@@ -516,3 +516,13 @@ fn calendar_and_sites_broadcast_daily() {
     assert!(sites_in(&to_b).is_none(), "{to_b:?}");
     assert!(to_b.iter().any(|p| matches!(p, ServerPacket::Calendar(_))));
 }
+
+#[test]
+fn embark_allowed_in_matches_history() {
+    let h = history();
+    let sites: Vec<_> = h.sites().map(|s| (s.id, s.region, s.abandoned.is_some())).collect();
+    for x in -1..17 {
+        let r = rc(x, 0);
+        assert_eq!(embark_allowed_in(h.grid(), sites.iter().copied(), r), h.embark_allowed(r), "region {x}");
+    }
+}

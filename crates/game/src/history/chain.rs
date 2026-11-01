@@ -235,24 +235,7 @@ impl History {
 
     /// Whether a new site may be founded in `region`; plan 3's player embark shares the rule.
     pub fn embark_allowed(&self, region: crate::RegionCoords) -> Result<(), EmbarkRefusal> {
-        let grid = self.grid();
-        if !grid.contains(region) {
-            return Err(EmbarkRefusal::OffMap);
-        }
-        if grid.capacity(region) == 0 {
-            return Err(EmbarkRefusal::NotHabitable);
-        }
-        if self.sites.values().any(|s| s.region == region) {
-            return Err(EmbarkRefusal::Occupied);
-        }
-        if let Some(s) = self
-            .sites
-            .values()
-            .find(|s| s.abandoned.is_none() && chebyshev(s.region, region) < EMBARK_MIN_DISTANCE_REGIONS)
-        {
-            return Err(EmbarkRefusal::TooClose { site: s.id });
-        }
-        Ok(())
+        embark_allowed_in(self.grid(), self.sites.values().map(|s| (s.id, s.region, s.abandoned.is_some())), region)
     }
 
     /// The best region to found a site in from `from_region`: allowed, reachable, scored
@@ -391,4 +374,31 @@ impl History {
             self.schedule(now.plus_days(death_age_days(self.seed, id, now)), super::Step::Death(id));
         }
     }
+}
+
+/// The embark rule over plain data (the client checks tiles with it too): `sites` are
+/// `(id, region, abandoned)` of every site. An occupied region (abandoned or not) refuses;
+/// a standing site closer than `EMBARK_MIN_DISTANCE_REGIONS` (Chebyshev) is `TooClose`.
+pub fn embark_allowed_in(
+    grid: &super::grid::SocietyGrid,
+    sites: impl Iterator<Item = (SiteId, crate::RegionCoords, bool)>,
+    region: crate::RegionCoords,
+) -> Result<(), EmbarkRefusal> {
+    if !grid.contains(region) {
+        return Err(EmbarkRefusal::OffMap);
+    }
+    if grid.capacity(region) == 0 {
+        return Err(EmbarkRefusal::NotHabitable);
+    }
+    let sites: Vec<_> = sites.collect();
+    if sites.iter().any(|(_, r, _)| *r == region) {
+        return Err(EmbarkRefusal::Occupied);
+    }
+    if let Some((id, _, _)) = sites
+        .iter()
+        .find(|(_, r, abandoned)| !*abandoned && chebyshev(*r, region) < EMBARK_MIN_DISTANCE_REGIONS)
+    {
+        return Err(EmbarkRefusal::TooClose { site: *id });
+    }
+    Ok(())
 }

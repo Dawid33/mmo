@@ -1,5 +1,14 @@
 import { Button, FrameFace, GraphicalSets, LabelFace, Styles, VerticalFlow } from "@widgets";
 
+// One site on the map: a small square on its tile, `hollow` once abandoned.
+export struct SiteMark {
+    col: int,
+    row: int,
+    color: color,
+    hollow: bool,
+    label: string,
+}
+
 // The map window's tunables. Exported to Rust (`WorldMapConfig`) so the
 // client and the tests share them.
 export global WorldMapConfig {
@@ -57,6 +66,17 @@ export component WorldMap {
     in property <bool> play-enabled;
     in property <string> play-reason;
     in property <string> map-status;
+    // Sites, drawn over the picture (a model, so they update without a redraw).
+    in property <[SiteMark]> sites;
+    // Room kept free at the window's left for the embark panel.
+    in property <length> reserve-left: 0px;
+    // Play is a dev action once the embark panel is the way in.
+    in property <bool> show-play: true;
+    // The tile under the pointer, -1 when off the map; whether embarking
+    // there is refused (a dark overlay on it).
+    out property <int> hover-col: touch.has-hover ? root.tile-at(touch.mouse-x - root.map-pan-x, root.map-cols) : -1;
+    out property <int> hover-row: touch.has-hover ? root.tile-at(touch.mouse-y - root.map-pan-y, root.map-rows) : -1;
+    in property <bool> hover-blocked;
     in-out property <float> map-zoom: 1;
     // Where the map's top-left corner sits in the view.
     in-out property <length> map-pan-x;
@@ -119,9 +139,6 @@ export component WorldMap {
     // A tile's visible cell: the tile minus its grid line (right and bottom),
     // which is what the markers frame.
     property <length> cell-len: (WorldMapConfig.tile-px - WorldMapConfig.grid-px) * 1px * root.map-zoom;
-    // The tile under the pointer, -1 when off the map.
-    property <int> hover-col: touch.has-hover ? root.tile-at(touch.mouse-x - root.map-pan-x, root.map-cols) : -1;
-    property <int> hover-row: touch.has-hover ? root.tile-at(touch.mouse-y - root.map-pan-y, root.map-rows) : -1;
     // Pan at the press, and whether the press became a drag.
     property <length> drag-start-x;
     property <length> drag-start-y;
@@ -168,9 +185,9 @@ export component WorldMap {
 
     window := FrameFace {
         title: "World Map";
-        x: WorldMapConfig.margin;
+        x: WorldMapConfig.margin + root.reserve-left;
         y: WorldMapConfig.margin;
-        width: root.width - 2 * WorldMapConfig.margin;
+        width: root.width - 2 * WorldMapConfig.margin - root.reserve-left;
         height: root.height - 2 * WorldMapConfig.margin;
 
         property <length> content-bottom: self.height - Styles.frame.box.padding.bottom
@@ -201,6 +218,15 @@ export component WorldMap {
                 border-width: 2px;
                 border-color: WorldMapConfig.home-color;
             }
+            for site in root.sites: Rectangle {
+                x: root.map-pan-x + site.col * root.tile-len + 2px;
+                y: root.map-pan-y + site.row * root.tile-len + 2px;
+                width: max(4px, root.cell-len / 3);
+                height: max(4px, root.cell-len / 3);
+                background: site.hollow ? transparent : site.color;
+                border-width: site.hollow ? 1px : 0px;
+                border-color: site.color;
+            }
             if root.map-available && root.selected-col >= 0 && root.selected-row >= 0: Rectangle {
                 // Inside the home marker when both are on one tile.
                 x: root.map-pan-x + root.selected-col * root.tile-len + 2px;
@@ -209,6 +235,13 @@ export component WorldMap {
                 height: max(0px, root.cell-len - 4px);
                 border-width: 2px;
                 border-color: WorldMapConfig.selected-color;
+            }
+            if root.map-available && root.hover-blocked && !root.dragged && root.hover-col >= 0 && root.hover-row >= 0: Rectangle {
+                x: root.map-pan-x + root.hover-col * root.tile-len;
+                y: root.map-pan-y + root.hover-row * root.tile-len;
+                width: root.cell-len;
+                height: root.cell-len;
+                background: #000000a0;
             }
             if root.map-available && !root.dragged && root.hover-col >= 0 && root.hover-row >= 0: Rectangle {
                 x: root.map-pan-x + root.hover-col * root.tile-len;
@@ -317,6 +350,7 @@ export component WorldMap {
                 text: root.play-reason;
             }
             play-button := Button {
+                visible: root.show-play;
                 text: "Play";
                 enabled: root.play-enabled;
                 clicked => { root.play(); }

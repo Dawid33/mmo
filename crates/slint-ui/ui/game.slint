@@ -1,13 +1,18 @@
 import { Button, FrameFace, GraphicalSets, HorizontalFlow, LabelFace, RadialItem, RadialMenu, Styles, VerticalFlow } from "@widgets";
 import { GameMenu } from "menu.slint";
-import { WorldMap, WorldMapConfig } from "world-map.slint";
+import { SiteMark, WorldMap, WorldMapConfig } from "world-map.slint";
+import { EmbarkPanel, EmbarkRow } from "embark.slint";
 import { GameTheme } from "theme.slint";
 
-export { RadialItem, WorldMapConfig }
+export { EmbarkRow, RadialItem, SiteMark, WorldMapConfig }
 
 // The whole in-game UI: one transparent window-sized layer that the client
 // draws over the 3D view (crates/client/src/renderer/slint_overlay.rs).
 // Transparent pixels let the pointer through to the game.
+global EmbarkLayout {
+    out property <length> width: 300px;
+}
+
 export component GameUi inherits Window {
     init => {
         GameTheme.apply();
@@ -86,6 +91,25 @@ export component GameUi inherits Window {
     in property <string> play-reason;
     // "Loading region…", a refusal; "" for none.
     in property <string> map-status;
+    in property <[SiteMark]> map-sites;
+    in property <bool> show-play: true;
+    // The tile under the map pointer, and whether embarking there is refused.
+    out property <int> map-hover-col: map.hover-col;
+    out property <int> map-hover-row: map.hover-row;
+    in property <bool> hover-blocked;
+    // The embark panel (beside the map while it is visible).
+    in property <bool> embark-visible;
+    in property <[string]> embark-civs;
+    in property <int> embark-civ-picked: -1;
+    in property <[EmbarkRow]> embark-rows;
+    in property <string> embark-counter;
+    in property <string> embark-region;
+    in property <bool> embark-enabled;
+    in property <[string]> embark-returns;
+    callback embark-pick-civ(int);
+    callback embark-toggle-person(int, int);
+    callback embark-go();
+    callback embark-return-to(int);
     in-out property <float> map-zoom: 1;
     in-out property <length> map-pan-x;
     in-out property <length> map-pan-y;
@@ -270,6 +294,10 @@ export component GameUi inherits Window {
         play-enabled: root.play-enabled;
         play-reason: root.play-reason;
         map-status: root.map-status;
+        sites: root.map-sites;
+        show-play: root.show-play;
+        hover-blocked: root.hover-blocked;
+        reserve-left: root.embark-visible ? EmbarkLayout.width + WorldMapConfig.gap : 0px;
         map-zoom <=> root.map-zoom;
         map-pan-x <=> root.map-pan-x;
         map-pan-y <=> root.map-pan-y;
@@ -277,5 +305,23 @@ export component GameUi inherits Window {
         select-tile(col, row) => { root.select-tile(col, row); }
         play => { root.play(); }
         close-map => { root.close-map(); }
+    }
+
+    if root.map-open && root.embark-visible: EmbarkPanel {
+        x: WorldMapConfig.margin;
+        y: WorldMapConfig.margin;
+        width: EmbarkLayout.width;
+        height: root.height - 2 * WorldMapConfig.margin;
+        civs: root.embark-civs;
+        civ-picked: root.embark-civ-picked;
+        rows: root.embark-rows;
+        counter: root.embark-counter;
+        region-text: root.embark-region;
+        embark-enabled: root.embark-enabled;
+        returns: root.embark-returns;
+        pick-civ(i) => { root.embark-pick-civ(i); }
+        toggle-person(s, p) => { root.embark-toggle-person(s, p); }
+        embark => { root.embark-go(); }
+        return-to(i) => { root.embark-return-to(i); }
     }
 }

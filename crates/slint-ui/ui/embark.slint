@@ -1,0 +1,91 @@
+import { Button, Checkbox, FrameFace, GraphicalSets, LabelFace, Styles } from "@widgets";
+
+// One line of the people list: a site header (`person` < 0) or a person with
+// a check box. `site` / `person` index the server's `EmbarkOptions` of the
+// picked civ.
+export struct EmbarkRow {
+    site: int,
+    person: int,
+    text: string,
+    checked: bool,
+}
+
+// The embark step beside the world map: civ -> its sites -> people to take (at
+// most 7), the Embark button, and the fortresses that can be played again
+// (`returns`). Embedded in `GameUi` (it inherits the theme applied there); the
+// client fills it from `HistoryView` (renderer/slint_overlay.rs).
+export component EmbarkPanel {
+    in property <[string]> civs;
+    in property <int> civ-picked: -1;
+    in property <[EmbarkRow]> rows;
+    // "3 / 7".
+    in property <string> counter;
+    // The selected tile and whether a site may go there.
+    in property <string> region-text;
+    in property <bool> embark-enabled;
+    // "Return to <site>" captions, in the client's order.
+    in property <[string]> returns;
+
+    callback pick-civ(int);
+    callback toggle-person(int, int);
+    callback embark();
+    callback return-to(int);
+
+    window := FrameFace {
+        title: "Embark";
+        width: 100%;
+        height: 100%;
+        property <length> content-bottom: self.height - Styles.frame.box.padding.bottom
+            - GraphicalSets.inset(Styles.frame.graphics).bottom;
+
+        VerticalLayout {
+            x: window.content-x;
+            y: window.content-y;
+            width: max(0px, window.content-right - window.content-x);
+            height: max(0px, parent.content-bottom - window.content-y);
+            spacing: 2px;
+
+            for name[i] in root.civs: Button {
+                text: name;
+                toggled: i == root.civ-picked;
+                clicked => { root.pick-civ(i); }
+            }
+            if root.civs.length == 0: LabelFace {
+                style: Styles.caption-label;
+                text: "No one can embark.";
+            }
+            Flickable {
+                viewport-height: people.preferred-height;
+                people := VerticalLayout {
+                    spacing: 1px;
+                    for row[i] in root.rows: Rectangle {
+                        height: row.person < 0 ? 18px : 22px;
+                        if row.person < 0: LabelFace {
+                            style: Styles.caption-label;
+                            text: row.text;
+                        }
+                        if row.person >= 0: Checkbox {
+                            text: row.text;
+                            checked: row.checked;
+                            toggled(on) => { root.toggle-person(row.site, row.person); }
+                        }
+                    }
+                }
+            }
+            LabelFace { text: root.counter; }
+            LabelFace {
+                style: Styles.caption-label;
+                text: root.region-text;
+            }
+            Button {
+                text: "Embark";
+                enabled: root.embark-enabled;
+                clicked => { root.embark(); }
+            }
+            for name[i] in root.returns: Button {
+                text: "Return to " + name;
+                clicked => { root.return-to(i); }
+            }
+        }
+    }
+}

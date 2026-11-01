@@ -38,7 +38,7 @@ use slint_ui::slint::{
     SharedString, VecModel,
 };
 use slint_ui::wheel::{self, WheelInput, WheelPhase};
-use slint_ui::{GameUi, HudConfig, HudUi, Overlay, WorldMapConfig};
+use slint_ui::{EmbarkRow, GameUi, HudConfig, HudUi, Overlay, SiteMark, WorldMapConfig};
 use worldgen::tile_map::{play_blocker, rasterize, tile_info_lines, MapLayer};
 
 use super::bridge::{LocalBody, SimEntity, SimKind};
@@ -54,6 +54,7 @@ use super::commander::CommanderCamera;
 use super::cursor::CursorPolicy;
 use super::slint_composite::{SlintCompositePlugin, SlintLayerTextures};
 use super::hud::{crosshair_visible, HudStatus};
+use super::history_view::{self, HistoryView};
 use super::world_map::WorldMapState;
 use super::ClientRequests;
 use crate::instance::ClientRequest;
@@ -148,6 +149,14 @@ pub enum UiAction {
     ToggleMode,
     /// Follow the selected entity, or stop following.
     ToggleFollow,
+    /// The embark panel's civ button (index into the options' civs).
+    EmbarkPickCiv(i32),
+    /// A person's check box (site index, person index in the picked civ).
+    EmbarkTogglePerson(i32, i32),
+    /// The panel's Embark button: found a site on the selected tile.
+    Embark,
+    /// A "Return to <site>" button (index into `HistoryView::returnable`).
+    ReturnTo(i32),
 }
 
 /// The region a Play request was sent for, until we are there with its region
@@ -466,6 +475,7 @@ impl Plugin for SlintOverlayPlugin {
                     // press does one thing.
                     menu_keys.before(minimap::minimap_pointer),
                     apply_ui_actions.before(minimap::minimap_pointer),
+                    apply_embark_result.before(minimap::minimap_pointer),
                     arrival_map.before(minimap::minimap_pointer),
                     // Also before the commander: the clicks the open wheel
                     // takes must not reach the world.
@@ -602,6 +612,13 @@ fn connect_game_ui(ui: &GameUi, world: &mut World) {
     // wasm has no main menu to leave to (one in-process session).
     ui.set_can_leave(cfg!(not(target_arch = "wasm32")));
     ui.on_play(push(UiAction::Play));
+    ui.on_embark_go(push(UiAction::Embark));
+    let queue = actions.clone();
+    ui.on_embark_pick_civ(move |i| queue.borrow_mut().push(UiAction::EmbarkPickCiv(i)));
+    let queue = actions.clone();
+    ui.on_embark_toggle_person(move |s, p| queue.borrow_mut().push(UiAction::EmbarkTogglePerson(s, p)));
+    let queue = actions.clone();
+    ui.on_embark_return_to(move |i| queue.borrow_mut().push(UiAction::ReturnTo(i)));
     ui.on_toggle_mode(push(UiAction::ToggleMode));
     ui.on_follow_clicked(push(UiAction::ToggleFollow));
     let layers: Vec<SharedString> = MapLayer::ALL.iter().map(|l| l.label().into()).collect();
@@ -848,6 +865,42 @@ pub fn tile_region(map: &WorldMap, col: i32, row: i32) -> Option<RegionCoords> {
     (col >= 0 && row >= 0 && map.tile(rc).is_some()).then_some(rc)
 }
 
+/// The 8 civ colours of the site markers, picked by `civ.0 % 8`.
+pub const SITE_PALETTE: [(u8, u8, u8); 8] = [
+    (230, 80, 70),
+    (70, 160, 235),
+    (240, 200, 60),
+    (90, 200, 110),
+    (200, 110, 230),
+    (240, 150, 60),
+    (80, 220, 220),
+    (235, 235, 235),
+];
+
+/// The marker colour of a civ.
+pub fn site_color(civ: game::history::CivId) -> slint_ui::slint::Color {
+    let (r, g, b) = SITE_PALETTE[(civ.0 % 8) as usize];
+    slint_ui::slint::Color::from_rgb_u8(r, g, b)
+}
+
+/// The sites on the map: a filled square in the civ's colour, hollow once abandoned.
+/// Sites off the map are dropped.
+pub fn site_marks(view: &HistoryView, map: &WorldMap) -> Vec<SiteMark> {
+    view.sites
+        .iter()
+        .filter_map(|s| {
+            let (col, row) = map_tile(map, s.region)?;
+            Some(SiteMark { col, row, color: site_color(s.civ), hollow: s.abandoned, label: s.name.as_str().into() })
+        })
+        .collect()
+}
+
+/// "Site: Name (civ), 12 dwarves" for the selected tile.
+pub fn site_line(site: &game::SiteMarker, civ_name: &str) -> String {
+    let abandoned = if site.abandoned { ", abandoned" } else { "" };
+    format!("Site: {} ({civ_name}), {} dwarves{abandoned}", site.name, site.population)
+}
+
 /// What the player reads when the server refuses Play.
 pub fn refusal_text(why: PlayRefusal) -> &'static str {
     match why {
@@ -1004,6 +1057,7 @@ fn apply_ui_actions(
     mut session_ended: Option<ResMut<Messages<crate::session::SessionEnded>>>,
     mut embarked: Option<ResMut<Embarked>>,
     mut cam: Option<ResMut<CommanderCamera>>,
+    mut history: ResMut<HistoryView>,
 ) {
     let (Some(actions), Some(slint)) = (actions, slint) else { return };
     let ui = slint.overlay.ui();
@@ -1028,6 +1082,56 @@ fn apply_ui_actions(
                 } else if let (1, Some(&(region, key))) = (selection.0.len(), selection.0.iter().next()) {
                     let is_local = local_body.iter().any(|s| s.region == region && s.key == key);
                     follow.0 = Some(if is_local { FollowTarget::LocalPlayer } else { FollowTarget::Entity(region, key) });
+                }
+            }
+            UiAction::EmbarkPickCiv(i) => {
+                if let Ok(i) = usize::try_from(i) {
+                    history.selection.pick_civ(i);
+                }
+            }
+            UiAction::EmbarkTogglePerson(site, person) => {
+                let offered = history.embark_options.as_ref().and_then(|o| {
+                    let civ = o.civs.get(history.selection.civ?)?;
+                    let p = civ.sites.get(usize::try_from(site).ok()?)?.people.get(usize::try_from(person).ok()?)?;
+                    Some(p.person)
+                });
+                if let Some(p) = offered {
+                    history.selection.toggle(p);
+                }
+            }
+            UiAction::Embark => {
+                if history.embark_pending {
+                    continue;
+                }
+                let region = world_map.map.as_ref().and_then(|m| tile_region(m, ui.get_selected_col(), ui.get_selected_row()));
+                let request = region.zip(history.embark_options.as_ref()).and_then(|(rc, o)| history.selection.request(o, rc));
+                let (Some(rc), Some(request)) = (region, request) else { continue };
+                // The same check the panel's button uses; the server decides anyway.
+                let grid = world_map.map.as_ref().map(game::history::SocietyGrid::from_world_map);
+                if grid.is_none_or(|g| history_view::embark_tile_check(&g, &history.sites, rc).is_err()) {
+                    continue;
+                }
+                let sent = requests.as_ref().is_some_and(|r| r.0.send(ClientRequest::Embark(request)).is_ok());
+                if sent {
+                    // A stale result must never drive the UI.
+                    history.embark_result = None;
+                    history.embark_refusal = None;
+                    history.embark_pending = true;
+                } else {
+                    warn!("[embark] request not sent: no game thread");
+                }
+            }
+            UiAction::ReturnTo(i) => {
+                if history.embark_pending {
+                    continue;
+                }
+                let site = usize::try_from(i).ok().and_then(|i| history.returnable().get(i).map(|s| s.site));
+                let Some(site) = site else { continue };
+                let sent = requests.as_ref().is_some_and(|r| r.0.send(ClientRequest::ReturnTo(site)).is_ok());
+                if sent {
+                    history.embark_result = None;
+                    history.embark_refusal = None;
+                    history.embark_pending = true;
                 }
             }
             UiAction::OpenMap => to = Screens::open_map(),
@@ -1083,6 +1187,47 @@ fn apply_ui_actions(
         }
         let modal = !is_embarked && world_map.map.is_some();
         set_screens(ui, to.held(modal), &mut world_map, status.home_region, policy.as_mut(), is_embarked);
+    }
+}
+
+/// An `EmbarkResult` (answer to Embark or Return): `Ok` embarks (the arrival
+/// map closes, the camera re-places over the new body), a refusal goes on the
+/// map status line for `REFUSAL_SHOW_SECS`. The result is taken, never read twice.
+fn apply_embark_result(
+    slint: Option<NonSend<SlintLayer<GameUi>>>,
+    mut history: ResMut<HistoryView>,
+    mut embarked: Option<ResMut<Embarked>>,
+    mut cam: Option<ResMut<CommanderCamera>>,
+    mut world_map: ResMut<WorldMapState>,
+    status: Res<HudStatus>,
+    mut policy: Option<ResMut<CursorPolicy>>,
+    time: Res<Time>,
+) {
+    let Some(slint) = slint else { return };
+    if history.embark_result.is_none() {
+        return;
+    }
+    let Some(result) = history.embark_result.take() else { return };
+    history.embark_pending = false;
+    match result {
+        Ok(_) => {
+            history.retired = false;
+            if let Some(embarked) = embarked.as_mut() {
+                embarked.0 = true;
+            }
+            if let Some(cam) = cam.as_mut() {
+                cam.placed = false;
+            }
+            let ui = slint.overlay.ui();
+            let mut to = Screens::of(ui);
+            to.map = false;
+            set_screens(ui, to, &mut world_map, status.home_region, policy.as_mut(), true);
+        }
+        Err(why) => {
+            history.embark_refusal = Some((why, time.elapsed_secs()));
+            // The options may be what went stale (someone left, a site arose).
+            history.options_requested = false;
+        }
     }
 }
 
@@ -1338,6 +1483,12 @@ struct MapShown {
     /// (generation, selected column, selected row, home, Play pending,
     /// embarked) the tile info was last computed for.
     info_for: Option<(u64, i32, i32, Option<RegionCoords>, bool, bool)>,
+    /// The embark check's grid, built from `map` (per generation).
+    grid: Option<(u64, game::history::SocietyGrid)>,
+    /// The site markers last pushed.
+    sites: Vec<SiteMark>,
+    /// (hovered column, row, history revision) the hover overlay was last set for.
+    hover_for: Option<(i32, i32, bool)>,
 }
 
 /// What the world map window reads.
@@ -1349,6 +1500,8 @@ struct MapParams<'w, 's> {
     cam: Option<Res<'w, CommanderCamera>>,
     embarked: Option<ResMut<'w, Embarked>>,
     shown: crate::session::SessionLocal<'w, 's, MapShown>,
+    history: ResMut<'w, HistoryView>,
+    requests: Option<Res<'w, ClientRequests>>,
 }
 
 /// The map picture, home and selected tile, tile info, Play state and
@@ -1409,24 +1562,114 @@ fn sync_world_map(ui: &GameUi, home: Option<RegionCoords>, p: &mut MapParams) {
 
     let (col, row) = (ui.get_selected_col(), ui.get_selected_row());
     let pending = p.pending.0.is_some();
+    // History changes (sites, options, the choice) redo everything below.
+    let history_changed = p.history.is_changed();
+    if history_changed {
+        shown.info_for = None;
+        shown.hover_for = None;
+    }
+
+    // The embark panel stands beside the map before embarking and after Retire.
+    let panel = map.is_some() && (!embarked || p.history.retired);
+    if panel && !p.history.options_requested {
+        if p.requests.as_ref().is_some_and(|r| r.0.send(ClientRequest::RequestEmbarkOptions).is_ok()) {
+            p.history.options_requested = true;
+        }
+    }
+    // Play is a dev action; a world without history (no one can embark) keeps it as the way in.
+    let no_embark = !embarked && p.history.embark_options.as_ref().is_some_and(|o| o.civs.is_empty());
+    let show_play = cfg!(feature = "dev_ui") || no_embark;
+    if ui.get_show_play() != show_play {
+        ui.set_show_play(show_play);
+    }
+    if ui.get_embark_visible() != (panel && !no_embark) {
+        ui.set_embark_visible(panel && !no_embark);
+    }
+
+    // Site markers, a model that follows the history without a redraw.
+    if let Some(map) = map {
+        if history_changed || shown.sites.is_empty() != p.history.sites.is_empty() || shown.info_for.is_none() {
+            let marks = site_marks(&p.history, map);
+            if marks != shown.sites {
+                ui.set_map_sites(ModelRc::new(VecModel::from(marks.clone())));
+                shown.sites = marks;
+            }
+        }
+    } else if !shown.sites.is_empty() {
+        shown.sites.clear();
+        ui.set_map_sites(ModelRc::default());
+    }
+
+    if map.is_some() && shown.grid.as_ref().map(|(g, _)| *g) != Some(shown.generation) {
+        shown.grid = map.map(|m| (shown.generation, game::history::SocietyGrid::from_world_map(m)));
+    }
+    let check = |rc: RegionCoords| {
+        shown.grid.as_ref().map_or(Ok(()), |(_, g)| history_view::embark_tile_check(g, &p.history.sites, rc))
+    };
+
     let info_for = Some((shown.generation, col, row, home, pending, embarked));
     if shown.info_for != info_for {
         shown.info_for = info_for;
         let picked = map.and_then(|map| Some((map, tile_region(map, col, row)?)));
-        let lines: Vec<SharedString> = picked
-            .map_or_else(Vec::new, |(map, rc)| tile_info_lines(map, rc))
-            .into_iter()
-            .map(Into::into)
-            .collect();
+        let mut lines: Vec<String> = picked.map_or_else(Vec::new, |(map, rc)| tile_info_lines(map, rc));
+        if let Some((_, rc)) = picked {
+            if let Some(site) = p.history.sites.iter().find(|s| s.region == rc) {
+                lines.push(site_line(site, &p.history.civ_name(site.civ)));
+            }
+        }
+        let lines: Vec<SharedString> = lines.into_iter().map(Into::into).collect();
         ui.set_tile_lines(ModelRc::new(VecModel::from(lines)));
         let blocker = picked.map(|(map, rc)| play_blocker(map, rc, blocker_home(embarked, home)));
         ui.set_play_enabled(!pending && matches!(blocker, Some(None)));
-        ui.set_play_reason(blocker.flatten().unwrap_or("").into());
+        let embark_why = if panel { picked.and_then(|(_, rc)| check(rc).err()) } else { None };
+        let reason = embark_why.map(history_view::embark_refusal_text).or(blocker.flatten()).unwrap_or("");
+        ui.set_play_reason(reason.into());
+        let region_text = match (picked, embark_why) {
+            (None, _) => "Select a tile to embark on".to_string(),
+            (Some(_), Some(why)) => history_view::embark_refusal_text(why).to_string(),
+            (Some((_, rc)), None) => format!("Embark in region ({}, {})", rc.x, rc.z),
+        };
+        let enabled = panel
+            && !p.history.embark_pending
+            && p.history.selection.party_ok()
+            && picked.is_some()
+            && embark_why.is_none();
+        if ui.get_embark_region() != region_text.as_str() {
+            ui.set_embark_region(region_text.into());
+        }
+        ui.set_embark_enabled(enabled);
+        // The panel's lists follow the choice.
+        ui.set_embark_counter(p.history.selection.counter().into());
+        ui.set_embark_civ_picked(p.history.selection.civ.map_or(-1, |c| c as i32));
+        let options = p.history.embark_options.clone().unwrap_or_default();
+        let civs: Vec<SharedString> = options.civs.iter().map(|c| c.name.as_str().into()).collect();
+        ui.set_embark_civs(ModelRc::new(VecModel::from(civs)));
+        let rows: Vec<EmbarkRow> = history_view::embark_rows(&options, &p.history.selection)
+            .into_iter()
+            .map(|r| EmbarkRow { site: r.site, person: r.person, text: r.text.into(), checked: r.checked })
+            .collect();
+        ui.set_embark_rows(ModelRc::new(VecModel::from(rows)));
+        let returns: Vec<SharedString> = p.history.returnable().iter().map(|s| s.name.as_str().into()).collect();
+        ui.set_embark_returns(ModelRc::new(VecModel::from(returns)));
+    }
+
+    // A dark overlay on the hovered tile when embarking there is refused.
+    let (hcol, hrow) = (ui.get_map_hover_col(), ui.get_map_hover_row());
+    if shown.hover_for != Some((hcol, hrow, panel)) {
+        shown.hover_for = Some((hcol, hrow, panel));
+        let blocked = panel && map.and_then(|m| tile_region(m, hcol, hrow)).is_some_and(|rc| check(rc).is_err());
+        if ui.get_hover_blocked() != blocked {
+            ui.set_hover_blocked(blocked);
+        }
     }
 
     // In the map window and, with the map closed (Play closes it), on the
     // game-level status line.
-    let status = map_status_text(p.pending.0, p.world_map.visible_refusal(p.time.elapsed_secs()));
+    let now = p.time.elapsed_secs();
+    let status = match p.history.visible_embark_refusal(now) {
+        Some(why) if p.pending.0.is_none() => history_view::embark_refusal_text(why),
+        _ => map_status_text(p.pending.0, p.world_map.visible_refusal(now)),
+    };
     if ui.get_map_status() != status {
         ui.set_map_status(status.into());
     }
@@ -1745,6 +1988,63 @@ mod tests {
         for rc in [RegionCoords::new(-3, 3), RegionCoords::new(1, 3), RegionCoords::new(-2, 5)] {
             assert_eq!(map_tile(&map, rc), None);
         }
+    }
+
+    #[test]
+    fn site_marks_positions_and_colours() {
+        let tile = game::TileSummary {
+            ground_min_m: 0.0,
+            ground_mean_m: 0.0,
+            ground_max_m: 0.0,
+            relief_m: 0.0,
+            slope: [0.0; 2],
+            sea_fraction: 0.0,
+            lake_fraction: 0.0,
+            lake_level_m: None,
+            rivers: 0,
+            river_max_discharge_m2: 0.0,
+            river_max_width_m: 0.0,
+            surface_rock: None,
+            landing: None,
+            biome: game::Biome::Ocean,
+            region: 0,
+            temperature_c: 0.0,
+            precip_mm: 0.0,
+            savagery: 0,
+            alignment: 0,
+            volcano: false,
+        };
+        let map = WorldMap {
+            origin: RegionCoords::new(-2, 3),
+            width: 3,
+            height: 2,
+            tiles: vec![tile; 6],
+            rock_names: Vec::new(),
+            region_types: Vec::new(),
+        };
+        let marker = |site, civ, region, abandoned| game::SiteMarker {
+            site: game::history::SiteId(site),
+            civ: game::history::CivId(civ),
+            region,
+            name: format!("S{site}"),
+            population: 5,
+            abandoned,
+            returnable: false,
+        };
+        let mut view = HistoryView::default();
+        view.sites = vec![
+            marker(0, 3, RegionCoords::new(0, 4), false),
+            marker(1, 11, RegionCoords::new(-2, 3), true),
+            marker(2, 0, RegionCoords::new(9, 9), false),
+        ];
+        let marks = site_marks(&view, &map);
+        assert_eq!(marks.len(), 2, "a site off the map is dropped");
+        assert_eq!((marks[0].col, marks[0].row, marks[0].hollow), (2, 1, false));
+        assert_eq!((marks[1].col, marks[1].row, marks[1].hollow), (0, 0, true));
+        assert_eq!(marks[0].color, site_color(game::history::CivId(3)));
+        assert_eq!(marks[1].color, site_color(game::history::CivId(3)), "civ 11 wraps onto civ 3's colour");
+        assert_ne!(marks[0].color, site_color(game::history::CivId(4)));
+        assert_eq!(site_line(&view.sites[0], "Dwarves"), "Site: S0 (Dwarves), 5 dwarves");
     }
 
     #[test]
