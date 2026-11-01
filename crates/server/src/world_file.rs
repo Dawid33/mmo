@@ -64,20 +64,29 @@ pub fn ensure_forged(path: &Path, params: &ForgeParams) -> Result<(), String> {
 /// The world's history, next to the world file: loaded if it exists, otherwise
 /// bootstrapped from the world map and saved. A file that will not load is
 /// never replaced (it holds the world's people) — the error says to delete it.
-pub fn ensure_history(world_path: &Path, map: &game::WorldMap) -> Result<game::history::History, String> {
+pub fn ensure_history(
+    world_path: &Path,
+    map: &game::WorldMap,
+) -> Result<Option<game::history::History>, String> {
     use game::history::bootstrap::{self, BootstrapParams};
     use game::history::{persist, SocietyGrid};
     let path = persist::history_path_for(world_path);
     let grid = SocietyGrid::from_world_map(map);
     if path.exists() {
-        return persist::load(&path, grid).map_err(|e| {
-            format!("{}: {e} — delete {} to re-create this world's history", path.display(), path.display())
-        });
+        return persist::load(&path, grid)
+            .map(Some)
+            .map_err(|e| format!("{}: {e} — delete {} to re-create this world's history", path.display(), path.display()));
     }
     let started = Instant::now();
     let params = BootstrapParams { seed: u64::from(grid.world_id()), ..BootstrapParams::default() };
-    let history = bootstrap::bootstrap(map, &params)
-        .map_err(|e| format!("{}: cannot bootstrap the world's history: {e}", path.display()))?;
+    // A world nobody can live in is still playable: no history, no file.
+    let history = match bootstrap::bootstrap(map, &params) {
+        Ok(h) => h,
+        Err(e) => {
+            log::error!("[server] world {}: {e}; running without history", world_path.display());
+            return Ok(None);
+        }
+    };
     persist::save(&history, &path).map_err(|e| format!("{}: {e}", path.display()))?;
     let stats = history.stats();
     game::perf_event!(
@@ -88,7 +97,7 @@ pub fn ensure_history(world_path: &Path, map: &game::WorldMap) -> Result<game::h
         stats.sites_alive,
         stats.alive
     );
-    Ok(history)
+    Ok(Some(history))
 }
 
 /// Save the history atomically; failures are logged, never fatal.
@@ -221,11 +230,22 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let world = dir.join("w.world");
         let map = land_map(48, 48, |x, z| x < 2 || z < 2 || x >= 46 || z >= 46);
-        let first = ensure_history(&world, &map).unwrap();
+        let first = ensure_history(&world, &map).unwrap().unwrap();
         let file = game::history::persist::history_path_for(&world);
         assert!(file.exists(), "the first call writes the history next to the world");
-        let second = ensure_history(&world, &map).unwrap();
+        let second = ensure_history(&world, &map).unwrap().unwrap();
         assert_eq!(bincode::serialize(&first).unwrap(), bincode::serialize(&second).unwrap());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ensure_history_without_habitable_land_runs_without_history() {
+        let dir = scratch("history-sea");
+        std::fs::create_dir_all(&dir).unwrap();
+        let world = dir.join("w.world");
+        let sea = land_map(16, 16, |_, _| true);
+        assert!(ensure_history(&world, &sea).unwrap().is_none());
+        assert!(!game::history::persist::history_path_for(&world).exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -454,8 +454,9 @@ pub fn run() {
         );
         // Forged worlds have a history next to the world file (procedural: none).
         if let Some(path) = &history_world_path {
-            let history = world_file::ensure_history(path, &map).unwrap_or_else(|e| panic!("{e}"));
-            manager.set_history(history, 0);
+            if let Some(history) = world_file::ensure_history(path, &map).unwrap_or_else(|e| panic!("{e}")) {
+                manager.set_history(history, 0);
+            }
         }
         manager.set_world_map(map);
     }
@@ -537,7 +538,10 @@ pub fn run() {
 /// the orderly-exit loop has parked every region).
 pub const HISTORY_SAVE_SECS: u64 = 60;
 
-fn save_history<S: game::RegionSpawner>(path: &Option<std::path::PathBuf>, manager: &game::WorldManager<S>) {
+fn save_history<S: game::RegionSpawner>(
+    path: &Option<std::path::PathBuf>,
+    manager: &game::WorldManager<S>,
+) {
     if let (Some(path), Some(history)) = (path, manager.history()) {
         world_file::save_history(path, history);
     }
