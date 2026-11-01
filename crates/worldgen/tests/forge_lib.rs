@@ -60,8 +60,7 @@ fn forge_quality_matches_baseline() {
 
 /// The default knobs build kilometre-plus relief (spec §3): a 16 km / 32 m
 /// forge of the default layout reaches a 1.5 km peak, and the geology column
-/// is deep enough for every level the erosion exhumes (`rock_at_s` debug-
-/// asserts it, and test builds keep debug assertions).
+/// is deep enough for every level the erosion exhumes.
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn default_forge_reaches_kilometre_peaks() {
@@ -72,4 +71,13 @@ fn default_forge_reaches_kilometre_peaks() {
     let q = quality(&forged);
     assert!(q.max_peak_m >= 1_500.0, "tallest peak {:.0} m, want >= 1,500 m", q.max_peak_m);
     assert!(q.max_peak_m <= p.knobs.max_peak_m + 1.0e-6, "peak {:.0} m over the cap", q.max_peak_m);
+    let w = &forged.world;
+    let deepest = (0..w.n * w.n)
+        .filter(|&i| !w.ocean[i])
+        .map(|i| w.h[i] - w.uplifted[i] - forged.geology.bedding[i])
+        .fold(f64::MAX, f64::min);
+    assert!(
+        deepest > worldgen::forge::geology::COLUMN_BOTTOM_S,
+        "the default forge exhumes s = {deepest:.0} m, below the geology column"
+    );
 }

@@ -425,6 +425,24 @@ mod tests {
         assert_eq!(last.map(|l| (l.iter, l.iters)), Some((7, 10)));
     }
 
+    /// Long runs exhume below the geology column's listed bottom; the granite
+    /// basement continues down, so nothing panics (debug builds included).
+    #[test]
+    #[ignore = "slow: >100ms — run via just test-full"]
+    fn erosion_below_the_column_is_granite() {
+        // The default 16 km island (its belts are inland), at coarse cells.
+        let mut p = ForgeParams { size_m: 16_000.0, cell_m: 128.0, quiet: true, ..Default::default() };
+        p.knobs.iters = 600.0;
+        let f = forge(&p);
+        let w = &f.world;
+        let deepest = (0..w.n * w.n)
+            .filter(|&i| !w.ocean[i])
+            .map(|i| w.h[i] - w.uplifted[i] - f.geology.bedding[i])
+            .fold(f64::MAX, f64::min);
+        assert!(deepest < geology::COLUMN_BOTTOM_S, "deepest s {deepest} should pass the column bottom");
+        assert_eq!(f.geology.rock_at_s(deepest), geology::rock_index("granite").unwrap() as u8);
+    }
+
     #[test]
     fn forge_matches_forge_with() {
         let p = tiny();

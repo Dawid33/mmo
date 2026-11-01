@@ -39,7 +39,8 @@ const GRANITE: u8 = 5;
 /// The column covers this stratigraphic range (m). Surface rock starts near
 /// s = 0 +- bedding relief and goes as deep as the erosion exhumes: the
 /// valleys of a kilometre-plus range cut ~4 km below where they started. The
-/// granite basement continues from `basement_top_s` down to the bottom.
+/// granite basement continues from `basement_top_s` down to the bottom and
+/// beyond (`rock_at_s`).
 const COLUMN_TOP_S: f64 = 700.0;
 pub const COLUMN_BOTTOM_S: f64 = -5_000.0;
 /// Chance that a formation boundary carries a thin basalt sill, and its thickness.
@@ -113,9 +114,10 @@ impl Geology {
         &self.column
     }
 
-    /// Rock at stratigraphic coordinate `s`.
+    /// Rock at stratigraphic coordinate `s`. Below the last formation's top
+    /// — including below `COLUMN_BOTTOM_S`, which long or fast runs exhume —
+    /// the granite basement simply continues.
     pub fn rock_at_s(&self, s: f64) -> u8 {
-        debug_assert!(s > COLUMN_BOTTOM_S, "column too shallow for s = {s}");
         // First formation whose top is at or above s, scanning down: the column
         // is sorted by descending top, so partition on "top > s".
         let idx = self.column.partition_point(|&(top, _)| top > s);

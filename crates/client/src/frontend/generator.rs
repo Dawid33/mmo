@@ -595,7 +595,8 @@ fn forge_world(root: &Path, params: &ForgeParams, name: String, cancel: &AtomicB
     });
     let Some(forged) = forged else { return ForgeEvent::Cancelled };
     let _ = tx.send(ForgeEvent::Saving);
-    // `artifact` panics when the world has no flat dry land for a spawn.
+    // `artifact` panics only when the world has no dry land at all for a spawn
+    // (`spawn::pick` falls back to the flattest dry patch otherwise).
     let artifact = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| forged.artifact(params))) {
         Ok(a) => a,
         Err(_) => return ForgeEvent::Failed("This world has no dry land to start on; try other settings.".into()),
