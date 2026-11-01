@@ -1,6 +1,7 @@
 //! Plan 2 hand-over: what a region spawns when it starts, what happens to people when it
 //! parks or someone crosses a seam, and which outcomes become region directives. Pure
-//! `History` — the world manager is played by calling the API directly.
+//! `History` — the world manager is played by calling the API directly — then the same
+//! hand-over driven by a real `WorldManager` over `InlineSpawner` regions.
 
 use game::history::log::LogKind;
 use game::history::rules::*;
@@ -14,7 +15,7 @@ fn rc(x: i32, z: i32) -> RegionCoords {
 }
 
 /// `width` × `height` grassland regions, landing at [`LANDING`].
-fn land_map(width: u32, height: u32) -> WorldMap {
+pub fn land_map(width: u32, height: u32) -> WorldMap {
     let tile = TileSummary {
         ground_min_m: 0.0,
         ground_mean_m: 10.0,
@@ -47,11 +48,11 @@ fn land_map(width: u32, height: u32) -> WorldMap {
     }
 }
 
-fn start() -> CalendarTick {
+pub fn start() -> CalendarTick {
     CalendarTick::from_days(HISTORY_START_YEAR * DAYS_PER_YEAR)
 }
 
-fn years_before(t: CalendarTick, y: u64) -> CalendarTick {
+pub fn years_before(t: CalendarTick, y: u64) -> CalendarTick {
     CalendarTick(t.0 - y * DAYS_PER_YEAR * TICKS_PER_DAY)
 }
 
@@ -543,4 +544,351 @@ fn civ_population_counts_strays() {
     // Still counted after a reload (the stray index is rebuilt).
     let back = persist::decode(&persist::encode(&h), SocietyGrid::from_world_map(&map)).unwrap();
     assert_eq!(back.civ_population(civ), 5);
+}
+
+// ---- the world manager runs the history -------------------------------------
+
+use crate::common;
+use crossbeam::channel::{unbounded, Receiver};
+use game::{
+    Block, BlockId, Chunk, ClientId, ClientPacket, Column, ColumnCoords, InlineLodBuilder, InlineSpawner, LodBuilder,
+    RegionOutput, ServerEvent, ServerPacket, SubChunk, WorldManager, BLOCK_VOXELS, FLIP_HYSTERESIS, REGION_SIZE,
+    TICK_RATE, UNLOAD_GRACE_MS,
+};
+use std::collections::BTreeMap;
+
+/// A one-block floor under the whole of every region.
+pub fn floored_region(_rc: RegionCoords) -> Vec<(ColumnCoords, Column)> {
+    let air = Block::new(BlockId::AIR);
+    common::chunks_over(0.0..REGION_SIZE, 0.0..REGION_SIZE)
+        .into_iter()
+        .map(|(x, z)| {
+            let sub = SubChunk::Dense(Box::new(Chunk::flat_floor(BLOCK_VOXELS as u32)));
+            (ColumnCoords::new(x, z), Column::new(0, air, air, vec![sub]))
+        })
+        .collect()
+}
+
+/// Every person with a body, and the running regions holding them.
+pub fn bodies(manager: &mut WorldManager<InlineSpawner>) -> BTreeMap<PersonId, Vec<RegionCoords>> {
+    let mut out: BTreeMap<PersonId, Vec<RegionCoords>> = BTreeMap::new();
+    for r in manager.running_regions() {
+        manager.spawner_mut().with_region(r, |region| {
+            for (p, _) in region.data().people_here() {
+                out.entry(p).or_default().push(r);
+            }
+        });
+    }
+    out
+}
+
+/// At most one body per person, and the history agrees on where it is: a living person
+/// `InRegion(r)` has their one body in `r` and an abstract home; anyone else has none.
+pub fn assert_one_place(h: &History, bodies: &BTreeMap<PersonId, Vec<RegionCoords>>, when: &str) {
+    for (p, at) in bodies {
+        assert!(at.len() <= 1, "{when}: {p:?} has bodies in {at:?}");
+        assert!(h.person(*p).is_some_and(|q| q.alive()), "{when}: a body for {p:?}, who is not alive");
+    }
+    for q in h.people().filter(|q| q.alive()) {
+        let at = bodies.get(&q.id).map_or(&[][..], Vec::as_slice);
+        match q.location {
+            Location::InRegion(r) => {
+                assert_eq!(at, [r], "{when}: {:?} is in {r:?}", q.id);
+                assert!(
+                    !matches!(q.home_location, Location::InRegion(_) | Location::Unplaced),
+                    "{when}: embodied {:?} has no abstract place: {:?}",
+                    q.id,
+                    q.home_location
+                );
+            }
+            loc => {
+                assert!(at.is_empty(), "{when}: {:?} is abstract ({loc:?}) but has a body in {at:?}", q.id);
+                assert_eq!(q.home_location, Location::Unplaced, "{when}: abstract {:?} keeps a home", q.id);
+            }
+        }
+    }
+}
+
+const CLIENT: ClientId = 0;
+
+/// A `WorldManager` over `InlineSpawner` regions with [`floored_region`] ground.
+struct World {
+    manager: WorldManager<InlineSpawner>,
+    region_out: Receiver<(RegionCoords, RegionOutput)>,
+    packets: Receiver<(Option<ClientId>, ServerPacket)>,
+    now_ms: u64,
+}
+
+impl World {
+    fn new(map: WorldMap, history: Option<History>) -> Self {
+        let (out_send, packets) = unbounded();
+        let (region_out_send, region_out) = unbounded();
+        let (lod_result_send, lod_result_recv) = unbounded();
+        let lod_builder: Box<dyn LodBuilder> = Box::new(InlineLodBuilder {
+            coarse: Box::new(|_key: &game::lod::LodKey| Vec::new()),
+            out: lod_result_send,
+        });
+        let mut manager = WorldManager::new(
+            InlineSpawner::default(),
+            Box::new(floored_region),
+            out_send,
+            region_out_send,
+            lod_builder,
+            lod_result_recv,
+        );
+        manager.set_world_map(map);
+        if let Some(h) = history {
+            manager.set_history(h, 0);
+        }
+        World { manager, region_out, packets, now_ms: 0 }
+    }
+
+    fn settle(&mut self) {
+        for _ in 0..4 {
+            self.manager.spawner_mut().pump();
+            while let Ok((rc, out)) = self.region_out.try_recv() {
+                self.manager.handle_region_output(rc, out, self.now_ms);
+            }
+        }
+        // Snapshots are big: never keep them.
+        self.packets.try_iter().for_each(drop);
+    }
+
+    fn packet(&mut self, packet: ClientPacket) {
+        self.send(ServerEvent::ClientPacket(packet, CLIENT));
+    }
+
+    fn send(&mut self, ev: ServerEvent) {
+        assert!(self.manager.handle_server_event(ev, self.now_ms));
+        self.settle();
+    }
+
+    /// One round: every region ticks, then the manager's upkeep.
+    fn tick(&mut self) {
+        self.now_ms += TICK_RATE;
+        self.manager.spawner_mut().tick_all();
+        self.settle();
+        self.manager.maintain(self.now_ms);
+        self.settle();
+    }
+
+    /// `ms` of wall time pass with no region tick: the calendar and the unload grace move.
+    fn wait(&mut self, ms: u64) {
+        self.now_ms += ms;
+        self.manager.maintain(self.now_ms);
+        self.settle();
+    }
+
+    fn history(&self) -> &History {
+        self.manager.history().expect("a history is installed")
+    }
+
+    fn running(&self, r: RegionCoords) -> bool {
+        self.manager.running_regions().contains(&r)
+    }
+
+    fn check(&mut self, when: &str) {
+        let census = bodies(&mut self.manager);
+        assert_one_place(self.manager.history().unwrap(), &census, when);
+    }
+
+    /// Move the player's body in `r` to region-local `x`, `z` (height kept).
+    fn teleport_player(&mut self, r: RegionCoords, x: f32, z: f32) {
+        self.manager.spawner_mut().with_region(r, |region| {
+            let key = *region.data().player_entites.get(&CLIENT).expect("the player is here");
+            region.with_data(|d| {
+                let handle = *d.ecs.rigidbody.get(key);
+                let y = d.physics.bodies.get(handle).unwrap().translation().y;
+                d.set_body_pose_safe(key, game::Pose::from_translation(game::rapier3d::math::Vector::new(x, y, z)))
+            });
+        });
+    }
+}
+
+/// Site 0 at (0, 0): four women and four men; site 1 at (2, 0): two men. On a 3 × 1 map.
+fn manager_history() -> (History, Vec<PersonId>, Vec<PersonId>) {
+    let s = start();
+    let mut h = History::new(11, s, SocietyGrid::from_world_map(&land_map(3, 1)));
+    let civ = h.add_civ(Race::Dwarf);
+    let a: Vec<_> = (0..8)
+        .map(|i| h.add_founder(if i % 2 == 0 { Sex::Female } else { Sex::Male }, years_before(s, 20)))
+        .collect();
+    let b: Vec<_> = (0..2).map(|_| h.add_founder(Sex::Male, years_before(s, 20))).collect();
+    h.found_site(civ, rc(0, 0), &a, None, false);
+    h.found_site(civ, rc(2, 0), &b, None, false);
+    (h, a, b)
+}
+
+/// Site 0's people have bodies in (0, 0), site 1's are abstract at their site.
+fn assert_site_0_embodied(w: &mut World, a: &[PersonId], b: &[PersonId]) {
+    let census = bodies(&mut w.manager);
+    for p in a {
+        assert_eq!(census.get(p), Some(&vec![rc(0, 0)]), "{p:?} spawned in the site region");
+        let q = w.history().person(*p).unwrap();
+        assert_eq!((q.location, q.home_location), (Location::InRegion(rc(0, 0)), Location::AtSite(SiteId(0))));
+    }
+    for p in b {
+        assert!(!census.contains_key(p));
+        assert_eq!(w.history().person(*p).unwrap().location, Location::AtSite(SiteId(1)));
+    }
+    w.check("site 0 embodied");
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn site_region_start_spawns_its_people() {
+    let (h, a, b) = manager_history();
+    // Installed before the region starts: caught up as it starts.
+    let mut w = World::new(land_map(3, 1), Some(h.clone()));
+    w.send(ServerEvent::ClientConnected(CLIENT));
+    assert!(w.running(rc(0, 0)));
+    assert_site_0_embodied(&mut w, &a, &b);
+    // Installed while it runs: caught up at once.
+    let mut w = World::new(land_map(3, 1), None);
+    w.send(ServerEvent::ClientConnected(CLIENT));
+    assert!(bodies(&mut w.manager).is_empty());
+    w.manager.set_history(h, w.now_ms);
+    w.settle();
+    assert_site_0_embodied(&mut w, &a, &b);
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn neighbour_wake_catches_up() {
+    let (h, a, _) = manager_history();
+    let mut w = World::new(land_map(3, 1), Some(h));
+    w.send(ServerEvent::ClientConnected(CLIENT));
+    w.packet(ClientPacket::PlayRegion(rc(1, 0)));
+    w.tick();
+    w.wait(UNLOAD_GRACE_MS);
+    assert!(!w.running(rc(0, 0)), "the site region parked");
+    for p in &a {
+        assert_eq!(w.history().person(*p).unwrap().location, Location::AtSite(SiteId(0)));
+    }
+    w.check("parked");
+
+    // The player walks over the seam into the site region: the arrival wakes it, and its
+    // people are there.
+    let z = (LANDING[1] as f32 + 0.5) * BLOCK_VOXELS as f32;
+    w.teleport_player(rc(1, 0), -(FLIP_HYSTERESIS + 2.0), z);
+    w.tick();
+    assert!(w.running(rc(0, 0)), "the player's arrival woke the site region");
+    let census = bodies(&mut w.manager);
+    for p in &a {
+        assert_eq!(census.get(p), Some(&vec![rc(0, 0)]));
+    }
+    w.check("woken by the player");
+
+    // And back out: once the site region parks, its people are abstract at their site.
+    w.teleport_player(rc(0, 0), REGION_SIZE + FLIP_HYSTERESIS + 2.0, z);
+    w.tick();
+    w.wait(UNLOAD_GRACE_MS);
+    assert!(!w.running(rc(0, 0)), "the site region parked again");
+    for p in &a {
+        let q = w.history().person(*p).unwrap();
+        assert_eq!((q.location, q.home_location), (Location::AtSite(SiteId(0)), Location::Unplaced));
+    }
+    assert!(bodies(&mut w.manager).is_empty());
+    w.check("parked again");
+}
+
+/// Rounds for a body to walk from the landing out over the +x seam (~45 blocks).
+const WALK_OUT_ROUNDS: usize = 800;
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn walk_out_does_not_wake_neighbour() {
+    let (h, a, _) = manager_history();
+    let mut w = World::new(land_map(3, 1), Some(h));
+    // The player's home keeps (0, 0) running; nobody asks for (1, 0).
+    w.send(ServerEvent::ClientConnected(CLIENT));
+    let j = w
+        .manager
+        .history_mut()
+        .unwrap()
+        .start_journey(vec![a[0]], SiteId(0), rc(2, 0), Purpose::Migrate { to: SiteId(1) })
+        .expect("a route to site 1");
+    let mut absorbed = false;
+    for round in 0..WALK_OUT_ROUNDS {
+        w.tick();
+        assert!(!w.running(rc(1, 0)), "round {round}: the walk out woke (1, 0)");
+        w.check(&format!("round {round}"));
+        if w.history().person(a[0]).unwrap().location == Location::Journey(j) {
+            absorbed = true;
+            break;
+        }
+    }
+    assert!(absorbed, "the traveller never walked out of (0, 0)");
+    let jr = w.history().journey(j).unwrap();
+    assert_eq!((jr.held_in, jr.leg), (None, 1), "the journey goes on abstractly from (1, 0)");
+    assert!(!bodies(&mut w.manager).contains_key(&a[0]));
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn no_person_twice_across_park_cycles() {
+    let (h, a, b) = manager_history();
+    let half_year = DAYS_PER_YEAR * DAY_MS / 2;
+    let mut w = World::new(land_map(3, 1), Some(h));
+    w.send(ServerEvent::ClientConnected(CLIENT));
+    // Home in site 1's region, so nothing but a subscription keeps (0, 0) running.
+    w.packet(ClientPacket::PlayRegion(rc(2, 0)));
+    w.tick();
+    w.wait(UNLOAD_GRACE_MS);
+    assert!(!w.running(rc(0, 0)));
+    w.check("start");
+    let mut journey = None;
+    for cycle in 0..5 {
+        w.packet(ClientPacket::RequestRegionConnection(rc(0, 0)));
+        assert!(w.running(rc(0, 0)));
+        w.check(&format!("cycle {cycle}: started"));
+        // Half a year with the region running: births beside embodied mothers.
+        w.wait(half_year);
+        w.check(&format!("cycle {cycle}: half a year running"));
+        if cycle == 1 {
+            journey = w.manager.history_mut().unwrap().start_journey(
+                vec![a[0]],
+                SiteId(0),
+                rc(2, 0),
+                Purpose::Migrate { to: SiteId(1) },
+            );
+            assert!(journey.is_some(), "a route to site 1");
+        }
+        for round in 0..40 {
+            w.tick();
+            w.check(&format!("cycle {cycle}: round {round}"));
+        }
+        w.packet(ClientPacket::ReleaseRegionConnection(rc(0, 0)));
+        w.wait(UNLOAD_GRACE_MS);
+        assert!(!w.running(rc(0, 0)), "cycle {cycle}: parked");
+        w.check(&format!("cycle {cycle}: parked"));
+        // Half a year parked: births at the abstract site, the journey goes on.
+        w.wait(half_year);
+        w.check(&format!("cycle {cycle}: half a year parked"));
+    }
+    let born = w.history().log().iter().filter(|e| matches!(e.kind, LogKind::Born { .. })).count();
+    assert!(born > 0, "children were born over the cycles");
+    let j = journey.unwrap();
+    assert!(w.history().journey(j).is_none(), "the journey ended");
+    let q = w.history().person(a[0]).unwrap();
+    assert_eq!(q.site, Some(SiteId(1)), "the traveller arrived at site 1");
+    // Site 1's region runs (the player's home): its people, the newcomer too, are there.
+    let census = bodies(&mut w.manager);
+    for p in b.iter().chain([&a[0]]) {
+        assert_eq!(census.get(p), Some(&vec![rc(2, 0)]), "{p:?}");
+    }
+}
+
+#[test]
+fn calendar_follows_now_ms() {
+    let (h, _, _) = manager_history();
+    let t0 = h.now();
+    let mut w = World::new(land_map(3, 1), None);
+    assert_eq!(w.manager.calendar_now(0), None);
+    w.manager.set_history(h, 5_000);
+    assert_eq!(w.manager.calendar_now(5_000), Some(t0));
+    assert_eq!(w.manager.calendar_now(5_000 + 7 * TICK_RATE + 3), Some(CalendarTick(t0.0 + 7)));
+    w.now_ms = 5_000;
+    w.wait(3 * DAY_MS);
+    assert_eq!(w.history().now(), t0.plus_days(3));
 }

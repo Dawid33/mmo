@@ -9,8 +9,9 @@ use std::time::Duration;
 
 use crossbeam::channel::{unbounded, Receiver, Sender};
 
+use crate::history::{CalendarTick, History};
 use crate::{
-    Chunk, ChunkCoords, ClientId, ClientPacket, Column, ColumnCoords, TerrainSnapshot, GameEventKind,
+    Chunk, ChunkCoords, ClientId, ClientPacket, Column, ColumnCoords, EntityKind, TerrainSnapshot, GameEventKind,
     LodBuildJob, LodBuilder, LodKey, LodPayload, LodResult, Region, RegionCoords, RegionInput,
     RegionOutput, RegionRunner, RegionSeed, SerializedRegion, ServerPacket, PlayRefusal, WorldMap,
 };
@@ -328,6 +329,12 @@ pub struct WorldManager<S: RegionSpawner> {
     /// region that was mid-stop when Play arrived; replayed in order (waking
     /// the region from its parked blob) once it parks.
     pending_events: BTreeMap<RegionCoords, Vec<RegionInput>>,
+    /// The world's history (forged worlds): it puts its people into regions as they
+    /// start, takes them back as they park, and sends running regions its decisions.
+    /// `None` = no history (procedural worlds, most tests): people are untouched.
+    history: Option<History>,
+    /// `(now_ms, calendar tick)` the calendar was anchored at by [`Self::set_history`].
+    calendar_anchor: (u64, CalendarTick),
     out: Sender<(Option<ClientId>, ServerPacket)>,
     region_out_send: Sender<(RegionCoords, RegionOutput)>,
     /// LOD subscriptions per key, and the reverse map for disconnects.
@@ -376,6 +383,8 @@ impl<S: RegionSpawner> WorldManager<S> {
             homes: BTreeMap::new(),
             world_map: None,
             pending_events: BTreeMap::new(),
+            history: None,
+            calendar_anchor: (0, CalendarTick(0)),
             out,
             region_out_send,
             lod_subscribers: BTreeMap::new(),
@@ -401,6 +410,65 @@ impl<S: RegionSpawner> WorldManager<S> {
         let running: Vec<RegionCoords> = self.regions.keys().copied().collect();
         for rc in running {
             self.send_to_region(rc, RegionInput::SetMapExtent(extent));
+        }
+    }
+
+    /// Install the world's history. Its calendar runs from `history.now()` at `now_ms`,
+    /// one calendar tick per `TICK_RATE` ms; every region already running is caught up
+    /// (its people spawned) at once.
+    pub fn set_history(&mut self, history: History, now_ms: u64) {
+        self.calendar_anchor = (now_ms, history.now());
+        self.history = Some(history);
+        let running: Vec<RegionCoords> =
+            self.regions.iter().filter(|(_, l)| !l.stopping).map(|(rc, _)| *rc).collect();
+        for rc in running {
+            let events = self.history.as_mut().unwrap().region_started(rc);
+            for kind in events {
+                self.send_to_region(rc, RegionInput::Event(kind));
+            }
+        }
+        self.deliver_directives();
+    }
+
+    /// The calendar at `now_ms`: the anchor's tick plus one per `TICK_RATE` ms since.
+    /// `None` without a history.
+    pub fn calendar_now(&self, now_ms: u64) -> Option<CalendarTick> {
+        self.history.as_ref()?;
+        let (ms, tick) = self.calendar_anchor;
+        Some(CalendarTick(tick.0 + now_ms.saturating_sub(ms) / crate::TICK_RATE))
+    }
+
+    pub fn history(&self) -> Option<&History> {
+        self.history.as_ref()
+    }
+
+    /// The history, to change directly (tests, tools). Whatever it decides for running
+    /// regions reaches them at the next [`Self::maintain`].
+    pub fn history_mut(&mut self) -> Option<&mut History> {
+        self.history.as_mut()
+    }
+
+    /// Send every directive the history has decided to its region. Only running regions
+    /// get directives — the history defers what acts on a stopping one — so one for any
+    /// other region is a bug, and dropped.
+    fn deliver_directives(&mut self) {
+        let Some(history) = self.history.as_mut() else { return };
+        for d in history.take_directives() {
+            let live = self.regions.get(&d.region).is_some_and(|l| !l.stopping);
+            debug_assert!(live, "history directive for {:?}, which is not running: {:?}", d.region, d.event);
+            if !live {
+                log::error!("history directive for {:?}, which is not running, dropped: {:?}", d.region, d.event);
+                continue;
+            }
+            self.send_to_region(d.region, RegionInput::Event(d.event));
+        }
+    }
+
+    /// `rc` stopped without parking its people (its thread died): the history takes back
+    /// everyone it had there, as if it had parked empty.
+    fn history_region_lost(&mut self, rc: RegionCoords) {
+        if let Some(history) = self.history.as_mut() {
+            history.region_parked(rc, Vec::new());
         }
     }
 
@@ -558,6 +626,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                 }
             },
         }
+        self.deliver_directives();
         true
     }
 
@@ -597,13 +666,20 @@ impl<S: RegionSpawner> WorldManager<S> {
                 self.cache_authoritative_terrain(rc, snap);
                 self.lod_terrain_ready(rc, client);
             }
-            // Wired to the history manager in a later task.
-            RegionOutput::PeopleParked(_) => {}
+            RegionOutput::PeopleParked(people) => {
+                if let Some(history) = self.history.as_mut() {
+                    history.region_parked(rc, people);
+                }
+            }
             RegionOutput::TerrainChanged(snap) => {
                 self.cache_authoritative_terrain(rc, snap);
                 self.invalidate_region_lod(rc);
             }
             RegionOutput::Stopped(serialized, far) => {
+                // `PeopleParked` comes first; a region that sent none gave nobody back.
+                if self.history.as_ref().is_some_and(|h| h.region_live(rc)) {
+                    self.history_region_lost(rc);
+                }
                 self.cache_authoritative_terrain(rc, far);
                 self.invalidate_region_lod(rc);
                 self.parked.insert(rc, serialized);
@@ -640,6 +716,13 @@ impl<S: RegionSpawner> WorldManager<S> {
                         self.send_to_region(rc, RegionInput::Event(GameEventKind::EntityArrived(bundle)));
                         continue;
                     }
+                    if let (EntityKind::Person { person }, Some(history)) = (bundle.kind, self.history.as_mut()) {
+                        // A person is delivered only into a running region; the history
+                        // absorbs anyone walking into one that is not (no wake).
+                        if !history.person_crossed(person, target) {
+                            continue;
+                        }
+                    }
                     bundle.isometry = crate::rebase_isometry(&bundle.isometry, rc, target);
                     // Arrivals ALWAYS wake the target (parked blob or gen).
                     self.ensure_running(target);
@@ -674,11 +757,19 @@ impl<S: RegionSpawner> WorldManager<S> {
                 }
             }
         }
+        // After the arrivals above: a directive for a delivered person (walk on) must
+        // reach the target behind the body.
+        self.deliver_directives();
     }
 
-    /// Grace-period unloads: a region with no subscribers and no connected
+    /// The history's calendar moves to `now_ms` (its decisions go to running regions),
+    /// then grace-period unloads: a region with no subscribers and no connected
     /// client's player entity parks after UNLOAD_GRACE_MS.
     pub fn maintain(&mut self, now_ms: u64) {
+        if let Some(to) = self.calendar_now(now_ms) {
+            self.history.as_mut().unwrap().advance(to);
+            self.deliver_directives();
+        }
         let connected_homes: BTreeSet<RegionCoords> = self
             .sessions
             .keys()
@@ -706,18 +797,30 @@ impl<S: RegionSpawner> WorldManager<S> {
                 self.regions.remove(&rc);
                 self.pending_events.remove(&rc);
                 self.spawner.reap(rc);
+                self.history_region_lost(rc);
+            } else if let Some(history) = self.history.as_mut() {
+                history.region_stopping(rc);
             }
         }
+        // Anything a lost region's people decided on their return.
+        self.deliver_directives();
     }
 
     pub fn shutdown_all(&mut self) {
+        let mut dead = Vec::new();
         for (rc, link) in self.regions.iter_mut() {
             if !link.stopping {
                 link.stopping = true;
                 if link.input.send(RegionInput::Shutdown).is_err() {
                     log::error!("region {:?} died before shutdown", rc);
+                    dead.push(*rc);
+                } else if let Some(history) = self.history.as_mut() {
+                    history.region_stopping(*rc);
                 }
             }
+        }
+        for rc in dead {
+            self.history_region_lost(rc);
         }
     }
 
@@ -821,6 +924,12 @@ impl<S: RegionSpawner> WorldManager<S> {
         if let Some(extent) = self.map_extent() {
             let _ = input.send(RegionInput::SetMapExtent(Some(extent)));
         }
+        // Then the history's catch-up: its people here now, before anything else.
+        if let Some(history) = self.history.as_mut() {
+            for kind in history.region_started(rc) {
+                let _ = input.send(RegionInput::Event(kind));
+            }
+        }
         self.regions.insert(
             rc,
             RegionLink {
@@ -910,6 +1019,8 @@ impl<S: RegionSpawner> WorldManager<S> {
         let subscribers = self.regions.remove(&rc).unwrap().subscribers;
         self.pending_events.remove(&rc);
         self.spawner.reap(rc);
+        // Its people's bodies died with it: back to the history, then caught up again.
+        self.history_region_lost(rc);
         self.ensure_running(rc);
         let link = self.regions.get_mut(&rc).unwrap();
         link.subscribers = subscribers.clone();

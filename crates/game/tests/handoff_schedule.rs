@@ -435,3 +435,86 @@ fn walk_into_neighbour_region() {
         }
     }
 }
+
+// --- A history traveller crosses a seam ---------------------------------------
+
+use crate::history_handover::{assert_one_place, bodies, floored_region, land_map, start, years_before};
+use game::history::{History, Location, Purpose, Race, Sex, SiteId, SocietyGrid};
+
+/// Where people land, in block columns: a few blocks short of the spawn region's −z seam.
+const NORTH_LANDING: [u32; 2] = [32, 3];
+/// Round budget for the traveller to walk over the seam and be delivered.
+const TRAVEL_ROUNDS: usize = 400;
+
+/// A traveller of the world history walks from a site in the spawn region over the −z
+/// seam to a site in the running north region: one body throughout (none while in
+/// flight), delivered and agreed on by the history. Panics with the seed on failure.
+fn travel_north(seed: u64) {
+    let mut map = land_map(3, 3);
+    map.origin = RegionCoords::new(-1, -1);
+    for t in &mut map.tiles {
+        t.landing = Some(NORTH_LANDING);
+    }
+    let s = start();
+    let mut h = History::new(seed, s, SocietyGrid::from_world_map(&map));
+    let civ = h.add_civ(Race::Dwarf);
+    let traveller = h.add_founder(Sex::Female, years_before(s, 20));
+    let host = h.add_founder(Sex::Male, years_before(s, 20));
+    h.found_site(civ, SPAWN_REGION, &[traveller], None, false);
+    h.found_site(civ, north(), &[host], None, false);
+
+    let mut rig = Rig::with_floor(Some(InlineSchedule::jittery(seed)), floored_region);
+    rig.manager.set_history(h, rig.now_ms);
+    rig.event(ServerEvent::ClientConnected(CLIENT));
+    for rc in SPAWN_REGION.window_3x3() {
+        rig.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(rc), CLIENT));
+    }
+    rig.walk_until_owned_by(SPAWN_REGION, "spawn");
+    let j = rig
+        .manager
+        .history_mut()
+        .unwrap()
+        .start_journey(vec![traveller], SiteId(0), north(), Purpose::Migrate { to: SiteId(1) })
+        .expect("a route north");
+    let mut delivered = false;
+    for round in 0..TRAVEL_ROUNDS {
+        rig.round();
+        rig.manager.maintain(rig.now_ms);
+        rig.settle();
+        let census = bodies(&mut rig.manager);
+        for (p, at) in &census {
+            assert!(at.len() <= 1, "seed {seed} round {round}: {p:?} has bodies in {at:?}");
+        }
+        let h = rig.manager.history().unwrap();
+        let loc = h.person(traveller).unwrap().location;
+        if !matches!(loc, Location::InRegion(_)) {
+            panic!("seed {seed} round {round}: the traveller was absorbed ({loc:?})");
+        }
+        if loc == Location::InRegion(north()) && census.get(&traveller) == Some(&vec![north()]) {
+            delivered = true;
+            break;
+        }
+    }
+    assert!(delivered, "seed {seed}: the traveller never reached {:?}", north());
+    for _ in 0..PAST_SEAM_ROUNDS {
+        rig.round();
+        rig.manager.maintain(rig.now_ms);
+        rig.settle();
+    }
+    let census = bodies(&mut rig.manager);
+    let h = rig.manager.history().unwrap();
+    assert_one_place(h, &census, &format!("seed {seed}: delivered"));
+    assert!(h.journey(j).is_none(), "seed {seed}: the journey ended on arrival");
+    let p = h.person(traveller).unwrap();
+    assert_eq!((p.location, p.home_location), (Location::InRegion(north()), Location::AtSite(SiteId(1))));
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn history_departure_under_jitter() {
+    for seed in 0..8u64 {
+        if std::panic::catch_unwind(|| travel_north(seed)).is_err() {
+            panic!("history traveller across the seam broke under seed {seed}");
+        }
+    }
+}
