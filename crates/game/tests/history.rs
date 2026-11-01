@@ -357,3 +357,179 @@ fn same_region_journey_arrives_next_step() {
     assert!(h.journey(j).is_none());
     assert!(h.site(SiteId(0)).unwrap().members.contains(&a[0]));
 }
+
+// ---- Task 5: migration, embark and founding ----
+
+fn cheb(a: RegionCoords, b: RegionCoords) -> u32 {
+    (a.x - b.x).unsigned_abs().max((a.z - b.z).unsigned_abs())
+}
+
+/// `n` founders (half women, half men, 20 years old) founding a site at `region`.
+fn add_site_with(h: &mut History, civ: CivId, region: RegionCoords, n: usize) -> SiteId {
+    let s = start();
+    let mut f = Vec::new();
+    for i in 0..n {
+        f.push(h.add_founder(if i % 2 == 0 { Sex::Female } else { Sex::Male }, years_before(s, 20)));
+    }
+    h.found_site(civ, region, &f, None, false)
+}
+
+#[test]
+fn household_of_is_spouse_and_young_children() {
+    let s = start();
+    let mut h = History::new(2, s, land_grid());
+    let civ = h.add_civ(Race::Dwarf);
+    let m = h.add_founder(Sex::Female, years_before(s, 40));
+    let f = h.add_founder(Sex::Male, years_before(s, 40));
+    let kid = h.add_founder(Sex::Male, years_before(s, 5));
+    let grown = h.add_founder(Sex::Female, years_before(s, 20));
+    let other = h.add_founder(Sex::Female, years_before(s, 30));
+    h.people.get_mut(&m).unwrap().spouse = Some(f);
+    h.people.get_mut(&f).unwrap().spouse = Some(m);
+    for c in [kid, grown] {
+        h.people.get_mut(&c).unwrap().mother = Some(m);
+        h.people.get_mut(&m).unwrap().children.push(c);
+        h.people.get_mut(&f).unwrap().children.push(c);
+    }
+    h.found_site(civ, RegionCoords::new(1, 1), &[m, f, kid, grown, other], None, false);
+    assert_eq!(household_of(&h, m), vec![m, f, kid]);
+    assert_eq!(household_of(&h, f), vec![m, f, kid]);
+    assert_eq!(household_of(&h, other), vec![other]);
+}
+
+#[test]
+fn embark_allowed_rules() {
+    let s = start();
+    let mut h = History::new(2, s, SocietyGrid::from_world_map(&test_map(12, 3, |x, _| x == 11)));
+    let civ = h.add_civ(Race::Dwarf);
+    let p = h.add_founder(Sex::Female, years_before(s, 20));
+    let site = h.found_site(civ, RegionCoords::new(0, 0), &[p], None, false);
+    assert_eq!(h.embark_allowed(RegionCoords::new(-1, 0)), Err(EmbarkRefusal::OffMap));
+    assert_eq!(h.embark_allowed(RegionCoords::new(11, 0)), Err(EmbarkRefusal::NotHabitable));
+    assert_eq!(h.embark_allowed(RegionCoords::new(0, 0)), Err(EmbarkRefusal::Occupied));
+    assert_eq!(h.embark_allowed(RegionCoords::new(3, 0)), Err(EmbarkRefusal::TooClose { site }));
+    assert_eq!(h.embark_allowed(RegionCoords::new(4, 0)), Ok(()));
+}
+
+#[test]
+fn crowded_site_sends_migrants() {
+    let s = start();
+    let mut h = History::new(5, s, SocietyGrid::from_world_map(&test_map(8, 3, |_, _| false)));
+    let civ = h.add_civ(Race::Dwarf);
+    let a = add_site_with(&mut h, civ, RegionCoords::new(0, 0), 50);
+    let b = add_site_with(&mut h, civ, RegionCoords::new(6, 0), 2);
+    assert_eq!(h.site(a).unwrap().capacity, 50);
+    h.advance(s.plus_days(2 * DAYS_PER_YEAR));
+    assert!(h
+        .log()
+        .iter()
+        .any(|e| matches!(&e.kind, LogKind::Departed { from, purpose: Purpose::Migrate { to }, .. } if *from == a && *to == b)));
+    assert!(h.log().iter().any(|e| matches!(&e.kind, LogKind::Arrived { site, .. } if *site == b)));
+}
+
+#[test]
+fn crowded_civ_embarks_and_founds() {
+    let s = start();
+    let mut h = History::new(9, s, SocietyGrid::from_world_map(&test_map(30, 30, |_, _| false)));
+    let civ = h.add_civ(Race::Dwarf);
+    let a = add_site_with(&mut h, civ, RegionCoords::new(15, 15), 50);
+    h.advance(s.plus_days(5 * DAYS_PER_YEAR));
+    let found = h.log().iter().find_map(|e| match &e.kind {
+        LogKind::SiteFounded { site, founders, from: Some(f), .. } if *f == a => Some((*site, founders.len())),
+        _ => None,
+    });
+    let (new, n) = found.expect("an embark party founded a site");
+    assert!(n >= 7, "{n}");
+    assert!(cheb(h.site(new).unwrap().region, RegionCoords::new(15, 15)) >= 4);
+    assert_eq!(h.site(new).unwrap().from, Some(a));
+}
+
+#[test]
+fn crowded_site_with_no_target_stays() {
+    let s = start();
+    let sea = |x: i32, z: i32| !(1..=5).contains(&x) || !(1..=5).contains(&z);
+    let mut h = History::new(9, s, SocietyGrid::from_world_map(&test_map(7, 7, sea)));
+    let civ = h.add_civ(Race::Dwarf);
+    add_site_with(&mut h, civ, RegionCoords::new(3, 3), 50);
+    h.advance(s.plus_days(5 * DAYS_PER_YEAR));
+    assert!(!h.log().iter().any(|e| matches!(e.kind, LogKind::Departed { .. })));
+    assert_eq!(h.sites().count(), 1);
+}
+
+#[test]
+fn extinct_civ_leaves_no_live_steps() {
+    let s = start();
+    let mut h = History::new(4, s, land_grid());
+    let civ = h.add_civ(Race::Dwarf);
+    let a = h.add_founder(Sex::Female, years_before(s, 159));
+    let b = h.add_founder(Sex::Male, years_before(s, 159));
+    h.found_site(civ, RegionCoords::new(2, 2), &[a, b], None, false);
+    h.advance(s.plus_days(3 * DAYS_PER_YEAR));
+    assert!(h.people().all(|p| !p.alive()));
+    assert!(h.sites().all(|s| s.abandoned.is_some()));
+    assert_eq!(h.pending_journey_legs(), 0);
+    assert_eq!(h.pending_site_months(SiteId(0)), 0);
+    assert_eq!(h.pending_deaths_of_dead(), 0);
+}
+
+#[test]
+fn last_household_leaving_abandons_site() {
+    let (mut h, _, b) = two_site_world(|_, _| false);
+    h.start_journey(b.clone(), SiteId(1), RegionCoords::new(0, 0), Purpose::Migrate { to: SiteId(0) }).unwrap();
+    assert!(h.site(SiteId(1)).unwrap().abandoned.is_some());
+    assert!(h.log().iter().any(|e| matches!(e.kind, LogKind::SiteAbandoned { site } if site == SiteId(1))));
+    h.advance(h.now().plus_days(2 * DAYS_PER_MONTH));
+    assert_eq!(h.pending_site_months(SiteId(1)), 0);
+}
+
+#[test]
+fn migrants_revive_abandoned_site() {
+    let (mut h, a, b) = two_site_world(|_, _| false);
+    h.start_journey(b, SiteId(1), RegionCoords::new(0, 0), Purpose::Migrate { to: SiteId(0) }).unwrap();
+    assert!(h.site(SiteId(1)).unwrap().abandoned.is_some());
+    h.start_journey(vec![a[0]], SiteId(0), RegionCoords::new(6, 0), Purpose::Migrate { to: SiteId(1) })
+        .unwrap();
+    h.advance(CalendarTick(h.now().0 + 8 * leg()));
+    let site = h.site(SiteId(1)).unwrap();
+    assert!(site.abandoned.is_none());
+    assert!(site.members.contains(&a[0]));
+    h.advance(h.now().plus_days(2 * DAYS_PER_MONTH));
+    assert_eq!(h.pending_site_months(SiteId(1)), 1);
+}
+
+#[test]
+fn embark_party_with_nowhere_to_go_wanders() {
+    let s = start();
+    // A 1-tile-wide strip, 5 long: only x = 4 is far enough from the origin at x = 0.
+    let mut h = History::new(11, s, SocietyGrid::from_world_map(&test_map(5, 1, |_, _| false)));
+    let civ = h.add_civ(Race::Dwarf);
+    let origin = add_site_with(&mut h, civ, RegionCoords::new(0, 0), 50);
+    let mut guard = 0;
+    while h.journeys.is_empty() {
+        h.advance(CalendarTick(h.now().0 + 10));
+        guard += 1;
+        assert!(guard < 2_000_000, "no embark party left");
+    }
+    let (jid, party) = {
+        let j = h.journeys.values().next().unwrap();
+        assert!(matches!(j.purpose, Purpose::Embark { .. }));
+        assert_eq!(*j.route.last().unwrap(), RegionCoords::new(4, 0));
+        (j.id, j.people.clone())
+    };
+    // The target gets taken by another civ, and the origin dies out.
+    let other = h.add_civ(Race::Dwarf);
+    let o = h.add_founder(Sex::Female, years_before(s, 20));
+    h.found_site(other, RegionCoords::new(4, 0), &[o], None, false);
+    for p in h.living_members(origin) {
+        h.record_death(p, DeathCause::OldAge);
+    }
+    assert!(h.site(origin).unwrap().abandoned.is_some());
+    h.advance(CalendarTick(h.now().0 + 10 * leg()));
+    assert!(h.journey(jid).is_none());
+    for p in &party {
+        let pr = h.person(*p).unwrap();
+        assert_eq!(pr.location, Location::Wandering(RegionCoords::new(4, 0)));
+        assert_eq!(pr.site, None);
+    }
+    assert_eq!(h.pending_journey_legs(), 0);
+}

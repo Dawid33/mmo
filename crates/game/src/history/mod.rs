@@ -10,6 +10,7 @@ pub mod rng;
 pub mod rules;
 
 pub use calendar::*;
+pub use chain::EmbarkRefusal;
 pub use grid::*;
 pub use records::*;
 
@@ -184,6 +185,19 @@ impl History {
     }
     pub fn log(&self) -> &[LogEntry] {
         &self.log
+    }
+
+    /// Queued `SiteMonth` steps of `site`.
+    pub fn pending_site_months(&self, site: SiteId) -> usize {
+        self.queue.values().filter(|s| matches!(s, Step::SiteMonth(x) if *x == site)).count()
+    }
+
+    /// Queued `Death` steps of people who are already dead.
+    pub fn pending_deaths_of_dead(&self) -> usize {
+        self.queue
+            .values()
+            .filter(|s| matches!(s, Step::Death(p) if self.people.get(p).is_some_and(|q| !q.alive())))
+            .count()
     }
 
     /// Living members of `site`, by id.

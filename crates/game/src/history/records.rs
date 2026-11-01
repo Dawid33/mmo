@@ -39,6 +39,8 @@ pub enum Location {
     Journey(JourneyId),
     /// Unused until plan 2.
     InRegion(crate::RegionCoords),
+    /// An embark party that found nowhere to settle: it stays in `region` and takes no further part.
+    Wandering(crate::RegionCoords),
 }
 
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]

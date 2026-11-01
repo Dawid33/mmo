@@ -2,6 +2,7 @@
 
 use super::calendar::{CalendarTick, DAYS_PER_YEAR};
 use super::records::PersonId;
+use super::History;
 use super::rng::{roll, SALT_DEATH_AGE};
 
 /// The year the bootstrapped history starts at.
@@ -75,4 +76,30 @@ pub fn walk_ticks_per_region() -> u64 {
     let mm_per_s = (crate::movement::WALK_SPEED * 1000.0).round() as u64;
     let region_mm = crate::REGION_BLOCKS as u64 * 1000;
     region_mm * 1000 / (mm_per_s * crate::TICK_RATE)
+}
+
+/// `person`, their living spouse and their living children under `ADULT_AGE_YEARS`, all
+/// present at the person's site (a traveller has no household), in id order.
+pub fn household_of(h: &History, person: PersonId) -> Vec<PersonId> {
+    let Some(p) = h.people.get(&person).filter(|p| p.alive()) else { return Vec::new() };
+    let Some(site) = p.site.and_then(|s| h.sites.get(&s)) else { return Vec::new() };
+    if !site.members.contains(&person) {
+        return Vec::new();
+    }
+    let present = |id: &PersonId| site.members.contains(id) && h.people.get(id).is_some_and(|q| q.alive());
+    let mut out = std::collections::BTreeSet::new();
+    out.insert(person);
+    let mut parents = vec![person];
+    if let Some(sp) = p.spouse.filter(|s| present(s)) {
+        out.insert(sp);
+        parents.push(sp);
+    }
+    for parent in parents {
+        for c in &h.people[&parent].children {
+            if present(c) && h.people[c].age_years(h.now) < ADULT_AGE_YEARS {
+                out.insert(*c);
+            }
+        }
+    }
+    out.into_iter().collect()
 }
