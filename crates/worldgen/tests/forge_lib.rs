@@ -26,3 +26,33 @@ fn forge_small_world_round_trips() {
     }
     assert_eq!(rock_index("marble"), None);
 }
+
+/// Quality gate: a 16 km / 32 m forge must stay within tolerance of the
+/// recorded baseline (`tests/fixtures/forge_quality_16k_32m.ron`). Output-
+/// changing forge speed-ups must pass it. The layout is pinned to the
+/// one-island layout explicitly so the gate keeps measuring the same world
+/// when the default layout changes. Re-bless with `FORGE_QUALITY_BLESS=1`
+/// ONLY on purpose (a deliberate change of the world), never to make a
+/// failure go away.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn forge_quality_matches_baseline() {
+    use worldgen::forge::knobs::LAYOUT_ONE_ISLAND;
+    use worldgen::forge::quality::{quality, within, Quality, QualityTolerance};
+    use worldgen::forge::world::DEFAULT_SEED;
+
+    let mut p = ForgeParams { size_m: 16_000.0, cell_m: 32.0, seed: DEFAULT_SEED, ..ForgeParams::default() };
+    p.knobs.layout = LAYOUT_ONE_ISLAND as f64;
+    let q = quality(&forge(&p));
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/forge_quality_16k_32m.ron");
+    if std::env::var_os("FORGE_QUALITY_BLESS").is_some() {
+        std::fs::write(path, q.to_text()).expect("write baseline");
+        eprintln!("blessed {path}:\n{}", q.to_text());
+        return;
+    }
+    let text = std::fs::read_to_string(path).expect("baseline fixture");
+    let baseline = Quality::from_text(&text).expect("baseline parses");
+    if let Err(e) = within(&q, &baseline, &QualityTolerance::DEFAULT) {
+        panic!("{e}");
+    }
+}
