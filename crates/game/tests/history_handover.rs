@@ -892,3 +892,31 @@ fn calendar_follows_now_ms() {
     w.wait(3 * DAY_MS);
     assert_eq!(w.history().now(), t0.plus_days(3));
 }
+
+/// The server's exit path: `shutdown_all` parks every region, THEN the history is saved. A
+/// history saved that way reloads with nobody embodied and the whole population intact.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn history_saved_on_shutdown_reloads() {
+    let (h, a, b) = manager_history();
+    let people = h.people().filter(|q| q.alive()).count();
+    assert_eq!(people, a.len() + b.len());
+    let mut w = World::new(land_map(3, 1), Some(h));
+    w.send(ServerEvent::ClientConnected(CLIENT));
+    w.packet(ClientPacket::PlayRegion(rc(0, 0)));
+    w.tick();
+    assert!(
+        w.history().people().any(|q| matches!(q.location, Location::InRegion(_))),
+        "site 0's people are embodied while the region runs"
+    );
+    w.manager.shutdown_all();
+    w.settle();
+    assert!(w.manager.running_regions().is_empty(), "every region is parked");
+    let bytes = persist::encode(w.history());
+    let loaded = persist::decode(&bytes, SocietyGrid::from_world_map(&land_map(3, 1))).unwrap();
+    assert!(
+        loaded.people().all(|q| !matches!(q.location, Location::InRegion(_))),
+        "nobody is left embodied in the saved file"
+    );
+    assert_eq!(loaded.people().filter(|q| q.alive()).count(), people);
+}

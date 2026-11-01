@@ -390,6 +390,7 @@ pub fn run() {
     };
     let materials = worldgen::material::Materials::from_names(resolve);
     // The world must be chosen before anything calls `forged::active()`.
+    let mut history_world_path: Option<std::path::PathBuf> = None;
     match world_file::resolve(std::env::var(worldgen::forged::WORLD_FILE_ENV).ok().as_deref()) {
         world_file::WorldSource::Procedural => {
             info!("[server] world: procedural");
@@ -404,6 +405,7 @@ pub fn run() {
             });
             info!("[server] world: forged {}", path.display());
             worldgen::forged::install(Some(world));
+            history_world_path = Some(path);
         }
     }
     let world_seed = worldgen::WORLD_SEED;
@@ -450,12 +452,18 @@ pub fn run() {
             map.height,
             built.elapsed().as_millis()
         );
+        // Forged worlds have a history next to the world file (procedural: none).
+        if let Some(path) = &history_world_path {
+            let history = world_file::ensure_history(path, &map).unwrap_or_else(|e| panic!("{e}"));
+            manager.set_history(history, 0);
+        }
         manager.set_world_map(map);
     }
 
     let start = std::time::Instant::now();
     let mut report = perf::ServerReport::new();
     let mut ever_connected = false;
+    let mut last_history_save = std::time::Instant::now();
     let parent_gone = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     if single_player {
         let gone = parent_gone.clone();
@@ -491,6 +499,10 @@ pub fn run() {
         }
         manager.maintain(now_ms);
         manager.pump_lod_results();
+        if last_history_save.elapsed() >= std::time::Duration::from_secs(HISTORY_SAVE_SECS) {
+            last_history_save = std::time::Instant::now();
+            save_history(&history_world_path, &manager);
+        }
         report.maybe_report(
             &mut manager,
             perf::Backlog {
@@ -512,10 +524,22 @@ pub fn run() {
             manager.handle_region_output(rc, output, now_ms);
         }
     }
+    // Every region is parked, so its people are back in the history.
+    save_history(&history_world_path, &manager);
     #[cfg(feature = "pyroscope")]
     if let Some(agent) = agent_running {
         let agent_ready = agent.stop().unwrap();
         agent_ready.shutdown();
+    }
+}
+
+/// How often the main loop writes the world history (it is also written after
+/// the orderly-exit loop has parked every region).
+pub const HISTORY_SAVE_SECS: u64 = 60;
+
+fn save_history<S: game::RegionSpawner>(path: &Option<std::path::PathBuf>, manager: &game::WorldManager<S>) {
+    if let (Some(path), Some(history)) = (path, manager.history()) {
+        world_file::save_history(path, history);
     }
 }
 

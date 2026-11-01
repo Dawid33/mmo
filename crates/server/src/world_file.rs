@@ -61,6 +61,49 @@ pub fn ensure_forged(path: &Path, params: &ForgeParams) -> Result<(), String> {
     Ok(())
 }
 
+/// The world's history, next to the world file: loaded if it exists, otherwise
+/// bootstrapped from the world map and saved. A file that will not load is
+/// never replaced (it holds the world's people) — the error says to delete it.
+pub fn ensure_history(world_path: &Path, map: &game::WorldMap) -> Result<game::history::History, String> {
+    use game::history::bootstrap::{self, BootstrapParams};
+    use game::history::{persist, SocietyGrid};
+    let path = persist::history_path_for(world_path);
+    let grid = SocietyGrid::from_world_map(map);
+    if path.exists() {
+        return persist::load(&path, grid).map_err(|e| {
+            format!("{}: {e} — delete {} to re-create this world's history", path.display(), path.display())
+        });
+    }
+    let started = Instant::now();
+    let params = BootstrapParams { seed: u64::from(grid.world_id()), ..BootstrapParams::default() };
+    let history = bootstrap::bootstrap(map, &params)
+        .map_err(|e| format!("{}: cannot bootstrap the world's history: {e}", path.display()))?;
+    persist::save(&history, &path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let stats = history.stats();
+    game::perf_event!(
+        "history_bootstrapped",
+        "ms={} civs={} sites={} alive={}",
+        game::perf::ms(started.elapsed()),
+        stats.civs_alive,
+        stats.sites_alive,
+        stats.alive
+    );
+    Ok(history)
+}
+
+/// Save the history atomically; failures are logged, never fatal.
+pub fn save_history(world_path: &Path, history: &game::history::History) {
+    let path = game::history::persist::history_path_for(world_path);
+    let started = Instant::now();
+    match game::history::persist::save(history, &path) {
+        Ok(()) => {
+            let bytes = std::fs::metadata(&path).map_or(0, |m| m.len());
+            game::perf_event!("history_saved", "ms={} bytes={bytes}", game::perf::ms(started.elapsed()));
+        }
+        Err(e) => log::error!("[server] cannot save the history to {}: {e}", path.display()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -130,6 +173,75 @@ mod tests {
         ensure_forged(&path, &ForgeParams::default()).unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), b"not a world");
         assert!(worldgen::forged::ForgedWorld::load(&path).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn land_map(width: u32, height: u32, sea: impl Fn(i32, i32) -> bool) -> game::WorldMap {
+        let mut tiles = Vec::new();
+        for z in 0..height as i32 {
+            for x in 0..width as i32 {
+                let is_sea = sea(x, z);
+                tiles.push(game::TileSummary {
+                    ground_min_m: 0.0,
+                    ground_mean_m: 10.0,
+                    ground_max_m: 50.0,
+                    relief_m: 50.0,
+                    slope: [0.0, 0.0],
+                    sea_fraction: if is_sea { 1.0 } else { 0.0 },
+                    lake_fraction: 0.0,
+                    lake_level_m: None,
+                    rivers: 1,
+                    river_max_discharge_m2: 0.0,
+                    river_max_width_m: 0.0,
+                    surface_rock: None,
+                    landing: Some([256, 256]),
+                    biome: if is_sea { game::Biome::Ocean } else { game::Biome::Grassland },
+                    region: 0,
+                    temperature_c: 15.0,
+                    precip_mm: 800.0,
+                    savagery: 0,
+                    alignment: 0,
+                    volcano: false,
+                });
+            }
+        }
+        game::WorldMap {
+            origin: game::RegionCoords::new(0, 0),
+            width,
+            height,
+            tiles,
+            rock_names: vec![],
+            region_types: vec![],
+        }
+    }
+
+    #[test]
+    fn ensure_history_bootstraps_then_loads() {
+        let dir = scratch("history");
+        std::fs::create_dir_all(&dir).unwrap();
+        let world = dir.join("w.world");
+        let map = land_map(48, 48, |x, z| x < 2 || z < 2 || x >= 46 || z >= 46);
+        let first = ensure_history(&world, &map).unwrap();
+        let file = game::history::persist::history_path_for(&world);
+        assert!(file.exists(), "the first call writes the history next to the world");
+        let second = ensure_history(&world, &map).unwrap();
+        assert_eq!(bincode::serialize(&first).unwrap(), bincode::serialize(&second).unwrap());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ensure_history_refuses_other_world() {
+        let dir = scratch("history-other");
+        std::fs::create_dir_all(&dir).unwrap();
+        let world = dir.join("w.world");
+        let map = land_map(48, 48, |x, z| x < 2 || z < 2 || x >= 46 || z >= 46);
+        ensure_history(&world, &map).unwrap();
+        let file = game::history::persist::history_path_for(&world);
+        let before = std::fs::read(&file).unwrap();
+        let other = land_map(48, 48, |x, z| x < 3 || z < 2 || x >= 46 || z >= 46);
+        let err = ensure_history(&world, &other).unwrap_err();
+        assert!(err.contains("delete") && err.contains("w.history"), "{err}");
+        assert_eq!(std::fs::read(&file).unwrap(), before, "the file is left alone");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
