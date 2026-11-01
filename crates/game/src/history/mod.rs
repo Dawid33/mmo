@@ -1,6 +1,7 @@
 //! Deterministic, threadless world history: people, sites, civs and journeys on one calendar.
 
 mod chain;
+mod handover;
 pub mod bootstrap;
 pub mod stats;
 mod journey;
@@ -14,11 +15,12 @@ pub mod rules;
 
 pub use calendar::*;
 pub use chain::EmbarkRefusal;
+pub use handover::Directive;
 pub use grid::*;
 pub use records::*;
 
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use log::{LogEntry, LogKind};
 
@@ -48,6 +50,15 @@ pub struct History {
     pub log: Vec<LogEntry>,
     #[serde(skip)]
     grid: Option<SocietyGrid>,
+    /// Regions running now (the manager's view, re-sent after a load).
+    #[serde(skip)]
+    running: BTreeSet<crate::RegionCoords>,
+    /// Regions shutting down, not yet parked: steps acting on their people wait.
+    #[serde(skip)]
+    stopping: BTreeSet<crate::RegionCoords>,
+    /// Decided but not yet taken by [`History::take_directives`].
+    #[serde(skip)]
+    directives: Vec<Directive>,
 }
 
 impl History {
@@ -64,6 +75,9 @@ impl History {
             next_ids: [0; 4],
             log: Vec::new(),
             grid: Some(grid),
+            running: BTreeSet::new(),
+            stopping: BTreeSet::new(),
+            directives: Vec::new(),
         }
     }
 
@@ -131,9 +145,9 @@ impl History {
             debug_assert!(
                 self.people
                     .get(f)
-                    .is_none_or(|p| matches!(p.location, Location::Unplaced | Location::Journey(_))),
+                    .is_none_or(|p| matches!(p.abstract_location(), Location::Unplaced | Location::Journey(_))),
                 "founder {f:?} is already placed: {:?}",
-                self.people.get(f).map(|p| p.location)
+                self.people.get(f).map(|p| p.abstract_location())
             );
         }
         let id = SiteId(self.next_ids[1]);
@@ -162,8 +176,8 @@ impl History {
         for f in founders {
             if let Some(p) = self.people.get_mut(f) {
                 p.site = Some(id);
-                p.location = Location::AtSite(id);
             }
+            self.set_abstract_location(*f, Location::AtSite(id));
         }
         self.log_event(LogKind::SiteFounded { site: id, civ, founders: founders.to_vec(), from });
         self.schedule(self.now.plus_days(DAYS_PER_MONTH), Step::SiteMonth(id));

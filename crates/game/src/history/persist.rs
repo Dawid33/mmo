@@ -4,7 +4,8 @@ use super::{History, SocietyGrid};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-pub const HISTORY_FILE_VERSION: u32 = 1;
+/// 2: `Person::home_location` and `Journey::held_in` (region hand-over).
+pub const HISTORY_FILE_VERSION: u32 = 2;
 pub const HISTORY_MAGIC: [u8; 8] = *b"MMOHIST\0";
 
 /// Largest decompressed history body a file may claim; a bigger size prefix is refused

@@ -24,6 +24,16 @@ fn chebyshev(a: crate::RegionCoords, b: crate::RegionCoords) -> u32 {
 impl History {
     /// Old age comes for `id`.
     pub(crate) fn on_death(&mut self, id: PersonId) {
+        if self.people.get(&id).is_some_and(|p| p.alive()) {
+            if self.in_stopping_region(id) {
+                let at = self.deferred();
+                self.schedule(at, super::Step::Death(id));
+                return;
+            }
+            if let Some(rc) = self.embodied_in(id) {
+                self.emit_despawn(rc, id);
+            }
+        }
         self.record_death(id, DeathCause::OldAge);
     }
 
@@ -37,7 +47,7 @@ impl History {
         }
         p.died = Some((now, cause));
         let spouse = p.spouse;
-        let on_journey = match p.location {
+        let on_journey = match p.abstract_location() {
             Location::Journey(j) => Some(j),
             _ => None,
         };
@@ -80,6 +90,12 @@ impl History {
         match self.sites.get(&sid) {
             Some(s) if s.abandoned.is_none() => {}
             _ => return,
+        }
+        // Its people are in a region being shut down: try again once it has parked.
+        if self.sites[&sid].members.iter().any(|p| self.in_stopping_region(*p)) {
+            let at = self.deferred();
+            self.schedule(at, super::Step::SiteMonth(sid));
+            return;
         }
         self.marriages(sid);
         self.births(sid);
@@ -286,8 +302,8 @@ impl History {
 
     /// Living citizens of `civ`: everyone alive whose `Person.site` is one of its sites,
     /// travellers included (as `stats().per_civ` counts them). Counted as the sites' members
-    /// (all alive, all citizens of that site) plus living travellers on journeys; in plan 1
-    /// nobody else has a site.
+    /// (all alive, all citizens of that site, embodied or not — Ruling P2-C) plus living
+    /// travellers on journeys, held ones included.
     pub fn civ_population(&self, civ: CivId) -> u32 {
         let in_civ = |s: Option<SiteId>| s.and_then(|s| self.sites.get(&s)).is_some_and(|s| s.civ == civ);
         let members: u32 = self.sites.values().filter(|s| s.civ == civ).map(|s| s.members.len() as u32).sum();
@@ -296,7 +312,7 @@ impl History {
             .values()
             .flat_map(|j| j.people.iter())
             .filter_map(|p| self.people.get(p))
-            .filter(|p| p.alive() && matches!(p.location, Location::Journey(_)) && in_civ(p.site))
+            .filter(|p| p.alive() && matches!(p.abstract_location(), Location::Journey(_)) && in_civ(p.site))
             .count() as u32;
         members + travellers
     }
@@ -331,6 +347,13 @@ impl History {
             let id = PersonId(self.next_ids[0]);
             self.next_ids[0] += 1;
             self.people.insert(id, Person::newborn(id, sex, now, Some(m), Some(f), Some(sid), Location::AtSite(sid)));
+            // Born to an embodied mother: the child gets a body beside her.
+            if let Some(rc) = self.embodied_in(m) {
+                let p = self.people.get_mut(&id).unwrap();
+                p.location = Location::InRegion(rc);
+                p.home_location = Location::AtSite(sid);
+                self.emit_spawn_near(rc, id, m);
+            }
             self.sites.get_mut(&sid).unwrap().members.insert(id);
             for parent in [m, f] {
                 self.people.get_mut(&parent).unwrap().children.push(id);

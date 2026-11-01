@@ -76,7 +76,7 @@ const VOXEL_BODY_TICKS: usize = 30;
 /// history, on every target. Depends on the region size (journey leg times
 /// come from `REGION_BLOCKS`), so it is pinned at the test default of 64
 /// blocks only, and on `TICK_RATE`.
-const HISTORY_DIGEST: u32 = 0xD71F_E34C;
+const HISTORY_DIGEST: u32 = 0x01C7_478F;
 
 /// The value pinned for this build's chunk size: `at2` at 2-block chunks,
 /// `at16` at 16 (0 elsewhere; see [`pinned_size`]).

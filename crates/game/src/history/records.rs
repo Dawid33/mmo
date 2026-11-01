@@ -37,7 +37,8 @@ pub enum Location {
     Unplaced,
     AtSite(SiteId),
     Journey(JourneyId),
-    /// Unused until plan 2.
+    /// Embodied in a running (or stopping) region: a body there stands for them, and
+    /// [`Person::home_location`] keeps where they are in the abstract history.
     InRegion(crate::RegionCoords),
     /// An embark party that found nowhere to settle: it stays in `region` and takes no further part.
     Wandering(crate::RegionCoords),
@@ -58,6 +59,10 @@ pub struct Person {
     /// Citizenship.
     pub site: Option<SiteId>,
     pub location: Location,
+    /// While `location` is `InRegion`: what they are in the abstract history (`AtSite`,
+    /// `Journey`, `Wandering`), restored when the region parks or they leave it.
+    /// `Unplaced` otherwise.
+    pub home_location: Location,
     pub last_birth: Option<CalendarTick>,
 }
 
@@ -84,12 +89,21 @@ impl Person {
             children: Vec::new(),
             site,
             location,
+            home_location: Location::Unplaced,
             last_birth: None,
         }
     }
 
     pub fn alive(&self) -> bool {
         self.died.is_none()
+    }
+
+    /// Where they are in the abstract history: `home_location` while embodied, else `location`.
+    pub fn abstract_location(&self) -> Location {
+        match self.location {
+            Location::InRegion(_) => self.home_location,
+            l => l,
+        }
     }
 
     pub fn age_years(&self, now: CalendarTick) -> u32 {
@@ -139,6 +153,9 @@ pub struct Journey {
     pub arrivals: Vec<u64>,
     /// Index into `route` of the current region.
     pub leg: u32,
+    /// The running region the party is being played in: no abstract leg is queued while
+    /// it is set; the region's people walk it, and hand it back on a crossing or a park.
+    pub held_in: Option<crate::RegionCoords>,
 }
 
 pub fn person_name(id: PersonId) -> String {

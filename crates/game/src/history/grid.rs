@@ -20,6 +20,8 @@ pub struct SocietyGrid {
     step_cost: Vec<u32>,
     /// Per tile: 8-connected component id of `passable` tiles (meaningless where impassable).
     component: Vec<u32>,
+    /// Per tile: the world map's landing column (region-local blocks), if any.
+    landing: Vec<Option<[u32; 2]>>,
     world_id: u32,
 }
 
@@ -83,6 +85,7 @@ impl SocietyGrid {
             capacity.push(cap);
         }
         let component = label_components(&passable, map.width);
+        let landing = map.tiles.iter().map(|t| t.landing).collect();
         let bytes = bincode::serialize(map).expect("world map serialises");
         SocietyGrid {
             origin: map.origin,
@@ -92,6 +95,7 @@ impl SocietyGrid {
             passable,
             step_cost,
             component,
+            landing,
             world_id: crc32fast::hash(&bytes),
         }
     }
@@ -123,6 +127,12 @@ impl SocietyGrid {
     /// Two regions in different components have no route between them.
     pub fn component(&self, rc: RegionCoords) -> Option<u32> {
         self.index(rc).and_then(|i| self.passable[i].then(|| self.component[i]))
+    }
+
+    /// The region's landing column (region-local blocks, `TileSummary::landing`); `None`
+    /// off the grid or with no dry land.
+    pub fn landing(&self, rc: RegionCoords) -> Option<[u32; 2]> {
+        self.index(rc).and_then(|i| self.landing[i])
     }
 
     pub fn step_cost(&self, rc: RegionCoords) -> u32 {

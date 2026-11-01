@@ -47,6 +47,13 @@ pub fn biome_capacity_per_mille(biome: crate::Biome) -> u32 {
     }
 }
 
+/// Blocks either way around the landing column that caught-up site people spread over.
+pub const SPAWN_SPREAD_BLOCKS: u32 = 4;
+/// Per mille either way around a party's point on the edge that its members spread over.
+pub const EDGE_SPREAD_PER_MILLE: u32 = 20;
+/// Days a step that acts on people in a stopping region waits before it is tried again.
+pub const STOPPING_DEFER_DAYS: u64 = 1;
+
 /// Age at death by old age, in days: uniform in `[OLD_AGE_MIN_YEARS, OLD_AGE_MAX_YEARS]` years,
 /// drawn from the history's `seed`.
 pub fn death_age_days(seed: u64, person: PersonId, born: CalendarTick) -> u64 {

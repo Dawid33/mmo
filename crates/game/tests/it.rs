@@ -29,6 +29,7 @@ mod handoff_scan;
 mod handoff_schedule;
 mod handoff_state;
 mod history;
+mod history_handover;
 mod hash_restore;
 mod jump_arc;
 mod kinematic;

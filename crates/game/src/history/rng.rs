@@ -20,6 +20,10 @@ pub const SALT_EMBARK: u64 = 0x4857_0006;
 pub const SALT_PLACE: u64 = 0x4857_0007;
 /// Founder ages at bootstrap.
 pub const SALT_AGE: u64 = 0x4857_0008;
+/// Where a caught-up site person lands around the region's landing column.
+pub const SALT_SPAWN: u64 = 0x4857_0009;
+/// Where along the edge a travelling party walks into a running region.
+pub const SALT_EDGE: u64 = 0x4857_000A;
 
 /// A 64-bit hash of (time, subject, salt).
 pub fn roll(at: CalendarTick, subject: u64, salt: u64) -> u64 {
