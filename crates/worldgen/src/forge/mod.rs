@@ -114,6 +114,7 @@ impl Forged {
                 .collect(),
             lakes,
             spawn: [spawn.0, spawn.1],
+            edges: w.edges,
         }
     }
 }

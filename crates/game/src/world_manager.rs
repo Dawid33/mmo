@@ -392,10 +392,20 @@ impl<S: RegionSpawner> WorldManager<S> {
         }
     }
 
-    /// Install the world map; connecting clients receive it and Play checks
-    /// targets against it.
+    /// Install the world map; connecting clients receive it, Play checks
+    /// targets against it, and every region is bounded by its extent
+    /// (`RegionInput::SetMapExtent`): nothing crosses the world's outer seam.
     pub fn set_world_map(&mut self, map: WorldMap) {
+        let extent = Some(map.extent());
         self.world_map = Some(map);
+        let running: Vec<RegionCoords> = self.regions.keys().copied().collect();
+        for rc in running {
+            self.send_to_region(rc, RegionInput::SetMapExtent(extent));
+        }
+    }
+
+    fn map_extent(&self) -> Option<crate::MapExtent> {
+        self.world_map.as_ref().map(WorldMap::extent)
     }
 
     /// Play: move the client's player to the landing spot of `target`.
@@ -614,6 +624,17 @@ impl<S: RegionSpawner> WorldManager<S> {
             RegionOutput::Departures(list) => {
                 for (mut bundle, target) in list {
                     let client = bundle.client.as_ref().map(|(c, _)| *c);
+                    if crate::off_map(self.map_extent(), target) {
+                        // Regions hold bodies at the outer seam, so this is a
+                        // region that was not bounded: refuse the crossing and
+                        // hand the entity back to where it left, on its seam.
+                        log::error!("departure from {rc:?} into off-map {target:?} refused: returned");
+                        let t = &mut bundle.isometry.translation;
+                        t.x = t.x.clamp(0.0, crate::REGION_SIZE);
+                        t.z = t.z.clamp(0.0, crate::REGION_SIZE);
+                        self.send_to_region(rc, RegionInput::Event(GameEventKind::EntityArrived(bundle)));
+                        continue;
+                    }
                     bundle.isometry = crate::rebase_isometry(&bundle.isometry, rc, target);
                     // Arrivals ALWAYS wake the target (parked blob or gen).
                     self.ensure_running(target);
@@ -791,6 +812,10 @@ impl<S: RegionSpawner> WorldManager<S> {
             }
         };
         let input = self.spawner.spawn(rc, seed, self.region_out_send.clone());
+        // First in the region's queue, so it is bounded before its first tick.
+        if let Some(extent) = self.map_extent() {
+            let _ = input.send(RegionInput::SetMapExtent(Some(extent)));
+        }
         self.regions.insert(
             rc,
             RegionLink {

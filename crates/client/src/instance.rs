@@ -145,6 +145,10 @@ pub struct GameInstanceManager {
     server_game_send: Sender<ClientPacket>,
     server_game_recv: Receiver<ClientPacket>,
     world: Option<game::World>,
+    /// The finite world's extent, from the server's `WorldMap`: every
+    /// predicted region is bounded by it, as the server's are
+    /// (`Region::set_map_extent`). `None` = unbounded (procedural).
+    map_extent: Option<game::MapExtent>,
     buffer: Vec<GameEvent>,
     tick_rate: Arc<AtomicU64>,
     ready: bool,
@@ -574,6 +578,7 @@ impl GameInstanceManager {
             #[cfg(not(target_arch = "wasm32"))]
             connect_policy: crate::netcode::ConnectPolicy::default(),
             world: None,
+            map_extent: None,
             buffer: Vec::new(),
             tick_rate: Arc::new(AtomicU64::new(game::TICK_RATE)),
             ready: false,
@@ -908,7 +913,8 @@ impl GameInstanceManager {
                 recv,
             ))
             .unwrap();
-        let data = Region::new(raw_game_data, Some(send), id, Some(client_id));
+        let mut data = Region::new(raw_game_data, Some(send), id, Some(client_id));
+        data.set_map_extent(self.map_extent);
         if let Some(ref mut w) = self.world {
             w.load(&id, data);
         } else {
@@ -1495,6 +1501,12 @@ impl GameInstanceManager {
             }
             game::ServerPacket::WorldMap(map) => {
                 info!("[client] world map received: {}x{} tiles", map.width, map.height);
+                self.map_extent = Some(map.extent());
+                if let Some(w) = self.world.as_mut() {
+                    for region in w.regions.values_mut() {
+                        region.set_map_extent(self.map_extent);
+                    }
+                }
                 let _ = self
                     .client_event_send
                     .send(ClientUpdateEvent::WorldMap(Box::new(map)));

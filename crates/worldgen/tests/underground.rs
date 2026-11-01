@@ -162,6 +162,7 @@ fn cliff_world() -> ForgedWorld {
         rivers: vec![],
         lakes: vec![],
         spawn: SPAWN,
+        edges: [worldgen::forged::EdgeKind::Sea; 4],
     })
 }
 

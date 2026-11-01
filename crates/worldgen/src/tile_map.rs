@@ -12,7 +12,7 @@
 use game::movement::UNITS_PER_METER;
 use game::{RegionCoords, TileSummary, WorldMap, BLOCK_VOXELS, REGION_BLOCKS, REGION_SIZE};
 
-use crate::forged::{ForgedWorld, PointSample, OUTSIDE_HEIGHT_M};
+use crate::forged::{ForgedWorld, PointSample};
 use crate::pipeline::{SEA_LEVEL, SEA_TOP_BLOCK};
 
 /// Percentiles whose spread is a tile's `relief_m`.
@@ -75,7 +75,8 @@ pub fn build_world_map(world: &ForgedWorld) -> WorldMap {
 }
 
 /// One raster cell of the artifact lattice: inside the artifact, or a
-/// virtual open-ocean cell beyond its edge.
+/// virtual cell beyond its edge (ocean past a sea edge, the border's ground
+/// past a land edge).
 struct Cell {
     ix: i64,
     iz: i64,
@@ -86,8 +87,9 @@ struct Cell {
 }
 
 /// The summary of region tile `rc`: statistics over the artifact cells whose
-/// centres fall in the tile (cells beyond the artifact count as ocean at
-/// [`OUTSIDE_HEIGHT_M`]), rivers by any reach point inside the footprint, the
+/// centres fall in the tile (cells beyond the artifact count as the sampler
+/// extends the map, `ForgedWorld::extended_cell_height`: ocean at
+/// [`crate::forged::OUTSIDE_HEIGHT_M`] past a sea edge, the border cell past a land edge), rivers by any reach point inside the footprint, the
 /// most common surface rock, and the landing column — the tile centre's
 /// column or else the in-artifact cell centre nearest it (ties by z, then x)
 /// whose block column [`is_landing`].
@@ -109,7 +111,7 @@ pub fn summarize_tile(world: &ForgedWorld, rc: RegionCoords) -> TileSummary {
     let (xs, zs) = (range(tile_min[0], min[0]), range(tile_min[1], min[1]));
     let inside = |ix: i64, iz: i64| (0..n).contains(&ix) && (0..n).contains(&iz);
     let height = |ix: i64, iz: i64| {
-        if inside(ix, iz) { f64::from(a.height.get((iz * n + ix) as usize)) } else { OUTSIDE_HEIGHT_M }
+        if inside(ix, iz) { f64::from(a.height.get((iz * n + ix) as usize)) } else { world.extended_cell_height(ix, iz) }
     };
     let cells: Vec<Cell> = zs
         .flat_map(|iz| xs.clone().map(move |ix| (ix, iz)))

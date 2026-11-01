@@ -44,13 +44,23 @@ pub struct WorldMap {
 }
 
 impl WorldMap {
+    /// The regions the map covers.
+    pub fn extent(&self) -> MapExtent {
+        MapExtent { origin: self.origin, width: self.width, height: self.height }
+    }
+
+    /// Whether `rc` is one of the map's regions.
+    pub fn contains(&self, rc: RegionCoords) -> bool {
+        self.extent().contains(rc)
+    }
+
     /// The tile of `rc`, or `None` outside the map.
     pub fn tile(&self, rc: RegionCoords) -> Option<&TileSummary> {
-        let dx = i64::from(rc.x) - i64::from(self.origin.x);
-        let dz = i64::from(rc.z) - i64::from(self.origin.z);
-        if dx < 0 || dz < 0 || dx >= i64::from(self.width) || dz >= i64::from(self.height) {
+        if !self.contains(rc) {
             return None;
         }
+        let dx = i64::from(rc.x) - i64::from(self.origin.x);
+        let dz = i64::from(rc.z) - i64::from(self.origin.z);
         self.tiles.get((dz * i64::from(self.width) + dx) as usize)
     }
 
@@ -62,6 +72,32 @@ impl WorldMap {
             self.origin.z + (index / w) as i32,
         )
     }
+}
+
+/// The rectangle of regions a finite (forged) world covers: the playable
+/// world ends at its outer seam. Region sims get it from the manager
+/// (`RegionInput::SetMapExtent`) and the client from its `WorldMap`, so both
+/// sides hold bodies and walks at that seam alike (`Region::set_map_extent`).
+/// A world without one (procedural) is unbounded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MapExtent {
+    /// Min-x, min-z region.
+    pub origin: RegionCoords,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl MapExtent {
+    pub fn contains(&self, rc: RegionCoords) -> bool {
+        let dx = i64::from(rc.x) - i64::from(self.origin.x);
+        let dz = i64::from(rc.z) - i64::from(self.origin.z);
+        (0..i64::from(self.width)).contains(&dx) && (0..i64::from(self.height)).contains(&dz)
+    }
+}
+
+/// Whether `rc` lies outside `map` (never, with no map: an unbounded world).
+pub fn off_map(map: Option<MapExtent>, rc: RegionCoords) -> bool {
+    map.is_some_and(|m| !m.contains(rc))
 }
 
 /// Why the server refused a `ClientPacket::PlayRegion`.

@@ -12,8 +12,8 @@ use state_hash::StateHash;
 
 use crate::movement::{MoveKeys, PLAYER_CAPSULE_HALF_HEIGHT, PLAYER_CAPSULE_RADIUS, STEP_HEIGHT, UNITS_PER_METER};
 use crate::{
-    find_path, nearest_standable, standable, ClientId, RegionCoords, Rollback, TilePos, TileSource, BLOCK_VOXELS,
-    MAX_PATH_NODES, REGION_BLOCKS, TICK_RATE,
+    find_path, nearest_standable, off_map, standable, ClientId, MapExtent, RegionCoords, Rollback, TilePos, TileSource,
+    BLOCK_VOXELS, MAX_PATH_NODES, REGION_BLOCKS, TICK_RATE,
 };
 
 /// How a client plays: the commander camera or one walking body.
@@ -124,8 +124,10 @@ impl Rollback {
     /// [`MAX_GOAL_REGION_STEP`] regions away (Chebyshev), or there is no
     /// path. A same-region goal is walked to `nearest_standable(goal.column,
     /// goal.y)`; a goal elsewhere to [`edge_toward`]'s edge tile, then out
-    /// along [`Walker::exit`]. Replaces any walk in progress.
-    pub fn move_to_safe(&mut self, client: ClientId, goal: Goal, here: RegionCoords) -> bool {
+    /// along [`Walker::exit`] — unless the goal's region is off `map` (the
+    /// world's outer seam): then the walk ends on that edge tile, the last
+    /// one inside the world. Replaces any walk in progress.
+    pub fn move_to_safe(&mut self, client: ClientId, goal: Goal, here: RegionCoords, map: Option<MapExtent>) -> bool {
         if self.data.clients.get(&client).map(|c| c.mode) != Some(PlayMode::Adventure) {
             return false;
         }
@@ -133,7 +135,7 @@ impl Rollback {
         let Some(key) = self.data.player_entites.get(&client).copied() else { return false };
         let Some(feet) = self.body_feet(key) else { return false };
         let Some(from) = current_tile(self, feet) else { return false };
-        let Some((path, exit)) = plan_walk(self, from, &goal, here) else { return false };
+        let Some((path, exit)) = plan_walk(self, from, &goal, here, map) else { return false };
         self.data.ecs.walker.set_safe(key, Some(Walker::new(goal, path, exit)));
         true
     }
@@ -142,7 +144,7 @@ impl Rollback {
     /// steer: passes reached waypoints, removes the walk on arrival, and
     /// handles a stuck body (re-plan once, then give up). Every change goes
     /// through `walker.set_safe`.
-    pub fn tick_walkers_safe(&mut self, here: RegionCoords) {
+    pub fn tick_walkers_safe(&mut self, here: RegionCoords, map: Option<MapExtent>) {
         let walking: Vec<crate::EntityKey> = self
             .data
             .player_entites
@@ -184,7 +186,8 @@ impl Rollback {
                 // Re-plan once from where the body stands. With no new
                 // path the old one is kept: a body still stuck after
                 // another STUCK_TICKS gives up.
-                if let Some((path, exit)) = current_tile(self, feet).and_then(|from| plan_walk(self, from, &w.goal, here))
+                if let Some((path, exit)) =
+                    current_tile(self, feet).and_then(|from| plan_walk(self, from, &w.goal, here, map))
                 {
                     w.next = Walker::first_next(&path);
                     w.path = path;
@@ -205,12 +208,12 @@ impl Rollback {
     /// left, so it is always planned afresh from the body's tile: to the goal
     /// when it lies in `here`, else to the edge facing it. The walk is dropped
     /// when the goal is now too far, or unreachable. No walker: no change.
-    pub fn resume_walker_safe(&mut self, e: crate::EntityKey, here: RegionCoords) {
+    pub fn resume_walker_safe(&mut self, e: crate::EntityKey, here: RegionCoords, map: Option<MapExtent>) {
         let Some(old) = self.data.ecs.walker.try_get(e).clone() else { return };
         let plan = self
             .body_feet(e)
             .and_then(|feet| current_tile(self, feet))
-            .and_then(|from| plan_walk(self, from, &old.goal, here));
+            .and_then(|from| plan_walk(self, from, &old.goal, here, map));
         let new = plan.map(|(path, exit)| Walker::new(old.goal, path, exit));
         self.data.ecs.walker.set_safe(e, new);
     }
@@ -332,18 +335,21 @@ fn region_step(goal: &Goal, here: RegionCoords) -> Option<[i32; 2]> {
 }
 
 /// The path (and exit step) from `from` toward `goal`, as `move_to_safe`
-/// plans it.
+/// plans it. A goal in a region off `map` gets no exit: nothing walks
+/// across the world's outer seam.
 fn plan_walk(
     src: &impl TileSource,
     from: TilePos,
     goal: &Goal,
     here: RegionCoords,
+    map: Option<MapExtent>,
 ) -> Option<(Vec<TilePos>, Option<[i8; 2]>)> {
     let d = region_step(goal, here)?;
     let (to, exit) = if d == [0, 0] {
         (nearest_standable(src, goal.column, goal.y)?, None)
     } else {
-        (edge_toward(src, from, goal, here)?, Some([d[0].signum() as i8, d[1].signum() as i8]))
+        let exit = (!off_map(map, goal.region)).then_some([d[0].signum() as i8, d[1].signum() as i8]);
+        (edge_toward(src, from, goal, here)?, exit)
     };
     find_path(src, from, to, MAX_PATH_NODES).map(|p| (p, exit))
 }

@@ -43,8 +43,9 @@ const CONTINENT_CENTRE_GAP: f64 = 0.6;
 /// Inland layout: the inland sea's centre lies within this of the middle.
 const INLAND_SEA_OFFSET: f64 = 0.3;
 
-/// What lies past one edge of the map.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// What lies past one edge of the map. Stored in the world file
+/// (`WorldArtifact::edges`), so its variants are part of the format.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EdgeKind {
     /// Sea: an ocean margin keeps the border drowned.
     Sea,

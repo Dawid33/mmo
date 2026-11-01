@@ -24,6 +24,7 @@ use serde::{Deserialize, Serialize};
 use game::BlockId;
 
 use crate::forge::geology::rock_index;
+pub use crate::forge::world::EdgeKind;
 use crate::material::Materials;
 use crate::noise::OctaveNoise;
 use crate::pipeline::{ColumnProfile, ProfileGrid, SEA_LEVEL, SEA_TOP_BLOCK};
@@ -31,8 +32,8 @@ use crate::pipeline::{ColumnProfile, ProfileGrid, SEA_LEVEL, SEA_TOP_BLOCK};
 /// Environment variable naming the world file to serve.
 pub const WORLD_FILE_ENV: &str = "VOXEL_WORLD_FILE";
 /// v3: quantised `u16` rasters (`QRaster`), sparse lakes, row-delta + zstd,
-/// coast distance recomputed on load.
-pub const ARTIFACT_VERSION: u32 = 3;
+/// coast distance recomputed on load. v4: `edges` (what lies past each side).
+pub const ARTIFACT_VERSION: u32 = 4;
 /// zstd level of the world file body (offline writer; reading cost is level-independent).
 #[cfg(not(target_arch = "wasm32"))]
 const ZSTD_LEVEL: i32 = 19;
@@ -47,7 +48,9 @@ const MAGIC: &[u8; 4] = b"VXWF";
 /// Engine column the artifact's spawn point lands on: block (8, 8) of region
 /// (0, 0), where players are created (see `examples/seed_scan.rs`).
 const ENGINE_SPAWN_M: f64 = 8.5;
-/// Ground height outside the artifact (m relative to sea): open ocean.
+/// Ground height past a SEA edge of the artifact (m relative to sea): open
+/// ocean. Past a LAND edge the edge's own ground continues instead
+/// ([`ForgedWorld::sample`]).
 pub const OUTSIDE_HEIGHT_M: f64 = -90.0;
 
 /// Detail noise added to the interpolated ground: first octave 2^5 = 32 m,
@@ -239,6 +242,11 @@ pub struct WorldArtifact {
     pub lakes: Vec<Lake>,
     /// Where players start, artifact meters. Maps to engine block (8, 8) of region (0, 0).
     pub spawn: [f64; 2],
+    /// What lies past each side, in `forge::world::EDGE_NAMES` order: north
+    /// (z = 0), east (x = max), south (z = max), west (x = 0). Past a land
+    /// edge the sampler continues the edge's ground; past a sea edge it is
+    /// ocean.
+    pub edges: [EdgeKind; 4],
 }
 
 /// The format version in a world file's 8-byte header, without loading the
@@ -614,12 +622,38 @@ impl ForgedWorld {
         column.iter().rev().find(|&&(top, _)| f64::from(top) > s).or(column.first()).map(|&(_, rock)| rock)
     }
 
-    /// Catmull-Rom interpolation of the height raster (artifact meters).
-    fn bicubic(&self, ax: f64, az: f64) -> f64 {
+    /// Where artifact point `(ax, az)` lies: inside, past a land edge (the
+    /// point clamped onto the map's border, whose ground continues outward),
+    /// or past a sea edge. A point past two edges (a corner) is sea if
+    /// either is.
+    fn place(&self, ax: f64, az: f64) -> Place {
         let size = self.artifact.size_m;
-        if ax < 0.0 || az < 0.0 || ax >= size || az >= size {
+        // `edges` order: north (z < 0), east (x >= size), south (z >= size), west (x < 0).
+        let past = [az < 0.0, ax >= size, az >= size, ax < 0.0];
+        if !past.contains(&true) {
+            return Place::Inside;
+        }
+        if (0..4).any(|e| past[e] && self.artifact.edges[e] == EdgeKind::Sea) {
+            return Place::Sea;
+        }
+        Place::Land(ax.clamp(0.0, size), az.clamp(0.0, size))
+    }
+
+    /// Height of raster cell `(ix, iz)` as the sampler extends the map: the
+    /// cell itself inside, the nearest border cell past a land edge, and
+    /// [`OUTSIDE_HEIGHT_M`] past a sea edge (`place`'s rules, by cell).
+    pub fn extended_cell_height(&self, ix: i64, iz: i64) -> f64 {
+        let n = i64::from(self.artifact.n);
+        let past = [iz < 0, ix >= n, iz >= n, ix < 0];
+        if (0..4).any(|e| past[e] && self.artifact.edges[e] == EdgeKind::Sea) {
             return OUTSIDE_HEIGHT_M;
         }
+        self.cell(ix, iz)
+    }
+
+    /// Catmull-Rom interpolation of the height raster (artifact meters),
+    /// edge-clamped: callers decide what lies outside (`place`).
+    fn bicubic(&self, ax: f64, az: f64) -> f64 {
         fn cubic(p: [f64; 4], t: f64) -> f64 {
             p[1] + 0.5
                 * t
@@ -643,8 +677,16 @@ impl ForgedWorld {
     }
 
     /// Smooth ground before water features: interpolated raster + detail
-    /// noise. Meters relative to sea; artifact coordinates.
+    /// noise. Meters relative to sea; artifact coordinates. Past a sea edge
+    /// it is ocean at [`OUTSIDE_HEIGHT_M`]; past a land edge, the ground of
+    /// the border point it clamps to (constant outward: no cliff, and the
+    /// far view shows land continuing).
     fn ground(&self, ax: f64, az: f64) -> f64 {
+        let (ax, az) = match self.place(ax, az) {
+            Place::Inside => (ax, az),
+            Place::Land(cx, cz) => (cx, cz),
+            Place::Sea => return OUTSIDE_HEIGHT_M,
+        };
         let g = self.bicubic(ax, az);
         let fade = ((g - DETAIL_FADE_M.0) / (DETAIL_FADE_M.1 - DETAIL_FADE_M.0)).clamp(0.0, 1.0);
         if fade <= 0.0 {
@@ -746,8 +788,13 @@ impl ForgedWorld {
     }
 
     /// Exact (un-latticed) sample at one engine-world point: map renderers, tests.
+    /// Outside the artifact there are no rivers or lakes: ocean past a sea
+    /// edge, the border's ground continued past a land edge.
     pub fn sample(&self, x: f64, z: f64) -> PointSample {
         let (ax, az) = self.to_artifact(x, z);
+        if self.place(ax, az) != Place::Inside {
+            return PointSample { ground_y: SEA_LEVEL + self.ground(ax, az), water_y: None };
+        }
         let (g, water) = self.refine(ax, az, self.ground(ax, az), self.bucket_segments(ax, az), true);
         PointSample { ground_y: SEA_LEVEL + g, water_y: water.map(|w| SEA_LEVEL + w) }
     }
@@ -810,6 +857,16 @@ impl ForgedWorld {
     }
 }
 
+/// Where an artifact point lies relative to the map (`ForgedWorld::place`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Place {
+    Inside,
+    /// Past land edges only: the point clamped onto the border (artifact m).
+    Land(f64, f64),
+    /// Past a sea edge.
+    Sea,
+}
+
 /// One window of a forged world: latticed ground + the rivers crossing it.
 pub struct ForgedPatch<'a> {
     world: &'a ForgedWorld,
@@ -835,6 +892,10 @@ impl crate::Patch for ForgedPatch<'_> {
     fn sample(&self, x: f64, z: f64) -> (ColumnProfile, i32) {
         let prof = self.grid.profile_at(x, z);
         let (ax, az) = self.world.to_artifact(x, z);
+        if self.world.place(ax, az) != Place::Inside {
+            // No rivers or lakes off the map: they stop at its edge.
+            return (ColumnProfile::from_surface(prof.surface_y()), SEA_TOP_BLOCK);
+        }
         let segments: &[u32] = if self.cells.is_empty() {
             &[]
         } else {

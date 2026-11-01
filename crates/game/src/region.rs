@@ -127,6 +127,11 @@ pub struct Region {
     /// never read (see the plan's read-after-progress invariant).
     pending_departures: Vec<(EntityBundle, RegionCoords)>,
     pending_ghosts: Vec<(GhostData, RegionCoords)>,
+    /// The finite world's regions, when it has an edge: nothing crosses
+    /// out of it (walks stop at the edge tile, bodies are held at the outer
+    /// seam). Not sim state — set by whoever runs the region (the manager
+    /// on the server, the client from its `WorldMap`), the same on both.
+    map_extent: Option<crate::MapExtent>,
     /// Wall-time attribution for Tick executions, drained by the client's
     /// budget reporter (native only — see `RegionTickPerf`).
     #[cfg(not(target_arch = "wasm32"))]
@@ -173,9 +178,20 @@ impl Region {
             base_event_id,
             pending_departures: Vec::new(),
             pending_ghosts: Vec::new(),
+            map_extent: None,
             #[cfg(not(target_arch = "wasm32"))]
             tick_perf: RegionTickPerf::default(),
         }
+    }
+
+    /// Bounds this region's sim to `extent` (`None` = unbounded): see
+    /// [`crate::MapExtent`]. Takes effect from the next event.
+    pub fn set_map_extent(&mut self, extent: Option<crate::MapExtent>) {
+        self.map_extent = extent;
+    }
+
+    pub fn map_extent(&self) -> Option<crate::MapExtent> {
+        self.map_extent
     }
 
     /// Check if event from network matches client event history. rollback the
@@ -481,7 +497,7 @@ impl Region {
                 self.data.tick_slimes_safe(self.id);
                 // Adventurers' walks advance before the camera controller
                 // steers their bodies from them.
-                self.data.tick_walkers_safe(self.id);
+                self.data.tick_walkers_safe(self.id, self.map_extent);
                 for c in self.controllers.iter_mut() {
                     let data = self.data.as_refs_mut();
                     c.on_tick(data.data);
@@ -539,7 +555,7 @@ impl Region {
                 }
                 #[cfg(not(target_arch = "wasm32"))]
                 let input_done = Instant::now();
-                let (departures, ghosts) = self.data.scan_boundaries(self.id);
+                let (departures, ghosts) = self.data.scan_boundaries(self.id, self.map_extent);
                 self.pending_departures = departures;
                 self.pending_ghosts = ghosts;
                 self.data.expire_ghosts();
@@ -590,7 +606,7 @@ impl Region {
             GameEventKind::EntityArrived(bundle) => {
                 // A walk in progress carries over, re-planned in this region.
                 if let Some(e) = self.data.apply_arrival(bundle) {
-                    self.data.resume_walker_safe(e, self.id);
+                    self.data.resume_walker_safe(e, self.id, self.map_extent);
                 }
             }
             GameEventKind::GhostUpdate(data) => {
@@ -613,7 +629,7 @@ impl Region {
             }
             // A walk is planned against this region's identity.
             GameEventKind::Order(client_id, crate::Order::MoveTo(goal)) => {
-                self.data.move_to_safe(client_id, goal, self.id);
+                self.data.move_to_safe(client_id, goal, self.id, self.map_extent);
             }
             GameEventKind::Order(client_id, order) => {
                 self.data.apply_order_safe(client_id, order);

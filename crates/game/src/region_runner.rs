@@ -45,6 +45,9 @@ pub enum RegionInput {
     /// An LOD build needs read-only terrain; replied with
     /// `RegionOutput::Terrain(client, ...)`. Does not affect sim state.
     RequestTerrain(ClientId),
+    /// The finite world's extent (`Region::set_map_extent`): the manager
+    /// sends it right after spawning, before any tick, when it has a map.
+    SetMapExtent(Option<crate::MapExtent>),
     /// Graceful stop; replied with `RegionOutput::Stopped(state)`.
     Shutdown,
 }
@@ -219,6 +222,7 @@ impl RegionRunner {
                     RegionOutput::Terrain(client_id, self.terrain()),
                 ));
             }
+            RegionInput::SetMapExtent(extent) => self.region.set_map_extent(extent),
             RegionInput::Shutdown => {
                 // Input must not be lost to a park.
                 for (kind, _) in std::mem::take(&mut self.held) {

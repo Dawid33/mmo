@@ -77,6 +77,7 @@ pub fn synthetic() -> WorldArtifact {
         rivers: vec![RiverReach { order: 1, discharge_m2: 2.0e6, width_m: RIVER_WIDTH_M, points }],
         lakes: vec![Lake { level: LAKE_LEVEL, area_m2: 36.0 * 256.0, max_depth: 5.0, outlet: [480.0, 200.0], cells: lake_cells }],
         spawn: SPAWN,
+        edges: [worldgen::forged::EdgeKind::Sea; 4],
     }
 }
 

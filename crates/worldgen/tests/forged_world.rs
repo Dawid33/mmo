@@ -5,7 +5,7 @@
 
 use game::{BlockId, BlockPos, Column, ColumnCoords, ReadVol, RegionCoords};
 use worldgen::forged::{
-    delta_rows, undelta_rows, ArtifactError, ForgedWorld, QRaster, WorldArtifact, ARTIFACT_VERSION, HEIGHT_STEP_M,
+    delta_rows, undelta_rows, ArtifactError, EdgeKind, ForgedWorld, QRaster, WorldArtifact, ARTIFACT_VERSION, HEIGHT_STEP_M,
 };
 
 mod common;
@@ -36,6 +36,57 @@ fn spawn_maps_to_the_engine_spawn_column_and_the_rim_is_ocean() {
     let outside = world.sample(50_000.0, -50_000.0);
     assert!(outside.ground_y < SEA_LEVEL - 50.0);
     assert_eq!(outside.water_y, None);
+}
+
+/// The synthetic world's east side is its high edge (the plain rising out
+/// of the western sea): declared land there, the ground runs on past it.
+fn east_land_edge() -> ForgedWorld {
+    let mut artifact = synthetic();
+    artifact.edges = [EdgeKind::Sea, EdgeKind::Land, EdgeKind::Sea, EdgeKind::Sea];
+    ForgedWorld::new(artifact)
+}
+
+#[test]
+fn outside_land_edge_continues_land() {
+    let world = east_land_edge();
+    let size = N as f64 * CELL_M;
+    for az in [100.0, 333.0, RIVER_Z, 900.0] {
+        let (ex, ez) = engine(size, az);
+        let edge = world.sample(ex, ez);
+        // The border's own ground: the plain's height at the map edge.
+        assert!(
+            (edge.ground_y - (SEA_LEVEL + plain(size))).abs() < 4.0,
+            "edge ground {} vs plain {} at az={az}",
+            edge.ground_y,
+            SEA_LEVEL + plain(size)
+        );
+        for past in [1.0, 64.0, 500.0, 5_000.0] {
+            let out = world.sample(ex + past, ez);
+            assert_eq!(out.ground_y, edge.ground_y, "{past} m past the land edge at az={az}: the edge height");
+            assert_eq!(out.water_y, None, "no rivers or lakes past the edge");
+        }
+        // Continuous across the edge: no cliff.
+        let inside = world.sample(ex - 0.25, ez);
+        assert!((inside.ground_y - edge.ground_y).abs() < 0.5, "step at the edge: {} vs {}", inside.ground_y, edge.ground_y);
+    }
+}
+
+#[test]
+fn outside_sea_edge_is_ocean() {
+    let size = N as f64 * CELL_M;
+    let ocean = SEA_LEVEL + worldgen::forged::OUTSIDE_HEIGHT_M;
+    // All edges sea (the default): ocean past the east edge too.
+    let world = ForgedWorld::new(synthetic());
+    let (ex, ez) = engine(size + 500.0, 333.0);
+    assert_eq!(world.sample(ex, ez), worldgen::forged::PointSample { ground_y: ocean, water_y: None });
+    // A land east edge does not carry the land round a sea corner: past
+    // both the east (land) and the north (sea) edge it is ocean, and so is
+    // the west (sea) side.
+    let world = east_land_edge();
+    let (cx, cz) = engine(size + 500.0, -500.0);
+    assert_eq!(world.sample(cx, cz).ground_y, ocean);
+    let (wx, wz) = engine(-500.0, 333.0);
+    assert_eq!(world.sample(wx, wz).ground_y, ocean);
 }
 
 #[test]

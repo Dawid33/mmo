@@ -185,6 +185,7 @@ mod tests {
             rivers: vec![],
             lakes: vec![],
             spawn: [8.5, 8.5],
+            edges: [crate::forged::EdgeKind::Sea; 4],
         })
     }
 

@@ -310,6 +310,54 @@ mod manager {
         assert!(h.drain().iter().any(|(_, p)| matches!(p, ServerPacket::PlayerRegion(Some(rc), 0) if *rc == SPAWN_REGION)));
     }
 
+    fn extent_of(h: &mut Harness, rc: RegionCoords) -> Option<game::MapExtent> {
+        let mut got = None;
+        h.manager.spawner_mut().with_region(rc, |r| got = r.map_extent());
+        got
+    }
+
+    #[test]
+    fn regions_are_bounded_by_the_world_map() {
+        let want = Some(map().extent());
+        assert!(map().contains(RegionCoords::new(1, 1)) && !map().contains(RegionCoords::new(2, 0)));
+        // Already running when the map is installed.
+        let mut h = harness();
+        h.event(ServerEvent::ClientConnected(0), 0);
+        h.drain();
+        assert_eq!(extent_of(&mut h, SPAWN_REGION), None, "no map: unbounded");
+        h.manager.set_world_map(map());
+        h.settle(0);
+        assert_eq!(extent_of(&mut h, SPAWN_REGION), want);
+        // Woken after it.
+        let target = RegionCoords::new(1, 0);
+        h.play(target, 1);
+        assert_eq!(extent_of(&mut h, target), want);
+    }
+
+    #[test]
+    fn departure_off_the_map_is_returned() {
+        let mut h = with_map();
+        let target = RegionCoords::new(1, 0); // its east neighbour (2, 0) is off the map
+        h.play(target, 1);
+        h.drain();
+        // A region that was never bounded walks its player out east.
+        h.manager.spawner_mut().with_region(target, |r| {
+            r.set_map_extent(None);
+            r.with_data(|d| {
+                let e = *d.player_entites.get(&0).unwrap();
+                let handle = *d.ecs.rigidbody.get(e);
+                let mut pose = *d.physics.bodies.get(handle).unwrap().position();
+                pose.translation.x = game::REGION_SIZE + 3.0 * game::FLIP_HYSTERESIS;
+                d.set_body_pose_safe(e, pose);
+            });
+        });
+        h.manager.spawner_mut().tick_all();
+        h.settle(2);
+        assert!(!h.manager.running_regions().contains(&RegionCoords::new(2, 0)), "no region off the map wakes");
+        assert_eq!(players_in(&mut h, target), 1, "the player is handed back");
+        assert!(!h.drain().iter().any(|(_, p)| matches!(p, ServerPacket::PlayerRegion(Some(rc), 0) if *rc != target)));
+    }
+
     #[test]
     fn double_play_is_refused() {
         let mut h = with_map();

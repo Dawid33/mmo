@@ -1529,9 +1529,14 @@ impl Rollback {
     /// Post-step boundary/margin scan. Iterates the kind component in key
     /// order (deterministic); terrain (kindless) and ghosts are excluded.
     /// Returns `(departures, ghost updates)` with ABSOLUTE target coords.
+    ///
+    /// With a `map`, a body past a side whose neighbour is off the map (the
+    /// world's outer seam) is put back on the seam instead of leaving:
+    /// nothing hands off out of a finite world.
     pub fn scan_boundaries(
         &mut self,
         region: crate::RegionCoords,
+        map: Option<crate::MapExtent>,
     ) -> (
         Vec<(crate::EntityBundle, crate::RegionCoords)>,
         Vec<(crate::GhostData, crate::RegionCoords)>,
@@ -1542,6 +1547,10 @@ impl Rollback {
         // immutable borrows of physics/ecs don't collide with extraction.
         let mut leavers: Vec<(EntityKey, crate::RegionCoords)> = Vec::new();
         let mut ghosts: Vec<(crate::GhostData, crate::RegionCoords)> = Vec::new();
+        let mut held: Vec<(EntityKey, Pose)> = Vec::new();
+        // Whether the neighbour at offset (dx, dz) is off the map: a body
+        // past that side is held on it.
+        let closed = |dx: i32, dz: i32| crate::off_map(map, crate::RegionCoords::new(region.x + dx, region.z + dz));
         for (key, kind) in self.data.ecs.kind.iter() {
             let Some(kind) = kind else { continue };
             if ghost_keys.contains(&key) {
@@ -1549,7 +1558,23 @@ impl Rollback {
             }
             let Some(handle) = *self.data.ecs.rigidbody.try_get(key) else { continue };
             let Some(body) = self.data.physics.bodies.get(handle) else { continue };
-            let t = body.translation();
+            let mut t = body.translation();
+            let size = crate::REGION_SIZE;
+            let hold = |v: f32, lo_closed: bool, hi_closed: bool| {
+                if v < 0.0 && lo_closed {
+                    0.0
+                } else if v > size && hi_closed {
+                    size
+                } else {
+                    v
+                }
+            };
+            let (hx, hz) = (hold(t.x, closed(-1, 0), closed(1, 0)), hold(t.z, closed(0, -1), closed(0, 1)));
+            if (hx, hz) != (t.x, t.z) {
+                t.x = hx;
+                t.z = hz;
+                held.push((key, Pose::from_parts(t, body.position().rotation)));
+            }
             if let Some((dx, dz)) = crate::departure_offset(t.x, t.z) {
                 leavers.push((key, crate::RegionCoords::new(region.x + dx, region.z + dz)));
             } else {
@@ -1568,7 +1593,10 @@ impl Rollback {
                 }
             }
         }
-        // Mutating pass: extraction is undo-tracked, one per leaver.
+        // Mutating pass: holds and extractions are undo-tracked.
+        for (key, pose) in held {
+            self.set_body_pose_safe(key, pose);
+        }
         let mut departures = Vec::new();
         for (key, target) in leavers {
             departures.push((self.extract_entity_safe(key, region), target));

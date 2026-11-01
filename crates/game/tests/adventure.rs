@@ -293,7 +293,7 @@ fn move_to_refused_in_fortress_mode() {
     let (mut region, e) = region_with_player();
     let before = state_hash(region.data());
     let mut accepted = true;
-    region.with_data(|d| accepted = d.move_to_safe(CLIENT, here_goal([20, 20], None), RegionCoords::new(0, 0)));
+    region.with_data(|d| accepted = d.move_to_safe(CLIENT, here_goal([20, 20], None), RegionCoords::new(0, 0), None));
     assert!(!accepted);
     assert!(walker(&region, e).is_none());
     assert_eq!(before, state_hash(region.data()));
@@ -307,7 +307,7 @@ fn move_to_unreachable_changes_nothing() {
     place(&mut region, ring.flat_map(|(dx, dz)| [1, 2].map(|y| [20 + dx, y, 20 + dz])));
     let before = state_hash(region.data());
     let mut accepted = true;
-    region.with_data(|d| accepted = d.move_to_safe(CLIENT, here_goal([20, 20], None), RegionCoords::new(0, 0)));
+    region.with_data(|d| accepted = d.move_to_safe(CLIENT, here_goal([20, 20], None), RegionCoords::new(0, 0), None));
     assert!(!accepted, "the enclosed goal has no path");
     assert!(walker(&region, e).is_none());
     assert_eq!(before, state_hash(region.data()));
@@ -318,7 +318,7 @@ fn move_to_refuses_goal_two_regions_away() {
     let (mut region, e) = adventure_at([4, 1, 4]);
     let mut accepted = true;
     let goal = Goal { region: RegionCoords::new(2, 0), column: [4, 4], y: None };
-    region.with_data(|d| accepted = d.move_to_safe(CLIENT, goal, RegionCoords::new(0, 0)));
+    region.with_data(|d| accepted = d.move_to_safe(CLIENT, goal, RegionCoords::new(0, 0), None));
     assert!(!accepted);
     assert!(walker(&region, e).is_none());
 }
@@ -334,7 +334,7 @@ fn extreme_untrusted_coordinates_are_refused_without_panic() {
             Goal { region: RegionCoords::new(i32::MIN, i32::MAX), column: [5, 5], y: None },
         ] {
             let mut accepted = true;
-            region.with_data(|d| accepted = d.move_to_safe(CLIENT, goal, RegionCoords::new(0, 0)));
+            region.with_data(|d| accepted = d.move_to_safe(CLIENT, goal, RegionCoords::new(0, 0), None));
             assert!(!accepted, "{goal:?}");
         }
         let order = Order::SetMode { mode: PlayMode::Adventure, at: Some([v, 1, 5]) };
@@ -349,8 +349,8 @@ fn extreme_untrusted_coordinates_are_refused_without_panic() {
     assert!(walker(&region, e).is_none());
     // An in-region column with an extreme level is clamped, not a panic.
     region.with_data(|d| {
-        d.move_to_safe(CLIENT, here_goal([6, 6], Some(i32::MAX)), RegionCoords::new(0, 0));
-        d.move_to_safe(CLIENT, here_goal([6, 6], Some(i32::MIN)), RegionCoords::new(0, 0));
+        d.move_to_safe(CLIENT, here_goal([6, 6], Some(i32::MAX)), RegionCoords::new(0, 0), None);
+        d.move_to_safe(CLIENT, here_goal([6, 6], Some(i32::MIN)), RegionCoords::new(0, 0), None);
     });
 }
 
@@ -572,4 +572,102 @@ fn feet_of_body(region: &Region, e: EntityKey) -> Vector {
     let data = region.data();
     let handle = data.ecs.rigidbody.try_get(e).unwrap();
     feet_of(data.physics.bodies.get(handle).unwrap().translation())
+}
+
+// --- The world's outer seam -------------------------------------------------
+
+/// The world is region (0, 0) alone: every side is its outer seam.
+fn one_region_world() -> game::MapExtent {
+    game::MapExtent { origin: RegionCoords::new(0, 0), width: 1, height: 1 }
+}
+
+/// Region (0, 0) floored edge to edge, bounded by `extent`, its player in
+/// Adventure on [`TILE`].
+fn floored_adventurer(extent: Option<game::MapExtent>) -> (Region, EntityKey) {
+    let (send, _recv) = crossbeam::channel::unbounded();
+    let mut region = Region::new(Rollback::new(Some(send.clone())), Some(send), RegionCoords::new(0, 0), None);
+    region.set_map_extent(extent);
+    let size = game::REGION_SIZE;
+    region.with_data(|r| r.seed_terrain_genesis(floor_chunks(0.0..size, 0.0..size, 16)));
+    region.handle_event(GameEventKind::CreateClient(CLIENT)).unwrap();
+    region.forget_last_event();
+    let e = *region.data().player_entites.get(&CLIENT).unwrap();
+    region
+        .handle_event(GameEventKind::Order(CLIENT, Order::SetMode { mode: PlayMode::Adventure, at: Some(TILE) }))
+        .unwrap();
+    region.forget_last_event();
+    for _ in 0..5 {
+        tick(&mut region);
+    }
+    (region, e)
+}
+
+/// Ticks `n` times; the departures the region's boundary scan produced.
+fn departures_over(region: &mut Region, n: u32) -> usize {
+    (0..n)
+        .map(|_| {
+            tick(region);
+            region.take_transfers().0.len()
+        })
+        .sum()
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn walker_never_leaves_the_map() {
+    let n = REGION_BLOCKS as i32;
+    let goal = Goal { region: RegionCoords::new(1, 0), column: [5, TILE[2]], y: None };
+    let (mut region, e) = floored_adventurer(Some(one_region_world()));
+    move_to(&mut region, goal);
+    let w = walker(&region, e).expect("MoveTo off the map still walks to the edge");
+    assert_eq!(w.exit, None, "no exit across the outer seam");
+    assert_eq!(w.path.last(), Some(&[n - 1, 1, TILE[2]]), "the last tile inside the map");
+    let mut departed = 0;
+    for _ in 0..walk_budget((n - TILE[0]) as f32) {
+        tick(&mut region);
+        departed += region.take_transfers().0.len();
+        if walker(&region, e).is_none() {
+            break;
+        }
+    }
+    assert!(walker(&region, e).is_none(), "the walk ends at the edge, body on {:?}", body_tile(&region, e));
+    departed += departures_over(&mut region, 20);
+    assert_eq!(departed, 0, "nothing hands off out of the world");
+    assert_eq!(body_tile(&region, e), [n - 1, 1, TILE[2]], "the walk ends on the last tile inside the map");
+
+    // Unbounded (procedural), the same order walks out across the seam.
+    let (mut region, e) = floored_adventurer(None);
+    move_to(&mut region, goal);
+    assert_eq!(walker(&region, e).and_then(|w| w.exit), Some([1, 0]));
+    assert!(departures_over(&mut region, walk_budget((n - TILE[0]) as f32 + 2.0)) > 0, "the walker leaves the region");
+}
+
+#[test]
+fn body_is_held_at_the_outer_seam() {
+    let size = game::REGION_SIZE;
+    let push_out = |region: &mut Region, e: EntityKey| {
+        region.with_data(|d| {
+            let handle = d.ecs.rigidbody.try_get(e).unwrap();
+            let mut pose = *d.physics.bodies.get(handle).unwrap().position();
+            pose.translation.x = size + 3.0 * game::FLIP_HYSTERESIS;
+            d.set_body_pose_safe(e, pose);
+        });
+    };
+    let (mut region, e) = floored_adventurer(Some(one_region_world()));
+    push_out(&mut region, e);
+    let before = state_hash(region.data());
+    region.handle_event(GameEventKind::Tick).unwrap();
+    assert!(region.take_transfers().0.is_empty(), "a body past the outer seam must not depart");
+    let x = feet_of_body(&region, e).x;
+    assert!(x <= size, "the body is put back on the seam, x = {x}");
+    assert!(region.data().player_entites.contains_key(&CLIENT));
+    region.rollback_last_event();
+    assert_eq!(before, state_hash(region.data()), "the hold rolls back bit-exact");
+
+    // Unbounded, the same body hands off east.
+    let (mut region, e) = floored_adventurer(None);
+    push_out(&mut region, e);
+    tick(&mut region);
+    let (departures, _) = region.take_transfers();
+    assert_eq!(departures.iter().map(|(_, to)| *to).collect::<Vec<_>>(), vec![RegionCoords::new(1, 0)]);
 }
