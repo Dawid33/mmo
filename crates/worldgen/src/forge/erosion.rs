@@ -44,6 +44,8 @@ pub struct StepScratch {
     q: Vec<f64>,
     /// Copy of `h` for the diffusion sub-steps.
     diffuse: Vec<f64>,
+    /// `routing_fast::route_fast`'s working buffers.
+    pub(super) fast: crate::forge::routing_fast::FastScratch,
 }
 
 /// Priority-Flood(+epsilon) seeded from the coast (Barnes et al. 2014). Cells
@@ -139,7 +141,7 @@ pub fn discharge_into(w: &World, r: &Routing, rain: &[f64], q: &mut Vec<f64>) {
 /// along the routing tree (Braun & Willett 2013, n = 1), sediment into
 /// depressions, then hillslope diffusion. Returns the cells under depressions.
 pub fn step(w: &mut World, p: &ForgeParams, geo: &Geology, rain: &[f64], scratch: &mut StepScratch) -> usize {
-    let StepScratch { routing, q, diffuse } = scratch;
+    let StepScratch { routing, q, diffuse, .. } = scratch;
     route_into(w, FLOOD_EPSILON, routing);
     discharge_into(w, routing, rain, q);
     let (k, dt) = (&p.knobs, p.knobs.dt_years);

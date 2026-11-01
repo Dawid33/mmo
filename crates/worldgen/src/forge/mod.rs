@@ -31,6 +31,7 @@ pub mod post;
 pub mod presets;
 pub mod quality;
 pub mod render;
+pub mod routing_fast;
 pub mod spawn;
 pub mod world;
 
