@@ -117,8 +117,12 @@ fn view_layer(view: &str) -> PreviewLayer {
     match view {
         "relief" => PreviewLayer::Relief,
         "geology" => PreviewLayer::Geology,
-        "rain" => PreviewLayer::Rain,
+        "rain" => PreviewLayer::Precipitation,
         "initial" => PreviewLayer::BeforeErosion,
+        "biome" => PreviewLayer::Biome,
+        "temperature" => PreviewLayer::Temperature,
+        "drainage" => PreviewLayer::Drainage,
+        "regions" => PreviewLayer::Regions,
         _ => PreviewLayer::Rivers,
     }
 }
@@ -242,11 +246,13 @@ fn knobs_json(base: &Params) -> String {
     s
 }
 
-fn stats_json(f: &Forged) -> String {
+fn stats_json(f: &Forged, p: &Params) -> String {
     let st = &f.analysis.stats;
     let cells = f.world.n * f.world.n;
     let list = |values: &[f64]| values.iter().map(|&v| num(v)).collect::<Vec<_>>().join(", ");
-    let criteria = search::criteria(st, cells)
+    let artifact = f.artifact(&p.forge);
+    let (score, terms) = search::score(f, &artifact, &p.forge);
+    let criteria = terms
         .iter()
         .map(|(name, value)| format!("{{\"name\": {}, \"value\": {}}}", quote(name), num(*value)))
         .collect::<Vec<_>>()
@@ -278,7 +284,7 @@ fn stats_json(f: &Forged) -> String {
         num(st.buildable_km2),
         list(&st.rock_shares),
         num(st.margin_drowned as f64 / cells as f64),
-        num(search::score(st, cells)),
+        num(score),
         criteria,
     )
 }
@@ -305,7 +311,7 @@ fn forge_json(server: &Server, p: &Params, query: &str) -> String {
         quote(&id),
         p.seed,
         started.elapsed().as_millis(),
-        stats_json(&forged)
+        stats_json(&forged, p)
     )
 }
 
@@ -329,7 +335,7 @@ fn export_json(server: &Server, p: &Params) -> String {
                 started.elapsed().as_millis(),
                 num(artifact.spawn[0]),
                 num(artifact.spawn[1]),
-                stats_json(&forged)
+                stats_json(&forged, p)
             )
         }
         Err(e) => format!("{{\"error\": {}}}", quote(&format!("could not write {path}: {e}"))),

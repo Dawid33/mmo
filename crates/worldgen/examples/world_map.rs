@@ -13,6 +13,9 @@
 //! linearly onto 0..=65535). +x is right, +z is down; one pixel is
 //! `span / size` meters, point-sampled at its center.
 //!
+//! `--world <file> --layer biome|temperature|precipitation|drainage|regions` also writes
+//! `<out>-<layer>.png` in the world map's colours (the forged world's own rasters).
+//!
 //! `--layer rain|temperature|moisture|salinity|trees` also writes `<out>-<layer>.png`
 //! (greyscale ramp over the layer's fixed range, `worldgen::habitat`).
 //!
@@ -88,8 +91,44 @@ struct Args {
     world: Option<PathBuf>,
     /// Also write one habitat field as a greyscale PNG.
     layer: Option<Layer>,
+    /// A forged world's coloured layer (`biome`, `temperature`, `precipitation`, `drainage`, `regions`; needs `world`).
+    forged_layer: Option<ForgedLayer>,
     /// Write the world map's tile layers instead (needs `world`).
     tiles: bool,
+}
+
+/// A layer read straight from the forged world's rasters, in the colours of
+/// the in-game world map (`worldgen::tile_map` ramps and palette).
+#[derive(Clone, Copy)]
+enum ForgedLayer {
+    Biome,
+    Temperature,
+    Precipitation,
+    Drainage,
+    Regions,
+}
+
+impl ForgedLayer {
+    fn parse(name: &str) -> Option<ForgedLayer> {
+        Some(match name {
+            "biome" => ForgedLayer::Biome,
+            "temperature" => ForgedLayer::Temperature,
+            "precipitation" => ForgedLayer::Precipitation,
+            "drainage" => ForgedLayer::Drainage,
+            "regions" => ForgedLayer::Regions,
+            _ => return None,
+        })
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            ForgedLayer::Biome => "biome",
+            ForgedLayer::Temperature => "temperature",
+            ForgedLayer::Precipitation => "precipitation",
+            ForgedLayer::Drainage => "drainage",
+            ForgedLayer::Regions => "regions",
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -110,7 +149,10 @@ impl Layer {
             "moisture" => Layer::Moisture,
             "salinity" => Layer::Salinity,
             "trees" => Layer::Trees,
-            other => panic!("unknown --layer {other}; one of rain, temperature, moisture, salinity, trees"),
+            other => panic!(
+                "unknown --layer {other}; one of rain, temperature, moisture, salinity, trees, or with --world: biome, \
+                 temperature, precipitation, drainage, regions"
+            ),
         }
     }
 
@@ -146,6 +188,7 @@ fn parse_args() -> Args {
         relief: DEFAULT_RELIEF,
         world: None,
         layer: None,
+        forged_layer: None,
         tiles: false,
     };
     let mut it = std::env::args().skip(1);
@@ -167,7 +210,14 @@ fn parse_args() -> Args {
             }
             "--relief" => a.relief = value().parse().expect("--relief <factor>"),
             "--world" => a.world = Some(PathBuf::from(value())),
-            "--layer" => a.layer = Some(Layer::parse(&value())),
+            "--layer" => {
+                let name = value();
+                match ForgedLayer::parse(&name) {
+                    // With a forged world "temperature" is its coloured raster, not the habitat grey.
+                    Some(f) if a.world.is_some() || name != "temperature" => a.forged_layer = Some(f),
+                    _ => a.layer = Some(Layer::parse(&name)),
+                }
+            }
             "--tiles" => a.tiles = true,
             other => panic!(
                 "unknown argument {other}; flags: --span --size --center --out --seed --relief --world --layer --tiles"
@@ -328,6 +378,12 @@ fn main() {
         println!("wrote {path}");
     }
 
+    if let Some(layer) = a.forged_layer {
+        let path = format!("{stem}-{}.png", layer.name());
+        write_forged_layer(&a, layer).save(&path).expect("write forged layer");
+        println!("wrote {path}");
+    }
+
     // Terrain stats — the numbers behind "is it flat / is it all ocean".
     let mut sorted = heights.clone();
     sorted.sort_by(f32::total_cmp);
@@ -349,6 +405,41 @@ fn main() {
         }
         println!();
     }
+}
+
+/// A forged world's raster layer, one colour per pixel: the cell nearest the
+/// pixel's centre, in the world map's own colours (`Biome::map_rgb`,
+/// `tile_map` ramps and `region_color`); open sea dimmed on the climate layers.
+fn write_forged_layer(a: &Args, layer: ForgedLayer) -> ImageBuffer<Rgb<u8>, Vec<u8>> {
+    use worldgen::tile_map::{drainage_color, precipitation_color, region_color, temperature_color, OCEAN_DIM};
+    let path = a.world.as_ref().expect("--layer biome|temperature|precipitation|drainage|regions needs --world <file>");
+    let world = worldgen::forged::ForgedWorld::load(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let n = a.size;
+    let step = a.span_m / n as f64;
+    let (x0, z0) = (a.center.0 - a.span_m * 0.5, a.center.1 - a.span_m * 0.5);
+    let mut img = ImageBuffer::<Rgb<u8>, Vec<u8>>::new(n as u32, n as u32);
+    for iz in 0..n {
+        for ix in 0..n {
+            let (x, z) = (x0 + (ix as f64 + 0.5) * step, z0 + (iz as f64 + 0.5) * step);
+            let c = world.cell_climate(x, z);
+            let dim = |rgb: [f64; 3]| {
+                let k = if c.height_m < 0.0 && !c.is_lake { OCEAN_DIM } else { 1.0 };
+                rgb.map(|v| (v * k).round().clamp(0.0, 255.0) as u8)
+            };
+            let rgb = match layer {
+                ForgedLayer::Biome => world.biome_cell(x, z).map_rgb(),
+                ForgedLayer::Temperature => dim(temperature_color(f64::from(c.temperature_c))),
+                ForgedLayer::Precipitation => dim(precipitation_color(f64::from(c.precip_mm))),
+                ForgedLayer::Drainage => dim(drainage_color(f64::from(c.drainage))),
+                ForgedLayer::Regions => {
+                    let (id, kind) = world.region_cell(x, z);
+                    region_color(id, kind)
+                }
+            };
+            img.put_pixel(ix as u32, iz as u32, Rgb(rgb));
+        }
+    }
+    img
 }
 
 /// One habitat field per pixel as a greyscale ramp, sampled the way the

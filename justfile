@@ -465,7 +465,9 @@ tree-textures:
 # Top-down PNG map of the generated world: colour relief + 16-bit heightmap +
 # terrain stats, into target/world-map/. Flags: --span <m> --size <px>
 # --center <x,z> --out <path stem> --seed <hex> --relief <factor> --world <file>
-# --layer rain|temperature|moisture|salinity (extra habitat PNG), e.g.
+# --layer rain|temperature|moisture|salinity (extra habitat PNG; with --world
+# also coloured biome|temperature|precipitation|drainage|regions from the forged
+# world's rasters, `<out>-<layer>.png`), e.g.
 # `just world-map --span 65536 --size 2048`. `--world <file> --tiles` writes the
 # in-game world map instead (every map layer, `<out>-tiles-<layer>.png`) and
 # prints the WorldMap packet size; pass `region_blocks=512` for the play tiling.
@@ -509,7 +511,10 @@ model-census *paths="target/test-models":
 # to forge n seeds at 32 m cells and rank them (generate-and-test). e.g.
 # `just forge-proto --cell 16` for the full-detail world, `just forge-proto
 # --cell 64 --size 100352` for a quick look at a ~100 km continent,
-# `just forge-proto --search 64`.
+# `just forge-proto --search 64` (ranks seeds by `forge::quality::world_score`:
+# land share, snow peaks, mountain/forest regions, a Strahler-4 river, 10+ biomes,
+# a glacier under a pole, regions under the cap). Writes -biome/-temperature/
+# -drainage/-regions PNGs next to the relief ones.
 forge-proto *args:
     {{cap}} {{cargo}} run --release -p worldgen --example forge_proto -- {{args}}
 

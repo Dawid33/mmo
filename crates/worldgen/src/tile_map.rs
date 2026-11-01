@@ -541,6 +541,28 @@ pub const PRECIP_RAMP: [(f64, [f64; 3]); 5] = [
     (1_600.0, [40.0, 140.0, 170.0]),
     (3_000.0, [30.0, 50.0, 150.0]),
 ];
+/// Drainage colour stops (0..100, RGB): waterlogged blue-green through green
+/// to dry tan. The DF thresholds sit at 33 and 66.
+pub const DRAINAGE_RAMP: [(f64, [f64; 3]); 4] = [
+    (0.0, [40.0, 90.0, 140.0]),
+    (33.0, [70.0, 150.0, 130.0]),
+    (66.0, [110.0, 170.0, 80.0]),
+    (100.0, [225.0, 200.0, 140.0]),
+];
+
+/// Mean annual temperature (deg C) on [`TEMPERATURE_RAMP`] — the one place
+/// the ramp is applied (world map tiles, forge previews, `world-map --layer`).
+pub fn temperature_color(c: f64) -> [f64; 3] {
+    ramp(&TEMPERATURE_RAMP, c)
+}
+/// Annual precipitation (mm/yr) on [`PRECIP_RAMP`].
+pub fn precipitation_color(mm: f64) -> [f64; 3] {
+    ramp(&PRECIP_RAMP, mm)
+}
+/// Drainage (0..100) on [`DRAINAGE_RAMP`].
+pub fn drainage_color(d: f64) -> [f64; 3] {
+    ramp(&DRAINAGE_RAMP, d)
+}
 /// Brightness of open-ocean tiles on the temperature and rain layers, so the
 /// coast still reads.
 pub const OCEAN_DIM: f64 = 0.6;
@@ -594,8 +616,8 @@ pub fn layer_color(map: &WorldMap, t: &TileSummary, layer: MapLayer) -> [u8; 3] 
     match layer {
         MapLayer::Biome => t.biome.map_rgb(),
         MapLayer::Relief => tile_color(t),
-        MapLayer::Temperature => dim(ramp(&TEMPERATURE_RAMP, f64::from(t.temperature_c))),
-        MapLayer::Precipitation => dim(ramp(&PRECIP_RAMP, f64::from(t.precip_mm))),
+        MapLayer::Temperature => dim(temperature_color(f64::from(t.temperature_c))),
+        MapLayer::Precipitation => dim(precipitation_color(f64::from(t.precip_mm))),
         MapLayer::Regions => region_color(t.region, map.region_types.get(usize::from(t.region)).copied()),
     }
 }

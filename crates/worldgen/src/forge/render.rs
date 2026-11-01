@@ -6,7 +6,8 @@ use image::{ImageBuffer, Rgb};
 
 use super::geology::ROCKS;
 use super::hydrology::{Analysis, LAKE_MIN_DEPTH_M};
-use super::{Forged, World};
+use super::{ForgeParams, Forged, World};
+use crate::tile_map;
 
 const RIVER_RGB: [f64; 3] = [40.0, 105.0, 200.0];
 const LAKE_RGB: [u8; 3] = [70, 150, 215];
@@ -20,21 +21,38 @@ pub enum PreviewLayer {
     Relief,
     Rivers,
     Geology,
-    Rain,
+    Precipitation,
     BeforeErosion,
+    Biome,
+    Temperature,
+    Drainage,
+    Regions,
 }
 
 impl PreviewLayer {
-    pub const ALL: [PreviewLayer; 5] =
-        [Self::Relief, Self::Rivers, Self::Geology, Self::Rain, Self::BeforeErosion];
+    pub const ALL: [PreviewLayer; 9] = [
+        Self::Relief,
+        Self::Rivers,
+        Self::Geology,
+        Self::Precipitation,
+        Self::BeforeErosion,
+        Self::Biome,
+        Self::Temperature,
+        Self::Drainage,
+        Self::Regions,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
             Self::Relief => "Relief",
             Self::Rivers => "Rivers",
             Self::Geology => "Geology",
-            Self::Rain => "Rain",
+            Self::Precipitation => "Precipitation",
             Self::BeforeErosion => "Before erosion",
+            Self::Biome => "Biome",
+            Self::Temperature => "Temperature",
+            Self::Drainage => "Drainage",
+            Self::Regions => "Regions",
         }
     }
 }
@@ -75,8 +93,22 @@ pub fn render(forged: &Forged, layer: PreviewLayer) -> Rgba {
         PreviewLayer::Relief => relief_image(w, None),
         PreviewLayer::Rivers => relief_image(w, Some(a)),
         PreviewLayer::Geology => geology_image(w, a),
-        PreviewLayer::Rain => rainfall_image(w, a, &forged.climate.precip_mm),
+        PreviewLayer::Precipitation => rainfall_image(w, a, &forged.climate.precip_mm),
         PreviewLayer::BeforeErosion => relief_image(&forged.initial, None),
+        PreviewLayer::Biome | PreviewLayer::Regions => {
+            let artifact = preview_artifact(forged);
+            artifact_image(w, &artifact, layer)
+        }
+        PreviewLayer::Temperature => {
+            let mut img = shaded(w, |i| tile_map::temperature_color(f64::from(forged.climate.temperature_c[i])));
+            draw_water(&mut img, w, a);
+            img
+        }
+        PreviewLayer::Drainage => {
+            let mut img = shaded(w, |i| tile_map::drainage_color(f64::from(forged.fields.drainage[i])));
+            draw_water(&mut img, w, a);
+            img
+        }
     };
     let (width, height) = img.dimensions();
     let mut pixels = Vec::with_capacity(img.len() / 3 * 4);
@@ -233,23 +265,48 @@ fn geology_image(w: &World, a: &Analysis) -> Image {
     img
 }
 
-/// Precipitation, desert tan (< 200 mm/yr) to rainforest blue (> 3,000).
+/// Precipitation on the shared ramp (`tile_map::PRECIP_RAMP`).
 fn rainfall_image(w: &World, a: &Analysis, precip_mm: &[f32]) -> Image {
-    let mut img = shaded(w, |i| {
-        ramp(
-            &[
-                (150.0, [226.0, 200.0, 140.0]),
-                (500.0, [190.0, 200.0, 120.0]),
-                (1_000.0, [90.0, 170.0, 90.0]),
-                (2_000.0, [30.0, 120.0, 110.0]),
-                (3_200.0, [20.0, 70.0, 120.0]),
-            ],
-            precip_mm[i] as f64,
-        )
-    });
+    let mut img = shaded(w, |i| tile_map::precipitation_color(f64::from(precip_mm[i])));
     draw_water(&mut img, w, a);
     img
 }
+
+/// The world file of `forged` as the biome and region layers read it. Only
+/// its classification matters here (not the seed, spawn or alignment), so the
+/// parameters are the defaults at the world's own size and cell.
+fn preview_artifact(forged: &Forged) -> crate::forged::WorldArtifact {
+    let w = &forged.world;
+    let p = ForgeParams { size_m: w.dx * w.n as f64, cell_m: w.dx, quiet: true, ..Default::default() };
+    forged.artifact(&p)
+}
+
+/// Biome palette (`Biome::map_rgb`) or region colours (`tile_map::region_color`),
+/// one flat colour per cell, land lightly hillshaded.
+fn artifact_image(w: &World, art: &crate::forged::WorldArtifact, layer: PreviewLayer) -> Image {
+    let n = w.n;
+    let mut img = Image::new(n as u32, n as u32);
+    for z in 0..n {
+        for x in 0..n {
+            let i = z * n + x;
+            let rgb = match layer {
+                PreviewLayer::Regions => {
+                    let id = art.region[i];
+                    tile_map::region_color(id, art.regions.get(usize::from(id)).map(|r| r.kind))
+                }
+                _ => game::Biome::from_u8(art.biome[i]).unwrap_or(game::Biome::Ocean).map_rgb(),
+            };
+            let s = if w.ocean[i] { 1.0 } else { PREVIEW_FLAT_SHADE + (1.0 - PREVIEW_FLAT_SHADE) * shade(w, x, z).min(1.0) };
+            let px = |v: u8| (f64::from(v) * s).clamp(0.0, 255.0) as u8;
+            img.put_pixel(x as u32, z as u32, Rgb([px(rgb[0]), px(rgb[1]), px(rgb[2])]));
+        }
+    }
+    img
+}
+
+/// Brightness floor of the shaded biome and region layers, so the palette
+/// stays readable on lee slopes.
+const PREVIEW_FLAT_SHADE: f64 = 0.6;
 
 #[cfg(test)]
 mod tests {

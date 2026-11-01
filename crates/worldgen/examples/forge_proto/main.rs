@@ -178,9 +178,11 @@ fn main() {
         forged.simulated_peak_m, forged.height_fit
     );
     print_climate(&forged, &p.forge);
-    println!("world score {:.3}:", search::score(&a.stats, w.n * w.n));
-    for (name, value) in search::criteria(&a.stats, w.n * w.n) {
-        println!("  {name:<13} {value:.2}");
+    let artifact = forged.artifact(&p.forge);
+    let (score, terms) = search::score(&forged, &artifact, &p.forge);
+    println!("world score {score:.3}:");
+    for (name, value) in terms {
+        println!("  {name:<15} {value:.2}");
     }
 
     let stem = p.out.to_string_lossy().to_string();
@@ -189,7 +191,10 @@ fn main() {
         ("relief", PreviewLayer::Relief),
         ("rivers", PreviewLayer::Rivers),
         ("geology", PreviewLayer::Geology),
-        ("rain", PreviewLayer::Rain),
+        ("rain", PreviewLayer::Precipitation),
+        ("temperature", PreviewLayer::Temperature),
+        ("drainage", PreviewLayer::Drainage),
+        ("regions", PreviewLayer::Regions),
     ] {
         render::layer(&forged, which, &format!("{stem}-{suffix}.png"));
     }
@@ -198,8 +203,8 @@ fn main() {
     std::fs::write(&objects, hydrology::objects_json(w, a)).expect("write water objects");
     println!("wrote {objects} ({} lakes, {} river reaches)", a.lakes.len(), a.rivers.len());
 
-    let artifact = forged.artifact(&p.forge);
     print_biomes(&artifact);
+    print_rivers_and_peaks(&forged, &artifact, &p.forge);
     render::biomes(&artifact, &format!("{stem}-biome.png"));
     let world_file = format!("{stem}.world");
     artifact.save(std::path::Path::new(&world_file)).expect("write world file");
@@ -245,6 +250,34 @@ fn print_climate(forged: &worldgen::forge::Forged, p: &worldgen::forge::ForgePar
             mean(&c.temperature_c), t.0, t.1, mean(&c.precip_mm), r.0, r.1
         );
     }
+}
+
+/// Rivers by Strahler order (count, km), the land temperature and
+/// precipitation ranges of the world file, and the peaks above the snow line.
+fn print_rivers_and_peaks(forged: &worldgen::forge::Forged, a: &worldgen::forged::WorldArtifact, p: &worldgen::forge::ForgeParams) {
+    use worldgen::forged::SNOW_LINE_C;
+    let top = forged.analysis.rivers.iter().map(|r| r.order).max().unwrap_or(0);
+    let by_order: Vec<String> = (1..=top)
+        .rev()
+        .map(|o| {
+            let rs = forged.analysis.rivers.iter().filter(|r| r.order == o);
+            let km: f64 = rs.clone().map(|r| r.points.windows(2).map(|w| ((w[1].x - w[0].x).hypot(w[1].z - w[0].z)) / 1000.0).sum::<f64>()).sum();
+            format!("order {o}: {} ({km:.0} km)", rs.count())
+        })
+        .collect();
+    println!("rivers by Strahler order: {}", by_order.join(", "));
+    let land: Vec<usize> = (0..a.biome.len()).filter(|&i| a.height.get(i) > 0.0).collect();
+    let range = |r: &worldgen::forged::QRaster| {
+        land.iter().fold((f32::MAX, f32::MIN), |(lo, hi), &i| (lo.min(r.get(i)), hi.max(r.get(i))))
+    };
+    let (t, r) = (range(&a.temperature_c), range(&a.precip_mm));
+    println!("world file land: temperature {:.1}..{:.1} C, precipitation {:.0}..{:.0} mm/yr", t.0, t.1, r.0, r.1);
+    let polar = p.knobs.pole_choice() != worldgen::forge::climate::POLE_NONE;
+    let s = worldgen::forge::quality::summarise(a, polar);
+    println!(
+        "peaks above the snow line (temperature < {SNOW_LINE_C} C): {}; mountain regions bordering other land: {}",
+        s.peaks_above_snow, s.mountain_regions_bordering_land
+    );
 }
 
 /// Biome shares (of all cells, and of land), region counts per type, and

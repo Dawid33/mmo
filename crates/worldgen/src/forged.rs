@@ -843,6 +843,13 @@ impl ForgedWorld {
         Biome::from_u8(b).expect("validated biome raster")
     }
 
+    /// The forge region of the raster cell nearest engine world metres
+    /// `(x, z)` (clamped to the map): its id and type.
+    pub fn region_cell(&self, x_m: f64, z_m: f64) -> (u16, Option<game::RegionType>) {
+        let id = self.artifact.region[self.nearest_cell(x_m, z_m)];
+        (id, self.artifact.regions.get(usize::from(id)).map(|r| r.kind))
+    }
+
     /// Bilinear interpolation (artifact metres, cell-centre lattice,
     /// edge-clamped) of `f` over raster cell indices.
     fn bilinear_cells(&self, ax: f64, az: f64, f: impl Fn(usize) -> f64) -> f64 {
