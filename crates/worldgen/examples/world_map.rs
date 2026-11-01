@@ -191,6 +191,7 @@ fn parse_args() -> Args {
         forged_layer: None,
         tiles: false,
     };
+    let mut layer_name: Option<String> = None;
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
         let mut value = || it.next().unwrap_or_else(|| panic!("{flag} needs a value"));
@@ -210,18 +211,19 @@ fn parse_args() -> Args {
             }
             "--relief" => a.relief = value().parse().expect("--relief <factor>"),
             "--world" => a.world = Some(PathBuf::from(value())),
-            "--layer" => {
-                let name = value();
-                match ForgedLayer::parse(&name) {
-                    // With a forged world "temperature" is its coloured raster, not the habitat grey.
-                    Some(f) if a.world.is_some() || name != "temperature" => a.forged_layer = Some(f),
-                    _ => a.layer = Some(Layer::parse(&name)),
-                }
-            }
+            "--layer" => layer_name = Some(value()),
             "--tiles" => a.tiles = true,
             other => panic!(
                 "unknown argument {other}; flags: --span --size --center --out --seed --relief --world --layer --tiles"
             ),
+        }
+    }
+    // Resolved after parsing so the flag order does not matter: with a forged
+    // world "temperature" is its coloured raster, not the habitat grey.
+    if let Some(name) = layer_name {
+        match ForgedLayer::parse(&name) {
+            Some(f) if a.world.is_some() || name != "temperature" => a.forged_layer = Some(f),
+            _ => a.layer = Some(Layer::parse(&name)),
         }
     }
     a

@@ -273,7 +273,7 @@ fn print_rivers_and_peaks(forged: &worldgen::forge::Forged, a: &worldgen::forged
     let (t, r) = (range(&a.temperature_c), range(&a.precip_mm));
     println!("world file land: temperature {:.1}..{:.1} C, precipitation {:.0}..{:.0} mm/yr", t.0, t.1, r.0, r.1);
     let polar = p.knobs.pole_choice() != worldgen::forge::climate::POLE_NONE;
-    let s = worldgen::forge::quality::summarise(a, polar);
+    let s = worldgen::forge::quality::summarise(a, polar, p.knobs.layout());
     println!(
         "peaks above the snow line (temperature < {SNOW_LINE_C} C): {}; mountain regions bordering other land: {}",
         s.peaks_above_snow, s.mountain_regions_bordering_land

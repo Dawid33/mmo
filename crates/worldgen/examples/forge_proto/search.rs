@@ -23,7 +23,7 @@ const THUMBNAILS: usize = 3;
 /// criteria (spec section 10), in the terms' own order.
 pub fn score(f: &Forged, artifact: &WorldArtifact, p: &ForgeParams) -> (f64, Vec<(&'static str, f64)>) {
     let polar = p.knobs.pole_choice() != worldgen::forge::climate::POLE_NONE;
-    world_score(&quality(f), &summarise(artifact, polar))
+    world_score(&quality(f), &summarise(artifact, polar, p.knobs.layout()))
 }
 
 pub fn run(base: &Params) {

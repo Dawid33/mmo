@@ -172,8 +172,19 @@ pub fn within(a: &Quality, baseline: &Quality, tol: &QualityTolerance) -> Result
 
 /// Land share window (of all cells) that scores full marks, and the margin
 /// over which it falls to zero on each side.
-pub const LAND_SHARE_RANGE: (f64, f64) = (0.30, 0.60);
-pub const LAND_SHARE_MARGIN: f64 = 0.10;
+/// Land share bands per layout: `(rise, fall)`, each a `(0, 1)` smoothstep
+/// edge pair; the term is 1 between `rise.1` and `fall.0`. Continental
+/// layouts want 30-60% land; islands and archipelagos share the sea.
+pub fn land_band(layout: u32) -> ((f64, f64), (f64, f64)) {
+    use super::knobs::{LAYOUT_CONTINENT, LAYOUT_CONTINENTS, LAYOUT_INLAND, LAYOUT_ONE_ISLAND};
+    if [LAYOUT_CONTINENT, LAYOUT_CONTINENTS, LAYOUT_INLAND].contains(&layout) {
+        ((0.20, 0.30), (0.60, 0.70))
+    } else if layout == LAYOUT_ONE_ISLAND {
+        ((0.22, 0.32), (0.48, 0.58))
+    } else {
+        ((0.10, 0.18), (0.48, 0.58))
+    }
+}
 /// Peaks above the snow line, mountain regions bordering other land, and
 /// forest regions a world should have (each scores full at this count).
 pub const WANTED_SNOW_PEAKS: u32 = 3;
@@ -206,6 +217,8 @@ pub struct BiomeSummary {
     pub mountain_regions_bordering_land: u32,
     /// A pole is on the map, so a glacier is expected.
     pub polar: bool,
+    /// `Knobs::layout()` (picks the land share band).
+    pub layout: u32,
 }
 
 impl BiomeSummary {
@@ -214,8 +227,8 @@ impl BiomeSummary {
     }
 }
 
-/// Biome and region numbers of `a`; `polar` = the forge had a pole on.
-pub fn summarise(a: &crate::forged::WorldArtifact, polar: bool) -> BiomeSummary {
+/// Biome and region numbers of `a`; `polar` = the forge had a pole on, `layout` = `Knobs::layout()`.
+pub fn summarise(a: &crate::forged::WorldArtifact, polar: bool, layout: u32) -> BiomeSummary {
     use super::regions::{biome_shares, region_counts};
     let n = a.n as usize;
     let kind_of = |id: u16| a.regions.get(usize::from(id)).map(|r| r.kind);
@@ -266,9 +279,7 @@ pub fn summarise(a: &crate::forged::WorldArtifact, polar: bool) -> BiomeSummary 
         out
     };
     let wmax = window_max(&window_max(&h, true), false);
-    let peaks_above_snow = (0..n * n)
-        .filter(|&i| h[i] > 0.0 && h[i] >= wmax[i] && a.temperature_c.get(i) < crate::forged::SNOW_LINE_C)
-        .count() as u32;
+    let peaks_above_snow = count_peaks(&h, &wmax, n, |i| a.temperature_c.get(i) < crate::forged::SNOW_LINE_C);
 
     BiomeSummary {
         shares: biome_shares(&a.biome),
@@ -276,7 +287,42 @@ pub fn summarise(a: &crate::forged::WorldArtifact, polar: bool) -> BiomeSummary 
         peaks_above_snow,
         mountain_regions_bordering_land: bordering.iter().filter(|&&b| b).count() as u32,
         polar,
+        layout,
     }
+}
+
+/// Summits: 8-connected groups of land cells equal to their window maximum
+/// (a flat, quantised summit is one peak, not one per cell), counted when
+/// `cold` holds for the group's first cell.
+fn count_peaks(h: &[f32], wmax: &[f32], n: usize, cold: impl Fn(usize) -> bool) -> u32 {
+    let is_max = |i: usize| h[i] > 0.0 && h[i] >= wmax[i];
+    let mut seen = vec![false; n * n];
+    let mut peaks = 0;
+    for start in 0..n * n {
+        if seen[start] || !is_max(start) {
+            continue;
+        }
+        let mut stack = vec![start];
+        seen[start] = true;
+        while let Some(i) = stack.pop() {
+            let (x, z) = ((i % n) as i64, (i / n) as i64);
+            for (dx, dz) in [(-1, -1), (0, -1), (1, -1), (-1, 0), (1, 0), (-1, 1), (0, 1), (1, 1)] {
+                let (nx, nz) = (x + dx, z + dz);
+                if nx < 0 || nz < 0 || nx >= n as i64 || nz >= n as i64 {
+                    continue;
+                }
+                let j = nz as usize * n + nx as usize;
+                if !seen[j] && is_max(j) {
+                    seen[j] = true;
+                    stack.push(j);
+                }
+            }
+        }
+        if cold(start) {
+            peaks += 1;
+        }
+    }
+    peaks
 }
 
 /// The DF-style world score: the product of `TERM_FLOOR + (1 - TERM_FLOOR) *
@@ -287,11 +333,10 @@ pub fn world_score(q: &Quality, biomes: &BiomeSummary) -> (f64, Vec<(&'static st
     let regions: u32 = biomes.regions_by_type.iter().map(|(_, c)| *c).sum();
     let glacier = biomes.shares.iter().any(|(b, s)| *b == Biome::Glacier && *s > 0.0);
     let terms = vec![
-        (
-            "land share",
-            smoothstep(LAND_SHARE_RANGE.0 - LAND_SHARE_MARGIN, LAND_SHARE_RANGE.0, q.land_share)
-                * (1.0 - smoothstep(LAND_SHARE_RANGE.1, LAND_SHARE_RANGE.1 + LAND_SHARE_MARGIN, q.land_share)),
-        ),
+        ("land share", {
+            let (rise, fall) = land_band(biomes.layout);
+            smoothstep(rise.0, rise.1, q.land_share) * (1.0 - smoothstep(fall.0, fall.1, q.land_share))
+        }),
         ("snow peaks", count(biomes.peaks_above_snow, WANTED_SNOW_PEAKS)),
         ("mountain starts", count(biomes.mountain_regions_bordering_land, WANTED_MOUNTAIN_REGIONS)),
         ("forests", count(biomes.regions(RegionType::Forest), WANTED_FOREST_REGIONS)),
@@ -335,6 +380,7 @@ mod tests {
             peaks_above_snow: 5,
             mountain_regions_bordering_land: 4,
             polar: false,
+            layout: super::super::knobs::LAYOUT_CONTINENT,
         }
     }
 
@@ -347,6 +393,34 @@ mod tests {
         assert!(many > few, "{many} vs {few}");
         assert_eq!(variety(&many_terms), 1.0);
         assert!(variety(&few_terms) < 1.0);
+    }
+
+    #[test]
+    fn island_layout_has_a_live_land_term() {
+        use crate::forge::knobs::{LAYOUT_ARCHIPELAGO, LAYOUT_ONE_ISLAND};
+        let term = |layout: u32, land: f64| {
+            let q = Quality { land_share: land, ..base() };
+            let s = BiomeSummary { layout, ..summary(12) };
+            world_score(&q, &s).1[0].1
+        };
+        assert!(term(LAYOUT_ONE_ISLAND, 0.27) > 0.5);
+        assert!(term(LAYOUT_ARCHIPELAGO, 0.14) > 0.5);
+        // The same island share is thin for a continent.
+        assert!(term(crate::forge::knobs::LAYOUT_CONTINENT, 0.22) < 0.2);
+    }
+
+    #[test]
+    fn a_plateau_of_tied_cells_is_one_peak() {
+        let n = 12;
+        let mut h = vec![10.0f32; n * n];
+        for z in 2..5 {
+            for x in 2..5 {
+                h[z * n + x] = 100.0; // one flat 3x3 summit
+            }
+        }
+        h[9 * n + 9] = 100.0; // a second, separate summit
+        let wmax: Vec<f32> = (0..n * n).map(|_| 100.0).collect();
+        assert_eq!(count_peaks(&h, &wmax, n, |_| true), 2);
     }
 
     #[test]
