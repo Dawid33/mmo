@@ -11,16 +11,23 @@
 //!   ground above the sea.
 //! - **Winds** blow along rows: from the east below `trade_wind_edge_deg`
 //!   (trade winds) and above `polar_edge_deg` (polar easterlies), from the
-//!   west between (westerlies). Each row's moisture sweep runs downwind:
-//!   moist air rains out as it crosses land and is forced up slopes, and
-//!   arrives dry on the lee side. It recharges over any sea (inland seas
-//!   included) and any lake. Air that enters across a SEA edge is moist; air
-//!   that enters across a LAND edge has crossed land the map does not show
-//!   and arrives with `LAND_EDGE_INFLOW_MOISTURE`.
+//!   west between (westerlies); within `BAND_BLEND_DEG` of a band edge a row
+//!   blends both directions, so no line marks the edge. Each row's moisture
+//!   sweep runs downwind. Over flat land the air's moisture relaxes toward
+//!   the continental equilibrium `CONTINENTAL_MOISTURE` over
+//!   `land_depletion_m` (rain-out balanced by evaporation from the land);
+//!   forced up a slope it rains out (`orographic_scale_m` of rise wrings out
+//!   about all of it) and arrives dry on the lee side; it recharges toward
+//!   saturation over any sea (inland seas included) and any lake. Air that
+//!   enters across a SEA edge is saturated; air that enters across a LAND
+//!   edge has crossed endless land and is at the equilibrium.
 //! - **Precipitation** (mm/yr) is the latitude's base (`LATITUDE_PRECIP_MM`:
-//!   wet equator, dry ~25° belts, wet ~50°, dry poles) times the orographic
-//!   factor (rain-out relative to the land mean), clamped to
-//!   `rain_min`..`rain_max` of the base.
+//!   wet equator, dry ~25° belts, wet ~50°, dry poles) times the air's
+//!   moisture relative to the equilibrium, raised on windward slopes
+//!   (`OROGRAPHIC_RUN_M`), clamped to `rain_min`..`rain_max` of the base:
+//!   flat land far inland gets exactly the table, coasts downwind of the sea
+//!   more, lee sides less. Every smoothing length is in metres, so the field
+//!   does not depend on the cell size.
 //!
 //! Precipitation weights discharge (`discharge_weight`), so wet flanks grow
 //! bigger rivers and erode faster — Dwarf Fortress computes rain shadows AFTER
@@ -29,7 +36,7 @@
 use crate::forge::erosion;
 use crate::forge::hydrology::LAKE_MIN_DEPTH_M;
 use crate::forge::par;
-use crate::forge::world::{EdgeKind, ForgeParams, World};
+use crate::forge::world::{smoothstep, EdgeKind, ForgeParams, World};
 
 /// `Knobs::pole` values.
 pub const POLE_NONE: u32 = 0;
@@ -42,19 +49,30 @@ pub const POLE_BOTH: u32 = 3;
 pub const LATITUDE_PRECIP_MM: [(f32, f32); 7] =
     [(0.0, 2500.0), (10.0, 1800.0), (25.0, 350.0), (40.0, 900.0), (55.0, 1000.0), (70.0, 400.0), (90.0, 200.0)];
 
-/// Moisture (1 = saturated sea air) of air blowing in across a LAND edge: it
-/// has crossed land beyond the map and rained part of its water out.
-pub const LAND_EDGE_INFLOW_MOISTURE: f64 = 0.5;
+/// Moisture (1 = saturated sea air) that air settles at over endless flat
+/// land: what it rains out is balanced by what the land gives back. Flat land
+/// under air at this moisture gets the latitude table's precipitation; air
+/// blowing in across a LAND edge arrives at it.
+pub const CONTINENTAL_MOISTURE: f64 = 0.65;
+/// Half-width (deg) of the latitude band over which the wind turns at a band
+/// edge (`trade_wind_edge_deg`, `polar_edge_deg`): rows inside it blend the
+/// two directions' sweeps.
+pub const BAND_BLEND_DEG: f64 = 5.0;
+/// Windward slopes rain more: precipitation is raised by
+/// `slope * OROGRAPHIC_RUN_M / orographic_scale_m` (a 1:10 upslope with the
+/// default 650 m scale nearly doubles it).
+pub const OROGRAPHIC_RUN_M: f64 = 6_000.0;
 
-// Sea recharge, land rain-out distance, orographic scale and the rain bounds
-// are knobs (knobs.rs, "Climate").
-/// Heights are blurred over this radius (cells) before taking windward slopes,
+// Sea recharge, land relaxation distance, orographic scale and the rain
+// bounds are knobs (knobs.rs, "Climate").
+/// Heights are blurred over this radius (m) before taking windward slopes,
 /// so rain follows ranges, not individual gullies.
-const TERRAIN_BLUR_CELLS: usize = 6;
-/// Cross-wind blur of the rain field (cells): air mixes sideways.
-const RAIN_BLUR_CELLS: usize = 5;
-/// Along-wind blur of the rain field (cells).
-const RAIN_ALONG_BLUR_CELLS: usize = 2;
+const TERRAIN_BLUR_M: f64 = 400.0;
+/// Cross-wind blur radius of the rain field (m; the box is twice as wide):
+/// air mixes sideways.
+const RAIN_CROSS_BLUR_M: f64 = 1_500.0;
+/// Along-wind blur radius of the rain field (m).
+const RAIN_ALONG_BLUR_M: f64 = 500.0;
 
 /// The climate fields of one grid, row-major like `World::h`.
 #[derive(Clone, Debug, PartialEq)]
@@ -101,14 +119,19 @@ pub fn sea_level_temperature_c(lat_deg: f64, p: &ForgeParams) -> f64 {
     k.pole_temp_c + (k.equator_temp_c - k.pole_temp_c) * lat_deg.abs().min(90.0).to_radians().cos()
 }
 
-/// The prevailing wind at latitude `lat_deg`.
-pub fn wind(lat_deg: f64, p: &ForgeParams) -> Wind {
+/// Share of a row's rain swept by the westerlies at latitude `lat_deg`: 1
+/// inside the westerly band, 0 in the trades and polar easterlies, a
+/// smoothstep over `BAND_BLEND_DEG` either side of each band edge.
+pub fn westerly_weight(lat_deg: f64, p: &ForgeParams) -> f64 {
     let (k, lat) = (&p.knobs, lat_deg.abs());
-    if lat < k.trade_wind_edge_deg || lat >= k.polar_edge_deg {
-        Wind::FromEast
-    } else {
-        Wind::FromWest
-    }
+    let b = BAND_BLEND_DEG;
+    smoothstep(k.trade_wind_edge_deg - b, k.trade_wind_edge_deg + b, lat)
+        * (1.0 - smoothstep(k.polar_edge_deg - b, k.polar_edge_deg + b, lat))
+}
+
+/// The prevailing wind at latitude `lat_deg` (the larger share).
+pub fn wind(lat_deg: f64, p: &ForgeParams) -> Wind {
+    if westerly_weight(lat_deg, p) >= 0.5 { Wind::FromWest } else { Wind::FromEast }
 }
 
 /// `LATITUDE_PRECIP_MM` interpolated at `lat_deg` (absolute value taken).
@@ -176,20 +199,26 @@ pub fn compute_with_lakes(w: &World, p: &ForgeParams, lakes: &[bool]) -> Climate
     Climate { temperature_c, precip_mm, latitude_deg }
 }
 
-/// Rain-out per cell relative to the land mean, clamped and scaled by the
-/// climate strength (1.0 at sea).
-fn orographic(w: &World, p: &ForgeParams, latitude_deg: &[f32], lakes: &[bool]) -> Vec<f64> {
-    let (n, k) = (w.n, &p.knobs);
-    let ground: Vec<f64> = w.h.iter().map(|h| h.max(0.0)).collect();
-    let ground = box_blur_rows(&ground, n, TERRAIN_BLUR_CELLS, true);
-    let ground = box_blur_rows(&ground, n, TERRAIN_BLUR_CELLS, false);
-    // `World::edges` order: N, E, S, W.
-    let inflow = |edge: usize| if w.edges[edge] == EdgeKind::Sea { 1.0 } else { LAND_EDGE_INFLOW_MOISTURE };
-    let recharge = (w.dx / k.sea_recharge_m).min(1.0);
+/// Blur radius (cells) of `metres` on a `dx` grid.
+fn radius_cells(metres: f64, dx: f64) -> usize {
+    (metres / dx).round() as usize
+}
 
-    let rows: Vec<Vec<f64>> = par::map_range(n, |z| {
-        let mut row = vec![0.0; n];
-        let from_west = wind(latitude_deg[z] as f64, p) == Wind::FromWest;
+/// Precipitation per cell relative to the latitude base, clamped and scaled
+/// by the climate strength (1.0 at sea).
+fn orographic(w: &World, p: &ForgeParams, latitude_deg: &[f32], lakes: &[bool]) -> Vec<f64> {
+    let (n, k, dx) = (w.n, &p.knobs, w.dx);
+    let ground: Vec<f64> = w.h.iter().map(|h| h.max(0.0)).collect();
+    let terrain = radius_cells(TERRAIN_BLUR_M, dx);
+    let ground = box_blur_rows(&box_blur_rows(&ground, n, terrain, true), n, terrain, false);
+    // `World::edges` order: N, E, S, W.
+    let inflow = |edge: usize| if w.edges[edge] == EdgeKind::Sea { 1.0 } else { CONTINENTAL_MOISTURE };
+    let recharge = (dx / k.sea_recharge_m).min(1.0);
+    let relax = (dx / k.land_depletion_m).min(1.0);
+    let lift = OROGRAPHIC_RUN_M / k.orographic_scale_m / dx;
+
+    // One row's precipitation relative to the base, wind from the west or east.
+    let sweep = |z: usize, from_west: bool, row: &mut [f64]| {
         let mut moisture: f64 = if from_west { inflow(3) } else { inflow(1) };
         let mut prev: Option<usize> = None;
         for step in 0..n {
@@ -198,47 +227,48 @@ fn orographic(w: &World, p: &ForgeParams, latitude_deg: &[f32], lakes: &[bool]) 
             if w.ocean[i] {
                 moisture += (1.0 - moisture) * recharge;
             } else {
-                // A lake rains like flat land, then recharges the air.
+                // Upslope from the upwind cell; a lake is flat water.
                 let rise = match prev {
                     Some(j) if !lakes[i] => (ground[i] - ground[j]).max(0.0),
                     _ => 0.0,
                 };
-                let fallout = moisture * (w.dx / k.land_depletion_m + rise / k.orographic_scale_m).min(1.0);
-                moisture -= fallout;
-                row[x] = fallout / w.dx;
+                row[x] = moisture * (1.0 + rise * lift) / CONTINENTAL_MOISTURE;
+                moisture -= moisture * (rise / k.orographic_scale_m).min(1.0);
+                moisture += (CONTINENTAL_MOISTURE - moisture) * relax;
                 if lakes[i] {
                     moisture += (1.0 - moisture) * recharge;
                 }
             }
             prev = Some(i);
         }
-        row
+    };
+    let rows: Vec<Vec<f64>> = par::map_range(n, |z| {
+        let west = westerly_weight(latitude_deg[z] as f64, p);
+        let (mut from_west, mut from_east) = (vec![0.0; n], vec![0.0; n]);
+        if west > 0.0 {
+            sweep(z, true, &mut from_west);
+        }
+        if west < 1.0 {
+            sweep(z, false, &mut from_east);
+        }
+        from_west.iter().zip(&from_east).map(|(&a, &b)| west * a + (1.0 - west) * b).collect()
     });
-    // Blur over the land only (the sea's zero rain would dry the coasts).
+    // Blur over the land only (the sea's zero would dry the coasts).
     let rain: Vec<f64> = rows.concat();
     let land: Vec<f64> = w.ocean.iter().map(|&o| if o { 0.0 } else { 1.0 }).collect();
-    let blur = |v: &[f64]| box_blur_rows(&box_blur_rows(v, n, RAIN_BLUR_CELLS, false), n, RAIN_ALONG_BLUR_CELLS, true);
+    let (cross, along) = (radius_cells(RAIN_CROSS_BLUR_M, dx), radius_cells(RAIN_ALONG_BLUR_M, dx));
+    let blur = |v: &[f64]| box_blur_rows(&box_blur_rows(v, n, cross, false), n, along, true);
     let (rain_sum, land_share) = (blur(&rain), blur(&land));
-    let mut rain: Vec<f64> =
-        rain_sum.iter().zip(&land_share).map(|(&r, &l)| if l > 0.0 { r / l } else { 0.0 }).collect();
-
-    let (mut sum, mut land) = (0.0, 0usize);
-    for i in 0..n * n {
-        if !w.ocean[i] {
-            sum += rain[i];
-            land += 1;
-        }
-    }
-    let mean = (sum / land.max(1) as f64).max(f64::MIN_POSITIVE);
-    for (i, r) in rain.iter_mut().enumerate() {
-        *r = if w.ocean[i] {
-            1.0
-        } else {
-            let relative = (*r / mean).clamp(k.rain_min, k.rain_max.max(k.rain_min));
-            1.0 + k.climate_strength.min(1.0) * (relative - 1.0)
-        };
-    }
-    rain
+    (0..n * n)
+        .map(|i| {
+            if w.ocean[i] || land_share[i] <= 0.0 {
+                1.0
+            } else {
+                let relative = (rain_sum[i] / land_share[i]).clamp(k.rain_min, k.rain_max.max(k.rain_min));
+                1.0 + k.climate_strength.min(1.0) * (relative - 1.0)
+            }
+        })
+        .collect()
 }
 
 /// Discharge weight per cell: precipitation relative to the mean over the
@@ -276,15 +306,19 @@ mod tests {
     /// A hand-made world: `height(x, z)`, ocean where it is <= 0, sea on
     /// every edge.
     fn world(height: impl Fn(usize, usize) -> f64) -> World {
-        let h: Vec<f64> = (0..N * N).map(|i| height(i % N, i / N)).collect();
+        world_sized(N, CELL_M, height)
+    }
+
+    fn world_sized(n: usize, dx: f64, height: impl Fn(usize, usize) -> f64) -> World {
+        let h: Vec<f64> = (0..n * n).map(|i| height(i % n, i / n)).collect();
         let ocean: Vec<bool> = h.iter().map(|&h| h <= 0.0).collect();
         World {
-            n: N,
-            dx: CELL_M,
+            n,
+            dx,
             outlet: ocean.clone(),
             ocean,
-            uplift: vec![0.0; N * N],
-            uplifted: vec![0.0; N * N],
+            uplift: vec![0.0; n * n],
+            uplifted: vec![0.0; n * n],
             margin_drowned: 0,
             edges: [EdgeKind::Sea; 4],
             h,
@@ -352,19 +386,104 @@ mod tests {
         assert_eq!(wind(75.0, &p), Wind::FromEast);
     }
 
+    /// At the default knobs: flat land under air at the continental
+    /// equilibrium gets the latitude table's value, and so does flat land
+    /// far inland from a sea coast.
     #[test]
     fn precip_follows_the_latitude_table_on_flat_land() {
-        let mut p = params(25.0);
-        // Air hardly rains out over flat land, so every cell sees the base.
-        p.knobs.land_depletion_m = 60_000.0;
-        // A low plain (a higher one rains on its coast: the air rises onto it).
-        let w = world(|x, _| if x < 4 || x >= N - 4 { -50.0 } else { 2.0 });
+        let p = params(25.0);
+        // All land, land edges all round: air arrives at the equilibrium.
+        let mut w = world(|_, _| 2.0);
+        w.edges = [EdgeKind::Land; 4];
         let c = compute(&w, &p);
-        for i in (0..N * N).filter(|&i| !w.ocean[i]) {
-            assert!((c.precip_mm[i] - 350.0).abs() <= 60.0, "cell {i}: {} mm", c.precip_mm[i]);
+        for i in 0..N * N {
+            assert!((c.precip_mm[i] - 350.0).abs() <= 60.0, "all land, cell {i}: {} mm", c.precip_mm[i]);
         }
+        // 32 km of plain with the sea upwind (the trades blow from the east).
+        let wide = 512.0;
+        let w = world_sized(N, wide, |x, _| if x >= N - 4 { -50.0 } else { 2.0 });
+        let p = ForgeParams { size_m: N as f64 * wide, cell_m: wide, ..p };
+        let c = compute(&w, &p);
+        let inland = p.knobs.land_depletion_m * 3.0;
+        for i in (0..N * N).filter(|&i| i % N < N - 4 && ((N - 4 - i % N) as f64) * wide > inland) {
+            assert!((c.precip_mm[i] - 350.0).abs() <= 60.0, "far inland, cell {i}: {} mm", c.precip_mm[i]);
+        }
+        // The coast itself is wetter than the interior.
+        assert!(c.precip_mm[N / 2 * N + N - 5] > 400.0, "coast {}", c.precip_mm[N / 2 * N + N - 5]);
         assert_eq!(base_precip_mm(17.5), (1800.0 + 350.0) / 2.0);
         assert_eq!(base_precip_mm(-90.0), 200.0);
+    }
+
+    /// Where the westerlies meet the trades, the rain does not jump between
+    /// nearby rows: the bands blend over a few degrees. Measured as the
+    /// change of precipitation (relative to the latitude base) over 1 km of z
+    /// on a 16 km pole-to-equator map (64 m cells).
+    #[test]
+    fn band_edges_have_no_step() {
+        let (n, dx) = (250, 64.0);
+        let mut p = ForgeParams { size_m: n as f64 * dx, cell_m: dx, ..params(45.0) };
+        p.knobs.pole = POLE_NORTH as f64;
+        // Sea strips on both sides, so each wind direction has its own wet coast.
+        let w = world_sized(n, dx, |x, _| if x < 8 || x >= n - 8 { -50.0 } else { 2.0 });
+        let c = compute(&w, &p);
+        let rel = |x: usize, z: usize| c.precip_mm[z * n + x] / base_precip_mm(c.latitude_deg[z]);
+        let window = (1_000.0 / dx) as usize;
+        let mut worst = (0.0f32, 0, 0);
+        for z in 0..n - window {
+            for x in 8..n - 8 {
+                let d = (rel(x, z + window) - rel(x, z)).abs();
+                if d > worst.0 {
+                    worst = (d, x, z);
+                }
+            }
+        }
+        assert!(
+            worst.0 < 0.3,
+            "rows {}..{} (lat {:.1}) at x {}: relative precipitation changes {:.3} within 1 km",
+            worst.2, worst.2 + window, c.latitude_deg[worst.2], worst.1, worst.0
+        );
+    }
+
+    /// The rain field is set in metres, not cells: a lake's downwind wet
+    /// stripe is about as wide at 32 m cells as at 64 m.
+    #[test]
+    fn rain_field_is_resolution_independent() {
+        let size = 16_000.0;
+        // Across z, at 3 km downwind (east) of a 2 km square lake in the
+        // westerlies: the width (m) of the stripe wetter than halfway to its
+        // peak, and of its edges (10%..90% of the way up).
+        let stripe = |dx: f64| {
+            let n = (size / dx) as usize;
+            let centre = size / 2.0;
+            let p = ForgeParams { size_m: size, cell_m: dx, quiet: true, ..params(45.0) };
+            // All land under continental air, so the lake's moisture shows.
+            let mut w = world_sized(n, dx, |_, _| 20.0);
+            w.edges = [EdgeKind::Land; 4];
+            let lakes: Vec<bool> = (0..n * n)
+                .map(|i| {
+                    let (x, z) = ((i % n) as f64 * dx + dx / 2.0, (i / n) as f64 * dx + dx / 2.0);
+                    (x - centre).abs() < 1_000.0 && (z - centre).abs() < 1_000.0
+                })
+                .collect();
+            let c = compute_with_lakes(&w, &p, &lakes);
+            let col = ((centre + 3_000.0) / dx) as usize;
+            let profile: Vec<f32> = (0..n).map(|z| c.precip_mm[z * n + col]).collect();
+            let (lo, hi) = profile.iter().fold((f32::MAX, f32::MIN), |(lo, hi), &v| (lo.min(v), hi.max(v)));
+            assert!(hi > lo * 1.03, "{dx} m: no stripe ({lo}..{hi})");
+            let edge = |v: f32| v > lo + 0.1 * (hi - lo) && v < lo + 0.9 * (hi - lo);
+            let (wide, soft) = (
+                profile.iter().filter(|&&v| v > (lo + hi) / 2.0).count() as f64 * dx,
+                profile.iter().filter(|&&v| edge(v)).count() as f64 * dx,
+            );
+            (wide, soft)
+        };
+        let ((fine, fine_edge), (coarse, coarse_edge)) = (stripe(32.0), stripe(64.0));
+        assert!(fine > 0.67 * coarse && fine < 1.5 * coarse, "stripe {fine} m at 32 m cells, {coarse} m at 64 m");
+        // Its edges blur over the same metres, not the same cells.
+        assert!(
+            fine_edge > 0.67 * coarse_edge && fine_edge < 1.5 * coarse_edge,
+            "stripe edges {fine_edge} m at 32 m cells, {coarse_edge} m at 64 m"
+        );
     }
 
     #[test]

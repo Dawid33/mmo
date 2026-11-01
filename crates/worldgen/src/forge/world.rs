@@ -885,8 +885,9 @@ mod tests {
         for _ in 0..15 {
             crate::forge::erosion::step(&mut w, &p, &geo, &rain, &mut scratch);
         }
-        // Re-recorded with the latitude climate (Task 12): the rain field is
-        // now blurred over land only and renormalised after its clamp.
-        assert_eq!(crc(&w.h), 0xA406_2A1A, "eroded island");
+        // Re-recorded with the latitude climate (Task 12): precipitation now
+        // comes from the air's moisture (relaxing to a continental
+        // equilibrium), blurred in metres over land only.
+        assert_eq!(crc(&w.h), 0x5771_874C, "eroded island");
     }
 }
