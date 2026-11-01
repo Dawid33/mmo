@@ -845,7 +845,8 @@ fn tree_blocks(world: &ForgedWorld) -> usize {
         .sum()
 }
 
-/// Trees grow on soil only: a marsh (mud) stays treeless
+/// Trees grow on soil, not on open mud flats: a marsh stays treeless
+/// (swamps and mangrove swamps, DF's forested wetlands, keep their trees)
 /// where the same rain on drained ground (shrubland) grows trees.
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
@@ -931,4 +932,56 @@ fn glacier_edge_is_grounded_and_closed() {
     println!("glacier edge: {ice_columns} ice columns ({} thicknesses {:?}), {bare} desert", glacier_tops.len(), glacier_tops);
     assert!(ice_columns > 500 && bare > 500, "the region holds both sides of the border");
     assert!(glacier_tops.len() > 5, "the glacier thins towards its edge");
+}
+
+/// Every submerged column of the coast region at artifact x `ax` (sea floor
+/// under water or ice): its top ground block, the block over it.
+fn sea_floors(world: &ForgedWorld, ax: f64) -> Vec<(BlockId, BlockId)> {
+    let m = biome_mats();
+    let cols = worldgen::generate_region_forged(world, region_at(ax, 600.0), m);
+    let per = game::CHUNK_BLOCKS;
+    let mut out = Vec::new();
+    for (_, col) in &cols {
+        let g = col.ground().unwrap();
+        for lx in 0..per {
+            for lz in 0..per {
+                let s = i32::from(g.surface[lx * per + lz]);
+                let above = block_at_y(col, lx, lz, s + 1);
+                if above == m.water || above == m.biome.ice {
+                    out.push((block_at_y(col, lx, lz, s), above));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Cold sea floors keep sea-floor cover — sand, under water and ice — whatever
+/// biome the dither gives them: no snow (the snow line lies far under a cold
+/// sea), no glacier bare rock, no tundra frozen dirt or snow patches.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn cold_sea_floors_are_sand_under_the_ice() {
+    let m = biome_mats();
+    // The glacier half meets the frozen sea strip at artifact x 960.
+    let glacier_coast = sea_floors(&two_biome_world(), EAST_SEA_FROM as f64 * CELL_M);
+    // A tundra coast: the same sea strip next to -8 C tundra.
+    let mut a = one_climate_world(-8.0, 300.0, 50).artifact().clone();
+    let mut height = a.height.to_f32();
+    for (i, h) in height.iter_mut().enumerate() {
+        if i % N >= EAST_SEA_FROM {
+            *h = -6.0;
+        }
+    }
+    a.height = QRaster::fit(&height, HEIGHT_STEP_M);
+    let tundra = ForgedWorld::new(a.with_regions());
+    let (tx, tz) = engine(800.0, 600.0);
+    assert_eq!(tundra.biome_cell(tx, tz), Biome::Tundra);
+    let tundra_coast = sea_floors(&tundra, EAST_SEA_FROM as f64 * CELL_M);
+    for (name, floors) in [("glacier", glacier_coast), ("tundra", tundra_coast)] {
+        assert!(floors.len() > 500, "{name}: the region holds sea ({} columns)", floors.len());
+        assert!(floors.iter().any(|f| f.1 == m.biome.ice), "{name}: the sea is frozen");
+        let bad: Vec<_> = floors.iter().filter(|f| f.0 != m.sand).collect();
+        assert!(bad.is_empty(), "{name}: {} sea floors not sand, e.g. {:?}", bad.len(), bad.first());
+    }
 }

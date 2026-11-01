@@ -180,7 +180,9 @@ fn point_sample(patch: &dyn Patch, mats: &Materials, x: f64, z: f64) -> ColSampl
 }
 
 /// Biomes that never carry trees: their cover is not soil (desert sand,
-/// wasteland gravel, badland red sand, marsh mud, frozen tundra, glacier).
+/// wasteland gravel, badland red sand, frozen tundra, glacier) or is an open
+/// mud flat (marsh). Swamps and mangrove swamps are forested wetland (DF)
+/// and keep their trees on mud.
 fn treeless(b: Biome) -> bool {
     matches!(
         b,
@@ -212,13 +214,24 @@ fn biome_column(mats: &Materials, c: &ColumnClimate, plain: ColSample, lake: boo
     let ColSample { s, water_top, .. } = plain;
     let dry = s >= water_top;
     let ground_m = (s - SEA_TOP_BLOCK) as f32; // top of block `s`, m above sea
-    let snowy = match c.biome {
-        Biome::Tundra => c.snow_patch,
-        Biome::Glacier => false,
-        _ => ground_m > c.snow_line_m,
-    };
+    // Snow lies on dry ground only (a cold sea's snow line is far below
+    // its floor).
+    let snowy = dry
+        && match c.biome {
+            Biome::Tundra => c.snow_patch,
+            Biome::Glacier => false,
+            _ => ground_m > c.snow_line_m,
+        };
     let salt_flat = dry && c.salt_flat && !snowy;
-    let cover = if salt_flat { mats.salt_flat() } else { mats.ground_cover(c.biome, snowy, s) };
+    let cover = if salt_flat {
+        mats.salt_flat()
+    } else if !dry {
+        // Under water the floor is the sea's (or a lake's / river's) floor,
+        // whatever biome the dither lands there: `material_at`'s sand.
+        mats.ground_cover(Biome::Ocean, false, s)
+    } else {
+        mats.ground_cover(c.biome, snowy, s)
+    };
     let glacier = if dry { c.glacier_blocks() } else { 0 };
     let frozen = lake || water_top == SEA_TOP_BLOCK;
     let ice = if !dry && frozen { c.ice_blocks() } else { 0 };

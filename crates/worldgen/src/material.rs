@@ -180,7 +180,8 @@ impl Materials {
     /// `block_y`; `above_snow_line` puts snow on top (straight on rock on
     /// mountains, on the biome's own soil elsewhere). Beaches (the band
     /// `material_at` makes sand) stay sand except in biomes with their own
-    /// shore (desert, wetlands, tundra, wastelands). Without biome blocks every
+    /// shore (desert, wetlands, tundra, wastelands); a mountain at the shore gets the
+    /// beach too. Without biome blocks every
     /// biome is `material_at`'s cover.
     pub fn ground_cover(&self, biome: Biome, above_snow_line: bool, block_y: i32) -> GroundCover {
         let b = &self.biome;
@@ -211,6 +212,7 @@ impl Materials {
             Biome::Marsh => GroundCover::of(b.mud, b.peat, MARSH_PEAT_DEPTH_BLOCKS),
             Biome::Swamp => GroundCover::of(b.mud, b.peat, SWAMP_PEAT_DEPTH_BLOCKS),
             Biome::MangroveSwamp => GroundCover::of(b.mud, b.mud, SWAMP_PEAT_DEPTH_BLOCKS),
+            Biome::Mountain if beach => beach_cover(),
             Biome::Mountain => GroundCover::of(self.grass, self.dirt, MOUNTAIN_SOIL_DEPTH_BLOCKS),
         };
         if !above_snow_line {
@@ -304,6 +306,10 @@ mod tests {
         assert_eq!(m.ground_cover(Biome::RockyWasteland, false, inland).surface, b.gravel);
         assert_eq!(m.ground_cover(Biome::Glacier, false, inland), GroundCover::BARE_ROCK);
         assert_eq!(m.salt_flat().surface, b.salt);
+        // A mountain reaching the shore gets the beach, not grass.
+        for y in [SEA_TOP_BLOCK - 3, SEA_TOP_BLOCK + 1] {
+            assert_eq!(m.ground_cover(Biome::Mountain, false, y).surface, m.sand, "mountain shore at y {y}");
+        }
         // Temperate: grass over dirt, exactly `material_at`'s answer, beaches included.
         for biome in [Biome::Grassland, Biome::BroadleafForest, Biome::ConiferForest] {
             for y in [SEA_TOP_BLOCK - 3, SEA_TOP_BLOCK, SEA_TOP_BLOCK + 1, SEA_TOP_BLOCK + 2, inland] {
