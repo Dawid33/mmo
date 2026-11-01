@@ -507,7 +507,8 @@ forge-proto *args:
 # run: ask before launching the default 16 km / 16 m. e.g. `just forge-bench 4096 64`.
 forge-bench size="16000" cell="16":
     mkdir -p target/forge-bench
-    {{cap}} /usr/bin/time -f 'forge-bench: wall %e s, max RSS %M KiB' {{cargo}} run --release -p worldgen --example forge_proto -- --size {{size}} --cell {{cell}} --out target/forge-bench/w
+    {{cap}} {{cargo}} build --release -p worldgen --example forge_proto
+    /usr/bin/time -f 'forge-bench: wall %e s, max RSS %M KiB' target/release/examples/forge_proto --size {{size}} --cell {{cell}} --out target/forge-bench/w
 
 # Tuning page for the world forge: every knob (crates/worldgen/src/forge/knobs.rs) as
 # a slider with a live map preview, on http://127.0.0.1:<port>/. A change
