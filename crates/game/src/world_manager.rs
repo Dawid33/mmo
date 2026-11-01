@@ -415,8 +415,10 @@ impl<S: RegionSpawner> WorldManager<S> {
 
     /// Install the world's history. Its calendar runs from `history.now()` at `now_ms`,
     /// one calendar tick per `TICK_RATE` ms; every region already running is caught up
-    /// (its people spawned) at once.
+    /// (its people spawned) at once. Installed once: a second history would orphan the
+    /// bodies the first one placed.
     pub fn set_history(&mut self, history: History, now_ms: u64) {
+        debug_assert!(self.history.is_none(), "a history is already installed");
         self.calendar_anchor = (now_ms, history.now());
         self.history = Some(history);
         let running: Vec<RegionCoords> =
@@ -443,7 +445,10 @@ impl<S: RegionSpawner> WorldManager<S> {
     }
 
     /// The history, to change directly (tests, tools). Whatever it decides for running
-    /// regions reaches them at the next [`Self::maintain`].
+    /// regions reaches them at the next [`Self::maintain`]. Never call its region lifecycle
+    /// methods (`region_started` / `region_stopping` / `region_parked` / `person_crossed`)
+    /// through it: the manager owns them, and a call behind its back breaks the one-body
+    /// invariant.
     pub fn history_mut(&mut self) -> Option<&mut History> {
         self.history.as_mut()
     }
@@ -453,14 +458,22 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// other region is a bug, and dropped.
     fn deliver_directives(&mut self) {
         let Some(history) = self.history.as_mut() else { return };
+        // Regions lost (thread died, respawned) during this delivery: the respawn's
+        // catch-up already placed their people, so what is left for them is stale.
+        let mut lost = BTreeSet::new();
         for d in history.take_directives() {
+            if lost.contains(&d.region) {
+                log::warn!("history directive for {:?}, lost and respawned meanwhile, dropped: {:?}", d.region, d.event);
+                continue;
+            }
             let live = self.regions.get(&d.region).is_some_and(|l| !l.stopping);
-            debug_assert!(live, "history directive for {:?}, which is not running: {:?}", d.region, d.event);
             if !live {
                 log::error!("history directive for {:?}, which is not running, dropped: {:?}", d.region, d.event);
                 continue;
             }
-            self.send_to_region(d.region, RegionInput::Event(d.event));
+            if !self.send_to_region(d.region, RegionInput::Event(d.event)) {
+                lost.insert(d.region);
+            }
         }
     }
 
@@ -1006,14 +1019,36 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// Route an input to a running region; a failed send means the region
     /// thread died — respawn it (parked state if any, else regenerated) and
     /// resnapshot every subscriber. The failed input itself is dropped; the
-    /// snapshot resync covers the gap.
-    fn send_to_region(&mut self, rc: RegionCoords, input: RegionInput) {
+    /// snapshot resync covers the gap. Returns whether the input reached the
+    /// region (or its stop queue) — `false` when it is not running or was
+    /// just lost and respawned.
+    ///
+    /// A region that is stopping is never sent anything nor respawned: its
+    /// thread may already have exited after `Shutdown`, and its
+    /// `PeopleParked` / `Stopped` are still on their way — a respawn now
+    /// would be parked by them. Its events queue in `pending_events` and
+    /// replay once it has parked (`Stopped` wakes it); its other inputs
+    /// (snapshot / terrain requests, the map extent, client key input) are
+    /// dropped — the restart re-sends what it needs.
+    fn send_to_region(&mut self, rc: RegionCoords, input: RegionInput) -> bool {
         let Some(link) = self.regions.get(&rc) else {
             log::debug!("send_to_region: {:?} not running", rc);
-            return;
+            return false;
         };
+        if link.stopping {
+            match input {
+                RegionInput::Event(GameEventKind::PlayerInput(..)) => {
+                    log::debug!("send_to_region: {rc:?} is stopping; player input dropped");
+                }
+                RegionInput::Event(kind) => {
+                    self.pending_events.entry(rc).or_default().push(RegionInput::Event(kind));
+                }
+                other => log::debug!("send_to_region: {rc:?} is stopping; {other:?} dropped"),
+            }
+            return true;
+        }
         if link.input.send(input).is_ok() {
-            return;
+            return true;
         }
         log::error!("region {:?} thread died; respawning", rc);
         let subscribers = self.regions.remove(&rc).unwrap().subscribers;
@@ -1027,6 +1062,7 @@ impl<S: RegionSpawner> WorldManager<S> {
         for client in subscribers {
             let _ = link.input.send(RegionInput::RequestSnapshot(client));
         }
+        false
     }
 
     fn lod_subscribe(&mut self, client: ClientId, key: LodKey, _now_ms: u64) {
