@@ -12,7 +12,7 @@ use std::collections::BTreeSet;
 use super::calendar::CalendarTick;
 use super::records::*;
 use super::rng::{SALT_EDGE, SALT_SPAWN};
-use super::rules::{EDGE_SPREAD_PER_MILLE, SPAWN_SPREAD_BLOCKS, STOPPING_DEFER_DAYS};
+use super::rules::{spawn_spread_blocks, EDGE_SPREAD_PER_MILLE, HELD_TIMEOUT_LEGS, STOPPING_DEFER_DAYS};
 use super::History;
 use crate::{GameEventKind, Goal, PersonSpawn, RegionCoords, SpawnAt, REGION_BLOCKS};
 
@@ -103,14 +103,16 @@ impl History {
         self.now.plus_days(STOPPING_DEFER_DAYS)
     }
 
-    /// The landing column of `rc` (else its centre), moved a hashed few blocks per person.
-    fn landing_column(&self, rc: RegionCoords, person: PersonId) -> [u32; 2] {
+    /// The landing column of `rc` (else its centre), moved a hashed few blocks per person —
+    /// within [`spawn_spread_blocks`] of `crowd`, the number spawned there together.
+    fn landing_column(&self, rc: RegionCoords, person: PersonId, crowd: usize) -> [u32; 2] {
         let c = REGION_BLOCKS as u32 / 2;
         let [x, z] = self.grid().landing(rc).unwrap_or([c, c]);
-        let span = u64::from(2 * SPAWN_SPREAD_BLOCKS + 1);
+        let spread = spawn_spread_blocks(u32::try_from(crowd).unwrap_or(u32::MAX));
+        let span = u64::from(2 * spread + 1);
         let r = self.roll(self.now, u64::from(person.0), SALT_SPAWN);
         let off = |v: u32, d: u64| {
-            (i64::from(v) + d as i64 - i64::from(SPAWN_SPREAD_BLOCKS)).clamp(0, REGION_BLOCKS as i64 - 1) as u32
+            (i64::from(v) + d as i64 - i64::from(spread)).clamp(0, REGION_BLOCKS as i64 - 1) as u32
         };
         [off(x, r % span), off(z, (r / span) % span)]
     }
@@ -129,8 +131,81 @@ impl History {
     fn hold(&mut self, j: JourneyId, rc: RegionCoords) {
         if let Some(jr) = self.journeys.get_mut(&j) {
             jr.held_in = Some(rc);
+            self.held_since.insert(j, self.now);
         }
         self.cancel_legs(j);
+    }
+
+    /// Release every journey held in a running region that has no living traveller
+    /// embodied there any more, or has been held for [`HELD_TIMEOUT_LEGS`] of its current
+    /// leg: its bodies there are despawned and it goes on abstractly from that region, with
+    /// half the leg left (as after a park). Journeys held in a stopping region wait for its
+    /// park. [`History::advance`] calls it.
+    pub(crate) fn release_stuck_journeys(&mut self) {
+        self.held_since.retain(|j, _| self.journeys.get(j).is_some_and(|jr| jr.held_in.is_some()));
+        let now = self.now;
+        let stuck: Vec<(JourneyId, RegionCoords, Vec<PersonId>)> = self
+            .held_since
+            .iter()
+            .filter_map(|(&j, &since)| {
+                let jr = &self.journeys[&j];
+                let rc = jr.held_in?;
+                if !self.running.contains(&rc) {
+                    return None;
+                }
+                let bodies: Vec<PersonId> = jr
+                    .people
+                    .iter()
+                    .copied()
+                    .filter(|p| {
+                        self.people.get(p).is_some_and(|q| {
+                            q.alive() && q.location == Location::InRegion(rc) && q.home_location == Location::Journey(j)
+                        })
+                    })
+                    .collect();
+                let timed_out = now.0 >= since.0.saturating_add(HELD_TIMEOUT_LEGS * self.leg_duration(j));
+                (bodies.is_empty() || timed_out).then_some((j, rc, bodies))
+            })
+            .collect();
+        for (j, rc, bodies) in stuck {
+            if !bodies.is_empty() {
+                ::log::warn!("history: journey {j:?} held in {rc:?} for too long; its bodies there go on abstractly");
+            }
+            for p in bodies {
+                self.emit_despawn(rc, p);
+                let q = self.people.get_mut(&p).unwrap();
+                q.location = Location::Journey(j);
+                q.home_location = Location::Unplaced;
+            }
+            self.journeys.get_mut(&j).unwrap().held_in = None;
+            self.held_since.remove(&j);
+            let at = CalendarTick(now.0 + self.leg_duration(j) / 2);
+            self.schedule_next_leg_from(j, at);
+        }
+    }
+
+    /// Embody site `site`'s people if its region is running (not stopping): every living
+    /// member at the site with no body yet is spawned near the landing, as at catch-up. No
+    /// change otherwise. [`History::found_site`] calls it; an embark into a running region
+    /// (a played site) goes through it.
+    pub fn embody_site(&mut self, site: SiteId) {
+        let Some(s) = self.sites.get(&site) else { return };
+        let rc = s.region;
+        if !self.running.contains(&rc) {
+            return;
+        }
+        let here: Vec<PersonId> = s
+            .members
+            .iter()
+            .copied()
+            .filter(|p| self.people.get(p).is_some_and(|q| q.alive() && q.location == Location::AtSite(site)))
+            .collect();
+        let crowd = here.len();
+        for p in here {
+            let at = SpawnAt::Column(self.landing_column(rc, p, crowd));
+            self.emit(rc, GameEventKind::SpawnPerson(PersonSpawn { person: p, at, walk_to: None }));
+            self.embody(p, rc, Location::AtSite(site));
+        }
     }
 
     /// Hold `j` in `rc` and walk its travellers embodied there out toward the next route
@@ -213,8 +288,9 @@ impl History {
             })
             .map(|p| (p.id, p.location))
             .collect();
+        let crowd = residents.len();
         for (p, home) in residents {
-            let at = SpawnAt::Column(self.landing_column(rc, p));
+            let at = SpawnAt::Column(self.landing_column(rc, p, crowd));
             self.emit(rc, GameEventKind::SpawnPerson(PersonSpawn { person: p, at, walk_to: None }));
             self.embody(p, rc, home);
         }
@@ -267,6 +343,7 @@ impl History {
     pub fn after_load(&mut self) {
         self.running.clear();
         self.stopping.clear();
+        self.held_since.clear();
         self.stray_candidates = self
             .people
             .values()
@@ -356,13 +433,15 @@ impl History {
             return;
         }
         let left = site.members.remove(&person);
-        if left && site.members.is_empty() {
-            self.abandon_site(s);
-        }
         self.people.get_mut(&person).unwrap().location = Location::Wandering(from);
         self.stray_candidates.insert(person);
-        // No route: they stay a stray in `from`, still a citizen of `s`.
-        let _ = self.start_journey_from_region(vec![person], from, home, Purpose::Migrate { to: s });
+        // No route: they stay a stray in `from`, still a citizen of `s`. A site whose
+        // last citizen is walking home to it is not abandoned (the walk's end, by death,
+        // abandons it — `remove_traveller`).
+        let walking = self.start_journey_from_region(vec![person], from, home, Purpose::Migrate { to: s }).is_some();
+        if left && !walking && self.sites.get(&s).is_some_and(|site| site.members.is_empty()) {
+            self.abandon_site(s);
+        }
     }
 
     /// The manager moved `person`'s body over a seam into `to`. True when `to` is running

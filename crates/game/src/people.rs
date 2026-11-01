@@ -19,6 +19,9 @@ pub const WANDER_MIN_TICKS: u64 = 100;
 pub const WANDER_RANGE_TICKS: u64 = 200;
 /// A wander goal lies within this many blocks (per axis) of the person's home column.
 pub const WANDER_RADIUS_BLOCKS: i32 = 8;
+/// A standing person re-runs the character controller every this many ticks (it is
+/// skipped while they stand grounded), so one whose ground was dug away falls.
+pub const IDLE_RESETTLE_TICKS: u64 = 20;
 
 const SALT_WANDER_WAIT: u64 = 0x9E47_0001;
 const SALT_WANDER_GOAL: u64 = 0x9E47_0002;
@@ -145,9 +148,12 @@ impl Rollback {
     }
 
     /// Walks `person` out of this region toward region `toward` (a
-    /// neighbour): a walk to its centre column, so the existing edge logic
-    /// takes them across the seam. `false` with no change if they have no
-    /// body here or no path.
+    /// neighbour), the shortest way: to the column of `toward` just across
+    /// the facing edge from them, so `edge_toward` picks the edge tile
+    /// straight out and the existing edge logic takes them across the seam.
+    /// If that edge tile cannot be reached, a walk toward `toward`'s centre
+    /// (another edge tile) is tried. `false` with no change if they have no
+    /// body here or no path either way.
     pub fn walk_out_safe(
         &mut self,
         person: PersonId,
@@ -156,7 +162,19 @@ impl Rollback {
         map: Option<MapExtent>,
     ) -> bool {
         let Some(e) = self.person_entity(person) else { return false };
-        let c = REGION_BLOCKS as i32 / 2;
+        let n = REGION_BLOCKS as i32;
+        if let Some(from) = self.body_feet(e).and_then(|feet| current_tile(self, feet)) {
+            let across = |d: i32, own: i32| match d.signum() {
+                1 => 0,
+                -1 => n - 1,
+                _ => own,
+            };
+            let column = [across(toward.x - here.x, from[0]), across(toward.z - here.z, from[2])];
+            if self.walk_entity_safe(e, Goal { region: toward, column, y: None }, here, map) {
+                return true;
+            }
+        }
+        let c = n / 2;
         self.walk_entity_safe(e, Goal { region: toward, column: [c, c], y: None }, here, map)
     }
 
@@ -218,8 +236,9 @@ impl Rollback {
         };
         let walking = self.data.ecs.walker.try_get(e).is_some();
         // A standing person on the ground makes no move at all, skipping the
-        // character controller on most ticks.
-        if !walking && motion0.grounded {
+        // character controller on most ticks — but not every one, so a person
+        // whose ground was dug away falls.
+        if !walking && motion0.grounded && tick % IDLE_RESETTLE_TICKS != 0 {
             return;
         }
         let mut motion = motion0;

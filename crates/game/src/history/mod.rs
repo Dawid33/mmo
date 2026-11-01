@@ -64,6 +64,10 @@ pub struct History {
     /// on use, filled where hand-over makes strays and rebuilt by [`History::after_load`].
     #[serde(skip)]
     stray_candidates: BTreeSet<PersonId>,
+    /// When each held journey was last held (`Journey::held_in` set), for
+    /// [`rules::HELD_TIMEOUT_LEGS`]. Not saved: a load releases every hold.
+    #[serde(skip)]
+    held_since: BTreeMap<JourneyId, CalendarTick>,
 }
 
 impl History {
@@ -84,6 +88,7 @@ impl History {
             stopping: BTreeSet::new(),
             directives: Vec::new(),
             stray_candidates: BTreeSet::new(),
+            held_since: BTreeMap::new(),
         }
     }
 
@@ -187,6 +192,8 @@ impl History {
         }
         self.log_event(LogKind::SiteFounded { site: id, civ, founders: founders.to_vec(), from });
         self.schedule(self.now.plus_days(DAYS_PER_MONTH), Step::SiteMonth(id));
+        // Founded into a running region (an embark into a played region): bodies at once.
+        self.embody_site(id);
         id
     }
 
@@ -205,6 +212,7 @@ impl History {
             }
         }
         self.now = self.now.max(to);
+        self.release_stuck_journeys();
     }
 
     pub fn person(&self, id: PersonId) -> Option<&Person> {

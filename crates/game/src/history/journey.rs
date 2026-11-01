@@ -305,12 +305,20 @@ impl History {
         }
     }
 
-    /// A traveller died: drop them from the journey, and the journey if it is empty.
+    /// A traveller died: drop them from the journey, and the journey if it is empty. An
+    /// emptied migration to a site nobody lives at any more (its last citizens were walking
+    /// home to it) abandons that site.
     pub(crate) fn remove_traveller(&mut self, j: JourneyId, person: PersonId) {
-        if let Some(jr) = self.journeys.get_mut(&j) {
-            jr.people.retain(|p| *p != person);
-            if jr.people.is_empty() {
-                self.journeys.remove(&j);
+        let Some(jr) = self.journeys.get_mut(&j) else { return };
+        jr.people.retain(|p| *p != person);
+        if !jr.people.is_empty() {
+            return;
+        }
+        let purpose = jr.purpose;
+        self.journeys.remove(&j);
+        if let Purpose::Migrate { to } = purpose {
+            if self.sites.get(&to).is_some_and(|s| s.abandoned.is_none() && s.members.is_empty()) {
+                self.abandon_site(to);
             }
         }
     }

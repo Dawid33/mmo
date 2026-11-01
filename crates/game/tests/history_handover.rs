@@ -370,7 +370,8 @@ fn held_journey_does_not_advance_abstractly() {
     h.advance(CalendarTick(departed.0 + 2 * leg() + 1));
     h.region_started(rc(2, 0));
     let before = h.journey(j).unwrap().clone();
-    h.advance(CalendarTick(h.now().0 + 20 * leg()));
+    // (Within HELD_TIMEOUT_LEGS of its leg: a longer hold is released.)
+    h.advance(CalendarTick(h.now().0 + (HELD_TIMEOUT_LEGS - 1) * leg()));
     assert_eq!(h.journey(j).unwrap(), &before);
     assert_eq!(h.person(a[0]).unwrap().location, Location::InRegion(rc(2, 0)));
     assert_eq!(h.pending_journey_legs(), 0);
@@ -515,6 +516,139 @@ fn party_of_two_delivered_one_at_a_time() {
         let pr = h.person(p).unwrap();
         assert_eq!((pr.location, pr.home_location), (Location::InRegion(rc(1, 0)), Location::Journey(j)));
     }
+}
+
+#[test]
+fn stuck_walk_out_is_released_after_timeout() {
+    let (mut h, a, j) = walking_out_of_running_site();
+    h.take_directives();
+    let held_at = h.now();
+    let timeout = HELD_TIMEOUT_LEGS * leg();
+    // The walk out never crosses (no path, the walker gave up): held until the timeout.
+    h.advance(CalendarTick(held_at.0 + timeout - 1));
+    assert_eq!(h.journey(j).unwrap().held_in, Some(rc(0, 0)));
+    assert!(h.take_directives().is_empty());
+    h.advance(CalendarTick(held_at.0 + timeout));
+    let jr = h.journey(j).unwrap();
+    assert_eq!((jr.held_in, jr.leg), (None, 0));
+    assert_eq!(h.pending_journey_legs(), 1);
+    assert_eq!(
+        h.take_directives(),
+        vec![Directive { region: rc(0, 0), event: GameEventKind::DespawnPerson(a[0]) }]
+    );
+    let p = h.person(a[0]).unwrap();
+    assert_eq!((p.location, p.home_location), (Location::Journey(j), Location::Unplaced));
+    // It goes on abstractly from (0, 0), half a leg left, and arrives.
+    let released = h.now();
+    h.advance(CalendarTick(released.0 + leg() / 2));
+    assert_eq!(h.journey(j).unwrap().leg, 1);
+    h.advance(CalendarTick(released.0 + 8 * leg()));
+    assert!(h.journey(j).is_none());
+    assert_eq!(h.person(a[0]).unwrap().location, Location::AtSite(SiteId(1)));
+}
+
+#[test]
+fn held_journey_whose_bodies_died_resumes_without_park() {
+    let (mut h, a, _) = two_sites();
+    h.region_started(rc(0, 0));
+    h.region_started(rc(1, 0));
+    let j = h.start_journey(vec![a[0], a[1]], SiteId(0), rc(6, 0), Purpose::Migrate { to: SiteId(1) }).unwrap();
+    assert!(h.person_crossed(a[0], rc(1, 0)));
+    assert_eq!(h.journey(j).unwrap().held_in, Some(rc(1, 0)));
+    h.record_death(a[0], DeathCause::OldAge);
+    h.take_directives();
+    // Nobody of the party is left in (1, 0), which never parks: released at once.
+    h.advance(CalendarTick(h.now().0 + 1));
+    let jr = h.journey(j).unwrap();
+    assert_eq!(jr.held_in, None);
+    assert_eq!(h.pending_journey_legs(), 1);
+    assert!(h.take_directives().is_empty(), "no body to despawn");
+    // a[1] still walks in (0, 0); the journey reaches site 1 without a park.
+    h.region_stopping(rc(0, 0));
+    h.region_parked(rc(0, 0), vec![(a[1], [0.0; 3])]);
+    h.advance(CalendarTick(h.now().0 + 8 * leg()));
+    assert!(h.journey(j).is_none());
+    assert_eq!(h.person(a[1]).unwrap().location, Location::AtSite(SiteId(1)));
+}
+
+#[test]
+fn sole_citizen_walking_home_keeps_their_site() {
+    let s = start();
+    let mut h = History::new(5, s, SocietyGrid::from_world_map(&land_map(8, 3)));
+    let civ = h.add_civ(Race::Dwarf);
+    let a = h.add_founder(Sex::Female, years_before(s, 20));
+    h.found_site(civ, rc(0, 0), &[a], None, false);
+    h.region_started(rc(0, 0));
+    // Their body wanders over the seam into unloaded (1, 0): they walk home.
+    assert!(!h.person_crossed(a, rc(1, 0)));
+    assert!(matches!(h.person(a).unwrap().location, Location::Journey(_)));
+    assert_eq!(h.site(SiteId(0)).unwrap().abandoned, None, "a site its citizen walks home to is not abandoned");
+    h.advance(CalendarTick(h.now().0 + 4 * leg()));
+    // Walked back into the running site region: a body there, at home.
+    let p = h.person(a).unwrap();
+    assert_eq!((p.location, p.home_location), (Location::InRegion(rc(0, 0)), Location::AtSite(SiteId(0))));
+    assert!(h.site(SiteId(0)).unwrap().members.contains(&a));
+    assert!(!h.log().iter().any(|e| matches!(e.kind, LogKind::SiteAbandoned { .. })));
+}
+
+#[test]
+fn sole_citizen_dying_on_the_walk_home_abandons_their_site() {
+    let s = start();
+    let mut h = History::new(5, s, SocietyGrid::from_world_map(&land_map(8, 3)));
+    let civ = h.add_civ(Race::Dwarf);
+    let a = h.add_founder(Sex::Female, years_before(s, 20));
+    h.found_site(civ, rc(0, 0), &[a], None, false);
+    h.region_started(rc(0, 0));
+    assert!(!h.person_crossed(a, rc(1, 0)));
+    h.record_death(a, DeathCause::OldAge);
+    assert!(h.site(SiteId(0)).unwrap().abandoned.is_some(), "nobody is left to come home");
+}
+
+#[test]
+fn catch_up_spread_grows_with_the_crowd() {
+    let s = start();
+    let mut h = History::new(5, s, SocietyGrid::from_world_map(&land_map(8, 3)));
+    let civ = h.add_civ(Race::Dwarf);
+    let people: Vec<_> = (0..100).map(|_| h.add_founder(Sex::Female, years_before(s, 20))).collect();
+    h.found_site(civ, rc(0, 0), &people, None, false);
+    let events = h.region_started(rc(0, 0));
+    // ceil(sqrt(100)) * 2 = 20 blocks either way.
+    let spread = 20i64;
+    let mut widest = 0i64;
+    for p in &people {
+        let SpawnAt::Column([x, z]) = spawn_of(&events, *p).unwrap().at else { panic!("a column spawn") };
+        let d = (i64::from(x) - i64::from(LANDING[0])).abs().max((i64::from(z) - i64::from(LANDING[1])).abs());
+        assert!(d <= spread, "{p:?} {d} blocks from the landing");
+        widest = widest.max(d);
+    }
+    assert!(widest > i64::from(SPAWN_SPREAD_BLOCKS), "a crowd spreads wider than {SPAWN_SPREAD_BLOCKS}: {widest}");
+}
+
+#[test]
+fn site_founded_in_running_region_is_embodied() {
+    let s = start();
+    let mut h = History::new(5, s, SocietyGrid::from_world_map(&land_map(8, 3)));
+    let civ = h.add_civ(Race::Dwarf);
+    let founders: Vec<_> = (0..3).map(|_| h.add_founder(Sex::Male, years_before(s, 20))).collect();
+    assert!(h.region_started(rc(3, 0)).is_empty());
+    let site = h.found_site(civ, rc(3, 0), &founders, None, true);
+    let d = h.take_directives();
+    assert_eq!(d.len(), founders.len());
+    for (f, d) in founders.iter().zip(&d) {
+        assert_eq!(d.region, rc(3, 0));
+        assert!(matches!(&d.event, GameEventKind::SpawnPerson(sp) if sp.person == *f && sp.walk_to.is_none()));
+        let p = h.person(*f).unwrap();
+        assert_eq!((p.location, p.home_location), (Location::InRegion(rc(3, 0)), Location::AtSite(site)));
+    }
+    // Again: nobody is spawned twice.
+    h.embody_site(site);
+    assert!(h.take_directives().is_empty());
+    // Not running: no change.
+    let other: Vec<_> = (0..2).map(|_| h.add_founder(Sex::Male, years_before(s, 20))).collect();
+    let far = h.found_site(civ, rc(6, 0), &other, None, false);
+    h.embody_site(far);
+    assert!(h.take_directives().is_empty());
+    assert_eq!(h.person(other[0]).unwrap().location, Location::AtSite(far));
 }
 
 #[test]
@@ -919,4 +1053,119 @@ fn history_saved_on_shutdown_reloads() {
         "nobody is left embodied in the saved file"
     );
     assert_eq!(loaded.people().filter(|q| q.alive()).count(), people);
+}
+
+/// A region's thread has already handled `Shutdown` (its `PeopleParked` / `Stopped` are on
+/// their way) when a departure is routed into it: the arrival waits for the park and is
+/// replayed into the woken region, which is never respawned in between — a respawn would
+/// be parked by the old thread's outputs and leave bodies the history does not know.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn arrival_into_stopping_region_waits_for_its_park() {
+    let (h, a, _) = manager_history();
+    let mut w = World::new(land_map(3, 1), Some(h));
+    w.send(ServerEvent::ClientConnected(CLIENT));
+    w.packet(ClientPacket::PlayRegion(rc(1, 0)));
+    w.tick();
+    // (0, 0) loses its keep-alive: Shutdown is sent and its thread handles it, but the
+    // manager has not seen its outputs yet.
+    w.now_ms += UNLOAD_GRACE_MS;
+    w.manager.maintain(w.now_ms);
+    w.manager.spawner_mut().pump();
+    assert!(!w.manager.spawner_mut().running().contains(&rc(0, 0)), "the old thread is gone");
+    let stop_outputs: Vec<_> = w.region_out.try_iter().collect();
+    assert!(stop_outputs.iter().any(|(r, o)| *r == rc(0, 0) && matches!(o, RegionOutput::Stopped(..))));
+    // The player walks over the seam into (0, 0): its departure is handled first.
+    let z = (LANDING[1] as f32 + 0.5) * BLOCK_VOXELS as f32;
+    w.teleport_player(rc(1, 0), -(FLIP_HYSTERESIS + 2.0), z);
+    w.now_ms += TICK_RATE;
+    w.manager.spawner_mut().tick_all();
+    let tick_outputs: Vec<_> = w.region_out.try_iter().collect();
+    assert!(tick_outputs.iter().any(|(_, o)| matches!(o, RegionOutput::Departures(d) if !d.is_empty())));
+    for (r, o) in tick_outputs.into_iter().chain(stop_outputs) {
+        w.manager.handle_region_output(r, o, w.now_ms);
+    }
+    w.settle();
+    assert!(w.running(rc(0, 0)), "the arrival woke (0, 0) once it parked");
+    let mut player_here = false;
+    w.manager.spawner_mut().with_region(rc(0, 0), |r| player_here = r.data().player_entites.contains_key(&CLIENT));
+    assert!(player_here, "the player arrived in (0, 0)");
+    let census = bodies(&mut w.manager);
+    for p in &a {
+        assert_eq!(census.get(p), Some(&vec![rc(0, 0)]), "{p:?} has one body in (0, 0)");
+    }
+    w.check("woken");
+    for round in 0..5 {
+        w.tick();
+        w.check(&format!("round {round}"));
+    }
+}
+
+/// `PeopleParked` alone hands a parking region's people back (the `Stopped` backstop is
+/// for a region that sent none).
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn people_parked_hands_people_back_before_stopped() {
+    let (h, a, _) = manager_history();
+    let mut w = World::new(land_map(3, 1), Some(h));
+    w.send(ServerEvent::ClientConnected(CLIENT));
+    w.packet(ClientPacket::PlayRegion(rc(1, 0)));
+    w.tick();
+    w.now_ms += UNLOAD_GRACE_MS;
+    w.manager.maintain(w.now_ms);
+    w.manager.spawner_mut().pump();
+    let outputs: Vec<_> = w.region_out.try_iter().filter(|(r, _)| *r == rc(0, 0)).collect();
+    let parked = outputs.iter().position(|(_, o)| matches!(o, RegionOutput::PeopleParked(_))).unwrap();
+    let stopped = outputs.iter().position(|(_, o)| matches!(o, RegionOutput::Stopped(..))).unwrap();
+    assert!(parked < stopped);
+    let mut outputs = outputs.into_iter();
+    for (r, o) in outputs.by_ref().take(parked + 1) {
+        w.manager.handle_region_output(r, o, w.now_ms);
+    }
+    // Before `Stopped`: everyone is back at their site, nobody embodied.
+    for p in &a {
+        let q = w.history().person(*p).unwrap();
+        assert_eq!((q.location, q.home_location), (Location::AtSite(SiteId(0)), Location::Unplaced), "{p:?}");
+    }
+    for (r, o) in outputs {
+        w.manager.handle_region_output(r, o, w.now_ms);
+    }
+    w.settle();
+    assert!(!w.running(rc(0, 0)));
+    for p in &a {
+        assert_eq!(w.history().person(*p).unwrap().location, Location::AtSite(SiteId(0)));
+    }
+    w.check("parked");
+}
+
+/// A site founded into a running region (an embark into a played region) has bodies.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn site_founded_in_running_region_has_bodies() {
+    let (h, _, _) = manager_history();
+    let mut w = World::new(land_map(3, 1), Some(h));
+    w.send(ServerEvent::ClientConnected(CLIENT));
+    w.packet(ClientPacket::PlayRegion(rc(1, 0)));
+    w.tick();
+    let history = w.manager.history_mut().unwrap();
+    let born = years_before(history.now(), 20);
+    let founders: Vec<_> = (0..4).map(|_| history.add_founder(Sex::Male, born)).collect();
+    let site = history.found_site(CivId(0), rc(1, 0), &founders, None, true);
+    w.tick();
+    let census = bodies(&mut w.manager);
+    for f in &founders {
+        assert_eq!(census.get(f), Some(&vec![rc(1, 0)]), "{f:?}");
+        let q = w.history().person(*f).unwrap();
+        assert_eq!((q.location, q.home_location), (Location::InRegion(rc(1, 0)), Location::AtSite(site)));
+    }
+    w.check("founded");
+}
+
+#[test]
+#[cfg(debug_assertions)]
+#[should_panic(expected = "history is already installed")]
+fn set_history_twice_is_a_bug() {
+    let (h, _, _) = manager_history();
+    let mut w = World::new(land_map(3, 1), Some(h.clone()));
+    w.manager.set_history(h, 0);
 }

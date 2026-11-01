@@ -331,6 +331,62 @@ fn replayed_person_arrival_corrects_pose() {
     });
 }
 
+#[test]
+fn walk_out_heads_for_the_nearest_edge_tile() {
+    let mut region = floored_region();
+    let n = REGION_BLOCKS as i32;
+    region.with_data(|d| {
+        d.spawn_person_safe(P, column_xz([10, 12])).unwrap();
+    });
+    for _ in 0..10 {
+        tick(&mut region);
+    }
+    let mut ok = false;
+    region.with_data(|d| ok = d.walk_out_safe(P, RegionCoords::new(1, 0), common::r0(), None));
+    assert!(ok);
+    let e = region.data().person_entity(P).unwrap();
+    let w = region.data().ecs.walker.try_get(e).clone().expect("walking");
+    let last = *w.path.last().unwrap();
+    // Straight across to the +x edge, not toward the far region's centre.
+    assert_eq!([last[0], last[2]], [n - 1, 12], "path ends at {last:?}");
+    assert_eq!(w.exit, Some([1, 0]));
+    // Diagonal: the corner side nearest the person.
+    region.with_data(|d| ok = d.walk_out_safe(P, RegionCoords::new(-1, -1), common::r0(), None));
+    assert!(ok);
+    let w = region.data().ecs.walker.try_get(e).clone().expect("walking");
+    let last = *w.path.last().unwrap();
+    assert!(last[0] == 0 || last[2] == 0, "path ends on a facing edge: {last:?}");
+    assert_eq!(w.exit, Some([-1, -1]));
+}
+
+#[test]
+fn idle_person_falls_when_the_ground_is_dug() {
+    let mut region = floored_region();
+    region.with_data(|d| {
+        d.spawn_person_safe(P, column_xz([30, 30])).unwrap();
+    });
+    for _ in 0..10 {
+        tick(&mut region);
+    }
+    let e = region.data().person_entity(P).unwrap();
+    assert!(region.data().ecs.motion.try_get(e).unwrap().grounded, "standing on the floor");
+    assert!(region.data().ecs.walker.try_get(e).is_none());
+    let y0 = region.data().people_here()[0].1[1];
+    region.with_data(|d| {
+        for x in 28..=32 {
+            for z in 28..=32 {
+                assert!(d.set_block_safe([x, 0, z], game::Block::new(game::BlockId::AIR)));
+            }
+        }
+    });
+    for _ in 0..2 * game::people::IDLE_RESETTLE_TICKS {
+        tick(&mut region);
+    }
+    assert!(region.data().ecs.walker.try_get(e).is_none(), "still idle");
+    let y = region.data().people_here()[0].1[1];
+    assert!(y < y0 - BLOCK_VOXELS as f32 / 2.0, "fell from {y0} to {y}");
+}
+
 // ---- undo: every new mutator rolls back bit-exact (HashMode::Full default) ----
 
 fn region_with_person(xz: (f32, f32)) -> (Region, game::EntityKey) {
@@ -502,4 +558,89 @@ fn client_cannot_send_spawn_person() {
     let mut n = 0;
     h.manager.spawner_mut().with_region(SPAWN_REGION, |region| n = region.data().people_here().len());
     assert_eq!(n, 0);
+}
+
+// ---- client convergence: a replica fed the server's events ends bit-identical ----
+
+fn world_hash(w: &game::World) -> u32 {
+    use game::StateHash;
+    let mut hasher = crc32fast::Hasher::new();
+    w.data(&common::r0()).state_hash(&mut hasher);
+    hasher.finalize()
+}
+
+/// The server's region and a client's replica of it (joined from its snapshot, predicting
+/// ticks and reconciling the server's stream, as the client does) stay bit-identical
+/// through every person event: a spawn with a walk, a spawn that wanders, a walk out and
+/// a despawn, with idle wander ticks in between.
+///
+/// Both regions get the same map extent BEFORE the stream starts. That ordering matters:
+/// the client sets its extent when the `WorldMap` packet arrives, and a walk planned while
+/// a replica has no extent (unbounded) gets an exit over the outer seam where the server's
+/// walk stops at the edge tile — the replica would diverge until its next snapshot. The
+/// server sends the `WorldMap` on connect, before any region snapshot, so in practice the
+/// extent is set first.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn client_replica_converges_on_person_events() {
+    let extent = Some(game::MapExtent { origin: common::r0(), width: 1, height: 1 });
+    let (send, _server_updates) = crossbeam::channel::unbounded();
+    let mut server_region =
+        Region::new(game::Rollback::new(Some(send.clone())), Some(send), common::r0(), None);
+    server_region.with_data(|r| r.seed_terrain_genesis(common::floor_chunks(0.0..REGION_SIZE, 0.0..REGION_SIZE, 16)));
+    server_region.set_map_extent(extent);
+    let mut server = game::World::new();
+    server.load(&common::r0(), server_region);
+
+    let (send, _client_updates) = crossbeam::channel::unbounded();
+    let mut client_region = Region::new(server.get_region_data(&common::r0()), Some(send), common::r0(), Some(0));
+    client_region.set_map_extent(extent);
+    let mut client = game::World::new();
+    client.load(&common::r0(), client_region);
+    assert_eq!(world_hash(&client), world_hash(&server));
+
+    let q = PersonId(8);
+    let n = REGION_BLOCKS as i32;
+    let script: Vec<(usize, GameEventKind)> = vec![
+        (
+            2,
+            GameEventKind::SpawnPerson(PersonSpawn {
+                person: P,
+                at: SpawnAt::Column([10, 12]),
+                walk_to: Some(goal_here([20, 12])),
+            }),
+        ),
+        (3, GameEventKind::SpawnPerson(PersonSpawn { person: q, at: SpawnAt::Column([n as u32 / 2, n as u32 / 2]), walk_to: None })),
+        // Toward the off-map +x neighbour: the walk ends on the edge tile.
+        (120, GameEventKind::WalkOut(P, RegionCoords::new(1, 0))),
+        (420, GameEventKind::DespawnPerson(q)),
+    ];
+    let mut wandered = false;
+    let mut furthest_x = 0.0f32;
+    for round in 0..460 {
+        let mut predicted = std::collections::BTreeMap::new();
+        client.progress_world_one_tick(&mut predicted);
+        for (_, kind) in script.iter().filter(|(at, _)| *at == round) {
+            let ev = server.handle_region_event(kind.clone(), common::r0()).unwrap();
+            server.forget_last_event(&common::r0());
+            client.reconcile_event(ev).unwrap();
+        }
+        let mut results = std::collections::BTreeMap::new();
+        server.progress_world_one_tick(&mut results);
+        server.forget_last_event(&common::r0());
+        let tick = results.remove(&common::r0()).unwrap().unwrap();
+        client.reconcile_event(tick).unwrap();
+        assert_eq!(world_hash(&client), world_hash(&server), "round {round}");
+        if let Some(e) = server.data(&common::r0()).person_entity(q) {
+            wandered |= server.data(&common::r0()).ecs.walker.try_get(e).is_some();
+        }
+        if let Some((_, t)) = server.data(&common::r0()).people_here().into_iter().find(|(p, _)| *p == P) {
+            furthest_x = furthest_x.max(t[0]);
+        }
+    }
+    assert!(wandered, "the idle person wandered");
+    assert!(furthest_x > (n - 2) as f32 * BLOCK_VOXELS as f32, "walked out to the +x edge: x {furthest_x}");
+    let here = server.data(&common::r0()).people_here();
+    assert_eq!(here.iter().map(|(p, _)| *p).collect::<Vec<_>>(), vec![P], "on the map's edge, not over it");
+    assert_eq!(client.data(&common::r0()).people_here(), here);
 }

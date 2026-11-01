@@ -53,6 +53,18 @@ pub const SPAWN_SPREAD_BLOCKS: u32 = 4;
 pub const EDGE_SPREAD_PER_MILLE: u32 = 20;
 /// Days a step that acts on people in a stopping region waits before it is tried again.
 pub const STOPPING_DEFER_DAYS: u64 = 1;
+/// A journey held in a running region for this many of its current leg's durations is
+/// released: its bodies there are despawned and it goes on abstractly (a walk out that
+/// found no path, or a walker that gave up, must not freeze it in a region that never parks).
+pub const HELD_TIMEOUT_LEGS: u64 = 3;
+
+/// Blocks either way around the landing column that `members` caught-up people spread
+/// over: [`SPAWN_SPREAD_BLOCKS`], or `ceil(sqrt(members)) * 2` for a bigger crowd.
+pub fn spawn_spread_blocks(members: u32) -> u32 {
+    let r = members.isqrt();
+    let ceil = if r * r < members { r + 1 } else { r };
+    SPAWN_SPREAD_BLOCKS.max(ceil * 2)
+}
 
 /// Age at death by old age, in days: uniform in `[OLD_AGE_MIN_YEARS, OLD_AGE_MAX_YEARS]` years,
 /// drawn from the history's `seed`.
