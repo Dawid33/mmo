@@ -19,9 +19,16 @@ pub const DEFAULT_SEED: u64 = 0x00D5_C0DE_0206;
 /// same shape scaled up. The island layouts keep their metres exactly.
 pub const REFERENCE_SIZE_M: f64 = 16_000.0;
 
-/// Uplift ramps from 0 at a land edge to full over this distance, so erosion
-/// does not cut a cliff down to the edge's fixed base level.
+/// Belt uplift ramps from 0 at a land edge to full over about this distance
+/// (the lowland share stays), so a range does not stand cut off at the edge.
 pub const LAND_EDGE_TAPER_M: f64 = 2_000.0;
+/// The taper length varies by up to this share either way along the edge
+/// (a 4 km noise at the reference size), so where it ends is not a line.
+const LAND_EDGE_TAPER_VARIATION: f64 = 0.5;
+/// A land-edge outlet sits this much lower (rise/run) than the land cell just
+/// inside it: the land runs on off the map, falling gently, so water leaves
+/// across the edge instead of being dammed by it.
+pub const LAND_EDGE_OUTLET_SLOPE: f64 = 0.004;
 /// In a world too small for that, the taper is at most this share of its size.
 const LAND_EDGE_TAPER_MAX_SHARE: f64 = 0.125;
 /// Each sea edge's coast distance varies by this share of `continent_coast`.
@@ -42,8 +49,18 @@ pub enum EdgeKind {
     /// Sea: an ocean margin keeps the border drowned.
     Sea,
     /// Land running off the map: an open drainage boundary. Its border cells
-    /// are fixed-height outlets (base level = the cell's own height).
+    /// are outlets whose base level is their own height, which follows the
+    /// land just inside (`World::follow_land_edges`).
     Land,
+}
+
+/// How `World::follow_land_edges` moves a land-edge outlet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EdgeFollow {
+    /// Exactly to the land inside it, less the outlet slope.
+    Set,
+    /// Only ever down to that.
+    Lower,
 }
 
 /// Edge order in `World::edges` and `edges`: north (z = 0), east (x = max),
@@ -349,8 +366,9 @@ pub struct World {
     /// What lies past each edge (`edges` order: N, E, S, W).
     pub edges: [EdgeKind; 4],
     /// Cells drainage ends at: the sea, and the border cells of land edges
-    /// (fixed-height outlets: never eroded, uplifted or diffused). Every
-    /// border cell is one. Routing gives outlets no receiver.
+    /// (never eroded, uplifted or diffused: they follow the land just inside,
+    /// `follow_land_edges`). Every border cell is one. Routing gives outlets
+    /// no receiver.
     pub outlet: Vec<bool>,
 }
 
@@ -467,6 +485,7 @@ impl World {
         let shape_lo = OctaveNoise::new(p.seed ^ 0xF001, -13, vec![1.0, 0.6, 0.3]); // 8 km at the reference size
         let shape_hi = OctaveNoise::new(p.seed ^ 0xF002, -10, vec![1.0, 0.5]); // 1 km
         let rough = OctaveNoise::new(p.seed ^ 0xF004, -8, vec![1.0, 1.0, 1.0]); // 256 m
+        let taper_noise = OctaveNoise::new(p.seed ^ 0xF005, -12, vec![1.0, 0.5]); // 4 km
         let edges = edges(p.seed, k);
         let mass = ContinentalMass::new(p.seed, k, &edges);
         let field = plates::plate_field(p.seed, p.size_m, n, k);
@@ -514,12 +533,15 @@ impl World {
                 let to_edge = [mz, p.size_m - mx, p.size_m - mz, mx];
                 let to_land_edge =
                     (0..4).filter(|&e| edges[e] == EdgeKind::Land).map(|e| to_edge[e]).fold(f64::INFINITY, f64::min);
-                let edge_taper = if to_land_edge.is_finite() { smoothstep(0.0, taper_m, to_land_edge) } else { 1.0 };
+                // Only the belts taper: the lowland share runs on to the edge,
+                // so the land near it neither sinks below the edge nor rises
+                // into a divide where a uniform taper would end.
+                let taper = taper_m * (1.0 + LAND_EDGE_TAPER_VARIATION * taper_noise.sample2(sx, sz).clamp(-1.0, 1.0));
+                let edge_taper = if to_land_edge.is_finite() { smoothstep(0.0, taper, to_land_edge) } else { 1.0 };
                 let coast_taper = smoothstep(0.0, 0.05, land);
                 w.uplift[i] = k.uplift
                     * coast_taper
-                    * edge_taper
-                    * (k.lowland_uplift_share + (k.belt_uplift - k.lowland_uplift_share).max(0.0) * belt);
+                    * (k.lowland_uplift_share + (k.belt_uplift - k.lowland_uplift_share).max(0.0) * belt * edge_taper);
             }
         }
         w.outlet.clone_from(&w.ocean);
@@ -536,7 +558,47 @@ impl World {
                 assert!(w.outlet[i], "every border cell must be sea or on a land edge (cell {i})");
             }
         }
+        w.follow_land_edges(EdgeFollow::Set);
         w
+    }
+
+    /// Hold every land-edge outlet at most `LAND_EDGE_OUTLET_SLOPE` below the
+    /// land just inside it (sea level if that cell is sea): the edge is an
+    /// open boundary that follows the land behind it DOWN — never a lip that
+    /// dams it — but never up, so it stays a base level the uplifted land
+    /// erodes toward (an edge that rose with the land would let the strip
+    /// along it climb forever). `EdgeFollow::Set` places it exactly there (an
+    /// initial condition). Reads only interior cells and writes only border
+    /// cells, so the result does not depend on order. A no-op without land
+    /// edges (islands). Called on every initial condition (`Set`), after
+    /// every erosion step and after the post-erosion shaping (`Lower`).
+    pub fn follow_land_edges(&mut self, mode: EdgeFollow) {
+        if !self.edges.contains(&EdgeKind::Land) || self.n < 3 {
+            return;
+        }
+        let n = self.n;
+        let last = n - 1;
+        let inward = |c: usize| if c == 0 { 1 } else if c == last { last - 1 } else { c };
+        for b in 0..n {
+            for i in [b, b * n + last, last * n + b, b * n] {
+                if self.ocean[i] || !self.outlet[i] {
+                    continue;
+                }
+                let (x, z) = (i % n, i / n);
+                let (ix, iz) = (inward(x), inward(z));
+                let inner = iz * n + ix;
+                let dist = if ix != x && iz != z { std::f64::consts::SQRT_2 * self.dx } else { self.dx };
+                let target = if self.ocean[inner] {
+                    LAND_FLOOR_M
+                } else {
+                    (self.h[inner] - LAND_EDGE_OUTLET_SLOPE * dist).max(LAND_FLOOR_M)
+                };
+                self.h[i] = match mode {
+                    EdgeFollow::Set => target,
+                    EdgeFollow::Lower => self.h[i].min(target),
+                };
+            }
+        }
     }
 
     /// True for a cell on the outermost ring of the grid.
@@ -583,6 +645,7 @@ impl World {
         let uplifted = par::map_range(nf * nf, |i| if outlet[i] { 0.0 } else { sample(&self.uplifted, i) });
         fine.h = h;
         fine.uplifted = uplifted;
+        fine.follow_land_edges(EdgeFollow::Set);
         fine
     }
 
@@ -721,15 +784,16 @@ mod tests {
         assert!(w.edges.contains(&EdgeKind::Land));
         let land_outlets = (0..w.n * w.n).filter(|&i| w.outlet[i] && !w.ocean[i]).count();
         assert!(land_outlets > w.n, "land edges give outlets: {land_outlets}");
-        let edge_h: Vec<f64> = (0..w.n * w.n).filter(|&i| w.outlet[i] && !w.ocean[i]).map(|i| w.h[i]).collect();
         let geo = crate::forge::geology::Geology::new(&p, &w);
         let rain = crate::forge::climate::rainfall(&w, &p);
         let mut scratch = StepScratch::default();
         for _ in 0..12 {
             step(&mut w, &p, &geo, &rain, &mut scratch);
         }
-        let after: Vec<f64> = (0..w.n * w.n).filter(|&i| w.outlet[i] && !w.ocean[i]).map(|i| w.h[i]).collect();
-        assert_eq!(edge_h, after, "land-edge outlets keep their height");
+        // Land-edge outlets sit just below the land inside them after every step.
+        let before = w.h.clone();
+        w.follow_land_edges(EdgeFollow::Lower);
+        assert_eq!(before, w.h, "land-edge outlets follow the land behind them down");
         let mut fast = crate::forge::erosion::Routing::default();
         crate::forge::routing_fast::route_fast(&w, FLOOD_EPSILON, &mut StepScratch::default(), &mut fast);
         for (name, r) in [("priority-flood", route(&w, FLOOD_EPSILON)), ("route_fast", fast)] {

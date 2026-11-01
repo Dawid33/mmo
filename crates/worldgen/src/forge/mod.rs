@@ -10,7 +10,8 @@
 //!   1. world      the layout's landmass — islands inside a guaranteed ocean
 //!                 margin, or a continent with sea on some edges and land
 //!                 running off the others (land-edge border cells are
-//!                 fixed-height drainage outlets) — low initial relief, an
+//!                 drainage outlets that follow the land behind them down)
+//!                 — low initial relief, an
 //!                 UPLIFT map with mountain belts (inland noise belts on the
 //!                 islands; convergent plate boundaries, `plates`, on the
 //!                 continental layouts);
@@ -344,6 +345,8 @@ pub fn forge_with(
     let rain = climate::rainfall(&w, p);
     post::carve_floodplains(&mut w, &rain, k);
     let basins = post::carve_lake_basins(&mut w, &rain, p.seed, k);
+    // The shaping may have lowered the land inside a land edge.
+    w.follow_land_edges(world::EdgeFollow::Lower);
     if !p.quiet {
         println!("planed valley floors; excavated {basins} lake basins");
     }
@@ -465,5 +468,90 @@ mod tests {
         let b = forge_with(&p, &mut |_| ControlFlow::Continue(())).unwrap();
         assert_eq!(a.world.h, b.world.h);
     }
-}
 
+    /// Cell index of `(row d in from edge e, position b along it)`, edges in
+    /// `world::edges` order (N, E, S, W).
+    fn edge_cell(n: usize, e: usize, d: usize, b: usize) -> usize {
+        match e {
+            0 => d * n + b,
+            1 => b * n + n - 1 - d,
+            2 => (n - 1 - d) * n + b,
+            _ => b * n + d,
+        }
+    }
+
+    /// Land-edge measurements of a forged world, per land edge: (share of
+    /// next-row cells > 0.5 m below their border cell, q-weighted share of
+    /// the next row's discharge that steps straight onto the border, mean
+    /// land height per row from the edge).
+    fn land_edge_report(f: &Forged) -> Vec<(usize, f64, f64, Vec<f64>)> {
+        let w = &f.world;
+        let n = w.n;
+        let routing = erosion::route(w, erosion::FLOOD_EPSILON);
+        let q = erosion::discharge(w, &routing, &f.rain);
+        let rows = ((3.0 * world::LAND_EDGE_TAPER_M / w.dx) as usize).min(n / 2);
+        let mut out = Vec::new();
+        for e in 0..4 {
+            if w.edges[e] != world::EdgeKind::Land {
+                continue;
+            }
+            // Away from the corners (another edge's strip).
+            let along = rows..n - rows;
+            let (mut lower, mut count) = (0usize, 0usize);
+            let (mut across, mut total) = (0.0, 0.0);
+            for b in along.clone() {
+                let (edge, inner) = (edge_cell(n, e, 0, b), edge_cell(n, e, 1, b));
+                if w.ocean[edge] || w.ocean[inner] {
+                    continue;
+                }
+                count += 1;
+                lower += (w.h[inner] < w.h[edge] - 0.5) as usize;
+                total += q[inner];
+                if w.on_border(routing.receiver[inner] as usize) {
+                    across += q[inner];
+                }
+            }
+            let profile: Vec<f64> = (0..rows)
+                .map(|d| {
+                    let cells: Vec<f64> =
+                        along.clone().map(|b| edge_cell(n, e, d, b)).filter(|&i| !w.ocean[i]).map(|i| w.h[i]).collect();
+                    cells.iter().sum::<f64>() / cells.len().max(1) as f64
+                })
+                .collect();
+            out.push((e, lower as f64 / count.max(1) as f64, across / total.max(f64::MIN_POSITIVE), profile));
+        }
+        out
+    }
+
+    /// A land edge lets the land behind it drain across: no lip along the
+    /// border row, rivers cross it instead of running along it, and no
+    /// straight ridge where the edge's uplift taper ends.
+    #[test]
+    #[ignore = "slow: >100ms — run via just test-full"]
+    fn land_edges_drain_across_without_a_lip_or_ridge() {
+        for (size_m, cell_m) in [(16_000.0, 32.0), (32_000.0, 64.0)] {
+            let p = ForgeParams { size_m, cell_m, quiet: true, ..Default::default() };
+            let f = forge(&p);
+            let report = land_edge_report(&f);
+            assert!(!report.is_empty(), "the default continent has land edges");
+            let dx = f.world.dx;
+            for (e, lower, across, profile) in report {
+                let name = world::EDGE_NAMES[e];
+                eprintln!("{size_m} m {name}: lower {lower:.2} across {across:.2} profile {:?}",
+                    profile.iter().step_by(4).map(|h| h.round() as i64).collect::<Vec<_>>());
+                // (1) The border row is not a lip.
+                assert!(lower < 0.2, "{size_m} m, {name} edge: {lower:.2} of the next row lies below the border");
+                // (2) Discharge in the row next to the edge leaves across it:
+                // a collector running along the row would carry most of it.
+                assert!(across >= 0.7, "{size_m} m, {name} edge: only {across:.2} of the next row's discharge crosses");
+                // (3) No ridge parallel to the edge: the mean height over the
+                // band where a taper would end is not above the land behind it.
+                let taper = (world::LAND_EDGE_TAPER_M / dx) as usize;
+                let band = |lo: usize, hi: usize| profile[lo.min(profile.len() - 1)..hi.min(profile.len())].iter().copied().fold(f64::MIN, f64::max);
+                let near = band(taper * 3 / 4, taper * 5 / 4);
+                let behind = band(taper * 3 / 2, taper * 3);
+                assert!(near <= behind + 10.0, "{size_m} m, {name} edge: ridge {near:.0} m at the taper's end vs {behind:.0} m behind it");
+            }
+        }
+    }
+}

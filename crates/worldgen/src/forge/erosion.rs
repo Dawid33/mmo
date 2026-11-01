@@ -173,6 +173,8 @@ pub fn step(w: &mut World, p: &ForgeParams, geo: &Geology, rain: &[f64], scratch
         scratch.routed_once = true;
     }
     let drowned = evolve(w, p, geo, rain, &routing, scratch);
+    // Land-edge outlets follow the land behind them (no-op without land edges).
+    w.follow_land_edges(crate::forge::world::EdgeFollow::Lower);
     scratch.routing = routing;
     drowned
 }
@@ -244,7 +246,7 @@ fn evolve(w: &mut World, p: &ForgeParams, geo: &Geology, rain: &[f64], routing: 
                         continue;
                     }
                     let rc = routing.receiver[i] as usize;
-                    // Sea level at the sea; a land-edge outlet's fixed height
+                    // Sea level at the sea; a land-edge outlet's height (fixed during the step)
                     // (never written); else already updated: downstream-first.
                     let base = if ocean[rc] { 0.0 } else { h.get(rc) };
                     let erodibility = k.erodibility * geo.erodibility_at(i, hi, before);

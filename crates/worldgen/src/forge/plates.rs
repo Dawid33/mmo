@@ -19,7 +19,7 @@
 
 use crate::forge::knobs::Knobs;
 use crate::forge::par;
-use crate::forge::world::{hash01, smoothstep, REFERENCE_SIZE_M};
+use crate::forge::world::{edges, hash01, smoothstep, EdgeKind, LAND_EDGE_TAPER_M, REFERENCE_SIZE_M};
 use crate::noise::OctaveNoise;
 
 /// Plate sites are scattered over the world grown by this share of its size
@@ -31,6 +31,13 @@ const PLATE_SPACING_SHARE: f64 = 0.55;
 const PLATE_PLACEMENT_ATTEMPTS: u64 = 4_000;
 /// Domain warp of the plate boundaries, as a share of the world's size.
 const PLATE_WARP_SHARE: f64 = 0.05;
+/// A boundary running along a land edge (within its belt half-width, the
+/// edge taper and the warp of the edge) would build a range parallel to the
+/// edge whose crest sits where the edge taper ends — a straight ridge. Such a
+/// stretch keeps `1 - parallel^LAND_EDGE_PARALLEL_POWER` of its strength,
+/// `parallel` = |cos| of its angle to the edge: belts crossing the edge stay,
+/// belts along it go.
+const LAND_EDGE_PARALLEL_POWER: f64 = 2.0;
 /// Convergence (closing speed over the plates' unit drift, -1..1) at which a
 /// boundary starts to build a belt, and at which the belt is at full height.
 const CONVERGENCE_MIN: f64 = 0.10;
@@ -178,6 +185,48 @@ pub fn convergent_boundaries(plates: &[Plate], size_m: f64) -> Vec<Boundary> {
     out
 }
 
+/// `boundaries` with the stretches that run along a land edge weakened
+/// (`LAND_EDGE_PARALLEL_POWER`): each boundary is split where it enters the
+/// band of width `band` m inside a land edge, and the part inside keeps the
+/// share of its strength its angle to the edge allows.
+fn soften_along_land_edges(boundaries: Vec<Boundary>, land: [bool; 4], size_m: f64, band: f64) -> Vec<Boundary> {
+    let mut out = boundaries;
+    for e in (0..4).filter(|&e| land[e]) {
+        // Distance in from edge e (N, E, S, W) of a point.
+        let inward = |x: f64, z: f64| [z, size_m - x, size_m - z, x][e];
+        let mut next = Vec::with_capacity(out.len());
+        for b in out {
+            let (d0, d1) = (inward(b.x0, b.z0), inward(b.x1, b.z1));
+            let len = (b.x1 - b.x0).hypot(b.z1 - b.z0).max(1.0e-9);
+            let along = if e % 2 == 0 { (b.x1 - b.x0).abs() } else { (b.z1 - b.z0).abs() } / len;
+            let kept = b.strength * (1.0 - along.powf(LAND_EDGE_PARALLEL_POWER));
+            let at = |t: f64| (b.x0 + t * (b.x1 - b.x0), b.z0 + t * (b.z1 - b.z0));
+            // Parameter range [lo, hi] of the segment inside the band.
+            let (lo, hi) = if (d1 - d0).abs() < 1.0e-9 {
+                if d0 < band { (0.0, 1.0) } else { (1.0, 0.0) }
+            } else {
+                let t = (band - d0) / (d1 - d0);
+                if d1 < d0 { (t.max(0.0), 1.0) } else { (0.0, t.min(1.0)) }
+            };
+            let mut piece = |t0: f64, t1: f64, strength: f64| {
+                if t1 > t0 && strength > 0.0 {
+                    let ((x0, z0), (x1, z1)) = (at(t0), at(t1));
+                    next.push(Boundary { x0, z0, x1, z1, strength });
+                }
+            };
+            if lo >= hi {
+                piece(0.0, 1.0, b.strength);
+            } else {
+                piece(0.0, lo, b.strength);
+                piece(lo, hi, kept);
+                piece(hi, 1.0, b.strength);
+            }
+        }
+        out = next;
+    }
+    out
+}
+
 /// Distance (m) from (x, z) to the segment (x0, z0)-(x1, z1).
 fn segment_distance(x: f64, z: f64, x0: f64, z0: f64, x1: f64, z1: f64) -> f64 {
     let (ex, ez) = (x1 - x0, z1 - z0);
@@ -195,10 +244,12 @@ fn belt_profile(d: f64, half_width: f64) -> f64 {
 /// The plate structure on an `n` x `n` grid over a `size_m` world.
 pub fn plate_field(seed: u64, size_m: f64, n: usize, k: &Knobs) -> PlateField {
     let plates = plates(seed, size_m, k);
-    let boundaries = convergent_boundaries(&plates, size_m);
     let warp = Warp::new(seed, size_m);
     let cell = size_m / n as f64;
     let half_width = (k.plate_belt_width * size_m).max(cell);
+    let land = edges(seed, k).map(|e| e == EdgeKind::Land);
+    let band = half_width + LAND_EDGE_TAPER_M.min(0.25 * size_m) + warp.amplitude;
+    let boundaries = soften_along_land_edges(convergent_boundaries(&plates, size_m), land, size_m, band);
     let per_cell = par::map_range(n * n, |i| {
         let (mx, mz) = (((i % n) as f64 + 0.5) * cell, ((i / n) as f64 + 0.5) * cell);
         let (px, pz) = warp.at(mx, mz);
