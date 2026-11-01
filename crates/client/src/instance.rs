@@ -40,6 +40,16 @@ pub enum ClientRequest {
     /// Play this region: the server moves our session there (or refuses,
     /// answered as `ClientUpdateEvent::PlayRefused`).
     PlayRegion(RegionCoords),
+    /// Ask who may embark (answered as `ClientUpdateEvent::EmbarkOptions`).
+    RequestEmbarkOptions,
+    /// Found a fortress (answered as `ClientUpdateEvent::EmbarkResult`).
+    Embark(game::EmbarkRequest),
+    /// Stop playing the fortress.
+    Retire,
+    /// Play a retired fortress again (answered as `EmbarkResult`).
+    ReturnTo(game::history::SiteId),
+    /// Ask for one person (answered as `ClientUpdateEvent::PersonInfo`).
+    RequestPersonInfo(game::history::PersonId),
     /// Leaving the world (back to the main menu): tell the server now, so it
     /// drops our session at once instead of at the connection's idle timeout.
     /// Followed by `GameEventKind::Quit`, which sends any request still queued
@@ -638,6 +648,22 @@ impl GameInstanceManager {
             ClientRequest::PlayRegion(rc) => {
                 info!("[client] requesting Play in region {rc:?}");
                 let _ = self.server_game_send.send(ClientPacket::PlayRegion(rc));
+            }
+            ClientRequest::RequestEmbarkOptions => {
+                let _ = self.server_game_send.send(ClientPacket::RequestEmbarkOptions);
+            }
+            ClientRequest::Embark(req) => {
+                info!("[client] embarking in region {:?}", req.region);
+                let _ = self.server_game_send.send(ClientPacket::Embark(req));
+            }
+            ClientRequest::Retire => {
+                let _ = self.server_game_send.send(ClientPacket::Retire);
+            }
+            ClientRequest::ReturnTo(site) => {
+                let _ = self.server_game_send.send(ClientPacket::ReturnTo(site));
+            }
+            ClientRequest::RequestPersonInfo(person) => {
+                let _ = self.server_game_send.send(ClientPacket::RequestPersonInfo(person));
             }
             ClientRequest::Leave => {
                 info!("[client] leaving the world");
@@ -1543,14 +1569,23 @@ impl GameInstanceManager {
                     .client_event_send
                     .send(ClientUpdateEvent::LodData(key, payload));
             }
-            // World history: plumbed to the views by plan 3 Task 2.
-            packet @ (game::ServerPacket::Sites(_)
-            | game::ServerPacket::Calendar(_)
-            | game::ServerPacket::Notice(_)
-            | game::ServerPacket::EmbarkOptions(_)
-            | game::ServerPacket::EmbarkResult(_)
-            | game::ServerPacket::PersonInfo(_)) => {
-                log::debug!("[client] history packet not handled yet: {packet:?}");
+            game::ServerPacket::Sites(v) => {
+                let _ = self.client_event_send.send(ClientUpdateEvent::Sites(v));
+            }
+            game::ServerPacket::Calendar(c) => {
+                let _ = self.client_event_send.send(ClientUpdateEvent::Calendar(c));
+            }
+            game::ServerPacket::Notice(n) => {
+                let _ = self.client_event_send.send(ClientUpdateEvent::Notice(n));
+            }
+            game::ServerPacket::EmbarkOptions(o) => {
+                let _ = self.client_event_send.send(ClientUpdateEvent::EmbarkOptions(o));
+            }
+            game::ServerPacket::EmbarkResult(r) => {
+                let _ = self.client_event_send.send(ClientUpdateEvent::EmbarkResult(r));
+            }
+            game::ServerPacket::PersonInfo(p) => {
+                let _ = self.client_event_send.send(ClientUpdateEvent::PersonInfo(p));
             }
         }
         Ok(())

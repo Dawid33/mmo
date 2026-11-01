@@ -221,6 +221,18 @@ pub enum ClientUpdateEvent {
     WorldMap(Box<WorldMap>),
     /// The server refused a Play request for this region.
     PlayRefused(RegionCoords, PlayRefusal),
+    /// World history: every site (on connect and when the set or a population bucket changes).
+    Sites(Vec<SiteMarker>),
+    /// World history: the calendar, once per game day.
+    Calendar(history::CalendarTick),
+    /// World history: a one-line notice for the player.
+    Notice(String),
+    /// World history: who may embark.
+    EmbarkOptions(EmbarkOptions),
+    /// World history: the answer to an embark / return request.
+    EmbarkResult(Result<history::SiteId, history::EmbarkRefusal>),
+    /// World history: one person, for the inspector.
+    PersonInfo(PersonInfo),
 }
 
 #[cfg(not(target_arch = "wasm32"))]

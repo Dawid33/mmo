@@ -33,6 +33,7 @@ use client::renderer::join_timeline::WorldReady;
 use client::renderer::lod_rings::LodRings;
 use client::renderer::meshing::queue::{ChunkGrid, RemeshQueue};
 use client::renderer::slint_overlay::SlintLayer;
+use client::renderer::history_view::HistoryView;
 use client::renderer::world_map::WorldMapState;
 use client::renderer::{ClientUpdates, GameEvents, LocalPlayer, SimBridgePlugin, UiCamera};
 use client::session::{end_session, AppState, Embarked, FrontendCamera, SessionPlugin, SessionScoped};
@@ -211,6 +212,16 @@ fn assert_no_world_state(app: &mut App, fresh_ui: &[(&'static str, String)], fre
     assert!(rings.roots.is_empty() && rings.retired.is_empty() && rings.pending.is_empty(), "LodRings");
     assert_eq!(w.resource::<TileMirror>().region(), None, "TileMirror");
     assert!(w.resource::<WorldMapState>().map.is_none(), "WorldMapState");
+    let hv = w.resource::<HistoryView>();
+    assert!(
+        hv.sites.is_empty()
+            && hv.calendar.is_none()
+            && hv.notices.is_empty()
+            && hv.embark_options.is_none()
+            && hv.embark_result.is_none()
+            && hv.people.is_empty(),
+        "HistoryView"
+    );
     assert_eq!(w.resource::<FarVoxelResidency>().resident_count(), 0, "far residency");
     assert!(!w.resource::<WorldReady>().0, "WorldReady");
     assert_eq!(w.resource::<LocalPlayer>().0, None, "LocalPlayer");

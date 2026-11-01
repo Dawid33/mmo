@@ -49,6 +49,7 @@ pub use slint_composite::UiCamera;
 pub mod voxel_bodies;
 mod voxel_material;
 pub mod voxel_pull;
+pub mod history_view;
 pub mod world_map;
 use block_textures::build_layers;
 use voxel_material::StandardVoxelMaterial;
@@ -113,6 +114,9 @@ impl Plugin for SimBridgePlugin {
         .add_session_reset::<world_map::PendingPlay>()
         .add_message::<world_map::WorldMapMsg>()
         .add_session_message_clear::<world_map::WorldMapMsg>()
+        .add_session_reset::<history_view::HistoryView>()
+        .add_message::<history_view::HistoryMsg>()
+        .add_session_message_clear::<history_view::HistoryMsg>()
         .add_session_reset::<LocalPlayer>()
         .add_session_reset::<bridge::Regions>()
         .add_session_reset::<bridge::RegionRoots>()
@@ -217,6 +221,7 @@ impl Plugin for SimBridgePlugin {
                 interpolate::interpolate_transforms,
                 (voxel_bodies::spawn_voxel_body_meshes, voxel_bodies::apply_voxel_body_meshes).chain(),
                 world_map::apply_world_map_msgs,
+                history_view::apply_history_msgs,
                 // Per-frame mouse look replaces the per-tick sim look that
                 // interpolate_transforms just snapped the camera to.
                 look::apply_local_look.after(interpolate::interpolate_transforms),

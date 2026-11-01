@@ -6,6 +6,7 @@ use bevy::tasks::{block_on, futures_lite::future, AsyncComputeTaskPool, Task};
 use crossbeam::channel::Receiver;
 use game::{ClientUpdateEvent, GameData, GameDataUpdate, GameDataUpdateKind, RegionId};
 use game::{EntityKey, Voxel};
+use super::history_view::HistoryMsg;
 
 use super::convert::{iso_to_transform, perspective_to_projection};
 use super::commander::tiles::TileMirrorMsg;
@@ -617,7 +618,7 @@ pub fn drain_client_updates(
     mut retired_roots: ResMut<RetiredRegionRoots>,
     camera_mode: Option<Res<super::commander::CameraMode>>,
     mut tile_msgs: Option<ResMut<Messages<TileMirrorMsg>>>,
-    mut world_map_msgs: Option<ResMut<Messages<super::world_map::WorldMapMsg>>>,
+    mut history_out: super::history_view::HistoryOut,
     mut session_ended: Option<ResMut<Messages<crate::session::SessionEnded>>>,
 ) {
     // Unbudgeted: drains everything the game thread queued since last frame.
@@ -722,15 +723,25 @@ pub fn drain_client_updates(
                 debug_lines.0.insert(id, lines);
             }
             ClientUpdateEvent::WorldMap(world_map) => {
-                if let Some(msgs) = world_map_msgs.as_mut() {
+                if let Some(msgs) = history_out.world_map.as_mut() {
                     msgs.write(super::world_map::WorldMapMsg::Map(world_map));
                 }
             }
             ClientUpdateEvent::PlayRefused(rc, why) => {
-                if let Some(msgs) = world_map_msgs.as_mut() {
+                if let Some(msgs) = history_out.world_map.as_mut() {
                     msgs.write(super::world_map::WorldMapMsg::Refused(rc, why));
                 }
             }
+            ClientUpdateEvent::Sites(v) => history_out.write(HistoryMsg::Sites(v)),
+            ClientUpdateEvent::Calendar(c) => history_out.write(HistoryMsg::Calendar(c)),
+            ClientUpdateEvent::Notice(n) => history_out.write(HistoryMsg::Notice(n)),
+            ClientUpdateEvent::EmbarkOptions(o) => {
+                history_out.write(HistoryMsg::EmbarkOptions(o))
+            }
+            ClientUpdateEvent::EmbarkResult(r) => {
+                history_out.write(HistoryMsg::EmbarkResult(r))
+            }
+            ClientUpdateEvent::PersonInfo(p) => history_out.write(HistoryMsg::PersonInfo(p)),
         }
     }
 }
