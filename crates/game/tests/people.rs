@@ -206,3 +206,127 @@ fn arrival_of_a_person_with_a_body_is_ignored() {
         assert_eq!(d.ecs.kind.iter().filter(|(_, k)| matches!(k, Some(game::EntityKind::Person { .. }))).count(), 1);
     });
 }
+
+// ---- walking ----
+
+use game::{Goal, GameEventKind, Region, BLOCK_VOXELS, REGION_BLOCKS};
+
+fn floored_region() -> Region {
+    let (send, _recv) = crossbeam::channel::unbounded();
+    let mut region = Region::new(game::Rollback::new(Some(send.clone())), Some(send), common::r0(), None);
+    let size = REGION_SIZE;
+    region.with_data(|r| r.seed_terrain_genesis(common::floor_chunks(0.0..size, 0.0..size, 16)));
+    region
+}
+
+fn tick(region: &mut Region) {
+    region.handle_event(GameEventKind::Tick).unwrap();
+    region.forget_last_event();
+}
+
+fn column_xz(c: [i32; 2]) -> (f32, f32) {
+    let bv = BLOCK_VOXELS as f32;
+    ((c[0] as f32 + 0.5) * bv, (c[1] as f32 + 0.5) * bv)
+}
+
+fn person_xz(region: &Region) -> (f32, f32) {
+    let here = region.data().people_here();
+    (here[0].1[0], here[0].1[2])
+}
+
+fn goal_here(c: [i32; 2]) -> Goal {
+    Goal { region: common::r0(), column: c, y: None }
+}
+
+#[test]
+fn person_walks_to_goal() {
+    let mut region = floored_region();
+    let start = column_xz([10, 12]);
+    region.with_data(|d| {
+        d.spawn_person_safe(P, start).unwrap();
+    });
+    for _ in 0..10 {
+        tick(&mut region);
+    }
+    let e = region.data().person_entity(P).unwrap();
+    let mut ok = false;
+    region.with_data(|d| ok = d.walk_entity_safe(e, goal_here([20, 12]), common::r0(), None));
+    assert!(ok, "a path exists");
+    // (The person may wander off afterwards: take the closest approach.)
+    let (gx, gz) = column_xz([20, 12]);
+    let mut best = f32::MAX;
+    for _ in 0..400 {
+        tick(&mut region);
+        let (x, z) = person_xz(&region);
+        best = best.min(((x - gx).powi(2) + (z - gz).powi(2)).sqrt());
+    }
+    let reach = game::WAYPOINT_REACH_M * game::movement::UNITS_PER_METER;
+    assert!(best <= reach + 1.0, "reached the goal, closest {best}");
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn person_wanders_near_spawn() {
+    let mut region = floored_region();
+    let start = column_xz([30, 30]);
+    region.with_data(|d| {
+        d.spawn_person_safe(P, start).unwrap();
+    });
+    let limit = (game::people::WANDER_RADIUS_BLOCKS as f32 + 2.0) * BLOCK_VOXELS as f32;
+    let mut moved = false;
+    for _ in 0..2000 {
+        tick(&mut region);
+        let (x, z) = person_xz(&region);
+        let d = (x - start.0).abs().max((z - start.1).abs());
+        assert!(d <= limit, "wandered {d} units from spawn");
+        moved |= d > BLOCK_VOXELS as f32;
+    }
+    assert!(moved, "the person wandered at least once");
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn walk_out_departs() {
+    let mut region = floored_region();
+    let n = REGION_BLOCKS as i32;
+    region.with_data(|d| {
+        d.spawn_person_safe(P, column_xz([n - 6, 12])).unwrap();
+    });
+    for _ in 0..10 {
+        tick(&mut region);
+    }
+    let mut ok = false;
+    region.with_data(|d| ok = d.walk_out_safe(P, RegionCoords::new(1, 0), common::r0(), None));
+    assert!(ok);
+    let mut got = None;
+    for _ in 0..2000 {
+        tick(&mut region);
+        let (deps, _) = region.take_transfers();
+        if let Some((b, to)) = deps.into_iter().next() {
+            got = Some((b.kind, to));
+            break;
+        }
+    }
+    let (kind, to) = got.expect("a departure");
+    assert!(matches!(kind, game::EntityKind::Person { person } if person == P));
+    assert_eq!(to, RegionCoords::new(1, 0));
+}
+
+#[test]
+fn replayed_person_arrival_corrects_pose() {
+    let mut a = flat_region();
+    let mut b = flat_region();
+    let mut bundle = None;
+    a.with_data(|d| {
+        let e = d.spawn_person_safe(P, (100.0, 100.0)).unwrap();
+        bundle = Some(d.extract_entity_safe(e, RegionCoords::new(1, 0)));
+    });
+    let bundle = bundle.unwrap();
+    b.with_data(|d| {
+        let e = d.apply_arrival(bundle.clone()).unwrap();
+        d.set_body_pose_safe(e, game::Pose::from_translation(Vector::new(10.0, 30.0, 10.0)));
+        assert!(d.apply_arrival(bundle.clone()).is_none(), "replay creates nothing");
+        let t = d.people_here()[0].1;
+        assert_eq!([t[0], t[2]], [bundle.isometry.translation.x, bundle.isometry.translation.z], "pose corrected");
+    });
+}

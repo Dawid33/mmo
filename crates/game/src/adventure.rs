@@ -131,12 +131,20 @@ impl Rollback {
         if self.data.clients.get(&client).map(|c| c.mode) != Some(PlayMode::Adventure) {
             return false;
         }
-        let Some(goal) = clamp_goal(self, goal) else { return false };
         let Some(key) = self.data.player_entites.get(&client).copied() else { return false };
-        let Some(feet) = self.body_feet(key) else { return false };
+        self.walk_entity_safe(key, goal, here, map)
+    }
+
+    /// Walks entity `e` toward `goal` (see [`Self::move_to_safe`] for the
+    /// goal rules), undo-safely: the part of `MoveTo` after the entity is
+    /// resolved, shared with people. `false` with no change when it has no
+    /// body, the goal is too far, or there is no path.
+    pub fn walk_entity_safe(&mut self, e: crate::EntityKey, goal: Goal, here: RegionCoords, map: Option<MapExtent>) -> bool {
+        let Some(goal) = clamp_goal(self, goal) else { return false };
+        let Some(feet) = self.body_feet(e) else { return false };
         let Some(from) = current_tile(self, feet) else { return false };
         let Some((path, exit)) = plan_walk(self, from, &goal, here, map) else { return false };
-        self.data.ecs.walker.set_safe(key, Some(Walker::new(goal, path, exit)));
+        self.data.ecs.walker.set_safe(e, Some(Walker::new(goal, path, exit)));
         true
     }
 
@@ -151,6 +159,7 @@ impl Rollback {
             .iter()
             .filter(|(c, _)| self.data.clients.get(c).is_some_and(|c| c.mode == PlayMode::Adventure))
             .map(|(_, &e)| e)
+            .chain(self.data.person_entities.values().copied())
             .filter(|&e| self.data.ecs.walker.try_get(e).is_some())
             .collect();
         for key in walking {
@@ -219,7 +228,7 @@ impl Rollback {
     }
 
     /// Region-local feet position (voxel units) of entity `key`'s body.
-    fn body_feet(&self, key: crate::EntityKey) -> Option<Vector> {
+    pub(crate) fn body_feet(&self, key: crate::EntityKey) -> Option<Vector> {
         let handle = (*self.data.ecs.rigidbody.try_get(key))?;
         let t = self.data.physics.bodies.get(handle)?.translation();
         Some(feet_of(t))

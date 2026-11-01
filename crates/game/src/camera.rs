@@ -281,21 +281,21 @@ impl Controller for CameraController {
                     (keys, yaw0)
                 }
             };
-            let desired = movement::plan(&mut motion, &keys, yaw, **data.tick as u64);
             let t = b.translation().clone();
             // Collision-corrected movement: slide along / stop at terrain
             // instead of teleporting through it. Queries are read-only; the
             // body write below is the footprint-sized mutate_body_safe entry.
-            let (corrected, grounded) = movement::sweep_character(
+            let corrected = movement::walk_body(
+                &mut motion,
+                &keys,
+                yaw,
+                **data.tick as u64,
                 &data.physics.broad_phase,
                 &data.physics.narrow_phase,
                 &data.physics.bodies,
                 &data.physics.colliders,
                 handle,
-                &motion,
-                desired,
             );
-            movement::settle(&mut motion, &desired, &corrected, grounded);
             if motion != motion0 {
                 // set_safe, not an undo_scope on the value: a body that
                 // arrived without movement state has an empty slot.

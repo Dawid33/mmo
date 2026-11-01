@@ -261,6 +261,8 @@ mod game_data {
         voxel_body: Component<crate::voxel_body::VoxelBody>,
         /// An adventurer's walk toward a `MoveTo` goal (`adventure.rs`).
         walker: Component<crate::Walker>,
+        /// When an idle person next wanders (`people.rs`).
+        wander: Component<crate::people::Wander>,
     }
 
     pub struct PhysicsState {
@@ -365,6 +367,7 @@ impl Undo<Ecs> {
         self.bones.insert_safe(key);
         self.voxel_body.insert_safe(key);
         self.walker.insert_safe(key);
+        self.wander.insert_safe(key);
         key
     }
 
@@ -1186,6 +1189,7 @@ impl Rollback {
         self.data.ecs.bones.remove_safe(key);
         self.data.ecs.voxel_body.remove_safe(key);
         self.data.ecs.walker.remove_safe(key);
+        self.data.ecs.wander.remove_safe(key);
         // ECS slot last: the slotmap #[emit] fires RemoveEntity on the delta
         // (and CreateEntity again on undo).
         self.data.ecs.entities.remove(key);
@@ -1277,17 +1281,19 @@ impl Rollback {
     pub fn apply_arrival(&mut self, bundle: EntityBundle) -> Option<EntityKey> {
         let identity = (bundle.source_region, bundle.source_key);
 
-        // A person already embodied here: the duplicate arrival is ignored.
-        if let EntityKind::Person { person } = bundle.kind {
-            if self.data.person_entities.contains_key(&person) {
-                return None;
-            }
-        }
-
         // Idempotency: a respawn-resnapshot replay must not duplicate.
         if let Some(&e) = self.data.arrivals.get(&identity) {
             if self.data.ecs.entities.contains_key(e) {
                 self.set_body_pose_safe(e, bundle.isometry);
+                return None;
+            }
+        }
+
+        // A person already embodied here (under another identity): the
+        // duplicate arrival is ignored. After the replay branch, so a replay
+        // of the same arrival still corrects the pose.
+        if let EntityKind::Person { person } = bundle.kind {
+            if self.data.person_entities.contains_key(&person) {
                 return None;
             }
         }

@@ -193,6 +193,27 @@ pub fn plan_with(
     desired
 }
 
+/// One tick of a body driven by `keys` heading `yaw`: plan, collision-swept
+/// move, settle. Updates `motion`; returns the collision-corrected
+/// translation to apply. Shared by every walking body (players steered by
+/// the keyboard or a `Walker`, and people).
+pub fn walk_body(
+    motion: &mut Motion,
+    keys: &MoveKeys,
+    yaw: f32,
+    tick: u64,
+    broad_phase: &rapier3d::prelude::DefaultBroadPhase,
+    narrow_phase: &rapier3d::prelude::NarrowPhase,
+    bodies: &rapier3d::prelude::RigidBodySet,
+    colliders: &rapier3d::prelude::ColliderSet,
+    handle: rapier3d::prelude::RigidBodyHandle,
+) -> Vector {
+    let desired = plan(motion, keys, yaw, tick);
+    let (corrected, grounded) = sweep_character(broad_phase, narrow_phase, bodies, colliders, handle, motion, desired);
+    settle(motion, &desired, &corrected, grounded);
+    corrected
+}
+
 /// Folds the collision result of this tick's move back into `motion`.
 pub fn settle(motion: &mut Motion, desired: &Vector, moved: &Vector, grounded: bool) {
     motion.grounded = grounded;

@@ -498,6 +498,9 @@ impl Region {
                 // Adventurers' walks advance before the camera controller
                 // steers their bodies from them.
                 self.data.tick_walkers_safe(self.id, self.map_extent);
+                // People wander and walk their walks (kinematic targets for
+                // the physics step below).
+                self.data.tick_people_safe(self.id, self.map_extent);
                 for c in self.controllers.iter_mut() {
                     let data = self.data.as_refs_mut();
                     c.on_tick(data.data);
