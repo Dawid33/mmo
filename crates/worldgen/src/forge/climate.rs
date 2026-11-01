@@ -45,9 +45,11 @@ pub const POLE_SOUTH: u32 = 2;
 pub const POLE_BOTH: u32 = 3;
 
 /// Annual precipitation (mm/yr) by absolute latitude (deg), interpolated
-/// linearly: the climatological base before rain shadows.
+/// linearly: the climatological base before rain shadows. The 25° entry is
+/// the subtropical desert belt (real interiors there get 25–200 mm), so flat
+/// interiors under the subtropical high are desert, not savanna.
 pub const LATITUDE_PRECIP_MM: [(f32, f32); 7] =
-    [(0.0, 2500.0), (10.0, 1800.0), (25.0, 350.0), (40.0, 900.0), (55.0, 1000.0), (70.0, 400.0), (90.0, 200.0)];
+    [(0.0, 2500.0), (10.0, 1800.0), (25.0, 180.0), (40.0, 900.0), (55.0, 1000.0), (70.0, 400.0), (90.0, 200.0)];
 
 /// Moisture (1 = saturated sea air) that air settles at over endless flat
 /// land: what it rains out is balanced by what the land gives back. Flat land
@@ -397,7 +399,7 @@ mod tests {
         w.edges = [EdgeKind::Land; 4];
         let c = compute(&w, &p);
         for i in 0..N * N {
-            assert!((c.precip_mm[i] - 350.0).abs() <= 60.0, "all land, cell {i}: {} mm", c.precip_mm[i]);
+            assert!((c.precip_mm[i] - 180.0).abs() <= 60.0, "all land, cell {i}: {} mm", c.precip_mm[i]);
         }
         // 32 km of plain with the sea upwind (the trades blow from the east).
         let wide = 512.0;
@@ -406,11 +408,12 @@ mod tests {
         let c = compute(&w, &p);
         let inland = p.knobs.land_depletion_m * 3.0;
         for i in (0..N * N).filter(|&i| i % N < N - 4 && ((N - 4 - i % N) as f64) * wide > inland) {
-            assert!((c.precip_mm[i] - 350.0).abs() <= 60.0, "far inland, cell {i}: {} mm", c.precip_mm[i]);
+            assert!((c.precip_mm[i] - 180.0).abs() <= 60.0, "far inland, cell {i}: {} mm", c.precip_mm[i]);
         }
         // The coast itself is wetter than the interior.
-        assert!(c.precip_mm[N / 2 * N + N - 5] > 400.0, "coast {}", c.precip_mm[N / 2 * N + N - 5]);
-        assert_eq!(base_precip_mm(17.5), (1800.0 + 350.0) / 2.0);
+        // (The same ratio as before the desert belt: 400 mm over a 350 mm base.)
+        assert!(c.precip_mm[N / 2 * N + N - 5] > 180.0 * 400.0 / 350.0, "coast {}", c.precip_mm[N / 2 * N + N - 5]);
+        assert_eq!(base_precip_mm(17.5), (1800.0 + 180.0) / 2.0);
         assert_eq!(base_precip_mm(-90.0), 200.0);
     }
 

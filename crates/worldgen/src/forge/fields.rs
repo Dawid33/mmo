@@ -471,6 +471,50 @@ mod tests {
     use super::*;
     use crate::forge::world::EdgeKind;
 
+    /// `game::biome` maps forge drainage onto DF's scale from two anchors;
+    /// they must be this module's floor (flat impermeable ground under a full
+    /// flood) and flat dry impermeable ground.
+    #[test]
+    fn biome_drainage_anchors_match_the_forge() {
+        let floor = to_u8(drainage_at(0.0, 0.0, 0.0, 0.0, DRAINAGE_FLOOD_M));
+        assert_eq!(floor, to_u8(DRAINAGE_BASE * (1.0 - DRAINAGE_FLOOD_DAMP)));
+        assert_eq!(floor, game::FORGE_DRAINAGE_FLOOR);
+        let flat_dry = to_u8(drainage_at(0.0, 0.0, 100.0, 1.0e6, DRAINAGE_FLOOD_M));
+        assert_eq!(flat_dry, to_u8(DRAINAGE_BASE));
+        assert_eq!(flat_dry, game::FORGE_DRAINAGE_FLAT_DRY);
+    }
+
+    fn cell(drainage: u8, precip_mm: f32, temperature_c: f32, salinity: u8) -> game::CellClimate {
+        game::CellClimate { height_m: 3.0, temperature_c, precip_mm, drainage, salinity, is_lake: false }
+    }
+
+    /// A tropical shale floodplain at a river mouth (salt water within
+    /// reach) is mangrove: the forge's lowest drainage reaches DF's cut.
+    #[test]
+    fn mangrove_is_reachable_on_a_tropical_salt_floodplain() {
+        for rock in ["shale", "granite"] {
+            let perm = PERMEABILITY.iter().find(|p| p.0 == rock).unwrap().1;
+            let d = to_u8(drainage_at(0.0, perm, 0.5, 50.0, DRAINAGE_FLOOD_M));
+            assert_eq!(game::classify(&cell(d, 1500.0, 25.0, 90)), game::Biome::MangroveSwamp, "{rock}: drainage {d}");
+            // Fresh water: a plain swamp.
+            assert_eq!(game::classify(&cell(d, 1500.0, 25.0, 0)), game::Biome::Swamp, "{rock}");
+        }
+    }
+
+    /// Flat, dry, impermeable desert ground away from any water is sand;
+    /// permeable or sloping desert is rock or badlands.
+    #[test]
+    fn flat_desert_ground_is_sand() {
+        let at = |slope: f64, rock: &str| {
+            let perm = PERMEABILITY.iter().find(|p| p.0 == rock).unwrap().1;
+            game::classify(&cell(to_u8(drainage_at(slope, perm, 100.0, 1.0e5, DRAINAGE_FLOOD_M)), 150.0, 22.0, 0))
+        };
+        assert_eq!(at(0.0, "shale"), game::Biome::SandDesert);
+        assert_eq!(at(0.0, "granite"), game::Biome::RockyWasteland);
+        assert_eq!(at(0.05, "shale"), game::Biome::RockyWasteland);
+        assert_eq!(at(0.0, "sandstone"), game::Biome::Badlands);
+    }
+
     /// A flat world of `n` x `n` cells at `dx` m, `h` per cell, no sea.
     fn world(n: usize, dx: f64, h: impl Fn(usize, usize) -> f64) -> World {
         let h: Vec<f64> = (0..n * n).map(|i| h(i % n, i / n)).collect();

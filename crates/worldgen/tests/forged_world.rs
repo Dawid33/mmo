@@ -283,9 +283,9 @@ fn biome_cell_is_classify_of_cell_climate() {
     let (lake, lake_climate) = at(cell(LAKE_CELLS.0.start + 1, LAKE_CELLS.1.start + 1));
     assert!(lake_climate.is_lake);
     assert_eq!(lake, Biome::Lake);
-    // 14 C, 900 mm/yr (rain index 56), drainage 50: shrubland.
+    // 14 C, 900 mm/yr (temperate forest rainfall), drainage 50: conifer forest.
     let (plain_biome, plain_climate) = at(cell(50, 40));
-    assert_eq!(plain_biome, Biome::Shrubland, "{plain_climate:?}");
+    assert_eq!(plain_biome, Biome::ConiferForest, "{plain_climate:?}");
     for iz in 0..N {
         for ix in 0..N {
             let (b, c) = at(cell(ix, iz));

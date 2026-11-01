@@ -190,6 +190,7 @@ fn main() {
 
     let artifact = forged.artifact(&p.forge);
     print_biomes(&artifact);
+    render::biomes(&artifact, &format!("{stem}-biome.png"));
     let world_file = format!("{stem}.world");
     artifact.save(std::path::Path::new(&world_file)).expect("write world file");
     let bytes = std::fs::metadata(&world_file).map(|m| m.len()).unwrap_or(0);
@@ -251,7 +252,9 @@ fn print_biomes(a: &worldgen::forged::WorldArtifact) {
     }
     let counts = region_counts(&a.regions);
     let list: Vec<String> = counts.iter().map(|(t, c)| format!("{} {c}", t.name())).collect();
-    println!("regions: {} ({})", a.regions.len(), list.join(", "));
+    let min = worldgen::forge::regions::min_region_cells(a.cell_m);
+    let under = a.regions.iter().filter(|r| r.cells < min).count();
+    println!("regions: {} ({}); {under} under the merge area (water or frozen with no same-class neighbour)", a.regions.len(), list.join(", "));
     let cells = |al: i8| a.regions.iter().filter(|r| r.alignment == al).map(|r| r.cells as f64).sum::<f64>();
     let aligned: f64 = a.regions.iter().filter(|r| r.kind != game::RegionType::Ocean).map(|r| r.cells as f64).sum::<f64>().max(1.0);
     println!(
