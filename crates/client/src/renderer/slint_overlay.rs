@@ -39,7 +39,7 @@ use slint_ui::slint::{
 };
 use slint_ui::wheel::{self, WheelInput, WheelPhase};
 use slint_ui::{GameUi, HudConfig, HudUi, Overlay, WorldMapConfig};
-use worldgen::tile_map::{play_blocker, rasterize, tile_info_lines};
+use worldgen::tile_map::{play_blocker, rasterize, tile_info_lines, MapLayer};
 
 use super::bridge::{LocalBody, SimEntity, SimKind};
 use super::commander::designate::{DesignateState, DragReadout, Tool, TOOL_KEYS};
@@ -604,6 +604,8 @@ fn connect_game_ui(ui: &GameUi, world: &mut World) {
     ui.on_play(push(UiAction::Play));
     ui.on_toggle_mode(push(UiAction::ToggleMode));
     ui.on_follow_clicked(push(UiAction::ToggleFollow));
+    let layers: Vec<SharedString> = MapLayer::ALL.iter().map(|l| l.label().into()).collect();
+    ui.set_map_layer_names(ModelRc::new(VecModel::from(layers)));
     let queue = actions.clone();
     ui.on_select_tile(move |col, row| queue.borrow_mut().push(UiAction::SelectTile(col, row)));
     debug_assert_eq!(
@@ -834,17 +836,16 @@ pub fn map_tile(map: &WorldMap, rc: RegionCoords) -> Option<(i32, i32)> {
     Some((rc.x - map.origin.x, rc.z - map.origin.z))
 }
 
+/// The map layer of the UI's layer button `index` (the buttons are
+/// [`MapLayer::ALL`] in order); the first for an unknown index.
+pub fn map_layer(index: i32) -> MapLayer {
+    usize::try_from(index).ok().and_then(|i| MapLayer::ALL.get(i)).copied().unwrap_or(MapLayer::ALL[0])
+}
+
 /// The region of map tile (`col`, `row`), `None` off the map.
 pub fn tile_region(map: &WorldMap, col: i32, row: i32) -> Option<RegionCoords> {
     let rc = RegionCoords::new(map.origin.x + col, map.origin.z + row);
     (col >= 0 && row >= 0 && map.tile(rc).is_some()).then_some(rc)
-}
-
-/// The pan (view-relative position of the map's top-left) that puts the
-/// centre of tile `index` at the centre of a view `view_len` long.
-pub fn centred_pan(view_len: f32, index: i32, tile_len: f32) -> f32 {
-    // Whole pixels, like every pan the map window sets itself.
-    (view_len / 2.0 - (index as f32 + 0.5) * tile_len).round()
 }
 
 /// What the player reads when the server refuses Play.
@@ -875,8 +876,8 @@ pub fn map_status_text(pending: Option<RegionCoords>, refused: Option<PlayRefusa
     }
 }
 
-/// Show `to`; on opening the map, drop a stale refusal and centre the view
-/// on the home tile. Keeps `CursorPolicy::ui_modal` in step (its only writer):
+/// Show `to`; on opening the map, drop a stale refusal and bring the home
+/// tile into view (centred unless it is in view already). Keeps `CursorPolicy::ui_modal` in step (its only writer):
 /// any screen open, or not `embarked`.
 /// Takes the `ResMut`s themselves and writes through them only on a real
 /// change, so an idle frame does not mark either resource changed (that
@@ -896,9 +897,7 @@ fn set_screens(
         }
         let home_tile = world_map.map.as_ref().zip(home).and_then(|(map, home)| map_tile(map, home));
         if let Some((col, row)) = home_tile {
-            let tile_len = ui.global::<WorldMapConfig>().get_tile_px() as f32 * ui.get_map_zoom();
-            ui.set_map_pan_x(centred_pan(ui.get_map_view_width(), col, tile_len));
-            ui.set_map_pan_y(centred_pan(ui.get_map_view_height(), row, tile_len));
+            ui.invoke_show_map_tile(col, row);
         }
     }
     if from.menu != to.menu {
@@ -1333,6 +1332,8 @@ struct MapShown {
     map: Option<WorldMap>,
     /// Bumped whenever `map` is replaced.
     generation: u64,
+    /// (generation, layer index) the map picture was last drawn for.
+    image_for: Option<(u64, i32)>,
     /// (generation, selected column, selected row, home, Play pending,
     /// embarked) the tile info was last computed for.
     info_for: Option<(u64, i32, i32, Option<RegionCoords>, bool, bool)>,
@@ -1354,21 +1355,34 @@ struct MapParams<'w, 's> {
 fn sync_world_map(ui: &GameUi, home: Option<RegionCoords>, p: &mut MapParams) {
     let shown = p.shown.get();
     if p.world_map.is_changed() && shown.map.as_ref() != p.world_map.map.as_ref() {
-        match &p.world_map.map {
-            Some(map) => {
-                let (width, height, pixels) = rasterize(map);
-                let buffer = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(pixels.as_flattened(), width, height);
-                ui.set_map_image(SlintImage::from_rgba8(buffer));
-                ui.set_map_cols(map.width as i32);
-                ui.set_map_rows(map.height as i32);
-            }
-            None => ui.set_map_image(SlintImage::default()),
+        if let Some(map) = &p.world_map.map {
+            ui.set_map_cols(map.width as i32);
+            ui.set_map_rows(map.height as i32);
         }
         ui.set_map_available(p.world_map.map.is_some());
         shown.map = p.world_map.map.clone();
         shown.generation += 1;
+        // A new map opens whole (a 100 km world is 196 tiles a side).
+        if p.world_map.map.is_some() {
+            ui.invoke_fit_map();
+        }
     }
     let map = p.world_map.map.as_ref();
+
+    // The picture of the picked layer, redrawn when the map or layer changes.
+    let layer = ui.get_map_layer();
+    if shown.image_for != Some((shown.generation, layer)) {
+        shown.image_for = Some((shown.generation, layer));
+        match map {
+            Some(map) => {
+                let layer = map_layer(layer);
+                let (width, height, pixels) = rasterize(map, layer);
+                let buffer = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(pixels.as_flattened(), width, height);
+                ui.set_map_image(SlintImage::from_rgba8(buffer));
+            }
+            None => ui.set_map_image(SlintImage::default()),
+        }
+    }
 
     let (home_col, home_row) = map.zip(home).and_then(|(map, home)| map_tile(map, home)).unwrap_or((-1, -1));
     if ui.get_home_col() != home_col || ui.get_home_row() != home_row {
@@ -1632,6 +1646,7 @@ mod tests {
             height: 0,
             tiles: Vec::new(),
             rock_names: Vec::new(),
+            region_types: Vec::new(),
         });
         assert!(!hides(FrontendHide::ExceptArrivalMap, &not, &world_map), "the arrival map");
         assert!(hides(FrontendHide::Always, &not, &world_map), "no HUD before embarking");
@@ -1680,9 +1695,12 @@ mod tests {
     }
 
     #[test]
-    fn centred_pan_puts_the_tile_centre_mid_view() {
-        assert_eq!(centred_pan(100.0, 2, 10.0), 25.0);
-        assert_eq!(centred_pan(100.0, 0, 10.0), 45.0);
+    fn map_layer_follows_the_button_order() {
+        assert_eq!(map_layer(0), MapLayer::Biome);
+        assert_eq!(map_layer(1), MapLayer::Relief);
+        assert_eq!(map_layer(4), MapLayer::Regions);
+        assert_eq!(map_layer(-1), MapLayer::Biome);
+        assert_eq!(map_layer(9), MapLayer::Biome);
     }
 
     #[test]
@@ -1701,6 +1719,13 @@ mod tests {
             river_max_width_m: 0.0,
             surface_rock: None,
             landing: None,
+            biome: game::Biome::Ocean,
+            region: 0,
+            temperature_c: 0.0,
+            precip_mm: 0.0,
+            savagery: 0,
+            alignment: 0,
+            volcano: false,
         };
         let map = WorldMap {
             origin: RegionCoords::new(-2, 3),
@@ -1708,6 +1733,7 @@ mod tests {
             height: 2,
             tiles: vec![tile; 6],
             rock_names: Vec::new(),
+            region_types: Vec::new(),
         };
         assert_eq!(tile_region(&map, 0, 0), Some(RegionCoords::new(-2, 3)));
         assert_eq!(tile_region(&map, 2, 1), Some(RegionCoords::new(0, 4)));

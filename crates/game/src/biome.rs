@@ -153,7 +153,41 @@ impl Biome {
             Biome::Mountain => "Mountain",
         }
     }
+
+    /// The biome's flat colour (RGB) on every biome map: the world map's
+    /// biome layer (`worldgen::tile_map::rasterize_layer`) and the forge's
+    /// debug biome render. The one palette — colour biomes from here.
+    pub fn map_rgb(self) -> [u8; 3] {
+        BIOME_MAP_RGB[self as usize]
+    }
 }
+
+/// [`Biome::map_rgb`] by discriminant. Water blues, ice whites, forests
+/// green (tropical darker, taiga blue-grey), dry land tan to rust, wetlands
+/// teal / olive / purple, mountain grey; every pair far enough apart to tell
+/// on a map (a test pins the spread).
+pub const BIOME_MAP_RGB: [[u8; 3]; 20] = [
+    [40, 80, 160],   // Ocean
+    [170, 200, 225], // FrozenOcean
+    [70, 150, 215],  // Lake
+    [245, 250, 255], // Glacier
+    [175, 185, 165], // Tundra
+    [80, 120, 110],  // Taiga
+    [35, 110, 60],   // ConiferForest
+    [80, 160, 50],   // BroadleafForest
+    [20, 130, 100],  // TropicalConiferForest
+    [10, 85, 25],    // TropicalBroadleafForest
+    [165, 205, 90],  // Grassland
+    [205, 190, 95],  // Savanna
+    [145, 150, 85],  // Shrubland
+    [238, 218, 150], // SandDesert
+    [165, 140, 115], // RockyWasteland
+    [190, 100, 60],  // Badlands
+    [110, 175, 160], // Marsh
+    [70, 95, 60],    // Swamp
+    [130, 60, 140],  // MangroveSwamp
+    [120, 115, 110], // Mountain
+];
 
 /// The fields one cell is classified from.
 #[derive(Clone, Copy, Debug, PartialEq)]

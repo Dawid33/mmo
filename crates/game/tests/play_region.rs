@@ -192,6 +192,13 @@ mod manager {
             river_max_width_m: 0.0,
             surface_rock: None,
             landing,
+            biome: game::Biome::Grassland,
+            region: 0,
+            temperature_c: 10.0,
+            precip_mm: 700.0,
+            savagery: 50,
+            alignment: 0,
+            volcano: false,
         }
     }
 
@@ -200,7 +207,7 @@ mod manager {
         let tiles = (0..9)
             .map(|i| tile(if i == 8 { None } else { Some([2, 2]) }))
             .collect();
-        WorldMap { origin: RegionCoords::new(-1, -1), width: 3, height: 3, tiles, rock_names: vec![] }
+        WorldMap { origin: RegionCoords::new(-1, -1), width: 3, height: 3, tiles, rock_names: vec![], region_types: vec![] }
     }
 
     fn with_map() -> Harness {

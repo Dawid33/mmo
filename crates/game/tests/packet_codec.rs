@@ -85,6 +85,13 @@ fn tile(landing: Option<[u32; 2]>) -> game::TileSummary {
         river_max_width_m: 3.0,
         surface_rock: Some(1),
         landing,
+        biome: game::Biome::Grassland,
+        region: 0,
+        temperature_c: 10.0,
+        precip_mm: 700.0,
+        savagery: 50,
+        alignment: 0,
+        volcano: false,
     }
 }
 
@@ -95,6 +102,7 @@ fn map_2x1() -> game::WorldMap {
         height: 1,
         tiles: vec![tile(Some([3, 4])), tile(None)],
         rock_names: vec!["granite".into(), "basalt".into()],
+        region_types: vec![game::RegionType::Grassland],
     }
 }
 
@@ -132,6 +140,7 @@ fn world_map_tile_lookup() {
         height: 2,
         tiles,
         rock_names: vec![],
+        region_types: vec![],
     };
     assert_eq!(map.tile(RegionCoords::new(1, 0)).unwrap().rivers, 5);
     assert!(map.tile(RegionCoords::new(2, 0)).is_none());

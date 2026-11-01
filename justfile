@@ -463,7 +463,9 @@ tree-textures:
 # terrain stats, into target/world-map/. Flags: --span <m> --size <px>
 # --center <x,z> --out <path stem> --seed <hex> --relief <factor> --world <file>
 # --layer rain|temperature|moisture|salinity (extra habitat PNG), e.g.
-# `just world-map --span 65536 --size 2048`.
+# `just world-map --span 65536 --size 2048`. `--world <file> --tiles` writes the
+# in-game world map instead (every map layer, `<out>-tiles-<layer>.png`) and
+# prints the WorldMap packet size; pass `region_blocks=512` for the play tiling.
 world-map *args:
     {{cap}} {{cargo}} run --release -p worldgen --example world_map -- {{args}}
 

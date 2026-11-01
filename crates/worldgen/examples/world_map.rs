@@ -16,6 +16,11 @@
 //! `--layer rain|temperature|moisture|salinity|trees` also writes `<out>-<layer>.png`
 //! (greyscale ramp over the layer's fixed range, `worldgen::habitat`).
 //!
+//! `--world <file> --tiles` instead writes the in-game world map: every
+//! `tile_map::MapLayer` as `<out>-tiles-<layer>.png` (the map window's
+//! picture, `MAP_TILE_PX` per tile) and prints the size of the `WorldMap`
+//! packet the server sends on connect.
+//!
 //! Heights come straight from `TerrainPipeline::column` (the exact field, not
 //! the 4 m `ProfileGrid` lattice `generate_region` interpolates — the two agree
 //! to well under a block), so a map costs one profile per pixel and never
@@ -83,6 +88,8 @@ struct Args {
     world: Option<PathBuf>,
     /// Also write one habitat field as a greyscale PNG.
     layer: Option<Layer>,
+    /// Write the world map's tile layers instead (needs `world`).
+    tiles: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -139,6 +146,7 @@ fn parse_args() -> Args {
         relief: DEFAULT_RELIEF,
         world: None,
         layer: None,
+        tiles: false,
     };
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
@@ -160,8 +168,9 @@ fn parse_args() -> Args {
             "--relief" => a.relief = value().parse().expect("--relief <factor>"),
             "--world" => a.world = Some(PathBuf::from(value())),
             "--layer" => a.layer = Some(Layer::parse(&value())),
+            "--tiles" => a.tiles = true,
             other => panic!(
-                "unknown argument {other}; flags: --span --size --center --out --seed --relief --world --layer"
+                "unknown argument {other}; flags: --span --size --center --out --seed --relief --world --layer --tiles"
             ),
         }
     }
@@ -223,8 +232,34 @@ fn percentile(sorted: &[f32], q: f64) -> f32 {
     sorted[((sorted.len() - 1) as f64 * q).round() as usize]
 }
 
+/// `--tiles`: the world map as the game shows it, one PNG per layer.
+fn write_tiles(a: &Args) {
+    use worldgen::tile_map::{build_world_map, rasterize, MapLayer};
+    let path = a.world.as_ref().expect("--tiles needs --world <file>");
+    let world = worldgen::forged::ForgedWorld::load(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let started = std::time::Instant::now();
+    let map = build_world_map(&world);
+    println!("world map: {}x{} tiles in {:?}", map.width, map.height, started.elapsed());
+    let packet = game::encode_packet(&game::ServerPacket::WorldMap(map.clone())).expect("encode");
+    println!("WorldMap packet: {} bytes on the wire", packet.len());
+    if let Some(dir) = a.out.parent() {
+        std::fs::create_dir_all(dir).expect("create output directory");
+    }
+    for layer in MapLayer::ALL {
+        let (w, h, px) = rasterize(&map, layer);
+        let img = image::RgbaImage::from_raw(w, h, px.into_iter().flatten().collect()).expect("buffer size");
+        let out = format!("{}-tiles-{}.png", a.out.display(), layer.label().to_lowercase());
+        img.save(&out).expect("write tiles png");
+        println!("wrote {out}");
+    }
+}
+
 fn main() {
     let a = parse_args();
+    if a.tiles {
+        write_tiles(&a);
+        return;
+    }
     let n = a.size;
     let step = a.span_m / n as f64;
     println!(

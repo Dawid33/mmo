@@ -9,13 +9,17 @@ export global WorldMapConfig {
     // Grid-line width in map pixels, drawn on each tile's right and bottom
     // edge. Must match `worldgen::tile_map::MAP_GRID_PX`.
     out property <int> grid-px: 1;
-    // Zoom doubles / halves per wheel notch: ½, 1, 2, 4, 8. Powers of two
+    // Zoom doubles / halves per wheel notch: ⅛, ¼, ½, 1, 2, 4, 8 (⅛ shows a
+    // 100 km world's 196 tiles a pixel each). Powers of two
     // only: the software renderer steps through a scaled image in fixed
     // point, so any other factor (×1.25, even ×3) drifts the image off the
     // markers by up to a few pixels across the map; whole factors also keep
     // the grid lines even.
-    out property <float> zoom-min: 0.5;
+    out property <float> zoom-min: 0.125;
     out property <float> zoom-max: 8;
+    // A pan keeps at least this share of the view (or all of a smaller map)
+    // covered by the map: the map can never be dragged out of sight.
+    out property <float> pan-keep: 0.5;
     // Matches the client's `WHEEL_LINE_PX`.
     out property <length> wheel-notch: 40px;
     // A press that moves further than this is a drag (pan), not a click.
@@ -32,12 +36,16 @@ export global WorldMapConfig {
 }
 
 // The world map (M, or the menu's World Map button): one tile per region,
-// zoomable about the cursor (wheel) and pannable (drag); click selects a
-// tile. The side panel shows what is known about the selected tile and the
+// zoomable about the cursor (wheel) and pannable (drag), never out of sight
+// (`pan-keep`); click selects a tile; the layer buttons pick what the
+// picture shows (the client redraws `map-image` for `map-layer`). The side panel shows what is known about the selected tile and the
 // Play button. The client builds `map-image` (`tile-px` pixels per tile) and
 // owns every property but the ones this window edits (selection, zoom, pan).
 export component WorldMap {
     in property <image> map-image;
+    // The layer buttons' captions; `map-layer` indexes them (0 = default).
+    in property <[string]> layer-names;
+    in-out property <int> map-layer;
     in property <int> map-cols;
     in property <int> map-rows;
     in property <bool> map-available;
@@ -73,6 +81,39 @@ export component WorldMap {
     // Close sits under Play, in a slot that is empty while `map-modal`.
     out property <length> close-button-x: root.play-button-x;
     out property <length> close-button-y: close-slot.absolute-position.y + close-slot.height / 2;
+    // The layer buttons: a column, button `i`'s centre at
+    // (`layer-button-x`, `layer-buttons-top + (i + 0.5) * layer-button-pitch`).
+    out property <length> layer-button-x: layers.absolute-position.x + layers.width / 2;
+    out property <length> layer-buttons-top: layers.absolute-position.y;
+    out property <length> layer-button-pitch: layers.height / max(1, root.layer-names.length);
+
+    // The whole map at the largest zoom step that fits the view, centred.
+    public function fit-map() {
+        let w = root.map-cols * WorldMapConfig.tile-px * 1px;
+        let h = root.map-rows * WorldMapConfig.tile-px * 1px;
+        if w <= 0px || h <= 0px || view.width <= 0px || view.height <= 0px {
+            return;
+        }
+        let fit = min(view.width / w, view.height / h);
+        // A hair over the exact ratio, so a power of two that fits exactly
+        // is not lost to log rounding.
+        let zoom = clamp(pow(2, floor(log(fit * 1.0001, 2))), WorldMapConfig.zoom-min, WorldMapConfig.zoom-max);
+        root.map-zoom = zoom;
+        root.map-pan-x = root.snap((view.width - w * zoom) / 2);
+        root.map-pan-y = root.snap((view.height - h * zoom) / 2);
+    }
+
+    // Bring tile (`col`, `row`) into view: centred (as far as the clamp
+    // allows) unless it is already wholly visible.
+    public function show-tile(col: int, row: int) {
+        let x = root.map-pan-x + col * root.tile-len;
+        let y = root.map-pan-y + row * root.tile-len;
+        if x >= 0 && y >= 0 && x + root.tile-len <= view.width && y + root.tile-len <= view.height {
+            return;
+        }
+        root.map-pan-x = root.clamp-pan-x(root.snap(view.width / 2 - (col + 0.5) * root.tile-len));
+        root.map-pan-y = root.clamp-pan-y(root.snap(view.height / 2 - (row + 0.5) * root.tile-len));
+    }
 
     property <length> tile-len: WorldMapConfig.tile-px * 1px * root.map-zoom;
     // A tile's visible cell: the tile minus its grid line (right and bottom),
@@ -88,6 +129,15 @@ export component WorldMap {
 
     // Scroll not yet worth a notch (touchpads scroll in small steps).
     property <length> wheel-acc;
+    // The map point (zoom-1 pixels) a wheel gesture zooms about, kept while
+    // the cursor and the pan stay where that gesture left them, so pan
+    // rounding never adds up over notches.
+    property <length> anchor-x;
+    property <length> anchor-y;
+    property <length> anchor-mouse-x: -1px;
+    property <length> anchor-mouse-y: -1px;
+    property <length> anchor-pan-x;
+    property <length> anchor-pan-y;
 
     pure function zoom-in(z: float) -> float {
         min(z * 2, WorldMapConfig.zoom-max)
@@ -98,6 +148,18 @@ export component WorldMap {
     // Pans stay on whole pixels, so the image's pixels land on the screen's.
     pure function snap(v: length) -> length {
         round(v / 1px) * 1px
+    }
+
+    // Pans keep `pan-keep` of the view (or all of a smaller map) on the map.
+    pure function clamp-pan(pan: length, view-len: length, map-len: length) -> length {
+        let keep = min(map-len, view-len * WorldMapConfig.pan-keep);
+        clamp(pan, keep - map-len, max(keep - map-len, view-len - keep))
+    }
+    pure function clamp-pan-x(pan: length) -> length {
+        root.clamp-pan(pan, view.width, root.map-cols * root.tile-len)
+    }
+    pure function clamp-pan-y(pan: length) -> length {
+        root.clamp-pan(pan, view.height, root.map-rows * root.tile-len)
     }
 
     pure function tile-at(offset: length, count: int) -> int {
@@ -187,8 +249,8 @@ export component WorldMap {
                             root.dragged = true;
                         }
                         if root.dragged {
-                            root.map-pan-x = root.snap(root.drag-start-x + self.mouse-x - self.pressed-x);
-                            root.map-pan-y = root.snap(root.drag-start-y + self.mouse-y - self.pressed-y);
+                            root.map-pan-x = root.clamp-pan-x(root.snap(root.drag-start-x + self.mouse-x - self.pressed-x));
+                            root.map-pan-y = root.clamp-pan-y(root.snap(root.drag-start-y + self.mouse-y - self.pressed-y));
                         }
                     }
                 }
@@ -215,9 +277,18 @@ export component WorldMap {
                     }
                     let zoom = root.wheel-acc > 0 ? root.zoom-in(root.map-zoom) : root.zoom-out(root.map-zoom);
                     root.wheel-acc = 0;
-                    root.map-pan-x = root.snap(self.mouse-x - (self.mouse-x - root.map-pan-x) * zoom / root.map-zoom);
-                    root.map-pan-y = root.snap(self.mouse-y - (self.mouse-y - root.map-pan-y) * zoom / root.map-zoom);
+                    if self.mouse-x != root.anchor-mouse-x || self.mouse-y != root.anchor-mouse-y
+                        || root.map-pan-x != root.anchor-pan-x || root.map-pan-y != root.anchor-pan-y {
+                        root.anchor-x = (self.mouse-x - root.map-pan-x) / root.map-zoom;
+                        root.anchor-y = (self.mouse-y - root.map-pan-y) / root.map-zoom;
+                    }
                     root.map-zoom = zoom;
+                    root.map-pan-x = root.clamp-pan-x(root.snap(self.mouse-x - root.anchor-x * zoom));
+                    root.map-pan-y = root.clamp-pan-y(root.snap(self.mouse-y - root.anchor-y * zoom));
+                    root.anchor-mouse-x = self.mouse-x;
+                    root.anchor-mouse-y = self.mouse-y;
+                    root.anchor-pan-x = root.map-pan-x;
+                    root.anchor-pan-y = root.map-pan-y;
                     accept
                 }
             }
@@ -228,6 +299,14 @@ export component WorldMap {
             y: window.content-y;
             width: WorldMapConfig.side-width;
 
+            layers := VerticalLayout {
+                for name[i] in root.layer-names: Button {
+                    text: name;
+                    enabled: root.map-available;
+                    toggled: i == root.map-layer;
+                    clicked => { root.map-layer = i; }
+                }
+            }
             if root.map-available && root.selected-col < 0: LabelFace {
                 style: Styles.caption-label;
                 text: "Select a tile";

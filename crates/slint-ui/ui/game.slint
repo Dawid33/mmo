@@ -66,6 +66,10 @@ export component GameUi inherits Window {
     in-out property <bool> map-open;
     // The whole tile grid, `WorldMapConfig.tile-px` pixels per tile.
     in property <image> map-image;
+    // The map's layer buttons (captions) and the picked one, which
+    // `map-image` shows.
+    in property <[string]> map-layer-names;
+    in-out property <int> map-layer;
     in property <int> map-cols;
     in property <int> map-rows;
     // False without a forged world: the map says so instead.
@@ -93,6 +97,17 @@ export component GameUi inherits Window {
     out property <length> map-view-height: map.view-height;
     out property <length> play-button-x: map.play-button-x;
     out property <length> play-button-y: map.play-button-y;
+    out property <length> layer-button-x: map.layer-button-x;
+    out property <length> layer-buttons-top: map.layer-buttons-top;
+    out property <length> layer-button-pitch: map.layer-button-pitch;
+    // The whole map in view (the client calls it when a map arrives).
+    public function fit-map() {
+        map.fit-map();
+    }
+    // Tile (`col`, `row`) of the map into view (the home tile, on opening).
+    public function show-map-tile(col: int, row: int) {
+        map.show-tile(col, row);
+    }
 
     callback open-map();
     callback close-menu();
@@ -242,6 +257,8 @@ export component GameUi inherits Window {
         width: 100%;
         height: 100%;
         map-image: root.map-image;
+        layer-names: root.map-layer-names;
+        map-layer <=> root.map-layer;
         map-cols: root.map-cols;
         map-rows: root.map-rows;
         map-available: root.map-available;

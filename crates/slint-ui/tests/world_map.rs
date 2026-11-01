@@ -311,3 +311,142 @@ fn modal_menu_offers_only_main_menu() {
     click(&mut overlay, x, y);
     assert_eq!(*left.borrow(), 1, "Main menu fires");
 }
+
+/// The tile (column, row) under view-relative point `(x, y)`, from the map's
+/// pan and zoom as the UI holds them.
+fn tile_under(overlay: &Overlay<GameUi>, x: f32, y: f32) -> (i32, i32) {
+    let ui = overlay.ui();
+    let len = ui.global::<WorldMapConfig>().get_tile_px() as f32 * ui.get_map_zoom();
+    (((x - ui.get_map_pan_x()) / len).floor() as i32, ((y - ui.get_map_pan_y()) / len).floor() as i32)
+}
+
+/// A 100 km world (196 × 196 tiles) does not fit the view at 1:1: fitting
+/// shows all of it, centred, at the largest zoom step that fits. From there
+/// every wheel notch in, to the closest zoom, and back out to the farthest,
+/// keeps the tile under the cursor under it, and a click there selects it.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn world_map_zoom_keeps_tile_under_cursor() {
+    let mut overlay = overlay();
+    let selected = Rc::new(RefCell::new(Vec::new()));
+    let s = selected.clone();
+    overlay.ui().on_select_tile(move |col, row| s.borrow_mut().push((col, row)));
+    let side = 196;
+    let ui = overlay.ui();
+    ui.set_map_open(true);
+    ui.set_map_available(true);
+    ui.set_map_cols(side);
+    ui.set_map_rows(side);
+    overlay.render();
+    overlay.ui().invoke_fit_map();
+    overlay.render();
+
+    let ui = overlay.ui();
+    let config = ui.global::<WorldMapConfig>();
+    let (tile, notch) = (config.get_tile_px() as f32, config.get_wheel_notch());
+    let (zoom_min, zoom_max) = (config.get_zoom_min(), config.get_zoom_max());
+    let (vw, vh) = (ui.get_map_view_width(), ui.get_map_view_height());
+    let fit = ui.get_map_zoom();
+    let map_len = side as f32 * tile * fit;
+    assert!(map_len <= vw && map_len <= vh, "fitted: {map_len} px in a {vw}x{vh} view");
+    assert!(fit == zoom_min || 2.0 * map_len > vw.min(vh), "the largest zoom that fits ({fit})");
+    assert!(fit < 1.0, "196 tiles do not fit at 1:1");
+    assert_eq!(ui.get_map_pan_x(), ((vw - map_len) / 2.0).round(), "centred");
+    assert_eq!(ui.get_map_pan_y(), ((vh - map_len) / 2.0).round(), "centred");
+
+    // The cursor a quarter pixel off the middle of an off-centre tile.
+    let (col, row) = (61, 133);
+    let len = tile * fit;
+    let cursor = (
+        ui.get_map_pan_x() + (col as f32 + 0.5) * len + 0.25,
+        ui.get_map_pan_y() + (row as f32 + 0.5) * len + 0.25,
+    );
+    assert_eq!(tile_under(&overlay, cursor.0, cursor.1), (col, row));
+    let (x0, y0) = (ui.get_map_view_x(), ui.get_map_view_y());
+    let position = LogicalPosition::new(x0 + cursor.0, y0 + cursor.1);
+    overlay.dispatch(WindowEvent::PointerMoved { position });
+
+    let mut check = |overlay: &mut Overlay<GameUi>, delta: f32, steps: usize| {
+        for _ in 0..steps {
+            overlay.dispatch(WindowEvent::PointerScrolled { position, delta_x: 0.0, delta_y: delta });
+            overlay.render();
+            let zoom = overlay.ui().get_map_zoom();
+            assert_eq!(tile_under(overlay, cursor.0, cursor.1), (col, row), "zoom {zoom}");
+            selected.borrow_mut().clear();
+            click(overlay, position.x, position.y);
+            assert_eq!(*selected.borrow(), [(col, row)], "a click at zoom {zoom}");
+        }
+    };
+    let ins = (zoom_max / fit).log2().round() as usize;
+    check(&mut overlay, notch, ins);
+    assert_eq!(overlay.ui().get_map_zoom(), zoom_max);
+    let outs = (zoom_max / zoom_min).log2().round() as usize;
+    check(&mut overlay, -notch, outs);
+    assert_eq!(overlay.ui().get_map_zoom(), zoom_min);
+}
+
+/// Panning stops with the map still on screen: half the view stays covered
+/// by a map bigger than it, and a smaller map stays wholly inside it.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn panning_is_clamped_to_the_map() {
+    let mut overlay = overlay();
+    let ui = overlay.ui();
+    ui.set_map_open(true);
+    ui.set_map_available(true);
+    ui.set_map_cols(196);
+    ui.set_map_rows(196);
+    ui.set_map_zoom(1.0);
+    overlay.render();
+    let ui = overlay.ui();
+    let (x0, y0) = (ui.get_map_view_x(), ui.get_map_view_y());
+    let (vw, vh) = (ui.get_map_view_width(), ui.get_map_view_height());
+    let map_len = 196.0 * ui.global::<WorldMapConfig>().get_tile_px() as f32;
+    let left = PointerEventButton::Left;
+    let mut drag = |overlay: &mut Overlay<GameUi>, dx: f32, dy: f32| {
+        let start = LogicalPosition::new(x0 + vw / 2.0, y0 + vh / 2.0);
+        let end = LogicalPosition::new(start.x + dx, start.y + dy);
+        overlay.dispatch(WindowEvent::PointerMoved { position: start });
+        overlay.dispatch(WindowEvent::PointerPressed { position: start, button: left });
+        overlay.dispatch(WindowEvent::PointerMoved { position: end });
+        overlay.dispatch(WindowEvent::PointerReleased { position: end, button: left });
+        overlay.render();
+    };
+    // Far right and down: the map's top-left stops half a view in.
+    for _ in 0..4 {
+        drag(&mut overlay, 400.0, 300.0);
+    }
+    let (px, py) = (overlay.ui().get_map_pan_x(), overlay.ui().get_map_pan_y());
+    assert!((px - vw / 2.0).abs() <= 1.0 && (py - vh / 2.0).abs() <= 1.0, "({px}, {py}) in {vw}x{vh}");
+    // Far left and up: the map's bottom-right stops half a view in.
+    for _ in 0..12 {
+        drag(&mut overlay, -400.0, -300.0);
+    }
+    let (px, py) = (overlay.ui().get_map_pan_x(), overlay.ui().get_map_pan_y());
+    assert!((px + map_len - vw / 2.0).abs() <= 1.0, "{px}");
+    assert!((py + map_len - vh / 2.0).abs() <= 1.0, "{py}");
+}
+
+/// The layer buttons, one per name the client gives, pick `map-layer`.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn layer_buttons_pick_the_layer() {
+    use slint_ui::slint::{ModelRc, SharedString, VecModel};
+    let mut overlay = overlay();
+    let names: Vec<SharedString> = ["Biomes", "Relief", "Temperature", "Rain", "Regions"].map(Into::into).to_vec();
+    let ui = overlay.ui();
+    ui.set_map_layer_names(ModelRc::new(VecModel::from(names)));
+    ui.set_map_open(true);
+    ui.set_map_available(true);
+    ui.set_map_cols(4);
+    ui.set_map_rows(4);
+    overlay.render();
+    assert_eq!(overlay.ui().get_map_layer(), 0, "biomes by default");
+    for i in [3, 1, 4, 0] {
+        let ui = overlay.ui();
+        let (x, y) = (ui.get_layer_button_x(), ui.get_layer_buttons_top() + (i as f32 + 0.5) * ui.get_layer_button_pitch());
+        assert!(overlay.opaque_at(x as u32, y as u32), "layer button {i} drawn at ({x}, {y})");
+        click(&mut overlay, x, y);
+        assert_eq!(overlay.ui().get_map_layer(), i);
+    }
+}

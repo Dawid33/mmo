@@ -2,6 +2,7 @@
 //! world) and the Play request. Pure data: the server fills them from
 //! `ForgedWorld` rasters, the client builds the picture.
 
+use crate::biome::{Biome, RegionType};
 use crate::protocol::RegionCoords;
 
 /// What one region looks like from above, summarised from the forged rasters.
@@ -29,6 +30,21 @@ pub struct TileSummary {
     pub surface_rock: Option<u8>,
     /// Region-local BLOCK column of the landing spot; `None` = no dry land.
     pub landing: Option<[u32; 2]>,
+    /// The most common stored biome over the tile (lowest discriminant wins a tie).
+    pub biome: Biome,
+    /// The most common forge region over the tile (lowest id wins a tie): an
+    /// index into [`WorldMap::region_types`].
+    pub region: u16,
+    /// Mean annual temperature at the ground over the tile, deg C.
+    pub temperature_c: f32,
+    /// Mean annual precipitation over the tile, mm/yr.
+    pub precip_mm: f32,
+    /// Mean savagery over the tile, 0..=100.
+    pub savagery: u8,
+    /// Alignment of `region`: -1 evil, 0 neutral, 1 good.
+    pub alignment: i8,
+    /// A volcano's summit lies in the tile.
+    pub volcano: bool,
 }
 
 /// The whole world as a grid of tile summaries, row-major by z then x.
@@ -41,6 +57,8 @@ pub struct WorldMap {
     pub height: u32,
     pub tiles: Vec<TileSummary>,
     pub rock_names: Vec<String>,
+    /// The type of every forge region, by id ([`TileSummary::region`]).
+    pub region_types: Vec<RegionType>,
 }
 
 impl WorldMap {

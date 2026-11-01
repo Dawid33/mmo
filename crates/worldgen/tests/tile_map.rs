@@ -194,6 +194,13 @@ fn tile(f: impl FnOnce(&mut TileSummary)) -> TileSummary {
         river_max_width_m: 0.0,
         surface_rock: None,
         landing: Some([1, 1]),
+        biome: game::Biome::Grassland,
+        region: 0,
+        temperature_c: 14.0,
+        precip_mm: 900.0,
+        savagery: 50,
+        alignment: 0,
+        volcano: false,
     };
     f(&mut t);
     t
@@ -224,12 +231,13 @@ fn two_tile_map() -> WorldMap {
         height: 1,
         tiles: vec![tile(|t| t.rivers = 1), tile(|_| {})],
         rock_names: vec!["granite".into()],
+        region_types: vec![],
     }
 }
 
 #[test]
 fn rasterize_size_and_grid() {
-    let (w, h, px) = rasterize(&two_tile_map());
+    let (w, h, px) = rasterize(&two_tile_map(), MapLayer::Relief);
     assert_eq!((w, h), (2 * MAP_TILE_PX, MAP_TILE_PX));
     assert_eq!(px.len(), (w * h) as usize);
     let at = |x: u32, z: u32| px[(z * w + x) as usize];
@@ -244,10 +252,13 @@ fn rasterize_size_and_grid() {
 fn info_lines_omit_absent_facts() {
     let map = two_tile_map();
     let lines = tile_info_lines(&map, RegionCoords::new(4, -2));
-    assert_eq!(lines.len(), 3, "{lines:?}");
+    assert_eq!(lines.len(), 6, "{lines:?}");
     assert_eq!(lines[0], "Region (4, -2)");
-    assert_eq!(lines[1], "Terrain: Lowland (provisional)");
-    assert_eq!(lines[2], "Elevation: 0\u{2013}20 m (mean 10 m)");
+    assert_eq!(lines[1], "Biome: Grassland");
+    assert_eq!(lines[2], "Terrain: Lowland (provisional)");
+    assert_eq!(lines[3], "Elevation: 0\u{2013}20 m (mean 10 m)");
+    assert_eq!(lines[4], "Climate: 14 \u{b0}C, 900 mm rain a year");
+    assert_eq!(lines[5], "Savagery: 50");
     assert!(tile_info_lines(&map, RegionCoords::new(0, 0)).is_empty());
 
     let full = WorldMap {
@@ -261,9 +272,25 @@ fn info_lines_omit_absent_facts() {
         ..two_tile_map()
     };
     let lines = tile_info_lines(&full, RegionCoords::new(3, -2));
-    assert_eq!(lines[3..], ["Rivers: 2 (largest 6 m wide)", "Lake: level 12 m", "Rock: granite"]);
+    assert_eq!(lines[6..], ["Rivers: 2 (largest 6 m wide)", "Lake: level 12 m", "Rock: granite"]);
     let bad = WorldMap { tiles: vec![tile(|t| t.surface_rock = Some(9))], ..full };
-    assert_eq!(tile_info_lines(&bad, RegionCoords::new(3, -2)).len(), 3, "out-of-range rock omitted");
+    assert_eq!(tile_info_lines(&bad, RegionCoords::new(3, -2)).len(), 6, "out-of-range rock omitted");
+
+    // A forge region (type + number, alignment when not neutral) and a volcano.
+    let regions = WorldMap {
+        tiles: vec![tile(|t| {
+            t.region = 1;
+            t.alignment = -1;
+            t.volcano = true;
+        })],
+        region_types: vec![game::RegionType::Ocean, game::RegionType::Forest],
+        ..bad
+    };
+    let lines = tile_info_lines(&regions, RegionCoords::new(3, -2));
+    assert_eq!(lines[2], "Biome region: Forest #1 (evil)", "{lines:?}");
+    assert!(lines.contains(&"Volcano".to_string()), "{lines:?}");
+    let neutral = WorldMap { tiles: vec![tile(|t| t.region = 1)], ..regions };
+    assert_eq!(tile_info_lines(&neutral, RegionCoords::new(3, -2))[2], "Biome region: Forest #1");
 }
 
 #[test]
@@ -301,4 +328,166 @@ fn default_world_map_builds() {
     println!("{}x{} tiles in {} ms", map.width, map.height, started.elapsed().as_millis());
     assert!(map.width > 0 && map.height > 0);
     assert!(map.tiles.iter().any(|t| t.landing.is_some()), "no tile has a landing");
+}
+
+/// The tile's biome is the stored biome raster's mode over its cells, its
+/// region the region raster's mode (with that region's alignment), and its
+/// climate the cell means.
+#[test]
+fn summary_carries_dominant_biome() {
+    use game::Biome;
+    let mut a = synthetic();
+    // One cell in sixteen grassland, the rest savanna: savanna wins every
+    // tile (no tile, edge strips included, holds as many grassland cells).
+    for (i, b) in a.biome.iter_mut().enumerate() {
+        let (ix, iz) = (i % N, i / N);
+        *b = if ix % 4 == 1 && iz % 4 == 1 { Biome::Grassland } else { Biome::Savanna } as u8;
+    }
+    a.savagery = vec![40; N * N];
+    // One volcano on the plain.
+    let volcano = [790.0f32, 880.0];
+    a.volcanoes = vec![volcano];
+    let world = ForgedWorld::new(a);
+    let map = build_world_map(&world);
+    let a = world.artifact();
+    assert_eq!(map.region_types, a.regions.iter().map(|r| r.kind).collect::<Vec<_>>());
+    for (i, t) in map.tiles.iter().enumerate() {
+        let rc = map.coords(i);
+        assert_eq!(t.biome, Biome::Savanna, "{rc:?}");
+        let region = a.regions.get(usize::from(t.region)).unwrap_or_else(|| panic!("{rc:?}: region {}", t.region));
+        assert_eq!(t.alignment, region.alignment, "{rc:?}");
+        assert!((t.temperature_c - 14.0).abs() < 0.5, "{rc:?}: {t:?}");
+        assert!((t.precip_mm - 900.0).abs() < 10.0, "{rc:?}: {t:?}");
+        assert_eq!(t.savagery, 40, "{rc:?}");
+        let here = rc == tile_at(f64::from(volcano[0]), f64::from(volcano[1]));
+        assert_eq!(t.volcano, here, "{rc:?}");
+    }
+    // The mode, not the first cell: the region holding most of a land tile.
+    let rc = tile_at(790.0, 880.0);
+    let t = summary(&map, rc);
+    let mut counts = std::collections::BTreeMap::<u16, u32>::new();
+    let (x0, z0) = (f64::from(rc.x) * tile_m(), f64::from(rc.z) * tile_m());
+    let (ox, oz) = engine(0.0, 0.0);
+    for iz in 0..N {
+        for ix in 0..N {
+            let (x, z) = (ox + (ix as f64 + 0.5) * CELL_M, oz + (iz as f64 + 0.5) * CELL_M);
+            if x >= x0 && x < x0 + tile_m() && z >= z0 && z < z0 + tile_m() {
+                *counts.entry(a.region[iz * N + ix]).or_default() += 1;
+            }
+        }
+    }
+    let mode = counts.iter().max_by(|(i, x), (j, y)| x.cmp(y).then(j.cmp(i))).map(|(&id, _)| id);
+    assert_eq!(Some(t.region), mode);
+}
+
+/// One pixel per tile, opaque; the biome layer is the shared palette and
+/// every biome's colour differs clearly from every other's.
+#[test]
+fn rasterize_layer_sizes_and_colours() {
+    use game::Biome;
+    let mut map = two_tile_map();
+    map.tiles[0].biome = Biome::Taiga;
+    map.tiles[1].biome = Biome::SandDesert;
+    for layer in MapLayer::ALL {
+        let (w, h, px) = rasterize_layer(&map, layer);
+        assert_eq!((w, h), (2, 1), "{layer:?}");
+        assert_eq!(px.len(), 2);
+        assert!(px.iter().all(|p| p[3] == 255), "{layer:?} opaque");
+    }
+    let (_, _, px) = rasterize_layer(&map, MapLayer::Biome);
+    assert_eq!(px[0][..3], Biome::Taiga.map_rgb());
+    assert_eq!(px[1][..3], Biome::SandDesert.map_rgb());
+    for (i, a) in Biome::ALL.iter().enumerate() {
+        for b in &Biome::ALL[i + 1..] {
+            let d: i32 = (0..3).map(|k| (i32::from(a.map_rgb()[k]) - i32::from(b.map_rgb()[k])).abs()).sum();
+            assert!(d >= 40, "{a:?} and {b:?} too alike ({d})");
+        }
+    }
+    // Warmer is redder, wetter is bluer.
+    map.tiles[1].temperature_c = 30.0;
+    map.tiles[0].temperature_c = -20.0;
+    let (_, _, px) = rasterize_layer(&map, MapLayer::Temperature);
+    assert!(px[1][0] > px[0][0] && px[1][2] < px[0][2], "{px:?}");
+    map.tiles[0].precip_mm = 100.0;
+    map.tiles[1].precip_mm = 2500.0;
+    let (_, _, px) = rasterize_layer(&map, MapLayer::Precipitation);
+    assert!(px[1][2] > px[0][2], "{px:?}");
+    // Two regions, two colours; one region, one.
+    map.region_types = vec![game::RegionType::Forest, game::RegionType::Grassland];
+    map.tiles[1].region = 1;
+    let (_, _, px) = rasterize_layer(&map, MapLayer::Regions);
+    assert_ne!(px[0], px[1]);
+    map.tiles[1].region = 0;
+    let (_, _, px) = rasterize_layer(&map, MapLayer::Regions);
+    assert_eq!(px[0], px[1]);
+    // The 8 px picture of a layer is its 1 px picture, grid-lined.
+    let (w, _, big) = rasterize(&map, MapLayer::Biome);
+    let (_, _, small) = rasterize_layer(&map, MapLayer::Biome);
+    assert_eq!(big[(3 * w + MAP_TILE_PX + 3) as usize], small[1]);
+}
+
+/// A 100 km world's map (196 × 196 tiles at 512 m) goes out in one packet
+/// well under 8 MB, even with no two tiles alike.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn world_map_packet_fits() {
+    let side = 196u32;
+    let mut state = 0x9E37_79B9_7F4A_7C15u64;
+    let mut next = move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+    let tiles = (0..side * side)
+        .map(|_| {
+            let r: Vec<u64> = (0..20).map(|_| next()).collect();
+            let f = |k: usize| (r[k] % 1_000_000) as f32 / 7.0;
+            TileSummary {
+                ground_min_m: f(1),
+                ground_mean_m: f(2),
+                ground_max_m: f(3),
+                relief_m: f(4),
+                slope: [f(5), f(6)],
+                sea_fraction: f(7),
+                lake_fraction: f(8),
+                lake_level_m: Some(f(9)),
+                rivers: 3,
+                river_max_discharge_m2: f(10),
+                river_max_width_m: f(11),
+                surface_rock: Some(2),
+                landing: Some([17, 300]),
+                biome: game::Biome::ALL[(r[18] % 20) as usize],
+                region: (r[14] % 2750) as u16,
+                temperature_c: f(12),
+                precip_mm: f(13),
+                savagery: (r[15] % 101) as u8,
+                alignment: (r[16] % 3) as i8 - 1,
+                volcano: r[17] % 2 == 0,
+            }
+        })
+        .collect();
+    let map = WorldMap {
+        origin: RegionCoords::new(-98, -98),
+        width: side,
+        height: side,
+        tiles,
+        rock_names: worldgen::forge::geology::ROCKS.iter().map(|r| r.name.to_string()).collect(),
+        region_types: vec![game::RegionType::Forest; 2750],
+    };
+    let bytes = game::encode_packet(&game::ServerPacket::WorldMap(map)).expect("encode");
+    println!("196x196 world map packet: {} bytes", bytes.len());
+    assert!(bytes.len() < 8 * 1024 * 1024, "{} bytes", bytes.len());
+}
+
+/// The whole-map build (rivers bucketed by tile in one pass) gives every
+/// tile exactly what summarising it alone does.
+#[test]
+fn map_tiles_match_single_tile_summaries() {
+    let world = ForgedWorld::new(synthetic());
+    let map = build_world_map(&world);
+    assert!(map.tiles.iter().any(|t| t.rivers > 0), "the synthetic river is on the map");
+    for (i, t) in map.tiles.iter().enumerate() {
+        assert_eq!(*t, summarize_tile(&world, map.coords(i)), "{:?}", map.coords(i));
+    }
 }
