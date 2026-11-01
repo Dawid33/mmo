@@ -53,6 +53,7 @@ fn forge_quality_matches_baseline() {
     p.knobs.layout = LAYOUT_ONE_ISLAND as f64;
     p.knobs.pole = worldgen::forge::climate::POLE_NONE as f64;
     p.knobs.latitude_center_deg = 45.0;
+    p.knobs.meander_amplitude_deg = 0.0;
     let q = quality(&forge(&p));
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/forge_quality_16k_32m.ron");
     if std::env::var_os("FORGE_QUALITY_BLESS").is_some() {

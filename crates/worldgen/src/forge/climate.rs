@@ -6,6 +6,14 @@
 //!   `latitude_center_deg`); `latitude_span_deg` is how far the map reaches
 //!   from its pole(s). Southern latitudes are negative; everything below uses
 //!   the absolute value.
+//! - **Meander**: everything that depends on latitude below (temperature, the
+//!   rain table, the wind bands) reads an EFFECTIVE latitude per cell — the
+//!   row's latitude plus a slow, seed-derived displacement
+//!   (`meander_field`: a few long waves running mostly along x, like
+//!   planetary waves on the jet stream), so isotherms and band edges wander
+//!   instead of running ruler-straight. Set in metres and degrees
+//!   (`meander_amplitude_deg`, `meander_wavelength_km`), so it is the same
+//!   field at every cell size and coarse-to-fine level; 0 = straight rows.
 //! - **Temperature** at sea level follows the cosine of latitude between
 //!   `pole_temp_c` and `equator_temp_c`, minus `lapse_c_per_km` per km of
 //!   ground above the sea.
@@ -36,7 +44,7 @@
 use crate::forge::erosion;
 use crate::forge::hydrology::LAKE_MIN_DEPTH_M;
 use crate::forge::par;
-use crate::forge::world::{smoothstep, EdgeKind, ForgeParams, World};
+use crate::forge::world::{hash01, smoothstep, EdgeKind, ForgeParams, World};
 
 /// `Knobs::pole` values.
 pub const POLE_NONE: u32 = 0;
@@ -60,6 +68,19 @@ pub const CONTINENTAL_MOISTURE: f64 = 0.65;
 /// edge (`trade_wind_edge_deg`, `polar_edge_deg`): rows inside it blend the
 /// two directions' sweeps.
 pub const BAND_BLEND_DEG: f64 = 5.0;
+/// The meander's wavelength is at most the world's size over this, so a
+/// small world still sees whole waves instead of one big kink.
+pub const MEANDER_MIN_WAVES: f64 = 2.0;
+/// The meander's component waves: (wavelength as a share of
+/// `meander_wavelength_km`, amplitude as a share of `meander_amplitude_deg`,
+/// largest angle (rad) of the wave's travel off the x axis). The main wave
+/// runs along x (a meander of the westerly jet) and shifts every band
+/// together; the shorter ones turn up to ~80° off it, so neighbouring
+/// latitudes are displaced differently and bands widen, narrow and break.
+const MEANDER_WAVES: [(f64, f64, f64); 3] = [(1.0, 1.0, 0.3), (0.5, 0.6, 1.0), (0.27, 0.35, 1.4)];
+/// Seed salt of the meander's phases and directions.
+const MEANDER_SALT: u64 = 0x3EA7_D0E5;
+
 /// Windward slopes rain more: precipitation is raised by
 /// `slope * OROGRAPHIC_RUN_M / orographic_scale_m` (a 1:10 upslope with the
 /// default 650 m scale nearly doubles it).
@@ -113,6 +134,38 @@ pub fn latitudes(n: usize, p: &ForgeParams) -> Vec<f32> {
             lat.clamp(-90.0, 90.0) as f32
         })
         .collect()
+}
+
+/// Latitude displacement (deg, northward positive) of the meander at artifact
+/// metres `(x_m, z_m)`: a function of position, seed and knobs only.
+pub fn meander_deg(x_m: f64, z_m: f64, p: &ForgeParams) -> f64 {
+    let k = &p.knobs;
+    if k.meander_amplitude_deg <= 0.0 {
+        return 0.0;
+    }
+    let wavelength = (k.meander_wavelength_km * 1000.0).min(p.size_m / MEANDER_MIN_WAVES).max(1.0);
+    let mut d = 0.0;
+    for (wave, &(share, weight, spread)) in MEANDER_WAVES.iter().enumerate() {
+        let angle = (hash01(p.seed, MEANDER_SALT, 2 * wave as u64) - 0.5) * 2.0 * spread;
+        let phase = hash01(p.seed, MEANDER_SALT, 2 * wave as u64 + 1) * std::f64::consts::TAU;
+        let along = x_m * angle.cos() + z_m * angle.sin();
+        d += weight * (std::f64::consts::TAU * along / (wavelength * share) + phase).sin();
+    }
+    k.meander_amplitude_deg * d
+}
+
+/// `meander_deg` at every cell centre of an `n * n` grid of `dx` cells.
+pub fn meander_field(n: usize, dx: f64, p: &ForgeParams) -> Vec<f32> {
+    (0..n * n)
+        .map(|i| meander_deg(((i % n) as f64 + 0.5) * dx, ((i / n) as f64 + 0.5) * dx, p) as f32)
+        .collect()
+}
+
+/// Effective latitude of every cell: its row's latitude plus the meander.
+pub fn effective_latitudes(n: usize, dx: f64, p: &ForgeParams) -> Vec<f32> {
+    let rows = latitudes(n, p);
+    let meander = meander_field(n, dx, p);
+    (0..n * n).map(|i| (rows[i / n] + meander[i]).clamp(-90.0, 90.0)).collect()
 }
 
 /// Sea-level temperature (deg C) at latitude `lat_deg`.
@@ -188,16 +241,17 @@ pub fn compute(w: &World, p: &ForgeParams) -> Climate {
 pub fn compute_with_lakes(w: &World, p: &ForgeParams, lakes: &[bool]) -> Climate {
     let (n, k) = (w.n, &p.knobs);
     let latitude_deg = latitudes(n, p);
+    let lat = effective_latitudes(n, w.dx, p);
     let lapse_c_per_m = k.lapse_c_per_km / 1000.0;
     let temperature_c = (0..n * n)
         .map(|i| {
             let ground = if w.ocean[i] { 0.0 } else { w.h[i].max(0.0) };
-            (sea_level_temperature_c(latitude_deg[i / n] as f64, p) - lapse_c_per_m * ground) as f32
+            (sea_level_temperature_c(lat[i] as f64, p) - lapse_c_per_m * ground) as f32
         })
         .collect();
 
-    let relative = if k.climate_strength <= 0.0 { vec![1.0; n * n] } else { orographic(w, p, &latitude_deg, lakes) };
-    let precip_mm = (0..n * n).map(|i| base_precip_mm(latitude_deg[i / n]) * relative[i] as f32).collect();
+    let relative = if k.climate_strength <= 0.0 { vec![1.0; n * n] } else { orographic(w, p, &lat, lakes) };
+    let precip_mm = (0..n * n).map(|i| base_precip_mm(lat[i]) * relative[i] as f32).collect();
     Climate { temperature_c, precip_mm, latitude_deg }
 }
 
@@ -207,8 +261,9 @@ fn radius_cells(metres: f64, dx: f64) -> usize {
 }
 
 /// Precipitation per cell relative to the latitude base, clamped and scaled
-/// by the climate strength (1.0 at sea).
-fn orographic(w: &World, p: &ForgeParams, latitude_deg: &[f32], lakes: &[bool]) -> Vec<f64> {
+/// by the climate strength (1.0 at sea). `lat` is the effective latitude per
+/// cell; it sets each cell's mix of the westerly and easterly sweeps.
+fn orographic(w: &World, p: &ForgeParams, lat: &[f32], lakes: &[bool]) -> Vec<f64> {
     let (n, k, dx) = (w.n, &p.knobs, w.dx);
     let ground: Vec<f64> = w.h.iter().map(|h| h.max(0.0)).collect();
     let terrain = radius_cells(TERRAIN_BLUR_M, dx);
@@ -245,15 +300,15 @@ fn orographic(w: &World, p: &ForgeParams, latitude_deg: &[f32], lakes: &[bool]) 
         }
     };
     let rows: Vec<Vec<f64>> = par::map_range(n, |z| {
-        let west = westerly_weight(latitude_deg[z] as f64, p);
+        let west: Vec<f64> = (0..n).map(|x| westerly_weight(lat[z * n + x] as f64, p)).collect();
         let (mut from_west, mut from_east) = (vec![0.0; n], vec![0.0; n]);
-        if west > 0.0 {
+        if west.iter().any(|&v| v > 0.0) {
             sweep(z, true, &mut from_west);
         }
-        if west < 1.0 {
+        if west.iter().any(|&v| v < 1.0) {
             sweep(z, false, &mut from_east);
         }
-        from_west.iter().zip(&from_east).map(|(&a, &b)| west * a + (1.0 - west) * b).collect()
+        (0..n).map(|x| west[x] * from_west[x] + (1.0 - west[x]) * from_east[x]).collect()
     });
     // Blur over the land only (the sea's zero would dry the coasts).
     let rain: Vec<f64> = rows.concat();
@@ -292,17 +347,62 @@ pub fn discharge_weight(c: &Climate, w: &World) -> Vec<f64> {
 mod tests {
     use super::*;
     use crate::forge::world::EdgeKind;
+    use crate::forge::Knobs;
 
     const N: usize = 64;
     const CELL_M: f64 = 128.0;
 
     /// Params for an `N`-cell world at `CELL_M`, one latitude everywhere
-    /// (`pole` none) unless the caller changes it.
+    /// (`pole` none, no meander: straight rows) unless the caller changes it.
     fn params(latitude: f64) -> ForgeParams {
         let mut p = ForgeParams { size_m: N as f64 * CELL_M, cell_m: CELL_M, quiet: true, ..Default::default() };
         p.knobs.pole = POLE_NONE as f64;
         p.knobs.latitude_center_deg = latitude;
+        p.knobs.meander_amplitude_deg = 0.0;
         p
+    }
+
+    /// With the default meander, the -5 C sea-level isotherm wanders north
+    /// and south across a pole-to-equator sea; without it, it is one row.
+    #[test]
+    fn isotherms_meander() {
+        let (n, dx) = (256, 128.0);
+        let isotherm_spread_m = |amplitude: f64| {
+            let mut p = ForgeParams { size_m: n as f64 * dx, cell_m: dx, quiet: true, ..Default::default() };
+            p.knobs.pole = POLE_NORTH as f64;
+            p.knobs.meander_amplitude_deg = amplitude;
+            let w = world_sized(n, dx, |_, _| -10.0);
+            let c = compute_with_lakes(&w, &p, &vec![false; n * n]);
+            // Per column: the first row (from the pole) at or above -5 C.
+            let rows: Vec<usize> =
+                (0..n).map(|x| (0..n).find(|&z| c.temperature_c[z * n + x] >= -5.0).unwrap_or(n)).collect();
+            (rows.iter().max().unwrap() - rows.iter().min().unwrap()) as f64 * dx
+        };
+        assert_eq!(isotherm_spread_m(0.0), 0.0);
+        let spread = isotherm_spread_m(Knobs::default().meander_amplitude_deg);
+        assert!(spread >= 1_500.0, "the -5 C isotherm only wanders {spread} m across a 32 km map");
+    }
+
+    /// The meander is a function of metres: the 64 m grid's value is the
+    /// mean of its four 32 m cells (to curvature), and it is the same at
+    /// every call.
+    #[test]
+    fn meander_field_is_resolution_independent() {
+        let size = 16_000.0;
+        let p = ForgeParams { size_m: size, quiet: true, ..Default::default() };
+        let (fine, coarse) = (meander_field(500, 32.0, &p), meander_field(250, 64.0, &p));
+        assert_eq!(fine, meander_field(500, 32.0, &p));
+        let mut worst = 0.0f32;
+        for z in 0..250 {
+            for x in 0..250 {
+                let f = |dx: usize, dz: usize| fine[(2 * z + dz) * 500 + 2 * x + dx];
+                let mean = (f(0, 0) + f(1, 0) + f(0, 1) + f(1, 1)) / 4.0;
+                worst = worst.max((mean - coarse[z * 250 + x]).abs());
+            }
+        }
+        assert!(worst < 0.02, "64 m vs 32 m meander differs by {worst} deg");
+        let (lo, hi) = coarse.iter().fold((f32::MAX, f32::MIN), |(lo, hi), &v| (lo.min(v), hi.max(v)));
+        assert!(hi - lo > 2.0 * p.knobs.meander_amplitude_deg as f32, "meander range {lo}..{hi}");
     }
 
     /// A hand-made world: `height(x, z)`, ocean where it is <= 0, sea on

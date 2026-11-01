@@ -943,6 +943,7 @@ mod tests {
         let mut p = continental(LAYOUT_ONE_ISLAND, DEFAULT_SEED, 8_192.0, 64.0);
         p.knobs.pole = crate::forge::climate::POLE_NONE as f64;
         p.knobs.latitude_center_deg = 45.0;
+        p.knobs.meander_amplitude_deg = 0.0;
         let mut w = World::new(&p);
         let geo = crate::forge::geology::Geology::new(&p, &w);
         let rain = crate::forge::climate::discharge_weight(&crate::forge::climate::compute(&w, &p), &w);

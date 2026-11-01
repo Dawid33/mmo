@@ -110,6 +110,8 @@ knobs! {
         equator_temp_c: 27.0, [10.0, 40.0], "Equator temperature (C)", "Mean sea-level temperature at the equator.";
         pole_temp_c: -25.0, [-50.0, 5.0], "Pole temperature (C)", "Mean sea-level temperature at a pole; between, temperature follows the cosine of latitude.";
         lapse_c_per_km: 6.5, [3.0, 10.0], "Lapse rate (C/km)", "Cooling per kilometre of height above the sea.";
+        meander_amplitude_deg: 5.0, [0.0, 15.0], "Band meander (deg)", "Amplitude of the slow north-south wander of the climate bands (a jet-stream / planetary-wave warp of latitude): temperature, the latitude rain table and the wind bands follow it, so band edges and isotherms wander instead of running ruler-straight. 0 = straight bands.";
+        meander_wavelength_km: 40.0, [5.0, 200.0], "Meander wavelength (km)", "Wavelength of the main meander wave along the map (two shorter waves ride on it). Capped at half the world's size, so a small world still sees whole waves.";
         trade_wind_edge_deg: 30.0, [5.0, 45.0], "Trade winds to (deg)", "Below this latitude the wind blows from the east (trade winds); above it the westerlies.";
         polar_edge_deg: 60.0, [45.0, 85.0], "Polar easterlies from (deg)", "Above this latitude the wind blows from the east again (polar easterlies).";
         climate_strength: 1.0, [0.0, 1.0], "Rain shadow strength", "0 = precipitation follows latitude only; 1 = full orographic rain and rain shadows along the prevailing wind.";
