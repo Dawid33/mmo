@@ -9,9 +9,13 @@
 //!
 //! - **Drainage** (`drainage`): how fast ground sheds water. High on slopes
 //!   and on permeable rock (sandstone, limestone, conglomerate), low on shale
-//!   and on flat ground standing within `DRAINAGE_FLOOD_M` of the nearest river
-//!   or lake surface — floodplains, and deltas where rivers reach the sea.
-//!   Slopes are never swamp-grade (< 33): see `drainage_at`.
+//!   and on flat ground standing within the flood height of the nearest river
+//!   or lake surface — floodplains, and deltas where rivers reach the sea. The
+//!   flood height scales with discharge (`flood_height_m`: `DRAINAGE_FLOOD_M`
+//!   for lakes and trunk rivers, well under 1 m for a creek), so creeks do
+//!   not turn their plains to marsh. Slopes from `DRAINAGE_FLOOD_SLOPE_MAX`
+//!   up are never swamp-grade (< 33): see `drainage_at`. River channel cells
+//!   carry their banks' value.
 //! - **Volcanism** (`volcanism`): a continental-scale noise base that never
 //!   reaches the top on its own, plus hot spots on the flanks of convergent
 //!   plate boundaries. Volcano sites are cells at 100, `VOLCANO_SPACING_M`
@@ -33,11 +37,22 @@ use crate::forge::plates::{self, PlateField};
 use crate::forge::world::{hash01, smoothstep, ForgeParams, World, REFERENCE_SIZE_M};
 use crate::noise::OctaveNoise;
 
-/// Flat ground at most this high above the nearest river or lake surface is
-/// floodplain: poorly drained.
+/// Flat ground at most this high above the nearest lake surface, or a big
+/// river's (`DRAINAGE_FLOOD_REF_M2` and up), is floodplain: poorly drained.
+/// A smaller river floods lower, by bankfull depth ~ Q^0.4
+/// (`flood_height_m`): a 0.4 km^2 creek about 0.4 m.
 pub const DRAINAGE_FLOOD_M: f64 = 4.0;
-/// The floodplain effect fades out over this much more height above the water.
+/// Discharge (m^2, rain-weighted area) at which a river floods the full
+/// `DRAINAGE_FLOOD_M`.
+pub const DRAINAGE_FLOOD_REF_M2: f64 = 1.0e8;
+/// Exponent of flood height on discharge (hydraulic geometry: depth ~ Q^0.4).
+pub const DRAINAGE_FLOOD_EXPONENT: f64 = 0.4;
+/// The floodplain effect fades out over this much more height above the
+/// water, per `DRAINAGE_FLOOD_M` of flood height (scaled with it).
 pub const DRAINAGE_FLOOD_FADE_M: f64 = 4.0;
+/// Floodplains are flat: the flood effect fades out by this slope (rise/run).
+/// From here up no ground is swamp-grade (< 33).
+pub const DRAINAGE_FLOOD_SLOPE_MAX: f64 = 0.025;
 /// ... and with horizontal distance from the water, from this far to twice it
 /// (a plain 3 m above a river 10 km away is not its floodplain).
 pub const DRAINAGE_FLOOD_REACH_M: f64 = 1_500.0;
@@ -48,8 +63,7 @@ pub const DRAINAGE_BASE: f64 = 0.35;
 /// Added at full permeability, and at full slope.
 pub const DRAINAGE_PERMEABILITY_WEIGHT: f64 = 0.4;
 pub const DRAINAGE_SLOPE_WEIGHT: f64 = 0.5;
-/// Share of the drainage a floodplain takes away on flat ground (fading with
-/// the square of the slope share, so a floodplain's valley walls stay dry).
+/// Share of the drainage a floodplain takes away on flat ground.
 pub const DRAINAGE_FLOOD_DAMP: f64 = 0.7;
 /// Rock permeability 0..1 by rock name (`geology::ROCKS`): sandstone,
 /// limestone and conglomerate drain, shale does not, crystalline rock drains
@@ -134,18 +148,51 @@ pub fn permeability(id: u8) -> f64 {
         .map_or(0.5, |&(_, p)| p)
 }
 
+/// Flood height (m) of water with discharge `q` (m^2; INFINITY for a lake):
+/// `DRAINAGE_FLOOD_M * min(1, (q / DRAINAGE_FLOOD_REF_M2)^0.4)`.
+pub fn flood_height_m(q: f64) -> f64 {
+    DRAINAGE_FLOOD_M * (q.max(0.0) / DRAINAGE_FLOOD_REF_M2).powf(DRAINAGE_FLOOD_EXPONENT).min(1.0)
+}
+
 /// Drainage 0..1 of one cell: `slope` rise/run, `permeability` 0..1, and
 /// `above_water` (m) above the nearest river or lake surface `water_dist` m
-/// away (infinite: none). Flat floodplain ground is < 0.33 on any rock; from
-/// a slope of 0.3 * `DRAINAGE_SLOPE_FULL` up nothing is, whatever the rock
-/// or water: dry = base + perm + slope shares, times 1 - damp * flood *
-/// (1 - slope share)^2.
-pub fn drainage_at(slope: f64, permeability: f64, above_water: f64, water_dist: f64) -> f64 {
+/// away (infinite: none), whose flood height is `flood_m`
+/// (`flood_height_m`). dry = base + permeability and slope shares; a
+/// floodplain takes `DRAINAGE_FLOOD_DAMP` of it on flat ground, fading out
+/// with height above the flood, distance from the water and slope (gone by
+/// `DRAINAGE_FLOOD_SLOPE_MAX`). Flat ground within a big river's flood is
+/// < 0.33 on any rock; from `DRAINAGE_FLOOD_SLOPE_MAX` up nothing is.
+pub fn drainage_at(slope: f64, permeability: f64, above_water: f64, water_dist: f64, flood_m: f64) -> f64 {
     let sl = (slope / DRAINAGE_SLOPE_FULL).clamp(0.0, 1.0);
     let dry = (DRAINAGE_BASE + DRAINAGE_PERMEABILITY_WEIGHT * permeability + DRAINAGE_SLOPE_WEIGHT * sl).min(1.0);
-    let flood = (1.0 - smoothstep(DRAINAGE_FLOOD_M, DRAINAGE_FLOOD_M + DRAINAGE_FLOOD_FADE_M, above_water))
-        * (1.0 - smoothstep(DRAINAGE_FLOOD_REACH_M, 2.0 * DRAINAGE_FLOOD_REACH_M, water_dist));
-    dry * (1.0 - DRAINAGE_FLOOD_DAMP * flood * (1.0 - sl) * (1.0 - sl))
+    let flood_m = flood_m.max(0.01);
+    let fade_m = DRAINAGE_FLOOD_FADE_M * flood_m / DRAINAGE_FLOOD_M;
+    let flood = (1.0 - smoothstep(flood_m, flood_m + fade_m, above_water))
+        * (1.0 - smoothstep(DRAINAGE_FLOOD_REACH_M, 2.0 * DRAINAGE_FLOOD_REACH_M, water_dist))
+        * (1.0 - smoothstep(0.0, DRAINAGE_FLOOD_SLOPE_MAX, slope));
+    dry * (1.0 - DRAINAGE_FLOOD_DAMP * flood)
+}
+
+/// Ground slope (rise/run) at cell `i`: central differences over land, the
+/// sea reading as sea level; a water neighbour (`is_water`: a river channel
+/// or lake) is skipped for a one-sided difference, so a channel's own banks
+/// do not count as a slope.
+pub fn ground_slope(w: &World, is_water: &dyn Fn(usize) -> bool, i: usize) -> f64 {
+    let n = w.n;
+    let (x, z) = (i % n, i / n);
+    let h = |j: usize| w.h[j].max(0.0);
+    let axis = |lo: Option<usize>, hi: Option<usize>| {
+        let ok = |j: &usize| !is_water(*j);
+        match (lo.filter(ok), hi.filter(ok)) {
+            (Some(a), Some(b)) => (h(b) - h(a)) / (2.0 * w.dx),
+            (Some(a), None) => (h(i) - h(a)) / w.dx,
+            (None, Some(b)) => (h(b) - h(i)) / w.dx,
+            (None, None) => 0.0,
+        }
+    };
+    let gx = axis((x > 0).then(|| i - 1), (x + 1 < n).then(|| i + 1));
+    let gz = axis((z > 0).then(|| i - n), (z + 1 < n).then(|| i + n));
+    gx.hypot(gz)
 }
 
 /// Water surface per cell: lakes at their level, rivers (discharge at least
@@ -171,17 +218,37 @@ pub fn water_levels(w: &World, a: &Analysis) -> Vec<f64> {
 /// Drainage 0..100 per cell (sea and lakes: 0).
 pub fn drainage(w: &World, a: &Analysis, geo: &Geology) -> Vec<u8> {
     let rock: Vec<u8> = (0..w.n * w.n).map(|i| if w.ocean[i] { 0 } else { geo.surface_rock(w, i) }).collect();
-    drainage_from(w, &water_levels(w, a), &rock)
+    drainage_from(w, &water_levels(w, a), &water_discharge(w, a), &rock)
+}
+
+/// Discharge (m^2) of each water cell of `water_levels`: a river's `q`,
+/// INFINITY for a lake, NaN elsewhere.
+pub fn water_discharge(w: &World, a: &Analysis) -> Vec<f64> {
+    let river = a.stats.river_min_discharge_m2;
+    (0..w.n * w.n)
+        .map(|i| {
+            if w.ocean[i] {
+                f64::NAN
+            } else if a.lake_depth[i] >= LAKE_MIN_DEPTH_M {
+                f64::INFINITY
+            } else if a.q[i] >= river {
+                a.q[i]
+            } else {
+                f64::NAN
+            }
+        })
+        .collect()
 }
 
 /// For each cell, the distance (m) to the nearest cell with a water level
-/// (not NaN) and that level: a two-pass chamfer carrying the source's level.
-/// (INFINITY, NaN) when there is no water at all.
-fn nearest_water(n: usize, dx: f64, level: &[f64]) -> (Vec<f64>, Vec<f64>) {
+/// (not NaN), that level and that water's discharge: a two-pass chamfer
+/// carrying the source's (level, q). (INFINITY, NaN, NaN) when there is no
+/// water at all.
+fn nearest_water(n: usize, dx: f64, level: &[f64], q: &[f64]) -> (Vec<f64>, Vec<(f64, f64)>) {
     let mut dist: Vec<f64> = level.iter().map(|l| if l.is_nan() { f64::INFINITY } else { 0.0 }).collect();
-    let mut at = level.to_vec();
+    let mut at: Vec<(f64, f64)> = level.iter().zip(q).map(|(&l, &q)| (l, q)).collect();
     let diag = dx * std::f64::consts::SQRT_2;
-    let relax = |dist: &mut Vec<f64>, at: &mut Vec<f64>, x: usize, z: usize, ox: isize, oz: isize, step: f64| {
+    let relax = |dist: &mut Vec<f64>, at: &mut Vec<(f64, f64)>, x: usize, z: usize, ox: isize, oz: isize, step: f64| {
         let (nx, nz) = (x as isize + ox, z as isize + oz);
         if nx >= 0 && nz >= 0 && (nx as usize) < n && (nz as usize) < n {
             let j = nz as usize * n + nx as usize;
@@ -212,23 +279,32 @@ fn nearest_water(n: usize, dx: f64, level: &[f64]) -> (Vec<f64>, Vec<f64>) {
 }
 
 /// Core of `drainage`: `water_level` is the water surface of a river or lake
-/// cell, NaN elsewhere; `rock` the surface rock per cell. Water cells (and
-/// the sea) are 0.
-pub fn drainage_from(w: &World, water_level: &[f64], rock: &[u8]) -> Vec<u8> {
-    let (n, dx) = (w.n, w.dx);
-    let (dist, level) = nearest_water(n, dx, water_level);
-    // Land height for slopes: the sea reads as sea level.
-    let ground = |x: usize, z: usize| w.h[z * n + x].max(0.0);
+/// cell, NaN elsewhere, and `water_q` its discharge (`water_discharge`:
+/// INFINITY for a lake); `rock` the surface rock per cell. The sea and lakes
+/// are 0; a river channel cell takes the mean of its land neighbours (its
+/// banks), so a creek is not a line of marsh.
+pub fn drainage_from(w: &World, water_level: &[f64], water_q: &[f64], rock: &[u8]) -> Vec<u8> {
+    let n = w.n;
+    let (dist, nearest) = nearest_water(n, w.dx, water_level, water_q);
+    let is_water = |j: usize| !water_level[j].is_nan();
+    let land_value = |i: usize| {
+        let (level, q) = nearest[i];
+        let above = if level.is_nan() { f64::INFINITY } else { w.h[i] - level };
+        let flood_m = if q.is_nan() { 0.0 } else { flood_height_m(q) };
+        to_u8(drainage_at(ground_slope(w, &is_water, i), permeability(rock[i]), above, dist[i], flood_m))
+    };
+    let land = par::map_range(n * n, |i| if w.ocean[i] || is_water(i) { 0 } else { land_value(i) });
     par::map_range(n * n, |i| {
-        if w.ocean[i] || !water_level[i].is_nan() {
-            return 0;
+        let river = is_water(i) && water_q[i].is_finite();
+        if !river || w.ocean[i] {
+            return land[i];
         }
-        let (x, z) = (i % n, i / n);
-        let (x0, x1, z0, z1) = (x.saturating_sub(1), (x + 1).min(n - 1), z.saturating_sub(1), (z + 1).min(n - 1));
-        let gx = (ground(x1, z) - ground(x0, z)) / (((x1 - x0).max(1)) as f64 * dx);
-        let gz = (ground(x, z1) - ground(x, z0)) / (((z1 - z0).max(1)) as f64 * dx);
-        let above = if level[i].is_nan() { f64::INFINITY } else { w.h[i] - level[i] };
-        to_u8(drainage_at(gx.hypot(gz), permeability(rock[i]), above, dist[i]))
+        let banks: Vec<u32> = w.neighbors(i).filter(|&(j, _)| !w.ocean[j] && !is_water(j)).map(|(j, _)| land[j] as u32).collect();
+        if banks.is_empty() {
+            land_value(i)
+        } else {
+            (banks.iter().sum::<u32>() as f64 / banks.len() as f64).round() as u8
+        }
     })
 }
 
@@ -415,6 +491,82 @@ mod tests {
         rock_index(name).unwrap() as u8
     }
 
+    /// A trunk river's discharge (1,000 km^2) and a creek's (the default
+    /// river threshold, 0.4 km^2).
+    const BIG_RIVER_M2: f64 = 1.0e9;
+    const CREEK_M2: f64 = 4.0e5;
+
+    /// `q` on the cells `water` picks, NaN elsewhere.
+    fn river_q(n: usize, water: impl Fn(usize) -> bool, q: f64) -> Vec<f64> {
+        (0..n * n).map(|i| if water(i) { q } else { f64::NAN }).collect()
+    }
+
+    /// A flat plain 3 m above a river down column 10 (water at 0 m).
+    fn plain_beside(q: f64) -> (World, Vec<f64>, Vec<f64>) {
+        let n = 21;
+        let w = world(n, 32.0, |x, _| if x == 10 { 0.0 } else { 3.0 });
+        let water: Vec<f64> = (0..n * n).map(|i| if i % n == 10 { 0.0 } else { f64::NAN }).collect();
+        (w, water, river_q(n, |i| i % n == 10, q))
+    }
+
+    /// Flood stage scales with discharge: a creek's plain 3 m above it is
+    /// not floodplain, on any rock.
+    #[test]
+    fn small_creeks_do_not_make_floodplains() {
+        let (w, water, q) = plain_beside(CREEK_M2);
+        let n = w.n;
+        for r in ["shale", "granite", "sandstone"] {
+            let d = drainage_from(&w, &water, &q, &vec![rock(r); n * n]);
+            for x in [8, 12, 15] {
+                assert!(d[10 * n + x] >= 33, "{r} x {x}: {}", d[10 * n + x]);
+            }
+        }
+    }
+
+    #[test]
+    fn big_river_floodplain_is_poorly_drained() {
+        let (w, water, q) = plain_beside(BIG_RIVER_M2);
+        let n = w.n;
+        for r in ["shale", "granite", "sandstone"] {
+            let d = drainage_from(&w, &water, &q, &vec![rock(r); n * n]);
+            for x in [9, 11, 14] {
+                assert!(d[10 * n + x] < 33, "{r} x {x}: {}", d[10 * n + x]);
+            }
+        }
+    }
+
+    /// A 3% slope rising from a big river is not swamp-grade, on any rock.
+    #[test]
+    fn gentle_slope_is_not_swamp_grade() {
+        let n = 41;
+        let dx = 32.0;
+        let w = world(n, dx, |x, _| x as f64 * dx * 0.03);
+        let water: Vec<f64> = (0..n * n).map(|i| if i % n == 0 { 0.0 } else { f64::NAN }).collect();
+        let q = river_q(n, |i| i % n == 0, BIG_RIVER_M2);
+        for r in ["shale", "granite", "basalt", "sandstone"] {
+            let d = drainage_from(&w, &water, &q, &vec![rock(r); n * n]);
+            for x in 1..n - 1 {
+                assert!(d[10 * n + x] >= 33, "{r} x {x}: {}", d[10 * n + x]);
+            }
+        }
+    }
+
+    /// A river channel cell carries its banks' drainage (a per-cell biome
+    /// lookup would otherwise draw a marsh line along every creek); lakes
+    /// stay 0.
+    #[test]
+    fn creek_cell_takes_its_banks() {
+        let (w, water, q) = plain_beside(CREEK_M2);
+        let n = w.n;
+        let d = drainage_from(&w, &water, &q, &vec![rock("granite"); n * n]);
+        let (creek, bank) = (d[10 * n + 10], d[10 * n + 11]);
+        assert!(bank >= 33, "bank {bank}");
+        assert_eq!(creek, bank, "creek cell vs its bank");
+        let lake = river_q(n, |i| i % n == 10, f64::INFINITY);
+        let d = drainage_from(&w, &water, &lake, &vec![rock("granite"); n * n]);
+        assert_eq!(d[10 * n + 10], 0, "lake cell");
+    }
+
     /// A river runs down column 10 of a flat plain 1 m above it: the plain
     /// beside it is poorly drained, whatever the rock.
     #[test]
@@ -422,8 +574,9 @@ mod tests {
         let n = 21;
         let w = world(n, 32.0, |x, _| if x == 10 { 0.0 } else { 1.0 });
         let water: Vec<f64> = (0..n * n).map(|i| if i % n == 10 { 0.5 } else { f64::NAN }).collect();
+        let q = river_q(n, |i| i % n == 10, BIG_RIVER_M2);
         for r in ["sandstone", "limestone", "shale", "granite"] {
-            let d = drainage_from(&w, &water, &vec![rock(r); n * n]);
+            let d = drainage_from(&w, &water, &q, &vec![rock(r); n * n]);
             let beside = 10 * n + 12;
             assert!(d[beside] < 33, "{r}: floodplain drainage {}", d[beside]);
         }
@@ -436,8 +589,9 @@ mod tests {
         let dx = 32.0;
         let w = world(n, dx, |x, _| x as f64 * dx * 0.5);
         let water: Vec<f64> = (0..n * n).map(|i| if i % n == 0 { 0.0 } else { f64::NAN }).collect();
+        let q = river_q(n, |i| i % n == 0, BIG_RIVER_M2);
         for r in ["shale", "sandstone"] {
-            let d = drainage_from(&w, &water, &vec![rock(r); n * n]);
+            let d = drainage_from(&w, &water, &q, &vec![rock(r); n * n]);
             for x in [2, 10] {
                 assert!(d[10 * n + x] > 66, "{r} x {x}: slope drainage {}", d[10 * n + x]);
             }
@@ -504,25 +658,27 @@ mod tests {
         assert_eq!(sites, vec![[50.5 * 250.0, 50.5 * 250.0]]);
     }
 
-    /// Swamp-grade drainage (< 33) only on flat ground: from a slope of
-    /// 0.3 * DRAINAGE_SLOPE_FULL up, no rock, water height or distance gets
-    /// there.
+    /// Swamp-grade drainage (< 33) only on flat ground: from
+    /// DRAINAGE_FLOOD_SLOPE_MAX up, no rock, water height, distance or flood
+    /// height gets there.
     #[test]
     fn slopes_are_never_swamp_grade() {
-        let slope = 0.3 * DRAINAGE_SLOPE_FULL;
-        for s in [slope, 0.1, 0.2, 0.5, 2.0] {
+        for s in [DRAINAGE_FLOOD_SLOPE_MAX, 0.03, 0.1, 0.2, 0.5, 2.0] {
             for perm in [0.0, 0.35, 1.0] {
                 for above in [-5.0, 0.0, 2.0, 4.0, 6.0, 50.0] {
                     for dist in [0.0, 100.0, 2_000.0, 1.0e9] {
-                        let d = to_u8(drainage_at(s, perm, above, dist));
+                        let d = to_u8(drainage_at(s, perm, above, dist, DRAINAGE_FLOOD_M));
                         assert!(d >= 33, "slope {s} perm {perm} above {above} dist {dist}: {d}");
                     }
                 }
             }
         }
         // Flat dry permeable ground is well drained, flat dry shale is not.
-        assert!(to_u8(drainage_at(0.0, permeability(rock("sandstone")), 50.0, 1.0e9)) > 66);
-        assert!(to_u8(drainage_at(0.0, permeability(rock("shale")), 50.0, 1.0e9)) < 50);
+        assert!(to_u8(drainage_at(0.0, permeability(rock("sandstone")), 50.0, 1.0e9, 0.0)) > 66);
+        assert!(to_u8(drainage_at(0.0, permeability(rock("shale")), 50.0, 1.0e9, 0.0)) < 50);
+        // Flood height: a lake and a trunk river flood the full height, a creek well under 1 m.
+        assert_eq!(flood_height_m(f64::INFINITY), DRAINAGE_FLOOD_M);
+        assert!(flood_height_m(4.0e5) < 0.6, "{}", flood_height_m(4.0e5));
     }
 
     #[test]

@@ -93,27 +93,20 @@ fn default_forge_reaches_kilometre_peaks() {
 
 /// The derived fields (spec §4) on a forged default continent: poorly
 /// drained ground (< 33) only on flat ground near rivers and lakes (floodplains
-/// and deltas), never on slopes; the sea is salt; volcanoes stand where
+/// and deltas), never on slopes, and not on most of the land; the sea is salt; volcanoes stand where
 /// volcanism peaks and above the typical land.
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn forged_fields_follow_the_terrain() {
-    use worldgen::forge::fields::{DRAINAGE_FLOOD_REACH_M, DRAINAGE_SLOPE_FULL};
+    use worldgen::forge::fields::{ground_slope, DRAINAGE_FLOOD_REACH_M, DRAINAGE_FLOOD_SLOPE_MAX};
     use worldgen::forge::hydrology::LAKE_MIN_DEPTH_M;
 
     let p = ForgeParams { size_m: 32_000.0, cell_m: 64.0, ..ForgeParams::default() };
     let f = forge(&p);
     let (w, a, fields) = (&f.world, &f.analysis, &f.fields);
     let n = w.n;
-    let ground = |x: usize, z: usize| w.h[z * n + x].max(0.0);
-    let slope = |i: usize| {
-        let (x, z) = (i % n, i / n);
-        let (x0, x1, z0, z1) = (x.saturating_sub(1), (x + 1).min(n - 1), z.saturating_sub(1), (z + 1).min(n - 1));
-        let gx = (ground(x1, z) - ground(x0, z)) / ((x1 - x0) as f64 * w.dx);
-        let gz = (ground(x, z1) - ground(x, z0)) / ((z1 - z0) as f64 * w.dx);
-        gx.hypot(gz)
-    };
     let water = |i: usize| a.lake_depth[i] >= LAKE_MIN_DEPTH_M || a.q[i] >= a.stats.river_min_discharge_m2;
+    let slope = |i: usize| ground_slope(w, &|j| !w.ocean[j] && water(j), i);
     let water_cells: Vec<(f64, f64)> = (0..n * n).filter(|&i| !w.ocean[i] && water(i)).map(|i| w.center(i)).collect();
     let land: Vec<usize> = (0..n * n).filter(|&i| !w.ocean[i] && !water(i)).collect();
     let poor: Vec<usize> = land.iter().copied().filter(|&i| fields.drainage[i] < 33).collect();
@@ -126,8 +119,9 @@ fn forged_fields_follow_the_terrain() {
         fields.volcanoes.len()
     );
     assert!(!poor.is_empty(), "some floodplain");
+    assert!(poor.len() * 10 < land.len(), "{} of {} land cells poorly drained", poor.len(), land.len());
     for &i in &poor {
-        assert!(slope(i) < 0.3 * DRAINAGE_SLOPE_FULL, "cell {i}: drainage {} on slope {:.3}", fields.drainage[i], slope(i));
+        assert!(slope(i) < DRAINAGE_FLOOD_SLOPE_MAX, "cell {i}: drainage {} on slope {:.3}", fields.drainage[i], slope(i));
         let (x, z) = w.center(i);
         let near = water_cells.iter().any(|&(wx, wz)| (wx - x).hypot(wz - z) <= 2.0 * DRAINAGE_FLOOD_REACH_M);
         assert!(near, "cell {i}: poorly drained {:.0} m from any river or lake", 2.0 * DRAINAGE_FLOOD_REACH_M);
