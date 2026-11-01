@@ -149,10 +149,16 @@ impl HabitatSource for ProceduralHabitat {
 /// two-pass chamfer (axis step 1, diagonal sqrt 2 cells). A raster with no sea
 /// reports the raster's full width everywhere.
 pub fn coast_distance_m<T: Copy + Into<f64>>(height: &[T], n: usize, cell_m: f64) -> Vec<f32> {
+    coast_distance_by(n, cell_m, |i| height[i].into() <= 0.0)
+}
+
+/// [`coast_distance_m`] with the sea test as a closure over the raster index
+/// (`ForgedWorld` reads its quantised height without decoding a copy).
+pub fn coast_distance_by(n: usize, cell_m: f64, is_sea: impl Fn(usize) -> bool) -> Vec<f32> {
     const DIAGONAL: f32 = 1.414_213_5;
     let far = (n as f64 * cell_m) as f32;
     let (axis, diag) = (cell_m as f32, cell_m as f32 * DIAGONAL);
-    let mut d: Vec<f32> = height.iter().map(|&h| if h.into() <= 0.0 { 0.0 } else { far }).collect();
+    let mut d: Vec<f32> = (0..n * n).map(|i| if is_sea(i) { 0.0 } else { far }).collect();
     let relax = |d: &mut Vec<f32>, x: usize, z: usize, dx: isize, dz: isize, step: f32| {
         let (nx, nz) = (x as isize + dx, z as isize + dz);
         if nx >= 0 && nz >= 0 && (nx as usize) < n && (nz as usize) < n {

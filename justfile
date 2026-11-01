@@ -462,6 +462,13 @@ assets *args:
 tree-textures:
     python3 tools/textures/tree_textures.py
 
+# Regenerate the biome / ice / tree-species block textures (blocks.ron ids 22+;
+# most derived from existing PNGs by a colour ramp) into assets/blocks/ with
+# Pillow; deterministic. `--sheet` also writes target/textures-sheet.png. New
+# PNGs also go in EMBEDDED_BLOCK_TEXTURES (crates/client/src/renderer/mod.rs).
+block-textures *args:
+    python3 tools/textures/gen.py {{args}}
+
 # Top-down PNG map of the generated world: colour relief + 16-bit heightmap +
 # terrain stats, into target/world-map/. Flags: --span <m> --size <px>
 # --center <x,z> --out <path stem> --seed <hex> --relief <factor> --world <file>

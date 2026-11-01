@@ -693,9 +693,14 @@ impl World {
         // does: a coast cell must not inherit the shelf's depth.
         let coarse_h: Vec<f64> =
             self.h.iter().zip(&self.ocean).map(|(&h, &sea)| if sea { 0.0 } else { h }).collect();
-        // Cell centers matched as shares of the world, so any size ratio works.
+        // Cell centers matched by real position (metres), not share of the
+        // grid: a level whose `size / cell` rounds (16 km at 256 m: 62.5 ->
+        // 63 cells) covers a little more or less than the fine grid, and a
+        // share mapping would stretch it over the fine one. Fine cells past
+        // the coarse grid's centers clamp to its edge.
+        let ratio = fine.dx / self.dx;
         let axis = |j: usize| {
-            let u = ((j as f64 + 0.5) / nf as f64 * nc as f64 - 0.5).clamp(0.0, (nc - 1) as f64);
+            let u = ((j as f64 + 0.5) * ratio - 0.5).clamp(0.0, (nc - 1) as f64);
             let i0 = (u.floor() as usize).min(nc.saturating_sub(2));
             (i0, (i0 + 1).min(nc - 1), u - i0 as f64)
         };
@@ -772,6 +777,35 @@ mod tests {
         }
         // Same input, same bytes (parallel map, fixed order).
         assert_eq!(coarse.upsample(&fine_p).h, up.h);
+    }
+
+    /// A level whose size does not divide by its cell (16 km at 256 m: 62.5
+    /// rounds to 63 cells, 16,128 m) maps onto the fine grid by position: a
+    /// coarse ramp of height = 1 km + x metres comes out as the same ramp at
+    /// the fine cell centers, not stretched by the grids' share.
+    #[test]
+    fn upsample_aligns_by_position_when_size_does_not_divide() {
+        let fine_p = ForgeParams { size_m: 16_000.0, cell_m: 128.0, ..Default::default() };
+        let coarse_p = ForgeParams { cell_m: 256.0, ..fine_p.clone() };
+        let mut coarse = World::new(&coarse_p);
+        assert_eq!((coarse.n, World::new(&fine_p).n), (63, 125), "the sizes must not divide");
+        for i in 0..coarse.n * coarse.n {
+            coarse.ocean[i] = false;
+            coarse.h[i] = 1_000.0 + coarse.center(i).0;
+        }
+        let up = coarse.upsample(&fine_p);
+        let first_center = coarse.dx * 0.5;
+        let mut checked = 0;
+        for i in 0..up.n * up.n {
+            let (x, z) = (i % up.n, i / up.n);
+            let (cx, _) = up.center(i);
+            if up.outlet[i] || x < 4 || z < 4 || x + 4 >= up.n || z + 4 >= up.n || cx < first_center {
+                continue;
+            }
+            assert!((up.h[i] - (1_000.0 + cx)).abs() < 1e-6, "cell {i}: {} vs {}", up.h[i], 1_000.0 + cx);
+            checked += 1;
+        }
+        assert!(checked > 1_000, "checked {checked} cells");
     }
 
     fn continental(layout: u32, seed: u64, size_m: f64, cell_m: f64) -> ForgeParams {

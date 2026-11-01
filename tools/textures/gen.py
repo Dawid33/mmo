@@ -5,13 +5,16 @@ assets/blocks/blocks.ron) into assets/blocks/. Deterministic: same bytes every r
 Most textures are derived from existing ones by mapping the source's luminance
 onto a new dark->light colour ramp (keeps the pixel pattern and alpha cutout);
 the rest are drawn from a hash noise in the same 3-5 colour style.
-Run from the repo root:  python3 tools/textures/gen.py [--sheet]
+Run from anywhere (paths resolve from this file):  just block-textures [--sheet]
+(or python3 tools/textures/gen.py [--sheet]); --sheet also writes a contact
+sheet to target/textures-sheet.png.
 """
 import sys
 from pathlib import Path
 from PIL import Image
 
-OUT = Path("assets/blocks")
+ROOT = Path(__file__).resolve().parents[2]
+OUT = ROOT / "assets" / "blocks"
 
 
 def h(x, y, salt):
@@ -155,8 +158,8 @@ def main():
         sheet = Image.new("RGBA", (cols * (16 * S + P), rows * (16 * S + P)), (60, 60, 70, 255))
         for i, n in enumerate(names):
             sheet.alpha_composite(t[n].resize((16 * S, 16 * S), Image.NEAREST), ((i % cols) * (16 * S + P), (i // cols) * (16 * S + P)))
-        Path("target").mkdir(exist_ok=True)
-        sheet.save("target/textures-sheet.png")
+        (ROOT / "target").mkdir(exist_ok=True)
+        sheet.save(ROOT / "target" / "textures-sheet.png")
         print("\n".join(f"{i}: {n}" for i, n in enumerate(names)))
 
 

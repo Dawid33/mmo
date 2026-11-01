@@ -43,6 +43,9 @@ pub const ARTIFACT_VERSION: u32 = 7;
 /// zstd level of the world file body (offline writer; reading cost is level-independent).
 #[cfg(not(target_arch = "wasm32"))]
 const ZSTD_LEVEL: i32 = 19;
+/// Read buffer between the streamed zstd decoder and bincode on load.
+#[cfg(not(target_arch = "wasm32"))]
+const LOAD_READ_BUFFER_BYTES: usize = 1 << 16;
 /// Height raster quantisation step (m): ~3 cm worst-case error, 16-bit span of 4095.9 m.
 pub const HEIGHT_STEP_M: f32 = 0.0625;
 /// Uplift / bedding raster step (m).
@@ -362,6 +365,7 @@ impl std::fmt::Display for ArtifactError {
 impl WorldArtifact {
     /// Every quantised raster, for the codec and for `validate`. A new
     /// raster is one line here (plus its field).
+    #[cfg(not(target_arch = "wasm32"))]
     fn qrasters_mut(&mut self) -> [&mut QRaster; 5] {
         [&mut self.height, &mut self.uplifted, &mut self.bedding, &mut self.temperature_c, &mut self.precip_mm]
     }
@@ -371,6 +375,7 @@ impl WorldArtifact {
     }
 
     /// Every `u8` (0..100) raster, likewise.
+    #[cfg(not(target_arch = "wasm32"))]
     fn byte_rasters_mut(&mut self) -> [&mut Vec<u8>; 5] {
         [&mut self.drainage, &mut self.volcanism, &mut self.salinity, &mut self.biome, &mut self.savagery]
     }
@@ -435,10 +440,14 @@ impl WorldArtifact {
                 "version {version} is newer than the {ARTIFACT_VERSION} this build reads"
             )));
         }
-        let body = zstd::stream::decode_all(&bytes[8..])
+        // Streamed: decompressing into a buffer first would hold the whole
+        // body (as big as the artifact) alongside it at the load's peak. The
+        // BufReader turns bincode's per-element reads into memcpys.
+        let decoder = zstd::stream::Decoder::new(&bytes[8..])
             .map_err(|e| ArtifactError::Format(format!("corrupt body: {e}")))?;
         let mut artifact: WorldArtifact =
-            bincode::deserialize(&body).map_err(|e| ArtifactError::Format(format!("corrupt body: {e}")))?;
+            bincode::deserialize_from(std::io::BufReader::with_capacity(LOAD_READ_BUFFER_BYTES, decoder))
+                .map_err(|e| ArtifactError::Format(format!("corrupt body: {e}")))?;
         artifact.validate()?;
         let n = artifact.n as usize;
         for raster in artifact.qrasters_mut() {
@@ -547,8 +556,6 @@ pub struct ForgedWorld {
     buckets: Vec<Vec<u32>>,
     buckets_per_side: usize,
     detail: OctaveNoise,
-    /// Height decoded to meters (the sampler's hot raster).
-    height: Vec<f32>,
     /// Distance (m) from the nearest sea cell (height <= 0), from `height`
     /// at load (`habitat::coast_distance_m`).
     coast_dist_m: Vec<f32>,
@@ -629,7 +636,9 @@ impl ForgedWorld {
     pub fn load(path: &Path) -> Result<ForgedWorld, ArtifactError> {
         let bytes = std::fs::read(path).map_err(ArtifactError::Io)?;
         let artifact = WorldArtifact::from_bytes(&bytes)?;
-        Ok(Self::with_crc(artifact, crc32fast::hash(&bytes)))
+        let content_crc = crc32fast::hash(&bytes);
+        drop(bytes);
+        Ok(Self::with_crc(artifact, content_crc))
     }
 
     fn with_crc(artifact: WorldArtifact, content_crc: u32) -> ForgedWorld {
@@ -665,8 +674,12 @@ impl ForgedWorld {
             }
         }
         let detail = OctaveNoise::new(artifact.seed ^ 0xDE7A_11, DETAIL_FIRST_OCTAVE, vec![1.0, 0.6]);
-        let height = artifact.height.to_f32();
-        let coast_dist_m = crate::habitat::coast_distance_m(&height, artifact.n as usize, artifact.cell_m);
+        // Height is held once, as the artifact's `QRaster`: the sampler reads
+        // it through `QRaster::get` (one multiply-add, the same values a
+        // decoded `f32` copy held), which saves 4 B/cell over keeping both.
+        let height = &artifact.height;
+        let coast_dist_m =
+            crate::habitat::coast_distance_by(artifact.n as usize, artifact.cell_m, |i| height.get(i) <= 0.0);
         let mut lake_runs: Vec<(u32, u32, f32)> = artifact
             .lakes
             .iter()
@@ -686,7 +699,6 @@ impl ForgedWorld {
             buckets,
             buckets_per_side,
             detail,
-            height,
             coast_dist_m,
             lake_runs,
             dither,
@@ -709,7 +721,7 @@ impl ForgedWorld {
     }
 
     fn cell(&self, ix: i64, iz: i64) -> f64 {
-        Self::raster_cell(&self.height, self.artifact.n, ix, iz)
+        Self::raster_cell(&self.artifact.height, self.artifact.n, ix, iz)
     }
 
     /// One cell of an `n * n` raster, clamped to the edge.
@@ -888,7 +900,7 @@ impl ForgedWorld {
         let (ax, az) = self.to_artifact(x_m, z_m);
         let a = &self.artifact;
         let line = |i: usize| {
-            let ground = f64::from(self.height[i]).max(0.0);
+            let ground = f64::from(a.height.get(i)).max(0.0);
             ground + f64::from(a.temperature_c.get(i) - SNOW_LINE_C) / self.lapse_c_per_m
         };
         self.bilinear_cells(ax, az, line) as f32

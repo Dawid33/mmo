@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::forge::knobs::Knobs;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::forged::WorldArtifact;
 
 pub const WORLDS_DIR: &str = "worlds";

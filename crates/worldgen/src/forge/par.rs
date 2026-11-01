@@ -133,8 +133,10 @@ pub struct Disjoint<'a, T> {
 }
 
 // SAFETY: access is only through the unsafe accessors, whose callers promise
-// disjoint indices per worker; T itself moves between threads.
-unsafe impl<T: Send> Sync for Disjoint<'_, T> {}
+// disjoint indices per worker. `set` moves a T in from another thread (Send);
+// `get` may read indices concurrently from several workers (Sync), so a shared
+// `Disjoint` needs both — the bound `&mut [T]: Sync` itself has.
+unsafe impl<T: Send + Sync> Sync for Disjoint<'_, T> {}
 unsafe impl<T: Send> Send for Disjoint<'_, T> {}
 
 impl<'a, T: Copy> Disjoint<'a, T> {

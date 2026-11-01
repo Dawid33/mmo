@@ -3,6 +3,7 @@
 //! memory estimate shown before Play, and [`forge_to_file`], the cancellable
 //! Play forge that never leaves a half-written world file behind.
 
+#[cfg(not(target_arch = "wasm32"))]
 use super::{forge_with, ForgeParams, ForgeProgress, ForgeStage, Forged};
 
 /// Preview cell sizes [`preview_cell_for`] picks from, finest first.

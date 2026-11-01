@@ -284,6 +284,19 @@ New format:
   100 km / 16 m. Steady state is lower (8 B of `u16` rasters + 4 B decoded height + 4 B coast
   distance = 16 B/cell, ~0.62 GB at 100 km); `uplifted`/`bedding`/`rain` could be dropped to
   one copy later if memory presses.
+- **Re-measured at v7 (final review, same method and world size)**: v7 adds `temperature_c` /
+  `precip_mm` (`QRaster`s, replacing rain), five `u8` rasters (drainage, volcanism, salinity,
+  biome, savagery) and the `u16` region raster, so the file is 1,937,612 B = **1.94 B/cell**.
+  Before the fix, `ForgedWorld::load` held height twice (the artifact's `QRaster` + a decoded
+  `f32` copy) and decompressed the whole body next to the artifact: steady **30.0 B/cell**,
+  peak 37.0 B/cell. Now the sampler reads the height `QRaster` directly (`QRaster::get`, the same
+  values the `f32` copy held; coast distance is computed from it without decoding a copy) and the
+  body is stream-decoded (zstd `Decoder` -> 64 KiB `BufReader` -> `bincode::deserialize_from`, load
+  time unchanged at ~40 ms): steady **26.6 B/cell**, peak **28.3 B/cell** (17 B of rasters, 4 B
+  coast distance, the rest rivers, lakes and allocator slack).
+  **100 km / 16 m (39.3 M cells): estimated ~1.05 GB steady, ~1.1 GB at load peak — at the 1 GB
+  budget; to be measured in Task 21.** Further levers if needed: coast distance as `u16` metres
+  (−2 B/cell), or dropping `uplifted` + `bedding` to one summed raster (−2 B/cell).
 - Header/version as today; an older version is refused (`ArtifactError::OldVersion`) with a re-forge message, which the main menu's world list shows as "needs re-forge: ...".
 
 ### 7. Engine changes for kilometre-plus terrain (from the 2026-11-01 code audit)

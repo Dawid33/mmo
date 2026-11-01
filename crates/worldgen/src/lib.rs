@@ -925,6 +925,36 @@ mod tests {
     use super::*;
     use game::{BlockId, Column, ColumnCoords, ReadVol, BlockPos, SubChunk, REGION_CHUNKS};
 
+    /// `treeless` (no trees dressed onto the column) and
+    /// `trees::BIOME_TREE_DENSITY` (no trees placed) are two sources of truth:
+    /// a land biome is treeless exactly when its density is 0, water biomes
+    /// have density 0, and the table lists every biome once.
+    #[test]
+    fn treeless_biomes_match_zero_tree_density() {
+        for b in Biome::ALL {
+            let listed = crate::trees::placement::BIOME_TREE_DENSITY.iter().filter(|(x, _)| *x == b).count();
+            assert_eq!(listed, 1, "{b:?} listed {listed} times in BIOME_TREE_DENSITY");
+            let zero = crate::trees::placement::biome_tree_density(Some(b)) == 0.0;
+            if game::region_type(b, 50).is_water() {
+                assert!(zero, "water biome {b:?} has trees");
+            } else {
+                assert_eq!(treeless(b), zero, "{b:?}: treeless() and BIOME_TREE_DENSITY disagree");
+            }
+        }
+    }
+
+    /// The engine's `SINGLE_BLOCK_TREES` (which blocks are trunk wood) names
+    /// exactly worldgen's `Species::single_block` species.
+    #[test]
+    fn single_block_trees_match_species() {
+        let mut species: Vec<&str> =
+            crate::trees::SPECIES.iter().filter(|s| s.single_block).map(|s| s.name).collect();
+        let mut engine = game::SINGLE_BLOCK_TREES.to_vec();
+        species.sort_unstable();
+        engine.sort_unstable();
+        assert_eq!(species, engine);
+    }
+
     fn mats() -> crate::material::Materials {
         crate::material::Materials {
             stone: BlockId(2),

@@ -66,7 +66,8 @@ pub const LATITUDE_PRECIP_MM: [(f32, f32); 7] =
 pub const CONTINENTAL_MOISTURE: f64 = 0.65;
 /// Half-width (deg) of the latitude band over which the wind turns at a band
 /// edge (`trade_wind_edge_deg`, `polar_edge_deg`): rows inside it blend the
-/// two directions' sweeps.
+/// two directions' sweeps. The two edge knobs' help text in `knobs.rs`
+/// quotes this value: keep them in step.
 pub const BAND_BLEND_DEG: f64 = 5.0;
 /// The meander's wavelength is at most the world's size over this, so a
 /// small world still sees whole waves instead of one big kink.

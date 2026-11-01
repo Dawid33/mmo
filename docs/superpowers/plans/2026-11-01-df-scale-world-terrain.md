@@ -24,7 +24,7 @@ before Task 1; section numbers below (§N) refer to it.
 
 - **The procedural world stays bit-identical.** The `procedural` world, tests and wasm `?offline`
   must not change. These must pass unchanged after every task:
-  - `just test-one worldgen "--test it scene_hash_golden::"`
+  - `just test-one worldgen "--test it -- --include-ignored scene_hash_golden::"`
   - `just test-one game "--test wasm_determinism"`
   - `just determinism-wasm`
 
@@ -331,7 +331,7 @@ before Task 1; section numbers below (§N) refer to it.
   bounds.
 - [ ] **Step 4: Run the passes.**
   - Step 2 target.
-  - `just test-one worldgen "--test it scene_hash_golden::"` → PASS unchanged.
+  - `just test-one worldgen "--test it -- --include-ignored scene_hash_golden::"` → PASS unchanged.
   - `just test-one worldgen "--test it underground::"`.
   - `just determinism-wasm`.
   - `just smoke`.
@@ -528,7 +528,7 @@ before Task 1; section numbers below (§N) refer to it.
   - `just test-one worldgen "--lib forge::"`.
   - `just test-one worldgen "--test forged_world"`.
   - `just test-one worldgen "--test it trees_in_terrain::"`.
-  - `just test-one worldgen "--test it scene_hash_golden::"` unchanged.
+  - `just test-one worldgen "--test it -- --include-ignored scene_hash_golden::"` unchanged.
 - [ ] **Step 5: Commit** `feat(forge): latitude climate — temperature, banded winds, precipitation in mm/yr`.
 
 ### Task 13: Drainage, volcanism, salinity
@@ -707,7 +707,7 @@ before Task 1; section numbers below (§N) refer to it.
 - [ ] **Step 3: Implement.**
 - [ ] **Step 4: Run the passes.**
   - Step 2 targets.
-  - `just test-one worldgen "--test it scene_hash_golden::"`.
+  - `just test-one worldgen "--test it -- --include-ignored scene_hash_golden::"`.
   - `just test-one worldgen "--test it underground::"`.
   - `just determinism-wasm`.
   - `just smoke`.
@@ -745,7 +745,7 @@ before Task 1; section numbers below (§N) refer to it.
   - `just test-one worldgen "--lib trees::"`.
   - `just test-one worldgen "--test it trees_in_terrain::"`.
   - `just test-one worldgen "--test it -- --include-ignored tree_chop::"`.
-  - `just test-one worldgen "--test it scene_hash_golden::"`.
+  - `just test-one worldgen "--test it -- --include-ignored scene_hash_golden::"`.
   - `just smoke`.
 - [ ] **Step 5: Commit** `feat(worldgen): biome trees — spruce, acacia, palm, jungle, cactus`.
 
