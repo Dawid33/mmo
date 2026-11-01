@@ -11,8 +11,10 @@
 //!   2. geology    rock column in a stratigraphic coordinate -> erodibility of
 //!                 whatever rock the surface currently cuts;
 //!   3. climate    orographic rain on the current heights -> discharge weights;
-//!   4. erosion    Priority-Flood routing, stream-power incision, depression
-//!                 silting, hillslope diffusion, per iteration;
+//!   4. erosion    drainage routing (a Priority-Flood on the first iteration,
+//!                 then the linear-time depression graph of `routing_fast`),
+//!                 stream-power incision, depression silting, hillslope
+//!                 diffusion, per iteration;
 //!   5. post       valley floors planed beside rivers; overdeepened basins
 //!                 flooded to their spill level = lakes;
 //!   6. hydrology  lakes and rivers as objects + statistics;

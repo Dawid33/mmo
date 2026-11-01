@@ -4,6 +4,7 @@ use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 
 use crate::forge::geology::Geology;
+use crate::forge::routing_fast::route_fast;
 use crate::forge::world::{ForgeParams, World};
 
 /// Priority-Flood epsilon (m per meter of travel): the routing surface falls
@@ -46,6 +47,8 @@ pub struct StepScratch {
     diffuse: Vec<f64>,
     /// `routing_fast::route_fast`'s working buffers.
     pub(super) fast: crate::forge::routing_fast::FastScratch,
+    /// `step` has run with this scratch: later steps route with `route_fast`.
+    routed_once: bool,
 }
 
 /// Priority-Flood(+epsilon) seeded from the coast (Barnes et al. 2014). Cells
@@ -140,9 +143,26 @@ pub fn discharge_into(w: &World, r: &Routing, rain: &[f64], q: &mut Vec<f64>) {
 /// One time step: uplift + implicit stream-power incision dh/dt = U - K*sqrt(Q)*S
 /// along the routing tree (Braun & Willett 2013, n = 1), sediment into
 /// depressions, then hillslope diffusion. Returns the cells under depressions.
+/// Routing is the Priority-Flood on the first step with a scratch and
+/// `route_fast` on every later one.
 pub fn step(w: &mut World, p: &ForgeParams, geo: &Geology, rain: &[f64], scratch: &mut StepScratch) -> usize {
-    let StepScratch { routing, q, diffuse, .. } = scratch;
-    route_into(w, FLOOD_EPSILON, routing);
+    // The first iteration floods the initial condition with the full
+    // Priority-Flood; after that the depression-graph routing is linear time.
+    let mut routing = std::mem::take(&mut scratch.routing);
+    if scratch.routed_once {
+        route_fast(w, FLOOD_EPSILON, scratch, &mut routing);
+    } else {
+        route_into(w, FLOOD_EPSILON, &mut routing);
+        scratch.routed_once = true;
+    }
+    let drowned = evolve(w, p, geo, rain, &routing, scratch);
+    scratch.routing = routing;
+    drowned
+}
+
+/// `step` after routing: incision along `routing`, silting, diffusion.
+fn evolve(w: &mut World, p: &ForgeParams, geo: &Geology, rain: &[f64], routing: &Routing, scratch: &mut StepScratch) -> usize {
+    let StepScratch { q, diffuse, .. } = scratch;
     discharge_into(w, routing, rain, q);
     let (k, dt) = (&p.knobs, p.knobs.dt_years);
     let mut drowned = 0;
@@ -199,9 +219,11 @@ mod tests {
         let geo = Geology::new(&p, &a);
         let rain = vec![1.0; a.n * a.n];
         let mut reused = StepScratch::default();
-        for _ in 0..20 {
+        for iter in 0..20 {
             step(&mut a, &p, &geo, &rain, &mut reused);
-            step(&mut b, &p, &geo, &rain, &mut StepScratch::default());
+            // A fresh scratch that has routed once, like `reused` after step 1.
+            let mut fresh = StepScratch { routed_once: iter > 0, ..Default::default() };
+            step(&mut b, &p, &geo, &rain, &mut fresh);
         }
         assert_eq!(a.h, b.h);
         assert_eq!(a.uplifted, b.uplifted);
