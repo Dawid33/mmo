@@ -79,6 +79,7 @@ pub fn decode(bytes: &[u8], grid: SocietyGrid) -> Result<History, HistoryLoadErr
     let mut h: History =
         bincode::deserialize(&body).map_err(|e| HistoryLoadError::Corrupt(e.to_string()))?;
     h.set_grid(grid);
+    h.after_load();
     Ok(h)
 }
 

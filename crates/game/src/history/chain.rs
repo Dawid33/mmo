@@ -300,21 +300,31 @@ impl History {
         }
     }
 
-    /// Living citizens of `civ`: everyone alive whose `Person.site` is one of its sites,
-    /// travellers included (as `stats().per_civ` counts them). Counted as the sites' members
-    /// (all alive, all citizens of that site, embodied or not — Ruling P2-C) plus living
-    /// travellers on journeys, held ones included.
+    /// Living citizens of `civ`: everyone alive whose `Person.site` is one of its sites
+    /// (as `stats().per_civ` counts them). Counted as the sites' members (all alive,
+    /// embodied or not — Ruling P2-C), plus living travellers on journeys (held or not),
+    /// plus strays (`Wandering`, still citizens) — the latter found through
+    /// `stray_candidates`, so no rule walks every person.
     pub fn civ_population(&self, civ: CivId) -> u32 {
-        let in_civ = |s: Option<SiteId>| s.and_then(|s| self.sites.get(&s)).is_some_and(|s| s.civ == civ);
+        let away = |p: &Person| {
+            p.alive()
+                && p.site.and_then(|s| self.sites.get(&s)).is_some_and(|s| s.civ == civ && !s.members.contains(&p.id))
+        };
         let members: u32 = self.sites.values().filter(|s| s.civ == civ).map(|s| s.members.len() as u32).sum();
         let travellers = self
             .journeys
             .values()
-            .flat_map(|j| j.people.iter())
-            .filter_map(|p| self.people.get(p))
-            .filter(|p| p.alive() && matches!(p.abstract_location(), Location::Journey(_)) && in_civ(p.site))
+            .flat_map(|j| j.people.iter().map(move |p| (j.id, p)))
+            .filter_map(|(j, p)| self.people.get(p).map(|q| (j, q)))
+            .filter(|(j, q)| q.abstract_location() == Location::Journey(*j) && away(q))
             .count() as u32;
-        members + travellers
+        let strays = self
+            .stray_candidates
+            .iter()
+            .filter_map(|p| self.people.get(p))
+            .filter(|q| matches!(q.abstract_location(), Location::Wandering(_)) && away(q))
+            .count() as u32;
+        members + travellers + strays
     }
 
     fn births(&mut self, sid: SiteId) {
@@ -325,6 +335,8 @@ impl History {
         };
         let mothers: Vec<PersonId> = self.sites[&sid].members.iter().copied().collect();
         let gap = BIRTH_MIN_GAP_DAYS * TICKS_PER_DAY;
+        // Counted once, on the first fertile couple, then kept up by this month's births.
+        let mut population: Option<u32> = None;
         for m in mothers {
             let p = &self.people[&m];
             let Some(f) = p.spouse else { continue };
@@ -336,7 +348,8 @@ impl History {
             {
                 continue;
             }
-            if self.civ_population(civ) >= CIV_POPULATION_CAP {
+            let pop = *population.get_or_insert_with(|| self.civ_population(civ));
+            if pop >= CIV_POPULATION_CAP {
                 break;
             }
             let members = self.sites[&sid].members.len() as u32;
@@ -355,6 +368,7 @@ impl History {
                 self.emit_spawn_near(rc, id, m);
             }
             self.sites.get_mut(&sid).unwrap().members.insert(id);
+            population = Some(pop + 1);
             for parent in [m, f] {
                 self.people.get_mut(&parent).unwrap().children.push(id);
             }

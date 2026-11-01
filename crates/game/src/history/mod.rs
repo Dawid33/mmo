@@ -50,7 +50,8 @@ pub struct History {
     pub log: Vec<LogEntry>,
     #[serde(skip)]
     grid: Option<SocietyGrid>,
-    /// Regions running now (the manager's view, re-sent after a load).
+    /// Regions running now (the manager's view). Not saved: a load starts with none, and
+    /// [`History::after_load`] hands every body and held journey back to the abstract history.
     #[serde(skip)]
     running: BTreeSet<crate::RegionCoords>,
     /// Regions shutting down, not yet parked: steps acting on their people wait.
@@ -59,6 +60,10 @@ pub struct History {
     /// Decided but not yet taken by [`History::take_directives`].
     #[serde(skip)]
     directives: Vec<Directive>,
+    /// Everyone who may be a stray citizen (`Wandering` with a site): a superset, checked
+    /// on use, filled where hand-over makes strays and rebuilt by [`History::after_load`].
+    #[serde(skip)]
+    stray_candidates: BTreeSet<PersonId>,
 }
 
 impl History {
@@ -78,6 +83,7 @@ impl History {
             running: BTreeSet::new(),
             stopping: BTreeSet::new(),
             directives: Vec::new(),
+            stray_candidates: BTreeSet::new(),
         }
     }
 

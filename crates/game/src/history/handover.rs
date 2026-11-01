@@ -134,7 +134,7 @@ impl History {
     }
 
     /// Hold `j` in `rc` and walk its travellers embodied there out toward the next route
-    /// region. A journey with nowhere left to walk is not held.
+    /// region. Nothing happens with nowhere left to walk or nobody there to walk it.
     pub(crate) fn hold_and_walk_out(&mut self, j: JourneyId, rc: RegionCoords) {
         let Some(jr) = self.journeys.get(&j) else { return };
         let Some(&next) = jr.route.get(jr.leg as usize + 1) else { return };
@@ -144,6 +144,9 @@ impl History {
             .copied()
             .filter(|p| self.people.get(p).is_some_and(|q| q.alive() && q.location == Location::InRegion(rc)))
             .collect();
+        if walkers.is_empty() {
+            return;
+        }
         self.hold(j, rc);
         for p in walkers {
             self.emit(rc, GameEventKind::WalkOut(p, next));
@@ -152,11 +155,19 @@ impl History {
 
     /// Journey `j` is at `route[idx]`, a running region: its abstract travellers walk in
     /// over the edge and on to the next region (or, at the destination, to its landing,
-    /// where they arrive at once). Holds the journey.
-    pub(crate) fn enter_running(&mut self, j: JourneyId, idx: usize) {
-        let Some(jr) = self.journeys.get_mut(&j) else { return };
-        jr.leg = idx as u32;
-        let jr = &self.journeys[&j];
+    /// where they arrive at once), and the journey is held there. False, with no change,
+    /// when it has no abstract traveller to walk in (it goes on abstractly).
+    pub(crate) fn enter_running(&mut self, j: JourneyId, idx: usize) -> bool {
+        let Some(jr) = self.journeys.get(&j) else { return false };
+        let travellers: Vec<PersonId> = jr
+            .people
+            .iter()
+            .copied()
+            .filter(|p| self.people.get(p).is_some_and(|q| q.alive() && q.location == Location::Journey(j)))
+            .collect();
+        if travellers.is_empty() {
+            return false;
+        }
         let rc = jr.route[idx];
         let last = jr.route.len() - 1;
         let from = if idx == 0 { rc } else { entry_side(jr.route[idx - 1], rc) };
@@ -166,12 +177,7 @@ impl History {
         } else {
             centre_goal(jr.route[idx + 1])
         };
-        let travellers: Vec<PersonId> = jr
-            .people
-            .iter()
-            .copied()
-            .filter(|p| self.people.get(p).is_some_and(|q| q.alive() && q.location == Location::Journey(j)))
-            .collect();
+        self.journeys.get_mut(&j).unwrap().leg = idx as u32;
         let spread = u64::from(EDGE_SPREAD_PER_MILLE);
         let base = spread + self.roll(self.now, u64::from(j.0), SALT_EDGE) % (1001 - 2 * spread);
         for p in travellers {
@@ -187,6 +193,7 @@ impl History {
         } else {
             self.hold(j, rc);
         }
+        true
     }
 
     /// Region `rc` starts: the events that put history's people into it now — site people
@@ -239,31 +246,70 @@ impl History {
     }
 
     /// Region `rc` parked with `people`'s bodies in it: each goes back to the abstract
-    /// history (a held journey resumes with half its current leg left). Anyone else still
-    /// in `rc` is restored too, with a warning — a body went missing.
+    /// history, and every journey held in `rc` resumes with half its current leg left.
+    /// Anyone else still in `rc` is restored too, with a warning — a body went missing.
     pub fn region_parked(&mut self, rc: RegionCoords, people: Vec<(PersonId, [f32; 3])>) {
         self.running.remove(&rc);
         self.stopping.remove(&rc);
-        let mut resumed = BTreeSet::new();
         for (p, _pose) in people {
             if self.people.get(&p).is_some_and(|q| q.location == Location::InRegion(rc)) {
-                self.restore(p, rc, &mut resumed);
+                self.restore(p, rc);
             } else {
                 ::log::warn!("history: parked region {rc:?} returned {p:?}, who is not in it");
             }
         }
-        let lost: Vec<PersonId> =
-            self.people.values().filter(|q| q.location == Location::InRegion(rc)).map(|q| q.id).collect();
-        for p in lost {
-            if self.people[&p].alive() {
-                ::log::warn!("history: {p:?} was in region {rc:?} but not parked with it; restoring");
-            }
-            self.restore(p, rc, &mut resumed);
+        self.release(rc, true);
+    }
+
+    /// After a load: nothing runs yet, so everyone embodied goes back to the abstract
+    /// history and every held journey resumes, as if their regions had parked.
+    /// [`super::persist::decode`] calls it.
+    pub fn after_load(&mut self) {
+        self.running.clear();
+        self.stopping.clear();
+        self.stray_candidates = self
+            .people
+            .values()
+            .filter(|p| p.site.is_some() && matches!(p.abstract_location(), Location::Wandering(_)))
+            .map(|p| p.id)
+            .collect();
+        let mut regions: BTreeSet<RegionCoords> = self
+            .people
+            .values()
+            .filter_map(|p| match p.location {
+                Location::InRegion(rc) => Some(rc),
+                _ => None,
+            })
+            .collect();
+        regions.extend(self.journeys.values().filter_map(|jr| jr.held_in));
+        for rc in regions {
+            self.release(rc, false);
         }
     }
 
-    /// Return `person`, embodied in `rc` (no longer live), to the abstract history.
-    fn restore(&mut self, person: PersonId, rc: RegionCoords, resumed: &mut BTreeSet<JourneyId>) {
+    /// Restore everyone still in `rc` (warning about the living when `warn`) and resume
+    /// every journey held there.
+    fn release(&mut self, rc: RegionCoords, warn: bool) {
+        let left: Vec<PersonId> =
+            self.people.values().filter(|q| q.location == Location::InRegion(rc)).map(|q| q.id).collect();
+        for p in left {
+            if warn && self.people[&p].alive() {
+                ::log::warn!("history: {p:?} was in region {rc:?} but not parked with it; restoring");
+            }
+            self.restore(p, rc);
+        }
+        let held: Vec<JourneyId> =
+            self.journeys.values().filter(|jr| jr.held_in == Some(rc)).map(|jr| jr.id).collect();
+        for j in held {
+            self.journeys.get_mut(&j).unwrap().held_in = None;
+            let at = CalendarTick(self.now.0 + self.leg_duration(j) / 2);
+            self.schedule_next_leg_from(j, at);
+        }
+    }
+
+    /// Return `person`, embodied in `rc` (no longer live), to the abstract history. Their
+    /// journey, if any, resumes in [`History::release`].
+    fn restore(&mut self, person: PersonId, rc: RegionCoords) {
         let Some(p) = self.people.get_mut(&person) else { return };
         let home = std::mem::replace(&mut p.home_location, Location::Unplaced);
         if !p.alive() {
@@ -271,20 +317,25 @@ impl History {
             return;
         }
         match home {
-            Location::Journey(j) if self.journeys.contains_key(&j) => {
-                p.location = Location::Journey(j);
-                if self.journeys[&j].held_in == Some(rc) && resumed.insert(j) {
-                    self.journeys.get_mut(&j).unwrap().held_in = None;
-                    let at = CalendarTick(self.now.0 + self.leg_duration(j) / 2);
-                    self.schedule_next_leg_from(j, at);
-                }
-            }
-            Location::AtSite(s) => self.walk_home(person, rc, s),
-            _ => {
-                let site = p.site;
-                match site {
-                    Some(s) => self.walk_home(person, rc, s),
-                    None => self.people.get_mut(&person).unwrap().location = Location::Wandering(rc),
+            Location::Journey(j) if self.journeys.contains_key(&j) => p.location = Location::Journey(j),
+            _ => self.settle(person, rc, home),
+        }
+    }
+
+    /// `person`, out of any body and any journey, in `region`: back to their site (walking
+    /// if it is elsewhere) when they have one, else a stray in `region`. The one rule for a
+    /// park and a seam crossing.
+    fn settle(&mut self, person: PersonId, region: RegionCoords, home: Location) {
+        let site = match home {
+            Location::AtSite(s) => Some(s),
+            _ => self.people.get(&person).and_then(|p| p.site),
+        };
+        match site {
+            Some(s) => self.walk_home(person, region, s),
+            None => {
+                if let Some(p) = self.people.get_mut(&person) {
+                    p.location = Location::Wandering(region);
+                    p.home_location = Location::Unplaced;
                 }
             }
         }
@@ -309,40 +360,58 @@ impl History {
             self.abandon_site(s);
         }
         self.people.get_mut(&person).unwrap().location = Location::Wandering(from);
+        self.stray_candidates.insert(person);
         // No route: they stay a stray in `from`, still a citizen of `s`.
         let _ = self.start_journey_from_region(vec![person], from, home, Purpose::Migrate { to: s });
     }
 
     /// The manager moved `person`'s body over a seam into `to`. True when `to` is running
     /// and the manager must deliver the body there; false when the history absorbed them
-    /// (their journey goes on abstractly, re-routed if `to` is off its route; a citizen
-    /// who wandered off heads home).
+    /// (their journey goes on abstractly, re-routed if `to` is off its route; anyone else
+    /// is settled as by a park: a citizen heads home, a stray wanders in `to`). Only a
+    /// crossing out of the region a journey is held in (or of an unheld journey) moves the
+    /// journey; it never steps back along its route.
     pub fn person_crossed(&mut self, person: PersonId, to: RegionCoords) -> bool {
         let Some(p) = self.people.get_mut(&person).filter(|p| p.alive()) else { return false };
         let home = p.abstract_location();
+        let from = match p.location {
+            Location::InRegion(r) => Some(r),
+            _ => None,
+        };
         if self.running.contains(&to) {
             p.location = Location::InRegion(to);
             p.home_location = home;
             if let Location::Journey(j) = home {
-                self.journey_delivered(j, person, to);
+                self.journey_delivered(j, person, from, to);
             }
             return true;
         }
         p.location = home;
         p.home_location = Location::Unplaced;
         match home {
-            Location::Journey(j) if self.journeys.contains_key(&j) => self.journey_absorbed(j, person, to),
-            Location::AtSite(s) => self.walk_home(person, to, s),
-            _ => self.people.get_mut(&person).unwrap().location = Location::Wandering(to),
+            Location::Journey(j) if self.journeys.contains_key(&j) => self.journey_absorbed(j, person, from, to),
+            _ => self.settle(person, to, home),
         }
         false
     }
 
-    /// A traveller of `j` walked into running region `to`.
-    fn journey_delivered(&mut self, j: JourneyId, person: PersonId, to: RegionCoords) {
+    /// A traveller of `j` walked from `from` into running region `to`.
+    fn journey_delivered(&mut self, j: JourneyId, person: PersonId, from: Option<RegionCoords>, to: RegionCoords) {
         let Some(jr) = self.journeys.get_mut(&j) else { return };
+        let held = jr.held_in;
+        if held == Some(to) {
+            // The party is walking here already: join it.
+            if let Some(&next) = jr.route.get(jr.leg as usize + 1) {
+                self.emit(to, GameEventKind::WalkOut(person, next));
+            }
+            return;
+        }
+        if held.is_some() && held != from {
+            // Held where other bodies walk it: this one idles here until the region parks.
+            return;
+        }
         if let Some(i) = jr.route.iter().position(|r| *r == to) {
-            jr.leg = i as u32;
+            jr.leg = jr.leg.max(i as u32);
             if i + 1 >= jr.route.len() {
                 self.arrive(j);
                 self.hold_and_walk_out(j, to);
@@ -359,34 +428,46 @@ impl History {
             self.hold(j, to);
             self.emit(to, GameEventKind::WalkOut(person, next));
         } else {
-            // No way on from here: they stay a stray; the rest of the party is unchanged.
+            // No way on from here: they leave the party (settled when `to` parks).
             self.remove_traveller(j, person);
             self.people.get_mut(&person).unwrap().home_location = Location::Wandering(to);
+            self.stray_candidates.insert(person);
         }
     }
 
-    /// A traveller of `j` walked into `to`, which is not running.
-    fn journey_absorbed(&mut self, j: JourneyId, person: PersonId, to: RegionCoords) {
+    /// A traveller of `j` walked from `from` into `to`, which is not running.
+    fn journey_absorbed(&mut self, j: JourneyId, person: PersonId, from: Option<RegionCoords>, to: RegionCoords) {
         let jr = self.journeys.get_mut(&j).unwrap();
-        let held = jr.held_in.take();
+        let held = jr.held_in;
+        if held.is_some() && held != from {
+            // Held where other bodies walk it: rejoin, and go on when that region parks.
+            return;
+        }
+        jr.held_in = None;
+        let unheld = held.is_some();
         if let Some(i) = jr.route.iter().position(|r| *r == to) {
-            jr.leg = i as u32;
-            if i + 1 >= jr.route.len() {
-                self.arrive(j);
-            } else {
-                let at = CalendarTick(self.now.0 + self.leg_duration(j));
-                self.schedule_next_leg_from(j, at);
+            let moved = i as u32 > jr.leg;
+            if moved {
+                jr.leg = i as u32;
+            }
+            if moved || unheld {
+                if jr.leg as usize + 1 >= jr.route.len() {
+                    self.arrive(j);
+                } else {
+                    let at = CalendarTick(self.now.0 + self.leg_duration(j));
+                    self.schedule_next_leg_from(j, at);
+                }
             }
             return;
         }
         let dest = *jr.route.last().expect("a route has a region");
         if !self.reroute_from(j, to, dest, None) {
-            // No way on from here: they stay a stray; the rest of the party is unchanged.
+            // No way on from here: they leave the party; the rest is unchanged.
             if let Some(jr) = self.journeys.get_mut(&j) {
                 jr.held_in = held;
             }
             self.remove_traveller(j, person);
-            self.people.get_mut(&person).unwrap().location = Location::Wandering(to);
+            self.settle(person, to, Location::Wandering(to));
         }
     }
 }

@@ -401,10 +401,146 @@ fn diagonal_entry_spawns_from_orthogonal_neighbour() {
 }
 
 #[test]
-fn history_file_version_is_two() {
+fn load_normalises_embodied_state() {
     assert_eq!(persist::HISTORY_FILE_VERSION, 2);
-    let (mut h, _, _) = two_sites();
-    h.region_started(rc(0, 0));
+    let (h, a, j) = walking_out_of_running_site();
+    assert_eq!(h.journey(j).unwrap().held_in, Some(rc(0, 0)));
+    assert_eq!(h.pending_journey_legs(), 0);
     let back = persist::decode(&persist::encode(&h), SocietyGrid::from_world_map(&land_map(8, 3))).unwrap();
-    assert_eq!(back.person(PersonId(0)).unwrap().home_location, Location::AtSite(SiteId(0)));
+    assert!(back.people().all(|p| !matches!(p.location, Location::InRegion(_))));
+    assert!(back.people().all(|p| p.home_location == Location::Unplaced));
+    assert_eq!(back.journey(j).unwrap().held_in, None);
+    assert_eq!(back.pending_journey_legs(), 1);
+    assert_eq!(back.person(a[0]).unwrap().location, Location::Journey(j));
+    assert_eq!(back.person(a[1]).unwrap().location, Location::AtSite(SiteId(0)));
+}
+
+#[test]
+fn held_journey_without_bodies_resumes_on_park() {
+    let (mut h, a, _) = two_sites();
+    h.region_started(rc(0, 0));
+    let j = h.start_journey(vec![a[0], a[1]], SiteId(0), rc(6, 0), Purpose::Migrate { to: SiteId(1) }).unwrap();
+    // a[0] walks into unloaded (1, 0) and dies there; a[1] is still a body in (0, 0).
+    assert!(!h.person_crossed(a[0], rc(1, 0)));
+    h.record_death(a[0], DeathCause::OldAge);
+    // The leg into running (2, 0) has nobody to walk in: the journey is not held there.
+    h.region_started(rc(2, 0));
+    h.advance(CalendarTick(h.now().0 + leg()));
+    let jr = h.journey(j).unwrap();
+    assert_eq!((jr.leg, jr.held_in), (2, None));
+    h.region_stopping(rc(0, 0));
+    h.region_parked(rc(0, 0), vec![(a[1], [0.0; 3])]);
+    h.region_stopping(rc(2, 0));
+    h.region_parked(rc(2, 0), vec![]);
+    h.advance(CalendarTick(h.now().0 + 6 * leg()));
+    assert!(h.journey(j).is_none());
+    assert_eq!(h.person(a[1]).unwrap().location, Location::AtSite(SiteId(1)));
+}
+
+#[test]
+fn journey_held_where_its_bodies_died_resumes_on_park() {
+    let (mut h, a, _) = two_sites();
+    h.region_started(rc(0, 0));
+    h.region_started(rc(1, 0));
+    let j = h.start_journey(vec![a[0], a[1]], SiteId(0), rc(6, 0), Purpose::Migrate { to: SiteId(1) }).unwrap();
+    assert!(h.person_crossed(a[0], rc(1, 0)));
+    assert_eq!(h.journey(j).unwrap().held_in, Some(rc(1, 0)));
+    h.record_death(a[0], DeathCause::OldAge);
+    h.region_stopping(rc(1, 0));
+    h.region_parked(rc(1, 0), vec![]);
+    assert_eq!(h.journey(j).unwrap().held_in, None);
+    assert_eq!(h.pending_journey_legs(), 1);
+    h.region_stopping(rc(0, 0));
+    h.region_parked(rc(0, 0), vec![(a[1], [0.0; 3]), (a[2], [0.0; 3])]);
+    h.advance(CalendarTick(h.now().0 + 6 * leg()));
+    assert!(h.journey(j).is_none());
+    assert_eq!(h.person(a[1]).unwrap().location, Location::AtSite(SiteId(1)));
+}
+
+#[test]
+fn party_of_two_crossing_one_at_a_time() {
+    let (mut h, a, _) = two_sites();
+    h.region_started(rc(0, 0));
+    let j = h.start_journey(vec![a[0], a[1]], SiteId(0), rc(6, 0), Purpose::Migrate { to: SiteId(1) }).unwrap();
+    let t1 = h.now();
+    assert!(!h.person_crossed(a[0], rc(1, 0)));
+    h.advance(CalendarTick(t1.0 + 5));
+    assert!(!h.person_crossed(a[1], rc(1, 0)));
+    let jr = h.journey(j).unwrap();
+    assert_eq!((jr.leg, jr.held_in), (1, None));
+    assert_eq!(jr.people, vec![a[0], a[1]]);
+    assert_eq!(h.pending_journey_legs(), 1);
+    for p in [a[0], a[1]] {
+        assert_eq!(h.person(p).unwrap().location, Location::Journey(j));
+    }
+    // A crossing back to the (now parked) start does not rewind the journey.
+    h.region_stopping(rc(0, 0));
+    h.region_parked(rc(0, 0), vec![]);
+    assert!(!h.person_crossed(a[1], rc(0, 0)));
+    assert_eq!(h.journey(j).unwrap().leg, 1);
+    // Timed from the first crossing, not re-timed by the later ones.
+    h.advance(CalendarTick(t1.0 + leg() - 1));
+    assert_eq!(h.journey(j).unwrap().leg, 1);
+    h.advance(CalendarTick(t1.0 + leg()));
+    assert_eq!(h.journey(j).unwrap().leg, 2);
+    h.advance(CalendarTick(t1.0 + 5 * leg()));
+    assert!(h.journey(j).is_none());
+    for p in [a[0], a[1]] {
+        assert_eq!(h.person(p).unwrap().location, Location::AtSite(SiteId(1)));
+    }
+    assert!(h.take_directives().iter().all(|d| d.region == rc(0, 0)));
+}
+
+#[test]
+fn party_of_two_delivered_one_at_a_time() {
+    let (mut h, a, _) = two_sites();
+    h.region_started(rc(0, 0));
+    h.region_started(rc(1, 0));
+    let j = h.start_journey(vec![a[0], a[1]], SiteId(0), rc(6, 0), Purpose::Migrate { to: SiteId(1) }).unwrap();
+    h.take_directives();
+    assert!(h.person_crossed(a[0], rc(1, 0)));
+    assert!(h.person_crossed(a[1], rc(1, 0)));
+    let jr = h.journey(j).unwrap();
+    assert_eq!((jr.leg, jr.held_in), (1, Some(rc(1, 0))));
+    assert_eq!(h.pending_journey_legs(), 0);
+    assert_eq!(
+        h.take_directives(),
+        vec![
+            Directive { region: rc(1, 0), event: GameEventKind::WalkOut(a[0], rc(2, 0)) },
+            Directive { region: rc(1, 0), event: GameEventKind::WalkOut(a[1], rc(2, 0)) },
+        ]
+    );
+    for p in [a[0], a[1]] {
+        let pr = h.person(p).unwrap();
+        assert_eq!((pr.location, pr.home_location), (Location::InRegion(rc(1, 0)), Location::Journey(j)));
+    }
+}
+
+#[test]
+fn civ_population_counts_strays() {
+    // Sea along x = 7: a citizen who walks into it has no way home and becomes a stray.
+    let mut map = land_map(8, 3);
+    for (i, t) in map.tiles.iter_mut().enumerate() {
+        if i % 8 == 7 {
+            t.sea_fraction = 1.0;
+            t.landing = None;
+        }
+    }
+    let s = start();
+    let mut h = History::new(5, s, SocietyGrid::from_world_map(&map));
+    let civ = h.add_civ(Race::Dwarf);
+    let a: Vec<_> = (0..3).map(|_| h.add_founder(Sex::Female, years_before(s, 20))).collect();
+    let b: Vec<_> = (0..2).map(|_| h.add_founder(Sex::Male, years_before(s, 20))).collect();
+    h.found_site(civ, rc(0, 0), &a, None, false);
+    h.found_site(civ, rc(6, 0), &b, None, false);
+    h.region_started(rc(6, 0));
+    assert!(!h.person_crossed(b[1], rc(7, 0)));
+    let p = h.person(b[1]).unwrap();
+    assert_eq!((p.location, p.site), (Location::Wandering(rc(7, 0)), Some(SiteId(1))));
+    assert!(!h.site(SiteId(1)).unwrap().members.contains(&b[1]));
+    assert_eq!(h.civ_population(civ), 5);
+    assert_eq!(h.stats().per_civ[0].1, 5);
+    // Still counted after a reload (the stray index is rebuilt).
+    let back = persist::decode(&persist::encode(&h), SocietyGrid::from_world_map(&map)).unwrap();
+    assert_eq!(back.civ_population(civ), 5);
 }

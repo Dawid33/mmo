@@ -220,8 +220,7 @@ impl History {
             self.schedule_next_leg_from(j, at);
             return;
         }
-        if self.running.contains(&entering) {
-            self.enter_running(j, idx);
+        if self.running.contains(&entering) && self.enter_running(j, idx) {
             return;
         }
         let jr = self.journeys.get_mut(&j).unwrap();
