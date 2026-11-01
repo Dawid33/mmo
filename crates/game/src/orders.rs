@@ -237,16 +237,48 @@ fn order_area(area: TileBox) -> Option<TileBox> {
     area.clip_to_region().filter(|a| a.tile_count() <= MAX_ORDER_TILES)
 }
 
+/// The shared `column_band` probe (sim and client mirror): walks the chunk
+/// stack with plain `has_chunk(cy)` lookups (no iteration order) from the
+/// lower of the band base and the bedrock chunk (`UNDERGROUND_DEPTH` below the
+/// surface: dug space can be materialised anywhere above it) up to
+/// [`BAND_HEADROOM_CHUNKS`] past the surface chunk, or over the fallback scan
+/// range without a recipe. The band spans the implied base, the surface and
+/// every chunk found; `None` with no recipe and no chunk.
+pub fn probe_column_band(
+    column: [i32; 2],
+    ground: Option<&crate::ColumnGround>,
+    has_chunk: impl Fn(i32) -> bool,
+) -> Option<(i32, i32)> {
+    let cb = crate::CHUNK_BLOCKS as i32;
+    let (probe_lo, probe_hi, base) = match ground {
+        Some(g) => {
+            let i = column[0].rem_euclid(cb) as usize * crate::CHUNK_BLOCKS + column[1].rem_euclid(cb) as usize;
+            let surface = i32::from(g.surface[i]);
+            let bedrock_sub = (surface - UNDERGROUND_DEPTH).div_euclid(cb);
+            (
+                g.band_base_sub_y.min(bedrock_sub),
+                surface.div_euclid(cb) + BAND_HEADROOM_CHUNKS,
+                Some((g.band_base_sub_y * cb, surface)),
+            )
+        }
+        None => (crate::COLUMN_SCAN_Y_MIN.div_euclid(cb), crate::COLUMN_SCAN_Y_MAX.div_euclid(cb), None),
+    };
+    let mut band = base;
+    for cy in probe_lo..=probe_hi {
+        if has_chunk(cy) {
+            let (lo, hi) = (cy * cb, cy * cb + cb - 1);
+            band = Some(band.map_or((lo, hi), |(a, b)| (a.min(lo), b.max(hi))));
+        }
+    }
+    band
+}
+
 /// Chunks above a column's surface chunk that `column_band` probes (trees,
 /// buildings).
 pub const BAND_HEADROOM_CHUNKS: i32 = 4;
 
 impl TileSource for Rollback {
-    /// Probes the column's chunk stack (plain index lookups, no iteration
-    /// order): with a ground recipe from its band base up to
-    /// [`BAND_HEADROOM_CHUNKS`] past the surface chunk, else the fallback
-    /// scan range. The band spans the implied base, the surface and every
-    /// materialised chunk found; `None` with no recipe and no chunk.
+    /// See [`probe_column_band`].
     fn column_band(&self, column: [i32; 2]) -> Option<(i32, i32)> {
         let cb = crate::CHUNK_BLOCKS as i32;
         let (cx, cz) = (column[0].div_euclid(cb), column[1].div_euclid(cb));
@@ -255,22 +287,9 @@ impl TileSource for Rollback {
             return None;
         }
         let ground = self.data.ground.get(&crate::ColumnCoords::new(cx as usize, cz as usize));
-        let (probe_lo, probe_hi, base) = match ground {
-            Some(g) => {
-                let i = column[0].rem_euclid(cb) as usize * crate::CHUNK_BLOCKS + column[1].rem_euclid(cb) as usize;
-                let surface = i32::from(g.surface[i]);
-                (g.band_base_sub_y, surface.div_euclid(cb) + BAND_HEADROOM_CHUNKS, Some((g.band_base_sub_y * cb, surface)))
-            }
-            None => (crate::COLUMN_SCAN_Y_MIN.div_euclid(cb), crate::COLUMN_SCAN_Y_MAX.div_euclid(cb), None),
-        };
-        let mut band = base;
-        for cy in probe_lo..=probe_hi {
-            if self.chunk_key_at(crate::ChunkCoords::new(cx as usize, cy, cz as usize)).is_some() {
-                let (lo, hi) = (cy * cb, cy * cb + cb - 1);
-                band = Some(band.map_or((lo, hi), |(a, b)| (a.min(lo), b.max(hi))));
-            }
-        }
-        band
+        probe_column_band(column, ground, |cy| {
+            self.chunk_key_at(crate::ChunkCoords::new(cx as usize, cy, cz as usize)).is_some()
+        })
     }
 
     fn block(&self, p: TilePos) -> BlockId {

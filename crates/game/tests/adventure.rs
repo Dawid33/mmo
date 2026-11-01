@@ -84,6 +84,37 @@ fn walker_paths_on_ground_above_block_512() {
     assert_eq!(body_tile(&region, e), [20, floor + 1, 20]);
 }
 
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn walker_paths_in_dug_space_below_the_band_base() {
+    let mut region = high_region();
+    let e = *region.data().player_entites.get(&CLIENT).unwrap();
+    let floor = HIGH_CHUNK_Y * game::CHUNK_BLOCKS as i32;
+    // A tunnel 30 blocks under the surface: chunk layer 123, well below the
+    // band base (layer 125), so its chunks materialise out of implied ground.
+    let tunnel_y = floor - 30;
+    assert!(tunnel_y < HIGH_CHUNK_Y * game::CHUNK_BLOCKS as i32 - 3);
+    region.with_data(|d| {
+        for x in 4..=20 {
+            for y in [tunnel_y, tunnel_y + 1] {
+                assert!(d.set_block_safe([x, y, 4], Block::new(BlockId::AIR)), "dig {x},{y}");
+            }
+        }
+    });
+    region
+        .handle_event(GameEventKind::Order(CLIENT, Order::SetMode { mode: PlayMode::Adventure, at: Some([4, tunnel_y, 4]) }))
+        .unwrap();
+    region.forget_last_event();
+    for _ in 0..5 {
+        tick(&mut region);
+    }
+    assert_eq!(body_tile(&region, e), [4, tunnel_y, 4], "the body must be put in the tunnel");
+    move_to(&mut region, here_goal([20, 4], Some(tunnel_y)));
+    assert!(walker(&region, e).is_some(), "MoveTo must find a path in the tunnel");
+    walk_until_arrived(&mut region, e, walk_budget(20.0));
+    assert_eq!(body_tile(&region, e), [20, tunnel_y, 4]);
+}
+
 fn tick(region: &mut Region) {
     region.handle_event(GameEventKind::Tick).unwrap();
     region.forget_last_event();

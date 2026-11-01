@@ -335,22 +335,7 @@ impl TileSource for TileMirror {
         if !(0..n).contains(&cx) || !(0..n).contains(&cz) {
             return None;
         }
-        let (probe_lo, probe_hi, base) = match self.ground_at(cx as usize, cz as usize) {
-            Some(g) => {
-                let i = column[0].rem_euclid(cb) as usize * game::CHUNK_BLOCKS + column[1].rem_euclid(cb) as usize;
-                let surface = i32::from(g.surface[i]);
-                (g.band_base_sub_y, surface.div_euclid(cb) + game::BAND_HEADROOM_CHUNKS, Some((g.band_base_sub_y * cb, surface)))
-            }
-            None => (game::COLUMN_SCAN_Y_MIN.div_euclid(cb), game::COLUMN_SCAN_Y_MAX.div_euclid(cb), None),
-        };
-        let mut band = base;
-        for cy in probe_lo..=probe_hi {
-            if self.chunks.contains_key(&[cx, cy, cz]) {
-                let (lo, hi) = (cy * cb, cy * cb + cb - 1);
-                band = Some(band.map_or((lo, hi), |(a, b)| (a.min(lo), b.max(hi))));
-            }
-        }
-        band
+        game::probe_column_band(column, self.ground_at(cx as usize, cz as usize), |cy| self.chunks.contains_key(&[cx, cy, cz]))
     }
 }
 
