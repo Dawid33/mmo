@@ -330,3 +330,83 @@ fn replayed_person_arrival_corrects_pose() {
         assert_eq!([t[0], t[2]], [bundle.isometry.translation.x, bundle.isometry.translation.z], "pose corrected");
     });
 }
+
+// ---- undo: every new mutator rolls back bit-exact (HashMode::Full default) ----
+
+fn region_with_person(xz: (f32, f32)) -> (Region, game::EntityKey) {
+    let mut region = floored_region();
+    region.with_data(|d| {
+        d.spawn_person_safe(P, xz).unwrap();
+    });
+    for _ in 0..10 {
+        tick(&mut region);
+    }
+    let e = region.data().person_entity(P).unwrap();
+    (region, e)
+}
+
+/// Rolls back one Tick and checks the state hash is the one before it.
+fn tick_and_undo(region: &mut Region) {
+    let before = game::state_hash(region.data());
+    region.handle_event(GameEventKind::Tick).unwrap();
+    region.rollback_last_event();
+    assert_eq!(before, game::state_hash(region.data()), "tick undo restores the exact state");
+}
+
+#[test]
+fn wander_tick_undo_restores_hash() {
+    let (mut region, e) = region_with_person(column_xz([30, 30]));
+    let mut checked = false;
+    for _ in 0..600 {
+        let before = game::state_hash(region.data());
+        region.handle_event(GameEventKind::Tick).unwrap();
+        if region.data().ecs.walker.try_get(e).is_some() {
+            // This tick planned the wander and steered the body.
+            region.rollback_last_event();
+            assert_eq!(before, game::state_hash(region.data()), "wander tick undo restores the exact state");
+            assert!(region.data().ecs.walker.try_get(e).is_none());
+            checked = true;
+            break;
+        }
+        region.forget_last_event();
+    }
+    assert!(checked, "a wander started");
+}
+
+#[test]
+fn walk_entity_undo_restores_hash() {
+    let (mut region, e) = region_with_person(column_xz([10, 12]));
+    let before = game::state_hash(region.data());
+    // Mutator alone, in its own transaction.
+    region.with_data(|d| {
+        d.new_transaction();
+        assert!(d.walk_entity_safe(e, goal_here([20, 12]), common::r0(), None));
+        d.rollback();
+    });
+    assert_eq!(before, game::state_hash(region.data()), "walk_entity undo restores the exact state");
+    // Then a steering tick under an active walk.
+    region.with_data(|d| {
+        assert!(d.walk_entity_safe(e, goal_here([20, 12]), common::r0(), None));
+    });
+    tick_and_undo(&mut region);
+    tick(&mut region);
+    tick_and_undo(&mut region);
+}
+
+#[test]
+fn walk_out_undo_restores_hash() {
+    let n = REGION_BLOCKS as i32;
+    let (mut region, e) = region_with_person(column_xz([n - 6, 12]));
+    let before = game::state_hash(region.data());
+    region.with_data(|d| {
+        d.new_transaction();
+        assert!(d.walk_out_safe(P, RegionCoords::new(1, 0), common::r0(), None));
+        d.rollback();
+    });
+    assert_eq!(before, game::state_hash(region.data()), "walk_out undo restores the exact state");
+    assert!(region.data().ecs.walker.try_get(e).is_none());
+    region.with_data(|d| {
+        assert!(d.walk_out_safe(P, RegionCoords::new(1, 0), common::r0(), None));
+    });
+    tick_and_undo(&mut region);
+}
