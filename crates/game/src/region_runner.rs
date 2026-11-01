@@ -67,6 +67,10 @@ pub enum RegionOutput {
     Departures(Vec<(EntityBundle, RegionCoords)>),
     /// Margin mirrors this tick, same framing.
     GhostUpdates(Vec<(GhostData, RegionCoords)>),
+    /// Sent on `Shutdown` just before `Stopped`: every person that had a
+    /// body here, with its region-local translation. They were despawned
+    /// first, so the parked blob holds no people; the manager owns them.
+    PeopleParked(Vec<(crate::history::PersonId, [f32; 3])>),
 }
 
 /// How to build a region when it spawns: restored from the parking lot if
@@ -228,6 +232,11 @@ impl RegionRunner {
                 for (kind, _) in std::mem::take(&mut self.held) {
                     self.apply(kind);
                 }
+                let people = self.region.data().people_here();
+                for (person, _) in &people {
+                    self.apply(GameEventKind::DespawnPerson(*person));
+                }
+                let _ = self.out.send((self.id, RegionOutput::PeopleParked(people)));
                 let serialized = SerializedRegion::from_rollback(self.region.data());
                 let far = self.terrain();
                 let _ = self.out.send((self.id, RegionOutput::Stopped(serialized, far)));

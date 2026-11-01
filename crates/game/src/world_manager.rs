@@ -545,6 +545,9 @@ impl<S: RegionSpawner> WorldManager<S> {
                     | GameEventKind::GhostUpdate(_)
                     | GameEventKind::CreateClient(_)
                     | GameEventKind::CreateClientAt(..)
+                    | GameEventKind::SpawnPerson(_)
+                    | GameEventKind::DespawnPerson(_)
+                    | GameEventKind::WalkOut(..)
                     | GameEventKind::ClientLeft(_) => {
                         log::debug!(
                             "dropping internal event kind sent by client {id} for {:?}",
@@ -594,6 +597,8 @@ impl<S: RegionSpawner> WorldManager<S> {
                 self.cache_authoritative_terrain(rc, snap);
                 self.lod_terrain_ready(rc, client);
             }
+            // Wired to the history manager in a later task.
+            RegionOutput::PeopleParked(_) => {}
             RegionOutput::TerrainChanged(snap) => {
                 self.cache_authoritative_terrain(rc, snap);
                 self.invalidate_region_lod(rc);

@@ -431,6 +431,34 @@ pub enum GameEventKind {
     /// Server-authored: like `CreateClient`, but the body lands over the
     /// region-local block column `[bx, bz]` instead of the spawn column.
     CreateClientAt(ClientId, [u32; 2]),
+    /// Server-authored: give a history person a body here (and optionally
+    /// start a walk). Never accepted from a client.
+    SpawnPerson(PersonSpawn),
+    /// Server-authored: remove a person's body from this region.
+    DespawnPerson(crate::history::PersonId),
+    /// Server-authored: walk a person out of this region toward a neighbour.
+    WalkOut(crate::history::PersonId, RegionCoords),
+}
+
+/// Where a spawned person appears in a region.
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub enum SpawnAt {
+    /// A region-local block column.
+    Column([u32; 2]),
+    /// Next to that person's body here (within 2 blocks); the region
+    /// landing if they have no body here.
+    NearPerson(crate::history::PersonId),
+    /// On the region edge facing `from`, `along_per_mille` along it
+    /// (0 = the lower x / z end), at the nearest standable column.
+    Edge { from: RegionCoords, along_per_mille: u32 },
+}
+
+/// A [`GameEventKind::SpawnPerson`] payload.
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct PersonSpawn {
+    pub person: crate::history::PersonId,
+    pub at: SpawnAt,
+    pub walk_to: Option<crate::Goal>,
 }
 
 impl GameEventKind {
@@ -447,7 +475,10 @@ impl GameEventKind {
             | GameEventKind::Quit
             | GameEventKind::EntityArrived(_)
             | GameEventKind::GhostUpdate(_)
-            | GameEventKind::ClientLeft(_) => None,
+            | GameEventKind::ClientLeft(_)
+            | GameEventKind::SpawnPerson(_)
+            | GameEventKind::DespawnPerson(_)
+            | GameEventKind::WalkOut(..) => None,
         }
     }
 

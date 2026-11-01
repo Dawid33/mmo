@@ -410,3 +410,96 @@ fn walk_out_undo_restores_hash() {
     });
     tick_and_undo(&mut region);
 }
+
+// ---- server-authored person events ----
+
+use game::{PersonSpawn, RegionInput, RegionRunner, SpawnAt};
+
+fn person_runner() -> (RegionRunner, Receiver<(RegionCoords, RegionOutput)>) {
+    let (out_send, out_recv) = unbounded();
+    (RegionRunner::new(common::r0(), floored_region(), out_send), out_recv)
+}
+
+fn spawn_ev(person: PersonId, at: SpawnAt) -> RegionInput {
+    RegionInput::Event(GameEventKind::SpawnPerson(PersonSpawn { person, at, walk_to: None }))
+}
+
+#[test]
+fn spawn_person_event_spawns() {
+    let (mut r, _out) = person_runner();
+    r.handle_input(spawn_ev(P, SpawnAt::Column([10, 12])));
+    let here = r.region_mut().data().people_here();
+    assert_eq!(here.len(), 1);
+    assert_eq!(here[0].0, P);
+    let bv = BLOCK_VOXELS as f32;
+    assert_eq!((here[0].1[0], here[0].1[2]), (10.5 * bv, 12.5 * bv));
+    r.handle_input(RegionInput::Event(GameEventKind::DespawnPerson(P)));
+    assert!(r.region_mut().data().people_here().is_empty());
+}
+
+#[test]
+fn spawn_near_person() {
+    let (mut r, _out) = person_runner();
+    r.handle_input(spawn_ev(P, SpawnAt::Column([20, 20])));
+    r.handle_input(spawn_ev(PersonId(8), SpawnAt::NearPerson(P)));
+    let here = r.region_mut().data().people_here();
+    assert_eq!(here.len(), 2);
+    let bv = BLOCK_VOXELS as f32;
+    let (a, b) = (here[0].1, here[1].1);
+    let (dx, dz) = (((b[0] - a[0]) / bv).abs(), ((b[2] - a[2]) / bv).abs());
+    assert!(dx <= 2.0 && dz <= 2.0 && (dx > 0.0 || dz > 0.0), "dx={dx} dz={dz}");
+    // No body here: falls back to the region landing.
+    r.handle_input(spawn_ev(PersonId(9), SpawnAt::NearPerson(PersonId(99))));
+    assert_eq!(r.region_mut().data().people_here().len(), 3);
+}
+
+#[test]
+fn spawn_at_edge_is_on_edge() {
+    let (mut r, _out) = person_runner();
+    r.handle_input(spawn_ev(P, SpawnAt::Edge { from: RegionCoords::new(-1, 0), along_per_mille: 500 }));
+    let bv = BLOCK_VOXELS as f32;
+    let here = r.region_mut().data().people_here();
+    assert!(here[0].1[0] < bv, "x block column 0, got {}", here[0].1[0]);
+    let mid = REGION_BLOCKS as f32 * bv / 2.0;
+    assert!((here[0].1[2] - mid).abs() < 2.0 * bv);
+    r.handle_input(spawn_ev(PersonId(8), SpawnAt::Edge { from: RegionCoords::new(0, 1), along_per_mille: 0 }));
+    let here = r.region_mut().data().people_here();
+    let p8 = here.iter().find(|(p, _)| p.0 == 8).unwrap().1;
+    assert!(p8[2] >= (REGION_BLOCKS as f32 - 1.0) * bv && p8[0] < bv);
+}
+
+#[test]
+fn shutdown_reports_and_strips_people() {
+    let (mut r, out) = person_runner();
+    r.handle_input(spawn_ev(PersonId(2), SpawnAt::Column([10, 10])));
+    r.handle_input(spawn_ev(PersonId(5), SpawnAt::Column([30, 30])));
+    let expected = r.region_mut().data().people_here();
+    assert!(!r.handle_input(RegionInput::Shutdown));
+    let outs: Vec<RegionOutput> = out.try_iter().map(|(_, o)| o).collect();
+    let parked_at = outs.iter().position(|o| matches!(o, RegionOutput::PeopleParked(_))).expect("PeopleParked");
+    let stopped_at = outs.iter().position(|o| matches!(o, RegionOutput::Stopped(..))).expect("Stopped");
+    assert!(parked_at < stopped_at);
+    let RegionOutput::PeopleParked(list) = &outs[parked_at] else { unreachable!() };
+    assert_eq!(*list, expected);
+    assert_eq!(list.len(), 2);
+    let RegionOutput::Stopped(blob, _) = &outs[stopped_at] else { unreachable!() };
+    let restored = blob.to_rollback().unwrap();
+    assert!(restored.people_here().is_empty());
+    assert!(restored.data.ecs.kind.iter().all(|(_, k)| !matches!(k, Some(game::EntityKind::Person { .. }))));
+}
+
+#[test]
+fn client_cannot_send_spawn_person() {
+    let mut h = harness();
+    connect_and_subscribe(&mut h);
+    let ev = game::GameEvent::new(
+        GameEventKind::SpawnPerson(PersonSpawn { person: P, at: SpawnAt::Column([5, 5]), walk_to: None }),
+        0,
+        SPAWN_REGION,
+    );
+    h.event(ServerEvent::ClientPacket(ClientPacket::GameEvent(ev), 0), 1);
+    h.tick(2);
+    let mut n = 0;
+    h.manager.spawner_mut().with_region(SPAWN_REGION, |region| n = region.data().people_here().len());
+    assert_eq!(n, 0);
+}

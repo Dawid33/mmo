@@ -799,8 +799,11 @@ impl GameInstanceManager {
             }
             kind @ (GameEventKind::CreateClient(_)
             | GameEventKind::CreateClientAt(..)
-            | GameEventKind::ClientLeft(_)) => {
-                // Players are created (and moved) by the server: on
+            | GameEventKind::ClientLeft(_)
+            | GameEventKind::SpawnPerson(_)
+            | GameEventKind::DespawnPerson(_)
+            | GameEventKind::WalkOut(..)) => {
+                // Players (and people) are created (and moved) by the server: on
                 // connection, and when Play moves a session.
                 warn!("ignoring locally-originated {kind:?}");
             }

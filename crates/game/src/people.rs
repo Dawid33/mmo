@@ -7,6 +7,7 @@
 use crate::history::PersonId;
 use crate::movement::{self, MoveKeys, PLAYER_CAPSULE_HALF_HEIGHT, PLAYER_CAPSULE_RADIUS};
 use crate::{
+    PersonSpawn, SpawnAt,
     current_tile, feet_of, nearest_standable, steer, ColliderSpec, EntityKey, EntityKind, GameDataTransactionKind,
     GameDataUpdate, GameDataUpdateKind, Goal, MapExtent, Pose, RegionCoords, Rollback, REGION_BLOCKS,
 };
@@ -76,6 +77,53 @@ impl Rollback {
         self.data.person_entities.remove(&person);
         self.remove_entity_safe(e, None);
         true
+    }
+
+    /// Applies a server-authored [`PersonSpawn`]: the body at the resolved
+    /// column, then the optional walk. No change if they already have a body.
+    pub fn apply_person_spawn_safe(&mut self, spawn: PersonSpawn, here: RegionCoords, map: Option<MapExtent>) {
+        let n = REGION_BLOCKS as i32;
+        let landing = [
+            (crate::PLAYER_SPAWN_X as i32 / crate::BLOCK_VOXELS as i32).clamp(0, n - 1),
+            (crate::PLAYER_SPAWN_Z as i32 / crate::BLOCK_VOXELS as i32).clamp(0, n - 1),
+        ];
+        let column = match spawn.at {
+            SpawnAt::Column([x, z]) => [(x as i32).clamp(0, n - 1), (z as i32).clamp(0, n - 1)],
+            SpawnAt::NearPerson(other) => self.near_person_column(other).unwrap_or(landing),
+            SpawnAt::Edge { from, along_per_mille } => {
+                let along = (along_per_mille.min(1000) as i64 * (n as i64 - 1) / 1000) as i32;
+                let axis = |d: i32, along: i32| match d.signum() {
+                    -1 => 0,
+                    1 => n - 1,
+                    _ => along,
+                };
+                let c = [axis(from.x - here.x, along), axis(from.z - here.z, along)];
+                nearest_standable(self, c, None).map(|t| [t[0], t[2]]).unwrap_or(c)
+            }
+        };
+        let xz = crate::block_column_xz([column[0] as u32, column[1] as u32]);
+        let Some(e) = self.spawn_person_safe(spawn.person, xz) else { return };
+        if let Some(goal) = spawn.walk_to {
+            self.walk_entity_safe(e, goal, here, map);
+        }
+    }
+
+    /// The nearest standable block column within 2 blocks of `other`'s body,
+    /// preferring one that is not their own.
+    fn near_person_column(&self, other: PersonId) -> Option<[i32; 2]> {
+        let e = self.person_entity(other)?;
+        let at = current_tile(self, self.body_feet(e)?)?;
+        let n = REGION_BLOCKS as i32;
+        let mut offsets: Vec<(i32, i32)> =
+            (-2..=2).flat_map(|dx| (-2..=2).map(move |dz| (dx, dz))).collect();
+        offsets.sort_by_key(|&(dx, dz)| (dx == 0 && dz == 0, dx * dx + dz * dz, dx, dz));
+        offsets.into_iter().find_map(|(dx, dz)| {
+            let c = [at[0] + dx, at[2] + dz];
+            if !(0..n).contains(&c[0]) || !(0..n).contains(&c[1]) {
+                return None;
+            }
+            nearest_standable(self, c, Some(at[1])).map(|t| [t[0], t[2]])
+        })
     }
 
     pub fn person_entity(&self, person: PersonId) -> Option<EntityKey> {

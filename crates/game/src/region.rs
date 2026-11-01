@@ -153,6 +153,9 @@ fn ev_desc(e: &GameEvent) -> String {
             format!("EntityArrived(c={:?})", b.client.as_ref().map(|(c, _)| *c))
         }
         GameEventKind::GhostUpdate(_) => "GhostUpdate".to_string(),
+        GameEventKind::SpawnPerson(s) => format!("SpawnPerson({s:?})"),
+        GameEventKind::DespawnPerson(p) => format!("DespawnPerson({p:?})"),
+        GameEventKind::WalkOut(p, to) => format!("WalkOut({p:?}, {to:?})"),
     };
     format!("[id={} r=({},{}) {}]", e.id, e.region_id.x, e.region_id.z, kind)
 }
@@ -594,6 +597,15 @@ impl Region {
                     Client { inventory: crate::Inventory::seeded(), ..Client::default() },
                 );
                 self.data.create_player_at_safe(client_id, crate::block_column_xz(column));
+            }
+            GameEventKind::SpawnPerson(spawn) => {
+                self.data.apply_person_spawn_safe(spawn, self.id, self.map_extent);
+            }
+            GameEventKind::DespawnPerson(person) => {
+                self.data.despawn_person_safe(person);
+            }
+            GameEventKind::WalkOut(person, toward) => {
+                self.data.walk_out_safe(person, toward, self.id, self.map_extent);
             }
             GameEventKind::ClientLeft(client_id) => {
                 info!("{:?}", event);
