@@ -384,3 +384,100 @@ fn install_pins_the_world_once() {
     let again = std::panic::catch_unwind(|| worldgen::forged::install(None));
     assert!(again.is_err(), "a second install must panic");
 }
+
+/// Height of the synthetic cone: a flat 48 m summit disc at `CONE_PEAK_M`
+/// over the artifact centre, flanks falling `CONE_SLOPE` m per m to the sea.
+const CONE_PEAK_M: f64 = 2500.0;
+const CONE_SLOPE: f64 = 6.0;
+const CONE_CAP_M: f64 = 48.0;
+const CONE_CENTRE: f64 = 512.0;
+
+fn cone_height(ax: f64, az: f64) -> f64 {
+    let r = ((ax - CONE_CENTRE).powi(2) + (az - CONE_CENTRE).powi(2)).sqrt();
+    (CONE_PEAK_M - (r - CONE_CAP_M).max(0.0) * CONE_SLOPE).max(-5.0)
+}
+
+/// A 1 km world holding one 2,500 m cone, spawn on its summit (engine block
+/// (8, 8) of region (0, 0)). No rivers, no lakes.
+fn cone() -> WorldArtifact {
+    let mut artifact = synthetic();
+    let height: Vec<f32> = (0..N * N)
+        .map(|i| cone_height((i % N) as f64 * CELL_M + CELL_M * 0.5, (i / N) as f64 * CELL_M + CELL_M * 0.5) as f32)
+        .collect();
+    artifact.height = QRaster::fit(&height, HEIGHT_STEP_M);
+    artifact.rivers.clear();
+    artifact.lakes.clear();
+    artifact.spawn = [CONE_CENTRE, CONE_CENTRE];
+    artifact
+}
+
+/// Highest non-air block of block column `(lx, lz)` of `col`, scanning the
+/// whole forged band.
+fn top_block(col: &Column, lx: i32, lz: i32) -> Option<i32> {
+    (-1024..4096).rev().find(|&y| col.get(BlockPos::new(lx, y, lz)).id != BlockId::AIR)
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn forged_ground_above_block_320_is_solid() {
+    let world = ForgedWorld::new(cone());
+    let columns = worldgen::generate_region_forged(&world, RegionCoords::new(0, 0), mats());
+    let per = game::CHUNK_BLOCKS as i32;
+    let mut tops = std::collections::BTreeMap::new();
+    for (cc, col) in &columns {
+        for lx in 0..per {
+            for lz in 0..per {
+                if let Some(y) = top_block(col, lx, lz) {
+                    tops.insert((cc.x as i32 * per + lx, cc.z as i32 * per + lz), y);
+                }
+            }
+        }
+    }
+    // The summit column: engine block (8, 8).
+    let expected = (CONE_PEAK_M + SEA_TOP_BLOCK as f64).round() as i32;
+    let summit = tops[&(8, 8)];
+    assert!((summit - expected).abs() <= 1, "summit top block {summit}, expected {expected} ± 1");
+    // No plateau cut at the old band top: nothing in the region stops at 320,
+    // and the flank inside the region keeps falling well above it.
+    assert!(tops.values().all(|&y| y != 320), "a column topped out at the old band top");
+    let lowest = *tops.values().min().unwrap();
+    assert!(lowest > 1000 && lowest < summit - 50, "flank inside the region: lowest top {lowest}, summit {summit}");
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn coarse_lod_steep_face_has_no_gaps() {
+    let world = ForgedWorld::new(cone());
+    // A region on the flank, ~200 m east of the summit: a 6:1 face.
+    let rc = RegionCoords::new(3, 0);
+    let key = game::lod::LodKey::for_region(16, rc);
+    let cells = worldgen::coarse_tile_forged(&world, &key, mats());
+    // Factor 16: one cell per block; 64×64 cell columns over a 64 m region.
+    let n = game::REGION_BLOCKS as i32;
+    let mut solid: std::collections::BTreeMap<(i32, i32), std::collections::BTreeSet<i32>> = Default::default();
+    for cell in &cells {
+        for (k, v) in cell.grid.iter().enumerate() {
+            if v.block == BlockId::AIR || v.block == mats().water {
+                continue;
+            }
+            let (lx, ly, lz) = ((k % 32) as i32, ((k / 32) % 32) as i32, (k / (32 * 32)) as i32);
+            let (cx, cy, cz) = (cell.group[0] * 32 + lx, cell.group[1] * 32 + ly, cell.group[2] * 32 + lz);
+            solid.entry((cx, cz)).or_default().insert(cy);
+        }
+    }
+    let top = |cx: i32, cz: i32| *solid[&(cx, cz)].last().unwrap();
+    let (mut checked, mut steep) = (0, 0);
+    for cx in 1..n - 1 {
+        for cz in 1..n - 1 {
+            let s = top(cx, cz);
+            let low = [(1, 0), (-1, 0), (0, 1), (0, -1)].iter().map(|&(dx, dz)| top(cx + dx, cz + dz)).min().unwrap();
+            steep += (s - low > 4) as usize;
+            for y in low.min(s)..=s {
+                assert!(solid[&(cx, cz)].contains(&y), "gap at cell ({cx}, {y}, {cz}): surface {s}, lowest neighbour {low}");
+            }
+            checked += 1;
+        }
+    }
+    assert!(steep > 100, "the flank must be steep enough to open gaps: {steep} of {checked} steep cells");
+    assert!(top(n / 2, n / 2) > 320, "the flank stands above the old band top");
+}

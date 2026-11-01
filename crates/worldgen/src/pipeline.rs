@@ -451,7 +451,7 @@ impl TerrainPipeline {
         let factor = self.factor_curve.eval(offset);
         let jaggedness = self.jaggedness_gate.eval(offset) * jag.abs();
 
-        ColumnProfile { offset_h: offset * HEIGHT_SCALE, factor, jaggedness }
+        ColumnProfile { offset_h: offset * HEIGHT_SCALE, factor, jaggedness, unbounded: false }
     }
 }
 
@@ -475,6 +475,9 @@ pub struct ProfileGrid {
     offset_h: Vec<f64>,
     factor: Vec<f64>,
     jaggedness: Vec<f64>,
+    /// Whether the corners are unbounded (forged) profiles; carried to every
+    /// interpolated profile.
+    unbounded: bool,
 }
 
 impl TerrainPipeline {
@@ -496,7 +499,7 @@ impl TerrainPipeline {
                 jaggedness.push(prof.jaggedness);
             }
         }
-        ProfileGrid { origin_x, origin_z, step, n, offset_h, factor, jaggedness }
+        ProfileGrid { origin_x, origin_z, step, n, offset_h, factor, jaggedness, unbounded: false }
     }
 }
 
@@ -514,15 +517,21 @@ impl ProfileGrid {
         let mut offset_h = Vec::with_capacity(n * n);
         let mut factor = Vec::with_capacity(n * n);
         let mut jaggedness = Vec::with_capacity(n * n);
+        let mut unbounded = None;
         for i in 0..n {
             for j in 0..n {
                 let prof = profile(origin_x + i as f64 * step, origin_z + j as f64 * step);
                 offset_h.push(prof.offset_h);
                 factor.push(prof.factor);
                 jaggedness.push(prof.jaggedness);
+                assert!(
+                    *unbounded.get_or_insert(prof.unbounded) == prof.unbounded,
+                    "a profile grid mixes bounded and unbounded profiles"
+                );
             }
         }
-        ProfileGrid { origin_x, origin_z, step, n, offset_h, factor, jaggedness }
+        let unbounded = unbounded.unwrap_or(false);
+        ProfileGrid { origin_x, origin_z, step, n, offset_h, factor, jaggedness, unbounded }
     }
 
     /// Bilinear profile at world meters (x, z); must lie within the sampled span.
@@ -555,6 +564,7 @@ impl ProfileGrid {
             offset_h: bilerp(&self.offset_h),
             factor: bilerp(&self.factor),
             jaggedness: bilerp(&self.jaggedness),
+            unbounded: self.unbounded,
         }
     }
 }
@@ -566,6 +576,11 @@ pub struct ColumnProfile {
     offset_h: f64, // offset value * HEIGHT_SCALE
     factor: f64,
     jaggedness: f64,
+    /// A forged profile: no density ramp, so ground stands at any height
+    /// (`density_at` uses `neg_y = -y` everywhere). Procedural profiles are
+    /// bounded: the ramp clamps above `RAMP_TO_Y` / below `RAMP_FROM_Y`,
+    /// which is what keeps the procedural world bit-identical.
+    pub(crate) unbounded: bool,
 }
 
 impl ColumnProfile {
@@ -573,11 +588,17 @@ impl ColumnProfile {
     /// jaggedness: what a forged world (`forged.rs`) hands the generator, which
     /// knows the height outright instead of deriving it from noise.
     pub fn from_surface(surface_y: f64) -> Self {
-        ColumnProfile { offset_h: surface_y - SEA_LEVEL, factor: 1.0, jaggedness: 0.0 }
+        ColumnProfile { offset_h: surface_y - SEA_LEVEL, factor: 1.0, jaggedness: 0.0, unbounded: true }
+    }
+
+    /// Whether this is an unbounded (forged) profile — see the field.
+    pub fn is_unbounded(&self) -> bool {
+        self.unbounded
     }
 
     /// Height where the density crosses zero, valid inside the ramp band
-    /// (RAMP_FROM_Y..RAMP_TO_Y), where `neg_y` is exactly `-y`.
+    /// (RAMP_FROM_Y..RAMP_TO_Y), where `neg_y` is (up to rounding) `-y` —
+    /// and everywhere for an unbounded profile.
     pub fn surface_y(&self) -> f64 {
         SEA_LEVEL + self.offset_h + self.jaggedness / (DEPTH_PER_BLOCK * self.factor)
     }
@@ -587,8 +608,12 @@ impl ColumnProfile {
         // grouping/associativity (f64 add/mul are not associative). The graph does:
         //   surface  = (offset*HEIGHT_SCALE) + (SEA_LEVEL + neg_y)
         //   density  = ((surface * DEPTH_PER_BLOCK) * factor) + jaggedness
-        let t = ((y - RAMP_FROM_Y) / (RAMP_TO_Y - RAMP_FROM_Y)).clamp(0.0, 1.0);
-        let neg_y = RAMP_FROM_V + t * (RAMP_TO_V - RAMP_FROM_V);
+        let neg_y = if self.unbounded {
+            -y
+        } else {
+            let t = ((y - RAMP_FROM_Y) / (RAMP_TO_Y - RAMP_FROM_Y)).clamp(0.0, 1.0);
+            RAMP_FROM_V + t * (RAMP_TO_V - RAMP_FROM_V)
+        };
         let surface = self.offset_h + (SEA_LEVEL + neg_y);
         (surface * DEPTH_PER_BLOCK) * self.factor + self.jaggedness
     }

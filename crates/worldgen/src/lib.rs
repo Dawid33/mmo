@@ -38,11 +38,19 @@ use crate::pipeline::{ProfileGrid, TerrainPipeline, PROFILE_LATTICE_BLOCKS, SEA_
 
 // Region span in blocks (the game's dial, as i32 for coordinate math).
 const REGION_BLOCKS: i32 = game::REGION_BLOCKS as i32; // 64 at the test default
-// Coarse vertical scan bounds (blocks). Terrain lives well inside this band.
-// They bound surfaces only: the ground below a surface is the column's
-// `ColumnGround` recipe, which has no lower bound.
+// Vertical scan bounds (blocks) of a procedural column. Terrain lives well
+// inside this band (the density ramp clamps outside it). They bound surfaces
+// only: the ground below a surface is the column's `ColumnGround` recipe,
+// which has no lower bound.
 const SCAN_TOP: i32 = 320;
 const SCAN_BOTTOM: i32 = -64;
+/// Scan bounds (blocks) of a forged (unbounded) column: the sea plus the
+/// forge's tallest peaks (~3,500 m) with headroom, and the deepest sea floor.
+const FORGED_SCAN_TOP: i32 = 4096;
+const FORGED_SCAN_BOTTOM: i32 = -1024;
+/// Blocks above the analytic surface (`ColumnProfile::surface_y`) where the
+/// surface scan starts.
+const SURFACE_SCAN_HEADROOM: i32 = 2;
 /// Margin (blocks) a region or cell patch covers past its window on every
 /// side, so the cliff rule can read the surfaces just outside it. One whole
 /// lattice step keeps the window on the world-aligned profile lattice, so the
@@ -79,19 +87,43 @@ fn block_center_m(b: i32) -> f64 {
 const HALF_TEST_M: f64 = 0.25;
 const FULL_TEST_M: f64 = 0.75;
 
+/// The scan band `(top, bottom)` (blocks) of a profile.
+fn scan_band(prof: &crate::pipeline::ColumnProfile) -> (i32, i32) {
+    if prof.is_unbounded() {
+        (FORGED_SCAN_TOP, FORGED_SCAN_BOTTOM)
+    } else {
+        (SCAN_TOP, SCAN_BOTTOM)
+    }
+}
+
 /// Highest block that is at least half full for a precomputed profile — the
-/// surface block — or `SCAN_BOTTOM - 1` if the whole column is air. Shared by
-/// full-res and coarse generation, so any-solid LOD cells agree with the
-/// generated blocks.
+/// surface block — or the band's bottom − 1 if the whole column is air.
+/// Shared by full-res and coarse generation, so any-solid LOD cells agree
+/// with the generated blocks.
+///
+/// The scan starts just above the analytic surface rather than at the band
+/// top, so its cost does not grow with the band. Density falls monotonically
+/// with height (every profile's `factor` is positive), so nothing above a
+/// non-solid start block is solid and the result is the full top-down scan's
+/// — bit-identical for procedural profiles. Should the start block be solid
+/// anyway (the analytic surface is only exact inside the ramp), the scan
+/// falls back to the band top.
 fn surface_from_profile(prof: &crate::pipeline::ColumnProfile) -> i32 {
-    let mut by = SCAN_TOP;
-    while by >= SCAN_BOTTOM {
-        if prof.density_at(by as f64 + HALF_TEST_M) > 0.0 {
+    let (top, bottom) = scan_band(prof);
+    let solid = |by: i32| prof.density_at(by as f64 + HALF_TEST_M) > 0.0;
+    // `as i32` saturates (NaN -> 0); the guard below covers both.
+    let analytic = (prof.surface_y().ceil() as i32).saturating_add(SURFACE_SCAN_HEADROOM);
+    let mut by = top.min(analytic);
+    if by < top && solid(by) {
+        by = top;
+    }
+    while by >= bottom {
+        if solid(by) {
             return by;
         }
         by -= 1;
     }
-    SCAN_BOTTOM - 1
+    bottom - 1
 }
 
 /// Whether the surface block `surface` is whole rather than a half block.
@@ -104,7 +136,7 @@ fn surface_is_full(prof: &crate::pipeline::ColumnProfile, surface: i32) -> bool 
 fn column_sample(patch: &dyn Patch, bx: i32, bz: i32) -> (i32, bool, i32) {
     let (prof, water_top) = patch.sample(block_center_m(bx), block_center_m(bz));
     let s = surface_from_profile(&prof);
-    debug_assert!(s >= SCAN_BOTTOM, "surface below the scan at block ({bx}, {bz})");
+    debug_assert!(s >= scan_band(&prof).1, "surface below the scan at block ({bx}, {bz})");
     // Under water the surface block is always whole: a half block's empty
     // upper half would be an air pocket.
     let full = surface_is_full(&prof, s) || s <= water_top;
@@ -396,9 +428,12 @@ fn columns_from_patch(
             let fz = (cz - zs.start) as i32 * cb;
             let col_trees = std::mem::take(&mut tree_cols[(cx - xs.start) * zs.len() + (cz - zs.start)]);
 
-            let mut lo = SCAN_TOP;
-            let mut hi = SCAN_BOTTOM - 1;
-            let mut open_lo = SCAN_TOP;
+            // Every footprint has samples, so these only seed the min/max
+            // (procedural results equal the old SCAN_TOP / SCAN_BOTTOM - 1 seeds:
+            // `lo - MAX_SOIL_DEPTH` is always under SCAN_TOP).
+            let mut lo = i32::MAX;
+            let mut hi = i32::MIN;
+            let mut open_lo = i32::MAX;
             for lx in 0..cb {
                 for lz in 0..cb {
                     let (s, _, water_top) = at(fx + lx, fz + lz);
@@ -541,7 +576,14 @@ pub fn coarse_tile_forged(
     key: &game::lod::LodKey,
     mats: Materials,
 ) -> Vec<game::lod::LodCell> {
+    // One cell column of margin past the key, for the steep-face fill's
+    // neighbours (rounded to the profile lattice, so surfaces stay
+    // bit-identical to any other window's).
+    let cb = (key.factor / BLOCK_VOXELS as u32) as i32;
+    let lattice = PROFILE_LATTICE_BLOCKS as i32;
+    let ring = (cb + lattice - 1) / lattice * lattice;
     let (ox, oz, span) = coarse_patch_window(key, &mats);
+    let (ox, oz, span) = (ox - ring as f64, oz - ring as f64, span + 2.0 * ring as f64);
     let trees_from = TreeSource { habitat: world, seed: world.artifact().seed };
     coarse_from_patch(&world.patch(ox, oz, span), key, mats, trees_from)
 }
@@ -598,15 +640,40 @@ fn coarse_from_patch(
 
     let (ox, oz, _) = coarse_window(key);
 
+    // (surface block, water top, unbounded) of cell column (cx, cz), sampled
+    // at its centre; cell columns just outside the key are sampled too.
+    let cell_sample = |cx: i32, cz: i32| {
+        let mx = (ox + cx * cb) as f64 + cb as f64 * 0.5;
+        let mz = (oz + cz * cb) as f64 + cb as f64 * 0.5;
+        let (prof, water_top) = patch.sample(mx, mz);
+        (surface_from_profile(&prof), water_top, prof.is_unbounded())
+    };
+    let samples: Vec<(i32, i32, bool)> =
+        (0..cells).flat_map(|cz| (0..cells).map(move |cx| (cx, cz))).map(|(cx, cz)| cell_sample(cx, cz)).collect();
+    let surface_of = |cx: i32, cz: i32| {
+        if (0..cells).contains(&cx) && (0..cells).contains(&cz) {
+            samples[(cz * cells + cx) as usize].0
+        } else {
+            cell_sample(cx, cz).0
+        }
+    };
+
     let mut grids: std::collections::BTreeMap<[i32; 3], Vec<Voxel>> = Default::default();
     for cz in 0..cells {
         for cx in 0..cells {
-            let mx = (ox + cx * cb) as f64 + cb as f64 * 0.5;
-            let mz = (oz + cz * cb) as f64 + cb as f64 * 0.5;
-            let (prof, water_top) = patch.sample(mx, mz);
-            let surface = surface_from_profile(&prof);
+            let (surface, water_top, unbounded) = samples[(cz * cells + cx) as usize];
 
-            let solid_lo = (surface - MAX_SOIL_DEPTH).div_euclid(cb);
+            // Under the soil band; a forged column also reaches down to its
+            // lowest face neighbour's surface, so a steep face (forged
+            // mountains) has no gaps. Procedural columns keep the soil band
+            // only, which keeps their tiles bit-identical.
+            let mut solid_lo_block = surface - MAX_SOIL_DEPTH;
+            if unbounded {
+                for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                    solid_lo_block = solid_lo_block.min(surface_of(cx + dx, cz + dz));
+                }
+            }
+            let solid_lo = solid_lo_block.div_euclid(cb);
             let solid_hi = surface.div_euclid(cb);
             let top_cell = surface.max(water_top).div_euclid(cb);
             for cy in solid_lo..=top_cell {
@@ -769,6 +836,31 @@ mod tests {
             (0..64).any(|y| col.get(BlockPos::new(0, y, 0)).id != BlockId::AIR)
         });
         assert!(any_solid, "expected some solid ground in the region");
+    }
+
+    #[test]
+    fn analytic_surface_scan_matches_the_full_band_scan() {
+        // The old scan: every block of the band, top down.
+        let full = |prof: &crate::pipeline::ColumnProfile| {
+            let (top, bottom) = scan_band(prof);
+            (bottom..=top).rev().find(|&by| prof.density_at(by as f64 + HALF_TEST_M) > 0.0).unwrap_or(bottom - 1)
+        };
+        // Procedural columns: sea, lowland and mountains, every 37 m over 30 km.
+        let p = TerrainPipeline::new(WORLD_SEED);
+        let mut tops = std::collections::BTreeSet::new();
+        for i in 0..800 {
+            let (x, z) = ((i % 40) as f64 * 37.0 * 20.0, (i / 40) as f64 * 37.0 * 20.0);
+            let prof = p.column(x, z);
+            let s = surface_from_profile(&prof);
+            assert_eq!(s, full(&prof), "procedural column at ({x}, {z})");
+            tops.insert(s);
+        }
+        assert!(tops.len() > 20, "a spread of procedural surfaces: {tops:?}");
+        // Forged columns, from the deep sea floor to above the old band top.
+        for surface_y in [-1100.0, -900.5, 0.3, 64.25, 64.8, 319.9, 320.6, 2563.0, 4000.4, 4200.0] {
+            let prof = crate::pipeline::ColumnProfile::from_surface(surface_y);
+            assert_eq!(surface_from_profile(&prof), full(&prof), "forged surface {surface_y}");
+        }
     }
 
     #[test]
