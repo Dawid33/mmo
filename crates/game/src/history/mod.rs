@@ -1,7 +1,9 @@
 //! Deterministic, threadless world history: people, sites, civs and journeys on one calendar.
 
+mod chain;
 pub mod calendar;
 pub mod grid;
+pub mod log;
 pub mod records;
 pub mod rng;
 pub mod rules;
@@ -9,3 +11,187 @@ pub mod rules;
 pub use calendar::*;
 pub use grid::*;
 pub use records::*;
+
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+
+use log::{LogEntry, LogKind};
+
+/// A queued event of the history.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub(crate) enum Step {
+    SiteMonth(SiteId),
+    Death(PersonId),
+    JourneyLeg(JourneyId),
+}
+
+/// The world's history: people, sites, civs and journeys advanced by a calendar-ordered queue.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct History {
+    pub seed: u64,
+    pub now: CalendarTick,
+    pub people: BTreeMap<PersonId, Person>,
+    pub sites: BTreeMap<SiteId, Site>,
+    pub civs: BTreeMap<CivId, Civ>,
+    pub journeys: BTreeMap<JourneyId, Journey>,
+    pub(crate) queue: BTreeMap<(CalendarTick, u64), Step>,
+    pub(crate) next_seq: u64,
+    /// Next person, site, civ, journey id.
+    pub(crate) next_ids: [u32; 4],
+    pub log: Vec<LogEntry>,
+    #[serde(skip)]
+    grid: Option<SocietyGrid>,
+}
+
+impl History {
+    pub fn new(seed: u64, start: CalendarTick, grid: SocietyGrid) -> Self {
+        History {
+            seed,
+            now: start,
+            people: BTreeMap::new(),
+            sites: BTreeMap::new(),
+            civs: BTreeMap::new(),
+            journeys: BTreeMap::new(),
+            queue: BTreeMap::new(),
+            next_seq: 0,
+            next_ids: [0; 4],
+            log: Vec::new(),
+            grid: Some(grid),
+        }
+    }
+
+    /// Re-attach the society grid after loading (it is not saved).
+    pub fn set_grid(&mut self, grid: SocietyGrid) {
+        self.grid = Some(grid);
+    }
+
+    pub fn grid(&self) -> &SocietyGrid {
+        self.grid.as_ref().expect("History::set_grid was not called after load")
+    }
+
+    pub fn now(&self) -> CalendarTick {
+        self.now
+    }
+
+    pub(crate) fn schedule(&mut self, at: CalendarTick, step: Step) {
+        let seq = self.next_seq;
+        self.next_seq += 1;
+        self.queue.insert((at, seq), step);
+    }
+
+    pub(crate) fn log_event(&mut self, kind: LogKind) {
+        self.log.push(LogEntry { at: self.now, kind });
+    }
+
+    pub fn add_civ(&mut self, race: Race) -> CivId {
+        let id = CivId(self.next_ids[2]);
+        self.next_ids[2] += 1;
+        self.civs.insert(id, Civ { id, race, name: civ_name(id), sites: Vec::new() });
+        id
+    }
+
+    /// A person with no parents, at no site yet. Dies of old age at the rolled age
+    /// (on the first `advance` if that date has already passed).
+    pub fn add_founder(&mut self, sex: Sex, born: CalendarTick) -> PersonId {
+        let id = PersonId(self.next_ids[0]);
+        self.next_ids[0] += 1;
+        // Placeholder location until `found_site` puts them at a site.
+        let loc = Location::InRegion(crate::RegionCoords::new(0, 0));
+        self.people.insert(id, Person::newborn(id, sex, born, None, None, None, loc));
+        let at = born.plus_days(rules::death_age_days(id, born)).max(self.now);
+        self.schedule(at, Step::Death(id));
+        id
+    }
+
+    pub fn found_site(
+        &mut self,
+        civ: CivId,
+        region: crate::RegionCoords,
+        founders: &[PersonId],
+        from: Option<SiteId>,
+        player_founded: bool,
+    ) -> SiteId {
+        let id = SiteId(self.next_ids[1]);
+        self.next_ids[1] += 1;
+        let capacity = self.grid().capacity(region);
+        let members = founders.iter().copied().collect();
+        self.sites.insert(
+            id,
+            Site {
+                id,
+                civ,
+                name: site_name(id),
+                region,
+                founded: self.now,
+                founders: founders.to_vec(),
+                from,
+                abandoned: None,
+                capacity,
+                members,
+                player_founded,
+            },
+        );
+        if let Some(c) = self.civs.get_mut(&civ) {
+            c.sites.push(id);
+        }
+        for f in founders {
+            if let Some(p) = self.people.get_mut(f) {
+                p.site = Some(id);
+                p.location = Location::AtSite(id);
+            }
+        }
+        self.log_event(LogKind::SiteFounded { site: id, civ, founders: founders.to_vec(), from });
+        self.schedule(self.now.plus_days(DAYS_PER_MONTH), Step::SiteMonth(id));
+        id
+    }
+
+    /// Run every queued step due by `to`, in (time, insertion) order.
+    pub fn advance(&mut self, to: CalendarTick) {
+        while let Some((&(at, seq), _)) = self.queue.first_key_value() {
+            if at > to {
+                break;
+            }
+            let step = self.queue.remove(&(at, seq)).unwrap();
+            self.now = self.now.max(at);
+            match step {
+                Step::SiteMonth(s) => self.on_site_month(s),
+                Step::Death(p) => self.on_death(p),
+                Step::JourneyLeg(_) => {}
+            }
+        }
+        self.now = self.now.max(to);
+    }
+
+    pub fn person(&self, id: PersonId) -> Option<&Person> {
+        self.people.get(&id)
+    }
+    pub fn site(&self, id: SiteId) -> Option<&Site> {
+        self.sites.get(&id)
+    }
+    pub fn civ(&self, id: CivId) -> Option<&Civ> {
+        self.civs.get(&id)
+    }
+    pub fn journey(&self, id: JourneyId) -> Option<&Journey> {
+        self.journeys.get(&id)
+    }
+    pub fn people(&self) -> impl Iterator<Item = &Person> {
+        self.people.values()
+    }
+    pub fn sites(&self) -> impl Iterator<Item = &Site> {
+        self.sites.values()
+    }
+    pub fn civs(&self) -> impl Iterator<Item = &Civ> {
+        self.civs.values()
+    }
+    pub fn log(&self) -> &[LogEntry] {
+        &self.log
+    }
+
+    /// Living members of `site`, by id.
+    pub fn living_members(&self, site: SiteId) -> Vec<PersonId> {
+        self.sites
+            .get(&site)
+            .map(|s| s.members.iter().copied().filter(|p| self.people.get(p).is_some_and(Person::alive)).collect())
+            .unwrap_or_default()
+    }
+}

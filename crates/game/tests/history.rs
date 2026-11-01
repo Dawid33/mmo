@@ -128,3 +128,125 @@ fn route_deterministic() {
     assert_eq!(a, b);
     assert_eq!(g.world_id(), g.world_id());
 }
+
+// ---- Task 3: queue, log, people, sites, births, deaths, marriages ----
+use game::history::log::LogKind;
+
+fn start() -> CalendarTick {
+    CalendarTick::from_days(HISTORY_START_YEAR * DAYS_PER_YEAR)
+}
+
+fn years_before(t: CalendarTick, y: u64) -> CalendarTick {
+    CalendarTick(t.0 - y * DAYS_PER_YEAR * TICKS_PER_DAY)
+}
+
+fn land_grid() -> SocietyGrid {
+    SocietyGrid::from_world_map(&test_map(8, 8, |_, _| false))
+}
+
+fn growing_world() -> History {
+    let s = start();
+    let mut h = History::new(7, s, land_grid());
+    let civ = h.add_civ(Race::Dwarf);
+    let mut founders = Vec::new();
+    for _ in 0..5 {
+        founders.push(h.add_founder(Sex::Female, years_before(s, 20)));
+        founders.push(h.add_founder(Sex::Male, years_before(s, 20)));
+    }
+    h.found_site(civ, RegionCoords::new(3, 3), &founders, None, false);
+    h
+}
+
+#[test]
+fn site_grows_by_births() {
+    let mut h = growing_world();
+    h.advance(start().plus_days(10 * DAYS_PER_YEAR));
+    let site = h.site(SiteId(0)).unwrap();
+    assert!(h.living_members(SiteId(0)).len() > 10, "{}", site.members.len());
+    assert!(h.log().iter().any(|e| matches!(e.kind, LogKind::Married { .. })));
+    let mut born = 0;
+    for e in h.log() {
+        if let LogKind::Born { mother: Some(m), father: Some(f), .. } = &e.kind {
+            born += 1;
+            assert_eq!(h.person(*m).unwrap().spouse, Some(*f));
+        }
+    }
+    assert!(born >= 1);
+}
+
+#[test]
+fn old_people_die() {
+    let s = start();
+    let mut h = History::new(1, s, land_grid());
+    let civ = h.add_civ(Race::Dwarf);
+    let p = h.add_founder(Sex::Female, years_before(s, 170));
+    h.found_site(civ, RegionCoords::new(1, 1), &[p], None, false);
+    h.advance(s.plus_days(1));
+    assert_eq!(h.person(p).unwrap().died.map(|d| d.1), Some(DeathCause::OldAge));
+    assert!(h.log().iter().any(|e| matches!(e.kind, LogKind::Died { person, .. } if person == p)));
+    assert!(h.log().iter().any(|e| matches!(e.kind, LogKind::SiteAbandoned { .. })));
+    assert!(h.site(SiteId(0)).unwrap().abandoned.is_some());
+}
+
+#[test]
+fn history_is_deterministic() {
+    let mut a = growing_world();
+    let mut b = growing_world();
+    a.advance(start().plus_days(20 * DAYS_PER_YEAR));
+    b.advance(start().plus_days(20 * DAYS_PER_YEAR));
+    assert_eq!(bincode::serialize(&a).unwrap(), bincode::serialize(&b).unwrap());
+}
+
+#[test]
+fn advance_is_idempotent_and_monotonic() {
+    let mut h = growing_world();
+    let t = start().plus_days(5 * DAYS_PER_YEAR);
+    h.advance(t);
+    let snap = bincode::serialize(&h).unwrap();
+    h.advance(t);
+    h.advance(CalendarTick(t.0 - 100));
+    assert_eq!(bincode::serialize(&h).unwrap(), snap);
+    assert_eq!(h.now(), t);
+}
+
+#[test]
+fn no_marriage_between_siblings() {
+    let s = start();
+    let mut h = History::new(3, s, land_grid());
+    let civ = h.add_civ(Race::Dwarf);
+    let mother = h.add_founder(Sex::Female, years_before(s, 40));
+    let father = h.add_founder(Sex::Male, years_before(s, 40));
+    let son = h.add_founder(Sex::Male, years_before(s, 20));
+    let daughter = h.add_founder(Sex::Female, years_before(s, 20));
+    for c in [son, daughter] {
+        let p = h.people.get_mut(&c).unwrap();
+        p.mother = Some(mother);
+        p.father = Some(father);
+    }
+    h.found_site(civ, RegionCoords::new(1, 1), &[son, daughter], None, false);
+    h.advance(s.plus_days(10 * DAYS_PER_YEAR));
+    assert_eq!(h.person(son).unwrap().spouse, None);
+    assert_eq!(h.person(daughter).unwrap().spouse, None);
+    assert!(!h.log().iter().any(|e| matches!(e.kind, LogKind::Married { .. })));
+}
+
+#[test]
+fn unrelated_adults_do_marry() {
+    let s = start();
+    let mut h = History::new(3, s, land_grid());
+    let civ = h.add_civ(Race::Dwarf);
+    let a = h.add_founder(Sex::Female, years_before(s, 20));
+    let b = h.add_founder(Sex::Male, years_before(s, 20));
+    h.found_site(civ, RegionCoords::new(1, 1), &[a, b], None, false);
+    h.advance(s.plus_days(30 * DAYS_PER_YEAR));
+    assert_eq!(h.person(a).unwrap().spouse, Some(b));
+}
+
+#[test]
+fn describe_born_line() {
+    let mut h = growing_world();
+    h.advance(start().plus_days(10 * DAYS_PER_YEAR));
+    let e = h.log().iter().find(|e| matches!(e.kind, LogKind::Born { site: Some(_), .. })).unwrap();
+    let line = e.describe(&h);
+    assert!(line.contains("was born at Site 0"), "{line}");
+}
