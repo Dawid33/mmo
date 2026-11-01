@@ -1,12 +1,154 @@
 //! The simulated world grid, run parameters, and the initial condition.
 
-use crate::forge::knobs::{Knobs, LAYOUT_ARC, LAYOUT_ARCHIPELAGO, LAYOUT_ONE_ISLAND};
+use crate::forge::knobs::{
+    Knobs, LAYOUT_ARC, LAYOUT_ARCHIPELAGO, LAYOUT_CONTINENT, LAYOUT_CONTINENTS, LAYOUT_INLAND, LAYOUT_ONE_ISLAND,
+};
 use crate::forge::par;
+use crate::forge::plates;
 use crate::noise::OctaveNoise;
 
 pub const DEFAULT_SIZE_M: f64 = 16_000.0;
-pub const DEFAULT_CELL_M: f64 = 16.0;
+/// The quick dev world's cell (`ForgeParams::default()`: the server's
+/// missing-world forge, tests, `just forge-proto` without flags). The
+/// main-menu generator picks its own, finer cell.
+pub const DEFAULT_CELL_M: f64 = 32.0;
 pub const DEFAULT_SEED: u64 = 0x00D5_C0DE_0206;
+
+/// World size the continental layouts' noise wavelengths are written for:
+/// they are sampled at `size_m / REFERENCE_SIZE_M`, so a bigger world is the
+/// same shape scaled up. The island layouts keep their metres exactly.
+pub const REFERENCE_SIZE_M: f64 = 16_000.0;
+
+/// Uplift ramps from 0 at a land edge to full over this distance, so erosion
+/// does not cut a cliff down to the edge's fixed base level.
+pub const LAND_EDGE_TAPER_M: f64 = 2_000.0;
+/// In a world too small for that, the taper is at most this share of its size.
+const LAND_EDGE_TAPER_MAX_SHARE: f64 = 0.125;
+/// Each sea edge's coast distance varies by this share of `continent_coast`.
+const COAST_DISTANCE_VARIATION: f64 = 0.4;
+/// Landness of a continental layout's interior, far from any sea: caps the
+/// layout terms so the interior is uniform before the coast noise.
+const CONTINENT_INTERIOR_MASS: f64 = 1.0;
+/// Continents layout: centres are placed inside this half-width box, at
+/// least `CONTINENT_CENTRE_GAP` apart (half-width units) when possible.
+const CONTINENT_CENTRE_BOX: f64 = 0.55;
+const CONTINENT_CENTRE_GAP: f64 = 0.6;
+/// Inland layout: the inland sea's centre lies within this of the middle.
+const INLAND_SEA_OFFSET: f64 = 0.3;
+
+/// What lies past one edge of the map.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EdgeKind {
+    /// Sea: an ocean margin keeps the border drowned.
+    Sea,
+    /// Land running off the map: an open drainage boundary. Its border cells
+    /// are fixed-height outlets (base level = the cell's own height).
+    Land,
+}
+
+/// Edge order in `World::edges` and `edges`: north (z = 0), east (x = max),
+/// south (z = max), west (x = 0).
+pub const EDGE_NAMES: [&str; 4] = ["north", "east", "south", "west"];
+
+/// Which edges are sea. The island layouts are sea all round; the
+/// continental ones take `Knobs::sea_edges` sea edges, which ones picked by
+/// the seed — except inland, which has none.
+pub fn edges(seed: u64, k: &Knobs) -> [EdgeKind; 4] {
+    if !k.is_continental() {
+        return [EdgeKind::Sea; 4];
+    }
+    let sea = if k.layout() == LAYOUT_INLAND { 0 } else { k.sea_edge_count() };
+    let mut order = [0usize, 1, 2, 3];
+    order.sort_by(|&a, &b| hash01(seed, 0xED6E, a as u64).total_cmp(&hash01(seed, 0xED6E, b as u64)));
+    let mut out = [EdgeKind::Land; 4];
+    for &e in &order[..sea] {
+        out[e] = EdgeKind::Sea;
+    }
+    out
+}
+
+/// Proximity of a point (half-width units, -1..1 both ways) to each edge in
+/// `edges` order: 1 on the edge, -1 on the opposite one.
+fn edge_proximity(rx: f64, rz: f64) -> [f64; 4] {
+    [-rz, rx, rz, -rx]
+}
+
+/// A continental layout's landness before coast noise: > 0 is land.
+enum ContinentalMass {
+    /// Coast `coast[e]` half-widths in from each sea edge.
+    Continent { coast: [f64; 4], sea: [bool; 4] },
+    /// As a continent, cut by seas along the Voronoi boundaries of `centres`.
+    Continents { coast: [f64; 4], sea: [bool; 4], centres: Vec<(f64, f64)>, channel: f64 },
+    /// Land all round an inland sea of `radius` at `centre`.
+    Inland { centre: (f64, f64), radius: f64 },
+}
+
+impl ContinentalMass {
+    fn new(seed: u64, k: &Knobs, edges: &[EdgeKind; 4]) -> ContinentalMass {
+        let sea = edges.map(|e| e == EdgeKind::Sea);
+        let mut coast = [0.0; 4];
+        for (e, c) in coast.iter_mut().enumerate() {
+            let u = hash01(seed, 0xC0A5, e as u64) - 0.5;
+            *c = k.continent_coast * (1.0 + COAST_DISTANCE_VARIATION * u);
+        }
+        match k.layout() {
+            LAYOUT_CONTINENTS => {
+                let count = k.continent_count.round().clamp(2.0, 4.0) as usize;
+                let mut centres: Vec<(f64, f64)> = Vec::new();
+                let mut attempt = 0u64;
+                while centres.len() < count {
+                    attempt += 1;
+                    let x = (2.0 * hash01(seed, 0xC0A6, attempt) - 1.0) * CONTINENT_CENTRE_BOX;
+                    let z = (2.0 * hash01(seed, 0xC0A7, attempt) - 1.0) * CONTINENT_CENTRE_BOX;
+                    let clear = attempt > 400
+                        || centres.iter().all(|&(cx, cz)| (cx - x).hypot(cz - z) >= CONTINENT_CENTRE_GAP);
+                    if clear {
+                        centres.push((x, z));
+                    }
+                }
+                ContinentalMass::Continents { coast, sea, centres, channel: k.continent_sea_width }
+            }
+            LAYOUT_INLAND => {
+                let a = hash01(seed, 0xC0A8, 0) * std::f64::consts::TAU;
+                let d = INLAND_SEA_OFFSET * hash01(seed, 0xC0A8, 1);
+                ContinentalMass::Inland { centre: (d * a.cos(), d * a.sin()), radius: k.inland_sea_size }
+            }
+            layout => {
+                debug_assert_eq!(layout, LAYOUT_CONTINENT);
+                ContinentalMass::Continent { coast, sea }
+            }
+        }
+    }
+
+    fn at(&self, rx: f64, rz: f64) -> f64 {
+        let prox = edge_proximity(rx, rz);
+        let coastal = |coast: &[f64; 4], sea: &[bool; 4]| {
+            (0..4).filter(|&e| sea[e]).map(|e| 1.0 - prox[e] - coast[e]).fold(CONTINENT_INTERIOR_MASS, f64::min)
+        };
+        match self {
+            ContinentalMass::Continent { coast, sea } => coastal(coast, sea),
+            ContinentalMass::Continents { coast, sea, centres, channel } => {
+                let (mut a, mut b) = ((f64::INFINITY, 0usize), (f64::INFINITY, 0usize));
+                for (j, &(cx, cz)) in centres.iter().enumerate() {
+                    let d = (rx - cx).powi(2) + (rz - cz).powi(2);
+                    if d < a.0 {
+                        b = a;
+                        a = (d, j);
+                    } else if d < b.0 {
+                        b = (d, j);
+                    }
+                }
+                let (ca, cb) = (centres[a.1], centres[b.1]);
+                let gap = (cb.0 - ca.0).hypot(cb.1 - ca.1).max(1.0e-9);
+                let to_strait = (b.0 - a.0) / (2.0 * gap);
+                coastal(coast, sea).min(to_strait - channel)
+            }
+            ContinentalMass::Inland { centre, radius } => {
+                ((rx - centre.0).hypot(rz - centre.1) - radius).min(CONTINENT_INTERIOR_MASS)
+            }
+        }
+    }
+}
 
 /// The ocean margin ramps from fully open to fully drowned over this share of
 /// the half-width past `Knobs::ocean_margin_start`.
@@ -204,12 +346,21 @@ pub struct World {
     /// Would-be land the ocean margin drowned (a big number = the island is
     /// pressing against the world edge; the seed search penalises it).
     pub margin_drowned: usize,
+    /// What lies past each edge (`edges` order: N, E, S, W).
+    pub edges: [EdgeKind; 4],
+    /// Cells drainage ends at: the sea, and the border cells of land edges
+    /// (fixed-height outlets: never eroded, uplifted or diffused). Every
+    /// border cell is one. Routing gives outlets no receiver.
+    pub outlet: Vec<bool>,
 }
 
 impl World {
     /// Island + uplift map from noise. Wavelength of a noise's first octave is
     /// 2^-first_octave meters (all sampled at scale 1).
     pub fn new(p: &ForgeParams) -> World {
+        if p.knobs.is_continental() {
+            return World::new_continental(p);
+        }
         let n = (p.size_m / p.cell_m).round() as usize;
         let half = p.size_m * 0.5;
         let shape_lo = OctaveNoise::new(p.seed ^ 0xF001, -13, vec![1.0, 0.6, 0.3]); // 8 km
@@ -229,6 +380,8 @@ impl World {
             uplift: vec![0.0; n * n],
             uplifted: vec![0.0; n * n],
             margin_drowned: 0,
+            edges: [EdgeKind::Sea; 4],
+            outlet: Vec::new(),
         };
         for z in 0..n {
             for x in 0..n {
@@ -298,7 +451,98 @@ impl World {
                 assert!(w.ocean[i], "ocean margin must reach the world edge");
             }
         }
+        w.outlet = w.ocean.clone();
         w
+    }
+
+    /// Continent / continents / inland: the layout's landness plus coast
+    /// noise (wavelengths scaled with the world), an ocean margin along the
+    /// sea edges only, and uplift belts along convergent plate boundaries
+    /// (`plates`) tapering to 0 toward the land edges.
+    fn new_continental(p: &ForgeParams) -> World {
+        let n = (p.size_m / p.cell_m).round() as usize;
+        let (half, k) = (p.size_m * 0.5, &p.knobs);
+        // Same noises as the island layouts, sampled at the world's scale.
+        let scale = p.size_m / REFERENCE_SIZE_M;
+        let shape_lo = OctaveNoise::new(p.seed ^ 0xF001, -13, vec![1.0, 0.6, 0.3]); // 8 km at the reference size
+        let shape_hi = OctaveNoise::new(p.seed ^ 0xF002, -10, vec![1.0, 0.5]); // 1 km
+        let rough = OctaveNoise::new(p.seed ^ 0xF004, -8, vec![1.0, 1.0, 1.0]); // 256 m
+        let edges = edges(p.seed, k);
+        let mass = ContinentalMass::new(p.seed, k, &edges);
+        let field = plates::plate_field(p.seed, p.size_m, n, k);
+        let ranges = plates::interior_ranges(p.seed, p.size_m, k);
+        let taper_m = LAND_EDGE_TAPER_M.min(LAND_EDGE_TAPER_MAX_SHARE * p.size_m);
+        let margin_end = (k.ocean_margin_start + OCEAN_MARGIN_RAMP).min(0.99);
+
+        let mut w = World {
+            n,
+            dx: p.cell_m,
+            h: vec![0.0; n * n],
+            ocean: vec![false; n * n],
+            uplift: vec![0.0; n * n],
+            uplifted: vec![0.0; n * n],
+            margin_drowned: 0,
+            edges,
+            outlet: vec![false; n * n],
+        };
+        for z in 0..n {
+            for x in 0..n {
+                let (mx, mz) = ((x as f64 + 0.5) * p.cell_m, (z as f64 + 0.5) * p.cell_m);
+                let (rx, rz) = ((mx - half) / half, (mz - half) / half);
+                let (sx, sz) = (mx / scale, mz / scale);
+                let shape = mass.at(rx, rz)
+                    + k.coast_noise_lo * shape_lo.sample2(sx, sz)
+                    + k.coast_noise_hi * shape_hi.sample2(sx, sz);
+                let prox = edge_proximity(rx, rz);
+                let sea_prox = (0..4).filter(|&e| edges[e] == EdgeKind::Sea).map(|e| prox[e]).fold(-1.0, f64::max);
+                let land = shape - 2.0 * smoothstep(k.ocean_margin_start, margin_end, sea_prox);
+
+                let i = z * n + x;
+                if land <= 0.0 {
+                    w.ocean[i] = true;
+                    w.h[i] = if shape < 0.0 {
+                        (shape * 160.0 - 1.0).max(-90.0) // shelf, then abyss
+                    } else {
+                        w.margin_drowned += 1;
+                        (land * 40.0 - 1.0).max(-20.0) // drowned by the margin: shoals
+                    };
+                    continue;
+                }
+                w.h[i] = (1.0 + 45.0 * smoothstep(0.0, 0.5, land) + 3.0 * rough.sample2(sx, sz)).max(0.5);
+                let belt = (field.convergence[i] as f64).max(plates::interior_strength(&ranges, mx, mz, p.size_m, k));
+                // Distance to the nearest land edge (m), in `edges` order.
+                let to_edge = [mz, p.size_m - mx, p.size_m - mz, mx];
+                let to_land_edge =
+                    (0..4).filter(|&e| edges[e] == EdgeKind::Land).map(|e| to_edge[e]).fold(f64::INFINITY, f64::min);
+                let edge_taper = if to_land_edge.is_finite() { smoothstep(0.0, taper_m, to_land_edge) } else { 1.0 };
+                let coast_taper = smoothstep(0.0, 0.05, land);
+                w.uplift[i] = k.uplift
+                    * coast_taper
+                    * edge_taper
+                    * (k.lowland_uplift_share + (k.belt_uplift - k.lowland_uplift_share).max(0.0) * belt);
+            }
+        }
+        w.outlet.clone_from(&w.ocean);
+        for b in 0..n {
+            // (cell, its edge) for the four border runs; corners are on two.
+            for (i, e) in [(b, 0), (b * n + n - 1, 1), ((n - 1) * n + b, 2), (b * n, 3)] {
+                if edges[e] == EdgeKind::Land {
+                    w.outlet[i] = true;
+                }
+            }
+        }
+        for b in 0..n {
+            for i in [b, (n - 1) * n + b, b * n, b * n + n - 1] {
+                assert!(w.outlet[i], "every border cell must be sea or on a land edge (cell {i})");
+            }
+        }
+        w
+    }
+
+    /// True for a cell on the outermost ring of the grid.
+    pub fn on_border(&self, i: usize) -> bool {
+        let (x, z) = (i % self.n, i / self.n);
+        x == 0 || z == 0 || x + 1 == self.n || z + 1 == self.n
     }
 
     /// This world's evolved state carried onto the finer grid of `p_fine`
@@ -311,8 +555,9 @@ impl World {
     }
 
     /// `upsample` onto an already built fine initial condition (`World::new`
-    /// of the fine params), which keeps its `ocean`, `uplift` and its sea
-    /// cells' heights; land cells take this world's state. Per cell and in
+    /// of the fine params), which keeps its `ocean`, `outlet`, `uplift` and
+    /// its outlets' heights (sea floor, land-edge base levels); other land
+    /// cells take this world's state. Per cell and in
     /// fixed order: the result does not depend on the thread count.
     pub fn upsample_onto(&self, mut fine: World) -> World {
         let (nc, nf) = (self.n, fine.n);
@@ -331,9 +576,11 @@ impl World {
             let row = |z: usize| grid[z * nc + x0] * (1.0 - tx) + grid[z * nc + x1] * tx;
             row(z0) * (1.0 - tz) + row(z1) * tz
         };
-        let ocean = &fine.ocean;
-        let h = par::map_range(nf * nf, |i| if ocean[i] { fine.h[i] } else { sample(&coarse_h, i).max(LAND_FLOOR_M) });
-        let uplifted = par::map_range(nf * nf, |i| if ocean[i] { 0.0 } else { sample(&self.uplifted, i) });
+        // Outlets (the sea, land-edge border cells) keep the fine initial
+        // condition: a land edge's base level is its own height.
+        let outlet = &fine.outlet;
+        let h = par::map_range(nf * nf, |i| if outlet[i] { fine.h[i] } else { sample(&coarse_h, i).max(LAND_FLOOR_M) });
+        let uplifted = par::map_range(nf * nf, |i| if outlet[i] { 0.0 } else { sample(&self.uplifted, i) });
         fine.h = h;
         fine.uplifted = uplifted;
         fine
@@ -396,5 +643,180 @@ mod tests {
         }
         // Same input, same bytes (parallel map, fixed order).
         assert_eq!(coarse.upsample(&fine_p).h, up.h);
+    }
+
+    fn continental(layout: u32, seed: u64, size_m: f64, cell_m: f64) -> ForgeParams {
+        let mut p = ForgeParams { size_m, cell_m, seed, ..Default::default() };
+        p.knobs.layout = layout as f64;
+        p
+    }
+
+    /// Share of the cells in edge `e`'s outer 5% band that `pick` holds.
+    fn band_share(w: &World, e: usize, pick: impl Fn(usize) -> bool) -> f64 {
+        let (n, depth) = (w.n, ((w.n as f64 * 0.05).ceil() as usize).max(1));
+        let cells: Vec<usize> = (0..depth)
+            .flat_map(|d| {
+                (0..n).map(move |b| match e {
+                    0 => d * n + b,
+                    1 => b * n + n - 1 - d,
+                    2 => (n - 1 - d) * n + b,
+                    _ => b * n + d,
+                })
+            })
+            .collect();
+        cells.iter().filter(|&&i| pick(i)).count() as f64 / cells.len() as f64
+    }
+
+    #[test]
+    fn continent_has_requested_sea_edges() {
+        for seed in [1, 2, 3, DEFAULT_SEED] {
+            let p = continental(LAYOUT_CONTINENT, seed, 16_000.0, 128.0);
+            assert_eq!(p.knobs.sea_edge_count(), 2);
+            let w = World::new(&p);
+            assert_eq!(w.edges, edges(seed, &p.knobs));
+            let sea: Vec<usize> = (0..4).filter(|&e| w.edges[e] == EdgeKind::Sea).collect();
+            assert_eq!(sea.len(), 2, "seed {seed}: {:?}", w.edges);
+            for e in 0..4 {
+                let ocean = band_share(&w, e, |i| w.ocean[i]);
+                if sea.contains(&e) {
+                    assert!(ocean >= 0.95, "seed {seed}: sea edge {} is {ocean:.2} ocean", EDGE_NAMES[e]);
+                } else {
+                    assert!(1.0 - ocean >= 0.5, "seed {seed}: land edge {} is {:.2} land", EDGE_NAMES[e], 1.0 - ocean);
+                }
+            }
+        }
+        // The seed picks which edges: not the same pair for every seed.
+        let picks: std::collections::BTreeSet<_> =
+            (0..16).map(|seed| format!("{:?}", edges(seed, &continental(LAYOUT_CONTINENT, seed, 1.0, 1.0).knobs))).collect();
+        assert!(picks.len() > 1);
+    }
+
+    #[test]
+    fn inland_has_no_sea_edges() {
+        let mut p = continental(LAYOUT_INLAND, 7, 16_000.0, 128.0);
+        p.knobs.sea_edges = 4.0; // inland ignores it
+        let w = World::new(&p);
+        assert_eq!(w.edges, [EdgeKind::Land; 4]);
+        for e in 0..4 {
+            let land = band_share(&w, e, |i| !w.ocean[i]);
+            assert!(land >= 0.9, "inland edge {} is only {land:.2} land", EDGE_NAMES[e]);
+        }
+        let n = w.n;
+        let inner_sea = (0..n * n).filter(|&i| w.ocean[i] && !w.on_border(i)).count();
+        assert!(inner_sea > n * n / 50, "an inland sea: {inner_sea} cells");
+        // Continents: several landmasses, seas between them.
+        let w = World::new(&continental(LAYOUT_CONTINENTS, 7, 16_000.0, 128.0));
+        let land = (0..n * n).filter(|&i| !w.ocean[i]).count();
+        assert!(land > n * n / 4 && land < n * n * 9 / 10, "continents: {land} land cells");
+    }
+
+    /// Every land cell drains to the sea or off a land edge: following
+    /// receivers ends at NO_RECEIVER, and only outlets have none — for the
+    /// Priority-Flood and for `route_fast`, after some erosion.
+    #[test]
+    fn land_edge_drains_out() {
+        use crate::forge::erosion::{route, step, StepScratch, FLOOD_EPSILON, NO_RECEIVER};
+        let p = continental(LAYOUT_CONTINENT, DEFAULT_SEED, 8_192.0, 64.0);
+        let mut w = World::new(&p);
+        assert!(w.edges.contains(&EdgeKind::Land));
+        let land_outlets = (0..w.n * w.n).filter(|&i| w.outlet[i] && !w.ocean[i]).count();
+        assert!(land_outlets > w.n, "land edges give outlets: {land_outlets}");
+        let edge_h: Vec<f64> = (0..w.n * w.n).filter(|&i| w.outlet[i] && !w.ocean[i]).map(|i| w.h[i]).collect();
+        let geo = crate::forge::geology::Geology::new(&p, &w);
+        let rain = crate::forge::climate::rainfall(&w, &p);
+        let mut scratch = StepScratch::default();
+        for _ in 0..12 {
+            step(&mut w, &p, &geo, &rain, &mut scratch);
+        }
+        let after: Vec<f64> = (0..w.n * w.n).filter(|&i| w.outlet[i] && !w.ocean[i]).map(|i| w.h[i]).collect();
+        assert_eq!(edge_h, after, "land-edge outlets keep their height");
+        let mut fast = crate::forge::erosion::Routing::default();
+        crate::forge::routing_fast::route_fast(&w, FLOOD_EPSILON, &mut StepScratch::default(), &mut fast);
+        for (name, r) in [("priority-flood", route(&w, FLOOD_EPSILON)), ("route_fast", fast)] {
+            let mut off_edge = 0;
+            for i in 0..w.n * w.n {
+                assert_eq!(r.receiver[i] == NO_RECEIVER, w.outlet[i], "{name}: cell {i}");
+                if w.outlet[i] {
+                    continue;
+                }
+                let (mut c, mut steps) = (i, 0);
+                while r.receiver[c] != NO_RECEIVER {
+                    c = r.receiver[c] as usize;
+                    steps += 1;
+                    assert!(steps <= w.n * w.n, "{name}: cell {i} loops");
+                }
+                off_edge += !w.ocean[c] as usize;
+            }
+            assert!(off_edge > 0, "{name}: some land drains off a land edge");
+        }
+    }
+
+    /// High uplift sits on convergent plate boundaries (interior ranges are
+    /// the rest).
+    #[test]
+    fn belts_follow_plate_boundaries() {
+        for seed in [DEFAULT_SEED, 3] {
+            let p = continental(LAYOUT_CONTINENT, seed, 16_000.0, 64.0);
+            let w = World::new(&p);
+            let n = w.n;
+            let field = plates::plate_field(p.seed, p.size_m, n, &p.knobs);
+            // Convergent boundary cells, then the distance to them (BFS, m).
+            let mut dist = vec![f64::INFINITY; n * n];
+            let mut queue = std::collections::VecDeque::new();
+            for i in 0..n * n {
+                let convergent = field.convergence[i] > 0.0
+                    && w.neighbors(i).any(|(j, _)| field.plate[j] != field.plate[i]);
+                if convergent {
+                    dist[i] = 0.0;
+                    queue.push_back(i);
+                }
+            }
+            while let Some(i) = queue.pop_front() {
+                for (j, d) in w.neighbors(i) {
+                    if dist[j] > dist[i] + d {
+                        dist[j] = dist[i] + d;
+                        queue.push_back(j);
+                    }
+                }
+            }
+            let max = w.uplift.iter().copied().fold(0.0, f64::max);
+            let high: Vec<usize> = (0..n * n).filter(|&i| w.uplift[i] > 0.5 * max).collect();
+            assert!(high.len() > 100, "seed {seed}: {} high-uplift cells", high.len());
+            let near = high.iter().filter(|&&i| dist[i] <= 3_000.0).count();
+            let share = near as f64 / high.len() as f64;
+            assert!(share >= 0.7, "seed {seed}: only {share:.2} of high uplift within 3 km of a convergent boundary");
+        }
+    }
+
+    /// The island layouts are untouched by the continental ones: the same
+    /// knobs give the same initial condition, and the same erosion, bit for
+    /// bit (crc32 of `h` / `uplift` recorded before the continental layouts).
+    #[test]
+    fn island_layout_unchanged() {
+        let crc = |v: &[f64]| {
+            let mut c = crc32fast::Hasher::new();
+            for x in v {
+                c.update(&x.to_bits().to_le_bytes());
+            }
+            c.finalize()
+        };
+        for (size, cell, h, uplift) in
+            [(8_192.0, 64.0, 0xAA1B_B793u32, 0xC8F9_C2E9u32), (16_000.0, 128.0, 0xD952_A152, 0x9936_283D)]
+        {
+            let p = continental(LAYOUT_ONE_ISLAND, DEFAULT_SEED, size, cell);
+            let w = World::new(&p);
+            assert_eq!(w.edges, [EdgeKind::Sea; 4]);
+            assert_eq!(w.outlet, w.ocean);
+            assert_eq!((crc(&w.h), crc(&w.uplift)), (h, uplift), "{size} m / {cell} m");
+        }
+        let p = continental(LAYOUT_ONE_ISLAND, DEFAULT_SEED, 8_192.0, 64.0);
+        let mut w = World::new(&p);
+        let geo = crate::forge::geology::Geology::new(&p, &w);
+        let rain = crate::forge::climate::rainfall(&w, &p);
+        let mut scratch = crate::forge::erosion::StepScratch::default();
+        for _ in 0..15 {
+            crate::forge::erosion::step(&mut w, &p, &geo, &rain, &mut scratch);
+        }
+        assert_eq!(crc(&w.h), 0xFB40_8372, "eroded island");
     }
 }

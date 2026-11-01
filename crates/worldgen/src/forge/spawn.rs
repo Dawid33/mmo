@@ -18,6 +18,10 @@ const FLAT_MAX_RELIEF_M: f64 = 4.0;
 const RIVER_DISCHARGE_M2: f64 = 1.5e6;
 /// "Mountain" for the view criterion: this share of the world's highest peak.
 const MOUNTAIN_SHARE_OF_PEAK: f64 = 0.55;
+/// A scored site keeps this far from the map edge (where a land edge ends the
+/// playable world), or `EDGE_CLEARANCE_MAX_SHARE` of a small world's size.
+const EDGE_CLEARANCE_M: f64 = 1_000.0;
+const EDGE_CLEARANCE_MAX_SHARE: f64 = 0.125;
 
 /// Grid distance (m, 8-connected steps approximated as 1 cell) to the nearest
 /// cell where `source` holds.
@@ -52,9 +56,14 @@ pub fn pick(w: &World, a: &Analysis, seed: u64) -> (f64, f64) {
     let to_sea = distance_field(w, |i| w.ocean[i]);
     let to_mountain = distance_field(w, |i| w.h[i] >= MOUNTAIN_SHARE_OF_PEAK * peak);
 
+    let clearance = EDGE_CLEARANCE_M.min(EDGE_CLEARANCE_MAX_SHARE * w.n as f64 * w.dx);
     let mut best = (f64::MIN, 0usize);
     // Flattest dry patch (its relief, cell) for when no site qualifies.
+    // ... preferring one clear of the map edge (the plain along a land edge
+    // is flat because it is not uplifted, and it is where the world ends).
     let mut flattest = (f64::MAX, None);
+    let mut flattest_clear = (f64::MAX, None);
+    let size = w.n as f64 * w.dx;
     for z in FLAT_RADIUS_CELLS..n - FLAT_RADIUS_CELLS {
         for x in FLAT_RADIUS_CELLS..n - FLAT_RADIUS_CELLS {
             let i = (z * n + x) as usize;
@@ -73,10 +82,18 @@ pub fn pick(w: &World, a: &Analysis, seed: u64) -> (f64, f64) {
             if !dry {
                 continue;
             }
+            let (cx, cz) = w.center(i);
+            let clear = cx.min(cz).min(size - cx).min(size - cz) >= clearance;
             if hi - lo < flattest.0 {
                 flattest = (hi - lo, Some(i));
             }
+            if clear && hi - lo < flattest_clear.0 {
+                flattest_clear = (hi - lo, Some(i));
+            }
             if hi - lo > FLAT_MAX_RELIEF_M || w.h[i] > SPAWN_HEIGHT_M.1 {
+                continue;
+            }
+            if !clear {
                 continue;
             }
             // Near, not in: a river 60-300 m away, the sea within ~1.5 km,
@@ -93,5 +110,5 @@ pub fn pick(w: &World, a: &Analysis, seed: u64) -> (f64, f64) {
     if best.0 > f64::MIN {
         return w.center(best.1);
     }
-    w.center(flattest.1.expect("no dry land for a spawn site"))
+    w.center(flattest_clear.1.or(flattest.1).expect("no dry land for a spawn site"))
 }

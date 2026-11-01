@@ -36,8 +36,8 @@ use crate::session::{AppState, PendingWorld};
 
 /// The tabs, each with the knob GROUPS it shows (`Spec::group`).
 pub const TABS: [(&str, &[&str]); 5] = [
-    ("Land", &["Island"]),
-    ("Mountains", &["Uplift"]),
+    ("Land", &["Island", "Continent"]),
+    ("Mountains", &["Uplift", "Plates"]),
     ("Water", &["Rivers", "Climate"]),
     ("Geology", &["Geology"]),
     ("Advanced", &["Erosion", "Schedule"]),
@@ -889,6 +889,8 @@ mod tests {
         }
         assert_eq!(tab("layout"), 0);
         assert_eq!(tab("uplift"), 1);
+        assert_eq!(tab("sea_edges"), 0);
+        assert_eq!(tab("plate_count"), 1);
         assert_eq!(tab("rain_max"), 2);
         assert_eq!(tab("river_width_m"), 2);
         assert_eq!(tab("hard_granite"), 3);
@@ -906,7 +908,7 @@ mod tests {
         assert_eq!(rows[0].key, WORLD_SIZE_KEY);
         assert_eq!(rows[1].key, "layout");
         assert!(rows[1].is_choice);
-        assert_eq!(rows[1].choices.row_count(), 3);
+        assert_eq!(rows[1].choices.row_count(), worldgen::forge::knobs::CHOICES[0].1.len());
         state.tab = ADVANCED;
         let keys: Vec<String> = state.rows().iter().map(|r| r.key.to_string()).collect();
         assert_eq!(keys.last().map(String::as_str), Some(WORLD_CELL_KEY));

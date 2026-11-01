@@ -43,7 +43,8 @@ use super::erosion::{Routing, StepScratch, NO_RECEIVER};
 use super::par;
 use super::world::World;
 
-/// Water surface at an outlet (sea level): the base level everything drains to.
+/// Water surface at a sea outlet (sea level). A land-edge outlet's base level
+/// is its own height.
 const OUTLET_LEVEL_M: f64 = 0.0;
 /// Basin of every outlet and of all land that descends straight to one.
 const SEA: u32 = 0;
@@ -95,13 +96,14 @@ const ROOTS_PER_TASK: usize = 64;
 #[derive(Clone, Copy)]
 struct Grid<'a> {
     h: &'a [f64],
+    ocean: &'a [bool],
     outlet: &'a [bool],
 }
 
 impl<'a> Grid<'a> {
     fn new(w: &'a World) -> Self {
-        // Cells that drain off the map: the sea today (land edges would join here).
-        Grid { h: &w.h, outlet: &w.ocean }
+        // Cells that drain off the map: the sea and the land edges' border.
+        Grid { h: &w.h, ocean: &w.ocean, outlet: &w.outlet }
     }
 
     #[inline]
@@ -109,10 +111,11 @@ impl<'a> Grid<'a> {
         self.outlet[i]
     }
 
-    /// Height as drainage sees it: outlets at sea level, not their floor.
+    /// Height as drainage sees it: the sea at sea level, not its floor; a
+    /// land-edge outlet (and any land) at its own height.
     #[inline]
     fn surface(&self, i: usize) -> f64 {
-        if self.is_outlet(i) { OUTLET_LEVEL_M } else { self.h[i] }
+        if self.ocean[i] { OUTLET_LEVEL_M } else { self.h[i] }
     }
 }
 
@@ -215,9 +218,10 @@ pub fn route_fast(w: &World, epsilon: f64, scratch: &mut StepScratch, out: &mut 
             for x in 0..n {
                 let i = z * n + x;
                 if g.is_outlet(i) {
-                    // A shore outlet: land among its (on-map) neighbours.
+                    // A shore outlet: land among its (on-map) neighbours. A
+                    // land-edge outlet stays at its own height.
                     let shore = land_near[x.saturating_sub(1)..=(x + 1).min(n - 1)].iter().any(|&l| l);
-                    filled[x] = if shore { OUTLET_LEVEL_M } else { g.h[i] };
+                    filled[x] = if shore && g.ocean[i] { OUTLET_LEVEL_M } else { g.h[i] };
                     (down[x], basin[x]) = (NO_DIR, SEA);
                     continue;
                 }
@@ -238,7 +242,7 @@ pub fn route_fast(w: &World, epsilon: f64, scratch: &mut StepScratch, out: &mut 
         }
     });
     donors.resize(cells, 0);
-    let land = w.ocean.iter().filter(|&&o| !o).count();
+    let land = w.outlet.iter().filter(|&&o| !o).count();
 
     // 2. Basins: label each cell with the root its descent ends at. A
     // descent tree's top is a land cell that is a minimum or steps straight
@@ -535,6 +539,8 @@ mod tests {
             uplift: vec![0.0; N * N],
             uplifted: vec![0.0; N * N],
             margin_drowned: 0,
+            edges: [crate::forge::world::EdgeKind::Sea; 4],
+            outlet: Vec::new(),
         };
         for z in 0..N {
             for x in 0..N {
@@ -547,6 +553,7 @@ mod tests {
                 }
             }
         }
+        w.outlet = w.ocean.clone();
         w
     }
 

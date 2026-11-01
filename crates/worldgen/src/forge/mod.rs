@@ -1,13 +1,19 @@
-//! The world forge: a whole finite world (default 16 km, ocean all round)
-//! generated OFFLINE by simulating landscape evolution instead of evaluating
+//! The world forge: a whole finite world (default a 16 km continent at 32 m
+//! cells; island layouts keep the sea all round) generated OFFLINE by
+//! simulating landscape evolution instead of evaluating
 //! noise per point. `forge` runs the pipeline and `Forged::artifact` turns it
 //! into the stored world file the engine serves (`crate::forged`). The CLI,
 //! PNG rendering, seed search and tuning page live in
 //! `examples/forge_proto` (`just forge-proto`, `just forge-ui`).
 //!
 //! Pipeline:
-//!   1. world      noise island inside a guaranteed ocean margin, low initial
-//!                 relief, an UPLIFT map with mountain belts inland;
+//!   1. world      the layout's landmass — islands inside a guaranteed ocean
+//!                 margin, or a continent with sea on some edges and land
+//!                 running off the others (land-edge border cells are
+//!                 fixed-height drainage outlets) — low initial relief, an
+//!                 UPLIFT map with mountain belts (inland noise belts on the
+//!                 islands; convergent plate boundaries, `plates`, on the
+//!                 continental layouts);
 //!   2. geology    rock column in a stratigraphic coordinate -> erodibility of
 //!                 whatever rock the surface currently cuts;
 //!   3. climate    orographic rain on the current heights -> discharge weights;
@@ -32,6 +38,7 @@ pub mod geology;
 pub mod hydrology;
 pub mod knobs;
 mod par;
+pub mod plates;
 pub mod post;
 pub mod presets;
 pub mod quality;
@@ -274,7 +281,14 @@ pub fn forge_with(
     }
     // The final grid's initial condition is also the "before erosion" world.
     let fine = World::new(p);
-    let initial = World { h: fine.h.clone(), ocean: fine.ocean.clone(), uplift: Vec::new(), uplifted: Vec::new(), ..fine };
+    let initial = World {
+        h: fine.h.clone(),
+        ocean: fine.ocean.clone(),
+        outlet: fine.outlet.clone(),
+        uplift: Vec::new(),
+        uplifted: Vec::new(),
+        ..fine
+    };
     let mut fine = Some(fine);
     let started = std::time::Instant::now();
     let mut w: Option<World> = None;
@@ -430,8 +444,9 @@ mod tests {
     #[test]
     #[ignore = "slow: >100ms — run via just test-full"]
     fn erosion_below_the_column_is_granite() {
-        // The default 16 km island (its belts are inland), at coarse cells.
+        // The 16 km island (its belts are inland), at coarse cells.
         let mut p = ForgeParams { size_m: 16_000.0, cell_m: 128.0, quiet: true, ..Default::default() };
+        p.knobs.layout = knobs::LAYOUT_ONE_ISLAND as f64;
         p.knobs.iters = 600.0;
         let f = forge(&p);
         let w = &f.world;

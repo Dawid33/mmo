@@ -21,17 +21,23 @@ const THUMBNAILS: usize = 3;
 /// a floor per term so one weak point lowers a world instead of zeroing it.
 pub fn criteria(s: &Stats, cells: usize) -> Vec<(&'static str, f64)> {
     let rocks = s.rock_shares.iter().filter(|&&share| share >= 0.04).count() as f64;
-    let one_island = s.layout == worldgen::forge::knobs::LAYOUT_ONE_ISLAND;
+    use worldgen::forge::knobs::{LAYOUT_CONTINENT, LAYOUT_CONTINENTS, LAYOUT_INLAND, LAYOUT_ONE_ISLAND};
+    let one_island = s.layout == LAYOUT_ONE_ISLAND;
+    let continental = [LAYOUT_CONTINENT, LAYOUT_CONTINENTS, LAYOUT_INLAND].contains(&s.layout);
     // Several islands share the sea between them: less land is right, and an
     // island a few km across cannot hold a 9 km river or an 18 km^2 basin.
-    let (land, peaks, river, basin, lakes, buildable) = if one_island {
+    // A continent is mostly land, running off the map on its land edges.
+    let (land, peaks, river, basin, lakes, buildable) = if continental {
+        ((0.40, 0.55), (140.0, 200.0), (5.0, 8.5), (8.0, 18.0), (2.0, 6.0), (15.0, 35.0))
+    } else if one_island {
         ((0.22, 0.32), (140.0, 200.0), (5.0, 8.5), (8.0, 18.0), (2.0, 6.0), (15.0, 35.0))
     } else {
         ((0.10, 0.18), (100.0, 160.0), (2.5, 5.0), (2.0, 6.0), (1.0, 4.0), (8.0, 20.0))
     };
+    let too_much_land = if continental { 1.0 } else { 1.0 - smoothstep(0.48, 0.58, s.land_share) };
     let mut criteria = vec![
         // Enough land to live on, enough sea that the rim stays far away.
-        ("land", smoothstep(land.0, land.1, s.land_share) * (1.0 - smoothstep(0.48, 0.58, s.land_share))),
+        ("land", smoothstep(land.0, land.1, s.land_share) * too_much_land),
         // Real mountains. No upper bound: the forge fits overshoot to the
         // engine's height band (post::fit_height_band), and a 32 m candidate
         // under-predicts the 16 m peak by up to ~30% anyway.
@@ -44,7 +50,7 @@ pub fn criteria(s: &Stats, cells: usize) -> Vec<(&'static str, f64)> {
         // The island must not lean on the forced ocean margin.
         ("clear of rim", 1.0 - smoothstep(0.002, 0.02, s.margin_drowned as f64 / cells as f64)),
     ];
-    if !one_island {
+    if !one_island && s.layout != LAYOUT_CONTINENT && s.layout != LAYOUT_INLAND {
         // An archipelago that merged into one landmass is not one.
         criteria.push(("islands", smoothstep(1.5, 3.5, s.islands as f64)));
     }

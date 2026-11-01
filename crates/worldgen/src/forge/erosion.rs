@@ -72,6 +72,9 @@ pub fn route(w: &World, epsilon: f64) -> Routing {
 }
 
 /// `route` into reusable buffers (cleared and resized, not reallocated).
+///
+/// Outlets (`World::outlet`) are where drainage ends: the sea at sea level,
+/// a land edge's border cells at their own height.
 pub fn route_into(w: &World, epsilon: f64, out: &mut Routing) {
     let cells = w.n * w.n;
     let Routing { filled, receiver, receiver_dist, order, tree_starts, closed, heap } = out;
@@ -79,7 +82,7 @@ pub fn route_into(w: &World, epsilon: f64, out: &mut Routing) {
     filled.clear();
     filled.extend_from_slice(&w.h);
     closed.clear();
-    closed.extend_from_slice(&w.ocean);
+    closed.extend_from_slice(&w.outlet);
     receiver.clear();
     receiver.resize(cells, NO_RECEIVER);
     receiver_dist.clear();
@@ -89,15 +92,17 @@ pub fn route_into(w: &World, epsilon: f64, out: &mut Routing) {
     heap.clear();
     let key = |height: f64| (height + 100_000.0).to_bits();
     for i in 0..cells {
-        if w.ocean[i] && w.neighbors(i).any(|(nb, _)| !w.ocean[nb]) {
-            // Sea level, not the sea floor, is the base level.
-            filled[i] = 0.0;
-            heap.push(Reverse((key(0.0), i as u32)));
+        if w.outlet[i] && w.neighbors(i).any(|(nb, _)| !w.outlet[nb]) {
+            // Sea level, not the sea floor, is the sea's base level; a land
+            // edge's is the cell's own height.
+            let level = if w.ocean[i] { 0.0 } else { w.h[i] };
+            filled[i] = level;
+            heap.push(Reverse((key(level), i as u32)));
         }
     }
     while let Some(Reverse((_, c))) = heap.pop() {
         let c = c as usize;
-        if !w.ocean[c] {
+        if !w.outlet[c] {
             order.push(c as u32);
         }
         for (nb, dist) in w.neighbors(c) {
@@ -146,7 +151,7 @@ pub fn discharge_into(w: &World, r: &Routing, rain: &[f64], q: &mut Vec<f64>) {
     }
     for &i in r.order.iter().rev() {
         let rc = r.receiver[i as usize] as usize;
-        if !w.ocean[rc] {
+        if !w.outlet[rc] {
             q[rc] += q[i as usize];
         }
     }
@@ -194,7 +199,7 @@ fn evolve(w: &mut World, p: &ForgeParams, geo: &Geology, rain: &[f64], routing: 
     par::for_rows(q, n, &mut Vec::new(), |z0, rows, _| {
         for (j, qi) in rows.iter_mut().enumerate() {
             let i = z0 * n + j;
-            if !w.ocean[i] {
+            if !w.outlet[i] {
                 *qi = cell_area * rain[i];
             }
         }
@@ -204,9 +209,11 @@ fn evolve(w: &mut World, p: &ForgeParams, geo: &Geology, rain: &[f64], routing: 
         par::for_ranges(groups, |range| {
             for &i in routing.order[range].iter().rev() {
                 let rc = routing.receiver[i as usize] as usize;
-                if !w.ocean[rc] {
-                    // SAFETY: a cell and its land receiver are in one tree,
-                    // and every tree is in exactly one group.
+                // An outlet (sea or land edge) collects from many trees: it
+                // must never be written here.
+                if !w.outlet[rc] {
+                    // SAFETY: a cell and its non-outlet receiver are in one
+                    // tree, and every tree is in exactly one group.
                     unsafe { q.set(rc, q.get(rc) + q.get(i as usize)) };
                 }
             }
@@ -237,7 +244,9 @@ fn evolve(w: &mut World, p: &ForgeParams, geo: &Geology, rain: &[f64], routing: 
                         continue;
                     }
                     let rc = routing.receiver[i] as usize;
-                    let base = if ocean[rc] { 0.0 } else { h.get(rc) }; // already updated: downstream-first
+                    // Sea level at the sea; a land-edge outlet's fixed height
+                    // (never written); else already updated: downstream-first.
+                    let base = if ocean[rc] { 0.0 } else { h.get(rc) };
                     let erodibility = k.erodibility * geo.erodibility_at(i, hi, before);
                     let f = dt * erodibility * q[i].max(k.hillslope_area_m2 * rain[i]).sqrt() / routing.receiver_dist[i];
                     h.set(i, ((hi + lift + f * base) / (1.0 + f)).max(LAND_FLOOR_M));
@@ -288,7 +297,14 @@ mod tests {
     fn step_with_reused_scratch_matches_fresh() {
         let p = ForgeParams { size_m: 4096.0, cell_m: 64.0, ..Default::default() };
         let mut a = World::new(&p);
-        let mut b = World { h: a.h.clone(), ocean: a.ocean.clone(), uplift: a.uplift.clone(), uplifted: a.uplifted.clone(), ..a };
+        let mut b = World {
+            h: a.h.clone(),
+            ocean: a.ocean.clone(),
+            outlet: a.outlet.clone(),
+            uplift: a.uplift.clone(),
+            uplifted: a.uplifted.clone(),
+            ..a
+        };
         let geo = Geology::new(&p, &a);
         let rain = vec![1.0; a.n * a.n];
         let mut reused = StepScratch::default();

@@ -16,8 +16,13 @@ pub const CUSTOM: &str = "Custom";
 pub const PRESETS: &[Preset] = &[
     Preset {
         name: "Default",
-        description: "Normal settings: one island, ranges inland, rivers to the sea.",
+        description: "Normal settings: a continent with sea on some edges, ranges along plate boundaries, rivers to the sea or off the land edges.",
         overrides: &[],
+    },
+    Preset {
+        name: "One island",
+        description: "A single island in open sea, ranges inland, rivers to the sea.",
+        overrides: &[("layout", 0.0)],
     },
     Preset {
         name: "Archipelago",
@@ -36,6 +41,7 @@ pub const PRESETS: &[Preset] = &[
             ("uplift", 6.0e-3),
             ("erodibility", 1.6e-5),
             ("belt_width", 0.40),
+            ("plate_belt_width", 0.22),
             ("lowland_uplift_share", 0.10),
         ],
     },
@@ -118,7 +124,7 @@ mod tests {
         let names: Vec<_> = PRESETS.iter().map(|p| p.name).collect();
         assert_eq!(
             names,
-            ["Default", "Archipelago", "Island arc", "Highlands", "Lowlands", "Dry", "Wet"]
+            ["Default", "One island", "Archipelago", "Island arc", "Highlands", "Lowlands", "Dry", "Wet"]
         );
     }
 

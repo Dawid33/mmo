@@ -216,7 +216,8 @@ fn chaikin(points: &[RiverPoint]) -> Vec<RiverPoint> {
 /// Reaches between network nodes, with Strahler order. Returns (rivers, max order).
 fn find_rivers(w: &World, routing: &Routing, q: &[f64], lake_depth: &[f64], k: &Knobs) -> (Vec<River>, u32) {
     let cells = w.n * w.n;
-    let channel = |i: usize| !w.ocean[i] && q[i] >= k.river_min_discharge_m2;
+    // Outlets (sea, land-edge border) end a river: they have no receiver.
+    let channel = |i: usize| !w.outlet[i] && q[i] >= k.river_min_discharge_m2;
     let mut donors = vec![0u8; cells];
     let (mut order, mut max_in, mut max_count) = (vec![0u32; cells], vec![0u32; cells], vec![0u8; cells]);
     // Upstream-first: every donor of a cell is handled before the cell itself.
@@ -262,12 +263,16 @@ fn find_rivers(w: &World, routing: &Routing, q: &[f64], lake_depth: &[f64], k: &
             last = cur;
             cur = routing.receiver[cur] as usize;
         }
-        // Close the reach on its downstream node: the confluence, or the sea.
+        // Close the reach on its downstream node: the confluence, the sea,
+        // or the land edge it leaves the map at.
         if channel(cur) {
             points.push(point(cur));
         } else if w.ocean[cur] {
             let (x, z) = w.center(cur);
             points.push(RiverPoint { x, z, bed: 0.0, water: 0.0, in_lake: 0.0 });
+        } else if w.outlet[cur] {
+            let (x, z) = w.center(cur);
+            points.push(RiverPoint { x, z, bed: w.h[cur], water: w.h[cur], in_lake: 0.0 });
         }
         for _ in 0..RIVER_SMOOTHING_PASSES {
             points = chaikin(&points);
@@ -313,7 +318,7 @@ pub fn analyze(w: &World, geo: &Geology, rain: &[f64], k: &Knobs) -> Analysis {
     }
     let (mut mouths, mut longest, mut biggest) = (0, 0.0f64, 0.0f64);
     for &i in &land {
-        if w.ocean[routing.receiver[i] as usize] && q[i] >= k.river_min_discharge_m2 {
+        if w.outlet[routing.receiver[i] as usize] && q[i] >= k.river_min_discharge_m2 {
             mouths += 1;
             longest = longest.max(length[i]);
             biggest = biggest.max(q[i]);

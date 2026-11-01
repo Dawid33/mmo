@@ -30,9 +30,10 @@ world := ""
 export VOXEL_WORLD := world
 
 # World the server serves. Empty (default) = the default forged world,
-# worlds/default.world, forged on first start if missing (a minute or more).
+# worlds/default.world, forged on first start if missing (ForgeParams::default():
+# a 16 km / 32 m continent, ~5-10 s).
 # `procedural` = the noise world. Any other value = that world file (e.g. one
-# from `just forge-proto`, one finite 16 km world, ocean all round):
+# from `just forge-proto`, one finite world — by default a 16 km continent):
 #   just forge-proto --seed D5C0DE021A --out target/world-forge/best
 #   just world_file=target/world-forge/best.world run
 # Defaults to $VOXEL_WORLD_FILE. Relative paths resolve from the repo root.
@@ -489,16 +490,19 @@ tree-view *args:
 model-census *paths="target/test-models":
     scripts/bbmodel_census.py {{paths}}
 
-# World forge prototype (F1): simulate a whole finite 16 km world offline —
+# World forge prototype (F1): simulate a whole finite world offline (default: a
+# 16 km continent at 32 m cells, ~5 s; `--set layout=0` for the one island) —
 # geology-controlled stream-power erosion, orographic rain, depression filling,
 # planed valley floors, spill-level lakes — and write relief / rivers / geology
 # / rain maps, a 16-bit heightmap, river+lake objects (JSON), drainage
 # statistics and the WORLD FILE `<stem>.world` into target/world-forge/ (serve it
 # with `just world_file=<path> run`). Never changes procedural output. Flags:
 # --cell <m> --iters <n> --seed <hex> --out <stem> --size --dt --uplift --k
-# --diffusivity --no-geology --no-climate, and --search <n> to forge n seeds at
-# 32 m cells and rank them (generate-and-test). e.g. `just forge-proto --cell 32`
-# for a 5 s look, `just forge-proto --search 64`.
+# --diffusivity --no-geology --no-climate, --set <knob>=<value>, and --search <n>
+# to forge n seeds at 32 m cells and rank them (generate-and-test). e.g.
+# `just forge-proto --cell 16` for the full-detail world, `just forge-proto
+# --cell 64 --size 100352` for a quick look at a ~100 km continent,
+# `just forge-proto --search 64`.
 forge-proto *args:
     {{cap}} {{cargo}} run --release -p worldgen --example forge_proto -- {{args}}
 

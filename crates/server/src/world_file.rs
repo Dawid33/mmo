@@ -125,8 +125,8 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("bad.world");
         std::fs::write(&path, b"not a world").unwrap();
-        // Default params: a forge here would be minutes, so this also proves
-        // nothing was forged.
+        // Default params: a forge here would take seconds and replace the
+        // file, so this also proves nothing was forged.
         ensure_forged(&path, &ForgeParams::default()).unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), b"not a world");
         assert!(worldgen::forged::ForgedWorld::load(&path).is_err());

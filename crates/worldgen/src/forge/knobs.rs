@@ -44,7 +44,7 @@ macro_rules! knobs {
 
 knobs! {
     "Island" {
-        layout: 0.0, [0.0, 2.0], "Layout", "One island fills the world; an archipelago scatters several; an island arc strings them along a curve, largest in the middle.";
+        layout: 3.0, [0.0, 5.0], "Layout", "One island fills the world; an archipelago scatters several; an island arc strings them along a curve, largest in the middle. A continent fills the world with sea on some edges and land running off the others; continents split it into several landmasses; inland has land on every edge around an inland sea.";
         island_extent: 0.66, [0.35, 0.95], "Island size", "One island: the coast sits about this share of the half-width out, before noise warps it. Several islands: scales all of them.";
         island_count: 6.0, [2.0, 14.0], "Islands", "How many islands an archipelago or arc is given (neighbours may merge, small ones may drown).";
         island_spread: 0.62, [0.25, 0.8], "Spread", "How far from the world center islands are placed, as a share of the half-width.";
@@ -52,7 +52,21 @@ knobs! {
         island_separation: 1.0, [0.5, 1.8], "Separation", "Below 1 neighbouring islands overlap and merge across isthmuses; above 1 open channels stay between them.";
         coast_noise_lo: 0.75, [0.0, 1.6], "Coast wander (8 km)", "Strength of the 8 km noise that pushes the coast in and out: bays, peninsulas, the overall outline.";
         coast_noise_hi: 0.18, [0.0, 0.7], "Coast detail (1 km)", "Strength of the 1 km noise on the coastline: coves and headlands.";
-        ocean_margin_start: 0.84, [0.55, 0.95], "Ocean margin", "Land is forced under the sea beyond this share of the half-width; guarantees ocean all round.";
+        ocean_margin_start: 0.84, [0.55, 0.95], "Ocean margin", "Land is forced under the sea beyond this share of the half-width; guarantees ocean all round (on a continent: along the sea edges only).";
+    }
+    "Continent" {
+        sea_edges: 2.0, [0.0, 4.0], "Sea edges", "Continent and continents: how many of the four map edges are sea (which ones is up to the seed); the rest are land that runs off the map, where rivers may leave. Inland has none.";
+        continent_coast: 0.45, [0.15, 0.9], "Coast distance", "How far in from a sea edge the coast sits, as a share of the half-width (each edge varies a little by seed).";
+        continent_count: 3.0, [2.0, 4.0], "Continents", "How many landmasses the continents layout splits the world into.";
+        continent_sea_width: 0.08, [0.02, 0.3], "Sea between continents", "Half-width of the seas between neighbouring continents, as a share of the half-width.";
+        inland_sea_size: 0.3, [0.1, 0.6], "Inland sea", "Inland layout: radius of the inland sea, as a share of the half-width.";
+    }
+    "Plates" {
+        plate_count: 7.0, [3.0, 24.0], "Plates", "Continental layouts: how many plates the world is cut into. Mountain belts rise where two plates converge, so fewer plates means longer ranges.";
+        plate_belt_width: 0.15, [0.03, 0.3], "Belt half-width", "Half-width of a plate-boundary mountain belt, as a share of the world's size.";
+        belt_uplift: 1.4, [0.3, 2.5], "Belt uplift", "Continental layouts: rock uplift on a fully convergent belt, as a multiple of the uplift rate. Linear belts drain out sideways in a few km, so they need more than an island's broad massifs for the same peaks.";
+        belt_length_km: 8.0, [2.0, 60.0], "Interior range length (km)", "Length of each interior range (capped at 60% of the world's size).";
+        interior_ranges: 2.0, [0.0, 8.0], "Interior ranges", "Ranges away from any plate boundary (old belts inside a plate), at about a third of a boundary belt's uplift.";
     }
     "Uplift" {
         uplift: 5.0e-3, [5.0e-5, 6.0e-3], "Uplift rate (m/yr)", "Peak rock uplift in the mountain belts. Relief scales with uplift / erodibility: the default builds 2-2.5 km ranges on a 16 km island.";
@@ -112,15 +126,38 @@ knobs! {
 
 /// Knobs that are a choice, not a quantity: the page shows a list, and the
 /// value is the index.
-pub const CHOICES: &[(&str, &[&str])] = &[("layout", &["One island", "Archipelago", "Island arc"])];
+pub const CHOICES: &[(&str, &[&str])] =
+    &[("layout", &["One island", "Archipelago", "Island arc", "Continent", "Continents", "Inland"])];
 
 pub const LAYOUT_ONE_ISLAND: u32 = 0;
 pub const LAYOUT_ARCHIPELAGO: u32 = 1;
 pub const LAYOUT_ARC: u32 = 2;
+/// One large landmass: sea on `sea_edges` edges, land running off the others.
+pub const LAYOUT_CONTINENT: u32 = 3;
+/// `continent_count` landmasses with seas between them; edges as a continent.
+pub const LAYOUT_CONTINENTS: u32 = 4;
+/// Land on every edge around an inland sea.
+pub const LAYOUT_INLAND: u32 = 5;
+const LAYOUT_LAST: u32 = LAYOUT_INLAND;
 
 impl Knobs {
     pub fn layout(&self) -> u32 {
-        self.layout.round().clamp(0.0, 2.0) as u32
+        self.layout.round().clamp(0.0, LAYOUT_LAST as f64) as u32
+    }
+
+    /// Continent, continents or inland: plate belts, per-edge sea or land,
+    /// noise scaled with the world's size. The island layouts are the rest.
+    pub fn is_continental(&self) -> bool {
+        self.layout() >= LAYOUT_CONTINENT
+    }
+
+    /// Requested sea edges (0-4); `world::edges` forces 0 for inland.
+    pub fn sea_edge_count(&self) -> usize {
+        self.sea_edges.round().clamp(0.0, 4.0) as usize
+    }
+
+    pub fn plate_total(&self) -> usize {
+        self.plate_count.round().clamp(2.0, 64.0) as usize
     }
 
     pub fn iterations(&self) -> usize {
