@@ -1018,7 +1018,9 @@ fn home_block_solid(mirror: &tiles::TileMirror, eye: Vec3) -> Option<bool> {
     }
     let n = game::REGION_BLOCKS as i32;
     let tile = [bx.rem_euclid(n), world.y.floor() as i32, bz.rem_euclid(n)];
-    Some(game::block_props().is_solid(game::TileSource::block(mirror, tile)))
+    // `is_solid` answers for blocks only (air is not one, and reads solid).
+    let id = game::TileSource::block(mirror, tile);
+    Some(id != game::BlockId::AIR && game::block_props().is_solid(id))
 }
 
 /// Inside a block: no sun shadows (everything down there is shadowed), a
