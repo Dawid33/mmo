@@ -7,6 +7,10 @@ use std::path::{Path, PathBuf};
 pub const HISTORY_FILE_VERSION: u32 = 1;
 pub const HISTORY_MAGIC: [u8; 8] = *b"MMOHIST\0";
 
+/// Largest decompressed history body a file may claim; a bigger size prefix is refused
+/// before anything is allocated.
+pub const MAX_HISTORY_BYTES: usize = 512 << 20;
+
 const HEADER_LEN: usize = 8 + 4 + 4;
 
 #[derive(Debug)]
@@ -45,8 +49,11 @@ pub fn encode(h: &History) -> Vec<u8> {
 }
 
 pub fn decode(bytes: &[u8], grid: SocietyGrid) -> Result<History, HistoryLoadError> {
-    if bytes.len() < HEADER_LEN || bytes[..8] != HISTORY_MAGIC {
+    if bytes.len() < HISTORY_MAGIC.len() || bytes[..HISTORY_MAGIC.len()] != HISTORY_MAGIC {
         return Err(HistoryLoadError::NotAHistory);
+    }
+    if bytes.len() < HEADER_LEN {
+        return Err(HistoryLoadError::Corrupt(format!("{} bytes, shorter than the header", bytes.len())));
     }
     let u32_at = |i: usize| u32::from_le_bytes(bytes[i..i + 4].try_into().expect("4 bytes"));
     let found = u32_at(8);
@@ -56,8 +63,18 @@ pub fn decode(bytes: &[u8], grid: SocietyGrid) -> Result<History, HistoryLoadErr
     if u32_at(12) != grid.world_id() {
         return Err(HistoryLoadError::OtherWorld);
     }
-    let body = lz4_flex::decompress_size_prepended(&bytes[HEADER_LEN..])
-        .map_err(|e| HistoryLoadError::Corrupt(e.to_string()))?;
+    let rest = &bytes[HEADER_LEN..];
+    if rest.len() < 4 {
+        return Err(HistoryLoadError::Corrupt("no body size".into()));
+    }
+    let size = u32::from_le_bytes(rest[..4].try_into().expect("4 bytes")) as usize;
+    if size > MAX_HISTORY_BYTES {
+        return Err(HistoryLoadError::Corrupt(format!("body of {size} bytes, more than {MAX_HISTORY_BYTES}")));
+    }
+    let body = lz4_flex::decompress(&rest[4..], size).map_err(|e| HistoryLoadError::Corrupt(e.to_string()))?;
+    if body.len() != size {
+        return Err(HistoryLoadError::Corrupt(format!("body is {} bytes, header says {size}", body.len())));
+    }
     let mut h: History =
         bincode::deserialize(&body).map_err(|e| HistoryLoadError::Corrupt(e.to_string()))?;
     h.set_grid(grid);

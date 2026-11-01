@@ -73,7 +73,7 @@ fn roll_is_stateless() {
 #[test]
 fn death_age_in_range() {
     for id in 0..1000u64 {
-        let y = death_age_days(PersonId(id as u32), CalendarTick(id * 31)) / DAYS_PER_YEAR;
+        let y = death_age_days(id ^ 0x55, PersonId(id as u32), CalendarTick(id * 31)) / DAYS_PER_YEAR;
         assert!((80..=160).contains(&y), "{y}");
     }
 }
@@ -315,11 +315,20 @@ fn journey_without_route_is_refused() {
     assert!(h.site(SiteId(0)).unwrap().members.contains(&a[0]));
 }
 
+/// A 170-year-old (dies on the first `advance`) made a member of `site`.
+fn old_member_of(h: &mut History, site: SiteId) -> PersonId {
+    let old = h.add_founder(Sex::Male, years_before(start(), 170));
+    h.sites.get_mut(&site).unwrap().members.insert(old);
+    let p = h.people.get_mut(&old).unwrap();
+    p.site = Some(site);
+    p.location = Location::AtSite(site);
+    old
+}
+
 #[test]
 fn death_on_journey() {
-    let s = start();
     let (mut h, a, _) = two_site_world(|_, _| false);
-    let old = h.add_founder(Sex::Male, years_before(s, 170));
+    let old = old_member_of(&mut h, SiteId(0));
     let departed = h.now();
     let j = h
         .start_journey(vec![old, a[0]], SiteId(0), RegionCoords::new(6, 0), Purpose::Migrate { to: SiteId(1) })
@@ -335,9 +344,8 @@ fn death_on_journey() {
 
 #[test]
 fn emptied_journey_is_removed_and_leg_is_noop() {
-    let s = start();
     let (mut h, _, _) = two_site_world(|_, _| false);
-    let old = h.add_founder(Sex::Male, years_before(s, 170));
+    let old = old_member_of(&mut h, SiteId(0));
     let departed = h.now();
     let j = h
         .start_journey(vec![old], SiteId(0), RegionCoords::new(6, 0), Purpose::Migrate { to: SiteId(1) })
@@ -686,4 +694,140 @@ fn history_path_for_world_files() {
     use std::path::Path;
     assert_eq!(history_path_for(Path::new("worlds/a/terrain.world")), Path::new("worlds/a/terrain.history"));
     assert_eq!(history_path_for(Path::new("worlds/default.world")), Path::new("worlds/default.history"));
+}
+
+// ---- Final-review fixes ----
+
+#[test]
+fn different_seeds_give_different_histories() {
+    let map = big_land();
+    let a = bootstrap(&map, &BootstrapParams { seed: 1, years: 50, ..BootstrapParams::default() }).unwrap();
+    let b = bootstrap(&map, &BootstrapParams { seed: 2, years: 50, ..BootstrapParams::default() }).unwrap();
+    assert_ne!(bincode::serialize(&a.log).unwrap(), bincode::serialize(&b.log).unwrap());
+}
+
+#[test]
+fn bootstrap_children_are_younger_than_parents() {
+    for seed in 0..4 {
+        let h = bootstrap(&big_land(), &BootstrapParams { seed, ..params(0) }).unwrap();
+        for p in h.people() {
+            for parent in [p.mother, p.father].into_iter().flatten() {
+                let q = h.person(parent).unwrap();
+                assert!(p.born.years_since(q.born) >= 15, "{:?} born {:?}, parent {:?} born {:?}", p.id, p.born, q.id, q.born);
+            }
+        }
+    }
+}
+
+#[test]
+fn start_journey_ignores_non_members() {
+    let (mut h, a, b) = two_site_world(|_, _| false);
+    let j = h
+        .start_journey(vec![a[0], b[0]], SiteId(0), RegionCoords::new(6, 0), Purpose::Migrate { to: SiteId(1) })
+        .unwrap();
+    assert_eq!(h.journey(j).unwrap().people, vec![a[0]]);
+    assert_eq!(h.person(b[0]).unwrap().location, Location::AtSite(SiteId(1)));
+    assert!(h.site(SiteId(1)).unwrap().members.contains(&b[0]));
+    assert!(!h.site(SiteId(0)).unwrap().members.contains(&b[0]));
+    // Only non-members: refused, nothing changes.
+    let before = bincode::serialize(&h).unwrap();
+    assert!(h.start_journey(vec![b[1]], SiteId(0), RegionCoords::new(6, 0), Purpose::Migrate { to: SiteId(1) }).is_none());
+    assert_eq!(bincode::serialize(&h).unwrap(), before);
+}
+
+#[test]
+fn journey_from_region_arrives() {
+    let (mut h, _, _) = two_site_world(|_, _| false);
+    let stray = h.add_founder(Sex::Female, years_before(start(), 20));
+    h.people.get_mut(&stray).unwrap().location = Location::InRegion(RegionCoords::new(2, 1));
+    let departed = h.now();
+    let j = h
+        .start_journey_from_region(vec![stray], RegionCoords::new(2, 1), RegionCoords::new(6, 0), Purpose::Migrate { to: SiteId(1) })
+        .unwrap();
+    assert_eq!(h.person(stray).unwrap().location, Location::Journey(j));
+    assert_eq!(h.journey(j).unwrap().route[0], RegionCoords::new(2, 1));
+    h.advance(CalendarTick(departed.0 + 6 * leg()));
+    assert!(h.journey(j).is_none());
+    assert!(h.site(SiteId(1)).unwrap().members.contains(&stray));
+    assert_eq!(h.person(stray).unwrap().location, Location::AtSite(SiteId(1)));
+    // Someone at a site cannot leave from a region.
+    let member = h.living_members(SiteId(0))[0];
+    assert!(h
+        .start_journey_from_region(vec![member], RegionCoords::new(0, 0), RegionCoords::new(6, 0), Purpose::Migrate { to: SiteId(1) })
+        .is_none());
+}
+
+#[test]
+fn different_landmass_rejected_without_route() {
+    // Two islands, x 0..=3 and x 6..=9, sea between.
+    let map = test_map(10, 10, |x, _| (4..=5).contains(&x));
+    let g = SocietyGrid::from_world_map(&map);
+    let (w, e) = (RegionCoords::new(1, 1), RegionCoords::new(8, 8));
+    assert!(g.component(w).is_some() && g.component(e).is_some());
+    assert_ne!(g.component(w), g.component(e));
+    assert_eq!(g.component(w), g.component(RegionCoords::new(3, 9)));
+    assert_eq!(g.component(RegionCoords::new(4, 4)), None);
+    assert_eq!(g.component(RegionCoords::new(-1, 0)), None);
+    let s = start();
+    let mut h = History::new(1, s, g);
+    let civ = h.add_civ(Race::Dwarf);
+    let a = add_site_with(&mut h, civ, w, 4);
+    let b = add_site_with(&mut h, civ, e, 4);
+    let p = h.living_members(a)[0];
+    assert!(h.start_journey(vec![p], a, e, Purpose::Migrate { to: b }).is_none());
+    // Every allowed embark region is either on this island (none: too small/too close) or the other one.
+    for z in 0..10 {
+        for x in 0..4 {
+            let rc = RegionCoords::new(x, z);
+            if h.embark_allowed(rc).is_ok() {
+                assert!(cheb(rc, w) >= 4);
+            }
+        }
+    }
+    if let Some(t) = h.embark_target(civ, w) {
+        assert_eq!(h.grid().component(t), h.grid().component(w));
+    }
+}
+
+#[test]
+fn civ_population_counts_travellers() {
+    let (mut h, a, _) = two_site_world(|_, _| false);
+    let civ = CivId(0);
+    assert_eq!(h.civ_population(civ), 5);
+    h.start_journey(vec![a[0], a[1]], SiteId(0), RegionCoords::new(6, 0), Purpose::Migrate { to: SiteId(1) })
+        .unwrap();
+    assert_eq!(h.civ_population(civ), 5);
+    let per = h.stats().per_civ;
+    assert_eq!(per[0].1, h.civ_population(civ));
+}
+
+#[test]
+fn oversized_prefix_is_corrupt() {
+    let map = big_land();
+    let mut bytes = encode(&bootstrap(&map, &params(0)).unwrap());
+    let too_big = (MAX_HISTORY_BYTES + 1) as u32;
+    bytes[16..20].copy_from_slice(&too_big.to_le_bytes());
+    let err = decode(&bytes, SocietyGrid::from_world_map(&map)).unwrap_err();
+    assert!(matches!(err, HistoryLoadError::Corrupt(_)), "{err:?}");
+    bytes[16..20].copy_from_slice(&u32::MAX.to_le_bytes());
+    let err = decode(&bytes, SocietyGrid::from_world_map(&map)).unwrap_err();
+    assert!(matches!(err, HistoryLoadError::Corrupt(_)), "{err:?}");
+}
+
+#[test]
+fn short_file_with_magic_is_corrupt() {
+    let grid = SocietyGrid::from_world_map(&big_land());
+    for len in [8, 12, 15] {
+        let mut bytes = HISTORY_MAGIC.to_vec();
+        bytes.resize(len, 0);
+        let err = decode(&bytes, grid.clone()).unwrap_err();
+        assert!(matches!(err, HistoryLoadError::Corrupt(_)), "{len}: {err:?}");
+    }
+    // A whole header but no lz4 size prefix.
+    let full = encode(&bootstrap(&big_land(), &params(0)).unwrap());
+    for len in [16, 19] {
+        let err = decode(&full[..len], grid.clone()).unwrap_err();
+        assert!(matches!(err, HistoryLoadError::Corrupt(_)), "{len}: {err:?}");
+    }
+    assert!(matches!(decode(b"MMOHIS", grid).unwrap_err(), HistoryLoadError::NotAHistory));
 }

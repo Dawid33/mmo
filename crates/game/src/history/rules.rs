@@ -3,7 +3,7 @@
 use super::calendar::{CalendarTick, DAYS_PER_YEAR};
 use super::records::PersonId;
 use super::History;
-use super::rng::{roll, SALT_DEATH_AGE};
+use super::rng::{seeded_roll, SALT_DEATH_AGE};
 
 /// The year the bootstrapped history starts at.
 pub const HISTORY_START_YEAR: u64 = 250;
@@ -47,11 +47,12 @@ pub fn biome_capacity_per_mille(biome: crate::Biome) -> u32 {
     }
 }
 
-/// Age at death by old age, in days: uniform in `[OLD_AGE_MIN_YEARS, OLD_AGE_MAX_YEARS]` years.
-pub fn death_age_days(person: PersonId, born: CalendarTick) -> u64 {
+/// Age at death by old age, in days: uniform in `[OLD_AGE_MIN_YEARS, OLD_AGE_MAX_YEARS]` years,
+/// drawn from the history's `seed`.
+pub fn death_age_days(seed: u64, person: PersonId, born: CalendarTick) -> u64 {
     let min = u64::from(OLD_AGE_MIN_YEARS) * DAYS_PER_YEAR;
     let span = u64::from(OLD_AGE_MAX_YEARS - OLD_AGE_MIN_YEARS) * DAYS_PER_YEAR + 1;
-    min + roll(born, u64::from(person.0), SALT_DEATH_AGE) % span
+    min + seeded_roll(seed, born, u64::from(person.0), SALT_DEATH_AGE) % span
 }
 
 /// members/capacity per mille (capacity 0 reads as 1000 or more).

@@ -103,15 +103,15 @@ impl History {
         let now = self.now;
         match self.least_crowded_reachable(civ, region, Some(sid), Some(CROWDED_PER_MILLE)) {
             Some(to) => {
-                if chance_per_mille(now, key, SALT_MIGRATE, MIGRATE_PER_MILLE_MONTHLY) {
+                if self.chance(now, key, SALT_MIGRATE, MIGRATE_PER_MILLE_MONTHLY) {
                     self.send_household(sid, to);
                 }
-                if chance_per_mille(now, key, SALT_EMBARK, EMBARK_BASE_PER_MILLE_MONTHLY) {
+                if self.chance(now, key, SALT_EMBARK, EMBARK_BASE_PER_MILLE_MONTHLY) {
                     self.send_embark_party(sid);
                 }
             }
             None => {
-                if chance_per_mille(now, key, SALT_EMBARK, EMBARK_PER_MILLE_MONTHLY) {
+                if self.chance(now, key, SALT_EMBARK, EMBARK_PER_MILLE_MONTHLY) {
                     self.send_embark_party(sid);
                 }
             }
@@ -137,6 +137,7 @@ impl History {
         cands.sort();
         cands
             .into_iter()
+            .filter(|(_, id)| self.same_landmass(from, self.sites[id].region))
             .find(|(_, id)| route(self.grid(), from, self.sites[id].region, ROUTE_MAX_NODES).is_some())
             .map(|(_, id)| id)
     }
@@ -155,7 +156,7 @@ impl History {
         if adults.is_empty() {
             return;
         }
-        let start = (roll(self.now, u64::from(sid.0), SALT_MIGRATE) % adults.len() as u64) as usize;
+        let start = (self.roll(self.now, u64::from(sid.0), SALT_MIGRATE) % adults.len() as u64) as usize;
         let household = household_of(self, adults[start]);
         let to_region = self.sites[&to].region;
         self.start_journey(household, sid, to_region, Purpose::Migrate { to });
@@ -168,7 +169,7 @@ impl History {
         if adults.is_empty() {
             return;
         }
-        let start = (roll(self.now, u64::from(sid.0), SALT_EMBARK) % adults.len() as u64) as usize;
+        let start = (self.roll(self.now, u64::from(sid.0), SALT_EMBARK) % adults.len() as u64) as usize;
         let order = std::iter::once(adults[start]).chain(adults.iter().copied().filter(|a| *a != adults[start]));
         let mut party: Vec<PersonId> = Vec::new();
         let (mut women, mut men) = (false, false);
@@ -232,7 +233,7 @@ impl History {
         for z in from_region.z - r..=from_region.z + r {
             for x in from_region.x - r..=from_region.x + r {
                 let rc = crate::RegionCoords::new(x, z);
-                if self.embark_allowed(rc).is_ok() {
+                if self.embark_allowed(rc).is_ok() && self.same_landmass(from_region, rc) {
                     let score = u64::from(self.grid().capacity(rc)) * 1000 / (u64::from(chebyshev(from_region, rc)) + 1);
                     cands.push((std::cmp::Reverse(score), z, x));
                 }
@@ -267,7 +268,7 @@ impl History {
             if !self.eligible(id) {
                 continue;
             }
-            if !chance_per_mille(self.now, u64::from(id.0), SALT_MARRY, MARRY_PER_MILLE_MONTHLY) {
+            if !self.chance(self.now, u64::from(id.0), SALT_MARRY, MARRY_PER_MILLE_MONTHLY) {
                 continue;
             }
             let sex = self.people[&id].sex;
@@ -283,9 +284,21 @@ impl History {
         }
     }
 
-    /// Living people of every site of `civ`.
-    fn civ_population(&self, civ: CivId) -> u32 {
-        self.sites.values().filter(|s| s.civ == civ).map(|s| s.members.len() as u32).sum()
+    /// Living citizens of `civ`: everyone alive whose `Person.site` is one of its sites,
+    /// travellers included (as `stats().per_civ` counts them). Counted as the sites' members
+    /// (all alive, all citizens of that site) plus living travellers on journeys; in plan 1
+    /// nobody else has a site.
+    pub fn civ_population(&self, civ: CivId) -> u32 {
+        let in_civ = |s: Option<SiteId>| s.and_then(|s| self.sites.get(&s)).is_some_and(|s| s.civ == civ);
+        let members: u32 = self.sites.values().filter(|s| s.civ == civ).map(|s| s.members.len() as u32).sum();
+        let travellers = self
+            .journeys
+            .values()
+            .flat_map(|j| j.people.iter())
+            .filter_map(|p| self.people.get(p))
+            .filter(|p| p.alive() && matches!(p.location, Location::Journey(_)) && in_civ(p.site))
+            .count() as u32;
+        members + travellers
     }
 
     fn births(&mut self, sid: SiteId) {
@@ -311,10 +324,10 @@ impl History {
                 break;
             }
             let members = self.sites[&sid].members.len() as u32;
-            if !chance_per_mille(now, u64::from(m.0), SALT_BIRTH, birth_per_mille(members, capacity)) {
+            if !self.chance(now, u64::from(m.0), SALT_BIRTH, birth_per_mille(members, capacity)) {
                 continue;
             }
-            let sex = if roll(now, u64::from(m.0), SALT_SEX) & 1 == 0 { Sex::Female } else { Sex::Male };
+            let sex = if self.roll(now, u64::from(m.0), SALT_SEX) & 1 == 0 { Sex::Female } else { Sex::Male };
             let id = PersonId(self.next_ids[0]);
             self.next_ids[0] += 1;
             self.people.insert(id, Person::newborn(id, sex, now, Some(m), Some(f), Some(sid), Location::AtSite(sid)));
@@ -324,7 +337,7 @@ impl History {
             }
             self.people.get_mut(&m).unwrap().last_birth = Some(now);
             self.log_event(LogKind::Born { person: id, mother: Some(m), father: Some(f), site: Some(sid) });
-            self.schedule(now.plus_days(death_age_days(id, now)), super::Step::Death(id));
+            self.schedule(now.plus_days(death_age_days(self.seed, id, now)), super::Step::Death(id));
         }
     }
 }

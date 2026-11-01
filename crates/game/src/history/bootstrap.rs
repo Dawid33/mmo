@@ -4,7 +4,7 @@ use std::cmp::Reverse;
 
 use super::calendar::*;
 use super::records::*;
-use super::rng::{roll, SALT_PLACE, SALT_SEX};
+use super::rng::{roll, SALT_AGE, SALT_PLACE, SALT_SEX};
 use super::rules::HISTORY_START_YEAR;
 use super::{History, SocietyGrid};
 
@@ -47,15 +47,15 @@ fn chebyshev(a: crate::RegionCoords, b: crate::RegionCoords) -> u32 {
     (i64::from(a.x) - i64::from(b.x)).unsigned_abs().max((i64::from(a.z) - i64::from(b.z)).unsigned_abs()) as u32
 }
 
-/// Civ home regions: highest capacity first (ties by hashed order), at least `spacing` apart.
-fn place_civs(grid: &SocietyGrid, p: &BootstrapParams, attempt: u32) -> Vec<crate::RegionCoords> {
-    let at = CalendarTick(u64::from(attempt));
+/// Civ home regions: highest capacity first (ties by the history's hashed order), at least `spacing` apart.
+fn place_civs(h: &History, p: &BootstrapParams) -> Vec<crate::RegionCoords> {
+    let grid = h.grid();
     let mut cands: Vec<(Reverse<u32>, u64, crate::RegionCoords)> = grid
         .regions()
         .filter(|&rc| grid.capacity(rc) > 0)
         .map(|rc| {
             let subject = (u64::from(rc.z as u32) << 32) | u64::from(rc.x as u32);
-            (Reverse(grid.capacity(rc)), roll(at, subject, SALT_PLACE), rc)
+            (Reverse(grid.capacity(rc)), h.roll(h.now, subject, SALT_PLACE), rc)
         })
         .collect();
     cands.sort_by_key(|&(c, r, _)| (c, r));
@@ -71,34 +71,52 @@ fn place_civs(grid: &SocietyGrid, p: &BootstrapParams, attempt: u32) -> Vec<crat
     placed
 }
 
-/// Founders of one civ: couples aged 15-60 and children 0-11 (about a third), linked as families.
+/// Youngest founding parent's age.
+pub const FOUNDER_PARENT_MIN_YEARS: u64 = 15;
+/// Founding parents are `FOUNDER_PARENT_MIN_YEARS` up to this many years more.
+pub const FOUNDER_PARENT_SPAN_YEARS: u64 = 45;
+/// Founding children are under this age.
+pub const FOUNDER_CHILD_MAX_YEARS: u64 = 12;
+/// A founding child is at least this many years younger than both parents.
+pub const FOUNDER_PARENT_GAP_YEARS: u64 = 15;
+
+/// Founders of one civ: couples aged 15-60 and children 0-11 (about a third), linked as
+/// families, every child at least `FOUNDER_PARENT_GAP_YEARS` younger than both parents.
 fn seed_civ(h: &mut History, civ: CivId, region: crate::RegionCoords, n: u32, start: CalendarTick) {
-    let day_ticks = TICKS_PER_DAY;
     let key = |i: u32| (u64::from(civ.0) << 32) | u64::from(i);
-    let born_at = |i: u32, min_years: u64, span_years: u64| {
-        let age_days = min_years * DAYS_PER_YEAR + roll(start, key(i), SALT_PLACE ^ 0x100) % (span_years * DAYS_PER_YEAR);
-        CalendarTick(start.0.saturating_sub(age_days * day_ticks))
+    // Founder `i`'s age in days, in `min_days..min_days + span_days`.
+    let age_days = |h: &History, i: u32, min_days: u64, span_days: u64| {
+        min_days + h.roll(start, key(i), SALT_AGE) % span_days.max(1)
     };
+    let born = |days: u64| CalendarTick(start.0.saturating_sub(days * TICKS_PER_DAY));
     let couples = (n * 2 / 3 / 2).max(u32::from(n >= 2));
     let mut all = Vec::new();
+    // (mother, father, the younger parent's age in days)
     let mut pairs = Vec::new();
     let mut idx = 0u32;
+    let (pmin, pspan) = (FOUNDER_PARENT_MIN_YEARS * DAYS_PER_YEAR, FOUNDER_PARENT_SPAN_YEARS * DAYS_PER_YEAR);
     for _ in 0..couples {
-        let f = h.add_founder(Sex::Female, born_at(idx, 15, 45));
-        let m = h.add_founder(Sex::Male, born_at(idx + 1, 15, 45));
+        let fa = age_days(h, idx, pmin, pspan);
+        let ma = age_days(h, idx + 1, pmin, pspan);
+        let f = h.add_founder(Sex::Female, born(fa));
+        let m = h.add_founder(Sex::Male, born(ma));
         idx += 2;
         h.people.get_mut(&f).unwrap().spouse = Some(m);
         h.people.get_mut(&m).unwrap().spouse = Some(f);
-        pairs.push((f, m));
+        pairs.push((f, m, fa.min(ma)));
         all.extend([f, m]);
     }
     let kids = n.saturating_sub(couples * 2);
+    let child_max = FOUNDER_CHILD_MAX_YEARS * DAYS_PER_YEAR;
+    let gap = FOUNDER_PARENT_GAP_YEARS * DAYS_PER_YEAR;
     for k in 0..kids {
-        let sex = if roll(start, key(idx), SALT_SEX) & 1 == 0 { Sex::Female } else { Sex::Male };
-        let c = h.add_founder(sex, born_at(idx, 0, 12));
+        let sex = if h.roll(start, key(idx), SALT_SEX) & 1 == 0 { Sex::Female } else { Sex::Male };
+        let parents = (!pairs.is_empty()).then(|| pairs[k as usize % pairs.len()]);
+        // At most the younger parent's age minus the gap: ages 0..=(parent - gap).
+        let span = parents.map_or(child_max, |(_, _, young)| child_max.min(young.saturating_sub(gap) + 1));
+        let c = h.add_founder(sex, born(age_days(h, idx, 0, span)));
         idx += 1;
-        if !pairs.is_empty() {
-            let (f, m) = pairs[k as usize % pairs.len()];
+        if let Some((f, m, _)) = parents {
             let p = h.people.get_mut(&c).unwrap();
             p.mother = Some(f);
             p.father = Some(m);
@@ -116,7 +134,7 @@ pub fn bootstrap(map: &crate::WorldMap, p: &BootstrapParams) -> Result<History, 
     for a in 0..p.max_attempts {
         let sub_seed = p.seed ^ roll(CalendarTick(u64::from(a)), u64::from(a), SALT_PLACE);
         let mut h = History::new(sub_seed, start, SocietyGrid::from_world_map(map));
-        let homes = place_civs(h.grid(), p, a);
+        let homes = place_civs(&h, p);
         if homes.is_empty() {
             return Err(BootstrapError::NoHabitableLand);
         }

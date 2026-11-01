@@ -18,10 +18,17 @@ pub const SALT_DEATH_AGE: u64 = 0x4857_0004;
 pub const SALT_MIGRATE: u64 = 0x4857_0005;
 pub const SALT_EMBARK: u64 = 0x4857_0006;
 pub const SALT_PLACE: u64 = 0x4857_0007;
+/// Founder ages at bootstrap.
+pub const SALT_AGE: u64 = 0x4857_0008;
 
 /// A 64-bit hash of (time, subject, salt).
 pub fn roll(at: CalendarTick, subject: u64, salt: u64) -> u64 {
     mix(mix(at.0 ^ salt.rotate_left(32)) ^ subject)
+}
+
+/// [`roll`] with a history's seed folded into the subject, so two seeds give two histories.
+pub fn seeded_roll(seed: u64, at: CalendarTick, subject: u64, salt: u64) -> u64 {
+    roll(at, subject ^ seed.rotate_left(17), salt)
 }
 
 /// True with probability `per_mille / 1000`.

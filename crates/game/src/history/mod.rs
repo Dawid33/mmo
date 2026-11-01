@@ -27,7 +27,9 @@ use log::{LogEntry, LogKind};
 pub(crate) enum Step {
     SiteMonth(SiteId),
     Death(PersonId),
-    JourneyLeg(JourneyId),
+    /// The end of leg `leg` (the walk out of `route[leg]`) of `journey`; stale, and
+    /// ignored, once the journey is on another leg.
+    JourneyLeg { journey: JourneyId, leg: u32 },
 }
 
 /// The world's history: people, sites, civs and journeys advanced by a calendar-ordered queue.
@@ -78,6 +80,17 @@ impl History {
         self.now
     }
 
+    /// The history's random number for (`at`, `subject`, `salt`): [`rng::roll`] with
+    /// `seed` folded in. Every rule draws through this (or [`History::chance`]).
+    pub fn roll(&self, at: CalendarTick, subject: u64, salt: u64) -> u64 {
+        rng::seeded_roll(self.seed, at, subject, salt)
+    }
+
+    /// True with probability `per_mille / 1000`, drawn from [`History::roll`].
+    pub fn chance(&self, at: CalendarTick, subject: u64, salt: u64, per_mille: u32) -> bool {
+        self.roll(at, subject, salt) % 1000 < u64::from(per_mille)
+    }
+
     pub(crate) fn schedule(&mut self, at: CalendarTick, step: Step) {
         let seq = self.next_seq;
         self.next_seq += 1;
@@ -101,7 +114,7 @@ impl History {
         let id = PersonId(self.next_ids[0]);
         self.next_ids[0] += 1;
         self.people.insert(id, Person::newborn(id, sex, born, None, None, None, Location::Unplaced));
-        let at = born.plus_days(rules::death_age_days(id, born)).max(self.now);
+        let at = born.plus_days(rules::death_age_days(self.seed, id, born)).max(self.now);
         self.schedule(at, Step::Death(id));
         id
     }
@@ -114,6 +127,15 @@ impl History {
         from: Option<SiteId>,
         player_founded: bool,
     ) -> SiteId {
+        for f in founders {
+            debug_assert!(
+                self.people
+                    .get(f)
+                    .is_none_or(|p| matches!(p.location, Location::Unplaced | Location::Journey(_))),
+                "founder {f:?} is already placed: {:?}",
+                self.people.get(f).map(|p| p.location)
+            );
+        }
         let id = SiteId(self.next_ids[1]);
         self.next_ids[1] += 1;
         let capacity = self.grid().capacity(region);
@@ -159,7 +181,7 @@ impl History {
             match step {
                 Step::SiteMonth(s) => self.on_site_month(s),
                 Step::Death(p) => self.on_death(p),
-                Step::JourneyLeg(j) => self.on_journey_leg(j),
+                Step::JourneyLeg { journey, leg } => self.on_journey_leg(journey, leg),
             }
         }
         self.now = self.now.max(to);

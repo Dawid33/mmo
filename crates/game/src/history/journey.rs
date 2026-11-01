@@ -9,8 +9,9 @@ use super::{History, Step};
 use crate::RegionCoords;
 
 impl History {
-    /// Send `people` from site `from` towards `to_region`. `None`, with no change,
-    /// when no living traveller is given or the grid has no route.
+    /// Send `people` from site `from` towards `to_region`. Only living members of `from` go;
+    /// anyone else passed in stays where they are. `None`, with no change, when no
+    /// traveller is left or `to_region` cannot be reached.
     pub fn start_journey(
         &mut self,
         people: Vec<PersonId>,
@@ -18,36 +19,81 @@ impl History {
         to_region: RegionCoords,
         purpose: Purpose,
     ) -> Option<JourneyId> {
-        let from_region = self.sites.get(&from)?.region;
-        let people: Vec<PersonId> =
-            people.into_iter().filter(|p| self.people.get(p).is_some_and(Person::alive)).collect();
-        if people.is_empty() {
+        let site = self.sites.get(&from)?;
+        let origin = site.region;
+        let people: Vec<PersonId> = people
+            .into_iter()
+            .filter(|p| site.members.contains(p) && self.people.get(p).is_some_and(Person::alive))
+            .collect();
+        self.begin_journey(people, origin, Some(from), to_region, purpose)
+    }
+
+    /// Send `people` who are at no site (strays in `origin`) towards `to_region`. Only living
+    /// people neither at a site nor on a journey go. `None`, with no change, when nobody is
+    /// left or `to_region` cannot be reached. No `Departed` entry is logged (it names a site).
+    pub fn start_journey_from_region(
+        &mut self,
+        people: Vec<PersonId>,
+        origin: RegionCoords,
+        to_region: RegionCoords,
+        purpose: Purpose,
+    ) -> Option<JourneyId> {
+        let people: Vec<PersonId> = people
+            .into_iter()
+            .filter(|p| {
+                self.people.get(p).is_some_and(|q| {
+                    q.alive() && !matches!(q.location, Location::AtSite(_) | Location::Journey(_))
+                })
+            })
+            .collect();
+        self.begin_journey(people, origin, None, to_region, purpose)
+    }
+
+    /// Whether `to` can be reached from `from` at all: both on the grid's same landmass.
+    pub(crate) fn same_landmass(&self, from: RegionCoords, to: RegionCoords) -> bool {
+        let g = self.grid();
+        g.component(from).is_some() && g.component(from) == g.component(to)
+    }
+
+    fn begin_journey(
+        &mut self,
+        people: Vec<PersonId>,
+        origin: RegionCoords,
+        from: Option<SiteId>,
+        to_region: RegionCoords,
+        purpose: Purpose,
+    ) -> Option<JourneyId> {
+        let mut seen = std::collections::BTreeSet::new();
+        let people: Vec<PersonId> = people.into_iter().filter(|p| seen.insert(*p)).collect();
+        if people.is_empty() || !self.same_landmass(origin, to_region) {
             return None;
         }
-        let path = route(self.grid(), from_region, to_region, ROUTE_MAX_NODES)?;
+        let path = route(self.grid(), origin, to_region, ROUTE_MAX_NODES)?;
         let (leg_ticks, arrivals) = self.leg_arrivals(&path);
         let id = JourneyId(self.next_ids[3]);
         self.next_ids[3] += 1;
         let departed = self.now;
         let mut left_site = false;
         for p in &people {
-            if let Some(s) = self.sites.get_mut(&from) {
+            if let Some(s) = from.and_then(|f| self.sites.get_mut(&f)) {
                 left_site |= s.members.remove(p);
             }
             if let Some(pr) = self.people.get_mut(p) {
                 pr.location = Location::Journey(id);
             }
         }
-        self.log_event(LogKind::Departed { people: people.clone(), from, purpose });
-        if left_site && self.sites.get(&from).is_some_and(|s| s.members.is_empty()) {
-            self.abandon_site(from);
+        if let Some(from) = from {
+            self.log_event(LogKind::Departed { people: people.clone(), from, purpose });
+            if left_site && self.sites.get(&from).is_some_and(|s| s.members.is_empty()) {
+                self.abandon_site(from);
+            }
         }
         let first = arrivals.first().copied().unwrap_or(0);
         self.journeys.insert(
             id,
             Journey { id, people, purpose, route: path, departed, leg_ticks, arrivals, leg: 0 },
         );
-        self.schedule(CalendarTick(departed.0 + first), Step::JourneyLeg(id));
+        self.schedule(CalendarTick(departed.0 + first), Step::JourneyLeg { journey: id, leg: 0 });
         Some(id)
     }
 
@@ -68,9 +114,15 @@ impl History {
     }
 
     /// Send journey `j` on from the region it stands in to `to_region`, optionally with a
-    /// new purpose. False, with no change, when there is no route.
-    fn reroute(&mut self, j: JourneyId, to_region: RegionCoords, purpose: Option<Purpose>) -> bool {
-        let Some(from) = self.journeys.get(&j).and_then(|jr| jr.route.last().copied()) else { return false };
+    /// new purpose. False, with no change, when there is no route. Any queued leg of the
+    /// journey is cancelled.
+    pub(crate) fn reroute(&mut self, j: JourneyId, to_region: RegionCoords, purpose: Option<Purpose>) -> bool {
+        let Some(from) = self.journeys.get(&j).and_then(|jr| jr.route.get(jr.leg as usize).copied()) else {
+            return false;
+        };
+        if !self.same_landmass(from, to_region) {
+            return false;
+        }
         let Some(path) = route(self.grid(), from, to_region, ROUTE_MAX_NODES) else { return false };
         let (leg_ticks, arrivals) = self.leg_arrivals(&path);
         let first = arrivals.first().copied().unwrap_or(0);
@@ -84,8 +136,40 @@ impl History {
         jr.leg_ticks = leg_ticks;
         jr.arrivals = arrivals;
         jr.leg = 0;
-        self.schedule(CalendarTick(now.0 + first), Step::JourneyLeg(j));
+        self.cancel_legs(j);
+        self.schedule(CalendarTick(now.0 + first), Step::JourneyLeg { journey: j, leg: 0 });
         true
+    }
+
+    /// Drop every queued leg step of `j`.
+    fn cancel_legs(&mut self, j: JourneyId) {
+        self.queue.retain(|_, s| !matches!(s, Step::JourneyLeg { journey, .. } if *journey == j));
+    }
+
+    /// Re-time journey `j` so the leg it is on now ends at `at` (not before now), with every
+    /// later leg taking its own duration as before, and queue that leg's end (cancelling any
+    /// queued leg of `j`). For a party whose walk was paused or played out in a region.
+    // Plan 2's region handover is the first caller.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn schedule_next_leg_from(&mut self, j: JourneyId, at: CalendarTick) {
+        let now = self.now;
+        let at = at.max(now);
+        let Some(jr) = self.journeys.get_mut(&j) else { return };
+        let leg = jr.leg;
+        let l = leg as usize;
+        if l < jr.arrivals.len() {
+            // The leg started (relatively) at `arrivals[l - 1]`; put that start at now.
+            let started = if l == 0 { 0 } else { jr.arrivals[l - 1] };
+            let departed = now.0.saturating_sub(started);
+            let shift_to = at.0 - departed;
+            let old_end = jr.arrivals[l];
+            for a in &mut jr.arrivals[l..] {
+                *a = *a - old_end + shift_to;
+            }
+            jr.departed = CalendarTick(departed);
+        }
+        self.cancel_legs(j);
+        self.schedule(at, Step::JourneyLeg { journey: j, leg });
     }
 
     /// The route region the party occupies at `at`.
@@ -108,11 +192,14 @@ impl History {
 
     /// Number of queued `JourneyLeg` steps (live or stale).
     pub fn pending_journey_legs(&self) -> usize {
-        self.queue.values().filter(|s| matches!(s, Step::JourneyLeg(_))).count()
+        self.queue.values().filter(|s| matches!(s, Step::JourneyLeg { .. })).count()
     }
 
-    pub(crate) fn on_journey_leg(&mut self, j: JourneyId) {
+    pub(crate) fn on_journey_leg(&mut self, j: JourneyId, step_leg: u32) {
         let Some(jr) = self.journeys.get_mut(&j) else { return };
+        if jr.leg != step_leg {
+            return;
+        }
         jr.leg += 1;
         let (leg, last) = (jr.leg as usize, jr.route.len() - 1);
         let region = jr.route[leg.min(last)];
@@ -122,7 +209,7 @@ impl History {
         } else {
             self.entered_region(j, region);
             if let Some(at) = next {
-                self.schedule(at, Step::JourneyLeg(j));
+                self.schedule(at, Step::JourneyLeg { journey: j, leg: leg as u32 });
             }
         }
     }
@@ -209,5 +296,110 @@ impl History {
                 self.journeys.remove(&j);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::history::calendar::{DAYS_PER_YEAR, TICKS_PER_DAY};
+    use crate::history::rules::HISTORY_START_YEAR;
+    use crate::history::SocietyGrid;
+    use crate::{Biome, TileSummary, WorldMap};
+
+    fn land(width: u32) -> SocietyGrid {
+        let tile = TileSummary {
+            ground_min_m: 0.0,
+            ground_mean_m: 10.0,
+            ground_max_m: 50.0,
+            relief_m: 50.0,
+            slope: [0.0, 0.0],
+            sea_fraction: 0.0,
+            lake_fraction: 0.0,
+            lake_level_m: None,
+            rivers: 1,
+            river_max_discharge_m2: 0.0,
+            river_max_width_m: 0.0,
+            surface_rock: None,
+            landing: Some([256, 256]),
+            biome: Biome::Grassland,
+            region: 0,
+            temperature_c: 15.0,
+            precip_mm: 800.0,
+            savagery: 0,
+            alignment: 0,
+            volcano: false,
+        };
+        SocietyGrid::from_world_map(&WorldMap {
+            origin: RegionCoords::new(0, 0),
+            width,
+            height: 1,
+            tiles: vec![tile; width as usize],
+            rock_names: vec![],
+            region_types: vec![],
+        })
+    }
+
+    /// One migrant walking from a site at x = 0 to a site at x = 6.
+    fn walking() -> (History, JourneyId) {
+        let start = CalendarTick::from_days(HISTORY_START_YEAR * DAYS_PER_YEAR);
+        let mut h = History::new(3, start, land(8));
+        let civ = h.add_civ(Race::Dwarf);
+        let born = CalendarTick(start.0 - 20 * DAYS_PER_YEAR * TICKS_PER_DAY);
+        let a = h.add_founder(Sex::Female, born);
+        let b = h.add_founder(Sex::Male, born);
+        h.found_site(civ, RegionCoords::new(0, 0), &[a], None, false);
+        let to = h.found_site(civ, RegionCoords::new(6, 0), &[b], None, false);
+        let j = h.start_journey(vec![a], SiteId(0), RegionCoords::new(6, 0), Purpose::Migrate { to }).unwrap();
+        (h, j)
+    }
+
+    #[test]
+    fn stale_leg_step_is_ignored() {
+        let (mut h, j) = walking();
+        let leg = walk_ticks_per_region();
+        h.advance(CalendarTick(h.now.0 + 2 * leg + leg / 2));
+        assert_eq!(h.journey(j).unwrap().leg, 2);
+        // Steps for legs the journey is not on: the past one and a future one.
+        let soon = CalendarTick(h.now.0 + 1);
+        h.schedule(soon, Step::JourneyLeg { journey: j, leg: 1 });
+        h.schedule(soon, Step::JourneyLeg { journey: j, leg: 4 });
+        h.advance(soon);
+        let jr = h.journey(j).unwrap();
+        assert_eq!(jr.leg, 2);
+        assert_eq!(h.journey_region_at(j, h.now), Some(RegionCoords::new(2, 0)));
+        assert_eq!(h.pending_journey_legs(), 1);
+    }
+
+    #[test]
+    fn rebased_journey_keeps_leg_durations() {
+        let (mut h, j) = walking();
+        let leg = walk_ticks_per_region();
+        h.advance(CalendarTick(h.now.0 + 2 * leg + leg / 2));
+        let before = h.journey(j).unwrap().clone();
+        assert_eq!(before.leg, 2);
+        let durations = |jr: &Journey| jr.arrivals.windows(2).map(|w| w[1] - w[0]).collect::<Vec<_>>();
+        // The party was held up (say, played) in region 2: its leg ends 10 legs from now.
+        let at = CalendarTick(h.now.0 + 10 * leg);
+        h.schedule_next_leg_from(j, at);
+        let after = h.journey(j).unwrap().clone();
+        assert_eq!(after.leg, 2);
+        assert_eq!(durations(&after)[2..], durations(&before)[2..]);
+        assert_eq!(CalendarTick(after.departed.0 + after.arrivals[2]), at);
+        // Still in region 2 now and right up to `at`; one queued leg (the old one is gone).
+        assert_eq!(h.journey_region_at(j, h.now), Some(RegionCoords::new(2, 0)));
+        assert_eq!(h.journey_region_at(j, CalendarTick(at.0 - 1)), Some(RegionCoords::new(2, 0)));
+        assert_eq!(h.pending_journey_legs(), 1);
+        h.advance(CalendarTick(at.0 - 1));
+        assert_eq!(h.journey(j).unwrap().leg, 2);
+        h.advance(at);
+        assert_eq!(h.journey(j).unwrap().leg, 3);
+        // The rest walks at its own pace: legs 3, 4 and 5 as before.
+        let rest: u64 = durations(&before)[2..].iter().sum();
+        h.advance(CalendarTick(at.0 + rest - 1));
+        assert!(h.journey(j).is_some());
+        h.advance(CalendarTick(at.0 + rest));
+        assert!(h.journey(j).is_none());
+        assert!(h.site(SiteId(1)).unwrap().members.contains(&PersonId(0)));
     }
 }

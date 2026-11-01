@@ -7,6 +7,9 @@
 //! kinematic compound of two rotated cuboids whose mass properties go through
 //! the eigen solve (std `acos`/`cos` in glamx).
 //!
+//! A fourth scene bootstraps a small synthetic world history
+//! (`game::history`) and pins crc32 of its encoded history file.
+//!
 //! Every constant holds on every target: [`WASM_SCENE_DIGEST`] is crc32 of
 //! the region's canonical bincode bytes (`SerializedRegion`, the parking and
 //! wire format: bincode writes `usize` as u64), and `game::state_hash` walks
@@ -68,6 +71,12 @@ const VOXEL_BODY_STATE_HASH: u32 = pinned(0x8D9E_A328, 0x6BE3_489F);
 /// Ticks of [`voxel_body_scene`] after the detach: mid-fall (it rests and
 /// despawns at ~50).
 const VOXEL_BODY_TICKS: usize = 30;
+
+/// crc32 of `history::persist::encode` of [`history_scene`]'s bootstrapped
+/// history, on every target. Depends on the region size (journey leg times
+/// come from `REGION_BLOCKS`), so it is pinned at the test default of 64
+/// blocks only, and on `TICK_RATE`.
+const HISTORY_DIGEST: u32 = 0xD71F_E34C;
 
 /// The value pinned for this build's chunk size: `at2` at 2-block chunks,
 /// `at16` at 16 (0 elsewhere; see [`pinned_size`]).
@@ -293,6 +302,62 @@ fn voxel_body_scene() -> (u32, u32) {
     (digest, hash)
 }
 
+/// A 16×16 synthetic world map: land with a sea border and a sea channel at
+/// x = 8 for z < 10, two civs of 20 founders, 20 years of history (births,
+/// marriages, deaths, migration, maybe an embark). Returns crc32 of the
+/// encoded history file.
+fn history_scene() -> u32 {
+    use game::history::bootstrap::{bootstrap, BootstrapParams};
+    use game::{Biome, RegionCoords, TileSummary, WorldMap};
+    let (w, h) = (16u32, 16u32);
+    let mut tiles = Vec::new();
+    for z in 0..h as i32 {
+        for x in 0..w as i32 {
+            let sea = x == 0 || z == 0 || x == w as i32 - 1 || z == h as i32 - 1 || (x == 8 && z < 10);
+            tiles.push(TileSummary {
+                ground_min_m: 0.0,
+                ground_mean_m: 10.0 + x as f32,
+                ground_max_m: 50.0 + (x * z) as f32,
+                relief_m: 50.0 + (x * z) as f32,
+                slope: [0.0, 0.0],
+                sea_fraction: if sea { 1.0 } else { 0.0 },
+                lake_fraction: if (x + z) % 7 == 0 { 0.1 } else { 0.0 },
+                lake_level_m: None,
+                rivers: ((x + 2 * z) % 3) as u16,
+                river_max_discharge_m2: 0.0,
+                river_max_width_m: 0.0,
+                surface_rock: None,
+                landing: Some([256, 256]),
+                biome: if sea { Biome::Ocean } else { Biome::Grassland },
+                region: 0,
+                temperature_c: 15.0,
+                precip_mm: 800.0,
+                savagery: 0,
+                alignment: 0,
+                volcano: false,
+            });
+        }
+    }
+    let map = WorldMap { origin: RegionCoords::new(0, 0), width: w, height: h, tiles, rock_names: vec![], region_types: vec![] };
+    let params = BootstrapParams { seed: 0x5EED, civs: 2, founders_per_civ: 20, years: 20, civ_min_spacing_regions: 6, ..BootstrapParams::default() };
+    let history = bootstrap(&map, &params).expect("the scene bootstraps");
+    assert!(history.log().len() > 40, "the scene must have happened: {} events", history.log().len());
+    let digest = crc32fast::hash(&game::history::persist::encode(&history));
+    if print_hash() {
+        log(&format!("HISTORY_DIGEST = 0x{digest:08X} ({} events, {} people)", history.log().len(), history.people().count()));
+    }
+    digest
+}
+
+/// Whether the region size has a pinned history digest; prints a skip line if not.
+fn history_pinned() -> bool {
+    let pinned = game::REGION_BLOCKS == 64;
+    if !pinned {
+        log(&format!("wasm_determinism: no history digest at {}-block regions, comparison skipped", game::REGION_BLOCKS));
+    }
+    pinned
+}
+
 /// Native prints on request; wasm32 always prints (node has no env to ask).
 #[cfg(not(target_arch = "wasm32"))]
 fn print_hash() -> bool {
@@ -380,4 +445,24 @@ fn voxel_body_hash_wasm() {
     }
     assert_eq!(digest, VOXEL_BODY_DIGEST, "wasm32 digest 0x{digest:08X} != golden 0x{VOXEL_BODY_DIGEST:08X}");
     assert_eq!(hash, VOXEL_BODY_STATE_HASH, "wasm32 state_hash 0x{hash:08X} != golden 0x{VOXEL_BODY_STATE_HASH:08X}");
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn history_hash_native() {
+    let digest = history_scene();
+    if !history_pinned() {
+        return;
+    }
+    assert_eq!(digest, HISTORY_DIGEST, "native history digest 0x{digest:08X} != golden 0x{HISTORY_DIGEST:08X}");
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen_test::wasm_bindgen_test]
+fn history_hash_wasm() {
+    let digest = history_scene();
+    if !history_pinned() {
+        return;
+    }
+    assert_eq!(digest, HISTORY_DIGEST, "wasm32 history digest 0x{digest:08X} != golden 0x{HISTORY_DIGEST:08X}");
 }

@@ -18,7 +18,44 @@ pub struct SocietyGrid {
     capacity: Vec<u32>,
     passable: Vec<bool>,
     step_cost: Vec<u32>,
+    /// Per tile: 8-connected component id of `passable` tiles (meaningless where impassable).
+    component: Vec<u32>,
     world_id: u32,
+}
+
+/// Label 8-connected components of `passable` on a `width`-wide grid, in row-major order.
+fn label_components(passable: &[bool], width: u32) -> Vec<u32> {
+    let w = width as usize;
+    let n = passable.len();
+    let h = if w == 0 { 0 } else { n / w };
+    let mut label = vec![u32::MAX; n];
+    let mut next = 0u32;
+    let mut stack = Vec::new();
+    for start in 0..n {
+        if !passable[start] || label[start] != u32::MAX {
+            continue;
+        }
+        label[start] = next;
+        stack.push(start);
+        while let Some(i) = stack.pop() {
+            let (x, z) = ((i % w) as i64, (i / w) as i64);
+            for dz in -1i64..=1 {
+                for dx in -1i64..=1 {
+                    let (nx, nz) = (x + dx, z + dz);
+                    if (dx, dz) == (0, 0) || nx < 0 || nz < 0 || nx >= w as i64 || nz >= h as i64 {
+                        continue;
+                    }
+                    let ni = nz as usize * w + nx as usize;
+                    if passable[ni] && label[ni] == u32::MAX {
+                        label[ni] = next;
+                        stack.push(ni);
+                    }
+                }
+            }
+        }
+        next += 1;
+    }
+    label
 }
 
 impl SocietyGrid {
@@ -45,6 +82,7 @@ impl SocietyGrid {
             };
             capacity.push(cap);
         }
+        let component = label_components(&passable, map.width);
         let bytes = bincode::serialize(map).expect("world map serialises");
         SocietyGrid {
             origin: map.origin,
@@ -53,6 +91,7 @@ impl SocietyGrid {
             capacity,
             passable,
             step_cost,
+            component,
             world_id: crc32fast::hash(&bytes),
         }
     }
@@ -77,6 +116,13 @@ impl SocietyGrid {
 
     pub fn passable(&self, rc: RegionCoords) -> bool {
         self.index(rc).is_some_and(|i| self.passable[i])
+    }
+
+    /// The landmass of `rc`: its 8-connected component of passable regions (numbered in
+    /// row-major order of their first region). `None` off the grid or on impassable ground.
+    /// Two regions in different components have no route between them.
+    pub fn component(&self, rc: RegionCoords) -> Option<u32> {
+        self.index(rc).and_then(|i| self.passable[i].then(|| self.component[i]))
     }
 
     pub fn step_cost(&self, rc: RegionCoords) -> u32 {
@@ -104,7 +150,7 @@ pub fn route(
     max_nodes: u32,
 ) -> Option<Vec<RegionCoords>> {
     let (fi, ti) = (grid.index(from)?, grid.index(to)?);
-    if !grid.passable[fi] || !grid.passable[ti] {
+    if !grid.passable[fi] || !grid.passable[ti] || grid.component[fi] != grid.component[ti] {
         return None;
     }
     let n = grid.passable.len();
