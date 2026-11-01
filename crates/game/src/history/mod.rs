@@ -95,9 +95,7 @@ impl History {
     pub fn add_founder(&mut self, sex: Sex, born: CalendarTick) -> PersonId {
         let id = PersonId(self.next_ids[0]);
         self.next_ids[0] += 1;
-        // Placeholder location until `found_site` puts them at a site.
-        let loc = Location::InRegion(crate::RegionCoords::new(0, 0));
-        self.people.insert(id, Person::newborn(id, sex, born, None, None, None, loc));
+        self.people.insert(id, Person::newborn(id, sex, born, None, None, None, Location::Unplaced));
         let at = born.plus_days(rules::death_age_days(id, born)).max(self.now);
         self.schedule(at, Step::Death(id));
         id

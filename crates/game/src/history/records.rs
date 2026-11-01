@@ -33,6 +33,8 @@ pub enum DeathCause {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum Location {
+    /// Created but not yet at a site or on a journey: founders between `add_founder` and `found_site`.
+    Unplaced,
     AtSite(SiteId),
     Journey(JourneyId),
     /// Unused until plan 2.

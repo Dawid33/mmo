@@ -250,3 +250,14 @@ fn describe_born_line() {
     let line = e.describe(&h);
     assert!(line.contains("was born at Site 0"), "{line}");
 }
+
+#[test]
+fn unplaced_founder_until_found_site() {
+    let s = start();
+    let mut h = History::new(1, s, land_grid());
+    let civ = h.add_civ(Race::Dwarf);
+    let p = h.add_founder(Sex::Female, years_before(s, 20));
+    assert_eq!(h.person(p).unwrap().location, Location::Unplaced);
+    let site = h.found_site(civ, RegionCoords::new(1, 1), &[p], None, false);
+    assert_eq!(h.person(p).unwrap().location, Location::AtSite(site));
+}
