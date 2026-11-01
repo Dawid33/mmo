@@ -489,6 +489,14 @@ world-map *args:
 cross-section *args:
     VOXEL_REGION_BLOCKS={{play_blocks}} {{cap}} {{cargo}} run --release -p worldgen --example cross_section -- {{args}}
 
+# World history: bootstrap + fast-forward a forged world's history (people, sites,
+# civs, journeys; `game::history`) and print statistics and the log. `--save` writes
+# <world>.history next to the world file (refuses to overwrite without `--force`),
+# `--dump <file>` reads one instead. Flags: --world --civs --years --founders --seed
+# --log --save --force --dump. Built with `play_blocks` like `cross-section`.
+history *args:
+    VOXEL_REGION_BLOCKS={{play_blocks}} {{cap}} {{cargo}} run --release -p worldgen --example history -- {{args}}
+
 # Front / side / top orthographic PNGs of one generated tree (one pixel per
 # voxel, coloured by part) into target/tree-view/. Flags: --species
 # oak|pine|birch|spruce|acacia|palm|jungle|cactus --seed N --age N (0..=100) --out <path stem> --scale N; --grid
