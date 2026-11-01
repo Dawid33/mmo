@@ -3,6 +3,9 @@ name = "bbmodel"
 version = "0.1.0"
 edition = "2024"
 description = "Blockbench .bbmodel reader: groups, cubes and mesh elements to textured triangles. Engine-free."
+# Integration tests are declared below: tests/it.rs is one binary for most
+# files, the rest need a process of their own (see tests/it.rs).
+autotests = false
 
 [features]
 default = ["textures"]
@@ -23,3 +26,7 @@ libm = "0.2"
 serde_json = { workspace = true }
 base64 = "0.22"
 image = { workspace = true }
+
+[[test]]
+name = "it"
+path = "tests/it.rs"

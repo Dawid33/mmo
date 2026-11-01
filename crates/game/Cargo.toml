@@ -2,6 +2,9 @@
 name = "game"
 version = "0.1.0"
 edition = "2021"
+# Integration tests are declared below: tests/it.rs is one binary for most
+# files, the rest need a process of their own (see tests/it.rs).
+autotests = false
 
 [dependencies]
 slotmapd = { workspace = true }
@@ -40,3 +43,19 @@ crc32fast = { workspace = true }
 # wasm-bindgen must stay the version Cargo.lock already has for the client.
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 wasm-bindgen-test = "0.3"
+
+[[test]]
+name = "it"
+path = "tests/it.rs"
+
+[[test]]
+name = "wasm_determinism"
+path = "tests/wasm_determinism.rs"
+
+[[test]]
+name = "hash_mode"
+path = "tests/hash_mode.rs"
+
+[[test]]
+name = "voxel_body"
+path = "tests/voxel_body.rs"

@@ -23,6 +23,8 @@ use slint::platform::{Platform, WindowAdapter, WindowEvent, WindowEventDispatchR
 use slint::{ComponentHandle, PhysicalSize};
 
 pub mod wheel;
+#[cfg(target_arch = "wasm32")]
+mod wasm_images;
 
 slint::include_modules!();
 

@@ -6,7 +6,7 @@ use game::{RegionCoords, TileSummary, WorldMap};
 use worldgen::forged::{ForgedWorld, OUTSIDE_HEIGHT_M};
 use worldgen::tile_map::*;
 
-mod common;
+use crate::common;
 use common::*;
 
 /// One tile's edge in engine metres (= `REGION_BLOCKS` blocks).

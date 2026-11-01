@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 description = "Pinning tests for the vendored rapier 0.36 / parry 0.31 forks' patches (journal, StateHash, voxels cast, KCC). Nothing in game/client/server depends on it."
+# Integration tests are declared below: tests/it.rs is one binary for most
+# files, the rest need a process of their own (see tests/it.rs).
+autotests = false
 
 [dependencies]
 # The vendored fork (upstream rapier 0.36.0 / parry 0.31.1 + `// mmo-fork:` patches).
@@ -29,3 +32,11 @@ game = { workspace = true }
 # alongside the game's scenes (same wasm-bindgen-test).
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 wasm-bindgen-test = "0.3"
+
+[[test]]
+name = "it"
+path = "tests/it.rs"
+
+[[test]]
+name = "state_hash_wasm"
+path = "tests/state_hash_wasm.rs"

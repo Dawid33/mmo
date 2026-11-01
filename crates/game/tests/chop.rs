@@ -1,7 +1,7 @@
 //! Chopping trees (`game::trees`, `DesignationKind::Chop`): which blocks a
 //! cut brings down, the tip spin that keeps a felled part inside the region,
 //! and the order carried out into a falling voxel body that despawns.
-mod common;
+use crate::common;
 
 use common::{floor_chunks, r0};
 use game::rapier3d::math::Vector;

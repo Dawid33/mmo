@@ -8,7 +8,7 @@
 //! components that point through a face some collider covers. The five
 //! single-shape cases of `crates/game/tests/shape_cast_grazing.rs` live in
 //! `upstream_movement_probe.rs`; these are the cross-collider ones.
-mod common;
+use crate::common;
 
 use game::movement::{CHARACTER_SKIN, PLAYER_CAPSULE_HALF_HEIGHT, PLAYER_CAPSULE_RADIUS, UNITS_PER_METER};
 use physics_next::PhysicsWorld;

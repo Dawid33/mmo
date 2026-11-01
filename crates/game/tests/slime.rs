@@ -2,7 +2,7 @@
 //! then alternates Minecraft-style between sitting still and hopping forward;
 //! it turns back before a region edge; and its ticks — the spawn included —
 //! undo bit-exact and replay identically.
-mod common;
+use crate::common;
 
 use common::floor_chunks;
 use game::slime::{slime_edge_units, slime_spawn_plan, SLIME_HOP_DELAY_MIN_TICKS};

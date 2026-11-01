@@ -1,9 +1,10 @@
 # One toolchain for everything — builds, tests, clippy, wasm, rust-analyzer.
-# Pinned to the current stable release so every machine and every recipe
-# compiles with the same rustc; bump it deliberately (and run `just smoke` +
-# `just determinism-wasm`), never via a floating `stable`. No nightly, no
-# Cranelift wrapper.
+# A DATED nightly (never a floating `nightly`), for the target-dir size
+# savings: `-Zembed-metadata=no` (set in .cargo/config.toml `[unstable]`) stops
+# every .rlib from carrying a second copy of the crate metadata, and nightly
+# cargo's build-dir layout v2. Bump the date deliberately (then `just smoke` +
+# `just determinism-wasm`). No Cranelift wrapper.
 [toolchain]
-channel = "1.99.1"
+channel = "nightly-2026-10-04"
 components = ["rustfmt", "clippy"]
 targets = ["wasm32-unknown-unknown"]

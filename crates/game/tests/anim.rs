@@ -1,7 +1,7 @@
 //! Sim-owned animation (`game::anim`): a player is a rigged dwarf with a clip
 //! the sim picks from how it moves, whose bones carry colliders that other
 //! bodies' sweeps hit, and whose animated ticks undo bit-exact.
-mod common;
+use crate::common;
 
 use common::floor_chunks;
 use game::anim::{self, Animator, RigId, REST_CLIP};

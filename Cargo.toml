@@ -19,10 +19,27 @@ opt-level = 1
 # symbols and inlined frames in dev builds. Cargo's dev default is already
 # `true`; pinned explicitly so a profiled dev build is always navigable.
 debug = "full"
+# Keep DWARF in per-object .dwo files instead of copying it into every linked
+# executable — this workspace links ~25 test/example binaries per dev build,
+# and each used to carry its own full copy. gdb, perf and backtraces read the
+# .dwo files in place. (Linux/macOS; `profiling` stays packed for perf tools.)
+split-debuginfo = "unpacked"
 
 # Enable a large amount of optimization in the dev profile for dependencies.
+# Dependencies keep line tables only (symbols, file:line, inlined frames — what
+# perf / pyroscope / backtraces need) but no variable info: full debuginfo on
+# Bevy/wgpu/rapier at opt-level 3 was most of target/debug.
 [profile.dev.package."*"]
 opt-level = 3
+debug = "line-tables-only"
+
+# slint-ui is mostly the Slint compiler's GENERATED Rust for the whole widget
+# library: its incremental cache was ~2-3 GB per build kind (lib, tests, check,
+# clippy — 11 GB measured 2026-10-31) and buys little, since the generated
+# file is re-emitted wholesale. Line tables are enough to profile it.
+[profile.dev.package.slint-ui]
+debug = "line-tables-only"
+incremental = false
 
 # The forge pipeline (worldgen::forge) is float-heavy offline simulation; in a
 # dev build the server would otherwise spend minutes forging a default world.

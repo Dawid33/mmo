@@ -2,6 +2,9 @@
 name = "worldgen"
 version = "0.1.0"
 edition = "2024"
+# Integration tests are declared below: tests/it.rs is one binary for most
+# files, the rest need a process of their own (see tests/it.rs).
+autotests = false
 
 [dependencies]
 image = { workspace = true }
@@ -25,3 +28,19 @@ name = "worldgen"
 
 [lib]
 path = "src/lib.rs"
+
+[[test]]
+name = "it"
+path = "tests/it.rs"
+
+[[test]]
+name = "forged_world"
+path = "tests/forged_world.rs"
+
+[[test]]
+name = "client_region_load_cost"
+path = "tests/client_region_load_cost.rs"
+
+[[test]]
+name = "region_load_cost"
+path = "tests/region_load_cost.rs"

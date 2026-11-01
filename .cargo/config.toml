@@ -8,6 +8,13 @@ rustflags = ["--cfg", "web_sys_unstable_apis"]
 [build]
 jobs = -4
 
+# Nightly-only (rust-toolchain.toml pins a dated nightly): keep crate metadata
+# only in the .rmeta, not duplicated into every .rlib (`-Zembed-metadata=no`;
+# ~10-30% of a target dir). Nightly cargo already defaults to it — pinned here
+# so a toolchain bump that changes the default doesn't silently grow target/.
+[unstable]
+embed-metadata = false
+
 # Region edge in BLOCKS, read at BUILD time by `game::REGION_BLOCKS`
 # (crates/game/src/protocol.rs; legal values there). It lives here so raw
 # `cargo`, rust-analyzer and `just` all compile with the SAME value — cargo

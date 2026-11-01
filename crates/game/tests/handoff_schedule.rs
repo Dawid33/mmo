@@ -15,7 +15,7 @@ use game::{
     REGION_BLOCKS, REGION_SIZE, SPAWN_REGION, TICK_RATE,
 };
 
-mod common;
+use crate::common;
 
 /// Seeds swept per schedule mode.
 const SEEDS: u64 = 12;

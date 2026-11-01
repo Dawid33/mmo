@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2024"
 
 # Engine-free like `game`: no Bevy. The client composites the pixels.
+# Integration tests are declared below: tests/it.rs is one binary for most
+# files, the rest need a process of their own (see tests/it.rs).
+autotests = false
+
 [dependencies]
 slint = { workspace = true }
 # Only for its build-script metadata (`DEP_WIDGETS_UI_DIR`): the .slint
@@ -14,5 +18,26 @@ widgets = { workspace = true }
 # the core crate directly (pinned to slint's version; png + jpeg, no more).
 i-slint-core = { version = "=1.18.1", features = ["image-decoders"] }
 
+# wasm32: build.rs points the generated code's embedded-image loads at
+# `wasm_images`, which decodes them here (Slint would hand them to the browser,
+# and the software renderer cannot draw that). Same `image` crate i-slint-core
+# decodes with on native, so no new build.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+image = { version = "0.25", default-features = false, features = ["png"] }
+log = { workspace = true }
+
+# `tests/wasm_images.rs` under node (`just slint-wasm`); same version as game's.
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = "0.3"
+
 [build-dependencies]
 slint-build = { workspace = true }
+
+[[test]]
+name = "it"
+path = "tests/it.rs"
+
+# wasm32 only: the embedded sprites draw in the browser build (`just slint-wasm`).
+[[test]]
+name = "wasm_images"
+path = "tests/wasm_images.rs"

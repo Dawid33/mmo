@@ -307,7 +307,7 @@ impl<K: Key, V> DenseSlotMap<K, V> {
     where
         F: FnOnce(K) -> Result<V, E>,
     {
-        if self.len() >= (core::u32::MAX - 1) as usize {
+        if self.len() >= (u32::MAX - 1) as usize {
             panic!("DenseSlotMap number of elements overflow");
         }
 

@@ -5,7 +5,7 @@
 //! every seam between two boxes used to read as an edge: the character
 //! controller slid down its leaning normal into the floor, fell through the
 //! skin for a tick, then tripped on the next box and popped up ungrounded.
-mod common;
+use crate::common;
 
 use common::{
     approach_seam, body, key, r0, seam_row, seam_z, spawn_x_band, spawn_z_walk, terraces, ticks, world_of,

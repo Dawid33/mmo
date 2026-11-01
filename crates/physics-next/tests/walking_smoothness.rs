@@ -10,7 +10,7 @@
 //! driving the fork. The game file's four `slow` cases run untagged here:
 //! the whole file takes ~0.1 s on the fork (test profile), and two of them are
 //! the snap gate's pins.
-mod common;
+use crate::common;
 
 use common::{Body, CHUNK, Walker, chunks_over, seam_row, seam_z, spawn_x_band, spawn_z_walk};
 use game::movement::{CHARACTER_SKIN, PLAYER_CAPSULE_HALF_HEIGHT, PLAYER_CAPSULE_RADIUS, TICK_DT, UNITS_PER_METER, WALK_SPEED};

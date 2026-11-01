@@ -281,11 +281,11 @@ impl KeyData {
     }
 
     fn null() -> Self {
-        Self::new(core::u32::MAX, 1)
+        Self::new(u32::MAX, 1)
     }
 
     fn is_null(self) -> bool {
-        self.idx == core::u32::MAX
+        self.idx == u32::MAX
     }
 
     /// Returns the key data as a 64-bit integer. No guarantees about its value
@@ -572,7 +572,7 @@ mod serialize {
             let mut ser_key: SerKey = Deserialize::deserialize(deserializer)?;
 
             // Ensure a.is_null() && b.is_null() implies a == b.
-            if ser_key.idx == core::u32::MAX {
+            if ser_key.idx == u32::MAX {
                 ser_key.version = 1;
             }
 

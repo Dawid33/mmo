@@ -2,7 +2,7 @@
 //! `Order::SetMode`, which puts the adventurer's body on a tile; the switch
 //! undoes bit-exact and reaches the UI once. `Order::MoveTo` walks the body
 //! along an A* path (`Walker`), re-planning once when stuck.
-mod common;
+use crate::common;
 
 use common::floor_chunks;
 use game::rapier3d::math::Vector;

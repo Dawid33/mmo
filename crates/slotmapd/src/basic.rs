@@ -448,7 +448,7 @@ impl<K: Key, V> SlotMap<K, V> {
     {
         // In case f panics, we don't make any changes until we have the value.
         let new_num_elems = self.num_elems + 1;
-        if new_num_elems == core::u32::MAX {
+        if new_num_elems == u32::MAX {
             panic!("SlotMap number of elements overflow");
         }
 
@@ -1434,7 +1434,7 @@ mod serialize {
         {
             let (free_head, mut slots): (u32, Vec<Slot<V>>) =
                 Deserialize::deserialize(deserializer)?;
-            if slots.len() >= u32::max_value() as usize {
+            if slots.len() >= u32::MAX as usize {
                 return Err(de::Error::custom(&"too many slots"));
             }
 

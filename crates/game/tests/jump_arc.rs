@@ -2,7 +2,7 @@
 //! the ballistic arc `movement::plan` computes: launch on the tick Space is
 //! read, rise for JUMP_SPEED/GRAVITY seconds, and land with the body back on
 //! its skin. Collision must not shorten, flatten, or delay it.
-mod common;
+use crate::common;
 
 use common::{body, key, ticks, world_of};
 use game::movement::{FALL_GRAVITY, GRAVITY, JUMP_SPEED, TICK_DT, UNITS_PER_METER};

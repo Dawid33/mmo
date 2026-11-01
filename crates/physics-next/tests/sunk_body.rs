@@ -9,7 +9,7 @@
 //! not the fork: the rig's controller runs with `depenetrate: false` (D7),
 //! and `depenetration_lift_is_what_puts_it_back` shows the fork alone
 //! leaves the body sunk.
-mod common;
+use crate::common;
 
 use common::{CHUNK, Walker};
 use game::movement::{character_controller, depenetration_lift};

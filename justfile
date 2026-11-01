@@ -242,6 +242,17 @@ run-release:
 # Vulkan call on a device loss).
 probe_features := ""
 
+# Builds whose features change Bevy's or wgpu's OWN feature set (trace_chrome,
+# tracy, pyroscope, probe features) are a whole second copy of the dependency
+# tree. They build into their own target dir, one per feature set, so the main
+# target/ never accumulates them and `just clean-variants` drops them all.
+variant_dir := "target/variants"
+probe_dir := if probe_features == "" { "target" } else { variant_dir / replace(probe_features, ",", "+") }
+
+# Delete every feature-variant build (trace_chrome, tracy, pyroscope, probes).
+clean-variants:
+    rm -rf {{variant_dir}}
+
 fly-probe seconds="45":
     #!/usr/bin/env bash
     set -euo pipefail
@@ -250,12 +261,12 @@ fly-probe seconds="45":
     if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
     out="target/fly-probe"; mkdir -p "$out"
     {{cap}} {{cargo}} build --release --bin server
-    {{cap}} {{cargo}} build --release --bin client --features "{{probe_features}}"
+    {{cap}} {{cargo}} build --release --bin client --features "{{probe_features}}" --target-dir {{probe_dir}}
     RUST_BACKTRACE=1 ./target/release/server > "$out/server.log" 2>&1 &
     server_pid=$!
     trap 'kill "$server_pid" 2>/dev/null || true' EXIT
     VOXEL_AUTOPILOT=1 VOXEL_AUTOPILOT_SECONDS={{seconds}} RUST_BACKTRACE=1 \
-        ./target/release/client > "$out/client.log" 2>&1 || true
+        ./{{probe_dir}}/release/client > "$out/client.log" 2>&1 || true
     grep -h "AdapterInfo" "$out/client.log" | head -1 || true
     grep -hE "event=(world_ready|autopilot_start|region_crossing|region_crossing_render|main_stall|bridge_region_spawned|region_loaded)" \
         "$out/client.log" | sed -n '/autopilot_start/,$p' || true
@@ -281,12 +292,12 @@ shuttle-probe boundary="region" seconds="45" overshoot="":
     if [ -n "{{overshoot}}" ]; then export VOXEL_AUTOPILOT_OVERSHOOT_M="{{overshoot}}"; fi
     out="target/shuttle-probe"; mkdir -p "$out"
     {{cap}} {{cargo}} build --release --bin server
-    {{cap}} {{cargo}} build --release --bin client --features "{{probe_features}}"
+    {{cap}} {{cargo}} build --release --bin client --features "{{probe_features}}" --target-dir {{probe_dir}}
     RUST_BACKTRACE=1 ./target/release/server > "$out/server.log" 2>&1 &
     server_pid=$!
     trap 'kill "$server_pid" 2>/dev/null || true' EXIT
     VOXEL_AUTOPILOT=shuttle VOXEL_AUTOPILOT_BOUNDARY={{boundary}} VOXEL_AUTOPILOT_SECONDS={{seconds}} \
-        PERF_LOG=1 RUST_BACKTRACE=1 ./target/release/client > "$out/client.log" 2>&1 || true
+        PERF_LOG=1 RUST_BACKTRACE=1 ./{{probe_dir}}/release/client > "$out/client.log" 2>&1 || true
     grep -h "AdapterInfo" "$out/client.log" | head -1 || true
     scripts/crossing_summary.py "$out/client.log"
     echo "logs: $out/client.log $out/server.log"
@@ -431,7 +442,7 @@ creature-progress *args:
 # The creature lint: every manifest model through the real parser (no reader
 # warnings, required clips + loop modes, budgets, rest bounds).
 creature-check:
-    {{cap}} {{cargo}} test -q -p bbmodel --test creatures
+    {{cap}} {{cargo}} test -q -p bbmodel --test it creatures::
 
 # Game models from a text prompt (tools/assets/generate.py): a Leonardo.ai picture,
 # then 3D AI Studio TRELLIS.2 image-to-3D -> assets/models/<name>.glb. Costs
@@ -618,10 +629,10 @@ web-release:
 #   RUSTC_BOOTSTRAP=1 cargo test -p <crate> -- -Zunstable-options --report-time
 
 # The routine check, hard-limited to `smoke_timeout` seconds (default 60). Even
-# the "quick" per-crate suites below link ~30 game test binaries and ~9
-# Bevy-sized client ones, which is far too slow for a while-iterating loop. So
-# smoke runs two game test binaries (undo/rollback invariants, region
-# park/restore) and the server lib tests, TYPE-CHECKS the server's integration
+# the "quick" per-crate suites below build every game test module and a
+# Bevy-sized client test binary, which is far too slow for a while-iterating loop. So
+# smoke runs two modules of the game test binary (undo/rollback invariants,
+# region park/restore) and the server lib tests, TYPE-CHECKS the server's integration
 # tests (all tagged slow, so nothing else would notice them rotting — a new
 # `ClientPacket` variant once left one uncompilable), and only TYPE-CHECKS the client
 # (lib + bin + tests): building or linking a client test binary means a full
@@ -644,17 +655,20 @@ smoke:
         fi
         if [ "$rc" -ne 0 ]; then exit "$rc"; fi
     }
-    step {{cargo}} test -q -p game --test simple --test region_runner
+    step {{cargo}} test -q -p game --test it -- simple:: region_runner::
     step {{cargo}} test -q -p server --lib
     step {{cargo}} check -q -p server --tests
     step {{cargo}} check -q -p client --lib --bins --tests
     echo ">> smoke ok in $(( $(date +%s) - deadline + {{smoke_timeout}} ))s"
 
 # Run exactly the tests a change touches, by crate + cargo-test arguments:
-#   just test-one game "--test lod_streaming pristine"
+#   just test-one game "--test it lod_streaming::pristine"
 #   just test-one client "--lib world_scale::"
 # Naming `--lib` / `--test <target>` matters: it skips building (and linking)
-# every other test binary in the crate.
+# every other test binary in the crate. Most integration tests live in ONE
+# binary per crate, `--test it` (tests/it.rs); filter it by file name +
+# `::`. The few files that need their own process keep their own target
+# (listed at the top of each tests/it.rs).
 test-one crate *args:
     {{cap}} {{cargo}} test -p {{crate}} {{args}}
 
@@ -669,9 +683,9 @@ test-one crate *args:
 # ~10s warm. Run after touching handoff, the WorldManager or region_threads.
 # The client-side twin (bit-exact convergence under late scheduling) needs a
 # Bevy-sized test binary, so it stays an explicit opt-in:
-#   just test-one client "--test crossing -- --include-ignored late_region"
+#   just test-one client "--test it -- --include-ignored crossing::crossing_converges_under_late_region"
 test-threads:
-    {{cap}} {{cargo}} test -p game --test handoff_schedule -- --include-ignored
+    {{cap}} {{cargo}} test -p game --test it -- --include-ignored handoff_schedule::
     {{cap}} {{cargo}} test -p server --test threaded_world -- --include-ignored --test-threads=1
 
 # Cross-target determinism: the same physics scene must end in the same state
@@ -693,6 +707,20 @@ determinism-wasm:
         {{cap}} {{cargo}} test -p game --test wasm_determinism --target wasm32-unknown-unknown
     CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER="$root/bin/wasm-bindgen-test-runner" \
         {{cap}} {{cargo}} test -p physics-next --test state_hash_wasm --target wasm32-unknown-unknown
+
+# The Slint screens' embedded sprites draw on wasm32 (node), where Slint would
+# hand them to the browser and the software renderer panicked
+# (crates/slint-ui/tests/wasm_images.rs, src/wasm_images.rs). Run it after a
+# Slint bump or a change to crates/slint-ui/build.rs. Same runner as
+# determinism-wasm.
+slint-wasm:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    ver=$(awk '/^name = "wasm-bindgen"$/ { getline; gsub(/version = |"/, ""); print; exit }' Cargo.lock)
+    root="$PWD/target/tools/wasm-bindgen-$ver"
+    [ -x "$root/bin/wasm-bindgen-test-runner" ] || {{cap}} cargo install --locked wasm-bindgen-cli --version "$ver" --root "$root"
+    CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER="$root/bin/wasm-bindgen-test-runner" \
+        {{cap}} {{cargo}} test -p slint-ui --test wasm_images --target wasm32-unknown-unknown
 
 # Upstream rapier's own determinism tests, run from the vendored rapier 0.36
 # fork (docs/superpowers/plans/2026-09-22-rapier-035-upgrade.md),
@@ -943,8 +971,8 @@ gpu-log:
 # extract step and per render-graph node), writing a Chrome Trace Event JSON, then reduces
 # it to a top-N table via scripts/trace_summary.py. Use after `just diag` says CPU-bound.
 # CLOSE THE WINDOW to stop — the JSON is only flushed on a clean exit, so Ctrl-C truncates it.
-# The feature build lands in target/release/client like any other (the next plain release
-# recipe relinks it); it is built under `cap` and launched directly, never via `cargo run`.
+# The feature build lands in target/variants/trace_chrome/release/client (its own Bevy
+# feature set, see `variant_dir`); it is built under `cap` and launched directly, never via `cargo run`.
 #
 # Per-ECS-system frame breakdown as text (which system eats the frame).
 trace-chrome:
@@ -956,13 +984,13 @@ trace-chrome:
     mkdir -p target/trace
     json=target/trace/client.json
     {{cap}} {{cargo}} build --release --bin server
-    {{cap}} {{cargo}} build --release --bin client --features trace_chrome
+    {{cap}} {{cargo}} build --release --bin client --features trace_chrome --target-dir {{variant_dir}}/trace_chrome
     RUST_BACKTRACE=1 ./target/release/server > target/trace/server.log 2>&1 &
     server_pid=$!
     trap 'kill "$server_pid" 2>/dev/null || true' EXIT
     sleep 1
     echo ">> tracing -> $json  (play for ~30s, then CLOSE THE WINDOW — Ctrl-C truncates it)"
-    TRACE_CHROME="$json" RUST_BACKTRACE=1 ./target/release/client
+    TRACE_CHROME="$json" RUST_BACKTRACE=1 ./{{variant_dir}}/trace_chrome/release/client
     echo
     # Skip the first 5s: startup asset loads + pipeline compilation would otherwise
     # dominate the totals and hide the steady-state per-frame cost.
@@ -989,13 +1017,13 @@ trace-join:
     mkdir -p target/trace
     json=target/trace/client.json
     {{cap}} {{cargo}} build --release --bin server
-    {{cap}} {{cargo}} build --release --bin client --features trace_chrome
+    {{cap}} {{cargo}} build --release --bin client --features trace_chrome --target-dir {{variant_dir}}/trace_chrome
     RUST_BACKTRACE=1 ./target/release/server > target/trace/server.log 2>&1 &
     server_pid=$!
     trap 'kill "$server_pid" 2>/dev/null || true' EXIT
     sleep 1
     echo ">> tracing the join -> $json  (wait for the world to load, then CLOSE THE WINDOW)"
-    TRACE_CHROME="$json" RUST_BACKTRACE=1 ./target/release/client
+    TRACE_CHROME="$json" RUST_BACKTRACE=1 ./{{variant_dir}}/trace_chrome/release/client
     echo
     # The rapier fork traces its solver internals: most of the file, none of the frame.
     scripts/trace_summary.py "$json" --until-ms {{join_ms}} --top 40 --skip-cat rapier3d --skip-cat parry3d
@@ -1018,7 +1046,7 @@ profile-client:
     RUST_BACKTRACE=1 {{cargo}} run --bin server &
     server_pid=$!
     trap 'kill "$server_pid" 2>/dev/null || true' EXIT
-    PYROSCOPE=1 RUST_BACKTRACE=1 {{cargo}} run --bin client --features pyroscope
+    PYROSCOPE=1 RUST_BACKTRACE=1 {{cargo}} run --bin client --features pyroscope --target-dir {{variant_dir}}/pyroscope
 
 # Server instrumented with pyroscope, client plain alongside; pushes to :4040 (`just profile-up` first).
 profile-server:
@@ -1030,7 +1058,7 @@ profile-server:
     RUST_BACKTRACE=1 {{cargo}} run --bin client &
     client_pid=$!
     trap 'kill "$client_pid" 2>/dev/null || true' EXIT
-    PYROSCOPE=1 RUST_BACKTRACE=1 {{cargo}} run --bin server --features pyroscope
+    PYROSCOPE=1 RUST_BACKTRACE=1 {{cargo}} run --bin server --features pyroscope --target-dir {{variant_dir}}/pyroscope
 
 # Run the client with the Tracy frame profiler compiled in (bevy `trace_tracy`,
 # opt-in via the client's `tracy` feature — plain builds never compile the
@@ -1054,7 +1082,7 @@ tracy-client detailed="":
     RUST_BACKTRACE=1 {{cargo}} run --bin server &
     server_pid=$!
     trap 'kill "$server_pid" 2>/dev/null || true' EXIT
-    RUST_BACKTRACE=1 {{cargo}} run --bin client --profile profiling --features "$feat"
+    RUST_BACKTRACE=1 {{cargo}} run --bin client --profile profiling --features "$feat" --target-dir "{{variant_dir}}/$feat"
 
 # Record a perf profile of the client and open hotspot (see scripts/perf.sh).
 # Uses the `profiling` cargo profile (release + debug info): dev's opt-level 1

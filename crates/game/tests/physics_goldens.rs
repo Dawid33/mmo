@@ -17,7 +17,7 @@
 //! ```sh
 //! PHYSICS_GOLDENS_RECORD=1 just test-one game "--test physics_goldens"
 //! ```
-mod common;
+use crate::common;
 
 use std::fmt::Write as _;
 
