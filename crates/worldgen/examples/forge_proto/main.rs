@@ -134,8 +134,10 @@ fn main() {
     }
     let n = (p.size_m / p.cell_m).round() as usize;
     println!(
-        "forge: seed {:#018X}, {} m world, {} m cells ({n}x{n}), {} iterations x {} yr, rock contrast {}, rain shadow {}",
-        p.seed, p.size_m, p.cell_m, p.knobs.iterations(), p.knobs.dt_years,
+        "forge: seed {:#018X}, {} m world, {} m cells ({n}x{n}), {} iterations x {} yr over {} level(s), rock contrast {}, rain shadow {}",
+        p.seed, p.size_m, p.cell_m,
+        worldgen::forge::schedule(&p).iter().map(|&(_, i)| i).sum::<usize>(), p.knobs.dt_years,
+        worldgen::forge::schedule(&p).len(),
         p.knobs.geology_strength, p.knobs.climate_strength,
     );
     let changed: Vec<String> = knobs::SPECS

@@ -40,7 +40,7 @@ pub const TABS: [(&str, &[&str]); 5] = [
     ("Mountains", &["Uplift"]),
     ("Water", &["Rivers", "Climate"]),
     ("Geology", &["Geology"]),
-    ("Advanced", &["Erosion"]),
+    ("Advanced", &["Erosion", "Schedule"]),
 ];
 
 /// Knobs shown in another tab than their group's: the "Shaping" group is
@@ -873,10 +873,10 @@ mod tests {
         for spec in SPECS {
             let tab = tab_of(spec);
             assert!(tab < TABS.len(), "{} → {tab}", spec.key);
-            // Only the Erosion group belongs in Advanced: anything else there
-            // fell through the table by accident.
+            // Only the Erosion and Schedule groups belong in Advanced:
+            // anything else there fell through the table by accident.
             if tab == ADVANCED {
-                assert_eq!(spec.group, "Erosion", "{} fell through to Advanced", spec.key);
+                assert!(["Erosion", "Schedule"].contains(&spec.group), "{} fell through to Advanced", spec.key);
             }
         }
         let tab = |key: &str| tab_of(SPECS.iter().find(|s| s.key == key).unwrap());

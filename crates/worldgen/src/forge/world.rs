@@ -1,6 +1,7 @@
 //! The simulated world grid, run parameters, and the initial condition.
 
 use crate::forge::knobs::{Knobs, LAYOUT_ARC, LAYOUT_ARCHIPELAGO, LAYOUT_ONE_ISLAND};
+use crate::forge::par;
 use crate::noise::OctaveNoise;
 
 pub const DEFAULT_SIZE_M: f64 = 16_000.0;
@@ -142,6 +143,9 @@ fn landmass(blobs: &[Blob], rx: f64, rz: f64) -> Landmass {
     }
     Landmass { mass: blended, radius: sum_r / sum_w, core: (best / best_r).clamp(0.0, 1.0) }
 }
+
+/// Lowest land height (m): erosion and diffusion clamp land to it too.
+pub const LAND_FLOOR_M: f64 = 0.05;
 
 const NEIGHBORS: [(i32, i32); 8] =
     [(1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1)];
@@ -297,6 +301,44 @@ impl World {
         w
     }
 
+    /// This world's evolved state carried onto the finer grid of `p_fine`
+    /// (the coarse-to-fine erosion schedule): `h` and `uplifted` bilinear;
+    /// `uplift` and `ocean` (with the sea floor) recomputed at fine
+    /// resolution from the same noise as `World::new`, so the coast and the
+    /// belts are as sharp as a fine run's.
+    pub fn upsample(&self, p_fine: &ForgeParams) -> World {
+        self.upsample_onto(World::new(p_fine))
+    }
+
+    /// `upsample` onto an already built fine initial condition (`World::new`
+    /// of the fine params), which keeps its `ocean`, `uplift` and its sea
+    /// cells' heights; land cells take this world's state. Per cell and in
+    /// fixed order: the result does not depend on the thread count.
+    pub fn upsample_onto(&self, mut fine: World) -> World {
+        let (nc, nf) = (self.n, fine.n);
+        // Coarse sea cells read as sea level for land, as diffusion's shore
+        // does: a coast cell must not inherit the shelf's depth.
+        let coarse_h: Vec<f64> =
+            self.h.iter().zip(&self.ocean).map(|(&h, &sea)| if sea { 0.0 } else { h }).collect();
+        // Cell centers matched as shares of the world, so any size ratio works.
+        let axis = |j: usize| {
+            let u = ((j as f64 + 0.5) / nf as f64 * nc as f64 - 0.5).clamp(0.0, (nc - 1) as f64);
+            let i0 = (u.floor() as usize).min(nc.saturating_sub(2));
+            (i0, (i0 + 1).min(nc - 1), u - i0 as f64)
+        };
+        let sample = |grid: &[f64], i: usize| {
+            let ((x0, x1, tx), (z0, z1, tz)) = (axis(i % nf), axis(i / nf));
+            let row = |z: usize| grid[z * nc + x0] * (1.0 - tx) + grid[z * nc + x1] * tx;
+            row(z0) * (1.0 - tz) + row(z1) * tz
+        };
+        let ocean = &fine.ocean;
+        let h = par::map_range(nf * nf, |i| if ocean[i] { fine.h[i] } else { sample(&coarse_h, i).max(LAND_FLOOR_M) });
+        let uplifted = par::map_range(nf * nf, |i| if ocean[i] { 0.0 } else { sample(&self.uplifted, i) });
+        fine.h = h;
+        fine.uplifted = uplifted;
+        fine
+    }
+
     /// 8-neighbors of cell `i` with their distance in meters.
     pub fn neighbors(&self, i: usize) -> impl Iterator<Item = (usize, f64)> + '_ {
         let (x, z) = ((i % self.n) as i32, (i / self.n) as i32);
@@ -313,5 +355,46 @@ impl World {
     /// Cell center in world meters.
     pub fn center(&self, i: usize) -> (f64, f64) {
         (((i % self.n) as f64 + 0.5) * self.dx, ((i / self.n) as f64 + 0.5) * self.dx)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn upsample_keeps_fine_mask_and_interpolates_land() {
+        let fine_p = ForgeParams { size_m: 4_096.0, cell_m: 64.0, ..Default::default() };
+        let coarse_p = ForgeParams { cell_m: 128.0, ..fine_p.clone() };
+        let mut coarse = World::new(&coarse_p);
+        // A recognisable evolved state: land raised by a ramp, some uplift spent.
+        for i in 0..coarse.n * coarse.n {
+            if !coarse.ocean[i] {
+                coarse.h[i] += (i % coarse.n) as f64;
+                coarse.uplifted[i] = 7.0;
+            }
+        }
+        let up = coarse.upsample(&fine_p);
+        let fresh = World::new(&fine_p);
+        assert_eq!((up.n, up.dx), (fresh.n, fresh.dx));
+        assert_eq!(up.ocean, fresh.ocean);
+        assert_eq!(up.uplift, fresh.uplift);
+        for i in 0..up.n * up.n {
+            if up.ocean[i] {
+                assert_eq!((up.h[i], up.uplifted[i]), (fresh.h[i], 0.0));
+            } else {
+                assert!(up.h[i] >= LAND_FLOOR_M);
+                assert!(up.uplifted[i] <= 7.0 && up.uplifted[i] >= 0.0);
+            }
+        }
+        // Away from the coast, the interpolated land carries the coarse ramp.
+        let (x, z) = (up.n / 2, up.n / 2);
+        let (cx, cz) = (x / 2, z / 2);
+        if !coarse.ocean[cz * coarse.n + cx] && !up.ocean[z * up.n + x] {
+            assert!((up.h[z * up.n + x] - coarse.h[cz * coarse.n + cx]).abs() < 30.0);
+            assert_eq!(up.uplifted[z * up.n + x], 7.0);
+        }
+        // Same input, same bytes (parallel map, fixed order).
+        assert_eq!(coarse.upsample(&fine_p).h, up.h);
     }
 }

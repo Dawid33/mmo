@@ -6,7 +6,7 @@ use std::collections::BinaryHeap;
 use crate::forge::geology::Geology;
 use crate::forge::par;
 use crate::forge::routing_fast::route_fast;
-use crate::forge::world::{ForgeParams, World};
+use crate::forge::world::{ForgeParams, World, LAND_FLOOR_M};
 
 /// Priority-Flood epsilon (m per meter of travel): the routing surface falls
 /// at least this much toward the sea, so flats and filled lakes still drain.
@@ -56,6 +56,9 @@ pub struct StepScratch {
     /// `routing_fast::route_fast`'s working buffers.
     pub(super) fast: crate::forge::routing_fast::FastScratch,
     /// `step` has run with this scratch: later steps route with `route_fast`.
+    /// Tied to the scratch, not the World: a scratch reused for ANOTHER world
+    /// (or the same world on a new grid) would skip that world's Priority-
+    /// Flood initial condition — use a fresh `StepScratch` per world/level.
     routed_once: bool,
 }
 
@@ -237,7 +240,7 @@ fn evolve(w: &mut World, p: &ForgeParams, geo: &Geology, rain: &[f64], routing: 
                     let base = if ocean[rc] { 0.0 } else { h.get(rc) }; // already updated: downstream-first
                     let erodibility = k.erodibility * geo.erodibility_at(i, hi, before);
                     let f = dt * erodibility * q[i].max(k.hillslope_area_m2 * rain[i]).sqrt() / routing.receiver_dist[i];
-                    h.set(i, ((hi + lift + f * base) / (1.0 + f)).max(0.05));
+                    h.set(i, ((hi + lift + f * base) / (1.0 + f)).max(LAND_FLOOR_M));
                 }
             }
             drowned
@@ -269,7 +272,7 @@ fn evolve(w: &mut World, p: &ForgeParams, geo: &Geology, rain: &[f64], routing: 
                     // The sea holds sea level at the shore, not its floor depth.
                     let s = |j: usize| if ocean[j] { 0.0 } else { diffuse[j] };
                     let lap = s(i - 1) + s(i + 1) + s(i - n) + s(i + n) - 4.0 * diffuse[i];
-                    row[x] = (diffuse[i] + c * lap).max(0.05);
+                    row[x] = (diffuse[i] + c * lap).max(LAND_FLOOR_M);
                 }
             }
         });

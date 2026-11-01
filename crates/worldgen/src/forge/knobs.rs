@@ -69,6 +69,10 @@ knobs! {
         iters: 500.0, [50.0, 1000.0], "Iterations", "Time steps. Relief approaches steady state around 450 at the default rates.";
         dt_years: 2_500.0, [500.0, 10_000.0], "Years per iteration", "The incision step is implicit, so this is limited by routing refresh, not stability.";
     }
+    "Schedule" {
+        coarse_levels: 2.0, [0.0, 3.0], "Coarse levels", "Erosion runs first on cells this many times 2x coarser, then refines level by level down to the final cell size: most of the work at a quarter (or less) of the cells.";
+        refine_iters: 80.0, [10.0, 300.0], "Refine iterations", "Iterations at the final cell size after the coarse levels (the coarsest runs Iterations, any level between half this): lets valleys re-cut at the new resolution.";
+    }
     "Geology" {
         geology_strength: 1.0, [0.0, 2.0], "Rock contrast", "0 = uniform rock; 1 = hardnesses as listed; 2 = doubled contrast (more scarps and cliffs).";
         regional_dip: 0.04, [0.0, 0.15], "Regional dip", "Tilt of the strata (rise/run): how many formations outcrop across the island.";
@@ -121,6 +125,16 @@ impl Knobs {
 
     pub fn iterations(&self) -> usize {
         self.iters.round().max(1.0) as usize
+    }
+
+    /// Number of 2x-coarser erosion levels before the final cell size.
+    pub fn coarse_level_count(&self) -> u32 {
+        self.coarse_levels.round().clamp(0.0, 3.0) as u32
+    }
+
+    /// Iterations at each level finer than the coarsest.
+    pub fn refine_iterations(&self) -> usize {
+        self.refine_iters.round().max(1.0) as usize
     }
 
     /// Erodibility multiplier of rock `id` (index into geology::ROCKS), with

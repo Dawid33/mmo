@@ -83,9 +83,17 @@ Research behind this:
 | 100 km | 64 m | 2.4 M | 2 min 13 s | 425 MB | 28 MB |
 | 100 km | 32 m | 9.8 M | 9 min 19 s | 1.4 GB | 107 MB |
 | 100 km | 16 m | 39 M | 1 h 9 min (4,128 s) | 5.5 GB | 422 MB |
+| 16 km, optimised (Tasks 1-5) | 32 m | 250 k | 0.74 s | 49 MB | 2.7 MB |
+| 16 km, optimised (Tasks 1-5) | 16 m | 1.0 M | 2.3 s | 181 MB | 10.7 MB |
+| 100 km / 16 m, optimised — not yet measured (needs user go-ahead) | 16 m | 39 M | — | — | — |
 
 Notes:
 - Cost grows a bit faster than linearly with cell count, and the forge is single-threaded.
+- The "optimised" rows (2026-11-01, `just forge-bench <size> <cell>`, wall time of the
+  release binary incl. PNG/world-file writing) are multi-threaded (rayon, all 20 logical
+  cores) and use the coarse-to-fine schedule: 500 iterations at 4× the cell, 40 at 2×, 80
+  at the cell (§12 item 1). Before the schedule (Tasks 1-4 only) the same runs took
+  1.44 s / 49 MB (32 m) and 7.15 s / 187 MB (16 m).
 - These runs used today's island layout stretched to the size, so the new layouts, climate and
   biome passes will add to them.
 - Larger basins may need more iterations to reach steady state: the 100 km runs still had
