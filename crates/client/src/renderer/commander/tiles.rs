@@ -326,6 +326,32 @@ impl TileSource for TileMirror {
     fn tree_limb(&self, p: TilePos) -> u8 {
         self.mirrored_block(p).map_or(0, |b| b.limb())
     }
+
+    /// Same probe as `impl TileSource for Rollback`, over the mirrored chunks.
+    fn column_band(&self, column: [i32; 2]) -> Option<(i32, i32)> {
+        let cb = game::CHUNK_BLOCKS as i32;
+        let (cx, cz) = (column[0].div_euclid(cb), column[1].div_euclid(cb));
+        let n = game::REGION_CHUNKS as i32;
+        if !(0..n).contains(&cx) || !(0..n).contains(&cz) {
+            return None;
+        }
+        let (probe_lo, probe_hi, base) = match self.ground_at(cx as usize, cz as usize) {
+            Some(g) => {
+                let i = column[0].rem_euclid(cb) as usize * game::CHUNK_BLOCKS + column[1].rem_euclid(cb) as usize;
+                let surface = i32::from(g.surface[i]);
+                (g.band_base_sub_y, surface.div_euclid(cb) + game::BAND_HEADROOM_CHUNKS, Some((g.band_base_sub_y * cb, surface)))
+            }
+            None => (game::COLUMN_SCAN_Y_MIN.div_euclid(cb), game::COLUMN_SCAN_Y_MAX.div_euclid(cb), None),
+        };
+        let mut band = base;
+        for cy in probe_lo..=probe_hi {
+            if self.chunks.contains_key(&[cx, cy, cz]) {
+                let (lo, hi) = (cy * cb, cy * cb + cb - 1);
+                band = Some(band.map_or((lo, hi), |(a, b)| (a.min(lo), b.max(hi))));
+            }
+        }
+        band
+    }
 }
 
 /// Each block (id + data), straight from the sim chunk's blocks.

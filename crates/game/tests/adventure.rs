@@ -32,6 +32,58 @@ fn region_with_player() -> (Region, EntityKey) {
     (region, e)
 }
 
+/// Chunk layer holding the high floor of [`high_region`] (block 2,000).
+const HIGH_CHUNK_Y: i32 = 125;
+
+/// Like `region_with_player`, but the one-block floor lies at block y 2,000
+/// (chunk layer 125, ground recipes with surface 2,000 and nothing below the
+/// band): far past the pathfinder's fixed scan constants.
+fn high_region() -> Region {
+    let (send, _recv) = crossbeam::channel::unbounded();
+    let mut region = Region::new(Rollback::new(Some(send.clone())), Some(send), RegionCoords::new(0, 0), None);
+    let (x, z) = region.data().spawn_xz();
+    let edge = common::CHUNK_EDGE;
+    let chunks = floor_chunks(x - edge..x + edge, z - edge..z + edge, 16)
+        .into_iter()
+        .map(|(c, chunk)| (game::ChunkCoords::new(c.x, HIGH_CHUNK_Y, c.z), chunk))
+        .collect::<Vec<_>>();
+    let ground = chunks
+        .iter()
+        .map(|(c, _)| {
+            let surface = vec![(HIGH_CHUNK_Y * game::CHUNK_BLOCKS as i32) as i16; game::COLUMN_FOOTPRINT];
+            let g = game::ColumnGround::plain(surface.into_boxed_slice(), HIGH_CHUNK_Y, WALL, BlockId(2));
+            (game::ColumnCoords::new(c.x, c.z), g)
+        })
+        .collect::<Vec<_>>();
+    region.with_data(|r| {
+        r.seed_ground_genesis(ground);
+        r.seed_terrain_genesis(chunks);
+    });
+    region.handle_event(GameEventKind::CreateClient(CLIENT)).unwrap();
+    region
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn walker_paths_on_ground_above_block_512() {
+    let mut region = high_region();
+    let e = *region.data().player_entites.get(&CLIENT).unwrap();
+    let floor = HIGH_CHUNK_Y * game::CHUNK_BLOCKS as i32;
+    assert_eq!(region.data().column_band([4, 4]), Some((floor, floor + game::CHUNK_BLOCKS as i32 - 1)));
+    region
+        .handle_event(GameEventKind::Order(CLIENT, Order::SetMode { mode: PlayMode::Adventure, at: Some([4, floor + 1, 4]) }))
+        .unwrap();
+    region.forget_last_event();
+    for _ in 0..5 {
+        tick(&mut region);
+    }
+    assert_eq!(body_tile(&region, e), [4, floor + 1, 4], "the body must be put on the high floor");
+    move_to(&mut region, here_goal([20, 20], None));
+    assert!(walker(&region, e).is_some(), "MoveTo must find a path at block {floor}");
+    walk_until_arrived(&mut region, e, walk_budget(40.0));
+    assert_eq!(body_tile(&region, e), [20, floor + 1, 20]);
+}
+
 fn tick(region: &mut Region) {
     region.handle_event(GameEventKind::Tick).unwrap();
     region.forget_last_event();

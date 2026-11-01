@@ -150,19 +150,31 @@ pub fn find_path(src: &impl TileSource, from: TilePos, to: TilePos, max_nodes: u
     None
 }
 
+/// Margin, in blocks, `nearest_standable` scans beyond a column's band.
+pub const COLUMN_BAND_MARGIN: i32 = 2;
+
+/// The block-`y` range scanned for `column`: its [`TileSource::column_band`]
+/// widened by [`COLUMN_BAND_MARGIN`], else the fixed fallback constants.
+pub fn column_scan_range(src: &impl TileSource, column: [i32; 2]) -> (i32, i32) {
+    src.column_band(column)
+        .map_or((COLUMN_SCAN_Y_MIN, COLUMN_SCAN_Y_MAX), |(lo, hi)| (lo - COLUMN_BAND_MARGIN, hi + COLUMN_BAND_MARGIN))
+}
+
 /// A standable tile in `column` (`[x, z]`): the one closest to `y_hint`
-/// (lower first on a tie), or the topmost when `None`.
+/// (lower first on a tie), or the topmost when `None`. Scans the column's
+/// band ([`column_scan_range`]).
 pub fn nearest_standable(src: &impl TileSource, column: [i32; 2], y_hint: Option<i32>) -> Option<TilePos> {
     let at = |y: i32| [column[0], y, column[1]];
+    let (y_min, y_max) = column_scan_range(src, column);
     match y_hint {
-        None => (COLUMN_SCAN_Y_MIN..=COLUMN_SCAN_Y_MAX).rev().map(at).find(|&p| standable(src, p)),
+        None => (y_min..=y_max).rev().map(at).find(|&p| standable(src, p)),
         Some(hint) => {
-            let hint = hint.clamp(COLUMN_SCAN_Y_MIN, COLUMN_SCAN_Y_MAX);
-            let span = (hint - COLUMN_SCAN_Y_MIN).max(COLUMN_SCAN_Y_MAX - hint).max(0);
+            let hint = hint.clamp(y_min, y_max);
+            let span = (hint - y_min).max(y_max - hint).max(0);
             (0..=span).find_map(|d| {
                 [hint - d, hint + d]
                     .into_iter()
-                    .filter(|y| (COLUMN_SCAN_Y_MIN..=COLUMN_SCAN_Y_MAX).contains(y))
+                    .filter(|y| (y_min..=y_max).contains(y))
                     .map(at)
                     .find(|&p| standable(src, p))
             })
