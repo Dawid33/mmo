@@ -341,9 +341,10 @@ pub struct WorldManager<S: RegionSpawner> {
     /// `(now_ms, calendar tick)` the calendar was anchored at by [`Self::set_history`].
     calendar_anchor: (u64, CalendarTick),
     /// The fortress each client plays (embarked or returned to, not retired). Not
-    /// persisted: a fortress is played only while its player is connected; on disconnect
-    /// the entry stays (like `homes`) so a reconnect resumes it, but it no longer keeps
-    /// anyone else from returning there (see [`Self::return_to`]).
+    /// persisted. Identity is the connection: a `ClientId` is never reused, so a
+    /// reconnecting player starts with no fortress and must Return to it. On disconnect
+    /// the entry stays (like `homes`) but no longer keeps anyone from returning there;
+    /// the Return drops it (see [`Self::return_to`]).
     fortress_of: BTreeMap<ClientId, SiteId>,
     /// The calendar day last broadcast (`ServerPacket::Calendar`).
     calendar_day: Option<u64>,
@@ -610,15 +611,15 @@ impl<S: RegionSpawner> WorldManager<S> {
         );
     }
 
-    /// Retire: the player stops playing its fortress and leaves its home region, which
-    /// parks by the usual grace rule (its people go back to the abstract history).
+    /// Retire: the player stops playing its fortress and moves back where a fresh
+    /// connection starts (`SPAWN_REGION`); the fortress region parks by the usual grace
+    /// rule (its people go back to the abstract history). No fortress = no-op.
     fn retire(&mut self, id: ClientId, now_ms: u64) {
-        self.fortress_of.remove(&id);
-        if let Some(home) = self.homes.remove(&id) {
-            self.send_play_event(home, GameEventKind::ClientLeft(id));
-            self.refresh_keepalive(home, now_ms);
+        if self.fortress_of.remove(&id).is_none() {
+            return;
         }
-        let _ = self.out.send((Some(id), ServerPacket::PlayerRegion(None, id)));
+        let landing = self.landing_in(SPAWN_REGION);
+        self.move_client(id, SPAWN_REGION, landing, now_ms);
         if let Some(history) = &self.history {
             let _ = self.out.send((Some(id), ServerPacket::Sites(history.site_markers())));
         }
@@ -630,7 +631,8 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// Player identity: there are no accounts and a `ClientId` is one connection, so
     /// "return only to a fortress you founded" is implemented as "only to a
     /// **player-founded** site no other *connected* player is playing" — the same in
-    /// single player. A disconnected player's claim is dropped when someone returns.
+    /// single player. A disconnected player's claim is dropped when someone returns,
+    /// and its player body leaves the region.
     fn return_to(&mut self, id: ClientId, site: SiteId, now_ms: u64) {
         let Some(history) = &self.history else {
             return self.embark_result(id, Err(EmbarkRefusal::NoHistory));
@@ -649,7 +651,16 @@ impl<S: RegionSpawner> WorldManager<S> {
             return self.embark_result(id, Err(EmbarkRefusal::InUse));
         }
         let region = history.site(site).expect("returnable").region;
-        self.fortress_of.retain(|_, s| *s != site);
+        // Drop the disconnected claim and its player body, so the fortress has one
+        // player: the returning one.
+        let stale: Vec<ClientId> = self.fortress_of.iter().filter(|(_, s)| **s == site).map(|(c, _)| *c).collect();
+        for c in stale {
+            self.fortress_of.remove(&c);
+            if let Some(home) = self.homes.remove(&c) {
+                self.send_play_event(home, GameEventKind::ClientLeft(c));
+                self.refresh_keepalive(home, now_ms);
+            }
+        }
         let landing = self.landing_in(region);
         self.move_client(id, region, landing, now_ms);
         self.fortress_of.insert(id, site);

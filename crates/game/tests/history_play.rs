@@ -11,7 +11,7 @@ use game::history::*;
 use game::{
     Biome, ClientId, ClientPacket, EmbarkRequest, GameEvent, GameEventKind, InlineLodBuilder, InlineSpawner,
     LodBuilder, PersonSpawn, RegionCoords, RegionOutput, ServerEvent, ServerPacket, SiteMarker, SpawnAt, WorldManager,
-    WorldMap, TICK_RATE, UNLOAD_GRACE_MS,
+    WorldMap, SPAWN_REGION, TICK_RATE, UNLOAD_GRACE_MS,
 };
 
 fn rc(x: i32, z: i32) -> RegionCoords {
@@ -52,6 +52,8 @@ fn home_site(h: &History) -> (SiteId, CivId, Vec<PersonId>) {
 
 const A: ClientId = 0;
 const B: ClientId = 1;
+/// Player `A` again after a reconnect: client ids are per connection.
+const A2: ClientId = 2;
 
 /// A `WorldManager` over `InlineSpawner` regions, keeping every packet except the big
 /// region snapshots and the per-tick stream.
@@ -166,6 +168,15 @@ impl World {
 
     fn running(&self, r: RegionCoords) -> bool {
         self.manager.running_regions().contains(&r)
+    }
+
+    /// The player bodies (clients) in `r`, if it runs.
+    fn players_in(&mut self, r: RegionCoords) -> Vec<ClientId> {
+        let mut out = Vec::new();
+        if self.running(r) {
+            self.manager.spawner_mut().with_region(r, |region| out.extend(region.data().clients.keys().copied()));
+        }
+        out
     }
 
     fn check(&mut self, when: &str) {
@@ -358,7 +369,7 @@ fn retire_then_return() {
     w.take(A);
     w.packet(A, ClientPacket::Retire);
     let to_a = w.take(A);
-    assert_eq!(player_region(&to_a), Some(None), "no home after retiring");
+    assert_eq!(player_region(&to_a), Some(Some(SPAWN_REGION)), "back where a connection starts");
     let marker = sites_in(&to_a).expect("fresh sites").into_iter().find(|m| m.site == site).unwrap();
     assert!(marker.returnable && !marker.abandoned);
     assert_eq!((marker.region, marker.population, marker.civ), (target, 3, civ));
@@ -370,21 +381,68 @@ fn retire_then_return() {
         assert_eq!(w.history().person(*p).unwrap().location, Location::AtSite(site));
     }
     w.check("parked");
-    // Reconnect: the site is listed as returnable.
+    // Reconnect (a new connection, a new client id): the site is listed as returnable.
     w.send(ServerEvent::ClientDisconnected(A));
-    w.connect(A);
-    let marker = sites_in(&w.take(A)).expect("sites on connect").into_iter().find(|m| m.site == site).unwrap();
+    w.connect(A2);
+    let to_a2 = w.take(A2);
+    assert_eq!(fortress_in(&to_a2), Some(None), "a new connection plays no fortress");
+    let marker = sites_in(&to_a2).expect("sites on connect").into_iter().find(|m| m.site == site).unwrap();
     assert!(marker.returnable);
     // Return: the fortress starts again with its people, the player in it.
-    assert_eq!(w.return_to(A, site), Ok(site));
+    assert_eq!(w.return_to(A2, site), Ok(site));
     assert!(w.running(target));
     let census = bodies(&mut w.manager);
     for p in &chosen {
         assert_eq!(census.get(p), Some(&vec![target]));
     }
-    w.packet(A, ClientPacket::RequestPlayerRegion);
-    assert_eq!(player_region(&w.take(A)), Some(Some(target)));
+    w.packet(A2, ClientPacket::RequestPlayerRegion);
+    assert_eq!(player_region(&w.take(A2)), Some(Some(target)));
     w.check("returned");
+}
+
+#[test]
+fn retire_moves_player_to_spawn() {
+    let (mut w, _, civ, people, free) = embark_world();
+    let target = free[0];
+    w.embark(A, EmbarkRequest { civ, people: people[..2].to_vec(), region: target }).unwrap();
+    w.tick();
+    assert_eq!(w.players_in(target), vec![A]);
+    w.take(A);
+    w.packet(A, ClientPacket::Retire);
+    let to_a = w.take(A);
+    assert!(
+        to_a.iter().any(|p| matches!(p, ServerPacket::PlayerRegion(Some(r), _) if *r == SPAWN_REGION)),
+        "{to_a:?}"
+    );
+    assert_eq!(fortress_in(&to_a), Some(None));
+    w.packet(A, ClientPacket::RequestPlayerRegion);
+    assert_eq!(player_region(&w.take(A)), Some(Some(SPAWN_REGION)), "home is the spawn region");
+    w.tick();
+    assert!(w.players_in(target).is_empty(), "the player left the fortress");
+    assert_eq!(w.players_in(SPAWN_REGION), vec![A]);
+    w.wait(UNLOAD_GRACE_MS);
+    assert!(!w.running(target), "the retired fortress parked");
+    w.check("retired");
+    // Retiring again, with no fortress, changes nothing.
+    w.packet(A, ClientPacket::Retire);
+    assert!(w.take(A).is_empty(), "no-op retire sends nothing");
+    w.tick();
+    assert_eq!(w.players_in(SPAWN_REGION), vec![A]);
+}
+
+#[test]
+fn return_after_reconnect_leaves_one_player_body() {
+    let (mut w, _, civ, people, free) = embark_world();
+    let target = free[0];
+    let site = w.embark(A, EmbarkRequest { civ, people: people[..2].to_vec(), region: target }).unwrap();
+    w.tick();
+    w.send(ServerEvent::ClientDisconnected(A));
+    w.connect(A2);
+    assert_eq!(fortress_in(&w.take(A2)), Some(None));
+    assert_eq!(w.return_to(A2, site), Ok(site));
+    w.tick();
+    assert_eq!(w.players_in(target), vec![A2], "one player body: the returning player's");
+    w.check("returned after reconnect");
 }
 
 #[test]
@@ -527,6 +585,24 @@ fn embark_allowed_in_matches_history() {
     }
 }
 
+#[test]
+fn embark_allowed_in_matches_history_with_an_abandoned_site() {
+    let mut h = history();
+    let (home, civ, people) = home_site(&h);
+    // Two embarks take every member, so the bootstrapped site is abandoned.
+    let max = EMBARK_PLAYER_PARTY_MAX as usize;
+    let first = free_regions(&h)[0];
+    h.player_embark(&EmbarkRequest { civ, people: people[..max].to_vec(), region: first }).unwrap();
+    let second = (0..16).map(|x| rc(x, 0)).find(|r| h.embark_allowed(*r).is_ok()).expect("room for a second embark");
+    h.player_embark(&EmbarkRequest { civ, people: people[max..].to_vec(), region: second }).unwrap();
+    assert!(h.site(home).unwrap().abandoned.is_some(), "the emptied site is abandoned");
+    let sites: Vec<_> = h.sites().map(|s| (s.id, s.region, s.abandoned.is_some())).collect();
+    for x in -1..17 {
+        let r = rc(x, 0);
+        assert_eq!(embark_allowed_in(h.grid(), sites.iter().copied(), r), h.embark_allowed(r), "region {x}");
+    }
+}
+
 fn fortress_in(packets: &[ServerPacket]) -> Option<Option<SiteId>> {
     packets.iter().rev().find_map(|p| match p {
         ServerPacket::Fortress(f) => Some(*f),
@@ -543,9 +619,13 @@ fn fortress_packet_follows_embark_retire_and_reconnect() {
     assert_eq!(fortress_in(&w.take(A)), Some(None), "retire");
     assert_eq!(w.return_to(A, site), Ok(site));
     assert_eq!(fortress_in(&w.take(A)), Some(Some(site)), "return");
+    // A reconnect is a new connection, so a new client id: it plays no fortress until
+    // it returns to one.
     w.send(ServerEvent::ClientDisconnected(A));
-    w.connect(A);
-    assert_eq!(fortress_in(&w.take(A)), Some(Some(site)), "reconnect keeps the fortress");
+    w.connect(A2);
+    assert_eq!(fortress_in(&w.take(A2)), Some(None), "a reconnect starts with none");
+    assert_eq!(w.return_to(A2, site), Ok(site));
+    assert_eq!(fortress_in(&w.take(A2)), Some(Some(site)), "return after reconnect");
     w.connect(B);
     assert_eq!(fortress_in(&w.take(B)), Some(None), "a new player has none");
 }
