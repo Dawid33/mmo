@@ -526,3 +526,26 @@ fn embark_allowed_in_matches_history() {
         assert_eq!(embark_allowed_in(h.grid(), sites.iter().copied(), r), h.embark_allowed(r), "region {x}");
     }
 }
+
+fn fortress_in(packets: &[ServerPacket]) -> Option<Option<SiteId>> {
+    packets.iter().rev().find_map(|p| match p {
+        ServerPacket::Fortress(f) => Some(*f),
+        _ => None,
+    })
+}
+
+#[test]
+fn fortress_packet_follows_embark_retire_and_reconnect() {
+    let (mut w, _, civ, people, free) = embark_world();
+    let site = w.embark(A, EmbarkRequest { civ, people: people[..3].to_vec(), region: free[0] }).unwrap();
+    assert_eq!(fortress_in(&w.take(A)), Some(Some(site)), "embark");
+    w.packet(A, ClientPacket::Retire);
+    assert_eq!(fortress_in(&w.take(A)), Some(None), "retire");
+    assert_eq!(w.return_to(A, site), Ok(site));
+    assert_eq!(fortress_in(&w.take(A)), Some(Some(site)), "return");
+    w.send(ServerEvent::ClientDisconnected(A));
+    w.connect(A);
+    assert_eq!(fortress_in(&w.take(A)), Some(Some(site)), "reconnect keeps the fortress");
+    w.connect(B);
+    assert_eq!(fortress_in(&w.take(B)), Some(None), "a new player has none");
+}

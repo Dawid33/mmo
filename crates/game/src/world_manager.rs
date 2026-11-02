@@ -573,6 +573,10 @@ impl<S: RegionSpawner> WorldManager<S> {
             .unwrap_or([edge / 2, edge / 2])
     }
 
+    fn send_fortress(&self, id: ClientId) {
+        let _ = self.out.send((Some(id), ServerPacket::Fortress(self.fortress_of.get(&id).copied())));
+    }
+
     fn embark_result(&self, id: ClientId, r: Result<SiteId, EmbarkRefusal>) {
         let _ = self.out.send((Some(id), ServerPacket::EmbarkResult(r)));
     }
@@ -595,6 +599,7 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.move_client(id, req.region, landing, now_ms);
         self.fortress_of.insert(id, site);
         self.embark_result(id, Ok(site));
+        self.send_fortress(id);
         crate::perf_event!(
             "embark",
             "client={id} site={} people={} to={},{}",
@@ -617,6 +622,7 @@ impl<S: RegionSpawner> WorldManager<S> {
         if let Some(history) = &self.history {
             let _ = self.out.send((Some(id), ServerPacket::Sites(history.site_markers())));
         }
+        self.send_fortress(id);
     }
 
     /// Return to a retired fortress.
@@ -648,6 +654,7 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.move_client(id, region, landing, now_ms);
         self.fortress_of.insert(id, site);
         self.embark_result(id, Ok(site));
+        self.send_fortress(id);
     }
 
     /// Send each notice the history made to the connected clients whose home is its region.
@@ -717,6 +724,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                 if let (Some(history), Some(now)) = (&self.history, self.calendar_now(now_ms)) {
                     let _ = self.out.send((Some(id), ServerPacket::Calendar(now)));
                     let _ = self.out.send((Some(id), ServerPacket::Sites(history.site_markers())));
+                    self.send_fortress(id);
                 }
             }
             ServerEvent::ClientDisconnected(id) => self.client_disconnected(id, now_ms),

@@ -464,6 +464,8 @@ pub enum ServerPacket {
     /// The answer to `ClientPacket::Embark` and `ClientPacket::ReturnTo`: the site played.
     EmbarkResult(Result<crate::history::SiteId, crate::history::EmbarkRefusal>),
     PersonInfo(PersonInfo),
+    /// The site this client plays (`None`: none): on connect and after Embark / Return / Retire.
+    Fortress(Option<crate::history::SiteId>),
 }
 
 /// A Game event

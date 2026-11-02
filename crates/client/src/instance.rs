@@ -1575,6 +1575,9 @@ impl GameInstanceManager {
             game::ServerPacket::Calendar(c) => {
                 let _ = self.client_event_send.send(ClientUpdateEvent::Calendar(c));
             }
+            game::ServerPacket::Fortress(f) => {
+                let _ = self.client_event_send.send(ClientUpdateEvent::Fortress(f));
+            }
             game::ServerPacket::Notice(n) => {
                 let _ = self.client_event_send.send(ClientUpdateEvent::Notice(n));
             }

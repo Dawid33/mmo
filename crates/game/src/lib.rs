@@ -233,6 +233,7 @@ pub enum ClientUpdateEvent {
     EmbarkResult(Result<history::SiteId, history::EmbarkRefusal>),
     /// World history: one person, for the inspector.
     PersonInfo(PersonInfo),
+    Fortress(Option<history::SiteId>),
 }
 
 #[cfg(not(target_arch = "wasm32"))]

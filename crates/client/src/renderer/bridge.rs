@@ -734,6 +734,7 @@ pub fn drain_client_updates(
             }
             ClientUpdateEvent::Sites(v) => history_out.write(HistoryMsg::Sites(v)),
             ClientUpdateEvent::Calendar(c) => history_out.write(HistoryMsg::Calendar(c)),
+            ClientUpdateEvent::Fortress(f) => history_out.write(HistoryMsg::Fortress(f)),
             ClientUpdateEvent::Notice(n) => history_out.write(HistoryMsg::Notice(n)),
             ClientUpdateEvent::EmbarkOptions(o) => {
                 history_out.write(HistoryMsg::EmbarkOptions(o))

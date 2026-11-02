@@ -218,6 +218,7 @@ pub enum HistoryMsg {
     EmbarkOptions(EmbarkOptions),
     EmbarkResult(Result<SiteId, EmbarkRefusal>),
     PersonInfo(PersonInfo),
+    Fortress(Option<SiteId>),
 }
 
 /// The bridge's writer for [`HistoryMsg`] (a param struct: `drain_client_updates`
@@ -270,6 +271,7 @@ pub fn apply_history_msgs(mut msgs: MessageReader<HistoryMsg>, mut view: ResMut<
     for msg in msgs.read() {
         match msg {
             HistoryMsg::Sites(v) => view.sites = v.clone(),
+            HistoryMsg::Fortress(f) => view.fortress = *f,
             HistoryMsg::Calendar(c) => view.calendar = Some(*c),
             HistoryMsg::Notice(n) => {
                 view.notices.push_back((n.clone(), now));
