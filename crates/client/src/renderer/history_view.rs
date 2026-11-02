@@ -213,12 +213,13 @@ impl HistoryOut<'_> {
     }
 }
 
-/// Drop notices shown for `NOTICE_SHOW_SECS` or longer; the oldest left, if any.
-fn live_notice(notices: &mut VecDeque<(String, f32)>, now: f32) -> Option<&str> {
+/// Drop notices shown for `NOTICE_SHOW_SECS` or longer; whether any was dropped.
+fn prune_notices(notices: &mut VecDeque<(String, f32)>, now: f32) -> bool {
+    let before = notices.len();
     while notices.front().is_some_and(|(_, at)| now - at >= NOTICE_SHOW_SECS) {
         notices.pop_front();
     }
-    notices.front().map(|(t, _)| t.as_str())
+    notices.len() != before
 }
 
 /// Whether a cached person received at `received` should be asked for again at `now`.
@@ -227,9 +228,9 @@ pub fn person_info_refresh_due(received: Option<f32>, now: f32) -> bool {
 }
 
 impl HistoryView {
-    /// The oldest notice younger than `NOTICE_SHOW_SECS`; expired ones are dropped.
-    pub fn current_notice(&mut self, now: f32) -> Option<&str> {
-        live_notice(&mut self.notices, now)
+    /// The oldest notice younger than `NOTICE_SHOW_SECS` (a pure read; `apply_history_msgs` prunes).
+    pub fn current_notice(&self, now: f32) -> Option<&str> {
+        self.notices.iter().find(|(_, at)| now - at < NOTICE_SHOW_SECS).map(|(t, _)| t.as_str())
     }
 
     /// Whether `person` should be requested from the server now.
@@ -240,6 +241,8 @@ impl HistoryView {
 
 pub fn apply_history_msgs(mut msgs: MessageReader<HistoryMsg>, mut view: ResMut<HistoryView>, time: Res<Time>) {
     let now = time.elapsed_secs();
+    // Only an actual expiry marks the resource changed.
+    prune_notices(&mut view.bypass_change_detection().notices, now).then(|| view.set_changed());
     for msg in msgs.read() {
         match msg {
             HistoryMsg::Sites(v) => view.sites = v.clone(),
@@ -274,8 +277,12 @@ mod tests {
         assert_eq!(v.current_notice(1.0), Some("a"));
         assert_eq!(v.current_notice(NOTICE_SHOW_SECS - 0.1), Some("a"));
         assert_eq!(v.current_notice(NOTICE_SHOW_SECS), Some("b"));
-        assert_eq!(v.notices.len(), 1);
+        assert_eq!(v.notices.len(), 2, "reading never prunes");
         assert_eq!(v.current_notice(4.0 + NOTICE_SHOW_SECS), None);
+        assert!(!prune_notices(&mut VecDeque::new(), 0.0));
+        assert!(prune_notices(&mut v.notices, NOTICE_SHOW_SECS));
+        assert_eq!(v.notices.len(), 1);
+        assert!(prune_notices(&mut v.notices, 4.0 + NOTICE_SHOW_SECS));
         assert!(v.notices.is_empty());
     }
 

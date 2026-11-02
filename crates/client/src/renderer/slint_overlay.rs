@@ -1578,12 +1578,13 @@ fn sync_world_map(ui: &GameUi, home: Option<RegionCoords>, p: &mut MapParams) {
     }
     // Play is a dev action; a world without history (no one can embark) keeps it as the way in.
     let no_embark = !embarked && p.history.embark_options.as_ref().is_some_and(|o| o.civs.is_empty());
+    let embark_ui = panel && !no_embark;
     let show_play = cfg!(feature = "dev_ui") || no_embark;
     if ui.get_show_play() != show_play {
         ui.set_show_play(show_play);
     }
-    if ui.get_embark_visible() != (panel && !no_embark) {
-        ui.set_embark_visible(panel && !no_embark);
+    if ui.get_embark_visible() != embark_ui {
+        ui.set_embark_visible(embark_ui);
     }
 
     // Site markers, a model that follows the history without a redraw.
@@ -1621,7 +1622,7 @@ fn sync_world_map(ui: &GameUi, home: Option<RegionCoords>, p: &mut MapParams) {
         ui.set_tile_lines(ModelRc::new(VecModel::from(lines)));
         let blocker = picked.map(|(map, rc)| play_blocker(map, rc, blocker_home(embarked, home)));
         ui.set_play_enabled(!pending && matches!(blocker, Some(None)));
-        let embark_why = if panel { picked.and_then(|(_, rc)| check(rc).err()) } else { None };
+        let embark_why = if embark_ui { picked.and_then(|(_, rc)| check(rc).err()) } else { None };
         let reason = embark_why.map(history_view::embark_refusal_text).or(blocker.flatten()).unwrap_or("");
         ui.set_play_reason(reason.into());
         let region_text = match (picked, embark_why) {
@@ -1629,7 +1630,7 @@ fn sync_world_map(ui: &GameUi, home: Option<RegionCoords>, p: &mut MapParams) {
             (Some(_), Some(why)) => history_view::embark_refusal_text(why).to_string(),
             (Some((_, rc)), None) => format!("Embark in region ({}, {})", rc.x, rc.z),
         };
-        let enabled = panel
+        let enabled = embark_ui
             && !p.history.embark_pending
             && p.history.selection.party_ok()
             && picked.is_some()
@@ -1655,9 +1656,9 @@ fn sync_world_map(ui: &GameUi, home: Option<RegionCoords>, p: &mut MapParams) {
 
     // A dark overlay on the hovered tile when embarking there is refused.
     let (hcol, hrow) = (ui.get_map_hover_col(), ui.get_map_hover_row());
-    if shown.hover_for != Some((hcol, hrow, panel)) {
-        shown.hover_for = Some((hcol, hrow, panel));
-        let blocked = panel && map.and_then(|m| tile_region(m, hcol, hrow)).is_some_and(|rc| check(rc).is_err());
+    if shown.hover_for != Some((hcol, hrow, embark_ui)) {
+        shown.hover_for = Some((hcol, hrow, embark_ui));
+        let blocked = embark_ui && map.and_then(|m| tile_region(m, hcol, hrow)).is_some_and(|rc| check(rc).is_err());
         if ui.get_hover_blocked() != blocked {
             ui.set_hover_blocked(blocked);
         }
