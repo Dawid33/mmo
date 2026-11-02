@@ -157,6 +157,8 @@ pub enum UiAction {
     Embark,
     /// A "Return to <site>" button (index into `HistoryView::returnable`).
     ReturnTo(i32),
+    /// The Esc menu's Retire fortress button.
+    Retire,
 }
 
 /// The region a Play request was sent for, until we are there with its region
@@ -609,6 +611,7 @@ fn connect_game_ui(ui: &GameUi, world: &mut World) {
     ui.on_close_map(push(UiAction::CloseMap));
     ui.on_close_menu(push(UiAction::CloseMenu));
     ui.on_main_menu(push(UiAction::MainMenu));
+    ui.on_retire(push(UiAction::Retire));
     // wasm has no main menu to leave to (one in-process session).
     ui.set_can_leave(cfg!(not(target_arch = "wasm32")));
     ui.on_play(push(UiAction::Play));
@@ -1134,6 +1137,30 @@ fn apply_ui_actions(
                     history.embark_pending = true;
                 }
             }
+            UiAction::Retire => {
+                if history.fortress.is_none() || history.embark_pending {
+                    continue;
+                }
+                if !requests.as_ref().is_some_and(|r| r.0.send(ClientRequest::Retire).is_ok()) {
+                    warn!("[embark] retire not sent: no game thread");
+                    continue;
+                }
+                // Back to the arrival map: the embark panel returns with the
+                // site as a returnable one (fresh options and sites follow).
+                history.fortress = None;
+                history.retired = true;
+                history.options_requested = false;
+                history.embark_result = None;
+                history.embark_refusal = None;
+                if let Some(embarked) = embarked.as_mut() {
+                    embarked.0 = false;
+                }
+                if let Some(follow) = follow.as_mut() {
+                    follow.0 = None;
+                }
+                to.menu = false;
+                // `arrival_map` opens the (now modal) map.
+            }
             UiAction::OpenMap => to = Screens::open_map(),
             UiAction::CloseMap => to.map = false,
             UiAction::CloseMenu => to.menu = false,
@@ -1210,8 +1237,9 @@ fn apply_embark_result(
     let Some(result) = history.embark_result.take() else { return };
     history.embark_pending = false;
     match result {
-        Ok(_) => {
+        Ok(site) => {
             history.retired = false;
+            history.fortress = Some(site);
             if let Some(embarked) = embarked.as_mut() {
                 embarked.0 = true;
             }
@@ -1502,6 +1530,13 @@ struct MapParams<'w, 's> {
     shown: crate::session::SessionLocal<'w, 's, MapShown>,
     history: ResMut<'w, HistoryView>,
     requests: Option<Res<'w, ClientRequests>>,
+    inspected: crate::session::SessionLocal<'w, 's, Inspected>,
+}
+
+/// The person last requested for the inspector, and when (secs).
+#[derive(Default)]
+struct Inspected {
+    asked: Option<(game::history::PersonId, f32)>,
 }
 
 /// The map picture, home and selected tile, tile info, Play state and
@@ -1674,8 +1709,14 @@ fn sync_world_map(ui: &GameUi, home: Option<RegionCoords>, p: &mut MapParams) {
     if ui.get_map_status() != status {
         ui.set_map_status(status.into());
     }
-    if ui.get_game_status() != status {
-        ui.set_game_status(status.into());
+    // The map status wins; with none, the current history notice.
+    let game_status = if status.is_empty() { p.history.current_notice(now).unwrap_or("") } else { status };
+    if ui.get_game_status() != game_status {
+        ui.set_game_status(game_status.into());
+    }
+    let can_retire = p.history.fortress.is_some() && embarked;
+    if ui.get_can_retire() != can_retire {
+        ui.set_can_retire(can_retire);
     }
 }
 
@@ -1699,12 +1740,36 @@ fn push_ui_state(
         );
         ui.set_connection(format!("{:?}", status.connection).into());
     }
-    let Some(selection) = selection.filter(|s| s.is_changed()) else { return };
-    let kinds = entities
+    let Some(selection) = selection else { return };
+    let kinds: Vec<game::EntityKind> = entities
         .iter()
         .filter(|(e, _)| selection.contains(e.region, e.key))
-        .map(|(_, kind)| kind.0);
-    let lines: Vec<SharedString> = selection_lines(kinds).into_iter().map(Into::into).collect();
+        .map(|(_, kind)| kind.0)
+        .collect();
+    // Exactly one person selected: the inspector asks for (and shows) their info.
+    let person = match kinds[..] {
+        [game::EntityKind::Person { person }] => Some(person),
+        _ => None,
+    };
+    let now = map.time.elapsed_secs();
+    if let Some(person) = person {
+        let inspected = map.inspected.get();
+        let due = map.history.person_refresh_due(person, now)
+            && inspected.asked.is_none_or(|(p, at)| p != person || history_view::person_info_refresh_due(Some(at), now));
+        if due && map.requests.as_ref().is_some_and(|r| r.0.send(ClientRequest::RequestPersonInfo(person)).is_ok()) {
+            inspected.asked = Some((person, now));
+        }
+    }
+    if !(selection.is_changed() || map.history.is_changed()) {
+        return;
+    }
+    let lines: Vec<SharedString> = match person {
+        Some(person) => {
+            let info = map.history.people.get(&person).map(|(i, _)| i);
+            history_view::person_lines(person, info).into_iter().map(Into::into).collect()
+        }
+        None => selection_lines(kinds).into_iter().map(Into::into).collect(),
+    };
     ui.set_selected_count(selection.0.len() as i32);
     ui.set_selection_lines(ModelRc::new(VecModel::from(lines)));
 }

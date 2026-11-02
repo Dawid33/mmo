@@ -137,6 +137,10 @@ export component GameUi inherits Window {
     callback close-menu();
     // The menu's Main menu button: leave the world.
     callback main-menu();
+    // The menu's Retire fortress button.
+    callback retire();
+    // Whether the menu offers Retire fortress.
+    in property <bool> can-retire;
     // Whether the menu offers Main menu (false on wasm, which has no menu).
     in property <bool> can-leave: true;
     // Not embarked yet: the world map is the embark step. Its Close is gone,
@@ -272,6 +276,8 @@ export component GameUi inherits Window {
         open-map => { root.open-map(); }
         close-menu => { root.close-menu(); }
         main-menu => { root.main-menu(); }
+        can-retire: root.can-retire;
+        retire => { root.retire(); }
     }
 
     // Over everything else. `visible` rather than `if`, so its hit-test

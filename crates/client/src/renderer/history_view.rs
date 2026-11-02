@@ -42,6 +42,9 @@ pub struct HistoryView {
     /// The player retired their fortress: the embark panel is back (set by the
     /// Retire flow).
     pub retired: bool,
+    /// The player's fortress (set by a successful Embark / Return, cleared by
+    /// Retire): the Esc menu offers Retire while it is `Some`.
+    pub fortress: Option<SiteId>,
 }
 
 /// The embark panel's choice: a civ (index into `EmbarkOptions::civs`) and at
@@ -185,6 +188,27 @@ impl HistoryView {
     }
 }
 
+/// The inspector's lines for one selected person: `info` once it arrived,
+/// otherwise a placeholder from the id. Empty parts are left out.
+pub fn person_lines(person: PersonId, info: Option<&PersonInfo>) -> Vec<String> {
+    let Some(info) = info else { return vec![format!("Dwarf {}", person.0)] };
+    let mut lines = vec![info.name.clone()];
+    lines.push(if info.alive { format!("age {}", info.age_years) } else { format!("age {} (deceased)", info.age_years) });
+    if let Some(site) = &info.site {
+        lines.push(site.clone());
+    }
+    if let Some(spouse) = &info.spouse {
+        lines.push(format!("married to {spouse}"));
+    }
+    if !info.parents.is_empty() {
+        lines.push(format!("parents: {}", info.parents.join(", ")));
+    }
+    if !info.children.is_empty() {
+        lines.push(format!("children: {}", info.children.join(", ")));
+    }
+    lines
+}
+
 /// Bridge -> [`HistoryView`].
 #[derive(Message, Debug, Clone)]
 pub enum HistoryMsg {
@@ -284,6 +308,31 @@ mod tests {
         assert_eq!(v.notices.len(), 1);
         assert!(prune_notices(&mut v.notices, 4.0 + NOTICE_SHOW_SECS));
         assert!(v.notices.is_empty());
+    }
+
+    #[test]
+    fn person_lines_full_family() {
+        let info = PersonInfo {
+            person: PersonId(4),
+            name: "Urist".into(),
+            age_years: 31,
+            alive: true,
+            site: Some("Boatmurdered".into()),
+            spouse: Some("Lorbam".into()),
+            parents: vec!["Aban".into(), "Besmar".into()],
+            children: vec!["Cog".into()],
+        };
+        assert_eq!(
+            person_lines(PersonId(4), Some(&info)),
+            ["Urist", "age 31", "Boatmurdered", "married to Lorbam", "parents: Aban, Besmar", "children: Cog"]
+        );
+        let lone = PersonInfo { site: None, spouse: None, parents: vec![], children: vec![], alive: false, ..info };
+        assert_eq!(person_lines(PersonId(4), Some(&lone)), ["Urist", "age 31 (deceased)"]);
+    }
+
+    #[test]
+    fn person_lines_pending() {
+        assert_eq!(person_lines(PersonId(9), None), ["Dwarf 9"]);
     }
 
     #[test]
