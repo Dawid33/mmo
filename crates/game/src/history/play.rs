@@ -4,7 +4,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::chain::EmbarkRefusal;
-use super::log::LogKind;
+use super::log::{LogEntry, LogKind};
 use super::records::*;
 use super::rules::EMBARK_PLAYER_PARTY_MAX;
 use super::History;
@@ -92,9 +92,9 @@ impl History {
         // The fortress is not running yet, so the founding made no notice: its player,
         // about to play it, gets one all the same.
         if !self.region_live(req.region) {
-            if let Some(line) = self.log.last().map(|e| e.describe(self)) {
-                self.notices.push((req.region, line));
-            }
+            let kind = LogKind::SiteFounded { site, civ: req.civ, founders: req.people.clone(), from };
+            let line = LogEntry { at: self.now, kind }.describe(self);
+            self.notices.push((req.region, line));
         }
         Ok(site)
     }

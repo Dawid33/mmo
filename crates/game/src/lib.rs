@@ -233,6 +233,8 @@ pub enum ClientUpdateEvent {
     EmbarkResult(Result<history::SiteId, history::EmbarkRefusal>),
     /// World history: one person, for the inspector.
     PersonInfo(PersonInfo),
+    /// World history: the fortress this client plays (`None` = none), from the server's
+    /// `ServerPacket::Fortress` (sent on connect, embark, retire and return).
     Fortress(Option<history::SiteId>),
 }
 

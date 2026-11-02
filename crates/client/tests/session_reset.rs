@@ -219,7 +219,13 @@ fn assert_no_world_state(app: &mut App, fresh_ui: &[(&'static str, String)], fre
             && hv.notices.is_empty()
             && hv.embark_options.is_none()
             && hv.embark_result.is_none()
-            && hv.people.is_empty(),
+            && hv.people.is_empty()
+            && hv.fortress.is_none()
+            && !hv.retired
+            && hv.selection == Default::default()
+            && !hv.options_requested
+            && !hv.embark_pending
+            && hv.embark_refusal.is_none(),
         "HistoryView"
     );
     assert_eq!(w.resource::<FarVoxelResidency>().resident_count(), 0, "far residency");
@@ -278,6 +284,17 @@ fn second_session_starts_clean() {
     assert!(!app.world().resource::<ChunkGrid>().0.is_empty(), "the first session meshed terrain");
     assert_ne!(live_game_ui(&app), fresh_ui, "the first session showed itself in the game UI");
     assert_eq!(active_ui_cameras(&mut app), vec![(false, true)], "in the world the commander camera has the UI");
+    // A played fortress and a half-made embark choice, which must not reach the next world.
+    {
+        let mut hv = app.world_mut().resource_mut::<HistoryView>();
+        hv.fortress = Some(game::history::SiteId(3));
+        hv.retired = true;
+        hv.selection.pick_civ(0);
+        hv.selection.chosen.insert(game::history::PersonId(5));
+        hv.options_requested = true;
+        hv.embark_pending = true;
+        hv.embark_refusal = Some((game::history::EmbarkRefusal::NoHistory, 1.0));
+    }
 
     leave(&mut app);
     drop(first);
