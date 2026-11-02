@@ -59,7 +59,7 @@ async fn webtransport_client_full_handshake() {
     let bind = "127.0.0.1:16467".parse().unwrap();
     let ingress_sinks = sinks.clone();
     tokio::spawn(async move {
-        webtransport::serve(bind, event_send, ingress_sinks, next_id)
+        webtransport::serve(bind, webtransport::CertSource::SelfSigned, event_send, ingress_sinks, next_id)
             .await
             .unwrap();
     });

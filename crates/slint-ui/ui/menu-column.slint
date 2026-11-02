@@ -1,0 +1,100 @@
+import { Button, FrameFace, GraphicalSets, LabelFace, Styles, VerticalFlow } from "@widgets";
+
+export global MenuLayout {
+    out property <length> width: 260px;
+    // Flush with the screen corner.
+    out property <length> margin: 0px;
+}
+
+// The top-right column: the game's menu buttons, and under them the context
+// box (Factorio-style) for what the player is doing right now — the active
+// designation tool and the selection. The box draws nothing when there is
+// neither. Embedded in `GameUi`; the client fills it
+// (renderer/slint_overlay.rs).
+export component MenuColumn {
+    callback open-settings();
+    callback open-encyclopedia();
+
+    // The active tool's name; "" = no tool.
+    in property <string> tool-name;
+    in property <int> priority;
+    // "Level 64 · 6 below surface"; "" until the level is known.
+    in property <string> level-text;
+
+    in property <int> selected-count;
+    // The inspector's lines (one person) or a count per kind.
+    in property <[string]> selection-lines;
+    in property <bool> following;
+    callback clear-selection();
+    callback follow-clicked();
+    // The DF-style top-down view is on (commander/top_down.rs): the box
+    // says so, with the level and the way back to 3D.
+    in property <bool> top-down;
+    callback top-down-clicked();
+
+    width: MenuLayout.width;
+    height: column.preferred-height;
+
+    column := VerticalLayout {
+        spacing: 4px;
+        alignment: start;
+
+        HorizontalLayout {
+            alignment: end;
+            spacing: 4px;
+            Button {
+                text: "Settings";
+                clicked => { root.open-settings(); }
+            }
+            Button {
+                text: "Encyclopedia";
+                clicked => { root.open-encyclopedia(); }
+            }
+        }
+
+        // Following outlives the selection (Clear selection does not end it),
+        // so Stop following stays reachable with nothing selected.
+        if root.top-down || root.tool-name != "" || root.selected-count > 0 || root.following: box := FrameFace {
+            height: self.content-y + body.preferred-height + Styles.frame.box.padding.bottom
+                + GraphicalSets.inset(Styles.frame.graphics).bottom;
+
+            body := VerticalFlow {
+                x: box.content-x;
+                y: box.content-y;
+                width: box.content-right - box.content-x;
+
+                if root.top-down: LabelFace {
+                    style: Styles.caption-label;
+                    text: "Top-down view";
+                }
+                if root.top-down && root.tool-name == "" && root.level-text != "": LabelFace { text: root.level-text; }
+                if root.top-down: LabelFace { text: "Wheel: level · Ctrl+wheel / [ ]: zoom"; }
+                if root.top-down: Button {
+                    text: "3D view  [V]";
+                    clicked => { root.top-down-clicked(); }
+                }
+                if root.tool-name != "": LabelFace {
+                    style: Styles.caption-label;
+                    text: root.tool-name;
+                }
+                if root.tool-name != "": LabelFace { text: "Priority " + root.priority + "  [1–7]"; }
+                if root.tool-name != "" && root.level-text != "": LabelFace { text: root.level-text; }
+
+                if root.selected-count > 0: LabelFace {
+                    style: Styles.caption-label;
+                    text: "Selected: " + root.selected-count;
+                }
+                for line in (root.selected-count > 0 ? root.selection-lines : []): LabelFace { text: line; }
+                if root.selected-count > 0 || root.following: Button {
+                    text: root.following ? "Stop following" : "Follow";
+                    enabled: root.selected-count == 1 || root.following;
+                    clicked => { root.follow-clicked(); }
+                }
+                if root.selected-count > 0: Button {
+                    text: "Clear selection";
+                    clicked => { root.clear-selection(); }
+                }
+            }
+        }
+    }
+}

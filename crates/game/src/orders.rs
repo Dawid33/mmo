@@ -400,29 +400,56 @@ impl Rollback {
         builds.sort_by_key(|(p, _)| p[1]);
         let mut removals: Vec<_> = all.iter().copied().filter(|(_, d)| !is_build(d)).collect();
         removals.sort_by_key(|(p, _)| std::cmp::Reverse(p[1]));
+        // Writes go through `fill_blocks_safe` in batches (one undo entry per
+        // chunk, not per tile): under `HashMode::Full` every entry re-hashes
+        // its whole field, and a per-tile loop over a few hundred tiles took
+        // seconds on a play-size region — on the server, in the client's
+        // prediction and again on every rollback and replay of it.
+        // Validity is checked tile by tile in the old order: a tile's
+        // validity never depends on another dig or build, only on a chop
+        // (which can fell blocks below it), so pending digs are flushed
+        // before each chop.
         let mut constructed = Vec::new();
-        for (p, d) in builds.into_iter().chain(removals) {
+        let mut placing: BTreeMap<BlockId, Vec<TilePos>> = BTreeMap::new();
+        for (p, d) in builds {
+            if let DesignationKind::Build(id) = d.kind {
+                if validate(self, d.kind, p).is_ok() {
+                    placing.entry(id).or_default().push(p);
+                }
+            }
+        }
+        for (id, tiles) in placing {
+            constructed.extend(self.fill_blocks_safe(&tiles, Block::new(id)).into_iter().map(|p| (p, true)));
+        }
+        let mut clearing = Vec::new();
+        for (p, d) in removals {
+            if d.kind == DesignationKind::Chop {
+                self.clear_tiles_safe(&mut clearing, &mut constructed);
+            }
             if validate(self, d.kind, p).is_err() {
                 continue;
             }
             match d.kind {
-                DesignationKind::Build(id) => {
-                    if self.set_block_safe(p, Block::new(id)) {
-                        constructed.push((p, true));
-                    }
-                }
-                DesignationKind::Dig | DesignationKind::Deconstruct => {
-                    // A refused write (e.g. the tile became bedrock) leaves
-                    // the construction standing, flag included.
-                    if self.set_block_safe(p, Block::new(BlockId::AIR)) && self.data.constructed.contains_key(&p) {
-                        constructed.push((p, false));
-                    }
-                }
+                DesignationKind::Build(_) => unreachable!("builds were done first"),
+                DesignationKind::Dig | DesignationKind::Deconstruct => clearing.push(p),
                 DesignationKind::Chop => self.chop_safe(p),
             }
         }
+        self.clear_tiles_safe(&mut clearing, &mut constructed);
         self.set_constructed_safe(constructed);
         self.set_designations_safe(all.into_iter().map(|(p, _)| (p, None)).collect());
+    }
+
+    /// Clears the pending dig / deconstruct tiles in one batch and drops
+    /// their constructed flags. A refused write (e.g. the tile became
+    /// bedrock) leaves the construction standing, flag included.
+    fn clear_tiles_safe(&mut self, tiles: &mut Vec<TilePos>, constructed: &mut Vec<(TilePos, bool)>) {
+        if tiles.is_empty() {
+            return;
+        }
+        let cleared = self.fill_blocks_safe(tiles, Block::new(BlockId::AIR));
+        constructed.extend(cleared.into_iter().filter(|p| self.data.constructed.contains_key(p)).map(|p| (p, false)));
+        tiles.clear();
     }
 
     /// Fells the tree at `p` (`trees::fell`, computed first): clears the cut

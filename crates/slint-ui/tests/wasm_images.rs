@@ -16,7 +16,6 @@ const SCAN: u32 = 400;
 fn panel_sprites_draw() {
     let mut overlay: Overlay<GameUi> = Overlay::new().expect("game UI");
     overlay.resize(WIDTH, HEIGHT, 1.0);
-    overlay.ui().set_panel_open(true);
     overlay.render();
     let drawn = (0..SCAN)
         .flat_map(|y| (WIDTH - SCAN..WIDTH).map(move |x| (x, y)))

@@ -15,7 +15,7 @@ pub mod rng;
 pub mod rules;
 
 pub use calendar::*;
-pub use chain::{embark_allowed_in, EmbarkRefusal};
+pub use chain::{embark_allowed_in, player_embark_allowed_in, EmbarkRefusal};
 pub use handover::Directive;
 pub use grid::*;
 pub use records::*;

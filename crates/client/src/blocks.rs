@@ -1,8 +1,8 @@
 //! Loads the shared block registry on the client. Prefers the runtime
 //! manifest under `assets/blocks/` on native (edit + restart, no rebuild);
 //! falls back to the copy embedded at build time, which is also what the
-//! browser (no filesystem) uses. Both the renderer (textures) and the offline
-//! `LocalServer` (worldgen material ids) read through here, so a single repo
+//! browser (no filesystem) uses. Both the renderer (textures) and the
+//! test harnesses' `LocalServer` (worldgen material ids) read through here, so a single repo
 //! file drives client identity.
 
 use game::BlockRegistry;

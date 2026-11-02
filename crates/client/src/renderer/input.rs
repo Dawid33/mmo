@@ -111,6 +111,7 @@ pub fn forward_input(
     game: Res<GameEvents>,
     cursor: Option<Res<super::cursor::CursorPolicy>>,
     mode: Option<Res<super::commander::CameraMode>>,
+    first_person: Option<Res<super::commander::first_person::FirstPerson>>,
 ) {
     let last_size = last_size.get();
     let coalescer = coalescer.get();
@@ -119,6 +120,10 @@ pub fn forward_input(
     // client-local (camera, minimap, selection) and must not walk the inert
     // sim body or break blocks. Only the window size still reaches the sim.
     let commander = mode.is_some_and(|m| *m == super::commander::CameraMode::Commander);
+    // ...unless the commander's adventurer is in first person: then the body
+    // takes the keys and the mouse, all but E — the sim's own fps-cam toggle,
+    // which `first_person` owns here.
+    let first_person = commander && first_person.is_some_and(|fp| fp.on);
     // A client-local overlay (dev panel, chat) owns the pointer: its clicks and
     // the mouse travel to reach it must not break blocks or turn the camera.
     // Releases still go through so a button held when it opened never sticks.
@@ -129,6 +134,13 @@ pub fn forward_input(
 
     if !commander {
         forward_body_input(&keys, &buttons, &motion, &time, &coalesce_window, coalescer, &window, overlay_open, send);
+    } else if first_person {
+        let send_body = |ev: InputEvent| {
+            if !matches!(ev, InputEvent::Key { key: game::Key::KeyE, .. }) {
+                send(ev);
+            }
+        };
+        forward_body_input(&keys, &buttons, &motion, &time, &coalesce_window, coalescer, &window, overlay_open, send_body);
     }
     if let Ok((w, _)) = window.single() {
         let size = (w.physical_width(), w.physical_height());

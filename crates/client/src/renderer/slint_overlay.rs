@@ -31,7 +31,8 @@ use bevy::input::ButtonState;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
-use game::{PlayRefusal, RegionCoords, WorldMap};
+use game::history::PersonId;
+use game::{EntityKey, PlayRefusal, RegionCoords, RegionId, WorldMap};
 use slint_ui::slint::platform::{Key as SlintKey, PointerEventButton, WindowEvent};
 use slint_ui::slint::{
     ComponentHandle, Image as SlintImage, LogicalPosition, ModelRc, Rgba8Pixel, SharedPixelBuffer,
@@ -48,20 +49,19 @@ use super::commander::level::{focus_surface, surface_level, WorkingLevel};
 use super::commander::minimap;
 use super::commander::selection::{Selection, SelectionBand};
 use super::commander::tiles::TileMirror;
-use super::commander::adventure::{ClientPlayMode, ToggleModeRequest};
+use super::commander::adventure::ClientPlayMode;
 use super::commander::follow::{Follow, FollowTarget};
 use super::commander::CommanderCamera;
 use super::cursor::CursorPolicy;
 use super::slint_composite::{SlintCompositePlugin, SlintLayerTextures};
 use super::hud::{crosshair_visible, HudStatus};
+use super::fortress_panel;
 use super::history_view::{self, HistoryView};
 use super::world_map::WorldMapState;
 use super::ClientRequests;
 use crate::instance::ClientRequest;
 use crate::session::{arrival_map_shown, frontend_owns, world_systems_enabled, AppState, Embarked, SessionResetExt};
 
-/// Shows and hides the panel.
-pub const SLINT_PANEL_KEY: KeyCode = KeyCode::F9;
 /// Closes the world map if it is open, else opens / closes the menu —
 /// unless a designation is in progress, which it cancels instead.
 pub const MENU_KEY: KeyCode = KeyCode::Escape;
@@ -82,16 +82,13 @@ pub const WHEEL_LINE_PX: f32 = 40.0;
 pub const GAME_LAYER_ORDER: i32 = 1_000;
 /// The pass-through HUD (crosshair, selection band, minimap).
 pub const HUD_LAYER_ORDER: i32 = 0;
-/// The F3 dev panel, above everything (`dev_ui`).
-pub const DEV_LAYER_ORDER: i32 = 2_000;
-/// The frontend (menu screens, starting screen) above the game UI; the dev
-/// panel stays on top.
+/// The frontend (menu screens, starting screen) above the game UI.
 pub const FRONTEND_LAYER_ORDER: i32 = 1_500;
 
 /// When a layer gives way to the frontend.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum FrontendHide {
-    /// Always drawn (the dev panel, the frontend itself).
+    /// Always drawn (the frontend itself).
     #[default]
     Never,
     /// Hidden while the frontend owns the screen (the HUD).
@@ -144,11 +141,18 @@ pub enum UiAction {
     SelectTile(i32, i32),
     /// The map's Play button: ask the server for the selected tile.
     Play,
-    /// The panel's mode button: Fortress ↔ Adventure
-    /// (`commander::adventure`).
-    ToggleMode,
     /// Follow the selected entity, or stop following.
     ToggleFollow,
+    /// The context box's "3D view" button: leave the top-down view.
+    ToggleTopDown,
+    /// The menu column's Settings / Encyclopedia buttons, and Close on
+    /// either stub window.
+    OpenSettings,
+    OpenEncyclopedia,
+    CloseWindow,
+    /// A People row clicked in the fortress panel (index into
+    /// [`PeopleRows`]): select that person.
+    PickPerson(i32),
     /// The embark panel's civ button (index into the options' civs).
     EmbarkPickCiv(i32),
     /// A person's check box (site index, person index in the picked civ).
@@ -174,22 +178,33 @@ pub struct Screens {
     /// The tool wheel ([`tool_wheel`]): modal while open, so the commander
     /// leaves the right button and the world alone.
     pub wheel: bool,
+    /// The menu column's stub windows (`ui/stub-window.slint`).
+    pub settings: bool,
+    pub encyclopedia: bool,
 }
 
 impl Screens {
     fn of(ui: &GameUi) -> Self {
-        Self { menu: ui.get_menu_open(), map: ui.get_map_open(), wheel: ui.get_wheel_open() }
+        Self {
+            menu: ui.get_menu_open(),
+            map: ui.get_map_open(),
+            wheel: ui.get_wheel_open(),
+            settings: ui.get_settings_open(),
+            encyclopedia: ui.get_encyclopedia_open(),
+        }
     }
 
     pub fn any(self) -> bool {
-        self.menu || self.map || self.wheel
+        self.menu || self.map || self.wheel || self.settings || self.encyclopedia
     }
 
     /// [`MENU_KEY`] (with no designation to cancel): the wheel closes first,
-    /// then the map.
+    /// then a stub window, then the map.
     pub fn escape(self) -> Self {
         if self.wheel {
             Self { wheel: false, ..self }
+        } else if self.settings || self.encyclopedia {
+            Self { settings: false, encyclopedia: false, ..self }
         } else if self.map {
             Self { map: false, ..self }
         } else {
@@ -210,11 +225,21 @@ impl Screens {
         Self { map: true, ..Self::default() }
     }
 
+    /// The menu column's Settings button.
+    pub fn open_settings() -> Self {
+        Self { settings: true, ..Self::default() }
+    }
+
+    /// The menu column's Encyclopedia button.
+    pub fn open_encyclopedia() -> Self {
+        Self { encyclopedia: true, ..Self::default() }
+    }
+
     /// [`MENU_KEY`] with the arrival map `modal` (not embarked yet): Esc
     /// only swaps the map for the Esc menu (Main menu only) and back.
     pub fn escape_in(self, modal: bool) -> Self {
         if modal {
-            Self { menu: !self.menu, map: self.menu, wheel: false }
+            Self { menu: !self.menu, map: self.menu, ..Self::default() }
         } else {
             self.escape()
         }
@@ -467,10 +492,10 @@ impl Plugin for SlintOverlayPlugin {
             SlintLayerPlugin::new(GameUi::new).shown_on_arrival_map().session_scoped().with_init(connect_game_ui),
         )
             .add_session_reset::<PlayPending>()
+            .add_session_reset::<PeopleRows>()
             .add_systems(
                 Update,
                 (
-                    toggle_panel,
                     // Before every commander input system (the chain starts
                     // at `minimap_pointer`, `designate_keys` is in it), so
                     // `CursorPolicy::ui_modal` holds this frame and one Esc
@@ -612,8 +637,6 @@ fn connect_game_ui(ui: &GameUi, world: &mut World) {
     ui.on_close_menu(push(UiAction::CloseMenu));
     ui.on_main_menu(push(UiAction::MainMenu));
     ui.on_retire(push(UiAction::Retire));
-    // wasm has no main menu to leave to (one in-process session).
-    ui.set_can_leave(cfg!(not(target_arch = "wasm32")));
     ui.on_play(push(UiAction::Play));
     ui.on_embark_go(push(UiAction::Embark));
     let queue = actions.clone();
@@ -622,8 +645,13 @@ fn connect_game_ui(ui: &GameUi, world: &mut World) {
     ui.on_embark_toggle_person(move |s, p| queue.borrow_mut().push(UiAction::EmbarkTogglePerson(s, p)));
     let queue = actions.clone();
     ui.on_embark_return_to(move |i| queue.borrow_mut().push(UiAction::ReturnTo(i)));
-    ui.on_toggle_mode(push(UiAction::ToggleMode));
     ui.on_follow_clicked(push(UiAction::ToggleFollow));
+    ui.on_top_down_clicked(push(UiAction::ToggleTopDown));
+    ui.on_open_settings(push(UiAction::OpenSettings));
+    ui.on_open_encyclopedia(push(UiAction::OpenEncyclopedia));
+    ui.on_close_window(push(UiAction::CloseWindow));
+    let queue = actions.clone();
+    ui.on_person_picked(move |i| queue.borrow_mut().push(UiAction::PickPerson(i)));
     let layers: Vec<SharedString> = MapLayer::ALL.iter().map(|l| l.label().into()).collect();
     ui.set_map_layer_names(ModelRc::new(VecModel::from(layers)));
     let queue = actions.clone();
@@ -639,6 +667,8 @@ fn connect_game_ui(ui: &GameUi, world: &mut World) {
         "the map image's grid line and the map window's must agree"
     );
     world.insert_non_send(GameUiActions(actions));
+    #[cfg(feature = "dev_ui")]
+    super::dev_ui::connect_debug_tab(ui, world);
 }
 
 fn setup_slint_layer<C: ComponentHandle + 'static>(
@@ -842,14 +872,6 @@ fn slint_input<C: ComponentHandle + 'static>(
     }
 }
 
-fn toggle_panel(keys: Res<ButtonInput<KeyCode>>, slint: Option<NonSend<SlintLayer<GameUi>>>) {
-    let Some(slint) = slint else { return };
-    if keys.just_pressed(SLINT_PANEL_KEY) {
-        let ui = slint.overlay.ui();
-        ui.set_panel_open(!ui.get_panel_open());
-    }
-}
-
 /// The map tile (column, row) of region `rc`, `None` off the map.
 pub fn map_tile(map: &WorldMap, rc: RegionCoords) -> Option<(i32, i32)> {
     map.tile(rc)?;
@@ -965,6 +987,12 @@ fn set_screens(
     if from.wheel != to.wheel {
         ui.set_wheel_open(to.wheel);
     }
+    if from.settings != to.settings {
+        ui.set_settings_open(to.settings);
+    }
+    if from.encyclopedia != to.encyclopedia {
+        ui.set_encyclopedia_open(to.encyclopedia);
+    }
     // Not embarked, the world behind is not ours to touch even with no
     // screen open (before the map arrives).
     let modal = to.any() || !embarked;
@@ -986,7 +1014,7 @@ fn menu_keys(
     embarked: Option<Res<Embarked>>,
 ) {
     let Some(slint) = slint else { return };
-    // The dev panel holds the keyboard.
+    // The Debug tab, open over a grabbed cursor (`dev_ui`), holds the keyboard.
     if policy.as_ref().is_some_and(|p| p.overlay_open) {
         return;
     }
@@ -1054,8 +1082,11 @@ fn apply_ui_actions(
     mut policy: Option<ResMut<CursorPolicy>>,
     requests: Option<Res<ClientRequests>>,
     status: Res<HudStatus>,
-    mut mode_toggles: Option<ResMut<Messages<ToggleModeRequest>>>,
-    mut follow: Option<ResMut<Follow>>,
+    people: Res<PeopleRows>,
+    (mut follow, mut top_down_requests): (
+        Option<ResMut<Follow>>,
+        Option<ResMut<Messages<super::commander::top_down::ToggleTopDownRequest>>>,
+    ),
     local_body: Query<&SimEntity, With<LocalBody>>,
     mut session_ended: Option<ResMut<Messages<crate::session::SessionEnded>>>,
     mut embarked: Option<ResMut<Embarked>>,
@@ -1073,9 +1104,22 @@ fn apply_ui_actions(
                     selection.0.clear();
                 }
             }
-            UiAction::ToggleMode => {
-                if let Some(toggles) = mode_toggles.as_mut() {
-                    toggles.write(ToggleModeRequest);
+            UiAction::OpenSettings => to = Screens::open_settings(),
+            UiAction::OpenEncyclopedia => to = Screens::open_encyclopedia(),
+            UiAction::CloseWindow => {
+                to.settings = false;
+                to.encyclopedia = false;
+            }
+            UiAction::PickPerson(i) => {
+                let row = usize::try_from(i).ok().and_then(|i| people.0.get(i));
+                if let (Some(&(region, key, _)), Some(selection)) = (row, selection.as_mut()) {
+                    selection.0.clear();
+                    selection.0.insert((region, key));
+                }
+            }
+            UiAction::ToggleTopDown => {
+                if let Some(requests) = top_down_requests.as_mut() {
+                    requests.write(super::commander::top_down::ToggleTopDownRequest);
                 }
             }
             UiAction::ToggleFollow => {
@@ -1148,6 +1192,7 @@ fn apply_ui_actions(
                 // Back to the arrival map: the embark panel returns with the
                 // site as a returnable one (fresh options and sites follow).
                 history.fortress = None;
+                history.fortress_region = None;
                 history.retired = true;
                 history.options_requested = false;
                 history.embark_result = None;
@@ -1433,6 +1478,7 @@ struct ToolbarParams<'w, 's> {
     mirror: Option<Res<'w, TileMirror>>,
     mode: Option<Res<'w, ClientPlayMode>>,
     follow: Option<Res<'w, Follow>>,
+    top_down: Option<Res<'w, super::commander::top_down::TopDown>>,
     window: Query<'w, 's, &'static Window, With<PrimaryWindow>>,
     /// The cut the wheel's items were last captioned for; `None` before
     /// the first set.
@@ -1447,6 +1493,10 @@ fn sync_toolbar(ui: &slint_ui::GameUi, ui_scale: f32, p: &mut ToolbarParams) {
     let adventure = p.mode.as_ref().is_some_and(|m| m.adventure());
     if ui.get_adventure() != adventure {
         ui.set_adventure(adventure);
+    }
+    let top_down = p.top_down.as_ref().is_some_and(|t| t.on);
+    if ui.get_top_down() != top_down {
+        ui.set_top_down(top_down);
     }
     let following = p.follow.as_ref().is_some_and(|f| f.0.is_some());
     if ui.get_following() != following {
@@ -1470,6 +1520,10 @@ fn sync_toolbar(ui: &slint_ui::GameUi, ui_scale: f32, p: &mut ToolbarParams) {
     let active = tool_index(state.tool);
     if ui.get_active_tool() != active {
         ui.set_active_tool(active);
+    }
+    let tool_name = state.tool.map_or("", Tool::label);
+    if ui.get_tool_name() != tool_name {
+        ui.set_tool_name(tool_name.into());
     }
     if ui.get_priority() != state.priority as i32 {
         ui.set_priority(state.priority as i32);
@@ -1720,6 +1774,107 @@ fn sync_world_map(ui: &GameUi, home: Option<RegionCoords>, p: &mut MapParams) {
     }
 }
 
+/// The People tab's rows as last pushed (region, entity, person), for
+/// [`UiAction::PickPerson`].
+#[derive(Resource, Default)]
+pub struct PeopleRows(pub Vec<(RegionId, EntityKey, PersonId)>);
+
+/// What the fortress panel was last given, and the People tab's name
+/// requests.
+#[derive(Default)]
+struct FortressShown {
+    governance: Option<Vec<String>>,
+    designations: Option<Vec<String>>,
+    names: Option<Vec<String>>,
+    /// When each person's info was last asked for by the People tab (secs).
+    asked: BTreeMap<PersonId, f32>,
+    /// The current one-second request window: (start secs, requests sent).
+    window: (f32, u32),
+}
+
+#[derive(SystemParam)]
+struct FortressParams<'w, 's> {
+    people: ResMut<'w, PeopleRows>,
+    shown: crate::session::SessionLocal<'w, 's, FortressShown>,
+}
+
+/// The fortress panel's tabs (`fortress_panel` shapes the lines), each
+/// pushed only when its source changed. While the People tab is open, rows
+/// with no name yet are asked for, at most
+/// [`fortress_panel::PERSON_NAME_REQUESTS_PER_SEC`] a second.
+fn sync_fortress_panel(
+    ui: &GameUi,
+    home: Option<RegionCoords>,
+    entities: &Query<(&SimEntity, &SimKind)>,
+    mirror: Option<&Res<TileMirror>>,
+    map: &MapParams,
+    p: &mut FortressParams,
+) {
+    let shown = p.shown.get();
+    let history = &map.history;
+    if history.is_changed() || shown.governance.is_none() {
+        let site = history.fortress.and_then(|f| history.sites.iter().find(|s| s.site == f));
+        let lines = fortress_panel::governance_lines(history.calendar, site);
+        if shown.governance.as_ref() != Some(&lines) {
+            ui.set_governance_lines(string_model(&lines));
+            shown.governance = Some(lines);
+        }
+    }
+    if let Some(mirror) = mirror {
+        if mirror.is_changed() || shown.designations.is_none() {
+            let lines = fortress_panel::designation_lines(mirror.designations());
+            if shown.designations.as_ref() != Some(&lines) {
+                ui.set_designation_lines(string_model(&lines));
+                shown.designations = Some(lines);
+            }
+        }
+    }
+
+    let mut rows: Vec<(RegionId, EntityKey, PersonId)> = entities
+        .iter()
+        .filter(|(e, _)| Some(e.region) == home)
+        .filter_map(|(e, kind)| match kind.0 {
+            game::EntityKind::Person { person } => Some((e.region, e.key, person)),
+            _ => None,
+        })
+        .collect();
+    rows.sort_by_key(|&(_, _, person)| person);
+    let names: Vec<String> =
+        rows.iter().map(|&(_, _, person)| fortress_panel::person_name(person, history.people.get(&person).map(|(i, _)| i))).collect();
+    if shown.names.as_ref() != Some(&names) {
+        ui.set_people_names(string_model(&names));
+        shown.names = Some(names);
+    }
+
+    if ui.get_fortress_tab() == 1 {
+        let now = map.time.elapsed_secs();
+        if now - shown.window.0 >= 1.0 {
+            shown.window = (now, 0);
+        }
+        for &(_, _, person) in &rows {
+            if shown.window.1 >= fortress_panel::PERSON_NAME_REQUESTS_PER_SEC {
+                break;
+            }
+            let asked_recently = shown.asked.get(&person).is_some_and(|&at| !history_view::person_info_refresh_due(Some(at), now));
+            if history.people.contains_key(&person) || asked_recently {
+                continue;
+            }
+            if map.requests.as_ref().is_some_and(|r| r.0.send(ClientRequest::RequestPersonInfo(person)).is_ok()) {
+                shown.asked.insert(person, now);
+                shown.window.1 += 1;
+            }
+        }
+    }
+    if p.people.0 != rows {
+        p.people.0 = rows;
+    }
+}
+
+fn string_model(lines: &[String]) -> ModelRc<SharedString> {
+    let lines: Vec<SharedString> = lines.iter().map(|l| l.as_str().into()).collect();
+    ModelRc::new(VecModel::from(lines))
+}
+
 /// Client state → panel properties, only when it changed (every set marks
 /// the UI dirty and costs a repaint).
 fn push_ui_state(
@@ -1729,17 +1884,13 @@ fn push_ui_state(
     entities: Query<(&SimEntity, &SimKind)>,
     mut toolbar: ToolbarParams,
     mut map: MapParams,
+    mut fortress: FortressParams,
 ) {
     let Some(slint) = slint else { return };
     let ui = slint.overlay.ui();
     sync_toolbar(ui, slint.ui_scale, &mut toolbar);
     sync_world_map(ui, status.home_region, &mut map);
-    if status.is_changed() {
-        ui.set_home_region(
-            status.home_region.map_or("--".into(), |r| format!("({}, {})", r.x, r.z)).into(),
-        );
-        ui.set_connection(format!("{:?}", status.connection).into());
-    }
+    sync_fortress_panel(ui, status.home_region, &entities, toolbar.mirror.as_ref(), &map, &mut fortress);
     let Some(selection) = selection else { return };
     let kinds: Vec<game::EntityKind> = entities
         .iter()
@@ -1963,6 +2114,23 @@ mod tests {
         assert!(!hides(FrontendHide::Always, &Embarked(true), &world_map));
         assert!(!hides(FrontendHide::Never, &not, &world_map));
         assert!(!frontend_hides(FrontendHide::Always, None, None, None), "headless: never");
+    }
+
+    #[test]
+    fn escape_closes_a_stub_window_before_the_menu() {
+        let open = Screens::open_settings();
+        assert!(open.any());
+        let closed = open.escape();
+        assert_eq!(closed, Screens::default(), "Esc closes Settings, opens nothing");
+        assert!(closed.escape().menu, "the next Esc opens the menu");
+        let wheel_over = Screens { wheel: true, ..Screens::open_encyclopedia() };
+        assert_eq!(wheel_over.escape(), Screens::open_encyclopedia(), "the wheel closes first");
+    }
+
+    #[test]
+    fn map_key_closes_a_stub_window() {
+        assert_eq!(Screens::open_encyclopedia().toggle_map(), Screens::open_map());
+        assert_eq!(Screens::open_settings().toggle_map(), Screens::open_map());
     }
 
     #[test]

@@ -44,14 +44,14 @@ impl RollbackInfo {
 /// One block's full new state in a terrain edit: what `SetBlocks` carries.
 /// The renderer writes the block's 16³ voxels from it (its chisel materials,
 /// else `block.id` throughout).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct BlockDelta {
     pub index: BlockIndex,
     pub block: Block,
     pub chisel: Option<ChiselData>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum GameDataUpdateKind {
     SetVoxelComponent(EntityKey, Option<Vec<Voxel>>),
     /// Blocks of a terrain chunk that changed, each as its full new state.
@@ -90,7 +90,7 @@ pub enum GameDataUpdateKind {
     SetConstructed(Vec<(crate::TilePos, bool)>),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct GameDataUpdate {
     pub do_kind: GameDataTransactionKind,
     pub update_kind: GameDataUpdateKind,
@@ -105,7 +105,7 @@ impl GameDataUpdate {
     }
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum GameDataTransactionKind {
     Do,
     Undo,

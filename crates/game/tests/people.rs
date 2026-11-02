@@ -644,3 +644,61 @@ fn client_replica_converges_on_person_events() {
     assert_eq!(here.iter().map(|(p, _)| *p).collect::<Vec<_>>(), vec![P], "on the map's edge, not over it");
     assert_eq!(client.data(&common::r0()).people_here(), here);
 }
+
+// ---- world autosave ----
+
+#[test]
+fn saved_region_restores_without_players_or_people() {
+    let (mut r, out) = person_runner();
+    r.handle_input(RegionInput::Event(GameEventKind::CreateClient(4)));
+    r.handle_input(spawn_ev(PersonId(2), SpawnAt::Column([10, 10])));
+    for _ in 0..3 {
+        r.tick();
+    }
+    assert!(r.handle_input(RegionInput::Save), "Save does not stop the region");
+    let saved = out
+        .try_iter()
+        .find_map(|(_, o)| match o {
+            RegionOutput::Saved(rb) => Some(rb),
+            _ => None,
+        })
+        .expect("Saved");
+    assert_eq!(saved.people_here().len(), 1, "the save is the live state");
+    assert!(saved.player_entites.contains_key(&4));
+    let (tick, terrain) = (r.region_mut().current_tick(), r.region_mut().terrain_fingerprint());
+    // Through the disk format (bincode) and back, as a restarted server loads it.
+    let blob = game::RegionSave::Live(saved).into_serialized();
+    let restored = game::restore_saved(common::r0(), blob.to_rollback().unwrap());
+    let data = restored.data();
+    assert!(data.people_here().is_empty(), "the history respawns its people");
+    assert!(data.player_entites.is_empty() && data.clients.is_empty(), "no stale sessions");
+    assert!(data.data.ecs.kind.iter().all(|(_, k)| !matches!(k, Some(game::EntityKind::Person { .. }))));
+    assert_eq!(restored.current_tick(), tick);
+    assert_eq!(restored.terrain_fingerprint(), terrain);
+}
+
+#[test]
+fn request_save_collects_running_then_parked_regions_once() {
+    let mut h = harness();
+    connect_and_subscribe(&mut h);
+    let running = h.manager.running_regions();
+    assert!(!running.is_empty());
+    h.manager.request_save();
+    h.settle(0);
+    let saves = h.manager.take_saves();
+    assert_eq!(saves.len(), running.len(), "every running region answers");
+    assert!(saves.iter().all(|(_, s)| matches!(s, game::RegionSave::Live(_))));
+    h.manager.shutdown_all();
+    h.settle(0);
+    assert!(h.manager.running_regions().is_empty());
+    h.manager.request_save();
+    let saves = h.manager.take_saves();
+    let mut parked: Vec<_> = saves.iter().map(|(rc, _)| *rc).collect();
+    parked.sort();
+    let mut expected = running.clone();
+    expected.sort();
+    assert_eq!(parked, expected, "each parked region once");
+    assert!(saves.iter().all(|(_, s)| matches!(s, game::RegionSave::Parked(_))));
+    h.manager.request_save();
+    assert!(h.manager.take_saves().is_empty(), "an unchanged parked blob is not saved twice");
+}

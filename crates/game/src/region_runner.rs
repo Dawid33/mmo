@@ -48,6 +48,9 @@ pub enum RegionInput {
     /// The finite world's extent (`Region::set_map_extent`): the manager
     /// sends it right after spawning, before any tick, when it has a map.
     SetMapExtent(Option<crate::MapExtent>),
+    /// World autosave: replied with `RegionOutput::Saved(state)`, a clone of
+    /// the live state (like a snapshot). Does not affect sim state.
+    Save,
     /// Graceful stop; replied with `RegionOutput::Stopped(state)`.
     Shutdown,
 }
@@ -55,6 +58,13 @@ pub enum RegionInput {
 #[derive(Debug)]
 pub enum RegionOutput {
     EventProcessed(GameEvent),
+    /// An `EventProcessed` that also carries the region's
+    /// [`crate::state_hash`] right after the event: a `Tick` landing on a
+    /// multiple of [`crate::state_hash_interval`]. Fanned out as
+    /// `ServerPacket::HashedGameEvent`, so the hash can never be split from
+    /// the event it describes.
+    /// Fields: the event, the tick it ran, the hash.
+    EventProcessedHashed(GameEvent, Tick, u32),
     Snapshot(ClientId, Rollback),
     /// Reply to `RequestTerrain`: read-only terrain for one requester.
     Terrain(ClientId, TerrainSnapshot),
@@ -71,6 +81,58 @@ pub enum RegionOutput {
     /// body here, with its region-local translation. They were despawned
     /// first, so the parked blob holds no people; the manager owns them.
     PeopleParked(Vec<(crate::history::PersonId, [f32; 3])>),
+    /// Reply to `Save`: the live state, serialized off the region thread.
+    /// It still holds this session's players and the history's people —
+    /// [`restore_saved`] strips both when it is loaded again.
+    Saved(Box<Rollback>),
+}
+
+/// One region's state for the world autosave: a running region's live clone
+/// (`RegionOutput::Saved`) or a parked blob. Either restores through
+/// [`restore_saved`].
+#[derive(Debug)]
+pub enum RegionSave {
+    Live(Box<Rollback>),
+    Parked(SerializedRegion),
+}
+
+impl RegionSave {
+    pub fn into_serialized(self) -> SerializedRegion {
+        match self {
+            RegionSave::Live(rollback) => SerializedRegion::from_rollback(&rollback),
+            RegionSave::Parked(serialized) => serialized,
+        }
+    }
+}
+
+/// A region restored from a saved state of an EARLIER server process. Its
+/// player bodies belong to sessions that no longer exist (client ids restart
+/// at 0, so a stale one would collide with a new connection) and its people
+/// belong to the history, which spawns them again as the region starts
+/// (`History::region_started`) — both are removed before the region runs.
+/// In-process parked blobs never need this: their people were despawned at
+/// `Shutdown` and their players are still this process's.
+pub fn restore_saved(id: RegionId, rollback: Rollback) -> Region {
+    let mut region = Region::new(rollback, None, id, None);
+    let clients: Vec<ClientId> = region.data().clients.keys().copied().collect();
+    let people: Vec<crate::history::PersonId> = region.data().person_entities.keys().copied().collect();
+    let events = clients
+        .into_iter()
+        .filter(|c| region.data().player_entites.contains_key(c))
+        .map(GameEventKind::ClientLeft)
+        .chain(people.into_iter().map(GameEventKind::DespawnPerson));
+    for kind in events.collect::<Vec<_>>() {
+        if let Err(e) = region.handle_event(kind) {
+            log::error!("restoring saved region {id:?}: {e:?}");
+        }
+        region.commit_server_event();
+    }
+    // A client entry without a body (none expected) is stale all the same.
+    let stale: Vec<ClientId> = region.data().clients.keys().copied().collect();
+    if !stale.is_empty() {
+        log::warn!("restoring saved region {id:?}: {} client entries without a body kept", stale.len());
+    }
+    region
 }
 
 /// How to build a region when it spawns: restored from the parking lot if
@@ -152,6 +214,9 @@ pub struct RegionRunner {
     held: std::collections::VecDeque<(GameEventKind, u64)>,
     /// See [`RegionRunner::baseline_hash_time`].
     baseline_hash_time: std::time::Duration,
+    /// Cost of the every-`state_hash_interval()` state hashes since the last
+    /// `take_state_hash_cost` (metrics only): count, total, slowest.
+    state_hash_cost: (u32, std::time::Duration, std::time::Duration),
 }
 
 /// Furthest ahead of a region's tick a client event may be stamped and still
@@ -176,7 +241,15 @@ impl RegionRunner {
             terrain_hash_cost: Default::default(),
             held: Default::default(),
             baseline_hash_time,
+            state_hash_cost: Default::default(),
         }
+    }
+
+    /// `(checks, total, slowest)` of the every-`state_hash_interval()` state
+    /// hashes since the previous call; resets it. Like the terrain hash it
+    /// runs inside a tick, so `slowest` is a floor on that tick's duration.
+    pub fn take_state_hash_cost(&mut self) -> (u32, std::time::Duration, std::time::Duration) {
+        std::mem::take(&mut self.state_hash_cost)
     }
 
     /// Wall time of the baseline `terrain_fingerprint` taken in `new`
@@ -227,6 +300,9 @@ impl RegionRunner {
                 ));
             }
             RegionInput::SetMapExtent(extent) => self.region.set_map_extent(extent),
+            RegionInput::Save => {
+                let _ = self.out.send((self.id, RegionOutput::Saved(Box::new(self.region.data().clone()))));
+            }
             RegionInput::Shutdown => {
                 // Input must not be lost to a park.
                 for (kind, _) in std::mem::take(&mut self.held) {
@@ -266,7 +342,21 @@ impl RegionRunner {
             .handle_event(GameEventKind::Tick)
             .expect("region tick failed");
         self.region.commit_server_event();
-        let _ = self.out.send((self.id, RegionOutput::EventProcessed(event)));
+        // Hashed before the held events below, so it describes the state the
+        // client holds right after confirming this Tick.
+        let interval = crate::state_hash_interval();
+        let output = if interval > 0 && self.region.current_tick() % interval == 0 {
+            let watch = crate::perf::Stopwatch::start();
+            let hash = crate::state_hash(self.region.data());
+            let took = watch.elapsed();
+            self.state_hash_cost.0 += 1;
+            self.state_hash_cost.1 += took;
+            self.state_hash_cost.2 = self.state_hash_cost.2.max(took);
+            RegionOutput::EventProcessedHashed(event, self.region.current_tick(), hash)
+        } else {
+            RegionOutput::EventProcessed(event)
+        };
+        let _ = self.out.send((self.id, output));
         // Events predicted after the tick that just ran, in arrival order.
         let now = self.region.current_tick() as u64;
         let mut i = 0;

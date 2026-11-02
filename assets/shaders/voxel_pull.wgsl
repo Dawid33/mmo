@@ -1,6 +1,6 @@
 // Pulled voxel forward shader. Record layout mirrored from
 // crates/client/src/renderer/meshing/records.rs (the source of truth):
-//   w0: x:6|y:6|z:6|face:3|ao0:2|ao1:2|ao2:2|ao3:2|flip:1|cutout:1|interior:1   w1: w:6|h:6|layer:16
+//   w0: x:6|y:6|z:6|face:3|ao0:2|ao1:2|ao2:2|ao3:2|flip:1|cutout:1|interior:1   w1: w:6|h:6|layer:11|bx:3|by:3|bz:3
 // The cutout bit needs no decoding: cutout records sit in their own range,
 // drawn by the CUTOUT pipeline (alpha test, double-sided); the opaque
 // pipeline never discards for alpha. The interior bit (the quad faces a dug
@@ -301,7 +301,11 @@ fn vertex(
     let cu = corner & 1u;
     let cv = corner >> 1u;
 
-    let record_pos = vec3<u32>(w0 & 63u, (w0 >> 6u) & 63u, (w0 >> 12u) & 63u);
+    // Brick-local corner + the brick's place in a merged list (w1 bits 23..32:
+    // bx | by << 3 | bz << 6; records.rs `with_brick`) times 32 voxels.
+    let brick = w1 >> 23u;
+    let record_pos = vec3<u32>(w0 & 63u, (w0 >> 6u) & 63u, (w0 >> 12u) & 63u)
+        + 32u * vec3<u32>(brick & 7u, (brick >> 3u) & 7u, (brick >> 6u) & 7u);
     var pos = record_pos;
     pos[FACE_UA[face]] += cu * (w1 & 63u);
     pos[FACE_VA[face]] += cv * ((w1 >> 6u) & 63u);
@@ -355,7 +359,7 @@ fn vertex(
     // Must match ao::AO_CURVE / pack::shade (test-pinned there).
     let ao_strength = clamp(1.0 - log2(max(scale.x, 1.0)) / AO_FADE_LOG2, 0.0, 1.0);
     out.shade = mix(1.0, 0.55 + 0.15 * f32(ao), ao_strength);
-    out.layer = (w1 >> 12u) & 65535u;
+    out.layer = (w1 >> 12u) & 2047u;
     return out;
 }
 
@@ -454,9 +458,28 @@ fn top_layer(layer: u32) -> u32 {
     return layer;
 }
 
+// Whether the view is orthographic (the commander's top-down view,
+// commander/top_down.rs): its clip_from_view keeps w = 1.
+fn view_is_orthographic() -> bool {
+    return view.clip_from_view[3][3] == 1.0;
+}
+
+// The view's forward direction in world space (−view z).
+fn view_forward() -> vec3<f32> {
+    return -vec3<f32>(view.view_from_world[0].z, view.view_from_world[1].z, view.view_from_world[2].z);
+}
+
 // Where the eye ray to `p` crosses the cut plane `cut`, when the eye is above
-// it and `p` below; else `p` itself.
+// it and `p` below; else `p` itself. Under an orthographic view every eye
+// ray runs along the view's forward, not from its position.
 fn cut_crossing(p: vec3<f32>, cut: f32) -> vec3<f32> {
+    if (view_is_orthographic()) {
+        let fwd = view_forward();
+        if (p.y < cut && fwd.y < 0.0) {
+            return p + fwd * ((cut - p.y) / fwd.y);
+        }
+        return p;
+    }
     let eye = view.world_position;
     let dy = p.y - eye.y;
     if (eye.y > cut && dy < 0.0) {
@@ -527,10 +550,14 @@ fn fragment(
 #endif
 
     // One block's height in pixels at this distance (perspective:
-    // clip_from_view[1][1] = 1 / tan(fov_y / 2), viewport.w = height).
+    // clip_from_view[1][1] = 1 / tan(fov_y / 2), viewport.w = height;
+    // orthographic: clip_from_view[1][1] = 2 / view height, no distance).
     let distance = length(world_position.xyz - view.world_position);
-    let block_px = BLOCK_VOXELS * view.clip_from_view[1][1] * view.viewport.w
+    var block_px = BLOCK_VOXELS * view.clip_from_view[1][1] * view.viewport.w
         / (2.0 * max(distance, 1e-3));
+    if (view_is_orthographic()) {
+        block_px = BLOCK_VOXELS * view.clip_from_view[1][1] * view.viewport.w / 2.0;
+    }
     let riser_fade = (1.0 - abs(n.y))
         * (1.0 - smoothstep(RISER_FADE_END_PX, RISER_FADE_START_PX, block_px));
     var light_n = n;

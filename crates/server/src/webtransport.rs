@@ -1,10 +1,18 @@
 //! WebTransport ingress: browsers can't speak raw QUIC, so they connect here
-//! (HTTP/3 Extended CONNECT on 127.0.0.1:6467) and are routed into the same
-//! ServerEvent channel and ClientSink map as quinn clients. Wire format is
-//! identical: one uni-stream per bincode packet.
+//! (HTTP/3 Extended CONNECT on `VOXEL_BIND_ADDR`:6467, 127.0.0.1 by default) and
+//! are routed into the same ServerEvent channel and ClientSink map as quinn
+//! clients. Wire format is identical: one uni-stream per bincode packet.
+//!
+//! Two certificate sources ([`CertSource`]): in dev a self-signed cert the page
+//! pins by hash (`assets/webtransport-cert-hash.json`); when deployed
+//! (`just deploy`) a real certificate for the page's hostname — the Let's
+//! Encrypt one the reverse proxy obtains — read from `VOXEL_WT_CERT` /
+//! `VOXEL_WT_KEY` and reloaded whenever the files change (renewals).
 use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 
 use crossbeam::channel::Sender;
 use dashmap::DashMap;
@@ -18,32 +26,132 @@ use crate::ClientSink;
 /// payloads and stay well under this.
 const MAX_PACKET_BYTES: usize = 64 * 1024 * 1024;
 
-pub async fn serve(
-    bind: SocketAddr,
-    send: Sender<ServerEvent>,
-    sinks: Arc<DashMap<ClientId, ClientSink>>,
-    next_client_id: Arc<AtomicUsize>,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // serverCertificateHashes requires an ECDSA cert valid <= 14 days;
-    // wtransport's self-signed identity satisfies both.
-    let identity = Identity::self_signed(["localhost", "127.0.0.1"])?;
-    // Dev nicety, not load-bearing: never fail the ingress over it.
-    if let Err(e) = write_cert_hash_file(&identity, bind.port()) {
-        warn!("could not write cert-hash file (browser clients need it): {e:?}");
-    }
+/// PEM certificate chain for the ingress (set together with [`WT_KEY_ENV`]).
+pub const WT_CERT_ENV: &str = "VOXEL_WT_CERT";
+/// PEM private key for the ingress (set together with [`WT_CERT_ENV`]).
+pub const WT_KEY_ENV: &str = "VOXEL_WT_KEY";
 
-    let config = ServerConfig::builder()
+/// How often the certificate files are checked for a renewal, and how often
+/// the ingress retries while they don't exist yet (the proxy obtains the
+/// certificate only once DNS points at the box).
+const CERT_POLL: Duration = Duration::from_secs(60);
+
+/// Where the ingress's certificate comes from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CertSource {
+    /// Minted at start, pinned by the page through the hash file (dev).
+    SelfSigned,
+    /// A real certificate on disk, reloaded when its files change.
+    Files { cert: PathBuf, key: PathBuf },
+}
+
+/// The certificate source from the values of [`WT_CERT_ENV`] / [`WT_KEY_ENV`]:
+/// both or neither (empty counts as unset).
+pub fn cert_source_from(cert: Option<&str>, key: Option<&str>) -> Result<CertSource, String> {
+    let cert = cert.map(str::trim).filter(|v| !v.is_empty());
+    let key = key.map(str::trim).filter(|v| !v.is_empty());
+    match (cert, key) {
+        (None, None) => Ok(CertSource::SelfSigned),
+        (Some(cert), Some(key)) => Ok(CertSource::Files { cert: cert.into(), key: key.into() }),
+        _ => Err(format!("set both {WT_CERT_ENV} and {WT_KEY_ENV}, or neither")),
+    }
+}
+
+fn server_config(bind: SocketAddr, identity: Identity) -> ServerConfig {
+    ServerConfig::builder()
         .with_bind_address(bind)
         .with_identity(identity)
         // A browser that vanishes without a close frame (tab killed, laptop
         // lid, frozen headless run) must be DETECTED, or its sink wedges the
         // shared writer task once the dead peer's stream credit runs out —
         // which stalls outgoing traffic for every client.
-        .keep_alive_interval(Some(std::time::Duration::from_secs(3)))
-        .max_idle_timeout(Some(std::time::Duration::from_secs(10)))
+        .keep_alive_interval(Some(Duration::from_secs(3)))
+        .max_idle_timeout(Some(Duration::from_secs(10)))
         .expect("static idle timeout is in range")
-        .build();
-    let endpoint = Endpoint::server(config)?;
+        .build()
+}
+
+/// The pair of modification times that identifies one version of the files.
+fn cert_version(cert: &Path, key: &Path) -> Option<(SystemTime, SystemTime)> {
+    let modified = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+    Some((modified(cert)?, modified(key)?))
+}
+
+/// Loads the files, waiting (and logging) until they exist and parse.
+async fn load_identity_waiting(cert: &Path, key: &Path) -> (Identity, Option<(SystemTime, SystemTime)>) {
+    loop {
+        let version = cert_version(cert, key);
+        match Identity::load_pemfiles(cert, key).await {
+            Ok(identity) => return (identity, version),
+            Err(e) => warn!(
+                "webtransport certificate {} / {} not loadable yet ({e}); retrying in {}s",
+                cert.display(),
+                key.display(),
+                CERT_POLL.as_secs()
+            ),
+        }
+        tokio::time::sleep(CERT_POLL).await;
+    }
+}
+
+/// Reloads the endpoint's certificate whenever the files change. A change is
+/// applied once the files have stayed the same for a whole poll, so a renewal
+/// caught between writing the chain and the key is not loaded half-done.
+async fn watch_cert_files(
+    endpoint: Arc<Endpoint<wtransport::endpoint::endpoint_side::Server>>,
+    bind: SocketAddr,
+    cert: PathBuf,
+    key: PathBuf,
+    mut loaded: Option<(SystemTime, SystemTime)>,
+) {
+    let mut seen = loaded;
+    loop {
+        tokio::time::sleep(CERT_POLL).await;
+        let now = cert_version(&cert, &key);
+        let settled = now.is_some() && now == seen && now != loaded;
+        seen = now;
+        if !settled {
+            continue;
+        }
+        match Identity::load_pemfiles(&cert, &key).await {
+            Ok(identity) => match endpoint.reload_config(server_config(bind, identity), false) {
+                Ok(()) => {
+                    info!("webtransport certificate reloaded from {}", cert.display());
+                    loaded = now;
+                }
+                Err(e) => warn!("webtransport certificate reload failed: {e:?}"),
+            },
+            Err(e) => warn!("webtransport certificate changed but does not load: {e}"),
+        }
+    }
+}
+
+pub async fn serve(
+    bind: SocketAddr,
+    certs: CertSource,
+    send: Sender<ServerEvent>,
+    sinks: Arc<DashMap<ClientId, ClientSink>>,
+    next_client_id: Arc<AtomicUsize>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let endpoint = match &certs {
+        CertSource::SelfSigned => {
+            // serverCertificateHashes requires an ECDSA cert valid <= 14 days;
+            // wtransport's self-signed identity satisfies both.
+            let identity = Identity::self_signed(["localhost", "127.0.0.1"])?;
+            // Dev nicety, not load-bearing: never fail the ingress over it.
+            if let Err(e) = write_cert_hash_file(&identity, bind.port()) {
+                warn!("could not write cert-hash file (browser clients need it): {e:?}");
+            }
+            Arc::new(Endpoint::server(server_config(bind, identity))?)
+        }
+        CertSource::Files { cert, key } => {
+            let (identity, version) = load_identity_waiting(cert, key).await;
+            info!("webtransport certificate loaded from {}", cert.display());
+            let endpoint = Arc::new(Endpoint::server(server_config(bind, identity))?);
+            tokio::spawn(watch_cert_files(endpoint.clone(), bind, cert.clone(), key.clone(), version));
+            endpoint
+        }
+    };
     info!("WebTransport endpoint listening on {bind}");
 
     loop {
@@ -126,4 +234,21 @@ fn write_cert_hash_file(
     );
     std::fs::write(path, json)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod cert_tests {
+    use super::*;
+
+    #[test]
+    fn cert_source_is_both_files_or_self_signed() {
+        assert_eq!(cert_source_from(None, None), Ok(CertSource::SelfSigned));
+        assert_eq!(cert_source_from(Some(""), Some(" ")), Ok(CertSource::SelfSigned));
+        assert_eq!(
+            cert_source_from(Some("/c.crt"), Some("/c.key")),
+            Ok(CertSource::Files { cert: "/c.crt".into(), key: "/c.key".into() })
+        );
+        assert!(cert_source_from(Some("/c.crt"), None).is_err());
+        assert!(cert_source_from(None, Some("/c.key")).is_err());
+    }
 }

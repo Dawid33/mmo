@@ -6,7 +6,7 @@
     <meta http-equiv="X-UA-Compatible" content="IE=edge">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <link rel="icon" href="data:,">
-    <title>Labour of Love</title>
+    <title>Orion</title>
 
     <style>
         html,
@@ -80,7 +80,7 @@
 
 <body>
     <div id="loading">
-        <div id="loading-label">Loading Labour of Love&hellip;</div>
+        <div id="loading-label">Loading Orion&hellip;</div>
         <div id="loading-track">
             <div id="loading-fill"></div>
         </div>
@@ -140,7 +140,18 @@
                 label.textContent = "Starting…";
                 document.getElementById("loading-fill").style.width = "100%";
 
-                await wasm_bindgen({ module_or_path: bytes }).catch(error => {
+                // Compile once and keep the module: the game's Web Workers
+                // (`crates/client/src/web_worker/`: the sim worker and the
+                // compute pool) instantiate this same compiled module from
+                // `globalThis.__orionWasm` instead of fetching and compiling
+                // the binary again.
+                const module = await WebAssembly.compile(bytes);
+                globalThis.__orionWasm = {
+                    js: new URL('./api/wasm.js', import.meta.url).href,
+                    module,
+                    base: document.baseURI,
+                };
+                await wasm_bindgen({ module_or_path: module }).catch(error => {
                     if (!error.message.startsWith("Using exceptions for control flow, don't mind me. This isn't actually an error!")) {
                         throw error;
                     }
@@ -177,6 +188,13 @@
             intervalToken = setInterval(reloadIfChanged, reloadInterval);
         }
 
+        // wasm-server-runner's console forwarding (`just web`: it serves /ws and
+        // prints the page's logs in its terminal). A deployed page (https on a real
+        // host — the same rule as crates/client/src/web_endpoint.rs) has no /ws:
+        // there the socket would only fail, and queue every log line forever.
+        const devServer = window.location.protocol !== "https:"
+            || ["localhost", "127.0.0.1", "[::1]"].includes(window.location.hostname);
+        if (devServer) {
         let queuedMessages = [];
         let websocket = new WebSocket(((window.location.protocol === "https:") ? "wss://" : "ws://") + window.location.host + "/ws");
 
@@ -282,6 +300,7 @@
                 }
             };
         }
+        } // devServer
 
         run();
         startReloadInterval();

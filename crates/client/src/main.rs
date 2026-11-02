@@ -1,14 +1,10 @@
 //! Game client
 // #![deny(missing_docs)]
 use bevy::prelude::*;
-#[cfg(target_arch = "wasm32")]
-use game::GameEventKind;
 #[cfg(not(target_arch = "wasm32"))]
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 
 use client::renderer;
-#[cfg(target_arch = "wasm32")]
-use client::sim_driver;
 use client::world_scale::WorldScale;
 #[cfg(not(target_arch = "wasm32"))]
 use client::instance::{start_game_thread, Command};
@@ -97,7 +93,22 @@ fn app_exit_code(exit: &bevy::app::AppExit) -> i32 {
     }
 }
 
+/// A Web Worker's entry (`web_worker`): the worker's bootstrap script calls it
+/// once the module is instantiated. In the binary crate so wasm-bindgen
+/// exports it from the bin's wasm.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen]
+pub fn orion_worker_main(role: String, base: String) {
+    client::web_worker::worker_main(&role, base);
+}
+
 fn main() {
+    // In a Web Worker the module is instantiated for its exports
+    // (`orion_worker_main`), not to run the app.
+    #[cfg(target_arch = "wasm32")]
+    if client::web_worker::in_worker() {
+        return;
+    }
     // First, so every panic reaches the browser console with its message:
     // without the hook it is only "RuntimeError: unreachable" (e.g. a bad
     // `?world=` value in `WorldScale::from_env` below).
@@ -105,11 +116,11 @@ fn main() {
     console_error_panic_hook::set_once();
 
     game::perf::pin_origin();
-    // Per-entry verification is off by default (desync is caught by the
-    // periodic tick-interval state hash); HASH_MODE=delta re-enables
-    // footprint-digest self-checks, HASH_MODE=full whole-field verification
-    // when chasing a footprint/capture gap. Tests and the convergence
-    // harnesses pin HashMode::Full themselves.
+    // Per-entry undo verification is Full by default (HASH_MODE=delta|off
+    // trades it for speed). Client/server desync is checked separately by the
+    // server's every-N-ticks state hash, `ServerPacket::HashedGameEvent`:
+    // every 100 ticks unless the SERVER runs with VOXEL_STATE_HASH_INTERVAL=N — a
+    // spawned single-player server inherits this process's env.
     game::set_hash_mode_from_env();
 
     // Continuous profiling: build with `--features pyroscope` and set PYROSCOPE
@@ -138,12 +149,27 @@ fn main() {
     // Shared debug toggles: render thread (F3 dev panel) writes, game thread reads.
     let debug_flags = game::DebugFlags::default();
 
+    // `client debug <preset> [--reset]` (e.g. `just run` = `debug embarked`)
+    // skips the manual setup; a plain `client` opens on the main menu. Parsed
+    // first, so a bad command line exits before any window opens.
+    #[cfg(not(target_arch = "wasm32"))]
+    let debug_scenario = {
+        let args: Vec<String> = std::env::args().skip(1).collect();
+        client::debug_launch::parse_args(&args).unwrap_or_else(|message| {
+            eprintln!("{message}");
+            std::process::exit(2);
+        })
+    };
+    #[cfg(target_arch = "wasm32")]
+    let debug_scenario: Option<()> = None;
+
     // The dev bypass (`VOXEL_SKIP_MENU=1`, a set `VOXEL_WORLD_FILE`,
     // `RENDER_BENCH`, `VOXEL_AUTOPILOT`)
     // connects to 127.0.0.1:6466 at startup, as before the menu existed.
     // Otherwise the app starts with dead channels and every world session
-    // gets fresh ones (`session::SessionFlowPlugin`).
-    let skip_menu = client::session::skip_menu();
+    // gets fresh ones (`session::SessionFlowPlugin`). A debug launch starts
+    // its own world, so it wins over the bypass.
+    let skip_menu = debug_scenario.is_none() && client::session::skip_menu();
 
     #[cfg(not(target_arch = "wasm32"))]
     let (command_send, game_send, client_recv, request_send) = {
@@ -158,8 +184,13 @@ fn main() {
         (command_send, game_send, client_recv, request_send)
     };
 
+    // The browser opens on the main menu with channels to nowhere; Join server
+    // gives each session fresh ones (`session::web_flow`).
     #[cfg(target_arch = "wasm32")]
-    let (sim, game_send, client_recv, request_send) = sim_driver::start_wasm_sim(debug_flags.clone(), world_scale);
+    let (game_send, client_recv, request_send) = {
+        let channels = client::session::SessionChannels::new();
+        (channels.game_send.clone(), channels.client_recv.clone(), channels.request_send.clone())
+    };
 
     // Bevy's default asset root is CARGO_MANIFEST_DIR/assets (crates/client/assets,
     // a local, gitignored scratch dir left over from earlier prototyping). The
@@ -174,7 +205,7 @@ fn main() {
 
     #[allow(unused_mut)]
     let mut primary_window = bevy::window::Window {
-        title: "Labour of Love".into(),
+        title: "Orion".into(),
         ..Default::default()
     };
     #[cfg(not(target_arch = "wasm32"))]
@@ -219,10 +250,9 @@ fn main() {
     // App states + the session reset registry + the frontend camera. The menu
     // is the default; the dev bypass starts straight in the world.
     app.add_plugins(client::session::SessionPlugin { skip_menu });
-    // The menu screens: on every native build, since a bypass session can
-    // still end up in the menu (leave, lost server). `skip_menu` only picks the
-    // initial state; wasm keeps today's flow.
-    #[cfg(not(target_arch = "wasm32"))]
+    // The menu screens: on every build, since a bypass session can still end
+    // up in the menu (leave, lost server). `skip_menu` only picks the initial
+    // state; the browser's menu only joins a server (`frontend::JOIN_ONLY`).
     app.add_plugins(client::frontend::FrontendPlugin);
     // The logger exists from here on: announce the perf timeline and flush the
     // events the game/netcode threads emitted while Bevy was still starting.
@@ -244,10 +274,16 @@ fn main() {
         .add_plugins(client::session::SessionFlowPlugin);
     #[cfg(feature = "dev_ui")]
     app.add_plugins(renderer::dev_ui::DevUiPlugin);
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(scenario) = debug_scenario {
+        info!("[client] debug launch: {scenario:?}");
+        app.add_plugins(client::debug_launch::DebugLaunchPlugin { scenario });
+    }
 
+    // Joining and leaving servers from the browser's menu.
     #[cfg(target_arch = "wasm32")]
-    app.insert_resource(sim)
-        .add_systems(Update, sim_driver::drive_sim);
+    app.insert_resource(client::session::SimConfig { world_scale })
+        .add_plugins(client::session::SessionFlowPlugin);
 
     let app_exit = app.run();
 
@@ -261,7 +297,7 @@ fn main() {
     // session was already left on `AppExit` (`SessionFlowPlugin`); wait for
     // its local server to stop so no child outlives the client.
     #[cfg(target_arch = "wasm32")]
-    let _ = game_send.send(GameEventKind::Quit);
+    drop(game_send);
     #[cfg(not(target_arch = "wasm32"))]
     {
         client::session::join_server_stops();

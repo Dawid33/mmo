@@ -213,10 +213,60 @@ pub fn device_supports_quad_records(
         && device.limits().max_storage_buffers_per_shader_stage >= PULL_STORAGE_BUFFERS_PER_STAGE
 }
 
+/// Index data at or above this many bytes gets its own buffer on a device without
+/// `BASE_VERTEX` (WebGL2). Zero = every mesh's indices in their own buffer.
+pub const WEBGL_INDEX_LARGE_THRESHOLD_BYTES: u64 = 0;
+
+/// WebGL2 (no `BASE_VERTEX`): give every mesh its own INDEX buffer.
+///
+/// Bevy already gives each vertex array its own slab there, but packs index data into
+/// shared slabs of up to 512 MiB. Firefox validates every `drawElements` by finding the
+/// largest index in the drawn range on the CPU and caches that per buffer + range; with
+/// thousands of chunk meshes drawing distinct ranges out of one index buffer (and slab
+/// writes as chunks stream in) the cache thrashes and every draw re-scans its indices
+/// every frame — a Firefox profile of the web build had the WebGL executor thread
+/// (`CanvasRenderer`) 91% busy in `WebGLBuffer::GetIndexedFetchMaxVert` and the page
+/// blocked 92% of the time waiting for it (`scripts/firefox_profile_summary.py`). One
+/// buffer per mesh = one range per buffer, validated once at first draw.
+fn webgl_own_index_buffers(app: &mut App) {
+    let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
+        return;
+    };
+    let world = render_app.world_mut();
+    world.init_resource::<bevy::render::mesh::allocator::MeshAllocatorSettings>();
+    let mut settings = world.resource_mut::<bevy::render::mesh::allocator::MeshAllocatorSettings>();
+    settings.slab_allocator_settings.large_threshold = WEBGL_INDEX_LARGE_THRESHOLD_BYTES;
+    info!(
+        "[render] no BASE_VERTEX (WebGL2): every mesh gets its own index buffer \
+         (large_threshold {WEBGL_INDEX_LARGE_THRESHOLD_BYTES} B)"
+    );
+}
+
+/// `assets/shaders/voxel_pull.wgsl` and `voxel_pull_depth.wgsl`, compiled into
+/// the binary like `voxel_material::VOXEL_TEXTURE_SHADER`: they decode the
+/// quad record layout (`meshing/records.rs`), which changes with the Rust that
+/// packs it, and a browser (a WebGPU build) would otherwise pair a cached old
+/// `.wgsl` with new records.
+pub const VOXEL_PULL_SHADER: Handle<Shader> = bevy::asset::uuid_handle!("a3c51e07-9b4d-4e2f-8d61-5f2e0b7c4d19");
+/// See [`VOXEL_PULL_SHADER`].
+pub const VOXEL_PULL_DEPTH_SHADER: Handle<Shader> = bevy::asset::uuid_handle!("c84f2d6a-1e93-4b07-a5c2-7d9e3f60b1a8");
+
 pub struct VoxelPullPlugin;
 
 impl Plugin for VoxelPullPlugin {
     fn build(&self, app: &mut App) {
+        bevy::asset::load_internal_asset!(
+            app,
+            VOXEL_PULL_SHADER,
+            "../../../../../assets/shaders/voxel_pull.wgsl",
+            Shader::from_wgsl
+        );
+        bevy::asset::load_internal_asset!(
+            app,
+            VOXEL_PULL_DEPTH_SHADER,
+            "../../../../../assets/shaders/voxel_pull_depth.wgsl",
+            Shader::from_wgsl
+        );
         app.add_plugins((
             ExtractResourcePlugin::<BlockArrayTexture>::default(),
             ExtractResourcePlugin::<BlockTopLayers>::default(),
@@ -295,6 +345,18 @@ impl Plugin for VoxelPullPlugin {
     }
 
     fn finish(&self, app: &mut App) {
+        let Some(render_app) = app.get_sub_app(RenderApp) else {
+            return;
+        };
+        let base_vertex = render_app
+            .world()
+            .resource::<bevy::render::renderer::RenderAdapter>()
+            .get_downlevel_capabilities()
+            .flags
+            .contains(bevy::render::render_resource::DownlevelFlags::BASE_VERTEX);
+        if !base_vertex {
+            webgl_own_index_buffers(app);
+        }
         let Some(render_app) = app.get_sub_app(RenderApp) else {
             return;
         };

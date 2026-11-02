@@ -24,7 +24,7 @@ pub const DEBUG_COLLIDER_RADIUS: f32 = 64.0;
 /// One wireframe segment, region-local coordinates. `color` is HSLA exactly
 /// as rapier's `DebugRenderStyle` emits it (fixed vs dynamic bodies get
 /// different hues for free); the render side converts with `Color::hsla`.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DebugLine {
     pub a: [f32; 3],
     pub b: [f32; 3],

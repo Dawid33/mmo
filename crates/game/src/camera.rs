@@ -257,9 +257,11 @@ impl Controller for CameraController {
 
             let motion0 = (*ecs.motion.try_get(e_id)).unwrap_or_default();
             let mut motion = motion0;
-            // An adventurer on a walk is steered by it, not the keyboard.
+            // An adventurer on a walk is steered by it, not the keyboard —
+            // unless the keyboard drives the body (first person), which ends
+            // the walk (`tick_walkers_safe`).
             let walk = match ecs.walker.try_get(e_id) {
-                Some(w) if client.mode == crate::PlayMode::Adventure => {
+                Some(w) if client.mode == crate::PlayMode::Adventure && !active => {
                     Some(crate::steer(w, crate::feet_of(b.translation()), motion0.grounded))
                 }
                 _ => None,

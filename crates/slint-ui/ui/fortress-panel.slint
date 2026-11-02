@@ -1,0 +1,158 @@
+import { ButtonFace, FrameFace, GraphicalSets, LabelFace, Styles } from "@widgets";
+import { PickList, Tabs } from "controls.slint";
+import { DebugPage, DevStat, DevTickRow, DevToggle } from "debug-tab.slint";
+
+export global FortressLayout {
+    // Wide enough for "Designations" in the tab font.
+    out property <length> tab-width: 112px;
+    // Between the last tab and the values, and after the values.
+    out property <length> values-gap: 16px;
+    // The open tab's page; a list longer than this scrolls.
+    out property <length> page-height: 280px;
+    // Flush with the screen corner.
+    out property <length> margin: 0px;
+    // Kept free under the open panel in a short window.
+    out property <length> bottom-gap: 12px;
+}
+
+// The EU5-style fortress panel, top left: the management tabs, with the key
+// fortress figures on the tab row to their right (placeholders until wealth /
+// mood / stocks exist).
+// The tabs start collapsed; a click on the open tab collapses it again.
+// Embedded in `GameUi`; the client fills it (renderer/slint_overlay.rs,
+// renderer/fortress_panel.rs).
+export component FortressPanel {
+    in property <string> value: "0";
+    in property <string> happiness: "0";
+    in property <string> food: "0";
+    // -1 = collapsed; 0 Governance, 1 People, 2 Designations, 3 Stocks,
+    // 4 Debug (only with `debug-available`).
+    in-out property <int> tab: -1;
+    // The Debug tab (debug-tab.slint) is on the row: `dev_ui` builds only.
+    in property <bool> debug-available;
+    in property <[DevStat]> dev-stats;
+    in property <[DevToggle]> dev-toggles;
+    in property <[DevTickRow]> dev-tick-rows;
+    callback dev-toggle(int, bool);
+    callback dev-complete-orders();
+    in property <[string]> governance-lines;
+    in property <[string]> people;
+    in property <[string]> designations;
+    // A People row clicked (index into `people`).
+    callback person-picked(int);
+    // The tallest the panel may be (the window's height less margins): the
+    // open page shrinks to fit, down to nothing.
+    in property <length> height-limit: 100000px;
+
+    // Probes for the headless tests (window logical pixels): a point on the
+    // tab row's left end, and the People list's first row and row pitch.
+    out property <length> tabs-x: tabs.absolute-position.x;
+    out property <length> tabs-y: tabs.absolute-position.y + 15px;
+    out property <length> people-first-item-y: people-list.absolute-position.y + people-list.first-item-y;
+    out property <length> people-row-height: people-list.row-height;
+    out property <length> dev-toggles-x: debug.toggles-x;
+    out property <length> dev-toggles-y: debug.toggles-y;
+    out property <length> dev-toggle-row-height: debug.toggle-row-height;
+    out property <length> dev-complete-x: debug.complete-button-x;
+    out property <length> dev-complete-y: debug.complete-button-y;
+    out property <length> dev-ticks-x: debug.ticks-x;
+    out property <length> values-left: values.absolute-position.x;
+    out property <length> values-top: values.absolute-position.y;
+    out property <length> values-bottom: values.absolute-position.y + values.height;
+    out property <length> tabs-top: tabs.absolute-position.y;
+    out property <length> tabs-end: tabs.absolute-position.x + tabs.tabs-end;
+    out property <length> tab-row-height: tabs.row-height;
+    // The bottom of the tab row (window logical pixels): the top-centre
+    // status line goes under it, so it never covers the tabs or the figures.
+    out property <length> bar-bottom: tabs.absolute-position.y + tabs.collapsed-height;
+    // The widest tab label against the room a tab gives its text.
+    out property <length> widest-label: widest.preferred-width;
+    out property <length> tab-label-room: tabs.tab-width - Styles.tab.button.box.padding.left
+        - Styles.tab.button.box.padding.right;
+
+    width: frame.content-x + tabs.tabs-end + FortressLayout.values-gap + values.preferred-width
+        + FortressLayout.values-gap + Styles.frame.box.padding.right + GraphicalSets.inset(Styles.frame.graphics).right;
+    height: frame.height;
+
+    // Everything but the page: the tab row and the frame's bottom.
+    property <length> chrome: tabs.y + tabs.collapsed-height + Styles.frame.box.padding.bottom
+        + GraphicalSets.inset(Styles.frame.graphics).bottom;
+    property <length> page-height: clamp(root.height-limit - root.chrome, 0px, FortressLayout.page-height);
+
+    widest := ButtonFace {
+        visible: false;
+        style: Styles.tab.button;
+        text: "Designations";
+    }
+
+    frame := FrameFace {
+        width: 100%;
+        height: tabs.y + tabs.height + Styles.frame.box.padding.bottom
+            + GraphicalSets.inset(Styles.frame.graphics).bottom;
+
+        tabs := Tabs {
+            x: frame.content-x;
+            y: frame.content-y;
+            width: frame.content-right - frame.content-x;
+            height: root.tab >= 0 ? self.collapsed-height + root.page-height : self.collapsed-height;
+            tabs: root.debug-available ? ["Governance", "People", "Designations", "Stocks", "Debug"]
+                : ["Governance", "People", "Designations", "Stocks"];
+            collapsible: true;
+            min-tab-width: FortressLayout.tab-width;
+            selected <=> root.tab;
+
+            if root.tab == 0: VerticalLayout {
+                alignment: start;
+                spacing: 2px;
+                for line in root.governance-lines: LabelFace { text: line; }
+            }
+            // Not `if`: the test probes above read the list's geometry.
+            Rectangle {
+                visible: root.tab == 1;
+                people-list := PickList {
+                    width: 100%;
+                    height: 100%;
+                    items: root.people;
+                    picked(i) => { root.person-picked(i); }
+                }
+            }
+            if root.tab == 2: PickList {
+                width: 100%;
+                height: 100%;
+                items: root.designations;
+            }
+            if root.tab == 3: VerticalLayout {
+                alignment: start;
+                LabelFace { text: "No stocks yet"; }
+            }
+            // Not `if`: the test probes above read its geometry. Clipped, so
+            // a short window cuts it rather than letting it spill.
+            Rectangle {
+                visible: root.debug-available && root.tab == 4;
+                clip: true;
+                debug := DebugPage {
+                    width: 100%;
+                    height: 100%;
+                    stats: root.dev-stats;
+                    toggles: root.dev-toggles;
+                    tick-rows: root.dev-tick-rows;
+                    toggle(i, on) => { root.dev-toggle(i, on); }
+                    complete-orders => { root.dev-complete-orders(); }
+                }
+            }
+        }
+
+        // On the tab row, after the last tab (drawn over the row's
+        // background; the tabs' click area ends with the last tab).
+        values := HorizontalLayout {
+            x: tabs.x + tabs.tabs-end + FortressLayout.values-gap;
+            y: tabs.y + (tabs.row-height - self.preferred-height) / 2;
+            width: self.preferred-width;
+            height: self.preferred-height;
+            spacing: FortressLayout.values-gap;
+            LabelFace { text: "Fortress value " + root.value; }
+            LabelFace { text: "Average happiness " + root.happiness; }
+            LabelFace { text: "Food stocks " + root.food; }
+        }
+    }
+}

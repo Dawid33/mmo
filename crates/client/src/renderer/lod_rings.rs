@@ -199,6 +199,7 @@ fn spawn_lod_root(commands: &mut Commands, key: LodKey, payload: &LodPayload) ->
             Visibility::default(),
             Name::new(format!("lod {:?} x{}", key.coords, factor)),
             crate::session::SessionScoped,
+            super::meshing::lod_tiles::LodTiles::default(),
         ))
         .id();
 
@@ -226,6 +227,7 @@ fn spawn_lod_root(commands: &mut Commands, key: LodKey, payload: &LodPayload) ->
                 Visibility::default(),
                 lod::LodChunk { factor },
                 lod::LodVoxelData(packed.clone()),
+                super::meshing::lod_tiles::LodGroup(*group),
                 ChildOf(root),
             ))
             .id();
@@ -360,10 +362,12 @@ type ReadyLodCellFilter = Or<(
 /// A near chunk not yet on screen: its snapshot voxels are still being
 /// derived, or it has voxels but its first mesh has not attached
 /// (`apply_meshed_chunks` inserts `ChunkConnectivity` for every finished
-/// mesh, all-air ones included, and strips it when the voxels go away).
+/// mesh, all-air ones included, and strips it when the voxels go away) — or,
+/// on the per-chunk backend, a sim chunk whose merged mesh is not rebuilt yet.
 type UnmeshedNearChunkFilter = Or<(
     With<PendingSnapshotVoxels>,
     (With<VoxelData>, Without<ChunkConnectivity>),
+    With<super::meshing::chunk_mesh::ChunkMeshDirty>,
 )>;
 
 /// Near regions whose every chunk has meshed, stably for

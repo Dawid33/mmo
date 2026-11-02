@@ -359,6 +359,16 @@ mod tests {
         assert_eq!(p, Vec2::splat(220.0));
     }
 
+    /// The top-down view's corner rays are parallel and straight down: the
+    /// footprint is the screen's rectangle on the ground, north at the top.
+    #[test]
+    fn top_down_footprint_is_the_screen_rectangle() {
+        let (a, b, h) = (300.0, 200.0, 8000.0);
+        let down = |x: f32, z: f32| Ray3d::new(Vec3::new(x, h, z), Dir3::NEG_Y);
+        let q = footprint([down(-a, -b), down(a, -b), down(a, b), down(-a, b)], 0.0);
+        assert_eq!(q, [Vec2::new(-a, -b), Vec2::new(a, -b), Vec2::new(a, b), Vec2::new(-a, b)]);
+    }
+
     #[test]
     fn footprint_is_a_trapezoid_wider_at_the_far_edge() {
         let pitch = super::super::PITCH_DEG.to_radians();

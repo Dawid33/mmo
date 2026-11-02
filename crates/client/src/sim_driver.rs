@@ -1,31 +1,29 @@
-//! Drives the sim from the Bevy schedule on wasm, replacing the native
-//! tick-generator thread, tokio/netcode thread, and blocking game thread.
+//! The browser's sim, in place of the native tick-generator thread,
+//! tokio/netcode thread, and blocking game thread. One [`SimDriverRes`] per
+//! joined server (`session::web_flow`): built on Join server, dropped on
+//! leaving, which hangs up its WebTransport connection.
+//!
+//! Two backends: normally the sim and its connection run in a Web Worker
+//! ([`crate::web_worker::sim`]) and [`drive_sim`] only moves messages; with
+//! workers off (`?workers=0`, or a page that did not publish the module) the
+//! sim runs here, on the page's main thread, once per frame.
 use bevy::platform::cell::SyncCell;
 use bevy::prelude::*;
-use crossbeam::channel::{Receiver, Sender};
-use game::{ClientUpdateEvent, GameEventKind, ServerPacket, TICK_RATE};
+use crossbeam::channel::Receiver;
+use game::ServerPacket;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 
-use crate::local_server::LocalServer;
+use crate::session::{SessionChannels, SessionEnded};
+use crate::web_endpoint::WebServer;
 use crate::GameInstanceManager;
 
+/// The inline (main-thread) backend.
 pub struct SimDriver {
     manager: GameInstanceManager,
     server_recv: Receiver<ServerPacket>,
-    mode: SimMode,
+    /// One line when the connect gave up or the connection died (`netcode_web`).
+    lost: Receiver<String>,
     client_tick_ms: f64,
-}
-
-/// Which transport is authoritative for this session, chosen once at
-/// startup by `start_wasm_sim` based on the `?server` query param.
-enum SimMode {
-    /// Embedded single-player authority (today's behavior).
-    Offline {
-        local_server: LocalServer,
-        server_tick_ms: f64,
-    },
-    /// Real server over WebTransport; the authority ticks remotely.
-    Online,
 }
 
 // SyncCell makes the driver Sync (Bevy Resource requires Send + Sync).
@@ -33,100 +31,71 @@ enum SimMode {
 // bounds only include Send, and trait objects don't inherit auto-traits from
 // their implementors. SyncCell<T> is Sync for any T: Send, which SimDriver is.
 #[derive(Resource)]
-pub struct SimDriverRes(pub SyncCell<SimDriver>);
+pub struct SimDriverRes(pub SyncCell<SimBackend>);
 
-pub fn start_wasm_sim(
+/// Where the session's sim runs.
+pub enum SimBackend {
+    /// In a Web Worker (the default).
+    Worker(Box<crate::web_worker::sim::SimWorker>),
+    /// Here, on the main thread (workers off).
+    Inline(Box<SimDriver>),
+}
+
+/// A session's sim: a fresh game manager on `channels`' sim ends (the app's
+/// ends are already installed), connected to `server` over WebTransport.
+pub fn start_session(
+    server: WebServer,
+    channels: SessionChannels,
     debug_flags: game::DebugFlags,
     world_scale: crate::world_scale::WorldScale,
-) -> (
-    SimDriverRes,
-    Sender<GameEventKind>,
-    Receiver<ClientUpdateEvent>,
-    Sender<crate::instance::ClientRequest>,
-) {
-    let (game_send, game_recv) = crossbeam::channel::unbounded();
-    let (request_send, request_recv) = crossbeam::channel::unbounded();
-    let (client_send, client_recv) = crossbeam::channel::unbounded();
+) -> SimDriverRes {
+    if crate::web_worker::enabled() {
+        match crate::web_worker::sim::SimWorker::start(server.clone(), channels.clone(), debug_flags.clone(), world_scale)
+        {
+            Ok(worker) => return SimDriverRes(SyncCell::new(SimBackend::Worker(Box::new(worker)))),
+            Err(e) => error!("[session] sim worker failed to start ({e:?}): running the sim on the main thread"),
+        }
+    }
+    let SessionChannels { game_send, game_recv, client_send, request_recv, .. } = channels;
     let (server_send, server_recv) = crossbeam::channel::unbounded();
+    let (lost_send, lost) = crossbeam::channel::unbounded();
     // The addr is unused on wasm; GameInstanceManager::new keeps one
     // signature on both targets.
     let dummy_addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 0));
-    let mut manager = GameInstanceManager::new(
-        game_send.clone(),
-        game_recv,
-        client_send,
-        dummy_addr,
-        debug_flags,
-    );
+    let mut manager = GameInstanceManager::new(game_send, game_recv, client_send, dummy_addr, debug_flags);
     // Same subscription scale as the native game thread (`?world=` here).
     manager.set_world_scale(world_scale);
-    // Offline the local server has no world map, so the UI never sends Play.
     manager.set_request_recv(request_recv);
-
-    // Online (real WebTransport server) is the default; `?offline` anywhere
-    // in the query string opts into the embedded single-player world instead.
-    let offline = web_sys::window()
-        .and_then(|w| w.location().search().ok())
-        .map(|s| s.contains("offline"))
-        .unwrap_or(false);
-
-    let mode = if !offline {
-        crate::netcode_web::connect(server_send, manager.client_packet_recv());
-        SimMode::Online
-    } else {
-        let local_server = LocalServer::new(manager.client_packet_recv(), server_send)
-            .expect("failed to build offline world");
-        SimMode::Offline {
-            local_server,
-            server_tick_ms: 0.0,
-        }
-    };
-
+    crate::netcode_web::connect(server, server_send, manager.client_packet_recv(), lost_send);
     manager.start();
-    (
-        SimDriverRes(SyncCell::new(SimDriver {
-            manager,
-            server_recv,
-            mode,
-            client_tick_ms: 0.0,
-        })),
-        game_send,
-        client_recv,
-        request_send,
-    )
+    let driver = SimDriver { manager, server_recv, lost, client_tick_ms: 0.0 };
+    SimDriverRes(SyncCell::new(SimBackend::Inline(Box::new(driver))))
 }
 
-/// Once per frame: run due server ticks, run due client ticks, then drain
+/// Once per frame while a session runs: run due client ticks, then drain
 /// both directions of traffic. Mirrors what the native threads do with
-/// sleeps and blocking select.
-pub fn drive_sim(time: Res<Time>, mut driver: ResMut<SimDriverRes>) {
-    let SimDriver {
-        manager,
-        server_recv,
-        mode,
-        client_tick_ms,
-    } = driver.0.get();
-
-    let dt_ms = time.delta_secs_f64() * 1000.0;
-
-    // Authoritative sim at fixed TICK_RATE (ms per tick), like the server's
-    // tick thread. Cap catch-up to avoid a spiral after a background tab.
-    // Only meaningful offline: online, the real server ticks remotely.
-    if let SimMode::Offline {
-        local_server,
-        server_tick_ms,
-    } = mode
-    {
-        *server_tick_ms = (*server_tick_ms + dt_ms).min(10.0 * TICK_RATE as f64);
-        while *server_tick_ms >= TICK_RATE as f64 {
-            *server_tick_ms -= TICK_RATE as f64;
-            local_server.tick();
+/// sleeps and blocking select. A lost connection ends the session.
+pub fn drive_sim(time: Res<Time>, driver: Option<ResMut<SimDriverRes>>, mut ended: MessageWriter<SessionEnded>) {
+    let Some(mut driver) = driver else { return };
+    let driver = match driver.0.get() {
+        SimBackend::Worker(worker) => {
+            if let Some(reason) = worker.pump() {
+                ended.write(SessionEnded { reason: Some(reason) });
+            }
+            return;
         }
+        SimBackend::Inline(driver) => driver,
+    };
+    let SimDriver { manager, server_recv, lost, client_tick_ms } = &mut **driver;
+
+    if let Ok(reason) = lost.try_recv() {
+        ended.write(SessionEnded { reason: Some(reason) });
+        return;
     }
 
+    let dt_ms = time.delta_secs_f64() * 1000.0;
     // Predicted client sim at the adaptive rate (SyncClock adjusts it),
-    // like the native tick-generator thread. Unconditional: both modes
-    // predict locally and reconcile against whatever authority replies.
+    // like the native tick-generator thread; the server ticks remotely.
     let rate = manager.tick_rate_ms().max(1) as f64;
     *client_tick_ms = (*client_tick_ms + dt_ms).min(10.0 * rate);
     while *client_tick_ms >= rate {
@@ -134,9 +103,6 @@ pub fn drive_sim(time: Res<Time>, mut driver: ResMut<SimDriverRes>) {
         manager.send_tick();
     }
 
-    if let SimMode::Offline { local_server, .. } = mode {
-        local_server.pump().expect("offline server crashed");
-    }
     if !manager.pump(server_recv).expect("game sim crashed") {
         info!("sim received Quit");
     }

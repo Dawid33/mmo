@@ -474,7 +474,7 @@ fn main() {
             DefaultPlugins
                 .set(bevy::window::WindowPlugin {
                     primary_window: Some(bevy::window::Window {
-                        title: "Labour of Love".into(),
+                        title: "Orion".into(),
                         ..Default::default()
                     }),
                     ..Default::default()

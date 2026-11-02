@@ -5,7 +5,7 @@
 
 /// Icon handle the client resolves to a texture. For inventory, derived from
 /// `ItemKind` (see `IconId::of`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct IconId(pub u32);
 
 impl IconId {
@@ -29,20 +29,20 @@ pub enum UiAction {
 }
 
 /// One filled hotbar slot.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SlotView {
     pub icon: IconId,
     pub count: u32,
 }
 
 /// The local player's hotbar, slot by slot (`None` = empty).
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct HotbarView {
     pub slots: Vec<Option<SlotView>>,
 }
 
 /// A change to the client's UI state, consumed by the client's Slint HUD.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum UiUpdate {
     /// The hotbar changed; sent only when it differs from the last one.
     Hotbar(HotbarView),

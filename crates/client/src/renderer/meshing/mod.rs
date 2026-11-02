@@ -9,9 +9,11 @@ use binary::PaddedVoxels;
 
 pub mod ao;
 pub mod binary;
+pub mod chunk_mesh;
 pub mod emit;
 pub mod interior;
 pub mod lod;
+pub mod lod_tiles;
 pub mod neighbors;
 pub mod pack;
 pub mod queue;
@@ -47,6 +49,33 @@ pub struct TerrainQuadCount(pub u32);
 #[derive(Component, Clone, Copy, Debug, Default)]
 pub struct InteriorFaces;
 
+/// [`MeshOutput`] as a compute job returns it (`renderer::compute`): the
+/// mesh still as data. [`MeshWire::into_output`] makes the `Mesh`.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct MeshWire {
+    pub mesh: Option<emit::MeshData>,
+    pub records: Option<Vec<records::QuadRecord>>,
+    pub connectivity: u16,
+    pub quad_count: u32,
+    pub has_interior: bool,
+}
+
+impl MeshWire {
+    /// Nothing to draw (a buried brick, in either render mode).
+    pub const EMPTY: MeshWire =
+        MeshWire { mesh: None, records: None, connectivity: 0, quad_count: 0, has_interior: false };
+
+    pub fn into_output(self) -> MeshOutput {
+        MeshOutput {
+            mesh: self.mesh.map(emit::MeshData::into_mesh),
+            records: self.records,
+            connectivity: self.connectivity,
+            quad_count: self.quad_count,
+            has_interior: self.has_interior,
+        }
+    }
+}
+
 impl MeshOutput {
     /// Whether applying this output creates or replaces GPU-backed terrain data.
     /// Empty chunks still carry connectivity, but must not consume the per-frame
@@ -70,6 +99,16 @@ pub fn mesh_chunk_classified(
     pull: bool,
     interior: Option<&interior::InteriorGround>,
 ) -> MeshOutput {
+    mesh_chunk_classified_wire(padded, layers, pull, interior).into_output()
+}
+
+/// [`mesh_chunk_classified`] with the mesh still as data (compute jobs).
+pub fn mesh_chunk_classified_wire(
+    padded: &PaddedVoxels,
+    layers: &BlockTextureLayers,
+    pull: bool,
+    interior: Option<&interior::InteriorGround>,
+) -> MeshWire {
     let cutout = binary::CutoutTable::installed();
     let quads = binary::mesh_quads_classified(padded, &cutout, interior.filter(|_| pull));
     let has_interior = quads.iter().any(|q| q.interior);
@@ -78,9 +117,9 @@ pub fn mesh_chunk_classified(
         let r = records::quads_to_records(&quads, layers);
         (None, (!r.is_empty()).then_some(r))
     } else {
-        (emit::quads_to_mesh(&quads, layers), None)
+        (emit::quads_to_mesh_data(&quads, layers), None)
     };
-    MeshOutput {
+    MeshWire {
         mesh,
         records,
         connectivity: visibility::face_connectivity(padded, &cutout),
@@ -127,7 +166,14 @@ pub fn apply_meshed_chunks(
     budgets: Res<queue::MeshBudgets>,
     mut uploads: ResMut<queue::FrameUploads>,
     mut pull_mem: Option<ResMut<PullMemStats>>,
+    render_config: Option<Res<super::config::TerrainRenderConfig>>,
+    brick_of: Query<&super::bricks::BrickOf>,
 ) {
+    // A brick of a sim chunk keeps its records and its chunk draws them all
+    // as one unit (`chunk_mesh`), on every backend. An entity with no sim
+    // chunk draws itself: its `ChunkQuads`, or on `PerChunk` (WebGL2) a mesh
+    // expanded from them here.
+    let per_chunk = chunk_mesh::per_chunk_backend(render_config.as_deref());
     for (e, mut task) in &mut tasks {
         if uploads.0 >= budgets.uploads_per_frame {
             break; // remaining completed tasks attach next frame
@@ -135,7 +181,10 @@ pub fn apply_meshed_chunks(
         let Some(output) = block_on(future::poll_once(&mut task.0)) else {
             continue;
         };
-        if output.requires_upload() {
+        let owner = brick_of.get(e).ok().map(|of| of.chunk);
+        // A brick of a merged chunk uploads nothing itself: its chunk's
+        // rebuild counts against the budget instead.
+        if output.requires_upload() && owner.is_none() {
             uploads.0 += 1;
         }
         let MeshOutput {
@@ -145,6 +194,17 @@ pub fn apply_meshed_chunks(
             quad_count,
             has_interior,
         } = output;
+        let records = match (owner, per_chunk, records) {
+            (Some(chunk), _, records) => {
+                keep_brick_records(&mut commands, e, chunk, records, connectivity, quad_count);
+                continue;
+            }
+            (None, true, Some(records)) => {
+                draw_own_records(&mut commands, &mut meshes, material.as_deref(), e, &records, connectivity, quad_count);
+                continue;
+            }
+            (None, _, records) => records,
+        };
         if let Some(records) = records {
             if let Some(stats) = pull_mem.as_deref_mut() {
                 stats.chunks += 1;
@@ -252,7 +312,81 @@ pub fn apply_meshed_chunks(
                 visibility::ChunkConnectivity,
                 super::voxel_pull::ChunkQuads,
                 TerrainQuadCount,
+                chunk_mesh::BrickRecords,
             )>();
+            if let Some(chunk) = brick_of.get(e).ok().map(|of| of.chunk) {
+                if let Ok(mut chunk) = commands.get_entity(chunk) {
+                    chunk.insert(chunk_mesh::ChunkMeshDirty);
+                }
+            }
+        }
+    }
+}
+
+/// `apply_meshed_chunks` for a brick of a sim chunk: keep its records (or
+/// none, when it meshed empty) for the chunk's merged rebuild and mark the
+/// chunk (`chunk_mesh`). The brick itself draws nothing.
+fn keep_brick_records(
+    commands: &mut Commands,
+    e: Entity,
+    chunk: Entity,
+    records: Option<Vec<records::QuadRecord>>,
+    connectivity: u16,
+    quad_count: u32,
+) {
+    let mut ec = commands.entity(e);
+    ec.insert(visibility::ChunkConnectivity(connectivity));
+    ec.remove::<(
+        MeshingTask,
+        InteriorFaces,
+        super::voxel_pull::ChunkQuads,
+        Mesh3d,
+        MeshMaterial3d<ExtendedMaterial<StandardMaterial, StandardVoxelMaterial>>,
+    )>();
+    match records {
+        Some(records) => {
+            ec.insert((chunk_mesh::BrickRecords(std::sync::Arc::new(records)), TerrainQuadCount(quad_count)));
+        }
+        None => {
+            ec.remove::<(chunk_mesh::BrickRecords, TerrainQuadCount)>();
+        }
+    }
+    if let Ok(mut chunk) = commands.get_entity(chunk) {
+        chunk.insert(chunk_mesh::ChunkMeshDirty);
+    }
+}
+
+/// `apply_meshed_chunks` on `PerChunk` (WebGL2) for an entity with no sim
+/// chunk: its records expanded into its own mesh.
+fn draw_own_records(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    material: Option<&ChunkMaterial>,
+    e: Entity,
+    records: &[records::QuadRecord],
+    connectivity: u16,
+    quad_count: u32,
+) {
+    let mut ec = commands.entity(e);
+    ec.insert((visibility::ChunkConnectivity(connectivity), TerrainQuadCount(quad_count)));
+    ec.remove::<(MeshingTask, InteriorFaces)>();
+    match chunk_mesh::records_to_mesh_data(records) {
+        Some(data) => {
+            ec.insert((
+                Mesh3d(meshes.add(data.into_mesh())),
+                // Constant brick-cube bounds, as the pulled path's bricks.
+                bevy::camera::primitives::Aabb {
+                    center: bevy::math::Vec3A::splat(BRICK_HALF),
+                    half_extents: bevy::math::Vec3A::splat(BRICK_HALF),
+                },
+                bevy::camera::visibility::NoAutoAabb,
+            ));
+            if let Some(material) = material {
+                ec.insert(MeshMaterial3d(material.0.clone()));
+            }
+        }
+        None => {
+            ec.remove::<(Mesh3d, MeshMaterial3d<ExtendedMaterial<StandardMaterial, StandardVoxelMaterial>>)>();
         }
     }
 }
@@ -560,7 +694,9 @@ mod tests {
             .add(ExtendedMaterial {
                 base: StandardMaterial::default(),
                 extension: StandardVoxelMaterial {
-                    voxels_texture: image_handle,
+                    voxels_texture: image_handle.clone(),
+                    fortress: Default::default(),
+                    top_layers: image_handle,
                 },
             });
         app.insert_resource(ChunkMaterial(handle));

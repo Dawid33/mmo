@@ -28,9 +28,9 @@
 //!
 //! The ids texture is rebuilt (whole: 128 KiB at 256 m regions) only when the
 //! level, the home region or the mirror changes ([`needs_rebuild`]). Commander
-//! mode only; hidden whenever the cut is off (`camera_cut` is `None`, which
-//! includes cell mode) and on the per-chunk Mesh fallback, which has no
-//! cutaway. No prepass, casts no shadows — the solid it stands for
+//! mode only; hidden whenever the cut is off (`camera_cut` is `None`). The
+//! per-chunk Mesh fallback (WebGL2) caps with it too — its cutaway lives in
+//! `voxel_texture.wgsl`. No prepass, casts no shadows — the solid it stands for
 //! already casts them through its meshed faces.
 
 use bevy::{
@@ -44,7 +44,6 @@ use bevy::{
 use game::{BlockId, RegionId, TileSource, REGION_BLOCKS, REGION_SIZE};
 
 use super::block_textures::BlockTextureLayers;
-use super::config::TerrainRenderConfig;
 use super::commander::level::{camera_cut, WorkingLevel};
 use super::commander::tiles::TileMirror;
 use super::fortress_view::{overlay_base_level, OverlayTexture, CAP_DARKEN};
@@ -215,7 +214,6 @@ fn spawn_slice_plane(
 /// Follow the cut: place the plane on it over the home region, hide it while
 /// the cut is off, and rebuild the ids texture when stale.
 fn update_slice_plane(
-    config: Res<TerrainRenderConfig>,
     working: Res<WorkingLevel>,
     tiles: Res<TileMirror>,
     mut state: ResMut<SliceState>,
@@ -224,11 +222,7 @@ fn update_slice_plane(
     mut materials: ResMut<Assets<SlicePlaneMaterial>>,
 ) {
     let Ok((plane, mut tf, mut visibility)) = plane.single_mut() else { return };
-    // The per-chunk Mesh fallback (WebGL2) has no cutaway to cap.
-    let pulled = config.near.uses_quad_records();
-    let (true, Some(cut), Some(home), Some(level)) =
-        (pulled, camera_cut(&working, &tiles), tiles.region(), working.level)
-    else {
+    let (Some(cut), Some(home), Some(level)) = (camera_cut(&working, &tiles), tiles.region(), working.level) else {
         visibility.set_if_neq(Visibility::Hidden);
         return;
     };

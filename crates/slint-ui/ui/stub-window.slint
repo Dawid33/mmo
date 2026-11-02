@@ -1,0 +1,34 @@
+import { Button, FrameFace, GraphicalSets, LabelFace, Styles, VerticalFlow } from "@widgets";
+
+// A window that exists before its content does (Settings, Encyclopedia): a
+// centred frame with the title, "Nothing here yet" and Close. Window-sized,
+// like the Esc menu; `GameUi` shows it as a modal screen.
+export component StubWindow {
+    in property <string> title;
+    callback close();
+    // The Close button's centre (window logical pixels), for headless tests.
+    out property <length> close-x: close-button.absolute-position.x + close-button.width / 2;
+    out property <length> close-y: close-button.absolute-position.y + close-button.height / 2;
+
+    window := FrameFace {
+        title: root.title;
+        width: max(260px, self.content-x + body.preferred-width + Styles.frame.box.padding.right
+            + GraphicalSets.inset(Styles.frame.graphics).right);
+        height: self.content-y + body.preferred-height + Styles.frame.box.padding.bottom
+            + GraphicalSets.inset(Styles.frame.graphics).bottom;
+        x: (root.width - self.width) / 2;
+        y: (root.height - self.height) / 2;
+
+        body := VerticalFlow {
+            x: window.content-x;
+            y: window.content-y;
+            width: window.content-right - window.content-x;
+
+            LabelFace { text: "Nothing here yet"; }
+            close-button := Button {
+                text: "Close";
+                clicked => { root.close(); }
+            }
+        }
+    }
+}

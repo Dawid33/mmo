@@ -491,9 +491,7 @@ pub fn cells_per_region(factor: u32) -> usize {
 /// (each pass halves the group lattice, so groups stay consistent throughout).
 pub fn downsample_chunks(chunks: Vec<(ChunkCoords, Chunk)>, factor: u32) -> Vec<LodCell> {
     match factor {
-        2 => build_far_lod_cells(chunks),
-        4 => downsample_cells(build_far_lod_cells(chunks)),
-        8 => downsample_cells(downsample_cells(build_far_lod_cells(chunks))),
+        2 | 4 | 8 => sub_block_cells_bucketed(chunks, factor),
         16 => block_scale_cells(chunks),
         32 => downsample_cells(block_scale_cells(chunks)),
         64 => downsample_cells(downsample_cells(block_scale_cells(chunks))),
@@ -502,6 +500,42 @@ pub fn downsample_chunks(chunks: Vec<(ChunkCoords, Chunk)>, factor: u32) -> Vec<
         )))),
         _ => panic!("unsupported LOD factor {factor} (must be one of {LOD_FACTORS:?})"),
     }
+}
+
+/// The sub-block factors (2/4/8) of [`downsample_chunks`]: factor 2 cells
+/// ([`build_far_lod_cells`]) merged `log2(factor / 2)` times by
+/// [`downsample_cells`], run over buckets of chunks instead of the whole
+/// region at once. The unbucketed pipeline holds one dense 32³ grid per
+/// 2×2×2-brick group of the WHOLE region before the first merge — ~4 GiB for
+/// a 256 m region at 16-block chunks, and the LOD pool runs several such builds
+/// at once (2026-11-02: the 256 m play default OOM-killed the server at
+/// 20 GB). A factor-`f` cell's group is its bricks' coords `div_euclid(f)`, and
+/// chunks sit on a `BRICKS_PER_CHUNK_EDGE` lattice, so bucketing chunks by
+/// their origin brick `div_euclid(max(f, BRICKS_PER_CHUNK_EDGE))` never splits
+/// a group: every output cell comes out of exactly one bucket, identical to the
+/// unbucketed one. Sorting by group restores the unbucketed (`BTreeMap`) order.
+/// Peak memory is one bucket's factor-2 grids (one chunk's at the default
+/// chunk size: 64 grids).
+fn sub_block_cells_bucketed(chunks: Vec<(ChunkCoords, Chunk)>, factor: u32) -> Vec<LodCell> {
+    debug_assert!(matches!(factor, 2 | 4 | 8));
+    let unit = (factor as i64).max(crate::BRICKS_PER_CHUNK_EDGE as i64);
+    let mut buckets: BTreeMap<[i64; 3], Vec<(ChunkCoords, Chunk)>> = BTreeMap::new();
+    for (coords, chunk) in chunks {
+        let key = crate::brick_coords(coords, [0, 0, 0]).map(|v| v.div_euclid(unit));
+        buckets.entry(key).or_default().push((coords, chunk));
+    }
+    let mut out = Vec::new();
+    for (_, bucket) in buckets {
+        let mut cells = build_far_lod_cells(bucket);
+        let mut f = 2;
+        while f < factor {
+            cells = downsample_cells(cells);
+            f *= 2;
+        }
+        out.extend(cells);
+    }
+    out.sort_by_key(|cell| cell.group);
+    out
 }
 
 /// Overlay one region's authoritative cells into a tile's grids: clear the
@@ -1144,6 +1178,44 @@ mod tests {
             let n = cells[0].grid.iter().filter(|v| !v.is_air()).count();
             assert_eq!(n, expect_per_axis.pow(3), "factor {factor}");
             assert_eq!(cells[0].grid[0].block, BlockId(5), "cell (0,0,0) solid");
+        }
+    }
+
+    /// The bucketed sub-block path is the whole-region pipeline, cell for
+    /// cell and in the same order: chunks spread over x, z and signed y, with
+    /// neighbours that share a factor-8 group at small chunk sizes, and blocks
+    /// in different octants so the merges see real content.
+    #[test]
+    fn bucketed_sub_block_cells_match_the_whole_region_pipeline() {
+        let edge = crate::CHUNK_BLOCKS;
+        let chunks = || -> Vec<(ChunkCoords, Chunk)> {
+            let mut v = Vec::new();
+            for (i, &(x, y, z)) in [(0, 0, 0), (1, 0, 0), (0, -1, 1), (3, 2, 2), (2, -3, 0), (1, 1, 1)]
+                .iter()
+                .enumerate()
+            {
+                let mut chunk = Chunk::default();
+                for k in 0..edge {
+                    let b = [(k * 3 + i) % edge, (k + i) % edge, (k * 5 + 2 * i) % edge];
+                    chunk.set_block(b[0], b[1], b[2], Block::new(BlockId(3 + (k % 4) as u16)));
+                }
+                v.push((ChunkCoords::new(x, y, z), chunk));
+            }
+            v
+        };
+        for factor in [2u32, 4, 8] {
+            let mut whole = build_far_lod_cells(chunks());
+            let mut f = 2;
+            while f < factor {
+                whole = downsample_cells(whole);
+                f *= 2;
+            }
+            let bucketed = downsample_chunks(chunks(), factor);
+            assert_eq!(bucketed.len(), whole.len(), "factor {factor}: cell count");
+            for (a, b) in bucketed.iter().zip(&whole) {
+                assert_eq!(a.group, b.group, "factor {factor}: order");
+                assert!(a.grid == b.grid, "factor {factor}: grid of group {:?}", a.group);
+            }
         }
     }
 

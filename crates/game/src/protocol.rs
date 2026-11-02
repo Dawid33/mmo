@@ -279,7 +279,7 @@ pub struct GhostData {
 pub type RegionId = RegionCoords;
 pub type LastGameEventId = usize;
 
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub enum GameError {
     CrashedOnServerEvent,
     QuitRequested,
@@ -373,6 +373,15 @@ pub struct EmbarkRequest {
     pub region: RegionCoords,
 }
 
+/// The fortress a client plays: its site and the region it stands in (the
+/// client centres its simulated neighbourhood on that region in both play
+/// modes, so it needs it without waiting for the next `Sites` broadcast).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct HeldFortress {
+    pub site: crate::history::SiteId,
+    pub region: RegionCoords,
+}
+
 /// A site as the world map shows it.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SiteMarker {
@@ -442,6 +451,12 @@ pub enum ServerPacket {
     SyncClock(RegionId, CurrentTickRate, Tick, Duration),
     /// Game event that was proccessed by the server.
     GameEvent(GameEvent),
+    /// A `GameEvent` plus the region's [`crate::state_hash`] right after it,
+    /// sent for the `Tick`s on the server's `VOXEL_STATE_HASH_INTERVAL`
+    /// cadence. Receiving one is the client's cue to compare its own state
+    /// once it has confirmed that event.
+    /// Fields: the event, the region tick right after it, the hash.
+    HashedGameEvent(GameEvent, Tick, u32),
     // TODO: Create player serverside and add player id here to let client know
     // who he is.
     Region(RegionId, Rollback),
@@ -465,7 +480,7 @@ pub enum ServerPacket {
     EmbarkResult(Result<crate::history::SiteId, crate::history::EmbarkRefusal>),
     PersonInfo(PersonInfo),
     /// The site this client plays (`None`: none): on connect and after Embark / Return / Retire.
-    Fortress(Option<crate::history::SiteId>),
+    Fortress(Option<HeldFortress>),
 }
 
 /// A Game event

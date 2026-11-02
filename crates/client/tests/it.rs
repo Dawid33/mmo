@@ -15,4 +15,5 @@ mod debug_lines;
 mod harness_smoke;
 mod mesh_parity;
 mod near_gpu_missing_hzb;
+mod region_threads;
 mod session_reset;

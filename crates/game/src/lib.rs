@@ -170,7 +170,7 @@ impl std::hash::Hasher for StateHasher {
 /// Connection/sync state surfaced to the client HUD. Derived from the
 /// manager's `ready`/`is_caught_up` flags; pure `game` type so the enum can
 /// cross the Bevy-free boundary in `ClientUpdateEvent`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum ConnectionState {
     #[default]
     Connecting,
@@ -178,12 +178,16 @@ pub enum ConnectionState {
     Ready,
 }
 
-#[derive(Debug)]
+/// Serializable so the browser can run the sim in a Web Worker
+/// (`client::web_worker::sim`): the two channel halves are skipped — the
+/// worker forwards their traffic as messages and the page side puts fresh
+/// channels in (a deserialized one is `never()`).
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub enum ClientUpdateEvent {
     NewRegion(
         RegionId,
         GameData,
-        crossbeam::channel::Receiver<GameDataUpdate>,
+        #[serde(skip, default = "crossbeam::channel::never")] crossbeam::channel::Receiver<GameDataUpdate>,
     ),
     /// The window moved on (or a region is being replaced): tear down this
     /// region's render state.
@@ -210,7 +214,7 @@ pub enum ClientUpdateEvent {
     /// Sent once by the manager; consumed by the ui_bridge. Widget-only —
     /// separate from the per-region `GameDataUpdate` channel because widgets
     /// hang off a screen-space UI root, not a region's world-space root.
-    UiChannel(crossbeam::channel::Receiver<UiUpdate>),
+    UiChannel(#[serde(skip, default = "crossbeam::channel::never")] crossbeam::channel::Receiver<UiUpdate>),
     /// Collider wireframe buffer for one region (region-local coords),
     /// regenerated per tick while the debug flag is on — including empty
     /// buffers, so the render side's replace-on-receipt clears stale
@@ -235,7 +239,11 @@ pub enum ClientUpdateEvent {
     PersonInfo(PersonInfo),
     /// World history: the fortress this client plays (`None` = none), from the server's
     /// `ServerPacket::Fortress` (sent on connect, embark, retire and return).
-    Fortress(Option<history::SiteId>),
+    Fortress(Option<HeldFortress>),
+    /// Every live predicted region's recent tick times (the F3 Debug tab),
+    /// every `perf::TICK_TIME_REPORT_INTERVAL`; native only (no clock on
+    /// wasm32). A region missing from the list is no longer live.
+    RegionTickTimes(Vec<(RegionId, perf::TickTimeStats)>),
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -246,18 +254,68 @@ pub trait Controller: Send {
     fn on_tick<'a>(&mut self, _t: &mut Undo<GameData>) {}
 }
 
+/// Every how many ticks a server region hashes its whole state
+/// ([`state_hash`]) and ships the hash with that tick's event
+/// (`ServerPacket::HashedGameEvent`); the client checks its own confirmed
+/// state at the same event against it (`Region::reconcile`). 0 = never.
+/// Process-global and read by every `RegionRunner` on each tick, so it is
+/// the SERVER's setting — a client never sets it, and tests and in-process
+/// harnesses keep 0 unless they opt in.
+static STATE_HASH_INTERVAL: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Env var read by [`set_state_hash_interval_from_env`].
+pub const STATE_HASH_INTERVAL_ENV: &str = "VOXEL_STATE_HASH_INTERVAL";
+
+/// The server binary's interval when `VOXEL_STATE_HASH_INTERVAL` is unset:
+/// a whole-state check every 100 ticks (5 s at a 50 ms `TICK_RATE`) in normal
+/// play. Only [`set_state_hash_interval_from_env`] applies it — tests and
+/// in-process harnesses still start at 0.
+pub const DEFAULT_STATE_HASH_INTERVAL: usize = 100;
+
+pub fn set_state_hash_interval(ticks: usize) {
+    STATE_HASH_INTERVAL.store(ticks, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn state_hash_interval() -> usize {
+    STATE_HASH_INTERVAL.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Server startup: [`set_state_hash_interval`] from `VOXEL_STATE_HASH_INTERVAL`
+/// (a tick count; 0 = off; unset or empty = [`DEFAULT_STATE_HASH_INTERVAL`]). Panics on a value that is not a
+/// number, like `HASH_MODE` — a typo silently turning the check off is worse
+/// than a startup crash.
+pub fn set_state_hash_interval_from_env() {
+    let ticks = match std::env::var(STATE_HASH_INTERVAL_ENV) {
+        Ok(v) if v.trim().is_empty() => DEFAULT_STATE_HASH_INTERVAL,
+        Ok(v) => v.trim().parse::<usize>().unwrap_or_else(|_| {
+            panic!("{STATE_HASH_INTERVAL_ENV} must be a tick count (0 = off), got {v:?}")
+        }),
+        Err(_) => DEFAULT_STATE_HASH_INTERVAL,
+    };
+    // println, not log: this runs before the logger is initialized.
+    println!("state hash check interval: {ticks} ticks (0 = off)");
+    set_state_hash_interval(ticks);
+}
+
 /// Set the undo hash-verification mode from the `HASH_MODE` env var
-/// (`off` | `delta` | `full`, case-insensitive), defaulting to Off — the
-/// production mode, with desync caught by the periodic tick-interval state
-/// hash instead — when unset (including wasm, which has no env). Client
-/// and server startup call this; tests and harnesses instead pin the mode
-/// explicitly (the process-global default stays Full for them). Run with
-/// `HASH_MODE=delta` for per-entry footprint digests, or
-/// `HASH_MODE=full` when chasing a suspected footprint/capture gap: Full
-/// whole-field-hashes every entry and catches state an undo closure missed,
-/// which Delta's declared-footprint digests structurally cannot see.
-/// Panics on an unrecognized value — a typo silently downgrading
+/// (`off` | `delta` | `full`, case-insensitive), defaulting to
+/// [`DEFAULT_HASH_MODE`] (Off) when unset (including wasm, which has no
+/// env). Client and server startup call this; tests and harnesses instead
+/// keep the process-global default (Full) or pin a mode explicitly.
+/// This is only the per-entry check that each undo restores its field
+/// bit-exact: Full whole-field-hashes every entry (catches state an undo
+/// closure missed), Delta digests the entry's declared footprint. It runs on
+/// every undo-log entry — every edit, every tick, again on every rollback —
+/// and Full cost seconds for a few hundred block edits on a play-size region
+/// (the "Complete all orders" rollback loop), so normal play runs Off.
+/// Client/server desync is caught independently of this mode by the
+/// server's every-N-ticks whole-state hash ([`set_state_hash_interval_from_env`]),
+/// which `game::state_hash` computes directly.
+/// Panics on an unrecognized value — a typo silently changing
 /// verification is worse than a startup crash.
+/// The binaries' undo verification mode when `HASH_MODE` is unset.
+pub const DEFAULT_HASH_MODE: HashMode = HashMode::Off;
+
 pub fn set_hash_mode_from_env() {
     let mode = match std::env::var("HASH_MODE") {
         Ok(v) => match v.to_ascii_lowercase().as_str() {
@@ -266,7 +324,7 @@ pub fn set_hash_mode_from_env() {
             "full" => HashMode::Full,
             other => panic!("HASH_MODE must be off|delta|full, got {other:?}"),
         },
-        Err(_) => HashMode::Off,
+        Err(_) => DEFAULT_HASH_MODE,
     };
     // println, not log: this runs before either binary initializes its logger.
     println!("undo hash verification mode: {mode:?}");
@@ -383,6 +441,19 @@ impl World {
             return Ok(ReconcileStats::default());
         };
         region.reconcile(event)
+    }
+
+    /// The server's state hash after event `event_id` of `region` arrived
+    /// (`ServerPacket::HashedGameEvent`); reconcile checks it when it
+    /// confirms that event. `false` = the region is not held, check dropped.
+    pub fn expect_state_hash(&mut self, region: &RegionId, event_id: usize, tick: usize, hash: u32) -> bool {
+        match self.regions.get_mut(region) {
+            Some(r) => {
+                r.expect_state_hash(event_id, tick, hash);
+                true
+            }
+            None => false,
+        }
     }
 
     pub fn remove_region(&mut self, id: &RegionId) -> Option<Region> {

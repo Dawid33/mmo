@@ -26,7 +26,7 @@ use std::sync::Arc;
 use bevy::camera::primitives::Aabb;
 use bevy::camera::visibility::NoAutoAabb;
 use bevy::prelude::*;
-use bevy::tasks::{block_on, futures_lite::future, AsyncComputeTaskPool, Task};
+use bevy::tasks::{block_on, futures_lite::future, Task};
 use game::{BlockId, Voxel, VoxelModel, BLOCK_VOXELS, BLOCK_VOXEL_COUNT, BRICK_BLOCKS, BRICK_VOXELS};
 
 use super::block_textures::BlockTextureLayers;
@@ -143,6 +143,24 @@ pub fn brick_translation(brick: [i32; 3], com: Vec3) -> Vec3 {
     Vec3::from_array(brick.map(|c| (c * BRICK_VOXELS as i32) as f32)) - com
 }
 
+/// A detached body's model to mesh (a compute job, `renderer::compute`);
+/// answers the centre of mass and each brick's records ([`BodyMesh`]).
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct BodyMeshJob {
+    pub model: VoxelModel,
+    pub layers: BlockTextureLayers,
+}
+
+impl super::compute::ComputeJob for BodyMeshJob {
+    type Output = ([f32; 3], Vec<([i32; 3], Vec<QuadRecord>)>);
+    const KIND: super::compute::JobKind = super::compute::JobKind::BodyMesh;
+
+    fn run(self) -> Self::Output {
+        let BodyMesh { com, bricks } = mesh_body(&self.model, &self.layers);
+        (com.to_array(), bricks)
+    }
+}
+
 /// Start meshing every pending body's model on the compute pool.
 pub fn spawn_voxel_body_meshes(
     mut commands: Commands,
@@ -150,9 +168,8 @@ pub fn spawn_voxel_body_meshes(
     layers: Res<BlockTextureLayers>,
 ) {
     for (e, PendingVoxelBody(model)) in &pending {
-        let model = Arc::clone(model);
-        let layers = BlockTextureLayers(layers.0.clone());
-        let task = AsyncComputeTaskPool::get().spawn(async move { mesh_body(&model, &layers) });
+        let job = BodyMeshJob { model: VoxelModel::clone(model), layers: layers.clone() };
+        let task = super::compute::spawn(job, |(com, bricks)| BodyMesh { com: Vec3::from_array(com), bricks });
         commands.entity(e).remove::<PendingVoxelBody>().insert(VoxelBodyMeshing(task));
     }
 }

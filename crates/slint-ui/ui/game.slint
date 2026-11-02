@@ -3,6 +3,10 @@ import { GameMenu } from "menu.slint";
 import { SiteMark, WorldMap, WorldMapConfig } from "world-map.slint";
 import { EmbarkPanel, EmbarkRow } from "embark.slint";
 import { GameTheme } from "theme.slint";
+import { FortressLayout, FortressPanel } from "fortress-panel.slint";
+import { DevStat, DevTickRow, DevToggle } from "debug-tab.slint";
+import { MenuColumn, MenuLayout } from "menu-column.slint";
+import { StubWindow } from "stub-window.slint";
 
 export { EmbarkRow, RadialItem, SiteMark, WorldMapConfig }
 
@@ -19,9 +23,51 @@ export component GameUi inherits Window {
     }
     background: transparent;
 
-    in-out property <bool> panel-open: true;
-    in property <string> home-region: "--";
-    in property <string> connection: "--";
+    // The fortress panel, top left (fortress-panel.slint): key figures on the
+    // tab row
+    // (placeholders reading "0"), the open tab (-1 = collapsed) and the
+    // tabs' contents.
+    in property <string> fortress-value: "0";
+    in property <string> fortress-happiness: "0";
+    in property <string> fortress-food: "0";
+    in-out property <int> fortress-tab: -1;
+    in property <[string]> governance-lines;
+    in property <[string]> people-names;
+    in property <[string]> designation-lines;
+    // A People row clicked (index into `people-names`).
+    callback person-picked(int);
+    // The fortress panel's Debug tab (index 4; `dev_ui` builds only, F3
+    // opens it): stats, the debug toggles and "Complete all orders"
+    // (crates/client/src/renderer/dev_ui.rs).
+    in property <bool> debug-available;
+    in property <[DevStat]> dev-stats;
+    in property <[DevToggle]> dev-toggles;
+    // Each live predicted region's tick times (dev_ui::tick_rows).
+    in property <[DevTickRow]> dev-tick-rows;
+    // Index into `dev-toggles`, new state.
+    callback dev-toggle(int, bool);
+    callback dev-complete-orders();
+    out property <length> dev-toggles-x: fortress.dev-toggles-x;
+    out property <length> dev-toggles-y: fortress.dev-toggles-y;
+    out property <length> dev-toggle-row-height: fortress.dev-toggle-row-height;
+    out property <length> dev-complete-x: fortress.dev-complete-x;
+    out property <length> dev-complete-y: fortress.dev-complete-y;
+    out property <length> dev-ticks-x: fortress.dev-ticks-x;
+    out property <length> fortress-tabs-x: fortress.tabs-x;
+    out property <length> fortress-tabs-y: fortress.tabs-y;
+    out property <length> people-first-item-y: fortress.people-first-item-y;
+    out property <length> people-row-height: fortress.people-row-height;
+    out property <length> fortress-values-left: fortress.values-left;
+    out property <length> fortress-values-top: fortress.values-top;
+    out property <length> fortress-values-bottom: fortress.values-bottom;
+    out property <length> fortress-tabs-top: fortress.tabs-top;
+    out property <length> fortress-tabs-end: fortress.tabs-end;
+    out property <length> fortress-tab-row-height: fortress.tab-row-height;
+    out property <length> fortress-widest-label: fortress.widest-label;
+    out property <length> fortress-tab-label-room: fortress.tab-label-room;
+    // The fortress panel's right edge (window logical pixels).
+    out property <length> fortress-panel-right: fortress.absolute-position.x + fortress.width;
+
     in property <int> selected-count;
     // One line per selected entity kind, e.g. "Slime (size 2) ×3".
     in property <[string]> selection-lines;
@@ -29,15 +75,32 @@ export component GameUi inherits Window {
     callback clear-selection();
 
     // Adventure mode: the client plays its one body instead of commanding
-    // (crates/client/src/renderer/commander/adventure.rs). The panel button
-    // switches; the fortress tools are off meanwhile (`tools-available`).
+    // (crates/client/src/renderer/commander/adventure.rs); the fortress tools
+    // are off meanwhile (`tools-available`). No UI switches it for now.
     in property <bool> adventure;
-    callback toggle-mode();
+
+    // The top-right column (menu-column.slint): Settings and Encyclopedia,
+    // each a stub window for now (modal screens, like the map), and the
+    // context box: the active tool (`tool-name`, "" = none) and the
+    // selection.
+    in-out property <bool> settings-open;
+    in-out property <bool> encyclopedia-open;
+    callback open-settings();
+    callback open-encyclopedia();
+    // Close on either stub window.
+    callback close-window();
+    in property <string> tool-name;
+    // The open stub window's Close button (window logical pixels).
+    out property <length> stub-close-x: root.encyclopedia-open ? encyclopedia.close-x : settings.close-x;
+    out property <length> stub-close-y: root.encyclopedia-open ? encyclopedia.close-y : settings.close-y;
 
     // Follow: the camera tracks the one selected entity
     // (commander/follow.rs).
     in property <bool> following;
     callback follow-clicked();
+    // The top-down view is on; its button leaves it.
+    in property <bool> top-down;
+    callback top-down-clicked();
 
     // Fortress tools (crates/client/src/renderer/commander/designate.rs).
     // False with no home region (not joined yet).
@@ -144,8 +207,8 @@ export component GameUi inherits Window {
     // Whether the menu offers Main menu (false on wasm, which has no menu).
     in property <bool> can-leave: true;
     // Not embarked yet: the world map is the embark step. Its Close is gone,
-    // the Esc menu offers only Main menu, and neither the F9 panel nor the
-    // status line is drawn.
+    // the Esc menu offers only Main menu, and neither the fortress panel, the
+    // menu column nor the status line is drawn.
     in property <bool> map-modal;
     out property <length> close-button-x: map.close-button-x;
     out property <length> close-button-y: map.close-button-y;
@@ -161,61 +224,54 @@ export component GameUi inherits Window {
     // The status line's centre (window logical pixels), for headless tests.
     out property <length> status-x: root.width / 2;
     out property <length> status-y: root.status-top + 12px;
-    property <length> status-top: 12px;
+    // Under the fortress panel's tab row, which spans the top centre.
+    property <length> status-top: fortress.bar-bottom + 8px;
 
     // The drag readout's distance right of and below the cursor; it flips
     // to the other side at the window edge rather than slide under it.
     property <length> drag-offset: 16px;
 
-    // Top-right, clear of the minimap (bottom-left).
-    // Not over the arrival map (nor beside its Esc menu).
-    if root.panel-open && !root.map-modal: panel := FrameFace {
-        title: "Fortress";
-        // Wide enough for the selection row ("Stop following" is its
-        // widest state).
-        width: max(240px, self.content-x + selection-row.preferred-width + Styles.frame.box.padding.right
-            + GraphicalSets.inset(Styles.frame.graphics).right);
-        height: self.content-y + body.preferred-height + Styles.frame.box.padding.bottom
-            + GraphicalSets.inset(Styles.frame.graphics).bottom;
-        x: root.width - self.width - 12px;
-        y: 12px;
-
-        body := VerticalFlow {
-            x: panel.content-x;
-            y: panel.content-y;
-            width: panel.content-right - panel.content-x;
-
-            LabelFace { text: "Region " + root.home-region; }
-            LabelFace { text: root.connection; }
-            if root.level-text != "": LabelFace { text: root.level-text; }
-            if root.active-tool >= 0: LabelFace {
-                style: Styles.caption-label;
-                text: "Priority " + root.priority + "  [1–7]";
-            }
-            // A flow never wraps, and the panel is pinned to the window's
-            // right edge: a row wider than the panel runs off screen.
-            Button {
-                text: root.adventure ? "Fortress mode" : "Adventure mode";
-                clicked => { root.toggle-mode(); }
-            }
-            LabelFace {
-                style: Styles.caption-label;
-                text: root.selected-count == 0 ? "Nothing selected" : "Selected: " + root.selected-count;
-            }
-            for line in root.selection-lines: LabelFace { text: line; }
-            selection-row := HorizontalFlow {
-                Button {
-                    text: "Clear selection";
-                    enabled: root.selected-count > 0;
-                    clicked => { root.clear-selection(); }
-                }
-                Button {
-                    text: root.following ? "Stop following" : "Follow";
-                    enabled: root.selected-count == 1 || root.following;
-                    clicked => { root.follow-clicked(); }
-                }
-            }
+    // Top left; not over the arrival map. `visible` on a plain Rectangle
+    // (not `if`), so the test probes above stay readable.
+    Rectangle {
+        visible: !root.map-modal;
+        fortress := FortressPanel {
+            x: FortressLayout.margin;
+            y: FortressLayout.margin;
+            height-limit: root.height - FortressLayout.margin - FortressLayout.bottom-gap;
+            value: root.fortress-value;
+            happiness: root.fortress-happiness;
+            food: root.fortress-food;
+            tab <=> root.fortress-tab;
+            governance-lines: root.governance-lines;
+            people: root.people-names;
+            designations: root.designation-lines;
+            person-picked(i) => { root.person-picked(i); }
+            debug-available: root.debug-available;
+            dev-stats: root.dev-stats;
+            dev-toggles: root.dev-toggles;
+            dev-tick-rows: root.dev-tick-rows;
+            dev-toggle(i, on) => { root.dev-toggle(i, on); }
+            dev-complete-orders => { root.dev-complete-orders(); }
         }
+    }
+
+    // Top right; not over the arrival map.
+    if !root.map-modal: MenuColumn {
+        x: root.width - self.width - MenuLayout.margin;
+        y: MenuLayout.margin;
+        open-settings => { root.open-settings(); }
+        open-encyclopedia => { root.open-encyclopedia(); }
+        tool-name: root.tool-name;
+        priority: root.priority;
+        level-text: root.level-text;
+        selected-count: root.selected-count;
+        selection-lines: root.selection-lines;
+        following: root.following;
+        clear-selection => { root.clear-selection(); }
+        follow-clicked => { root.follow-clicked(); }
+        top-down: root.top-down;
+        top-down-clicked => { root.top-down-clicked(); }
     }
 
     // Next to the cursor while dragging.
@@ -236,7 +292,8 @@ export component GameUi inherits Window {
         }
     }
 
-    // Top centre, apart from the F9 panel and the map window; only while
+    // Top centre, between the fortress panel and the menu column, apart from
+    // the map window; only while
     // there is something to say, so it takes no pixels or clicks otherwise.
     if root.game-status != "" && !root.map-open && !root.map-modal: status := FrameFace {
         width: self.content-x + status-label.preferred-width + Styles.frame.box.padding.right
@@ -264,6 +321,23 @@ export component GameUi inherits Window {
         y: root.wheel-y - self.side / 2;
         items: root.wheel-items;
         toggled: root.active-tool;
+    }
+
+    // The stub windows: `visible` rather than `if`, so their Close probes
+    // stay readable.
+    settings := StubWindow {
+        visible: root.settings-open;
+        width: 100%;
+        height: 100%;
+        title: "Settings";
+        close => { root.close-window(); }
+    }
+    encyclopedia := StubWindow {
+        visible: root.encyclopedia-open;
+        width: 100%;
+        height: 100%;
+        title: "Encyclopedia";
+        close => { root.close-window(); }
     }
 
     // `visible` rather than `if`, so its hit-test positions stay readable.

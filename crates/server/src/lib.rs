@@ -28,6 +28,21 @@ pub const SINGLE_PLAYER_ENV: &str = "VOXEL_SINGLE_PLAYER";
 /// menu world never collides with a dev server on 6466.
 pub const SERVER_PORT_ENV: &str = "VOXEL_SERVER_PORT";
 
+/// The address both listeners (QUIC and WebTransport) bind (unset or empty =
+/// `127.0.0.1`, local only). The deployed server (`just deploy`) sets `0.0.0.0`.
+pub const BIND_ADDR_ENV: &str = "VOXEL_BIND_ADDR";
+
+/// The listeners' address from the value of [`BIND_ADDR_ENV`].
+fn bind_ip_from(value: Option<&str>) -> Result<std::net::IpAddr, String> {
+    let value = value.map(str::trim).unwrap_or("");
+    if value.is_empty() {
+        return Ok(std::net::IpAddr::from([127, 0, 0, 1]));
+    }
+    value
+        .parse()
+        .map_err(|_| format!("invalid {BIND_ADDR_ENV} value `{value}` (expected an IP address, e.g. 0.0.0.0)"))
+}
+
 /// The dev server's QUIC port (`just run` / `just server`).
 pub const DEFAULT_SERVER_PORT: u16 = 6466;
 
@@ -114,6 +129,7 @@ fn build_server_runtime(worker_threads: usize) -> tokio::runtime::Runtime {
 
 pub mod lod_workers;
 pub mod perf;
+pub mod region_store;
 pub mod region_threads;
 pub mod webtransport;
 pub mod world_file;
@@ -181,15 +197,17 @@ impl ClientSink {
 /// - Execute game tick.
 /// - If the loop didn't take a full TICK_TIME, wait until full TICK_TIME has passed.
 pub struct WorldIngress {
-    /// The QUIC port bound on 127.0.0.1.
+    /// The address both listeners bind ([`BIND_ADDR_ENV`]).
+    ip: std::net::IpAddr,
+    /// The QUIC port.
     port: u16,
-    /// Whether the WebTransport ingress (127.0.0.1:[`WEBTRANSPORT_PORT`]) runs.
+    /// Whether the WebTransport ingress (`ip`:[`WEBTRANSPORT_PORT`]) runs.
     webtransport: bool,
 }
 
 impl WorldIngress {
-    pub fn new(port: u16, webtransport: bool) -> Self {
-        Self { port, webtransport }
+    pub fn new(ip: std::net::IpAddr, port: u16, webtransport: bool) -> Self {
+        Self { ip, port, webtransport }
     }
 
     /// ## Network Loop
@@ -216,9 +234,10 @@ impl WorldIngress {
             quinn::ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(crypto).unwrap()));
         let t_config = TransportConfig::default();
         config.transport_config(Arc::new(t_config));
-        let endpoint = Endpoint::server(config, std::net::SocketAddr::from(([127, 0, 0, 1], self.port)))
-            .unwrap_or_else(|e| panic!("could not bind QUIC on 127.0.0.1:{}: {e}", self.port));
-        info!("listening on 127.0.0.1:{} (QUIC)", self.port);
+        let quic_addr = std::net::SocketAddr::new(self.ip, self.port);
+        let endpoint = Endpoint::server(config, quic_addr)
+            .unwrap_or_else(|e| panic!("could not bind QUIC on {quic_addr}: {e}"));
+        info!("listening on {quic_addr} (QUIC)");
 
         let sinks: Arc<DashMap<ClientId, ClientSink>> = Arc::new(DashMap::new());
         let writer_sinks = sinks.clone();
@@ -241,7 +260,17 @@ impl WorldIngress {
                 timed_out
             }
 
-            while let Ok((target, event)) = server_recv.recv() {
+            // The channel is a blocking crossbeam one: `block_in_place` hands
+            // this worker thread's queued tasks to another worker before it
+            // blocks. A bare `recv()` here parked the thread with whatever sat
+            // in its LIFO slot — which tokio never lets another worker steal —
+            // and that was the connection task this writer had just woken, so
+            // a WebTransport connection froze (no ACKs, no keep-alives) until
+            // the server next had something to send: the browser saw its
+            // streams never complete and closed the session as a "Network
+            // blackhole" (2026-11-02, a join whose first request arrived while
+            // the server was quiet).
+            while let Ok((target, event)) = tokio::task::block_in_place(|| server_recv.recv()) {
                 // Serialize + frame (large packets are lz4-compressed; see
                 // `game::encode_packet`). `serialize_ms` covers both.
                 let serialize_started = std::time::Instant::now();
@@ -286,9 +315,16 @@ impl WorldIngress {
             let wt_send = send.clone();
             let wt_sinks = sinks.clone();
             let wt_next = next_client_id.clone();
+            let wt_addr = std::net::SocketAddr::new(self.ip, WEBTRANSPORT_PORT);
+            let certs = crate::webtransport::cert_source_from(
+                std::env::var(crate::webtransport::WT_CERT_ENV).ok().as_deref(),
+                std::env::var(crate::webtransport::WT_KEY_ENV).ok().as_deref(),
+            )
+            .unwrap_or_else(|message| panic!("{message}"));
             tokio::spawn(async move {
                 if let Err(e) = crate::webtransport::serve(
-                    std::net::SocketAddr::from(([127, 0, 0, 1], WEBTRANSPORT_PORT)),
+                    wt_addr,
+                    certs,
                     wt_send,
                     wt_sinks,
                     wt_next,
@@ -333,12 +369,12 @@ impl WorldIngress {
 
 pub fn run() {
     game::perf::pin_origin();
-    // Per-entry verification is off by default (desync is caught by the
-    // periodic tick-interval state hash); HASH_MODE=delta re-enables
-    // footprint-digest self-checks, HASH_MODE=full whole-field verification
-    // when chasing a footprint/capture gap. Tests and the convergence
-    // harnesses pin HashMode::Full themselves.
+    // Per-entry undo verification is Full by default (HASH_MODE=delta|off
+    // trades it for speed); client/server desync is checked by the
+    // every-N-ticks state hash the server ships to clients — every 100 ticks
+    // unless VOXEL_STATE_HASH_INTERVAL=N overrides it, 0 = off.
     game::set_hash_mode_from_env();
+    game::set_state_hash_interval_from_env();
 
     // Continuous profiling: build with `--features pyroscope` and set PYROSCOPE
     // to push flamegraphs to a local Pyroscope (`just profile-server`). Off
@@ -366,12 +402,18 @@ pub fn run() {
     let single_player = std::env::var(SINGLE_PLAYER_ENV).is_ok_and(|v| v == "1");
     let configured_port = std::env::var(SERVER_PORT_ENV).ok();
     let port = server_port_from(configured_port.as_deref()).unwrap_or_else(|message| panic!("{message}"));
-    let mut rgi = WorldIngress::new(port, webtransport_enabled(single_player));
+    let configured_bind = std::env::var(BIND_ADDR_ENV).ok();
+    let ip = bind_ip_from(configured_bind.as_deref()).unwrap_or_else(|message| panic!("{message}"));
+    let mut rgi = WorldIngress::new(ip, port, webtransport_enabled(single_player));
     let configured_worker_threads = std::env::var("TOKIO_WORKER_THREADS").ok();
     let worker_threads = server_worker_threads(configured_worker_threads.as_deref())
         .unwrap_or_else(|message| panic!("{message}"));
     let rt = build_server_runtime(worker_threads);
     let cps = client_packet_send.clone();
+    // SIGINT / SIGTERM (`just run` stops its server with TERM) end the main
+    // loop like a last client leaving does, so the world is saved on the way out.
+    let stop_signal = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    rt.spawn(watch_stop_signals(stop_signal.clone()));
     std::thread::spawn(move || rt.block_on(async move { rgi.listen(cps, server_recv).await }));
 
     let (region_out_send, region_out_recv) = crossbeam::channel::unbounded();
@@ -408,6 +450,14 @@ pub fn run() {
             history_world_path = Some(path);
         }
     }
+    // World autosave: forged worlds keep their regions next to the world file
+    // (procedural worlds, like their missing history, keep nothing).
+    let region_store = history_world_path.as_ref().map(|path| {
+        let world = worldgen::forged::active().expect("a forged world is installed");
+        let store = region_store::RegionStore::new(region_store::regions_dir_for(path), world.content_crc());
+        info!("[server] region saves: {}", store.dir().display());
+        store
+    });
     let world_seed = worldgen::WORLD_SEED;
     let gen_cache = worldgen::cache::WorldgenCache::from_env(world_seed, &manifest);
     let (lod_result_send, lod_result_recv) = crossbeam::channel::unbounded();
@@ -432,8 +482,13 @@ pub fn run() {
     let region_gen_cache = gen_cache.clone();
     let region_generator: region_threads::SharedRegionGenerator =
         std::sync::Arc::new(move |rc| region_gen_cache.generate_cached(rc, world_seed, materials));
+    let mut spawner = region_threads::ThreadRegionSpawner::with_generator(region_generator);
+    if let Some(store) = &region_store {
+        spawner = spawner.with_store(store.clone());
+    }
+    let saver = region_store.map(region_store::spawn_saver);
     let mut manager = game::WorldManager::new(
-        region_threads::ThreadRegionSpawner::with_generator(region_generator),
+        spawner,
         Box::new(move |rc| gen_cache.generate_cached(rc, world_seed, materials)),
         server_send,
         region_out_send,
@@ -464,7 +519,8 @@ pub fn run() {
     let start = std::time::Instant::now();
     let mut report = perf::ServerReport::new();
     let mut ever_connected = false;
-    let mut last_history_save = std::time::Instant::now();
+    let mut last_world_save = std::time::Instant::now();
+    let save_every = std::time::Duration::from_secs(world_save_secs(std::env::var(WORLD_SAVE_SECS_ENV).ok().as_deref()));
     let parent_gone = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     if single_player {
         let gone = parent_gone.clone();
@@ -498,12 +554,18 @@ pub fn run() {
             info!("[server] single-player: {why}, exiting");
             break 'main;
         }
+        if stop_signal.load(std::sync::atomic::Ordering::SeqCst) {
+            info!("[server] stop signal: saving the world and exiting");
+            break 'main;
+        }
         manager.maintain(now_ms);
         manager.pump_lod_results();
-        if last_history_save.elapsed() >= std::time::Duration::from_secs(HISTORY_SAVE_SECS) {
-            last_history_save = std::time::Instant::now();
+        if last_world_save.elapsed() >= save_every {
+            last_world_save = std::time::Instant::now();
             save_history(&history_world_path, &manager);
+            manager.request_save();
         }
+        forward_saves(&saver, &mut manager);
         report.maybe_report(
             &mut manager,
             perf::Backlog {
@@ -525,6 +587,19 @@ pub fn run() {
             manager.handle_region_output(rc, output, now_ms);
         }
     }
+    let unparked = manager.running_regions();
+    if !unparked.is_empty() {
+        log::warn!("[server] {} regions did not park in time and are not saved: {unparked:?}", unparked.len());
+    }
+    // Every region that parked is saved (its blob since the last autosave).
+    manager.request_save();
+    forward_saves(&saver, &mut manager);
+    if let Some((send, handle)) = saver {
+        drop(send);
+        if handle.join().is_err() {
+            log::error!("[server] the world saver panicked");
+        }
+    }
     // Every region is parked, so its people are back in the history.
     save_history(&history_world_path, &manager);
     #[cfg(feature = "pyroscope")]
@@ -534,9 +609,73 @@ pub fn run() {
     }
 }
 
-/// How often the main loop writes the world history (it is also written after
-/// the orderly-exit loop has parked every region).
-pub const HISTORY_SAVE_SECS: u64 = 60;
+/// How often the main loop saves the world — the history and every region
+/// (running regions' live state; parked ones once after they park). Both are
+/// also saved after the orderly-exit loop has parked every region.
+pub const WORLD_SAVE_SECS: u64 = 60;
+
+/// Overrides [`WORLD_SAVE_SECS`] (whole seconds, at least 1) — for testing.
+pub const WORLD_SAVE_SECS_ENV: &str = "VOXEL_SAVE_SECS";
+
+/// The autosave period from `VOXEL_SAVE_SECS`; unset, empty or invalid (a
+/// warning) is [`WORLD_SAVE_SECS`].
+pub fn world_save_secs(env_value: Option<&str>) -> u64 {
+    match env_value.map(str::trim) {
+        None | Some("") => WORLD_SAVE_SECS,
+        Some(v) => match v.parse::<u64>() {
+            Ok(secs) if secs >= 1 => secs,
+            _ => {
+                log::warn!("[server] {WORLD_SAVE_SECS_ENV}={v:?} is not a whole number of seconds >= 1; using {WORLD_SAVE_SECS}");
+                WORLD_SAVE_SECS
+            }
+        },
+    }
+}
+
+/// Hand the manager's collected region states to the saver thread.
+fn forward_saves<S: game::RegionSpawner>(
+    saver: &Option<(
+        crossbeam::channel::Sender<(game::RegionCoords, game::RegionSave)>,
+        std::thread::JoinHandle<()>,
+    )>,
+    manager: &mut game::WorldManager<S>,
+) {
+    let saves = manager.take_saves();
+    if let Some((send, _)) = saver {
+        for save in saves {
+            let _ = send.send(save);
+        }
+    }
+}
+
+/// Sets `stop` on the first SIGINT / SIGTERM; a second one exits at once
+/// (an orderly exit that hangs can still be interrupted).
+async fn watch_stop_signals(stop: std::sync::Arc<std::sync::atomic::AtomicBool>) {
+    #[cfg(unix)]
+    let mut term = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+        Ok(term) => term,
+        Err(e) => {
+            log::error!("[server] cannot watch SIGTERM: {e}");
+            return;
+        }
+    };
+    loop {
+        #[cfg(unix)]
+        let got = tokio::select! {
+            r = tokio::signal::ctrl_c() => r.is_ok(),
+            r = term.recv() => r.is_some(),
+        };
+        #[cfg(not(unix))]
+        let got = tokio::signal::ctrl_c().await.is_ok();
+        if !got {
+            return;
+        }
+        if stop.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            log::warn!("[server] second stop signal: exiting without saving");
+            std::process::exit(130);
+        }
+    }
+}
 
 fn save_history<S: game::RegionSpawner>(
     path: &Option<std::path::PathBuf>,
@@ -587,6 +726,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn world_save_period_from_env() {
+        assert_eq!(world_save_secs(None), WORLD_SAVE_SECS);
+        assert_eq!(world_save_secs(Some("")), WORLD_SAVE_SECS);
+        assert_eq!(world_save_secs(Some("5")), 5);
+        assert_eq!(world_save_secs(Some("0")), WORLD_SAVE_SECS, "0 would save every loop");
+        assert_eq!(world_save_secs(Some("soon")), WORLD_SAVE_SECS);
+    }
+
+    #[test]
     fn single_player_exits_only_after_last_client_leaves() {
         assert!(!should_exit_single_player(false, true, 0));
         assert!(!should_exit_single_player(true, false, 0));
@@ -608,6 +756,14 @@ mod tests {
         let gone = std::sync::atomic::AtomicBool::new(false);
         watch_parent(&b"anything"[..], &gone);
         assert!(gone.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[test]
+    fn bind_address_defaults_to_loopback() {
+        assert_eq!(bind_ip_from(None), Ok(std::net::IpAddr::from([127, 0, 0, 1])));
+        assert_eq!(bind_ip_from(Some(" ")), Ok(std::net::IpAddr::from([127, 0, 0, 1])));
+        assert_eq!(bind_ip_from(Some("0.0.0.0")), Ok(std::net::IpAddr::from([0, 0, 0, 0])));
+        assert!(bind_ip_from(Some("everywhere")).is_err());
     }
 
     #[test]

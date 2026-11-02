@@ -1,33 +1,75 @@
 //! Headless probe: how long does a region take to start on a real server
-//! region thread? Spawns regions through `ThreadRegionSpawner` with production
-//! worldgen columns — the path `server::run` takes on a client's first
-//! subscription (deferred seeds: each region thread runs its own worldgen) —
-//! and times each until its first tick output.
+//! region thread, and how much memory does each running region cost? Spawns
+//! regions through `ThreadRegionSpawner` with production worldgen columns —
+//! the path `server::run` takes on a client's first subscription (deferred
+//! seeds: each region thread runs its own worldgen) — times each until its
+//! first output and prints the process RSS as they come up, then keeps them
+//! ticking for `hold` seconds, sampling RSS.
 //!
-//!   cargo run --release -p server --example genesis_probe -- [regions=1]
+//!   just genesis-probe [regions=1] [hold_secs=0] [center_x,center_z]
+//!   (`just world_file=<file> genesis-probe …` for a forged world)
 //!
-//! `regions=9` starts a 3x3 window at once, like a production-scale join.
+//! `regions=9` starts a 3x3 window at once, like a production-scale join (or
+//! the fortress neighbourhood). `VOXEL_WORLD_FILE=<file>` serves a forged
+//! world with the server's real block materials; unset = procedural.
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-use game::{BlockId, RegionCoords, RegionSeed, RegionSpawner};
+use game::{RegionCoords, RegionSeed, RegionSpawner};
+
+/// Resident set size of this process in MiB (Linux `/proc`; 0 elsewhere).
+fn rss_mib() -> u64 {
+    std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|s| {
+            s.lines()
+                .find(|l| l.starts_with("VmRSS:"))
+                .and_then(|l| l.split_whitespace().nth(1)?.parse::<u64>().ok())
+        })
+        .map_or(0, |kib| kib / 1024)
+}
 
 fn main() {
     game::set_hash_mode_from_env();
-    let count: usize = std::env::args().nth(1).and_then(|a| a.parse().ok()).unwrap_or(1);
-    let materials = worldgen::material::Materials {
-        stone: BlockId(2),
-        dirt: BlockId(1),
-        grass: BlockId(3),
-        sand: BlockId(4),
-        water: BlockId(5),
-        bedrock: game::BlockId(6),
-        rocks: [7, 8, 9, 10, 11, 12].map(game::BlockId),
-        trees: worldgen::material::TreeBlocks::NONE,
-        biome: worldgen::material::BiomeBlocks::NONE,
-    };
+    let mut args = std::env::args().skip(1);
+    let count: usize = args.next().and_then(|a| a.parse().ok()).unwrap_or(1);
+    let hold_secs: u64 = args.next().and_then(|a| a.parse().ok()).unwrap_or(0);
+    let center = args
+        .next()
+        .and_then(|a| {
+            let (x, z) = a.split_once(',')?;
+            Some(RegionCoords::new(x.trim().parse().ok()?, z.trim().parse().ok()?))
+        })
+        .unwrap_or(RegionCoords::new(0, 0));
+
+    // The server's block registry and materials (biome blocks, trees).
+    let manifest = include_str!("../../../assets/blocks/blocks.ron");
+    let registry = game::BlockRegistry::from_ron(manifest).expect("invalid block manifest");
+    game::install_block_props(registry.props());
+    let materials = worldgen::material::Materials::from_names(|name| {
+        registry.id_of(name).unwrap_or_else(|| panic!("block manifest must define \"{name}\""))
+    });
+    match std::env::var(worldgen::forged::WORLD_FILE_ENV).ok().filter(|p| !p.is_empty() && p != "procedural") {
+        Some(path) => {
+            let world = worldgen::forged::ForgedWorld::load(std::path::Path::new(&path))
+                .unwrap_or_else(|e| panic!("{path}: {e}"));
+            worldgen::forged::install(Some(world));
+            println!("world: forged {path}");
+        }
+        None => {
+            worldgen::forged::install(None);
+            println!("world: procedural");
+        }
+    }
+    println!(
+        "region {} blocks, chunk {} blocks; rss before regions: {} MiB",
+        game::REGION_BLOCKS,
+        game::CHUNK_BLOCKS,
+        rss_mib()
+    );
+
     let regions: Vec<RegionCoords> = (-1..=1)
-        .flat_map(|x| (-1..=1).map(move |z| RegionCoords::new(x, z)))
+        .flat_map(|x| (-1..=1).map(move |z| RegionCoords::new(center.x + x, center.z + z)))
         .take(count.max(1))
         .collect();
     let (out_send, out_recv) = crossbeam::channel::unbounded();
@@ -45,8 +87,19 @@ fn main() {
     while !pending.is_empty() {
         let (rc, _output) = out_recv.recv().expect("region thread died");
         if pending.remove(&rc) {
-            println!("first output from {rc:?} after {:.0} ms", started.elapsed().as_secs_f64() * 1000.0);
+            println!(
+                "first output from {rc:?} after {:.0} ms; rss {} MiB",
+                started.elapsed().as_secs_f64() * 1000.0,
+                rss_mib()
+            );
         }
+    }
+    let hold = Instant::now();
+    while hold.elapsed() < Duration::from_secs(hold_secs) {
+        // Drain outputs (as the manager would) so they don't pile up here.
+        while out_recv.try_recv().is_ok() {}
+        std::thread::sleep(Duration::from_secs(2));
+        println!("t+{:>3} s: rss {} MiB", hold.elapsed().as_secs(), rss_mib());
     }
     drop(inputs);
 }

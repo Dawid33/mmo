@@ -207,6 +207,48 @@ pub fn budget_lines_requested() -> bool {
         .unwrap_or(false)
 }
 
+/// Ticks each live region's tick-time window keeps (the client's F3 Debug
+/// tab): 200 ticks at the 50 ms tick = the last 10 s.
+pub const TICK_TIME_WINDOW: usize = 200;
+/// How often the client's game thread sends the windows' summaries to the
+/// render thread (`ClientUpdateEvent::RegionTickTimes`).
+pub const TICK_TIME_REPORT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// One region's recent forward-tick wall times, in microseconds: the mean
+/// and nearest-rank percentiles over its last [`TICK_TIME_WINDOW`] ticks.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TickTimeStats {
+    pub samples: u32,
+    pub mean_us: u32,
+    pub p50_us: u32,
+    pub p95_us: u32,
+    pub p99_us: u32,
+    pub max_us: u32,
+}
+
+impl TickTimeStats {
+    /// `None` for no samples.
+    pub fn from_samples(samples_us: impl IntoIterator<Item = u32>) -> Option<Self> {
+        let mut sorted: Vec<u32> = samples_us.into_iter().collect();
+        if sorted.is_empty() {
+            return None;
+        }
+        sorted.sort_unstable();
+        let n = sorted.len();
+        // Nearest rank: the smallest sample with at least p of them at or below it.
+        let rank = |p: u32| sorted[((n as u64 * p as u64).div_ceil(100) as usize).clamp(1, n) - 1];
+        let sum: u64 = sorted.iter().map(|&s| s as u64).sum();
+        Some(Self {
+            samples: n as u32,
+            mean_us: (sum / n as u64) as u32,
+            p50_us: rank(50),
+            p95_us: rank(95),
+            p99_us: rank(99),
+            max_us: sorted[n - 1],
+        })
+    }
+}
+
 /// Milliseconds with one decimal, the unit every `*_ms` field uses.
 pub fn ms(d: std::time::Duration) -> f64 {
     (d.as_secs_f64() * 10_000.0).round() / 10.0
@@ -227,6 +269,21 @@ macro_rules! perf_event {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tick_time_stats_nearest_rank() {
+        assert_eq!(TickTimeStats::from_samples([]), None);
+        let one = TickTimeStats::from_samples([7]).unwrap();
+        assert_eq!((one.mean_us, one.p50_us, one.p99_us, one.max_us), (7, 7, 7, 7));
+        // 1..=100: p50 = 50, p95 = 95, p99 = 99, mean 50 (floor of 50.5).
+        let s = TickTimeStats::from_samples((1..=100).rev()).unwrap();
+        assert_eq!(s, TickTimeStats { samples: 100, mean_us: 50, p50_us: 50, p95_us: 95, p99_us: 99, max_us: 100 });
+        // One slow tick in 20 shows at p95's edge and in max, not in p50.
+        let mut v = vec![1_000; 19];
+        v.push(9_000);
+        let s = TickTimeStats::from_samples(v).unwrap();
+        assert_eq!((s.p50_us, s.p95_us, s.max_us, s.mean_us), (1_000, 1_000, 9_000, 1_400));
+    }
 
     #[test]
     fn clock_is_monotonic_and_survives_a_missing_init() {

@@ -14,6 +14,18 @@ jobs = -4
 # so a toolchain bump that changes the default doesn't silently grow target/.
 [unstable]
 embed-metadata = false
+# Per-package `rustflags` in Cargo.toml profiles (the client's `-Clto=off`).
+profile-rustflags = true
+# Resolve dependency features for the WHOLE workspace whatever `-p` selects.
+# Without it `cargo build -p client` (smoke, test-one, …) and a root
+# `cargo build --bin client` / `--workspace` enabled different features on 26
+# shared deps (tokio, rapier3d, typenum, hashbrown, …), so each selection built
+# its own copy of rapier → game → worldgen → client and of the Slint stack →
+# slint-ui, and every .slint edit paid the slint-ui compile once per copy.
+feature-unification = true
+
+[resolver]
+feature-unification = "workspace"
 
 # Region edge in BLOCKS, read at BUILD time by `game::REGION_BLOCKS`
 # (crates/game/src/protocol.rs; legal values there). It lives here so raw

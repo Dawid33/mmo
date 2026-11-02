@@ -59,7 +59,7 @@ impl History {
     /// player-founded site in `req.region` at once — no journey is walked. All or
     /// nothing: a refusal changes no state.
     pub fn player_embark(&mut self, req: &EmbarkRequest) -> Result<SiteId, EmbarkRefusal> {
-        self.embark_allowed(req.region)?;
+        self.player_embark_allowed(req.region)?;
         if req.people.is_empty() || req.people.len() > EMBARK_PLAYER_PARTY_MAX as usize {
             return Err(EmbarkRefusal::PartySize);
         }

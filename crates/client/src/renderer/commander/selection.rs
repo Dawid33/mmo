@@ -1,8 +1,10 @@
 //! Client-local selection and the ground pick.
 //!
-//! Left click selects the entity nearest the cursor (within
-//! [`CLICK_SELECT_RADIUS_PX`]), left-drag selects everything whose projected
-//! position falls in the box, Ctrl adds to the selection (Shift is the level-down key), and a click on
+//! Left click selects the entity whose body on screen — its feet-to-head
+//! axis, as wide as the body — is nearest the cursor (within
+//! [`CLICK_SELECT_RADIUS_PX`] of it, so a click anywhere on a dwarf hits it at
+//! any zoom), left-drag selects everything whose projected centre falls in
+//! the box, Ctrl adds to the selection (Shift is the level-down key), and a click on
 //! empty ground clears it. Nothing here reaches the sim: orders (a right
 //! click, designations) will be sim events aimed at [`GroundPick`].
 
@@ -23,7 +25,8 @@ use super::adventure::ClientPlayMode;
 use crate::renderer::bridge::{LocalBody, SimEntity, SimEntityMap, SimKind};
 use crate::renderer::cursor::CursorPolicy;
 
-/// A click selects the nearest entity whose screen position is this close.
+/// A click selects the nearest entity whose body on screen is this close
+/// (slack beyond its projected width, so a far, tiny one is still hittable).
 pub const CLICK_SELECT_RADIUS_PX: f32 = 12.0;
 /// A left press that moves farther than this becomes a box drag.
 pub const DRAG_THRESHOLD_PX: f32 = 4.0;
@@ -80,18 +83,43 @@ pub fn is_selectable(kind: EntityKind, local_player: bool) -> bool {
     !matches!(kind, EntityKind::Player) || local_player // people and slimes always
 }
 
-/// The candidate nearest `cursor` within `radius` pixels.
+/// A selectable as the screen sees it: its centre, its vertical axis from
+/// feet to head, and its half-width, all in viewport pixels.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScreenBody {
+    pub centre: Vec2,
+    pub feet: Vec2,
+    pub head: Vec2,
+    pub half_width: f32,
+}
+
+impl ScreenBody {
+    /// A point-sized body (no extent).
+    pub fn point(at: Vec2) -> Self {
+        Self { centre: at, feet: at, head: at, half_width: 0.0 }
+    }
+
+    /// Pixels from `p` to the body's outline (0 inside it).
+    pub fn distance(&self, p: Vec2) -> f32 {
+        let axis = self.head - self.feet;
+        let t = if axis.length_squared() > 0.0 { ((p - self.feet).dot(axis) / axis.length_squared()).clamp(0.0, 1.0) } else { 0.0 };
+        (p.distance(self.feet + axis * t) - self.half_width).max(0.0)
+    }
+}
+
+/// The candidate whose body is nearest `cursor`, within `slack` pixels of
+/// its outline; inside several, the one whose axis is nearest.
 pub fn click_pick<K: Copy>(
     cursor: Vec2,
-    candidates: impl IntoIterator<Item = (K, Vec2)>,
-    radius: f32,
+    candidates: impl IntoIterator<Item = (K, ScreenBody)>,
+    slack: f32,
 ) -> Option<K> {
     candidates
         .into_iter()
-        .map(|(k, p)| (k, p.distance(cursor)))
-        .filter(|&(_, d)| d <= radius)
-        .min_by(|a, b| a.1.total_cmp(&b.1))
-        .map(|(k, _)| k)
+        .map(|(k, b)| (k, b.distance(cursor), ScreenBody { half_width: 0.0, ..b }.distance(cursor)))
+        .filter(|&(_, d, _)| d <= slack)
+        .min_by(|a, b| a.1.total_cmp(&b.1).then(a.2.total_cmp(&b.2)))
+        .map(|(k, _, _)| k)
 }
 
 /// Every candidate inside the box spanned by two corners.
@@ -202,20 +230,39 @@ pub fn fallback_ground_pick(
     })();
 }
 
-/// The selectables' screen positions this frame (units hidden by the cut
-/// are not selectable).
+/// Half the body's height and its half-width, world units: feet and head
+/// are the pose's centre ∓ the first.
+fn body_extent(kind: EntityKind) -> (f32, f32) {
+    let half_height = super::cut_entities::feet_offset(kind);
+    let half_width = match kind {
+        EntityKind::Player | EntityKind::Person { .. } => game::movement::PLAYER_CAPSULE_RADIUS,
+        EntityKind::Slime { size } => game::slime::slime_edge_units(size) / 2.0,
+    };
+    (half_height, half_width)
+}
+
+/// The selectables' bodies on screen this frame (units hidden by the cut
+/// are not selectable). A body whose centre is off-screen or behind the
+/// camera is left out.
 fn projected(
     camera: &Camera,
     gt: &GlobalTransform,
     entities: &Query<(&SimEntity, &SimKind, &GlobalTransform, Has<LocalBody>), Without<CutHidden>>,
     adventure: bool,
-) -> Vec<((RegionId, EntityKey), Vec2)> {
+) -> Vec<((RegionId, EntityKey), ScreenBody)> {
+    let right = gt.right();
     entities
         .iter()
         .filter(|(_, kind, _, local)| is_selectable(kind.0, *local && adventure))
-        .filter_map(|(sim, _, e, _)| {
-            let p = camera.world_to_viewport(gt, e.translation()).ok()?;
-            Some(((sim.region, sim.key), p))
+        .filter_map(|(sim, kind, e, _)| {
+            let at = e.translation();
+            let to_screen = |p: Vec3| camera.world_to_viewport(gt, p).ok();
+            let centre = to_screen(at)?;
+            let (half_height, half_width) = body_extent(kind.0);
+            let feet = to_screen(at - Vec3::Y * half_height).unwrap_or(centre);
+            let head = to_screen(at + Vec3::Y * half_height).unwrap_or(centre);
+            let half_width = to_screen(at + right * half_width).map_or(0.0, |p| p.distance(centre));
+            Some(((sim.region, sim.key), ScreenBody { centre, feet, head, half_width }))
         })
         .collect()
 }
@@ -261,7 +308,7 @@ pub fn select_input(
     let gt = GlobalTransform::from(*tf);
     let candidates = projected(camera, &gt, &entities, mode.adventure());
     let picked: Vec<_> = if dragging(start, end) {
-        box_pick(start, end, candidates)
+        box_pick(start, end, candidates.into_iter().map(|(k, b)| (k, b.centre)))
     } else {
         click_pick(end, candidates, CLICK_SELECT_RADIUS_PX).into_iter().collect()
     };
@@ -337,9 +384,37 @@ mod tests {
 
     #[test]
     fn click_takes_the_nearest_within_the_radius() {
-        let c = [(1, Vec2::new(100.0, 100.0)), (2, Vec2::new(105.0, 100.0)), (3, Vec2::new(300.0, 0.0))];
+        let p = |x, y| ScreenBody::point(Vec2::new(x, y));
+        let c = [(1, p(100.0, 100.0)), (2, p(105.0, 100.0)), (3, p(300.0, 0.0))];
         assert_eq!(click_pick(Vec2::new(104.0, 100.0), c, 12.0), Some(2));
         assert_eq!(click_pick(Vec2::new(200.0, 200.0), c, 12.0), None, "empty ground");
+    }
+
+    #[test]
+    fn click_anywhere_on_a_tall_body_hits_it() {
+        // Zoomed in: a body 200 px tall, 40 px wide, centre at (100, 200).
+        let body = ScreenBody {
+            centre: Vec2::new(100.0, 200.0),
+            feet: Vec2::new(100.0, 300.0),
+            head: Vec2::new(100.0, 100.0),
+            half_width: 20.0,
+        };
+        assert_eq!(click_pick(Vec2::new(115.0, 290.0), [(1, body)], 12.0), Some(1), "on its legs");
+        assert_eq!(click_pick(Vec2::new(100.0, 105.0), [(1, body)], 12.0), Some(1), "on its head");
+        assert_eq!(click_pick(Vec2::new(130.0, 200.0), [(1, body)], 12.0), Some(1), "just beside it");
+        assert_eq!(click_pick(Vec2::new(140.0, 200.0), [(1, body)], 12.0), None, "well beside it");
+        assert_eq!(click_pick(Vec2::new(100.0, 330.0), [(1, body)], 12.0), None, "below its feet");
+    }
+
+    #[test]
+    fn click_inside_two_bodies_takes_the_nearer_axis() {
+        let at = |x: f32| ScreenBody {
+            centre: Vec2::new(x, 200.0),
+            feet: Vec2::new(x, 300.0),
+            head: Vec2::new(x, 100.0),
+            half_width: 20.0,
+        };
+        assert_eq!(click_pick(Vec2::new(112.0, 200.0), [(1, at(100.0)), (2, at(120.0))], 12.0), Some(2));
     }
 
     #[test]

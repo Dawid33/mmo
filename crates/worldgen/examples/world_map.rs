@@ -294,6 +294,24 @@ fn write_tiles(a: &Args) {
     println!("world map: {}x{} tiles in {:?}", map.width, map.height, started.elapsed());
     let packet = game::encode_packet(&game::ServerPacket::WorldMap(map.clone())).expect("encode");
     println!("WorldMap packet: {} bytes on the wire", packet.len());
+    // Relief of the tiles with a landing spot: what the embark steepness rule sees.
+    let mut relief: Vec<f32> = map.tiles.iter().filter(|t| t.landing.is_some()).map(|t| t.relief_m).collect();
+    relief.sort_by(f32::total_cmp);
+    if !relief.is_empty() {
+        let p = |q: f64| relief[((relief.len() - 1) as f64 * q).round() as usize];
+        let steep = map.tiles.iter().filter(|t| t.landing.is_some() && game::too_steep_to_embark(t)).count();
+        println!(
+            "landing tiles: {} relief_m p10 {:.0} p50 {:.0} p75 {:.0} p90 {:.0} p99 {:.0} max {:.0}; too steep to embark: {steep} ({:.0}%)",
+            relief.len(),
+            p(0.1),
+            p(0.5),
+            p(0.75),
+            p(0.9),
+            p(0.99),
+            p(1.0),
+            100.0 * steep as f64 / relief.len() as f64,
+        );
+    }
     if let Some(dir) = a.out.parent() {
         std::fs::create_dir_all(dir).expect("create output directory");
     }

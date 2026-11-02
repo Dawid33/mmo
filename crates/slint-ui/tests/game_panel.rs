@@ -1,6 +1,8 @@
-//! The F9 Fortress panel, headless: every button in it can be clicked inside
-//! the window. The panel is pinned to the window's right edge, so a row
-//! wider than the panel runs off screen (the Adventure button once did).
+//! The top-right menu column (`ui/menu-column.slint`) and the stub windows it
+//! opens, headless: every button can be clicked inside the window, the
+//! context box draws nothing when idle, and a stub window's Close works. The
+//! column is pinned to the window's right edge, so a row wider than it would
+//! run off screen.
 use std::cell::Cell;
 use std::rc::Rc;
 
@@ -10,13 +12,9 @@ use slint_ui::{GameUi, Overlay};
 
 const WIDTH: u32 = 1280;
 const HEIGHT: u32 = 720;
-/// The scan covers the top-right of the window, where the panel sits.
+/// The scan covers the top-right of the window, where the column sits.
 const SCAN: u32 = 400;
 const STEP: usize = 6;
-/// The panel sits 12 px in from the window's right edge (`game.slint`) and
-/// its frame shadow reaches ~4 px past that; nothing may draw in the last
-/// `MARGIN` columns.
-const MARGIN: u32 = 4;
 
 fn click(overlay: &Overlay<GameUi>, x: f32, y: f32) {
     let position = LogicalPosition::new(x, y);
@@ -25,42 +23,112 @@ fn click(overlay: &Overlay<GameUi>, x: f32, y: f32) {
     overlay.dispatch(WindowEvent::PointerReleased { position, button: PointerEventButton::Left });
 }
 
-/// Clicks over the panel's corner of the window; returns how often each of
-/// (mode, clear, follow) fired.
-fn scan(adventure: bool, following: bool) -> (u32, u32, u32) {
+fn counter() -> (Rc<Cell<u32>>, impl Fn() + 'static) {
+    let n = Rc::new(Cell::new(0));
+    let m = n.clone();
+    (n, move || m.set(m.get() + 1))
+}
+
+fn overlay() -> Overlay<GameUi> {
     let mut overlay = Overlay::new().expect("game UI");
     overlay.resize(WIDTH, HEIGHT, 1.0);
-    let (mode, clear, follow) = (Rc::new(Cell::new(0)), Rc::new(Cell::new(0)), Rc::new(Cell::new(0)));
-    let (m, c, f) = (mode.clone(), clear.clone(), follow.clone());
-    overlay.ui().on_toggle_mode(move || m.set(m.get() + 1));
-    overlay.ui().on_clear_selection(move || c.set(c.get() + 1));
-    overlay.ui().on_follow_clicked(move || f.set(f.get() + 1));
-    overlay.ui().set_panel_open(true);
-    overlay.ui().set_selected_count(1);
-    overlay.ui().set_adventure(adventure);
-    overlay.ui().set_following(following);
-    overlay.render();
-    for y in 0..SCAN {
-        for x in WIDTH - MARGIN..WIDTH {
-            assert!(!overlay.opaque_at(x, y), "panel draws past its right edge at ({x}, {y})");
-        }
-    }
+    overlay
+}
+
+/// Clicks across the top-right `SCAN`² corner.
+fn scan_clicks(overlay: &Overlay<GameUi>) {
     for y in (0..SCAN).step_by(STEP) {
         for x in (WIDTH - SCAN..WIDTH).step_by(STEP) {
-            click(&overlay, x as f32, y as f32);
+            click(overlay, x as f32, y as f32);
         }
     }
-    (mode.get(), clear.get(), follow.get())
+}
+
+/// The column is flush with the window's top-right corner (its buttons reach
+/// the last pixel column).
+fn assert_flush_in_the_corner(overlay: &Overlay<GameUi>) {
+    assert!(overlay.opaque_at(WIDTH - 1, 2), "menu column flush with the right edge");
 }
 
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
-fn every_panel_button_is_on_screen() {
-    for (adventure, following) in [(false, false), (true, true)] {
-        let (mode, clear, follow) = scan(adventure, following);
-        assert!(mode > 0, "mode button reachable (adventure {adventure})");
-        assert!(clear > 0, "Clear selection reachable (following {following})");
-        assert!(follow > 0, "Follow reachable (following {following})");
+fn menu_buttons_open_windows() {
+    let mut overlay = overlay();
+    let (settings, on_settings) = counter();
+    let (encyclopedia, on_encyclopedia) = counter();
+    overlay.ui().on_open_settings(on_settings);
+    overlay.ui().on_open_encyclopedia(on_encyclopedia);
+    overlay.render();
+    assert_flush_in_the_corner(&overlay);
+    scan_clicks(&overlay);
+    assert!(settings.get() > 0, "Settings reachable");
+    assert!(encyclopedia.get() > 0, "Encyclopedia reachable");
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn context_box_absent_when_idle() {
+    let mut overlay = overlay();
+    overlay.ui().set_selected_count(0);
+    overlay.ui().set_tool_name("".into());
+    overlay.render();
+    for y in 80..SCAN {
+        for x in WIDTH - SCAN..WIDTH {
+            assert!(!overlay.opaque_at(x, y), "idle context box draws at ({x}, {y})");
+        }
     }
 }
 
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn context_box_shows_the_active_tool() {
+    let mut overlay = overlay();
+    overlay.ui().set_tool_name("Dig".into());
+    overlay.render();
+    let drawn = (80..SCAN).any(|y| (WIDTH - SCAN..WIDTH).any(|x| overlay.opaque_at(x, y)));
+    assert!(drawn, "a tool shows the context box");
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn selection_controls_reachable() {
+    for following in [false, true] {
+        let mut overlay = overlay();
+        let (clear, on_clear) = counter();
+        let (follow, on_follow) = counter();
+        overlay.ui().on_clear_selection(on_clear);
+        overlay.ui().on_follow_clicked(on_follow);
+        overlay.ui().set_selected_count(1);
+        overlay.ui().set_following(following);
+        overlay.render();
+        assert_flush_in_the_corner(&overlay);
+        scan_clicks(&overlay);
+        assert!(clear.get() > 0, "Clear selection reachable (following {following})");
+        assert!(follow.get() > 0, "Follow reachable (following {following})");
+    }
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn stub_window_closes() {
+    let mut overlay = overlay();
+    let (closed, on_close) = counter();
+    overlay.ui().on_close_window(on_close);
+    overlay.ui().set_settings_open(true);
+    overlay.render();
+    click(&overlay, overlay.ui().get_stub_close_x(), overlay.ui().get_stub_close_y());
+    assert_eq!(closed.get(), 1, "Close on the Settings window");
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn stop_following_reachable_with_nothing_selected() {
+    let mut overlay = overlay();
+    let (follow, on_follow) = counter();
+    overlay.ui().on_follow_clicked(on_follow);
+    overlay.ui().set_selected_count(0);
+    overlay.ui().set_following(true);
+    overlay.render();
+    scan_clicks(&overlay);
+    assert!(follow.get() > 0, "Stop following reachable after the selection was cleared");
+}

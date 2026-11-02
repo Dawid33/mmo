@@ -17,6 +17,13 @@
 //! neighbouring terrain and the LOD rings — the terrain draws exactly as
 //! without the cut, the shader dropping back faces itself there.
 //!
+//! The per-chunk Mesh fallback (WebGL2 — the browser build) gets the same
+//! cut from `voxel_texture.wgsl`: `voxel_material::sync_chunk_material_cut`
+//! copies this uniform into the chunk material, whose key drops face culling
+//! while the cut is on. Its vertices clamp to the cut per vertex (no quad
+//! context there); the cap, depth darkening and the slice plane match. The
+//! designation overlay is not drawn on that path.
+//!
 //! The designation overlay ([`OverlayGrid`]) is one byte per block cell of
 //! the home region on the working level and the [`OVERLAY_LEVELS`]` - 1`
 //! below it ([`overlay_byte`]: the designation kind, plus the drag preview's

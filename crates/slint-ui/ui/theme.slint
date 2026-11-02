@@ -3,7 +3,9 @@ import { ActiveTheme, Theme } from "@widgets";
 // The widget theme the game's screens use (`~/Projects/ui`'s themes:
 // `factorio`, or `fortress`, its Dwarf Fortress palette). Slint keeps one
 // `ActiveTheme` per root component, so every root calls `apply()` from
-// its `init`.
+// its `init`. NOTE: the build compiles the widgets with the Fortress styles
+// only (crates/slint-ui/build_common.rs `single_theme_overlay`, for compile
+// time), so setting `factorio` here changes nothing without changing that.
 export global GameTheme {
     out property <Theme> theme: Theme.fortress;
 

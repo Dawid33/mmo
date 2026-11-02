@@ -19,8 +19,9 @@ pub fn land_map(width: u32, height: u32) -> WorldMap {
     let tile = TileSummary {
         ground_min_m: 0.0,
         ground_mean_m: 10.0,
-        ground_max_m: 50.0,
-        relief_m: 50.0,
+        ground_max_m: 10.0,
+        // Gentle: under `game::EMBARK_MAX_RELIEF_PER_REGION_M` at every region size.
+        relief_m: 10.0,
         slope: [0.0, 0.0],
         sea_fraction: 0.0,
         lake_fraction: 0.0,

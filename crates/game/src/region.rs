@@ -1,6 +1,6 @@
 use std::{
     cmp::Reverse,
-    collections::{BinaryHeap, VecDeque},
+    collections::{BTreeMap, BinaryHeap, VecDeque},
     ops::DerefMut,
 };
 #[cfg(not(target_arch = "wasm32"))]
@@ -88,6 +88,11 @@ pub struct ReconcileStats {
     /// a predicted tick displaced by our own input is the client running
     /// ahead of the server, the reverse is it running behind.
     pub by_kinds: [[u32; 3]; 3],
+    /// Server state hashes (`ServerPacket::HashedGameEvent`) compared
+    /// against this client's confirmed state in this pass, and how many of
+    /// them differed (each is also logged as an error).
+    pub state_hash_checks: u32,
+    pub state_hash_mismatches: u32,
 }
 
 impl ReconcileStats {
@@ -132,6 +137,12 @@ pub struct Region {
     /// seam). Not sim state — set by whoever runs the region (the manager
     /// on the server, the client from its `WorldMap`), the same on both.
     map_extent: Option<crate::MapExtent>,
+    /// Client-only: the server's state hash after each of these event ids
+    /// (`id -> (tick, hash)`), checked when reconcile confirms that event.
+    /// Ids at or below the confirmed head are dropped as missed.
+    expected_hashes: BTreeMap<usize, (usize, u32)>,
+    /// Client-only: id of the newest server event reconcile has confirmed.
+    last_confirmed_id: Option<usize>,
     /// Wall-time attribution for Tick executions, drained by the client's
     /// budget reporter (native only — see `RegionTickPerf`).
     #[cfg(not(target_arch = "wasm32"))]
@@ -182,8 +193,77 @@ impl Region {
             pending_departures: Vec::new(),
             pending_ghosts: Vec::new(),
             map_extent: None,
+            expected_hashes: BTreeMap::new(),
+            last_confirmed_id: None,
             #[cfg(not(target_arch = "wasm32"))]
             tick_perf: RegionTickPerf::default(),
+        }
+    }
+
+    /// Client: the server's [`crate::state_hash`] after event `event_id`
+    /// (tick `tick`). Checked by [`Region::reconcile`] when it confirms that
+    /// event; an event already confirmed, or baked into the snapshot this
+    /// region was built from, can no longer be checked and is dropped.
+    pub fn expect_state_hash(&mut self, event_id: usize, tick: usize, hash: u32) {
+        let confirmed = self.last_confirmed_id.is_some_and(|c| event_id <= c);
+        if event_id < self.base_event_id || confirmed {
+            debug!(
+                "[state-hash r={:?}] server hash for id={event_id} tick={tick} arrived after that event was confirmed; not checked",
+                self.id
+            );
+            return;
+        }
+        self.expected_hashes.insert(event_id, (tick, hash));
+    }
+
+    /// Reconcile just confirmed server event `id`: the state is the
+    /// authoritative state after it, plus — when `predictions_on_top` — the
+    /// still-unconfirmed predictions in `event_log`. If the server sent its
+    /// hash for `id`, compare. Predictions are rolled back for the hash and
+    /// replayed after it (exact inverses, like a misprediction), which is why
+    /// the server only hashes every `state_hash_interval()` ticks.
+    fn confirmed(&mut self, id: usize, predictions_on_top: bool, stats: &mut ReconcileStats) {
+        self.last_confirmed_id = Some(id);
+        if self.expected_hashes.is_empty() {
+            return;
+        }
+        // Anything older was never confirmed in place (snapshot, skipped id).
+        while let Some((&first, _)) = self.expected_hashes.first_key_value() {
+            if first >= id {
+                break;
+            }
+            self.expected_hashes.remove(&first);
+        }
+        let Some((tick, expected)) = self.expected_hashes.remove(&id) else { return };
+        let actual = if predictions_on_top && !self.event_log.is_empty() {
+            let kinds: Vec<GameEventKind> = self.event_log.iter().map(|e| e.kind.clone()).collect();
+            while self.event_log.pop_back().is_some() {
+                self.data.rollback();
+            }
+            let hash = crate::state_hash(&self.data);
+            for kind in kinds {
+                let _ = self.handle_event(kind);
+            }
+            hash
+        } else {
+            crate::state_hash(&self.data)
+        };
+        stats.state_hash_checks += 1;
+        if actual != expected {
+            stats.state_hash_mismatches += 1;
+            log::error!(
+                "[state-hash r=({},{})] DESYNC after event id={id} tick={tick}: server {expected:#010x} != client {actual:#010x}",
+                self.id.x,
+                self.id.z
+            );
+            crate::perf_event!(
+                "state_hash_mismatch",
+                "region={},{} id={id} tick={tick} server={expected:#010x} client={actual:#010x}",
+                self.id.x,
+                self.id.z
+            );
+        } else {
+            debug!("[state-hash r={:?}] ok id={id} tick={tick} hash={actual:#010x}", self.id);
         }
     }
 
@@ -306,6 +386,10 @@ impl Region {
                             // apply server event that was different from expected.
                             self.handle_event(server_event.clone().0.kind)?;
                             self.data.forget();
+                            // Every prediction is rolled back and none is
+                            // replayed yet: the state is exactly the server's
+                            // after this event.
+                            self.confirmed(server_event.0.id, false, &mut stats);
 
                             let foreign = match server_event.0.kind.origin_client() {
                                 Some(origin) => Some(origin) != self.local_client_id,
@@ -390,6 +474,7 @@ impl Region {
                                 ev_desc(&server_event.0)
                             );
                             self.data.forget();
+                            self.confirmed(server_event.0.id, true, &mut stats);
                         }
                     } else {
                         // IDs are incorrect, game event arrived out of order.

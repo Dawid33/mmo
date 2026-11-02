@@ -101,6 +101,20 @@ pub struct PendingWorld {
     pub name: String,
 }
 
+/// The server the next session joins, set by the browser menu's Join server
+/// before `AppState::Starting`; the wasm session flow connects to it and
+/// removes it. The address as typed (`web_endpoint::web_server_for`).
+#[derive(Resource, Clone, Debug, PartialEq, Eq)]
+pub struct PendingServer(pub String);
+
+/// A start whose world is still being prepared (the `debug embarked` launch
+/// forging its world): `Starting` waits for the [`PendingWorld`] to arrive
+/// instead of failing for want of one. Whoever inserts it sets the starting
+/// screen's [`StartingStatus`] and replaces it with a `PendingWorld` (or ends
+/// the start with a [`SessionEnded`] reason).
+#[derive(Resource, Clone, Copy, Default, Debug, PartialEq, Eq)]
+pub struct PreparingWorld;
+
 /// The menu screens' camera; see the module docs for when it exists.
 /// Extracted to the render world, where the custom terrain passes (near
 /// voxel_pull forward / prepass / shadows / x-ray, the far-voxel pass) skip
@@ -285,12 +299,12 @@ pub fn skip_menu_from_env(get: impl Fn(&str) -> Option<String>) -> bool {
     bypass
 }
 
-/// [`skip_menu_from_env`] on the process environment; always true on wasm,
-/// which keeps today's flow (no menu).
+/// [`skip_menu_from_env`] on the process environment; never on wasm, which
+/// opens on the main menu (Join server) like the native client.
 pub fn skip_menu() -> bool {
     #[cfg(target_arch = "wasm32")]
     {
-        true
+        false
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
@@ -373,11 +387,54 @@ fn frontend_camera_bundle() -> impl Bundle {
     )
 }
 
+/// One session's channels: the app's ends go into the [`ClientUpdates`](crate::renderer::ClientUpdates) /
+/// [`GameEvents`](crate::renderer::GameEvents) / [`ClientRequests`](crate::renderer::ClientRequests) resources, the sim's into its game
+/// manager (native: the game thread's connect command; wasm: `sim_driver`).
+#[derive(Clone)]
+pub struct SessionChannels {
+    pub game_send: crossbeam::channel::Sender<game::GameEventKind>,
+    pub game_recv: crossbeam::channel::Receiver<game::GameEventKind>,
+    pub client_send: crossbeam::channel::Sender<game::ClientUpdateEvent>,
+    pub client_recv: crossbeam::channel::Receiver<game::ClientUpdateEvent>,
+    pub request_send: crossbeam::channel::Sender<crate::instance::ClientRequest>,
+    pub request_recv: crossbeam::channel::Receiver<crate::instance::ClientRequest>,
+}
+
+impl SessionChannels {
+    pub fn new() -> Self {
+        let (game_send, game_recv) = crossbeam::channel::unbounded();
+        let (client_send, client_recv) = crossbeam::channel::unbounded();
+        let (request_send, request_recv) = crossbeam::channel::unbounded();
+        Self { game_send, game_recv, client_send, client_recv, request_send, request_recv }
+    }
+
+    /// Make these the app's session channels.
+    pub fn install(&self, world: &mut World) {
+        world.insert_resource(crate::renderer::ClientUpdates(self.client_recv.clone()));
+        world.insert_resource(crate::renderer::GameEvents(self.game_send.clone()));
+        world.insert_resource(crate::renderer::ClientRequests(self.request_send.clone()));
+    }
+}
+
+impl Default for SessionChannels {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Channels to nowhere: what the app holds while no session runs, so a
+/// late message of an old session can't reach the next one.
+pub fn install_dead_channels(world: &mut World) {
+    SessionChannels::new().install(world); // the other ends drop here
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 pub use flow::{
-    install_dead_channels, join_server_stops, leave_session, server_stops_finished, GameThread, SessionChannels,
-    SessionFlowPlugin, SERVER_LOG_TAIL_LINES, WAITING_FOR_PREVIOUS_SERVER,
+    join_server_stops, leave_session, server_stops_finished, GameThread, SessionFlowPlugin, SERVER_LOG_TAIL_LINES,
+    WAITING_FOR_PREVIOUS_SERVER,
 };
+#[cfg(target_arch = "wasm32")]
+pub use web_flow::{leave_session, SessionFlowPlugin, SimConfig};
 
 /// Starting and leaving a world session (native only; wasm keeps today's
 /// single in-process session).
@@ -398,14 +455,17 @@ mod flow {
 
     use bevy::app::AppExit;
     use bevy::prelude::*;
-    use crossbeam::channel::{unbounded, Receiver, Sender};
-    use game::{ClientUpdateEvent, GameEventKind};
+    use crossbeam::channel::Sender;
+    use game::GameEventKind;
 
-    use super::{end_session, AppState, LastSessionError, PendingWorld, SessionEnded, StartingLog, StartingStatus};
+    use super::{
+        end_session, install_dead_channels, AppState, LastSessionError, PendingWorld, PreparingWorld, SessionChannels,
+        SessionEnded, StartingLog, StartingStatus,
+    };
     use crate::instance::{ClientRequest, Command};
     use crate::local_host::{server_log_path, LocalHost, STOP_GRACE};
     use crate::renderer::collider_debug::DebugFlagsRes;
-    use crate::renderer::{ClientRequests, ClientUpdates, GameEvents, LocalPlayer};
+    use crate::renderer::{ClientRequests, GameEvents, LocalPlayer};
     use crate::world_scale::WorldScale;
 
     /// The starting screen's line while a previous server is still stopping.
@@ -418,33 +478,7 @@ mod flow {
     #[derive(Resource, Clone)]
     pub struct GameThread(pub Sender<Command>);
 
-    /// One session's channels: the app's ends go into the [`ClientUpdates`] /
-    /// [`GameEvents`] / [`ClientRequests`] resources, the game thread's into
-    /// its connect command.
-    pub struct SessionChannels {
-        pub game_send: Sender<GameEventKind>,
-        pub game_recv: Receiver<GameEventKind>,
-        pub client_send: Sender<ClientUpdateEvent>,
-        pub client_recv: Receiver<ClientUpdateEvent>,
-        pub request_send: Sender<ClientRequest>,
-        pub request_recv: Receiver<ClientRequest>,
-    }
-
     impl SessionChannels {
-        pub fn new() -> Self {
-            let (game_send, game_recv) = unbounded();
-            let (client_send, client_recv) = unbounded();
-            let (request_send, request_recv) = unbounded();
-            Self { game_send, game_recv, client_send, client_recv, request_send, request_recv }
-        }
-
-        /// Make these the app's session channels.
-        pub fn install(&self, world: &mut World) {
-            world.insert_resource(ClientUpdates(self.client_recv.clone()));
-            world.insert_resource(GameEvents(self.game_send.clone()));
-            world.insert_resource(ClientRequests(self.request_send.clone()));
-        }
-
         /// The game thread's connect command for these channels.
         pub fn connect(
             self,
@@ -465,17 +499,6 @@ mod flow {
         }
     }
 
-    impl Default for SessionChannels {
-        fn default() -> Self {
-            Self::new()
-        }
-    }
-
-    /// Channels to nowhere: what the app holds while no session runs, so a
-    /// late message of an old session can't reach the next one.
-    pub fn install_dead_channels(world: &mut World) {
-        SessionChannels::new().install(world); // the other ends drop here
-    }
 
     /// Server stops still running in the background (each waits up to
     /// [`STOP_GRACE`]).
@@ -522,6 +545,7 @@ mod flow {
         install_dead_channels(world);
         end_session(world);
         world.remove_resource::<PendingWorld>(); // a start abandoned while waiting
+        world.remove_resource::<PreparingWorld>();
         if let Some(host) = world.remove_resource::<LocalHost>() {
             let tail = host.log_tail(SERVER_LOG_TAIL_LINES);
             if let Some(mut error) = world.get_resource_mut::<LastSessionError>() {
@@ -539,7 +563,7 @@ mod flow {
     pub(super) fn begin_starting(world: &mut World) {
         world.resource_mut::<LastSessionError>().0 = None;
         world.get_resource_or_init::<StartingLog>().0.clear();
-        if !world.contains_resource::<PendingWorld>() {
+        if !world.contains_resource::<PendingWorld>() && !world.contains_resource::<PreparingWorld>() {
             fail_start(world, "no world was chosen to play".into());
         }
     }
@@ -685,6 +709,151 @@ mod flow {
                         .chain(),
                 )
                 .add_systems(Last, leave_on_app_exit);
+        }
+    }
+}
+
+
+/// Joining and leaving a server from the browser (wasm has no local server:
+/// it can only join one).
+///
+/// - Join server ([`PendingServer`]) → `Starting`: a fresh set of
+///   [`SessionChannels`], a fresh game manager and a WebTransport connection
+///   (`sim_driver::start_session`). The first `SetPlayer` moves on to
+///   `InWorld`, not embarked: the arrival map is the embark step, as native.
+/// - A connect that gives up, or a lost connection, ends the session with the
+///   reason ([`SessionEnded`], from `sim_driver::drive_sim`): a failed start
+///   stays on the starting screen to show why, a lost session goes to the menu.
+/// - Leaving (the Esc menu's Main menu, Back from a failed start) drops the
+///   sim driver, which hangs up the connection.
+#[cfg(target_arch = "wasm32")]
+mod web_flow {
+    use bevy::prelude::*;
+
+    use super::{
+        end_session, install_dead_channels, AppState, LastSessionError, PendingServer, SessionChannels, SessionEnded,
+        StartingLog, StartingStatus,
+    };
+    use crate::renderer::collider_debug::DebugFlagsRes;
+    use crate::renderer::LocalPlayer;
+    use crate::sim_driver::SimDriverRes;
+    use crate::world_scale::WorldScale;
+
+    /// What every session's game manager is built with (from `main`).
+    #[derive(Resource, Clone, Copy, Debug)]
+    pub struct SimConfig {
+        pub world_scale: WorldScale,
+    }
+
+    /// Tear the current session down: dead channels first (nothing of the old
+    /// session reaches the next), drop the sim driver (its game manager's end
+    /// of the outgoing channel goes with it, so the connection hangs up),
+    /// `end_session`. Safe to run twice.
+    pub fn leave_session(world: &mut World) {
+        install_dead_channels(world);
+        world.remove_resource::<SimDriverRes>();
+        end_session(world);
+        world.remove_resource::<PendingServer>();
+    }
+
+    fn set_status(world: &mut World, text: String) {
+        let mut status = world.get_resource_or_init::<StartingStatus>();
+        if status.0 != text {
+            status.0 = text;
+        }
+    }
+
+    /// A start that failed stays on the starting screen, which shows why
+    /// until Back. Nothing is left running behind it.
+    fn fail_start(world: &mut World, why: String) {
+        error!("[session] {why}");
+        leave_session(world);
+        world.resource_mut::<LastSessionError>().0 = Some(why);
+    }
+
+    /// `OnEnter(Starting)`: connect to the [`PendingServer`].
+    fn begin_join(world: &mut World) {
+        world.resource_mut::<LastSessionError>().0 = None;
+        world.get_resource_or_init::<StartingLog>().0.clear();
+        let Some(PendingServer(address)) = world.remove_resource::<PendingServer>() else {
+            fail_start(world, "no server was chosen to join".into());
+            return;
+        };
+        let server = match crate::web_endpoint::web_server_for(&address) {
+            Ok(server) => server,
+            Err(why) => {
+                fail_start(world, format!("Cannot join {address:?}: {why}"));
+                return;
+            }
+        };
+        info!("[session] joining {address} ({server:?})");
+        set_status(world, format!("Connecting to {address}\u{2026}"));
+        let channels = SessionChannels::new();
+        channels.install(world);
+        let debug_flags = world.resource::<DebugFlagsRes>().0.clone();
+        let config = *world.resource::<SimConfig>();
+        let driver = crate::sim_driver::start_session(server, channels, debug_flags, config.world_scale);
+        world.insert_resource(driver);
+    }
+
+    /// The first `SetPlayer` of a session: we are in. Not embarked yet — the
+    /// arrival map is the embark step (`slint_overlay`).
+    fn enter_world_on_player(player: Res<LocalPlayer>, mut next: ResMut<NextState<AppState>>) {
+        if player.0.is_some() {
+            next.set(AppState::InWorld);
+        }
+    }
+
+    /// In the world, waiting for the map: say so on the starting screen.
+    fn receiving_map(mut status: ResMut<StartingStatus>) {
+        status.0 = crate::frontend::RECEIVING_MAP.into();
+    }
+
+    /// [`SessionEnded`] while a session runs: record why and go to the menu
+    /// (the transition runs [`leave_session`]) — except a start that was
+    /// lost, which stays on the starting screen to show why.
+    fn end_on_session_ended(
+        mut ended: MessageReader<SessionEnded>,
+        state: Res<State<AppState>>,
+        mut next: ResMut<NextState<AppState>>,
+        mut error: ResMut<LastSessionError>,
+        mut commands: Commands,
+    ) {
+        let Some(last) = ended.read().last() else { return };
+        if !matches!(state.get(), AppState::Starting | AppState::InWorld) {
+            return;
+        }
+        info!("[session] session ended: {}", last.reason.as_deref().unwrap_or("left by the player"));
+        match (state.get(), last.reason.clone()) {
+            (AppState::Starting, Some(reason)) => {
+                commands.queue(move |world: &mut World| fail_start(world, reason));
+            }
+            (_, reason) => {
+                error.0 = reason;
+                next.set(AppState::MainMenu);
+            }
+        }
+    }
+
+    /// The browser session flow; needs [`SessionPlugin`](super::SessionPlugin),
+    /// the session channel resources and [`SimConfig`].
+    pub struct SessionFlowPlugin;
+
+    impl Plugin for SessionFlowPlugin {
+        fn build(&self, app: &mut App) {
+            app.add_systems(OnEnter(AppState::Starting), begin_join)
+                .add_systems(OnEnter(AppState::InWorld), receiving_map)
+                .add_systems(OnTransition { exited: AppState::Starting, entered: AppState::MainMenu }, leave_session)
+                .add_systems(OnTransition { exited: AppState::InWorld, entered: AppState::MainMenu }, leave_session)
+                .add_systems(
+                    Update,
+                    (
+                        crate::sim_driver::drive_sim,
+                        enter_world_on_player.run_if(in_state(AppState::Starting)),
+                        end_on_session_ended,
+                    )
+                        .chain(),
+                );
         }
     }
 }

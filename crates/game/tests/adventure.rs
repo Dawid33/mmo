@@ -7,7 +7,7 @@ use crate::common;
 use common::floor_chunks;
 use game::rapier3d::math::Vector;
 use game::{
-    edge_toward, feet_of, feet_tile, play_mode_update, state_hash, steer, Block, BlockId, EntityKey, GameEventKind,
+    edge_toward, feet_of, feet_tile, play_mode_update, state_hash, steer, Block, BlockId, EntityKey, GameEventKind, InputEvent, Key,
     Goal, Motion, Order, PlayMode, Region, RegionCoords, Rollback, TilePos, TileSource, UiUpdate, Walker,
     BLOCK_VOXELS, REGION_BLOCKS, STUCK_TICKS, TICK_RATE,
 };
@@ -286,6 +286,27 @@ fn walker_driven_body_plays_a_gait() {
     let rig = game::anim::rig(a.rig);
     // WALK_SPEED is past ANIM_RUN_MIN_SPEED: the keyboard walk plays `run` too.
     assert!([rig.walk, rig.run].contains(&a.current.clip), "a walking adventurer plays a gait, got clip {}", a.current.clip);
+}
+
+#[test]
+fn first_person_ends_the_walk_and_the_keyboard_drives() {
+    let (mut region, e) = adventure_at([4, 1, 4]);
+    move_to(&mut region, here_goal([20, 20], None));
+    tick(&mut region);
+    assert!(walker(&region, e).is_some());
+    let input = |region: &mut Region, ev: InputEvent| {
+        region.handle_event(GameEventKind::PlayerInput(CLIENT, ev)).unwrap();
+        region.forget_last_event();
+    };
+    input(&mut region, InputEvent::FpsCam(true));
+    tick(&mut region);
+    assert!(walker(&region, e).is_none(), "first person drops the walk");
+    let start = body_tile(&region, e);
+    input(&mut region, InputEvent::Key { key: Key::KeyW, pressed: true });
+    for _ in 0..walk_budget(3.0) {
+        tick(&mut region);
+    }
+    assert_ne!(body_tile(&region, e), start, "W walks the body in first person");
 }
 
 #[test]

@@ -1,0 +1,26 @@
+[package]
+name = "slint-ui-tools"
+version = "0.1.0"
+edition = "2024"
+
+# Non-game screens: the asset viewer (client example `asset_viewer`) and the controls test harness (slint-ui tests). Not in the game build.
+# Generated Rust only (see crates/slint-ui/build_common.rs); engine-free.
+[dependencies]
+slint = { workspace = true }
+# Build-script metadata only (`DEP_WIDGETS_UI_DIR`).
+widgets = { workspace = true }
+# The widgets' sprites are embedded PNGs. `slint` only turns the decoders on
+# through its winit/femtovg backends, which we leave out, so ask for them on
+# the core crate directly (pinned to slint's version; png + jpeg, no more).
+i-slint-core = { version = "=1.18.1", features = ["image-decoders"] }
+
+# wasm32: build_common.rs points the generated embedded-image loads at
+# `wasm_images` (crates/slint-ui/src/wasm_images.rs, mounted by src/lib.rs),
+# which decodes them in Rust — the software renderer can't draw the browser's
+# HTMLImage. Same `image` crate i-slint-core decodes with on native.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+image = { version = "0.25", default-features = false, features = ["png"] }
+log = { workspace = true }
+
+[build-dependencies]
+slint-build = { workspace = true }

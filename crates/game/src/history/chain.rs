@@ -29,6 +29,9 @@ pub enum EmbarkRefusal {
     NotPlayerFounded,
     /// Return: another connected player plays it.
     InUse,
+    /// The player's embark: the region is a mountainside
+    /// ([`crate::too_steep_to_embark`]).
+    TooSteep,
 }
 
 fn chebyshev(a: crate::RegionCoords, b: crate::RegionCoords) -> u32 {
@@ -238,6 +241,15 @@ impl History {
         embark_allowed_in(self.grid(), self.sites.values().map(|s| (s.id, s.region, s.abandoned.is_some())), region)
     }
 
+    /// [`player_embark_allowed_in`] over this history's sites.
+    pub fn player_embark_allowed(&self, region: crate::RegionCoords) -> Result<(), EmbarkRefusal> {
+        player_embark_allowed_in(
+            self.grid(),
+            self.sites.values().map(|s| (s.id, s.region, s.abandoned.is_some())),
+            region,
+        )
+    }
+
     /// The best region to found a site in from `from_region`: allowed, reachable, scored
     /// `capacity * 1000 / (distance + 1)`, ties by `(z, x)`.
     pub fn embark_target(&self, _civ: CivId, from_region: crate::RegionCoords) -> Option<crate::RegionCoords> {
@@ -399,6 +411,21 @@ pub fn embark_allowed_in(
         .find(|(_, r, abandoned)| !*abandoned && chebyshev(*r, region) < EMBARK_MIN_DISTANCE_REGIONS)
     {
         return Err(EmbarkRefusal::TooClose { site: *id });
+    }
+    Ok(())
+}
+
+/// The player's embark rule: [`embark_allowed_in`] (shared with the civs), and the
+/// region must not be [`too steep`](crate::too_steep_to_embark) — the player is put
+/// down on its landing spot, which must not be the side of a mountain.
+pub fn player_embark_allowed_in(
+    grid: &super::grid::SocietyGrid,
+    sites: impl Iterator<Item = (SiteId, crate::RegionCoords, bool)>,
+    region: crate::RegionCoords,
+) -> Result<(), EmbarkRefusal> {
+    embark_allowed_in(grid, sites, region)?;
+    if grid.too_steep(region) {
+        return Err(EmbarkRefusal::TooSteep);
     }
     Ok(())
 }

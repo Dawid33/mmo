@@ -8,6 +8,9 @@ members = [
   "crates/physics-next",
   "crates/server",
   "crates/slint-ui",
+  "crates/slint-ui-frontend",
+  "crates/slint-ui-game",
+  "crates/slint-ui-tools",
   "crates/state-hash",
   "crates/state-hash-derive",
   "crates/worldgen",
@@ -33,13 +36,44 @@ split-debuginfo = "unpacked"
 opt-level = 3
 debug = "line-tables-only"
 
-# slint-ui is mostly the Slint compiler's GENERATED Rust for the whole widget
-# library: its incremental cache was ~2-3 GB per build kind (lib, tests, check,
+# slint-ui-game / -frontend / -tools are the Slint compiler's GENERATED Rust
+# (crates/slint-ui/build_common.rs): its incremental cache was ~2-3 GB per build kind (lib, tests, check,
 # clippy — 11 GB measured 2026-10-31) and buys little, since the generated
 # file is re-emitted wholesale. Line tables are enough to profile it.
-[profile.dev.package.slint-ui]
+#
+# opt-level 0: the generated file was ~27 MB of Rust (one crate, before the split
+# and the 2026-11-02 codegen cuts — now ~4–6 MB per crate), and at opt-level 1 LLVM
+# (local ThinLTO + passes over 16 CGUs) took ~284 of its ~360 s compile — paid
+# on EVERY .slint edit. At 0 it compiles in ~62 s (measured 2026-11-01). Only
+# the generated binding glue loses optimisation; Slint's software renderer is
+# its own crate and stays at opt-level 3. Release builds are unaffected.
+[profile.dev.package.slint-ui-game]
 debug = "line-tables-only"
 incremental = false
+opt-level = 0
+rustflags = ["-Zthreads=8"]
+
+# The other two Slint-generated crates (same reasons as slint-ui-game above).
+[profile.dev.package.slint-ui-frontend]
+debug = "line-tables-only"
+incremental = false
+opt-level = 0
+rustflags = ["-Zthreads=8"]
+
+[profile.dev.package.slint-ui-tools]
+debug = "line-tables-only"
+incremental = false
+opt-level = 0
+rustflags = ["-Zthreads=8"]
+
+# No local ThinLTO for the client crate (rustflags here need nightly cargo's
+# `profile-rustflags`, enabled in .cargo/config.toml). With it, a one-line
+# client edit re-optimised 242 of 256 incremental codegen units (~40 s); with
+# `-Clto=off` it re-emits ~19 (~15 s), and a full client-lib build drops from
+# ~59 to ~34 s (measured 2026-11-01). `lto` itself can only be set per
+# profile, which would also strip it from the opt-level-3 dependencies.
+[profile.dev.package.client]
+rustflags = ["-Clto=off"]
 
 # The forge pipeline (worldgen::forge) is float-heavy offline simulation; in a
 # dev build the server would otherwise spend minutes forging a default world.
@@ -53,6 +87,23 @@ opt-level = 3
 [profile.profiling]
 inherits = "release"
 debug = "full"
+
+# The browser release (`just web-release`, `just deploy`). The whole rollback sim
+# runs in the browser, so this is tuned for speed, not size: opt-level 3, and one
+# codegen unit + fat LTO so LLVM inlines across Bevy / rapier / game (the wasm
+# binary is one module either way; slower to build, ~10-20% faster to run).
+# No debuginfo (it would ship to every player); names are kept so panics in the
+# console still have readable frames. wasm32-unknown-unknown aborts on panic
+# regardless. scripts/web_release.sh then runs wasm-opt -O3 on the output.
+[profile.wasm-release]
+inherits = "release"
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+debug = false
+strip = "debuginfo"
+panic = "abort"
+incremental = false
 
 [workspace.dependencies]
 bevy = { version = "0.19.1", default-features = false, features = [
@@ -84,6 +135,9 @@ bevy = { version = "0.19.1", default-features = false, features = [
 block-mesh = { path = "crates/block-mesh", default-features = false }
 bbmodel = { path = "crates/bbmodel" }
 slint-ui = { path = "crates/slint-ui" }
+slint-ui-frontend = { path = "crates/slint-ui-frontend" }
+slint-ui-game = { path = "crates/slint-ui-game" }
+slint-ui-tools = { path = "crates/slint-ui-tools" }
 # The game UI: Slint + the Factorio-style `widgets` library from the sibling
 # ~/Projects/ui checkout (must sit next to this repo). Software renderer only —
 # no winit/femtovg backend, so no second event loop or wgpu (see

@@ -11,19 +11,25 @@
 //! `mark_remesh_dirty`) a `ChunkKey`. The commander's height grid and tile
 //! mirror key by the sim chunk entity and read [`SimChunk`], never bricks.
 //!
-//! All-air bricks and bricks buried inside their chunk are never spawned
-//! ([`spawn_chunk_bricks`]). An edit that needs one ([`apply_block_deltas`])
-//! derives it from the mirror, which is why the client keeps the blocks.
+//! All-air bricks and buried bricks are never spawned ([`spawn_chunk_bricks`]).
+//! Buried means opaque with no air across any face: inside the chunk, and —
+//! for a region snapshot, which knows every chunk at once — across the
+//! chunk's faces too, against the next chunk or the implied ground under the
+//! band ([`snapshot_across`]); that roughly halves a join's brick entities.
+//! An edit that needs one ([`apply_block_deltas`]) derives it from the
+//! mirror, which is why the client keeps the blocks; a brick buried against
+//! another chunk is spawned when that chunk lands, is edited, cleared or
+//! removed with air against it ([`expose_across`], [`SimChunkIndex`]).
 
 use std::collections::BTreeSet;
 
 use bevy::prelude::*;
-use bevy::tasks::{AsyncComputeTaskPool, Task};
+use bevy::tasks::Task;
 use game::{BlockDelta, BlockId, BlockIndex, Chunk, Voxel, BRICKS_PER_CHUNK_EDGE, BRICK_BLOCKS, BRICK_VOXELS};
 
 use super::bridge::{PendingBlockDeltas, PendingSnapshotVoxels, VoxelData};
 use super::meshing::binary::CutoutTable;
-use super::meshing::queue::is_buried_by;
+use super::meshing::queue::presents_opaque_face;
 
 /// The render bricks of a sim chunk entity. Present (maybe empty) on every
 /// terrain chunk entity from the moment it is spawned: it is also how the
@@ -84,6 +90,26 @@ fn to_local(b: [usize; 3]) -> [u8; 3] {
     b.map(|v| v as u8)
 }
 
+/// An edited chunk's dirty bricks to re-derive (a compute job,
+/// `renderer::compute`).
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct BrickEditsJob {
+    pub source: Chunk,
+    pub dirty: BTreeSet<[u8; 3]>,
+}
+
+impl super::compute::ComputeJob for BrickEditsJob {
+    type Output = Vec<([u8; 3], VoxelData)>;
+    const KIND: super::compute::JobKind = super::compute::JobKind::BrickEdits;
+
+    fn run(self) -> Self::Output {
+        self.dirty
+            .into_iter()
+            .map(|l| (l, VoxelData::from_brick(&self.source.brick(to_brick(l))).with_boundary_zones()))
+            .collect()
+    }
+}
+
 fn to_brick(local: [u8; 3]) -> [usize; 3] {
     local.map(usize::from)
 }
@@ -95,7 +121,7 @@ fn brick_linear(b: [usize; 3]) -> usize {
 }
 
 /// A chunk's bricks, split by what the client does with them.
-#[derive(Default, Debug)]
+#[derive(Default, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DerivedBricks {
     /// Spawned as brick entities.
     pub spawn: Vec<([u8; 3], VoxelData)>,
@@ -116,18 +142,33 @@ pub fn spawn_chunk_bricks(chunk: &Chunk) -> Vec<([u8; 3], VoxelData)> {
 
 /// [`spawn_chunk_bricks`] plus the buried bricks it skips.
 pub fn derive_chunk_bricks(chunk: &Chunk) -> DerivedBricks {
+    derive_chunk_bricks_across(chunk, |_, _| false)
+}
+
+/// The six face offsets, in the order burial checks them.
+const FACES: [[i32; 3]; 6] = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]];
+
+/// [`derive_chunk_bricks`] where a brick on the chunk's face may be buried
+/// too: `across(b, off)` says whether whatever lies past brick `b`'s face
+/// `off` — outside this chunk — presents no air there (see
+/// [`snapshot_across`]). A region snapshot answers that for every chunk at
+/// once; about half of a join's face bricks are buried by the chunk (or the
+/// implied ground) next to them (2026-11-02 census, 256 m regions).
+pub fn derive_chunk_bricks_across(chunk: &Chunk, across: impl Fn([usize; 3], [i32; 3]) -> bool) -> DerivedBricks {
     let n = BRICKS_PER_CHUNK_EDGE;
     let mut out = DerivedBricks::default();
     let cutout = CutoutTable::installed();
+    let outside = |b: [usize; 3], off: [i32; 3]| (0..3).any(|a| (b[a] as i32 + off[a]) < 0 || (b[a] as i32 + off[a]) >= n as i32);
     if let (Some(block), true) = (chunk.blocks.uniform(), chunk.chisel.is_empty()) {
         if block.id == BlockId::AIR {
             return out;
         }
-        // A see-through (cutout) chunk buries nothing.
+        // A see-through (cutout) chunk buries nothing; inside an opaque one
+        // only the faces past the chunk can show.
         let see_through = cutout.is_cutout(block.id);
-        let on_face = |b: [usize; 3]| see_through || b.iter().any(|&v| v == 0 || v == n - 1);
+        let shows = |b: [usize; 3]| see_through || FACES.iter().any(|&off| outside(b, off) && !across(b, off));
         for (b, _) in chunk.bricks() {
-            let list = if on_face(b) { &mut out.spawn } else { &mut out.buried };
+            let list = if shows(b) { &mut out.spawn } else { &mut out.buried };
             list.push((to_local(b), VoxelData::uniform(block.id)));
         }
         return out;
@@ -149,9 +190,14 @@ pub fn derive_chunk_bricks(chunk: &Chunk) -> DerivedBricks {
         .bricks()
         .map(|(b, _)| {
             let voxels = &all[brick_linear(b)];
+            let buried = voxels.is_opaque_throughout(&cutout)
+                && FACES.iter().all(|&off| match at(b, off) {
+                    Some(neighbor) => presents_opaque_face(neighbor, off, &cutout),
+                    None => across(b, off),
+                });
             if voxels.is_all_air() {
                 0
-            } else if is_buried_by(voxels, &cutout, |off| at(b, off)) {
+            } else if buried {
                 2
             } else {
                 1
@@ -166,6 +212,246 @@ pub fn derive_chunk_bricks(chunk: &Chunk) -> DerivedBricks {
         }
     }
     out
+}
+
+/// The chunk-local block coords of brick `b`'s face plane toward `off`
+/// (one non-zero axis), on the chunk's block layer `layer` along that axis.
+fn plane_blocks(b: [usize; 3], off: [i32; 3], layer: usize) -> impl Iterator<Item = [usize; 3]> {
+    let axis = (0..3).find(|&a| off[a] != 0).expect("a face offset");
+    let (u, v) = ((axis + 1) % 3, (axis + 2) % 3);
+    (0..BRICK_BLOCKS * BRICK_BLOCKS).map(move |i| {
+        let mut p = [0; 3];
+        p[axis] = layer;
+        p[u] = b[u] * BRICK_BLOCKS + i % BRICK_BLOCKS;
+        p[v] = b[v] * BRICK_BLOCKS + i / BRICK_BLOCKS;
+        p
+    })
+}
+
+/// The chunk block layer brick faces toward `off` lie on: the chunk's own
+/// face (`own`), or the neighbour chunk's facing layer.
+fn face_layer(off: [i32; 3], own: bool) -> usize {
+    let positive = off.iter().sum::<i32>() > 0;
+    if positive == own { game::CHUNK_BLOCKS - 1 } else { 0 }
+}
+
+/// An unchiselled, non-air, non-cutout block: hides the face beside it. A
+/// chiselled block may hold air, so it never counts.
+fn block_opaque(block: game::Block, chiselled: bool, cutout: &CutoutTable) -> bool {
+    !chiselled && block.id != BlockId::AIR && !cutout.is_cutout(block.id)
+}
+
+/// Whether every block of `chunk` at `blocks` hides the face beside it.
+fn chunk_blocks_opaque(chunk: &Chunk, mut blocks: impl Iterator<Item = [usize; 3]>, cutout: &CutoutTable) -> bool {
+    blocks.all(|[x, y, z]| {
+        let i = BlockIndex::from_xyz(x, y, z);
+        block_opaque(chunk.blocks.get(i), chunk.chisel.contains_key(&i), cutout)
+    })
+}
+
+/// The `across` test of [`derive_chunk_bricks_across`] for the chunk at
+/// `coords` in a region snapshot: past the chunk's face is either another
+/// chunk of the snapshot, the column's implied ground (solid rock below its
+/// band), or air. Past the region's edge is unknown: never buries.
+pub fn snapshot_across<'a>(
+    data: &'a game::GameData,
+    coords: game::ChunkCoords,
+    cutout: &'a CutoutTable,
+) -> impl Fn([usize; 3], [i32; 3]) -> bool + 'a {
+    across_with(
+        move |next| {
+            data.chunk_index
+                .get(&game::chunk_index_key(next))
+                .map(|&key| data.ecs.chunk.try_get(key).as_ref())
+        },
+        move |column| data.ground.get(&column),
+        coords,
+        cutout,
+    )
+}
+
+/// The chunks and ground a batch of a snapshot's chunks reads to derive its
+/// bricks ([`snapshot_across`]): the chunks themselves, their face
+/// neighbours inside the region, and the ground of those columns — what a
+/// compute worker gets instead of the whole snapshot.
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct SnapshotPart {
+    /// `None`: indexed, but absent from the snapshot (never opaque).
+    pub chunks: std::collections::BTreeMap<game::ChunkCoords, Option<Chunk>>,
+    pub ground: std::collections::BTreeMap<game::ColumnCoords, game::ColumnGround>,
+}
+
+impl SnapshotPart {
+    /// What deriving the chunks at `items` reads from `data`.
+    pub fn gather(data: &game::GameData, items: impl IntoIterator<Item = game::ChunkCoords>) -> Self {
+        let n = game::REGION_CHUNKS as i64;
+        let mut part = SnapshotPart::default();
+        for coords in items {
+            for off in std::iter::once([0, 0, 0]).chain(FACES) {
+                let (x, z) = (coords.x as i64 + off[0] as i64, coords.z as i64 + off[2] as i64);
+                if !(0..n).contains(&x) || !(0..n).contains(&z) {
+                    continue;
+                }
+                let next = game::ChunkCoords::new(x as usize, coords.y + off[1], z as usize);
+                if part.chunks.contains_key(&next) {
+                    continue;
+                }
+                match data.chunk_index.get(&game::chunk_index_key(next)) {
+                    Some(&key) => {
+                        part.chunks.insert(next, data.ecs.chunk.try_get(key).as_ref().cloned());
+                    }
+                    None => {
+                        let column = game::ColumnCoords::new(next.x, next.z);
+                        if let Some(ground) = data.ground.get(&column) {
+                            part.ground.entry(column).or_insert_with(|| ground.clone());
+                        }
+                    }
+                }
+            }
+        }
+        part
+    }
+
+    /// [`snapshot_across`] over this part.
+    pub fn across<'a>(&'a self, coords: game::ChunkCoords, cutout: &'a CutoutTable) -> impl Fn([usize; 3], [i32; 3]) -> bool + 'a {
+        across_with(move |next| self.chunks.get(&next).map(Option::as_ref), move |column| self.ground.get(&column), coords, cutout)
+    }
+}
+
+/// [`snapshot_across`] over any source: `chunk(next)` is `None` where the
+/// snapshot has no chunk (implied ground or air: `ground(column)` decides),
+/// `Some(None)` for an indexed chunk that is absent.
+fn across_with<'a>(
+    chunk: impl Fn(game::ChunkCoords) -> Option<Option<&'a Chunk>> + 'a,
+    ground: impl Fn(game::ColumnCoords) -> Option<&'a game::ColumnGround> + 'a,
+    coords: game::ChunkCoords,
+    cutout: &'a CutoutTable,
+) -> impl Fn([usize; 3], [i32; 3]) -> bool + 'a {
+    move |b, off| {
+        let n = game::REGION_CHUNKS as i64;
+        let (x, z) = (coords.x as i64 + off[0] as i64, coords.z as i64 + off[2] as i64);
+        if !(0..n).contains(&x) || !(0..n).contains(&z) {
+            return false;
+        }
+        let next = game::ChunkCoords::new(x as usize, coords.y + off[1], z as usize);
+        let plane = plane_blocks(b, off, face_layer(off, false));
+        match chunk(next) {
+            Some(found) => found.is_some_and(|chunk| chunk_blocks_opaque(chunk, plane, cutout)),
+            None => {
+                let ground = ground(game::ColumnCoords::new(next.x, next.z));
+                plane.into_iter().all(|[x, y, z]| {
+                    game::implied_block(ground, next, (x, y, z)).is_some_and(|block| block_opaque(block, false, cutout))
+                })
+            }
+        }
+    }
+}
+
+/// Landed terrain chunk entities by world sim-chunk key (region root +
+/// chunk origin, over `CHUNK_UNITS`). Lets a chunk find the neighbour its
+/// face bricks were buried against. Entries go with the chunk's despawn or
+/// its region.
+#[derive(Resource, Default, Debug)]
+pub struct SimChunkIndex(pub std::collections::HashMap<[i32; 3], Entity>);
+
+/// World sim-chunk key of `chunk` (see [`SimChunkIndex`]).
+fn chunk_world_key(world: &World, chunk: Entity) -> Option<[i32; 3]> {
+    let per = BRICKS_PER_CHUNK_EDGE as i32;
+    brick_grid_key(world, chunk, [0; 3]).map(|k| k.map(|v| v.div_euclid(per)))
+}
+
+/// Every (brick, offset) pair of a chunk whose face lies on the chunk's own
+/// face, i.e. borders another chunk.
+fn boundary_faces() -> impl Iterator<Item = ([usize; 3], [i32; 3])> {
+    let n = BRICKS_PER_CHUNK_EDGE;
+    (0..n * n * n).flat_map(move |i| {
+        let b = [i % n, (i / n) % n, i / (n * n)];
+        FACES.into_iter().filter_map(move |off| {
+            let a = (0..3).find(|&a| off[a] != 0).unwrap();
+            let edge = if off[a] > 0 { n - 1 } else { 0 };
+            (b[a] == edge).then_some((b, off))
+        })
+    })
+}
+
+/// Spawn the skipped brick at grid key `key` if a chunk other than `chunk`
+/// owns it: something next to it no longer hides its face.
+fn expose_skipped(world: &mut World, key: [i32; 3], chunk: Entity) {
+    let Some((owner, voxels)) = world
+        .get_resource::<SkippedBricks>()
+        .and_then(|s| s.0.get(&key))
+        .filter(|(owner, _)| *owner != chunk)
+        .cloned()
+    else {
+        return;
+    };
+    let Some(base) = brick_grid_key(world, owner, [0; 3]) else { return };
+    let local = [0, 1, 2].map(|a| (key[a] - base[a]) as u8);
+    write_brick(world, owner, local, voxels);
+}
+
+/// After `chunk` changed (landed, cleared, removed): spawn every brick of a
+/// neighbouring chunk that was buried against one of its faces which no
+/// longer hides it — every face when `opaque` is `None` (the chunk is gone),
+/// else the faces `opaque(b, off)` says show air.
+fn expose_across(world: &mut World, chunk: Entity, opaque: Option<&dyn Fn([usize; 3], [i32; 3]) -> bool>) {
+    let Some(base) = brick_grid_key(world, chunk, [0; 3]) else { return };
+    if world.get_resource::<SkippedBricks>().is_none_or(|s| s.0.is_empty()) {
+        return;
+    }
+    for (b, off) in boundary_faces() {
+        let key = [0, 1, 2].map(|a| base[a] + b[a] as i32 + off[a]);
+        let skipped = world.resource::<SkippedBricks>().0.get(&key).is_some_and(|(owner, _)| *owner != chunk);
+        if skipped && !opaque.is_some_and(|f| f(b, off)) {
+            expose_skipped(world, key, chunk);
+        }
+    }
+}
+
+/// [`expose_across`] from `chunk`'s mirror: the faces whose own blocks show air.
+fn expose_across_mirror(world: &mut World, chunk: Entity) {
+    let cutout = CutoutTable::installed();
+    let Some(mirror) = world.get::<SimChunk>(chunk).map(|m| m.0.clone()) else {
+        expose_across(world, chunk, None);
+        return;
+    };
+    let opaque = |b: [usize; 3], off: [i32; 3]| chunk_blocks_opaque(&mirror, plane_blocks(b, off, face_layer(off, true)), &cutout);
+    expose_across(world, chunk, Some(&opaque));
+}
+
+/// Keep only the buried bricks of a landing chunk whose cross-chunk faces are
+/// still hidden by the neighbours that already LANDED: those may have been
+/// edited since the snapshot the burial was decided on. A neighbour still
+/// deriving checks this chunk when it lands ([`expose_across_mirror`]).
+fn recheck_buried(world: &World, chunk: Entity, bricks: &mut DerivedBricks) {
+    let n = BRICKS_PER_CHUNK_EDGE;
+    let (Some(index), Some(key)) = (world.get_resource::<SimChunkIndex>(), chunk_world_key(world, chunk)) else {
+        return;
+    };
+    let cutout = CutoutTable::installed();
+    let mut shown = Vec::new();
+    bricks.buried.retain(|(local, voxels)| {
+        let b = to_brick(*local);
+        let hidden = FACES.iter().all(|&off| {
+            let a = (0..3).find(|&a| off[a] != 0).unwrap();
+            if b[a] != if off[a] > 0 { n - 1 } else { 0 } {
+                return true; // an in-chunk face, checked by the derivation
+            }
+            let next = [0, 1, 2].map(|i| key[i] + off[i]);
+            let Some(&e) = index.0.get(&next) else { return true };
+            if world.get::<PendingSnapshotVoxels>(e).is_some() {
+                return true;
+            }
+            world
+                .get::<SimChunk>(e)
+                .is_some_and(|m| chunk_blocks_opaque(&m.0, plane_blocks(b, off, face_layer(off, false)), &cutout))
+        });
+        if !hidden {
+            shown.push((*local, voxels.clone()));
+        }
+        hidden
+    });
+    bricks.spawn.extend(shown);
 }
 
 /// Bricks that exist in their sim chunk but were never spawned because they
@@ -232,6 +518,10 @@ pub fn prune_region_skipped(world: &mut World, region: game::RegionId) {
     if let Some(mut skipped) = world.get_resource_mut::<SkippedBricks>() {
         skipped.0.retain(|k, _| (k[0].div_euclid(per), k[2].div_euclid(per)) != (region.x, region.z));
     }
+    let per = game::REGION_CHUNKS as i32;
+    if let Some(mut index) = world.get_resource_mut::<SimChunkIndex>() {
+        index.0.retain(|k, _| (k[0].div_euclid(per), k[2].div_euclid(per)) != (region.x, region.z));
+    }
 }
 
 /// Region-local translation of brick `local` of a chunk at `chunk_origin`.
@@ -286,15 +576,31 @@ pub fn write_brick(world: &mut World, chunk: Entity, local: [u8; 3], voxels: Vox
 /// Despawn every brick of `chunk` (the chunk entity itself stays).
 pub fn despawn_chunk_bricks(world: &mut World, chunk: Entity) {
     let Some(mut bricks) = world.get_mut::<ChunkBricks>(chunk) else { return };
+    let had = !bricks.0.is_empty();
     for e in std::mem::take(&mut bricks.0) {
         if let Ok(brick) = world.get_entity_mut(e) {
             brick.despawn();
         }
     }
+    if had {
+        // The per-chunk backend's merged mesh drew them (`chunk_mesh`).
+        world.entity_mut(chunk).insert(super::meshing::chunk_mesh::ChunkMeshDirty);
+    }
 }
 
 /// Despawn a sim entity and, for a terrain chunk, its bricks.
 pub fn despawn_sim_entity(world: &mut World, e: Entity) {
+    if world.get::<ChunkBricks>(e).is_some() {
+        // Whatever it buried next door shows now.
+        expose_across(world, e, None);
+        if let Some(key) = chunk_world_key(world, e) {
+            if let Some(mut index) = world.get_resource_mut::<SimChunkIndex>() {
+                if index.0.get(&key) == Some(&e) {
+                    index.0.remove(&key);
+                }
+            }
+        }
+    }
     despawn_chunk_bricks(world, e);
     clear_skipped(world, e);
     if let Ok(entity) = world.get_entity_mut(e) {
@@ -316,9 +622,15 @@ pub fn move_chunk_bricks(world: &mut World, chunk: Entity, origin: Vec3) {
 /// A chunk's derived bricks landed (snapshot or cell activation, off-thread):
 /// replace whatever bricks it had, take the mirror, and lay any block edits
 /// that arrived meanwhile on top. The caller checked it is still pending.
-pub fn land_chunk_bricks(world: &mut World, chunk: Entity, source: Chunk, bricks: DerivedBricks) {
+pub fn land_chunk_bricks(world: &mut World, chunk: Entity, source: Chunk, mut bricks: DerivedBricks) {
     despawn_chunk_bricks(world, chunk);
     clear_skipped(world, chunk);
+    recheck_buried(world, chunk, &mut bricks);
+    if let Some(key) = chunk_world_key(world, chunk) {
+        if let Some(mut index) = world.get_resource_mut::<SimChunkIndex>() {
+            index.0.insert(key, chunk);
+        }
+    }
     let Ok(mut entity) = world.get_entity_mut(chunk) else { return };
     entity.remove::<(PendingSnapshotVoxels, BrickEdits)>().insert((SimChunk(source), ChunkEdits { full: true, ..default() }));
     if !entity.contains::<ChunkBricks>() {
@@ -329,6 +641,8 @@ pub fn land_chunk_bricks(world: &mut World, chunk: Entity, source: Chunk, bricks
     for (local, voxels) in bricks.spawn {
         write_brick(world, chunk, local, voxels);
     }
+    // Neighbours buried against this chunk's faces see its real blocks now.
+    expose_across_mirror(world, chunk);
     if let Some(PendingBlockDeltas(deltas)) = pending.filter(|p| !p.0.is_empty()) {
         apply_block_deltas(world, chunk, deltas);
     }
@@ -388,6 +702,7 @@ pub fn apply_block_deltas(world: &mut World, chunk: Entity, deltas: Vec<BlockDel
     }
     let Some(mut source) = entity.get_mut::<SimChunk>() else {
         edit_bricks_without_mirror(world, chunk, &deltas);
+        expose_edited_faces(world, chunk, &deltas);
         return;
     };
     let n = BRICKS_PER_CHUNK_EDGE;
@@ -420,6 +735,32 @@ pub fn apply_block_deltas(world: &mut World, chunk: Entity, deltas: Vec<BlockDel
     exposed.retain(|l| !touched.contains(l) && find_brick(world, chunk, *l).is_none());
     touched.extend(exposed);
     rederive_bricks(world, chunk, touched);
+    expose_edited_faces(world, chunk, &deltas);
+}
+
+/// Edited blocks on `chunk`'s own faces that no longer hide what is next to
+/// them: spawn the neighbouring chunk's brick buried behind each.
+fn expose_edited_faces(world: &mut World, chunk: Entity, deltas: &[BlockDelta]) {
+    if world.get_resource::<SkippedBricks>().is_none_or(|s| s.0.is_empty()) {
+        return;
+    }
+    let Some(base) = brick_grid_key(world, chunk, [0; 3]) else { return };
+    let cutout = CutoutTable::installed();
+    for delta in deltas {
+        if block_opaque(delta.block, delta.chisel.is_some(), &cutout) {
+            continue;
+        }
+        let (x, y, z) = delta.index.xyz();
+        let p = [x, y, z];
+        for off in FACES {
+            let a = (0..3).find(|&a| off[a] != 0).unwrap();
+            if p[a] != face_layer(off, true) {
+                continue;
+            }
+            let key = [0, 1, 2].map(|i| base[i] + (p[i] / BRICK_BLOCKS) as i32 + off[i]);
+            expose_skipped(world, key, chunk);
+        }
+    }
 }
 
 /// Re-derive `locals` (with every brick still dirty from earlier edits) from
@@ -442,14 +783,8 @@ fn rederive_bricks(world: &mut World, chunk: Entity, locals: BTreeSet<[u8; 3]>) 
         }
         return;
     }
-    let source = source.0.clone();
-    let dirty = edits.dirty.clone();
-    edits.task = Some(AsyncComputeTaskPool::get().spawn(async move {
-        dirty
-            .into_iter()
-            .map(|l| (l, VoxelData::from_brick(&source.brick(to_brick(l))).with_boundary_zones()))
-            .collect()
-    }));
+    let job = BrickEditsJob { source: source.0.clone(), dirty: edits.dirty.clone() };
+    edits.task = Some(super::compute::spawn(job, |voxels| voxels));
     entity.insert(edits);
 }
 
@@ -502,6 +837,7 @@ pub fn write_legacy_voxels(world: &mut World, chunk: Entity, voxels: Vec<Voxel>)
         warn!("bridge: dense SetVoxelComponent on a multi-brick chunk ignored");
         return;
     }
+    expose_across(world, chunk, None);
     clear_skipped(world, chunk);
     let Ok(mut entity) = world.get_entity_mut(chunk) else { return };
     entity.remove::<(PendingSnapshotVoxels, PendingBlockDeltas, BrickEdits, SimChunk)>();
@@ -513,6 +849,7 @@ pub fn write_legacy_voxels(world: &mut World, chunk: Entity, voxels: Vec<Voxel>)
 
 /// `SetVoxelComponent(None)`: the chunk renders nothing.
 pub fn clear_chunk_voxels(world: &mut World, chunk: Entity) {
+    expose_across(world, chunk, None);
     despawn_chunk_bricks(world, chunk);
     clear_skipped(world, chunk);
     let Ok(mut entity) = world.get_entity_mut(chunk) else { return };
@@ -670,6 +1007,121 @@ mod tests {
                 assert_eq!(listed, usize::from(!air), "{b:?}: every non-air brick is spawned or buried, once");
             }
         }
+    }
+
+    /// Across the chunk's faces, `across` decides: a solid chunk next to
+    /// solid on every side buries every brick; one open side shows exactly
+    /// the face layer toward it.
+    #[test]
+    fn face_bricks_bury_against_what_lies_across() {
+        let n = BRICKS_PER_CHUNK_EDGE;
+        let stone = Block::new(BlockId(2));
+        // Uniform, and the same blocks stored densely (the generator's form).
+        let dense = Chunk { blocks: ChunkBlocks::from_vec(vec![stone; game::CHUNK_BLOCK_COUNT]), chisel: Default::default() };
+        for chunk in [Chunk::uniform(stone), dense] {
+            let all = derive_chunk_bricks_across(&chunk, |_, _| true);
+            assert!(all.spawn.is_empty(), "solid all round: nothing shows");
+            assert_eq!(all.buried.len(), n.pow(3));
+            let open_up = derive_chunk_bricks_across(&chunk, |_, off| off != [0, 1, 0]);
+            assert_eq!(open_up.spawn.len(), n * n, "only the top layer shows");
+            assert!(open_up.spawn.iter().all(|(l, _)| l[1] as usize == n - 1));
+            let unknown = derive_chunk_bricks(&chunk);
+            assert_eq!(unknown.spawn.len(), n.pow(3) - n.saturating_sub(2).pow(3), "unknown neighbours bury nothing");
+        }
+    }
+
+    /// Two chunks side by side along +x under one root, both tracked in the
+    /// [`SimChunkIndex`]; returns (root, left, right).
+    fn two_chunk_world(world: &mut World) -> (Entity, Entity, Entity) {
+        world.init_resource::<SkippedBricks>();
+        world.init_resource::<SimChunkIndex>();
+        // Re-derive edited bricks inline: a bare World has no compute pool.
+        world.insert_resource(BrickEditPolicy { inline_max_bricks: usize::MAX });
+        let root = world.spawn((Transform::IDENTITY, Visibility::default())).id();
+        let mut chunk = |x: f32| {
+            world
+                .spawn((Transform::from_xyz(x, 0.0, 0.0), Visibility::default(), ChildOf(root), ChunkBricks::default()))
+                .id()
+        };
+        let (left, right) = (chunk(0.0), chunk(game::CHUNK_UNITS as f32));
+        (root, left, right)
+    }
+
+    fn stone_chunk() -> Chunk {
+        Chunk::uniform(Block::new(BlockId(2)))
+    }
+
+    /// The left chunk's brick on its +x face, buried against the right chunk.
+    fn left_face_brick() -> [u8; 3] {
+        [BRICKS_PER_CHUNK_EDGE as u8 - 1, 0, 0]
+    }
+
+    fn left_buried() -> DerivedBricks {
+        DerivedBricks { spawn: vec![], buried: vec![(left_face_brick(), solid())] }
+    }
+
+    /// The right chunk as stone with its -x face block at the left brick's
+    /// plane dug out.
+    fn right_with_hole() -> Chunk {
+        let mut chunk = stone_chunk();
+        chunk.set_block(0, 0, 0, Block::new(BlockId::AIR));
+        chunk
+    }
+
+    /// A buried face brick shows once the chunk next to it lands with air
+    /// against it; a solid neighbour keeps it buried.
+    #[test]
+    fn neighbour_landing_exposes_only_against_air() {
+        let mut world = World::new();
+        let (_, left, right) = two_chunk_world(&mut world);
+        land_chunk_bricks(&mut world, left, stone_chunk(), left_buried());
+        land_chunk_bricks(&mut world, right, stone_chunk(), DerivedBricks::default());
+        assert!(find_brick(&world, left, left_face_brick()).is_none(), "solid neighbour: still buried");
+        assert_eq!(world.resource::<SkippedBricks>().0.len(), 1);
+        land_chunk_bricks(&mut world, right, right_with_hole(), DerivedBricks::default());
+        assert!(find_brick(&world, left, left_face_brick()).is_some(), "the hole exposes it");
+        assert!(world.resource::<SkippedBricks>().0.is_empty());
+    }
+
+    /// Digging the neighbour's face block, or the neighbour going away,
+    /// exposes the buried brick behind it.
+    #[test]
+    fn neighbour_edit_or_despawn_exposes() {
+        for despawn in [false, true] {
+            let mut world = World::new();
+            let (_, left, right) = two_chunk_world(&mut world);
+            land_chunk_bricks(&mut world, right, stone_chunk(), DerivedBricks::default());
+            land_chunk_bricks(&mut world, left, stone_chunk(), left_buried());
+            assert!(find_brick(&world, left, left_face_brick()).is_none());
+            if despawn {
+                despawn_sim_entity(&mut world, right);
+                assert!(world.resource::<SimChunkIndex>().0.values().all(|&e| e != right));
+            } else {
+                let air = Block::new(BlockId::AIR);
+                // A block off the shared face changes nothing next door.
+                let inner = BlockDelta { index: BlockIndex::from_xyz(1, 0, 0), block: air, chisel: None };
+                apply_block_deltas(&mut world, right, vec![inner]);
+                assert!(find_brick(&world, left, left_face_brick()).is_none(), "an inner dig keeps it buried");
+                let dig = BlockDelta { index: BlockIndex::from_xyz(0, 0, 0), block: air, chisel: None };
+                apply_block_deltas(&mut world, right, vec![dig]);
+            }
+            assert!(find_brick(&world, left, left_face_brick()).is_some(), "despawn={despawn}: exposed");
+        }
+    }
+
+    /// A chunk landing after its neighbour was edited re-checks the burial
+    /// its (older) snapshot decided against the neighbour's current blocks.
+    #[test]
+    fn landing_rechecks_burial_against_landed_neighbours() {
+        let mut world = World::new();
+        let (_, left, right) = two_chunk_world(&mut world);
+        land_chunk_bricks(&mut world, right, right_with_hole(), DerivedBricks::default());
+        land_chunk_bricks(&mut world, left, stone_chunk(), left_buried());
+        assert!(find_brick(&world, left, left_face_brick()).is_some(), "the neighbour has a hole there");
+        // Still deriving: trusted (its own landing re-checks).
+        world.entity_mut(right).insert(PendingSnapshotVoxels);
+        land_chunk_bricks(&mut world, left, stone_chunk(), left_buried());
+        assert!(find_brick(&world, left, left_face_brick()).is_none());
     }
 
     /// A world with a region root at the origin and one terrain chunk entity.

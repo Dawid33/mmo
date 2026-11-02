@@ -326,7 +326,7 @@ Rulings:
 - Test: `crates/slint-ui/tests/frontend.rs`
 
 **Interfaces:**
-- Produces (Slint `FrontendUi`): `in property <string> title: "Labour of Love"`; `in property <bool> can-load`; `in property <string> menu-error`; callbacks `new-world()`, `load-world()`, `exit()`.
+- Produces (Slint `FrontendUi`): `in property <string> title: "Orion"`; `in property <bool> can-load`; `in property <string> menu-error`; callbacks `new-world()`, `load-world()`, `exit()`.
 - Bevy: `new-world` → `AppState::MapGenerator`; `load-world` → `AppState::LoadWorld`; `exit` → `AppExit::Success` (after the leave path, a no-op in the menu). `can-load` = `!world_store::list(root).is_empty()`, refreshed on `OnEnter(MainMenu)`. `menu-error` = `LastSessionError`.
 - [ ] **Step 1: Failing tests:** `main_menu_buttons_fire` (click each → its callback); `load_disabled_without_worlds` (`can-load: false` → click does not fire); `menu_error_is_shown` (property set → text visible via the overlay's accessible tree or a pixel probe, whichever `world_map.rs` already uses).
 - [ ] **Step 2:** `just test-one slint-ui "--test frontend"` → FAIL.

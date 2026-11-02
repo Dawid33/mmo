@@ -624,3 +624,58 @@ fn xray_ignores_a_room_beyond_reach() {
     let (solid, dug) = xray_world();
     assert_eq!(pick_xray_cell(o, d, 20.0, false, &solid, &dug), Some([3, 29, 3]), "the room lies 33 blocks down");
 }
+
+/// `DevCompleteAll` writes in per-chunk batches (one undo entry per chunk —
+/// a per-tile loop re-hashed whole fields per tile, seconds on a play-size
+/// region, and the client replayed it on every rollback). The batched result
+/// must be the per-tile one, across chunk borders, and roll back bit-exact.
+#[test]
+fn complete_all_batches_match_per_tile_edits() {
+    let build_region = || {
+        let r0 = RegionCoords::new(0, 0);
+        let mut columns = Vec::new();
+        for x in 0..2 {
+            for z in 0..2 {
+                columns.push((ColumnCoords::new(x, z), stone_column()));
+            }
+        }
+        let built = Region::from_columns(r0, columns);
+        let (send, recv) = crossbeam::channel::unbounded();
+        std::mem::forget(recv);
+        let mut region = Region::new(built.data().clone(), Some(send), r0, None);
+        region.handle_event(GameEventKind::CreateClient(0)).unwrap();
+        region.forget_last_event();
+        region
+    };
+    let c = CHUNK_BLOCKS as i32;
+    // Straddles the chunk corner at (c, c), down into implied ground.
+    let dig = TileBox::new([c - 3, SURFACE - 3, c - 3], [c + 2, SURFACE, c + 2]);
+    let build = TileBox::new([c - 2, SURFACE + 1, c - 2], [c + 1, SURFACE + 2, c + 1]);
+    let mut batched = build_region();
+    apply_checked(&mut batched, designate(op(1), DesignationKind::Dig, dig));
+    apply_checked(&mut batched, designate(op(2), DesignationKind::Build(game::edit::PLACE_BLOCK), build));
+    let mut per_tile = build_region();
+    apply_checked(&mut batched, Order::DevCompleteAll);
+    assert!(batched.data().designations().is_empty());
+    per_tile.with_data(|r| {
+        for p in dig.tiles() {
+            r.set_block_safe(p, Block::new(BlockId::AIR));
+        }
+        for p in build.tiles() {
+            r.set_block_safe(p, Block::new(game::edit::PLACE_BLOCK));
+        }
+    });
+    let span = TileBox::new([0, SURFACE - 8, 0], [2 * c - 1, SURFACE + 4, 2 * c - 1]);
+    for p in span.tiles() {
+        assert_eq!(block_at(&batched, p), block_at(&per_tile, p), "block at {p:?}");
+    }
+    let built: Vec<TilePos> = batched.data().constructed().keys().copied().collect();
+    let mut want: Vec<TilePos> = build.tiles().collect();
+    want.sort();
+    assert_eq!(built, want, "every build is flagged constructed");
+    // Deconstructing them all clears the blocks and the flags.
+    apply_checked(&mut batched, designate(op(3), DesignationKind::Deconstruct, build));
+    apply_checked(&mut batched, Order::DevCompleteAll);
+    assert!(batched.data().constructed().is_empty());
+    assert!(build.tiles().all(|p| block_at(&batched, p) == BlockId::AIR));
+}

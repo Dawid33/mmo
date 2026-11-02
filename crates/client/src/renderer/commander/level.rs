@@ -9,14 +9,18 @@
 //!   away, the camera rides the level's floor (zooming with the wheel), and
 //!   Space / Shift (or PgUp / PgDn) step the level, repeating while held,
 //!   Ctrl ×[`LEVEL_STEP_FAST`]; Home goes back to the surface level.
-//! - Cut off: the free camera. The level follows it ([`derive_level`]): the
-//!   surface under the focus above ground, the focus's level underground
-//!   (the camera sank through the surface, see `super::vertical_move`).
-//!   Space / Shift move it straight up / down (in `super::pan_and_zoom`),
-//!   PgUp / PgDn by one level; Home brings it back above the surface.
+//! - Cut off: the free camera, following nothing (not the terrain, trees or
+//!   the cut). The level is the focus's ([`derive_level`]). Space / Shift
+//!   move it straight up / down (in `super::pan_and_zoom`) with no ceiling,
+//!   PgUp / PgDn by one level; Home puts it back over the surface.
 //!
-//! Turning the cut off leaves the camera at the level it was on (underground
-//! when that is below the surface); turning it on starts at the camera's.
+//! - Top-down (V, `super::top_down`): the cut is always on, as above, and
+//!   the wheel steps the level too (`wheel_step_level`); turning the cut
+//!   off leaves top-down for the free camera.
+//!
+//! Either way the level is where the focus is, so switching never changes
+//! it: turning the cut off puts the free camera's focus on the level's
+//! floor, turning it on keeps the focus's level.
 
 use bevy::prelude::*;
 
@@ -66,10 +70,38 @@ impl Default for WorkingLevel {
 }
 
 /// The level after `steps` steps (±1 each, ±[`LEVEL_STEP_FAST`] when
-/// `fast`), clamped to `range`.
+/// `fast`), clamped to `range` — widened to include `level` itself, so a
+/// level the free camera left outside it (high in the air) steps back
+/// toward it instead of jumping.
 pub fn step_level(level: i32, steps: i32, fast: bool, range: (i32, i32)) -> i32 {
     let step = if fast { LEVEL_STEP_FAST } else { 1 };
-    (level + steps * step).clamp(range.0, range.1.max(range.0))
+    let (lo, hi) = (range.0.min(level), range.1.max(range.0).max(level));
+    (level + steps * step).clamp(lo, hi)
+}
+
+/// Whole wheel notches to step the level by this frame (wheel up = level up),
+/// keeping the fraction (touchpads scroll in pixels) in `carry`.
+pub fn wheel_level_steps(notches: f32, carry: &mut f32) -> i32 {
+    *carry += notches;
+    let steps = carry.trunc();
+    *carry -= steps;
+    steps as i32
+}
+
+/// The level after a wheel of `notches` ([`wheel_level_steps`], then
+/// [`step_level`] within `range`). A step clamped at the range's end drops
+/// the carried fraction, so scrolling past the end stores nothing to undo.
+pub fn wheel_step_level(level: i32, notches: f32, carry: &mut f32, fast: bool, range: (i32, i32)) -> i32 {
+    let steps = wheel_level_steps(notches, carry);
+    if steps == 0 {
+        return level;
+    }
+    let next = step_level(level, steps, fast, range);
+    let per = if fast { LEVEL_STEP_FAST } else { 1 };
+    if next != level + steps * per {
+        *carry = 0.0;
+    }
+    next
 }
 
 /// The reachable levels for loaded surfaces spanning `surface` (sim units).
@@ -81,12 +113,10 @@ pub fn level_range(surface: (f32, f32)) -> (i32, i32) {
     )
 }
 
-/// The working level for a camera: the level its focus is at when it is
-/// underground (`ground_y`, world sim units), else the surface under the
-/// focus (`surface`; `None` while that column is not loaded).
-pub fn derive_level(underground: bool, ground_y: f32, surface: Option<f32>) -> Option<i32> {
-    let baseline = if underground { Some(ground_y) } else { surface };
-    baseline.map(surface_level)
+/// The free camera's working level: the one its focus (`ground_y`, world sim
+/// units) is in, above ground or below.
+pub fn derive_level(ground_y: f32) -> i32 {
+    surface_level(ground_y)
 }
 
 /// How many steps a level key has fired once it has been held `t` seconds
@@ -147,48 +177,45 @@ pub fn init_level(grid: Res<HeightGrid>, cam: Res<CommanderCamera>, mut level: R
     }
 }
 
-/// Where the free camera's focus goes when the cut is turned off on `level`:
-/// that level's floor, underground when it is below `surface` (the terrain
-/// under the focus). `None` without a level.
-pub fn uncut_camera(level: Option<i32>, home: Option<RegionId>, surface: Option<f32>) -> Option<(f32, bool)> {
-    let floor = level_floor_y(&WorkingLevel { level, cut: true }, home)?;
-    Some((floor, surface.is_some_and(|s| floor < s)))
-}
-
-/// With the cut off, keep the working level on the camera ([`derive_level`]);
-/// on turning the cut off, leave the camera at the level it was on
-/// ([`uncut_camera`]). The cut is toggled by C and the tool wheel alike, so
-/// the toggle is seen as a change, not a key.
+/// With the cut off, keep the working level on the camera's focus
+/// ([`derive_level`]); on turning the cut off, put the focus on the level's
+/// floor ([`level_floor_y`]) at the opening distance ([`super::ZOOM_START_M`])
+/// — the free camera has no zoom, so a wheel zoom from the cut-on mode must
+/// not carry over. The level is unchanged by the switch either way. The cut
+/// is toggled by C and the tool wheel alike, so the toggle is seen as a
+/// change, not a key.
 pub fn track_camera_level(
-    grid: Res<HeightGrid>,
     tiles: Res<TileMirror>,
     mut cam: ResMut<CommanderCamera>,
     mut level: ResMut<WorkingLevel>,
     mut was_cut: crate::session::SessionLocal<Option<bool>>,
 ) {
     let was_cut = was_cut.get();
-    let surface = super::focus_ground_target(&grid, cam.focus);
     if was_cut.replace(level.cut) == Some(true) && !level.cut {
-        if let Some((floor, underground)) = uncut_camera(level.level, tiles.region(), surface) {
-            cam.underground = underground;
-            if underground {
-                cam.ground_y = floor;
-            }
+        cam.distance = super::ZOOM_START_M * game::movement::UNITS_PER_METER;
+        cam.target_distance = cam.distance;
+        if let Some(floor) = level_floor_y(&level, tiles.region()) {
+            cam.ground_y = floor;
         }
     }
     if level.cut {
         return;
     }
-    let derived = derive_level(cam.underground, cam.ground_y, focus_surface(&grid, cam.focus));
-    if derived.is_some() && derived != level.level {
-        level.level = derived;
+    // Before the first level is known (`init_level`) the focus height is a
+    // placeholder, not a level.
+    if level.level.is_none() {
+        return;
+    }
+    let derived = derive_level(cam.ground_y);
+    if level.level != Some(derived) {
+        level.level = Some(derived);
     }
 }
 
 /// C toggles the cut. Cut on: Space / Shift / PgUp / PgDn step the level
 /// (Ctrl: ten), repeating while held, and Home goes to the surface level.
-/// Cut off: PgUp / PgDn move the camera one level (Ctrl: ten), Home brings
-/// it back above the surface (Space / Shift are `super::pan_and_zoom`'s).
+/// Cut off: PgUp / PgDn move the camera one level (Ctrl: ten), Home puts it
+/// back over the surface (Space / Shift are `super::pan_and_zoom`'s).
 #[allow(clippy::too_many_arguments)] // Bevy system: params are DI, not an API
 pub fn level_input(
     keys: Res<ButtonInput<KeyCode>>,
@@ -230,15 +257,14 @@ pub fn level_input(
         }
         return;
     }
-    let surface = super::focus_ground_target(&grid, cam.focus);
-    let floor = grid.surface_range().map(sink_floor);
     let steps = up as i32 - down as i32;
     if steps != 0 {
         let per = if fast { LEVEL_STEP_FAST } else { 1 };
         let dy = (steps * per * BLOCK_VOXELS as i32) as f32;
-        super::move_vertically(&mut cam, dy, surface, floor);
+        super::move_vertically(&mut cam, dy, grid.surface_range().map(sink_floor));
     }
     if keys.just_pressed(SURFACE_KEY) {
+        let surface = focus_surface(&grid, cam.focus);
         super::surface_camera(&mut cam, surface);
     }
 }
@@ -298,20 +324,22 @@ mod tests {
     }
 
     #[test]
-    fn turning_the_cut_off_leaves_the_camera_on_its_level() {
-        let b = BLOCK_VOXELS as f32;
-        let home = Some(home0());
-        assert_eq!(uncut_camera(Some(40), home, Some(64.0 * b)), Some((40.0 * b, true)), "dug down: underground");
-        assert_eq!(uncut_camera(Some(70), home, Some(64.0 * b)), Some((70.0 * b, false)), "above the ground");
-        assert_eq!(uncut_camera(None, home, Some(64.0 * b)), None);
+    fn a_level_outside_the_range_steps_back_toward_it_without_jumping() {
+        assert_eq!(step_level(500, -1, false, (0, 100)), 499, "high in the air: one level down");
+        assert_eq!(step_level(500, 1, false, (0, 100)), 500, "and no further up");
+        assert_eq!(step_level(-20, 1, false, (0, 100)), -19);
     }
 
     #[test]
-    fn the_level_follows_the_surface_above_ground_and_the_focus_below() {
+    fn the_free_cameras_level_is_its_focus_and_round_trips_the_cut() {
         let b = BLOCK_VOXELS as f32;
-        assert_eq!(derive_level(false, 10.0 * b, Some(64.0 * b)), Some(64), "above ground: the surface");
-        assert_eq!(derive_level(false, 10.0 * b, None), None, "the surface column not loaded yet");
-        assert_eq!(derive_level(true, 40.5 * b, Some(64.0 * b)), Some(40), "underground: where the focus is");
+        assert_eq!(derive_level(40.5 * b), 40, "underground");
+        assert_eq!(derive_level(300.0 * b), 300, "high in the air");
+        // Cut off puts the focus on the level's floor: its level is the same.
+        for at in [-5, 40, 64, 70] {
+            let floor = level_floor_y(&WorkingLevel { level: Some(at), cut: true }, Some(home0())).unwrap();
+            assert_eq!(derive_level(floor), at);
+        }
     }
 
     #[test]
@@ -319,6 +347,25 @@ mod tests {
         let b = BLOCK_VOXELS as f32;
         let floor = sink_floor((100.0 * b, 300.0 * b));
         assert_eq!(floor, (100 - UNDERGROUND_DEPTH as i32 - LEVELS_BELOW_BEDROCK) as f32 * b);
+    }
+
+    #[test]
+    fn the_wheel_steps_whole_levels_and_keeps_the_remainder() {
+        assert_eq!(wheel_level_steps(1.0, &mut 0.0), 1);
+        assert_eq!(wheel_level_steps(-2.0, &mut 0.0), -2);
+        let mut carry = 0.0;
+        assert_eq!(wheel_level_steps(0.6, &mut carry), 0);
+        assert_eq!(wheel_level_steps(0.6, &mut carry), 1);
+        assert!((carry - 0.2).abs() < 1e-5, "{carry}");
+    }
+
+    #[test]
+    fn the_wheel_does_not_store_steps_past_the_range_end() {
+        let mut carry = 0.0;
+        let top = wheel_step_level(100, 5.0, &mut carry, false, (0, 100));
+        assert_eq!(top, 100, "clamped at the top");
+        assert_eq!(wheel_step_level(top, -1.0, &mut carry, false, (0, 100)), 99, "one notch down is one level");
+        assert_eq!(wheel_step_level(50, 1.0, &mut 0.0, true, (0, 100)), 50 + LEVEL_STEP_FAST);
     }
 
     fn home0() -> RegionId {

@@ -23,10 +23,15 @@ use slint::platform::{Platform, WindowAdapter, WindowEvent, WindowEventDispatchR
 use slint::{ComponentHandle, PhysicalSize};
 
 pub mod wheel;
-#[cfg(target_arch = "wasm32")]
-mod wasm_images;
 
-slint::include_modules!();
+// The screens are generated in their own crates (crates/slint-ui/build_common.rs):
+// the in-game ones from ui/index.slint in `slint-ui-game`, the frontend from
+// ui/frontend.slint in `slint-ui-frontend`. Both are leaves, so they compile in
+// parallel and a .slint edit regenerates only its half; re-exported so users
+// keep one `slint_ui::` path. The asset viewer / controls harness are in
+// `slint-ui-tools`, outside the game build.
+pub use slint_ui_frontend::{FrontendUi, KnobRow, WorldRow};
+pub use slint_ui_game::*;
 
 thread_local! {
     /// The window the next component is created in. Slint's platform can be

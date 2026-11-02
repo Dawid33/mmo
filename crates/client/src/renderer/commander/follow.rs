@@ -1,7 +1,7 @@
 //! Following: the commander camera tracks the selected entity until the
 //! player pans away.
 //!
-//! The panel's Follow button (`slint_overlay`) sets [`Follow`] for the one
+//! The context box's Follow button (`slint_overlay`, `ui/menu-column.slint`) sets [`Follow`] for the one
 //! selected entity — [`FollowTarget::LocalPlayer`] for the local body (whose
 //! sim key changes when a seam handoff re-creates it), otherwise
 //! [`FollowTarget::Entity`]. Any pan (WASD, arrows, screen edge, middle-drag,

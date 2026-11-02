@@ -18,7 +18,9 @@ crossbeam = { workspace = true }
 simplelog = { workspace = true }
 log = { workspace = true }
 quinn = { workspace = true }
-tokio = { workspace = true, features = ["time"] }
+tokio = { workspace = true, features = ["macros", "time", "signal"] }
+lz4_flex = { workspace = true }
+crc32fast = { workspace = true }
 rcgen = { workspace = true }
 dashmap = { workspace = true }
 wtransport = { workspace = true }

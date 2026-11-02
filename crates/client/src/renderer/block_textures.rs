@@ -15,7 +15,7 @@ use image::{Rgba, RgbaImage};
 /// Maps each renderable `BlockId` to its `[top, side, bottom]` array-texture
 /// layers. The mesher writes these into the `tex_idx` vertex attribute; the
 /// fragment shader selects a slot by face normal.
-#[derive(Resource, Default, Clone)]
+#[derive(Resource, Default, Clone, serde::Serialize, serde::Deserialize)]
 pub struct BlockTextureLayers(pub BTreeMap<BlockId, [u32; 3]>);
 
 impl BlockTextureLayers {

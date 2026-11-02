@@ -24,6 +24,13 @@ zstd = "0.13"
 
 [dev-dependencies]
 crossbeam = { workspace = true }
+# `profiler`: rapier's stage timers for `examples/narrow_phase_probe.rs`. It is
+# ALSO load-bearing for build times: under workspace feature unification every
+# test build resolves rapier3d with it and bin builds without, so tests (region
+# dial 64) and the play recipes (VOXEL_REGION_BLOCKS=512) keep separate copies
+# of rapier -> game -> worldgen -> server/client. Cargo fingerprints that env
+# var but doesn't key artifacts on it, so one shared copy would flip-flop and
+# recompile the whole chain on every `just smoke` <-> `just run` switch.
 rapier3d = { workspace = true, features = ["profiler"] }
 slotmapd = { workspace = true }
 block-mesh = { workspace = true }

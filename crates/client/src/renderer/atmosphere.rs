@@ -53,6 +53,32 @@ pub fn sun_cascades() -> CascadeShadowConfig {
     .build()
 }
 
+/// Top-down view (`commander/top_down.rs`): how far above the working level
+/// terrain still casts and receives sun shadows, metres. The eye sits
+/// `TOP_DOWN_EYE_HEIGHT_M` above the cut, so the cascades start that much
+/// less this far from it; higher neighbouring terrain goes unshadowed.
+pub const TOP_DOWN_SHADOW_ABOVE_M: f32 = 64.0;
+/// Top-down: far bound of the first (sharpest) cascade below the eye's
+/// height above the cut, metres.
+pub const TOP_DOWN_FIRST_CASCADE_M: f32 = 16.0;
+
+/// The sun's cascades for the top-down view: measured from its eye, high
+/// above the working level (`top_down::TOP_DOWN_EYE_HEIGHT_M`), so the same
+/// depth of ground as in 3D is covered from the level down.
+pub fn top_down_cascades() -> CascadeShadowConfig {
+    let m = game::movement::UNITS_PER_METER;
+    let eye = crate::renderer::commander::top_down::TOP_DOWN_EYE_HEIGHT_M;
+    let defaults = CascadeShadowConfigBuilder::default();
+    CascadeShadowConfigBuilder {
+        num_cascades: SHADOW_CASCADES.min(defaults.num_cascades),
+        minimum_distance: (eye - TOP_DOWN_SHADOW_ABOVE_M) * m,
+        maximum_distance: (eye + SHADOW_MAX_DISTANCE_M) * m,
+        first_cascade_far_bound: (eye + TOP_DOWN_FIRST_CASCADE_M) * m,
+        overlap_proportion: defaults.overlap_proportion,
+    }
+    .build()
+}
+
 /// Sky fill light. Blue-tinted, as open shade under a clear sky is; bright
 /// enough that a face in full shadow keeps ~30–40 % of a sunlit top instead
 /// of going near-black (the old 100 against 10 klx was ~7 %).
@@ -116,6 +142,17 @@ pub fn underground_fog() -> DistanceFog {
     }
 }
 
+/// The fog in the top-down view: none. Its eye is far above the ground
+/// (`top_down::TOP_DOWN_EYE_HEIGHT_M`), so eye-distance fog would haze the
+/// working level; the levels below darken by depth instead
+/// (`fortress_view`). Same colour as [`distance_fog`], beyond the
+/// projection's far plane.
+pub fn top_down_fog() -> DistanceFog {
+    use crate::renderer::commander::top_down::{TOP_DOWN_DEPTH_M, TOP_DOWN_EYE_HEIGHT_M};
+    let far = (TOP_DOWN_EYE_HEIGHT_M + TOP_DOWN_DEPTH_M) * game::movement::UNITS_PER_METER;
+    DistanceFog { falloff: FogFalloff::Linear { start: far + 1.0, end: far + 2.0 }, ..distance_fog() }
+}
+
 /// Spawn the sun and set the ambient fill. Called from `setup_scene`.
 pub fn spawn_lights(commands: &mut Commands) {
     commands.spawn((
@@ -175,6 +212,25 @@ mod tests {
         let m = game::movement::UNITS_PER_METER;
         let far = sun_cascades().bounds.last().copied().unwrap();
         assert!(far >= 2.0 * crate::renderer::commander::ZOOM_FAR_M * m, "shadow far bound {far}");
+    }
+
+    #[test]
+    fn top_down_fog_never_reaches_the_ground() {
+        use crate::renderer::commander::top_down::{top_down_projection, TOP_DOWN_ZOOM_START};
+        let far = top_down_projection(TOP_DOWN_ZOOM_START, 1.0).far;
+        let FogFalloff::Linear { start, end } = top_down_fog().falloff else { panic!("linear fog") };
+        assert!(start > far && end > start, "fog {start}..{end} vs far {far}");
+        assert_eq!(top_down_fog().color, distance_fog().color);
+    }
+
+    #[test]
+    fn top_down_shadows_cover_the_working_level_and_what_is_under_it() {
+        use crate::renderer::commander::top_down::TOP_DOWN_EYE_HEIGHT_M;
+        let m = game::movement::UNITS_PER_METER;
+        let c = top_down_cascades();
+        assert!(c.minimum_distance <= (TOP_DOWN_EYE_HEIGHT_M - 1.0) * m, "starts above the level");
+        let far = c.bounds.last().copied().unwrap();
+        assert!(far >= (TOP_DOWN_EYE_HEIGHT_M + crate::renderer::commander::ZOOM_FAR_M) * m, "far bound {far}");
     }
 
     #[test]

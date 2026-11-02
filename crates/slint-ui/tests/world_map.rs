@@ -81,7 +81,6 @@ fn clicking_the_map_selects_a_tile() {
 #[ignore = "slow: >100ms — run via just test-full"]
 fn closed_ui_draws_nothing() {
     let mut overlay = overlay();
-    overlay.ui().set_panel_open(false);
     overlay.ui().set_tools_available(false);
     overlay.ui().set_menu_open(false);
     overlay.ui().set_map_open(false);
@@ -167,7 +166,6 @@ fn dragging_pans_and_the_wheel_zooms_about_the_cursor() {
 #[ignore = "slow: >100ms — run via just test-full"]
 fn status_line_draws_only_with_text() {
     let mut overlay = overlay();
-    overlay.ui().set_panel_open(false);
     overlay.ui().set_tools_available(false);
     overlay.render();
     let (x, y) = (overlay.ui().get_status_x(), overlay.ui().get_status_y());
@@ -252,7 +250,6 @@ fn open_map_counting_closes(overlay: &mut Overlay<GameUi>) -> Rc<RefCell<u32>> {
     let closed = Rc::new(RefCell::new(0));
     let c = closed.clone();
     overlay.ui().on_close_map(move || *c.borrow_mut() += 1);
-    overlay.ui().set_panel_open(false);
     overlay.ui().set_map_open(true);
     overlay.ui().set_map_available(true);
     overlay.ui().set_map_cols(4);
@@ -295,7 +292,6 @@ fn modal_map_cannot_be_closed() {
 #[ignore = "slow: >100ms — run via just test-full"]
 fn modal_menu_offers_only_main_menu() {
     let mut overlay = overlay();
-    overlay.ui().set_panel_open(false);
     overlay.ui().set_menu_open(true);
     overlay.render();
     let drawn = |overlay: &Overlay<GameUi>| overlay.pixels().iter().filter(|p| p.alpha > 0).count();

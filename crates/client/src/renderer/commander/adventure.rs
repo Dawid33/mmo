@@ -1,4 +1,5 @@
-//! Adventure mode on the client: the panel's mode button, the local body's
+//! Adventure mode on the client: mode switch requests (no UI sends one since
+//! the F9 panel went — Adventure has no entry point for now), the local body's
 //! visibility and the fortress tools' off switch.
 //!
 //! The mode itself is sim state (`game::PlayMode` on the client's
@@ -33,7 +34,9 @@ impl ClientPlayMode {
     }
 }
 
-/// The panel's mode button was pressed (written by `slint_overlay`).
+/// Switch Fortress ↔ Adventure. Nothing writes it at the moment (the F9
+/// panel's mode button was removed with the panel); kept for the next entry
+/// point.
 #[derive(Message, Debug, Clone, Copy)]
 pub struct ToggleModeRequest;
 
@@ -103,10 +106,15 @@ pub fn body_visibility(mode: PlayMode) -> Visibility {
 /// the mode. Writes only on a mode change or a newly tagged body (the bridge
 /// tags it `Hidden`), so the z-level cut (`cut_entities`), which watches for
 /// other writers, is not disturbed every frame.
-pub fn sync_body_visibility(mode: Res<ClientPlayMode>, mut bodies: Query<(Ref<LocalBody>, &mut Visibility)>) {
-    let want = body_visibility(mode.0);
+pub fn sync_body_visibility(
+    mode: Res<ClientPlayMode>,
+    first_person: Res<super::first_person::FirstPerson>,
+    mut bodies: Query<(Ref<LocalBody>, &mut Visibility)>,
+) {
+    // In first person the view is inside the body: its model would fill it.
+    let want = if first_person.on { Visibility::Hidden } else { body_visibility(mode.0) };
     for (body, mut vis) in &mut bodies {
-        if mode.is_changed() || body.is_added() {
+        if mode.is_changed() || first_person.is_changed() || body.is_added() {
             vis.set_if_neq(want);
         }
     }

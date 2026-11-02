@@ -23,8 +23,10 @@ pub(crate) mod cursor;
 #[cfg(feature = "dev_ui")]
 pub mod dev_ui;
 pub(crate) mod boundaries;
+pub mod fortress_panel;
 pub mod fortress_view;
 pub(crate) mod slice_plane;
+pub mod compute; // off-main-thread jobs: Bevy's pool natively, Web Workers on wasm
 pub mod config;
 pub mod convert;
 pub(crate) mod diag;
@@ -96,6 +98,7 @@ pub struct SimBridgePlugin {
 
 impl Plugin for SimBridgePlugin {
     fn build(&self, app: &mut App) {
+        voxel_material::embed_voxel_texture_shader(app);
         app.add_plugins((
             MaterialPlugin::<ExtendedMaterial<StandardMaterial, StandardVoxelMaterial>>::default(),
             bevy::diagnostic::FrameTimeDiagnosticsPlugin::default(),
@@ -124,6 +127,7 @@ impl Plugin for SimBridgePlugin {
         .add_session_reset::<bridge::SnapshotVoxelQueue>()
         .add_session_reset::<bridge::RetiredRegionRoots>()
         .add_session_reset::<hud::HudStatus>()
+        .add_session_reset::<hud::RegionTickTimes>()
         .init_resource::<boundaries::BoundaryOverlay>()
         .add_session_reset::<boundaries::BoundaryUniform>()
         .add_session_reset::<fortress_view::FortressViewUniform>()
@@ -142,6 +146,7 @@ impl Plugin for SimBridgePlugin {
         .add_session_reset::<meshing::lod::LodBuildQueue>()
         .add_session_reset::<meshing::lod::FarFrameUploads>()
         .add_session_reset::<bricks::SkippedBricks>()
+        .add_session_reset::<bricks::SimChunkIndex>()
         // Cave culling starts OFF: the world has no caves yet, and the flood
         // cost 5-8.5 ms per turning frame at the 5x5 window (2026-09-23
         // bench) for nothing to hide. F4 / the F3 dev panel turn it on.
@@ -196,6 +201,7 @@ impl Plugin for SimBridgePlugin {
                     meshing::queue::remesh_awaiting_ground,
                     meshing::queue::spawn_mesh_tasks,
                     meshing::apply_meshed_chunks,
+                    meshing::chunk_mesh::rebuild_chunk_meshes,
                     // LOD meshes land in the same chain; culling moved to
                     // cull_plugin (PostUpdate) so it sees the current
                     // frame's frustum — it runs after this chain either way.
@@ -204,6 +210,7 @@ impl Plugin for SimBridgePlugin {
                     meshing::lod::spawn_lod_mesh_tasks,
                     far_voxel::lifecycle::queue_far_brick_tasks,
                     meshing::lod::apply_lod_meshes,
+                    meshing::lod_tiles::rebuild_lod_tiles,
                     far_voxel::lifecycle::remove_far_voxel_cells,
                     far_voxel::lifecycle::refresh_far_neighbors,
                     far_voxel::lifecycle::apply_far_brick_tasks,
@@ -434,6 +441,126 @@ const EMBEDDED_BLOCK_TEXTURES: &[(&str, &[u8])] = &[
         "water.png",
         include_bytes!("../../../../assets/blocks/water.png"),
     ),
+    (
+        "acacia_bark.png",
+        include_bytes!("../../../../assets/blocks/acacia_bark.png"),
+    ),
+    (
+        "acacia_branch.png",
+        include_bytes!("../../../../assets/blocks/acacia_branch.png"),
+    ),
+    (
+        "acacia_leaves.png",
+        include_bytes!("../../../../assets/blocks/acacia_leaves.png"),
+    ),
+    (
+        "acacia_rings.png",
+        include_bytes!("../../../../assets/blocks/acacia_rings.png"),
+    ),
+    (
+        "cactus.png",
+        include_bytes!("../../../../assets/blocks/cactus.png"),
+    ),
+    (
+        "dry_grass_side.png",
+        include_bytes!("../../../../assets/blocks/dry_grass_side.png"),
+    ),
+    (
+        "dry_grass_top.png",
+        include_bytes!("../../../../assets/blocks/dry_grass_top.png"),
+    ),
+    (
+        "frozen_dirt.png",
+        include_bytes!("../../../../assets/blocks/frozen_dirt.png"),
+    ),
+    (
+        "glacier_ice.png",
+        include_bytes!("../../../../assets/blocks/glacier_ice.png"),
+    ),
+    (
+        "gravel.png",
+        include_bytes!("../../../../assets/blocks/gravel.png"),
+    ),
+    (
+        "ice.png",
+        include_bytes!("../../../../assets/blocks/ice.png"),
+    ),
+    (
+        "jungle_bark.png",
+        include_bytes!("../../../../assets/blocks/jungle_bark.png"),
+    ),
+    (
+        "jungle_branch.png",
+        include_bytes!("../../../../assets/blocks/jungle_branch.png"),
+    ),
+    (
+        "jungle_leaves.png",
+        include_bytes!("../../../../assets/blocks/jungle_leaves.png"),
+    ),
+    (
+        "jungle_rings.png",
+        include_bytes!("../../../../assets/blocks/jungle_rings.png"),
+    ),
+    (
+        "mud.png",
+        include_bytes!("../../../../assets/blocks/mud.png"),
+    ),
+    (
+        "palm_bark.png",
+        include_bytes!("../../../../assets/blocks/palm_bark.png"),
+    ),
+    (
+        "palm_branch.png",
+        include_bytes!("../../../../assets/blocks/palm_branch.png"),
+    ),
+    (
+        "palm_leaves.png",
+        include_bytes!("../../../../assets/blocks/palm_leaves.png"),
+    ),
+    (
+        "palm_rings.png",
+        include_bytes!("../../../../assets/blocks/palm_rings.png"),
+    ),
+    (
+        "peat.png",
+        include_bytes!("../../../../assets/blocks/peat.png"),
+    ),
+    (
+        "podzol_side.png",
+        include_bytes!("../../../../assets/blocks/podzol_side.png"),
+    ),
+    (
+        "podzol_top.png",
+        include_bytes!("../../../../assets/blocks/podzol_top.png"),
+    ),
+    (
+        "red_sand.png",
+        include_bytes!("../../../../assets/blocks/red_sand.png"),
+    ),
+    (
+        "salt.png",
+        include_bytes!("../../../../assets/blocks/salt.png"),
+    ),
+    (
+        "snow.png",
+        include_bytes!("../../../../assets/blocks/snow.png"),
+    ),
+    (
+        "spruce_bark.png",
+        include_bytes!("../../../../assets/blocks/spruce_bark.png"),
+    ),
+    (
+        "spruce_branch.png",
+        include_bytes!("../../../../assets/blocks/spruce_branch.png"),
+    ),
+    (
+        "spruce_leaves.png",
+        include_bytes!("../../../../assets/blocks/spruce_leaves.png"),
+    ),
+    (
+        "spruce_rings.png",
+        include_bytes!("../../../../assets/blocks/spruce_rings.png"),
+    ),
 ];
 
 /// Anisotropic filtering samples for the block array texture (wgpu's maximum).
@@ -520,6 +647,8 @@ fn setup_scene(
             },
             extension: StandardVoxelMaterial {
                 voxels_texture: handle,
+                fortress: Default::default(),
+                top_layers: images.add(voxel_material::top_layers_image(&block_layers.side_to_top())),
             },
         },
     )));

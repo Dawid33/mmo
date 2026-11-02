@@ -5,6 +5,18 @@
 use crate::biome::{Biome, RegionType};
 use crate::protocol::RegionCoords;
 
+/// Steepest region a player may embark on: its `relief_m` (p90 − p10 of the ground)
+/// divided by the region's width in metres. A plane tilted at θ across the region
+/// scores 0.8·tan θ, so 0.3 ≈ a 20° mountainside; rolling hills and valley floors
+/// stay well under it.
+pub const EMBARK_MAX_RELIEF_PER_REGION_M: f32 = 0.3;
+
+/// Whether a region is too steep to found a fortress in (the side of a mountain).
+/// The player's embark only — civs in the history still settle where they please.
+pub fn too_steep_to_embark(tile: &TileSummary) -> bool {
+    tile.relief_m > EMBARK_MAX_RELIEF_PER_REGION_M * crate::REGION_BLOCKS as f32
+}
+
 /// What one region looks like from above, summarised from the forged rasters.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TileSummary {

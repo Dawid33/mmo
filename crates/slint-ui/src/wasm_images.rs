@@ -1,3 +1,5 @@
+// Not a module of slint-ui itself: each Slint-generated crate (slint-ui-game,
+// -frontend, -tools) mounts this file as `crate::wasm_images` via #[path].
 //! wasm32 only: decodes the screens' embedded images in Rust.
 //!
 //! On wasm32 Slint does not decode embedded images itself: `load_image_from_embedded_data`

@@ -23,7 +23,7 @@ adapter := env_var_or_default("VOXEL_ADAPTER", "")
 #   small = 1 simulated region + one factor-2 ring (24 LOD keys)
 #   full  = 5x5 simulated regions + the rings beyond them (~1,060 LOD keys)
 # e.g. `just world=tiny run`, `just world=small render-bench`. Finer control:
-# export VOXEL_NEAR_RADIUS=0..3 / VOXEL_LOD_RINGS=off|small|full|"2:2,4:4"
+# export VOXEL_NEAR_RADIUS=0..3 / VOXEL_FORTRESS_RADIUS=0..3 / VOXEL_LOD_RINGS=off|small|full|"2:2,4:4"
 # (see crates/client/src/world_scale.rs). Every recipe inherits it; tests
 # ignore it (GameInstanceManager::new is env-free).
 world := ""
@@ -35,9 +35,9 @@ export VOXEL_WORLD := world
 # `procedural` = the noise world. Any other value = that world file (e.g. one
 # from `just forge-proto`, one finite world — by default a 16 km continent):
 #   just forge-proto --seed D5C0DE021A --out target/world-forge/best
-#   just world_file=target/world-forge/best.world run
+#   just world_file=target/world-forge/best.world server   # then `just client`
 # Defaults to $VOXEL_WORLD_FILE. Relative paths resolve from the repo root.
-# Tests and the wasm/offline client never go through the server: procedural.
+# Tests never go through the server: procedural. The browser build only joins a server.
 world_file := env_var_or_default("VOXEL_WORLD_FILE", "")
 export VOXEL_WORLD_FILE := world_file
 
@@ -60,14 +60,14 @@ export VOXEL_WORLD_FILE := world_file
 # web*, diag, perf-capture, fly-probe, shuttle-probe, play-test, the profilers
 # trace-chrome / trace-join / perf / perf-client / perf-server / profile-* /
 # tracy-client, and cross-section) build with
-# `play_blocks` = 512 (512 m regions, one-region near window — see
+# `play_blocks` = 256 (256 m regions, one-region near window — see
 # `DEFAULT_NEAR_RADIUS` in crates/client/src/world_scale.rs); everything else —
 # tests, check, clippy, render-bench, raw cargo — stays at `test_blocks` = 64.
 # An explicit `just region_blocks=N <recipe>` (or $VOXEL_REGION_BLOCKS) wins for
 # every recipe.
 region_blocks := env_var_or_default("VOXEL_REGION_BLOCKS", "")
 test_blocks := if region_blocks == "" { "64" } else { region_blocks }
-play_blocks := if region_blocks == "" { "512" } else { region_blocks }
+play_blocks := if region_blocks == "" { "256" } else { region_blocks }
 export VOXEL_REGION_BLOCKS := test_blocks
 
 # Sim-chunk edge in BLOCKS — a BUILD-time constant (`game::CHUNK_BLOCKS`,
@@ -164,20 +164,19 @@ client:
     if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
     RUST_BACKTRACE=1 {{cargo}} run --bin client
 
-# Run server + client together. Both are built up front (no build-lock race
-# between two `cargo run`s), the server starts first in the background, and
-# closing the client window (or Ctrl-C) stops both.
-run:
+# Debug launch: straight into a small generated world with a fortress embarked
+# (`client debug embarked`, crates/client/src/debug_launch.rs). The world is
+# worlds/debug-embarked/ (16 km / 32 m, forged on first run) and is REUSED, with
+# its fortress, on every later run; `just run --reset` (or deleting the
+# directory) re-forges it and embarks afresh. Builds both binaries — the client
+# spawns the world's server itself, like a menu start.
+run *args:
     #!/usr/bin/env bash
     set -euo pipefail
     export VOXEL_REGION_BLOCKS={{play_blocks}}
-    export VOXEL_SKIP_MENU=1
     if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
     {{cap}} {{cargo}} build --bin client --bin server
-    RUST_BACKTRACE=1 ./target/debug/server &
-    server_pid=$!
-    trap 'kill "$server_pid" 2>/dev/null || true' EXIT
-    RUST_BACKTRACE=1 ./target/debug/client
+    RUST_BACKTRACE=1 ./target/debug/client debug embarked {{args}}
 
 # The game with its main menu: build client + server (the client spawns the
 # server per world from next to its own executable, so both need the same
@@ -202,8 +201,9 @@ play-release:
     {{cap}} {{cargo}} build --release --bin client --bin server
     RUST_BACKTRACE=1 ./target/release/client
 
-# Release-mode variants: production performance. Undo verification defaults to
-# Delta in every build; set HASH_MODE=full (or off) on any recipe to override,
+# Release-mode variants: production performance. Per-entry undo verification is
+# Off in every build (the server's every-100-ticks state hash still catches
+# desyncs); set HASH_MODE=full (or delta) on any recipe to turn it on,
 # e.g. `HASH_MODE=full just run` when chasing a footprint/capture gap. Use
 # perf-client / perf-server when you also want a profile out of the run.
 
@@ -220,18 +220,15 @@ client-release:
     if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
     RUST_BACKTRACE=1 {{cargo}} run --release --bin client
 
-# Run server + client together in release mode (same shape as `run`).
-run-release:
+# `run` in release mode: the embarked debug world (`just run-release --reset`
+# starts it over).
+run-release *args:
     #!/usr/bin/env bash
     set -euo pipefail
     export VOXEL_REGION_BLOCKS={{play_blocks}}
-    export VOXEL_SKIP_MENU=1
     if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
     {{cap}} {{cargo}} build --release --bin client --bin server
-    RUST_BACKTRACE=1 ./target/release/server &
-    server_pid=$!
-    trap 'kill "$server_pid" 2>/dev/null || true' EXIT
-    RUST_BACKTRACE=1 ./target/release/client
+    RUST_BACKTRACE=1 ./target/release/client debug embarked {{args}}
 
 # Scripted flight across region seams (release): server + client, the client
 # flying a straight line under VOXEL_AUTOPILOT once the world is ready, closing
@@ -374,6 +371,14 @@ worldgen:
 worldgen-bench:
     {{cargo}} run --release -p worldgen --bin worldgen
 
+# Region start time + server RSS per running region, on real region threads
+# (no client, no LOD): `just genesis-probe 9 30 -9,-6` starts the 3x3 around
+# region (-9,-6), keeps it ticking 30 s and prints RSS. Builds at the play
+# region size; serves `world_file` if set (e.g. worlds/debug-embarked/terrain.world).
+genesis-probe regions="1" hold="0" center="0,0":
+    VOXEL_REGION_BLOCKS={{play_blocks}} {{cap}} {{cargo}} build --release -p server --example genesis_probe
+    VOXEL_WORLD_FILE="{{world_file}}" ./target/release/examples/genesis_probe {{regions}} {{hold}} {{center}}
+
 # Time one region's collider genesis build + determinism check.
 collider-bench:
     {{cargo}} run --release -p worldgen --example collider_profile
@@ -477,7 +482,7 @@ block-textures *args:
 # world's rasters, `<out>-<layer>.png`), e.g.
 # `just world-map --span 65536 --size 2048`. `--world <file> --tiles` writes the
 # in-game world map instead (every map layer, `<out>-tiles-<layer>.png`) and
-# prints the WorldMap packet size; pass `region_blocks=512` for the play tiling.
+# prints the WorldMap packet size; pass `region_blocks=256` for the play tiling.
 world-map *args:
     {{cap}} {{cargo}} run --release -p worldgen --example world_map -- {{args}}
 
@@ -488,6 +493,12 @@ world-map *args:
 # `play_blocks`, so --region / --at address the same grid as `just run`.
 cross-section *args:
     VOXEL_REGION_BLOCKS={{play_blocks}} {{cap}} {{cargo}} run --release -p worldgen --example cross_section -- {{args}}
+
+# Flags: --world <file> --region X,Z; IMPLIED_AIR=1 counts the ground under a
+# column's band as unknown. Built with `play_blocks`, like cross-section.
+# Render-brick census of a region: entities spawned, bricks with faces, buried ones
+brick-census *args:
+    VOXEL_REGION_BLOCKS={{play_blocks}} {{cap}} {{cargo}} run --release -p worldgen --example brick_census -- {{args}}
 
 # World history: bootstrap + fast-forward a forged world's history (people, sites,
 # civs, journeys; `game::history`) and print statistics and the log. `--save` writes
@@ -518,7 +529,7 @@ model-census *paths="target/test-models":
 # planed valley floors, spill-level lakes — and write relief / rivers / geology
 # / rain maps, a 16-bit heightmap, river+lake objects (JSON), drainage
 # statistics and the WORLD FILE `<stem>.world` into target/world-forge/ (serve it
-# with `just world_file=<path> run`). Never changes procedural output. Flags:
+# with `just world_file=<path> server` + `just client`). Never changes procedural output. Flags:
 # --cell <m> --iters <n> --seed <hex> --out <stem> --size --dt --uplift --k
 # --diffusivity --no-geology --no-climate, --preset <name> (a map-generator preset
 # from forge/presets.rs, e.g. "Frozen north"; give it before any --set),
@@ -640,20 +651,73 @@ render-bench backend="direct+raster" adapter="" repetitions="3" threads="4":
 
 # ---- WASM / browser -------------------------------------------------------
 
-# Start `just server` first, or append ?offline in the browser for single-player.
+# The server the browser build's main menu prefills in Join server (the deployed
+# game's hostname: the WebTransport certificate is Let's Encrypt's for that name,
+# so the bare deploy_host IP would fail the browser's TLS check). Baked into
+# `web-release` / `deploy` bundles as VOXEL_WEB_SERVER; `just web` leaves it unset,
+# so a dev page prefills 127.0.0.1 (the local `just server`).
+web_server := "orion.factoriosurvivalworld.com"
+
+# The browser has no worlds of its own: it opens on the main menu, whose Join
+# server connects to a running server. So this starts the dev server too (the
+# same as `just server`, built with the same dials; log in target/web-server.log)
+# unless one already listens on UDP 6466, serves the page, and stops the server
+# (orderly: the world is saved) when the page server exits. Then press Join
+# server — the field says 127.0.0.1. ?world=tiny|small|full picks the world scale;
+# ?workers=0 runs the sim and meshing on the page's main thread instead of in Web
+# Workers (crates/client/src/web_worker/), ?workers=N sizes the compute pool.
 # Needs: rustup target add wasm32-unknown-unknown; cargo install wasm-server-runner.
 # Serve the wasm client via wasm-server-runner (open http://127.0.0.1:1334/).
 web:
-    VOXEL_REGION_BLOCKS={{play_blocks}} WASM_SERVER_RUNNER_CUSTOM_INDEX_HTML=crates/client/index.html \
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export VOXEL_REGION_BLOCKS={{play_blocks}}
+    if ss -Huln 'sport = :6466' | grep -q .; then
+        echo "web: a server already listens on UDP 6466 — using it"
+    else
+        {{cap}} {{cargo}} build --bin server
+        echo "web: starting the dev server (log: target/web-server.log)"
+        RUST_BACKTRACE=1 ./target/debug/server >target/web-server.log 2>&1 </dev/null &
+        server=$!
+        trap 'echo "web: stopping the dev server (saving the world)"; kill -TERM $server 2>/dev/null; wait $server 2>/dev/null || true' EXIT
+    fi
+    WASM_SERVER_RUNNER_CUSTOM_INDEX_HTML=crates/client/index.html \
         {{cargo}} run -p client --target wasm32-unknown-unknown
 
-# Needs: wasm-bindgen-cli and wasm-opt (binaryen) on PATH.
-# Build the optimized wasm release bundle into public/ (see scripts/web_release.rs).
+# The browser release bundle in target/web/ (scripts/web_release.sh): the
+# `wasm-release` profile, wasm-bindgen (the Cargo.lock-matched CLI, installed under
+# target/tools on first use), wasm-opt -O3 from a pinned binaryen release (also
+# under target/tools; BINARYEN=none skips it), index.html, api/version and assets/. Built at the play
+# region size, like the server it talks to; its Join server field prefills
+# `web_server`. Serve the directory as is.
 web-release:
-    VOXEL_REGION_BLOCKS={{play_blocks}} {{cap}} {{cargo}} build -p client --profile wasm-release --target wasm32-unknown-unknown
-    wasm-bindgen --out-name client --out-dir public --target web \
-        target/wasm32-unknown-unknown/wasm-release/client.wasm
-    wasm-opt -O -ol 100 -s 100 -o public/client_bg.wasm public/client_bg.wasm
+    VOXEL_REGION_BLOCKS={{play_blocks}} VOXEL_WEB_SERVER={{web_server}} CAP="{{cap}}" scripts/web_release.sh
+
+# ---- Deploy (the game box) ---------------------------------------------------
+
+# The public web build on root@5.9.7.138: https://orion.factoriosurvivalworld.com/
+# (deploy/web/compose.yml: the release server in a Debian container with the
+# Let's Encrypt certificate of the survival-world proxy, and a file server for the
+# bundle behind that proxy). Builds the browser bundle and the release server
+# with the same region/chunk dials, rsyncs both to /srv/mmo and restarts the
+# server (orderly: the world is saved; open tabs reload on the new version). The
+# proxy site, firewall (UDP 6466/6467) and DNS record are in
+# ~/Projects/mod/mods/survival-world. `just deploy-host=user@host deploy` to aim elsewhere.
+deploy_host := "root@5.9.7.138"
+
+deploy: deploy-build deploy-push
+
+# Build only: target/web + target/release/server.
+deploy-build: web-release
+    VOXEL_REGION_BLOCKS={{play_blocks}} {{cap}} {{cargo}} build --release --bin server
+
+# Ship what deploy-build made and restart (scripts/deploy_push.sh).
+deploy-push:
+    DEPLOY_HOST={{deploy_host}} scripts/deploy_push.sh
+
+# Follow the deployed server's log.
+deploy-logs:
+    ssh {{deploy_host}} docker compose -f /srv/mmo/compose.yml logs -f --tail 200 server
 
 # ---- Test -----------------------------------------------------------------
 
@@ -1185,6 +1249,18 @@ perf-server:
 # Reduce perf-folded-<side>.txt to thread / crate / self / inclusive top-N tables.
 perf-summary side="client" *args:
     scripts/perf_summary.py perf-folded-{{side}}.txt {{args}}
+
+# Reduce a Firefox Profiler capture of the web build (about:profiling or devtools →
+# Performance, then Upload → Download: a processed `*.json.gz`) to text: frames, where the
+# main thread went (wasm per crate / Bevy system / blocked in sync WebGL IPC / JS / GC), the
+# WebGL calls, the WebGL executor thread (CanvasRenderer) and other browser threads, markers,
+# memory, the client's [perf] log lines and a verdict with known Firefox costs explained.
+# Extra args: --from-ms N / --to-ms N (window), --top N, --thread NAME, --logs, e.g.
+#   just firefox-profile ~/Downloads/"Firefox 2026-11-02 17.15 profile.json.gz" --from-ms 5000
+#
+# Summarise a Firefox Profiler capture of the web build (client + WebGL).
+firefox-profile profile *args:
+    python3 -I scripts/firefox_profile_summary.py "{{profile}}" {{args}}
 
 # ---- Housekeeping ---------------------------------------------------------
 

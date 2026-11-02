@@ -16,7 +16,7 @@ pub const BRICK_BLOCKS: i32 = (BRICK_VOXELS / BLOCK_VOXELS) as i32;
 const SPAN: usize = BRICK_BLOCKS as usize + 2;
 
 /// The original surfaces around one brick, for classifying its faces.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct InteriorGround {
     /// The brick's minimum block, world block coords.
     pub origin: [i32; 3],

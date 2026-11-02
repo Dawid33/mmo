@@ -12,6 +12,13 @@ pub struct HudStatus {
     pub connection: ConnectionState,
 }
 
+/// Each live predicted region's recent tick times, from the game thread's
+/// `ClientUpdateEvent::RegionTickTimes` (every
+/// `game::perf::TICK_TIME_REPORT_INTERVAL`, native only). Shown by the F3
+/// Debug tab (`dev_ui`).
+#[derive(Resource, Default)]
+pub struct RegionTickTimes(pub Vec<(game::RegionId, game::perf::TickTimeStats)>);
+
 /// Show the crosshair only while the cursor is locked for mouse look (not
 /// when free for menus or the commander camera, nor held for its right-drag
 /// orbit). Drawn by the HUD layer (`HudUi`).

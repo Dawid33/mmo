@@ -1,9 +1,20 @@
 //! WebTransport netcode for the browser: the third implementation of the
-//! transport seam (after netcode.rs/quinn and local_server.rs). Fetches the
-//! dev cert hash the server publishes, opens a WebTransport session, and
+//! transport seam (after netcode.rs/quinn and local_server.rs). Dials the
+//! server the player joined from the main menu (`web_endpoint.rs`: a real
+//! hostname is dialled with its real certificate; a local address fetches the
+//! cert hash the dev server publishes and pins it), opens a WebTransport session, and
 //! shuttles one bincode packet per uni-stream in each direction — the same
 //! wire format quinn speaks natively.
-use crossbeam::channel::{Receiver, Sender};
+//!
+//! Always runs on the page. With the sim in a Web Worker (`web_worker::sim`)
+//! the page only moves raw frames ([`connect_frames`]) and the worker decodes
+//! and encodes them. A worker-hosted transport was tried (2026-11-02): it
+//! connected and joined, but in a debug build under load the server's shared
+//! writer later wedged on that client's stream credit — unexplained, so the
+//! transport stays where the main-thread build has always had it. It only
+//! uses what both globals have (`web_worker::fetch` / `sleep_ms`), so moving
+//! it into the worker is a call-site change once that is understood.
+use crossbeam::channel::{Receiver, Sender, TryRecvError};
 use game::{ClientPacket, ServerPacket};
 use js_sys::{Reflect, Uint8Array};
 use log::{error, info, warn};
@@ -15,24 +26,103 @@ use web_sys::{
     ReadableStreamDefaultReader, WebTransport, WebTransportHash, WebTransportOptions,
 };
 
-/// Dev-grade on-screen signal (per the spec): flag the dead connection in the
-/// tab title, not just the console.
-fn connection_lost(reason: &str) {
+use crate::web_endpoint::WebServer;
+
+/// Report a failed or lost connection to the session flow (`session::web_flow`
+/// ends the session with it as the reason). A session already left has
+/// dropped the receiver: nothing to tell.
+fn connection_lost(lost: &Sender<String>, reason: &str) {
     error!("connection lost: {reason}");
-    if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
-        doc.set_title("CONNECTION LOST — Labour of Love");
+    let _ = lost.send(reason.to_string());
+}
+
+/// Kick off the connection to `server`; returns immediately. All I/O runs on
+/// the browser event loop via spawn_local, feeding the same channels
+/// `LocalServer` feeds the native harnesses. `lost` gets one line when the
+/// connect gives up or the connection dies; dropping `client_recv`'s sender
+/// (the session's game manager) closes the transport.
+pub fn connect(
+    server: WebServer,
+    server_send: Sender<ServerPacket>,
+    client_recv: Receiver<ClientPacket>,
+    lost: Sender<String>,
+) {
+    let incoming = Incoming::Packets(server_send);
+    let outgoing = Outgoing::Packets(client_recv);
+    spawn_local(async move {
+        if let Err(e) = run(server, incoming, outgoing, lost.clone()).await {
+            connection_lost(&lost, &js_error_text(&e));
+        }
+    });
+}
+
+/// [`connect`] at the frame level: each server packet's frame (as
+/// `game::encode_packet` made it) goes to `on_frame` undecoded, and the
+/// frames from `outgoing` are sent as they are. Dropping `outgoing`'s sender
+/// closes the transport.
+pub fn connect_frames(
+    server: WebServer,
+    on_frame: impl FnMut(Vec<u8>) + 'static,
+    outgoing: Receiver<Vec<u8>>,
+    lost: Sender<String>,
+) {
+    let incoming = Incoming::Frames(Box::new(on_frame));
+    spawn_local(async move {
+        if let Err(e) = run(server, incoming, Outgoing::Frames(outgoing), lost.clone()).await {
+            connection_lost(&lost, &js_error_text(&e));
+        }
+    });
+}
+
+/// Where received packets go.
+enum Incoming {
+    Packets(Sender<ServerPacket>),
+    Frames(Box<dyn FnMut(Vec<u8>)>),
+}
+
+impl Incoming {
+    fn deliver(&mut self, bytes: Vec<u8>) {
+        match self {
+            Incoming::Packets(send) => match game::decode_packet::<ServerPacket>(&bytes) {
+                Ok(packet) => {
+                    let _ = send.send(packet);
+                }
+                Err(e) => warn!("failed deserializing packet {e:?}"),
+            },
+            Incoming::Frames(on_frame) => on_frame(bytes),
+        }
     }
 }
 
-/// Kick off the connection; returns immediately. All I/O runs on the browser
-/// event loop via spawn_local, feeding the same channels LocalServer feeds
-/// in offline mode.
-pub fn connect(server_send: Sender<ServerPacket>, client_recv: Receiver<ClientPacket>) {
-    spawn_local(async move {
-        if let Err(e) = run(server_send, client_recv).await {
-            connection_lost(&format!("{e:?}"));
+/// Where packets to send come from.
+enum Outgoing {
+    Packets(Receiver<ClientPacket>),
+    Frames(Receiver<Vec<u8>>),
+}
+
+impl Outgoing {
+    /// The next frame to send; `Err` once the session was left.
+    fn next(&self) -> Result<Option<Vec<u8>>, ()> {
+        let take = |r: Result<Vec<u8>, TryRecvError>| match r {
+            Ok(frame) => Ok(Some(frame)),
+            Err(TryRecvError::Empty) => Ok(None),
+            Err(TryRecvError::Disconnected) => Err(()),
+        };
+        match self {
+            Outgoing::Packets(recv) => take(recv.try_recv().map(|p| game::encode_packet(&p).unwrap())),
+            Outgoing::Frames(recv) => take(recv.try_recv()),
         }
-    });
+    }
+}
+
+/// A readable line for a JS error value (`Error.message` when it has one).
+fn js_error_text(e: &JsValue) -> String {
+    Reflect::get(e, &"message".into())
+        .ok()
+        .and_then(|m| m.as_string())
+        .filter(|m| !m.is_empty())
+        .or_else(|| e.as_string())
+        .unwrap_or_else(|| format!("{e:?}"))
 }
 
 /// Pause between connect attempts and the total budget before giving up —
@@ -44,23 +134,24 @@ pub const CONNECT_DEADLINE_MS: f64 = 120_000.0;
 /// Log every Nth failed attempt (and the first): the browser console is the
 /// only log here, and two minutes of 500 ms retries would bury it.
 const CONNECT_RETRY_LOG_EVERY: u32 = 10;
+/// How often the write loop looks for outgoing packets (ms): an input waits
+/// at most this long for the wire.
+const WRITE_POLL_MS: i32 = 4;
 
-async fn run(
-    server_send: Sender<ServerPacket>,
-    client_recv: Receiver<ClientPacket>,
-) -> Result<(), JsValue> {
-    let window = web_sys::window().expect("no window");
-
+async fn run(server: WebServer, mut incoming_to: Incoming, outgoing: Outgoing, lost: Sender<String>) -> Result<(), JsValue> {
     let started = js_sys::Date::now();
     let mut attempt = 1u32;
     let transport = loop {
-        let failure = match open_transport(&window).await {
+        let failure = match open_transport(&server).await {
             Ok(transport) => break transport,
             Err(failure) => failure,
         };
         if js_sys::Date::now() - started >= CONNECT_DEADLINE_MS {
             error!("[client] giving up after {attempt} connect attempts");
-            return Err(failure);
+            return Err(JsValue::from_str(&format!(
+                "Could not reach the server after {attempt} attempts ({}).",
+                js_error_text(&failure)
+            )));
         }
         if attempt == 1 || attempt % CONNECT_RETRY_LOG_EVERY == 0 {
             warn!(
@@ -92,23 +183,27 @@ async fn run(
         .incoming_unidirectional_streams()
         .get_reader()
         .dyn_into()?;
-    let read_send = server_send.clone();
     let read_dead = dead.clone();
+    let read_lost = lost.clone();
     spawn_local(async move {
         loop {
             let next = match JsFuture::from(incoming.read()).await {
                 Ok(v) => v,
                 Err(e) => {
-                    read_dead.set(true);
-                    return connection_lost(&format!("incoming streams closed: {e:?}"));
+                    if read_dead.replace(true) {
+                        return; // closed by the write loop: the session was left
+                    }
+                    return connection_lost(&read_lost, &format!("Lost the server: {}", js_error_text(&e)));
                 }
             };
             if Reflect::get(&next, &"done".into())
                 .map(|d| d.is_truthy())
                 .unwrap_or(true)
             {
-                read_dead.set(true);
-                return connection_lost("server closed the connection");
+                if read_dead.replace(true) {
+                    return;
+                }
+                return connection_lost(&read_lost, "The server closed the connection.");
             }
             let stream: web_sys::ReadableStream =
                 match Reflect::get(&next, &"value".into()).and_then(|v| v.dyn_into()) {
@@ -119,27 +214,33 @@ async fn run(
                     }
                 };
             match read_stream_to_end(stream).await {
-                Ok(bytes) => match game::decode_packet::<ServerPacket>(&bytes) {
-                    Ok(packet) => {
-                        let _ = read_send.send(packet);
-                    }
-                    Err(e) => warn!("failed deserializing packet {e:?}"),
-                },
+                Ok(bytes) => incoming_to.deliver(bytes),
                 Err(e) => warn!("stream read failed: {e:?}"),
             }
         }
     });
 
-    // 4. Write loop: drain outgoing ClientPackets. The channel is filled by
-    //    the sim on the same (only) thread, so poll it with a task that
-    //    yields to the event loop between drains.
+    // 4. Write loop: drain outgoing packets. The channel is filled on this
+    //    same thread (the sim, or the sim worker's messages), so poll it with
+    //    a task that yields to the event loop between drains.
     spawn_local(async move {
         loop {
             if dead.get() {
                 return;
             }
-            while let Ok(packet) = client_recv.try_recv() {
-                let payload = game::encode_packet(&packet).unwrap();
+            loop {
+                let payload = match outgoing.next() {
+                    Ok(Some(payload)) => payload,
+                    Ok(None) => break,
+                    Err(()) => {
+                        // The session was left: hang up, so the server sees
+                        // this client go at once.
+                        dead.set(true);
+                        transport.close();
+                        info!("[client] session left: webtransport closed");
+                        return;
+                    }
+                };
                 // `create_unidirectional_stream` resolves to a typed
                 // `WebTransportSendStream`, which `extends WritableStream` —
                 // the dyn_into upcast below always succeeds.
@@ -158,18 +259,31 @@ async fn run(
                         if let Err(e) = JsFuture::from(writer.write_with_chunk(&chunk)).await {
                             warn!("write failed: {e:?}");
                         }
-                        let _ = JsFuture::from(writer.close()).await;
+                        // Not awaited: `close()` resolves only once the server
+                        // has acknowledged the stream's end, and waiting for
+                        // that put every packet behind the previous one's
+                        // round trip. The stream is already opened and written
+                        // in order, which is the order the server reads them in.
+                        let closing = writer.close();
+                        spawn_local(async move {
+                            if let Err(e) = JsFuture::from(closing).await {
+                                warn!("closing a stream failed: {e:?}");
+                            }
+                        });
                     }
                     Err(e) => {
                         // Can't open streams: the session is gone. Fatal, not
                         // retry-every-16ms.
-                        dead.set(true);
-                        return connection_lost(&format!("failed to open outgoing stream: {e:?}"));
+                        if dead.replace(true) {
+                            return;
+                        }
+                        return connection_lost(&lost, &format!("Lost the server: {}", js_error_text(&e)));
                     }
                 }
             }
-            // Yield ~one frame so the sim can enqueue more packets.
-            sleep_ms(16).await;
+            // Yield so the sim can enqueue more packets: about its drive
+            // interval, so an input waits at most that long for the wire.
+            sleep_ms(WRITE_POLL_MS).await;
         }
     });
 
@@ -189,20 +303,34 @@ async fn read_stream_to_end(stream: web_sys::ReadableStream) -> Result<Vec<u8>, 
     }
 }
 
-/// One connect attempt: fetch the cert hash the server published, then open a
-/// session trusting exactly that certificate.
-async fn open_transport(window: &web_sys::Window) -> Result<WebTransport, JsValue> {
+/// One connect attempt to `server` (`web_endpoint`).
+async fn open_transport(server: &WebServer) -> Result<WebTransport, JsValue> {
+    match server {
+        WebServer::Trusted { url } => {
+            let transport = WebTransport::new(url)?;
+            JsFuture::from(transport.ready()).await?;
+            Ok(transport)
+        }
+        WebServer::PinnedLocal => open_pinned_local().await,
+    }
+}
+
+/// Dev: fetch the cert hash the local server published, then open a session
+/// trusting exactly that certificate.
+async fn open_pinned_local() -> Result<WebTransport, JsValue> {
     // 1. Fetch the cert hash + port the server wrote into assets/. Malformed
     //    contents are Err returns, not panics: a panic inside this promise
     //    would poison the whole wasm instance instead of just flagging the
     //    connection as lost. Re-fetched on every attempt, past the HTTP cache:
     //    the server mints a new certificate (and rewrites this file) each
     //    start, so a hash read before it came up is stale.
-    let hash_url = format!(
+    // Resolved against the page: in the sim worker a bare relative URL would
+    // resolve against the worker's Blob URL.
+    let hash_url = crate::web_worker::page_url(&format!(
         "assets/webtransport-cert-hash.json?t={}",
         js_sys::Date::now()
-    );
-    let resp: web_sys::Response = JsFuture::from(window.fetch_with_str(&hash_url))
+    ));
+    let resp: web_sys::Response = JsFuture::from(crate::web_worker::fetch(&hash_url))
         .await?
         .dyn_into()?;
     let text = JsFuture::from(resp.text()?).await?;
@@ -251,12 +379,4 @@ fn parse_hash_json(text: &str) -> Option<(String, u16)> {
     Some((hex.to_string(), port))
 }
 
-async fn sleep_ms(ms: i32) {
-    let promise = js_sys::Promise::new(&mut |resolve, _| {
-        web_sys::window()
-            .unwrap()
-            .set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, ms)
-            .unwrap();
-    });
-    let _ = JsFuture::from(promise).await;
-}
+use crate::web_worker::sleep_ms;

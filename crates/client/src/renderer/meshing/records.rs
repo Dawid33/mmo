@@ -2,9 +2,14 @@
 //! Layout (LOCKED, mirrored by assets/shaders/voxel_pull.wgsl — the shader
 //! only decodes; this file is the source of truth):
 //!   w0: x:6 | y:6 | z:6 | face:3 | ao0:2 | ao1:2 | ao2:2 | ao3:2 | flip:1 | cutout:1 | interior:1
-//!   w1: w:6 | h:6 | layer:16                                                          (bits 28-31 zero)
-//! x/y/z/face sit at the same bit positions as pack.rs word0, and w1 equals
-//! pack.rs word1 exactly, so the two formats stay diffable while both live.
+//!   w1: w:6 | h:6 | layer:11 | bx:3 | by:3 | bz:3
+//! x/y/z are brick-local (0..=33); `bx/by/bz` place the brick inside a MERGED
+//! record list — a sim chunk's 8³ bricks or a LOD tile's 8³ cells
+//! (`chunk_mesh`, `lod_tiles`) — so the shader adds `b * 32` (0 for a lone
+//! brick). Layers are block-texture array layers (56 in 2026-11; 11 bits = 2048).
+//! w1 equals pack.rs word1 exactly; w0 differs (pack.rs has 9-bit positions
+//! for merged sim-chunk meshes). `chunk_mesh::records_to_mesh_data` expands
+//! records into pack.rs vertices for the WebGL2 per-chunk path.
 //! `cutout` (bit 30) marks an alpha-tested quad (`Quad::cutout`, leaves); a
 //! chunk's records put every opaque quad first, then the cutout ones, and
 //! `face_ends` entry 7 stores where the cutout range starts. `interior`
@@ -17,7 +22,7 @@ use super::ao::ao_flips_quad;
 use super::binary::{cross_axes, Face, Quad};
 use super::pack;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, bytemuck::Pod, bytemuck::Zeroable, serde::Serialize, serde::Deserialize)]
 #[repr(transparent)]
 pub struct QuadRecord(pub [u32; 2]);
 
@@ -56,7 +61,7 @@ pub fn pack_record(q: &Quad, layer: u32) -> QuadRecord {
         origin[q.face.axis()] += 1;
     }
     debug_assert!(origin.iter().all(|&c| c <= 33) && q.w <= 33 && q.h <= 33);
-    debug_assert!(q.ao.iter().all(|&a| a <= 3) && layer <= 0xFFFF);
+    debug_assert!(q.ao.iter().all(|&a| a <= 3) && layer <= LAYER_MAX);
     let flip = ao_flips_quad(&q.ao) as u32;
     let w0 = origin[0]
         | origin[1] << 6
@@ -71,6 +76,38 @@ pub fn pack_record(q: &Quad, layer: u32) -> QuadRecord {
         | (q.interior as u32) << INTERIOR_BIT;
     let w1 = q.w | q.h << 6 | layer << 12;
     QuadRecord([w0, w1])
+}
+
+/// Largest texture layer a record holds (11 bits).
+pub const LAYER_MAX: u32 = 0x7FF;
+/// w1 bit where the 9-bit brick placement (`bx | by << 3 | bz << 6`) starts.
+pub const BRICK_SHIFT: u32 = 23;
+
+/// `rec` placed at brick `local` (each axis 0..8) of a merged record list.
+pub fn with_brick(rec: QuadRecord, local: [u8; 3]) -> QuadRecord {
+    debug_assert!(local.iter().all(|&c| c < 8));
+    let brick = local[0] as u32 | (local[1] as u32) << 3 | (local[2] as u32) << 6;
+    let w1 = rec.0[1] & !(0x1FF << BRICK_SHIFT) | brick << BRICK_SHIFT;
+    QuadRecord([rec.0[0], w1])
+}
+
+/// The brick placement of a record (each axis 0..8).
+pub fn record_brick(rec: QuadRecord) -> [u32; 3] {
+    let b = rec.0[1] >> BRICK_SHIFT;
+    [b & 7, (b >> 3) & 7, (b >> 6) & 7]
+}
+
+/// Merge bricks' record lists into one, each placed at its brick, in
+/// `quads_to_records` order (opaque then cutout, each by face), as
+/// `face_ends` needs — the shader draws the opaque and cutout ranges with
+/// different pipelines, so an unsorted merge would draw leaves opaque.
+pub fn merge_records<'a>(parts: impl IntoIterator<Item = ([u8; 3], &'a [QuadRecord])>) -> Vec<QuadRecord> {
+    let mut out: Vec<QuadRecord> = Vec::new();
+    for (local, records) in parts {
+        out.extend(records.iter().map(|&r| with_brick(r, local)));
+    }
+    out.sort_by_key(|r| record_order(*r));
+    out
 }
 
 /// w0 bit of the cutout flag.
@@ -165,14 +202,15 @@ pub fn decode_corner(rec: QuadRecord, slot: u32) -> DecodedCorner {
     let (cu, cv) = (corner & 1, corner >> 1);
     let face = Face::from_index(face_id);
     let (ua, va) = cross_axes(face.axis());
-    let mut pos = [w0 & 63, (w0 >> 6) & 63, (w0 >> 12) & 63];
+    let brick = record_brick(rec);
+    let mut pos = [0, 1, 2].map(|a| ((w0 >> (6 * a)) & 63) + brick[a] * 32);
     pos[ua] += cu * (w1 & 63);
     pos[va] += cv * ((w1 >> 6) & 63);
     DecodedCorner {
         pos,
         face,
         ao: ((w0 >> (21 + 2 * corner)) & 3) as u8,
-        layer: (w1 >> 12) & 0xFFFF,
+        layer: (w1 >> 12) & LAYER_MAX,
     }
 }
 

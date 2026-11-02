@@ -6,13 +6,15 @@
 //! starting 3 — also `InWorld` until the world map arrives); the layer draws
 //! only while [`frontend_ui_shown`]: the frontend owns the screen and the
 //! arrival map (the game UI's world map, before the first Play) is not up.
-//! The generator lives in [`generator`] and the world list in [`load_world`]
-//! (native only); the starting screen's lines come from [`starting_lines`].
+//! The generator lives in [`generator`], the world list in [`load_world`] and
+//! the menu's map backdrop in [`menu_background`] (native only); the starting screen's lines come from [`starting_lines`].
 
 #[cfg(not(target_arch = "wasm32"))]
 pub mod generator;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod load_world;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod menu_background;
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -32,10 +34,19 @@ pub enum FrontendAction {
     LoadWorld,
     Exit,
     Back,
+    /// The browser menu's Join server, with the address in [`JoinAddress`].
+    JoinServer,
 }
 
 /// Actions queued by Slint callbacks, applied by [`apply_frontend_actions`].
 struct FrontendActions(Rc<RefCell<Vec<FrontendAction>>>);
+
+/// The address the last Join server named (the Slint callback's argument).
+struct JoinAddress(Rc<RefCell<String>>);
+
+/// Whether the menu is the browser's: only Join server (the browser cannot
+/// make or keep worlds, it only joins a server).
+pub const JOIN_ONLY: bool = cfg!(target_arch = "wasm32");
 
 /// Whether any saved world exists, refreshed on entering the main menu.
 #[derive(Resource, Default, Clone, Copy, Debug, PartialEq, Eq)]
@@ -84,6 +95,7 @@ pub fn action_target(action: FrontendAction) -> Option<AppState> {
         FrontendAction::NewWorld => Some(AppState::MapGenerator),
         FrontendAction::LoadWorld => Some(AppState::LoadWorld),
         FrontendAction::Back => Some(AppState::MainMenu),
+        FrontendAction::JoinServer => Some(AppState::Starting),
         FrontendAction::Exit => None,
     }
 }
@@ -101,7 +113,7 @@ impl Plugin for FrontendPlugin {
         .add_systems(OnEnter(AppState::MainMenu), refresh_can_load)
         .add_systems(Update, (apply_frontend_actions, push_frontend_state).chain());
         #[cfg(not(target_arch = "wasm32"))]
-        app.add_plugins((generator::GeneratorPlugin, load_world::LoadWorldPlugin));
+        app.add_plugins((generator::GeneratorPlugin, load_world::LoadWorldPlugin, menu_background::MenuBackgroundPlugin));
     }
 }
 
@@ -115,6 +127,18 @@ fn connect_frontend(ui: &FrontendUi, world: &mut World) {
     ui.on_load_world(push(FrontendAction::LoadWorld));
     ui.on_exit(push(FrontendAction::Exit));
     ui.on_back(push(FrontendAction::Back));
+    let address = Rc::new(RefCell::new(String::new()));
+    {
+        let (queue, address) = (actions.clone(), address.clone());
+        ui.on_join_server(move |typed| {
+            *address.borrow_mut() = typed.trim().to_string();
+            queue.borrow_mut().push(FrontendAction::JoinServer);
+        });
+    }
+    ui.set_join_only(JOIN_ONLY);
+    #[cfg(target_arch = "wasm32")]
+    ui.set_server_address(initial_server_address().into());
+    world.insert_non_send(JoinAddress(address));
     world.insert_non_send(FrontendActions(actions));
     #[cfg(not(target_arch = "wasm32"))]
     generator::connect(ui, world);
@@ -132,9 +156,20 @@ fn refresh_can_load(mut can_load: ResMut<CanLoad>) {
 #[cfg(target_arch = "wasm32")]
 fn refresh_can_load() {}
 
+/// The browser menu's prefilled server (`web_endpoint::default_server_address`).
+#[cfg(target_arch = "wasm32")]
+fn initial_server_address() -> String {
+    let location = web_sys::window().map(|w| w.location());
+    let protocol = location.as_ref().and_then(|l| l.protocol().ok()).unwrap_or_default();
+    let hostname = location.as_ref().and_then(|l| l.hostname().ok()).unwrap_or_default();
+    crate::web_endpoint::default_server_address(crate::web_endpoint::BUILT_FOR_SERVER, &protocol, &hostname)
+}
+
 #[allow(clippy::too_many_arguments)] // Bevy system: params are DI, not an API
 fn apply_frontend_actions(
     actions: Option<NonSend<FrontendActions>>,
+    join_address: Option<NonSend<JoinAddress>>,
+    mut commands: Commands,
     state: Res<State<AppState>>,
     embarked: Res<Embarked>,
     world_map: Option<Res<WorldMapState>>,
@@ -155,6 +190,13 @@ fn apply_frontend_actions(
         if action == FrontendAction::Back && matches!(state.get(), AppState::Starting | AppState::InWorld) {
             error.0 = None;
             log.0.clear();
+        }
+        if action == FrontendAction::JoinServer {
+            let address = join_address.as_ref().map(|a| a.0.borrow().clone()).unwrap_or_default();
+            if address.is_empty() || *state.get() != AppState::MainMenu {
+                continue;
+            }
+            commands.insert_resource(crate::session::PendingServer(address));
         }
         match action_target(action) {
             Some(target) => next.set(target),
@@ -250,6 +292,7 @@ mod tests {
         assert_eq!(action_target(FrontendAction::NewWorld), Some(AppState::MapGenerator));
         assert_eq!(action_target(FrontendAction::LoadWorld), Some(AppState::LoadWorld));
         assert_eq!(action_target(FrontendAction::Back), Some(AppState::MainMenu));
+        assert_eq!(action_target(FrontendAction::JoinServer), Some(AppState::Starting));
         assert_eq!(action_target(FrontendAction::Exit), None);
     }
 }

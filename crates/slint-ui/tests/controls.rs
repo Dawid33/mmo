@@ -6,7 +6,8 @@ use std::rc::Rc;
 
 use slint_ui::slint::platform::{PointerEventButton, WindowEvent};
 use slint_ui::slint::{LogicalPosition, ModelRc, SharedString, VecModel};
-use slint_ui::{ControlsHarness, Overlay};
+use slint_ui::Overlay;
+use slint_ui_tools::ControlsHarness;
 
 const SLIDER_X: f32 = 20.0;
 const SLIDER_Y: f32 = 20.0;
@@ -151,4 +152,31 @@ fn two_way_bound_value_keeps_following_the_parent_after_a_press() {
     // A click on the thumb's new place still edits from there.
     press(&mut overlay, SLIDER_X + 0.2 * SLIDER_W, SLIDER_Y + 5.0);
     assert!((overlay.ui().get_slider_value() - 20.0).abs() < 1.0);
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn tabs_collapse_on_second_click() {
+    let mut overlay = overlay();
+    overlay.ui().set_tabs_collapsible(true);
+    overlay.ui().set_tab_selected(-1);
+    overlay.render();
+    let changed = Rc::new(RefCell::new(Vec::new()));
+    let c = changed.clone();
+    overlay.ui().on_tab_changed(move |i| c.borrow_mut().push(i));
+
+    // Find tab 0 along the row: the first click that selects anything.
+    let y = TABS_Y + 15.0;
+    let mut x = TABS_X + 4.0;
+    while overlay.ui().get_tab_selected() != 0 && x < TABS_X + 400.0 {
+        click(&mut overlay, x, y);
+        x += 4.0;
+    }
+    assert_eq!(overlay.ui().get_tab_selected(), 0, "a click on a tab opens it while collapsed");
+    let tab0 = x - 4.0;
+    click(&mut overlay, tab0, y);
+    assert_eq!(overlay.ui().get_tab_selected(), -1, "a second click on the open tab collapses");
+    click(&mut overlay, tab0, y);
+    assert_eq!(overlay.ui().get_tab_selected(), 0, "and a third opens it again");
+    assert_eq!(*changed.borrow(), [0, -1, 0]);
 }

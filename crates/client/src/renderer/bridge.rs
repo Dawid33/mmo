@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 
 use bevy::prelude::*;
-use bevy::tasks::{block_on, futures_lite::future, AsyncComputeTaskPool, Task};
+use bevy::tasks::{block_on, futures_lite::future, Task};
 use crossbeam::channel::Receiver;
 use game::{ClientUpdateEvent, GameData, GameDataUpdate, GameDataUpdateKind, RegionId};
 use game::{EntityKey, Voxel};
@@ -199,7 +199,7 @@ pub const EYE_OFFSET: Vec3 = Vec3::new(0.0, game::movement::PLAYER_EYE_OFFSET, 0
 /// (`meshing::queue::boundary_zones`) when they were computed off the main
 /// thread (`with_boundary_zones`, in the snapshot-voxel task); `new` — and so
 /// `edit` — start without it. Equality ignores it.
-#[derive(Component, Clone, Debug)]
+#[derive(Component, Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct VoxelData(Vec<(u16, game::BlockId)>, Option<[u32; 26]>);
 
 impl PartialEq for VoxelData {
@@ -435,6 +435,85 @@ pub struct PendingBlockDeltas(pub(crate) Vec<game::BlockDelta>);
 #[derive(Component)]
 pub struct SnapshotVoxelTask(Task<Vec<DerivedChunk>>);
 
+/// A batch of chunks whose render bricks to derive (a compute job,
+/// `renderer::compute`); answers each chunk's bricks in order (`None`: the
+/// chunk is gone from the snapshot).
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct DeriveBricksJob {
+    /// Threads only: the whole snapshot, shared — the chunks at `items` are
+    /// read from it and `source` is ignored. Never serialized (a skipped
+    /// FIELD: serde's skipped enum *variants* renumber the rest on decode).
+    #[serde(skip)]
+    pub shared: Option<Arc<GameData>>,
+    /// The snapshot chunks to derive (unused for `DeriveSource::Owned`).
+    pub items: Vec<game::ChunkCoords>,
+    pub source: DeriveSource,
+}
+
+/// What a [`DeriveBricksJob`] derives from when it does not share a snapshot.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub enum DeriveSource {
+    /// The part of the snapshot the `items` read (a worker).
+    Part(super::bricks::SnapshotPart),
+    /// Chunks that came on their own (`AddTerrainChunk`): nothing across.
+    Owned(Vec<game::Chunk>),
+}
+
+impl DeriveBricksJob {
+    /// Snapshot chunks at `items`, the snapshot shared (threads).
+    pub fn shared(data: Arc<GameData>, items: Vec<game::ChunkCoords>) -> Self {
+        Self { shared: Some(data), items, source: DeriveSource::Part(Default::default()) }
+    }
+
+    /// Snapshot chunks at `items` with just the part of the snapshot they read.
+    pub fn part(part: super::bricks::SnapshotPart, items: Vec<game::ChunkCoords>) -> Self {
+        Self { shared: None, items, source: DeriveSource::Part(part) }
+    }
+
+    /// Chunks that came on their own.
+    pub fn owned(chunks: Vec<game::Chunk>) -> Self {
+        Self { shared: None, items: Vec::new(), source: DeriveSource::Owned(chunks) }
+    }
+}
+
+impl super::compute::ComputeJob for DeriveBricksJob {
+    type Output = Vec<Option<super::bricks::DerivedBricks>>;
+    const KIND: super::compute::JobKind = super::compute::JobKind::DeriveBricks;
+
+    fn run(self) -> Self::Output {
+        use super::bricks::{derive_chunk_bricks, derive_chunk_bricks_across, snapshot_across, DerivedBricks};
+        let zones = |mut derived: DerivedBricks| {
+            derived.spawn = derived.spawn.into_iter().map(|(l, v)| (l, v.with_boundary_zones())).collect();
+            derived
+        };
+        let cutout = super::meshing::binary::CutoutTable::installed();
+        if let Some(data) = self.shared {
+            return self
+                .items
+                .into_iter()
+                .map(|coords| {
+                    let key = data.chunk_index.get(&game::chunk_index_key(coords))?;
+                    let chunk = data.ecs.chunk.try_get(*key).as_ref()?;
+                    Some(zones(derive_chunk_bricks_across(chunk, snapshot_across(&data, coords, &cutout))))
+                })
+                .collect();
+        }
+        match self.source {
+            DeriveSource::Part(part) => self
+                .items
+                .into_iter()
+                .map(|coords| {
+                    let chunk = part.chunks.get(&coords)?.as_ref()?;
+                    Some(zones(derive_chunk_bricks_across(chunk, part.across(coords, &cutout))))
+                })
+                .collect(),
+            DeriveSource::Owned(chunks) => {
+                chunks.iter().map(|chunk| Some(zones(derive_chunk_bricks(chunk)))).collect()
+            }
+        }
+    }
+}
+
 /// A chunk entity, the blocks its bricks were derived from, and the bricks.
 type DerivedChunk = (Entity, game::Chunk, super::bricks::DerivedBricks);
 
@@ -462,8 +541,10 @@ struct PendingVoxelBatch {
 
 /// Where a voxel batch's chunks come from.
 enum BatchChunks {
-    /// A region snapshot, shared by its batches (no per-chunk clone).
-    Snapshot(Arc<GameData>, Vec<(Entity, EntityKey)>),
+    /// A region snapshot, shared by its batches (no per-chunk clone), with
+    /// each chunk's coords: the snapshot also buries face bricks against the
+    /// chunks next to them (`bricks::snapshot_across`).
+    Snapshot(Arc<GameData>, Vec<(Entity, EntityKey, game::ChunkCoords)>),
     /// Chunks of a cell activated after the snapshot (`AddTerrainChunk`).
     Owned(Vec<(Entity, game::Chunk)>),
 }
@@ -516,7 +597,6 @@ pub fn apply_snapshot_voxels(
         .iter()
         .find(|(_, camera)| camera.is_active)
         .map(|(transform, _)| transform.translation());
-    let pool = AsyncComputeTaskPool::get();
     while outstanding < MAX_OUTSTANDING_SNAPSHOT_VOXEL_TASKS {
         let Some(index) = nearest_batch(queue.batches.iter().map(|batch| batch.center), camera) else {
             break;
@@ -524,29 +604,38 @@ pub fn apply_snapshot_voxels(
         let Some(PendingVoxelBatch { root, chunks, .. }) = queue.batches.remove(index) else {
             break;
         };
-        let task = pool.spawn(async move {
-            let bricks = |chunk: &game::Chunk| {
-                let mut derived = super::bricks::derive_chunk_bricks(chunk);
-                derived.spawn = derived.spawn.into_iter().map(|(l, v)| (l, v.with_boundary_zones())).collect();
-                derived
-            };
-            match chunks {
-                BatchChunks::Snapshot(data, items) => items
-                    .into_iter()
-                    .filter_map(|(entity, key)| {
-                        let chunk = data.ecs.chunk.try_get(key).as_ref()?;
-                        Some((entity, chunk.clone(), bricks(chunk)))
-                    })
-                    .collect(),
-                BatchChunks::Owned(items) => items
-                    .into_iter()
-                    .map(|(entity, chunk)| {
-                        let derived = bricks(&chunk);
-                        (entity, chunk, derived)
-                    })
-                    .collect(),
+        let task = match chunks {
+            BatchChunks::Snapshot(data, items) => {
+                let coords: Vec<_> = items.iter().map(|&(_, _, coords)| coords).collect();
+                // Off the page (a wasm worker) the job carries just what it
+                // reads; on a thread it shares the snapshot.
+                let job = if super::compute::serializes() {
+                    DeriveBricksJob::part(super::bricks::SnapshotPart::gather(&data, coords.iter().copied()), coords)
+                } else {
+                    DeriveBricksJob::shared(data.clone(), coords)
+                };
+                super::compute::spawn(job, move |derived: Vec<Option<super::bricks::DerivedBricks>>| {
+                    items
+                        .into_iter()
+                        .zip(derived)
+                        .filter_map(|((entity, key, _), derived)| {
+                            let chunk = data.ecs.chunk.try_get(key).as_ref()?;
+                            Some((entity, chunk.clone(), derived?))
+                        })
+                        .collect()
+                })
             }
-        });
+            BatchChunks::Owned(items) => {
+                let job = DeriveBricksJob::owned(items.iter().map(|(_, chunk)| chunk.clone()).collect());
+                super::compute::spawn(job, move |derived: Vec<Option<super::bricks::DerivedBricks>>| {
+                    items
+                        .into_iter()
+                        .zip(derived)
+                        .filter_map(|((entity, chunk), derived)| Some((entity, chunk, derived?)))
+                        .collect()
+                })
+            }
+        };
         // Child of the region root: removing the region cancels the task.
         commands.spawn((SnapshotVoxelTask(task), ChildOf(root)));
         outstanding += 1;
@@ -610,7 +699,8 @@ pub fn drain_client_updates(
     mut regions: ResMut<Regions>,
     mut roots: ResMut<RegionRoots>,
     mut map: ResMut<SimEntityMap>,
-    mut hud_status: ResMut<HudStatus>,
+    // Paired to stay within Bevy's 16 system parameters.
+    (mut hud_status, mut tick_times): (ResMut<HudStatus>, Option<ResMut<super::hud::RegionTickTimes>>),
     mut ui_updates: ResMut<crate::renderer::slint_overlay::UiUpdates>,
     mut debug_lines: ResMut<crate::renderer::collider_debug::DebugColliderLines>,
     mut lod_rings: ResMut<lod_rings::LodRings>,
@@ -735,6 +825,11 @@ pub fn drain_client_updates(
             ClientUpdateEvent::Sites(v) => history_out.write(HistoryMsg::Sites(v)),
             ClientUpdateEvent::Calendar(c) => history_out.write(HistoryMsg::Calendar(c)),
             ClientUpdateEvent::Fortress(f) => history_out.write(HistoryMsg::Fortress(f)),
+            ClientUpdateEvent::RegionTickTimes(stats) => {
+                if let Some(times) = tick_times.as_mut() {
+                    times.0 = stats;
+                }
+            }
             ClientUpdateEvent::Notice(n) => history_out.write(HistoryMsg::Notice(n)),
             ClientUpdateEvent::EmbarkOptions(o) => {
                 history_out.write(HistoryMsg::EmbarkOptions(o))
@@ -861,7 +956,13 @@ fn spawn_region_snapshot(
             center: offset + center + Vec3::splat(game::CHUNK_UNITS as f32 / 2.0),
             chunks: BatchChunks::Snapshot(
                 Arc::clone(data),
-                batch.iter().map(|(entity, key, _)| (*entity, *key)).collect(),
+                batch
+                    .iter()
+                    .map(|(entity, key, position)| {
+                        let t = game::rapier3d::math::Vector::new(position.x, position.y, position.z);
+                        (*entity, *key, game::chunk_coords_from_translation(t))
+                    })
+                    .collect(),
             ),
         });
     }

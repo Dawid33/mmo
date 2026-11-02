@@ -8,7 +8,7 @@
 //! the speed. Left- or right-drag on the view orbits, the wheel zooms. Saved
 //! files hot-reload (the `file_watcher` feature, which the recipe turns on);
 //! Rescan picks up new ones. The panels are the Slint
-//! widget library's (`slint_ui::AssetViewerUi`), drawn like the game UI.
+//! widget library's (`slint_ui_tools::AssetViewerUi`), drawn like the game UI.
 //!
 //! Self-check without a human: `--model <part of a path>` picks a model at
 //! start, `--anim <name>` a clip, `--time <s>` freezes it there, and
@@ -30,7 +30,7 @@ use bevy::render::view::screenshot::{save_to_disk, Screenshot};
 use client::renderer::model::{BbAnimationPlayer, BbModel, BbModelAsset, BbModelPlugin, BbModelSpawned};
 use client::renderer::slint_overlay::{SlintLayer, SlintLayerPlugin};
 use slint_ui::slint::{Model, ModelRc, SharedString, VecModel};
-use slint_ui::AssetViewerUi;
+use slint_ui_tools::AssetViewerUi;
 
 /// Where a model is looked for when no roots are given.
 const DEFAULT_ROOTS: [&str; 2] = ["assets", "crates/bbmodel/tests/fixtures"];

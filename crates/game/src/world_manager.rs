@@ -13,7 +13,7 @@ use crate::history::{CalendarTick, EmbarkRefusal, History, SiteId, TICKS_PER_DAY
 use crate::{
     Chunk, ChunkCoords, ClientId, ClientPacket, Column, ColumnCoords, EntityKind, TerrainSnapshot, GameEventKind,
     LodBuildJob, LodBuilder, LodKey, LodPayload, LodResult, Region, RegionCoords, RegionInput,
-    RegionOutput, RegionRunner, RegionSeed, SerializedRegion, ServerPacket, PlayRefusal, WorldMap, EmbarkRequest,
+    RegionOutput, RegionRunner, RegionSave, RegionSeed, SerializedRegion, ServerPacket, PlayRefusal, WorldMap, EmbarkRequest,
 };
 
 pub const SPAWN_REGION: RegionCoords = RegionCoords { x: 0, z: 0 };
@@ -313,6 +313,10 @@ pub struct WorldManager<S: RegionSpawner> {
     generator: RegionGenerator,
     regions: BTreeMap<RegionCoords, RegionLink>,
     parked: BTreeMap<RegionCoords, SerializedRegion>,
+    /// Parked since the last [`Self::request_save`]: their blob is not saved yet.
+    unsaved_parked: BTreeSet<RegionCoords>,
+    /// World autosave states waiting for [`Self::take_saves`].
+    saves: Vec<(RegionCoords, RegionSave)>,
     /// Frozen terrain for parked / never-run regions, so LOD builds never
     /// wake a region. Refreshed on TerrainChanged and on park (Stopped).
     terrain_cache: BTreeMap<RegionCoords, TerrainSnapshot>,
@@ -392,6 +396,8 @@ impl<S: RegionSpawner> WorldManager<S> {
             generator,
             regions: BTreeMap::new(),
             parked: BTreeMap::new(),
+            unsaved_parked: BTreeSet::new(),
+            saves: Vec::new(),
             terrain_cache: BTreeMap::new(),
             pristine_terrain: BTreeMap::new(),
             pristine_terrain_max: PRISTINE_TERRAIN_CACHE_MAX,
@@ -575,7 +581,11 @@ impl<S: RegionSpawner> WorldManager<S> {
     }
 
     fn send_fortress(&self, id: ClientId) {
-        let _ = self.out.send((Some(id), ServerPacket::Fortress(self.fortress_of.get(&id).copied())));
+        let held = self.fortress_of.get(&id).and_then(|&site| {
+            let region = self.history.as_ref()?.site(site)?.region;
+            Some(crate::HeldFortress { site, region })
+        });
+        let _ = self.out.send((Some(id), ServerPacket::Fortress(held)));
     }
 
     fn embark_result(&self, id: ClientId, r: Result<SiteId, EmbarkRefusal>) {
@@ -849,9 +859,19 @@ impl<S: RegionSpawner> WorldManager<S> {
                     }
                 }
             }
+            RegionOutput::EventProcessedHashed(event, tick, hash) => {
+                if let Some(link) = self.regions.get(&rc) {
+                    for client in &link.subscribers {
+                        let _ = self
+                            .out
+                            .send((Some(*client), ServerPacket::HashedGameEvent(event.clone(), tick, hash)));
+                    }
+                }
+            }
             RegionOutput::Snapshot(client, rollback) => {
                 let _ = self.out.send((Some(client), ServerPacket::Region(rc, rollback)));
             }
+            RegionOutput::Saved(rollback) => self.saves.push((rc, RegionSave::Live(rollback))),
             RegionOutput::SyncClock { tick_rate, tick } => {
                 if let Some(link) = self.regions.get(&rc) {
                     for client in &link.subscribers {
@@ -883,6 +903,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                 self.cache_authoritative_terrain(rc, far);
                 self.invalidate_region_lod(rc);
                 self.parked.insert(rc, serialized);
+                self.unsaved_parked.insert(rc);
                 let pending = self
                     .regions
                     .remove(&rc)
@@ -1024,6 +1045,28 @@ impl<S: RegionSpawner> WorldManager<S> {
         for rc in dead {
             self.history_region_lost(rc);
         }
+    }
+
+    /// World autosave: every running region (not stopping) is asked for its
+    /// state — it arrives as `RegionOutput::Saved` — and every region parked
+    /// since the last call is queued at once. A stopping region is saved once
+    /// it has parked, by the next call. Collect them with [`Self::take_saves`].
+    pub fn request_save(&mut self) {
+        for (rc, link) in &self.regions {
+            if !link.stopping && link.input.send(RegionInput::Save).is_err() {
+                log::error!("region {:?} died before it could be saved", rc);
+            }
+        }
+        for rc in std::mem::take(&mut self.unsaved_parked) {
+            if let Some(blob) = self.parked.get(&rc) {
+                self.saves.push((rc, RegionSave::Parked(blob.clone())));
+            }
+        }
+    }
+
+    /// Region states for the world autosave collected since the last call.
+    pub fn take_saves(&mut self) -> Vec<(RegionCoords, RegionSave)> {
+        std::mem::take(&mut self.saves)
     }
 
     pub fn running_regions(&self) -> Vec<RegionCoords> {

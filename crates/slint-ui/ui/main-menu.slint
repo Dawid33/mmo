@@ -1,14 +1,24 @@
-import { Button, FrameFace, GraphicalSets, LabelFace, Styles, VerticalFlow } from "@widgets";
+import { Button, FrameFace, GraphicalSets, LabelFace, Styles, TextField, VerticalFlow } from "@widgets";
 
 // The main menu: New world / Load world / Exit, and the reason the last
-// session ended (if it did not end by the player's choice).
+// session ended (if it did not end by the player's choice), over a saved
+// world's map preview (`background-image`; empty = the plain backdrop).
+// `join-only` (the browser build, which cannot make or keep worlds) swaps the
+// buttons for a server address and Join server.
 export component MainMenu {
-    in property <string> title: "Labour of Love";
+    in property <image> background-image;
+    in property <string> title: "Orion";
     in property <bool> can-load;
     in property <string> menu-error;
+    in property <bool> join-only;
+    in-out property <string> server-address;
     callback new-world();
     callback load-world();
     callback exit();
+    callback join-server(string);
+
+    out property <length> join-button-x: join-btn.absolute-position.x + join-btn.width / 2;
+    out property <length> join-button-y: join-btn.absolute-position.y + join-btn.height / 2;
 
     out property <length> new-button-x: new-btn.absolute-position.x + new-btn.width / 2;
     out property <length> new-button-y: new-btn.absolute-position.y + new-btn.height / 2;
@@ -17,16 +27,31 @@ export component MainMenu {
     out property <length> exit-button-x: exit-btn.absolute-position.x + exit-btn.width / 2;
     out property <length> exit-button-y: exit-btn.absolute-position.y + exit-btn.height / 2;
 
+    Image {
+        width: root.width;
+        height: root.height;
+        source: root.background-image;
+        image-fit: cover;
+    }
+    // Darkens the map so the menu frame stands out.
+    Rectangle {
+        width: root.width;
+        height: root.height;
+        background: root.background-image.width > 0 ? #000000a0 : transparent;
+    }
+
     menu := FrameFace {
         title: root.title;
-        width: max(260px, self.content-x + body.preferred-width + Styles.frame.box.padding.right
-            + GraphicalSets.inset(Styles.frame.graphics).right);
-        height: self.content-y + body.preferred-height + Styles.frame.box.padding.bottom
-            + GraphicalSets.inset(Styles.frame.graphics).bottom;
+        width: max(root.join-only ? 360px : 260px,
+            self.content-x + (root.join-only ? join.preferred-width : body.preferred-width)
+            + Styles.frame.box.padding.right + GraphicalSets.inset(Styles.frame.graphics).right);
+        height: self.content-y + (root.join-only ? join.preferred-height : body.preferred-height)
+            + Styles.frame.box.padding.bottom + GraphicalSets.inset(Styles.frame.graphics).bottom;
         x: (root.width - self.width) / 2;
         y: (root.height - self.height) / 2;
 
         body := VerticalFlow {
+            visible: !root.join-only;
             x: menu.content-x;
             y: menu.content-y;
             width: menu.content-right - menu.content-x;
@@ -45,6 +70,29 @@ export component MainMenu {
                 clicked => { root.exit(); }
             }
             if root.menu-error != "": LabelFace {
+                text: root.menu-error;
+            }
+        }
+
+        join := VerticalFlow {
+            visible: root.join-only;
+            x: menu.content-x;
+            y: menu.content-y;
+            width: menu.content-right - menu.content-x;
+
+            LabelFace {
+                text: "Server";
+            }
+            TextField {
+                text <=> root.server-address;
+                accepted => { root.join-server(root.server-address); }
+            }
+            join-btn := Button {
+                text: "Join server";
+                enabled: root.server-address != "";
+                clicked => { root.join-server(root.server-address); }
+            }
+            if root.join-only && root.menu-error != "": LabelFace {
                 text: root.menu-error;
             }
         }

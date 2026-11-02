@@ -9,6 +9,7 @@
 mod asset_viewer;
 mod controls;
 mod dev_panel;
+mod fortress_panel;
 mod fortress_wheel;
 mod frontend;
 mod game_panel;

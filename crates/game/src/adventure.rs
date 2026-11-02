@@ -153,6 +153,18 @@ impl Rollback {
     /// handles a stuck body (re-plan once, then give up). Every change goes
     /// through `walker.set_safe`.
     pub fn tick_walkers_safe(&mut self, here: RegionCoords, map: Option<MapExtent>) {
+        // A body the keyboard drives (first person) is not on a walk.
+        let driven: Vec<crate::EntityKey> = self
+            .data
+            .player_entites
+            .iter()
+            .filter(|(c, _)| self.data.clients.get(c).is_some_and(|c| c.fps_cam_mode))
+            .map(|(_, &e)| e)
+            .filter(|&e| self.data.ecs.walker.try_get(e).is_some())
+            .collect();
+        for key in driven {
+            self.data.ecs.walker.set_safe(key, None);
+        }
         let walking: Vec<crate::EntityKey> = self
             .data
             .player_entites

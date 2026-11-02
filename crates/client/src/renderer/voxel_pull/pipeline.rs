@@ -69,7 +69,7 @@ impl FromWorld for VoxelPullPipeline {
             chunk_layout_desc,
             xray_layout,
             xray_layout_desc,
-            forward_shader: world.load_asset("shaders/voxel_pull.wgsl"),
+            forward_shader: super::VOXEL_PULL_SHADER,
             view_layouts: world.resource::<MeshPipelineViewLayouts>().clone(),
         }
     }
@@ -276,7 +276,6 @@ pub fn init_voxel_pull_depth_pipeline(
     mut commands: Commands,
     forward: Option<Res<VoxelPullPipeline>>,
     prepass: Res<PrepassPipeline>,
-    asset_server: Res<AssetServer>,
 ) {
     // Absent on a device that cannot run the pull path (`VoxelPullPlugin::finish`).
     let Some(forward) = forward else {
@@ -285,7 +284,7 @@ pub fn init_voxel_pull_depth_pipeline(
     commands.insert_resource(VoxelPullDepthPipeline {
         chunk_layout_desc: forward.chunk_layout_desc.clone(),
         prepass_view_layout: prepass.view_layout_no_motion_vectors.clone(),
-        depth_shader: asset_server.load("shaders/voxel_pull_depth.wgsl"),
+        depth_shader: super::VOXEL_PULL_DEPTH_SHADER,
         depth_clip_control_supported: prepass.depth_clip_control_supported,
     });
 }
@@ -531,6 +530,21 @@ fn position_world_to_clip(position: vec3<f32>) -> vec4<f32> { return vec4(positi
             "the forward shader binds the designation overlay at 7"
         );
         assert!(source.contains("overlay_tint("), "the forward shader tints by the overlay");
+    }
+
+    /// The top-down view (`commander/top_down.rs`) is orthographic: the
+    /// cut's cap and the riser fade must not assume a perspective eye.
+    #[test]
+    fn ortho_paths_are_in_the_forward_shader() {
+        let source = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/shaders/voxel_pull.wgsl"
+        ))
+        .expect("voxel_pull.wgsl");
+        assert!(source.contains("fn view_is_orthographic"), "the forward shader tells an orthographic view");
+        assert!(source.contains("fn view_forward"), "the cap's eye ray follows the view under ortho");
+        let defs: Vec<bevy::shader::ShaderDefVal> = vec!["CUTAWAY".into()];
+        validate_shader(source, &defs, &IMPORTS).expect("voxel_pull.wgsl with CUTAWAY");
     }
 
     /// The depth/shadow pipelines with the cutaway, with and without the

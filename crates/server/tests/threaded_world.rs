@@ -527,3 +527,70 @@ fn walking_into_a_cold_region_wakes_its_thread_and_returns() {
         "returned just past the flip line in the spawn region's frame, z={z}"
     );
 }
+
+/// World autosave on the server's spawn path: a running region's save goes to
+/// the store; a fresh manager (a restarted server) wakes that region from the
+/// file on its own thread — same clock, and only the new session's player.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn saved_region_is_restored_by_a_restarted_server() {
+    use server::region_store::RegionStore;
+    let dir = std::env::temp_dir().join(format!("mmo-threaded-save-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let store = RegionStore::new(dir.clone(), 42);
+    let spawner = || ThreadRegionSpawner::with_generator(std::sync::Arc::new(|_| lightweight_columns())).with_store(store.clone());
+
+    let mut rig = Rig::with_spawner(spawner(), |_| lightweight_columns());
+    rig.event(ServerEvent::ClientConnected(0));
+    rig.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(SPAWN_REGION), 0));
+    rig.wait_for_snapshots(&[SPAWN_REGION], REGION_STARTUP_BUDGET);
+    // Let the clock run so a regenerated region (tick ~0) is told apart.
+    let ran_until = Instant::now() + Duration::from_millis(20 * game::TICK_RATE);
+    while Instant::now() < ran_until {
+        if let Ok((rc, output)) = rig.region_out.recv_timeout(Duration::from_millis(50)) {
+            rig.absorb(rc, output);
+        }
+    }
+    rig.manager.request_save();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut saves = Vec::new();
+    while saves.is_empty() && Instant::now() < deadline {
+        if let Ok((rc, output)) = rig.region_out.recv_timeout(Duration::from_millis(50)) {
+            rig.absorb(rc, output);
+        }
+        saves = rig.manager.take_saves();
+    }
+    let (rc, save) = saves.pop().expect("the running region answered Save");
+    assert_eq!(rc, SPAWN_REGION);
+    let game::RegionSave::Live(live) = &save else { panic!("a running region saves its live state") };
+    let saved_tick = *live.tick;
+    assert!(saved_tick >= 10, "the region ran: tick {saved_tick}");
+    store.save(rc, &save.into_serialized()).unwrap();
+    rig.manager.shutdown_all();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !rig.manager.running_regions().is_empty() && Instant::now() < deadline {
+        if let Ok((rc, output)) = rig.region_out.recv_timeout(Duration::from_millis(50)) {
+            rig.absorb(rc, output);
+        }
+    }
+    drop(rig);
+
+    // A new process: client ids start at 0 again.
+    let mut rig = Rig::with_spawner(spawner(), |_| lightweight_columns());
+    rig.event(ServerEvent::ClientConnected(0));
+    rig.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(SPAWN_REGION), 0));
+    let mut log = Vec::new();
+    let mut restored = None;
+    rig.pump_until(REGION_STARTUP_BUDGET, &mut log, |p| match p {
+        ServerPacket::Region(id, rb) if *id == SPAWN_REGION => {
+            restored = Some((*rb.tick, rb.player_entites.len(), rb.clients.len()));
+            true
+        }
+        _ => false,
+    });
+    let (tick, players, clients) = restored.expect("snapshot of the restored region");
+    assert!(tick >= saved_tick, "restored from the save (tick {tick} < saved {saved_tick})");
+    assert_eq!((players, clients), (1, 1), "the old session's player was dropped, the new one created");
+    rig.manager.shutdown_all();
+    let _ = std::fs::remove_dir_all(&dir);
+}

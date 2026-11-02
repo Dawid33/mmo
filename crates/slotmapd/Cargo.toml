@@ -23,7 +23,9 @@ serde = { workspace = true }
 state-hash = { workspace = true }
 
 [dev-dependencies]
-fxhash = "0.2.1"
+# mmo: upstream's unused `fxhash` dev-dependency dropped — it turned on
+# `byteorder/std` in every workspace test build, forking slotmapd -> game
+# into separate test and bin copies.
 serde = "1.0"
 serde_derive = "1.0"
 serde_json = "1.0"

@@ -603,9 +603,33 @@ fn embark_allowed_in_matches_history_with_an_abandoned_site() {
     }
 }
 
+/// A mountainside refuses the player's embark (with no state change) while the civs'
+/// own rule still allows it; the client's tile check agrees.
+#[test]
+fn embark_refuses_a_too_steep_region() {
+    let mut map = strip();
+    let steep_relief = game::EMBARK_MAX_RELIEF_PER_REGION_M * game::REGION_BLOCKS as f32 + 1.0;
+    for t in &mut map.tiles[8..] {
+        t.relief_m = steep_relief;
+        assert!(game::too_steep_to_embark(t));
+    }
+    let p = BootstrapParams { seed: 7, civs: 1, founders_per_civ: 10, years: 0, ..BootstrapParams::default() };
+    let mut h = bootstrap(&map, &p).expect("the strip holds a civ");
+    let (_, civ, people) = home_site(&h);
+    let steep = (8..16).map(|x| rc(x, 0)).find(|r| h.embark_allowed(*r).is_ok()).expect("a steep region civs may settle");
+    let sites: Vec<_> = h.sites().map(|s| (s.id, s.region, s.abandoned.is_some())).collect();
+    assert_eq!(player_embark_allowed_in(h.grid(), sites.iter().copied(), steep), Err(EmbarkRefusal::TooSteep));
+    let log_before = h.log().len();
+    let req = EmbarkRequest { civ, people: people[..2].to_vec(), region: steep };
+    assert_eq!(h.player_embark(&req), Err(EmbarkRefusal::TooSteep));
+    assert_eq!(h.log().len(), log_before, "a refusal changes nothing");
+    let gentle = (1..8).map(|x| rc(x, 0)).find(|r| h.player_embark_allowed(*r).is_ok()).expect("a gentle free region");
+    h.player_embark(&EmbarkRequest { region: gentle, ..req }).expect("gentle ground is fine");
+}
+
 fn fortress_in(packets: &[ServerPacket]) -> Option<Option<SiteId>> {
     packets.iter().rev().find_map(|p| match p {
-        ServerPacket::Fortress(f) => Some(*f),
+        ServerPacket::Fortress(f) => Some(f.map(|f| f.site)),
         _ => None,
     })
 }

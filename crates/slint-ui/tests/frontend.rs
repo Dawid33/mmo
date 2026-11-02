@@ -54,6 +54,34 @@ fn main_menu_buttons_fire() {
     assert_eq!((new.get(), load.get(), exit.get()), (1, 1, 1));
 }
 
+/// The browser's menu (`join-only`): New world / Load world / Exit give way to
+/// a server address and Join server, which hands the typed address over.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn join_only_menu_joins_the_typed_server() {
+    let mut overlay = overlay();
+    let joined: Rc<std::cell::RefCell<Vec<String>>> = Rc::default();
+    let new = counter();
+    let (j, n) = (joined.clone(), new.clone());
+    overlay.ui().on_join_server(move |address| j.borrow_mut().push(address.to_string()));
+    overlay.ui().on_new_world(move || n.set(n.get() + 1));
+    let (nx, ny) = (overlay.ui().get_new_button_x(), overlay.ui().get_new_button_y());
+    overlay.ui().set_join_only(true);
+    overlay.ui().set_server_address("orion.factoriosurvivalworld.com".into());
+    overlay.render();
+
+    click(&mut overlay, nx, ny);
+    assert_eq!(new.get(), 0, "New world is gone from the browser's menu");
+    let (x, y) = (overlay.ui().get_join_button_x(), overlay.ui().get_join_button_y());
+    click(&mut overlay, x, y);
+    assert_eq!(*joined.borrow(), ["orion.factoriosurvivalworld.com"]);
+
+    overlay.ui().set_server_address("".into());
+    overlay.render();
+    click(&mut overlay, x, y);
+    assert_eq!(joined.borrow().len(), 1, "no Join without an address");
+}
+
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn load_disabled_without_worlds() {

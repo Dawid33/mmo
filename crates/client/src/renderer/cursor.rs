@@ -26,11 +26,15 @@ pub struct CursorPolicy {
     /// hidden and still (`commander::hold_pointer_while_orbiting` puts it back
     /// where the press was) until the button is released.
     pub orbit: bool,
+    /// The commander's adventurer is in first person
+    /// (`commander::first_person`): mouse look holds the pointer, except
+    /// while the menu or map is open.
+    pub first_person: bool,
 }
 
 impl CursorPolicy {
     pub fn grabbed(&self) -> bool {
-        self.sim_grab && !self.overlay_open
+        (self.sim_grab || (self.first_person && !self.ui_modal)) && !self.overlay_open
     }
 
     /// A client-local overlay or a modal game screen is open: commander
@@ -123,6 +127,14 @@ mod tests {
         assert_eq!(locked.mode(), (CursorGrabMode::Locked, false));
         let overlay = CursorPolicy { overlay_open: true, ..locked };
         assert_eq!(overlay.mode(), (CursorGrabMode::None, true));
+    }
+
+    #[test]
+    fn first_person_holds_the_pointer_unless_the_menu_is_open() {
+        let fp = CursorPolicy { first_person: true, ..Default::default() };
+        assert_eq!(fp.mode(), (CursorGrabMode::Locked, false));
+        assert_eq!(CursorPolicy { ui_modal: true, ..fp }.mode(), (CursorGrabMode::None, true));
+        assert_eq!(CursorPolicy { overlay_open: true, ..fp }.mode(), (CursorGrabMode::None, true));
     }
 
     #[test]

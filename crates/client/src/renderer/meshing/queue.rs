@@ -6,14 +6,13 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use bevy::camera::primitives::{Frustum, Sphere};
 use bevy::prelude::*;
-use bevy::tasks::AsyncComputeTaskPool;
 
 use super::super::block_textures::BlockTextureLayers;
 use super::super::bridge::VoxelData;
 use super::binary::CutoutTable;
 use super::neighbors::{gather_padded_rle, zone_index, zone_indices, zone_offsets};
 use super::interior::InteriorGround;
-use super::{mesh_chunk_classified, MeshingTask};
+use super::{mesh_chunk_classified_wire, MeshWire, MeshingTask};
 
 /// World-space brick grid: key = world position / `BRICK_VOXELS`. Render-side
 /// spatial index for neighbor lookups; rebuilt from entities, never persisted.
@@ -272,7 +271,11 @@ pub fn spawn_mesh_tasks(
         rank_cache.clear();
         return;
     }
-    let pull = render_config
+    // Every near brick meshes to quad records: the pulled path draws them,
+    // the per-chunk path merges them into its sim chunk's mesh
+    // (`chunk_mesh`). Dug-space classification is for the pulled x-ray only.
+    let pull = true;
+    let x_ray = render_config
         .as_deref()
         .is_none_or(|config| config.near.uses_quad_records());
     let capacity = budgets
@@ -286,7 +289,6 @@ pub fn spawn_mesh_tasks(
         chunk_rank(key, cam)
     });
 
-    let pool = AsyncComputeTaskPool::get();
     for (e, key) in picked {
         queue.dirty.remove(&e);
         let Ok(voxels) = chunks.get(e) else { continue };
@@ -317,26 +319,41 @@ pub fn spawn_mesh_tasks(
         // classified against its original surfaces. Meshed before that ground
         // arrived, the brick is re-meshed once it does.
         let mut interior = None;
-        if let (true, Some(k), Some(g)) = (pull, key, ground.as_deref()) {
+        if let (true, Some(k), Some(g)) = (x_ray, key, ground.as_deref()) {
             if g.has_home_ground() {
                 interior = InteriorGround::around(k, |x, z| g.home_surface(x, z));
             } else {
                 commands.entity(e).insert(AwaitingGround(k));
             }
         }
-        let layers = layers.0.clone();
-        let task = pool.spawn(async move {
-            if is_buried(&center, &owned_neighbors, &CutoutTable::installed()) {
-                return buried_mesh_output();
-            }
-            let neighbors = owned_neighbors
-                .iter()
-                .map(|(off, data)| (*off, data))
-                .collect();
-            let padded = gather_padded_rle(&center, &neighbors);
-            mesh_chunk_classified(&padded, &BlockTextureLayers(layers), pull, interior.as_ref())
-        });
+        let job = NearMeshJob { center, neighbors: owned_neighbors, layers: layers.clone(), pull, interior };
+        let task = super::super::compute::spawn(job, MeshWire::into_output);
         commands.entity(e).insert(MeshingTask(task));
+    }
+}
+
+/// One near brick to mesh (a compute job, `renderer::compute`): its RLE
+/// voxels and its neighbours' — expanded into the padded snapshot in the job.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct NearMeshJob {
+    pub center: VoxelData,
+    pub neighbors: Vec<([i32; 3], VoxelData)>,
+    pub layers: BlockTextureLayers,
+    pub pull: bool,
+    pub interior: Option<InteriorGround>,
+}
+
+impl super::super::compute::ComputeJob for NearMeshJob {
+    type Output = MeshWire;
+    const KIND: super::super::compute::JobKind = super::super::compute::JobKind::NearMesh;
+
+    fn run(self) -> MeshWire {
+        if is_buried(&self.center, &self.neighbors, &CutoutTable::installed()) {
+            return MeshWire::EMPTY;
+        }
+        let neighbors = self.neighbors.iter().map(|(off, data)| (*off, data)).collect();
+        let padded = gather_padded_rle(&self.center, &neighbors);
+        mesh_chunk_classified_wire(&padded, &self.layers, self.pull, self.interior.as_ref())
     }
 }
 
@@ -416,18 +433,22 @@ pub fn is_buried_by<'a>(
         return false;
     }
     let faces = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]];
-    faces.into_iter().all(|off| {
-        neighbor(off).is_some_and(|neighbor| {
-            if neighbor.is_opaque_throughout(cutout) {
-                return true;
-            }
-            let mut solid = true;
-            neighbor.for_each_index_sorted(zone_indices([-off[0], -off[1], -off[2]]), |_, voxel| {
-                solid &= cutout.is_opaque(voxel);
-            });
-            solid
-        })
-    })
+    faces
+        .into_iter()
+        .all(|off| neighbor(off).is_some_and(|neighbor| presents_opaque_face(neighbor, off, cutout)))
+}
+
+/// Whether `neighbor`, the brick at face offset `off` from some brick,
+/// presents no air across the face they share (its plane toward `-off`).
+pub fn presents_opaque_face(neighbor: &VoxelData, off: [i32; 3], cutout: &CutoutTable) -> bool {
+    if neighbor.is_opaque_throughout(cutout) {
+        return true;
+    }
+    let mut solid = true;
+    neighbor.for_each_index_sorted(zone_indices([-off[0], -off[1], -off[2]]), |_, voxel| {
+        solid &= cutout.is_opaque(voxel);
+    });
+    solid
 }
 
 /// What `mesh_chunk` returns for a buried chunk, in either render mode.

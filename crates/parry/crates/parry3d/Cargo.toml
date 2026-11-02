@@ -115,5 +115,8 @@ encase = { version = "0.12", optional = true }
 
 [dev-dependencies]
 oorandom = "11"
-rand = "0.10"
+# mmo-fork: upstream's `rand = "0.10"` dropped — only the benches use it, and
+# it turned on rand/getrandom std features in every workspace test build,
+# forking rand -> bevy_math -> all of Bevy into a separate test copy.
+# (`cargo bench -p parry3d` needs it back.)
 web-time = "1"

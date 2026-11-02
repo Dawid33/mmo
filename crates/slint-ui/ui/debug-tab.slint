@@ -1,0 +1,122 @@
+import { Button, Checkbox, LabelFace } from "@widgets";
+
+// One stats row: "FPS" · "60".
+export struct DevStat {
+    label: string,
+    value: string,
+}
+
+// One debug toggle; `checked` mirrors the client resource it flips.
+export struct DevToggle {
+    label: string,
+    checked: bool,
+}
+
+// One live region's recent tick times, already formatted (ms): region
+// "(0, 0)", then mean and percentiles over its last ticks.
+export struct DevTickRow {
+    region: string,
+    mean: string,
+    p50: string,
+    p95: string,
+    p99: string,
+    max: string,
+}
+
+// The fortress panel's Debug tab (fortress-panel.slint; only in `dev_ui`
+// builds, F3 opens it) — dev tooling, not player UI: stats on the left with
+// stand-ins for systems that don't exist yet under them, the debug toggles
+// in the middle, and each live region's tick times on the right
+// (crates/client/src/renderer/dev_ui.rs fills it).
+export component DebugPage {
+    in property <[DevStat]> stats;
+    in property <[DevToggle]> toggles;
+    in property <[DevTickRow]> tick-rows;
+
+    // Index into `toggles`, new state.
+    callback toggle(int, bool);
+    callback complete-orders();
+
+    out property <length> toggle-row-height: 22px;
+    property <length> stat-row-height: 18px;
+    property <length> stat-label-width: 100px;
+    property <length> tick-region-width: 80px;
+    property <length> tick-value-width: 48px;
+
+    // Probes for the headless tests (window logical pixels).
+    out property <length> toggles-x: toggle-column.absolute-position.x;
+    out property <length> toggles-y: toggle-column.absolute-position.y;
+    out property <length> complete-button-x: complete.absolute-position.x + complete.width / 2;
+    out property <length> complete-button-y: complete.absolute-position.y + complete.height / 2;
+    out property <length> ticks-x: tick-table.absolute-position.x;
+    out property <length> ticks-y: tick-table.absolute-position.y;
+
+    HorizontalLayout {
+        alignment: start;
+        spacing: 24px;
+
+        VerticalLayout {
+            alignment: start;
+            spacing: 6px;
+
+            VerticalLayout {
+                for stat in root.stats: HorizontalLayout {
+                    height: root.stat-row-height;
+                    LabelFace {
+                        width: root.stat-label-width;
+                        text: stat.label;
+                    }
+                    LabelFace { text: stat.value; }
+                }
+            }
+
+            HorizontalLayout {
+                alignment: start;
+                complete := Button {
+                    text: "Complete all orders";
+                    clicked => { root.complete-orders(); }
+                }
+            }
+        }
+
+        toggle-column := VerticalLayout {
+            alignment: start;
+            for toggle[i] in root.toggles: Rectangle {
+                height: root.toggle-row-height;
+                min-width: box.preferred-width;
+                box := Checkbox {
+                    x: 0;
+                    y: (parent.height - self.preferred-height) / 2;
+                    text: toggle.label;
+                    checked: toggle.checked;
+                    toggled(on) => { root.toggle(i, on); }
+                }
+            }
+        }
+
+        // One row per live predicted region: its forward-tick wall time
+        // over the last ticks (native builds; empty on wasm).
+        tick-table := VerticalLayout {
+            alignment: start;
+            HorizontalLayout {
+                height: root.stat-row-height;
+                LabelFace { width: root.tick-region-width; text: "Tick (ms)"; }
+                LabelFace { width: root.tick-value-width; text: "mean"; }
+                LabelFace { width: root.tick-value-width; text: "p50"; }
+                LabelFace { width: root.tick-value-width; text: "p95"; }
+                LabelFace { width: root.tick-value-width; text: "p99"; }
+                LabelFace { width: root.tick-value-width; text: "max"; }
+            }
+            for row in root.tick-rows: HorizontalLayout {
+                height: root.stat-row-height;
+                LabelFace { width: root.tick-region-width; text: row.region; }
+                LabelFace { width: root.tick-value-width; text: row.mean; }
+                LabelFace { width: root.tick-value-width; text: row.p50; }
+                LabelFace { width: root.tick-value-width; text: row.p95; }
+                LabelFace { width: root.tick-value-width; text: row.p99; }
+                LabelFace { width: root.tick-value-width; text: row.max; }
+            }
+            if root.tick-rows.length == 0: LabelFace { text: "No live regions"; }
+        }
+    }
+}

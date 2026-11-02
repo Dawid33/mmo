@@ -191,6 +191,25 @@ mod tests {
         solid(p) && !((p[0], p[2]) == (1, 1) && (10..=12).contains(&p[1]))
     }
 
+    /// The top-down view's rays (`top_down`): parallel, straight down, from
+    /// an eye `TOP_DOWN_EYE_HEIGHT_M` above the cut.
+    #[test]
+    fn a_straight_down_ray_from_above_the_cut_finds_the_level_floor() {
+        let level = 20;
+        let cut = cut_at(level);
+        let eye_y = cut.plane_y + super::super::top_down::TOP_DOWN_EYE_HEIGHT_M * UNITS_PER_METER;
+        let reach = game::lod::LOD_HORIZON_UNITS;
+        // Solid ground (to 29, cut at 20): the cut level's block top, not the
+        // cut-away rock above it.
+        let hit = visible_ground_with(Vec3::new(1.5 * S, eye_y, 1.5 * S), Vec3::NEG_Y, reach, Some(cut), surface, solid, everywhere, NO_XRAY)
+            .unwrap();
+        assert!((hit.y - (level + 1) as f32 * S).abs() < 1e-3, "the cut level's top: {hit:?}");
+        // Over the pit (floor block 5): the pit's floor, below the level.
+        let hit = visible_ground_with(Vec3::new(3.5 * S, eye_y, 3.5 * S), Vec3::NEG_Y, reach, Some(cut), surface, solid, everywhere, NO_XRAY)
+            .unwrap();
+        assert!((hit.y - 6.0 * S).abs() < 1e-3, "the pit's floor: {hit:?}");
+    }
+
     #[test]
     fn xray_with_the_cut_off_sees_the_floor_of_a_room_under_the_ground() {
         let eye = Vec3::new(1.5 * S, 60.0 * S, 1.5 * S);

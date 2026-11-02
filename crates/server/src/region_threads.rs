@@ -20,11 +20,21 @@ pub struct ThreadRegionSpawner {
     /// `None` (the `Default`, used by tests that pass ready-made seeds) keeps
     /// worldgen with the manager.
     generator: Option<SharedRegionGenerator>,
+    /// World autosave: a region that has not run in this process (a
+    /// `RegionSeed::Deferred(None)`) is restored from its save, if any, instead
+    /// of generated — read on the region's own thread.
+    store: Option<std::sync::Arc<crate::region_store::RegionStore>>,
 }
 
 impl ThreadRegionSpawner {
     pub fn with_generator(generator: SharedRegionGenerator) -> Self {
-        Self { handles: BTreeMap::new(), generator: Some(generator) }
+        Self { handles: BTreeMap::new(), generator: Some(generator), store: None }
+    }
+
+    /// Restore never-run regions from `store` (see [`crate::region_store`]).
+    pub fn with_store(mut self, store: crate::region_store::RegionStore) -> Self {
+        self.store = Some(std::sync::Arc::new(store));
+        self
     }
 }
 
@@ -37,6 +47,7 @@ impl RegionSpawner for ThreadRegionSpawner {
     ) -> Sender<RegionInput> {
         let (send, recv) = unbounded();
         let generator = self.generator.clone();
+        let store = self.store.clone();
         let handle = std::thread::Builder::new()
             .name(format!("region {},{}", id.x, id.z))
             .spawn(move || {
@@ -44,12 +55,17 @@ impl RegionSpawner for ThreadRegionSpawner {
                 // region never stalls the manager.
                 let genesis_started = Instant::now();
                 let parked = matches!(seed, RegionSeed::Parked(..) | RegionSeed::Deferred(Some(_)));
+                // Never run in this process: the world autosave may have it.
+                let saved = match (&seed, &store) {
+                    (RegionSeed::Deferred(None), Some(store)) => store.load(id),
+                    _ => None,
+                };
+                let stored = saved.is_some();
                 // Deferred seeds generate here, timed separately from the build.
                 let generate_time = std::cell::Cell::new(Duration::ZERO);
-                let runner = seed.into_runner(
-                    id,
-                    out,
-                    &|rc| {
+                let runner = match saved {
+                    Some(rollback) => RegionRunner::new(id, game::restore_saved(id, rollback), out),
+                    None => seed.into_runner(id, out, &|rc| {
                         let started = Instant::now();
                         let columns = match &generator {
                             Some(generate) => generate(rc),
@@ -57,18 +73,19 @@ impl RegionSpawner for ThreadRegionSpawner {
                         };
                         generate_time.set(started.elapsed());
                         columns
-                    },
-                );
+                    }),
+                };
                 let generate_time = generate_time.get();
                 let hash_time = runner.baseline_hash_time();
                 let build = genesis_started.elapsed() - generate_time - hash_time;
                 // `generate_ms` = worldgen on this thread (deferred seeds);
-                // `build_ms` = deserialize (parked) or chunk flatten + collider
-                // genesis (fresh); `terrain_hash_ms` = the runner's baseline
+                // `build_ms` = deserialize (parked; `stored` = read from the
+                // world autosave) or chunk flatten + collider genesis (fresh);
+                // `terrain_hash_ms` = the runner's baseline
                 // terrain hash (timed inside `RegionRunner::new`).
                 game::perf_event!(
                     "region_genesis",
-                    "region={},{} ms={} generate_ms={} build_ms={} terrain_hash_ms={} parked={parked}",
+                    "region={},{} ms={} generate_ms={} build_ms={} terrain_hash_ms={} parked={parked} stored={stored}",
                     id.x,
                     id.z,
                     game::perf::ms(genesis_started.elapsed()),
@@ -187,8 +204,10 @@ impl TickMetrics {
             // The cadence terrain snapshot + hash runs inside a tick; reported
             // beside `max` because it is the prime suspect when they match.
             let (hash_checks, hash_total, hash_max) = runner.take_terrain_hash_cost();
+            // The VOXEL_STATE_HASH_INTERVAL whole-state hash, also in-tick.
+            let (state_checks, state_total, state_max) = runner.take_state_hash_cost();
             log::info!(
-                "[region ({},{})] ticks={} avg={:.2}ms max={:.2}ms budget={:.1}% overruns={} | terrain_hash n={} sum={:.1}ms max={:.1}ms",
+                "[region ({},{})] ticks={} avg={:.2}ms max={:.2}ms budget={:.1}% overruns={} | terrain_hash n={} sum={:.1}ms max={:.1}ms | state_hash n={} sum={:.1}ms max={:.1}ms",
                 id.x,
                 id.z,
                 self.ticks,
@@ -199,9 +218,13 @@ impl TickMetrics {
                 hash_checks,
                 game::perf::ms(hash_total),
                 game::perf::ms(hash_max),
+                state_checks,
+                game::perf::ms(state_total),
+                game::perf::ms(state_max),
             );
         } else {
             let _ = runner.take_terrain_hash_cost();
+            let _ = runner.take_state_hash_cost();
         }
         *self = TickMetrics::new();
     }

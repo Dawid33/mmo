@@ -3,7 +3,7 @@
 // depth. Keeps the camera's HZB fed with pulled terrain so mesh entities behind
 // terrain stay occlusion-culled. Record layout mirrored from
 // crates/client/src/renderer/meshing/records.rs (the source of truth):
-//   w0: x:6|y:6|z:6|face:3|ao0:2|ao1:2|ao2:2|ao3:2|flip:1|cutout:1   w1: w:6|h:6|layer:16
+//   w0: x:6|y:6|z:6|face:3|ao0:2|ao1:2|ao2:2|ao3:2|flip:1|cutout:1   w1: w:6|h:6|layer:11|bx:3|by:3|bz:3
 // The CUTOUT variant (the cutout record ranges: leaves) adds a fragment
 // stage that alpha-tests the block texture, so leaves cast dappled shadows.
 //
@@ -183,7 +183,11 @@ fn vertex(
     let cu = corner & 1u;
     let cv = corner >> 1u;
 
-    let record_pos = vec3<u32>(w0 & 63u, (w0 >> 6u) & 63u, (w0 >> 12u) & 63u);
+    // Brick-local corner + the brick's place in a merged list (w1 bits 23..32:
+    // bx | by << 3 | bz << 6; records.rs `with_brick`) times 32 voxels.
+    let brick = w1 >> 23u;
+    let record_pos = vec3<u32>(w0 & 63u, (w0 >> 6u) & 63u, (w0 >> 12u) & 63u)
+        + 32u * vec3<u32>(brick & 7u, (brick >> 3u) & 7u, (brick >> 6u) & 7u);
     var pos = record_pos;
     pos[FACE_UA[face]] += cu * (w1 & 63u);
     pos[FACE_VA[face]] += cv * ((w1 >> 6u) & 63u);
@@ -219,7 +223,7 @@ fn vertex(
         dot(tex_pos, FACE_U_MASK[face]),
         dot(tex_pos, FACE_V_MASK[face]),
     ) / BLOCK_VOXELS;
-    out.layer = (w1 >> 12u) & 65535u;
+    out.layer = (w1 >> 12u) & 2047u;
 #endif // CUTOUT
 #ifdef UNCLIPPED_DEPTH_ORTHO_EMULATION
     out.unclipped_depth = out.position.z;

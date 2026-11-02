@@ -40,6 +40,9 @@ pub struct SimHarness {
     /// `forward()`, which can withhold `SyncClock` (see `catch_up`).
     client_in_send: Sender<ServerPacket>,
     client_in: Receiver<ServerPacket>,
+    /// The client's regions run on their own threads (`threaded`); every
+    /// pump then waits for them (`settle_regions`), so a step stays lockstep.
+    threaded: bool,
 }
 
 /// Most server-only ticks `catch_up` runs — comfortably more than the
@@ -71,6 +74,17 @@ impl SimHarness {
     /// opt into radius 1; home-only tests keep the one-region default.
     pub fn with_near_radius(near_radius: i32) -> Self {
         Self::with_config(&[], near_radius)
+    }
+
+    /// `with_near_radius`, with the client's regions on their own threads
+    /// as in native play. Region state is then only reachable through the
+    /// regions themselves (`client_home_data` is unavailable).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn threaded(near_radius: i32) -> Self {
+        let mut h = Self::with_config(&[], near_radius);
+        h.client.use_region_threads();
+        h.threaded = true;
+        h
     }
 
     fn with_config(lod_table: &'static [(i32, u32)], near_radius: i32) -> Self {
@@ -111,6 +125,7 @@ impl SimHarness {
             server_hashes: HashMap::new(),
             client_in_send,
             client_in,
+            threaded: false,
         }
     }
 
@@ -206,6 +221,11 @@ impl SimHarness {
             }
         }
         self.client.pump(&self.client_in).expect("client pump");
+        if self.threaded {
+            self.client.settle_regions().expect("client regions");
+            // What settling routed may have queued more (events, ticks).
+            self.client.pump(&self.client_in).expect("client pump");
+        }
     }
 
     pub fn step_n(&mut self, n: usize) {
@@ -216,11 +236,31 @@ impl SimHarness {
 
     // --- inspectors used by tests ---
     pub fn client_tick(&self) -> usize {
+        if self.threaded {
+            return self.client.home_tick().expect("home region reports a tick");
+        }
         let rc = self.client_home();
         self.client.world_ref().current_tick(&rc)
     }
+    pub fn client_region_count(&self) -> usize {
+        self.client.loaded_regions().len()
+    }
     pub fn client_region_loaded(&self, rc: RegionCoords) -> bool {
-        self.client.world_ref().region_exists(&rc)
+        self.client.loaded_regions().contains(&rc)
+    }
+
+    /// Every client region's `(tick, state hash)`: read directly on the
+    /// inline host, asked of the regions on threads.
+    fn client_regions(&mut self) -> HashMap<RegionCoords, (usize, u32)> {
+        if self.threaded {
+            return self.client.region_probe().expect("client regions").into_iter().collect();
+        }
+        let world = self.client.world_ref();
+        world
+            .loaded_regions()
+            .into_iter()
+            .map(|rc| (rc, (world.current_tick(&rc), state_hash(world.data(&rc)))))
+            .collect()
     }
     /// Local player's body translation (region-local). Panics if called before
     /// the player exists (i.e. before `connect`).
@@ -278,7 +318,7 @@ impl SimHarness {
             self.step();
             aligned = self.catch_up();
         }
-        for rc in self.client.world_ref().loaded_regions() {
+        for rc in self.client.loaded_regions() {
             match aligned.get(&rc) {
                 Some(&(t, client_hash, server_hash)) => {
                     assert_eq!(
@@ -434,26 +474,24 @@ impl SimHarness {
     /// Afterwards the client predicts the same number of ticks alone, which
     /// restores the lead it had — the run continues as if uninterrupted.
     fn catch_up(&mut self) -> HashMap<RegionCoords, (usize, u32, u32)> {
-        let regions = self.client.world_ref().loaded_regions();
         let mut steps = 0;
+        let mut client = self.client_regions();
         while steps < CATCH_UP_MAX_TICKS
-            && regions.iter().any(|rc| {
-                let t = self.client.world_ref().current_tick(rc);
-                !self.server_hashes.contains_key(&(*rc, t)) && self.server.region_tick(*rc) < t
+            && client.iter().any(|(rc, (t, _))| {
+                !self.server_hashes.contains_key(&(*rc, *t)) && self.server.region_tick(*rc) < *t
             })
         {
             self.tick_server();
             self.pump_client(false);
             steps += 1;
+            client = self.client_regions();
         }
 
-        let world = self.client.world_ref();
-        let aligned = regions
-            .iter()
-            .filter_map(|rc| {
-                let t = world.current_tick(rc);
-                let server = *self.server_hashes.get(&(*rc, t))?;
-                Some((*rc, (t, state_hash(world.data(rc)), server)))
+        let aligned = client
+            .into_iter()
+            .filter_map(|(rc, (t, hash))| {
+                let server = *self.server_hashes.get(&(rc, t))?;
+                Some((rc, (t, hash, server)))
             })
             .collect();
 

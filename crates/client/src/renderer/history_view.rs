@@ -9,7 +9,7 @@ use bevy::prelude::*;
 use std::collections::BTreeSet;
 
 use game::history::rules::EMBARK_PLAYER_PARTY_MAX;
-use game::history::{embark_allowed_in, CalendarTick, CivId, EmbarkRefusal, PersonId, SiteId, SocietyGrid};
+use game::history::{player_embark_allowed_in, CalendarTick, CivId, EmbarkRefusal, PersonId, SiteId, SocietyGrid};
 use game::RegionCoords;
 use game::{EmbarkOptions, EmbarkRequest, PersonInfo, SiteMarker};
 
@@ -45,6 +45,10 @@ pub struct HistoryView {
     /// The player's fortress (set by a successful Embark / Return, cleared by
     /// Retire): the Esc menu offers Retire while it is `Some`.
     pub fortress: Option<SiteId>,
+    /// The region the fortress stands in, from the server's `Fortress` packet
+    /// (cleared by Retire with `fortress`): the centre of the simulated
+    /// fortress neighbourhood (`world_scale::FORTRESS_NEAR_RADIUS`).
+    pub fortress_region: Option<RegionCoords>,
 }
 
 /// The embark panel's choice: a civ (index into `EmbarkOptions::civs`) and at
@@ -145,9 +149,9 @@ pub fn embark_rows(options: &EmbarkOptions, sel: &EmbarkSelection) -> Vec<Embark
     rows
 }
 
-/// The tile check the server applies, run on the client's markers.
+/// The tile check the server applies to the player's embark, run on the client's markers.
 pub fn embark_tile_check(grid: &SocietyGrid, sites: &[SiteMarker], region: RegionCoords) -> Result<(), EmbarkRefusal> {
-    embark_allowed_in(grid, sites.iter().map(|s| (s.site, s.region, s.abandoned)), region)
+    player_embark_allowed_in(grid, sites.iter().map(|s| (s.site, s.region, s.abandoned)), region)
 }
 
 /// What the player reads for a refusal.
@@ -163,6 +167,7 @@ pub fn embark_refusal_text(why: EmbarkRefusal) -> &'static str {
         EmbarkRefusal::UnavailablePerson(_) => "Someone chosen is no longer available",
         EmbarkRefusal::NotPlayerFounded => "Not a fortress you founded",
         EmbarkRefusal::InUse => "Another player is in that fortress",
+        EmbarkRefusal::TooSteep => "Too steep: the side of a mountain",
     }
 }
 
@@ -218,7 +223,7 @@ pub enum HistoryMsg {
     EmbarkOptions(EmbarkOptions),
     EmbarkResult(Result<SiteId, EmbarkRefusal>),
     PersonInfo(PersonInfo),
-    Fortress(Option<SiteId>),
+    Fortress(Option<game::HeldFortress>),
 }
 
 /// The bridge's writer for [`HistoryMsg`] (a param struct: `drain_client_updates`
@@ -271,7 +276,10 @@ pub fn apply_history_msgs(mut msgs: MessageReader<HistoryMsg>, mut view: ResMut<
     for msg in msgs.read() {
         match msg {
             HistoryMsg::Sites(v) => view.sites = v.clone(),
-            HistoryMsg::Fortress(f) => view.fortress = *f,
+            HistoryMsg::Fortress(f) => {
+                view.fortress = f.map(|f| f.site);
+                view.fortress_region = f.map(|f| f.region);
+            }
             HistoryMsg::Calendar(c) => view.calendar = Some(*c),
             HistoryMsg::Notice(n) => {
                 view.notices.push_back((n.clone(), now));

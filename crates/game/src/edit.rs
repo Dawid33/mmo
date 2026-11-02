@@ -484,25 +484,68 @@ impl Rollback {
     /// implied face-neighbour chunk of a cleared block, so the new air never
     /// borders implied ground. Returns how many blocks were cleared.
     pub fn clear_blocks_safe(&mut self, positions: &[BlockPos]) -> usize {
+        self.fill_blocks_safe(positions, Block::new(BlockId::AIR)).len()
+    }
+
+    /// Writes `block` (whole, unchiseled) at every position, undo-safely, as
+    /// [`Self::set_block_safe`] would one by one — the same refusals
+    /// (bedrock; for air, the edge ring; positions outside the region) and
+    /// the same materialisation of implied ground — but batched per chunk:
+    /// one block write, one `SetBlocks` and one collider patch per chunk
+    /// (a chunk slot with no chunk is spawned once, holding all its writes).
+    /// Each undo entry re-hashes its whole field under `HashMode::Full`, so
+    /// a per-block loop over a large set costs seconds on a play-size
+    /// region — on every rollback and replay too. Returns the positions
+    /// that changed, in chunk then block-index order.
+    pub fn fill_blocks_safe(&mut self, positions: &[BlockPos], block: Block) -> Vec<BlockPos> {
         use std::collections::{BTreeMap, BTreeSet};
-        // Chunk (index-key order) → its clearable blocks, deduplicated.
+        let breaking = block.id == BlockId::AIR;
+        // Chunk (index-key order) → its writable blocks, deduplicated.
         let mut by_chunk: BTreeMap<crate::ChunkIndexKey, BTreeMap<BlockIndex, BlockPos>> = BTreeMap::new();
         for &pos in positions {
-            if self.clearable_block(pos).is_none() {
-                continue;
+            let Some((coords, (bx, by, bz))) = locate(pos) else { continue };
+            let writable = if breaking {
+                self.clearable_block(pos).is_some()
+            } else {
+                match self.chunk_key_at(coords) {
+                    Some(e) => self.data.ecs.chunk.try_get(e).as_ref().is_some_and(|chunk| {
+                        let index = BlockIndex::from_xyz(bx, by, bz);
+                        let current = chunk.blocks.get(index);
+                        !self.is_bedrock(coords, current) && (current != block || chunk.chisel.contains_key(&index))
+                    }),
+                    None => self
+                        .implied_block(coords, (bx, by, bz))
+                        .is_none_or(|current| current != block && !self.is_bedrock(coords, current)),
+                }
+            };
+            if writable {
+                by_chunk
+                    .entry(crate::chunk_index_key(coords))
+                    .or_default()
+                    .insert(BlockIndex::from_xyz(bx, by, bz), pos);
             }
-            let (coords, (bx, by, bz)) = locate(pos).expect("clearable blocks are in the region");
-            by_chunk
-                .entry(crate::chunk_index_key(coords))
-                .or_default()
-                .insert(BlockIndex::from_xyz(bx, by, bz), pos);
         }
-        let air = Block::new(BlockId::AIR);
+        let mut written = Vec::new();
         let mut cleared = Vec::new();
         for (&key, blocks) in &by_chunk {
             let coords = crate::chunk_coords_of_index_key(key);
             self.materialize_ground_safe(coords);
-            let Some(e) = self.chunk_key_at(coords) else { continue };
+            let Some(e) = self.chunk_key_at(coords) else {
+                if breaking {
+                    continue;
+                }
+                // An empty slot (not implied ground — materialised above):
+                // one new chunk holding every write, as `write_block_safe`
+                // spawns one for a single block.
+                let mut chunk = Chunk::uniform(Block::new(BlockId::AIR));
+                for &index in blocks.keys() {
+                    let (bx, by, bz) = index.xyz();
+                    chunk.set_block(bx, by, bz, block);
+                }
+                self.spawn_chunk_safe(coords, chunk);
+                written.extend(blocks.values().copied());
+                continue;
+            };
             let Some(chunk) = self.data.ecs.chunk.try_get(e).as_ref() else { continue };
             let mut olds = Vec::with_capacity(blocks.len());
             let mut old_cells = crate::ColliderCells { blocks: Vec::new(), halves: Vec::new(), voxels: Vec::new() };
@@ -513,7 +556,7 @@ impl Rollback {
                 old_cells.voxels.extend(cells.voxels);
                 olds.push(BlockDelta { index, block: chunk.blocks.get(index), chisel: chunk.chisel.get(&index).cloned() });
             }
-            let news: Vec<BlockDelta> = blocks.keys().map(|&index| BlockDelta { index, block: air, chisel: None }).collect();
+            let news: Vec<BlockDelta> = blocks.keys().map(|&index| BlockDelta { index, block, chisel: None }).collect();
             // LIFO: registered before the write, so the old blocks are
             // re-sent after the chunk value is restored.
             self.data.ecs.chunk.emit_on_undo(GameDataUpdate::new(
@@ -523,16 +566,29 @@ impl Rollback {
             self.data
                 .ecs
                 .chunk
-                .set_chunk_blocks_safe(e, blocks.keys().map(|&index| (index, air, None)).collect());
+                .set_chunk_blocks_safe(e, blocks.keys().map(|&index| (index, block, None)).collect());
             self.data.send(GameDataUpdate::new(
                 GameDataTransactionKind::Do,
                 GameDataUpdateKind::SetBlocks(e, news),
             ));
-            let no_cells = crate::ColliderCells { blocks: Vec::new(), halves: Vec::new(), voxels: Vec::new() };
-            self.edit_block_colliders_safe(e, &old_cells, &no_cells);
-            cleared.extend(blocks.values().map(|&pos| (coords, pos)));
+            let mut new_cells = crate::ColliderCells { blocks: Vec::new(), halves: Vec::new(), voxels: Vec::new() };
+            if !breaking {
+                let chunk = self.data.ecs.chunk.get(e);
+                for &index in blocks.keys() {
+                    let cells = crate::collider_cells_of_block(chunk, index);
+                    new_cells.blocks.extend(cells.blocks);
+                    new_cells.halves.extend(cells.halves);
+                    new_cells.voxels.extend(cells.voxels);
+                }
+            }
+            self.edit_block_colliders_safe(e, &old_cells, &new_cells);
+            written.extend(blocks.values().copied());
+            if breaking {
+                cleared.extend(blocks.values().map(|&pos| (coords, pos)));
+            }
         }
-        // Every implied face neighbour in another chunk becomes real.
+        // Every implied face neighbour in another chunk of new air becomes
+        // real.
         let mut neighbours = BTreeSet::new();
         for &(coords, pos) in &cleared {
             for d in [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]] {
@@ -545,7 +601,7 @@ impl Rollback {
         for key in neighbours {
             self.materialize_ground_safe(crate::chunk_coords_of_index_key(key));
         }
-        cleared.len()
+        written
     }
 
     /// Runs one break or place for `client`'s player from its eye along its

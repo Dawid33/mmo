@@ -5,7 +5,8 @@ use std::rc::Rc;
 
 use slint_ui::slint::platform::{PointerEventButton, WindowEvent};
 use slint_ui::slint::{LogicalPosition, ModelRc, SharedString, VecModel};
-use slint_ui::{AssetViewerUi, Overlay};
+use slint_ui::Overlay;
+use slint_ui_tools::AssetViewerUi;
 
 const WIDTH: u32 = 1600;
 const HEIGHT: u32 = 900;

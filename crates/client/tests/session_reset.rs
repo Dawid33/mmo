@@ -172,8 +172,10 @@ fn count<F: bevy::ecs::query::QueryFilter>(app: &mut App) -> usize {
 /// The `GameUi` / `HudUi` properties a session sets, as (name, value) pairs.
 fn game_ui_props(ui: &slint_ui::GameUi) -> Vec<(&'static str, String)> {
     vec![
-        ("home-region", ui.get_home_region().to_string()),
-        ("connection", ui.get_connection().to_string()),
+        ("tool-name", ui.get_tool_name().to_string()),
+        ("fortress-tab", ui.get_fortress_tab().to_string()),
+        ("settings-open", ui.get_settings_open().to_string()),
+        ("encyclopedia-open", ui.get_encyclopedia_open().to_string()),
         ("level-text", ui.get_level_text().to_string()),
         ("tools-available", ui.get_tools_available().to_string()),
         ("active-tool", ui.get_active_tool().to_string()),

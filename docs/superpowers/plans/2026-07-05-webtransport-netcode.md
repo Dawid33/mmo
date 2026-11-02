@@ -619,7 +619,7 @@ pub fn connect(server_send: Sender<ServerPacket>, client_recv: Receiver<ClientPa
             error!("webtransport connection failed: {e:?}");
             // Spec: dev-grade on-screen signal, not just the console.
             if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
-                doc.set_title("CONNECTION LOST — Labour of Love");
+                doc.set_title("CONNECTION LOST — Orion");
             }
         }
     });

@@ -6,7 +6,7 @@ use bevy::math::Vec3A;
 use bevy::mesh::Mesh;
 use bevy::pbr::ExtendedMaterial;
 use bevy::prelude::*;
-use bevy::tasks::{block_on, futures_lite::future, AsyncComputeTaskPool, Task};
+use bevy::tasks::{block_on, futures_lite::future, Task};
 pub use game::lod::{build_far_lod_cells, downsample2, LodCell};
 use game::Voxel;
 
@@ -23,7 +23,7 @@ use super::queue::MeshBudgets;
 use super::records;
 #[cfg(test)]
 use super::MeshingTask;
-use super::{ChunkMaterial, MeshOutput, TerrainQuadCount};
+use super::{ChunkMaterial, MeshOutput, MeshWire, TerrainQuadCount};
 
 /// Does `q`'s plane sit on the 32-grid's outer edge along its own face axis?
 /// Only X/Z side faces are ever skirted — Y (top/bottom) faces never are.
@@ -112,21 +112,44 @@ pub fn mesh_lod_grid(
 /// counterpart to `mesh_lod_grid`, used by `spawn_lod_mesh_tasks`.
 /// `connectivity` is always 0: LOD chunks never carry a connectivity mask
 /// (the field only exists so `MeshOutput` can be shared with full-res).
+/// One LOD cell grid to mesh, with its packed neighbours (a compute job,
+/// `renderer::compute`): the dense expansions happen in the job.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct LodMeshJob {
+    pub packed: game::lod::PackedLodGrid,
+    pub neighbors: BTreeMap<[i32; 3], game::lod::PackedLodGrid>,
+    pub layers: BlockTextureLayers,
+    pub pull: bool,
+}
+
+impl super::super::compute::ComputeJob for LodMeshJob {
+    type Output = MeshWire;
+    const KIND: super::super::compute::JobKind = super::super::compute::JobKind::LodMesh;
+
+    fn run(self) -> MeshWire {
+        let grid = decode_lod_grid(&self.packed);
+        let neigh: BTreeMap<[i32; 3], Vec<Voxel>> =
+            self.neighbors.iter().map(|(&off, packed)| (off, decode_lod_grid(packed))).collect();
+        let neighbor_refs: BTreeMap<[i32; 3], &[Voxel]> = neigh.iter().map(|(&k, v)| (k, v.as_slice())).collect();
+        mesh_lod_output(&grid, &neighbor_refs, &self.layers, self.pull)
+    }
+}
+
 fn mesh_lod_output(
     grid: &[Voxel],
     neighbors: &BTreeMap<[i32; 3], &[Voxel]>,
     layers: &BlockTextureLayers,
     pull: bool,
-) -> MeshOutput {
+) -> MeshWire {
     let quads = lod_quads(grid, neighbors);
     let quad_count = u32::try_from(quads.len()).expect("terrain quad count fits u32");
     let (mesh, records) = if pull {
         let r = records::quads_to_records(&quads, layers);
         (None, (!r.is_empty()).then_some(r))
     } else {
-        (emit::quads_to_mesh(&quads, layers), None)
+        (emit::quads_to_mesh_data(&quads, layers), None)
     };
-    MeshOutput {
+    MeshWire {
         mesh,
         records,
         connectivity: 0,
@@ -207,6 +230,11 @@ impl LodBuildQueue {
     pub fn remove(&mut self, entity: Entity) {
         self.raster.remove(&entity);
         self.brick.remove(&entity);
+    }
+
+    /// Whether `entity` waits for a raster mesh build.
+    pub fn contains_raster(&self, entity: Entity) -> bool {
+        self.raster.contains(&entity)
     }
 
     pub fn pending_count(&self) -> usize {
@@ -313,11 +341,10 @@ pub fn spawn_lod_mesh_tasks(
     if capacity == 0 {
         return;
     }
-    let pull = render_config
-        .as_deref()
-        .is_none_or(|config| config.near.uses_quad_records());
+    // Records on every backend: the pulled path draws them, the per-chunk
+    // path merges a root's cells into tiles (`lod_tiles`).
+    let pull = true;
 
-    let pool = AsyncComputeTaskPool::get();
     let batch = queue.raster_batch(capacity);
     for e in batch {
         queue.remove(e);
@@ -335,18 +362,8 @@ pub fn spawn_lod_mesh_tasks(
                 }
             }
         }
-        let packed = voxels.0.clone();
-        let layers = layers.0.clone();
-        let task = pool.spawn(async move {
-            let grid = decode_lod_grid(&packed);
-            let neigh: BTreeMap<[i32; 3], Vec<Voxel>> = packed_neigh
-                .iter()
-                .map(|(&off, packed)| (off, decode_lod_grid(packed)))
-                .collect();
-            let neighbor_refs: BTreeMap<[i32; 3], &[Voxel]> =
-                neigh.iter().map(|(&k, v)| (k, v.as_slice())).collect();
-            mesh_lod_output(&grid, &neighbor_refs, &BlockTextureLayers(layers), pull)
-        });
+        let job = LodMeshJob { packed: voxels.0.clone(), neighbors: packed_neigh, layers: layers.clone(), pull };
+        let task = super::super::compute::spawn(job, MeshWire::into_output);
         commands.entity(e).insert(LodMeshTask(task));
     }
 }
@@ -365,7 +382,12 @@ pub fn apply_lod_meshes(
     material: Option<Res<ChunkMaterial>>,
     budgets: Res<MeshBudgets>,
     mut uploads: ResMut<FarFrameUploads>,
+    render_config: Option<Res<super::super::config::TerrainRenderConfig>>,
+    grouped: Query<(), With<super::lod_tiles::LodGroup>>,
 ) {
+    // A cell of a LOD root keeps its records for its tile's merged list
+    // (`lod_tiles`), on every backend; one with no group draws its own.
+    let per_chunk = super::chunk_mesh::per_chunk_backend(render_config.as_deref());
     for (e, mut task) in &mut tasks {
         if uploads.0 >= budgets.uploads_per_frame {
             break; // remaining completed tasks attach next frame
@@ -373,7 +395,8 @@ pub fn apply_lod_meshes(
         let Some(output) = block_on(future::poll_once(&mut task.0)) else {
             continue;
         };
-        if output.requires_upload() {
+        let tiled = grouped.contains(e);
+        if output.requires_upload() && !tiled {
             uploads.0 += 1;
         }
         let MeshOutput {
@@ -384,7 +407,27 @@ pub fn apply_lod_meshes(
         } = output;
         let mut ec = commands.entity(e);
         ec.remove::<LodMeshTask>();
+        if tiled {
+            // Ready (`LodRasterReady`) once its tile is drawn.
+            ec.insert(super::lod_tiles::LodTileDirty);
+            match records {
+                Some(records) => {
+                    ec.insert((super::chunk_mesh::BrickRecords(std::sync::Arc::new(records)), TerrainQuadCount(quad_count)));
+                }
+                None => {
+                    ec.remove::<(super::chunk_mesh::BrickRecords, TerrainQuadCount)>();
+                }
+            }
+            continue;
+        }
         ec.insert(LodRasterReady);
+        let (records, mesh) = match (per_chunk, records) {
+            // No tile to join: draws its own records.
+            (true, Some(records)) => {
+                (None, super::chunk_mesh::records_to_mesh_data(&records).map(emit::MeshData::into_mesh))
+            }
+            (_, records) => (records, mesh),
+        };
         if let Some(records) = records {
             ec.insert((
                 super::super::voxel_pull::ChunkQuads(std::sync::Arc::new(records)),
@@ -433,6 +476,7 @@ pub fn apply_lod_meshes(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bevy::tasks::AsyncComputeTaskPool;
     use game::{BlockId, BRICK_VOXEL_COUNT};
 
     /// Two side quads on the same plane, facing the same way, whose rects

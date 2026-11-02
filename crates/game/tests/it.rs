@@ -9,6 +9,7 @@
 //! - `wasm_determinism`: also built for wasm32 (just determinism-wasm).
 //! - `hash_mode`: flips the process-global HASH_MODE to Off/Delta.
 //! - `voxel_body`: flips the process-global HASH_MODE to Delta.
+//! - `state_hash_check`: sets the process-global state hash interval.
 
 mod common;
 mod adventure;
