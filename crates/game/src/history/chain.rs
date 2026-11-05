@@ -86,6 +86,7 @@ impl History {
     /// abandon the site if nobody is left. A person already dead is left alone.
     pub fn record_death(&mut self, person: PersonId, cause: DeathCause) {
         let now = self.now;
+        self.positions.remove(&person);
         let Some(p) = self.people.get_mut(&person) else { return };
         if !p.alive() {
             return;

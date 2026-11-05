@@ -81,6 +81,62 @@ pub struct History {
     notices: Vec<(crate::RegionCoords, String)>,
 }
 
+/// The version-2 file body: [`History`] before `positions`. Bincode is positional, so a
+/// v2 body only decodes through this shape.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct HistoryV2 {
+    seed: u64,
+    now: CalendarTick,
+    people: BTreeMap<PersonId, Person>,
+    sites: BTreeMap<SiteId, Site>,
+    civs: BTreeMap<CivId, Civ>,
+    journeys: BTreeMap<JourneyId, Journey>,
+    queue: BTreeMap<(CalendarTick, u64), Step>,
+    next_seq: u64,
+    next_ids: [u32; 4],
+    log: Vec<LogEntry>,
+}
+
+impl HistoryV2 {
+    pub(crate) fn upgrade(self) -> History {
+        History {
+            seed: self.seed,
+            now: self.now,
+            people: self.people,
+            sites: self.sites,
+            civs: self.civs,
+            journeys: self.journeys,
+            queue: self.queue,
+            next_seq: self.next_seq,
+            next_ids: self.next_ids,
+            log: self.log,
+            positions: BTreeMap::new(),
+            grid: None,
+            running: BTreeSet::new(),
+            stopping: BTreeSet::new(),
+            directives: Vec::new(),
+            stray_candidates: BTreeSet::new(),
+            held_since: BTreeMap::new(),
+            notices: Vec::new(),
+        }
+    }
+
+    pub(crate) fn of(h: &History) -> HistoryV2 {
+        HistoryV2 {
+            seed: h.seed,
+            now: h.now,
+            people: h.people.clone(),
+            sites: h.sites.clone(),
+            civs: h.civs.clone(),
+            journeys: h.journeys.clone(),
+            queue: h.queue.clone(),
+            next_seq: h.next_seq,
+            next_ids: h.next_ids,
+            log: h.log.clone(),
+        }
+    }
+}
+
 impl History {
     pub fn new(seed: u64, start: CalendarTick, grid: SocietyGrid) -> Self {
         History {

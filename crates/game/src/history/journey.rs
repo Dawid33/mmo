@@ -75,6 +75,7 @@ impl History {
         let departed = self.now;
         let mut left_site = false;
         for p in &people {
+            self.positions.remove(p);
             if let Some(s) = from.and_then(|f| self.sites.get_mut(&f)) {
                 left_site |= s.members.remove(p);
             }

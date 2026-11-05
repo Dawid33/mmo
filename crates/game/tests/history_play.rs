@@ -6,6 +6,7 @@ use crate::history_handover::{assert_one_place, bodies, floored_region, land_map
 use crossbeam::channel::{unbounded, Receiver};
 use game::history::bootstrap::{bootstrap, BootstrapParams};
 use game::history::log::LogKind;
+use game::history::persist;
 use game::history::rules::EMBARK_PLAYER_PARTY_MAX;
 use game::history::*;
 use game::{
@@ -880,6 +881,13 @@ fn fortress_claim_survives_restart() {
     assert_eq!(w.return_to(B, site), Err(EmbarkRefusal::InUse));
 }
 
+fn spawn_at(events: &[GameEventKind], who: PersonId) -> Option<SpawnAt> {
+    events.iter().find_map(|e| match e {
+        GameEventKind::SpawnPerson(s) if s.person == who => Some(s.at),
+        _ => None,
+    })
+}
+
 #[test]
 fn autosave_positions_are_respawn_positions() {
     let mut h = history();
@@ -887,26 +895,61 @@ fn autosave_positions_are_respawn_positions() {
     let region = h.site(site).unwrap().region;
     let events = h.region_started(region);
     assert_eq!(events.len(), people.len());
-    // The autosave sees person 0 far from the landing: block (3, 5), region-local units.
     let who = people[0];
+    let landing = spawn_at(&events, who).expect("spawns at the landing");
+    // The autosave sees them far from the landing: block (3, 5), region-local units.
     let b = game::BLOCK_VOXELS as f32;
     h.note_positions(vec![(who, [3.5 * b, 40.0, 5.5 * b])]);
     // A server restart: save, load (bodies go back to the abstract history), region starts.
     let grid = h.grid().clone();
-    use game::history::persist;
     let mut h = persist::decode(&persist::encode(&h), grid).expect("history reloads");
     let events = h.region_started(region);
-    let spawn = events
-        .iter()
-        .find_map(|e| match e {
-            GameEventKind::SpawnPerson(s) if s.person == who => Some(*s),
-            _ => None,
-        })
-        .expect("the person respawns");
-    assert_eq!(spawn.at, SpawnAt::Column([3, 5]));
-    // Others still land at the landing, and the note is used up.
+    assert_eq!(spawn_at(&events, who), Some(SpawnAt::Column([3, 5])));
+    assert_eq!(h.noted_position(who), None, "the note is used up");
+    // A park records positions too: the next start spawns them there.
+    h.region_stopping(region);
+    h.region_parked(region, vec![(who, [7.5 * b, 40.0, 9.5 * b])]);
+    let events = h.region_started(region);
+    assert_eq!(spawn_at(&events, who), Some(SpawnAt::Column([7, 9])));
+    // Used up, so the next start is the plain landing again.
     h.region_stopping(region);
     h.region_parked(region, vec![]);
-    let again = h.region_started(region);
-    assert!(again.iter().any(|e| matches!(e, GameEventKind::SpawnPerson(s) if s.person == who && s.at != SpawnAt::Column([3, 5]))));
+    let events = h.region_started(region);
+    assert_eq!(spawn_at(&events, who), Some(landing));
+}
+
+#[test]
+fn stale_position_not_used_after_leaving() {
+    let mut h = history();
+    let (site, _, people) = home_site(&h);
+    let region = h.site(site).unwrap().region;
+    h.region_started(region);
+    let (left, died) = (people[0], people[1]);
+    h.note_positions(vec![(left, [40.0, 0.0, 40.0]), (died, [40.0, 0.0, 40.0])]);
+    assert!(h.noted_position(left).is_some() && h.noted_position(died).is_some());
+    h.person_crossed(left, rc(region.x + 1, region.z));
+    assert_eq!(h.noted_position(left), None);
+    h.record_death(died, game::history::records::DeathCause::OldAge);
+    assert_eq!(h.noted_position(died), None);
+}
+
+#[test]
+fn history_v2_file_loads_with_empty_positions() {
+    let mut h = history();
+    let (site, _, people) = home_site(&h);
+    let region = h.site(site).unwrap().region;
+    h.region_started(region);
+    h.note_positions(vec![(people[0], [40.0, 0.0, 40.0])]);
+    let grid = h.grid().clone();
+    let bytes = persist::encode_v2(&h);
+    assert_eq!(u32::from_le_bytes(bytes[8..12].try_into().unwrap()), 2);
+    let back = persist::decode(&bytes, grid.clone()).expect("a v2 file loads");
+    assert_eq!(back.noted_position(people[0]), None);
+    assert_eq!(back.people().count(), h.people().count());
+    assert_eq!(back.sites().count(), h.sites().count());
+    assert_eq!(back.log.len(), h.log.len());
+    assert_eq!(back.now(), h.now());
+    // And it is written back as the current version.
+    let again = persist::encode(&back);
+    assert_eq!(u32::from_le_bytes(again[8..12].try_into().unwrap()), persist::HISTORY_FILE_VERSION);
 }

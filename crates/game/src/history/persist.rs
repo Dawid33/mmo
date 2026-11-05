@@ -5,8 +5,9 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 /// 2: `Person::home_location` and `Journey::held_in` (region hand-over).
-/// 3: `History::positions` (autosave-noted body positions).
+/// 3: `History::positions` (autosave-noted body positions). Version 2 files still load.
 pub const HISTORY_FILE_VERSION: u32 = 3;
+const OLDEST_LOADABLE_VERSION: u32 = 2;
 pub const HISTORY_MAGIC: [u8; 8] = *b"MMOHIST\0";
 
 /// Largest decompressed history body a file may claim; a bigger size prefix is refused
@@ -41,10 +42,19 @@ impl fmt::Display for HistoryLoadError {
 impl std::error::Error for HistoryLoadError {}
 
 pub fn encode(h: &History) -> Vec<u8> {
-    let body = bincode::serialize(h).expect("history serializes");
+    encode_body(h, HISTORY_FILE_VERSION, bincode::serialize(h).expect("history serializes"))
+}
+
+/// A version-2 file of `h` (without its positions), for the old-file load test.
+#[doc(hidden)]
+pub fn encode_v2(h: &History) -> Vec<u8> {
+    encode_body(h, 2, bincode::serialize(&super::HistoryV2::of(h)).expect("history serializes"))
+}
+
+fn encode_body(h: &History, version: u32, body: Vec<u8>) -> Vec<u8> {
     let mut out = Vec::with_capacity(HEADER_LEN + body.len() / 2);
     out.extend_from_slice(&HISTORY_MAGIC);
-    out.extend_from_slice(&HISTORY_FILE_VERSION.to_le_bytes());
+    out.extend_from_slice(&version.to_le_bytes());
     out.extend_from_slice(&h.grid().world_id().to_le_bytes());
     out.extend_from_slice(&lz4_flex::compress_prepend_size(&body));
     out
@@ -59,7 +69,7 @@ pub fn decode(bytes: &[u8], grid: SocietyGrid) -> Result<History, HistoryLoadErr
     }
     let u32_at = |i: usize| u32::from_le_bytes(bytes[i..i + 4].try_into().expect("4 bytes"));
     let found = u32_at(8);
-    if found != HISTORY_FILE_VERSION {
+    if !(OLDEST_LOADABLE_VERSION..=HISTORY_FILE_VERSION).contains(&found) {
         return Err(HistoryLoadError::OldVersion { found });
     }
     if u32_at(12) != grid.world_id() {
@@ -77,8 +87,12 @@ pub fn decode(bytes: &[u8], grid: SocietyGrid) -> Result<History, HistoryLoadErr
     if body.len() != size {
         return Err(HistoryLoadError::Corrupt(format!("body is {} bytes, header says {size}", body.len())));
     }
-    let mut h: History =
-        bincode::deserialize(&body).map_err(|e| HistoryLoadError::Corrupt(e.to_string()))?;
+    let corrupt = |e: bincode::Error| HistoryLoadError::Corrupt(e.to_string());
+    let mut h: History = if found == 2 {
+        bincode::deserialize::<super::HistoryV2>(&body).map_err(corrupt)?.upgrade()
+    } else {
+        bincode::deserialize(&body).map_err(corrupt)?
+    };
     h.set_grid(grid);
     h.after_load();
     Ok(h)

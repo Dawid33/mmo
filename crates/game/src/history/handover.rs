@@ -74,6 +74,10 @@ impl History {
     }
 
     fn emit(&mut self, region: RegionCoords, event: GameEventKind) {
+        // A body leaving (despawn, walk-out) makes its noted spot stale.
+        if let GameEventKind::DespawnPerson(p) | GameEventKind::WalkOut(p, _) = &event {
+            self.positions.remove(p);
+        }
         self.directives.push(Directive { region, event });
     }
 
@@ -357,6 +361,11 @@ impl History {
         }
     }
 
+    /// The spot noted for `person` by [`History::note_positions`], if still pending.
+    pub fn noted_position(&self, person: PersonId) -> Option<(RegionCoords, [f32; 3])> {
+        self.positions.get(&person).copied()
+    }
+
     /// After a load: nothing runs yet, so everyone embodied goes back to the abstract
     /// history and every held journey resumes, as if their regions had parked.
     /// [`super::persist::decode`] calls it.
@@ -471,6 +480,7 @@ impl History {
     /// crossing out of the region a journey is held in (or of an unheld journey) moves the
     /// journey; it never steps back along its route.
     pub fn person_crossed(&mut self, person: PersonId, to: RegionCoords) -> bool {
+        self.positions.remove(&person);
         let Some(p) = self.people.get_mut(&person).filter(|p| p.alive()) else { return false };
         let home = p.abstract_location();
         let from = match p.location {
