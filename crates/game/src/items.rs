@@ -39,7 +39,7 @@ impl ItemId {
 
 /// What a broken block yields.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Drop {
+pub enum BlockDrop {
     /// The block's own item.
     #[default]
     Same,
@@ -63,9 +63,9 @@ pub fn drop_of(block: Block) -> Option<ItemStack> {
         return None;
     }
     let item = match block_props().drop(block.id) {
-        Drop::Same => ItemId::block(block.id),
-        Drop::Nothing => return None,
-        Drop::Item(i) => i,
+        BlockDrop::Same => ItemId::block(block.id),
+        BlockDrop::Nothing => return None,
+        BlockDrop::Item(i) => i,
     };
     Some(ItemStack { item, count: 1 })
 }

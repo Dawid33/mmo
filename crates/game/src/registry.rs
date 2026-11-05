@@ -177,12 +177,12 @@ impl BlockRegistry {
             match &def.drop {
                 None | Some(DropDef::Same) => {}
                 Some(DropDef::Nothing) => {
-                    p.drops.insert(id.0, crate::Drop::Nothing);
+                    p.drops.insert(id.0, crate::BlockDrop::Nothing);
                 }
                 Some(DropDef::Item(n)) => {
                     // Checked by `from_ron`.
                     let item = self.drop_item(n).expect("drop item validated at load");
-                    p.drops.insert(id.0, crate::Drop::Item(item));
+                    p.drops.insert(id.0, crate::BlockDrop::Item(item));
                 }
             }
             // Tree trunks are named `<species>_log` (worldgen's `TreeBlocks`),

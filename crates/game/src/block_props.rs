@@ -48,7 +48,7 @@ pub struct BlockProps {
     /// Non-default hardness only.
     pub(crate) hardness: BTreeMap<u16, u16>,
     /// Non-`Same` drops only.
-    pub(crate) drops: BTreeMap<u16, crate::Drop>,
+    pub(crate) drops: BTreeMap<u16, crate::BlockDrop>,
     pub(crate) names: BTreeMap<u16, String>,
 }
 
@@ -82,7 +82,7 @@ impl BlockProps {
     }
 
     /// What the block yields when broken.
-    pub fn drop(&self, id: BlockId) -> crate::Drop {
+    pub fn drop(&self, id: BlockId) -> crate::BlockDrop {
         self.drops.get(&id.0).copied().unwrap_or_default()
     }
 
