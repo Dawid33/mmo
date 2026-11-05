@@ -4,6 +4,7 @@
 // these pixels. Sizes the client also uses are in `HudConfig`; the client
 // asserts they match its constants.
 import { GameTheme } from "theme.slint";
+import { InventoryConfig, ItemSlot, SlotCell } from "inventory.slint";
 
 export global HudConfig {
     out property <length> crosshair-arm: 16px;
@@ -12,6 +13,8 @@ export global HudConfig {
     out property <length> minimap-size: 220px;
     out property <length> minimap-margin: 12px;
     out property <length> minimap-outline: 2px;
+    out property <length> mining-bar-width: 48px;
+    out property <length> mining-bar-height: 6px;
 }
 
 export component HudUi inherits Window {
@@ -22,6 +25,13 @@ export component HudUi inherits Window {
 
     // First person, while the cursor is locked for mouse look.
     in property <bool> crosshair-visible;
+
+    // Adventure first person: the hotbar strip (bottom centre, 9 slots, the
+    // selected one highlighted) and the mining progress ring around the
+    // crosshair (0..1; 0 = not mining).
+    in property <[ItemSlot]> hotbar;
+    in property <int> hotbar-selected;
+    in property <float> mining-progress;
 
     // Commander box selection, window logical pixels.
     in property <bool> band-visible;
@@ -94,6 +104,38 @@ export component HudUi inherits Window {
             x: (parent.width - HudConfig.crosshair-width) / 2;
             width: HudConfig.crosshair-width;
             background: white;
+        }
+    }
+
+    if root.hotbar.length > 0: Rectangle {
+        width: root.hotbar.length * (InventoryConfig.slot-size + InventoryConfig.slot-gap) + InventoryConfig.slot-gap;
+        height: InventoryConfig.slot-size + 2 * InventoryConfig.slot-gap;
+        x: (root.width - self.width) / 2;
+        y: root.height - self.height - 4px;
+        background: rgba(0, 0, 0, 0.4);
+
+        for slot[i] in root.hotbar: SlotCell {
+            x: InventoryConfig.slot-gap + i * (InventoryConfig.slot-size + InventoryConfig.slot-gap);
+            y: InventoryConfig.slot-gap;
+            slot: slot;
+            selected: i == root.hotbar-selected;
+            interactive: false;
+        }
+    }
+
+    // Mining progress: a bar under the crosshair that fills as the block
+    // gives (a ring cannot be stroked with the software renderer's shapes).
+    if root.mining-progress > 0: Rectangle {
+        width: HudConfig.mining-bar-width;
+        height: HudConfig.mining-bar-height;
+        x: (root.width - self.width) / 2;
+        y: root.height / 2 + HudConfig.crosshair-arm;
+        background: rgba(0, 0, 0, 0.6);
+
+        Rectangle {
+            x: 0px;
+            width: parent.width * clamp(root.mining-progress, 0, 1);
+            background: rgb(255, 215, 90);
         }
     }
 }

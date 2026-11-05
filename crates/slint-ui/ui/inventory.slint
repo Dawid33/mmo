@@ -1,0 +1,136 @@
+import { FrameFace, GraphicalSets, LabelFace, Styles } from "@widgets";
+
+// One item slot as the sim's projection gives it (`game::ui::SlotView`):
+// `icon` is empty (zero-sized) for an item with no texture of its own.
+export struct ItemSlot {
+    filled: bool,
+    count: string,
+    icon: image,
+}
+
+export global InventoryConfig {
+    out property <length> slot-size: 44px;
+    out property <length> slot-gap: 3px;
+    out property <int> columns: 9;
+}
+
+// One slot square: a dark well, the item's icon (a tint when it has none),
+// its count bottom right, a bright border when `selected`.
+export component SlotCell {
+    in property <ItemSlot> slot;
+    in property <bool> selected;
+    // `right` = the secondary button.
+    callback pressed(bool);
+    // False for the stack drawn at the pointer, which presses pass through.
+    in property <bool> interactive: true;
+    width: InventoryConfig.slot-size;
+    height: InventoryConfig.slot-size;
+
+    Rectangle {
+        background: rgba(20, 14, 10, 0.85);
+        border-width: root.selected ? 3px : 1px;
+        border-color: root.selected ? rgb(255, 215, 90) : rgba(190, 150, 70, 0.6);
+    }
+
+    if root.slot.filled && root.slot.icon.width > 0: Image {
+        x: 4px;
+        y: 4px;
+        width: parent.width - 8px;
+        height: parent.height - 8px;
+        source: root.slot.icon;
+        image-fit: contain;
+        image-rendering: pixelated;
+    }
+    if root.slot.filled && root.slot.icon.width <= 0: Rectangle {
+        x: 8px;
+        y: 8px;
+        width: parent.width - 16px;
+        height: parent.height - 16px;
+        background: rgb(102, 77, 51);
+    }
+    if root.slot.filled: Text {
+        x: parent.width - self.width - 3px;
+        y: parent.height - self.height - 1px;
+        text: root.slot.count;
+        color: white;
+        font-size: 12px;
+        font-weight: 700;
+    }
+
+    if root.interactive: TouchArea {
+        pointer-event(event) => {
+            if (event.kind == PointerEventKind.down) {
+                root.pressed(event.button == PointerEventButton.right);
+            }
+        }
+    }
+}
+
+// The inventory screen, window-sized and modal: the chest's 9 x 3 grid above
+// (when `container` has slots), the main 9 x 3 grid, the hotbar row, and the
+// stack on the cursor following `pointer-x/y`. A slot press reports
+// `(in-container, index, right)` with the index within its own inventory:
+// hotbar column c = c, main row r column c = 9 + r * 9 + c, chest row r
+// column c = r * 9 + c. Presses elsewhere are swallowed.
+export component InventoryScreen {
+    in property <[ItemSlot]> hotbar-slots;
+    in property <[ItemSlot]> main-slots;
+    in property <[ItemSlot]> container-slots;
+    in property <ItemSlot> cursor-slot;
+    in property <int> selected;
+    in property <length> pointer-x;
+    in property <length> pointer-y;
+    callback slot-pressed(bool, int, bool);
+
+    property <length> pitch: InventoryConfig.slot-size + InventoryConfig.slot-gap;
+    property <length> chest-height: root.container-slots.length > 0 ? 3 * root.pitch + 12px : 0px;
+    // Top-left of the first slot of each grid (window logical pixels), for
+    // headless tests; columns are `slot-pitch` apart.
+    out property <length> grid-left: grid.absolute-position.x + grid.content-x;
+    out property <length> container-top: grid.absolute-position.y + grid.content-y;
+    out property <length> main-top: root.container-top + root.chest-height;
+    out property <length> hotbar-top: root.main-top + 3 * root.pitch + 8px;
+    out property <length> slot-pitch: root.pitch;
+    out property <length> slot-size: InventoryConfig.slot-size;
+
+    // Swallows presses outside the slots.
+    TouchArea { }
+
+    grid := FrameFace {
+        title: root.container-slots.length > 0 ? "Chest" : "Inventory";
+        width: self.content-x + 9 * root.pitch + Styles.frame.box.padding.right
+            + GraphicalSets.inset(Styles.frame.graphics).right;
+        height: self.content-y + root.chest-height + 6 * root.pitch + 8px + Styles.frame.box.padding.bottom
+            + GraphicalSets.inset(Styles.frame.graphics).bottom;
+        x: (root.width - self.width) / 2;
+        y: (root.height - self.height) / 2;
+
+        for slot[i] in root.container-slots: SlotCell {
+            x: grid.content-x + mod(i, 9) * root.pitch;
+            y: grid.content-y + floor(i / 9) * root.pitch;
+            slot: slot;
+            pressed(right) => { root.slot-pressed(true, i, right); }
+        }
+        for slot[i] in root.main-slots: SlotCell {
+            x: grid.content-x + mod(i, 9) * root.pitch;
+            y: grid.content-y + root.chest-height + floor(i / 9) * root.pitch;
+            slot: slot;
+            pressed(right) => { root.slot-pressed(false, 9 + i, right); }
+        }
+        for slot[i] in root.hotbar-slots: SlotCell {
+            x: grid.content-x + i * root.pitch;
+            y: grid.content-y + root.chest-height + 3 * root.pitch + 8px;
+            slot: slot;
+            selected: i == root.selected;
+            pressed(right) => { root.slot-pressed(false, i, right); }
+        }
+    }
+
+    // The held stack, drawn over everything at the pointer.
+    if root.cursor-slot.filled: SlotCell {
+        x: root.pointer-x - self.width / 2;
+        y: root.pointer-y - self.height / 2;
+        slot: root.cursor-slot;
+        interactive: false;
+    }
+}

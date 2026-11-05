@@ -198,6 +198,9 @@ pub struct Screens {
     /// The menu column's stub windows (`ui/stub-window.slint`).
     pub settings: bool,
     pub encyclopedia: bool,
+    /// The inventory / chest screen: opened and closed by the sim
+    /// (`HudItems`), modal while open.
+    pub inventory: bool,
 }
 
 impl Screens {
@@ -208,11 +211,12 @@ impl Screens {
             wheel: ui.get_wheel_open(),
             settings: ui.get_settings_open(),
             encyclopedia: ui.get_encyclopedia_open(),
+            inventory: ui.get_inventory_open(),
         }
     }
 
     pub fn any(self) -> bool {
-        self.menu || self.map || self.wheel || self.settings || self.encyclopedia
+        self.menu || self.map || self.wheel || self.settings || self.encyclopedia || self.inventory
     }
 
     /// [`MENU_KEY`] (with no designation to cancel): the wheel closes first,
@@ -314,6 +318,17 @@ fn blocker_home(embarked: bool, home: Option<RegionCoords>) -> Option<RegionCoor
 /// Whether the arrival map is modal now (not embarked, the map received).
 fn map_modal(embarked: Option<&Embarked>, world_map: &WorldMapState) -> bool {
     !embarked.is_none_or(|e| e.0) && world_map.map.is_some()
+}
+
+/// Slot presses on the inventory screen: (in the chest, index within its
+/// inventory, right button).
+struct InventoryClicks(Rc<RefCell<Vec<(bool, i32, bool)>>>);
+
+/// The sim slot a screen press names: container slots are `Container(i)`,
+/// the player's are `Player(i)` (hotbar `0..9`, main grid `9..36`).
+pub fn slot_ref(container: bool, index: i32) -> Option<game::SlotRef> {
+    let i = u8::try_from(index).ok()?;
+    Some(if container { game::SlotRef::Container(i) } else { game::SlotRef::Player(i) })
 }
 
 /// Filled by the game UI's callbacks during event dispatch (`!Send`, a
@@ -510,9 +525,13 @@ impl Plugin for SlintOverlayPlugin {
         )
             .add_session_reset::<PlayPending>()
             .add_session_reset::<PeopleRows>()
+            .init_resource::<HudItems>()
+            .add_session_reset::<HudItems>()
             .add_systems(
                 Update,
                 (
+                    sync_inventory_screen.before(menu_keys),
+                    inventory_clicks,
                     // Before every commander input system (the chain starts
                     // at `minimap_pointer`, `designate_keys` is in it), so
                     // `CursorPolicy::ui_modal` holds this frame and one Esc
@@ -538,18 +557,30 @@ impl Plugin for SlintOverlayPlugin {
 #[derive(Resource, Default)]
 pub struct UiUpdates(pub Option<crossbeam::channel::Receiver<game::UiUpdate>>);
 
-/// Apply the sim's UI projection: the cursor grab it asks for. Its hotbar
-/// is not drawn (the HUD's hotbar strip was removed; the fortress tools are
-/// on the tool wheel).
+/// The sim's item UI as last projected: the hotbar and mining progress the
+/// HUD draws in Adventure first person, and the inventory / chest screen.
+#[derive(Resource, Default, Debug, Clone, PartialEq)]
+pub struct HudItems {
+    pub hotbar: game::HotbarView,
+    pub inventory: game::InventoryView,
+    /// Mining progress, 0..=1000.
+    pub mining: Option<u32>,
+}
+
+/// Apply the sim's UI projection: the cursor grab it asks for, the play
+/// mode and the item UI ([`HudItems`]).
 pub fn drain_ui_updates(
     updates: Res<UiUpdates>,
+    mut items: ResMut<HudItems>,
     mut cursor_policy: ResMut<CursorPolicy>,
     mut play_mode: Option<ResMut<ClientPlayMode>>,
 ) {
     let Some(receiver) = updates.0.as_ref() else { return };
     while let Ok(update) = receiver.try_recv() {
         match update {
-            game::UiUpdate::Hotbar(_) => {}
+            game::UiUpdate::Hotbar(hotbar) => items.hotbar = hotbar,
+            game::UiUpdate::Inventory(view) => items.inventory = view,
+            game::UiUpdate::Mining(m) => items.mining = m,
             game::UiUpdate::PlayMode(mode) => {
                 if let Some(play_mode) = play_mode.as_mut() {
                     play_mode.set_if_neq(ClientPlayMode(mode));
@@ -593,9 +624,37 @@ fn push_hud_state(
     policy: Option<Res<CursorPolicy>>,
     band: Option<Res<SelectionBand>>,
     minimap_pixels: Option<ResMut<minimap::MinimapPixels>>,
+    items: Option<Res<HudItems>>,
+    first_person: Option<Res<super::commander::first_person::FirstPerson>>,
+    adventure: Option<Res<ClientPlayMode>>,
+    mut hotbar_shown: crate::session::SessionLocal<Option<game::HotbarView>>,
 ) {
     let Some(hud) = hud else { return };
     let ui = hud.overlay.ui();
+
+    // The hotbar strip and the mining bar: Adventure first person only.
+    let hotbar_on = adventure.is_some_and(|m| m.adventure()) && first_person.is_some_and(|f| f.on);
+    let hotbar_shown = hotbar_shown.get();
+    match items {
+        Some(items) if hotbar_on => {
+            if hotbar_shown.as_ref() != Some(&items.hotbar) {
+                let slots: Vec<slint_ui::ItemSlot> = items.hotbar.slots.iter().map(item_slot).collect();
+                ui.set_hotbar(ModelRc::new(VecModel::from(slots)));
+                ui.set_hotbar_selected(items.hotbar.selected as i32);
+                *hotbar_shown = Some(items.hotbar.clone());
+            }
+            let progress = items.mining.map_or(0.0, |m| m as f32 / 1000.0);
+            if ui.get_mining_progress() != progress {
+                ui.set_mining_progress(progress);
+            }
+        }
+        _ if hotbar_shown.is_some() => {
+            ui.set_hotbar(ModelRc::new(VecModel::from(Vec::<slint_ui::ItemSlot>::new())));
+            ui.set_mining_progress(0.0);
+            *hotbar_shown = None;
+        }
+        _ => {}
+    }
 
     // The minimap exists in commander mode only.
     if ui.get_minimap_visible() != minimap_pixels.is_some() {
@@ -639,6 +698,80 @@ fn push_hud_state(
         }
         None if ui.get_band_visible() => ui.set_band_visible(false),
         None => {}
+    }
+}
+
+/// Inventory screen presses → the sim's `UiAction::Click` (Shift from the
+/// keyboard).
+fn inventory_clicks(
+    clicks: Option<NonSend<InventoryClicks>>,
+    keys: Res<ButtonInput<KeyCode>>,
+    player: Option<Res<super::LocalPlayer>>,
+    game: Option<Res<super::GameEvents>>,
+) {
+    let Some(clicks) = clicks else { return };
+    let pressed: Vec<_> = clicks.0.borrow_mut().drain(..).collect();
+    let (Some(Some(player)), Some(game)) = (player.map(|p| p.0), game) else { return };
+    let shift = keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
+    for (container, index, right) in pressed {
+        let Some(slot) = slot_ref(container, index) else { continue };
+        let button = if right { game::ClickButton::Right } else { game::ClickButton::Left };
+        let _ = game.0.send(game::GameEventKind::UiAction(player, game::UiAction::Click { slot, button, shift }));
+    }
+}
+
+/// One sim slot as the Slint item slot.
+pub fn item_slot(slot: &Option<game::SlotView>) -> slint_ui::ItemSlot {
+    match slot {
+        Some(s) => slint_ui::ItemSlot {
+            filled: true,
+            count: if s.count > 1 { s.count.to_string().into() } else { SharedString::default() },
+            icon: super::item_icons::icon(game::ItemId(s.icon.0 as u16)),
+        },
+        None => slint_ui::ItemSlot::default(),
+    }
+}
+
+fn item_model(slots: &[Option<game::SlotView>]) -> ModelRc<slint_ui::ItemSlot> {
+    ModelRc::new(VecModel::from(slots.iter().map(item_slot).collect::<Vec<_>>()))
+}
+
+/// The sim's inventory screen → the game UI: open state, slot models (only
+/// when the projection changed), the held stack and the pointer it follows.
+fn sync_inventory_screen(
+    slint: Option<NonSend<SlintLayer<GameUi>>>,
+    items: Res<HudItems>,
+    window: Query<&Window, With<PrimaryWindow>>,
+    mut shown: crate::session::SessionLocal<Option<game::InventoryView>>,
+) {
+    let Some(slint) = slint else { return };
+    let ui = slint.overlay.ui();
+    let view = &items.inventory;
+    if ui.get_inventory_open() != view.open {
+        ui.set_inventory_open(view.open);
+    }
+    if !view.open {
+        *shown.get() = None;
+        return;
+    }
+    let shown = shown.get();
+    if shown.as_ref() != Some(view) {
+        let part = |range: std::ops::Range<usize>| view.slots.get(range).unwrap_or(&[]);
+        ui.set_inventory_hotbar(item_model(part(0..game::HOTBAR_SLOTS)));
+        ui.set_inventory_main(item_model(part(game::HOTBAR_SLOTS..game::INVENTORY_SLOTS)));
+        ui.set_inventory_container(item_model(view.container.as_deref().unwrap_or(&[])));
+        ui.set_inventory_cursor(item_slot(&view.cursor));
+        *shown = Some(view.clone());
+    }
+    if ui.get_inventory_selected() != items.hotbar.selected as i32 {
+        ui.set_inventory_selected(items.hotbar.selected as i32);
+    }
+    if let Some(cursor) = window.single().ok().and_then(|w| w.cursor_position()) {
+        let at = cursor / slint.ui_scale;
+        if ui.get_inventory_pointer_x() != at.x || ui.get_inventory_pointer_y() != at.y {
+            ui.set_inventory_pointer_x(at.x);
+            ui.set_inventory_pointer_y(at.y);
+        }
     }
 }
 
@@ -697,6 +830,10 @@ fn connect_game_ui(ui: &GameUi, world: &mut World) {
         worldgen::tile_map::MAP_GRID_PX as i32,
         "the map image's grid line and the map window's must agree"
     );
+    let clicks = Rc::new(RefCell::new(Vec::new()));
+    let queue = clicks.clone();
+    ui.on_inventory_slot_pressed(move |container, index, right| queue.borrow_mut().push((container, index, right)));
+    world.insert_non_send(InventoryClicks(clicks));
     world.insert_non_send(GameUiActions(actions));
     #[cfg(feature = "dev_ui")]
     super::dev_ui::connect_debug_tab(ui, world);
@@ -1024,6 +1161,9 @@ fn set_screens(
     if from.encyclopedia != to.encyclopedia {
         ui.set_encyclopedia_open(to.encyclopedia);
     }
+    if from.inventory != to.inventory {
+        ui.set_inventory_open(to.inventory);
+    }
     // Not embarked, the world behind is not ours to touch even with no
     // screen open (before the map arrives).
     let modal = to.any() || !embarked;
@@ -1043,8 +1183,18 @@ fn menu_keys(
     mut world_map: ResMut<WorldMapState>,
     status: Res<HudStatus>,
     embarked: Option<Res<Embarked>>,
+    items: Res<HudItems>,
+    (player, game): (Option<Res<super::LocalPlayer>>, Option<Res<super::GameEvents>>),
 ) {
     let Some(slint) = slint else { return };
+    // Esc closes the inventory: the sim owns it, so ask the sim to.
+    if items.inventory.open && keys.just_pressed(MENU_KEY) {
+        if let (Some(Some(player)), Some(game)) = (player.map(|p| p.0), game) {
+            let _ = game.0.send(game::GameEventKind::UiAction(player, game::UiAction::ToggleInventory));
+        }
+        keys.clear_just_pressed(MENU_KEY);
+        return;
+    }
     // The Debug tab, open over a grabbed cursor (`dev_ui`), holds the keyboard.
     if policy.as_ref().is_some_and(|p| p.overlay_open) {
         return;
@@ -2201,6 +2351,13 @@ mod tests {
         app.add_systems(Startup, |_marker: NonSend<Marker>| {});
         app.update();
         assert!(app.world().get_non_send::<SlintLayer<HudUi>>().is_some());
+    }
+
+    #[test]
+    fn screen_presses_map_to_slot_refs() {
+        assert_eq!(slot_ref(false, 20), Some(game::SlotRef::Player(20)));
+        assert_eq!(slot_ref(true, 21), Some(game::SlotRef::Container(21)));
+        assert_eq!(slot_ref(false, -1), None);
     }
 
     /// The HUD's sizes are shared with Bevy-side hit rects in window pixels

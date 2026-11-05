@@ -144,7 +144,9 @@ pub fn forward_input(
     // A client-local overlay (dev panel, chat) owns the pointer: its clicks and
     // the mouse travel to reach it must not break blocks or turn the camera.
     // Releases still go through so a button held when it opened never sticks.
-    let overlay_open = cursor.is_some_and(|c| c.overlay_open);
+    // A modal game screen (the Esc menu, the map, the inventory) holds the
+    // pointer the same way: its clicks must not mine or place.
+    let overlay_open = cursor.is_some_and(|c| c.blocks_game());
     let send = |ev: InputEvent| {
         let _ = game.0.send(GameEventKind::PlayerInput(player, ev));
     };

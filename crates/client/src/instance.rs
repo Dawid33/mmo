@@ -224,6 +224,8 @@ pub struct GameInstanceManager {
     ui_update_send: Sender<game::UiUpdate>,
     /// Last hotbar emitted; the next projection is sent only if it differs.
     prev_hotbar: game::HotbarView,
+    prev_inventory_view: game::InventoryView,
+    prev_mining: Option<u32>,
     prev_play_mode: game::PlayMode,
     /// Last-emitted cursor-grab intent, for edge-triggered SetCursorGrab.
     last_cursor_grab: bool,
@@ -680,6 +682,8 @@ impl GameInstanceManager {
             last_hud_status: None,
             ui_update_send,
             prev_hotbar: game::HotbarView::default(),
+            prev_inventory_view: game::InventoryView::default(),
+            prev_mining: None,
             prev_play_mode: game::PlayMode::default(),
             last_cursor_grab: true,
             debug_flags,
@@ -1370,6 +1374,18 @@ impl GameInstanceManager {
         if hotbar != self.prev_hotbar {
             let _ = self.ui_update_send.send(game::UiUpdate::Hotbar(hotbar.clone()));
             self.prev_hotbar = hotbar;
+        }
+        if let Some(v) = view {
+            let screen = game::build_inventory_view(v.inventory_open, &v.inventory, &v.cursor, v.container.as_ref());
+            if screen != self.prev_inventory_view {
+                let _ = self.ui_update_send.send(game::UiUpdate::Inventory(screen.clone()));
+                self.prev_inventory_view = screen;
+            }
+            let mining = v.mining.map(|m| m.progress_per_mille);
+            if mining != self.prev_mining {
+                let _ = self.ui_update_send.send(game::UiUpdate::Mining(mining));
+                self.prev_mining = mining;
+            }
         }
         // Mid-handoff the client can be briefly absent from the home region's
         // data; reading that as Fortress would flicker the body hidden, so

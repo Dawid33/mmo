@@ -95,6 +95,10 @@ pub struct HomeView {
     pub mining: Option<game::MiningView>,
     pub mode: game::PlayMode,
     pub inventory_open: bool,
+    /// The local player's 36 slots and the stack on its cursor (the
+    /// inventory screen).
+    pub inventory: game::Inventory,
+    pub cursor: Option<game::ItemStack>,
     /// The chest the local player has open (its screen shows these slots).
     pub container: Option<game::ContainerView>,
     /// Unconfirmed predictions (the death-spiral signal).
@@ -312,6 +316,8 @@ fn home_view(region: &Region, client: ClientId) -> Option<HomeView> {
         mining: game::mining_view(c, region.current_tick() as u64),
         mode: c.mode,
         inventory_open: c.inventory_open,
+        inventory: c.inventory.clone(),
+        cursor: c.cursor,
         container: game::container_view(data, client),
         log_len: region.pending_event_ids().len(),
     })

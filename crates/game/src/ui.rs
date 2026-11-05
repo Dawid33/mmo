@@ -49,6 +49,46 @@ pub enum UiUpdate {
     SetCursorGrab(bool),
     /// The local client's play mode; sent only when it changes.
     PlayMode(crate::PlayMode),
+    /// The inventory / chest screen's contents; sent only when they change
+    /// (`InventoryView::default()` = closed).
+    Inventory(InventoryView),
+    /// The block being mined, 0..=1000 (`None` = not mining); sent only when
+    /// it changes.
+    Mining(Option<u32>),
+}
+
+/// What the inventory screen shows while it is open (client-side projection).
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub struct InventoryView {
+    pub open: bool,
+    /// The 36 player slots: hotbar `0..9`, then the main grid.
+    pub slots: Vec<Option<SlotView>>,
+    /// The stack held on the mouse cursor.
+    pub cursor: Option<SlotView>,
+    /// The open chest's slots, if one is open.
+    pub container: Option<Vec<Option<SlotView>>>,
+}
+
+fn slot_view(stack: &Option<crate::ItemStack>) -> Option<SlotView> {
+    stack.map(|s| SlotView { icon: IconId::of(s.item), count: s.count })
+}
+
+/// The inventory screen for a client: closed = the default (empty) view.
+pub fn build_inventory_view(
+    open: bool,
+    inventory: &crate::Inventory,
+    cursor: &Option<crate::ItemStack>,
+    container: Option<&crate::ContainerView>,
+) -> InventoryView {
+    if !open {
+        return InventoryView::default();
+    }
+    InventoryView {
+        open,
+        slots: inventory.slots.iter().map(slot_view).collect(),
+        cursor: slot_view(cursor),
+        container: container.map(|c| c.slots.iter().map(slot_view).collect()),
+    }
 }
 
 /// The local client's play mode as `UiUpdate::PlayMode`, only when it
@@ -87,6 +127,19 @@ pub fn build_hotbar(data: &crate::GameData, client: crate::ClientId) -> HotbarVi
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inventory_view_is_empty_when_closed_and_full_when_open() {
+        let mut inv = crate::Inventory::new();
+        inv.slots[12] = Some(crate::ItemStack { item: crate::ItemId(3), count: 7 });
+        let cursor = Some(crate::ItemStack { item: crate::ItemId(4), count: 2 });
+        assert_eq!(build_inventory_view(false, &inv, &cursor, None), InventoryView::default());
+        let open = build_inventory_view(true, &inv, &cursor, None);
+        assert!(open.open && open.container.is_none());
+        assert_eq!(open.slots.len(), crate::INVENTORY_SLOTS);
+        assert_eq!(open.slots[12], Some(SlotView { icon: IconId(3), count: 7 }));
+        assert_eq!(open.cursor, Some(SlotView { icon: IconId(4), count: 2 }));
+    }
 
     #[test]
     fn build_hotbar_projects_first_nine_slots_and_selection() {

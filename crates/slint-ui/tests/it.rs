@@ -15,4 +15,5 @@ mod fortress_wheel;
 mod frontend;
 mod game_panel;
 mod hud;
+mod inventory;
 mod world_map;

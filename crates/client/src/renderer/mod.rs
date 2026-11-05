@@ -38,6 +38,7 @@ mod interpolate;
 mod look;
 mod motion_probe;
 pub mod join_timeline;
+pub mod item_icons;
 pub mod item_piles;
 pub mod lod_rings;
 pub mod meshing;

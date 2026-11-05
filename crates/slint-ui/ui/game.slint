@@ -7,8 +7,9 @@ import { FortressLayout, FortressPanel } from "fortress-panel.slint";
 import { DevStat, DevTickRow, DevToggle } from "debug-tab.slint";
 import { MenuColumn, MenuLayout } from "menu-column.slint";
 import { StubWindow } from "stub-window.slint";
+import { InventoryScreen, ItemSlot } from "inventory.slint";
 
-export { EmbarkRow, LegendsFilterRow, RadialItem, SiteMark, WorldMapConfig }
+export { ItemSlot, EmbarkRow, LegendsFilterRow, RadialItem, SiteMark, WorldMapConfig }
 
 // The whole in-game UI: one transparent window-sized layer that the client
 // draws over the 3D view (crates/client/src/renderer/slint_overlay.rs).
@@ -98,6 +99,27 @@ export component GameUi inherits Window {
     // The top-down view is on; its button leaves it.
     in property <bool> top-down;
     callback top-down-clicked();
+
+    // The inventory / chest screen (inventory.slint), modal while open. The
+    // sim owns whether it is open; the client mirrors it here and reports
+    // slot presses as (in-container, index, right button).
+    in-out property <bool> inventory-open;
+    in property <[ItemSlot]> inventory-hotbar;
+    in property <[ItemSlot]> inventory-main;
+    // Empty = no chest open.
+    in property <[ItemSlot]> inventory-container;
+    in property <ItemSlot> inventory-cursor;
+    in property <int> inventory-selected;
+    // The pointer, UI logical pixels (the held stack follows it).
+    in property <length> inventory-pointer-x;
+    in property <length> inventory-pointer-y;
+    callback inventory-slot-pressed(bool, int, bool);
+    out property <length> inventory-grid-left: inventory.grid-left;
+    out property <length> inventory-container-top: inventory.container-top;
+    out property <length> inventory-main-top: inventory.main-top;
+    out property <length> inventory-hotbar-top: inventory.hotbar-top;
+    out property <length> inventory-slot-pitch: inventory.slot-pitch;
+    out property <length> inventory-slot-size: inventory.slot-size;
 
     // Fortress tools (crates/client/src/renderer/commander/designate.rs).
     // False with no home region (not joined yet).
@@ -348,6 +370,21 @@ export component GameUi inherits Window {
             y: status.content-y;
             text: root.game-status;
         }
+    }
+
+    // `visible` rather than `if`, so its hit-test positions stay readable.
+    inventory := InventoryScreen {
+        visible: root.inventory-open;
+        width: 100%;
+        height: 100%;
+        hotbar-slots: root.inventory-hotbar;
+        main-slots: root.inventory-main;
+        container-slots: root.inventory-container;
+        cursor-slot: root.inventory-cursor;
+        selected: root.inventory-selected;
+        pointer-x: root.inventory-pointer-x;
+        pointer-y: root.inventory-pointer-y;
+        slot-pressed(c, i, r) => { root.inventory-slot-pressed(c, i, r); }
     }
 
     // Centred where it was opened, and large enough to cover the window
