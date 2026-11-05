@@ -60,3 +60,11 @@ plan docs/superpowers/plans/2026-07-07-in-engine-ui.md): inventory/hotbar landed
 (engine-owned data → client-side widget projection → bevy_ui). Follow-ups: real
 item icons/textures, drag-drop UX, additional screens, and the deferred diegetic
 world-space panel case (needs in-engine taffy + deterministic text measurement).
+
+Adventure survival follow-ups (landed 2026-11-05, plans/2026-11-05-adventure-survival-items.md; live run pending):
+- Not built: tools, crafting, health, hunger, fall damage; authentication for player tokens (comes with the external database behind `PlayerStore`); a thrown-item arc animation; a block-crack overlay (progress is a bar under the crosshair); fortress dig orders yielding items (one `deposit_items_safe` call in `clear_tiles_safe`); item piles crossing region seams (deposits clamp into the region).
+- Restore keeps position, inventory and mode only: a walk in progress and animation state of a parked player are lost.
+- A parked owner's fortress claim can be taken by another player while they are away.
+- Chests: open reach (eye ray 5) is shorter than stay-open reach (feet tile 6), so a chest ~5 blocks above the eye silently cannot be opened; SetMode -> Fortress leaves a chest open; `inventory_open` persists after a handoff.
+- UI: Esc ToggleInventory from stale HUD items can reopen the inventory (race); the hotbar flickers empty when the view is None mid-handoff; M / menu can stack over the inventory; inventory slots are plain themed rectangles (restyle to the widgets' slot style).
+- Client re-sim double-counts `items_destroyed` (server count is exact); a refused `set_block_in` leaves a silent repeat mine cycle.
