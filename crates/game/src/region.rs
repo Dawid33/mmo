@@ -42,6 +42,19 @@ pub struct RegionTickPerf {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+/// Opens or closes the inventory. Closing in Adventure returns the cursor
+/// stack to the inventory; what does not fit stays on the cursor (a pile
+/// drop replaces that once item piles exist).
+fn toggle_inventory(c: &mut Client) {
+    c.inventory_open = !c.inventory_open;
+    if !c.inventory_open && c.mode == crate::PlayMode::Adventure {
+        if let Some(mut stack) = c.cursor.take() {
+            stack.count = c.inventory.add(stack);
+            c.cursor = (stack.count > 0).then_some(stack);
+        }
+    }
+}
+
 impl RegionTickPerf {
     fn record(&mut self, start: Instant, controllers_done: Instant, input_done: Instant) {
         let end = Instant::now();
@@ -632,7 +645,20 @@ impl Region {
                     // input step are both covered by one delta.
                     let toggled = {
                         let client = data.clients.get_mut(&client_id).unwrap();
-                        let toggle = client.input.key_pressed(&Key::KeyE);
+                        let adventure = client.mode == crate::PlayMode::Adventure;
+                        let e_pressed = client.input.key_pressed(&Key::KeyE);
+                        if adventure {
+                            // Survival: E is the inventory, not a camera mode.
+                            if e_pressed {
+                                toggle_inventory(client);
+                            }
+                            if let Some(slot) = Key::DIGITS.iter().find_map(|k| {
+                                client.input.key_pressed(k).then(|| k.hotbar_slot()).flatten()
+                            }) {
+                                client.selected = slot;
+                            }
+                        }
+                        let toggle = !adventure && e_pressed;
                         if toggle {
                             client.fps_cam_mode = !client.fps_cam_mode;
                         }
@@ -662,6 +688,15 @@ impl Region {
                     // get_mut logged the prior Client: both arms undo.
                     match player_event {
                         crate::InputEvent::FpsCam(on) => c.fps_cam_mode = on,
+                        crate::InputEvent::MouseWheel { y, .. } => {
+                            // The wheel steps the hotbar while the body is
+                            // driven and no inventory window holds the pointer.
+                            if c.fps_cam_mode && !c.inventory_open && y != 0.0 {
+                                let n = crate::HOTBAR_SLOTS as i32;
+                                let step = if y > 0.0 { 1 } else { -1 };
+                                c.selected = (c.selected as i32 + step).rem_euclid(n) as u8;
+                            }
+                        }
                         _ => {
                             let _ = c.input.update(player_event.clone());
                         }
@@ -727,7 +762,7 @@ impl Region {
                             crate::click(cursor, inventory, None, slot, button, shift);
                         }
                         crate::UiAction::ToggleInventory => {
-                            c.inventory_open = !c.inventory_open;
+                            toggle_inventory(c);
                         }
                     }
                 }

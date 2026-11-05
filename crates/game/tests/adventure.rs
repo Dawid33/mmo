@@ -692,3 +692,91 @@ fn body_is_held_at_the_outer_seam() {
     let (departures, _) = region.take_transfers();
     assert_eq!(departures.iter().map(|(_, to)| *to).collect::<Vec<_>>(), vec![RegionCoords::new(1, 0)]);
 }
+
+// --- survival controls -----------------------------------------------------
+
+fn send(region: &mut Region, ev: InputEvent) {
+    region.handle_event(GameEventKind::PlayerInput(CLIENT, ev)).unwrap();
+    region.forget_last_event();
+}
+
+fn tap(region: &mut Region, key: Key) {
+    send(region, InputEvent::Key { key, pressed: true });
+    send(region, InputEvent::Key { key, pressed: false });
+    tick(region);
+}
+
+fn double_tap_space(region: &mut Region) {
+    tap(region, Key::Space);
+    tap(region, Key::Space);
+}
+
+fn motion_of(region: &Region, e: EntityKey) -> Motion {
+    (*region.data().ecs.motion.try_get(e)).unwrap_or_default()
+}
+
+#[test]
+fn no_flight_in_adventure() {
+    let (mut region, e) = adventure_at([4, 1, 4]);
+    send(&mut region, InputEvent::FpsCam(true));
+    tick(&mut region);
+    double_tap_space(&mut region);
+    assert!(!motion_of(&region, e).flying, "an adventurer cannot fly");
+    for _ in 0..80 {
+        tick(&mut region);
+    }
+    assert!(motion_of(&region, e).grounded, "the body comes back down");
+}
+
+#[test]
+fn fortress_body_still_flies() {
+    let (mut region, e) = region_with_player();
+    send(&mut region, InputEvent::FpsCam(true));
+    tick(&mut region);
+    double_tap_space(&mut region);
+    assert!(motion_of(&region, e).flying, "a fortress body keeps creative flight");
+}
+
+#[test]
+fn e_toggles_inventory_in_adventure() {
+    let (mut region, _e) = adventure_at([4, 1, 4]);
+    send(&mut region, InputEvent::FpsCam(true));
+    tick(&mut region);
+    let open = |r: &Region| r.data().clients.get(&CLIENT).unwrap().inventory_open;
+    let fps = |r: &Region| r.data().clients.get(&CLIENT).unwrap().fps_cam_mode;
+    tap(&mut region, Key::KeyE);
+    assert!(open(&region));
+    assert!(fps(&region), "E no longer toggles the camera mode");
+    tap(&mut region, Key::KeyE);
+    assert!(!open(&region));
+    assert!(fps(&region));
+}
+
+#[test]
+fn closing_inventory_returns_the_cursor_stack() {
+    let (mut region, _e) = adventure_at([4, 1, 4]);
+    send(&mut region, InputEvent::FpsCam(true));
+    tap(&mut region, Key::KeyE);
+    let stack = game::ItemStack { item: game::ItemId::block(BlockId(1)), count: 5 };
+    region.with_data(|r| r.clients.get_mut(&CLIENT).unwrap().cursor = Some(stack));
+    tap(&mut region, Key::KeyE);
+    let c = region.data().clients.get(&CLIENT).unwrap();
+    assert_eq!(c.cursor, None);
+    let total: u32 = c.inventory.slots.iter().flatten().filter(|s| s.item == stack.item).map(|s| s.count).sum();
+    assert!(total >= 5);
+}
+
+#[test]
+fn digits_and_wheel_select_slot() {
+    let (mut region, _e) = adventure_at([4, 1, 4]);
+    send(&mut region, InputEvent::FpsCam(true));
+    let selected = |r: &Region| r.data().clients.get(&CLIENT).unwrap().selected;
+    tap(&mut region, Key::Digit3);
+    assert_eq!(selected(&region), 2);
+    tap(&mut region, Key::Digit1);
+    assert_eq!(selected(&region), 0);
+    send(&mut region, InputEvent::MouseWheel { x: 0.0, y: -1.0 });
+    assert_eq!(selected(&region), 8);
+    send(&mut region, InputEvent::MouseWheel { x: 0.0, y: 1.0 });
+    assert_eq!(selected(&region), 0);
+}

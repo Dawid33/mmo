@@ -120,10 +120,13 @@ pub struct MoveParams {
     pub walk_speed: f32,
     /// Launch speed of a jump, m/s.
     pub jump_speed: f32,
+    /// Whether a double tap of jump starts flight. Off for Adventure
+    /// (survival) bodies, which also drop out of flight.
+    pub allow_flight: bool,
 }
 
 impl MoveParams {
-    pub const PLAYER: MoveParams = MoveParams { walk_speed: WALK_SPEED, jump_speed: JUMP_SPEED };
+    pub const PLAYER: MoveParams = MoveParams { walk_speed: WALK_SPEED, jump_speed: JUMP_SPEED, allow_flight: true };
 }
 
 /// Advances `motion` by one tick of intent and returns the translation the
@@ -141,7 +144,10 @@ pub fn plan_with(
     tick: u64,
     params: &MoveParams,
 ) -> Vector {
-    if keys.jump_pressed {
+    if !params.allow_flight {
+        motion.flying = false;
+        motion.last_jump_tap = None;
+    } else if keys.jump_pressed {
         let window = DOUBLE_TAP_WINDOW_MS / TICK_RATE;
         match motion.last_jump_tap {
             Some(t) if tick.saturating_sub(t) <= window => {
@@ -208,7 +214,24 @@ pub fn walk_body(
     colliders: &rapier3d::prelude::ColliderSet,
     handle: rapier3d::prelude::RigidBodyHandle,
 ) -> Vector {
-    let desired = plan(motion, keys, yaw, tick);
+    walk_body_with(motion, keys, yaw, tick, broad_phase, narrow_phase, bodies, colliders, handle, &MoveParams::PLAYER)
+}
+
+/// [`walk_body`] with explicit tunables (Adventure bodies cannot fly).
+#[allow(clippy::too_many_arguments)]
+pub fn walk_body_with(
+    motion: &mut Motion,
+    keys: &MoveKeys,
+    yaw: f32,
+    tick: u64,
+    broad_phase: &rapier3d::prelude::DefaultBroadPhase,
+    narrow_phase: &rapier3d::prelude::NarrowPhase,
+    bodies: &rapier3d::prelude::RigidBodySet,
+    colliders: &rapier3d::prelude::ColliderSet,
+    handle: rapier3d::prelude::RigidBodyHandle,
+    params: &MoveParams,
+) -> Vector {
+    let desired = plan_with(motion, keys, yaw, tick, params);
     let (corrected, grounded) = sweep_character(broad_phase, narrow_phase, bodies, colliders, handle, motion, desired);
     settle(motion, &desired, &corrected, grounded);
     corrected

@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use bevy::input::mouse::AccumulatedMouseMotion;
+use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll};
 use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 use game::{GameEventKind, InputEvent};
@@ -19,6 +19,16 @@ fn map_key(code: KeyCode) -> Option<game::Key> {
         KeyCode::ControlLeft => K::ControlLeft,
         KeyCode::ShiftLeft => K::ShiftLeft,
         KeyCode::Escape => K::Escape,
+        KeyCode::Digit1 => K::Digit1,
+        KeyCode::Digit2 => K::Digit2,
+        KeyCode::Digit3 => K::Digit3,
+        KeyCode::Digit4 => K::Digit4,
+        KeyCode::Digit5 => K::Digit5,
+        KeyCode::Digit6 => K::Digit6,
+        KeyCode::Digit7 => K::Digit7,
+        KeyCode::Digit8 => K::Digit8,
+        KeyCode::Digit9 => K::Digit9,
+        KeyCode::KeyQ => K::KeyQ,
         _ => return None,
     })
 }
@@ -112,6 +122,8 @@ pub fn forward_input(
     cursor: Option<Res<super::cursor::CursorPolicy>>,
     mode: Option<Res<super::commander::CameraMode>>,
     first_person: Option<Res<super::commander::first_person::FirstPerson>>,
+    adventure: Option<Res<super::commander::adventure::ClientPlayMode>>,
+    scroll: Res<AccumulatedMouseScroll>,
 ) {
     let last_size = last_size.get();
     let coalescer = coalescer.get();
@@ -135,11 +147,18 @@ pub fn forward_input(
     if !commander {
         forward_body_input(&keys, &buttons, &motion, &time, &coalesce_window, coalescer, &window, overlay_open, send);
     } else if first_person {
+        // E is the sim's inventory key in Adventure; elsewhere it is the
+        // fps-cam toggle `first_person` owns. Q reaches the sim only here,
+        // never in the commander (where it holds the tool wheel).
+        let adventure = adventure.is_some_and(|m| m.adventure());
         let send_body = |ev: InputEvent| {
-            if !matches!(ev, InputEvent::Key { key: game::Key::KeyE, .. }) {
+            if adventure || !matches!(ev, InputEvent::Key { key: game::Key::KeyE, .. }) {
                 send(ev);
             }
         };
+        if !overlay_open && scroll.delta.y != 0.0 {
+            send_body(InputEvent::MouseWheel { x: scroll.delta.x, y: scroll.delta.y });
+        }
         forward_body_input(&keys, &buttons, &motion, &time, &coalesce_window, coalescer, &window, overlay_open, send_body);
     }
     if let Ok((w, _)) = window.single() {

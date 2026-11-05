@@ -128,12 +128,19 @@ pub fn on_mode_change(
     mut selection: ResMut<Selection>,
     mut follow: ResMut<Follow>,
     bodies: Query<&SimEntity, With<LocalBody>>,
+    first_person: Res<super::first_person::FirstPerson>,
+    mut to_first_person: MessageWriter<super::first_person::ToggleFirstPersonRequest>,
 ) {
     if !mode.is_changed() {
         return;
     }
     match mode.0 {
         PlayMode::Adventure => {
+            // Survival is played from the eyes (F5 returns to the overhead
+            // view); `toggle_first_person` also drops the cut and x-ray.
+            if !first_person.on {
+                to_first_person.write(super::first_person::ToggleFirstPersonRequest);
+            }
             if designate.tool.is_some() {
                 designate.set_tool(None);
             }

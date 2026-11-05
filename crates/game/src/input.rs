@@ -12,6 +12,47 @@ pub enum Key {
     ControlLeft,
     ShiftLeft,
     Escape,
+    Digit1,
+    Digit2,
+    Digit3,
+    Digit4,
+    Digit5,
+    Digit6,
+    Digit7,
+    Digit8,
+    Digit9,
+    KeyQ,
+}
+
+impl Key {
+    /// The nine digit keys, in hotbar order.
+    pub const DIGITS: [Key; 9] = [
+        Key::Digit1,
+        Key::Digit2,
+        Key::Digit3,
+        Key::Digit4,
+        Key::Digit5,
+        Key::Digit6,
+        Key::Digit7,
+        Key::Digit8,
+        Key::Digit9,
+    ];
+
+    /// The hotbar slot (0-based) a digit key selects.
+    pub fn hotbar_slot(self) -> Option<u8> {
+        Some(match self {
+            Key::Digit1 => 0,
+            Key::Digit2 => 1,
+            Key::Digit3 => 2,
+            Key::Digit4 => 3,
+            Key::Digit5 => 4,
+            Key::Digit6 => 5,
+            Key::Digit7 => 6,
+            Key::Digit8 => 7,
+            Key::Digit9 => 8,
+            _ => return None,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, state_hash::StateHash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
@@ -196,6 +237,13 @@ impl InputState {
     /// The button went down since the last tick (edge, like `key_pressed`).
     pub fn mouse_pressed(&self, button: &MouseButton) -> bool {
         is_pressed(self.mouse_buttons.get(button))
+    }
+    /// The button is down (pressed this tick, held, or tapped).
+    pub fn mouse_held(&self, button: &MouseButton) -> bool {
+        matches!(
+            self.mouse_buttons.get(button),
+            Some(KeyState::Held | KeyState::Pressed | KeyState::Tapped)
+        )
     }
     pub fn key_held(&self, key: &Key) -> bool {
         if let Some(key) = self.keyboard_state.get(key) {

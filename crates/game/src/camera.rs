@@ -287,7 +287,7 @@ impl Controller for CameraController {
             // Collision-corrected movement: slide along / stop at terrain
             // instead of teleporting through it. Queries are read-only; the
             // body write below is the footprint-sized mutate_body_safe entry.
-            let corrected = movement::walk_body(
+            let corrected = movement::walk_body_with(
                 &mut motion,
                 &keys,
                 yaw,
@@ -297,6 +297,10 @@ impl Controller for CameraController {
                 &data.physics.bodies,
                 &data.physics.colliders,
                 handle,
+                &movement::MoveParams {
+                    allow_flight: client.mode != crate::PlayMode::Adventure,
+                    ..movement::MoveParams::PLAYER
+                },
             );
             if motion != motion0 {
                 // set_safe, not an undo_scope on the value: a body that
