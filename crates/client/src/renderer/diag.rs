@@ -74,5 +74,91 @@ impl Plugin for DiagPlugin {
         if !app.is_plugin_added::<bevy::render::diagnostic::RenderDiagnosticsPlugin>() {
             app.add_plugins(bevy::render::diagnostic::RenderDiagnosticsPlugin);
         }
+
+        if let Some(render_app) = app.get_sub_app_mut(bevy::render::RenderApp) {
+            render_app.add_systems(bevy::render::Render, log_arena_geometry);
+        }
     }
+}
+
+/// Seconds between `[arena]` lines.
+const ARENA_LOG_SECS: f32 = 5.0;
+
+/// `[arena]` every [`ARENA_LOG_SECS`]: the pulled path's resident geometry —
+/// live chunk slots and quads, split into sim chunks (16 m; `with_twin` =
+/// those with a coarse twin, drawn only near the camera), coarse twins
+/// (`meshing::coarse`) and LOD tiles — the volume every view's cull walks.
+fn log_arena_geometry(
+    arena: Option<bevy::prelude::Res<super::voxel_pull::arena::GpuQuadArena>>,
+    mut last: bevy::prelude::Local<Option<std::time::Instant>>,
+) {
+    let Some(arena) = arena else { return };
+    let now = std::time::Instant::now();
+    if last.is_some_and(|t| now.duration_since(t).as_secs_f32() < ARENA_LOG_SECS) {
+        return;
+    }
+    *last = Some(now);
+    let sim_half = game::CHUNK_UNITS as f32 * 0.5 * 1.01;
+    let (mut near, mut near_q, mut fine_q, mut coarse, mut coarse_q, mut lod, mut lod_q) = (0u32, 0u64, 0u64, 0u32, 0u64, 0u32, 0u64);
+    for m in arena.metadata.values().iter().filter(|m| m.quad_count != 0) {
+        let q = u64::from(m.quad_count);
+        match m.center[3] as u32 {
+            2 => {
+                coarse += 1;
+                coarse_q += q;
+            }
+            band if m.half_extents[0] <= sim_half => {
+                near += 1;
+                near_q += q;
+                if band == 1 {
+                    fine_q += q;
+                }
+            }
+            _ => {
+                lod += 1;
+                lod_q += q;
+            }
+        }
+    }
+    bevy::log::info!(
+        "[arena] near_chunks={near} near_quads={near_q} (with_twin={fine_q}) coarse_twins={coarse} coarse_quads={coarse_q} lod_slots={lod} lod_quads={lod_q}"
+    );
+}
+
+/// `VOXEL_EXIT_AFTER_SECS=N` closes the client cleanly (`AppExit`) N seconds after
+/// start — for unattended profiling runs whose output only flushes on a clean exit
+/// (the `trace_chrome` JSON), where a SIGTERM would truncate it. Native only.
+pub fn exit_after_from_env() -> Option<f32> {
+    std::env::var("VOXEL_EXIT_AFTER_SECS").ok()?.parse().ok().filter(|s: &f32| *s > 0.0)
+}
+
+/// Writes `AppExit::Success` once `secs` of real time have passed.
+pub fn exit_after_plugin(app: &mut App, secs: f32) {
+    use bevy::prelude::*;
+    app.add_systems(Update, move |time: Res<Time<Real>>, mut exit: MessageWriter<AppExit>| {
+        if time.elapsed_secs() >= secs {
+            exit.write(AppExit::Success);
+        }
+    });
+}
+
+/// `VOXEL_SCREENSHOT=<secs>:<path>`: save the primary window to `<path>` (PNG)
+/// once, `secs` of real time after start — an in-process capture for
+/// before/after image comparisons of renderer changes. Native only.
+pub fn screenshot_from_env() -> Option<(f32, String)> {
+    let value = std::env::var("VOXEL_SCREENSHOT").ok()?;
+    let (secs, path) = value.split_once(':')?;
+    Some((secs.parse().ok()?, path.to_owned()))
+}
+
+/// Takes the [`screenshot_from_env`] capture.
+pub fn screenshot_plugin(app: &mut App, secs: f32, path: String) {
+    use bevy::prelude::*;
+    use bevy::render::view::screenshot::{save_to_disk, Screenshot};
+    app.add_systems(Update, move |time: Res<Time<Real>>, mut commands: Commands, mut taken: Local<bool>| {
+        if !*taken && time.elapsed_secs() >= secs {
+            *taken = true;
+            commands.spawn(Screenshot::primary_window()).observe(save_to_disk(path.clone()));
+        }
+    });
 }

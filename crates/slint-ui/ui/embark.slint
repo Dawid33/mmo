@@ -1,4 +1,5 @@
-import { Button, Checkbox, FrameFace, GraphicalSets, LabelFace, Styles } from "@widgets";
+import { Button, ButtonStyle, Checkbox, FrameFace, GraphicalSets, LabelFace, Styles } from "@widgets";
+import { Tabs } from "controls.slint";
 
 // One line of the people list: a site header (`person` < 0) or a person with
 // a check box. `site` / `person` index the server's `EmbarkOptions` of the
@@ -10,11 +11,32 @@ export struct EmbarkRow {
     checked: bool,
 }
 
-// The embark step beside the world map: civ -> its sites -> people to take (at
-// most 7), the Embark button, and the fortresses that can be played again
-// (`returns`). Embedded in `GameUi` (it inherits the theme applied there); the
-// client fills it from `HistoryView` (renderer/slint_overlay.rs).
-export component EmbarkPanel {
+// One line of the Legends filter column: "All events" (depth 0), a civ
+// (depth 0) or one of its sites (depth 1); `dimmed` for an abandoned site.
+export struct LegendsFilterRow {
+    text: string,
+    depth: int,
+    dimmed: bool,
+}
+
+// The embark panel's width beside the map (Fortress and Adventure tabs).
+export global EmbarkLayout {
+    out property <length> width: 300px;
+}
+
+export global LegendsLayout {
+    // The Legends tab's event lines are long: the panel takes twice the
+    // embark width while it is open (the map keeps the rest).
+    out property <length> width: 2 * EmbarkLayout.width;
+    out property <length> filter-row-height: 24px;
+    // A site's filter row is indented this much under its civ.
+    out property <length> indent: 14px;
+}
+
+
+// The Fortress tab: civ -> its sites -> people to take (at most 7), the
+// Embark button, and the fortresses that can be played again (`returns`).
+component FortressTab {
     in property <[string]> civs;
     in property <int> civ-picked: -1;
     in property <[EmbarkRow]> rows;
@@ -31,6 +53,272 @@ export component EmbarkPanel {
     callback embark();
     callback return-to(int);
 
+    VerticalLayout {
+        width: 100%;
+        height: 100%;
+        spacing: 2px;
+
+        for name[i] in root.civs: Button {
+            text: name;
+            toggled: i == root.civ-picked;
+            clicked => { root.pick-civ(i); }
+        }
+        if root.civs.length == 0: LabelFace {
+            style: Styles.caption-label;
+            text: "No one can embark.";
+        }
+        Flickable {
+            viewport-height: people.preferred-height;
+            people := VerticalLayout {
+                spacing: 1px;
+                for row[i] in root.rows: Rectangle {
+                    height: row.person < 0 ? 18px : 22px;
+                    if row.person < 0: LabelFace {
+                        style: Styles.caption-label;
+                        text: row.text;
+                    }
+                    if row.person >= 0: Checkbox {
+                        text: row.text;
+                        checked: row.checked;
+                        toggled(on) => { root.toggle-person(row.site, row.person); }
+                    }
+                }
+            }
+        }
+        LabelFace { text: root.counter; }
+        LabelFace {
+            style: Styles.caption-label;
+            text: root.region-text;
+        }
+        Button {
+            text: "Embark";
+            enabled: root.embark-enabled;
+            clicked => { root.embark(); }
+        }
+        for name[i] in root.returns: Button {
+            text: "Return to " + name;
+            clicked => { root.return-to(i); }
+        }
+    }
+}
+
+// The Adventure tab: a civ, then one of its populated sites, then Start.
+component AdventureTab {
+    in property <[string]> civs;
+    in property <int> civ-picked: -1;
+    // "<site> — pop N", the picked civ's populated sites.
+    in property <[string]> sites;
+    in property <int> site-picked: -1;
+    // The picked site's region.
+    in property <string> region-text;
+    // A site is picked and no request is pending.
+    in property <bool> start-enabled;
+
+    callback pick-civ(int);
+    callback pick-site(int);
+    callback start();
+
+    // The Start button's centre (window logical pixels), for headless tests.
+    out property <length> start-x: start-button.absolute-position.x + start-button.width / 2;
+    out property <length> start-y: start-button.absolute-position.y + start-button.height / 2;
+
+    VerticalLayout {
+        width: 100%;
+        height: 100%;
+        spacing: 2px;
+
+        for name[i] in root.civs: Button {
+            text: name;
+            toggled: i == root.civ-picked;
+            clicked => { root.pick-civ(i); }
+        }
+        if root.civs.length == 0: LabelFace {
+            style: Styles.caption-label;
+            text: "No civilisation has a populated site.";
+        }
+        if root.civs.length > 0 && root.civ-picked < 0: LabelFace {
+            style: Styles.caption-label;
+            text: "Pick a civilisation.";
+        }
+        if root.civ-picked >= 0: LabelFace {
+            style: Styles.caption-label;
+            text: root.sites.length == 0 ? "No populated sites." : "Sites";
+        }
+        Flickable {
+            viewport-height: sites.preferred-height;
+            sites := VerticalLayout {
+                spacing: 1px;
+                for name[i] in root.sites: Button {
+                    text: name;
+                    toggled: i == root.site-picked;
+                    clicked => { root.pick-site(i); }
+                }
+            }
+        }
+        LabelFace {
+            style: Styles.caption-label;
+            text: root.region-text;
+        }
+        start-button := Button {
+            text: "Start adventure";
+            enabled: root.start-enabled;
+            clicked => { root.start(); }
+        }
+    }
+}
+
+// The Legends tab: the filter column on the left (about a third), the
+// picked filter's event lines on the right, newest first. Scrolling the
+// lines to the bottom asks for the next (older) page while `more`.
+component LegendsTab {
+    in property <[LegendsFilterRow]> filters;
+    in property <int> filter-picked: 0;
+    // "Events of <filter> — N".
+    in property <string> header;
+    in property <[string]> lines;
+    in property <bool> more;
+
+    callback pick-filter(int);
+    callback load-more();
+    callback line-clicked(int);
+
+    // Probes for the headless tests (window logical pixels): a point inside
+    // the filter rows, the first row's top and the row pitch.
+    out property <length> filter-x: filter-flick.absolute-position.x + 40px;
+    out property <length> filter-first-y: filter-flick.absolute-position.y;
+    out property <length> filter-row-height: LegendsLayout.filter-row-height;
+
+    // A filter row for an abandoned site: the list item, text dimmed.
+    property <ButtonStyle> dim-style: Styles.list-box.item;
+    init => {
+        root.dim-style.default.font-color = Styles.button.disabled.font-color;
+        root.dim-style.hovered.font-color = Styles.button.disabled.font-color;
+    }
+
+    function at-bottom() -> bool {
+        lines-flick.viewport-height + lines-flick.viewport-y <= lines-flick.height + 2px
+    }
+
+    HorizontalLayout {
+        width: 100%;
+        height: 100%;
+        spacing: 6px;
+
+        filter-flick := Flickable {
+            width: (root.width - 6px) / 3;
+            viewport-height: filter-rows.preferred-height;
+            filter-rows := VerticalLayout {
+                alignment: start;
+                for row[i] in root.filters: Rectangle {
+                    height: LegendsLayout.filter-row-height;
+                    Button {
+                        x: row.depth * LegendsLayout.indent;
+                        width: parent.width - self.x;
+                        height: parent.height;
+                        style: row.dimmed ? root.dim-style : Styles.list-box.item;
+                        text: row.text;
+                        toggled: i == root.filter-picked;
+                        clicked => { root.pick-filter(i); }
+                    }
+                }
+            }
+        }
+        VerticalLayout {
+            spacing: 2px;
+            LabelFace { text: root.header; }
+            lines-flick := Flickable {
+                viewport-height: line-list.preferred-height;
+                changed viewport-y => {
+                    if root.more && root.at-bottom() {
+                        root.load-more();
+                    }
+                }
+                line-list := VerticalLayout {
+                    alignment: start;
+                    spacing: 3px;
+                    for line[i] in root.lines: Rectangle {
+                        height: text.preferred-height;
+                        text := Text {
+                            width: parent.width;
+                            text: line;
+                            wrap: word-wrap;
+                            color: Styles.label.font-color;
+                            font-family: Styles.label.font.family;
+                            font-weight: Styles.label.font.weight;
+                            font-size: Styles.label.font.size;
+                        }
+                        TouchArea {
+                            clicked => { root.line-clicked(i); }
+                        }
+                    }
+                    if root.more: Button {
+                        text: "Older events";
+                        clicked => { root.load-more(); }
+                    }
+                }
+            }
+            if root.lines.length == 0: LabelFace {
+                style: Styles.caption-label;
+                text: "No events.";
+            }
+        }
+    }
+}
+
+// The embark step beside the world map, as three tabs: Fortress (found or
+// return to a fortress), Adventure (start an adventure at a populated site)
+// and Legends (the world history). Embedded in `GameUi` (it inherits the
+// theme applied there); the client fills it from `HistoryView`
+// (renderer/slint_overlay.rs).
+export component EmbarkPanel {
+    // 0 Fortress, 1 Adventure, 2 Legends.
+    in-out property <int> tab: 0;
+    callback tab-changed(int);
+
+    in property <[string]> civs;
+    in property <int> civ-picked: -1;
+    in property <[EmbarkRow]> rows;
+    in property <string> counter;
+    in property <string> region-text;
+    in property <bool> embark-enabled;
+    in property <[string]> returns;
+    callback pick-civ(int);
+    callback toggle-person(int, int);
+    callback embark();
+    callback return-to(int);
+
+    in property <[string]> adventure-civs;
+    in property <int> adventure-civ-picked: -1;
+    in property <[string]> adventure-sites;
+    in property <int> adventure-site-picked: -1;
+    in property <string> adventure-region;
+    in property <bool> adventure-enabled;
+    callback adventure-pick-civ(int);
+    callback adventure-pick-site(int);
+    callback adventure-start();
+
+    in property <[LegendsFilterRow]> legends-filters;
+    in property <int> legends-filter-picked: 0;
+    in property <string> legends-header;
+    in property <[string]> legends-lines;
+    in property <bool> legends-more;
+    callback legends-pick-filter(int);
+    callback legends-load-more();
+    callback legends-line-clicked(int);
+
+    // Probes for the headless tests (window logical pixels): the tab row's
+    // left end and middle, where the last tab ends, and the tab bodies' hit
+    // points.
+    out property <length> tabs-x: tabs.absolute-position.x;
+    out property <length> tabs-y: tabs.absolute-position.y + tabs.row-height / 2;
+    out property <length> tabs-end: tabs.absolute-position.x + tabs.tabs-end;
+    out property <length> tabs-right: tabs.absolute-position.x + tabs.width;
+    out property <length> adventure-start-x: adventure.start-x;
+    out property <length> adventure-start-y: adventure.start-y;
+    out property <length> legends-filter-x: legends.filter-x;
+    out property <length> legends-filter-first-y: legends.filter-first-y;
+    out property <length> legends-filter-row-height: legends.filter-row-height;
+
     window := FrameFace {
         title: "Embark";
         width: 100%;
@@ -38,53 +326,66 @@ export component EmbarkPanel {
         property <length> content-bottom: self.height - Styles.frame.box.padding.bottom
             - GraphicalSets.inset(Styles.frame.graphics).bottom;
 
-        VerticalLayout {
+        tabs := Tabs {
             x: window.content-x;
             y: window.content-y;
             width: max(0px, window.content-right - window.content-x);
             height: max(0px, parent.content-bottom - window.content-y);
-            spacing: 2px;
+            tabs: ["Fortress", "Adventure", "Legends"];
+            collapsible: false;
+            selected <=> root.tab;
+            changed(i) => { root.tab-changed(i); }
 
-            for name[i] in root.civs: Button {
-                text: name;
-                toggled: i == root.civ-picked;
-                clicked => { root.pick-civ(i); }
-            }
-            if root.civs.length == 0: LabelFace {
-                style: Styles.caption-label;
-                text: "No one can embark.";
-            }
-            Flickable {
-                viewport-height: people.preferred-height;
-                people := VerticalLayout {
-                    spacing: 1px;
-                    for row[i] in root.rows: Rectangle {
-                        height: row.person < 0 ? 18px : 22px;
-                        if row.person < 0: LabelFace {
-                            style: Styles.caption-label;
-                            text: row.text;
-                        }
-                        if row.person >= 0: Checkbox {
-                            text: row.text;
-                            checked: row.checked;
-                            toggled(on) => { root.toggle-person(row.site, row.person); }
-                        }
-                    }
+            // `visible` wrappers rather than `if`: the test probes above read
+            // the bodies' geometry.
+            Rectangle {
+                visible: root.tab == 0;
+                FortressTab {
+                    width: 100%;
+                    height: 100%;
+                    civs: root.civs;
+                    civ-picked: root.civ-picked;
+                    rows: root.rows;
+                    counter: root.counter;
+                    region-text: root.region-text;
+                    embark-enabled: root.embark-enabled;
+                    returns: root.returns;
+                    pick-civ(i) => { root.pick-civ(i); }
+                    toggle-person(s, p) => { root.toggle-person(s, p); }
+                    embark => { root.embark(); }
+                    return-to(i) => { root.return-to(i); }
                 }
             }
-            LabelFace { text: root.counter; }
-            LabelFace {
-                style: Styles.caption-label;
-                text: root.region-text;
+            Rectangle {
+                visible: root.tab == 1;
+                adventure := AdventureTab {
+                    width: 100%;
+                    height: 100%;
+                    civs: root.adventure-civs;
+                    civ-picked: root.adventure-civ-picked;
+                    sites: root.adventure-sites;
+                    site-picked: root.adventure-site-picked;
+                    region-text: root.adventure-region;
+                    start-enabled: root.adventure-enabled;
+                    pick-civ(i) => { root.adventure-pick-civ(i); }
+                    pick-site(i) => { root.adventure-pick-site(i); }
+                    start => { root.adventure-start(); }
+                }
             }
-            Button {
-                text: "Embark";
-                enabled: root.embark-enabled;
-                clicked => { root.embark(); }
-            }
-            for name[i] in root.returns: Button {
-                text: "Return to " + name;
-                clicked => { root.return-to(i); }
+            Rectangle {
+                visible: root.tab == 2;
+                legends := LegendsTab {
+                    width: 100%;
+                    height: 100%;
+                    filters: root.legends-filters;
+                    filter-picked: root.legends-filter-picked;
+                    header: root.legends-header;
+                    lines: root.legends-lines;
+                    more: root.legends-more;
+                    pick-filter(i) => { root.legends-pick-filter(i); }
+                    load-more => { root.legends-load-more(); }
+                    line-clicked(i) => { root.legends-line-clicked(i); }
+                }
             }
         }
     }

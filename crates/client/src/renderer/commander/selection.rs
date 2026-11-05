@@ -32,6 +32,11 @@ pub const CLICK_SELECT_RADIUS_PX: f32 = 12.0;
 pub const DRAG_THRESHOLD_PX: f32 = 4.0;
 /// Ground-pick march step along the cursor ray, metres.
 pub const PICK_STEP_M: f32 = 0.5;
+/// How far a ground pick (the cursor ray, the orbit pivot) looks, metres.
+/// Picks only meet the height grid of loaded near terrain, and the march is
+/// linear in it, so it is NOT the view distance (15 km at the play sizes):
+/// the old 1 km horizon.
+pub const PICK_REACH_M: f32 = 1024.0;
 /// Bisection rounds refining a ground-pick hit.
 pub const PICK_REFINE_STEPS: u32 = 8;
 /// Selection ring radius as a share of the entity's footprint edge.
@@ -187,7 +192,7 @@ pub fn update_ground_pick(
         let hit = super::visible::visible_ground(
             ray.origin,
             *ray.direction,
-            game::lod::LOD_HORIZON_UNITS,
+            PICK_REACH_M * game::movement::UNITS_PER_METER,
             &grid,
             &working,
             &tiles,

@@ -198,7 +198,7 @@ mod tests {
         let level = 20;
         let cut = cut_at(level);
         let eye_y = cut.plane_y + super::super::top_down::TOP_DOWN_EYE_HEIGHT_M * UNITS_PER_METER;
-        let reach = game::lod::LOD_HORIZON_UNITS;
+        let reach = super::super::selection::PICK_REACH_M * UNITS_PER_METER;
         // Solid ground (to 29, cut at 20): the cut level's block top, not the
         // cut-away rock above it.
         let hit = visible_ground_with(Vec3::new(1.5 * S, eye_y, 1.5 * S), Vec3::NEG_Y, reach, Some(cut), surface, solid, everywhere, NO_XRAY)

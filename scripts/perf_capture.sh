@@ -2,7 +2,7 @@
 # One self-describing performance capture: release server + client, everything a later
 # analysis needs in ONE directory, plus a manifest saying exactly what was run.
 #
-#   target/perf-capture/<utc-timestamp>-<adapter>-<world>/
+#   target/perf-capture/<utc-timestamp>-<adapter>-<world>-view<VOXEL_VIEW_DISTANCE_M>/
 #     manifest.json   provenance: git rev + dirty, profile, adapter asked for AND selected,
 #                     world scale, render backends, thread counts, host, durations, exit codes
 #     client.log      full client log: [perf] join timeline, [client-budget], DIAG dumps
@@ -33,7 +33,7 @@ esac
 
 slug() { local s="${1:-}"; s="${s//[^[:alnum:]._-]/_}"; echo "${s:-$2}"; }
 stamp="$(date -u +%Y%m%dT%H%M%SZ)"
-out="target/perf-capture/${stamp}-$(slug "$adapter" default)-$(slug "$world" full)"
+out="target/perf-capture/${stamp}-$(slug "$adapter" default)-$(slug "$world" full)-view$(slug "${VOXEL_VIEW_DISTANCE_M:-}" default)"
 mkdir -p "$out"
 
 if [ -n "$adapter" ]; then export WGPU_ADAPTER_NAME="$adapter"; else unset WGPU_ADAPTER_NAME || true; fi

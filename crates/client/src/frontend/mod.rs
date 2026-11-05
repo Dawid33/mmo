@@ -8,9 +8,12 @@
 //! arrival map (the game UI's world map, before the first Play) is not up.
 //! The generator lives in [`generator`], the world list in [`load_world`] and
 //! the menu's map backdrop in [`menu_background`] (native only); the starting screen's lines come from [`starting_lines`].
+//! Once embarked, the same layer draws the [`loading`] screen (screen 4) over
+//! the world camera until the camera is placed and the home region is meshed.
 
 #[cfg(not(target_arch = "wasm32"))]
 pub mod generator;
+pub mod loading;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod load_world;
 #[cfg(not(target_arch = "wasm32"))]
@@ -23,7 +26,8 @@ use bevy::app::AppExit;
 use bevy::prelude::*;
 use slint_ui::FrontendUi;
 
-use crate::renderer::slint_overlay::{SlintLayer, SlintLayerPlugin, FRONTEND_LAYER_ORDER};
+use crate::renderer::slint_overlay::{render_slint_layer, SlintLayer, SlintLayerPlugin, FRONTEND_LAYER_ORDER};
+use crate::session::SessionResetExt;
 use crate::renderer::world_map::WorldMapState;
 use crate::session::{frontend_ui_shown, AppState, Embarked, LastSessionError, StartingLog, StartingStatus};
 
@@ -51,6 +55,9 @@ pub const JOIN_ONLY: bool = cfg!(target_arch = "wasm32");
 /// Whether any saved world exists, refreshed on entering the main menu.
 #[derive(Resource, Default, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CanLoad(pub bool);
+
+/// `FrontendUi.screen` of the loading screen ([`loading`]).
+pub const LOADING_SCREEN: i32 = 4;
 
 /// The `FrontendUi.screen` an [`AppState`] shows (`InWorld` shows the
 /// starting screen: the layer is visible there only until the world map
@@ -111,7 +118,14 @@ impl Plugin for FrontendPlugin {
         .init_resource::<LastSessionError>()
         .init_resource::<StartingLog>()
         .add_systems(OnEnter(AppState::MainMenu), refresh_can_load)
-        .add_systems(Update, (apply_frontend_actions, push_frontend_state).chain());
+        .add_session_reset::<loading::LoadingCover>()
+        .add_systems(Update, apply_frontend_actions)
+        // After every Update system that embarks or re-arms the camera, so the
+        // loading screen is drawn on the very frame the world camera takes over.
+        .add_systems(
+            PostUpdate,
+            (loading::update_loading_cover, push_frontend_state).chain().before(render_slint_layer::<FrontendUi>),
+        );
         #[cfg(not(target_arch = "wasm32"))]
         app.add_plugins((generator::GeneratorPlugin, load_world::LoadWorldPlugin, menu_background::MenuBackgroundPlugin));
     }
@@ -218,16 +232,31 @@ fn push_frontend_state(
     log: Res<StartingLog>,
     world_map: Option<Res<WorldMapState>>,
     #[cfg(not(target_arch = "wasm32"))] host: Option<Res<crate::local_host::LocalHost>>,
+    (cover, time): (Res<loading::LoadingCover>, Res<Time<Real>>),
     mut shown_lines: Local<Vec<String>>,
 ) {
     let Some(layer) = layer else { return };
     let ui = layer.overlay.ui();
     let map_arrived = world_map.is_some_and(|m| m.map.is_some());
-    let shown = frontend_ui_shown(*state.get(), embarked.0, map_arrived);
+    let frontend = frontend_ui_shown(*state.get(), embarked.0, map_arrived);
+    let loading = !frontend && cover.visible();
+    let shown = frontend || loading;
     if ui.get_shown() != shown {
         ui.set_shown(shown);
     }
-    let screen = screen_index(*state.get());
+    let screen = if loading { LOADING_SCREEN } else { screen_index(*state.get()) };
+    if loading {
+        if ui.get_load_screen_progress() != cover.progress {
+            ui.set_load_screen_progress(cover.progress);
+        }
+        if ui.get_load_screen_step() != cover.step {
+            ui.set_load_screen_step(cover.step.into());
+        }
+        let fade = cover.fade(time.elapsed_secs());
+        if ui.get_load_screen_fade() != fade {
+            ui.set_load_screen_fade(fade);
+        }
+    }
     if ui.get_screen() != screen {
         ui.set_screen(screen);
     }

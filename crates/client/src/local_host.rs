@@ -113,14 +113,23 @@ pub fn free_udp_port() -> io::Result<u16> {
 }
 
 impl LocalHost {
-    /// Start the server binary ([`server_binary`]) on `terrain`, logging to `log`.
-    pub fn start(terrain: &Path, log: &Path) -> io::Result<LocalHost> {
-        Self::start_with(&server_binary(), terrain, log)
+    /// Start the server binary ([`server_binary`]) on `terrain`, logging to `log`,
+    /// on `port` (`None` = a free one, [`free_udp_port`]).
+    pub fn start(terrain: &Path, log: &Path, port: Option<u16>) -> io::Result<LocalHost> {
+        Self::start_on(&server_binary(), terrain, log, port)
     }
 
-    /// [`start`](Self::start) with an explicit binary.
+    /// [`start`](Self::start) with an explicit binary, on a free port.
     pub fn start_with(binary: &Path, terrain: &Path, log: &Path) -> io::Result<LocalHost> {
-        let port = free_udp_port()?;
+        Self::start_on(binary, terrain, log, None)
+    }
+
+    /// [`start`](Self::start) with an explicit binary and port.
+    pub fn start_on(binary: &Path, terrain: &Path, log: &Path, port: Option<u16>) -> io::Result<LocalHost> {
+        let port = match port {
+            Some(port) => port,
+            None => free_udp_port()?,
+        };
         if let Some(dir) = log.parent() {
             std::fs::create_dir_all(dir)?;
         }

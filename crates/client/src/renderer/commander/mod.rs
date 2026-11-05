@@ -197,19 +197,39 @@ impl CommanderCamera {
 
 impl Default for CommanderCamera {
     fn default() -> Self {
-        let d = ZOOM_START_M * UNITS_PER_METER;
+        let d = start_angle_deg("VOXEL_CAMERA_DISTANCE_M").unwrap_or(ZOOM_START_M) * UNITS_PER_METER;
         Self {
             focus: region_rect(game::RegionCoords { x: 0, z: 0 }).center(),
             ground_y: sea_level_units(),
             distance: d,
             target_distance: d,
-            yaw: 0.0,
-            pitch: PITCH_DEG.to_radians(),
+            yaw: start_angle_deg("VOXEL_CAMERA_YAW_DEG").unwrap_or(0.0).to_radians(),
+            pitch: start_angle_deg("VOXEL_CAMERA_PITCH_DEG")
+                .unwrap_or(PITCH_DEG)
+                .clamp(PITCH_MIN_DEG, PITCH_MAX_DEG)
+                .to_radians(),
             rise: 0.0,
             pivot: None,
             placed: false,
             bounds: None,
         }
+    }
+}
+
+/// `VOXEL_CAMERA_PITCH_DEG` / `VOXEL_CAMERA_YAW_DEG` / `VOXEL_CAMERA_DISTANCE_M`
+/// (native): the commander camera's starting pitch below the horizon and
+/// heading (degrees) and distance from its focus (metres; the wheel later
+/// clamps to `ZOOM_NEAR_M..=ZOOM_FAR_M`) — e.g. a horizon-facing benchmark view
+/// above the canopy (`…_PITCH_DEG=15 …_DISTANCE_M=150`).
+fn start_angle_deg(name: &str) -> Option<f32> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        std::env::var(name).ok()?.trim().parse().ok()
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = name;
+        None
     }
 }
 
@@ -838,7 +858,7 @@ fn grab_orbit_pivot(
     let tf = camera_transform(focus, cam.distance, cam.yaw, cam.pitch);
     // The ground the player sees: with the cut on, never the cut-away rock.
     let ground =
-        visible::visible_ground(tf.translation, *tf.forward(), game::lod::LOD_HORIZON_UNITS, &grid, &working, &tiles, xray_on(xray.as_deref(), working.cut));
+        visible::visible_ground(tf.translation, *tf.forward(), selection::PICK_REACH_M * UNITS_PER_METER, &grid, &working, &tiles, xray_on(xray.as_deref(), working.cut));
     cam.pivot = Some(if working.cut { orbit_pivot(ground, focus) } else { free_orbit_pivot(ground, tf.translation, focus) });
 }
 
@@ -1067,6 +1087,7 @@ fn underground_view(
     td: Option<Res<top_down::TopDown>>,
     working: Res<level::WorkingLevel>,
     mut fog_choice: crate::session::SessionLocal<Option<(bool, bool)>>,
+    view: Option<Res<crate::renderer::atmosphere::ViewDistance>>,
 ) {
     let Some(mut ambient) = ambient else { return };
     // Top-down: its eye is always in the air; underground is the working
@@ -1093,7 +1114,7 @@ fn underground_view(
             } else if under {
                 crate::renderer::atmosphere::underground_fog()
             } else {
-                crate::renderer::atmosphere::distance_fog()
+                crate::renderer::atmosphere::distance_fog(&view.as_deref().copied().unwrap_or_default())
             };
             // The top-down fog shares the surface fog's colour, so the
             // colour alone cannot tell them apart.

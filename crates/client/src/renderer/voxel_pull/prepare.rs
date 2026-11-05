@@ -176,7 +176,9 @@ pub fn prepare_view_chunk_draws(
     let resolved: Vec<(GpuChunkQuads, Vec3, Vec3, bool)> = chunks
         .iter()
         .filter_map(|(main_entity, chunk)| {
-            if !chunk.cave_active {
+            // CPU-culled paths have no distance bands: full detail always,
+            // coarse twins never.
+            if !chunk.cave_active || chunk.band == super::DetailBand::code(Some(&super::DetailBand::Coarse)) {
                 return None;
             }
             let allocation = arena.allocations.get(&main_entity.id())?;
@@ -339,6 +341,7 @@ pub fn prepare_chunk_quads(
             extracted.half_extents,
             extracted.cave_active,
             ends,
+            extracted.band,
         );
 
         let record_end = allocation.record_start as usize + quad_count as usize;

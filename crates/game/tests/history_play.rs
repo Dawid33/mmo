@@ -10,7 +10,7 @@ use game::history::rules::EMBARK_PLAYER_PARTY_MAX;
 use game::history::*;
 use game::{
     Biome, ClientId, ClientPacket, EmbarkRequest, GameEvent, GameEventKind, InlineLodBuilder, InlineSpawner,
-    LodBuilder, PersonSpawn, RegionCoords, RegionOutput, ServerEvent, ServerPacket, SiteMarker, SpawnAt, WorldManager,
+    LodBuilder, PersonSpawn, PlayMode, RegionCoords, RegionOutput, ServerEvent, ServerPacket, SiteMarker, SpawnAt, WorldManager,
     WorldMap, SPAWN_REGION, TICK_RATE, UNLOAD_GRACE_MS,
 };
 
@@ -132,6 +132,45 @@ impl World {
     fn return_to(&mut self, c: ClientId, site: SiteId) -> Result<SiteId, EmbarkRefusal> {
         self.packet(c, ClientPacket::ReturnTo(site));
         self.result(c)
+    }
+
+    fn adventure(&mut self, c: ClientId, site: SiteId) -> Result<SiteId, AdventureRefusal> {
+        self.packet(c, ClientPacket::StartAdventure(site));
+        let mut results = Vec::new();
+        self.inbox.retain(|(to, p)| match p {
+            ServerPacket::AdventureResult(r) if *to == Some(c) => {
+                results.push(*r);
+                false
+            }
+            _ => true,
+        });
+        assert_eq!(results.len(), 1, "one AdventureResult: {results:?}");
+        results[0]
+    }
+
+    /// The play mode of `c`'s player in `r`, if `r` runs and holds it.
+    fn mode_in(&mut self, r: RegionCoords, c: ClientId) -> Option<PlayMode> {
+        let mut out = None;
+        if self.running(r) {
+            self.manager.spawner_mut().with_region(r, |region| out = region.data().clients.get(&c).map(|c| c.mode));
+        }
+        out
+    }
+
+    /// The block column (`[x, z]`) `c`'s body stands over in `r`, if `r` runs and holds it.
+    fn body_column(&mut self, r: RegionCoords, c: ClientId) -> Option<[i32; 2]> {
+        let mut out = None;
+        if self.running(r) {
+            self.manager.spawner_mut().with_region(r, |region| {
+                let d = region.data();
+                let handle = d.player_entites.get(&c).and_then(|&k| *d.ecs.rigidbody.try_get(k));
+                if let Some(t) = handle.and_then(|h| d.physics.bodies.get(h)).map(|b| b.position().translation) {
+                    let bv = game::BLOCK_VOXELS as f32;
+                    out = Some([(t.x / bv).floor() as i32, (t.z / bv).floor() as i32]);
+                }
+            });
+        }
+        out
     }
 
     /// The one `EmbarkResult` sent to `c` since the last call (other packets stay).
@@ -652,4 +691,136 @@ fn fortress_packet_follows_embark_retire_and_reconnect() {
     assert_eq!(fortress_in(&w.take(A2)), Some(Some(site)), "return after reconnect");
     w.connect(B);
     assert_eq!(fortress_in(&w.take(B)), Some(None), "a new player has none");
+}
+
+#[test]
+fn connect_sends_civ_names() {
+    let (mut w, _, _, _, _) = embark_world();
+    w.connect(B);
+    let civs: Vec<_> = w.take(B).into_iter().filter_map(|p| if let ServerPacket::Civs(c) = p { Some(c) } else { None }).collect();
+    assert_eq!(civs.len(), 1, "one Civs packet");
+    let want: Vec<_> = w.history().civs.values().map(|c| (c.id, c.name.clone())).collect();
+    let got: Vec<_> = civs[0].iter().map(|m| (m.civ, m.name.clone())).collect();
+    assert!(!want.is_empty());
+    assert_eq!(got, want);
+}
+
+#[test]
+fn legends_request_answered() {
+    let (mut w, _, _, _, _) = embark_world();
+    w.connect(B);
+    w.take(B);
+    let q = LegendsQuery { filter: LegendsFilter::All, before: None, limit: 5 };
+    w.packet(B, ClientPacket::RequestLegends(q.clone()));
+    let pages: Vec<_> = w.take(B).into_iter().filter_map(|p| if let ServerPacket::Legends(g) = p { Some(g) } else { None }).collect();
+    assert_eq!(pages.len(), 1);
+    assert_eq!(pages[0], w.history().legends(&q));
+}
+
+#[test]
+fn adventure_starts_at_populated_site() {
+    let (mut w, home, _, _, _) = embark_world();
+    let region = w.history().site(home).unwrap().region;
+    assert_eq!(w.adventure(A, home), Ok(home));
+    let to_a = w.take(A);
+    assert_eq!(player_region(&to_a), Some(Some(region)));
+    assert_eq!(fortress_in(&to_a), Some(None), "an adventurer holds no fortress");
+    w.settle();
+    assert_eq!(w.mode_in(region, A), Some(PlayMode::Adventure));
+    w.tick();
+    assert_eq!(w.players_in(region), vec![A]);
+    assert_eq!(w.mode_in(region, A), Some(PlayMode::Adventure));
+    w.check("adventuring");
+}
+
+#[test]
+fn adventure_in_the_home_region_lands_the_body_on_the_site() {
+    let (mut w, home, _, _, _) = embark_world();
+    let region = w.history().site(home).unwrap().region;
+    // Dev Play puts the player's body in the site's region first, off the landing.
+    w.packet(A, ClientPacket::PlayRegion(region));
+    w.take(A);
+    assert_eq!(w.adventure(A, home), Ok(home));
+    w.settle();
+    assert_eq!(w.mode_in(region, A), Some(PlayMode::Adventure));
+    w.tick();
+    assert_eq!(w.body_column(region, A), Some([20, 30]), "the body is at the site's landing");
+}
+
+#[test]
+fn adventure_refuses_unpopulated_and_abandoned() {
+    let (mut w, home, civ, people, free) = embark_world();
+    w.connect(B);
+    // B's two embarks take every member of the bootstrapped site: it is abandoned.
+    let max = EMBARK_PLAYER_PARTY_MAX as usize;
+    let first = w.embark(B, EmbarkRequest { civ, people: people[..max].to_vec(), region: free[0] }).unwrap();
+    assert!(w.history().site(home).unwrap().abandoned.is_none());
+    w.packet(B, ClientPacket::Retire);
+    w.tick();
+    w.wait(UNLOAD_GRACE_MS);
+    let second = free_regions(w.history())[0];
+    w.embark(B, EmbarkRequest { civ, people: people[max..].to_vec(), region: second }).unwrap();
+    assert!(w.history().site(home).unwrap().abandoned.is_some(), "the emptied site is abandoned");
+    w.take(A);
+    assert_eq!(w.adventure(A, home), Err(AdventureRefusal::SiteAbandoned));
+    // A site whose members are all dead but which is not yet abandoned.
+    {
+        let h = w.manager.history_mut().unwrap();
+        let members: Vec<PersonId> = h.site(first).unwrap().members.iter().copied().collect();
+        assert!(!members.is_empty());
+        for m in members {
+            h.people.get_mut(&m).unwrap().died = Some((CalendarTick(0), DeathCause::OldAge));
+        }
+    }
+    assert_eq!(w.adventure(A, first), Err(AdventureRefusal::Unpopulated));
+    assert_eq!(w.adventure(A, SiteId(9999)), Err(AdventureRefusal::UnknownSite));
+    assert_eq!(player_region(&w.take(A)), None, "no move for a refusal");
+}
+
+#[test]
+fn fortress_and_adventure_exclusive() {
+    let (mut w, home, civ, people, free) = embark_world();
+    w.embark(A, EmbarkRequest { civ, people: people[..2].to_vec(), region: free[0] }).unwrap();
+    assert_eq!(w.adventure(A, home), Err(AdventureRefusal::AlreadyPlaying));
+    w.connect(B);
+    assert_eq!(w.adventure(B, home), Ok(home));
+    assert_eq!(w.adventure(B, home), Err(AdventureRefusal::AlreadyPlaying), "one adventure at a time");
+    let req = EmbarkRequest { civ, people: people[2..4].to_vec(), region: free[1] };
+    assert_eq!(w.embark(B, req), Err(EmbarkRefusal::AlreadyHasFortress));
+    w.packet(A, ClientPacket::Retire);
+    let site = w.history().sites().find(|s| s.player_founded).unwrap().id;
+    assert_eq!(w.return_to(B, site), Err(EmbarkRefusal::AlreadyHasFortress));
+}
+
+#[test]
+fn end_adventure_returns_to_spawn_in_fortress_mode() {
+    let (mut w, home, civ, people, free) = embark_world();
+    let region = w.history().site(home).unwrap().region;
+    assert_eq!(w.adventure(A, home), Ok(home));
+    w.tick();
+    w.take(A);
+    w.packet(A, ClientPacket::EndAdventure);
+    let to_a = w.take(A);
+    assert_eq!(player_region(&to_a), Some(Some(SPAWN_REGION)));
+    assert!(sites_in(&to_a).is_some(), "fresh sites for the arrival map");
+    w.tick();
+    assert!(w.players_in(region).is_empty(), "the adventurer left the site");
+    assert_eq!(w.players_in(SPAWN_REGION), vec![A]);
+    assert_eq!(w.mode_in(SPAWN_REGION, A), Some(PlayMode::Fortress));
+    // Ending again changes nothing.
+    w.packet(A, ClientPacket::EndAdventure);
+    assert!(w.take(A).is_empty(), "no-op end sends nothing");
+    // The site region parks, so its people may embark.
+    w.wait(UNLOAD_GRACE_MS);
+    assert!(w.embark(A, EmbarkRequest { civ, people: people[..2].to_vec(), region: free[0] }).is_ok());
+    w.check("embarked after an adventure");
+}
+
+#[test]
+fn adventure_dropped_on_disconnect() {
+    let (mut w, home, _, _, _) = embark_world();
+    assert_eq!(w.adventure(A, home), Ok(home));
+    w.send(ServerEvent::ClientDisconnected(A));
+    w.connect(A);
+    assert_eq!(w.adventure(A, home), Ok(home), "the adventure was not kept");
 }

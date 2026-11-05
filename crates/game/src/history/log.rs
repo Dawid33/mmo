@@ -84,3 +84,33 @@ impl LogEntry {
         format!("{}: {what}", self.at.date())
     }
 }
+
+impl LogEntry {
+    /// The people and sites this entry names (for filtering; no duplicates guaranteed).
+    pub fn subjects(&self) -> (Vec<PersonId>, Vec<SiteId>) {
+        match &self.kind {
+            LogKind::Born { person, mother, father, site } => {
+                let mut people = vec![*person];
+                people.extend(mother);
+                people.extend(father);
+                (people, site.iter().copied().collect())
+            }
+            LogKind::Died { person, .. } => (vec![*person], Vec::new()),
+            LogKind::Married { a, b } => (vec![*a, *b], Vec::new()),
+            LogKind::Departed { people, from, purpose } => {
+                let mut sites = vec![*from];
+                if let Purpose::Migrate { to } = purpose {
+                    sites.push(*to);
+                }
+                (people.clone(), sites)
+            }
+            LogKind::Arrived { people, site } => (people.clone(), vec![*site]),
+            LogKind::SiteFounded { site, founders, from, .. } => {
+                let mut sites = vec![*site];
+                sites.extend(from);
+                (founders.clone(), sites)
+            }
+            LogKind::SiteAbandoned { site } => (Vec::new(), vec![*site]),
+        }
+    }
+}

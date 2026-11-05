@@ -1,0 +1,77 @@
+// The loading screen: covers the world from embarking until the camera sits
+// over the fortress and the ground around it has been built, then fades out
+// (the client drives `fade`; `client/src/renderer/loading_screen.rs`).
+// A tiled, darkened dirt backdrop, a title, the current step and a bar.
+// Text takes the theme's fonts (title = the frame title's, step = labels').
+import { Styles } from "@widgets";
+
+export component Loading {
+    // 0..1 of the bar.
+    in property <float> progress;
+    // The current step ("Receiving terrain…").
+    in property <string> step;
+    // 1 = fully opaque, 0 = gone. Applied below the root (never bind
+    // opacity on a component's root: Slint then inlines it at every use).
+    in property <float> fade: 1;
+
+    cover := Rectangle {
+        width: root.width;
+        height: root.height;
+        opacity: root.fade;
+        background: #1b130c;
+
+        Image {
+            width: parent.width;
+            height: parent.height;
+            source: @image-url("images/loading-dirt.png");
+            horizontal-tiling: repeat;
+            vertical-tiling: repeat;
+            image-rendering: pixelated;
+        }
+        // Darkens the dirt so the text reads.
+        Rectangle {
+            background: #000000b0;
+        }
+
+        title := Text {
+            x: (parent.width - self.width) / 2;
+            y: parent.height / 2 - 56px;
+            text: "Loading terrain";
+            color: #ffffff;
+            font-family: Styles.frame.title.font.family;
+            font-weight: Styles.frame.title.font.weight;
+            font-size: 24px;
+        }
+        Text {
+            x: (parent.width - self.width) / 2;
+            y: title.y + 36px;
+            text: root.step;
+            color: #b0b0b0;
+            font-family: Styles.label.font.family;
+            font-weight: Styles.label.font.weight;
+            font-size: 15px;
+        }
+        // The bar: a light frame, a dark track and a green fill.
+        bar := Rectangle {
+            width: min(parent.width - 48px, 400px);
+            height: 8px;
+            x: (parent.width - self.width) / 2;
+            y: title.y + 72px;
+            background: #808080;
+            Rectangle {
+                x: 1px;
+                y: 1px;
+                width: parent.width - 2px;
+                height: parent.height - 2px;
+                background: #202020;
+            }
+            Rectangle {
+                x: 1px;
+                y: 1px;
+                width: (parent.width - 2px) * clamp(root.progress, 0, 1);
+                height: parent.height - 2px;
+                background: #80ff20;
+            }
+        }
+    }
+}

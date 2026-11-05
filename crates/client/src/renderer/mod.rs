@@ -10,7 +10,7 @@ use game::{ClientId, ClientUpdateEvent, GameEventKind};
 
 use crate::session::{world_systems_enabled, SessionResetExt};
 
-mod atmosphere;
+pub mod atmosphere;
 #[cfg(not(target_arch = "wasm32"))]
 mod autopilot;
 mod avatar;
@@ -51,6 +51,7 @@ pub use slint_composite::UiCamera;
 pub mod voxel_bodies;
 mod voxel_material;
 pub mod voxel_pull;
+pub mod embark_tabs;
 pub mod history_view;
 pub mod world_map;
 use block_textures::build_layers;
@@ -227,6 +228,11 @@ impl Plugin for SimBridgePlugin {
                     .chain(),
                 interpolate::interpolate_transforms,
                 (voxel_bodies::spawn_voxel_body_meshes, voxel_bodies::apply_voxel_body_meshes).chain(),
+                // Coarse twins of sim chunks (distance LOD in the simulated
+                // neighbourhood): dirtied by `rebuild_chunk_meshes`.
+                (meshing::coarse::apply_coarse_tasks, meshing::coarse::spawn_coarse_tasks)
+                    .chain()
+                    .after(meshing::chunk_mesh::rebuild_chunk_meshes),
                 world_map::apply_world_map_msgs,
                 history_view::apply_history_msgs,
                 // Per-frame mouse look replaces the per-tick sim look that
@@ -248,6 +254,8 @@ impl Plugin for SimBridgePlugin {
         );
         // Every camera, the frontend's included (which brings its own).
         app.add_systems(Update, (skybox::attach_skybox, atmosphere::attach_fog));
+        // Far planes follow the fog's end (`ViewDistance`), before the frusta.
+        app.add_systems(PostUpdate, atmosphere::sync_far_plane.before(bevy::camera::CameraUpdateSystems));
         app.add_systems(
             Update,
             motion_probe::probe_region_crossing
@@ -298,6 +306,15 @@ impl Plugin for SimBridgePlugin {
         // RenderDiagnosticsPlugin reaches into the RenderApp sub-app.
         if diag::enabled() {
             app.add_plugins(diag::DiagPlugin);
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(secs) = diag::exit_after_from_env() {
+            diag::exit_after_plugin(app, secs);
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some((secs, path)) = diag::screenshot_from_env() {
+            diag::screenshot_plugin(app, secs, path);
         }
     }
 }

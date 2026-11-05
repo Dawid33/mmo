@@ -1107,7 +1107,7 @@ mod tests {
         // — region (5, -3) at the default size — so it is the same coast at any
         // `REGION_CHUNKS`.
         let rc = RegionCoords::from_world(5632.0, -2560.0);
-        for factor in [16u32, 32, 64, 256] {
+        for factor in [16u32, 32, 64, 128, 256, 512] {
             let key = game::lod::LodKey::for_region(factor, rc);
             let mut water_columns = 0;
             for cell in coarse_tile(&key, WORLD_SEED, mats()) {

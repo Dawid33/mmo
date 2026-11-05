@@ -831,3 +831,87 @@ fn short_file_with_magic_is_corrupt() {
     }
     assert!(matches!(decode(b"MMOHIS", grid).unwrap_err(), HistoryLoadError::NotAHistory));
 }
+
+// ---- Embark tabs Task 1: legends query ----
+fn legends_world() -> History {
+    bootstrap(&big_land(), &params(60)).unwrap()
+}
+
+fn q(filter: LegendsFilter, before: Option<u32>, limit: u16) -> LegendsQuery {
+    LegendsQuery { filter, before, limit }
+}
+
+#[test]
+fn legends_all_pages_newest_first() {
+    let h = legends_world();
+    let first = h.legends(&q(LegendsFilter::All, None, 10));
+    assert_eq!(first.lines.len(), 10);
+    assert_eq!(first.lines[0].index as usize, h.log.len() - 1);
+    assert!(first.lines.windows(2).all(|w| w[0].index > w[1].index));
+    assert_eq!(first.total as usize, h.log.len());
+    let mut seen = Vec::new();
+    let mut page = first;
+    loop {
+        seen.extend(page.lines.iter().map(|l| l.index));
+        let Some(next) = page.next else { break };
+        assert_eq!(Some(next), page.lines.last().map(|l| l.index));
+        page = h.legends(&q(LegendsFilter::All, Some(next), 10));
+    }
+    let expect: Vec<u32> = (0..h.log.len() as u32).rev().collect();
+    assert_eq!(seen, expect);
+}
+
+fn brute(h: &History, f: impl Fn(&[PersonId], &[SiteId]) -> bool) -> u32 {
+    h.log.iter().filter(|e| { let (p, s) = e.subjects(); f(&p, &s) }).count() as u32
+}
+
+#[test]
+fn legends_site_filter_matches_subjects() {
+    let h = legends_world();
+    let s = h.sites().find(|s| s.members.len() > 0).unwrap().id;
+    let hits = |p: &[PersonId], sites: &[SiteId]| {
+        sites.contains(&s) || p.iter().any(|x| h.person(*x).and_then(|x| x.site) == Some(s))
+    };
+    let page = h.legends(&q(LegendsFilter::Site(s), None, 200));
+    assert!(page.total > 0);
+    assert!(page.lines.iter().all(|l| hits(&l.people, &l.sites)));
+    assert_eq!(page.total, brute(&h, hits));
+}
+
+#[test]
+fn legends_civ_filter_matches_its_sites() {
+    let h = legends_world();
+    let c = h.civs().next().unwrap().id;
+    let of_civ = |s: SiteId| h.site(s).is_some_and(|s| s.civ == c);
+    let hits = |p: &[PersonId], sites: &[SiteId]| {
+        sites.iter().any(|s| of_civ(*s)) || p.iter().any(|x| h.person(*x).and_then(|x| x.site).is_some_and(of_civ))
+    };
+    let page = h.legends(&q(LegendsFilter::Civ(c), None, 200));
+    assert!(page.total > 0);
+    assert!(page.lines.iter().all(|l| hits(&l.people, &l.sites)));
+    assert_eq!(page.total, brute(&h, hits));
+}
+
+#[test]
+fn legends_person_filter() {
+    let h = legends_world();
+    let (idx, who) = h.log.iter().enumerate().find_map(|(i, e)| match &e.kind {
+        game::history::log::LogKind::Born { person, .. } => Some((i as u32, *person)),
+        _ => None,
+    }).unwrap();
+    let page = h.legends(&q(LegendsFilter::Person(who), None, 200));
+    assert!(page.lines.iter().any(|l| l.index == idx));
+    assert!(page.lines.iter().all(|l| l.people.contains(&who)));
+}
+
+#[test]
+fn legends_unknown_filters_and_cursor_clamp() {
+    let h = legends_world();
+    let none = h.legends(&q(LegendsFilter::Civ(CivId(9999)), None, 10));
+    assert!(none.lines.is_empty() && none.total == 0 && none.next.is_none());
+    let a = h.legends(&q(LegendsFilter::All, Some(u32::MAX), 10));
+    let b = h.legends(&q(LegendsFilter::All, None, 10));
+    assert_eq!(a.lines, b.lines);
+    assert_eq!(h.legends(&q(LegendsFilter::All, None, 0)).lines.len(), 1);
+    assert!(h.legends(&q(LegendsFilter::All, None, 5000)).lines.len() <= 200);
+}

@@ -8,7 +8,7 @@ use super::log::{LogEntry, LogKind};
 use super::records::*;
 use super::rules::EMBARK_PLAYER_PARTY_MAX;
 use super::History;
-use crate::protocol::{CivOption, EmbarkOptions, EmbarkRequest, PersonInfo, PersonOption, SiteMarker, SiteOption};
+use crate::protocol::{CivMarker, CivOption, EmbarkOptions, EmbarkRequest, PersonInfo, PersonOption, SiteMarker, SiteOption};
 use crate::RegionCoords;
 
 impl History {
@@ -120,6 +120,11 @@ impl History {
                 returnable: self.returnable(s.id),
             })
             .collect()
+    }
+
+    /// Every civilisation's name, by id.
+    pub fn civ_markers(&self) -> Vec<CivMarker> {
+        self.civs.values().map(|c| CivMarker { civ: c.id, name: c.name.clone() }).collect()
     }
 
     /// `person` for the inspector; `None` for an unknown id.

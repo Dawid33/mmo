@@ -99,7 +99,7 @@ type VoxelMaterial = ExtendedMaterial<StandardMaterial, StandardVoxelMaterial>;
 #[allow(clippy::too_many_arguments)] // Bevy system: params are DI, not an API
 pub fn rebuild_chunk_meshes(
     mut commands: Commands,
-    dirty: Query<(Entity, &ChunkBricks, &GlobalTransform), With<ChunkMeshDirty>>,
+    dirty: Query<(Entity, &ChunkBricks, &GlobalTransform, Option<&super::coarse::CoarseTwin>), With<ChunkMeshDirty>>,
     bricks: Query<(&BrickOf, Option<&BrickRecords>, Has<MeshingTask>)>,
     queue: Res<RemeshQueue>,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -116,7 +116,7 @@ pub fn rebuild_chunk_meshes(
     let eye = camera.iter().next().map(|t| t.translation());
     let mut order: Vec<(f32, Entity)> = dirty
         .iter()
-        .map(|(e, _, tf)| {
+        .map(|(e, _, tf, _)| {
             let centre = tf.transform_point(Vec3::splat(CHUNK_UNITS as f32 / 2.0));
             (eye.map_or(0.0, |eye| eye.distance_squared(centre)), e)
         })
@@ -126,7 +126,7 @@ pub fn rebuild_chunk_meshes(
         if uploads.0 >= budgets.uploads_per_frame {
             break;
         }
-        let Ok((_, list, _)) = dirty.get(chunk) else { continue };
+        let Ok((_, list, _, twin)) = dirty.get(chunk) else { continue };
         let settled = list.0.iter().all(|&b| {
             // A despawned brick counts as settled (it just draws nothing).
             !queue.dirty.contains_key(&b) && bricks.get(b).map_or(true, |(_, _, meshing)| !meshing)
@@ -147,6 +147,7 @@ pub fn rebuild_chunk_meshes(
         ec.remove::<ChunkMeshDirty>();
         if merged.is_empty() {
             ec.remove::<(Mesh3d, MeshMaterial3d<VoxelMaterial>, ChunkQuads, TerrainQuadCount, InteriorFaces)>();
+            super::coarse::drop_coarse_twin(&mut commands, chunk, twin);
             continue;
         }
         uploads.0 += 1;
@@ -164,6 +165,10 @@ pub fn rebuild_chunk_meshes(
                 ec.remove::<InteriorFaces>();
             }
             ec.insert(ChunkQuads(Arc::new(merged)));
+            // Its coarse twin follows every rebuild (`meshing::coarse`).
+            if super::coarse::coarse_twins_enabled() {
+                ec.insert(super::coarse::CoarseDirty);
+            }
         }
     }
 }

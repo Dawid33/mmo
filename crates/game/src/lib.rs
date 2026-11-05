@@ -244,6 +244,12 @@ pub enum ClientUpdateEvent {
     /// every `perf::TICK_TIME_REPORT_INTERVAL`; native only (no clock on
     /// wasm32). A region missing from the list is no longer live.
     RegionTickTimes(Vec<(RegionId, perf::TickTimeStats)>),
+    /// World history: every civ's name (on connect), for the embark tabs.
+    Civs(Vec<CivMarker>),
+    /// World history: one page of the legends log (answer to `RequestLegends`).
+    Legends(history::LegendsPage),
+    /// World history: the answer to a start-adventure request.
+    AdventureResult(Result<history::SiteId, history::AdventureRefusal>),
 }
 
 #[cfg(not(target_arch = "wasm32"))]

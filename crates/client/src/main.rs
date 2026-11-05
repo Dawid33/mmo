@@ -102,7 +102,26 @@ pub fn orion_worker_main(role: String, base: String) {
     client::web_worker::worker_main(&role, base);
 }
 
+/// `VOXEL_VSYNC=on|1|true`: vsync (`AutoVsync`); `immediate` / `mailbox` /
+/// `fifo`: that present mode exactly (fails at startup if the surface lacks
+/// it); unset or anything else: `AutoNoVsync`.
+#[cfg(not(target_arch = "wasm32"))]
+fn present_mode_from_env() -> bevy::window::PresentMode {
+    use bevy::window::PresentMode;
+    match std::env::var("VOXEL_VSYNC").unwrap_or_default().to_ascii_lowercase().as_str() {
+        "on" | "1" | "true" => PresentMode::AutoVsync,
+        "immediate" => PresentMode::Immediate,
+        "mailbox" => PresentMode::Mailbox,
+        "fifo" => PresentMode::Fifo,
+        _ => PresentMode::AutoNoVsync,
+    }
+}
+
 fn main() {
+    // Before any thread: it may set WGPU_ADAPTER_NAME (never the slow NVK GPU
+    // by accident). `RENDER_BENCH` and probes pin theirs and are left alone.
+    #[cfg(not(target_arch = "wasm32"))]
+    client::adapter_pick::pin_adapter();
     // In a Web Worker the module is instantiated for its exports
     // (`orion_worker_main`), not to run the app.
     #[cfg(target_arch = "wasm32")]
@@ -145,6 +164,10 @@ fn main() {
     // any window or socket opens. The game thread subscribes by it; the
     // render benchmark gates on it.
     let world_scale = WorldScale::from_env().unwrap_or_else(|error| panic!("{error}"));
+    // Haze + camera far plane: follow the ring table's reach
+    // (VOXEL_VIEW_DISTANCE_M); VOXEL_FOG_VISIBILITY_M sets the haze alone.
+    let view_distance = client::renderer::atmosphere::ViewDistance::from_env(&world_scale)
+        .unwrap_or_else(|error| panic!("{error}"));
 
     // Shared debug toggles: render thread (F3 dev panel) writes, game thread reads.
     let debug_flags = game::DebugFlags::default();
@@ -208,6 +231,23 @@ fn main() {
         title: "Orion".into(),
         ..Default::default()
     };
+    // Native presents without vsync by default, so the frame rate shows the
+    // real per-frame cost (a vsync'd frame sits at the refresh rate however much
+    // headroom it has); `VOXEL_VSYNC=on` brings vsync back. The browser paces
+    // its own frames.
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        primary_window.present_mode = present_mode_from_env();
+    }
+    // `VOXEL_WINDOW=WxH`: the window's physical size (perf A/B: a quarter of
+    // the pixels tells a fragment-bound pass from a geometry-bound one).
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some((w, h)) = std::env::var("VOXEL_WINDOW")
+        .ok()
+        .and_then(|v| v.split_once('x').and_then(|(w, h)| Some((w.parse::<u32>().ok()?, h.parse::<u32>().ok()?))))
+    {
+        primary_window.resolution = bevy::window::WindowResolution::new(w, h).with_scale_factor_override(1.0);
+    }
     #[cfg(not(target_arch = "wasm32"))]
     if renderer::render_bench::enabled() {
         primary_window.resolution = bevy::window::WindowResolution::new(
@@ -246,7 +286,8 @@ fn main() {
             .set(bevy::app::TaskPoolPlugin { task_pool_options })
             .set(renderer::render_plugin()),
     )
-    .insert_resource(world_scale);
+    .insert_resource(world_scale)
+    .insert_resource(view_distance);
     // App states + the session reset registry + the frontend camera. The menu
     // is the default; the dev bypass starts straight in the world.
     app.add_plugins(client::session::SessionPlugin { skip_menu });
@@ -260,6 +301,12 @@ fn main() {
     // Repeated here because the game thread's own `world scale` line is logged
     // before the logger exists; capture manifests read this one.
     info!("[client] world scale: {world_scale}");
+    info!(
+        "[client] view distance: haze visibility {:.0} m, far plane {:.0} m, lod reach {:.0} m",
+        view_distance.visibility / game::movement::UNITS_PER_METER,
+        view_distance.far / game::movement::UNITS_PER_METER,
+        world_scale.lod_reach_units() / game::movement::UNITS_PER_METER,
+    );
     app.add_plugins(renderer::SimBridgePlugin {
         client_recv,
         game_send: game_send.clone(),

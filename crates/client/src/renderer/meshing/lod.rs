@@ -63,7 +63,7 @@ fn skirt_extend(q: &mut Quad) {
 /// on the same plane (e.g. grass over dirt: two quads, since greedy meshing
 /// never merges different blocks) — the skirt would lie coplanar on it and
 /// z-fight. A seam can only open where that row is NOT an exposed wall.
-fn lod_quads(grid: &[Voxel], neighbors: &BTreeMap<[i32; 3], &[Voxel]>) -> Vec<Quad> {
+pub(crate) fn lod_quads(grid: &[Voxel], neighbors: &BTreeMap<[i32; 3], &[Voxel]>) -> Vec<Quad> {
     let padded = gather_padded(grid, neighbors);
     // LOD stays opaque: coarse cells of leaves are solid foliage.
     let mut quads = binary::mesh_quads(&padded, &binary::CutoutTable::NONE);

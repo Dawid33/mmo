@@ -56,7 +56,8 @@ use super::cursor::CursorPolicy;
 use super::slint_composite::{SlintCompositePlugin, SlintLayerTextures};
 use super::hud::{crosshair_visible, HudStatus};
 use super::fortress_panel;
-use super::history_view::{self, HistoryView};
+use super::embark_tabs;
+use super::history_view::{self, EmbarkTab, HistoryView};
 use super::world_map::WorldMapState;
 use super::ClientRequests;
 use crate::instance::ClientRequest;
@@ -163,6 +164,22 @@ pub enum UiAction {
     ReturnTo(i32),
     /// The Esc menu's Retire fortress button.
     Retire,
+    /// The embark panel's tab row (0 Fortress, 1 Adventure, 2 Legends).
+    EmbarkTab(i32),
+    /// The Adventure tab's civ button (index into `AdventureSelection::civs`).
+    AdventurePickCiv(i32),
+    /// The Adventure tab's site button (index into the picked civ's sites).
+    AdventurePickSite(i32),
+    /// The Adventure tab's Start adventure button.
+    AdventureStart,
+    /// The Esc menu's End adventure button.
+    EndAdventure,
+    /// A Legends filter row (index into `embark_tabs::legends_filter_entries`).
+    LegendsPickFilter(i32),
+    /// The Legends list reached its bottom: the next older page.
+    LegendsMore,
+    /// A Legends line clicked (index into `LegendsState::lines`).
+    LegendsLine(i32),
 }
 
 /// The region a Play request was sent for, until we are there with its region
@@ -503,6 +520,7 @@ impl Plugin for SlintOverlayPlugin {
                     menu_keys.before(minimap::minimap_pointer),
                     apply_ui_actions.before(minimap::minimap_pointer),
                     apply_embark_result.before(minimap::minimap_pointer),
+                    apply_adventure_result.before(minimap::minimap_pointer),
                     arrival_map.before(minimap::minimap_pointer),
                     // Also before the commander: the clicks the open wheel
                     // takes must not reach the world.
@@ -645,6 +663,19 @@ fn connect_game_ui(ui: &GameUi, world: &mut World) {
     ui.on_embark_toggle_person(move |s, p| queue.borrow_mut().push(UiAction::EmbarkTogglePerson(s, p)));
     let queue = actions.clone();
     ui.on_embark_return_to(move |i| queue.borrow_mut().push(UiAction::ReturnTo(i)));
+    let queue = actions.clone();
+    ui.on_embark_tab_changed(move |i| queue.borrow_mut().push(UiAction::EmbarkTab(i)));
+    let queue = actions.clone();
+    ui.on_adventure_pick_civ(move |i| queue.borrow_mut().push(UiAction::AdventurePickCiv(i)));
+    let queue = actions.clone();
+    ui.on_adventure_pick_site(move |i| queue.borrow_mut().push(UiAction::AdventurePickSite(i)));
+    ui.on_adventure_start(push(UiAction::AdventureStart));
+    ui.on_end_adventure(push(UiAction::EndAdventure));
+    let queue = actions.clone();
+    ui.on_legends_pick_filter(move |i| queue.borrow_mut().push(UiAction::LegendsPickFilter(i)));
+    ui.on_legends_load_more(push(UiAction::LegendsMore));
+    let queue = actions.clone();
+    ui.on_legends_line_clicked(move |i| queue.borrow_mut().push(UiAction::LegendsLine(i)));
     ui.on_follow_clicked(push(UiAction::ToggleFollow));
     ui.on_top_down_clicked(push(UiAction::ToggleTopDown));
     ui.on_open_settings(push(UiAction::OpenSettings));
@@ -1206,6 +1237,94 @@ fn apply_ui_actions(
                 to.menu = false;
                 // `arrival_map` opens the (now modal) map.
             }
+            UiAction::EndAdventure => {
+                if history.adventuring.is_none() || history.adventure_pending {
+                    continue;
+                }
+                if !requests.as_ref().is_some_and(|r| r.0.send(ClientRequest::EndAdventure).is_ok()) {
+                    warn!("[adventure] end not sent: no game thread");
+                    continue;
+                }
+                // Back to the arrival map, as after Retire.
+                history.adventuring = None;
+                history.adventure_result = None;
+                history.adventure_refusal = None;
+                history.options_requested = false;
+                history.embark_result = None;
+                history.embark_refusal = None;
+                if let Some(embarked) = embarked.as_mut() {
+                    embarked.0 = false;
+                }
+                if let Some(follow) = follow.as_mut() {
+                    follow.0 = None;
+                }
+                to.menu = false;
+                // `arrival_map` opens the (now modal) map.
+            }
+            UiAction::EmbarkTab(i) => {
+                let tab = embark_tabs::embark_tab(i);
+                if history.tab != tab {
+                    history.tab = tab;
+                }
+                // The first visit to Legends asks for the newest page.
+                let unasked = history.legends.pending.is_none() && history.legends.lines.is_empty() && history.legends.total == 0;
+                if tab == EmbarkTab::Legends && unasked {
+                    let filter = history.legends.filter.clone();
+                    send_legends_query(requests.as_deref(), &mut history, Some(filter));
+                }
+            }
+            UiAction::AdventurePickCiv(i) => {
+                if let Some(civ) = embark_tabs::adventure_civ_at(&history.sites, &history.civs, i) {
+                    history.adventure.pick_civ(civ);
+                }
+            }
+            UiAction::AdventurePickSite(i) => {
+                let Some(site) = embark_tabs::adventure_site_at(&history.adventure, &history.sites, i) else { continue };
+                history.adventure.pick_site(site.site);
+                if let Some(tile) = world_map.map.as_ref().and_then(|m| map_tile(m, site.region)) {
+                    embark_tabs::select_map_tile(ui, tile);
+                }
+            }
+            UiAction::AdventureStart => {
+                if history.adventure_pending {
+                    continue;
+                }
+                let Some(site) = history.adventure.site else { continue };
+                if requests.as_ref().is_some_and(|r| r.0.send(ClientRequest::StartAdventure(site)).is_ok()) {
+                    // A stale result must never drive the UI.
+                    history.adventure_result = None;
+                    history.adventure_refusal = None;
+                    history.adventure_pending = true;
+                } else {
+                    warn!("[adventure] request not sent: no game thread");
+                }
+            }
+            UiAction::LegendsPickFilter(i) => {
+                let entries = embark_tabs::legends_filter_entries(&history.civs, &history.sites);
+                let Some(entry) = usize::try_from(i).ok().and_then(|i| entries.into_iter().nth(i)) else { continue };
+                if let game::history::LegendsFilter::Site(site) = entry.filter {
+                    let tile = world_map.map.as_ref().and_then(|m| embark_tabs::site_tile(m, &history.sites, site));
+                    if let Some(tile) = tile {
+                        embark_tabs::select_map_tile(ui, tile);
+                    }
+                }
+                send_legends_query(requests.as_deref(), &mut history, Some(entry.filter));
+            }
+            UiAction::LegendsMore => {
+                // Fires while the list sits at its bottom: read first, so an
+                // idle repeat does not mark the history changed.
+                if history.legends.pending.is_none() && history.legends.next.is_some() {
+                    send_legends_query(requests.as_deref(), &mut history, None);
+                }
+            }
+            UiAction::LegendsLine(i) => {
+                let line = usize::try_from(i).ok().and_then(|i| history.legends.lines.get(i));
+                let Some(site) = line.and_then(embark_tabs::legends_line_site) else { continue };
+                let tile = world_map.map.as_ref().and_then(|m| embark_tabs::site_tile(m, &history.sites, site));
+                if let Some(tile) = tile {
+                    embark_tabs::select_map_tile(ui, tile);
+                }
+            }
             UiAction::OpenMap => to = Screens::open_map(),
             UiAction::CloseMap => to.map = false,
             UiAction::CloseMenu => to.menu = false,
@@ -1216,7 +1335,18 @@ fn apply_ui_actions(
                 }
             }
             // The selection lives in Slint; `push_ui_state` follows it.
-            UiAction::SelectTile(..) => {}
+            // In the Adventure tab a populated site's tile picks that site.
+            UiAction::SelectTile(col, row) => {
+                if history.tab != EmbarkTab::Adventure {
+                    continue;
+                }
+                let region = world_map.map.as_ref().and_then(|m| tile_region(m, col, row));
+                let site = region.and_then(|rc| embark_tabs::adventure_site_in(&history.sites, rc)).map(|s| (s.civ, s.site));
+                if let Some((civ, site)) = site {
+                    history.adventure.pick_civ(civ);
+                    history.adventure.pick_site(site);
+                }
+            }
             UiAction::Play => {
                 // One request at a time: Play is disabled while one is pending.
                 if pending.0.is_some() {
@@ -1259,6 +1389,64 @@ fn apply_ui_actions(
         }
         let modal = !is_embarked && world_map.map.is_some();
         set_screens(ui, to.held(modal), &mut world_map, status.home_region, policy.as_mut(), is_embarked);
+    }
+}
+
+/// Send the first page of `filter` (`Some`) or the next older page (`None`)
+/// as `RequestLegends`; `LegendsState` keeps at most one query in flight.
+fn send_legends_query(
+    requests: Option<&ClientRequests>,
+    history: &mut HistoryView,
+    filter: Option<game::history::LegendsFilter>,
+) {
+    let query = match filter {
+        Some(filter) => Some(history.legends.query_first(filter)),
+        None => history.legends.query_next(),
+    };
+    let Some(query) = query else { return };
+    if !requests.is_some_and(|r| r.0.send(ClientRequest::RequestLegends(query)).is_ok()) {
+        warn!("[legends] query not sent: no game thread");
+        history.legends.pending = None;
+    }
+}
+
+/// An `AdventureResult` (answer to Start adventure): `Ok` starts it (the
+/// arrival map closes, the camera re-places over the body), a refusal goes on
+/// the map status line for `REFUSAL_SHOW_SECS`. The result is taken, never
+/// read twice.
+fn apply_adventure_result(
+    slint: Option<NonSend<SlintLayer<GameUi>>>,
+    mut history: ResMut<HistoryView>,
+    mut embarked: Option<ResMut<Embarked>>,
+    mut cam: Option<ResMut<CommanderCamera>>,
+    mut world_map: ResMut<WorldMapState>,
+    status: Res<HudStatus>,
+    mut policy: Option<ResMut<CursorPolicy>>,
+    time: Res<Time>,
+) {
+    let Some(slint) = slint else { return };
+    if history.adventure_result.is_none() {
+        return;
+    }
+    let Some(result) = history.adventure_result.take() else { return };
+    history.adventure_pending = false;
+    match result {
+        Ok(site) => {
+            history.adventuring = Some(site);
+            // The embark panel stays beside the map only while not playing.
+            history.retired = false;
+            if let Some(embarked) = embarked.as_mut() {
+                embarked.0 = true;
+            }
+            if let Some(cam) = cam.as_mut() {
+                cam.placed = false;
+            }
+            let ui = slint.overlay.ui();
+            let mut to = Screens::of(ui);
+            to.map = false;
+            set_screens(ui, to, &mut world_map, status.home_region, policy.as_mut(), true);
+        }
+        Err(why) => history.adventure_refusal = Some((why, time.elapsed_secs())),
     }
 }
 
@@ -1585,6 +1773,8 @@ struct MapParams<'w, 's> {
     history: ResMut<'w, HistoryView>,
     requests: Option<Res<'w, ClientRequests>>,
     inspected: crate::session::SessionLocal<'w, 's, Inspected>,
+    /// The embark tabs as last pushed.
+    tabs: crate::session::SessionLocal<'w, 's, Option<embark_tabs::TabsView>>,
 }
 
 /// The person last requested for the inspector, and when (secs).
@@ -1743,11 +1933,13 @@ fn sync_world_map(ui: &GameUi, home: Option<RegionCoords>, p: &mut MapParams) {
         ui.set_embark_returns(ModelRc::new(VecModel::from(returns)));
     }
 
-    // A dark overlay on the hovered tile when embarking there is refused.
+    // A dark overlay on the hovered tile when embarking there is refused
+    // (the Fortress tab only: Adventure and Legends pick no tile to found on).
     let (hcol, hrow) = (ui.get_map_hover_col(), ui.get_map_hover_row());
-    if shown.hover_for != Some((hcol, hrow, embark_ui)) {
-        shown.hover_for = Some((hcol, hrow, embark_ui));
-        let blocked = embark_ui && map.and_then(|m| tile_region(m, hcol, hrow)).is_some_and(|rc| check(rc).is_err());
+    let darken = embark_ui && p.history.tab == EmbarkTab::Fortress;
+    if shown.hover_for != Some((hcol, hrow, darken)) {
+        shown.hover_for = Some((hcol, hrow, darken));
+        let blocked = darken && map.and_then(|m| tile_region(m, hcol, hrow)).is_some_and(|rc| check(rc).is_err());
         if ui.get_hover_blocked() != blocked {
             ui.set_hover_blocked(blocked);
         }
@@ -1756,8 +1948,10 @@ fn sync_world_map(ui: &GameUi, home: Option<RegionCoords>, p: &mut MapParams) {
     // In the map window and, with the map closed (Play closes it), on the
     // game-level status line.
     let now = p.time.elapsed_secs();
-    let status = match p.history.visible_embark_refusal(now) {
-        Some(why) if p.pending.0.is_none() => history_view::embark_refusal_text(why),
+    let refusal = p.history.visible_embark_refusal(now).map(history_view::embark_refusal_text);
+    let refusal = refusal.or_else(|| p.history.visible_adventure_refusal(now).map(|why| why.describe()));
+    let status = match refusal {
+        Some(text) if p.pending.0.is_none() => text,
         _ => map_status_text(p.pending.0, p.world_map.visible_refusal(now)),
     };
     if ui.get_map_status() != status {
@@ -1771,6 +1965,15 @@ fn sync_world_map(ui: &GameUi, home: Option<RegionCoords>, p: &mut MapParams) {
     let can_retire = p.history.fortress.is_some() && embarked;
     if ui.get_can_retire() != can_retire {
         ui.set_can_retire(can_retire);
+    }
+    let can_end_adventure = p.history.adventuring.is_some() && embarked;
+    if ui.get_can_end_adventure() != can_end_adventure {
+        ui.set_can_end_adventure(can_end_adventure);
+    }
+    // The Adventure and Legends tabs.
+    let tabs = p.tabs.get();
+    if history_changed || tabs.is_none() {
+        embark_tabs::sync_embark_tabs(ui, &p.history, tabs);
     }
 }
 
@@ -1927,7 +2130,7 @@ fn push_ui_state(
 
 /// Redraw what changed and copy that rect into the texture, un-premultiplied
 /// (the composite pass blends straight alpha, as `bevy_ui` did). The texture follows the window size.
-fn render_slint_layer<C: ComponentHandle + 'static>(
+pub(crate) fn render_slint_layer<C: ComponentHandle + 'static>(
     slint: Option<NonSendMut<SlintLayer<C>>>,
     mut images: ResMut<Assets<Image>>,
     state: Option<Res<State<AppState>>>,

@@ -29,6 +29,16 @@ adapter := env_var_or_default("VOXEL_ADAPTER", "")
 world := ""
 export VOXEL_WORLD := world
 
+# How far you see, in metres (empty = default: the LOD ring table's reach —
+# 15,360 m at the play recipes' 256 m regions (~4,400 LOD keys), 1 km at 64/128).
+# Builds a ring table by the pixel-budget rule (`game::lod::ring_table_for`), and
+# the exponential haze (visibility = 0.8 x reach) and camera far plane follow it:
+# `just view=4000 run` for a cheap short view. An explicit VOXEL_LOD_RINGS wins.
+# Haze alone: export VOXEL_FOG_VISIBILITY_M=M (2 % contrast distance; shorter =
+# mistier). Browser: `?view=4000`.
+view := env_var_or_default("VOXEL_VIEW_DISTANCE_M", "")
+export VOXEL_VIEW_DISTANCE_M := view
+
 # World the server serves. Empty (default) = the default forged world,
 # worlds/default.world, forged on first start if missing (ForgeParams::default():
 # a 16 km / 32 m continent, ~5-10 s).
@@ -177,6 +187,49 @@ run *args:
     if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
     {{cap}} {{cargo}} build --bin client --bin server
     RUST_BACKTRACE=1 ./target/debug/client debug embarked {{args}}
+
+run_two_port := "6476"
+
+# `run` with TWO clients on one server, both in ONE fortress: client 1 is the
+# debug launch in fortress mode, hosting the embarked world's server on UDP
+# `run_two_port` (`--port`); once it has embarked (it logs
+# `[debug] embarked: fortress site=N`), client 2 joins (`--join`) and starts an
+# adventure at that fortress (`--adventure-at N`). Output is prefixed
+# [client 1] / [client 2] (client 1's also in target/run-two/client1.log); the
+# server log is worlds/debug-embarked/server.log. Closing client 1 ends both
+# (its server is single-player: it exits with its host). `just run-two --reset`
+# re-forges the world first.
+run-two *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export VOXEL_REGION_BLOCKS={{play_blocks}}
+    if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
+    {{cap}} {{cargo}} build --bin client --bin server
+    port={{run_two_port}}
+    if [ -n "$(ss -Huln "sport = :$port")" ]; then
+        echo "UDP port $port is already in use; pick another: just run_two_port=N run-two" >&2
+        exit 1
+    fi
+    mkdir -p target/run-two
+    log=target/run-two/client1.log
+    : > "$log"
+    pids=()
+    trap 'kill "${pids[@]}" 2>/dev/null || true' EXIT
+    RUST_BACKTRACE=1 ./target/debug/client debug embarked --port "$port" {{args}} \
+        > >(tee "$log" | sed -u 's/^/[client 1] /') 2>&1 &
+    host=$!; pids+=("$host")
+    # The world may be forged first, then client 1 embarks: wait for its fortress.
+    site=""
+    until [ -n "$site" ]; do
+        kill -0 "$host" 2>/dev/null || exit 0
+        sleep 0.5
+        site=$(grep -aoE 'embarked: fortress site=[0-9]+' "$log" | head -n1 | grep -oE '[0-9]+$' || true)
+    done
+    echo "[run-two] client 1 holds fortress site $site; client 2 adventures there"
+    RUST_BACKTRACE=1 ./target/debug/client debug embarked --join "127.0.0.1:$port" --adventure-at "$site" \
+        > >(sed -u 's/^/[client 2] /') 2>&1 &
+    pids+=("$!")
+    wait "$host" || true
 
 # The game with its main menu: build client + server (the client spawns the
 # server per world from next to its own executable, so both need the same
@@ -1054,6 +1107,33 @@ diag:
 perf-capture:
     VOXEL_REGION_BLOCKS={{play_blocks}} {{cap}} {{cargo}} build --release --bin client --bin server
     VOXEL_SKIP_MENU=1 VOXEL_REGION_BLOCKS={{play_blocks}} scripts/perf_capture.sh "{{adapter}}" "{{world}}"
+
+# GPU time per render pass straight from Mesa's Intel Vulkan driver (INTEL_MEASURE), including
+# the passes `diag` cannot time (Bevy's shadow cascades record no GPU timestamp, nor do the
+# Slint composite or post passes) — so `diag` can call a frame "CPU-bound" while the GPU is
+# in fact busy. Release server + client on the Intel adapter (`adapter=` overrides it, but
+# only an Intel GPU writes the CSV), closed cleanly after `seconds` (VOXEL_EXIT_AFTER_SECS),
+# then scripts/gpu_measure_summary.py: mean GPU µs per frame and per render pass over the
+# last 150 frames (GPU_MEASURE_FRAMES). Output in target/gpu-measure/<label>/.
+#   just gpu-measure                 # label "latest", 45 s
+#   just gpu-measure shadows-off 60
+#
+# Steady-state frame time of the windowed release client (never fullscreen): mean / median /
+# p90 of the DIAG frame_time dumps after the join (scripts/fps_steady.sh). Intel by default
+# (`adapter=` overrides); extra KEY=VALUE args go to the client for A/B runs. A window is held
+# to ~60 fps by the desktop compositor — for headroom raise the load with region_blocks=512.
+#   just fps-steady base
+#   just region_blocks=512 fps-steady c1 VOXEL_SHADOW_CASCADES=1
+#
+# Windowed steady-state frame time (mean/median/p90) for A/B perf runs -> target/fps-steady/.
+fps-steady label *env:
+    VOXEL_REGION_BLOCKS={{play_blocks}} {{cap}} {{cargo}} build --release --bin client --bin server
+    WGPU_ADAPTER_NAME="{{ if adapter == "" { "Intel" } else { adapter } }}" {{ if world == "" { "" } else { "VOXEL_WORLD=" + world } }} VOXEL_REGION_BLOCKS={{play_blocks}} scripts/fps_steady.sh {{label}} {{env}}
+
+# Per-render-pass GPU time on an Intel adapter, shadow cascades included -> target/gpu-measure/.
+gpu-measure label="latest" seconds="45":
+    VOXEL_REGION_BLOCKS={{play_blocks}} {{cap}} {{cargo}} build --release --bin client --bin server
+    WGPU_ADAPTER_NAME="{{ if adapter == "" { "Intel" } else { adapter } }}" {{ if world == "" { "" } else { "VOXEL_WORLD=" + world } }} VOXEL_REGION_BLOCKS={{play_blocks}} scripts/gpu_measure.sh target/gpu-measure/{{label}} {{seconds}}
 
 # The independent check on `just diag`'s GPU numbers, measured from outside the process,
 # and it needs no rebuild. Sustained Graphics-Pipe ~100% => GPU-bound; low while a core is

@@ -10,6 +10,7 @@ use binary::PaddedVoxels;
 pub mod ao;
 pub mod binary;
 pub mod chunk_mesh;
+pub mod coarse;
 pub mod emit;
 pub mod interior;
 pub mod lod;

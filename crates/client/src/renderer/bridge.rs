@@ -838,6 +838,9 @@ pub fn drain_client_updates(
                 history_out.write(HistoryMsg::EmbarkResult(r))
             }
             ClientUpdateEvent::PersonInfo(p) => history_out.write(HistoryMsg::PersonInfo(p)),
+            ClientUpdateEvent::Civs(c) => history_out.write(HistoryMsg::Civs(c)),
+            ClientUpdateEvent::Legends(p) => history_out.write(HistoryMsg::Legends(p)),
+            ClientUpdateEvent::AdventureResult(r) => history_out.write(HistoryMsg::AdventureResult(r)),
         }
     }
 }

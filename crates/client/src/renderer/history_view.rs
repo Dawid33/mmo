@@ -11,7 +11,10 @@ use std::collections::BTreeSet;
 use game::history::rules::EMBARK_PLAYER_PARTY_MAX;
 use game::history::{player_embark_allowed_in, CalendarTick, CivId, EmbarkRefusal, PersonId, SiteId, SocietyGrid};
 use game::RegionCoords;
-use game::{EmbarkOptions, EmbarkRequest, PersonInfo, SiteMarker};
+use game::history::{
+    AdventureRefusal, LegendLine, LegendsFilter, LegendsPage, LegendsQuery, LEGENDS_PAGE_DEFAULT,
+};
+use game::{CivMarker, EmbarkOptions, EmbarkRequest, PersonInfo, SiteMarker};
 
 /// How long a notice stays on screen.
 pub const NOTICE_SHOW_SECS: f32 = 6.0;
@@ -49,6 +52,132 @@ pub struct HistoryView {
     /// (cleared by Retire with `fortress`): the centre of the simulated
     /// fortress neighbourhood (`world_scale::FORTRESS_NEAR_RADIUS`).
     pub fortress_region: Option<RegionCoords>,
+    /// Every civ's name (server `Civs`, on connect).
+    pub civs: Vec<CivMarker>,
+    /// The embark screen's tab.
+    pub tab: EmbarkTab,
+    /// The Adventure tab's choice.
+    pub adventure: AdventureSelection,
+    /// The last answer to a start-adventure request.
+    pub adventure_result: Option<Result<SiteId, AdventureRefusal>>,
+    /// A `StartAdventure` is out and unanswered.
+    pub adventure_pending: bool,
+    /// The last adventure refusal and `Time::elapsed_secs` when it arrived.
+    pub adventure_refusal: Option<(AdventureRefusal, f32)>,
+    /// The site the player is adventuring from.
+    pub adventuring: Option<SiteId>,
+    /// The Legends tab's paged log.
+    pub legends: LegendsState,
+}
+
+/// Which tab of the embark screen is open.
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EmbarkTab {
+    #[default]
+    Fortress,
+    Adventure,
+    Legends,
+}
+
+/// The Adventure tab's choice: a civ, then one of its populated sites.
+#[derive(Default, Debug, Clone, PartialEq, Eq)]
+pub struct AdventureSelection {
+    pub civ: Option<CivId>,
+    pub site: Option<SiteId>,
+}
+
+fn populated(s: &SiteMarker) -> bool {
+    !s.abandoned && s.population > 0
+}
+
+impl AdventureSelection {
+    /// Civs with at least one populated site, in id order.
+    pub fn civs(sites: &[SiteMarker], civs: &[CivMarker]) -> Vec<CivMarker> {
+        let mut out: Vec<CivMarker> =
+            civs.iter().filter(|c| sites.iter().any(|s| s.civ == c.civ && populated(s))).cloned().collect();
+        out.sort_by_key(|c| c.civ);
+        out
+    }
+
+    /// The picked civ's populated sites.
+    pub fn sites(&self, sites: &[SiteMarker]) -> Vec<SiteMarker> {
+        let Some(civ) = self.civ else { return Vec::new() };
+        sites.iter().filter(|s| s.civ == civ && populated(s)).cloned().collect()
+    }
+
+    pub fn pick_civ(&mut self, civ: CivId) {
+        if self.civ != Some(civ) {
+            self.civ = Some(civ);
+            self.site = None;
+        }
+    }
+
+    pub fn pick_site(&mut self, site: SiteId) {
+        self.site = Some(site);
+    }
+
+    /// Drop a picked site that is no longer populated.
+    pub fn retain_offered(&mut self, sites: &[SiteMarker]) {
+        if let Some(site) = self.site {
+            if !sites.iter().any(|s| s.site == site && populated(s)) {
+                self.site = None;
+            }
+        }
+    }
+}
+
+/// The Legends tab's paged log. Pure, so it is unit-tested.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LegendsState {
+    pub filter: LegendsFilter,
+    pub lines: Vec<LegendLine>,
+    /// Cursor for the next (older) page; `None` = no older match.
+    pub next: Option<u32>,
+    pub total: u32,
+    /// The query sent and not yet answered.
+    pub pending: Option<LegendsQuery>,
+}
+
+impl Default for LegendsState {
+    fn default() -> Self {
+        Self { filter: LegendsFilter::All, lines: Vec::new(), next: None, total: 0, pending: None }
+    }
+}
+
+impl LegendsState {
+    /// Start over with `filter`: clears the lines and returns the query to send.
+    pub fn query_first(&mut self, filter: LegendsFilter) -> LegendsQuery {
+        self.filter = filter.clone();
+        self.lines.clear();
+        self.next = None;
+        self.total = 0;
+        let q = LegendsQuery { filter, before: None, limit: LEGENDS_PAGE_DEFAULT };
+        self.pending = Some(q.clone());
+        q
+    }
+
+    /// The query for the next older page; `None` while one is pending or none remains.
+    pub fn query_next(&mut self) -> Option<LegendsQuery> {
+        if self.pending.is_some() {
+            return None;
+        }
+        let before = self.next?;
+        let q = LegendsQuery { filter: self.filter.clone(), before: Some(before), limit: LEGENDS_PAGE_DEFAULT };
+        self.pending = Some(q.clone());
+        Some(q)
+    }
+
+    /// Append `page` if it answers the pending query; a stale page is ignored.
+    pub fn accept(&mut self, page: LegendsPage) -> bool {
+        if self.pending.as_ref() != Some(&page.query) {
+            return false;
+        }
+        self.pending = None;
+        self.lines.extend(page.lines);
+        self.next = page.next;
+        self.total = page.total;
+        true
+    }
 }
 
 /// The embark panel's choice: a civ (index into `EmbarkOptions::civs`) and at
@@ -179,6 +308,13 @@ impl HistoryView {
             .map(|(why, _)| why)
     }
 
+    /// The adventure refusal still worth showing at `now`.
+    pub fn visible_adventure_refusal(&self, now: f32) -> Option<AdventureRefusal> {
+        self.adventure_refusal
+            .filter(|(_, at)| now - *at < super::world_map::REFUSAL_SHOW_SECS)
+            .map(|(why, _)| why)
+    }
+
     /// Returnable sites, in the order the panel lists them.
     pub fn returnable(&self) -> Vec<&SiteMarker> {
         self.sites.iter().filter(|s| s.returnable).collect()
@@ -224,6 +360,9 @@ pub enum HistoryMsg {
     EmbarkResult(Result<SiteId, EmbarkRefusal>),
     PersonInfo(PersonInfo),
     Fortress(Option<game::HeldFortress>),
+    Civs(Vec<CivMarker>),
+    Legends(LegendsPage),
+    AdventureResult(Result<SiteId, AdventureRefusal>),
 }
 
 /// The bridge's writer for [`HistoryMsg`] (a param struct: `drain_client_updates`
@@ -275,7 +414,10 @@ pub fn apply_history_msgs(mut msgs: MessageReader<HistoryMsg>, mut view: ResMut<
     prune_notices(&mut view.bypass_change_detection().notices, now).then(|| view.set_changed());
     for msg in msgs.read() {
         match msg {
-            HistoryMsg::Sites(v) => view.sites = v.clone(),
+            HistoryMsg::Sites(v) => {
+                view.adventure.retain_offered(v);
+                view.sites = v.clone();
+            }
             HistoryMsg::Fortress(f) => {
                 view.fortress = f.map(|f| f.site);
                 view.fortress_region = f.map(|f| f.region);
@@ -292,6 +434,11 @@ pub fn apply_history_msgs(mut msgs: MessageReader<HistoryMsg>, mut view: ResMut<
                 view.embark_options = Some(o.clone());
             }
             HistoryMsg::EmbarkResult(r) => view.embark_result = Some(*r),
+            HistoryMsg::Civs(c) => view.civs = c.clone(),
+            HistoryMsg::Legends(p) => {
+                view.legends.accept(p.clone());
+            }
+            HistoryMsg::AdventureResult(r) => view.adventure_result = Some(*r),
             HistoryMsg::PersonInfo(p) => {
                 view.people.insert(p.person, (p.clone(), now));
             }
@@ -302,6 +449,84 @@ pub fn apply_history_msgs(mut msgs: MessageReader<HistoryMsg>, mut view: ResMut<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn site(id: u32, civ: u32, population: u32, abandoned: bool) -> SiteMarker {
+        SiteMarker {
+            site: SiteId(id),
+            civ: CivId(civ),
+            region: RegionCoords::new(0, 0),
+            name: format!("s{id}"),
+            population,
+            abandoned,
+            returnable: false,
+        }
+    }
+
+    fn civ(id: u32) -> CivMarker {
+        CivMarker { civ: CivId(id), name: format!("c{id}") }
+    }
+
+    fn line(index: u32) -> LegendLine {
+        LegendLine { index, text: String::new(), sites: vec![], people: vec![] }
+    }
+
+    #[test]
+    fn adventure_lists_only_populated_sites() {
+        let sites = [site(1, 1, 5, false), site(2, 1, 0, false), site(3, 1, 4, true), site(4, 2, 0, false)];
+        let civs = [civ(2), civ(1)];
+        let offered = AdventureSelection::civs(&sites, &civs);
+        assert_eq!(offered, vec![civ(1)]);
+        let mut sel = AdventureSelection::default();
+        assert!(sel.sites(&sites).is_empty());
+        sel.pick_civ(CivId(1));
+        let got: Vec<_> = sel.sites(&sites).iter().map(|s| s.site).collect();
+        assert_eq!(got, vec![SiteId(1)]);
+    }
+
+    #[test]
+    fn adventure_pick_civ_clears_site() {
+        let mut sel = AdventureSelection::default();
+        sel.pick_civ(CivId(1));
+        sel.pick_site(SiteId(1));
+        sel.pick_civ(CivId(1));
+        assert_eq!(sel.site, Some(SiteId(1)));
+        sel.pick_civ(CivId(2));
+        assert_eq!(sel.site, None);
+    }
+
+    #[test]
+    fn adventure_retain_drops_depopulated_site() {
+        let mut sel = AdventureSelection::default();
+        sel.pick_civ(CivId(1));
+        sel.pick_site(SiteId(1));
+        sel.retain_offered(&[site(1, 1, 3, false)]);
+        assert_eq!(sel.site, Some(SiteId(1)));
+        sel.retain_offered(&[site(1, 1, 0, false)]);
+        assert_eq!(sel.site, None);
+    }
+
+    #[test]
+    fn legends_paging_appends_and_stops() {
+        let mut st = LegendsState::default();
+        let q1 = st.query_first(LegendsFilter::All);
+        assert_eq!((q1.before, q1.limit), (None, LEGENDS_PAGE_DEFAULT));
+        assert!(st.query_next().is_none(), "pending");
+        assert!(st.accept(LegendsPage { query: q1, lines: vec![line(9), line(8)], next: Some(8), total: 3 }));
+        let q2 = st.query_next().expect("older page");
+        assert_eq!(q2.before, Some(8));
+        assert!(st.accept(LegendsPage { query: q2, lines: vec![line(7)], next: None, total: 3 }));
+        assert_eq!(st.lines.len(), 3);
+        assert!(st.query_next().is_none());
+    }
+
+    #[test]
+    fn legends_stale_page_dropped() {
+        let mut st = LegendsState::default();
+        let a = st.query_first(LegendsFilter::All);
+        st.query_first(LegendsFilter::Civ(CivId(1)));
+        assert!(!st.accept(LegendsPage { query: a, lines: vec![line(1)], next: None, total: 1 }));
+        assert!(st.lines.is_empty());
+    }
 
     #[test]
     fn notices_expire_in_order() {

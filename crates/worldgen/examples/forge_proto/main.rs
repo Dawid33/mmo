@@ -60,6 +60,11 @@ pub struct Params {
     pub search: usize,
     /// Serve the tuning page on this port instead of forging once.
     pub serve: Option<u16>,
+    /// Override the forged spawn point (artifact metres, `--spawn X,Z`):
+    /// region (0, 0) of the engine lands there, so a benchmark world can put
+    /// its viewer in the middle of the land instead of where `spawn::pick`
+    /// chose.
+    pub spawn: Option<[f64; 2]>,
 }
 
 impl Deref for Params {
@@ -82,6 +87,7 @@ impl Params {
             out: PathBuf::from(DEFAULT_OUT),
             search: 0,
             serve: None,
+            spawn: None,
         };
         let mut it = std::env::args().skip(1);
         while let Some(flag) = it.next() {
@@ -102,6 +108,11 @@ impl Params {
                 "--diffusivity" => p.knobs.diffusivity = value().parse().expect("--diffusivity <m^2/yr>"),
                 "--no-geology" => p.knobs.geology_strength = 0.0,
                 "--no-climate" => p.knobs.climate_strength = 0.0,
+                "--spawn" => {
+                    let v = value();
+                    let (x, z) = v.split_once(',').expect("--spawn <x>,<z> (metres)");
+                    p.spawn = Some([x.parse().expect("--spawn x"), z.parse().expect("--spawn z")]);
+                }
                 "--search" => p.search = value().parse().expect("--search <seed count>"),
                 "--serve" => p.serve = Some(value().parse().expect("--serve <port>")),
                 // A generator preset's knobs (forge::presets, by name, any
@@ -124,7 +135,7 @@ impl Params {
                 other => panic!(
                     "unknown argument {other}; flags: --size --cell --iters --seed --out --dt \
                      --uplift --k --diffusivity --no-geology --no-climate --preset <name> --set <knob>=<value> \
-                     --search <n> --serve <port>"
+                     --search <n> --serve <port> --spawn <x>,<z>"
                 ),
             }
         }
@@ -178,7 +189,10 @@ fn main() {
         forged.simulated_peak_m, forged.height_fit
     );
     print_climate(&forged, &p.forge);
-    let artifact = forged.artifact(&p.forge);
+    let mut artifact = forged.artifact(&p.forge);
+    if let Some(spawn) = p.spawn {
+        artifact.spawn = spawn;
+    }
     let (score, terms) = search::score(&forged, &artifact, &p.forge);
     println!("world score {score:.3}:");
     for (name, value) in terms {

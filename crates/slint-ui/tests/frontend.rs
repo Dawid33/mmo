@@ -502,3 +502,29 @@ fn starting_back_fires_with_an_error_shown() {
     click(&mut overlay, x, y);
     assert_eq!(back.get(), 1);
 }
+
+/// The loading screen (screen 4) covers the whole window opaquely while
+/// `load-screen-fade` is 1 and draws nothing at 0. `SLINT_SHOT=<file.ppm>`
+/// writes the covered frame for a look.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn loading_screen_covers_the_window_until_faded() {
+    let mut overlay = overlay();
+    overlay.ui().set_screen(4);
+    overlay.ui().set_load_screen_progress(0.6);
+    overlay.ui().set_load_screen_step("Building terrain\u{2026}".into());
+    overlay.render();
+    for (x, y) in [(0, 0), (WIDTH - 1, HEIGHT - 1), (WIDTH / 2, HEIGHT / 2), (WIDTH / 3, HEIGHT - 3)] {
+        assert!(overlay.opaque_at(x, y), "({x}, {y}) not covered");
+    }
+    if let Ok(path) = std::env::var("SLINT_SHOT") {
+        let mut ppm = format!("P6 {WIDTH} {HEIGHT} 255\n").into_bytes();
+        for p in overlay.pixels() {
+            ppm.extend([p.red, p.green, p.blue]);
+        }
+        std::fs::write(path, ppm).unwrap();
+    }
+    overlay.ui().set_load_screen_fade(0.0);
+    overlay.render();
+    assert!(!overlay.opaque_at(WIDTH / 2, HEIGHT / 2), "faded out");
+}

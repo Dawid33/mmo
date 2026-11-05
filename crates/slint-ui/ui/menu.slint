@@ -10,12 +10,18 @@ export component GameMenu {
     callback retire();
     // Whether the player has a fortress to retire.
     in property <bool> can-retire;
+    // End the adventure; the arrival map opens again.
+    callback end-adventure();
+    // Whether the player is on an adventure (shown in place of Retire).
+    in property <bool> can-end-adventure;
     // Whether this client can leave to a main menu (not on wasm).
     in property <bool> can-leave: true;
     // Before the first Play (the arrival map is modal): only Main menu.
     in property <bool> leave-only;
     out property <length> main-menu-button-x: main-slot.absolute-position.x + main-slot.width / 2;
     out property <length> main-menu-button-y: main-slot.absolute-position.y + main-slot.height / 2;
+    out property <length> end-adventure-button-x: end-slot.absolute-position.x + end-slot.width / 2;
+    out property <length> end-adventure-button-y: end-slot.absolute-position.y + end-slot.height / 2;
 
     menu := FrameFace {
         title: "Menu";
@@ -38,6 +44,12 @@ export component GameMenu {
             if !root.leave-only && root.can-retire: Button {
                 text: "Retire fortress";
                 clicked => { root.retire(); }
+            }
+            end-slot := VerticalLayout {
+                if !root.leave-only && root.can-end-adventure: Button {
+                    text: "End adventure";
+                    clicked => { root.end-adventure(); }
+                }
             }
             main-slot := VerticalLayout {
                 if root.can-leave: Button {

@@ -363,6 +363,13 @@ pub enum ClientPacket {
     ReturnTo(crate::history::SiteId),
     /// Answered by `ServerPacket::PersonInfo`; ignored for an unknown person.
     RequestPersonInfo(crate::history::PersonId),
+    /// One page of the world's legends; answered by `ServerPacket::Legends`.
+    RequestLegends(crate::history::LegendsQuery),
+    /// Start an adventure at a populated site; answered by `ServerPacket::AdventureResult`
+    /// (and, on success, `PlayerRegion`).
+    StartAdventure(crate::history::SiteId),
+    /// End the adventure: the player goes back to fortress mode at the spawn region.
+    EndAdventure,
 }
 
 /// The player's embark: a civ, people of that civ's sites, and the region to found in.
@@ -394,6 +401,13 @@ pub struct SiteMarker {
     pub abandoned: bool,
     /// Player-founded and not abandoned: a player may return to it.
     pub returnable: bool,
+}
+
+/// A civilisation's name, as the embark tabs show it.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CivMarker {
+    pub civ: crate::history::CivId,
+    pub name: String,
 }
 
 /// Who may embark: per civ, per site, its people free to leave.
@@ -481,6 +495,12 @@ pub enum ServerPacket {
     PersonInfo(PersonInfo),
     /// The site this client plays (`None`: none): on connect and after Embark / Return / Retire.
     Fortress(Option<HeldFortress>),
+    /// Every civilisation's name, by id: on connect, next to `Sites`.
+    Civs(Vec<CivMarker>),
+    /// The answer to `ClientPacket::RequestLegends`.
+    Legends(crate::history::LegendsPage),
+    /// The answer to `ClientPacket::StartAdventure`: the site the adventure starts at.
+    AdventureResult(Result<crate::history::SiteId, crate::history::AdventureRefusal>),
 }
 
 /// A Game event

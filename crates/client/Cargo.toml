@@ -44,6 +44,9 @@ pyroscope_pprofrs = { workspace = true, optional = true }
 # Only for the `gpu_error_panic` diagnostic feature; the version must be the one
 # Bevy's wgpu already resolves to, so no second copy is built.
 wgpu-hal = { version = "29.0.4", optional = true }
+# Only to enumerate adapters before Bevy starts (`adapter_pick.rs`). Same version
+# as Bevy's wgpu and no features of its own, so it adds no build.
+wgpu = { version = "29.0.4", default-features = false }
 
 [features]
 default = ["dev_ui"]

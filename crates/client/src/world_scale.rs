@@ -31,6 +31,12 @@ pub const FORTRESS_NEAR_RADIUS: i32 = 1;
 /// factor (2 at the default region size), so the far path still has
 /// something to draw (24 keys around a radius-0 near window).
 pub const SMALL_LOD_RING_TABLE: &[(i32, u32)] = &[(2, game::lod::LOD_RING_TABLE[0].1)];
+/// Upper bound on `VOXEL_VIEW_DISTANCE_M` (`?view=` in the browser), in
+/// metres. Every ring region is a `RequestLod` key the server builds and the
+/// client meshes (~4,400 at the default 15 km and 256 m regions); past 16 km
+/// the coarsest factor (512) runs over the pixel budget's spacing and the key
+/// count climbs fast, so a typo should fail loudly instead of flooding both sides.
+pub const MAX_VIEW_DISTANCE_M: f32 = 16_384.0;
 
 /// The resolved near window + LOD ring table.
 #[derive(bevy::prelude::Resource, Clone, Copy, Debug, PartialEq, Eq)]
@@ -106,16 +112,40 @@ impl WorldScale {
         Ok(scale)
     }
 
+    /// The ring table reaching `value` metres (`VOXEL_VIEW_DISTANCE_M`),
+    /// rounded up to whole regions, built by the pixel-budget rule
+    /// (`game::lod::ring_table_for`). The table is leaked, like an explicit
+    /// `VOXEL_LOD_RINGS` one: this runs once per process.
+    pub fn with_view_distance_m(mut self, value: &str) -> Result<Self, WorldScaleError> {
+        let invalid = || WorldScaleError::InvalidViewDistance(value.to_owned());
+        let metres = value.trim().parse::<f32>().map_err(|_| invalid())?;
+        if !(metres > 0.0 && metres <= MAX_VIEW_DISTANCE_M) {
+            return Err(invalid());
+        }
+        let regions = (metres * game::movement::UNITS_PER_METER / game::REGION_SIZE).ceil() as i32;
+        self.lod_table = Box::leak(game::lod::ring_table_for(regions).into_boxed_slice());
+        Ok(self)
+    }
+
+    /// How far the LOD rings reach, in world units (0 without rings).
+    pub fn lod_reach_units(&self) -> f32 {
+        game::lod::ring_table_reach_units(self.lod_table)
+    }
+
     /// Resolve the process environment on native; browser builds read the
-    /// page URL's `?world=` preset instead (default full).
+    /// page URL's `?world=` preset and `?view=` distance instead (default full).
     pub fn from_env() -> Result<Self, WorldScaleError> {
         #[cfg(target_arch = "wasm32")]
         {
             // No environment in the browser: `?world=tiny|small|full` in the
             // page URL picks the preset (default full).
             let search = web_sys::window().and_then(|w| w.location().search().ok());
-            let preset = search.as_deref().and_then(query_world);
-            Self::resolve(preset, None, None, None)
+            let preset = search.as_deref().and_then(|s| query_param(s, "world"));
+            let scale = Self::resolve(preset, None, None, None)?;
+            match search.as_deref().and_then(|s| query_param(s, "view")) {
+                Some(view) => scale.with_view_distance_m(view),
+                None => Ok(scale),
+            }
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -126,12 +156,17 @@ impl WorldScale {
             let near_radius = var("VOXEL_NEAR_RADIUS");
             let fortress_radius = var("VOXEL_FORTRESS_RADIUS");
             let lod_rings = var("VOXEL_LOD_RINGS");
-            Self::resolve(
+            let scale = Self::resolve(
                 preset.as_deref(),
                 near_radius.as_deref(),
                 fortress_radius.as_deref(),
                 lod_rings.as_deref(),
-            )
+            )?;
+            // An explicit `VOXEL_LOD_RINGS` table wins over the distance.
+            match var("VOXEL_VIEW_DISTANCE_M") {
+                Some(view) if lod_rings.is_none() => scale.with_view_distance_m(&view),
+                _ => Ok(scale),
+            }
         }
     }
 }
@@ -155,14 +190,14 @@ impl fmt::Display for WorldScale {
     }
 }
 
-/// The `world` parameter of a page URL's query string (`?world=small`,
-/// `?port=1&world=tiny`), for the browser build's [`WorldScale`] preset.
+/// One parameter of a page URL's query string (`?world=small`,
+/// `?port=1&world=tiny&view=3000`), for the browser build's [`WorldScale`].
 #[cfg(any(target_arch = "wasm32", test))]
-fn query_world(search: &str) -> Option<&str> {
+fn query_param<'a>(search: &'a str, name: &str) -> Option<&'a str> {
     search
         .trim_start_matches('?')
         .split('&')
-        .find_map(|pair| pair.strip_prefix("world="))
+        .find_map(|pair| pair.strip_prefix(name)?.strip_prefix('='))
         .filter(|value| !value.is_empty())
 }
 
@@ -197,6 +232,7 @@ pub enum WorldScaleError {
     InvalidNearRadius(String),
     InvalidFortressRadius(String),
     InvalidLodRings(String),
+    InvalidViewDistance(String),
 }
 
 impl fmt::Display for WorldScaleError {
@@ -220,6 +256,10 @@ impl fmt::Display for WorldScaleError {
                  ascending `bound:factor,...` with factors from {:?})",
                 game::lod::LOD_FACTORS
             ),
+            Self::InvalidViewDistance(value) => write!(
+                f,
+                "invalid VOXEL_VIEW_DISTANCE_M value `{value}` (expected metres, 0 < m <= {MAX_VIEW_DISTANCE_M})"
+            ),
         }
     }
 }
@@ -232,11 +272,28 @@ mod tests {
 
     #[test]
     fn page_query_picks_the_world_preset() {
-        assert_eq!(query_world("?world=small"), Some("small"));
-        assert_eq!(query_world("?port=1&world=tiny"), Some("tiny"));
-        assert_eq!(query_world("?port=1"), None);
-        assert_eq!(query_world("?world="), None);
-        assert_eq!(query_world(""), None);
+        assert_eq!(query_param("?world=small", "world"), Some("small"));
+        assert_eq!(query_param("?port=1&world=tiny", "world"), Some("tiny"));
+        assert_eq!(query_param("?port=1", "world"), None);
+        assert_eq!(query_param("?world=", "world"), None);
+        assert_eq!(query_param("", "world"), None);
+        assert_eq!(query_param("?worlds=x&view=3000", "view"), Some("3000"));
+        assert_eq!(query_param("?worlds=x", "world"), None);
+    }
+
+    #[test]
+    fn view_distance_builds_a_ring_table_reaching_it() {
+        let region_m = game::REGION_SIZE / game::movement::UNITS_PER_METER;
+        let scale = WorldScale::FULL.with_view_distance_m("3000").unwrap();
+        let regions = (3000.0 / region_m).ceil() as i32;
+        assert_eq!(scale.lod_table, game::lod::ring_table_for(regions).as_slice());
+        assert!(scale.lod_reach_units() >= 3000.0 * game::movement::UNITS_PER_METER);
+        for bad in ["0", "-5", "far", "99999"] {
+            assert_eq!(
+                WorldScale::FULL.with_view_distance_m(bad),
+                Err(WorldScaleError::InvalidViewDistance(bad.to_owned()))
+            );
+        }
     }
 
     #[test]

@@ -8,6 +8,7 @@ pub mod stats;
 mod journey;
 pub mod calendar;
 pub mod grid;
+pub mod legends;
 pub mod log;
 pub mod persist;
 pub mod records;
@@ -15,9 +16,10 @@ pub mod rng;
 pub mod rules;
 
 pub use calendar::*;
-pub use chain::{embark_allowed_in, player_embark_allowed_in, EmbarkRefusal};
+pub use chain::{embark_allowed_in, player_embark_allowed_in, AdventureRefusal, EmbarkRefusal};
 pub use handover::Directive;
 pub use grid::*;
+pub use legends::{LegendLine, LegendsFilter, LegendsPage, LegendsQuery, LEGENDS_PAGE_DEFAULT, LEGENDS_PAGE_MAX};
 pub use records::*;
 
 use serde::{Deserialize, Serialize};

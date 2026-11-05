@@ -213,12 +213,30 @@ pub struct DrawIndexedIndirectArgs {
 struct GpuNearCullView {
     clip_from_world: [f32; 16],
     viewport_and_capacity: [u32; 4],
-    /// Eye position; w = 1 lets the cull drop back-facing face ranges
-    /// (perspective views), w = 0 keeps every face (orthographic shadow
-    /// cascades, whose casters must not depend on the camera; and every view
-    /// while the z-level cut is on, whose cap is drawn from back faces).
+    /// Face-range culling. w = 1: xyz is the eye (perspective views) and
+    /// ranges facing away from it are dropped; w = 2: xyz is the unit
+    /// direction toward the viewer of an orthographic view (the sun's shadow
+    /// cascades, the top-down camera) and ranges whose normal points away
+    /// from it are dropped — the pipelines cull back faces anyway, so this
+    /// only saves their vertex work; w = 0 keeps every face.
     camera: [f32; 4],
+    /// The z-level cut, which needs back faces (its cap) inside the home
+    /// region: x, y = the home region's world x, z origin; z = its extent;
+    /// w = the cut plane's world y, or `f32::MAX` with the cut off. Chunks
+    /// wholly outside the region face-cull as usual (the shaders drop their
+    /// back faces), chunks wholly inside and above the cut are skipped (the
+    /// vertex shaders collapse every one of their quads).
+    cut: [f32; 4],
+    /// Near detail bands (`super::DetailBand`, chunk metadata `center.w`):
+    /// x, z = the main camera's eye for EVERY view (shadow cascades too, so
+    /// the camera and its shadows pick the same mesh), w = the switch
+    /// distance in world units (<= 0: bands off — fine chunks draw, coarse
+    /// twins never).
+    detail: [f32; 4],
 }
+
+/// `camera.w` of an orthographic view: cull by direction, not eye position.
+pub const CULL_DIRECTIONAL: f32 = 2.0;
 
 /// `VOXEL_FACE_CULL=off|0|false` keeps every face range (A/B runs, or a
 /// quick fallback if face culling ever leaves holes). On by default. Read once.
@@ -253,7 +271,13 @@ fn resolve_clip_from_world(
 }
 
 impl GpuNearCullView {
-    fn new(view: &ExtractedView, chunk_capacity: u32, hzb_mip_count: u32, cutaway: bool) -> Self {
+    fn new(
+        view: &ExtractedView,
+        chunk_capacity: u32,
+        hzb_mip_count: u32,
+        fortress: Option<&crate::renderer::fortress_view::FortressViewUniform>,
+        detail: Option<&super::NearDetail>,
+    ) -> Self {
         let clip_from_world = resolve_clip_from_world(
             view.clip_from_world,
             view.clip_from_view,
@@ -267,14 +291,36 @@ impl GpuNearCullView {
                 chunk_capacity,
                 hzb_mip_count,
             ],
-            camera: {
-                let eye = view.world_from_view.translation();
-                // Perspective projections have w_axis.w == 0.
-                let perspective = view.clip_from_view.w_axis.w == 0.0;
-                let cull = perspective && face_culling_enabled() && !cutaway;
-                [eye.x, eye.y, eye.z, if cull { 1.0 } else { 0.0 }]
-            },
+            camera: cull_camera(view, face_culling_enabled()),
+            cut: cull_cut(fortress),
+            detail: detail.map_or([0.0; 4], super::NearDetail::cull_uniform),
         }
+    }
+}
+
+/// `GpuNearCullView::camera` for `view`.
+fn cull_camera(view: &ExtractedView, face_culling: bool) -> [f32; 4] {
+    if !face_culling {
+        return [0.0; 4];
+    }
+    // Perspective projections have w_axis.w == 0.
+    if view.clip_from_view.w_axis.w == 0.0 {
+        let eye = view.world_from_view.translation();
+        [eye.x, eye.y, eye.z, 1.0]
+    } else {
+        // An orthographic view looks down its -Z: its viewer is along +Z.
+        let toward = view.world_from_view.back();
+        [toward.x, toward.y, toward.z, CULL_DIRECTIONAL]
+    }
+}
+
+/// `GpuNearCullView::cut` from the fortress view's uniform.
+fn cull_cut(fortress: Option<&crate::renderer::fortress_view::FortressViewUniform>) -> [f32; 4] {
+    match fortress {
+        Some(u) if crate::renderer::fortress_view::cutaway_active(u) => {
+            [u.origin.x, u.origin.z, u.cut.w, u.cut.x]
+        }
+        _ => [0.0, 0.0, 0.0, f32::MAX],
     }
 }
 
@@ -493,6 +539,7 @@ pub fn prepare_gpu_near_view_buffers(
     queue: Res<RenderQueue>,
     arena: Res<super::arena::GpuQuadArena>,
     fortress_view: Option<Res<crate::renderer::fortress_view::FortressViewUniform>>,
+    detail: Option<Res<super::NearDetail>>,
     mut views: Query<(
         Entity,
         &ExtractedView,
@@ -512,9 +559,6 @@ pub fn prepare_gpu_near_view_buffers(
         return;
     }
     let capacity = geometric_gpu_capacity(slot_count);
-    let cutaway = fortress_view
-        .as_deref()
-        .is_some_and(crate::renderer::fortress_view::cutaway_active);
     for (entity, view, depth_pyramid, existing, frontend) in &mut views {
         // No near-terrain cull or draw for the frontend camera's view.
         if !crate::session::view_draws_world(frontend) {
@@ -527,7 +571,8 @@ pub fn prepare_gpu_near_view_buffers(
             view,
             slot_count,
             depth_pyramid.map_or(0, |pyramid| pyramid.mip_count),
-            cutaway,
+            fortress_view.as_deref(),
+            detail.as_deref(),
         );
         if let Some(mut existing) = existing {
             if existing.capacity == capacity

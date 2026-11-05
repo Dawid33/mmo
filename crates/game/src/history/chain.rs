@@ -34,6 +34,34 @@ pub enum EmbarkRefusal {
     TooSteep,
 }
 
+/// Why the server refuses `ClientPacket::StartAdventure`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
+pub enum AdventureRefusal {
+    /// The world has no history.
+    NoHistory,
+    /// No site has that id.
+    UnknownSite,
+    /// The site was abandoned.
+    SiteAbandoned,
+    /// No living person belongs to the site.
+    Unpopulated,
+    /// The player already plays a fortress or an adventure.
+    AlreadyPlaying,
+}
+
+impl AdventureRefusal {
+    /// One line for the status line.
+    pub fn describe(&self) -> &'static str {
+        match self {
+            Self::NoHistory => "This world has no history",
+            Self::UnknownSite => "No such site",
+            Self::SiteAbandoned => "That site is abandoned",
+            Self::Unpopulated => "Nobody lives there",
+            Self::AlreadyPlaying => "Already playing: retire or end it first",
+        }
+    }
+}
+
 fn chebyshev(a: crate::RegionCoords, b: crate::RegionCoords) -> u32 {
     (i64::from(a.x) - i64::from(b.x)).unsigned_abs().max((i64::from(a.z) - i64::from(b.z)).unsigned_abs()) as u32
 }

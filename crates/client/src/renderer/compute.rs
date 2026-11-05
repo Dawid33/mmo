@@ -34,6 +34,8 @@ pub enum JobKind {
     BrickEdits = 4,
     /// A detached voxel body's bricks (`voxel_bodies`).
     BodyMesh = 5,
+    /// A sim chunk's coarse (block-scale) twin (`meshing::coarse`).
+    CoarseMesh = 6,
 }
 
 impl JobKind {
@@ -44,6 +46,7 @@ impl JobKind {
             3 => Self::DeriveBricks,
             4 => Self::BrickEdits,
             5 => Self::BodyMesh,
+            6 => Self::CoarseMesh,
             _ => return None,
         })
     }
@@ -101,6 +104,7 @@ pub fn run_encoded(kind: JobKind, input: &[u8]) -> Vec<u8> {
         JobKind::DeriveBricks => go::<super::bridge::DeriveBricksJob>(input),
         JobKind::BrickEdits => go::<super::bricks::BrickEditsJob>(input),
         JobKind::BodyMesh => go::<super::voxel_bodies::BodyMeshJob>(input),
+        JobKind::CoarseMesh => go::<super::meshing::coarse::CoarseMeshJob>(input),
     }
 }
 

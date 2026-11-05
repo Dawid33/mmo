@@ -4,6 +4,8 @@
 
 #[cfg(not(target_arch = "wasm32"))]
 pub mod netcode;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod adapter_pick;
 // Compiled unconditionally now (was cfg(any(wasm32, test))): the harness and
 // integration tests need LocalServer in a normal (non-cfg(test)) lib build.
 pub mod local_server;

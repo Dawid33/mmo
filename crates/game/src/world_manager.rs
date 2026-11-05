@@ -9,13 +9,17 @@ use std::time::Duration;
 
 use crossbeam::channel::{unbounded, Receiver, Sender};
 
-use crate::history::{CalendarTick, EmbarkRefusal, History, SiteId, TICKS_PER_DAY};
+use crate::history::{AdventureRefusal, CalendarTick, EmbarkRefusal, History, SiteId, TICKS_PER_DAY};
 use crate::{
     Chunk, ChunkCoords, ClientId, ClientPacket, Column, ColumnCoords, EntityKind, TerrainSnapshot, GameEventKind,
     LodBuildJob, LodBuilder, LodKey, LodPayload, LodResult, Region, RegionCoords, RegionInput,
     RegionOutput, RegionRunner, RegionSave, RegionSeed, SerializedRegion, ServerPacket, PlayRefusal, WorldMap, EmbarkRequest,
+    Order, PlayMode,
 };
 
+/// Level hint for an adventure landing: above any surface, so it clamps to the
+/// column's top and the nearest standable tile is the topmost.
+const ADVENTURE_LANDING_HINT_Y: i32 = 1 << 20;
 pub const SPAWN_REGION: RegionCoords = RegionCoords { x: 0, z: 0 };
 
 /// The sites as last broadcast, bucketed (see `WorldManager::sites_key`).
@@ -350,6 +354,10 @@ pub struct WorldManager<S: RegionSpawner> {
     /// the entry stays (like `homes`) but no longer keeps anyone from returning there;
     /// the Return drops it (see [`Self::return_to`]).
     fortress_of: BTreeMap<ClientId, SiteId>,
+    /// The site each client started its adventure at (Adventure play mode). A client
+    /// holds a fortress or an adventure, never both. Not persisted; dropped on
+    /// disconnect (an adventurer is not a history object yet).
+    adventurer_of: BTreeMap<ClientId, SiteId>,
     /// The calendar day last broadcast (`ServerPacket::Calendar`).
     calendar_day: Option<u64>,
     /// What clients were last told of the sites, bucketed: (site, abandoned, population
@@ -408,6 +416,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             history: None,
             calendar_anchor: (0, CalendarTick(0)),
             fortress_of: BTreeMap::new(),
+            adventurer_of: BTreeMap::new(),
             calendar_day: None,
             sites_key: Vec::new(),
             out,
@@ -596,7 +605,7 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// the site at once, then the player moves in (the region's catch-up, or the
     /// founding itself when it already runs, spawns the party).
     fn embark(&mut self, id: ClientId, req: EmbarkRequest, now_ms: u64) {
-        if self.fortress_of.contains_key(&id) && self.history.is_some() {
+        if (self.fortress_of.contains_key(&id) || self.adventurer_of.contains_key(&id)) && self.history.is_some() {
             return self.embark_result(id, Err(EmbarkRefusal::AlreadyHasFortress));
         }
         let Some(history) = self.history.as_mut() else {
@@ -647,7 +656,7 @@ impl<S: RegionSpawner> WorldManager<S> {
         let Some(history) = &self.history else {
             return self.embark_result(id, Err(EmbarkRefusal::NoHistory));
         };
-        if self.fortress_of.contains_key(&id) {
+        if self.fortress_of.contains_key(&id) || self.adventurer_of.contains_key(&id) {
             return self.embark_result(id, Err(EmbarkRefusal::AlreadyHasFortress));
         }
         if !history.returnable(site) {
@@ -676,6 +685,66 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.fortress_of.insert(id, site);
         self.embark_result(id, Ok(site));
         self.send_fortress(id);
+    }
+
+    fn adventure_result(&self, id: ClientId, r: Result<SiteId, AdventureRefusal>) {
+        let _ = self.out.send((Some(id), ServerPacket::AdventureResult(r)));
+    }
+
+    /// Start an adventure at a populated site: the player moves to the site's region
+    /// and a server-originated `Order::SetMode` puts it in Adventure play mode
+    /// (sequenced after its `CreateClientAt` there, so client and server agree). One
+    /// at a time: no adventure while a fortress or another adventure is held.
+    fn start_adventure(&mut self, id: ClientId, site: SiteId, now_ms: u64) {
+        let Some(history) = &self.history else {
+            return self.adventure_result(id, Err(AdventureRefusal::NoHistory));
+        };
+        let Some(s) = history.site(site) else {
+            return self.adventure_result(id, Err(AdventureRefusal::UnknownSite));
+        };
+        if s.abandoned.is_some() {
+            return self.adventure_result(id, Err(AdventureRefusal::SiteAbandoned));
+        }
+        if !s.members.iter().any(|&p| history.person(p).is_some_and(|p| p.died.is_none())) {
+            return self.adventure_result(id, Err(AdventureRefusal::Unpopulated));
+        }
+        if self.fortress_of.contains_key(&id) || self.adventurer_of.contains_key(&id) {
+            return self.adventure_result(id, Err(AdventureRefusal::AlreadyPlaying));
+        }
+        let region = s.region;
+        let landing = self.landing_in(region);
+        // Already at home in that region: `move_client` only resends `PlayerRegion`
+        // and the body stays put, so the order itself carries the landing tile
+        // (a high level clamps to the column's top and `nearest_standable` searches
+        // down). Elsewhere `CreateClientAt` has placed the body.
+        let at = (self.homes.get(&id) == Some(&region))
+            .then(|| [landing[0] as i32, ADVENTURE_LANDING_HINT_Y, landing[1] as i32]);
+        self.move_client(id, region, landing, now_ms);
+        self.send_play_event(region, GameEventKind::Order(id, Order::SetMode { mode: PlayMode::Adventure, at }));
+        self.adventurer_of.insert(id, site);
+        self.adventure_result(id, Ok(site));
+        self.send_fortress(id);
+        crate::perf_event!("adventure_start", "client={id} site={} to={},{}", site.0, region.x, region.z);
+    }
+
+    /// End the adventure: back to Fortress mode, then to `SPAWN_REGION` like
+    /// [`Self::retire`]. No adventure = no-op.
+    fn end_adventure(&mut self, id: ClientId, now_ms: u64) {
+        if !self.adventurer_of.contains_key(&id) {
+            return;
+        }
+        if let Some(home) = self.homes.get(&id).copied() {
+            self.send_play_event(
+                home,
+                GameEventKind::Order(id, Order::SetMode { mode: PlayMode::Fortress, at: None }),
+            );
+        }
+        self.adventurer_of.remove(&id);
+        let landing = self.landing_in(SPAWN_REGION);
+        self.move_client(id, SPAWN_REGION, landing, now_ms);
+        if let Some(history) = &self.history {
+            let _ = self.out.send((Some(id), ServerPacket::Sites(history.site_markers())));
+        }
     }
 
     /// Send each notice the history made to the connected clients whose home is its region.
@@ -745,6 +814,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                 if let (Some(history), Some(now)) = (&self.history, self.calendar_now(now_ms)) {
                     let _ = self.out.send((Some(id), ServerPacket::Calendar(now)));
                     let _ = self.out.send((Some(id), ServerPacket::Sites(history.site_markers())));
+                    let _ = self.out.send((Some(id), ServerPacket::Civs(history.civ_markers())));
                     self.send_fortress(id);
                 }
             }
@@ -767,9 +837,16 @@ impl<S: RegionSpawner> WorldManager<S> {
                 ClientPacket::Embark(req) => self.embark(id, req, now_ms),
                 ClientPacket::Retire => self.retire(id, now_ms),
                 ClientPacket::ReturnTo(site) => self.return_to(id, site, now_ms),
+                ClientPacket::StartAdventure(site) => self.start_adventure(id, site, now_ms),
+                ClientPacket::EndAdventure => self.end_adventure(id, now_ms),
                 ClientPacket::RequestPersonInfo(person) => {
                     if let Some(info) = self.history.as_ref().and_then(|h| h.person_info(person)) {
                         let _ = self.out.send((Some(id), ServerPacket::PersonInfo(info)));
+                    }
+                }
+                ClientPacket::RequestLegends(query) => {
+                    if let Some(history) = &self.history {
+                        let _ = self.out.send((Some(id), ServerPacket::Legends(history.legends(&query))));
                     }
                 }
                 packet @ (ClientPacket::GameEvent(_) | ClientPacket::GameEventAfterTick(..)) => {
@@ -1089,6 +1166,8 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// Drop a client's session and subscriptions. Idempotent: a second call
     /// (e.g. `Leave` then the transport closing) finds no session.
     fn client_disconnected(&mut self, id: ClientId, now_ms: u64) {
+        // Unlike `fortress_of`, an adventure is not kept for a reconnect.
+        self.adventurer_of.remove(&id);
         if let Some(session) = self.sessions.remove(&id) {
             for rc in session.subscribed {
                 self.unsubscribe_link(id, rc, now_ms);

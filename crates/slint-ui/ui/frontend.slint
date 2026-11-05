@@ -2,12 +2,13 @@ import { MainMenu } from "main-menu.slint";
 import { KnobRow, MapGenerator } from "map-generator.slint";
 import { LoadWorld, WorldRow } from "load-world.slint";
 import { Starting } from "starting.slint";
+import { Loading } from "loading.slint";
 import { GameTheme } from "theme.slint";
 
 export { KnobRow, WorldRow }
 
 // Every screen outside the world: the main menu, the map generator, the world
-// list and the starting screen. Drawn at FRONTEND_LAYER_ORDER over the
+// list, the starting screen and the loading screen. Drawn at FRONTEND_LAYER_ORDER over the
 // frontend camera's plain backdrop; `shown: false` draws nothing at all.
 export component FrontendUi inherits Window {
     init => {
@@ -15,7 +16,7 @@ export component FrontendUi inherits Window {
     }
     background: transparent;
 
-    // 0 menu, 1 generator, 2 load, 3 starting.
+    // 0 menu, 1 generator, 2 load, 3 starting, 4 loading (over the world).
     in property <int> screen;
     in property <bool> shown: true;
     in property <string> game-title: "Orion";
@@ -28,6 +29,10 @@ export component FrontendUi inherits Window {
     in property <[string]> start-lines <=> starting.lines;
     in property <string> start-error <=> starting.error;
     in property <string> start-log <=> starting.log;
+    // The loading screen (screen 4, loading.slint), with a `load-screen-` prefix.
+    in property <float> load-screen-progress <=> loading.progress;
+    in property <string> load-screen-step <=> loading.step;
+    in property <float> load-screen-fade <=> loading.fade;
 
     callback new-world();
     callback load-world();
@@ -145,9 +150,14 @@ export component FrontendUi inherits Window {
         back => { root.back(); }
     }
     starting := Starting {
-        visible: root.shown && root.screen >= 3;
+        visible: root.shown && root.screen == 3;
         width: root.width;
         height: root.height;
         back => { root.back(); }
+    }
+    loading := Loading {
+        visible: root.shown && root.screen == 4;
+        width: root.width;
+        height: root.height;
     }
 }

@@ -26,10 +26,79 @@ struct CullView {
     clip_from_world: mat4x4<f32>,
     // viewport width, viewport height, chunk capacity, HZB mip count.
     viewport_and_capacity: vec4<u32>,
-    // Eye position; w = 1 culls back-facing face ranges (perspective views),
-    // w = 0 keeps every face (shadow cascades).
+    // Face-range culling (gpu.rs GpuNearCullView::camera): w = 1: xyz is the
+    // eye of a perspective view; w = 2: xyz is the unit direction toward the
+    // viewer of an orthographic one (shadow cascades, top-down); w = 0 keeps
+    // every face.
     camera: vec4<f32>,
+    // The z-level cut (gpu.rs GpuNearCullView::cut): x, y = home region world
+    // x, z origin, z = its extent, w = cut plane y (>= CUT_OFF: no cut).
+    cut: vec4<f32>,
+    // Near detail bands (gpu.rs GpuNearCullView::detail): x, z = the MAIN
+    // camera's eye (every view, shadow cascades included, so the camera and
+    // its shadows pick the same mesh), w = the switch distance (<= 0: off).
+    detail: vec4<f32>,
 };
+
+// ChunkMeta.center.w: which detail band a slot belongs to (voxel_pull
+// DetailBand). A sim chunk with a coarse twin draws within the switch
+// distance, its twin beyond it; everything else always.
+const BAND_ALWAYS: u32 = 0u;
+const BAND_FINE: u32 = 1u;
+const BAND_COARSE: u32 = 2u;
+
+// Horizontal distance from the main eye to the slot's xz rect decides the
+// band. A chunk and its twin share that rect exactly, so in every view
+// exactly one of the two draws. Twins are padded with their neighbours'
+// boundary blocks (meshing/coarse.rs), so the z-level cut's cap (back faces
+// below the plane) works through them as through full-detail chunks.
+fn band_visible(chunk: ChunkMeta) -> bool {
+    let band = u32(chunk.center.w + 0.5);
+    if band == BAND_ALWAYS {
+        return true;
+    }
+    if view.detail.w <= 0.0 {
+        return band == BAND_FINE;
+    }
+    let lo = chunk.center.xz - chunk.half_extents.xz;
+    let hi = chunk.center.xz + chunk.half_extents.xz;
+    let eye = view.detail.xz;
+    let gap = max(max(lo - eye, eye - hi), vec2<f32>(0.0));
+    let near = dot(gap, gap) < view.detail.w * view.detail.w;
+    return select(!near, near, band == BAND_FINE);
+}
+
+// voxel_pull_depth.wgsl's CUT_OFF / CUT_EPSILON.
+const CUT_OFF: f32 = 3.0e38;
+const CUT_EPSILON: f32 = 0.01;
+// Below this |component| of the viewer direction a face axis is (nearly)
+// edge-on to an orthographic view: keep both of its directions.
+const EDGE_ON: f32 = 1.0e-4;
+
+// How the z-level cut treats a chunk.
+const CUT_NONE: u32 = 0u;   // outside the home region (or no cut): as usual
+const CUT_ALL_FACES: u32 = 1u; // in the home region, not above the cut: its back faces are the cap
+const CUT_HIDDEN: u32 = 2u; // wholly in the home region and above the cut: every quad collapses
+
+fn cut_state(chunk: ChunkMeta) -> u32 {
+    if view.cut.w >= CUT_OFF {
+        return CUT_NONE;
+    }
+    let lo = view.cut.xy;
+    let hi = lo + vec2<f32>(view.cut.z);
+    let cmin = chunk.center.xyz - chunk.half_extents.xyz;
+    let cmax = chunk.center.xyz + chunk.half_extents.xyz;
+    // The shaders judge a quad by a point inside its own block, in [lo, hi).
+    let overlaps = all(cmax.xz > lo) && all(cmin.xz < hi);
+    if !overlaps {
+        return CUT_NONE;
+    }
+    let inside = all(cmin.xz >= lo) && all(cmax.xz <= hi);
+    if inside && cmin.y > view.cut.w + CUT_EPSILON {
+        return CUT_HIDDEN;
+    }
+    return CUT_ALL_FACES;
+}
 
 // `commands` first: indirect-count draws read the opaque command count at
 // offset 0, the cutout one at offset 12 (gpu.rs CUTOUT_COUNT_OFFSET).
@@ -107,11 +176,20 @@ fn face_end(chunk: ChunkMeta, face: u32) -> u32 {
 // or below it all +X faces are seen from behind or edge-on (and likewise for
 // the other five). Conservative; the rasterizer still back-face culls within
 // kept ranges.
-fn face_may_be_visible(chunk: ChunkMeta, face: u32) -> bool {
-    if view.camera.w == 0.0 {
+fn face_may_be_visible(chunk: ChunkMeta, face: u32, cut: u32) -> bool {
+    if view.camera.w == 0.0 || cut == CUT_ALL_FACES {
         return true;
     }
     let axis = face / 2u;
+    if view.camera.w > 1.5 {
+        // Orthographic: a +axis face looks at the viewer iff the direction
+        // toward it has a positive component on that axis.
+        let toward = view.camera[axis];
+        if (face & 1u) == 0u {
+            return toward > -EDGE_ON;
+        }
+        return toward < EDGE_ON;
+    }
     let lo = chunk.center[axis] - chunk.half_extents[axis];
     let hi = chunk.center[axis] + chunk.half_extents[axis];
     let eye = view.camera[axis];
@@ -131,7 +209,9 @@ fn write_command(index: u32, chunk: ChunkMeta, start: u32, count: u32) {
     );
 }
 
-fn emit_command(slot: u32, chunk: ChunkMeta, visible: bool) {
+fn emit_command(slot: u32, chunk: ChunkMeta, frustum_ok: bool) {
+    let cut = cut_state(chunk);
+    let visible = frustum_ok && cut != CUT_HIDDEN && band_visible(chunk);
     // Unsorted records (flag) draw as one whole range, never face-culled.
     let unsorted = chunk.face_ends_hi.z != 0u;
     var emitted_quads = 0u;
@@ -143,7 +223,7 @@ fn emit_command(slot: u32, chunk: ChunkMeta, visible: bool) {
             start = 0u;
         }
         let count = end - min(start, end);
-        let keep = visible && count > 0u && (unsorted || face_may_be_visible(chunk, face));
+        let keep = visible && count > 0u && (unsorted || face_may_be_visible(chunk, face, cut));
 #ifdef INDIRECT_COUNT
         if keep {
             let output = atomicAdd(&draw_count.commands, 1u);

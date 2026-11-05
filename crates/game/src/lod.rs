@@ -283,10 +283,12 @@ pub fn block_scale_cells(chunks: Vec<(ChunkCoords, Chunk)>) -> Vec<LodCell> {
 }
 
 /// Every streamable LOD factor. The server validates request factors
-/// against this list; `downsample_chunks` supports exactly these. 256 stays
-/// streamable (custom `VOXEL_LOD_RINGS` tables, a future longer horizon) but
-/// the production table below never reaches it.
-pub const LOD_FACTORS: [u32; 7] = [2, 4, 8, 16, 32, 64, 256];
+/// against this list; `downsample_chunks` supports exactly these. Each is
+/// twice the last from 2 to 512 (128 and 512 added 2026-11-05 for the 15 km
+/// horizon), so [`ring_table_for`] can double the cell per doubling of
+/// distance. Every one divides the sea surface (`worldgen`'s
+/// `sea_surface_sits_on_every_lod_lattice`).
+pub const LOD_FACTORS: [u32; 9] = [2, 4, 8, 16, 32, 64, 128, 256, 512];
 
 /// Pristine (never-edited) terrain at this factor and coarser is sampled
 /// straight from the worldgen profile (`worldgen::coarse_tile`) instead of
@@ -322,21 +324,67 @@ pub const LOD_REFERENCE_FOCAL_PX: f32 = 935.0;
 /// regions of 1024, 8 of 2048, 4 of 4096, 2 of 8192). `ring_table_keeps_cells_within_the_pixel_budget`
 /// checks whichever table the build ships, `ring_table_ends_at_the_horizon`
 /// that it stops at the horizon.
+///
+/// The play sizes (256 / 512) reach 15 km since 2026-11-05 — an overcast
+/// day's visibility (the client's haze is ~2 % contrast at 80 % of the reach,
+/// `atmosphere::VISIBILITY_SHARE_OF_REACH`), with factors 128 and 512 added
+/// so the cells keep doubling instead of jumping 64 → 256 (~4,400 keys at
+/// 256 m regions, against 80 at the old 1 km); 64 / 128 — tests and
+/// `render-bench` — keep 1 km so their key counts and baselines do not move. Every
+/// table equals [`ring_table_for`] at its horizon except 64's `(13, 16)` (the
+/// rule gives 12), which predates the rule and is pinned by fixtures.
+/// The client's `VOXEL_VIEW_DISTANCE_M` builds another one at run time.
 pub const LOD_RING_TABLE: &[(i32, u32)] = match crate::REGION_BLOCKS {
     64 => &[(2, 2), (3, 4), (6, 8), (13, 16), (16, 32)],
     128 => &[(2, 4), (3, 8), (6, 16), (8, 32)],
-    256 => &[(2, 8), (3, 16), (4, 32)],
-    // One ring: factor 32 a region out would be 3.7 px per cell.
-    512 => &[(2, 16)],
+    256 => &[(2, 8), (3, 16), (6, 32), (12, 64), (24, 128), (47, 256), (60, 512)],
+    // Factor 32 a region out would be 3.7 px per cell, hence factor 16 to 2.
+    512 => &[(2, 16), (3, 32), (6, 64), (12, 128), (24, 256), (30, 512)],
     _ => panic!("no LOD_RING_TABLE for this REGION_BLOCKS"),
 };
 
-/// How far the LOD rings reach, in world units: the last ring's Chebyshev
-/// bound × `REGION_SIZE`, the same at every region size. It is also the
-/// NEAREST the horizon edge can be (the viewer may stand on their region's
-/// edge), which is where the client's fog goes opaque. 16 384 units = 1 km;
-/// it was 2 km (32 768).
-pub const LOD_HORIZON_UNITS: f32 = 16_384.0;
+/// How far the default LOD rings reach, in world units: the last ring's
+/// Chebyshev bound × `REGION_SIZE` ([`ring_table_reach_units`]). It is also
+/// the NEAREST the horizon edge can be (the viewer may stand on their
+/// region's edge), which is where the client's fog goes opaque by default.
+/// 1 km (16 384 units) at 64 / 128 m regions, 15,360 m at the play sizes.
+pub const LOD_HORIZON_UNITS: f32 = if crate::REGION_BLOCKS >= 256 { 245_760.0 } else { 16_384.0 };
+
+/// Reach of a ring table in world units: its last bound × `REGION_SIZE`
+/// (0 for an empty table).
+pub fn ring_table_reach_units(table: &[(i32, u32)]) -> f32 {
+    table.last().map_or(0.0, |&(bound, _)| bound as f32 * REGION_SIZE)
+}
+
+/// The ring table that reaches `horizon_regions` regions while keeping every
+/// ring within [`LOD_MAX_CELL_PX`] where it starts, as coarse as that allows:
+/// each ring takes the coarsest [`LOD_FACTORS`] entry whose cell is within
+/// budget at the ring's start (worst case: the viewer on their region's edge,
+/// the first ring starting one region out, as
+/// `ring_table_keeps_cells_within_the_pixel_budget` assumes) and lasts until
+/// the next coarser factor fits. Factors only grow outward. Empty for
+/// `horizon_regions < 1`.
+pub fn ring_table_for(horizon_regions: i32) -> Vec<(i32, u32)> {
+    // Nearest start distance (regions) at which `factor` is within budget.
+    let fits_from = |factor: u32| -> i32 {
+        let units = factor as f32 * LOD_REFERENCE_FOCAL_PX / LOD_MAX_CELL_PX;
+        (units / REGION_SIZE).ceil() as i32
+    };
+    let mut table = Vec::new();
+    let mut prev = 0;
+    let mut i = 0;
+    while prev < horizon_regions {
+        let start = prev.max(1);
+        while i + 1 < LOD_FACTORS.len() && fits_from(LOD_FACTORS[i + 1]) <= start {
+            i += 1;
+        }
+        let next = LOD_FACTORS.get(i + 1).map_or(horizon_regions, |&f| fits_from(f));
+        let bound = next.min(horizon_regions).max(prev + 1);
+        table.push((bound, LOD_FACTORS[i]));
+        prev = bound;
+    }
+    table
+}
 
 // The `LodKey` tiling contract (`tile_regions`, `cells_per_region`,
 // `copy_region_cells_into_tile`): every factor's 32-cell grid (32 * factor
@@ -359,8 +407,9 @@ pub fn tile_regions(factor: u32) -> i32 {
     ((32 * factor) as i32 / REGION_SIZE as i32).max(1)
 }
 
-/// Names one streamable LOD unit: a region (factor <= 16) or a tile of
-/// `tile_regions(factor)`² regions (64/256). `coords` are region coords
+/// Names one streamable LOD unit: a region, or a tile of
+/// `tile_regions(factor)`² regions once a factor's 32-cell grid spans more
+/// than one region (from 64 at 64 m regions, 256 at 256 m). `coords` are region coords
 /// divided (euclid) by the tile span, so they're plain region coords for
 /// the small factors.
 #[derive(
@@ -495,8 +544,12 @@ pub fn downsample_chunks(chunks: Vec<(ChunkCoords, Chunk)>, factor: u32) -> Vec<
         16 => block_scale_cells(chunks),
         32 => downsample_cells(block_scale_cells(chunks)),
         64 => downsample_cells(downsample_cells(block_scale_cells(chunks))),
+        128 => downsample_cells(downsample_cells(downsample_cells(block_scale_cells(chunks)))),
         256 => downsample_cells(downsample_cells(downsample_cells(downsample_cells(
             block_scale_cells(chunks),
+        )))),
+        512 => downsample_cells(downsample_cells(downsample_cells(downsample_cells(
+            downsample_cells(block_scale_cells(chunks)),
         )))),
         _ => panic!("unsupported LOD factor {factor} (must be one of {LOD_FACTORS:?})"),
     }
@@ -1072,8 +1125,38 @@ mod tests {
 
     #[test]
     fn ring_table_ends_at_the_horizon() {
-        let &(last, _) = LOD_RING_TABLE.last().unwrap();
-        assert_eq!(last as f32 * REGION_SIZE, LOD_HORIZON_UNITS);
+        assert_eq!(ring_table_reach_units(LOD_RING_TABLE), LOD_HORIZON_UNITS);
+    }
+
+    #[test]
+    fn generated_ring_table_matches_the_shipped_one() {
+        let &(horizon, _) = LOD_RING_TABLE.last().unwrap();
+        let generated = ring_table_for(horizon);
+        if crate::REGION_BLOCKS == 64 {
+            // The one hand-cut table: factor 16 ends at 13, the rule says 12.
+            assert_eq!(generated, [(2, 2), (3, 4), (6, 8), (12, 16), (16, 32)]);
+        } else {
+            assert_eq!(generated, LOD_RING_TABLE);
+        }
+    }
+
+    #[test]
+    fn generated_ring_tables_keep_the_pixel_budget_and_reach_the_horizon() {
+        assert!(ring_table_for(0).is_empty());
+        for horizon in 1..=64 {
+            let table = ring_table_for(horizon);
+            assert_eq!(table.last().unwrap().0, horizon, "horizon {horizon}: {table:?}");
+            let mut prev = 1;
+            let mut last_factor = 0;
+            for &(bound, factor) in &table {
+                assert!(bound >= prev && factor > last_factor, "{table:?}");
+                let px = factor as f32 / (prev as f32 * REGION_SIZE) * LOD_REFERENCE_FOCAL_PX;
+                assert!(px <= LOD_MAX_CELL_PX, "horizon {horizon}: factor {factor} at {prev}: {px:.2} px");
+                assert!(LOD_FACTORS.contains(&factor));
+                prev = bound;
+                last_factor = factor;
+            }
+        }
     }
 
     #[test]
@@ -1169,7 +1252,7 @@ mod tests {
         // each axis. Expected occupancy per factor: f cells = 16/f per axis
         // (min 1), all in the grid at group [0,0,0].
         for &(factor, expect_per_axis) in
-            &[(2u32, 8usize), (4, 4), (8, 2), (16, 1), (32, 1), (64, 1), (256, 1)]
+            &[(2u32, 8usize), (4, 4), (8, 2), (16, 1), (32, 1), (64, 1), (128, 1), (256, 1), (512, 1)]
         {
             let chunks = vec![(ChunkCoords::new(0, 0, 0), chunk_with_block([0, 0, 0], 5))];
             let cells = populated(downsample_chunks(chunks, factor));

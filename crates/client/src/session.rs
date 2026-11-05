@@ -107,6 +107,18 @@ pub struct PendingWorld {
 #[derive(Resource, Clone, Debug, PartialEq, Eq)]
 pub struct PendingServer(pub String);
 
+/// Native: the port the next [`PendingWorld`]'s server binds instead of a free
+/// one (`client debug embarked --port N`, so other clients can join it).
+/// Kept for the process's life.
+#[derive(Resource, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HostPort(pub u16);
+
+/// Native: join this already running server instead of starting a
+/// [`PendingWorld`]'s own (`client debug embarked --join ADDR`). Set before
+/// `AppState::Starting`; the session flow connects to it and removes it.
+#[derive(Resource, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct JoinServer(pub std::net::SocketAddr);
+
 /// A start whose world is still being prepared (the `debug embarked` launch
 /// forging its world): `Starting` waits for the [`PendingWorld`] to arrive
 /// instead of failing for want of one. Whoever inserts it sets the starting
@@ -459,7 +471,8 @@ mod flow {
     use game::GameEventKind;
 
     use super::{
-        end_session, install_dead_channels, AppState, LastSessionError, PendingWorld, PreparingWorld, SessionChannels,
+        end_session, install_dead_channels, AppState, HostPort, JoinServer, LastSessionError, PendingWorld, PreparingWorld,
+        SessionChannels,
         SessionEnded, StartingLog, StartingStatus,
     };
     use crate::instance::{ClientRequest, Command};
@@ -546,6 +559,7 @@ mod flow {
         end_session(world);
         world.remove_resource::<PendingWorld>(); // a start abandoned while waiting
         world.remove_resource::<PreparingWorld>();
+        world.remove_resource::<JoinServer>();
         if let Some(host) = world.remove_resource::<LocalHost>() {
             let tail = host.log_tail(SERVER_LOG_TAIL_LINES);
             if let Some(mut error) = world.get_resource_mut::<LastSessionError>() {
@@ -563,7 +577,10 @@ mod flow {
     pub(super) fn begin_starting(world: &mut World) {
         world.resource_mut::<LastSessionError>().0 = None;
         world.get_resource_or_init::<StartingLog>().0.clear();
-        if !world.contains_resource::<PendingWorld>() && !world.contains_resource::<PreparingWorld>() {
+        if !world.contains_resource::<PendingWorld>()
+            && !world.contains_resource::<PreparingWorld>()
+            && !world.contains_resource::<JoinServer>()
+        {
             fail_start(world, "no world was chosen to play".into());
         }
     }
@@ -578,6 +595,11 @@ mod flow {
     /// ([`LocalHost`]), and connect to it. Until
     /// then the starting screen says what it waits for; the frame never does.
     pub(super) fn launch_when_ready(world: &mut World) {
+        if let Some(JoinServer(addr)) = world.remove_resource::<JoinServer>() {
+            info!("[session] joining the server on {addr}");
+            connect_session(world, addr);
+            return;
+        }
         if !world.contains_resource::<PendingWorld>() {
             return; // launched (or failed) already
         }
@@ -589,7 +611,8 @@ mod flow {
         set_status(world, "");
         let pending = world.remove_resource::<PendingWorld>().expect("checked above");
         let log = server_log_path(&pending.entry_dir, &pending.terrain);
-        let host = match LocalHost::start(&pending.terrain, &log) {
+        let port = world.get_resource::<HostPort>().map(|p| p.0);
+        let host = match LocalHost::start(&pending.terrain, &log, port) {
             Ok(host) => host,
             Err(e) => {
                 fail_start(world, format!("Could not start the server for {:?}: {e}", pending.name));
@@ -605,6 +628,11 @@ mod flow {
         );
         let addr = host.addr;
         world.insert_resource(host);
+        connect_session(world, addr);
+    }
+
+    /// Fresh session channels, and the game thread told to connect them to `addr`.
+    fn connect_session(world: &mut World, addr: std::net::SocketAddr) {
         let channels = SessionChannels::new();
         channels.install(world);
         let debug_flags = world.resource::<DebugFlagsRes>().0.clone();

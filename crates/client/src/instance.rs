@@ -57,6 +57,12 @@ pub enum ClientRequest {
     /// Followed by `GameEventKind::Quit`, which sends any request still queued
     /// before the session ends.
     Leave,
+    /// Ask for a page of the legends log (answered as `ClientUpdateEvent::Legends`).
+    RequestLegends(game::history::LegendsQuery),
+    /// Start an adventure from a populated site (answered as `AdventureResult`).
+    StartAdventure(game::history::SiteId),
+    /// Stop the adventure.
+    EndAdventure,
 }
 
 /// Command sent from the client (Bevy app) to the game thread.
@@ -720,6 +726,15 @@ impl GameInstanceManager {
             ClientRequest::Embark(req) => {
                 info!("[client] embarking in region {:?}", req.region);
                 let _ = self.server_game_send.send(ClientPacket::Embark(req));
+            }
+            ClientRequest::RequestLegends(q) => {
+                let _ = self.server_game_send.send(ClientPacket::RequestLegends(q));
+            }
+            ClientRequest::StartAdventure(site) => {
+                let _ = self.server_game_send.send(ClientPacket::StartAdventure(site));
+            }
+            ClientRequest::EndAdventure => {
+                let _ = self.server_game_send.send(ClientPacket::EndAdventure);
             }
             ClientRequest::Retire => {
                 let _ = self.server_game_send.send(ClientPacket::Retire);
@@ -1661,6 +1676,15 @@ impl GameInstanceManager {
                 // The window diff picks the neighbourhood up on the next tick.
                 self.fortress_region = f.map(|f| f.region);
                 let _ = self.client_event_send.send(ClientUpdateEvent::Fortress(f));
+            }
+            game::ServerPacket::Civs(c) => {
+                let _ = self.client_event_send.send(ClientUpdateEvent::Civs(c));
+            }
+            game::ServerPacket::Legends(p) => {
+                let _ = self.client_event_send.send(ClientUpdateEvent::Legends(p));
+            }
+            game::ServerPacket::AdventureResult(r) => {
+                let _ = self.client_event_send.send(ClientUpdateEvent::AdventureResult(r));
             }
             game::ServerPacket::Notice(n) => {
                 let _ = self.client_event_send.send(ClientUpdateEvent::Notice(n));

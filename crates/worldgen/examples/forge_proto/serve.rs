@@ -163,7 +163,7 @@ fn parse_query(query: &str) -> Vec<(String, String)> {
 /// The page's query -> forge parameters. Knob values are clamped to their
 /// table range, so a typo cannot ask for a million iterations.
 fn params_from_query(base: &Params, query: &str) -> Result<Params, String> {
-    let mut p = Params { forge: ForgeParams { quiet: true, ..base.forge.clone() }, search: 0, serve: None, out: base.out.clone() };
+    let mut p = Params { forge: ForgeParams { quiet: true, ..base.forge.clone() }, search: 0, serve: None, spawn: None, out: base.out.clone() };
     for (key, value) in parse_query(query) {
         match key.as_str() {
             "seed" => {

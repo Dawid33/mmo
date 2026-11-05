@@ -50,6 +50,89 @@ use queue::{
 #[require(Visibility, SyncToRenderWorld)]
 pub struct ChunkQuads(pub Arc<Vec<QuadRecord>>);
 
+/// Which detail band a `ChunkQuads` entity draws in (GPU-driven path only;
+/// see `meshing::coarse`). A sim chunk whose coarse twin is meshed is
+/// [`DetailBand::Fine`] — drawn only within [`NearDetail`]'s switch distance
+/// of the main camera — and the twin [`DetailBand::Coarse`], drawn only
+/// beyond it. No component (or `Always`) = always drawn. The cull compute
+/// decides per view from the same eye, so a chunk and its twin never both
+/// draw nor both vanish; the CPU-culled paths draw `Fine` always and skip
+/// `Coarse`.
+#[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DetailBand {
+    Always,
+    Fine,
+    Coarse,
+}
+
+impl DetailBand {
+    /// The cull shader's `BAND_*` code (`voxel_pull_cull.wgsl`).
+    pub fn code(band: Option<&DetailBand>) -> u32 {
+        match band {
+            None | Some(DetailBand::Always) => 0,
+            Some(DetailBand::Fine) => 1,
+            Some(DetailBand::Coarse) => 2,
+        }
+    }
+}
+
+/// Default switch distance from full-detail sim chunks to their coarse
+/// (block-scale) twins, metres of horizontal distance from the camera. At
+/// 96 m a block is ~10 px and a leaf texel ~0.6 px on the reference 935 px
+/// focal length, so the twin's whole blocks and solid foliage do not read as
+/// a change; chiselled detail (branches, half blocks) is already sub-pixel.
+pub const NEAR_DETAIL_DISTANCE_M: f32 = 96.0;
+
+/// `VOXEL_NEAR_DETAIL_M=M` (native) moves the switch; `0` turns coarse twins
+/// off (every sim chunk at full detail, as before). Read once.
+pub fn near_detail_distance_m() -> f32 {
+    static VALUE: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    *VALUE.get_or_init(|| {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(m) = std::env::var("VOXEL_NEAR_DETAIL_M").ok().and_then(|v| v.trim().parse::<f32>().ok()) {
+            return m.max(0.0);
+        }
+        NEAR_DETAIL_DISTANCE_M
+    })
+}
+
+/// The main camera's eye and the detail switch distance, for the cull
+/// compute's `detail` uniform. Written every frame by [`track_near_detail`].
+#[derive(Resource, Clone, Copy, Debug, Default, ExtractResource)]
+pub struct NearDetail {
+    pub eye: Vec3,
+    /// World units; 0 = no eye yet / bands off.
+    pub distance: f32,
+}
+
+impl NearDetail {
+    pub fn cull_uniform(&self) -> [f32; 4] {
+        [self.eye.x, self.eye.y, self.eye.z, self.distance]
+    }
+}
+
+/// The active world camera's eye into [`NearDetail`].
+pub fn track_near_detail(
+    mut detail: ResMut<NearDetail>,
+    cameras: Query<(&GlobalTransform, &Camera), (With<Camera3d>, Without<crate::session::FrontendCamera>)>,
+) {
+    let distance = near_detail_distance_m() * game::movement::UNITS_PER_METER;
+    let eye = cameras.iter().find(|(_, c)| c.is_active).map(|(t, _)| t.translation());
+    let next = match eye {
+        Some(eye) => NearDetail { eye, distance },
+        None => NearDetail::default(),
+    };
+    if *detail != next {
+        *detail = next;
+    }
+}
+
+impl PartialEq for NearDetail {
+    fn eq(&self, other: &Self) -> bool {
+        self.eye == other.eye && self.distance == other.distance
+    }
+}
+
 /// The block array texture, shared with the mesh path's material. Extracted
 /// into the render world (via `ExtractResource`) so `prepare` can bind it.
 #[derive(Resource, Clone, ExtractResource)]
@@ -84,6 +167,8 @@ pub struct ExtractedChunkQuads {
     /// The brick holds interior quads (`meshing::InteriorFaces`): the x-ray's
     /// interior pass draws it (`xray::InteriorChunks`).
     pub interior: bool,
+    /// [`DetailBand::code`].
+    pub band: u32,
 }
 
 #[derive(Resource, Default)]
@@ -154,15 +239,21 @@ pub fn extract_chunk_quads(
                 &Aabb,
                 &InheritedVisibility,
                 Has<super::meshing::InteriorFaces>,
+                Option<&DetailBand>,
             ),
-            Or<(Changed<ChunkQuads>, Changed<GlobalTransform>, Changed<InheritedVisibility>)>,
+            Or<(
+                Changed<ChunkQuads>,
+                Changed<GlobalTransform>,
+                Changed<InheritedVisibility>,
+                Changed<DetailBand>,
+            )>,
         >,
     >,
     all_chunks: Extract<Query<&InheritedVisibility, With<ChunkQuads>>>,
     mut debug_frame: Local<u32>,
 ) {
     let mut extracted = 0u32;
-    for (entity, quads, transform, aabb, vis, interior) in &chunks {
+    for (entity, quads, transform, aabb, vis, interior, band) in &chunks {
         extracted += 1;
         let mut ec = commands.entity(entity);
         // Cave-culling hides via Visibility -> InheritedVisibility=false.
@@ -176,6 +267,7 @@ pub fn extract_chunk_quads(
             half_extents: half,
             cave_active,
             interior,
+            band: DetailBand::code(band),
         });
     }
     // VOXEL_PULL_DEBUG=1: once a second, where do chunks disappear — here
@@ -273,8 +365,14 @@ impl Plugin for VoxelPullPlugin {
             ExtractResourcePlugin::<super::boundaries::BoundaryUniform>::default(),
             ExtractResourcePlugin::<super::fortress_view::FortressViewUniform>::default(),
             ExtractResourcePlugin::<xray::XraySettings>::default(),
+            ExtractResourcePlugin::<NearDetail>::default(),
         ));
         app.init_resource::<xray::XraySettings>();
+        app.init_resource::<NearDetail>();
+        app.add_systems(
+            PostUpdate,
+            track_near_detail.after(bevy::transform::TransformSystems::Propagate),
+        );
         // Main-world tally driving the `[pull-mem]` headline log in
         // `apply_meshed_chunks`. Registered here (not in `renderer/mod.rs`) so
         // the pull path owns its own accounting resource.

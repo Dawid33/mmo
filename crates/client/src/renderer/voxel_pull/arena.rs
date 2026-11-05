@@ -44,9 +44,11 @@ impl GpuNearChunkMeta {
         half_extents: Vec3,
         cave_active: bool,
         face_ends: [u32; 8],
+        band: u32,
     ) -> Self {
         Self {
-            center: [center.x, center.y, center.z, 0.0],
+            // w: the slot's detail band (`super::DetailBand::code`).
+            center: [center.x, center.y, center.z, band as f32],
             half_extents: [half_extents.x, half_extents.y, half_extents.z, 0.0],
             record_start: allocation.record_start,
             quad_count: allocation.quad_count,
@@ -283,6 +285,7 @@ impl GpuQuadArena {
         half_extents: Vec3,
         cave_active: bool,
         face_ends: [u32; 8],
+        band: u32,
     ) {
         let allocation = *self
             .allocations
@@ -295,6 +298,7 @@ impl GpuQuadArena {
                 half_extents,
                 cave_active,
                 face_ends,
+                band,
             );
         self.metadata_dirty.insert(allocation.chunk_slot);
     }
@@ -365,6 +369,7 @@ mod tests {
             Vec3::new(4.0, 5.0, 6.0),
             true,
             [9; 8],
+            0,
         );
 
         let resized = arena.ensure_allocation(entity, 9);
@@ -392,8 +397,8 @@ mod tests {
         let replacement_entity = Entity::from_raw_u32(12).unwrap();
         let first = arena.ensure_allocation(first_entity, 2);
         let second = arena.ensure_allocation(second_entity, 3);
-        arena.update_metadata(first_entity, Vec3::ONE, Vec3::splat(2.0), true, [0; 8]);
-        arena.update_metadata(second_entity, Vec3::splat(3.0), Vec3::splat(4.0), true, [0; 8]);
+        arena.update_metadata(first_entity, Vec3::ONE, Vec3::splat(2.0), true, [0; 8], 0);
+        arena.update_metadata(second_entity, Vec3::splat(3.0), Vec3::splat(4.0), true, [0; 8], 0);
 
         arena.release(first_entity);
 
