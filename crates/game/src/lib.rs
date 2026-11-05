@@ -26,6 +26,7 @@ pub mod history;
 pub mod input;
 pub mod inventory;
 pub mod items;
+pub mod item_piles;
 pub mod lod;
 pub mod lod_builder;
 pub mod movement;
@@ -71,6 +72,7 @@ pub use debug_render::{ColliderDebug, DebugFlags, DebugLine, DEBUG_COLLIDER_RADI
 pub use input::*;
 pub use inventory::*;
 pub use items::*;
+pub use item_piles::*;
 pub use lod::*;
 pub use lod_builder::*;
 pub use movement::Motion;

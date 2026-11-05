@@ -268,6 +268,10 @@ impl Rollback {
                 }
             }
         }
+        if changed {
+            // A pile pushed up out of the new block, or left unsupported.
+            self.piles_after_write_safe(pos);
+        }
         changed
     }
 
@@ -600,6 +604,10 @@ impl Rollback {
         }
         for key in neighbours {
             self.materialize_ground_safe(crate::chunk_coords_of_index_key(key));
+        }
+        // Piles follow their support once every block is written.
+        for &pos in &written {
+            self.piles_after_write_safe(pos);
         }
         written
     }

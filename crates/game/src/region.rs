@@ -26,14 +26,35 @@ use crate::{
 /// never drains; a few `Instant::now()` reads per tick are noise next to the
 /// ~ms tick itself.
 /// Opens or closes the inventory. Closing in Adventure returns the cursor
-/// stack to the inventory; what does not fit stays on the cursor (a pile
-/// drop replaces that once item piles exist).
-fn toggle_inventory(c: &mut Client) {
+/// stack to the inventory; what does not fit is returned, for the caller to
+/// drop as a pile at the player's feet ([`Rollback::drop_at_feet_safe`]).
+fn toggle_inventory(c: &mut Client) -> Option<crate::ItemStack> {
     c.inventory_open = !c.inventory_open;
     if !c.inventory_open && c.mode == crate::PlayMode::Adventure {
         if let Some(mut stack) = c.cursor.take() {
             stack.count = c.inventory.add(stack);
-            c.cursor = (stack.count > 0).then_some(stack);
+            return (stack.count > 0).then_some(stack);
+        }
+    }
+    None
+}
+
+impl Rollback {
+    /// Drops `stack` as a pile at the cell of `client`'s feet, pickable after
+    /// [`crate::PICKUP_DELAY_TICKS`]. With no body to drop it from, it goes
+    /// back on the cursor instead, so nothing is lost.
+    fn drop_at_feet_safe(&mut self, client: ClientId, stack: crate::ItemStack) {
+        let feet = self.data.player_entites.get(&client).and_then(|&e| self.body_feet(e));
+        match feet {
+            Some(feet) => {
+                let tick = *self.data.tick as u64;
+                self.deposit_items_safe(crate::feet_tile(feet), stack, tick, crate::PICKUP_DELAY_TICKS);
+            }
+            None => {
+                if let Some(c) = self.data.clients.get_mut(&client) {
+                    c.cursor = Some(stack);
+                }
+            }
         }
     }
 }
@@ -638,6 +659,11 @@ impl Region {
                 for (client_id, action) in edits {
                     self.data.player_edit_safe(client_id, action);
                 }
+                // Item piles: Adventure bodies pick up what they reach, then
+                // due piles despawn.
+                self.data.tick_pickups_safe(tick);
+                self.data.expire_piles_safe(tick);
+                let mut drops: Vec<(ClientId, crate::ItemStack)> = Vec::new();
                 let data: &mut GameData = self.data.deref_mut();
                 let keys: Vec<ClientId> = data.clients.keys().cloned().collect();
                 for client_id in keys {
@@ -650,7 +676,9 @@ impl Region {
                         if adventure {
                             // Survival: E is the inventory, not a camera mode.
                             if e_pressed {
-                                toggle_inventory(client);
+                                if let Some(rest) = toggle_inventory(client) {
+                                    drops.push((client_id, rest));
+                                }
                             }
                             if let Some(slot) = Key::DIGITS.iter().find_map(|k| {
                                 client.input.key_pressed(k).then(|| k.hotbar_slot()).flatten()
@@ -671,6 +699,9 @@ impl Region {
                             crate::GameDataUpdateKind::SetFreeCam(client_id, mode),
                         ));
                     }
+                }
+                for (client_id, rest) in drops {
+                    self.data.drop_at_feet_safe(client_id, rest);
                 }
                 #[cfg(not(target_arch = "wasm32"))]
                 let input_done = Instant::now();
@@ -762,7 +793,9 @@ impl Region {
                             crate::click(cursor, inventory, None, slot, button, shift);
                         }
                         crate::UiAction::ToggleInventory => {
-                            toggle_inventory(c);
+                            if let Some(rest) = toggle_inventory(c) {
+                                self.data.drop_at_feet_safe(client_id, rest);
+                            }
                         }
                     }
                 }

@@ -49,25 +49,27 @@ use slotmapd::Key as _;
 /// only — no body in this scene; 16-block values only).
 /// Then for `Client.mode` (`game::adventure`; the scene's player is a
 /// client; 16-block values only). Then for the `Ecs` `walker` component
-/// slot (`game::adventure`; layout only — nobody walks; 16-block values only).
+/// slot (`game::adventure`; layout only — nobody walks; 16-block values only). Then for
+/// `GameData.item_piles` / `pile_expiry` (`game::item_piles`; layout only —
+/// no pile in these scenes; 16-block values only).
 ///
 /// Every value is pinned per sim-chunk size (`game::CHUNK_BLOCKS`, a build
 /// dial): the same physical scene splits into different chunk entities,
 /// bodies and colliders at 2 and 16 blocks, so its bytes and hashes differ.
 /// Other sizes are not pinned and skip the comparison.
-const WASM_SCENE_DIGEST: u32 = pinned(0xFA8E_102F, 0xDF3B_7883);
+const WASM_SCENE_DIGEST: u32 = pinned(0xFA8E_102F, 0x3A25_BC72);
 /// `game::state_hash` of the same state, on every target.
-const SCENE_STATE_HASH: u32 = pinned(0x5233_40BE, 0x5EA6_DD54);
+const SCENE_STATE_HASH: u32 = pinned(0x5233_40BE, 0x897A_4E7E);
 const SCENE_TICKS: usize = 120;
 /// crc32 of [`underground_scene`]'s region bytes, on every target.
-const UNDERGROUND_DIGEST: u32 = pinned(0x5448_586C, 0xD851_4114);
+const UNDERGROUND_DIGEST: u32 = pinned(0x5448_586C, 0xE44A_7239);
 /// `game::state_hash` of the same state, on every target.
-const UNDERGROUND_STATE_HASH: u32 = pinned(0x4080_B196, 0xA1DB_CD77);
+const UNDERGROUND_STATE_HASH: u32 = pinned(0x4080_B196, 0x9394_5106);
 
 /// crc32 of [`voxel_body_scene`]'s region bytes, on every target.
-const VOXEL_BODY_DIGEST: u32 = pinned(0x0F43_FFD4, 0x81F3_53DF);
+const VOXEL_BODY_DIGEST: u32 = pinned(0x0F43_FFD4, 0x0190_025A);
 /// `game::state_hash` of the same state, on every target.
-const VOXEL_BODY_STATE_HASH: u32 = pinned(0x8D9E_A328, 0x3D90_D0F3);
+const VOXEL_BODY_STATE_HASH: u32 = pinned(0x8D9E_A328, 0x2362_EB1C);
 /// Ticks of [`voxel_body_scene`] after the detach: mid-fall (it rests and
 /// despawns at ~50).
 const VOXEL_BODY_TICKS: usize = 30;

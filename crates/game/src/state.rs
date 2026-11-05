@@ -88,6 +88,9 @@ pub enum GameDataUpdateKind {
     SetDesignations(Vec<(crate::TilePos, Option<crate::Designation>)>),
     /// Tiles that became (`true`) or stopped being (`false`) constructions.
     SetConstructed(Vec<(crate::TilePos, bool)>),
+    /// Item piles (`item_piles.rs`) set (`Some`, the whole new pile) or gone
+    /// (`None`) per cell. Do carries the new views, Undo the prior ones.
+    SetItemPiles(Vec<(crate::edit::BlockPos, Option<crate::PileView>)>),
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -212,6 +215,14 @@ mod game_data {
         /// The body each history person has in this region (`people.rs`).
         #[undo(map)]
         person_entities: BTreeMap<crate::history::PersonId, EntityKey>,
+        /// Dropped items, one pile per resting cell (`item_piles.rs`):
+        /// never entities, never bodies.
+        #[undo(map)]
+        item_piles: BTreeMap<crate::edit::BlockPos, crate::ItemPile>,
+        /// Expiry index of `item_piles`: `(expire_tick, cell)`, so expiry
+        /// and the cap's eviction touch only the earliest piles.
+        #[undo(map)]
+        pile_expiry: BTreeMap<(u64, crate::edit::BlockPos), ()>,
     }
 
     pub struct Ecs {
@@ -315,6 +326,16 @@ impl GameData {
 
     pub fn constructed(&self) -> &std::collections::BTreeMap<crate::TilePos, ()> {
         &self.constructed
+    }
+
+    /// Dropped-item piles by resting cell.
+    pub fn item_piles(&self) -> &std::collections::BTreeMap<crate::edit::BlockPos, crate::ItemPile> {
+        &self.item_piles
+    }
+
+    /// The piles' expiry index, `(expire_tick, cell)` in expiry order.
+    pub fn pile_expiry(&self) -> &std::collections::BTreeMap<(u64, crate::edit::BlockPos), ()> {
+        &self.pile_expiry
     }
 
     /// The per-column ground recipes (for the client's tile mirror).

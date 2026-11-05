@@ -1199,6 +1199,9 @@ pub fn drain_region_updates(
                         msgs.write(TileMirrorMsg::Constructed { region, changes });
                     }
                 }
+                // Item piles (`game::item_piles`): not drawn yet (plan
+                // 2026-11-05 Task 11).
+                GameDataUpdateKind::SetItemPiles(_) => {}
                 GameDataUpdateKind::SetFreeCam(client_id, enabled) => {
                     // Only the local player's toggle may grab this window's cursor.
                     if local_player.0 != Some(client_id) {

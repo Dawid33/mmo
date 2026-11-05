@@ -38,11 +38,13 @@ use game::{state_hash, GameEventKind, InputEvent, Key, Region, RegionCoords};
 /// Then for `Client.mode` (`game::adventure`; 16 only).
 /// Then for the `Ecs` `walker` component slot (`game::adventure`; hashed
 /// layout only, nobody walks in the scene; 16 only).
+/// Then for `GameData.item_piles` / `pile_expiry` (`game::item_piles`;
+/// hashed layout only, no pile in the scene; 16 only).
 /// Pinned per sim-chunk size (`game::CHUNK_BLOCKS`): the same world splits
 /// into other chunk entities, bodies and colliders at 2 and 16 blocks.
 const SCENE_HASH: u32 = match game::CHUNK_BLOCKS {
     2 => 0x380C_FBC3,
-    16 => 0x8C71_D3E4,
+    16 => 0xC1E5_D78E,
     _ => 0,
 };
 /// Ticks of scripted input.

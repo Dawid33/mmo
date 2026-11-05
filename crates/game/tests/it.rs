@@ -31,6 +31,7 @@ mod handoff_schedule;
 mod handoff_state;
 mod history;
 mod inventory;
+mod item_piles;
 mod items;
 mod history_handover;
 mod history_play;
