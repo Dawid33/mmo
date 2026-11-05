@@ -452,22 +452,42 @@ impl Rollback {
         tiles.clear();
     }
 
+    /// Carries out a chop order at `p`: [`Self::fell_safe`] with felled parts
+    /// that despawn at rest, leaving nothing (no items).
+    fn chop_safe(&mut self, p: TilePos) {
+        let _ = self.fell_safe(p, crate::SettlePolicy::Despawn);
+    }
+
     /// Fells the tree at `p` (`trees::fell`, computed first): clears the cut
     /// blocks and detaches every falling piece with its tip spin, turning
-    /// about the cut (`trees::tip_pivot`). A tree
-    /// `fell` refuses (over `MAX_TREE_BLOCKS`) is left whole.
-    fn chop_safe(&mut self, p: TilePos) {
+    /// about the cut (`trees::tip_pivot`), each settling by `policy`.
+    /// Returns the cut blocks as they were before clearing, and the
+    /// falling part's body (the last one, when a cut splits the tree into
+    /// several; `None` when nothing that collides fell). `None`, with
+    /// nothing changed, for a tree `fell` refuses (not wood, or over
+    /// `MAX_TREE_BLOCKS`) — left whole.
+    pub fn fell_safe(
+        &mut self,
+        p: TilePos,
+        policy: crate::SettlePolicy,
+    ) -> Option<(Vec<(TilePos, crate::Block)>, Option<crate::EntityKey>)> {
         let tree = TileSource::tree_id(self, p);
-        let Some(felling) = crate::trees::fell(self, p) else { return };
+        let felling = crate::trees::fell(self, p)?;
+        let mut cut: Vec<(TilePos, crate::Block)> =
+            felling.cut.iter().filter_map(|&c| self.block_at(c).map(|b| (c, b))).collect();
         if self.clear_blocks_safe(&felling.cut) == 0 {
-            return;
+            return None;
         }
+        // Only what was actually cleared (a refused write keeps its block).
+        cut.retain(|&(c, _)| self.block_at(c).is_some_and(|b| b.id == BlockId::AIR));
         let tick = *self.data.tick as u64;
+        let mut body = None;
         for set in felling.falling {
             let spin = crate::trees::tip_angvel(tree, p, &set, tick);
             let pivot = crate::trees::tip_pivot(p);
-            self.detach_blocks_pivoting_safe(&set, crate::SettlePolicy::Despawn, spin, Some(pivot));
+            body = self.detach_blocks_pivoting_safe(&set, policy, spin, Some(pivot)).or(body);
         }
+        Some((cut, body))
     }
 
     /// Writes designation changes and tells the renderer, both ways.

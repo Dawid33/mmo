@@ -137,9 +137,14 @@ pub struct VoxelModel {
 /// What happens to a body once it is settled.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, StateHash)]
 pub enum SettlePolicy {
-    /// Removed, leaving nothing behind (felled trees: no items).
+    /// Removed, leaving nothing behind (a fortress chop order: no items).
     #[default]
     Despawn,
+    /// Removed, each model block turned into its drop (`drop_of`) and
+    /// deposited as a pile at the region block cell its centre ended in
+    /// (clamped into the region by the deposit) — a tree a player felled:
+    /// the logs lie where it landed.
+    DropItems,
 }
 
 /// A detached-terrain entity (ECS component `voxel_body`).
@@ -445,7 +450,42 @@ fn topple_angvel(
     axis * w.max((TOPPLE_MARGIN * needed).min(TOPPLE_MAX_ANGVEL))
 }
 
+/// Each model block of `model` with the region block cell its centre lies
+/// in when the body stands at `pose` (its centre-of-mass frame, as
+/// `detach_blocks_pivoting_safe` built it), in model key order. Only
+/// `+ - * /` and `floor` (the quaternion rotation included), so the cells
+/// agree on every target.
+pub fn settled_cells(model: &VoxelModel, pose: &Pose) -> Vec<(BlockPos, Block)> {
+    let com = model_mass_properties(model).local_com;
+    let bv = BLOCK_VOXELS as f32;
+    model
+        .blocks
+        .iter()
+        .map(|(o, (block, _))| {
+            let centre = Vector::new(
+                (f32::from(o[0]) + 0.5) * bv,
+                (f32::from(o[1]) + 0.5) * bv,
+                (f32::from(o[2]) + 0.5) * bv,
+            );
+            let world = pose.translation + pose.rotation * (centre - com);
+            let cell = [world.x, world.y, world.z].map(|v| (v / bv).floor() as i32);
+            (cell, *block)
+        })
+        .collect()
+}
+
 impl Rollback {
+    /// Deposits each block's drop (`drop_of`; leaves drop nothing) as a pile
+    /// at its cell, in order, pickable after `PICKUP_DELAY_TICKS`. Losses to
+    /// the pile caps are counted by the deposit.
+    fn drop_blocks_safe(&mut self, cells: Vec<(BlockPos, Block)>, tick: u64) {
+        for (cell, block) in cells {
+            if let Some(stack) = crate::drop_of(block) {
+                let _destroyed = self.deposit_items_safe(cell, stack, tick, crate::PICKUP_DELAY_TICKS);
+            }
+        }
+    }
+
     /// Detaches the blocks at `positions` into one dynamic voxel body,
     /// undo-safely: the blocks are cleared from the terrain
     /// (`clear_blocks_safe`) and a new entity carries them, its body at the
@@ -509,6 +549,15 @@ impl Rollback {
         let colliding = collision_model(&model, pivot.is_some());
         let boxes = model_collider_boxes(&colliding);
         if boxes.is_empty() {
+            if policy == SettlePolicy::DropItems {
+                // Settled at once, where it stood.
+                let cells = model
+                    .blocks
+                    .iter()
+                    .map(|(o, (block, _))| ([0, 1, 2].map(|a| origin[a] + i32::from(o[a])), *block))
+                    .collect();
+                self.drop_blocks_safe(cells, *self.data.tick as u64);
+            }
             return None;
         }
 
@@ -618,6 +667,12 @@ impl Rollback {
             if settle {
                 match vb.policy {
                     SettlePolicy::Despawn => self.remove_entity_safe(e, None),
+                    SettlePolicy::DropItems => {
+                        let pose = *body.position();
+                        let cells = settled_cells(&vb.model, &pose);
+                        self.remove_entity_safe(e, None);
+                        self.drop_blocks_safe(cells, tick);
+                    }
                 }
                 continue;
             }

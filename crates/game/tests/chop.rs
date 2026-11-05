@@ -393,3 +393,190 @@ fn cactus_column_cut_fells_the_top_and_its_arms() {
     want.sort_unstable();
     assert_eq!(sets[0], want, "the column above and the upper arm; the lower arm stays");
 }
+
+// --- Felling as an Adventure player (plan 2026-11-05, Decision 9) ---
+
+/// About 45 degrees down (as in `mining.rs`).
+const DOWN_45: f32 = 302.0;
+
+fn input(ev: game::InputEvent) -> GameEventKind {
+    GameEventKind::PlayerInput(0, ev)
+}
+
+fn forget(region: &mut Region, ev: GameEventKind) {
+    region.handle_event(ev).unwrap();
+    region.forget_last_event();
+}
+
+fn player_body(region: &Region) -> [f32; 3] {
+    let data = region.data();
+    let e = *data.player_entites.get(&0).unwrap();
+    data.physics.bodies.get(*data.ecs.rigidbody.get(e)).unwrap().translation().to_array()
+}
+
+fn place_player(region: &mut Region, x: f32, z: f32) {
+    let y = player_body(region)[1];
+    region.with_data(|r| {
+        let e = *r.data.player_entites.get(&0).unwrap();
+        r.set_body_pose_safe(e, game::Pose::translation(x, y, z));
+    });
+}
+
+/// The forested region with player 0 in Adventure, first person, standing
+/// just +z of the trunk and looking 45 degrees down at its base log
+/// (x0, 1, Z0). Setup is forgotten.
+fn adventure_at_the_trunk(ids: &Ids) -> Region {
+    let mut region = forested_region(ids);
+    forget(&mut region, GameEventKind::CreateClient(0));
+    forget(&mut region, input(game::InputEvent::FpsCam(true)));
+    region.with_data(|r| {
+        let c = r.clients.get_mut(&0).unwrap();
+        c.mode = game::PlayMode::Adventure;
+        c.inventory = game::Inventory::new();
+    });
+    for _ in 0..12 {
+        forget(&mut region, GameEventKind::Tick);
+    }
+    let bv = BLOCK_VOXELS as f32;
+    place_player(&mut region, (x0() as f32 + 0.5) * bv, (Z0 as f32 + 2.1) * bv);
+    forget(&mut region, input(game::InputEvent::MouseMotion { dx: 0.0, dy: DOWN_45 }));
+    for _ in 0..3 {
+        forget(&mut region, GameEventKind::Tick);
+    }
+    let hit = region.data().eye_hit(0).expect("the eye ray hits the trunk").block;
+    assert_eq!(hit, [x0(), 1, Z0], "aimed at the base log");
+    region
+}
+
+fn press(pressed: bool) -> GameEventKind {
+    input(game::InputEvent::MouseButton { button: game::MouseButton::Left, pressed })
+}
+
+/// Holds the left button on the base log until it breaks (asserting the
+/// trunk timing) and releases it; with `move_away`, then moves the player
+/// well away (outside any event) so it picks nothing up. Returns the events
+/// run (none forgotten).
+fn chop_base(region: &mut Region, ids: &Ids, move_away: bool) -> usize {
+    let needed = game::break_ticks(game::block_props(), Block::with_tree(ids.log, TREE, 0)) as usize;
+    let mut events = 0;
+    region.handle_event(press(true)).unwrap();
+    events += 1;
+    for n in 1..=needed {
+        region.handle_event(GameEventKind::Tick).unwrap();
+        events += 1;
+        let gone = TileSource::block(region.data(), [x0(), 1, Z0]) == BlockId::AIR;
+        assert_eq!(gone, n == needed, "the trunk breaks on tick {needed}, not {n}");
+    }
+    region.handle_event(press(false)).unwrap();
+    events += 1;
+    if !move_away {
+        return events;
+    }
+    let bv = BLOCK_VOXELS as f32;
+    region.with_data(|r| {
+        let e = *r.data.player_entites.get(&0).unwrap();
+        let y = r.data.physics.bodies.get(*r.data.ecs.rigidbody.get(e)).unwrap().translation().y;
+        r.set_body_pose_safe(e, game::Pose::translation((x0() as f32 + 0.5) * bv, y, (Z0 as f32 + 40.5) * bv));
+    });
+    events
+}
+
+/// Ticks until no voxel body is left (at most the settle timeout and a
+/// margin). Returns the events run.
+fn run_to_settle(region: &mut Region) -> usize {
+    let mut events = 0;
+    for _ in 0..SETTLE_TIMEOUT_TICKS + 5 {
+        region.handle_event(GameEventKind::Tick).unwrap();
+        events += 1;
+        if region.data().ecs.voxel_body.iter().all(|(_, v)| v.is_none()) {
+            return events;
+        }
+    }
+    panic!("the felled part never settled");
+}
+
+/// Total `item` over every pile, and the pile cells holding it.
+fn piled(region: &Region, item: game::ItemId) -> (u32, Vec<TilePos>) {
+    let mut total = 0;
+    let mut cells = Vec::new();
+    for (p, pile) in region.data().item_piles() {
+        let n: u32 = pile.stacks.iter().filter(|s| s.item == item).map(|s| u32::from(s.count)).sum();
+        if n > 0 {
+            total += n;
+            cells.push(*p);
+        }
+    }
+    (total, cells)
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn player_trunk_cut_yields_every_log() {
+    let ids = ids();
+    let mut region = adventure_at_the_trunk(&ids);
+    chop_base(&mut region, &ids, true);
+    assert!(region.data().ecs.voxel_body.iter().any(|(_, v)| v.is_some()), "the tree falls as a body");
+    run_to_settle(&mut region);
+    let r = region.data();
+    for p in tree_of(&ids, TREE) {
+        assert_eq!(TileSource::block(r, p), BlockId::AIR, "{p:?} felled");
+    }
+    let (logs, _) = piled(&region, game::ItemId::block(ids.log));
+    assert_eq!(logs, 8, "every trunk log: {:?}", region.data().item_piles());
+    let (sticks, _) = piled(&region, game::STICK);
+    assert_eq!(sticks, 3, "one stick per branch block");
+    let (leaves, _) = piled(&region, game::ItemId::block(ids.leaves));
+    assert_eq!(leaves, 0, "leaves drop nothing");
+    // 11 items in 5 piles: a deposit merges into a pile within
+    // `PILE_MERGE_RADIUS_BLOCKS` (1) of it and the pile stays put, so along
+    // a felled trunk piles end up every other block.
+    assert!(region.data().item_piles().len() <= 5, "merged into a few piles: {:?}", region.data().item_piles());
+    assert!(region.data().clients[&0].inventory.slots.iter().all(|s| s.is_none()), "nothing picked up");
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn logs_lie_where_tree_landed() {
+    let ids = ids();
+    let mut region = adventure_at_the_trunk(&ids);
+    chop_base(&mut region, &ids, true);
+    run_to_settle(&mut region);
+    let (_, cells) = piled(&region, game::ItemId::block(ids.log));
+    let reach = (TRUNK_TOP + 2) as f32;
+    let dist = |p: &TilePos| (((p[0] - x0()).pow(2) + (p[2] - Z0).pow(2)) as f32).sqrt();
+    for p in &cells {
+        assert!(dist(p) <= reach, "pile {p:?} within the tree's reach of the stump");
+    }
+    assert!(cells.iter().any(|p| dist(p) >= 3.0), "logs lie along the fallen tree, not on the stump: {cells:?}");
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn fortress_chop_still_yields_nothing() {
+    let ids = ids();
+    let mut region = forested_region(&ids);
+    let cut = [x0(), 1, Z0];
+    forget(&mut region, GameEventKind::Order(0, order(DesignationKind::Chop, cut, cut)));
+    forget(&mut region, GameEventKind::Order(0, Order::DevCompleteAll));
+    assert!(region.data().ecs.voxel_body.iter().any(|(_, v)| v.is_some()), "the tree falls as a body");
+    assert!(region.data().ecs.voxel_body.iter().all(|(_, v)| v.as_ref().is_none_or(|v| v.policy == game::SettlePolicy::Despawn)));
+    run_to_settle(&mut region);
+    assert!(region.data().item_piles().is_empty(), "a chop order leaves no items");
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn player_chop_undo_roundtrip() {
+    let ids = ids();
+    let mut region = adventure_at_the_trunk(&ids);
+    let before = state_hash(region.data());
+    let mut events = chop_base(&mut region, &ids, false);
+    events += run_to_settle(&mut region);
+    assert!(!region.data().item_piles().is_empty(), "the chop dropped logs");
+    for _ in 0..events {
+        region.rollback_last_event();
+    }
+    assert_eq!(state_hash(region.data()), before, "felling, settling and the drops roll back bit-exact");
+    assert!(region.data().item_piles().is_empty());
+    assert_eq!(TileSource::block(region.data(), [x0(), 1, Z0]), ids.log);
+}

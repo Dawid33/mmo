@@ -47,7 +47,7 @@ fn forest() -> RegionCoords {
 
 /// The ground a tree is planted on: its chunks, per-column ground recipes
 /// (real terrain only) and the top of the ground per block column (units).
-struct Ground {
+pub(crate) struct Ground {
     rc: RegionCoords,
     chunks: BTreeMap<ChunkCoords, Chunk>,
     recipes: Vec<(ColumnCoords, game::ColumnGround)>,
@@ -88,7 +88,7 @@ fn bare_forest() -> Ground {
 }
 
 /// A stone floor `depth` blocks deep over the whole region.
-fn flat_floor(depth: i32) -> Ground {
+pub(crate) fn flat_floor(depth: i32) -> Ground {
     registry();
     let mut chunks = BTreeMap::new();
     for x in 0..REGION_CHUNKS {
@@ -163,16 +163,16 @@ impl Ground {
     }
 }
 
-struct Scene {
-    region: Region,
+pub(crate) struct Scene {
+    pub(crate) region: Region,
     ground: Ground,
     /// Tree blocks by region-local position.
-    tree: BTreeMap<TilePos, TreeBlock>,
+    pub(crate) tree: BTreeMap<TilePos, TreeBlock>,
 }
 
 /// `sp`'s tree (`seed`, `age`) standing on `ground` at its flattest spot
 /// near the centre, as region genesis.
-fn scene(mut ground: Ground, sp: &Species, seed: u64, age: u16) -> Scene {
+pub(crate) fn scene(mut ground: Ground, sp: &Species, seed: u64, age: u16) -> Scene {
     let reg = registry();
     let [x, z] = ground.flat_spot(3);
     let base = [x, ground.surface[&[x, z]] + 1, z];
@@ -214,14 +214,14 @@ fn scene(mut ground: Ground, sp: &Species, seed: u64, age: u16) -> Scene {
 }
 
 impl Scene {
-    fn base_y(&self) -> i32 {
+    pub(crate) fn base_y(&self) -> i32 {
         self.tree.iter().filter(|(_, b)| b.part != TreePart::Leaves).map(|(p, _)| p[1]).min().unwrap()
     }
     fn top_log(&self) -> i32 {
         self.tree.iter().filter(|(_, b)| b.part == TreePart::Log).map(|(p, _)| p[1]).max().unwrap()
     }
     /// The trunk log (limb 0) at level `y` nearest the trunk's base.
-    fn trunk_at(&self, y: i32) -> Option<TilePos> {
+    pub(crate) fn trunk_at(&self, y: i32) -> Option<TilePos> {
         let axis = self.tree.iter().find(|(p, b)| p[1] == self.base_y() && b.part == TreePart::Log).map(|(p, _)| *p)?;
         self.tree
             .iter()

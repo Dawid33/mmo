@@ -431,3 +431,50 @@ fn branch_cut_leaves_nothing_floating() {
     println!("floating blocks after branch cuts (cuts, piece rule alone, with support): {counts:?}");
     assert!(counts.values().all(|c| c.0 > 0));
 }
+
+/// A player felling a generated tree at its base (plan 2026-11-05,
+/// Decision 9) gets every block's drop back — one log per log block, one
+/// stick per branch block, nothing for leaves — as piles where the tree
+/// came to rest, once its body settles. Every species with logs (a
+/// single-block species has none), mature, on a flat floor.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn player_fell_yields_one_log_per_wood_block() {
+    use crate::tree_fall::{flat_floor, scene};
+    use game::voxel_body::SETTLE_TIMEOUT_TICKS;
+    use game::{drop_of, GameEventKind, ItemId};
+
+    for sp in SPECIES.iter().filter(|s| !s.single_block) {
+        for seed in 0..2 {
+            let mut s = scene(flat_floor(2), sp, seed, MAX_AGE);
+            let cut = s.trunk_at(s.base_y()).unwrap_or_else(|| panic!("{} {seed}: no base log", sp.name));
+            let mut want: BTreeMap<ItemId, u32> = BTreeMap::new();
+            for p in s.tree.keys() {
+                let block = s.region.data().block_at(*p).expect("tree block");
+                if let Some(stack) = drop_of(block) {
+                    *want.entry(stack.item).or_default() += u32::from(stack.count);
+                }
+            }
+            let tick = s.region.current_tick() as u64;
+            s.region.with_data(|r| assert!(r.player_chop_safe(0, cut, tick), "{} {seed}: the chop clears", sp.name));
+            let mut settled = false;
+            for _ in 0..SETTLE_TIMEOUT_TICKS + 5 {
+                s.region.handle_event(GameEventKind::Tick).unwrap();
+                s.region.forget_last_event();
+                if s.region.data().ecs.voxel_body.iter().all(|(_, v)| v.is_none()) {
+                    settled = true;
+                    break;
+                }
+            }
+            assert!(settled, "{} {seed}: the felled tree settles", sp.name);
+            let mut got: BTreeMap<ItemId, u32> = BTreeMap::new();
+            for pile in s.region.data().item_piles().values() {
+                for st in &pile.stacks {
+                    *got.entry(st.item).or_default() += u32::from(st.count);
+                }
+            }
+            assert_eq!(got, want, "{} seed {seed}: one item per wood block ({} piles)", sp.name, s.region.data().item_piles().len());
+            println!("{} seed {seed}: {want:?} in {} piles", sp.name, s.region.data().item_piles().len());
+        }
+    }
+}
