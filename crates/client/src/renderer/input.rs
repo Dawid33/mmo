@@ -1,11 +1,14 @@
 use std::time::Duration;
 
-use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll};
+use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll, MouseScrollUnit};
 use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 use game::{GameEventKind, InputEvent};
 
 use super::{GameEvents, LocalPlayer};
+
+/// Touchpad scroll (pixel units) needed for one hotbar slot step.
+const WHEEL_PIXELS_PER_SLOT: f32 = 40.0;
 
 fn map_key(code: KeyCode) -> Option<game::Key> {
     use game::Key as K;
@@ -124,7 +127,9 @@ pub fn forward_input(
     first_person: Option<Res<super::commander::first_person::FirstPerson>>,
     adventure: Option<Res<super::commander::adventure::ClientPlayMode>>,
     scroll: Res<AccumulatedMouseScroll>,
+    mut wheel_acc: crate::session::SessionLocal<f32>,
 ) {
+    let wheel_acc = wheel_acc.get();
     let last_size = last_size.get();
     let coalescer = coalescer.get();
     let Some(player) = player.0 else { return };
@@ -156,8 +161,19 @@ pub fn forward_input(
                 send(ev);
             }
         };
+        // One hotbar step per notch: lines count one each, pixels (touchpads)
+        // accumulate until WHEEL_PIXELS_PER_SLOT.
         if !overlay_open && scroll.delta.y != 0.0 {
-            send_body(InputEvent::MouseWheel { x: scroll.delta.x, y: scroll.delta.y });
+            let per_notch = match scroll.unit {
+                MouseScrollUnit::Line => 1.0,
+                MouseScrollUnit::Pixel => WHEEL_PIXELS_PER_SLOT,
+            };
+            *wheel_acc += scroll.delta.y;
+            while wheel_acc.abs() >= per_notch {
+                let step = wheel_acc.signum();
+                *wheel_acc -= step * per_notch;
+                send_body(InputEvent::MouseWheel { x: 0.0, y: step });
+            }
         }
         forward_body_input(&keys, &buttons, &motion, &time, &coalesce_window, coalescer, &window, overlay_open, send_body);
     }

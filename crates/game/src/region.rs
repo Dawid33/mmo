@@ -25,6 +25,19 @@ use crate::{
 /// cost the client's keep-up budget cares about. The server accumulates but
 /// never drains; a few `Instant::now()` reads per tick are noise next to the
 /// ~ms tick itself.
+/// Opens or closes the inventory. Closing in Adventure returns the cursor
+/// stack to the inventory; what does not fit stays on the cursor (a pile
+/// drop replaces that once item piles exist).
+fn toggle_inventory(c: &mut Client) {
+    c.inventory_open = !c.inventory_open;
+    if !c.inventory_open && c.mode == crate::PlayMode::Adventure {
+        if let Some(mut stack) = c.cursor.take() {
+            stack.count = c.inventory.add(stack);
+            c.cursor = (stack.count > 0).then_some(stack);
+        }
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Default, Clone, Copy)]
 pub struct RegionTickPerf {
@@ -42,19 +55,6 @@ pub struct RegionTickPerf {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-/// Opens or closes the inventory. Closing in Adventure returns the cursor
-/// stack to the inventory; what does not fit stays on the cursor (a pile
-/// drop replaces that once item piles exist).
-fn toggle_inventory(c: &mut Client) {
-    c.inventory_open = !c.inventory_open;
-    if !c.inventory_open && c.mode == crate::PlayMode::Adventure {
-        if let Some(mut stack) = c.cursor.take() {
-            stack.count = c.inventory.add(stack);
-            c.cursor = (stack.count > 0).then_some(stack);
-        }
-    }
-}
-
 impl RegionTickPerf {
     fn record(&mut self, start: Instant, controllers_done: Instant, input_done: Instant) {
         let end = Instant::now();
@@ -691,7 +691,7 @@ impl Region {
                         crate::InputEvent::MouseWheel { y, .. } => {
                             // The wheel steps the hotbar while the body is
                             // driven and no inventory window holds the pointer.
-                            if c.fps_cam_mode && !c.inventory_open && y != 0.0 {
+                            if c.mode == crate::PlayMode::Adventure && c.fps_cam_mode && !c.inventory_open && y != 0.0 {
                                 let n = crate::HOTBAR_SLOTS as i32;
                                 let step = if y > 0.0 { 1 } else { -1 };
                                 c.selected = (c.selected as i32 + step).rem_euclid(n) as u8;

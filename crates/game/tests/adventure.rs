@@ -780,3 +780,29 @@ fn digits_and_wheel_select_slot() {
     send(&mut region, InputEvent::MouseWheel { x: 0.0, y: 1.0 });
     assert_eq!(selected(&region), 0);
 }
+
+#[test]
+fn flying_body_entering_adventure_lands() {
+    let (mut region, e) = region_with_player();
+    send(&mut region, InputEvent::FpsCam(true));
+    tick(&mut region);
+    double_tap_space(&mut region);
+    assert!(motion_of(&region, e).flying);
+    region
+        .handle_event(GameEventKind::Order(CLIENT, Order::SetMode { mode: PlayMode::Adventure, at: Some(TILE) }))
+        .unwrap();
+    region.forget_last_event();
+    for _ in 0..3 {
+        tick(&mut region);
+    }
+    assert!(!motion_of(&region, e).flying, "survival bodies do not keep flight");
+}
+
+#[test]
+fn wheel_ignored_while_inventory_open() {
+    let (mut region, _e) = adventure_at([4, 1, 4]);
+    send(&mut region, InputEvent::FpsCam(true));
+    tap(&mut region, Key::KeyE);
+    send(&mut region, InputEvent::MouseWheel { x: 0.0, y: 1.0 });
+    assert_eq!(region.data().clients.get(&CLIENT).unwrap().selected, 0);
+}
