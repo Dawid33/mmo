@@ -38,6 +38,7 @@ mod interpolate;
 mod look;
 mod motion_probe;
 pub mod join_timeline;
+pub mod item_piles;
 pub mod lod_rings;
 pub mod meshing;
 pub mod model;
@@ -107,6 +108,7 @@ impl Plugin for SimBridgePlugin {
             fortress_view::FortressOverlayPlugin,
             far_voxel::FarVoxelPlugin,
             model::BbModelPlugin,
+            item_piles::ItemPilesPlugin,
         ))
         .insert_resource(ClientUpdates(self.client_recv.clone()))
         .insert_resource(GameEvents(self.game_send.clone()))

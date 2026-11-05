@@ -738,6 +738,16 @@ pub fn drain_client_updates(
                 let (root, bodies) = spawn_region_roots(&mut commands, id);
                 roots.insert(id, root, bodies);
                 regions.0.insert(id, receiver);
+                // The snapshot's item piles, ahead of the region's own updates.
+                let piles: Vec<_> = data.item_piles().iter().map(|(p, pile)| (*p, Some(pile.view()))).collect();
+                commands.queue(move |world: &mut World| {
+                    if let Some(mut msgs) = world.get_resource_mut::<Messages<super::item_piles::ItemPileMsg>>() {
+                        msgs.write(super::item_piles::ItemPileMsg::RemoveRegion(id));
+                        if !piles.is_empty() {
+                            msgs.write(super::item_piles::ItemPileMsg::Set { region: id, changes: piles });
+                        }
+                    }
+                });
                 // The fortress tools' tile mirror (commander only).
                 if let Some(msgs) = tile_msgs.as_mut() {
                     msgs.write(TileMirrorMsg::Reset {
@@ -783,6 +793,11 @@ pub fn drain_client_updates(
                     commands.queue(move |world: &mut World| super::bricks::prune_region_skipped(world, id));
                 }
                 debug_lines.0.remove(&id);
+                commands.queue(move |world: &mut World| {
+                    if let Some(mut msgs) = world.get_resource_mut::<Messages<super::item_piles::ItemPileMsg>>() {
+                        msgs.write(super::item_piles::ItemPileMsg::RemoveRegion(id));
+                    }
+                });
                 info!("bridge: region {:?} removed", id);
             }
             ClientUpdateEvent::LodData(key, payload) => {
@@ -986,6 +1001,7 @@ pub fn drain_region_updates(
     mut voxel_queue: ResMut<SnapshotVoxelQueue>,
     camera_mode: Option<Res<super::commander::CameraMode>>,
     mut tile_msgs: Option<ResMut<Messages<TileMirrorMsg>>>,
+    mut pile_msgs: Option<ResMut<Messages<super::item_piles::ItemPileMsg>>>,
 ) {
     let commander = commander(camera_mode.as_deref());
     // Local cameras inserted by Commands this drain, not yet queryable: a
@@ -1199,9 +1215,12 @@ pub fn drain_region_updates(
                         msgs.write(TileMirrorMsg::Constructed { region, changes });
                     }
                 }
-                // Item piles (`game::item_piles`): not drawn yet (plan
-                // 2026-11-05 Task 11).
-                GameDataUpdateKind::SetItemPiles(_) => {}
+                // Item piles (`game::item_piles`), drawn by `item_piles`.
+                GameDataUpdateKind::SetItemPiles(changes) => {
+                    if let Some(msgs) = pile_msgs.as_mut() {
+                        msgs.write(super::item_piles::ItemPileMsg::Set { region, changes });
+                    }
+                }
                 GameDataUpdateKind::SetFreeCam(client_id, enabled) => {
                     // Only the local player's toggle may grab this window's cursor.
                     if local_player.0 != Some(client_id) {
