@@ -117,28 +117,6 @@ pub struct ItemStack {
     pub count: u32,
 }
 
-/// A fixed-size slot list. Authoritative sim state, carried on `Client` so it
-/// follows the player across region handoffs (Client rides `EntityBundle`).
-#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize, StateHash, PartialEq)]
-pub struct Inventory {
-    pub slots: Vec<Option<ItemStack>>,
-}
-
-impl Inventory {
-    /// Nine empty hotbar slots.
-    pub fn hotbar() -> Self {
-        Self { slots: vec![None; 9] }
-    }
-
-    /// Nine slots seeded with test items (slice-1 render target).
-    pub fn seeded() -> Self {
-        let mut inv = Self::hotbar();
-        inv.slots[0] = Some(ItemStack { item: crate::ItemId::block(crate::BlockId(1)), count: 42 });
-        inv.slots[3] = Some(ItemStack { item: crate::ItemId::block(crate::BlockId(2)), count: 7 });
-        inv
-    }
-}
-
 #[derive(Default, Debug, serde::Serialize, serde::Deserialize, Clone, ::borrow::Partial, StateHash, PartialEq)]
 #[module(crate)]
 pub struct Client {
@@ -147,8 +125,12 @@ pub struct Client {
     /// Fortress (commander camera) or Adventure (one body walked by
     /// orders); `adventure.rs`.
     pub mode: crate::PlayMode,
-    pub inventory: Inventory,
+    pub inventory: crate::Inventory,
     pub inventory_open: bool,
+    /// The selected hotbar slot (`0..HOTBAR_SLOTS`).
+    pub selected: u8,
+    /// The stack held on the mouse cursor (inventory clicks).
+    pub cursor: Option<ItemStack>,
 }
 
 /// What an entity *is*, for rendering and future gameplay. The player is the
@@ -1690,10 +1672,9 @@ mod inventory_tests {
     use super::*;
 
     #[test]
-    fn seeded_inventory_has_items_in_a_fixed_hotbar() {
-        let inv = Inventory::seeded();
-        assert_eq!(inv.slots.len(), 9);
-        assert!(inv.slots.iter().filter(|s| s.is_some()).count() >= 2);
+    fn starting_kit_is_a_full_size_inventory() {
+        let inv = crate::Inventory::starting_kit();
+        assert_eq!(inv.slots.len(), crate::INVENTORY_SLOTS);
         // Client carries an inventory and it round-trips by value.
         let c = Client { inventory: inv.clone(), ..Client::default() };
         assert_eq!(c.inventory, inv);
@@ -1705,7 +1686,7 @@ mod inventory_tests {
         // Client, so an inventory edit is covered by one delta and inverts.
         let mut rb = Rollback::new(None);
         rb.new_transaction();
-        rb.clients.insert(0, Client { inventory: Inventory::seeded(), ..Client::default() });
+        rb.clients.insert(0, Client { inventory: crate::Inventory::starting_kit(), ..Client::default() });
         rb.forget();
         let before = crate::state_hash(&rb);
 

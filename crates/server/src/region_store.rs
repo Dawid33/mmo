@@ -32,7 +32,7 @@ pub const REGION_MAGIC: [u8; 8] = *b"MMOREGN\0";
 /// Bump when the header changes. (A change to the sim's state types changes
 /// the bincode payload without this: such a file fails to decode and is set
 /// aside, like any other unreadable one.)
-pub const REGION_FILE_VERSION: u32 = 2;
+pub const REGION_FILE_VERSION: u32 = 3;
 /// magic + version + region blocks + chunk blocks + world crc + payload crc.
 const HEADER_LEN: usize = 8 + 4 * 5;
 

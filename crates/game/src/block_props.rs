@@ -91,6 +91,11 @@ impl BlockProps {
         self.names.get(&id.0).map(String::as_str)
     }
 
+    /// The block called `name` in the manifest.
+    pub fn id_named(&self, name: &str) -> Option<BlockId> {
+        self.names.iter().find(|(_, n)| n.as_str() == name).map(|(id, _)| BlockId(*id))
+    }
+
     /// The grid the block's chisel collides on.
     pub fn collider_scale(&self, id: BlockId) -> ColliderScale {
         if self.half_collider.contains(&id.0) { ColliderScale::Half } else { ColliderScale::Voxel }

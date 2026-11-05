@@ -3,24 +3,21 @@
 use game::{build_hotbar, GameEventKind, HotbarView, Region, RegionCoords, UiAction};
 
 #[test]
-fn move_item_swaps_hotbar_slots() {
+fn click_moves_hotbar_stack_to_main() {
     let mut region = Region::from_chunks(RegionCoords::new(0, 0), Vec::new());
     region.handle_event(GameEventKind::CreateClient(0)).unwrap();
+    region.with_data(|d| {
+        d.clients.get_mut(&0).unwrap().inventory.slots[0] =
+            Some(game::ItemStack { item: game::ItemId(1), count: 3 });
+    });
     region.forget_last_event();
+    assert!(build_hotbar(region.data(), 0).slots[0].is_some());
 
-    // Before: slot 0 filled, slot 1 empty.
-    let before = build_hotbar(region.data(), 0);
-    assert!(before.slots[0].is_some());
-    assert!(before.slots[1].is_none());
+    let shift = UiAction::Click { slot: game::SlotRef::Player(0), button: game::ClickButton::Left, shift: true };
+    region.handle_event(GameEventKind::UiAction(0, shift)).unwrap();
 
-    region
-        .handle_event(GameEventKind::UiAction(0, UiAction::MoveItem { from: 0, to: 1 }))
-        .unwrap();
-
-    // After: swapped.
-    let after = build_hotbar(region.data(), 0);
-    assert_eq!(after.slots[0], before.slots[1]);
-    assert_eq!(after.slots[1], before.slots[0]);
+    assert!(build_hotbar(region.data(), 0).slots[0].is_none());
+    assert_eq!(region.data().clients.get(&0).unwrap().inventory.slots[9].unwrap().count, 3);
 }
 
 #[test]

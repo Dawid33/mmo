@@ -533,13 +533,14 @@ fn client_event(h: &mut Harness, client: ClientId, kind: GameEventKind) {
     h.event(ServerEvent::ClientPacket(ClientPacket::GameEvent(ev), client), 0);
 }
 
-/// Swap hotbar slots 0 and 5: an inventory no fresh player has.
+/// Switch to Adventure: client state no fresh player has (the parked record
+/// resets the inventory flags, so an item cannot be the marker with an empty kit).
 fn rearrange_inventory(h: &mut Harness, client: ClientId) {
-    client_event(h, client, GameEventKind::UiAction(client, game::UiAction::MoveItem { from: 0, to: 5 }));
+    client_event(h, client, GameEventKind::Order(client, game::Order::SetMode { mode: game::PlayMode::Adventure, at: None }));
 }
 
 fn rearranged(record: &game::Client) -> bool {
-    record.inventory.slots[0].is_none() && record.inventory.slots[5].is_some_and(|s| s.count == 42)
+    record.mode == game::PlayMode::Adventure
 }
 
 /// Put `client`'s body on tile `at` of `rc`; returns its translation.

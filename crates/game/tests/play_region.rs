@@ -40,7 +40,7 @@ fn create_client_at_lands_over_the_column() {
     let surface = region.data().surface_voxel_y(cx as i32, cz as i32).expect("floor under the column");
     assert!(y > surface as f32, "body y={y} must be above surface {surface}");
     let client = region.data().clients.get(&0).expect("client 0 created");
-    assert_eq!(client.inventory, game::Inventory::seeded());
+    assert_eq!(client.inventory, game::Inventory::starting_kit());
 }
 
 #[test]

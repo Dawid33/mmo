@@ -18,8 +18,8 @@ impl IconId {
 /// Logical-space UI action (never pixels). Routed to the sim like PlayerInput.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum UiAction {
-    /// Swap two inventory slots (drag/drop resolves to this).
-    MoveItem { from: usize, to: usize },
+    /// A click on an inventory slot (`inventory::click`).
+    Click { slot: crate::SlotRef, button: crate::ClickButton, shift: bool },
     /// Open/close the inventory (drives cursor grab).
     ToggleInventory,
 }
@@ -35,6 +35,8 @@ pub struct SlotView {
 #[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct HotbarView {
     pub slots: Vec<Option<SlotView>>,
+    /// The selected slot.
+    pub selected: u8,
 }
 
 /// A change to the client's UI state, consumed by the client's Slint HUD.
@@ -76,9 +78,10 @@ pub fn build_hotbar(data: &crate::GameData, client: crate::ClientId) -> HotbarVi
         .inventory
         .slots
         .iter()
+        .take(crate::HOTBAR_SLOTS)
         .map(|slot| slot.map(|stack| SlotView { icon: IconId::of(stack.item), count: stack.count }))
         .collect();
-    HotbarView { slots }
+    HotbarView { slots, selected: c.selected }
 }
 
 #[cfg(test)]
@@ -86,21 +89,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn build_hotbar_projects_seeded_inventory() {
-        // A minimal GameData with one client that has a seeded inventory.
+    fn build_hotbar_projects_first_nine_slots_and_selection() {
         let mut rb = crate::Rollback::new(None);
         rb.new_transaction();
-        rb.clients.insert(
-            0,
-            crate::Client { inventory: crate::Inventory::seeded(), ..crate::Client::default() },
-        );
+        let mut inventory = crate::Inventory::new();
+        inventory.slots[0] = Some(crate::ItemStack { item: crate::ItemId(1), count: 42 });
+        inventory.slots[20] = Some(crate::ItemStack { item: crate::ItemId(2), count: 1 });
+        rb.clients.insert(0, crate::Client { inventory, selected: 4, ..crate::Client::default() });
         rb.forget();
 
         let hotbar = build_hotbar(&rb, 0);
         assert_eq!(hotbar.slots.len(), 9);
-        // Slot 0 is seeded (Dirt x42); slot 1 is empty.
         assert_eq!(hotbar.slots[0], Some(SlotView { icon: IconId(1), count: 42 }));
         assert_eq!(hotbar.slots[1], None);
+        assert_eq!(hotbar.selected, 4);
     }
 
     #[test]

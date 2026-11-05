@@ -673,7 +673,7 @@ impl Region {
                 info!("{:?}", event);
                 self.data.clients.insert(
                     client_id,
-                    Client { inventory: crate::Inventory::seeded(), ..Client::default() },
+                    Client { inventory: crate::Inventory::starting_kit(), ..Client::default() },
                 );
                 self.data.create_player_safe(client_id);
             }
@@ -681,7 +681,7 @@ impl Region {
                 info!("{:?}", event);
                 self.data.clients.insert(
                     client_id,
-                    Client { inventory: crate::Inventory::seeded(), ..Client::default() },
+                    Client { inventory: crate::Inventory::starting_kit(), ..Client::default() },
                 );
                 self.data.create_player_at_safe(client_id, crate::block_column_xz(column));
             }
@@ -722,10 +722,9 @@ impl Region {
                 let data: &mut GameData = self.data.deref_mut();
                 if let Some(c) = data.clients.get_mut(&client_id) {
                     match action {
-                        crate::UiAction::MoveItem { from, to } => {
-                            if from < c.inventory.slots.len() && to < c.inventory.slots.len() {
-                                c.inventory.slots.swap(from, to);
-                            }
+                        crate::UiAction::Click { slot, button, shift } => {
+                            let Client { cursor, inventory, .. } = c;
+                            crate::click(cursor, inventory, None, slot, button, shift);
                         }
                         crate::UiAction::ToggleInventory => {
                             c.inventory_open = !c.inventory_open;
@@ -856,19 +855,26 @@ mod ui_action_tests {
     use crate::{BlockId, Inventory, ItemId, ItemStack, UiAction};
 
     #[test]
-    fn move_item_swaps_slots_and_rolls_back() {
+    fn click_picks_up_and_rolls_back() {
         let mut region = Region::from_chunks(RegionCoords::new(0, 0), Vec::new());
         region.handle_event(GameEventKind::CreateClient(0)).unwrap();
         region.forget_last_event();
+        region.with_data(|d| {
+            d.clients.get_mut(&0).unwrap().inventory.slots[0] =
+                Some(ItemStack { item: ItemId::block(BlockId(1)), count: 42 });
+        });
         let before = crate::state_hash(region.data());
 
-        region
-            .handle_event(GameEventKind::UiAction(0, UiAction::MoveItem { from: 0, to: 1 }))
-            .unwrap();
-        // Slot 0 (seeded Dirt) moved to slot 1.
-        let inv: &Inventory = &region.data().clients.get(&0).unwrap().inventory;
+        let click = UiAction::Click {
+            slot: crate::SlotRef::Player(0),
+            button: crate::ClickButton::Left,
+            shift: false,
+        };
+        region.handle_event(GameEventKind::UiAction(0, click)).unwrap();
+        let c = region.data().clients.get(&0).unwrap();
+        let inv: &Inventory = &c.inventory;
         assert_eq!(inv.slots[0], None);
-        assert_eq!(inv.slots[1], Some(ItemStack { item: ItemId::block(BlockId(1)), count: 42 }));
+        assert_eq!(c.cursor, Some(ItemStack { item: ItemId::block(BlockId(1)), count: 42 }));
 
         region.rollback_last_event();
         assert_eq!(before, crate::state_hash(region.data()), "UiAction must invert bit-exact");
