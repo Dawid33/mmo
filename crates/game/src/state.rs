@@ -143,6 +143,40 @@ pub struct Client {
     pub open_container: Option<crate::edit::BlockPos>,
 }
 
+impl Client {
+    /// Clears what only means something in the region the client is in:
+    /// mining (a region-local target and a start tick of that region's
+    /// clock), the break cooldown (an absolute tick of that clock — each
+    /// region's tick starts at 0 at genesis, so it would block mining in a
+    /// younger region for as long as the age gap) and the open chest (a
+    /// region-local cell). Called wherever a client enters a region from
+    /// elsewhere: a seam arrival, a restore, a move.
+    pub fn reset_region_local(&mut self) {
+        self.mining = None;
+        self.break_cooldown_until = 0;
+        self.open_container = None;
+    }
+
+    /// Puts the cursor stack back into the inventory; returns what does not
+    /// fit (the cursor is then empty — the caller drops or keeps the rest).
+    pub fn stow_cursor(&mut self) -> Option<ItemStack> {
+        let mut stack = self.cursor.take()?;
+        stack.count = self.inventory.add(stack);
+        (stack.count > 0).then_some(stack)
+    }
+
+    /// Leaves the survival screens: the inventory closes (the cursor stack
+    /// goes back into it; the rest is returned for the caller to drop), any
+    /// chest closes and mining stops. Used when the play mode changes to
+    /// Fortress.
+    pub fn leave_survival(&mut self) -> Option<ItemStack> {
+        self.inventory_open = false;
+        self.open_container = None;
+        self.mining = None;
+        self.stow_cursor()
+    }
+}
+
 /// What an entity *is*, for rendering and future gameplay. The player is the
 /// first kind; NPC kinds extend this enum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize, StateHash)]
@@ -1389,8 +1423,10 @@ impl Rollback {
                 ));
                 self.data.ecs.camera.set_safe(e, Some(cam));
             }
-            // A container is open in the region it was opened in only.
-            let client = Client { open_container: None, ..client };
+            // Mining, its cooldown and an open chest belong to the region
+            // the client came from.
+            let mut client = client;
+            client.reset_region_local();
             self.data.clients.insert(client_id, client);
             self.data.player_entites.insert(client_id, e);
         }

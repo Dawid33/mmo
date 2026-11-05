@@ -34,3 +34,18 @@ fn player_record_round_trips_through_bincode() {
     assert_eq!(id, PlayerId(9));
     assert_eq!(back, record);
 }
+
+#[test]
+fn parked_client_folds_the_cursor_into_the_inventory() {
+    let stack = game::ItemStack { item: game::ItemId(6), count: 2 };
+    let mut c = game::Client { inventory: game::Inventory::new(), cursor: Some(stack), ..game::Client::default() };
+    let parked = game::parked_client(&c);
+    assert_eq!(parked.cursor, None);
+    assert_eq!(parked.inventory.slots[0], Some(stack));
+    // A full inventory: what does not fit stays on the cursor.
+    let other = game::ItemStack { item: game::ItemId(7), count: 1 };
+    c.inventory.slots.iter_mut().for_each(|s| *s = Some(other));
+    let parked = game::parked_client(&c);
+    assert_eq!(parked.cursor, Some(stack), "kept on the cursor, not lost");
+    assert!(parked.inventory.slots.iter().all(|s| *s == Some(other)));
+}

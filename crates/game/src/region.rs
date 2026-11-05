@@ -17,30 +17,27 @@ use crate::{
     RegionCoords, RegionId, ServerPacket,
 };
 
-/// Cumulative wall-time breakdown of `handle_event(Tick)` executions since
-/// the last `take_tick_perf()`. Native-only: `Instant::now()` panics on
-/// wasm32-unknown-unknown, so the accumulator and its call sites compile away
-/// there. Reconcile replays run through `handle_event` too, so `ticks` counts
-/// tick *executions* (main-loop + replayed), not sim-time ticks — exactly the
-/// cost the client's keep-up budget cares about. The server accumulates but
-/// never drains; a few `Instant::now()` reads per tick are noise next to the
-/// ~ms tick itself.
-/// Opens or closes the inventory. Closing in Adventure returns the cursor
-/// stack to the inventory; what does not fit is returned, for the caller to
-/// drop as a pile at the player's feet ([`Rollback::drop_at_feet_safe`]).
+/// Opens or closes the inventory. Closing (in either play mode) closes the
+/// chest shown in it and returns the cursor stack to the inventory; what does
+/// not fit is returned, for the caller to drop as a pile at the player's feet
+/// ([`Rollback::drop_at_feet_safe`]).
 pub(crate) fn toggle_inventory(c: &mut Client) -> Option<crate::ItemStack> {
-    c.inventory_open = !c.inventory_open;
-    if !c.inventory_open {
-        // Closing the screen closes the chest shown in it.
-        c.open_container = None;
+    if c.inventory_open {
+        return close_inventory(c);
     }
-    if !c.inventory_open && c.mode == crate::PlayMode::Adventure {
-        if let Some(mut stack) = c.cursor.take() {
-            stack.count = c.inventory.add(stack);
-            return (stack.count > 0).then_some(stack);
-        }
-    }
+    c.inventory_open = true;
     None
+}
+
+/// Closes the inventory if it is open (else a no-op), as
+/// [`toggle_inventory`] closes it.
+pub(crate) fn close_inventory(c: &mut Client) -> Option<crate::ItemStack> {
+    if !c.inventory_open {
+        return None;
+    }
+    c.inventory_open = false;
+    c.open_container = None;
+    c.stow_cursor()
 }
 
 impl Rollback {
@@ -65,6 +62,14 @@ impl Rollback {
     }
 }
 
+/// Cumulative wall-time breakdown of `handle_event(Tick)` executions since
+/// the last `take_tick_perf()`. Native-only: `Instant::now()` panics on
+/// wasm32-unknown-unknown, so the accumulator and its call sites compile away
+/// there. Reconcile replays run through `handle_event` too, so `ticks` counts
+/// tick *executions* (main-loop + replayed), not sim-time ticks — exactly the
+/// cost the client's keep-up budget cares about. The server accumulates but
+/// never drains; a few `Instant::now()` reads per tick are noise next to the
+/// ~ms tick itself.
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Default, Clone, Copy)]
 pub struct RegionTickPerf {
@@ -201,7 +206,9 @@ fn ev_desc(e: &GameEvent) -> String {
         GameEventKind::UiAction(c, a) => format!("UiAction(c={c:?}, {a:?})"),
         GameEventKind::Order(c, o) => format!("Order(c={c:?}, {o:?})"),
         GameEventKind::CreateClient(c) => format!("CreateClient(c={c:?})"),
-        GameEventKind::CreateClientAt(c, col) => format!("CreateClientAt(c={c:?}, col={col:?})"),
+        GameEventKind::CreateClientAt(c, col, carried) => {
+            format!("CreateClientAt(c={c:?}, col={col:?}, carried={})", carried.is_some())
+        }
         GameEventKind::ClientLeft(c) => format!("ClientLeft(c={c:?})"),
         GameEventKind::ParkPlayer(c) => format!("ParkPlayer(c={c:?})"),
         GameEventKind::RestorePlayer(c, r) => format!("RestorePlayer(c={c:?}, region={:?})", r.region),
@@ -782,12 +789,16 @@ impl Region {
                 );
                 self.data.create_player_safe(client_id);
             }
-            GameEventKind::CreateClientAt(client_id, column) => {
-                info!("{:?}", event);
-                self.data.clients.insert(
-                    client_id,
-                    Client { inventory: crate::Inventory::starting_kit(), ..Client::default() },
-                );
+            GameEventKind::CreateClientAt(client_id, column, carried) => {
+                info!("{}", ev_desc(&event));
+                // A moved player brings its `Client` (inventory, cursor,
+                // mode); only a player new to the world gets the kit.
+                let client = match carried {
+                    // Session and region-local state reset.
+                    Some(c) => crate::parked_client(&c),
+                    None => Client { inventory: crate::Inventory::starting_kit(), ..Client::default() },
+                };
+                self.data.clients.insert(client_id, client);
                 self.data.create_player_at_safe(client_id, crate::block_column_xz(column));
             }
             GameEventKind::RestorePlayer(client_id, record) => {
@@ -827,6 +838,8 @@ impl Region {
                 let data: &mut GameData = self.data.deref_mut();
                 if let Some(c) = data.clients.get_mut(&client_id) {
                     match action {
+                        // Clicks land only on an open screen.
+                        crate::UiAction::Click { .. } if !c.inventory_open => {}
                         crate::UiAction::Click { slot, button, shift } => {
                             // The open chest's slots, shared with any other
                             // client that has it open.
@@ -836,6 +849,11 @@ impl Region {
                         }
                         crate::UiAction::ToggleInventory => {
                             if let Some(rest) = toggle_inventory(c) {
+                                self.data.drop_at_feet_safe(client_id, rest);
+                            }
+                        }
+                        crate::UiAction::CloseInventory => {
+                            if let Some(rest) = close_inventory(c) {
                                 self.data.drop_at_feet_safe(client_id, rest);
                             }
                         }

@@ -101,7 +101,7 @@ fn client_sent_session_events_are_dropped() {
     // even a subscribed one.
     for kind in [
         GameEventKind::CreateClient(0),
-        GameEventKind::CreateClientAt(0, [1, 1]),
+        GameEventKind::CreateClientAt(0, [1, 1], None),
         GameEventKind::ClientLeft(0),
     ] {
         let ev = GameEvent::new(kind, 0, rc);
@@ -539,8 +539,9 @@ const MARK_STACK: game::ItemStack = game::ItemStack { item: game::ItemId(5), cou
 const MARK_CURSOR: game::ItemStack = game::ItemStack { item: game::ItemId(6), count: 2 };
 
 /// Give `client` a stack in a main slot and one on the cursor, and switch it
-/// to Adventure: state no fresh player has (the kit is empty, and a parked
-/// record resets only input / first person / the open flag).
+/// to Adventure: state no fresh player has (a parked record resets input /
+/// first person / the open flag, and puts the cursor stack into the
+/// inventory).
 fn rearrange_inventory(h: &mut Harness, client: ClientId) {
     h.manager.spawner_mut().with_region(SPAWN_REGION, |region| {
         region.with_data(|d| {
@@ -552,10 +553,13 @@ fn rearrange_inventory(h: &mut Harness, client: ClientId) {
     client_event(h, client, GameEventKind::Order(client, game::Order::SetMode { mode: game::PlayMode::Adventure, at: None }));
 }
 
+/// `rearrange_inventory`'s state as a park keeps it: the cursor stack is in
+/// the inventory now.
 fn rearranged(record: &game::Client) -> bool {
     record.mode == game::PlayMode::Adventure
         && record.inventory.slots[MARK_SLOT] == Some(MARK_STACK)
-        && record.cursor == Some(MARK_CURSOR)
+        && record.cursor.is_none()
+        && record.inventory.slots.iter().any(|s| *s == Some(MARK_CURSOR))
 }
 
 /// Put `client`'s body on tile `at` of `rc`; returns its translation.
@@ -822,4 +826,27 @@ fn disconnect_mid_crossing_parks_the_body_where_it_went() {
     h.event(session(1, 0, None), 20);
     assert_eq!(bodies_in(&mut h, east), 1);
     assert!(rearranged(&client_in(&mut h, east, 1).unwrap()));
+}
+
+#[test]
+fn starting_kit_only_for_new_player() {
+    let reg = game::BlockRegistry::from_ron(include_str!("../../../assets/blocks/blocks.ron")).unwrap();
+    game::install_block_props(reg.props());
+    assert!(game::Inventory::starting_kit().slots[0].is_some(), "the kit holds chests");
+    let mut h = floored_harness();
+    // A player the world has never seen gets the kit.
+    h.event(session(0, 0, None), 0);
+    let fresh = client_in(&mut h, SPAWN_REGION, 0).expect("a new player");
+    assert_eq!(fresh.inventory, game::Inventory::starting_kit());
+    // A known player who used it up comes back empty-handed, not with a new kit.
+    let record = PlayerRecord {
+        client: game::Client { inventory: game::Inventory::new(), ..game::Client::default() },
+        pose: game::Pose::from_translation(body_on_tile([3, 1, 3])),
+        region: SPAWN_REGION,
+        fortress: None,
+        adventure: None,
+    };
+    h.event(session(1, 1, Some(record)), 0);
+    let back = client_in(&mut h, SPAWN_REGION, 1).expect("restored");
+    assert_eq!(back.inventory, game::Inventory::new());
 }

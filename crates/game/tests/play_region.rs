@@ -31,7 +31,7 @@ fn player_translation(region: &Region, client: game::ClientId) -> (f32, f32, f32
 #[test]
 fn create_client_at_lands_over_the_column() {
     let mut region = region_with_floor();
-    region.handle_event(GameEventKind::CreateClientAt(0, COLUMN)).unwrap();
+    region.handle_event(GameEventKind::CreateClientAt(0, COLUMN, None)).unwrap();
     let (x, y, z) = player_translation(&region, 0);
     let bv = BLOCK_VOXELS as f32;
     let (cx, cz) = ((COLUMN[0] as f32 + 0.5) * bv, (COLUMN[1] as f32 + 0.5) * bv);
@@ -407,6 +407,9 @@ mod manager {
         h.manager.handle_server_event(ServerEvent::connected(0), late);
         let target = RegionCoords::new(1, 0);
         h.manager.handle_server_event(ServerEvent::ClientPacket(ClientPacket::PlayRegion(target), 0), late);
+        h.settle(late);
+        // The move parks the restored body out of the re-woken home first,
+        // then creates it in the target: one more round trip.
         h.settle(late);
         assert_eq!(players_in(&mut h, SPAWN_REGION), 0);
         assert_eq!(players_in(&mut h, target), 1);

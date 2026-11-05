@@ -356,6 +356,22 @@ struct Parking {
     adventure: Option<SiteId>,
 }
 
+/// A move in flight (`WorldManager::moving`): the body is being parked out of
+/// `from` (`ParkPlayer`), and its `Client` — inventory, cursor, mode — is then
+/// created at `landing` in `target` (`CreateClientAt` carrying it), followed by
+/// `then`.
+#[derive(Clone, Debug)]
+struct Moving {
+    /// Where the body is: the home it left, or where a seam crossing in flight
+    /// took it.
+    from: RegionCoords,
+    target: RegionCoords,
+    landing: [u32; 2],
+    /// Server-authored events for `target` that must follow the body's
+    /// creation there (an adventure start's `SetMode`).
+    then: Vec<GameEventKind>,
+}
+
 /// Requests that place or move the player, held while its restore waits for its
 /// park (they would act on a session with no body yet).
 fn defers_until_restored(packet: &ClientPacket) -> bool {
@@ -424,6 +440,10 @@ pub struct WorldManager<S: RegionSpawner> {
     /// region the body is in (followed across a seam crossing in flight) and the
     /// claims it held. Settled by `RegionOutput::PlayerParked`.
     parking: BTreeMap<ClientId, Parking>,
+    /// Players moving between regions (Play, embark, adventure start / end)
+    /// whose park out of the old region is on its way; settled by
+    /// `RegionOutput::PlayerParked` like a park, then created in the target.
+    moving: BTreeMap<ClientId, Moving>,
     /// Records of players parked by this process: authoritative over the record
     /// the network edge read from the store (whose write may lag a fast
     /// reconnect). Taken when the player is restored.
@@ -502,6 +522,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             adventurer_of: BTreeMap::new(),
             player_of: BTreeMap::new(),
             parking: BTreeMap::new(),
+            moving: BTreeMap::new(),
             parked_players: BTreeMap::new(),
             awaiting_park: BTreeMap::new(),
             deferred_packets: BTreeMap::new(),
@@ -646,25 +667,66 @@ impl<S: RegionSpawner> WorldManager<S> {
         );
     }
 
-    /// Move the client's player from its home (if any) to `landing` in `target`: it
-    /// leaves the old home, is created in `target` (woken if parked — after any history
-    /// catch-up, so a fortress's people are there first), and `target` becomes its home.
+    /// Move the client's player from its home (if any) to `landing` in `target`,
+    /// keeping its `Client` (inventory, cursor, mode): it is parked out of the old
+    /// home (`ParkPlayer`) and, once that answers with its record
+    /// ([`Self::player_parked`]), created in `target` with it (`CreateClientAt`; woken
+    /// at once, so any history catch-up puts a fortress's people there first).
+    /// `target` becomes its home now. A player with no home yet is created fresh.
+    /// A second move while one is in flight retargets it.
     fn move_client(&mut self, id: ClientId, target: RegionCoords, landing: [u32; 2], now_ms: u64) {
         let home = self.homes.get(&id).copied();
         if home == Some(target) {
             let _ = self.out.send((Some(id), ServerPacket::PlayerRegion(Some(target), id)));
             return;
         }
-        if let Some(home) = home {
-            self.send_play_event(home, GameEventKind::ClientLeft(id));
+        if let Some(m) = self.moving.get_mut(&id) {
+            m.target = target;
+            m.landing = landing;
+            self.ensure_running(target);
+        } else if let Some(home) = home {
+            self.moving.insert(id, Moving { from: home, target, landing, then: Vec::new() });
+            self.send_play_event(home, GameEventKind::ParkPlayer(id));
+            self.ensure_running(target);
+        } else {
+            self.send_play_event(target, GameEventKind::CreateClientAt(id, landing, None));
         }
-        self.send_play_event(target, GameEventKind::CreateClientAt(id, landing));
         self.homes.insert(id, target);
         let _ = self.out.send((Some(id), ServerPacket::PlayerRegion(Some(target), id)));
         if let Some(home) = home {
             self.refresh_keepalive(home, now_ms);
         }
         self.refresh_keepalive(target, now_ms);
+    }
+
+    /// A server-authored event for `id`'s player in `rc`: after its creation there
+    /// when a move into `rc` is in flight, else at once.
+    fn send_player_event(&mut self, id: ClientId, rc: RegionCoords, kind: GameEventKind) {
+        match self.moving.get_mut(&id) {
+            Some(m) if m.target == rc => m.then.push(kind),
+            _ => self.send_play_event(rc, kind),
+        }
+    }
+
+    /// The move of `client` out of `rc` is answered (`record` = its park, `None` =
+    /// no body was there, or the region was lost): the player is created in the
+    /// target with its `Client` — an empty one if the body was lost, never the
+    /// starting kit, which is only for players new to the world.
+    fn finish_move(&mut self, client: ClientId, record: Option<Box<PlayerRecord>>, now_ms: u64) {
+        let Some(m) = self.moving.remove(&client) else { return };
+        let carried = match record {
+            Some(record) => record.client,
+            None => {
+                log::error!("move of client {client} out of {:?}: no body came back; its items are lost", m.from);
+                crate::Client::default()
+            }
+        };
+        self.send_play_event(m.target, GameEventKind::CreateClientAt(client, m.landing, Some(Box::new(carried))));
+        for kind in m.then {
+            self.send_play_event(m.target, kind);
+        }
+        self.refresh_keepalive(m.from, now_ms);
+        self.refresh_keepalive(m.target, now_ms);
     }
 
     /// Where a player lands in `rc`: the world map tile's dry landing, else the society
@@ -799,7 +861,7 @@ impl<S: RegionSpawner> WorldManager<S> {
         let at = (self.homes.get(&id) == Some(&region))
             .then(|| [landing[0] as i32, ADVENTURE_LANDING_HINT_Y, landing[1] as i32]);
         self.move_client(id, region, landing, now_ms);
-        self.send_play_event(region, GameEventKind::Order(id, Order::SetMode { mode: PlayMode::Adventure, at }));
+        self.send_player_event(id, region, GameEventKind::Order(id, Order::SetMode { mode: PlayMode::Adventure, at }));
         self.adventurer_of.insert(id, site);
         self.adventure_result(id, Ok(site));
         self.send_fortress(id);
@@ -813,7 +875,8 @@ impl<S: RegionSpawner> WorldManager<S> {
             return;
         }
         if let Some(home) = self.homes.get(&id).copied() {
-            self.send_play_event(
+            self.send_player_event(
+                id,
                 home,
                 GameEventKind::Order(id, Order::SetMode { mode: PlayMode::Fortress, at: None }),
             );
@@ -1115,7 +1178,15 @@ impl<S: RegionSpawner> WorldManager<S> {
                         target,
                         RegionInput::Event(GameEventKind::EntityArrived(bundle)),
                     );
-                    if let Some(p) = client.and_then(|c| self.parking.get_mut(&c)) {
+                    if let Some(m) = client.and_then(|c| self.moving.get_mut(&c)) {
+                        // The body crossed a seam while its move's park was on the
+                        // way: park it where it went (its home is the move target).
+                        m.from = target;
+                        let c = client.expect("moving is keyed by client");
+                        self.send_to_region(target, RegionInput::Event(GameEventKind::ParkPlayer(c)));
+                        self.refresh_keepalive(rc, now_ms);
+                        self.refresh_keepalive(target, now_ms);
+                    } else if let Some(p) = client.and_then(|c| self.parking.get_mut(&c)) {
                         // The body crossed a seam while its park was on the way:
                         // the old region found nobody; park it where it went.
                         p.region = target;
@@ -1287,7 +1358,18 @@ impl<S: RegionSpawner> WorldManager<S> {
         }
         // Park the player: its body leaves the region and comes back as its
         // record (`PlayerParked`), so no orphan body stays behind.
-        if let Some(home) = self.homes.remove(&id) {
+        if let Some(m) = self.moving.remove(&id) {
+            // A move in flight: its `ParkPlayer` is already on the way to where
+            // the body is; it becomes this park (the record keeps the old region).
+            let target = self.homes.remove(&id);
+            if let Some(player) = player {
+                self.parking.insert(id, Parking { player, region: m.from, fortress, adventure });
+            }
+            self.refresh_keepalive(m.from, now_ms);
+            if let Some(target) = target {
+                self.refresh_keepalive(target, now_ms);
+            }
+        } else if let Some(home) = self.homes.remove(&id) {
             match player {
                 Some(player) => {
                     self.parking.insert(id, Parking { player, region: home, fortress, adventure });
@@ -1365,12 +1447,24 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.awaiting_park.values().any(|(c, _)| *c == id)
     }
 
-    /// Give a session its body: restored from `record`, or a fresh player at the
-    /// spawn region (`None`, or a record whose region is off the map).
+    /// Give a session its body: restored from `record`; a record whose region is
+    /// off the map (the world changed) lands at the spawn region with its
+    /// `Client` (no claims); no record = a fresh player at the spawn region.
     fn place_player(&mut self, id: ClientId, record: Option<PlayerRecord>, now_ms: u64) {
         match record {
             Some(record) if !crate::off_map(self.map_extent(), record.region) => self.restore_player(id, record, now_ms),
-            _ => {
+            Some(record) => {
+                log::warn!("client {id}: its record's region {:?} is off the map; placed at spawn", record.region);
+                let landing = self.landing_in(SPAWN_REGION);
+                self.homes.insert(id, SPAWN_REGION);
+                self.send_play_event(
+                    SPAWN_REGION,
+                    GameEventKind::CreateClientAt(id, landing, Some(Box::new(record.client))),
+                );
+                let _ = self.out.send((Some(id), ServerPacket::PlayerRegion(Some(SPAWN_REGION), id)));
+                self.refresh_keepalive(SPAWN_REGION, now_ms);
+            }
+            None => {
                 // Server-authoritative player creation, once per session.
                 self.ensure_running(SPAWN_REGION);
                 self.homes.insert(id, SPAWN_REGION);
@@ -1420,6 +1514,14 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// held) becomes the player's parked record and goes to the store; a session
     /// of the same player waiting for it is restored now.
     fn player_parked(&mut self, rc: RegionCoords, client: ClientId, record: Option<Box<PlayerRecord>>, now_ms: u64) {
+        if let Some(m) = self.moving.get(&client) {
+            // A move's park; one from a region the body had already left is
+            // superseded (see `Departures`).
+            if m.from == rc {
+                self.finish_move(client, record, now_ms);
+            }
+            return;
+        }
         let Some(p) = self.parking.get(&client).copied() else {
             log::warn!("PlayerParked({client}) from {rc:?}: no park in flight");
             return;
@@ -1476,6 +1578,15 @@ impl<S: RegionSpawner> WorldManager<S> {
             log::error!("region {rc:?} was lost with client {client}'s park in flight (player {})", player.0);
             self.parking.remove(&client);
             self.park_settled(player, self.clock_ms);
+        }
+        let lost_moves: Vec<ClientId> = self
+            .moving
+            .iter()
+            .filter(|(c, m)| m.from == rc && !queued.contains(c))
+            .map(|(c, _)| *c)
+            .collect();
+        for client in lost_moves {
+            self.finish_move(client, None, self.clock_ms);
         }
     }
 
@@ -1630,7 +1741,8 @@ impl<S: RegionSpawner> WorldManager<S> {
         let is_home = self
             .sessions
             .keys()
-            .any(|c| self.homes.get(c) == Some(&rc));
+            .any(|c| self.homes.get(c) == Some(&rc))
+            || self.moving.values().any(|m| m.from == rc);
         let Some(link) = self.regions.get_mut(&rc) else { return };
         if link.subscribers.is_empty() && !is_home {
             link.empty_since_ms.get_or_insert(now_ms);

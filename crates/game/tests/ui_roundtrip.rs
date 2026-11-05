@@ -7,8 +7,10 @@ fn click_moves_hotbar_stack_to_main() {
     let mut region = Region::from_chunks(RegionCoords::new(0, 0), Vec::new());
     region.handle_event(GameEventKind::CreateClient(0)).unwrap();
     region.with_data(|d| {
-        d.clients.get_mut(&0).unwrap().inventory.slots[0] =
-            Some(game::ItemStack { item: game::ItemId(1), count: 3 });
+        let c = d.clients.get_mut(&0).unwrap();
+        c.inventory.slots[0] = Some(game::ItemStack { item: game::ItemId(1), count: 3 });
+        // Clicks land only on an open screen.
+        c.inventory_open = true;
     });
     region.forget_last_event();
     assert!(build_hotbar(region.data(), 0).slots[0].is_some());

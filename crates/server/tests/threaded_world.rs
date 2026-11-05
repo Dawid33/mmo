@@ -655,7 +655,10 @@ fn player_is_restored_by_a_restarted_server() {
     let record = record.expect("the player's record was stored");
     assert!(record.client.mode == game::PlayMode::Adventure);
     assert_eq!(record.client.inventory.slots[20].map(|s| s.count), Some(33));
-    assert_eq!(record.client.cursor.map(|s| s.count), Some(2));
+    // A park puts the cursor stack back into the inventory.
+    let cursor_stack = Some(game::ItemStack { item: game::ItemId(6), count: 2 });
+    assert_eq!(record.client.cursor, None);
+    assert!(record.client.inventory.slots.contains(&cursor_stack), "{:?}", record.client.inventory);
     let mut rig = Rig::with_spawner(spawner(), |_| lightweight_columns());
     rig.event(ServerEvent::ClientConnected { client: 0, player, record: Some(record) });
     rig.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(SPAWN_REGION), 0));
@@ -673,7 +676,8 @@ fn player_is_restored_by_a_restarted_server() {
     let client = client.expect("client 0 restored");
     assert!(client.mode == game::PlayMode::Adventure, "{client:?}");
     assert_eq!(client.inventory.slots[20].map(|s| s.count), Some(33), "{client:?}");
-    assert_eq!(client.cursor.map(|s| s.count), Some(2), "{client:?}");
+    assert_eq!(client.cursor, None, "{client:?}");
+    assert!(client.inventory.slots.contains(&cursor_stack), "{client:?}");
     rig.manager.shutdown_all();
     let _ = std::fs::remove_dir_all(&dir);
 }

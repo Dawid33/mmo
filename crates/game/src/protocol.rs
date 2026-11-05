@@ -560,12 +560,16 @@ pub enum GameEventKind {
     UiAction(ClientId, crate::UiAction),
     /// A fortress order from a client (designate, erase, cancel, ...).
     Order(ClientId, crate::Order),
-    /// Server-authored: the client's session left this region (Play moved
-    /// it elsewhere). Removes its player body and `clients` entry, undoably.
+    /// Server-authored: the client's session left this region with nothing
+    /// kept (a session with no player identity ended; moves park instead).
+    /// Removes its player body and `clients` entry, undoably.
     ClientLeft(ClientId),
     /// Server-authored: like `CreateClient`, but the body lands over the
-    /// region-local block column `[bx, bz]` instead of the spawn column.
-    CreateClientAt(ClientId, [u32; 2]),
+    /// region-local block column `[bx, bz]` instead of the spawn column. A
+    /// player moved from another region (Play, embark, adventure start /
+    /// end) carries its `Client` — inventory, cursor, mode — taken from its
+    /// park there; `None` = a player new to the world (the starting kit).
+    CreateClientAt(ClientId, [u32; 2], Option<Box<crate::Client>>),
     /// Server-authored: give a history person a body here (and optionally
     /// start a walk). Never accepted from a client.
     SpawnPerson(PersonSpawn),
@@ -611,7 +615,7 @@ impl GameEventKind {
         match self {
             GameEventKind::PlayerInput(id, _)
             | GameEventKind::CreateClient(id)
-            | GameEventKind::CreateClientAt(id, _)
+            | GameEventKind::CreateClientAt(id, ..)
             | GameEventKind::RestorePlayer(id, _)
             | GameEventKind::UiAction(id, _)
             | GameEventKind::Order(id, _) => Some(*id),

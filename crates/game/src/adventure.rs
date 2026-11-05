@@ -57,7 +57,9 @@ impl Rollback {
     /// Entering Adventure with `at` moves the body onto the standable tile
     /// nearest `at` in its column (`nearest_standable`), or to the region's
     /// spawn column when there is none; with no `at` the body stays where it
-    /// is. Fortress leaves the body where it stands.
+    /// is. Fortress leaves the body where it stands and closes the survival
+    /// state ([`crate::Client::leave_survival`]: inventory, chest, mining;
+    /// a cursor stack that no longer fits is dropped at the feet).
     pub fn set_play_mode_safe(&mut self, client: ClientId, mode: PlayMode, at: Option<TilePos>) -> bool {
         // `at` comes off the wire: a tile outside the region is refused
         // before anything changes; its level is clamped to the scan range.
@@ -72,9 +74,19 @@ impl Rollback {
         if old == mode {
             return true;
         }
-        // UndoMap::get_mut logs the prior Client: its undo restores `mode`.
+        // UndoMap::get_mut logs the prior Client: its undo restores `mode`
+        // and the survival state below.
+        let mut rest = None;
         if let Some(c) = self.data.clients.get_mut(&client) {
             c.mode = mode;
+            if mode == PlayMode::Fortress {
+                // The survival screens close and mining stops; the cursor
+                // stack goes back into the inventory.
+                rest = c.leave_survival();
+            }
+        }
+        if let Some(rest) = rest {
+            self.drop_at_feet_safe(client, rest);
         }
         match mode {
             PlayMode::Adventure => {

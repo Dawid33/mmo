@@ -216,6 +216,15 @@ impl World {
         self.manager.running_regions().contains(&r)
     }
 
+    /// `c`'s `Client` in `r`, if `r` runs and holds it.
+    fn client_in(&mut self, r: RegionCoords, c: ClientId) -> Option<game::Client> {
+        let mut out = None;
+        if self.running(r) {
+            self.manager.spawner_mut().with_region(r, |region| out = region.data().clients.get(&c).cloned());
+        }
+        out
+    }
+
     /// The player bodies (clients) in `r`, if it runs.
     fn players_in(&mut self, r: RegionCoords) -> Vec<ClientId> {
         let mut out = Vec::new();
@@ -551,7 +560,7 @@ fn client_cannot_spoof_server_events() {
         GameEventKind::SpawnPerson(PersonSpawn { person: outsider, at: SpawnAt::Column([20, 30]), walk_to: None }),
         GameEventKind::DespawnPerson(people[0]),
         GameEventKind::WalkOut(people[1], rc(target.x + 1, 0)),
-        GameEventKind::CreateClientAt(A, [5, 5]),
+        GameEventKind::CreateClientAt(A, [5, 5], None),
         GameEventKind::ClientLeft(A),
     ];
     for kind in spoofs {
@@ -952,4 +961,84 @@ fn history_v2_file_loads_with_empty_positions() {
     // And it is written back as the current version.
     let again = persist::encode(&back);
     assert_eq!(u32::from_le_bytes(again[8..12].try_into().unwrap()), persist::HISTORY_FILE_VERSION);
+}
+
+const MARK_STACK: game::ItemStack = game::ItemStack { item: game::ItemId(5), count: 33 };
+const MARK_CURSOR: game::ItemStack = game::ItemStack { item: game::ItemId(6), count: 2 };
+
+/// Puts marker stacks in `c`'s inventory (slot 20) and on its cursor in `r`;
+/// returns the inventory a move must keep (the cursor stack folded into it).
+fn mark_inventory(w: &mut World, r: RegionCoords, c: ClientId) -> game::Inventory {
+    let mut expected = None;
+    w.manager.spawner_mut().with_region(r, |region| {
+        region.with_data(|d| {
+            let client = d.clients.get_mut(&c).expect("the client is here");
+            client.inventory.slots[20] = Some(MARK_STACK);
+            client.cursor = Some(MARK_CURSOR);
+            let mut inv = client.inventory.clone();
+            assert_eq!(inv.add(MARK_CURSOR), 0);
+            expected = Some(inv);
+        });
+    });
+    expected.unwrap()
+}
+
+#[test]
+fn inventory_survives_move_client() {
+    let (mut w, home, _, _, _) = embark_world();
+    let region = w.history().site(home).unwrap().region;
+    assert_ne!(region, SPAWN_REGION);
+    let expected = mark_inventory(&mut w, SPAWN_REGION, A);
+    assert_eq!(w.adventure(A, home), Ok(home));
+    w.tick();
+    assert!(w.client_in(SPAWN_REGION, A).is_none(), "left the spawn region");
+    let there = w.client_in(region, A).expect("moved to the site");
+    assert_eq!(there.inventory, expected, "the inventory came along, no new kit");
+    assert_eq!(there.cursor, None);
+    assert_eq!(there.mode, PlayMode::Adventure);
+    assert_eq!(w.players_in(region), vec![A]);
+    w.packet(A, ClientPacket::EndAdventure);
+    w.tick();
+    let back = w.client_in(SPAWN_REGION, A).expect("back at spawn");
+    assert_eq!(back.inventory, expected, "and back again");
+    assert_eq!(back.mode, PlayMode::Fortress);
+    assert!(w.players_in(region).is_empty());
+    assert_eq!(w.players_in(SPAWN_REGION), vec![A]);
+}
+
+/// A second move while the first one's park is still on its way: the body
+/// goes straight to the second target, once, with its inventory.
+#[test]
+fn move_retargeted_in_flight_keeps_one_body() {
+    let (mut w, home, _, _, _) = embark_world();
+    let region = w.history().site(home).unwrap().region;
+    let expected = mark_inventory(&mut w, SPAWN_REGION, A);
+    assert!(w.manager.handle_server_event(ServerEvent::ClientPacket(ClientPacket::StartAdventure(home), A), w.now_ms));
+    assert!(w.manager.handle_server_event(ServerEvent::ClientPacket(ClientPacket::EndAdventure, A), w.now_ms));
+    w.settle();
+    w.tick();
+    assert!(w.client_in(region, A).is_none(), "never created at the site");
+    let back = w.client_in(SPAWN_REGION, A).expect("at spawn");
+    assert_eq!(back.inventory, expected);
+    assert_eq!(back.mode, PlayMode::Fortress, "the adventure's start and end both applied, in order");
+    assert_eq!(w.players_in(SPAWN_REGION), vec![A]);
+}
+
+#[test]
+fn off_map_record_restores_at_spawn_with_its_client() {
+    let mut w = World::new();
+    let mut client = game::Client { inventory: game::Inventory::new(), ..game::Client::default() };
+    client.inventory.slots[20] = Some(MARK_STACK);
+    let record = game::PlayerRecord {
+        client,
+        pose: game::Pose::from_translation(game::body_on_tile([3, 1, 3])),
+        region: rc(0, 5),
+        fortress: None,
+        adventure: None,
+    };
+    w.send(ServerEvent::ClientConnected { client: A, player: game::PlayerId(42), record: Some(record) });
+    assert_eq!(player_region(&w.take(A)), Some(Some(SPAWN_REGION)));
+    let placed = w.client_in(SPAWN_REGION, A).expect("placed at spawn");
+    assert_eq!(placed.inventory.slots[20], Some(MARK_STACK), "with the record's Client, not a fresh one");
+    assert_eq!(w.players_in(SPAWN_REGION), vec![A]);
 }

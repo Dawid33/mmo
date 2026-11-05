@@ -1187,10 +1187,12 @@ fn menu_keys(
     (player, game): (Option<Res<super::LocalPlayer>>, Option<Res<super::GameEvents>>),
 ) {
     let Some(slint) = slint else { return };
-    // Esc closes the inventory: the sim owns it, so ask the sim to.
+    // Esc closes the inventory: the sim owns it, so ask the sim to. Close,
+    // never toggle: `HudItems` may lag the sim, and a toggle on a stale view
+    // would reopen a screen just closed.
     if items.inventory.open && keys.just_pressed(MENU_KEY) {
         if let (Some(Some(player)), Some(game)) = (player.map(|p| p.0), game) {
-            let _ = game.0.send(game::GameEventKind::UiAction(player, game::UiAction::ToggleInventory));
+            let _ = game.0.send(game::GameEventKind::UiAction(player, game::UiAction::CloseInventory));
         }
         keys.clear_just_pressed(MENU_KEY);
         return;

@@ -323,3 +323,54 @@ fn mining_undo_roundtrip() {
     assert!(piles(&region).is_empty());
     assert_eq!(slot(&region, 0), Some(ItemStack { item: DIRT_ITEM, count: 5 }));
 }
+
+/// A stale mining state and a cooldown far in the future, as a client
+/// brings them from an older region (each region's tick starts at 0 at
+/// genesis, so another region's absolute ticks mean nothing here).
+fn stale_mining(region: &mut Region) {
+    region.with_data(|r| {
+        let c = r.clients.get_mut(&0).unwrap();
+        c.break_cooldown_until = 1_000_000;
+        c.mining = Some(game::Mining { target: [3, 1, 3], started_tick: 999_990, needed_ticks: 15 });
+    });
+}
+
+#[test]
+fn cooldown_does_not_cross_into_a_younger_region() {
+    let mut region = region(DOWN_45);
+    let a = target(&region);
+    stale_mining(&mut region);
+    // The body arrives over a seam (here: from region (1, 0)).
+    region.with_data(|r| {
+        let e = *r.data.player_entites.get(&0).unwrap();
+        let mut bundle = r.extract_entity_safe(e, r0());
+        bundle.source_region = game::RegionCoords::new(1, 0);
+        r.apply_arrival(bundle).expect("the body arrives");
+    });
+    let c = &region.data().clients[&0];
+    assert_eq!((c.break_cooldown_until, c.mining), (0, None), "region-local state reset on arrival");
+    assert_eq!(target(&region), a);
+    mouse(&mut region, MouseButton::Left, true);
+    assert_eq!(ticks_to_break(&mut region, a, 40), Some(15), "mining progresses at once");
+}
+
+#[test]
+fn cooldown_does_not_survive_a_restore() {
+    let mut region = region(DOWN_45);
+    let a = target(&region);
+    stale_mining(&mut region);
+    let record = region.data().player_record(0, r0()).expect("a record");
+    assert_eq!((record.client.break_cooldown_until, record.client.mining), (0, None), "the record drops it");
+    // Restoring a record that still carries it (an old store) drops it too.
+    let mut stale = record.clone();
+    stale.client.break_cooldown_until = 1_000_000;
+    region.handle_event(GameEventKind::ParkPlayer(0)).unwrap();
+    region.handle_event(GameEventKind::RestorePlayer(0, Box::new(stale))).unwrap();
+    assert_eq!(region.data().clients[&0].break_cooldown_until, 0);
+    region.handle_event(input(InputEvent::FpsCam(true))).unwrap();
+    region.handle_event(input(InputEvent::MouseMotion { dx: 0.0, dy: DOWN_45 })).unwrap();
+    ticks(&mut region, 3);
+    assert_eq!(target(&region), a);
+    mouse(&mut region, MouseButton::Left, true);
+    assert_eq!(ticks_to_break(&mut region, a, 40), Some(15), "mining progresses at once");
+}

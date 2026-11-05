@@ -22,6 +22,9 @@ pub enum UiAction {
     Click { slot: crate::SlotRef, button: crate::ClickButton, shift: bool },
     /// Open/close the inventory (drives cursor grab).
     ToggleInventory,
+    /// Close the inventory if it is open (a no-op when it is closed): Esc,
+    /// which must never open it from a stale view of the state.
+    CloseInventory,
 }
 
 /// One filled hotbar slot.
