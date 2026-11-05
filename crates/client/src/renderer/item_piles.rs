@@ -180,6 +180,8 @@ fn spawn_pile(
             n += 1;
         }
     }
+    // TEMP diagnostic (live report "items not rendering", 2026-11-05).
+    info!("[item_piles] spawn {region:?} cell={cell:?} world={:?} cubes={n}", pile_world_position(region, cell));
     commands
         .spawn((
             ItemPileRoot { region, cell },
@@ -244,7 +246,10 @@ fn hide_cut_piles(
     let home = tiles.region().map(home_rect);
     for (root, mut vis) in &mut roots {
         let hide = hidden_by_cut(pile_world_position(root.region, root.cell), cut, home);
-        vis.set_if_neq(if hide { Visibility::Hidden } else { Visibility::Inherited });
+        if vis.set_if_neq(if hide { Visibility::Hidden } else { Visibility::Inherited }) && hide {
+            // TEMP diagnostic (live report "items not rendering", 2026-11-05).
+            info!("[item_piles] hidden by cut {:?} cell={:?} cut={cut:?}", root.region, root.cell);
+        }
     }
 }
 

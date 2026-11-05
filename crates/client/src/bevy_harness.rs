@@ -87,6 +87,7 @@ impl BevyInputHarness {
             .init_resource::<ButtonInput<KeyCode>>()
             .init_resource::<ButtonInput<MouseButton>>()
             .init_resource::<AccumulatedMouseMotion>()
+            .init_resource::<bevy::input::mouse::AccumulatedMouseScroll>()
             .init_resource::<crate::renderer::input::MouseCoalesceWindow>()
             .init_resource::<LocalPlayer>()
             .init_resource::<Regions>()
@@ -256,6 +257,16 @@ impl BevyInputHarness {
             .world_mut()
             .resource_mut::<crate::renderer::input::MouseCoalesceWindow>()
             .0 = window;
+    }
+
+    /// The harness's Bevy app (tests add the messages / resources they read).
+    pub fn app_mut(&mut self) -> &mut App {
+        &mut self.app
+    }
+
+    /// Push a sim event straight into the client manager (no Bevy input).
+    pub fn push_sim_event(&mut self, ev: GameEventKind) {
+        let _ = self.client.push_game_event(ev);
     }
 
     // --- inspectors (one per bug suspect) ---

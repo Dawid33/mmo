@@ -144,3 +144,37 @@ fn long_window_coalesces_frames_into_one_packet() {
          7 frames must be held, summed, and awaiting the window's expiry"
     );
 }
+
+/// Live report 2026-11-05: "items not rendering". A thrown item must reach
+/// the pile renderer as an `ItemPileMsg::Set` with a non-empty view.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn thrown_item_reaches_the_pile_renderer() {
+    use client::renderer::item_piles::ItemPileMsg;
+    use game::{GameEventKind, InputEvent, Key, Order, PlayMode};
+    let reg = game::BlockRegistry::from_ron(&client::blocks::manifest_src()).unwrap();
+    game::install_block_props(reg.props());
+    let mut h = BevyInputHarness::new();
+    h.app_mut().add_message::<ItemPileMsg>();
+    h.connect();
+    let me = h.local_player().expect("local player");
+    h.push_sim_event(GameEventKind::Order(me, Order::SetMode { mode: PlayMode::Adventure, at: None }));
+    h.push_sim_event(GameEventKind::PlayerInput(me, InputEvent::FpsCam(true)));
+    for _ in 0..4 {
+        h.step();
+    }
+    h.push_sim_event(GameEventKind::PlayerInput(me, InputEvent::Key { key: Key::KeyQ, pressed: true }));
+    h.step();
+    h.push_sim_event(GameEventKind::PlayerInput(me, InputEvent::Key { key: Key::KeyQ, pressed: false }));
+    let mut seen = Vec::new();
+    for _ in 0..10 {
+        h.step();
+        let mut msgs = h.app_mut().world_mut().resource_mut::<bevy::ecs::message::Messages<ItemPileMsg>>();
+        seen.extend(msgs.drain().map(|m| format!("{m:?}")));
+    }
+    eprintln!("pile msgs: {seen:#?}");
+    assert!(
+        seen.iter().any(|m| m.starts_with("Set") && m.contains("stacks")),
+        "a thrown item must reach the pile renderer; got {seen:?}"
+    );
+}

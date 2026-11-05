@@ -770,7 +770,8 @@ impl Region {
                             // driven and no inventory window holds the pointer.
                             if c.mode == crate::PlayMode::Adventure && c.fps_cam_mode && !c.inventory_open && y != 0.0 {
                                 let n = crate::HOTBAR_SLOTS as i32;
-                                let step = if y > 0.0 { 1 } else { -1 };
+                                // Minecraft: wheel down (negative y) = next slot.
+                                let step = if y > 0.0 { -1 } else { 1 };
                                 c.selected = (c.selected as i32 + step).rem_euclid(n) as u8;
                             }
                         }

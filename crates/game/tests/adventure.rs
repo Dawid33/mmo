@@ -775,9 +775,10 @@ fn digits_and_wheel_select_slot() {
     assert_eq!(selected(&region), 2);
     tap(&mut region, Key::Digit1);
     assert_eq!(selected(&region), 0);
-    send(&mut region, InputEvent::MouseWheel { x: 0.0, y: -1.0 });
-    assert_eq!(selected(&region), 8);
+    // Wheel up (positive y) = previous slot, wheel down = next (Minecraft).
     send(&mut region, InputEvent::MouseWheel { x: 0.0, y: 1.0 });
+    assert_eq!(selected(&region), 8);
+    send(&mut region, InputEvent::MouseWheel { x: 0.0, y: -1.0 });
     assert_eq!(selected(&region), 0);
 }
 
