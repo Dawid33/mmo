@@ -51,6 +51,9 @@ pub struct History {
     /// Next person, site, civ, journey id.
     pub(crate) next_ids: [u32; 4],
     pub log: Vec<LogEntry>,
+    /// Where each embodied person last stood (region, region-local translation), noted by
+    /// the autosave and by parks; the next embodiment in that region spawns them there.
+    pub(crate) positions: BTreeMap<PersonId, (crate::RegionCoords, [f32; 3])>,
     #[serde(skip)]
     grid: Option<SocietyGrid>,
     /// Regions running now (the manager's view). Not saved: a load starts with none, and
@@ -91,6 +94,7 @@ impl History {
             next_seq: 0,
             next_ids: [0; 4],
             log: Vec::new(),
+            positions: BTreeMap::new(),
             grid: Some(grid),
             running: BTreeSet::new(),
             stopping: BTreeSet::new(),

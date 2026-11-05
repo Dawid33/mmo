@@ -87,6 +87,7 @@ impl History {
     }
 
     fn embody(&mut self, person: PersonId, rc: RegionCoords, home: Location) {
+        self.positions.remove(&person);
         if let Some(p) = self.people.get_mut(&person) {
             p.location = Location::InRegion(rc);
             p.home_location = home;
@@ -106,6 +107,13 @@ impl History {
     /// The landing column of `rc` (else its centre), moved a hashed few blocks per person —
     /// within [`spawn_spread_blocks`] of `crowd`, the number spawned there together.
     fn landing_column(&self, rc: RegionCoords, person: PersonId, crowd: usize) -> [u32; 2] {
+        if let Some(&(r, [x, _, z])) = self.positions.get(&person) {
+            if r == rc {
+                let n = REGION_BLOCKS as i32 - 1;
+                let b = crate::BLOCK_VOXELS as f32;
+                return [((x / b).floor() as i32).clamp(0, n) as u32, ((z / b).floor() as i32).clamp(0, n) as u32];
+            }
+        }
         let c = REGION_BLOCKS as u32 / 2;
         let [x, z] = self.grid().landing(rc).unwrap_or([c, c]);
         let spread = spawn_spread_blocks(u32::try_from(crowd).unwrap_or(u32::MAX));
@@ -327,6 +335,7 @@ impl History {
     pub fn region_parked(&mut self, rc: RegionCoords, people: Vec<(PersonId, [f32; 3])>) {
         self.running.remove(&rc);
         self.stopping.remove(&rc);
+        self.note_positions(people.clone());
         for (p, _pose) in people {
             if self.people.get(&p).is_some_and(|q| q.location == Location::InRegion(rc)) {
                 self.restore(p, rc);
@@ -335,6 +344,17 @@ impl History {
             }
         }
         self.release(rc, true);
+    }
+
+    /// Record where embodied people stand now (region-local translations, from an
+    /// autosave or a park): a later embodiment in the same region spawns them there.
+    /// Changes nothing else — nobody is despawned or restored.
+    pub fn note_positions(&mut self, people: Vec<(PersonId, [f32; 3])>) {
+        for (p, pos) in people {
+            if let Some(Location::InRegion(rc)) = self.people.get(&p).map(|q| q.location) {
+                self.positions.insert(p, (rc, pos));
+            }
+        }
     }
 
     /// After a load: nothing runs yet, so everyone embodied goes back to the abstract

@@ -879,3 +879,34 @@ fn fortress_claim_survives_restart() {
     w.connect(B);
     assert_eq!(w.return_to(B, site), Err(EmbarkRefusal::InUse));
 }
+
+#[test]
+fn autosave_positions_are_respawn_positions() {
+    let mut h = history();
+    let (site, _, people) = home_site(&h);
+    let region = h.site(site).unwrap().region;
+    let events = h.region_started(region);
+    assert_eq!(events.len(), people.len());
+    // The autosave sees person 0 far from the landing: block (3, 5), region-local units.
+    let who = people[0];
+    let b = game::BLOCK_VOXELS as f32;
+    h.note_positions(vec![(who, [3.5 * b, 40.0, 5.5 * b])]);
+    // A server restart: save, load (bodies go back to the abstract history), region starts.
+    let grid = h.grid().clone();
+    use game::history::persist;
+    let mut h = persist::decode(&persist::encode(&h), grid).expect("history reloads");
+    let events = h.region_started(region);
+    let spawn = events
+        .iter()
+        .find_map(|e| match e {
+            GameEventKind::SpawnPerson(s) if s.person == who => Some(*s),
+            _ => None,
+        })
+        .expect("the person respawns");
+    assert_eq!(spawn.at, SpawnAt::Column([3, 5]));
+    // Others still land at the landing, and the note is used up.
+    h.region_stopping(region);
+    h.region_parked(region, vec![]);
+    let again = h.region_started(region);
+    assert!(again.iter().any(|e| matches!(e, GameEventKind::SpawnPerson(s) if s.person == who && s.at != SpawnAt::Column([3, 5]))));
+}

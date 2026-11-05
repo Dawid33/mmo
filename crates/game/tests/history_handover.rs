@@ -405,7 +405,7 @@ fn diagonal_entry_spawns_from_orthogonal_neighbour() {
 
 #[test]
 fn load_normalises_embodied_state() {
-    assert_eq!(persist::HISTORY_FILE_VERSION, 2);
+    assert_eq!(persist::HISTORY_FILE_VERSION, 3);
     let (h, a, j) = walking_out_of_running_site();
     assert_eq!(h.journey(j).unwrap().held_in, Some(rc(0, 0)));
     assert_eq!(h.pending_journey_legs(), 0);

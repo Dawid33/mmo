@@ -1019,6 +1019,9 @@ impl<S: RegionSpawner> WorldManager<S> {
             }
             RegionOutput::Saved(rollback) => {
                 self.extract_player_saves(rc, &rollback);
+                if let Some(history) = self.history.as_mut() {
+                    history.note_positions(rollback.people_here());
+                }
                 self.saves.push((rc, RegionSave::Live(rollback)));
             }
             RegionOutput::PlayerParked(client, record) => self.player_parked(rc, client, record, now_ms),
