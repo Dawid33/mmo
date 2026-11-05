@@ -47,6 +47,34 @@ pub fn shared(store: impl PlayerStore + 'static) -> SharedPlayerStore {
     Arc::new(Mutex::new(store))
 }
 
+/// A batch of player records for the store (`WorldManager::take_player_saves`).
+pub type PlayerSaves = Vec<(PlayerId, PlayerRecord)>;
+
+/// The `player-saver` thread: writes each batch it receives through `store`,
+/// off the manager thread (a file write, later a database round trip). Ends
+/// when the sender is dropped, after the batches already sent; join it to know
+/// they are written. A failed write is logged, never fatal.
+pub fn spawn_saver(store: SharedPlayerStore) -> (crossbeam::channel::Sender<PlayerSaves>, std::thread::JoinHandle<()>) {
+    let (send, recv) = crossbeam::channel::unbounded::<PlayerSaves>();
+    let handle = std::thread::Builder::new()
+        .name("player-saver".into())
+        .spawn(move || {
+            while let Ok(batch) = recv.recv() {
+                let n = batch.len();
+                let result = match store.lock() {
+                    Ok(mut store) => store.store(batch),
+                    Err(poisoned) => poisoned.into_inner().store(batch),
+                };
+                match result {
+                    Ok(()) => log::debug!("[server] saved {n} player record(s)"),
+                    Err(e) => log::error!("[server] cannot save {n} player record(s): {e}"),
+                }
+            }
+        })
+        .expect("spawn the player saver thread");
+    (send, handle)
+}
+
 /// How long a new connection may take to send its `Hello` before it is closed.
 pub const HELLO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 /// Largest first packet the edge reads (a `Hello` is a few dozen bytes).

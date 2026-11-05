@@ -594,3 +594,70 @@ fn saved_region_is_restored_by_a_restarted_server() {
     rig.manager.shutdown_all();
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A player's body and inventory outlive the server on its own spawn path: the
+/// orderly exit parks the player (its record goes through the player store) and
+/// every region (saved to the region store); a restarted server strips the old
+/// session's body from the region file and restores the player, with its
+/// inventory, from the record the store resolves for its token.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn player_is_restored_by_a_restarted_server() {
+    use server::player_store::{MemoryPlayerStore, PlayerStore};
+    use server::region_store::RegionStore;
+    let dir = std::env::temp_dir().join(format!("mmo-threaded-players-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let store = RegionStore::new(dir.clone(), 42);
+    let spawner = || ThreadRegionSpawner::with_generator(std::sync::Arc::new(|_| lightweight_columns())).with_store(store.clone());
+    let mut players = MemoryPlayerStore::default();
+    let token = game::PlayerToken::generate([7; game::PLAYER_TOKEN_BYTES]);
+    let (player, record) = players.resolve(&token).unwrap();
+    assert!(record.is_none(), "a new player");
+
+    let mut rig = Rig::with_spawner(spawner(), |_| lightweight_columns());
+    rig.event(ServerEvent::ClientConnected { client: 0, player, record: None });
+    rig.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(SPAWN_REGION), 0));
+    rig.wait_for_snapshots(&[SPAWN_REGION], REGION_STARTUP_BUDGET);
+    let swap = GameEventKind::UiAction(0, game::UiAction::MoveItem { from: 0, to: 5 });
+    rig.event(ServerEvent::ClientPacket(ClientPacket::GameEvent(GameEvent::new(swap, 0, SPAWN_REGION)), 0));
+    // The server's orderly exit.
+    rig.manager.park_all_players(rig.now_ms());
+    rig.manager.shutdown_all();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !rig.manager.running_regions().is_empty() && Instant::now() < deadline {
+        if let Ok((rc, output)) = rig.region_out.recv_timeout(Duration::from_millis(50)) {
+            rig.absorb(rc, output);
+        }
+    }
+    assert!(rig.manager.running_regions().is_empty(), "every region parked");
+    rig.manager.request_save();
+    for (rc, save) in rig.manager.take_saves() {
+        store.save(rc, &save.into_serialized()).unwrap();
+    }
+    players.store(rig.manager.take_player_saves()).unwrap();
+    drop(rig);
+
+    // A new process: client ids start at 0 again; the edge resolves the token.
+    let (again, record) = players.resolve(&token).unwrap();
+    assert_eq!(again, player);
+    let record = record.expect("the player's record was stored");
+    assert!(record.client.inventory.slots[5].is_some() && record.client.inventory.slots[0].is_none());
+    let mut rig = Rig::with_spawner(spawner(), |_| lightweight_columns());
+    rig.event(ServerEvent::ClientConnected { client: 0, player, record: Some(record) });
+    rig.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(SPAWN_REGION), 0));
+    let mut log = Vec::new();
+    let mut restored = None;
+    rig.pump_until(REGION_STARTUP_BUDGET, &mut log, |p| match p {
+        ServerPacket::Region(id, rb) if *id == SPAWN_REGION => {
+            restored = Some((rb.player_entites.len(), rb.clients.get(&0).map(|c| c.inventory.clone())));
+            true
+        }
+        _ => false,
+    });
+    let (bodies, inventory) = restored.expect("snapshot of the restored region");
+    assert_eq!(bodies, 1, "one body: the restored player's");
+    let inventory = inventory.expect("client 0 restored");
+    assert!(inventory.slots[5].is_some() && inventory.slots[0].is_none(), "{inventory:?}");
+    rig.manager.shutdown_all();
+    let _ = std::fs::remove_dir_all(&dir);
+}

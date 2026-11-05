@@ -1027,8 +1027,15 @@ impl Rollback {
     pub fn create_player_at_safe(&mut self, client_id: ClientId, xz: (f32, f32)) {
         let (spawn_x, spawn_z) = xz;
         let spawn_y = self.player_spawn_y(xz);
+        self.create_player_body_safe(client_id, Vector::new(spawn_x, spawn_y, spawn_z));
+    }
+
+    /// `client_id`'s player body (camera, capsule, rig), its centre at
+    /// region-local `translation` (voxel units). The `clients` entry is the
+    /// caller's.
+    pub fn create_player_body_safe(&mut self, client_id: ClientId, translation: Vector) {
         let e = self.ecs.create_entity_safe();
-        let position = Pose::from_translation(Vector::new(spawn_x as f32, spawn_y as f32, spawn_z as f32));
+        let position = Pose::from_translation(translation);
         let body = RigidBodyBuilder::kinematic_position_based()
             .pose(position)
             .gravity_scale(0.0)

@@ -573,6 +573,14 @@ pub enum GameEventKind {
     DespawnPerson(crate::history::PersonId),
     /// Server-authored: walk a person out of this region toward a neighbour.
     WalkOut(crate::history::PersonId, RegionCoords),
+    /// Server-authored: the player's session ended. Removes its body and
+    /// `clients` entry like [`GameEventKind::ClientLeft`]; the server keeps
+    /// what it removed as the player's [`crate::PlayerRecord`].
+    ParkPlayer(ClientId),
+    /// Server-authored: a returning player's `Client` and body are put back
+    /// from its record (the body at the record's pose, lifted onto the nearest
+    /// standable tile if that is now inside terrain).
+    RestorePlayer(ClientId, Box<crate::PlayerRecord>),
 }
 
 /// Where a spawned person appears in a region.
@@ -604,6 +612,7 @@ impl GameEventKind {
             GameEventKind::PlayerInput(id, _)
             | GameEventKind::CreateClient(id)
             | GameEventKind::CreateClientAt(id, _)
+            | GameEventKind::RestorePlayer(id, _)
             | GameEventKind::UiAction(id, _)
             | GameEventKind::Order(id, _) => Some(*id),
             GameEventKind::Tick
@@ -611,6 +620,7 @@ impl GameEventKind {
             | GameEventKind::EntityArrived(_)
             | GameEventKind::GhostUpdate(_)
             | GameEventKind::ClientLeft(_)
+            | GameEventKind::ParkPlayer(_)
             | GameEventKind::SpawnPerson(_)
             | GameEventKind::DespawnPerson(_)
             | GameEventKind::WalkOut(..) => None,

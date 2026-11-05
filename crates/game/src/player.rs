@@ -12,7 +12,9 @@
 use serde::{Deserialize, Serialize};
 
 use crate::history::SiteId;
-use crate::{Client, Pose, RegionCoords, StateHash};
+use rapier3d::math::Vector;
+
+use crate::{Client, ClientId, Pose, RegionCoords, Rollback, StateHash, TileSource};
 
 /// The stable identity of a player (never reused for another token).
 #[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize, StateHash)]
@@ -64,4 +66,79 @@ pub struct PlayerRecord {
     pub fortress: Option<SiteId>,
     /// The site the player's adventure started at.
     pub adventure: Option<SiteId>,
+}
+
+/// `client` as a parked record keeps it: what belongs to the connection —
+/// held input, the first-person flag, an open inventory — is reset, so a
+/// restored player starts like a fresh session in everything but its state.
+pub fn parked_client(client: &Client) -> Client {
+    let mut c = client.clone();
+    c.input = Default::default();
+    c.fps_cam_mode = false;
+    c.inventory_open = false;
+    c
+}
+
+/// Every player body in `rollback` as a record (claims empty — the
+/// `WorldManager` holds those), keyed by session. The world autosave extracts
+/// online players from each region's `Saved` state with this.
+pub fn players_in(rollback: &Rollback, region: RegionCoords) -> Vec<(ClientId, PlayerRecord)> {
+    rollback
+        .player_entites
+        .keys()
+        .filter_map(|&c| Some((c, rollback.player_record(c, region)?)))
+        .collect()
+}
+
+impl Rollback {
+    /// `client`'s record as it stands in this region (`region`), if it has a
+    /// body here. Claims are empty.
+    pub fn player_record(&self, client: ClientId, region: RegionCoords) -> Option<PlayerRecord> {
+        let key = *self.data.player_entites.get(&client)?;
+        let handle = (*self.data.ecs.rigidbody.try_get(key))?;
+        let pose = *self.data.physics.bodies.get(handle)?.position();
+        let c = self.data.clients.get(&client)?;
+        Some(PlayerRecord { client: parked_client(c), pose, region, fortress: None, adventure: None })
+    }
+
+    /// Puts a returning player back, undo-safely: its `Client` (session state
+    /// reset) and a body at the record's position — or, when that is now inside
+    /// terrain (someone built there), on the nearest standable tile of its
+    /// column ([`restore_translation`]). A client that already has a body here
+    /// is left alone.
+    pub fn restore_player_safe(&mut self, client: ClientId, record: &PlayerRecord) {
+        if self.data.player_entites.contains_key(&client) {
+            log::warn!("RestorePlayer({client}): already has a body here");
+            return;
+        }
+        let at = restore_translation(self, record.pose.translation);
+        self.data.clients.insert(client, parked_client(&record.client));
+        self.create_player_body_safe(client, at);
+    }
+}
+
+/// Where a restored body goes: `t` (a body centre, region-local voxel units)
+/// when its feet tile and the tile above are clear of solid blocks and inside
+/// the region; else onto the standable tile nearest its feet level in its
+/// column (clamped into the region); else over the region's spawn column.
+/// Never inside terrain.
+pub fn restore_translation(rollback: &Rollback, t: Vector) -> Vector {
+    let feet = crate::feet_tile(crate::feet_of(t));
+    let n = crate::REGION_BLOCKS as i32;
+    let inside = (0..n).contains(&feet[0]) && (0..n).contains(&feet[2]);
+    let clear = |p: crate::TilePos| {
+        let b = rollback.block(p);
+        b == crate::BlockId::AIR || crate::pathfind::is_water(b) || !crate::block_props().is_solid(b)
+    };
+    if inside && clear(feet) && clear([feet[0], feet[1] + 1, feet[2]]) {
+        return t;
+    }
+    let column = [feet[0].clamp(0, n - 1), feet[2].clamp(0, n - 1)];
+    match crate::nearest_standable(rollback, column, Some(feet[1])) {
+        Some(tile) => crate::body_on_tile(tile),
+        None => {
+            let xz = rollback.spawn_xz();
+            Vector::new(xz.0, rollback.player_spawn_y(xz), xz.1)
+        }
+    }
 }

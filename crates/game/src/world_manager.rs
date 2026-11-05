@@ -182,11 +182,21 @@ pub struct InlineSpawner {
     /// Regions whose input queue stays untouched until after their next tick
     /// (see [`InlineSchedule`]). Always empty without a schedule.
     late: BTreeSet<RegionCoords>,
+    /// Region states saved by an earlier process (a restarted server's
+    /// store): a region that has not run in this one starts from its save,
+    /// through [`crate::restore_saved`], as `ThreadRegionSpawner::with_store`
+    /// does on the server.
+    saved: BTreeMap<RegionCoords, crate::Rollback>,
 }
 
 impl InlineSpawner {
     pub fn with_schedule(schedule: InlineSchedule) -> Self {
         Self { schedule: Some(schedule), ..Self::default() }
+    }
+
+    /// Regions that have not run yet start from `saved` (a restarted server).
+    pub fn with_saved(saved: BTreeMap<RegionCoords, crate::Rollback>) -> Self {
+        Self { saved, ..Self::default() }
     }
 
     /// Swap the schedule on a live spawner (`None` = back to lockstep), for
@@ -266,11 +276,15 @@ impl RegionSpawner for InlineSpawner {
         out: Sender<(RegionCoords, RegionOutput)>,
     ) -> Sender<RegionInput> {
         let (send, recv) = unbounded();
-        let runner = seed.into_runner(
-            id,
-            out,
-            &|rc| unreachable!("InlineSpawner never generates columns ({rc:?})"),
-        );
+        let never_ran = matches!(seed, RegionSeed::Fresh(_) | RegionSeed::Deferred(None));
+        let runner = match self.saved.remove(&id).filter(|_| never_ran) {
+            Some(rollback) => RegionRunner::new(id, crate::restore_saved(id, rollback), out),
+            None => seed.into_runner(
+                id,
+                out,
+                &|rc| unreachable!("InlineSpawner never generates columns ({rc:?})"),
+            ),
+        };
         self.runners.insert(id, (recv, runner));
         send
     }
@@ -327,6 +341,35 @@ pub struct ManagerDepths {
     pub terrain_cache: usize,
 }
 
+/// The refusal a second session of an online player gets (`ServerPacket::Refused`).
+pub const ALREADY_PLAYING: &str = "already playing";
+
+/// A park in flight (`WorldManager::parking`).
+#[derive(Clone, Copy, Debug)]
+struct Parking {
+    player: PlayerId,
+    /// Where the body is: its home at the disconnect, or where a seam crossing
+    /// in flight took it.
+    region: RegionCoords,
+    fortress: Option<SiteId>,
+    adventure: Option<SiteId>,
+}
+
+/// Requests that place or move the player, held while its restore waits for its
+/// park (they would act on a session with no body yet).
+fn defers_until_restored(packet: &ClientPacket) -> bool {
+    matches!(
+        packet,
+        ClientPacket::RequestPlayerRegion
+            | ClientPacket::PlayRegion(_)
+            | ClientPacket::Embark(_)
+            | ClientPacket::Retire
+            | ClientPacket::ReturnTo(_)
+            | ClientPacket::StartAdventure(_)
+            | ClientPacket::EndAdventure
+    )
+}
+
 pub struct WorldManager<S: RegionSpawner> {
     spawner: S,
     generator: RegionGenerator,
@@ -363,23 +406,37 @@ pub struct WorldManager<S: RegionSpawner> {
     history: Option<History>,
     /// `(now_ms, calendar tick)` the calendar was anchored at by [`Self::set_history`].
     calendar_anchor: (u64, CalendarTick),
-    /// The fortress each client plays (embarked or returned to, not retired). Not
-    /// persisted. Identity is the connection: a `ClientId` is never reused, so a
-    /// reconnecting player starts with no fortress and must Return to it. On disconnect
-    /// the entry stays (like `homes`) but no longer keeps anyone from returning there;
-    /// the Return drops it (see [`Self::return_to`]).
+    /// The fortress each connected client plays (embarked or returned to, not
+    /// retired). On disconnect it moves into the player's record (`parking`, then
+    /// `parked_players` and the player store), and a reconnect of the same player
+    /// restores it unless someone else has returned to that fortress meanwhile.
     fortress_of: BTreeMap<ClientId, SiteId>,
-    /// The site each client started its adventure at (Adventure play mode). A client
-    /// holds a fortress or an adventure, never both. Not persisted; dropped on
-    /// disconnect (an adventurer is not a history object yet).
+    /// The site each connected client started its adventure at (Adventure play
+    /// mode). A client holds a fortress or an adventure, never both. Kept in the
+    /// player's record like `fortress_of`.
     adventurer_of: BTreeMap<ClientId, SiteId>,
     /// The stable player behind each connected client, as the network edge
     /// resolved it from the connection's `Hello` token. Dropped on disconnect.
+    /// A player is online at most once: a second session is refused.
     player_of: BTreeMap<ClientId, PlayerId>,
-    /// The record the player store held for a client's player at connect,
-    /// kept until the body is restored from it (not yet: players still start
-    /// fresh at the spawn region). Dropped on disconnect.
-    connect_records: BTreeMap<ClientId, PlayerRecord>,
+    /// Disconnected clients whose `ParkPlayer` is on its way: the player, the
+    /// region the body is in (followed across a seam crossing in flight) and the
+    /// claims it held. Settled by `RegionOutput::PlayerParked`.
+    parking: BTreeMap<ClientId, Parking>,
+    /// Records of players parked by this process: authoritative over the record
+    /// the network edge read from the store (whose write may lag a fast
+    /// reconnect). Taken when the player is restored.
+    parked_players: BTreeMap<PlayerId, PlayerRecord>,
+    /// A player that reconnected while its park was still in flight: its new
+    /// session and the edge's record (the fallback should the park bring none
+    /// back). Restored when `PlayerParked` arrives.
+    awaiting_park: BTreeMap<PlayerId, (ClientId, Option<PlayerRecord>)>,
+    /// Requests that move the player (Play, embark, …) from a session whose
+    /// restore waits for its park: replayed once it is restored.
+    deferred_packets: BTreeMap<ClientId, Vec<ClientPacket>>,
+    /// Player records for the player store, collected since the last
+    /// [`Self::take_player_saves`]: parks and autosave extracts, oldest first.
+    player_saves: Vec<(PlayerId, PlayerRecord)>,
     /// The calendar day last broadcast (`ServerPacket::Calendar`).
     calendar_day: Option<u64>,
     /// What clients were last told of the sites, bucketed: (site, abandoned, population
@@ -440,7 +497,11 @@ impl<S: RegionSpawner> WorldManager<S> {
             fortress_of: BTreeMap::new(),
             adventurer_of: BTreeMap::new(),
             player_of: BTreeMap::new(),
-            connect_records: BTreeMap::new(),
+            parking: BTreeMap::new(),
+            parked_players: BTreeMap::new(),
+            awaiting_park: BTreeMap::new(),
+            deferred_packets: BTreeMap::new(),
+            player_saves: Vec::new(),
             calendar_day: None,
             sites_key: Vec::new(),
             out,
@@ -671,11 +732,10 @@ impl<S: RegionSpawner> WorldManager<S> {
 
     /// Return to a retired fortress.
     ///
-    /// Player identity: there are no accounts and a `ClientId` is one connection, so
-    /// "return only to a fortress you founded" is implemented as "only to a
+    /// "Return only to a fortress you founded" is implemented as "only to a
     /// **player-founded** site no other *connected* player is playing" — the same in
-    /// single player. A disconnected player's claim is dropped when someone returns,
-    /// and its player body leaves the region.
+    /// single player. A disconnected player's claim lives in its record; it is
+    /// dropped when that player comes back to find someone else playing there.
     fn return_to(&mut self, id: ClientId, site: SiteId, now_ms: u64) {
         let Some(history) = &self.history else {
             return self.embark_result(id, Err(EmbarkRefusal::NoHistory));
@@ -694,16 +754,6 @@ impl<S: RegionSpawner> WorldManager<S> {
             return self.embark_result(id, Err(EmbarkRefusal::InUse));
         }
         let region = history.site(site).expect("returnable").region;
-        // Drop the disconnected claim and its player body, so the fortress has one
-        // player: the returning one.
-        let stale: Vec<ClientId> = self.fortress_of.iter().filter(|(_, s)| **s == site).map(|(c, _)| *c).collect();
-        for c in stale {
-            self.fortress_of.remove(&c);
-            if let Some(home) = self.homes.remove(&c) {
-                self.send_play_event(home, GameEventKind::ClientLeft(c));
-                self.refresh_keepalive(home, now_ms);
-            }
-        }
         let landing = self.landing_in(region);
         self.move_client(id, region, landing, now_ms);
         self.fortress_of.insert(id, site);
@@ -818,40 +868,14 @@ impl<S: RegionSpawner> WorldManager<S> {
     pub fn handle_server_event(&mut self, ev: ServerEvent, now_ms: u64) -> bool {
         match ev {
             ServerEvent::ClientConnected { client: id, player, record } => {
-                self.sessions.insert(id, Session::default());
-                self.player_of.insert(id, player);
-                match record {
-                    Some(record) => {
-                        self.connect_records.insert(id, record);
-                    }
-                    None => {
-                        self.connect_records.remove(&id);
-                    }
-                }
-                if !self.homes.contains_key(&id) {
-                    // Server-authoritative player creation, once per client.
-                    self.ensure_running(SPAWN_REGION);
-                    self.homes.insert(id, SPAWN_REGION);
-                    self.send_to_region(
-                        SPAWN_REGION,
-                        RegionInput::Event(GameEventKind::CreateClient(id)),
-                    );
-                } else {
-                    // Reconnect: the player already exists in its home
-                    // region (running or parked); nothing to create.
-                    log::info!("client {id} reconnected");
-                }
-                if let Some(map) = &self.world_map {
-                    let _ = self.out.send((Some(id), ServerPacket::WorldMap(map.clone())));
-                }
-                if let (Some(history), Some(now)) = (&self.history, self.calendar_now(now_ms)) {
-                    let _ = self.out.send((Some(id), ServerPacket::Calendar(now)));
-                    let _ = self.out.send((Some(id), ServerPacket::Sites(history.site_markers())));
-                    let _ = self.out.send((Some(id), ServerPacket::Civs(history.civ_markers())));
-                    self.send_fortress(id);
+                if !self.client_connected(id, player, record, now_ms) {
+                    return true;
                 }
             }
             ServerEvent::ClientDisconnected(id) => self.client_disconnected(id, now_ms),
+            ServerEvent::ClientPacket(packet, id) if self.restore_pending(id) && defers_until_restored(&packet) => {
+                self.deferred_packets.entry(id).or_default().push(packet);
+            }
             ServerEvent::ClientPacket(packet, id) => match packet {
                 // The network edge consumes the handshake; in-process
                 // harnesses may forward one. Nothing to do here.
@@ -938,7 +962,9 @@ impl<S: RegionSpawner> WorldManager<S> {
                     | GameEventKind::SpawnPerson(_)
                     | GameEventKind::DespawnPerson(_)
                     | GameEventKind::WalkOut(..)
-                    | GameEventKind::ClientLeft(_) => {
+                    | GameEventKind::ClientLeft(_)
+                    | GameEventKind::ParkPlayer(_)
+                    | GameEventKind::RestorePlayer(..) => {
                         log::debug!(
                             "dropping internal event kind sent by client {id} for {:?}",
                             event.region_id
@@ -984,7 +1010,11 @@ impl<S: RegionSpawner> WorldManager<S> {
             RegionOutput::Snapshot(client, rollback) => {
                 let _ = self.out.send((Some(client), ServerPacket::Region(rc, rollback)));
             }
-            RegionOutput::Saved(rollback) => self.saves.push((rc, RegionSave::Live(rollback))),
+            RegionOutput::Saved(rollback) => {
+                self.extract_player_saves(rc, &rollback);
+                self.saves.push((rc, RegionSave::Live(rollback)));
+            }
+            RegionOutput::PlayerParked(client, record) => self.player_parked(rc, client, record, now_ms),
             RegionOutput::SyncClock { tick_rate, tick } => {
                 if let Some(link) = self.regions.get(&rc) {
                     for client in &link.subscribers {
@@ -1064,7 +1094,15 @@ impl<S: RegionSpawner> WorldManager<S> {
                         target,
                         RegionInput::Event(GameEventKind::EntityArrived(bundle)),
                     );
-                    if let Some(c) = client {
+                    if let Some(p) = client.and_then(|c| self.parking.get_mut(&c)) {
+                        // The body crossed a seam while its park was on the way:
+                        // the old region found nobody; park it where it went.
+                        p.region = target;
+                        let c = client.expect("parking is keyed by client");
+                        self.send_to_region(target, RegionInput::Event(GameEventKind::ParkPlayer(c)));
+                        self.refresh_keepalive(rc, now_ms);
+                        self.refresh_keepalive(target, now_ms);
+                    } else if let Some(c) = client {
                         self.homes.insert(c, target);
                         let _ = self
                             .out
@@ -1202,10 +1240,11 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// Drop a client's session and subscriptions. Idempotent: a second call
     /// (e.g. `Leave` then the transport closing) finds no session.
     fn client_disconnected(&mut self, id: ClientId, now_ms: u64) {
-        // Unlike `fortress_of`, an adventure is not kept for a reconnect.
-        self.adventurer_of.remove(&id);
-        self.player_of.remove(&id);
-        self.connect_records.remove(&id);
+        let player = self.player_of.remove(&id);
+        let fortress = self.fortress_of.remove(&id);
+        let adventure = self.adventurer_of.remove(&id);
+        self.deferred_packets.remove(&id);
+        self.awaiting_park.retain(|_, (c, _)| *c != id);
         if let Some(session) = self.sessions.remove(&id) {
             for rc in session.subscribed {
                 self.unsubscribe_link(id, rc, now_ms);
@@ -1219,20 +1258,184 @@ impl<S: RegionSpawner> WorldManager<S> {
                 }
             }
         }
-        // The home region may have just lost its keep-alive reason.
-        if let Some(home) = self.homes.get(&id).copied() {
+        // Park the player: its body leaves the region and comes back as its
+        // record (`PlayerParked`), so no orphan body stays behind.
+        if let Some(home) = self.homes.remove(&id) {
+            match player {
+                Some(player) => {
+                    self.parking.insert(id, Parking { player, region: home, fortress, adventure });
+                    self.send_play_event(home, GameEventKind::ParkPlayer(id));
+                }
+                None => self.send_play_event(home, GameEventKind::ClientLeft(id)),
+            }
+            // The home region may have just lost its keep-alive reason.
             self.refresh_keepalive(home, now_ms);
+        }
+    }
+
+    /// The orderly exit's first step: every connected player is parked (as on a
+    /// disconnect), so its record reaches the player store before the process
+    /// ends. Then [`Self::shutdown_all`]; regions answer `ParkPlayer` first.
+    pub fn park_all_players(&mut self, now_ms: u64) {
+        let online: Vec<ClientId> = self.sessions.keys().copied().collect();
+        for id in online {
+            self.client_disconnected(id, now_ms);
+        }
+    }
+
+    /// Player records for the player store collected since the last call
+    /// (parks and autosave extracts, oldest first: a later one for the same
+    /// player supersedes an earlier).
+    pub fn take_player_saves(&mut self) -> Vec<(PlayerId, PlayerRecord)> {
+        std::mem::take(&mut self.player_saves)
+    }
+
+    /// A session started. `false` = refused (the player is already online).
+    fn client_connected(&mut self, id: ClientId, player: PlayerId, record: Option<PlayerRecord>, now_ms: u64) -> bool {
+        if self.player_of.iter().any(|(c, p)| *p == player && *c != id) {
+            log::info!("client {id}: player {} is already playing; refused", player.0);
+            let _ = self.out.send((Some(id), ServerPacket::Refused(ALREADY_PLAYING.to_string())));
+            return false;
+        }
+        self.sessions.entry(id).or_default();
+        self.player_of.insert(id, player);
+        let in_flight = self.parking.values().any(|p| p.player == player);
+        if self.homes.contains_key(&id) {
+            // The same session announced again: its body is already placed.
+            log::info!("client {id} re-announced");
+        } else if in_flight {
+            // Reconnected faster than the park: restore once it is back.
+            log::info!("client {id}: player {} is still parking; restore deferred", player.0);
+            self.awaiting_park.insert(player, (id, record));
+            self.deferred_packets.entry(id).or_default();
+        } else {
+            let record = self.parked_players.remove(&player).or(record);
+            self.place_player(id, record, now_ms);
+        }
+        if let Some(map) = &self.world_map {
+            let _ = self.out.send((Some(id), ServerPacket::WorldMap(map.clone())));
+        }
+        if let (Some(history), Some(now)) = (&self.history, self.calendar_now(now_ms)) {
+            let _ = self.out.send((Some(id), ServerPacket::Calendar(now)));
+            let _ = self.out.send((Some(id), ServerPacket::Sites(history.site_markers())));
+            let _ = self.out.send((Some(id), ServerPacket::Civs(history.civ_markers())));
+            if !self.restore_pending(id) {
+                self.send_claims(id);
+            }
+        }
+        true
+    }
+
+    /// Whether `id` waits for its player's park before it is restored.
+    fn restore_pending(&self, id: ClientId) -> bool {
+        self.awaiting_park.values().any(|(c, _)| *c == id)
+    }
+
+    /// Give a session its body: restored from `record`, or a fresh player at the
+    /// spawn region (`None`, or a record whose region is off the map).
+    fn place_player(&mut self, id: ClientId, record: Option<PlayerRecord>, now_ms: u64) {
+        match record {
+            Some(record) if !crate::off_map(self.map_extent(), record.region) => self.restore_player(id, record, now_ms),
+            _ => {
+                // Server-authoritative player creation, once per session.
+                self.ensure_running(SPAWN_REGION);
+                self.homes.insert(id, SPAWN_REGION);
+                self.send_to_region(SPAWN_REGION, RegionInput::Event(GameEventKind::CreateClient(id)));
+            }
+        }
+    }
+
+    /// Put a returning player back: its body and `Client` in the record's region
+    /// (`RestorePlayer`, waking it if parked), and its claims — a fortress only if
+    /// no connected player has returned to it meanwhile, a site only if the
+    /// history still knows it.
+    fn restore_player(&mut self, id: ClientId, record: PlayerRecord, now_ms: u64) {
+        let region = record.region;
+        let known = |site: SiteId| self.history.as_ref().map_or(true, |h| h.site(site).is_some());
+        let fortress = record
+            .fortress
+            .filter(|&site| known(site) && !self.fortress_of.values().any(|&s| s == site));
+        let adventure = record.adventure.filter(|&site| fortress.is_none() && known(site));
+        self.homes.insert(id, region);
+        self.send_play_event(region, GameEventKind::RestorePlayer(id, Box::new(record)));
+        if let Some(site) = fortress {
+            self.fortress_of.insert(id, site);
+        }
+        if let Some(site) = adventure {
+            self.adventurer_of.insert(id, site);
+        }
+        let _ = self.out.send((Some(id), ServerPacket::PlayerRegion(Some(region), id)));
+        self.refresh_keepalive(region, now_ms);
+        crate::perf_event!("player_restored", "client={id} to={},{}", region.x, region.z);
+    }
+
+    /// What a session holds, told on connect: its fortress (`Fortress`), and a
+    /// restored claim as the answer an embark / adventure start would have had,
+    /// so the client leaves the arrival map without embarking again.
+    fn send_claims(&self, id: ClientId) {
+        self.send_fortress(id);
+        if let Some(&site) = self.fortress_of.get(&id) {
+            self.embark_result(id, Ok(site));
+        }
+        if let Some(&site) = self.adventurer_of.get(&id) {
+            self.adventure_result(id, Ok(site));
+        }
+    }
+
+    /// A region answered `ParkPlayer`. The record (with the claims the manager
+    /// held) becomes the player's parked record and goes to the store; a session
+    /// of the same player waiting for it is restored now.
+    fn player_parked(&mut self, rc: RegionCoords, client: ClientId, record: Option<Box<PlayerRecord>>, now_ms: u64) {
+        let Some(p) = self.parking.get(&client).copied() else {
+            log::warn!("PlayerParked({client}) from {rc:?}: no park in flight");
+            return;
+        };
+        if p.region != rc {
+            // The body had left `rc` before the park reached it; it is parked
+            // where it went (see `Departures`).
+            return;
+        }
+        self.parking.remove(&client);
+        match record {
+            Some(record) => {
+                let record = PlayerRecord { fortress: p.fortress, adventure: p.adventure, ..*record };
+                self.parked_players.insert(p.player, record.clone());
+                self.player_saves.push((p.player, record));
+            }
+            None => log::warn!("PlayerParked({client}) from {rc:?}: no body to park"),
+        }
+        let Some((waiting, edge_record)) = self.awaiting_park.remove(&p.player) else { return };
+        if !self.sessions.contains_key(&waiting) {
+            return;
+        }
+        let record = self.parked_players.remove(&p.player).or(edge_record);
+        self.place_player(waiting, record, now_ms);
+        if self.history.is_some() {
+            self.send_claims(waiting);
+        }
+        for packet in self.deferred_packets.remove(&waiting).unwrap_or_default() {
+            self.handle_server_event(ServerEvent::ClientPacket(packet, waiting), now_ms);
+        }
+    }
+
+    /// The world autosave keeps online players too: each body in a region's
+    /// saved state becomes its player's record, so a crash loses at most the
+    /// autosave interval ([`crate::restore_saved`] strips the bodies on load).
+    fn extract_player_saves(&mut self, rc: RegionCoords, rollback: &crate::Rollback) {
+        for (client, record) in crate::players_in(rollback, rc) {
+            let Some(&player) = self.player_of.get(&client) else { continue };
+            let record = PlayerRecord {
+                fortress: self.fortress_of.get(&client).copied(),
+                adventure: self.adventurer_of.get(&client).copied(),
+                ..record
+            };
+            self.player_saves.push((player, record));
         }
     }
 
     /// The stable player behind a connected client.
     pub fn player_of(&self, client: ClientId) -> Option<PlayerId> {
         self.player_of.get(&client).copied()
-    }
-
-    /// The record the store held for a connected client's player at connect.
-    pub fn connect_record(&self, client: ClientId) -> Option<&PlayerRecord> {
-        self.connect_records.get(&client)
     }
 
     pub fn depths(&self) -> ManagerDepths {

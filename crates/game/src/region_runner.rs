@@ -81,6 +81,10 @@ pub enum RegionOutput {
     /// body here, with its region-local translation. They were despawned
     /// first, so the parked blob holds no people; the manager owns them.
     PeopleParked(Vec<(crate::history::PersonId, [f32; 3])>),
+    /// Reply to a [`GameEventKind::ParkPlayer`], right after it ran: what the
+    /// body and `Client` were (claims empty — the manager adds them), `None`
+    /// when the client had no body here (it had just crossed a seam).
+    PlayerParked(ClientId, Option<Box<crate::PlayerRecord>>),
     /// Reply to `Save`: the live state, serialized off the region thread.
     /// It still holds this session's players and the history's people —
     /// [`restore_saved`] strips both when it is loaded again.
@@ -277,6 +281,11 @@ impl RegionRunner {
                 // The manager filters these; drop defensively rather than
                 // double-ticking or stopping on a stray packet.
                 GameEventKind::Tick | GameEventKind::Quit => {}
+                GameEventKind::ParkPlayer(client) => {
+                    let record = self.region.data().player_record(client, self.id).map(Box::new);
+                    self.apply(GameEventKind::ParkPlayer(client));
+                    let _ = self.out.send((self.id, RegionOutput::PlayerParked(client, record)));
+                }
                 kind => self.apply(kind),
             },
             RegionInput::EventAfterTick(kind, after_tick) => {

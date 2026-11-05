@@ -488,3 +488,285 @@ fn leave_packet_removes_the_session() {
     h.event(ServerEvent::ClientDisconnected(0), 20);
     assert_eq!(h.manager.depths().sessions, before - 1);
 }
+
+// ---- Players park and restore across disconnects and restarts (Task 2) ----
+
+use game::{body_on_tile, feet_of, feet_tile, standable, PlayMode, PlayerId, PlayerRecord, Rollback, TilePos};
+use std::collections::BTreeMap;
+
+/// A harness whose regions are a whole floor (block 0 solid, block 1 air),
+/// built over `spawner`.
+fn floored_harness_with(spawner: InlineSpawner) -> Harness {
+    let (out_send, packets) = unbounded();
+    let (region_out_send, region_out) = unbounded();
+    let (lod_result_send, lod_result_recv) = unbounded();
+    let lod_builder: Box<dyn LodBuilder> = Box::new(InlineLodBuilder {
+        coarse: Box::new(|_key: &game::lod::LodKey| Vec::new()),
+        out: lod_result_send,
+    });
+    Harness {
+        manager: WorldManager::new(
+            spawner,
+            Box::new(crate::history_handover::floored_region),
+            out_send,
+            region_out_send,
+            lod_builder,
+            lod_result_recv,
+        ),
+        region_out,
+        packets,
+    }
+}
+
+fn floored_harness() -> Harness {
+    floored_harness_with(InlineSpawner::default())
+}
+
+/// A session of `player` on connection `client`, with the record the store
+/// returned for it.
+fn session(client: ClientId, player: u64, record: Option<PlayerRecord>) -> ServerEvent {
+    ServerEvent::ClientConnected { client, player: PlayerId(player), record }
+}
+
+fn client_event(h: &mut Harness, client: ClientId, kind: GameEventKind) {
+    let ev = GameEvent::new(kind, 0, SPAWN_REGION);
+    h.event(ServerEvent::ClientPacket(ClientPacket::GameEvent(ev), client), 0);
+}
+
+/// Swap hotbar slots 0 and 5: an inventory no fresh player has.
+fn rearrange_inventory(h: &mut Harness, client: ClientId) {
+    client_event(h, client, GameEventKind::UiAction(client, game::UiAction::MoveItem { from: 0, to: 5 }));
+}
+
+fn rearranged(record: &game::Client) -> bool {
+    record.inventory.slots[0].is_none() && record.inventory.slots[5].is_some_and(|s| s.count == 42)
+}
+
+/// Put `client`'s body on tile `at` of `rc`; returns its translation.
+fn place_body(h: &mut Harness, rc: RegionCoords, client: ClientId, at: TilePos) -> game::rapier3d::math::Vector {
+    let t = body_on_tile(at);
+    h.manager.spawner_mut().with_region(rc, |region| {
+        let key = *region.data().player_entites.get(&client).expect("a body");
+        region.with_data(|d| d.set_body_pose_safe(key, game::Pose::from_translation(t)));
+    });
+    t
+}
+
+/// The translation of `client`'s body in `rc`, if `rc` runs and holds it.
+fn body_of(h: &mut Harness, rc: RegionCoords, client: ClientId) -> Option<game::rapier3d::math::Vector> {
+    let mut out = None;
+    h.manager.spawner_mut().with_region(rc, |region| {
+        let d = region.data();
+        let handle = d.player_entites.get(&client).and_then(|&k| *d.ecs.rigidbody.try_get(k));
+        out = handle.and_then(|h| d.physics.bodies.get(h)).map(|b| b.position().translation);
+    });
+    out
+}
+
+fn client_in(h: &mut Harness, rc: RegionCoords, client: ClientId) -> Option<game::Client> {
+    let mut out = None;
+    h.manager.spawner_mut().with_region(rc, |region| out = region.data().clients.get(&client).cloned());
+    out
+}
+
+fn bodies_in(h: &mut Harness, rc: RegionCoords) -> usize {
+    let mut n = 0;
+    h.manager.spawner_mut().with_region(rc, |region| n = region.data().player_entites.len());
+    n
+}
+
+#[test]
+fn disconnect_parks_player_no_orphan_body() {
+    let mut h = floored_harness();
+    h.event(session(0, 0, None), 0);
+    rearrange_inventory(&mut h, 0);
+    h.event(ServerEvent::ClientDisconnected(0), 10);
+    assert_eq!(bodies_in(&mut h, SPAWN_REGION), 0, "no orphan body");
+    assert!(client_in(&mut h, SPAWN_REGION, 0).is_none(), "no orphan client entry");
+    let saves = h.manager.take_player_saves();
+    assert_eq!(saves.len(), 1, "{saves:?}");
+    let (player, record) = &saves[0];
+    assert_eq!(*player, PlayerId(0));
+    assert_eq!(record.region, SPAWN_REGION);
+    assert!(rearranged(&record.client), "the record keeps the inventory: {:?}", record.client.inventory);
+    assert!(h.manager.take_player_saves().is_empty(), "taken once");
+}
+
+#[test]
+fn reconnect_same_token_restores_body_and_inventory() {
+    let mut h = floored_harness();
+    h.event(session(0, 0, None), 0);
+    rearrange_inventory(&mut h, 0);
+    client_event(&mut h, 0, GameEventKind::Order(0, game::Order::SetMode { mode: PlayMode::Adventure, at: None }));
+    let at = place_body(&mut h, SPAWN_REGION, 0, [5, 1, 7]);
+    h.event(ServerEvent::ClientDisconnected(0), 10);
+    h.drain_packets();
+    // A new connection (a new client id) of the same player.
+    h.event(session(1, 0, None), 20);
+    assert_eq!(bodies_in(&mut h, SPAWN_REGION), 1);
+    assert_eq!(body_of(&mut h, SPAWN_REGION, 1), Some(at), "the body is back where it stood");
+    let client = client_in(&mut h, SPAWN_REGION, 1).expect("the client is restored");
+    assert!(rearranged(&client), "{:?}", client.inventory);
+    assert_eq!(client.mode, PlayMode::Adventure);
+    assert!(h.drain_packets().iter().any(|(to, p)| {
+        *to == Some(1) && matches!(p, ServerPacket::PlayerRegion(Some(rc), 1) if *rc == SPAWN_REGION)
+    }));
+}
+
+#[test]
+fn second_session_same_player_refused() {
+    let mut h = floored_harness();
+    h.event(session(0, 0, None), 0);
+    h.drain_packets();
+    h.event(session(1, 0, None), 10);
+    let packets = h.drain_packets();
+    assert!(
+        packets.iter().any(|(to, p)| *to == Some(1) && matches!(p, ServerPacket::Refused(why) if why == "already playing")),
+        "{packets:?}"
+    );
+    assert!(packets.iter().all(|(to, p)| *to != Some(1) || matches!(p, ServerPacket::Refused(_))), "{packets:?}");
+    assert_eq!(h.manager.depths().sessions, 1);
+    assert_eq!(bodies_in(&mut h, SPAWN_REGION), 1, "no duplicate body");
+    // The refused connection closing parks nobody.
+    h.event(ServerEvent::ClientDisconnected(1), 20);
+    assert_eq!(h.manager.depths().sessions, 1);
+    assert!(body_of(&mut h, SPAWN_REGION, 0).is_some(), "the first session keeps its body");
+    assert!(h.manager.take_player_saves().is_empty());
+}
+
+#[test]
+fn restore_into_built_over_cell_lands_standable() {
+    let mut h = floored_harness();
+    h.event(session(0, 0, None), 0);
+    place_body(&mut h, SPAWN_REGION, 0, [5, 1, 7]);
+    h.event(ServerEvent::ClientDisconnected(0), 10);
+    // Someone builds where the player stood: a two-block pillar.
+    h.manager.spawner_mut().with_region(SPAWN_REGION, |region| {
+        region.with_data(|d| {
+            assert!(d.set_block_safe([5, 1, 7], game::Block::new(BlockId(1))));
+            assert!(d.set_block_safe([5, 2, 7], game::Block::new(BlockId(1))));
+        });
+    });
+    // And the home region parks before the player is back.
+    let late = 10 + UNLOAD_GRACE_MS + 1;
+    h.manager.maintain(late);
+    h.settle(late);
+    assert!(h.manager.parked_regions().contains(&SPAWN_REGION));
+    h.event(session(1, 0, None), late);
+    let t = body_of(&mut h, SPAWN_REGION, 1).expect("restored");
+    let tile = feet_tile(feet_of(t));
+    let mut ok = false;
+    h.manager.spawner_mut().with_region(SPAWN_REGION, |region| ok = standable(region.data(), tile));
+    assert!(ok, "the body stands on a standable tile, not inside the pillar: {tile:?}");
+    assert_eq!(tile, [5, 3, 7], "on top of the pillar");
+}
+
+#[test]
+fn autosave_extracts_online_player_records() {
+    let mut h = floored_harness();
+    h.event(session(0, 3, None), 0);
+    rearrange_inventory(&mut h, 0);
+    h.manager.request_save();
+    h.settle(0);
+    assert_eq!(h.manager.take_saves().len(), 1);
+    let saves = h.manager.take_player_saves();
+    assert_eq!(saves.len(), 1, "{saves:?}");
+    assert_eq!(saves[0].0, PlayerId(3));
+    assert_eq!(saves[0].1.region, SPAWN_REGION);
+    assert!(rearranged(&saves[0].1.client));
+    assert_eq!(bodies_in(&mut h, SPAWN_REGION), 1, "an autosave parks nobody");
+}
+
+#[test]
+fn fast_reconnect_waits_for_park() {
+    let mut h = floored_harness();
+    h.event(session(0, 0, None), 0);
+    rearrange_inventory(&mut h, 0);
+    let at = place_body(&mut h, SPAWN_REGION, 0, [9, 1, 4]);
+    // Disconnect and reconnect before the region has parked the body (no
+    // settle in between), with a stale record from the store.
+    h.manager.handle_server_event(ServerEvent::ClientDisconnected(0), 10);
+    let stale = PlayerRecord {
+        client: game::Client::default(),
+        pose: game::Pose::from_translation(body_on_tile([1, 1, 1])),
+        region: SPAWN_REGION,
+        fortress: None,
+        adventure: None,
+    };
+    h.manager.handle_server_event(session(1, 0, Some(stale)), 11);
+    // A move request in the window waits for the restore too.
+    h.manager.handle_server_event(ServerEvent::ClientPacket(ClientPacket::RequestPlayerRegion, 1), 11);
+    h.settle(12);
+    assert_eq!(bodies_in(&mut h, SPAWN_REGION), 1, "exactly one body");
+    assert_eq!(body_of(&mut h, SPAWN_REGION, 1), Some(at), "restored from the park, not the stale record");
+    assert!(rearranged(&client_in(&mut h, SPAWN_REGION, 1).unwrap()));
+    let packets = h.drain_packets();
+    assert!(
+        !packets.iter().any(|(to, p)| *to == Some(1) && matches!(p, ServerPacket::PlayerRegion(None, _))),
+        "never told it has no home: {packets:?}"
+    );
+}
+
+/// Every region state a manager saved, as a restarted server's store would
+/// hand them back.
+fn saved_states(saves: Vec<(RegionCoords, game::RegionSave)>) -> BTreeMap<RegionCoords, Rollback> {
+    saves
+        .into_iter()
+        .map(|(rc, save)| (rc, save.into_serialized().to_rollback().expect("decodes")))
+        .collect()
+}
+
+#[test]
+fn restart_restores_player() {
+    let mut h = floored_harness();
+    h.event(session(0, 0, None), 0);
+    rearrange_inventory(&mut h, 0);
+    let at = place_body(&mut h, SPAWN_REGION, 0, [6, 1, 2]);
+    h.manager.spawner_mut().tick_all();
+    h.settle(0);
+    let at = body_of(&mut h, SPAWN_REGION, 0).unwrap_or(at);
+    // The server's orderly exit: park every player, then every region.
+    h.manager.park_all_players(100);
+    h.manager.shutdown_all();
+    h.settle(100);
+    assert!(h.manager.running_regions().is_empty());
+    h.manager.request_save();
+    let regions = saved_states(h.manager.take_saves());
+    let mut store: BTreeMap<PlayerId, PlayerRecord> = BTreeMap::new();
+    store.extend(h.manager.take_player_saves());
+    drop(h);
+
+    // A new process: client ids start at 0 again; the edge resolves the token.
+    let mut h = floored_harness_with(InlineSpawner::with_saved(regions));
+    h.event(session(0, 0, store.get(&PlayerId(0)).cloned()), 0);
+    assert_eq!(bodies_in(&mut h, SPAWN_REGION), 1, "the saved body was stripped, the player restored once");
+    assert_eq!(body_of(&mut h, SPAWN_REGION, 0), Some(at));
+    assert!(rearranged(&client_in(&mut h, SPAWN_REGION, 0).unwrap()));
+}
+
+#[test]
+fn disconnect_mid_crossing_parks_the_body_where_it_went() {
+    let mut h = floored_harness();
+    h.event(session(0, 0, None), 0);
+    rearrange_inventory(&mut h, 0);
+    // Past the +x seam: the next tick hands the body to (1, 0).
+    let edge = game::REGION_BLOCKS as i32;
+    place_body(&mut h, SPAWN_REGION, 0, [edge + 2, 1, 7]);
+    h.manager.spawner_mut().tick_all();
+    // The disconnect reaches the manager before the departure does: the park
+    // goes to the old home, which no longer has the body.
+    h.manager.handle_server_event(ServerEvent::ClientDisconnected(0), 10);
+    h.settle(10);
+    h.settle(10);
+    let east = RegionCoords::new(1, 0);
+    assert_eq!(bodies_in(&mut h, SPAWN_REGION), 0);
+    assert_eq!(bodies_in(&mut h, east), 0, "no orphan body where it crossed to");
+    let saves = h.manager.take_player_saves();
+    assert_eq!(saves.len(), 1, "{saves:?}");
+    assert_eq!(saves[0].1.region, east);
+    assert!(rearranged(&saves[0].1.client));
+    // And it comes back there.
+    h.event(session(1, 0, None), 20);
+    assert_eq!(bodies_in(&mut h, east), 1);
+    assert!(rearranged(&client_in(&mut h, east, 1).unwrap()));
+}

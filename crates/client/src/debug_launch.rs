@@ -425,6 +425,14 @@ fn auto_embark(
         launch.phase = Phase::Done;
         return;
     }
+    // A restored player (the server kept its fortress or adventure across the
+    // disconnect / restart) is told so on connect, as the answer an embark
+    // would have had: wait for that to be applied, never embark again.
+    if sent == Sent::Nothing
+        && (history.fortress.is_some() || history.embark_result.is_some() || history.adventure_result.is_some())
+    {
+        return;
+    }
     let (Some(map), Some(requests)) = (world_map.map.as_ref(), requests) else { return };
     let DebugScenario::Embarked { adventure_at, .. } = launch.scenario;
     if let Some(site) = adventure_at {

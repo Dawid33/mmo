@@ -278,25 +278,35 @@ fn tile_build_overlays_regions_with_authoritative_state() {
     out.try_iter().for_each(drop);
 
     // Region (0,0) is SPAWN_REGION: ClientConnected already made it client
-    // 1's home, so it's running from the start. Disconnect to lift the
-    // home keep-alive, park it past the grace period (same dance as
-    // world_manager.rs's home_region_survives_zero_subscribers), then
-    // reconnect the SAME client id: `homes` already contains it, so
-    // ClientConnected takes the reconnect branch and does NOT call
-    // ensure_running — the region stays parked, with terrain_cache seeded
-    // from the park (the flat-floor generator's state).
+    // 1's home, so it's running from the start. Disconnect (the player parks)
+    // to lift the home keep-alive and park the region past the grace period
+    // (same dance as world_manager.rs's home_region_survives_zero_subscribers),
+    // so terrain_cache is seeded from the park (the flat-floor generator's
+    // state). Then a session whose player stands far away (its stored record
+    // is in region (5,5)) asks for the tile: nothing wakes (0,0).
     m.handle_server_event(ServerEvent::ClientDisconnected(1), 0);
+    drain_region_outputs(&mut m, &region_out);
     m.maintain(UNLOAD_GRACE_MS);
     drain_region_outputs(&mut m, &region_out);
     out.try_iter().for_each(drop);
     assert!(m.parked_regions().contains(&RegionCoords::new(0, 0)));
 
-    m.handle_server_event(ServerEvent::connected(1), UNLOAD_GRACE_MS);
+    let far = game::PlayerRecord {
+        client: game::Client::default(),
+        pose: game::Pose::from_translation(game::body_on_tile([8, 1, 8])),
+        region: RegionCoords::new(5, 5),
+        fortress: None,
+        adventure: None,
+    };
+    m.handle_server_event(
+        ServerEvent::ClientConnected { client: 1, player: game::PlayerId(2), record: Some(far) },
+        UNLOAD_GRACE_MS,
+    );
     drain_region_outputs(&mut m, &region_out);
     out.try_iter().for_each(drop);
     assert!(
         !m.running_regions().contains(&RegionCoords::new(0, 0)),
-        "reconnecting the same client must not wake the parked region"
+        "a session elsewhere must not wake the parked region"
     );
 
     let key = LodKey { factor: 64, coords: [0, 0] }; // covers regions (0..2, 0..2)

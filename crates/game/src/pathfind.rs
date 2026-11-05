@@ -31,7 +31,7 @@ pub const COLUMN_SCAN_Y_MAX: i32 = 512;
 /// The water block id (`assets/blocks/blocks.ron`).
 const WATER: BlockId = BlockId(5);
 
-fn is_water(b: BlockId) -> bool {
+pub(crate) fn is_water(b: BlockId) -> bool {
     b == WATER
 }
 

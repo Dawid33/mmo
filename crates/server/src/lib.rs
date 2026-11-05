@@ -556,6 +556,9 @@ pub fn run() {
         spawner = spawner.with_store(store.clone());
     }
     let saver = region_store.map(region_store::spawn_saver);
+    // Parked players and the autosave's online players go to the player store
+    // on their own thread (procedural worlds: the in-memory store).
+    let player_saver = player_store::spawn_saver(players.clone());
     let mut manager = game::WorldManager::new(
         spawner,
         Box::new(move |rc| gen_cache.generate_cached(rc, world_seed, materials)),
@@ -635,6 +638,7 @@ pub fn run() {
             manager.request_save();
         }
         forward_saves(&saver, &mut manager);
+        forward_player_saves(&player_saver.0, &mut manager);
         report.maybe_report(
             &mut manager,
             perf::Backlog {
@@ -645,7 +649,9 @@ pub fn run() {
         );
     }
 
-    // Orderly exit: park everything, join region threads.
+    // Orderly exit: park every player (regions answer `ParkPlayer` before
+    // `Shutdown`), then everything else, and join region threads.
+    manager.park_all_players(start.elapsed().as_millis() as u64);
     manager.shutdown_all();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
     while !manager.running_regions().is_empty() && std::time::Instant::now() < deadline {
@@ -655,6 +661,8 @@ pub fn run() {
         {
             manager.handle_region_output(rc, output, now_ms);
         }
+        // A park queued for a region that was mid-stop woke it again.
+        manager.shutdown_all();
     }
     let unparked = manager.running_regions();
     if !unparked.is_empty() {
@@ -668,6 +676,13 @@ pub fn run() {
         if handle.join().is_err() {
             log::error!("[server] the world saver panicked");
         }
+    }
+    // Every player parked: their records are written before the process ends.
+    forward_player_saves(&player_saver.0, &mut manager);
+    let (send, handle) = player_saver;
+    drop(send);
+    if handle.join().is_err() {
+        log::error!("[server] the player saver panicked");
     }
     // Every region is parked, so its people are back in the history.
     save_history(&history_world_path, &manager);
@@ -714,6 +729,17 @@ fn forward_saves<S: game::RegionSpawner>(
         for save in saves {
             let _ = send.send(save);
         }
+    }
+}
+
+/// Hand the manager's collected player records to the player-saver thread.
+fn forward_player_saves<S: game::RegionSpawner>(
+    send: &crossbeam::channel::Sender<player_store::PlayerSaves>,
+    manager: &mut game::WorldManager<S>,
+) {
+    let saves = manager.take_player_saves();
+    if !saves.is_empty() {
+        let _ = send.send(saves);
     }
 }
 

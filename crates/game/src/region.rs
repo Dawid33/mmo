@@ -159,6 +159,8 @@ fn ev_desc(e: &GameEvent) -> String {
         GameEventKind::CreateClient(c) => format!("CreateClient(c={c:?})"),
         GameEventKind::CreateClientAt(c, col) => format!("CreateClientAt(c={c:?}, col={col:?})"),
         GameEventKind::ClientLeft(c) => format!("ClientLeft(c={c:?})"),
+        GameEventKind::ParkPlayer(c) => format!("ParkPlayer(c={c:?})"),
+        GameEventKind::RestorePlayer(c, r) => format!("RestorePlayer(c={c:?}, region={:?})", r.region),
         GameEventKind::Quit => "Quit".to_string(),
         GameEventKind::EntityArrived(b) => {
             format!("EntityArrived(c={:?})", b.client.as_ref().map(|(c, _)| *c))
@@ -683,6 +685,10 @@ impl Region {
                 );
                 self.data.create_player_at_safe(client_id, crate::block_column_xz(column));
             }
+            GameEventKind::RestorePlayer(client_id, record) => {
+                info!("{}", ev_desc(&event));
+                self.data.restore_player_safe(client_id, &record);
+            }
             GameEventKind::SpawnPerson(spawn) => {
                 self.data.apply_person_spawn_safe(spawn, self.id, self.map_extent);
             }
@@ -692,7 +698,7 @@ impl Region {
             GameEventKind::WalkOut(person, toward) => {
                 self.data.walk_out_safe(person, toward, self.id, self.map_extent);
             }
-            GameEventKind::ClientLeft(client_id) => {
+            GameEventKind::ClientLeft(client_id) | GameEventKind::ParkPlayer(client_id) => {
                 info!("{:?}", event);
                 match self.data.player_entites.get(&client_id).copied() {
                     // The bundle is for handoffs; a leaving session drops it.

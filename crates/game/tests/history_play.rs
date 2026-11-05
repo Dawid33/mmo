@@ -67,6 +67,12 @@ struct World {
 
 impl World {
     fn new() -> Self {
+        Self::over(history(), InlineSpawner::default())
+    }
+
+    /// A world over `history` whose regions `spawner` runs (a restarted server:
+    /// the saved history and region states).
+    fn over(history: History, spawner: InlineSpawner) -> Self {
         let (out_send, packets) = unbounded();
         let (region_out_send, region_out) = unbounded();
         let (lod_result_send, lod_result_recv) = unbounded();
@@ -75,7 +81,7 @@ impl World {
             out: lod_result_send,
         });
         let mut manager = WorldManager::new(
-            InlineSpawner::default(),
+            spawner,
             Box::new(floored_region),
             out_send,
             region_out_send,
@@ -83,7 +89,7 @@ impl World {
             lod_result_recv,
         );
         manager.set_world_map(strip());
-        manager.set_history(history(), 0);
+        manager.set_history(history, 0);
         World { manager, region_out, packets, inbox: Vec::new(), now_ms: 0 }
     }
 
@@ -817,10 +823,59 @@ fn end_adventure_returns_to_spawn_in_fortress_mode() {
 }
 
 #[test]
-fn adventure_dropped_on_disconnect() {
+fn adventure_kept_across_reconnect() {
     let (mut w, home, _, _, _) = embark_world();
+    let region = w.history().site(home).unwrap().region;
     assert_eq!(w.adventure(A, home), Ok(home));
     w.send(ServerEvent::ClientDisconnected(A));
-    w.connect(A);
-    assert_eq!(w.adventure(A, home), Ok(home), "the adventure was not kept");
+    // The same player on a new connection: the adventure is part of its record.
+    w.send(ServerEvent::ClientConnected { client: A2, player: game::PlayerId(A as u64), record: None });
+    let to_a2 = w.take(A2);
+    assert!(to_a2.iter().any(|p| matches!(p, ServerPacket::AdventureResult(Ok(s)) if *s == home)), "{to_a2:?}");
+    assert_eq!(player_region(&to_a2), Some(Some(region)));
+    w.settle();
+    assert_eq!(w.mode_in(region, A2), Some(PlayMode::Adventure));
+    assert_eq!(w.adventure(A2, home), Err(AdventureRefusal::AlreadyPlaying), "still adventuring");
+}
+
+/// A player's fortress claim is part of its record: after an orderly exit and a
+/// restart, the same player (a new client id) holds its fortress again without
+/// embarking, and is told so on connect.
+#[test]
+fn fortress_claim_survives_restart() {
+    let (mut w, _, civ, people, free) = embark_world();
+    let target = free[0];
+    let site = w.embark(A, EmbarkRequest { civ, people: people[..2].to_vec(), region: target }).unwrap();
+    w.tick();
+    w.take(A);
+    // The server's orderly exit: park every player, then every region; save.
+    w.manager.park_all_players(w.now_ms);
+    w.manager.shutdown_all();
+    w.settle();
+    assert!(w.manager.running_regions().is_empty());
+    w.manager.request_save();
+    let regions: std::collections::BTreeMap<RegionCoords, game::Rollback> = w
+        .manager
+        .take_saves()
+        .into_iter()
+        .map(|(rc, save)| (rc, save.into_serialized().to_rollback().unwrap()))
+        .collect();
+    let records: std::collections::BTreeMap<game::PlayerId, game::PlayerRecord> =
+        w.manager.take_player_saves().into_iter().collect();
+    let record = records.get(&game::PlayerId(A as u64)).cloned().expect("A's record");
+    assert_eq!(record.fortress, Some(site));
+    let history = w.history().clone();
+    drop(w);
+
+    let mut w = World::over(history, InlineSpawner::with_saved(regions));
+    w.send(ServerEvent::ClientConnected { client: 0, player: game::PlayerId(A as u64), record: Some(record) });
+    let to_a = w.take(0);
+    assert_eq!(fortress_in(&to_a), Some(Some(site)), "the fortress is held again: {to_a:?}");
+    assert!(to_a.iter().any(|p| matches!(p, ServerPacket::EmbarkResult(Ok(s)) if *s == site)), "{to_a:?}");
+    assert_eq!(player_region(&to_a), Some(Some(target)));
+    assert_eq!(w.players_in(target), vec![0], "the body is back in the fortress");
+    assert_eq!(w.return_to(0, site), Err(EmbarkRefusal::AlreadyHasFortress), "no second embark");
+    // Nobody else may take it up.
+    w.connect(B);
+    assert_eq!(w.return_to(B, site), Err(EmbarkRefusal::InUse));
 }

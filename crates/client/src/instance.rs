@@ -897,6 +897,8 @@ impl GameInstanceManager {
             kind @ (GameEventKind::CreateClient(_)
             | GameEventKind::CreateClientAt(..)
             | GameEventKind::ClientLeft(_)
+            | GameEventKind::ParkPlayer(_)
+            | GameEventKind::RestorePlayer(..)
             | GameEventKind::SpawnPerson(_)
             | GameEventKind::DespawnPerson(_)
             | GameEventKind::WalkOut(..)) => {
