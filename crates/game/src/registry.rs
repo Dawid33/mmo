@@ -42,6 +42,20 @@ pub struct BlockDef {
     /// The grid a chiseled block collides on. Default voxel.
     #[serde(default)]
     pub collider: crate::ColliderScale,
+    /// Break time, in hundredths (`DEFAULT_HARDNESS_CENTI` when absent).
+    #[serde(default)]
+    pub hardness: Option<u16>,
+    /// What breaking it yields (`Same` when absent).
+    #[serde(default)]
+    pub drop: Option<DropDef>,
+}
+
+/// A manifest drop: item names are resolved (and checked) at registry load.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum DropDef {
+    Same,
+    Nothing,
+    Item(String),
 }
 
 fn default_solid() -> bool {
@@ -61,6 +75,7 @@ pub enum RegistryError {
     DuplicateName(String),
     MissingAir,
     BadAir,
+    UnknownDropItem { block: String, item: String },
 }
 
 impl std::fmt::Display for RegistryError {
@@ -71,6 +86,9 @@ impl std::fmt::Display for RegistryError {
             RegistryError::DuplicateName(n) => write!(f, "duplicate block name {n:?}"),
             RegistryError::MissingAir => write!(f, "block manifest must define id 0 as air"),
             RegistryError::BadAir => write!(f, "block id 0 must be name \"air\" with Untextured textures"),
+            RegistryError::UnknownDropItem { block, item } => {
+                write!(f, "block {block:?} drops unknown item {item:?}")
+            }
         }
     }
 }
@@ -92,7 +110,10 @@ pub struct BlockRegistry {
 impl BlockRegistry {
     pub fn from_ron(src: &str) -> Result<Self, RegistryError> {
         let manifest: BlockManifest =
-            ron::from_str(src).map_err(|e| RegistryError::Parse(e.to_string()))?;
+            ron::Options::default()
+                .with_default_extension(ron::extensions::Extensions::IMPLICIT_SOME)
+                .from_str(src)
+                .map_err(|e| RegistryError::Parse(e.to_string()))?;
 
         let mut defs = BTreeMap::new();
         let mut by_name = BTreeMap::new();
@@ -112,11 +133,27 @@ impl BlockRegistry {
             Some(_) => return Err(RegistryError::BadAir),
         }
 
-        Ok(Self { defs, by_name })
+        let reg = Self { defs, by_name };
+        for def in reg.defs.values() {
+            if let Some(DropDef::Item(name)) = &def.drop {
+                if reg.drop_item(name).is_none() {
+                    return Err(RegistryError::UnknownDropItem { block: def.name.clone(), item: name.clone() });
+                }
+            }
+        }
+        Ok(reg)
     }
 
     pub fn id_of(&self, name: &str) -> Option<BlockId> {
         self.by_name.get(name).copied()
+    }
+
+    /// The item called `name`: a block's item, else an extra item.
+    fn drop_item(&self, name: &str) -> Option<crate::ItemId> {
+        match self.id_of(name) {
+            Some(b) => Some(crate::ItemId::block(b)),
+            None => crate::ItemId::extra_named(name),
+        }
     }
 
     /// The collision / render properties of every block, for
@@ -132,6 +169,21 @@ impl BlockRegistry {
             }
             if def.collider == crate::ColliderScale::Half {
                 p.half_collider.insert(id.0);
+            }
+            p.names.insert(id.0, def.name.clone());
+            if let Some(h) = def.hardness.filter(|h| *h != crate::DEFAULT_HARDNESS_CENTI) {
+                p.hardness.insert(id.0, h);
+            }
+            match &def.drop {
+                None | Some(DropDef::Same) => {}
+                Some(DropDef::Nothing) => {
+                    p.drops.insert(id.0, crate::Drop::Nothing);
+                }
+                Some(DropDef::Item(n)) => {
+                    // Checked by `from_ron`.
+                    let item = self.drop_item(n).expect("drop item validated at load");
+                    p.drops.insert(id.0, crate::Drop::Item(item));
+                }
             }
             // Tree trunks are named `<species>_log` (worldgen's `TreeBlocks`),
             // or are a one-block species' block (a cactus is all trunk wood).

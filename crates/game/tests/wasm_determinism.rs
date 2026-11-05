@@ -55,9 +55,9 @@ use slotmapd::Key as _;
 /// dial): the same physical scene splits into different chunk entities,
 /// bodies and colliders at 2 and 16 blocks, so its bytes and hashes differ.
 /// Other sizes are not pinned and skip the comparison.
-const WASM_SCENE_DIGEST: u32 = pinned(0xFA8E_102F, 0x9E75_87D8);
+const WASM_SCENE_DIGEST: u32 = pinned(0xFA8E_102F, 0xFB56_E618);
 /// `game::state_hash` of the same state, on every target.
-const SCENE_STATE_HASH: u32 = pinned(0x5233_40BE, 0x2400_6949);
+const SCENE_STATE_HASH: u32 = pinned(0x5233_40BE, 0x934D_D4E3);
 const SCENE_TICKS: usize = 120;
 /// crc32 of [`underground_scene`]'s region bytes, on every target.
 const UNDERGROUND_DIGEST: u32 = pinned(0x5448_586C, 0xD851_4114);

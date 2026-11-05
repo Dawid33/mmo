@@ -5,7 +5,7 @@
 //! (colliders) and the client agree. Unknown ids are solid and opaque, which
 //! is what every block was before properties existed. Bevy-free.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::OnceLock;
 
 use crate::BlockId;
@@ -34,6 +34,9 @@ pub enum ColliderScale {
 /// block's octant one solid half-block cell.
 pub const HALF_CELL_FILL_MIN: u32 = 128;
 
+/// Break time (hundredths) of a block whose manifest entry has no `hardness`.
+pub const DEFAULT_HARDNESS_CENTI: u16 = 100;
+
 /// The non-default properties of the registry's blocks (sets keep it small
 /// and comparable: two equal manifests give equal props).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -42,6 +45,11 @@ pub struct BlockProps {
     pub(crate) cutout: BTreeSet<u16>,
     pub(crate) half_collider: BTreeSet<u16>,
     pub(crate) trunk: BTreeSet<u16>,
+    /// Non-default hardness only.
+    pub(crate) hardness: BTreeMap<u16, u16>,
+    /// Non-`Same` drops only.
+    pub(crate) drops: BTreeMap<u16, crate::Drop>,
+    pub(crate) names: BTreeMap<u16, String>,
 }
 
 impl BlockProps {
@@ -68,6 +76,21 @@ impl BlockProps {
         self.trunk.contains(&id.0)
     }
 
+    /// Break time in hundredths ([`DEFAULT_HARDNESS_CENTI`] unless set).
+    pub fn hardness_centi(&self, id: BlockId) -> u16 {
+        self.hardness.get(&id.0).copied().unwrap_or(DEFAULT_HARDNESS_CENTI)
+    }
+
+    /// What the block yields when broken.
+    pub fn drop(&self, id: BlockId) -> crate::Drop {
+        self.drops.get(&id.0).copied().unwrap_or_default()
+    }
+
+    /// The manifest name of the block.
+    pub fn name_of(&self, id: BlockId) -> Option<&str> {
+        self.names.get(&id.0).map(String::as_str)
+    }
+
     /// The grid the block's chisel collides on.
     pub fn collider_scale(&self, id: BlockId) -> ColliderScale {
         if self.half_collider.contains(&id.0) { ColliderScale::Half } else { ColliderScale::Voxel }
@@ -90,6 +113,9 @@ pub fn block_props() -> &'static BlockProps {
         cutout: BTreeSet::new(),
         half_collider: BTreeSet::new(),
         trunk: BTreeSet::new(),
+        hardness: BTreeMap::new(),
+        drops: BTreeMap::new(),
+        names: BTreeMap::new(),
     };
     PROPS.get().unwrap_or(&DEFAULT)
 }

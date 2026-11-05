@@ -30,6 +30,7 @@ mod handoff_scan;
 mod handoff_schedule;
 mod handoff_state;
 mod history;
+mod items;
 mod history_handover;
 mod history_play;
 mod hash_restore;

@@ -111,19 +111,9 @@ pub enum GameDataTransactionKind {
     Undo,
 }
 
-/// What an inventory slot holds. `Empty` is the default so `ItemStack` and
-/// `Inventory` derive `Default` cleanly.
-#[derive(Debug, Default, Clone, Copy, serde::Serialize, serde::Deserialize, StateHash, Hash, PartialEq, Eq)]
-pub enum ItemKind {
-    #[default]
-    Empty,
-    Dirt,
-    Stone,
-}
-
 #[derive(Debug, Default, Clone, Copy, serde::Serialize, serde::Deserialize, StateHash, PartialEq)]
 pub struct ItemStack {
-    pub kind: ItemKind,
+    pub item: crate::ItemId,
     pub count: u32,
 }
 
@@ -143,8 +133,8 @@ impl Inventory {
     /// Nine slots seeded with test items (slice-1 render target).
     pub fn seeded() -> Self {
         let mut inv = Self::hotbar();
-        inv.slots[0] = Some(ItemStack { kind: ItemKind::Dirt, count: 42 });
-        inv.slots[3] = Some(ItemStack { kind: ItemKind::Stone, count: 7 });
+        inv.slots[0] = Some(ItemStack { item: crate::ItemId::block(crate::BlockId(1)), count: 42 });
+        inv.slots[3] = Some(ItemStack { item: crate::ItemId::block(crate::BlockId(2)), count: 7 });
         inv
     }
 }
@@ -1722,7 +1712,7 @@ mod inventory_tests {
         rb.new_transaction();
         {
             let c = rb.clients.get_mut(&0).unwrap();
-            c.inventory.slots[0] = Some(ItemStack { kind: ItemKind::Stone, count: 5 });
+            c.inventory.slots[0] = Some(ItemStack { item: crate::ItemId::block(crate::BlockId(2)), count: 5 });
         }
         rb.rollback();
         assert_eq!(before, crate::state_hash(&rb), "inventory edit must invert bit-exact");

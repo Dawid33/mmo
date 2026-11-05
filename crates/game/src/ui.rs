@@ -4,18 +4,14 @@
 //! wire. `game` stays Bevy- and Slint-free: these are plain data types.
 
 /// Icon handle the client resolves to a texture. For inventory, derived from
-/// `ItemKind` (see `IconId::of`).
+/// `ItemId` (see `IconId::of`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct IconId(pub u32);
 
 impl IconId {
-    /// Map an item kind to a client icon handle. `Empty` has no icon.
-    pub fn of(kind: crate::ItemKind) -> Option<IconId> {
-        match kind {
-            crate::ItemKind::Empty => None,
-            crate::ItemKind::Dirt => Some(IconId(1)),
-            crate::ItemKind::Stone => Some(IconId(2)),
-        }
+    /// The client icon handle of an item: its id.
+    pub fn of(item: crate::ItemId) -> IconId {
+        IconId(item.0 as u32)
     }
 }
 
@@ -80,7 +76,7 @@ pub fn build_hotbar(data: &crate::GameData, client: crate::ClientId) -> HotbarVi
         .inventory
         .slots
         .iter()
-        .map(|slot| slot.and_then(|stack| IconId::of(stack.kind).map(|icon| SlotView { icon, count: stack.count })))
+        .map(|slot| slot.map(|stack| SlotView { icon: IconId::of(stack.item), count: stack.count }))
         .collect();
     HotbarView { slots }
 }

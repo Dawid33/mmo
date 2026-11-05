@@ -853,7 +853,7 @@ impl Region {
 #[cfg(test)]
 mod ui_action_tests {
     use super::*;
-    use crate::{Inventory, ItemKind, ItemStack, UiAction};
+    use crate::{BlockId, Inventory, ItemId, ItemStack, UiAction};
 
     #[test]
     fn move_item_swaps_slots_and_rolls_back() {
@@ -868,7 +868,7 @@ mod ui_action_tests {
         // Slot 0 (seeded Dirt) moved to slot 1.
         let inv: &Inventory = &region.data().clients.get(&0).unwrap().inventory;
         assert_eq!(inv.slots[0], None);
-        assert_eq!(inv.slots[1], Some(ItemStack { kind: ItemKind::Dirt, count: 42 }));
+        assert_eq!(inv.slots[1], Some(ItemStack { item: ItemId::block(BlockId(1)), count: 42 }));
 
         region.rollback_last_event();
         assert_eq!(before, crate::state_hash(region.data()), "UiAction must invert bit-exact");
