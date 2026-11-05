@@ -88,6 +88,30 @@ impl ItemPile {
     }
 }
 
+thread_local! {
+    /// Items destroyed by the pile caps on this thread (metrics only: never
+    /// state, never hashed, never undone — a client replay counts again).
+    /// `Region::handle_event` attributes each event's share to its region.
+    static ITEMS_DESTROYED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Items the pile caps have destroyed on this thread so far (see
+/// `ITEMS_DESTROYED`); read before and after a unit of work for its share.
+pub fn items_destroyed_on_thread() -> u64 {
+    ITEMS_DESTROYED.with(|c| c.get())
+}
+
+/// The one place pile items are destroyed from: a stack no pile in reach
+/// could take (deposit or re-settle overflow) or a pile evicted by
+/// [`PILES_PER_REGION_MAX`]. Logs and counts it; returns `n`.
+fn record_destroyed(n: u32, at: BlockPos, why: &str) -> u32 {
+    if n > 0 {
+        log::debug!("[item_piles] destroyed {n} items near {at:?}: {why}");
+        ITEMS_DESTROYED.with(|c| c.set(c.get() + u64::from(n)));
+    }
+    n
+}
+
 /// What the renderer needs of a pile.
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PileView {
@@ -188,41 +212,48 @@ impl Rollback {
     /// Drops `stack` at `at` (Decision 1): settles, merges into nearby piles,
     /// else starts stacks in the rest cell or a free cell nearby. The new
     /// items despawn at `tick + PILE_DESPAWN_TICKS` and can be picked up from
-    /// `tick + pickup_delay`. Returns how many items the caps destroyed (0
-    /// normally). Emits `SetItemPiles` both ways.
+    /// `tick + pickup_delay`. Returns how many items the caps destroyed —
+    /// overflow plus any evicted pile's items (0 normally); every one is
+    /// counted (`record_destroyed`). Emits `SetItemPiles` both ways.
     pub fn deposit_items_safe(&mut self, at: BlockPos, stack: ItemStack, tick: u64, pickup_delay: u64) -> u32 {
         let mut ov = PileOverlay::new(&self.data.item_piles);
-        let lost = plan_deposit(self, &mut ov, at, stack, tick + PILE_DESPAWN_TICKS, tick + pickup_delay);
-        let changes = self.capped(ov);
+        let overflow = plan_deposit(self, &mut ov, at, stack, tick + PILE_DESPAWN_TICKS, tick + pickup_delay);
+        let (changes, evicted) = self.capped(ov);
         self.write_piles_safe(changes);
-        lost
+        record_destroyed(overflow, at, "deposit overflow") + record_destroyed(evicted, at, "pile cap eviction")
     }
 
     /// Takes the pile at `cell` away and deposits its stacks again from
     /// `cell`, keeping its expiry and pickup tick: it falls if its support
     /// went, or rises out of a block placed into its cell. `tick` is the
     /// current tick (the pile keeps its own times, so it is not read).
-    pub fn resettle_pile_safe(&mut self, cell: BlockPos, tick: u64) {
+    /// Returns the items destroyed (counted, as for a deposit).
+    pub fn resettle_pile_safe(&mut self, cell: BlockPos, tick: u64) -> u32 {
         let _ = tick;
         let mut ov = PileOverlay::new(&self.data.item_piles);
-        let Some(pile) = ov.slot(cell).take() else { return };
+        let Some(pile) = ov.slot(cell).take() else { return 0 };
+        let mut overflow = 0;
         for s in pile.stacks {
-            plan_deposit(self, &mut ov, cell, s, pile.expire_tick, pile.pickup_after_tick);
+            overflow += plan_deposit(self, &mut ov, cell, s, pile.expire_tick, pile.pickup_after_tick);
         }
-        let changes = self.capped(ov);
+        let (changes, evicted) = self.capped(ov);
         self.write_piles_safe(changes);
+        record_destroyed(overflow, cell, "re-settle overflow") + record_destroyed(evicted, cell, "pile cap eviction")
     }
 
     /// After block `pos` was written: a pile pushed up out of it, or the
     /// pile it held up falls. Called by every terrain write in `edit.rs`.
-    pub(crate) fn piles_after_write_safe(&mut self, pos: BlockPos) {
+    /// Returns the items destroyed (already counted).
+    pub(crate) fn piles_after_write_safe(&mut self, pos: BlockPos) -> u32 {
         if self.data.item_piles.is_empty() {
-            return;
+            return 0;
         }
         let tick = *self.data.tick as u64;
         let cell = if self.pile_support(pos) { pos } else { [pos[0], pos[1] + 1, pos[2]] };
         if self.data.item_piles.contains_key(&cell) {
-            self.resettle_pile_safe(cell, tick);
+            self.resettle_pile_safe(cell, tick)
+        } else {
+            0
         }
     }
 
@@ -316,8 +347,9 @@ impl Rollback {
 
     /// `ov`'s changes, plus the evictions that keep the region at
     /// [`PILES_PER_REGION_MAX`]: the earliest-expiring piles this edit did
-    /// not touch.
-    fn capped(&self, mut ov: PileOverlay<'_>) -> Vec<(BlockPos, Option<ItemPile>)> {
+    /// not touch — and the evicted piles' item count.
+    fn capped(&self, mut ov: PileOverlay<'_>) -> (Vec<(BlockPos, Option<ItemPile>)>, u32) {
+        let mut evicted = 0;
         let mut over = ov.len().saturating_sub(PILES_PER_REGION_MAX);
         if over > 0 {
             let mut evict = Vec::new();
@@ -331,10 +363,10 @@ impl Rollback {
                 }
             }
             for p in evict {
-                *ov.slot(p) = None;
+                evicted += ov.slot(p).take().map_or(0, |pile| pile.count());
             }
         }
-        ov.into_changes()
+        (ov.into_changes(), evicted)
     }
 
     /// The one write funnel: sets or clears each cell's pile and its expiry

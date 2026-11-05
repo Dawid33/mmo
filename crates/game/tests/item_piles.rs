@@ -282,7 +282,9 @@ fn cap_evicts_earliest() {
         }
     });
     assert_eq!(region.data().item_piles().len(), PILES_PER_REGION_MAX);
-    deposit(&mut region, [5, 4, 5], stack(STICK, 1), tick);
+    let counted = game::item_piles::items_destroyed_on_thread();
+    assert_eq!(deposit(&mut region, [5, 4, 5], stack(STICK, 1), tick), 1, "the evicted pile's one item is reported");
+    assert_eq!(game::item_piles::items_destroyed_on_thread() - counted, 1, "and counted");
     let all = region.data().item_piles();
     assert_eq!(all.len(), PILES_PER_REGION_MAX);
     assert!(!all.contains_key(&[0, 1, 0]), "the earliest-expiring pile was evicted");
@@ -370,4 +372,57 @@ fn closing_inventory_drops_what_does_not_fit_at_the_feet() {
     assert!(pile.pickup_after_tick >= PICKUP_DELAY_TICKS, "not picked straight back up");
     region.rollback_last_event();
     assert_eq!(before, state_hash(region.data()));
+}
+
+/// A pile whose support breaks falls onto a full pile, and every cell
+/// around its rest cell that could take a stack is full too: its items are
+/// destroyed, reported and counted, and nothing else changes.
+#[test]
+fn resettle_into_full_neighbourhood_counts_loss() {
+    let mut region = region();
+    let full = vec![stack(DIRT, MAX_STACK); game::PILE_MAX_STACKS];
+    let total = MAX_STACK * game::PILE_MAX_STACKS as u32;
+    // Rest cell (10, 1, 10) first, then its eight floor neighbours: the only
+    // cells within reach that rest where they are (the rest fall or rise).
+    let mut cells = vec![[10, 1, 10]];
+    for dx in -1..=1 {
+        for dz in -1..=1 {
+            if (dx, dz) != (0, 0) {
+                cells.push([10 + dx, 1, 10 + dz]);
+            }
+        }
+    }
+    for &c in &cells {
+        assert_eq!(deposit(&mut region, c, stack(DIRT, total), 0), 0);
+    }
+    // A shelf over the rest cell's pile, with another pile on it.
+    set_block(&mut region, [10, 2, 10], STONE);
+    deposit(&mut region, [10, 3, 10], stack(STICK, 5), 0);
+    assert_eq!(piles(&region).len(), cells.len() + 1);
+    let full_piles: Vec<_> = cells.iter().map(|&c| (c, region.data().item_piles()[&c].clone())).collect();
+    for (_, p) in &full_piles {
+        assert_eq!(p.stacks, full);
+    }
+
+    // The shelf is dug out through orders (the batched clear path), as
+    // region events, so the region's own counter sees the loss too.
+    region.handle_event(GameEventKind::CreateClient(0)).unwrap();
+    region.forget_last_event();
+    let _ = region.take_items_destroyed();
+    let counted = game::item_piles::items_destroyed_on_thread();
+    let shelf = game::TileBox::new([10, 2, 10], [10, 2, 10]);
+    let op = game::OpId { client: 0, seq: 1 };
+    let dig = game::Order::Designate { op, kind: game::DesignationKind::Dig, priority: game::DEFAULT_PRIORITY, area: shelf };
+    for order in [dig, game::Order::DevCompleteAll] {
+        region.handle_event(GameEventKind::Order(0, order)).unwrap();
+        region.forget_last_event();
+    }
+    assert_eq!(game::item_piles::items_destroyed_on_thread() - counted, 5, "the stick pile's 5 items, counted once");
+    assert_eq!(region.take_items_destroyed(), 5, "attributed to the region");
+    assert_eq!(region.take_items_destroyed(), 0, "and drained");
+    let after = region.data().item_piles();
+    assert_eq!(after.len(), cells.len(), "the stick pile is gone");
+    for (c, p) in &full_piles {
+        assert_eq!(&after[c], p, "{c:?} unchanged");
+    }
 }

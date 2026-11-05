@@ -48,7 +48,9 @@ impl Rollback {
         match feet {
             Some(feet) => {
                 let tick = *self.data.tick as u64;
-                self.deposit_items_safe(crate::feet_tile(feet), stack, tick, crate::PICKUP_DELAY_TICKS);
+                // A loss to the caps is counted where it happens.
+                let _destroyed =
+                    self.deposit_items_safe(crate::feet_tile(feet), stack, tick, crate::PICKUP_DELAY_TICKS);
             }
             None => {
                 if let Some(c) = self.data.clients.get_mut(&client) {
@@ -181,6 +183,10 @@ pub struct Region {
     /// budget reporter (native only — see `RegionTickPerf`).
     #[cfg(not(target_arch = "wasm32"))]
     tick_perf: RegionTickPerf,
+    /// Items the pile caps destroyed in this region's events since the last
+    /// `take_items_destroyed` (metrics only; not state, not hashed — a
+    /// client replay counts again).
+    items_destroyed: u64,
 }
 
 /// Compact one-line description of a game event for reconcile tracing.
@@ -233,6 +239,7 @@ impl Region {
             last_confirmed_id: None,
             #[cfg(not(target_arch = "wasm32"))]
             tick_perf: RegionTickPerf::default(),
+            items_destroyed: 0,
         }
     }
 
@@ -609,6 +616,7 @@ impl Region {
     /// Handle a client event.
     pub fn handle_event(&mut self, event: GameEventKind) -> Result<GameEvent, GameError> {
         let event = GameEvent::new(event, *self.data.next_game_event_id, self.id);
+        let destroyed_before = crate::item_piles::items_destroyed_on_thread();
         self.data.new_transaction();
         self.data.next_game_event_id.update(|n| *n += 1);
         let _b = &event.kind;
@@ -808,8 +816,15 @@ impl Region {
                 self.data.apply_order_safe(client_id, order);
             }
         }
+        self.items_destroyed += crate::item_piles::items_destroyed_on_thread() - destroyed_before;
         self.event_log.push_back(event.clone());
         Ok(event)
+    }
+
+    /// Items the pile caps destroyed in this region's events since the
+    /// previous call; resets it (metrics only).
+    pub fn take_items_destroyed(&mut self) -> u64 {
+        std::mem::take(&mut self.items_destroyed)
     }
 
     pub fn build_region_server_packet(&self, region_id: &RegionId) -> ServerPacket {

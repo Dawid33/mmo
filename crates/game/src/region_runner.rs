@@ -256,6 +256,12 @@ impl RegionRunner {
         std::mem::take(&mut self.state_hash_cost)
     }
 
+    /// Items the region's pile caps destroyed since the previous call
+    /// (`Region::take_items_destroyed`); resets it. Metrics only.
+    pub fn take_items_destroyed(&mut self) -> u64 {
+        self.region.take_items_destroyed()
+    }
+
     /// Wall time of the baseline `terrain_fingerprint` taken in `new`
     /// (the `terrain_hash_ms` of the server's `region_genesis` line).
     pub fn baseline_hash_time(&self) -> std::time::Duration {

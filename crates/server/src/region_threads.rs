@@ -206,8 +206,10 @@ impl TickMetrics {
             let (hash_checks, hash_total, hash_max) = runner.take_terrain_hash_cost();
             // The VOXEL_STATE_HASH_INTERVAL whole-state hash, also in-tick.
             let (state_checks, state_total, state_max) = runner.take_state_hash_cost();
+            // Dropped items the pile caps destroyed (`game::item_piles`).
+            let items_destroyed = runner.take_items_destroyed();
             log::info!(
-                "[region ({},{})] ticks={} avg={:.2}ms max={:.2}ms budget={:.1}% overruns={} | terrain_hash n={} sum={:.1}ms max={:.1}ms | state_hash n={} sum={:.1}ms max={:.1}ms",
+                "[region ({},{})] ticks={} avg={:.2}ms max={:.2}ms budget={:.1}% overruns={} | terrain_hash n={} sum={:.1}ms max={:.1}ms | state_hash n={} sum={:.1}ms max={:.1}ms | items_destroyed={}",
                 id.x,
                 id.z,
                 self.ticks,
@@ -221,10 +223,12 @@ impl TickMetrics {
                 state_checks,
                 game::perf::ms(state_total),
                 game::perf::ms(state_max),
+                items_destroyed,
             );
         } else {
             let _ = runner.take_terrain_hash_cost();
             let _ = runner.take_state_hash_cost();
+            let _ = runner.take_items_destroyed();
         }
         *self = TickMetrics::new();
     }

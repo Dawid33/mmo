@@ -270,7 +270,8 @@ impl Rollback {
         }
         if changed {
             // A pile pushed up out of the new block, or left unsupported.
-            self.piles_after_write_safe(pos);
+            // Any loss is counted where it happens (`item_piles`).
+            let _destroyed = self.piles_after_write_safe(pos);
         }
         changed
     }
@@ -607,7 +608,7 @@ impl Rollback {
         }
         // Piles follow their support once every block is written.
         for &pos in &written {
-            self.piles_after_write_safe(pos);
+            let _destroyed = self.piles_after_write_safe(pos);
         }
         written
     }
