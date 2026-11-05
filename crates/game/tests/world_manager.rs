@@ -614,24 +614,61 @@ fn reconnect_same_token_restores_body_and_inventory() {
 }
 
 #[test]
-fn second_session_same_player_refused() {
+fn second_session_takes_over() {
     let mut h = floored_harness();
     h.event(session(0, 0, None), 0);
+    rearrange_inventory(&mut h, 0);
+    let at = place_body(&mut h, SPAWN_REGION, 0, [4, 1, 9]);
     h.drain_packets();
+    // The same player connects again while its first session is still open
+    // (a crashed client whose connection has not timed out yet).
     h.event(session(1, 0, None), 10);
     let packets = h.drain_packets();
     assert!(
-        packets.iter().any(|(to, p)| *to == Some(1) && matches!(p, ServerPacket::Refused(why) if why == "already playing")),
-        "{packets:?}"
+        packets.iter().any(|(to, p)| *to == Some(0) && matches!(p, ServerPacket::Refused(why) if why == "logged in elsewhere")),
+        "the old session is told why it ends: {packets:?}"
     );
-    assert!(packets.iter().all(|(to, p)| *to != Some(1) || matches!(p, ServerPacket::Refused(_))), "{packets:?}");
+    assert!(!packets.iter().any(|(to, p)| *to == Some(1) && matches!(p, ServerPacket::Refused(_))), "{packets:?}");
     assert_eq!(h.manager.depths().sessions, 1);
-    assert_eq!(bodies_in(&mut h, SPAWN_REGION), 1, "no duplicate body");
-    // The refused connection closing parks nobody.
-    h.event(ServerEvent::ClientDisconnected(1), 20);
+    assert_eq!(bodies_in(&mut h, SPAWN_REGION), 1, "exactly one body");
+    assert!(body_of(&mut h, SPAWN_REGION, 0).is_none(), "the old session has no body");
+    assert_eq!(body_of(&mut h, SPAWN_REGION, 1), Some(at), "the new session has the player's body");
+    assert!(rearranged(&client_in(&mut h, SPAWN_REGION, 1).unwrap()));
+    // The old connection closing afterwards changes nothing.
+    h.event(ServerEvent::ClientDisconnected(0), 20);
     assert_eq!(h.manager.depths().sessions, 1);
-    assert!(body_of(&mut h, SPAWN_REGION, 0).is_some(), "the first session keeps its body");
-    assert!(h.manager.take_player_saves().is_empty());
+    assert_eq!(body_of(&mut h, SPAWN_REGION, 1), Some(at));
+    assert_eq!(h.manager.take_player_saves().len(), 1, "one park: the takeover's");
+}
+
+#[test]
+fn park_in_dead_region_does_not_lock_out() {
+    let mut h = floored_harness();
+    h.event(session(0, 0, None), 0);
+    rearrange_inventory(&mut h, 0);
+    // What the store holds for the player: the last autosave's record.
+    h.manager.request_save();
+    h.settle(0);
+    let (_, stored) = h.manager.take_player_saves().pop().expect("autosaved");
+    // The park goes out, then the region thread dies before answering it.
+    h.manager.handle_server_event(ServerEvent::ClientDisconnected(0), 10);
+    h.manager.spawner_mut().kill(SPAWN_REGION);
+    // The player reconnects while the park is (as far as the manager knows)
+    // still in flight: the restore waits.
+    h.event(session(1, 0, Some(stored)), 20);
+    // The death is noticed (here: the grace-period Shutdown finds the region
+    // gone): the park is settled from the store's record and the player is in.
+    let late = 20 + UNLOAD_GRACE_MS + 1;
+    h.manager.maintain(late);
+    h.settle(late);
+    h.manager.maintain(late);
+    h.settle(late);
+    assert_eq!(bodies_in(&mut h, SPAWN_REGION), 1, "the player is back, once");
+    assert!(rearranged(&client_in(&mut h, SPAWN_REGION, 1).expect("restored")));
+    h.event(ServerEvent::ClientPacket(ClientPacket::RequestPlayerRegion, 1), late);
+    assert!(h.drain_packets().iter().any(|(to, p)| {
+        *to == Some(1) && matches!(p, ServerPacket::PlayerRegion(Some(rc), 1) if *rc == SPAWN_REGION)
+    }));
 }
 
 #[test]

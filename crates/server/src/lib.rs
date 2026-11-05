@@ -181,6 +181,15 @@ impl ClientSink {
             }
         }
     }
+
+    /// Close the connection with application code 1 (`refused`): the session
+    /// was ended by the server (`ServerPacket::Refused` already sent).
+    pub fn close_refused(&self) {
+        match self {
+            ClientSink::Quinn(conn) => conn.close(1u32.into(), b"refused"),
+            ClientSink::Web(session) => session.close(wtransport::VarInt::from_u32(1), b"refused"),
+        }
+    }
 }
 
 /// Wrapper around RegionGroup with additional bookeeping / networking
@@ -289,6 +298,20 @@ impl WorldIngress {
                     Some(id) => {
                         let sink = writer_sinks.get(&id).map(|e| e.value().clone());
                         if let Some(sink) = sink {
+                            if matches!(event, ServerPacket::Refused(_)) {
+                                // The manager ended this session (its player
+                                // logged in elsewhere): nothing more goes to it,
+                                // and the connection closes once the reason has
+                                // had a moment to arrive. Its connection task
+                                // then reports the disconnect (a no-op by now).
+                                writer_sinks.remove(&id);
+                                send_bounded(sink.clone(), packet.clone()).await;
+                                tokio::spawn(async move {
+                                    tokio::time::sleep(REFUSE_FLUSH).await;
+                                    sink.close_refused();
+                                });
+                                continue;
+                            }
                             let send_started = std::time::Instant::now();
                             let timed_out = send_bounded(sink, packet.clone()).await;
                             // Region snapshots are the join's big packets (MBs

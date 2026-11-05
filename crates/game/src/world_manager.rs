@@ -341,8 +341,9 @@ pub struct ManagerDepths {
     pub terrain_cache: usize,
 }
 
-/// The refusal a second session of an online player gets (`ServerPacket::Refused`).
-pub const ALREADY_PLAYING: &str = "already playing";
+/// What a session is told when a new session of its player takes over
+/// (`ServerPacket::Refused`); the server edge then closes it.
+pub const LOGGED_IN_ELSEWHERE: &str = "logged in elsewhere";
 
 /// A park in flight (`WorldManager::parking`).
 #[derive(Clone, Copy, Debug)]
@@ -417,7 +418,7 @@ pub struct WorldManager<S: RegionSpawner> {
     adventurer_of: BTreeMap<ClientId, SiteId>,
     /// The stable player behind each connected client, as the network edge
     /// resolved it from the connection's `Hello` token. Dropped on disconnect.
-    /// A player is online at most once: a second session is refused.
+    /// A player is online at most once: a second session takes over.
     player_of: BTreeMap<ClientId, PlayerId>,
     /// Disconnected clients whose `ParkPlayer` is on its way: the player, the
     /// region the body is in (followed across a seam crossing in flight) and the
@@ -437,6 +438,9 @@ pub struct WorldManager<S: RegionSpawner> {
     /// Player records for the player store, collected since the last
     /// [`Self::take_player_saves`]: parks and autosave extracts, oldest first.
     player_saves: Vec<(PlayerId, PlayerRecord)>,
+    /// The `now_ms` of the latest call in (server event, region output,
+    /// maintenance), for paths that learn of a lost region without one.
+    clock_ms: u64,
     /// The calendar day last broadcast (`ServerPacket::Calendar`).
     calendar_day: Option<u64>,
     /// What clients were last told of the sites, bucketed: (site, abandoned, population
@@ -502,6 +506,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             awaiting_park: BTreeMap::new(),
             deferred_packets: BTreeMap::new(),
             player_saves: Vec::new(),
+            clock_ms: 0,
             calendar_day: None,
             sites_key: Vec::new(),
             out,
@@ -866,6 +871,7 @@ impl<S: RegionSpawner> WorldManager<S> {
 
     /// Returns false when the server should quit (a Quit game event).
     pub fn handle_server_event(&mut self, ev: ServerEvent, now_ms: u64) -> bool {
+        self.clock_ms = self.clock_ms.max(now_ms);
         match ev {
             ServerEvent::ClientConnected { client: id, player, record } => {
                 if !self.client_connected(id, player, record, now_ms) {
@@ -980,6 +986,7 @@ impl<S: RegionSpawner> WorldManager<S> {
     }
 
     pub fn handle_region_output(&mut self, rc: RegionCoords, output: RegionOutput, now_ms: u64) {
+        self.clock_ms = self.clock_ms.max(now_ms);
         match output {
             RegionOutput::EventProcessed(event) => {
                 if let Some(link) = self.regions.get(&rc) {
@@ -1053,13 +1060,24 @@ impl<S: RegionSpawner> WorldManager<S> {
                     .map(|l| l.resubscribe_pending)
                     .unwrap_or_default();
                 self.spawner.reap(rc);
-                if let Some(events) = self.pending_events.remove(&rc) {
+                let events = self.pending_events.remove(&rc).unwrap_or_default();
+                // A park answered before `Stopped`; one still open here, with no
+                // `ParkPlayer` queued for the region's next run, was lost.
+                let queued: BTreeSet<ClientId> = events
+                    .iter()
+                    .filter_map(|e| match e {
+                        RegionInput::Event(GameEventKind::ParkPlayer(c)) => Some(*c),
+                        _ => None,
+                    })
+                    .collect();
+                if !events.is_empty() {
                     self.ensure_running(rc);
                     for input in events {
                         self.send_to_region(rc, input);
                     }
                     self.refresh_keepalive(rc, now_ms);
                 }
+                self.settle_lost_parks(rc, &queued);
                 for client in pending {
                     // A client asked for this region while it was stopping:
                     // now that the state is parked, cycle it right back in.
@@ -1138,6 +1156,7 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// then grace-period unloads: a region with no subscribers and no connected
     /// client's player entity parks after UNLOAD_GRACE_MS.
     pub fn maintain(&mut self, now_ms: u64) {
+        self.clock_ms = self.clock_ms.max(now_ms);
         if let Some(to) = self.calendar_now(now_ms) {
             self.history.as_mut().unwrap().advance(to);
             self.deliver_directives();
@@ -1172,6 +1191,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                 self.pending_events.remove(&rc);
                 self.spawner.reap(rc);
                 self.history_region_lost(rc);
+                self.settle_lost_parks(rc, &BTreeSet::new());
             } else if let Some(history) = self.history.as_mut() {
                 history.region_stopping(rc);
             }
@@ -1194,7 +1214,11 @@ impl<S: RegionSpawner> WorldManager<S> {
             }
         }
         for rc in dead {
+            self.regions.remove(&rc);
+            self.pending_events.remove(&rc);
+            self.spawner.reap(rc);
             self.history_region_lost(rc);
+            self.settle_lost_parks(rc, &BTreeSet::new());
         }
     }
 
@@ -1290,12 +1314,19 @@ impl<S: RegionSpawner> WorldManager<S> {
         std::mem::take(&mut self.player_saves)
     }
 
-    /// A session started. `false` = refused (the player is already online).
+    /// A session started. A session of the same player already online is
+    /// ended in its favour. Always `true` (kept for a future refusal).
     fn client_connected(&mut self, id: ClientId, player: PlayerId, record: Option<PlayerRecord>, now_ms: u64) -> bool {
-        if self.player_of.iter().any(|(c, p)| *p == player && *c != id) {
-            log::info!("client {id}: player {} is already playing; refused", player.0);
-            let _ = self.out.send((Some(id), ServerPacket::Refused(ALREADY_PLAYING.to_string())));
-            return false;
+        let elsewhere: Vec<ClientId> =
+            self.player_of.iter().filter(|(c, p)| **p == player && **c != id).map(|(c, _)| *c).collect();
+        for old in elsewhere {
+            // The new session takes over (a crashed client's session lingers
+            // until the transport times out): the old one is told why and
+            // ended — the server edge closes it — and its player parks, so the
+            // new session is restored once the park is back.
+            log::info!("client {id}: player {} takes over from client {old}", player.0);
+            let _ = self.out.send((Some(old), ServerPacket::Refused(LOGGED_IN_ELSEWHERE.to_string())));
+            self.client_disconnected(old, now_ms);
         }
         self.sessions.entry(id).or_default();
         self.player_of.insert(id, player);
@@ -1404,17 +1435,44 @@ impl<S: RegionSpawner> WorldManager<S> {
             }
             None => log::warn!("PlayerParked({client}) from {rc:?}: no body to park"),
         }
-        let Some((waiting, edge_record)) = self.awaiting_park.remove(&p.player) else { return };
+        self.park_settled(p.player, now_ms);
+    }
+
+    /// `player`'s park is over (answered or lost): a session of it waiting for
+    /// the park is placed now — from its parked record, else the record the
+    /// edge read from the store, else as a fresh player — and its held
+    /// requests are replayed.
+    fn park_settled(&mut self, player: PlayerId, now_ms: u64) {
+        let Some((waiting, edge_record)) = self.awaiting_park.remove(&player) else { return };
         if !self.sessions.contains_key(&waiting) {
             return;
         }
-        let record = self.parked_players.remove(&p.player).or(edge_record);
+        let record = self.parked_players.remove(&player).or(edge_record);
         self.place_player(waiting, record, now_ms);
         if self.history.is_some() {
             self.send_claims(waiting);
         }
         for packet in self.deferred_packets.remove(&waiting).unwrap_or_default() {
             self.handle_server_event(ServerEvent::ClientPacket(packet, waiting), now_ms);
+        }
+    }
+
+    /// Region `rc` was lost (its thread died, or it stopped without answering)
+    /// with parks in flight: those bodies are gone, so the parks end with no new
+    /// record (the player keeps whatever the store last had), and a session of
+    /// each player that waits for its park is let in. `queued`: clients whose
+    /// `ParkPlayer` is queued for the region's next run (still in flight).
+    fn settle_lost_parks(&mut self, rc: RegionCoords, queued: &BTreeSet<ClientId>) {
+        let lost: Vec<(ClientId, PlayerId)> = self
+            .parking
+            .iter()
+            .filter(|(c, p)| p.region == rc && !queued.contains(c))
+            .map(|(c, p)| (*c, p.player))
+            .collect();
+        for (client, player) in lost {
+            log::error!("region {rc:?} was lost with client {client}'s park in flight (player {})", player.0);
+            self.parking.remove(&client);
+            self.park_settled(player, self.clock_ms);
         }
     }
 
@@ -1624,6 +1682,8 @@ impl<S: RegionSpawner> WorldManager<S> {
         for client in subscribers {
             let _ = link.input.send(RegionInput::RequestSnapshot(client));
         }
+        // Bodies being parked there died with it.
+        self.settle_lost_parks(rc, &BTreeSet::new());
         false
     }
 
