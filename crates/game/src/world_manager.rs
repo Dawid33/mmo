@@ -14,7 +14,7 @@ use crate::{
     Chunk, ChunkCoords, ClientId, ClientPacket, Column, ColumnCoords, EntityKind, TerrainSnapshot, GameEventKind,
     LodBuildJob, LodBuilder, LodKey, LodPayload, LodResult, Region, RegionCoords, RegionInput,
     RegionOutput, RegionRunner, RegionSave, RegionSeed, SerializedRegion, ServerPacket, PlayRefusal, WorldMap, EmbarkRequest,
-    Order, PlayMode,
+    Order, PlayMode, PlayerId, PlayerRecord,
 };
 
 /// Level hint for an adventure landing: above any surface, so it clamps to the
@@ -57,8 +57,23 @@ pub const fn pristine_cache_max(region_blocks: usize) -> usize {
 #[derive(Debug)]
 pub enum ServerEvent {
     ClientPacket(ClientPacket, ClientId),
-    ClientConnected(ClientId),
+    /// A session started: the network edge has resolved the connection's
+    /// `Hello` token to `player`, with the record the store keeps for it
+    /// (`None` for a new player, or one never parked).
+    ClientConnected {
+        client: ClientId,
+        player: crate::PlayerId,
+        record: Option<crate::PlayerRecord>,
+    },
     ClientDisconnected(ClientId),
+}
+
+impl ServerEvent {
+    /// A session for an in-process harness or test: the player id is the
+    /// client id and there is no saved record.
+    pub fn connected(client: ClientId) -> Self {
+        Self::ClientConnected { client, player: crate::PlayerId(client as u64), record: None }
+    }
 }
 
 pub type RegionGenerator = Box<dyn FnMut(RegionCoords) -> Vec<(ColumnCoords, Column)> + Send>;
@@ -358,6 +373,13 @@ pub struct WorldManager<S: RegionSpawner> {
     /// holds a fortress or an adventure, never both. Not persisted; dropped on
     /// disconnect (an adventurer is not a history object yet).
     adventurer_of: BTreeMap<ClientId, SiteId>,
+    /// The stable player behind each connected client, as the network edge
+    /// resolved it from the connection's `Hello` token. Dropped on disconnect.
+    player_of: BTreeMap<ClientId, PlayerId>,
+    /// The record the player store held for a client's player at connect,
+    /// kept until the body is restored from it (not yet: players still start
+    /// fresh at the spawn region). Dropped on disconnect.
+    connect_records: BTreeMap<ClientId, PlayerRecord>,
     /// The calendar day last broadcast (`ServerPacket::Calendar`).
     calendar_day: Option<u64>,
     /// What clients were last told of the sites, bucketed: (site, abandoned, population
@@ -417,6 +439,8 @@ impl<S: RegionSpawner> WorldManager<S> {
             calendar_anchor: (0, CalendarTick(0)),
             fortress_of: BTreeMap::new(),
             adventurer_of: BTreeMap::new(),
+            player_of: BTreeMap::new(),
+            connect_records: BTreeMap::new(),
             calendar_day: None,
             sites_key: Vec::new(),
             out,
@@ -793,8 +817,17 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// Returns false when the server should quit (a Quit game event).
     pub fn handle_server_event(&mut self, ev: ServerEvent, now_ms: u64) -> bool {
         match ev {
-            ServerEvent::ClientConnected(id) => {
+            ServerEvent::ClientConnected { client: id, player, record } => {
                 self.sessions.insert(id, Session::default());
+                self.player_of.insert(id, player);
+                match record {
+                    Some(record) => {
+                        self.connect_records.insert(id, record);
+                    }
+                    None => {
+                        self.connect_records.remove(&id);
+                    }
+                }
                 if !self.homes.contains_key(&id) {
                     // Server-authoritative player creation, once per client.
                     self.ensure_running(SPAWN_REGION);
@@ -820,6 +853,9 @@ impl<S: RegionSpawner> WorldManager<S> {
             }
             ServerEvent::ClientDisconnected(id) => self.client_disconnected(id, now_ms),
             ServerEvent::ClientPacket(packet, id) => match packet {
+                // The network edge consumes the handshake; in-process
+                // harnesses may forward one. Nothing to do here.
+                ClientPacket::Hello { .. } => {}
                 ClientPacket::RequestPlayerRegion => {
                     let home = self.homes.get(&id).copied();
                     let _ = self.out.send((Some(id), ServerPacket::PlayerRegion(home, id)));
@@ -1168,6 +1204,8 @@ impl<S: RegionSpawner> WorldManager<S> {
     fn client_disconnected(&mut self, id: ClientId, now_ms: u64) {
         // Unlike `fortress_of`, an adventure is not kept for a reconnect.
         self.adventurer_of.remove(&id);
+        self.player_of.remove(&id);
+        self.connect_records.remove(&id);
         if let Some(session) = self.sessions.remove(&id) {
             for rc in session.subscribed {
                 self.unsubscribe_link(id, rc, now_ms);
@@ -1185,6 +1223,16 @@ impl<S: RegionSpawner> WorldManager<S> {
         if let Some(home) = self.homes.get(&id).copied() {
             self.refresh_keepalive(home, now_ms);
         }
+    }
+
+    /// The stable player behind a connected client.
+    pub fn player_of(&self, client: ClientId) -> Option<PlayerId> {
+        self.player_of.get(&client).copied()
+    }
+
+    /// The record the store held for a connected client's player at connect.
+    pub fn connect_record(&self, client: ClientId) -> Option<&PlayerRecord> {
+        self.connect_records.get(&client)
     }
 
     pub fn depths(&self) -> ManagerDepths {

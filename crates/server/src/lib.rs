@@ -129,6 +129,7 @@ fn build_server_runtime(worker_threads: usize) -> tokio::runtime::Runtime {
 
 pub mod lod_workers;
 pub mod perf;
+pub mod player_store;
 pub mod region_store;
 pub mod region_threads;
 pub mod webtransport;
@@ -203,11 +204,18 @@ pub struct WorldIngress {
     port: u16,
     /// Whether the WebTransport ingress (`ip`:[`WEBTRANSPORT_PORT`]) runs.
     webtransport: bool,
+    /// Resolves each connection's `Hello` token before its session starts.
+    players: player_store::SharedPlayerStore,
 }
 
 impl WorldIngress {
-    pub fn new(ip: std::net::IpAddr, port: u16, webtransport: bool) -> Self {
-        Self { ip, port, webtransport }
+    pub fn new(
+        ip: std::net::IpAddr,
+        port: u16,
+        webtransport: bool,
+        players: player_store::SharedPlayerStore,
+    ) -> Self {
+        Self { ip, port, webtransport, players }
     }
 
     /// ## Network Loop
@@ -315,6 +323,7 @@ impl WorldIngress {
             let wt_send = send.clone();
             let wt_sinks = sinks.clone();
             let wt_next = next_client_id.clone();
+            let wt_players = self.players.clone();
             let wt_addr = std::net::SocketAddr::new(self.ip, WEBTRANSPORT_PORT);
             let certs = crate::webtransport::cert_source_from(
                 std::env::var(crate::webtransport::WT_CERT_ENV).ok().as_deref(),
@@ -328,6 +337,7 @@ impl WorldIngress {
                     wt_send,
                     wt_sinks,
                     wt_next,
+                    wt_players,
                 )
                 .await
                 {
@@ -341,16 +351,26 @@ impl WorldIngress {
         while let Some(conn) = endpoint.accept().await {
             let send = send.clone();
             let sinks = sinks.clone();
+            let players = self.players.clone();
             let id = next_client_id.fetch_add(1, Ordering::SeqCst);
             tokio::spawn(async move {
                 info!("accepting connection");
-                let connection = conn.await.unwrap();
-                game::perf_event!("client_connected", "client={id} transport=quic");
+                let connection = match conn.await {
+                    Ok(connection) => connection,
+                    Err(e) => return log::warn!("quic connection failed: {e}"),
+                };
+                // The handshake comes first: no session (and no sink) exists
+                // until the connection's Hello has resolved to a player.
+                let (player, record) = match quic_hello(&connection, &players).await {
+                    Ok(resolved) => resolved,
+                    Err(why) => return refuse_quic(&connection, &why).await,
+                };
+                game::perf_event!("client_connected", "client={id} player={} transport=quic", player.0);
                 sinks.insert(id, ClientSink::Quinn(connection.clone()));
-                // Announce before any of this client's packets can be read:
-                // guarantees the player exists before its first request is
-                // served.
-                send.send(ServerEvent::ClientConnected(id)).unwrap();
+                // Announce before any of this client's other packets can be
+                // read: guarantees the player exists before its first request
+                // is served.
+                send.send(ServerEvent::ClientConnected { client: id, player, record }).unwrap();
 
                 let fut = handle_connection(connection, send.clone(), id);
                 tokio::spawn(async move {
@@ -365,6 +385,42 @@ impl WorldIngress {
             });
         }
     }
+}
+
+/// How long a refused connection waits for its `Refused` packet to be
+/// acknowledged before it is closed.
+const REFUSE_FLUSH: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Read a QUIC connection's first packet (within
+/// [`player_store::HELLO_TIMEOUT`]) and resolve it as the handshake.
+async fn quic_hello(
+    connection: &quinn::Connection,
+    players: &player_store::SharedPlayerStore,
+) -> Result<(game::PlayerId, Option<game::PlayerRecord>), String> {
+    let first = tokio::time::timeout(player_store::HELLO_TIMEOUT, async {
+        let mut stream = connection.accept_uni().await.map_err(|e| format!("no first packet: {e}"))?;
+        let bytes = stream
+            .read_to_end(player_store::HELLO_MAX_BYTES)
+            .await
+            .map_err(|e| format!("first packet unreadable: {e}"))?;
+        game::decode_packet::<ClientPacket>(&bytes).map_err(|e| format!("first packet does not decode: {e}"))
+    })
+    .await
+    .map_err(|_| format!("no Hello within {:?}", player_store::HELLO_TIMEOUT))??;
+    player_store::resolve_hello(players, first).await
+}
+
+/// Tell the client why (best effort), then close the connection.
+async fn refuse_quic(connection: &quinn::Connection, why: &str) {
+    log::warn!("[server] refusing a connection from {}: {why}", connection.remote_address());
+    if let Ok(packet) = game::encode_packet(&ServerPacket::Refused(why.to_string())) {
+        if let Ok(mut stream) = connection.open_uni().await {
+            if stream.write_all(&packet).await.is_ok() && stream.finish().is_ok() {
+                let _ = tokio::time::timeout(REFUSE_FLUSH, stream.stopped()).await;
+            }
+        }
+    }
+    connection.close(1u32.into(), b"refused");
 }
 
 pub fn run() {
@@ -404,7 +460,21 @@ pub fn run() {
     let port = server_port_from(configured_port.as_deref()).unwrap_or_else(|message| panic!("{message}"));
     let configured_bind = std::env::var(BIND_ADDR_ENV).ok();
     let ip = bind_ip_from(configured_bind.as_deref()).unwrap_or_else(|message| panic!("{message}"));
-    let mut rgi = WorldIngress::new(ip, port, webtransport_enabled(single_player));
+    // The world is chosen before anything calls `forged::active()` (below), and
+    // before the ingress starts: its player store sits next to a forged world.
+    let world_source = world_file::resolve(std::env::var(worldgen::forged::WORLD_FILE_ENV).ok().as_deref());
+    let players: player_store::SharedPlayerStore = match &world_source {
+        world_file::WorldSource::Procedural => player_store::shared(player_store::MemoryPlayerStore::default()),
+        world_file::WorldSource::Forged(path) => {
+            let dir = player_store::players_dir_for(&world_file::from_repo_root(path));
+            let store = player_store::FilePlayerStore::open(dir.clone()).unwrap_or_else(|e| {
+                panic!("cannot open the player store {}: {e} — move it away to start without players", dir.display())
+            });
+            info!("[server] players: {}", dir.display());
+            player_store::shared(store)
+        }
+    };
+    let mut rgi = WorldIngress::new(ip, port, webtransport_enabled(single_player), players.clone());
     let configured_worker_threads = std::env::var("TOKIO_WORKER_THREADS").ok();
     let worker_threads = server_worker_threads(configured_worker_threads.as_deref())
         .unwrap_or_else(|message| panic!("{message}"));
@@ -431,9 +501,8 @@ pub fn run() {
             .unwrap_or_else(|| panic!("block manifest must define \"{name}\""))
     };
     let materials = worldgen::material::Materials::from_names(resolve);
-    // The world must be chosen before anything calls `forged::active()`.
     let mut history_world_path: Option<std::path::PathBuf> = None;
-    match world_file::resolve(std::env::var(worldgen::forged::WORLD_FILE_ENV).ok().as_deref()) {
+    match world_source {
         world_file::WorldSource::Procedural => {
             info!("[server] world: procedural");
             worldgen::forged::install(None);

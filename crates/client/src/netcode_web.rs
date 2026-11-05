@@ -223,13 +223,23 @@ async fn run(server: WebServer, mut incoming_to: Incoming, outgoing: Outgoing, l
     // 4. Write loop: drain outgoing packets. The channel is filled on this
     //    same thread (the sim, or the sim worker's messages), so poll it with
     //    a task that yields to the event loop between drains.
+    // The handshake goes first: the server starts the session once this
+    // `Hello` resolves, and refuses a connection that sends anything else.
+    let mut hello = Some(
+        game::encode_packet(&ClientPacket::Hello { token: crate::player_token::load_or_create_token() })
+            .map_err(|e| JsValue::from_str(&format!("cannot encode Hello: {e}")))?,
+    );
     spawn_local(async move {
         loop {
             if dead.get() {
                 return;
             }
             loop {
-                let payload = match outgoing.next() {
+                let next = match hello.take() {
+                    Some(hello) => Ok(Some(hello)),
+                    None => outgoing.next(),
+                };
+                let payload = match next {
                     Ok(Some(payload)) => payload,
                     Ok(None) => break,
                     Err(()) => {

@@ -9,6 +9,7 @@ pub mod adapter_pick;
 // Compiled unconditionally now (was cfg(any(wasm32, test))): the harness and
 // integration tests need LocalServer in a normal (non-cfg(test)) lib build.
 pub mod local_server;
+pub mod player_token; // this machine's player identity, sent first on every connection
 #[cfg(target_arch = "wasm32")]
 pub mod netcode_web;
 #[cfg(target_arch = "wasm32")]

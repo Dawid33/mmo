@@ -110,7 +110,7 @@ impl World {
     }
 
     fn connect(&mut self, c: ClientId) {
-        self.send(ServerEvent::ClientConnected(c));
+        self.send(ServerEvent::connected(c));
     }
 
     fn packet(&mut self, c: ClientId, packet: ClientPacket) {

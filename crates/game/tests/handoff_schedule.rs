@@ -248,7 +248,7 @@ fn walk_there_and_back(
     schedule: Option<InlineSchedule>,
 ) -> Vec<(RegionCoords, usize, u32)> {
     let mut rig = Rig::new(schedule);
-    rig.event(ServerEvent::ClientConnected(CLIENT));
+    rig.event(ServerEvent::connected(CLIENT));
     for rc in SPAWN_REGION.window_3x3() {
         rig.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(rc), CLIENT));
     }
@@ -390,7 +390,7 @@ fn adventure_floor_columns(rc: RegionCoords) -> Vec<(ColumnCoords, Column)> {
 /// arrive. Panics with the seed on failure.
 fn walk_into_east(seed: u64, schedule: InlineSchedule) {
     let mut rig = Rig::with_floor(Some(schedule), adventure_floor_columns);
-    rig.event(ServerEvent::ClientConnected(CLIENT));
+    rig.event(ServerEvent::connected(CLIENT));
     for rc in SPAWN_REGION.window_3x3() {
         rig.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(rc), CLIENT));
     }
@@ -465,7 +465,7 @@ fn travel_north(seed: u64) {
 
     let mut rig = Rig::with_floor(Some(InlineSchedule::jittery(seed)), floored_region);
     rig.manager.set_history(h, rig.now_ms);
-    rig.event(ServerEvent::ClientConnected(CLIENT));
+    rig.event(ServerEvent::connected(CLIENT));
     for rc in SPAWN_REGION.window_3x3() {
         rig.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(rc), CLIENT));
     }

@@ -65,7 +65,7 @@ impl Harness {
 #[test]
 fn connect_spawns_home_and_creates_player() {
     let mut h = harness();
-    h.event(ServerEvent::ClientConnected(0), 0);
+    h.event(ServerEvent::connected(0), 0);
     assert_eq!(h.manager.running_regions(), vec![SPAWN_REGION]);
     h.event(ServerEvent::ClientPacket(ClientPacket::RequestPlayerRegion, 0), 0);
     let packets = h.drain_packets();
@@ -77,7 +77,7 @@ fn connect_spawns_home_and_creates_player() {
 #[test]
 fn subscribe_spawns_region_and_delivers_snapshot() {
     let mut h = harness();
-    h.event(ServerEvent::ClientConnected(0), 0);
+    h.event(ServerEvent::connected(0), 0);
     h.drain_packets();
     let rc = RegionCoords::new(1, 0);
     h.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(rc), 0), 0);
@@ -91,7 +91,7 @@ fn subscribe_spawns_region_and_delivers_snapshot() {
 #[test]
 fn client_sent_session_events_are_dropped() {
     let mut h = harness();
-    h.event(ServerEvent::ClientConnected(0), 0);
+    h.event(ServerEvent::connected(0), 0);
     let rc = RegionCoords::new(1, 0);
     h.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(rc), 0), 0);
     h.drain_packets();
@@ -120,7 +120,7 @@ fn client_sent_session_events_are_dropped() {
 #[test]
 fn release_then_grace_parks_region_and_resubscribe_restores_it() {
     let mut h = harness();
-    h.event(ServerEvent::ClientConnected(0), 0);
+    h.event(ServerEvent::connected(0), 0);
     let rc = RegionCoords::new(1, 0);
     h.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(rc), 0), 0);
     h.event(ServerEvent::ClientPacket(ClientPacket::ReleaseRegionConnection(rc), 0), 1000);
@@ -147,7 +147,7 @@ fn release_then_grace_parks_region_and_resubscribe_restores_it() {
 #[test]
 fn home_region_survives_zero_subscribers() {
     let mut h = harness();
-    h.event(ServerEvent::ClientConnected(0), 0);
+    h.event(ServerEvent::connected(0), 0);
     // Client subscribes to home then wanders off and releases it.
     h.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(SPAWN_REGION), 0), 0);
     h.event(ServerEvent::ClientPacket(ClientPacket::ReleaseRegionConnection(SPAWN_REGION), 0), 100);
@@ -167,11 +167,11 @@ fn home_region_survives_zero_subscribers() {
 #[test]
 fn reconnect_does_not_create_second_player() {
     let mut h = harness();
-    h.event(ServerEvent::ClientConnected(0), 0);
+    h.event(ServerEvent::connected(0), 0);
     h.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(SPAWN_REGION), 0), 0);
     h.drain_packets();
     h.event(ServerEvent::ClientDisconnected(0), 100);
-    h.event(ServerEvent::ClientConnected(0), 200);
+    h.event(ServerEvent::connected(0), 200);
     h.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(SPAWN_REGION), 0), 200);
     let packets = h.drain_packets();
     let snapshot = packets.iter().find_map(|(_, p)| match p {
@@ -184,7 +184,7 @@ fn reconnect_does_not_create_second_player() {
 #[test]
 fn dead_region_respawns_and_resnapshots_subscribers() {
     let mut h = harness();
-    h.event(ServerEvent::ClientConnected(0), 0);
+    h.event(ServerEvent::connected(0), 0);
     let rc = RegionCoords::new(2, 0);
     h.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(rc), 0), 0);
     h.drain_packets();
@@ -206,7 +206,7 @@ fn dead_region_respawns_and_resnapshots_subscribers() {
 #[test]
 fn disconnect_during_stopping_window_leaves_no_phantom_subscriber() {
     let mut h = harness();
-    h.event(ServerEvent::ClientConnected(0), 0);
+    h.event(ServerEvent::connected(0), 0);
     let rc = RegionCoords::new(3, 0);
     h.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(rc), 0), 0);
     h.event(ServerEvent::ClientPacket(ClientPacket::ReleaseRegionConnection(rc), 0), 1000);
@@ -246,7 +246,7 @@ fn disconnect_during_stopping_window_leaves_no_phantom_subscriber() {
 #[test]
 fn quit_event_stops_the_manager() {
     let mut h = harness();
-    h.event(ServerEvent::ClientConnected(0), 0);
+    h.event(ServerEvent::connected(0), 0);
     let ev = GameEvent::new(GameEventKind::Quit, 0, SPAWN_REGION);
     assert!(!h.event(ServerEvent::ClientPacket(ClientPacket::GameEvent(ev), 0), 0));
 }
@@ -255,7 +255,7 @@ fn quit_event_stops_the_manager() {
 /// for LOD-serving assertions.
 fn connected_harness() -> Harness {
     let mut h = harness();
-    h.event(ServerEvent::ClientConnected(0), 0);
+    h.event(ServerEvent::connected(0), 0);
     h.drain_packets();
     h
 }
@@ -415,7 +415,7 @@ fn region_start_defers_worldgen_to_a_spawner_that_generates_columns() {
         lod_result_recv,
     );
 
-    manager.handle_server_event(ServerEvent::ClientConnected(1), 0);
+    manager.handle_server_event(ServerEvent::connected(1), 0);
     manager.handle_server_event(
         ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(RegionCoords::new(5, 5)), 1),
         0,
@@ -457,7 +457,7 @@ fn deferred_seed_generates_only_for_fresh_regions() {
 #[test]
 fn order_event_routes_to_the_home_region() {
     let mut h = harness();
-    h.event(ServerEvent::ClientConnected(0), 0);
+    h.event(ServerEvent::connected(0), 0);
     h.drain_packets();
     // Air above the floor takes a Build designation.
     let order = game::Order::Designate {
@@ -479,7 +479,7 @@ fn order_event_routes_to_the_home_region() {
 #[test]
 fn leave_packet_removes_the_session() {
     let mut h = harness();
-    h.event(ServerEvent::ClientConnected(0), 0);
+    h.event(ServerEvent::connected(0), 0);
     let before = h.manager.depths().sessions;
     assert_eq!(before, 1);
     h.event(ServerEvent::ClientPacket(ClientPacket::Leave, 0), 10);

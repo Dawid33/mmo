@@ -68,6 +68,9 @@ pub struct ServerConnection {
     /// Disconnects (its sender drops) when the game thread abandons the
     /// session; `never()` when nobody can cancel.
     cancel: Receiver<()>,
+    /// Sent as the connection's first packet; `None` = this machine's
+    /// (`player_token::load_or_create_token`), read once connected.
+    token: Option<game::PlayerToken>,
 }
 
 impl ServerConnection {
@@ -82,7 +85,14 @@ impl ServerConnection {
             server,
             connect_policy: ConnectPolicy::default(),
             cancel: crossbeam::channel::never(),
+            token: None,
         }
+    }
+
+    /// Identify as this player instead of the machine's token (test hook).
+    pub fn with_token(mut self, token: game::PlayerToken) -> Self {
+        self.token = Some(token);
+        self
     }
 
     /// Abandon the connect once every sender of `cancel` has dropped: the
@@ -214,6 +224,14 @@ impl ServerConnection {
             return Ok(());
         };
         info!("[client] connected: addr={}", connection.remote_address());
+        // The handshake: the server starts the session once this resolves,
+        // and refuses a connection whose first packet is anything else.
+        let token = self.token.clone().unwrap_or_else(crate::player_token::load_or_create_token);
+        let hello = game::encode_packet(&ClientPacket::Hello { token })
+            .map_err(|e| std::io::Error::other(format!("cannot encode Hello: {e}")))?;
+        let mut stream = connection.open_uni().await.map_err(connection_lost)?;
+        stream.write_all(&hello).await.map_err(connection_lost)?;
+        stream.finish().map_err(connection_lost)?;
         let sender = self.send.clone();
         let recv_conn = connection.clone();
 

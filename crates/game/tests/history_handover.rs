@@ -875,12 +875,12 @@ fn site_region_start_spawns_its_people() {
     let (h, a, b) = manager_history();
     // Installed before the region starts: caught up as it starts.
     let mut w = World::new(land_map(3, 1), Some(h.clone()));
-    w.send(ServerEvent::ClientConnected(CLIENT));
+    w.send(ServerEvent::connected(CLIENT));
     assert!(w.running(rc(0, 0)));
     assert_site_0_embodied(&mut w, &a, &b);
     // Installed while it runs: caught up at once.
     let mut w = World::new(land_map(3, 1), None);
-    w.send(ServerEvent::ClientConnected(CLIENT));
+    w.send(ServerEvent::connected(CLIENT));
     assert!(bodies(&mut w.manager).is_empty());
     w.manager.set_history(h, w.now_ms);
     w.settle();
@@ -892,7 +892,7 @@ fn site_region_start_spawns_its_people() {
 fn neighbour_wake_catches_up() {
     let (h, a, _) = manager_history();
     let mut w = World::new(land_map(3, 1), Some(h));
-    w.send(ServerEvent::ClientConnected(CLIENT));
+    w.send(ServerEvent::connected(CLIENT));
     w.packet(ClientPacket::PlayRegion(rc(1, 0)));
     w.tick();
     w.wait(UNLOAD_GRACE_MS);
@@ -936,7 +936,7 @@ fn walk_out_does_not_wake_neighbour() {
     let (h, a, _) = manager_history();
     let mut w = World::new(land_map(3, 1), Some(h));
     // The player's home keeps (0, 0) running; nobody asks for (1, 0).
-    w.send(ServerEvent::ClientConnected(CLIENT));
+    w.send(ServerEvent::connected(CLIENT));
     let j = w
         .manager
         .history_mut()
@@ -965,7 +965,7 @@ fn no_person_twice_across_park_cycles() {
     let (h, a, b) = manager_history();
     let half_year = DAYS_PER_YEAR * DAY_MS / 2;
     let mut w = World::new(land_map(3, 1), Some(h));
-    w.send(ServerEvent::ClientConnected(CLIENT));
+    w.send(ServerEvent::connected(CLIENT));
     // Home in site 1's region, so nothing but a subscription keeps (0, 0) running.
     w.packet(ClientPacket::PlayRegion(rc(2, 0)));
     w.tick();
@@ -1037,7 +1037,7 @@ fn history_saved_on_shutdown_reloads() {
     let people = h.people().filter(|q| q.alive()).count();
     assert_eq!(people, a.len() + b.len());
     let mut w = World::new(land_map(3, 1), Some(h));
-    w.send(ServerEvent::ClientConnected(CLIENT));
+    w.send(ServerEvent::connected(CLIENT));
     w.packet(ClientPacket::PlayRegion(rc(0, 0)));
     w.tick();
     assert!(
@@ -1065,7 +1065,7 @@ fn history_saved_on_shutdown_reloads() {
 fn arrival_into_stopping_region_waits_for_its_park() {
     let (h, a, _) = manager_history();
     let mut w = World::new(land_map(3, 1), Some(h));
-    w.send(ServerEvent::ClientConnected(CLIENT));
+    w.send(ServerEvent::connected(CLIENT));
     w.packet(ClientPacket::PlayRegion(rc(1, 0)));
     w.tick();
     // (0, 0) loses its keep-alive: Shutdown is sent and its thread handles it, but the
@@ -1109,7 +1109,7 @@ fn arrival_into_stopping_region_waits_for_its_park() {
 fn people_parked_hands_people_back_before_stopped() {
     let (h, a, _) = manager_history();
     let mut w = World::new(land_map(3, 1), Some(h));
-    w.send(ServerEvent::ClientConnected(CLIENT));
+    w.send(ServerEvent::connected(CLIENT));
     w.packet(ClientPacket::PlayRegion(rc(1, 0)));
     w.tick();
     w.now_ms += UNLOAD_GRACE_MS;
@@ -1145,7 +1145,7 @@ fn people_parked_hands_people_back_before_stopped() {
 fn site_founded_in_running_region_has_bodies() {
     let (h, _, _) = manager_history();
     let mut w = World::new(land_map(3, 1), Some(h));
-    w.send(ServerEvent::ClientConnected(CLIENT));
+    w.send(ServerEvent::connected(CLIENT));
     w.packet(ClientPacket::PlayRegion(rc(1, 0)));
     w.tick();
     let history = w.manager.history_mut().unwrap();

@@ -225,7 +225,7 @@ impl Rig {
 #[ignore = "slow: >100ms — run via just test-full"]
 fn roaming_client_cycles_regions_across_threads() {
     let mut rig = Rig::new();
-    rig.event(ServerEvent::ClientConnected(0));
+    rig.event(ServerEvent::connected(0));
 
     // Subscribe the 3x3 window around home.
     let window = SPAWN_REGION.window_3x3();
@@ -335,7 +335,7 @@ fn roaming_client_cycles_regions_across_threads() {
 #[ignore = "slow: >100ms — run via just test-full"]
 fn walking_input_crosses_a_boundary_on_real_threads() {
     let mut rig = Rig::with_columns(seam_floor_columns);
-    rig.event(ServerEvent::ClientConnected(0));
+    rig.event(ServerEvent::connected(0));
 
     // Subscribe the 3x3 window so both the departing (0,0) and arriving
     // (0,-1) regions are up and relaying to us.
@@ -436,7 +436,7 @@ fn arrival_in(p: &ServerPacket, region: RegionCoords) -> Option<&EntityBundle> {
 #[ignore = "slow: >100ms — run via just test-full"]
 fn diagonal_walk_crosses_a_corner_on_real_threads() {
     let mut rig = Rig::with_columns(seam_floor_columns);
-    rig.event(ServerEvent::ClientConnected(0));
+    rig.event(ServerEvent::connected(0));
     let window = SPAWN_REGION.window_3x3();
     for rc in &window {
         rig.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(*rc), 0));
@@ -484,7 +484,7 @@ fn diagonal_walk_crosses_a_corner_on_real_threads() {
 #[ignore = "slow: >100ms — run via just test-full"]
 fn walking_into_a_cold_region_wakes_its_thread_and_returns() {
     let mut rig = Rig::with_on_thread_worldgen(seam_floor_columns);
-    rig.event(ServerEvent::ClientConnected(0));
+    rig.event(ServerEvent::connected(0));
     // Home only: the region to the north is cold.
     rig.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(SPAWN_REGION), 0));
     rig.wait_for_snapshots(&[SPAWN_REGION], REGION_STARTUP_BUDGET);
@@ -541,7 +541,7 @@ fn saved_region_is_restored_by_a_restarted_server() {
     let spawner = || ThreadRegionSpawner::with_generator(std::sync::Arc::new(|_| lightweight_columns())).with_store(store.clone());
 
     let mut rig = Rig::with_spawner(spawner(), |_| lightweight_columns());
-    rig.event(ServerEvent::ClientConnected(0));
+    rig.event(ServerEvent::connected(0));
     rig.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(SPAWN_REGION), 0));
     rig.wait_for_snapshots(&[SPAWN_REGION], REGION_STARTUP_BUDGET);
     // Let the clock run so a regenerated region (tick ~0) is told apart.
@@ -577,7 +577,7 @@ fn saved_region_is_restored_by_a_restarted_server() {
 
     // A new process: client ids start at 0 again.
     let mut rig = Rig::with_spawner(spawner(), |_| lightweight_columns());
-    rig.event(ServerEvent::ClientConnected(0));
+    rig.event(ServerEvent::connected(0));
     rig.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(SPAWN_REGION), 0));
     let mut log = Vec::new();
     let mut restored = None;

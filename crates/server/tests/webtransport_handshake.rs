@@ -6,8 +6,24 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use dashmap::DashMap;
-use game::{ClientPacket, RegionCoords, ServerEvent, ServerPacket};
-use server::{webtransport, ClientSink};
+use game::{ClientPacket, PlayerToken, RegionCoords, ServerEvent, ServerPacket};
+use server::{player_store, webtransport, ClientSink};
+
+fn memory_store() -> player_store::SharedPlayerStore {
+    player_store::shared(player_store::MemoryPlayerStore::default())
+}
+
+async fn connect(port: u16) -> wtransport::Connection {
+    let config = wtransport::ClientConfig::builder()
+        .with_bind_default()
+        .with_no_cert_validation() // test-only; the browser path uses the hash
+        .build();
+    wtransport::Endpoint::client(config)
+        .unwrap()
+        .connect(format!("https://127.0.0.1:{port}"))
+        .await
+        .expect("connect failed")
+}
 
 async fn recv_packet(conn: &wtransport::Connection) -> ServerPacket {
     let mut stream = conn.accept_uni().await.expect("server closed stream");
@@ -59,7 +75,7 @@ async fn webtransport_client_full_handshake() {
     let bind = "127.0.0.1:16467".parse().unwrap();
     let ingress_sinks = sinks.clone();
     tokio::spawn(async move {
-        webtransport::serve(bind, webtransport::CertSource::SelfSigned, event_send, ingress_sinks, next_id)
+        webtransport::serve(bind, webtransport::CertSource::SelfSigned, event_send, ingress_sinks, next_id, memory_store())
             .await
             .unwrap();
     });
@@ -95,7 +111,7 @@ async fn webtransport_client_full_handshake() {
                             .send((None, ServerPacket::GameEvent(out)))
                             .unwrap();
                     }
-                    ClientPacket::ReleaseRegionConnection(_) => {}
+                    ClientPacket::ReleaseRegionConnection(_) | ClientPacket::Hello { .. } => {}
                     ClientPacket::RequestLod(_)
                     | ClientPacket::ReleaseLod(_)
                     | ClientPacket::PlayRegion(_)
@@ -109,7 +125,7 @@ async fn webtransport_client_full_handshake() {
                     | ClientPacket::StartAdventure(_)
                     | ClientPacket::EndAdventure => {}
                 },
-                ServerEvent::ClientConnected(client_id) => {
+                ServerEvent::ClientConnected { client: client_id, .. } => {
                     if world.find_player(&client_id).is_none() {
                         let region = RegionCoords::new(0, 0);
                         let ev = world
@@ -147,7 +163,9 @@ async fn webtransport_client_full_handshake() {
         .await
         .expect("connect failed");
 
-    // CreateClient broadcast arrives first (ClientConnected fired on accept).
+    // The handshake: nothing happens until the Hello resolves a player.
+    send_packet(&conn, &ClientPacket::Hello { token: PlayerToken::generate([5; 16]) }).await;
+    // CreateClient broadcast arrives first (ClientConnected fired on Hello).
     let first = recv_packet(&conn).await;
     assert!(matches!(first, ServerPacket::GameEvent(_)), "got {first:?}");
 
@@ -167,4 +185,72 @@ async fn webtransport_client_full_handshake() {
         matches!(snapshot, ServerPacket::Region(..)),
         "got {snapshot:?}"
     );
+}
+
+/// A connection whose first packet is not `Hello` is refused and closed, and
+/// the world never hears of it; one with a valid `Hello` becomes a session
+/// whose player the store resolved.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "slow: >100ms — run via just test-full"]
+async fn first_packet_not_hello_closes() {
+    const PORT: u16 = 16468;
+    let (event_send, event_recv) = crossbeam::channel::unbounded();
+    let sinks: Arc<DashMap<usize, ClientSink>> = Arc::new(DashMap::new());
+    let ingress_sinks = sinks.clone();
+    tokio::spawn(async move {
+        let bind = format!("127.0.0.1:{PORT}").parse().unwrap();
+        webtransport::serve(
+            bind,
+            webtransport::CertSource::SelfSigned,
+            event_send,
+            ingress_sinks,
+            Arc::new(AtomicUsize::new(0)),
+            memory_store(),
+        )
+        .await
+        .unwrap();
+    });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // Not a Hello: refused, closed, no session.
+    let conn = connect(PORT).await;
+    send_packet(&conn, &ClientPacket::RequestPlayerRegion).await;
+    let refused = tokio::time::timeout(Duration::from_secs(5), recv_packet(&conn)).await.expect("an answer");
+    assert!(matches!(&refused, ServerPacket::Refused(why) if why.contains("Hello")), "got {refused:?}");
+    tokio::time::timeout(Duration::from_secs(5), conn.closed()).await.expect("the server closes the session");
+    assert!(event_recv.try_recv().is_err(), "a refused connection is never announced");
+    assert!(sinks.is_empty());
+
+    // An invalid token: refused too.
+    let conn = connect(PORT).await;
+    send_packet(&conn, &ClientPacket::Hello { token: PlayerToken("not-a-token".into()) }).await;
+    let refused = tokio::time::timeout(Duration::from_secs(5), recv_packet(&conn)).await.expect("an answer");
+    assert!(matches!(refused, ServerPacket::Refused(_)), "got {refused:?}");
+    tokio::time::timeout(Duration::from_secs(5), conn.closed()).await.expect("the server closes the session");
+    assert!(event_recv.try_recv().is_err());
+
+    // A Hello: announced with its player, and the same token is the same player.
+    let token = PlayerToken::generate([7; 16]);
+    let mut players = Vec::new();
+    // The refused connections took ids 0 and 1.
+    for client in [2, 3] {
+        let conn = connect(PORT).await;
+        send_packet(&conn, &ClientPacket::Hello { token: token.clone() }).await;
+        let event = loop {
+            match event_recv.recv_timeout(Duration::from_secs(5)).expect("the session is announced") {
+                ServerEvent::ClientDisconnected(_) => continue, // the previous one
+                event => break event,
+            }
+        };
+        match event {
+            ServerEvent::ClientConnected { client: c, player, record } => {
+                assert_eq!(c, client, "client ids count every connection");
+                assert!(record.is_none());
+                players.push(player);
+            }
+            other => panic!("expected ClientConnected, got {other:?}"),
+        }
+        drop(conn);
+    }
+    assert_eq!(players[0], players[1], "one token, one player");
 }

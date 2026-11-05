@@ -94,7 +94,7 @@ fn rect_blocks(
 #[test]
 fn request_lod_pristine_region_builds_downsamples_and_caches() {
     let (mut m, out, region_out) = manager_with_lod();
-    m.handle_server_event(ServerEvent::ClientConnected(1), 0);
+    m.handle_server_event(ServerEvent::connected(1), 0);
     drain_region_outputs(&mut m, &region_out);
     let key = LodKey::for_region(4, RegionCoords::new(5, 5)); // never run
     m.handle_server_event(
@@ -135,7 +135,7 @@ fn request_lod_running_region_downsamples_authoritative_state() {
     // (RequestTerrain), the reply seeds terrain_cache, and the pending LOD
     // request completes.
     let (mut m, out, region_out) = manager_with_lod();
-    m.handle_server_event(ServerEvent::ClientConnected(1), 0);
+    m.handle_server_event(ServerEvent::connected(1), 0);
     drain_region_outputs(&mut m, &region_out);
     out.try_iter().for_each(drop); // discard the join/create-client traffic
 
@@ -174,7 +174,7 @@ fn release_and_disconnect_clear_subscriptions() {
     // Then RequestLod from client 2 and disconnect client 2: no panic, and
     // client 1's later request still works.
     let (mut m, out, region_out) = manager_with_lod();
-    m.handle_server_event(ServerEvent::ClientConnected(1), 0);
+    m.handle_server_event(ServerEvent::connected(1), 0);
     drain_region_outputs(&mut m, &region_out);
     out.try_iter().for_each(drop);
 
@@ -191,7 +191,7 @@ fn release_and_disconnect_clear_subscriptions() {
 
     // Client 2 subscribes to the same (now-cached) key, then disconnects
     // before doing anything else with it.
-    m.handle_server_event(ServerEvent::ClientConnected(2), 0);
+    m.handle_server_event(ServerEvent::connected(2), 0);
     drain_region_outputs(&mut m, &region_out);
     out.try_iter().for_each(drop);
     m.handle_server_event(ServerEvent::ClientPacket(ClientPacket::RequestLod(key), 2), 0);
@@ -221,7 +221,7 @@ fn release_and_disconnect_clear_subscriptions() {
 #[test]
 fn invalid_factor_is_dropped() {
     let (mut m, out, _region_out) = manager_with_lod();
-    m.handle_server_event(ServerEvent::ClientConnected(1), 0);
+    m.handle_server_event(ServerEvent::connected(1), 0);
     let bogus = LodKey { factor: 3, coords: [0, 0] };
     m.handle_server_event(
         ServerEvent::ClientPacket(ClientPacket::RequestLod(bogus), 1),
@@ -237,7 +237,7 @@ fn invalid_factor_is_dropped() {
 #[test]
 fn tile_build_is_coarse_only_when_every_region_is_pristine() {
     let (mut m, out, _region_out) = manager_with_lod();
-    m.handle_server_event(ServerEvent::ClientConnected(1), 0);
+    m.handle_server_event(ServerEvent::connected(1), 0);
     let key = LodKey { factor: 64, coords: [50, 50] }; // far away, all pristine
     m.handle_server_event(ServerEvent::ClientPacket(ClientPacket::RequestLod(key), 1), 0);
     m.pump_lod_results();
@@ -254,7 +254,7 @@ fn tile_build_is_coarse_only_when_every_region_is_pristine() {
 #[test]
 fn pristine_region_keyed_coarse_factors_are_sampled_not_generated() {
     let (mut m, out, _region_out) = manager_with_lod();
-    m.handle_server_event(ServerEvent::ClientConnected(1), 0);
+    m.handle_server_event(ServerEvent::connected(1), 0);
     for factor in [16, 32] {
         let key = LodKey::for_region(factor, RegionCoords::new(50, 50)); // far away, pristine
         assert_eq!(key.region_span(), 1);
@@ -273,7 +273,7 @@ fn pristine_region_keyed_coarse_factors_are_sampled_not_generated() {
 #[test]
 fn tile_build_overlays_regions_with_authoritative_state() {
     let (mut m, out, region_out) = manager_with_lod();
-    m.handle_server_event(ServerEvent::ClientConnected(1), 0);
+    m.handle_server_event(ServerEvent::connected(1), 0);
     drain_region_outputs(&mut m, &region_out);
     out.try_iter().for_each(drop);
 
@@ -291,7 +291,7 @@ fn tile_build_overlays_regions_with_authoritative_state() {
     out.try_iter().for_each(drop);
     assert!(m.parked_regions().contains(&RegionCoords::new(0, 0)));
 
-    m.handle_server_event(ServerEvent::ClientConnected(1), UNLOAD_GRACE_MS);
+    m.handle_server_event(ServerEvent::connected(1), UNLOAD_GRACE_MS);
     drain_region_outputs(&mut m, &region_out);
     out.try_iter().for_each(drop);
     assert!(
@@ -328,7 +328,7 @@ fn terrain_change_invalidates_and_repushes_subscribed_keys() {
     // fresh LodData for both, reflecting the new terrain. A client that
     // released one of the same keys beforehand must get nothing.
     let (mut m, out, region_out) = manager_with_lod();
-    m.handle_server_event(ServerEvent::ClientConnected(1), 0);
+    m.handle_server_event(ServerEvent::connected(1), 0);
     drain_region_outputs(&mut m, &region_out);
     out.try_iter().for_each(drop);
 
@@ -348,7 +348,7 @@ fn terrain_change_invalidates_and_repushes_subscribed_keys() {
 
     // Client 2 subscribes to the region key then releases it: it must NOT
     // receive the refresh push below (Task 7's carried review obligation).
-    m.handle_server_event(ServerEvent::ClientConnected(2), 0);
+    m.handle_server_event(ServerEvent::connected(2), 0);
     drain_region_outputs(&mut m, &region_out);
     out.try_iter().for_each(drop);
     m.handle_server_event(ServerEvent::ClientPacket(ClientPacket::RequestLod(region_key), 2), 0);
@@ -397,7 +397,7 @@ fn terrain_change_invalidates_and_repushes_subscribed_keys() {
 #[test]
 fn terrain_change_with_no_subscribers_only_drops_cache() {
     let (mut m, out, region_out) = manager_with_lod();
-    m.handle_server_event(ServerEvent::ClientConnected(1), 0);
+    m.handle_server_event(ServerEvent::connected(1), 0);
     drain_region_outputs(&mut m, &region_out);
     out.try_iter().for_each(drop);
 
@@ -436,7 +436,7 @@ fn terrain_change_with_no_subscribers_only_drops_cache() {
 #[test]
 fn lod_cache_evicts_unsubscribed_lru_but_pins_subscribed() {
     let (mut m, out, region_out) = manager_with_lod();
-    m.handle_server_event(ServerEvent::ClientConnected(1), 0);
+    m.handle_server_event(ServerEvent::connected(1), 0);
     drain_region_outputs(&mut m, &region_out);
     out.try_iter().for_each(drop);
 
@@ -470,7 +470,7 @@ fn lod_cache_evicts_unsubscribed_lru_but_pins_subscribed() {
 #[test]
 fn pristine_terrain_cache_is_lru_capped_but_authoritative_terrain_is_kept() {
     let (mut m, out, region_out) = manager_with_lod();
-    m.handle_server_event(ServerEvent::ClientConnected(1), 0);
+    m.handle_server_event(ServerEvent::connected(1), 0);
     drain_region_outputs(&mut m, &region_out);
     out.try_iter().for_each(drop);
 
@@ -511,7 +511,7 @@ fn pristine_terrain_cache_is_lru_capped_but_authoritative_terrain_is_kept() {
 #[test]
 fn tile_build_waits_for_running_unseeded_regions() {
     let (mut m, out, region_out) = manager_with_lod();
-    m.handle_server_event(ServerEvent::ClientConnected(1), 0);
+    m.handle_server_event(ServerEvent::connected(1), 0);
     drain_region_outputs(&mut m, &region_out);
     out.try_iter().for_each(drop);
     // Region (0,0) is SPAWN_REGION: running from client 1's home, but
@@ -580,7 +580,7 @@ fn pristine_lod_source_is_generated_by_the_builder_not_the_manager() {
         Box::new(RecordingBuilder { jobs: jobs.clone() }),
         lod_result_recv,
     );
-    m.handle_server_event(ServerEvent::ClientConnected(1), 0);
+    m.handle_server_event(ServerEvent::connected(1), 0);
     drain_region_outputs(&mut m, &region_out);
     let after_join = generated.load(Ordering::SeqCst);
     assert_eq!(after_join, 1, "the home region itself still generates on the manager");

@@ -13,6 +13,9 @@ use game::{
 
 /// The only client in an offline world.
 pub const LOCAL_CLIENT_ID: ClientId = 0;
+/// Its player: there is no network edge here to resolve a `Hello`, so the
+/// in-process session is announced as this player directly.
+pub const LOCAL_PLAYER_ID: game::PlayerId = game::PlayerId(LOCAL_CLIENT_ID as u64);
 
 pub struct LocalServer {
     manager: WorldManager<InlineSpawner>,
@@ -73,8 +76,12 @@ impl LocalServer {
             lod_builder,
             lod_result_recv,
         );
-        // Server-authoritative player creation, as on ClientConnected.
-        manager.handle_server_event(ServerEvent::ClientConnected(LOCAL_CLIENT_ID), 0);
+        // Server-authoritative player creation, as on ClientConnected. The
+        // handshake is bypassed: the session starts as the local player.
+        manager.handle_server_event(
+            ServerEvent::ClientConnected { client: LOCAL_CLIENT_ID, player: LOCAL_PLAYER_ID, record: None },
+            0,
+        );
         let mut server = Self {
             manager,
             recv,

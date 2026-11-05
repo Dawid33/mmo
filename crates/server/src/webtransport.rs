@@ -20,6 +20,7 @@ use game::{ClientId, ClientPacket, ServerEvent};
 use log::{info, warn};
 use wtransport::{Endpoint, Identity, ServerConfig};
 
+use crate::player_store::{HELLO_MAX_BYTES, HELLO_TIMEOUT};
 use crate::ClientSink;
 
 /// Max size of a single packet stream; region snapshots are the largest
@@ -132,6 +133,7 @@ pub async fn serve(
     send: Sender<ServerEvent>,
     sinks: Arc<DashMap<ClientId, ClientSink>>,
     next_client_id: Arc<AtomicUsize>,
+    players: crate::player_store::SharedPlayerStore,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let endpoint = match &certs {
         CertSource::SelfSigned => {
@@ -158,6 +160,7 @@ pub async fn serve(
         let incoming = endpoint.accept().await;
         let send = send.clone();
         let sinks = sinks.clone();
+        let players = players.clone();
         let id = next_client_id.fetch_add(1, Ordering::SeqCst);
         tokio::spawn(async move {
             let session = match incoming.await {
@@ -167,12 +170,18 @@ pub async fn serve(
                 },
                 Err(e) => return warn!("webtransport session failed: {e:?}"),
             };
-            info!("webtransport client {id} connected");
-            game::perf_event!("client_connected", "client={id} transport=webtransport");
+            // The handshake comes first: no session (and no sink) exists until
+            // the connection's Hello has resolved to a player.
+            let (player, record) = match web_hello(&session, &players).await {
+                Ok(resolved) => resolved,
+                Err(why) => return refuse(&session, &why).await,
+            };
+            info!("webtransport client {id} connected (player {})", player.0);
+            game::perf_event!("client_connected", "client={id} player={} transport=webtransport", player.0);
             sinks.insert(id, ClientSink::Web(session.clone()));
-            // Announce before reading any packets, mirroring the quinn path:
-            // guarantees the player exists before its first request is served.
-            send.send(ServerEvent::ClientConnected(id)).unwrap();
+            // Announce before reading any other packets, mirroring the quinn
+            // path: guarantees the player exists before its first request is served.
+            send.send(ServerEvent::ClientConnected { client: id, player, record }).unwrap();
 
             loop {
                 let stream = match session.accept_uni().await {
@@ -205,6 +214,47 @@ pub async fn serve(
             let _ = send.send(ServerEvent::ClientDisconnected(id));
         });
     }
+}
+
+/// How long a refused session waits for its `Refused` packet to go out
+/// before it is closed.
+const REFUSE_FLUSH: Duration = Duration::from_secs(1);
+
+/// Read a session's first packet (within [`HELLO_TIMEOUT`]) and resolve it as
+/// the handshake.
+async fn web_hello(
+    session: &wtransport::Connection,
+    players: &crate::player_store::SharedPlayerStore,
+) -> Result<(game::PlayerId, Option<game::PlayerRecord>), String> {
+    let first = tokio::time::timeout(HELLO_TIMEOUT, async {
+        let stream = session.accept_uni().await.map_err(|e| format!("no first packet: {e}"))?;
+        let mut buf = Vec::new();
+        let mut limited = tokio::io::AsyncReadExt::take(stream, (HELLO_MAX_BYTES as u64) + 1);
+        tokio::io::AsyncReadExt::read_to_end(&mut limited, &mut buf)
+            .await
+            .map_err(|e| format!("first packet unreadable: {e}"))?;
+        if buf.len() > HELLO_MAX_BYTES {
+            return Err(format!("first packet over {HELLO_MAX_BYTES} bytes"));
+        }
+        game::decode_packet::<ClientPacket>(&buf).map_err(|e| format!("first packet does not decode: {e}"))
+    })
+    .await
+    .map_err(|_| format!("no Hello within {HELLO_TIMEOUT:?}"))??;
+    crate::player_store::resolve_hello(players, first).await
+}
+
+/// Tell the client why (best effort), then close the session.
+async fn refuse(session: &wtransport::Connection, why: &str) {
+    warn!("refusing a webtransport session from {}: {why}", session.remote_address());
+    if let Ok(packet) = game::encode_packet(&game::ServerPacket::Refused(why.to_string())) {
+        let _ = tokio::time::timeout(REFUSE_FLUSH, async {
+            let mut stream = session.open_uni().await.ok()?.await.ok()?;
+            tokio::io::AsyncWriteExt::write_all(&mut stream, &packet).await.ok()?;
+            stream.finish().await.ok()
+        })
+        .await;
+    }
+    session.close(wtransport::VarInt::from_u32(1), b"refused");
 }
 
 /// Dev-mode CA substitute: the page fetches this (wasm-server-runner serves

@@ -11,7 +11,7 @@ use game::{
 };
 #[cfg(test)]
 use game::Region;
-use log::{info, warn};
+use log::{error, info, warn};
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::{Duration, Instant};
 use std::{
@@ -1636,6 +1636,12 @@ impl GameInstanceManager {
                 let _ = self
                     .client_event_send
                     .send(ClientUpdateEvent::WorldMap(Box::new(map)));
+            }
+            game::ServerPacket::Refused(why) => {
+                // The server closes the connection after this: end the session
+                // with its reason.
+                error!("[client] the server refused the connection: {why}");
+                return Err(GameError::Disconnected(format!("The server refused the connection: {why}")));
             }
             game::ServerPacket::PlayRefused(rc, why) => {
                 warn!("[client] Play in region {rc:?} refused: {why:?}");

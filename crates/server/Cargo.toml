@@ -24,6 +24,10 @@ crc32fast = { workspace = true }
 rcgen = { workspace = true }
 dashmap = { workspace = true }
 wtransport = { workspace = true }
+# Player store files (`player_store.rs`): the token index is RON, records bincode.
+bincode = { workspace = true }
+serde = { workspace = true }
+ron = "0.12"
 pyroscope = { workspace = true, optional = true }
 pyroscope_pprofrs = { workspace = true, optional = true }
 

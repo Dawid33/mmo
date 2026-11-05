@@ -39,6 +39,9 @@ bincode = { workspace = true }
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 quinn = { workspace = true }
 tokio = { workspace = true, features = ["time"] } # connect retry: timeout + sleep
+# The player token's random bytes (`player_token.rs`); the version Bevy's
+# dependencies already build, so no new crate.
+getrandom = "0.3"
 pyroscope = { workspace = true, optional = true }
 pyroscope_pprofrs = { workspace = true, optional = true }
 # Only for the `gpu_error_panic` diagnostic feature; the version must be the one
@@ -105,6 +108,8 @@ web-sys = { version = "0.3", features = [
   "Worker", "WorkerOptions", "WorkerType", "Blob", "BlobPropertyBag", "Url",
   "MessageEvent", "ErrorEvent", "DedicatedWorkerGlobalScope", "WorkerGlobalScope",
   "Navigator", "WorkerNavigator", "console",
+  # The player token (src/player_token.rs): localStorage + Web Crypto.
+  "Storage", "Crypto",
 ] }
 
 [dev-dependencies]

@@ -226,7 +226,9 @@ run-two *args:
         site=$(grep -aoE 'embarked: fortress site=[0-9]+' "$log" | head -n1 | grep -oE '[0-9]+$' || true)
     done
     echo "[run-two] client 1 holds fortress site $site; client 2 adventures there"
-    RUST_BACKTRACE=1 ./target/debug/client debug embarked --join "127.0.0.1:$port" --adventure-at "$site" \
+    # Its own player token: with the machine's, the server would see client 1's player.
+    VOXEL_PLAYER_TOKEN_FILE=target/run-two/player2_token RUST_BACKTRACE=1 \
+        ./target/debug/client debug embarked --join "127.0.0.1:$port" --adventure-at "$site" \
         > >(sed -u 's/^/[client 2] /') 2>&1 &
     pids+=("$!")
     wait "$host" || true

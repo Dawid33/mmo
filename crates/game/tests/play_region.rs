@@ -213,7 +213,7 @@ mod manager {
     fn with_map() -> Harness {
         let mut h = harness();
         h.manager.set_world_map(map());
-        h.event(ServerEvent::ClientConnected(0), 0);
+        h.event(ServerEvent::connected(0), 0);
         h.drain();
         h
     }
@@ -235,10 +235,10 @@ mod manager {
     fn connect_pushes_world_map() {
         let mut h = harness();
         h.manager.set_world_map(map());
-        h.event(ServerEvent::ClientConnected(0), 0);
+        h.event(ServerEvent::connected(0), 0);
         assert!(h.drain().iter().any(|(t, p)| *t == Some(0) && matches!(p, ServerPacket::WorldMap(_))));
         let mut h = harness();
-        h.event(ServerEvent::ClientConnected(0), 0);
+        h.event(ServerEvent::connected(0), 0);
         assert!(!h.drain().iter().any(|(_, p)| matches!(p, ServerPacket::WorldMap(_))));
     }
 
@@ -287,7 +287,7 @@ mod manager {
         }
         // No map.
         let mut h = harness();
-        h.event(ServerEvent::ClientConnected(0), 0);
+        h.event(ServerEvent::connected(0), 0);
         h.drain();
         h.play(RegionCoords::new(1, 0), 1);
         assert_eq!(refusal(&h.drain()), Some((RegionCoords::new(1, 0), PlayRefusal::NoWorldMap)));
@@ -329,7 +329,7 @@ mod manager {
         assert!(map().contains(RegionCoords::new(1, 1)) && !map().contains(RegionCoords::new(2, 0)));
         // Already running when the map is installed.
         let mut h = harness();
-        h.event(ServerEvent::ClientConnected(0), 0);
+        h.event(ServerEvent::connected(0), 0);
         h.drain();
         assert_eq!(extent_of(&mut h, SPAWN_REGION), None, "no map: unbounded");
         h.manager.set_world_map(map());
@@ -379,13 +379,13 @@ mod manager {
     fn play_from_a_parked_home_removes_the_old_body() {
         let mut h = harness();
         h.manager.set_world_map(map());
-        h.event(ServerEvent::ClientConnected(0), 0);
+        h.event(ServerEvent::connected(0), 0);
         h.event(ServerEvent::ClientDisconnected(0), 10);
         let late = 10 + UNLOAD_GRACE_MS + 1;
         h.manager.maintain(late);
         h.settle(late);
         assert!(!h.manager.running_regions().contains(&SPAWN_REGION), "home parked");
-        h.event(ServerEvent::ClientConnected(0), late);
+        h.event(ServerEvent::connected(0), late);
         let target = RegionCoords::new(1, 0);
         h.play(target, late);
         h.settle(late);
@@ -404,7 +404,7 @@ mod manager {
         h.event(ServerEvent::ClientDisconnected(0), 10);
         let late = 10 + UNLOAD_GRACE_MS + 1;
         h.manager.maintain(late); // Shutdown queued; Stopped not yet handled
-        h.manager.handle_server_event(ServerEvent::ClientConnected(0), late);
+        h.manager.handle_server_event(ServerEvent::connected(0), late);
         let target = RegionCoords::new(1, 0);
         h.manager.handle_server_event(ServerEvent::ClientPacket(ClientPacket::PlayRegion(target), 0), late);
         h.settle(late);

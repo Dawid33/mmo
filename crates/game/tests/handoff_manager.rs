@@ -76,7 +76,7 @@ impl Harness {
 }
 
 fn connect_and_subscribe(h: &mut Harness) {
-    h.event(ServerEvent::ClientConnected(0), 0);
+    h.event(ServerEvent::connected(0), 0);
     for rc in SPAWN_REGION.window_3x3() {
         h.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(rc), 0), 0);
     }
@@ -116,7 +116,7 @@ fn crossing_flips_ownership_home_and_pushes_player_region() {
 fn arrival_wakes_a_cold_region() {
     let mut h = harness();
     // Connect but subscribe to nothing beyond home: target region is cold.
-    h.event(ServerEvent::ClientConnected(0), 0);
+    h.event(ServerEvent::connected(0), 0);
     h.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(SPAWN_REGION), 0), 0);
     h.drain_packets();
     let target = RegionCoords::new(1, 0);
@@ -130,7 +130,7 @@ fn arrival_wakes_a_cold_region() {
 #[test]
 fn ghost_updates_never_wake_a_cold_region() {
     let mut h = harness();
-    h.event(ServerEvent::ClientConnected(0), 0);
+    h.event(ServerEvent::connected(0), 0);
     h.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(SPAWN_REGION), 0), 0);
     h.drain_packets();
     let neighbour = RegionCoords::new(1, 0);

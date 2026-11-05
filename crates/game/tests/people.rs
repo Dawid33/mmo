@@ -78,7 +78,7 @@ impl Harness {
 }
 
 fn connect_and_subscribe(h: &mut Harness) {
-    h.event(ServerEvent::ClientConnected(0), 0);
+    h.event(ServerEvent::connected(0), 0);
     for rc in SPAWN_REGION.window_3x3() {
         h.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(rc), 0), 0);
     }
