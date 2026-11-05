@@ -76,6 +76,7 @@ pub fn parked_client(client: &Client) -> Client {
     c.input = Default::default();
     c.fps_cam_mode = false;
     c.inventory_open = false;
+    c.open_container = None;
     c
 }
 

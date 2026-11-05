@@ -142,6 +142,23 @@ def build():
                 c = (226, 214, 150)
             cac.putpixel((x, y), (*c, 255))
     t["cactus"] = cac
+    # --- chest: oak planks (from the oak textures) with a dark rim, the
+    # side with a lid seam and an iron latch
+    plank = [(78, 52, 28), (122, 84, 46), (164, 118, 68)]
+    rim = (52, 34, 18)
+    top = recolour("oak_rings", plank)
+    side = recolour("oak_bark", plank)
+    for im in (top, side):
+        for i in range(16):
+            for p in ((i, 0), (i, 15), (0, i), (15, i)):
+                im.putpixel(p, (*rim, 255))
+    for x in range(16):
+        side.putpixel((x, 5), (*rim, 255))
+    for y in range(4, 8):
+        for x in range(7, 9):
+            side.putpixel((x, y), (150, 150, 156, 255) if y != 7 else (96, 96, 104, 255))
+    t["chest_top"] = top
+    t["chest_side"] = side
     return t
 
 

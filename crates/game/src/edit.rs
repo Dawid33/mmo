@@ -269,8 +269,11 @@ impl Rollback {
             }
         }
         if changed {
-            // A pile pushed up out of the new block, or left unsupported.
-            // Any loss is counted where it happens (`item_piles`).
+            // A chest written gets its container, a chest replaced spills;
+            // then a pile pushed up out of the new block, or left
+            // unsupported. Any loss is counted where it happens
+            // (`item_piles`).
+            let _spilled = self.containers_after_write_safe(pos);
             let _destroyed = self.piles_after_write_safe(pos);
         }
         changed
@@ -606,7 +609,11 @@ impl Rollback {
         for key in neighbours {
             self.materialize_ground_safe(crate::chunk_coords_of_index_key(key));
         }
-        // Piles follow their support once every block is written.
+        // Containers follow their chests, then piles their support, once
+        // every block is written.
+        for &pos in &written {
+            let _spilled = self.containers_after_write_safe(pos);
+        }
         for &pos in &written {
             let _destroyed = self.piles_after_write_safe(pos);
         }

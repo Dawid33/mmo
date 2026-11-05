@@ -138,6 +138,9 @@ pub struct Client {
     pub mining: Option<crate::Mining>,
     /// No mining progress before this tick (set after each break).
     pub break_cooldown_until: u64,
+    /// The container (chest cell, region-local) whose screen is open
+    /// (`containers.rs`).
+    pub open_container: Option<crate::edit::BlockPos>,
 }
 
 /// What an entity *is*, for rendering and future gameplay. The player is the
@@ -227,6 +230,9 @@ mod game_data {
         /// and the cap's eviction touch only the earliest piles.
         #[undo(map)]
         pile_expiry: BTreeMap<(u64, crate::edit::BlockPos), ()>,
+        /// Block inventories (chests) by cell (`containers.rs`).
+        #[undo(map)]
+        containers: BTreeMap<crate::edit::BlockPos, crate::Container>,
     }
 
     pub struct Ecs {
@@ -335,6 +341,11 @@ impl GameData {
     /// Dropped-item piles by resting cell.
     pub fn item_piles(&self) -> &std::collections::BTreeMap<crate::edit::BlockPos, crate::ItemPile> {
         &self.item_piles
+    }
+
+    /// Block inventories (chests) by cell.
+    pub fn containers(&self) -> &std::collections::BTreeMap<crate::edit::BlockPos, crate::Container> {
+        &self.containers
     }
 
     /// The piles' expiry index, `(expire_tick, cell)` in expiry order.
@@ -1378,6 +1389,8 @@ impl Rollback {
                 ));
                 self.data.ecs.camera.set_safe(e, Some(cam));
             }
+            // A container is open in the region it was opened in only.
+            let client = Client { open_container: None, ..client };
             self.data.clients.insert(client_id, client);
             self.data.player_entites.insert(client_id, e);
         }

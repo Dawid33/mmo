@@ -95,6 +95,8 @@ pub struct HomeView {
     pub mining: Option<game::MiningView>,
     pub mode: game::PlayMode,
     pub inventory_open: bool,
+    /// The chest the local player has open (its screen shows these slots).
+    pub container: Option<game::ContainerView>,
     /// Unconfirmed predictions (the death-spiral signal).
     pub log_len: usize,
 }
@@ -310,6 +312,7 @@ fn home_view(region: &Region, client: ClientId) -> Option<HomeView> {
         mining: game::mining_view(c, region.current_tick() as u64),
         mode: c.mode,
         inventory_open: c.inventory_open,
+        container: game::container_view(data, client),
         log_len: region.pending_event_ids().len(),
     })
 }

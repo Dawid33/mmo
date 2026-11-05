@@ -171,7 +171,11 @@ impl Rollback {
     /// place nothing.
     pub fn survival_place_safe(&mut self, client: ClientId) -> bool {
         let Some(hit) = self.eye_hit(client) else { return false };
-        // Task 10 hook: a chest under the crosshair opens here instead.
+        // A chest under the crosshair opens instead (Decision 10).
+        if self.data.containers().contains_key(&hit.block) {
+            self.open_container_safe(client, hit.block);
+            return false;
+        }
         let Some(c) = self.data.clients.get(&client) else { return false };
         let selected = c.selected;
         let Some(stack) = c.inventory.slots.get(selected as usize).copied().flatten() else { return false };

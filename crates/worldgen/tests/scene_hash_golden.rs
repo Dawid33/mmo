@@ -40,11 +40,14 @@ use game::{state_hash, GameEventKind, InputEvent, Key, Region, RegionCoords};
 /// layout only, nobody walks in the scene; 16 only).
 /// Then for `GameData.item_piles` / `pile_expiry` (`game::item_piles`;
 /// hashed layout only, no pile in the scene; 16 only).
+/// Then for `GameData.containers` + `Client.open_container`
+/// (`game::containers`), with the starting kit now holding 2 chests (the
+/// manifest has a `chest`; 16 only).
 /// Pinned per sim-chunk size (`game::CHUNK_BLOCKS`): the same world splits
 /// into other chunk entities, bodies and colliders at 2 and 16 blocks.
 const SCENE_HASH: u32 = match game::CHUNK_BLOCKS {
     2 => 0x380C_FBC3,
-    16 => 0x0628_A06C,
+    16 => 0xFF50_2C0D,
     _ => 0,
 };
 /// Ticks of scripted input.

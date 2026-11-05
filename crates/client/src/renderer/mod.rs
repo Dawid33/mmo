@@ -479,6 +479,14 @@ const EMBEDDED_BLOCK_TEXTURES: &[(&str, &[u8])] = &[
         include_bytes!("../../../../assets/blocks/cactus.png"),
     ),
     (
+        "chest_side.png",
+        include_bytes!("../../../../assets/blocks/chest_side.png"),
+    ),
+    (
+        "chest_top.png",
+        include_bytes!("../../../../assets/blocks/chest_top.png"),
+    ),
+    (
         "dry_grass_side.png",
         include_bytes!("../../../../assets/blocks/dry_grass_side.png"),
     ),

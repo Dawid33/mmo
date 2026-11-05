@@ -18,6 +18,7 @@ mod block_edit;
 mod block_props;
 mod camera_controller;
 mod camera_look;
+mod chests;
 mod chop;
 mod chunk_blocks;
 mod chunk_units;

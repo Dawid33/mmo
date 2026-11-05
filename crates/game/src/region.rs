@@ -28,8 +28,12 @@ use crate::{
 /// Opens or closes the inventory. Closing in Adventure returns the cursor
 /// stack to the inventory; what does not fit is returned, for the caller to
 /// drop as a pile at the player's feet ([`Rollback::drop_at_feet_safe`]).
-fn toggle_inventory(c: &mut Client) -> Option<crate::ItemStack> {
+pub(crate) fn toggle_inventory(c: &mut Client) -> Option<crate::ItemStack> {
     c.inventory_open = !c.inventory_open;
+    if !c.inventory_open {
+        // Closing the screen closes the chest shown in it.
+        c.open_container = None;
+    }
     if !c.inventory_open && c.mode == crate::PlayMode::Adventure {
         if let Some(mut stack) = c.cursor.take() {
             stack.count = c.inventory.add(stack);
@@ -43,7 +47,7 @@ impl Rollback {
     /// Drops `stack` as a pile at the cell of `client`'s feet, pickable after
     /// [`crate::PICKUP_DELAY_TICKS`]. With no body to drop it from, it goes
     /// back on the cursor instead, so nothing is lost.
-    fn drop_at_feet_safe(&mut self, client: ClientId, stack: crate::ItemStack) {
+    pub(crate) fn drop_at_feet_safe(&mut self, client: ClientId, stack: crate::ItemStack) {
         let feet = self.data.player_entites.get(&client).and_then(|&e| self.body_feet(e));
         match feet {
             Some(feet) => {
@@ -696,6 +700,8 @@ impl Region {
                 // due piles despawn.
                 self.data.tick_pickups_safe(tick);
                 self.data.expire_piles_safe(tick);
+                // Chests left behind (or gone) close.
+                self.data.close_far_containers_safe();
                 let mut drops: Vec<(ClientId, crate::ItemStack)> = Vec::new();
                 let data: &mut GameData = self.data.deref_mut();
                 let keys: Vec<ClientId> = data.clients.keys().cloned().collect();
@@ -822,8 +828,11 @@ impl Region {
                 if let Some(c) = data.clients.get_mut(&client_id) {
                     match action {
                         crate::UiAction::Click { slot, button, shift } => {
+                            // The open chest's slots, shared with any other
+                            // client that has it open.
+                            let container = c.open_container.and_then(|p| data.containers.get_mut(&p));
                             let Client { cursor, inventory, .. } = c;
-                            crate::click(cursor, inventory, None, slot, button, shift);
+                            crate::click(cursor, inventory, container.map(|k| &mut k.slots), slot, button, shift);
                         }
                         crate::UiAction::ToggleInventory => {
                             if let Some(rest) = toggle_inventory(c) {

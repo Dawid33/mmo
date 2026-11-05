@@ -55,5 +55,6 @@
         (id: 43, name: "jungle_branch", textures: All("jungle_branch.png"), collider: Half, hardness: 100, drop: Item("stick")),
         (id: 44, name: "jungle_leaves", textures: All("jungle_leaves.png"), solid: false, render: Cutout, hardness: 20, drop: Nothing),
         (id: 45, name: "cactus", textures: All("cactus.png"), collider: Half),
+        (id: 46, name: "chest", textures: Faces(top: "chest_top.png", side: "chest_side.png", bottom: "chest_top.png"), hardness: 250),
     ],
 )

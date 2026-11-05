@@ -2,12 +2,10 @@
 //! Minecraft cursor-click rules (`click`). Authoritative sim state carried on
 //! `Client`, so it follows the player across region handoffs.
 
-use crate::{block_props, ItemId, ItemStack, MAX_STACK};
+use crate::{chest_block, ItemId, ItemStack, MAX_STACK, STARTING_CHESTS};
 
 pub const INVENTORY_SLOTS: usize = 36;
 pub const HOTBAR_SLOTS: usize = 9;
-/// Chests in a new player's starting kit (slot 0).
-pub const STARTING_CHESTS: u32 = 2;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, state_hash::StateHash, PartialEq)]
 pub struct Inventory {
@@ -26,10 +24,10 @@ impl Inventory {
     }
 
     /// What a new player starts with: `STARTING_CHESTS` chests in slot 0
-    /// (empty while the manifest has no `chest` block).
+    /// (empty with a manifest that has no `chest` block).
     pub fn starting_kit() -> Self {
         let mut inv = Self::new();
-        if let Some(chest) = block_props().id_named("chest") {
+        if let Some(chest) = chest_block() {
             inv.slots[0] = Some(ItemStack { item: ItemId::block(chest), count: STARTING_CHESTS });
         }
         inv
