@@ -43,6 +43,9 @@ impl Inventory {
 
     /// Takes up to `n` items from the selected hotbar slot.
     pub fn take_selected(&mut self, selected: u8, n: u32) -> Option<ItemStack> {
+        if selected as usize >= HOTBAR_SLOTS {
+            return None;
+        }
         let slot = self.slots.get_mut(selected as usize)?;
         let held = slot.as_mut()?;
         let take = n.min(held.count);

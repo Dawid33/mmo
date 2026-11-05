@@ -36,6 +36,42 @@ fn take_selected_takes_and_empties() {
     assert_eq!(inv.take_selected(2, 5), st(1, 1));
     assert_eq!(inv.slots[2], None);
     assert_eq!(inv.take_selected(2, 1), None);
+    inv.slots[20] = st(1, 3);
+    assert_eq!(inv.take_selected(20, 1), None, "only hotbar slots");
+    assert_eq!(inv.slots[20], st(1, 3));
+}
+
+fn total(inv: &Inventory, chest: &[Option<ItemStack>], cur: Option<ItemStack>) -> u32 {
+    inv.slots.iter().chain(chest).chain(std::iter::once(&cur)).flatten().map(|s| s.count).sum()
+}
+
+#[test]
+fn clicks_conserve_items() {
+    let mut inv = Inventory::new();
+    let mut cur = None;
+    // Hotbar slot to a nearly full main region: the remainder stays behind.
+    for s in inv.slots[HOTBAR_SLOTS..].iter_mut() {
+        *s = st(1, MAX_STACK - 1);
+    }
+    inv.slots[0] = st(1, 40);
+    let before = total(&inv, &[], cur);
+    click(&mut cur, &mut inv, None, SlotRef::Player(0), Left, true);
+    assert_eq!(total(&inv, &[], cur), before);
+    assert_eq!(inv.slots[0], st(1, 40 - (INVENTORY_SLOTS - HOTBAR_SLOTS) as u32));
+    // Container full: nothing moves, nothing is lost.
+    let mut chest = vec![st(1, MAX_STACK); 27];
+    inv.slots[1] = st(1, 5);
+    let before = total(&inv, &chest, cur);
+    click(&mut cur, &mut inv, Some(&mut chest), SlotRef::Player(1), Left, true);
+    assert_eq!(total(&inv, &chest, cur), before);
+    assert_eq!(inv.slots[1], st(1, 5));
+    // Right click a cursor stack onto a MAX_STACK slot of the same item.
+    cur = st(1, 4);
+    inv.slots[2] = st(1, MAX_STACK);
+    let before = total(&inv, &chest, cur);
+    click(&mut cur, &mut inv, None, SlotRef::Player(2), Right, false);
+    assert_eq!(total(&inv, &chest, cur), before);
+    assert_eq!((cur, inv.slots[2]), (st(1, 4), st(1, MAX_STACK)));
 }
 
 #[test]
@@ -82,7 +118,7 @@ fn shift_moves_hotbar_to_main_and_container_to_player() {
     assert_eq!((inv.slots[0], inv.slots[HOTBAR_SLOTS]), (st(1, 5), None));
 
     let mut chest = vec![None; 27];
-    chest[3] = st(1, 70u32.min(64));
+    chest[3] = st(1, MAX_STACK);
     click(&mut cur, &mut inv, Some(&mut chest), SlotRef::Container(3), Left, true);
     assert_eq!(chest[3], None);
     assert_eq!(inv.slots[0], st(1, 64));

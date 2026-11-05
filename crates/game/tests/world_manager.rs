@@ -533,14 +533,29 @@ fn client_event(h: &mut Harness, client: ClientId, kind: GameEventKind) {
     h.event(ServerEvent::ClientPacket(ClientPacket::GameEvent(ev), client), 0);
 }
 
-/// Switch to Adventure: client state no fresh player has (the parked record
-/// resets the inventory flags, so an item cannot be the marker with an empty kit).
+/// The marker stacks: a main-inventory slot and the cursor.
+const MARK_SLOT: usize = 20;
+const MARK_STACK: game::ItemStack = game::ItemStack { item: game::ItemId(5), count: 33 };
+const MARK_CURSOR: game::ItemStack = game::ItemStack { item: game::ItemId(6), count: 2 };
+
+/// Give `client` a stack in a main slot and one on the cursor, and switch it
+/// to Adventure: state no fresh player has (the kit is empty, and a parked
+/// record resets only input / first person / the open flag).
 fn rearrange_inventory(h: &mut Harness, client: ClientId) {
+    h.manager.spawner_mut().with_region(SPAWN_REGION, |region| {
+        region.with_data(|d| {
+            let c = d.clients.get_mut(&client).expect("client in the spawn region");
+            c.inventory.slots[MARK_SLOT] = Some(MARK_STACK);
+            c.cursor = Some(MARK_CURSOR);
+        });
+    });
     client_event(h, client, GameEventKind::Order(client, game::Order::SetMode { mode: game::PlayMode::Adventure, at: None }));
 }
 
 fn rearranged(record: &game::Client) -> bool {
     record.mode == game::PlayMode::Adventure
+        && record.inventory.slots[MARK_SLOT] == Some(MARK_STACK)
+        && record.cursor == Some(MARK_CURSOR)
 }
 
 /// Put `client`'s body on tile `at` of `rc`; returns its translation.

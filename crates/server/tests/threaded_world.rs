@@ -614,8 +614,20 @@ fn player_is_restored_by_a_restarted_server() {
     let (player, record) = players.resolve(&token).unwrap();
     assert!(record.is_none(), "a new player");
 
+    // The first session starts from a record that carries a main-slot stack
+    // and a cursor stack (items cannot be injected into a live thread).
+    let mut seeded = game::Client::default();
+    seeded.inventory.slots[20] = Some(game::ItemStack { item: game::ItemId(5), count: 33 });
+    seeded.cursor = Some(game::ItemStack { item: game::ItemId(6), count: 2 });
+    let first = game::PlayerRecord {
+        client: seeded,
+        pose: game::Pose::from_translation(game::rapier3d::math::Vector::new(512.0, 2000.0, 512.0)),
+        region: SPAWN_REGION,
+        fortress: None,
+        adventure: None,
+    };
     let mut rig = Rig::with_spawner(spawner(), |_| lightweight_columns());
-    rig.event(ServerEvent::ClientConnected { client: 0, player, record: None });
+    rig.event(ServerEvent::ClientConnected { client: 0, player, record: Some(first) });
     rig.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(SPAWN_REGION), 0));
     rig.wait_for_snapshots(&[SPAWN_REGION], REGION_STARTUP_BUDGET);
     let swap = GameEventKind::Order(0, game::Order::SetMode { mode: game::PlayMode::Adventure, at: None });
@@ -642,6 +654,8 @@ fn player_is_restored_by_a_restarted_server() {
     assert_eq!(again, player);
     let record = record.expect("the player's record was stored");
     assert!(record.client.mode == game::PlayMode::Adventure);
+    assert_eq!(record.client.inventory.slots[20].map(|s| s.count), Some(33));
+    assert_eq!(record.client.cursor.map(|s| s.count), Some(2));
     let mut rig = Rig::with_spawner(spawner(), |_| lightweight_columns());
     rig.event(ServerEvent::ClientConnected { client: 0, player, record: Some(record) });
     rig.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(SPAWN_REGION), 0));
@@ -658,6 +672,8 @@ fn player_is_restored_by_a_restarted_server() {
     assert_eq!(bodies, 1, "one body: the restored player's");
     let client = client.expect("client 0 restored");
     assert!(client.mode == game::PlayMode::Adventure, "{client:?}");
+    assert_eq!(client.inventory.slots[20].map(|s| s.count), Some(33), "{client:?}");
+    assert_eq!(client.cursor.map(|s| s.count), Some(2), "{client:?}");
     rig.manager.shutdown_all();
     let _ = std::fs::remove_dir_all(&dir);
 }
