@@ -456,6 +456,7 @@ fn player_fell_yields_one_log_per_wood_block() {
                 }
             }
             let tick = s.region.current_tick() as u64;
+            let destroyed_before = game::item_piles::items_destroyed_on_thread();
             s.region.with_data(|r| assert!(r.player_chop_safe(0, cut, tick), "{} {seed}: the chop clears", sp.name));
             let mut settled = false;
             for _ in 0..SETTLE_TIMEOUT_TICKS + 5 {
@@ -473,6 +474,12 @@ fn player_fell_yields_one_log_per_wood_block() {
                     *got.entry(st.item).or_default() += u32::from(st.count);
                 }
             }
+            assert_eq!(
+                game::item_piles::items_destroyed_on_thread(),
+                destroyed_before,
+                "{} seed {seed}: no item lost to the pile caps",
+                sp.name
+            );
             assert_eq!(got, want, "{} seed {seed}: one item per wood block ({} piles)", sp.name, s.region.data().item_piles().len());
             println!("{} seed {seed}: {want:?} in {} piles", sp.name, s.region.data().item_piles().len());
         }

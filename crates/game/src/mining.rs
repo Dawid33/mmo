@@ -132,24 +132,21 @@ impl Rollback {
 
     /// An Adventure player finished mining tree block `p` (Decision 9): the
     /// tree is felled as a chop order fells it (`fell_safe`), the cut
-    /// blocks drop their items in their own cells right away, and the
+    /// blocks drop their items at the stump right away, and the
     /// falling part turns into piles where it comes to rest
     /// (`SettlePolicy::DropItems`). A block `fell` refuses (leaves, or a
     /// tree over `MAX_TREE_BLOCKS`) is broken alone, like any block.
     /// Returns whether anything was cleared.
-    pub fn player_chop_safe(&mut self, client: ClientId, p: BlockPos, tick: u64) -> bool {
-        let _ = client;
+    pub fn player_chop_safe(&mut self, _client: ClientId, p: BlockPos, tick: u64) -> bool {
         let Some((cut, _body)) = self.fell_safe(p, crate::SettlePolicy::DropItems) else {
             return match self.mineable(p) {
                 Some(block) => self.mine_block_safe(p, block, tick),
                 None => false,
             };
         };
-        for (pos, block) in cut {
-            if let Some(stack) = drop_of(block) {
-                // A loss to the pile caps is counted where it happens.
-                let _destroyed = self.deposit_items_safe(pos, stack, tick, PICKUP_DELAY_TICKS);
-            }
+        // At the stump: the cut's lowest cell, summed per item.
+        if let Some(&(at, _)) = cut.iter().min_by_key(|(pos, _)| (pos[1], *pos)) {
+            self.drop_blocks_at_safe(at, cut.iter().map(|(_, b)| *b), tick);
         }
         true
     }

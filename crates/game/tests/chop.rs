@@ -527,10 +527,7 @@ fn player_trunk_cut_yields_every_log() {
     assert_eq!(sticks, 3, "one stick per branch block");
     let (leaves, _) = piled(&region, game::ItemId::block(ids.leaves));
     assert_eq!(leaves, 0, "leaves drop nothing");
-    // 11 items in 5 piles: a deposit merges into a pile within
-    // `PILE_MERGE_RADIUS_BLOCKS` (1) of it and the pile stays put, so along
-    // a felled trunk piles end up every other block.
-    assert!(region.data().item_piles().len() <= 5, "merged into a few piles: {:?}", region.data().item_piles());
+    assert!(region.data().item_piles().len() <= 3, "merged into a few piles: {:?}", region.data().item_piles());
     assert!(region.data().clients[&0].inventory.slots.iter().all(|s| s.is_none()), "nothing picked up");
 }
 
@@ -579,4 +576,32 @@ fn player_chop_undo_roundtrip() {
     assert_eq!(state_hash(region.data()), before, "felling, settling and the drops roll back bit-exact");
     assert!(region.data().item_piles().is_empty());
     assert_eq!(TileSource::block(region.data(), [x0(), 1, Z0]), ids.log);
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn player_mining_a_tree_leaf_breaks_it_alone() {
+    let ids = ids();
+    let mut region = adventure_at_the_trunk(&ids);
+    // A tree-id leaf in front of the trunk's base, in the eye ray's way.
+    let leaf = [x0(), 1, Z0 + 1];
+    region.with_data(|r| assert!(r.set_block_safe(leaf, Block::with_tree(ids.leaves, TREE, 0))));
+    assert_eq!(region.data().eye_hit(0).unwrap().block, leaf, "aimed at the leaf");
+    let needed = game::break_ticks(game::block_props(), Block::with_tree(ids.leaves, TREE, 0)) as usize;
+    region.handle_event(press(true)).unwrap();
+    let mut broke = None;
+    for n in 1..=needed + 5 {
+        region.handle_event(GameEventKind::Tick).unwrap();
+        if TileSource::block(region.data(), leaf) == BlockId::AIR {
+            broke = Some(n);
+            break;
+        }
+    }
+    assert_eq!(broke, Some(needed), "the leaf breaks on its own timing");
+    let r = region.data();
+    assert!(r.ecs.voxel_body.iter().all(|(_, v)| v.is_none()), "nothing fells");
+    for p in tree_of(&ids, TREE) {
+        assert_ne!(TileSource::block(r, p), BlockId::AIR, "{p:?} stands");
+    }
+    assert!(r.item_piles().is_empty(), "leaves drop nothing");
 }

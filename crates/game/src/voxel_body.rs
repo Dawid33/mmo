@@ -140,10 +140,11 @@ pub enum SettlePolicy {
     /// Removed, leaving nothing behind (a fortress chop order: no items).
     #[default]
     Despawn,
-    /// Removed, each model block turned into its drop (`drop_of`) and
-    /// deposited as a pile at the region block cell its centre ended in
-    /// (clamped into the region by the deposit) — a tree a player felled:
-    /// the logs lie where it landed.
+    /// Removed, its blocks turned into their drops (`drop_of`), summed per
+    /// item and deposited as piles at the region block cell its centre of
+    /// mass rests in (clamped into the region by the deposit; a full pile
+    /// spills to the cells around it) — a tree a player felled: the logs
+    /// lie where it landed.
     DropItems,
 }
 
@@ -450,39 +451,22 @@ fn topple_angvel(
     axis * w.max((TOPPLE_MARGIN * needed).min(TOPPLE_MAX_ANGVEL))
 }
 
-/// Each model block of `model` with the region block cell its centre lies
-/// in when the body stands at `pose` (its centre-of-mass frame, as
-/// `detach_blocks_pivoting_safe` built it), in model key order. Only
-/// `+ - * /` and `floor` (the quaternion rotation included), so the cells
-/// agree on every target.
-pub fn settled_cells(model: &VoxelModel, pose: &Pose) -> Vec<(BlockPos, Block)> {
-    let com = model_mass_properties(model).local_com;
-    let bv = BLOCK_VOXELS as f32;
-    model
-        .blocks
-        .iter()
-        .map(|(o, (block, _))| {
-            let centre = Vector::new(
-                (f32::from(o[0]) + 0.5) * bv,
-                (f32::from(o[1]) + 0.5) * bv,
-                (f32::from(o[2]) + 0.5) * bv,
-            );
-            let world = pose.translation + pose.rotation * (centre - com);
-            let cell = [world.x, world.y, world.z].map(|v| (v / bv).floor() as i32);
-            (cell, *block)
-        })
-        .collect()
-}
-
 impl Rollback {
-    /// Deposits each block's drop (`drop_of`; leaves drop nothing) as a pile
-    /// at its cell, in order, pickable after `PICKUP_DELAY_TICKS`. Losses to
-    /// the pile caps are counted by the deposit.
-    fn drop_blocks_safe(&mut self, cells: Vec<(BlockPos, Block)>, tick: u64) {
-        for (cell, block) in cells {
+    /// Deposits the drops (`drop_of`; leaves drop nothing) of `blocks` at
+    /// `cell`, summed per item (in `ItemId` order) — one deposit per item,
+    /// whose merge / free-cell rule spills what one pile cannot hold to the
+    /// cells around it. Pickable after `PICKUP_DELAY_TICKS`. Losses to the
+    /// pile caps are counted by the deposit.
+    pub(crate) fn drop_blocks_at_safe(&mut self, cell: BlockPos, blocks: impl IntoIterator<Item = Block>, tick: u64) {
+        let mut totals: BTreeMap<crate::ItemId, u32> = BTreeMap::new();
+        for block in blocks {
             if let Some(stack) = crate::drop_of(block) {
-                let _destroyed = self.deposit_items_safe(cell, stack, tick, crate::PICKUP_DELAY_TICKS);
+                *totals.entry(stack.item).or_default() += stack.count;
             }
+        }
+        for (item, count) in totals {
+            let stack = crate::ItemStack { item, count };
+            let _destroyed = self.deposit_items_safe(cell, stack, tick, crate::PICKUP_DELAY_TICKS);
         }
     }
 
@@ -550,13 +534,17 @@ impl Rollback {
         let boxes = model_collider_boxes(&colliding);
         if boxes.is_empty() {
             if policy == SettlePolicy::DropItems {
-                // Settled at once, where it stood.
-                let cells = model
-                    .blocks
-                    .iter()
-                    .map(|(o, (block, _))| ([0, 1, 2].map(|a| origin[a] + i32::from(o[a])), *block))
-                    .collect();
-                self.drop_blocks_safe(cells, *self.data.tick as u64);
+                // Settled at once, where it stood: at the middle of its
+                // blocks' bounds.
+                let mut hi = [0i16; 3];
+                for o in model.blocks.keys() {
+                    for a in 0..3 {
+                        hi[a] = hi[a].max(o[a]);
+                    }
+                }
+                let cell = [0, 1, 2].map(|a| origin[a] + i32::from(hi[a]) / 2);
+                let blocks: Vec<Block> = model.blocks.values().map(|(b, _)| *b).collect();
+                self.drop_blocks_at_safe(cell, blocks, *self.data.tick as u64);
             }
             return None;
         }
@@ -668,10 +656,14 @@ impl Rollback {
                 match vb.policy {
                     SettlePolicy::Despawn => self.remove_entity_safe(e, None),
                     SettlePolicy::DropItems => {
-                        let pose = *body.position();
-                        let cells = settled_cells(&vb.model, &pose);
+                        // The body frame is the centre-of-mass frame: the
+                        // drops go to the cell its centre of mass rests in.
+                        let t = body.translation();
+                        let bv = BLOCK_VOXELS as f32;
+                        let cell = [t.x, t.y, t.z].map(|v| (v / bv).floor() as i32);
                         self.remove_entity_safe(e, None);
-                        self.drop_blocks_safe(cells, tick);
+                        let blocks: Vec<Block> = vb.model.blocks.values().map(|(b, _)| *b).collect();
+                        self.drop_blocks_at_safe(cell, blocks, tick);
                     }
                 }
                 continue;
