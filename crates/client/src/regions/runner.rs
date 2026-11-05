@@ -90,6 +90,9 @@ pub struct HomeView {
     pub translation: Option<[f32; 3]>,
     pub fps_cam_mode: bool,
     pub hotbar: game::HotbarView,
+    /// The block the local player is mining and how far along (Adventure;
+    /// drawn on the crosshair).
+    pub mining: Option<game::MiningView>,
     pub mode: game::PlayMode,
     pub inventory_open: bool,
     /// Unconfirmed predictions (the death-spiral signal).
@@ -304,6 +307,7 @@ fn home_view(region: &Region, client: ClientId) -> Option<HomeView> {
         translation: body_translation(region, client),
         fps_cam_mode: c.fps_cam_mode,
         hotbar: game::build_hotbar(data, client),
+        mining: game::mining_view(c, region.current_tick() as u64),
         mode: c.mode,
         inventory_open: c.inventory_open,
         log_len: region.pending_event_ids().len(),

@@ -137,7 +137,7 @@ pub fn players_dir_for(world_file: &Path) -> PathBuf {
 pub const PLAYER_MAGIC: [u8; 8] = *b"MMOPLYR\0";
 /// Bump when the header changes. (A change to the sim's state types changes
 /// the payload without this: such a record fails to decode and is set aside.)
-pub const PLAYER_FILE_VERSION: u32 = 3;
+pub const PLAYER_FILE_VERSION: u32 = 4;
 /// magic + version + payload crc.
 const HEADER_LEN: usize = 8 + 4 * 2;
 const INDEX_FILE: &str = "index.ron";

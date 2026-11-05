@@ -653,7 +653,8 @@ impl Region {
                     .clients
                     .iter()
                     // Not while the inventory is open: its clicks are UI.
-                    .filter(|(_, c)| c.fps_cam_mode && !c.inventory_open)
+                    // Adventure (survival) clients mine instead, below.
+                    .filter(|(_, c)| c.mode != crate::PlayMode::Adventure && c.fps_cam_mode && !c.inventory_open)
                     .filter_map(|(id, c)| {
                         if c.input.mouse_pressed(&crate::edit::BREAK_BUTTON) {
                             Some((*id, crate::edit::EditAction::Break))
@@ -666,6 +667,30 @@ impl Region {
                     .collect();
                 for (client_id, action) in edits {
                     self.data.player_edit_safe(client_id, action);
+                }
+                // Survival (Adventure): left held mines with break times,
+                // a right press places the selected block, Q / Ctrl+Q throw.
+                let survivors: Vec<(ClientId, bool, Option<bool>)> = self
+                    .data
+                    .clients
+                    .iter()
+                    .filter(|(_, c)| c.mode == crate::PlayMode::Adventure)
+                    .map(|(id, c)| {
+                        let hands = c.fps_cam_mode && !c.inventory_open;
+                        let place = hands && c.input.mouse_pressed(&crate::edit::PLACE_BUTTON);
+                        let throw = (hands && c.input.key_pressed(&Key::KeyQ))
+                            .then(|| c.input.key_held(&Key::ControlLeft));
+                        (*id, place, throw)
+                    })
+                    .collect();
+                for (client_id, place, throw) in survivors {
+                    self.data.tick_mining_safe(client_id, tick);
+                    if place {
+                        self.data.survival_place_safe(client_id);
+                    }
+                    if let Some(whole_stack) = throw {
+                        self.data.throw_selected_safe(client_id, whole_stack, tick);
+                    }
                 }
                 // Item piles: Adventure bodies pick up what they reach, then
                 // due piles despawn.

@@ -51,15 +51,17 @@ use slotmapd::Key as _;
 /// client; 16-block values only). Then for the `Ecs` `walker` component
 /// slot (`game::adventure`; layout only — nobody walks; 16-block values only). Then for
 /// `GameData.item_piles` / `pile_expiry` (`game::item_piles`; layout only —
-/// no pile in these scenes; 16-block values only).
+/// no pile in these scenes; 16-block values only). Then for `Client.mining` /
+/// `break_cooldown_until` (`game::mining`; layout only — nobody mines; 16-block
+/// values only).
 ///
 /// Every value is pinned per sim-chunk size (`game::CHUNK_BLOCKS`, a build
 /// dial): the same physical scene splits into different chunk entities,
 /// bodies and colliders at 2 and 16 blocks, so its bytes and hashes differ.
 /// Other sizes are not pinned and skip the comparison.
-const WASM_SCENE_DIGEST: u32 = pinned(0xFA8E_102F, 0x3A25_BC72);
+const WASM_SCENE_DIGEST: u32 = pinned(0xFA8E_102F, 0xAF68_329A);
 /// `game::state_hash` of the same state, on every target.
-const SCENE_STATE_HASH: u32 = pinned(0x5233_40BE, 0x897A_4E7E);
+const SCENE_STATE_HASH: u32 = pinned(0x5233_40BE, 0xEBA9_B866);
 const SCENE_TICKS: usize = 120;
 /// crc32 of [`underground_scene`]'s region bytes, on every target.
 const UNDERGROUND_DIGEST: u32 = pinned(0x5448_586C, 0xE44A_7239);

@@ -134,6 +134,10 @@ pub struct Client {
     pub selected: u8,
     /// The stack held on the mouse cursor (inventory clicks).
     pub cursor: Option<ItemStack>,
+    /// The block being mined (Adventure, left held; `mining.rs`).
+    pub mining: Option<crate::Mining>,
+    /// No mining progress before this tick (set after each break).
+    pub break_cooldown_until: u64,
 }
 
 /// What an entity *is*, for rendering and future gameplay. The player is the

@@ -44,7 +44,7 @@ use game::{state_hash, GameEventKind, InputEvent, Key, Region, RegionCoords};
 /// into other chunk entities, bodies and colliders at 2 and 16 blocks.
 const SCENE_HASH: u32 = match game::CHUNK_BLOCKS {
     2 => 0x380C_FBC3,
-    16 => 0xC1E5_D78E,
+    16 => 0x0628_A06C,
     _ => 0,
 };
 /// Ticks of scripted input.

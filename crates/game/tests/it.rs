@@ -33,6 +33,7 @@ mod history;
 mod inventory;
 mod item_piles;
 mod items;
+mod mining;
 mod history_handover;
 mod history_play;
 mod hash_restore;

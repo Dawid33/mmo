@@ -130,7 +130,7 @@ impl Rollback {
         COLLIDER_REBUILDS.with(|c| c.get())
     }
 
-    fn block_solid(&self, pos: BlockPos) -> bool {
+    pub(crate) fn block_solid(&self, pos: BlockPos) -> bool {
         let Some((coords, local)) = locate(pos) else { return false };
         let Some(e) = self.chunk_key_at(coords) else {
             return self.implied_block(coords, local).is_some_and(|b| b.id != BlockId::AIR);
@@ -200,13 +200,13 @@ impl Rollback {
         self.raycast_block_in(origin, dir, reach)
     }
 
-    fn raycast_block_in(&self, origin: Vector, dir: Vector, reach: f32) -> Option<BlockHit> {
+    pub(crate) fn raycast_block_in(&self, origin: Vector, dir: Vector, reach: f32) -> Option<BlockHit> {
         raycast_blocks(origin, dir, reach, |p| self.block_solid(p))
     }
 
     /// True if any non-fixed body's collider overlaps block `pos`. Keeps a
     /// placed block from burying a player (or any other moving entity).
-    fn block_overlaps_body(&self, pos: BlockPos) -> bool {
+    pub(crate) fn block_overlaps_body(&self, pos: BlockPos) -> bool {
         let size = BLOCK_VOXELS as f32;
         let lo = [pos[0] as f32 * size, pos[1] as f32 * size, pos[2] as f32 * size];
         let hi = [lo[0] + size, lo[1] + size, lo[2] + size];
@@ -237,7 +237,7 @@ impl Rollback {
     }
 
     /// The one funnel of both `set_block_safe` and `player_edit_safe`.
-    fn set_block_in(&mut self, pos: BlockPos, block: Block) -> bool {
+    pub(crate) fn set_block_in(&mut self, pos: BlockPos, block: Block) -> bool {
         let Some((coords, (bx, by, bz))) = locate(pos) else { return false };
         let breaking = block.id == BlockId::AIR;
         if breaking && self.breaks_into_neighbour_ground(pos, coords) {
@@ -613,18 +613,39 @@ impl Rollback {
         written
     }
 
+    /// `client`'s player's eye (sim units) and unit look direction, or
+    /// `None` without a body and camera.
+    pub fn eye_ray(&self, client: ClientId) -> Option<(Vector, Vector)> {
+        let &e = self.data.player_entites.get(&client)?;
+        let handle = (*self.data.ecs.rigidbody.try_get(e))?;
+        let body = self.data.physics.bodies.get(handle)?;
+        let camera = self.data.ecs.camera.try_get(e).as_ref()?;
+        let eye = body.translation() + Vector::new(0.0, PLAYER_EYE_OFFSET, 0.0);
+        // Cameras look down -Z, as the renderer's Camera3d does.
+        let dir = crate::look_quat(camera.yaw, camera.pitch) * Vector::new(0.0, 0.0, -1.0);
+        Some((eye, dir))
+    }
+
+    /// The block under `client`'s crosshair within [`REACH`]: the first
+    /// non-air block along its eye ray (implied ground included). Shared by
+    /// the Fortress instant edit and survival mining / placing.
+    pub fn eye_hit(&self, client: ClientId) -> Option<BlockHit> {
+        let (eye, dir) = self.eye_ray(client)?;
+        self.raycast_block_in(eye, dir, REACH)
+    }
+
+    /// The block at `pos` as the sim sees it (implied ground included);
+    /// `None` outside the region or in an empty chunk slot.
+    pub fn block_at(&self, pos: BlockPos) -> Option<Block> {
+        let (coords, local) = locate(pos)?;
+        self.current_block(coords, local)
+    }
+
     /// Runs one break or place for `client`'s player from its eye along its
     /// look. Returns whether a block changed. Invalid edits (nothing in reach,
     /// the target cell occupied, a body in the way) change nothing.
     pub fn player_edit_safe(&mut self, client: ClientId, action: EditAction) -> bool {
-        let Some(&e) = self.data.player_entites.get(&client) else { return false };
-        let Some(handle) = *self.data.ecs.rigidbody.try_get(e) else { return false };
-        let Some(body) = self.data.physics.bodies.get(handle) else { return false };
-        let Some(camera) = self.data.ecs.camera.try_get(e).as_ref() else { return false };
-        let eye = body.translation() + Vector::new(0.0, PLAYER_EYE_OFFSET, 0.0);
-        // Cameras look down -Z, as the renderer's Camera3d does.
-        let dir = crate::look_quat(camera.yaw, camera.pitch) * Vector::new(0.0, 0.0, -1.0);
-        let Some(hit) = self.raycast_block_in(eye, dir, REACH) else { return false };
+        let Some(hit) = self.eye_hit(client) else { return false };
         match action {
             EditAction::Break => self.set_block_in(hit.block, Block::new(BlockId::AIR)),
             EditAction::Place => {
