@@ -574,7 +574,24 @@ pub fn run() {
     let region_gen_cache = gen_cache.clone();
     let region_generator: region_threads::SharedRegionGenerator =
         std::sync::Arc::new(move |rc| region_gen_cache.generate_cached(rc, world_seed, materials));
-    let mut spawner = region_threads::ThreadRegionSpawner::with_generator(region_generator);
+    // The world clock: ms since `start` (the manager's `now_ms` base) -> world
+    // tick, continuing from the saved tick (procedural worlds: from 0, never saved).
+    let start = std::time::Instant::now();
+    let world_clock = game::WorldClock::starting_at(
+        0,
+        region_store.as_ref().and_then(|s| s.load_world_tick()).unwrap_or(0),
+    );
+    let mut spawner = region_threads::ThreadRegionSpawner::with_generator(region_generator)
+        .with_clock(world_clock, start);
+    let tick_store = region_store.clone();
+    let save_world_tick = move |start: std::time::Instant| {
+        if let Some(store) = &tick_store {
+            let tick = world_clock.tick_at(start.elapsed().as_millis() as u64);
+            if let Err(e) = store.save_world_tick(tick) {
+                log::error!("[server] cannot save the world tick: {e}");
+            }
+        }
+    };
     if let Some(store) = &region_store {
         spawner = spawner.with_store(store.clone());
     }
@@ -611,7 +628,6 @@ pub fn run() {
         manager.set_world_map(map);
     }
 
-    let start = std::time::Instant::now();
     let mut report = perf::ServerReport::new();
     let mut ever_connected = false;
     let mut last_world_save = std::time::Instant::now();
@@ -658,6 +674,7 @@ pub fn run() {
         if last_world_save.elapsed() >= save_every {
             last_world_save = std::time::Instant::now();
             save_history(&history_world_path, &manager);
+            save_world_tick(start);
             manager.request_save();
         }
         forward_saves(&saver, &mut manager);
@@ -692,6 +709,7 @@ pub fn run() {
         log::warn!("[server] {} regions did not park in time and are not saved: {unparked:?}", unparked.len());
     }
     // Every region that parked is saved (its blob since the last autosave).
+    save_world_tick(start);
     manager.request_save();
     forward_saves(&saver, &mut manager);
     if let Some((send, handle)) = saver {

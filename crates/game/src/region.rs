@@ -897,8 +897,11 @@ impl Region {
             return;
         }
         debug_assert!(self.event_log.is_empty(), "jump_clock_to after the region ticked");
+        // Own forgotten transaction (R8): `update` always logs an undo entry.
+        self.data.new_transaction();
         self.data.tick.update(|t| *t = tick);
         self.data.on_clock_jump(tick - now);
+        self.data.forget();
     }
 
     /// Drain the cumulative Tick wall-time breakdown (native only).

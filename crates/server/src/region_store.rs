@@ -93,6 +93,25 @@ impl RegionStore {
         &self.dir
     }
 
+    fn world_tick_path(&self) -> PathBuf {
+        self.dir.join("world.tick")
+    }
+
+    /// Persist the world tick (`<dir>/world.tick`, atomic temp + rename).
+    pub fn save_world_tick(&self, tick: game::Tick) -> std::io::Result<()> {
+        std::fs::create_dir_all(&self.dir)?;
+        let path = self.world_tick_path();
+        let tmp = path.with_extension("tick.tmp");
+        std::fs::write(&tmp, tick.to_le_bytes())?;
+        std::fs::rename(&tmp, &path)
+    }
+
+    /// The saved world tick; `None` when missing or unreadable.
+    pub fn load_world_tick(&self) -> Option<game::Tick> {
+        let bytes = std::fs::read(self.world_tick_path()).ok()?;
+        Some(game::Tick::from_le_bytes(bytes.try_into().ok()?))
+    }
+
     pub fn path(&self, rc: RegionCoords) -> PathBuf {
         self.dir.join(format!("r.{}.{}.region", rc.x, rc.z))
     }
@@ -248,6 +267,14 @@ mod tests {
             dir,
             PathBuf::from(format!("worlds/foo/terrain.regions/b{}-c{}", game::REGION_BLOCKS, game::CHUNK_BLOCKS))
         );
+    }
+
+    #[test]
+    fn world_tick_round_trips() {
+        let store = RegionStore::new(scratch("tick"), 7);
+        assert_eq!(store.load_world_tick(), None);
+        store.save_world_tick(123_456).unwrap();
+        assert_eq!(store.load_world_tick(), Some(123_456));
     }
 
     #[test]

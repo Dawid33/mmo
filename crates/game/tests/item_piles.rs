@@ -265,6 +265,27 @@ fn expiry_removes_pile_at_tick() {
     assert!(region.data().pile_expiry().is_empty(), "the index goes with the pile");
 }
 
+#[test]
+fn clock_jump_keeps_pile_loaded_time() {
+    let mut region = region();
+    // Region tick 0, so the jump's delta is 10_000.
+    deposit(&mut region, [10, 1, 10], stack(DIRT, 1), 0);
+    let oldest = region.data().oldest();
+    region.jump_clock_to(10_000);
+    assert_eq!(region.current_tick(), 10_000);
+    // R8: the jump ran in its own forgotten transaction: none is pending, and
+    // its undo entries (tick write, pile shifts) were dropped, not left in the log.
+    assert_eq!(region.data().current(), region.data().oldest(), "the jump leaves no pending transaction");
+    assert_eq!(region.data().oldest(), oldest + 1, "the jump was one forgotten transaction");
+    region.handle_event(GameEventKind::Tick);
+    assert_eq!(piles(&region).len(), 1, "the pile keeps its loaded time across the jump");
+    for _ in 0..PILE_DESPAWN_TICKS {
+        region.handle_event(GameEventKind::Tick);
+    }
+    assert!(piles(&region).is_empty());
+    assert!(region.data().pile_expiry().is_empty());
+}
+
 // ~6 s under the tests' `HashMode::Full`: every map write re-hashes the
 // whole pile map, and this fills it to the cap.
 #[test]

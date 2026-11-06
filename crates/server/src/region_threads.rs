@@ -16,6 +16,8 @@ pub struct ThreadRegionSpawner {
     /// Server start: the base of the world clock's ms (the same base as the
     /// manager's `now_ms`).
     started: Instant,
+    /// The world clock (ms since `started` -> world tick).
+    clock: game::WorldClock,
     handles: BTreeMap<RegionCoords, JoinHandle<()>>,
     /// `Some` = regions generate their own columns on their own thread, so the
     /// manager hands out `RegionSeed::Deferred` (see `generates_columns`).
@@ -30,13 +32,21 @@ pub struct ThreadRegionSpawner {
 
 impl Default for ThreadRegionSpawner {
     fn default() -> Self {
-        Self { started: Instant::now(), handles: BTreeMap::new(), generator: None, store: None }
+        Self { started: Instant::now(), clock: game::WorldClock::starting_at(0, 0), handles: BTreeMap::new(), generator: None, store: None }
     }
 }
 
 impl ThreadRegionSpawner {
     pub fn with_generator(generator: SharedRegionGenerator) -> Self {
         Self { generator: Some(generator), ..Self::default() }
+    }
+
+    /// Use `clock` (anchored at `started`, the same base as the manager's
+    /// `now_ms`) as the world clock.
+    pub fn with_clock(mut self, clock: game::WorldClock, started: Instant) -> Self {
+        self.clock = clock;
+        self.started = started;
+        self
     }
 
     /// Restore never-run regions from `store` (see [`crate::region_store`]).
@@ -112,10 +122,10 @@ impl RegionSpawner for ThreadRegionSpawner {
         self.generator.is_some()
     }
 
-    /// Interim world clock: tick 0 at server start, one tick per `TICK_RATE`
-    /// ms of wall time (a real shared clock arrives with the later tasks).
+    /// The world clock: one tick per `TICK_RATE` ms of wall time since the
+    /// server's start, from the persisted world tick.
     fn world_tick(&self) -> game::Tick {
-        game::WorldClock::starting_at(0, 0).tick_at(self.started.elapsed().as_millis() as u64)
+        self.clock.tick_at(self.started.elapsed().as_millis() as u64)
     }
 
     fn reap(&mut self, id: RegionCoords) {

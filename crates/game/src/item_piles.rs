@@ -428,7 +428,7 @@ impl Rollback {
     /// The one write funnel: sets or clears each cell's pile and its expiry
     /// index entry, and tells the renderer — the new views now, the prior
     /// ones on undo.
-    fn write_piles_safe(&mut self, changes: Vec<(BlockPos, Option<ItemPile>)>) {
+    pub(crate) fn write_piles_safe(&mut self, changes: Vec<(BlockPos, Option<ItemPile>)>) {
         if changes.is_empty() {
             return;
         }
