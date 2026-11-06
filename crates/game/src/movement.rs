@@ -48,9 +48,15 @@ pub const JUMP_SPEED: f32 = 10.6;
 pub const DOUBLE_TAP_WINDOW_MS: u64 = 350;
 /// Ledges up to this height are walked up without jumping (Minecraft: 0.6 m).
 pub const STEP_HEIGHT: f32 = 0.6;
+/// The tread an autostep needs past a ledge, metres. Below the 0.5 m tread of
+/// a terrain slope's upper half; rapier's `Relative(0.5)` evaluated against the
+/// capsule AABB's horizontal DIAGONAL (~0.58 m) and refused it.
+pub const AUTOSTEP_MIN_WIDTH_M: f32 = 0.3;
 /// A walking body within this distance above the ground is pulled down onto
-/// it, so stepping down stairs does not go airborne.
-pub const GROUND_SNAP: f32 = 0.25;
+/// it, so stepping down stairs does not go airborne. As tall as `STEP_HEIGHT`:
+/// what a body walks up it also walks down — at 0.25 m a terrain slope's
+/// 0.5 m half-steps went airborne for 3-4 ticks.
+pub const GROUND_SNAP: f32 = 0.6;
 
 /// Standing height of a player body (Minecraft: 1.8 m). It fills two blocks
 /// while still fitting through a two-block-high gap: a body of exactly 2 m
@@ -341,7 +347,7 @@ pub fn character_controller(motion: &Motion) -> KinematicCharacterController {
     KinematicCharacterController {
         autostep: walking.then(|| CharacterAutostep {
             max_height: CharacterLength::Absolute(STEP_HEIGHT * UNITS_PER_METER),
-            min_width: CharacterLength::Relative(0.5),
+            min_width: CharacterLength::Absolute(AUTOSTEP_MIN_WIDTH_M * UNITS_PER_METER),
             include_dynamic_bodies: false,
         }),
         snap_to_ground: walking

@@ -59,6 +59,7 @@ mod rollback_restore;
 mod shape_cast_grazing;
 mod simple;
 mod slime;
+mod slope_walk;
 mod spawn_surface;
 mod state_hash;
 mod sunk_body;

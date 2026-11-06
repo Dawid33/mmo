@@ -14,7 +14,7 @@
 //!   (`IntegrationParameters::length_unit`); run with `-- --nocapture` for
 //!   the numbers in `docs/superpowers/specs/2026-09-22-rapier-035-spike-results.md`.
 use game::movement::{
-    CHARACTER_SKIN, GRAVITY, GROUND_SNAP, PLAYER_CAPSULE_HALF_HEIGHT, PLAYER_CAPSULE_RADIUS, STEP_HEIGHT,
+    AUTOSTEP_MIN_WIDTH_M, CHARACTER_SKIN, GRAVITY, GROUND_SNAP, PLAYER_CAPSULE_HALF_HEIGHT, PLAYER_CAPSULE_RADIUS, STEP_HEIGHT,
     UNITS_PER_METER, WALK_SPEED,
 };
 use physics_next::PhysicsWorld;
@@ -198,7 +198,7 @@ fn game_controller() -> KinematicCharacterController {
     KinematicCharacterController {
         autostep: Some(CharacterAutostep {
             max_height: CharacterLength::Absolute(STEP_HEIGHT * UNITS_PER_METER),
-            min_width: CharacterLength::Relative(0.5),
+            min_width: CharacterLength::Absolute(AUTOSTEP_MIN_WIDTH_M * UNITS_PER_METER),
             include_dynamic_bodies: false,
         }),
         snap_to_ground: Some(CharacterLength::Absolute(GROUND_SNAP * UNITS_PER_METER)),
