@@ -941,3 +941,56 @@ fn ghost_pushes_dynamic_body_one_way() {
     assert!(vx > 0.8 * speed, "carried at the mirror's {speed} units/s: {vx}");
     assert!(region.data().id_index.get(&body_id(5)).is_none(), "the mirror stays a mirror");
 }
+
+/// A mirror whose pose JUMPS (past `MIRROR_SNAP_DISTANCE_UNITS`: an in-band
+/// teleport, or updates of several missed ticks landing at once) is
+/// teleported, not driven: a mirror pushing a body that then jumps through it
+/// to 10 blocks past leaves it be. Driven across the jump in one step, it
+/// would hit the body at the jump's speed (~200 m/s) and fling it.
+#[test]
+fn ghost_jump_snaps_without_flinging() {
+    use game::halo::MIRROR_SNAP_DISTANCE_UNITS;
+    let mut region = floored_region();
+    let b = game::BLOCK_VOXELS as f32;
+    let e = spawn(&mut region, pose(512.0, b * 1.5, 512.0), cube(), Vector::ZERO, Vector::ZERO);
+    for _ in 0..10 {
+        tick(&mut region);
+    }
+    let capsule = ColliderSpec::CapsuleY { half_height: 8.0, radius: 6.4 };
+    let y = b + 8.0 + 6.4;
+    let mirror = |x: f32| HaloEntityDelta {
+        id: body_id(5),
+        source_region: body_src(),
+        kind: EntityKind::Slime { size: 2 },
+        isometry: pose(x, y, 512.0),
+        linvel: Vector::ZERO,
+        collider: capsule.clone(),
+    };
+    let mut step = |region: &mut Region, x: f32| {
+        region.handle_event(GameEventKind::HaloEntity(mirror(x))).unwrap();
+        region.forget_last_event();
+        tick(region);
+    };
+    // Walk up to the cube and push it (as `ghost_pushes_dynamic_body_one_way`).
+    let mut x = 512.0 - 3.0 * b;
+    for _ in 0..30 {
+        step(&mut region, x);
+        x += 2.0;
+    }
+    let before = live_body(&region, e).translation();
+    assert!(before.x > 512.0 + 1.0, "the walk pushed the cube: {before:?}");
+    // One update puts the mirror 10 blocks past the cube's far side.
+    let past = before.x + 10.0 * b;
+    assert!(past - x > MIRROR_SNAP_DISTANCE_UNITS, "the test's jump is past the snap distance");
+    step(&mut region, past);
+    for _ in 0..5 {
+        tick(&mut region);
+    }
+    let body = live_body(&region, e);
+    let moved = body.translation() - before;
+    // Teleported, the cube keeps only the walk's push (2 units/tick), which
+    // friction ends within a few ticks.
+    assert!(moved.length() < b, "not flung by the mirror's jump: moved {moved:?}, linvel {:?}", body.linvel());
+}
+
+

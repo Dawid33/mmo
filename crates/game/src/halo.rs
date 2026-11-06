@@ -70,6 +70,22 @@ pub const HALO_BLOCKS: i32 = 8;
 /// mirrored into that neighbour's entity halo (`crate::halo_offsets`).
 pub const HALO_UNITS: f32 = (HALO_BLOCKS * crate::BLOCK_VOXELS as i32) as f32;
 
+/// How far (units) a halo mirror may be DRIVEN to its next pose in one
+/// step; a jump past it TELEPORTS the mirror instead (`apply_halo_entity_safe`).
+/// A driven mirror moves with the velocity that covers the jump in one tick,
+/// and hands that velocity to any dynamic body it touches — right for motion,
+/// a fling for a jump (an in-band teleport, or a mirror resumed after missed
+/// ticks under jitter, whose updates land several ticks at once). The fastest
+/// legit per-tick motion of a moving entity is a fly-sprint,
+/// `FLY_SPRINT_SPEED` × `TICK_DT` = 1.08 blocks; ×1.5 margin = 1.62 blocks
+/// (25.9 units), so every walk, sprint and flight step is driven. A fall
+/// faster than ~32 m/s (≈0.7 s of free fall; terminal is 78.4) is teleported:
+/// it only loses its push, the behaviour before mirrors were driven.
+pub const MIRROR_SNAP_DISTANCE_UNITS: f32 = 1.5
+    * crate::movement::FLY_SPRINT_SPEED
+    * crate::movement::UNITS_PER_METER
+    * crate::movement::TICK_DT;
+
 /// The halo width in whole chunks: chunk rows mirrored along each edge.
 pub const HALO_CHUNKS: i32 = (HALO_BLOCKS + CHUNK_BLOCKS as i32 - 1) / CHUNK_BLOCKS as i32;
 

@@ -10,11 +10,12 @@
 //! differs between a centred and a seam placement. A placement's outcome is
 //! a [`WorldSnapshot`] instead, compared by [`compare`]: DISCRETE state
 //! exactly (the set of `EntityId`s and kinds, each entity's feet tile in
-//! world blocks, its walk goal, a client's mode and inventory, changed
-//! terrain chunks, item piles, chests) and CONTINUOUS state (world poses,
-//! velocities) within named [`Tolerances`]. Ownership is checked inside
-//! [`snapshot`] instead of compared: every entity must be owned by the
-//! region its world position lies in.
+//! world blocks, whether its body sleeps, its walk goal, a client's mode and
+//! inventory, changed terrain chunks, item piles, chests) and CONTINUOUS
+//! state (world poses, rotations, velocities) within named [`Tolerances`]
+//! (a scenario may set its own: [`Scenario::lockstep_tolerances`]).
+//! Ownership is checked inside [`snapshot`] instead of compared: every
+//! entity must be owned by the region its world position lies in.
 //!
 //! Scope of the snapshot: entities the scenario plays with. Slimes are left
 //! out — the spawner places them by region-local rules, so they do not move
@@ -124,9 +125,18 @@ pub trait Scenario {
     fn crosses(&self) -> bool {
         true
     }
+    /// The kind of the one entity whose motion crosses: `None` = the
+    /// client's player. Every round it must be owned by at most one region.
+    fn crosser(&self) -> Option<EntityKind> {
+        None
+    }
     /// What a jittery run is held to against the lockstep centred one.
     fn jitter_tolerances(&self) -> Tolerances {
         JITTER_TOLERANCES
+    }
+    /// What a lockstep placement is held to against the centred one.
+    fn lockstep_tolerances(&self) -> Tolerances {
+        LOCKSTEP_TOLERANCES
     }
 }
 
@@ -140,6 +150,10 @@ pub struct Tolerances {
     /// Feet tiles must be equal (off when lag may legitimately move a body
     /// into the next tile; the pose tolerance still holds it).
     pub tiles: bool,
+    /// Largest world-frame rotation difference, degrees. Infinite = not
+    /// compared (the walking scenarios: a capsule's facing is not what they
+    /// test).
+    pub angle_deg: f32,
 }
 
 /// Lockstep placements vs the centred one: world poses within this many
@@ -158,8 +172,12 @@ pub const POSE_TOL_BLOCKS: f32 = 1.1e-4;
 /// (Task 6.5) the adventure walk is 7.6e-5 in every placement, lockstep and
 /// jittery, the key walk 0). Shared with [`JITTER_TOLERANCES`].
 pub const VEL_TOL_BLOCKS_PER_S: f32 = 3.1e-4;
-pub const LOCKSTEP_TOLERANCES: Tolerances =
-    Tolerances { pose_blocks: POSE_TOL_BLOCKS, vel_blocks_per_s: VEL_TOL_BLOCKS_PER_S, tiles: true };
+pub const LOCKSTEP_TOLERANCES: Tolerances = Tolerances {
+    pose_blocks: POSE_TOL_BLOCKS,
+    vel_blocks_per_s: VEL_TOL_BLOCKS_PER_S,
+    tiles: true,
+    angle_deg: f32::INFINITY,
+};
 
 /// A jittery run vs the lockstep centred one: late inputs and missed ticks
 /// shift WHEN a key takes effect, so a held-key walk may end up to a few
@@ -168,7 +186,12 @@ pub const LOCKSTEP_TOLERANCES: Tolerances =
 /// (2026-11-06, as above).
 pub const JITTER_POSE_TOL_BLOCKS: f32 = 1.53;
 pub const JITTER_TOLERANCES: Tolerances =
-    Tolerances { pose_blocks: JITTER_POSE_TOL_BLOCKS, vel_blocks_per_s: VEL_TOL_BLOCKS_PER_S, tiles: false };
+    Tolerances {
+        pose_blocks: JITTER_POSE_TOL_BLOCKS,
+        vel_blocks_per_s: VEL_TOL_BLOCKS_PER_S,
+        tiles: false,
+        angle_deg: f32::INFINITY,
+    };
 
 /// Seeds a jittery [`assert_seam_invariant`] sweeps per placement.
 pub const JITTER_SEEDS: u64 = 4;
@@ -187,6 +210,11 @@ pub struct EntitySnap {
     pub pos: [f32; 3],
     /// Linear velocity, blocks per second.
     pub vel: [f32; 3],
+    /// Body rotation (quaternion x, y, z, w): regions share axes, so the
+    /// local rotation is the world one.
+    pub rot: [f32; 4],
+    /// Whether the body is asleep (compared exactly).
+    pub sleeping: bool,
     /// A walk in progress: its goal column relative to the origin, and level.
     pub walk_goal: Option<([i64; 2], Option<i32>)>,
     /// A client's body: its play mode, inventory and cursor stack.
@@ -259,7 +287,7 @@ pub fn snapshot(rig: &mut Rig, origin: WorldBlockPos, baseline: &BTreeMap<[i64; 
                 }
                 let handle = (*data.ecs.rigidbody.try_get(key)).expect("an entity with an id has a body");
                 let body = data.physics.bodies.get(handle).expect("its body exists");
-                let (t, v) = (body.translation(), body.linvel());
+                let (t, v, q) = (body.translation(), body.linvel(), *body.rotation());
                 let world = [
                     rc.x as f64 * REGION_SIZE as f64 + t.x as f64,
                     t.y as f64,
@@ -286,6 +314,8 @@ pub fn snapshot(rig: &mut Rig, origin: WorldBlockPos, baseline: &BTreeMap<[i64; 
                     tile: rel(tile),
                     pos: [blocks(world[0] - o[0]), blocks(world[1] - o[1]), blocks(world[2] - o[2])],
                     vel: [blocks(v.x as f64), blocks(v.y as f64), blocks(v.z as f64)],
+                    rot: [q.x, q.y, q.z, q.w],
+                    sleeping: body.is_sleeping(),
                     walk_goal,
                     client,
                 };
@@ -337,6 +367,16 @@ pub fn compare(a: &WorldSnapshot, b: &WorldSnapshot, tol: &Tolerances) -> Result
         if x.client != y.client {
             return Err(format!("{id:?}: client state {:?} vs {:?}", x.client, y.client));
         }
+        if x.sleeping != y.sleeping {
+            return Err(format!("{id:?}: asleep {} vs {}", x.sleeping, y.sleeping));
+        }
+        let turn = angle_deg(x.rot, y.rot);
+        if turn > tol.angle_deg {
+            return Err(format!(
+                "{id:?}: rotation {:?} vs {:?} — {turn}° apart, tolerance {}°",
+                x.rot, y.rot, tol.angle_deg
+            ));
+        }
         let off = max_diff(x.pos, y.pos);
         if off > tol.pose_blocks {
             return Err(format!(
@@ -374,22 +414,32 @@ fn max_diff(a: [f32; 3], b: [f32; 3]) -> f32 {
     (0..3).map(|i| (a[i] - b[i]).abs()).fold(0.0, f32::max)
 }
 
-/// Largest position and velocity spread between the entities two snapshots
-/// share (blocks, blocks/s): what the tolerances are measured from.
-pub fn spread(a: &WorldSnapshot, b: &WorldSnapshot) -> (f32, f32) {
-    let mut out = (0.0f32, 0.0f32);
+/// The angle (degrees) of the rotation between two unit quaternions.
+pub fn angle_deg(a: [f32; 4], b: [f32; 4]) -> f32 {
+    let dot = (0..4).map(|i| a[i] as f64 * b[i] as f64).sum::<f64>().abs().min(1.0);
+    (2.0 * dot.acos()).to_degrees() as f32
+}
+
+/// Largest position, velocity and rotation spread between the entities two
+/// snapshots share (blocks, blocks/s, degrees): what the tolerances are
+/// measured from.
+pub fn spread(a: &WorldSnapshot, b: &WorldSnapshot) -> (f32, f32, f32) {
+    let mut out = (0.0f32, 0.0f32, 0.0f32);
     for (id, x) in &a.entities {
         if let Some(y) = b.entities.get(id) {
             out.0 = out.0.max(max_diff(x.pos, y.pos));
             out.1 = out.1.max(max_diff(x.vel, y.vel));
+            out.2 = out.2.max(angle_deg(x.rot, y.rot));
         }
     }
     out
 }
 
 /// Play `s` at `placement` (under `schedule`, then lockstep to settle) and
-/// snapshot the outcome. Panics unless the player was owned by the region
-/// past the placement's seam at some point: the motion must cross it.
+/// snapshot the outcome. Panics unless the crossing entity
+/// ([`Scenario::crosser`], the player by default) was owned by the region
+/// past the placement's seam at some point — the motion must cross it — or
+/// by two regions in one round.
 pub fn run<S: Scenario>(s: &S, placement: Placement, schedule: Option<InlineSchedule>) -> WorldSnapshot {
     let mut rig = Rig::with_floor(schedule, uniform_floor);
     rig.join_spawn();
@@ -397,15 +447,23 @@ pub fn run<S: Scenario>(s: &S, placement: Placement, schedule: Option<InlineSche
     let origin = placement.origin();
     s.setup(&mut rig, origin);
     let mut owners = std::collections::BTreeSet::new();
+    let mut track = |rig: &mut Rig| {
+        let now = match s.crosser() {
+            None => rig.owners(),
+            Some(kind) => rig.owners_of(kind),
+        };
+        assert!(now.len() <= 1, "{placement:?}: the crossing entity is owned by several regions: {now:?}");
+        owners.extend(now);
+    };
     for round in 0..s.rounds() {
         s.drive(&mut rig, round);
         rig.round();
-        owners.extend(rig.owners());
+        track(&mut rig);
     }
     rig.manager.spawner_mut().set_schedule(None);
     for _ in 0..SETTLE_ROUNDS {
         rig.round();
-        owners.extend(rig.owners());
+        track(&mut rig);
     }
     if let Some(beyond) = placement.beyond().filter(|_| s.crosses()) {
         assert!(owners.contains(&beyond), "{placement:?}: the scenario never reached {beyond:?} (owners {owners:?})");
@@ -415,7 +473,8 @@ pub fn run<S: Scenario>(s: &S, placement: Placement, schedule: Option<InlineSche
 }
 
 /// Seam-translation invariance of `s`. Lockstep (`schedule == None`): every
-/// placement matches the centred run within [`LOCKSTEP_TOLERANCES`].
+/// placement matches the centred run within `s.lockstep_tolerances()`
+/// ([`LOCKSTEP_TOLERANCES`] by default).
 /// Jittery: each placement under `schedule(seed)` for [`JITTER_SEEDS`] seeds
 /// keeps the entity set (no loss, no duplicate — `Rig::round` asserts
 /// conservation every round) and matches the lockstep centred run within
@@ -427,9 +486,11 @@ pub fn assert_seam_invariant<S: Scenario>(s: &S, schedule: Option<fn(u64) -> Inl
         None => {
             for placement in &PLACEMENTS[1..] {
                 let snap = run(s, *placement, None);
-                let (pose, vel) = spread(&reference, &snap);
-                eprintln!("[seam-invariant] lockstep {placement:?}: pose spread {pose} blocks, velocity {vel} blocks/s");
-                if let Err(e) = compare(&reference, &snap, &LOCKSTEP_TOLERANCES) {
+                let (pose, vel, turn) = spread(&reference, &snap);
+                eprintln!(
+                    "[seam-invariant] lockstep {placement:?}: pose spread {pose} blocks, velocity {vel} blocks/s, rotation {turn}°"
+                );
+                if let Err(e) = compare(&reference, &snap, &s.lockstep_tolerances()) {
                     panic!("lockstep {placement:?} differs from Centre: {e}");
                 }
             }
@@ -442,9 +503,9 @@ pub fn assert_seam_invariant<S: Scenario>(s: &S, schedule: Option<fn(u64) -> Inl
                         run(s, placement, Some(schedule(seed)))
                     }))
                     .unwrap_or_else(|_| panic!("{placement:?} broke under schedule seed {seed}"));
-                    let (pose, vel) = spread(&reference, &snap);
+                    let (pose, vel, turn) = spread(&reference, &snap);
                     eprintln!(
-                        "[seam-invariant] seed {seed} {placement:?}: pose spread {pose} blocks, velocity {vel} blocks/s"
+                        "[seam-invariant] seed {seed} {placement:?}: pose spread {pose} blocks, velocity {vel} blocks/s, rotation {turn}°"
                     );
                     if let Err(e) = compare(&reference, &snap, &tol) {
                         panic!("{placement:?} under schedule seed {seed} differs from lockstep Centre: {e}");

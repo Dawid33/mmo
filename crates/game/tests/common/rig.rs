@@ -288,6 +288,23 @@ impl Rig {
         owners
     }
 
+    /// Regions that currently own an entity of `kind`, once per entity (a
+    /// region owning two shows twice).
+    pub fn owners_of(&mut self, kind: game::EntityKind) -> Vec<RegionCoords> {
+        let mut owners = Vec::new();
+        for rc in self.manager.running_regions() {
+            self.manager.spawner_mut().with_region(rc, |region| {
+                let data = region.data();
+                for &key in data.id_index.values() {
+                    if *data.ecs.kind.try_get(key) == Some(kind) {
+                        owners.push(rc);
+                    }
+                }
+            });
+        }
+        owners
+    }
+
     pub fn player_xz(&mut self, rc: RegionCoords) -> (f32, f32) {
         let mut xz = None;
         self.manager.spawner_mut().with_region(rc, |region| {

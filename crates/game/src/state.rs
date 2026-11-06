@@ -1619,9 +1619,19 @@ impl Rollback {
             ));
             // Driven, not teleported: the step moves the kinematic mirror to
             // its new pose with the matching velocity, so a dynamic body it
-            // touches gets a contact push (one way: nothing goes back).
+            // touches gets a contact push (one way: nothing goes back). A
+            // jump past `MIRROR_SNAP_DISTANCE_UNITS` is not motion: teleported,
+            // so it flings nothing.
             if let Some(handle) = *self.data.ecs.rigidbody.try_get(entry.entity) {
-                self.data.physics.bodies.mutate_body_safe(handle, |b| b.set_next_kinematic_position(data.isometry));
+                let snap = crate::halo::MIRROR_SNAP_DISTANCE_UNITS;
+                let jump = self.data.physics.bodies.get(handle).is_some_and(|b| {
+                    (data.isometry.translation - b.translation()).length_squared() > snap * snap
+                });
+                if jump {
+                    self.data.physics.bodies.mutate_body_safe(handle, |b| b.set_position(data.isometry, true));
+                } else {
+                    self.data.physics.bodies.mutate_body_safe(handle, |b| b.set_next_kinematic_position(data.isometry));
+                }
             }
         } else {
             let e = self.data.ecs.create_entity_safe();

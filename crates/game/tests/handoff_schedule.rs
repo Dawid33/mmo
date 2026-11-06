@@ -866,3 +866,197 @@ fn adventure_walk_reaches_its_goal_in_every_placement() {
     assert_eq!(p.walk_goal, None, "the walk finished");
     assert_eq!(p.tile, [-d, 0, -d], "the walk ended on its goal (relative to the origin)");
 }
+
+// --- A tumbling body crosses a seam ---------------------------------------------
+
+use crate::common::seam_translate::{
+    compare, run, spread, Axis, EntitySnap, Placement, WorldSnapshot, JITTER_SEEDS, LOCKSTEP_TOLERANCES, PLACEMENTS,
+};
+use game::rapier3d::math::Vector;
+
+/// Horizontal launch speed, m/s, diagonally toward −x/−z (through the
+/// placement's origin: across the seam, or both seams at the corner).
+const BODY_LAUNCH_SPEED_M_PER_S: f32 = 8.0;
+/// Spin about Y at launch, rad/s.
+const BODY_SPIN_RAD_PER_S: f32 = 6.0;
+/// Rounds of a launch: the flight and slide (< 1 s), then rapier's stillness
+/// before a body sleeps, with room for jitter's delays.
+const BODY_LAUNCH_ROUNDS: u32 = 100;
+/// Blocks from the origin, along +x and +z, the player stands at: behind the
+/// launch, never touched by the body.
+const BODY_PLAYER_BLOCKS: i64 = 8;
+
+/// Rest position tolerance of a tossed body against the centred lockstep
+/// run, per axis, blocks (1 block = 1 m; the October start value was 0.02).
+/// The toss crosses the seam in the air, lands about a block past it and
+/// rests 1.3 blocks past it, clear of every chunk collider edge, so the
+/// handoff carries a body with no contacts and only float rounding differs. Measured ×2: the largest spread
+/// (2026-11-06, REGION_BLOCKS 64, CHUNK_BLOCKS 16) was 1.14e-5 blocks
+/// (Seam(Z)), lockstep and under the shuffled / late / jittery schedules
+/// alike (4 seeds each, every placement): a late arrival only pauses the body
+/// in the air for the ticks its target is behind, which leaves its path in
+/// space unchanged.
+const BODY_REST_POS_TOL: f32 = 2.3e-5;
+/// … and rest rotation, degrees (October start value 1°). Measured: 0° (the
+/// quaternions agree to f32 rounding) in every run above.
+const BODY_REST_ANGLE_TOL: f32 = 0.01;
+
+/// A 1 m cube launched toward −x/−z from `start` blocks (each axis) past the
+/// placement's origin, `lift` blocks above the floor and `up` m/s upward,
+/// spinning about Y.
+#[derive(Clone, Copy)]
+struct BodyLaunch {
+    start: f32,
+    lift: f32,
+    up: f32,
+}
+
+/// Tossed: crosses the seam in flight, lands about a block past it.
+const TOSS: BodyLaunch = BodyLaunch { start: 1.0, lift: 1.5, up: 4.0 };
+/// Slid along the floor from half a block short of the seam.
+const SLIDE: BodyLaunch = BodyLaunch { start: 0.5, lift: 0.0, up: 0.0 };
+
+impl Scenario for BodyLaunch {
+    fn setup(&self, rig: &mut Rig, origin: WorldBlockPos) {
+        let b = game::BLOCK_VOXELS as f32;
+        // The player first: its placement runs rounds.
+        let p = BODY_PLAYER_BLOCKS;
+        place_player(rig, offset(origin, p, 0, p), false);
+        // Resting on the floor (its bottom at the stand level), a hair above
+        // it, then lifted.
+        let y = origin.y as f32 * b + b / 2.0 + 0.01 + self.lift * b;
+        let d = self.start * b;
+        let local = Vector::new(
+            origin.x as f32 * b + d - SPAWN_REGION.x as f32 * REGION_SIZE,
+            y,
+            origin.z as f32 * b + d - SPAWN_REGION.z as f32 * REGION_SIZE,
+        );
+        let units = game::movement::UNITS_PER_METER;
+        let v = BODY_LAUNCH_SPEED_M_PER_S * units / std::f32::consts::SQRT_2;
+        let linvel = Vector::new(-v, self.up * units, -v);
+        let angvel = Vector::new(0.0, BODY_SPIN_RAD_PER_S, 0.0);
+        let cube = game::ColliderSpec::Cuboid { half_extents: Vector::splat(b / 2.0) };
+        rig.manager.spawner_mut().with_region(SPAWN_REGION, |region| {
+            region.with_data(|d| {
+                d.spawn_body_safe(game::Pose::from_translation(local), cube, linvel, angvel);
+            });
+        });
+    }
+
+    fn drive(&self, _rig: &mut Rig, _round: u32) {}
+
+    fn rounds(&self) -> u32 {
+        BODY_LAUNCH_ROUNDS
+    }
+
+    fn crosser(&self) -> Option<game::EntityKind> {
+        Some(game::EntityKind::Body)
+    }
+
+    fn lockstep_tolerances(&self) -> Tolerances {
+        Tolerances { pose_blocks: BODY_REST_POS_TOL, angle_deg: BODY_REST_ANGLE_TOL, ..LOCKSTEP_TOLERANCES }
+    }
+}
+
+/// The body in a snapshot (the only `EntityKind::Body`).
+fn the_body(s: &WorldSnapshot) -> &EntitySnap {
+    let mut bodies = s.entities.values().filter(|e| e.kind == game::EntityKind::Body);
+    let b = bodies.next().expect("the body");
+    assert!(bodies.next().is_none(), "one body");
+    b
+}
+
+/// The toss in every placement (centred, across each straight seam —
+/// Seam(Z) into `north()` — and through the corner into `north_west()`)
+/// ends at the centred run's rest pose, asleep, owned by the region it rests
+/// in. `run` asserts the body reached the region past the seam or corner and
+/// was never owned twice in a round, `snapshot` that its owner is the region
+/// it lies in, and `Rig::round` that it was in exactly one place every round.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn body_toss_is_seam_invariant() {
+    let end = assert_seam_invariant(&TOSS, None);
+    let body = the_body(&end);
+    assert!(body.sleeping, "the body comes to rest asleep: {body:?}");
+    assert!(body.pos[0] < -0.25 && body.pos[2] < -0.25, "rests past the origin: {:?}", body.pos);
+    for (placement, owner) in [(Placement::Seam(Axis::Z), north()), (Placement::Corner, north_west())] {
+        let s = run(&TOSS, placement, None);
+        let o = placement.origin();
+        let p = the_body(&s).pos;
+        let world = [o.x as f32 + p[0], o.z as f32 + p[2]];
+        let n = REGION_BLOCKS as f32;
+        let at = RegionCoords::new((world[0] / n).floor() as i32, (world[1] / n).floor() as i32);
+        assert_eq!(at, owner, "{placement:?}: rests in (and so is owned by) {owner:?}");
+    }
+}
+
+/// The toss under each schedule mode: per seed and placement it is
+/// reproducible (the same snapshot, bit for bit), ends with the lockstep
+/// centred run's entities, tiles and walks (the player within
+/// `JITTER_TOLERANCES`: its landing from the placement is lag-sensitive),
+/// and its body asleep at the centred rest pose within the body tolerances;
+/// every round the body is in exactly one place (`Rig::round`).
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn body_toss_survives_jitter() {
+    let reference = run(&TOSS, Placement::Centre, None);
+    let body_ref = the_body(&reference).clone();
+    let body_tol = TOSS.lockstep_tolerances();
+    let modes: [(&str, fn(u64) -> InlineSchedule); 3] =
+        [("shuffled", InlineSchedule::shuffled), ("late", InlineSchedule::late), ("jittery", InlineSchedule::jittery)];
+    let mut worst = (0.0f32, 0.0f32);
+    for (mode, schedule) in modes {
+        for seed in 0..JITTER_SEEDS {
+            for placement in PLACEMENTS {
+                let what = format!("{mode} seed {seed} {placement:?}");
+                let a = run(&TOSS, placement, Some(schedule(seed)));
+                assert_eq!(a, run(&TOSS, placement, Some(schedule(seed))), "{what} is not reproducible");
+                let tol = Tolerances { tiles: true, ..JITTER_TOLERANCES };
+                if let Err(e) = compare(&reference, &a, &tol) {
+                    panic!("{what} differs from lockstep Centre: {e}");
+                }
+                let body = the_body(&a);
+                assert!(body.sleeping, "{what}: asleep");
+                let only = |b: &EntitySnap| WorldSnapshot {
+                    entities: [(game::EntityId { birth_region: SPAWN_REGION, serial: u64::MAX }, b.clone())].into(),
+                    terrain: Default::default(),
+                    piles: Default::default(),
+                    containers: Default::default(),
+                };
+                let (pose, _, turn) = spread(&only(&body_ref), &only(body));
+                eprintln!("[body-jitter] {what}: pose spread {pose} blocks, rotation {turn}°");
+                worst = (worst.0.max(pose), worst.1.max(turn));
+                if let Err(e) = compare(&only(&body_ref), &only(body), &body_tol) {
+                    panic!("{what}: the body differs from lockstep Centre: {e}");
+                }
+            }
+        }
+    }
+    eprintln!("[body-jitter] worst: pose {} blocks, rotation {}°", worst.0, worst.1);
+}
+
+/// The slide along the floor through the seam: it crosses, is owned by one
+/// region at a time, and ends asleep past the origin in the region it lies
+/// in, in every placement. Its rest pose is NOT compared with the centred
+/// run: a body sliding over the boundary between two terrain colliders (every
+/// chunk edge, so every region seam) catches on the far collider's edge
+/// ("ghost" contacts — each chunk's `Voxels` shape has no idea of its
+/// neighbour), which makes the slide chaotic with no region seam involved.
+/// Measured (2026-11-06): the same slide centred at block 16 and at block 32
+/// (identical geometry, only the coordinates' float rounding differs) rests
+/// 0.14 blocks apart; across a seam it rests 0.012–0.039 blocks and up to 7°
+/// from the centred run, and other launch speeds tip the cube onto another
+/// face at a seam (90°) or stop it dead at a chunk edge. The handoff adds to
+/// it: rebuilding the body mid-slide drops its contact warm-start (re-arriving
+/// a sliding body in the same region, no seam, moved its rest 0.003–0.07
+/// blocks).
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn body_slides_across_seam() {
+    for placement in PLACEMENTS {
+        let s = run(&SLIDE, placement, None);
+        let body = the_body(&s);
+        assert!(body.sleeping, "{placement:?}: asleep: {body:?}");
+        assert!(body.pos[0] < -0.25 && body.pos[2] < -0.25, "{placement:?}: rests past the origin: {:?}", body.pos);
+    }
+}

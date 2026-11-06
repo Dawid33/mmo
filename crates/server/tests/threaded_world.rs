@@ -786,3 +786,102 @@ fn walk_through_cold_regions_reaches_its_goal_on_real_threads() {
     let tile = game::feet_tile(game::feet_of(t));
     assert_eq!([tile[0], tile[2]], [3, 12], "the walk ends on its goal");
 }
+
+/// A tumbling body crosses a seam on real region threads. Tossed (spinning
+/// about Y) from just inside the spawn region's −z seam, it crosses in the
+/// air and lands in the north neighbour. The spawn region starts from a
+/// world save holding the body mid-launch (the server's own load path: a
+/// region file read on its thread), so nothing is injected into a live
+/// thread. Of every region output, only the source's directory record and
+/// departure, then the target's arrival and record, name the body — it is
+/// never owned by two regions — and
+/// it ends in the north region's state alone, asleep, past the seam.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn body_crosses_seam_on_real_threads() {
+    use game::rapier3d::math::Vector;
+    use server::region_store::RegionStore;
+    let north = RegionCoords::new(0, -1);
+    let dir = std::env::temp_dir().join(format!("mmo-threaded-body-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let store = RegionStore::new(dir.clone(), 42);
+
+    // The spawn region with the body in it, as a world save.
+    let b = game::BLOCK_VOXELS as f32;
+    let units = movement::UNITS_PER_METER;
+    let mut region = game::RegionSeed::Fresh(seam_floor_columns(SPAWN_REGION)).into_region(SPAWN_REGION);
+    // A block in from the seam, 1.5 blocks above the floor (FLOOR_DEPTH
+    // voxels deep), 8 m/s toward −z and 4 m/s up, spinning at 6 rad/s.
+    let pose = game::Pose::from_translation(Vector::new(128.0, FLOOR_DEPTH as f32 + b / 2.0 + 1.5 * b, b));
+    let cube = game::ColliderSpec::Cuboid { half_extents: Vector::splat(b / 2.0) };
+    let (linvel, angvel) = (Vector::new(0.0, 4.0 * units, -8.0 * units), Vector::new(0.0, 6.0, 0.0));
+    let mut key = None;
+    region.with_data(|d| key = Some(d.spawn_body_safe(pose, cube, linvel, angvel)));
+    let id = (*region.data().ecs.id.try_get(key.unwrap())).expect("the body has an EntityId");
+    let save = game::RegionSave::Live(Box::new(region.data().clone()), Vec::new());
+    store.save(SPAWN_REGION, &save.into_serialized()).unwrap();
+    drop(region);
+
+    let generate: server::region_threads::SharedRegionGenerator = std::sync::Arc::new(seam_floor_columns);
+    let spawner = ThreadRegionSpawner::with_region_generator(generate).with_store(store);
+    let mut rig = Rig::with_spawner(spawner, seam_floor_columns);
+    rig.event(ServerEvent::connected(0));
+    for rc in SPAWN_REGION.window_3x3() {
+        rig.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(rc), 0));
+    }
+
+    // Every region output naming the body, in the order the manager saw them.
+    let mut named: Vec<(RegionCoords, &'static str)> = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let settle_after = Duration::from_millis(game::body::BODY_SETTLE_MS);
+    let mut arrived_at = None;
+    while arrived_at.is_none_or(|t: Instant| t.elapsed() < settle_after) && Instant::now() < deadline {
+        let Ok((rc, output)) = rig.region_out.recv_timeout(Duration::from_millis(50)) else { continue };
+        match &output {
+            RegionOutput::Departures(list, _) => {
+                named.extend(list.iter().filter(|(bundle, _)| bundle.id == id).map(|_| (rc, "departed")));
+            }
+            RegionOutput::EventProcessed(ev) | RegionOutput::EventProcessedHashed(ev, ..) => {
+                if let GameEventKind::EntityArrived(bundle) = &ev.kind {
+                    if bundle.id == id {
+                        named.push((rc, "arrived"));
+                        arrived_at.get_or_insert_with(Instant::now);
+                    }
+                }
+            }
+            // The manager's directory records: the restored body, then the arrival.
+            RegionOutput::Spawned(ids) if ids.contains(&id) => named.push((rc, "spawned")),
+            _ => {}
+        }
+        rig.absorb(rc, output);
+    }
+    assert_eq!(
+        named,
+        [(SPAWN_REGION, "spawned"), (SPAWN_REGION, "departed"), (north, "arrived"), (north, "spawned")],
+        "the body is owned by the spawn region, leaves it once and arrives in {north:?} once"
+    );
+    assert_eq!(rig.manager.in_flight_count(), 0, "the arrival was confirmed");
+
+    // Both regions' states now: the body is in the north one only, asleep.
+    let _ = rig.packets.try_iter().count();
+    for rc in [SPAWN_REGION, north] {
+        rig.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(rc), 0));
+    }
+    let mut states = std::collections::BTreeMap::new();
+    let mut log = Vec::new();
+    rig.pump_until(REGION_STARTUP_BUDGET, &mut log, |p| {
+        if let ServerPacket::Region(rc, s) = p {
+            states.insert(*rc, s.clone());
+        }
+        states.len() == 2
+    });
+    assert!(!states[&SPAWN_REGION].id_index.contains_key(&id), "the spawn region no longer owns the body");
+    let state = &states[&north];
+    let e = *state.id_index.get(&id).expect("the north region owns the body");
+    let body = state.physics.bodies.get(state.ecs.rigidbody.try_get(e).expect("a body")).unwrap();
+    assert!(body.is_dynamic() && body.is_sleeping(), "asleep: {body:?}");
+    let z = body.translation().z;
+    assert!(z < REGION_SIZE - b && z > REGION_SIZE - 4.0 * b, "landed a block or more past the seam: z {z}");
+    rig.manager.shutdown_all();
+    let _ = std::fs::remove_dir_all(&dir);
+}
