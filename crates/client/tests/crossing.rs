@@ -26,6 +26,7 @@ fn walking_across_a_region_boundary_keeps_input_and_converges() {
 
     h.assert_progresses(game::Key::KeyW); // input still moves the player post-cross
     h.assert_converged(); // converges bit-exact once the flip-tick transient heals
+    h.assert_regions_in_step(); // the new home and its window on one world tick
     assert_ne!(
         h.player_region(),
         game::SPAWN_REGION,
@@ -237,9 +238,10 @@ fn server_crosses_later(late_at: usize) {
 /// How long `predicted_halo_updates_do_not_mispredict` watches the slime:
 /// 6 s, which in this scene sees it leave the band and come back.
 const HALO_WATCH_STEPS: usize = (6000 / game::TICK_RATE) as usize;
-/// Steps for its join to settle: past the unload grace, when the regions the
-/// window left behind (around the spawn region) park and reseed their
-/// neighbours' terrain halos — server events no client can predict.
+/// Steps for its join to settle: past the unload grace, when any region the
+/// server ran for the join that the client's window does not hold parks and
+/// reseeds its neighbours' terrain halos — server events no client can
+/// predict.
 const HALO_JOIN_SETTLE_STEPS: usize = (game::UNLOAD_GRACE_MS / game::TICK_RATE) as usize + 10;
 
 /// A one-block floor under every chunk column of the regions at x <= 0; the
@@ -259,18 +261,13 @@ fn floored_west(rc: game::RegionCoords) -> Vec<(game::ColumnCoords, game::Column
     out
 }
 
-/// A slime hopping in and out of the spawn region's band along its east seam:
-/// the halo entity updates (and ends) the client predicts for the east
-/// region are the server's, slot for slot, so nothing mispredicts once the
-/// join has settled.
-///
-/// The player's home is east (it walks there before the client joins): the
-/// client steps every other region into its lead band at once but lets the
-/// home's lead settle slowly (`regions::clock`), so in this lockstep harness
-/// the home sits a few ticks behind its neighbours for good. A transfer into
-/// a region already past its slot lands late — a misprediction that has
-/// nothing to do with the halo — so the halo traffic here runs from a
-/// neighbour into the home, which is behind and holds it for its slot.
+/// A slime hopping in and out of the HOME region's band along its east seam,
+/// mirrored into the east neighbour: the halo entity updates (and ends) the
+/// client predicts for the east region are the server's, slot for slot, so
+/// nothing mispredicts once the join has settled. That needs the home and
+/// its neighbours on one predicted world tick (`regions::clock`): a
+/// neighbour ahead of the home would close the slot of every transfer the
+/// home sends it before it arrives — a late landing, one misprediction each.
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn predicted_halo_updates_do_not_mispredict() {
@@ -284,10 +281,6 @@ fn predicted_halo_updates_do_not_mispredict() {
         let mut key = None;
         let tick = r.current_tick();
         r.with_data(|d| {
-            // The player: past the east seam (it crosses on the next tick),
-            // landing outside east's band.
-            let player = *d.player_entites.values().next().expect("the local player");
-            d.set_body_pose_safe(player, game::Pose::translation(size + 10.0 * bv, 2.5 * bv, size / 4.0));
             let pos = game::rapier3d::math::Vector::new(size - 7.0 * bv, 2.5 * bv, size * 3.0 / 4.0);
             key = Some(d.spawn_slime_safe(pos, 1, 0.0, tick));
         });
@@ -296,8 +289,9 @@ fn predicted_halo_updates_do_not_mispredict() {
     let id = id.expect("the slime has an EntityId");
     h.connect();
     h.step_n(HALO_JOIN_SETTLE_STEPS);
-    assert_eq!(h.player_region(), east, "the player's home is east");
+    assert_eq!(h.player_region(), game::SPAWN_REGION, "the player's home holds the slime");
     h.assert_converged();
+    h.assert_regions_in_step();
     let before = h.total_mispredictions();
     let mut mirrored = 0;
     let mut ended = 0;
@@ -320,5 +314,6 @@ fn predicted_halo_updates_do_not_mispredict() {
         0,
         "halo entity traffic mispredicted ({mirrored} steps mirrored, {entered} entries, {ended} ends)"
     );
+    h.assert_regions_in_step();
     h.assert_converged();
 }

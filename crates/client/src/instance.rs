@@ -171,9 +171,8 @@ pub struct GameInstanceManager {
     /// Each region's latest view of the local client (`RegionReport::View`):
     /// the home region's is what the camera, HUD and UI read.
     views: BTreeMap<RegionId, crate::regions::runner::HomeView>,
-    /// Inline host: alignment ticks still to run, region by region
-    /// (`drain_reports`); region threads run their own.
-    inline_align: Vec<(RegionId, usize)>,
+    /// The one predicted world tick every region runs to (`regions::clock`).
+    clock: crate::regions::clock::PredictedClock,
     /// `(tick, state hash)` per region from the last `region_probe`.
     probe: BTreeMap<RegionId, (game::Tick, u32)>,
     /// The finite world's extent, from the server's `WorldMap`: every
@@ -184,9 +183,10 @@ pub struct GameInstanceManager {
     tick_rate: Arc<AtomicU64>,
     ready: bool,
     is_caught_up: bool,
-    /// Mirror of the ticks each region still sits out (the runner owns the
-    /// real count; this one feeds the crossing probe only).
-    stalled: BTreeMap<RegionId, usize>,
+    /// Each region's tick as its last `Ticked` report left it: how far it
+    /// runs ahead of the clock (held) feeds the crossing probe.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    region_ticks: BTreeMap<RegionId, game::Tick>,
     client_id: Option<ClientId>,
     home_region: Option<RegionCoords>,
     /// Sticky centre of the near window + LOD rings; see `advance_window_center`.
@@ -327,11 +327,10 @@ struct ReconMetrics {
     corrections: u32,
     correction_sum: f32,
     correction_max: f32,
-    /// Regions stepped into the lead band (`align_region`): steps, ticks
-    /// added or sat out over them, and how many of the steps were home's.
+    /// World-clock steps (`regions::clock`): how many, and the ticks the
+    /// predicted tick moved over them.
     align_steps: u32,
     align_ticks: usize,
-    home_align_steps: u32,
     /// Server state hashes checked against the confirmed state, and how many
     /// differed (`ServerPacket::HashedGameEvent`).
     state_hash_checks: u32,
@@ -398,15 +397,15 @@ const CROSSING_WINDOW: Duration = Duration::from_secs(2);
 #[derive(Default)]
 struct CrossingProbe {
     open: Option<(Instant, RegionCoords, RegionCoords)>,
-    /// Ticks the new home still had to sit out (`stalled`) at the flip.
+    /// Ticks the new home still had to sit out (ahead of the clock) at the flip.
     stalled_at_flip: usize,
     last_home_tick: Option<Instant>,
     tick_gap_max: Duration,
     before_tick_gap_max: Duration,
-    /// Home ticks skipped by `stalled` inside the window.
+    /// Home ticks sat out (ahead of the clock) inside the window.
     home_stalled_ticks: u32,
-    /// `align_region` on home inside the window: steps, and ticks predicted
-    /// at once (+) or sat out (-).
+    /// World-clock steps inside the window: steps, and ticks the clock moved
+    /// forward (+) or back (-).
     home_align_steps: u32,
     home_align_ticks: isize,
     corrections: u32,
@@ -662,13 +661,13 @@ impl GameInstanceManager {
             world_started: false,
             views: BTreeMap::new(),
             probe: BTreeMap::new(),
-            inline_align: Vec::new(),
+            clock: Default::default(),
             map_extent: None,
             buffer: Vec::new(),
             tick_rate: Arc::new(AtomicU64::new(game::TICK_RATE)),
             ready: false,
             is_caught_up: false,
-            stalled: BTreeMap::new(),
+            region_ticks: BTreeMap::new(),
             server_game_send,
             server_game_recv,
             client_id: None,
@@ -866,11 +865,14 @@ impl GameInstanceManager {
             GameEventKind::Tick => {
                 #[cfg(not(target_arch = "wasm32"))]
                 let tick_start = Instant::now();
+                let Some(target) = self.clock.advance() else {
+                    return Ok(true);
+                };
                 #[cfg(not(target_arch = "wasm32"))]
                 if let Some(home) = self.home_region {
-                    self.crossing.home_tick(self.stalled.contains_key(&home));
+                    self.crossing.home_tick(self.held_ticks(home, target) > 0);
                 }
-                self.host.broadcast(|| RegionCmd::Tick);
+                self.host.broadcast(|| RegionCmd::Tick(target));
                 #[cfg(not(target_arch = "wasm32"))]
                 self.perf.record_tick(tick_start.elapsed());
                 // The ticks' transfers are routed here (`drain_reports`), and
@@ -951,20 +953,29 @@ impl GameInstanceManager {
                 self.route_reports(batch)?;
                 continue;
             }
-            // Inline alignment, one tick at a time (each `Ticked` relayed as
-            // it is drained), as a region thread steps a trailing region.
-            let Some((region, left)) = self.inline_align.first_mut() else {
-                return Ok(());
-            };
-            let region = *region;
-            *left -= 1;
-            if *left == 0 {
-                self.inline_align.remove(0);
-            }
-            if !self.host.send(region, RegionCmd::Tick) {
-                self.inline_align.retain(|(r, _)| *r != region);
-            }
+            return Ok(());
         }
+    }
+
+    /// Apply one world-clock decision: the tick rate, `ready`, the metrics
+    /// (the step itself is already on the clock).
+    fn on_clock_decision(&mut self, d: crate::regions::clock::ClockDecision) {
+        self.recon.last_drift_ms = d.drift_ms;
+        let (rate, ready) = d.rate;
+        self.ready = ready;
+        self.tick_rate.store(rate, Ordering::SeqCst);
+        if let Some((_error_ms, ticks)) = d.step.filter(|(_, t)| *t > 0) {
+            self.recon.align_steps += 1;
+            self.recon.align_ticks += ticks;
+            #[cfg(not(target_arch = "wasm32"))]
+            self.crossing.align_home(_error_ms, ticks);
+        }
+    }
+
+    /// Ticks region `id` sits out before the clock (at `target`) reaches it.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn held_ticks(&self, id: RegionId, target: game::Tick) -> usize {
+        self.region_ticks.get(&id).map_or(0, |t| t.saturating_sub(target) as usize)
     }
 
     /// Run every region on its own thread (native play), like the server.
@@ -1043,14 +1054,8 @@ impl GameInstanceManager {
                                 self.tick_times.record(id, took);
                             }
                         }
-                        if sat_out {
-                            if let Some(left) = self.stalled.get_mut(&id) {
-                                *left = left.saturating_sub(1);
-                                if *left == 0 {
-                                    self.stalled.remove(&id);
-                                }
-                            }
-                        }
+                        let _ = sat_out; // read natively only (tick times)
+                        self.region_ticks.insert(id, stamp);
                         // This tick's transfers, now (both hosts).
                         self.route_transfers(id, d, g, h, stamp);
                     }
@@ -1073,32 +1078,6 @@ impl GameInstanceManager {
                                 self.recon.correction_max = self.recon.correction_max.max(moved);
                                 #[cfg(not(target_arch = "wasm32"))]
                                 self.crossing.correction(moved);
-                            }
-                        }
-                    }
-                    RegionReport::Clock(d) => {
-                        if is_home {
-                            self.recon.last_drift_ms = d.drift_ms;
-                        }
-                        if let Some((rate, ready)) = d.home_rate {
-                            self.ready = ready;
-                            self.tick_rate.store(rate, Ordering::SeqCst);
-                        }
-                        if let Some((error_ms, ticks)) = d.step.filter(|(_, t)| *t > 0) {
-                            self.recon.align_steps += 1;
-                            self.recon.align_ticks += ticks;
-                            if is_home {
-                                self.recon.home_align_steps += 1;
-                                #[cfg(not(target_arch = "wasm32"))]
-                                self.crossing.align_home(error_ms, ticks);
-                            }
-                            if error_ms > 0 {
-                                self.stalled.insert(id, ticks);
-                            } else {
-                                self.stalled.remove(&id);
-                                if !self.host.is_threaded() {
-                                    self.inline_align.push((id, ticks));
-                                }
                             }
                         }
                     }
@@ -1161,7 +1140,7 @@ impl GameInstanceManager {
                 // PlayerRegion push confirms (or corrects) it.
                 #[cfg(not(target_arch = "wasm32"))]
                 if self.home_region != Some(target) {
-                    let stalled = self.stalled.get(&target).copied().unwrap_or(0);
+                    let stalled = self.clock.tick().map_or(0, |t| self.held_ticks(target, t));
                     self.crossing.flip(source, target, stalled);
                 }
                 self.home_region = Some(target);
@@ -1227,8 +1206,10 @@ impl GameInstanceManager {
             server_send: self.server_game_send.clone(),
             client_event_send: self.client_event_send.clone(),
             debug_flags: self.debug_flags.clone(),
-            self_relay: false, // the host decides
         };
+        // The first snapshot starts the clock at its world tick; every
+        // region, this one too, runs to the clock from the next tick on.
+        self.clock.start_at(*raw_game_data.tick);
         // The region is built where it runs (its thread, when threaded): the
         // bridge's `NewRegion` copy and the `Region` itself.
         self.host.spawn(ctx, raw_game_data, self.map_extent);
@@ -1450,8 +1431,7 @@ impl GameInstanceManager {
     fn drop_region(&mut self, rc: RegionCoords) {
         self.pending_events.remove(&rc);
         self.views.remove(&rc);
-        self.stalled.remove(&rc);
-        self.inline_align.retain(|(r, _)| *r != rc);
+        self.region_ticks.remove(&rc);
         // The host takes it off the render bridge (after all it sent there).
         self.host.stop(rc);
     }
@@ -1553,20 +1533,18 @@ impl GameInstanceManager {
 
     pub fn handle_server(&mut self, server_msg: ServerPacket) -> Result<(), GameError> {
         match server_msg {
-            game::ServerPacket::SyncClock(region_id, server_tick_rate, server_tick, rtt) => {
-                // With a moving 3×3 window a SyncClock can arrive for a region
-                // we no longer hold (released mid-shift) or don't hold yet
-                // (snapshot still in flight). Skip it — steady-state noise.
-                // The region decides and steps itself (`regions::clock`) and
-                // reports the decision (`RegionReport::Clock`).
-                if self.host.contains(&region_id) {
-                    let input = crate::regions::clock::ClockInput {
-                        server_tick,
-                        server_rate_ms: server_tick_rate,
-                        rtt_ms: rtt.as_millis() as u64,
-                        is_home: self.home_region == Some(region_id),
-                    };
-                    self.host.send(region_id, RegionCmd::Clock(input));
+            game::ServerPacket::SyncClock(_region, server_tick_rate, server_tick, rtt) => {
+                // Every region reports the one world tick numbering, so any
+                // region's sample steers the one clock — held or not (one
+                // released mid-shift, or whose snapshot is still in flight,
+                // still runs on the server's world clock).
+                let input = crate::regions::clock::ClockInput {
+                    server_tick,
+                    server_rate_ms: server_tick_rate,
+                    rtt_ms: rtt.as_millis() as u64,
+                };
+                if let Some(d) = self.clock.sample(&input) {
+                    self.on_clock_decision(d);
                 }
             }
             game::ServerPacket::HashedGameEvent(game_event, tick, hash) => {
@@ -1592,7 +1570,7 @@ impl GameInstanceManager {
                 match self.home_region {
                     // The server flipped first (no predicted crossing yet).
                     Some(prev) if prev != home => {
-                        let stalled = self.stalled.get(&home).copied().unwrap_or(0);
+                        let stalled = self.clock.tick().map_or(0, |t| self.held_ticks(home, t));
                         self.crossing.flip(prev, home, stalled);
                         self.crossing.confirmed(home);
                     }
@@ -1897,7 +1875,7 @@ impl GameInstanceManager {
         };
         log::debug!(
             target: game::perf::BUDGET_TARGET,
-            "[client] mispredicts/s={:.2} avg_replay={:.1} max_replay={} evlog={} tick_rate={}ms drift={}ms aligned={}({}t,home={})",
+            "[client] mispredicts/s={:.2} avg_replay={:.1} max_replay={} evlog={} tick_rate={}ms drift={}ms aligned={}({}t)",
             per_sec,
             avg_replay,
             m.max_replay_depth,
@@ -1906,7 +1884,6 @@ impl GameInstanceManager {
             m.last_drift_ms,
             m.align_steps,
             m.align_ticks,
-            m.home_align_steps,
         );
         if m.mispredictions > 0 {
             // What was mispredicted (predicted>server), and how far the ones
@@ -2012,7 +1989,6 @@ impl GameInstanceManager {
         self.recon.max_replay_depth = 0;
         self.recon.align_steps = 0;
         self.recon.align_ticks = 0;
-        self.recon.home_align_steps = 0;
         self.recon.by_kinds = Default::default();
         self.recon.home_mispredictions = 0;
         self.recon.corrections = 0;

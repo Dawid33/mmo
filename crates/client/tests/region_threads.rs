@@ -15,6 +15,7 @@ fn threaded_regions_converge_bit_exact() {
     h.assert_converged();
     h.assert_progresses(game::Key::KeyW);
     h.assert_converged();
+    h.assert_regions_in_step(); // one world clock on threads as inline
 }
 
 /// Input keeps flowing across a predicted crossing on threads: the home
@@ -30,4 +31,6 @@ fn threaded_input_survives_crossing() {
     h.cross_boundary(Dir::East);
     assert_ne!(h.player_region(), game::SPAWN_REGION, "player actually crossed");
     h.assert_progresses(game::Key::KeyW);
+    h.settle();
+    h.assert_regions_in_step();
 }

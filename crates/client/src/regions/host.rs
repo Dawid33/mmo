@@ -119,7 +119,6 @@ mod threaded {
 
         pub(super) fn spawn(&mut self, ctx: RunnerCtx, snapshot: Rollback, extent: Option<game::MapExtent>) {
             let id = ctx.id;
-            let ctx = RunnerCtx { self_relay: true, ..ctx };
             self.stop(id);
             // Earlier threads of this id finish first (on the new thread, so
             // the caller never waits): their `RemoveRegion` reaches the
@@ -320,7 +319,6 @@ impl RegionHost {
         match self {
             RegionHost::Inline(h) => {
                 let id = ctx.id;
-                let ctx = RunnerCtx { self_relay: false, ..ctx };
                 let region = build_region(&ctx, snapshot, extent);
                 h.world.load(&id, region);
                 h.states.insert(id, (RunnerState::default(), ctx));
@@ -470,12 +468,14 @@ mod tests {
     fn ctx() -> RunnerCtx {
         let (server_send, _) = crossbeam::channel::unbounded();
         let (client_event_send, _) = crossbeam::channel::unbounded();
-        RunnerCtx { id: RC, client_id: CLIENT, server_send, client_event_send, debug_flags: Default::default(), self_relay: true }
+        RunnerCtx { id: RC, client_id: CLIENT, server_send, client_event_send, debug_flags: Default::default() }
     }
 
+    /// `n` ticks of the clock from world tick 0 (every snapshot here starts
+    /// at 0).
     fn ticks(host: &mut RegionHost, n: usize) {
-        for _ in 0..n {
-            host.broadcast(|| RegionCmd::Tick);
+        for t in 1..=n {
+            host.broadcast(|| RegionCmd::Tick(t as game::Tick));
         }
     }
 

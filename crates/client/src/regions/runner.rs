@@ -12,13 +12,15 @@ use std::collections::VecDeque;
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::{Duration, Instant};
 
-use super::clock::{decide, ClockDecision, ClockInput};
+use super::clock::ticks_due;
 
 /// One instruction for one region.
 #[derive(Debug)]
 pub enum RegionCmd {
-    /// One predicted tick, or sit it out while the region is stalled.
-    Tick,
+    /// One tick of the client's world clock: run to this predicted world
+    /// tick (`regions::clock`) — one tick in step, a bounded burst while
+    /// behind (a fresh snapshot), none while ahead (sat out).
+    Tick(game::Tick),
     /// A server-authoritative event to reconcile, with the server's
     /// `(tick, state hash)` when it came as a `HashedGameEvent`.
     ServerEvent(GameEvent, Option<(game::Tick, u32)>),
@@ -36,7 +38,6 @@ pub enum RegionCmd {
     /// A predicted terrain halo update from a sibling region (ditto, same
     /// stamp), like the server's `RegionInput::Transfer(HaloUpdate)`.
     Halo(game::HaloUpdate, game::Tick),
-    Clock(ClockInput),
     SetMapExtent(Option<game::MapExtent>),
     /// Wireframe the colliders near this viewer WORLD position.
     DebugLines([f32; 3]),
@@ -51,8 +52,9 @@ pub enum RegionCmd {
 /// What a region reports back.
 #[derive(Debug)]
 pub enum RegionReport {
-    /// One `Tick` (or alignment tick): this tick's boundary crossings and
-    /// entity-halo messages, targets absolute, isometries still region-local.
+    /// One tick (one of a `Tick`'s burst), or a sat-out `Tick`: this tick's
+    /// boundary crossings and entity-halo messages, targets absolute,
+    /// isometries still region-local.
     /// Every host relays them per report, so both see one order.
     Ticked {
         sat_out: bool,
@@ -79,7 +81,6 @@ pub enum RegionReport {
         #[cfg(not(target_arch = "wasm32"))]
         took: Duration,
     },
-    Clock(ClockDecision),
     /// This region's view of the local client; `None` = it no longer holds it.
     View(Option<HomeView>),
     /// A `Predict` that reached this region after the local player's body
@@ -124,17 +125,11 @@ pub struct RunnerCtx {
     pub server_send: Sender<ClientPacket>,
     pub client_event_send: Sender<ClientUpdateEvent>,
     pub debug_flags: game::DebugFlags,
-    /// The region runs its own alignment ticks (a region thread). `false` =
-    /// the caller sends them one `Tick` at a time (the inline host). Every
-    /// tick's transfers ride its `Ticked` report either way. Set by the host.
-    pub self_relay: bool,
 }
 
 /// A region's runner-side state (the region itself is held beside it).
 #[derive(Default)]
 pub struct RunnerState {
-    /// Ticks still to sit out: the timeline ran ahead of the server's.
-    stall: usize,
     /// The local player left this region in a predicted crossing.
     player_departed: bool,
     /// Predicted arrivals / margin mirrors whose slot (the stamp) this
@@ -167,7 +162,15 @@ pub fn handle(
             st.held_inputs.clear();
             return false;
         }
-        RegionCmd::Tick => tick(region, st, ctx, out),
+        RegionCmd::Tick(target) => {
+            let due = ticks_due(region.current_tick(), target);
+            if due == 0 {
+                sat_out(region, out);
+            }
+            for _ in 0..due {
+                tick(region, st, ctx, out);
+            }
+        }
         RegionCmd::ServerEvent(event, hash) => {
             #[cfg(not(target_arch = "wasm32"))]
             let start = Instant::now();
@@ -211,23 +214,6 @@ pub fn handle(
         }
         RegionCmd::HaloEntity(msg, stamp) => transfer(region, st, ctx, msg.into_event(), stamp, out),
         RegionCmd::Halo(update, stamp) => transfer(region, st, ctx, GameEventKind::HaloUpdate(update), stamp, out),
-        RegionCmd::Clock(input) => {
-            let d = decide(region.current_tick(), &input);
-            out.push(RegionReport::Clock(d));
-            if let Some((error, ticks)) = d.step.filter(|(_, ticks)| *ticks > 0) {
-                if error > 0 {
-                    st.stall = ticks;
-                } else {
-                    st.stall = 0;
-                    // Inline, the caller runs them, relaying after each.
-                    if ctx.self_relay {
-                        for _ in 0..ticks {
-                            tick(region, st, ctx, out);
-                        }
-                    }
-                }
-            }
-        }
         RegionCmd::SetMapExtent(extent) => region.set_map_extent(extent),
         RegionCmd::DebugLines(viewer_world) => {
             if ctx.debug_flags.collider_wireframes() {
@@ -256,23 +242,24 @@ pub fn handle(
     true
 }
 
-/// One `Tick` command: run it, or sit it out while stalled.
+/// A `Tick` that found the region at (or past) the predicted world tick:
+/// nothing runs, and no slot closes (held transfers stay held).
+fn sat_out(region: &Region, out: &mut Vec<RegionReport>) {
+    out.push(RegionReport::Ticked {
+        sat_out: true,
+        departures: Vec::new(),
+        halo_entities: Vec::new(),
+        halo: Vec::new(),
+        stamp: region.current_tick(),
+        #[cfg(not(target_arch = "wasm32"))]
+        perf: game::RegionTickPerf::default(),
+        #[cfg(not(target_arch = "wasm32"))]
+        took: Duration::ZERO,
+    });
+}
+
+/// One region tick.
 fn tick(region: &mut Region, st: &mut RunnerState, ctx: &RunnerCtx, out: &mut Vec<RegionReport>) {
-    if st.stall > 0 {
-        st.stall -= 1;
-        out.push(RegionReport::Ticked {
-            sat_out: true,
-            departures: Vec::new(),
-            halo_entities: Vec::new(),
-            halo: Vec::new(),
-            stamp: region.current_tick(),
-            #[cfg(not(target_arch = "wasm32"))]
-            perf: game::RegionTickPerf::default(),
-            #[cfg(not(target_arch = "wasm32"))]
-            took: Duration::ZERO,
-        });
-        return;
-    }
     // The slot this tick closes ends with the transfers held for it, in
     // receipt order — after every input predicted in it, the server's order
     // (its held inputs for a slot, then its held transfers).
@@ -448,7 +435,6 @@ mod tests {
             server_send,
             client_event_send,
             debug_flags: game::DebugFlags::default(),
-            self_relay: true,
         };
         (region, RunnerState::default(), ctx, server_recv)
     }
@@ -468,42 +454,47 @@ mod tests {
             .collect()
     }
 
-    fn clock(server_tick: game::Tick, rtt_ms: u64) -> RegionCmd {
-        RegionCmd::Clock(ClockInput { server_tick, server_rate_ms: 50, rtt_ms, is_home: false })
+    /// One tick of the clock with the region in step: it runs one tick.
+    fn tick1(r: &mut Region, st: &mut RunnerState, ctx: &RunnerCtx) -> Vec<RegionReport> {
+        let target = r.current_tick() + 1;
+        run(r, st, ctx, RegionCmd::Tick(target))
     }
 
     #[test]
-    fn tick_reports_once_and_stall_sits_out() {
+    fn tick_reports_once_and_ahead_sits_out() {
         let (mut r, mut st, ctx, _) = setup();
         for _ in 0..6 {
-            run(&mut r, &mut st, &ctx, RegionCmd::Tick);
+            tick1(&mut r, &mut st, &ctx);
         }
-        // 4 ticks ahead, rtt 25 ms: error 100 ms → sit 2 ticks out.
         let t = r.current_tick();
-        let out = run(&mut r, &mut st, &ctx, clock(t - 4, 25));
-        assert!(matches!(out.first(), Some(RegionReport::Clock(d)) if d.step == Some((100, 2))));
-        assert_eq!(ticked(&run(&mut r, &mut st, &ctx, RegionCmd::Tick)), vec![true]);
-        assert_eq!(ticked(&run(&mut r, &mut st, &ctx, RegionCmd::Tick)), vec![true]);
+        // At or past the predicted tick: held.
+        assert_eq!(ticked(&run(&mut r, &mut st, &ctx, RegionCmd::Tick(t))), vec![true]);
+        assert_eq!(ticked(&run(&mut r, &mut st, &ctx, RegionCmd::Tick(t - 2))), vec![true]);
         assert_eq!(r.current_tick(), t);
-        assert_eq!(ticked(&run(&mut r, &mut st, &ctx, RegionCmd::Tick)), vec![false]);
+        assert_eq!(ticked(&run(&mut r, &mut st, &ctx, RegionCmd::Tick(t + 1))), vec![false]);
         assert_eq!(r.current_tick(), t + 1);
     }
 
+    /// Behind the predicted tick (a fresh snapshot): bursts of at most
+    /// `MAX_CATCH_UP_BURST` ticks, each reported, never past it.
     #[test]
-    fn trailing_clock_runs_align_ticks() {
+    fn behind_runs_bounded_bursts() {
         let (mut r, mut st, ctx, _) = setup();
         let t = r.current_tick();
-        // 10 ticks behind, rtt 0: error −575 ms → 12 ticks predicted now.
-        let out = run(&mut r, &mut st, &ctx, clock(t + 10, 0));
-        assert_eq!(ticked(&out), vec![false; 12]);
-        assert_eq!(r.current_tick(), t + 12);
+        let burst = game::MAX_CATCH_UP_BURST as usize;
+        let out = run(&mut r, &mut st, &ctx, RegionCmd::Tick(t + 7));
+        assert_eq!(ticked(&out), vec![false; burst]);
+        assert_eq!(r.current_tick(), t + burst as game::Tick);
+        let out = run(&mut r, &mut st, &ctx, RegionCmd::Tick(t + 7));
+        assert_eq!(ticked(&out), vec![false; 7 - burst]);
+        assert_eq!(r.current_tick(), t + 7);
     }
 
     #[test]
     fn predict_stamps_and_sends() {
         let (mut r, mut st, ctx, server_recv) = setup();
         for _ in 0..5 {
-            run(&mut r, &mut st, &ctx, RegionCmd::Tick);
+            tick1(&mut r, &mut st, &ctx);
         }
         let kind = GameEventKind::PlayerInput(CLIENT, InputEvent::MouseMotion { dx: 1.0, dy: 0.0 });
         run(&mut r, &mut st, &ctx, RegionCmd::Predict(kind.clone()));
@@ -538,7 +529,7 @@ mod tests {
         let key = *r.data().player_entites.get(&CLIENT).unwrap();
         let out_of_region = game::Pose::translation(game::REGION_SIZE + game::FLIP_HYSTERESIS + 2.0, 26.0, 128.0);
         r.with_data(|d| d.set_body_pose_safe(key, out_of_region));
-        let out = run(&mut r, &mut st, &ctx, RegionCmd::Tick);
+        let out = tick1(&mut r, &mut st, &ctx);
         let mut bundle = out
             .into_iter()
             .find_map(|o| match o {
@@ -560,7 +551,7 @@ mod tests {
         assert_eq!(r.pending_event_ids().len(), n, "held, not predicted");
         assert!(server_recv.try_recv().is_err(), "held, not sent");
 
-        run(&mut r, &mut st, &ctx, RegionCmd::Tick);
+        tick1(&mut r, &mut st, &ctx);
         assert!(st.held_inputs.is_empty());
         let ids = r.pending_event_ids();
         assert_eq!(ids.len(), n + 3, "arrival, input, tick");
@@ -577,7 +568,7 @@ mod tests {
     #[test]
     fn view_changes_only_when_state_changes() {
         let (mut r, mut st, ctx, _) = setup();
-        let out = run(&mut r, &mut st, &ctx, RegionCmd::Tick);
+        let out = tick1(&mut r, &mut st, &ctx);
         assert!(out.iter().any(|o| matches!(o, RegionReport::View(Some(_)))));
         for n in 0..2 {
             let out = run(&mut r, &mut st, &ctx, RegionCmd::Ping(n));
@@ -601,7 +592,7 @@ mod tests {
     #[test]
     fn state_hash_reports_tick_and_hash() {
         let (mut r, mut st, ctx, _) = setup();
-        run(&mut r, &mut st, &ctx, RegionCmd::Tick);
+        tick1(&mut r, &mut st, &ctx);
         let out = run(&mut r, &mut st, &ctx, RegionCmd::StateHash);
         let want = (r.current_tick(), game::state_hash(r.data()));
         assert!(
@@ -635,7 +626,7 @@ mod tests {
         let n = logged(&r).len();
         run(&mut r, &mut st, &ctx, ghost(t + 1));
         assert_eq!(logged(&r).len(), n, "held, not applied");
-        run(&mut r, &mut st, &ctx, RegionCmd::Tick);
+        tick1(&mut r, &mut st, &ctx);
         assert_eq!(logged(&r).len(), n + 1, "tick into slot t+1: still held");
         let input = GameEventKind::PlayerInput(CLIENT, InputEvent::MouseMotion { dx: 1.0, dy: 0.0 });
         run(&mut r, &mut st, &ctx, RegionCmd::Predict(input));
@@ -644,7 +635,7 @@ mod tests {
             other => panic!("expected GameEventAfterTick, got {other:?}"),
         };
         assert_eq!(logged(&r).len(), n + 2, "slot t+1 still open: still held");
-        run(&mut r, &mut st, &ctx, RegionCmd::Tick);
+        tick1(&mut r, &mut st, &ctx);
         let ids = logged(&r);
         assert_eq!(ids.len(), n + 4, "the mirror, then the tick closing slot t+1");
         assert_eq!(ids[n + 2], input_id + 1, "the mirror follows the slot's input");
@@ -659,10 +650,9 @@ mod tests {
         let (mut r, mut st, ctx, _) = setup();
         let t = r.current_tick();
         run(&mut r, &mut st, &ctx, ghost(t));
-        st.stall = 1;
-        run(&mut r, &mut st, &ctx, RegionCmd::Tick);
+        run(&mut r, &mut st, &ctx, RegionCmd::Tick(t));
         assert_eq!(st.held_transfers.len(), 1);
-        let out = run(&mut r, &mut st, &ctx, RegionCmd::Tick);
+        let out = tick1(&mut r, &mut st, &ctx);
         assert!(st.held_transfers.is_empty());
         assert!(
             out.iter().any(|o| matches!(o, RegionReport::Ticked { sat_out: false, stamp, .. } if *stamp == t + 1)),
@@ -687,7 +677,7 @@ mod tests {
             pending_inputs: Vec::new(),
         };
         let t = r.current_tick();
-        run(&mut r, &mut st, &ctx, RegionCmd::Tick);
+        tick1(&mut r, &mut st, &ctx);
         let n = r.pending_event_ids().len();
         // Slot t is closed: applied (here: dropped) on receipt.
         run(&mut r, &mut st, &ctx, RegionCmd::Arrival(bundle, t));

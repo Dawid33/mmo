@@ -62,7 +62,7 @@ pub struct SimHarness {
 }
 
 /// Most server-only ticks `catch_up` runs — comfortably more than the
-/// client's lead band (`CLIENT_LEAD_MS` in instance.rs).
+/// client's lead band (`CLIENT_LEAD_MS` in `regions::clock`).
 const CATCH_UP_MAX_TICKS: usize = 8;
 
 /// Ticks `cross_boundary` spends ascending before it heads for the seam
@@ -444,6 +444,17 @@ impl SimHarness {
         );
     }
 
+    /// Every loaded client region stands within one tick of every other: they
+    /// all run to the one predicted world tick (`regions::clock`). Call after
+    /// a settle — a region still catching up a fresh snapshot is behind.
+    pub fn assert_regions_in_step(&mut self) {
+        let ticks: Vec<(RegionCoords, game::Tick)> =
+            self.client_regions().into_iter().map(|(rc, (t, _))| (rc, t)).collect();
+        let lo = ticks.iter().map(|(_, t)| *t).min().expect("a loaded region");
+        let hi = ticks.iter().map(|(_, t)| *t).max().expect("a loaded region");
+        assert!(hi - lo <= 1, "client regions not on one world tick: {ticks:?}");
+    }
+
     /// Liveness: holding `key` advances the sim tick AND moves the player body.
     pub fn assert_progresses(&mut self, key: Key) {
         let t0 = self.client_tick();
@@ -580,7 +591,7 @@ impl SimHarness {
     /// `(tick, client hash, server hash)` AT THE CLIENT'S CURRENT TICK.
     ///
     /// The client holds a lead over the server (`CLIENT_LEAD_MS` in
-    /// instance.rs; window regions are stepped into the lead band), so a
+    /// `regions::clock`; every region runs to the one predicted tick), so a
     /// region's client tick is usually one the server has not reached. The
     /// client's past states can't be read back, and a hash noted when a tick
     /// was first predicted is no substitute — the server's per-tick events (a
@@ -588,7 +599,7 @@ impl SimHarness {
     /// rewrite every predicted tick on arrival. So the CLIENT is frozen while
     /// the server alone ticks up to it, the client reconciling what arrives;
     /// `SyncClock` is withheld for the duration, or the client would step
-    /// itself forward to win its lead back. Both sides then hold final state
+    /// its clock forward to win its lead back. Both sides then hold final state
     /// for the same tick, and the comparison is as strict as it ever was.
     /// Afterwards the client predicts the same number of ticks alone, which
     /// restores the lead it had — the run continues as if uninterrupted.
