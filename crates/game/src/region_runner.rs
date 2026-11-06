@@ -448,8 +448,12 @@ impl RegionRunner {
 
     /// Halo seeds generated here, applied at once (before the first tick).
     fn seed_halo_from_worldgen(&mut self, neighbours: Vec<RegionCoords>) {
+        // Only a spawner that generates columns asks for this, and every
+        // such spawner hands its runners a halo generator (server
+        // `ThreadRegionSpawner::with_generator` takes both).
         let Some(generate) = self.halo_generator.clone() else {
-            log::warn!("region {:?}: no halo generator; {} neighbour seeds skipped", self.id, neighbours.len());
+            debug_assert!(false, "region {:?}: halo seed from worldgen without a halo generator", self.id);
+            log::error!("region {:?}: no halo generator; {} neighbour seeds skipped", self.id, neighbours.len());
             return;
         };
         for n in neighbours {

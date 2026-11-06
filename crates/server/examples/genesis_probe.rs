@@ -76,7 +76,7 @@ fn main() {
     // Production path: region threads generate their own columns.
     let generator: server::region_threads::SharedRegionGenerator =
         std::sync::Arc::new(move |rc| worldgen::generate_region(rc, worldgen::WORLD_SEED, materials));
-    let mut spawner = server::region_threads::ThreadRegionSpawner::with_generator(generator);
+    let mut spawner = server::region_threads::ThreadRegionSpawner::with_region_generator(generator);
     let started = Instant::now();
     let mut inputs = Vec::new();
     for &rc in &regions {

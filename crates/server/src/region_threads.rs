@@ -23,11 +23,11 @@ pub struct ThreadRegionSpawner {
     /// `Some` = regions generate their own columns on their own thread, so the
     /// manager hands out `RegionSeed::Deferred` (see `generates_columns`).
     /// `None` (the `Default`, used by tests that pass ready-made seeds) keeps
-    /// worldgen with the manager.
-    generator: Option<SharedRegionGenerator>,
-    /// Worldgen of a neighbour's band columns for halo seeds
-    /// (`RegionInput::SeedHaloFromWorldgen`), handed to every runner.
-    halo_generator: Option<game::HaloGenerator>,
+    /// worldgen with the manager. With it comes the halo generator: worldgen
+    /// of a never-run neighbour's band columns for halo seeds
+    /// (`RegionInput::SeedHaloFromWorldgen`), handed to every runner — one
+    /// field, so a spawner that generates regions always seeds halos too.
+    generator: Option<(SharedRegionGenerator, game::HaloGenerator)>,
     /// World autosave: a region that has not run in this process (a
     /// `RegionSeed::Deferred(None)`) is restored from its save, if any, instead
     /// of generated — read on the region's own thread.
@@ -36,13 +36,30 @@ pub struct ThreadRegionSpawner {
 
 impl Default for ThreadRegionSpawner {
     fn default() -> Self {
-        Self { started: Instant::now(), clock: game::WorldClock::starting_at(0, 0), handles: BTreeMap::new(), generator: None, halo_generator: None, store: None }
+        Self { started: Instant::now(), clock: game::WorldClock::starting_at(0, 0), handles: BTreeMap::new(), generator: None, store: None }
     }
 }
 
 impl ThreadRegionSpawner {
-    pub fn with_generator(generator: SharedRegionGenerator) -> Self {
-        Self { generator: Some(generator), ..Self::default() }
+    /// Regions generate their own columns with `generator`, and seed the
+    /// halo of never-run neighbours with `halo` (their band columns only:
+    /// `worldgen::generate_columns` on the server). Both or neither — a
+    /// region that generates but cannot seed its halo would have no floor
+    /// past its seams.
+    pub fn with_generator(generator: SharedRegionGenerator, halo: game::HaloGenerator) -> Self {
+        Self { generator: Some((generator, halo)), ..Self::default() }
+    }
+
+    /// [`Self::with_generator`] for tests and tools, whose generators make
+    /// whole regions only: the halo seed generates the neighbour whole and
+    /// keeps the window's columns (the same columns, a whole region's cost
+    /// per window).
+    pub fn with_region_generator(generator: SharedRegionGenerator) -> Self {
+        let whole = generator.clone();
+        let halo: game::HaloGenerator = std::sync::Arc::new(move |rc, xs, zs| {
+            whole(rc).into_iter().filter(|(c, _)| xs.contains(&c.x) && zs.contains(&c.z)).collect()
+        });
+        Self::with_generator(generator, halo)
     }
 
     /// Use `clock` (anchored at `started`, the same base as the manager's
@@ -50,13 +67,6 @@ impl ThreadRegionSpawner {
     pub fn with_clock(mut self, clock: game::WorldClock, started: Instant) -> Self {
         self.clock = clock;
         self.started = started;
-        self
-    }
-
-    /// Seed halos of never-run neighbours with `generator` on the region's
-    /// own thread (see `game::HaloGenerator`).
-    pub fn with_halo_generator(mut self, generator: game::HaloGenerator) -> Self {
-        self.halo_generator = Some(generator);
         self
     }
 
@@ -75,8 +85,10 @@ impl RegionSpawner for ThreadRegionSpawner {
         out: Sender<(RegionCoords, RegionOutput)>,
     ) -> Sender<RegionInput> {
         let (send, recv) = unbounded();
-        let generator = self.generator.clone();
-        let halo_generator = self.halo_generator.clone();
+        let (generator, halo_generator) = match self.generator.clone() {
+            Some((g, h)) => (Some(g), Some(h)),
+            None => (None, None),
+        };
         let store = self.store.clone();
         let (clock, started) = (self.clock, self.started);
         let handle = std::thread::Builder::new()

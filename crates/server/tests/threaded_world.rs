@@ -111,13 +111,7 @@ impl Rig {
     fn with_on_thread_worldgen(
         columns: impl Fn(RegionCoords) -> Vec<(ColumnCoords, Column)> + Send + Sync + Clone + 'static,
     ) -> Self {
-        let window = columns.clone();
-        let spawner = ThreadRegionSpawner::with_generator(std::sync::Arc::new(columns.clone()))
-            // Halo seeds of never-run neighbours, as the server makes them:
-            // the band columns only, on the starting region's thread.
-            .with_halo_generator(std::sync::Arc::new(move |rc, xs, zs| {
-                window(rc).into_iter().filter(|(c, _)| xs.contains(&c.x) && zs.contains(&c.z)).collect()
-            }));
+        let spawner = ThreadRegionSpawner::with_region_generator(std::sync::Arc::new(columns.clone()));
         Self::with_spawner(spawner, columns)
     }
 
@@ -519,7 +513,7 @@ fn diagonal_walk_crosses_a_corner_on_real_threads() {
 }
 
 /// Walking into a region nobody is subscribed to, on the server's production
-/// spawn path (`ThreadRegionSpawner::with_generator`): the departure has to
+/// spawn path (`ThreadRegionSpawner::with_region_generator`): the departure has to
 /// WAKE the target, whose brand-new thread runs worldgen + collider genesis
 /// before it can look at the `EntityArrived` already queued for it. Then the
 /// player walks back, so the return `EntityArrived` — sourced from the woken
@@ -583,7 +577,7 @@ fn saved_region_is_restored_by_a_restarted_server() {
     let dir = std::env::temp_dir().join(format!("mmo-threaded-save-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let store = RegionStore::new(dir.clone(), 42);
-    let spawner = || ThreadRegionSpawner::with_generator(std::sync::Arc::new(|_| lightweight_columns())).with_store(store.clone());
+    let spawner = || ThreadRegionSpawner::with_region_generator(std::sync::Arc::new(|_| lightweight_columns())).with_store(store.clone());
 
     let mut rig = Rig::with_spawner(spawner(), |_| lightweight_columns());
     rig.event(ServerEvent::connected(0));
@@ -653,7 +647,7 @@ fn player_is_restored_by_a_restarted_server() {
     let dir = std::env::temp_dir().join(format!("mmo-threaded-players-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let store = RegionStore::new(dir.clone(), 42);
-    let spawner = || ThreadRegionSpawner::with_generator(std::sync::Arc::new(|_| lightweight_columns())).with_store(store.clone());
+    let spawner = || ThreadRegionSpawner::with_region_generator(std::sync::Arc::new(|_| lightweight_columns())).with_store(store.clone());
     let mut players = MemoryPlayerStore::default();
     let token = game::PlayerToken::generate([7; game::PLAYER_TOKEN_BYTES]);
     let (player, record) = players.resolve(&token).unwrap();

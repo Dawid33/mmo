@@ -201,3 +201,23 @@ fn halo_updates_roll_back_bit_exact() {
     region.rollback_last_event();
     assert_eq!(game::state_hash(region.data()), seeded, "patch undone exactly");
 }
+
+/// A neighbour that parks hands its final terrain to the running regions
+/// that mirror it: an edit it never ticked (so never sent as a delta) still
+/// reaches their halo once its `Stopped` is handled.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn parked_neighbour_reseeds_running_halo() {
+    let mut rig = joined();
+    let n = REGION_BLOCKS as i32;
+    let local = BlockPos::new(12, 0, n - 1);
+    let world = WorldBlockPos::from_local(north(), local);
+    rig.event(game::ServerEvent::ClientPacket(game::ClientPacket::ReleaseRegionConnection(north()), CLIENT));
+    // Edited between ticks, then parked before it ticks again.
+    set_block(&mut rig, north(), local, Block::new(BlockId::AIR));
+    rig.now_ms += game::UNLOAD_GRACE_MS;
+    rig.manager.maintain(rig.now_ms);
+    rig.settle();
+    assert!(rig.manager.parked_regions().contains(&north()), "north parked");
+    assert_eq!(seen_from_spawn(&mut rig, world).map(|b| b.id), Some(BlockId::AIR), "the parked edit is in the halo");
+}

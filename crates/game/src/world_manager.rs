@@ -1285,6 +1285,19 @@ impl<S: RegionSpawner> WorldManager<S> {
                 if self.history.as_ref().is_some_and(|h| h.region_live(rc)) {
                     self.history_region_lost(rc);
                 }
+                // Its final terrain reseeds the running regions that mirror
+                // it: what it changed since its last halo deltas (edits of
+                // its last slot, transfers applied at `Shutdown`) never went
+                // out as deltas. Stream-borne, so their clients replay it.
+                for n in crate::halo::neighbours(rc) {
+                    let running = self.regions.get(&n).is_some_and(|l| !l.stopping);
+                    if !running {
+                        continue;
+                    }
+                    if let Some(seed) = crate::halo::halo_seed_from_chunks(rc, n, far.chunks.iter().map(|(c, k)| (*c, k))) {
+                        self.send_to_region(n, RegionInput::Event(GameEventKind::HaloUpdate(seed)));
+                    }
+                }
                 self.cache_authoritative_terrain(rc, far);
                 self.invalidate_region_lod(rc);
                 self.parked.insert(rc, serialized);
@@ -2033,7 +2046,9 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// channel; nothing has ticked it yet), from each on-map neighbour:
     /// - running: the neighbour answers a `HaloRequest` with its live chunks
     ///   (a stamped Transfer); its cached terrain, if any, goes in first;
-    /// - parked or cached (its last pushed / parked terrain): from the cache;
+    /// - parked or cached (its last pushed / parked terrain): from the cache
+    ///   (a region that parks also reseeds its running neighbours from its
+    ///   final terrain, on `Stopped`);
     /// - never run: worldgen — on the region's own thread when the spawner
     ///   generates there (only the band columns), else here (the whole
     ///   region, not cached: LOD keeps its own choice of pristine sources).

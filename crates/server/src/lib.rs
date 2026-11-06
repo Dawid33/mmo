@@ -586,8 +586,7 @@ pub fn run() {
     let halo_generator: game::HaloGenerator = std::sync::Arc::new(move |rc, xs, zs| {
         worldgen::generate_columns(rc, xs, zs, world_seed, materials)
     });
-    let mut spawner = region_threads::ThreadRegionSpawner::with_generator(region_generator)
-        .with_halo_generator(halo_generator)
+    let mut spawner = region_threads::ThreadRegionSpawner::with_generator(region_generator, halo_generator)
         .with_clock(world_clock, start);
     let tick_store = region_store.clone();
     let save_world_tick = move |start: std::time::Instant| {
