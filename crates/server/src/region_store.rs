@@ -59,7 +59,9 @@ pub const REGION_MAGIC: [u8; 8] = *b"MMOREGN\0";
 /// column, `Walker::path` world tiles, `Walker::exit` became `to_goal`.
 /// 18: a wandering person's home (`people::Wander::home`) is a world block
 /// column (`[i64; 2]`), so it means the same place across seams.
-pub const REGION_FILE_VERSION: u32 = 18;
+/// 19: `BodyState` (in saved in-flight transfers) carries the body's user
+/// force/torque and soft-CCD distance (`EntityKind::Body`).
+pub const REGION_FILE_VERSION: u32 = 19;
 /// magic + version + region blocks + chunk blocks + world crc + payload crc.
 const HEADER_LEN: usize = 8 + 4 * 5;
 

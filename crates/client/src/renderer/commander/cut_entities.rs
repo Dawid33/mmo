@@ -39,6 +39,8 @@ pub fn feet_offset(kind: EntityKind) -> f32 {
     match kind {
         EntityKind::Player | EntityKind::Person { .. } => game::movement::PLAYER_CAPSULE_HALF_HEIGHT + game::movement::PLAYER_CAPSULE_RADIUS,
         EntityKind::Slime { size } => game::slime::slime_edge_units(size) / 2.0,
+        // Placeholder: the 1 m dev cube (bodies of other shapes come later).
+        EntityKind::Body => game::BLOCK_VOXELS as f32 / 2.0,
     }
 }
 

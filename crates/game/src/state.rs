@@ -203,6 +203,10 @@ pub enum EntityKind {
     /// body with no camera and no client. The id ties the body to its
     /// history record.
     Person { person: crate::history::PersonId },
+    /// A generic dynamic rigid body (`body.rs`): no behaviour, it falls,
+    /// tumbles, rests and crosses seams with its full body state. Appended
+    /// (bincode keeps the earlier variants' indices).
+    Body,
 }
 
 /// A live entity-halo mirror in this region (`halo.rs`), keyed in
@@ -1464,11 +1468,15 @@ impl Rollback {
         self.data.ecs.rigidbody.set_safe(e, Some(handle));
         // One collider at the body origin. A dynamic body's is massless: its
         // mass is the state's explicit `mass` (`mass_props`), which rapier
-        // then returns bit-unchanged. Kinematic bodies keep the default
-        // density (their mass is never used, but it is hashed state).
+        // then returns bit-unchanged. A kinematic body's mass is never used,
+        // but it is hashed state: capsules (players, slimes, people, their
+        // mirrors) keep the default density, every other shape — a mirror of
+        // a dynamic body — is massless too, so its mass never goes through
+        // parry's compound sum (glamx eigen solve, not bit-identical across
+        // targets).
         let mut builder = rapier3d::prelude::ColliderBuilder::new(collider.shared_shape())
             .user_data(e.data().as_ffi() as u128);
-        if state.kind == crate::BodyKind::Dynamic {
+        if state.kind == crate::BodyKind::Dynamic || !matches!(collider, ColliderSpec::CapsuleY { .. }) {
             builder = builder.density(0.0);
         }
         self.attach_collider_safe(handle, builder.build());
@@ -1478,28 +1486,6 @@ impl Rollback {
     /// pattern generalized to a transfer payload.
     fn inject_body_safe(&mut self, e: EntityKey, bundle: &EntityBundle) {
         self.build_body_safe(e, &bundle.body, &bundle.collider);
-    }
-
-    /// Re-pose and re-state `e`'s existing body from a bundle (a halo
-    /// mirror upgraded in place, or a replayed arrival).
-    fn apply_body_state_safe(&mut self, e: EntityKey, state: &crate::BodyState) {
-        let Some(handle) = *self.data.ecs.rigidbody.try_get(e) else { return };
-        if state.kind == crate::BodyKind::Dynamic {
-            // A kinematic mirror becoming a dynamic body: its colliders lose
-            // their density, so the explicit mass is all of its mass.
-            let colliders: Vec<_> = self.data.physics.bodies.get(handle).map(|b| b.colliders().to_vec()).unwrap_or_default();
-            for ch in colliders {
-                let massless = self.data.physics.colliders.get(ch).is_some_and(|c| c.density() == 0.0);
-                if !massless {
-                    self.data.physics.colliders.mutate_collider_safe(ch, |c| c.set_density(0.0));
-                }
-            }
-        }
-        self.data.physics.bodies.mutate_body_safe(handle, |b| state.apply_to(b));
-        self.data.send(GameDataUpdate::new(
-            GameDataTransactionKind::Do,
-            GameDataUpdateKind::SetEntityPosition(e, state.pose),
-        ));
     }
 
     /// Ownership transfer INTO this region. Three paths:
@@ -1519,7 +1505,7 @@ impl Rollback {
         if let Some(e) = known {
             if self.data.ecs.entities.contains_key(e) {
                 // A replay re-applies the whole bundle, not only the pose.
-                self.apply_body_state_safe(e, &bundle.body);
+                self.restate_body_safe(e, &bundle.body, &bundle.collider);
                 let client_id = bundle.client.as_ref().map(|(c, _)| *c);
                 self.restore_components_safe(e, &bundle.carried, client_id);
                 if let Some((client_id, client)) = bundle.client {
@@ -1573,9 +1559,11 @@ impl Rollback {
         self.data.ecs.kind.set_safe(e, Some(bundle.kind));
 
         // Body + collider at the (already rebased) bundle pose. A mirror
-        // already has a body: re-state it instead of double-inserting.
+        // already has a body: re-state it instead of double-inserting (a
+        // kinematic mirror of a dynamic body is replaced by one built like a
+        // fresh arrival's — `restate_body_safe`).
         if self.data.ecs.rigidbody.try_get(e).is_some() {
-            self.apply_body_state_safe(e, &bundle.body);
+            self.restate_body_safe(e, &bundle.body, &bundle.collider);
         } else {
             self.inject_body_safe(e, &bundle);
         }
@@ -1629,7 +1617,12 @@ impl Rollback {
                 GameDataTransactionKind::Do,
                 GameDataUpdateKind::SetEntityPosition(entry.entity, data.isometry),
             ));
-            self.set_body_pose_safe(entry.entity, data.isometry);
+            // Driven, not teleported: the step moves the kinematic mirror to
+            // its new pose with the matching velocity, so a dynamic body it
+            // touches gets a contact push (one way: nothing goes back).
+            if let Some(handle) = *self.data.ecs.rigidbody.try_get(entry.entity) {
+                self.data.physics.bodies.mutate_body_safe(handle, |b| b.set_next_kinematic_position(data.isometry));
+            }
         } else {
             let e = self.data.ecs.create_entity_safe();
             self.data.send(GameDataUpdate::new(

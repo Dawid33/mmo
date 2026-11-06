@@ -21,6 +21,7 @@ mod common;
 mod adventure;
 mod anim;
 mod block_edit;
+mod body;
 mod block_props;
 mod camera_controller;
 mod camera_look;

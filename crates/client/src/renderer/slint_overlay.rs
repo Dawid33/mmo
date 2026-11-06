@@ -1650,6 +1650,7 @@ fn kind_label(kind: game::EntityKind) -> String {
         game::EntityKind::Player => "Player".into(),
         game::EntityKind::Slime { size } => format!("Slime (size {size})"),
         game::EntityKind::Person { .. } => "Dwarf".into(),
+        game::EntityKind::Body => "Body".into(),
     }
 }
 

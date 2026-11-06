@@ -242,6 +242,8 @@ fn body_extent(kind: EntityKind) -> (f32, f32) {
     let half_width = match kind {
         EntityKind::Player | EntityKind::Person { .. } => game::movement::PLAYER_CAPSULE_RADIUS,
         EntityKind::Slime { size } => game::slime::slime_edge_units(size) / 2.0,
+        // Placeholder: the 1 m dev cube.
+        EntityKind::Body => game::BLOCK_VOXELS as f32 / 2.0,
     };
     (half_height, half_width)
 }
@@ -345,6 +347,11 @@ pub fn draw_selection_rings(
         let (edge, centre_height) = match kind.0 {
             EntityKind::Slime { size } => {
                 let edge = game::slime::slime_edge_units(size);
+                (edge, edge / 2.0)
+            }
+            // Placeholder: the 1 m dev cube.
+            EntityKind::Body => {
+                let edge = game::BLOCK_VOXELS as f32;
                 (edge, edge / 2.0)
             }
             // Only the adventurer's own body is ever selected.

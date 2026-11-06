@@ -38,6 +38,9 @@ pub fn attach_avatars(
             EntityKind::Player if rigged => {}
             // A person is always drawn by `rigs` (the dwarf), never a capsule.
             EntityKind::Person { .. } => {}
+            // A generic dynamic body: not drawn yet (placeholder until its
+            // shape is rendered).
+            EntityKind::Body => {}
             EntityKind::Player => {
                 let (mesh, material) = assets
                     .player

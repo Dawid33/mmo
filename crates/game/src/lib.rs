@@ -18,6 +18,7 @@ pub mod anim;
 pub mod biome;
 pub mod block;
 pub mod block_props;
+pub mod body;
 pub mod camera;
 pub mod containers;
 pub mod debug_render;

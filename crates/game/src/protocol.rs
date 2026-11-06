@@ -423,6 +423,14 @@ pub struct BodyState {
     /// `Rollback::build_body_safe`), so this is exactly the additional mass
     /// properties it is built with, and rapier hands it back bit-unchanged.
     pub mass: Option<parry3d::mass_properties::MassProperties>,
+    /// The constant user force and torque rapier keeps applying to a
+    /// dynamic body (zero for kinematic): the world's gravity is zero, so a
+    /// dynamic body's weight is a user force (`body.rs`, `voxel_body.rs`),
+    /// and it must cross with the body.
+    pub user_force: Vector,
+    pub user_torque: Vector,
+    /// Soft-CCD prediction distance (units; 0 = off).
+    pub soft_ccd: f32,
 }
 
 impl BodyState {
@@ -441,6 +449,9 @@ impl BodyState {
             ccd: false,
             locked_axes: rapier3d::dynamics::LockedAxes::empty(),
             mass: None,
+            user_force: Vector::ZERO,
+            user_torque: Vector::ZERO,
+            soft_ccd: 0.0,
         }
     }
 
@@ -459,6 +470,9 @@ impl BodyState {
             ccd: body.is_ccd_enabled(),
             locked_axes: body.locked_axes(),
             mass: dynamic.then(|| Self::explicit_mass(body)),
+            user_force: body.user_force(),
+            user_torque: body.user_torque(),
+            soft_ccd: body.soft_ccd_prediction(),
         }
     }
 
@@ -490,6 +504,7 @@ impl BodyState {
         .angular_damping(self.angular_damping)
         .locked_axes(self.locked_axes)
         .ccd_enabled(self.ccd)
+        .soft_ccd_prediction(self.soft_ccd)
         .can_sleep(false)
         .user_data(e.data().as_ffi() as u128);
         if self.kind == BodyKind::Dynamic {
@@ -499,34 +514,42 @@ impl BodyState {
             }
         }
         let mut body = b.build();
+        // Zero forces are skipped by rapier (and are zero already).
+        body.add_force(self.user_force, false);
+        body.add_torque(self.user_torque, false);
         *body.activation_mut() = self.activation;
         body
     }
 
-    /// Re-apply this state to an existing body (a halo mirror upgraded
-    /// in place, or a replayed arrival): type and, for a dynamic body, its
-    /// explicit mass too. The body's colliders must then be massless
-    /// (`Rollback::apply_body_state_safe` sees to that).
+    /// Whether a live body is of this state's [`BodyKind`].
+    pub fn same_kind_as(&self, body: &rapier3d::dynamics::RigidBody) -> bool {
+        (body.body_type() == rapier3d::dynamics::RigidBodyType::Dynamic) == (self.kind == BodyKind::Dynamic)
+    }
+
+    /// Re-apply this state to an existing body OF THE SAME KIND (a halo
+    /// mirror upgraded in place, or a replayed arrival). Never changes the
+    /// body type: a kind change rebuilds the body instead
+    /// (`Rollback::restate_body_safe`), because rapier's type-change mass
+    /// recompute is the path explicit mass avoids.
     pub fn apply_to(&self, body: &mut rapier3d::dynamics::RigidBody) {
-        body.set_body_type(
-            match self.kind {
-                BodyKind::Dynamic => rapier3d::dynamics::RigidBodyType::Dynamic,
-                BodyKind::KinematicPosition => rapier3d::dynamics::RigidBodyType::KinematicPositionBased,
-            },
-            false,
-        );
+        debug_assert!(self.same_kind_as(body), "BodyState::apply_to across body kinds");
         body.set_position(self.pose, true);
         body.set_linear_damping(self.linear_damping);
         body.set_angular_damping(self.angular_damping);
         body.set_gravity_scale(self.gravity_scale, false);
         body.enable_ccd(self.ccd);
         body.set_locked_axes(self.locked_axes, false);
+        body.set_soft_ccd_prediction(self.soft_ccd);
         if self.kind == BodyKind::Dynamic {
             body.set_linvel(self.linvel, false);
             body.set_angvel(self.angvel, false);
             if let Some(m) = self.mass {
                 body.set_additional_mass_properties(m, false);
             }
+            body.reset_forces(false);
+            body.reset_torques(false);
+            body.add_force(self.user_force, false);
+            body.add_torque(self.user_torque, false);
         }
         *body.activation_mut() = self.activation;
     }

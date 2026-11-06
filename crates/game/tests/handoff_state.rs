@@ -312,11 +312,13 @@ fn stage2_ghost_has_a_collidable_body_that_tracks_updates() {
         "ghost carries its collider"
     );
 
-    // Refresh moves the body (and holds the hash bar).
+    // Refresh drives the kinematic body toward the new pose — reached at
+    // the next step (Task 7.2: driven, not teleported) — and holds the hash
+    // bar.
     let before = crc(&rb);
     rb.new_transaction();
     rb.apply_halo_entity_safe(ghost(src, src_key, 240.0));
-    let t = rb.data.physics.bodies.get(handle).unwrap().translation();
+    let t = rb.data.physics.bodies.get(handle).unwrap().next_position().translation;
     assert_eq!(t.x, 240.0);
     rb.rollback();
     assert_eq!(before, crc(&rb));
@@ -677,4 +679,265 @@ fn ignored_duplicate_person_arrival_drops_its_mirror() {
     assert!(rb.halo_entity(eid(src, src_key)).is_none(), "its mirror went with it");
     rb.rollback();
     assert_eq!(before, crc(&rb), "and undoes bit-exact");
+}
+
+// ---- dynamic bodies: EntityKind::Body (Task 7.2) ----
+
+use crate::body::{cube, floored_region, live_body, spawn, tick};
+use game::rapier3d::dynamics::{RigidBody, RigidBodyActivation};
+use game::{BodyKind, BodyState, EntityId, GameEventKind, Region};
+
+/// The neighbour the test bodies come from.
+fn body_src() -> RegionCoords {
+    RegionCoords::new(0, -1)
+}
+
+fn body_id(serial: u64) -> EntityId {
+    EntityId { birth_region: body_src(), serial }
+}
+
+fn vbits(v: Vector) -> [u32; 3] {
+    [v.x.to_bits(), v.y.to_bits(), v.z.to_bits()]
+}
+
+fn mbits(mp: &game::parry::mass_properties::MassProperties) -> [u32; 11] {
+    let (c, i, q) = (mp.local_com, mp.inv_principal_inertia, mp.principal_inertia_local_frame);
+    [
+        c.x.to_bits(),
+        c.y.to_bits(),
+        c.z.to_bits(),
+        mp.inv_mass.to_bits(),
+        i.x.to_bits(),
+        i.y.to_bits(),
+        i.z.to_bits(),
+        q.x.to_bits(),
+        q.y.to_bits(),
+        q.z.to_bits(),
+        q.w.to_bits(),
+    ]
+}
+
+/// A tumbling, floating (no gravity force) 1 m cube at region-local x.
+fn body_bundle(serial: u64, x: f32) -> EntityBundle {
+    let mass = game::mass_props::mass_properties(&cube(), game::mass_props::BODY_DEFAULT_DENSITY);
+    EntityBundle {
+        id: body_id(serial),
+        kind: EntityKind::Body,
+        body: BodyState {
+            kind: BodyKind::Dynamic,
+            linvel: Vector::new(3.25, -1.5, 0.75),
+            angvel: Vector::new(0.5, -0.25, 1.0),
+            activation: RigidBodyActivation::active(),
+            angular_damping: 0.0,
+            mass: Some(mass),
+            ..BodyState::kinematic(pose(x, 300.0, 128.0))
+        },
+        collider: cube(),
+        carried: game::Carried::default(),
+        client: None,
+        pending_inputs: Vec::new(),
+    }
+}
+
+/// The source's halo mirror of [`body_bundle`]'s body.
+fn body_ghost(serial: u64, x: f32) -> HaloEntityDelta {
+    HaloEntityDelta {
+        id: body_id(serial),
+        source_region: body_src(),
+        kind: EntityKind::Body,
+        isometry: pose(x, 300.0, 128.0),
+        linvel: Vector::ZERO,
+        collider: cube(),
+    }
+}
+
+fn bare_region() -> Region {
+    crate::common::install_real_block_props();
+    let (send, _recv) = crossbeam::channel::unbounded();
+    Region::new(Rollback::new(Some(send.clone())), Some(send), RegionCoords::new(0, 0), None)
+}
+
+fn arrive(region: &mut Region, bundle: EntityBundle) -> Option<game::EntityKey> {
+    let mut e = None;
+    region.with_data(|r| e = r.apply_arrival(bundle));
+    e
+}
+
+fn owned(region: &Region, id: EntityId) -> game::EntityKey {
+    *region.data().id_index.get(&id).expect("owned here")
+}
+
+/// The arrived body carries the bundle's velocities and mass exactly.
+fn assert_carries(body: &RigidBody, bundle: &EntityBundle) {
+    assert!(body.is_dynamic(), "a dynamic body");
+    assert_eq!(vbits(body.linvel()), vbits(bundle.body.linvel), "linvel");
+    assert_eq!(vbits(body.angvel()), vbits(bundle.body.angvel), "angvel");
+    let carried = BodyState::of(body).mass.expect("explicit mass");
+    assert_eq!(mbits(&carried), mbits(bundle.body.mass.as_ref().unwrap()), "explicit mass");
+}
+
+/// After one step: the total mass is exactly the carried mass.
+fn assert_stepped_mass(body: &RigidBody, bundle: &EntityBundle) {
+    assert_eq!(mbits(&body.mass_properties().local_mprops), mbits(bundle.body.mass.as_ref().unwrap()), "local_mprops");
+}
+
+/// The same body after the same step, wherever it came from.
+fn assert_same_motion(a: &RigidBody, b: &RigidBody) {
+    assert_eq!(vbits(a.translation()), vbits(b.translation()), "translation");
+    let (qa, qb) = (a.rotation(), b.rotation());
+    assert_eq!([qa.x, qa.y, qa.z, qa.w].map(f32::to_bits), [qb.x, qb.y, qb.z, qb.w].map(f32::to_bits), "rotation");
+    assert_eq!(vbits(a.linvel()), vbits(b.linvel()), "linvel");
+    assert_eq!(vbits(a.angvel()), vbits(b.angvel()), "angvel");
+}
+
+#[test]
+fn dynamic_arrival_without_ghost() {
+    let bundle = body_bundle(1, 2.0);
+    let mut region = bare_region();
+    let e = arrive(&mut region, bundle.clone()).expect("a fresh arrival");
+    assert_eq!(*region.data().ecs.kind.try_get(e), Some(EntityKind::Body));
+    assert_carries(live_body(&region, e), &bundle);
+    tick(&mut region);
+    assert_stepped_mass(live_body(&region, e), &bundle);
+}
+
+#[test]
+fn dynamic_arrival_upgrades_ghost_to_dynamic() {
+    let bundle = body_bundle(1, 2.0);
+    let mut region = bare_region();
+    region.handle_event(GameEventKind::HaloEntity(body_ghost(1, 2.0))).unwrap();
+    region.forget_last_event();
+    let mirror = region.data().halo_entities.get(&body_id(1)).unwrap().entity;
+    assert!(live_body(&region, mirror).is_kinematic(), "the mirror is kinematic");
+
+    let e = arrive(&mut region, bundle.clone()).expect("an upgrade");
+    assert_eq!(e, mirror, "the same EntityKey continues");
+    assert!(region.data().halo_entities.get(&body_id(1)).is_none(), "the mirror record is gone");
+    assert_carries(live_body(&region, e), &bundle);
+    assert_eq!(live_body(&region, e).colliders().len(), 1, "one collider, no leftover of the mirror's");
+    tick(&mut region);
+    assert_stepped_mass(live_body(&region, e), &bundle);
+
+    // Bit-equal to the same body arriving with no mirror.
+    let mut fresh = bare_region();
+    let f = arrive(&mut fresh, bundle.clone()).unwrap();
+    tick(&mut fresh);
+    assert_same_motion(live_body(&region, e), live_body(&fresh, f));
+}
+
+#[test]
+fn undo_dynamic_upgrade_restores_ghost() {
+    let (send, _recv) = crossbeam::channel::unbounded();
+    let mut rb = Rollback::new(Some(send));
+    rb.new_transaction();
+    rb.apply_halo_entity_safe(body_ghost(1, 2.0));
+    rb.forget();
+    let mirror = rb.data.halo_entities.get(&body_id(1)).unwrap().clone();
+    let before = crc(&rb);
+
+    rb.new_transaction();
+    let e = rb.apply_arrival(body_bundle(1, 2.0)).unwrap();
+    assert_eq!(e, mirror.entity);
+    rb.rollback();
+    assert_eq!(before, crc(&rb), "the upgrade rolls back bit-exact");
+    assert_eq!(rb.data.halo_entities.get(&body_id(1)), Some(&mirror), "the mirror record is back");
+    let h = rb.data.ecs.rigidbody.try_get(mirror.entity).expect("its body is back");
+    assert!(rb.data.physics.bodies.get(h).unwrap().is_kinematic(), "kinematic again");
+}
+
+/// Task 7.1 review: a replayed dynamic arrival (the same bundle applied
+/// twice) steps exactly like a single one.
+#[test]
+fn replayed_dynamic_arrival_is_bit_exact() {
+    let bundle = body_bundle(1, 2.0);
+    let mut once = bare_region();
+    let a = arrive(&mut once, bundle.clone()).unwrap();
+    let mut twice = bare_region();
+    let b = arrive(&mut twice, bundle.clone()).unwrap();
+    assert_eq!(arrive(&mut twice, bundle.clone()), None, "a replay creates nothing");
+    assert_carries(live_body(&twice, b), &bundle);
+    tick(&mut once);
+    tick(&mut twice);
+    assert_stepped_mass(live_body(&twice, b), &bundle);
+    assert_same_motion(live_body(&once, a), live_body(&twice, b));
+    assert_eq!(game::state_hash(once.data()), game::state_hash(twice.data()), "the whole state agrees");
+}
+
+#[test]
+fn sleeping_body_arrives_asleep() {
+    let mut a = floored_region();
+    let rest = game::BLOCK_VOXELS as f32 * 1.5;
+    let e = spawn(&mut a, pose(512.0, rest, 512.0), cube(), Vector::ZERO, Vector::ZERO);
+    for _ in 0..game::body::BODY_SETTLE_TICKS {
+        tick(&mut a);
+        if live_body(&a, e).is_sleeping() {
+            break;
+        }
+    }
+    assert!(live_body(&a, e).is_sleeping(), "settled asleep in the source");
+    let mut bundle = None;
+    a.with_data(|r| bundle = Some(r.extract_entity_safe(e)));
+    let bundle = bundle.unwrap();
+    assert!(bundle.body.activation.sleeping);
+
+    let mut b = floored_region();
+    let f = arrive(&mut b, bundle.clone()).unwrap();
+    assert!(live_body(&b, f).is_sleeping(), "arrives asleep");
+    assert_eq!(*live_body(&b, f).activation(), bundle.body.activation, "activation carried");
+    // Rapier wakes a sleeping body when a contact of it STARTS, and every
+    // contact of a body just inserted here starts on its first step: it
+    // wakes once, finds itself at rest, and goes back to sleep where it lay.
+    let at = live_body(&b, f).translation();
+    for _ in 0..game::body::BODY_SETTLE_TICKS {
+        tick(&mut b);
+        if live_body(&b, f).is_sleeping() {
+            break;
+        }
+    }
+    assert!(live_body(&b, f).is_sleeping(), "asleep again");
+    let moved = (live_body(&b, f).translation() - at).length();
+    assert!(moved < 0.01 * game::BLOCK_VOXELS as f32, "where it lay: moved {moved}");
+}
+
+/// A halo mirror moved toward a resting body pushes it (one way: the
+/// mirror is kinematic, and nothing about it goes back to its owner).
+#[test]
+fn ghost_pushes_dynamic_body_one_way() {
+    let mut region = floored_region();
+    let b = game::BLOCK_VOXELS as f32;
+    let e = spawn(&mut region, pose(512.0, b * 1.5, 512.0), cube(), Vector::ZERO, Vector::ZERO);
+    for _ in 0..10 {
+        tick(&mut region);
+    }
+    let start = live_body(&region, e).translation();
+    // A slime-sized capsule mirror standing on the floor, 3 blocks to -x,
+    // walking +x at 2 units/tick: it reaches the cube in ~20 ticks.
+    let capsule = ColliderSpec::CapsuleY { half_height: 8.0, radius: 6.4 };
+    let y = b + 8.0 + 6.4;
+    let mut x = 512.0 - 3.0 * b;
+    let mirror = |x: f32| HaloEntityDelta {
+        id: body_id(5),
+        source_region: body_src(),
+        kind: EntityKind::Slime { size: 2 },
+        isometry: pose(x, y, 512.0),
+        linvel: Vector::ZERO,
+        collider: capsule.clone(),
+    };
+    for _ in 0..40 {
+        region.handle_event(GameEventKind::HaloEntity(mirror(x))).unwrap();
+        region.forget_last_event();
+        tick(&mut region);
+        let (departures, halo) = region.take_transfers();
+        assert!(departures.is_empty() && halo.is_empty(), "nothing goes back to the owner");
+        x += 2.0;
+    }
+    let end = live_body(&region, e).translation();
+    assert!(end.x - start.x > 1.0, "pushed along +x: {start:?} -> {end:?}");
+    // Driven (not teleported), the mirror has a velocity, and the contact
+    // hands it on: the cube is carried at the mirror's speed (a teleported
+    // mirror only shoves it out of overlap, at ~2 units/s).
+    let speed = 2.0 / game::movement::TICK_DT;
+    let vx = live_body(&region, e).linvel().x;
+    assert!(vx > 0.8 * speed, "carried at the mirror's {speed} units/s: {vx}");
+    assert!(region.data().id_index.get(&body_id(5)).is_none(), "the mirror stays a mirror");
 }
