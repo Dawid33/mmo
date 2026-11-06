@@ -40,6 +40,13 @@
 //! source, so a (re)started region never keeps a stale one; the source's next
 //! tick re-sends the entities still in the band.
 //!
+//! The PILE halo rides the terrain halo's updates too
+//! ([`HaloUpdate::piles`]): each own pile within [`HALO_BLOCKS`] of an edge
+//! (`item_piles::pile_halo_targets`) is mirrored, read-only, into the
+//! neighbours' `GameData::halo_piles` — written piles as deltas, all of them
+//! on a seed (which drops the source's other mirrors). Pickup reach and a
+//! deposit's merge search read them; takes and deposits are intents.
+//!
 //! A halo chunk is a whole neighbour chunk: with `CHUNK_BLOCKS` >= 8 the
 //! band is the one chunk row along each edge, plus the corner chunks.
 
@@ -103,16 +110,22 @@ pub struct HaloUpdate {
     /// `from`'s ground recipes for the band's chunk columns, by world chunk
     /// column (`y` 0) — on seeds; empty on deltas (ground never changes).
     pub ground: Vec<(WorldChunkPos, crate::ColumnGround)>,
+    /// `from`'s piles in the receiver's pile band, by world cell: the new
+    /// pile, `None` = gone. On a seed, all of them (the source's other
+    /// mirrors are dropped); on a delta, the cells written.
+    pub piles: Vec<(crate::WorldBlockPos, Option<crate::ItemPile>)>,
 }
 
 impl HaloUpdate {
-    /// Same source and the same chunks (reconcile's identity match; the
-    /// contents may differ).
+    /// Same source and the same chunks and pile cells (reconcile's identity
+    /// match; the contents may differ).
     pub fn same_chunks(&self, other: &Self) -> bool {
         self.from == other.from
             && self.replace == other.replace
             && self.deltas.len() == other.deltas.len()
             && self.deltas.iter().zip(&other.deltas).all(|(a, b)| a.chunk == b.chunk)
+            && self.piles.len() == other.piles.len()
+            && self.piles.iter().zip(&other.piles).all(|(a, b)| a.0 == b.0)
     }
 }
 
@@ -214,7 +227,7 @@ pub fn halo_seed<'a>(
         .map(|(c, g)| (WorldChunkPos::from_local(from, [c.x as i32, 0, c.z as i32]), g.clone()))
         .collect();
     ground.sort_by_key(|(k, _)| *k);
-    Some(HaloUpdate { from, replace: true, deltas, ground })
+    Some(HaloUpdate { from, replace: true, deltas, ground, piles: Vec::new() })
 }
 
 /// The chunk columns `xs × zs` of `from` (its own frame) that neighbour `to`
@@ -319,6 +332,21 @@ impl Rollback {
         Some((c.block_at(l[0], l[1], l[2]), c.chisel.contains_key(&BlockIndex::from_xyz(l[0], l[1], l[2]))))
     }
 
+    /// Whether the halo knows world block `p`'s column: a neighbour's
+    /// column it holds a ground recipe or a chunk of (seeded). An unseeded
+    /// band column reads as air, but nothing there is known.
+    pub(crate) fn halo_column_known(&self, p: WorldBlockPos) -> bool {
+        let cb = CHUNK_BLOCKS as i64;
+        let (cx, cz) = (p.x.div_euclid(cb), p.z.div_euclid(cb));
+        if self.data.halo_ground.contains_key(&WorldChunkPos::new(cx, 0, cz)) {
+            return true;
+        }
+        self.data
+            .halo
+            .range(WorldChunkPos::new(cx, i32::MIN, i64::MIN)..=WorldChunkPos::new(cx, i32::MAX, i64::MAX))
+            .any(|(k, h)| k.z == cz && h.chunk.is_some())
+    }
+
     /// The neighbour's ground recipe for halo chunk `key`'s column.
     fn halo_ground_of(&self, key: WorldChunkPos) -> Option<&crate::ColumnGround> {
         self.data.halo_ground.get(&WorldChunkPos::new(key.x, 0, key.z))
@@ -412,7 +440,8 @@ impl Rollback {
         self.data.halo.get(&WorldChunkPos::from_local(*self.data.region, local))
     }
 
-    /// This region's chunks that neighbour `to` mirrors, as a seed.
+    /// This region's chunks (and piles) that neighbour `to` mirrors, as a
+    /// seed.
     pub fn halo_seed_for(&self, to: RegionCoords) -> Option<HaloUpdate> {
         let from = *self.data.region;
         let chunks: Vec<(ChunkCoords, &Chunk)> = self
@@ -421,15 +450,23 @@ impl Rollback {
             .iter()
             .filter_map(|(&k, &e)| Some((crate::chunk_coords_of_index_key(k), self.data.ecs.chunk.try_get(e).as_ref()?)))
             .collect();
-        halo_seed(from, to, chunks, self.data.ground.iter().map(|(c, g)| (*c, g)))
+        let mut seed = halo_seed(from, to, chunks, self.data.ground.iter().map(|(c, g)| (*c, g)))?;
+        seed.piles = self.pile_seed_for(to);
+        Some(seed)
     }
 
-    /// The halo updates for chunk entities written since the last call
-    /// (`keys`, any order, repeats allowed): one update per neighbour that
-    /// mirrors any of them, with each chunk's current content.
-    pub(crate) fn halo_updates_for(&self, keys: &std::collections::BTreeSet<crate::ChunkIndexKey>) -> Vec<(HaloUpdate, RegionCoords)> {
+    /// The halo updates for chunk entities (`keys`) and own pile cells
+    /// (`piles`) written since the last call (any order, repeats allowed):
+    /// one update per neighbour that mirrors any of them, with each chunk's
+    /// and pile's current content.
+    pub(crate) fn halo_updates_for(
+        &self,
+        keys: &std::collections::BTreeSet<crate::ChunkIndexKey>,
+        piles: &std::collections::BTreeSet<crate::WorldBlockPos>,
+    ) -> Vec<(HaloUpdate, RegionCoords)> {
+        type Pending = (Vec<HaloDelta>, Vec<(crate::WorldBlockPos, Option<crate::ItemPile>)>);
         let from = *self.data.region;
-        let mut by_target: std::collections::BTreeMap<(i32, i32), Vec<HaloDelta>> = Default::default();
+        let mut by_target: std::collections::BTreeMap<(i32, i32), Pending> = Default::default();
         for &k in keys {
             let c = crate::chunk_coords_of_index_key(k);
             let targets = halo_targets(c.x as i32, c.z as i32);
@@ -439,14 +476,22 @@ impl Rollback {
             let data = self.chunk_key_at(c).and_then(|e| self.data.ecs.chunk.try_get(e).clone());
             let chunk = WorldChunkPos::from_local(from, [c.x as i32, c.y, c.z as i32]);
             for t in targets {
-                by_target.entry(t).or_default().push(HaloDelta { chunk, data: data.clone() });
+                by_target.entry(t).or_default().0.push(HaloDelta { chunk, data: data.clone() });
+            }
+        }
+        for &p in piles {
+            let l = crate::item_piles::local_cell(from, p);
+            let pile = self.data.item_piles.get(&p).cloned();
+            for t in crate::item_piles::pile_halo_targets(l[0], l[2]) {
+                by_target.entry(t).or_default().1.push((p, pile.clone()));
             }
         }
         by_target
             .into_iter()
-            .map(|((dx, dz), mut deltas)| {
+            .map(|((dx, dz), (mut deltas, piles))| {
                 deltas.sort_by_key(|d| d.chunk);
-                (HaloUpdate { from, replace: false, deltas, ground: Vec::new() }, RegionCoords::new(from.x + dx, from.z + dz))
+                let update = HaloUpdate { from, replace: false, deltas, ground: Vec::new(), piles };
+                (update, RegionCoords::new(from.x + dx, from.z + dz))
             })
             .collect()
     }
@@ -481,7 +526,31 @@ impl Rollback {
                 touched.push(chunk);
             }
             self.drop_halo_source_safe(u.from);
+            let listed: std::collections::BTreeSet<crate::WorldBlockPos> = u.piles.iter().map(|(p, _)| *p).collect();
+            let stale: Vec<_> = self
+                .data
+                .halo_piles
+                .keys()
+                .filter(|p| p.to_local().0 == u.from && !listed.contains(p))
+                .map(|p| (*p, None))
+                .collect();
+            self.write_halo_piles_safe(stale);
         }
+        let region = *self.data.region;
+        let piles: Vec<_> = u
+            .piles
+            .iter()
+            .filter(|(p, _)| {
+                let l = crate::item_piles::local_cell(region, *p);
+                let ok = p.to_local().0 == u.from && crate::item_piles::in_pile_halo_band(l[0], l[2]);
+                if !ok {
+                    log::warn!("halo update from {:?}: pile {p:?} outside its band; ignored", u.from);
+                }
+                ok
+            })
+            .cloned()
+            .collect();
+        self.write_halo_piles_safe(piles);
         for d in &u.deltas {
             if d.chunk.to_local().0 != u.from {
                 log::warn!("halo update from {:?} carries a chunk of another region: {:?}", u.from, d.chunk);

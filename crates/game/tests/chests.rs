@@ -274,6 +274,7 @@ fn break_chest_spills_contents_and_chest() {
     *want.entry(chest_item().0).or_default() += 1;
     assert_eq!(pile_totals(&region), want, "every item plus the chest, nothing lost");
     for p in region.data().item_piles().keys() {
+        let p = game::local_cell(crate::common::r0(), *p);
         let d = (0..3).map(|i| (p[i] - a[i]).abs()).max().unwrap();
         assert!(d <= 1, "pile {p:?} at or around the chest cell {a:?}");
     }

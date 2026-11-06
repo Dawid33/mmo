@@ -741,13 +741,20 @@ pub fn drain_client_updates(
                 let (root, bodies) = spawn_region_roots(&mut commands, id);
                 roots.insert(id, root, bodies);
                 regions.0.insert(id, receiver);
-                // The snapshot's item piles, ahead of the region's own updates.
-                let piles: Vec<_> = data.item_piles().iter().map(|(p, pile)| (*p, Some(pile.view()))).collect();
+                // The snapshot's item piles and halo pile mirrors (cells in
+                // the region's frame), ahead of the region's own updates.
+                let frame = |m: &std::collections::BTreeMap<game::WorldBlockPos, game::ItemPile>| -> Vec<_> {
+                    m.iter().map(|(p, pile)| (game::local_cell(id, *p), Some(pile.view()))).collect()
+                };
+                let (piles, mirrors) = (frame(data.item_piles()), frame(data.halo_piles()));
                 commands.queue(move |world: &mut World| {
                     if let Some(mut msgs) = world.get_resource_mut::<Messages<super::item_piles::ItemPileMsg>>() {
                         msgs.write(super::item_piles::ItemPileMsg::RemoveRegion(id));
                         if !piles.is_empty() {
                             msgs.write(super::item_piles::ItemPileMsg::Set { region: id, changes: piles });
+                        }
+                        if !mirrors.is_empty() {
+                            msgs.write(super::item_piles::ItemPileMsg::SetMirrors { region: id, changes: mirrors });
                         }
                     }
                 });
@@ -1235,6 +1242,11 @@ pub fn drain_region_updates(
                 GameDataUpdateKind::SetItemPiles(changes) => {
                     if let Some(msgs) = pile_msgs.as_mut() {
                         msgs.write(super::item_piles::ItemPileMsg::Set { region, changes });
+                    }
+                }
+                GameDataUpdateKind::SetHaloPiles(changes) => {
+                    if let Some(msgs) = pile_msgs.as_mut() {
+                        msgs.write(super::item_piles::ItemPileMsg::SetMirrors { region, changes });
                     }
                 }
                 // Render-only pickup / landing events, animated by `item_flights`.

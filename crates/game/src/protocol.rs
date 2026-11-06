@@ -313,6 +313,20 @@ pub struct EntityId {
     pub serial: u64,
 }
 
+impl EntityId {
+    /// A region itself as an intent's source: a write no entity sends (a
+    /// settling voxel body's drops, a chest's spill). Never allocated (serials
+    /// count up from 0), never replied to (`intents.rs`).
+    pub const fn of_region(rc: RegionCoords) -> Self {
+        EntityId { birth_region: rc, serial: u64::MAX }
+    }
+
+    /// Whether this is [`EntityId::of_region`].
+    pub fn is_region(&self) -> bool {
+        self.serial == u64::MAX
+    }
+}
+
 /// Shape spec carried across the transfer seam so the receiving region can
 /// rebuild the collider. Players are capsules; new kinds extend this enum.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, state_hash::StateHash)]

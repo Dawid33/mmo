@@ -32,6 +32,11 @@
 //! sent on (`hops` + 1) for the manager to find it by its directory; past
 //! [`MAX_INTENT_REPLY_HOPS`] the manager gives up, logged and counted.
 //!
+//! **Region-sourced intents.** A write no entity sends (a settling voxel
+//! body's drops) is sent `by` [`EntityId::of_region`] of its region. Its
+//! reply goes back to that region (the `hint`), which handles it itself
+//! (`Rollback::region_reply_safe`): a refused deposit is put down there.
+//!
 //! **Never lost.** An intent whose owner is not running — or is stopping —
 //! is answered `Refused(.., OwnerNotRunning)` by the manager (an intent never
 //! wakes a region). A region that parks refuses the intents still queued in
@@ -94,6 +99,18 @@ pub enum Intent {
     /// sender took one `block` item for it, which a refusal gives back
     /// (`Rollback::refund_refused_places_safe`).
     PlaceBlock { block: crate::BlockId, by: EntityId, survival: bool },
+    /// Put `stack` into the pile of the target cell `cell` (a
+    /// `Target::Pile`), as `item_piles.rs`'s deposit does there: that cell
+    /// first, then the owner's own cells around it. The new items carry the
+    /// sender's `expire` / `pickup` ticks (world ticks). Granted when all fit;
+    /// else `Refused(.., PileFull)` carrying the items that did NOT fit,
+    /// which the sender gets back (`Rollback::settle_pile_replies_safe`).
+    DepositItems { cell: WorldBlockPos, stack: crate::ItemStack, expire: Tick, pickup: Tick, by: EntityId },
+    /// Take up to `count` of `item` from the pile of the target cell `cell`.
+    /// Granted with the count actually taken (into the sender's inventory
+    /// only then); `Refused(.., NothingThere)` when there is none (or not
+    /// yet pickable) — the loser of a race for the last item.
+    TakeFromPile { cell: WorldBlockPos, item: crate::ItemId, count: u32, by: EntityId },
 }
 
 /// Required by the rollback map; never a real intent.
@@ -107,7 +124,10 @@ impl Intent {
     /// The sending entity.
     pub fn by(&self) -> EntityId {
         match self {
-            Intent::BreakBlock { by, .. } | Intent::PlaceBlock { by, .. } => *by,
+            Intent::BreakBlock { by, .. }
+            | Intent::PlaceBlock { by, .. }
+            | Intent::DepositItems { by, .. }
+            | Intent::TakeFromPile { by, .. } => *by,
         }
     }
 }
@@ -129,6 +149,8 @@ pub enum IntentRefusal {
     /// The intent does not apply to that kind of target (or reached a
     /// region that does not own it).
     BadTarget,
+    /// A deposit's items did not all fit in the piles around the cell.
+    PileFull,
 }
 
 /// An owner's answer, delivered to `Intent::by` one tick after the intent
@@ -315,6 +337,10 @@ impl Rollback {
         for k in due {
             let Some(sent) = self.data.intent_replies.remove(&k) else { continue };
             let to = sent.reply.to();
+            if to == EntityId::of_region(*self.data.region) {
+                self.region_reply_safe(sent.reply);
+                continue;
+            }
             if !self.data.id_index.contains_key(&to) {
                 // Gone (parked, despawned, or arrived elsewhere): sent on for
                 // the manager's directory to find.
@@ -339,9 +365,11 @@ impl Rollback {
         }
     }
 
-    /// A reply from here: queued if its entity is here, else out.
+    /// A reply from here: queued if its entity (or this region, for a
+    /// region-sourced intent) is here, else out.
     fn send_reply_safe(&mut self, msg: SentReply, out: &mut Vec<IntentMsg>) {
-        if self.data.id_index.contains_key(&msg.reply.to()) {
+        let to = msg.reply.to();
+        if self.data.id_index.contains_key(&to) || to == EntityId::of_region(*self.data.region) {
             self.queue_reply_safe(msg);
         } else {
             out.push(IntentMsg::Reply(msg));
@@ -377,7 +405,17 @@ impl Rollback {
     /// the halo delta reaches it (`halo.rs`).
     fn apply_intent_safe(&mut self, target: Target, intent: Intent) -> IntentReply {
         let refused = |why| IntentReply::Refused(intent, why);
-        let Target::Block(p) = target else { return refused(IntentRefusal::BadTarget) };
+        let p = match (target, intent) {
+            (Target::Pile(p), Intent::DepositItems { .. } | Intent::TakeFromPile { .. }) => {
+                if p.to_local().0 != *self.data.region {
+                    log::warn!("[intents] {intent:?} for {p:?} reached {:?}, not its owner", *self.data.region);
+                    return refused(IntentRefusal::BadTarget);
+                }
+                return self.apply_pile_intent_safe(p, intent);
+            }
+            (Target::Block(p), Intent::BreakBlock { .. } | Intent::PlaceBlock { .. }) => p,
+            _ => return refused(IntentRefusal::BadTarget),
+        };
         let (rc, local) = p.to_local();
         if rc != *self.data.region {
             log::warn!("[intents] {intent:?} for {p:?} reached {:?}, not its owner", *self.data.region);
@@ -406,6 +444,7 @@ impl Rollback {
                 }
                 self.set_block_in(pos, crate::Block::new(block))
             }
+            Intent::DepositItems { .. } | Intent::TakeFromPile { .. } => unreachable!("pile intents returned above"),
         };
         if done {
             IntentReply::Granted(intent)

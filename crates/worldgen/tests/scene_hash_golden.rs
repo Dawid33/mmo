@@ -55,11 +55,14 @@ use game::{state_hash, GameEventKind, InputEvent, Key, Region, RegionCoords};
 /// Then for the scene installing the real block props itself (it raced
 /// other tests of the `it` binary for them: with the default props the
 /// starting kit had no chests); 16 only.
+/// Then for item piles keyed by `WorldBlockPos` and the new
+/// `GameData.halo_piles` / `pile_takes` (Task 6.3; empty here) — hashed
+/// layout only; 16 only.
 /// Pinned per sim-chunk size (`game::CHUNK_BLOCKS`): the same world splits
 /// into other chunk entities, bodies and colliders at 2 and 16 blocks.
 const SCENE_HASH: u32 = match game::CHUNK_BLOCKS {
     2 => 0x1EA6_B476,
-    16 => 0x2445_89D7,
+    16 => 0x0BCE_C99B,
     _ => 0,
 };
 /// Ticks of scripted input.

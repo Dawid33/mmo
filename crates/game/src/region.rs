@@ -49,9 +49,12 @@ impl Rollback {
         match feet {
             Some(feet) => {
                 let tick = *self.data.tick;
-                // A loss to the caps is counted where it happens.
-                let _destroyed =
-                    self.deposit_items_safe(crate::feet_tile(feet), stack, tick, crate::PICKUP_DELAY_TICKS);
+                let at = crate::feet_tile(feet);
+                // From the body: a part a neighbour's piles cannot hold
+                // comes back to it. A loss to the caps is counted where it
+                // happens.
+                let by = self.client_body_id(client).unwrap_or(crate::EntityId::of_region(*self.data.region));
+                let _destroyed = self.deposit_items_by_safe(by, at, at, stack, tick, crate::PICKUP_DELAY_TICKS);
             }
             None => {
                 if let Some(c) = self.data.clients.get_mut(&client) {
@@ -204,6 +207,10 @@ pub struct Region {
     /// reconcile clears it (its replays re-write chunks whose updates the
     /// forward ticks already sent).
     halo_dirty: std::collections::BTreeSet<crate::ChunkIndexKey>,
+    /// Own pile cells in the pile halo band written since the last
+    /// [`Region::take_halo_updates`] (`item_piles.rs`); cleared like
+    /// `halo_dirty`.
+    halo_pile_dirty: std::collections::BTreeSet<crate::WorldBlockPos>,
     /// Intents and replies this region's events sent to other regions
     /// (`intents.rs`), each with its own due tick; taken after each tick
     /// ([`Region::take_intents`]). Not state, and not filled by a client's
@@ -291,6 +298,7 @@ impl Region {
             pending_departures: Vec::new(),
             pending_halo_entities: Vec::new(),
             halo_dirty: Default::default(),
+            halo_pile_dirty: Default::default(),
             pending_intents: Vec::new(),
             replaying: false,
             map_extent: None,
@@ -618,6 +626,7 @@ impl Region {
         // Replays re-wrote chunks whose halo updates their forward ticks
         // already sent.
         self.halo_dirty.clear();
+        self.halo_pile_dirty.clear();
 
         // Id-accounting invariant: predictions are appended with ids from
         // next_game_event_id, so the log tail must sit exactly one below it.
@@ -730,6 +739,8 @@ impl Region {
         let destroyed_before = crate::item_piles::items_destroyed_on_thread();
         // Writes left over from outside an event are no region's.
         crate::halo::take_touched_chunks();
+        crate::item_piles::take_touched_piles();
+        crate::item_piles::take_pile_intents();
         self.data.new_transaction();
         self.data.next_game_event_id.update(|n| *n += 1);
         // Intents this event sends to other regions (`intents.rs`).
@@ -790,6 +801,8 @@ impl Region {
                 let clients: Vec<ClientId> = self.data.clients.keys().copied().collect();
                 for client_id in clients {
                     self.data.refund_refused_places_safe(client_id);
+                    // Pile takes granted, deposits refused (`item_piles.rs`).
+                    self.data.settle_pile_replies_safe(client_id);
                 }
                 // Survival (Adventure): left held mines with break times,
                 // a right press places the selected block, Q / Ctrl+Q throw.
@@ -999,6 +1012,8 @@ impl Region {
         }
         self.items_destroyed += crate::item_piles::items_destroyed_on_thread() - destroyed_before;
         self.note_halo_writes();
+        // Pile intents sent from inside writes (`item_piles.rs`).
+        intents_out.extend(crate::item_piles::take_pile_intents());
         if !self.replaying {
             self.pending_intents.extend(intents_out);
         }
@@ -1143,17 +1158,21 @@ impl Region {
     }
 
     /// Test hook: run an undo-safe mutation in its own forgotten
-    /// transaction (teleports, state surgery in integration tests).
+    /// transaction (teleports, state surgery in integration tests). Pile
+    /// intents it sends join the outbox.
     pub fn with_data(&mut self, f: impl FnOnce(&mut Rollback)) {
         crate::halo::take_touched_chunks();
+        crate::item_piles::take_touched_piles();
+        crate::item_piles::take_pile_intents();
         self.data.new_transaction();
         f(&mut self.data);
         self.data.forget();
         self.note_halo_writes();
+        self.pending_intents.extend(crate::item_piles::take_pile_intents());
     }
 
-    /// The chunk writes of the event just handled that a neighbour mirrors
-    /// join `halo_dirty`.
+    /// The chunk and pile writes of the event just handled that a neighbour
+    /// mirrors join `halo_dirty` / `halo_pile_dirty`.
     fn note_halo_writes(&mut self) {
         for e in crate::halo::take_touched_chunks() {
             let Some(c) = self.data.chunk_coords_of(e) else { continue };
@@ -1161,17 +1180,25 @@ impl Region {
                 self.halo_dirty.insert(crate::chunk_index_key(c));
             }
         }
+        for p in crate::item_piles::take_touched_piles() {
+            let l = crate::item_piles::local_cell(self.id, p);
+            if !crate::item_piles::pile_halo_targets(l[0], l[2]).is_empty() {
+                self.halo_pile_dirty.insert(p);
+            }
+        }
     }
 
-    /// Halo updates for the neighbours, from the band chunks written since
-    /// the previous call (their content now), with each target. Taken right
-    /// after a tick and its slot's events, like [`Region::take_transfers`].
+    /// Halo updates for the neighbours, from the band chunks and piles
+    /// written since the previous call (their content now), with each
+    /// target. Taken right after a tick and its slot's events, like
+    /// [`Region::take_transfers`].
     pub fn take_halo_updates(&mut self) -> Vec<(crate::HaloUpdate, RegionCoords)> {
-        if self.halo_dirty.is_empty() {
+        if self.halo_dirty.is_empty() && self.halo_pile_dirty.is_empty() {
             return Vec::new();
         }
         let dirty = std::mem::take(&mut self.halo_dirty);
-        self.data.halo_updates_for(&dirty)
+        let piles = std::mem::take(&mut self.halo_pile_dirty);
+        self.data.halo_updates_for(&dirty, &piles)
     }
 
     /// Test hook: roll back the most recent (unforgotten) event.

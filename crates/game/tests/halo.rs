@@ -10,6 +10,11 @@ use game::{
 use crate::common::rig::{Rig, CLIENT};
 use crate::common::seam_translate::uniform_floor;
 
+/// A pile of `n` dirt, pickable at once.
+fn pile(n: u32) -> game::ItemPile {
+    game::ItemPile { stacks: vec![game::ItemStack { item: game::ItemId(1), count: n }], expire_tick: 6000, pickup_after_tick: 0 }
+}
+
 fn north() -> RegionCoords {
     RegionCoords::new(SPAWN_REGION.x, SPAWN_REGION.z - 1)
 }
@@ -183,10 +188,13 @@ fn halo_updates_roll_back_bit_exact() {
         replace: true,
         deltas: column(Chunk::flat_floor(BLOCK_VOXELS as u32)),
         ground: Vec::new(),
+        // A pile on the neighbour's edge cell: its mirror rolls back too.
+        piles: vec![(WorldBlockPos::from_local(SPAWN_REGION, game::BlockPos::new(REGION_BLOCKS as i32, 1, 3)), Some(pile(3)))],
     };
     let before = game::state_hash(region.data());
     region.handle_event(GameEventKind::HaloUpdate(seed.clone())).unwrap();
     assert!(region.data().halo_chunk_at([n, 0, 0]).is_some());
+    assert_eq!(region.data().halo_piles().len(), 1, "the seed's pile is mirrored");
     let bodies = region.data().physics.bodies.len();
     region.rollback_last_event();
     assert_eq!(game::state_hash(region.data()), before, "seed undone exactly");
@@ -202,6 +210,7 @@ fn halo_updates_roll_back_bit_exact() {
         replace: false,
         deltas: vec![HaloDelta { chunk: WorldChunkPos::from_local(SPAWN_REGION, [n, 0, 0]), data: Some(dug) }],
         ground: Vec::new(),
+        piles: vec![(WorldBlockPos::from_local(SPAWN_REGION, game::BlockPos::new(REGION_BLOCKS as i32, 1, 3)), Some(pile(5)))],
     };
     region.handle_event(GameEventKind::HaloUpdate(patch)).unwrap();
     assert_ne!(game::state_hash(region.data()), seeded);

@@ -114,7 +114,7 @@ fn ticks(region: &mut Region, n: usize) {
 }
 
 fn piles(region: &Region) -> Vec<(BlockPos, Vec<ItemStack>)> {
-    region.data().item_piles().iter().map(|(p, pile)| (*p, pile.stacks.clone())).collect()
+    region.data().item_piles().iter().map(|(p, pile)| (game::local_cell(r0(), *p), pile.stacks.clone())).collect()
 }
 
 fn set_slot(region: &mut Region, slot: usize, stack: Option<ItemStack>) {
@@ -315,7 +315,7 @@ fn throw_lands_two_blocks_ahead_on_ground() {
     key(&mut region, Key::KeyQ, false);
     // Body block (8, 2, 8); two blocks ahead (-z) on the floor (y 2).
     assert_eq!(piles(&region), vec![([8, 2, 6], vec![ItemStack { item: DIRT_ITEM, count: 1 }])]);
-    assert_eq!(region.data().item_piles()[&[8, 2, 6]].pickup_after_tick, t + THROWN_PICKUP_DELAY_TICKS);
+    assert_eq!(region.data().item_piles()[&game::WorldBlockPos::from_local(r0(), game::BlockPos::new(8, 2, 6))].pickup_after_tick, t + THROWN_PICKUP_DELAY_TICKS);
     assert_eq!(slot(&region, 0), Some(ItemStack { item: DIRT_ITEM, count: 4 }));
 
     // Ctrl+Q: the whole stack.

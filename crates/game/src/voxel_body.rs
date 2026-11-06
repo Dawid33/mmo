@@ -141,9 +141,10 @@ pub enum SettlePolicy {
     #[default]
     Despawn,
     /// Removed, its blocks turned into their drops (`drop_of`), summed per
-    /// item and deposited as piles at the region block cell its centre of
-    /// mass rests in (clamped into the region by the deposit; a full pile
-    /// spills to the cells around it) — a tree a player felled: the logs
+    /// item and deposited as piles at the block cell its centre of mass
+    /// rests in — past the region's edge (a body settles as it leaves) that
+    /// is the neighbour's cell, deposited by an intent to its owner; a full
+    /// pile spills to the cells around it — a tree a player felled: the logs
     /// lie where it landed.
     DropItems,
 }

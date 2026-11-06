@@ -3,7 +3,11 @@
 //! The sim keeps piles as cell-keyed [`PileView`]s and emits
 //! `GameDataUpdateKind::SetItemPiles` both ways; the bridge forwards them
 //! here as [`ItemPileMsg`]s (a region's snapshot piles too, and a region's
-//! removal). One root entity per `(RegionId, BlockPos)` sits at the floor
+//! removal). Cells are in the region's block frame. A region's halo mirrors
+//! of its neighbours' piles (`SetHaloPiles`, cells past its edges) come as
+//! [`ItemPileMsg::SetMirrors`]: drawn only where no region drawn here owns
+//! the cell, once (the lowest hosting region's), like `dedupe_halo_entities`.
+//! One root entity per `(RegionId, BlockPos)` sits at the floor
 //! centre of the cell in world space (region offset applied here, at the
 //! render boundary) with `cubes_for(count)` cube children per stack, spread
 //! over a fixed offset table. The bob and spin are client-only and never
@@ -67,6 +71,8 @@ pub fn extra_item_texture(item: ItemId) -> String {
 pub enum ItemPileMsg {
     /// Per cell: the new pile (`None` = gone), applied in order.
     Set { region: RegionId, changes: Vec<(BlockPos, Option<PileView>)> },
+    /// The same for the region's halo mirrors of its neighbours' piles.
+    SetMirrors { region: RegionId, changes: Vec<(BlockPos, Option<PileView>)> },
     /// The region was removed (or replaced): drop all its piles.
     RemoveRegion(RegionId),
     /// Pickups this tick (`GameDataUpdateKind::ItemsPickedUp`), animated by
@@ -77,15 +83,29 @@ pub enum ItemPileMsg {
     Landed { region: RegionId, flights: Vec<game::PileFlight> },
 }
 
-/// The piles drawn now.
+/// The piles drawn now: the regions' own, then their halo mirrors.
 #[derive(Resource, Default)]
-pub struct ItemPileRoots(pub BTreeMap<(RegionId, BlockPos), Entity>);
+pub struct ItemPileRoots(pub BTreeMap<(RegionId, BlockPos), Entity>, pub BTreeMap<(RegionId, BlockPos), Entity>);
 
-/// A pile's root.
+/// A pile's root: `cell` in `region`'s frame; `mirror` for a halo mirror
+/// (the cell is a neighbour's).
 #[derive(Component, Debug, Clone, Copy)]
 pub struct ItemPileRoot {
     pub region: RegionId,
     pub cell: BlockPos,
+    pub mirror: bool,
+}
+
+impl ItemPileRoot {
+    /// The world cell it stands for.
+    pub fn world_cell(&self) -> game::WorldBlockPos {
+        world_cell(self.region, self.cell)
+    }
+}
+
+/// `cell` of `region`'s frame as a world cell.
+pub fn world_cell(region: RegionId, cell: BlockPos) -> game::WorldBlockPos {
+    game::WorldBlockPos::from_local(region, game::BlockPos::new(cell[0], cell[1], cell[2]))
 }
 
 /// One drawn cube (child of a root): its rest position and animation phase.
@@ -188,6 +208,7 @@ pub(crate) fn cube_layout(
     out
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_pile(
     commands: &mut Commands,
     assets: &mut ItemPileAssets,
@@ -195,6 +216,7 @@ fn spawn_pile(
     mats: &mut Assets<StandardMaterial>,
     region: RegionId,
     cell: BlockPos,
+    mirror: bool,
     view: &PileView,
 ) -> Entity {
     let mut children = Vec::new();
@@ -212,7 +234,7 @@ fn spawn_pile(
     }
     commands
         .spawn((
-            ItemPileRoot { region, cell },
+            ItemPileRoot { region, cell, mirror },
             SessionScoped,
             Transform::from_translation(pile_world_position(region, cell)),
             Visibility::default(),
@@ -230,27 +252,33 @@ fn apply_pile_msgs(
     mut mats: ResMut<Assets<StandardMaterial>>,
 ) {
     for msg in msgs.read() {
-        match msg {
-            ItemPileMsg::Set { region, changes } => {
-                for (cell, view) in changes {
-                    if let Some(old) = roots.0.remove(&(*region, *cell)) {
-                        commands.entity(old).despawn();
-                    }
-                    if let Some(view) = view.as_ref().filter(|v| !v.stacks.is_empty()) {
-                        let e = spawn_pile(&mut commands, &mut assets, &mut images, &mut mats, *region, *cell, view);
-                        roots.0.insert((*region, *cell), e);
-                    }
-                }
-            }
+        let (region, changes, mirror) = match msg {
+            ItemPileMsg::Set { region, changes } => (region, changes, false),
+            ItemPileMsg::SetMirrors { region, changes } => (region, changes, true),
             // Animations only: `item_flights` reads these.
-            ItemPileMsg::PickedUp { .. } | ItemPileMsg::Landed { .. } => {}
+            ItemPileMsg::PickedUp { .. } | ItemPileMsg::Landed { .. } => continue,
             ItemPileMsg::RemoveRegion(region) => {
-                let keys: Vec<_> = roots.0.range((*region, [i32::MIN; 3])..=(*region, [i32::MAX; 3])).map(|(k, _)| *k).collect();
-                for k in keys {
-                    if let Some(e) = roots.0.remove(&k) {
-                        commands.entity(e).despawn();
+                let all: &mut ItemPileRoots = &mut roots;
+                for map in [&mut all.0, &mut all.1] {
+                    let keys: Vec<_> =
+                        map.range((*region, [i32::MIN; 3])..=(*region, [i32::MAX; 3])).map(|(k, _)| *k).collect();
+                    for k in keys {
+                        if let Some(e) = map.remove(&k) {
+                            commands.entity(e).despawn();
+                        }
                     }
                 }
+                continue;
+            }
+        };
+        let map = if mirror { &mut roots.1 } else { &mut roots.0 };
+        for (cell, view) in changes {
+            if let Some(old) = map.remove(&(*region, *cell)) {
+                commands.entity(old).despawn();
+            }
+            if let Some(view) = view.as_ref().filter(|v| !v.stacks.is_empty()) {
+                let e = spawn_pile(&mut commands, &mut assets, &mut images, &mut mats, *region, *cell, mirror, view);
+                map.insert((*region, *cell), e);
             }
         }
     }
@@ -266,17 +294,41 @@ fn animate_cubes(time: Res<Time>, mut cubes: Query<(&ItemCube, &mut Transform)>)
     }
 }
 
+/// Which halo mirror roots draw: one per world cell no region here owns (a
+/// pile drawn by its owner hides every mirror of it), the lowest hosting
+/// region's (a corner pile is mirrored into up to 3 regions).
+pub fn shown_mirrors(roots: &ItemPileRoots) -> std::collections::BTreeSet<(RegionId, BlockPos)> {
+    let owned: std::collections::BTreeSet<game::WorldBlockPos> =
+        roots.0.keys().map(|(r, c)| world_cell(*r, *c)).collect();
+    let mut drawn: BTreeMap<game::WorldBlockPos, (RegionId, BlockPos)> = BTreeMap::new();
+    for &(region, cell) in roots.1.keys() {
+        let w = world_cell(region, cell);
+        if owned.contains(&w) {
+            continue;
+        }
+        let e = drawn.entry(w).or_insert((region, cell));
+        *e = (*e).min((region, cell));
+    }
+    drawn.into_values().collect()
+}
+
 /// Piles at or above the working level inside the home region are hidden.
-/// A pile waiting for its landing flight (`item_flights`) is hidden too.
+/// A pile waiting for its landing flight (`item_flights`) is hidden too, and
+/// a halo mirror [`shown_mirrors`] does not pick.
 fn hide_cut_piles(
     level: Res<WorkingLevel>,
     tiles: Res<TileMirror>,
+    pile_roots: Res<ItemPileRoots>,
     mut roots: Query<(&ItemPileRoot, &mut Visibility, Option<&super::item_flights::LandingHold>)>,
 ) {
     let cut = camera_cut(&level, &tiles);
     let home = tiles.region().map(home_rect);
+    let shown = shown_mirrors(&pile_roots);
     for (root, mut vis, hold) in &mut roots {
-        let hide = hold.is_some() || hidden_by_cut(pile_world_position(root.region, root.cell), cut, home);
+        let duplicate = root.mirror && !shown.contains(&(root.region, root.cell));
+        let hide = duplicate
+            || hold.is_some()
+            || hidden_by_cut(pile_world_position(root.region, root.cell), cut, home);
         vis.set_if_neq(if hide { Visibility::Hidden } else { Visibility::Inherited });
     }
 }
@@ -403,5 +455,34 @@ mod tests {
         app.update();
         app.update();
         assert_eq!(roots(&mut app).len(), 1);
+    }
+
+    /// Halo mirrors (Task 6.3): a pile seen as its owner's and as a
+    /// neighbour's mirror draws once — the owner's; with the owner not
+    /// drawn here, one mirror draws (the lowest hosting region's).
+    #[test]
+    fn halo_mirrors_draw_once() {
+        let mut app = app();
+        let n = game::REGION_BLOCKS as i32;
+        let (home, east) = (RegionId::new(0, 0), RegionId::new(1, 0));
+        // East's cell (0, 1, 5) is home's (n, 1, 5).
+        app.world_mut().write_message(ItemPileMsg::SetMirrors { region: home, changes: vec![([n, 1, 5], Some(view(2)))] });
+        app.update();
+        app.update();
+        let visible = |app: &mut App| -> Vec<(RegionId, bool)> {
+            let mut q = app.world_mut().query::<(&ItemPileRoot, &Visibility)>();
+            let mut v: Vec<_> = q.iter(app.world()).filter(|(_, v)| **v != Visibility::Hidden).map(|(r, _)| (r.region, r.mirror)).collect();
+            v.sort();
+            v
+        };
+        assert_eq!(visible(&mut app), vec![(home, true)], "the mirror draws while the owner is not here");
+        app.world_mut().write_message(ItemPileMsg::Set { region: east, changes: vec![([0, 1, 5], Some(view(2)))] });
+        app.update();
+        app.update();
+        assert_eq!(visible(&mut app), vec![(east, false)], "the owner's copy draws, the mirror hides");
+        app.world_mut().write_message(ItemPileMsg::RemoveRegion(east));
+        app.update();
+        app.update();
+        assert_eq!(visible(&mut app), vec![(home, true)]);
     }
 }

@@ -24,7 +24,9 @@
 //!   empty slot places nothing.
 //! - **Throwing** (Q one, Ctrl+Q the whole stack) drops the selected item as
 //!   a pile [`THROW_DISTANCE_BLOCKS`] ahead along the look, clamped by the
-//!   first block in the way, settled onto the ground at once.
+//!   first block in the way (halo blocks included), settled onto the ground
+//!   at once — or, landing in a neighbour's cell, deposited there by an
+//!   intent to its owner (`item_piles.rs`).
 //!
 //! Fortress clients keep `edit.rs`'s creative edit (also intents).
 
@@ -283,7 +285,11 @@ impl Rollback {
         };
         // A loss to the pile caps is counted where it happens.
         // From the eye: the renderer arcs it to where it lands (`ItemsLanded`).
-        let _destroyed = self.deposit_items_from_safe(cell_of(eye), landing, stack, tick, THROWN_PICKUP_DELAY_TICKS);
+        // A landing across a seam is a deposit intent to its owner; what its
+        // piles cannot hold comes back to the thrower.
+        let by = self.client_body_id(client).unwrap_or(crate::EntityId::of_region(*self.data.region));
+        let _destroyed =
+            self.deposit_items_by_safe(by, cell_of(eye), landing, stack, tick, THROWN_PICKUP_DELAY_TICKS);
         true
     }
 }

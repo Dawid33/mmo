@@ -289,8 +289,8 @@ pub fn snapshot(rig: &mut Rig, origin: WorldBlockPos, baseline: &BTreeMap<[i64; 
                 assert!(entities.insert(*id, snap).is_none(), "{id:?} owned twice");
             }
             for (cell, pile) in data.item_piles.iter() {
-                let w = WorldBlockPos::from_local(rc, game::BlockPos::new(cell[0], cell[1], cell[2]));
-                piles.insert(rel(w), pile.stacks.clone());
+                assert_eq!(cell.to_local().0, rc, "{rc:?} holds a pile it does not own: {cell:?}");
+                piles.insert(rel(*cell), pile.stacks.clone());
             }
         });
     }

@@ -503,7 +503,7 @@ fn piled(region: &Region, item: game::ItemId) -> (u32, Vec<TilePos>) {
         let n: u32 = pile.stacks.iter().filter(|s| s.item == item).map(|s| u32::from(s.count)).sum();
         if n > 0 {
             total += n;
-            cells.push(*p);
+            cells.push(game::local_cell(*region.data().region, *p));
         }
     }
     (total, cells)

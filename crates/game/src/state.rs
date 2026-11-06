@@ -90,7 +90,14 @@ pub enum GameDataUpdateKind {
     SetConstructed(Vec<(crate::TilePos, bool)>),
     /// Item piles (`item_piles.rs`) set (`Some`, the whole new pile) or gone
     /// (`None`) per cell. Do carries the new views, Undo the prior ones.
+    /// Cells are in the emitting region's block frame (a world cell past its
+    /// edge lies outside `0..REGION_BLOCKS`).
     SetItemPiles(Vec<(crate::edit::BlockPos, Option<crate::PileView>)>),
+    /// The halo's mirrors of the neighbours' piles (`item_piles.rs`), set or
+    /// gone per cell, in the emitting region's block frame (outside its
+    /// edges). Do carries the new views, Undo the prior ones. The renderer
+    /// draws one copy per world cell (the owner's, when it has it).
+    SetHaloPiles(Vec<(crate::edit::BlockPos, Option<crate::PileView>)>),
     /// Render-only, Do only: pickups this tick (`item_piles::tick_pickups_safe`)
     /// — who took what from which cell — so the client can fly the items into
     /// the picker. A replay re-sends it with the same tick (dedupe on that).
@@ -122,7 +129,9 @@ pub enum GameDataTransactionKind {
     Undo,
 }
 
-#[derive(Debug, Default, Clone, Copy, serde::Serialize, serde::Deserialize, StateHash, PartialEq)]
+#[derive(
+    Debug, Default, Clone, Copy, serde::Serialize, serde::Deserialize, StateHash, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 pub struct ItemStack {
     pub item: crate::ItemId,
     pub count: u32,
@@ -284,14 +293,25 @@ mod game_data {
         /// The body each history person has in this region (`people.rs`).
         #[undo(map)]
         person_entities: BTreeMap<crate::history::PersonId, EntityKey>,
-        /// Dropped items, one pile per resting cell (`item_piles.rs`):
-        /// never entities, never bodies.
+        /// Dropped items, one pile per resting cell (`item_piles.rs`), by
+        /// world cell — only cells this region owns: never entities, never
+        /// bodies.
         #[undo(map)]
-        item_piles: BTreeMap<crate::edit::BlockPos, crate::ItemPile>,
+        item_piles: BTreeMap<crate::WorldBlockPos, crate::ItemPile>,
         /// Expiry index of `item_piles`: `(expire_tick, cell)`, so expiry
         /// and the cap's eviction touch only the earliest piles.
         #[undo(map)]
-        pile_expiry: BTreeMap<(u64, crate::edit::BlockPos), ()>,
+        pile_expiry: BTreeMap<(u64, crate::WorldBlockPos), ()>,
+        /// Read-only mirror of the neighbours' piles within `HALO_BLOCKS` of
+        /// each edge (`item_piles.rs`, carried by halo updates), by world
+        /// cell: what deposits merge with and pickups reach across a seam.
+        #[undo(map)]
+        halo_piles: BTreeMap<crate::WorldBlockPos, crate::ItemPile>,
+        /// Takes sent to a neighbour's pile (`Intent::TakeFromPile`) by
+        /// `(taker, cell)`: no new take of that cell before the tick held
+        /// here (the mirror lags the owner's answer).
+        #[undo(map)]
+        pile_takes: BTreeMap<(crate::EntityId, crate::WorldBlockPos), crate::Tick>,
         /// Block inventories (chests) by cell (`containers.rs`).
         #[undo(map)]
         containers: BTreeMap<crate::edit::BlockPos, crate::Container>,
@@ -424,9 +444,14 @@ impl GameData {
         &self.constructed
     }
 
-    /// Dropped-item piles by resting cell.
-    pub fn item_piles(&self) -> &std::collections::BTreeMap<crate::edit::BlockPos, crate::ItemPile> {
+    /// Dropped-item piles by resting world cell (this region's cells).
+    pub fn item_piles(&self) -> &std::collections::BTreeMap<crate::WorldBlockPos, crate::ItemPile> {
         &self.item_piles
+    }
+
+    /// The halo's mirrors of the neighbours' piles, by world cell.
+    pub fn halo_piles(&self) -> &std::collections::BTreeMap<crate::WorldBlockPos, crate::ItemPile> {
+        &self.halo_piles
     }
 
     /// Block inventories (chests) by cell.
@@ -435,7 +460,7 @@ impl GameData {
     }
 
     /// The piles' expiry index, `(expire_tick, cell)` in expiry order.
-    pub fn pile_expiry(&self) -> &std::collections::BTreeMap<(u64, crate::edit::BlockPos), ()> {
+    pub fn pile_expiry(&self) -> &std::collections::BTreeMap<(u64, crate::WorldBlockPos), ()> {
         &self.pile_expiry
     }
 
