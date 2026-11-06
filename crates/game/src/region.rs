@@ -476,29 +476,61 @@ impl Region {
                                 // prediction, shifting everything before it.
                                 // Only locally-originated predictions are
                                 // candidates for removal.
-                                let len = temp_log.len();
+                                let server_kind = &server_event.0.kind;
                                 let mut i = 0;
                                 let mut removed_id = None;
+                                let mut dropped_ghosts = 0;
                                 while i < temp_log.len() {
-                                    let e = &mut temp_log[i];
+                                    let e = &temp_log[i];
                                     let local_origin = match e.kind.origin_client() {
                                         Some(o) => Some(o) == self.local_client_id,
                                         None => true,
                                     };
-                                    if local_origin && e.kind.matches_prediction(&server_event.0.kind) {
+                                    if local_origin && e.kind.matches_prediction(server_kind) {
                                         removed_id = Some(e.id);
                                         temp_log.remove(i);
                                         break;
                                     }
-                                    e.id += 1;
+                                    // Margin mirrors are per slot (the events
+                                    // between two Ticks): a server Tick closes
+                                    // the slot, so a mirror predicted in it
+                                    // that the server did not have is dropped
+                                    // (never carried into the next slot) ...
+                                    if matches!(server_kind, GameEventKind::Tick)
+                                        && matches!(e.kind, GameEventKind::GhostUpdate(_))
+                                    {
+                                        temp_log.remove(i);
+                                        dropped_ghosts += 1;
+                                        continue;
+                                    }
+                                    // ... and a server mirror never takes the
+                                    // place of a later slot's prediction.
+                                    if matches!(server_kind, GameEventKind::GhostUpdate(_))
+                                        && matches!(e.kind, GameEventKind::Tick)
+                                    {
+                                        break;
+                                    }
                                     i += 1;
                                 }
-                                if len == temp_log.len() {
+                                // The predictions follow the server's event,
+                                // gap-free.
+                                for (k, e) in temp_log.iter_mut().enumerate() {
+                                    e.id = server_event.0.id + 1 + k;
+                                }
+                                if dropped_ghosts > 0 {
                                     debug!(
-                                        "[reconcile r={:?}] NO MATCHING PREDICTION for server {} — client behind; kept all {} predictions, NOTHING removed/forgotten",
+                                        "[reconcile r={:?}] dropped {} margin mirror(s) predicted in the slot server {} closed",
+                                        self.id,
+                                        dropped_ghosts,
+                                        ev_desc(&server_event.0)
+                                    );
+                                }
+                                if removed_id.is_none() {
+                                    debug!(
+                                        "[reconcile r={:?}] NO MATCHING PREDICTION for server {} — client behind; kept {} predictions, none removed",
                                         self.id,
                                         ev_desc(&server_event.0),
-                                        len
+                                        temp_log.len()
                                     );
                                 } else {
                                     debug!(

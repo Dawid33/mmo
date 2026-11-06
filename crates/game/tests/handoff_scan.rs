@@ -280,3 +280,58 @@ fn reconcile_replaces_a_diverged_predicted_arrival_without_sticking() {
     let t = region.data().physics.bodies.get(handle).unwrap().translation();
     assert_eq!(t.x, 4.0, "authoritative pose won");
 }
+
+/// A margin mirror from region (1,0), at local `x`.
+fn mirror(x: f32) -> GameEventKind {
+    GameEventKind::GhostUpdate(game::GhostData {
+        id: game::EntityId { birth_region: RegionCoords::new(1, 0), serial: 0 },
+        source_region: RegionCoords::new(1, 0),
+        kind: game::EntityKind::Player,
+        isometry: pose(x, 128.0),
+        linvel: game::parry::math::Vector::ZERO,
+        collider: game::ColliderSpec::CapsuleY { half_height: 8.0, radius: 6.4 },
+    })
+}
+
+/// The server's region running `kinds` (its event stream) and a client
+/// region that predicted `predicted`, both from the same empty start; the
+/// stream is reconciled into the client one event at a time.
+fn reconcile_stream(kinds: &[GameEventKind], predicted: &[GameEventKind]) -> (Region, Region) {
+    let id = RegionCoords::new(0, 0);
+    let mut server = Region::new(Rollback::new(None), None, id, None);
+    let stream: Vec<GameEvent> = kinds.iter().map(|k| server.handle_event(k.clone()).unwrap()).collect();
+    let (send, _recv) = crossbeam::channel::unbounded();
+    let mut client = Region::new(Rollback::new(None), Some(send), id, Some(9));
+    for k in predicted {
+        client.handle_event(k.clone()).unwrap();
+    }
+    for event in stream {
+        client.reconcile(event).unwrap();
+    }
+    (server, client)
+}
+
+#[test]
+fn reconcile_keeps_a_later_slots_predicted_mirror() {
+    // The server mirrored in slots 1 and 2; the client (its source a tick
+    // behind) only in slot 2. The server's slot-1 mirror is an insertion: it
+    // must not consume the client's slot-2 one (they share an EntityId).
+    let (server, client) = reconcile_stream(
+        &[GameEventKind::Tick, mirror(250.0), GameEventKind::Tick, mirror(251.0)],
+        &[GameEventKind::Tick, GameEventKind::Tick, mirror(251.0)],
+    );
+    assert!(client.pending_event_ids().is_empty(), "{:?}", client.pending_event_ids());
+    assert_eq!(crc(&client), crc(&server));
+}
+
+#[test]
+fn reconcile_drops_a_mirror_the_servers_slot_did_not_have() {
+    // The client mirrored in slot 1, the server did not: its Tick closing
+    // slot 1 drops the prediction rather than carrying it into slot 2.
+    let (server, client) = reconcile_stream(
+        &[GameEventKind::Tick, GameEventKind::Tick],
+        &[GameEventKind::Tick, mirror(250.0), GameEventKind::Tick],
+    );
+    assert!(client.pending_event_ids().is_empty(), "{:?}", client.pending_event_ids());
+    assert_eq!(crc(&client), crc(&server));
+}

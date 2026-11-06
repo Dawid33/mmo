@@ -8,6 +8,7 @@ use game::{
     GhostData, ReconcileStats, Region, RegionCoords, RegionId,
 };
 use log::info;
+use std::collections::VecDeque;
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::{Duration, Instant};
 
@@ -24,18 +25,17 @@ pub enum RegionCmd {
     /// A PlayerInput / UiAction / Order from this client: predicted here and
     /// sent to the server stamped with the tick it was predicted after.
     Predict(GameEventKind),
-    /// A predicted arrival from a sibling region (isometry already rebased).
-    Arrival(EntityBundle),
-    /// A predicted margin mirror from a sibling region (ditto).
-    Ghost(GhostData),
+    /// A predicted arrival from a sibling region (isometry already rebased),
+    /// stamped with the source's tick after the tick that produced it: held
+    /// until this region reaches the stamp, the server's slot (see
+    /// [`RunnerState::held_transfers`]).
+    Arrival(EntityBundle, game::Tick),
+    /// A predicted margin mirror from a sibling region (ditto, same stamp).
+    Ghost(GhostData, game::Tick),
     Clock(ClockInput),
     SetMapExtent(Option<game::MapExtent>),
     /// Wireframe the colliders near this viewer WORLD position.
     DebugLines([f32; 3]),
-    /// Hand over whatever the region's transfer buffers hold
-    /// (`RegionReport::Transfers`): the inline host's relay points, where
-    /// the single-threaded loop drained every region at once.
-    TakeTransfers,
     /// Answered with `Pong` once every earlier command has run.
     Ping(u64),
     /// Answered with `StateHash`: the region's tick and `game::state_hash`
@@ -49,21 +49,21 @@ pub enum RegionCmd {
 pub enum RegionReport {
     /// One `Tick` (or alignment tick): this tick's boundary crossings and
     /// margin mirrors, targets absolute, isometries still region-local.
+    /// Every host relays them per report, so both see one order.
     Ticked {
         sat_out: bool,
         departures: Vec<(EntityBundle, RegionCoords)>,
         ghosts: Vec<(GhostData, RegionCoords)>,
+        /// The region's `current_tick()` right after this tick (T+1 for its
+        /// tick T): the slot the targets apply these transfers in, as the
+        /// server's `RegionOutput::Departures` stamp.
+        stamp: game::Tick,
         #[cfg(not(target_arch = "wasm32"))]
         perf: game::RegionTickPerf,
         /// Wall time of this one forward tick (zero when sat out; replays
         /// are not in it). The F3 Debug tab's per-region tick times.
         #[cfg(not(target_arch = "wasm32"))]
         took: Duration,
-    },
-    /// Answer to `TakeTransfers` (same framing as `Ticked`).
-    Transfers {
-        departures: Vec<(EntityBundle, RegionCoords)>,
-        ghosts: Vec<(GhostData, RegionCoords)>,
     },
     Reconciled {
         stats: ReconcileStats,
@@ -113,10 +113,9 @@ pub struct RunnerCtx {
     pub server_send: Sender<ClientPacket>,
     pub client_event_send: Sender<ClientUpdateEvent>,
     pub debug_flags: game::DebugFlags,
-    /// The region relays its own transfers right after each tick and runs
-    /// its own alignment ticks (a region thread). `false` = the caller does
-    /// both (`TakeTransfers`, the inline host), at the points the
-    /// single-threaded loop did. Set by the host.
+    /// The region runs its own alignment ticks (a region thread). `false` =
+    /// the caller sends them one `Tick` at a time (the inline host). Every
+    /// tick's transfers ride its `Ticked` report either way. Set by the host.
     pub self_relay: bool,
 }
 
@@ -127,6 +126,12 @@ pub struct RunnerState {
     stall: usize,
     /// The local player left this region in a predicted crossing.
     player_departed: bool,
+    /// Predicted arrivals / margin mirrors whose stamp this region has not
+    /// reached, in receipt order: released right after the tick that
+    /// reaches it — the slot the server's `RegionRunner` applies them in
+    /// (behind the inputs it holds for that slot; this client predicts its
+    /// own inputs as they come, never holding them).
+    held_transfers: VecDeque<(GameEventKind, game::Tick)>,
     collider_debug: game::ColliderDebug,
     last_view: Option<HomeView>,
 }
@@ -141,7 +146,10 @@ pub fn handle(
     out: &mut Vec<RegionReport>,
 ) -> bool {
     match cmd {
-        RegionCmd::Stop => return false,
+        RegionCmd::Stop => {
+            st.held_transfers.clear();
+            return false;
+        }
         RegionCmd::Tick => tick(region, st, ctx, out),
         RegionCmd::ServerEvent(event, hash) => {
             #[cfg(not(target_arch = "wasm32"))]
@@ -189,15 +197,15 @@ pub fn handle(
                 }
             }
         }
-        RegionCmd::Arrival(bundle) => {
+        RegionCmd::Arrival(bundle, stamp) => {
+            // On receipt, not release: input for the returning player is
+            // predicted here from now on, never bounced as misrouted.
             if bundle.client.as_ref().map(|(c, _)| *c) == Some(ctx.client_id) {
                 st.player_departed = false;
             }
-            let _ = region.handle_event(GameEventKind::EntityArrived(bundle));
+            transfer(region, st, GameEventKind::EntityArrived(bundle), stamp);
         }
-        RegionCmd::Ghost(data) => {
-            let _ = region.handle_event(GameEventKind::GhostUpdate(data));
-        }
+        RegionCmd::Ghost(data, stamp) => transfer(region, st, GameEventKind::GhostUpdate(data), stamp),
         RegionCmd::Clock(input) => {
             let d = decide(region.current_tick(), &input);
             out.push(RegionReport::Clock(d));
@@ -229,10 +237,6 @@ pub fn handle(
                 let _ = ctx.client_event_send.send(ClientUpdateEvent::DebugLines(ctx.id, lines));
             }
         }
-        RegionCmd::TakeTransfers => {
-            let (departures, ghosts) = take_transfers(region, st, ctx);
-            out.push(RegionReport::Transfers { departures, ghosts });
-        }
         RegionCmd::Ping(n) => out.push(RegionReport::Pong(n)),
         RegionCmd::StateHash => out.push(RegionReport::StateHash {
             tick: region.current_tick(),
@@ -255,6 +259,7 @@ fn tick(region: &mut Region, st: &mut RunnerState, ctx: &RunnerCtx, out: &mut Ve
             sat_out: true,
             departures: Vec::new(),
             ghosts: Vec::new(),
+            stamp: region.current_tick(),
             #[cfg(not(target_arch = "wasm32"))]
             perf: game::RegionTickPerf::default(),
             #[cfg(not(target_arch = "wasm32"))]
@@ -269,18 +274,55 @@ fn tick(region: &mut Region, st: &mut RunnerState, ctx: &RunnerCtx, out: &mut Ve
     }
     #[cfg(not(target_arch = "wasm32"))]
     let took = start.elapsed();
-    // Read right after the tick: the buffers hold this tick's scan only.
-    let (departures, ghosts) =
-        if ctx.self_relay { take_transfers(region, st, ctx) } else { (Vec::new(), Vec::new()) };
+    // Read right after the tick: the buffers hold this tick's scan only
+    // (a reconcile replay overwrites them with stale scans, never read).
+    let (departures, ghosts) = take_transfers(region, st, ctx);
+    let stamp = region.current_tick();
+    // Slot `stamp`: the transfers held for it, in receipt order.
+    let mut i = 0;
+    while i < st.held_transfers.len() {
+        if st.held_transfers[i].1 <= stamp {
+            let (kind, _) = st.held_transfers.remove(i).expect("index checked");
+            apply_transfer(region, kind);
+        } else {
+            i += 1;
+        }
+    }
     out.push(RegionReport::Ticked {
         sat_out: false,
         departures,
         ghosts,
+        stamp,
         #[cfg(not(target_arch = "wasm32"))]
         perf: region.take_tick_perf(),
         #[cfg(not(target_arch = "wasm32"))]
         took,
     });
+}
+
+/// A transfer stamped `stamp`: applied now if this region has reached the
+/// stamp (it runs level with or ahead of the source), else held for it.
+fn transfer(region: &mut Region, st: &mut RunnerState, kind: GameEventKind, stamp: game::Tick) {
+    if stamp > region.current_tick() {
+        st.held_transfers.push_back((kind, stamp));
+    } else {
+        apply_transfer(region, kind);
+    }
+}
+
+/// Predict a transfer into the region, unless it is an arrival of an entity
+/// already living here: the authoritative copy got here first (this region
+/// trails the server's, its source trails this one), and a second arrival
+/// would never be confirmed — it would re-apply its stale bundle on every
+/// replay.
+fn apply_transfer(region: &mut Region, kind: GameEventKind) {
+    if let GameEventKind::EntityArrived(bundle) = &kind {
+        if region.data().entity_by_id(bundle.id).is_some() {
+            log::debug!("[client] predicted arrival of {:?} dropped: already here", bundle.id);
+            return;
+        }
+    }
+    let _ = region.handle_event(kind);
 }
 
 /// Empty the region's transfer buffers, noting the local player's departure.
@@ -461,6 +503,79 @@ mod tests {
             out.iter().any(|o| matches!(o, RegionReport::StateHash { tick, hash } if (*tick, *hash) == want)),
             "{out:?}"
         );
+    }
+
+    fn ghost(stamp: game::Tick) -> RegionCmd {
+        RegionCmd::Ghost(
+            GhostData {
+                id: game::EntityId { birth_region: RegionCoords::new(-1, 0), serial: 0 },
+                source_region: RegionCoords::new(-1, 0),
+                kind: game::EntityKind::Player,
+                isometry: game::Pose::translation(1.0, 26.0, 128.0),
+                linvel: game::parry::math::Vector::ZERO,
+                collider: game::ColliderSpec::CapsuleY { half_height: 8.0, radius: 6.4 },
+            },
+            stamp,
+        )
+    }
+
+    /// A transfer stamped ahead waits for the tick that reaches its stamp
+    /// and lands right after it (the server's slot); one whose stamp has
+    /// passed lands at once.
+    #[test]
+    fn transfers_land_in_their_stamped_slot() {
+        let (mut r, mut st, ctx, _) = setup();
+        let t = r.current_tick();
+        let logged = |r: &Region| r.pending_event_ids().len();
+        let n = logged(&r);
+        run(&mut r, &mut st, &ctx, ghost(t + 2));
+        assert_eq!(logged(&r), n, "held, not applied");
+        run(&mut r, &mut st, &ctx, RegionCmd::Tick);
+        assert_eq!(logged(&r), n + 1, "tick t+1: still held");
+        run(&mut r, &mut st, &ctx, RegionCmd::Tick);
+        assert_eq!(logged(&r), n + 3, "tick t+2, then the ghost in slot t+2");
+        assert!(st.held_transfers.is_empty());
+        run(&mut r, &mut st, &ctx, ghost(t + 2));
+        assert_eq!(logged(&r), n + 4, "stamp already reached: applied on receipt");
+    }
+
+    /// A sat-out tick does not reach the stamp: the transfer stays held.
+    #[test]
+    fn stalled_tick_keeps_transfers_held() {
+        let (mut r, mut st, ctx, _) = setup();
+        let t = r.current_tick();
+        run(&mut r, &mut st, &ctx, ghost(t + 1));
+        st.stall = 1;
+        run(&mut r, &mut st, &ctx, RegionCmd::Tick);
+        assert_eq!(st.held_transfers.len(), 1);
+        let out = run(&mut r, &mut st, &ctx, RegionCmd::Tick);
+        assert!(st.held_transfers.is_empty());
+        assert!(
+            out.iter().any(|o| matches!(o, RegionReport::Ticked { sat_out: false, stamp, .. } if *stamp == t + 1)),
+            "{out:?}"
+        );
+    }
+
+    /// A predicted arrival of an entity already living in the region (the
+    /// authoritative copy got there first) is dropped, never logged.
+    #[test]
+    fn arrival_of_a_resident_is_dropped() {
+        let (mut r, mut st, ctx, _) = setup();
+        let key = *r.data().player_entites.get(&CLIENT).unwrap();
+        let id = r.data().entity_id(key).expect("players carry an EntityId");
+        let bundle = EntityBundle {
+            id,
+            kind: game::EntityKind::Player,
+            body: game::BodyState::kinematic(game::Pose::translation(1.0, 26.0, 128.0)),
+            collider: game::ColliderSpec::CapsuleY { half_height: 8.0, radius: 6.4 },
+            carried: game::Carried::default(),
+            client: None,
+            pending_inputs: Vec::new(),
+        };
+        let n = r.pending_event_ids().len();
+        let t = r.current_tick();
+        run(&mut r, &mut st, &ctx, RegionCmd::Arrival(bundle, t));
+        assert_eq!(r.pending_event_ids().len(), n);
     }
 
     #[test]

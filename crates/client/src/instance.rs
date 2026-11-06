@@ -861,11 +861,6 @@ impl GameInstanceManager {
                     self.crossing.home_tick(self.stalled.contains_key(&home));
                 }
                 self.host.broadcast(|| RegionCmd::Tick);
-                if !self.host.is_threaded() {
-                    // The single-threaded relay point: every region's
-                    // buffers at once (stalled ones' replay leftovers too).
-                    self.host.broadcast(|| RegionCmd::TakeTransfers);
-                }
                 #[cfg(not(target_arch = "wasm32"))]
                 self.perf.record_tick(tick_start.elapsed());
                 // The ticks' transfers are routed here (`drain_reports`), and
@@ -931,10 +926,10 @@ impl GameInstanceManager {
     }
 
     /// Route every report the regions produced since the last drain, until
-    /// none is left (routing an arrival can produce more). Transfers of one
-    /// batch are relayed after it, all departures before all ghosts — the
-    /// order the single-threaded loop relayed them in. A region's failure
-    /// ends the session, as the inline `?` did.
+    /// none is left (routing an arrival can produce more). Each `Ticked`
+    /// report's transfers are relayed as it is routed, on either host, and
+    /// land in their target at the source's stamp. A region's failure ends
+    /// the session, as the inline `?` did.
     fn drain_reports(&mut self) -> Result<(), GameError> {
         loop {
             let batch = self.host.drain();
@@ -942,8 +937,8 @@ impl GameInstanceManager {
                 self.route_reports(batch)?;
                 continue;
             }
-            // Inline alignment, one tick at a time with a relay after each,
-            // as the single-threaded loop stepped a trailing region.
+            // Inline alignment, one tick at a time (each `Ticked` relayed as
+            // it is drained), as a region thread steps a trailing region.
             let Some((region, left)) = self.inline_align.first_mut() else {
                 return Ok(());
             };
@@ -952,9 +947,7 @@ impl GameInstanceManager {
             if *left == 0 {
                 self.inline_align.remove(0);
             }
-            if self.host.send(region, RegionCmd::Tick) {
-                self.host.broadcast(|| RegionCmd::TakeTransfers);
-            } else {
+            if !self.host.send(region, RegionCmd::Tick) {
                 self.inline_align.retain(|(r, _)| *r != region);
             }
         }
@@ -1009,13 +1002,10 @@ impl GameInstanceManager {
         self.home_view().map(|v| v.tick)
     }
 
-    /// Route one batch of reports, then the batch's transfers.
+    /// Route one batch of reports (each tick's transfers as its `Ticked`
+    /// report comes), then the batch's misrouted inputs.
     fn route_reports(&mut self, batch: Vec<(RegionId, RegionReport)>) -> Result<(), GameError> {
         {
-            // `Transfers` of one batch (one inline relay point): all
-            // departures, then all ghosts, in region order.
-            let mut departures = Vec::new();
-            let mut ghosts = Vec::new();
             // Re-sent once this batch's departures have flipped home.
             let mut misrouted = Vec::new();
             for (id, report) in batch {
@@ -1025,6 +1015,7 @@ impl GameInstanceManager {
                         sat_out,
                         departures: d,
                         ghosts: g,
+                        stamp,
                         #[cfg(not(target_arch = "wasm32"))]
                         perf,
                         #[cfg(not(target_arch = "wasm32"))]
@@ -1045,12 +1036,8 @@ impl GameInstanceManager {
                                 }
                             }
                         }
-                        // A region thread's own relay: this tick's, now.
-                        self.route_transfers(id, d, g);
-                    }
-                    RegionReport::Transfers { departures: d, ghosts: g } => {
-                        departures.extend(d.into_iter().map(|(b, t)| (id, b, t)));
-                        ghosts.extend(g);
+                        // This tick's transfers, now (both hosts).
+                        self.route_transfers(id, d, g, stamp);
                     }
                     RegionReport::Reconciled {
                         stats,
@@ -1117,7 +1104,6 @@ impl GameInstanceManager {
                     }
                 }
             }
-            self.route_departures(departures, ghosts);
             for (id, kind) in misrouted {
                 match self.home_region {
                     Some(home) if home != id && self.host.contains(&home) => {
@@ -1131,33 +1117,25 @@ impl GameInstanceManager {
     }
 
     /// Mirror of the server manager's relay, on the predicted timeline:
-    /// inject one batch of ticks' transfers into loaded sibling regions as
-    /// predicted events. Targets outside the local window are dropped —
-    /// their authoritative streams cover them.
+    /// inject one tick's transfers from `source` into loaded sibling regions
+    /// as predicted events, stamped like the server's `Transfer`s so each
+    /// lands in the same slot (`stamp` = the source's tick after that tick).
+    /// Targets outside the local window are dropped — their authoritative
+    /// streams cover them.
     fn route_transfers(
         &mut self,
         source: RegionCoords,
         departures: Vec<(game::EntityBundle, RegionCoords)>,
         ghosts: Vec<(game::GhostData, RegionCoords)>,
+        stamp: game::Tick,
     ) {
-        let departures = departures.into_iter().map(|(b, t)| (source, b, t)).collect();
-        self.route_departures(departures, ghosts);
-    }
-
-    /// [`Self::route_transfers`] over departures that each name the region
-    /// they left (the bundle no longer carries it).
-    fn route_departures(
-        &mut self,
-        departures: Vec<(RegionCoords, game::EntityBundle, RegionCoords)>,
-        ghosts: Vec<(game::GhostData, RegionCoords)>,
-    ) {
-        for (source, bundle, target) in departures {
+        for (bundle, target) in departures {
             let is_local_player = bundle.client.as_ref().map(|(c, _)| *c) == self.client_id
                 && self.client_id.is_some();
             if self.host.contains(&target) {
                 let mut b = bundle;
                 b.rebase(source, target);
-                self.host.send(target, RegionCmd::Arrival(b));
+                self.host.send(target, RegionCmd::Arrival(b, stamp));
             }
             if is_local_player {
                 // Predicted home flip: reroute input now; the server's
@@ -1174,7 +1152,7 @@ impl GameInstanceManager {
             if self.host.contains(&target) {
                 let mut d = data;
                 d.isometry = game::rebase_isometry(&d.isometry, d.source_region, target);
-                self.host.send(target, RegionCmd::Ghost(d));
+                self.host.send(target, RegionCmd::Ghost(d, stamp));
             }
         }
     }
@@ -2474,7 +2452,7 @@ mod manager_tests {
         while manager.client_packet_recv().try_recv().is_ok() {}
 
         // The old home's tick: the player leaves (a real departure bundle).
-        let (departures, ghosts) = {
+        let (departures, ghosts, stamp) = {
             let w = manager.world_mut();
             let key = *w.data(&home).player_entites.get(&0).unwrap();
             let region = w.regions.get_mut(&home).unwrap();
@@ -2485,7 +2463,8 @@ mod manager_tests {
                 )
             });
             region.handle_event(GameEventKind::Tick).unwrap();
-            region.take_transfers()
+            let (departures, ghosts) = region.take_transfers();
+            (departures, ghosts, region.current_tick())
         };
         assert!(departures.iter().any(|(b, _)| b.client.as_ref().map(|(c, _)| *c) == Some(0)));
         let input = GameEventKind::PlayerInput(0, game::InputEvent::Key { key: game::Key::KeyW, pressed: false });
@@ -2496,6 +2475,7 @@ mod manager_tests {
                     sat_out: false,
                     departures,
                     ghosts,
+                    stamp,
                     perf: game::RegionTickPerf::default(),
                     took: Duration::ZERO,
                 },

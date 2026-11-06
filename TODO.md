@@ -26,6 +26,23 @@ Multi-region world follow-ups (milestone landed; spec 2026-07-05-multi-region-wo
   converges bit-exact but has a transient rubber-band under active input (spec-accepted
   flip-tick divergence). Proper fix needs a protocol-level design (server-side input
   routing / predicted-authority-transfer); see docs/superpowers/2026-07-06-seamless-local-crossing-followup.md.
+  - **2026-11-06 (seam-transparent regions Task 3.2): the lockstep test PASSES again**
+    (`walking_across_a_region_boundary_keeps_input_and_converges`, `crossing_is_deterministic`).
+    The client's regions do not run in step with each other (the home leads its neighbours by
+    ~3 ticks in this harness), so predicted transfers landed in other slots than the server's.
+    Fixed by: predicted arrivals / mirrors stamped and held to the server's slot
+    (`regions/runner.rs`); reconcile treating margin mirrors per slot (a server mirror never
+    consumes a LATER slot's prediction, a server Tick drops a mirror predicted in the slot it
+    closes — before, one missing mirror shifted every later one by a slot forever); and a predicted
+    arrival of an entity already living in the region (the authoritative copy got there first)
+    dropped instead of floating in the log re-applying its stale bundle.
+    STILL RED: `crossing_converges_under_late_region_scheduling` fails `InlineSchedule::late(2)`
+    (seeds 0 and 1 pass): when the server delivers a mirror a slot late, the client's correct-by-
+    protocol mirror prediction for that slot is a misprediction until the server's NEXT Tick closes
+    the slot, and `assert_converged` compares the non-home region (0,0) at that open slot (its heal
+    steps wait for the HOME region only). Measured: letting the heal steps also wait for every
+    aligned region makes all 6 seeds converge bit-exact within the bound — so it heals; whether
+    that harness change is acceptable is open (not made).
   - **REGRESSED — FAILING as of 2026-09-20** (was PASSING): `crates/client/tests/crossing.rs::walking_across_a_region_boundary_keeps_input_and_converges`.
     Red since 8e90481 (client tick lead), which no run of this slow client test covered. Two layers:
     (1) harness — `assert_converged` assumed the client TRAILS the server and panicked "no matching
