@@ -998,19 +998,19 @@ orion_context := "orion"
 # Extra args pass through, e.g. `just orion-init monitoring -upgrade`.
 [positional-arguments]
 orion-init root *args:
-    {{tofu}} -chdir=deploy/envs/orion/{{root}} init -input=false \
-        -backend-config=../backend.s3.tfbackend -backend-config=key=orion/{{root}}.tfstate "${@:2}"
+    shift; {{tofu}} -chdir=deploy/envs/orion/{{root}} init -input=false \
+        -backend-config=../backend.s3.tfbackend -backend-config=key=orion/{{root}}.tfstate "$@"
 
 # Show what applying an orion root would change.
 [positional-arguments]
 orion-plan root *args:
-    {{tofu}} -chdir=deploy/envs/orion/{{root}} plan -input=false -var kube_context={{orion_context}} "${@:2}"
+    shift; {{tofu}} -chdir=deploy/envs/orion/{{root}} plan -input=false -var kube_context={{orion_context}} "$@"
 
 # Apply an orion root (interactive: tofu shows the plan and asks). Order on a
 # fresh server: platform, then monitoring.
 [positional-arguments]
 orion-apply root *args:
-    {{tofu}} -chdir=deploy/envs/orion/{{root}} apply -var kube_context={{orion_context}} "${@:2}"
+    shift; {{tofu}} -chdir=deploy/envs/orion/{{root}} apply -var kube_context={{orion_context}} "$@"
 
 # The bootstrap root has no kubernetes provider (no kube_context variable).
 orion-bootstrap-plan:
@@ -1023,7 +1023,7 @@ orion-kube *args:
 
 # Grafana without the public Ingress: http://127.0.0.1:3000 (port-forward).
 orion-grafana port="3000":
-    kubectl --context {{orion_context}} -n monitoring port-forward svc/kps-grafana {{port}}:80
+    kubectl --context {{orion_context}} -n monitoring port-forward svc/kube-prometheus-stack-grafana {{port}}:80
 
 # Print the Grafana `admin` password (from the monitoring root's state).
 orion-grafana-password:

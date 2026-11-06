@@ -67,3 +67,8 @@ lokiCanary:
   enabled: false
 test:
   enabled: false
+
+# Loki's own metrics (no dashboards / rules / self-log collection from the chart).
+monitoring:
+  serviceMonitor:
+    enabled: true

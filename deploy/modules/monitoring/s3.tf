@@ -62,7 +62,7 @@ resource "aws_s3_bucket_lifecycle_configuration" "telemetry" {
 
 resource "aws_iam_user" "telemetry" {
   name = var.iam_user_name
-  tags = { purpose = "orion k3s telemetry (deploy/modules/monitoring)" }
+  tags = { purpose = "orion k3s telemetry - deploy/modules/monitoring" }
 }
 
 data "aws_iam_policy_document" "telemetry" {
