@@ -7,6 +7,8 @@ pub mod ca;
 pub mod edit;
 pub mod fixture;
 pub mod grid;
+pub mod metrics;
+pub mod scenario;
 pub mod state;
 
 /// Units in one full 1 m³ cell (16³ voxels).
