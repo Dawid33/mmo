@@ -160,7 +160,7 @@ fn exposure_invariant_after_random_digs() {
     // Shaft area: a 4x4 block square straddling the chunk faces at block
     // 2 * CHUNK_BLOCKS (blocks 2..6 at 2-block chunks, in chunk columns 1 and
     // 2); columns 0 and 3 are an untouched band ring around it (column 0 holds
-    // the region's edge ring, which can't be dug below the surface).
+    // the region's edge ring).
     let at = 2 * CHUNK_BLOCKS as i32 - 2;
     let mut region = region_blocks(0..4 * CHUNK_BLOCKS as i32, 0..4 * CHUNK_BLOCKS as i32);
     let mut depth = [[SURFACE as i32; 4]; 4];
@@ -281,36 +281,31 @@ fn undo_of_a_materialising_dig_restores_the_hash() {
     });
 }
 
-/// Known limit: the outermost block ring can't be dug below the surface (its
-/// outward face would open into the next region's unmaterialised ground).
-/// The surface block itself and blocks one column in stay diggable.
+/// The outermost block ring digs below the surface like any block (the edge
+/// lock is gone, Task 6.2): a dig there materialises only this region's
+/// implied ground and never reaches outside it — the neighbour materialises
+/// its own when the halo delta reaches it (`block_edit::dig_edge_ring_below_surface`).
 #[test]
 fn digging_at_the_region_edge_does_not_reach_outside() {
     let last = REGION_CHUNKS - 1;
     let mut high = region(last..=last, last..=last);
     let edge = (REGION_CHUNKS * CHUNK_BLOCKS) as i32 - 1;
     assert!(dig(&mut high, [edge, 1, edge]), "the edge surface block breaks");
-    let before = state_hash(high.data());
-    assert!(!dig(&mut high, [edge, 0, edge]), "below the surface on the edge ring is refused");
-    assert!(!dig(&mut high, [edge - 1, 0, edge]), "edge ring on one axis is enough");
-    assert_eq!(before, state_hash(high.data()), "a refused dig changes nothing");
-    assert!(!has_chunk(high.data(), ChunkCoords::new(last, -1, last)));
-    // One column in: diggable, and materialises the ground below.
+    assert!(dig(&mut high, [edge, 0, edge]), "below the surface on the edge ring digs");
+    assert!(dig(&mut high, [edge, -1, edge]), "and into the implied ground below");
+    assert!(has_chunk(high.data(), ChunkCoords::new(last, -1, last)));
+    // One column in, as before.
     assert!(dig(&mut high, [edge - 1, 1, edge - 1]));
     assert!(dig(&mut high, [edge - 1, 0, edge - 1]));
     let chunks = high.data().terrain_snapshot().chunks;
-    assert!(chunks.iter().any(|(c, _)| *c == ChunkCoords::new(last, -1, last)));
     assert!(chunks.iter().all(|(c, _)| c.x < REGION_CHUNKS && c.z < REGION_CHUNKS));
     assert!(exposed_implied(high.data()).is_empty());
     // The low edge too: a region whose ground starts at column 0.
     let mut low = region(0..=0, 0..=0);
     assert!(dig(&mut low, [0, 1, 0]));
-    assert!(!dig(&mut low, [0, 0, 0]), "the low edge ring is refused below the surface");
-    assert!(!dig(&mut low, [1, 0, 0]), "z = 0 is still the edge ring");
+    assert!(dig(&mut low, [0, 0, 0]), "the low edge ring digs below the surface");
     assert!(low.data().terrain_snapshot().chunks.iter().all(|(c, _)| c.x == 0 && c.z == 0));
 }
-
-// --- one raycast case through the player's click, as tests/block_edit.rs ---
 
 fn input(ev: InputEvent) -> GameEventKind {
     GameEventKind::PlayerInput(0, ev)

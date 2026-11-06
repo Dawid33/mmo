@@ -571,9 +571,6 @@ impl TileSource for Flat {
     fn is_bedrock(&self, _: TilePos) -> bool {
         false
     }
-    fn edge_locked(&self, _: TilePos) -> bool {
-        false
-    }
     fn is_constructed(&self, _: TilePos) -> bool {
         false
     }

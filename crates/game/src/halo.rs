@@ -14,9 +14,19 @@
 //!   neighbour's running state (`RegionInput::HaloRequest`), its parked /
 //!   cached terrain, or worldgen ([`HaloUpdate::replace`] seeds).
 //!
-//! Read-only: edits stay with the owner (a raycast may hit a halo block; it
-//! cannot break it). What is not mirrored: the neighbour's implied ground
-//! (its rock below the materialised band reads as air here).
+//! Read-only: edits stay with the owner (a raycast may hit a halo block; an
+//! edit of it is an intent to the owner, `intents.rs`). Below a neighbour's
+//! materialised band the halo reads the neighbour's implied ground from its
+//! ground recipes (`GameData::halo_ground`, carried by seeds), as
+//! `implied_block` does in the region itself — solid until dug, never air.
+//!
+//! Implied ground at a seam: a break that opens air next to the neighbour's
+//! implied ground cannot materialise it (it is not this region's). The
+//! neighbour does, when the halo delta of the new air reaches it
+//! ([`Rollback::materialize_behind_halo_safe`]): its own chunk facing the air
+//! across the seam becomes real, and its next halo delta brings that chunk
+//! (and its colliders) back here. Until then the halo reads it as the
+//! recipe's rock.
 //!
 //! The ENTITY halo rides the same stamped channel: each tick the owner sends
 //! every owned entity within [`HALO_UNITS`] of an edge to that neighbour
@@ -90,6 +100,9 @@ pub struct HaloUpdate {
     /// entity mirror of `from` (its next tick re-sends those in the band).
     pub replace: bool,
     pub deltas: Vec<HaloDelta>,
+    /// `from`'s ground recipes for the band's chunk columns, by world chunk
+    /// column (`y` 0) — on seeds; empty on deltas (ground never changes).
+    pub ground: Vec<(WorldChunkPos, crate::ColumnGround)>,
 }
 
 impl HaloUpdate {
@@ -163,6 +176,28 @@ pub fn halo_seed_from_chunks<'a>(
     to: RegionCoords,
     chunks: impl IntoIterator<Item = (ChunkCoords, &'a Chunk)>,
 ) -> Option<HaloUpdate> {
+    halo_seed(from, to, chunks, std::iter::empty())
+}
+
+/// [`halo_seed_from_chunks`] from a terrain snapshot, its ground recipes
+/// included (what the receiver's halo reads below the band).
+pub fn halo_seed_from_snapshot(from: RegionCoords, to: RegionCoords, snap: &crate::TerrainSnapshot) -> Option<HaloUpdate> {
+    halo_seed(
+        from,
+        to,
+        snap.chunks.iter().map(|(c, k)| (*c, k)),
+        snap.ground.iter().map(|(c, g)| (*c, g)),
+    )
+}
+
+/// A seed of `from`'s `chunks` and column `ground` recipes (its own frame)
+/// that `to` mirrors.
+pub fn halo_seed<'a>(
+    from: RegionCoords,
+    to: RegionCoords,
+    chunks: impl IntoIterator<Item = (ChunkCoords, &'a Chunk)>,
+    ground: impl IntoIterator<Item = (crate::ColumnCoords, &'a crate::ColumnGround)>,
+) -> Option<HaloUpdate> {
     let offset = neighbour_offset(from, to)?;
     let mut deltas: Vec<HaloDelta> = chunks
         .into_iter()
@@ -173,7 +208,13 @@ pub fn halo_seed_from_chunks<'a>(
         })
         .collect();
     deltas.sort_by_key(|d| d.chunk);
-    Some(HaloUpdate { from, replace: true, deltas })
+    let mut ground: Vec<(WorldChunkPos, crate::ColumnGround)> = ground
+        .into_iter()
+        .filter(|(c, _)| halo_targets(c.x as i32, c.z as i32).contains(&offset))
+        .map(|(c, g)| (WorldChunkPos::from_local(from, [c.x as i32, 0, c.z as i32]), g.clone()))
+        .collect();
+    ground.sort_by_key(|(k, _)| *k);
+    Some(HaloUpdate { from, replace: true, deltas, ground })
 }
 
 /// The chunk columns `xs × zs` of `from` (its own frame) that neighbour `to`
@@ -267,10 +308,74 @@ impl Rollback {
             return None;
         }
         let key = WorldChunkPos::from_local(*self.data.region, chunk);
-        let air = (Block::new(BlockId::AIR), false);
-        let Some(c) = self.data.halo.get(&key).and_then(|h| h.chunk.as_ref()) else { return Some(air) };
         let l = [pos[0].rem_euclid(cb) as usize, pos[1].rem_euclid(cb) as usize, pos[2].rem_euclid(cb) as usize];
+        let Some(c) = self.data.halo.get(&key).and_then(|h| h.chunk.as_ref()) else {
+            // No chunk: the neighbour's implied ground below its band, else air.
+            let implied = self.halo_ground_of(key).and_then(|g| {
+                crate::ground::implied_block(Some(g), ChunkCoords::new(0, key.y, 0), (l[0], l[1], l[2]))
+            });
+            return Some((implied.unwrap_or(Block::new(BlockId::AIR)), false));
+        };
         Some((c.block_at(l[0], l[1], l[2]), c.chisel.contains_key(&BlockIndex::from_xyz(l[0], l[1], l[2]))))
+    }
+
+    /// The neighbour's ground recipe for halo chunk `key`'s column.
+    fn halo_ground_of(&self, key: WorldChunkPos) -> Option<&crate::ColumnGround> {
+        self.data.halo_ground.get(&WorldChunkPos::new(key.x, 0, key.z))
+    }
+
+    /// The halo block at region-local `pos` (outside the region) if a break
+    /// of it may clear something: not air, not the neighbour's bedrock. The
+    /// sender's view; the owner decides (`intents.rs`).
+    pub(crate) fn halo_mineable(&self, pos: [i32; 3]) -> Option<Block> {
+        let (block, chiseled) = self.halo_cell(pos)?;
+        if block.id == BlockId::AIR && !chiseled {
+            return None;
+        }
+        let cb = CHUNK_BLOCKS as i32;
+        let key = WorldChunkPos::from_local(*self.data.region, [pos[0].div_euclid(cb), 0, pos[2].div_euclid(cb)]);
+        let bedrock = self.halo_ground_of(key).is_some_and(|g| block.id == g.bedrock);
+        (!bedrock).then_some(block)
+    }
+
+    /// After halo chunks `keys` changed: every chunk of this region that
+    /// faces one across a seam, is still implied ground, and borders air in
+    /// it is materialised (undo-safely) — the new air of a neighbour's dig
+    /// never borders ground that has no chunk, mesh or collider. Its halo
+    /// delta then brings the chunk to the neighbour. Corner chunks share no
+    /// face with this region and are skipped.
+    pub(crate) fn materialize_behind_halo_safe(&mut self, keys: &[WorldChunkPos]) {
+        let n = REGION_CHUNKS as i32;
+        let cb = CHUNK_BLOCKS as i32;
+        let inside = |c: i32| (0..n).contains(&c);
+        for &key in keys {
+            let [lx, ly, lz] = key.local_in(*self.data.region);
+            // The own chunk across the shared face, and the halo chunk's
+            // face plane (axis, block index) touching it.
+            let (own, axis, plane) = match (lx, lz) {
+                (-1, z) if inside(z) => ([0, ly, z], 0, cb - 1),
+                (x, z) if x == n && inside(z) => ([n - 1, ly, z], 0, 0),
+                (x, -1) if inside(x) => ([x, ly, 0], 2, cb - 1),
+                (x, z) if z == n && inside(x) => ([x, ly, n - 1], 2, 0),
+                _ => continue,
+            };
+            let coords = ChunkCoords::new(own[0] as usize, own[1], own[2] as usize);
+            if self.implied_block(coords, (0, 0, 0)).is_none() || self.chunk_key_at(coords).is_some() {
+                continue;
+            }
+            let base = [lx * cb, ly * cb, lz * cb];
+            let opens = (0..cb).any(|a| {
+                (0..cb).any(|y| {
+                    let mut p = [base[0], base[1] + y, base[2]];
+                    p[axis] += plane;
+                    p[2 - axis] += a;
+                    self.halo_cell(p).is_some_and(|(b, chiseled)| b.id == BlockId::AIR || chiseled)
+                })
+            });
+            if opens {
+                self.materialize_ground_safe(coords);
+            }
+        }
     }
 
     /// The block at region-local tile `p` as this region sees it: its own
@@ -316,7 +421,7 @@ impl Rollback {
             .iter()
             .filter_map(|(&k, &e)| Some((crate::chunk_coords_of_index_key(k), self.data.ecs.chunk.try_get(e).as_ref()?)))
             .collect();
-        halo_seed_from_chunks(from, to, chunks)
+        halo_seed(from, to, chunks, self.data.ground.iter().map(|(c, g)| (*c, g)))
     }
 
     /// The halo updates for chunk entities written since the last call
@@ -341,14 +446,27 @@ impl Rollback {
             .into_iter()
             .map(|((dx, dz), mut deltas)| {
                 deltas.sort_by_key(|d| d.chunk);
-                (HaloUpdate { from, replace: false, deltas }, RegionCoords::new(from.x + dx, from.z + dz))
+                (HaloUpdate { from, replace: false, deltas, ground: Vec::new() }, RegionCoords::new(from.x + dx, from.z + dz))
             })
             .collect()
     }
 
-    /// Applies a [`HaloUpdate`], undo-safely: a seed first drops the source's
-    /// halo chunks it does not list; then each delta.
+    /// Applies a [`HaloUpdate`], undo-safely: its ground recipes; a seed
+    /// first drops the source's halo chunks it does not list; then each
+    /// delta; then this region materialises its implied ground facing new
+    /// air in them ([`Self::materialize_behind_halo_safe`]).
     pub(crate) fn apply_halo_update_safe(&mut self, u: &HaloUpdate) {
+        let mut touched = Vec::new();
+        for (k, g) in &u.ground {
+            let local = k.local_in(*self.data.region);
+            if k.to_local().0 != u.from || k.y != 0 || !in_halo_band(local[0], local[2]) {
+                log::warn!("halo update from {:?}: ground for {k:?} outside its band; ignored", u.from);
+                continue;
+            }
+            if self.data.halo_ground.get(k) != Some(g) {
+                self.data.halo_ground.insert(*k, g.clone());
+            }
+        }
         if u.replace {
             let listed: std::collections::BTreeSet<WorldChunkPos> = u.deltas.iter().map(|d| d.chunk).collect();
             let stale: Vec<WorldChunkPos> = self
@@ -360,6 +478,7 @@ impl Rollback {
                 .collect();
             for chunk in stale {
                 self.apply_halo_delta_safe(&HaloDelta { chunk, data: None });
+                touched.push(chunk);
             }
             self.drop_halo_source_safe(u.from);
         }
@@ -369,7 +488,9 @@ impl Rollback {
                 continue;
             }
             self.apply_halo_delta_safe(d);
+            touched.push(d.chunk);
         }
+        self.materialize_behind_halo_safe(&touched);
     }
 
     /// One halo chunk takes its new content, undo-safely: the stored chunk

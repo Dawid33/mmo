@@ -508,7 +508,7 @@ impl RegionRunner {
                 .flat_map(|(xs, zs)| generate(n, xs, zs))
                 .collect();
             let snap = TerrainSnapshot::from_columns(columns);
-            if let Some(seed) = crate::halo::halo_seed_from_chunks(n, self.id, snap.chunks.iter().map(|(c, k)| (*c, k))) {
+            if let Some(seed) = crate::halo::halo_seed_from_snapshot(n, self.id, &snap) {
                 self.apply(GameEventKind::HaloUpdate(seed));
             }
         }

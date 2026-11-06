@@ -423,9 +423,6 @@ mod tests {
         fn is_bedrock(&self, _: TilePos) -> bool {
             false
         }
-        fn edge_locked(&self, _: TilePos) -> bool {
-            false
-        }
         fn is_constructed(&self, _: TilePos) -> bool {
             false
         }
@@ -469,9 +466,6 @@ mod tests {
             if p[1] == 0 || wall { BlockId(1) } else { BlockId::AIR }
         }
         fn is_bedrock(&self, _: TilePos) -> bool {
-            false
-        }
-        fn edge_locked(&self, _: TilePos) -> bool {
             false
         }
         fn is_constructed(&self, _: TilePos) -> bool {

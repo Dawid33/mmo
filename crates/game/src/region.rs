@@ -784,7 +784,12 @@ impl Region {
                     })
                     .collect();
                 for (client_id, action) in edits {
-                    self.data.player_edit_safe(client_id, action);
+                    self.data.player_edit_safe(client_id, action, &mut intents_out);
+                }
+                // Survival places their owner refused give their item back.
+                let clients: Vec<ClientId> = self.data.clients.keys().copied().collect();
+                for client_id in clients {
+                    self.data.refund_refused_places_safe(client_id);
                 }
                 // Survival (Adventure): left held mines with break times,
                 // a right press places the selected block, Q / Ctrl+Q throw.
@@ -802,9 +807,9 @@ impl Region {
                     })
                     .collect();
                 for (client_id, place, throw) in survivors {
-                    self.data.tick_mining_safe(client_id, tick);
+                    self.data.tick_mining_safe(client_id, tick, &mut intents_out);
                     if place {
-                        self.data.survival_place_safe(client_id);
+                        self.data.survival_place_safe(client_id, &mut intents_out);
                     }
                     if let Some(whole_stack) = throw {
                         self.data.throw_selected_safe(client_id, whole_stack, tick);

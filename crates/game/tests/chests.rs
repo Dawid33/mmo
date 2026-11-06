@@ -182,6 +182,8 @@ fn placing_chest_creates_container() {
     let above = [a[0], a[1] + 1, a[2]];
     set_slot(&mut region, 0, Some(ItemStack { item: chest_item(), count: 2 }));
     right_click(&mut region);
+    // The place is an intent to the cell's owner: it lands at the next tick.
+    ticks(&mut region, 1);
     assert_eq!(block(&region, above), chest(), "the chest is placed on the hit face");
     assert_eq!(slot(&region, 0), Some(ItemStack { item: chest_item(), count: 1 }));
     assert_eq!(container(&region, above), Some(vec![None; CHEST_SLOTS]), "an empty container");
@@ -327,8 +329,9 @@ fn chest_undo_roundtrip() {
     let a = target(&region);
     let above = [a[0], a[1] + 1, a[2]];
     set_slot(&mut region, 0, Some(ItemStack { item: chest_item(), count: 2 }));
-    // Place.
+    // Place: sent at this tick, an intent landing at the next one.
     mouse(&mut region, MouseButton::Right, true);
+    ticks(&mut region, 1);
     let before = state_hash(region.data());
     ticks(&mut region, 1);
     assert!(container(&region, above).is_some());

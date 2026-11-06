@@ -22,6 +22,7 @@ fn r0() -> RegionCoords {
 /// controls on. Setup events are forgotten, so only what a
 /// test does afterwards can be rolled back.
 fn region(floor: impl Fn() -> Chunk) -> Region {
+    crate::common::install_real_block_props();
     let mut chunks = Vec::new();
     let around = SPAWN_CHUNK.saturating_sub(1)..=SPAWN_CHUNK + 1;
     for x in around.clone() {
@@ -297,6 +298,7 @@ const TARGET: ChunkCoords = ChunkCoords { x: 1, y: 0, z: 1 };
 /// A rollback-able sim over chunk columns 0..=2 x 0..=2 of `floor`, with its
 /// render-update receiver. No player, no ground recipe.
 fn terrain(floor: impl Fn(ChunkCoords) -> Chunk) -> (Rollback, crossbeam::channel::Receiver<GameDataUpdate>) {
+    crate::common::install_real_block_props();
     let (send, recv) = crossbeam::channel::unbounded();
     let mut r = Rollback::new(Some(send));
     let mut chunks = Vec::new();
@@ -532,4 +534,143 @@ fn partial_chunk_edit_patches_colliders_without_rebuild() {
     let after = state(&r);
     assert!(after.iter().all(|(on, _)| *on), "none disabled");
     assert_ne!(before, after, "the shape changed");
+}
+
+// ---- Across a seam (Task 6.2): edits are intents to the block's owner ----
+
+use crate::common::rig::{Rig, CLIENT};
+use crate::common::seam_translate::{offset, spawn_tile, uniform_floor, Axis, Placement};
+use game::{ColumnCoords, Column, ColumnGround, InputEvent as Input, ItemId, ItemStack, Order, PlayMode, WorldBlockPos, SPAWN_REGION};
+
+const STONE: BlockId = BlockId(2);
+/// The grounded floor's bedrock (any id distinct from the strata).
+const BEDROCK: BlockId = BlockId(6);
+/// Surface block y of the grounded floor: its band is one chunk (blocks 0
+/// and 1 stone); everything below block 0 is implied ground.
+const SURFACE: i16 = 1;
+
+/// Every region: one stone band chunk per column over plain implied ground.
+fn grounded_floor(_rc: RegionCoords) -> Vec<(ColumnCoords, Column)> {
+    let mut out = Vec::new();
+    for x in 0..game::REGION_CHUNKS {
+        for z in 0..game::REGION_CHUNKS {
+            let band = game::SubChunk::Dense(Box::new(Chunk::flat_floor_with(32, STONE)));
+            let ground =
+                ColumnGround::plain(vec![SURFACE; game::COLUMN_FOOTPRINT].into_boxed_slice(), 0, STONE, BEDROCK);
+            out.push((ColumnCoords::new(x, z), Column::new(0, Block::new(BlockId(1)), air(), vec![band]).with_ground(ground)));
+        }
+    }
+    out
+}
+
+/// The block at world `p` as region `rc` sees it (own or halo).
+fn seen_from(rig: &mut Rig, rc: RegionCoords, p: WorldBlockPos) -> Option<BlockId> {
+    let mut out = None;
+    rig.manager.spawner_mut().with_region(rc, |r| out = r.data().halo_block(p).map(|b| b.id));
+    out
+}
+
+/// The outermost block ring is diggable below the surface: the owner digs
+/// its own block; the neighbour sees the cavity in its halo and materialises
+/// its own implied ground behind it (the new air never borders ground that
+/// has no chunk), and the halo reads the neighbour's unmaterialised ground
+/// as its rock.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn dig_edge_ring_below_surface() {
+    let mut rig = Rig::with_floor(None, grounded_floor);
+    rig.join_spawn();
+    let west = RegionCoords::new(SPAWN_REGION.x - 1, SPAWN_REGION.z);
+    let z = 10;
+    let y = i32::from(SURFACE) - 3;
+    let dug = WorldBlockPos::from_local(SPAWN_REGION, game::BlockPos::new(0, y, z));
+    let behind = WorldBlockPos::new(dug.x - 1, y, dug.z);
+    rig.manager.spawner_mut().with_region(SPAWN_REGION, |r| {
+        r.with_data(|d| assert!(d.set_block_safe([0, y, z], air()), "the edge ring digs below the surface"));
+    });
+    for _ in 0..4 {
+        rig.round();
+    }
+    assert_eq!(seen_from(&mut rig, SPAWN_REGION, dug), Some(BlockId::AIR));
+    assert_eq!(seen_from(&mut rig, west, dug), Some(BlockId::AIR), "the neighbour's halo shows the cavity");
+    assert_eq!(seen_from(&mut rig, west, behind), Some(STONE), "the neighbour's ground next to it is solid");
+    assert_eq!(seen_from(&mut rig, SPAWN_REGION, behind), Some(STONE), "and reads solid through the halo");
+    // The owner materialised it: the cavity is bordered by a real chunk.
+    let cb = CHUNK_BLOCKS as i32;
+    let (_, local) = behind.to_local();
+    let chunk = ChunkCoords::new((local.x / cb) as usize, y.div_euclid(cb), (local.z / cb) as usize);
+    let mut materialised = false;
+    rig.manager.spawner_mut().with_region(west, |r| materialised = r.data().chunk_key_at(chunk).is_some());
+    assert!(materialised, "the neighbour materialised {chunk:?} behind the cavity");
+    // Implied ground the neighbour has not materialised reads as its rock
+    // through the halo, not as air.
+    let deep = WorldBlockPos::new(dug.x - 1, y - 20, dug.z);
+    assert_eq!(seen_from(&mut rig, SPAWN_REGION, deep), Some(STONE), "unmaterialised halo ground is solid");
+}
+
+/// The owner (`p`'s region) block id at `p`, and the player's slot 0.
+fn place_state(rig: &mut Rig, p: WorldBlockPos) -> (BlockId, Option<ItemStack>) {
+    let (rc, local) = p.to_local();
+    let mut id = None;
+    rig.manager.spawner_mut().with_region(rc, |r| {
+        id = Some(r.data().block_at([local.x, local.y, local.z]).map_or(BlockId::AIR, |b| b.id));
+    });
+    let home = rig.owners()[0];
+    let mut slot = None;
+    rig.manager.spawner_mut().with_region(home, |r| slot = r.data().clients[&CLIENT].inventory.slots[0]);
+    (id.expect("the owner runs"), slot)
+}
+
+/// A survival right click on a block across the seam places into the
+/// neighbour: the owner has the block at T+1 and the placer's slot lost one
+/// item at the click. A place the owner refuses gives the item back.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn place_block_across_seam() {
+    let mut rig = Rig::with_floor(None, uniform_floor);
+    rig.join_spawn();
+    let origin = Placement::Seam(Axis::X).origin();
+    rig.order(Order::SetMode { mode: PlayMode::Adventure, at: Some(spawn_tile(offset(origin, 2, 0, 0))) });
+    rig.input(Input::FpsCam(true));
+    for _ in 0..6 {
+        rig.round();
+    }
+    rig.manager.spawner_mut().with_region(SPAWN_REGION, |r| {
+        r.with_data(|d| {
+            let c = d.clients.get_mut(&CLIENT).expect("the client");
+            c.inventory.slots[0] = Some(ItemStack { item: ItemId::block(STONE), count: 3 });
+            c.selected = 0;
+        })
+    });
+    let floor = offset(origin, -1, -1, 0);
+    rig.aim_at([floor.x as f64 + 0.5, floor.y as f64 + 1.0, floor.z as f64 + 0.5]);
+    assert_eq!(rig.eye_hit(), Some((floor, [0, 1, 0])), "the crosshair is on the floor across the seam");
+    let at = offset(floor, 0, 1, 0);
+    let stone = |n| Some(ItemStack { item: ItemId::block(STONE), count: n });
+    rig.input(Input::MouseButton { button: MouseButton::Right, pressed: true });
+    rig.round();
+    rig.input(Input::MouseButton { button: MouseButton::Right, pressed: false });
+    assert_eq!(place_state(&mut rig, at), (BlockId::AIR, stone(2)), "tick T sent it and took the item");
+    rig.round();
+    assert_eq!(place_state(&mut rig, at), (STONE, stone(2)), "the owner placed it at T+1");
+    for _ in 0..3 {
+        rig.round();
+    }
+    assert_eq!(place_state(&mut rig, at), (STONE, stone(2)), "granted: nothing given back");
+
+    // Refused: the owner's cell fills between the send and T+1.
+    rig.aim_at([at.x as f64 + 0.5, at.y as f64 + 1.0, at.z as f64 + 0.5]);
+    let above = offset(at, 0, 1, 0);
+    rig.input(Input::MouseButton { button: MouseButton::Right, pressed: true });
+    rig.round();
+    rig.input(Input::MouseButton { button: MouseButton::Right, pressed: false });
+    assert_eq!(place_state(&mut rig, above), (BlockId::AIR, stone(1)));
+    let (rc, local) = above.to_local();
+    rig.manager.spawner_mut().with_region(rc, |r| {
+        r.with_data(|d| assert!(d.set_block_safe([local.x, local.y, local.z], Block::new(BlockId(1)))));
+    });
+    for _ in 0..3 {
+        rig.round();
+    }
+    assert_eq!(place_state(&mut rig, above), (BlockId(1), stone(2)), "refused at the owner: the item came back");
 }

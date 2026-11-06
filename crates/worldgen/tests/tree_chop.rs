@@ -25,9 +25,6 @@ impl TileSource for Tree {
     fn is_bedrock(&self, _: TilePos) -> bool {
         false
     }
-    fn edge_locked(&self, _: TilePos) -> bool {
-        false
-    }
     fn is_constructed(&self, _: TilePos) -> bool {
         false
     }
@@ -457,7 +454,7 @@ fn player_fell_yields_one_log_per_wood_block() {
             }
             let tick = s.region.current_tick() as u64;
             let destroyed_before = game::item_piles::items_destroyed_on_thread();
-            s.region.with_data(|r| assert!(r.player_chop_safe(0, cut, tick), "{} {seed}: the chop clears", sp.name));
+            s.region.with_data(|r| assert!(r.player_chop_safe(cut, tick), "{} {seed}: the chop clears", sp.name));
             let mut settled = false;
             for _ in 0..SETTLE_TIMEOUT_TICKS + 5 {
                 s.region.handle_event(GameEventKind::Tick).unwrap();

@@ -15,24 +15,22 @@
 //! `Voxels` shapes in place, see `edit_block_colliders_safe` and
 //! `Undo::<ColliderSet>::mutate_collider_safe`).
 //!
-//! Scope: whole blocks only (a break clears chisel detail), and only inside
-//! the player's home region. A ray that leaves the region reads the terrain
-//! halo (`halo.rs`), so it may HIT a neighbour's block, but an edit there is
-//! refused: the halo is read-only (edits past the seam are Task 6.2's).
+//! Scope: whole blocks only (a break clears chisel detail). A player's edit
+//! is an intent to the block's owner (`intents.rs`), applied at the opening
+//! of the next tick: the eye ray reads the terrain halo (`halo.rs`), so the
+//! block may be a neighbour's, and the owner applies it with its own
+//! refusals (bedrock, an occupied cell). `set_block_safe` itself writes only
+//! this region's blocks.
 //!
 //! Implied ground (rock below the materialised surface band, stored only as
 //! the column's `ColumnGround` recipe) is solid to the ray. Breaking a block
-//! materialises its own chunk and every implied face-neighbour chunk in the
-//! same undoable edit, so reachable air is always bordered by real chunks.
+//! materialises its own chunk and every implied face-neighbour chunk of this
+//! region in the same undoable edit, so reachable air is always bordered by
+//! real chunks. A face neighbour across a seam is the neighbour's implied
+//! ground: it reads solid through the halo (which carries the neighbour's
+//! ground recipes), and the neighbour materialises it itself when the halo
+//! delta of the new air reaches it (`Rollback::materialize_behind_halo_safe`).
 //! Bedrock cannot be broken.
-//!
-//! Known limit: the region's outermost block ring cannot be dug below the
-//! surface. Its outward face neighbour is in the next region, whose implied
-//! ground this region cannot materialise, so the new air would show a face
-//! with no mesh and no collider behind it (see-through, fall-through). Such
-//! a break is refused (`breaks_into_neighbour_ground`); the surface block
-//! itself and everything one block column in stay diggable.
-
 
 use rapier3d::math::Vector;
 use rapier3d::prelude::ColliderBuilder;
@@ -102,22 +100,6 @@ pub fn is_bedrock_at(ground: Option<&crate::ColumnGround>, block: Block) -> bool
     ground.is_some_and(|g| block.id == g.bedrock)
 }
 
-/// Whether breaking `pos` would open a face into a neighbour region's
-/// unmaterialised ground: strictly below its block column's surface with a
-/// face neighbour outside this region's columns. Pure core of
-/// `Rollback::breaks_into_neighbour_ground`.
-pub fn edge_ring_locked(pos: BlockPos, ground: Option<&crate::ColumnGround>) -> bool {
-    let Some(ground) = ground else { return false };
-    let cb = CHUNK_BLOCKS as i32;
-    let (bx, bz) = (pos[0].rem_euclid(cb) as usize, pos[2].rem_euclid(cb) as usize);
-    if pos[1] >= i32::from(ground.surface[bx * CHUNK_BLOCKS + bz]) {
-        return false;
-    }
-    [[1, 0], [-1, 0], [0, 1], [0, -1]]
-        .into_iter()
-        .any(|[dx, dz]| locate([pos[0] + dx, pos[1], pos[2] + dz]).is_none())
-}
-
 thread_local! {
     /// Full collider rebuilds on this thread — a test probe for "did the edit
     /// patch incrementally". Not state: never hashed, serialized or undone.
@@ -154,15 +136,6 @@ impl Rollback {
     /// Whether `block` is the bedrock of the ground under chunk `coords`.
     fn is_bedrock(&self, coords: ChunkCoords, block: Block) -> bool {
         is_bedrock_at(self.data.ground.get(&crate::ColumnCoords::new(coords.x, coords.z)), block)
-    }
-
-    /// Whether breaking `pos` (in chunk `coords`) would open a face
-    /// into a neighbour region's unmaterialised ground: the block lies
-    /// strictly below its own block column's surface and a face neighbour is
-    /// outside this region's columns. Only columns with ground qualify. See
-    /// the module docs' known limit.
-    fn breaks_into_neighbour_ground(&self, pos: BlockPos, coords: ChunkCoords) -> bool {
-        edge_ring_locked(pos, self.data.ground.get(&crate::ColumnCoords::new(coords.x, coords.z)))
     }
 
     /// Turns implied chunk `coords` into a real chunk entity built from the
@@ -240,13 +213,11 @@ impl Rollback {
         self.set_block_in(pos, block)
     }
 
-    /// The one funnel of both `set_block_safe` and `player_edit_safe`.
+    /// The one funnel of `set_block_safe` and of the block intents a player's
+    /// edit sends (`intents.rs`).
     pub(crate) fn set_block_in(&mut self, pos: BlockPos, block: Block) -> bool {
         let Some((coords, (bx, by, bz))) = locate(pos) else { return false };
         let breaking = block.id == BlockId::AIR;
-        if breaking && self.breaks_into_neighbour_ground(pos, coords) {
-            return false;
-        }
         // Bedrock takes no write at all, implied bedrock included; refused
         // before anything changes.
         if let Some(current) = self.current_block(coords, (bx, by, bz)) {
@@ -476,15 +447,11 @@ impl Rollback {
 
     /// The state of the block at `pos` if clearing it to air would change
     /// anything and is allowed: `None` outside the region, for air (an empty
-    /// slot, implied air or an unchiseled air block), for bedrock and for the
-    /// edge-ring blocks `breaks_into_neighbour_ground` refuses — the same
-    /// refusals as a break through `set_block_safe`. Implied ground reads as
-    /// its recipe block, with no chisel.
+    /// slot, implied air or an unchiseled air block) and for bedrock — the
+    /// same refusals as a break through `set_block_safe`. Implied ground
+    /// reads as its recipe block, with no chisel.
     pub(crate) fn clearable_block(&self, pos: BlockPos) -> Option<(Block, Option<crate::ChiselData>)> {
         let (coords, local) = locate(pos)?;
-        if self.breaks_into_neighbour_ground(pos, coords) {
-            return None;
-        }
         let state = match self.chunk_key_at(coords) {
             Some(e) => {
                 let chunk = self.data.ecs.chunk.try_get(e).as_ref()?;
@@ -500,7 +467,7 @@ impl Rollback {
     }
 
     /// Clears every position to air, undo-safely, with the same refusals
-    /// as a `set_block_safe` break (bedrock, the edge ring; air is skipped).
+    /// as a `set_block_safe` break (bedrock; air is skipped).
     /// Batched per chunk: one block write, one `SetBlocks` with every block
     /// of the chunk, and one incremental collider patch. An implied chunk is
     /// materialised before its blocks are cleared, and afterwards every
@@ -512,7 +479,7 @@ impl Rollback {
 
     /// Writes `block` (whole, unchiseled) at every position, undo-safely, as
     /// [`Self::set_block_safe`] would one by one — the same refusals
-    /// (bedrock; for air, the edge ring; positions outside the region) and
+    /// (bedrock; positions outside the region) and
     /// the same materialisation of implied ground — but batched per chunk:
     /// one block write, one `SetBlocks` and one collider patch per chunk
     /// (a chunk slot with no chunk is spawned once, holding all its writes).
@@ -663,13 +630,20 @@ impl Rollback {
         self.current_block(coords, local)
     }
 
-    /// Runs one break or place for `client`'s player from its eye along its
-    /// look. Returns whether a block changed. Invalid edits (nothing in reach,
-    /// the target cell occupied, a body in the way) change nothing.
-    pub fn player_edit_safe(&mut self, client: ClientId, action: EditAction) -> bool {
+    /// One creative (Fortress) break or place for `client`'s player from its
+    /// eye along its look: an intent to the block's owner (into `out` when
+    /// that is a neighbour), applied at the next tick's opening. Returns
+    /// whether one was sent. Edits seen to be invalid (nothing in reach, the
+    /// target cell occupied, a body in the way) send nothing; the owner
+    /// checks again.
+    pub fn player_edit_safe(&mut self, client: ClientId, action: EditAction, out: &mut Vec<crate::IntentMsg>) -> bool {
+        use crate::intents::Effects as _;
         let Some(hit) = self.eye_hit(client) else { return false };
-        match action {
-            EditAction::Break => self.set_block_in(hit.block, Block::new(BlockId::AIR)),
+        let (pos, intent) = match action {
+            EditAction::Break => {
+                let Some(by) = self.client_body_id(client) else { return false };
+                (hit.block, crate::Intent::BreakBlock { by, survival: false })
+            }
             EditAction::Place => {
                 if hit.normal == [0; 3] {
                     return false;
@@ -682,9 +656,13 @@ impl Rollback {
                 if self.block_solid(target) || self.block_overlaps_body(target) {
                     return false;
                 }
-                self.set_block_in(target, Block::new(PLACE_BLOCK))
+                let Some(by) = self.client_body_id(client) else { return false };
+                (target, crate::Intent::PlaceBlock { block: PLACE_BLOCK, by, survival: false })
             }
-        }
+        };
+        let p = crate::WorldBlockPos::from_local(*self.data.region, crate::BlockPos::new(pos[0], pos[1], pos[2]));
+        crate::intents::RegionEffects { data: self, out }.send(crate::Target::Block(p), intent);
+        true
     }
 }
 

@@ -544,12 +544,18 @@ pub enum WorldId {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TerrainSnapshot {
     pub chunks: Vec<(ChunkCoords, Chunk)>,
+    /// The per-column ground recipes (implied ground below the band), by
+    /// column: what a neighbour's halo reads below these chunks. Not part of
+    /// [`TerrainSnapshot::terrain_hash`] (it never changes).
+    pub ground: Vec<(ColumnCoords, crate::ColumnGround)>,
 }
 
 impl TerrainSnapshot {
     /// Materialize worldgen columns into the same `(ChunkCoords, Chunk)` form
     /// `Region::from_columns` uses — how never-run regions are served.
     pub fn from_columns(columns: Vec<(ColumnCoords, Column)>) -> Self {
+        let mut ground: Vec<_> = columns.iter().filter_map(|(c, col)| Some((*c, col.ground()?.clone()))).collect();
+        ground.sort_by_key(|(c, _)| (c.x, c.z));
         let mut chunks: Vec<_> = columns
             .into_iter()
             .flat_map(|(col, column)| {
@@ -564,13 +570,14 @@ impl TerrainSnapshot {
         // ECS-insertion-order output, since both are hashed positionally via
         // bincode.
         chunks.sort_by_key(|(c, _)| (c.x, c.y, c.z));
-        Self { chunks }
+        Self { chunks, ground }
     }
 
-    /// crc32 of the terrain, for cheap change detection on the region thread.
+    /// crc32 of the terrain (the chunks), for cheap change detection on the
+    /// region thread.
     pub fn terrain_hash(&self) -> u32 {
         let mut h = crc32fast::Hasher::new();
-        h.update(&bincode::serialize(self).expect("terrain snapshot serializes"));
+        h.update(&bincode::serialize(&self.chunks).expect("terrain snapshot serializes"));
         h.finalize()
     }
 }

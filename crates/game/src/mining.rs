@@ -9,19 +9,31 @@
 //!   [`break_ticks`]-th tick held (the start tick counts), drops its item as
 //!   a pile in its own cell, and no mining progresses for
 //!   [`BREAK_COOLDOWN_TICKS`] ticks after.
+//!
+//!   The block may be the neighbour's, seen through the halo: the break is
+//!   always an [`crate::Intent::BreakBlock`] (`survival`) to the block's
+//!   owner, here or across a seam alike, which applies it at the opening of
+//!   the next tick — so it is sent on the tick before the last one held and
+//!   lands on the `break_ticks`-th (a one-tick block breaks one tick late).
+//!   The owner's refusals decide, and the drop lands in the owner's piles.
 //! - **Placing** (right press) puts the selected hotbar block against the
-//!   hit face and takes one from the slot; a non-block item or an empty slot
-//!   places nothing.
+//!   hit face and takes one from the slot at once; the block itself is an
+//!   [`crate::Intent::PlaceBlock`] to the cell's owner (next tick), and a
+//!   place the owner refuses gives the item back
+//!   ([`Rollback::refund_refused_places_safe`]). A non-block item or an
+//!   empty slot places nothing.
 //! - **Throwing** (Q one, Ctrl+Q the whole stack) drops the selected item as
 //!   a pile [`THROW_DISTANCE_BLOCKS`] ahead along the look, clamped by the
 //!   first block in the way, settled onto the ground at once.
 //!
-//! Fortress clients keep `edit.rs`'s instant creative edit.
+//! Fortress clients keep `edit.rs`'s creative edit (also intents).
 
 use crate::edit::{BlockPos, BREAK_BUTTON};
+use crate::intents::{Effects as _, RegionEffects};
 use crate::{
-    block_props, drop_of, Block, BlockId, BlockProps, Client, ClientId, PlayMode, Rollback, BLOCK_VOXELS,
-    MAX_STACK, PICKUP_DELAY_TICKS, THROWN_PICKUP_DELAY_TICKS,
+    block_props, drop_of, Block, BlockId, BlockProps, Client, ClientId, EntityId, Intent, IntentMsg, IntentReply,
+    ItemId, ItemStack, PlayMode, Rollback, Target, WorldBlockPos, BLOCK_VOXELS, MAX_STACK,
+    PICKUP_DELAY_TICKS, THROWN_PICKUP_DELAY_TICKS,
 };
 
 /// Ticks per whole unit of hardness with the bare hand (Minecraft's
@@ -73,12 +85,28 @@ pub fn mining_view(client: &Client, now: u64) -> Option<MiningView> {
 }
 
 impl Rollback {
-    /// Whether an Adventure player may mine the block at `pos`: what a break
-    /// may clear (`clearable_block`: not air, not bedrock, not the locked
-    /// edge ring), and not water. Returns the block.
-    fn mineable(&self, pos: BlockPos) -> Option<Block> {
+    /// Whether an Adventure player may mine the block at `pos` (this
+    /// region's): what a break may clear (`clearable_block`: not air, not
+    /// bedrock), and not water. Returns the block. The owner's check.
+    pub(crate) fn mineable(&self, pos: BlockPos) -> Option<Block> {
         let (block, _) = self.clearable_block(pos)?;
         (!crate::pathfind::is_water(block.id)).then_some(block)
+    }
+
+    /// [`Self::mineable`] as this region sees `pos`, which may lie in the
+    /// halo (a neighbour's block: not air, not its bedrock, not water). The
+    /// sender's check; the owner checks again when the break reaches it.
+    fn mineable_seen(&self, pos: BlockPos) -> Option<Block> {
+        if crate::edit::locate(pos).is_some() {
+            return self.mineable(pos);
+        }
+        let block = self.halo_mineable(pos)?;
+        (!crate::pathfind::is_water(block.id)).then_some(block)
+    }
+
+    /// The id of `client`'s body, if it has one here.
+    pub(crate) fn client_body_id(&self, client: ClientId) -> Option<EntityId> {
+        self.data.player_entites.get(&client).and_then(|&k| self.entity_id(k))
     }
 
     /// Writes `client`'s mining state if it differs (one logged delta).
@@ -96,8 +124,10 @@ impl Rollback {
 
     /// One tick of `client`'s survival mining (Decision 7), at region tick
     /// `tick`. Only an Adventure client in first person with no inventory
-    /// open and the left button held mines; anything else cancels.
-    pub fn tick_mining_safe(&mut self, client: ClientId, tick: u64) {
+    /// open and the left button held mines; anything else cancels. The
+    /// break goes to the block's owner as an intent (into `out` when that is
+    /// a neighbour), sent on the tick before the last one held.
+    pub(crate) fn tick_mining_safe(&mut self, client: ClientId, tick: u64, out: &mut Vec<IntentMsg>) {
         let Some(c) = self.data.clients.get(&client) else { return };
         let active = c.mode == PlayMode::Adventure
             && c.fps_cam_mode
@@ -106,7 +136,7 @@ impl Rollback {
             && tick >= c.break_cooldown_until;
         let current = c.mining;
         let target = if active {
-            self.eye_hit(client).and_then(|hit| self.mineable(hit.block).map(|b| (hit.block, b)))
+            self.eye_hit(client).and_then(|hit| self.mineable_seen(hit.block).map(|b| (hit.block, b)))
         } else {
             None
         };
@@ -118,26 +148,28 @@ impl Rollback {
             Some(m) if m.target == target => m,
             _ => Mining { target, started_tick: tick, needed_ticks: break_ticks(block_props(), block) },
         };
-        if (tick + 1).saturating_sub(mining.started_tick) < u64::from(mining.needed_ticks) {
+        // Held through this tick and the next one counts the needed ticks:
+        // the break, applied at the next tick's opening, is due now.
+        if (tick + 2).saturating_sub(mining.started_tick) < u64::from(mining.needed_ticks) {
             self.set_mining_safe(client, Some(mining), None);
             return;
         }
-        let broke = match block.tree_id() {
-            0 => self.mine_block_safe(target, block, tick),
-            _tree => self.player_chop_safe(client, target, tick),
-        };
-        let cooldown = broke.then_some(tick + 1 + BREAK_COOLDOWN_TICKS);
-        self.set_mining_safe(client, None, cooldown);
+        let Some(by) = self.client_body_id(client) else { return };
+        let p = WorldBlockPos::from_local(*self.data.region, crate::BlockPos::new(target[0], target[1], target[2]));
+        RegionEffects { data: self, out }.send(Target::Block(p), Intent::BreakBlock { by, survival: true });
+        // The progress stays until the break lands; the cooldown counts from
+        // the tick it lands at.
+        self.set_mining_safe(client, Some(mining), Some(tick + 2 + BREAK_COOLDOWN_TICKS));
     }
 
-    /// An Adventure player finished mining tree block `p` (Decision 9): the
-    /// tree is felled as a chop order fells it (`fell_safe`), the cut
-    /// blocks drop their items at the stump right away, and the
-    /// falling part turns into piles where it comes to rest
+    /// An Adventure player's break of tree block `p` reached its owner
+    /// (Decision 9): the tree is felled as a chop order fells it
+    /// (`fell_safe`), the cut blocks drop their items at the stump right
+    /// away, and the falling part turns into piles where it comes to rest
     /// (`SettlePolicy::DropItems`). A block `fell` refuses (leaves, or a
     /// tree over `MAX_TREE_BLOCKS`) is broken alone, like any block.
     /// Returns whether anything was cleared.
-    pub fn player_chop_safe(&mut self, _client: ClientId, p: BlockPos, tick: u64) -> bool {
+    pub fn player_chop_safe(&mut self, p: BlockPos, tick: u64) -> bool {
         let Some((cut, _body)) = self.fell_safe(p, crate::SettlePolicy::DropItems) else {
             return match self.mineable(p) {
                 Some(block) => self.mine_block_safe(p, block, tick),
@@ -153,7 +185,7 @@ impl Rollback {
 
     /// Breaks one mined block and drops its item as a pile in its cell.
     /// Returns whether the block was cleared.
-    fn mine_block_safe(&mut self, pos: BlockPos, block: Block, tick: u64) -> bool {
+    pub(crate) fn mine_block_safe(&mut self, pos: BlockPos, block: Block, tick: u64) -> bool {
         if !self.set_block_in(pos, Block::new(BlockId::AIR)) {
             return false;
         }
@@ -164,12 +196,13 @@ impl Rollback {
         true
     }
 
-    /// `client`'s right click in survival (Decision 8): places the selected
-    /// hotbar block against the hit face and takes one from the slot.
-    /// Returns whether a block was placed. A non-block item, an empty slot,
-    /// a hit from inside a block, an occupied cell or a body in the way
-    /// place nothing.
-    pub fn survival_place_safe(&mut self, client: ClientId) -> bool {
+    /// `client`'s right click in survival (Decision 8): takes one of the
+    /// selected hotbar block and sends it to the cell against the hit face
+    /// (an intent to that cell's owner, into `out` when that is a
+    /// neighbour). Returns whether a place was sent. A non-block item, an
+    /// empty slot, a hit from inside a block, a cell seen occupied or a body
+    /// in the way place nothing.
+    pub(crate) fn survival_place_safe(&mut self, client: ClientId, out: &mut Vec<IntentMsg>) -> bool {
         let Some(hit) = self.eye_hit(client) else { return false };
         // A chest under the crosshair opens instead (Decision 10).
         if self.data.containers().contains_key(&hit.block) {
@@ -190,13 +223,38 @@ impl Rollback {
         if self.block_solid(target) || self.block_overlaps_body(target) {
             return false;
         }
-        if !self.set_block_in(target, Block::new(id)) {
-            return false;
-        }
+        let Some(by) = self.client_body_id(client) else { return false };
         if let Some(c) = self.data.clients.get_mut(&client) {
             let _ = c.inventory.take_selected(selected, 1);
         }
+        let p = WorldBlockPos::from_local(*self.data.region, crate::BlockPos::new(target[0], target[1], target[2]));
+        RegionEffects { data: self, out }.send(Target::Block(p), Intent::PlaceBlock { block: id, by, survival: true });
         true
+    }
+
+    /// The survival places refused by their owner, in `client`'s inbox this
+    /// tick, give their item back: into the inventory, else (full) as a
+    /// pile at the feet.
+    pub(crate) fn refund_refused_places_safe(&mut self, client: ClientId) {
+        let Some(by) = self.client_body_id(client) else { return };
+        let refunds: Vec<BlockId> = self
+            .intent_inbox(by)
+            .into_iter()
+            .filter_map(|r| match r {
+                IntentReply::Refused(Intent::PlaceBlock { block, survival: true, .. }, why) => {
+                    log::debug!("[mining] place of {block:?} refused ({why:?}): refunded");
+                    Some(block)
+                }
+                _ => None,
+            })
+            .collect();
+        for block in refunds {
+            let stack = ItemStack { item: ItemId::block(block), count: 1 };
+            let left = self.data.clients.get_mut(&client).map_or(1, |c| c.inventory.add(stack));
+            if left > 0 {
+                self.drop_at_feet_safe(client, ItemStack { count: left, ..stack });
+            }
+        }
     }
 
     /// Throws one of `client`'s selected hotbar item (the whole stack with

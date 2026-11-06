@@ -155,6 +155,12 @@ impl Rig {
         self.event(ServerEvent::ClientPacket(ClientPacket::GameEvent(ev), CLIENT));
     }
 
+    /// Any player input, stamped like [`Rig::key`].
+    pub fn input(&mut self, input: InputEvent) {
+        let ev = GameEvent::new(GameEventKind::PlayerInput(CLIENT, input), 0, SPAWN_REGION);
+        self.event(ServerEvent::ClientPacket(ClientPacket::GameEvent(ev), CLIENT));
+    }
+
     pub fn order(&mut self, order: Order) {
         let ev = GameEvent::new(GameEventKind::Order(CLIENT, order), 0, SPAWN_REGION);
         self.event(ServerEvent::ClientPacket(ClientPacket::GameEvent(ev), CLIENT));
@@ -171,6 +177,46 @@ impl Rig {
             out = Some((data.ecs.walker.try_get(e).clone(), game::feet_tile(game::feet_of(t))));
         });
         out.expect("region is running")
+    }
+
+    /// Points the player's look at `p` (world blocks, fractional) from its
+    /// eye, in the region owning it (a forgotten state write, as a test
+    /// teleport is).
+    pub fn aim_at(&mut self, p: [f64; 3]) {
+        let rc = self.owners()[0];
+        self.manager.spawner_mut().with_region(rc, |region| {
+            region.with_data(|d| {
+                let e = *d.data.player_entites.get(&CLIENT).expect("player owned here");
+                let (eye, _) = d.eye_ray(CLIENT).expect("a body and camera");
+                let (bv, n) = (game::BLOCK_VOXELS as f64, game::REGION_BLOCKS as f64);
+                let to = [
+                    (p[0] - rc.x as f64 * n) * bv - eye.x as f64,
+                    p[1] * bv - eye.y as f64,
+                    (p[2] - rc.z as f64 * n) * bv - eye.z as f64,
+                ];
+                let len = (to[0] * to[0] + to[1] * to[1] + to[2] * to[2]).sqrt();
+                let d3 = [to[0] / len, to[1] / len, to[2] / len];
+                // look_quat(yaw, pitch) * -Z = (-cos p sin y, sin p, -cos p cos y).
+                let mut cam = d.data.ecs.camera.try_get(e).clone().expect("a camera");
+                cam.pitch = d3[1].asin() as f32;
+                cam.yaw = (-d3[0]).atan2(-d3[2]) as f32;
+                d.data.ecs.camera.set_safe(e, Some(cam));
+            });
+        });
+    }
+
+    /// The block under the player's crosshair (world blocks), and the face
+    /// normal, as its owning region's sim sees it.
+    pub fn eye_hit(&mut self) -> Option<(game::WorldBlockPos, [i32; 3])> {
+        let rc = self.owners()[0];
+        let mut out = None;
+        self.manager.spawner_mut().with_region(rc, |region| {
+            out = region.data().eye_hit(CLIENT).map(|h| {
+                let w = game::WorldBlockPos::from_local(rc, game::BlockPos::new(h.block[0], h.block[1], h.block[2]));
+                (w, h.normal)
+            });
+        });
+        out
     }
 
     /// Regions that currently own the player entity.

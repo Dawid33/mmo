@@ -18,6 +18,7 @@ use crate::common::seam_translate::{assert_seam_invariant, offset, spawn_tile, u
 /// A region over a one-block floor (block y 0) with `clients` players,
 /// wired to a renderer channel so its events can be rolled back.
 fn floor_region(clients: &[ClientId]) -> Region {
+    crate::common::install_real_block_props();
     let rc = SPAWN_REGION;
     let built = Region::from_columns(rc, uniform_floor(rc));
     let (send, recv) = crossbeam::channel::unbounded();
@@ -73,7 +74,7 @@ fn intent_applies_next_slot_same_region() {
     assert_eq!(region.current_tick(), sent_at + 2);
     assert!(region.data().intent_inbox(by).is_empty(), "the reply is one tick behind the intent");
     step(&mut region, GameEventKind::Tick);
-    assert_eq!(region.data().intent_inbox(by), vec![IntentReply::Granted(Intent::BreakBlock { by })]);
+    assert_eq!(region.data().intent_inbox(by), vec![IntentReply::Granted(Intent::BreakBlock { by, survival: false })]);
     // An inbox holds one tick's replies.
     step(&mut region, GameEventKind::Tick);
     assert!(region.data().intent_inbox(by).is_empty());
@@ -93,10 +94,10 @@ fn conflicting_takes_resolve_by_entity_id() {
         step(&mut region, GameEventKind::Tick);
     }
     assert!(!solid(&region, target));
-    assert_eq!(region.data().intent_inbox(first), vec![IntentReply::Granted(Intent::BreakBlock { by: first })]);
+    assert_eq!(region.data().intent_inbox(first), vec![IntentReply::Granted(Intent::BreakBlock { by: first, survival: false })]);
     assert_eq!(
         region.data().intent_inbox(second),
-        vec![IntentReply::Refused(Intent::BreakBlock { by: second }, IntentRefusal::NothingThere)]
+        vec![IntentReply::Refused(Intent::BreakBlock { by: second, survival: false }, IntentRefusal::NothingThere)]
     );
 }
 
@@ -156,7 +157,7 @@ fn intent_to_unloaded_owner_is_refused() {
         rig.round();
         replies.extend(inbox(&mut rig, home, by));
     }
-    assert_eq!(replies, vec![IntentReply::Refused(Intent::BreakBlock { by }, IntentRefusal::OwnerNotRunning)]);
+    assert_eq!(replies, vec![IntentReply::Refused(Intent::BreakBlock { by, survival: false }, IntentRefusal::OwnerNotRunning)]);
     assert!(!rig.manager.running_regions().contains(&far), "an intent never wakes its owner");
 }
 
@@ -225,7 +226,7 @@ impl Scenario for BreakAcross {
         if entry.1.is_none() {
             rig.manager.spawner_mut().with_region(home, |r| {
                 if !r.data().intent_inbox(by).is_empty() {
-                    assert_eq!(r.data().intent_inbox(by), vec![IntentReply::Granted(Intent::BreakBlock { by })]);
+                    assert_eq!(r.data().intent_inbox(by), vec![IntentReply::Granted(Intent::BreakBlock { by, survival: false })]);
                     entry.1 = Some(r.current_tick() - sent_at);
                 }
             });
@@ -308,7 +309,7 @@ fn reply_follows_sender_across_seam() {
     assert_eq!(rig.owners(), [west], "the sender crossed");
     assert_eq!(
         got,
-        vec![(west, 3, vec![IntentReply::Granted(Intent::BreakBlock { by })])],
+        vec![(west, 3, vec![IntentReply::Granted(Intent::BreakBlock { by, survival: false })])],
         "delivered once, in the new region, at the opening of T+2 (seen after it)"
     );
     assert_eq!(rig.manager.intent_replies_lost(), 0);
@@ -374,5 +375,5 @@ fn parking_refuses_queued_intents() {
         .expect("stopped");
     assert!(parked.queued_intents().is_empty(), "no unanswered intent parks");
     let replies: Vec<IntentReply> = parked.queued_replies().iter().map(|r| r.reply).collect();
-    assert_eq!(replies, vec![IntentReply::Refused(Intent::BreakBlock { by }, IntentRefusal::OwnerNotRunning)]);
+    assert_eq!(replies, vec![IntentReply::Refused(Intent::BreakBlock { by, survival: false }, IntentRefusal::OwnerNotRunning)]);
 }

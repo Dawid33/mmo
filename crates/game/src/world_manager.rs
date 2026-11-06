@@ -1341,7 +1341,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                     if !running {
                         continue;
                     }
-                    if let Some(seed) = crate::halo::halo_seed_from_chunks(rc, n, far.chunks.iter().map(|(c, k)| (*c, k))) {
+                    if let Some(seed) = crate::halo::halo_seed_from_snapshot(rc, n, &far) {
                         self.send_to_region(n, RegionInput::Transfer(GameEventKind::HaloUpdate(seed), stamp));
                     }
                 }
@@ -2170,7 +2170,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             }
             let running = self.regions.get(&n).is_some_and(|l| !l.stopping);
             if let Some(snap) = self.terrain_cache.get(&n) {
-                if let Some(seed) = crate::halo::halo_seed_from_chunks(n, rc, snap.chunks.iter().map(|(c, k)| (*c, k))) {
+                if let Some(seed) = crate::halo::halo_seed_from_snapshot(n, rc, &snap) {
                     let _ = input.send(RegionInput::Event(GameEventKind::HaloUpdate(seed)));
                 }
             } else if running {
@@ -2180,7 +2180,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             } else {
                 // Not cached: LOD keeps its own choice of pristine sources.
                 let snap = TerrainSnapshot::from_columns(self.generate_timed(n));
-                if let Some(seed) = crate::halo::halo_seed_from_chunks(n, rc, snap.chunks.iter().map(|(c, k)| (*c, k))) {
+                if let Some(seed) = crate::halo::halo_seed_from_snapshot(n, rc, &snap) {
                     let _ = input.send(RegionInput::Event(GameEventKind::HaloUpdate(seed)));
                 }
             }

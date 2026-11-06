@@ -348,6 +348,8 @@ fn mining_undo_roundtrip() {
     // Places dirt back into the hole (pushing the pile up), then throws.
     run(&mut region, input(InputEvent::MouseButton { button: MouseButton::Right, pressed: true }));
     run(&mut region, GameEventKind::Tick);
+    // The place is an intent to the cell's owner: it lands at the next tick.
+    run(&mut region, GameEventKind::Tick);
     assert_eq!(block(&region, a), DIRT, "placed back");
     run(&mut region, input(InputEvent::Key { key: Key::KeyQ, pressed: true }));
     run(&mut region, GameEventKind::Tick);
@@ -409,4 +411,108 @@ fn cooldown_does_not_survive_a_restore() {
     assert_eq!(target(&region), a);
     mouse(&mut region, MouseButton::Left, true);
     assert_eq!(ticks_to_break(&mut region, a, 40), Some(15), "mining progresses at once");
+}
+
+// --- Across a seam (Task 6.2) -------------------------------------------------
+
+use std::cell::RefCell;
+
+use crate::common::rig::Rig;
+use crate::common::seam_translate::{assert_seam_invariant, offset, spawn_tile, Scenario};
+use game::{InlineSchedule, Order, WorldBlockPos};
+
+/// Rounds the button is held at most (dirt: 15 ticks to break).
+const MINE_ROUNDS: u32 = 30;
+
+/// The world block `p`'s owner sees, and that owner's tick.
+fn owner_block(rig: &mut Rig, p: WorldBlockPos) -> (BlockId, u64) {
+    let (rc, local) = p.to_local();
+    let mut out = None;
+    rig.manager.spawner_mut().with_region(rc, |r| {
+        out = Some((
+            r.data().block_at([local.x, local.y, local.z]).map_or(BlockId::AIR, |b| b.id),
+            r.current_tick(),
+        ));
+    });
+    out.expect("the owner runs")
+}
+
+/// An Adventure player two blocks from the seam (+x/+z of the origin)
+/// mines the floor block one block across it (−x/−z): the last tick sends
+/// the break to the block's owner. Records, per run, how many ticks after
+/// the press the block broke at its owner, and whether the drop is a pile
+/// there.
+#[derive(Default)]
+struct MineAcross {
+    /// Per run: (ticks from the press to the break, the owner holds the pile).
+    seen: RefCell<Vec<(Option<u64>, bool)>>,
+    /// The current run: the home tick at the press, the target.
+    run: RefCell<Option<(u64, WorldBlockPos)>>,
+}
+
+impl Scenario for MineAcross {
+    fn setup(&self, rig: &mut Rig, origin: WorldBlockPos) {
+        let at = offset(origin, 2, 0, 2);
+        rig.order(Order::SetMode { mode: PlayMode::Adventure, at: Some(spawn_tile(at)) });
+        rig.input(InputEvent::FpsCam(true));
+        for _ in 0..6 {
+            rig.round();
+        }
+        let target = offset(origin, -1, -1, -1);
+        // The middle of its top face: the ray meets no other solid block.
+        rig.aim_at([target.x as f64 + 0.5, target.y as f64 + 1.0, target.z as f64 + 0.5]);
+        assert_eq!(rig.eye_hit().map(|h| h.0), Some(target), "the crosshair is on the block across the seam");
+        let home = rig.owners()[0];
+        let mut now = 0;
+        rig.manager.spawner_mut().with_region(home, |r| now = r.current_tick());
+        *self.run.borrow_mut() = Some((now, target));
+        self.seen.borrow_mut().push((None, false));
+        rig.input(InputEvent::MouseButton { button: MouseButton::Left, pressed: true });
+    }
+
+    fn drive(&self, rig: &mut Rig, _round: u32) {
+        let (pressed_at, target) = self.run.borrow().expect("set up");
+        let mut seen = self.seen.borrow_mut();
+        let entry = seen.last_mut().expect("this run's entry");
+        if entry.0.is_some() {
+            return;
+        }
+        let (id, tick) = owner_block(rig, target);
+        if id == BlockId::AIR {
+            entry.0 = Some(tick - pressed_at);
+            let (rc, _) = target.to_local();
+            rig.manager.spawner_mut().with_region(rc, |r| entry.1 = !r.data().item_piles().is_empty());
+            // One block: the next one under the crosshair stays.
+            rig.input(InputEvent::MouseButton { button: MouseButton::Left, pressed: false });
+        }
+    }
+
+    fn rounds(&self) -> u32 {
+        MINE_ROUNDS
+    }
+
+    fn crosses(&self) -> bool {
+        false
+    }
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn break_block_across_seam() {
+    let s = MineAcross::default();
+    let end = assert_seam_invariant(&s, None);
+    assert!(end.terrain.values().any(|d| d.is_some()), "the block broke: {:?}", end.terrain);
+    assert_eq!(
+        end.piles.values().cloned().collect::<Vec<_>>(),
+        vec![vec![ItemStack { item: DIRT_ITEM, count: 1 }]],
+        "one dirt dropped"
+    );
+    let seen = s.seen.borrow().clone();
+    assert_eq!(seen.len(), 4, "one entry per placement");
+    let first = seen[0].0.expect("Centre broke it");
+    for (i, s) in seen.iter().enumerate() {
+        assert_eq!(*s, (Some(first), true), "placement #{i}: (ticks from the press to the break, pile at the owner)");
+    }
+    // Under jitter the outcome still matches.
+    assert_seam_invariant(&MineAcross::default(), Some(InlineSchedule::jittery));
 }

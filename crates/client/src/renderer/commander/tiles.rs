@@ -339,11 +339,6 @@ impl TileSource for TileMirror {
         game::edit::is_bedrock_at(self.ground_at(coords.x, coords.z), Block::new(self.block(p)))
     }
 
-    fn edge_locked(&self, p: TilePos) -> bool {
-        let Some((coords, _)) = game::edit::locate(p) else { return false };
-        game::edit::edge_ring_locked(p, self.ground_at(coords.x, coords.z))
-    }
-
     fn is_constructed(&self, p: TilePos) -> bool {
         self.home_tiles().is_some_and(|t| t.constructed.contains(&p))
     }
@@ -619,8 +614,6 @@ mod tests {
         let deep = [1, SURFACE - UNDERGROUND_DEPTH, 1];
         assert_eq!(m.block(deep), BEDROCK);
         assert!(m.is_bedrock(deep));
-        assert!(m.edge_locked([0, y, 0]), "x = 0 borders the next region");
-        assert!(!m.edge_locked([1, y, 1]));
         assert_eq!(m.block([0, SURFACE + 1, 0]), BlockId::AIR, "the band is not implied");
     }
 

@@ -474,7 +474,7 @@ impl Rollback {
     /// undo-safely: the blocks are cleared from the terrain
     /// (`clear_blocks_safe`) and a new entity carries them, its body at the
     /// model's centre of mass, spinning at `angvel` (rad/s, world axes).
-    /// Refused positions (bedrock, the edge ring, outside the region) and
+    /// Refused positions (bedrock, outside the region) and
     /// air are skipped; `None`, with nothing changed, when nothing is left.
     /// A set with nothing that collides (no solid or leaf block — e.g.
     /// water only) is cleared but spawns no body (it would fall through the

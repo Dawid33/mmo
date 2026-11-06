@@ -9,7 +9,6 @@ const WATER: BlockId = BlockId(9);
 struct Src {
     blocks: BTreeMap<TilePos, BlockId>,
     bedrock: BTreeSet<TilePos>,
-    edge: BTreeSet<TilePos>,
     built: BTreeSet<TilePos>,
     trees: BTreeMap<TilePos, u32>,
 }
@@ -20,9 +19,6 @@ impl TileSource for Src {
     }
     fn is_bedrock(&self, p: TilePos) -> bool {
         self.bedrock.contains(&p)
-    }
-    fn edge_locked(&self, p: TilePos) -> bool {
-        self.edge.contains(&p)
     }
     fn is_constructed(&self, p: TilePos) -> bool {
         self.built.contains(&p)
@@ -61,13 +57,13 @@ fn dig_rules() {
     }
     s.built.insert(p(2));
     s.bedrock.insert(p(3));
-    s.edge.insert(p(4));
     let dig = DesignationKind::Dig;
     assert_eq!(validate(&s, dig, p(0)), Err(Invalid::NothingToDig));
     assert_eq!(validate(&s, dig, p(1)), Ok(()));
     assert_eq!(validate(&s, dig, p(2)), Err(Invalid::Built));
     assert_eq!(validate(&s, dig, p(3)), Err(Invalid::Bedrock));
-    assert_eq!(validate(&s, dig, p(4)), Err(Invalid::RegionEdge));
+    // No region-edge rule: the owner materialises its own implied ground.
+    assert_eq!(validate(&s, dig, p(4)), Ok(()));
 }
 
 #[test]

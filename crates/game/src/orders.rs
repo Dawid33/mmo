@@ -151,7 +151,6 @@ pub enum Invalid {
     Bedrock,
     NothingToDig,
     Built,
-    RegionEdge,
     Occupied,
     NotBuilt,
     /// Chop on anything but a solid block of a tree (a log or branch).
@@ -163,8 +162,6 @@ pub trait TileSource {
     /// The block at `p`; `AIR` when unknown.
     fn block(&self, p: TilePos) -> BlockId;
     fn is_bedrock(&self, p: TilePos) -> bool;
-    /// The outer ring below the surface that cannot be dug (see `edit.rs`).
-    fn edge_locked(&self, p: TilePos) -> bool;
     fn is_constructed(&self, p: TilePos) -> bool;
     /// The tree id of the block at `p` (`Block::tree_id`); 0 when none or
     /// unknown.
@@ -197,8 +194,6 @@ pub fn validate(src: &impl TileSource, kind: DesignationKind, p: TilePos) -> Res
                 Err(Invalid::Built)
             } else if src.is_bedrock(p) {
                 Err(Invalid::Bedrock)
-            } else if src.edge_locked(p) {
-                Err(Invalid::RegionEdge)
             } else {
                 Ok(())
             }
@@ -321,11 +316,6 @@ impl TileSource for Rollback {
         self.current_block(coords, local).is_some_and(|b| {
             crate::edit::is_bedrock_at(self.data.ground.get(&crate::ColumnCoords::new(coords.x, coords.z)), b)
         })
-    }
-
-    fn edge_locked(&self, p: TilePos) -> bool {
-        let Some((coords, _)) = crate::edit::locate(p) else { return false };
-        crate::edit::edge_ring_locked(p, self.data.ground.get(&crate::ColumnCoords::new(coords.x, coords.z)))
     }
 
     fn is_constructed(&self, p: TilePos) -> bool {

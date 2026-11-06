@@ -46,7 +46,9 @@ pub const REGION_MAGIC: [u8; 8] = *b"MMOREGN\0";
 /// 12: `GameData` gained the intent queues (`intents`, `intent_replies`,
 /// `intent_inbox` — `game::intents`).
 /// 13: a queued intent reply (`SentReply`) gained `hops`.
-pub const REGION_FILE_VERSION: u32 = 13;
+/// 14: `GameData` gained `halo_ground` (the neighbours' ground recipes under
+/// the halo); `Intent::BreakBlock` gained `survival`, `Intent::PlaceBlock` is new.
+pub const REGION_FILE_VERSION: u32 = 14;
 /// magic + version + region blocks + chunk blocks + world crc + payload crc.
 const HEADER_LEN: usize = 8 + 4 * 5;
 

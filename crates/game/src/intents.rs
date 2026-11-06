@@ -84,14 +84,22 @@ impl Target {
 )]
 pub enum Intent {
     /// Break the target block to air through the ordinary break path
-    /// (`set_block_in`), with its refusals.
-    BreakBlock { by: EntityId },
+    /// (`set_block_in`), with its refusals. `survival`: an Adventure
+    /// player's mined block — its drop goes into the owner's piles, and a
+    /// tree block fells its tree (`Rollback::player_chop_safe`); otherwise
+    /// a plain (creative / dev) break that drops nothing.
+    BreakBlock { by: EntityId, survival: bool },
+    /// Put `block` (whole) into the target cell, refused when the owner sees
+    /// it occupied (a solid block, or a body in the way). `survival`: the
+    /// sender took one `block` item for it, which a refusal gives back
+    /// (`Rollback::refund_refused_places_safe`).
+    PlaceBlock { block: crate::BlockId, by: EntityId, survival: bool },
 }
 
 /// Required by the rollback map; never a real intent.
 impl Default for Intent {
     fn default() -> Self {
-        Intent::BreakBlock { by: EntityId::default() }
+        Intent::BreakBlock { by: EntityId::default(), survival: false }
     }
 }
 
@@ -99,7 +107,7 @@ impl Intent {
     /// The sending entity.
     pub fn by(&self) -> EntityId {
         match self {
-            Intent::BreakBlock { by } => *by,
+            Intent::BreakBlock { by, .. } | Intent::PlaceBlock { by, .. } => *by,
         }
     }
 }
@@ -116,8 +124,8 @@ pub enum IntentRefusal {
     NothingThere,
     /// The block is the column's bedrock.
     Bedrock,
-    /// The region's outermost ring below the surface (`edit::edge_ring_locked`).
-    EdgeLocked,
+    /// A place into a cell that is solid, or that a body overlaps.
+    Occupied,
     /// The intent does not apply to that kind of target (or reached a
     /// region that does not own it).
     BadTarget,
@@ -363,39 +371,52 @@ impl Rollback {
         }
     }
 
-    /// Apply one intent as the target's owner.
+    /// Apply one intent as the target's owner. The owner's own refusals
+    /// decide; implied ground it opens is materialised by `set_block_in`
+    /// (its own), and the neighbour's behind a seam by that neighbour when
+    /// the halo delta reaches it (`halo.rs`).
     fn apply_intent_safe(&mut self, target: Target, intent: Intent) -> IntentReply {
         let refused = |why| IntentReply::Refused(intent, why);
-        match intent {
-            Intent::BreakBlock { .. } => {
-                let Target::Block(p) = target else { return refused(IntentRefusal::BadTarget) };
-                let (rc, local) = p.to_local();
-                if rc != *self.data.region {
-                    log::warn!("[intents] {intent:?} for {p:?} reached {:?}, not its owner", *self.data.region);
-                    return refused(IntentRefusal::BadTarget);
-                }
-                let pos = [local.x, local.y, local.z];
-                let Some((coords, l)) = crate::edit::locate(pos) else { return refused(IntentRefusal::NothingThere) };
-                let ground = self.data.ground.get(&crate::ColumnCoords::new(coords.x, coords.z));
-                // The break path's own refusals, in its order.
-                if crate::edit::edge_ring_locked(pos, ground) {
-                    return refused(IntentRefusal::EdgeLocked);
-                }
-                if self.current_block(coords, l).is_some_and(|b| crate::edit::is_bedrock_at(ground, b)) {
-                    return refused(IntentRefusal::Bedrock);
-                }
-                if self.set_block_in(pos, crate::Block::new(crate::BlockId::AIR)) {
-                    IntentReply::Granted(intent)
-                } else {
-                    refused(IntentRefusal::NothingThere)
+        let Target::Block(p) = target else { return refused(IntentRefusal::BadTarget) };
+        let (rc, local) = p.to_local();
+        if rc != *self.data.region {
+            log::warn!("[intents] {intent:?} for {p:?} reached {:?}, not its owner", *self.data.region);
+            return refused(IntentRefusal::BadTarget);
+        }
+        let pos = [local.x, local.y, local.z];
+        let Some((coords, l)) = crate::edit::locate(pos) else { return refused(IntentRefusal::NothingThere) };
+        let current = self.current_block(coords, l);
+        let ground = self.data.ground.get(&crate::ColumnCoords::new(coords.x, coords.z));
+        if current.is_some_and(|b| crate::edit::is_bedrock_at(ground, b)) {
+            return refused(IntentRefusal::Bedrock);
+        }
+        let done = match intent {
+            Intent::BreakBlock { survival: false, .. } => self.set_block_in(pos, crate::Block::new(crate::BlockId::AIR)),
+            Intent::BreakBlock { survival: true, .. } => {
+                let tick = *self.data.tick;
+                match self.mineable(pos) {
+                    Some(block) if block.tree_id() != 0 => self.player_chop_safe(pos, tick),
+                    Some(block) => self.mine_block_safe(pos, block, tick),
+                    None => false,
                 }
             }
+            Intent::PlaceBlock { block, .. } => {
+                if self.block_solid(pos) || self.block_overlaps_body(pos) {
+                    return refused(IntentRefusal::Occupied);
+                }
+                self.set_block_in(pos, crate::Block::new(block))
+            }
+        };
+        if done {
+            IntentReply::Granted(intent)
+        } else {
+            refused(IntentRefusal::NothingThere)
         }
     }
 
     /// `Order::DevBreakBlock`: `client`'s body sends `BreakBlock` at `p`.
     pub(crate) fn dev_break_block_safe(&mut self, client: ClientId, p: WorldBlockPos, out: &mut Vec<IntentMsg>) {
         let Some(by) = self.data.player_entites.get(&client).and_then(|&k| self.entity_id(k)) else { return };
-        RegionEffects { data: self, out }.send(Target::Block(p), Intent::BreakBlock { by });
+        RegionEffects { data: self, out }.send(Target::Block(p), Intent::BreakBlock { by, survival: false });
     }
 }

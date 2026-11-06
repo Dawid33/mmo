@@ -118,6 +118,12 @@ pub trait Scenario {
     fn setup(&self, rig: &mut Rig, origin: WorldBlockPos);
     fn drive(&self, rig: &mut Rig, round: u32);
     fn rounds(&self) -> u32;
+    /// Whether the scenario's motion crosses the seam (`run` then asserts
+    /// it reached the region past it). A scenario that reaches across a
+    /// seam without moving there (an edit through an intent) says `false`.
+    fn crosses(&self) -> bool {
+        true
+    }
     /// What a jittery run is held to against the lockstep centred one.
     fn jitter_tolerances(&self) -> Tolerances {
         JITTER_TOLERANCES
@@ -391,7 +397,7 @@ pub fn run<S: Scenario>(s: &S, placement: Placement, schedule: Option<InlineSche
         rig.round();
         owners.extend(rig.owners());
     }
-    if let Some(beyond) = placement.beyond() {
+    if let Some(beyond) = placement.beyond().filter(|_| s.crosses()) {
         assert!(owners.contains(&beyond), "{placement:?}: the scenario never reached {beyond:?} (owners {owners:?})");
     }
     assert_eq!(rig.manager.in_flight_count(), 0, "{placement:?}: a transfer still in flight after settling");

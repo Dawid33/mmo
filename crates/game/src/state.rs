@@ -299,6 +299,12 @@ mod game_data {
         /// `HALO_BLOCKS` of each edge (`halo.rs`), by world chunk.
         #[undo(map)]
         halo: BTreeMap<crate::WorldChunkPos, crate::HaloChunk>,
+        /// The neighbours' ground recipes for the halo's chunk columns
+        /// (`halo.rs`), by world chunk column (`y` 0): below a neighbour's
+        /// materialised band the halo reads its implied ground, as
+        /// `implied_block` does here. Arrive with halo seeds; never change.
+        #[undo(map)]
+        halo_ground: BTreeMap<crate::WorldChunkPos, crate::ColumnGround>,
         /// Intents waiting at their owner (`intents.rs`), in application
         /// order: `(due tick, source EntityId, seq)`.
         #[undo(map)]
@@ -1899,7 +1905,8 @@ impl Rollback {
         // order-insensitive and stable across sources (ECS insertion order
         // here vs. column-iteration order in `TerrainSnapshot::from_columns`).
         chunks.sort_by_key(|(c, _)| (c.x, c.y, c.z));
-        crate::TerrainSnapshot { chunks }
+        let ground = self.data.ground.iter().map(|(c, g)| (*c, g.clone())).collect();
+        crate::TerrainSnapshot { chunks, ground }
     }
 }
 

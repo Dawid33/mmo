@@ -165,6 +165,7 @@ fn raycast_hits_neighbour_block() {
 /// rollback bar: `hash(before) == hash(after undo)`), colliders included.
 #[test]
 fn halo_updates_roll_back_bit_exact() {
+    crate::common::install_real_block_props();
     let n = REGION_CHUNKS as i32;
     let floor = |cx: usize, cz: usize| (ChunkCoords::new(cx, 0, cz), Chunk::flat_floor(BLOCK_VOXELS as u32));
     let own: Vec<_> = (0..REGION_CHUNKS).flat_map(|x| (0..REGION_CHUNKS).map(move |z| floor(x, z))).collect();
@@ -177,7 +178,12 @@ fn halo_updates_roll_back_bit_exact() {
             .map(|z| HaloDelta { chunk: WorldChunkPos::from_local(SPAWN_REGION, [n, 0, z]), data: Some(data.clone()) })
             .collect()
     };
-    let seed = HaloUpdate { from: east(), replace: true, deltas: column(Chunk::flat_floor(BLOCK_VOXELS as u32)) };
+    let seed = HaloUpdate {
+        from: east(),
+        replace: true,
+        deltas: column(Chunk::flat_floor(BLOCK_VOXELS as u32)),
+        ground: Vec::new(),
+    };
     let before = game::state_hash(region.data());
     region.handle_event(GameEventKind::HaloUpdate(seed.clone())).unwrap();
     assert!(region.data().halo_chunk_at([n, 0, 0]).is_some());
@@ -195,6 +201,7 @@ fn halo_updates_roll_back_bit_exact() {
         from: east(),
         replace: false,
         deltas: vec![HaloDelta { chunk: WorldChunkPos::from_local(SPAWN_REGION, [n, 0, 0]), data: Some(dug) }],
+        ground: Vec::new(),
     };
     region.handle_event(GameEventKind::HaloUpdate(patch)).unwrap();
     assert_ne!(game::state_hash(region.data()), seeded);

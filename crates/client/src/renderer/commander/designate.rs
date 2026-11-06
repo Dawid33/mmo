@@ -352,7 +352,6 @@ fn reason(why: Invalid) -> &'static str {
         Invalid::Bedrock => "bedrock",
         Invalid::NothingToDig => "nothing to dig",
         Invalid::Built => "built",
-        Invalid::RegionEdge => "region edge",
         Invalid::Occupied => "occupied",
         Invalid::NotBuilt => "not built",
         Invalid::NotTree => "not a tree",
@@ -901,11 +900,11 @@ mod tests {
         let area = TileBox::new([0, 7, 0], [3, 8, 2]);
         let summary = OrderSummary {
             valid: 20,
-            invalid: [(Invalid::RegionEdge, 1), (Invalid::Bedrock, 3)].into_iter().collect(),
+            invalid: [(Invalid::Built, 1), (Invalid::Bedrock, 3)].into_iter().collect(),
         };
         assert_eq!(
             drag_text(area, Some(DesignationKind::Dig), &summary),
-            "4 × 3 × 2 — 20 to dig · 3 bedrock · 1 region edge"
+            "4 × 3 × 2 — 20 to dig · 3 bedrock · 1 built"
         );
     }
 
