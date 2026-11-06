@@ -579,9 +579,15 @@ pub struct EntityBundle {
 
 impl EntityBundle {
     /// Move the bundle from region `from`'s local frame into `to`'s: the
-    /// body pose (everything carried is in world coordinates).
+    /// body pose and a voxel body's region-local block `origin` (everything
+    /// else carried is in world coordinates).
     pub fn rebase(&mut self, from: RegionCoords, to: RegionCoords) {
         self.body.pose = rebase_isometry(&self.body.pose, from, to);
+        if let Some(vb) = &mut self.carried.voxel_body {
+            let n = crate::REGION_BLOCKS as i32;
+            vb.origin[0] += (from.x - to.x) * n;
+            vb.origin[2] += (from.z - to.z) * n;
+        }
     }
 }
 

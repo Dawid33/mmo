@@ -84,7 +84,16 @@ pub enum DevAction {
     /// Stands in for workers until jobs exist: every designation in the home
     /// region done at once (an undoable sim order).
     CompleteOrders,
+    /// Drops a 1 m dynamic body (`Order::DevDropBody`) above the ground the
+    /// cursor last pointed at off the panel ([`DevDropTarget`]).
+    DropBody,
 }
+
+/// The ground point (`GroundPick`) the cursor last pointed at while it was
+/// not over a Slint layer: where "Drop body at cursor" aims, since the
+/// cursor is on the button when it is clicked.
+#[derive(Resource, Default, Debug, Clone, Copy)]
+pub struct DevDropTarget(pub Option<(game::RegionCoords, Vec3)>);
 
 /// Filled by the panel's callbacks during event dispatch (`!Send`).
 struct DevActions(Rc<RefCell<Vec<DevAction>>>);
@@ -96,9 +105,10 @@ impl Plugin for DevUiPlugin {
         // The tab lives in the session-scoped game UI layer
         // (`slint_overlay`), whose init calls [`connect_debug_tab`]; the
         // toggles' flags are preferences and outlive the session.
-        app.add_systems(
+        use crate::session::SessionResetExt as _;
+        app.add_session_reset::<DevDropTarget>().add_systems(
             Update,
-            (toggle_dev_ui, apply_dev_actions, push_dev_panel)
+            (remember_drop_target, toggle_dev_ui, apply_dev_actions, push_dev_panel)
                 .chain()
                 .run_if(crate::session::world_systems_enabled()),
         );
@@ -118,6 +128,8 @@ pub fn connect_debug_tab(ui: &GameUi, world: &mut World) {
     });
     let queue = actions.clone();
     ui.on_dev_complete_orders(move || queue.borrow_mut().push(DevAction::CompleteOrders));
+    let queue = actions.clone();
+    ui.on_dev_drop_body(move || queue.borrow_mut().push(DevAction::DropBody));
     world.insert_non_send(DevActions(actions));
 }
 
@@ -180,6 +192,40 @@ pub fn apply_dev_action(action: DevAction, world: &mut World) {
                 let order = game::GameEventKind::Order(client, game::Order::DevCompleteAll);
                 let _ = world.resource::<GameEvents>().0.send(order);
             }
+        }
+        DevAction::DropBody => {
+            let target = world.get_resource::<DevDropTarget>().and_then(|t| t.0);
+            let home = world.get_resource::<HudStatus>().and_then(|h| h.home_region);
+            if let (Some(client), Some(order)) = (world.resource::<LocalPlayer>().0, drop_body_order(target, home)) {
+                let _ = world.resource::<GameEvents>().0.send(game::GameEventKind::Order(client, order));
+            }
+        }
+    }
+}
+
+/// The dev drop order for ground point `target` (a region and a point in
+/// its local frame): the tile under it in the `home` region's block
+/// coordinates — orders run in the home region, which refuses a tile off its
+/// columns. `None` without a point or a home.
+pub fn drop_body_order(target: Option<(game::RegionCoords, Vec3)>, home: Option<game::RegionCoords>) -> Option<game::Order> {
+    let ((region, local), home) = (target?, home?);
+    Some(game::Order::DevDropBody { at: super::commander::move_order::hover_tile(region, local, home) })
+}
+
+/// Keeps [`DevDropTarget`] on the ground under the cursor while the cursor
+/// is not over a Slint layer.
+fn remember_drop_target(
+    cursor: Res<CursorPolicy>,
+    pick: Option<Res<super::commander::selection::GroundPick>>,
+    mut target: ResMut<DevDropTarget>,
+) {
+    if cursor.ui_pointer {
+        return;
+    }
+    let Some(pick) = pick else { return };
+    if let Some(p) = pick.0 {
+        if target.0 != Some(p) {
+            target.0 = Some(p);
         }
     }
 }
@@ -395,6 +441,55 @@ mod tests {
             recv.try_recv(),
             Ok(game::GameEventKind::Order(7, game::Order::DevCompleteAll))
         ));
+    }
+
+    use super::super::commander::selection::GroundPick;
+
+    #[test]
+    fn drop_body_aims_at_the_last_ground_point_in_home_tiles() {
+        let home = game::RegionCoords::new(0, 0);
+        let b = game::BLOCK_VOXELS as f32;
+        // Region-local ground point → the home region's tile under it.
+        let at = drop_body_order(Some((home, Vec3::new(3.5 * b, b, 9.25 * b))), Some(home));
+        assert_eq!(at, Some(game::Order::DevDropBody { at: [3, 1, 9] }));
+        // A point in the west neighbour is in home's frame (the sim refuses it).
+        let west = game::RegionCoords::new(-1, 0);
+        let at = drop_body_order(Some((west, Vec3::new(2.5 * b, b, 1.5 * b))), Some(home));
+        assert_eq!(at, Some(game::Order::DevDropBody { at: [2 - game::REGION_BLOCKS as i32, 1, 1] }));
+        assert_eq!(drop_body_order(None, Some(home)), None, "no ground seen");
+        assert_eq!(drop_body_order(Some((home, Vec3::ZERO)), None), None, "no home yet");
+    }
+
+    #[test]
+    fn drop_body_sends_the_order_at_the_remembered_point() {
+        let (mut world, recv) = world();
+        let home = game::RegionCoords::new(0, 0);
+        world.insert_resource(HudStatus { home_region: Some(home), ..Default::default() });
+        world.insert_resource(DevDropTarget(Some((home, Vec3::new(40.0, 16.0, 40.0)))));
+        apply_dev_action(DevAction::DropBody, &mut world);
+        assert!(recv.try_recv().is_err(), "no local player: nothing sent");
+        world.insert_resource(LocalPlayer(Some(7)));
+        apply_dev_action(DevAction::DropBody, &mut world);
+        assert!(matches!(
+            recv.try_recv(),
+            Ok(game::GameEventKind::Order(7, game::Order::DevDropBody { at: [2, 1, 2] }))
+        ));
+    }
+
+    #[test]
+    fn the_drop_target_follows_the_ground_pick_off_the_panel_only() {
+        let mut app = App::new();
+        app.insert_resource(CursorPolicy::default())
+            .insert_resource(GroundPick(Some((game::RegionCoords::new(0, 0), Vec3::ONE)), true))
+            .init_resource::<DevDropTarget>()
+            .add_systems(Update, remember_drop_target);
+        app.update();
+        assert_eq!(app.world().resource::<DevDropTarget>().0.map(|p| p.1), Some(Vec3::ONE));
+        // Over the panel: the button's click must not aim at the ground behind it.
+        app.world_mut().resource_mut::<CursorPolicy>().ui_pointer = true;
+        app.world_mut().resource_mut::<GroundPick>().0 = Some((game::RegionCoords::new(0, 0), Vec3::ZERO));
+        app.update();
+        assert_eq!(app.world().resource::<DevDropTarget>().0.map(|p| p.1), Some(Vec3::ONE));
     }
 
     #[test]

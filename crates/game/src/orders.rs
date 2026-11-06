@@ -144,6 +144,9 @@ pub enum Order {
     /// issuing client's body sends one at this world block, wherever it is.
     /// Until Task 6.2 ports mining onto the intent, nothing else sends it.
     DevBreakBlock(crate::WorldBlockPos),
+    /// Dev panel: drop a 1 m dynamic body (`EntityKind::Body`) above this
+    /// region-local tile (`Rollback::dev_drop_body_safe`).
+    DevDropBody { at: TilePos },
 }
 
 /// Why a tile refuses a designation.
@@ -399,6 +402,7 @@ impl Rollback {
             Order::MoveTo(_) => return false,
             // Sends an intent: `Region::handle_event` routes it too.
             Order::DevBreakBlock(_) => return false,
+            Order::DevDropBody { at } => return self.dev_drop_body_safe(at),
         }
         true
     }

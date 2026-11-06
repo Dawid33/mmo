@@ -1,5 +1,5 @@
 //! Chopping trees (`game::trees`, `DesignationKind::Chop`): which blocks a
-//! cut brings down, the tip spin that keeps a felled part inside the region,
+//! cut brings down, the tip spin that topples a felled part toward its lean,
 //! and the order carried out into a falling voxel body that despawns.
 use crate::common;
 
@@ -9,7 +9,7 @@ use game::voxel_body::SETTLE_TIMEOUT_TICKS;
 use game::{
     falling_sets, fell, install_block_props, state_hash, tip_angvel, Block, BlockId, BlockRegistry, DesignationKind,
     GameEventKind, OpId, Order, Region, Rollback, TileBox, TilePos, TileSource, BLOCK_VOXELS, DEFAULT_PRIORITY,
-    REGION_BLOCKS, REGION_SIZE, TIP_ANGVEL, TIP_EDGE_MARGIN_BLOCKS,
+    REGION_BLOCKS, REGION_SIZE, TIP_ANGVEL,
 };
 
 const MANIFEST: &str = include_str!("../../../assets/blocks/blocks.ron");
@@ -334,34 +334,17 @@ fn tip_follows_the_lean() {
     assert!((a.length() - TIP_ANGVEL).abs() < 1e-5 && a.y == 0.0);
 }
 
+/// Bodies cross seams (Task 7.5), so the tip no longer turns inward at a
+/// region edge: a part leaning out over an edge falls out over it.
 #[test]
-fn tip_near_edge_points_inward() {
+fn tip_near_edge_follows_the_lean_across_the_seam() {
     let mid = REGION_BLOCKS as i32 / 2;
-    let edge = TIP_EDGE_MARGIN_BLOCKS - 1;
-    // Leaning out over the −x edge: every direction with any −x, and ±z too
-    // (the cut itself is inside the margin), would land too close; the
-    // nearest-angle direction left is a +x diagonal.
-    let cut = [edge, 1, mid];
+    let cut = [2, 1, mid];
     let d = tip_direction(tip_angvel(TREE, cut, &part(cut, -1), 0));
-    assert!(d.x > 0.5, "tips inward: {d:?}");
-    // Leaning +x at the +x edge: tips back −x.
-    let cut = [REGION_BLOCKS as i32 - 1 - edge, 1, mid];
+    assert!((d - Vector::new(-1.0, 0.0, 0.0)).length() < 1e-5, "over the −x seam: {d:?}");
+    let cut = [REGION_BLOCKS as i32 - 3, 1, mid];
     let d = tip_direction(tip_angvel(TREE, cut, &part(cut, 1), 0));
-    assert!(d.x < -0.5, "tips inward: {d:?}");
-    // Leaning −x with only the −x landing too close: the nearest diagonal.
-    let cut = [9, 1, mid];
-    let d = tip_direction(tip_angvel(TREE, cut, &part(cut, -1), 0));
-    assert!(d.x < -0.5 && d.z.abs() > 0.5, "a −x diagonal: {d:?}");
-    // Near the edge but leaning inward and short enough: keeps the lean.
-    let cut = [TIP_EDGE_MARGIN_BLOCKS + 1, 1, mid];
-    let d = tip_direction(tip_angvel(TREE, cut, &part(cut, 1), 0));
-    assert!((d - Vector::new(1.0, 0.0, 0.0)).length() < 1e-5, "{d:?}");
-    // Rolled with no lean: whatever the roll, the landing stays inside.
-    for tick in 0..32 {
-        let cut = [edge, 1, edge];
-        let d = tip_direction(tip_angvel(TREE, cut, &part(cut, 0), tick));
-        assert!(d.x > 0.5 && d.z > 0.5, "tick {tick}: {d:?}");
-    }
+    assert!((d - Vector::new(1.0, 0.0, 0.0)).length() < 1e-5, "over the +x seam: {d:?}");
 }
 
 /// A cactus is one block (`cactus`) for trunk and arms, no leaves: a cut on

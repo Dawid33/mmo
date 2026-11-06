@@ -1,7 +1,9 @@
 //! The generic dynamic body, [`EntityKind::Body`]: a rigid body with no
 //! behaviour of its own that falls, tumbles, comes to rest and crosses region
 //! seams with its full [`BodyState`] (velocities, sleep state, explicit mass,
-//! its weight). Voxel bodies (`voxel_body.rs`) are meant to build on it.
+//! its weight). Voxel bodies (`voxel_body.rs`) are bodies of this kind with
+//! a compound collider and a `VoxelBody` component. `Order::DevDropBody`
+//! drops a cube from the dev panel ([`Rollback::dev_drop_body_safe`]).
 //!
 //! **Mass.** Explicit, from [`crate::mass_props::mass_properties`] of its
 //! collider at [`BODY_DEFAULT_DENSITY`]; its collider is massless (density
@@ -37,6 +39,16 @@ pub const BODY_ANGULAR_DAMPING: f32 = 0.5;
 /// (see `voxel_body::VOXEL_BODY_SOFT_CCD`).
 pub const BODY_SOFT_CCD: f32 = crate::BLOCK_VOXELS as f32;
 
+/// Height above the tile, in blocks, of the bottom of a dev-dropped body
+/// (`Order::DevDropBody`).
+pub const DEV_DROP_HEIGHT_BLOCKS: i32 = 4;
+/// Most spin about each axis (rad/s) a dev-dropped body starts with, rolled
+/// per axis from the tick and the tile (`slime::roll`, so a replay spins the
+/// same way).
+pub const DEV_DROP_SPIN_RAD_PER_S: f32 = 1.0;
+/// `roll` salt of a dev-dropped body's spin.
+pub const DEV_DROP_SALT: u64 = 0xD20B_B0D1;
+
 /// The state a new body of `collider` starts in at `pose`.
 pub fn body_state(pose: Pose, collider: &ColliderSpec, linvel: Vector, angvel: Vector) -> BodyState {
     let mass = mass_properties(collider, BODY_DEFAULT_DENSITY);
@@ -63,6 +75,16 @@ impl Rollback {
         let e = self.data.ecs.create_entity_safe();
         self.assign_entity_id_safe(e);
         self.build_body_safe(e, &body_state(pose, &collider, linvel, angvel), &collider);
+        self.set_body_kind_safe(e);
+        self.data.send(GameDataUpdate::new(
+            GameDataTransactionKind::Do,
+            GameDataUpdateKind::SetEntityPosition(e, pose),
+        ));
+        e
+    }
+
+    /// Makes `e` an [`EntityKind::Body`] (renderer told both ways).
+    pub(crate) fn set_body_kind_safe(&mut self, e: EntityKey) {
         let kind = EntityKind::Body;
         self.data.send(GameDataUpdate::new(
             GameDataTransactionKind::Do,
@@ -73,11 +95,30 @@ impl Rollback {
             GameDataUpdateKind::SetEntityKind(e, None),
         ));
         self.data.ecs.kind.set_safe(e, Some(kind));
-        self.data.send(GameDataUpdate::new(
-            GameDataTransactionKind::Do,
-            GameDataUpdateKind::SetEntityPosition(e, pose),
-        ));
-        e
+    }
+
+    /// `Order::DevDropBody`: a 1 m cube whose bottom is
+    /// [`DEV_DROP_HEIGHT_BLOCKS`] above region-local tile `at`, spinning at
+    /// up to [`DEV_DROP_SPIN_RAD_PER_S`] about each axis. Refused (`false`,
+    /// nothing changed) off the region's block columns.
+    pub fn dev_drop_body_safe(&mut self, at: crate::TilePos) -> bool {
+        let n = crate::REGION_BLOCKS as i32;
+        if !(0..n).contains(&at[0]) || !(0..n).contains(&at[2]) {
+            return false;
+        }
+        let b = crate::BLOCK_VOXELS as f32;
+        let centre =
+            Vector::new((at[0] as f32 + 0.5) * b, (at[1] + DEV_DROP_HEIGHT_BLOCKS) as f32 * b + b / 2.0, (at[2] as f32 + 0.5) * b);
+        let tick = *self.data.tick;
+        // Per axis a roll in [-1, 1] (a 2001-step lattice) of the tile.
+        let subject = |axis: u64| ((at[0] as u32 as u64) << 32 | at[2] as u32 as u64) ^ (axis << 62);
+        let spin = |axis: u64| {
+            let r = crate::slime::roll(tick, subject(axis), DEV_DROP_SALT) % 2001;
+            (r as f32 - 1000.0) / 1000.0 * DEV_DROP_SPIN_RAD_PER_S
+        };
+        let cube = ColliderSpec::Cuboid { half_extents: Vector::splat(b / 2.0) };
+        self.spawn_body_safe(Pose::from_translation(centre), cube, Vector::ZERO, Vector::new(spin(0), spin(1), spin(2)));
+        true
     }
 
     /// Removes only the body + colliders of `e` (undo-tracked), never the

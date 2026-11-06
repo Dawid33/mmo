@@ -33,10 +33,17 @@
 //! Leaves collide in a body (not standing). Colliders grip (high friction)
 //! and never bounce, and soft CCD stops a fast landing at the surface.
 //!
-//! **No `EntityKind`.** A voxel body is never a seam-crossing entity:
-//! `scan_boundaries` walks `ecs.kind` (and would rebuild it on the other
-//! side as a player capsule). A body whose centre of mass leaves the region
-//! is settled instead.
+//! **Crossing seams.** A voxel body is an [`crate::EntityKind::Body`] with an
+//! `EntityId`, so `scan_boundaries` hands it to the neighbour its centre of
+//! mass moves into, like any dynamic body (`body.rs`): its `BodyState`
+//! (velocities, explicit mass, weight, damping, sleep) and its compound
+//! collider (read back exactly as a `ColliderSpec`) rebuild it there, and
+//! the [`VoxelBody`] travels in `Carried` (`migrate.rs`) — its model (the
+//! receiver re-announces it to the renderer, `AddVoxelBody`), its settle
+//! state, and its [`VoxelBody::drops`], which leave in `Carried::drops` so
+//! a body lost on the way (the manager's mailbox overflow) puts them down
+//! instead of losing them. The collider's material (friction, restitution)
+//! is not in the spec: the receiver sets it again (`set_voxel_body_material_safe`).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -49,7 +56,7 @@ use crate::edit::BlockPos;
 use crate::movement::UNITS_PER_METER;
 use crate::{
     block_collider_cells, block_props, Block, BlockId, ChiselData, ColliderScale, EntityKey, GameDataTransactionKind,
-    GameDataUpdate, GameDataUpdateKind, Rollback, BLOCK_VOXELS, HALF_BLOCK_VOXELS, REGION_SIZE, TICK_RATE,
+    GameDataUpdate, GameDataUpdateKind, Rollback, BLOCK_VOXELS, HALF_BLOCK_VOXELS, TICK_RATE,
 };
 
 /// Density of tree wood (logs and branches: `ColliderScale::Half` blocks),
@@ -140,12 +147,12 @@ pub enum SettlePolicy {
     /// Removed, leaving nothing behind (a fortress chop order: no items).
     #[default]
     Despawn,
-    /// Removed, its blocks turned into their drops (`drop_of`), summed per
-    /// item and deposited as piles at the block cell its centre of mass
-    /// rests in — past the region's edge (a body settles as it leaves) that
-    /// is the neighbour's cell, deposited by an intent to its owner; a full
-    /// pile spills to the cells around it — a tree a player felled: the logs
-    /// lie where it landed.
+    /// Removed, its blocks turned into their drops (`drop_of`, summed per
+    /// item at the detach: [`VoxelBody::drops`]) and deposited as piles at
+    /// the block cell its centre of mass rests in — in whichever region
+    /// then owns it (it crosses seams while it falls); a full pile spills to
+    /// the cells around it — a tree a player felled: the logs lie where it
+    /// landed.
     DropItems,
 }
 
@@ -167,6 +174,11 @@ pub struct VoxelBody {
     /// Its centre of mass's downward speed (units/s) after the last tick,
     /// for telling an impact ([`LANDING_IMPACT_TICKS`]).
     pub fall_speed: f32,
+    /// What it turns into once settled ([`SettlePolicy::DropItems`]: its
+    /// blocks' drops, [`drop_totals`], fixed at the detach; empty for
+    /// [`SettlePolicy::Despawn`]). In transit it rides `Carried::drops`
+    /// instead (empty here), so it is never carried twice.
+    pub drops: Vec<crate::ItemStack>,
 }
 
 /// Density class of a block (kg/m³): non-solid → leaf, half-block collider
@@ -452,28 +464,51 @@ fn topple_angvel(
     axis * w.max((TOPPLE_MARGIN * needed).min(TOPPLE_MAX_ANGVEL))
 }
 
-impl Rollback {
-    /// Deposits the drops (`drop_of`; leaves drop nothing) of `blocks` at
-    /// `cell`, summed per item (in `ItemId` order) — one deposit per item,
-    /// whose merge / free-cell rule spills what one pile cannot hold to the
-    /// cells around it. Pickable after `PICKUP_DELAY_TICKS`. Losses to the
-    /// pile caps are counted by the deposit.
-    pub(crate) fn drop_blocks_at_safe(&mut self, cell: BlockPos, blocks: impl IntoIterator<Item = Block>, tick: u64) {
-        let mut totals: BTreeMap<crate::ItemId, u32> = BTreeMap::new();
-        for block in blocks {
-            if let Some(stack) = crate::drop_of(block) {
-                *totals.entry(stack.item).or_default() += stack.count;
-            }
+/// The drops (`drop_of`; leaves drop nothing) of `blocks`, summed per item,
+/// in `ItemId` order.
+pub fn drop_totals(blocks: impl IntoIterator<Item = Block>) -> Vec<crate::ItemStack> {
+    let mut totals: BTreeMap<crate::ItemId, u32> = BTreeMap::new();
+    for block in blocks {
+        if let Some(stack) = crate::drop_of(block) {
+            *totals.entry(stack.item).or_default() += stack.count;
         }
-        for (item, count) in totals {
-            let stack = crate::ItemStack { item, count };
-            let _destroyed = self.deposit_items_safe(cell, stack, tick, crate::PICKUP_DELAY_TICKS);
+    }
+    totals.into_iter().map(|(item, count)| crate::ItemStack { item, count }).collect()
+}
+
+impl Rollback {
+    /// Deposits the drops of `blocks` ([`drop_totals`]) at `cell`.
+    pub(crate) fn drop_blocks_at_safe(&mut self, cell: BlockPos, blocks: impl IntoIterator<Item = Block>, tick: u64) {
+        self.deposit_drops_safe(cell, &drop_totals(blocks), tick);
+    }
+
+    /// Deposits `drops` at `cell` — one deposit per stack, whose merge /
+    /// free-cell rule spills what one pile cannot hold to the cells around
+    /// it. Pickable after `PICKUP_DELAY_TICKS`. Losses to the pile caps are
+    /// counted by the deposit.
+    pub(crate) fn deposit_drops_safe(&mut self, cell: BlockPos, drops: &[crate::ItemStack], tick: u64) {
+        for stack in drops {
+            let _destroyed = self.deposit_items_safe(cell, *stack, tick, crate::PICKUP_DELAY_TICKS);
+        }
+    }
+
+    /// A voxel body's collider material (not part of its `ColliderSpec`):
+    /// set on every collider of `handle`'s body, undo-safely — on a body
+    /// rebuilt from a crossing's bundle.
+    pub(crate) fn set_voxel_body_material_safe(&mut self, handle: rapier3d::prelude::RigidBodyHandle) {
+        let Some(body) = self.data.physics.bodies.get(handle) else { return };
+        for ch in body.colliders().to_vec() {
+            self.data.physics.colliders.mutate_collider_safe(ch, |c| {
+                c.set_friction(VOXEL_BODY_FRICTION);
+                c.set_restitution(VOXEL_BODY_RESTITUTION);
+            });
         }
     }
 
     /// Detaches the blocks at `positions` into one dynamic voxel body,
     /// undo-safely: the blocks are cleared from the terrain
-    /// (`clear_blocks_safe`) and a new entity carries them, its body at the
+    /// (`clear_blocks_safe`) and a new [`crate::EntityKind::Body`] entity
+    /// (with an `EntityId`: it crosses seams) carries them, its body at the
     /// model's centre of mass, spinning at `angvel` (rad/s, world axes).
     /// Refused positions (bedrock, outside the region) and
     /// air are skipped; `None`, with nothing changed, when nothing is left.
@@ -565,6 +600,7 @@ impl Rollback {
         let linvel = pivot.map_or(Vector::ZERO, |p| angvel.cross(pose.translation - p));
 
         let e = self.data.ecs.create_entity_safe();
+        self.assign_entity_id_safe(e);
         let user_data = e.data().as_ffi() as u128;
         // The body frame is the COM frame: same mass and inertia, COM at 0.
         let body_mprops = MassProperties { local_com: Vector::ZERO, ..mprops };
@@ -608,23 +644,31 @@ impl Rollback {
         self.attach_collider_safe(handle, collider);
 
         let spawned_tick = *self.data.tick;
+        // The model first, then the kind: a renderer seeing a `Body` kind
+        // already knows it is a voxel body (no placeholder box).
         self.data.send(GameDataUpdate::new(
             GameDataTransactionKind::Do,
             GameDataUpdateKind::AddVoxelBody(e, pose, Box::new(model.clone())),
         ));
-        self.data
-            .ecs
-            .voxel_body
-            .set_safe(e, Some(VoxelBody { model, origin, policy, spawned_tick, still_ticks: 0, landed: false, fall_speed: 0.0 }));
+        self.set_body_kind_safe(e);
+        let drops = match policy {
+            SettlePolicy::Despawn => Vec::new(),
+            SettlePolicy::DropItems => drop_totals(model.blocks.values().map(|(b, _)| *b)),
+        };
+        self.data.ecs.voxel_body.set_safe(
+            e,
+            Some(VoxelBody { model, origin, policy, spawned_tick, still_ticks: 0, landed: false, fall_speed: 0.0, drops }),
+        );
         Some(e)
     }
 
     /// Once per region tick, after the physics step: count each voxel
     /// body's consecutive still ticks (under both `REST_LINVEL` and
     /// `REST_ANGVEL`, or asleep), and settle it — apply its policy — at
-    /// `REST_TICKS` of them, at `SETTLE_TIMEOUT_TICKS` of age, or once its
-    /// centre of mass leaves the region's `0..REGION_SIZE` in x or z; and
-    /// mark it landed (heavier angular damping) when it is.
+    /// `REST_TICKS` of them, or at `SETTLE_TIMEOUT_TICKS` of age; and mark
+    /// it landed (heavier angular damping) when it is. A body whose centre
+    /// of mass leaves the region is not settled: `scan_boundaries` hands it
+    /// to the neighbour.
     /// Entities in key order.
     pub fn tick_voxel_bodies_safe(&mut self, tick: u64) {
         let keys: Vec<EntityKey> = self
@@ -647,24 +691,21 @@ impl Rollback {
             let land = !vb.landed && (body.rotation() * Vector::Y).y < LANDED_TILT_COS && impact;
             let still = body.is_sleeping()
                 || (v.dot(v) < REST_LINVEL * REST_LINVEL && w.dot(w) < REST_ANGVEL * REST_ANGVEL);
-            let t = body.translation();
-            let outside = !(0.0..REGION_SIZE).contains(&t.x) || !(0.0..REGION_SIZE).contains(&t.z);
             let still_ticks = if still { vb.still_ticks.saturating_add(1) } else { 0 };
-            let settle = still_ticks >= REST_TICKS
-                || tick.saturating_sub(vb.spawned_tick) >= SETTLE_TIMEOUT_TICKS
-                || outside;
+            let settle = still_ticks >= REST_TICKS || tick.saturating_sub(vb.spawned_tick) >= SETTLE_TIMEOUT_TICKS;
             if settle {
                 match vb.policy {
                     SettlePolicy::Despawn => self.remove_entity_safe(e, None),
                     SettlePolicy::DropItems => {
                         // The body frame is the centre-of-mass frame: the
-                        // drops go to the cell its centre of mass rests in.
+                        // drops go to the cell its centre of mass rests in
+                        // (past the seam within the flip hysteresis, the
+                        // neighbour's, by an intent to its owner).
                         let t = body.translation();
                         let bv = BLOCK_VOXELS as f32;
                         let cell = [t.x, t.y, t.z].map(|v| (v / bv).floor() as i32);
                         self.remove_entity_safe(e, None);
-                        let blocks: Vec<Block> = vb.model.blocks.values().map(|(b, _)| *b).collect();
-                        self.drop_blocks_at_safe(cell, blocks, tick);
+                        self.deposit_drops_safe(cell, &vb.drops, tick);
                     }
                 }
                 continue;

@@ -1,6 +1,7 @@
 use bevy::prelude::*;
 
 use super::bridge::{SimKind, SimTarget};
+use super::voxel_bodies::VoxelBodyModel;
 use game::EntityKind;
 
 /// Lazily-created shared avatar assets (one mesh + material per kind for now).
@@ -8,7 +9,19 @@ use game::EntityKind;
 pub struct AvatarAssets {
     player: Option<(Handle<Mesh>, Handle<StandardMaterial>)>,
     slime: Option<SlimeAssets>,
+    body: Option<(Handle<Mesh>, Handle<StandardMaterial>)>,
 }
+
+/// Marks an `EntityKind::Body` drawn as the placeholder box (a body whose
+/// shape the renderer does not know: the dev-dropped cube, or a voxel
+/// body's halo mirror before its arrival brings the model). Removed, with
+/// the box, once the entity turns out to be a voxel body.
+#[derive(Component, Debug)]
+pub struct BodyBox;
+
+/// Edge of a body's placeholder box, world units: one block, the dev
+/// drop's cube (`game::body::dev_drop_body_safe`).
+pub const BODY_BOX_EDGE: f32 = game::BLOCK_VOXELS as f32;
 
 /// A unit cube plus the slime's materials; every part is the cube scaled.
 #[derive(Clone)]
@@ -21,26 +34,48 @@ struct SlimeAssets {
 
 /// Attaches a renderable body to kind-bearing entities. Entities with an
 /// active `Camera3d` are the local player — the first-person camera sits
-/// inside the capsule, so the local player gets no mesh.
+/// inside the capsule, so the local player gets no mesh. A body that is a
+/// voxel body (`VoxelBodyModel`) is drawn by `voxel_bodies`, any other one
+/// as a [`BodyBox`] — taken off again if the model comes later.
 pub fn attach_avatars(
     mut commands: Commands,
     added: Query<
-        (Entity, &SimKind, Has<super::rigs::SimAnimator>),
+        (Entity, &SimKind, Has<super::rigs::SimAnimator>, Has<VoxelBodyModel>),
         (Added<SimKind>, Without<Camera3d>, Without<SlimeAvatar>),
     >,
+    modelled: Query<Entity, (Added<VoxelBodyModel>, With<BodyBox>)>,
     mut assets: ResMut<AvatarAssets>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    for (e, kind, rigged) in &added {
+    for e in &modelled {
+        commands.entity(e).remove::<(BodyBox, Mesh3d, MeshMaterial3d<StandardMaterial>)>();
+    }
+    for (e, kind, rigged, modelled) in &added {
         match kind.0 {
             // A rigged player is drawn by `rigs` (its model), not a capsule.
             EntityKind::Player if rigged => {}
             // A person is always drawn by `rigs` (the dwarf), never a capsule.
             EntityKind::Person { .. } => {}
-            // A generic dynamic body: not drawn yet (placeholder until its
-            // shape is rendered).
-            EntityKind::Body => {}
+            // A voxel body: its model is its look (`voxel_bodies`).
+            EntityKind::Body if modelled => {}
+            // Any other body: a one-block box (the shape is not sent; the
+            // only such body today is the dev-dropped cube).
+            EntityKind::Body => {
+                let (mesh, material) = assets
+                    .body
+                    .get_or_insert_with(|| {
+                        (
+                            meshes.add(Cuboid::from_length(BODY_BOX_EDGE)),
+                            materials.add(StandardMaterial {
+                                base_color: Color::srgb(0.62, 0.48, 0.32),
+                                ..Default::default()
+                            }),
+                        )
+                    })
+                    .clone();
+                commands.entity(e).insert((BodyBox, Mesh3d(mesh), MeshMaterial3d(material)));
+            }
             EntityKind::Player => {
                 let (mesh, material) = assets
                     .player
@@ -290,6 +325,24 @@ mod tests {
         app.world_mut().entity_mut(e).insert(SimKind(EntityKind::Slime { size: 2 }));
         app.update();
         assert_eq!(app.world().entity(e).get::<Children>().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn body_gets_a_box_unless_it_is_a_voxel_body() {
+        use crate::renderer::voxel_bodies::VoxelBodyModel;
+        let mut app = test_app();
+        let plain = app.world_mut().spawn(SimKind(EntityKind::Body)).id();
+        let voxel = app.world_mut().spawn((SimKind(EntityKind::Body), VoxelBodyModel)).id();
+        // A mirror drawn as a box until its arrival brings the model.
+        let late = app.world_mut().spawn(SimKind(EntityKind::Body)).id();
+        app.update();
+        assert!(app.world().entity(plain).contains::<Mesh3d>(), "a plain body is a box");
+        assert!(!app.world().entity(voxel).contains::<Mesh3d>(), "a voxel body draws its model");
+        assert!(app.world().entity(late).contains::<Mesh3d>());
+        app.world_mut().entity_mut(late).insert(VoxelBodyModel);
+        app.update();
+        assert!(!app.world().entity(late).contains::<Mesh3d>(), "the box goes once the model comes");
+        assert!(!app.world().entity(late).contains::<BodyBox>());
     }
 
     #[test]

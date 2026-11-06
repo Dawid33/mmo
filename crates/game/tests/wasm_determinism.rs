@@ -87,9 +87,13 @@ const UNDERGROUND_DIGEST: u32 = pinned(0x5448_586C, 0x2DEF_E7AF);
 const UNDERGROUND_STATE_HASH: u32 = pinned(0x4080_B196, 0x2521_E38D);
 
 /// crc32 of [`voxel_body_scene`]'s region bytes, on every target.
-const VOXEL_BODY_DIGEST: u32 = pinned(0x0F43_FFD4, 0x286E_0739);
+/// Re-recorded for Task 7.5 (voxel bodies cross seams): the body is now an
+/// `EntityKind::Body` with an `EntityId` (`Ecs.kind` / `id`, `id_index`,
+/// `next_entity_serial`) and `VoxelBody` gained `drops` — state layout only,
+/// the same detach and fall (16-block values only).
+const VOXEL_BODY_DIGEST: u32 = pinned(0x0F43_FFD4, 0xED51_A22D);
 /// `game::state_hash` of the same state, on every target.
-const VOXEL_BODY_STATE_HASH: u32 = pinned(0x8D9E_A328, 0x4A25_6EB1);
+const VOXEL_BODY_STATE_HASH: u32 = pinned(0x8D9E_A328, 0x7E5C_6CD7);
 /// Ticks of [`voxel_body_scene`] after the detach: mid-fall (it rests and
 /// despawns at ~50).
 const VOXEL_BODY_TICKS: usize = 30;

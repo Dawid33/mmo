@@ -108,3 +108,60 @@ fn spawn_rolls_back_bit_exact() {
     rb.rollback();
     assert_eq!(before, state_hash(&rb), "the spawn rolls back bit-exact");
 }
+
+/// `Order::DevDropBody`: a 1 m cube [`game::body::DEV_DROP_HEIGHT_BLOCKS`]
+/// above the tile, spinning a little (at most
+/// [`game::body::DEV_DROP_SPIN_RAD_PER_S`] about each axis, rolled from the
+/// tick — the same on every replay); a tile off the region's columns is
+/// refused.
+#[test]
+fn dev_drop_body_drops_a_spinning_cube_above_the_tile() {
+    use game::body::{DEV_DROP_HEIGHT_BLOCKS, DEV_DROP_SPIN_RAD_PER_S};
+    let bodies = |region: &Region| -> Vec<EntityKey> {
+        let r = region.data();
+        r.id_index.values().copied().filter(|k| *r.ecs.kind.try_get(*k) == Some(EntityKind::Body)).collect()
+    };
+    let drop = |region: &mut Region, at: game::TilePos| {
+        region.handle_event(GameEventKind::Order(0, game::Order::DevDropBody { at })).unwrap();
+        region.forget_last_event();
+    };
+    let mut region = floored_region();
+    let at = [20, 1, 24];
+    drop(&mut region, at);
+    let all = bodies(&region);
+    assert_eq!(all.len(), 1, "one body dropped");
+    let b = live_body(&region, all[0]);
+    let t = b.translation();
+    let want = Vector::new(20.5 * B, (1 + DEV_DROP_HEIGHT_BLOCKS) as f32 * B + B / 2.0, 24.5 * B);
+    assert_eq!(t, want);
+    let w = b.angvel();
+    assert!(w != Vector::ZERO, "it spins");
+    assert!(w.abs().max_element() <= DEV_DROP_SPIN_RAD_PER_S, "a little: {w:?}");
+    let collider = region.data().physics.colliders.get(b.colliders()[0]).unwrap();
+    assert_eq!(ColliderSpec::of_shape(collider.shape()), Some(cube()));
+    // The same order on the same tick spins the same way.
+    let mut again = floored_region();
+    drop(&mut again, at);
+    assert_eq!(live_body(&again, bodies(&again)[0]).angvel(), w);
+    // Off the region's columns: refused.
+    drop(&mut region, [-1, 1, 24]);
+    drop(&mut region, [game::REGION_BLOCKS as i32, 1, 24]);
+    assert_eq!(bodies(&region).len(), 1, "off-region drops refused");
+}
+
+/// A body whose collider is a shape that cannot cross (no `ColliderSpec`)
+/// fails loudly at extraction instead of arriving as a player capsule.
+#[test]
+#[cfg(debug_assertions)]
+#[should_panic(expected = "no ColliderSpec")]
+fn unsupported_collider_shape_fails_loudly() {
+    let mut region = floored_region();
+    let pose = Pose::from_translation(Vector::new(REGION_SIZE / 2.0, FLOOR_TOP + B, REGION_SIZE / 2.0));
+    let e = spawn(&mut region, pose, cube(), Vector::ZERO, Vector::ZERO);
+    region.with_data(|r| {
+        let handle = r.data.ecs.rigidbody.try_get(e).unwrap();
+        let ch = r.data.physics.bodies.get(handle).unwrap().colliders()[0];
+        r.data.physics.colliders.mutate_collider_safe(ch, |c| c.set_shape(game::rapier3d::prelude::SharedShape::cylinder(4.0, 8.0)));
+        let _ = r.extract_entity_safe(e);
+    });
+}

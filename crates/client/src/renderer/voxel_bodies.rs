@@ -40,6 +40,12 @@ use super::voxel_pull::ChunkQuads;
 #[derive(Component, Clone)]
 pub struct PendingVoxelBody(pub Arc<VoxelModel>);
 
+/// Marks a body entity drawn by its voxel model (set with every
+/// [`PendingVoxelBody`], never removed): `avatar` draws such an
+/// `EntityKind::Body` no placeholder box.
+#[derive(Component, Clone, Copy, Debug, Default)]
+pub struct VoxelBodyModel;
+
 /// The body's in-flight mesh build. Replacing it cancels the older build.
 #[derive(Component)]
 pub struct VoxelBodyMeshing(Task<BodyMesh>);

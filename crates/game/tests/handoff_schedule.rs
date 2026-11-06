@@ -1164,3 +1164,143 @@ fn body_slide_is_seam_invariant_within_its_handoff_cost() {
     }
     eprintln!("[body] slide worst: pose {} blocks, rotation {}°", worst.0, worst.1);
 }
+
+// --- A tree felled across a seam ------------------------------------------------
+
+/// The felled tree's id (any non-zero id; the floor holds no other tree).
+const FELLED_TREE_ID: u32 = 7;
+/// Its trunk, in logs above the floor: tall enough (`TALL_PART_BLOCKS`) to
+/// topple over its butt, and to lay its centre of mass down past the seam.
+const FELLED_TRUNK_BLOCKS: i32 = 12;
+/// Blocks from the origin, along +x and +z, of the trunk: 2 from the seam.
+const FELLED_TRUNK_OFFSET: i64 = 2;
+/// Rounds for the fall and the rest that settles it (`REST_TICKS` still
+/// ticks), well under its `SETTLE_TIMEOUT_TICKS`, with room for jitter.
+const FELLED_ROUNDS: u32 = 120;
+
+/// A tree 2 blocks short of the seam (the corner, at `Corner`) leaning
+/// toward −x/−z across it: an oak trunk with a limb of logs and a few
+/// leaves reaching over the origin. Setup chops it at the floor as an
+/// Adventure player does (`player_chop_safe`: the cut drops at the stump,
+/// the rest falls as a `DropItems` voxel body). It tips along its lean,
+/// crosses the seam as an `EntityKind::Body` while it falls, and its logs
+/// are put down where it rests, by the region that then owns it.
+struct FelledTree;
+
+impl FelledTree {
+    /// The tree's blocks, (offset from the origin — on the stand level —,
+    /// block, limb).
+    fn blocks(log: BlockId, leaves: BlockId) -> Vec<([i64; 3], BlockId, u8)> {
+        let t = FELLED_TRUNK_OFFSET;
+        let mut out: Vec<([i64; 3], BlockId, u8)> =
+            (0..FELLED_TRUNK_BLOCKS).map(|y| ([t, y as i64, t], log, 0)).collect();
+        let top = FELLED_TRUNK_BLOCKS as i64 - 1;
+        for (d, dy) in [(1, -3), (1, -2), (2, -2), (2, -1), (1, -1)] {
+            out.push(([t - d, top + dy, t - d], log, 1));
+        }
+        for (d, dy) in [(2, 0), (1, 0)] {
+            out.push(([t - d, top + dy, t - d], leaves, 1));
+        }
+        out
+    }
+
+    fn ids() -> (BlockId, BlockId) {
+        let reg = game::BlockRegistry::from_ron(include_str!("../../../assets/blocks/blocks.ron")).unwrap();
+        (reg.id_of("oak_log").unwrap(), reg.id_of("oak_leaves").unwrap())
+    }
+
+    /// Every item the tree is worth: the drops of its blocks.
+    fn worth() -> BTreeMap<game::ItemId, u32> {
+        common::install_real_block_props();
+        let (log, leaves) = Self::ids();
+        let mut out = BTreeMap::new();
+        for (_, id, limb) in Self::blocks(log, leaves) {
+            if let Some(s) = game::drop_of(Block::with_tree(id, FELLED_TREE_ID, limb)) {
+                *out.entry(s.item).or_default() += s.count;
+            }
+        }
+        out
+    }
+}
+
+impl Scenario for FelledTree {
+    fn setup(&self, rig: &mut Rig, origin: WorldBlockPos) {
+        common::install_real_block_props();
+        let p = BODY_PLAYER_BLOCKS;
+        place_player(rig, offset(origin, p, 0, p), false);
+        let (log, leaves) = Self::ids();
+        let blocks = Self::blocks(log, leaves);
+        let cut = spawn_tile(offset(origin, FELLED_TRUNK_OFFSET, 0, FELLED_TRUNK_OFFSET));
+        rig.manager.spawner_mut().with_region(SPAWN_REGION, |region| {
+            region.with_data(|d| {
+                for (o, id, limb) in &blocks {
+                    let at = spawn_tile(offset(origin, o[0], o[1] as i32, o[2]));
+                    assert!(d.set_block_safe(at, Block::with_tree(*id, FELLED_TREE_ID, *limb)), "tree block at {at:?}");
+                }
+                let tick = *d.data.tick;
+                assert!(d.player_chop_safe(cut, tick), "the chop fells the tree");
+            });
+        });
+    }
+
+    fn drive(&self, _rig: &mut Rig, _round: u32) {}
+
+    fn rounds(&self) -> u32 {
+        FELLED_ROUNDS
+    }
+
+    fn crosser(&self) -> Option<game::EntityKind> {
+        Some(game::EntityKind::Body)
+    }
+}
+
+/// Every pile's items summed per item.
+fn pile_totals(s: &WorldSnapshot) -> BTreeMap<game::ItemId, u32> {
+    let mut out = BTreeMap::new();
+    for stack in s.piles.values().flatten() {
+        *out.entry(stack.item).or_default() += stack.count;
+    }
+    out
+}
+
+/// A tree felled 2 blocks from a seam, leaning across it, falls across it
+/// in every placement: the body crosses (`run` asserts it was owned past the
+/// seam / corner, and by one region at a time), settles there, and its logs
+/// lie in piles owned by the regions they lie in (`snapshot` asserts it),
+/// past the origin — every item the tree was worth, once (the stump's pile
+/// included), lockstep and under jittery seeds. The piles' cells are the
+/// discrete outcome compared against the centred run; see the body below.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn tree_felled_across_seam() {
+    let worth = FelledTree::worth();
+    assert!(!worth.is_empty(), "the tree is worth something");
+    let reference = run(&FelledTree, Placement::Centre, None);
+    let check = |snap: &WorldSnapshot, what: &str| {
+        assert!(
+            !snap.entities.values().any(|e| e.kind == game::EntityKind::Body),
+            "{what}: the felled part settled"
+        );
+        assert_eq!(pile_totals(snap), worth, "{what}: every item, once: {:?}", snap.piles);
+        let past = snap.piles.keys().filter(|c| c[0] < 0 && c[2] < 0).count();
+        assert!(past > 0, "{what}: logs lie past the origin: {:?}", snap.piles);
+    };
+    check(&reference, "lockstep Centre");
+    for placement in &PLACEMENTS[1..] {
+        let snap = run(&FelledTree, *placement, None);
+        check(&snap, &format!("lockstep {placement:?}"));
+        if let Err(e) = compare(&reference, &snap, &LOCKSTEP_TOLERANCES) {
+            panic!("lockstep {placement:?} differs from Centre: {e}");
+        }
+    }
+    for seed in 0..JITTER_SEEDS {
+        for placement in PLACEMENTS {
+            let what = format!("jittery seed {seed} {placement:?}");
+            let snap = run(&FelledTree, placement, Some(InlineSchedule::jittery(seed)));
+            check(&snap, &what);
+            if let Err(e) = compare(&reference, &snap, &Tolerances { tiles: true, ..JITTER_TOLERANCES }) {
+                panic!("{what} differs from lockstep Centre: {e}");
+            }
+        }
+    }
+}

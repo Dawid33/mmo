@@ -749,12 +749,11 @@ fn pickup_from_neighbour_pile() {
     assert_seam_invariant(&PickupAcross, Some(InlineSchedule::jittery));
 }
 
-/// A felled body's `DropItems` across a seam (Task 6.3): a voxel body
-/// settles at once when its centre of mass leaves its region, and its drops
-/// go to the cell under it — the neighbour's, by a region-sourced deposit
-/// intent to that cell's owner. A dirt column at the spawn region's −x edge
-/// toppled about its −x base edge falls into region (−1, 0): the four dirt
-/// end up in piles there, none here, nothing lost.
+/// A felled body's `DropItems` across a seam: a dirt column at the spawn
+/// region's −x edge toppled about its −x base edge falls into region
+/// (−1, 0) — since Task 7.5 the voxel body crosses the seam (its drops in
+/// the bundle) and settles there, putting its drops down in its new owner's
+/// cells: the four dirt end up in piles there, none here, nothing lost.
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn felled_body_drops_across_seam() {

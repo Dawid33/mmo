@@ -68,6 +68,16 @@ Multi-region world follow-ups (milestone landed; spec 2026-07-05-multi-region-wo
   region grid bounded by the map's extent — it does not read `WorldMap` tile summaries (sea, relief),
   so a goal past a sea or a mountain range relies on the fine A* finding a way within each region ∪
   halo, and gives up (walk dropped) where none is.
+- **Dynamic bodies across seams (Task 7.5, 2026-11-06)**: voxel bodies (felled trees, detached
+  terrain) are `EntityKind::Body`s that cross seams with their model and `DropItems` drops
+  (`Carried::voxel_body` / `Carried::drops`); `TIP_EDGE_MARGIN_BLOCKS` is gone, a tree falls across a
+  seam; the F3 Debug tab's "Drop body at cursor" sends `Order::DevDropBody` (a 1 m cube, drawn as a
+  placeholder box). **Live check pending** (one client, `just adapter=Intel world=small run`): drop
+  bodies on a slope toward the home region edge, fell a tree across the seam in Adventure — each
+  crosses without a pop or a frozen frame, the orientation interpolates across the region-local frame
+  change, and the logs lie where the tree lands. Known gaps: a voxel body's halo mirror whose owner the
+  client does not predict draws as the placeholder box (the mirror has no model); a voxel body's
+  collider material (friction 0.9) is re-set on arrival, its mirror keeps the default.
 
 In-engine UI (spec docs/superpowers/specs/2026-07-07-in-engine-ui-design.md,
 plan docs/superpowers/plans/2026-07-07-in-engine-ui.md): inventory/hotbar landed

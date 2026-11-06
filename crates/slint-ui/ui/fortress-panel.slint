@@ -35,6 +35,7 @@ export component FortressPanel {
     in property <[DevTickRow]> dev-tick-rows;
     callback dev-toggle(int, bool);
     callback dev-complete-orders();
+    callback dev-drop-body();
     in property <[string]> governance-lines;
     in property <[string]> people;
     in property <[string]> designations;
@@ -55,6 +56,8 @@ export component FortressPanel {
     out property <length> dev-toggle-row-height: debug.toggle-row-height;
     out property <length> dev-complete-x: debug.complete-button-x;
     out property <length> dev-complete-y: debug.complete-button-y;
+    out property <length> dev-drop-x: debug.drop-button-x;
+    out property <length> dev-drop-y: debug.drop-button-y;
     out property <length> dev-ticks-x: debug.ticks-x;
     out property <length> values-left: values.absolute-position.x;
     out property <length> values-top: values.absolute-position.y;
@@ -138,6 +141,7 @@ export component FortressPanel {
                     tick-rows: root.dev-tick-rows;
                     toggle(i, on) => { root.dev-toggle(i, on); }
                     complete-orders => { root.dev-complete-orders(); }
+                    drop-body => { root.dev-drop-body(); }
                 }
             }
         }

@@ -15,11 +15,13 @@ use std::collections::BTreeMap;
 /// The conservation invariant of a crossing: every `EntityId` is owned by
 /// exactly one running region or sits exactly once in the manager's
 /// in-flight table or arrival mailbox — never both, never twice, and (people aside, whom the
-/// history may absorb or end, and arrivals a full mailbox despawned) never
-/// lost. Called every round.
+/// history may absorb or end, arrivals a full mailbox despawned, and voxel
+/// bodies that settled in the region owning them) never lost. Called every
+/// round.
 pub fn assert_conserved(rig: &mut Rig) {
     let mut places: BTreeMap<EntityId, Vec<Option<RegionCoords>>> = BTreeMap::new();
     let mut people = std::collections::BTreeSet::new();
+    let mut settling = std::collections::BTreeSet::new();
     for rc in rig.manager.running_regions() {
         rig.manager.spawner_mut().with_region(rc, |region| {
             let data = region.data();
@@ -28,9 +30,13 @@ pub fn assert_conserved(rig: &mut Rig) {
                 if matches!(data.ecs.kind.try_get(key), Some(game::EntityKind::Person { .. })) {
                     people.insert(*id);
                 }
+                if data.ecs.voxel_body.try_get(key).is_some() {
+                    settling.insert(*id);
+                }
             }
         });
     }
+    rig.settling.extend(settling);
     for (id, _target) in rig.manager.in_flight_ids() {
         places.entry(id).or_default().push(None);
     }
@@ -45,6 +51,18 @@ pub fn assert_conserved(rig: &mut Rig) {
     // A waiting arrival the full mailbox despawned is an allowed exit.
     for id in rig.manager.recently_despawned_arrivals() {
         rig.tracked.remove(&id);
+    }
+    // A voxel body settles (its policy) where it is owned: an allowed exit
+    // from a region, never from flight.
+    let settled: Vec<EntityId> = rig
+        .tracked
+        .iter()
+        .filter(|(id, last)| !places.contains_key(id) && last.is_some() && rig.settling.contains(id))
+        .map(|(id, _)| *id)
+        .collect();
+    for id in settled {
+        rig.tracked.remove(&id);
+        rig.settling.remove(&id);
     }
     for (id, last) in &rig.tracked {
         assert!(places.contains_key(id), "{id:?} vanished (last seen {last:?}, None = in flight)");
@@ -120,6 +138,9 @@ pub struct Rig {
     /// Every non-person entity [`assert_conserved`] has seen, and where it
     /// was last (`None` = in flight): it must never vanish.
     pub tracked: std::collections::BTreeMap<EntityId, Option<RegionCoords>>,
+    /// The voxel bodies [`assert_conserved`] has seen: they may end by
+    /// settling in the region that owns them.
+    pub settling: std::collections::BTreeSet<EntityId>,
     /// Latest region snapshot sent to the client, per region: whether it
     /// held the client's player.
     pub snapshot_has_player: std::collections::BTreeMap<RegionCoords, bool>,
@@ -154,6 +175,7 @@ impl Rig {
             pushed_home: None,
             trace: None,
             tracked: Default::default(),
+            settling: Default::default(),
             snapshot_has_player: Default::default(),
         }
     }

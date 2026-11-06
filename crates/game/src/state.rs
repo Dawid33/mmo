@@ -1725,20 +1725,25 @@ impl Rollback {
     }
 
     /// The transferable shape spec of a body's first collider (capsule,
-    /// cuboid, ball or a compound of those), or the player default.
+    /// cuboid, ball or a compound of those — a voxel body's compound reads
+    /// back exactly). Any other shape cannot cross: a bug, which fails a
+    /// debug build and is logged in release, where the player capsule stands
+    /// in.
     fn collider_spec_of(&self, handle: RigidBodyHandle) -> crate::ColliderSpec {
-        self.data
+        let spec = self
+            .data
             .physics
             .bodies
             .get(handle)
             .and_then(|b| b.colliders().first().copied())
             .and_then(|ch| self.data.physics.colliders.get(ch))
-            .and_then(|c| crate::ColliderSpec::of_shape(c.shape()))
-            // Other shapes don't transfer; the player default.
-            .unwrap_or(crate::ColliderSpec::CapsuleY {
-                half_height: PLAYER_CAPSULE_HALF_HEIGHT,
-                radius: PLAYER_CAPSULE_RADIUS,
-            })
+            .and_then(|c| crate::ColliderSpec::of_shape(c.shape()));
+        if let Some(spec) = spec {
+            return spec;
+        }
+        log::error!("body {handle:?} has no ColliderSpec (missing collider or a shape that cannot cross); crossing as a player capsule");
+        debug_assert!(false, "body {handle:?} has no ColliderSpec: its collider shape cannot cross a seam");
+        crate::ColliderSpec::CapsuleY { half_height: PLAYER_CAPSULE_HALF_HEIGHT, radius: PLAYER_CAPSULE_RADIUS }
     }
 
     /// Assemble the bundle, then remove the entity — all undo-tracked.

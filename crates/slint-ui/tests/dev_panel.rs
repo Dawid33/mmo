@@ -120,6 +120,22 @@ fn clicking_the_button_fires_complete_orders() {
 
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
+fn clicking_drop_body_fires_its_callback_only() {
+    let mut panel = panel();
+    let dropped = Rc::new(RefCell::new(0));
+    let completed = Rc::new(RefCell::new(0));
+    let (d, c) = (dropped.clone(), completed.clone());
+    panel.ui().on_dev_drop_body(move || *d.borrow_mut() += 1);
+    panel.ui().on_dev_complete_orders(move || *c.borrow_mut() += 1);
+    open(&mut panel);
+
+    let (x, y) = (panel.ui().get_dev_drop_x(), panel.ui().get_dev_drop_y());
+    click(&mut panel, x, y);
+    assert_eq!((*dropped.borrow(), *completed.borrow()), (1, 0));
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
 fn collapsed_tab_takes_no_clicks() {
     let mut panel = panel();
     let fired = Rc::new(RefCell::new(0));

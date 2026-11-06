@@ -62,7 +62,9 @@ pub const REGION_MAGIC: [u8; 8] = *b"MMOREGN\0";
 /// 19: `BodyState` (in saved in-flight transfers) carries the body's user
 /// force/torque and soft-CCD distance (`EntityKind::Body`).
 /// 20: `Carried` (in saved in-flight transfers) carries the entity's `drops`.
-pub const REGION_FILE_VERSION: u32 = 20;
+/// 21: `VoxelBody` gained `drops`; voxel bodies are `EntityKind::Body` with an
+/// `EntityId`, and `Carried` gained `voxel_body`.
+pub const REGION_FILE_VERSION: u32 = 21;
 /// magic + version + region blocks + chunk blocks + world crc + payload crc.
 const HEADER_LEN: usize = 8 + 4 * 5;
 

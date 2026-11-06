@@ -1,8 +1,9 @@
 //! Voxel bodies (`game::voxel_body`): a set of terrain blocks detached into
 //! one dynamic rigid body that falls and is despawned once it rests. The
 //! detach and every tick of the fall must roll back bit-exact, replay
-//! identically, and a body leaving the region must vanish rather than be
-//! handed to the neighbour as a (capsule) entity.
+//! identically, and a body leaving the region crosses the seam as an
+//! `EntityKind::Body` — its model, compound collider, mass, material and
+//! drops travel with it.
 mod common;
 
 use common::{floor_chunks, r0};
@@ -10,10 +11,10 @@ use crossbeam::channel::Receiver;
 use game::rapier3d::math::Vector;
 use game::voxel_body::{
     model_mass_properties, SettlePolicy, VoxelModel, LEAF_DENSITY, REST_TICKS, SETTLE_TIMEOUT_TICKS,
-    STONE_DENSITY, WOOD_DENSITY,
+    STONE_DENSITY, VOXEL_BODY_FRICTION, VOXEL_BODY_RESTITUTION, WOOD_DENSITY,
 };
 use game::{
-    install_block_props, state_hash, Block, BlockId, BlockRegistry, EntityKey, GameDataUpdate,
+    install_block_props, state_hash, Block, BlockId, BlockRegistry, ColliderSpec, EntityKey, GameDataUpdate, ItemStack,
     GameDataUpdateKind, GameEventKind, Region, Rollback, BLOCK_VOXELS, REGION_BLOCKS, REGION_SIZE,
 };
 
@@ -32,9 +33,14 @@ fn registry() -> BlockRegistry {
 /// A region floored one block deep over block columns `x_blocks` × 0..32,
 /// no players, with its render-update receiver (drained).
 fn region_over(x_blocks: std::ops::Range<usize>) -> (Region, Receiver<GameDataUpdate>) {
+    region_at(r0(), x_blocks)
+}
+
+/// [`region_over`] for the region at `rc`.
+fn region_at(rc: game::RegionCoords, x_blocks: std::ops::Range<usize>) -> (Region, Receiver<GameDataUpdate>) {
     registry();
     let (send, recv) = crossbeam::channel::unbounded();
-    let mut region = Region::new(Rollback::new(Some(send.clone())), Some(send), r0(), None);
+    let mut region = Region::new(Rollback::new(Some(send.clone())), Some(send), rc, None);
     let chunks = floor_chunks(x_blocks.start as f32 * B..x_blocks.end as f32 * B, 0.0..32.0 * B, BLOCK_VOXELS as u32);
     region.with_data(|r| r.seed_terrain_genesis(chunks));
     while recv.try_recv().is_ok() {}
@@ -97,7 +103,9 @@ fn detach_clears_terrain_and_spawns_body() {
     assert_ne!(block_at(r, [16, 0, 16]).id, BlockId::AIR, "the floor under it stays");
     let body = r.physics.bodies.get(*r.ecs.rigidbody.get(e)).unwrap();
     assert!(body.is_dynamic(), "a dynamic body");
-    assert_eq!(r.ecs.kind.try_get(e), &None, "no EntityKind: never transferred");
+    assert_eq!(r.ecs.kind.try_get(e), &Some(game::EntityKind::Body), "a crossing body");
+    assert!(r.entity_id(e).is_some(), "with an identity");
+    assert!(r.ecs.voxel_body.get(e).drops.is_empty(), "a Despawn body carries no drops");
     let vb = r.ecs.voxel_body.get(e);
     assert_eq!(vb.model.blocks.len(), 6);
     assert_eq!(vb.origin, [16, 1, 16]);
@@ -290,21 +298,146 @@ fn same_inputs_same_end_pose() {
     assert_eq!(ha, hb);
 }
 
+/// The compound a voxel body of `model` (not toppling) collides with, as a
+/// spec: one cuboid per `model_collider_boxes` box, in the body's
+/// centre-of-mass frame — computed here independently of the sim's read-back.
+fn expected_collider(model: &VoxelModel) -> ColliderSpec {
+    let com = model_mass_properties(model).local_com;
+    ColliderSpec::Compound(
+        game::voxel_body::model_collider_boxes(model)
+            .into_iter()
+            .map(|(lo, hi)| {
+                let half = [0, 1, 2].map(|a| (hi[a] - lo[a]) as f32 * 0.5);
+                let centre = Vector::new(lo[0] as f32 + half[0], lo[1] as f32 + half[1], lo[2] as f32 + half[2]);
+                (game::Pose::from_translation(centre - com), ColliderSpec::Cuboid { half_extents: Vector::from(half) })
+            })
+            .collect(),
+    )
+}
+
 #[test]
-fn body_leaving_region_is_despawned_not_transferred() {
+fn body_leaving_region_departs_as_a_body() {
     let edge = REGION_BLOCKS as i32 - 1;
     let (mut region, _recv) = region_over(REGION_BLOCKS - 32..REGION_BLOCKS);
-    let col = column(edge, 16, 6);
+    let mut col = column(edge, 16, 6);
+    col.push([edge - 1, 6, 16]);
     build(&mut region, &col, Block::new(STONE));
     // Tips toward +x, over the region edge.
     let e = detach(&mut region, &col, Vector::new(0.0, 0.0, -2.0));
-    let (ticks, _, still, last_x) = run_until_gone(&mut region, e, SETTLE_TIMEOUT_TICKS + 5, |reg| {
-        let (departures, halo) = reg.take_transfers();
-        assert!(departures.is_empty() && halo.is_empty(), "a voxel body never crosses the seam");
-    })
-    .expect("despawned");
-    assert!(ticks < SETTLE_TIMEOUT_TICKS && still < REST_TICKS, "left the region, not rested/timed out");
-    assert!(last_x > REGION_SIZE - B, "it was leaving over +x: last x {last_x}");
+    let vb = region.data().ecs.voxel_body.get(e).clone();
+    let id = region.data().entity_id(e).expect("an id");
+    let mut departed = None;
+    for t in 0..SETTLE_TIMEOUT_TICKS {
+        tick(&mut region);
+        let (departures, _halo) = region.take_transfers();
+        if let Some((bundle, _)) = departures.into_iter().next() {
+            departed = Some((t, bundle));
+            break;
+        }
+        assert!(alive(region.data(), e), "not settled while still in the region (tick {t})");
+    }
+    let (t, bundle) = departed.expect("the body departs over +x");
+    assert!(t < SETTLE_TIMEOUT_TICKS, "it left, it did not time out");
+    assert!(!alive(region.data(), e), "extracted from the source");
+    assert_eq!((bundle.id, bundle.kind), (id, game::EntityKind::Body));
+    assert_eq!(bundle.body.kind, game::BodyKind::Dynamic);
+    let carried = bundle.carried.voxel_body.as_ref().expect("the voxel body travels");
+    assert_eq!(carried.model, vb.model);
+    assert!(bundle.carried.drops.is_empty(), "a Despawn body carries no drops");
+    // The compound reads back exactly — part for part, bit for bit — and
+    // rebuilds into the same shape.
+    assert_eq!(bundle.collider, expected_collider(&vb.model));
+    assert_eq!(ColliderSpec::of_shape(&*bundle.collider.shared_shape()), Some(bundle.collider.clone()));
+    // The whole mass is the explicit one (COM frame).
+    let m = bundle.body.mass.expect("a dynamic body's explicit mass");
+    let want = model_mass_properties(&vb.model);
+    assert_eq!((m.mass(), m.local_com), (want.mass(), Vector::ZERO));
+}
+
+/// A `DropItems` body crossing a seam: its drops leave in
+/// `Carried::drops` (not inside the carried voxel body), come back into the
+/// arrived body's `VoxelBody`, and are put down where it rests in the new
+/// region — every item, once. Material, mass, model and identity arrive
+/// unchanged; the region-local `origin` is rebased.
+#[test]
+fn drops_travel_with_a_crossing_body() {
+    let reg = registry();
+    let log = Block::new(reg.id_of("oak_log").unwrap());
+    let (mut west, _rw) = region_over(0..32);
+    let col = column(16, 16, 3);
+    build(&mut west, &col, log);
+    let mut e = None;
+    west.with_data(|r| e = r.detach_blocks_safe(&col, SettlePolicy::DropItems, Vector::ZERO));
+    let e = e.expect("detached");
+    let one = game::drop_of(log).expect("a log drops");
+    let expected = vec![ItemStack { item: one.item, count: one.count * 3 }];
+    let vb = west.data().ecs.voxel_body.get(e).clone();
+    assert_eq!(vb.drops, expected, "the drops are fixed at the detach");
+    // Moved past the +x edge (as if it had flown there), then handed off.
+    let id = west.data().entity_id(e).unwrap();
+    let mut bundle = None;
+    west.with_data(|r| {
+        let mut pose = *r.physics.bodies.get(*r.ecs.rigidbody.get(e)).unwrap().position();
+        pose.translation.x += REGION_SIZE;
+        r.set_body_pose_safe(e, pose);
+        bundle = Some(r.extract_entity_safe(e));
+    });
+    let mut bundle = bundle.unwrap();
+    assert_eq!(bundle.carried.drops, expected, "the drops leave in the bundle");
+    assert!(bundle.carried.voxel_body.as_ref().unwrap().drops.is_empty(), "once: not also inside the body");
+    let east = game::RegionCoords::new(r0().x + 1, r0().z);
+    bundle.rebase(r0(), east);
+    assert_eq!(bundle.carried.voxel_body.as_ref().unwrap().origin, [16 - REGION_BLOCKS as i32, 1, 16]);
+
+    let (mut there, recv) = region_at(east, 0..32);
+    let mut arrived = None;
+    there.with_data(|r| arrived = r.apply_arrival(bundle.clone()));
+    let a = arrived.expect("a fresh arrival");
+    let r = there.data();
+    assert_eq!((r.entity_id(a), *r.ecs.kind.try_get(a)), (Some(id), Some(game::EntityKind::Body)));
+    let got = r.ecs.voxel_body.get(a).clone();
+    assert_eq!(got.drops, expected, "the drops are back in the body");
+    assert_eq!((got.model, got.policy), (vb.model.clone(), vb.policy));
+    let body = r.physics.bodies.get(*r.ecs.rigidbody.get(a)).unwrap();
+    let collider = r.physics.colliders.get(body.colliders()[0]).unwrap();
+    assert_eq!((collider.friction(), collider.restitution()), (VOXEL_BODY_FRICTION, VOXEL_BODY_RESTITUTION));
+    assert_eq!(game::BodyState::of(body).mass, bundle.body.mass, "the explicit mass arrives bit-unchanged");
+    let added = recv.try_iter().any(|u| matches!(u.update_kind, GameDataUpdateKind::AddVoxelBody(k, _, _) if k == a));
+    assert!(added, "the renderer is told the arrived body's model");
+
+    // It falls to the floor, rests and puts every log down here.
+    run_until_gone(&mut there, a, SETTLE_TIMEOUT_TICKS + 5, |_| {}).expect("settled");
+    let piles: Vec<_> = there.data().item_piles().iter().map(|(c, p)| (*c, p.stacks.clone())).collect();
+    let logs: u32 = piles.iter().flat_map(|(_, s)| s).filter(|s| s.item == one.item).map(|s| s.count).sum();
+    assert_eq!(logs, 3 * one.count, "every log, once: {piles:?}");
+    assert!(piles.iter().all(|(c, _)| c.to_local().0 == east), "put down in the region it rests in: {piles:?}");
+}
+
+/// Re-applying the same arrival (a replay) neither duplicates the body nor
+/// re-announces its model, and keeps its drops.
+#[test]
+fn replayed_voxel_body_arrival_keeps_one_copy_of_its_drops() {
+    let reg = registry();
+    let log = Block::new(reg.id_of("oak_log").unwrap());
+    let (mut west, _rw) = region_over(0..32);
+    let col = column(16, 16, 2);
+    build(&mut west, &col, log);
+    let mut bundle = None;
+    west.with_data(|r| {
+        let e = r.detach_blocks_safe(&col, SettlePolicy::DropItems, Vector::ZERO).unwrap();
+        bundle = Some(r.extract_entity_safe(e));
+    });
+    let bundle = bundle.unwrap();
+    let (mut there, recv) = region_at(r0(), 0..32);
+    let mut first = None;
+    there.with_data(|r| first = r.apply_arrival(bundle.clone()));
+    let a = first.expect("arrived");
+    while recv.try_recv().is_ok() {}
+    there.with_data(|r| assert!(r.apply_arrival(bundle.clone()).is_none(), "a replay"));
+    let r = there.data();
+    assert_eq!(r.ecs.voxel_body.get(a).drops, bundle.carried.drops);
+    assert_eq!(r.ecs.voxel_body.iter().filter(|(_, v)| v.is_some()).count(), 1);
+    assert!(!recv.try_iter().any(|u| matches!(u.update_kind, GameDataUpdateKind::AddVoxelBody(..))), "not re-meshed");
 }
 
 #[test]

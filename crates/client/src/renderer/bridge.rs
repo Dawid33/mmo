@@ -975,7 +975,7 @@ fn spawn_region_snapshot(
             e.insert(*mirror);
         }
         if let Some(body) = data.ecs.voxel_body.try_get(key) {
-            e.insert(super::voxel_bodies::PendingVoxelBody(Arc::new(body.model.clone())));
+            e.insert((super::voxel_bodies::PendingVoxelBody(Arc::new(body.model.clone())), super::voxel_bodies::VoxelBodyModel));
         }
         map.0.insert((region, key), e.id());
     }
@@ -1300,6 +1300,7 @@ pub fn drain_region_updates(
                         tf,
                         SimTarget::body(tf.translation, tf.rotation),
                         super::voxel_bodies::PendingVoxelBody(Arc::new(*model)),
+                        super::voxel_bodies::VoxelBodyModel,
                     );
                     if let Some(&e) = map.0.get(&(region, key)) {
                         commands.entity(e).insert(bundle);

@@ -36,6 +36,8 @@ export component DebugPage {
     // Index into `toggles`, new state.
     callback toggle(int, bool);
     callback complete-orders();
+    // Drop a 1 m body above the ground last under the cursor (off the panel).
+    callback drop-body();
 
     out property <length> toggle-row-height: 22px;
     property <length> stat-row-height: 18px;
@@ -48,6 +50,8 @@ export component DebugPage {
     out property <length> toggles-y: toggle-column.absolute-position.y;
     out property <length> complete-button-x: complete.absolute-position.x + complete.width / 2;
     out property <length> complete-button-y: complete.absolute-position.y + complete.height / 2;
+    out property <length> drop-button-x: drop.absolute-position.x + drop.width / 2;
+    out property <length> drop-button-y: drop.absolute-position.y + drop.height / 2;
     out property <length> ticks-x: tick-table.absolute-position.x;
     out property <length> ticks-y: tick-table.absolute-position.y;
 
@@ -75,6 +79,14 @@ export component DebugPage {
                 complete := Button {
                     text: "Complete all orders";
                     clicked => { root.complete-orders(); }
+                }
+            }
+
+            HorizontalLayout {
+                alignment: start;
+                drop := Button {
+                    text: "Drop body at cursor";
+                    clicked => { root.drop-body(); }
                 }
             }
         }

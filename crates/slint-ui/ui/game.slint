@@ -45,11 +45,14 @@ export component GameUi inherits Window {
     // Index into `dev-toggles`, new state.
     callback dev-toggle(int, bool);
     callback dev-complete-orders();
+    callback dev-drop-body();
     out property <length> dev-toggles-x: fortress.dev-toggles-x;
     out property <length> dev-toggles-y: fortress.dev-toggles-y;
     out property <length> dev-toggle-row-height: fortress.dev-toggle-row-height;
     out property <length> dev-complete-x: fortress.dev-complete-x;
     out property <length> dev-complete-y: fortress.dev-complete-y;
+    out property <length> dev-drop-x: fortress.dev-drop-x;
+    out property <length> dev-drop-y: fortress.dev-drop-y;
     out property <length> dev-ticks-x: fortress.dev-ticks-x;
     out property <length> fortress-tabs-x: fortress.tabs-x;
     out property <length> fortress-tabs-y: fortress.tabs-y;
@@ -315,6 +318,7 @@ export component GameUi inherits Window {
             dev-tick-rows: root.dev-tick-rows;
             dev-toggle(i, on) => { root.dev-toggle(i, on); }
             dev-complete-orders => { root.dev-complete-orders(); }
+            dev-drop-body => { root.dev-drop-body(); }
         }
     }
 
