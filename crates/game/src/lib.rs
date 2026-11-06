@@ -97,7 +97,7 @@ pub use volume::*;
 pub use voxel::*;
 pub use trees::*;
 pub use voxel_body::*;
-pub use world_clock::{WorldClock, MAX_CATCH_UP_BURST};
+pub use world_clock::{ticks_due, WorldClock, MAX_CATCH_UP_BURST};
 pub use world_manager::*;
 pub use world_map::*;
 

@@ -342,26 +342,29 @@ fn regions_share_tick_numbers_on_real_threads() {
         rig.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(rc), 0));
     }
     rig.wait_for_snapshots(&pair, REGION_STARTUP_BUDGET);
-    let mut reported: std::collections::BTreeMap<RegionCoords, Vec<(u64, u64)>> = Default::default();
-    let deadline = Instant::now() + Duration::from_secs(1);
-    while Instant::now() < deadline {
+    // Wait (bounded) until both regions have reported a few times. A report is
+    // stamped when emitted and drained later, so the only drain-delay-proof
+    // claims are: a region is never ahead of the world clock, and both regions
+    // count on the SAME numbers (reports land on multiples of 10).
+    let mut reported: std::collections::BTreeMap<RegionCoords, BTreeSet<u64>> = Default::default();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline && !pair.iter().all(|rc| reported.get(rc).is_some_and(|t| t.len() >= 3)) {
         if let Ok((rc, output)) = rig.region_out.recv_timeout(Duration::from_millis(20)) {
-            // The world tick when the report is drained, vs the tick it carries.
             if let RegionOutput::SyncClock { tick, .. } = &output {
-                reported.entry(rc).or_default().push((*tick, rig.manager.spawner_mut().world_tick()));
+                let world = rig.manager.spawner_mut().world_tick();
+                assert!(*tick <= world, "{rc:?} reports tick {tick} ahead of the world tick {world}");
+                assert_eq!(tick % 10, 0, "{rc:?} reports an off-cadence tick {tick}");
+                reported.entry(rc).or_default().insert(*tick);
             }
             rig.absorb(rc, output);
         }
     }
     for rc in pair {
-        let reports = reported.get(&rc).unwrap_or_else(|| panic!("{rc:?} reported no SyncClock"));
-        for &(tick, world) in reports {
-            assert!(
-                tick.abs_diff(world) <= u64::from(game::MAX_CATCH_UP_BURST),
-                "{rc:?} reports tick {tick} while the world is at {world}"
-            );
-        }
+        let n = reported.get(&rc).map_or(0, |t| t.len());
+        assert!(n >= 3, "{rc:?} reported only {n} SyncClocks within 10 s");
     }
+    let common = reported[&pair[0]].intersection(&reported[&pair[1]]).count();
+    assert!(common >= 2, "regions share no tick numbers: {reported:?}");
 }
 
 #[test]

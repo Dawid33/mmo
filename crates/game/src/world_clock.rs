@@ -31,3 +31,10 @@ impl WorldClock {
         self.anchor_ms + tick.saturating_sub(self.anchor_tick) * TICK_RATE
     }
 }
+
+/// Ticks a region at `current` runs back to back to reach `target` (the world
+/// tick): the whole gap, at most [`MAX_CATCH_UP_BURST`]. Never overshoots, so
+/// no tick number is skipped.
+pub fn ticks_due(current: Tick, target: Tick) -> u32 {
+    target.saturating_sub(current).min(u64::from(MAX_CATCH_UP_BURST)) as u32
+}

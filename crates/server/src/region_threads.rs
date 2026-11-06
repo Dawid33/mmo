@@ -165,8 +165,10 @@ pub fn region_thread_loop(
                 }
             }
             Err(RecvTimeoutError::Timeout) => {
-                let mut burst = 0;
-                loop {
+                // The deadline fired, so one tick is due even if the ms
+                // rounding says otherwise.
+                let due = game::ticks_due(runner.current_tick(), clock.tick_at(now_ms())).max(1);
+                for _ in 0..due {
                     let compute_start = Instant::now();
                     runner.tick();
                     metrics.record_tick(compute_start.elapsed());
@@ -181,10 +183,6 @@ pub fn region_thread_loop(
                             id.z,
                             game::perf::ms(compute_start.elapsed())
                         );
-                    }
-                    burst += 1;
-                    if burst >= game::MAX_CATCH_UP_BURST || runner.current_tick() >= clock.tick_at(now_ms()) {
-                        break;
                     }
                 }
                 metrics.lag_ticks = clock.tick_at(now_ms()).saturating_sub(runner.current_tick());
