@@ -8,7 +8,10 @@ same fixtures:
 - the synthesis's **water bodies + frontier CA** ("bodies").
 
 It proves that the bodies model is exactly mass-conserving, exactly undoable, bit-identical on
-native and wasm32, and cheaper.
+native and wasm32, and cheaper. Since 2026-11-06 it must also show that:
+- the player actions (dam breach, gates, pumps, scoops) give exact results;
+- two worlds joined at a lagged seam conserve mass and stay damped;
+- a brick journal is a cheaper undo shape than per-cell entries.
 
 **Architecture:** A standalone crate at `prototypes/water/` with **no dependencies** and its own
 `[workspace]`, so it never touches the engine build. The world is a 64³ grid of 1 m cells, and
@@ -25,11 +28,18 @@ all state is integer.
 - Scenarios run both models and report cost, undo bytes, state size, mass and hashes.
 - A wasm32 build run under node must reproduce the native hashes.
 
-**Tech Stack:** Rust 1.96 (edition 2024), std only. The recipes pin cores with `just`'s `cap`
+**Tech Stack:** the repo's pinned toolchain (`rust-toolchain.toml`), edition 2024, std only. The recipes pin cores with `just`'s `cap`
 prefix. Node (v25, already installed) runs the wasm32-unknown-unknown build.
 
 **Spec:** `docs/superpowers/specs/2026-09-22-voxel-water-efficiency/00-synthesis.md`. Read the
-"User decisions, 2026-09-22" section first; it overrides the rest. Background:
+"User decisions, 2026-09-22" section first; it overrides the rest. **Amended 2026-11-06**
+(Tasks 6–11, measurement moved to Task 12) from
+`docs/superpowers/specs/2026-11-06-water-revisit/00-synthesis.md`, which adds four things:
+- the flow models: a checkerboard frontier CA, and one start-of-step edge rule for gates,
+  pumps and seams;
+- what players can do with water, run as scenarios;
+- brick-journal undo;
+- film evaporation into the ledger (off by default). Background:
 `02-algorithms-and-data-structures.md` §5 (body mechanics) and §6 (scenarios).
 
 ## Global Constraints
@@ -38,9 +48,13 @@ prefix. Node (v25, already installed) runs the wasm32-unknown-unknown build.
   rules are integer. No floats anywhere in state or rules (floats only in report printing).
 - **Water is finite** (user decision). There are no infinite bodies and no sources. Water enters
   only through `Edit::Pour`, which the ledger `poured` counts, so `mass() == initial + poured`
-  must hold exactly.
+  must hold exactly. From Task 7 on, the identity is
+  `accounted() == initial + poured`, where `accounted = mass + evaporated + scooped`. A seam pair
+  also counts its in-flight arrivals.
 - **Canonical order everywhere:** ascending cell index, which is y-major:
   `idx = (y * Z + z) * X + x`, and `BTreeMap` for bodies.
+  - From Task 6 on, the CA pass visits even parity, then odd, each ascending.
+  - Links go in ascending `LinkId`.
   - **No `HashMap`/`HashSet`** anywhere.
   - Horizontal edge order rotates with the step (`horizontal_order(step)`).
 - **Work budgets count cells, never time** (`EXPAND_BUDGET`, `EXPAND_BACKOFF` in steps).
@@ -69,11 +83,12 @@ prefix. Node (v25, already installed) runs the wasm32-unknown-unknown build.
   - Work on `develop` in the main checkout. No worktrees.
   - The tree has unrelated uncommitted user changes, so **never** `git add -A` / `git add .`.
     Add only the paths each task names.
-  - `justfile` and `.gitignore` already carry the user's uncommitted edits. Edit `justfile` but
-    **do not commit it**; list it as uncommitted in the final report. Ignore the crate's
-    `target/` with a crate-local `prototypes/water/.gitignore`, not the root one.
+  - Before committing `justfile`, run `git diff justfile`. If the diff shows only this plan's
+    recipes, commit it with the task. If it holds the user's own edits, leave it uncommitted
+    and list it in the final report. Ignore the crate's `target/` with a crate-local
+    `prototypes/water/.gitignore`, not the root one.
   - End every commit message with
-    `Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>`.
+    `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`.
 
 ## Review Focus
 
@@ -183,10 +198,14 @@ prototypes/water/
   src/ca.rs             the water step: edges, absorb/seed, after-step
   src/edit.rs           Edit::{Remove, Place, Pour}
   src/metrics.rs        column surface, surface spread, dense/sparse byte estimates
+  src/link.rs           (Task 7) gates, pumps: the start-of-step edge rule; head/avail/room/take/give
+  src/seam.rs           (Task 10) two worlds joined at a lagged, capped seam
   src/scenario.rs       the six scenarios, step_once, run -> Report
   src/wasm.rs           #[cfg(wasm32)] exported golden(scenario, mode) -> u64
   src/bin/water_proto.rs CLI table / --golden
   tests/t1_state.rs  tests/t2_bodies.rs  tests/t3_ca.rs  tests/t4_scenarios.rs  tests/t5_rollback.rs
+  tests/t6_order.rs  tests/t7_links.rs  tests/t8_journal.rs  tests/t9_evaporation.rs
+  tests/t10_seam.rs  tests/t11_players.rs
 ```
 
 ---
@@ -912,7 +931,7 @@ git add prototypes/water/Cargo.toml prototypes/water/Cargo.lock prototypes/water
   prototypes/water/src prototypes/water/tests/t1_state.rs
 git commit -m "proto(water): standalone crate with grid, undo-logged state, body math
 
-Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
 ---
@@ -1651,7 +1670,7 @@ git add prototypes/water/src/body.rs prototypes/water/src/fixture.rs prototypes/
   prototypes/water/tests/t2_bodies.rs
 git commit -m "proto(water): bodies seed, expand, drop, split, merge with relevel
 
-Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
 ---
@@ -2258,7 +2277,7 @@ git add prototypes/water/src/ca.rs prototypes/water/src/edit.rs prototypes/water
   prototypes/water/tests/t3_ca.rs
 git commit -m "proto(water): water step (CA and body edges, absorb, seed) and edits
 
-Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
 ---
@@ -2730,7 +2749,7 @@ git add prototypes/water/src/scenario.rs prototypes/water/src/metrics.rs prototy
   prototypes/water/tests/t4_scenarios.rs
 git commit -m "proto(water): six scenarios, runner, surface and size metrics
 
-Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
 ---
@@ -2991,81 +3010,574 @@ git add prototypes/water/tests/t5_rollback.rs prototypes/water/src/bin prototype
   prototypes/water/src/lib.rs prototypes/water/wasm_golden.mjs
 git commit -m "proto(water): rollback/determinism tests, scenario CLI, wasm golden hashes
 
-Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
 ---
 
-### Task 6: Measure and record results
+## Amendments of 2026-11-06 (Tasks 6–11)
+
+**Spec for these tasks:** `docs/superpowers/specs/2026-11-06-water-revisit/00-synthesis.md`, the
+sections "Flow models" and "What players can do with water". Tasks 1–5 stand as written; the
+tasks below extend them. Each task starts from the state the previous one committed.
+
+**The order of one step** after these amendments, inside one undo log:
+1. edits due this step;
+2. evaporation due this step (Task 9);
+3. the CA pass over awake cells, in checkerboard order (Task 6);
+4. the link phase (Task 7);
+5. the after-step: expansions and shore wake-ups (Tasks 2–3).
+
+The expected values below depend on this order.
+
+**New mass ledger.** `World::accounted() = mass() + evaporated + scooped`. Every mass check in
+`scenario::run` and the tests becomes `accounted() == initial_mass + poured` (Task 7 makes the
+change; Tasks 9 and 11 add the fields it sums).
+
+**New tunables** (in `src/lib.rs`, with the others):
+
+| Constant | Value | Task |
+|---|---|---|
+| `GATE_CAP` | 1024 (`FULL / 4`) | 7 |
+| `PUMP_RATE` | 512 (`FULL / 8`) | 7, 11 |
+| `BRICK` | 8 (edge of a journal brick, in cells) | 8 |
+| `EVAP_BELOW` | 585 (`FULL / 7`, DF's 1/7: a cell holding less than this is a film; films can rest just above `FILM`) | 9 |
+| `EVAP_AFTER_STEPS` | 64 | 9 |
+| `SEAM_CAP` | 512 (per face cell, per step) | 10 |
+| `SEAM_LAG_STEPS` | 1 | 10 |
+| `SEAM_SETTLE_TOL` | 2 (units of level) | 10 |
+
+**Additional review focus** (each pinned by a test in its task):
+1. A pump or gate whose source is dry moves nothing and creates nothing:
+   `pump_from_dry_source_moves_nothing` (Task 7).
+2. Opening and closing a gate in the same step leaves it closed, and the hash equals a
+   never-opened run: `gate_open_close_same_step_is_closed` (Task 7).
+3. Scooping more than a cell or body holds takes what is there; scooping a dry cell is
+   rejected with no state change: `scoop_dry_cell_rejected` (Task 11).
+4. A seam face cell that is solid on either side never exchanges:
+   `seam_solid_face_is_closed` (Task 10).
+5. Evaporation never takes water from a body member or from a cell holding `EVAP_BELOW` or
+   more: `evaporation_spares_bodies_and_deep_cells` (Task 9).
+
+---
+
+### Task 6: Checkerboard frontier order
 
 **Files:**
-- Create: `docs/superpowers/specs/2026-09-22-voxel-water-efficiency/04-prototype-results.md`
-- Modify: `docs/superpowers/specs/2026-09-22-voxel-water-efficiency/00-synthesis.md`: add a
-  one-paragraph "Prototype results" pointer under "User decisions".
+- Modify: `prototypes/water/src/ca.rs` (`step`)
+- Test: `prototypes/water/tests/t6_order.rs`
 
-- [ ] **Step 1: Ask the user before the timing run.** It pins 16 cores for ~1–2 minutes.
-  Suggested wording: "Ready to run the water prototype timing table (`just water-proto`),
-  release, about 1–2 min. OK to run now?"
+**Interfaces:**
+- Consumes: `ca::step`, `World::active`, `Dims::xyz`.
+- Produces: `grid::parity(dims: Dims, i: u32) -> u32` (`(x + y + z) % 2`). `ca::step` keeps
+  its signature.
 
-- [ ] **Step 2: Run it (after the OK) and keep the raw output**
+- [ ] **Step 1: Write the failing test**
 
-Run: `just water-proto | tee /home/dawids/.claude/jobs/ce041ce6/tmp/water-proto-table.txt`
-Also record the CPU state:
-`cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq`, and the power source
-`cat /sys/class/power_supply/*/online`. Per CLAUDE.md, the laptop's power clamp can make
-absolute times several times slower, so compare ratios.
+`checkerboard_spill_is_unbiased`:
+- 64³ world, `fill_solid(0..=3)` (a flat plain), bodies mode;
+- four `Edit::Pour(idx(32, 8, 32), FULL)` at steps 0..=3;
+- run to sleep (`max_steps` 5000);
+- sum the water at x < 32 and at x > 32; assert `|left − right| <= FILM as u64`;
+- assert the same for z;
+- assert `accounted() == 4 * FULL as u64`.
 
-- [ ] **Step 3: Write `04-prototype-results.md`** with these sections, filled from the table:
-  1. **Setup:** commit, CPU frequency and power, release profile, 64³ world, constants from
+If the bound fails with the checkerboard in place, report the measured imbalance; don't widen
+the bound silently.
+
+- [ ] **Step 2: Run to see it fail.** `just water-proto-test --test t6_order`. Expected: the
+  imbalance assertion fails under the ascending sweep. If it passes already, say so in the
+  report and keep the test as a regression pin.
+
+- [ ] **Step 3: Change the visit order in `ca::step`.**
+  - Take `w.active.ones()` once at the start of the pass.
+  - Visit the cells with `parity == step % 2` first, then the rest, each group in ascending
+    index.
+  - A cell activated during the pass is not visited until the next step (as before).
+  - Edge rules and `horizontal_order(step)` stay unchanged.
+
+- [ ] **Step 4: Run Tasks 3–6 tests.** `just water-proto-test`. Expected: all pass.
+  - The end-state assertions of Tasks 3–5 (levels, mass, invariants) are order-independent by
+    design.
+  - If an exact expected value moves, find out why before touching the test, and say so in the
+    commit message.
+
+- [ ] **Step 5: Commit** `prototypes/water/src/ca.rs prototypes/water/src/grid.rs
+  prototypes/water/tests/t6_order.rs` with message
+  `feat(water-proto): checkerboard visit order for the frontier CA`.
+
+---
+
+### Task 7: Links: the shared edge rule (gates and pumps)
+
+**Files:**
+- Create: `prototypes/water/src/link.rs`
+- Modify:
+  - `src/lib.rs`: module and constants;
+  - `src/state.rs`: `links`, `scooped`, `Undo::Link`, `Undo::Scooped`, `accounted`, and
+    links in `hash`;
+  - `src/ca.rs`: call `link::flux_all` between the CA pass and the after-step;
+  - `src/edit.rs`: `Edit::SetLink`;
+  - `src/scenario.rs`: the mass check uses `accounted`.
+- Test: `prototypes/water/tests/t7_links.rs`
+
+**Interfaces:**
+- Consumes: `body::{add_volume, remove_volume}`, `Body::{level, room}`, `World` setters.
+- Produces:
+  - `link::{LinkId = u32, Link { a: u32, b: u32, kind: LinkKind }, LinkKind::{Gate { open:
+    bool }, Pump { rate: u16 }}}`;
+  - `World.links: BTreeMap<LinkId, Link>`, plus `World::add_link(Link) -> LinkId` (logged);
+  - `link::head(&World, i) -> Option<u64>`:
+    - `None` for a solid cell;
+    - `y * FULL + water` for a CA cell;
+    - `body.level()` for a member;
+  - `link::avail(&World, i) -> u64`: the cell's water, or its body's `volume`;
+  - `link::room(&World, i) -> u64`: `FULL − water` for a CA cell, `Body::room()` for a
+    member;
+  - `link::take(&mut World, i, q: u64) -> u64` and `link::give(&mut World, i, q: u64) -> u64`:
+    each returns the amount actually moved, wakes the cell, and records a touched body;
+  - `link::flux_all(&mut World)`;
+  - `Edit::SetLink(LinkId, LinkKind)`;
+  - `World.scooped: u64`;
+  - `World::accounted() -> u64`.
+
+**The rule** (`flux_all`; the algorithm the tests don't determine):
+1. For every link in ascending `LinkId`, compute a wanted amount `q` from the state as it was
+   *before* this phase. Nothing is applied yet.
+   - `Gate { open: true }`: from the higher head `h_hi` to the lower `h_lo`,
+     `q = min(GATE_CAP, (h_hi − h_lo) / 2)`. 0 if either head is `None`, or if the gate is
+     closed.
+   - `Pump { rate }`: from `a` to `b`, `q = rate`, whatever the heads.
+2. Cap each `q` by `room(destination)` as it was before the phase.
+3. For each source cell, or each body when the source is a member (all members of a body are
+   one source), let `out` be the sum of its wanted amounts. If `out > avail`, scale each of
+   its amounts to `q * avail / out`, rounded down.
+4. Apply in ascending `LinkId`: `take` from the source, then `give` the amount taken to the
+   destination. If `give` returns less than was taken, `give` the remainder back to the
+   source. Mass then stays exact even if two links fill one destination.
+
+- [ ] **Step 1: Write the failing tests** (all in bodies mode, using the "two basins"
+  fixture):
+  - **The fixture:**
+    - 64³ world, `fill_solid(0..=20)`;
+    - basin A: `carve(4..=19, 12..=20, 4..=19)` with `fill_water(4..=19, 12..=17, 4..=19)`,
+      i.e. 256 cells per layer at level `18 * F`;
+    - basin B: `carve(21..=44, 4..=20, 4..=19)`, dry, 384 cells per layer;
+    - the solid wall x = 20 stays;
+    - `a = idx(19, 12, 11)` is a member of A's bottom layer;
+    - `b = idx(21, 12, 11)` is the air above B.
+  - `gate_closed_holds`: a closed gate `a → b`; after 50 steps the hash of all water and bodies
+    equals the start (the step counter excluded), and `accounted()` is exact.
+  - `gate_open_moves_cap_per_step`:
+    - the gate is opened by `SetLink` at step 10 and closed at step 210;
+    - run to sleep;
+    - B's box holds exactly `200 * GATE_CAP` units, and A lost exactly that.
+    - Why it is exact: A's head stays above `b`'s, and `b` empties by falling in each CA pass
+      before the link phase.
+  - `gate_open_close_same_step_is_closed`: both edits at step 10, open first. Its final hash
+    equals the never-opened run's at the same step.
+  - `scarce_source_is_shared_proportionally`:
+    - 32³, `fill_solid(0..=20)`;
+    - three sealed one-cell pockets carved at `(10, 15, 10)`, `(20, 15, 20)` and
+      `(28, 15, 28)`;
+    - `Edit::Pour` puts 1000 units in the first at step 0;
+    - two pumps of `rate = 1000` (links 1 and 2) run from it to the other two;
+    - after that step each destination holds 500 and the source holds 0.
+    - The pockets are sealed so that the CA pass can't move the water before the link phase.
+  - `pump_lifts_water_uphill`:
+    - a `Pump { rate: PUMP_RATE }` from `a` (A's bottom, y12) to `idx(50, 21, 50)`, the air on
+      the plain's surface outside both basins;
+    - after 8 steps, the water outside both basins totals exactly `8 * PUMP_RATE`.
+  - `pump_from_dry_source_moves_nothing`: a pump from a dry CA cell. After 10 steps
+    `accounted()` and every cell are unchanged.
+
+- [ ] **Step 2: Run to see them fail.** `just water-proto-test --test t7_links`. Expected:
+  compile errors (`link` doesn't exist).
+
+- [ ] **Step 3: Implement `link.rs` and the `World` fields.**
+  - `Undo::Link(LinkId, Option<Link>)` and `Undo::Scooped(u64)`, each with a `bytes()` entry.
+  - `hash` covers `links` (in id order) and `scooped`.
+  - `Edit::SetLink` on an unknown id returns `EditError::NoRoom`; don't add a new variant for
+    this throwaway.
+
+- [ ] **Step 4: Run all prototype tests.** `just water-proto-test`. Expected: all pass.
+  - Scenarios without links are unaffected: `flux_all` over an empty map must do nothing and
+    log nothing.
+
+- [ ] **Step 5: Commit** the files above with message
+  `feat(water-proto): links with a start-of-step edge rule (gates, pumps)`.
+
+---
+
+### Task 8: Brick-journal undo
+
+The engine's per-mutation undo entry clones a value, takes a global mutex, and is as large as
+the biggest event variant (`02-engine-today.md` §2). This task measures the alternative: the
+first touch of an 8³ brick in a step saves the brick once.
+
+**Files:**
+- Modify: `prototypes/water/src/state.rs`
+- Test: `prototypes/water/tests/t8_journal.rs`
+
+**Interfaces:**
+- Consumes: the `World` cell setters (`set_water`, `set_owner`, `set_active`, `touch`).
+- Produces:
+  - `state::JournalMode::{PerCell, Brick}` and the field `World.journal` (default `PerCell`;
+    config, not hashed);
+  - `Undo::Brick(u32, Box<BrickImage>)`, where `BrickImage` holds the brick's `water`,
+    `owner`, `active` and `last_touch`;
+  - `Dims::brick_of(i) -> u32`;
+  - `World::journal_bricks(&self) -> u32` (bricks imaged in the open log, for stats).
+
+**Rules:**
+- In `Brick` mode the four cell setters save the cell's brick once per open log (a scratch
+  `Bits`, cleared by `begin_log`) and then write without logging.
+- Solid, bodies, links and scalars keep their per-entry logging in both modes.
+- Dims must be multiples of `BRICK`: `World::new` asserts it in `Brick` mode.
+- `bytes()` of a brick image = 4 + 512 × (2 + 4 + 4) + 64.
+
+- [ ] **Step 1: Write the failing tests:**
+  - `brick_journal_undo_is_exact_all_scenarios`: for every name in `scenario::NAMES` in
+    bodies mode with `journal = Brick`:
+    - step 40 times;
+    - then take 20 logged steps, recording the hash before each;
+    - undo them in reverse;
+    - each undo restores the matching hash.
+
+    This mirrors Task 5's per-cell test.
+  - `brick_journal_logs_each_brick_once`: one step of `small_spill` in `Brick` mode yields at
+    most one `Undo::Brick` per brick index.
+
+- [ ] **Step 2: Run to see them fail.** `just water-proto-test --test t8_journal`. Expected:
+  compile errors.
+
+- [ ] **Step 3: Implement the mode in `state.rs`.**
+
+- [ ] **Step 4: Run all prototype tests.** `just water-proto-test`. Expected: all pass. Task
+  5's per-cell tests still pass, because the default stays `PerCell`.
+
+- [ ] **Step 5: Add `--undo cell|brick`** to `water_proto` (Task 5's CLI). It sets
+  `world.journal` on every built scenario. Run `just water-proto --golden --undo brick`; the
+  hashes must equal the `--undo cell` ones, because the journal mode is not state.
+
+- [ ] **Step 6: Commit** `src/state.rs src/grid.rs src/bin/water_proto.rs
+  tests/t8_journal.rs` with message `feat(water-proto): brick-journal undo mode`.
+
+---
+
+### Task 9: Thin films evaporate into the ledger (off by default)
+
+This waits on user decision 1 in the 2026-11-06 synthesis, so it is **off** unless a scenario
+turns it on. It is DF's 1/7 evaporation done without breaking conservation.
+
+**Files:**
+- Modify: `src/state.rs` (`evaporated`, `evap_after`, `evap_due`, their undo entries and the
+  hash), `src/ca.rs`
+- Test: `prototypes/water/tests/t9_evaporation.rs`
+
+**Interfaces:**
+- Consumes: `World::accounted` (Task 7), and `ca::step`'s sleep logic.
+- Produces:
+  - `World.evaporated: u64` (state, hashed, `Undo::Evaporated`);
+  - `World.evap_after: u32` (config, not hashed; 0 = off; `World::new` sets 0);
+  - `World.evap_due: BTreeSet<(u32, u32)>` (state, hashed, `Undo::EvapDue(u32, u32, bool)`).
+    It is the item-pile expiry-index pattern: `(due_step, cell)`.
+
+**Rules:**
+- When a CA cell goes to sleep while every one of these holds:
+  - `0 < water < EVAP_BELOW`;
+  - it rests on solid or a member;
+  - `evap_after > 0`;
+
+  insert `(step + evap_after, cell)`.
+- Any write to the cell's water removes its pending entry (look it up by the cell's
+  `last_touch` + `evap_after`, or keep a reverse map; choose one and say which in the commit).
+- At step start (stage 2 of the step order), pop every due entry. If the cell is still a CA
+  cell with `0 < water < EVAP_BELOW`, move its water to `evaporated`.
+
+- [ ] **Step 1: Write the failing tests:**
+  - `film_evaporates_into_ledger`: the `film` scenario with `evap_after = EVAP_AFTER_STEPS`,
+    run until asleep and the queue is empty (`max_steps` 5000). Then:
+    - every `water` entry is 0;
+    - `evaporated == initial_mass + poured`;
+    - `accounted()` is exact.
+  - `film_stays_when_evaporation_off`: the same scenario with `evap_after = 0` ends with
+    `evaporated == 0`, and its wet-cell count is inside Task 4's range.
+  - `evaporation_spares_bodies_and_deep_cells`:
+    - The `bucket` scenario with evaporation on: the body's level still equals Task 4's
+      expected `3 * F + 2 * F / 9`, and `accounted()` is exact.
+    - Two sealed one-cell pockets (32³, `fill_solid(0..=20)`) poured with 600 and 500 units at
+      step 0, run 300 steps.
+    - The 600 pocket still holds 600.
+    - The 500 pocket is 0, with `evaporated == 500`.
+    - Before step `EVAP_AFTER_STEPS` it still held 500.
+
+- [ ] **Step 2: Run to see them fail.** `just water-proto-test --test t9_evaporation`.
+
+- [ ] **Step 3: Implement it.** Evaporation must not keep cells awake: a film costs one queue
+  entry while it waits, not a visit per step.
+
+- [ ] **Step 4: Run all prototype tests.** `just water-proto-test`. Expected: all pass.
+
+- [ ] **Step 5: Commit** with message
+  `feat(water-proto): film evaporation into the ledger (off by default)`.
+
+---
+
+### Task 10: Two worlds joined at a seam, with lag
+
+This models two regions on different threads. Each side sends only its own water. It subtracts
+the water at once and posts it as an arrival that lands `SEAM_LAG_STEPS` later. Heads seen
+across the seam are the other side's heads as reported at the end of the previous step.
+
+**Files:**
+- Create: `prototypes/water/src/seam.rs`
+- Modify:
+  - `src/lib.rs`;
+  - `src/wasm.rs`: `golden_seam(index: u32) -> u64`;
+  - `wasm_golden.mjs`: print the seam goldens too;
+  - `src/bin/water_proto.rs`: `--seam` prints a table per seam scenario.
+- Test: `prototypes/water/tests/t10_seam.rs`
+
+**Interfaces:**
+- Consumes: `link::{head, avail, room, take, give}` (Task 7), `ca::step`, and
+  `World::{begin_log, end_log, undo, hash, accounted}`.
+- Produces:
+  - `seam::Arrival { to_b: bool, y: u32, z: u32, amount: u64, due: u32 }`;
+  - `seam::Pair { a: World, b: World, inflight: Vec<Arrival>, seen_by_a: Vec<Option<(u64,
+    u64)>>, seen_by_b: Vec<Option<(u64, u64)>>, bounced: u64, initial: u64 }`:
+    - each seen entry is the other side's `(head, room)` for that face cell, or `None` when it
+      is solid;
+    - `Pair::new` fills both from the initial worlds.
+  - `Pair::new(a, b) -> Pair`. The two worlds must have equal `y` and `z`. The seam is between
+    A's face `x = dims.x − 1` and B's face `x = 0`, and face cells are indexed by `(y, z)`.
+  - `Pair::step(&mut self) -> PairUndo` and `Pair::undo(&mut self, PairUndo)`;
+  - `Pair::hash(&self) -> u64` (both worlds, the in-flight arrivals in order, both seen-head
+    vectors);
+  - `Pair::accounted(&self) -> u64` (both worlds plus in-flight);
+  - `Pair::net_flux_last_step(&self) -> i64` (A→B positive);
+  - `seam::NAMES: [&str; 3] = ["seam_drain", "seam_lake", "seam_bounce"]` and
+    `seam::build(name) -> Pair`.
+
+**One pair step** (the algorithm):
+1. **Deliver arrivals.** Deliver every arrival with `due == step` in `inflight` order: `give`
+   it to the destination face cell. A remainder that doesn't fit becomes a new arrival back to
+   the sender, due next step, and adds to `bounced`. Water is never dropped.
+2. **Step each world.** `ca::step` on A, then on B. Order is irrelevant: they share nothing.
+3. **Compute outflow.** For each face `(y, z)`, on each side, using its own `head` now and the
+   other side's head from `seen_by_*` (stale by one step):
+   - `q = min(SEAM_CAP, (own − seen_head) / 2, seen_room)` when positive;
+   - 0 when either side is `None`;
+   - capped by `avail`.
+
+   Capping by the room the other side last reported is what lets a full receiver settle. Only
+   the one-step staleness of that room can cause a bounce.
+
+   Then `take` it and push an arrival due at `step + SEAM_LAG_STEPS`. All faces of a body share
+   its volume, so scale them as in Task 7's rule 3.
+4. **Report heads.** Refresh both `seen_by_*` vectors from the current heads.
+
+- [ ] **Step 1: Write the failing tests:**
+  - **Fixtures** (32³ worlds, `fill_solid(0..=20)` on both sides):
+    - `seam_drain`:
+      - A has `carve(4..=31, 12..=20, 8..=23)` with water `4..=31, 12..=17, 8..=23`
+        (2688 m³);
+      - B has the deep basin `carve(0..=27, 4..=20, 8..=23)` (448 cells per layer).
+    - `seam_lake`: as `seam_drain`, but B is `carve(0..=27, 12..=20, 8..=23)`, dry and level
+      with A's floor.
+    - `seam_bounce`:
+      - A as in `seam_drain`;
+      - B solid except one sealed cell `carve(0..=0, 13..=13, 12..=12)`.
+  - `seam_conserves_mass_every_step`: for all three fixtures, for 2000 steps,
+    `accounted() == initial` after every step.
+  - `seam_drain_moves_lake_into_neighbour`: run until both worlds sleep with `inflight` empty.
+    - B is one body with `level.abs_diff(10 * F) <= 512`: 2688 m³ over 448 cells is 6 layers,
+      y4..=9.
+    - A holds at most 512 units.
+  - `seam_lake_levels_across_the_seam`: settled at `max_steps` 20,000.
+    - `|level_A − level_B| <= SEAM_SETTLE_TOL`;
+    - the two levels sum to `2 * 15 * F` within `SEAM_SETTLE_TOL`: 2688 m³ over 896 cells is
+      3 layers each, y12..=14.
+  - `seam_flux_is_damped`: in `seam_lake`, the sign of `net_flux_last_step` changes at most
+    4 times before settling.
+    - If this fails, the lag needs damping. Try `q = diff / 4` for seam faces, record both
+      results, and report which held.
+    - This decides the seam gain the engine uses.
+  - `seam_full_receiver_bounces_back`: run `seam_bounce` until both worlds sleep with
+    `inflight` empty.
+    - The pocket ends at exactly `FULL`, and mass is exact.
+    - `bounced == SEAM_CAP as u64`. Why: sends happen at steps 0–8, because the room seen at
+      step 8 is still the one-step-old 512. Deliveries 1–8 fill the pocket, and the 9th
+      bounces.
+  - `seam_solid_face_is_closed`: replace B in `seam_drain` with a fully solid world. After 200
+    steps no arrival was ever created, and A's hash equals A stepped alone.
+  - `pair_step_undo_is_exact`: in `seam_lake`, step 30. Then take 10 logged pair steps,
+    recording `Pair::hash` before each, and undo them in reverse; every hash is restored.
+
+- [ ] **Step 2: Run to see them fail.** `just water-proto-test --test t10_seam`.
+
+- [ ] **Step 3: Implement `seam.rs`, the wasm export and the CLI table.**
+
+- [ ] **Step 4: Run all prototype tests, then the goldens.**
+  - Run `just water-proto-test`, then `just water-proto --golden` and `just water-proto-wasm`.
+  - Expected: all tests pass.
+  - The seam goldens printed by node equal the native ones.
+
+- [ ] **Step 5: Commit** with message `feat(water-proto): two-world seam with lagged, capped flux`.
+
+---
+
+### Task 11: Player scenarios
+
+These are the synthesis's player actions, run as scenarios. They join the CLI table and the
+wasm goldens through `NAMES`.
+
+**Files:**
+- Modify:
+  - `src/edit.rs`: `Edit::Scoop(u32, u16)` and `EditError::Dry`;
+  - `src/scenario.rs`: four new names; `NAMES` becomes `[&str; 10]`;
+  - `src/fixture.rs`: `two_basins(mode) -> World`, the Task 7 fixture moved here so tests and
+    scenarios share it.
+- Test: `prototypes/water/tests/t11_players.rs`
+
+**Interfaces:**
+- Consumes: `link::{take, give}`, `Edit::SetLink`, `World::add_link`, and Task 4's
+  `Scenario`/`run`.
+- Produces:
+  - `Edit::Scoop(i, q)`: `take(i, q)`, adding the amount taken to `scooped`. Taking 0 returns
+    `Err(EditError::Dry)` with no state change.
+  - The scenarios `"dam_breach"`, `"gate_flood"`, `"pumped_cistern"` and `"scoop"`.
+
+- [ ] **Step 1: Write the failing tests** (bodies mode; each runs its scenario to sleep with
+  `max_steps` 20,000 and asserts `mass_ok` and `edit_errors == 0` first):
+  - `dam_breach_drains_lake_into_valley`:
+    - `two_basins`, plus `Edit::Remove` of the wall cells `x = 20`, `z = 11..=12`,
+      `y = 12..=20`, all at step 0;
+    - A's 1536 m³ fits under its floor in B: 384 cells per layer, 4 layers, y4..=7;
+    - so B ends as one body with `level.abs_diff(8 * F) <= 512`;
+    - A's box holds at most 512 units, and A's body is gone.
+  - `gate_flood_open_then_close`:
+    - `two_basins` with a closed gate `a → b`, opened at step 10 and closed at step 210;
+    - B's box holds exactly `200 * GATE_CAP`;
+    - B's box total is unchanged between step 211 and the end.
+  - `pumped_cistern_fills_one_layer`:
+    - 64³, `fill_solid(0..=14)`;
+    - the pool `carve(4..=11, 4..=14, 4..=11)` with water `4..=11, 4..=8, 4..=11` (level
+      `9 * F`);
+    - the cistern `carve(30..=32, 12..=14, 30..=32)`;
+    - a pump `idx(4, 4, 4) → idx(31, 14, 31)` set to `PUMP_RATE` at step 0 and to 0 at step
+      72.
+    - The cistern box holds exactly `9 * F` (72 × 512).
+    - The pool body's level is `9 * F − 576` (9 m³ over 64 cells).
+  - `scoop_lowers_lake_by_one_bucket`: `two_basins`, with `Edit::Scoop(a, FULL)` at step 0.
+    A's level is `18 * F − 16` (one bucket over 256 cells), and `scooped == F`.
+  - `scoop_dry_cell_rejected`: scooping a dry CA cell returns `Err(Dry)`, and the hash is
+    unchanged.
+
+- [ ] **Step 2: Run to see them fail.** `just water-proto-test --test t11_players`.
+
+- [ ] **Step 3: Implement the edit, the fixture move and the four scenarios.**
+
+- [ ] **Step 4: Run all prototype tests and both goldens.** `just water-proto-test`,
+  `just water-proto --golden`, `just water-proto-wasm`. Expected: all tests pass, and wasm
+  equals native for all 10 scenarios and 3 seam scenarios.
+
+- [ ] **Step 5: Commit** with message
+  `feat(water-proto): player scenarios (breach, gate, pump, scoop)`.
+
+---
+
+### Task 12: Measure and record results
+
+**Files:**
+- Create: `docs/superpowers/specs/2026-11-06-water-revisit/03-prototype-results.md`
+- Modify: add a one-paragraph "Prototype results" pointer to
+  `docs/superpowers/specs/2026-11-06-water-revisit/00-synthesis.md` (under "What to build, in
+  order") and to `docs/superpowers/specs/2026-09-22-voxel-water-efficiency/00-synthesis.md`
+  (under "User decisions").
+
+- [ ] **Step 1: Ask the user before the timing run.** It pins 16 cores for ~2–4 minutes.
+  Suggested wording: "Ready to run the water prototype timing tables (`just water-proto`,
+  with `--undo brick`, and `--seam`), release, about 2–4 min. OK to run now?"
+
+- [ ] **Step 2: Run it (after the OK) and keep the raw output.**
+  Run `just water-proto`, `just water-proto --undo brick` and `just water-proto --seam`, each
+  piped through `tee` into `$CLAUDE_JOB_DIR/tmp/`. Also record:
+  - the CPU state: `cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq`;
+  - the power source: `cat /sys/class/power_supply/*/online`.
+
+  Per CLAUDE.md, the laptop's power clamp can make absolute times several times slower, so
+  compare ratios.
+
+- [ ] **Step 3: Write `03-prototype-results.md`** with these sections, filled from the tables:
+  1. **Setup:** commit, CPU frequency and power, release profile, world sizes, constants from
      `lib.rs`.
-  2. **The table** (paste raw), then per scenario the **bodies ÷ cell ratio** of mean µs/step,
-     cells visited/step, steps to sleep, and mean undo bytes/step.
-  3. **Correctness gates:** mass exact, undo exact, rerun identical, wasm32 == native,
-     invariants. Each gets pass/fail with the command that proved it.
+  2. **The tables** (pasted raw). Then, per scenario:
+     - the **bodies ÷ cell ratio** of mean µs/step, cells visited/step and steps to sleep;
+     - mean undo bytes/step for **per-cell vs brick-journal**.
+  3. **Correctness gates**, each pass/fail with the command that proved it:
+     - mass exact (`accounted`);
+     - undo exact (both journal modes);
+     - rerun identical;
+     - wasm32 == native (single-world and seam goldens);
+     - invariants.
   4. **Behaviour:**
-     - lake A's max surface spread during `big_drain` in each mode;
-     - U-tube levels in each mode;
-     - film area.
-  5. **Interface findings:** `seeds`, `absorbs`, `expansions`, `splits`, `merges` per scenario.
-     Flag any sign of member/CA flicker: absorbs far above the number of distinct cells that
-     ended as members.
-  6. **Decision gate.** The bodies model passes if *all* hold:
+     - lake A's max surface spread during `big_drain`;
+     - U-tube levels;
+     - film area, with evaporation off and on;
+     - the spill imbalance from `checkerboard_spill_is_unbiased`;
+     - **seam:** sign reversals of the net flux, the final level difference, the bounced
+       volume, and which seam gain held (`diff / 2` or `diff / 4`).
+  5. **Interface findings:** `seeds`, `absorbs`, `expansions`, `splits` and `merges` per
+     scenario. Flag any sign of member/CA flicker: absorbs far above the number of distinct
+     cells that ended as members.
+  6. **Decision gate.** The bodies model passes if *all* of these hold:
      - (a) every correctness gate passes;
      - (b) `settled` costs 0 visits in both modes;
      - (c) `big_drain` bodies mean ≤ 20 µs/step native, and lake A's spread is 0;
      - (d) U-tube levels are equal;
-     - (e) bodies mean undo bytes/step is below cell-only's on `small_spill` and `big_drain`.
+     - (e) bodies mean undo bytes/step is below cell-only's on `small_spill` and
+       `big_drain`;
+     - (f) every player scenario (`dam_breach`, `gate_flood`, `pumped_cistern`, `scoop`)
+       meets its exact expected values;
+     - (g) the seam conserves mass every step and is damped (`seam_flux_is_damped` passes
+       with one of the two gains).
 
-     If (c) or (e) fails, or (5) shows flicker, record which. The synthesis fallback is dense
-     bricks plus analytic settle of quiet patches. Say whether the numbers argue for it.
+     Also report, without gating on it, whether the brick journal's bytes/step beat per-cell
+     on `big_drain` and `dam_breach`. That decides the engine's undo shape for water.
+
+     If (c), (e) or (g) fails, or (5) shows flicker, record which. The synthesis fallback is
+     dense bricks plus analytic settle of quiet patches. Say whether the numbers argue for it.
   7. **What the prototype does not model**, carried into any engine plan:
      - chisel/half-block capacity;
-     - region seams (closed box here);
-     - the finite world sea ledger;
+     - the finite world sea ledger beyond films;
      - currents for swimming;
-     - rendering.
+     - rendering;
+     - a seam with a *parked* neighbour (the pending-volume ledger at the manager);
+     - client prediction across a seam.
 
-- [ ] **Step 4: Update the synthesis pointer and commit the docs**
-
-In `00-synthesis.md`, directly under the "User decisions" section, add:
-`**Prototype results (2026-09-22):** see [04-prototype-results.md](04-prototype-results.md), gate: <PASS|FAIL + one line>.`
-Write the actual verdict in place of the angle-bracket part.
+- [ ] **Step 4: Update both synthesis pointers and commit the docs.**
+  - Under "What to build, in order" in the 2026-11-06 synthesis, add
+    `**Prototype results:** see [03-prototype-results.md](03-prototype-results.md), gate: <PASS|FAIL + one line>.`
+  - Add the same line, linking `../2026-11-06-water-revisit/03-prototype-results.md`, under
+    "User decisions" in the 2026-09-22 synthesis.
+  - Write the actual verdict in place of the angle-bracket part.
 
 ```bash
-git add docs/superpowers/specs/2026-09-22-voxel-water-efficiency/04-prototype-results.md \
-  docs/superpowers/specs/2026-09-22-voxel-water-efficiency/00-synthesis.md \
+git add docs/superpowers/specs/2026-11-06-water-revisit/ \
+  docs/superpowers/specs/2026-09-22-voxel-water-efficiency/ \
+  docs/superpowers/specs/2026-09-22-rapier-water-physics-investigation.md \
   docs/superpowers/plans/2026-09-22-water-prototype.md
 git commit -m "docs(water): prototype results and decision gate
 
-Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
-The synthesis and the other research files in that folder are not committed yet. Add them too
-(`git add docs/superpowers/specs/2026-09-22-voxel-water-efficiency/
-docs/superpowers/specs/2026-09-22-rapier-water-physics-investigation.md`); they are this
-session's files, not the user's.
+
+Check `git status` first. Those docs are all this work's own files. Add nothing else.
 
 - [ ] **Step 5: Final report to the user.** Include:
   - the gate verdict and the two or three headline ratios;
+  - the seam gain that held;
+  - the brick-journal verdict;
   - the path of the results doc;
-  - that `justfile` has the three new recipes **uncommitted**, alongside their own pending
-    justfile edits.
+  - whether `justfile` was committed or left uncommitted (see Global Constraints).
