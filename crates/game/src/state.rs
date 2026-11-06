@@ -1445,6 +1445,8 @@ impl Rollback {
         // of the same arrival still corrects the pose.
         if let EntityKind::Person { person } = bundle.kind {
             if self.data.person_entities.contains_key(&person) {
+                // No upgrade, so the source sent no end for its mirror here.
+                self.remove_halo_entity_safe(identity);
                 return None;
             }
         }
@@ -1572,6 +1574,21 @@ impl Rollback {
     pub fn apply_halo_entity_gone_safe(&mut self, gone: HaloEntityGone) {
         if self.data.halo_entities.get(&gone.id).is_some_and(|h| h.source_region == gone.from) {
             self.remove_halo_entity_safe(gone.id);
+        }
+    }
+
+    /// Ends every entity mirror of source region `from`, undo-safely (a
+    /// halo seed from it, or `GameEventKind::HaloSourceGone`).
+    pub fn drop_halo_source_safe(&mut self, from: crate::RegionCoords) {
+        let mirrors: Vec<crate::EntityId> = self
+            .data
+            .halo_entities
+            .iter()
+            .filter(|(_, h)| h.source_region == from)
+            .map(|(id, _)| *id)
+            .collect();
+        for id in mirrors {
+            self.remove_halo_entity_safe(id);
         }
     }
 

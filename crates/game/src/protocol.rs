@@ -801,6 +801,10 @@ pub enum GameEventKind {
     HaloEntity(HaloEntityDelta),
     /// Entity halo: the neighbour ends a mirror (see [`HaloEntityGone`]).
     HaloEntityGone(HaloEntityGone),
+    /// Server-authored: region `.0` was lost without stopping (its thread
+    /// died), so it can send no `HaloEntityGone`: every entity mirror of it
+    /// here ends.
+    HaloSourceGone(RegionCoords),
     /// Terrain halo refresh from a neighbouring region (`halo.rs`): its
     /// chunks within `HALO_BLOCKS` of the shared edge, changed (or, to seed
     /// the halo, all of them).
@@ -885,6 +889,7 @@ impl GameEventKind {
             | GameEventKind::EntityArrived(_)
             | GameEventKind::HaloEntity(_)
             | GameEventKind::HaloEntityGone(_)
+            | GameEventKind::HaloSourceGone(_)
             | GameEventKind::HaloUpdate(_)
             | GameEventKind::ClientLeft(_)
             | GameEventKind::ParkPlayer(_)

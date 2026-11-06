@@ -337,3 +337,21 @@ fn parked_reseed_wins_over_held_delta_in_lagging_neighbour() {
     }
     assert_eq!(seen_from_spawn(&mut rig, world).map(|b| b.id), Some(BlockId(1)), "the final terrain won");
 }
+
+/// A region lost without `Stopped` (its thread died; the manager finds out
+/// when it asks it to shut down) takes its mirrors in the running
+/// neighbours with it: nothing else would ever end them.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn lost_region_mirrors_dropped_on_unload() {
+    let mut rig = joined();
+    let id = slime_in_north_band(&mut rig);
+    rig.event(game::ServerEvent::ClientPacket(game::ClientPacket::ReleaseRegionConnection(north()), CLIENT));
+    rig.kill(north());
+    rig.now_ms += game::UNLOAD_GRACE_MS;
+    rig.manager.maintain(rig.now_ms);
+    rig.settle();
+    assert!(!rig.manager.running_regions().contains(&north()), "north is gone");
+    assert_eq!(mirror_in(&mut rig, SPAWN_REGION, id), None, "the lost owner's mirror is gone");
+}
+

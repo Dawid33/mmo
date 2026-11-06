@@ -1188,6 +1188,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                     GameEventKind::EntityArrived(_)
                     | GameEventKind::HaloEntity(_)
                     | GameEventKind::HaloEntityGone(_)
+                    | GameEventKind::HaloSourceGone(_)
                     | GameEventKind::HaloUpdate(_)
                     | GameEventKind::CreateClient(_)
                     | GameEventKind::CreateClientAt(..)
@@ -1420,6 +1421,9 @@ impl<S: RegionSpawner> WorldManager<S> {
                 }
             }
             RegionOutput::HaloEntities(list, stamp) => {
+                // Late output of a region already lost is dropped: its
+                // mirrors were ended (`halo_source_lost`); none comes back.
+                let list = if self.regions.contains_key(&rc) { list } else { Vec::new() };
                 for (mut msg, target) in list {
                     // Entity-halo messages NEVER wake a region (a starting one
                     // gets the band entities from its neighbours' next ticks).
@@ -1475,6 +1479,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                 self.regions.remove(&rc);
                 self.pending_events.remove(&rc);
                 self.spawner.reap(rc);
+                self.halo_source_lost(rc);
                 self.history_region_lost(rc);
                 let queued = self.restart_for_in_flight(rc);
                 self.settle_lost_parks(rc, &queued);
@@ -1503,6 +1508,8 @@ impl<S: RegionSpawner> WorldManager<S> {
             self.regions.remove(&rc);
             self.pending_events.remove(&rc);
             self.spawner.reap(rc);
+            // Every other region is stopping: a no-op unless one is not.
+            self.halo_source_lost(rc);
             self.history_region_lost(rc);
             // Woken for what was in flight to it; the exit loop stops it again.
             let queued = self.restart_for_in_flight(rc);
@@ -2167,6 +2174,21 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// replay once it has parked (`Stopped` wakes it); its other inputs
     /// (snapshot / terrain requests, the map extent, client key input) are
     /// dropped — the restart re-sends what it needs.
+    /// Region `rc` was lost without `Stopped` (its thread died), so it sent
+    /// no `HaloEntityGone` for its mirrors: each running, non-stopping
+    /// neighbour ends them all (`HaloSourceGone`), stamped with the world
+    /// tick so a lagging neighbour applies what `rc` sent before first. Its
+    /// terrain halo stays as last mirrored (a respawn reseeds it; the
+    /// terrain cache may be older than the deltas the neighbour applied).
+    fn halo_source_lost(&mut self, rc: RegionCoords) {
+        let stamp = self.spawner.world_tick();
+        for n in crate::halo::neighbours(rc) {
+            if self.regions.get(&n).is_some_and(|l| !l.stopping) {
+                self.send_to_region(n, RegionInput::Transfer(GameEventKind::HaloSourceGone(rc), stamp));
+            }
+        }
+    }
+
     fn send_to_region(&mut self, rc: RegionCoords, input: RegionInput) -> bool {
         let Some(link) = self.regions.get(&rc) else {
             log::debug!("send_to_region: {:?} not running", rc);
@@ -2193,6 +2215,7 @@ impl<S: RegionSpawner> WorldManager<S> {
         let subscribers = self.regions.remove(&rc).unwrap().subscribers;
         self.pending_events.remove(&rc);
         self.spawner.reap(rc);
+        self.halo_source_lost(rc);
         // Its people's bodies died with it: back to the history, then caught up again.
         self.history_region_lost(rc);
         self.ensure_running(rc);

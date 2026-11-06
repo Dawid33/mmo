@@ -647,3 +647,31 @@ fn arrival_closes_open_chest_view() {
     assert!(!c.inventory_open);
     assert_eq!((c.mining, c.break_cooldown_until), (None, 0));
 }
+
+/// A person's arrival into a region where that person already has a body
+/// is ignored — and takes the arriving entity's mirror with it, so no
+/// mirror outlives the crossing that skipped the upgrade.
+#[test]
+fn ignored_duplicate_person_arrival_drops_its_mirror() {
+    let (_, src_key) = donor();
+    let src = RegionCoords::new(0, 0);
+    let (send, _recv) = crossbeam::channel::unbounded();
+    let mut rb = Rollback::new(Some(send));
+    let person = game::history::PersonId(7);
+    rb.new_transaction();
+    rb.spawn_person_safe(person, (128.0, 128.0)).expect("embodied here");
+    let mut mirror = ghost(src, src_key, 250.0);
+    mirror.kind = EntityKind::Person { person };
+    rb.apply_halo_entity_safe(mirror);
+    rb.forget();
+    assert!(rb.halo_entity(eid(src, src_key)).is_some());
+    let mut arrival = bundle(src, src_key, 9, 2.0);
+    arrival.kind = EntityKind::Person { person };
+    arrival.client = None;
+    let before = crc(&rb);
+    rb.new_transaction();
+    assert_eq!(rb.apply_arrival(arrival), None, "the duplicate is ignored");
+    assert!(rb.halo_entity(eid(src, src_key)).is_none(), "its mirror went with it");
+    rb.rollback();
+    assert_eq!(before, crc(&rb), "and undoes bit-exact");
+}

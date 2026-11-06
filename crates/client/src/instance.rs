@@ -920,6 +920,7 @@ impl GameInstanceManager {
             GameEventKind::EntityArrived(_)
             | GameEventKind::HaloEntity(_)
             | GameEventKind::HaloEntityGone(_)
+            | GameEventKind::HaloSourceGone(_)
             | GameEventKind::HaloUpdate(_) => {}
             GameEventKind::UiAction(_, _) | GameEventKind::Order(_, _) if !self.is_caught_up => {
                 // Same admission rule as PlayerInput: drop until the sim has

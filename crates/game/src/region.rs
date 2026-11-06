@@ -245,6 +245,7 @@ fn ev_desc(e: &GameEvent) -> String {
         }
         GameEventKind::HaloEntity(d) => format!("HaloEntity({:?})", d.id),
         GameEventKind::HaloEntityGone(g) => format!("HaloEntityGone({:?})", g.id),
+        GameEventKind::HaloSourceGone(rc) => format!("HaloSourceGone({rc:?})"),
         GameEventKind::HaloUpdate(u) => format!("HaloUpdate(from={:?}, chunks={})", u.from, u.deltas.len()),
         GameEventKind::SpawnPerson(s) => format!("SpawnPerson({s:?})"),
         GameEventKind::DespawnPerson(p) => format!("DespawnPerson({p:?})"),
@@ -920,6 +921,9 @@ impl Region {
             }
             GameEventKind::HaloEntityGone(gone) => {
                 self.data.apply_halo_entity_gone_safe(gone);
+            }
+            GameEventKind::HaloSourceGone(from) => {
+                self.data.drop_halo_source_safe(from);
             }
             GameEventKind::HaloUpdate(update) => {
                 self.data.apply_halo_update_safe(&update);

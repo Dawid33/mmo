@@ -361,16 +361,7 @@ impl Rollback {
             for chunk in stale {
                 self.apply_halo_delta_safe(&HaloDelta { chunk, data: None });
             }
-            let mirrors: Vec<crate::EntityId> = self
-                .data
-                .halo_entities
-                .iter()
-                .filter(|(_, h)| h.source_region == u.from)
-                .map(|(id, _)| *id)
-                .collect();
-            for id in mirrors {
-                self.remove_halo_entity_safe(id);
-            }
+            self.drop_halo_source_safe(u.from);
         }
         for d in &u.deltas {
             if d.chunk.to_local().0 != u.from {
