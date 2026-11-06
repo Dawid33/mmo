@@ -3,6 +3,7 @@
 //! Everything authoritative is integer and iterated in ascending cell index.
 
 pub mod body;
+pub mod fixture;
 pub mod grid;
 pub mod state;
 
