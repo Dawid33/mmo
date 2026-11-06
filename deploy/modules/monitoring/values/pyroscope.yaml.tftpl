@@ -1,0 +1,32 @@
+# Pyroscope, single binary (v2 storage), profiles in S3.
+pyroscope:
+  replicaCount: 1
+  extraArgs:
+    log.level: info
+    storage.backend: s3
+    storage.s3.bucket-name: ${bucket}
+    storage.s3.endpoint: ${endpoint}
+    storage.s3.region: ${region}
+    retention-period: ${retention}
+  # No static key: the S3 client's credential chain reads the telemetry-s3 env.
+  extraEnvFrom:
+    - secretRef:
+        name: telemetry-s3
+  persistence:
+    enabled: true
+    storageClassName: ${storage_class}
+    size: ${size}
+  resources:
+    requests: { cpu: 50m, memory: 256Mi }
+    limits: { memory: 1Gi }
+
+# One Alloy in this stack (the alloy release); no bundled agents or MinIO.
+alloy:
+  enabled: false
+agent:
+  enabled: false
+minio:
+  enabled: false
+
+serviceMonitor:
+  enabled: true

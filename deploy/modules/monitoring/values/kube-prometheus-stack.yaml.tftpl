@@ -1,0 +1,172 @@
+# kube-prometheus-stack on k3s: Prometheus (+ Thanos sidecar), Alertmanager,
+# node-exporter, kube-state-metrics, Grafana.
+fullnameOverride: kps
+
+# k3s embeds the controller-manager, scheduler, proxy and etcd in its own
+# process: the chart's default endpoints don't exist, so don't scrape (or alert on) them.
+kubeControllerManager:
+  enabled: false
+kubeScheduler:
+  enabled: false
+kubeProxy:
+  enabled: false
+kubeEtcd:
+  enabled: false
+
+alertmanager:
+  alertmanagerSpec:
+    resources:
+      requests: { cpu: 10m, memory: 32Mi }
+      limits: { memory: 128Mi }
+    storage:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: ${storage_class}
+          accessModes: [ReadWriteOnce]
+          resources:
+            requests:
+              storage: ${alertmanager_size}
+
+prometheusOperator:
+  resources:
+    requests: { cpu: 20m, memory: 64Mi }
+    limits: { memory: 256Mi }
+
+kube-state-metrics:
+  resources:
+    requests: { cpu: 10m, memory: 64Mi }
+    limits: { memory: 256Mi }
+
+prometheus-node-exporter:
+  resources:
+    requests: { cpu: 10m, memory: 32Mi }
+    limits: { memory: 128Mi }
+
+prometheus:
+  # Headless gRPC service of the sidecars: Thanos Query discovers them through it.
+  thanosService:
+    enabled: true
+  thanosServiceMonitor:
+    enabled: true
+  prometheusSpec:
+    retention: ${retention}
+    retentionSize: ${retention_size}
+    externalLabels:
+      cluster: ${cluster}
+    # Pick up every ServiceMonitor / PodMonitor / rule / probe in the cluster,
+    # not only ones carrying this release's labels (the game's will come later).
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
+    probeSelectorNilUsesHelmValues: false
+    scrapeConfigSelectorNilUsesHelmValues: false
+    # The sidecar uploads 2 h blocks: local compaction must stay off.
+    disableCompaction: true
+    thanos:
+      image: ${thanos_image}
+      objectStorageConfig:
+        existingSecret:
+          name: thanos-objstore
+          key: objstore.yml
+    resources:
+      requests: { cpu: 200m, memory: 1Gi }
+      limits: { memory: 2Gi }
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: ${storage_class}
+          accessModes: [ReadWriteOnce]
+          resources:
+            requests:
+              storage: ${prometheus_size}
+
+grafana:
+  admin:
+    existingSecret: grafana-admin
+    userKey: admin-user
+    passwordKey: admin-password
+  persistence:
+    enabled: true
+    type: pvc
+    storageClassName: ${storage_class}
+    size: ${grafana_size}
+  # A PVC is ReadWriteOnce: never run two Grafanas at once during a rollout.
+  deploymentStrategy:
+    type: Recreate
+  resources:
+    requests: { cpu: 20m, memory: 128Mi }
+    limits: { memory: 256Mi }
+  plugins:
+    - grafana-pyroscope-app
+  grafana.ini:
+    server:
+      domain: ${grafana_host}
+      root_url: https://${grafana_host}
+    auth.anonymous:
+      enabled: false
+    analytics:
+      reporting_enabled: false
+      check_for_updates: false
+  ingress:
+    enabled: true
+    ingressClassName: ${ingress_class}
+    annotations:
+      cert-manager.io/cluster-issuer: ${cluster_issuer}
+    hosts:
+      - ${grafana_host}
+    tls:
+      - secretName: grafana-tls
+        hosts:
+          - ${grafana_host}
+  sidecar:
+    datasources:
+      # The chart's own Prometheus datasource stays (direct, last ${retention}),
+      # but Thanos Query is the default.
+      isDefaultDatasource: false
+      name: Prometheus (local)
+  additionalDataSources:
+    - name: Thanos
+      uid: thanos
+      type: prometheus
+      url: http://thanos-query.${namespace}.svc:10902
+      access: proxy
+      isDefault: true
+      jsonData:
+        prometheusType: Thanos
+        timeInterval: 30s
+    - name: Loki
+      uid: loki
+      type: loki
+      url: http://loki.${namespace}.svc:3100
+      access: proxy
+      jsonData:
+        derivedFields:
+          - name: TraceID
+            datasourceUid: tempo
+            matcherRegex: '(?:trace_?id|traceID)[=:"]+(\w+)'
+            url: '$${__value.raw}'
+    - name: Tempo
+      uid: tempo
+      type: tempo
+      url: http://tempo.${namespace}.svc:3200
+      access: proxy
+      jsonData:
+        tracesToLogsV2:
+          datasourceUid: loki
+          spanStartTimeShift: -5m
+          spanEndTimeShift: 5m
+          filterByTraceID: true
+        tracesToProfiles:
+          datasourceUid: pyroscope
+          profileTypeId: process_cpu:cpu:nanoseconds:cpu:nanoseconds
+        serviceMap:
+          datasourceUid: thanos
+        nodeGraph:
+          enabled: true
+        lokiSearch:
+          datasourceUid: loki
+    - name: Pyroscope
+      uid: pyroscope
+      type: grafana-pyroscope-datasource
+      url: http://pyroscope.${namespace}.svc:4040
+      access: proxy

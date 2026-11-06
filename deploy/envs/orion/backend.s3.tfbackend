@@ -1,0 +1,7 @@
+# Shared S3 backend settings of every envs/orion/* root (created by ./bootstrap).
+# Each root adds its own `key` (`just orion-init <root>` → orion/<root>.tfstate).
+# Credentials: the AWS default chain (AWS_PROFILE etc.).
+bucket       = "mmo-orion-tfstate-029905505680"
+region       = "eu-central-1"
+encrypt      = true
+use_lockfile = true

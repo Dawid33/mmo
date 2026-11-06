@@ -1,0 +1,26 @@
+# Every value is set by deploy/modules/monitoring/main.tf.
+image: quay.io/thanos/thanos:v0.42.5
+objstoreSecret: thanos-objstore
+# Headless service of the Prometheus sidecars (kube-prometheus-stack thanosService).
+sidecarService: kps-thanos-discovery
+replicaLabel: prometheus_replica
+storageClass: local-path
+retention:
+  raw: 30d
+  fiveMinutes: 90d
+  oneHour: 365d
+store:
+  size: 10Gi
+  indexCacheSize: 256MB
+  resources:
+    requests: { cpu: 20m, memory: 256Mi }
+    limits: { memory: 768Mi }
+compactor:
+  size: 80Gi
+  resources:
+    requests: { cpu: 20m, memory: 256Mi }
+    limits: { memory: 1Gi }
+query:
+  resources:
+    requests: { cpu: 20m, memory: 128Mi }
+    limits: { memory: 512Mi }

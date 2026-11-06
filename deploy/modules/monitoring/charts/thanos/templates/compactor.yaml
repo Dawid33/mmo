@@ -1,0 +1,77 @@
+# The compactor must be a singleton: two would compact the same blocks.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: thanos-compactor
+  labels:
+    {{- include "thanos.labels" . | nindent 4 }}
+    app.kubernetes.io/component: compactor
+spec:
+  replicas: 1
+  serviceName: thanos-compactor
+  podManagementPolicy: OrderedReady
+  updateStrategy:
+    type: RollingUpdate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: thanos
+      app.kubernetes.io/component: compactor
+  template:
+    metadata:
+      labels:
+        {{- include "thanos.labels" . | nindent 8 }}
+        app.kubernetes.io/component: compactor
+    spec:
+      {{- include "thanos.securityContext" . | nindent 6 }}
+      containers:
+        - name: compactor
+          image: {{ .Values.image }}
+          args:
+            - compact
+            - --wait
+            - --log.level=info
+            - --data-dir=/var/thanos/compact
+            - --objstore.config-file=/etc/thanos/objstore.yml
+            - --http-address=0.0.0.0:10902
+            - --retention.resolution-raw={{ .Values.retention.raw }}
+            - --retention.resolution-5m={{ .Values.retention.fiveMinutes }}
+            - --retention.resolution-1h={{ .Values.retention.oneHour }}
+            - --deduplication.replica-label={{ .Values.replicaLabel }}
+            - --delete-delay=48h
+          ports:
+            - { name: http, containerPort: 10902 }
+          {{- include "thanos.probes" . | nindent 10 }}
+          resources:
+            {{- toYaml .Values.compactor.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          volumeMounts:
+            - { name: data, mountPath: /var/thanos/compact }
+            {{- include "thanos.objstoreMount" . | nindent 12 }}
+      volumes:
+        {{- include "thanos.objstoreVolume" . | nindent 8 }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        storageClassName: {{ .Values.storageClass }}
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests:
+            storage: {{ .Values.compactor.size }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: thanos-compactor
+  labels:
+    {{- include "thanos.labels" . | nindent 4 }}
+    app.kubernetes.io/component: compactor
+spec:
+  selector:
+    app.kubernetes.io/name: thanos
+    app.kubernetes.io/component: compactor
+  ports:
+    - { name: http, port: 10902, targetPort: http }

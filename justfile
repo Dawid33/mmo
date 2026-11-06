@@ -983,6 +983,52 @@ deploy-local-plan: dev-cluster-up
 kube *args:
     KUBECONFIG={{dev_kubeconfig}} kubectl "$@"
 
+# ---------------------------------------------------------------------------
+# The orion k3s server (Hetzner 5.9.7.138, kube context `orion`): OpenTofu roots
+# under deploy/envs/orion — `bootstrap` (the S3 state bucket), `platform`
+# (cert-manager), `monitoring` (Grafana, Prometheus + Thanos, Loki, Tempo,
+# Pyroscope, Alloy; data in S3). State lives in S3 (deploy/envs/orion/backend.s3.tfbackend,
+# key orion/<root>.tfstate); AWS credentials come from the default chain
+# (`AWS_PROFILE=…` to pick a profile). Every recipe pins the `orion` context,
+# never the current one. Plan before every apply. Design:
+# docs/superpowers/plans/2026-11-06-k3s-observability-stack-handoff.md.
+orion_context := "orion"
+
+# `tofu init` an orion root (bootstrap | platform | monitoring) against its S3 state.
+# Extra args pass through, e.g. `just orion-init monitoring -upgrade`.
+[positional-arguments]
+orion-init root *args:
+    {{tofu}} -chdir=deploy/envs/orion/{{root}} init -input=false \
+        -backend-config=../backend.s3.tfbackend -backend-config=key=orion/{{root}}.tfstate "${@:2}"
+
+# Show what applying an orion root would change.
+[positional-arguments]
+orion-plan root *args:
+    {{tofu}} -chdir=deploy/envs/orion/{{root}} plan -input=false -var kube_context={{orion_context}} "${@:2}"
+
+# Apply an orion root (interactive: tofu shows the plan and asks). Order on a
+# fresh server: platform, then monitoring.
+[positional-arguments]
+orion-apply root *args:
+    {{tofu}} -chdir=deploy/envs/orion/{{root}} apply -var kube_context={{orion_context}} "${@:2}"
+
+# The bootstrap root has no kubernetes provider (no kube_context variable).
+orion-bootstrap-plan:
+    {{tofu}} -chdir=deploy/envs/orion/bootstrap plan -input=false
+
+# kubectl against the orion server, e.g. `just orion-kube -n monitoring get pods`.
+[positional-arguments]
+orion-kube *args:
+    kubectl --context {{orion_context}} "$@"
+
+# Grafana without the public Ingress: http://127.0.0.1:3000 (port-forward).
+orion-grafana port="3000":
+    kubectl --context {{orion_context}} -n monitoring port-forward svc/kps-grafana {{port}}:80
+
+# Print the Grafana `admin` password (from the monitoring root's state).
+orion-grafana-password:
+    @{{tofu}} -chdir=deploy/envs/orion/monitoring output -raw grafana_admin_password; echo
+
 # Whole quick suites (slow tests skipped). Minutes, not seconds — reach for
 # `smoke` / `test-one` while iterating and keep this for a broader sweep.
 test: test-game test-client test-server test-worldgen

@@ -1,0 +1,38 @@
+# Tempo, single binary: traces in S3, OTLP in (Alloy forwards to it).
+replicas: 1
+
+tempo:
+  reportingEnabled: false
+  retention: ${retention}
+  # No static key: the S3 client's credential chain reads the telemetry-s3 env.
+  extraEnvFrom:
+    - secretRef:
+        name: telemetry-s3
+  storage:
+    trace:
+      backend: s3
+      s3:
+        bucket: ${bucket}
+        endpoint: ${endpoint}
+        region: ${region}
+      wal:
+        path: /var/tempo/wal
+  # The chart merges in its Jaeger receivers too (its Service template needs them); unused.
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: "0.0.0.0:4317"
+        http:
+          endpoint: "0.0.0.0:4318"
+  resources:
+    requests: { cpu: 50m, memory: 256Mi }
+    limits: { memory: 1Gi }
+
+persistence:
+  enabled: true
+  storageClassName: ${storage_class}
+  size: ${size}
+
+serviceMonitor:
+  enabled: true

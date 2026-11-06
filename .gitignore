@@ -22,6 +22,9 @@ perf-folded-server.txt
 deploy/**/.terraform/
 deploy/**/*.tfstate
 deploy/**/*.tfstate.*
+# Variable files may hold secrets; only the examples are committed
+deploy/**/*.tfvars
+!deploy/**/*.tfvars.example
 
 # API keys (Leonardo.ai, 3D AI Studio) for tools/assets — never commit
 .env

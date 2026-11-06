@@ -1,0 +1,18 @@
+{{- range $c := list "query" "store" "compactor" }}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: thanos-{{ $c }}
+  labels:
+    {{- include "thanos.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: {{ $c }}
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: thanos
+      app.kubernetes.io/component: {{ $c }}
+  endpoints:
+    - port: http
+      interval: 30s
+{{- end }}
