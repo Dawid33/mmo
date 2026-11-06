@@ -7,63 +7,22 @@
 //! breaks the handoff is a seed to replay rather than a flaky thread test
 //! (`crates/server/tests/threaded_world.rs` keeps the real-thread plumbing
 //! check). Run via `just test-threads`.
-use crossbeam::channel::{unbounded, Receiver};
 use game::{
-    Block, BlockId, Chunk, ClientId, ClientPacket, Column, ColumnCoords, GameEvent, GameEventKind,
-    Goal, InlineLodBuilder, InlineSchedule, InlineSpawner, InputEvent, Key, LodBuilder, Order, PlayMode,
-    RegionCoords, RegionOutput, ServerEvent, ServerPacket, SubChunk, TilePos, Walker, WorldManager,
-    REGION_BLOCKS, REGION_SIZE, SPAWN_REGION, TICK_RATE,
+    Block, BlockId, Chunk, ClientPacket, Column, ColumnCoords, GameEvent, GameEventKind, Goal, InlineSchedule,
+    InputEvent, Key, Order, PlayMode, RegionCoords, ServerEvent, SubChunk, REGION_BLOCKS, REGION_SIZE,
+    SPAWN_REGION, TICK_RATE,
 };
 
 use crate::common;
+use crate::common::rig::{Rig, Seen, CLIENT, LEG_ROUNDS};
 use game::EntityId;
 use std::collections::BTreeMap;
 
-/// The conservation invariant of a crossing: every `EntityId` is owned by
-/// exactly one running region or sits exactly once in the manager's
-/// in-flight table — never both, never twice, and (people aside, whom the
-/// history may absorb or end) never lost. Called every round.
-fn assert_conserved(rig: &mut Rig) {
-    let mut places: BTreeMap<EntityId, Vec<Option<RegionCoords>>> = BTreeMap::new();
-    let mut people = std::collections::BTreeSet::new();
-    for rc in rig.manager.running_regions() {
-        rig.manager.spawner_mut().with_region(rc, |region| {
-            let data = region.data();
-            for (id, &key) in data.id_index.iter() {
-                places.entry(*id).or_default().push(Some(rc));
-                if matches!(data.ecs.kind.try_get(key), Some(game::EntityKind::Person { .. })) {
-                    people.insert(*id);
-                }
-            }
-        });
-    }
-    for (id, _target) in rig.manager.in_flight_ids() {
-        places.entry(id).or_default().push(None);
-    }
-    for (id, at) in &places {
-        assert_eq!(at.len(), 1, "{id:?} is in several places at once (None = in flight): {at:?}");
-    }
-    for (id, last) in &rig.tracked {
-        assert!(places.contains_key(id), "{id:?} vanished (last seen {last:?}, None = in flight)");
-    }
-    rig.tracked.retain(|id, _| !people.contains(id));
-    for (id, at) in places {
-        if !people.contains(&id) {
-            rig.tracked.insert(id, at[0]);
-        }
-    }
-}
-
 /// Seeds swept per schedule mode.
 const SEEDS: u64 = 12;
-/// Round budget for one leg of the walk. Lockstep needs ~40 (130 units at
-/// walk speed); missed ticks and late inputs stretch it.
-const LEG_ROUNDS: usize = 160;
 /// Rounds walked past the seam before turning back, so the return leg starts
 /// clear of the flip hysteresis.
 const PAST_SEAM_ROUNDS: usize = 6;
-
-const CLIENT: ClientId = 0;
 
 fn north() -> RegionCoords {
     RegionCoords::new(0, -1)
@@ -131,174 +90,9 @@ fn seam_floor_columns(rc: RegionCoords) -> Vec<(ColumnCoords, Column)> {
     floor_columns(xs, zs)
 }
 
-struct Rig {
-    manager: WorldManager<InlineSpawner>,
-    region_out: Receiver<(RegionCoords, RegionOutput)>,
-    packets: Receiver<(Option<ClientId>, ServerPacket)>,
-    now_ms: u64,
-    /// Latest authoritative `PlayerRegion` push — what a client would believe.
-    pushed_home: Option<RegionCoords>,
-    /// [`Rig::start_trace`]: each traced region's tick, and what was seen.
-    trace: Option<(std::collections::BTreeMap<RegionCoords, u64>, Vec<(RegionCoords, Seen)>)>,
-    /// Every non-person entity [`assert_conserved`] has seen, and where it
-    /// was last (`None` = in flight): it must never vanish.
-    tracked: std::collections::BTreeMap<EntityId, Option<RegionCoords>>,
-    /// Latest region snapshot sent to the client, per region: whether it
-    /// held the client's player.
-    snapshot_has_player: std::collections::BTreeMap<RegionCoords, bool>,
-}
-
 impl Rig {
     fn new(schedule: Option<InlineSchedule>) -> Self {
         Self::with_floor(schedule, seam_floor_columns)
-    }
-
-    fn with_floor(schedule: Option<InlineSchedule>, floor: fn(RegionCoords) -> Vec<(ColumnCoords, Column)>) -> Self {
-        let (out_send, packets) = unbounded();
-        let (region_out_send, region_out) = unbounded();
-        let (lod_result_send, lod_result_recv) = unbounded();
-        let lod_builder: Box<dyn LodBuilder> = Box::new(InlineLodBuilder {
-            coarse: Box::new(|_key: &game::lod::LodKey| Vec::new()),
-            out: lod_result_send,
-        });
-        let spawner = schedule.map_or_else(InlineSpawner::default, InlineSpawner::with_schedule);
-        Rig {
-            manager: WorldManager::new(
-                spawner,
-                Box::new(floor),
-                out_send,
-                region_out_send,
-                lod_builder,
-                lod_result_recv,
-            ),
-            region_out,
-            packets,
-            now_ms: 0,
-            pushed_home: None,
-            trace: None,
-            tracked: Default::default(),
-            snapshot_has_player: Default::default(),
-        }
-    }
-
-    fn settle(&mut self) {
-        for _ in 0..3 {
-            self.manager.spawner_mut().pump();
-            while let Ok((rc, out)) = self.region_out.try_recv() {
-                self.trace_output(rc, &out);
-                self.manager.handle_region_output(rc, out, self.now_ms);
-            }
-        }
-        for (_, packet) in self.packets.try_iter() {
-            match packet {
-                ServerPacket::PlayerRegion(home, CLIENT) => self.pushed_home = home,
-                ServerPacket::Region(rc, state) => {
-                    self.snapshot_has_player.insert(rc, state.player_entites.contains_key(&CLIENT));
-                }
-                _ => {}
-            }
-        }
-    }
-
-    fn event(&mut self, ev: ServerEvent) {
-        assert!(self.manager.handle_server_event(ev, self.now_ms));
-        self.settle();
-    }
-
-    /// One scheduling round, then the ownership invariant: the player is
-    /// owned by at most one region (none while a handoff is in flight).
-    fn round(&mut self) {
-        self.now_ms += TICK_RATE;
-        self.manager.spawner_mut().tick_all();
-        self.settle();
-        let owners = self.owners();
-        assert!(owners.len() <= 1, "player owned by several regions at once: {owners:?}");
-        assert_conserved(self);
-    }
-
-    /// Test support: kill `rc`'s runner (a dead region thread). Its entities
-    /// die with it, except what is in flight to it.
-    fn kill(&mut self, rc: RegionCoords) {
-        self.manager.spawner_mut().kill(rc);
-        self.tracked.retain(|_, at| *at != Some(rc));
-    }
-
-    fn key(&mut self, key: Key, pressed: bool) {
-        // Stamped with the spawn region on purpose: the manager routes input
-        // by the player's home, not by the client's stamp.
-        let ev = GameEvent::new(
-            GameEventKind::PlayerInput(CLIENT, InputEvent::Key { key, pressed }),
-            0,
-            SPAWN_REGION,
-        );
-        self.event(ServerEvent::ClientPacket(ClientPacket::GameEvent(ev), CLIENT));
-    }
-
-    fn order(&mut self, order: Order) {
-        let ev = GameEvent::new(GameEventKind::Order(CLIENT, order), 0, SPAWN_REGION);
-        self.event(ServerEvent::ClientPacket(ClientPacket::GameEvent(ev), CLIENT));
-    }
-
-    /// The player's walk (if any) and feet tile in `rc`, which owns it.
-    fn walk_state(&mut self, rc: RegionCoords) -> (Option<Walker>, TilePos) {
-        let mut out = None;
-        self.manager.spawner_mut().with_region(rc, |region| {
-            let data = region.data();
-            let e = *data.player_entites.get(&CLIENT).expect("player owned here");
-            let handle = *data.ecs.rigidbody.get(e);
-            let t = data.physics.bodies.get(handle).unwrap().translation();
-            out = Some((data.ecs.walker.try_get(e).clone(), game::feet_tile(game::feet_of(t))));
-        });
-        out.expect("region is running")
-    }
-
-    /// Regions that currently own the player entity.
-    fn owners(&mut self) -> Vec<RegionCoords> {
-        let mut owners = Vec::new();
-        for rc in self.manager.running_regions() {
-            self.manager.spawner_mut().with_region(rc, |region| {
-                if region.data().player_entites.contains_key(&CLIENT) {
-                    owners.push(rc);
-                }
-            });
-        }
-        owners
-    }
-
-    fn player_xz(&mut self, rc: RegionCoords) -> (f32, f32) {
-        let mut xz = None;
-        self.manager.spawner_mut().with_region(rc, |region| {
-            let data = region.data();
-            let e = *data.player_entites.get(&CLIENT).expect("player owned here");
-            let handle = *data.ecs.rigidbody.get(e);
-            let t = data.physics.bodies.get(handle).unwrap().translation();
-            xz = Some((t.x, t.z));
-        });
-        xz.expect("region is running")
-    }
-
-    /// Rounds until `rc` owns the player; panics past the leg budget.
-    fn walk_until_owned_by(&mut self, rc: RegionCoords, what: &str) {
-        for _ in 0..LEG_ROUNDS {
-            self.round();
-            if self.owners() == [rc] {
-                return;
-            }
-        }
-        panic!("{what}: player never reached {rc:?}; owners now {:?}", self.owners());
-    }
-
-    /// (region, tick, state hash) of every running region, in region order.
-    fn fingerprint(&mut self) -> Vec<(RegionCoords, u64, u32)> {
-        let mut regions = self.manager.running_regions();
-        regions.sort();
-        let mut out = Vec::new();
-        for rc in regions {
-            self.manager.spawner_mut().with_region(rc, |region| {
-                out.push((rc, region.current_tick(), game::state_hash(region.data())));
-            });
-        }
-        out
     }
 }
 
@@ -622,58 +416,7 @@ const HELD_AFTER_CROSSING_ROUNDS: usize = (3000 / TICK_RATE) as usize;
 /// stamps its inputs (its prediction lead).
 const INPUT_LEAD_TICKS: u64 = 2;
 
-/// One entry of a region's authoritative output stream, as the held-key
-/// test reads it: the region's tick when it happened.
-#[derive(Debug, Clone, Copy)]
-enum Seen {
-    /// A marker input (`Resized { width: seq }`) was applied.
-    Marker { seq: u32, tick: u64 },
-    /// The player's body arrived (or was created) here.
-    Arrived,
-    /// The player's body left here, during the tick that brought the
-    /// region to `stamp`.
-    Departed { stamp: u64 },
-}
-
 impl Rig {
-    /// Start recording what the running regions output (see [`Seen`]).
-    fn start_trace(&mut self) {
-        let mut ticks = std::collections::BTreeMap::new();
-        for rc in self.manager.running_regions() {
-            self.manager.spawner_mut().with_region(rc, |region| {
-                ticks.insert(rc, region.current_tick());
-            });
-        }
-        self.trace = Some((ticks, Vec::new()));
-    }
-
-    fn trace_output(&mut self, rc: RegionCoords, out: &RegionOutput) {
-        let Some((ticks, seen)) = self.trace.as_mut() else { return };
-        let Some(tick) = ticks.get_mut(&rc) else { return };
-        let events = match out {
-            RegionOutput::EventProcessed(e) | RegionOutput::EventProcessedHashed(e, ..) => vec![&e.kind],
-            RegionOutput::Departures(list, stamp) => {
-                if list.iter().any(|(b, _)| b.client.as_ref().map(|(c, _)| *c) == Some(CLIENT)) {
-                    seen.push((rc, Seen::Departed { stamp: *stamp }));
-                }
-                vec![]
-            }
-            _ => vec![],
-        };
-        for kind in events {
-            match kind {
-                GameEventKind::Tick => *tick += 1,
-                GameEventKind::PlayerInput(CLIENT, InputEvent::Resized { width, .. }) => {
-                    seen.push((rc, Seen::Marker { seq: *width, tick: *tick }))
-                }
-                GameEventKind::EntityArrived(b) if b.client.as_ref().map(|(c, _)| *c) == Some(CLIENT) => {
-                    seen.push((rc, Seen::Arrived))
-                }
-                _ => {}
-            }
-        }
-    }
-
     /// A client input stamped the way a client stamps it: with the region it
     /// believes it is in and that region's tick plus its lead.
     fn stamped(&mut self, kind: GameEventKind) {
@@ -1043,4 +786,130 @@ fn autosave_holds_a_transfer_to_a_stopping_target() {
     saves.round(&mut rig);
     assert_eq!(rig.owners(), [north()]);
     assert!(saves.checked > checked_in_flight + 2, "saves checked after the wake: {}", saves.checked);
+}
+
+// --- Seam-translation invariance ----------------------------------------------
+
+use crate::common::seam_translate::{
+    assert_seam_invariant, offset, spawn_tile, Scenario, Tolerances, JITTER_TOLERANCES,
+};
+use game::WorldBlockPos;
+
+/// Rounds a freshly placed body is left to land before a scenario starts.
+const PLACE_ROUNDS: usize = 6;
+
+/// Puts the client's body on `at` (a world block in the spawn region) by
+/// entering Adventure there; `fortress` then switches back to Fortress mode
+/// with key control on (the held-key walk's mode).
+fn place_player(rig: &mut Rig, at: WorldBlockPos, fortress: bool) {
+    rig.order(Order::SetMode { mode: PlayMode::Adventure, at: Some(spawn_tile(at)) });
+    if fortress {
+        rig.order(Order::SetMode { mode: PlayMode::Fortress, at: None });
+        rig.key(Key::KeyE, true);
+        rig.key(Key::KeyE, false);
+    }
+    for _ in 0..PLACE_ROUNDS {
+        rig.round();
+    }
+}
+
+/// `walk_there_and_back` on the harness: W+A held for a leg (toward −z/−x,
+/// through the origin), then S+D for a leg back, then released.
+struct KeyWalk;
+
+/// Blocks from the origin, along +x and +z, the key walk starts at.
+const KEY_WALK_START_BLOCKS: i64 = 6;
+/// Rounds each leg's keys are held (~13 blocks of diagonal walking).
+const KEY_WALK_LEG_ROUNDS: u32 = 60;
+/// Rounds after the release, for the body to stop.
+const KEY_WALK_STOP_ROUNDS: u32 = 20;
+
+impl Scenario for KeyWalk {
+    fn setup(&self, rig: &mut Rig, origin: WorldBlockPos) {
+        let d = KEY_WALK_START_BLOCKS;
+        place_player(rig, offset(origin, d, 0, d), true);
+    }
+
+    fn drive(&self, rig: &mut Rig, round: u32) {
+        let (out, back) = ([Key::KeyW, Key::KeyA], [Key::KeyS, Key::KeyD]);
+        if round == 0 {
+            out.iter().for_each(|&k| rig.key(k, true));
+        } else if round == KEY_WALK_LEG_ROUNDS {
+            out.iter().for_each(|&k| rig.key(k, false));
+            back.iter().for_each(|&k| rig.key(k, true));
+        } else if round == 2 * KEY_WALK_LEG_ROUNDS {
+            back.iter().for_each(|&k| rig.key(k, false));
+        }
+    }
+
+    fn rounds(&self) -> u32 {
+        2 * KEY_WALK_LEG_ROUNDS + KEY_WALK_STOP_ROUNDS
+    }
+}
+
+/// An adventurer sent with `Order::MoveTo` diagonally through the origin.
+struct AdventureWalk;
+
+/// Blocks from the origin, along each axis, the adventurer starts (+x/+z)
+/// and stops (−x/−z) at.
+const ADVENTURE_WALK_BLOCKS: i64 = 8;
+/// Round budget of the walk (lockstep arrives in ~60; jitter stretches it).
+const ADVENTURE_WALK_ROUNDS: u32 = 160;
+
+impl Scenario for AdventureWalk {
+    fn setup(&self, rig: &mut Rig, origin: WorldBlockPos) {
+        let d = ADVENTURE_WALK_BLOCKS;
+        place_player(rig, offset(origin, d, 0, d), false);
+        let (region, goal) = offset(origin, -d, 0, -d).to_local();
+        rig.order(Order::MoveTo(Goal { region, column: [goal.x, goal.z], y: None }));
+    }
+
+    fn drive(&self, _rig: &mut Rig, _round: u32) {}
+
+    fn rounds(&self) -> u32 {
+        ADVENTURE_WALK_ROUNDS
+    }
+
+    /// A walk ends on its goal tile whatever the lag: tiles stay exact.
+    fn jitter_tolerances(&self) -> Tolerances {
+        Tolerances { tiles: true, ..JITTER_TOLERANCES }
+    }
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn walk_is_seam_invariant() {
+    let end = assert_seam_invariant(&KeyWalk, None);
+    let p = end.player();
+    assert!(p.walk_goal.is_none());
+    // There and back: it ends near where it started, having crossed the origin.
+    let d = KEY_WALK_START_BLOCKS as f32;
+    assert!((p.pos[0] - d).abs() < 2.0 && (p.pos[2] - d).abs() < 2.0, "ended at {:?}", p.pos);
+    assert_seam_invariant(&KeyWalk, Some(InlineSchedule::jittery));
+}
+
+/// KNOWN RED until Task 6.5 (TODO.md, "Adventure walk is not seam
+/// invariant"): a walk split at a straight seam steers its last edge tile
+/// toward a block past the edge along the exit axis and re-plans on arrival,
+/// so it reaches the same goal tile on a different line — 0.165 blocks off
+/// the centred run's resting point at Seam(X)/Seam(Z), where Corner matches
+/// (0.012). Pinned with `should_panic` so the fix shows up as this test going
+/// red: then drop the attribute.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+#[should_panic(expected = "lockstep Seam(X) differs from Centre")]
+fn adventure_walk_is_seam_invariant() {
+    assert_seam_invariant(&AdventureWalk, None);
+}
+
+/// The walk's discrete outcome — the goal tile, the walk over — holds in
+/// every placement under missed ticks and late inputs.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn adventure_walk_reaches_its_goal_in_every_placement() {
+    let end = assert_seam_invariant(&AdventureWalk, Some(InlineSchedule::jittery));
+    let p = end.player();
+    let d = ADVENTURE_WALK_BLOCKS;
+    assert_eq!(p.walk_goal, None, "the walk finished");
+    assert_eq!(p.tile, [-d, 0, -d], "the walk ended on its goal (relative to the origin)");
 }

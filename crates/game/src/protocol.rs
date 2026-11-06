@@ -172,6 +172,40 @@ impl RegionCoords {
     }
 }
 
+/// A block in WORLD block coordinates: region-local blocks plus the region's
+/// origin (`REGION_BLOCKS` per region). `x`/`z` are `i64` so any region of an
+/// `i32` [`RegionCoords`] grid fits; `y` is the region-local block y (regions
+/// tile only the plane). The seam-translation harness compares outcomes in
+/// this frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct WorldBlockPos {
+    pub x: i64,
+    pub y: i32,
+    pub z: i64,
+}
+
+impl WorldBlockPos {
+    pub fn new(x: i64, y: i32, z: i64) -> Self {
+        Self { x, y, z }
+    }
+
+    /// The world block of `pos` in `rc`'s block frame. `pos` need not lie
+    /// inside the region: a block past its edge maps to the neighbour's.
+    pub fn from_local(rc: RegionCoords, pos: crate::volume::BlockPos) -> Self {
+        let n = REGION_BLOCKS as i64;
+        Self { x: rc.x as i64 * n + pos.x as i64, y: pos.y, z: rc.z as i64 * n + pos.z as i64 }
+    }
+
+    /// The region owning this block and the block in its frame
+    /// (`0..REGION_BLOCKS` in x and z; floor division, so world block -1 is
+    /// region -1's last block).
+    pub fn to_local(self) -> (RegionCoords, crate::volume::BlockPos) {
+        let n = REGION_BLOCKS as i64;
+        let rc = RegionCoords::new(self.x.div_euclid(n) as i32, self.z.div_euclid(n) as i32);
+        (rc, crate::volume::BlockPos::new(self.x.rem_euclid(n) as i32, self.y, self.z.rem_euclid(n) as i32))
+    }
+}
+
 /// Owned entities within this distance of a region edge are mirrored as
 /// ghosts into that neighbour (up to 3 at a corner).
 pub const GHOST_MARGIN: f32 = 32.0;
@@ -786,6 +820,25 @@ impl GameEventKind {
 
 #[cfg(test)]
 mod tests {
+    use crate::volume::BlockPos;
+
+    #[test]
+    fn world_block_pos_round_trips_across_negative_regions() {
+        let n = REGION_BLOCKS as i32;
+        for rc in [RegionCoords::new(0, 0), RegionCoords::new(-1, 0), RegionCoords::new(0, -1), RegionCoords::new(-3, 2)] {
+            for local in [BlockPos::new(0, 5, 0), BlockPos::new(n - 1, -7, 0), BlockPos::new(3, 0, n - 1)] {
+                let w = WorldBlockPos::from_local(rc, local);
+                assert_eq!(w.to_local(), (rc, local), "{rc:?} {local:?} -> {w:?}");
+            }
+        }
+        // Floor division: the block just west/north of the origin is region -1's last.
+        let (rc, local) = WorldBlockPos::new(-1, 0, -1).to_local();
+        assert_eq!((rc, local), (RegionCoords::new(-1, -1), BlockPos::new(n - 1, 0, n - 1)));
+        // A local block past the edge lands in the neighbour.
+        let w = WorldBlockPos::from_local(RegionCoords::new(-1, 0), BlockPos::new(n, 0, -1));
+        assert_eq!(w.to_local(), (RegionCoords::new(0, -1), BlockPos::new(0, 0, n - 1)));
+    }
+
     #[test]
     fn legal_region_sizes_parse() {
         assert_eq!(parse_region_blocks(None), 64);

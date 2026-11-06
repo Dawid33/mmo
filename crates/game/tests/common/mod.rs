@@ -185,3 +185,6 @@ pub fn fixed_body_mass_count(data: &Rollback) -> (usize, usize) {
     let massive = fixed.iter().filter(|(_, b)| b.mass() != 0.0).count();
     (fixed.len(), massive)
 }
+
+pub mod rig;
+pub mod seam_translate;
