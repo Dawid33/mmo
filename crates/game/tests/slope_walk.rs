@@ -142,9 +142,9 @@ impl Frame {
         (if self.flip_x { edge - x } else { x }, if self.flip_z { edge - z } else { z })
     }
 
-    /// The keys walking +a (and +b when `diagonal`) at yaw 0: S is +z, W −z,
+    /// The keys walking `dir` (uphill, or back) at yaw 0: S is +z, W −z,
     /// D +x, A −x.
-    fn keys(self, diagonal: bool, uphill: bool) -> Vec<Key> {
+    fn keys(self, dir: Dir, uphill: bool) -> Vec<Key> {
         let key_for = |s: Side| match s {
             Side::PosX => Key::KeyD,
             Side::NegX => Key::KeyA,
@@ -152,8 +152,11 @@ impl Frame {
             Side::NegZ => Key::KeyW,
         };
         let (pa, pb) = if uphill { (Side::PosX, Side::PosZ) } else { (Side::NegX, Side::NegZ) };
-        let mut keys = vec![key_for(self.side(pa))];
-        if diagonal {
+        let mut keys = Vec::new();
+        if dir != Dir::B {
+            keys.push(key_for(self.side(pa)));
+        }
+        if dir != Dir::A {
             keys.push(key_for(self.side(pb)));
         }
         keys
@@ -180,6 +183,17 @@ fn slope_world(layout: Layout, frame: Frame) -> World {
         }
         chunk
     })
+}
+
+/// The canonical direction of a walk.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Dir {
+    /// Along +a.
+    A,
+    /// Along +b.
+    B,
+    /// Along +a +b.
+    Diagonal,
 }
 
 /// One leg's record: every tick's body, in order.
@@ -235,33 +249,43 @@ fn walk(world: &mut World, keys: &[Key], jump: bool, done: impl Fn(Body) -> bool
     Leg(leg)
 }
 
-/// Canonical metres along +a (or the diagonal) of a world position.
-fn progress(frame: Frame, diagonal: bool, b: Body) -> f32 {
+/// Canonical metres along `dir` of a world position.
+fn progress(frame: Frame, dir: Dir, b: Body) -> f32 {
     let (x, z) = (b.x / UNITS_PER_METER, b.z / UNITS_PER_METER);
     let edge = CHUNK_BLOCKS as f32;
     let (x, z) = (if frame.flip_x { edge - x } else { x }, if frame.flip_z { edge - z } else { z });
     let (a, b) = if frame.swap { (z, x) } else { (x, z) };
-    if diagonal { a.min(b) } else { a }
+    match dir {
+        Dir::A => a,
+        Dir::B => b,
+        Dir::Diagonal => a.min(b),
+    }
 }
 
 /// Puts the player at the start, walks up the rise without Space and back
 /// down, asserting the climb and the descent.
 fn assert_walks_up_and_down(layout: Layout, frame: Frame, diagonal: bool) {
+    let dir = if diagonal { Dir::Diagonal } else { Dir::A };
+    assert_walks_from(layout, frame, dir, (START_M, START_M));
+}
+
+/// [`assert_walks_up_and_down`] from canonical metres `start`, along `dir`.
+fn assert_walks_from(layout: Layout, frame: Frame, dir: Dir, start: (f32, f32)) {
     let mut world = slope_world(layout, frame);
     let floor_y = body(&world).y;
-    let (x, z) = frame.world_m(START_M, START_M);
+    let (x, z) = frame.world_m(start.0, start.1);
     teleport(&mut world, x * UNITS_PER_METER, floor_y, z * UNITS_PER_METER);
     ticks(&mut world, 2);
-    let what = format!("{layout:?} {frame:?}");
+    let what = format!("{layout:?} {frame:?} {dir:?}");
     let start = body(&world);
     assert!((start.y - floor_y).abs() < 0.01, "{what}: start must stand on level 0: {start:?}");
 
     let top = EDGE as f32 + CLIMB_TO_M;
-    let up = walk(&mut world, &frame.keys(diagonal, true), false, |b| progress(frame, diagonal, b) >= top);
+    let up = walk(&mut world, &frame.keys(dir, true), false, |b| progress(frame, dir, b) >= top);
     let end = up.last();
     let feet_tol = FEET_TOLERANCE_M * UNITS_PER_METER;
     assert!(
-        (end.y - (floor_y + UNITS_PER_METER)).abs() < feet_tol && progress(frame, diagonal, end) >= top - 0.5,
+        (end.y - (floor_y + UNITS_PER_METER)).abs() < feet_tol && progress(frame, dir, end) >= top - 0.5,
         "{what}: the body must end on the plateau without jumping: floor y {floor_y}, end {end:?}"
     );
     assert!(
@@ -271,7 +295,7 @@ fn assert_walks_up_and_down(layout: Layout, frame: Frame, diagonal: bool) {
         STEP_HEIGHT * UNITS_PER_METER
     );
 
-    let down = walk(&mut world, &frame.keys(diagonal, false), false, |b| progress(frame, diagonal, b) <= START_M);
+    let down = walk(&mut world, &frame.keys(dir, false), false, |b| progress(frame, dir, b) <= START_M);
     let back = down.last();
     assert!(
         (back.y - floor_y).abs() < feet_tol && back.grounded,
@@ -304,6 +328,20 @@ fn slope_walk_diagonal_onto_outer_and_inner() {
     }
 }
 
+/// Head-on onto an outer corner from each of its two low cardinals, centred
+/// on the corner's other axis (the edge between its high and low halves).
+#[test]
+fn slope_walk_onto_outer_from_each_low_cardinal() {
+    let across = EDGE as f32 + 0.5;
+    for flip_x in [false, true] {
+        for flip_z in [false, true] {
+            let frame = Frame { swap: false, flip_x, flip_z };
+            assert_walks_from(Layout::Outer, frame, Dir::A, (START_M, across));
+            assert_walks_from(Layout::Outer, frame, Dir::B, (across, START_M));
+        }
+    }
+}
+
 #[test]
 fn full_block_still_needs_a_jump() {
     let frame = Frame::facing(Side::PosX);
@@ -312,17 +350,17 @@ fn full_block_still_needs_a_jump() {
     teleport(&mut world, START_M * UNITS_PER_METER, floor_y, START_M * UNITS_PER_METER);
     ticks(&mut world, 2);
     let top = EDGE as f32 + CLIMB_TO_M;
-    let keys = frame.keys(false, true);
+    let keys = frame.keys(Dir::A, true);
     let tol = FEET_TOLERANCE_M * UNITS_PER_METER;
 
-    let blocked = walk(&mut world, &keys, false, |b| progress(frame, false, b) >= top);
+    let blocked = walk(&mut world, &keys, false, |b| progress(frame, Dir::A, b) >= top);
     let end = blocked.last();
     assert!(
-        blocked.0.iter().all(|b| (b.y - floor_y).abs() < tol) && progress(frame, false, end) < EDGE as f32,
+        blocked.0.iter().all(|b| (b.y - floor_y).abs() < tol) && progress(frame, Dir::A, end) < EDGE as f32,
         "without Space the body must stay on level 0 short of the rise: {end:?}"
     );
 
-    let climbed = walk(&mut world, &keys, true, |b| progress(frame, false, b) >= top);
+    let climbed = walk(&mut world, &keys, true, |b| progress(frame, Dir::A, b) >= top);
     let end = climbed.last();
     assert!(
         (end.y - (floor_y + UNITS_PER_METER)).abs() < tol,

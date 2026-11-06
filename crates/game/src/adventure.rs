@@ -271,6 +271,10 @@ pub const WAYPOINT_REACH_M: f32 = 0.3;
 pub const STUCK_MS: u64 = 2000;
 /// [`STUCK_MS`] in ticks ([`TICK_RATE`] is the tick period in ms).
 pub const STUCK_TICKS: u32 = (STUCK_MS / TICK_RATE) as u32;
+/// Stalled ticks after which [`steer`] holds jump on a climb even when the
+/// step walks up a slope, so a failed walk-up recovers by jumping instead of
+/// running into the give-up.
+pub const WALK_UP_JUMP_AFTER_STALL_TICKS: u32 = STUCK_TICKS / 2;
 /// How far (regions, Chebyshev) a `MoveTo` goal may lie from the walker's
 /// region.
 pub const MAX_GOAL_REGION_STEP: i32 = 1;
@@ -430,7 +434,8 @@ pub fn edge_toward(src: &impl TileSource, from: TilePos, goal: &Goal, here: Regi
 /// forward, yawed toward the next waypoint's column centre (or, on the last
 /// tile of a walk that leaves the region, a block past it along `exit`); jump held when the
 /// waypoint is more than [`STEP_HEIGHT`] above the feet, the body is
-/// grounded and the step is not a walk-up a slope ([`Walker::walk_up`]). Never sprints. The yaw follows `movement::plan`'s convention:
+/// grounded and the step is not a walk-up a slope ([`Walker::walk_up`]) — unless the walk
+/// has stalled [`WALK_UP_JUMP_AFTER_STALL_TICKS`], then it jumps anyway. Never sprints. The yaw follows `movement::plan`'s convention:
 /// forward is local −Z, so a heading `(dx, dz)` is `atan2(−dx, −dz)`.
 ///
 /// Jump is held, never pressed: `plan` toggles flight on a double tap, and
@@ -450,6 +455,7 @@ pub fn steer(walker: &Walker, feet: Vector, grounded: bool) -> (MoveKeys, f32) {
     let (dx, dz) = (cx - feet.x, cz - feet.z);
     let yaw = libm::atan2f(-dx, -dz);
     let walk_up = walker.walk_up.get(walker.next as usize).copied().unwrap_or(false);
+    let walk_up = walk_up && walker.stalled < WALK_UP_JUMP_AFTER_STALL_TICKS;
     let climb = grounded && !walk_up && wp[1] as f32 * bv - feet.y > STEP_HEIGHT * UNITS_PER_METER;
     let keys = MoveKeys { forward: true, jump_held: climb, ..MoveKeys::default() };
     (keys, yaw)

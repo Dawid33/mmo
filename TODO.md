@@ -69,3 +69,10 @@ Adventure survival follow-ups (landed 2026-11-05, plans/2026-11-05-adventure-sur
 - UI: the hotbar flickers empty when the view is None mid-handoff; M / menu can stack over the inventory; inventory slots are plain themed rectangles (restyle to the widgets' slot style).
 - Crash-only duplication window: a player's park record is written at once but the region file only every `WORLD_SAVE_SECS` — items picked up after the last region save, then a park, then a crash, can come back in the world and stay in the record (fix: save the region when one of its players parks).
 - Client re-sim double-counts `items_destroyed` (server count is exact); a refused `set_block_in` leaves a silent repeat mine cycle.
+
+Terrain slopes follow-ups (landed 2026-11-06, spec specs/2026-11-06-terrain-slopes-design.md):
+- Live look: `just run --reset` at hillsides, shores and slopes, and walking up/down them in Adventure (keyboard and `MoveTo`).
+- Feel check of `movement::GROUND_SNAP` 0.6 m: small player-made ledges now snap the body down instead of a short fall.
+- The tree_fall test skips cactus (needs a real scene for a single-block tree).
+- Fortress-mode stair building (TBD with the building rework).
+- Old saves are reset: `REGION_FILE_VERSION` 7 sets pre-slope region files aside as `.bak` and regenerates them.

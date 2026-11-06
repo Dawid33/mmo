@@ -62,13 +62,17 @@ pub fn standable(src: &impl TileSource, p: TilePos) -> bool {
         && solid_block(src.block([p[0], p[1] - 1, p[2]]))
 }
 
-/// Octile distance. No `CLIMB_COST` per level: a slope climbs for free, so
-/// charging levels would overestimate (and A* stop returning cheapest paths).
+/// Octile distance plus `CLIMB_COST` per level `a` must go DOWN to reach `b`:
+/// every descent pays it, so that part never overestimates. Levels UP are not
+/// charged — a slope walk-up climbs for free. Admissible and consistent (one
+/// step moves at most one level, and a step down pays the `CLIMB_COST` the
+/// heuristic drops).
 fn heuristic(a: TilePos, b: TilePos) -> u32 {
     let dx = a[0].abs_diff(b[0]);
     let dz = a[2].abs_diff(b[2]);
     let (lo, hi) = (dx.min(dz), dx.max(dz));
-    DIAG_COST * lo + STEP_COST * (hi - lo)
+    let down = (a[1] - b[1]).max(0) as u32;
+    DIAG_COST * lo + STEP_COST * (hi - lo) + CLIMB_COST * down
 }
 
 /// Whether the `dy = +1` step `from -> to` walks up a slope: `to`'s floor is

@@ -65,8 +65,26 @@ fn top_solid(shape: SlopeShape, x: usize, z: usize) -> bool {
 }
 
 /// The slope as a canonical chisel of `material`.
+///
+/// Changing this geometry changes generated terrain, but the worldgen disk
+/// cache key hashes only `crates/worldgen/src`: run `just worldgen-cache-clear`
+/// (wipes `target/worldgen-cache`) after such a change, or stale regions load.
 pub fn slope_chisel(material: BlockId, shape: SlopeShape) -> ChiselData {
     ChiselData::from_fn(vec![material], |x, y, z| (y < H || top_solid(shape, x, z)).then_some(0))
+}
+
+/// One cuboid of a slope geometry: (min, exclusive max), material-free.
+type Bounds = ([usize; 3], [usize; 3]);
+
+/// The twelve slope geometries as cuboid lists, built once from
+/// [`slope_chisel`] so [`classify`] cannot drift from it.
+fn shape_table() -> &'static [(SlopeShape, Vec<Bounds>)] {
+    static TABLE: std::sync::OnceLock<Vec<(SlopeShape, Vec<Bounds>)>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        all_shapes()
+            .map(|shape| (shape, slope_chisel(BlockId(1), shape).cuboids().map(|(min, max, _)| (min, max)).collect()))
+            .collect()
+    })
 }
 
 /// All twelve shapes.
@@ -82,15 +100,16 @@ fn all_shapes() -> impl Iterator<Item = SlopeShape> {
 
 /// `Some(shape)` only when `chisel` is exactly one of the twelve slope
 /// geometries, in a single material; half blocks and other chisels give `None`.
+/// Allocation-free: it runs inside A* and on every client chunk ingest.
 pub fn classify(chisel: &ChiselData) -> Option<SlopeShape> {
-    let cuboids: Vec<_> = chisel.cuboids().collect();
-    let material = cuboids.first()?.2;
-    if cuboids.iter().any(|c| c.2 != material) {
+    let material = chisel.cuboids().next()?.2;
+    if chisel.cuboids().any(|c| c.2 != material) {
         return None;
     }
-    all_shapes().find(|&shape| {
-        let candidate = slope_chisel(material, shape);
-        candidate.cuboids().eq(cuboids.iter().copied())
+    let count = chisel.cuboids().count();
+    shape_table().iter().find_map(|(shape, bounds)| {
+        (bounds.len() == count && chisel.cuboids().map(|(min, max, _)| (min, max)).eq(bounds.iter().copied()))
+            .then_some(*shape)
     })
 }
 
@@ -167,6 +186,32 @@ mod tests {
         assert_eq!(classify(&ChiselData::cuboid(STONE, [0, 0, 0], [BLOCK_VOXELS, H, BLOCK_VOXELS])), None);
         assert_eq!(classify(&ChiselData::cuboid(STONE, [0, 0, 0], [BLOCK_VOXELS; 3])), None);
         assert_eq!(classify(&ChiselData::default()), None);
+    }
+
+    #[test]
+    fn classify_table_matches_slope_chisel() {
+        let table = shape_table();
+        assert_eq!(table.len(), 12);
+        for (shape, bounds) in table {
+            let want: Vec<Bounds> = slope_chisel(STONE, *shape).cuboids().map(|(min, max, _)| (min, max)).collect();
+            assert_eq!(bounds, &want, "{shape:?}");
+        }
+    }
+
+    #[test]
+    fn classify_rejects_other_multi_cuboid_chisels() {
+        // A voxel-masked log: a round-ish trunk core, several cuboids, one material.
+        let log = ChiselData::from_fn(vec![STONE], |x, _, z| {
+            let (dx, dz) = (x as i32 * 2 - 15, z as i32 * 2 - 15);
+            (dx * dx + dz * dz <= 12 * 12).then_some(0)
+        });
+        assert!(log.cuboids().count() > 1);
+        assert_eq!(classify(&log), None);
+        // A slope's geometry in two materials is not a slope.
+        let two = ChiselData::from_fn(vec![STONE, BlockId(28)], |x, y, z| {
+            (y < H || x < H).then_some(u8::from(z < H))
+        });
+        assert_eq!(classify(&two), None);
     }
 
     #[test]

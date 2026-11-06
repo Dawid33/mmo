@@ -9,7 +9,7 @@ use game::rapier3d::math::Vector;
 use game::{
     edge_toward, feet_of, feet_tile, play_mode_update, slope_chisel, state_hash, steer, Block, BlockId, BlockIndex, EntityKey,
     GameEventKind, InputEvent, Key, Goal, Motion, Order, PlayMode, Region, RegionCoords, Rollback, Side, SlopeShape, TilePos,
-    TileSource, UiUpdate, Walker, BLOCK_VOXELS, CHUNK_BLOCKS, REGION_BLOCKS, STUCK_TICKS, TICK_RATE,
+    TileSource, UiUpdate, Walker, BLOCK_VOXELS, CHUNK_BLOCKS, REGION_BLOCKS, STUCK_TICKS, TICK_RATE, WALK_UP_JUMP_AFTER_STALL_TICKS,
 };
 
 const CLIENT: game::ClientId = 7;
@@ -535,6 +535,28 @@ fn steer_points_at_next_waypoint() {
     // No jump onto a slope walked up from its low side.
     let up = Walker { walk_up: vec![false, true], ..walk([5, 2, 4]) };
     assert!(!steer(&up, feet, true).0.jump_held);
+}
+
+#[test]
+fn steer_jumps_a_stalled_walk_up() {
+    let bv = BLOCK_VOXELS as f32;
+    let feet = Vector::new(4.5 * bv, bv, 4.5 * bv);
+    let up = |next: TilePos, stalled: u32| Walker {
+        path: vec![[4, 1, 4], next],
+        walk_up: vec![false, true],
+        next: 1,
+        stalled,
+        ..Walker::default()
+    };
+    assert!(WALK_UP_JUMP_AFTER_STALL_TICKS > 0 && WALK_UP_JUMP_AFTER_STALL_TICKS < STUCK_TICKS);
+    assert!(!steer(&up([5, 2, 4], 0), feet, true).0.jump_held);
+    assert!(!steer(&up([5, 2, 4], WALK_UP_JUMP_AFTER_STALL_TICKS - 1), feet, true).0.jump_held);
+    for stalled in [WALK_UP_JUMP_AFTER_STALL_TICKS, STUCK_TICKS] {
+        assert!(steer(&up([5, 2, 4], stalled), feet, true).0.jump_held, "stalled {stalled}");
+        // Still only on a climb, and only when grounded.
+        assert!(!steer(&up([5, 1, 4], stalled), feet, true).0.jump_held);
+        assert!(!steer(&up([5, 2, 4], stalled), feet, false).0.jump_held);
+    }
 }
 
 /// A flat one-block floor over every column except `holes`.
