@@ -31,6 +31,9 @@ REPO = os.path.dirname(os.path.dirname(HERE))
 SRC = os.path.join(HERE, "src")
 OUT = os.path.join(REPO, "assets", "models", "creatures")
 MANIFEST = os.path.join(OUT, "creatures.json")
+# The sim's shapes only ({id: {move, body}}), compact: crates/game embeds it
+# (game::creature_shapes), so it ships in every binary and the wasm download.
+COLLIDERS = os.path.join(OUT, "creature_colliders.json")
 
 # Bones of one template keep one UUID in every model (animations bind to bones
 # by UUID), so they hash the template and bone name only.
@@ -620,7 +623,7 @@ def rest_bounds(model):
     return [min(p[i] for p in points) for i in range(3)], [max(p[i] for p in points) for i in range(3)]
 
 
-# The sim's creature colliders (crates/game/src/creature_shapes.rs, which
+# The sim's creature colliders, written to COLLIDERS (crates/game/src/creature_shapes.rs, which
 # holds the same clamp as CREATURE_MIN_RADIUS / CREATURE_MAX_RADIUS and whose
 # test pins this mirror), in world units (1 Blockbench px = 1 unit).
 CREATURE_MIN_RADIUS = 2.0
@@ -665,7 +668,6 @@ def manifest_entry(df_id, src, model):
         "cubes": len(model["cubes"]),
         "bones": len(model["bones"]),
         "clips": clips,
-        "collider": collider(model, lo, hi),
     }
 
 
@@ -674,6 +676,7 @@ def main(ids):
         ids = sorted(f[:-5] for f in os.listdir(SRC) if f.endswith(".toml"))
     os.makedirs(OUT, exist_ok=True)
     entries = {}
+    colliders = {}
     failed = []
     for df_id in ids:
         try:
@@ -688,6 +691,7 @@ def main(ids):
             json.dump(data, f, indent=1)
             f.write("\n")
         entries[df_id] = manifest_entry(df_id, src, model)
+        colliders[df_id] = collider(model, *rest_bounds(model))
         print(f"{df_id}: {len(model['cubes'])} cubes, {len(model['bones'])} bones, "
               f"{len(model['clips'])} clips -> {os.path.relpath(path, REPO)}")
     # Several builds may run at once (batches in parallel): the manifest's
@@ -705,6 +709,17 @@ def main(ids):
             json.dump(dict(sorted(manifest.items())), f, indent=1)
             f.write("\n")
         os.replace(tmp, MANIFEST)
+        try:
+            with open(COLLIDERS) as f:
+                shapes = json.load(f)
+        except FileNotFoundError:
+            shapes = {}
+        shapes.update(colliders)
+        tmp = COLLIDERS + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(dict(sorted(shapes.items())), f, separators=(",", ":"))
+            f.write("\n")
+        os.replace(tmp, COLLIDERS)
     if failed:
         sys.exit(f"{len(failed)} failed: {' '.join(failed)}")
 

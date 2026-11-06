@@ -3,7 +3,8 @@
 //! `tools/creatures/build.py`) read with the real parser must follow the
 //! creature style guide (docs/superpowers/specs/2026-10-29-creature-asset-pipeline.md):
 //! no reader warnings, its template's clips with the manifest's loop modes and
-//! lengths, within the template's budgets, and the size the manifest records.
+//! lengths, within the template's budgets, and the size the manifest records;
+//! and its sim colliders in `creature_colliders.json` within that size.
 use bbmodel::{LoopMode, Model, parse, quat_rotate};
 use serde_json::Value;
 
@@ -12,11 +13,15 @@ fn assets() -> String {
 }
 
 fn manifest() -> serde_json::Map<String, Value> {
-    let path = format!("{}/models/creatures/creatures.json", assets());
+    json_object("creatures.json")
+}
+
+fn json_object(name: &str) -> serde_json::Map<String, Value> {
+    let path = format!("{}/models/creatures/{name}", assets());
     let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
-    match serde_json::from_str(&text).expect("manifest is JSON") {
+    match serde_json::from_str(&text).unwrap_or_else(|e| panic!("{path}: {e}")) {
         Value::Object(m) => m,
-        _ => panic!("manifest is not an object"),
+        _ => panic!("{path} is not an object"),
     }
 }
 
@@ -54,6 +59,7 @@ fn vec3(v: &Value) -> [f32; 3] {
 #[test]
 fn creature_models_follow_the_style_guide() {
     let manifest = manifest();
+    let colliders = json_object("creature_colliders.json");
     assert!(!manifest.is_empty(), "no creatures in the manifest");
     let mut problems = Vec::new();
     for (id, entry) in &manifest {
@@ -126,10 +132,11 @@ fn creature_models_follow_the_style_guide() {
             }
         }
 
-        // The sim's colliders (`game::creature_shapes`): a move capsule and
-        // one rest-pose box per bone with cubes, inside the bounds.
-        let Some(collider) = entry.get("collider") else {
-            bad("no collider".into());
+        // The sim's colliders (`game::creature_shapes`, from the compact
+        // creature_colliders.json): a move capsule and one rest-pose box per
+        // bone with cubes, inside the bounds.
+        let Some(collider) = colliders.get(id) else {
+            bad("not in creature_colliders.json (stale? just creatures)".into());
             continue;
         };
         let mv = &collider["move"];
@@ -146,6 +153,9 @@ fn creature_models_follow_the_style_guide() {
                 bad(format!("body box {plo:?}..{phi:?} outside the bounds {want_lo:?}..{want_hi:?}"));
             }
         }
+    }
+    for id in colliders.keys().filter(|id| !manifest.contains_key(*id)) {
+        problems.push(format!("{id}: in creature_colliders.json but not in the manifest"));
     }
     assert!(problems.is_empty(), "creature lint:\n{}", problems.join("\n"));
 }

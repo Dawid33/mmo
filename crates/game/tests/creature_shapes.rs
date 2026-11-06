@@ -1,6 +1,7 @@
 //! Creature colliders from their `.bbmodel` rest pose, as written into
-//! `assets/models/creatures/creatures.json` by `tools/creatures/build.py`
-//! (`game::creature_shapes`).
+//! `assets/models/creatures/creature_colliders.json` by
+//! `tools/creatures/build.py` (`game::creature_shapes`), checked against the
+//! manifest `creatures.json`'s bounds.
 use game::creature_shapes::{creature_shape, CREATURE_MAX_RADIUS, CREATURE_MIN_RADIUS};
 use game::ColliderSpec;
 use serde_json::Value;
@@ -63,6 +64,10 @@ fn every_manifest_creature_has_shapes() {
         }
     }
     assert!(creature_shape("no_such_creature").is_none());
+    // Stale-file guard: the embedded colliders cover exactly the manifest.
+    let text = include_str!("../../../assets/models/creatures/creature_colliders.json");
+    let colliders: serde_json::Map<String, Value> = serde_json::from_str(text).unwrap();
+    assert!(colliders.keys().eq(manifest.keys()), "creature_colliders.json and creatures.json list different creatures (just creatures)");
 }
 
 #[test]

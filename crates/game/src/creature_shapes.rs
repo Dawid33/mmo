@@ -2,10 +2,11 @@
 //!
 //! The shapes are computed offline by `tools/creatures/build.py` (every cube
 //! corner through its bones' rest rotations) and written as plain decimals
-//! into `assets/models/creatures/creatures.json` (`collider: {move, body}`).
-//! The sim never loads a `.bbmodel` for this: `bbmodel` rotates cubes with
-//! std `sin`/`cos`, which differ between native and wasm32. The manifest is
-//! embedded here and parsed once; server and client parse the same text, so
+//! into `assets/models/creatures/creature_colliders.json` (`{id: {move,
+//! body}}`, compact; the creature lint checks it against the manifest
+//! `creatures.json`). The sim never loads a `.bbmodel` for this: `bbmodel`
+//! rotates cubes with std `sin`/`cos`, which differ between native and
+//! wasm32. The file is embedded here and parsed once; server and client parse the same text, so
 //! the shapes are bit-identical and no transcendental runs in the sim.
 //!
 //! Units are world units (1 Blockbench px = 1 unit, 16 per block), model
@@ -29,7 +30,9 @@ pub const CREATURE_MIN_RADIUS: f32 = 2.0;
 pub const CREATURE_MAX_RADIUS: f32 = 12.0;
 /// A creature body's density, in `mass_props::BODY_DEFAULT_DENSITY`'s units
 /// (kg per cubic world unit): ~1000 kg/m³, water-like flesh, at 16 units
-/// per metre.
+/// per metre. The body's per-bone boxes overlap and bound rotated cubes
+/// loosely, so the mass they give is an upper bound (the stylised dog comes
+/// out at ~187 kg); tune this when a creature body is first used.
 pub const CREATURE_DENSITY: f32 = 1000.0 / (16.0 * 16.0 * 16.0);
 
 /// A creature's two sim shapes.
@@ -47,18 +50,13 @@ pub struct CreatureShape {
     pub body: ColliderSpec,
 }
 
-/// The shapes of DF creature `df_id` (a `creatures.json` key), or `None` for
+/// The shapes of DF creature `df_id` (a `creatures.json` manifest key), or `None` for
 /// a creature with no model.
 pub fn creature_shape(df_id: &str) -> Option<&'static CreatureShape> {
     shapes().get(df_id)
 }
 
-static MANIFEST: &str = include_str!("../../../assets/models/creatures/creatures.json");
-
-#[derive(serde::Deserialize)]
-struct Entry {
-    collider: Collider,
-}
+static COLLIDERS: &str = include_str!("../../../assets/models/creatures/creature_colliders.json");
 
 #[derive(serde::Deserialize)]
 struct Collider {
@@ -82,9 +80,9 @@ struct Box3 {
 fn shapes() -> &'static BTreeMap<String, CreatureShape> {
     static SHAPES: OnceLock<BTreeMap<String, CreatureShape>> = OnceLock::new();
     SHAPES.get_or_init(|| {
-        let entries: BTreeMap<String, Entry> =
-            serde_json::from_str(MANIFEST).expect("creatures.json: every creature has a collider (just creatures)");
-        entries.into_iter().map(|(id, e)| (id, shape_of(e.collider))).collect()
+        let entries: BTreeMap<String, Collider> =
+            serde_json::from_str(COLLIDERS).expect("creature_colliders.json is malformed (regenerate: just creatures)");
+        entries.into_iter().map(|(id, c)| (id, shape_of(c))).collect()
     })
 }
 
