@@ -966,6 +966,25 @@ fn the_body(s: &WorldSnapshot) -> &EntitySnap {
     b
 }
 
+/// The body of `snap` against `reference`'s (the lockstep centred run's)
+/// within `tol`, asleep: returns its (pose, rotation) spread, logged.
+fn assert_body_matches(reference: &EntitySnap, snap: &WorldSnapshot, tol: &Tolerances, what: &str) -> (f32, f32) {
+    let body = the_body(snap);
+    assert!(body.sleeping, "{what}: asleep");
+    let only = |b: &EntitySnap| WorldSnapshot {
+        entities: [(game::EntityId { birth_region: SPAWN_REGION, serial: u64::MAX }, b.clone())].into(),
+        terrain: Default::default(),
+        piles: Default::default(),
+        containers: Default::default(),
+    };
+    let (pose, _, turn) = spread(&only(reference), &only(body));
+    eprintln!("[body] {what}: pose spread {pose} blocks, rotation {turn}°");
+    if let Err(e) = compare(&only(reference), &only(body), tol) {
+        panic!("{what}: the body differs from lockstep Centre: {e}");
+    }
+    (pose, turn)
+}
+
 /// The toss in every placement (centred, across each straight seam —
 /// Seam(Z) into `north()` — and through the corner into `north_west()`)
 /// ends at the centred run's rest pose, asleep, owned by the region it rests
@@ -1015,48 +1034,133 @@ fn body_toss_survives_jitter() {
                 if let Err(e) = compare(&reference, &a, &tol) {
                     panic!("{what} differs from lockstep Centre: {e}");
                 }
-                let body = the_body(&a);
-                assert!(body.sleeping, "{what}: asleep");
-                let only = |b: &EntitySnap| WorldSnapshot {
-                    entities: [(game::EntityId { birth_region: SPAWN_REGION, serial: u64::MAX }, b.clone())].into(),
-                    terrain: Default::default(),
-                    piles: Default::default(),
-                    containers: Default::default(),
-                };
-                let (pose, _, turn) = spread(&only(&body_ref), &only(body));
-                eprintln!("[body-jitter] {what}: pose spread {pose} blocks, rotation {turn}°");
+                let (pose, turn) = assert_body_matches(&body_ref, &a, &body_tol, &what);
                 worst = (worst.0.max(pose), worst.1.max(turn));
-                if let Err(e) = compare(&only(&body_ref), &only(body), &body_tol) {
-                    panic!("{what}: the body differs from lockstep Centre: {e}");
-                }
             }
         }
     }
     eprintln!("[body-jitter] worst: pose {} blocks, rotation {}°", worst.0, worst.1);
 }
 
-/// The slide along the floor through the seam: it crosses, is owned by one
-/// region at a time, and ends asleep past the origin in the region it lies
-/// in, in every placement. Its rest pose is NOT compared with the centred
-/// run: a body sliding over the boundary between two terrain colliders (every
-/// chunk edge, so every region seam) catches on the far collider's edge
-/// ("ghost" contacts — each chunk's `Voxels` shape has no idea of its
-/// neighbour), which makes the slide chaotic with no region seam involved.
-/// Measured (2026-11-06): the same slide centred at block 16 and at block 32
-/// (identical geometry, only the coordinates' float rounding differs) rests
-/// 0.14 blocks apart; across a seam it rests 0.012–0.039 blocks and up to 7°
-/// from the centred run, and other launch speeds tip the cube onto another
-/// face at a seam (90°) or stop it dead at a chunk edge. The handoff adds to
-/// it: rebuilding the body mid-slide drops its contact warm-start (re-arriving
-/// a sliding body in the same region, no seam, moved its rest 0.003–0.07
-/// blocks).
+/// [`SLIDE`] with its body re-arrived in its OWN region (extracted and
+/// arrived again, as a seam handoff does, no seam involved) in the round its
+/// centre passes `FLIP_HYSTERESIS` beyond the origin — when the seam
+/// placements hand it off. It measures what a handoff costs a body in
+/// contact: its contact state (warm-start impulses, manifolds) is not in
+/// the bundle, so it restarts from none.
+struct SlideReArrived {
+    origin: std::cell::Cell<Option<WorldBlockPos>>,
+    done: std::cell::Cell<bool>,
+}
+
+impl Scenario for SlideReArrived {
+    fn setup(&self, rig: &mut Rig, origin: WorldBlockPos) {
+        self.origin.set(Some(origin));
+        SLIDE.setup(rig, origin);
+    }
+
+    fn drive(&self, rig: &mut Rig, _round: u32) {
+        if self.done.get() {
+            return;
+        }
+        let origin = self.origin.get().expect("set up");
+        let b = game::BLOCK_VOXELS as f32;
+        let rc = rig.owners_of(game::EntityKind::Body)[0];
+        rig.manager.spawner_mut().with_region(rc, |region| {
+            region.with_data(|d| {
+                let key = *d
+                    .data
+                    .id_index
+                    .values()
+                    .find(|k| *d.data.ecs.kind.try_get(**k) == Some(game::EntityKind::Body))
+                    .expect("the body");
+                let t = d.data.physics.bodies.get(d.data.ecs.rigidbody.try_get(key).unwrap()).unwrap().translation();
+                let past = |local: f32, region: i32, block: i64| {
+                    region as f32 * REGION_SIZE + local - block as f32 * b < -game::FLIP_HYSTERESIS
+                };
+                if past(t.x, rc.x, origin.x) || past(t.z, rc.z, origin.z) {
+                    let bundle = d.extract_entity_safe(key);
+                    d.apply_arrival(bundle).expect("re-arrived");
+                    self.done.set(true);
+                }
+            });
+        });
+    }
+
+    fn rounds(&self) -> u32 {
+        SLIDE.rounds()
+    }
+
+    fn crosser(&self) -> Option<game::EntityKind> {
+        SLIDE.crosser()
+    }
+}
+
+/// Rest position tolerance of the floor SLIDE against the centred lockstep
+/// run, per axis, blocks — loose on purpose, and measured ×2 (2026-11-06,
+/// REGION_BLOCKS 64, CHUNK_BLOCKS 16): lockstep Seam(X) 0.0388, Seam(Z)
+/// 0.0158, Corner 0.0124; the jittery seeds 0–3 the same in every
+/// placement (the slide is over before jitter shifts anything); the
+/// [`SlideReArrived`] control (the handoff's contact-state reset with no
+/// seam) 0.0024. The seam spreads exceed the control: before any handoff, a
+/// cube touching the seam already starts differently, because its floor
+/// there is the neighbour's halo chunk, a collider inserted after the
+/// region's own, so the contact pairs are solved in another order (first
+/// tick spin 2.68 vs 1.41 rad/s centred) — and the chunk-edge ghost contacts
+/// amplify any such difference (seam-free: 0.14 blocks, see the test).
+const SLIDE_POSE_TOL_BLOCKS: f32 = 0.078;
+/// … and rest rotation, degrees. Measured ×2: lockstep Seam(X) 6.96°,
+/// Corner 2.31°, Seam(Z) 0.26°; jittery seeds the same; the control 0°.
+const SLIDE_ANGLE_TOL_DEG: f32 = 14.0;
+
+/// The slide along the floor through the seam — the ground-contact
+/// crossing (a rolling log, a pushed crate). It crosses, is owned by one
+/// region at a time, ends asleep past the origin in the region it lies in,
+/// and rests within [`SLIDE_POSE_TOL_BLOCKS`] / [`SLIDE_ANGLE_TOL_DEG`] of the
+/// centred run, lockstep and under jittery seeds. Those bounds are far
+/// looser than the toss's, for two measured reasons: the handoff drops the
+/// body's contact state (the [`SlideReArrived`] control, run here, measures
+/// it with no seam), and a body sliding over the boundary between two
+/// terrain colliders (every chunk edge, so every region seam) catches on the
+/// far collider's edge — "ghost" contacts, each chunk's `Voxels` shape knows
+/// nothing of its neighbour — which makes the slide chaotic with no region
+/// seam at all: the same slide centred at block 16 and at block 32 (identical
+/// geometry, only the coordinates' float rounding differs) rests 0.14 blocks
+/// apart, and other launch speeds tip the cube onto another face at a seam
+/// or stop it dead at a chunk edge. A handoff regression beyond that cost
+/// (a lost velocity, weight or spin) still fails.
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
-fn body_slides_across_seam() {
-    for placement in PLACEMENTS {
-        let s = run(&SLIDE, placement, None);
-        let body = the_body(&s);
-        assert!(body.sleeping, "{placement:?}: asleep: {body:?}");
-        assert!(body.pos[0] < -0.25 && body.pos[2] < -0.25, "{placement:?}: rests past the origin: {:?}", body.pos);
+fn body_slide_is_seam_invariant_within_its_handoff_cost() {
+    let reference = run(&SLIDE, Placement::Centre, None);
+    let body_ref = the_body(&reference).clone();
+    assert!(body_ref.pos[0] < -0.25 && body_ref.pos[2] < -0.25, "rests past the origin: {:?}", body_ref.pos);
+    let tol = Tolerances { pose_blocks: SLIDE_POSE_TOL_BLOCKS, angle_deg: SLIDE_ANGLE_TOL_DEG, ..LOCKSTEP_TOLERANCES };
+    let control = SlideReArrived { origin: Default::default(), done: Default::default() };
+    let snap = run(&control, Placement::Centre, None);
+    assert!(control.done.get(), "the control re-arrived the body");
+    let mut worst = assert_body_matches(&body_ref, &snap, &tol, "control: re-arrived at Centre");
+    let mut check = |snap: &WorldSnapshot, what: &str| {
+        let (pose, turn) = assert_body_matches(&body_ref, snap, &tol, what);
+        let body = the_body(snap);
+        assert!(body.pos[0] < -0.25 && body.pos[2] < -0.25, "{what}: rests past the origin: {:?}", body.pos);
+        worst = (worst.0.max(pose), worst.1.max(turn));
+    };
+    for placement in &PLACEMENTS[1..] {
+        let snap = run(&SLIDE, *placement, None);
+        if let Err(e) = compare(&reference, &snap, &tol) {
+            panic!("lockstep {placement:?} differs from Centre: {e}");
+        }
+        check(&snap, &format!("lockstep {placement:?}"));
     }
+    for seed in 0..JITTER_SEEDS {
+        for placement in PLACEMENTS {
+            let snap = run(&SLIDE, placement, Some(InlineSchedule::jittery(seed)));
+            if let Err(e) = compare(&reference, &snap, &Tolerances { tiles: true, ..JITTER_TOLERANCES }) {
+                panic!("jittery seed {seed} {placement:?} differs from lockstep Centre: {e}");
+            }
+            check(&snap, &format!("jittery seed {seed} {placement:?}"));
+        }
+    }
+    eprintln!("[body] slide worst: pose {} blocks, rotation {}°", worst.0, worst.1);
 }

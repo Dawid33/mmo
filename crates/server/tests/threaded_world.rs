@@ -832,7 +832,8 @@ fn body_crosses_seam_on_real_threads() {
 
     // Every region output naming the body, in the order the manager saw them.
     let mut named: Vec<(RegionCoords, &'static str)> = Vec::new();
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let started = Instant::now();
+    let deadline = started + Duration::from_secs(30);
     let settle_after = Duration::from_millis(game::body::BODY_SETTLE_MS);
     let mut arrived_at = None;
     while arrived_at.is_none_or(|t: Instant| t.elapsed() < settle_after) && Instant::now() < deadline {
@@ -855,6 +856,16 @@ fn body_crosses_seam_on_real_threads() {
         }
         rig.absorb(rc, output);
     }
+    assert!(
+        arrived_at.is_some(),
+        "the body never arrived in {north:?} within {:?} (outputs naming it: {named:?})",
+        started.elapsed()
+    );
+    assert!(
+        arrived_at.is_some_and(|t| t.elapsed() >= settle_after),
+        "deadline passed {:?} after the arrival, before the body could settle",
+        arrived_at.map(|t| t.elapsed())
+    );
     assert_eq!(
         named,
         [(SPAWN_REGION, "spawned"), (SPAWN_REGION, "departed"), (north, "arrived"), (north, "spawned")],
