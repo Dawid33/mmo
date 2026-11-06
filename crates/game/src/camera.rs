@@ -221,6 +221,8 @@ pub struct CameraController {}
 impl Controller for CameraController {
     fn on_tick<'a>(&mut self, data: &mut Undo<GameData>) {
         let data = data.as_refs_mut();
+        // Walk waypoints are world tiles, read in this region's frame.
+        let region = **data.region;
         for (client_id, e_id) in data.player_entites.iter() {
             let e_id = *e_id;
             let ecs = data.ecs.as_refs_mut();
@@ -262,7 +264,7 @@ impl Controller for CameraController {
             // the walk (`tick_walkers_safe`).
             let walk = match ecs.walker.try_get(e_id) {
                 Some(w) if client.mode == crate::PlayMode::Adventure && !active => {
-                    Some(crate::steer(w, crate::feet_of(b.translation()), motion0.grounded))
+                    Some(crate::steer(w, crate::feet_of(b.translation()), motion0.grounded, region))
                 }
                 _ => None,
             };

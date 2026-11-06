@@ -567,8 +567,8 @@ fn open_chest_follows_its_viewer_across_the_seam() {
     assert_eq!(view_of(&mut rig, CLIENT), Some((Some(cell), true)));
     let west = game::RegionCoords::new(-1, 0);
     let goal = |x: i64| {
-        let (rc, l) = offset(origin, x, 0, 0).to_local();
-        game::Goal { region: rc, column: [l.x, l.z], y: None }
+        let p = offset(origin, x, 0, 0);
+        game::Goal { column: [p.x, p.z], y: None }
     };
     rig.order(Order::MoveTo(goal(-2)));
     rig.walk_until_owned_by(west, "across the seam");

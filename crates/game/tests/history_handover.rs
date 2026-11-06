@@ -96,7 +96,7 @@ fn spawn_of(events: &[GameEventKind], person: PersonId) -> Option<PersonSpawn> {
 
 fn centre(region: RegionCoords) -> Goal {
     let c = (REGION_BLOCKS / 2) as i32;
-    Goal { region, column: [c, c], y: None }
+    Goal::local(region, [c, c], None)
 }
 
 /// `a[0]` leaves site 0 (running) for site 1: the journey and its id.
@@ -173,7 +173,7 @@ fn catch_up_at_destination_walks_to_landing() {
     assert!(matches!(spawn.at, SpawnAt::Edge { from, .. } if from == rc(5, 0)), "{:?}", spawn.at);
     assert_eq!(
         spawn.walk_to,
-        Some(Goal { region: rc(6, 0), column: [LANDING[0] as i32, LANDING[1] as i32], y: None })
+        Some(Goal::local(rc(6, 0), [LANDING[0] as i32, LANDING[1] as i32], None))
     );
     assert!(h.journey(j).is_none());
     let p = h.person(a[0]).unwrap();

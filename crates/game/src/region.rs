@@ -957,9 +957,9 @@ impl Region {
                 }
             }
             GameEventKind::EntityArrived(bundle) => {
-                // A walk in progress carries over, re-planned in this region.
+                // A walk in progress walks on (`path_plan.rs`).
                 if let Some(e) = self.data.apply_arrival(bundle) {
-                    self.data.resume_walker_safe(e, self.id, self.map_extent);
+                    self.data.continue_walk_safe(e, self.id, self.map_extent);
                 }
             }
             GameEventKind::HaloEntity(data) => {

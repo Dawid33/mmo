@@ -275,8 +275,8 @@ fn adventure_floor_columns(rc: RegionCoords) -> Vec<(ColumnCoords, Column)> {
 }
 
 /// An adventurer `SEAM_GAP_BLOCKS` short of the +x seam is sent to a column
-/// as far into the east neighbour: it must hand off, re-plan there, and
-/// arrive. Panics with the seed on failure.
+/// as far into the east neighbour: it must hand off, walk on along its path
+/// there, and arrive. Panics with the seed on failure.
 fn walk_into_east(seed: u64, schedule: InlineSchedule) {
     let mut rig = Rig::with_floor(Some(schedule), adventure_floor_columns);
     rig.event(ServerEvent::connected(CLIENT));
@@ -290,15 +290,15 @@ fn walk_into_east(seed: u64, schedule: InlineSchedule) {
         rig.round();
     }
     let column = [SEAM_GAP_BLOCKS, WALK_Z_BLOCK];
-    rig.order(Order::MoveTo(Goal { region: EAST, column, y: None }));
+    rig.order(Order::MoveTo(Goal::local(EAST, column, None)));
     for _ in 0..ADVENTURE_ROUNDS {
         rig.round();
         if rig.owners() == [EAST] {
             let (walker, tile) = rig.walk_state(EAST);
-            // Re-planned on arrival: a path local to EAST, straight to the
-            // goal — not the carried edge path, nor a stuck re-plan.
+            // The goal is in the halo: one path straight to it, carried
+            // over the seam and walked on — never a stuck re-plan.
             if let Some(w) = &walker {
-                assert!(w.exit.is_none() && !w.replanned, "seed {seed}: walk not re-planned on arrival: {w:?}");
+                assert!(w.to_goal && !w.replanned, "seed {seed}: walk not straight to the goal: {w:?}");
             }
             if walker.is_none() {
                 assert_eq!([tile[0], tile[2]], column, "seed {seed}: walk ended off the goal column");
@@ -860,8 +860,8 @@ impl Scenario for AdventureWalk {
     fn setup(&self, rig: &mut Rig, origin: WorldBlockPos) {
         let d = ADVENTURE_WALK_BLOCKS;
         place_player(rig, offset(origin, d, 0, d), false);
-        let (region, goal) = offset(origin, -d, 0, -d).to_local();
-        rig.order(Order::MoveTo(Goal { region, column: [goal.x, goal.z], y: None }));
+        let goal = offset(origin, -d, 0, -d);
+        rig.order(Order::MoveTo(Goal { column: [goal.x, goal.z], y: None }));
     }
 
     fn drive(&self, _rig: &mut Rig, _round: u32) {}
@@ -888,16 +888,12 @@ fn walk_is_seam_invariant() {
     assert_seam_invariant(&KeyWalk, Some(InlineSchedule::jittery));
 }
 
-/// KNOWN RED until Task 6.5 (TODO.md, "Adventure walk is not seam
-/// invariant"): a walk split at a straight seam steers its last edge tile
-/// toward a block past the edge along the exit axis and re-plans on arrival,
-/// so it reaches the same goal tile on a different line — 0.165 blocks off
-/// the centred run's resting point at Seam(X)/Seam(Z), where Corner matches
-/// (0.012). Pinned with `should_panic` so the fix shows up as this test going
-/// red: then drop the attribute.
+/// A walk split by a seam takes the centred run's path: it is planned over
+/// the region ∪ halo in world tiles and walked on after the hand-off
+/// (`path_plan.rs`). Before that it stopped at an edge tile, steered a block
+/// past it and re-planned on arrival, resting 0.17 blocks off at Seam(X).
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
-#[should_panic(expected = "lockstep Seam(X) differs from Centre")]
 fn adventure_walk_is_seam_invariant() {
     assert_seam_invariant(&AdventureWalk, None);
 }

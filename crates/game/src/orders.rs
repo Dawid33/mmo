@@ -137,7 +137,8 @@ pub enum Order {
     /// Switch the issuing client's play mode; `at` is read only when
     /// entering Adventure (the tile to put the body on).
     SetMode { mode: crate::PlayMode, at: Option<TilePos> },
-    /// Walk the issuing client's adventurer to a goal.
+    /// Walk the issuing client's adventurer to a world goal, any number of
+    /// regions away (`path_plan.rs`).
     MoveTo(crate::Goal),
     /// Dev / test front end of `Intent::BreakBlock` (`intents.rs`): the
     /// issuing client's body sends one at this world block, wherever it is.
@@ -284,8 +285,7 @@ pub const BAND_HEADROOM_CHUNKS: i32 = 4;
 
 /// Region ∪ halo: tiles outside the region read the terrain halo
 /// (`halo.rs`) — its blocks, slopes and chunk bands; never bedrock, edge
-/// locks or constructions there. `find_path` itself still keeps to the
-/// region (`pathfind::in_region`) until walks plan across seams.
+/// locks or constructions there. Walks plan over all of it (`path_plan.rs`).
 impl TileSource for Rollback {
     /// See [`probe_column_band`]; a halo column probes its mirrored chunks
     /// (no ground recipe is mirrored).

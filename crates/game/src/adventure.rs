@@ -5,15 +5,13 @@
 //! state on [`crate::Client`], so it travels with the client's bundle across
 //! seams.
 
-use std::collections::BTreeSet;
-
 use rapier3d::math::{Pose, Vector};
 use state_hash::StateHash;
 
 use crate::movement::{MoveKeys, PLAYER_CAPSULE_HALF_HEIGHT, PLAYER_CAPSULE_RADIUS, STEP_HEIGHT, UNITS_PER_METER};
 use crate::{
-    find_path, nearest_standable, walk_ups, off_map, standable, ClientId, MapExtent, RegionCoords, Rollback, TilePos, TileSource,
-    BLOCK_VOXELS, MAX_PATH_NODES, REGION_BLOCKS, TICK_RATE,
+    nearest_standable, standable, walk_ups, ClientId, MapExtent, PathPlan, RegionCoords, Rollback, TilePos, TileSource,
+    WorldBlockPos, BLOCK_VOXELS, MAX_PATH_NODES, REGION_BLOCKS, TICK_RATE,
 };
 
 /// How a client plays: the commander camera or one walking body.
@@ -24,14 +22,46 @@ pub enum PlayMode {
     Adventure,
 }
 
-/// Where an adventurer is asked to walk: a block column of `region`
-/// (region-local to it), optionally at a level `y` (the air tile the feet
-/// occupy).
+/// Where an adventurer is asked to walk: a WORLD block column, any number
+/// of regions away, optionally at a level `y` (the air tile the feet
+/// occupy). `path_plan.rs` plans the walk.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize, StateHash)]
 pub struct Goal {
-    pub region: RegionCoords,
-    pub column: [i32; 2],
+    /// World block `[x, z]` ([`WorldBlockPos`]'s frame).
+    pub column: [i64; 2],
     pub y: Option<i32>,
+}
+
+impl Goal {
+    /// The goal at world block `p`, at its level.
+    pub fn at(p: WorldBlockPos) -> Self {
+        Goal { column: [p.x, p.z], y: Some(p.y) }
+    }
+
+    /// The goal at block column `column` of region `rc` (region-local; it may
+    /// lie past the region's edge).
+    pub fn local(rc: RegionCoords, column: [i32; 2], y: Option<i32>) -> Self {
+        let w = WorldBlockPos::from_local(rc, crate::BlockPos::new(column[0], 0, column[1]));
+        Goal { column: [w.x, w.z], y }
+    }
+
+    /// The region the goal's column lies in; `None` past the `i32` region
+    /// grid (untrusted input).
+    pub fn region(&self) -> Option<RegionCoords> {
+        let n = REGION_BLOCKS as i64;
+        let x = i32::try_from(self.column[0].div_euclid(n)).ok()?;
+        let z = i32::try_from(self.column[1].div_euclid(n)).ok()?;
+        Some(RegionCoords::new(x, z))
+    }
+
+    /// The goal's column in `here`'s block frame (outside `0..REGION_BLOCKS`
+    /// for a goal elsewhere); `None` when it does not fit an `i32`.
+    pub fn local_column(&self, here: RegionCoords) -> Option<[i32; 2]> {
+        let n = REGION_BLOCKS as i64;
+        let x = self.column[0].checked_sub(i64::from(here.x) * n)?;
+        let z = self.column[1].checked_sub(i64::from(here.z) * n)?;
+        Some([i32::try_from(x).ok()?, i32::try_from(z).ok()?])
+    }
 }
 
 /// Gap (voxel units) left between the capsule bottom and the tile floor when
@@ -130,15 +160,13 @@ impl Rollback {
         }
     }
 
-    /// Walks `client`'s adventurer toward `goal` (region-local to
-    /// `goal.region`; `here` is this region), undo-safely. `false` with no
-    /// change when the client is not in Adventure, the goal is more than
-    /// [`MAX_GOAL_REGION_STEP`] regions away (Chebyshev), or there is no
-    /// path. A same-region goal is walked to `nearest_standable(goal.column,
-    /// goal.y)`; a goal elsewhere to [`edge_toward`]'s edge tile, then out
-    /// along [`Walker::exit`] — unless the goal's region is off `map` (the
-    /// world's outer seam): then the walk ends on that edge tile, the last
-    /// one inside the world. Replaces any walk in progress.
+    /// Walks `client`'s adventurer toward world `goal`, undo-safely
+    /// (`here` is this region). `false` with no change when the client is not
+    /// in Adventure or there is no path ([`PathPlan::plan`]: to the goal
+    /// through this region and its halo, else into the next region of the
+    /// coarse route toward it; a goal off `map` — past the world's outer seam
+    /// — is walked to the nearest column inside it). Replaces any walk in
+    /// progress.
     pub fn move_to_safe(&mut self, client: ClientId, goal: Goal, here: RegionCoords, map: Option<MapExtent>) -> bool {
         if self.data.clients.get(&client).map(|c| c.mode) != Some(PlayMode::Adventure) {
             return false;
@@ -150,21 +178,27 @@ impl Rollback {
     /// Walks entity `e` toward `goal` (see [`Self::move_to_safe`] for the
     /// goal rules), undo-safely: the part of `MoveTo` after the entity is
     /// resolved, shared with people. `false` with no change when it has no
-    /// body, the goal is too far, or there is no path.
+    /// body or there is no path.
     pub fn walk_entity_safe(&mut self, e: crate::EntityKey, goal: Goal, here: RegionCoords, map: Option<MapExtent>) -> bool {
-        let Some(goal) = clamp_goal(self, goal) else { return false };
-        let Some(feet) = self.body_feet(e) else { return false };
-        let Some(from) = current_tile(self, feet) else { return false };
-        let Some((path, exit)) = plan_walk(self, from, &goal, here, map) else { return false };
-        let walk_up = walk_ups(self, &path);
-        self.data.ecs.walker.set_safe(e, Some(Walker::new(goal, path, exit, walk_up)));
+        let Some(walker) = self.plan_walker(e, goal, here, map) else { return false };
+        self.data.ecs.walker.set_safe(e, Some(walker));
         true
     }
 
+    /// A fresh walk for entity `e` toward `goal`, from the tile its body
+    /// stands on; `None` without a body or a path.
+    pub(crate) fn plan_walker(&self, e: crate::EntityKey, goal: Goal, here: RegionCoords, map: Option<MapExtent>) -> Option<Walker> {
+        let from = current_tile(self, self.body_feet(e)?)?;
+        let plan = PathPlan::plan(self, from, &goal, here, map, MAX_PATH_NODES)?;
+        let walk_up = walk_ups(self, &plan.local_path(here));
+        Some(Walker::new(goal, plan, walk_up))
+    }
+
     /// Advances every adventurer's walk by one tick, before the controllers
-    /// steer: passes reached waypoints, removes the walk on arrival, and
-    /// handles a stuck body (re-plan once, then give up). Every change goes
-    /// through `walker.set_safe`.
+    /// steer: passes reached waypoints, removes the walk on arrival, plans
+    /// the next stretch at the end of one that only crosses into the next
+    /// region of the route, and handles a stuck body (re-plan once, then
+    /// give up). Every change goes through `walker.set_safe`.
     pub fn tick_walkers_safe(&mut self, here: RegionCoords, map: Option<MapExtent>) {
         // A body the keyboard drives (first person) is not on a walk.
         let driven: Vec<crate::EntityKey> = self
@@ -192,17 +226,24 @@ impl Rollback {
             let Some(feet) = self.body_feet(key) else { continue };
             let mut w = old.clone();
             let last = w.path.len().saturating_sub(1) as u32;
-            let mut arrived = false;
-            while (w.next as usize) < w.path.len() && reached(w.path[w.next as usize], feet) {
+            let mut at_end = false;
+            while w.waypoint(w.next, here).is_some_and(|p| reached(p, feet)) {
                 if w.next < last {
                     w.next += 1;
                 } else {
-                    arrived = w.exit.is_none();
+                    at_end = true;
                     break;
                 }
             }
-            if arrived || w.path.is_empty() {
+            if w.path.is_empty() || (at_end && w.to_goal) {
                 self.data.ecs.walker.set_safe(key, None);
+                continue;
+            }
+            if at_end {
+                // The end of a stretch into the next region of the route
+                // (normally the arrival there plans the next one first).
+                let next = self.plan_walker(key, w.goal, here, map);
+                self.data.ecs.walker.set_safe(key, next);
                 continue;
             }
             let remaining = w.remaining();
@@ -220,13 +261,8 @@ impl Rollback {
                 // Re-plan once from where the body stands. With no new
                 // path the old one is kept: a body still stuck after
                 // another STUCK_TICKS gives up.
-                if let Some((path, exit)) =
-                    current_tile(self, feet).and_then(|from| plan_walk(self, from, &w.goal, here, map))
-                {
-                    w.next = Walker::first_next(&path);
-                    w.walk_up = walk_ups(self, &path);
-                    w.path = path;
-                    w.exit = exit;
+                if let Some(fresh) = self.plan_walker(key, w.goal, here, map) {
+                    w = Walker { replanned: w.replanned, ..fresh };
                 }
                 w.replanned = true;
                 w.stalled = 0;
@@ -236,24 +272,6 @@ impl Rollback {
                 self.data.ecs.walker.set_safe(key, Some(w));
             }
         }
-    }
-
-    /// Re-plans the walk of an adventurer that just arrived across a seam
-    /// into `here`, undo-safely. The carried path is local to the region it
-    /// left, so it is always planned afresh from the body's tile: to the goal
-    /// when it lies in `here`, else to the edge facing it. The walk is dropped
-    /// when the goal is now too far, or unreachable. No walker: no change.
-    pub fn resume_walker_safe(&mut self, e: crate::EntityKey, here: RegionCoords, map: Option<MapExtent>) {
-        let Some(old) = self.data.ecs.walker.try_get(e).clone() else { return };
-        let plan = self
-            .body_feet(e)
-            .and_then(|feet| current_tile(self, feet))
-            .and_then(|from| plan_walk(self, from, &old.goal, here, map));
-        let new = plan.map(|(path, exit)| {
-            let walk_up = walk_ups(self, &path);
-            Walker::new(old.goal, path, exit, walk_up)
-        });
-        self.data.ecs.walker.set_safe(e, new);
     }
 
     /// Region-local feet position (voxel units) of entity `key`'s body.
@@ -275,25 +293,25 @@ pub const STUCK_TICKS: u32 = (STUCK_MS / TICK_RATE) as u32;
 /// step walks up a slope, so a failed walk-up recovers by jumping instead of
 /// running into the give-up.
 pub const WALK_UP_JUMP_AFTER_STALL_TICKS: u32 = STUCK_TICKS / 2;
-/// How far (regions, Chebyshev) a `MoveTo` goal may lie from the walker's
-/// region.
-pub const MAX_GOAL_REGION_STEP: i32 = 1;
 
 /// An adventurer walking a planned path toward a `MoveTo` goal. Lives in the
-/// rollback ECS (`Ecs::walker`) on the walking body.
+/// rollback ECS (`Ecs::walker`) on the walking body and travels across seams
+/// in its bundle: the path is in WORLD blocks, so the region it arrives in
+/// walks on along it (`Rollback::continue_walk_safe`).
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize, StateHash)]
 pub struct Walker {
     pub goal: Goal,
-    /// The planned tiles, inclusive of the start and the end.
-    pub path: Vec<TilePos>,
+    /// The planned tiles in world blocks, inclusive of the start and the end.
+    pub path: Vec<WorldBlockPos>,
     /// Per tile of `path`: the step onto it walks up a slope, no jump
     /// ([`crate::walk_ups`]).
     pub walk_up: Vec<bool>,
     /// Index into `path` of the waypoint being walked to.
     pub next: u32,
-    /// Outward `(dx, dz)` unit step once the path's last tile is the region
-    /// edge toward a goal in another region.
-    pub exit: Option<[i8; 2]>,
+    /// `path` ends on the goal's tile ([`PathPlan::reaches_goal`]); else it
+    /// ends a few blocks into the next region of the route, and the walk is
+    /// planned on from there.
+    pub to_goal: bool,
     /// Fewest tiles left so far (progress = going below it).
     pub best_dist: u32,
     /// Ticks since the last progress.
@@ -303,22 +321,39 @@ pub struct Walker {
 }
 
 impl Walker {
-    fn new(goal: Goal, path: Vec<TilePos>, exit: Option<[i8; 2]>, walk_up: Vec<bool>) -> Self {
-        let next = Self::first_next(&path);
-        let mut w = Walker { goal, path, walk_up, next, exit, best_dist: 0, stalled: 0, replanned: false };
+    pub(crate) fn new(goal: Goal, plan: PathPlan, walk_up: Vec<bool>) -> Self {
+        let next = (plan.path.len() > 1) as u32;
+        let mut w = Walker {
+            goal,
+            path: plan.path,
+            walk_up,
+            next,
+            to_goal: plan.reaches_goal,
+            best_dist: 0,
+            stalled: 0,
+            replanned: false,
+        };
         w.best_dist = w.remaining();
         w
-    }
-
-    /// `path[0]` is where the body stands: walk to the one after it.
-    fn first_next(path: &[TilePos]) -> u32 {
-        (path.len() > 1) as u32
     }
 
     /// Tiles still to reach, the current waypoint included.
     pub fn remaining(&self) -> u32 {
         (self.path.len() as u32).saturating_sub(self.next)
     }
+
+    /// Path tile `i` in `here`'s block frame (outside the region for a tile
+    /// in its halo).
+    pub fn waypoint(&self, i: u32, here: RegionCoords) -> Option<TilePos> {
+        self.path.get(i as usize).map(|&p| local_tile(p, here))
+    }
+}
+
+/// World tile `p` in `here`'s block frame. Walk tiles lie within a region
+/// and its halo, so the offset fits an `i32`.
+pub fn local_tile(p: WorldBlockPos, here: RegionCoords) -> TilePos {
+    let n = REGION_BLOCKS as i64;
+    [(p.x - i64::from(here.x) * n) as i32, p.y, (p.z - i64::from(here.z) * n) as i32]
 }
 
 /// Feet position of a player body whose centre is at `t` (voxel units).
@@ -366,73 +401,9 @@ fn clamp_tile(src: &impl TileSource, t: TilePos) -> Option<TilePos> {
     })
 }
 
-/// `goal` with its level clamped to the scan range; `None` when its column
-/// lies outside the region (untrusted input).
-fn clamp_goal(src: &impl TileSource, goal: Goal) -> Option<Goal> {
-    let t = clamp_tile(src, [goal.column[0], goal.y.unwrap_or(0), goal.column[1]])?;
-    Some(Goal { y: goal.y.map(|_| t[1]), ..goal })
-}
-
-/// `goal.region - here`, when within [`MAX_GOAL_REGION_STEP`].
-fn region_step(goal: &Goal, here: RegionCoords) -> Option<[i32; 2]> {
-    let d = [goal.region.x.saturating_sub(here.x), goal.region.z.saturating_sub(here.z)];
-    (d[0].unsigned_abs().max(d[1].unsigned_abs()) <= MAX_GOAL_REGION_STEP as u32).then_some(d)
-}
-
-/// The path (and exit step) from `from` toward `goal`, as `move_to_safe`
-/// plans it. A goal in a region off `map` gets no exit: nothing walks
-/// across the world's outer seam.
-fn plan_walk(
-    src: &impl TileSource,
-    from: TilePos,
-    goal: &Goal,
-    here: RegionCoords,
-    map: Option<MapExtent>,
-) -> Option<(Vec<TilePos>, Option<[i8; 2]>)> {
-    let d = region_step(goal, here)?;
-    let (to, exit) = if d == [0, 0] {
-        (nearest_standable(src, goal.column, goal.y)?, None)
-    } else {
-        let exit = (!off_map(map, goal.region)).then_some([d[0].signum() as i8, d[1].signum() as i8]);
-        (edge_toward(src, from, goal, here)?, exit)
-    };
-    find_path(src, from, to, MAX_PATH_NODES).map(|p| (p, exit))
-}
-
-/// The standable tile on this region's edge facing `goal` (in another
-/// region, at most [`MAX_GOAL_REGION_STEP`] away) whose column is nearest
-/// the straight line from `from` to the goal; ties go to the lowest `(x,
-/// z)`. Its level is the standable one nearest `from`'s. `None` when the
-/// goal is in `here` or too far, or no facing column has a standable tile.
-pub fn edge_toward(src: &impl TileSource, from: TilePos, goal: &Goal, here: RegionCoords) -> Option<TilePos> {
-    let d = region_step(goal, here)?;
-    if d == [0, 0] {
-        return None;
-    }
-    let n = REGION_BLOCKS as i32;
-    // The goal column in this region's block coordinates.
-    let goal_xz = [(goal.column[0] + d[0] * n) as i64, (goal.column[1] + d[1] * n) as i64];
-    let (fx, fz) = (from[0] as i64, from[2] as i64);
-    let (lx, lz) = (goal_xz[0] - fx, goal_xz[1] - fz);
-    let edge = |s: i32| if s > 0 { n - 1 } else { 0 };
-    let mut columns = BTreeSet::new();
-    if d[0] != 0 {
-        columns.extend((0..n).map(|z| [edge(d[0]), z]));
-    }
-    if d[1] != 0 {
-        columns.extend((0..n).map(|x| [x, edge(d[1])]));
-    }
-    // Twice the triangle area over the line: the distance to it, scaled by
-    // the line's (shared) length.
-    let off_line = |c: &[i32; 2]| (lx * (c[1] as i64 - fz) - lz * (c[0] as i64 - fx)).abs();
-    let mut ranked: Vec<_> = columns.into_iter().map(|c| (off_line(&c), c)).collect();
-    ranked.sort();
-    ranked.into_iter().find_map(|(_, c)| nearest_standable(src, c, Some(from[1])))
-}
-
-/// One tick of walking intent for a body with feet at `feet` (voxel units):
-/// forward, yawed toward the next waypoint's column centre (or, on the last
-/// tile of a walk that leaves the region, a block past it along `exit`); jump held when the
+/// One tick of walking intent for a body with feet at `feet` (voxel units,
+/// local to `here`): forward, yawed toward the next waypoint's column
+/// centre — which may lie past the region's edge, in its halo; jump held when the
 /// waypoint is more than [`STEP_HEIGHT`] above the feet, the body is
 /// grounded and the step is not a walk-up a slope ([`Walker::walk_up`]) — unless the walk
 /// has stalled [`WALK_UP_JUMP_AFTER_STALL_TICKS`], then it jumps anyway. Never sprints. The yaw follows `movement::plan`'s convention:
@@ -440,18 +411,10 @@ pub fn edge_toward(src: &impl TileSource, from: TilePos, goal: &Goal, here: Regi
 ///
 /// Jump is held, never pressed: `plan` toggles flight on a double tap, and
 /// a body re-jumping on landing could tap twice inside the window.
-pub fn steer(walker: &Walker, feet: Vector, grounded: bool) -> (MoveKeys, f32) {
+pub fn steer(walker: &Walker, feet: Vector, grounded: bool, here: RegionCoords) -> (MoveKeys, f32) {
     let bv = BLOCK_VOXELS as f32;
-    let Some(&wp) = walker.path.get(walker.next as usize) else { return (MoveKeys::default(), 0.0) };
-    let centre = |p: TilePos| ((p[0] as f32 + 0.5) * bv, (p[2] as f32 + 0.5) * bv);
-    let on_last = walker.next as usize + 1 >= walker.path.len();
-    let (cx, cz) = centre(wp);
-    // Leaving the region: aim a block past the edge tile, so the heading
-    // keeps pointing out once the body is on it.
-    let (cx, cz) = match walker.exit {
-        Some([ex, ez]) if on_last => (cx + ex as f32 * bv, cz + ez as f32 * bv),
-        _ => (cx, cz),
-    };
+    let Some(wp) = walker.waypoint(walker.next, here) else { return (MoveKeys::default(), 0.0) };
+    let (cx, cz) = ((wp[0] as f32 + 0.5) * bv, (wp[2] as f32 + 0.5) * bv);
     let (dx, dz) = (cx - feet.x, cz - feet.z);
     let yaw = libm::atan2f(-dx, -dz);
     let walk_up = walker.walk_up.get(walker.next as usize).copied().unwrap_or(false);

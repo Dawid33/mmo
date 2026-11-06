@@ -7,10 +7,11 @@
 //! whatever level (`designate::pick_visible`), with it on the working
 //! level's cell; off the home region's blocks, the ground pick's column
 //! ([`goal_from_hover`]). It is pathed from the
-//! body's tile over the home region's [`TileMirror`] with the sim's own rules
-//! (`game::find_path`, `game::nearest_standable`, and `game::edge_toward` for
-//! a hover in a neighbouring region — the path then runs to the facing edge
-//! tile and a dashed line goes on to the hover). The search runs on the main
+//! body's tile over the home region's [`TileMirror`] and its neighbours' halo
+//! band (`TileMirror::with_halo`, what the sim's region reads) by the sim's
+//! own planner, `game::PathPlan` — through the halo to a hover there, and for
+//! a hover farther away into the next region of the route, with a dashed
+//! line on to the hover. The search runs on the main
 //! thread, only when the (body tile, hover tile) pair changes
 //! ([`PathPreview::update`]), and under [`PREVIEW_MAX_PATH_NODES`] rather
 //! than the sim's `MAX_PATH_NODES`, so a hover never costs a frame more than
@@ -30,7 +31,7 @@
 use bevy::prelude::*;
 use game::movement::UNITS_PER_METER;
 use game::rapier3d::math::Vector;
-use game::{Goal, Order, RegionCoords, RegionId, TilePos, TileSource, BLOCK_VOXELS, REGION_BLOCKS};
+use game::{Goal, MapExtent, Order, PathPlan, RegionCoords, RegionId, TilePos, TileSource, BLOCK_VOXELS, REGION_BLOCKS};
 
 use super::adventure::ClientPlayMode;
 use super::designate::{self, HiddenEdgeGizmos};
@@ -79,13 +80,13 @@ pub fn is_click(accumulated_motion_px: f32) -> bool {
 /// standable tile of the column).
 pub fn goal_from_hover(region: RegionId, local: Vec3, exact: bool, home: RegionId) -> Goal {
     let t = game::feet_tile(Vector::new(local.x, local.y, local.z));
-    Goal { region, column: [t[0], t[2]], y: (exact && region == home).then_some(t[1]) }
+    Goal::local(region, [t[0], t[2]], (exact && region == home).then_some(t[1]))
 }
 
 /// The `MoveTo` goal for a picked block-selection tile in `home`: that
 /// tile's column, at its level.
 pub fn goal_from_tile(tile: TilePos, home: RegionId) -> Goal {
-    Goal { region: home, column: [tile[0], tile[2]], y: Some(tile[1]) }
+    Goal::local(home, [tile[0], tile[2]], Some(tile[1]))
 }
 
 /// The tile block selection picks under the cursor ray in the mirrored
@@ -111,27 +112,30 @@ pub fn hover_tile(region: RegionId, local: Vec3, home: RegionId) -> TilePos {
     [t[0] + (region.x - home.x) * n, t[1], t[2] + (region.z - home.z) * n]
 }
 
-/// The path the sim would plan from `from` toward `goal` (`here` is the
-/// home region), searched under `max_nodes`: to the goal's tile in `here`,
-/// else to `game::edge_toward`'s edge tile.
+/// The stretch the sim would plan from `from` toward `goal` (`here` is the
+/// home region, `map` the world's extent), searched under `max_nodes`: the
+/// sim's own `game::PathPlan::plan`, over the same tiles when `src` is the
+/// mirror with its halo.
 pub fn plan_path(
     src: &impl TileSource,
     from: TilePos,
     goal: &Goal,
     here: RegionCoords,
+    map: Option<MapExtent>,
     max_nodes: u32,
-) -> Option<Vec<TilePos>> {
-    let to = if goal.region == here {
-        game::nearest_standable(src, goal.column, goal.y)?
-    } else {
-        game::edge_toward(src, from, goal, here)?
-    };
-    game::find_path(src, from, to, max_nodes)
+) -> Option<PathPlan> {
+    PathPlan::plan(src, from, goal, here, map, max_nodes)
 }
 
 /// [`plan_path`] under [`PREVIEW_MAX_PATH_NODES`].
-pub fn preview_path(src: &impl TileSource, from: TilePos, goal: &Goal, here: RegionCoords) -> Option<Vec<TilePos>> {
-    plan_path(src, from, goal, here, PREVIEW_MAX_PATH_NODES)
+pub fn preview_path(
+    src: &impl TileSource,
+    from: TilePos,
+    goal: &Goal,
+    here: RegionCoords,
+    map: Option<MapExtent>,
+) -> Option<PathPlan> {
+    plan_path(src, from, goal, here, map, PREVIEW_MAX_PATH_NODES)
 }
 
 /// The path a click sends: the preview's (`previewed`, searched under the
@@ -143,9 +147,10 @@ pub fn click_path(
     from: TilePos,
     goal: &Goal,
     here: RegionCoords,
-    previewed: Option<Vec<TilePos>>,
-) -> Option<Vec<TilePos>> {
-    previewed.or_else(|| plan_path(src, from, goal, here, game::MAX_PATH_NODES))
+    map: Option<MapExtent>,
+    previewed: Option<PathPlan>,
+) -> Option<PathPlan> {
+    previewed.or_else(|| plan_path(src, from, goal, here, map, game::MAX_PATH_NODES))
 }
 
 /// The live path preview.
@@ -153,13 +158,13 @@ pub fn click_path(
 pub struct PathPreview {
     /// (body tile, hovered tile) the preview was computed for.
     pub key: Option<(TilePos, TilePos)>,
-    /// The path, home-local tiles; `None` = no path within the preview's
-    /// budget (see `unreachable`).
-    pub path: Option<Vec<TilePos>>,
+    /// The planned stretch; `None` = no path within the preview's budget
+    /// (see `unreachable`).
+    pub path: Option<PathPlan>,
     /// With no `path`: a full-budget search (a click) found none either.
     pub unreachable: bool,
-    /// The hover's world point when it lies in another region (the path
-    /// then ends at the facing edge).
+    /// The hover's world point when the path stops short of it (it ends in
+    /// the next region of the route toward a hover farther away).
     pub beyond: Option<Vec3>,
     /// The goal a click would send.
     pub goal: Option<Goal>,
@@ -177,6 +182,7 @@ impl PathPreview {
         hover: TilePos,
         goal: Goal,
         here: RegionCoords,
+        map: Option<MapExtent>,
         world: Vec3,
     ) -> bool {
         self.hover = Some(world);
@@ -185,9 +191,9 @@ impl PathPreview {
         }
         self.key = Some((from, hover));
         self.goal = Some(goal);
-        self.path = preview_path(src, from, &goal, here);
+        self.path = preview_path(src, from, &goal, here, map);
         self.unreachable = false;
-        self.beyond = (goal.region != here).then_some(world);
+        self.beyond = self.path.as_ref().is_some_and(|p| !p.reaches_goal).then_some(world);
         true
     }
 
@@ -208,7 +214,7 @@ pub struct SentPath {
 /// it (`game::current_tile`), when it stands in `home`.
 fn body_tile(
     bodies: &Query<(&SimEntity, &GlobalTransform), With<LocalBody>>,
-    mirror: &TileMirror,
+    mirror: &impl TileSource,
     home: RegionId,
 ) -> Option<(TilePos, (RegionId, game::EntityKey))> {
     let (sim, gt) = bodies.iter().find(|(s, _)| s.region == home)?;
@@ -231,11 +237,14 @@ pub fn update_path_preview(
     view: Query<(&Camera, &Transform), With<CommanderView>>,
     bodies: Query<(&SimEntity, &GlobalTransform), With<LocalBody>>,
     xray: Option<Res<crate::renderer::voxel_pull::xray::XraySettings>>,
+    world_map: Option<Res<crate::renderer::world_map::WorldMapState>>,
     mut preview: ResMut<PathPreview>,
     mut sent: ResMut<SentPath>,
 ) {
     let home = mirror.region();
-    let body = home.and_then(|home| body_tile(&bodies, &mirror, home).map(|b| (home, b)));
+    let tiles = mirror.with_halo();
+    let map = map_extent(world_map.as_deref());
+    let body = home.and_then(|home| body_tile(&bodies, &tiles, home).map(|b| (home, b)));
     // The sent path is done once the body stands on its end, or left with it.
     if !sent.path.is_empty() {
         let arrived = body.is_some_and(|(_, (tile, _))| sent.beyond.is_none() && sent.path.last() == Some(&tile));
@@ -264,12 +273,18 @@ pub fn update_path_preview(
     // Block selection's tile first; the ground pick only off the region's blocks.
     let ray = window.single().ok().zip(view.single().ok()).and_then(|(w, v)| designate::cursor_ray(w, v, home));
     if let Some(tile) = ray.and_then(|ray| pick_move_tile(ray, &working, &mirror, crate::renderer::voxel_pull::xray::xray_on(xray.as_deref(), working.cut))) {
-        preview.update(&*mirror, from, tile, goal_from_tile(tile, home), home, tile_point(tile, home));
+        preview.update(&tiles, from, tile, goal_from_tile(tile, home), home, map, tile_point(tile, home));
         return;
     }
     let goal = goal_from_hover(region, local, pick.1, home);
     let world = local + Vec3::from_array(region.world_offset());
-    preview.update(&*mirror, from, hover_tile(region, local, home), goal, home, world);
+    preview.update(&tiles, from, hover_tile(region, local, home), goal, home, map, world);
+}
+
+/// The world's extent, as the sim's regions are bounded by it
+/// (`Region::set_map_extent`); `None` without a map (procedural).
+fn map_extent(state: Option<&crate::renderer::world_map::WorldMapState>) -> Option<MapExtent> {
+    state.and_then(|s| s.map.as_ref()).map(|m| m.extent())
 }
 
 /// The hover a right press was made on, kept until its release.
@@ -277,7 +292,9 @@ pub fn update_path_preview(
 pub struct PressedHover {
     pub key: (TilePos, TilePos),
     pub goal: Goal,
-    pub path: Option<Vec<TilePos>>,
+    pub path: Option<PathPlan>,
+    /// The hover's world point (the dashed line's end, if the sent path
+    /// stops short of it).
     pub beyond: Option<Vec3>,
 }
 
@@ -294,6 +311,7 @@ pub fn send_move_order(
     mirror: Res<TileMirror>,
     events: Res<GameEvents>,
     local: Res<LocalPlayer>,
+    world_map: Option<Res<crate::renderer::world_map::WorldMapState>>,
     mut pending: crate::session::SessionLocal<Option<PressedHover>>,
     mut sent: ResMut<SentPath>,
 ) {
@@ -301,7 +319,7 @@ pub fn send_move_order(
     if buttons.just_pressed(MouseButton::Right) && press.at.is_some() {
         *pending = match (preview.key, preview.goal) {
             (Some(key), Some(goal)) if !preview.unreachable => {
-                Some(PressedHover { key, goal, path: preview.path.clone(), beyond: preview.beyond })
+                Some(PressedHover { key, goal, path: preview.path.clone(), beyond: preview.hover })
             }
             _ => None,
         };
@@ -312,18 +330,21 @@ pub fn send_move_order(
     if !is_click(motion) {
         return;
     }
-    let Some(path) = click_path(&*mirror, hover.key.0, &hover.goal, here, hover.path) else {
+    let map = map_extent(world_map.as_deref());
+    let Some(plan) = click_path(&mirror.with_halo(), hover.key.0, &hover.goal, here, map, hover.path) else {
         // Truly unreachable: show it, for as long as the hover stays.
         if preview.key == Some(hover.key) && preview.path.is_none() {
             preview.unreachable = true;
         }
         return;
     };
+    let beyond = (!plan.reaches_goal).then_some(hover.beyond).flatten();
+    let path = plan.local_path(here);
     if preview.key == Some(hover.key) && preview.path.is_none() {
-        preview.path = Some(path.clone());
+        preview.path = Some(plan);
     }
     let _ = events.0.send(game::GameEventKind::Order(client, Order::MoveTo(hover.goal)));
-    *sent = SentPath { region: Some(here), path, beyond: hover.beyond };
+    *sent = SentPath { region: Some(here), path, beyond };
 }
 
 /// World point of tile `p`'s floor centre in `home`, lifted
@@ -381,7 +402,7 @@ pub fn draw_paths(
         draw_path(&mut gizmos, &mut hidden, &sent.path, sent.beyond, home, dim);
     }
     match (&preview.path, preview.hover) {
-        (Some(path), _) => draw_path(&mut gizmos, &mut hidden, path, preview.beyond, home, PATH_COLOR_OK),
+        (Some(plan), _) => draw_path(&mut gizmos, &mut hidden, &plan.local_path(home), preview.beyond, home, PATH_COLOR_OK),
         (None, Some(at)) => {
             let color = if preview.unreachable { PATH_COLOR_NONE } else { PATH_COLOR_UNKNOWN };
             let r = NO_PATH_CROSS_M * UNITS_PER_METER;
@@ -438,22 +459,23 @@ mod tests {
     fn preview_recomputes_only_on_key_change() {
         let src = CountingFloor { reads: Cell::new(0) };
         let home = RegionCoords { x: 0, z: 0 };
-        let goal = Goal { region: home, column: [8, 6], y: Some(1) };
+        let goal = Goal::local(home, [8, 6], Some(1));
         let mut preview = PathPreview::default();
-        assert!(preview.update(&src, [2, 1, 2], [8, 1, 6], goal, home, Vec3::ZERO));
-        assert_eq!(preview.path.as_ref().and_then(|p| p.last().copied()), Some([8, 1, 6]));
+        assert!(preview.update(&src, [2, 1, 2], [8, 1, 6], goal, home, None, Vec3::ZERO));
+        assert_eq!(preview.path.as_ref().and_then(|p| p.local_path(home).last().copied()), Some([8, 1, 6]));
         let reads = src.reads.get();
         assert!(reads > 0);
         // Same body tile, same hover (the cursor moved within the tile).
-        assert!(!preview.update(&src, [2, 1, 2], [8, 1, 6], goal, home, Vec3::ONE));
+        assert!(!preview.update(&src, [2, 1, 2], [8, 1, 6], goal, home, None, Vec3::ONE));
         assert_eq!(src.reads.get(), reads, "no search for an unchanged key");
         // The body stepped: re-planned.
-        assert!(preview.update(&src, [3, 1, 2], [8, 1, 6], goal, home, Vec3::ONE));
+        assert!(preview.update(&src, [3, 1, 2], [8, 1, 6], goal, home, None, Vec3::ONE));
         assert!(src.reads.get() > reads);
     }
 
-    /// A flat floor at y = 0 split by a wall along x = `WALL_X` (z < `gap`),
-    /// so a walk from one side to the other detours around its end.
+    /// A flat floor at y = 0 over the region, split by a wall along x =
+    /// `WALL_X` (z < `gap`), so a walk from one side to the other detours
+    /// around its end.
     struct WalledFloor {
         gap: i32,
     }
@@ -463,7 +485,10 @@ mod tests {
     impl TileSource for WalledFloor {
         fn block(&self, p: TilePos) -> BlockId {
             let wall = p[0] == WALL_X && p[2] < self.gap && (1..4).contains(&p[1]);
-            if p[1] == 0 || wall { BlockId(1) } else { BlockId::AIR }
+            // Floored inside the region only: past its edge nothing is known.
+            let n = REGION_BLOCKS as i32;
+            let inside = (0..n).contains(&p[0]) && (0..n).contains(&p[2]);
+            if (p[1] == 0 && inside) || wall { BlockId(1) } else { BlockId::AIR }
         }
         fn is_bedrock(&self, _: TilePos) -> bool {
             false
@@ -488,17 +513,80 @@ mod tests {
         // than the preview's budget but well under the sim's.
         let src = WalledFloor { gap: n - 1 };
         let (from, to) = ([WALL_X - 1, 1, 0], [WALL_X + 1, 1, 0]);
-        let goal = Goal { region: home, column: [to[0], to[2]], y: Some(1) };
-        let previewed = preview_path(&src, from, &goal, home);
+        let goal = Goal::local(home, [to[0], to[2]], Some(1));
+        let previewed = preview_path(&src, from, &goal, home, None);
         assert_eq!(previewed, None, "the capped preview runs out of budget");
-        let path = click_path(&src, from, &goal, home, previewed).expect("the full budget finds the detour");
+        let plan = click_path(&src, from, &goal, home, None, previewed).expect("the full budget finds the detour");
+        let path = plan.local_path(home);
         assert_eq!((path.first(), path.last()), (Some(&from), Some(&to)));
         // A preview path is used as is.
-        let short = vec![from];
-        assert_eq!(click_path(&src, from, &goal, home, Some(short.clone())), Some(short));
+        let short = PathPlan { path: vec![game::WorldBlockPos::new(1, 2, 3)], reaches_goal: true };
+        assert_eq!(click_path(&src, from, &goal, home, None, Some(short.clone())), Some(short));
         // Closed wall: unreachable at any budget.
         let closed = WalledFloor { gap: n };
-        assert_eq!(click_path(&closed, from, &goal, home, None), None);
+        assert_eq!(click_path(&closed, from, &goal, home, None, None), None);
+    }
+
+    /// The preview plans with the sim's `PathPlan` over the mirror with its
+    /// halo: for a goal across the seam (in the halo) and one two regions
+    /// away, the preview's path is the one the sim's `MoveTo` walks.
+    #[test]
+    fn preview_path_is_the_sims_path_across_a_seam() {
+        use game::{Chunk, ChunkCoords, GameEventKind, Region, Rollback};
+        const CLIENT: game::ClientId = 3;
+        let home = RegionCoords::new(0, 0);
+        let n = game::REGION_CHUNKS as i32;
+        let chunks: Vec<(ChunkCoords, Chunk)> = (0..n as usize)
+            .flat_map(|x| (0..n as usize).map(move |z| (ChunkCoords::new(x, 0, z), Chunk::flat_floor(16))))
+            .collect();
+        // The sim: a floored region, its halo seeded from floored neighbours.
+        let (send, _recv) = crossbeam::channel::unbounded();
+        let mut region = Region::new(Rollback::new(Some(send.clone())), Some(send), home, None);
+        region.with_data(|r| r.seed_terrain_genesis(chunks.clone()));
+        // The client: the same chunks in the mirror, home and halo band.
+        let mut mirror = TileMirror::default();
+        mirror.set_home(Some(home));
+        for from in home.window_3x3().into_iter().filter(|&rc| rc != home) {
+            let seed = game::halo::halo_seed_from_chunks(from, home, chunks.iter().map(|(c, ch)| (*c, ch))).unwrap();
+            region.handle_event(GameEventKind::HaloUpdate(seed)).unwrap();
+            region.forget_last_event();
+            for (c, chunk) in &chunks {
+                if let Some(key) = mirror.mirror_key(from, [c.x as i32, c.y, c.z as i32]) {
+                    mirror.set_chunk_from(key, chunk);
+                }
+            }
+        }
+        for (c, chunk) in &chunks {
+            mirror.set_chunk_from([c.x as i32, c.y, c.z as i32], chunk);
+        }
+        let blocks = REGION_BLOCKS as i32;
+        let start = [blocks - 4, 1, 12];
+        region.handle_event(GameEventKind::CreateClient(CLIENT)).unwrap();
+        let mode = Order::SetMode { mode: game::PlayMode::Adventure, at: Some(start) };
+        region.handle_event(GameEventKind::Order(CLIENT, mode)).unwrap();
+        for _ in 0..5 {
+            region.handle_event(GameEventKind::Tick).unwrap();
+        }
+        let e = *region.data().player_entites.get(&CLIENT).unwrap();
+        let feet = {
+            let data = region.data();
+            let handle = data.ecs.rigidbody.try_get(e).unwrap();
+            game::feet_of(data.physics.bodies.get(handle).unwrap().translation())
+        };
+        let from = game::current_tile(&mirror.with_halo(), feet).expect("the body stands");
+        assert_eq!(from, start);
+        let east = RegionCoords::new(1, 0);
+        for (goal, to_goal) in
+            [(Goal::local(east, [3, 12], None), true), (Goal::local(RegionCoords::new(2, 0), [3, 12], None), false)]
+        {
+            region.handle_event(GameEventKind::Order(CLIENT, Order::MoveTo(goal))).unwrap();
+            let walk = region.data().ecs.walker.try_get(e).clone().expect("the sim walks");
+            let preview = click_path(&mirror.with_halo(), from, &goal, home, None, preview_path(&mirror.with_halo(), from, &goal, home, None))
+                .expect("the preview finds it");
+            assert_eq!(preview.path, walk.path, "{goal:?}");
+            assert_eq!((preview.reaches_goal, walk.to_goal), (to_goal, to_goal), "{goal:?}");
+            assert!(preview.path.last().unwrap().x >= blocks as i64, "the path crosses the seam");
+        }
     }
 
     #[test]
@@ -515,11 +603,11 @@ mod tests {
         let east = RegionCoords { x: 1, z: 0 };
         let bv = BLOCK_VOXELS as f32;
         let local = Vec3::new(5.5 * bv, 3.0 * bv, 12.25 * bv);
-        assert_eq!(goal_from_hover(east, local, true, home), Goal { region: east, column: [5, 12], y: None });
+        let n = REGION_BLOCKS as i64;
+        assert_eq!(goal_from_hover(east, local, true, home), Goal { column: [n + 5, 12], y: None });
         // At home an exact pick keeps its level; an inexact one does not.
-        assert_eq!(goal_from_hover(home, local, true, home), Goal { region: home, column: [5, 12], y: Some(3) });
+        assert_eq!(goal_from_hover(home, local, true, home), Goal { column: [5, 12], y: Some(3) });
         assert_eq!(goal_from_hover(home, local, false, home).y, None);
-        let n = REGION_BLOCKS as i32;
-        assert_eq!(hover_tile(east, local, home), [5 + n, 3, 12]);
+        assert_eq!(hover_tile(east, local, home), [5 + n as i32, 3, 12]);
     }
 }

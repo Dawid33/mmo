@@ -1,13 +1,14 @@
 //! Per-client play mode (`game::adventure`): Fortress by default, switched by
 //! `Order::SetMode`, which puts the adventurer's body on a tile; the switch
 //! undoes bit-exact and reaches the UI once. `Order::MoveTo` walks the body
-//! along an A* path (`Walker`), re-planning once when stuck.
+//! along an A* path (`Walker`, planned by `PathPlan`) to a world goal any
+//! number of regions away, re-planning once when stuck.
 use crate::common;
 
 use common::floor_chunks;
 use game::rapier3d::math::Vector;
 use game::{
-    edge_toward, feet_of, feet_tile, play_mode_update, slope_chisel, state_hash, steer, Block, BlockId, BlockIndex, EntityKey,
+    feet_of, feet_tile, next_region, PathPlan, WorldBlockPos, PORTAL_DEPTH_BLOCKS, play_mode_update, slope_chisel, state_hash, steer, Block, BlockId, BlockIndex, EntityKey,
     GameEventKind, InputEvent, Key, Goal, Motion, Order, PlayMode, Region, RegionCoords, Rollback, Side, SlopeShape, TilePos,
     TileSource, UiUpdate, Walker, BLOCK_VOXELS, CHUNK_BLOCKS, REGION_BLOCKS, STUCK_TICKS, TICK_RATE, WALK_UP_JUMP_AFTER_STALL_TICKS,
 };
@@ -247,7 +248,12 @@ fn adventure_on(at: TilePos, cells: &[(TilePos, Option<SlopeShape>)]) -> (Region
 }
 
 fn here_goal(column: [i32; 2], y: Option<i32>) -> Goal {
-    Goal { region: RegionCoords::new(0, 0), column, y }
+    Goal::local(RegionCoords::new(0, 0), column, y)
+}
+
+/// Tile `p` of region (0, 0) as a world tile.
+fn world(p: TilePos) -> WorldBlockPos {
+    WorldBlockPos::new(p[0] as i64, p[1], p[2] as i64)
 }
 
 fn move_to(region: &mut Region, goal: Goal) {
@@ -358,14 +364,18 @@ fn move_to_unreachable_changes_nothing() {
     assert_eq!(before, state_hash(region.data()));
 }
 
+/// A lone region has no halo: nothing of the next region of the route is
+/// known, so a goal beyond it has no way on.
 #[test]
-fn move_to_refuses_goal_two_regions_away() {
+fn move_to_far_goal_with_no_way_on_changes_nothing() {
     let (mut region, e) = adventure_at([4, 1, 4]);
+    let before = state_hash(region.data());
     let mut accepted = true;
-    let goal = Goal { region: RegionCoords::new(2, 0), column: [4, 4], y: None };
+    let goal = Goal::local(RegionCoords::new(2, 0), [4, 4], None);
     region.with_data(|d| accepted = d.move_to_safe(CLIENT, goal, RegionCoords::new(0, 0), None));
     assert!(!accepted);
     assert!(walker(&region, e).is_none());
+    assert_eq!(before, state_hash(region.data()));
 }
 
 #[test]
@@ -376,7 +386,9 @@ fn extreme_untrusted_coordinates_are_refused_without_panic() {
         for goal in [
             here_goal([v, 5], None),
             here_goal([5, v], Some(1)),
-            Goal { region: RegionCoords::new(i32::MIN, i32::MAX), column: [5, 5], y: None },
+            Goal::local(RegionCoords::new(i32::MIN, i32::MAX), [5, 5], None),
+            Goal { column: [i64::MIN, i64::MAX], y: None },
+            Goal { column: [i64::MAX, 5], y: Some(i32::MIN) },
         ] {
             let mut accepted = true;
             region.with_data(|d| accepted = d.move_to_safe(CLIENT, goal, RegionCoords::new(0, 0), None));
@@ -512,10 +524,12 @@ fn steer_points_at_next_waypoint() {
     let bv = BLOCK_VOXELS as f32;
     let feet = Vector::new(4.5 * bv, bv, 4.5 * bv);
     let walk = |next: TilePos| Walker {
-        path: vec![[4, 1, 4], next],
+        path: vec![world([4, 1, 4]), world(next)],
         next: 1,
         ..Walker::default()
     };
+    let here = RegionCoords::new(0, 0);
+    let steer = |w: &Walker, feet, grounded| steer(w, feet, grounded, here);
     // +x: the yaw look_quat turns forward (-Z) onto +X, and plan walks +x.
     let (keys, yaw) = steer(&walk([5, 1, 4]), feet, true);
     assert!(keys.forward && !keys.sprint && !keys.jump_held && !keys.jump_pressed);
@@ -541,8 +555,10 @@ fn steer_points_at_next_waypoint() {
 fn steer_jumps_a_stalled_walk_up() {
     let bv = BLOCK_VOXELS as f32;
     let feet = Vector::new(4.5 * bv, bv, 4.5 * bv);
+    let here = RegionCoords::new(0, 0);
+    let steer = |w: &Walker, feet, grounded| steer(w, feet, grounded, here);
     let up = |next: TilePos, stalled: u32| Walker {
-        path: vec![[4, 1, 4], next],
+        path: vec![world([4, 1, 4]), world(next)],
         walk_up: vec![false, true],
         next: 1,
         stalled,
@@ -582,24 +598,106 @@ impl TileSource for Flat {
     }
 }
 
+/// Rounds for the walk of [`move_to_two_regions_away`] (~70 blocks at walk
+/// speed is ~330 rounds).
+const TWO_REGIONS_ROUNDS: usize = 600;
+
+/// A `MoveTo` goal two regions east, over a floor everywhere: the walk
+/// crosses into the next region of the route, walks on toward the goal from
+/// there, and ends on the goal's tile.
 #[test]
-fn edge_toward_picks_facing_edge() {
+#[ignore = "slow: >100ms — run via just test-full"]
+fn move_to_two_regions_away() {
+    use common::rig::Rig;
+    use common::seam_translate::{spawn_tile, uniform_floor, STAND_LEVEL};
+    let n = REGION_BLOCKS as i64;
+    let mut rig = Rig::with_floor(None, uniform_floor);
+    rig.join_spawn();
+    let start = WorldBlockPos::new(n - 3, STAND_LEVEL, 12);
+    rig.order(Order::SetMode { mode: PlayMode::Adventure, at: Some(spawn_tile(start)) });
+    for _ in 0..6 {
+        rig.round();
+    }
+    let far = RegionCoords::new(2, 0);
+    let goal = WorldBlockPos::new(2 * n + 3, STAND_LEVEL, 12);
+    rig.order(Order::MoveTo(Goal { column: [goal.x, goal.z], y: None }));
+    let mut owners = std::collections::BTreeSet::new();
+    for _ in 0..TWO_REGIONS_ROUNDS {
+        rig.round();
+        let now = rig.owners();
+        owners.extend(now.iter().copied());
+        if now == [far] && rig.walk_state(far).0.is_none() {
+            break;
+        }
+    }
+    assert!(owners.contains(&RegionCoords::new(1, 0)), "walked through the region between: {owners:?}");
+    assert_eq!(rig.owners(), [far], "the walk ends in the goal's region");
+    let (walker, tile) = rig.walk_state(far);
+    assert!(walker.is_none(), "still walking: {walker:?}");
+    let (_, local) = goal.to_local();
+    assert_eq!(tile, [local.x, local.y, local.z], "the walk ends on the goal tile");
+}
+
+#[test]
+fn next_region_steps_along_the_line() {
+    let r = RegionCoords::new;
+    assert_eq!(next_region(r(0, 0), r(0, 0)), r(0, 0));
+    assert_eq!(next_region(r(0, 0), r(3, 0)), r(1, 0));
+    assert_eq!(next_region(r(0, 0), r(-2, -2)), r(-1, -1));
+    // Off the diagonal, the step nearest the straight line.
+    assert_eq!(next_region(r(0, 0), r(5, 1)), r(1, 0));
+    assert_eq!(next_region(r(0, 0), r(3, 2)), r(1, 1));
+    assert_eq!(next_region(r(0, 0), r(-1, 4)), r(0, 1));
+    // The whole route: one Chebyshev step at a time, never past the box.
+    let (mut at, to) = (r(-3, 7), r(4, 2));
+    let mut steps = 0;
+    while at != to {
+        let n = next_region(at, to);
+        assert!((n.x - at.x).abs() <= 1 && (n.z - at.z).abs() <= 1 && n != at);
+        assert!((-3..=4).contains(&n.x) && (2..=7).contains(&n.z), "{n:?} left the box");
+        at = n;
+        steps += 1;
+    }
+    assert_eq!(steps, 7);
+    // Extremes do not overflow.
+    assert_eq!(next_region(r(i32::MIN, i32::MAX), r(i32::MAX, i32::MIN)), r(i32::MIN + 1, i32::MAX - 1));
+}
+
+#[test]
+fn path_plan_reaches_a_goal_past_the_seam_and_heads_for_one_beyond() {
     let n = REGION_BLOCKS as i32;
     let here = RegionCoords::new(0, 0);
+    // `Flat` answers everywhere, like a region whose halo is all floor.
     let flat = Flat { holes: vec![] };
-    let from = [10, 1, 12];
-    let east = Goal { region: RegionCoords::new(1, 0), column: [5, 12], y: None };
-    assert_eq!(edge_toward(&flat, from, &east, here), Some([n - 1, 1, 12]));
-    let west = Goal { region: RegionCoords::new(-1, 0), column: [5, 12], y: None };
-    assert_eq!(edge_toward(&flat, from, &west, here), Some([0, 1, 12]));
-    let north = Goal { region: RegionCoords::new(0, -1), column: [10, 40], y: None };
-    assert_eq!(edge_toward(&flat, from, &north, here), Some([10, 1, 0]));
-    // The line's own column has no floor: the two beside it tie, the lower wins.
-    let holed = Flat { holes: vec![[n - 1, 12]] };
-    assert_eq!(edge_toward(&holed, from, &east, here), Some([n - 1, 1, 11]));
-    // Same region, or two regions away: no edge.
-    assert_eq!(edge_toward(&flat, from, &Goal { region: here, ..east }, here), None);
-    assert_eq!(edge_toward(&flat, from, &Goal { region: RegionCoords::new(2, 0), ..east }, here), None);
+    let from = [n - 4, 1, 12];
+    let max = game::MAX_PATH_NODES;
+    // Within the halo: the path runs over the seam to the goal itself.
+    let east = Goal::local(RegionCoords::new(1, 0), [3, 12], None);
+    let plan = PathPlan::plan(&flat, from, &east, here, None, max).expect("a path");
+    assert!(plan.reaches_goal);
+    assert_eq!(plan.path.first(), Some(&world(from)));
+    assert_eq!(plan.path.last(), Some(&world([n + 3, 1, 12])));
+    // Two regions away: a stretch ending PORTAL_DEPTH_BLOCKS into the next
+    // region of the route, straight toward the goal.
+    let far = Goal::local(RegionCoords::new(2, 0), [3, 12], None);
+    let plan = PathPlan::plan(&flat, from, &far, here, None, max).expect("a stretch");
+    assert!(!plan.reaches_goal);
+    assert_eq!(plan.path.last(), Some(&world([n + PORTAL_DEPTH_BLOCKS, 1, 12])));
+    // Diagonally two regions away: into the corner region.
+    let corner = Goal::local(RegionCoords::new(-2, -2), [3, 3], None);
+    let plan = PathPlan::plan(&flat, [2, 1, 2], &corner, here, None, max).expect("a stretch");
+    let end = *plan.path.last().unwrap();
+    assert_eq!(end.to_local().0, RegionCoords::new(-1, -1));
+    assert!(end.x < -(PORTAL_DEPTH_BLOCKS as i64) && end.z < -(PORTAL_DEPTH_BLOCKS as i64), "{end:?}");
+    // Off a one-region map: the goal moves onto the map's edge column.
+    let map = Some(game::MapExtent { origin: here, width: 1, height: 1 });
+    let plan = PathPlan::plan(&flat, from, &far, here, map, max).expect("a path");
+    assert!(plan.reaches_goal);
+    assert_eq!(plan.path.last(), Some(&world([n - 1, 1, 12])));
+    assert!(plan.path.iter().all(|p| p.to_local().0 == here), "never off the map");
+    // A goal in this region with no path: nothing, even with a way out.
+    let holed = Flat { holes: vec![[20, 20]] };
+    assert_eq!(PathPlan::plan(&holed, [4, 1, 4], &here_goal([20, 20], None), here, None, max), None);
 }
 
 // --- Seam handoff -----------------------------------------------------------
@@ -631,6 +729,7 @@ fn walker_survives_bundle_roundtrip() {
     let goal = here_goal([20, 20], None);
     let bundle = walking_bundle(goal);
     assert_eq!(bundle.carried.walker.as_ref().map(|w| w.goal), Some(goal), "the bundle carries the walk");
+    let bundle_walker = bundle.carried.walker.clone();
 
     let mut dst = floored_region(RegionCoords::new(0, 0));
     let before = state_hash(dst.data());
@@ -638,52 +737,21 @@ fn walker_survives_bundle_roundtrip() {
     let e = *dst.data().player_entites.get(&CLIENT).expect("arrived");
     let w = walker(&dst, e).expect("the walk survives the handoff");
     assert_eq!(w.goal, goal);
-    assert_eq!(w.exit, None, "the goal is in the receiving region");
-    assert_eq!(w.path.first(), Some(&body_tile(&dst, e)), "re-planned from where the body stands");
+    assert!(w.to_goal, "the goal is in the receiving region");
+    assert_eq!(Some(&w), bundle_walker.as_ref(), "it walks on along the carried path, no re-plan");
     dst.rollback_last_event();
     assert_eq!(before, state_hash(dst.data()), "arrival + re-plan must roll back bit-exact");
 }
 
 #[test]
-fn arrived_walker_with_out_of_reach_goal_is_dropped() {
+fn arrived_walker_with_no_way_on_is_dropped() {
     let bundle = walking_bundle(here_goal([20, 20], None));
-    // Received two regions away from its goal's region: too far to resume.
+    // Received two regions away from its goal's region, with no halo: its
+    // carried path is not walkable there and nothing leads on.
     let mut dst = floored_region(RegionCoords::new(2, 0));
     dst.handle_event(GameEventKind::EntityArrived(bundle)).unwrap();
     let e = *dst.data().player_entites.get(&CLIENT).expect("arrived");
-    assert!(walker(&dst, e).is_none(), "an out-of-reach walk is dropped on arrival");
-}
-
-#[test]
-fn edge_toward_matches_move_to_plan() {
-    // A floor over the whole region, so every edge column is standable.
-    let here = RegionCoords::new(0, 0);
-    let (send, _recv) = crossbeam::channel::unbounded();
-    let mut region = Region::new(Rollback::new(Some(send.clone())), Some(send), here, None);
-    let size = game::REGION_SIZE;
-    region.with_data(|r| r.seed_terrain_genesis(floor_chunks(0.0..size, 0.0..size, 16)));
-    region.handle_event(GameEventKind::CreateClient(CLIENT)).unwrap();
-    let e = *region.data().player_entites.get(&CLIENT).unwrap();
-    region.forget_last_event();
-    region
-        .handle_event(GameEventKind::Order(CLIENT, Order::SetMode { mode: PlayMode::Adventure, at: Some(TILE) }))
-        .unwrap();
-    region.forget_last_event();
-    for _ in 0..5 {
-        tick(&mut region);
-    }
-    let from = game::current_tile(region.data(), feet_of_body(&region, e)).expect("standing");
-    for goal in [
-        Goal { region: RegionCoords::new(1, 0), column: [5, 30], y: None },
-        Goal { region: RegionCoords::new(0, -1), column: [40, 20], y: None },
-        Goal { region: RegionCoords::new(-1, 1), column: [60, 3], y: None },
-    ] {
-        let edge = edge_toward(region.data(), from, &goal, here).expect("an edge tile");
-        move_to(&mut region, goal);
-        let w = walker(&region, e).expect("MoveTo must start a walk");
-        assert_eq!(w.path.first(), Some(&from), "{goal:?}");
-        assert_eq!(w.path.last(), Some(&edge), "the sim walks to edge_toward's tile for {goal:?}");
-    }
+    assert!(walker(&dst, e).is_none(), "a walk with no way on is dropped on arrival");
 }
 
 fn feet_of_body(region: &Region, e: EntityKey) -> Vector {
@@ -734,12 +802,13 @@ fn departures_over(region: &mut Region, n: u32) -> usize {
 #[ignore = "slow: >100ms — run via just test-full"]
 fn walker_never_leaves_the_map() {
     let n = REGION_BLOCKS as i32;
-    let goal = Goal { region: RegionCoords::new(1, 0), column: [5, TILE[2]], y: None };
+    let goal = Goal::local(RegionCoords::new(1, 0), [5, TILE[2]], None);
     let (mut region, e) = floored_adventurer(Some(one_region_world()));
+    common::seed_floor_halo(&mut region, RegionCoords::new(0, 0));
     move_to(&mut region, goal);
     let w = walker(&region, e).expect("MoveTo off the map still walks to the edge");
-    assert_eq!(w.exit, None, "no exit across the outer seam");
-    assert_eq!(w.path.last(), Some(&[n - 1, 1, TILE[2]]), "the last tile inside the map");
+    assert!(w.to_goal, "the goal moves onto the map");
+    assert_eq!(w.path.last(), Some(&world([n - 1, 1, TILE[2]])), "the last tile inside the map");
     let mut departed = 0;
     for _ in 0..walk_budget((n - TILE[0]) as f32) {
         tick(&mut region);
@@ -755,8 +824,10 @@ fn walker_never_leaves_the_map() {
 
     // Unbounded (procedural), the same order walks out across the seam.
     let (mut region, e) = floored_adventurer(None);
+    common::seed_floor_halo(&mut region, RegionCoords::new(0, 0));
     move_to(&mut region, goal);
-    assert_eq!(walker(&region, e).and_then(|w| w.exit), Some([1, 0]));
+    let w = walker(&region, e).expect("a walk over the seam");
+    assert_eq!(w.path.last(), Some(&world([n + 5, 1, TILE[2]])), "to the goal, through the halo");
     assert!(departures_over(&mut region, walk_budget((n - TILE[0]) as f32 + 2.0)) > 0, "the walker leaves the region");
 }
 

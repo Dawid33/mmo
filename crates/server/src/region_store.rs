@@ -55,7 +55,9 @@ pub const REGION_MAGIC: [u8; 8] = *b"MMOREGN\0";
 /// `Client::open_container` is a `WorldBlockPos`; `HaloUpdate` gained
 /// `containers`; `Intent::PutInContainer` / `TakeFromContainer` and
 /// `IntentRefusal::ContainerFull` are new.
-pub const REGION_FILE_VERSION: u32 = 16;
+/// 17: walks plan across seams (`path_plan.rs`): `Goal` is a world block
+/// column, `Walker::path` world tiles, `Walker::exit` became `to_goal`.
+pub const REGION_FILE_VERSION: u32 = 17;
 /// magic + version + region blocks + chunk blocks + world crc + payload crc.
 const HEADER_LEN: usize = 8 + 4 * 5;
 

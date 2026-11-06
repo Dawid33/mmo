@@ -150,10 +150,9 @@ impl Rollback {
 
     /// Walks `person` out of this region toward region `toward` (a
     /// neighbour), the shortest way: to the column of `toward` just across
-    /// the facing edge from them, so `edge_toward` picks the edge tile
-    /// straight out and the existing edge logic takes them across the seam.
-    /// If that edge tile cannot be reached, a walk toward `toward`'s centre
-    /// (another edge tile) is tried. `false` with no change if they have no
+    /// the facing edge from them, which the walk reaches through the halo
+    /// (`path_plan.rs`). If that column cannot be reached, a walk toward
+    /// `toward`'s centre is tried. `false` with no change if they have no
     /// body here or no path either way.
     pub fn walk_out_safe(
         &mut self,
@@ -171,12 +170,12 @@ impl Rollback {
                 _ => own,
             };
             let column = [across(toward.x - here.x, from[0]), across(toward.z - here.z, from[2])];
-            if self.walk_entity_safe(e, Goal { region: toward, column, y: None }, here, map) {
+            if self.walk_entity_safe(e, Goal::local(toward, column, None), here, map) {
                 return true;
             }
         }
         let c = n / 2;
-        self.walk_entity_safe(e, Goal { region: toward, column: [c, c], y: None }, here, map)
+        self.walk_entity_safe(e, Goal::local(toward, [c, c], None), here, map)
     }
 
     /// Once per region tick, after `tick_walkers_safe` and before the physics
@@ -222,7 +221,7 @@ impl Rollback {
         if nearest_standable(self, column, Some(from[1])).is_none() {
             return;
         }
-        self.walk_entity_safe(e, Goal { region: here, column, y: Some(from[1]) }, here, map);
+        self.walk_entity_safe(e, Goal::local(here, column, Some(from[1])), here, map);
     }
 
     fn steer_person_safe(&mut self, e: EntityKey, tick: u64) {
@@ -232,7 +231,7 @@ impl Rollback {
         let rot0 = body.position().rotation;
         let motion0 = (*self.data.ecs.motion.try_get(e)).unwrap_or_default();
         let (keys, yaw) = match self.data.ecs.walker.try_get(e) {
-            Some(w) => steer(w, feet_of(t), motion0.grounded),
+            Some(w) => steer(w, feet_of(t), motion0.grounded, *self.data.region),
             None => (MoveKeys::default(), 0.0),
         };
         let walking = self.data.ecs.walker.try_get(e).is_some();

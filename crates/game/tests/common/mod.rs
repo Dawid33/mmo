@@ -64,6 +64,20 @@ pub fn floor_chunks(x_units: Range<f32>, z_units: Range<f32>, depth: u32) -> Vec
         .collect()
 }
 
+/// Seeds `region`'s terrain halo (it stands at `here`) as if each of its 8
+/// neighbours were floored like [`floor_chunks`] edge to edge: the seeds the
+/// manager sends a starting region.
+pub fn seed_floor_halo(region: &mut game::Region, here: game::RegionCoords) {
+    let size = game::REGION_SIZE;
+    let chunks = floor_chunks(0.0..size, 0.0..size, 16);
+    for from in here.window_3x3().into_iter().filter(|&rc| rc != here) {
+        let seed = game::halo::halo_seed_from_chunks(from, here, chunks.iter().map(|(c, ch)| (*c, ch)))
+            .expect("neighbours");
+        region.handle_event(game::GameEventKind::HaloUpdate(seed)).unwrap();
+        region.forget_last_event();
+    }
+}
+
 /// The first chunk row past the spawn's: where a chunk seam lies ahead of the
 /// player walking +z / +x from the spawn column (row 5, z = 160, at 2-block
 /// chunks).

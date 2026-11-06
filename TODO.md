@@ -61,15 +61,13 @@ Multi-region world follow-ups (milestone landed; spec 2026-07-05-multi-region-wo
     threaded server never runs, so judge a candidate protocol by `crossing.rs` convergence across
     `InlineSchedule::late` seeds, not by the lockstep run alone. `jittery` (missed ticks) needs the
     client per-region clock tracking item above first — the harness aligns client and server by tick.
-- **Adventure walk is not seam invariant** (found 2026-11-06 by the seam-translation harness,
-  Task 4.1; owner: Task 6.5 pathfinding/walker): `handoff_schedule::adventure_walk_is_seam_invariant`,
-  lockstep (no seed), placements `Seam(X)` and `Seam(Z)` — a `MoveTo` 8 blocks diagonally through
-  the origin reaches the same goal tile in every placement, but rests 0.165 blocks off the centred
-  run's point at a straight seam (Corner: 0.012, within `POSE_TOL_BLOCKS` 0.025). Cause: a walk
-  split at a seam goes to `edge_toward`'s edge tile, `steer` aims its last tile a block past the
-  edge along the exit axis only, and the walk re-plans on arrival (`resume_walker_safe`), so the
-  body follows a different line. Pinned with `should_panic` until the walker plans across the seam;
-  `adventure_walk_reaches_its_goal_in_every_placement` holds the discrete outcome meanwhile.
+- ~~**Adventure walk is not seam invariant**~~ FIXED (Task 6.5, `path_plan.rs`): walks plan in world
+  tiles over region ∪ halo and walk on along the carried path after a hand-off, so
+  `handoff_schedule::adventure_walk_is_seam_invariant` passes lockstep (Seam(X)/Seam(Z) 2.3e-5 blocks,
+  was 0.17; Corner 5.3e-5). Open: the coarse region route (`next_region`) is a straight line over the
+  region grid bounded by the map's extent — it does not read `WorldMap` tile summaries (sea, relief),
+  so a goal past a sea or a mountain range relies on the fine A* finding a way within each region ∪
+  halo, and gives up (walk dropped) where none is.
 
 In-engine UI (spec docs/superpowers/specs/2026-07-07-in-engine-ui-design.md,
 plan docs/superpowers/plans/2026-07-07-in-engine-ui.md): inventory/hotbar landed

@@ -235,7 +235,7 @@ fn person_xz(region: &Region) -> (f32, f32) {
 }
 
 fn goal_here(c: [i32; 2]) -> Goal {
-    Goal { region: common::r0(), column: c, y: None }
+    Goal::local(common::r0(), c, None)
 }
 
 #[test]
@@ -288,6 +288,8 @@ fn person_wanders_near_spawn() {
 #[ignore = "slow: >100ms — run via just test-full"]
 fn walk_out_departs() {
     let mut region = floored_region();
+    // A walk out runs over the halo into the neighbour.
+    common::seed_floor_halo(&mut region, common::r0());
     let n = REGION_BLOCKS as i32;
     region.with_data(|d| {
         d.spawn_person_safe(P, column_xz([n - 6, 12])).unwrap();
@@ -334,7 +336,8 @@ fn replayed_person_arrival_corrects_pose() {
 #[test]
 fn walk_out_heads_for_the_nearest_edge_tile() {
     let mut region = floored_region();
-    let n = REGION_BLOCKS as i32;
+    common::seed_floor_halo(&mut region, common::r0());
+    let n = REGION_BLOCKS as i64;
     region.with_data(|d| {
         d.spawn_person_safe(P, column_xz([10, 12])).unwrap();
     });
@@ -347,16 +350,15 @@ fn walk_out_heads_for_the_nearest_edge_tile() {
     let e = region.data().person_entity(P).unwrap();
     let w = region.data().ecs.walker.try_get(e).clone().expect("walking");
     let last = *w.path.last().unwrap();
-    // Straight across to the +x edge, not toward the far region's centre.
-    assert_eq!([last[0], last[2]], [n - 1, 12], "path ends at {last:?}");
-    assert_eq!(w.exit, Some([1, 0]));
-    // Diagonal: the corner side nearest the person.
+    // Straight across the +x seam, not toward the far region's centre.
+    assert_eq!([last.x, last.z], [n, 12], "path ends at {last:?}");
+    assert!(w.to_goal, "the column across the seam is in the halo");
+    // Diagonal: the corner column across from the person.
     region.with_data(|d| ok = d.walk_out_safe(P, RegionCoords::new(-1, -1), common::r0(), None));
     assert!(ok);
     let w = region.data().ecs.walker.try_get(e).clone().expect("walking");
     let last = *w.path.last().unwrap();
-    assert!(last[0] == 0 || last[2] == 0, "path ends on a facing edge: {last:?}");
-    assert_eq!(w.exit, Some([-1, -1]));
+    assert_eq!(last.to_local().0, RegionCoords::new(-1, -1), "path ends past the corner: {last:?}");
 }
 
 #[test]
@@ -391,6 +393,7 @@ fn idle_person_falls_when_the_ground_is_dug() {
 
 fn region_with_person(xz: (f32, f32)) -> (Region, game::EntityKey) {
     let mut region = floored_region();
+    common::seed_floor_halo(&mut region, common::r0());
     region.with_data(|d| {
         d.spawn_person_safe(P, xz).unwrap();
     });

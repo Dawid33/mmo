@@ -1,6 +1,8 @@
 //! Deterministic block-scale A* over region-local tiles (`TilePos`), shared by
 //! the sim and the client. The sim's `TileSource` covers the region and its
-//! terrain halo (`halo.rs`); paths themselves stay inside the region. Moves
+//! terrain halo (`halo.rs`), so a path may run past the region's edge as far
+//! as the source answers (unknown tiles read as air: never standable).
+//! Walks to goals beyond that are planned by `path_plan.rs`. Moves
 //! are DF-like: 8 horizontal neighbours at dy in {-1, 0, +1}, landing on a
 //! standable tile; no swimming.
 //!
@@ -15,7 +17,7 @@ use std::cmp::Reverse;
 use std::collections::{BTreeMap, BinaryHeap};
 
 use crate::orders::{TilePos, TileSource};
-use crate::{block_props, BlockId, REGION_BLOCKS};
+use crate::{block_props, BlockId};
 
 /// Default expansion budget of one search, in nodes.
 pub const MAX_PATH_NODES: u32 = 32_768;
@@ -46,23 +48,15 @@ fn solid_block(b: BlockId) -> bool {
     b != BlockId::AIR && !is_water(b) && block_props().is_solid(b)
 }
 
-/// Paths keep to the region. A [`TileSource`] may answer past its edge (the
-/// sim's reads its terrain halo, `halo.rs`, so a source covers region ∪
-/// halo); walks planned across a seam are a later step.
-fn in_region(p: TilePos) -> bool {
-    let n = REGION_BLOCKS as i32;
-    (0..n).contains(&p[0]) && (0..n).contains(&p[2])
-}
-
 fn passable(src: &impl TileSource, p: TilePos) -> bool {
-    in_region(p) && passable_block(src.block(p))
+    passable_block(src.block(p))
 }
 
 /// Whether a body can stand at `p`: `p` and the tile above are passable and
-/// the tile below is solid, inside the region.
+/// the tile below is solid. Anywhere the source answers — the sim's covers
+/// region ∪ halo; an unknown floor reads as air, so it is never standable.
 pub fn standable(src: &impl TileSource, p: TilePos) -> bool {
-    in_region(p)
-        && passable_block(src.block(p))
+    passable_block(src.block(p))
         && passable_block(src.block([p[0], p[1] + 1, p[2]]))
         && solid_block(src.block([p[0], p[1] - 1, p[2]]))
 }
@@ -129,10 +123,30 @@ fn successors(src: &impl TileSource, p: TilePos, out: &mut Vec<(TilePos, u32)>) 
 /// The cheapest path `from..=to` inclusive, or `None` when unreachable, an
 /// end is not standable, or more than `max_nodes` nodes would be expanded.
 pub fn find_path(src: &impl TileSource, from: TilePos, to: TilePos, max_nodes: u32) -> Option<Vec<TilePos>> {
-    if !standable(src, from) || !standable(src, to) {
+    if !standable(src, to) {
         return None;
     }
-    if from == to {
+    find_path_toward(src, from, to, |p| p == to, max_nodes)
+}
+
+/// A* from `from` guided toward `toward` (the heuristic's target), ending at
+/// the first tile `accept` takes as it is expanded: the cheapest such tile
+/// when `toward` is accepted (as [`find_path`]), else the first one the
+/// search toward `toward` reaches (`path_plan.rs` uses it to cross into the
+/// next region of a route). `None` when `from` is not standable, no accepted
+/// tile is reachable, or more than `max_nodes` nodes would be expanded.
+pub fn find_path_toward(
+    src: &impl TileSource,
+    from: TilePos,
+    toward: TilePos,
+    accept: impl Fn(TilePos) -> bool,
+    max_nodes: u32,
+) -> Option<Vec<TilePos>> {
+    if !standable(src, from) {
+        return None;
+    }
+    let to = toward;
+    if accept(from) {
         return Some(vec![from]);
     }
     let mut g: BTreeMap<TilePos, u32> = BTreeMap::new();
@@ -148,7 +162,7 @@ pub fn find_path(src: &impl TileSource, from: TilePos, to: TilePos, max_nodes: u
         if g.get(&p).is_some_and(|&best| gp > best) {
             continue;
         }
-        if p == to {
+        if accept(p) {
             let mut path = vec![p];
             let mut cur = p;
             while let Some(&prev) = came.get(&cur) {

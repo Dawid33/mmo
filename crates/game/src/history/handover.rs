@@ -26,7 +26,7 @@ pub struct Directive {
 /// The region's centre column, as a walk goal.
 fn centre_goal(region: RegionCoords) -> Goal {
     let c = (REGION_BLOCKS / 2) as i32;
-    Goal { region, column: [c, c], y: None }
+    Goal::local(region, [c, c], None)
 }
 
 /// The edge of `rc` a party coming from `prev` walks in over: `prev` itself when it is
@@ -260,7 +260,7 @@ impl History {
         let from = if idx == 0 { rc } else { entry_side(jr.route[idx - 1], rc) };
         let goal = if idx >= last {
             let [x, z] = self.grid().landing(rc).unwrap_or([REGION_BLOCKS as u32 / 2; 2]);
-            Goal { region: rc, column: [x as i32, z as i32], y: None }
+            Goal::local(rc, [x as i32, z as i32], None)
         } else {
             centre_goal(jr.route[idx + 1])
         };

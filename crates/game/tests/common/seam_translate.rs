@@ -147,15 +147,16 @@ pub struct Tolerances {
 /// with the terrain halo; REGION_BLOCKS 64, CHUNK_BLOCKS 16; adventure walk
 /// at Corner — the key walk's is 6.3e-6 at Seam(X)/Seam(Z), 3.3e-6 at
 /// Corner). Before the halo it was 0.0123 (tolerance 0.025): the body dipped
-/// past the seam (no floor there) and rested at another height. The known-red
-/// adventure Seam(X) (0.17, Task 6.5) is not part of the measurement.
+/// past the seam (no floor there) and rested at another height. The adventure
+/// walk at Seam(X)/Seam(Z) was 0.17 until walks planned across seams
+/// (`path_plan.rs`, Task 6.5); see `adventure_walk_is_seam_invariant`.
 pub const POSE_TOL_BLOCKS: f32 = 1.1e-4;
 /// Lockstep velocities within this many blocks per second (bodies are at
 /// rest when the snapshot is taken). Measured ×2: 1.5e-4 (2026-11-06,
-/// before the halo; with it the largest is still the known-red adventure
-/// walk at a seam, 1.5e-4 lockstep and 2.3e-4 under jitter — the adventure
-/// walk at Corner is 7.6e-5, the key walk 0). Shared with
-/// [`JITTER_TOLERANCES`], which the adventure walk's seam runs still need.
+/// before the halo; with it the adventure walk at a seam was 1.5e-4 lockstep
+/// and 2.3e-4 under jitter until walks planned across seams — since then
+/// (Task 6.5) the adventure walk is 7.6e-5 in every placement, lockstep and
+/// jittery, the key walk 0). Shared with [`JITTER_TOLERANCES`].
 pub const VEL_TOL_BLOCKS_PER_S: f32 = 3.1e-4;
 pub const LOCKSTEP_TOLERANCES: Tolerances =
     Tolerances { pose_blocks: POSE_TOL_BLOCKS, vel_blocks_per_s: VEL_TOL_BLOCKS_PER_S, tiles: true };
@@ -273,8 +274,7 @@ pub fn snapshot(rig: &mut Rig, origin: WorldBlockPos, baseline: &BTreeMap<[i64; 
                 let tile = WorldBlockPos::from_local(rc, game::BlockPos::new(tile[0], tile[1], tile[2]));
                 let walk_goal = data.ecs.walker.try_get(key).as_ref().map(|w| {
                     let g = w.goal;
-                    let c = WorldBlockPos::from_local(g.region, game::BlockPos::new(g.column[0], 0, g.column[1]));
-                    ([c.x - origin.x, c.z - origin.z], g.y)
+                    ([g.column[0] - origin.x, g.column[1] - origin.z], g.y)
                 });
                 let client = client_of.get(&key).map(|c| {
                     let c = data.clients.get(c).expect("a player's client");

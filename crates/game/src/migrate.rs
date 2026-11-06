@@ -16,8 +16,8 @@ pub struct Carried {
     pub motion: Option<crate::Motion>,
     pub slime: Option<crate::slime::Slime>,
     pub animator: Option<crate::anim::Animator>,
-    /// An adventurer's walk; its path is sender-local, the receiver re-plans
-    /// it (`Rollback::resume_walker_safe`).
+    /// An adventurer's walk; its path is in world blocks, the receiver walks
+    /// on along it (`Rollback::continue_walk_safe`).
     pub walker: Option<crate::Walker>,
     pub wander: Option<crate::people::Wander>,
 }
