@@ -50,6 +50,7 @@ pub struct Stats {
     pub layer_drops: u64,
     pub splits: u64,
     pub merges: u64,
+    pub relevels: u64,
 }
 
 /// FNV-1a, 64-bit: tiny, dependency-free, identical on every target.

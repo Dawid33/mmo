@@ -133,7 +133,9 @@ fn horizontal(w: &mut World, c: u32, d: Dir) {
             let wn = w.water[n as usize];
             let (hi, lo, whi, wlo) = if wc >= wn { (c, n, wc, wn) } else { (n, c, wn, wc) };
             let diff = whi - wlo;
-            let q = if !w.supported(lo) {
+            let q = if !w.supported(hi) {
+                0 // a donor in mid-air only falls
+            } else if !w.supported(lo) {
                 diff.div_ceil(2) // over an edge: pour, rounding up so films drain off
             } else if whi <= FILM || diff < 2 {
                 0 // film rule
@@ -212,6 +214,7 @@ fn absorb_or_seed(w: &mut World, c: u32) {
     if w.bodies.contains_key(&keep) && y < w.bodies[&keep].top {
         if let Some(u) = dims.step(c, Dir::Up) {
             if !w.solid.get(u) && w.owner[u as usize] != keep {
+                w.stats.relevels += 1;
                 body::relevel(w, keep, y);
             }
         }

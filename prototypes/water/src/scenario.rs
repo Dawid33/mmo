@@ -9,9 +9,6 @@ use crate::{FULL, Mode, ca};
 
 pub const NAMES: [&str; 6] = ["settled", "small_spill", "big_drain", "bucket", "film", "u_tube"];
 /// Full-grid mass checks cost O(grid); run one every this many steps (and at the end).
-/// Steps between u_tube pours: the pour cell must have emptied (a full-cell pour into a
-/// cell still holding splash is refused).
-pub const POUR_GAP: u32 = 4;
 pub const MASS_CHECK_EVERY: u32 = 64;
 
 pub struct Scenario {
@@ -68,7 +65,7 @@ pub fn build(name: &str, mode: Mode) -> Scenario {
         "bucket" => {
             fill_solid(&mut w, 0..=3);
             carve(&mut w, 30..=32, 1..=3, 30..=32);
-            let e = (0..20).map(|k| (k, Edit::Pour(d.idx(31, 4, 31), FULL))).collect();
+            let e = (0..20).map(|k| (k, Edit::Pour(d.idx(31, 10, 31), FULL))).collect();
             ("bucket", e, 2_000, true)
         }
         "film" => {
@@ -81,7 +78,9 @@ pub fn build(name: &str, mode: Mode) -> Scenario {
             carve(&mut w, 20..=21, 4..=45, 30..=31);
             carve(&mut w, 40..=41, 4..=45, 30..=31);
             carve(&mut w, 22..=39, 4..=5, 30..=31);
-            let e = (0..100u32).map(|k| (k * POUR_GAP, Edit::Pour(d.idx(20, 44, 30), FULL))).collect();
+            let e = (0..100u32)
+                .map(|k| (k, Edit::Pour(d.idx(20 + k % 2, 44, 30 + (k / 2) % 2), FULL)))
+                .collect();
             ("u_tube", e, 20_000, true)
         }
         other => panic!("unknown scenario {other}"),

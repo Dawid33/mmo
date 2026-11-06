@@ -131,10 +131,10 @@ fn floor_hole_drains_lake_into_cavity() {
 fn plain_overflow_backs_off() {
     let mut w = World::new(Dims::cube(32), Mode::Bodies);
     fill_solid(&mut w, 0..=3);
-    carve(&mut w, 10..=12, 3..=3, 10..=12); // 9 m³ pit in a plain
+    carve(&mut w, 10..=11, 2..=3, 10..=11); // 8 m³ pit in a plain
     finish(&mut w);
-    let spout = w.dims.idx(11, 4, 11);
-    let edits = (0..26).map(|k| (k * 2, Edit::Pour(spout, FULL / 2))).collect();
+    let spout = w.dims.idx(10, 8, 10);
+    let edits = (0..12).map(|k| (k, Edit::Pour(spout, FULL))).collect();
     let mut sc = Scenario {
         name: "plain_overflow",
         world: w,

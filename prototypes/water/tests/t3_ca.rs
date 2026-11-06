@@ -171,3 +171,28 @@ fn settled_bodies_world_floods_nothing() {
     assert_eq!(w.stats.cells_visited, 0);
     assert_eq!(w.stats.flood_cells, 0);
 }
+
+#[test]
+fn absorb_below_top_with_open_ground_above_relevels() {
+    // shaft A holds a tall body; the tunnel and shaft B are dry. As the tunnel cells join
+    // (below the body's top, with B's column open above them) the body must regrow over B.
+    let mut w = World::new(Dims::cube(32), Mode::Bodies);
+    fill_solid(&mut w, 0..=20);
+    carve(&mut w, 4..=5, 2..=15, 4..=5);
+    carve(&mut w, 10..=11, 2..=15, 4..=5);
+    carve(&mut w, 6..=9, 2..=3, 4..=5);
+    fill_water(&mut w, 4..=5, 2..=7, 4..=5); // 24 m³
+    finish(&mut w);
+    assert_eq!(w.bodies.len(), 1);
+    run_until_asleep(&mut w, 20_000);
+    assert!(w.stats.relevels > 0, "the rule never fired");
+    assert_eq!(w.bodies.len(), 1);
+    check_invariants(&w).unwrap();
+    let b = w.bodies.values().next().unwrap();
+    // communicating vessels: layers 2,3 hold 16 cells each; 24 m³ -> level 2 + 24/16
+    assert_eq!(b.level(), 2 * F + 24 * F / 16);
+    assert_eq!(b.area[2], 16);
+    assert_eq!(b.area[3], 16);
+    assert!(b.area[4] == 0 && b.top == 3);
+    assert_eq!(w.mass(), 24 * F);
+}
