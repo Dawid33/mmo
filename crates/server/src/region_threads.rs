@@ -84,7 +84,11 @@ impl RegionSpawner for ThreadRegionSpawner {
                 // Deferred seeds generate here, timed separately from the build.
                 let generate_time = std::cell::Cell::new(Duration::ZERO);
                 let runner = match saved {
-                    Some(rollback) => RegionRunner::new(id, game::restore_saved(id, rollback), out),
+                    Some(saved) => {
+                        let mut runner = RegionRunner::new(id, game::restore_saved(id, saved.state), out);
+                        runner.requeue_saved(saved.transfers);
+                        runner
+                    }
                     None => seed.into_runner(id, out, &|rc| {
                         let started = Instant::now();
                         let columns = match &generator {

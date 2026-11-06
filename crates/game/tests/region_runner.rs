@@ -307,3 +307,46 @@ fn a_server_runner_keeps_no_event_history() {
         "server regions must not retain applied events"
     );
 }
+
+/// A donor region's entity, extracted as a crossing bundle.
+fn departed(make: impl FnOnce(&mut game::Rollback) -> game::EntityKey) -> game::EntityBundle {
+    let (send, _recv) = unbounded();
+    let mut donor = game::Rollback::new(Some(send));
+    donor.new_transaction();
+    let key = make(&mut donor);
+    let bundle = donor.extract_entity_safe(key);
+    donor.forget();
+    bundle
+}
+
+#[test]
+fn saved_crossings_ride_the_region_file_and_queue_again_on_restore() {
+    let id = RegionCoords::new(0, 0);
+    let slime = departed(|d| d.spawn_slime_safe(game::parry::math::Vector::new(100.0, 200.0, 100.0), 2, 0.0, 0));
+    let player = departed(|d| {
+        d.create_player_safe(9);
+        d.clients.insert(9, game::Client::default());
+        *d.player_entites.get(&9).unwrap()
+    });
+    let state = Region::from_chunks(id, flat_chunks()).data().clone();
+    let tick = *state.tick;
+    let stamp = tick + 1;
+    let blob = game::RegionSave::Live(Box::new(state), vec![(slime.clone(), stamp), (player, stamp)]).into_serialized();
+    // The state prefix is still a parking blob; the whole is the file payload.
+    assert_eq!(*blob.to_rollback().expect("state prefix").tick, tick);
+    let saved = blob.to_saved().expect("payload decodes");
+    assert_eq!(saved.transfers.len(), 2);
+    let parked = game::RegionSave::Parked(SerializedRegion::from_rollback(&saved.state)).into_serialized();
+    assert!(parked.to_saved().expect("parked payload decodes").transfers.is_empty());
+
+    let (out_send, out) = unbounded();
+    let mut r = RegionRunner::new(id, game::restore_saved(id, saved.state), out_send);
+    r.requeue_saved(saved.transfers);
+    assert!(r.region_mut().data().entity_by_id(slime.id).is_none(), "held for its slot");
+    r.tick();
+    let data = r.region_mut().data();
+    assert!(data.entity_by_id(slime.id).is_some(), "the slime arrived");
+    assert!(data.player_entites.is_empty(), "a saved player crossing is dropped: the player store restores it");
+    let arrivals = processed(&out).into_iter().filter(|e| matches!(e.kind, GameEventKind::EntityArrived(_))).count();
+    assert_eq!(arrivals, 1);
+}

@@ -16,6 +16,43 @@ use game::{
 };
 
 use crate::common;
+use game::EntityId;
+use std::collections::BTreeMap;
+
+/// The conservation invariant of a crossing: every `EntityId` is owned by
+/// exactly one running region or sits exactly once in the manager's
+/// in-flight table — never both, never twice, and (people aside, whom the
+/// history may absorb or end) never lost. Called every round.
+fn assert_conserved(rig: &mut Rig) {
+    let mut places: BTreeMap<EntityId, Vec<Option<RegionCoords>>> = BTreeMap::new();
+    let mut people = std::collections::BTreeSet::new();
+    for rc in rig.manager.running_regions() {
+        rig.manager.spawner_mut().with_region(rc, |region| {
+            let data = region.data();
+            for (id, &key) in data.id_index.iter() {
+                places.entry(*id).or_default().push(Some(rc));
+                if matches!(data.ecs.kind.try_get(key), Some(game::EntityKind::Person { .. })) {
+                    people.insert(*id);
+                }
+            }
+        });
+    }
+    for (id, _target) in rig.manager.in_flight_ids() {
+        places.entry(id).or_default().push(None);
+    }
+    for (id, at) in &places {
+        assert_eq!(at.len(), 1, "{id:?} is in several places at once (None = in flight): {at:?}");
+    }
+    for (id, last) in &rig.tracked {
+        assert!(places.contains_key(id), "{id:?} vanished (last seen {last:?}, None = in flight)");
+    }
+    rig.tracked.retain(|id, _| !people.contains(id));
+    for (id, at) in places {
+        if !people.contains(&id) {
+            rig.tracked.insert(id, at[0]);
+        }
+    }
+}
 
 /// Seeds swept per schedule mode.
 const SEEDS: u64 = 12;
@@ -103,6 +140,12 @@ struct Rig {
     pushed_home: Option<RegionCoords>,
     /// [`Rig::start_trace`]: each traced region's tick, and what was seen.
     trace: Option<(std::collections::BTreeMap<RegionCoords, u64>, Vec<(RegionCoords, Seen)>)>,
+    /// Every non-person entity [`assert_conserved`] has seen, and where it
+    /// was last (`None` = in flight): it must never vanish.
+    tracked: std::collections::BTreeMap<EntityId, Option<RegionCoords>>,
+    /// Latest region snapshot sent to the client, per region: whether it
+    /// held the client's player.
+    snapshot_has_player: std::collections::BTreeMap<RegionCoords, bool>,
 }
 
 impl Rig {
@@ -133,6 +176,8 @@ impl Rig {
             now_ms: 0,
             pushed_home: None,
             trace: None,
+            tracked: Default::default(),
+            snapshot_has_player: Default::default(),
         }
     }
 
@@ -145,8 +190,12 @@ impl Rig {
             }
         }
         for (_, packet) in self.packets.try_iter() {
-            if let ServerPacket::PlayerRegion(home, CLIENT) = packet {
-                self.pushed_home = home;
+            match packet {
+                ServerPacket::PlayerRegion(home, CLIENT) => self.pushed_home = home,
+                ServerPacket::Region(rc, state) => {
+                    self.snapshot_has_player.insert(rc, state.player_entites.contains_key(&CLIENT));
+                }
+                _ => {}
             }
         }
     }
@@ -164,6 +213,14 @@ impl Rig {
         self.settle();
         let owners = self.owners();
         assert!(owners.len() <= 1, "player owned by several regions at once: {owners:?}");
+        assert_conserved(self);
+    }
+
+    /// Test support: kill `rc`'s runner (a dead region thread). Its entities
+    /// die with it, except what is in flight to it.
+    fn kill(&mut self, rc: RegionCoords) {
+        self.manager.spawner_mut().kill(rc);
+        self.tracked.retain(|_, at| *at != Some(rc));
     }
 
     fn key(&mut self, key: Key, pressed: bool) {
@@ -709,6 +766,234 @@ fn held_key_across_seam_settles() {
     for seed in 0..SEEDS {
         if std::panic::catch_unwind(|| hold_key_across_seam(Some(InlineSchedule::jittery(seed)))).is_err() {
             panic!("held key across the seam broke under InlineSchedule::jittery({seed})");
+        }
+    }
+}
+
+// --- Crossing faults: lag, a double crossing, a parked or dead target ---------
+
+/// Walking ticks short of the seam where the fault tests set their fault up.
+const FAULT_LEAD_TICKS: f32 = 3.0;
+/// Round budget for a held region to be released / a fault to play out.
+const FAULT_ROUNDS: usize = 200;
+
+/// A rig with the player standing in the spawn region, controls on, the 3x3
+/// window subscribed.
+fn rig_at_spawn(schedule: Option<InlineSchedule>) -> Rig {
+    let mut rig = Rig::new(schedule);
+    rig.event(ServerEvent::connected(CLIENT));
+    for rc in SPAWN_REGION.window_3x3() {
+        rig.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(rc), CLIENT));
+    }
+    rig.walk_until_owned_by(SPAWN_REGION, "spawn");
+    rig.key(Key::KeyE, true);
+    rig.key(Key::KeyE, false);
+    rig
+}
+
+/// Hold W until the player is `FAULT_LEAD_TICKS` of walking short of the
+/// north seam, still owned by the spawn region.
+fn approach_north_seam(rig: &mut Rig) {
+    use game::movement::{TICK_DT, UNITS_PER_METER, WALK_SPEED};
+    rig.key(Key::KeyW, true);
+    let margin = FAULT_LEAD_TICKS * WALK_SPEED * UNITS_PER_METER * TICK_DT;
+    for _ in 0..LEG_ROUNDS {
+        rig.round();
+        if rig.owners() == [SPAWN_REGION] && rig.player_xz(SPAWN_REGION).1 < margin {
+            return;
+        }
+    }
+    panic!("player never got near the north seam; owners {:?}", rig.owners());
+}
+
+/// Rounds until the manager has the player's transfer in flight.
+fn until_in_flight(rig: &mut Rig) {
+    for _ in 0..FAULT_ROUNDS {
+        rig.round();
+        if rig.manager.in_flight_count() > 0 {
+            return;
+        }
+    }
+    panic!("no transfer went in flight; owners {:?}", rig.owners());
+}
+
+/// After the crossing: settled in `rc`, nothing left in flight.
+fn assert_settled_in(rig: &mut Rig, rc: RegionCoords) {
+    for _ in 0..PAST_SEAM_ROUNDS {
+        rig.round();
+    }
+    assert_eq!(rig.owners(), [rc]);
+    assert_eq!(rig.pushed_home, Some(rc), "client told about its new home");
+    assert_eq!(rig.manager.in_flight_count(), 0, "the arrival was confirmed");
+}
+
+/// The source region misses 5 rounds around the crossing (its thread fell
+/// behind): it catches up in a burst, crossing on the way, and the transfer
+/// is accounted for every round.
+fn lagging_source(schedule: Option<InlineSchedule>) {
+    let mut rig = rig_at_spawn(schedule);
+    approach_north_seam(&mut rig);
+    rig.manager.spawner_mut().hold(SPAWN_REGION, 5);
+    rig.walk_until_owned_by(north(), "lagging source");
+    assert_settled_in(&mut rig, north());
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn lagging_source_transfer_conserved() {
+    lagging_source(None);
+    for seed in 0..4 {
+        if std::panic::catch_unwind(|| lagging_source(Some(InlineSchedule::jittery(seed)))).is_err() {
+            panic!("lagging source broke under InlineSchedule::jittery({seed})");
+        }
+    }
+}
+
+/// A sprint diagonally through the -x/-z corner: two seams within a couple
+/// of ticks, whichever order the schedule makes of them.
+fn corner_sprint(schedule: Option<InlineSchedule>) {
+    let mut rig = rig_at_spawn(schedule);
+    for key in [Key::ControlLeft, Key::KeyW, Key::KeyA] {
+        rig.key(key, true);
+    }
+    rig.walk_until_owned_by(north_west(), "corner sprint");
+    for key in [Key::KeyW, Key::KeyA] {
+        rig.key(key, false);
+    }
+    assert_settled_in(&mut rig, north_west());
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn double_crossing_at_corner() {
+    corner_sprint(None);
+    for seed in 0..6 {
+        if std::panic::catch_unwind(|| corner_sprint(Some(InlineSchedule::jittery(seed)))).is_err() {
+            panic!("corner sprint broke under InlineSchedule::jittery({seed})");
+        }
+    }
+}
+
+/// The target is stopping (Shutdown sent, `Stopped` not back) when the
+/// departure arrives: the transfer waits for it to park, wakes it again,
+/// and the body is there for the resubscribe.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn park_target_mid_transfer() {
+    let mut rig = rig_at_spawn(None);
+    approach_north_seam(&mut rig);
+    rig.event(ServerEvent::ClientPacket(ClientPacket::ReleaseRegionConnection(north()), CLIENT));
+    rig.now_ms += game::UNLOAD_GRACE_MS;
+    rig.manager.maintain(rig.now_ms);
+    // The Shutdown sits unread in north's queue until released.
+    rig.manager.spawner_mut().hold(north(), u32::MAX);
+    until_in_flight(&mut rig);
+    assert!(rig.owners().is_empty(), "the body is in flight: {:?}", rig.owners());
+    rig.manager.spawner_mut().hold(north(), 0);
+    rig.walk_until_owned_by(north(), "after the target parked");
+    rig.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(north()), CLIENT));
+    assert_eq!(rig.snapshot_has_player.get(&north()), Some(&true), "the resubscribe sees the body");
+    assert_settled_in(&mut rig, north());
+}
+
+/// The target's thread dies with the arrival unread: the respawned target is
+/// sent the transfer again, and the body exists exactly once.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn dead_target_redelivers_in_flight() {
+    let mut rig = rig_at_spawn(None);
+    approach_north_seam(&mut rig);
+    rig.manager.spawner_mut().hold(north(), u32::MAX);
+    until_in_flight(&mut rig);
+    rig.kill(north());
+    // Player input goes to the new home: the send finds the thread dead.
+    rig.key(Key::KeyW, false);
+    assert!(rig.manager.running_regions().contains(&north()), "respawned");
+    rig.walk_until_owned_by(north(), "after the respawn");
+    assert_settled_in(&mut rig, north());
+}
+
+/// One autosave at a time: the next is requested once every region asked
+/// for the last has answered, and then the last is checked.
+struct SaveCheck {
+    id: EntityId,
+    asked: Vec<RegionCoords>,
+    got: BTreeMap<RegionCoords, game::RegionSave>,
+    checked: usize,
+}
+
+impl SaveCheck {
+    fn round(&mut self, rig: &mut Rig) {
+        self.got.extend(rig.manager.take_saves());
+        if !self.asked.iter().all(|rc| self.got.contains_key(rc)) {
+            return;
+        }
+        if !self.asked.is_empty() {
+            let mut at = Vec::new();
+            for (rc, save) in &self.got {
+                let game::RegionSave::Live(state, transfers) = save else { panic!("nothing parks here") };
+                if state.id_index.contains_key(&self.id) {
+                    at.push((*rc, "state"));
+                }
+                at.extend(transfers.iter().filter(|(b, _)| b.id == self.id).map(|_| (*rc, "transfer")));
+            }
+            assert_eq!(at.len(), 1, "save {}: the player is saved in {at:?}", self.checked);
+            self.checked += 1;
+        }
+        self.got.clear();
+        self.asked = rig.manager.running_regions();
+        rig.manager.request_save();
+    }
+}
+
+/// Autosaves through the crossing, one after another (each once every
+/// region asked has answered): the player's `EntityId` is in exactly one of
+/// them each time — in a saved state, or as a transfer saved with its
+/// target (or, when the target answered before the departure, rebased back
+/// into its source).
+fn saves_through_crossing(schedule: Option<InlineSchedule>, lagging: Option<RegionCoords>) {
+    let mut rig = rig_at_spawn(schedule);
+    let mut id = None;
+    rig.manager.spawner_mut().with_region(SPAWN_REGION, |region| {
+        let data = region.data();
+        id = *data.ecs.id.try_get(*data.player_entites.get(&CLIENT).unwrap());
+    });
+    let id = id.expect("the player has an EntityId");
+    let mut saves = SaveCheck { id, asked: Vec::new(), got: BTreeMap::new(), checked: 0 };
+    use game::movement::{TICK_DT, UNITS_PER_METER, WALK_SPEED};
+    let margin = FAULT_LEAD_TICKS * WALK_SPEED * UNITS_PER_METER * TICK_DT;
+    rig.key(Key::KeyW, true);
+    let mut lagging = lagging;
+    let mut settled_at = None;
+    for round in 0..LEG_ROUNDS {
+        saves.round(&mut rig);
+        if rig.owners() == [SPAWN_REGION] && rig.player_xz(SPAWN_REGION).1 < margin {
+            if let Some(rc) = lagging.take() {
+                rig.manager.spawner_mut().hold(rc, 4);
+            }
+        }
+        rig.round();
+        if rig.owners() == [north()] && rig.manager.in_flight_count() == 0 {
+            let at = *settled_at.get_or_insert(round);
+            if round > at + 12 {
+                saves.round(&mut rig);
+                assert!(saves.checked > 10, "only {} saves checked", saves.checked);
+                return;
+            }
+        }
+    }
+    panic!("player never settled in {:?}; owners {:?}", north(), rig.owners());
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn autosave_holds_each_transfer_exactly_once() {
+    saves_through_crossing(None, None);
+    saves_through_crossing(None, Some(north()));
+    saves_through_crossing(None, Some(SPAWN_REGION));
+    for seed in 0..SEEDS {
+        if std::panic::catch_unwind(|| saves_through_crossing(Some(InlineSchedule::jittery(seed)), None)).is_err() {
+            panic!("autosave through a crossing broke under InlineSchedule::jittery({seed})");
         }
     }
 }

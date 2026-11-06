@@ -667,7 +667,7 @@ fn saved_region_restores_without_players_or_people() {
     assert!(saved.player_entites.contains_key(&4));
     let (tick, terrain) = (r.region_mut().current_tick(), r.region_mut().terrain_fingerprint());
     // Through the disk format (bincode) and back, as a restarted server loads it.
-    let blob = game::RegionSave::Live(saved).into_serialized();
+    let blob = game::RegionSave::Live(saved, Vec::new()).into_serialized();
     let restored = game::restore_saved(common::r0(), blob.to_rollback().unwrap());
     let data = restored.data();
     assert!(data.people_here().is_empty(), "the history respawns its people");
@@ -687,7 +687,7 @@ fn request_save_collects_running_then_parked_regions_once() {
     h.settle(0);
     let saves = h.manager.take_saves();
     assert_eq!(saves.len(), running.len(), "every running region answers");
-    assert!(saves.iter().all(|(_, s)| matches!(s, game::RegionSave::Live(_))));
+    assert!(saves.iter().all(|(_, s)| matches!(s, game::RegionSave::Live(..))));
     h.manager.shutdown_all();
     h.settle(0);
     assert!(h.manager.running_regions().is_empty());

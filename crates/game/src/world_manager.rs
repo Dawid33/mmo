@@ -189,7 +189,7 @@ pub struct InlineSpawner {
     /// store): a region that has not run in this one starts from its save,
     /// through [`crate::restore_saved`], as `ThreadRegionSpawner::with_store`
     /// does on the server.
-    saved: BTreeMap<RegionCoords, crate::Rollback>,
+    saved: BTreeMap<RegionCoords, crate::SavedRegion>,
     /// Rounds advanced by `tick_all`: the world tick of this lockstep world.
     rounds: crate::Tick,
     /// Test support ([`InlineSpawner::hold`]): regions that sit out the next
@@ -224,6 +224,15 @@ impl InlineSpawner {
 
     /// Regions that have not run yet start from `saved` (a restarted server).
     pub fn with_saved(saved: BTreeMap<RegionCoords, crate::Rollback>) -> Self {
+        let saved = saved
+            .into_iter()
+            .map(|(rc, state)| (rc, crate::SavedRegion { state, transfers: Vec::new() }))
+            .collect();
+        Self::with_saved_regions(saved)
+    }
+
+    /// [`Self::with_saved`], with the crossings saved alongside each state.
+    pub fn with_saved_regions(saved: BTreeMap<RegionCoords, crate::SavedRegion>) -> Self {
         Self { saved, ..Self::default() }
     }
 
@@ -238,10 +247,12 @@ impl InlineSpawner {
     /// no tick, and `pump` leaves its inputs queued — the way a region thread
     /// that fell behind looks to its neighbours. Afterwards it catches up
     /// like any skipped region (at most [`crate::MAX_CATCH_UP_BURST`] ticks a
-    /// round while behind the round counter).
+    /// round while behind the round counter). `rounds == 0` releases it now.
     pub fn hold(&mut self, rc: RegionCoords, rounds: u32) {
         if rounds > 0 {
             self.held.insert(rc, rounds);
+        } else {
+            self.held.remove(&rc);
         }
     }
 
@@ -324,6 +335,9 @@ impl InlineSpawner {
     /// handshake, simulating a crashed region thread.
     pub fn kill(&mut self, id: RegionCoords) {
         self.runners.remove(&id);
+        // A respawned region is a new thread: not held, not late.
+        self.held.remove(&id);
+        self.late.remove(&id);
     }
 
     /// Test support: run a closure against a live region (state assertions
@@ -345,7 +359,11 @@ impl RegionSpawner for InlineSpawner {
         let (send, recv) = unbounded();
         let never_ran = matches!(seed, RegionSeed::Fresh(_) | RegionSeed::Deferred(None));
         let runner = match self.saved.remove(&id).filter(|_| never_ran) {
-            Some(rollback) => RegionRunner::new(id, crate::restore_saved(id, rollback), out),
+            Some(saved) => {
+                let mut runner = RegionRunner::new(id, crate::restore_saved(id, saved.state), out);
+                runner.requeue_saved(saved.transfers);
+                runner
+            }
             None => seed.into_runner(
                 id,
                 out,
@@ -414,6 +432,8 @@ pub struct ManagerDepths {
     pub lod_waiting_terrain: usize,
     pub lod_cache: usize,
     pub terrain_cache: usize,
+    /// Crossings routed but not yet confirmed ([`WorldManager::in_flight_count`]).
+    pub transfers_in_flight: usize,
 }
 
 /// What a session is told when a new session of its player takes over
@@ -460,6 +480,24 @@ fn defers_until_restored(packet: &ClientPacket) -> bool {
             | ClientPacket::StartAdventure(_)
             | ClientPacket::EndAdventure
     )
+}
+
+/// A crossing the manager has routed to its target but not yet seen applied
+/// there (`WorldManager::in_flight`).
+#[derive(Debug, Clone)]
+struct InFlight {
+    source: RegionCoords,
+    target: RegionCoords,
+    stamp: crate::Tick,
+    /// In the target's frame.
+    bundle: crate::EntityBundle,
+    /// The autosave round ([`WorldManager::request_save`]) it departed in, and
+    /// whether its source had already answered that round's `Save` — then the
+    /// source's saved state still holds it.
+    save_round: u64,
+    in_source_save: bool,
+    /// The autosave round it was last saved with, as a transfer.
+    saved_in: Option<u64>,
 }
 
 pub struct WorldManager<S: RegionSpawner> {
@@ -571,6 +609,22 @@ pub struct WorldManager<S: RegionSpawner> {
     /// goes as a `Transfer` of the same stamp, so it lands behind the body
     /// even when the arrival is held. Emptied by `deliver_directives`.
     directive_stamps: BTreeMap<RegionCoords, crate::Tick>,
+    /// Crossings routed to their target (`Departures`) whose arrival the
+    /// target has not confirmed yet (its `EventProcessed(EntityArrived)`):
+    /// every crossing entity is always in exactly one of its source's state,
+    /// here, or its target's state / held queue. A target that dies is sent
+    /// these again once respawned; an autosave saves them with the target
+    /// whose saved state does not hold them yet.
+    in_flight: BTreeMap<crate::EntityId, InFlight>,
+    /// Autosave rounds started ([`Self::request_save`]); the regions asked in
+    /// the current one that have not answered yet, and those that have.
+    save_round: u64,
+    save_asked: BTreeSet<RegionCoords>,
+    save_answered: BTreeSet<RegionCoords>,
+    /// Crossings of the current round that landed in a target whose save had
+    /// already been taken, from a source still to answer: they go with the
+    /// source's save (see [`Self::owe_source_save`]).
+    save_owed: BTreeMap<RegionCoords, Vec<crate::SavedTransfer>>,
 }
 
 impl<S: RegionSpawner> WorldManager<S> {
@@ -624,6 +678,11 @@ impl<S: RegionSpawner> WorldManager<S> {
             lod_builder,
             lod_results,
             directive_stamps: BTreeMap::new(),
+            in_flight: BTreeMap::new(),
+            save_round: 0,
+            save_asked: BTreeSet::new(),
+            save_answered: BTreeSet::new(),
+            save_owed: BTreeMap::new(),
         }
     }
 
@@ -1137,6 +1196,12 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.clock_ms = self.clock_ms.max(now_ms);
         match output {
             RegionOutput::EventProcessed(event) => {
+                if let GameEventKind::EntityArrived(bundle) = &event.kind {
+                    if self.in_flight.get(&bundle.id).is_some_and(|f| f.target == rc) {
+                        let f = self.in_flight.remove(&bundle.id).expect("checked");
+                        self.owe_source_save(f);
+                    }
+                }
                 if let Some(link) = self.regions.get(&rc) {
                     if let GameEventKind::PlayerInput(_, ev) = &event.kind {
                         log::debug!(
@@ -1170,7 +1235,8 @@ impl<S: RegionSpawner> WorldManager<S> {
                 if let Some(history) = self.history.as_mut() {
                     history.note_positions(rollback.people_here());
                 }
-                self.saves.push((rc, RegionSave::Live(rollback)));
+                let transfers = self.saved_transfers(rc);
+                self.saves.push((rc, RegionSave::Live(rollback, transfers)));
             }
             RegionOutput::PlayerParked(client, record) => self.player_parked(rc, client, record, now_ms),
             RegionOutput::SyncClock { tick_rate, tick } => {
@@ -1247,6 +1313,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                         let t = &mut bundle.body.pose.translation;
                         t.x = t.x.clamp(0.0, crate::REGION_SIZE);
                         t.z = t.z.clamp(0.0, crate::REGION_SIZE);
+                        self.enter_in_flight(rc, rc, stamp, &bundle);
                         self.send_to_region(rc, RegionInput::Transfer(GameEventKind::EntityArrived(bundle), stamp));
                         continue;
                     }
@@ -1260,6 +1327,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                     bundle.rebase(rc, target);
                     // Arrivals ALWAYS wake the target (parked blob or gen).
                     self.ensure_running(target);
+                    self.enter_in_flight(rc, target, stamp, &bundle);
                     self.send_to_region(
                         target,
                         RegionInput::Transfer(GameEventKind::EntityArrived(bundle), stamp),
@@ -1366,7 +1434,8 @@ impl<S: RegionSpawner> WorldManager<S> {
                 self.pending_events.remove(&rc);
                 self.spawner.reap(rc);
                 self.history_region_lost(rc);
-                self.settle_lost_parks(rc, &BTreeSet::new());
+                let queued = self.restart_for_in_flight(rc);
+                self.settle_lost_parks(rc, &queued);
             } else if let Some(history) = self.history.as_mut() {
                 history.region_stopping(rc);
             }
@@ -1393,7 +1462,9 @@ impl<S: RegionSpawner> WorldManager<S> {
             self.pending_events.remove(&rc);
             self.spawner.reap(rc);
             self.history_region_lost(rc);
-            self.settle_lost_parks(rc, &BTreeSet::new());
+            // Woken for what was in flight to it; the exit loop stops it again.
+            let queued = self.restart_for_in_flight(rc);
+            self.settle_lost_parks(rc, &queued);
         }
     }
 
@@ -1401,10 +1472,21 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// state — it arrives as `RegionOutput::Saved` — and every region parked
     /// since the last call is queued at once. A stopping region is saved once
     /// it has parked, by the next call. Collect them with [`Self::take_saves`].
+    /// A live save carries the crossings in flight that no saved state of the
+    /// round holds (`saved_transfers`), so each is saved exactly once.
     pub fn request_save(&mut self) {
+        self.save_round += 1;
+        self.save_asked.clear();
+        self.save_answered.clear();
+        self.save_owed.clear();
         for (rc, link) in &self.regions {
-            if !link.stopping && link.input.send(RegionInput::Save).is_err() {
+            if link.stopping {
+                continue;
+            }
+            if link.input.send(RegionInput::Save).is_err() {
                 log::error!("region {:?} died before it could be saved", rc);
+            } else {
+                self.save_asked.insert(*rc);
             }
         }
         for rc in std::mem::take(&mut self.unsaved_parked) {
@@ -1417,6 +1499,125 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// Region states for the world autosave collected since the last call.
     pub fn take_saves(&mut self) -> Vec<(RegionCoords, RegionSave)> {
         std::mem::take(&mut self.saves)
+    }
+
+    /// Crossings routed but not yet confirmed by their target (the `[server]`
+    /// counters line).
+    pub fn in_flight_count(&self) -> usize {
+        self.in_flight.len()
+    }
+
+    /// Test support: every crossing in flight, with its target.
+    pub fn in_flight_ids(&self) -> Vec<(crate::EntityId, RegionCoords)> {
+        self.in_flight.iter().map(|(id, f)| (*id, f.target)).collect()
+    }
+
+    /// `bundle` (in `target`'s frame) is on its way from `source` to `target`.
+    fn enter_in_flight(
+        &mut self,
+        source: RegionCoords,
+        target: RegionCoords,
+        stamp: crate::Tick,
+        bundle: &crate::EntityBundle,
+    ) {
+        let entry = InFlight {
+            source,
+            target,
+            stamp,
+            bundle: bundle.clone(),
+            save_round: self.save_round,
+            in_source_save: self.save_answered.contains(&source),
+            saved_in: None,
+        };
+        if let Some(old) = self.in_flight.insert(bundle.id, entry) {
+            log::error!("{:?} departed {source:?} while still in flight to {:?}", bundle.id, old.target);
+        }
+    }
+
+    /// `rc` answered this round's `Save`: the crossings in flight that its
+    /// saved state lacks and no other save of the round holds — so each one
+    /// is saved exactly once per round:
+    /// - in flight to `rc` (unless the source's save, answered before the
+    ///   departure, still holds the body);
+    /// - departed from `rc` this round after it was asked, to a target that
+    ///   has already answered (or was not asked): saved here, rebased back
+    ///   into `rc`'s frame — restored, it arrives just past the seam and
+    ///   crosses again.
+    fn saved_transfers(&mut self, rc: RegionCoords) -> Vec<crate::SavedTransfer> {
+        self.save_asked.remove(&rc);
+        self.save_answered.insert(rc);
+        let round = self.save_round;
+        let asked = &self.save_asked;
+        let mut out = self.save_owed.remove(&rc).unwrap_or_default();
+        for f in self.in_flight.values_mut() {
+            if f.saved_in == Some(round) || (f.save_round == round && f.in_source_save) {
+                continue;
+            }
+            if f.target == rc {
+                out.push((f.bundle.clone(), f.stamp));
+            } else if f.source == rc && f.save_round == round && !asked.contains(&f.target) {
+                let mut bundle = f.bundle.clone();
+                bundle.rebase(f.target, f.source);
+                out.push((bundle, f.stamp));
+            } else {
+                continue;
+            }
+            f.saved_in = Some(round);
+        }
+        out
+    }
+
+    /// `f` just landed in its target. If that was after the target answered
+    /// this round's `Save`, and its source answers after the departure, no
+    /// saved state of the round holds it — the source's save takes it,
+    /// rebased back into the source's frame, as for one still in flight.
+    fn owe_source_save(&mut self, f: InFlight) {
+        let round = self.save_round;
+        let unsaved = f.save_round == round && !f.in_source_save && f.saved_in != Some(round);
+        if unsaved
+            && f.source != f.target
+            && !self.save_asked.contains(&f.target)
+            && self.save_asked.contains(&f.source)
+        {
+            let mut bundle = f.bundle;
+            bundle.rebase(f.target, f.source);
+            self.save_owed.entry(f.source).or_default().push((bundle, f.stamp));
+        }
+    }
+
+    /// `rc` died: what was in flight to it is sent again to its respawn (or
+    /// respawns it), with its stamps. A person's is dropped — the history
+    /// took its people back with the region ([`Self::history_region_lost`])
+    /// and its catch-up places them again. A player whose park or move was
+    /// waiting on `rc` gets its `ParkPlayer` again behind the body; returns
+    /// those clients (their parks are still in flight).
+    fn restart_for_in_flight(&mut self, rc: RegionCoords) -> BTreeSet<ClientId> {
+        let ids: Vec<crate::EntityId> =
+            self.in_flight.iter().filter(|(_, f)| f.target == rc).map(|(id, _)| *id).collect();
+        let mut parks = BTreeSet::new();
+        if ids.is_empty() {
+            return parks;
+        }
+        self.ensure_running(rc);
+        for id in ids {
+            let f = self.in_flight[&id].clone();
+            if matches!(f.bundle.kind, EntityKind::Person { .. }) && self.history.is_some() {
+                log::warn!("{id:?} was in flight to lost region {rc:?}: the history places that person again");
+                self.in_flight.remove(&id);
+                continue;
+            }
+            log::warn!("{id:?} was in flight to lost region {rc:?}: sent again");
+            let client = f.bundle.client.as_ref().map(|(c, _)| *c);
+            self.send_to_region(rc, RegionInput::Transfer(GameEventKind::EntityArrived(f.bundle), f.stamp));
+            let Some(c) = client else { continue };
+            let parked_here = self.parking.get(&c).is_some_and(|p| p.region == rc)
+                || self.moving.get(&c).is_some_and(|m| m.from == rc);
+            if parked_here {
+                self.send_to_region(rc, RegionInput::Transfer(GameEventKind::ParkPlayer(c), f.stamp));
+                parks.insert(c);
+            }
+        }
+        parks
     }
 
     pub fn running_regions(&self) -> Vec<RegionCoords> {
@@ -1721,6 +1922,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                 + self.lod_tile_waiting.len(),
             lod_cache: self.lod_cache.len(),
             terrain_cache: self.terrain_cache.len(),
+            transfers_in_flight: self.in_flight_count(),
         }
     }
 
@@ -1857,9 +2059,10 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// Route an input to a running region; a failed send means the region
     /// thread died — respawn it (parked state if any, else regenerated) and
     /// resnapshot every subscriber. The failed input itself is dropped; the
-    /// snapshot resync covers the gap. Returns whether the input reached the
-    /// region (or its stop queue) — `false` when it is not running or was
-    /// just lost and respawned.
+    /// snapshot resync covers the gap, and every crossing in flight to the
+    /// region (`in_flight`, which a failed arrival is part of) is sent again.
+    /// Returns whether the input reached the region (or its stop queue) —
+    /// `false` when it is not running or was just lost and respawned.
     ///
     /// A region that is stopping is never sent anything nor respawned: its
     /// thread may already have exited after `Shutdown`, and its
@@ -1902,8 +2105,11 @@ impl<S: RegionSpawner> WorldManager<S> {
         for client in subscribers {
             let _ = link.input.send(RegionInput::RequestSnapshot(client));
         }
-        // Bodies being parked there died with it.
-        self.settle_lost_parks(rc, &BTreeSet::new());
+        // What was on its way there was not in its state: sent again.
+        let queued = self.restart_for_in_flight(rc);
+        // Bodies being parked there died with it (unless their arrival and
+        // park were just sent again).
+        self.settle_lost_parks(rc, &queued);
         false
     }
 

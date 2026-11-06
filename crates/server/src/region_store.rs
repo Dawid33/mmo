@@ -9,11 +9,13 @@
 //!
 //! A file is a header — [`REGION_MAGIC`], [`REGION_FILE_VERSION`], the two
 //! dials, the forged world's `content_crc`, a crc32 of the payload — then the
-//! lz4-compressed bincode `Rollback` (the in-memory parking format,
-//! [`game::SerializedRegion`]). Writes are atomic (temp file + rename). A file
-//! that does not fit this world/build or will not decode is moved aside to
-//! `<file>.bak` with a warning and the region is generated afresh — it is never
-//! silently overwritten by the next autosave.
+//! lz4-compressed bincode `(Rollback, Vec<SavedTransfer>)` — the in-memory
+//! parking format ([`game::SerializedRegion`]) followed by the crossings in
+//! flight to the region at the save ([`game::RegionSave::into_serialized`]).
+//! Writes are atomic (temp file + rename). A file that does not fit this
+//! world/build or will not decode is moved aside to `<file>.bak` with a warning
+//! and the region is generated afresh — it is never silently overwritten by the
+//! next autosave.
 //!
 //! Who writes: [`spawn_saver`]'s thread, fed by the main loop from
 //! `WorldManager::take_saves` (running regions' live clones every
@@ -26,7 +28,7 @@ use std::thread::JoinHandle;
 use std::time::Instant;
 
 use crossbeam::channel::{unbounded, Receiver, Sender};
-use game::{RegionCoords, RegionSave, Rollback, SerializedRegion};
+use game::{RegionCoords, RegionSave, Rollback, SavedRegion, SerializedRegion};
 
 pub const REGION_MAGIC: [u8; 8] = *b"MMOREGN\0";
 /// Bump when the header changes. (A change to the sim's state types changes
@@ -36,7 +38,9 @@ pub const REGION_MAGIC: [u8; 8] = *b"MMOREGN\0";
 /// `walk_up`) are set aside as `.bak` and their regions regenerate.
 /// 8: `EntityId` — `GameData` gained `region` / `next_entity_serial` / `id_index`
 /// and `Ecs.id`, and `ghosts` / `arrivals` are keyed by it.
-pub const REGION_FILE_VERSION: u32 = 8;
+/// 9: the payload is `(Rollback, Vec<SavedTransfer>)` — the crossings in flight
+/// to the region when it was saved, queued again on load.
+pub const REGION_FILE_VERSION: u32 = 9;
 /// magic + version + region blocks + chunk blocks + world crc + payload crc.
 const HEADER_LEN: usize = 8 + 4 * 5;
 
@@ -172,7 +176,7 @@ impl RegionStore {
     /// The saved state of `rc`, decoded, if there is a usable one. A file that
     /// will not load is set aside ([`Self::set_aside`]) so the region starts
     /// fresh and the next autosave cannot overwrite it.
-    pub fn load(&self, rc: RegionCoords) -> Option<Rollback> {
+    pub fn load(&self, rc: RegionCoords) -> Option<SavedRegion> {
         let path = self.path(rc);
         let bytes = match std::fs::read(&path) {
             Ok(bytes) => bytes,
@@ -183,10 +187,10 @@ impl RegionStore {
             }
         };
         let decoded = self.decode(&bytes).and_then(|blob| {
-            blob.to_rollback().map_err(|e| RegionFileError::Corrupt(format!("state does not decode: {e}")))
+            blob.to_saved().map_err(|e| RegionFileError::Corrupt(format!("state does not decode: {e}")))
         });
         match decoded {
-            Ok(rollback) => Some(rollback),
+            Ok(saved) => Some(saved),
             Err(e) => {
                 self.set_aside(rc, &e);
                 None
@@ -259,7 +263,7 @@ mod tests {
     }
 
     fn blob() -> SerializedRegion {
-        SerializedRegion(bincode::serialize(&Rollback::new(None)).unwrap())
+        RegionSave::Live(Box::new(Rollback::new(None)), Vec::new()).into_serialized()
     }
 
     #[test]
@@ -348,7 +352,7 @@ mod tests {
         for x in 0..3 {
             send.send((RegionCoords::new(x, 0), RegionSave::Parked(blob()))).unwrap();
         }
-        send.send((RegionCoords::new(9, 9), RegionSave::Live(Box::new(Rollback::new(None))))).unwrap();
+        send.send((RegionCoords::new(9, 9), RegionSave::Live(Box::new(Rollback::new(None)), Vec::new()))).unwrap();
         drop(send);
         handle.join().unwrap();
         for rc in [(0, 0), (1, 0), (2, 0), (9, 9)] {

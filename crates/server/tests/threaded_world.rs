@@ -434,6 +434,8 @@ fn walking_input_crosses_a_boundary_on_real_threads() {
         );
     };
 
+    // The relayed arrival is the target's confirmation: nothing in flight.
+    assert_eq!(rig.manager.in_flight_count(), 0, "the confirmed crossing left the in-flight table");
     // The handoff carried the player's identity and state, not just an event.
     assert_eq!(bundle.id.birth_region, SPAWN_REGION);
     assert_eq!(bundle.client.as_ref().map(|(id, _)| *id), Some(0), "client rides the bundle");
@@ -500,6 +502,7 @@ fn diagonal_walk_crosses_a_corner_on_real_threads() {
 
     assert_eq!(home, Some(corner), "home never settled on the diagonal region; packets: {log:#?}");
     let bundle = arrival.expect("EntityArrived relayed from the diagonal region");
+    assert_eq!(rig.manager.in_flight_count(), 0, "every crossing on the way was confirmed");
     let (x, z) = (f32::from(bundle.body.pose.translation.x), f32::from(bundle.body.pose.translation.z));
     assert!(
         x > REGION_SIZE - 32.0 && z > REGION_SIZE - 32.0,
@@ -598,7 +601,7 @@ fn saved_region_is_restored_by_a_restarted_server() {
     }
     let (rc, save) = saves.pop().expect("the running region answered Save");
     assert_eq!(rc, SPAWN_REGION);
-    let game::RegionSave::Live(live) = &save else { panic!("a running region saves its live state") };
+    let game::RegionSave::Live(live, _) = &save else { panic!("a running region saves its live state") };
     let saved_tick = *live.tick;
     assert!(saved_tick >= 10, "the region ran: tick {saved_tick}");
     store.save(rc, &save.into_serialized()).unwrap();

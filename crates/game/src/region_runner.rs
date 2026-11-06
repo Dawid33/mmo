@@ -112,21 +112,48 @@ pub enum RegionOutput {
     Saved(Box<Rollback>),
 }
 
+/// A crossing saved with a region: the bundle (in that region's frame) and
+/// its stamp. Restored, it is queued again as a held
+/// [`RegionInput::Transfer`] (see [`RegionRunner::requeue_saved`]).
+pub type SavedTransfer = (EntityBundle, Tick);
+
 /// One region's state for the world autosave: a running region's live clone
-/// (`RegionOutput::Saved`) or a parked blob. Either restores through
-/// [`restore_saved`].
+/// (`RegionOutput::Saved`) with the crossings in flight to it that its state
+/// does not hold yet (from the manager's in-flight table), or a parked blob (which holds every arrival:
+/// `Shutdown` applies what is held). Either restores through
+/// [`restore_saved`] + [`RegionRunner::requeue_saved`].
 #[derive(Debug)]
 pub enum RegionSave {
-    Live(Box<Rollback>),
+    Live(Box<Rollback>, Vec<SavedTransfer>),
     Parked(SerializedRegion),
 }
 
 impl RegionSave {
+    /// The region file's payload: bincode of `(Rollback, Vec<SavedTransfer>)`.
+    /// Its state prefix is a parking blob, so [`SerializedRegion::to_rollback`]
+    /// still reads it; [`SerializedRegion::to_saved`] reads both.
     pub fn into_serialized(self) -> SerializedRegion {
-        match self {
-            RegionSave::Live(rollback) => SerializedRegion::from_rollback(&rollback),
-            RegionSave::Parked(serialized) => serialized,
-        }
+        let (mut bytes, transfers) = match self {
+            RegionSave::Live(rollback, transfers) => (SerializedRegion::from_rollback(&rollback).0, transfers),
+            RegionSave::Parked(serialized) => (serialized.0, Vec::new()),
+        };
+        bincode::serialize_into(&mut bytes, &transfers).expect("saved transfers must serialize");
+        SerializedRegion(bytes)
+    }
+}
+
+/// A region file's payload, decoded ([`SerializedRegion::to_saved`]).
+#[derive(Debug)]
+pub struct SavedRegion {
+    pub state: Rollback,
+    pub transfers: Vec<SavedTransfer>,
+}
+
+impl SerializedRegion {
+    /// Decode a region file's payload ([`RegionSave::into_serialized`]).
+    pub fn to_saved(&self) -> Result<SavedRegion, Box<bincode::ErrorKind>> {
+        let (state, transfers) = bincode::deserialize(&self.0)?;
+        Ok(SavedRegion { state, transfers })
     }
 }
 
@@ -573,6 +600,29 @@ impl RegionRunner {
 
     pub fn current_tick(&self) -> crate::Tick {
         self.region.current_tick()
+    }
+
+    /// A restored region's saved crossings ([`SavedRegion::transfers`]) are
+    /// queued again with their stamps, as if just received. A player's or a
+    /// person's is dropped, like their bodies in [`restore_saved`]: the
+    /// player store and the history put them back. One already here (it
+    /// cannot be, by how the manager saves them — defensive) is dropped too.
+    pub fn requeue_saved(&mut self, transfers: Vec<SavedTransfer>) {
+        let mut dropped = 0;
+        for (bundle, stamp) in transfers {
+            let stale = bundle.client.is_some() || matches!(bundle.kind, crate::EntityKind::Person { .. });
+            if stale || self.region.data().entity_by_id(bundle.id).is_some() {
+                dropped += 1;
+                continue;
+            }
+            self.held_transfers.push_back((GameEventKind::EntityArrived(bundle), stamp));
+        }
+        if dropped > 0 {
+            log::info!(
+                "restoring region {:?}: {dropped} saved crossings dropped (players, people, already present)",
+                self.id
+            );
+        }
     }
 
     pub fn region_mut(&mut self) -> &mut Region {
