@@ -2,6 +2,7 @@
 //! for both models. `--golden` prints only "<scenario> <mode> <hash>" lines.
 
 use water_proto::Mode;
+use water_proto::state::JournalMode;
 use water_proto::scenario::{self, NAMES, drain_a_spread};
 
 fn arg(args: &[String], key: &str) -> Option<String> {
@@ -16,6 +17,11 @@ fn main() {
         Some("cell") => vec![Mode::CellOnly],
         Some("bodies") => vec![Mode::Bodies],
         _ => vec![Mode::CellOnly, Mode::Bodies],
+    };
+    let journal = match arg(&args, "--undo").as_deref() {
+        Some("brick") => JournalMode::Brick,
+        Some("cell") | None => JournalMode::PerCell,
+        Some(o) => panic!("--undo takes cell|brick, not {o}"),
     };
     if !golden {
         println!(
@@ -32,6 +38,7 @@ fn main() {
         }
         for &mode in &modes {
             let mut sc = scenario::build(name, mode);
+            sc.world.journal = journal;
             let mut spread = 0u64;
             let r = scenario::run(&mut sc, |w| {
                 if name == "big_drain" && w.step % 100 == 0 {

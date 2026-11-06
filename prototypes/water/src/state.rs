@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use crate::body::Body;
 use crate::grid::{Bits, Dims, Dir};
 use crate::link::{Link, LinkId, LinkKind};
-use crate::{FULL, Mode};
+use crate::{BRICK, FULL, Mode};
 
 pub type BodyId = u32;
 pub const NO_BODY: BodyId = 0;
@@ -26,6 +26,35 @@ pub enum Undo {
     Poured(u64),
     Scooped(u64),
     Link(LinkId, Option<Link>),
+    /// Before-image of a whole `BRICK`³ brick (Brick journal mode).
+    Brick(u32, Box<BrickImage>),
+}
+
+/// How cell writes are journalled. Config, not state: never hashed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum JournalMode {
+    /// One entry per changed cell array element.
+    #[default]
+    PerCell,
+    /// The first write to a brick in an open log saves the whole brick once.
+    Brick,
+}
+
+pub const BRICK_CELLS: usize = (BRICK * BRICK * BRICK) as usize;
+
+/// The four per-cell arrays of one brick, in brick-local order `(ly * B + lz) * B + lx`.
+#[derive(Clone, Debug)]
+pub struct BrickImage {
+    pub water: [u16; BRICK_CELLS],
+    pub owner: [BodyId; BRICK_CELLS],
+    /// One bit per cell.
+    pub active: [u64; BRICK_CELLS / 64],
+    pub last_touch: [u32; BRICK_CELLS],
+}
+
+impl BrickImage {
+    /// 4 (brick index) + 512 x (2 + 4 + 4) + 64 (active bits).
+    pub const BYTES: usize = 4 + BRICK_CELLS * (2 + 4 + 4) + BRICK_CELLS / 8;
 }
 
 impl Undo {
@@ -38,6 +67,7 @@ impl Undo {
             Undo::Solid(..) | Undo::Active(..) => 6,
             Undo::NextId(..) | Undo::Step(..) => 5,
             Undo::Body(_, b) => 5 + b.as_ref().map_or(0, |b| b.byte_size()),
+            Undo::Brick(..) => BrickImage::BYTES,
         }
     }
 }
@@ -103,7 +133,12 @@ pub struct World {
     pub scooped: u64,
     pub links: BTreeMap<LinkId, Link>,
     pub stats: Stats,
+    /// Journal granularity (config, not hashed). Brick mode needs brick-multiple dims.
+    pub journal: JournalMode,
     log: Option<Vec<Undo>>,
+    /// Bricks already imaged in the open log (scratch).
+    brick_imaged: Bits,
+    bricks_logged: u32,
     imaged: Vec<BodyId>,
     /// Bodies changed this step, with their volume before the first change.
     pub(crate) touched: Vec<(BodyId, u64)>,
@@ -131,7 +166,10 @@ impl World {
             scooped: 0,
             links: BTreeMap::new(),
             stats: Stats::default(),
+            journal: JournalMode::PerCell,
             log: None,
+            brick_imaged: Bits::new(dims.brick_count() as usize),
+            bricks_logged: 0,
             imaged: Vec::new(),
             touched: Vec::new(),
             expand_requests: Vec::new(),
@@ -163,17 +201,66 @@ impl World {
         }
     }
 
+    /// Brick mode with an open log: image `i`'s brick if this is its first write, and
+    /// return true when the write is covered by an image (so it logs nothing itself).
+    fn brick_first(&mut self, i: u32) -> bool {
+        if self.journal != JournalMode::Brick || self.log.is_none() {
+            return false;
+        }
+        let b = self.dims.brick_of(i);
+        if !self.brick_imaged.get(b) {
+            self.brick_imaged.set(b, true);
+            self.bricks_logged += 1;
+            let img = self.brick_image(b);
+            self.push(Undo::Brick(b, Box::new(img)));
+        }
+        true
+    }
+    fn brick_image(&self, b: u32) -> BrickImage {
+        let mut img = BrickImage {
+            water: [0; BRICK_CELLS],
+            owner: [0; BRICK_CELLS],
+            active: [0; BRICK_CELLS / 64],
+            last_touch: [0; BRICK_CELLS],
+        };
+        for (k, i) in self.dims.brick_cells(b).enumerate() {
+            img.water[k] = self.water[i as usize];
+            img.owner[k] = self.owner[i as usize];
+            img.last_touch[k] = self.last_touch[i as usize];
+            if self.active.get(i) {
+                img.active[k / 64] |= 1 << (k % 64);
+            }
+        }
+        img
+    }
+    fn brick_restore(&mut self, b: u32, img: &BrickImage) {
+        for (k, i) in self.dims.brick_cells(b).enumerate() {
+            self.water[i as usize] = img.water[k];
+            self.owner[i as usize] = img.owner[k];
+            self.last_touch[i as usize] = img.last_touch[k];
+            self.active.set(i, (img.active[k / 64] >> (k % 64)) & 1 == 1);
+        }
+    }
+    /// Bricks imaged in the open (or last) log, for stats.
+    pub fn journal_bricks(&self) -> u32 {
+        self.bricks_logged
+    }
+
     pub fn set_water(&mut self, i: u32, v: u16) {
         let old = self.water[i as usize];
         if old != v {
-            self.push(Undo::Water(i, old));
+            if !self.brick_first(i) {
+                self.push(Undo::Water(i, old));
+            }
             self.water[i as usize] = v;
         }
     }
     pub fn set_owner(&mut self, i: u32, v: BodyId) {
         let old = self.owner[i as usize];
         if old != v {
-            self.push(Undo::Owner(i, old));
+            if !self.brick_first(i) {
+                self.push(Undo::Owner(i, old));
+            }
             self.owner[i as usize] = v;
         }
     }
@@ -187,7 +274,9 @@ impl World {
     pub fn set_active(&mut self, i: u32, v: bool) {
         let old = self.active.get(i);
         if old != v {
-            self.push(Undo::Active(i, old));
+            if !self.brick_first(i) {
+                self.push(Undo::Active(i, old));
+            }
             self.active.set(i, v);
         }
     }
@@ -195,7 +284,9 @@ impl World {
     pub fn touch(&mut self, i: u32) {
         let old = self.last_touch[i as usize];
         if old != self.step {
-            self.push(Undo::Touch(i, old));
+            if !self.brick_first(i) {
+                self.push(Undo::Touch(i, old));
+            }
             self.last_touch[i as usize] = self.step;
         }
     }
@@ -260,7 +351,16 @@ impl World {
     }
 
     pub fn begin_log(&mut self) {
+        if self.journal == JournalMode::Brick {
+            let b = BRICK;
+            assert!(
+                self.dims.x % b == 0 && self.dims.y % b == 0 && self.dims.z % b == 0,
+                "Brick journal needs dims that are multiples of BRICK"
+            );
+        }
         self.log = Some(Vec::new());
+        self.brick_imaged = Bits::new(self.dims.brick_count() as usize);
+        self.bricks_logged = 0;
         self.imaged.clear();
         self.touched.clear();
     }
@@ -294,6 +394,7 @@ impl World {
                 Undo::Link(id, None) => {
                     self.links.remove(&id);
                 }
+                Undo::Brick(b, img) => self.brick_restore(b, &img),
             }
         }
     }

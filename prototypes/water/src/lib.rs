@@ -37,6 +37,9 @@ pub const GATE_CAP: u64 = 1024;
 /// Units a pump moves in one step (1/8 m³).
 pub const PUMP_RATE: u16 = 512;
 
+/// Edge of a journal brick, in cells.
+pub const BRICK: u32 = 8;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
     /// The July plan: every wet cell is a CA cell.

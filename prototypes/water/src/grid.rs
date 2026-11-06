@@ -31,6 +31,33 @@ impl Dims {
     pub fn y_of(self, i: u32) -> u32 {
         i / self.layer()
     }
+    /// Bricks along each axis (`BRICK` cells each; dims must be multiples).
+    fn bricks(self) -> (u32, u32, u32) {
+        let b = crate::BRICK;
+        (self.x / b, self.y / b, self.z / b)
+    }
+    pub fn brick_count(self) -> u32 {
+        let (bx, by, bz) = self.bricks();
+        bx * by * bz
+    }
+    /// Index of the `BRICK`³ brick holding cell `i`: `(by * bz_n + bz) * bx_n + bx`.
+    pub fn brick_of(self, i: u32) -> u32 {
+        let b = crate::BRICK;
+        let (x, y, z) = self.xyz(i);
+        let (bxn, _, bzn) = self.bricks();
+        ((y / b) * bzn + z / b) * bxn + x / b
+    }
+    /// Cells of brick `b` in brick-local order `(ly * B + lz) * B + lx`.
+    pub fn brick_cells(self, b: u32) -> impl Iterator<Item = u32> {
+        let n = crate::BRICK;
+        let (bxn, _, bzn) = self.bricks();
+        let (bx, r) = (b % bxn, b / bxn);
+        let (bz, by) = (r % bzn, r / bzn);
+        (0..n * n * n).map(move |k| {
+            let (lx, r) = (k % n, k / n);
+            self.idx(bx * n + lx, by * n + r / n, bz * n + r % n)
+        })
+    }
     /// Face neighbour, or `None` outside the box. The box is closed: callers
     /// treat `None` as solid.
     pub fn step(self, i: u32, d: Dir) -> Option<u32> {
