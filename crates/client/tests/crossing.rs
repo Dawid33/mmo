@@ -14,8 +14,8 @@ use client::harness::{Dir, SimHarness};
 /// deterministically). `assert_converged` allows that bounded, documented
 /// transient to heal before its strict bit-exact check — so this asserts the
 /// real accepted guarantee (converges just after input), not an impossible
-/// instantaneous one. The deeper case (input held INDEFINITELY across a seam,
-/// which never settles) remains the deferred protocol-level item in TODO.md.
+/// instantaneous one. Input held across a seam under a real round trip is
+/// `held_key_crossing_has_no_rubber_band` below (inputs follow the body).
 #[test]
 fn walking_across_a_region_boundary_keeps_input_and_converges() {
     let mut h = SimHarness::with_near_radius(1);
@@ -78,4 +78,91 @@ fn crossing_converges_under_late_region_scheduling() {
         });
         assert!(run.is_ok(), "crossing broke under InlineSchedule::late({seed})");
     }
+}
+
+/// One-way delay of `held_key_crossing_has_no_rubber_band`, in steps (one
+/// tick each): a 100 ms round trip.
+const RUBBER_BAND_LATENCY_STEPS: usize = 1;
+/// Idle steps after the latency is switched on, for the client's clock to
+/// take the round trip into its lead (`SyncClock` every 10 ticks).
+const CLOCK_SETTLE_STEPS: usize = 60;
+/// Steps the key stays held past the crossing (3 s).
+const HELD_PAST_CROSSING_STEPS: usize = (3000 / game::TICK_RATE) as usize;
+/// Sprint is pressed / released every this many steps of the walk, so the
+/// inputs around the crossing change the body's speed: one lost or applied
+/// in the wrong region on either side shows as a correction along the walk.
+/// Several periods, so some toggle lands in the crossing's slots.
+const SPRINT_TOGGLE_PERIODS: [usize; 4] = [1, 2, 3, 4];
+/// The most the predicted body may move back along the walk between two
+/// steps (one world unit, 1/16 block).
+const MAX_STEP_BACK_UNITS: f32 = 1.0;
+
+/// W held across the north seam under a 100 ms round trip, sprint toggling
+/// all the while: the inputs the client predicts around the crossing land in
+/// the same place on the server (they follow the body), so a reconcile never
+/// pulls the predicted body back along its walk — no rubber band. Then the
+/// regions converge bit-exact.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn held_key_crossing_has_no_rubber_band() {
+    for period in SPRINT_TOGGLE_PERIODS {
+        hold_w_across_north_seam(period);
+    }
+}
+
+fn hold_w_across_north_seam(toggle_period: usize) {
+    use game::Key;
+    let mut h = SimHarness::with_near_radius(1);
+    h.connect();
+    h.set_latency(RUBBER_BAND_LATENCY_STEPS);
+    h.step_n(CLOCK_SETTLE_STEPS);
+    h.press(Key::KeyE);
+    h.step();
+    h.release(Key::KeyE);
+    h.step();
+    // Fly (double-tap Space, climb) so no ledge stops the walk.
+    h.press(Key::Space);
+    h.step();
+    h.release(Key::Space);
+    h.step();
+    h.press(Key::Space);
+    h.step_n(20);
+    h.release(Key::Space);
+    h.step_n(4);
+
+    let start = h.player_region();
+    h.press(Key::KeyW);
+    // North is -z: z only ever falls.
+    let mut last = h.player_world_pos().expect("body before the walk");
+    let mut past = None;
+    for step in 0..400 + HELD_PAST_CROSSING_STEPS {
+        if step % toggle_period == 0 {
+            if (step / toggle_period) % 2 == 0 {
+                h.press(Key::ControlLeft);
+            } else {
+                h.release(Key::ControlLeft);
+            }
+        }
+        h.step();
+        let Some(now) = h.player_world_pos() else { continue };
+        assert!(
+            now[2] <= last[2] + MAX_STEP_BACK_UNITS,
+            "sprint every {toggle_period}, step {step}: the predicted body moved back along the walk, z {} -> {} (home {:?})",
+            last[2],
+            now[2],
+            h.player_region()
+        );
+        last = now;
+        if past.is_none() && h.player_region() != start {
+            past = Some(step);
+        }
+        if past.is_some_and(|p| step >= p + HELD_PAST_CROSSING_STEPS) {
+            break;
+        }
+    }
+    assert_eq!(h.player_region(), game::RegionCoords::new(0, -1), "crossed north");
+    h.release(Key::ControlLeft);
+    h.release(Key::KeyW);
+    h.set_latency(0);
+    h.assert_converged();
 }

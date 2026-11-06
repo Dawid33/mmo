@@ -3,11 +3,11 @@
 //! over the existing channels and advanced in lockstep. No Bevy, no threads,
 //! no wall clock. See docs/superpowers/specs/2026-07-06-headless-sim-test-harness-design.md.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 
 use crossbeam::channel::{unbounded, Receiver, Sender};
 use game::{
-    state_hash, ClientUpdateEvent, GameEventKind, InputEvent, Key, RegionCoords, ServerPacket,
+    state_hash, ClientPacket, ClientUpdateEvent, GameEventKind, InputEvent, Key, RegionCoords, ServerPacket,
 };
 
 use crate::{GameInstanceManager, LocalServer, LOCAL_CLIENT_ID};
@@ -47,6 +47,16 @@ pub struct SimHarness {
     /// The client's regions run on their own threads (`threaded`); every
     /// pump then waits for them (`settle_regions`), so a step stays lockstep.
     threaded: bool,
+    /// What the client sent, on its way to `server_in` (see `set_latency`).
+    client_out: Receiver<ClientPacket>,
+    server_in: Sender<ClientPacket>,
+    /// One-way delay in steps (`set_latency`); 0 = the lockstep default.
+    latency: usize,
+    /// Packets in flight, each with the step it is delivered at.
+    to_server: VecDeque<(usize, ClientPacket)>,
+    to_client: VecDeque<(usize, ServerPacket)>,
+    /// Steps taken (the clock `latency` counts in).
+    steps: usize,
 }
 
 /// Most server-only ticks `catch_up` runs — comfortably more than the
@@ -108,7 +118,8 @@ impl SimHarness {
         client.set_lod_table(lod_table);
         client.set_near_radius(near_radius);
 
-        let client_to_server = client.client_packet_recv(); // Receiver<ClientPacket>
+        let client_out = client.client_packet_recv(); // Receiver<ClientPacket>
+        let (server_in, client_to_server) = unbounded::<ClientPacket>();
         let (server_to_client_send, server_to_client) = unbounded::<ServerPacket>();
         let (client_in_send, client_in) = unbounded::<ServerPacket>();
         let server = LocalServer::new_with_generator(
@@ -132,6 +143,40 @@ impl SimHarness {
             client_in_send,
             client_in,
             threaded: false,
+            client_out,
+            server_in,
+            latency: 0,
+            to_server: VecDeque::new(),
+            to_client: VecDeque::new(),
+            steps: 0,
+        }
+    }
+
+    /// Delay every packet by `steps` steps each way (one step = one tick),
+    /// and report the round trip in `SyncClock`, as a network would — the
+    /// client then leads the server by it. 0 (the default) is the lockstep
+    /// harness. `assert_converged` and `settle` expect 0: set it back first.
+    pub fn set_latency(&mut self, steps: usize) {
+        self.latency = steps;
+        if steps == 0 {
+            // Deliver everything still in flight.
+            for (_, p) in self.to_server.drain(..) {
+                let _ = self.server_in.send(p);
+            }
+            for (_, p) in self.to_client.drain(..) {
+                let _ = self.client_in_send.send(p);
+            }
+        }
+    }
+
+    /// Client packets whose delivery step has come, on to the server.
+    fn deliver_to_server(&mut self) {
+        for p in self.client_out.try_iter() {
+            self.to_server.push_back((self.steps + self.latency, p));
+        }
+        while self.to_server.front().is_some_and(|(due, _)| *due <= self.steps) {
+            let (_, p) = self.to_server.pop_front().expect("checked");
+            let _ = self.server_in.send(p);
         }
     }
 
@@ -201,12 +246,14 @@ impl SimHarness {
 
         // 3. Client reconcile.
         self.pump_client(true);
+        self.steps += 1;
     }
 
     /// Server ingest + one authoritative tick, recording each region's
     /// slot-start hash at every tick it ran so convergence can be checked
     /// tick-aligned (see `server_hashes` / `assert_converged`).
     fn tick_server(&mut self) {
+        self.deliver_to_server();
         self.server.pump().expect("server pump");
         self.server.tick();
         for (rc, t, hash) in self.server.take_slot_start_hashes() {
@@ -218,10 +265,19 @@ impl SimHarness {
     /// queued `Tick`). `with_clock: false` withholds `SyncClock`, so the
     /// client reconciles without re-pacing itself against the server.
     fn pump_client(&mut self, with_clock: bool) {
+        let rtt = std::time::Duration::from_millis(2 * self.latency as u64 * game::TICK_RATE);
         for packet in self.server_to_client.try_iter() {
+            let packet = match packet {
+                ServerPacket::SyncClock(rc, rate, tick, _) => ServerPacket::SyncClock(rc, rate, tick, rtt),
+                p => p,
+            };
             if with_clock || !matches!(packet, ServerPacket::SyncClock(..)) {
-                let _ = self.client_in_send.send(packet);
+                self.to_client.push_back((self.steps + self.latency, packet));
             }
+        }
+        while self.to_client.front().is_some_and(|(due, _)| *due <= self.steps) {
+            let (_, p) = self.to_client.pop_front().expect("checked");
+            let _ = self.client_in_send.send(p);
         }
         self.client.pump(&self.client_in).expect("client pump");
         if self.threaded {
@@ -272,6 +328,13 @@ impl SimHarness {
             .local_player_translation()
             .expect("player exists after connect")
     }
+    /// The local body's WORLD translation, from the home region's view
+    /// (`None` while the home holds no body: a crossing not yet landed).
+    pub fn player_world_pos(&self) -> Option<[f32; 3]> {
+        let t = self.client.local_player_translation()?;
+        let off = self.client_home().world_offset();
+        Some([t[0] + off[0], t[1] + off[1], t[2] + off[2]])
+    }
     fn client_home(&self) -> RegionCoords {
         self.client.home_region()
     }
@@ -309,8 +372,8 @@ impl SimHarness {
     /// agreement; it only permits the documented, bounded reconciliation the
     /// authority guarantees. Callers must not hold input across this call (the
     /// heal steps are meant to be idle); the tests release before asserting.
-    /// A genuinely non-healing divergence (e.g. input held indefinitely across
-    /// a seam) still exhausts the bound and fails loudly below.
+    /// A genuinely non-healing divergence (e.g. an input left stuck in a
+    /// region's log) still exhausts the bound and fails loudly below.
     pub fn assert_converged(&mut self) {
         self.settle();
         const HEAL_BOUND: usize = 8;

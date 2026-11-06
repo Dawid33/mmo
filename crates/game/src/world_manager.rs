@@ -1090,14 +1090,13 @@ impl<S: RegionSpawner> WorldManager<S> {
                                 log::debug!(
                                     "[server] recv {kind:?} from cid={cid:?} -> route to home {home:?}"
                                 );
-                                // The stamp counts ticks of the region the
-                                // client predicted into; after a flip the
-                                // home it routes to counts its own.
+                                // Regions share one tick numbering, so the
+                                // stamp holds in whichever region the input
+                                // reaches; that region makes it follow the
+                                // body if the body is crossing (`Forward`).
                                 let input = match after_tick {
-                                    Some(tick) if event.region_id == home => {
-                                        RegionInput::EventAfterTick(kind, tick)
-                                    }
-                                    _ => RegionInput::Event(kind),
+                                    Some(tick) => RegionInput::EventAfterTick(kind, tick),
+                                    None => RegionInput::Event(kind),
                                 };
                                 self.send_to_region(home, input);
                             }
@@ -1294,6 +1293,18 @@ impl<S: RegionSpawner> WorldManager<S> {
                         self.refresh_keepalive(rc, now_ms);
                         self.refresh_keepalive(target, now_ms);
                     }
+                }
+            }
+            RegionOutput::Forward(kind, stamp) => {
+                // An input that reached `rc` after its client's body left:
+                // on to the client's home, where the arrival (sent when the
+                // `Departures` came, before this) is already queued.
+                let client = kind.input_client();
+                match client.and_then(|c| self.homes.get(&c).copied()) {
+                    Some(home) if home != rc && self.regions.contains_key(&home) => {
+                        self.send_to_region(home, RegionInput::EventAfterTick(kind, stamp));
+                    }
+                    home => log::debug!("[server] forward of {kind:?} from {rc:?} dropped: home {home:?}"),
                 }
             }
             RegionOutput::GhostUpdates(list, stamp) => {
@@ -1864,10 +1875,11 @@ impl<S: RegionSpawner> WorldManager<S> {
         };
         if link.stopping {
             match input {
-                RegionInput::Event(GameEventKind::PlayerInput(..)) => {
+                RegionInput::Event(GameEventKind::PlayerInput(..))
+                | RegionInput::EventAfterTick(GameEventKind::PlayerInput(..), _) => {
                     log::debug!("send_to_region: {rc:?} is stopping; player input dropped");
                 }
-                input @ (RegionInput::Event(_) | RegionInput::Transfer(..)) => {
+                input @ (RegionInput::Event(_) | RegionInput::EventAfterTick(..) | RegionInput::Transfer(..)) => {
                     // A transfer keeps its stamp for the region's next run.
                     self.pending_events.entry(rc).or_default().push(input);
                 }

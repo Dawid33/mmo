@@ -101,6 +101,8 @@ struct Rig {
     now_ms: u64,
     /// Latest authoritative `PlayerRegion` push — what a client would believe.
     pushed_home: Option<RegionCoords>,
+    /// [`Rig::start_trace`]: each traced region's tick, and what was seen.
+    trace: Option<(std::collections::BTreeMap<RegionCoords, u64>, Vec<(RegionCoords, Seen)>)>,
 }
 
 impl Rig {
@@ -130,6 +132,7 @@ impl Rig {
             packets,
             now_ms: 0,
             pushed_home: None,
+            trace: None,
         }
     }
 
@@ -137,6 +140,7 @@ impl Rig {
         for _ in 0..3 {
             self.manager.spawner_mut().pump();
             while let Ok((rc, out)) = self.region_out.try_recv() {
+                self.trace_output(rc, &out);
                 self.manager.handle_region_output(rc, out, self.now_ms);
             }
         }
@@ -549,6 +553,162 @@ fn history_departure_under_jitter() {
     for seed in 0..8u64 {
         if std::panic::catch_unwind(|| travel_north(seed)).is_err() {
             panic!("history traveller across the seam broke under seed {seed}");
+        }
+    }
+}
+
+// --- A key held across a seam: inputs follow the body --------------------------
+
+/// Rounds the key stays held once the player has crossed (3 s).
+const HELD_AFTER_CROSSING_ROUNDS: usize = (3000 / TICK_RATE) as usize;
+/// How far ahead of the region it believes it is in the scripted client
+/// stamps its inputs (its prediction lead).
+const INPUT_LEAD_TICKS: u64 = 2;
+
+/// One entry of a region's authoritative output stream, as the held-key
+/// test reads it: the region's tick when it happened.
+#[derive(Debug, Clone, Copy)]
+enum Seen {
+    /// A marker input (`Resized { width: seq }`) was applied.
+    Marker { seq: u32, tick: u64 },
+    /// The player's body arrived (or was created) here.
+    Arrived,
+    /// The player's body left here, during the tick that brought the
+    /// region to `stamp`.
+    Departed { stamp: u64 },
+}
+
+impl Rig {
+    /// Start recording what the running regions output (see [`Seen`]).
+    fn start_trace(&mut self) {
+        let mut ticks = std::collections::BTreeMap::new();
+        for rc in self.manager.running_regions() {
+            self.manager.spawner_mut().with_region(rc, |region| {
+                ticks.insert(rc, region.current_tick());
+            });
+        }
+        self.trace = Some((ticks, Vec::new()));
+    }
+
+    fn trace_output(&mut self, rc: RegionCoords, out: &RegionOutput) {
+        let Some((ticks, seen)) = self.trace.as_mut() else { return };
+        let Some(tick) = ticks.get_mut(&rc) else { return };
+        let events = match out {
+            RegionOutput::EventProcessed(e) | RegionOutput::EventProcessedHashed(e, ..) => vec![&e.kind],
+            RegionOutput::Departures(list, stamp) => {
+                if list.iter().any(|(b, _)| b.client.as_ref().map(|(c, _)| *c) == Some(CLIENT)) {
+                    seen.push((rc, Seen::Departed { stamp: *stamp }));
+                }
+                vec![]
+            }
+            _ => vec![],
+        };
+        for kind in events {
+            match kind {
+                GameEventKind::Tick => *tick += 1,
+                GameEventKind::PlayerInput(CLIENT, InputEvent::Resized { width, .. }) => {
+                    seen.push((rc, Seen::Marker { seq: *width, tick: *tick }))
+                }
+                GameEventKind::EntityArrived(b) if b.client.as_ref().map(|(c, _)| *c) == Some(CLIENT) => {
+                    seen.push((rc, Seen::Arrived))
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// A client input stamped the way a client stamps it: with the region it
+    /// believes it is in and that region's tick plus its lead.
+    fn stamped(&mut self, kind: GameEventKind) {
+        let home = self.pushed_home.unwrap_or(SPAWN_REGION);
+        let mut tick = 0;
+        self.manager.spawner_mut().with_region(home, |region| tick = region.current_tick());
+        let ev = GameEvent::new(kind, 0, home);
+        self.event(ServerEvent::ClientPacket(ClientPacket::GameEventAfterTick(ev, tick + INPUT_LEAD_TICKS), CLIENT));
+    }
+}
+
+/// Holds W across the north seam and for 3 s beyond, a stamped marker input
+/// every round. The player stays owned by `north()` from the crossing on, and
+/// every marker is applied exactly once, in the region that held the body at
+/// that moment — none lost to the region it just left.
+fn hold_key_across_seam(schedule: Option<InlineSchedule>) {
+    let mut rig = Rig::new(schedule);
+    rig.event(ServerEvent::connected(CLIENT));
+    for rc in SPAWN_REGION.window_3x3() {
+        rig.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(rc), CLIENT));
+    }
+    rig.walk_until_owned_by(SPAWN_REGION, "spawn");
+    rig.key(Key::KeyE, true);
+    rig.key(Key::KeyE, false);
+    rig.start_trace();
+    rig.stamped(GameEventKind::PlayerInput(CLIENT, InputEvent::Key { key: Key::KeyW, pressed: true }));
+
+    let mut seq = 0u32;
+    let mut marker = |rig: &mut Rig| {
+        seq += 1;
+        rig.stamped(GameEventKind::PlayerInput(CLIENT, InputEvent::Resized { width: seq, height: 1 }));
+    };
+    let mut crossed = false;
+    for _ in 0..LEG_ROUNDS {
+        marker(&mut rig);
+        rig.round();
+        if rig.owners() == [north()] {
+            crossed = true;
+            break;
+        }
+    }
+    assert!(crossed, "player never reached {:?}; owners {:?}", north(), rig.owners());
+    for round in 0..HELD_AFTER_CROSSING_ROUNDS {
+        marker(&mut rig);
+        rig.round();
+        assert_eq!(rig.owners(), [north()], "ownership left {:?} {round} rounds after the crossing", north());
+    }
+    // Let the last markers land.
+    for _ in 0..PAST_SEAM_ROUNDS {
+        rig.round();
+    }
+    let sent = seq;
+
+    let (_, seen) = rig.trace.take().expect("tracing");
+    let mut count = vec![0u32; sent as usize + 1];
+    // The departure is reported after the tick it happened in, so find it first.
+    let left_spawn_at = seen.iter().find_map(|(rc, s)| match s {
+        Seen::Departed { stamp } if *rc == SPAWN_REGION => Some(*stamp),
+        _ => None,
+    });
+    let mut arrived_north = false;
+    for (rc, s) in &seen {
+        match *s {
+            Seen::Arrived if *rc == north() => arrived_north = true,
+            Seen::Marker { seq, tick } => {
+                count[seq as usize] += 1;
+                if *rc == SPAWN_REGION {
+                    assert!(
+                        left_spawn_at.map_or(true, |d| tick < d),
+                        "marker {seq} applied in the spawn region at tick {tick}, after the body left (at {left_spawn_at:?})"
+                    );
+                } else {
+                    assert_eq!(*rc, north(), "marker {seq} applied in {rc:?}");
+                    assert!(arrived_north, "marker {seq} applied in {rc:?} before the body arrived");
+                }
+            }
+            _ => {}
+        }
+    }
+    assert!(left_spawn_at.is_some() && arrived_north, "the crossing was traced: {seen:?}");
+    for seq in 1..=sent {
+        assert_eq!(count[seq as usize], 1, "marker {seq} applied {} times", count[seq as usize]);
+    }
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn held_key_across_seam_settles() {
+    hold_key_across_seam(None);
+    for seed in 0..SEEDS {
+        if std::panic::catch_unwind(|| hold_key_across_seam(Some(InlineSchedule::jittery(seed)))).is_err() {
+            panic!("held key across the seam broke under InlineSchedule::jittery({seed})");
         }
     }
 }

@@ -75,8 +75,12 @@ pub enum RegionReport {
     Clock(ClockDecision),
     /// This region's view of the local client; `None` = it no longer holds it.
     View(Option<HomeView>),
-    /// A `Predict` that reached this region after the local player left it.
-    Misrouted(GameEventKind),
+    /// A `Predict` that reached this region after the local player's body
+    /// left it — on a region thread, the game thread may send one before it
+    /// sees the departure. Re-sent to the new home (where it is held behind
+    /// the arrival if that is still held), as the server's region sends one
+    /// back as `RegionOutput::Forward`: inputs follow the body.
+    Forward(GameEventKind),
     Pong(u64),
     StateHash { tick: game::Tick, hash: u32 },
     Failed(GameError),
@@ -133,6 +137,10 @@ pub struct RunnerState {
     /// `RegionRunner` releases its held inputs for a slot before its held
     /// transfers. A sat-out tick closes nothing and releases nothing.
     held_transfers: VecDeque<(GameEventKind, game::Tick)>,
+    /// This client's inputs that reached the region while its body's
+    /// arrival was held here: predicted right after the arrival, in order
+    /// — where the server's region applies them too (they follow the body).
+    held_inputs: Vec<GameEventKind>,
     collider_debug: game::ColliderDebug,
     last_view: Option<HomeView>,
 }
@@ -149,6 +157,7 @@ pub fn handle(
     match cmd {
         RegionCmd::Stop => {
             st.held_transfers.clear();
+            st.held_inputs.clear();
             return false;
         }
         RegionCmd::Tick => tick(region, st, ctx, out),
@@ -177,36 +186,23 @@ pub fn handle(
         }
         RegionCmd::Predict(kind) => {
             let has_body = region.data().player_entites.contains_key(&ctx.client_id);
-            if st.player_departed && !has_body {
-                out.push(RegionReport::Misrouted(kind));
+            if !has_body && local_arrival_held(st, ctx.client_id) {
+                st.held_inputs.push(kind);
+            } else if st.player_departed && !has_body {
+                out.push(RegionReport::Forward(kind));
             } else {
-                // Predicted right after this many ticks: the server applies it
-                // in that same slot if it gets there first.
-                let after_tick = region.current_tick() as u64;
-                let is_input = matches!(kind, GameEventKind::PlayerInput(..));
-                match region.handle_event(kind) {
-                    Ok(event) => {
-                        if is_input {
-                            info!(
-                                "[client] predicted PlayerInput id={} in home {:?}; sending to server",
-                                event.id, ctx.id
-                            );
-                        }
-                        let _ = ctx.server_send.send(ClientPacket::GameEventAfterTick(event, after_tick));
-                    }
-                    Err(e) => out.push(RegionReport::Failed(e)),
-                }
+                predict(region, ctx, kind, out);
             }
         }
         RegionCmd::Arrival(bundle, stamp) => {
             // On receipt, not release: input for the returning player is
-            // predicted here from now on, never bounced as misrouted.
+            // held behind it here from now on, never sent back.
             if bundle.client.as_ref().map(|(c, _)| *c) == Some(ctx.client_id) {
                 st.player_departed = false;
             }
-            transfer(region, st, GameEventKind::EntityArrived(bundle), stamp);
+            transfer(region, st, ctx, GameEventKind::EntityArrived(bundle), stamp, out);
         }
-        RegionCmd::Ghost(data, stamp) => transfer(region, st, GameEventKind::GhostUpdate(data), stamp),
+        RegionCmd::Ghost(data, stamp) => transfer(region, st, ctx, GameEventKind::GhostUpdate(data), stamp, out),
         RegionCmd::Clock(input) => {
             let d = decide(region.current_tick(), &input);
             out.push(RegionReport::Clock(d));
@@ -276,7 +272,7 @@ fn tick(region: &mut Region, st: &mut RunnerState, ctx: &RunnerCtx, out: &mut Ve
     while i < st.held_transfers.len() {
         if st.held_transfers[i].1 <= now {
             let (kind, _) = st.held_transfers.remove(i).expect("index checked");
-            apply_transfer(region, kind);
+            apply_transfer(region, st, ctx, kind, out);
         } else {
             i += 1;
         }
@@ -307,12 +303,43 @@ fn tick(region: &mut Region, st: &mut RunnerState, ctx: &RunnerCtx, out: &mut Ve
 /// A transfer stamped `stamp`: applied now if its slot has already closed
 /// here (this region runs ahead of the source), else held to the end of
 /// that slot — released by the `Tick` that closes it.
-fn transfer(region: &mut Region, st: &mut RunnerState, kind: GameEventKind, stamp: game::Tick) {
+fn transfer(
+    region: &mut Region,
+    st: &mut RunnerState,
+    ctx: &RunnerCtx,
+    kind: GameEventKind,
+    stamp: game::Tick,
+    out: &mut Vec<RegionReport>,
+) {
     if stamp >= region.current_tick() {
         st.held_transfers.push_back((kind, stamp));
     } else {
-        apply_transfer(region, kind);
+        apply_transfer(region, st, ctx, kind, out);
     }
+}
+
+/// Predict one of this client's inputs and send it to the server, stamped
+/// with the tick it was predicted after: the server applies it in that same
+/// slot if it gets there first.
+fn predict(region: &mut Region, ctx: &RunnerCtx, kind: GameEventKind, out: &mut Vec<RegionReport>) {
+    let after_tick = region.current_tick() as u64;
+    let is_input = matches!(kind, GameEventKind::PlayerInput(..));
+    match region.handle_event(kind) {
+        Ok(event) => {
+            if is_input {
+                info!("[client] predicted PlayerInput id={} in home {:?}; sending to server", event.id, ctx.id);
+            }
+            let _ = ctx.server_send.send(ClientPacket::GameEventAfterTick(event, after_tick));
+        }
+        Err(e) => out.push(RegionReport::Failed(e)),
+    }
+}
+
+/// Is the local player's predicted arrival held here?
+fn local_arrival_held(st: &RunnerState, client: ClientId) -> bool {
+    st.held_transfers.iter().any(|(k, _)| {
+        matches!(k, GameEventKind::EntityArrived(b) if b.client.as_ref().map(|(c, _)| *c) == Some(client))
+    })
 }
 
 /// Predict a transfer into the region, unless it is an arrival of an entity
@@ -320,14 +347,29 @@ fn transfer(region: &mut Region, st: &mut RunnerState, kind: GameEventKind, stam
 /// trails the server's, its source trails this one), and a second arrival
 /// would never be confirmed — it would re-apply its stale bundle on every
 /// replay.
-fn apply_transfer(region: &mut Region, kind: GameEventKind) {
-    if let GameEventKind::EntityArrived(bundle) = &kind {
-        if region.data().entity_by_id(bundle.id).is_some() {
+///
+/// After the local player's arrival, the inputs held for it are predicted.
+fn apply_transfer(
+    region: &mut Region,
+    st: &mut RunnerState,
+    ctx: &RunnerCtx,
+    kind: GameEventKind,
+    out: &mut Vec<RegionReport>,
+) {
+    let local = matches!(&kind, GameEventKind::EntityArrived(b) if b.client.as_ref().map(|(c, _)| *c) == Some(ctx.client_id));
+    let resident = matches!(&kind, GameEventKind::EntityArrived(b) if region.data().entity_by_id(b.id).is_some());
+    if resident {
+        if let GameEventKind::EntityArrived(bundle) = &kind {
             log::debug!("[client] predicted arrival of {:?} dropped: already here", bundle.id);
-            return;
+        }
+    } else {
+        let _ = region.handle_event(kind);
+    }
+    if local && !local_arrival_held(st, ctx.client_id) {
+        for kind in std::mem::take(&mut st.held_inputs) {
+            predict(region, ctx, kind, out);
         }
     }
-    let _ = region.handle_event(kind);
 }
 
 /// Empty the region's transfer buffers, noting the local player's departure.
@@ -464,14 +506,59 @@ mod tests {
     }
 
     #[test]
-    fn misrouted_input_after_departure() {
+    fn input_after_departure_is_forwarded() {
         let (mut r, mut st, ctx, server_recv) = setup();
         r.handle_event(GameEventKind::ClientLeft(CLIENT)).unwrap();
         st.player_departed = true;
         let kind = GameEventKind::PlayerInput(CLIENT, InputEvent::MouseMotion { dx: 1.0, dy: 0.0 });
         let out = run(&mut r, &mut st, &ctx, RegionCmd::Predict(kind.clone()));
-        assert!(out.iter().any(|o| matches!(o, RegionReport::Misrouted(k) if *k == kind)));
-        assert!(server_recv.try_recv().is_err(), "a misrouted input is not sent");
+        assert!(out.iter().any(|o| matches!(o, RegionReport::Forward(k) if *k == kind)));
+        assert!(server_recv.try_recv().is_err(), "a forwarded input is not sent from here");
+    }
+
+    /// An input for the local player whose arrival is held here waits for
+    /// it: predicted (and sent, stamped with the arrival's slot) right after
+    /// the arrival, where the server's region applies it too.
+    #[test]
+    fn local_input_waits_for_its_held_arrival() {
+        let (mut r, mut st, ctx, server_recv) = setup();
+        let key = *r.data().player_entites.get(&CLIENT).unwrap();
+        let out_of_region = game::Pose::translation(game::REGION_SIZE + game::FLIP_HYSTERESIS + 2.0, 26.0, 128.0);
+        r.with_data(|d| d.set_body_pose_safe(key, out_of_region));
+        let out = run(&mut r, &mut st, &ctx, RegionCmd::Tick);
+        let mut bundle = out
+            .into_iter()
+            .find_map(|o| match o {
+                RegionReport::Ticked { departures, .. } => departures.into_iter().next(),
+                _ => None,
+            })
+            .expect("the player departed")
+            .0;
+        assert!(!r.data().player_entites.contains_key(&CLIENT));
+        // It comes straight back, in this slot (as if from a neighbour).
+        bundle.body = game::BodyState::kinematic(game::Pose::translation(128.0, 26.0, 128.0));
+        let t = r.current_tick();
+        run(&mut r, &mut st, &ctx, RegionCmd::Arrival(bundle, t));
+        assert_eq!(st.held_transfers.len(), 1, "the arrival is held to the end of slot {t}");
+        let n = r.pending_event_ids().len();
+        let input = GameEventKind::PlayerInput(CLIENT, InputEvent::MouseMotion { dx: 1.0, dy: 0.0 });
+        let out = run(&mut r, &mut st, &ctx, RegionCmd::Predict(input.clone()));
+        assert!(!out.iter().any(|o| matches!(o, RegionReport::Forward(_))), "{out:?}");
+        assert_eq!(r.pending_event_ids().len(), n, "held, not predicted");
+        assert!(server_recv.try_recv().is_err(), "held, not sent");
+
+        run(&mut r, &mut st, &ctx, RegionCmd::Tick);
+        assert!(st.held_inputs.is_empty());
+        let ids = r.pending_event_ids();
+        assert_eq!(ids.len(), n + 3, "arrival, input, tick");
+        match server_recv.try_recv().unwrap() {
+            ClientPacket::GameEventAfterTick(ev, after) => {
+                assert_eq!(ev.kind, input);
+                assert_eq!(after, t as u64, "stamped with the arrival's slot");
+                assert_eq!(ev.id, ids[n] + 1, "right after the arrival");
+            }
+            other => panic!("expected GameEventAfterTick, got {other:?}"),
+        }
     }
 
     #[test]

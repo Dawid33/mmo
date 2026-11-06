@@ -335,3 +335,18 @@ fn reconcile_drops_a_mirror_the_servers_slot_did_not_have() {
     assert!(client.pending_event_ids().is_empty(), "{:?}", client.pending_event_ids());
     assert_eq!(crc(&client), crc(&server));
 }
+
+#[test]
+fn reconcile_drops_a_local_input_where_the_body_is_not() {
+    // The client predicted an input in a region its body is not in (here:
+    // never was — as when the server's copy of the body left a tick earlier
+    // than predicted). The server forwards such an input to the body, so it
+    // never shows in this region's stream: the replay drops it.
+    let input = GameEventKind::PlayerInput(9, game::InputEvent::Key { key: game::Key::KeyW, pressed: true });
+    let (server, client) = reconcile_stream(
+        &[GameEventKind::Tick, GameEventKind::Tick],
+        &[GameEventKind::Tick, input, GameEventKind::Tick],
+    );
+    assert!(client.pending_event_ids().is_empty(), "{:?}", client.pending_event_ids());
+    assert_eq!(crc(&client), crc(&server));
+}

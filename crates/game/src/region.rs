@@ -386,11 +386,6 @@ impl Region {
             return Ok(stats);
         }
 
-        // Set when this reconcile pass integrates the AUTHORITATIVE arrival of
-        // the local player into this region (the server-confirmed handoff).
-        // Triggers eviction of the orphan lag-window inputs below.
-        let mut applied_local_arrival = false;
-
         'outer: while !self.input_buffer.is_empty() && !self.event_log.is_empty() {
             if let Some(server_event) = self.input_buffer.pop() {
                 if let Some(event) = self.event_log.pop_front() {
@@ -401,14 +396,6 @@ impl Region {
                         ev_desc(&server_event.0)
                     );
                     if event.id == server_event.0.id {
-                        if let GameEventKind::EntityArrived(bundle) = &server_event.0.kind {
-                            let is_local = self.local_client_id.is_some()
-                                && bundle.client.as_ref().map(|(c, _)| *c)
-                                    == self.local_client_id;
-                            if is_local {
-                                applied_local_arrival = true;
-                            }
-                        }
                         if event != server_event.0 {
                             debug!(
                                 "[reconcile r={:?}] MISPREDICT at id={}: predicted {} != server {} -> rollback+replay",
@@ -543,23 +530,50 @@ impl Region {
                                 }
                             }
 
-                            for event in &mut temp_log {
-                                let replayed = self.handle_event(event.clone().kind);
-                                match replayed {
-                                    Ok(r) if r.id != event.id => debug!(
-                                        "[reconcile r={:?}] REPLAY-ID-SKEW: temp_log says id={} but handle_event assigned id={}",
-                                        self.id, event.id, r.id
-                                    ),
-                                    Err(ref e) => debug!(
-                                        "[reconcile r={:?}] REPLAY-ERR for {}: {:?}",
-                                        self.id,
-                                        ev_desc(event),
-                                        e
-                                    ),
-                                    _ => {}
+                            let mut replayed_log = VecDeque::with_capacity(temp_log.len());
+                            for mut event in temp_log {
+                                // Inputs follow the body: the server applies
+                                // this client's input only where its body is
+                                // (a region its body left forwards it), so a
+                                // prediction replayed where the local body is
+                                // not can never be confirmed. Its server copy
+                                // reaches the body's region on its own.
+                                if let Some(local) = self.local_client_id {
+                                    if event.kind.input_client() == Some(local)
+                                        && !self.data.clients.contains_key(&local)
+                                    {
+                                        debug!(
+                                            "[reconcile r={:?}] dropped {}: the local body is not here",
+                                            self.id,
+                                            ev_desc(&event)
+                                        );
+                                        continue;
+                                    }
                                 }
+                                let id = *self.data.next_game_event_id;
+                                match self.handle_event(event.clone().kind) {
+                                    Ok(r) => {
+                                        if r.id != event.id {
+                                            debug!(
+                                                "[reconcile r={:?}] REPLAY-ID-SKEW: temp_log says id={} but handle_event assigned id={}",
+                                                self.id, event.id, r.id
+                                            );
+                                        }
+                                        event.id = r.id;
+                                    }
+                                    Err(ref e) => {
+                                        debug!(
+                                            "[reconcile r={:?}] REPLAY-ERR for {}: {:?}",
+                                            self.id,
+                                            ev_desc(&event),
+                                            e
+                                        );
+                                        event.id = id;
+                                    }
+                                }
+                                replayed_log.push_back(event);
                             }
-                            self.event_log = temp_log;
+                            self.event_log = replayed_log;
                         } else {
                             debug!(
                                 "[reconcile r={:?}] MATCH+FORGET {}",
@@ -585,17 +599,9 @@ impl Region {
             }
         }
 
-        if applied_local_arrival {
-            debug!(
-                "[reconcile r={:?}] applied local player arrival; evicting orphan lag-window inputs",
-                self.id
-            );
-            self.evict_orphan_local_inputs();
-        }
-
         // Id-accounting invariant: predictions are appended with ids from
         // next_game_event_id, so the log tail must sit exactly one below it.
-        // A violation means the replay/evict machinery desynced the counter.
+        // A violation means the replay machinery desynced the counter.
         if let Some(back) = self.event_log.back() {
             let next = *self.data.next_game_event_id;
             if back.id + 1 != next {
@@ -617,50 +623,6 @@ impl Region {
             stats.mispredictions
         );
         Ok(stats)
-    }
-
-    /// Client-only: the authoritative handoff of the LOCAL player into this
-    /// region has just been confirmed (reconcile integrated the server's
-    /// `EntityArrived` for our client). The local-player `PlayerInput`s still
-    /// pending in this region's event log were predicted during the flip RTT,
-    /// while the server still routed our inputs to the SOURCE region by
-    /// `homes`. Those inputs resolved in the source and will NEVER echo back
-    /// for this region, so no server event can ever match/remove them: they
-    /// are orphans that would otherwise re-apply on every future rollback and
-    /// accumulate on every crossing. Evict them; the arrival bundle already
-    /// carries the post-window pose (the source applied them before extraction).
-    ///
-    /// Legitimate inputs predicted AFTER this confirmation carry higher ids,
-    /// are not yet in the log at this point, and reconcile normally.
-    ///
-    /// Removal reuses the exact-inverse rollback machinery: roll every pending
-    /// prediction back (each is one un-forgotten transaction, which also
-    /// rewinds `next_game_event_id` to the first pending slot), then replay the
-    /// non-orphan tail. The replayed events re-append with fresh, gap-free ids
-    /// that mirror the server's arrival-onward sequence — closing the id holes
-    /// the orphans left so later authoritative events still match. State stays
-    /// hash-exact because every mutation goes through the same logged deltas.
-    fn evict_orphan_local_inputs(&mut self) {
-        let Some(local) = self.local_client_id else { return };
-        let is_orphan = |e: &GameEvent| {
-            matches!(&e.kind, GameEventKind::PlayerInput(cid, _) if *cid == local)
-        };
-        if !self.event_log.iter().any(is_orphan) {
-            return;
-        }
-
-        let kept_kinds: Vec<GameEventKind> = self
-            .event_log
-            .iter()
-            .filter(|e| !is_orphan(e))
-            .map(|e| e.kind.clone())
-            .collect();
-        while self.event_log.pop_back().is_some() {
-            self.data.rollback();
-        }
-        for kind in kept_kinds {
-            let _ = self.handle_event(kind);
-        }
     }
 
     /// Handle a client event.
@@ -953,6 +915,12 @@ impl Region {
     /// Exposed for tests.
     pub fn pending_event_ids(&self) -> Vec<usize> {
         self.event_log.iter().map(|e| e.id).collect()
+    }
+
+    /// The locally-predicted events awaiting server confirmation, in order.
+    /// Exposed for tests.
+    pub fn pending_events(&self) -> impl Iterator<Item = &GameEvent> {
+        self.event_log.iter()
     }
 
     pub fn data(&self) -> &Rollback {

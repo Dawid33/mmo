@@ -369,8 +369,11 @@ pub struct EntityBundle {
     pub collider: ColliderSpec,
     pub carried: crate::Carried,
     pub client: Option<(ClientId, Client)>,
-    /// Inputs held for the entity at the crossing (filled in by the transfer
-    /// slot work; empty until then).
+    /// The crossing player's client inputs the source region held for a slot
+    /// at or after the departure stamp, with their stamps, in arrival order.
+    /// The server's target region queues them again right after applying the
+    /// arrival (`RegionRunner`), so they follow the body; the authoritative
+    /// `EntityArrived` event carries none. Empty on the client.
     pub pending_inputs: Vec<(crate::GameEventKind, Tick)>,
 }
 
@@ -732,6 +735,18 @@ pub struct PersonSpawn {
 }
 
 impl GameEventKind {
+    /// The client whose input this is: the kinds a client sends and the
+    /// manager routes to its home (`PlayerInput`, `UiAction`, `Order`). They
+    /// follow the client's body across a seam.
+    pub fn input_client(&self) -> Option<ClientId> {
+        match self {
+            GameEventKind::PlayerInput(id, _) | GameEventKind::UiAction(id, _) | GameEventKind::Order(id, _) => {
+                Some(*id)
+            }
+            _ => None,
+        }
+    }
+
     /// The client this event originated from. `Tick` and `Quit` are
     /// server/shared events with no originating client.
     pub fn origin_client(&self) -> Option<ClientId> {
