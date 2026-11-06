@@ -554,6 +554,8 @@ pub struct WorldManager<S: RegionSpawner> {
     /// The forged world's tile summaries, pushed to every client on connect
     /// and consulted by Play. `None` = no forged world (procedural / tests).
     world_map: Option<WorldMap>,
+    /// The coarse-route map built from `world_map`, shared with every region.
+    route_map: Option<std::sync::Arc<crate::RouteMap>>,
     /// Server-authored Play events (`ClientLeft` / `CreateClientAt`) for a
     /// region that was mid-stop when Play arrived; replayed in order (waking
     /// the region from its parked blob) once it parks.
@@ -702,6 +704,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             sessions: BTreeMap::new(),
             homes: BTreeMap::new(),
             world_map: None,
+            route_map: None,
             pending_events: BTreeMap::new(),
             history: None,
             calendar_anchor: (0, CalendarTick(0)),
@@ -747,14 +750,16 @@ impl<S: RegionSpawner> WorldManager<S> {
     }
 
     /// Install the world map; connecting clients receive it, Play checks
-    /// targets against it, and every region is bounded by its extent
-    /// (`RegionInput::SetMapExtent`): nothing crosses the world's outer seam.
+    /// targets against it, and every region is bounded by its extent and
+    /// routes walks over it (`RegionInput::SetRouteMap`): nothing crosses the
+    /// world's outer seam.
     pub fn set_world_map(&mut self, map: WorldMap) {
-        let extent = Some(map.extent());
+        let route = std::sync::Arc::new(crate::RouteMap::from_world_map(&map));
         self.world_map = Some(map);
+        self.route_map = Some(route.clone());
         let running: Vec<RegionCoords> = self.regions.keys().copied().collect();
         for rc in running {
-            self.send_to_region(rc, RegionInput::SetMapExtent(extent));
+            self.send_to_region(rc, RegionInput::SetRouteMap(Some(route.clone())));
         }
     }
 
@@ -2140,8 +2145,8 @@ impl<S: RegionSpawner> WorldManager<S> {
         // Very first: join the world's tick numbering before anything else.
         let _ = input.send(RegionInput::StartAt(self.spawner.world_tick()));
         // Next, so it is bounded before its first tick.
-        if let Some(extent) = self.map_extent() {
-            let _ = input.send(RegionInput::SetMapExtent(Some(extent)));
+        if let Some(route) = &self.route_map {
+            let _ = input.send(RegionInput::SetRouteMap(Some(route.clone())));
         }
         // Its terrain halo, before its first tick too.
         self.seed_halo(rc, &input);

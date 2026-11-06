@@ -766,6 +766,8 @@ pub fn drain_client_updates(
                         designations: data.designations().iter().map(|(p, d)| (*p, *d)).collect(),
                         constructed: data.constructed().keys().copied().collect(),
                     });
+                    // Its terrain halo: walks are planned over it too.
+                    msgs.write(TileMirrorMsg::halo_of(id, &data));
                 }
                 let spawn = game::perf::Stopwatch::start();
                 let data = Arc::new(data);
@@ -1236,6 +1238,12 @@ pub fn drain_region_updates(
                 GameDataUpdateKind::SetConstructed(changes) => {
                     if let Some(msgs) = tile_msgs.as_mut() {
                         msgs.write(TileMirrorMsg::Constructed { region, changes });
+                    }
+                }
+                // The terrain halo, for walk planning past the region's edge.
+                kind @ (GameDataUpdateKind::SetHaloTerrain(_) | GameDataUpdateKind::SetHaloGround(_)) => {
+                    if let Some(msg) = tile_msgs.as_mut().and_then(|_| TileMirrorMsg::from_update(region, &kind)) {
+                        tile_msgs.as_mut().unwrap().write(msg);
                     }
                 }
                 // Item piles (`game::item_piles`), drawn by `item_piles`.

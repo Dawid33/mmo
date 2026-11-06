@@ -720,3 +720,69 @@ fn player_is_restored_by_a_restarted_server() {
     rig.manager.shutdown_all();
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// One block-thick floor under every chunk column of a region: ground a
+/// walk can be planned over anywhere.
+fn whole_floor_columns(_rc: RegionCoords) -> Vec<(ColumnCoords, Column)> {
+    let n = game::REGION_CHUNKS;
+    let air = Block::new(BlockId::AIR);
+    (0..n)
+        .flat_map(|x| (0..n).map(move |z| (x, z)))
+        .map(|(x, z)| {
+            let floor = SubChunk::Dense(Box::new(Chunk::flat_floor(game::BLOCK_VOXELS as u32)));
+            (ColumnCoords::new(x, z), Column::new(0, air, air, vec![floor]))
+        })
+        .collect()
+}
+
+/// An `Order` from client 0 (stamped with the spawn region; routed by home).
+fn order_event(order: game::Order) -> ServerEvent {
+    ServerEvent::ClientPacket(ClientPacket::GameEvent(GameEvent::new(GameEventKind::Order(0, order), 0, SPAWN_REGION)), 0)
+}
+
+/// A `MoveTo` two regions east with only the spawn region subscribed: the
+/// walk wakes the region between and the goal's region on the production
+/// spawn path (worldgen on the region thread). Each woken region is seeded
+/// before its first tick, ahead of the arrival (`WorldManager::ensure_running`
+/// sends `StartAt`, `SetRouteMap` and its halo seeds — cached / worldgen
+/// seeds as `Event`s, a running neighbour's by `HaloRequest` — before the
+/// arrival's `Transfer`), and a walk arriving before a running neighbour's
+/// seed keeps its carried path (`Rollback::continue_walk_safe`): the walk is
+/// never dropped on a fresh region and ends on its goal tile.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn walk_through_cold_regions_reaches_its_goal_on_real_threads() {
+    let n = game::REGION_BLOCKS as i32;
+    let mut rig = Rig::with_on_thread_worldgen(whole_floor_columns);
+    rig.event(ServerEvent::connected(0));
+    rig.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(SPAWN_REGION), 0));
+    rig.wait_for_snapshots(&[SPAWN_REGION], REGION_STARTUP_BUDGET);
+    let (between, far) = (RegionCoords::new(1, 0), RegionCoords::new(2, 0));
+    assert!(!rig.manager.running_regions().contains(&between), "the region between starts cold");
+    rig.event(order_event(game::Order::SetMode { mode: game::PlayMode::Adventure, at: Some([n - 3, 1, 12]) }));
+    let mut log = Vec::new();
+    rig.pump_until(Duration::from_secs(1), &mut log, |_| false);
+    rig.event(order_event(game::Order::MoveTo(game::Goal::local(far, [3, 12], None))));
+    let arrived = rig.pump_until(Duration::from_secs(60), &mut log, |p| {
+        matches!(p, ServerPacket::PlayerRegion(Some(rc), 0) if *rc == far)
+    });
+    assert!(arrived, "the walk never reached {far:?}; packets: {:#?}", &log[log.len().saturating_sub(20)..]);
+    // A few blocks more to the goal, then look at the region's state.
+    rig.pump_until(Duration::from_secs(5), &mut log, |_| false);
+    rig.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(far), 0));
+    let mut state = None;
+    rig.pump_until(REGION_STARTUP_BUDGET, &mut log, |p| match p {
+        ServerPacket::Region(rc, s) if *rc == far => {
+            state = Some(s.clone());
+            true
+        }
+        _ => false,
+    });
+    let state = state.expect("a snapshot of the goal's region");
+    let e = *state.player_entites.get(&0).expect("the player is in the goal's region");
+    assert!(state.ecs.walker.try_get(e).is_none(), "the walk is over: {:?}", state.ecs.walker.try_get(e));
+    let handle = (*state.ecs.rigidbody.try_get(e)).expect("a body");
+    let t = state.physics.bodies.get(handle).unwrap().translation();
+    let tile = game::feet_tile(game::feet_of(t));
+    assert_eq!([tile[0], tile[2]], [3, 12], "the walk ends on its goal");
+}

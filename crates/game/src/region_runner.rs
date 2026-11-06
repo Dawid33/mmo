@@ -54,11 +54,12 @@ pub enum RegionInput {
     /// An LOD build needs read-only terrain; replied with
     /// `RegionOutput::Terrain(client, ...)`. Does not affect sim state.
     RequestTerrain(ClientId),
-    /// The finite world's extent (`Region::set_map_extent`): the manager
-    /// sends it right after spawning, before any tick, when it has a map.
-    SetMapExtent(Option<crate::MapExtent>),
+    /// The finite world's extent and coarse-route map
+    /// (`Region::set_route_map`): the manager sends it right after spawning,
+    /// before any tick, when it has a map.
+    SetRouteMap(Option<std::sync::Arc<crate::RouteMap>>),
     /// Start the region's tick count at this world tick (`Region::jump_clock_to`).
-    /// The manager sends it FIRST after spawning, before `SetMapExtent`.
+    /// The manager sends it FIRST after spawning, before `SetRouteMap`.
     StartAt(crate::Tick),
     /// World autosave: replied with `RegionOutput::Saved(state)`, a clone of
     /// the live state (like a snapshot). Does not affect sim state.
@@ -442,7 +443,7 @@ impl RegionRunner {
                 ));
             }
             RegionInput::StartAt(tick) => self.region.jump_clock_to(tick),
-            RegionInput::SetMapExtent(extent) => self.region.set_map_extent(extent),
+            RegionInput::SetRouteMap(route) => self.region.set_route_map(route),
             RegionInput::Save => {
                 // Intents sent before the save go out before it, so the
                 // manager knows them as in flight when it books the save.

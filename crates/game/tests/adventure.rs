@@ -8,7 +8,7 @@ use crate::common;
 use common::floor_chunks;
 use game::rapier3d::math::Vector;
 use game::{
-    feet_of, feet_tile, next_region, PathPlan, WorldBlockPos, PORTAL_DEPTH_BLOCKS, play_mode_update, slope_chisel, state_hash, steer, Block, BlockId, BlockIndex, EntityKey,
+    feet_of, feet_tile, line_step, next_region, PathPlan, RouteMap, WorldBlockPos, PORTAL_DEPTH_BLOCKS, play_mode_update, slope_chisel, state_hash, steer, Block, BlockId, BlockIndex, EntityKey,
     GameEventKind, InputEvent, Key, Goal, Motion, Order, PlayMode, Region, RegionCoords, Rollback, Side, SlopeShape, TilePos,
     TileSource, UiUpdate, Walker, BLOCK_VOXELS, CHUNK_BLOCKS, REGION_BLOCKS, STUCK_TICKS, TICK_RATE, WALK_UP_JUMP_AFTER_STALL_TICKS,
 };
@@ -641,18 +641,18 @@ fn move_to_two_regions_away() {
 #[test]
 fn next_region_steps_along_the_line() {
     let r = RegionCoords::new;
-    assert_eq!(next_region(r(0, 0), r(0, 0)), r(0, 0));
-    assert_eq!(next_region(r(0, 0), r(3, 0)), r(1, 0));
-    assert_eq!(next_region(r(0, 0), r(-2, -2)), r(-1, -1));
+    assert_eq!(next_region(r(0, 0), r(0, 0), None), r(0, 0));
+    assert_eq!(next_region(r(0, 0), r(3, 0), None), r(1, 0));
+    assert_eq!(next_region(r(0, 0), r(-2, -2), None), r(-1, -1));
     // Off the diagonal, the step nearest the straight line.
-    assert_eq!(next_region(r(0, 0), r(5, 1)), r(1, 0));
-    assert_eq!(next_region(r(0, 0), r(3, 2)), r(1, 1));
-    assert_eq!(next_region(r(0, 0), r(-1, 4)), r(0, 1));
+    assert_eq!(next_region(r(0, 0), r(5, 1), None), r(1, 0));
+    assert_eq!(next_region(r(0, 0), r(3, 2), None), r(1, 1));
+    assert_eq!(next_region(r(0, 0), r(-1, 4), None), r(0, 1));
     // The whole route: one Chebyshev step at a time, never past the box.
     let (mut at, to) = (r(-3, 7), r(4, 2));
     let mut steps = 0;
     while at != to {
-        let n = next_region(at, to);
+        let n = next_region(at, to, None);
         assert!((n.x - at.x).abs() <= 1 && (n.z - at.z).abs() <= 1 && n != at);
         assert!((-3..=4).contains(&n.x) && (2..=7).contains(&n.z), "{n:?} left the box");
         at = n;
@@ -660,7 +660,69 @@ fn next_region_steps_along_the_line() {
     }
     assert_eq!(steps, 7);
     // Extremes do not overflow.
-    assert_eq!(next_region(r(i32::MIN, i32::MAX), r(i32::MAX, i32::MIN)), r(i32::MIN + 1, i32::MAX - 1));
+    assert_eq!(next_region(r(i32::MIN, i32::MAX), r(i32::MAX, i32::MIN), None), r(i32::MIN + 1, i32::MAX - 1));
+}
+
+/// The coarse route over a world map walks around the regions it marks
+/// (water, mountain walls), and keeps to the straight line where nothing is
+/// in the way or no way around exists.
+#[test]
+fn next_region_routes_around_impassable_regions() {
+    let r = RegionCoords::new;
+    let extent = game::MapExtent { origin: r(0, 0), width: 5, height: 5 };
+    // A wall across x = 2, open only at z = 4.
+    let wall = RouteMap::with_blocked(extent, (0..4).map(|z| r(2, z)));
+    let (mut at, to) = (r(0, 1), r(4, 1));
+    let mut route = vec![at];
+    while at != to {
+        at = next_region(at, to, Some(&wall));
+        route.push(at);
+        assert!(route.len() < 20, "no progress: {route:?}");
+    }
+    assert!(route.iter().all(|&rc| wall.passable(rc)), "through the wall: {route:?}");
+    assert!(route.contains(&r(2, 4)), "around the wall's end: {route:?}");
+    // Nothing in the way: as many steps as the straight line.
+    let open = RouteMap::open(extent);
+    let (mut at, mut steps) = (r(0, 1), 0);
+    while at != to {
+        at = next_region(at, to, Some(&open));
+        steps += 1;
+    }
+    assert_eq!(steps, 4);
+    // Walled off completely: the straight line's step.
+    let closed = RouteMap::with_blocked(extent, (0..5).map(|z| r(2, z)));
+    assert_eq!(next_region(r(0, 1), to, Some(&closed)), line_step(r(0, 1), to));
+}
+
+/// The world map's tile summaries mark what a route walks around: mostly
+/// water, or relief past `ROUTE_MAX_RELIEF_PER_REGION_M`.
+#[test]
+fn route_map_from_world_map_marks_water_and_walls() {
+    let r = RegionCoords::new;
+    let mut map = crate::history_handover::land_map(4, 1);
+    map.tiles[1].sea_fraction = 0.4;
+    map.tiles[1].lake_fraction = 0.2;
+    map.tiles[2].relief_m = game::ROUTE_MAX_RELIEF_PER_REGION_M * REGION_BLOCKS as f32 + 1.0;
+    map.tiles[3].sea_fraction = game::ROUTE_MAX_WATER_SHARE;
+    let route = RouteMap::from_world_map(&map);
+    assert_eq!((0..4).map(|x| route.passable(r(x, 0))).collect::<Vec<_>>(), [true, false, false, true]);
+    assert!(!route.passable(r(4, 0)), "off the map");
+    assert_eq!(route.extent(), map.extent());
+}
+
+/// A walk to a goal behind an impassable region heads into the region the
+/// route goes around by, not the one in the way.
+#[test]
+fn path_plan_crosses_into_the_routes_next_region() {
+    let here = RegionCoords::new(0, 0);
+    let flat = Flat { holes: vec![] };
+    let n = REGION_BLOCKS as i32;
+    let extent = game::MapExtent { origin: here, width: 3, height: 2 };
+    let map = RouteMap::with_blocked(extent, [RegionCoords::new(1, 0)]);
+    let goal = Goal::local(RegionCoords::new(2, 0), [3, 12], None);
+    let plan = PathPlan::plan(&flat, [n - 4, 1, n - 4], &goal, here, Some(&map), game::MAX_PATH_NODES).expect("a stretch");
+    assert!(!plan.reaches_goal);
+    assert_eq!(plan.path.last().unwrap().to_local().0, RegionCoords::new(1, 1), "{:?}", plan.path.last());
 }
 
 #[test]
@@ -690,8 +752,8 @@ fn path_plan_reaches_a_goal_past_the_seam_and_heads_for_one_beyond() {
     assert_eq!(end.to_local().0, RegionCoords::new(-1, -1));
     assert!(end.x < -(PORTAL_DEPTH_BLOCKS as i64) && end.z < -(PORTAL_DEPTH_BLOCKS as i64), "{end:?}");
     // Off a one-region map: the goal moves onto the map's edge column.
-    let map = Some(game::MapExtent { origin: here, width: 1, height: 1 });
-    let plan = PathPlan::plan(&flat, from, &far, here, map, max).expect("a path");
+    let map = RouteMap::open(game::MapExtent { origin: here, width: 1, height: 1 });
+    let plan = PathPlan::plan(&flat, from, &far, here, Some(&map), max).expect("a path");
     assert!(plan.reaches_goal);
     assert_eq!(plan.path.last(), Some(&world([n - 1, 1, 12])));
     assert!(plan.path.iter().all(|p| p.to_local().0 == here), "never off the map");

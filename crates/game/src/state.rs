@@ -98,6 +98,14 @@ pub enum GameDataUpdateKind {
     /// edges). Do carries the new views, Undo the prior ones. The renderer
     /// draws one copy per world cell (the owner's, when it has it).
     SetHaloPiles(Vec<(crate::edit::BlockPos, Option<crate::PileView>)>),
+    /// The terrain halo's chunks (`halo.rs`) set (`Some`) or gone (`None`),
+    /// by world chunk. Do carries the new content, Undo the prior. For the
+    /// client's walk planning past the region's edge (its tile mirror).
+    SetHaloTerrain(Vec<(crate::WorldChunkPos, Option<crate::Chunk>)>),
+    /// The halo's ground recipes set (`Some`) or gone (`None`), by world
+    /// chunk column (`y` 0): implied ground under the halo chunks. Do carries
+    /// the new recipe, Undo the prior.
+    SetHaloGround(Vec<(crate::WorldChunkPos, Option<crate::ColumnGround>)>),
     /// Render-only, Do only: pickups this tick (`item_piles::tick_pickups_safe`)
     /// — who took what from which cell — so the client can fly the items into
     /// the picker. A replay re-sends it with the same tick (dedupe on that).
@@ -473,6 +481,17 @@ impl GameData {
     /// The piles' expiry index, `(expire_tick, cell)` in expiry order.
     pub fn pile_expiry(&self) -> &std::collections::BTreeMap<(u64, crate::WorldBlockPos), ()> {
         &self.pile_expiry
+    }
+
+    /// The terrain halo's mirrored chunks, by world chunk (for the client's
+    /// tile mirror).
+    pub fn halo_terrain(&self) -> &std::collections::BTreeMap<crate::WorldChunkPos, crate::HaloChunk> {
+        &self.halo
+    }
+
+    /// The terrain halo's ground recipes, by world chunk column.
+    pub fn halo_grounds(&self) -> &std::collections::BTreeMap<crate::WorldChunkPos, crate::ColumnGround> {
+        &self.halo_ground
     }
 
     /// The per-column ground recipes (for the client's tile mirror).

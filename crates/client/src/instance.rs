@@ -175,10 +175,11 @@ pub struct GameInstanceManager {
     clock: crate::regions::clock::PredictedClock,
     /// `(tick, state hash)` per region from the last `region_probe`.
     probe: BTreeMap<RegionId, (game::Tick, u32)>,
-    /// The finite world's extent, from the server's `WorldMap`: every
-    /// predicted region is bounded by it, as the server's are
-    /// (`Region::set_map_extent`). `None` = unbounded (procedural).
-    map_extent: Option<game::MapExtent>,
+    /// The finite world's extent and coarse-route map, from the server's
+    /// `WorldMap`: every predicted region is bounded by it and routes walks
+    /// over it, as the server's do (`Region::set_route_map`). `None` =
+    /// unbounded (procedural).
+    route_map: Option<std::sync::Arc<game::RouteMap>>,
     buffer: Vec<GameEvent>,
     tick_rate: Arc<AtomicU64>,
     ready: bool,
@@ -662,7 +663,7 @@ impl GameInstanceManager {
             views: BTreeMap::new(),
             probe: BTreeMap::new(),
             clock: Default::default(),
-            map_extent: None,
+            route_map: None,
             buffer: Vec::new(),
             tick_rate: Arc::new(AtomicU64::new(game::TICK_RATE)),
             ready: false,
@@ -1233,7 +1234,7 @@ impl GameInstanceManager {
         self.clock.start_at(*raw_game_data.tick);
         // The region is built where it runs (its thread, when threaded): the
         // bridge's `NewRegion` copy and the `Region` itself.
-        self.host.spawn(ctx, raw_game_data, self.map_extent);
+        self.host.spawn(ctx, raw_game_data, self.route_map.clone());
         self.world_started = true;
         info!("Region recieved and loaded!");
     }
@@ -1660,9 +1661,9 @@ impl GameInstanceManager {
             }
             game::ServerPacket::WorldMap(map) => {
                 info!("[client] world map received: {}x{} tiles", map.width, map.height);
-                self.map_extent = Some(map.extent());
-                let extent = self.map_extent;
-                self.host.broadcast(|| RegionCmd::SetMapExtent(extent));
+                self.route_map = Some(std::sync::Arc::new(game::RouteMap::from_world_map(&map)));
+                let route = self.route_map.clone();
+                self.host.broadcast(|| RegionCmd::SetRouteMap(route.clone()));
                 let _ = self
                     .client_event_send
                     .send(ClientUpdateEvent::WorldMap(Box::new(map)));

@@ -4,10 +4,11 @@
 //! preview, so both plan the same path from the same tiles:
 //!
 //! - the COARSE route is over the region graph: [`next_region`] is its step,
-//!   a pure integer function of the two regions (8-connected, along the
-//!   straight line), identical in every region and on the client. A goal off
-//!   the world's map (`MapExtent`) is first moved onto its nearest column
-//!   inside it; the map is a rectangle, so the route never leaves it.
+//!   identical in every region and on the client. Over a forged world it is
+//!   integer A* on the [`RouteMap`] the `WorldMap`'s tile summaries give —
+//!   mostly-water regions and mountain walls ([`route_blocked`]) are walked
+//!   around; a procedural world (no map) walks the straight line. A goal off
+//!   the world's map is first moved onto its nearest column inside it.
 //! - the FINE path is block-scale A* (`pathfind.rs`) over the region's own
 //!   tiles ∪ its terrain halo (`halo.rs`), tiles off the map excluded: to the
 //!   goal when the halo reaches it, else to the first tile at least
@@ -18,10 +19,71 @@
 //!   stop at the edge and no re-plan, so a walk split by a seam takes the
 //!   path a walk inside one region would — and plans the next stretch
 //!   otherwise.
+use std::collections::BTreeSet;
+
 use crate::{
     find_path, find_path_toward, nearest_standable, standable, Goal, MapExtent, RegionCoords, Rollback, TilePos,
-    TileSource, WorldBlockPos, BLOCK_VOXELS, FLIP_HYSTERESIS, HALO_BLOCKS, REGION_BLOCKS,
+    TileSource, TileSummary, WorldBlockPos, WorldMap, BLOCK_VOXELS, FLIP_HYSTERESIS, HALO_BLOCKS, REGION_BLOCKS,
 };
+
+/// Largest share of a region's raster cells under sea or lake that a coarse
+/// route still crosses (a coast, a lakeshore); a region wetter than this is
+/// water to walk around.
+pub const ROUTE_MAX_WATER_SHARE: f32 = 0.5;
+/// Steepest region a coarse route crosses: its `relief_m` over its width in
+/// metres (`world_map::EMBARK_MAX_RELIEF_PER_REGION_M`'s measure). 0.6 is
+/// twice the embark limit, about a 37° mountainside: a range's flanks stay
+/// passable, its walls are routed around.
+pub const ROUTE_MAX_RELIEF_PER_REGION_M: f32 = 0.6;
+
+/// Expansion budget of one coarse route search, in regions: more than a
+/// 100 km world's map (197² tiles).
+pub const MAX_ROUTE_NODES: u32 = 65_536;
+
+/// Whether a coarse route walks around region `tile`: mostly water, or a
+/// mountain wall ([`ROUTE_MAX_WATER_SHARE`], [`ROUTE_MAX_RELIEF_PER_REGION_M`]).
+pub fn route_blocked(tile: &TileSummary) -> bool {
+    tile.sea_fraction + tile.lake_fraction > ROUTE_MAX_WATER_SHARE
+        || tile.relief_m > ROUTE_MAX_RELIEF_PER_REGION_M * REGION_BLOCKS as f32
+}
+
+/// The world's regions as a coarse route sees them: the map's extent (the
+/// outer seam) and the regions it walks around ([`route_blocked`]). Not sim
+/// state: the manager hands every region the one built from its `WorldMap`
+/// (`RegionInput::SetRouteMap`), the client builds the same from the map it
+/// receives — so every region and the client route alike.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RouteMap {
+    extent: MapExtent,
+    blocked: BTreeSet<RegionCoords>,
+}
+
+impl RouteMap {
+    /// The extent with nothing to walk around.
+    pub fn open(extent: MapExtent) -> Self {
+        RouteMap { extent, blocked: BTreeSet::new() }
+    }
+
+    /// The extent with `blocked` walked around (those on the map).
+    pub fn with_blocked(extent: MapExtent, blocked: impl IntoIterator<Item = RegionCoords>) -> Self {
+        RouteMap { extent, blocked: blocked.into_iter().filter(|rc| extent.contains(*rc)).collect() }
+    }
+
+    /// From the world map's tile summaries.
+    pub fn from_world_map(map: &WorldMap) -> Self {
+        let blocked = map.tiles.iter().enumerate().filter(|(_, t)| route_blocked(t)).map(|(i, _)| map.coords(i));
+        Self::with_blocked(map.extent(), blocked)
+    }
+
+    pub fn extent(&self) -> MapExtent {
+        self.extent
+    }
+
+    /// On the map and not walked around.
+    pub fn passable(&self, rc: RegionCoords) -> bool {
+        self.extent.contains(rc) && !self.blocked.contains(&rc)
+    }
+}
 
 /// How far (blocks) past the seam into the route's next region a stretch
 /// that does not reach the goal ends: the body is handed off well before it
@@ -60,12 +122,12 @@ impl PathPlan {
         from: TilePos,
         goal: &Goal,
         here: RegionCoords,
-        map: Option<MapExtent>,
+        map: Option<&RouteMap>,
         max_nodes: u32,
     ) -> Option<PathPlan> {
-        let goal = onto_map(goal, map)?;
+        let goal = onto_map(goal, map.map(RouteMap::extent))?;
         let goal_region = goal.region()?;
-        let src = OnMap { src, here, map };
+        let src = OnMap { src, here, map: map.map(RouteMap::extent) };
         let n = REGION_BLOCKS as i32;
         let gl = goal.local_column(here);
         let world = |path: Vec<TilePos>| {
@@ -84,7 +146,7 @@ impl PathPlan {
             }
         }
         // Else into the next region of the route.
-        let next = next_region(here, goal_region);
+        let next = next_region(here, goal_region, map);
         let toward = hint(from, &goal, here);
         let accept = |p: TilePos| past_seam(p, here, next);
         let path = find_path_toward(&src, from, toward, accept, max_nodes).filter(|p| p.len() > 1)?;
@@ -97,12 +159,92 @@ impl PathPlan {
     }
 }
 
-/// The coarse route's step: the neighbour of `from` (8-connected) to walk
-/// into toward `to` — one whose Chebyshev distance to `to` is one less,
-/// moving along each axis only toward `to`, nearest the straight line from
-/// `from` to `to` (ties: the lower `(x, z)`). `to` itself when `from == to`.
-/// Pure integer: every region and the client step the same way.
-pub fn next_region(from: RegionCoords, to: RegionCoords) -> RegionCoords {
+/// The coarse route's step from `from` toward `to`: the first region of the
+/// route over `map` ([`route_step`]), or the straight line's next region
+/// ([`line_step`]) when there is no map (procedural) or no route around.
+/// `to` itself when `from == to`. Pure: every region and the client step
+/// the same way.
+pub fn next_region(from: RegionCoords, to: RegionCoords, map: Option<&RouteMap>) -> RegionCoords {
+    map.and_then(|m| route_step(from, to, m)).unwrap_or_else(|| line_step(from, to))
+}
+
+/// Cost of an orthogonal / diagonal step of the coarse route.
+const ROUTE_STEP: u64 = 10;
+const ROUTE_DIAG: u64 = 14;
+
+/// The first region of the cheapest route from `from` to `to` over `map`'s
+/// passable regions (`from` and `to` always count as passable): integer A*,
+/// 8-connected (a diagonal step needs one of the two regions beside it
+/// passable), octile costs and heuristic, ties to the lower `(f, h, x, z)`.
+/// `None` when `from == to`, no route exists, or the search would expand
+/// more than [`MAX_ROUTE_NODES`] regions.
+pub fn route_step(from: RegionCoords, to: RegionCoords, map: &RouteMap) -> Option<RegionCoords> {
+    use std::cmp::Reverse;
+    use std::collections::{BTreeMap, BinaryHeap};
+    if from == to {
+        return None;
+    }
+    let ok = |rc: RegionCoords| rc == from || rc == to || map.passable(rc);
+    let h = |rc: RegionCoords| {
+        let dx = (i64::from(rc.x) - i64::from(to.x)).unsigned_abs();
+        let dz = (i64::from(rc.z) - i64::from(to.z)).unsigned_abs();
+        let (lo, hi) = (dx.min(dz), dx.max(dz));
+        ROUTE_DIAG * lo + ROUTE_STEP * (hi - lo)
+    };
+    let key = |rc: RegionCoords| (rc.x, rc.z);
+    let mut g: BTreeMap<(i32, i32), u64> = BTreeMap::new();
+    let mut came: BTreeMap<(i32, i32), RegionCoords> = BTreeMap::new();
+    let mut open = BinaryHeap::new();
+    g.insert(key(from), 0);
+    open.push((Reverse(h(from)), Reverse(h(from)), Reverse(key(from))));
+    let mut expanded = 0u32;
+    while let Some((Reverse(f), Reverse(hp), Reverse(k))) = open.pop() {
+        let p = RegionCoords::new(k.0, k.1);
+        let gp = f - hp;
+        if g.get(&k).is_some_and(|&best| gp > best) {
+            continue;
+        }
+        if p == to {
+            let mut cur = p;
+            while let Some(&prev) = came.get(&key(cur)) {
+                if prev == from {
+                    return Some(cur);
+                }
+                cur = prev;
+            }
+            return None;
+        }
+        if expanded >= MAX_ROUTE_NODES {
+            return None;
+        }
+        expanded += 1;
+        for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1)] {
+            let (Some(x), Some(z)) = (p.x.checked_add(dx), p.z.checked_add(dz)) else { continue };
+            let q = RegionCoords::new(x, z);
+            if !ok(q) {
+                continue;
+            }
+            let diagonal = dx != 0 && dz != 0;
+            if diagonal && !ok(RegionCoords::new(x, p.z)) && !ok(RegionCoords::new(p.x, z)) {
+                continue;
+            }
+            let gq = gp + if diagonal { ROUTE_DIAG } else { ROUTE_STEP };
+            if g.get(&key(q)).is_none_or(|&best| gq < best) {
+                g.insert(key(q), gq);
+                came.insert(key(q), p);
+                let hq = h(q);
+                open.push((Reverse(gq + hq), Reverse(hq), Reverse(key(q))));
+            }
+        }
+    }
+    None
+}
+
+/// The straight line's step: the neighbour of `from` (8-connected) whose
+/// Chebyshev distance to `to` is one less, moving along each axis only
+/// toward `to`, nearest the straight line from `from` to `to` (ties: the
+/// lower `(x, z)`). `to` itself when `from == to`. Integer only.
+pub fn line_step(from: RegionCoords, to: RegionCoords) -> RegionCoords {
     let (lx, lz) = (i128::from(to.x) - i128::from(from.x), i128::from(to.z) - i128::from(from.z));
     if (lx, lz) == (0, 0) {
         return to;
@@ -209,16 +351,30 @@ impl Rollback {
     /// safely: along its carried path when that still leads to the goal over
     /// this region's own ∪ halo tiles (every tile still to walk standable
     /// here), else along a stretch planned afresh from the body's tile
-    /// ([`PathPlan::plan`]); dropped when there is none. No walker: no change.
-    pub fn continue_walk_safe(&mut self, e: crate::EntityKey, here: RegionCoords, map: Option<MapExtent>) {
+    /// ([`PathPlan::plan`]). With no plan the carried walk is kept while its
+    /// next waypoint lies within this region and its halo: a region woken by
+    /// this arrival may not hold its halo from a running neighbour yet (that
+    /// seed answers a `HaloRequest`, `WorldManager::seed_halo`), and the walk
+    /// re-plans at the end of its stretch or when stuck, giving up only then.
+    /// Dropped otherwise. No walker: no change.
+    pub fn continue_walk_safe(&mut self, e: crate::EntityKey, here: RegionCoords, map: Option<&RouteMap>) {
         let Some(old) = self.data.ecs.walker.try_get(e).clone() else { return };
-        let src = OnMap { src: &*self, here, map };
+        let src = OnMap { src: &*self, here, map: map.map(RouteMap::extent) };
         let rest = old.path.get(old.next as usize..).unwrap_or_default();
         let walkable = rest.iter().all(|&p| standable(&src, crate::local_tile(p, here)));
         if old.to_goal && !rest.is_empty() && walkable {
             return;
         }
-        let new = self.plan_walker(e, old.goal, here, map);
-        self.data.ecs.walker.set_safe(e, new);
+        if let Some(new) = self.plan_walker(e, old.goal, here, map) {
+            self.data.ecs.walker.set_safe(e, Some(new));
+            return;
+        }
+        let n = i64::from(REGION_BLOCKS as i32);
+        let halo = i64::from(HALO_BLOCKS);
+        let near = |v: i64, o: i32| (-halo..n + halo).contains(&(v - i64::from(o) * n));
+        let keep = rest.first().is_some_and(|p| near(p.x, here.x) && near(p.z, here.z));
+        if !keep {
+            self.data.ecs.walker.set_safe(e, None);
+        }
     }
 }

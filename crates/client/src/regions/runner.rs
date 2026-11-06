@@ -43,7 +43,8 @@ pub enum RegionCmd {
     /// `RegionInput::Transfer(Intent)`, then queued for the opening of the
     /// tick.
     Intent(game::IntentMsg),
-    SetMapExtent(Option<game::MapExtent>),
+    /// The world's extent and coarse-route map (`Region::set_route_map`).
+    SetRouteMap(Option<std::sync::Arc<game::RouteMap>>),
     /// Wireframe the colliders near this viewer WORLD position.
     DebugLines([f32; 3]),
     /// Answered with `Pong` once every earlier command has run.
@@ -223,7 +224,7 @@ pub fn handle(
         RegionCmd::HaloEntity(msg, stamp) => transfer(region, st, ctx, msg.into_event(), stamp, out),
         RegionCmd::Halo(update, stamp) => transfer(region, st, ctx, GameEventKind::HaloUpdate(update), stamp, out),
         RegionCmd::Intent(msg) => transfer(region, st, ctx, GameEventKind::Intent(msg), msg.due(), out),
-        RegionCmd::SetMapExtent(extent) => region.set_map_extent(extent),
+        RegionCmd::SetRouteMap(route) => region.set_route_map(route),
         RegionCmd::DebugLines(viewer_world) => {
             if ctx.debug_flags.collider_wireframes() {
                 let off = ctx.id.world_offset();

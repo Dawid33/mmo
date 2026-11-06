@@ -18,8 +18,11 @@
 //! a few ms. A capped search that fails cannot tell "unreachable" from "out
 //! of budget", so it shows as "not previewed" (an amber cross); a click there
 //! runs one search at the sim's full budget ([`click_path`]) and sends the
-//! order if it finds a path — else the hover turns to "no path" (a red
-//! cross: the sim, with the same inputs and budget, would refuse it too).
+//! order if it finds a path — else, for a hover in the home region, the
+//! hover turns to "no path" (a red cross: the sim, with the same inputs and
+//! budget, would refuse it too). A hover outside the home region is always
+//! sent ([`click_order`]): with no path known it stays amber ("not
+//! previewed") and the sim decides.
 //!
 //! A right press starts an orbit drag (`hold_pointer_while_orbiting`); a
 //! press released with less than [`selection::DRAG_THRESHOLD_PX`] of mouse
@@ -31,7 +34,7 @@
 use bevy::prelude::*;
 use game::movement::UNITS_PER_METER;
 use game::rapier3d::math::Vector;
-use game::{Goal, MapExtent, Order, PathPlan, RegionCoords, RegionId, TilePos, TileSource, BLOCK_VOXELS, REGION_BLOCKS};
+use game::{Goal, Order, PathPlan, RouteMap, RegionCoords, RegionId, TilePos, TileSource, BLOCK_VOXELS, REGION_BLOCKS};
 
 use super::adventure::ClientPlayMode;
 use super::designate::{self, HiddenEdgeGizmos};
@@ -121,7 +124,7 @@ pub fn plan_path(
     from: TilePos,
     goal: &Goal,
     here: RegionCoords,
-    map: Option<MapExtent>,
+    map: Option<&RouteMap>,
     max_nodes: u32,
 ) -> Option<PathPlan> {
     PathPlan::plan(src, from, goal, here, map, max_nodes)
@@ -133,7 +136,7 @@ pub fn preview_path(
     from: TilePos,
     goal: &Goal,
     here: RegionCoords,
-    map: Option<MapExtent>,
+    map: Option<&RouteMap>,
 ) -> Option<PathPlan> {
     plan_path(src, from, goal, here, map, PREVIEW_MAX_PATH_NODES)
 }
@@ -147,7 +150,7 @@ pub fn click_path(
     from: TilePos,
     goal: &Goal,
     here: RegionCoords,
-    map: Option<MapExtent>,
+    map: Option<&RouteMap>,
     previewed: Option<PathPlan>,
 ) -> Option<PathPlan> {
     previewed.or_else(|| plan_path(src, from, goal, here, map, game::MAX_PATH_NODES))
@@ -182,7 +185,7 @@ impl PathPreview {
         hover: TilePos,
         goal: Goal,
         here: RegionCoords,
-        map: Option<MapExtent>,
+        map: Option<&RouteMap>,
         world: Vec3,
     ) -> bool {
         self.hover = Some(world);
@@ -243,7 +246,8 @@ pub fn update_path_preview(
 ) {
     let home = mirror.region();
     let tiles = mirror.with_halo();
-    let map = map_extent(world_map.as_deref());
+    let route = route_of(world_map.as_deref());
+    let map = route.as_deref();
     let body = home.and_then(|home| body_tile(&bodies, &tiles, home).map(|b| (home, b)));
     // The sent path is done once the body stands on its end, or left with it.
     if !sent.path.is_empty() {
@@ -281,10 +285,46 @@ pub fn update_path_preview(
     preview.update(&tiles, from, hover_tile(region, local, home), goal, home, map, world);
 }
 
-/// The world's extent, as the sim's regions are bounded by it
-/// (`Region::set_map_extent`); `None` without a map (procedural).
-fn map_extent(state: Option<&crate::renderer::world_map::WorldMapState>) -> Option<MapExtent> {
-    state.and_then(|s| s.map.as_ref()).map(|m| m.extent())
+/// The world's coarse-route map, as the sim's regions are bounded by it and
+/// route over it (`Region::set_route_map`); `None` without a map
+/// (procedural).
+fn route_of(state: Option<&crate::renderer::world_map::WorldMapState>) -> Option<std::sync::Arc<RouteMap>> {
+    state.and_then(|s| s.route.clone())
+}
+
+/// What a right click on a hover does.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ClickOrder {
+    /// Send `Order::MoveTo`: along `plan` (`None` when the client could not
+    /// plan it), drawn with a dashed line on to `beyond`.
+    Send { plan: Option<PathPlan>, beyond: Option<Vec3> },
+    /// The goal is in the home region and the sim, planning over the same
+    /// tiles at the same budget, would find no path: nothing is sent.
+    NoPath,
+}
+
+/// The click's order for a hover at world point `hover` with goal `goal`:
+/// along [`click_path`]'s path when there is one. Without one, a goal in the
+/// home region is refused ([`ClickOrder::NoPath`]); a goal outside it is
+/// sent anyway, unplanned — the mirror may not know the terrain on the way
+/// (past the halo, or a halo not mirrored yet) and the sim decides.
+pub fn click_order(
+    src: &impl TileSource,
+    from: TilePos,
+    goal: &Goal,
+    here: RegionCoords,
+    map: Option<&RouteMap>,
+    previewed: Option<PathPlan>,
+    hover: Option<Vec3>,
+) -> ClickOrder {
+    match click_path(src, from, goal, here, map, previewed) {
+        Some(plan) => {
+            let beyond = (!plan.reaches_goal).then_some(hover).flatten();
+            ClickOrder::Send { plan: Some(plan), beyond }
+        }
+        None if goal.region() != Some(here) => ClickOrder::Send { plan: None, beyond: hover },
+        None => ClickOrder::NoPath,
+    }
 }
 
 /// The hover a right press was made on, kept until its release.
@@ -301,8 +341,8 @@ pub struct PressedHover {
 /// A right click (a press released as [`is_click`]) sends `Order::MoveTo`
 /// for the tile hovered at the press, along the preview's path or, when the
 /// capped preview found none, one found at the sim's budget
-/// ([`click_path`]). With none at all nothing is sent and the hover shows
-/// "no path".
+/// ([`click_order`]). A goal in the home region with no path at all sends
+/// nothing and the hover shows "no path"; one outside it is always sent.
 #[allow(clippy::too_many_arguments)] // Bevy system: params are DI, not an API
 pub fn send_move_order(
     buttons: Res<ButtonInput<MouseButton>>,
@@ -330,18 +370,18 @@ pub fn send_move_order(
     if !is_click(motion) {
         return;
     }
-    let map = map_extent(world_map.as_deref());
-    let Some(plan) = click_path(&mirror.with_halo(), hover.key.0, &hover.goal, here, map, hover.path) else {
+    let route = route_of(world_map.as_deref());
+    let order = click_order(&mirror.with_halo(), hover.key.0, &hover.goal, here, route.as_deref(), hover.path, hover.beyond);
+    let ClickOrder::Send { plan, beyond } = order else {
         // Truly unreachable: show it, for as long as the hover stays.
         if preview.key == Some(hover.key) && preview.path.is_none() {
             preview.unreachable = true;
         }
         return;
     };
-    let beyond = (!plan.reaches_goal).then_some(hover.beyond).flatten();
-    let path = plan.local_path(here);
+    let path = plan.as_ref().map(|p| p.local_path(here)).unwrap_or_default();
     if preview.key == Some(hover.key) && preview.path.is_none() {
-        preview.path = Some(plan);
+        preview.path = plan;
     }
     let _ = events.0.send(game::GameEventKind::Order(client, Order::MoveTo(hover.goal)));
     *sent = SentPath { region: Some(here), path, beyond };
@@ -527,33 +567,46 @@ mod tests {
         assert_eq!(click_path(&closed, from, &goal, home, None, None), None);
     }
 
-    /// The preview plans with the sim's `PathPlan` over the mirror with its
-    /// halo: for a goal across the seam (in the halo) and one two regions
-    /// away, the preview's path is the one the sim's `MoveTo` walks.
+    /// The preview plans with the sim's `PathPlan` over the mirror with the
+    /// home region's own halo — mirrored from the predicted region's state
+    /// and render updates, as the bridge does, with no neighbour region
+    /// loaded (an unsubscribed neighbour): for a goal across the seam and
+    /// one two regions away, the preview's path is the one the sim's
+    /// `MoveTo` walks. A goal past what the mirror knows is still sent.
     #[test]
     fn preview_path_is_the_sims_path_across_a_seam() {
         use game::{Chunk, ChunkCoords, GameEventKind, Region, Rollback};
+        use super::super::tiles::TileMirrorMsg;
         const CLIENT: game::ClientId = 3;
         let home = RegionCoords::new(0, 0);
         let n = game::REGION_CHUNKS as i32;
         let chunks: Vec<(ChunkCoords, Chunk)> = (0..n as usize)
             .flat_map(|x| (0..n as usize).map(move |z| (ChunkCoords::new(x, 0, z), Chunk::flat_floor(16))))
             .collect();
-        // The sim: a floored region, its halo seeded from floored neighbours.
-        let (send, _recv) = crossbeam::channel::unbounded();
+        // The predicted region: floored, its halo seeded from floored
+        // neighbours (east and its corners only: west stays unknown).
+        let (send, updates) = crossbeam::channel::unbounded();
         let mut region = Region::new(Rollback::new(Some(send.clone())), Some(send), home, None);
         region.with_data(|r| r.seed_terrain_genesis(chunks.clone()));
-        // The client: the same chunks in the mirror, home and halo band.
         let mut mirror = TileMirror::default();
         mirror.set_home(Some(home));
-        for from in home.window_3x3().into_iter().filter(|&rc| rc != home) {
+        mirror.apply(TileMirrorMsg::Reset {
+            region: home,
+            ground: Default::default(),
+            designations: Vec::new(),
+            constructed: Vec::new(),
+        });
+        mirror.apply(TileMirrorMsg::halo_of(home, region.data()));
+        for from in [RegionCoords::new(1, -1), RegionCoords::new(1, 0), RegionCoords::new(1, 1)] {
             let seed = game::halo::halo_seed_from_chunks(from, home, chunks.iter().map(|(c, ch)| (*c, ch))).unwrap();
             region.handle_event(GameEventKind::HaloUpdate(seed)).unwrap();
             region.forget_last_event();
-            for (c, chunk) in &chunks {
-                if let Some(key) = mirror.mirror_key(from, [c.x as i32, c.y, c.z as i32]) {
-                    mirror.set_chunk_from(key, chunk);
-                }
+        }
+        // The render updates the bridge forwards (only the home region is
+        // loaded: no neighbour chunk reaches the mirror any other way).
+        for u in updates.try_iter() {
+            if let Some(msg) = TileMirrorMsg::from_update(home, &u.update_kind) {
+                mirror.apply(msg);
             }
         }
         for (c, chunk) in &chunks {
@@ -573,7 +626,8 @@ mod tests {
             let handle = data.ecs.rigidbody.try_get(e).unwrap();
             game::feet_of(data.physics.bodies.get(handle).unwrap().translation())
         };
-        let from = game::current_tile(&mirror.with_halo(), feet).expect("the body stands");
+        let tiles = mirror.with_halo();
+        let from = game::current_tile(&tiles, feet).expect("the body stands");
         assert_eq!(from, start);
         let east = RegionCoords::new(1, 0);
         for (goal, to_goal) in
@@ -581,12 +635,28 @@ mod tests {
         {
             region.handle_event(GameEventKind::Order(CLIENT, Order::MoveTo(goal))).unwrap();
             let walk = region.data().ecs.walker.try_get(e).clone().expect("the sim walks");
-            let preview = click_path(&mirror.with_halo(), from, &goal, home, None, preview_path(&mirror.with_halo(), from, &goal, home, None))
-                .expect("the preview finds it");
+            let preview = click_path(&tiles, from, &goal, home, None, preview_path(&tiles, from, &goal, home, None))
+                .expect("the preview finds it over the halo");
             assert_eq!(preview.path, walk.path, "{goal:?}");
             assert_eq!((preview.reaches_goal, walk.to_goal), (to_goal, to_goal), "{goal:?}");
             assert!(preview.path.last().unwrap().x >= blocks as i64, "the path crosses the seam");
+            let order = click_order(&tiles, from, &goal, home, None, None, Some(Vec3::ONE));
+            assert!(matches!(order, ClickOrder::Send { plan: Some(_), .. }), "{order:?}");
         }
+        // West is not mirrored (nor in the sim's halo here): no path is
+        // known, yet the order is sent — the sim decides; the hover stays
+        // amber, never the red "no path".
+        let west = Goal::local(RegionCoords::new(-1, 0), [blocks - 3, 12], None);
+        assert_eq!(preview_path(&tiles, from, &west, home, None), None);
+        let order = click_order(&tiles, from, &west, home, None, None, Some(Vec3::ONE));
+        assert_eq!(order, ClickOrder::Send { plan: None, beyond: Some(Vec3::ONE) });
+        let mut preview = PathPreview::default();
+        preview.update(&tiles, from, [-3, 1, 12], west, home, None, Vec3::ONE);
+        assert!(preview.path.is_none() && !preview.unreachable, "amber, not red");
+        // A goal at home with no path is refused, as before.
+        let walled = WalledFloor { gap: blocks };
+        let goal = Goal::local(home, [WALL_X + 1, 0], Some(1));
+        assert_eq!(click_order(&walled, [WALL_X - 1, 1, 0], &goal, home, None, None, None), ClickOrder::NoPath);
     }
 
     #[test]

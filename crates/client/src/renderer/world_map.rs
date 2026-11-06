@@ -13,6 +13,9 @@ use game::{PlayRefusal, RegionCoords, WorldMap};
 #[derive(Resource, Default)]
 pub struct WorldMapState {
     pub map: Option<WorldMap>,
+    /// The coarse-route map built from `map`, as the sim's regions route
+    /// walks over it (`game::RouteMap::from_world_map`).
+    pub route: Option<std::sync::Arc<game::RouteMap>>,
     /// The latest refused Play request; replaced by the next refusal.
     pub refused: Option<(RegionCoords, PlayRefusal)>,
     /// `Time::elapsed_secs` when `refused` arrived.
@@ -53,7 +56,10 @@ pub fn apply_world_map_msgs(
 ) {
     for msg in msgs.read() {
         match msg {
-            WorldMapMsg::Map(map) => state.map = Some(WorldMap::clone(map)),
+            WorldMapMsg::Map(map) => {
+                state.route = Some(std::sync::Arc::new(game::RouteMap::from_world_map(map)));
+                state.map = Some(WorldMap::clone(map));
+            }
             WorldMapMsg::Refused(rc, why) => {
                 pending_play.0 = false;
                 state.refused = Some((*rc, *why));

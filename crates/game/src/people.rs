@@ -9,7 +9,7 @@ use crate::movement::{self, MoveKeys, PLAYER_CAPSULE_HALF_HEIGHT, PLAYER_CAPSULE
 use crate::{
     PersonSpawn, SpawnAt,
     current_tile, feet_of, nearest_standable, steer, ColliderSpec, EntityKey, EntityKind, GameDataTransactionKind,
-    GameDataUpdate, GameDataUpdateKind, Goal, MapExtent, Pose, RegionCoords, Rollback, REGION_BLOCKS,
+    GameDataUpdate, GameDataUpdateKind, Goal, Pose, RouteMap, RegionCoords, Rollback, REGION_BLOCKS,
 };
 use rapier3d::math::Vector;
 
@@ -85,7 +85,7 @@ impl Rollback {
 
     /// Applies a server-authored [`PersonSpawn`]: the body at the resolved
     /// column, then the optional walk. No change if they already have a body.
-    pub fn apply_person_spawn_safe(&mut self, spawn: PersonSpawn, here: RegionCoords, map: Option<MapExtent>) {
+    pub fn apply_person_spawn_safe(&mut self, spawn: PersonSpawn, here: RegionCoords, map: Option<&RouteMap>) {
         let n = REGION_BLOCKS as i32;
         let landing = [
             (crate::PLAYER_SPAWN_X as i32 / crate::BLOCK_VOXELS as i32).clamp(0, n - 1),
@@ -159,7 +159,7 @@ impl Rollback {
         person: PersonId,
         toward: RegionCoords,
         here: RegionCoords,
-        map: Option<MapExtent>,
+        map: Option<&RouteMap>,
     ) -> bool {
         let Some(e) = self.person_entity(person) else { return false };
         let n = REGION_BLOCKS as i32;
@@ -182,7 +182,7 @@ impl Rollback {
     /// step: idle people pick a wander goal when due, and every embodied
     /// person is steered along its walk (or held to gravity) through the
     /// same planner and character controller as a player's body.
-    pub fn tick_people_safe(&mut self, here: RegionCoords, map: Option<MapExtent>) {
+    pub fn tick_people_safe(&mut self, here: RegionCoords, map: Option<&RouteMap>) {
         let tick = *self.data.tick;
         let people: Vec<(PersonId, EntityKey)> =
             self.data.person_entities.iter().map(|(&p, &e)| (p, e)).collect();
@@ -194,7 +194,7 @@ impl Rollback {
         }
     }
 
-    fn wander_person_safe(&mut self, person: PersonId, e: EntityKey, tick: u64, here: RegionCoords, map: Option<MapExtent>) {
+    fn wander_person_safe(&mut self, person: PersonId, e: EntityKey, tick: u64, here: RegionCoords, map: Option<&RouteMap>) {
         let wait = |t: u64| WANDER_MIN_TICKS + crate::slime::roll(t, person.0 as u64, SALT_WANDER_WAIT) % WANDER_RANGE_TICKS;
         let Some(feet) = self.body_feet(e) else { return };
         let Some(from) = current_tile(self, feet) else { return };

@@ -39,6 +39,44 @@ pub enum TileMirrorMsg {
     Designations { region: RegionId, changes: Vec<(TilePos, Option<Designation>)> },
     /// Per tile: whether it is now a construction, applied in order.
     Constructed { region: RegionId, changes: Vec<(TilePos, bool)> },
+    /// `region`'s terrain halo (`game::halo`): chunks and ground recipes set
+    /// (`Some`) or gone (`None`), by world chunk — from its snapshot after
+    /// the `Reset`, then from `SetHaloTerrain` / `SetHaloGround` updates.
+    Halo {
+        region: RegionId,
+        chunks: Vec<(game::WorldChunkPos, Option<Chunk>)>,
+        ground: Vec<(game::WorldChunkPos, Option<ColumnGround>)>,
+    },
+}
+
+impl TileMirrorMsg {
+    /// The halo `data` holds (a region's snapshot), as one [`Self::Halo`].
+    pub fn halo_of(region: RegionId, data: &game::GameData) -> Self {
+        TileMirrorMsg::Halo {
+            region,
+            chunks: data.halo_terrain().iter().map(|(k, h)| (*k, h.chunk.clone())).collect(),
+            ground: data.halo_grounds().iter().map(|(k, g)| (*k, Some(g.clone()))).collect(),
+        }
+    }
+
+    /// The tile-mirror message a region's render update carries, if any.
+    pub fn from_update(region: RegionId, kind: &game::GameDataUpdateKind) -> Option<Self> {
+        use game::GameDataUpdateKind as K;
+        Some(match kind {
+            K::SetDesignations(changes) => TileMirrorMsg::Designations { region, changes: changes.clone() },
+            K::SetConstructed(changes) => TileMirrorMsg::Constructed { region, changes: changes.clone() },
+            K::SetHaloTerrain(chunks) => TileMirrorMsg::Halo { region, chunks: chunks.clone(), ground: Vec::new() },
+            K::SetHaloGround(ground) => TileMirrorMsg::Halo { region, chunks: Vec::new(), ground: ground.clone() },
+            _ => return None,
+        })
+    }
+}
+
+/// One mirrored halo chunk: its blocks and slope shapes.
+#[derive(Debug, Clone, Default)]
+struct HaloTiles {
+    blocks: Box<[Block]>,
+    slopes: BTreeMap<u16, SlopeShape>,
 }
 
 /// One region's non-chunk tile state.
@@ -47,6 +85,10 @@ struct RegionTiles {
     ground: BTreeMap<ColumnCoords, ColumnGround>,
     designations: BTreeMap<TilePos, Designation>,
     constructed: BTreeSet<TilePos>,
+    /// The region's terrain halo: its neighbours' chunks along its edges.
+    halo: BTreeMap<game::WorldChunkPos, HaloTiles>,
+    /// The halo's ground recipes, by world chunk column (`y` 0).
+    halo_ground: BTreeMap<game::WorldChunkPos, ColumnGround>,
 }
 
 static NO_DESIGNATIONS: BTreeMap<TilePos, Designation> = BTreeMap::new();
@@ -262,6 +304,7 @@ impl TileMirror {
                     ground,
                     designations: designations.into_iter().collect(),
                     constructed: constructed.into_iter().collect(),
+                    ..RegionTiles::default()
                 };
                 self.regions.insert(region, tiles);
                 region
@@ -286,6 +329,24 @@ impl TileMirror {
                     }
                 }
                 region
+            }
+            // Read only by walk planning (`WithHalo`), which re-plans on its
+            // own key: no version bump.
+            TileMirrorMsg::Halo { region, chunks, ground } => {
+                let Some(tiles) = self.regions.get_mut(&region) else { return };
+                for (k, chunk) in chunks {
+                    match chunk {
+                        Some(c) => tiles.halo.insert(k, HaloTiles { blocks: chunk_blocks(&c), slopes: chunk_slopes(&c) }),
+                        None => tiles.halo.remove(&k),
+                    };
+                }
+                for (k, g) in ground {
+                    match g {
+                        Some(g) => tiles.halo_ground.insert(k, g),
+                        None => tiles.halo_ground.remove(&k),
+                    };
+                }
+                return;
             }
         };
         if self.home == Some(region) {
@@ -370,62 +431,49 @@ impl TileSource for TileMirror {
     }
 }
 
-/// A [`TileMirror`] read as the sim reads its region: the home region ∪ the
-/// halo band of its neighbours' chunks (`game::halo`; their implied ground
-/// from their ground recipes, never bedrock or constructions there) — what
+/// A [`TileMirror`] read as the sim reads its region: the home region ∪ its
+/// terrain halo (`game::halo`) as the predicted home region holds it
+/// ([`TileMirrorMsg::Halo`]) — the neighbours' chunks along its edges and
+/// their implied ground from the halo's ground recipes, never bedrock or
+/// constructions there — whether or not the neighbours are loaded. What
 /// walks are planned over (`move_order.rs`, `game::PathPlan`).
 pub struct WithHalo<'a>(&'a TileMirror);
 
 impl TileMirror {
-    /// The mirror with its neighbours' halo band ([`WithHalo`]).
+    /// The mirror with the home region's halo ([`WithHalo`]).
     pub fn with_halo(&self) -> WithHalo<'_> {
         WithHalo(self)
-    }
-
-    /// The mirror's chunk key of chunk `rel` of `region` (home-relative: off
-    /// `0..REGION_CHUNKS` for a neighbour's), when the mirror keeps it: home
-    /// chunks, and the neighbours' halo band.
-    pub(crate) fn mirror_key(&self, region: RegionId, rel: [i32; 3]) -> Option<[i32; 3]> {
-        let home = self.home?;
-        let n = game::REGION_CHUNKS as i32;
-        let key = [rel[0] + (region.x - home.x) * n, rel[1], rel[2] + (region.z - home.z) * n];
-        (region == home || game::halo::in_halo_band(key[0], key[2])).then_some(key)
-    }
-
-    /// The neighbour region and its chunk column of halo chunk key `key`.
-    fn halo_ground(&self, key: [i32; 3]) -> Option<&ColumnGround> {
-        let home = self.home?;
-        let n = game::REGION_CHUNKS as i32;
-        let region = game::RegionCoords::new(home.x + key[0].div_euclid(n), home.z + key[2].div_euclid(n));
-        let column = ColumnCoords::new(key[0].rem_euclid(n) as usize, key[2].rem_euclid(n) as usize);
-        self.regions.get(&region)?.ground.get(&column)
     }
 }
 
 impl WithHalo<'_> {
-    /// The halo chunk key and in-chunk block of `p`, when `p` lies in the
-    /// halo band (outside the home region).
-    fn halo_locate(p: TilePos) -> Option<([i32; 3], (usize, usize, usize))> {
+    /// The home region's halo world chunk and in-chunk block of `p` (a tile
+    /// past the home region's edge, in its frame).
+    fn halo_locate(&self, p: TilePos) -> Option<(game::WorldChunkPos, (usize, usize, usize))> {
+        let home = self.0.home?;
         let cb = CHUNK_BLOCKS as i32;
         let key = [p[0].div_euclid(cb), p[1].div_euclid(cb), p[2].div_euclid(cb)];
-        game::halo::in_halo_band(key[0], key[2])
-            .then(|| (key, (p[0].rem_euclid(cb) as usize, p[1].rem_euclid(cb) as usize, p[2].rem_euclid(cb) as usize)))
+        game::halo::in_halo_band(key[0], key[2]).then(|| {
+            let local = (p[0].rem_euclid(cb) as usize, p[1].rem_euclid(cb) as usize, p[2].rem_euclid(cb) as usize);
+            (game::WorldChunkPos::from_local(home, key), local)
+        })
     }
 
     fn halo_block(&self, p: TilePos) -> Option<Block> {
-        let (key, local) = Self::halo_locate(p)?;
-        match self.0.chunks.get(&key) {
-            Some((_, blocks)) => Some(blocks[BlockIndex::from_xyz(local.0, local.1, local.2).linear()]),
+        let (key, local) = self.halo_locate(p)?;
+        let tiles = self.0.home_tiles()?;
+        match tiles.halo.get(&key) {
+            Some(h) => Some(h.blocks[BlockIndex::from_xyz(local.0, local.1, local.2).linear()]),
             None => {
-                let coords = game::ChunkCoords::new(0, key[1], 0);
-                game::ground::implied_block(self.0.halo_ground(key), coords, local)
+                let ground = tiles.halo_ground.get(&game::WorldChunkPos::new(key.x, 0, key.z));
+                game::ground::implied_block(ground, game::ChunkCoords::new(0, key.y, 0), local)
             }
         }
     }
 }
 
-/// The home region's tiles as [`TileMirror`] reads them; past its edge the
-/// halo band, as `impl TileSource for Rollback` reads its halo.
+/// The home region's tiles as [`TileMirror`] reads them; past its edge its
+/// halo, as `impl TileSource for Rollback` reads it.
 impl TileSource for WithHalo<'_> {
     fn block(&self, p: TilePos) -> BlockId {
         if game::edit::locate(p).is_some() {
@@ -456,22 +504,26 @@ impl TileSource for WithHalo<'_> {
         self.halo_block(p).map_or(0, |b| b.limb())
     }
 
-    /// As the sim's halo column: probed over the mirrored chunks only.
+    /// As the sim's halo column: probed over the halo's chunks, no ground.
     fn column_band(&self, column: [i32; 2]) -> Option<(i32, i32)> {
         let cb = CHUNK_BLOCKS as i32;
         let (cx, cz) = (column[0].div_euclid(cb), column[1].div_euclid(cb));
         if !game::halo::in_halo_band(cx, cz) {
             return self.0.column_band(column);
         }
-        game::probe_column_band(column, None, |cy| self.0.chunks.contains_key(&[cx, cy, cz]))
+        let home = self.0.home?;
+        let tiles = self.0.home_tiles()?;
+        game::probe_column_band(column, None, |cy| {
+            tiles.halo.contains_key(&game::WorldChunkPos::from_local(home, [cx, cy, cz]))
+        })
     }
 
     fn slope(&self, p: TilePos) -> Option<SlopeShape> {
         if game::edit::locate(p).is_some() {
             return self.0.slope(p);
         }
-        let (key, (bx, by, bz)) = Self::halo_locate(p)?;
-        self.0.slopes.get(&key)?.get(&(BlockIndex::from_xyz(bx, by, bz).linear() as u16)).copied()
+        let (key, (bx, by, bz)) = self.halo_locate(p)?;
+        self.0.home_tiles()?.halo.get(&key)?.slopes.get(&(BlockIndex::from_xyz(bx, by, bz).linear() as u16)).copied()
     }
 }
 
@@ -520,8 +572,8 @@ pub fn update_tile_mirror(
     };
     if mirror.set_home(Some(home)) {
         for (entity, chunk, tf, sim) in &all {
-            if let Some(key) = mirror.mirror_key(sim.region, chunk_key(tf)) {
-                mirror.insert_chunk(entity, key, chunk_blocks(&chunk.0), chunk_slopes(&chunk.0));
+            if sim.region == home {
+                mirror.insert_chunk(entity, chunk_key(tf), chunk_blocks(&chunk.0), chunk_slopes(&chunk.0));
             }
         }
         // Everything was just read whole: pending edit lists are moot.
@@ -540,8 +592,10 @@ pub fn update_tile_mirror(
             }),
             None => (true, Default::default()),
         };
-        // Home chunks, and the neighbours' halo band (`WithHalo`).
-        let Some(key) = mirror.mirror_key(sim.region, chunk_key(tf)) else { continue };
+        if sim.region != home {
+            continue;
+        }
+        let key = chunk_key(tf);
         if full || !mirror.update_blocks(key, &chunk.0, blocks) {
             mirror.insert_chunk(entity, key, chunk_blocks(&chunk.0), chunk_slopes(&chunk.0));
         }

@@ -93,7 +93,10 @@ pub use migrate::Carried;
 pub use movement::Motion;
 pub use orders::*;
 pub use pathfind::*;
-pub use path_plan::{next_region, PathPlan, HINT_LEVEL_REACH, HINT_REACH_BLOCKS, PORTAL_DEPTH_BLOCKS};
+pub use path_plan::{
+    line_step, next_region, route_blocked, PathPlan, RouteMap, HINT_LEVEL_REACH, HINT_REACH_BLOCKS, MAX_ROUTE_NODES,
+    PORTAL_DEPTH_BLOCKS, ROUTE_MAX_RELIEF_PER_REGION_M, ROUTE_MAX_WATER_SHARE,
+};
 pub use player::*;
 pub use protocol::*;
 pub use region_runner::*;

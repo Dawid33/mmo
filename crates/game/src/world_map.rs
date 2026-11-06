@@ -106,8 +106,8 @@ impl WorldMap {
 
 /// The rectangle of regions a finite (forged) world covers: the playable
 /// world ends at its outer seam. Region sims get it from the manager
-/// (`RegionInput::SetMapExtent`) and the client from its `WorldMap`, so both
-/// sides hold bodies and walks at that seam alike (`Region::set_map_extent`).
+/// (`RegionInput::SetRouteMap`) and the client from its `WorldMap`, so both
+/// sides hold bodies and walks at that seam alike (`Region::set_route_map`).
 /// A world without one (procedural) is unbounded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MapExtent {

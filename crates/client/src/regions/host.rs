@@ -12,11 +12,11 @@ use super::runner::{handle, RegionCmd, RegionReport, RunnerCtx, RunnerState};
 /// Build a client region from its snapshot: the render bridge gets its copy
 /// (`NewRegion`, sent before any update this region emits), the snapshot
 /// itself becomes the region.
-pub(crate) fn build_region(ctx: &RunnerCtx, snapshot: Rollback, extent: Option<game::MapExtent>) -> Region {
+pub(crate) fn build_region(ctx: &RunnerCtx, snapshot: Rollback, route: Option<std::sync::Arc<game::RouteMap>>) -> Region {
     let (send, recv) = crossbeam::channel::unbounded();
     let _ = ctx.client_event_send.send(ClientUpdateEvent::NewRegion(ctx.id, (*snapshot.data).clone(), recv));
     let mut region = Region::new(snapshot, Some(send), ctx.id, Some(ctx.client_id));
-    region.set_map_extent(extent);
+    region.set_route_map(route);
     region
 }
 
@@ -117,7 +117,7 @@ mod threaded {
             }
         }
 
-        pub(super) fn spawn(&mut self, ctx: RunnerCtx, snapshot: Rollback, extent: Option<game::MapExtent>) {
+        pub(super) fn spawn(&mut self, ctx: RunnerCtx, snapshot: Rollback, route: Option<std::sync::Arc<game::RouteMap>>) {
             let id = ctx.id;
             self.stop(id);
             // Earlier threads of this id finish first (on the new thread, so
@@ -138,7 +138,7 @@ mod threaded {
                     for handle in previous {
                         let _ = handle.join();
                     }
-                    let region = region_thread(ctx, snapshot, extent, recv, out, generation);
+                    let region = region_thread(ctx, snapshot, route, recv, out, generation);
                     live.fetch_sub(1, Ordering::SeqCst);
                     region
                 })
@@ -272,12 +272,12 @@ mod threaded {
     fn region_thread(
         ctx: RunnerCtx,
         snapshot: Rollback,
-        extent: Option<game::MapExtent>,
+        route: Option<std::sync::Arc<game::RouteMap>>,
         recv: Receiver<ToRegion>,
         out: Sender<Tagged>,
         generation: u64,
     ) -> Option<Region> {
-        let mut region = build_region(&ctx, snapshot, extent);
+        let mut region = build_region(&ctx, snapshot, route);
         let mut st = RunnerState::default();
         let mut reports = Vec::new();
         while let Ok(msg) = recv.recv() {
@@ -315,16 +315,16 @@ impl RegionHost {
     }
 
     /// Start region `ctx.id` from `snapshot`, replacing one already held.
-    pub fn spawn(&mut self, ctx: RunnerCtx, snapshot: Rollback, extent: Option<game::MapExtent>) {
+    pub fn spawn(&mut self, ctx: RunnerCtx, snapshot: Rollback, route: Option<std::sync::Arc<game::RouteMap>>) {
         match self {
             RegionHost::Inline(h) => {
                 let id = ctx.id;
-                let region = build_region(&ctx, snapshot, extent);
+                let region = build_region(&ctx, snapshot, route);
                 h.world.load(&id, region);
                 h.states.insert(id, (RunnerState::default(), ctx));
             }
             #[cfg(not(target_arch = "wasm32"))]
-            RegionHost::Threaded(h) => h.spawn(ctx, snapshot, extent),
+            RegionHost::Threaded(h) => h.spawn(ctx, snapshot, route),
         }
     }
 

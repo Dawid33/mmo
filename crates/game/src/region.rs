@@ -223,6 +223,9 @@ pub struct Region {
     /// seam). Not sim state — set by whoever runs the region (the manager
     /// on the server, the client from its `WorldMap`), the same on both.
     map_extent: Option<crate::MapExtent>,
+    /// The coarse route's view of the world (`path_plan.rs`), bounded by
+    /// `map_extent`; walks plan over it.
+    route_map: Option<std::sync::Arc<crate::RouteMap>>,
     /// Client-only: the server's state hash after each of these event ids
     /// (`id -> (tick, hash)`), checked when reconcile confirms that event.
     /// Ids at or below the confirmed head are dropped as missed.
@@ -302,6 +305,7 @@ impl Region {
             pending_intents: Vec::new(),
             replaying: false,
             map_extent: None,
+            route_map: None,
             expected_hashes: BTreeMap::new(),
             last_confirmed_id: None,
             #[cfg(not(target_arch = "wasm32"))]
@@ -376,9 +380,18 @@ impl Region {
     }
 
     /// Bounds this region's sim to `extent` (`None` = unbounded): see
-    /// [`crate::MapExtent`]. Takes effect from the next event.
+    /// [`crate::MapExtent`], with nothing for a walk's coarse route to walk
+    /// around ([`crate::RouteMap::open`]). Takes effect from the next event.
     pub fn set_map_extent(&mut self, extent: Option<crate::MapExtent>) {
-        self.map_extent = extent;
+        self.set_route_map(extent.map(|e| std::sync::Arc::new(crate::RouteMap::open(e))));
+    }
+
+    /// Bounds this region's sim to `route`'s extent and routes walks over it
+    /// (`path_plan.rs`); `None` = unbounded, straight-line routes. Takes
+    /// effect from the next event.
+    pub fn set_route_map(&mut self, route: Option<std::sync::Arc<crate::RouteMap>>) {
+        self.map_extent = route.as_ref().map(|r| r.extent());
+        self.route_map = route;
     }
 
     pub fn map_extent(&self) -> Option<crate::MapExtent> {
@@ -758,10 +771,10 @@ impl Region {
                 self.data.tick_slimes_safe(self.id);
                 // Adventurers' walks advance before the camera controller
                 // steers their bodies from them.
-                self.data.tick_walkers_safe(self.id, self.map_extent);
+                self.data.tick_walkers_safe(self.id, self.route_map.as_deref());
                 // People wander and walk their walks (kinematic targets for
                 // the physics step below).
-                self.data.tick_people_safe(self.id, self.map_extent);
+                self.data.tick_people_safe(self.id, self.route_map.as_deref());
                 for c in self.controllers.iter_mut() {
                     let data = self.data.as_refs_mut();
                     c.on_tick(data.data);
@@ -937,13 +950,13 @@ impl Region {
                 self.data.restore_player_safe(client_id, &record);
             }
             GameEventKind::SpawnPerson(spawn) => {
-                self.data.apply_person_spawn_safe(spawn, self.id, self.map_extent);
+                self.data.apply_person_spawn_safe(spawn, self.id, self.route_map.as_deref());
             }
             GameEventKind::DespawnPerson(person) => {
                 self.data.despawn_person_safe(person);
             }
             GameEventKind::WalkOut(person, toward) => {
-                self.data.walk_out_safe(person, toward, self.id, self.map_extent);
+                self.data.walk_out_safe(person, toward, self.id, self.route_map.as_deref());
             }
             GameEventKind::ClientLeft(client_id) | GameEventKind::ParkPlayer(client_id) => {
                 info!("{:?}", event);
@@ -959,7 +972,7 @@ impl Region {
             GameEventKind::EntityArrived(bundle) => {
                 // A walk in progress walks on (`path_plan.rs`).
                 if let Some(e) = self.data.apply_arrival(bundle) {
-                    self.data.continue_walk_safe(e, self.id, self.map_extent);
+                    self.data.continue_walk_safe(e, self.id, self.route_map.as_deref());
                 }
             }
             GameEventKind::HaloEntity(data) => {
@@ -1013,7 +1026,7 @@ impl Region {
             GameEventKind::Intent(msg) => self.data.receive_intent_safe(msg),
             // A walk is planned against this region's identity.
             GameEventKind::Order(client_id, crate::Order::MoveTo(goal)) => {
-                self.data.move_to_safe(client_id, goal, self.id, self.map_extent);
+                self.data.move_to_safe(client_id, goal, self.id, self.route_map.as_deref());
             }
             GameEventKind::Order(client_id, order) => {
                 self.data.apply_order_safe(client_id, order);

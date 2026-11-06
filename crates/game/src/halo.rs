@@ -56,7 +56,8 @@ use rapier3d::math::{Pose, Vector};
 use rapier3d::prelude::{ColliderBuilder, RigidBodyBuilder, RigidBodyHandle};
 
 use crate::{
-    Block, BlockId, BlockIndex, Chunk, ChunkCoords, RegionCoords, Rollback, WorldBlockPos, WorldChunkPos,
+    Block, BlockId, BlockIndex, Chunk, ChunkCoords, GameDataTransactionKind, GameDataUpdate, GameDataUpdateKind,
+    RegionCoords, Rollback, WorldBlockPos, WorldChunkPos,
     CHUNK_BLOCKS, CHUNK_UNITS, REGION_BLOCKS, REGION_CHUNKS,
 };
 
@@ -525,6 +526,15 @@ impl Rollback {
                 continue;
             }
             if self.data.halo_ground.get(k) != Some(g) {
+                if self.data.has_render_sink() {
+                    let prior = self.data.halo_ground.get(k).cloned();
+                    self.data.emit_on_undo(GameDataUpdate::new(
+                        GameDataTransactionKind::Undo,
+                        GameDataUpdateKind::SetHaloGround(vec![(*k, prior)]),
+                    ));
+                    let now = GameDataUpdateKind::SetHaloGround(vec![(*k, Some(g.clone()))]);
+                    self.data.send(GameDataUpdate::new(GameDataTransactionKind::Do, now));
+                }
                 self.data.halo_ground.insert(*k, g.clone());
             }
         }
@@ -616,6 +626,18 @@ impl Rollback {
             Some(chunk) => crate::collider_cells(chunk),
             None => crate::ColliderCells { blocks: Vec::new(), halves: Vec::new(), voxels: Vec::new() },
         };
+        let unchanged = self.data.halo.get(&d.chunk).is_some_and(|h| h.chunk == d.data)
+            || (d.data.is_none() && !self.data.halo.contains_key(&d.chunk));
+        if !unchanged && self.data.has_render_sink() {
+            // The client's tile mirror plans walks over the halo too.
+            let prior = self.data.halo.get(&d.chunk).and_then(|h| h.chunk.clone());
+            self.data.emit_on_undo(GameDataUpdate::new(
+                GameDataTransactionKind::Undo,
+                GameDataUpdateKind::SetHaloTerrain(vec![(d.chunk, prior)]),
+            ));
+            let now = GameDataUpdateKind::SetHaloTerrain(vec![(d.chunk, d.data.clone())]);
+            self.data.send(GameDataUpdate::new(GameDataTransactionKind::Do, now));
+        }
         match self.data.halo.get(&d.chunk).map(|h| (h.chunk == d.data, h.body)) {
             Some((true, _)) => {}
             Some((false, body)) => {

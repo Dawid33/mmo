@@ -10,7 +10,7 @@ use state_hash::StateHash;
 
 use crate::movement::{MoveKeys, PLAYER_CAPSULE_HALF_HEIGHT, PLAYER_CAPSULE_RADIUS, STEP_HEIGHT, UNITS_PER_METER};
 use crate::{
-    nearest_standable, standable, walk_ups, ClientId, MapExtent, PathPlan, RegionCoords, Rollback, TilePos, TileSource,
+    nearest_standable, standable, walk_ups, ClientId, PathPlan, RouteMap, RegionCoords, Rollback, TilePos, TileSource,
     WorldBlockPos, BLOCK_VOXELS, MAX_PATH_NODES, REGION_BLOCKS, TICK_RATE,
 };
 
@@ -167,7 +167,7 @@ impl Rollback {
     /// coarse route toward it; a goal off `map` — past the world's outer seam
     /// — is walked to the nearest column inside it). Replaces any walk in
     /// progress.
-    pub fn move_to_safe(&mut self, client: ClientId, goal: Goal, here: RegionCoords, map: Option<MapExtent>) -> bool {
+    pub fn move_to_safe(&mut self, client: ClientId, goal: Goal, here: RegionCoords, map: Option<&RouteMap>) -> bool {
         if self.data.clients.get(&client).map(|c| c.mode) != Some(PlayMode::Adventure) {
             return false;
         }
@@ -179,7 +179,7 @@ impl Rollback {
     /// goal rules), undo-safely: the part of `MoveTo` after the entity is
     /// resolved, shared with people. `false` with no change when it has no
     /// body or there is no path.
-    pub fn walk_entity_safe(&mut self, e: crate::EntityKey, goal: Goal, here: RegionCoords, map: Option<MapExtent>) -> bool {
+    pub fn walk_entity_safe(&mut self, e: crate::EntityKey, goal: Goal, here: RegionCoords, map: Option<&RouteMap>) -> bool {
         let Some(walker) = self.plan_walker(e, goal, here, map) else { return false };
         self.data.ecs.walker.set_safe(e, Some(walker));
         true
@@ -187,7 +187,7 @@ impl Rollback {
 
     /// A fresh walk for entity `e` toward `goal`, from the tile its body
     /// stands on; `None` without a body or a path.
-    pub(crate) fn plan_walker(&self, e: crate::EntityKey, goal: Goal, here: RegionCoords, map: Option<MapExtent>) -> Option<Walker> {
+    pub(crate) fn plan_walker(&self, e: crate::EntityKey, goal: Goal, here: RegionCoords, map: Option<&RouteMap>) -> Option<Walker> {
         let from = current_tile(self, self.body_feet(e)?)?;
         let plan = PathPlan::plan(self, from, &goal, here, map, MAX_PATH_NODES)?;
         let walk_up = walk_ups(self, &plan.local_path(here));
@@ -199,7 +199,7 @@ impl Rollback {
     /// the next stretch at the end of one that only crosses into the next
     /// region of the route, and handles a stuck body (re-plan once, then
     /// give up). Every change goes through `walker.set_safe`.
-    pub fn tick_walkers_safe(&mut self, here: RegionCoords, map: Option<MapExtent>) {
+    pub fn tick_walkers_safe(&mut self, here: RegionCoords, map: Option<&RouteMap>) {
         // A body the keyboard drives (first person) is not on a walk.
         let driven: Vec<crate::EntityKey> = self
             .data
