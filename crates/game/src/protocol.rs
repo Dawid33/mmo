@@ -246,15 +246,9 @@ impl WorldChunkPos {
     }
 }
 
-/// Owned entities within this distance of a region edge are mirrored as
-/// ghosts into that neighbour (up to 3 at a corner).
-pub const GHOST_MARGIN: f32 = 32.0;
 /// Ownership flips only this far PAST the boundary; flipping back needs 2x
 /// the travel. Kills boundary thrash.
 pub const FLIP_HYSTERESIS: f32 = 2.0;
-/// A ghost not refreshed for this many host ticks is removed by the host's
-/// tick (owner parked/died/left the margin).
-pub const GHOST_TTL_TICKS: usize = 25;
 
 /// Neighbour offset that now owns a region-local point, None while this
 /// region still owns it. Pure; the same function runs on server regions and
@@ -275,11 +269,14 @@ pub fn departure_offset(x: f32, z: f32) -> Option<(i32, i32)> {
     }
 }
 
-/// Neighbour offsets whose margin a region-local point is inside. Order is
-/// fixed (x edge, z edge, corner) — determinism requires a stable order.
-pub fn ghost_offsets(x: f32, z: f32) -> Vec<(i32, i32)> {
-    let dx = if x < GHOST_MARGIN { -1 } else if x > REGION_SIZE - GHOST_MARGIN { 1 } else { 0 };
-    let dz = if z < GHOST_MARGIN { -1 } else if z > REGION_SIZE - GHOST_MARGIN { 1 } else { 0 };
+/// Neighbour offsets whose entity halo a region-local point is inside:
+/// within [`crate::halo::HALO_UNITS`] of an edge ([`crate::halo::HALO_BLOCKS`]
+/// blocks), up to 3 at a corner. Order is fixed (x edge, z edge, corner) —
+/// determinism requires a stable order.
+pub fn halo_offsets(x: f32, z: f32) -> Vec<(i32, i32)> {
+    let m = crate::halo::HALO_UNITS;
+    let dx = if x < m { -1 } else if x > REGION_SIZE - m { 1 } else { 0 };
+    let dz = if z < m { -1 } else if z > REGION_SIZE - m { 1 } else { 0 };
     let mut out = Vec::new();
     if dx != 0 { out.push((dx, 0)); }
     if dz != 0 { out.push((0, dz)); }
@@ -302,7 +299,7 @@ pub fn rebase_isometry(iso: &Pose, from: RegionCoords, to: RegionCoords) -> Pose
 /// World-unique identity of a crossing-capable entity (player, slime,
 /// person): the region that first spawned it plus that region's allocation
 /// serial. Allocated from rollback state (`Rollback::alloc_entity_id_safe`),
-/// so a client's prediction and the server allocate the same id. Ghost
+/// so a client's prediction and the server allocate the same id. Halo
 /// mirrors carry their source entity's id.
 #[derive(
     Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq, PartialOrd,
@@ -315,7 +312,7 @@ pub struct EntityId {
 
 /// Shape spec carried across the transfer seam so the receiving region can
 /// rebuild the collider. Players are capsules; new kinds extend this enum.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, state_hash::StateHash)]
 pub enum ColliderSpec {
     CapsuleY { half_height: f32, radius: f32 },
 }
@@ -351,7 +348,7 @@ pub struct BodyState {
 
 impl BodyState {
     /// The state of the character bodies the game builds today (and of a
-    /// ghost's mirror body): kinematic, no gravity of its own, never sleeps.
+    /// halo mirror's body): kinematic, no gravity of its own, never sleeps.
     pub fn kinematic(pose: Pose) -> Self {
         BodyState {
             kind: BodyKind::KinematicPosition,
@@ -412,7 +409,7 @@ impl BodyState {
         body
     }
 
-    /// Re-apply this state to an existing body (a ghost's mirror upgraded
+    /// Re-apply this state to an existing body (a halo mirror upgraded
     /// in place, or a replayed arrival).
     pub fn apply_to(&self, body: &mut rapier3d::dynamics::RigidBody) {
         body.set_position(self.pose, true);
@@ -431,7 +428,7 @@ impl BodyState {
 
 /// The unit of ownership transfer. Assembled deterministically at the
 /// extraction tick; `body.pose` is source-local until [`EntityBundle::rebase`]
-/// moves it into the target's frame. `id` is the identity (ghost upgrade,
+/// moves it into the target's frame. `id` is the identity (halo upgrade,
 /// arrival idempotency); the region it left is the departure's own framing
 /// (`RegionOutput::Departures`). What travels is classified exhaustively in
 /// `migrate.rs` (`Carried`, `Client::arrive`).
@@ -463,17 +460,62 @@ impl EntityBundle {
     }
 }
 
-/// Per-tick mirror of a margin entity. `collider` rides along for stage 2.
+/// One owned entity in a neighbour's entity halo, as of the owner's tick:
+/// sent every tick the entity is within [`crate::halo::HALO_BLOCKS`] of the
+/// receiver's edge; the receiver upserts its mirror (a kinematic body with
+/// this collider, so the two regions' bodies collide).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
-pub struct GhostData {
+pub struct HaloEntityDelta {
     pub id: EntityId,
-    /// The region hosting the real entity (rebase origin, and what the
+    /// The region owning the real entity (rebase origin, and what the
     /// renderer hides the mirror for) — not identity.
     pub source_region: RegionCoords,
     pub kind: EntityKind,
     pub isometry: Pose,
     pub linvel: Vector,
     pub collider: ColliderSpec,
+}
+
+/// The owner's explicit end of a mirror: the entity left the receiver's
+/// band, despawned, was parked, crossed elsewhere, or its region stopped.
+/// (A crossing INTO the receiver sends none: the arrival takes the mirror
+/// over in place.)
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct HaloEntityGone {
+    pub id: EntityId,
+    /// The owner that sent it; a mirror of another source is left alone.
+    pub from: RegionCoords,
+}
+
+/// An entity-halo message from an owner to one neighbour, as the owner's
+/// tick produced it (`RegionOutput::HaloEntities`).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+pub enum HaloEntityMsg {
+    Update(HaloEntityDelta),
+    Gone(HaloEntityGone),
+}
+
+impl HaloEntityMsg {
+    pub fn id(&self) -> EntityId {
+        match self {
+            HaloEntityMsg::Update(d) => d.id,
+            HaloEntityMsg::Gone(g) => g.id,
+        }
+    }
+
+    /// Into the receiver's frame (`from` -> `to`): only an update has a pose.
+    pub fn rebase(&mut self, from: RegionCoords, to: RegionCoords) {
+        if let HaloEntityMsg::Update(d) = self {
+            d.isometry = rebase_isometry(&d.isometry, from, to);
+        }
+    }
+
+    pub fn into_event(self) -> GameEventKind {
+        match self {
+            HaloEntityMsg::Update(d) => GameEventKind::HaloEntity(d),
+            HaloEntityMsg::Gone(g) => GameEventKind::HaloEntityGone(g),
+        }
+    }
 }
 
 pub type RegionId = RegionCoords;
@@ -754,8 +796,11 @@ pub enum GameEventKind {
     /// Ownership transfer into this region (manager-relayed or
     /// client-predicted). Injection is an ordinary undoable mutation.
     EntityArrived(EntityBundle),
-    /// Margin mirror refresh from a neighbouring region.
-    GhostUpdate(GhostData),
+    /// Entity halo: a neighbour's entity within `HALO_BLOCKS` of the shared
+    /// edge, as of the neighbour's tick (upsert of its mirror here).
+    HaloEntity(HaloEntityDelta),
+    /// Entity halo: the neighbour ends a mirror (see [`HaloEntityGone`]).
+    HaloEntityGone(HaloEntityGone),
     /// Terrain halo refresh from a neighbouring region (`halo.rs`): its
     /// chunks within `HALO_BLOCKS` of the shared edge, changed (or, to seed
     /// the halo, all of them).
@@ -838,7 +883,8 @@ impl GameEventKind {
             GameEventKind::Tick
             | GameEventKind::Quit
             | GameEventKind::EntityArrived(_)
-            | GameEventKind::GhostUpdate(_)
+            | GameEventKind::HaloEntity(_)
+            | GameEventKind::HaloEntityGone(_)
             | GameEventKind::HaloUpdate(_)
             | GameEventKind::ClientLeft(_)
             | GameEventKind::ParkPlayer(_)
@@ -857,7 +903,8 @@ impl GameEventKind {
         use GameEventKind::*;
         match (self, other) {
             (EntityArrived(a), EntityArrived(b)) => a.id == b.id,
-            (GhostUpdate(a), GhostUpdate(b)) => a.id == b.id,
+            (HaloEntity(a), HaloEntity(b)) => a.id == b.id,
+            (HaloEntityGone(a), HaloEntityGone(b)) => a == b,
             (HaloUpdate(a), HaloUpdate(b)) => a.same_chunks(b),
             _ => self == other,
         }

@@ -150,6 +150,13 @@ impl LocalServer {
         tick
     }
 
+    /// Run `f` against a running server region (state surgery before a
+    /// client loads it, assertions). Test/harness hook.
+    #[doc(hidden)]
+    pub fn with_region(&mut self, rc: RegionCoords, f: impl FnOnce(&mut game::Region)) {
+        self.manager.spawner_mut().with_region(rc, f);
+    }
+
     /// Coords of every region currently running on the server. Test/harness hook.
     pub fn running_regions(&mut self) -> Vec<RegionCoords> {
         self.manager.spawner_mut().running()

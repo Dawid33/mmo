@@ -299,8 +299,8 @@ fn body_leaving_region_is_despawned_not_transferred() {
     // Tips toward +x, over the region edge.
     let e = detach(&mut region, &col, Vector::new(0.0, 0.0, -2.0));
     let (ticks, _, still, last_x) = run_until_gone(&mut region, e, SETTLE_TIMEOUT_TICKS + 5, |reg| {
-        let (departures, ghosts) = reg.take_transfers();
-        assert!(departures.is_empty() && ghosts.is_empty(), "a voxel body never crosses the seam");
+        let (departures, halo) = reg.take_transfers();
+        assert!(departures.is_empty() && halo.is_empty(), "a voxel body never crosses the seam");
     })
     .expect("despawned");
     assert!(ticks < SETTLE_TIMEOUT_TICKS && still < REST_TICKS, "left the region, not rested/timed out");

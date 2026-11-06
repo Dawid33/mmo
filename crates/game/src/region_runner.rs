@@ -6,7 +6,7 @@
 //! wasm build LocalServer pumps runners inline (crates/client).
 
 use crate::{
-    ClientId, Column, ColumnCoords, EntityBundle, TerrainSnapshot, GameEvent, GameEventKind, GhostData, Region,
+    ClientId, Column, ColumnCoords, EntityBundle, TerrainSnapshot, GameEvent, GameEventKind, HaloEntityMsg, Region,
     RegionCoords, RegionId, Rollback, Tick,
     TERRAIN_HASH_INTERVAL_TICKS, TICK_RATE,
 };
@@ -40,7 +40,8 @@ pub enum RegionInput {
     /// server gets it applied on arrival, like [`RegionInput::Event`].
     EventAfterTick(GameEventKind, u64),
     /// Something another region sent during its tick T (an `EntityArrived`,
-    /// a `GhostUpdate`, a park that must follow an arrival), stamped T+1:
+    /// an entity- or terrain-halo update, a park that must follow an
+    /// arrival), stamped T+1:
     /// applied once this region's `current_tick()` reaches the stamp — in
     /// slot T+1 when the two run in step, at once when this one is ahead.
     /// Held for as long as it takes (no `MAX_INPUT_LEAD_TICKS` cap: the
@@ -90,15 +91,23 @@ pub enum RegionOutput {
     /// Throttled push when this region's terrain changed; manager fans out.
     TerrainChanged(TerrainSnapshot),
     SyncClock { tick_rate: u64, tick: Tick },
-    Stopped(SerializedRegion, TerrainSnapshot),
+    /// The parked state, its final terrain, and its final stamp (its
+    /// `current_tick()` at `Shutdown`: what the manager stamps the final
+    /// terrain's halo reseed with, so it lands after every delta this region
+    /// sent before).
+    Stopped(SerializedRegion, TerrainSnapshot, Tick),
     /// Boundary crossings this tick: bundles + ABSOLUTE target regions.
     /// Isometries are still source-local; the manager rebases. The stamp is
     /// the source's `current_tick()` right after the tick that produced
     /// them (T+1 for its tick T): the slot each target applies them in, as a
     /// [`RegionInput::Transfer`].
     Departures(Vec<(EntityBundle, RegionCoords)>, Tick),
-    /// Margin mirrors this tick, same framing and stamp.
-    GhostUpdates(Vec<(GhostData, RegionCoords)>, Tick),
+    /// Entity-halo messages (`halo.rs`) for the neighbours, same framing
+    /// and stamp: an update per owned entity in each neighbour's band, and
+    /// the explicit ends (`HaloEntityGone`) — on `Shutdown` too, just before
+    /// `Stopped`, for every mirror this region keeps. Poses are source-local;
+    /// the manager rebases.
+    HaloEntities(Vec<(HaloEntityMsg, RegionCoords)>, Tick),
     /// Terrain halo updates (`halo.rs`) for the neighbours, same framing and
     /// stamp: the band chunks this tick and its slot's events changed, or a
     /// seed answering a [`RegionInput::HaloRequest`] (stamped with the tick
@@ -437,9 +446,15 @@ impl RegionRunner {
                     self.apply(GameEventKind::DespawnPerson(*person));
                 }
                 let _ = self.out.send((self.id, RegionOutput::PeopleParked(people)));
+                // Its mirrors in the neighbours end with it.
+                let stamp = self.region.current_tick();
+                let gone = self.region.data().halo_entities_gone_all();
+                if !gone.is_empty() {
+                    let _ = self.out.send((self.id, RegionOutput::HaloEntities(gone, stamp)));
+                }
                 let serialized = SerializedRegion::from_rollback(self.region.data());
                 let far = self.terrain();
-                let _ = self.out.send((self.id, RegionOutput::Stopped(serialized, far)));
+                let _ = self.out.send((self.id, RegionOutput::Stopped(serialized, far, stamp)));
                 return false;
             }
         }
@@ -585,7 +600,7 @@ impl RegionRunner {
         let now = self.region.current_tick() as u64;
         // This tick's crossings, before the slot opens: a departing client's
         // inputs held for this slot or later go with its body.
-        let (mut departures, mut ghosts) = self.region.take_transfers();
+        let (mut departures, mut halo_entities) = self.region.take_transfers();
         self.departed.retain(|_, (_, left)| now - *left <= MAX_INPUT_LEAD_TICKS);
         for (bundle, target) in &mut departures {
             let Some(client) = bundle.client.as_ref().map(|(c, _)| *c) else { continue };
@@ -617,16 +632,16 @@ impl RegionRunner {
             }
         }
         // (The slot's events cross nothing; the Tick's scan did.)
-        let (more_departures, more_ghosts) = self.region.take_transfers();
+        let (more_departures, more_halo) = self.region.take_transfers();
         departures.extend(more_departures);
-        ghosts.extend(more_ghosts);
+        halo_entities.extend(more_halo);
         let stamp = self.region.current_tick();
         let halo = self.region.take_halo_updates();
         if !departures.is_empty() {
             let _ = self.out.send((self.id, RegionOutput::Departures(departures, stamp)));
         }
-        if !ghosts.is_empty() {
-            let _ = self.out.send((self.id, RegionOutput::GhostUpdates(ghosts, stamp)));
+        if !halo_entities.is_empty() {
+            let _ = self.out.send((self.id, RegionOutput::HaloEntities(halo_entities, stamp)));
         }
         if !halo.is_empty() {
             let _ = self.out.send((self.id, RegionOutput::HaloDeltas(halo, stamp)));

@@ -141,7 +141,7 @@ fn walk_there_and_back(
         rig.key(key, false);
     }
 
-    // Let ghost mirrors and late inputs drain, then the player must still be
+    // Let halo mirrors and late inputs drain, then the player must still be
     // exactly where ownership says it is.
     for _ in 0..PAST_SEAM_ROUNDS {
         rig.round();

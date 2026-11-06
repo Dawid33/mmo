@@ -9,7 +9,7 @@ use game::slime::{slime_edge_units, slime_spawn_plan, SLIME_HOP_DELAY_MIN_TICKS}
 use crossbeam::channel::Receiver;
 use game::{
     state_hash, EntityKey, EntityKind, GameDataUpdate, GameDataUpdateKind,
-    GameEventKind, Region, RegionCoords, GHOST_MARGIN,
+    GameEventKind, Region, RegionCoords,
 };
 use game::rapier3d::math::Vector;
 
@@ -118,7 +118,8 @@ fn slime_turns_back_before_the_region_edge() {
         assert!(departures.is_empty(), "a slime must never leave its region");
         min_x = min_x.min(pose(&region, e).0[0]);
     }
-    assert!(min_x > GHOST_MARGIN, "the slime reached x = {min_x}, inside the ghost margin");
+    let clear = game::slime::SLIME_EDGE_MARGIN / 2.0;
+    assert!(min_x > clear, "the slime reached x = {min_x}, within {clear} units of the edge");
 }
 
 #[test]

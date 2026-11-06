@@ -13,7 +13,7 @@ use crate::{Chunk, Client, ClientId, GameData, Rollback, Tick};
 
 use crate::{
     camera::CameraController, physics::PhysicsController, ChunkCoords, Column, ColumnCoords,
-    Controller, EntityBundle, GameDataUpdate, GameError, GameEvent, GameEventKind, GhostData,
+    Controller, EntityBundle, GameDataUpdate, GameError, GameEvent, GameEventKind, HaloEntityMsg,
     RegionCoords, RegionId, ServerPacket,
 };
 
@@ -82,7 +82,7 @@ pub struct RegionTickPerf {
     pub controllers: Duration,
     /// Per-client input step + fps-cam toggle.
     pub input: Duration,
-    /// Boundary scan + ghost expiry + tick bump.
+    /// Boundary scan (departures, entity halo) + tick bump.
     pub scan: Duration,
 }
 
@@ -198,7 +198,7 @@ pub struct Region {
     /// tick; reconcile replays overwrite these with stale scans that are
     /// never read (see the plan's read-after-progress invariant).
     pending_departures: Vec<(EntityBundle, RegionCoords)>,
-    pending_ghosts: Vec<(GhostData, RegionCoords)>,
+    pending_halo_entities: Vec<(HaloEntityMsg, RegionCoords)>,
     /// Terrain chunks within the halo band written since the last
     /// [`Region::take_halo_updates`] (`halo.rs`). Not state: a client's
     /// reconcile clears it (its replays re-write chunks whose updates the
@@ -243,7 +243,8 @@ fn ev_desc(e: &GameEvent) -> String {
         GameEventKind::EntityArrived(b) => {
             format!("EntityArrived(c={:?})", b.client.as_ref().map(|(c, _)| *c))
         }
-        GameEventKind::GhostUpdate(_) => "GhostUpdate".to_string(),
+        GameEventKind::HaloEntity(d) => format!("HaloEntity({:?})", d.id),
+        GameEventKind::HaloEntityGone(g) => format!("HaloEntityGone({:?})", g.id),
         GameEventKind::HaloUpdate(u) => format!("HaloUpdate(from={:?}, chunks={})", u.from, u.deltas.len()),
         GameEventKind::SpawnPerson(s) => format!("SpawnPerson({s:?})"),
         GameEventKind::DespawnPerson(p) => format!("DespawnPerson({p:?})"),
@@ -279,7 +280,7 @@ impl Region {
             local_client_id,
             base_event_id,
             pending_departures: Vec::new(),
-            pending_ghosts: Vec::new(),
+            pending_halo_entities: Vec::new(),
             halo_dirty: Default::default(),
             map_extent: None,
             expected_hashes: BTreeMap::new(),
@@ -497,7 +498,7 @@ impl Region {
                                 let server_kind = &server_event.0.kind;
                                 let mut i = 0;
                                 let mut removed_id = None;
-                                let mut dropped_ghosts = 0;
+                                let mut dropped_mirrors = 0;
                                 while i < temp_log.len() {
                                     let e = &temp_log[i];
                                     let local_origin = match e.kind.origin_client() {
@@ -515,15 +516,15 @@ impl Region {
                                     // that the server did not have is dropped
                                     // (never carried into the next slot) ...
                                     if matches!(server_kind, GameEventKind::Tick)
-                                        && matches!(e.kind, GameEventKind::GhostUpdate(_) | GameEventKind::HaloUpdate(_))
+                                        && matches!(e.kind, GameEventKind::HaloEntity(_) | GameEventKind::HaloEntityGone(_) | GameEventKind::HaloUpdate(_))
                                     {
                                         temp_log.remove(i);
-                                        dropped_ghosts += 1;
+                                        dropped_mirrors += 1;
                                         continue;
                                     }
                                     // ... and a server mirror never takes the
                                     // place of a later slot's prediction.
-                                    if matches!(server_kind, GameEventKind::GhostUpdate(_) | GameEventKind::HaloUpdate(_))
+                                    if matches!(server_kind, GameEventKind::HaloEntity(_) | GameEventKind::HaloEntityGone(_) | GameEventKind::HaloUpdate(_))
                                         && matches!(e.kind, GameEventKind::Tick)
                                     {
                                         break;
@@ -535,11 +536,11 @@ impl Region {
                                 for (k, e) in temp_log.iter_mut().enumerate() {
                                     e.id = server_event.0.id + 1 + k;
                                 }
-                                if dropped_ghosts > 0 {
+                                if dropped_mirrors > 0 {
                                     debug!(
-                                        "[reconcile r={:?}] dropped {} margin mirror(s) predicted in the slot server {} closed",
+                                        "[reconcile r={:?}] dropped {} halo update(s) predicted in the slot server {} closed",
                                         self.id,
-                                        dropped_ghosts,
+                                        dropped_mirrors,
                                         ev_desc(&server_event.0)
                                     );
                                 }
@@ -834,10 +835,9 @@ impl Region {
                 }
                 #[cfg(not(target_arch = "wasm32"))]
                 let input_done = Instant::now();
-                let (departures, ghosts) = self.data.scan_boundaries(self.id, self.map_extent);
+                let (departures, halo) = self.data.scan_boundaries(self.id, self.map_extent);
                 self.pending_departures = departures;
-                self.pending_ghosts = ghosts;
-                self.data.expire_ghosts();
+                self.pending_halo_entities = halo;
                 self.data.tick.update(|t| *t += 1);
                 #[cfg(not(target_arch = "wasm32"))]
                 self.tick_perf.record(tick_start, controllers_done, input_done);
@@ -915,8 +915,11 @@ impl Region {
                     self.data.resume_walker_safe(e, self.id, self.map_extent);
                 }
             }
-            GameEventKind::GhostUpdate(data) => {
-                self.data.apply_ghost(data);
+            GameEventKind::HaloEntity(data) => {
+                self.data.apply_halo_entity_safe(data);
+            }
+            GameEventKind::HaloEntityGone(gone) => {
+                self.data.apply_halo_entity_gone_safe(gone);
             }
             GameEventKind::HaloUpdate(update) => {
                 self.data.apply_halo_update_safe(&update);
@@ -1072,10 +1075,10 @@ impl Region {
     /// other time — see the read-after-progress invariant on the fields.
     pub fn take_transfers(
         &mut self,
-    ) -> (Vec<(EntityBundle, RegionCoords)>, Vec<(GhostData, RegionCoords)>) {
+    ) -> (Vec<(EntityBundle, RegionCoords)>, Vec<(HaloEntityMsg, RegionCoords)>) {
         (
             std::mem::take(&mut self.pending_departures),
-            std::mem::take(&mut self.pending_ghosts),
+            std::mem::take(&mut self.pending_halo_entities),
         )
     }
 

@@ -538,7 +538,7 @@ fn shutdown_reports_and_strips_people() {
     let RegionOutput::PeopleParked(list) = &outs[parked_at] else { unreachable!() };
     assert_eq!(*list, expected);
     assert_eq!(list.len(), 2);
-    let RegionOutput::Stopped(blob, _) = &outs[stopped_at] else { unreachable!() };
+    let RegionOutput::Stopped(blob, _, _) = &outs[stopped_at] else { unreachable!() };
     let restored = blob.to_rollback().unwrap();
     assert!(restored.people_here().is_empty());
     assert!(restored.data.ecs.kind.iter().all(|(_, k)| !matches!(k, Some(game::EntityKind::Person { .. }))));

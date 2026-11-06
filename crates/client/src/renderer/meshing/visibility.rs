@@ -773,7 +773,7 @@ pub fn cull_chunks(
     }
 
     // Apply only what flipped since the last applied run (see
-    // `GridCache::applied`), and write only on change (like `dedupe_ghosts`)
+    // `GridCache::applied`), and write only on change (like `dedupe_halo_entities`)
     // to avoid change-detection churn.
     let GridCache { keys, entities, applied, .. } = &mut *cache;
     for ((key, entity), applied) in keys.iter().zip(entities.iter()).zip(applied.iter_mut()) {

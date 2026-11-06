@@ -155,33 +155,33 @@ fn arrival_wakes_a_cold_region() {
 }
 
 #[test]
-fn ghost_updates_never_wake_a_cold_region() {
+fn halo_entity_updates_never_wake_a_cold_region() {
     let mut h = harness();
     h.event(ServerEvent::connected(0), 0);
     h.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(SPAWN_REGION), 0), 0);
     h.drain_packets();
     let neighbour = RegionCoords::new(1, 0);
 
-    h.teleport_player(SPAWN_REGION, 0, REGION_SIZE - 5.0, 128.0); // margin, not past
+    h.teleport_player(SPAWN_REGION, 0, REGION_SIZE - 5.0, 128.0); // halo band, not past
     h.tick(100);
     assert!(
         !h.manager.running_regions().contains(&neighbour),
-        "ghost updates to cold regions are dropped"
+        "halo entity updates to cold regions are dropped"
     );
 }
 
 #[test]
-fn ghost_updates_reach_running_neighbours() {
+fn halo_entity_updates_reach_running_neighbours() {
     let mut h = harness();
     connect_and_subscribe(&mut h);
     let neighbour = RegionCoords::new(1, 0);
     h.teleport_player(SPAWN_REGION, 0, REGION_SIZE - 5.0, 128.0);
     h.tick(100);
-    let mut ghost_count = 0;
+    let mut mirrors = 0;
     h.manager.spawner_mut().with_region(neighbour, |region| {
-        ghost_count = region.data().ghosts.len();
+        mirrors = region.data().halo_entities.len();
     });
-    assert_eq!(ghost_count, 1, "margin player mirrored into the running neighbour");
+    assert_eq!(mirrors, 1, "band player mirrored into the running neighbour");
 }
 
 #[test]

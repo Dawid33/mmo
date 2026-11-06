@@ -11,7 +11,7 @@
 //! centred on the pose, so feet = world y − half the body height
 //! ([`feet_offset`]).
 //!
-//! Composing with other `Visibility` writers (ghost dedupe, the hidden local
+//! Composing with other `Visibility` writers (halo dedupe, the hidden local
 //! body): the cut owns the entity's `Visibility` only while it hides it. On
 //! hiding, [`CutHidden`] remembers what was there; a write by any other
 //! system meanwhile (seen through change detection — this system's own

@@ -1,6 +1,6 @@
 use game::{Pose, Rollback};
 use game::{
-    Client, ColliderSpec, EntityBundle, EntityKind, GhostData, RegionCoords, GHOST_TTL_TICKS,
+    Client, ColliderSpec, EntityBundle, EntityKind, HaloEntityDelta, HaloEntityGone, RegionCoords,
 };
 use game::parry::math::Vector;
 use game::GameDataUpdateKind;
@@ -42,7 +42,7 @@ fn remove_entity_safe_holds_the_hash_bar() {
 #[test]
 fn remove_then_create_in_one_transaction_holds_the_hash_bar() {
     // Region-crossing repro: a single reconcile-replayed Tick can BOTH remove
-    // an entity (expire_ghosts / extraction) AND create one (apply_ghost /
+    // an entity (a halo mirror's end / extraction) AND create one (a mirror /
     // apply_arrival). The slotmap reuses the just-freed slot index for the new
     // entity, so the secondary-map (kind/camera/...) slot at that index gets
     // reallocated mid-transaction. Rolling the whole transaction back must
@@ -103,8 +103,8 @@ fn bundle(src: RegionCoords, key: game::EntityKey, client: game::ClientId, x: f3
     }
 }
 
-fn ghost(src: RegionCoords, key: game::EntityKey, x: f32) -> GhostData {
-    GhostData {
+fn ghost(src: RegionCoords, key: game::EntityKey, x: f32) -> HaloEntityDelta {
+    HaloEntityDelta {
         id: eid(src, key),
         source_region: src,
         kind: EntityKind::Player,
@@ -204,7 +204,7 @@ fn arrival_preserves_camera_look_direction() {
 }
 
 #[test]
-fn ghost_upsert_refresh_and_ttl_expiry_hold_hash_bar() {
+fn halo_entity_upsert_refresh_and_gone_hold_hash_bar() {
     let (_, src_key) = donor();
     let src = RegionCoords::new(0, 0);
     let (send, recv) = crossbeam::channel::unbounded();
@@ -212,37 +212,38 @@ fn ghost_upsert_refresh_and_ttl_expiry_hold_hash_bar() {
 
     // Create.
     rb.new_transaction();
-    rb.apply_ghost(ghost(src, src_key, 250.0));
+    rb.apply_halo_entity_safe(ghost(src, src_key, 250.0));
     rb.forget();
-    assert_eq!(rb.data.ghosts.len(), 1);
-    let entry = rb.data.ghosts.get(&eid(src, src_key)).unwrap().clone();
+    assert_eq!(rb.data.halo_entities.len(), 1);
+    let entry = rb.data.halo_entities.get(&eid(src, src_key)).unwrap().clone();
 
     // Refresh keeps the same entity and holds the bar.
     let before = crc(&rb);
     rb.new_transaction();
-    rb.apply_ghost(ghost(src, src_key, 252.0));
+    rb.apply_halo_entity_safe(ghost(src, src_key, 252.0));
     assert_eq!(
-        rb.data.ghosts.get(&eid(src, src_key)).unwrap().entity,
+        rb.data.halo_entities.get(&eid(src, src_key)).unwrap().entity,
         entry.entity,
         "refresh must not respawn the ghost"
     );
     rb.rollback();
     assert_eq!(before, crc(&rb));
 
-    // Expiry: age the region past the TTL, then tick the reaper.
-    rb.new_transaction();
-    for _ in 0..(GHOST_TTL_TICKS + 1) {
-        rb.data.tick.update(|t| *t += 1);
-    }
-    rb.forget();
     // Drain events accumulated from the create/refresh above (including the
-    // creation-time SetGhostSource(Some) Do-emit) so the post-rollback drain
-    // below only reflects expire_ghosts' own emits, not stale lookalikes.
+    // creation-time SetHaloSource(Some) Do-emit) so the post-rollback drain
+    // below only reflects the end's own emits, not stale lookalikes.
     let _: Vec<_> = recv.try_iter().collect();
+    // An end from another owner leaves the mirror alone.
     let before = crc(&rb);
     rb.new_transaction();
-    rb.expire_ghosts();
-    assert!(rb.data.ghosts.get(&eid(src, src_key)).is_none(), "stale ghost reaped");
+    rb.apply_halo_entity_gone_safe(HaloEntityGone { id: eid(src, src_key), from: RegionCoords::new(7, 7) });
+    assert!(rb.data.halo_entities.get(&eid(src, src_key)).is_some(), "not that owner's mirror");
+    rb.forget();
+    assert_eq!(before, crc(&rb));
+    // The owner's end removes it.
+    rb.new_transaction();
+    rb.apply_halo_entity_gone_safe(HaloEntityGone { id: eid(src, src_key), from: src });
+    assert!(rb.data.halo_entities.get(&eid(src, src_key)).is_none(), "mirror ended");
     assert!(!rb.data.ecs.entities.contains_key(entry.entity));
     rb.rollback();
     assert_eq!(before, crc(&rb));
@@ -250,9 +251,9 @@ fn ghost_upsert_refresh_and_ttl_expiry_hold_hash_bar() {
     assert!(
         events.iter().any(|u| matches!(
             u.update_kind,
-            GameDataUpdateKind::SetGhostSource(e, Some(rc)) if e == entry.entity && rc == src
+            GameDataUpdateKind::SetHaloSource(e, Some((rc, _))) if e == entry.entity && rc == src
         )),
-        "expire_ghosts rollback must restore the ghost mark via compensating emit_on_undo"
+        "the end's rollback must restore the mirror mark via compensating emit_on_undo"
     );
 }
 
@@ -263,15 +264,15 @@ fn arrival_upgrades_ghost_in_place_keeping_entity_key() {
     let (send, recv) = crossbeam::channel::unbounded();
     let mut rb = Rollback::new(Some(send));
     rb.new_transaction();
-    rb.apply_ghost(ghost(src, src_key, 250.0));
+    rb.apply_halo_entity_safe(ghost(src, src_key, 250.0));
     rb.forget();
-    let ghost_entity = rb.data.ghosts.get(&eid(src, src_key)).unwrap().entity;
+    let ghost_entity = rb.data.halo_entities.get(&eid(src, src_key)).unwrap().entity;
     // Drain the creation-time events (including the creation's own
-    // SetGhostSource(Some) Do-emit) so the post-rollback drain below only
+    // SetHaloSource(Some) Do-emit) so the post-rollback drain below only
     // reflects the upgrade transaction's own emits, not a stale lookalike.
     let _: Vec<_> = recv.try_iter().collect();
 
-    // Do NOT forget: the upgrade (ghost drop + SetGhostSource-clear emit + body
+    // Do NOT forget: the upgrade (mirror drop + SetHaloSource-clear emit + body
     // inject) must be exactly invertible, including the compensating undo emit
     // that restores the ghost mark.
     let before = crc(&rb);
@@ -279,7 +280,7 @@ fn arrival_upgrades_ghost_in_place_keeping_entity_key() {
     rb.apply_arrival(bundle(src, src_key, 9, 2.0));
     let owned = *rb.data.player_entites.get(&9).unwrap();
     assert_eq!(owned, ghost_entity, "upgrade-in-place: same EntityKey continues");
-    assert!(rb.data.ghosts.get(&eid(src, src_key)).is_none(), "ghost record dropped");
+    assert!(rb.data.halo_entities.get(&eid(src, src_key)).is_none(), "ghost record dropped");
     assert!(rb.data.ecs.rigidbody.try_get(owned).is_some(), "body attached on upgrade");
     rb.rollback();
     assert_eq!(before, crc(&rb), "upgrade path holds the hash bar, bit-exact");
@@ -287,7 +288,7 @@ fn arrival_upgrades_ghost_in_place_keeping_entity_key() {
     assert!(
         events.iter().any(|u| matches!(
             u.update_kind,
-            GameDataUpdateKind::SetGhostSource(e, Some(rc)) if e == ghost_entity && rc == src
+            GameDataUpdateKind::SetHaloSource(e, Some((rc, _))) if e == ghost_entity && rc == src
         )),
         "upgrade rollback must restore the ghost mark via compensating emit_on_undo"
     );
@@ -302,9 +303,9 @@ fn stage2_ghost_has_a_collidable_body_that_tracks_updates() {
     let (send, _recv) = crossbeam::channel::unbounded();
     let mut rb = Rollback::new(Some(send));
     rb.new_transaction();
-    rb.apply_ghost(ghost(src, src_key, 250.0));
+    rb.apply_halo_entity_safe(ghost(src, src_key, 250.0));
     rb.forget();
-    let e = rb.data.ghosts.get(&eid(src, src_key)).unwrap().entity;
+    let e = rb.data.halo_entities.get(&eid(src, src_key)).unwrap().entity;
     let handle = rb.data.ecs.rigidbody.try_get(e).expect("stage 2: ghost has a body");
     assert!(
         rb.data.physics.bodies.get(handle).unwrap().colliders().len() == 1,
@@ -314,7 +315,7 @@ fn stage2_ghost_has_a_collidable_body_that_tracks_updates() {
     // Refresh moves the body (and holds the hash bar).
     let before = crc(&rb);
     rb.new_transaction();
-    rb.apply_ghost(ghost(src, src_key, 240.0));
+    rb.apply_halo_entity_safe(ghost(src, src_key, 240.0));
     let t = rb.data.physics.bodies.get(handle).unwrap().translation();
     assert_eq!(t.x, 240.0);
     rb.rollback();
@@ -338,8 +339,8 @@ fn stage2_ghost_create_with_body_is_exactly_invertible() {
 
     let before = crc(&rb);
     rb.new_transaction();
-    rb.apply_ghost(ghost(src, src_key, 250.0));
-    let e = rb.data.ghosts.get(&eid(src, src_key)).unwrap().entity;
+    rb.apply_halo_entity_safe(ghost(src, src_key, 250.0));
+    let e = rb.data.halo_entities.get(&eid(src, src_key)).unwrap().entity;
     assert!(
         rb.data.ecs.rigidbody.try_get(e).is_some(),
         "ghost create must allocate a body (proves this exercises the bodied-create path)"
@@ -355,9 +356,9 @@ fn stage2_upgrade_reuses_the_ghost_body() {
     let (send, _recv) = crossbeam::channel::unbounded();
     let mut rb = Rollback::new(Some(send));
     rb.new_transaction();
-    rb.apply_ghost(ghost(src, src_key, 250.0));
+    rb.apply_halo_entity_safe(ghost(src, src_key, 250.0));
     rb.forget();
-    let e = rb.data.ghosts.get(&eid(src, src_key)).unwrap().entity;
+    let e = rb.data.halo_entities.get(&eid(src, src_key)).unwrap().entity;
     let ghost_handle = rb.data.ecs.rigidbody.try_get(e).unwrap();
 
     rb.new_transaction();
@@ -395,11 +396,11 @@ fn stage2_ghost_collider_blocks_a_walking_player() {
     // W walks -z at 8 units/tick). Placed at z=104 so the combined capsule
     // radii (6.4 + 6.4 = 12.8) stop the walker near z=116.8.
     region
-        .handle_event(GameEventKind::GhostUpdate(ghost(RegionCoords::new(0, -1), src_key, 0.0)))
+        .handle_event(GameEventKind::HaloEntity(ghost(RegionCoords::new(0, -1), src_key, 0.0)))
         .unwrap();
     region.forget_last_event();
     // Reposition the ghost precisely via its entity.
-    let ghost_e = region.data().ghosts.get(&eid(RegionCoords::new(0, -1), src_key)).unwrap().entity;
+    let ghost_e = region.data().halo_entities.get(&eid(RegionCoords::new(0, -1), src_key)).unwrap().entity;
     region.with_data(|d| d.set_body_pose_safe(ghost_e, pose(128.0, 26.0, 104.0)));
 
     // fps-cam on: press KeyE, then tick once so the toggle takes effect

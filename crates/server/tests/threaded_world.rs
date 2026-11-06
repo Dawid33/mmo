@@ -467,7 +467,7 @@ fn arrival_in(p: &ServerPacket, region: RegionCoords) -> Option<&EntityBundle> {
 
 /// Diagonal crossing through a region corner on real threads: W+A from the
 /// spawn point, which is equidistant from the -x and -z seams. Four region
-/// threads are involved — the home, both edge neighbours (which get ghost
+/// threads are involved — the home, both edge neighbours (which get halo
 /// mirrors, and may briefly own the player if one seam is crossed a tick
 /// before the other) and the diagonal neighbour, where the player must end up.
 #[test]

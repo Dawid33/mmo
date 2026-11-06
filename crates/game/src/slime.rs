@@ -65,8 +65,9 @@ pub const SLIME_TURN_RANGE_TICKS: u64 = 60;
 /// Fastest a slime turns, radians per tick (Minecraft: 90°).
 pub const SLIME_MAX_TURN_PER_TICK: f32 = FRAC_PI_4;
 /// Within this many world units of a region edge a slime heads back inwards.
-/// Kept out of the ghost margin: a slime that crossed would wake the next
-/// region, and wildlife is not worth a region genesis.
+/// Keeps slimes home: a slime that crossed would wake the next region, and
+/// wildlife is not worth a region genesis. (Inside the halo band they are
+/// mirrored into the neighbour like any entity.)
 pub const SLIME_EDGE_MARGIN: f32 = 4.0 * BLOCK_VOXELS as f32;
 
 /// Per-slime behaviour state. Lives in the rollback ECS (`Ecs::slime`) and
@@ -221,7 +222,7 @@ impl Rollback {
     pub fn tick_slimes_safe(&mut self, region: RegionCoords) {
         let tick = *self.data.tick;
         self.maybe_spawn_slime_safe(region, tick);
-        // Ghost mirrors never carry a Slime component, so only owned slimes
+        // Halo mirrors never carry a Slime component, so only owned slimes
         // are driven. Key order is deterministic.
         let slimes: Vec<EntityKey> = self
             .ecs

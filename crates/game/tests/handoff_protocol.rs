@@ -1,6 +1,6 @@
 use game::{
-    departure_offset, ghost_offsets, rebase_isometry, Pose, RegionCoords,
-    FLIP_HYSTERESIS, GHOST_MARGIN, REGION_SIZE,
+    departure_offset, halo_offsets, rebase_isometry, Pose, RegionCoords,
+    FLIP_HYSTERESIS, REGION_SIZE,
 };
 
 #[test]
@@ -22,13 +22,16 @@ fn departure_needs_hysteresis() {
 }
 
 #[test]
-fn ghost_offsets_cover_edges_and_corners() {
-    assert!(ghost_offsets(128.0, 128.0).is_empty());
-    assert_eq!(ghost_offsets(GHOST_MARGIN - 1.0, 128.0), vec![(-1, 0)]);
-    assert_eq!(ghost_offsets(REGION_SIZE - GHOST_MARGIN + 1.0, 128.0), vec![(1, 0)]);
-    assert_eq!(ghost_offsets(128.0, 10.0), vec![(0, -1)]);
+fn halo_offsets_cover_edges_and_corners() {
+    use game::halo::HALO_UNITS;
+    let mid = REGION_SIZE / 2.0;
+    assert!(halo_offsets(mid, mid).is_empty());
+    assert!(halo_offsets(HALO_UNITS, mid).is_empty(), "the band ends HALO_BLOCKS in");
+    assert_eq!(halo_offsets(HALO_UNITS - 1.0, mid), vec![(-1, 0)]);
+    assert_eq!(halo_offsets(REGION_SIZE - HALO_UNITS + 1.0, mid), vec![(1, 0)]);
+    assert_eq!(halo_offsets(mid, 10.0), vec![(0, -1)]);
     // Corner mirrors into 3 neighbours.
-    let corner = ghost_offsets(10.0, 10.0);
+    let corner = halo_offsets(10.0, 10.0);
     assert_eq!(corner.len(), 3);
     for o in [(-1, 0), (0, -1), (-1, -1)] {
         assert!(corner.contains(&o));
@@ -49,7 +52,7 @@ fn rebase_is_exact_for_boundary_walk() {
 
 #[test]
 fn matches_prediction_is_identity_based_for_transfers() {
-    use game::{Client, ColliderSpec, EntityBundle, EntityKind, GameEventKind, GhostData};
+    use game::{Client, ColliderSpec, EntityBundle, EntityKind, GameEventKind, HaloEntityDelta, HaloEntityGone};
     use game::parry::math::Vector;
     let mk = |x: f32| EntityBundle {
         id: game::EntityId { birth_region: RegionCoords::new(0, 0), serial: 0 },
@@ -71,7 +74,7 @@ fn matches_prediction_is_identity_based_for_transfers() {
     assert!(!a.matches_prediction(&GameEventKind::EntityArrived(other)));
     // Non-transfer kinds: exact equality.
     assert!(GameEventKind::Tick.matches_prediction(&GameEventKind::Tick));
-    let g = |x: f32| GameEventKind::GhostUpdate(GhostData {
+    let g = |x: f32| GameEventKind::HaloEntity(HaloEntityDelta {
         id: game::EntityId { birth_region: RegionCoords::new(0, 0), serial: 0 },
         source_region: RegionCoords::new(0, 0),
         kind: EntityKind::Player,
@@ -80,4 +83,10 @@ fn matches_prediction_is_identity_based_for_transfers() {
         collider: ColliderSpec::CapsuleY { half_height: 8.0, radius: 6.4 },
     });
     assert!(g(1.0).matches_prediction(&g(9.0)));
+    // An end matches only the same end (id and sender), never an update.
+    let id = game::EntityId { birth_region: RegionCoords::new(0, 0), serial: 0 };
+    let gone = |from| GameEventKind::HaloEntityGone(HaloEntityGone { id, from });
+    assert!(gone(RegionCoords::new(0, 0)).matches_prediction(&gone(RegionCoords::new(0, 0))));
+    assert!(!gone(RegionCoords::new(0, 0)).matches_prediction(&gone(RegionCoords::new(1, 0))));
+    assert!(!gone(RegionCoords::new(0, 0)).matches_prediction(&g(1.0)));
 }

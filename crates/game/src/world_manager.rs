@@ -122,7 +122,7 @@ pub const SCHEDULE_SKIP_PER_MILLE: u32 = 100;
 /// - tick order is permuted, which permutes the order the manager sees region
 ///   outputs in (two regions handing off in the same round);
 /// - a *late* region does not look at its input queue until after its next
-///   tick — a handoff, ghost update or player input that lost the race with
+///   tick — a handoff, halo update or player input that lost the race with
 ///   the tick it would have preceded in lockstep;
 /// - a *skipped* region misses a round entirely, the way
 ///   `region_thread_loop` falls behind its deadline, and runs a catch-up tick
@@ -1186,7 +1186,8 @@ impl<S: RegionSpawner> WorldManager<S> {
                     // must never inject these directly (sessions are created
                     // and moved by the manager). Drop rather than forward.
                     GameEventKind::EntityArrived(_)
-                    | GameEventKind::GhostUpdate(_)
+                    | GameEventKind::HaloEntity(_)
+                    | GameEventKind::HaloEntityGone(_)
                     | GameEventKind::HaloUpdate(_)
                     | GameEventKind::CreateClient(_)
                     | GameEventKind::CreateClientAt(..)
@@ -1280,7 +1281,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                 self.cache_authoritative_terrain(rc, snap);
                 self.invalidate_region_lod(rc);
             }
-            RegionOutput::Stopped(serialized, far) => {
+            RegionOutput::Stopped(serialized, far, stamp) => {
                 // `PeopleParked` comes first; a region that sent none gave nobody back.
                 if self.history.as_ref().is_some_and(|h| h.region_live(rc)) {
                     self.history_region_lost(rc);
@@ -1289,13 +1290,15 @@ impl<S: RegionSpawner> WorldManager<S> {
                 // it: what it changed since its last halo deltas (edits of
                 // its last slot, transfers applied at `Shutdown`) never went
                 // out as deltas. Stream-borne, so their clients replay it.
+                // Stamped with its final tick, like those deltas: a lagging
+                // neighbour still holding one applies the reseed after it.
                 for n in crate::halo::neighbours(rc) {
                     let running = self.regions.get(&n).is_some_and(|l| !l.stopping);
                     if !running {
                         continue;
                     }
                     if let Some(seed) = crate::halo::halo_seed_from_chunks(rc, n, far.chunks.iter().map(|(c, k)| (*c, k))) {
-                        self.send_to_region(n, RegionInput::Event(GameEventKind::HaloUpdate(seed)));
+                        self.send_to_region(n, RegionInput::Transfer(GameEventKind::HaloUpdate(seed), stamp));
                     }
                 }
                 self.cache_authoritative_terrain(rc, far);
@@ -1408,26 +1411,24 @@ impl<S: RegionSpawner> WorldManager<S> {
             }
             RegionOutput::HaloDeltas(list, stamp) => {
                 for (update, target) in list {
-                    // Like ghosts: halo updates never wake a region (a
-                    // starting one is seeded afresh).
+                    // Halo updates never wake a region (a starting one is
+                    // seeded afresh).
                     let running = self.regions.get(&target).is_some_and(|link| !link.stopping);
                     if running {
                         self.send_to_region(target, RegionInput::Transfer(GameEventKind::HaloUpdate(update), stamp));
                     }
                 }
             }
-            RegionOutput::GhostUpdates(list, stamp) => {
-                for (mut data, target) in list {
-                    // Ghost updates NEVER wake a region.
-                    let running = self
-                        .regions
-                        .get(&target)
-                        .map_or(false, |link| !link.stopping);
+            RegionOutput::HaloEntities(list, stamp) => {
+                for (mut msg, target) in list {
+                    // Entity-halo messages NEVER wake a region (a starting one
+                    // gets the band entities from its neighbours' next ticks).
+                    let running = self.regions.get(&target).is_some_and(|link| !link.stopping);
                     if !running {
                         continue;
                     }
-                    data.isometry = crate::rebase_isometry(&data.isometry, rc, target);
-                    self.send_to_region(target, RegionInput::Transfer(GameEventKind::GhostUpdate(data), stamp));
+                    msg.rebase(rc, target);
+                    self.send_to_region(target, RegionInput::Transfer(msg.into_event(), stamp));
                 }
             }
         }

@@ -448,16 +448,16 @@ impl World {
         &mut self,
     ) -> (
         Vec<(EntityBundle, RegionCoords)>,
-        Vec<(GhostData, RegionCoords)>,
+        Vec<(HaloEntityMsg, RegionCoords)>,
     ) {
         let mut departures = Vec::new();
-        let mut ghosts = Vec::new();
+        let mut halo = Vec::new();
         for (_, region) in &mut self.regions {
-            let (d, g) = region.take_transfers();
+            let (d, h) = region.take_transfers();
             departures.extend(d);
-            ghosts.extend(g);
+            halo.extend(h);
         }
-        (departures, ghosts)
+        (departures, halo)
     }
 
     pub fn reconcile_event(&mut self, event: GameEvent) -> Result<ReconcileStats, GameError> {

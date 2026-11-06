@@ -309,6 +309,9 @@ pub const LOD_REQUESTS_PER_TICK: usize = 32;
 struct ReconMetrics {
     window_start: Option<std::time::Instant>,
     mispredictions: u32,
+    /// Every misprediction since the session started (never reset by the
+    /// metrics window): the harness reads it (`total_mispredictions`).
+    total_mispredictions: u64,
     replay_depth_sum: usize,
     max_replay_depth: usize,
     /// Latest RTT-adjusted client-vs-server tick drift, in ms (negative =
@@ -518,6 +521,7 @@ impl ReconMetrics {
     /// Fold in the cost of one `reconcile()` pass.
     fn record(&mut self, s: ReconcileStats) {
         self.mispredictions += s.mispredictions;
+        self.total_mispredictions += u64::from(s.mispredictions);
         self.state_hash_checks += s.state_hash_checks;
         self.state_hash_mismatches += s.state_hash_mismatches;
         for (total, row) in self.by_kinds.iter_mut().zip(s.by_kinds) {
@@ -822,6 +826,12 @@ impl GameInstanceManager {
         self.host.world_mut().expect("world_mut needs the inline region host")
     }
 
+    /// Mispredictions over the whole session, every region (test/harness
+    /// hook).
+    pub fn total_mispredictions(&self) -> u64 {
+        self.recon.total_mispredictions
+    }
+
     /// The client's current home region (test/harness hook).
     pub fn home_region(&self) -> RegionCoords {
         self.home_region.expect("home region set")
@@ -907,7 +917,10 @@ impl GameInstanceManager {
             }
             // Transfer events are relayed into regions directly (server) or
             // client-predicted (later task); never locally-originated here.
-            GameEventKind::EntityArrived(_) | GameEventKind::GhostUpdate(_) | GameEventKind::HaloUpdate(_) => {}
+            GameEventKind::EntityArrived(_)
+            | GameEventKind::HaloEntity(_)
+            | GameEventKind::HaloEntityGone(_)
+            | GameEventKind::HaloUpdate(_) => {}
             GameEventKind::UiAction(_, _) | GameEventKind::Order(_, _) if !self.is_caught_up => {
                 // Same admission rule as PlayerInput: drop until the sim has
                 // caught up with the server (join/replay window).
@@ -1014,7 +1027,7 @@ impl GameInstanceManager {
                     RegionReport::Ticked {
                         sat_out,
                         departures: d,
-                        ghosts: g,
+                        halo_entities: g,
                         halo: h,
                         stamp,
                         #[cfg(not(target_arch = "wasm32"))]
@@ -1130,7 +1143,7 @@ impl GameInstanceManager {
         &mut self,
         source: RegionCoords,
         departures: Vec<(game::EntityBundle, RegionCoords)>,
-        ghosts: Vec<(game::GhostData, RegionCoords)>,
+        halo_entities: Vec<(game::HaloEntityMsg, RegionCoords)>,
         halo: Vec<(game::HaloUpdate, RegionCoords)>,
         stamp: game::Tick,
     ) {
@@ -1153,11 +1166,11 @@ impl GameInstanceManager {
                 self.home_region = Some(target);
             }
         }
-        for (data, target) in ghosts {
+        for (msg, target) in halo_entities {
             if self.host.contains(&target) {
-                let mut d = data;
-                d.isometry = game::rebase_isometry(&d.isometry, d.source_region, target);
-                self.host.send(target, RegionCmd::Ghost(d, stamp));
+                let mut m = msg;
+                m.rebase(source, target);
+                self.host.send(target, RegionCmd::HaloEntity(m, stamp));
             }
         }
         for (update, target) in halo {
@@ -2470,7 +2483,7 @@ mod manager_tests {
         while manager.client_packet_recv().try_recv().is_ok() {}
 
         // The old home's tick: the player leaves (a real departure bundle).
-        let (departures, ghosts, stamp) = {
+        let (departures, halo_entities, stamp) = {
             let w = manager.world_mut();
             let key = *w.data(&home).player_entites.get(&0).unwrap();
             let region = w.regions.get_mut(&home).unwrap();
@@ -2481,8 +2494,8 @@ mod manager_tests {
                 )
             });
             region.handle_event(GameEventKind::Tick).unwrap();
-            let (departures, ghosts) = region.take_transfers();
-            (departures, ghosts, region.current_tick())
+            let (departures, halo_entities) = region.take_transfers();
+            (departures, halo_entities, region.current_tick())
         };
         assert!(departures.iter().any(|(b, _)| b.client.as_ref().map(|(c, _)| *c) == Some(0)));
         let input = GameEventKind::PlayerInput(0, game::InputEvent::Key { key: game::Key::KeyW, pressed: false });
@@ -2492,7 +2505,7 @@ mod manager_tests {
                 RegionReport::Ticked {
                     sat_out: false,
                     departures,
-                    ghosts,
+                    halo_entities,
                     halo: Vec::new(),
                     stamp,
                     perf: game::RegionTickPerf::default(),
@@ -2580,7 +2593,7 @@ mod manager_tests {
         manager.is_caught_up = true;
 
         let player_key = *manager.world_ref().data(&home).player_entites.get(&0).unwrap();
-        // Deep into B: local x rebases to 128 (interior — no ghost back to A,
+        // Deep into B: local x rebases to 128 (interior — no halo entity back to A,
         // no re-departure from B), just past A's +x boundary.
         let cross_iso = game::Pose::translation(game::REGION_SIZE + 128.0, 26.0, 128.0);
         manager
@@ -2623,7 +2636,7 @@ mod manager_tests {
         let sa_key = *server_a.data().player_entites.get(&0).unwrap();
         server_a.with_data(|d| d.set_body_pose_safe(sa_key, cross_iso));
         server_a.handle_event(GameEventKind::Tick).unwrap();
-        let (departures, _ghosts) = server_a.take_transfers();
+        let (departures, _halo) = server_a.take_transfers();
         let (mut bundle, to) = departures.into_iter().next().expect("server-side player departed A");
         assert_eq!(to, target);
         bundle.rebase(home, target);

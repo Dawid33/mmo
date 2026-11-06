@@ -5,7 +5,7 @@
 use crossbeam::channel::Sender;
 use game::{
     ClientId, ClientPacket, ClientUpdateEvent, EntityBundle, GameError, GameEvent, GameEventKind,
-    GhostData, ReconcileStats, Region, RegionCoords, RegionId,
+    HaloEntityMsg, ReconcileStats, Region, RegionCoords, RegionId,
 };
 use log::info;
 use std::collections::VecDeque;
@@ -30,8 +30,9 @@ pub enum RegionCmd {
     /// to the end of that slot here, the server's slot and order (see
     /// [`RunnerState::held_transfers`]).
     Arrival(EntityBundle, game::Tick),
-    /// A predicted margin mirror from a sibling region (ditto, same stamp).
-    Ghost(GhostData, game::Tick),
+    /// A predicted entity-halo message from a sibling region (ditto, same
+    /// stamp): an update of its mirror here, or its explicit end.
+    HaloEntity(HaloEntityMsg, game::Tick),
     /// A predicted terrain halo update from a sibling region (ditto, same
     /// stamp), like the server's `RegionInput::Transfer(HaloUpdate)`.
     Halo(game::HaloUpdate, game::Tick),
@@ -51,12 +52,12 @@ pub enum RegionCmd {
 #[derive(Debug)]
 pub enum RegionReport {
     /// One `Tick` (or alignment tick): this tick's boundary crossings and
-    /// margin mirrors, targets absolute, isometries still region-local.
+    /// entity-halo messages, targets absolute, isometries still region-local.
     /// Every host relays them per report, so both see one order.
     Ticked {
         sat_out: bool,
         departures: Vec<(EntityBundle, RegionCoords)>,
-        ghosts: Vec<(GhostData, RegionCoords)>,
+        halo_entities: Vec<(HaloEntityMsg, RegionCoords)>,
         /// Terrain halo updates for the neighbours (`game::halo`): band
         /// chunks this tick changed. Targets absolute.
         halo: Vec<(game::HaloUpdate, RegionCoords)>,
@@ -208,7 +209,7 @@ pub fn handle(
             }
             transfer(region, st, ctx, GameEventKind::EntityArrived(bundle), stamp, out);
         }
-        RegionCmd::Ghost(data, stamp) => transfer(region, st, ctx, GameEventKind::GhostUpdate(data), stamp, out),
+        RegionCmd::HaloEntity(msg, stamp) => transfer(region, st, ctx, msg.into_event(), stamp, out),
         RegionCmd::Halo(update, stamp) => transfer(region, st, ctx, GameEventKind::HaloUpdate(update), stamp, out),
         RegionCmd::Clock(input) => {
             let d = decide(region.current_tick(), &input);
@@ -262,7 +263,7 @@ fn tick(region: &mut Region, st: &mut RunnerState, ctx: &RunnerCtx, out: &mut Ve
         out.push(RegionReport::Ticked {
             sat_out: true,
             departures: Vec::new(),
-            ghosts: Vec::new(),
+            halo_entities: Vec::new(),
             halo: Vec::new(),
             stamp: region.current_tick(),
             #[cfg(not(target_arch = "wasm32"))]
@@ -294,7 +295,7 @@ fn tick(region: &mut Region, st: &mut RunnerState, ctx: &RunnerCtx, out: &mut Ve
     let took = start.elapsed();
     // Read right after the tick: the buffers hold this tick's scan only
     // (a reconcile replay overwrites them with stale scans, never read).
-    let (departures, ghosts) = take_transfers(region, st, ctx);
+    let (departures, halo_entities) = take_transfers(region, st, ctx);
     // Band chunks written since the last tick (this tick's edits, and any a
     // predicted event made in the slot before it).
     let halo = region.take_halo_updates();
@@ -302,7 +303,7 @@ fn tick(region: &mut Region, st: &mut RunnerState, ctx: &RunnerCtx, out: &mut Ve
     out.push(RegionReport::Ticked {
         sat_out: false,
         departures,
-        ghosts,
+        halo_entities,
         halo,
         stamp,
         #[cfg(not(target_arch = "wasm32"))]
@@ -389,12 +390,12 @@ fn take_transfers(
     region: &mut Region,
     st: &mut RunnerState,
     ctx: &RunnerCtx,
-) -> (Vec<(EntityBundle, RegionCoords)>, Vec<(GhostData, RegionCoords)>) {
-    let (departures, ghosts) = region.take_transfers();
+) -> (Vec<(EntityBundle, RegionCoords)>, Vec<(HaloEntityMsg, RegionCoords)>) {
+    let (departures, halo_entities) = region.take_transfers();
     if departures.iter().any(|(b, _)| b.client.as_ref().map(|(c, _)| *c) == Some(ctx.client_id)) {
         st.player_departed = true;
     }
-    (departures, ghosts)
+    (departures, halo_entities)
 }
 
 /// The local body's region-local translation, if it is here.
@@ -610,15 +611,15 @@ mod tests {
     }
 
     fn ghost(stamp: game::Tick) -> RegionCmd {
-        RegionCmd::Ghost(
-            GhostData {
+        RegionCmd::HaloEntity(
+            HaloEntityMsg::Update(game::HaloEntityDelta {
                 id: game::EntityId { birth_region: RegionCoords::new(-1, 0), serial: 0 },
                 source_region: RegionCoords::new(-1, 0),
                 kind: game::EntityKind::Player,
                 isometry: game::Pose::translation(1.0, 26.0, 128.0),
                 linvel: game::parry::math::Vector::ZERO,
                 collider: game::ColliderSpec::CapsuleY { half_height: 8.0, radius: 6.4 },
-            },
+            }),
             stamp,
         )
     }
@@ -645,8 +646,8 @@ mod tests {
         assert_eq!(logged(&r).len(), n + 2, "slot t+1 still open: still held");
         run(&mut r, &mut st, &ctx, RegionCmd::Tick);
         let ids = logged(&r);
-        assert_eq!(ids.len(), n + 4, "the ghost, then the tick closing slot t+1");
-        assert_eq!(ids[n + 2], input_id + 1, "the ghost follows the slot's input");
+        assert_eq!(ids.len(), n + 4, "the mirror, then the tick closing slot t+1");
+        assert_eq!(ids[n + 2], input_id + 1, "the mirror follows the slot's input");
         assert!(st.held_transfers.is_empty());
         run(&mut r, &mut st, &ctx, ghost(t + 1));
         assert_eq!(logged(&r).len(), n + 5, "slot already closed: applied on receipt");

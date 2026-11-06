@@ -8,7 +8,7 @@
 //! [`GameEventKind::HaloUpdate`](crate::GameEventKind::HaloUpdate) events:
 //! - a region's tick (and the slot's events after it) that changed a chunk
 //!   within the band sends [`HaloUpdate`]s to the neighbours that mirror it,
-//!   stamped like departures and ghosts (`RegionOutput::HaloDeltas`), so
+//!   stamped like departures (`RegionOutput::HaloDeltas`), so
 //!   they land in slot T+1 and the client replays them in that slot;
 //! - a starting region is seeded before its first tick: from each
 //!   neighbour's running state (`RegionInput::HaloRequest`), its parked /
@@ -16,8 +16,19 @@
 //!
 //! Read-only: edits stay with the owner (a raycast may hit a halo block; it
 //! cannot break it). What is not mirrored: the neighbour's implied ground
-//! (its rock below the materialised band reads as air here) and entities
-//! (still ghosts).
+//! (its rock below the materialised band reads as air here).
+//!
+//! The ENTITY halo rides the same stamped channel: each tick the owner sends
+//! every owned entity within [`HALO_UNITS`] of an edge to that neighbour
+//! ([`crate::HaloEntityDelta`], `RegionOutput::HaloEntities`), which upserts
+//! a kinematic mirror (`GameData::halo_entities`). The owner remembers what it
+//! mirrored where (`GameData::halo_sent`) and ends a mirror explicitly with
+//! [`crate::HaloEntityGone`] — the entity left the band, despawned, was
+//! parked, crossed into another region, or the owner stopped. A crossing into
+//! the receiver itself sends none: the arrival upgrades the mirror in place.
+//! A seed ([`HaloUpdate::replace`]) also drops every entity mirror of its
+//! source, so a (re)started region never keeps a stale one; the source's next
+//! tick re-sends the entities still in the band.
 //!
 //! A halo chunk is a whole neighbour chunk: with `CHUNK_BLOCKS` >= 8 the
 //! band is the one chunk row along each edge, plus the corner chunks.
@@ -34,6 +45,10 @@ use crate::{
 /// reach that may look past an edge (the asserts below), plus a sprint step
 /// and a body's half-extent (spec P5's width rule).
 pub const HALO_BLOCKS: i32 = 8;
+
+/// [`HALO_BLOCKS`] in world units: an owned entity this close to an edge is
+/// mirrored into that neighbour's entity halo (`crate::halo_offsets`).
+pub const HALO_UNITS: f32 = (HALO_BLOCKS * crate::BLOCK_VOXELS as i32) as f32;
 
 /// The halo width in whole chunks: chunk rows mirrored along each edge.
 pub const HALO_CHUNKS: i32 = (HALO_BLOCKS + CHUNK_BLOCKS as i32 - 1) / CHUNK_BLOCKS as i32;
@@ -71,7 +86,8 @@ pub struct HaloUpdate {
     /// The region the chunks belong to.
     pub from: RegionCoords,
     /// A seed: `deltas` are ALL of `from`'s chunks in the receiver's band;
-    /// any other halo chunk of `from` held there is dropped.
+    /// any other halo chunk of `from` held there is dropped, and so is every
+    /// entity mirror of `from` (its next tick re-sends those in the band).
     pub replace: bool,
     pub deltas: Vec<HaloDelta>,
 }
@@ -344,6 +360,16 @@ impl Rollback {
                 .collect();
             for chunk in stale {
                 self.apply_halo_delta_safe(&HaloDelta { chunk, data: None });
+            }
+            let mirrors: Vec<crate::EntityId> = self
+                .data
+                .halo_entities
+                .iter()
+                .filter(|(_, h)| h.source_region == u.from)
+                .map(|(id, _)| *id)
+                .collect();
+            for id in mirrors {
+                self.remove_halo_entity_safe(id);
             }
         }
         for d in &u.deltas {

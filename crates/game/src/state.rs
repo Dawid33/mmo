@@ -15,7 +15,7 @@ use std::sync::{Arc, atomic::AtomicUsize};
 
 use crate::camera::{Camera, Perspective3};
 use crate::input::InputState;
-use crate::protocol::{BodyState, ColliderSpec, EntityBundle, GhostData, GHOST_TTL_TICKS};
+use crate::protocol::{BodyState, ColliderSpec, EntityBundle, HaloEntityDelta, HaloEntityGone, HaloEntityMsg};
 use crate::registry::BlockId;
 use crate::block::CHUNK_UNITS;
 use crate::block::{Block, BlockIndex, ChiselData};
@@ -70,10 +70,10 @@ pub enum GameDataUpdateKind {
     RemoveEntity(EntityKey),
     SetFreeCam(ClientId, bool),
     SetEntityKind(EntityKey, Option<EntityKind>),
-    /// Marks an entity as a ghost mirror of (source region, source key), or
-    /// clears the mark on upgrade/expiry. The bridge uses it to hide ghosts
-    /// whose source region is also loaded locally.
-    SetGhostSource(EntityKey, Option<crate::protocol::RegionCoords>),
+    /// Marks an entity as an entity-halo mirror of (source region, entity
+    /// id), or clears the mark on upgrade / removal. The bridge draws one
+    /// copy per id: the owned one when its source region is loaded here.
+    SetHaloSource(EntityKey, Option<(crate::protocol::RegionCoords, crate::EntityId)>),
     /// The entity's animation state (`anim.rs`), set (`Some`) or gone. The
     /// renderer poses the entity's model from it with `anim::sample`.
     SetAnimator(EntityKey, Option<crate::anim::Animator>),
@@ -188,16 +188,31 @@ pub enum EntityKind {
     Person { person: crate::history::PersonId },
 }
 
-/// A live ghost mirror in this region, keyed in `GameData::ghosts` by its
-/// `EntityId`. `last_update_tick` drives the TTL reaper.
-#[derive(Default, Debug, serde::Serialize, serde::Deserialize, Clone, ::borrow::Partial, StateHash, PartialEq)]
-#[module(crate)]
-pub struct GhostEntry {
+/// A live entity-halo mirror in this region (`halo.rs`), keyed in
+/// `GameData::halo_entities` by the owned entity's `EntityId`. It lives
+/// until its owner ends it ([`HaloEntityGone`], or a halo seed from it) or
+/// the entity arrives here.
+#[derive(Debug, serde::Serialize, serde::Deserialize, Clone, StateHash, PartialEq)]
+pub struct HaloEntity {
     pub entity: EntityKey,
-    pub last_update_tick: crate::Tick,
-    /// The region hosting the real entity (the renderer hides the mirror
+    /// The region owning the real entity (the renderer hides the mirror
     /// while that region is loaded here).
     pub source_region: crate::RegionCoords,
+    pub kind: EntityKind,
+    /// The shape of the mirror's kinematic body.
+    pub collider: ColliderSpec,
+}
+
+/// Required by the rollback map; never a real mirror.
+impl Default for HaloEntity {
+    fn default() -> Self {
+        Self {
+            entity: EntityKey::default(),
+            source_region: crate::RegionCoords::default(),
+            kind: EntityKind::default(),
+            collider: ColliderSpec::CapsuleY { half_height: 0.0, radius: 0.0 },
+        }
+    }
 }
 
 #[rollback(GameData)]
@@ -211,7 +226,7 @@ mod game_data {
     use super::{
         Camera, Chunk, ChunkIndexKey, Client, ClientId, Component, EntityKey,
         PhysicsParams,
-        EntityKind, GhostEntry, Pose, RigidBodyHandle, RollbackInfo, SlotMap,
+        EntityKind, HaloEntity, Pose, RigidBodyHandle, RollbackInfo, SlotMap,
     };
     use std::collections::BTreeMap;
 
@@ -233,9 +248,14 @@ mod game_data {
         player_entites: BTreeMap<ClientId, EntityKey>,
         #[undo(map)]
         clients: BTreeMap<ClientId, Client>,
-        /// Ghost mirrors hosted here, by the source entity's id.
+        /// Entity-halo mirrors hosted here, by the owned entity's id.
         #[undo(map)]
-        ghosts: BTreeMap<crate::EntityId, GhostEntry>,
+        halo_entities: BTreeMap<crate::EntityId, HaloEntity>,
+        /// Owner side of the entity halo: the neighbours each owned entity
+        /// was mirrored into at the last boundary scan (sorted), so a scan
+        /// that no longer mirrors it there sends an explicit `HaloEntityGone`.
+        #[undo(map)]
+        halo_sent: BTreeMap<crate::EntityId, Vec<crate::RegionCoords>>,
         /// Owned entities that arrived via handoff, by the id they
         /// arrived under — makes replayed arrivals idempotent.
         #[undo(map)]
@@ -1294,7 +1314,8 @@ impl Rollback {
         *self.data.ecs.id.try_get(key)
     }
 
-    /// The entity carrying `id` in this region (owned bodies only, not ghosts).
+    /// The entity carrying `id` in this region (owned bodies only, not halo
+    /// mirrors).
     pub fn entity_by_id(&self, id: crate::EntityId) -> Option<EntityKey> {
         self.data.id_index.get(&id).copied()
     }
@@ -1334,8 +1355,8 @@ impl Rollback {
 
     /// Insert a kinematic character body + its collider for entity `e`,
     /// undo-tracked (the create_player_safe insert pattern generalized). The
-    /// shared build used by transfer arrivals (`inject_body_safe`) and stage-2
-    /// ghost hosting (`apply_ghost`): both need the same kinematic body from a
+    /// shared build used by transfer arrivals (`inject_body_safe`) and the
+    /// entity halo (`apply_halo_entity_safe`): both need the same kinematic body from a
     /// pose + collider spec, so the builder chain lives here, once.
     pub(crate) fn build_kinematic_body_safe(
         &mut self,
@@ -1381,7 +1402,7 @@ impl Rollback {
         self.build_body_safe(e, &bundle.body, &bundle.collider);
     }
 
-    /// Re-pose and re-state `e`'s existing body from a bundle (a ghost's
+    /// Re-pose and re-state `e`'s existing body from a bundle (a halo
     /// mirror upgraded in place, or a replayed arrival).
     fn apply_body_state_safe(&mut self, e: EntityKey, state: &crate::BodyState) {
         let Some(handle) = *self.data.ecs.rigidbody.try_get(e) else { return };
@@ -1393,8 +1414,8 @@ impl Rollback {
     }
 
     /// Ownership transfer INTO this region. Three paths:
-    /// replayed identity → pose correction; ghost present → upgrade in
-    /// place (same EntityKey — visual continuity); else → fresh create.
+    /// replayed identity → pose correction; halo mirror present → upgrade
+    /// in place (same EntityKey — visual continuity); else → fresh create.
     /// Returns the arrived entity, `None` for a replay (only a pose fix).
     pub fn apply_arrival(&mut self, bundle: EntityBundle) -> Option<EntityKey> {
         let identity = bundle.id;
@@ -1402,8 +1423,8 @@ impl Rollback {
         // Idempotency: a respawn-resnapshot replay must not duplicate. An id
         // already owned here is a replay too, even one never in `arrivals`
         // (born here, kept in a restored save, then sent again as in flight):
-        // ghosts never carry an `EntityId`, so a live `id_index` hit is the
-        // same entity.
+        // halo mirrors are never in `id_index`, so a live hit is the same
+        // entity.
         let known =
             self.data.arrivals.get(&identity).copied().or_else(|| self.data.id_index.get(&identity).copied());
         if let Some(e) = known {
@@ -1428,21 +1449,21 @@ impl Rollback {
             }
         }
 
-        let e = if let Some(entry) = self.data.ghosts.get(&identity).cloned() {
-            // Upgrade-in-place: drop the ghost record, keep the entity.
-            self.data.ghosts.remove(&identity);
+        let e = if let Some(entry) = self.data.halo_entities.get(&identity).cloned() {
+            // Upgrade-in-place: drop the mirror record, keep the entity.
+            self.data.halo_entities.remove(&identity);
             self.data.send(GameDataUpdate::new(
                 GameDataTransactionKind::Do,
-                GameDataUpdateKind::SetGhostSource(entry.entity, None),
+                GameDataUpdateKind::SetHaloSource(entry.entity, None),
             ));
-            // The entity persists across rollback (it was baked as a ghost in a
-            // prior transaction), so on undo we must re-apply the ghost mark —
-            // otherwise the renderer keeps a phantom owned mirror. Compensating
-            // emit rides `kind` (a tracked field; the ghosts map has no
+            // The entity persists across rollback (it was baked as a mirror in
+            // a prior transaction), so on undo we must re-apply the mirror mark
+            // — otherwise the renderer keeps a phantom owned copy. Compensating
+            // emit rides `kind` (a tracked field; the halo map has no
             // emit_on_undo), fires LIFO after state is restored.
             self.data.ecs.kind.emit_on_undo(GameDataUpdate::new(
                 GameDataTransactionKind::Undo,
-                GameDataUpdateKind::SetGhostSource(entry.entity, Some(entry.source_region)),
+                GameDataUpdateKind::SetHaloSource(entry.entity, Some((entry.source_region, identity))),
             ));
             entry.entity
         } else {
@@ -1460,9 +1481,8 @@ impl Rollback {
         ));
         self.data.ecs.kind.set_safe(e, Some(bundle.kind));
 
-        // Body + collider at the (already rebased) bundle pose. A stage-1
-        // ghost has no body; if one exists (stage 2), re-state it instead of
-        // double-inserting.
+        // Body + collider at the (already rebased) bundle pose. A mirror
+        // already has a body: re-state it instead of double-inserting.
         if self.data.ecs.rigidbody.try_get(e).is_some() {
             self.apply_body_state_safe(e, &bundle.body);
         } else {
@@ -1487,25 +1507,37 @@ impl Rollback {
         Some(e)
     }
 
-    /// Margin mirror upsert. Stage 2: the ghost carries a kinematic body +
-    /// collider (built from `GhostData.collider`) so it participates in the
-    /// receiving region's physics — cross-boundary collision. A pose refresh
-    /// moves that body; the arrival upgrade path reuses it (set_body_pose vs
-    /// re-inject), and expiry removes it via remove_entity_safe.
-    pub fn apply_ghost(&mut self, data: GhostData) {
+    /// Entity-halo mirror upsert (`halo.rs`): a kinematic body + collider
+    /// (built from the delta's collider), so it takes part in this region's
+    /// physics — cross-seam collision. An update moves that body; the arrival
+    /// upgrade path reuses it. An id owned here is ignored (a late update of
+    /// an entity that already arrived).
+    pub fn apply_halo_entity_safe(&mut self, data: HaloEntityDelta) {
         let identity = data.id;
-        let tick = *self.data.tick;
-        if let Some(entry) = self.data.ghosts.get(&identity).cloned() {
-            let mut refreshed = entry.clone();
-            refreshed.last_update_tick = tick;
-            self.data.ghosts.insert(identity, refreshed); // UndoMap logs the old value
+        if self.data.id_index.contains_key(&identity) {
+            log::debug!("halo entity {identity:?} from {:?} is owned here; ignored", data.source_region);
+            return;
+        }
+        if let Some(entry) = self.data.halo_entities.get(&identity).cloned() {
+            if entry.source_region != data.source_region {
+                // The entity changed owner: the mirror follows the new one.
+                let mut moved = entry.clone();
+                moved.source_region = data.source_region;
+                self.data.halo_entities.insert(identity, moved);
+                self.data.send(GameDataUpdate::new(
+                    GameDataTransactionKind::Do,
+                    GameDataUpdateKind::SetHaloSource(entry.entity, Some((data.source_region, identity))),
+                ));
+                self.data.ecs.kind.emit_on_undo(GameDataUpdate::new(
+                    GameDataTransactionKind::Undo,
+                    GameDataUpdateKind::SetHaloSource(entry.entity, Some((entry.source_region, identity))),
+                ));
+            }
             self.data.ecs.isometry.set_safe(entry.entity, Some(data.isometry));
             self.data.send(GameDataUpdate::new(
                 GameDataTransactionKind::Do,
                 GameDataUpdateKind::SetEntityPosition(entry.entity, data.isometry),
             ));
-            // Move the ghost's body to match (no-ops if it has none — safe
-            // during a mixed-version rollout of parked blobs).
             self.set_body_pose_safe(entry.entity, data.isometry);
         } else {
             let e = self.data.ecs.create_entity_safe();
@@ -1525,45 +1557,62 @@ impl Rollback {
             ));
             self.data.send(GameDataUpdate::new(
                 GameDataTransactionKind::Do,
-                GameDataUpdateKind::SetGhostSource(e, Some(data.source_region)),
+                GameDataUpdateKind::SetHaloSource(e, Some((data.source_region, identity))),
             ));
-            // Stage 2: a kinematic body + collider so the ghost collides.
             self.build_kinematic_body_safe(e, data.isometry, &data.collider);
-            self.data.ghosts.insert(
+            self.data.halo_entities.insert(
                 identity,
-                GhostEntry { entity: e, last_update_tick: tick, source_region: data.source_region },
+                HaloEntity { entity: e, source_region: data.source_region, kind: data.kind, collider: data.collider },
             );
         }
     }
 
-    /// TTL reaper: called once per tick. Covers the owner region parking,
-    /// dying, or the entity leaving the margin.
-    pub fn expire_ghosts(&mut self) {
-        let tick = *self.data.tick;
-        let expired: Vec<(crate::EntityId, GhostEntry)> = self
-            .data
-            .ghosts
-            .iter()
-            .filter(|(_, g)| tick.saturating_sub(g.last_update_tick) > GHOST_TTL_TICKS as crate::Tick)
-            .map(|(k, g)| (*k, g.clone()))
-            .collect();
-        for (k, GhostEntry { entity: e, source_region, .. }) in expired {
-            self.data.ghosts.remove(&k);
-            self.data.send(GameDataUpdate::new(
-                GameDataTransactionKind::Do,
-                GameDataUpdateKind::SetGhostSource(e, None),
-            ));
-            // remove_entity_safe's undo re-creates the entity (its slot #[emit]
-            // fires CreateEntity on undo), so on rollback the ghost survives and
-            // its mark must be restored. Registered BEFORE remove_entity_safe so
-            // it replays LIFO-after the entity is re-created/re-mapped — else the
-            // bridge would warn on an unmapped key. k.0 is the source region.
-            self.data.ecs.kind.emit_on_undo(GameDataUpdate::new(
-                GameDataTransactionKind::Undo,
-                GameDataUpdateKind::SetGhostSource(e, Some(source_region)),
-            ));
-            self.remove_entity_safe(e, None);
+    /// An owner ends its mirror here: removed if it is `gone.from`'s (a
+    /// mirror of another owner, or none, is left alone).
+    pub fn apply_halo_entity_gone_safe(&mut self, gone: HaloEntityGone) {
+        if self.data.halo_entities.get(&gone.id).is_some_and(|h| h.source_region == gone.from) {
+            self.remove_halo_entity_safe(gone.id);
         }
+    }
+
+    /// Removes the mirror of `id` and its entity, undo-safely.
+    pub(crate) fn remove_halo_entity_safe(&mut self, id: crate::EntityId) {
+        let Some(HaloEntity { entity: e, source_region, .. }) = self.data.halo_entities.get(&id).cloned() else {
+            return;
+        };
+        self.data.halo_entities.remove(&id);
+        self.data.send(GameDataUpdate::new(
+            GameDataTransactionKind::Do,
+            GameDataUpdateKind::SetHaloSource(e, None),
+        ));
+        // remove_entity_safe's undo re-creates the entity (its slot #[emit]
+        // fires CreateEntity on undo), so on rollback the mirror survives and
+        // its mark must be restored. Registered BEFORE remove_entity_safe so
+        // it replays LIFO-after the entity is re-created/re-mapped — else the
+        // bridge would warn on an unmapped key.
+        self.data.ecs.kind.emit_on_undo(GameDataUpdate::new(
+            GameDataTransactionKind::Undo,
+            GameDataUpdateKind::SetHaloSource(e, Some((source_region, id))),
+        ));
+        self.remove_entity_safe(e, None);
+    }
+
+    /// The mirror of `id` hosted here, if any.
+    pub fn halo_entity(&self, id: crate::EntityId) -> Option<&HaloEntity> {
+        self.data.halo_entities.get(&id)
+    }
+
+    /// `HaloEntityGone` for every mirror this region keeps in its neighbours
+    /// (`halo_sent`): what a stopping region sends on its way out. Read-only.
+    pub fn halo_entities_gone_all(&self) -> Vec<(HaloEntityMsg, crate::RegionCoords)> {
+        let from = *self.data.region;
+        self.data
+            .halo_sent
+            .iter()
+            .flat_map(|(id, targets)| {
+                targets.iter().map(move |t| (HaloEntityMsg::Gone(HaloEntityGone { id: *id, from }), *t))
+            })
+            .collect()
     }
 
     /// The transferable shape spec of a body's first collider, or the player
@@ -1636,9 +1685,15 @@ impl Rollback {
         bundle
     }
 
-    /// Post-step boundary/margin scan. Iterates the kind component in key
-    /// order (deterministic); terrain (kindless) and ghosts are excluded.
-    /// Returns `(departures, ghost updates)` with ABSOLUTE target coords.
+    /// Post-step boundary scan. Iterates the kind component in key order
+    /// (deterministic); terrain (kindless) and halo mirrors are excluded.
+    /// Returns `(departures, entity-halo messages)` with ABSOLUTE target
+    /// coords: an update for every owned entity within the halo band of each
+    /// neighbour (`halo_offsets`), and a `HaloEntityGone` for each mirror the
+    /// last scan made that this one does not (the entity left that band,
+    /// despawned, was parked, or crossed into another region — a crossing
+    /// into the mirror's own region sends none: the arrival upgrades it).
+    /// `halo_sent` is updated to match, undo-tracked.
     ///
     /// With a `map`, a body past a side whose neighbour is off the map (the
     /// world's outer seam) is put back on the seam instead of leaving:
@@ -1649,25 +1704,30 @@ impl Rollback {
         map: Option<crate::MapExtent>,
     ) -> (
         Vec<(crate::EntityBundle, crate::RegionCoords)>,
-        Vec<(crate::GhostData, crate::RegionCoords)>,
+        Vec<(HaloEntityMsg, crate::RegionCoords)>,
     ) {
-        let ghost_keys: std::collections::BTreeSet<EntityKey> =
-            self.data.ghosts.iter().map(|(_, g)| g.entity).collect();
-        // Read-only pass: gather leavers/ghosts before any mutation, so the
+        let mirror_keys: std::collections::BTreeSet<EntityKey> =
+            self.data.halo_entities.iter().map(|(_, h)| h.entity).collect();
+        // Read-only pass: gather leavers/mirrors before any mutation, so the
         // immutable borrows of physics/ecs don't collide with extraction.
         let mut leavers: Vec<(EntityKey, crate::RegionCoords)> = Vec::new();
-        let mut ghosts: Vec<(crate::GhostData, crate::RegionCoords)> = Vec::new();
+        let mut updates: Vec<(HaloEntityMsg, crate::RegionCoords)> = Vec::new();
+        // Where each owned entity is mirrored after this scan (sorted), and
+        // where a leaver goes.
+        let mut mirrored: std::collections::BTreeMap<crate::EntityId, Vec<crate::RegionCoords>> = Default::default();
+        let mut crossing: std::collections::BTreeMap<crate::EntityId, crate::RegionCoords> = Default::default();
         let mut held: Vec<(EntityKey, Pose)> = Vec::new();
         // Whether the neighbour at offset (dx, dz) is off the map: a body
         // past that side is held on it.
         let closed = |dx: i32, dz: i32| crate::off_map(map, crate::RegionCoords::new(region.x + dx, region.z + dz));
         for (key, kind) in self.data.ecs.kind.iter() {
             let Some(kind) = kind else { continue };
-            if ghost_keys.contains(&key) {
+            if mirror_keys.contains(&key) {
                 continue;
             }
             let Some(handle) = *self.data.ecs.rigidbody.try_get(key) else { continue };
             let Some(body) = self.data.physics.bodies.get(handle) else { continue };
+            let id = (*self.data.ecs.id.try_get(key)).expect("transferable entities have an EntityId");
             let mut t = body.translation();
             let size = crate::REGION_SIZE;
             let hold = |v: f32, lo_closed: bool, hi_closed: bool| {
@@ -1686,23 +1746,65 @@ impl Rollback {
                 held.push((key, Pose::from_parts(t, body.position().rotation)));
             }
             if let Some((dx, dz)) = crate::departure_offset(t.x, t.z) {
-                leavers.push((key, crate::RegionCoords::new(region.x + dx, region.z + dz)));
+                let target = crate::RegionCoords::new(region.x + dx, region.z + dz);
+                leavers.push((key, target));
+                crossing.insert(id, target);
             } else {
-                for (dx, dz) in crate::ghost_offsets(t.x, t.z) {
-                    ghosts.push((
-                        crate::GhostData {
-                            id: (*self.data.ecs.id.try_get(key)).expect("transferable entities have an EntityId"),
+                let mut targets = Vec::new();
+                for (dx, dz) in crate::halo_offsets(t.x, t.z) {
+                    let target = crate::RegionCoords::new(region.x + dx, region.z + dz);
+                    if crate::off_map(map, target) {
+                        continue;
+                    }
+                    updates.push((
+                        HaloEntityMsg::Update(HaloEntityDelta {
+                            id,
                             source_region: region,
                             kind: *kind,
                             isometry: *body.position(),
                             linvel: body.linvel(),
                             collider: self.collider_spec_of(handle),
-                        },
-                        crate::RegionCoords::new(region.x + dx, region.z + dz),
+                        }),
+                        target,
                     ));
+                    targets.push(target);
+                }
+                if !targets.is_empty() {
+                    targets.sort();
+                    mirrored.insert(id, targets);
                 }
             }
         }
+        // Explicit ends: each mirror the last scan made that this one does
+        // not, except in the region a leaver crosses into.
+        let mut halo = Vec::new();
+        let sent: Vec<(crate::EntityId, Vec<crate::RegionCoords>)> =
+            self.data.halo_sent.iter().map(|(id, t)| (*id, t.clone())).collect();
+        for (id, was) in &sent {
+            let now = mirrored.get(id);
+            for t in was {
+                if now.is_some_and(|n| n.contains(t)) || crossing.get(id) == Some(t) {
+                    continue;
+                }
+                halo.push((HaloEntityMsg::Gone(HaloEntityGone { id: *id, from: region }), *t));
+            }
+            if now != Some(was) {
+                match now {
+                    Some(n) => {
+                        self.data.halo_sent.insert(*id, n.clone());
+                    }
+                    None => {
+                        self.data.halo_sent.remove(id);
+                    }
+                }
+            }
+        }
+        for (id, targets) in mirrored {
+            if !self.data.halo_sent.contains_key(&id) {
+                self.data.halo_sent.insert(id, targets);
+            }
+        }
+        halo.extend(updates);
         // Mutating pass: holds and extractions are undo-tracked.
         for (key, pose) in held {
             self.set_body_pose_safe(key, pose);
@@ -1711,7 +1813,7 @@ impl Rollback {
         for (key, target) in leavers {
             departures.push((self.extract_entity_safe(key), target));
         }
-        (departures, ghosts)
+        (departures, halo)
     }
 
     /// Change detector for the terrain `terrain_snapshot` would return, without
@@ -1929,7 +2031,7 @@ mod physics_params_tests {
     }
 
     /// One physics step per region tick: a kinematic body's derived `linvel`
-    /// (Δpose / dt, carried in `EntityBundle`/`GhostData`) is in units/s, and
+    /// (Δpose / dt, carried in `EntityBundle`/`HaloEntityDelta`) is in units/s, and
     /// a dynamic body falls in real time (H10, the user's decision).
     #[test]
     fn default_physics_state_steps_one_tick() {

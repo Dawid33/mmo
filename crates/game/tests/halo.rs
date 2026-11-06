@@ -221,3 +221,119 @@ fn parked_neighbour_reseeds_running_halo() {
     assert!(rig.manager.parked_regions().contains(&north()), "north parked");
     assert_eq!(seen_from_spawn(&mut rig, world).map(|b| b.id), Some(BlockId::AIR), "the parked edit is in the halo");
 }
+
+/// The mirror `rc` holds of entity `id`, if any.
+fn mirror_in(rig: &mut Rig, rc: RegionCoords, id: game::EntityId) -> Option<game::EntityKey> {
+    let mut m = None;
+    rig.manager.spawner_mut().with_region(rc, |r| m = r.data().halo_entity(id).map(|h| h.entity));
+    m
+}
+
+/// A slime in north's edge band facing the spawn region: north owns it, the
+/// spawn region mirrors it. Returns its id.
+fn slime_in_north_band(rig: &mut Rig) -> game::EntityId {
+    let bv = BLOCK_VOXELS as f32;
+    let size = game::REGION_SIZE;
+    // 1.5 blocks short of north's +z edge, mid-region in x, on the floor.
+    let pos = [size / 2.0, 2.5 * bv, size - 1.5 * bv];
+    let mut id = None;
+    rig.manager.spawner_mut().with_region(north(), |r| {
+        let tick = r.current_tick();
+        let key = crate::common::spawn_slime(r, pos, 1, 0.0, tick);
+        id = r.data().entity_id(key);
+    });
+    let id = id.expect("the slime has an EntityId");
+    rig.round();
+    rig.round();
+    assert!(mirror_in(rig, SPAWN_REGION, id).is_some(), "the spawn region mirrors north's slime");
+    id
+}
+
+/// An owner that parks takes its mirrors with it at once: the neighbour's
+/// halo entity is gone in the slot after the owner's last, not after a TTL.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn halo_entity_removed_explicitly_on_park() {
+    let mut rig = joined();
+    let id = slime_in_north_band(&mut rig);
+    rig.event(game::ServerEvent::ClientPacket(game::ClientPacket::ReleaseRegionConnection(north()), CLIENT));
+    let last = tick_of(&mut rig, north());
+    rig.now_ms += game::UNLOAD_GRACE_MS;
+    rig.manager.maintain(rig.now_ms);
+    rig.settle();
+    assert!(rig.manager.parked_regions().contains(&north()), "north parked");
+    // No round since: the spawn region is in the slot north's last stamp opens.
+    assert_eq!(tick_of(&mut rig, SPAWN_REGION), last, "lockstep, nothing ticked since the park");
+    assert_eq!(mirror_in(&mut rig, SPAWN_REGION, id), None, "the parked owner's mirror is gone");
+}
+
+/// A body that walks across the seam takes over its own mirror: the arrival
+/// upgrades the halo entity in place, under the same `EntityKey` (the
+/// renderer keeps one entity throughout).
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn upgrade_in_place_keeps_key() {
+    let mut rig = joined();
+    rig.key(Key::KeyE, true);
+    rig.key(Key::KeyE, false);
+    for _ in 0..10 {
+        rig.round();
+    }
+    let bv = BLOCK_VOXELS as f32;
+    let mut id = None;
+    rig.manager.spawner_mut().with_region(SPAWN_REGION, |r| {
+        r.with_data(|d| {
+            let e = *d.player_entites.get(&CLIENT).unwrap();
+            id = d.entity_id(e);
+            let t = d.physics.bodies.get(*d.ecs.rigidbody.get(e)).unwrap().translation();
+            d.set_body_pose_safe(e, Pose::translation(REGION_BLOCKS as f32 / 2.0 * bv, t.y, 1.0 * bv));
+        });
+    });
+    let id = id.expect("the player has an EntityId");
+    rig.round();
+    rig.round();
+    let mirror = mirror_in(&mut rig, north(), id).expect("north mirrors the player in the spawn region's band");
+    rig.key(Key::KeyW, true);
+    rig.walk_until_owned_by(north(), "north");
+    rig.key(Key::KeyW, false);
+    let mut owned = None;
+    rig.manager.spawner_mut().with_region(north(), |r| owned = r.data().player_entites.get(&CLIENT).copied());
+    assert_eq!(owned, Some(mirror), "the arrival took over the mirror's key");
+    assert_eq!(mirror_in(&mut rig, north(), id), None, "no mirror left beside the owned body");
+}
+
+/// A neighbour lagging behind a region that parks: a halo delta the parker
+/// sent earlier is still held there when the final-terrain reseed arrives.
+/// The reseed is stamped with the parker's last tick, so it lands after the
+/// held delta and the final terrain wins.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn parked_reseed_wins_over_held_delta_in_lagging_neighbour() {
+    let mut rig = joined();
+    let n = REGION_BLOCKS as i32;
+    let local = BlockPos::new(14, 0, n - 1);
+    let world = WorldBlockPos::from_local(north(), local);
+    rig.event(game::ServerEvent::ClientPacket(game::ClientPacket::ReleaseRegionConnection(north()), CLIENT));
+    // The spawn region falls behind for a while.
+    rig.manager.spawner_mut().hold(SPAWN_REGION, 6);
+    // North breaks the block; its next tick sends the delta, which the
+    // lagging spawn region holds for a later slot.
+    set_block(&mut rig, north(), local, Block::new(BlockId::AIR));
+    rig.now_ms += game::TICK_RATE;
+    rig.manager.spawner_mut().tick_all();
+    rig.settle();
+    // Then puts it back and parks before ticking again: only the reseed
+    // carries the final block.
+    set_block(&mut rig, north(), local, Block::new(BlockId(1)));
+    rig.now_ms += game::UNLOAD_GRACE_MS;
+    rig.manager.maintain(rig.now_ms);
+    rig.settle();
+    assert!(rig.manager.parked_regions().contains(&north()), "north parked");
+    // The spawn region catches up past every stamp.
+    for _ in 0..12 {
+        rig.now_ms += game::TICK_RATE;
+        rig.manager.spawner_mut().tick_all();
+        rig.settle();
+    }
+    assert_eq!(seen_from_spawn(&mut rig, world).map(|b| b.id), Some(BlockId(1)), "the final terrain won");
+}

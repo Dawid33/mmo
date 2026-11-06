@@ -178,7 +178,7 @@ impl Plugin for SimBridgePlugin {
                         bridge::despawn_retired_regions,
                         bridge::drain_region_updates,
                         bridge::apply_snapshot_voxels,
-                        bridge::dedupe_ghosts,
+                        bridge::dedupe_halo_entities,
                     )
                         .chain()
                         .run_if(world_systems_enabled()),

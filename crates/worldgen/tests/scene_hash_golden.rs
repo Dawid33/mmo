@@ -48,11 +48,13 @@ use game::{state_hash, GameEventKind, InputEvent, Key, Region, RegionCoords};
 /// Then for `GameData.region` / `next_entity_serial` / `id_index` and the
 /// `Ecs` `id` slot (stable `EntityId`s) and `GameData.halo` (the terrain
 /// halo, empty in this lone region) — hashed layout only; 16 only.
+/// Then for the entity halo (`ghosts` -> `halo_entities`, new
+/// `GameData.halo_sent`; empty here) — hashed layout only; 16 only.
 /// Pinned per sim-chunk size (`game::CHUNK_BLOCKS`): the same world splits
 /// into other chunk entities, bodies and colliders at 2 and 16 blocks.
 const SCENE_HASH: u32 = match game::CHUNK_BLOCKS {
     2 => 0x1EA6_B476,
-    16 => 0xC5AD_51D6,
+    16 => 0xF421_ADD6,
     _ => 0,
 };
 /// Ticks of scripted input.

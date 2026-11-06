@@ -375,11 +375,14 @@ fn commander(mode: Option<&super::commander::CameraMode>) -> bool {
 #[derive(Component, Clone, Copy)]
 pub struct SimKind(pub game::EntityKind);
 
-/// Marks a bevy entity as a ghost mirror sourced from another region. Used
-/// only for render dedupe: when the source region is also loaded locally,
-/// the owned copy renders and the ghost hides (sim state keeps both).
+/// Marks a bevy entity as an entity-halo mirror (`game::halo`) of the owned
+/// entity `id` in region `source`. Used only for render dedupe
+/// ([`dedupe_halo_entities`]): one copy per id is drawn.
 #[derive(Component, Clone, Copy)]
-pub struct GhostSource(pub RegionId);
+pub struct HaloMirror {
+    pub id: game::EntityId,
+    pub source: RegionId,
+}
 
 /// Bricks derived per snapshot-voxel task. A region is ~2800 bricks at
 /// ~0.3 ms each, so a batch is ~20 ms of worker time: small enough that the
@@ -906,6 +909,12 @@ fn spawn_region_snapshot(
     // Every player in the snapshot has a sim camera, but only the local
     // player's may become this window's active Camera3d.
     let local_camera_key = local_player.and_then(|id| data.player_entites.get(&id).copied());
+    // Entity-halo mirrors in the snapshot, by entity.
+    let mirrors: BTreeMap<EntityKey, HaloMirror> = data
+        .halo_entities
+        .iter()
+        .map(|(id, h)| (h.entity, HaloMirror { id: *id, source: h.source_region }))
+        .collect();
     for (key, _) in data.ecs.entities.iter() {
         // Terrain under the static region root, everything else under the
         // bodies root (see `RegionRoots`).
@@ -952,6 +961,9 @@ fn spawn_region_snapshot(
         }
         if let Some(kind) = *data.ecs.kind.try_get(key) {
             e.insert(SimKind(kind));
+        }
+        if let Some(mirror) = mirrors.get(&key) {
+            e.insert(*mirror);
         }
         if let Some(body) = data.ecs.voxel_body.try_get(key) {
             e.insert(super::voxel_bodies::PendingVoxelBody(Arc::new(body.model.clone())));
@@ -1193,14 +1205,18 @@ pub fn drain_region_updates(
                         None => { commands.entity(e).remove::<SimKind>(); }
                     }
                 }
-                GameDataUpdateKind::SetGhostSource(key, src) => {
+                GameDataUpdateKind::SetHaloSource(key, src) => {
                     let Some(&e) = map.0.get(&(region, key)) else {
-                        warn!("bridge: SetGhostSource for unmapped {:?}", key);
+                        warn!("bridge: SetHaloSource for unmapped {:?}", key);
                         continue;
                     };
                     match src {
-                        Some(rc) => { commands.entity(e).insert(GhostSource(rc)); }
-                        None => { commands.entity(e).remove::<GhostSource>(); }
+                        Some((source, id)) => { commands.entity(e).insert(HaloMirror { id, source }); }
+                        None => {
+                            commands.entity(e).remove::<HaloMirror>();
+                            // Upgraded in place: an owned body draws.
+                            commands.entity(e).insert(Visibility::Inherited);
+                        }
                     }
                 }
                 // Plain per-tile writes, undo included: forwarded to the
@@ -1295,16 +1311,26 @@ pub fn drain_region_updates(
     }
 }
 
-/// Render rule: a ghost is visible only while its source region is NOT
-/// loaded locally — with both regions in the window you see the owned copy,
-/// not its mirror. Runs every frame; ghosts are few.
-pub fn dedupe_ghosts(
+/// Render rule: one copy per `EntityId`. A halo mirror hides while its
+/// source region is loaded locally (the owned copy draws there); otherwise
+/// the mirror in the lowest hosting region draws and the others (a corner
+/// entity is mirrored into up to 3 regions) hide. Runs every frame; mirrors
+/// are few.
+pub fn dedupe_halo_entities(
     roots: Res<RegionRoots>,
-    mut ghosts: Query<(&GhostSource, &mut Visibility)>,
+    mut mirrors: Query<(&HaloMirror, &SimEntity, &mut Visibility)>,
 ) {
-    for (src, mut vis) in ghosts.iter_mut() {
-        let hidden = roots.0.contains_key(&src.0);
-        let want = if hidden { Visibility::Hidden } else { Visibility::Inherited };
+    // The host region drawing each id whose owner is not loaded here.
+    let mut drawn: BTreeMap<game::EntityId, RegionId> = BTreeMap::new();
+    for (m, host, _) in mirrors.iter() {
+        if !roots.0.contains_key(&m.source) {
+            let r = drawn.entry(m.id).or_insert(host.region);
+            *r = (*r).min(host.region);
+        }
+    }
+    for (m, host, mut vis) in mirrors.iter_mut() {
+        let shown = drawn.get(&m.id) == Some(&host.region);
+        let want = if shown { Visibility::Inherited } else { Visibility::Hidden };
         if *vis != want {
             *vis = want;
         }
@@ -2143,63 +2169,63 @@ mod tests {
     }
 
     #[test]
-    fn ghost_hidden_only_while_its_source_region_is_loaded() {
+    fn halo_mirror_drawn_once_per_entity_id() {
         let (mut app, client, updates, region_id) = test_app();
-        app.add_systems(Update, dedupe_ghosts);
+        app.add_systems(Update, dedupe_halo_entities);
+        // A second host of the same entity's mirror (a corner entity).
+        let other_host = RegionCoords::new(0, 1);
+        let (updates2, recv2) = crossbeam::channel::unbounded();
+        client.send(ClientUpdateEvent::NewRegion(other_host, (*Rollback::new(None).data).clone(), recv2)).unwrap();
         app.update();
 
         let k = key(11);
         let src = RegionCoords::new(1, 0);
-        updates.send(GameDataUpdate::new(GameDataTransactionKind::Do, GameDataUpdateKind::CreateEntity(k))).unwrap();
-        updates.send(GameDataUpdate::new(
-            GameDataTransactionKind::Do,
-            GameDataUpdateKind::SetGhostSource(k, Some(src)),
-        )).unwrap();
+        let id = game::EntityId { birth_region: src, serial: 3 };
+        for u in [&updates, &updates2] {
+            u.send(GameDataUpdate::new(GameDataTransactionKind::Do, GameDataUpdateKind::CreateEntity(k))).unwrap();
+            u.send(GameDataUpdate::new(GameDataTransactionKind::Do, GameDataUpdateKind::SetHaloSource(k, Some((src, id)))))
+                .unwrap();
+        }
         app.update();
         app.update(); // component insert lands a frame after spawn-in-same-drain
 
-        let e = *app.world().resource::<SimEntityMap>().0.get(&(region_id, k)).unwrap();
-        // Source region NOT loaded: ghost visible.
-        assert_ne!(
-            *app.world().entity(e).get::<Visibility>().unwrap(),
-            Visibility::Hidden,
-            "ghost renders while its source region is absent"
-        );
+        let map = app.world().resource::<SimEntityMap>();
+        let e = *map.0.get(&(region_id, k)).unwrap();
+        let e2 = *map.0.get(&(other_host, k)).unwrap();
+        let vis = |app: &App, e: Entity| *app.world().entity(e).get::<Visibility>().unwrap();
+        // Source region NOT loaded: one mirror draws — the lowest host's.
+        assert_ne!(vis(&app, e), Visibility::Hidden, "the mirror renders while its source region is absent");
+        assert_eq!(vis(&app, e2), Visibility::Hidden, "a second mirror of the same id hides");
 
-        // Load the source region: the owned copy renders there; hide the ghost.
-        let (_s2, recv2) = crossbeam::channel::unbounded();
-        let rb2 = Rollback::new(None);
-        client.send(ClientUpdateEvent::NewRegion(src, (*rb2.data).clone(), recv2)).unwrap();
+        // Load the source region: the owned copy renders there; both mirrors hide.
+        let (_s3, recv3) = crossbeam::channel::unbounded();
+        client.send(ClientUpdateEvent::NewRegion(src, (*Rollback::new(None).data).clone(), recv3)).unwrap();
         app.update();
         app.update();
-        assert_eq!(
-            *app.world().entity(e).get::<Visibility>().unwrap(),
-            Visibility::Hidden,
-            "ghost hides when its source region loads"
-        );
+        assert_eq!(vis(&app, e), Visibility::Hidden, "the mirror hides when its source region loads");
+        assert_eq!(vis(&app, e2), Visibility::Hidden);
 
-        // Unload the source: ghost visible again.
+        // Unload the source: one mirror again.
         client.send(ClientUpdateEvent::RemoveRegion(src)).unwrap();
         app.update();
         app.update();
-        assert_ne!(*app.world().entity(e).get::<Visibility>().unwrap(), Visibility::Hidden);
+        assert_ne!(vis(&app, e), Visibility::Hidden);
+        assert_eq!(vis(&app, e2), Visibility::Hidden);
 
-        // Upgrade clears the mark: never hidden again.
-        updates.send(GameDataUpdate::new(
-            GameDataTransactionKind::Do,
-            GameDataUpdateKind::SetGhostSource(k, None),
-        )).unwrap();
-        client.send(ClientUpdateEvent::NewRegion(src, (*Rollback::new(None).data).clone(), {
-            let (_s3, r3) = crossbeam::channel::unbounded();
-            r3
-        })).unwrap();
+        // Upgrade clears the mark: never hidden again, even with the old
+        // source loaded.
+        updates
+            .send(GameDataUpdate::new(GameDataTransactionKind::Do, GameDataUpdateKind::SetHaloSource(k, None)))
+            .unwrap();
+        client
+            .send(ClientUpdateEvent::NewRegion(src, (*Rollback::new(None).data).clone(), {
+                let (_s4, r4) = crossbeam::channel::unbounded();
+                r4
+            }))
+            .unwrap();
         app.update();
         app.update();
-        assert_ne!(
-            *app.world().entity(e).get::<Visibility>().unwrap(),
-            Visibility::Hidden,
-            "upgraded (owned) entity is never deduped"
-        );
+        assert_ne!(vis(&app, e), Visibility::Hidden, "upgraded (owned) entity is never deduped");
     }
 
     #[test]
