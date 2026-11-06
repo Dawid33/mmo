@@ -5,6 +5,7 @@
 //! ([`super::seam_translate`]) drives the same rig.
 use crossbeam::channel::{unbounded, Receiver};
 use game::{
+    Block, BlockId, Chunk, SubChunk, REGION_SIZE,
     ClientId, ClientPacket, Column, ColumnCoords, EntityId, GameEvent, GameEventKind, InlineLodBuilder,
     InlineSchedule, InlineSpawner, InputEvent, Key, LodBuilder, Order, RegionCoords, RegionOutput, ServerEvent,
     ServerPacket, TilePos, Walker, WorldManager, SPAWN_REGION, TICK_RATE,
@@ -13,7 +14,7 @@ use std::collections::BTreeMap;
 
 /// The conservation invariant of a crossing: every `EntityId` is owned by
 /// exactly one running region or sits exactly once in the manager's
-/// in-flight table — never both, never twice, and (people aside, whom the
+/// in-flight table or arrival mailbox — never both, never twice, and (people aside, whom the
 /// history may absorb or end) never lost. Called every round.
 pub fn assert_conserved(rig: &mut Rig) {
     let mut places: BTreeMap<EntityId, Vec<Option<RegionCoords>>> = BTreeMap::new();
@@ -32,6 +33,11 @@ pub fn assert_conserved(rig: &mut Rig) {
     for (id, _target) in rig.manager.in_flight_ids() {
         places.entry(id).or_default().push(None);
     }
+    // Waiting in the manager's mailbox for a region that is not running
+    // counts as in flight too.
+    for (id, _target) in rig.manager.pending_arrival_ids() {
+        places.entry(id).or_default().push(None);
+    }
     for (id, at) in &places {
         assert_eq!(at.len(), 1, "{id:?} is in several places at once (None = in flight): {at:?}");
     }
@@ -44,6 +50,51 @@ pub fn assert_conserved(rig: &mut Rig) {
             rig.tracked.insert(id, at[0]);
         }
     }
+}
+
+// --- The seam floor (moved from `handoff_schedule.rs`, shared) ---------
+
+pub fn north() -> RegionCoords {
+    RegionCoords::new(0, -1)
+}
+
+pub fn north_west() -> RegionCoords {
+    RegionCoords::new(-1, -1)
+}
+
+fn floor_column(x: usize, z: usize) -> (ColumnCoords, Column) {
+    let air = Block::new(BlockId::AIR);
+    let sub = SubChunk::Dense(Box::new(Chunk::flat_floor(8)));
+    (ColumnCoords::new(x, z), Column::new(0, air, air, vec![sub]))
+}
+
+/// Floor columns over the world-unit rectangle `xs` x `zs`: every chunk
+/// column the rectangle overlaps.
+pub fn floor_columns(xs: std::ops::Range<f32>, zs: std::ops::Range<f32>) -> Vec<(ColumnCoords, Column)> {
+    super::chunks_over(xs, zs).into_iter().map(|(x, z)| floor_column(x, z)).collect()
+}
+
+/// Floor under the whole square between the spawn point (x=128,z=128) and the
+/// region's -x/-z corner, continuing 128 units deep into
+/// the three neighbours around that corner — so every route is walked
+/// grounded, with colliders on both sides of each handoff. Stated in world
+/// units, so it holds at any chunk size.
+pub fn seam_floor_columns(rc: RegionCoords) -> Vec<(ColumnCoords, Column)> {
+    let near = 0.0..5.0 * 64.0;
+    let far = REGION_SIZE - 128.0..REGION_SIZE;
+    let (xs, zs) = if rc == SPAWN_REGION {
+        (near.clone(), near)
+    } else if rc == north() {
+        (near, far)
+    } else if rc == RegionCoords::new(-1, 0) {
+        (far, near)
+    } else if rc == north_west() {
+        (far.clone(), far)
+    } else {
+        // Far regions: just the chunk under the spawn column.
+        return floor_columns(128.0..160.0, 128.0..160.0);
+    };
+    floor_columns(xs, zs)
 }
 
 /// Round budget for one leg of the walk. Lockstep needs ~40 (130 units at

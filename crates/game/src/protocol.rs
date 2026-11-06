@@ -467,13 +467,9 @@ pub struct EntityBundle {
 
 impl EntityBundle {
     /// Move the bundle from region `from`'s local frame into `to`'s: the
-    /// body pose, and any carried region-local coordinates.
+    /// body pose (everything carried is in world coordinates).
     pub fn rebase(&mut self, from: RegionCoords, to: RegionCoords) {
         self.body.pose = rebase_isometry(&self.body.pose, from, to);
-        if let Some(w) = &mut self.carried.wander {
-            w.home[0] += (from.x - to.x) * crate::REGION_BLOCKS as i32;
-            w.home[1] += (from.z - to.z) * crate::REGION_BLOCKS as i32;
-        }
     }
 }
 

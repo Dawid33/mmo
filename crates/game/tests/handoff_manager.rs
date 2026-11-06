@@ -338,3 +338,94 @@ fn transfer_to_leading_target_applies_on_receipt() {
     });
     assert!(!in_source, "the body left the source");
 }
+
+/// Where `id` is in one autosave round's saves: `(region, "state" | "transfer")`.
+fn saved_places(saves: Vec<(RegionCoords, game::RegionSave)>, id: game::EntityId) -> Vec<(RegionCoords, &'static str, Option<game::EntityBundle>)> {
+    let mut at = Vec::new();
+    for (rc, save) in saves {
+        let (state, transfers) = match save {
+            game::RegionSave::Live(state, transfers) => (*state, transfers),
+            parked => {
+                let saved = parked.into_serialized().to_saved().expect("parked blob decodes");
+                (saved.state, saved.transfers)
+            }
+        };
+        if state.id_index.contains_key(&id) {
+            at.push((rc, "state", None));
+        }
+        at.extend(transfers.into_iter().filter(|(b, _)| b.id == id).map(|(b, _)| (rc, "transfer", Some(b))));
+    }
+    at
+}
+
+/// One whole autosave round: asked, answered, collected.
+fn autosave(h: &mut Harness, now_ms: u64) -> Vec<(RegionCoords, game::RegionSave)> {
+    h.manager.request_save();
+    h.settle(now_ms);
+    assert!(h.manager.awaiting_save().is_empty(), "every region asked answered");
+    h.manager.take_saves()
+}
+
+/// Decision 3: a slime crossing into a region that is not running does not
+/// wake it. It waits in the manager's mailbox — saved exactly once per
+/// autosave round, with the region it left (rebased back, so restored it
+/// crosses again) — and is delivered when the region next starts.
+#[test]
+fn slime_arrival_does_not_wake_unloaded_region() {
+    crate::common::install_real_block_props();
+    let mut h = harness();
+    h.event(ServerEvent::connected(0), 0);
+    h.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(SPAWN_REGION), 0), 0);
+    h.drain_packets();
+    let north = RegionCoords::new(0, -1);
+    assert!(!h.manager.running_regions().contains(&north));
+
+    let mut id = None;
+    h.manager.spawner_mut().with_region(SPAWN_REGION, |region| {
+        let e = crate::common::spawn_slime(region, [128.0, 26.0, -(FLIP_HYSTERESIS + 2.0)], 1, 0.0, 0);
+        id = *region.data().ecs.id.try_get(e);
+    });
+    let id = id.expect("the slime has an EntityId");
+    h.tick(100);
+    assert!(!h.manager.running_regions().contains(&north), "a slime's arrival must not wake its target");
+    assert_eq!(h.manager.pending_arrival_count(north), 1, "the slime waits in the mailbox");
+    assert_eq!(h.manager.depths().pending_arrivals, 1);
+    h.manager.spawner_mut().with_region(SPAWN_REGION, |region| {
+        assert!(!region.data().id_index.contains_key(&id), "the slime left its source");
+    });
+
+    for round in 0..3 {
+        h.tick(150 + round * 50);
+        let at = saved_places(autosave(&mut h, 150 + round * 50), id);
+        assert_eq!(at.len(), 1, "save {round}: the waiting slime is saved in {:?}", at.iter().map(|a| (a.0, a.1)).collect::<Vec<_>>());
+        let (rc, what, bundle) = &at[0];
+        assert_eq!((*rc, *what), (SPAWN_REGION, "transfer"), "saved with the region it left");
+        let bundle = bundle.as_ref().unwrap();
+        assert!(matches!(bundle.kind, game::EntityKind::Slime { size: 1 }));
+        assert!(bundle.body.pose.translation.z < 0.0, "in its source's frame, past the seam: restored, it crosses again");
+    }
+    assert!(!h.manager.running_regions().contains(&north), "saving did not wake it either");
+
+    // The region starts (subscribed): the slime is delivered before its first tick.
+    let mark = h.trace.len();
+    h.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(north), 0), 400);
+    assert_eq!(h.manager.pending_arrival_count(north), 0, "delivered on start");
+    h.tick(420);
+    let first = h.trace[mark..].iter().find(|(rc, _)| *rc == north).map(|(_, t)| *t);
+    assert_eq!(first, Some(Traced::Arrived), "applied before the region's first tick");
+    let mut slime = None;
+    h.manager.spawner_mut().with_region(north, |region| {
+        let data = region.data();
+        let key = *data.id_index.get(&id).expect("north owns the slime");
+        slime = Some((*data.ecs.kind.try_get(key), data.ecs.slime.try_get(key).is_some()));
+    });
+    assert_eq!(slime, Some((Some(game::EntityKind::Slime { size: 1 }), true)), "a whole slime arrived");
+    assert_eq!(h.manager.in_flight_count(), 0, "its arrival is confirmed");
+
+    for round in 0..2 {
+        h.tick(450 + round * 50);
+        let at = saved_places(autosave(&mut h, 450 + round * 50), id);
+        let at: Vec<_> = at.into_iter().map(|a| (a.0, a.1)).collect();
+        assert_eq!(at, [(north, "state")], "save {round} after delivery");
+    }
+}

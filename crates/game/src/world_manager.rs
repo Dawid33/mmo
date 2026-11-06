@@ -434,6 +434,9 @@ pub struct ManagerDepths {
     pub terrain_cache: usize,
     /// Crossings routed but not yet confirmed ([`WorldManager::in_flight_count`]).
     pub transfers_in_flight: usize,
+    /// Non-player arrivals waiting for a region that is not running
+    /// ([`WorldManager::pending_arrival_total`]).
+    pub pending_arrivals: usize,
 }
 
 /// What a session is told when a new session of its player takes over
@@ -526,6 +529,21 @@ impl InFlight {
             && !asked.contains(&self.target)
             && (self.save_round == round || !answered.contains(&self.target))
     }
+}
+
+/// A non-player crossing into a region that was not running (plan Decision
+/// 3: only players wake their target; history people are absorbed): it
+/// waits in [`WorldManager::pending_arrivals`] until the region next runs.
+#[derive(Debug, Clone)]
+struct PendingArrival {
+    /// The region it left, which saves it meanwhile.
+    source: RegionCoords,
+    stamp: crate::Tick,
+    /// In the target's frame.
+    bundle: crate::EntityBundle,
+    /// The autosave round a save last held it in (its source's: as the body
+    /// in a state saved before it departed, or as a saved transfer).
+    saved_in: Option<u64>,
 }
 
 pub struct WorldManager<S: RegionSpawner> {
@@ -671,6 +689,13 @@ pub struct WorldManager<S: RegionSpawner> {
     /// Replies for an entity in a parked or stopping region: delivered when
     /// it next runs, saved with its parked state meanwhile.
     intent_mailbox: BTreeMap<RegionCoords, Vec<crate::IntentMsg>>,
+    /// Non-player arrivals into a region that is not running (neither
+    /// running nor stopping), by target, in arrival order: they do not wake
+    /// it, and are delivered — before its first tick — when it next starts.
+    /// Meanwhile each is saved exactly once per autosave round, with the
+    /// region it left (rebased back into its frame: restored, it crosses
+    /// again), and it is at its target in `locations`.
+    pending_arrivals: BTreeMap<RegionCoords, Vec<PendingArrival>>,
     /// Replies given up (no running, parked or stopping destination, or past
     /// `MAX_INTENT_REPLY_HOPS`): each logged at warn.
     intent_replies_lost: u64,
@@ -745,6 +770,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             in_flight_intents: Vec::new(),
             save_owed_intents: BTreeMap::new(),
             intent_mailbox: BTreeMap::new(),
+            pending_arrivals: BTreeMap::new(),
             intent_replies_lost: 0,
         }
     }
@@ -1420,7 +1446,15 @@ impl<S: RegionSpawner> WorldManager<S> {
                         }
                     }
                     bundle.rebase(rc, target);
-                    // Arrivals ALWAYS wake the target (parked blob or gen).
+                    // A player's arrival wakes its target (parked blob or
+                    // gen), as does a person's with no history to absorb
+                    // them; anything else into a region that is not running
+                    // waits for it to run.
+                    let wakes = client.is_some() || matches!(bundle.kind, EntityKind::Person { .. });
+                    if !wakes && !self.regions.contains_key(&target) {
+                        self.hold_arrival(rc, target, stamp, bundle);
+                        continue;
+                    }
                     self.ensure_running(target);
                     self.enter_in_flight(rc, target, stamp, &bundle);
                     self.locations.insert(bundle.id, target);
@@ -1622,6 +1656,10 @@ impl<S: RegionSpawner> WorldManager<S> {
             }
         }
         for rc in std::mem::take(&mut self.unsaved_parked) {
+            if !self.parked.contains_key(&rc) {
+                continue;
+            }
+            let transfers = self.saved_pending_arrivals(rc);
             if let Some(blob) = self.parked.get(&rc) {
                 let blob = match self.intent_mailbox.get(&rc) {
                     // Its mailbox goes into the saved state (the parked blob
@@ -1639,7 +1677,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                     },
                     None => blob.clone(),
                 };
-                self.saves.push((rc, RegionSave::Parked(blob)));
+                self.saves.push((rc, RegionSave::Parked(blob, transfers)));
             }
         }
     }
@@ -1659,6 +1697,73 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// answered yet (a stopping region is never asked).
     pub fn awaiting_save(&self) -> Vec<RegionCoords> {
         self.save_asked.iter().copied().collect()
+    }
+
+    /// Non-player arrivals waiting in the mailbox for `rc` to run.
+    pub fn pending_arrival_count(&self, rc: RegionCoords) -> usize {
+        self.pending_arrivals.get(&rc).map_or(0, Vec::len)
+    }
+
+    /// Every arrival waiting in the mailbox (the `[server]` counters line).
+    pub fn pending_arrival_total(&self) -> usize {
+        self.pending_arrivals.values().map(Vec::len).sum()
+    }
+
+    /// Test support: every arrival waiting in the mailbox, with its target.
+    pub fn pending_arrival_ids(&self) -> Vec<(crate::EntityId, RegionCoords)> {
+        self.pending_arrivals.iter().flat_map(|(rc, list)| list.iter().map(|p| (p.bundle.id, *rc))).collect()
+    }
+
+    /// `bundle` (in `target`'s frame), departed from `source` at `stamp`,
+    /// waits for `target`, which is not running. If `source` already
+    /// answered this round's `Save`, its saved state holds the body.
+    fn hold_arrival(&mut self, source: RegionCoords, target: RegionCoords, stamp: crate::Tick, bundle: crate::EntityBundle) {
+        let saved_in = self.save_answered.contains(&source).then_some(self.save_round);
+        self.locations.insert(bundle.id, target);
+        self.pending_arrivals.entry(target).or_default().push(PendingArrival { source, stamp, bundle, saved_in });
+    }
+
+    /// `rc` just started: its waiting arrivals go to it as ordinary
+    /// crossings in flight, the save bookkeeping carried over — a save that
+    /// held one this round still does. A parked source is saved again at the
+    /// next round, without them (its saved file holds them until then).
+    fn deliver_pending_arrivals(&mut self, rc: RegionCoords) {
+        for p in self.pending_arrivals.remove(&rc).unwrap_or_default() {
+            if self.parked.contains_key(&p.source) {
+                self.unsaved_parked.insert(p.source);
+            }
+            let entry = InFlight {
+                source: p.source,
+                target: rc,
+                stamp: p.stamp,
+                bundle: p.bundle.clone(),
+                save_round: self.save_round,
+                in_source_save: false,
+                saved_in: p.saved_in,
+            };
+            if let Some(old) = self.in_flight.insert(p.bundle.id, entry) {
+                log::error!("{:?} waited for {rc:?} while in flight to {:?}", p.bundle.id, old.target);
+            }
+            self.locations.insert(p.bundle.id, rc);
+            self.send_to_region(rc, RegionInput::Transfer(GameEventKind::EntityArrived(p.bundle), p.stamp));
+        }
+    }
+
+    /// This round's save of `source` (live or parked) carries the arrivals
+    /// waiting elsewhere that departed from it and are not saved this round
+    /// yet, rebased back into its frame.
+    fn saved_pending_arrivals(&mut self, source: RegionCoords) -> Vec<crate::SavedTransfer> {
+        let round = self.save_round;
+        let mut out = Vec::new();
+        for (target, list) in self.pending_arrivals.iter_mut() {
+            for p in list.iter_mut().filter(|p| p.source == source && p.saved_in != Some(round)) {
+                let mut bundle = p.bundle.clone();
+                bundle.rebase(*target, source);
+                out.push((bundle, p.stamp));
+                p.saved_in = Some(round);
+            }
+        }
+        out
     }
 
     /// Test support: every crossing in flight, with its target.
@@ -1701,8 +1806,9 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.save_asked.remove(&rc);
         self.save_answered.insert(rc);
         let round = self.save_round;
-        let (asked, answered) = (&self.save_asked, &self.save_answered);
         let mut out = self.save_owed.remove(&rc).unwrap_or_default();
+        out.extend(self.saved_pending_arrivals(rc));
+        let (asked, answered) = (&self.save_asked, &self.save_answered);
         for f in self.in_flight.values_mut() {
             if f.saved_in == Some(round) || (f.save_round == round && f.in_source_save) {
                 continue;
@@ -2095,6 +2201,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             lod_cache: self.lod_cache.len(),
             terrain_cache: self.terrain_cache.len(),
             transfers_in_flight: self.in_flight_count(),
+            pending_arrivals: self.pending_arrival_total(),
         }
     }
 
@@ -2166,6 +2273,9 @@ impl<S: RegionSpawner> WorldManager<S> {
                 resubscribe_pending: Vec::new(),
             },
         );
+        // Arrivals that waited for it, in arrival order, before its first
+        // tick (their stamps are past, so it applies them on receipt).
+        self.deliver_pending_arrivals(rc);
         // Replies that waited for it.
         for msg in self.intent_mailbox.remove(&rc).unwrap_or_default() {
             self.send_intent_to(rc, msg, None);

@@ -31,9 +31,11 @@ const SALT_WANDER_GOAL: u64 = 0x9E47_0002;
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, state_hash::StateHash, serde::Serialize, serde::Deserialize)]
 pub struct Wander {
     pub next_tick: u64,
-    /// The block column the person wanders around: where they stood when the
-    /// component was first set (so repeated wanders do not drift away).
-    pub home: [i32; 2],
+    /// The world block column ([`crate::WorldBlockPos`]'s `[x, z]`) the
+    /// person wanders around: where they stood when the component was first
+    /// set (so repeated wanders do not drift away). World, not region-local,
+    /// so it means the same place on both sides of a seam.
+    pub home: [i64; 2],
 }
 
 impl Rollback {
@@ -202,7 +204,8 @@ impl Rollback {
             Some(w) if tick < w.next_tick => return,
             Some(w) => w.home,
             None => {
-                let home = [from[0], from[2]];
+                let w = crate::WorldBlockPos::from_local(here, crate::BlockPos::new(from[0], from[1], from[2]));
+                let home = [w.x, w.z];
                 self.data.ecs.wander.set_safe(e, Some(Wander { next_tick: tick + wait(tick), home }));
                 return;
             }
@@ -210,18 +213,13 @@ impl Rollback {
         self.data.ecs.wander.set_safe(e, Some(Wander { next_tick: tick + wait(tick), home }));
         let r = crate::slime::roll(tick, person.0 as u64, SALT_WANDER_GOAL);
         let span = 2 * WANDER_RADIUS_BLOCKS as u64 + 1;
-        let dx = (r % span) as i32 - WANDER_RADIUS_BLOCKS;
-        let dz = ((r >> 24) % span) as i32 - WANDER_RADIUS_BLOCKS;
-        let column = [home[0] + dx, home[1] + dz];
-        let n = REGION_BLOCKS as i32;
-        if !(0..n).contains(&column[0]) || !(0..n).contains(&column[1]) {
-            return;
-        }
-        // Only to a tile that exists near the person's own level.
-        if nearest_standable(self, column, Some(from[1])).is_none() {
-            return;
-        }
-        self.walk_entity_safe(e, Goal::local(here, column, Some(from[1])), here, map);
+        let dx = (r % span) as i64 - WANDER_RADIUS_BLOCKS as i64;
+        let dz = ((r >> 24) % span) as i64 - WANDER_RADIUS_BLOCKS as i64;
+        // Anywhere around home, this side of a seam or the other: the walk
+        // plans across seams (`PathPlan`), and finds the goal's standable
+        // tile nearest the person's own level or gives up.
+        let goal = Goal { column: [home[0] + dx, home[1] + dz], y: Some(from[1]) };
+        self.walk_entity_safe(e, goal, here, map);
     }
 
     fn steer_person_safe(&mut self, e: EntityKey, tick: u64) {

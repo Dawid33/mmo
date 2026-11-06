@@ -158,12 +158,14 @@ pub type SavedTransfer = (EntityBundle, Tick);
 /// One region's state for the world autosave: a running region's live clone
 /// (`RegionOutput::Saved`) with the crossings in flight to it that its state
 /// does not hold yet (from the manager's in-flight table), or a parked blob (which holds every arrival:
-/// `Shutdown` applies what is held). Either restores through
+/// `Shutdown` applies what is held). Either also carries, rebased back into
+/// its frame, what departed from it into a region that is not running and
+/// waits there (the manager's arrival mailbox). Either restores through
 /// [`restore_saved`] + [`RegionRunner::requeue_saved`].
 #[derive(Debug)]
 pub enum RegionSave {
     Live(Box<Rollback>, Vec<SavedTransfer>),
-    Parked(SerializedRegion),
+    Parked(SerializedRegion, Vec<SavedTransfer>),
 }
 
 impl RegionSave {
@@ -173,7 +175,7 @@ impl RegionSave {
     pub fn into_serialized(self) -> SerializedRegion {
         let (mut bytes, transfers) = match self {
             RegionSave::Live(rollback, transfers) => (SerializedRegion::from_rollback(&rollback).0, transfers),
-            RegionSave::Parked(serialized) => (serialized.0, Vec::new()),
+            RegionSave::Parked(serialized, transfers) => (serialized.0, transfers),
         };
         bincode::serialize_into(&mut bytes, &transfers).expect("saved transfers must serialize");
         SerializedRegion(bytes)

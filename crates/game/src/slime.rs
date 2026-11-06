@@ -2,7 +2,8 @@
 //!
 //! A slime sits still on the ground for a random 10–30 ticks, then hops,
 //! travelling only while airborne. It wanders on a random heading that it
-//! re-picks every few seconds, and turns back before it reaches a region edge.
+//! re-picks every few seconds, across region seams like any entity (into a
+//! region that is not running it waits in the manager's mailbox).
 //! It never attacks: this is wildlife, not a hostile mob.
 //!
 //! Everything here is deterministic sim code, run identically by the server
@@ -17,7 +18,7 @@
 
 use rapier3d::math::Vector;
 use slotmapd::Key as _;
-use std::f32::consts::{FRAC_PI_2, FRAC_PI_4, PI, TAU};
+use std::f32::consts::{FRAC_PI_4, PI, TAU};
 
 use crate::movement::{self, MoveKeys, MoveParams, UNITS_PER_METER};
 use crate::protocol::{ColliderSpec, RegionCoords, REGION_SIZE};
@@ -64,11 +65,6 @@ pub const SLIME_TURN_MIN_TICKS: u64 = 40;
 pub const SLIME_TURN_RANGE_TICKS: u64 = 60;
 /// Fastest a slime turns, radians per tick (Minecraft: 90°).
 pub const SLIME_MAX_TURN_PER_TICK: f32 = FRAC_PI_4;
-/// Within this many world units of a region edge a slime heads back inwards.
-/// Keeps slimes home: a slime that crossed would wake the next region, and
-/// wildlife is not worth a region genesis. (Inside the halo band they are
-/// mirrored into the neighbour like any entity.)
-pub const SLIME_EDGE_MARGIN: f32 = 4.0 * BLOCK_VOXELS as f32;
 
 /// Per-slime behaviour state. Lives in the rollback ECS (`Ecs::slime`) and
 /// rides `EntityBundle`. u64 ticks, not usize: serialized across the
@@ -139,33 +135,6 @@ fn wrap_angle(a: f32) -> f32 {
     (a + PI).rem_euclid(TAU) - PI
 }
 
-/// Heading back toward the region interior when within the edge margin of
-/// region-local `(x, z)`, else `None`. Yaw 0 faces −Z and +π/2 faces −X
-/// (`yaw_quat` applied to the −Z forward).
-fn inward_yaw(x: f32, z: f32) -> Option<f32> {
-    let axis = |v: f32| {
-        if v < SLIME_EDGE_MARGIN {
-            1
-        } else if v > REGION_SIZE - SLIME_EDGE_MARGIN {
-            -1
-        } else {
-            0
-        }
-    };
-    let yaw = match (axis(x), axis(z)) {
-        (0, 0) => return None,
-        (1, 0) => -FRAC_PI_2,
-        (-1, 0) => FRAC_PI_2,
-        (0, 1) => PI,
-        (0, _) => 0.0,
-        (1, 1) => -3.0 * FRAC_PI_4,
-        (1, _) => -FRAC_PI_4,
-        (_, 1) => 3.0 * FRAC_PI_4,
-        _ => FRAC_PI_4,
-    };
-    Some(yaw)
-}
-
 /// Where and what a region's spawn attempt at `tick` would place, before the
 /// terrain and cap checks. Pure, so tests can predict spawns.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -188,14 +157,12 @@ pub fn slime_spawn_plan(region: RegionCoords, tick: u64) -> Option<SlimeSpawnPla
     if r % 100 >= SLIME_SPAWN_CHANCE_PERCENT {
         return None;
     }
-    // A block column clear of the edge margin (twice over, so a fresh slime
-    // does not start out turning back), centred in the block.
+    // Any block column of the region, centred in the block.
     let block = BLOCK_VOXELS as u64;
-    let margin_blocks = (2.0 * SLIME_EDGE_MARGIN) as u64 / block;
-    let span = REGION_SIZE as u64 / block - 2 * margin_blocks;
+    let span = REGION_SIZE as u64 / block;
     let r2 = mix(r);
-    let bx = margin_blocks + (r2 % span);
-    let bz = margin_blocks + ((r2 >> 32) % span);
+    let bx = r2 % span;
+    let bz = (r2 >> 32) % span;
     let r3 = mix(r2);
     let total: u64 = SLIME_SIZE_WEIGHTS.iter().map(|(_, w)| w).sum();
     let mut pick = r3 % total;
@@ -297,10 +264,8 @@ impl Rollback {
         let subject = e.data().as_ffi();
         let mut slime = slime0;
 
-        // Heading: back inwards near an edge, else re-rolled now and then.
-        if let Some(inward) = inward_yaw(t.x, t.z) {
-            slime.target_yaw = inward;
-        } else if tick >= slime.next_turn_tick {
+        // Heading: re-rolled now and then.
+        if tick >= slime.next_turn_tick {
             let r = roll(tick, subject, SALT_TURN);
             slime.target_yaw = random_yaw(r);
             slime.next_turn_tick = tick + SLIME_TURN_MIN_TICKS + mix(r) % SLIME_TURN_RANGE_TICKS;
@@ -388,23 +353,6 @@ mod tests {
             let w = wrap_angle(a);
             assert!((-PI..PI).contains(&w), "{a} -> {w}");
         }
-    }
-
-    #[test]
-    fn inward_yaw_points_inwards() {
-        // Forward is yaw_quat(yaw) · (0, 0, −1) = (−sin yaw, 0, −cos yaw).
-        let fwd = |y: f32| (-y.sin(), -y.cos());
-        let lo = SLIME_EDGE_MARGIN / 2.0;
-        let hi = REGION_SIZE - lo;
-        let mid = REGION_SIZE / 2.0;
-        for (x, z) in [(lo, mid), (hi, mid), (mid, lo), (mid, hi), (lo, lo), (hi, hi), (lo, hi), (hi, lo)] {
-            let (fx, fz) = fwd(inward_yaw(x, z).unwrap());
-            // Moving along the heading brings the point closer to the centre.
-            let before = (x - mid).abs() + (z - mid).abs();
-            let after = (x + fx - mid).abs() + (z + fz - mid).abs();
-            assert!(after < before, "({x},{z}) heading ({fx},{fz})");
-        }
-        assert_eq!(inward_yaw(mid, mid), None);
     }
 
     #[test]

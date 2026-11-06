@@ -14,7 +14,7 @@ use game::{
 };
 
 use crate::common;
-use crate::common::rig::{Rig, Seen, CLIENT, LEG_ROUNDS};
+use crate::common::rig::{north, north_west, seam_floor_columns, Rig, Seen, CLIENT, LEG_ROUNDS};
 use game::EntityId;
 use std::collections::BTreeMap;
 
@@ -23,14 +23,6 @@ const SEEDS: u64 = 12;
 /// Rounds walked past the seam before turning back, so the return leg starts
 /// clear of the flip hysteresis.
 const PAST_SEAM_ROUNDS: usize = 6;
-
-fn north() -> RegionCoords {
-    RegionCoords::new(0, -1)
-}
-
-fn north_west() -> RegionCoords {
-    RegionCoords::new(-1, -1)
-}
 
 /// One scripted walk out of the spawn region and back.
 #[derive(Clone, Copy)]
@@ -54,41 +46,6 @@ const CORNER: Route = Route {
     out: &[Key::KeyW, Key::KeyA],
     back: &[Key::KeyS, Key::KeyD],
 };
-
-fn floor_column(x: usize, z: usize) -> (ColumnCoords, Column) {
-    let air = Block::new(BlockId::AIR);
-    let sub = SubChunk::Dense(Box::new(Chunk::flat_floor(8)));
-    (ColumnCoords::new(x, z), Column::new(0, air, air, vec![sub]))
-}
-
-/// Floor columns over the world-unit rectangle `xs` x `zs`: every chunk
-/// column the rectangle overlaps.
-fn floor_columns(xs: std::ops::Range<f32>, zs: std::ops::Range<f32>) -> Vec<(ColumnCoords, Column)> {
-    common::chunks_over(xs, zs).into_iter().map(|(x, z)| floor_column(x, z)).collect()
-}
-
-/// Floor under the whole square between the spawn point (x=128,z=128) and the
-/// region's -x/-z corner, continuing 128 units deep into
-/// the three neighbours around that corner — so every route is walked
-/// grounded, with colliders on both sides of each handoff. Stated in world
-/// units, so it holds at any chunk size.
-fn seam_floor_columns(rc: RegionCoords) -> Vec<(ColumnCoords, Column)> {
-    let near = 0.0..5.0 * 64.0;
-    let far = REGION_SIZE - 128.0..REGION_SIZE;
-    let (xs, zs) = if rc == SPAWN_REGION {
-        (near.clone(), near)
-    } else if rc == north() {
-        (near, far)
-    } else if rc == RegionCoords::new(-1, 0) {
-        (far, near)
-    } else if rc == north_west() {
-        (far.clone(), far)
-    } else {
-        // Far regions: just the chunk under the spawn column.
-        return floor_columns(128.0..160.0, 128.0..160.0);
-    };
-    floor_columns(xs, zs)
-}
 
 impl Rig {
     fn new(schedule: Option<InlineSchedule>) -> Self {

@@ -57,7 +57,9 @@ pub const REGION_MAGIC: [u8; 8] = *b"MMOREGN\0";
 /// `IntentRefusal::ContainerFull` are new.
 /// 17: walks plan across seams (`path_plan.rs`): `Goal` is a world block
 /// column, `Walker::path` world tiles, `Walker::exit` became `to_goal`.
-pub const REGION_FILE_VERSION: u32 = 17;
+/// 18: a wandering person's home (`people::Wander::home`) is a world block
+/// column (`[i64; 2]`), so it means the same place across seams.
+pub const REGION_FILE_VERSION: u32 = 18;
 /// magic + version + region blocks + chunk blocks + world crc + payload crc.
 const HEADER_LEN: usize = 8 + 4 * 5;
 
@@ -367,7 +369,7 @@ mod tests {
         let store = RegionStore::new(scratch("saver"), 7);
         let (send, handle) = spawn_saver(store.clone());
         for x in 0..3 {
-            send.send((RegionCoords::new(x, 0), RegionSave::Parked(blob()))).unwrap();
+            send.send((RegionCoords::new(x, 0), RegionSave::Parked(blob(), Vec::new()))).unwrap();
         }
         send.send((RegionCoords::new(9, 9), RegionSave::Live(Box::new(Rollback::new(None)), Vec::new()))).unwrap();
         drop(send);

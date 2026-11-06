@@ -701,7 +701,66 @@ fn request_save_collects_running_then_parked_regions_once() {
     let mut expected = running.clone();
     expected.sort();
     assert_eq!(parked, expected, "each parked region once");
-    assert!(saves.iter().all(|(_, s)| matches!(s, game::RegionSave::Parked(_))));
+    assert!(saves.iter().all(|(_, s)| matches!(s, game::RegionSave::Parked(..))));
     h.manager.request_save();
     assert!(h.manager.take_saves().is_empty(), "an unchanged parked blob is not saved twice");
+}
+
+// ---- wandering across a seam ----
+
+/// Rounds a person standing on the north seam gets to pick a wander goal
+/// across it and walk there (a wander is due every 100–300 ticks; a bit
+/// under half of the goals lie north of the seam).
+const WANDER_SEAM_ROUNDS: usize = 3000;
+
+/// A person whose wander home is on the spawn region's north seam (world
+/// block row z = 0) picks goals on both sides of it: one across the seam is
+/// walked to like any other — the person crosses into north and reaches it.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn wander_across_seam() {
+    use crate::common::rig::{north, seam_floor_columns, Rig};
+    common::install_real_block_props();
+    let mut rig = Rig::with_floor(None, seam_floor_columns);
+    rig.join_spawn();
+    let home = [10i64, 0];
+    rig.manager.spawner_mut().with_region(SPAWN_REGION, |region| {
+        region.with_data(|d| {
+            let e = d.spawn_person_safe(P, column_xz([10, 1])).unwrap();
+            d.data.ecs.wander.set_safe(e, Some(game::people::Wander { next_tick: 0, home }));
+        });
+    });
+    let reach = game::WAYPOINT_REACH_M * game::movement::UNITS_PER_METER + 1.0;
+    let mut goals: Vec<Goal> = Vec::new();
+    for _ in 0..WANDER_SEAM_ROUNDS {
+        rig.round();
+        for rc in rig.manager.running_regions() {
+            let mut seen = None;
+            rig.manager.spawner_mut().with_region(rc, |region| {
+                let data = region.data();
+                let Some(e) = data.person_entity(P) else { return };
+                let walker = data.ecs.walker.try_get(e).clone();
+                let t = data.physics.bodies.get(*data.ecs.rigidbody.get(e)).unwrap().translation();
+                seen = Some((walker.map(|w| w.goal), t.x + rc.x as f32 * REGION_SIZE, t.z + rc.z as f32 * REGION_SIZE));
+            });
+            let Some((goal, x, z)) = seen else { continue };
+            if let Some(goal) = goal.filter(|g| g.region() == Some(north())) {
+                if !goals.contains(&goal) {
+                    goals.push(goal);
+                }
+            }
+            if rc != north() {
+                continue;
+            }
+            let bv = BLOCK_VOXELS as f32;
+            let reached = goals.iter().any(|g| {
+                let (gx, gz) = ((g.column[0] as f32 + 0.5) * bv, (g.column[1] as f32 + 0.5) * bv);
+                ((x - gx).powi(2) + (z - gz).powi(2)).sqrt() <= reach
+            });
+            if reached {
+                return;
+            }
+        }
+    }
+    panic!("the person never reached a wander goal across the seam (goals north: {goals:?})");
 }

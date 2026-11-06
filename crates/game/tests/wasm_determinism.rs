@@ -66,14 +66,18 @@ use slotmapd::Key as _;
 /// for chests keyed by `WorldBlockPos`, the new `GameData.halo_containers`
 /// and `Client.open_container` as a `WorldBlockPos` (`game::containers`, Task
 /// 6.4; layout only — no chest in these scenes; 16-block values only).
+/// Then for the slime spawner dropping its edge margin (Task 6.6: the
+/// region's tick-100 spawn attempt now picks a column off this floor, so the
+/// second slime the scene used to get no longer spawns; 16-block values
+/// only).
 ///
 /// Every value is pinned per sim-chunk size (`game::CHUNK_BLOCKS`, a build
 /// dial): the same physical scene splits into different chunk entities,
 /// bodies and colliders at 2 and 16 blocks, so its bytes and hashes differ.
 /// Other sizes are not pinned and skip the comparison.
-const WASM_SCENE_DIGEST: u32 = pinned(0xFA8E_102F, 0x0DB5_5CC2);
+const WASM_SCENE_DIGEST: u32 = pinned(0xFA8E_102F, 0x172D_0DF6);
 /// `game::state_hash` of the same state, on every target.
-const SCENE_STATE_HASH: u32 = pinned(0x5233_40BE, 0xADBF_F868);
+const SCENE_STATE_HASH: u32 = pinned(0x5233_40BE, 0x4C3E_CFAB);
 const SCENE_TICKS: usize = 120;
 /// crc32 of [`underground_scene`]'s region bytes, on every target.
 const UNDERGROUND_DIGEST: u32 = pinned(0x5448_586C, 0x2DEF_E7AF);

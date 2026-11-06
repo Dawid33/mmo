@@ -1,7 +1,7 @@
 //! Slimes through the real region tick: a spawned slime falls to the ground,
 //! then alternates Minecraft-style between sitting still and hopping forward;
-//! it turns back before a region edge; and its ticks — the spawn included —
-//! undo bit-exact and replay identically.
+//! it wanders across a region seam like any entity; and its ticks — the
+//! spawn included — undo bit-exact and replay identically.
 use crate::common;
 
 use common::floor_chunks;
@@ -106,23 +106,6 @@ fn slime_rests_then_hops_forward() {
 }
 
 #[test]
-fn slime_turns_back_before_the_region_edge() {
-    // Floor along the −X edge; the slime starts heading straight at it
-    // (yaw π/2 faces −X).
-    let (mut region, _updates) = floor_region(0.0..224.0, 64.0..224.0);
-    let e = spawn(&mut region, 80.0, 128.0, 2, std::f32::consts::FRAC_PI_2);
-    let mut min_x = f32::MAX;
-    for _ in 0..400 {
-        tick(&mut region);
-        let (departures, _) = region.take_transfers();
-        assert!(departures.is_empty(), "a slime must never leave its region");
-        min_x = min_x.min(pose(&region, e).0[0]);
-    }
-    let clear = game::slime::SLIME_EDGE_MARGIN / 2.0;
-    assert!(min_x > clear, "the slime reached x = {min_x}, within {clear} units of the edge");
-}
-
-#[test]
 fn slime_ticks_and_spawn_undo_bit_exact_and_replay() {
     // The first spawn attempt of region (0,0), with a floor put under it.
     let (t, plan) = (1..200u64)
@@ -156,6 +139,66 @@ fn slime_ticks_and_spawn_undo_bit_exact_and_replay() {
         region.forget_last_event();
         if n == 0 {
             assert_eq!(slimes(&region), before_spawn + 1, "the planned spawn happened");
+        }
+    }
+}
+
+// ---- across a seam ----
+
+use crate::common::rig::{north, seam_floor_columns, Rig};
+use game::{EntityId, InlineSchedule, SPAWN_REGION};
+
+/// Rounds a slime heading straight at the seam from 1 m short has to cross
+/// it and land in the neighbour (it hops ~1.3 m every ~1.5 s at most).
+const CROSS_ROUNDS: usize = 300;
+/// Seeds of the jittery schedule swept.
+const CROSS_SEEDS: u64 = 12;
+
+/// A slime 1 m short of the north seam (−z), its heading pinned north (yaw 0
+/// faces −Z; it never re-rolls), must end up owned by north with its
+/// `Slime` component — the pinned heading included — intact.
+fn slime_crosses_north(schedule: Option<InlineSchedule>) {
+    let mut rig = Rig::with_floor(schedule, seam_floor_columns);
+    rig.join_spawn();
+    let mut id: Option<EntityId> = None;
+    rig.manager.spawner_mut().with_region(SPAWN_REGION, |region| {
+        let tick = region.current_tick();
+        let e = common::spawn_slime(region, [200.0, 24.0, game::movement::UNITS_PER_METER], 1, 0.0, tick);
+        region.with_data(|d| {
+            let mut s = (*d.data.ecs.slime.try_get(e)).expect("a slime");
+            s.next_turn_tick = u64::MAX;
+            d.data.ecs.slime.set_safe(e, Some(s));
+        });
+        id = *region.data().ecs.id.try_get(e);
+    });
+    let id = id.expect("the slime has an EntityId");
+    for _ in 0..CROSS_ROUNDS {
+        rig.round();
+        let mut found = None;
+        rig.manager.spawner_mut().with_region(north(), |region| {
+            let data = region.data();
+            if let Some(&key) = data.id_index.get(&id) {
+                found = Some((*data.ecs.kind.try_get(key), *data.ecs.slime.try_get(key)));
+            }
+        });
+        if let Some((kind, slime)) = found {
+            assert_eq!(kind, Some(EntityKind::Slime { size: 1 }), "it is still a size-1 slime");
+            let slime = slime.expect("the Slime component crossed with it");
+            assert_eq!(slime.next_turn_tick, u64::MAX, "its own state crossed, not a fresh one");
+            assert_eq!(slime.target_yaw, 0.0, "still heading north");
+            return;
+        }
+    }
+    panic!("the slime never crossed into {:?}", north());
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn wanders_across_seam() {
+    slime_crosses_north(None);
+    for seed in 0..CROSS_SEEDS {
+        if std::panic::catch_unwind(|| slime_crosses_north(Some(InlineSchedule::jittery(seed)))).is_err() {
+            panic!("the slime crossing broke under InlineSchedule::jittery({seed})");
         }
     }
 }

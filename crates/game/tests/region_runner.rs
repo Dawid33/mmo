@@ -336,7 +336,7 @@ fn saved_crossings_ride_the_region_file_and_queue_again_on_restore() {
     assert_eq!(*blob.to_rollback().expect("state prefix").tick, tick);
     let saved = blob.to_saved().expect("payload decodes");
     assert_eq!(saved.transfers.len(), 2);
-    let parked = game::RegionSave::Parked(SerializedRegion::from_rollback(&saved.state)).into_serialized();
+    let parked = game::RegionSave::Parked(SerializedRegion::from_rollback(&saved.state), Vec::new()).into_serialized();
     assert!(parked.to_saved().expect("parked payload decodes").transfers.is_empty());
 
     let (out_send, out) = unbounded();
