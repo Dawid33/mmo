@@ -159,6 +159,33 @@ fn left_click_breaks_the_block_underfoot_and_the_player_falls_in() {
 }
 
 #[test]
+fn slope_breaks_like_a_half_block() {
+    // Block (8, 1, 8) is a straight slope (low side +x) instead of a whole block.
+    const CB: usize = game::CHUNK_BLOCKS;
+    let slope = || {
+        let mut c = Chunk::flat_floor(32);
+        let dirt = BlockId(1);
+        c.set_block(8 % CB, 1 % CB, 8 % CB, game::Block::new(dirt));
+        c.chisel.insert(
+            game::BlockIndex::from_xyz(8 % CB, 1 % CB, 8 % CB),
+            game::slope_chisel(dirt, game::SlopeShape::Straight { low: game::Side::PosX }),
+        );
+        c
+    };
+    let mut region = region(slope);
+    teleport(&mut region, 136.0, 136.0);
+    let before = blocks(&region);
+    run(&mut region, &click(DOWN, MouseButton::Left));
+    let diff = changed(&before, &blocks(&region));
+    assert_eq!(diff.len(), 1, "exactly one block must change: {diff:?}");
+    assert_eq!((world_of(diff[0]), diff[0].2), ([8, 1, 8], BlockId::AIR), "{diff:?}");
+    let (coords, bi) = (diff[0].0, game::BlockIndex::from_linear(diff[0].1));
+    let snap = region.terrain_snapshot();
+    let chunk = &snap.chunks.iter().find(|(c, _)| (c.x, c.y, c.z) == coords).unwrap().1;
+    assert!(!chunk.chisel.contains_key(&bi), "the broken slope leaves no chisel behind");
+}
+
+#[test]
 fn right_click_places_a_block_that_stops_the_player() {
     let mut region = region(|| Chunk::flat_floor(32));
     let before = blocks(&region);

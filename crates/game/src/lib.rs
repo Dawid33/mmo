@@ -43,6 +43,7 @@ pub mod region_runner;
 pub mod registry;
 pub mod people;
 pub mod slime;
+pub mod slope;
 pub mod state;
 pub mod trees;
 pub mod ui;
@@ -86,6 +87,8 @@ pub use player::*;
 pub use protocol::*;
 pub use region_runner::*;
 pub use registry::*;
+// Not a glob: `slope::classify` would collide with `biome::classify`; call it as `slope::classify`.
+pub use slope::{display_name, slope_chisel, walk_up, Side, SlopeShape};
 pub use state::*;
 pub use ui::*;
 pub use volume::*;
