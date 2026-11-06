@@ -38,6 +38,11 @@ pub enum RegionCmd {
     /// A predicted terrain halo update from a sibling region (ditto, same
     /// stamp), like the server's `RegionInput::Transfer(HaloUpdate)`.
     Halo(game::HaloUpdate, game::Tick),
+    /// A predicted intent or reply from a sibling region (`game::intents`),
+    /// stamped with its due tick: held to that slot like the server's
+    /// `RegionInput::Transfer(Intent)`, then queued for the opening of the
+    /// tick.
+    Intent(game::IntentMsg),
     SetMapExtent(Option<game::MapExtent>),
     /// Wireframe the colliders near this viewer WORLD position.
     DebugLines([f32; 3]),
@@ -63,6 +68,9 @@ pub enum RegionReport {
         /// Terrain halo updates for the neighbours (`game::halo`): band
         /// chunks this tick changed. Targets absolute.
         halo: Vec<(game::HaloUpdate, RegionCoords)>,
+        /// Intents and replies sent to other regions since the last tick
+        /// (`game::intents`), each stamped with its own due tick.
+        intents: Vec<game::IntentMsg>,
         /// The region's `current_tick()` right after this tick (T+1 for its
         /// tick T): the slot the targets apply these transfers in, as the
         /// server's `RegionOutput::Departures` stamp.
@@ -214,6 +222,7 @@ pub fn handle(
         }
         RegionCmd::HaloEntity(msg, stamp) => transfer(region, st, ctx, msg.into_event(), stamp, out),
         RegionCmd::Halo(update, stamp) => transfer(region, st, ctx, GameEventKind::HaloUpdate(update), stamp, out),
+        RegionCmd::Intent(msg) => transfer(region, st, ctx, GameEventKind::Intent(msg), msg.due(), out),
         RegionCmd::SetMapExtent(extent) => region.set_map_extent(extent),
         RegionCmd::DebugLines(viewer_world) => {
             if ctx.debug_flags.collider_wireframes() {
@@ -250,6 +259,7 @@ fn sat_out(region: &Region, out: &mut Vec<RegionReport>) {
         departures: Vec::new(),
         halo_entities: Vec::new(),
         halo: Vec::new(),
+        intents: Vec::new(),
         stamp: region.current_tick(),
         #[cfg(not(target_arch = "wasm32"))]
         perf: game::RegionTickPerf::default(),
@@ -286,12 +296,15 @@ fn tick(region: &mut Region, st: &mut RunnerState, ctx: &RunnerCtx, out: &mut Ve
     // Band chunks written since the last tick (this tick's edits, and any a
     // predicted event made in the slot before it).
     let halo = region.take_halo_updates();
+    // Sent by this tick and the events predicted before it.
+    let intents = region.take_intents();
     let stamp = region.current_tick();
     out.push(RegionReport::Ticked {
         sat_out: false,
         departures,
         halo_entities,
         halo,
+        intents,
         stamp,
         #[cfg(not(target_arch = "wasm32"))]
         perf: region.take_tick_perf(),

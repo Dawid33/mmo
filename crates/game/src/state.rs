@@ -299,6 +299,18 @@ mod game_data {
         /// `HALO_BLOCKS` of each edge (`halo.rs`), by world chunk.
         #[undo(map)]
         halo: BTreeMap<crate::WorldChunkPos, crate::HaloChunk>,
+        /// Intents waiting at their owner (`intents.rs`), in application
+        /// order: `(due tick, source EntityId, seq)`.
+        #[undo(map)]
+        intents: BTreeMap<(crate::Tick, crate::EntityId, u32), crate::SentIntent>,
+        /// Replies waiting to be delivered to an entity here, same key order
+        /// (`to` instead of the source).
+        #[undo(map)]
+        intent_replies: BTreeMap<(crate::Tick, crate::EntityId, u32), crate::SentReply>,
+        /// The replies delivered at this tick's opening, per entity in order;
+        /// emptied at the next tick's.
+        #[undo(map)]
+        intent_inbox: BTreeMap<(crate::EntityId, u32), crate::IntentReply>,
     }
 
     pub struct Ecs {

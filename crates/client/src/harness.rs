@@ -227,6 +227,11 @@ impl SimHarness {
         self.server.set_schedule(Some(schedule));
     }
 
+    /// Send an `Order` as the local client (predicted at the next `step`).
+    pub fn order(&mut self, order: game::Order) {
+        let _ = self.client.push_game_event(GameEventKind::Order(LOCAL_CLIENT_ID, order));
+    }
+
     pub fn press(&mut self, key: Key) {
         self.held.insert(key);
     }

@@ -923,7 +923,8 @@ impl GameInstanceManager {
             | GameEventKind::HaloEntity(_)
             | GameEventKind::HaloEntityGone(_)
             | GameEventKind::HaloSourceGone(_)
-            | GameEventKind::HaloUpdate(_) => {}
+            | GameEventKind::HaloUpdate(_)
+            | GameEventKind::Intent(_) => {}
             GameEventKind::UiAction(_, _) | GameEventKind::Order(_, _) if !self.is_caught_up => {
                 // Same admission rule as PlayerInput: drop until the sim has
                 // caught up with the server (join/replay window).
@@ -1041,6 +1042,7 @@ impl GameInstanceManager {
                         departures: d,
                         halo_entities: g,
                         halo: h,
+                        intents,
                         stamp,
                         #[cfg(not(target_arch = "wasm32"))]
                         perf,
@@ -1058,6 +1060,7 @@ impl GameInstanceManager {
                         self.region_ticks.insert(id, stamp);
                         // This tick's transfers, now (both hosts).
                         self.route_transfers(id, d, g, h, stamp);
+                        self.route_intents(intents);
                     }
                     RegionReport::Reconciled {
                         stats,
@@ -1156,6 +1159,24 @@ impl GameInstanceManager {
         for (update, target) in halo {
             if self.host.contains(&target) {
                 self.host.send(target, RegionCmd::Halo(update, stamp));
+            }
+        }
+    }
+
+    /// Mirror of the server manager's intent routing, on the predicted
+    /// timeline: each intent or reply to the loaded region it is addressed to
+    /// (a position target's owner, a reply's `hint` — the client has no
+    /// location directory), held there to its due tick. Others — an owner
+    /// outside the local window, an intent to an entity — are dropped: the
+    /// authoritative streams cover them (an owner the server does not run
+    /// answers with a refusal the sender's stream brings).
+    fn route_intents(&mut self, intents: Vec<game::IntentMsg>) {
+        for msg in intents {
+            match msg.region_hint() {
+                Some(target) if self.host.contains(&target) => {
+                    self.host.send(target, RegionCmd::Intent(msg));
+                }
+                _ => log::debug!("[client] predicted {msg:?} not relayed: its region is not loaded here"),
             }
         }
     }
@@ -2484,6 +2505,7 @@ mod manager_tests {
                     departures,
                     halo_entities,
                     halo: Vec::new(),
+                    intents: Vec::new(),
                     stamp,
                     perf: game::RegionTickPerf::default(),
                     took: Duration::ZERO,

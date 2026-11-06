@@ -139,6 +139,10 @@ pub enum Order {
     SetMode { mode: crate::PlayMode, at: Option<TilePos> },
     /// Walk the issuing client's adventurer to a goal.
     MoveTo(crate::Goal),
+    /// Dev / test front end of `Intent::BreakBlock` (`intents.rs`): the
+    /// issuing client's body sends one at this world block, wherever it is.
+    /// Until Task 6.2 ports mining onto the intent, nothing else sends it.
+    DevBreakBlock(crate::WorldBlockPos),
 }
 
 /// Why a tile refuses a designation.
@@ -403,6 +407,8 @@ impl Rollback {
             // Needs the region's coordinates: `Region::handle_event` routes
             // it to `move_to_safe`.
             Order::MoveTo(_) => return false,
+            // Sends an intent: `Region::handle_event` routes it too.
+            Order::DevBreakBlock(_) => return false,
         }
         true
     }

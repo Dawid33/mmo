@@ -40,6 +40,7 @@ mod mining;
 mod history_handover;
 mod history_play;
 mod hash_restore;
+mod intents;
 mod jump_arc;
 mod kinematic;
 mod lod_streaming;

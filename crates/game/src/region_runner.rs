@@ -128,6 +128,19 @@ pub enum RegionOutput {
     /// the body. A region sends its `Departures` before any `Forward` for
     /// them, so the arrival is always queued at the target first.
     Forward(GameEventKind, Tick),
+    /// Intents and replies this region sent to other regions
+    /// (`intents.rs`), each with its due tick (its transfer stamp): the
+    /// manager routes them to the owner — by position, or by `EntityId`
+    /// through its location directory — or refuses an intent whose owner is
+    /// not running.
+    Intents(Vec<crate::IntentMsg>),
+    /// Entities that came to be owned here since the previous report
+    /// (spawned, arrived, restored): the manager's location directory.
+    /// Sent after the tick that saw them.
+    Spawned(Vec<crate::EntityId>),
+    /// Entities no longer owned here, departures excepted (despawned,
+    /// parked, left): the manager forgets their location.
+    Despawned(Vec<crate::EntityId>),
     /// Reply to `Save`: the live state, serialized off the region thread.
     /// It still holds this session's players and the history's people —
     /// [`restore_saved`] strips both when it is loaded again.
@@ -313,6 +326,10 @@ pub struct RegionRunner {
     /// hash right after each Tick event, before the slot's held events —
     /// what the desync check hashes and what a client holds at that tick.
     slot_start_hashes: Option<Vec<(Tick, u32)>>,
+    /// The entity ids owned here at the last report (`Spawned` /
+    /// `Despawned` are its diffs). Starts empty, so a region's first tick
+    /// reports everything it holds.
+    known_ids: std::collections::BTreeSet<crate::EntityId>,
 }
 
 /// Furthest ahead of a region's tick a client event may be stamped and still
@@ -342,6 +359,7 @@ impl RegionRunner {
             baseline_hash_time,
             state_hash_cost: Default::default(),
             slot_start_hashes: None,
+            known_ids: Default::default(),
         }
     }
 
@@ -446,6 +464,11 @@ impl RegionRunner {
                     self.apply(GameEventKind::DespawnPerson(*person));
                 }
                 let _ = self.out.send((self.id, RegionOutput::PeopleParked(people)));
+                // Intents sent since the last tick still go out.
+                let intents = self.region.take_intents();
+                if !intents.is_empty() {
+                    let _ = self.out.send((self.id, RegionOutput::Intents(intents)));
+                }
                 // Its mirrors in the neighbours end with it.
                 let stamp = self.region.current_tick();
                 let gone = self.region.data().halo_entities_gone_all();
@@ -637,6 +660,7 @@ impl RegionRunner {
         halo_entities.extend(more_halo);
         let stamp = self.region.current_tick();
         let halo = self.region.take_halo_updates();
+        let departed_ids: Vec<crate::EntityId> = departures.iter().map(|(b, _)| b.id).collect();
         if !departures.is_empty() {
             let _ = self.out.send((self.id, RegionOutput::Departures(departures, stamp)));
         }
@@ -645,6 +669,11 @@ impl RegionRunner {
         }
         if !halo.is_empty() {
             let _ = self.out.send((self.id, RegionOutput::HaloDeltas(halo, stamp)));
+        }
+        self.report_ids(&departed_ids);
+        let intents = self.region.take_intents();
+        if !intents.is_empty() {
+            let _ = self.out.send((self.id, RegionOutput::Intents(intents)));
         }
         if self.region.current_tick() % 10 == 0 {
             let _ = self.out.send((
@@ -677,6 +706,22 @@ impl RegionRunner {
 
     pub fn current_tick(&self) -> crate::Tick {
         self.region.current_tick()
+    }
+
+    /// The location directory's diffs since the last report: ids owned here
+    /// now and not then (`Spawned`), and then and not now except `departed`
+    /// (`Despawned` — a departure's new place comes with the `Departures`).
+    fn report_ids(&mut self, departed: &[crate::EntityId]) {
+        let now: std::collections::BTreeSet<crate::EntityId> = self.region.data().id_index.keys().copied().collect();
+        let spawned: Vec<_> = now.difference(&self.known_ids).copied().collect();
+        let gone: Vec<_> = self.known_ids.difference(&now).filter(|id| !departed.contains(id)).copied().collect();
+        self.known_ids = now;
+        if !spawned.is_empty() {
+            let _ = self.out.send((self.id, RegionOutput::Spawned(spawned)));
+        }
+        if !gone.is_empty() {
+            let _ = self.out.send((self.id, RegionOutput::Despawned(gone)));
+        }
     }
 
     /// A restored region's saved crossings ([`SavedRegion::transfers`]) are

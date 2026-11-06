@@ -177,7 +177,10 @@ impl RegionCoords {
 /// `i32` [`RegionCoords`] grid fits; `y` is the region-local block y (regions
 /// tile only the plane). The seam-translation harness compares outcomes in
 /// this frame.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+    state_hash::StateHash,
+)]
 pub struct WorldBlockPos {
     pub x: i64,
     pub y: i32,
@@ -838,6 +841,10 @@ pub enum GameEventKind {
     /// from its record (the body at the record's pose, lifted onto the nearest
     /// standable tile if that is now inside terrain).
     RestorePlayer(ClientId, Box<crate::PlayerRecord>),
+    /// An intent or its reply from another region (`intents.rs`), relayed
+    /// as a stamped transfer: joins this region's queue, applied / delivered
+    /// at the opening of its due tick. Never accepted from a client.
+    Intent(crate::IntentMsg),
 }
 
 /// Where a spawned person appears in a region.
@@ -895,7 +902,8 @@ impl GameEventKind {
             | GameEventKind::ParkPlayer(_)
             | GameEventKind::SpawnPerson(_)
             | GameEventKind::DespawnPerson(_)
-            | GameEventKind::WalkOut(..) => None,
+            | GameEventKind::WalkOut(..)
+            | GameEventKind::Intent(_) => None,
         }
     }
 

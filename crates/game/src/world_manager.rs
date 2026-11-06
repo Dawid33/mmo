@@ -642,6 +642,11 @@ pub struct WorldManager<S: RegionSpawner> {
     /// already been taken, from a source still to answer: they go with the
     /// source's save (see [`Self::owe_source_save`]).
     save_owed: BTreeMap<RegionCoords, Vec<crate::SavedTransfer>>,
+    /// Where each entity is owned (spec P2's directory): from the regions'
+    /// `Spawned` / `Despawned` reports and the `Departures` routed here (an
+    /// entity in flight is at its target). Intents and replies addressed by
+    /// `EntityId` are routed by it.
+    locations: BTreeMap<crate::EntityId, RegionCoords>,
 }
 
 impl<S: RegionSpawner> WorldManager<S> {
@@ -700,6 +705,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             save_asked: BTreeSet::new(),
             save_answered: BTreeSet::new(),
             save_owed: BTreeMap::new(),
+            locations: BTreeMap::new(),
         }
     }
 
@@ -1190,6 +1196,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                     | GameEventKind::HaloEntityGone(_)
                     | GameEventKind::HaloSourceGone(_)
                     | GameEventKind::HaloUpdate(_)
+                    | GameEventKind::Intent(_)
                     | GameEventKind::CreateClient(_)
                     | GameEventKind::CreateClientAt(..)
                     | GameEventKind::SpawnPerson(_)
@@ -1304,6 +1311,8 @@ impl<S: RegionSpawner> WorldManager<S> {
                 }
                 self.cache_authoritative_terrain(rc, far);
                 self.invalidate_region_lod(rc);
+                // What it held parks with it (its next run reports it again).
+                self.forget_locations(rc);
                 self.parked.insert(rc, serialized);
                 self.unsaved_parked.insert(rc);
                 let pending = self
@@ -1349,6 +1358,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                         t.x = t.x.clamp(0.0, crate::REGION_SIZE);
                         t.z = t.z.clamp(0.0, crate::REGION_SIZE);
                         self.enter_in_flight(rc, rc, stamp, &bundle);
+                        self.locations.insert(bundle.id, rc);
                         self.send_to_region(rc, RegionInput::Transfer(GameEventKind::EntityArrived(bundle), stamp));
                         continue;
                     }
@@ -1356,6 +1366,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                         // A person is delivered only into a running region; the history
                         // absorbs anyone walking into one that is not (no wake).
                         if !history.person_crossed(person, target) {
+                            self.locations.remove(&bundle.id);
                             continue;
                         }
                     }
@@ -1363,6 +1374,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                     // Arrivals ALWAYS wake the target (parked blob or gen).
                     self.ensure_running(target);
                     self.enter_in_flight(rc, target, stamp, &bundle);
+                    self.locations.insert(bundle.id, target);
                     self.send_to_region(
                         target,
                         RegionInput::Transfer(GameEventKind::EntityArrived(bundle), stamp),
@@ -1418,6 +1430,25 @@ impl<S: RegionSpawner> WorldManager<S> {
                     if running {
                         self.send_to_region(target, RegionInput::Transfer(GameEventKind::HaloUpdate(update), stamp));
                     }
+                }
+            }
+            RegionOutput::Spawned(ids) => {
+                if self.regions.contains_key(&rc) {
+                    for id in ids {
+                        self.locations.insert(id, rc);
+                    }
+                }
+            }
+            RegionOutput::Despawned(ids) => {
+                for id in ids {
+                    if self.locations.get(&id) == Some(&rc) {
+                        self.locations.remove(&id);
+                    }
+                }
+            }
+            RegionOutput::Intents(list) => {
+                for msg in list {
+                    self.route_intent(msg);
                 }
             }
             RegionOutput::HaloEntities(list, stamp) => {
@@ -1480,6 +1511,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                 self.pending_events.remove(&rc);
                 self.spawner.reap(rc);
                 self.halo_source_lost(rc);
+                self.forget_locations(rc);
                 self.history_region_lost(rc);
                 let queued = self.restart_for_in_flight(rc);
                 self.settle_lost_parks(rc, &queued);
@@ -1510,6 +1542,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             self.spawner.reap(rc);
             // Every other region is stopping: a no-op unless one is not.
             self.halo_source_lost(rc);
+            self.forget_locations(rc);
             self.history_region_lost(rc);
             // Woken for what was in flight to it; the exit loop stops it again.
             let queued = self.restart_for_in_flight(rc);
@@ -2189,6 +2222,49 @@ impl<S: RegionSpawner> WorldManager<S> {
         }
     }
 
+    /// `rc` no longer holds anything (parked or lost): its directory
+    /// entries go.
+    fn forget_locations(&mut self, rc: RegionCoords) {
+        self.locations.retain(|_, at| *at != rc);
+    }
+
+    /// Where `id` is owned, per the directory.
+    pub fn location_of(&self, id: crate::EntityId) -> Option<RegionCoords> {
+        self.locations.get(&id).copied()
+    }
+
+    /// An intent or reply from a region's `Intents` output, to the region
+    /// owning its target (by position, or by `EntityId` through the
+    /// directory) as a `Transfer` stamped with its due tick. An intent whose
+    /// owner is not running — or is stopping — is answered
+    /// `Refused(.., OwnerNotRunning)`: an intent never wakes a region. A
+    /// reply goes where its entity is, else to its `hint`; with neither
+    /// running it is dropped (logged): its entity parked or is gone.
+    fn route_intent(&mut self, msg: crate::IntentMsg) {
+        use crate::{IntentMsg, IntentRefusal, IntentReply, SentReply, Target};
+        let owner = match msg {
+            IntentMsg::Intent(s) => match s.target {
+                Target::Entity(id) => self.locations.get(&id).copied(),
+                _ => s.target.region(),
+            },
+            IntentMsg::Reply(s) => self.locations.get(&s.reply.to()).copied().or(Some(s.hint)),
+        };
+        let running = owner.filter(|rc| self.regions.get(rc).is_some_and(|l| !l.stopping));
+        match (running, msg) {
+            (Some(rc), msg) => {
+                self.send_to_region(rc, RegionInput::Transfer(GameEventKind::Intent(msg), msg.due()));
+            }
+            (None, IntentMsg::Intent(s)) => {
+                log::debug!("[server] intent {:?} at {:?}: owner {owner:?} not running; refused", s.intent, s.target);
+                let reply = IntentReply::Refused(s.intent, IntentRefusal::OwnerNotRunning);
+                self.route_intent(IntentMsg::Reply(SentReply { reply, hint: s.from, due: s.due + 1 }));
+            }
+            (None, IntentMsg::Reply(s)) => {
+                log::info!("[server] intent reply for {:?} dropped: {owner:?} not running", s.reply.to());
+            }
+        }
+    }
+
     fn send_to_region(&mut self, rc: RegionCoords, input: RegionInput) -> bool {
         let Some(link) = self.regions.get(&rc) else {
             log::debug!("send_to_region: {:?} not running", rc);
@@ -2216,6 +2292,7 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.pending_events.remove(&rc);
         self.spawner.reap(rc);
         self.halo_source_lost(rc);
+        self.forget_locations(rc);
         // Its people's bodies died with it: back to the history, then caught up again.
         self.history_region_lost(rc);
         self.ensure_running(rc);

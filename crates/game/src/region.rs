@@ -204,6 +204,13 @@ pub struct Region {
     /// reconcile clears it (its replays re-write chunks whose updates the
     /// forward ticks already sent).
     halo_dirty: std::collections::BTreeSet<crate::ChunkIndexKey>,
+    /// Intents and replies this region's events sent to other regions
+    /// (`intents.rs`), each with its own due tick; taken after each tick
+    /// ([`Region::take_intents`]). Not state, and not filled by a client's
+    /// reconcile (its forward events already sent theirs).
+    pending_intents: Vec<crate::IntentMsg>,
+    /// Inside [`Region::reconcile`]: replays send no intents out.
+    replaying: bool,
     /// The finite world's regions, when it has an edge: nothing crosses
     /// out of it (walks stop at the edge tile, bodies are held at the outer
     /// seam). Not sim state — set by whoever runs the region (the manager
@@ -250,6 +257,7 @@ fn ev_desc(e: &GameEvent) -> String {
         GameEventKind::SpawnPerson(s) => format!("SpawnPerson({s:?})"),
         GameEventKind::DespawnPerson(p) => format!("DespawnPerson({p:?})"),
         GameEventKind::WalkOut(p, to) => format!("WalkOut({p:?}, {to:?})"),
+        GameEventKind::Intent(m) => format!("Intent({m:?})"),
     };
     format!("[id={} r=({},{}) {}]", e.id, e.region_id.x, e.region_id.z, kind)
 }
@@ -283,6 +291,8 @@ impl Region {
             pending_departures: Vec::new(),
             pending_halo_entities: Vec::new(),
             halo_dirty: Default::default(),
+            pending_intents: Vec::new(),
+            replaying: false,
             map_extent: None,
             expected_hashes: BTreeMap::new(),
             last_confirmed_id: None,
@@ -370,6 +380,13 @@ impl Region {
     /// Check if event from network matches client event history. rollback the
     /// game state as neccessary and re-simulate to current time.
     pub fn reconcile(&mut self, server_event: GameEvent) -> Result<ReconcileStats, GameError> {
+        self.replaying = true;
+        let result = self.reconcile_inner(server_event);
+        self.replaying = false;
+        result
+    }
+
+    fn reconcile_inner(&mut self, server_event: GameEvent) -> Result<ReconcileStats, GameError> {
         let mut stats = ReconcileStats::default();
         // Events older than the snapshot this region was constructed from
         // are already baked into its state.
@@ -517,7 +534,7 @@ impl Region {
                                     // that the server did not have is dropped
                                     // (never carried into the next slot) ...
                                     if matches!(server_kind, GameEventKind::Tick)
-                                        && matches!(e.kind, GameEventKind::HaloEntity(_) | GameEventKind::HaloEntityGone(_) | GameEventKind::HaloUpdate(_))
+                                        && matches!(e.kind, GameEventKind::HaloEntity(_) | GameEventKind::HaloEntityGone(_) | GameEventKind::HaloUpdate(_) | GameEventKind::Intent(_))
                                     {
                                         temp_log.remove(i);
                                         dropped_mirrors += 1;
@@ -525,7 +542,7 @@ impl Region {
                                     }
                                     // ... and a server mirror never takes the
                                     // place of a later slot's prediction.
-                                    if matches!(server_kind, GameEventKind::HaloEntity(_) | GameEventKind::HaloEntityGone(_) | GameEventKind::HaloUpdate(_))
+                                    if matches!(server_kind, GameEventKind::HaloEntity(_) | GameEventKind::HaloEntityGone(_) | GameEventKind::HaloUpdate(_) | GameEventKind::Intent(_))
                                         && matches!(e.kind, GameEventKind::Tick)
                                     {
                                         break;
@@ -715,11 +732,16 @@ impl Region {
         crate::halo::take_touched_chunks();
         self.data.new_transaction();
         self.data.next_game_event_id.update(|n| *n += 1);
+        // Intents this event sends to other regions (`intents.rs`).
+        let mut intents_out = Vec::new();
         let _b = &event.kind;
         match event.kind.clone() {
             GameEventKind::Tick => {
                 #[cfg(not(target_arch = "wasm32"))]
                 let tick_start = Instant::now();
+                // The tick opens with the intents due at it (sent at the
+                // previous tick, here or across a seam) and their replies.
+                self.data.tick_intents_safe(&mut intents_out);
                 // Mobs set kinematic targets, like the camera controller;
                 // the physics controller's step consumes them.
                 self.data.tick_slimes_safe(self.id);
@@ -954,6 +976,10 @@ impl Region {
                     }
                 }
             }
+            GameEventKind::Order(client_id, crate::Order::DevBreakBlock(p)) => {
+                self.data.dev_break_block_safe(client_id, p, &mut intents_out);
+            }
+            GameEventKind::Intent(msg) => self.data.receive_intent_safe(msg),
             // A walk is planned against this region's identity.
             GameEventKind::Order(client_id, crate::Order::MoveTo(goal)) => {
                 self.data.move_to_safe(client_id, goal, self.id, self.map_extent);
@@ -964,6 +990,9 @@ impl Region {
         }
         self.items_destroyed += crate::item_piles::items_destroyed_on_thread() - destroyed_before;
         self.note_halo_writes();
+        if !self.replaying {
+            self.pending_intents.extend(intents_out);
+        }
         self.event_log.push_back(Logged { event: event.clone(), stamp });
         Ok(event)
     }
@@ -1084,6 +1113,13 @@ impl Region {
             std::mem::take(&mut self.pending_departures),
             std::mem::take(&mut self.pending_halo_entities),
         )
+    }
+
+    /// The intents and replies sent to other regions since the previous call
+    /// (each carries its due tick). Taken right after a tick and its slot's
+    /// events, like [`Region::take_transfers`].
+    pub fn take_intents(&mut self) -> Vec<crate::IntentMsg> {
+        std::mem::take(&mut self.pending_intents)
     }
 
     /// Test hook: run an undo-safe mutation in its own forgotten

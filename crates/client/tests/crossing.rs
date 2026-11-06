@@ -317,3 +317,51 @@ fn predicted_halo_updates_do_not_mispredict() {
     h.assert_regions_in_step();
     h.assert_converged();
 }
+
+/// A `BreakBlock` intent the home region's player sends at a block of the
+/// WEST region (`game::intents`): the client relays it between its predicted
+/// regions like the server's manager, held to the same due tick — the break
+/// in the west region, its reply back in the home — so nothing mispredicts,
+/// and both ends converge with the server.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn predicted_intent_across_regions_does_not_mispredict() {
+    let mut h = SimHarness::with_generator(1, Box::new(floored_west));
+    let west = game::RegionCoords::new(game::SPAWN_REGION.x - 1, game::SPAWN_REGION.z);
+    let mid = game::REGION_BLOCKS as i32 / 2;
+    let target = game::WorldBlockPos::from_local(west, game::BlockPos::new(mid, 0, mid));
+    h.connect();
+    h.step_n(HALO_JOIN_SETTLE_STEPS);
+    assert_eq!(h.player_region(), game::SPAWN_REGION);
+    h.assert_converged();
+    // A real round trip: the client leads the server, so its order lands in
+    // the slot it was predicted in (in the lockstep harness the client
+    // trails by a tick and the order itself would mispredict).
+    h.set_latency(RUBBER_BAND_LATENCY_STEPS);
+    h.step_n(CLOCK_SETTLE_STEPS);
+    let solid = |h: &SimHarness| {
+        h.client_region_data(west)
+            .and_then(|d| d.block_at([mid, 0, mid]))
+            .is_some_and(|b| b.id != game::BlockId::AIR)
+    };
+    assert!(solid(&h), "the west region's floor is there to break");
+    let before = h.total_mispredictions();
+    h.order(game::Order::DevBreakBlock(target));
+    let mut granted = 0;
+    for _ in 0..10 + 2 * RUBBER_BAND_LATENCY_STEPS {
+        h.step();
+        let home = h.client_home_data();
+        let me = home.player_entites.get(&client::LOCAL_CLIENT_ID).and_then(|&k| home.entity_id(k)).expect("the player's id");
+        granted += home
+            .intent_inbox(me)
+            .iter()
+            .filter(|r| matches!(r, game::IntentReply::Granted(game::Intent::BreakBlock { .. })))
+            .count();
+    }
+    assert!(!solid(&h), "the client's west region broke the block");
+    assert_eq!(granted, 1, "the grant reached the sender once");
+    assert_eq!(h.total_mispredictions() - before, 0, "the cross-region intent mispredicted");
+    h.set_latency(0);
+    h.assert_regions_in_step();
+    h.assert_converged();
+}
