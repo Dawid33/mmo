@@ -2,7 +2,7 @@
 // "<scenario> <mode> <hash>" (then "<seam scenario> pair <hash>"), the same lines `water_proto --golden` prints natively.
 import { readFileSync } from "node:fs";
 
-const NAMES = ["settled", "small_spill", "big_drain", "bucket", "film", "u_tube"];
+const NAMES = ["settled", "small_spill", "big_drain", "bucket", "film", "u_tube", "dam_breach", "gate_flood", "pumped_cistern", "scoop"];
 const MODES = ["cell", "bodies"];
 const SEAMS = ["seam_drain", "seam_lake", "seam_bounce"];
 const { instance } = await WebAssembly.instantiate(readFileSync(process.argv[2]), {});

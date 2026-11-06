@@ -11,6 +11,8 @@ pub enum Edit {
     Place(u32),
     Pour(u32, u16),
     SetLink(crate::link::LinkId, crate::link::LinkKind),
+    /// Take up to `q` from the cell (or its body); counted in `scooped`.
+    Scoop(u32, u16),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -18,6 +20,8 @@ pub enum EditError {
     NotSolid,
     Solid,
     NoRoom,
+    /// Nothing to take.
+    Dry,
 }
 
 pub fn apply(w: &mut World, e: Edit) -> Result<(), EditError> {
@@ -25,6 +29,14 @@ pub fn apply(w: &mut World, e: Edit) -> Result<(), EditError> {
         Edit::Remove(i) => remove_solid(w, i),
         Edit::Place(i) => place_solid(w, i),
         Edit::Pour(i, q) => pour(w, i, q),
+        Edit::Scoop(i, q) => {
+            let got = crate::link::take(w, i, q as u64);
+            if got == 0 {
+                return Err(EditError::Dry);
+            }
+            w.add_scooped(got);
+            Ok(())
+        }
         Edit::SetLink(id, kind) => {
             if w.set_link_kind(id, kind) { Ok(()) } else { Err(EditError::NoRoom) }
         }

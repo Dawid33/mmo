@@ -1,13 +1,18 @@
 //! The benchmark scenarios. Each is a 64³ world, built identically for both modes.
 
 use crate::edit::{self, Edit};
-use crate::fixture::{carve, fill_solid, fill_water, finish};
+use crate::fixture::{carve, fill_solid, fill_water, finish, gate_basins};
+use crate::link::{Link, LinkKind};
+use crate::{PUMP_RATE};
 use crate::grid::Dims;
 use crate::metrics::{dense_bytes, sparse_bytes, surface_spread};
 use crate::state::{Stats, Undo, World};
 use crate::{FULL, Mode, ca};
 
-pub const NAMES: [&str; 6] = ["settled", "small_spill", "big_drain", "bucket", "film", "u_tube"];
+pub const NAMES: [&str; 10] = [
+    "settled", "small_spill", "big_drain", "bucket", "film", "u_tube",
+    "dam_breach", "gate_flood", "pumped_cistern", "scoop",
+];
 /// Full-grid mass checks cost O(grid); run one every this many steps (and at the end).
 pub const MASS_CHECK_EVERY: u32 = 64;
 
@@ -41,6 +46,7 @@ pub struct Report {
 pub fn build(name: &str, mode: Mode) -> Scenario {
     let d = Dims::cube(64);
     let mut w = World::new(d, mode);
+    let mut finished = false;
     let (name, edits, max_steps, stop): (&'static str, Vec<(u32, Edit)>, u32, bool) = match name {
         "settled" => {
             lake(&mut w);
@@ -83,9 +89,50 @@ pub fn build(name: &str, mode: Mode) -> Scenario {
                 .collect();
             ("u_tube", e, 20_000, true)
         }
+        "dam_breach" => {
+            w = gate_basins(mode);
+            finished = true;
+            let mut e = Vec::new();
+            for y in 12..=20 {
+                for z in 11..=12 {
+                    e.push((0, Edit::Remove(d.idx(20, y, z))));
+                }
+            }
+            ("dam_breach", e, 20_000, true)
+        }
+        "gate_flood" => {
+            w = gate_basins(mode);
+            finished = true;
+            let id = w.add_link(Link { a: d.idx(19, 12, 11), b: d.idx(21, 12, 11), kind: LinkKind::Gate { open: false } });
+            let e = vec![
+                (10, Edit::SetLink(id, LinkKind::Gate { open: true })),
+                (210, Edit::SetLink(id, LinkKind::Gate { open: false })),
+            ];
+            ("gate_flood", e, 20_000, true)
+        }
+        "pumped_cistern" => {
+            fill_solid(&mut w, 0..=14);
+            carve(&mut w, 4..=11, 4..=14, 4..=11);
+            fill_water(&mut w, 4..=11, 4..=8, 4..=11);
+            carve(&mut w, 30..=32, 12..=14, 30..=32);
+            finished = false;
+            let id = w.add_link(Link { a: d.idx(4, 4, 4), b: d.idx(31, 14, 31), kind: LinkKind::Pump { rate: 0 } });
+            let e = vec![
+                (0, Edit::SetLink(id, LinkKind::Pump { rate: PUMP_RATE })),
+                (72, Edit::SetLink(id, LinkKind::Pump { rate: 0 })),
+            ];
+            ("pumped_cistern", e, 20_000, true)
+        }
+        "scoop" => {
+            w = gate_basins(mode);
+            finished = true;
+            ("scoop", vec![(0, Edit::Scoop(d.idx(19, 12, 11), FULL))], 20_000, true)
+        }
         other => panic!("unknown scenario {other}"),
     };
-    finish(&mut w);
+    if !finished {
+        finish(&mut w);
+    }
     let initial_mass = w.mass();
     Scenario { name, world: w, edits, max_steps, stop_when_asleep: stop, initial_mass }
 }

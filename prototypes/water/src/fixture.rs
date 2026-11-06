@@ -3,6 +3,7 @@
 
 use std::ops::RangeInclusive as R;
 
+use crate::grid::Dims;
 use crate::state::World;
 use crate::{FULL, Mode, body};
 
@@ -50,4 +51,17 @@ pub fn finish(w: &mut World) {
         w.active.set(i, false);
     }
     w.stats = Default::default();
+}
+
+/// Two stepped basins, finished: lake A (x4..=19, floor y12, water y12..=17) beside an empty
+/// basin B (x21..=44, floor y4) with a one-cell wall at x = 20. The gate cells are
+/// `(19, 12, 11)` in A and `(21, 12, 11)` in B.
+pub fn gate_basins(mode: Mode) -> World {
+    let mut w = World::new(Dims::cube(64), mode);
+    fill_solid(&mut w, 0..=20);
+    carve(&mut w, 4..=19, 12..=20, 4..=19);
+    fill_water(&mut w, 4..=19, 12..=17, 4..=19);
+    carve(&mut w, 21..=44, 4..=20, 4..=19);
+    finish(&mut w);
+    w
 }

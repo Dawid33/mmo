@@ -1,17 +1,12 @@
 use water_proto::edit::{Edit, apply};
-use water_proto::fixture::{carve, fill_solid, fill_water, finish};
+use water_proto::fixture::{carve, fill_solid, fill_water, finish, gate_basins};
 use water_proto::grid::Dims;
 use water_proto::link::{Link, LinkKind};
 use water_proto::state::World;
 use water_proto::{FULL, GATE_CAP, Mode, PUMP_RATE, ca};
 
 fn basins() -> (World, u32, u32) {
-    let mut w = World::new(Dims::cube(64), Mode::Bodies);
-    fill_solid(&mut w, 0..=20);
-    carve(&mut w, 4..=19, 12..=20, 4..=19);
-    fill_water(&mut w, 4..=19, 12..=17, 4..=19);
-    carve(&mut w, 21..=44, 4..=20, 4..=19);
-    finish(&mut w);
+    let w = gate_basins(Mode::Bodies);
     let a = w.dims.idx(19, 12, 11);
     let b = w.dims.idx(21, 12, 11);
     assert_ne!(w.owner[a as usize], 0);
