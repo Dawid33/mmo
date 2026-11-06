@@ -152,3 +152,27 @@ fn plain_overflow_backs_off() {
     let bound = (r.steps as u64 / EXPAND_BACKOFF as u64 + 2) * 1024 + 64;
     assert!(r.stats.flood_cells <= bound, "flooded {} > {bound}", r.stats.flood_cells);
 }
+
+/// Regression for a mass-creating leftover unit (a donor holding 1 sent 2). Cell-only `big_drain`
+/// needs ~75k steps to sleep with the midpoint cap (60k is the scenario's own budget), ~1 minute.
+#[test]
+#[ignore = "slow: ~1 min in release; run with --include-ignored"]
+fn big_drain_cell_only_conserves_mass_and_sleeps() {
+    let mut sc = build("big_drain", Mode::CellOnly);
+    for (_, e) in sc.edits.clone() {
+        water_proto::edit::apply(&mut sc.world, e).unwrap();
+    }
+    let mut slept = false;
+    for k in 0..150_000u32 {
+        water_proto::ca::step(&mut sc.world);
+        if k % 1000 == 0 {
+            assert_eq!(sc.world.mass(), sc.initial_mass, "mass changed by step {k}");
+        }
+        if sc.world.active.count() == 0 {
+            slept = true;
+            break;
+        }
+    }
+    assert!(slept, "never slept");
+    assert_eq!(sc.world.mass(), sc.initial_mass);
+}

@@ -25,6 +25,7 @@ fn main() {
             "split", "merge", "A_sprd"
         );
     }
+    let mut failed = false;
     for name in NAMES {
         if only.as_deref().is_some_and(|o| o != name) {
             continue;
@@ -37,6 +38,10 @@ fn main() {
                     spread = spread.max(drain_a_spread(w).unwrap_or(0));
                 }
             });
+            if !(r.mass_ok && r.edit_errors == 0) {
+                failed = true;
+                eprintln!("FAILURE {name} {}: mass_ok={} edit_errors={}", mode.name(), r.mass_ok, r.edit_errors);
+            }
             if golden {
                 println!("{name} {} {:016x}", mode.name(), r.final_hash);
                 continue;
@@ -70,5 +75,8 @@ fn main() {
                 if r.mass_ok && r.edit_errors == 0 { "" } else { "  !! MASS/EDIT FAILURE" },
             );
         }
+    }
+    if failed {
+        std::process::exit(1);
     }
 }

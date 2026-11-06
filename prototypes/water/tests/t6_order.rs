@@ -33,15 +33,6 @@ fn checkerboard_spill_is_unbiased() {
         if x < 32 { l += q } else if x > 32 { r += q }
         if z < 32 { b += q } else if z > 32 { f += q }
     }
-    let mut maxd = 0u16;
-    for i in 0..w.dims.len() as u32 {
-        let (x, y, z) = w.dims.xyz(i);
-        if (1..=63).contains(&x) {
-            let m = w.dims.idx(64 - x, y, z);
-            maxd = maxd.max(w.water[i as usize].abs_diff(w.water[m as usize]));
-        }
-    }
-    eprintln!("max mirror diff {maxd}; x {l} vs {r}; z {b} vs {f}");
     assert!(l.abs_diff(r) <= FILM as u64, "x imbalance {l} vs {r}");
     assert!(b.abs_diff(f) <= FILM as u64, "z imbalance {b} vs {f}");
 }

@@ -1,5 +1,8 @@
-//! One water step. Every awake CA cell settles its six edges once, in ascending
-//! index order. Then (bodies mode) cells are absorbed/seeded, requested
+//! One water step. The awake CA cells are visited by checkerboard colour (this step's parity
+//! first). Per colour group: vertical edges, then all CA<->CA sideways wants computed from the
+//! same state, capped per donor and per receiver, then applied (the amounts do not depend on
+//! visit order, except which donor gets a receiver's leftover units, which rotates with the
+//! step); then body edges, absorb/seed and sleep per cell. Afterwards (bodies mode) requested
 //! expansions run, bodies whose level rose wake their shore, and the step advances.
 
 use crate::body::{self, Body};
@@ -61,8 +64,8 @@ fn wake(w: &mut World, c: u32) {
     w.touch(c);
 }
 
-/// A cell that lost water may now sit below a sleeping neighbour: sideways flow is donor-driven,
-/// so wake the neighbours that hold water.
+/// A cell that lost water may now sit below a neighbour that is asleep: sideways flow is
+/// donor-driven, so wake every neighbour that holds water (it re-checks its wants).
 fn wake_donors(w: &mut World, c: u32) {
     for d in crate::grid::HORIZONTAL {
         if let Some(n) = w.dims.step(c, d) {
@@ -75,7 +78,8 @@ fn wake_donors(w: &mut World, c: u32) {
 
 fn move_ca(w: &mut World, from: u32, to: u32, q: u16) {
     let (a, b) = (w.water[from as usize], w.water[to as usize]);
-    w.set_water(from, a - q);
+    let a2 = a.checked_sub(q).expect("move_ca: donor underflow");
+    w.set_water(from, a2);
     w.set_water(to, b + q);
     wake(w, from);
     wake(w, to);
@@ -85,7 +89,7 @@ fn move_ca(w: &mut World, from: u32, to: u32, q: u16) {
 
 fn ca_to_body(w: &mut World, from: u32, id: BodyId, q: u16) {
     let a = w.water[from as usize];
-    w.set_water(from, a - q);
+    w.set_water(from, a.checked_sub(q).expect("ca_to_body: donor underflow"));
     body::add_volume(w, id, q as u64);
     wake(w, from);
     wake_donors(w, from);
@@ -228,17 +232,16 @@ fn donor_wants(w: &World, c: u32, out: &mut Vec<(u32, u32, u16)>) {
     }
 }
 
-/// Receiver cap (incoming <= room, proportional floor), then apply in a fixed order.
+/// Receiver caps, then apply in a fixed order (the amounts do not depend on the order).
 fn cap_and_apply(w: &mut World, mut moves: Vec<(u32, u32, u16)>) {
-    // incoming total and largest single want per receiver
+    // largest single want per receiver
     let mut incoming: std::collections::BTreeMap<u32, (u64, u64)> = Default::default();
     for &(_, n, q) in &moves {
         let e = incoming.entry(n).or_default();
         e.0 += q as u64;
         e.1 = e.1.max(q as u64);
     }
-    // room first (floor: never overfills), then the midpoint cap (ceil: equal donors still move
-    // something); simultaneous donors would otherwise overshoot and ping-pong
+    // room cap: proportional floor, never overfills
     for m in &mut moves {
         let (tot, _) = incoming[&m.1];
         let room = (FULL - w.water[m.1 as usize]) as u64;
@@ -250,25 +253,32 @@ fn cap_and_apply(w: &mut World, mut moves: Vec<(u32, u32, u16)>) {
     for &(_, n, q) in &moves {
         *after.entry(n).or_default() += q as u64;
     }
-    // floor shares, then the leftover units (cap - sum of floors) go one each to the receiver's
-    // donors in move order, so the receiver takes in exactly `biggest` when it was over-asked
-    let mut left: std::collections::BTreeMap<u32, u64> = Default::default();
-    for m in &mut moves {
+    // midpoint cap: a receiver takes in at most the biggest single want (never past the midpoint
+    // with its highest donor), or simultaneous donors overshoot and ping-pong. Floor shares; the
+    // leftover units go one each to donors that still move something (so floor(q*b/t)+1 <= q),
+    // starting at a donor rotated by the step so no fixed index is favoured.
+    let mut left: std::collections::BTreeMap<u32, (u64, Vec<usize>)> = Default::default();
+    for (i, m) in moves.iter_mut().enumerate() {
         let (_, biggest) = incoming[&m.1];
         let tot = after[&m.1];
-        if tot > biggest {
-            let q = m.2 as u64;
-            m.2 = (q * biggest / tot) as u16;
-            *left.entry(m.1).or_insert(biggest) -= m.2 as u64;
+        if tot > biggest && m.2 > 0 {
+            m.2 = (m.2 as u64 * biggest / tot) as u16;
+            let e = left.entry(m.1).or_insert((biggest, Vec::new()));
+            e.0 -= m.2 as u64;
+            e.1.push(i);
         }
     }
-    for m in &mut moves {
-        if let Some(l) = left.get_mut(&m.1) {
-            if *l > 0 {
-                m.2 += 1;
-                *l -= 1;
+    let rot = w.step as usize;
+    for (_, (mut l, idx)) in left {
+        let k = idx.len();
+        for j in 0..k {
+            if l == 0 {
+                break;
             }
+            moves[idx[(j + rot) % k]].2 += 1;
+            l -= 1;
         }
+        debug_assert_eq!(l, 0);
     }
     for (from, to, q) in moves {
         if q > 0 {
