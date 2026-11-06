@@ -30,6 +30,7 @@ mod chop;
 mod chunk_blocks;
 mod chunk_units;
 mod collider_genesis;
+mod creature_shapes;
 mod gjk_upstream;
 mod ground;
 mod halo;

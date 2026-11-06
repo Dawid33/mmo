@@ -11,6 +11,8 @@
 //! (`game::history`) and pins crc32 of its encoded history file.
 //! A fifth pins the explicit mass properties of a compound collider spec
 //! (`game::mass_props`: our own Jacobi frame, no glamx eigen solve).
+//! A sixth pins the dog's creature body (`game::creature_shapes`: the
+//! embedded manifest's decimals parsed by serde_json) and its mass properties.
 //!
 //! Every constant holds on every target: [`WASM_SCENE_DIGEST`] is crc32 of
 //! the region's canonical bincode bytes (`SerializedRegion`, the parking and
@@ -110,6 +112,12 @@ const HISTORY_DIGEST: u32 = 0x4869_3884;
 /// (`jacobi_eigen_sym3`) and `Quat::from_mat3` must agree bit for bit.
 /// Independent of the chunk and region size.
 const EXPLICIT_MASS_DIGEST: u32 = 0x1A48_699B;
+
+/// crc32 of the field bits of the dog's `creature_shape` body parts (pose
+/// translations + half extents) and of their `mass_properties` at
+/// `CREATURE_DENSITY`, on every target. Changes when the dog's model (or
+/// `build.py`'s collider rule) does. Independent of the chunk and region size.
+const CREATURE_MASS_DIGEST: u32 = 0x62EC_1C69;
 
 /// The value pinned for this build's chunk size: `at2` at 2-block chunks,
 /// `at16` at 16 (0 elsewhere; see [`pinned_size`]).
@@ -408,6 +416,28 @@ fn explicit_mass_scene() -> u32 {
     digest
 }
 
+/// crc32 of the dog's body parts and its explicit mass properties.
+fn creature_mass_scene() -> u32 {
+    use game::creature_shapes::{creature_shape, CREATURE_DENSITY};
+    let body = &creature_shape("dog").expect("the dog has a model").body;
+    let game::ColliderSpec::Compound(parts) = body else { panic!("the body is a compound") };
+    let mut bits = Vec::new();
+    for (pose, part) in parts {
+        let game::ColliderSpec::Cuboid { half_extents: h } = part else { panic!("body parts are cuboids") };
+        let t = pose.translation;
+        bits.extend([t.x, t.y, t.z, h.x, h.y, h.z]);
+    }
+    let mp = game::mass_props::mass_properties(body, CREATURE_DENSITY);
+    let (c, i, q) = (mp.local_com, mp.inv_principal_inertia, mp.principal_inertia_local_frame);
+    bits.extend([c.x, c.y, c.z, mp.inv_mass, i.x, i.y, i.z, q.x, q.y, q.z, q.w]);
+    let bytes: Vec<u8> = bits.iter().flat_map(|v| v.to_bits().to_le_bytes()).collect();
+    let digest = crc32fast::hash(&bytes);
+    if print_hash() {
+        log(&format!("CREATURE_MASS_DIGEST = 0x{digest:08X} ({} parts, {mp:?})", parts.len()));
+    }
+    digest
+}
+
 /// Whether the region size has a pinned history digest; prints a skip line if not.
 fn history_pinned() -> bool {
     let pinned = game::REGION_BLOCKS == 64;
@@ -538,4 +568,18 @@ fn explicit_mass_compound_is_cross_target_native() {
 fn explicit_mass_compound_is_cross_target_wasm() {
     let digest = explicit_mass_scene();
     assert_eq!(digest, EXPLICIT_MASS_DIGEST, "wasm32 explicit mass digest 0x{digest:08X} != golden 0x{EXPLICIT_MASS_DIGEST:08X}");
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn creature_mass_is_cross_target_native() {
+    let digest = creature_mass_scene();
+    assert_eq!(digest, CREATURE_MASS_DIGEST, "native creature mass digest 0x{digest:08X} != golden 0x{CREATURE_MASS_DIGEST:08X}");
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen_test::wasm_bindgen_test]
+fn creature_mass_is_cross_target_wasm() {
+    let digest = creature_mass_scene();
+    assert_eq!(digest, CREATURE_MASS_DIGEST, "wasm32 creature mass digest 0x{digest:08X} != golden 0x{CREATURE_MASS_DIGEST:08X}");
 }

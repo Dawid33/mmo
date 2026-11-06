@@ -21,6 +21,7 @@ pub mod block_props;
 pub mod body;
 pub mod camera;
 pub mod containers;
+pub mod creature_shapes;
 pub mod debug_render;
 pub mod edit;
 pub mod ground;

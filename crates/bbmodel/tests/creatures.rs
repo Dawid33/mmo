@@ -125,6 +125,27 @@ fn creature_models_follow_the_style_guide() {
                 break;
             }
         }
+
+        // The sim's colliders (`game::creature_shapes`): a move capsule and
+        // one rest-pose box per bone with cubes, inside the bounds.
+        let Some(collider) = entry.get("collider") else {
+            bad("no collider".into());
+            continue;
+        };
+        let mv = &collider["move"];
+        if mv["radius"].as_f64().is_none_or(|r| r <= 0.0) || mv["half_height"].as_f64().is_none_or(|h| h < 0.0) {
+            bad(format!("bad move capsule {mv}"));
+        }
+        let body = collider["body"].as_array().map(Vec::as_slice).unwrap_or_default();
+        if body.is_empty() || body.len() > bones {
+            bad(format!("{} body boxes for {bones} bones", body.len()));
+        }
+        for part in body {
+            let (plo, phi) = (vec3(&part["min"]), vec3(&part["max"]));
+            if (0..3).any(|k| plo[k] > phi[k] || plo[k] < want_lo[k] - 1e-3 || phi[k] > want_hi[k] + 1e-3) {
+                bad(format!("body box {plo:?}..{phi:?} outside the bounds {want_lo:?}..{want_hi:?}"));
+            }
+        }
     }
     assert!(problems.is_empty(), "creature lint:\n{}", problems.join("\n"));
 }

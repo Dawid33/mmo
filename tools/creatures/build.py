@@ -42,7 +42,7 @@ def uid(*parts):
 
 
 from templates import (TEMPLATES, WING_CLIPS, add_wings, at, clip, extra_clips, hold, osc,  # noqa: E402
-                       rest_points, wing_clips)
+                       box, rest_points, wing_clips)
 
 
 # --- Creature sources -----------------------------------------------------------
@@ -620,6 +620,30 @@ def rest_bounds(model):
     return [min(p[i] for p in points) for i in range(3)], [max(p[i] for p in points) for i in range(3)]
 
 
+# The sim's creature colliders (crates/game/src/creature_shapes.rs, which
+# holds the same clamp as CREATURE_MIN_RADIUS / CREATURE_MAX_RADIUS and whose
+# test pins this mirror), in world units (1 Blockbench px = 1 unit).
+CREATURE_MIN_RADIUS = 2.0
+CREATURE_MAX_RADIUS = 12.0
+
+
+def collider(model, lo, hi):
+    """The sim's two shapes for the rest pose: `move`, an upright capsule for
+    the character controller (radius = the smaller horizontal half-extent of
+    the bounds, clamped; as tall as the bounds), and `body`, one box per bone
+    with cubes (the box of its rest-pose cube corners, model space, bone
+    order). Values go through `num` like the bounds, so the boxes stay
+    inside them."""
+    radius = min(CREATURE_MAX_RADIUS, max(CREATURE_MIN_RADIUS, min(hi[0] - lo[0], hi[2] - lo[2]) / 2))
+    half_height = max(0.0, (hi[1] - lo[1]) / 2 - radius)
+    body = []
+    for name, *_ in model["bones"]:
+        if any(bone == name for _, bone, *_ in model["cubes"]):
+            blo, bhi = box(model, {name})
+            body.append({"min": vec(blo), "max": vec(bhi)})
+    return {"move": {"radius": num(radius), "half_height": num(half_height)}, "body": body}
+
+
 def manifest_entry(df_id, src, model):
     lo, hi = rest_bounds(model)
     clips = {}
@@ -641,6 +665,7 @@ def manifest_entry(df_id, src, model):
         "cubes": len(model["cubes"]),
         "bones": len(model["bones"]),
         "clips": clips,
+        "collider": collider(model, lo, hi),
     }
 
 
