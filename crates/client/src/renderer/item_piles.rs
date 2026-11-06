@@ -13,14 +13,18 @@
 //! Textures: a block item draws its block's side texture on a shared cube
 //! mesh; a non-block item draws a flat double-sided quad. There is no
 //! `assets/items/` directory yet: `stick` reuses `oak_branch.png`
-//! ([`extra_item_texture`]). Materials are one per `ItemId`, nearest-sampled.
+//! ([`extra_item_texture`]). Materials are one per `ItemId`, nearest-sampled; their
+//! textures are decoded here into `Image` assets (`texture_for`), never
+//! loaded through the asset server (no `png` feature in this Bevy build).
 
 use std::collections::BTreeMap;
 
-use bevy::image::{ImageLoaderSettings, ImageSampler};
+use bevy::asset::RenderAssetUsages;
+use bevy::image::ImageSampler;
+use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::prelude::*;
 use game::edit::BlockPos;
-use game::{BlockRegistry, ItemId, PileView, RegionId, TextureSpec, BLOCK_VOXELS};
+use game::{BlockRegistry, ItemId, PileView, RegionId, BLOCK_VOXELS};
 
 use super::commander::cut_entities::{home_rect, hidden_by_cut};
 use super::commander::level::{camera_cut, WorkingLevel};
@@ -93,19 +97,6 @@ struct ItemPileAssets {
     materials: BTreeMap<ItemId, (Handle<StandardMaterial>, bool)>,
 }
 
-impl ItemPileAssets {
-    fn texture_path(&self, item: ItemId) -> Option<String> {
-        match item.as_block() {
-            Some(b) => match &self.registry.def(b)?.textures {
-                TextureSpec::Untextured => None,
-                TextureSpec::All(p) => Some(format!("blocks/{p}")),
-                TextureSpec::Faces { side, .. } => Some(format!("blocks/{side}")),
-            },
-            None => Some(extra_item_texture(item)),
-        }
-    }
-}
-
 impl FromWorld for ItemPileAssets {
     fn from_world(world: &mut World) -> Self {
         let size = ITEM_CUBE_SIZE_M * game::movement::UNITS_PER_METER;
@@ -116,18 +107,37 @@ impl FromWorld for ItemPileAssets {
     }
 }
 
+/// The texture for `item` as an `Image` asset, decoded here from the block
+/// PNG (`super::load_block_texture`: the file natively, the embedded copy on
+/// wasm). Never through the asset server: Bevy is built without its `png`
+/// feature, so a `load("blocks/x.png")` never arrives and a material waiting
+/// on it is never drawn.
+fn texture_for(registry: &BlockRegistry, images: &mut Assets<Image>, item: ItemId) -> Option<Handle<Image>> {
+    let rgba = super::item_icons::texture_path(registry, item).and_then(|p| super::load_block_texture(&p))?;
+    let (w, h) = rgba.dimensions();
+    let mut image = Image::new(
+        Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        TextureDimension::D2,
+        rgba.into_raw(),
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::RENDER_WORLD,
+    );
+    image.sampler = ImageSampler::nearest();
+    Some(images.add(image))
+}
+
 /// The material for `item` (made once) and whether it is a flat quad.
-fn material_for(world_assets: &mut ItemPileAssets, server: &AssetServer, mats: &mut Assets<StandardMaterial>, item: ItemId) -> (Handle<StandardMaterial>, bool) {
+fn material_for(
+    world_assets: &mut ItemPileAssets,
+    images: &mut Assets<Image>,
+    mats: &mut Assets<StandardMaterial>,
+    item: ItemId,
+) -> (Handle<StandardMaterial>, bool) {
     if let Some(m) = world_assets.materials.get(&item) {
         return m.clone();
     }
     let flat = item.as_block().is_none();
-    let texture = world_assets.texture_path(item).map(|p| {
-        server
-            .load_builder()
-            .with_settings(|s: &mut ImageLoaderSettings| s.sampler = ImageSampler::nearest())
-            .load::<Image>(p)
-    });
+    let texture = texture_for(&world_assets.registry, images, item);
     let material = mats.add(StandardMaterial {
         base_color_texture: texture,
         perceptual_roughness: 1.0,
@@ -151,7 +161,7 @@ pub fn pile_world_position(region: RegionId, cell: BlockPos) -> Vec3 {
 fn spawn_pile(
     commands: &mut Commands,
     assets: &mut ItemPileAssets,
-    server: &AssetServer,
+    images: &mut Assets<Image>,
     mats: &mut Assets<StandardMaterial>,
     region: RegionId,
     cell: BlockPos,
@@ -162,7 +172,7 @@ fn spawn_pile(
     let mut n = 0usize;
     let mut children = Vec::new();
     for stack in &view.stacks {
-        let (material, flat) = material_for(assets, server, mats, stack.item);
+        let (material, flat) = material_for(assets, images, mats, stack.item);
         for _ in 0..cubes_for(stack.count) {
             let [ox, oz] = OFFSETS[n % OFFSETS.len()];
             let base = Vec3::new(ox * SPREAD_M * unit, half, oz * SPREAD_M * unit);
@@ -180,8 +190,6 @@ fn spawn_pile(
             n += 1;
         }
     }
-    // TEMP diagnostic (live report "items not rendering", 2026-11-05).
-    info!("[item_piles] spawn {region:?} cell={cell:?} world={:?} cubes={n}", pile_world_position(region, cell));
     commands
         .spawn((
             ItemPileRoot { region, cell },
@@ -198,7 +206,7 @@ fn apply_pile_msgs(
     mut msgs: MessageReader<ItemPileMsg>,
     mut roots: ResMut<ItemPileRoots>,
     mut assets: ResMut<ItemPileAssets>,
-    server: Res<AssetServer>,
+    mut images: ResMut<Assets<Image>>,
     mut mats: ResMut<Assets<StandardMaterial>>,
 ) {
     for msg in msgs.read() {
@@ -209,7 +217,7 @@ fn apply_pile_msgs(
                         commands.entity(old).despawn();
                     }
                     if let Some(view) = view.as_ref().filter(|v| !v.stacks.is_empty()) {
-                        let e = spawn_pile(&mut commands, &mut assets, &server, &mut mats, *region, *cell, view);
+                        let e = spawn_pile(&mut commands, &mut assets, &mut images, &mut mats, *region, *cell, view);
                         roots.0.insert((*region, *cell), e);
                     }
                 }
@@ -246,10 +254,7 @@ fn hide_cut_piles(
     let home = tiles.region().map(home_rect);
     for (root, mut vis) in &mut roots {
         let hide = hidden_by_cut(pile_world_position(root.region, root.cell), cut, home);
-        if vis.set_if_neq(if hide { Visibility::Hidden } else { Visibility::Inherited }) && hide {
-            // TEMP diagnostic (live report "items not rendering", 2026-11-05).
-            info!("[item_piles] hidden by cut {:?} cell={:?} cut={cut:?}", root.region, root.cell);
-        }
+        vis.set_if_neq(if hide { Visibility::Hidden } else { Visibility::Inherited });
     }
 }
 
@@ -302,6 +307,32 @@ mod tests {
     fn roots(app: &mut App) -> Vec<(Entity, usize, Vec3)> {
         let mut q = app.world_mut().query::<(Entity, &ItemPileRoot, &Transform, Option<&Children>)>();
         q.iter(app.world()).map(|(e, _, t, c)| (e, c.map_or(0, |c| c.len()), t.translation)).collect()
+    }
+
+    /// Live report 2026-11-05: piles were never drawn. Bevy is built without
+    /// its `png` feature, so a texture loaded through the asset server never
+    /// arrives and its `StandardMaterial` is never drawn. Every cube's texture
+    /// must already be an `Image` asset when the pile spawns.
+    #[test]
+    fn cube_textures_are_ready_at_spawn() {
+        let mut app = app();
+        let stick = ItemId::extra_named("stick").expect("stick item");
+        let changes = vec![
+            ([0, 0, 0], Some(view(5))),
+            ([2, 0, 0], Some(PileView { stacks: vec![ItemStack { item: stick, count: 3 }] })),
+        ];
+        app.world_mut().write_message(ItemPileMsg::Set { region: RegionId::new(0, 0), changes });
+        app.update();
+        app.update();
+        let mut q = app.world_mut().query::<&MeshMaterial3d<StandardMaterial>>();
+        let handles: Vec<_> = q.iter(app.world()).map(|m| m.0.clone()).collect();
+        assert!(!handles.is_empty(), "piles spawned cubes");
+        let mats = app.world().resource::<Assets<StandardMaterial>>();
+        let images = app.world().resource::<Assets<Image>>();
+        for h in handles {
+            let tex = mats.get(&h).and_then(|m| m.base_color_texture.clone()).expect("cube material has a texture");
+            assert!(images.get(&tex).is_some(), "cube texture must be an Image asset at spawn, not a pending load");
+        }
     }
 
     #[test]
