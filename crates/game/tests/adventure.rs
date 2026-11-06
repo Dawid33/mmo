@@ -633,7 +633,7 @@ fn floored_region(at: RegionCoords) -> Region {
 fn walker_survives_bundle_roundtrip() {
     let goal = here_goal([20, 20], None);
     let bundle = walking_bundle(goal);
-    assert_eq!(bundle.walker.as_ref().map(|w| w.goal), Some(goal), "the bundle carries the walk");
+    assert_eq!(bundle.carried.walker.as_ref().map(|w| w.goal), Some(goal), "the bundle carries the walk");
 
     let mut dst = floored_region(RegionCoords::new(0, 0));
     let before = state_hash(dst.data());

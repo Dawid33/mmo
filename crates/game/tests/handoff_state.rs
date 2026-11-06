@@ -93,19 +93,13 @@ fn eid(src: RegionCoords, key: game::EntityKey) -> game::EntityId {
 
 fn bundle(src: RegionCoords, key: game::EntityKey, client: game::ClientId, x: f32) -> EntityBundle {
     EntityBundle {
-        kind: EntityKind::Player,
-        isometry: pose(x, 26.0, 128.0),
-        linvel: Vector::ZERO,
-        collider: ColliderSpec::CapsuleY { half_height: 8.0, radius: 6.4 },
-        has_camera: true,
-        yaw: 0.0,
-        pitch: 0.0,
-        motion: Some(game::Motion::default()),
-        slime: None,
-        animator: None,
-        walker: None,
-        client: Some((client, Client::default())),
         id: eid(src, key),
+        kind: EntityKind::Player,
+        body: game::BodyState::kinematic(pose(x, 26.0, 128.0)),
+        collider: ColliderSpec::CapsuleY { half_height: 8.0, radius: 6.4 },
+        carried: game::Carried { camera: Some((0.0, 0.0)), motion: Some(game::Motion::default()), ..Default::default() },
+        client: Some((client, Client::default())),
+        pending_inputs: Vec::new(),
     }
 }
 
@@ -170,7 +164,7 @@ fn arrival_preserves_movement_state() {
 
     donor_rb.new_transaction();
     let bundle = donor_rb.extract_entity_safe(src_key);
-    assert_eq!(bundle.motion, Some(motion));
+    assert_eq!(bundle.carried.motion, Some(motion));
 
     let (send, _recv) = crossbeam::channel::unbounded();
     let mut rb = Rollback::new(Some(send));
@@ -517,4 +511,109 @@ fn undo_spawn_frees_serial() {
     rb.rollback();
     assert_eq!(*rb.data.next_entity_serial, 0, "the serial is freed");
     assert_eq!(before, crc(&rb));
+}
+
+// ---- generated bundle: exhaustive classification (Task 2.2) ----
+
+/// A donor player carrying every transferable component, plus a client with
+/// region-local state to be reset.
+fn loaded_donor() -> (Rollback, game::EntityKey, Client) {
+    let (mut rb, key) = donor();
+    let client = Client {
+        fps_cam_mode: true,
+        selected: 3,
+        inventory_open: true,
+        mining: Some(game::Mining {
+            target: [1, 2, 3],
+            started_tick: 40,
+            needed_ticks: 9,
+        }),
+        break_cooldown_until: 77,
+        open_container: Some([4, 5, 6]),
+        ..Client::default()
+    };
+    rb.new_transaction();
+    rb.data.clients.insert(9, client.clone());
+    rb.data.ecs.motion.set_safe(
+        key,
+        Some(game::Motion { vel_y: -3.5, grounded: false, flying: true, last_jump_tap: Some(12) }),
+    );
+    rb.data.ecs.slime.set_safe(
+        key,
+        Some(game::slime::Slime { yaw: 0.5, target_yaw: 1.5, next_turn_tick: 90, next_hop_tick: 95, hopping: true }),
+    );
+    rb.data.ecs.walker.set_safe(
+        key,
+        Some(game::Walker { goal: Default::default(), next: 2, stalled: 4, ..Default::default() }),
+    );
+    rb.data.ecs.wander.set_safe(key, Some(game::people::Wander { next_tick: 123, home: [7, 8] }));
+    let mut cam = rb.data.ecs.camera.try_get(key).clone().unwrap();
+    cam.yaw = 0.75;
+    cam.pitch = -0.25;
+    rb.data.ecs.camera.set_safe(key, Some(cam));
+    rb.forget();
+    (rb, key, client)
+}
+
+#[test]
+fn bundle_round_trip_is_state_exact() {
+    let (mut donor_rb, key, client) = loaded_donor();
+    donor_rb.new_transaction();
+    // An animator needs a rig (and its bone colliders): attach the dwarf's.
+    let animator = game::anim::Animator::idle(game::anim::RigId::default());
+    donor_rb.attach_rig_safe(key, animator, 2.0);
+    donor_rb.forget();
+
+    donor_rb.new_transaction();
+    let bundle = donor_rb.extract_entity_safe(key);
+    let want = bundle.carried.clone();
+    assert!(want.motion.is_some() && want.slime.is_some() && want.walker.is_some());
+    assert!(want.animator.is_some() && want.wander.is_some() && want.camera.is_some());
+    assert_eq!(bundle.client.as_ref().map(|(_, c)| c), Some(&client), "extraction copies the client as is");
+
+    let (send, _recv) = crossbeam::channel::unbounded();
+    let mut rb = Rollback::new(Some(send));
+    rb.new_transaction();
+    let e = rb.apply_arrival(bundle.clone()).expect("arrives");
+    let handle = rb.data.ecs.rigidbody.try_get(e).unwrap();
+    assert_eq!(game::BodyState::of(rb.data.physics.bodies.get(handle).unwrap()), bundle.body);
+    assert_eq!(rb.data.clients[&9], client.arrive());
+    assert_eq!(rb.entity_id(e), Some(bundle.id));
+    // Every carried component is bit-equal: extracting again yields it.
+    let again = rb.extract_entity_safe(e);
+    assert_eq!(again.carried, want, "every carried component is bit-equal");
+}
+
+#[test]
+fn replayed_arrival_overwrites_whole_bundle() {
+    let (mut donor_rb, key, _) = loaded_donor();
+    donor_rb.new_transaction();
+    let bundle = donor_rb.extract_entity_safe(key);
+
+    let (send, _recv) = crossbeam::channel::unbounded();
+    let mut rb = Rollback::new(Some(send));
+    rb.new_transaction();
+    let e = rb.apply_arrival(bundle.clone()).expect("arrives");
+    rb.data.ecs.motion.set_safe(e, Some(game::Motion { vel_y: 99.0, ..Default::default() }));
+    rb.data.ecs.wander.set_safe(e, None);
+    rb.data.clients.get_mut(&9).unwrap().selected = 8;
+    assert!(rb.apply_arrival(bundle.clone()).is_none(), "a replay creates nothing");
+    assert_eq!(*rb.data.ecs.motion.try_get(e), bundle.carried.motion);
+    assert_eq!(*rb.data.ecs.wander.try_get(e), bundle.carried.wander);
+    assert_eq!(rb.data.clients[&9].selected, 3, "the client is the bundle's too");
+}
+
+#[test]
+fn arrival_closes_open_chest_view() {
+    let (mut donor_rb, key, _) = loaded_donor();
+    donor_rb.new_transaction();
+    let bundle = donor_rb.extract_entity_safe(key);
+    let (send, _recv) = crossbeam::channel::unbounded();
+    let mut rb = Rollback::new(Some(send));
+    rb.new_transaction();
+    rb.apply_arrival(bundle);
+    let c = &rb.data.clients[&9];
+    assert_eq!(c.open_container, None);
+    assert!(!c.inventory_open);
+    assert_eq!((c.mining, c.break_cooldown_until), (None, 0));
 }

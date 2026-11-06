@@ -72,7 +72,7 @@ pub struct PlayerRecord {
 /// held input, the first-person flag, an open inventory — is reset, the
 /// cursor stack goes back into the inventory (what does not fit stays on the
 /// cursor), and what belongs to the region it stood in (mining, the break
-/// cooldown, an open chest: [`Client::reset_region_local`]) is cleared, so a
+/// cooldown, an open chest: [`Client::arrive`]) is cleared, so a
 /// restored player starts like a fresh session in everything but its state.
 pub fn parked_client(client: &Client) -> Client {
     let mut c = client.clone();
@@ -82,8 +82,7 @@ pub fn parked_client(client: &Client) -> Client {
     if let Some(rest) = c.stow_cursor() {
         c.cursor = Some(rest);
     }
-    c.reset_region_local();
-    c
+    c.arrive()
 }
 
 /// Every player body in `rollback` as a record (claims empty — the

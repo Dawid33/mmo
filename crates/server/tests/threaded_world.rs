@@ -437,10 +437,10 @@ fn walking_input_crosses_a_boundary_on_real_threads() {
     // The handoff carried the player's identity and state, not just an event.
     assert_eq!(bundle.id.birth_region, SPAWN_REGION);
     assert_eq!(bundle.client.as_ref().map(|(id, _)| *id), Some(0), "client rides the bundle");
-    assert!(bundle.has_camera, "camera rides the bundle");
+    assert!(bundle.carried.camera.is_some(), "camera rides the bundle");
     // Pose is rebased into the arrival frame: x untouched, z just inside the
     // far (+z) edge — past the hysteresis line by at most one tick of walking.
-    let (x, z) = (f32::from(bundle.isometry.translation.x), f32::from(bundle.isometry.translation.z));
+    let (x, z) = (f32::from(bundle.body.pose.translation.x), f32::from(bundle.body.pose.translation.z));
     let tick_walk = movement::WALK_SPEED * movement::UNITS_PER_METER * movement::TICK_DT;
     assert!((x - 128.0).abs() < 0.5, "walked straight along -z, x={x}");
     assert!(
@@ -448,7 +448,7 @@ fn walking_input_crosses_a_boundary_on_real_threads() {
         "arrived within one walking tick past the flip line, z={z}"
     );
     // The floor spans the seam, so the crossing happened on the ground.
-    let motion = bundle.motion.expect("player carries movement state");
+    let motion = bundle.carried.motion.expect("player carries movement state");
     assert!(motion.grounded && !motion.flying, "crossed grounded, got {motion:?}");
 }
 
@@ -500,12 +500,12 @@ fn diagonal_walk_crosses_a_corner_on_real_threads() {
 
     assert_eq!(home, Some(corner), "home never settled on the diagonal region; packets: {log:#?}");
     let bundle = arrival.expect("EntityArrived relayed from the diagonal region");
-    let (x, z) = (f32::from(bundle.isometry.translation.x), f32::from(bundle.isometry.translation.z));
+    let (x, z) = (f32::from(bundle.body.pose.translation.x), f32::from(bundle.body.pose.translation.z));
     assert!(
         x > REGION_SIZE - 32.0 && z > REGION_SIZE - 32.0,
         "arrived near the corner in the diagonal region's frame, got x={x} z={z}"
     );
-    let motion = bundle.motion.expect("player carries movement state");
+    let motion = bundle.carried.motion.expect("player carries movement state");
     assert!(motion.grounded, "crossed the corner grounded, got {motion:?}");
 }
 
@@ -557,7 +557,7 @@ fn walking_into_a_cold_region_wakes_its_thread_and_returns() {
     let bundle = back.expect("EntityArrived relayed from the spawn region on return");
     assert_eq!(bundle.id.birth_region, SPAWN_REGION, "the same identity comes back");
     assert_eq!(bundle.client.as_ref().map(|(id, _)| *id), Some(0));
-    let z = f32::from(bundle.isometry.translation.z);
+    let z = f32::from(bundle.body.pose.translation.z);
     assert!(
         z >= FLIP_HYSTERESIS && z < 32.0,
         "returned just past the flip line in the spawn region's frame, z={z}"

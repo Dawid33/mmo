@@ -15,7 +15,7 @@ use std::sync::{Arc, atomic::AtomicUsize};
 
 use crate::camera::{Camera, Perspective3};
 use crate::input::InputState;
-use crate::protocol::{ColliderSpec, EntityBundle, GhostData, GHOST_TTL_TICKS};
+use crate::protocol::{BodyState, ColliderSpec, EntityBundle, GhostData, GHOST_TTL_TICKS};
 use crate::registry::BlockId;
 use crate::block::CHUNK_UNITS;
 use crate::block::{Block, BlockIndex, ChiselData};
@@ -152,19 +152,6 @@ pub struct Client {
 }
 
 impl Client {
-    /// Clears what only means something in the region the client is in:
-    /// mining (a region-local target and a start tick of that region's
-    /// clock), the break cooldown (an absolute tick of that clock — each
-    /// region's tick starts at 0 at genesis, so it would block mining in a
-    /// younger region for as long as the age gap) and the open chest (a
-    /// region-local cell). Called wherever a client enters a region from
-    /// elsewhere: a seam arrival, a restore, a move.
-    pub fn reset_region_local(&mut self) {
-        self.mining = None;
-        self.break_cooldown_until = 0;
-        self.open_container = None;
-    }
-
     /// Puts the cursor stack back into the inventory; returns what does not
     /// fit (the cursor is then empty — the caller drops or keeps the rest).
     pub fn stow_cursor(&mut self) -> Option<ItemStack> {
@@ -1349,15 +1336,18 @@ impl Rollback {
         pose: Pose,
         collider: &ColliderSpec,
     ) {
-        let body = RigidBodyBuilder::kinematic_position_based()
-            .pose(pose)
-            .gravity_scale(0.0)
-            .enabled_rotations(true, true, true)
-            .ccd_enabled(false)
-            .angular_damping(1.0)
-            .can_sleep(false)
-            .user_data(e.data().as_ffi() as u128)
-            .build();
+        self.build_body_safe(e, &crate::BodyState::kinematic(pose), collider);
+    }
+
+    /// Body + collider for entity `e` from a transferable [`crate::BodyState`],
+    /// undo-tracked.
+    pub(crate) fn build_body_safe(
+        &mut self,
+        e: EntityKey,
+        state: &crate::BodyState,
+        collider: &ColliderSpec,
+    ) {
+        let body = state.build(e);
         // Tier-2 with a true fork inverse + delta digest, same shape as in
         // create_mesh.
         let (prev_head, prev_len) = self.data.physics.bodies.alloc_state();
@@ -1381,7 +1371,18 @@ impl Rollback {
     /// Body+collider insertion from a bundle — the create_player_safe insert
     /// pattern generalized to a transfer payload.
     fn inject_body_safe(&mut self, e: EntityKey, bundle: &EntityBundle) {
-        self.build_kinematic_body_safe(e, bundle.isometry, &bundle.collider);
+        self.build_body_safe(e, &bundle.body, &bundle.collider);
+    }
+
+    /// Re-pose and re-state `e`'s existing body from a bundle (a ghost's
+    /// mirror upgraded in place, or a replayed arrival).
+    fn apply_body_state_safe(&mut self, e: EntityKey, state: &crate::BodyState) {
+        let Some(handle) = *self.data.ecs.rigidbody.try_get(e) else { return };
+        self.data.physics.bodies.mutate_body_safe(handle, |b| state.apply_to(b));
+        self.data.send(GameDataUpdate::new(
+            GameDataTransactionKind::Do,
+            GameDataUpdateKind::SetEntityPosition(e, state.pose),
+        ));
     }
 
     /// Ownership transfer INTO this region. Three paths:
@@ -1394,7 +1395,13 @@ impl Rollback {
         // Idempotency: a respawn-resnapshot replay must not duplicate.
         if let Some(&e) = self.data.arrivals.get(&identity) {
             if self.data.ecs.entities.contains_key(e) {
-                self.set_body_pose_safe(e, bundle.isometry);
+                // A replay re-applies the whole bundle, not only the pose.
+                self.apply_body_state_safe(e, &bundle.body);
+                let client_id = bundle.client.as_ref().map(|(c, _)| *c);
+                self.restore_components_safe(e, &bundle.carried, client_id);
+                if let Some((client_id, client)) = bundle.client {
+                    self.data.clients.insert(client_id, client.arrive());
+                }
                 return None;
             }
         }
@@ -1441,53 +1448,21 @@ impl Rollback {
         self.data.ecs.kind.set_safe(e, Some(bundle.kind));
 
         // Body + collider at the (already rebased) bundle pose. A stage-1
-        // ghost has no body; if one exists (stage 2), correct its pose
-        // instead of double-inserting.
+        // ghost has no body; if one exists (stage 2), re-state it instead of
+        // double-inserting.
         if self.data.ecs.rigidbody.try_get(e).is_some() {
-            self.set_body_pose_safe(e, bundle.isometry);
+            self.apply_body_state_safe(e, &bundle.body);
         } else {
             self.inject_body_safe(e, &bundle);
         }
 
-        // Movement state (velocity, flight) carries across the seam.
-        self.data.ecs.motion.set_safe(e, bundle.motion);
-        // So does a mob's behaviour state.
-        self.data.ecs.slime.set_safe(e, bundle.slime);
-        // A rig: animator + bone colliders, unless the entity already has
-        // them (a replayed arrival).
-        if let (Some(animator), None) = (bundle.animator, self.data.ecs.bones.try_get(e)) {
-            self.attach_rig_safe(e, animator, animator.foot_y);
-        }
-        // An adventurer's walk; its sender-local path is re-planned by
-        // `resume_walker_safe` once the arrival is in.
-        if bundle.walker.is_some() {
-            self.data.ecs.walker.set_safe(e, bundle.walker.clone());
-        }
+        // Movement, behaviour, rig, walk, camera: the carried components.
+        let client_id = bundle.client.as_ref().map(|(c, _)| *c);
+        self.restore_components_safe(e, &bundle.carried, client_id);
 
-        // Camera + client attachment (players).
+        // Client attachment (players); region-local client state resets.
         if let Some((client_id, client)) = bundle.client.clone() {
-            if bundle.has_camera {
-                let handle = self.data.ecs.rigidbody.try_get(e).unwrap();
-                let mut cam = Camera::new(handle);
-                cam.yaw = bundle.yaw;
-                cam.pitch = bundle.pitch;
-                self.data.send(GameDataUpdate::new(
-                    GameDataTransactionKind::Do,
-                    GameDataUpdateKind::AddCameraComponent(
-                        e, client_id, cam.proj_matrix.clone(), bundle.isometry,
-                    ),
-                ));
-                self.data.ecs.camera.emit_on_undo(GameDataUpdate::new(
-                    GameDataTransactionKind::Undo,
-                    GameDataUpdateKind::RemoveCameraComponent(e),
-                ));
-                self.data.ecs.camera.set_safe(e, Some(cam));
-            }
-            // Mining, its cooldown and an open chest belong to the region
-            // the client came from.
-            let mut client = client;
-            client.reset_region_local();
-            self.data.clients.insert(client_id, client);
+            self.data.clients.insert(client_id, client.arrive());
             self.data.player_entites.insert(client_id, e);
         }
 
@@ -1608,9 +1583,7 @@ impl Rollback {
         let kind = (*self.data.ecs.kind.try_get(key)).unwrap_or_default();
         let handle = (*self.data.ecs.rigidbody.try_get(key))
             .expect("transferable entities have bodies");
-        let body = self.data.physics.bodies.get(handle).unwrap();
-        let isometry = *body.position();
-        let linvel = body.linvel();
+        let body = BodyState::of(self.data.physics.bodies.get(handle).unwrap());
         let collider = self.collider_spec_of(handle);
         let client_id = self
             .data
@@ -1619,28 +1592,14 @@ impl Rollback {
             .find(|(_, e)| **e == key)
             .map(|(c, _)| *c);
         let client = client_id.map(|c| (c, self.data.clients.get(&c).unwrap().clone()));
-        let (yaw, pitch) = self
-            .data
-            .ecs
-            .camera
-            .try_get(key)
-            .as_ref()
-            .map(|c| (c.yaw, c.pitch))
-            .unwrap_or_default();
         let bundle = crate::EntityBundle {
-            kind,
-            isometry,
-            linvel,
-            collider,
-            has_camera: self.data.ecs.camera.try_get(key).is_some(),
-            yaw,
-            pitch,
-            motion: *self.data.ecs.motion.try_get(key),
-            slime: *self.data.ecs.slime.try_get(key),
-            animator: *self.data.ecs.animator.try_get(key),
-            walker: self.data.ecs.walker.try_get(key).clone(),
-            client,
             id: (*self.data.ecs.id.try_get(key)).expect("transferable entities have an EntityId"),
+            kind,
+            body,
+            collider,
+            carried: self.carry_components(key),
+            client,
+            pending_inputs: Vec::new(),
         };
         if let EntityKind::Person { person } = kind {
             self.data.person_entities.remove(&person);

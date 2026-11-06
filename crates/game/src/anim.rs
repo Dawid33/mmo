@@ -340,7 +340,7 @@ impl Rollback {
     }
 
     /// Set the animator and tell the renderer, both directions.
-    fn set_animator_safe(&mut self, e: EntityKey, animator: Animator) {
+    pub(crate) fn set_animator_safe(&mut self, e: EntityKey, animator: Animator) {
         let old = *self.data.ecs.animator.try_get(e);
         self.data.send(GameDataUpdate::new(
             GameDataTransactionKind::Do,

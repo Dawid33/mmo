@@ -52,19 +52,13 @@ fn matches_prediction_is_identity_based_for_transfers() {
     use game::{Client, ColliderSpec, EntityBundle, EntityKind, GameEventKind, GhostData};
     use game::parry::math::Vector;
     let mk = |x: f32| EntityBundle {
-        kind: EntityKind::Player,
-        isometry: Pose::translation(x, 0.0, 0.0),
-        linvel: Vector::ZERO,
-        collider: ColliderSpec::CapsuleY { half_height: 8.0, radius: 6.4 },
-        has_camera: true,
-        yaw: 0.0.into(),
-        pitch: 0.0.into(),
-        motion: None,
-        slime: None,
-        animator: None,
-        walker: None,
-        client: Some((7, Client::default())),
         id: game::EntityId { birth_region: RegionCoords::new(0, 0), serial: 0 },
+        kind: EntityKind::Player,
+        body: game::BodyState::kinematic(Pose::translation(x, 0.0, 0.0)),
+        collider: ColliderSpec::CapsuleY { half_height: 8.0, radius: 6.4 },
+        carried: game::Carried { camera: Some((0.0, 0.0)), motion: None, ..Default::default() },
+        client: Some((7, Client::default())),
+        pending_inputs: Vec::new(),
     };
     // Same identity, different pose (predicted vs authoritative tick): matches.
     let a = GameEventKind::EntityArrived(mk(2.0));

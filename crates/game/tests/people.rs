@@ -327,7 +327,7 @@ fn replayed_person_arrival_corrects_pose() {
         d.set_body_pose_safe(e, game::Pose::from_translation(Vector::new(10.0, 30.0, 10.0)));
         assert!(d.apply_arrival(bundle.clone()).is_none(), "replay creates nothing");
         let t = d.people_here()[0].1;
-        assert_eq!([t[0], t[2]], [bundle.isometry.translation.x, bundle.isometry.translation.z], "pose corrected");
+        assert_eq!([t[0], t[2]], [bundle.body.pose.translation.x, bundle.body.pose.translation.z], "pose corrected");
     });
 }
 

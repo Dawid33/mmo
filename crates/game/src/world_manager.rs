@@ -1181,7 +1181,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                         // region that was not bounded: refuse the crossing and
                         // hand the entity back to where it left, on its seam.
                         log::error!("departure from {rc:?} into off-map {target:?} refused: returned");
-                        let t = &mut bundle.isometry.translation;
+                        let t = &mut bundle.body.pose.translation;
                         t.x = t.x.clamp(0.0, crate::REGION_SIZE);
                         t.z = t.z.clamp(0.0, crate::REGION_SIZE);
                         self.send_to_region(rc, RegionInput::Event(GameEventKind::EntityArrived(bundle)));
@@ -1194,7 +1194,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                             continue;
                         }
                     }
-                    bundle.isometry = crate::rebase_isometry(&bundle.isometry, rc, target);
+                    bundle.rebase(rc, target);
                     // Arrivals ALWAYS wake the target (parked blob or gen).
                     self.ensure_running(target);
                     self.send_to_region(

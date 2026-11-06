@@ -246,35 +246,144 @@ pub enum ColliderSpec {
     CapsuleY { half_height: f32, radius: f32 },
 }
 
+/// Which rapier body type a transferred body is rebuilt as. Players, slimes
+/// and people are all `KinematicPosition` today; dynamic bodies join later.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum BodyKind {
+    Dynamic,
+    KinematicPosition,
+}
+
+/// Everything about a rapier body that has to survive a seam crossing,
+/// read from the body at extraction ([`BodyState::of`]) and rebuilt from on
+/// arrival. `pose` is region-local (rebased by [`EntityBundle::rebase`]).
+/// `linvel`/`angvel` are only applied to `Dynamic` bodies: a position-based
+/// kinematic body's velocity is derived from its motion.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct BodyState {
+    pub kind: BodyKind,
+    pub pose: Pose,
+    pub linvel: Vector,
+    pub angvel: Vector,
+    pub activation: rapier3d::dynamics::RigidBodyActivation,
+    pub linear_damping: f32,
+    pub angular_damping: f32,
+    pub gravity_scale: f32,
+    pub ccd: bool,
+    pub locked_axes: rapier3d::dynamics::LockedAxes,
+    /// Explicit mass properties of a dynamic body (`None`: kinematic).
+    pub mass: Option<parry3d::mass_properties::MassProperties>,
+}
+
+impl BodyState {
+    /// The state of the character bodies the game builds today (and of a
+    /// ghost's mirror body): kinematic, no gravity of its own, never sleeps.
+    pub fn kinematic(pose: Pose) -> Self {
+        BodyState {
+            kind: BodyKind::KinematicPosition,
+            pose,
+            linvel: Vector::ZERO,
+            angvel: Vector::ZERO,
+            activation: rapier3d::dynamics::RigidBodyActivation::cannot_sleep(),
+            linear_damping: 0.0,
+            angular_damping: 1.0,
+            gravity_scale: 0.0,
+            ccd: false,
+            locked_axes: rapier3d::dynamics::LockedAxes::empty(),
+            mass: None,
+        }
+    }
+
+    /// Read the transferable state off a live body.
+    pub fn of(body: &rapier3d::dynamics::RigidBody) -> Self {
+        let dynamic = body.body_type() == rapier3d::dynamics::RigidBodyType::Dynamic;
+        BodyState {
+            kind: if dynamic { BodyKind::Dynamic } else { BodyKind::KinematicPosition },
+            pose: *body.position(),
+            linvel: body.linvel(),
+            angvel: body.angvel(),
+            activation: *body.activation(),
+            linear_damping: body.linear_damping(),
+            angular_damping: body.angular_damping(),
+            gravity_scale: body.gravity_scale(),
+            ccd: body.is_ccd_enabled(),
+            locked_axes: body.locked_axes(),
+            mass: dynamic.then(|| body.mass_properties().local_mprops),
+        }
+    }
+
+    /// A fresh body for entity `e` (its key rides in `user_data`).
+    pub fn build(&self, e: EntityKey) -> rapier3d::dynamics::RigidBody {
+        use slotmapd::Key;
+        let mut b = match self.kind {
+            BodyKind::Dynamic => rapier3d::dynamics::RigidBodyBuilder::dynamic(),
+            BodyKind::KinematicPosition => rapier3d::dynamics::RigidBodyBuilder::kinematic_position_based(),
+        }
+        .pose(self.pose)
+        .gravity_scale(self.gravity_scale)
+        .linear_damping(self.linear_damping)
+        .angular_damping(self.angular_damping)
+        .locked_axes(self.locked_axes)
+        .ccd_enabled(self.ccd)
+        .can_sleep(false)
+        .user_data(e.data().as_ffi() as u128);
+        if self.kind == BodyKind::Dynamic {
+            b = b.linvel(self.linvel).angvel(self.angvel);
+            if let Some(m) = self.mass {
+                b = b.additional_mass_properties(m);
+            }
+        }
+        let mut body = b.build();
+        *body.activation_mut() = self.activation;
+        body
+    }
+
+    /// Re-apply this state to an existing body (a ghost's mirror upgraded
+    /// in place, or a replayed arrival).
+    pub fn apply_to(&self, body: &mut rapier3d::dynamics::RigidBody) {
+        body.set_position(self.pose, true);
+        body.set_linear_damping(self.linear_damping);
+        body.set_angular_damping(self.angular_damping);
+        body.set_gravity_scale(self.gravity_scale, false);
+        body.enable_ccd(self.ccd);
+        body.set_locked_axes(self.locked_axes, false);
+        if self.kind == BodyKind::Dynamic {
+            body.set_linvel(self.linvel, false);
+            body.set_angvel(self.angvel, false);
+        }
+        *body.activation_mut() = self.activation;
+    }
+}
+
 /// The unit of ownership transfer. Assembled deterministically at the
-/// extraction tick; `isometry` is source-local until the relay rebases it.
-/// `id` is the identity (ghost upgrade, arrival idempotency); the region it
-/// left is the departure's own framing (`RegionOutput::Departures`).
+/// extraction tick; `body.pose` is source-local until [`EntityBundle::rebase`]
+/// moves it into the target's frame. `id` is the identity (ghost upgrade,
+/// arrival idempotency); the region it left is the departure's own framing
+/// (`RegionOutput::Departures`). What travels is classified exhaustively in
+/// `migrate.rs` (`Carried`, `Client::arrive`).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 pub struct EntityBundle {
-    pub kind: EntityKind,
-    pub isometry: Pose,
-    pub linvel: Vector,
-    pub collider: ColliderSpec,
-    pub has_camera: bool,
-    /// Authoritative look scalars (the body quaternion is derived from them
-    /// on every look change) — zeroes when `has_camera` is false.
-    pub yaw: f32,
-    pub pitch: f32,
-    /// Movement state (fall speed, flight) — `None` for entities that don't move
-    /// under the character controller.
-    pub motion: Option<crate::Motion>,
-    /// Slime behaviour state — `None` for every other kind.
-    pub slime: Option<crate::slime::Slime>,
-    /// Animation state of a rigged entity; the receiver rebuilds its bone
-    /// colliders from it (`None`: no rig).
-    pub animator: Option<crate::anim::Animator>,
-    /// An adventurer's walk in progress (`None`: not walking). Its path is
-    /// region-local to the sender, so the receiver re-plans it
-    /// (`Rollback::resume_walker_safe`).
-    pub walker: Option<crate::Walker>,
-    pub client: Option<(ClientId, Client)>,
     pub id: EntityId,
+    pub kind: EntityKind,
+    pub body: BodyState,
+    pub collider: ColliderSpec,
+    pub carried: crate::Carried,
+    pub client: Option<(ClientId, Client)>,
+    /// Inputs held for the entity at the crossing (filled in by the transfer
+    /// slot work; empty until then).
+    pub pending_inputs: Vec<(crate::GameEventKind, Tick)>,
+}
+
+impl EntityBundle {
+    /// Move the bundle from region `from`'s local frame into `to`'s: the
+    /// body pose, and any carried region-local coordinates.
+    pub fn rebase(&mut self, from: RegionCoords, to: RegionCoords) {
+        self.body.pose = rebase_isometry(&self.body.pose, from, to);
+        if let Some(w) = &mut self.carried.wander {
+            w.home[0] += (from.x - to.x) * crate::REGION_BLOCKS as i32;
+            w.home[1] += (from.z - to.z) * crate::REGION_BLOCKS as i32;
+        }
+    }
 }
 
 /// Per-tick mirror of a margin entity. `collider` rides along for stage 2.

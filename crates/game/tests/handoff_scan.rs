@@ -38,7 +38,7 @@ fn tick_extracts_a_leaver_into_a_departure() {
     assert_eq!(*target, RegionCoords::new(1, 0));
     assert_eq!(bundle.id.birth_region, id);
     assert!(bundle.client.is_some(), "player carries its client input state");
-    assert!(bundle.has_camera);
+    assert!(bundle.carried.camera.is_some());
     assert!(
         !region.data().player_entites.contains_key(&7),
         "extracted player is gone from the source"
@@ -246,19 +246,13 @@ fn reconcile_replaces_a_diverged_predicted_arrival_without_sticking() {
     let src = RegionCoords::new(0, 0);
     let id = RegionCoords::new(1, 0);
     let mk = |x: f32| game::EntityBundle {
-        kind: game::EntityKind::Player,
-        isometry: pose(x, 128.0),
-        linvel: game::parry::math::Vector::ZERO,
-        collider: game::ColliderSpec::CapsuleY { half_height: 8.0, radius: 6.4 },
-        has_camera: true,
-        yaw: 0.0.into(),
-        pitch: 0.0.into(),
-        motion: None,
-        slime: None,
-        animator: None,
-        walker: None,
-        client: Some((9, game::Client::default())),
         id: game::EntityId { birth_region: src, serial: 0 },
+        kind: game::EntityKind::Player,
+        body: game::BodyState::kinematic(pose(x, 128.0)),
+        collider: game::ColliderSpec::CapsuleY { half_height: 8.0, radius: 6.4 },
+        carried: game::Carried { camera: Some((0.0, 0.0)), motion: None, ..Default::default() },
+        client: Some((9, game::Client::default())),
+        pending_inputs: Vec::new(),
     };
 
     // Client-side region (local_client_id = Some → predictions reconcile).

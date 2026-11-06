@@ -1156,7 +1156,7 @@ impl GameInstanceManager {
                 && self.client_id.is_some();
             if self.host.contains(&target) {
                 let mut b = bundle;
-                b.isometry = game::rebase_isometry(&b.isometry, source, target);
+                b.rebase(source, target);
                 self.host.send(target, RegionCmd::Arrival(b));
             }
             if is_local_player {
@@ -2683,7 +2683,7 @@ mod manager_tests {
             .next()
             .expect("server-side player departed A");
         assert_eq!(tgt, target, "server-side departure targets B");
-        bundle.isometry = game::rebase_isometry(&bundle.isometry, home, target);
+        bundle.rebase(home, target);
 
         // Server-side region B produces the authoritative event stream: ticks,
         // the relayed arrival, more ticks — NO PlayerInputs (server sent those
@@ -2905,7 +2905,7 @@ mod manager_tests {
             .next()
             .expect("server-side departed A");
         assert_eq!(tgt, target);
-        bundle.isometry = game::rebase_isometry(&bundle.isometry, home, target);
+        bundle.rebase(home, target);
 
         // Server B: ticks, the relayed arrival, then post-flip ticks INTERLEAVED
         // with the two LEGIT inputs the server routed to B and echoed back.
