@@ -500,6 +500,23 @@ struct InFlight {
     saved_in: Option<u64>,
 }
 
+impl InFlight {
+    /// Whether this round's save of the SOURCE must carry this crossing
+    /// (given it is in no save yet): its target's save of the round will not
+    /// hold it, because the target is not (or no longer) asked —
+    /// - it departed this round and the target answered before that, or the
+    ///   target was never asked (stopping);
+    /// - it departed in an earlier round and the target was never asked this
+    ///   round: a stopping target, woken with the body only after this round
+    ///   began. (Had the target answered this round, it was in flight then
+    ///   and went with that save.)
+    fn source_saves(&self, round: u64, asked: &BTreeSet<RegionCoords>, answered: &BTreeSet<RegionCoords>) -> bool {
+        self.source != self.target
+            && !asked.contains(&self.target)
+            && (self.save_round == round || !answered.contains(&self.target))
+    }
+}
+
 pub struct WorldManager<S: RegionSpawner> {
     spawner: S,
     generator: RegionGenerator,
@@ -1507,6 +1524,12 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.in_flight.len()
     }
 
+    /// Test support: regions asked for this round's save that have not
+    /// answered yet (a stopping region is never asked).
+    pub fn awaiting_save(&self) -> Vec<RegionCoords> {
+        self.save_asked.iter().copied().collect()
+    }
+
     /// Test support: every crossing in flight, with its target.
     pub fn in_flight_ids(&self) -> Vec<(crate::EntityId, RegionCoords)> {
         self.in_flight.iter().map(|(id, f)| (*id, f.target)).collect()
@@ -1539,15 +1562,15 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// is saved exactly once per round:
     /// - in flight to `rc` (unless the source's save, answered before the
     ///   departure, still holds the body);
-    /// - departed from `rc` this round after it was asked, to a target that
-    ///   has already answered (or was not asked): saved here, rebased back
-    ///   into `rc`'s frame — restored, it arrives just past the seam and
-    ///   crosses again.
+    /// - departed from `rc` to a target whose save of this round will not
+    ///   hold it ([`InFlight::source_saves`]): saved here, rebased back into
+    ///   `rc`'s frame — restored, it arrives just past the seam and crosses
+    ///   again.
     fn saved_transfers(&mut self, rc: RegionCoords) -> Vec<crate::SavedTransfer> {
         self.save_asked.remove(&rc);
         self.save_answered.insert(rc);
         let round = self.save_round;
-        let asked = &self.save_asked;
+        let (asked, answered) = (&self.save_asked, &self.save_answered);
         let mut out = self.save_owed.remove(&rc).unwrap_or_default();
         for f in self.in_flight.values_mut() {
             if f.saved_in == Some(round) || (f.save_round == round && f.in_source_save) {
@@ -1555,7 +1578,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             }
             if f.target == rc {
                 out.push((f.bundle.clone(), f.stamp));
-            } else if f.source == rc && f.save_round == round && !asked.contains(&f.target) {
+            } else if f.source == rc && f.source_saves(round, asked, answered) {
                 let mut bundle = f.bundle.clone();
                 bundle.rebase(f.target, f.source);
                 out.push((bundle, f.stamp));
@@ -1567,16 +1590,15 @@ impl<S: RegionSpawner> WorldManager<S> {
         out
     }
 
-    /// `f` just landed in its target. If that was after the target answered
-    /// this round's `Save`, and its source answers after the departure, no
-    /// saved state of the round holds it — the source's save takes it,
-    /// rebased back into the source's frame, as for one still in flight.
+    /// `f` just landed in its target. If the target's save of this round does
+    /// not hold it ([`InFlight::source_saves`]) and its source has yet to
+    /// answer, no saved state of the round holds it — the source's save takes
+    /// it, rebased back into the source's frame, as for one still in flight.
     fn owe_source_save(&mut self, f: InFlight) {
         let round = self.save_round;
-        let unsaved = f.save_round == round && !f.in_source_save && f.saved_in != Some(round);
-        if unsaved
-            && f.source != f.target
-            && !self.save_asked.contains(&f.target)
+        let in_a_save = f.saved_in == Some(round) || (f.save_round == round && f.in_source_save);
+        if !in_a_save
+            && f.source_saves(round, &self.save_asked, &self.save_answered)
             && self.save_asked.contains(&f.source)
         {
             let mut bundle = f.bundle;

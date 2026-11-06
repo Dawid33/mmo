@@ -1392,8 +1392,14 @@ impl Rollback {
     pub fn apply_arrival(&mut self, bundle: EntityBundle) -> Option<EntityKey> {
         let identity = bundle.id;
 
-        // Idempotency: a respawn-resnapshot replay must not duplicate.
-        if let Some(&e) = self.data.arrivals.get(&identity) {
+        // Idempotency: a respawn-resnapshot replay must not duplicate. An id
+        // already owned here is a replay too, even one never in `arrivals`
+        // (born here, kept in a restored save, then sent again as in flight):
+        // ghosts never carry an `EntityId`, so a live `id_index` hit is the
+        // same entity.
+        let known =
+            self.data.arrivals.get(&identity).copied().or_else(|| self.data.id_index.get(&identity).copied());
+        if let Some(e) = known {
             if self.data.ecs.entities.contains_key(e) {
                 // A replay re-applies the whole bundle, not only the pose.
                 self.apply_body_state_safe(e, &bundle.body);

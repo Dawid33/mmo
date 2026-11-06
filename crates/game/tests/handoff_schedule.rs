@@ -917,31 +917,46 @@ fn dead_target_redelivers_in_flight() {
 /// for the last has answered, and then the last is checked.
 struct SaveCheck {
     id: EntityId,
-    asked: Vec<RegionCoords>,
+    requested: bool,
     got: BTreeMap<RegionCoords, game::RegionSave>,
     checked: usize,
 }
 
 impl SaveCheck {
+    fn new(rig: &mut Rig) -> Self {
+        let mut id = None;
+        rig.manager.spawner_mut().with_region(SPAWN_REGION, |region| {
+            let data = region.data();
+            id = *data.ecs.id.try_get(*data.player_entites.get(&CLIENT).unwrap());
+        });
+        Self { id: id.expect("the player has an EntityId"), requested: false, got: BTreeMap::new(), checked: 0 }
+    }
+
     fn round(&mut self, rig: &mut Rig) {
         self.got.extend(rig.manager.take_saves());
-        if !self.asked.iter().all(|rc| self.got.contains_key(rc)) {
+        if !rig.manager.awaiting_save().is_empty() {
             return;
         }
-        if !self.asked.is_empty() {
+        if self.requested {
             let mut at = Vec::new();
-            for (rc, save) in &self.got {
-                let game::RegionSave::Live(state, transfers) = save else { panic!("nothing parks here") };
+            for (rc, save) in std::mem::take(&mut self.got) {
+                let (state, transfers) = match save {
+                    game::RegionSave::Live(state, transfers) => (*state, transfers),
+                    parked => {
+                        let saved = parked.into_serialized().to_saved().expect("parked blob decodes");
+                        (saved.state, saved.transfers)
+                    }
+                };
                 if state.id_index.contains_key(&self.id) {
-                    at.push((*rc, "state"));
+                    at.push((rc, "state"));
                 }
-                at.extend(transfers.iter().filter(|(b, _)| b.id == self.id).map(|_| (*rc, "transfer")));
+                at.extend(transfers.iter().filter(|(b, _)| b.id == self.id).map(|_| (rc, "transfer")));
             }
             assert_eq!(at.len(), 1, "save {}: the player is saved in {at:?}", self.checked);
             self.checked += 1;
         }
         self.got.clear();
-        self.asked = rig.manager.running_regions();
+        self.requested = true;
         rig.manager.request_save();
     }
 }
@@ -953,13 +968,7 @@ impl SaveCheck {
 /// into its source).
 fn saves_through_crossing(schedule: Option<InlineSchedule>, lagging: Option<RegionCoords>) {
     let mut rig = rig_at_spawn(schedule);
-    let mut id = None;
-    rig.manager.spawner_mut().with_region(SPAWN_REGION, |region| {
-        let data = region.data();
-        id = *data.ecs.id.try_get(*data.player_entites.get(&CLIENT).unwrap());
-    });
-    let id = id.expect("the player has an EntityId");
-    let mut saves = SaveCheck { id, asked: Vec::new(), got: BTreeMap::new(), checked: 0 };
+    let mut saves = SaveCheck::new(&mut rig);
     use game::movement::{TICK_DT, UNITS_PER_METER, WALK_SPEED};
     let margin = FAULT_LEAD_TICKS * WALK_SPEED * UNITS_PER_METER * TICK_DT;
     rig.key(Key::KeyW, true);
@@ -996,4 +1005,42 @@ fn autosave_holds_each_transfer_exactly_once() {
             panic!("autosave through a crossing broke under InlineSchedule::jittery({seed})");
         }
     }
+}
+
+/// Autosaves while the crossing waits on a stopping target: the body departs
+/// in one save round towards a region that is mid-stop (never asked to save),
+/// the next round starts before that region has parked, and only then is it
+/// woken with the body. Every round's saves still hold the player once.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn autosave_holds_a_transfer_to_a_stopping_target() {
+    let mut rig = rig_at_spawn(None);
+    approach_north_seam(&mut rig);
+    rig.event(ServerEvent::ClientPacket(ClientPacket::ReleaseRegionConnection(north()), CLIENT));
+    rig.now_ms += game::UNLOAD_GRACE_MS;
+    rig.manager.maintain(rig.now_ms);
+    rig.manager.spawner_mut().hold(north(), u32::MAX);
+    let mut saves = SaveCheck::new(&mut rig);
+    let mut in_flight_rounds = 0;
+    for _ in 0..FAULT_ROUNDS {
+        saves.round(&mut rig);
+        rig.round();
+        if rig.manager.in_flight_count() > 0 {
+            in_flight_rounds += 1;
+            // Several save rounds pass while the target is still stopping.
+            if in_flight_rounds == 4 {
+                break;
+            }
+        }
+    }
+    assert_eq!(in_flight_rounds, 4, "the crossing never went in flight");
+    let checked_in_flight = saves.checked;
+    rig.manager.spawner_mut().hold(north(), 0);
+    for _ in 0..PAST_SEAM_ROUNDS * 2 {
+        saves.round(&mut rig);
+        rig.round();
+    }
+    saves.round(&mut rig);
+    assert_eq!(rig.owners(), [north()]);
+    assert!(saves.checked > checked_in_flight + 2, "saves checked after the wake: {}", saves.checked);
 }

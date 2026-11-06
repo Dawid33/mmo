@@ -456,6 +456,35 @@ fn replayed_arrival_is_a_pose_correction_not_a_duplicate() {
     assert_eq!(before, crc(&rb), "idempotent replay path holds the hash bar");
 }
 
+/// An entity born here (so never in `arrivals`) whose arrival comes in
+/// again — a region restored from a file that still holds it, then sent the
+/// in-flight copy — is corrected, not duplicated.
+#[test]
+fn arrival_of_an_entity_born_here_is_not_a_duplicate() {
+    let (send, _recv) = crossbeam::channel::unbounded();
+    let mut rb = Rollback::new(Some(send));
+    rb.new_transaction();
+    let key = rb.spawn_slime_safe(Vector::new(100.0, 200.0, 100.0), 2, 0.0, 0);
+    rb.forget();
+    let id = rb.entity_id(key).expect("a slime has an EntityId");
+    let mut other = rb.clone();
+    other.new_transaction();
+    let mut bundle = other.extract_entity_safe(key);
+    other.forget();
+    bundle.body.pose.translation.x = 150.0;
+    let count = rb.data.ecs.entities.len();
+
+    let before = crc(&rb);
+    rb.new_transaction();
+    rb.apply_arrival(bundle);
+    assert_eq!(rb.data.ecs.entities.len(), count, "no duplicate entity");
+    assert_eq!(rb.entity_by_id(id), Some(key), "the entity born here is the one corrected");
+    let handle = rb.data.ecs.rigidbody.try_get(key).unwrap();
+    assert_eq!(rb.data.physics.bodies.get(handle).unwrap().translation().x, 150.0, "pose corrected");
+    rb.rollback();
+    assert_eq!(before, crc(&rb), "the correction holds the hash bar");
+}
+
 #[test]
 fn entity_id_survives_crossing() {
     let (mut donor_rb, key) = donor();
