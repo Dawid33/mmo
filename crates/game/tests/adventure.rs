@@ -615,7 +615,7 @@ fn walking_bundle(goal: Goal) -> game::EntityBundle {
         tick(&mut src);
     }
     let mut bundle = None;
-    src.with_data(|d| bundle = Some(d.extract_entity_safe(e, RegionCoords::new(0, 0))));
+    src.with_data(|d| bundle = Some(d.extract_entity_safe(e)));
     bundle.unwrap()
 }
 

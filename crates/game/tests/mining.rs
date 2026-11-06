@@ -379,8 +379,8 @@ fn cooldown_does_not_cross_into_a_younger_region() {
     // The body arrives over a seam (here: from region (1, 0)).
     region.with_data(|r| {
         let e = *r.data.player_entites.get(&0).unwrap();
-        let mut bundle = r.extract_entity_safe(e, r0());
-        bundle.source_region = game::RegionCoords::new(1, 0);
+        let mut bundle = r.extract_entity_safe(e);
+        bundle.id.birth_region = game::RegionCoords::new(1, 0);
         r.apply_arrival(bundle).expect("the body arrives");
     });
     let c = &region.data().clients[&0];

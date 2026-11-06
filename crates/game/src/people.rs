@@ -45,6 +45,7 @@ impl Rollback {
         }
         let y = self.player_spawn_y(xz);
         let e = self.data.ecs.create_entity_safe();
+        self.assign_entity_id_safe(e);
         let pose = Pose::from_translation(Vector::new(xz.0, y, xz.1));
         self.build_kinematic_body_safe(
             e,

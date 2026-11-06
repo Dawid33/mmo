@@ -64,8 +64,7 @@ fn matches_prediction_is_identity_based_for_transfers() {
         animator: None,
         walker: None,
         client: Some((7, Client::default())),
-        source_region: RegionCoords::new(0, 0),
-        source_key: Default::default(),
+        id: game::EntityId { birth_region: RegionCoords::new(0, 0), serial: 0 },
     };
     // Same identity, different pose (predicted vs authoritative tick): matches.
     let a = GameEventKind::EntityArrived(mk(2.0));
@@ -74,13 +73,13 @@ fn matches_prediction_is_identity_based_for_transfers() {
     assert_ne!(a, b, "full equality still detects divergence");
     // Different identity: no match.
     let mut other = mk(2.0);
-    other.source_region = RegionCoords::new(5, 5);
+    other.id.birth_region = RegionCoords::new(5, 5);
     assert!(!a.matches_prediction(&GameEventKind::EntityArrived(other)));
     // Non-transfer kinds: exact equality.
     assert!(GameEventKind::Tick.matches_prediction(&GameEventKind::Tick));
     let g = |x: f32| GameEventKind::GhostUpdate(GhostData {
+        id: game::EntityId { birth_region: RegionCoords::new(0, 0), serial: 0 },
         source_region: RegionCoords::new(0, 0),
-        source_key: Default::default(),
         kind: EntityKind::Player,
         isometry: Pose::translation(x, 0.0, 0.0),
         linvel: Vector::ZERO,

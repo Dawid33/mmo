@@ -196,11 +196,11 @@ fn arrival_of_a_person_with_a_body_is_ignored() {
     let mut region = flat_region();
     region.with_data(|d| {
         let e = d.spawn_person_safe(P, (100.0, 100.0)).unwrap();
-        let bundle = d.extract_entity_safe(e, RegionCoords::new(1, 0));
+        let bundle = d.extract_entity_safe(e);
         // Same person arrives twice under different identities.
         let mut dup = bundle.clone();
         d.apply_arrival(bundle);
-        dup.source_key = game::EntityKey::default();
+        dup.id.serial += 1;
         assert!(d.apply_arrival(dup).is_none(), "duplicate person ignored");
         assert_eq!(d.people_here().len(), 1);
         assert_eq!(d.ecs.kind.iter().filter(|(_, k)| matches!(k, Some(game::EntityKind::Person { .. }))).count(), 1);
@@ -319,7 +319,7 @@ fn replayed_person_arrival_corrects_pose() {
     let mut bundle = None;
     a.with_data(|d| {
         let e = d.spawn_person_safe(P, (100.0, 100.0)).unwrap();
-        bundle = Some(d.extract_entity_safe(e, RegionCoords::new(1, 0)));
+        bundle = Some(d.extract_entity_safe(e));
     });
     let bundle = bundle.unwrap();
     b.with_data(|d| {

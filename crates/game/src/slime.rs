@@ -254,6 +254,7 @@ impl Rollback {
     /// undo-safely. Falls to the ground before its first hop.
     pub fn spawn_slime_safe(&mut self, pos: Vector, size: u8, yaw: f32, tick: u64) -> EntityKey {
         let e = self.data.ecs.create_entity_safe();
+        self.assign_entity_id_safe(e);
         let pose = Pose::from_parts(pos, crate::yaw_quat(yaw));
         self.build_kinematic_body_safe(e, pose, &slime_collider(size));
         let kind = EntityKind::Slime { size };

@@ -435,7 +435,7 @@ fn walking_input_crosses_a_boundary_on_real_threads() {
     };
 
     // The handoff carried the player's identity and state, not just an event.
-    assert_eq!(bundle.source_region, SPAWN_REGION);
+    assert_eq!(bundle.id.birth_region, SPAWN_REGION);
     assert_eq!(bundle.client.as_ref().map(|(id, _)| *id), Some(0), "client rides the bundle");
     assert!(bundle.has_camera, "camera rides the bundle");
     // Pose is rebased into the arrival frame: x untouched, z just inside the
@@ -555,7 +555,7 @@ fn walking_into_a_cold_region_wakes_its_thread_and_returns() {
     });
     assert!(home_again, "no home flip back to the spawn region; packets: {log:#?}");
     let bundle = back.expect("EntityArrived relayed from the spawn region on return");
-    assert_eq!(bundle.source_region, north, "the player came back FROM the woken region");
+    assert_eq!(bundle.id.birth_region, SPAWN_REGION, "the same identity comes back");
     assert_eq!(bundle.client.as_ref().map(|(id, _)| *id), Some(0));
     let z = f32::from(bundle.isometry.translation.z);
     assert!(

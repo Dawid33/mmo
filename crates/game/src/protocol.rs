@@ -24,7 +24,6 @@ impl From<usize> for Usize {
 
 pub type Tick = u64;
 pub type EventId = usize;
-pub type EntityId = usize;
 /// Regions tile the horizontal plane in fixed squares of `REGION_BLOCKS`²
 /// blocks — 64 blocks (1024 units, 64 m) at the test default. Signed and
 /// unbounded: the world grows in every direction. Sims stay region-local; the
@@ -226,6 +225,20 @@ pub fn rebase_isometry(iso: &Pose, from: RegionCoords, to: RegionCoords) -> Pose
     out
 }
 
+/// World-unique identity of a crossing-capable entity (player, slime,
+/// person): the region that first spawned it plus that region's allocation
+/// serial. Allocated from rollback state (`Rollback::alloc_entity_id_safe`),
+/// so a client's prediction and the server allocate the same id. Ghost
+/// mirrors carry their source entity's id.
+#[derive(
+    Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq, PartialOrd,
+    Ord, Hash, state_hash::StateHash,
+)]
+pub struct EntityId {
+    pub birth_region: RegionCoords,
+    pub serial: u64,
+}
+
 /// Shape spec carried across the transfer seam so the receiving region can
 /// rebuild the collider. Players are capsules; new kinds extend this enum.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
@@ -235,8 +248,8 @@ pub enum ColliderSpec {
 
 /// The unit of ownership transfer. Assembled deterministically at the
 /// extraction tick; `isometry` is source-local until the relay rebases it.
-/// `source_region`/`source_key` are an identity token (ghost upgrade,
-/// arrival idempotency) — never dereferenced in the target's slotmap.
+/// `id` is the identity (ghost upgrade, arrival idempotency); the region it
+/// left is the departure's own framing (`RegionOutput::Departures`).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 pub struct EntityBundle {
     pub kind: EntityKind,
@@ -261,15 +274,16 @@ pub struct EntityBundle {
     /// (`Rollback::resume_walker_safe`).
     pub walker: Option<crate::Walker>,
     pub client: Option<(ClientId, Client)>,
-    pub source_region: RegionCoords,
-    pub source_key: EntityKey,
+    pub id: EntityId,
 }
 
 /// Per-tick mirror of a margin entity. `collider` rides along for stage 2.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 pub struct GhostData {
+    pub id: EntityId,
+    /// The region hosting the real entity (rebase origin, and what the
+    /// renderer hides the mirror for) — not identity.
     pub source_region: RegionCoords,
-    pub source_key: EntityKey,
     pub kind: EntityKind,
     pub isometry: Pose,
     pub linvel: Vector,
@@ -632,19 +646,15 @@ impl GameEventKind {
     }
 
     /// Reconcile's prediction-removal matcher. Transfers match on IDENTITY
-    /// (source region+key), not full equality: the predicted and
+    /// (`EntityId`), not full equality: the predicted and
     /// authoritative copies differ in pose whenever the client's extraction
     /// tick differs from the server's, and the rollback-replace path must
     /// still find and remove the prediction or it re-applies forever.
     pub fn matches_prediction(&self, other: &Self) -> bool {
         use GameEventKind::*;
         match (self, other) {
-            (EntityArrived(a), EntityArrived(b)) => {
-                a.source_region == b.source_region && a.source_key == b.source_key
-            }
-            (GhostUpdate(a), GhostUpdate(b)) => {
-                a.source_region == b.source_region && a.source_key == b.source_key
-            }
+            (EntityArrived(a), EntityArrived(b)) => a.id == b.id,
+            (GhostUpdate(a), GhostUpdate(b)) => a.id == b.id,
             _ => self == other,
         }
     }

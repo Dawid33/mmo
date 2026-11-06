@@ -36,7 +36,7 @@ fn tick_extracts_a_leaver_into_a_departure() {
     assert_eq!(departures.len(), 1);
     let (bundle, target) = &departures[0];
     assert_eq!(*target, RegionCoords::new(1, 0));
-    assert_eq!(bundle.source_region, id);
+    assert_eq!(bundle.id.birth_region, id);
     assert!(bundle.client.is_some(), "player carries its client input state");
     assert!(bundle.has_camera);
     assert!(
@@ -175,8 +175,8 @@ fn bodyless_ghost_is_not_scanned() {
     let mut region = Region::from_chunks(id, Vec::new());
     region
         .handle_event(GameEventKind::GhostUpdate(game::GhostData {
+            id: game::EntityId::default(),
             source_region: src,
-            source_key: Default::default(),
             kind: game::EntityKind::Player,
             isometry: pose(300.0, 128.0), // absurdly out of bounds
             linvel: game::parry::math::Vector::ZERO,
@@ -205,12 +205,12 @@ fn bodied_ghost_past_boundary_is_not_extracted() {
     // then be extracted into departures.
     let id = RegionCoords::new(0, 0);
     let src = RegionCoords::new(1, 0);
-    let src_key = game::EntityKey::default();
+    let ghost_id = game::EntityId { birth_region: src, serial: 0 };
     let mut region = Region::from_chunks(id, Vec::new());
     region
         .handle_event(GameEventKind::GhostUpdate(game::GhostData {
+            id: ghost_id,
             source_region: src,
-            source_key: src_key,
             kind: game::EntityKind::Player,
             isometry: pose(300.0, 128.0), // strictly past the 258 flip line
             linvel: game::parry::math::Vector::ZERO,
@@ -220,7 +220,7 @@ fn bodied_ghost_past_boundary_is_not_extracted() {
     region.forget_last_event();
     // Sanity: stage-2 ghost really has a body (else the guard under test is
     // moot and the bite-proof would be vacuous).
-    let ghost_e = region.data().ghosts.get(&(src, src_key)).unwrap().entity;
+    let ghost_e = region.data().ghosts.get(&ghost_id).unwrap().entity;
     assert!(
         region.data().ecs.rigidbody.try_get(ghost_e).is_some(),
         "stage-2 ghost must carry a body for ghost_keys to be load-bearing"
@@ -243,14 +243,6 @@ fn reconcile_replaces_a_diverged_predicted_arrival_without_sticking() {
     // arrival has pose Y (server extracted on a different tick). Reconcile
     // must (a) end with the authoritative pose and (b) leave no unconfirmed
     // prediction stuck in the event log.
-    let (_, src_key) = {
-        let mut rb = Rollback::new(None);
-        rb.new_transaction();
-        rb.create_player_safe(9);
-        rb.forget();
-        let key = *rb.data.player_entites.get(&9).unwrap();
-        (rb, key)
-    };
     let src = RegionCoords::new(0, 0);
     let id = RegionCoords::new(1, 0);
     let mk = |x: f32| game::EntityBundle {
@@ -266,8 +258,7 @@ fn reconcile_replaces_a_diverged_predicted_arrival_without_sticking() {
         animator: None,
         walker: None,
         client: Some((9, game::Client::default())),
-        source_region: src,
-        source_key: src_key,
+        id: game::EntityId { birth_region: src, serial: 0 },
     };
 
     // Client-side region (local_client_id = Some → predictions reconcile).

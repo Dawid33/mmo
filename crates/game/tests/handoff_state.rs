@@ -86,6 +86,11 @@ fn set_body_pose_safe_moves_and_undoes_exactly() {
     assert_eq!(before, crc(&rb));
 }
 
+fn eid(src: RegionCoords, key: game::EntityKey) -> game::EntityId {
+    use slotmapd::Key;
+    game::EntityId { birth_region: src, serial: key.data().as_ffi() }
+}
+
 fn bundle(src: RegionCoords, key: game::EntityKey, client: game::ClientId, x: f32) -> EntityBundle {
     EntityBundle {
         kind: EntityKind::Player,
@@ -100,15 +105,14 @@ fn bundle(src: RegionCoords, key: game::EntityKey, client: game::ClientId, x: f3
         animator: None,
         walker: None,
         client: Some((client, Client::default())),
-        source_region: src,
-        source_key: key,
+        id: eid(src, key),
     }
 }
 
 fn ghost(src: RegionCoords, key: game::EntityKey, x: f32) -> GhostData {
     GhostData {
+        id: eid(src, key),
         source_region: src,
-        source_key: key,
         kind: EntityKind::Player,
         isometry: pose(x, 26.0, 128.0),
         linvel: Vector::ZERO,
@@ -152,7 +156,6 @@ fn arrival_preserves_movement_state() {
     // A player flying (or falling) across a seam must keep flying (or keep
     // its fall speed) in the receiving region.
     let (mut donor_rb, src_key) = donor();
-    let src = RegionCoords::new(0, 0);
     let motion = game::Motion {
         vel_y: -12.5,
         grounded: false,
@@ -166,7 +169,7 @@ fn arrival_preserves_movement_state() {
     donor_rb.forget();
 
     donor_rb.new_transaction();
-    let bundle = donor_rb.extract_entity_safe(src_key, src);
+    let bundle = donor_rb.extract_entity_safe(src_key);
     assert_eq!(bundle.motion, Some(motion));
 
     let (send, _recv) = crossbeam::channel::unbounded();
@@ -184,7 +187,6 @@ fn arrival_preserves_camera_look_direction() {
     // survive a region crossing, or the first mouse move after the flip
     // snaps the camera back to the default facing.
     let (mut donor_rb, src_key) = donor();
-    let src = RegionCoords::new(0, 0);
 
     donor_rb.new_transaction();
     donor_rb.data.clients.insert(9, Client::default());
@@ -195,7 +197,7 @@ fn arrival_preserves_camera_look_direction() {
     donor_rb.forget();
 
     donor_rb.new_transaction();
-    let bundle = donor_rb.extract_entity_safe(src_key, src);
+    let bundle = donor_rb.extract_entity_safe(src_key);
 
     let (send, _recv) = crossbeam::channel::unbounded();
     let mut rb = Rollback::new(Some(send));
@@ -219,14 +221,14 @@ fn ghost_upsert_refresh_and_ttl_expiry_hold_hash_bar() {
     rb.apply_ghost(ghost(src, src_key, 250.0));
     rb.forget();
     assert_eq!(rb.data.ghosts.len(), 1);
-    let entry = rb.data.ghosts.get(&(src, src_key)).unwrap().clone();
+    let entry = rb.data.ghosts.get(&eid(src, src_key)).unwrap().clone();
 
     // Refresh keeps the same entity and holds the bar.
     let before = crc(&rb);
     rb.new_transaction();
     rb.apply_ghost(ghost(src, src_key, 252.0));
     assert_eq!(
-        rb.data.ghosts.get(&(src, src_key)).unwrap().entity,
+        rb.data.ghosts.get(&eid(src, src_key)).unwrap().entity,
         entry.entity,
         "refresh must not respawn the ghost"
     );
@@ -246,7 +248,7 @@ fn ghost_upsert_refresh_and_ttl_expiry_hold_hash_bar() {
     let before = crc(&rb);
     rb.new_transaction();
     rb.expire_ghosts();
-    assert!(rb.data.ghosts.get(&(src, src_key)).is_none(), "stale ghost reaped");
+    assert!(rb.data.ghosts.get(&eid(src, src_key)).is_none(), "stale ghost reaped");
     assert!(!rb.data.ecs.entities.contains_key(entry.entity));
     rb.rollback();
     assert_eq!(before, crc(&rb));
@@ -269,7 +271,7 @@ fn arrival_upgrades_ghost_in_place_keeping_entity_key() {
     rb.new_transaction();
     rb.apply_ghost(ghost(src, src_key, 250.0));
     rb.forget();
-    let ghost_entity = rb.data.ghosts.get(&(src, src_key)).unwrap().entity;
+    let ghost_entity = rb.data.ghosts.get(&eid(src, src_key)).unwrap().entity;
     // Drain the creation-time events (including the creation's own
     // SetGhostSource(Some) Do-emit) so the post-rollback drain below only
     // reflects the upgrade transaction's own emits, not a stale lookalike.
@@ -283,7 +285,7 @@ fn arrival_upgrades_ghost_in_place_keeping_entity_key() {
     rb.apply_arrival(bundle(src, src_key, 9, 2.0));
     let owned = *rb.data.player_entites.get(&9).unwrap();
     assert_eq!(owned, ghost_entity, "upgrade-in-place: same EntityKey continues");
-    assert!(rb.data.ghosts.get(&(src, src_key)).is_none(), "ghost record dropped");
+    assert!(rb.data.ghosts.get(&eid(src, src_key)).is_none(), "ghost record dropped");
     assert!(rb.data.ecs.rigidbody.try_get(owned).is_some(), "body attached on upgrade");
     rb.rollback();
     assert_eq!(before, crc(&rb), "upgrade path holds the hash bar, bit-exact");
@@ -308,7 +310,7 @@ fn stage2_ghost_has_a_collidable_body_that_tracks_updates() {
     rb.new_transaction();
     rb.apply_ghost(ghost(src, src_key, 250.0));
     rb.forget();
-    let e = rb.data.ghosts.get(&(src, src_key)).unwrap().entity;
+    let e = rb.data.ghosts.get(&eid(src, src_key)).unwrap().entity;
     let handle = rb.data.ecs.rigidbody.try_get(e).expect("stage 2: ghost has a body");
     assert!(
         rb.data.physics.bodies.get(handle).unwrap().colliders().len() == 1,
@@ -343,7 +345,7 @@ fn stage2_ghost_create_with_body_is_exactly_invertible() {
     let before = crc(&rb);
     rb.new_transaction();
     rb.apply_ghost(ghost(src, src_key, 250.0));
-    let e = rb.data.ghosts.get(&(src, src_key)).unwrap().entity;
+    let e = rb.data.ghosts.get(&eid(src, src_key)).unwrap().entity;
     assert!(
         rb.data.ecs.rigidbody.try_get(e).is_some(),
         "ghost create must allocate a body (proves this exercises the bodied-create path)"
@@ -361,7 +363,7 @@ fn stage2_upgrade_reuses_the_ghost_body() {
     rb.new_transaction();
     rb.apply_ghost(ghost(src, src_key, 250.0));
     rb.forget();
-    let e = rb.data.ghosts.get(&(src, src_key)).unwrap().entity;
+    let e = rb.data.ghosts.get(&eid(src, src_key)).unwrap().entity;
     let ghost_handle = rb.data.ecs.rigidbody.try_get(e).unwrap();
 
     rb.new_transaction();
@@ -403,7 +405,7 @@ fn stage2_ghost_collider_blocks_a_walking_player() {
         .unwrap();
     region.forget_last_event();
     // Reposition the ghost precisely via its entity.
-    let ghost_e = region.data().ghosts.get(&(RegionCoords::new(0, -1), src_key)).unwrap().entity;
+    let ghost_e = region.data().ghosts.get(&eid(RegionCoords::new(0, -1), src_key)).unwrap().entity;
     region.with_data(|d| d.set_body_pose_safe(ghost_e, pose(128.0, 26.0, 104.0)));
 
     // fps-cam on: press KeyE, then tick once so the toggle takes effect
@@ -458,4 +460,61 @@ fn replayed_arrival_is_a_pose_correction_not_a_duplicate() {
     assert_eq!(t.x, 5.0, "replay corrected the pose");
     rb.rollback();
     assert_eq!(before, crc(&rb), "idempotent replay path holds the hash bar");
+}
+
+#[test]
+fn entity_id_survives_crossing() {
+    let (mut donor_rb, key) = donor();
+    donor_rb.new_transaction();
+    donor_rb.data.clients.insert(9, Client::default());
+    donor_rb.forget();
+    let id = donor_rb.entity_id(key).expect("a player has an id");
+    assert_eq!(donor_rb.entity_by_id(id), Some(key));
+
+    donor_rb.new_transaction();
+    let bundle = donor_rb.extract_entity_safe(key);
+    assert_eq!(bundle.id, id);
+    assert_eq!(donor_rb.entity_by_id(id), None, "gone from the source");
+
+    let (send, _recv) = crossbeam::channel::unbounded();
+    let mut rb = Rollback::new(Some(send));
+    rb.new_transaction();
+    let e = rb.apply_arrival(bundle).expect("arrives");
+    assert_eq!(rb.entity_id(e), Some(id), "keeps its id");
+    assert_eq!(rb.entity_by_id(id), Some(e));
+}
+
+#[test]
+fn predicted_and_authoritative_ids_agree() {
+    let run = || {
+        let (send, _recv) = crossbeam::channel::unbounded();
+        let mut rb = Rollback::new(Some(send));
+        rb.new_transaction();
+        let slime = rb.spawn_slime_safe(
+            game::rapier3d::math::Vector::new(100.0, 40.0, 100.0),
+            2,
+            0.0,
+            0,
+        );
+        rb.create_player_safe(3);
+        rb.forget();
+        let player = *rb.data.player_entites.get(&3).unwrap();
+        (rb.entity_id(slime).unwrap(), rb.entity_id(player).unwrap())
+    };
+    let (a, b) = (run(), run());
+    assert_eq!(a, b, "same events, same ids");
+    assert_ne!(a.0, a.1, "distinct entities, distinct ids");
+}
+
+#[test]
+fn undo_spawn_frees_serial() {
+    let (send, _recv) = crossbeam::channel::unbounded();
+    let mut rb = Rollback::new(Some(send));
+    let before = crc(&rb);
+    rb.new_transaction();
+    rb.spawn_slime_safe(game::rapier3d::math::Vector::new(100.0, 40.0, 100.0), 2, 0.0, 0);
+    assert_eq!(*rb.data.next_entity_serial, 1);
+    rb.rollback();
+    assert_eq!(*rb.data.next_entity_serial, 0, "the serial is freed");
+    assert_eq!(before, crc(&rb));
 }

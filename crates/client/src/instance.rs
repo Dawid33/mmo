@@ -1046,10 +1046,10 @@ impl GameInstanceManager {
                             }
                         }
                         // A region thread's own relay: this tick's, now.
-                        self.route_transfers(d, g);
+                        self.route_transfers(id, d, g);
                     }
                     RegionReport::Transfers { departures: d, ghosts: g } => {
-                        departures.extend(d);
+                        departures.extend(d.into_iter().map(|(b, t)| (id, b, t)));
                         ghosts.extend(g);
                     }
                     RegionReport::Reconciled {
@@ -1117,7 +1117,7 @@ impl GameInstanceManager {
                     }
                 }
             }
-            self.route_transfers(departures, ghosts);
+            self.route_departures(departures, ghosts);
             for (id, kind) in misrouted {
                 match self.home_region {
                     Some(home) if home != id && self.host.contains(&home) => {
@@ -1136,11 +1136,22 @@ impl GameInstanceManager {
     /// their authoritative streams cover them.
     fn route_transfers(
         &mut self,
+        source: RegionCoords,
         departures: Vec<(game::EntityBundle, RegionCoords)>,
         ghosts: Vec<(game::GhostData, RegionCoords)>,
     ) {
-        for (bundle, target) in departures {
-            let source = bundle.source_region;
+        let departures = departures.into_iter().map(|(b, t)| (source, b, t)).collect();
+        self.route_departures(departures, ghosts);
+    }
+
+    /// [`Self::route_transfers`] over departures that each name the region
+    /// they left (the bundle no longer carries it).
+    fn route_departures(
+        &mut self,
+        departures: Vec<(RegionCoords, game::EntityBundle, RegionCoords)>,
+        ghosts: Vec<(game::GhostData, RegionCoords)>,
+    ) {
+        for (source, bundle, target) in departures {
             let is_local_player = bundle.client.as_ref().map(|(c, _)| *c) == self.client_id
                 && self.client_id.is_some();
             if self.host.contains(&target) {
@@ -2673,7 +2684,6 @@ mod manager_tests {
             .expect("server-side player departed A");
         assert_eq!(tgt, target, "server-side departure targets B");
         bundle.isometry = game::rebase_isometry(&bundle.isometry, home, target);
-        bundle.source_key = player_key; // identity match with the client's prediction
 
         // Server-side region B produces the authoritative event stream: ticks,
         // the relayed arrival, more ticks — NO PlayerInputs (server sent those
@@ -2896,7 +2906,6 @@ mod manager_tests {
             .expect("server-side departed A");
         assert_eq!(tgt, target);
         bundle.isometry = game::rebase_isometry(&bundle.isometry, home, target);
-        bundle.source_key = player_key;
 
         // Server B: ticks, the relayed arrival, then post-flip ticks INTERLEAVED
         // with the two LEGIT inputs the server routed to B and echoed back.

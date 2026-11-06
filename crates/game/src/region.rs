@@ -233,6 +233,13 @@ impl Region {
         local_client_id: Option<ClientId>,
     ) -> Self {
         data.reinitialize(game_update_send);
+        if *data.region != id {
+            // The id namespace of this state (`EntityId::birth_region`); its
+            // own forgotten transaction, like `jump_clock_to`.
+            data.new_transaction();
+            data.region.update(|r| *r = id);
+            data.forget();
+        }
         let base_event_id = *data.next_game_event_id;
         Self {
             data,
@@ -819,7 +826,7 @@ impl Region {
                 info!("{:?}", event);
                 match self.data.player_entites.get(&client_id).copied() {
                     // The bundle is for handoffs; a leaving session drops it.
-                    Some(key) => drop(self.data.extract_entity_safe(key, self.id)),
+                    Some(key) => drop(self.data.extract_entity_safe(key)),
                     None => log::warn!(
                         "[region r={:?}] ClientLeft({client_id}): no player body here",
                         self.id

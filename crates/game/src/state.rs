@@ -202,12 +202,15 @@ pub enum EntityKind {
 }
 
 /// A live ghost mirror in this region, keyed in `GameData::ghosts` by its
-/// source identity. `last_update_tick` drives the TTL reaper.
+/// `EntityId`. `last_update_tick` drives the TTL reaper.
 #[derive(Default, Debug, serde::Serialize, serde::Deserialize, Clone, ::borrow::Partial, StateHash, PartialEq)]
 #[module(crate)]
 pub struct GhostEntry {
     pub entity: EntityKey,
     pub last_update_tick: crate::Tick,
+    /// The region hosting the real entity (the renderer hides the mirror
+    /// while that region is loaded here).
+    pub source_region: crate::RegionCoords,
 }
 
 #[rollback(GameData)]
@@ -232,17 +235,27 @@ mod game_data {
         tick: crate::Tick,
         #[undo(cell)]
         next_game_event_id: usize,
+        /// The region this state belongs to (set by `Region::new`): the
+        /// `birth_region` of every `EntityId` it allocates.
+        #[undo(cell)]
+        region: crate::RegionCoords,
+        /// Next `EntityId` serial of this region (`alloc_entity_id_safe`).
+        #[undo(cell)]
+        next_entity_serial: u64,
         #[undo(map)]
         player_entites: BTreeMap<ClientId, EntityKey>,
         #[undo(map)]
         clients: BTreeMap<ClientId, Client>,
-        /// Ghost mirrors hosted here, by source identity.
+        /// Ghost mirrors hosted here, by the source entity's id.
         #[undo(map)]
-        ghosts: BTreeMap<(crate::RegionCoords, EntityKey), GhostEntry>,
-        /// Owned entities that arrived via handoff, by the identity they
+        ghosts: BTreeMap<crate::EntityId, GhostEntry>,
+        /// Owned entities that arrived via handoff, by the id they
         /// arrived under — makes replayed arrivals idempotent.
         #[undo(map)]
-        arrivals: BTreeMap<(crate::RegionCoords, EntityKey), EntityKey>,
+        arrivals: BTreeMap<crate::EntityId, EntityKey>,
+        /// Entity by [`crate::EntityId`], in step with `Ecs.id`.
+        #[undo(map)]
+        id_index: BTreeMap<crate::EntityId, EntityKey>,
         /// Terrain chunk entity by [`ChunkIndexKey`]. Replaces the scans
         /// that recovered chunk coordinates from body translations.
         #[undo(map)]
@@ -286,6 +299,8 @@ mod game_data {
         rigidbody: Component<RigidBodyHandle>,
         chunk: Component<Chunk>,
         kind: Component<EntityKind>,
+        /// Stable world-unique identity of a crossing-capable entity.
+        id: Component<crate::EntityId>,
         motion: Component<crate::Motion>,
         slime: Component<crate::slime::Slime>,
         /// Sim-owned animation state (`anim.rs`).
@@ -411,6 +426,7 @@ impl Undo<Ecs> {
         self.rigidbody.insert_safe(key);
         self.chunk.insert_safe(key);
         self.kind.insert_safe(key);
+        self.id.insert_safe(key);
         self.motion.insert_safe(key);
         self.slime.insert_safe(key);
         self.animator.insert_safe(key);
@@ -1080,11 +1096,34 @@ impl Rollback {
         self.create_player_body_safe(client_id, Vector::new(spawn_x, spawn_y, spawn_z));
     }
 
+    /// Allocate the next [`crate::EntityId`] of this region, undo-logged: a
+    /// rolled-back spawn frees its serial, so a prediction and the server
+    /// hand out the same ids.
+    pub(crate) fn alloc_entity_id_safe(&mut self) -> crate::EntityId {
+        let serial = *self.next_entity_serial;
+        self.next_entity_serial.update(|n| *n += 1);
+        crate::EntityId { birth_region: *self.region, serial }
+    }
+
+    /// Give `e` its `EntityId`, indexed.
+    pub(crate) fn set_entity_id_safe(&mut self, e: EntityKey, id: crate::EntityId) {
+        self.ecs.id.set_safe(e, Some(id));
+        self.id_index.insert(id, e);
+    }
+
+    /// Spawn-time identity: allocate and attach.
+    pub(crate) fn assign_entity_id_safe(&mut self, e: EntityKey) -> crate::EntityId {
+        let id = self.alloc_entity_id_safe();
+        self.set_entity_id_safe(e, id);
+        id
+    }
+
     /// `client_id`'s player body (camera, capsule, rig), its centre at
     /// region-local `translation` (voxel units). The `clients` entry is the
     /// caller's.
     pub fn create_player_body_safe(&mut self, client_id: ClientId, translation: Vector) {
         let e = self.ecs.create_entity_safe();
+        self.assign_entity_id_safe(e);
         let position = Pose::from_translation(translation);
         let body = RigidBodyBuilder::kinematic_position_based()
             .pose(position)
@@ -1239,6 +1278,10 @@ impl Rollback {
         self.data.ecs.rigidbody.remove_safe(key);
         self.data.ecs.isometry.remove_safe(key);
         self.data.ecs.chunk.remove_safe(key);
+        if let Some(id) = *self.data.ecs.id.try_get(key) {
+            self.data.id_index.remove(&id);
+        }
+        self.data.ecs.id.remove_safe(key);
         self.data.ecs.kind.remove_safe(key);
         self.data.ecs.motion.remove_safe(key);
         self.data.ecs.slime.remove_safe(key);
@@ -1250,6 +1293,16 @@ impl Rollback {
         // ECS slot last: the slotmap #[emit] fires RemoveEntity on the delta
         // (and CreateEntity again on undo).
         self.data.ecs.entities.remove(key);
+    }
+
+    /// The stable id of a crossing-capable entity.
+    pub fn entity_id(&self, key: EntityKey) -> Option<crate::EntityId> {
+        *self.data.ecs.id.try_get(key)
+    }
+
+    /// The entity carrying `id` in this region (owned bodies only, not ghosts).
+    pub fn entity_by_id(&self, id: crate::EntityId) -> Option<EntityKey> {
+        self.data.id_index.get(&id).copied()
     }
 
     /// Teleport a body, undo-safely. Footprint-sized entry: set_position also
@@ -1336,7 +1389,7 @@ impl Rollback {
     /// place (same EntityKey — visual continuity); else → fresh create.
     /// Returns the arrived entity, `None` for a replay (only a pose fix).
     pub fn apply_arrival(&mut self, bundle: EntityBundle) -> Option<EntityKey> {
-        let identity = (bundle.source_region, bundle.source_key);
+        let identity = bundle.id;
 
         // Idempotency: a respawn-resnapshot replay must not duplicate.
         if let Some(&e) = self.data.arrivals.get(&identity) {
@@ -1366,11 +1419,10 @@ impl Rollback {
             // prior transaction), so on undo we must re-apply the ghost mark —
             // otherwise the renderer keeps a phantom owned mirror. Compensating
             // emit rides `kind` (a tracked field; the ghosts map has no
-            // emit_on_undo), fires LIFO after state is restored. source_region
-            // == identity.0.
+            // emit_on_undo), fires LIFO after state is restored.
             self.data.ecs.kind.emit_on_undo(GameDataUpdate::new(
                 GameDataTransactionKind::Undo,
-                GameDataUpdateKind::SetGhostSource(entry.entity, Some(bundle.source_region)),
+                GameDataUpdateKind::SetGhostSource(entry.entity, Some(entry.source_region)),
             ));
             entry.entity
         } else {
@@ -1442,6 +1494,7 @@ impl Rollback {
         if let EntityKind::Person { person } = bundle.kind {
             self.data.person_entities.insert(person, e);
         }
+        self.set_entity_id_safe(e, identity);
         self.data.arrivals.insert(identity, e);
         Some(e)
     }
@@ -1452,7 +1505,7 @@ impl Rollback {
     /// moves that body; the arrival upgrade path reuses it (set_body_pose vs
     /// re-inject), and expiry removes it via remove_entity_safe.
     pub fn apply_ghost(&mut self, data: GhostData) {
-        let identity = (data.source_region, data.source_key);
+        let identity = data.id;
         let tick = *self.data.tick;
         if let Some(entry) = self.data.ghosts.get(&identity).cloned() {
             let mut refreshed = entry.clone();
@@ -1490,7 +1543,7 @@ impl Rollback {
             self.build_kinematic_body_safe(e, data.isometry, &data.collider);
             self.data.ghosts.insert(
                 identity,
-                GhostEntry { entity: e, last_update_tick: tick },
+                GhostEntry { entity: e, last_update_tick: tick, source_region: data.source_region },
             );
         }
     }
@@ -1499,14 +1552,14 @@ impl Rollback {
     /// dying, or the entity leaving the margin.
     pub fn expire_ghosts(&mut self) {
         let tick = *self.data.tick;
-        let expired: Vec<((crate::RegionCoords, EntityKey), EntityKey)> = self
+        let expired: Vec<(crate::EntityId, GhostEntry)> = self
             .data
             .ghosts
             .iter()
             .filter(|(_, g)| tick.saturating_sub(g.last_update_tick) > GHOST_TTL_TICKS as crate::Tick)
-            .map(|(k, g)| (*k, g.entity))
+            .map(|(k, g)| (*k, g.clone()))
             .collect();
-        for (k, e) in expired {
+        for (k, GhostEntry { entity: e, source_region, .. }) in expired {
             self.data.ghosts.remove(&k);
             self.data.send(GameDataUpdate::new(
                 GameDataTransactionKind::Do,
@@ -1519,7 +1572,7 @@ impl Rollback {
             // bridge would warn on an unmapped key. k.0 is the source region.
             self.data.ecs.kind.emit_on_undo(GameDataUpdate::new(
                 GameDataTransactionKind::Undo,
-                GameDataUpdateKind::SetGhostSource(e, Some(k.0)),
+                GameDataUpdateKind::SetGhostSource(e, Some(source_region)),
             ));
             self.remove_entity_safe(e, None);
         }
@@ -1551,7 +1604,6 @@ impl Rollback {
     pub fn extract_entity_safe(
         &mut self,
         key: EntityKey,
-        region: crate::RegionCoords,
     ) -> crate::EntityBundle {
         let kind = (*self.data.ecs.kind.try_get(key)).unwrap_or_default();
         let handle = (*self.data.ecs.rigidbody.try_get(key))
@@ -1588,8 +1640,7 @@ impl Rollback {
             animator: *self.data.ecs.animator.try_get(key),
             walker: self.data.ecs.walker.try_get(key).clone(),
             client,
-            source_region: region,
-            source_key: key,
+            id: (*self.data.ecs.id.try_get(key)).expect("transferable entities have an EntityId"),
         };
         if let EntityKind::Person { person } = kind {
             self.data.person_entities.remove(&person);
@@ -1599,7 +1650,7 @@ impl Rollback {
             self.data.clients.remove(&c);
         }
         // This entity's own arrival identity (if it arrived here) is now stale.
-        let stale: Vec<(crate::RegionCoords, EntityKey)> = self
+        let stale: Vec<crate::EntityId> = self
             .data
             .arrivals
             .iter()
@@ -1668,8 +1719,8 @@ impl Rollback {
                 for (dx, dz) in crate::ghost_offsets(t.x, t.z) {
                     ghosts.push((
                         crate::GhostData {
+                            id: (*self.data.ecs.id.try_get(key)).expect("transferable entities have an EntityId"),
                             source_region: region,
-                            source_key: key,
                             kind: *kind,
                             isometry: *body.position(),
                             linvel: body.linvel(),
@@ -1686,7 +1737,7 @@ impl Rollback {
         }
         let mut departures = Vec::new();
         for (key, target) in leavers {
-            departures.push((self.extract_entity_safe(key, region), target));
+            departures.push((self.extract_entity_safe(key), target));
         }
         (departures, ghosts)
     }
