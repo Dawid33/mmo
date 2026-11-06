@@ -672,6 +672,12 @@ pub struct WorldManager<S: RegionSpawner> {
     /// Replies given up (no running, parked or stopping destination, or past
     /// `MAX_INTENT_REPLY_HOPS`): each logged at warn.
     intent_replies_lost: u64,
+    /// The bodies of parked players, by `EntityId`: a reply carrying items
+    /// to one of them goes into the player's parked record. Dropped when
+    /// the player is restored (its new body has a new id).
+    parked_bodies: BTreeMap<crate::EntityId, PlayerId>,
+    /// Items in replies that had nowhere to go (logged at warn).
+    items_destroyed: u64,
 }
 
 impl<S: RegionSpawner> WorldManager<S> {
@@ -708,6 +714,8 @@ impl<S: RegionSpawner> WorldManager<S> {
             awaiting_park: BTreeMap::new(),
             deferred_packets: BTreeMap::new(),
             player_saves: Vec::new(),
+            parked_bodies: BTreeMap::new(),
+            items_destroyed: 0,
             clock_ms: 0,
             calendar_day: None,
             sites_key: Vec::new(),
@@ -1301,7 +1309,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                 let transfers = self.saved_transfers(rc);
                 self.saves.push((rc, RegionSave::Live(rollback, transfers)));
             }
-            RegionOutput::PlayerParked(client, record) => self.player_parked(rc, client, record, now_ms),
+            RegionOutput::PlayerParked(client, record, body) => self.player_parked(rc, client, record, body, now_ms),
             RegionOutput::SyncClock { tick_rate, tick } => {
                 if let Some(link) = self.regions.get(&rc) {
                     for client in &link.subscribers {
@@ -1876,7 +1884,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             self.awaiting_park.insert(player, (id, record));
             self.deferred_packets.entry(id).or_default();
         } else {
-            let record = self.parked_players.remove(&player).or(record);
+            let record = self.take_parked(player).or(record);
             self.place_player(id, record, now_ms);
         }
         if let Some(map) = &self.world_map {
@@ -1964,7 +1972,14 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// A region answered `ParkPlayer`. The record (with the claims the manager
     /// held) becomes the player's parked record and goes to the store; a session
     /// of the same player waiting for it is restored now.
-    fn player_parked(&mut self, rc: RegionCoords, client: ClientId, record: Option<Box<PlayerRecord>>, now_ms: u64) {
+    fn player_parked(
+        &mut self,
+        rc: RegionCoords,
+        client: ClientId,
+        record: Option<Box<PlayerRecord>>,
+        body: Option<crate::EntityId>,
+        now_ms: u64,
+    ) {
         if let Some(m) = self.moving.get(&client) {
             // A move's park; one from a region the body had already left is
             // superseded (see `Departures`).
@@ -1988,6 +2003,9 @@ impl<S: RegionSpawner> WorldManager<S> {
                 let record = PlayerRecord { fortress: p.fortress, adventure: p.adventure, ..*record };
                 self.parked_players.insert(p.player, record.clone());
                 self.player_saves.push((p.player, record));
+                if let Some(body) = body {
+                    self.parked_bodies.insert(body, p.player);
+                }
             }
             None => log::warn!("PlayerParked({client}) from {rc:?}: no body to park"),
         }
@@ -2003,7 +2021,7 @@ impl<S: RegionSpawner> WorldManager<S> {
         if !self.sessions.contains_key(&waiting) {
             return;
         }
-        let record = self.parked_players.remove(&player).or(edge_record);
+        let record = self.take_parked(player).or(edge_record);
         self.place_player(waiting, record, now_ms);
         if self.history.is_some() {
             self.send_claims(waiting);
@@ -2311,11 +2329,18 @@ impl<S: RegionSpawner> WorldManager<S> {
     ///   logged at warn and counted (`intent_replies_lost`).
     fn route_intent(&mut self, msg: crate::IntentMsg, emitter: RegionCoords) {
         use crate::{IntentMsg, IntentRefusal, IntentReply, SentReply, Target};
+        if let IntentMsg::Reply(s) = msg {
+            if self.salvage_reply(s, emitter) {
+                return;
+            }
+        }
         let owner = match msg {
             IntentMsg::Intent(s) => match s.target {
                 Target::Entity(id) => self.locations.get(&id).copied(),
                 _ => s.target.region(),
             },
+            // A region-sourced intent's reply goes to that region itself.
+            IntentMsg::Reply(s) if s.reply.to().is_region() => Some(s.reply.to().birth_region),
             IntentMsg::Reply(s) => self.locations.get(&s.reply.to()).copied().or(Some(s.hint)),
         };
         let running = owner.filter(|rc| self.regions.get(rc).is_some_and(|l| !l.stopping));
@@ -2323,6 +2348,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             (_, IntentMsg::Reply(s)) if s.hops > crate::intents::MAX_INTENT_REPLY_HOPS => {
                 self.intent_replies_lost += 1;
                 log::warn!("[server] intent reply {:?} for {:?} given up after {} hops", s.reply, s.reply.to(), s.hops);
+                self.items_lost(&s.reply);
             }
             (Some(rc), msg) => {
                 let saved = self.book_intent(rc, emitter, msg).then_some(self.save_round);
@@ -2346,10 +2372,87 @@ impl<S: RegionSpawner> WorldManager<S> {
                     None => {
                         self.intent_replies_lost += 1;
                         log::warn!("[server] intent reply {:?} for {:?} lost: {owner:?} never ran", s.reply, s.reply.to());
+                        self.items_lost(&s.reply);
                     }
                 }
             }
         }
+    }
+
+    /// A reply carrying items (`IntentReply::carried_items`) whose entity is
+    /// gone is never given up silently: to a parked player's old body, the
+    /// items go into its parked record (inventory, then an empty cursor) and
+    /// to the store; otherwise — once a delivery found the entity gone
+    /// (`hops` > 0) — or for what the record cannot hold, they are put down
+    /// as a region-sourced deposit at the reply's pile cell (its owner's
+    /// refusal comes back to that region, which puts them down itself).
+    /// Returns whether the reply was dealt with here.
+    fn salvage_reply(&mut self, s: crate::SentReply, emitter: RegionCoords) -> bool {
+        let to = s.reply.to();
+        let Some((cell, mut stack)) = s.reply.carried_items() else { return false };
+        if to.is_region() || self.locations.contains_key(&to) || self.in_flight.contains_key(&to) {
+            return false;
+        }
+        let parked = self.parked_bodies.get(&to).copied();
+        if let Some(record) = parked.and_then(|p| self.parked_players.get_mut(&p)) {
+            stack.count = record.client.inventory.add(stack);
+            if stack.count > 0 && record.client.cursor.is_none() {
+                record.client.cursor = Some(stack);
+                stack.count = 0;
+            }
+            let player = parked.expect("checked");
+            log::info!("[server] reply {:?} for parked {to:?}: folded into player {}'s record", s.reply, player.0);
+            self.player_saves.push((player, record.clone()));
+            if stack.count == 0 {
+                return true;
+            }
+        } else if s.hops == 0 {
+            // First delivery to its hint: the entity may still be there.
+            return false;
+        }
+        let owner = cell.to_local().0;
+        log::info!("[server] reply {:?} for gone {to:?}: {stack:?} put down at {cell:?}", s.reply);
+        let sent = crate::SentIntent {
+            target: crate::Target::Pile(cell),
+            intent: crate::Intent::DepositItems {
+                cell,
+                stack,
+                expire: s.due + crate::PILE_DESPAWN_TICKS,
+                pickup: s.due + crate::PICKUP_DELAY_TICKS,
+                by: crate::EntityId::of_region(owner),
+            },
+            from: owner,
+            due: s.due,
+        };
+        self.route_intent(crate::IntentMsg::Intent(sent), emitter);
+        true
+    }
+
+    /// A reply given up: the items it carried are destroyed — counted
+    /// ([`Self::items_destroyed`]) and logged at warn.
+    fn items_lost(&mut self, reply: &crate::IntentReply) {
+        if let Some((cell, stack)) = reply.carried_items() {
+            self.items_destroyed += u64::from(stack.count);
+            log::warn!("[server] {stack:?} of pile {cell:?} destroyed: their reply {reply:?} had nowhere to go");
+        }
+    }
+
+    /// Items destroyed with replies that had nowhere to go (see
+    /// [`Self::route_intent`]).
+    pub fn items_destroyed(&self) -> u64 {
+        self.items_destroyed
+    }
+
+    /// `player`'s parked record, taken for a restore; its old body's id is
+    /// forgotten (a late reply to it is put down where it came from).
+    fn take_parked(&mut self, player: PlayerId) -> Option<PlayerRecord> {
+        self.parked_bodies.retain(|_, p| *p != player);
+        self.parked_players.remove(&player)
+    }
+
+    /// Test support: `player`'s parked record.
+    pub fn parked_record(&self, player: PlayerId) -> Option<&PlayerRecord> {
+        self.parked_players.get(&player)
     }
 
     /// Replies given up so far (see [`Self::route_intent`]).

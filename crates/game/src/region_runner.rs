@@ -119,8 +119,10 @@ pub enum RegionOutput {
     PeopleParked(Vec<(crate::history::PersonId, [f32; 3])>),
     /// Reply to a [`GameEventKind::ParkPlayer`], right after it ran: what the
     /// body and `Client` were (claims empty — the manager adds them), `None`
-    /// when the client had no body here (it had just crossed a seam).
-    PlayerParked(ClientId, Option<Box<crate::PlayerRecord>>),
+    /// when the client had no body here (it had just crossed a seam). The
+    /// parked body's `EntityId`: a reply still owed to it (items a pile
+    /// grant carries) is folded into the record by the manager.
+    PlayerParked(ClientId, Option<Box<crate::PlayerRecord>>, Option<crate::EntityId>),
     /// A client input that reached this region after the client's body left
     /// it (within [`MAX_INPUT_LEAD_TICKS`]): the manager sends it on to the
     /// client's home as `EventAfterTick(kind, stamp)`. The stamp is the
@@ -583,8 +585,10 @@ impl RegionRunner {
             kind if kind.input_client().is_some() => self.route_input(kind, None),
             GameEventKind::ParkPlayer(client) => {
                 let record = self.region.data().player_record(client, self.id).map(Box::new);
+                let data = self.region.data();
+                let body = data.player_entites.get(&client).and_then(|&k| data.entity_id(k));
                 self.apply(GameEventKind::ParkPlayer(client));
-                let _ = self.out.send((self.id, RegionOutput::PlayerParked(client, record)));
+                let _ = self.out.send((self.id, RegionOutput::PlayerParked(client, record, body)));
             }
             kind => self.apply(kind),
         }

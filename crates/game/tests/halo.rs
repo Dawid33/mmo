@@ -195,6 +195,11 @@ fn halo_updates_roll_back_bit_exact() {
     region.handle_event(GameEventKind::HaloUpdate(seed.clone())).unwrap();
     assert!(region.data().halo_chunk_at([n, 0, 0]).is_some());
     assert_eq!(region.data().halo_piles().len(), 1, "the seed's pile is mirrored");
+    let pile_cell = WorldBlockPos::from_local(SPAWN_REGION, game::BlockPos::new(REGION_BLOCKS as i32, 1, 3));
+    {
+        use game::WorldView as _;
+        assert_eq!(region.data().view().pile(pile_cell), Some(&pile(3)), "WorldView reads the mirror");
+    }
     let bodies = region.data().physics.bodies.len();
     region.rollback_last_event();
     assert_eq!(game::state_hash(region.data()), before, "seed undone exactly");
@@ -216,6 +221,11 @@ fn halo_updates_roll_back_bit_exact() {
     assert_ne!(game::state_hash(region.data()), seeded);
     region.rollback_last_event();
     assert_eq!(game::state_hash(region.data()), seeded, "patch undone exactly");
+    // The source gone: its pile mirrors go (nobody answers takes of them).
+    region.handle_event(GameEventKind::HaloSourceGone(east())).unwrap();
+    assert!(region.data().halo_piles().is_empty(), "no mirror of a gone source's pile");
+    region.rollback_last_event();
+    assert_eq!(game::state_hash(region.data()), seeded, "the drop undoes exactly");
 }
 
 /// A neighbour that parks hands its final terrain to the running regions

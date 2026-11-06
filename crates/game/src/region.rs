@@ -968,6 +968,8 @@ impl Region {
             }
             GameEventKind::HaloSourceGone(from) => {
                 self.data.drop_halo_source_safe(from);
+                // Its pile mirrors too: nobody answers takes of them now.
+                self.data.drop_halo_piles_of_safe(from);
             }
             GameEventKind::HaloUpdate(update) => {
                 self.data.apply_halo_update_safe(&update);

@@ -818,6 +818,13 @@ impl Rollback {
         self.data.send(GameDataUpdate::new(GameDataTransactionKind::Do, GameDataUpdateKind::SetHaloPiles(views)));
     }
 
+    /// Drops every halo pile mirror of region `from` (its source is gone).
+    pub(crate) fn drop_halo_piles_of_safe(&mut self, from: RegionCoords) {
+        let gone: Vec<_> =
+            self.data.halo_piles.keys().filter(|p| p.to_local().0 == from).map(|p| (*p, None)).collect();
+        self.write_halo_piles_safe(gone);
+    }
+
     /// This region's piles that neighbour `to` mirrors (`HaloUpdate::piles`
     /// of a seed), in cell order.
     pub(crate) fn pile_seed_for(&self, to: RegionCoords) -> Vec<(WorldBlockPos, Option<ItemPile>)> {

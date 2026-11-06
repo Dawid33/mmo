@@ -169,6 +169,19 @@ impl Default for IntentReply {
 }
 
 impl IntentReply {
+    /// The items it hands to its entity, and the pile cell they came from or
+    /// were meant for: a granted take, or a refused deposit's rest. A reply
+    /// that carries items is never given up silently (`WorldManager`).
+    pub fn carried_items(&self) -> Option<(WorldBlockPos, crate::ItemStack)> {
+        match *self {
+            IntentReply::Granted(Intent::TakeFromPile { cell, item, count, .. }) => {
+                Some((cell, crate::ItemStack { item, count }))
+            }
+            IntentReply::Refused(Intent::DepositItems { cell, stack, .. }, _) => Some((cell, stack)),
+            _ => None,
+        }
+    }
+
     /// The entity it is for.
     pub fn to(&self) -> EntityId {
         match self {

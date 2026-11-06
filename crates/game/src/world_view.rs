@@ -9,7 +9,7 @@
 //! region's origin at `RegionCoords * REGION_SIZE`), as `f64` so any region
 //! of the `i32` grid keeps sub-voxel precision; blocks are
 //! [`WorldBlockPos`].
-use crate::{Block, EntityId, EntityKey, EntityKind, Rollback, Tick, WorldBlockPos, HALO_BLOCKS, REGION_SIZE};
+use crate::{Block, EntityId, EntityKey, EntityKind, ItemPile, Rollback, Tick, WorldBlockPos, HALO_BLOCKS, REGION_SIZE};
 
 /// An axis-aligned box in world sim units, `min` inclusive, `max` exclusive.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -99,6 +99,10 @@ pub trait WorldView {
     /// A ray longer than the halo panics in debug: a long reach must be an
     /// intent, not a read.
     fn raycast(&self, ray: WorldRay, max_blocks: f32) -> Option<Hit>;
+    /// The item pile resting in cell `p`: own, or the halo's read-only
+    /// mirror of a neighbour's (`item_piles.rs`); `None` elsewhere. Taking
+    /// from or adding to a neighbour's is an intent.
+    fn pile(&self, p: WorldBlockPos) -> Option<&ItemPile>;
 }
 
 /// One region's [`WorldView`] ([`Rollback::view`]).
@@ -158,6 +162,10 @@ impl WorldView for RegionView<'_> {
             .filter_map(|id| self.get(id))
             .filter(|e| aabb.contains(e.world_translation()))
             .collect()
+    }
+
+    fn pile(&self, p: WorldBlockPos) -> Option<&ItemPile> {
+        self.data.pile_seen(p)
     }
 
     fn raycast(&self, ray: WorldRay, max_blocks: f32) -> Option<Hit> {

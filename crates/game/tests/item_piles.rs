@@ -794,3 +794,56 @@ fn felled_body_drops_across_seam() {
         assert!(r.data().item_piles().keys().all(|p| p.x < 0), "in the cells under the body");
     });
 }
+
+/// Review fix (R26): a take's grant carries items the owner already removed.
+/// The taker parks (disconnects) after sending the take of a neighbour's
+/// pile and before the grant reaches it: the grant finds no body, and its
+/// items go into the parked player's record — never lost, never twice.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn grant_to_a_parked_taker_lands_in_its_record() {
+    let mut rig = Rig::with_floor(None, crate::common::seam_translate::uniform_floor);
+    rig.join_spawn();
+    let origin = crate::common::seam_translate::Placement::Seam(crate::common::seam_translate::Axis::X).origin();
+    rig.order(Order::SetMode { mode: PlayMode::Adventure, at: Some(spawn_tile(origin)) });
+    with_client(&mut rig, |c| c.inventory = game::Inventory::new());
+    let cell = offset(origin, -1, 0, -1);
+    deposit_at_owner(&mut rig, cell, stack(DIRT, 5));
+    let sent = |rig: &mut Rig| {
+        let mut n = 0;
+        rig.manager.spawner_mut().with_region(game::SPAWN_REGION, |r| n = r.data().pile_takes.len());
+        n > 0
+    };
+    for _ in 0..20 {
+        rig.round();
+        if sent(&mut rig) {
+            break;
+        }
+    }
+    assert!(sent(&mut rig), "the take of the neighbour's pile was sent");
+    rig.event(game::ServerEvent::ClientDisconnected(CLIENT));
+    // The parked body is gone on purpose: not a conservation failure.
+    rig.tracked.clear();
+    for _ in 0..12 {
+        rig.round();
+    }
+    let record = rig.manager.parked_record(game::PlayerId(CLIENT as u64)).expect("parked").clone();
+    let in_record: u32 = record
+        .client
+        .inventory
+        .slots
+        .iter()
+        .flatten()
+        .chain(record.client.cursor.iter())
+        .filter(|s| s.item == DIRT)
+        .map(|s| s.count)
+        .sum();
+    let mut in_piles = 0;
+    for rc in rig.manager.running_regions() {
+        rig.manager.spawner_mut().with_region(rc, |r| {
+            in_piles += r.data().item_piles().values().flat_map(|p| &p.stacks).filter(|s| s.item == DIRT).map(|s| s.count).sum::<u32>();
+        });
+    }
+    assert_eq!((in_record, in_piles), (5, 0), "the granted dirt is in the parked record");
+    assert_eq!(rig.manager.items_destroyed(), 0);
+}
