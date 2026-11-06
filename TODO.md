@@ -16,7 +16,7 @@ Multi-region world follow-ups (milestone landed; spec 2026-07-05-multi-region-wo
 - Chunk-16 follow-up (needs Dawid's go-ahead to measure): client brick landing per frame (a whole chunk is ~200-300 bricks/frame vs the cap of 160), client replay churn when a predicted break materialises ground (RemoveEntity + AddTerrainChunk re-spawns bricks per replay), and a solid chunk's first-edit full collider rebuild; then fix what the numbers show.
 - `just pull-smoke` is red: since 9aed311 `prepare_chunk_quads` needs `OverlayTexture`, which only `FortressOverlayPlugin` creates; the probe doesn't add it (production unaffected). Fix: `VoxelPullPlugin` falls back to a 1x1x1 placeholder overlay texture.
 
-- Client per-region clock tracking (single shared tick_rate today; 9 SyncClock streams fight over it).
+- ~~Client per-region clock tracking (single shared tick_rate today; 9 SyncClock streams fight over it).~~ **RESOLVED 2026-11-06 (seam-transparent regions Task 5.3)**: the client keeps ONE predicted world tick (`regions::clock::PredictedClock`), steered by every region's SyncClock (all world-numbered; the newest sample per round decides); every predicted region runs to it (bounded catch-up bursts, held when ahead), so client regions close slots together like the server's.
 - Durable region persistence (parking lot is in-memory only).
 - Cross-region event relay groundwork (deferred with handoff).
 - Stable client identity across connections: reconnects get a fresh ClientId, so the manager's no-duplicate-player reconnect path only fires for same-id sessions; the old player entity lingers in its home region.
