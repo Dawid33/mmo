@@ -2,7 +2,7 @@
 //! Scratch fields (log, imaged, touched, expand_requests, mark) are rebuilt every
 //! step and are never hashed; `stats` is diagnostics only.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::body::Body;
 use crate::grid::{Bits, Dims, Dir};
@@ -25,6 +25,9 @@ pub enum Undo {
     Step(u32),
     Poured(u64),
     Scooped(u64),
+    Evaporated(u64),
+    /// `(due, cell, was_present)`: the pair in `evap_due` / `evap_of` before the change.
+    EvapDue(u32, u32, bool),
     Link(LinkId, Option<Link>),
     /// Before-image of a whole `BRICK`³ brick (Brick journal mode).
     Brick(u32, Box<BrickImage>),
@@ -62,7 +65,8 @@ impl Undo {
     pub fn bytes(&self) -> usize {
         match self {
             Undo::Water(..) => 7,
-            Undo::Owner(..) | Undo::Touch(..) | Undo::Poured(..) | Undo::Scooped(..) => 9,
+            Undo::Owner(..) | Undo::Touch(..) | Undo::Poured(..) | Undo::Scooped(..) | Undo::Evaporated(..) => 9,
+            Undo::EvapDue(..) => 10,
             Undo::Link(..) => 16,
             Undo::Solid(..) | Undo::Active(..) => 6,
             Undo::NextId(..) | Undo::Step(..) => 5,
@@ -131,6 +135,14 @@ pub struct World {
     pub poured: u64,
     /// Units removed by scoops (the mass ledger; Task 11).
     pub scooped: u64,
+    /// Units that evaporated (the mass ledger; Task 9).
+    pub evaporated: u64,
+    /// Steps a sleeping film waits before it evaporates; 0 = off (config, not hashed).
+    pub evap_after: u32,
+    /// Pending evaporations `(due_step, cell)`, ordered (state).
+    pub evap_due: BTreeSet<(u32, u32)>,
+    /// Reverse of `evap_due`: cell -> due step (state; a water write to the cell removes both).
+    pub evap_of: BTreeMap<u32, u32>,
     pub links: BTreeMap<LinkId, Link>,
     pub stats: Stats,
     /// Journal granularity (config, not hashed). Brick mode needs brick-multiple dims.
@@ -164,6 +176,10 @@ impl World {
             step: 0,
             poured: 0,
             scooped: 0,
+            evaporated: 0,
+            evap_after: 0,
+            evap_due: BTreeSet::new(),
+            evap_of: BTreeMap::new(),
             links: BTreeMap::new(),
             stats: Stats::default(),
             journal: JournalMode::PerCell,
@@ -249,6 +265,7 @@ impl World {
     pub fn set_water(&mut self, i: u32, v: u16) {
         let old = self.water[i as usize];
         if old != v {
+            self.evap_cancel(i);
             if !self.brick_first(i) {
                 self.push(Undo::Water(i, old));
             }
@@ -301,6 +318,29 @@ impl World {
     pub fn add_scooped(&mut self, q: u64) {
         self.push(Undo::Scooped(self.scooped));
         self.scooped += q;
+    }
+    pub fn add_evaporated(&mut self, q: u64) {
+        self.push(Undo::Evaporated(self.evaporated));
+        self.evaporated += q;
+    }
+    /// Queue cell `i` to evaporate at `due` (no-op if it already waits).
+    pub fn evap_schedule(&mut self, i: u32, due: u32) {
+        if self.evap_of.contains_key(&i) {
+            return;
+        }
+        self.push(Undo::EvapDue(due, i, false));
+        self.evap_due.insert((due, i));
+        self.evap_of.insert(i, due);
+    }
+    /// Drop cell `i`'s pending evaporation, if any.
+    pub fn evap_cancel(&mut self, i: u32) {
+        if self.evap_of.is_empty() {
+            return;
+        }
+        if let Some(due) = self.evap_of.remove(&i) {
+            self.push(Undo::EvapDue(due, i, true));
+            self.evap_due.remove(&(due, i));
+        }
     }
     pub fn add_link(&mut self, l: Link) -> LinkId {
         let id = self.links.keys().next_back().map_or(1, |k| k + 1);
@@ -388,6 +428,15 @@ impl World {
                 Undo::Step(v) => self.step = v,
                 Undo::Poured(v) => self.poured = v,
                 Undo::Scooped(v) => self.scooped = v,
+                Undo::Evaporated(v) => self.evaporated = v,
+                Undo::EvapDue(due, i, true) => {
+                    self.evap_due.insert((due, i));
+                    self.evap_of.insert(i, due);
+                }
+                Undo::EvapDue(due, i, false) => {
+                    self.evap_due.remove(&(due, i));
+                    self.evap_of.remove(&i);
+                }
                 Undo::Link(id, Some(l)) => {
                     self.links.insert(id, l);
                 }
@@ -406,6 +455,15 @@ impl World {
         h.u32(self.next_id);
         h.u64(self.poured);
         h.u64(self.scooped);
+        h.u64(self.evaporated);
+        for &(due, i) in &self.evap_due {
+            h.u32(due);
+            h.u32(i);
+        }
+        for (&i, &due) in &self.evap_of {
+            h.u32(i);
+            h.u32(due);
+        }
         for w in self.solid.words() {
             h.u64(*w);
         }
@@ -459,6 +517,6 @@ impl World {
 
     /// `mass()` plus water that left the world on purpose; equals initial mass + poured.
     pub fn accounted(&self) -> u64 {
-        self.mass() + self.scooped
+        self.mass() + self.evaporated + self.scooped
     }
 }

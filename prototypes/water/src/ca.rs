@@ -8,11 +8,12 @@
 use crate::body::{self, Body};
 use crate::grid::{ALL, Dir, horizontal_order, parity};
 use crate::state::{BodyId, NO_BODY, World};
-use crate::{ABSORB_TOL, FILM, FULL, MAX_FLOW, Mode, SEED_QUIET, SLEEP_STEPS};
+use crate::{ABSORB_TOL, EVAP_BELOW, FILM, FULL, MAX_FLOW, Mode, SEED_QUIET, SLEEP_STEPS};
 
 pub fn step(w: &mut World) {
     let s = w.step;
     w.expand_requests.clear();
+    evaporate_due(w);
     let order = horizontal_order(s);
     let all = w.active.ones();
     let dims = w.dims;
@@ -50,6 +51,10 @@ pub fn step(w: &mut World) {
             }
             if w.is_ca(c) && s >= w.last_touch[c as usize] + SLEEP_STEPS {
                 w.set_active(c, false);
+                let v = w.water[c as usize];
+                if w.evap_after > 0 && v > 0 && v < EVAP_BELOW && body::on_solid_or_member(w, c) {
+                    w.evap_schedule(c, s + w.evap_after);
+                }
             }
         }
     }
@@ -58,6 +63,23 @@ pub fn step(w: &mut World) {
         after_step(w);
     }
     w.set_step(s + 1);
+}
+
+/// Stage 2: pop every evaporation due now; a cell still a thin film on footing loses its
+/// water to the ledger. (Any water write since scheduling already removed the entry.)
+fn evaporate_due(w: &mut World) {
+    while let Some(&(due, c)) = w.evap_due.first() {
+        if due > w.step {
+            break;
+        }
+        w.evap_cancel(c);
+        let v = w.water[c as usize];
+        if w.is_ca(c) && v > 0 && v < EVAP_BELOW {
+            w.set_water(c, 0);
+            w.add_evaporated(v as u64);
+            wake_donors(w, c);
+        }
+    }
 }
 
 pub(crate) fn wake(w: &mut World, c: u32) {

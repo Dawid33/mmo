@@ -37,6 +37,11 @@ pub const GATE_CAP: u64 = 1024;
 /// Units a pump moves in one step (1/8 m³).
 pub const PUMP_RATE: u16 = 512;
 
+/// A CA cell holding less than this is a film (DF's 1/7 of a cell).
+pub const EVAP_BELOW: u16 = 585;
+/// Steps a sleeping film waits before it evaporates (when evaporation is on).
+pub const EVAP_AFTER_STEPS: u32 = 64;
+
 /// Edge of a journal brick, in cells.
 pub const BRICK: u32 = 8;
 

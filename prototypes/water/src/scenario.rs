@@ -164,6 +164,7 @@ pub fn run(sc: &mut Scenario, mut probe: impl FnMut(&World)) -> Report {
         probe(&sc.world);
         if sc.stop_when_asleep && last_edit.is_none_or(|e| s > e) && sc.world.active.count() == 0
             && sc.world.stats.link_moved_last_step == 0
+            && sc.world.evap_due.is_empty()
         {
             r.asleep_at = Some(s);
             break;
