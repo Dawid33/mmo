@@ -359,6 +359,9 @@ struct DeferringSpawner {
 }
 
 impl game::RegionSpawner for DeferringSpawner {
+    fn world_tick(&self) -> game::Tick {
+        0
+    }
     fn spawn(
         &mut self,
         id: RegionCoords,

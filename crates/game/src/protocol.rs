@@ -22,7 +22,7 @@ impl From<usize> for Usize {
     }
 }
 
-pub type Tick = usize;
+pub type Tick = u64;
 pub type EventId = usize;
 pub type EntityId = usize;
 /// Regions tile the horizontal plane in fixed squares of `REGION_BLOCKS`²

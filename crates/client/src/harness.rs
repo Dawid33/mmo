@@ -35,7 +35,7 @@ pub struct SimHarness {
     /// server's authoritative hash recorded FOR THAT SAME TICK — not the
     /// server's live (already-advanced) hash. (That describes a client that
     /// trails; one that leads is aligned by `catch_up`.)
-    server_hashes: HashMap<(RegionCoords, usize), u32>,
+    server_hashes: HashMap<(RegionCoords, game::Tick), u32>,
     /// What the client actually reads: `server_to_client` forwarded through
     /// `forward()`, which can withhold `SyncClock` (see `catch_up`).
     client_in_send: Sender<ServerPacket>,
@@ -235,7 +235,7 @@ impl SimHarness {
     }
 
     // --- inspectors used by tests ---
-    pub fn client_tick(&self) -> usize {
+    pub fn client_tick(&self) -> game::Tick {
         if self.threaded {
             return self.client.home_tick().expect("home region reports a tick");
         }
@@ -251,7 +251,7 @@ impl SimHarness {
 
     /// Every client region's `(tick, state hash)`: read directly on the
     /// inline host, asked of the regions on threads.
-    fn client_regions(&mut self) -> HashMap<RegionCoords, (usize, u32)> {
+    fn client_regions(&mut self) -> HashMap<RegionCoords, (game::Tick, u32)> {
         if self.threaded {
             return self.client.region_probe().expect("client regions").into_iter().collect();
         }
@@ -473,7 +473,7 @@ impl SimHarness {
     /// for the same tick, and the comparison is as strict as it ever was.
     /// Afterwards the client predicts the same number of ticks alone, which
     /// restores the lead it had — the run continues as if uninterrupted.
-    fn catch_up(&mut self) -> HashMap<RegionCoords, (usize, u32, u32)> {
+    fn catch_up(&mut self) -> HashMap<RegionCoords, (game::Tick, u32, u32)> {
         let mut steps = 0;
         let mut client = self.client_regions();
         while steps < CATCH_UP_MAX_TICKS

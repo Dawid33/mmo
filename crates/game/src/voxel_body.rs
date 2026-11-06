@@ -544,7 +544,7 @@ impl Rollback {
                 }
                 let cell = [0, 1, 2].map(|a| origin[a] + i32::from(hi[a]) / 2);
                 let blocks: Vec<Block> = model.blocks.values().map(|(b, _)| *b).collect();
-                self.drop_blocks_at_safe(cell, blocks, *self.data.tick as u64);
+                self.drop_blocks_at_safe(cell, blocks, *self.data.tick);
             }
             return None;
         }
@@ -606,7 +606,7 @@ impl Rollback {
         debug_assert_eq!(*collider.position(), Pose::IDENTITY, "a voxel body's compound sits at the identity offset");
         self.attach_collider_safe(handle, collider);
 
-        let spawned_tick = *self.data.tick as u64;
+        let spawned_tick = *self.data.tick;
         self.data.send(GameDataUpdate::new(
             GameDataTransactionKind::Do,
             GameDataUpdateKind::AddVoxelBody(e, pose, Box::new(model.clone())),

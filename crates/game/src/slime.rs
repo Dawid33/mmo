@@ -219,7 +219,7 @@ impl Rollback {
     /// Runs at the start of the region tick, before the physics step that
     /// consumes the kinematic targets it sets.
     pub fn tick_slimes_safe(&mut self, region: RegionCoords) {
-        let tick = *self.data.tick as u64;
+        let tick = *self.data.tick;
         self.maybe_spawn_slime_safe(region, tick);
         // Ghost mirrors never carry a Slime component, so only owned slimes
         // are driven. Key order is deterministic.

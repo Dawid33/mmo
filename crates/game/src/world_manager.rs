@@ -98,6 +98,9 @@ pub trait RegionSpawner {
     fn generates_columns(&self) -> bool {
         false
     }
+
+    /// The world's current tick: where a region spawned now starts counting.
+    fn world_tick(&self) -> crate::Tick;
 }
 
 /// Chance (per mille, per region per round) that [`InlineSchedule::jittery`]
@@ -187,6 +190,8 @@ pub struct InlineSpawner {
     /// through [`crate::restore_saved`], as `ThreadRegionSpawner::with_store`
     /// does on the server.
     saved: BTreeMap<RegionCoords, crate::Rollback>,
+    /// Rounds advanced by `tick_all`: the world tick of this lockstep world.
+    rounds: crate::Tick,
 }
 
 impl InlineSpawner {
@@ -226,6 +231,7 @@ impl InlineSpawner {
     }
 
     pub fn tick_all(&mut self) {
+        self.rounds += 1;
         let Some(schedule) = self.schedule.as_mut() else {
             for (_, (_, runner)) in self.runners.iter_mut() {
                 runner.tick();
@@ -287,6 +293,10 @@ impl RegionSpawner for InlineSpawner {
         };
         self.runners.insert(id, (recv, runner));
         send
+    }
+
+    fn world_tick(&self) -> crate::Tick {
+        self.rounds
     }
 }
 
@@ -1667,7 +1677,9 @@ impl<S: RegionSpawner> WorldManager<S> {
             }
         };
         let input = self.spawner.spawn(rc, seed, self.region_out_send.clone());
-        // First in the region's queue, so it is bounded before its first tick.
+        // Very first: join the world's tick numbering before anything else.
+        let _ = input.send(RegionInput::StartAt(self.spawner.world_tick()));
+        // Next, so it is bounded before its first tick.
         if let Some(extent) = self.map_extent() {
             let _ = input.send(RegionInput::SetMapExtent(Some(extent)));
         }

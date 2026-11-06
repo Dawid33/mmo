@@ -207,7 +207,7 @@ pub enum EntityKind {
 #[module(crate)]
 pub struct GhostEntry {
     pub entity: EntityKey,
-    pub last_update_tick: usize,
+    pub last_update_tick: crate::Tick,
 }
 
 #[rollback(GameData)]
@@ -229,7 +229,7 @@ mod game_data {
         ecs: Ecs,
         physics: PhysicsState,
         #[undo(cell)]
-        tick: usize,
+        tick: crate::Tick,
         #[undo(cell)]
         next_game_event_id: usize,
         #[undo(map)]
@@ -1503,7 +1503,7 @@ impl Rollback {
             .data
             .ghosts
             .iter()
-            .filter(|(_, g)| tick.saturating_sub(g.last_update_tick) > GHOST_TTL_TICKS)
+            .filter(|(_, g)| tick.saturating_sub(g.last_update_tick) > GHOST_TTL_TICKS as crate::Tick)
             .map(|(k, g)| (*k, g.entity))
             .collect();
         for (k, e) in expired {

@@ -228,7 +228,7 @@ impl Rig {
     }
 
     /// (region, tick, state hash) of every running region, in region order.
-    fn fingerprint(&mut self) -> Vec<(RegionCoords, usize, u32)> {
+    fn fingerprint(&mut self) -> Vec<(RegionCoords, u64, u32)> {
         let mut regions = self.manager.running_regions();
         regions.sort();
         let mut out = Vec::new();
@@ -246,7 +246,7 @@ impl Rig {
 fn walk_there_and_back(
     route: Route,
     schedule: Option<InlineSchedule>,
-) -> Vec<(RegionCoords, usize, u32)> {
+) -> Vec<(RegionCoords, u64, u32)> {
     let mut rig = Rig::new(schedule);
     rig.event(ServerEvent::connected(CLIENT));
     for rc in SPAWN_REGION.window_3x3() {

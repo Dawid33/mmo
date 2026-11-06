@@ -183,7 +183,7 @@ impl Rollback {
     /// person is steered along its walk (or held to gravity) through the
     /// same planner and character controller as a player's body.
     pub fn tick_people_safe(&mut self, here: RegionCoords, map: Option<MapExtent>) {
-        let tick = *self.data.tick as u64;
+        let tick = *self.data.tick;
         let people: Vec<(PersonId, EntityKey)> =
             self.data.person_entities.iter().map(|(&p, &e)| (p, e)).collect();
         for (person, e) in people {

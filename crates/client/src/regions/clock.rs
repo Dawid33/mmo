@@ -25,7 +25,7 @@ pub(crate) const MAX_ALIGN_TICKS: usize = 2000 / game::TICK_RATE as usize;
 /// One `ServerPacket::SyncClock` sample for a region.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ClockInput {
-    pub server_tick: usize,
+    pub server_tick: game::Tick,
     pub server_rate_ms: u64,
     pub rtt_ms: u64,
     pub is_home: bool,
@@ -47,7 +47,7 @@ pub struct ClockDecision {
 }
 
 /// The clock decision for one region whose timeline stands at `client_tick`.
-pub fn decide(client_tick: usize, input: &ClockInput) -> ClockDecision {
+pub fn decide(client_tick: game::Tick, input: &ClockInput) -> ClockDecision {
     let diff: isize = client_tick as isize - input.server_tick as isize;
     // How far ahead of the server the client is, net of the round trip.
     let drift_ms = diff * input.server_rate_ms as isize - input.rtt_ms as isize;
@@ -96,7 +96,7 @@ pub fn decide(client_tick: usize, input: &ClockInput) -> ClockDecision {
 mod tests {
     use super::*;
 
-    fn sample(server_tick: usize, rtt_ms: u64, is_home: bool) -> ClockInput {
+    fn sample(server_tick: game::Tick, rtt_ms: u64, is_home: bool) -> ClockInput {
         ClockInput { server_tick, server_rate_ms: 50, rtt_ms, is_home }
     }
 

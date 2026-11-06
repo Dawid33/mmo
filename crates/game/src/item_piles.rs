@@ -295,7 +295,7 @@ impl Rollback {
         if self.data.item_piles.is_empty() {
             return 0;
         }
-        let tick = *self.data.tick as u64;
+        let tick = *self.data.tick;
         let cell = if self.pile_support(pos) { pos } else { [pos[0], pos[1] + 1, pos[2]] };
         if self.data.item_piles.contains_key(&cell) {
             self.resettle_pile_safe(cell, tick)

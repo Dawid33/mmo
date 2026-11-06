@@ -36,6 +36,7 @@ pub mod orders;
 pub mod pathfind;
 pub mod perf;
 pub mod player;
+mod clock_jump;
 mod physics;
 pub mod protocol;
 mod region;
@@ -50,6 +51,7 @@ pub mod ui;
 pub mod volume;
 pub mod voxel;
 pub mod voxel_body;
+pub mod world_clock;
 pub mod world_manager;
 pub mod world_map;
 pub use parry3d as parry;
@@ -95,6 +97,7 @@ pub use volume::*;
 pub use voxel::*;
 pub use trees::*;
 pub use voxel_body::*;
+pub use world_clock::WorldClock;
 pub use world_manager::*;
 pub use world_map::*;
 
@@ -377,7 +380,7 @@ impl World {
         };
     }
 
-    pub fn current_tick(&self, id: &RegionId) -> usize {
+    pub fn current_tick(&self, id: &RegionId) -> Tick {
         self.regions.get(id).unwrap().current_tick()
     }
 
@@ -467,7 +470,7 @@ impl World {
     /// The server's state hash after event `event_id` of `region` arrived
     /// (`ServerPacket::HashedGameEvent`); reconcile checks it when it
     /// confirms that event. `false` = the region is not held, check dropped.
-    pub fn expect_state_hash(&mut self, region: &RegionId, event_id: usize, tick: usize, hash: u32) -> bool {
+    pub fn expect_state_hash(&mut self, region: &RegionId, event_id: usize, tick: Tick, hash: u32) -> bool {
         match self.regions.get_mut(region) {
             Some(r) => {
                 r.expect_state_hash(event_id, tick, hash);

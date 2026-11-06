@@ -20,7 +20,7 @@ pub enum RegionCmd {
     Tick,
     /// A server-authoritative event to reconcile, with the server's
     /// `(tick, state hash)` when it came as a `HashedGameEvent`.
-    ServerEvent(GameEvent, Option<(usize, u32)>),
+    ServerEvent(GameEvent, Option<(game::Tick, u32)>),
     /// A PlayerInput / UiAction / Order from this client: predicted here and
     /// sent to the server stamped with the tick it was predicted after.
     Predict(GameEventKind),
@@ -78,14 +78,14 @@ pub enum RegionReport {
     /// A `Predict` that reached this region after the local player left it.
     Misrouted(GameEventKind),
     Pong(u64),
-    StateHash { tick: usize, hash: u32 },
+    StateHash { tick: game::Tick, hash: u32 },
     Failed(GameError),
 }
 
 /// What the game thread needs from the region holding the local client.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HomeView {
-    pub tick: usize,
+    pub tick: game::Tick,
     /// The local body's region-local translation (`None`: no body).
     pub translation: Option<[f32; 3]>,
     pub fps_cam_mode: bool,
@@ -366,7 +366,7 @@ mod tests {
             .collect()
     }
 
-    fn clock(server_tick: usize, rtt_ms: u64) -> RegionCmd {
+    fn clock(server_tick: game::Tick, rtt_ms: u64) -> RegionCmd {
         RegionCmd::Clock(ClockInput { server_tick, server_rate_ms: 50, rtt_ms, is_home: false })
     }
 

@@ -494,7 +494,7 @@ impl Rollback {
         }
         // Only what was actually cleared (a refused write keeps its block).
         cut.retain(|&(c, _)| self.block_at(c).is_some_and(|b| b.id == BlockId::AIR));
-        let tick = *self.data.tick as u64;
+        let tick = *self.data.tick;
         let mut body = None;
         for set in felling.falling {
             let spin = crate::trees::tip_angvel(tree, p, &set, tick);

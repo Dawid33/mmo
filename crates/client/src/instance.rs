@@ -175,7 +175,7 @@ pub struct GameInstanceManager {
     /// (`drain_reports`); region threads run their own.
     inline_align: Vec<(RegionId, usize)>,
     /// `(tick, state hash)` per region from the last `region_probe`.
-    probe: BTreeMap<RegionId, (usize, u32)>,
+    probe: BTreeMap<RegionId, (game::Tick, u32)>,
     /// The finite world's extent, from the server's `WorldMap`: every
     /// predicted region is bounded by it, as the server's are
     /// (`Region::set_map_extent`). `None` = unbounded (procedural).
@@ -225,7 +225,7 @@ pub struct GameInstanceManager {
     /// Last hotbar emitted; the next projection is sent only if it differs.
     prev_hotbar: game::HotbarView,
     prev_inventory_view: game::InventoryView,
-    prev_mining: Option<u32>,
+    prev_mining: Option<game::MiningView>,
     prev_play_mode: game::PlayMode,
     /// Last-emitted cursor-grab intent, for edge-triggered SetCursorGrab.
     last_cursor_grab: bool,
@@ -992,7 +992,7 @@ impl GameInstanceManager {
 
     /// Every loaded region's `(tick, state hash)`, asked of the regions
     /// themselves (harness hook: works on either host).
-    pub fn region_probe(&mut self) -> Result<BTreeMap<RegionId, (usize, u32)>, GameError> {
+    pub fn region_probe(&mut self) -> Result<BTreeMap<RegionId, (game::Tick, u32)>, GameError> {
         self.probe.clear();
         self.host.broadcast(|| RegionCmd::StateHash);
         self.settle_regions()?;
@@ -1005,7 +1005,7 @@ impl GameInstanceManager {
     }
 
     /// The home region's tick as it last reported it (harness hook).
-    pub fn home_tick(&self) -> Option<usize> {
+    pub fn home_tick(&self) -> Option<game::Tick> {
         self.home_view().map(|v| v.tick)
     }
 
@@ -1381,7 +1381,7 @@ impl GameInstanceManager {
                 let _ = self.ui_update_send.send(game::UiUpdate::Inventory(screen.clone()));
                 self.prev_inventory_view = screen;
             }
-            let mining = v.mining.map(|m| m.progress_per_mille);
+            let mining = v.mining;
             if mining != self.prev_mining {
                 let _ = self.ui_update_send.send(game::UiUpdate::Mining(mining));
                 self.prev_mining = mining;
@@ -1504,7 +1504,7 @@ impl GameInstanceManager {
     /// reconcile there (with the server's state hash, if it sent one) when
     /// loaded, buffer if the snapshot is still in flight, drop if the region
     /// was released/never wanted.
-    fn route_server_game_event(&mut self, event: GameEvent, hash: Option<(usize, u32)>) {
+    fn route_server_game_event(&mut self, event: GameEvent, hash: Option<(game::Tick, u32)>) {
         if self.host.contains(&event.region_id) {
             self.host.send(event.region_id, RegionCmd::ServerEvent(event, hash));
             return;
@@ -1523,7 +1523,7 @@ impl GameInstanceManager {
     }
 
     /// One server event (`hash`: the state hash a `HashedGameEvent` carried).
-    fn on_server_event(&mut self, event: GameEvent, hash: Option<(usize, u32)>) {
+    fn on_server_event(&mut self, event: GameEvent, hash: Option<(game::Tick, u32)>) {
         if !self.world_started {
             // No region yet: nothing to check a hash against, the snapshot
             // bakes it in.

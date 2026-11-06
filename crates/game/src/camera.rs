@@ -291,7 +291,7 @@ impl Controller for CameraController {
                 &mut motion,
                 &keys,
                 yaw,
-                **data.tick as u64,
+                **data.tick,
                 &data.physics.broad_phase,
                 &data.physics.narrow_phase,
                 &data.physics.bodies,

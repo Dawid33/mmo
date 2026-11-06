@@ -181,3 +181,26 @@ fn input_routes_by_home_ignoring_the_stamp() {
             if ev.region_id == target && matches!(ev.kind, GameEventKind::PlayerInput(0, _))
     )));
 }
+
+#[test]
+fn late_started_region_starts_at_world_tick() {
+    let mut h = harness();
+    h.event(ServerEvent::connected(0), 0);
+    h.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(SPAWN_REGION), 0), 0);
+    h.drain_packets();
+    for i in 0..30 {
+        h.tick(i * 50);
+    }
+    let neighbour = RegionCoords::new(1, 0);
+    h.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(neighbour), 0), 1500);
+    h.tick(1550);
+    let tick_of = |h: &mut Harness, rc: RegionCoords| {
+        let mut t = None;
+        h.manager.spawner_mut().with_region(rc, |r| t = Some(r.current_tick()));
+        t.unwrap()
+    };
+    let a = tick_of(&mut h, SPAWN_REGION);
+    let b = tick_of(&mut h, neighbour);
+    assert!(a >= 31, "spawn region ran its rounds: {a}");
+    assert_eq!(a, b, "late region joined the world tick numbering");
+}

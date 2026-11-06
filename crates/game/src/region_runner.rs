@@ -48,6 +48,9 @@ pub enum RegionInput {
     /// The finite world's extent (`Region::set_map_extent`): the manager
     /// sends it right after spawning, before any tick, when it has a map.
     SetMapExtent(Option<crate::MapExtent>),
+    /// Start the region's tick count at this world tick (`Region::jump_clock_to`).
+    /// The manager sends it FIRST after spawning, before `SetMapExtent`.
+    StartAt(crate::Tick),
     /// World autosave: replied with `RegionOutput::Saved(state)`, a clone of
     /// the live state (like a snapshot). Does not affect sim state.
     Save,
@@ -314,6 +317,7 @@ impl RegionRunner {
                     RegionOutput::Terrain(client_id, self.terrain()),
                 ));
             }
+            RegionInput::StartAt(tick) => self.region.jump_clock_to(tick),
             RegionInput::SetMapExtent(extent) => self.region.set_map_extent(extent),
             RegionInput::Save => {
                 let _ = self.out.send((self.id, RegionOutput::Saved(Box::new(self.region.data().clone()))));
@@ -359,7 +363,7 @@ impl RegionRunner {
         self.region.commit_server_event();
         // Hashed before the held events below, so it describes the state the
         // client holds right after confirming this Tick.
-        let interval = crate::state_hash_interval();
+        let interval = crate::state_hash_interval() as crate::Tick;
         let output = if interval > 0 && self.region.current_tick() % interval == 0 {
             let watch = crate::perf::Stopwatch::start();
             let hash = crate::state_hash(self.region.data());
@@ -402,7 +406,7 @@ impl RegionRunner {
         // Push-on-change, throttled: the check cadence is the throttle. The
         // manager invalidates this region's LOD keys and rebuilds the
         // subscribed ones.
-        if self.region.current_tick() % TERRAIN_HASH_INTERVAL_TICKS == 0 {
+        if self.region.current_tick() % TERRAIN_HASH_INTERVAL_TICKS as crate::Tick == 0 {
             let watch = crate::perf::Stopwatch::start();
             // In-place fingerprint: the (large) snapshot is only built below,
             // once something actually changed.
@@ -419,7 +423,7 @@ impl RegionRunner {
         }
     }
 
-    pub fn current_tick(&self) -> usize {
+    pub fn current_tick(&self) -> crate::Tick {
         self.region.current_tick()
     }
 

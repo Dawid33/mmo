@@ -26,6 +26,7 @@ mod collider_genesis;
 mod gjk_upstream;
 mod ground;
 mod handoff_manager;
+mod world_clock;
 mod handoff_protocol;
 mod handoff_scan;
 mod handoff_schedule;

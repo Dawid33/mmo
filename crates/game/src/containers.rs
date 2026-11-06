@@ -172,7 +172,7 @@ impl Rollback {
         if chest && !has {
             self.data.containers.insert(pos, Container::chest());
         } else if !chest && has {
-            let tick = *self.data.tick as u64;
+            let tick = *self.data.tick;
             return self.spill_container_safe(pos, tick);
         }
         0

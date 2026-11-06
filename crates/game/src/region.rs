@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use crossbeam::channel::Sender;
 use log::{debug, info};
 use crate::input::Key;
-use crate::{Chunk, Client, ClientId, GameData, Rollback};
+use crate::{Chunk, Client, ClientId, GameData, Rollback, Tick};
 
 use crate::{
     camera::CameraController, physics::PhysicsController, ChunkCoords, Column, ColumnCoords,
@@ -48,7 +48,7 @@ impl Rollback {
         let feet = self.data.player_entites.get(&client).and_then(|&e| self.body_feet(e));
         match feet {
             Some(feet) => {
-                let tick = *self.data.tick as u64;
+                let tick = *self.data.tick;
                 // A loss to the caps is counted where it happens.
                 let _destroyed =
                     self.deposit_items_safe(crate::feet_tile(feet), stack, tick, crate::PICKUP_DELAY_TICKS);
@@ -185,7 +185,7 @@ pub struct Region {
     /// Client-only: the server's state hash after each of these event ids
     /// (`id -> (tick, hash)`), checked when reconcile confirms that event.
     /// Ids at or below the confirmed head are dropped as missed.
-    expected_hashes: BTreeMap<usize, (usize, u32)>,
+    expected_hashes: BTreeMap<usize, (Tick, u32)>,
     /// Client-only: id of the newest server event reconcile has confirmed.
     last_confirmed_id: Option<usize>,
     /// Wall-time attribution for Tick executions, drained by the client's
@@ -258,7 +258,7 @@ impl Region {
     /// (tick `tick`). Checked by [`Region::reconcile`] when it confirms that
     /// event; an event already confirmed, or baked into the snapshot this
     /// region was built from, can no longer be checked and is dropped.
-    pub fn expect_state_hash(&mut self, event_id: usize, tick: usize, hash: u32) {
+    pub fn expect_state_hash(&mut self, event_id: usize, tick: Tick, hash: u32) {
         let confirmed = self.last_confirmed_id.is_some_and(|c| event_id <= c);
         if event_id < self.base_event_id || confirmed {
             debug!(
@@ -652,7 +652,7 @@ impl Region {
                 // colliders take the new pose for the next step.
                 self.data.tick_animators_safe();
                 // Voxel bodies that came to rest (or left) are settled.
-                let tick = *self.data.tick as u64;
+                let tick = *self.data.tick;
                 self.data.tick_voxel_bodies_safe(tick);
                 #[cfg(not(target_arch = "wasm32"))]
                 let controllers_done = Instant::now();
@@ -884,8 +884,21 @@ impl Region {
         ServerPacket::Region(*region_id, self.data.clone())
     }
 
-    pub fn current_tick(&self) -> usize {
+    pub fn current_tick(&self) -> Tick {
         *self.data.tick
+    }
+
+    /// Start this region's tick count at the world tick `tick` (a region woken
+    /// late joins the world's numbering). Unlogged state surgery: only before
+    /// the first tick, and a no-op when `tick` is not ahead of the region.
+    pub fn jump_clock_to(&mut self, tick: Tick) {
+        let now = self.current_tick();
+        if tick <= now {
+            return;
+        }
+        debug_assert!(self.event_log.is_empty(), "jump_clock_to after the region ticked");
+        self.data.tick.update(|t| *t = tick);
+        self.data.on_clock_jump(tick - now);
     }
 
     /// Drain the cumulative Tick wall-time breakdown (native only).

@@ -142,7 +142,7 @@ impl LocalServer {
 
     /// Current sim tick of a running region, or 0 if it isn't running
     /// (not yet spawned / already cycled out). Test/harness hook.
-    pub fn region_tick(&mut self, rc: RegionCoords) -> usize {
+    pub fn region_tick(&mut self, rc: RegionCoords) -> game::Tick {
         let mut tick = 0;
         self.manager
             .spawner_mut()
