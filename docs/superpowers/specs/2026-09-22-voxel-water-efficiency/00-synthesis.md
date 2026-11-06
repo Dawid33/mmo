@@ -51,6 +51,8 @@ and runs inside the predicted rollback sim.
    - **Thin sheets.** A spill on flat ground spreads until it reaches a minimum film depth
      (a tunable, e.g. 1/16 m), then stops and stays as a puddle. Finite water can't vanish.
 
+**Prototype results (2026-11-06):** see [../2026-11-06-water-revisit/03-prototype-results.md](../2026-11-06-water-revisit/03-prototype-results.md). Gate: PASS except (c) borderline. Bodies are 30–80× cheaper per step; the brick undo lost to per-cell.
+
 ### How water moves (not static like Minecraft)
 
 Water flows to fit its container, conserving volume. The two layers split the work:

@@ -264,6 +264,8 @@ crossing (TODO.md:25-42) is in the same code path.
 5. **Flow in one region,** with seams closed and the ledger in place.
 6. **Seam flux,** after the mispredict measurement and fix.
 
+**Prototype results (2026-11-06):** see [03-prototype-results.md](03-prototype-results.md). Gate: PASS except (c) borderline (big_drain bodies 20.2 µs/step vs 20 µs on a ~1.3 GHz clamped CPU). Bodies are 30–80× cheaper per step than the per-cell CA on standing water. The brick-journal undo lost to per-cell entries. Body-restructure spikes (p99 258 µs, max 579 KB undo in one step) need a per-step budget and span-delta undo in the engine.
+
 ## Decisions for you
 
 1. **Is the ledger the water cycle?** Map-edge rivers, evaporation and springs run through
