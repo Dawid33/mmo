@@ -10,6 +10,8 @@ pub mod grid;
 pub mod metrics;
 pub mod scenario;
 pub mod state;
+#[cfg(target_arch = "wasm32")]
+mod wasm;
 
 /// Units in one full 1 m³ cell (16³ voxels).
 pub const FULL: u16 = 4096;

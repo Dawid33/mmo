@@ -604,6 +604,18 @@ forge-proto *args:
 water-proto-test *args:
     cd prototypes/water && {{cap}} cargo test --release {{args}}
 
+# Scenario table for both water models (a TIMING run: ask before running on the shared box).
+# `just water-proto --golden` prints only final state hashes (not a timing run).
+water-proto *args:
+    cd prototypes/water && {{cap}} cargo run --release --quiet --bin water_proto -- {{args}}
+
+# The same scenarios compiled to wasm32 and run under node; hashes must equal the native ones.
+water-proto-wasm:
+    cd prototypes/water && {{cap}} cargo build --release --lib --target wasm32-unknown-unknown
+    cd prototypes/water && PATH=$HOME/.nvm/versions/node/v25.0.0/bin:$PATH node wasm_golden.mjs target/wasm32-unknown-unknown/release/water_proto.wasm > target/golden-wasm.txt
+    cd prototypes/water && {{cap}} cargo run --release --quiet --bin water_proto -- --golden > target/golden-native.txt
+    cd prototypes/water && diff target/golden-native.txt target/golden-wasm.txt && echo "golden hashes match (native == wasm32)"
+
 # Forge speed benchmark: one forge at `size` m / `cell` m, printing wall time and
 # max RSS (needs /usr/bin/time). Output goes to target/forge-bench/. Timing
 # run: ask before launching the default 16 km / 16 m. e.g. `just forge-bench 4096 64`.
