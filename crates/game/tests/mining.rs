@@ -39,13 +39,18 @@ fn forget(region: &mut Region, ev: GameEventKind) {
 /// of block (8, 2, 8), first person, in Adventure, looking 45 degrees down
 /// (`pitch_px` of mouse motion). Setup is forgotten.
 fn region(pitch_px: f32) -> Region {
+    region_with(pitch_px, || Chunk::flat_floor(32))
+}
+
+/// [`region`] over a custom floor chunk (the same for every column).
+fn region_with(pitch_px: f32, floor: impl Fn() -> Chunk) -> Region {
     let reg = BlockRegistry::from_ron(MANIFEST).unwrap();
     install_block_props(reg.props());
     let mut chunks = Vec::new();
     let around = SPAWN_CHUNK.saturating_sub(1)..=SPAWN_CHUNK + 1;
     for x in around.clone() {
         for z in around.clone() {
-            chunks.push((ChunkCoords::new(x, 0, z), Chunk::flat_floor(32)));
+            chunks.push((ChunkCoords::new(x, 0, z), floor()));
         }
     }
     let (send, recv) = crossbeam::channel::unbounded();
@@ -147,6 +152,28 @@ fn dirt_breaks_after_15_ticks() {
     // One dirt resting in the hole, on the block below it.
     assert_eq!(piles(&region), vec![(a, vec![ItemStack { item: DIRT_ITEM, count: 1 }])]);
     assert!(region.data().clients[&0].mining.is_none());
+}
+
+#[test]
+fn a_mined_slope_ends_as_air_and_drops_one_dirt() {
+    const CB: usize = game::CHUNK_BLOCKS;
+    let bi = game::BlockIndex::from_xyz(8 % CB, 1 % CB, 8 % CB);
+    let mut region = region_with(DOWN_45, || {
+        let mut c = Chunk::flat_floor(32);
+        c.set_block(8 % CB, 1 % CB, 8 % CB, Block::new(DIRT));
+        c.chisel.insert(bi, game::slope_chisel(DIRT, game::SlopeShape::Straight { low: game::Side::PosX }));
+        c
+    });
+    let a = target(&region);
+    assert_eq!(block(&region, a), DIRT);
+    mouse(&mut region, MouseButton::Left, true);
+    assert!(ticks_to_break(&mut region, a, 40).is_some(), "the slope must break");
+    assert_eq!(piles(&region), vec![(a, vec![ItemStack { item: DIRT_ITEM, count: 1 }])]);
+    let snap = region.terrain_snapshot();
+    assert!(
+        snap.chunks.iter().all(|(_, c)| !c.chisel.contains_key(&bi) || c.block_at(8 % CB, 1 % CB, 8 % CB).id != BlockId::AIR),
+        "a broken block keeps no chisel"
+    );
 }
 
 #[test]
