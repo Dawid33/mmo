@@ -607,7 +607,8 @@ water-proto-test *args:
 # Scenario table for both water models (a TIMING run: ask before running on the shared box).
 # `just water-proto --golden` prints only final state hashes (not a timing run).
 water-proto *args:
-    cd prototypes/water && {{cap}} cargo run --release --quiet --bin water_proto -- {{args}}
+    cd prototypes/water && {{cap}} cargo build --release --quiet --bin water_proto
+    cd prototypes/water && target/release/water_proto {{args}}
 
 # The same scenarios compiled to wasm32 and run under node; hashes must equal the native ones.
 water-proto-wasm:

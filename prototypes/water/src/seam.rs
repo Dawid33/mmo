@@ -60,6 +60,9 @@ pub struct Pair {
     pub unseen_by_b: Vec<u64>,
     /// Units that arrived to no room and were sent back.
     pub bounced: u64,
+    /// Cumulative units sent A→B and B→A (diagnostics: restored by undo, not hashed).
+    pub gross_ab: u64,
+    pub gross_ba: u64,
     /// Total mass at construction (both worlds; nothing in flight).
     pub initial: u64,
     /// A→B minus B→A sent in the last step (diagnostics, restored by undo, not hashed).
@@ -77,6 +80,8 @@ pub struct PairUndo {
     unseen_by_a: Vec<u64>,
     unseen_by_b: Vec<u64>,
     bounced: u64,
+    gross_ab: u64,
+    gross_ba: u64,
     last_flux: i64,
 }
 
@@ -142,6 +147,8 @@ impl Pair {
             unseen_by_a: vec![0; n],
             unseen_by_b: vec![0; n],
             bounced: 0,
+            gross_ab: 0,
+            gross_ba: 0,
             initial,
             last_flux: 0,
         }
@@ -159,6 +166,8 @@ impl Pair {
             unseen_by_a: self.unseen_by_a.clone(),
             unseen_by_b: self.unseen_by_b.clone(),
             bounced: self.bounced,
+            gross_ab: self.gross_ab,
+            gross_ba: self.gross_ba,
             last_flux: self.last_flux,
         };
         let s = self.a.step;
@@ -184,6 +193,8 @@ impl Pair {
         let sent_a = send(&mut self.a, true, view_a, s, &mut self.inflight);
         let view_b = View { seen: &self.seen_by_b, group: &self.group_seen_by_b, unseen: &self.unseen_by_b };
         let sent_b = send(&mut self.b, false, view_b, s, &mut self.inflight);
+        self.gross_ab += sent_a;
+        self.gross_ba += sent_b;
         self.last_flux = sent_a as i64 - sent_b as i64;
         // 4: report heads; each sender notes what it has in flight that the report cannot show
         (self.seen_by_a, self.group_seen_by_a) = report(&self.b, false);
@@ -207,6 +218,8 @@ impl Pair {
         self.unseen_by_a = u.unseen_by_a;
         self.unseen_by_b = u.unseen_by_b;
         self.bounced = u.bounced;
+        self.gross_ab = u.gross_ab;
+        self.gross_ba = u.gross_ba;
         self.last_flux = u.last_flux;
     }
 

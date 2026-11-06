@@ -2,7 +2,7 @@ use water_proto::edit::{Edit, EditError, apply};
 use water_proto::scenario::{build, run};
 use water_proto::state::World;
 use water_proto::fixture::gate_basins;
-use water_proto::{FULL, GATE_CAP, Mode, PUMP_RATE};
+use water_proto::{FULL, GATE_CAP, Mode};
 
 type R = std::ops::RangeInclusive<u32>;
 
@@ -14,7 +14,7 @@ fn box_total(w: &World, xs: R, ys: R, zs: R) -> u64 {
                 let i = w.dims.idx(x, y, z);
                 t += match w.owner[i as usize] {
                     0 => w.water[i as usize] as u64,
-                    id => w.bodies[&id].volume / w.bodies[&id].cells as u64,
+                    id => w.bodies[&id].virtual_at(y) as u64,
                 };
             }
         }
@@ -41,10 +41,10 @@ fn dam_breach_drains_lake_into_valley() {
     let b: Vec<_> = w.bodies.values().filter(|b| b.lo[0] >= 21).collect();
     assert_eq!(b.len(), 1);
     assert!(b[0].level().abs_diff(8 * FULL as u64) <= 512, "level {}", b[0].level());
-    let a_box = body_volume_in(&w, 0..=20) + 0; // A-side bodies
+    let a_bodies = body_volume_in(&w, 0..=20); // A-side bodies
     let a_cells = box_total(&w, 4..=19, 12..=20, 4..=19);
-    eprintln!("residue: bodies {a_box}, cells {a_cells}");
-    assert!(a_box.max(a_cells) <= 512, "A residue");
+    eprintln!("residue: bodies {a_bodies}, cells {a_cells}");
+    assert!(a_bodies.max(a_cells) <= 512, "A residue");
 }
 
 #[test]
@@ -71,7 +71,6 @@ fn pumped_cistern_fills_one_layer() {
     let pool: Vec<_> = w.bodies.values().filter(|b| b.lo[0] == 4).collect();
     assert_eq!(pool.len(), 1);
     assert_eq!(pool[0].level(), 9 * FULL as u64 - 576);
-    let _ = PUMP_RATE;
 }
 
 #[test]

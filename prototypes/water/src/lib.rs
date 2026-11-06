@@ -50,6 +50,7 @@ pub const BRICK: u32 = 8;
 pub const SEAM_CAP: u64 = 512;
 /// Steps between a seam send and its arrival on the other side.
 pub const SEAM_LAG_STEPS: u32 = 1;
+const _: () = assert!(SEAM_LAG_STEPS >= 1);
 /// Units of level two settled sides of a seam may still differ by.
 pub const SEAM_SETTLE_TOL: u64 = 2;
 

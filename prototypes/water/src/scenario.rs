@@ -3,11 +3,10 @@
 use crate::edit::{self, Edit};
 use crate::fixture::{carve, fill_solid, fill_water, finish, gate_basins};
 use crate::link::{Link, LinkKind};
-use crate::{PUMP_RATE};
 use crate::grid::Dims;
 use crate::metrics::{dense_bytes, sparse_bytes, surface_spread};
 use crate::state::{Stats, Undo, World};
-use crate::{FULL, Mode, ca};
+use crate::{FULL, Mode, PUMP_RATE, ca};
 
 pub const NAMES: [&str; 10] = [
     "settled", "small_spill", "big_drain", "bucket", "film", "u_tube",
