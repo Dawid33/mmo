@@ -225,7 +225,7 @@ pub struct GameInstanceManager {
     /// Last hotbar emitted; the next projection is sent only if it differs.
     prev_hotbar: game::HotbarView,
     prev_inventory_view: game::InventoryView,
-    prev_mining: Option<game::MiningView>,
+    prev_mining: Option<u32>,
     prev_play_mode: game::PlayMode,
     /// Last-emitted cursor-grab intent, for edge-triggered SetCursorGrab.
     last_cursor_grab: bool,
@@ -1381,7 +1381,7 @@ impl GameInstanceManager {
                 let _ = self.ui_update_send.send(game::UiUpdate::Inventory(screen.clone()));
                 self.prev_inventory_view = screen;
             }
-            let mining = v.mining;
+            let mining = v.mining.map(|m| m.progress_per_mille);
             if mining != self.prev_mining {
                 let _ = self.ui_update_send.send(game::UiUpdate::Mining(mining));
                 self.prev_mining = mining;
