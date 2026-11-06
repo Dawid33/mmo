@@ -124,6 +124,7 @@ fn scarce_source_is_shared_proportionally() {
     w.add_link(Link { a: cells[0], b: cells[2], kind: LinkKind::Pump { rate: 1000 } });
     apply(&mut w, Edit::Pour(cells[0], 1000)).unwrap();
     ca::step(&mut w);
+    assert_eq!(w.accounted(), 1000);
     assert_eq!(w.water[cells[0] as usize], 0);
     assert_eq!(w.water[cells[1] as usize], 500);
     assert_eq!(w.water[cells[2] as usize], 500);
@@ -149,11 +150,92 @@ fn pump_from_dry_source_moves_nothing() {
     let (mut w, _, b) = basins();
     let dry = w.dims.idx(30, 10, 5);
     let m0 = w.accounted();
-    let water0 = w.water.clone();
     w.add_link(Link { a: dry, b, kind: LinkKind::Pump { rate: PUMP_RATE } });
+    let h0 = hash_no_step(&mut w);
     for _ in 0..10 {
         ca::step(&mut w);
     }
     assert_eq!(w.accounted(), m0);
-    assert_eq!(w.water, water0);
+    assert_eq!(hash_no_step(&mut w), h0);
+}
+
+fn column_lake(xs: std::ops::RangeInclusive<u32>, pockets: &[u32]) -> World {
+    let mut w = World::new(Dims::cube(32), Mode::Bodies);
+    fill_solid(&mut w, 0..=20);
+    carve(&mut w, xs.clone(), 12..=13, 5..=5);
+    fill_water(&mut w, xs, 12..=13, 5..=5);
+    for &x in pockets {
+        carve(&mut w, x..=x, 15..=15, 10..=10);
+    }
+    finish(&mut w);
+    w
+}
+
+#[test]
+fn drained_top_layer_does_not_break_link_phase() {
+    // two stacked cells; two pumps into one sealed pocket drain the top layer mid-phase
+    let mut w = column_lake(5..=5, &[10]);
+    let d = w.dims;
+    let (top, pocket) = (d.idx(5, 13, 5), d.idx(10, 15, 10));
+    assert_ne!(w.owner[top as usize], 0);
+    let m0 = w.accounted();
+    w.add_link(Link { a: top, b: pocket, kind: LinkKind::Pump { rate: 3000 } });
+    w.add_link(Link { a: top, b: pocket, kind: LinkKind::Pump { rate: 3000 } });
+    for _ in 0..10 {
+        ca::step(&mut w);
+        assert_eq!(w.accounted(), m0);
+        assert!(water_proto::link::avail(&w, pocket) <= FULL as u64);
+    }
+    // (a full pocket may have seeded a one-cell body, so read it through avail)
+    assert_eq!(water_proto::link::avail(&w, pocket), FULL as u64);
+    let lake = w.accounted() - FULL as u64;
+    assert_eq!(lake, FULL as u64);
+}
+
+#[test]
+fn links_from_several_top_members_share_a_dropping_body() {
+    // 4x1 lake, two layers. Links 1-4 (one per top member) take the whole top layer, which
+    // drops after link 4; link 5 (from a member that just went dry) still takes from the body.
+    let pockets = [10, 14, 18, 22, 26];
+    let mut w = column_lake(4..=7, &[]);
+    let d = w.dims;
+    for &x in &pockets {
+        carve(&mut w, x..=x, 15..=15, 10..=10);
+    }
+    let m0 = w.accounted();
+    let src = [d.idx(4, 13, 5), d.idx(5, 13, 5), d.idx(6, 13, 5), d.idx(7, 13, 5), d.idx(4, 13, 5)];
+    assert_ne!(w.owner[src[0] as usize], 0);
+    for (k, &x) in pockets.iter().enumerate() {
+        w.add_link(Link { a: src[k], b: d.idx(x, 15, 10), kind: LinkKind::Pump { rate: 4096 } });
+    }
+    ca::step(&mut w);
+    assert_eq!(w.accounted(), m0);
+    for &x in &pockets {
+        assert_eq!(w.water[d.idx(x, 15, 10) as usize], FULL, "pocket {x}");
+    }
+    let left: u64 = w.bodies.values().map(|b| b.volume).sum::<u64>()
+        + (4..=7).map(|x| w.water[d.idx(x, 13, 5) as usize] as u64 + w.water[d.idx(x, 12, 5) as usize] as u64).sum::<u64>();
+    assert_eq!(left, 8 * FULL as u64 - 5 * FULL as u64);
+}
+
+#[test]
+fn links_roll_back_exactly() {
+    let (mut w, a, b) = basins();
+    let id = w.add_link(Link { a, b, kind: LinkKind::Gate { open: false } });
+    for _ in 0..3 {
+        ca::step(&mut w);
+    }
+    let h0 = w.hash();
+    w.begin_log();
+    let extra = w.add_link(Link { a, b: w.dims.idx(50, 21, 50), kind: LinkKind::Pump { rate: PUMP_RATE } });
+    apply(&mut w, Edit::SetLink(id, LinkKind::Gate { open: true })).unwrap();
+    w.add_scooped(7);
+    ca::step(&mut w);
+    assert_eq!(extra, id + 1);
+    assert_ne!(w.hash(), h0);
+    let log = w.end_log();
+    w.undo(log);
+    assert_eq!(w.hash(), h0);
+    assert_eq!(w.links.len(), 1);
+    assert_eq!(apply(&mut w, Edit::SetLink(99, LinkKind::Gate { open: true })), Err(water_proto::edit::EditError::NoRoom));
 }
