@@ -207,6 +207,15 @@ fn absorb_or_seed(w: &mut World, c: u32) {
             keep = body::merge(w, keep, o);
         }
     }
+    // c joined below the top with open ground above it: the upper layers no longer
+    // describe the connected container (e.g. the far shaft of a U-tube), so re-derive them
+    if w.bodies.contains_key(&keep) && y < w.bodies[&keep].top {
+        if let Some(u) = dims.step(c, Dir::Up) {
+            if !w.solid.get(u) && w.owner[u as usize] != keep {
+                body::relevel(w, keep, y);
+            }
+        }
+    }
 }
 
 fn after_step(w: &mut World) {

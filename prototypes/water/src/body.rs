@@ -473,7 +473,7 @@ fn expand_layer(w: &mut World, id: BodyId, forced: bool) -> bool {
 /// Cut membership back to layer `t0`, then regrow layer by layer while the volume
 /// exceeds capacity. This re-derives the container after bodies at different
 /// heights join (communicating vessels: one level, instantly).
-fn relevel(w: &mut World, id: BodyId, t0: u32) {
+pub fn relevel(w: &mut World, id: BodyId, t0: u32) {
     let top = w.bodies[&id].top;
     for y in (t0 + 1..=top).rev() {
         for c in layer_members(w, id, y) {
