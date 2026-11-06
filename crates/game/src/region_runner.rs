@@ -238,6 +238,10 @@ pub struct RegionRunner {
     /// Cost of the every-`state_hash_interval()` state hashes since the last
     /// `take_state_hash_cost` (metrics only): count, total, slowest.
     state_hash_cost: (u32, std::time::Duration, std::time::Duration),
+    /// Test support ([`RegionRunner::record_slot_start_hashes`]): the state
+    /// hash right after each Tick event, before the slot's held events —
+    /// what the desync check hashes and what a client holds at that tick.
+    slot_start_hashes: Option<Vec<(Tick, u32)>>,
 }
 
 /// Furthest ahead of a region's tick a client event may be stamped and still
@@ -264,7 +268,19 @@ impl RegionRunner {
             held_transfers: Default::default(),
             baseline_hash_time,
             state_hash_cost: Default::default(),
+            slot_start_hashes: None,
         }
+    }
+
+    /// Test support: from now on record `(tick, state hash)` right after each
+    /// Tick event (see [`RegionRunner::take_slot_start_hashes`]).
+    pub fn record_slot_start_hashes(&mut self) {
+        self.slot_start_hashes.get_or_insert_with(Vec::new);
+    }
+
+    /// The slot-start hashes recorded since the last call.
+    pub fn take_slot_start_hashes(&mut self) -> Vec<(Tick, u32)> {
+        self.slot_start_hashes.as_mut().map(std::mem::take).unwrap_or_default()
     }
 
     /// `(checks, total, slowest)` of the every-`state_hash_interval()` state
@@ -392,6 +408,9 @@ impl RegionRunner {
             .handle_event(GameEventKind::Tick)
             .expect("region tick failed");
         self.region.commit_server_event();
+        if let Some(hashes) = self.slot_start_hashes.as_mut() {
+            hashes.push((self.region.current_tick(), crate::state_hash(self.region.data())));
+        }
         // Hashed before the held events below, so it describes the state the
         // client holds right after confirming this Tick.
         let interval = crate::state_hash_interval() as crate::Tick;

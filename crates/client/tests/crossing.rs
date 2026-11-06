@@ -56,10 +56,8 @@ const SCHEDULE_SEEDS: u64 = 6;
 /// only ever exercises one schedule; the production server never runs that
 /// one. A failure names its seed, which replays exactly.
 ///
-/// NOTE 2026-09-20: fails together with the lockstep test above, and for the
-/// same reason — the new home region stays bit-inexact after a crossing (see
-/// TODO.md, "REGRESSED"). Once that is fixed, this is the test that says
-/// whether the fix also holds off the lockstep schedule.
+/// Passing since 2026-11-06 (red with the lockstep test above from
+/// 2026-09-20): predicted transfers now land in the server's slot.
 ///
 /// `InlineSchedule::late`, not `jittery`: missed ticks desynchronise region
 /// tick counts from the client, which this harness's tick-aligned

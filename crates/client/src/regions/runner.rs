@@ -27,7 +27,7 @@ pub enum RegionCmd {
     Predict(GameEventKind),
     /// A predicted arrival from a sibling region (isometry already rebased),
     /// stamped with the source's tick after the tick that produced it: held
-    /// until this region reaches the stamp, the server's slot (see
+    /// to the end of that slot here, the server's slot and order (see
     /// [`RunnerState::held_transfers`]).
     Arrival(EntityBundle, game::Tick),
     /// A predicted margin mirror from a sibling region (ditto, same stamp).
@@ -126,11 +126,12 @@ pub struct RunnerState {
     stall: usize,
     /// The local player left this region in a predicted crossing.
     player_departed: bool,
-    /// Predicted arrivals / margin mirrors whose stamp this region has not
-    /// reached, in receipt order: released right after the tick that
-    /// reaches it — the slot the server's `RegionRunner` applies them in
-    /// (behind the inputs it holds for that slot; this client predicts its
-    /// own inputs as they come, never holding them).
+    /// Predicted arrivals / margin mirrors whose slot (the stamp) this
+    /// region has not closed, in receipt order: released at the start of
+    /// the `Tick` that closes it, right before that tick runs — so they
+    /// follow every input this client predicted in the slot, as the server's
+    /// `RegionRunner` releases its held inputs for a slot before its held
+    /// transfers. A sat-out tick closes nothing and releases nothing.
     held_transfers: VecDeque<(GameEventKind, game::Tick)>,
     collider_debug: game::ColliderDebug,
     last_view: Option<HomeView>,
@@ -267,6 +268,19 @@ fn tick(region: &mut Region, st: &mut RunnerState, ctx: &RunnerCtx, out: &mut Ve
         });
         return;
     }
+    // The slot this tick closes ends with the transfers held for it, in
+    // receipt order — after every input predicted in it, the server's order
+    // (its held inputs for a slot, then its held transfers).
+    let now = region.current_tick();
+    let mut i = 0;
+    while i < st.held_transfers.len() {
+        if st.held_transfers[i].1 <= now {
+            let (kind, _) = st.held_transfers.remove(i).expect("index checked");
+            apply_transfer(region, kind);
+        } else {
+            i += 1;
+        }
+    }
     #[cfg(not(target_arch = "wasm32"))]
     let start = Instant::now();
     if let Err(e) = region.handle_event(GameEventKind::Tick) {
@@ -278,16 +292,6 @@ fn tick(region: &mut Region, st: &mut RunnerState, ctx: &RunnerCtx, out: &mut Ve
     // (a reconcile replay overwrites them with stale scans, never read).
     let (departures, ghosts) = take_transfers(region, st, ctx);
     let stamp = region.current_tick();
-    // Slot `stamp`: the transfers held for it, in receipt order.
-    let mut i = 0;
-    while i < st.held_transfers.len() {
-        if st.held_transfers[i].1 <= stamp {
-            let (kind, _) = st.held_transfers.remove(i).expect("index checked");
-            apply_transfer(region, kind);
-        } else {
-            i += 1;
-        }
-    }
     out.push(RegionReport::Ticked {
         sat_out: false,
         departures,
@@ -300,10 +304,11 @@ fn tick(region: &mut Region, st: &mut RunnerState, ctx: &RunnerCtx, out: &mut Ve
     });
 }
 
-/// A transfer stamped `stamp`: applied now if this region has reached the
-/// stamp (it runs level with or ahead of the source), else held for it.
+/// A transfer stamped `stamp`: applied now if its slot has already closed
+/// here (this region runs ahead of the source), else held to the end of
+/// that slot — released by the `Tick` that closes it.
 fn transfer(region: &mut Region, st: &mut RunnerState, kind: GameEventKind, stamp: game::Tick) {
-    if stamp > region.current_tick() {
+    if stamp >= region.current_tick() {
         st.held_transfers.push_back((kind, stamp));
     } else {
         apply_transfer(region, kind);
@@ -519,32 +524,41 @@ mod tests {
         )
     }
 
-    /// A transfer stamped ahead waits for the tick that reaches its stamp
-    /// and lands right after it (the server's slot); one whose stamp has
-    /// passed lands at once.
+    /// A transfer is held to the end of its slot: released by the `Tick`
+    /// that closes the slot, after the inputs predicted in it (the server's
+    /// order); one whose slot has already closed lands at once.
     #[test]
-    fn transfers_land_in_their_stamped_slot() {
-        let (mut r, mut st, ctx, _) = setup();
+    fn transfers_land_at_the_end_of_their_slot() {
+        let (mut r, mut st, ctx, server_recv) = setup();
         let t = r.current_tick();
-        let logged = |r: &Region| r.pending_event_ids().len();
-        let n = logged(&r);
-        run(&mut r, &mut st, &ctx, ghost(t + 2));
-        assert_eq!(logged(&r), n, "held, not applied");
+        let logged = |r: &Region| r.pending_event_ids();
+        let n = logged(&r).len();
+        run(&mut r, &mut st, &ctx, ghost(t + 1));
+        assert_eq!(logged(&r).len(), n, "held, not applied");
         run(&mut r, &mut st, &ctx, RegionCmd::Tick);
-        assert_eq!(logged(&r), n + 1, "tick t+1: still held");
+        assert_eq!(logged(&r).len(), n + 1, "tick into slot t+1: still held");
+        let input = GameEventKind::PlayerInput(CLIENT, InputEvent::MouseMotion { dx: 1.0, dy: 0.0 });
+        run(&mut r, &mut st, &ctx, RegionCmd::Predict(input));
+        let input_id = match server_recv.try_recv().unwrap() {
+            ClientPacket::GameEventAfterTick(ev, _) => ev.id,
+            other => panic!("expected GameEventAfterTick, got {other:?}"),
+        };
+        assert_eq!(logged(&r).len(), n + 2, "slot t+1 still open: still held");
         run(&mut r, &mut st, &ctx, RegionCmd::Tick);
-        assert_eq!(logged(&r), n + 3, "tick t+2, then the ghost in slot t+2");
+        let ids = logged(&r);
+        assert_eq!(ids.len(), n + 4, "the ghost, then the tick closing slot t+1");
+        assert_eq!(ids[n + 2], input_id + 1, "the ghost follows the slot's input");
         assert!(st.held_transfers.is_empty());
-        run(&mut r, &mut st, &ctx, ghost(t + 2));
-        assert_eq!(logged(&r), n + 4, "stamp already reached: applied on receipt");
+        run(&mut r, &mut st, &ctx, ghost(t + 1));
+        assert_eq!(logged(&r).len(), n + 5, "slot already closed: applied on receipt");
     }
 
-    /// A sat-out tick does not reach the stamp: the transfer stays held.
+    /// A sat-out tick closes no slot: the transfer stays held.
     #[test]
     fn stalled_tick_keeps_transfers_held() {
         let (mut r, mut st, ctx, _) = setup();
         let t = r.current_tick();
-        run(&mut r, &mut st, &ctx, ghost(t + 1));
+        run(&mut r, &mut st, &ctx, ghost(t));
         st.stall = 1;
         run(&mut r, &mut st, &ctx, RegionCmd::Tick);
         assert_eq!(st.held_transfers.len(), 1);
@@ -572,9 +586,12 @@ mod tests {
             client: None,
             pending_inputs: Vec::new(),
         };
-        let n = r.pending_event_ids().len();
         let t = r.current_tick();
+        run(&mut r, &mut st, &ctx, RegionCmd::Tick);
+        let n = r.pending_event_ids().len();
+        // Slot t is closed: applied (here: dropped) on receipt.
         run(&mut r, &mut st, &ctx, RegionCmd::Arrival(bundle, t));
+        assert!(st.held_transfers.is_empty());
         assert_eq!(r.pending_event_ids().len(), n);
     }
 

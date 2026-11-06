@@ -2416,6 +2416,13 @@ mod manager_tests {
             Some(target),
             "home flipped on prediction"
         );
+        assert!(
+            !manager.world_ref().data(&target).player_entites.contains_key(&0),
+            "the arrival is held to the end of its slot"
+        );
+        // The next tick closes the slot: the arrival lands right before it.
+        manager.send_tick();
+        manager.pump(&server_recv).unwrap();
         let w = manager.world_ref();
         assert!(
             w.data(&target).player_entites.contains_key(&0),
@@ -2607,14 +2614,8 @@ mod manager_tests {
             Some(target),
             "home flipped on prediction"
         );
-        assert!(
-            manager
-            .world_ref()
-                .data(&target)
-                .player_entites
-                .contains_key(&0),
-            "predicted arrival applied in B"
-        );
+        // The arrival is held to the end of its slot (released by the next
+        // tick, the first of the lag window below).
 
         // Lag window: N ticks each preceded by a PlayerInput. home == B, so
         // these predict into local B and are 'sent to the server' (which would
@@ -2633,6 +2634,10 @@ mod manager_tests {
             manager.send_tick();
             manager.pump(&server_recv).unwrap();
         }
+        assert!(
+            manager.world_ref().data(&target).player_entites.contains_key(&0),
+            "predicted arrival applied in B"
+        );
 
         let predicted_b = manager
             .world_ref()

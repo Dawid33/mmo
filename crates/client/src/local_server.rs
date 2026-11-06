@@ -165,6 +165,20 @@ impl LocalServer {
         hash
     }
 
+    /// Test/harness hook: record every region's state hash at the START of
+    /// each slot — right after its Tick event, before the held inputs and
+    /// transfers of the slot (what the desync check hashes).
+    #[doc(hidden)]
+    pub fn record_slot_start_hashes(&mut self) {
+        self.manager.spawner_mut().record_slot_start_hashes();
+    }
+
+    /// `(region, tick, hash)` recorded since the last call.
+    #[doc(hidden)]
+    pub fn take_slot_start_hashes(&mut self) -> Vec<(RegionCoords, game::Tick, u32)> {
+        self.manager.spawner_mut().take_slot_start_hashes()
+    }
+
     /// Authoritative teleport of the single local player, wherever its home
     /// region currently runs. Undo-safe (`Region::with_data` runs the pose
     /// mutation in its own forgotten transaction). Test/harness hook.

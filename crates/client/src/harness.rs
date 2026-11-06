@@ -27,7 +27,11 @@ pub struct SimHarness {
     /// (movement reads `key_held`).
     released: BTreeSet<Key>,
     /// Authoritative server region state hashes, keyed by (region, that
-    /// region's tick), recorded every `step()` after `server.tick()`. The
+    /// region's tick), each taken at the START of the slot — right after the
+    /// Tick event, before the slot's held inputs and transfers (the state the
+    /// desync check hashes, and what a client region holds at that tick: it
+    /// predicts a slot's inputs and releases its held transfers only on its
+    /// way to the next tick). Recorded every `step()` by `server.tick()`. The
     /// client is a bit-exact but ~1-tick-delayed mirror of the server in this
     /// lockstep model (the server snapshots a region then immediately ticks it
     /// forward before the client observes the snapshot), so convergence is
@@ -113,6 +117,8 @@ impl SimHarness {
             crate::local_server::lightweight_test_generator(),
         )
         .expect("local server");
+        let mut server = server;
+        server.record_slot_start_hashes();
 
         Self {
             server,
@@ -197,17 +203,14 @@ impl SimHarness {
         self.pump_client(true);
     }
 
-    /// Server ingest + one authoritative tick, recording each region's hash at
-    /// its new tick so convergence can be checked tick-aligned (see
-    /// `server_hashes` / `assert_converged`).
+    /// Server ingest + one authoritative tick, recording each region's
+    /// slot-start hash at every tick it ran so convergence can be checked
+    /// tick-aligned (see `server_hashes` / `assert_converged`).
     fn tick_server(&mut self) {
         self.server.pump().expect("server pump");
         self.server.tick();
-        for rc in self.server.running_regions() {
-            let t = self.server.region_tick(rc);
-            if let Some(hash) = self.server.region_hash(rc) {
-                self.server_hashes.insert((rc, t), hash);
-            }
+        for (rc, t, hash) in self.server.take_slot_start_hashes() {
+            self.server_hashes.insert((rc, t), hash);
         }
     }
 
@@ -294,8 +297,10 @@ impl SimHarness {
     /// `server_hashes`). Fails if a held region diverges, or if nothing could
     /// be tick-aligned at all (convergence would otherwise be vacuous).
     ///
-    /// Right after a boundary crossing the just-flipped home region can be
-    /// bit-inexact for a FEW ticks — the spec-accepted transient flip-tick
+    /// Right after a boundary crossing a region can be
+    /// bit-inexact for a FEW ticks (the just-flipped home; or a neighbour
+    /// whose server copy got a transfer a slot late, which the client's
+    /// prediction for that slot cannot know until the server closes it) — the spec-accepted transient flip-tick
     /// rubber-band (docs/superpowers/2026-07-06-seamless-local-crossing-followup.md),
     /// which reconciles within ~1 tick once input stops. `settle()` returns as
     /// soon as `pending_events_empty()` (true at the flip tick), so before the
@@ -312,7 +317,9 @@ impl SimHarness {
         let home = self.client.home_region();
         let mut aligned = self.catch_up();
         for _ in 0..HEAL_BOUND {
-            if aligned.get(&home).is_some_and(|(_, client, server)| client == server) {
+            // Every aligned region healed (the home among them); none is
+            // skipped by the strict check below either.
+            if aligned.contains_key(&home) && aligned.values().all(|(_, client, server)| client == server) {
                 break;
             }
             self.step();

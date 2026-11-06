@@ -195,9 +195,29 @@ pub struct InlineSpawner {
     /// Test support ([`InlineSpawner::hold`]): regions that sit out the next
     /// `n` calls of `tick_all`, neither ticking nor draining their inputs.
     held: BTreeMap<RegionCoords, u32>,
+    /// Test support ([`InlineSpawner::record_slot_start_hashes`]).
+    record_slot_hashes: bool,
 }
 
 impl InlineSpawner {
+    /// Test support: every runner, now and spawned later, records its
+    /// slot-start hashes ([`RegionRunner::record_slot_start_hashes`]).
+    pub fn record_slot_start_hashes(&mut self) {
+        self.record_slot_hashes = true;
+        for (_, runner) in self.runners.values_mut() {
+            runner.record_slot_start_hashes();
+        }
+    }
+
+    /// Every runner's slot-start hashes since the last call.
+    pub fn take_slot_start_hashes(&mut self) -> Vec<(RegionCoords, crate::Tick, u32)> {
+        let mut all = Vec::new();
+        for (id, (_, runner)) in self.runners.iter_mut() {
+            all.extend(runner.take_slot_start_hashes().into_iter().map(|(t, h)| (*id, t, h)));
+        }
+        all
+    }
+
     pub fn with_schedule(schedule: InlineSchedule) -> Self {
         Self { schedule: Some(schedule), ..Self::default() }
     }
@@ -332,6 +352,10 @@ impl RegionSpawner for InlineSpawner {
                 &|rc| unreachable!("InlineSpawner never generates columns ({rc:?})"),
             ),
         };
+        let mut runner = runner;
+        if self.record_slot_hashes {
+            runner.record_slot_start_hashes();
+        }
         self.runners.insert(id, (recv, runner));
         send
     }

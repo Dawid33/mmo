@@ -26,37 +26,23 @@ Multi-region world follow-ups (milestone landed; spec 2026-07-05-multi-region-wo
   converges bit-exact but has a transient rubber-band under active input (spec-accepted
   flip-tick divergence). Proper fix needs a protocol-level design (server-side input
   routing / predicted-authority-transfer); see docs/superpowers/2026-07-06-seamless-local-crossing-followup.md.
-  - **2026-11-06 (seam-transparent regions Task 3.2): the lockstep test PASSES again**
-    (`walking_across_a_region_boundary_keeps_input_and_converges`, `crossing_is_deterministic`).
-    The client's regions do not run in step with each other (the home leads its neighbours by
-    ~3 ticks in this harness), so predicted transfers landed in other slots than the server's.
-    Fixed by: predicted arrivals / mirrors stamped and held to the server's slot
-    (`regions/runner.rs`); reconcile treating margin mirrors per slot (a server mirror never
-    consumes a LATER slot's prediction, a server Tick drops a mirror predicted in the slot it
-    closes — before, one missing mirror shifted every later one by a slot forever); and a predicted
-    arrival of an entity already living in the region (the authoritative copy got there first)
-    dropped instead of floating in the log re-applying its stale bundle.
-    STILL RED: `crossing_converges_under_late_region_scheduling` fails `InlineSchedule::late(2)`
-    (seeds 0 and 1 pass): when the server delivers a mirror a slot late, the client's correct-by-
-    protocol mirror prediction for that slot is a misprediction until the server's NEXT Tick closes
-    the slot, and `assert_converged` compares the non-home region (0,0) at that open slot (its heal
-    steps wait for the HOME region only). Measured: letting the heal steps also wait for every
-    aligned region makes all 6 seeds converge bit-exact within the bound — so it heals; whether
-    that harness change is acceptable is open (not made).
-  - **REGRESSED — FAILING as of 2026-09-20** (was PASSING): `crates/client/tests/crossing.rs::walking_across_a_region_boundary_keeps_input_and_converges`.
-    Red since 8e90481 (client tick lead), which no run of this slow client test covered. Two layers:
-    (1) harness — `assert_converged` assumed the client TRAILS the server and panicked "no matching
-    server-authoritative tick"; FIXED: `SimHarness::catch_up` freezes the client, ticks the server up
-    to it with `SyncClock` withheld, compares live state at the same tick, then restores the lead.
-    (2) real, OPEN — under that strict check the pre-crossing baseline matches on all 9 regions for
-    40 ticks, and after the crossing 8 of 9 still match (old home with its ghost mirror, fresh
-    neighbours), but the NEW HOME region is bit-inexact on every one of 40 idle ticks: permanent,
-    not the ~1-tick flip transient described below. Suspects: the 1.5-tick lead putting the client's
-    predicted arrival at a different tick than the server's with state the correction path never
-    fixes (`apply_arrival`'s replay branch only corrects the pose — not `Motion`, yaw/pitch,
-    `Client` input state; `cross_boundary` flies, so `Motion`/`last_jump_tap` are live), or
-    `align_region` stepping the flipped home. Repro: `just test-one client "--test crossing walking_across"`.
-    Next step: diff the two `GameData`s field by field at the aligned tick (hash per `#[rollback]` field).
+  - **RESOLVED 2026-11-06 (seam-transparent regions Task 3.2)**: all three `crossing.rs` tests pass —
+    `walking_across_a_region_boundary_keeps_input_and_converges` (red 2026-09-20 .. 2026-11-06, since
+    8e90481), `crossing_is_deterministic`, and `crossing_converges_under_late_region_scheduling` over
+    all 6 `InlineSchedule::late` seeds. The 2026-09-20 "new home permanently bit-inexact" was the
+    client's regions not running in step with each other (the home leads its neighbours by ~3 ticks
+    in this harness), so predicted transfers met the server's in other slots. Fixed by: predicted
+    arrivals / mirrors stamped with the source's tick and held to the END of that slot
+    (`regions/runner.rs`: released by the Tick that closes it, after the slot's predicted inputs —
+    the server's order: held inputs, then held transfers); reconcile treating margin mirrors per
+    slot (a server mirror never consumes a LATER slot's prediction; a server Tick drops a mirror
+    predicted in the slot it closes — before, one missing mirror shifted every later one by a slot
+    for good); and a predicted arrival of an entity already living in the region (the
+    authoritative copy got there first) dropped instead of floating in the log re-applying its
+    stale bundle. Harness: the server hashes are now SLOT-START hashes (right after the Tick event,
+    as the desync check hashes; `InlineSpawner::record_slot_start_hashes`), and
+    `assert_converged`'s heal steps wait for every aligned region, not only the home. Still open
+    here: input held INDEFINITELY across a seam (Task 3.3, inputs follow the body).
   - Previous status, kept for the root-cause notes: deterministic headless coverage in the same test. Root-caused via SimHarness: the flip-tick divergence at the just-crossed home
     region is genuinely TRANSIENT — it reconciles bit-exact within ~1 tick once input stops
     (measured: diverged at the flip tick, converged the next tick, stable 240+ ticks after).
