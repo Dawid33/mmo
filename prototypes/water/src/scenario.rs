@@ -158,17 +158,19 @@ pub fn run(sc: &mut Scenario, mut probe: impl FnMut(&World)) -> Report {
         r.step_ns.push(ns);
         r.undo_bytes.push(log.iter().map(Undo::bytes).sum::<usize>() as u32);
         let s = sc.world.step;
-        if s % MASS_CHECK_EVERY == 0 && sc.world.mass() != sc.initial_mass + sc.world.poured {
+        if s % MASS_CHECK_EVERY == 0 && sc.world.accounted() != sc.initial_mass + sc.world.poured {
             r.mass_ok = false;
         }
         probe(&sc.world);
-        if sc.stop_when_asleep && last_edit.is_none_or(|e| s > e) && sc.world.active.count() == 0 {
+        if sc.stop_when_asleep && last_edit.is_none_or(|e| s > e) && sc.world.active.count() == 0
+            && sc.world.stats.link_moved_last_step == 0
+        {
             r.asleep_at = Some(s);
             break;
         }
     }
     let w = &sc.world;
-    r.mass_ok &= w.mass() == sc.initial_mass + w.poured;
+    r.mass_ok &= w.accounted() == sc.initial_mass + w.poured;
     r.steps = w.step;
     r.stats = w.stats;
     r.final_hash = w.hash();

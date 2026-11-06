@@ -7,6 +7,7 @@ pub mod ca;
 pub mod edit;
 pub mod fixture;
 pub mod grid;
+pub mod link;
 pub mod metrics;
 pub mod scenario;
 pub mod state;
@@ -31,6 +32,10 @@ pub const EXPAND_AREA_FACTOR: u32 = 4;
 pub const EXPAND_BUDGET: u32 = 16384;
 /// Steps a refused expansion waits before retrying.
 pub const EXPAND_BACKOFF: u32 = 16;
+/// Most units a gate moves in one step (1/4 m³).
+pub const GATE_CAP: u64 = 1024;
+/// Units a pump moves in one step (1/8 m³).
+pub const PUMP_RATE: u16 = 512;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {

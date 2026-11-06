@@ -10,6 +10,7 @@ pub enum Edit {
     Remove(u32),
     Place(u32),
     Pour(u32, u16),
+    SetLink(crate::link::LinkId, crate::link::LinkKind),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -24,6 +25,9 @@ pub fn apply(w: &mut World, e: Edit) -> Result<(), EditError> {
         Edit::Remove(i) => remove_solid(w, i),
         Edit::Place(i) => place_solid(w, i),
         Edit::Pour(i, q) => pour(w, i, q),
+        Edit::SetLink(id, kind) => {
+            if w.set_link_kind(id, kind) { Ok(()) } else { Err(EditError::NoRoom) }
+        }
     }
 }
 

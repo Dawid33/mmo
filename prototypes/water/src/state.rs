@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 
 use crate::body::Body;
 use crate::grid::{Bits, Dims, Dir};
+use crate::link::{Link, LinkId, LinkKind};
 use crate::{FULL, Mode};
 
 pub type BodyId = u32;
@@ -23,6 +24,8 @@ pub enum Undo {
     NextId(BodyId),
     Step(u32),
     Poured(u64),
+    Scooped(u64),
+    Link(LinkId, Option<Link>),
 }
 
 impl Undo {
@@ -30,7 +33,8 @@ impl Undo {
     pub fn bytes(&self) -> usize {
         match self {
             Undo::Water(..) => 7,
-            Undo::Owner(..) | Undo::Touch(..) | Undo::Poured(..) => 9,
+            Undo::Owner(..) | Undo::Touch(..) | Undo::Poured(..) | Undo::Scooped(..) => 9,
+            Undo::Link(..) => 16,
             Undo::Solid(..) | Undo::Active(..) => 6,
             Undo::NextId(..) | Undo::Step(..) => 5,
             Undo::Body(_, b) => 5 + b.as_ref().map_or(0, |b| b.byte_size()),
@@ -51,6 +55,8 @@ pub struct Stats {
     pub splits: u64,
     pub merges: u64,
     pub relevels: u64,
+    /// Total moved by the link phase of the last step.
+    pub link_moved_last_step: u64,
 }
 
 /// FNV-1a, 64-bit: tiny, dependency-free, identical on every target.
@@ -93,6 +99,9 @@ pub struct World {
     pub step: u32,
     /// Units added by `Edit::Pour` since the fixture was built (the mass ledger).
     pub poured: u64,
+    /// Units removed by scoops (the mass ledger; Task 11).
+    pub scooped: u64,
+    pub links: BTreeMap<LinkId, Link>,
     pub stats: Stats,
     log: Option<Vec<Undo>>,
     imaged: Vec<BodyId>,
@@ -119,6 +128,8 @@ impl World {
             next_id: 1,
             step: 0,
             poured: 0,
+            scooped: 0,
+            links: BTreeMap::new(),
             stats: Stats::default(),
             log: None,
             imaged: Vec::new(),
@@ -196,6 +207,23 @@ impl World {
         self.push(Undo::Poured(self.poured));
         self.poured += q;
     }
+    pub fn add_scooped(&mut self, q: u64) {
+        self.push(Undo::Scooped(self.scooped));
+        self.scooped += q;
+    }
+    pub fn add_link(&mut self, l: Link) -> LinkId {
+        let id = self.links.keys().next_back().map_or(1, |k| k + 1);
+        self.push(Undo::Link(id, None));
+        self.links.insert(id, l);
+        id
+    }
+    /// Change a link's kind; false if the id is unknown.
+    pub fn set_link_kind(&mut self, id: LinkId, kind: LinkKind) -> bool {
+        let Some(old) = self.links.get(&id).copied() else { return false };
+        self.push(Undo::Link(id, Some(old)));
+        self.links.get_mut(&id).unwrap().kind = kind;
+        true
+    }
     pub fn alloc_id(&mut self) -> BodyId {
         let id = self.next_id;
         self.push(Undo::NextId(id));
@@ -259,6 +287,13 @@ impl World {
                 Undo::NextId(v) => self.next_id = v,
                 Undo::Step(v) => self.step = v,
                 Undo::Poured(v) => self.poured = v,
+                Undo::Scooped(v) => self.scooped = v,
+                Undo::Link(id, Some(l)) => {
+                    self.links.insert(id, l);
+                }
+                Undo::Link(id, None) => {
+                    self.links.remove(&id);
+                }
             }
         }
     }
@@ -269,6 +304,7 @@ impl World {
         h.u32(self.step);
         h.u32(self.next_id);
         h.u64(self.poured);
+        h.u64(self.scooped);
         for w in self.solid.words() {
             h.u64(*w);
         }
@@ -296,6 +332,21 @@ impl World {
         for b in self.bodies.values() {
             b.hash_into(&mut h);
         }
+        for (id, l) in &self.links {
+            h.u32(*id);
+            h.u32(l.a);
+            h.u32(l.b);
+            match l.kind {
+                LinkKind::Gate { open } => {
+                    h.u32(1);
+                    h.u32(open as u32);
+                }
+                LinkKind::Pump { rate } => {
+                    h.u32(2);
+                    h.u32(rate as u32);
+                }
+            }
+        }
         h.finish()
     }
 
@@ -303,5 +354,10 @@ impl World {
     pub fn mass(&self) -> u64 {
         self.water.iter().map(|&w| w as u64).sum::<u64>()
             + self.bodies.values().map(|b| b.volume).sum::<u64>()
+    }
+
+    /// `mass()` plus water that left the world on purpose; equals initial mass + poured.
+    pub fn accounted(&self) -> u64 {
+        self.mass() + self.scooped
     }
 }

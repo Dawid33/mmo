@@ -53,20 +53,21 @@ pub fn step(w: &mut World) {
             }
         }
     }
+    crate::link::flux_all(w);
     if w.mode == Mode::Bodies {
         after_step(w);
     }
     w.set_step(s + 1);
 }
 
-fn wake(w: &mut World, c: u32) {
+pub(crate) fn wake(w: &mut World, c: u32) {
     w.set_active(c, true);
     w.touch(c);
 }
 
 /// A cell that lost water may now sit below a neighbour that is asleep: sideways flow is
 /// donor-driven, so wake every neighbour that holds water (it re-checks its wants).
-fn wake_donors(w: &mut World, c: u32) {
+pub(crate) fn wake_donors(w: &mut World, c: u32) {
     for d in crate::grid::HORIZONTAL {
         if let Some(n) = w.dims.step(c, d) {
             if w.is_ca(n) && w.water[n as usize] > 0 {
