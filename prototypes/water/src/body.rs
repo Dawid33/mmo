@@ -65,6 +65,16 @@ impl Body {
             0
         }
     }
+    /// Head for water LEAVING the body: top layer rounded up, so a draining last layer empties.
+    pub fn outflow_at(&self, y: u32) -> u16 {
+        if y < self.top {
+            FULL
+        } else if y == self.top && self.top_area() > 0 {
+            self.frac().div_ceil(self.top_area()) as u16
+        } else {
+            0
+        }
+    }
     /// Surface height in units.
     pub fn level(&self) -> u64 {
         self.top as u64 * F + self.virtual_at(self.top) as u64

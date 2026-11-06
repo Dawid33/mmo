@@ -233,6 +233,7 @@ impl World {
     pub fn begin_log(&mut self) {
         self.log = Some(Vec::new());
         self.imaged.clear();
+        self.touched.clear();
     }
     pub fn end_log(&mut self) -> Vec<Undo> {
         self.imaged.clear();
