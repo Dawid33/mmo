@@ -17,7 +17,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use bevy::prelude::*;
 use game::{
-    Block, BlockId, BlockIndex, Chunk, ColumnCoords, ColumnGround, Designation, RegionId, TilePos, TileSource,
+    Block, BlockId, BlockIndex, Chunk, ColumnCoords, ColumnGround, Designation, RegionId, SlopeShape, TilePos, TileSource,
     CHUNK_BLOCKS, CHUNK_BLOCK_COUNT, REGION_BLOCKS,
 };
 
@@ -61,6 +61,9 @@ pub struct TileMirror {
     /// (`Entity::PLACEHOLDER` for [`TileMirror::set_chunk`]).
     chunks: HashMap<[i32; 3], (Entity, Box<[Block]>)>,
     chunk_of: HashMap<Entity, [i32; 3]>,
+    /// Per home chunk: the slope blocks (by `BlockIndex::linear`), classified
+    /// from the chunk's chisels when it is mirrored.
+    slopes: HashMap<[i32; 3], BTreeMap<u16, SlopeShape>>,
     version: u64,
     /// Bumped whenever the home region's ground recipe may have appeared
     /// (its `Reset`, a home switch): bricks meshed without it re-mesh then
@@ -149,11 +152,24 @@ impl TileMirror {
         for i in indices {
             let (x, y, z) = i.xyz();
             let block = chunk.block_at(x, y, z);
+            let shape = chunk.chisel.get(&i).and_then(game::slope::classify);
+            let slot = i.linear() as u16;
+            let slopes = self.slopes.entry(key).or_default();
+            if slopes.get(&slot).copied() != shape {
+                match shape {
+                    Some(shape) => slopes.insert(slot, shape),
+                    None => slopes.remove(&slot),
+                };
+                changed = true;
+            }
             if blocks[i.linear()] != block {
                 blocks[i.linear()] = block;
                 self.tiles_touched += 1;
                 changed = true;
             }
+        }
+        if self.slopes.get(&key).is_some_and(|m| m.is_empty()) {
+            self.slopes.remove(&key);
         }
         if changed {
             self.version += 1;
@@ -162,22 +178,34 @@ impl TileMirror {
     }
 
     pub fn set_chunk(&mut self, chunk: [i32; 3], blocks: Box<[Block]>) {
-        self.insert_chunk(Entity::PLACEHOLDER, chunk, blocks);
+        self.insert_chunk(Entity::PLACEHOLDER, chunk, blocks, BTreeMap::new());
+    }
+
+    /// [`TileMirror::set_chunk`] from a sim chunk, slopes included.
+    pub fn set_chunk_from(&mut self, key: [i32; 3], chunk: &Chunk) {
+        self.insert_chunk(Entity::PLACEHOLDER, key, chunk_blocks(chunk), chunk_slopes(chunk));
     }
 
     pub fn remove_chunk(&mut self, chunk: [i32; 3]) {
+        self.slopes.remove(&chunk);
         if let Some((e, _)) = self.chunks.remove(&chunk) {
             self.chunk_of.remove(&e);
             self.version += 1;
         }
     }
 
-    fn insert_chunk(&mut self, entity: Entity, chunk: [i32; 3], blocks: Box<[Block]>) {
+    fn insert_chunk(&mut self, entity: Entity, chunk: [i32; 3], blocks: Box<[Block]>, slopes: BTreeMap<u16, SlopeShape>) {
         if entity != Entity::PLACEHOLDER {
             self.chunk_of.insert(entity, chunk);
         }
-        let same = self.chunks.get(&chunk).is_some_and(|(_, old)| *old == blocks);
+        let same = self.chunks.get(&chunk).is_some_and(|(_, old)| *old == blocks)
+            && self.slopes.get(&chunk).map_or(slopes.is_empty(), |old| *old == slopes);
         self.chunks.insert(chunk, (entity, blocks));
+        if slopes.is_empty() {
+            self.slopes.remove(&chunk);
+        } else {
+            self.slopes.insert(chunk, slopes);
+        }
         if !same {
             self.version += 1;
         }
@@ -189,6 +217,7 @@ impl TileMirror {
         let Some(chunk) = self.chunk_of.remove(&entity) else { return };
         if self.chunks.get(&chunk).is_some_and(|(owner, _)| *owner == entity) {
             self.chunks.remove(&chunk);
+            self.slopes.remove(&chunk);
             self.version += 1;
         }
     }
@@ -202,6 +231,7 @@ impl TileMirror {
         self.home = home;
         self.chunks.clear();
         self.chunk_of.clear();
+        self.slopes.clear();
         self.version += 1;
         self.ground_epoch += 1;
         true
@@ -337,6 +367,12 @@ impl TileSource for TileMirror {
         }
         game::probe_column_band(column, self.ground_at(cx as usize, cz as usize), |cy| self.chunks.contains_key(&[cx, cy, cz]))
     }
+
+    fn slope(&self, p: TilePos) -> Option<SlopeShape> {
+        let (coords, (bx, by, bz)) = game::edit::locate(p)?;
+        let key = [coords.x as i32, coords.y, coords.z as i32];
+        self.slopes.get(&key)?.get(&(BlockIndex::from_xyz(bx, by, bz).linear() as u16)).copied()
+    }
 }
 
 /// Each block (id + data), straight from the sim chunk's blocks.
@@ -347,6 +383,11 @@ pub fn chunk_blocks(chunk: &Chunk) -> Box<[Block]> {
             chunk.block_at(x, y, z)
         })
         .collect()
+}
+
+/// The chunk's slope blocks by `BlockIndex::linear`.
+pub fn chunk_slopes(chunk: &Chunk) -> BTreeMap<u16, SlopeShape> {
+    chunk.chisel.iter().filter_map(|(i, c)| Some((i.linear() as u16, game::slope::classify(c)?))).collect()
 }
 
 /// Region-local chunk coords of a sim chunk entity.
@@ -380,7 +421,7 @@ pub fn update_tile_mirror(
     if mirror.set_home(Some(home)) {
         for (entity, chunk, tf, sim) in &all {
             if sim.region == home {
-                mirror.insert_chunk(entity, chunk_key(tf), chunk_blocks(&chunk.0));
+                mirror.insert_chunk(entity, chunk_key(tf), chunk_blocks(&chunk.0), chunk_slopes(&chunk.0));
             }
         }
         // Everything was just read whole: pending edit lists are moot.
@@ -404,7 +445,7 @@ pub fn update_tile_mirror(
         }
         let key = chunk_key(tf);
         if full || !mirror.update_blocks(key, &chunk.0, blocks) {
-            mirror.insert_chunk(entity, key, chunk_blocks(&chunk.0));
+            mirror.insert_chunk(entity, key, chunk_blocks(&chunk.0), chunk_slopes(&chunk.0));
         }
     }
 }
@@ -412,7 +453,7 @@ pub fn update_tile_mirror(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use game::{DesignationKind, OpId, RegionCoords, CHUNK_BLOCKS, UNDERGROUND_DEPTH};
+    use game::{ChiselData, DesignationKind, OpId, RegionCoords, CHUNK_BLOCKS, UNDERGROUND_DEPTH};
 
     const STONE: BlockId = BlockId(2);
     const BEDROCK: BlockId = BlockId(7);
@@ -501,6 +542,31 @@ mod tests {
         assert_eq!(blocks.len(), CHUNK_BLOCK_COUNT);
         assert_eq!(blocks[BlockIndex::from_xyz(1, 0, 1).linear()].id, STONE);
         assert_eq!(blocks.iter().filter(|b| b.id != BlockId::AIR).count(), 1);
+    }
+
+    #[test]
+    fn mirror_reports_slopes() {
+        use game::slope::{slope_chisel, Side};
+        let mut m = mirror();
+        let key = [0, band_base() + 1, 0];
+        let y0 = key[1] * CHUNK_BLOCKS as i32;
+        let shape = SlopeShape::Straight { low: Side::PosX };
+        let mut chunk = Chunk::uniform(Block::new(BlockId::AIR));
+        let (slope_at, half_at, plain_at) = (BlockIndex::from_xyz(1, 0, 1), BlockIndex::from_xyz(2, 0, 1), BlockIndex::from_xyz(3, 0, 1));
+        chunk.set_block(1, 0, 1, Block::new(STONE));
+        chunk.chisel.insert(slope_at, slope_chisel(STONE, shape));
+        chunk.set_block(2, 0, 1, Block::new(STONE));
+        chunk.chisel.insert(half_at, ChiselData::cuboid(STONE, [0, 0, 0], [game::BLOCK_VOXELS, game::BLOCK_VOXELS / 2, game::BLOCK_VOXELS]));
+        chunk.set_block(3, 0, 1, Block::new(STONE));
+        m.set_chunk_from(key, &chunk);
+        assert_eq!(m.slope([1, y0, 1]), Some(shape));
+        assert_eq!(m.slope([2, y0, 1]), None, "a half block is no slope");
+        assert_eq!(m.slope([3, y0, 1]), None);
+        assert_eq!(m.slope([0, implied_y(), 0]), None, "implied ground");
+        // An edit that removes the slope clears it.
+        chunk.chisel.remove(&slope_at);
+        assert!(m.update_blocks(key, &chunk, [slope_at, plain_at]));
+        assert_eq!(m.slope([1, y0, 1]), None);
     }
 
     #[test]

@@ -50,6 +50,12 @@ fn top_not(chunk: &Chunk, vx: usize, vz: usize, skip: Option<BlockId>) -> Option
         let bi = BlockIndex::from_xyz(bx, by, bz);
         let base = by * BLOCK_VOXELS;
         match chunk.chisel.get(&bi) {
+            // A slope reads as a full block: its centre column would give half height on some facings.
+            Some(chisel) if game::slope::classify(chisel).is_some() => {
+                if shown(chunk.blocks.get(bi).id) {
+                    return Some(base + BLOCK_VOXELS - 1);
+                }
+            }
             Some(chisel) => {
                 if let Some(ly) = (0..BLOCK_VOXELS).rev().find(|&ly| shown(chisel.material_at(lx, ly, lz))) {
                     return Some(base + ly);
@@ -83,6 +89,23 @@ pub fn chunk_tops(chunk: &Chunk, water: BlockId) -> ChunkTops {
                 Some(_) => top_not(chunk, vx, vz, Some(water)).map_or(0, |y| (y + 1) as u16),
                 None => 0,
             };
+        }
+    }
+    // Slopes count as full blocks (the centre-column sample is half height on some facings).
+    for (bi, chisel) in &chunk.chisel {
+        if game::slope::classify(chisel).is_none() {
+            continue;
+        }
+        let id = chunk.blocks.get(*bi).id;
+        if id == BlockId::AIR {
+            continue;
+        }
+        let (bx, by, bz) = bi.xyz();
+        let column = bx + CHUNK_BLOCKS * bz;
+        let top = ((by + 1) * BLOCK_VOXELS) as u16;
+        tops.surface[column] = tops.surface[column].max(top);
+        if id != water {
+            tops.ground[column] = tops.ground[column].max(top);
         }
     }
     tops
@@ -334,6 +357,23 @@ mod tests {
         let mut want = [0u16; COLUMNS];
         want[1] = (BLOCK_VOXELS - 1) as u16;
         assert_eq!(tops.surface, want);
+    }
+
+    #[test]
+    fn slope_counts_as_full_height() {
+        use game::slope::{slope_chisel, Side, SlopeShape};
+        for side in [Side::NegX, Side::PosX, Side::NegZ, Side::PosZ] {
+            let mut chunk = Chunk::uniform(Block::new(BlockId::AIR));
+            let bi = BlockIndex::from_xyz(2, 1, 3);
+            chunk.blocks.set(bi, Block::new(STONE));
+            chunk.chisel.insert(bi, slope_chisel(STONE, SlopeShape::Straight { low: side }));
+            let tops = chunk_tops(&chunk, WATER);
+            let column = 2 + CHUNK_BLOCKS * 3;
+            let full = (2 * BLOCK_VOXELS) as u16;
+            assert_eq!(tops.surface[column], full, "{side:?}");
+            assert_eq!(tops.ground[column], full, "{side:?}");
+            assert_eq!(top_not(&chunk, 2 * BLOCK_VOXELS, 3 * BLOCK_VOXELS, Some(WATER)), Some(full as usize - 1), "{side:?}");
+        }
     }
 
     #[test]
