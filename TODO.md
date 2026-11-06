@@ -41,17 +41,21 @@ Multi-region world follow-ups (milestone landed; spec 2026-07-05-multi-region-wo
     authoritative copy got there first) dropped instead of floating in the log re-applying its
     stale bundle. Harness: the server hashes are now SLOT-START hashes (right after the Tick event,
     as the desync check hashes; `InlineSpawner::record_slot_start_hashes`), and
-    `assert_converged`'s heal steps wait for every aligned region, not only the home. Still open
-    here: input held INDEFINITELY across a seam (Task 3.3, inputs follow the body).
+    `assert_converged`'s heal steps wait for every aligned region, not only the home.
+  - **RESOLVED 2026-11-06 (Task 3.3, inputs follow the body)**: input held across a seam. The server's
+    source region hands a departing client's held inputs (stamp >= departure) to the target in the
+    bundle, and forwards inputs that reach it after the body left (`RegionOutput::Forward`) to the
+    home; an input for a held arrival waits behind it (server and client runner alike).
+    `evict_orphan_local_inputs` and `Misrouted` are gone; reconcile drops a local input replayed
+    where the local body is not (also heals a mispredicted crossing tick). Tests:
+    `handoff_schedule::held_key_across_seam_settles` (lockstep + jittery) and
+    `crossing::held_key_crossing_has_no_rubber_band` (100 ms RTT via `SimHarness::set_latency`).
   - Previous status, kept for the root-cause notes: deterministic headless coverage in the same test. Root-caused via SimHarness: the flip-tick divergence at the just-crossed home
     region is genuinely TRANSIENT — it reconciles bit-exact within ~1 tick once input stops
     (measured: diverged at the flip tick, converged the next tick, stable 240+ ticks after).
     The earlier "not self-healing" reading was the harness asserting one tick too early
     (`assert_converged` now lets the documented bounded transient heal before its strict check).
-    STILL DEFERRED (this ticket): input held INDEFINITELY across a seam oscillates the home
-    region and never settles in the tight lockstep — the real protocol-level case above. Needs
-    the server-side input stamp-routing / predicted-authority-transfer design, not a harness or
-    client-side patch.
+    (The held-input case deferred here was resolved by Task 3.3, above.)
   - Validation tool for that design, when it lands: `game::InlineSchedule` (seeded region-scheduling
     jitter on the `InlineSpawner`; `SimHarness::set_schedule`). Lockstep is the one schedule the
     threaded server never runs, so judge a candidate protocol by `crossing.rs` convergence across
