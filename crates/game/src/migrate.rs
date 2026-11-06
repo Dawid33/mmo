@@ -20,6 +20,13 @@ pub struct Carried {
     /// on along it (`Rollback::continue_walk_safe`).
     pub walker: Option<crate::Walker>,
     pub wander: Option<crate::people::Wander>,
+    /// What the entity leaves behind as item piles if it is destroyed on
+    /// its way (the manager's mailbox overflow, `WorldManager::hold_arrival`):
+    /// it must never vanish with them. No component holds drops yet, so
+    /// [`Rollback::carry_components`] sends none and an arrival must bring
+    /// none; voxel bodies (`SettlePolicy::DropItems`) fill it once they
+    /// cross seams.
+    pub drops: Vec<crate::ItemStack>,
 }
 
 impl Client {
@@ -96,6 +103,7 @@ impl Rollback {
             animator: *animator.try_get(key),
             walker: walker.try_get(key).clone(),
             wander: *wander.try_get(key),
+            drops: Vec::new(),
         }
     }
 
@@ -103,6 +111,7 @@ impl Rollback {
     /// re-applies the whole bundle). `client` is the player attached to `e`;
     /// only a player gets a camera.
     pub(crate) fn restore_components_safe(&mut self, e: EntityKey, c: &Carried, client: Option<ClientId>) {
+        debug_assert!(c.drops.is_empty(), "no entity holds drops yet: {:?} would be lost on arrival", c.drops);
         self.data.ecs.motion.set_safe(e, c.motion);
         self.data.ecs.slime.set_safe(e, c.slime);
         if let Some(animator) = c.animator {

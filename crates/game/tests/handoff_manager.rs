@@ -503,3 +503,206 @@ fn mailbox_is_capped_and_despawns_the_oldest() {
         assert_eq!(counts[id], want, "slime {i} saved {} times", counts[id]);
     }
 }
+
+// --- Dynamic bodies and the mailbox (Task 7.4) --------------------------------
+
+/// A 1 m cube body.
+fn cube_collider() -> game::ColliderSpec {
+    let b = game::BLOCK_VOXELS as f32;
+    game::ColliderSpec::Cuboid { half_extents: game::rapier3d::math::Vector::splat(b / 2.0) }
+}
+
+/// Spawns a dynamic body in the spawn region just past its north seam (so it
+/// departs on the next tick), resting still. Returns its id.
+fn spawn_body_past_north_seam(h: &mut Harness) -> game::EntityId {
+    use game::rapier3d::math::Vector;
+    let mut id = None;
+    h.manager.spawner_mut().with_region(SPAWN_REGION, |region| {
+        let pose = game::Pose::from_translation(Vector::new(128.0, 26.0, -(FLIP_HYSTERESIS + 2.0)));
+        region.with_data(|d| {
+            let e = d.spawn_body_safe(pose, cube_collider(), Vector::ZERO, Vector::ZERO);
+            id = *d.ecs.id.try_get(e);
+        });
+    });
+    id.expect("the body has an EntityId")
+}
+
+/// The kind of `id` in `rc` and whether its rigid body is dynamic, if `rc` owns it.
+fn owned_body(h: &mut Harness, rc: RegionCoords, id: game::EntityId) -> Option<(Option<game::EntityKind>, bool)> {
+    let mut out = None;
+    h.manager.spawner_mut().with_region(rc, |region| {
+        let data = region.data();
+        if let Some(&key) = data.id_index.get(&id) {
+            let dynamic = data.ecs.rigidbody.try_get(key).and_then(|h| data.physics.bodies.get(h)).is_some_and(|b| b.is_dynamic());
+            out = Some((*data.ecs.kind.try_get(key), dynamic));
+        }
+    });
+    out
+}
+
+/// Only the spawn region runs; a body departs north, into a region that
+/// never ran.
+fn body_waiting_north(h: &mut Harness) -> game::EntityId {
+    crate::common::install_real_block_props();
+    h.event(ServerEvent::connected(0), 0);
+    h.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(SPAWN_REGION), 0), 0);
+    h.drain_packets();
+    let id = spawn_body_past_north_seam(h);
+    h.tick(100);
+    id
+}
+
+/// Decision 3 for dynamic bodies: a body crossing into a region that is not
+/// running does not wake it; it waits in the mailbox.
+#[test]
+fn body_arrival_does_not_wake_unloaded_region() {
+    let mut h = harness();
+    let id = body_waiting_north(&mut h);
+    let north = RegionCoords::new(0, -1);
+    assert!(!h.manager.running_regions().contains(&north), "a body's arrival must not wake its target");
+    assert_eq!(h.manager.pending_arrival_count(north), 1, "the body waits in the mailbox");
+    assert_eq!(h.manager.pending_arrival_ids(), [(id, north)]);
+    assert_eq!(owned_body(&mut h, SPAWN_REGION, id), None, "the body left its source");
+    assert_eq!(h.manager.location_of(id), Some(north), "the directory points at its target");
+}
+
+/// The waiting body is delivered when its region starts: it exists there
+/// exactly once, still a dynamic `Body`, and the mailbox is empty.
+#[test]
+fn body_mailbox_delivers_when_region_starts() {
+    let mut h = harness();
+    let id = body_waiting_north(&mut h);
+    let north = RegionCoords::new(0, -1);
+    let mark = h.trace.len();
+    h.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(north), 0), 400);
+    assert_eq!(h.manager.pending_arrival_count(north), 0, "delivered on start");
+    h.tick(420);
+    let first = h.trace[mark..].iter().find(|(rc, _)| *rc == north).map(|(_, t)| *t);
+    assert_eq!(first, Some(Traced::Arrived), "applied before the region's first tick");
+    assert_eq!(owned_body(&mut h, north, id), Some((Some(game::EntityKind::Body), true)), "a dynamic body arrived");
+    assert_eq!(owned_body(&mut h, SPAWN_REGION, id), None, "and only there");
+    assert_eq!(h.manager.in_flight_count(), 0, "its arrival is confirmed");
+    assert_eq!(h.manager.pending_arrival_total(), 0);
+}
+
+/// The target is stopping (Shutdown sent, `Stopped` not back) when the body
+/// departs: the body waits in the mailbox, the region parks and stays parked
+/// (a body never wakes it), and the resubscribe delivers the body once.
+#[test]
+fn body_mailbox_survives_stopping_region() {
+    use game::UNLOAD_GRACE_MS;
+    crate::common::install_real_block_props();
+    let mut h = harness();
+    h.event(ServerEvent::connected(0), 0);
+    h.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(SPAWN_REGION), 0), 0);
+    let north = RegionCoords::new(0, -1);
+    h.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(north), 0), 0);
+    h.tick(50);
+    h.event(ServerEvent::ClientPacket(ClientPacket::ReleaseRegionConnection(north), 0), 100);
+    let now = 100 + UNLOAD_GRACE_MS;
+    // The Shutdown sits unread in north's queue until released.
+    h.manager.spawner_mut().hold(north, u32::MAX);
+    h.manager.maintain(now);
+    h.settle(now);
+    h.drain_packets();
+
+    let id = spawn_body_past_north_seam(&mut h);
+    h.tick(now + 50);
+    assert_eq!(h.manager.pending_arrival_count(north), 1, "the body waits for the stopping region");
+    assert_eq!(owned_body(&mut h, SPAWN_REGION, id), None, "the body left its source");
+
+    h.manager.spawner_mut().hold(north, 0);
+    h.tick(now + 100);
+    h.tick(now + 150);
+    assert!(h.manager.parked_regions().contains(&north), "north parked");
+    assert!(!h.manager.running_regions().contains(&north), "the body did not wake north once it parked");
+    assert_eq!(h.manager.pending_arrival_count(north), 1, "still waiting");
+    assert_eq!(h.manager.location_of(id), Some(north), "the park kept its directory entry");
+
+    h.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(north), 0), now + 200);
+    assert_eq!(h.manager.pending_arrival_count(north), 0, "delivered on the resubscribe");
+    h.tick(now + 250);
+    assert_eq!(owned_body(&mut h, north, id), Some((Some(game::EntityKind::Body), true)), "the body arrived");
+    assert_eq!(owned_body(&mut h, SPAWN_REGION, id), None, "exactly once");
+    assert_eq!(h.manager.in_flight_count(), 0);
+}
+
+/// Every item in `rc`'s piles: item -> count.
+fn piled_items(h: &mut Harness, rc: RegionCoords) -> std::collections::BTreeMap<game::ItemId, u32> {
+    let mut out = std::collections::BTreeMap::new();
+    h.manager.spawner_mut().with_region(rc, |region| {
+        for pile in region.data().item_piles.values() {
+            for s in &pile.stacks {
+                *out.entry(s.item).or_insert(0) += s.count;
+            }
+        }
+    });
+    out
+}
+
+/// A body departing `SPAWN_REGION` north at `x` (units), synthetic: it
+/// carries `drops` (what a body leaves behind if destroyed — no body spawns
+/// with drops yet; voxel bodies will).
+fn departing_body(serial: u64, x: f32, drops: Vec<game::ItemStack>) -> game::EntityBundle {
+    use game::rapier3d::math::Vector;
+    let pose = game::Pose::from_translation(Vector::new(x, 26.0, -(FLIP_HYSTERESIS + 2.0)));
+    game::EntityBundle {
+        id: game::EntityId { birth_region: SPAWN_REGION, serial: 1_000_000 + serial },
+        kind: game::EntityKind::Body,
+        body: game::body::body_state(pose, &cube_collider(), Vector::ZERO, Vector::ZERO),
+        collider: cube_collider(),
+        carried: game::Carried { drops, ..Default::default() },
+        client: None,
+        pending_inputs: Vec::new(),
+    }
+}
+
+/// Overflow policy: a waiting body that carries drops is never despawned
+/// silently. Pushed out of the full mailbox, it is counted as despawned and
+/// its drops are put down as item piles at the seam cell on the side of the
+/// region it left — every item conserved; a plain body is wildlife.
+#[test]
+fn mailbox_overflow_puts_a_bodys_drops_down() {
+    use game::PENDING_ARRIVALS_PER_REGION_MAX as CAP;
+    crate::common::install_real_block_props();
+    let mut h = harness();
+    h.event(ServerEvent::connected(0), 0);
+    h.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(SPAWN_REGION), 0), 0);
+    h.drain_packets();
+    let north = RegionCoords::new(0, -1);
+    let item = game::ItemId::block(game::BlockId(1));
+    let drops = vec![game::ItemStack { item, count: 5 }];
+    let mut now = 50;
+    h.tick(now);
+    let mut stamp = 0;
+    h.manager.spawner_mut().with_region(SPAWN_REGION, |r| stamp = r.current_tick());
+    // The oldest carries drops; CAP plain bodies follow it.
+    let x = 128.0;
+    let with_drops = departing_body(0, x, drops.clone());
+    h.manager.handle_region_output(SPAWN_REGION, RegionOutput::Departures(vec![(with_drops.clone(), north)], stamp), now);
+    for i in 1..=CAP as u64 {
+        let plain = departing_body(i, x + i as f32, Vec::new());
+        h.manager.handle_region_output(SPAWN_REGION, RegionOutput::Departures(vec![(plain, north)], stamp), now);
+    }
+    assert!(!h.manager.running_regions().contains(&north), "bodies never wake north");
+    assert_eq!(h.manager.pending_arrival_count(north), CAP);
+    assert_eq!(h.manager.arrivals_despawned(), 1, "the body with drops was pushed out, counted");
+    assert_eq!(h.manager.recently_despawned_arrivals(), [with_drops.id]);
+    for _ in 0..3 {
+        now += 50;
+        h.tick(now);
+    }
+    assert_eq!(piled_items(&mut h, SPAWN_REGION).get(&item), Some(&5), "every dropped item lies in a pile");
+    assert_eq!(h.manager.items_destroyed(), 0);
+    assert_eq!(h.manager.intent_replies_lost(), 0);
+    // At the seam: the source's row of cells next to north.
+    let mut cells = Vec::new();
+    h.manager.spawner_mut().with_region(SPAWN_REGION, |region| {
+        cells = region.data().item_piles.keys().map(|c| c.to_local().1).collect();
+    });
+    let b = game::BLOCK_VOXELS as f32;
+    let col = (x / b).floor() as i32;
+    for c in &cells {
+        assert!(c.z <= 1 && (c.x - col).abs() <= 1, "pile at {c:?}, not at the seam cell (x {col}, z 0)");
+    }
+}

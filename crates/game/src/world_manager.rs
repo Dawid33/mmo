@@ -29,11 +29,13 @@ fn sites_key(history: &History) -> Vec<(SiteId, bool, u32, bool)> {
 pub const UNLOAD_GRACE_MS: u64 = 5000;
 /// Most arrivals that wait in the manager's mailbox for one region that is
 /// not running ([`WorldManager::pending_arrival_count`]); past it the oldest
-/// is despawned. Twice [`crate::slime::SLIME_CAP_PER_REGION`]: room for a
-/// neighbour's whole slime population and its refill, while a region next
-/// to an unloaded one cannot pump wildlife into the mailbox (and every
-/// round's save of it) forever, nor hand the target an unbounded backlog in
-/// one burst when it starts.
+/// is despawned — one carrying drops leaves them as item piles at the seam
+/// (the overflow policy is on `WorldManager::pending_arrivals`). Twice
+/// [`crate::slime::SLIME_CAP_PER_REGION`]: room for a neighbour's whole
+/// slime population and its refill, while a region next to an unloaded one
+/// cannot pump wildlife into the mailbox (and every round's save of it)
+/// forever, nor hand the target an unbounded backlog in one burst when it
+/// starts.
 pub const PENDING_ARRIVALS_PER_REGION_MAX: usize = 2 * crate::slime::SLIME_CAP_PER_REGION;
 /// How many of the latest despawned arrivals' ids the manager remembers
 /// ([`WorldManager::recently_despawned_arrivals`], test support: the
@@ -704,12 +706,24 @@ pub struct WorldManager<S: RegionSpawner> {
     /// Replies for an entity in a parked or stopping region: delivered when
     /// it next runs, saved with its parked state meanwhile.
     intent_mailbox: BTreeMap<RegionCoords, Vec<crate::IntentMsg>>,
-    /// Non-player arrivals into a region that is not running (neither
-    /// running nor stopping), by target, in arrival order: they do not wake
-    /// it, and are delivered — before its first tick — when it next starts.
-    /// Meanwhile each is saved exactly once per autosave round, with the
-    /// region it left (rebased back into its frame: restored, it crosses
-    /// again), and it is at its target in `locations`.
+    /// Non-player arrivals (slimes, dynamic bodies — anything but players
+    /// and people) into a region that is not running (absent, parked or
+    /// stopping), by target, in arrival order: they do not wake it, and are
+    /// delivered — before its first tick — when it next starts. Meanwhile
+    /// each is saved exactly once per autosave round, with the region it
+    /// left (rebased back into its frame: restored, it crosses again), and
+    /// it is at its target in `locations` (kept when the target parks).
+    ///
+    /// Overflow ([`PENDING_ARRIVALS_PER_REGION_MAX`], `hold_arrival`): the
+    /// oldest waiting arrival is despawned and counted
+    /// (`arrivals_despawned`). An arrival with nothing to leave behind is
+    /// wildlife — a slime, a plain body — and simply goes. One that carries
+    /// drops (`Carried::drops`, a felled tree's logs) is never lost
+    /// silently: its drops are put down as item piles at the seam cell on
+    /// the side of the region it left (the cell under its body, clamped into
+    /// that region), by region-sourced `DepositItems` intents — the Task 6.3
+    /// deposit path, so a parked source gets them when it next runs and what
+    /// its piles cannot hold is counted as destroyed there.
     pending_arrivals: BTreeMap<RegionCoords, Vec<PendingArrival>>,
     /// Waiting arrivals despawned past [`PENDING_ARRIVALS_PER_REGION_MAX`]
     /// (the `[server]` counters line), the latest of their ids
@@ -1474,9 +1488,10 @@ impl<S: RegionSpawner> WorldManager<S> {
                     // A player's arrival wakes its target (parked blob or
                     // gen), as does a person's with no history to absorb
                     // them; anything else into a region that is not running
-                    // waits for it to run.
+                    // — absent, parked or stopping — waits for it to run.
                     let wakes = client.is_some() || matches!(bundle.kind, EntityKind::Person { .. });
-                    if !wakes && !self.regions.contains_key(&target) {
+                    let running = self.regions.get(&target).is_some_and(|l| !l.stopping);
+                    if !wakes && !running {
                         self.hold_arrival(rc, target, stamp, bundle);
                         continue;
                     }
@@ -1782,6 +1797,47 @@ impl<S: RegionSpawner> WorldManager<S> {
                 "[server] arrivals waiting for {target:?} past {PENDING_ARRIVALS_PER_REGION_MAX}: the oldest are despawned ({:?} first)",
                 gone.bundle.kind
             );
+        }
+        self.put_down_drops(gone, target);
+    }
+
+    /// `gone`, a waiting arrival for `target` despawned past the cap, leaves
+    /// its drops (if any) as piles at the seam cell on its source's side:
+    /// the cell under its body, clamped into the source (see
+    /// `pending_arrivals`). Region-sourced deposits, so a refusal (the
+    /// source not running) comes back to the source, which puts them down
+    /// itself when it next runs.
+    fn put_down_drops(&mut self, gone: PendingArrival, target: RegionCoords) {
+        if gone.bundle.carried.drops.is_empty() {
+            return;
+        }
+        let source = gone.source;
+        let mut bundle = gone.bundle;
+        bundle.rebase(target, source);
+        let t = bundle.body.pose.translation;
+        let b = crate::BLOCK_VOXELS as f32;
+        let n = crate::REGION_BLOCKS as i32;
+        let local = [(t.x / b).floor() as i32, (t.y / b).floor() as i32, (t.z / b).floor() as i32];
+        let cell = crate::WorldBlockPos::from_local(
+            source,
+            crate::BlockPos::new(local[0].clamp(0, n - 1), local[1], local[2].clamp(0, n - 1)),
+        );
+        let due = self.spawner.world_tick();
+        log::info!("[server] waiting {:?} despawned: its drops {:?} put down at {cell:?}", bundle.id, bundle.carried.drops);
+        for stack in bundle.carried.drops {
+            let sent = crate::SentIntent {
+                target: crate::Target::Pile(cell),
+                intent: crate::Intent::DepositItems {
+                    cell,
+                    stack,
+                    expire: due + crate::PILE_DESPAWN_TICKS,
+                    pickup: due + crate::PICKUP_DELAY_TICKS,
+                    by: crate::EntityId::of_region(source),
+                },
+                from: source,
+                due,
+            };
+            self.route_intent(crate::IntentMsg::Intent(sent), source);
         }
     }
 
@@ -2489,6 +2545,10 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// entries go.
     fn forget_locations(&mut self, rc: RegionCoords) {
         self.locations.retain(|_, at| *at != rc);
+        // Arrivals waiting for it are still on their way there.
+        for p in self.pending_arrivals.get(&rc).into_iter().flatten() {
+            self.locations.insert(p.bundle.id, rc);
+        }
     }
 
     /// Where `id` is owned, per the directory.
