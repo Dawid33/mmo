@@ -192,6 +192,9 @@ pub struct InlineSpawner {
     saved: BTreeMap<RegionCoords, crate::Rollback>,
     /// Rounds advanced by `tick_all`: the world tick of this lockstep world.
     rounds: crate::Tick,
+    /// Test support ([`InlineSpawner::hold`]): regions that sit out the next
+    /// `n` calls of `tick_all`, neither ticking nor draining their inputs.
+    held: BTreeMap<RegionCoords, u32>,
 }
 
 impl InlineSpawner {
@@ -211,9 +214,24 @@ impl InlineSpawner {
         self.late.clear();
     }
 
+    /// Test support: `rc` sits out the next `rounds` calls of `tick_all` —
+    /// no tick, and `pump` leaves its inputs queued — the way a region thread
+    /// that fell behind looks to its neighbours. Afterwards it catches up
+    /// like any skipped region (at most [`crate::MAX_CATCH_UP_BURST`] ticks a
+    /// round while behind the round counter).
+    pub fn hold(&mut self, rc: RegionCoords, rounds: u32) {
+        if rounds > 0 {
+            self.held.insert(rc, rounds);
+        }
+    }
+
     pub fn pump(&mut self) {
-        let ids: Vec<RegionCoords> =
-            self.runners.keys().copied().filter(|id| !self.late.contains(id)).collect();
+        let ids: Vec<RegionCoords> = self
+            .runners
+            .keys()
+            .copied()
+            .filter(|id| !self.late.contains(id) && !self.held.contains_key(id))
+            .collect();
         for id in ids {
             let mut stopped = false;
             if let Some((recv, runner)) = self.runners.get_mut(&id) {
@@ -244,14 +262,24 @@ impl InlineSpawner {
 
     pub fn tick_all(&mut self) {
         self.rounds += 1;
+        // Held regions sit this round out; the last held round releases them
+        // for the next `pump`.
+        let held: BTreeSet<RegionCoords> = self.held.keys().copied().collect();
+        self.held.retain(|_, n| {
+            *n -= 1;
+            *n > 0
+        });
         let Some(schedule) = self.schedule.as_mut() else {
             let world = self.rounds;
-            for (_, (_, runner)) in self.runners.iter_mut() {
-                Self::tick_to(runner, world);
+            for (id, (_, runner)) in self.runners.iter_mut() {
+                if !held.contains(id) {
+                    Self::tick_to(runner, world);
+                }
             }
             return;
         };
-        let mut ids: Vec<RegionCoords> = self.runners.keys().copied().collect();
+        let mut ids: Vec<RegionCoords> =
+            self.runners.keys().copied().filter(|id| !held.contains(id)).collect();
         schedule.shuffle(&mut ids);
         // Last round's late regions tick here without having seen their
         // inputs, then catch up at the next `pump()`.
@@ -514,6 +542,11 @@ pub struct WorldManager<S: RegionSpawner> {
     lod_tile_waiting: BTreeMap<LodKey, BTreeSet<RegionCoords>>,
     lod_builder: Box<dyn LodBuilder>,
     lod_results: Receiver<LodResult>,
+    /// Regions handed arrivals in the `Departures` being handled, with their
+    /// stamp: a history directive for one (a delivered person's walk-on)
+    /// goes as a `Transfer` of the same stamp, so it lands behind the body
+    /// even when the arrival is held. Emptied by `deliver_directives`.
+    directive_stamps: BTreeMap<RegionCoords, crate::Tick>,
 }
 
 impl<S: RegionSpawner> WorldManager<S> {
@@ -566,6 +599,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             lod_tile_waiting: BTreeMap::new(),
             lod_builder,
             lod_results,
+            directive_stamps: BTreeMap::new(),
         }
     }
 
@@ -627,6 +661,7 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// get directives — the history defers what acts on a stopping one — so one for any
     /// other region is a bug, and dropped.
     fn deliver_directives(&mut self) {
+        let stamps = std::mem::take(&mut self.directive_stamps);
         let Some(history) = self.history.as_mut() else { return };
         // Regions lost (thread died, respawned) during this delivery: the respawn's
         // catch-up already placed their people, so what is left for them is stale.
@@ -641,7 +676,11 @@ impl<S: RegionSpawner> WorldManager<S> {
                 log::error!("history directive for {:?}, which is not running, dropped: {:?}", d.region, d.event);
                 continue;
             }
-            if !self.send_to_region(d.region, RegionInput::Event(d.event)) {
+            let input = match stamps.get(&d.region) {
+                Some(&stamp) => RegionInput::Transfer(d.event, stamp),
+                None => RegionInput::Event(d.event),
+            };
+            if !self.send_to_region(d.region, input) {
                 lost.insert(d.region);
             }
         }
@@ -1155,7 +1194,8 @@ impl<S: RegionSpawner> WorldManager<S> {
                 let queued: BTreeSet<ClientId> = events
                     .iter()
                     .filter_map(|e| match e {
-                        RegionInput::Event(GameEventKind::ParkPlayer(c)) => Some(*c),
+                        RegionInput::Event(GameEventKind::ParkPlayer(c))
+                        | RegionInput::Transfer(GameEventKind::ParkPlayer(c), _) => Some(*c),
                         _ => None,
                     })
                     .collect();
@@ -1173,7 +1213,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                     self.subscribe(client, rc);
                 }
             }
-            RegionOutput::Departures(list) => {
+            RegionOutput::Departures(list, stamp) => {
                 for (mut bundle, target) in list {
                     let client = bundle.client.as_ref().map(|(c, _)| *c);
                     if crate::off_map(self.map_extent(), target) {
@@ -1184,7 +1224,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                         let t = &mut bundle.body.pose.translation;
                         t.x = t.x.clamp(0.0, crate::REGION_SIZE);
                         t.z = t.z.clamp(0.0, crate::REGION_SIZE);
-                        self.send_to_region(rc, RegionInput::Event(GameEventKind::EntityArrived(bundle)));
+                        self.send_to_region(rc, RegionInput::Transfer(GameEventKind::EntityArrived(bundle), stamp));
                         continue;
                     }
                     if let (EntityKind::Person { person }, Some(history)) = (bundle.kind, self.history.as_mut()) {
@@ -1199,14 +1239,16 @@ impl<S: RegionSpawner> WorldManager<S> {
                     self.ensure_running(target);
                     self.send_to_region(
                         target,
-                        RegionInput::Event(GameEventKind::EntityArrived(bundle)),
+                        RegionInput::Transfer(GameEventKind::EntityArrived(bundle), stamp),
                     );
+                    self.directive_stamps.insert(target, stamp);
                     if let Some(m) = client.and_then(|c| self.moving.get_mut(&c)) {
                         // The body crossed a seam while its move's park was on the
                         // way: park it where it went (its home is the move target).
                         m.from = target;
                         let c = client.expect("moving is keyed by client");
-                        self.send_to_region(target, RegionInput::Event(GameEventKind::ParkPlayer(c)));
+                        // Behind the arrival, in its slot.
+                        self.send_to_region(target, RegionInput::Transfer(GameEventKind::ParkPlayer(c), stamp));
                         self.refresh_keepalive(rc, now_ms);
                         self.refresh_keepalive(target, now_ms);
                     } else if let Some(p) = client.and_then(|c| self.parking.get_mut(&c)) {
@@ -1214,7 +1256,8 @@ impl<S: RegionSpawner> WorldManager<S> {
                         // the old region found nobody; park it where it went.
                         p.region = target;
                         let c = client.expect("parking is keyed by client");
-                        self.send_to_region(target, RegionInput::Event(GameEventKind::ParkPlayer(c)));
+                        // Behind the arrival, in its slot.
+                        self.send_to_region(target, RegionInput::Transfer(GameEventKind::ParkPlayer(c), stamp));
                         self.refresh_keepalive(rc, now_ms);
                         self.refresh_keepalive(target, now_ms);
                     } else if let Some(c) = client {
@@ -1229,7 +1272,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                     }
                 }
             }
-            RegionOutput::GhostUpdates(list) => {
+            RegionOutput::GhostUpdates(list, stamp) => {
                 for (mut data, target) in list {
                     // Ghost updates NEVER wake a region.
                     let running = self
@@ -1240,7 +1283,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                         continue;
                     }
                     data.isometry = crate::rebase_isometry(&data.isometry, rc, target);
-                    self.send_to_region(target, RegionInput::Event(GameEventKind::GhostUpdate(data)));
+                    self.send_to_region(target, RegionInput::Transfer(GameEventKind::GhostUpdate(data), stamp));
                 }
             }
         }
@@ -1800,8 +1843,9 @@ impl<S: RegionSpawner> WorldManager<S> {
                 RegionInput::Event(GameEventKind::PlayerInput(..)) => {
                     log::debug!("send_to_region: {rc:?} is stopping; player input dropped");
                 }
-                RegionInput::Event(kind) => {
-                    self.pending_events.entry(rc).or_default().push(RegionInput::Event(kind));
+                input @ (RegionInput::Event(_) | RegionInput::Transfer(..)) => {
+                    // A transfer keeps its stamp for the region's next run.
+                    self.pending_events.entry(rc).or_default().push(input);
                 }
                 other => log::debug!("send_to_region: {rc:?} is stopping; {other:?} dropped"),
             }

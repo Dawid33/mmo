@@ -1082,7 +1082,7 @@ fn arrival_into_stopping_region_waits_for_its_park() {
     w.now_ms += TICK_RATE;
     w.manager.spawner_mut().tick_all();
     let tick_outputs: Vec<_> = w.region_out.try_iter().collect();
-    assert!(tick_outputs.iter().any(|(_, o)| matches!(o, RegionOutput::Departures(d) if !d.is_empty())));
+    assert!(tick_outputs.iter().any(|(_, o)| matches!(o, RegionOutput::Departures(d, _) if !d.is_empty())));
     for (r, o) in tick_outputs.into_iter().chain(stop_outputs) {
         w.manager.handle_region_output(r, o, w.now_ms);
     }
