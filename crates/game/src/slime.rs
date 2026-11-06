@@ -358,7 +358,9 @@ mod tests {
     #[test]
     fn collider_fills_the_cube_height() {
         for size in [1, 2, 4] {
-            let ColliderSpec::CapsuleY { half_height, radius } = slime_collider(size);
+            let ColliderSpec::CapsuleY { half_height, radius } = slime_collider(size) else {
+                panic!("a slime is a capsule")
+            };
             assert!((2.0 * (half_height + radius) - slime_edge_units(size)).abs() < 1e-4);
         }
     }

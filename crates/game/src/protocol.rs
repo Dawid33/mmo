@@ -328,10 +328,69 @@ impl EntityId {
 }
 
 /// Shape spec carried across the transfer seam so the receiving region can
-/// rebuild the collider. Players are capsules; new kinds extend this enum.
+/// rebuild the collider (one collider per body, at the body origin).
+/// Players, slimes and people are Y capsules; dynamic bodies may be any of
+/// these. A dynamic body's mass comes from [`crate::mass_props`], never from
+/// the collider. New variants go at the END (the bincode variant index is in
+/// saved regions, via halo mirrors).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, state_hash::StateHash)]
 pub enum ColliderSpec {
     CapsuleY { half_height: f32, radius: f32 },
+    Cuboid { half_extents: Vector },
+    Ball { radius: f32 },
+    /// Primitive parts only (no nested compounds), in the order given.
+    Compound(Vec<(Pose, ColliderSpec)>),
+}
+
+impl ColliderSpec {
+    /// The parry shape this spec builds.
+    ///
+    /// # Panics
+    /// On a compound nested in a compound.
+    pub fn shared_shape(&self) -> parry3d::shape::SharedShape {
+        use parry3d::shape::SharedShape;
+        match self {
+            ColliderSpec::CapsuleY { half_height, radius } => SharedShape::capsule_y(*half_height, *radius),
+            ColliderSpec::Cuboid { half_extents } => SharedShape::cuboid(half_extents.x, half_extents.y, half_extents.z),
+            ColliderSpec::Ball { radius } => SharedShape::ball(*radius),
+            ColliderSpec::Compound(parts) => SharedShape::compound(
+                parts
+                    .iter()
+                    .map(|(pose, part)| {
+                        assert!(
+                            !matches!(part, ColliderSpec::Compound(_)),
+                            "ColliderSpec: a compound's parts must be primitives"
+                        );
+                        (*pose, part.shared_shape())
+                    })
+                    .collect(),
+            ),
+        }
+    }
+
+    /// The spec of a primitive or compound-of-primitives shape (what
+    /// [`Self::shared_shape`] builds); `None` for any other shape.
+    pub fn of_shape(shape: &dyn parry3d::shape::Shape) -> Option<Self> {
+        if let Some(cap) = shape.as_capsule() {
+            return Some(ColliderSpec::CapsuleY { half_height: cap.half_height(), radius: cap.radius });
+        }
+        if let Some(c) = shape.as_cuboid() {
+            return Some(ColliderSpec::Cuboid { half_extents: c.half_extents });
+        }
+        if let Some(b) = shape.as_ball() {
+            return Some(ColliderSpec::Ball { radius: b.radius });
+        }
+        let compound = shape.as_compound()?;
+        let parts = compound
+            .shapes()
+            .iter()
+            .map(|(pose, part)| match Self::of_shape(&**part)? {
+                ColliderSpec::Compound(_) => None,
+                spec => Some((*pose, spec)),
+            })
+            .collect::<Option<Vec<_>>>()?;
+        Some(ColliderSpec::Compound(parts))
+    }
 }
 
 /// Which rapier body type a transferred body is rebuilt as. Players, slimes
@@ -359,7 +418,10 @@ pub struct BodyState {
     pub gravity_scale: f32,
     pub ccd: bool,
     pub locked_axes: rapier3d::dynamics::LockedAxes,
-    /// Explicit mass properties of a dynamic body (`None`: kinematic).
+    /// Explicit mass properties of a dynamic body (`None`: kinematic): its
+    /// WHOLE mass. A dynamic body's colliders are massless (density 0,
+    /// `Rollback::build_body_safe`), so this is exactly the additional mass
+    /// properties it is built with, and rapier hands it back bit-unchanged.
     pub mass: Option<parry3d::mass_properties::MassProperties>,
 }
 
@@ -396,7 +458,22 @@ impl BodyState {
             gravity_scale: body.gravity_scale(),
             ccd: body.is_ccd_enabled(),
             locked_axes: body.locked_axes(),
-            mass: dynamic.then(|| body.mass_properties().local_mprops),
+            mass: dynamic.then(|| Self::explicit_mass(body)),
+        }
+    }
+
+    /// A dynamic body's whole mass: its additional mass properties, which
+    /// are all of it since its colliders are massless — and which, unlike
+    /// the total, are already right before the first step recomputes it. A
+    /// body given no explicit mass (collider density only) carries its
+    /// total, which the receiver rebuilds as explicit mass over massless
+    /// colliders.
+    fn explicit_mass(body: &rapier3d::dynamics::RigidBody) -> parry3d::mass_properties::MassProperties {
+        use rapier3d::dynamics::RigidBodyAdditionalMassProps;
+        let mprops = body.mass_properties();
+        match mprops.additional_local_mprops.as_deref() {
+            Some(RigidBodyAdditionalMassProps::MassProps(m)) => *m,
+            _ => mprops.local_mprops,
         }
     }
 
@@ -427,8 +504,17 @@ impl BodyState {
     }
 
     /// Re-apply this state to an existing body (a halo mirror upgraded
-    /// in place, or a replayed arrival).
+    /// in place, or a replayed arrival): type and, for a dynamic body, its
+    /// explicit mass too. The body's colliders must then be massless
+    /// (`Rollback::apply_body_state_safe` sees to that).
     pub fn apply_to(&self, body: &mut rapier3d::dynamics::RigidBody) {
+        body.set_body_type(
+            match self.kind {
+                BodyKind::Dynamic => rapier3d::dynamics::RigidBodyType::Dynamic,
+                BodyKind::KinematicPosition => rapier3d::dynamics::RigidBodyType::KinematicPositionBased,
+            },
+            false,
+        );
         body.set_position(self.pose, true);
         body.set_linear_damping(self.linear_damping);
         body.set_angular_damping(self.angular_damping);
@@ -438,6 +524,9 @@ impl BodyState {
         if self.kind == BodyKind::Dynamic {
             body.set_linvel(self.linvel, false);
             body.set_angvel(self.angvel, false);
+            if let Some(m) = self.mass {
+                body.set_additional_mass_properties(m, false);
+            }
         }
         *body.activation_mut() = self.activation;
     }

@@ -1462,11 +1462,16 @@ impl Rollback {
             },
         );
         self.data.ecs.rigidbody.set_safe(e, Some(handle));
-        match collider {
-            ColliderSpec::CapsuleY { half_height, radius } => {
-                self.attach_capsule_collider_safe(e, handle, *half_height, *radius);
-            }
+        // One collider at the body origin. A dynamic body's is massless: its
+        // mass is the state's explicit `mass` (`mass_props`), which rapier
+        // then returns bit-unchanged. Kinematic bodies keep the default
+        // density (their mass is never used, but it is hashed state).
+        let mut builder = rapier3d::prelude::ColliderBuilder::new(collider.shared_shape())
+            .user_data(e.data().as_ffi() as u128);
+        if state.kind == crate::BodyKind::Dynamic {
+            builder = builder.density(0.0);
         }
+        self.attach_collider_safe(handle, builder.build());
     }
 
     /// Body+collider insertion from a bundle — the create_player_safe insert
@@ -1479,6 +1484,17 @@ impl Rollback {
     /// mirror upgraded in place, or a replayed arrival).
     fn apply_body_state_safe(&mut self, e: EntityKey, state: &crate::BodyState) {
         let Some(handle) = *self.data.ecs.rigidbody.try_get(e) else { return };
+        if state.kind == crate::BodyKind::Dynamic {
+            // A kinematic mirror becoming a dynamic body: its colliders lose
+            // their density, so the explicit mass is all of its mass.
+            let colliders: Vec<_> = self.data.physics.bodies.get(handle).map(|b| b.colliders().to_vec()).unwrap_or_default();
+            for ch in colliders {
+                let massless = self.data.physics.colliders.get(ch).is_some_and(|c| c.density() == 0.0);
+                if !massless {
+                    self.data.physics.colliders.mutate_collider_safe(ch, |c| c.set_density(0.0));
+                }
+            }
+        }
         self.data.physics.bodies.mutate_body_safe(handle, |b| state.apply_to(b));
         self.data.send(GameDataUpdate::new(
             GameDataTransactionKind::Do,
@@ -1705,8 +1721,8 @@ impl Rollback {
             .collect()
     }
 
-    /// The transferable shape spec of a body's first collider, or the player
-    /// default. Non-capsule shapes don't cross the seam yet.
+    /// The transferable shape spec of a body's first collider (capsule,
+    /// cuboid, ball or a compound of those), or the player default.
     fn collider_spec_of(&self, handle: RigidBodyHandle) -> crate::ColliderSpec {
         self.data
             .physics
@@ -1714,13 +1730,8 @@ impl Rollback {
             .get(handle)
             .and_then(|b| b.colliders().first().copied())
             .and_then(|ch| self.data.physics.colliders.get(ch))
-            .and_then(|c| {
-                c.shape().as_capsule().map(|cap| crate::ColliderSpec::CapsuleY {
-                    half_height: cap.half_height(),
-                    radius: cap.radius,
-                })
-            })
-            // Non-capsule shapes don't transfer yet; the player default.
+            .and_then(|c| crate::ColliderSpec::of_shape(c.shape()))
+            // Other shapes don't transfer; the player default.
             .unwrap_or(crate::ColliderSpec::CapsuleY {
                 half_height: PLAYER_CAPSULE_HALF_HEIGHT,
                 radius: PLAYER_CAPSULE_RADIUS,

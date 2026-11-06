@@ -51,6 +51,7 @@ mod jump_arc;
 mod kinematic;
 mod lod_streaming;
 mod log_model;
+mod mass_props;
 mod multi_client;
 mod orders;
 mod packet_codec;

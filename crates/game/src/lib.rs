@@ -33,6 +33,7 @@ pub mod item_piles;
 pub mod lod;
 pub mod mining;
 pub mod lod_builder;
+pub mod mass_props;
 mod migrate;
 pub mod movement;
 pub mod orders;

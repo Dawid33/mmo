@@ -9,6 +9,8 @@
 //!
 //! A fourth scene bootstraps a small synthetic world history
 //! (`game::history`) and pins crc32 of its encoded history file.
+//! A fifth pins the explicit mass properties of a compound collider spec
+//! (`game::mass_props`: our own Jacobi frame, no glamx eigen solve).
 //!
 //! Every constant holds on every target: [`WASM_SCENE_DIGEST`] is crc32 of
 //! the region's canonical bincode bytes (`SerializedRegion`, the parking and
@@ -97,6 +99,13 @@ const VOXEL_BODY_TICKS: usize = 30;
 /// come from `REGION_BLOCKS`), so it is pinned at the test default of 64
 /// blocks only, and on `TICK_RATE`.
 const HISTORY_DIGEST: u32 = 0x4869_3884;
+
+/// crc32 of the field bits of `game::mass_props::mass_properties` of
+/// [`l_shape`] (two cuboids, one turned 30° about Y) at
+/// `BODY_DEFAULT_DENSITY`, on every target: the compound's own Jacobi frame
+/// (`jacobi_eigen_sym3`) and `Quat::from_mat3` must agree bit for bit.
+/// Independent of the chunk and region size.
+const EXPLICIT_MASS_DIGEST: u32 = 0x1A48_699B;
 
 /// The value pinned for this build's chunk size: `at2` at 2-block chunks,
 /// `at16` at 16 (0 elsewhere; see [`pinned_size`]).
@@ -369,6 +378,32 @@ fn history_scene() -> u32 {
     digest
 }
 
+/// The L-shape of `tests/mass_props.rs`, its rotation given by explicit
+/// components (no `sin`/`cos`) so the input is the same bits everywhere.
+fn l_shape() -> game::ColliderSpec {
+    use game::ColliderSpec;
+    let rot = Quat::from_xyzw(0.0, 0.258_819_04, 0.0, 0.965_925_8).normalize();
+    ColliderSpec::Compound(vec![
+        (Pose::from_translation(Vector::new(0.0, 8.0, 0.0)), ColliderSpec::Cuboid { half_extents: Vector::new(8.0, 8.0, 8.0) }),
+        (Pose::from_parts(Vector::new(24.0, 4.0, 2.0), rot), ColliderSpec::Cuboid { half_extents: Vector::new(16.0, 4.0, 6.0) }),
+    ])
+}
+
+/// crc32 of every field's bits of the L-shape's explicit mass properties.
+fn explicit_mass_scene() -> u32 {
+    let mp = game::mass_props::mass_properties(&l_shape(), game::mass_props::BODY_DEFAULT_DENSITY);
+    let (c, i, q) = (mp.local_com, mp.inv_principal_inertia, mp.principal_inertia_local_frame);
+    let mut bytes = Vec::new();
+    for v in [c.x, c.y, c.z, mp.inv_mass, i.x, i.y, i.z, q.x, q.y, q.z, q.w] {
+        bytes.extend_from_slice(&v.to_bits().to_le_bytes());
+    }
+    let digest = crc32fast::hash(&bytes);
+    if print_hash() {
+        log(&format!("EXPLICIT_MASS_DIGEST = 0x{digest:08X} ({mp:?})"));
+    }
+    digest
+}
+
 /// Whether the region size has a pinned history digest; prints a skip line if not.
 fn history_pinned() -> bool {
     let pinned = game::REGION_BLOCKS == 64;
@@ -485,4 +520,18 @@ fn history_hash_wasm() {
         return;
     }
     assert_eq!(digest, HISTORY_DIGEST, "wasm32 history digest 0x{digest:08X} != golden 0x{HISTORY_DIGEST:08X}");
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn explicit_mass_compound_is_cross_target_native() {
+    let digest = explicit_mass_scene();
+    assert_eq!(digest, EXPLICIT_MASS_DIGEST, "native explicit mass digest 0x{digest:08X} != golden 0x{EXPLICIT_MASS_DIGEST:08X}");
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen_test::wasm_bindgen_test]
+fn explicit_mass_compound_is_cross_target_wasm() {
+    let digest = explicit_mass_scene();
+    assert_eq!(digest, EXPLICIT_MASS_DIGEST, "wasm32 explicit mass digest 0x{digest:08X} != golden 0x{EXPLICIT_MASS_DIGEST:08X}");
 }
