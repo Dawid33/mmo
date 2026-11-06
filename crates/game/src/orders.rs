@@ -175,6 +175,12 @@ pub trait TileSource {
     fn column_band(&self, _column: [i32; 2]) -> Option<(i32, i32)> {
         None
     }
+    /// The slope shape of the block at `p` (a floor walked up from its low
+    /// side, see [`crate::step_is_walk_up`]); `None` when it is not a slope or
+    /// unknown.
+    fn slope(&self, _p: TilePos) -> Option<crate::SlopeShape> {
+        None
+    }
 }
 
 /// Whether `kind` may be designated on tile `p`.
@@ -324,6 +330,14 @@ impl TileSource for Rollback {
         crate::edit::locate(p)
             .and_then(|(coords, local)| self.current_block(coords, local))
             .map_or(0, |b| b.limb())
+    }
+
+    /// Classifies the chisel of the block at `p`; implied ground has none.
+    fn slope(&self, p: TilePos) -> Option<crate::SlopeShape> {
+        let (coords, (bx, by, bz)) = crate::edit::locate(p)?;
+        let e = self.chunk_key_at(coords)?;
+        let chunk = self.data.ecs.chunk.try_get(e).as_ref()?;
+        chunk.chisel.get(&crate::BlockIndex::from_xyz(bx, by, bz)).and_then(crate::slope::classify)
     }
 }
 

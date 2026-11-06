@@ -12,7 +12,7 @@ use state_hash::StateHash;
 
 use crate::movement::{MoveKeys, PLAYER_CAPSULE_HALF_HEIGHT, PLAYER_CAPSULE_RADIUS, STEP_HEIGHT, UNITS_PER_METER};
 use crate::{
-    find_path, nearest_standable, off_map, standable, ClientId, MapExtent, RegionCoords, Rollback, TilePos, TileSource,
+    find_path, nearest_standable, walk_ups, off_map, standable, ClientId, MapExtent, RegionCoords, Rollback, TilePos, TileSource,
     BLOCK_VOXELS, MAX_PATH_NODES, REGION_BLOCKS, TICK_RATE,
 };
 
@@ -156,7 +156,8 @@ impl Rollback {
         let Some(feet) = self.body_feet(e) else { return false };
         let Some(from) = current_tile(self, feet) else { return false };
         let Some((path, exit)) = plan_walk(self, from, &goal, here, map) else { return false };
-        self.data.ecs.walker.set_safe(e, Some(Walker::new(goal, path, exit)));
+        let walk_up = walk_ups(self, &path);
+        self.data.ecs.walker.set_safe(e, Some(Walker::new(goal, path, exit, walk_up)));
         true
     }
 
@@ -223,6 +224,7 @@ impl Rollback {
                     current_tile(self, feet).and_then(|from| plan_walk(self, from, &w.goal, here, map))
                 {
                     w.next = Walker::first_next(&path);
+                    w.walk_up = walk_ups(self, &path);
                     w.path = path;
                     w.exit = exit;
                 }
@@ -247,7 +249,10 @@ impl Rollback {
             .body_feet(e)
             .and_then(|feet| current_tile(self, feet))
             .and_then(|from| plan_walk(self, from, &old.goal, here, map));
-        let new = plan.map(|(path, exit)| Walker::new(old.goal, path, exit));
+        let new = plan.map(|(path, exit)| {
+            let walk_up = walk_ups(self, &path);
+            Walker::new(old.goal, path, exit, walk_up)
+        });
         self.data.ecs.walker.set_safe(e, new);
     }
 
@@ -277,6 +282,9 @@ pub struct Walker {
     pub goal: Goal,
     /// The planned tiles, inclusive of the start and the end.
     pub path: Vec<TilePos>,
+    /// Per tile of `path`: the step onto it walks up a slope, no jump
+    /// ([`crate::walk_ups`]).
+    pub walk_up: Vec<bool>,
     /// Index into `path` of the waypoint being walked to.
     pub next: u32,
     /// Outward `(dx, dz)` unit step once the path's last tile is the region
@@ -291,9 +299,9 @@ pub struct Walker {
 }
 
 impl Walker {
-    fn new(goal: Goal, path: Vec<TilePos>, exit: Option<[i8; 2]>) -> Self {
+    fn new(goal: Goal, path: Vec<TilePos>, exit: Option<[i8; 2]>, walk_up: Vec<bool>) -> Self {
         let next = Self::first_next(&path);
-        let mut w = Walker { goal, path, next, exit, best_dist: 0, stalled: 0, replanned: false };
+        let mut w = Walker { goal, path, walk_up, next, exit, best_dist: 0, stalled: 0, replanned: false };
         w.best_dist = w.remaining();
         w
     }
@@ -421,8 +429,8 @@ pub fn edge_toward(src: &impl TileSource, from: TilePos, goal: &Goal, here: Regi
 /// One tick of walking intent for a body with feet at `feet` (voxel units):
 /// forward, yawed toward the next waypoint's column centre (or, on the last
 /// tile of a walk that leaves the region, a block past it along `exit`); jump held when the
-/// waypoint is more than [`STEP_HEIGHT`] above the feet and the body is
-/// grounded. Never sprints. The yaw follows `movement::plan`'s convention:
+/// waypoint is more than [`STEP_HEIGHT`] above the feet, the body is
+/// grounded and the step is not a walk-up a slope ([`Walker::walk_up`]). Never sprints. The yaw follows `movement::plan`'s convention:
 /// forward is local −Z, so a heading `(dx, dz)` is `atan2(−dx, −dz)`.
 ///
 /// Jump is held, never pressed: `plan` toggles flight on a double tap, and
@@ -441,7 +449,8 @@ pub fn steer(walker: &Walker, feet: Vector, grounded: bool) -> (MoveKeys, f32) {
     };
     let (dx, dz) = (cx - feet.x, cz - feet.z);
     let yaw = libm::atan2f(-dx, -dz);
-    let climb = grounded && wp[1] as f32 * bv - feet.y > STEP_HEIGHT * UNITS_PER_METER;
+    let walk_up = walker.walk_up.get(walker.next as usize).copied().unwrap_or(false);
+    let climb = grounded && !walk_up && wp[1] as f32 * bv - feet.y > STEP_HEIGHT * UNITS_PER_METER;
     let keys = MoveKeys { forward: true, jump_held: climb, ..MoveKeys::default() };
     (keys, yaw)
 }

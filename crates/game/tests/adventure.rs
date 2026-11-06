@@ -7,9 +7,9 @@ use crate::common;
 use common::floor_chunks;
 use game::rapier3d::math::Vector;
 use game::{
-    edge_toward, feet_of, feet_tile, play_mode_update, state_hash, steer, Block, BlockId, EntityKey, GameEventKind, InputEvent, Key,
-    Goal, Motion, Order, PlayMode, Region, RegionCoords, Rollback, TilePos, TileSource, UiUpdate, Walker,
-    BLOCK_VOXELS, REGION_BLOCKS, STUCK_TICKS, TICK_RATE,
+    edge_toward, feet_of, feet_tile, play_mode_update, slope_chisel, state_hash, steer, Block, BlockId, BlockIndex, EntityKey,
+    GameEventKind, InputEvent, Key, Goal, Motion, Order, PlayMode, Region, RegionCoords, Rollback, Side, SlopeShape, TilePos,
+    TileSource, UiUpdate, Walker, BLOCK_VOXELS, CHUNK_BLOCKS, REGION_BLOCKS, STUCK_TICKS, TICK_RATE,
 };
 
 const CLIENT: game::ClientId = 7;
@@ -19,11 +19,30 @@ const TILE: TilePos = [10, 1, 12];
 /// One region with a flat one-block floor around the spawn and one player
 /// settled on it, with a render channel (rollback needs one).
 fn region_with_player() -> (Region, EntityKey) {
+    region_with_player_on(&[])
+}
+
+/// [`region_with_player`] with `cells` built into the terrain before genesis:
+/// each a [`WALL`] block, chiselled into the slope when one is given.
+fn region_with_player_on(cells: &[(TilePos, Option<SlopeShape>)]) -> (Region, EntityKey) {
     let (send, _recv) = crossbeam::channel::unbounded();
     let mut region = Region::new(Rollback::new(Some(send.clone())), Some(send), RegionCoords::new(0, 0), None);
     let (x, z) = region.data().spawn_xz();
     let edge = common::CHUNK_EDGE;
-    region.with_data(|r| r.seed_terrain_genesis(floor_chunks(x - edge..x + edge, z - edge..z + edge, 16)));
+    let mut chunks = floor_chunks(x - edge..x + edge, z - edge..z + edge, 16);
+    let cb = CHUNK_BLOCKS as i32;
+    for &(p, slope) in cells {
+        let (_, chunk) = chunks
+            .iter_mut()
+            .find(|(c, _)| [c.x as i32, c.y as i32, c.z as i32] == [p[0].div_euclid(cb), p[1].div_euclid(cb), p[2].div_euclid(cb)])
+            .unwrap_or_else(|| panic!("no floor chunk under {p:?}"));
+        let l = p.map(|v| v.rem_euclid(cb) as usize);
+        chunk.set_block(l[0], l[1], l[2], Block::new(WALL));
+        if let Some(shape) = slope {
+            chunk.chisel.insert(BlockIndex::from_xyz(l[0], l[1], l[2]), slope_chisel(WALL, shape));
+        }
+    }
+    region.with_data(|r| r.seed_terrain_genesis(chunks));
     region.handle_event(GameEventKind::CreateClient(CLIENT)).unwrap();
     let e = *region.data().player_entites.get(&CLIENT).unwrap();
     for _ in 0..20 {
@@ -211,7 +230,12 @@ fn set_mode_teleport_clears_fall_velocity() {
 const WALL: BlockId = BlockId(1);
 
 fn adventure_at(at: TilePos) -> (Region, EntityKey) {
-    let (mut region, e) = region_with_player();
+    adventure_on(at, &[])
+}
+
+/// [`adventure_at`] on terrain with `cells` built in ([`region_with_player_on`]).
+fn adventure_on(at: TilePos, cells: &[(TilePos, Option<SlopeShape>)]) -> (Region, EntityKey) {
+    let (mut region, e) = region_with_player_on(cells);
     region
         .handle_event(GameEventKind::Order(CLIENT, Order::SetMode { mode: PlayMode::Adventure, at: Some(at) }))
         .unwrap();
@@ -386,6 +410,57 @@ fn move_to_climbs_step() {
     assert_eq!(body_tile(&region, e), [20, 2, 10], "the body must end on the upper level");
 }
 
+/// Walks until the walker is gone (like [`walk_until_arrived`]); the highest
+/// `Motion::vel_y` seen. Walking (autostep included) never makes it positive:
+/// only a jump does (it leaves the first tick at `JUMP_SPEED` less one tick
+/// of gravity).
+fn walk_max_vel_y(region: &mut Region, e: EntityKey, max: u32) -> f32 {
+    let mut most = f32::MIN;
+    for _ in 0..max {
+        tick(region);
+        most = most.max(motion_of(region, e).vel_y);
+        if walker(region, e).is_none() {
+            return most;
+        }
+    }
+    panic!("still walking after {max} ticks, body on {:?}", body_tile(region, e));
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn walker_walks_up_a_slope_without_jumping() {
+    // A one-block platform (x 13..24) fronted by a row of slopes at x = 12,
+    // low side toward the start.
+    let slopes = (6..15).map(|z| ([12, 1, z], Some(SlopeShape::Straight { low: Side::NegX })));
+    let platform = (13..24).flat_map(|x| (6..15).map(move |z| ([x, 1, z], None)));
+    let cells: Vec<_> = slopes.chain(platform).collect();
+    let (mut region, e) = adventure_on([4, 1, 10], &cells);
+    move_to(&mut region, here_goal([20, 10], None));
+    let w = walker(&region, e).expect("MoveTo must start a walk");
+    assert_eq!(w.walk_up.len(), w.path.len());
+    assert!(w.walk_up.contains(&true), "the path walks up the slope: {:?}", w.path);
+    let vel_y = walk_max_vel_y(&mut region, e, walk_budget(16.0) + 20);
+    assert!(vel_y <= 0.0, "the body jumped (vel_y {vel_y})");
+    assert_eq!(body_tile(&region, e), [20, 2, 10], "the body must end on the upper level");
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn walker_jumps_onto_a_slope_from_its_side() {
+    // One slope whose low side (and both its diagonals) is walled off 2 high:
+    // the only way up is a lateral jump climb.
+    let slope = ([12, 1, 10], Some(SlopeShape::Straight { low: Side::NegX }));
+    let walls = (9..=11).flat_map(|z| [1, 2].map(|y| ([11, y, z], None)));
+    let cells: Vec<_> = std::iter::once(slope).chain(walls).collect();
+    let (mut region, e) = adventure_on([12, 1, 4], &cells);
+    move_to(&mut region, here_goal([12, 10], Some(2)));
+    let w = walker(&region, e).expect("MoveTo must start a walk");
+    assert!(!w.walk_up.contains(&true), "no walk-up from the side: {:?}", w.path);
+    let vel_y = walk_max_vel_y(&mut region, e, walk_budget(8.0) + 20);
+    assert_eq!(body_tile(&region, e), [12, 2, 10], "the body must end on the slope");
+    assert!(vel_y > 0.0, "the climb from the side is a jump");
+}
+
 #[test]
 fn move_to_undo_bit_exact() {
     let (mut region, _) = adventure_at([4, 1, 4]);
@@ -457,6 +532,9 @@ fn steer_points_at_next_waypoint() {
     assert!(steer(&walk([5, 2, 4]), feet, true).0.jump_held);
     assert!(!steer(&walk([5, 2, 4]), feet, false).0.jump_held);
     assert!(!steer(&walk([5, 0, 4]), feet, true).0.jump_held);
+    // No jump onto a slope walked up from its low side.
+    let up = Walker { walk_up: vec![false, true], ..walk([5, 2, 4]) };
+    assert!(!steer(&up, feet, true).0.jump_held);
 }
 
 /// A flat one-block floor over every column except `holes`.

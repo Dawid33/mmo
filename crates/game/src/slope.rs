@@ -2,7 +2,7 @@
 //! own material, shaped like a Minecraft stair (spec
 //! `docs/superpowers/specs/2026-11-06-terrain-slopes-design.md`). Every shape
 //! is octant-aligned: the bottom half plus one, two or three top quadrants.
-use crate::block::{ChiselData, BLOCK_VOXELS, HALF_BLOCK_VOXELS};
+use crate::block::{ChiselData, HALF_BLOCK_VOXELS};
 use crate::block_props::block_props;
 use crate::registry::BlockId;
 
@@ -125,6 +125,7 @@ pub fn display_name(id: BlockId, chisel: Option<&ChiselData>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::block::BLOCK_VOXELS;
     use crate::{install_block_props, BlockRegistry};
 
     const STONE: BlockId = BlockId(2);

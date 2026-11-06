@@ -21,7 +21,8 @@ pub const MAX_PATH_NODES: u32 = 32_768;
 pub const STEP_COST: u32 = 10;
 /// Cost of one diagonal step.
 pub const DIAG_COST: u32 = 14;
-/// Extra cost of a step that changes level.
+/// Extra cost of a step that changes level — except a walk-up a slope
+/// ([`step_is_walk_up`]), charged like a level step.
 pub const CLIMB_COST: u32 = 5;
 /// Lowest block `y` `nearest_standable` scans.
 pub const COLUMN_SCAN_Y_MIN: i32 = -256;
@@ -31,7 +32,7 @@ pub const COLUMN_SCAN_Y_MAX: i32 = 512;
 /// The water block id (`assets/blocks/blocks.ron`).
 const WATER: BlockId = BlockId(5);
 
-pub(crate) fn is_water(b: BlockId) -> bool {
+pub fn is_water(b: BlockId) -> bool {
     b == WATER
 }
 
@@ -61,12 +62,28 @@ pub fn standable(src: &impl TileSource, p: TilePos) -> bool {
         && solid_block(src.block([p[0], p[1] - 1, p[2]]))
 }
 
+/// Octile distance. No `CLIMB_COST` per level: a slope climbs for free, so
+/// charging levels would overestimate (and A* stop returning cheapest paths).
 fn heuristic(a: TilePos, b: TilePos) -> u32 {
     let dx = a[0].abs_diff(b[0]);
     let dz = a[2].abs_diff(b[2]);
-    let dy = a[1].abs_diff(b[1]);
     let (lo, hi) = (dx.min(dz), dx.max(dz));
-    DIAG_COST * lo + STEP_COST * (hi - lo) + CLIMB_COST * dy
+    DIAG_COST * lo + STEP_COST * (hi - lo)
+}
+
+/// Whether the `dy = +1` step `from -> to` walks up a slope: `to`'s floor is
+/// a slope entered from its low side ([`crate::walk_up`]). Every other climb
+/// is a jump.
+pub fn step_is_walk_up(src: &impl TileSource, from: TilePos, to: TilePos) -> bool {
+    to[1] == from[1] + 1
+        && src.slope([to[0], to[1] - 1, to[2]]).is_some_and(|s| crate::walk_up(s, [from[0] - to[0], from[2] - to[2]]))
+}
+
+/// Per tile of `path`: whether the step onto it is a walk-up
+/// ([`step_is_walk_up`]); the first tile is `false`.
+pub fn walk_ups(src: &impl TileSource, path: &[TilePos]) -> Vec<bool> {
+    let steps = path.windows(2).map(|w| step_is_walk_up(src, w[0], w[1]));
+    path.first().map(|_| false).into_iter().chain(steps).collect()
 }
 
 /// Neighbour offsets in a fixed order (orthogonals first).
@@ -92,7 +109,7 @@ fn successors(src: &impl TileSource, p: TilePos, out: &mut Vec<(TilePos, u32)>) 
                 }
             }
             let mut cost = if diagonal { DIAG_COST } else { STEP_COST };
-            if dy != 0 {
+            if dy == -1 || (dy == 1 && !step_is_walk_up(src, p, q)) {
                 cost += CLIMB_COST;
             }
             out.push((q, cost));

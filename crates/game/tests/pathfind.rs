@@ -9,6 +9,7 @@ const LEAVES: BlockId = BlockId(15);
 #[derive(Default)]
 struct Src {
     blocks: BTreeMap<TilePos, BlockId>,
+    slopes: BTreeMap<TilePos, SlopeShape>,
 }
 
 impl Src {
@@ -48,6 +49,9 @@ impl TileSource for Src {
     }
     fn tree_limb(&self, _: TilePos) -> u8 {
         0
+    }
+    fn slope(&self, p: TilePos) -> Option<SlopeShape> {
+        self.slopes.get(&p).copied()
     }
 }
 
@@ -180,4 +184,42 @@ fn deterministic() {
     let b = path(&s, [0, 1, 0], [19, 1, 19]);
     assert!(a.is_some());
     assert_eq!(a, b);
+}
+
+/// A stone slope block at `p` (its floor tile is the one above).
+fn put_slope(s: &mut Src, p: TilePos, shape: SlopeShape) {
+    s.blocks.insert(p, STONE);
+    s.slopes.insert(p, shape);
+}
+
+#[test]
+fn slope_climb_costs_a_level_step() {
+    // A one-block step up along x = 10 (level 2 beyond it) with one slope,
+    // low side toward the start, 3.5 tiles off the straight line at the step.
+    let mut s = Src::floor(24);
+    for x in 10..24 {
+        for z in 0..24 {
+            s.blocks.insert([x, 1, z], STONE);
+        }
+    }
+    put_slope(&mut s, [10, 1, 9], SlopeShape::Straight { low: Side::NegX });
+    let p = path(&s, [1, 1, 1], [21, 2, 11]).expect("the step is climbable");
+    assert!(p.contains(&[10, 2, 9]), "the path must walk up the slope: {p:?}");
+    let ups = walk_ups(&s, &p);
+    assert_eq!(ups.len(), p.len());
+    assert_eq!(ups.iter().filter(|&&u| u).count(), 1, "one walk-up step, no jump: {p:?}");
+}
+
+#[test]
+fn wrong_side_slope_is_still_a_jump_climb() {
+    let mut s = Src::floor(12);
+    put_slope(&mut s, [5, 1, 5], SlopeShape::Straight { low: Side::NegX });
+    let on_slope = [5, 2, 5];
+    assert!(step_is_walk_up(&s, [4, 1, 5], on_slope), "from the low side");
+    for beside in [[5, 1, 4], [5, 1, 6], [6, 1, 5], [4, 1, 4]] {
+        assert!(!step_is_walk_up(&s, beside, on_slope), "from {beside:?}");
+    }
+    let p = path(&s, [5, 1, 4], on_slope).expect("a jump climb onto the slope is allowed");
+    assert_eq!(p, vec![[5, 1, 4], on_slope]);
+    assert_eq!(walk_ups(&s, &p), vec![false, false]);
 }
