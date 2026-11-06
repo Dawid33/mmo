@@ -226,7 +226,7 @@ fn fortress_mode_leaves_survival_state() {
         c.mode = game::PlayMode::Adventure;
         c.inventory_open = true;
         c.cursor = st(2, 3);
-        c.open_container = Some([1, 2, 3]);
+        c.open_container = Some(game::WorldBlockPos::new(1, 2, 3));
         c.mining = Some(game::Mining { target: [1, 1, 1], started_tick: 0, needed_ticks: 15 });
     });
     let before = game::state_hash(region.data());

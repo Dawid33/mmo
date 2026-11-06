@@ -124,9 +124,9 @@ thread_local! {
     /// [`take_pile_intents`]: `Region::handle_event` adds them to its
     /// outbox. Not state: never hashed, serialized or undone.
     static PILE_INTENTS: std::cell::RefCell<Vec<IntentMsg>> = const { std::cell::RefCell::new(Vec::new()) };
-    /// Cells whose own pile was written on this thread since the last
-    /// [`take_touched_piles`]: the region that wrote them sends the halo
-    /// deltas. Not state.
+    /// Cells whose own pile or chest was written on this thread since the
+    /// last [`take_touched_piles`]: the region that wrote them sends the
+    /// halo deltas. Not state.
     static TOUCHED_PILES: std::cell::RefCell<Vec<WorldBlockPos>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
@@ -138,6 +138,12 @@ pub(crate) fn take_pile_intents() -> Vec<IntentMsg> {
 /// The own pile cells written on this thread since the previous call.
 pub(crate) fn take_touched_piles() -> Vec<WorldBlockPos> {
     TOUCHED_PILES.with(|q| std::mem::take(&mut *q.borrow_mut()))
+}
+
+/// Marks own cell `p` written — its pile or its chest (`containers.rs`):
+/// the region re-sends the cell's halo mirrors (`Region::note_halo_writes`).
+pub(crate) fn touch_cell(p: WorldBlockPos) {
+    TOUCHED_PILES.with(|t| t.borrow_mut().push(p));
 }
 
 /// Sends `intent` to the pile at `cell` (a neighbour's) from `r`, into the
@@ -773,7 +779,7 @@ impl Rollback {
         let mut views = Vec::with_capacity(changes.len());
         for (p, new) in changes {
             debug_assert_eq!(p.to_local().0, rc, "a region writes only its own piles");
-            TOUCHED_PILES.with(|t| t.borrow_mut().push(p));
+            touch_cell(p);
             if let Some(old) = self.data.item_piles.remove(&p) {
                 self.data.pile_expiry.remove(&(old.expire_tick, p));
             }

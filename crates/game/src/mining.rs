@@ -206,9 +206,12 @@ impl Rollback {
     /// in the way place nothing.
     pub(crate) fn survival_place_safe(&mut self, client: ClientId, out: &mut Vec<IntentMsg>) -> bool {
         let Some(hit) = self.eye_hit(client) else { return false };
-        // A chest under the crosshair opens instead (Decision 10).
-        if self.data.containers().contains_key(&hit.block) {
-            self.open_container_safe(client, hit.block);
+        // A chest under the crosshair — here, or a neighbour's seen through
+        // the halo — opens instead (Decision 10).
+        let [x, y, z] = hit.block;
+        let cell = WorldBlockPos::from_local(*self.data.region, crate::BlockPos::new(x, y, z));
+        if self.data.container_seen(cell).is_some() {
+            self.open_container_safe(client, cell);
             return false;
         }
         let Some(c) = self.data.clients.get(&client) else { return false };

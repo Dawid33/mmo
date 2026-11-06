@@ -34,28 +34,30 @@ impl Client {
             fps_cam_mode,
             mode,
             inventory,
-            // An open inventory screen is closed on arrival, like the chest.
-            inventory_open: _,
+            // An open inventory screen stays open, with its chest.
+            inventory_open,
             selected,
             cursor,
             // Mining: a region-local target and a start tick of the old clock.
             mining: _,
             // An absolute tick of the old region's progress; none in the new.
             break_cooldown_until: _,
-            // A region-local chest cell: the view closes.
-            open_container: _,
+            // A world cell: the chest stays open across the seam; the new
+            // region closes it if it is out of reach or unseen
+            // (`Rollback::close_far_containers_safe`).
+            open_container,
         } = self;
         Client {
             input,
             fps_cam_mode,
             mode,
             inventory,
-            inventory_open: false,
+            inventory_open,
             selected,
             cursor,
             mining: None,
             break_cooldown_until: 0,
-            open_container: None,
+            open_container,
         }
     }
 }

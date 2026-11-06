@@ -51,7 +51,11 @@ pub const REGION_MAGIC: [u8; 8] = *b"MMOREGN\0";
 /// 15: item piles keyed by `WorldBlockPos`; `GameData` gained `halo_piles` and
 /// `pile_takes`; `HaloUpdate` gained `piles`; `Intent::DepositItems` /
 /// `TakeFromPile` and `IntentRefusal::PileFull` are new.
-pub const REGION_FILE_VERSION: u32 = 15;
+/// 16: chests keyed by `WorldBlockPos`; `GameData` gained `halo_containers`;
+/// `Client::open_container` is a `WorldBlockPos`; `HaloUpdate` gained
+/// `containers`; `Intent::PutInContainer` / `TakeFromContainer` and
+/// `IntentRefusal::ContainerFull` are new.
+pub const REGION_FILE_VERSION: u32 = 16;
 /// magic + version + region blocks + chunk blocks + world crc + payload crc.
 const HEADER_LEN: usize = 8 + 4 * 5;
 

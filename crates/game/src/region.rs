@@ -207,7 +207,7 @@ pub struct Region {
     /// reconcile clears it (its replays re-write chunks whose updates the
     /// forward ticks already sent).
     halo_dirty: std::collections::BTreeSet<crate::ChunkIndexKey>,
-    /// Own pile cells in the pile halo band written since the last
+    /// Own pile and chest cells in the pile halo band written since the last
     /// [`Region::take_halo_updates`] (`item_piles.rs`); cleared like
     /// `halo_dirty`.
     halo_pile_dirty: std::collections::BTreeSet<crate::WorldBlockPos>,
@@ -803,6 +803,8 @@ impl Region {
                     self.data.refund_refused_places_safe(client_id);
                     // Pile takes granted, deposits refused (`item_piles.rs`).
                     self.data.settle_pile_replies_safe(client_id);
+                    // Chest takes granted, puts refused (`containers.rs`).
+                    self.data.settle_container_replies_safe(client_id);
                 }
                 // Survival (Adventure): left held mines with break times,
                 // a right press places the selected block, Q / Ctrl+Q throw.
@@ -968,8 +970,10 @@ impl Region {
             }
             GameEventKind::HaloSourceGone(from) => {
                 self.data.drop_halo_source_safe(from);
-                // Its pile mirrors too: nobody answers takes of them now.
+                // Its pile and chest mirrors too: nobody answers takes of
+                // them now (an open chest view of one closes next tick).
                 self.data.drop_halo_piles_of_safe(from);
+                self.data.drop_halo_containers_of_safe(from);
             }
             GameEventKind::HaloUpdate(update) => {
                 self.data.apply_halo_update_safe(&update);
@@ -980,12 +984,15 @@ impl Region {
                     match action {
                         // Clicks land only on an open screen.
                         crate::UiAction::Click { .. } if !c.inventory_open => {}
+                        // With a chest open: what moves in or out of it is an
+                        // intent to its owner, here or across a seam
+                        // (`containers.rs`).
+                        crate::UiAction::Click { slot, button, shift } if c.open_container.is_some() => {
+                            self.data.container_click_safe(client_id, slot, button, shift, &mut intents_out);
+                        }
                         crate::UiAction::Click { slot, button, shift } => {
-                            // The open chest's slots, shared with any other
-                            // client that has it open.
-                            let container = c.open_container.and_then(|p| data.containers.get_mut(&p));
                             let Client { cursor, inventory, .. } = c;
-                            crate::click(cursor, inventory, container.map(|k| &mut k.slots), slot, button, shift);
+                            crate::click(cursor, inventory, None, slot, button, shift);
                         }
                         crate::UiAction::ToggleInventory => {
                             if let Some(rest) = toggle_inventory(c) {

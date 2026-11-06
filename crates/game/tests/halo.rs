@@ -190,6 +190,8 @@ fn halo_updates_roll_back_bit_exact() {
         ground: Vec::new(),
         // A pile on the neighbour's edge cell: its mirror rolls back too.
         piles: vec![(WorldBlockPos::from_local(SPAWN_REGION, game::BlockPos::new(REGION_BLOCKS as i32, 1, 3)), Some(pile(3)))],
+        // And a chest beside it (Task 6.4).
+        containers: vec![(chest_cell(), Some(game::Container::chest()))],
     };
     let before = game::state_hash(region.data());
     region.handle_event(GameEventKind::HaloUpdate(seed.clone())).unwrap();
@@ -199,6 +201,7 @@ fn halo_updates_roll_back_bit_exact() {
     {
         use game::WorldView as _;
         assert_eq!(region.data().view().pile(pile_cell), Some(&pile(3)), "WorldView reads the mirror");
+        assert_eq!(region.data().view().container(chest_cell()), Some(&game::Container::chest()), "and the chest's");
     }
     let bodies = region.data().physics.bodies.len();
     region.rollback_last_event();
@@ -216,14 +219,17 @@ fn halo_updates_roll_back_bit_exact() {
         deltas: vec![HaloDelta { chunk: WorldChunkPos::from_local(SPAWN_REGION, [n, 0, 0]), data: Some(dug) }],
         ground: Vec::new(),
         piles: vec![(WorldBlockPos::from_local(SPAWN_REGION, game::BlockPos::new(REGION_BLOCKS as i32, 1, 3)), Some(pile(5)))],
+        containers: vec![(chest_cell(), Some(stocked_chest()))],
     };
     region.handle_event(GameEventKind::HaloUpdate(patch)).unwrap();
     assert_ne!(game::state_hash(region.data()), seeded);
+    assert_eq!(region.data().halo_containers().get(&chest_cell()), Some(&stocked_chest()), "the chest delta");
     region.rollback_last_event();
     assert_eq!(game::state_hash(region.data()), seeded, "patch undone exactly");
     // The source gone: its pile mirrors go (nobody answers takes of them).
     region.handle_event(GameEventKind::HaloSourceGone(east())).unwrap();
     assert!(region.data().halo_piles().is_empty(), "no mirror of a gone source's pile");
+    assert!(region.data().halo_containers().is_empty(), "nor of its chest");
     region.rollback_last_event();
     assert_eq!(game::state_hash(region.data()), seeded, "the drop undoes exactly");
 }
@@ -381,3 +387,16 @@ fn lost_region_mirrors_dropped_on_unload() {
     assert_eq!(mirror_in(&mut rig, SPAWN_REGION, id), None, "the lost owner's mirror is gone");
 }
 
+
+/// The chest cell [`halo_updates_roll_back_bit_exact`] mirrors: east's edge
+/// column, next to its pile.
+fn chest_cell() -> WorldBlockPos {
+    WorldBlockPos::from_local(SPAWN_REGION, game::BlockPos::new(REGION_BLOCKS as i32 + 1, 1, 4))
+}
+
+/// A chest holding one stack.
+fn stocked_chest() -> game::Container {
+    let mut c = game::Container::chest();
+    c.slots[2] = Some(game::ItemStack { item: game::ItemId(1), count: 7 });
+    c
+}

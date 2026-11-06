@@ -111,6 +111,27 @@ pub enum Intent {
     /// only then); `Refused(.., NothingThere)` when there is none (or not
     /// yet pickable) — the loser of a race for the last item.
     TakeFromPile { cell: WorldBlockPos, item: crate::ItemId, count: u32, by: EntityId },
+    /// Put `stack` into the chest of the target cell `cell` (a
+    /// `Target::Container`): into `slot` only (empty, or the same item), or
+    /// with `None` anywhere it fits (a shift click). The sender gave the
+    /// stack up when it sent this; granted when all fit, else
+    /// `Refused(.., ContainerFull)` carrying the rest (`NothingThere`, all
+    /// of it, with no chest there), which goes back to the sender
+    /// (`Rollback::settle_container_replies_safe`).
+    PutInContainer { cell: WorldBlockPos, stack: crate::ItemStack, slot: Option<u8>, by: EntityId },
+    /// Take up to `count` of `item` from slot `slot` of the chest of the
+    /// target cell `cell`. Granted with the count actually taken — into the
+    /// sender's cursor (`to_cursor`) or inventory only then;
+    /// `Refused(.., NothingThere)` when the slot holds none of it (the loser
+    /// of a race for one slot).
+    TakeFromContainer {
+        cell: WorldBlockPos,
+        slot: u8,
+        item: crate::ItemId,
+        count: u32,
+        to_cursor: bool,
+        by: EntityId,
+    },
 }
 
 /// Required by the rollback map; never a real intent.
@@ -127,7 +148,9 @@ impl Intent {
             Intent::BreakBlock { by, .. }
             | Intent::PlaceBlock { by, .. }
             | Intent::DepositItems { by, .. }
-            | Intent::TakeFromPile { by, .. } => *by,
+            | Intent::TakeFromPile { by, .. }
+            | Intent::PutInContainer { by, .. }
+            | Intent::TakeFromContainer { by, .. } => *by,
         }
     }
 }
@@ -151,6 +174,8 @@ pub enum IntentRefusal {
     BadTarget,
     /// A deposit's items did not all fit in the piles around the cell.
     PileFull,
+    /// A put's items did not all fit in the chest (or its slot).
+    ContainerFull,
 }
 
 /// An owner's answer, delivered to `Intent::by` one tick after the intent
@@ -169,15 +194,19 @@ impl Default for IntentReply {
 }
 
 impl IntentReply {
-    /// The items it hands to its entity, and the pile cell they came from or
-    /// were meant for: a granted take, or a refused deposit's rest. A reply
-    /// that carries items is never given up silently (`WorldManager`).
+    /// The items it hands to its entity, and the cell (a pile's or a
+    /// chest's) they came from or were meant for: a granted take, or a
+    /// refused deposit's or put's rest. A reply that carries items is never
+    /// given up silently (`WorldManager`).
     pub fn carried_items(&self) -> Option<(WorldBlockPos, crate::ItemStack)> {
         match *self {
-            IntentReply::Granted(Intent::TakeFromPile { cell, item, count, .. }) => {
-                Some((cell, crate::ItemStack { item, count }))
-            }
-            IntentReply::Refused(Intent::DepositItems { cell, stack, .. }, _) => Some((cell, stack)),
+            IntentReply::Granted(
+                Intent::TakeFromPile { cell, item, count, .. } | Intent::TakeFromContainer { cell, item, count, .. },
+            ) => Some((cell, crate::ItemStack { item, count })),
+            IntentReply::Refused(
+                Intent::DepositItems { cell, stack, .. } | Intent::PutInContainer { cell, stack, .. },
+                _,
+            ) => Some((cell, stack)),
             _ => None,
         }
     }
@@ -426,6 +455,13 @@ impl Rollback {
                 }
                 return self.apply_pile_intent_safe(p, intent);
             }
+            (Target::Container(p), Intent::PutInContainer { .. } | Intent::TakeFromContainer { .. }) => {
+                if p.to_local().0 != *self.data.region {
+                    log::warn!("[intents] {intent:?} for {p:?} reached {:?}, not its owner", *self.data.region);
+                    return refused(IntentRefusal::BadTarget);
+                }
+                return self.apply_container_intent_safe(p, intent);
+            }
             (Target::Block(p), Intent::BreakBlock { .. } | Intent::PlaceBlock { .. }) => p,
             _ => return refused(IntentRefusal::BadTarget),
         };
@@ -457,7 +493,10 @@ impl Rollback {
                 }
                 self.set_block_in(pos, crate::Block::new(block))
             }
-            Intent::DepositItems { .. } | Intent::TakeFromPile { .. } => unreachable!("pile intents returned above"),
+            Intent::DepositItems { .. }
+            | Intent::TakeFromPile { .. }
+            | Intent::PutInContainer { .. }
+            | Intent::TakeFromContainer { .. } => unreachable!("pile and chest intents returned above"),
         };
         if done {
             IntentReply::Granted(intent)

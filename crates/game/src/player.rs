@@ -71,14 +71,15 @@ pub struct PlayerRecord {
 /// `client` as a parked record keeps it: what belongs to the connection —
 /// held input, the first-person flag, an open inventory — is reset, the
 /// cursor stack goes back into the inventory (what does not fit stays on the
-/// cursor), and what belongs to the region it stood in (mining, the break
-/// cooldown, an open chest: [`Client::arrive`]) is cleared, so a
+/// cursor), an open chest closes, and what belongs to the region it stood
+/// in (mining, the break cooldown: [`Client::arrive`]) is cleared, so a
 /// restored player starts like a fresh session in everything but its state.
 pub fn parked_client(client: &Client) -> Client {
     let mut c = client.clone();
     c.input = Default::default();
     c.fps_cam_mode = false;
     c.inventory_open = false;
+    c.open_container = None;
     if let Some(rest) = c.stow_cursor() {
         c.cursor = Some(rest);
     }

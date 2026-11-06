@@ -155,9 +155,9 @@ pub struct Client {
     pub mining: Option<crate::Mining>,
     /// No mining progress before this tick (set after each break).
     pub break_cooldown_until: u64,
-    /// The container (chest cell, region-local) whose screen is open
-    /// (`containers.rs`).
-    pub open_container: Option<crate::edit::BlockPos>,
+    /// The chest (its world cell — this region's, or a neighbour's seen
+    /// through the halo) whose screen is open (`containers.rs`).
+    pub open_container: Option<crate::WorldBlockPos>,
 }
 
 impl Client {
@@ -312,9 +312,15 @@ mod game_data {
         /// here (the mirror lags the owner's answer).
         #[undo(map)]
         pile_takes: BTreeMap<(crate::EntityId, crate::WorldBlockPos), crate::Tick>,
-        /// Block inventories (chests) by cell (`containers.rs`).
+        /// Block inventories (chests) by world cell — this region's cells
+        /// only (`containers.rs`).
         #[undo(map)]
-        containers: BTreeMap<crate::edit::BlockPos, crate::Container>,
+        containers: BTreeMap<crate::WorldBlockPos, crate::Container>,
+        /// Read-only mirror of the neighbours' chests within `HALO_BLOCKS`
+        /// of each edge (`containers.rs`, carried by halo updates like the
+        /// pile mirrors), by world cell: what a chest across a seam shows.
+        #[undo(map)]
+        halo_containers: BTreeMap<crate::WorldBlockPos, crate::Container>,
         /// Read-only mirror of the neighbours' terrain within
         /// `HALO_BLOCKS` of each edge (`halo.rs`), by world chunk.
         #[undo(map)]
@@ -455,8 +461,13 @@ impl GameData {
     }
 
     /// Block inventories (chests) by cell.
-    pub fn containers(&self) -> &std::collections::BTreeMap<crate::edit::BlockPos, crate::Container> {
+    pub fn containers(&self) -> &std::collections::BTreeMap<crate::WorldBlockPos, crate::Container> {
         &self.containers
+    }
+
+    /// The halo's mirrors of the neighbours' chests, by world cell.
+    pub fn halo_containers(&self) -> &std::collections::BTreeMap<crate::WorldBlockPos, crate::Container> {
+        &self.halo_containers
     }
 
     /// The piles' expiry index, `(expire_tick, cell)` in expiry order.

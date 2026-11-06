@@ -62,25 +62,28 @@ use slotmapd::Key as _;
 /// `GameData.halo_sent` was added (layout only — no mirror in these scenes;
 /// 16-block values only). Then for item piles keyed by `WorldBlockPos` and
 /// the new `GameData.halo_piles` / `pile_takes` (`game::item_piles`, Task
-/// 6.3; layout only — no pile in these scenes; 16-block values only).
+/// 6.3; layout only — no pile in these scenes; 16-block values only). Then
+/// for chests keyed by `WorldBlockPos`, the new `GameData.halo_containers`
+/// and `Client.open_container` as a `WorldBlockPos` (`game::containers`, Task
+/// 6.4; layout only — no chest in these scenes; 16-block values only).
 ///
 /// Every value is pinned per sim-chunk size (`game::CHUNK_BLOCKS`, a build
 /// dial): the same physical scene splits into different chunk entities,
 /// bodies and colliders at 2 and 16 blocks, so its bytes and hashes differ.
 /// Other sizes are not pinned and skip the comparison.
-const WASM_SCENE_DIGEST: u32 = pinned(0xFA8E_102F, 0x4F43_AF8F);
+const WASM_SCENE_DIGEST: u32 = pinned(0xFA8E_102F, 0x0DB5_5CC2);
 /// `game::state_hash` of the same state, on every target.
-const SCENE_STATE_HASH: u32 = pinned(0x5233_40BE, 0xF4D6_1473);
+const SCENE_STATE_HASH: u32 = pinned(0x5233_40BE, 0xADBF_F868);
 const SCENE_TICKS: usize = 120;
 /// crc32 of [`underground_scene`]'s region bytes, on every target.
-const UNDERGROUND_DIGEST: u32 = pinned(0x5448_586C, 0x312E_D984);
+const UNDERGROUND_DIGEST: u32 = pinned(0x5448_586C, 0x2DEF_E7AF);
 /// `game::state_hash` of the same state, on every target.
-const UNDERGROUND_STATE_HASH: u32 = pinned(0x4080_B196, 0x8F29_536A);
+const UNDERGROUND_STATE_HASH: u32 = pinned(0x4080_B196, 0x2521_E38D);
 
 /// crc32 of [`voxel_body_scene`]'s region bytes, on every target.
-const VOXEL_BODY_DIGEST: u32 = pinned(0x0F43_FFD4, 0x9427_660D);
+const VOXEL_BODY_DIGEST: u32 = pinned(0x0F43_FFD4, 0x286E_0739);
 /// `game::state_hash` of the same state, on every target.
-const VOXEL_BODY_STATE_HASH: u32 = pinned(0x8D9E_A328, 0x4E6A_F7D6);
+const VOXEL_BODY_STATE_HASH: u32 = pinned(0x8D9E_A328, 0x4A25_6EB1);
 /// Ticks of [`voxel_body_scene`] after the detach: mid-fall (it rests and
 /// despawns at ~50).
 const VOXEL_BODY_TICKS: usize = 30;

@@ -58,11 +58,15 @@ use game::{state_hash, GameEventKind, InputEvent, Key, Region, RegionCoords};
 /// Then for item piles keyed by `WorldBlockPos` and the new
 /// `GameData.halo_piles` / `pile_takes` (Task 6.3; empty here) — hashed
 /// layout only; 16 only.
+/// Then for chests keyed by `WorldBlockPos`, the new
+/// `GameData.halo_containers` and `Client.open_container` as a
+/// `WorldBlockPos` (Task 6.4; no chest placed here) — hashed layout only;
+/// 16 only.
 /// Pinned per sim-chunk size (`game::CHUNK_BLOCKS`): the same world splits
 /// into other chunk entities, bodies and colliders at 2 and 16 blocks.
 const SCENE_HASH: u32 = match game::CHUNK_BLOCKS {
     2 => 0x1EA6_B476,
-    16 => 0x0BCE_C99B,
+    16 => 0x127F_E343,
     _ => 0,
 };
 /// Ticks of scripted input.

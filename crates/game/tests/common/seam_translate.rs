@@ -11,7 +11,7 @@
 //! a [`WorldSnapshot`] instead, compared by [`compare`]: DISCRETE state
 //! exactly (the set of `EntityId`s and kinds, each entity's feet tile in
 //! world blocks, its walk goal, a client's mode and inventory, changed
-//! terrain chunks, item piles) and CONTINUOUS state (world poses,
+//! terrain chunks, item piles, chests) and CONTINUOUS state (world poses,
 //! velocities) within named [`Tolerances`]. Ownership is checked inside
 //! [`snapshot`] instead of compared: every entity must be owned by the
 //! region its world position lies in.
@@ -202,6 +202,8 @@ pub struct WorldSnapshot {
     pub terrain: BTreeMap<[i64; 3], Option<u32>>,
     /// Item piles by cell, world blocks relative to the origin.
     pub piles: BTreeMap<[i64; 3], Vec<ItemStack>>,
+    /// Chests by cell, world blocks relative to the origin: their slots.
+    pub containers: BTreeMap<[i64; 3], Vec<Option<ItemStack>>>,
 }
 
 impl WorldSnapshot {
@@ -243,6 +245,7 @@ pub fn snapshot(rig: &mut Rig, origin: WorldBlockPos, baseline: &BTreeMap<[i64; 
     let o = [origin.x as f64 * bv, origin.y as f64 * bv, origin.z as f64 * bv];
     let mut entities = BTreeMap::new();
     let mut piles = BTreeMap::new();
+    let mut containers = BTreeMap::new();
     let rel = |w: WorldBlockPos| [w.x - origin.x, (w.y - origin.y) as i64, w.z - origin.z];
     for rc in rig.manager.running_regions() {
         rig.manager.spawner_mut().with_region(rc, |region| {
@@ -292,6 +295,10 @@ pub fn snapshot(rig: &mut Rig, origin: WorldBlockPos, baseline: &BTreeMap<[i64; 
                 assert_eq!(cell.to_local().0, rc, "{rc:?} holds a pile it does not own: {cell:?}");
                 piles.insert(rel(*cell), pile.stacks.clone());
             }
+            for (cell, c) in data.containers().iter() {
+                assert_eq!(cell.to_local().0, rc, "{rc:?} holds a chest it does not own: {cell:?}");
+                containers.insert(rel(*cell), c.slots.clone());
+            }
         });
     }
     let chunk = CHUNK_BLOCKS as i64;
@@ -307,7 +314,7 @@ pub fn snapshot(rig: &mut Rig, origin: WorldBlockPos, baseline: &BTreeMap<[i64; 
     for c in baseline.keys().filter(|c| !now.contains_key(*c)) {
         terrain.insert([c[0] - co[0], c[1], c[2] - co[2]], None);
     }
-    WorldSnapshot { entities, terrain, piles }
+    WorldSnapshot { entities, terrain, piles, containers }
 }
 
 /// The first difference between `a` and `b` beyond `tol`, readably.
@@ -356,6 +363,9 @@ pub fn compare(a: &WorldSnapshot, b: &WorldSnapshot, tol: &Tolerances) -> Result
     }
     if a.piles != b.piles {
         return Err(format!("item piles differ: {:?} vs {:?}", a.piles, b.piles));
+    }
+    if a.containers != b.containers {
+        return Err(format!("chests differ: {:?} vs {:?}", a.containers, b.containers));
     }
     Ok(())
 }

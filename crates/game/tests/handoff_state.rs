@@ -559,7 +559,7 @@ fn loaded_donor() -> (Rollback, game::EntityKey, Client) {
             needed_ticks: 9,
         }),
         break_cooldown_until: 77,
-        open_container: Some([4, 5, 6]),
+        open_container: Some(game::WorldBlockPos::new(4, 5, 6)),
         ..Client::default()
     };
     rb.new_transaction();
@@ -633,8 +633,11 @@ fn replayed_arrival_overwrites_whole_bundle() {
     assert_eq!(rb.data.clients[&9].selected, 3, "the client is the bundle's too");
 }
 
+/// Task 6.4: the open chest is a world cell, so it travels — the new
+/// region closes it only when out of reach or unseen. Mining and the break
+/// cooldown are the old region's and reset.
 #[test]
-fn arrival_closes_open_chest_view() {
+fn arrival_keeps_open_chest_view() {
     let (mut donor_rb, key, _) = loaded_donor();
     donor_rb.new_transaction();
     let bundle = donor_rb.extract_entity_safe(key);
@@ -643,8 +646,8 @@ fn arrival_closes_open_chest_view() {
     rb.new_transaction();
     rb.apply_arrival(bundle);
     let c = &rb.data.clients[&9];
-    assert_eq!(c.open_container, None);
-    assert!(!c.inventory_open);
+    assert_eq!(c.open_container, Some(game::WorldBlockPos::new(4, 5, 6)));
+    assert!(c.inventory_open);
     assert_eq!((c.mining, c.break_cooldown_until), (None, 0));
 }
 

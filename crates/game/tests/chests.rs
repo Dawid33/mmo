@@ -106,8 +106,18 @@ fn slot(region: &Region, slot: usize) -> Option<ItemStack> {
     region.data().clients[&0].inventory.slots[slot]
 }
 
+/// Local cell `p` of [`r0`] as the world cell chests are keyed by.
+fn wc(p: BlockPos) -> game::WorldBlockPos {
+    game::WorldBlockPos::from_local(r0(), game::BlockPos::new(p[0], p[1], p[2]))
+}
+
 fn container(region: &Region, p: BlockPos) -> Option<Vec<Option<ItemStack>>> {
-    region.data().containers().get(&p).map(|c| c.slots.clone())
+    region.data().containers().get(&wc(p)).map(|c| c.slots.clone())
+}
+
+/// Fills the chest at local cell `p` (state surgery through the write funnel).
+fn stock(r: &mut Rollback, p: BlockPos, slots: Vec<Option<ItemStack>>) {
+    r.write_container_safe(wc(p), Some(game::Container { slots }));
 }
 
 fn mouse(region: &mut Region, button: MouseButton, pressed: bool) {
@@ -199,12 +209,12 @@ fn right_click_chest_opens_not_places() {
     set_slot(&mut region, 0, dirt);
     right_click(&mut region);
     let c = &region.data().clients[&0];
-    assert_eq!(c.open_container, Some(a), "the chest is open");
+    assert_eq!(c.open_container, Some(wc(a)), "the chest is open");
     assert!(c.inventory_open, "with the inventory screen");
     assert_eq!(slot(&region, 0), dirt, "nothing was placed");
     assert_eq!(block(&region, above), BlockId::AIR);
     let view = game::container_view(region.data(), 0).expect("a view while open");
-    assert_eq!(view.pos, a);
+    assert_eq!(view.pos, wc(a));
     assert_eq!(view.slots, vec![None; CHEST_SLOTS]);
 }
 
@@ -213,15 +223,20 @@ fn shift_click_moves_into_chest() {
     let mut region = region();
     let a = chest_under_crosshair(&mut region);
     right_click(&mut region);
-    assert_eq!(region.data().clients[&0].open_container, Some(a));
+    assert_eq!(region.data().clients[&0].open_container, Some(wc(a)));
     let dirt = ItemStack { item: DIRT_ITEM, count: 10 };
     set_slot(&mut region, 0, Some(dirt));
     let shift = |slot| GameEventKind::UiAction(0, UiAction::Click { slot, button: ClickButton::Left, shift: true });
     region.handle_event(shift(SlotRef::Player(0))).unwrap();
-    assert_eq!(slot(&region, 0), None);
+    assert_eq!(slot(&region, 0), None, "given up at once");
+    // A put intent to the chest's owner (here), sent between ticks: due at
+    // the tick after the next one, like any intent an event sends.
+    ticks(&mut region, 2);
     assert_eq!(container(&region, a).unwrap()[0], Some(dirt), "into the chest");
-    // And back: a container slot shift-clicks into the player.
+    // And back: a container slot shift-clicks into the player — a take,
+    // granted when it applies and delivered a tick later.
     region.handle_event(shift(SlotRef::Container(0))).unwrap();
+    ticks(&mut region, 3);
     assert_eq!(container(&region, a).unwrap()[0], None);
     assert_eq!(slot(&region, 0), Some(dirt));
     // Closing the inventory closes the chest.
@@ -235,9 +250,9 @@ fn walking_away_closes() {
     let mut region = region();
     let a = chest_under_crosshair(&mut region);
     right_click(&mut region);
-    assert_eq!(region.data().clients[&0].open_container, Some(a));
+    assert_eq!(region.data().clients[&0].open_container, Some(wc(a)));
     ticks(&mut region, 2);
-    assert_eq!(region.data().clients[&0].open_container, Some(a), "in reach: stays open");
+    assert_eq!(region.data().clients[&0].open_container, Some(wc(a)), "in reach: stays open");
     let y = body(&region)[1];
     // Ten blocks away.
     region.with_data(|r| {
@@ -256,9 +271,7 @@ fn break_chest_spills_contents_and_chest() {
     let mut region = region();
     let a = chest_under_crosshair(&mut region);
     let contents = mixed_contents();
-    region.with_data(|r| {
-        r.containers.get_mut(&a).unwrap().slots = contents.clone();
-    });
+    region.with_data(|r| stock(r, a, contents.clone()));
     mouse(&mut region, MouseButton::Left, true);
     let mut broke = false;
     for _ in 0..200 {
@@ -287,9 +300,9 @@ fn break_open_chest_spills_once_and_closes() {
     forget(&mut region, GameEventKind::CreateClient(1));
     let contents = mixed_contents();
     region.with_data(|r| {
-        r.containers.get_mut(&a).unwrap().slots = contents.clone();
-        assert!(r.open_container_safe(0, a), "client 0 opens it");
-        assert!(r.open_container_safe(1, a), "client 1 opens it");
+        stock(r, a, contents.clone());
+        assert!(r.open_container_safe(0, wc(a)), "client 0 opens it");
+        assert!(r.open_container_safe(1, wc(a)), "client 1 opens it");
     });
     assert_eq!(
         game::container_view(region.data(), 0),
@@ -315,12 +328,10 @@ fn chest_survives_region_park_restore() {
     let mut region = region();
     let a = chest_under_crosshair(&mut region);
     let contents = mixed_contents();
-    region.with_data(|r| {
-        r.containers.get_mut(&a).unwrap().slots = contents.clone();
-    });
+    region.with_data(|r| stock(r, a, contents.clone()));
     let parked = SerializedRegion::from_rollback(region.data());
     let restored = parked.to_rollback().expect("the parked region decodes");
-    assert_eq!(restored.containers().get(&a).map(|c| c.slots.clone()), Some(contents));
+    assert_eq!(restored.containers().get(&wc(a)).map(|c| c.slots.clone()), Some(contents));
     assert_eq!(state_hash(&restored), state_hash(region.data()));
 }
 
@@ -346,7 +357,7 @@ fn chest_undo_roundtrip() {
     mouse(&mut region, MouseButton::Right, true);
     let before = state_hash(region.data());
     ticks(&mut region, 1);
-    assert_eq!(region.data().clients[&0].open_container, Some(above));
+    assert_eq!(region.data().clients[&0].open_container, Some(wc(above)));
     region.rollback_last_event();
     assert_eq!(before, state_hash(region.data()), "opening must undo bit-exact");
     ticks(&mut region, 1);
@@ -359,19 +370,28 @@ fn chest_undo_roundtrip() {
     region.rollback_last_event();
     assert_eq!(before, state_hash(region.data()), "a chest click must undo bit-exact");
     region.handle_event(shift).unwrap();
+    // The put lands two ticks on; undone bit-exact too.
+    ticks(&mut region, 1);
+    let before = state_hash(region.data());
+    ticks(&mut region, 1);
+    assert!(container(&region, above).unwrap()[0].is_some(), "the put applied");
+    region.rollback_last_event();
+    assert_eq!(before, state_hash(region.data()), "a put applied must undo bit-exact");
+    ticks(&mut region, 1);
     let stored = container(&region, above).unwrap();
-    assert_eq!(region.data().clients[&0].open_container, Some(above));
+    assert_eq!(stored[0], Some(ItemStack { item: DIRT_ITEM, count: 9 }), "stored");
+    assert_eq!(region.data().clients[&0].open_container, Some(wc(above)));
     region.with_data(|r| {
         let before = state_hash(&*r);
         r.new_transaction();
         assert!(r.set_block_safe(above, Block::new(BlockId::AIR)));
-        assert!(r.containers().get(&above).is_none());
+        assert!(r.containers().get(&wc(above)).is_none());
         assert_eq!(r.clients[&0].open_container, None);
         assert!(!r.item_piles().is_empty(), "spilled");
         r.rollback();
         assert_eq!(before, state_hash(&*r), "a spill must undo bit-exact");
-        assert_eq!(r.containers().get(&above).map(|c| c.slots.clone()), Some(stored));
-        assert_eq!(r.clients[&0].open_container, Some(above));
+        assert_eq!(r.containers().get(&wc(above)).map(|c| c.slots.clone()), Some(stored));
+        assert_eq!(r.clients[&0].open_container, Some(wc(above)));
         assert!(r.item_piles().is_empty());
     });
 }
@@ -388,10 +408,282 @@ fn batched_fill_and_clear_follow_chests() {
         assert_eq!(container(&region, c), Some(vec![None; CHEST_SLOTS]), "a filled chest at {c:?} gets a container");
     }
     let dirt = ItemStack { item: DIRT_ITEM, count: 3 };
-    region.with_data(|r| r.containers.get_mut(&cells[0]).unwrap().slots[4] = Some(dirt));
+    region.with_data(|r| {
+        let mut slots = vec![None; CHEST_SLOTS];
+        slots[4] = Some(dirt);
+        stock(r, cells[0], slots);
+    });
     region.with_data(|r| {
         assert_eq!(r.clear_blocks_safe(&cells), 2);
     });
     assert!(region.data().containers().is_empty(), "cleared chests leave no container");
     assert_eq!(pile_totals(&region), totals_of(&[Some(dirt)]), "the stored dirt spilled");
+}
+
+// --- Across a seam (Task 6.4) -------------------------------------------------
+
+use crate::common::rig::{Rig, CLIENT};
+use crate::common::seam_translate::{
+    assert_seam_invariant, offset, spawn_tile, uniform_floor, Axis, Placement, Scenario,
+};
+use game::{InlineSchedule, Order, WorldBlockPos};
+
+fn stack(item: ItemId, count: u32) -> ItemStack {
+    ItemStack { item, count }
+}
+
+/// Writes a chest holding `slots` into world cell `p`, at its owner.
+fn put_chest(rig: &mut Rig, p: WorldBlockPos, slots: Vec<Option<ItemStack>>) {
+    let (rc, l) = p.to_local();
+    let local = [l.x, l.y, l.z];
+    rig.manager.spawner_mut().with_region(rc, |r| {
+        r.with_data(|d| {
+            assert!(d.set_block_safe(local, Block::new(chest())), "chest at {p:?}");
+            d.write_container_safe(p, Some(game::Container { slots }));
+        })
+    });
+}
+
+/// The slots of the chest in world cell `p`, at its owner.
+fn chest_at(rig: &mut Rig, p: WorldBlockPos) -> Option<Vec<Option<ItemStack>>> {
+    let mut out = None;
+    rig.manager.spawner_mut().with_region(p.to_local().0, |r| {
+        out = r.data().containers().get(&p).map(|c| c.slots.clone());
+    });
+    out
+}
+
+/// Client `id`'s open chest and whether its inventory screen is open, in the
+/// region owning its body (`None`: no region has it).
+fn view_of(rig: &mut Rig, id: ClientId) -> Option<(Option<WorldBlockPos>, bool)> {
+    let mut out = None;
+    for rc in rig.manager.running_regions() {
+        rig.manager.spawner_mut().with_region(rc, |r| {
+            if let Some(c) = r.data().clients.get(&id).filter(|_| r.data().player_entites.contains_key(&id)) {
+                out = Some((c.open_container, c.inventory_open));
+            }
+        });
+    }
+    out
+}
+
+fn ui(rig: &mut Rig, action: UiAction) {
+    let ev = game::GameEvent::new(GameEventKind::UiAction(CLIENT, action), 0, game::SPAWN_REGION);
+    rig.event(game::ServerEvent::ClientPacket(game::ClientPacket::GameEvent(ev), CLIENT));
+}
+
+fn click(rig: &mut Rig, slot: SlotRef, shift: bool) {
+    ui(rig, UiAction::Click { slot, button: ClickButton::Left, shift });
+}
+
+/// An Adventure player on the origin tile right-clicks the chest one block
+/// across the seam / corner (−x/−z of it, on the floor): it opens. Then a
+/// shift click takes the chest's five dirt into the inventory, and the ten
+/// stone are picked onto the cursor and put into chest slot 1.
+struct ChestAcross;
+
+impl Scenario for ChestAcross {
+    fn setup(&self, rig: &mut Rig, origin: WorldBlockPos) {
+        rig.order(Order::SetMode { mode: PlayMode::Adventure, at: Some(spawn_tile(origin)) });
+        rig.input(InputEvent::FpsCam(true));
+        for _ in 0..6 {
+            rig.round();
+        }
+        let rc = rig.owners()[0];
+        rig.manager.spawner_mut().with_region(rc, |r| {
+            r.with_data(|d| {
+                let c = d.clients.get_mut(&CLIENT).unwrap();
+                c.inventory = Inventory::new();
+                c.inventory.slots[1] = Some(stack(STONE_ITEM, 10));
+            })
+        });
+        let cell = offset(origin, -1, 0, -1);
+        let mut slots = vec![None; CHEST_SLOTS];
+        slots[0] = Some(stack(DIRT_ITEM, 5));
+        put_chest(rig, cell, slots);
+        // The chest's halo mirror reaches a neighbour with the owner's next
+        // tick: a player sees it before it clicks it.
+        for _ in 0..3 {
+            rig.round();
+        }
+        rig.aim_at([cell.x as f64 + 0.5, cell.y as f64 + 0.5, cell.z as f64 + 0.5]);
+        rig.input(InputEvent::MouseButton { button: MouseButton::Right, pressed: true });
+    }
+
+    fn drive(&self, rig: &mut Rig, round: u32) {
+        match round {
+            1 => rig.input(InputEvent::MouseButton { button: MouseButton::Right, pressed: false }),
+            2 => click(rig, SlotRef::Container(0), true),
+            5 => click(rig, SlotRef::Player(1), false),
+            6 => click(rig, SlotRef::Container(1), false),
+            _ => {}
+        }
+    }
+
+    fn rounds(&self) -> u32 {
+        12
+    }
+
+    fn crosses(&self) -> bool {
+        false
+    }
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn open_chest_across_seam() {
+    let end = assert_seam_invariant(&ChestAcross, None);
+    let (_, inv, cursor) = end.player().client.clone().expect("a client");
+    assert_eq!(inv.slots[0], Some(stack(DIRT_ITEM, 5)), "the dirt was taken: {inv:?}");
+    assert_eq!(inv.slots[1], None, "the stone went into the chest");
+    assert_eq!(cursor, None);
+    let mut want = vec![None; CHEST_SLOTS];
+    want[1] = Some(stack(STONE_ITEM, 10));
+    let chests: Vec<_> = end.containers.values().cloned().collect();
+    assert_eq!(chests, vec![want], "one chest, holding the stone");
+    assert_seam_invariant(&ChestAcross, Some(InlineSchedule::jittery));
+}
+
+/// A chest two blocks across the −x seam stays open while its viewer walks
+/// across the seam within reach, and closes once it walks out of reach.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn open_chest_follows_its_viewer_across_the_seam() {
+    let mut rig = Rig::with_floor(None, uniform_floor);
+    rig.join_spawn();
+    let origin = Placement::Seam(Axis::X).origin();
+    rig.order(Order::SetMode { mode: PlayMode::Adventure, at: Some(spawn_tile(origin)) });
+    for _ in 0..6 {
+        rig.round();
+    }
+    let cell = offset(origin, -2, 0, 2);
+    put_chest(&mut rig, cell, vec![None; CHEST_SLOTS]);
+    for _ in 0..3 {
+        rig.round();
+    }
+    rig.manager.spawner_mut().with_region(game::SPAWN_REGION, |r| {
+        r.with_data(|d| assert!(d.open_container_safe(CLIENT, cell), "opened across the seam"))
+    });
+    assert_eq!(view_of(&mut rig, CLIENT), Some((Some(cell), true)));
+    let west = game::RegionCoords::new(-1, 0);
+    let goal = |x: i64| {
+        let (rc, l) = offset(origin, x, 0, 0).to_local();
+        game::Goal { region: rc, column: [l.x, l.z], y: None }
+    };
+    rig.order(Order::MoveTo(goal(-2)));
+    rig.walk_until_owned_by(west, "across the seam");
+    for _ in 0..30 {
+        rig.round();
+        assert_eq!(view_of(&mut rig, CLIENT), Some((Some(cell), true)), "in reach: open");
+    }
+    rig.order(Order::MoveTo(goal(-12)));
+    let mut closed = false;
+    for _ in 0..crate::common::rig::LEG_ROUNDS {
+        rig.round();
+        if view_of(&mut rig, CLIENT) == Some((None, false)) {
+            closed = true;
+            break;
+        }
+    }
+    assert!(closed, "out of reach: closed ({:?})", view_of(&mut rig, CLIENT));
+    assert_eq!(chest_at(&mut rig, cell), Some(vec![None; CHEST_SLOTS]), "the chest itself stays");
+}
+
+/// Two viewers take from one chest slot in the same tick: the lower
+/// `EntityId` gets the stack, the other is refused, and the items exist once.
+#[test]
+fn two_takers_of_one_slot_one_wins() {
+    let mut region = region();
+    let a = chest_under_crosshair(&mut region);
+    forget(&mut region, GameEventKind::CreateClient(1));
+    let wa = game::WorldBlockPos::from_local(r0(), game::BlockPos::new(a[0], a[1], a[2]));
+    region.with_data(|r| {
+        let mut slots = vec![None; CHEST_SLOTS];
+        slots[0] = Some(stack(DIRT_ITEM, 5));
+        r.write_container_safe(wa, Some(game::Container { slots }));
+        r.clients.get_mut(&1).unwrap().inventory = Inventory::new();
+        assert!(r.open_container_safe(0, wa), "client 0 opens it");
+        assert!(r.open_container_safe(1, wa), "client 1 opens it");
+    });
+    for id in [1, 0] {
+        let take = UiAction::Click { slot: SlotRef::Container(0), button: ClickButton::Left, shift: false };
+        region.handle_event(GameEventKind::UiAction(id, take)).unwrap();
+    }
+    ticks(&mut region, 3);
+    let cursor = |id: ClientId| region.data().clients[&id].cursor;
+    let key = |id: ClientId| region.data().entity_id(region.data().player_entites[&id]).unwrap();
+    let (winner, loser) = if key(0) < key(1) { (0, 1) } else { (1, 0) };
+    assert_eq!(cursor(winner), Some(stack(DIRT_ITEM, 5)), "the lower id took the stack");
+    assert_eq!(cursor(loser), None, "the other was refused");
+    assert_eq!(container(&region, a).unwrap()[0], None);
+    let held: u32 =
+        [0, 1].iter().flat_map(|id| region.data().clients[id].inventory.slots.clone()).flatten().map(|s| s.count).sum();
+    assert_eq!(held, 0, "nothing else moved");
+}
+
+/// A chest in region (−1, 0) by the seam, open in two views — its owner's
+/// client 1 standing by it, and `CLIENT` across the seam — is broken by
+/// `CLIENT` (an intent to its owner): it spills there once, and both views
+/// close.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn break_chest_across_seam_spills_once_and_closes_both_views() {
+    let mut rig = Rig::with_floor(None, uniform_floor);
+    rig.join_spawn();
+    let origin = Placement::Seam(Axis::X).origin();
+    rig.order(Order::SetMode { mode: PlayMode::Adventure, at: Some(spawn_tile(origin)) });
+    for _ in 0..6 {
+        rig.round();
+    }
+    let west = game::RegionCoords::new(-1, 0);
+    let cell = offset(origin, -2, 0, 0);
+    let contents = mixed_contents();
+    put_chest(&mut rig, cell, contents.clone());
+    rig.manager.spawner_mut().with_region(west, |r| {
+        r.handle_event(GameEventKind::CreateClient(1)).unwrap();
+        r.with_data(|d| {
+            let e = *d.data.player_entites.get(&1).unwrap();
+            let bv = game::BLOCK_VOXELS as f32;
+            let (_, l) = offset(cell, -1, 0, 0).to_local();
+            let h = *d.data.ecs.rigidbody.get(e);
+            let y = d.data.physics.bodies.get(h).unwrap().translation().y;
+            d.set_body_pose_safe(e, Pose::translation((l.x as f32 + 0.5) * bv, y, (l.z as f32 + 0.5) * bv));
+        });
+    });
+    for _ in 0..4 {
+        rig.round();
+    }
+    rig.manager.spawner_mut().with_region(west, |r| {
+        r.with_data(|d| assert!(d.open_container_safe(1, cell), "client 1 opens it at its owner"))
+    });
+    rig.manager.spawner_mut().with_region(game::SPAWN_REGION, |r| {
+        r.with_data(|d| assert!(d.open_container_safe(CLIENT, cell), "CLIENT opens it across the seam"))
+    });
+    rig.order(Order::DevBreakBlock(cell));
+    let spilled = |rig: &mut Rig| {
+        let mut out = BTreeMap::new();
+        for rc in rig.manager.running_regions() {
+            rig.manager.spawner_mut().with_region(rc, |r| {
+                for s in r.data().item_piles().values().flat_map(|p| &p.stacks) {
+                    *out.entry(s.item.0).or_insert(0u32) += s.count;
+                }
+            });
+        }
+        out
+    };
+    for _ in 0..8 {
+        rig.round();
+    }
+    assert_eq!(chest_at(&mut rig, cell), None, "the chest is gone");
+    assert_eq!(spilled(&mut rig), totals_of(&contents), "spilled exactly once");
+    assert_eq!(view_of(&mut rig, CLIENT), Some((None, false)), "the view across the seam closed");
+    let mut owner_view = None;
+    rig.manager.spawner_mut().with_region(west, |r| {
+        owner_view = r.data().clients.get(&1).map(|c| (c.open_container, c.inventory_open));
+    });
+    assert_eq!(owner_view, Some((None, false)), "the owner's view closed");
+    for _ in 0..8 {
+        rig.round();
+    }
+    assert_eq!(spilled(&mut rig), totals_of(&contents), "and never again");
 }
