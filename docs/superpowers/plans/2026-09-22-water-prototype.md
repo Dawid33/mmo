@@ -938,6 +938,8 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 ### Task 2: Body operations and fixtures
 
+> **Pre-flight ruling (2026-11-06), overrides the text below:** In `expand_layer`, right after the `room > 0 || …` early return, add `if !forced && wet == 0 { return false }` with no backoff. Here `wet` is the CA water in the candidate layer: compute it before the bowl test, or check it before accepting. Without it, `settle_init` grows a dry top layer on every full body: `lake_settles_into_one_body` would see 14,400 cells instead of 12,800, `merge_keeps_the_larger_body` 60 instead of 40, and `check_invariants` fails on a frac-0 top layer. `finish` must be idempotent: a second call on a settled world changes nothing.
+
 **Files:**
 - Modify: `prototypes/water/src/body.rs` (append the operations below)
 - Create: `prototypes/water/src/fixture.rs`
@@ -1676,6 +1678,8 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ---
 
 ### Task 3: The water step and edits
+
+> **Pre-flight ruling (2026-11-06), overrides the text below:** (1) **Absorb tolerance.** Water fed from a body into a cell stops at FULL−ABSORB_TOL, so in `level_with`, below the top, use `FULL - wc <= ABSORB_TOL`, not `wc == FULL`. Otherwise `hole_fills_pocket_and_joins_the_lake` never absorbs the pocket. (2) **Top-layer drain.** Water leaving a body *from its top layer* (`body_to_ca`, sideways or down) uses the top's head rounded **up**: add `Body::outflow_at(y) -> u16`, which is `FULL` below the top and `frac.div_ceil(top_area)` at the top. Use it wherever an outlet reads the body's head (plan lines near `b.virtual_at(y)` in `horizontal` and the down/up member edges). Without it a draining last layer stalls at 1–15 units and the body never goes away (`floor_hole`). (3) **Shore wake.** Move `w.touched.clear()` from the start of `ca::step` to `World::begin_log`, so a level change from an edit also wakes the shore.
 
 **Files:**
 - Create: `prototypes/water/src/ca.rs`, `prototypes/water/src/edit.rs`
@@ -3063,6 +3067,8 @@ change; Tasks 9 and 11 add the fields it sums).
 
 ### Task 6: Checkerboard frontier order
 
+> **Pre-flight ruling (2026-11-06), overrides the text below:** The test asserts `w.mass() == 4 * FULL as u64` (`accounted()` arrives in Task 7). Files also include `src/grid.rs` (`parity`).
+
 **Files:**
 - Modify: `prototypes/water/src/ca.rs` (`step`)
 - Test: `prototypes/water/tests/t6_order.rs`
@@ -3109,6 +3115,8 @@ the bound silently.
 ---
 
 ### Task 7: Links: the shared edge rule (gates and pumps)
+
+> **Pre-flight ruling (2026-11-06), overrides the text below:** (1) **Link ids.** `add_link` returns `links.last_key() + 1`, starting at 1. Links are never removed; `Undo::Link(id, None)` undoes an add. (2) **Zero amounts.** `take` and `give` with `q == 0` change nothing and log nothing. (3) **No expansion through links.** `give` into a member is capped by the body's current `room()`, and the remainder goes back per rule 4. (4) **Stopping.** Add `Stats.link_moved_last_step: u64`, the total moved in this step's link phase. `scenario::run`'s asleep condition becomes `active.count() == 0 && link_moved_last_step == 0`. Task 9 extends it.
 
 **Files:**
 - Create: `prototypes/water/src/link.rs`
@@ -3211,6 +3219,8 @@ the bound silently.
 
 ### Task 8: Brick-journal undo
 
+> **Pre-flight ruling (2026-11-06), overrides the text below:** Assert the brick-multiple dims in `begin_log` when `journal == Brick`, not in `World::new`, which has no journal argument. Files also include `src/grid.rs` (`brick_of`) and `src/bin/water_proto.rs` (`--undo`).
+
 The engine's per-mutation undo entry clones a value, takes a global mutex, and is as large as
 the biggest event variant (`02-engine-today.md` §2). This task measures the alternative: the
 first touch of an 8³ brick in a step saves the brick once.
@@ -3266,6 +3276,8 @@ first touch of an 8³ brick in a step saves the brick once.
 ---
 
 ### Task 9: Thin films evaporate into the ledger (off by default)
+
+> **Pre-flight ruling (2026-11-06), overrides the text below:** (1) Keep a reverse map `evap_of: BTreeMap<u32 cell, u32 due>` next to `evap_due`. Both are state: hashed and undone with `Undo::EvapDue`. A write to the cell's water removes both entries. (2) `scenario.rs` is in Files: `run`'s asleep condition also needs `evap_due.is_empty()`.
 
 This waits on user decision 1 in the 2026-11-06 synthesis, so it is **off** unless a scenario
 turns it on. It is DF's 1/7 evaporation done without breaking conservation.
@@ -3325,6 +3337,8 @@ turns it on. It is DF's 1/7 evaporation done without breaking conservation.
 ---
 
 ### Task 10: Two worlds joined at a seam, with lag
+
+> **Pre-flight ruling (2026-11-06), overrides the text below:** (1) The `seam_drain` residue bound is `A's total < 2 * 448` units, not `<= 512`, because the seam's `(own − seen) / 2` floors. Report the measured residue. (2) In bodies mode the full sealed pocket in `seam_bounce` seeds a one-cell body, so read "the pocket ends at exactly FULL" through `link::avail(pocket)`, not `water[]`.
 
 This models two regions on different threads. Each side sends only its own water. It subtracts
 the water at once and posts it as an arrival that lands `SEAM_LAG_STEPS` later. Heads seen
@@ -3428,6 +3442,8 @@ across the seam are the other side's heads as reported at the end of the previou
 ---
 
 ### Task 11: Player scenarios
+
+> **Pre-flight ruling (2026-11-06), overrides the text below:** (1) `dam_breach`: replace "A's body is gone" with "A's box holds at most 512 units". A residue body may survive at the outlet's tolerance. Report the residue. (2) Name the moved fixture `fixture::gate_basins(mode) -> World`. It returns a finished world, `scenario::build` does not call `finish` on it again, and it avoids a clash with t2's local `two_basins`. (3) Files also include `wasm_golden.mjs` (it must iterate all 10 names) and `tests/t7_links.rs` (switch it to the moved fixture).
 
 These are the synthesis's player actions, run as scenarios. They join the CLI table and the
 wasm goldens through `NAMES`.
@@ -3566,7 +3582,6 @@ wasm goldens through `NAMES`.
 ```bash
 git add docs/superpowers/specs/2026-11-06-water-revisit/ \
   docs/superpowers/specs/2026-09-22-voxel-water-efficiency/ \
-  docs/superpowers/specs/2026-09-22-rapier-water-physics-investigation.md \
   docs/superpowers/plans/2026-09-22-water-prototype.md
 git commit -m "docs(water): prototype results and decision gate
 
