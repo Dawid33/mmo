@@ -5,6 +5,12 @@
 //! Tests here share a process and run in parallel with each other: never
 //! change process-global state (hash mode, the installed world, a logger)
 //! from one — give such a file its own `[[test]]` in Cargo.toml instead.
+//! The one exception is the block props (`game::install_block_props`):
+//! every installer here installs the same `assets/blocks/blocks.ron` props,
+//! so the process flips once from the all-solid default to those. A test
+//! whose outcome reads them (starting kit, drops, solidity) must install
+//! them before it builds state (`common::install_real_block_props`), or it
+//! races that flip.
 //! Separate binaries:
 //! - `forged_world`: forged::install pins the process's world once.
 //! - `client_region_load_cost`: sets the process-global HASH_MODE to Off.

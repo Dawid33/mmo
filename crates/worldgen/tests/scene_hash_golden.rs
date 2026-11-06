@@ -8,7 +8,7 @@
 //! The constant changes only in a commit whose message says why. Regenerate:
 //!
 //! ```sh
-//! SCENE_HASH_PRINT=1 just test-one worldgen "--test scene_hash_golden -- --include-ignored --nocapture"
+//! SCENE_HASH_PRINT=1 just test-one worldgen "--test it -- --include-ignored --nocapture scene_hash_golden"
 //! ```
 //!
 //! It lives in `worldgen` because `game` can't depend on it (worldgen
@@ -52,11 +52,14 @@ use game::{state_hash, GameEventKind, InputEvent, Key, Region, RegionCoords};
 /// `GameData.halo_sent`; empty here) — hashed layout only; 16 only.
 /// Then for `GameData.intents` / `intent_replies` / `intent_inbox` and
 /// `GameData.halo_ground` (empty here) — hashed layout only; 16 only.
+/// Then for the scene installing the real block props itself (it raced
+/// other tests of the `it` binary for them: with the default props the
+/// starting kit had no chests); 16 only.
 /// Pinned per sim-chunk size (`game::CHUNK_BLOCKS`): the same world splits
 /// into other chunk entities, bodies and colliders at 2 and 16 blocks.
 const SCENE_HASH: u32 = match game::CHUNK_BLOCKS {
     2 => 0x1EA6_B476,
-    16 => 0xC864_AB85,
+    16 => 0x2445_89D7,
     _ => 0,
 };
 /// Ticks of scripted input.
@@ -105,6 +108,10 @@ fn script() -> Vec<GameEventKind> {
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn canonical_scene_state_hash() {
+    // The real block props before any state: the starting kit (2 chests)
+    // reads them, and other tests in this binary install them too — the
+    // scene must not depend on whether one ran first.
+    common::install_real_block_props();
     if !default_dials() {
         eprintln!("scene_hash_golden: non-default world dials, skipped");
         return;
