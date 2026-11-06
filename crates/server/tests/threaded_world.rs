@@ -333,6 +333,39 @@ fn roaming_client_cycles_regions_across_threads() {
 /// `PlayerInput` by the player's *home*, which is (0,0) until the flip lands.
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
+fn regions_share_tick_numbers_on_real_threads() {
+    use game::RegionSpawner;
+    let mut rig = Rig::new();
+    rig.event(ServerEvent::connected(0));
+    let pair = [SPAWN_REGION, RegionCoords::new(0, -1)];
+    for rc in pair {
+        rig.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(rc), 0));
+    }
+    rig.wait_for_snapshots(&pair, REGION_STARTUP_BUDGET);
+    let mut reported: std::collections::BTreeMap<RegionCoords, Vec<(u64, u64)>> = Default::default();
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while Instant::now() < deadline {
+        if let Ok((rc, output)) = rig.region_out.recv_timeout(Duration::from_millis(20)) {
+            // The world tick when the report is drained, vs the tick it carries.
+            if let RegionOutput::SyncClock { tick, .. } = &output {
+                reported.entry(rc).or_default().push((*tick, rig.manager.spawner_mut().world_tick()));
+            }
+            rig.absorb(rc, output);
+        }
+    }
+    for rc in pair {
+        let reports = reported.get(&rc).unwrap_or_else(|| panic!("{rc:?} reported no SyncClock"));
+        for &(tick, world) in reports {
+            assert!(
+                tick.abs_diff(world) <= u64::from(game::MAX_CATCH_UP_BURST),
+                "{rc:?} reports tick {tick} while the world is at {world}"
+            );
+        }
+    }
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
 fn walking_input_crosses_a_boundary_on_real_threads() {
     let mut rig = Rig::with_columns(seam_floor_columns);
     rig.event(ServerEvent::connected(0));

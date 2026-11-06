@@ -4,6 +4,10 @@
 //! explicit `now_ms`, never `Instant`, so this works on wasm and in tests.
 use crate::{Tick, TICK_RATE};
 
+/// Most ticks a region runs back to back while behind the world tick before
+/// it services its inputs again.
+pub const MAX_CATCH_UP_BURST: u32 = 5;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct WorldClock {
     /// Wall time (ms) at which `anchor_tick` was due.

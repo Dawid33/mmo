@@ -125,8 +125,8 @@ pub const SCHEDULE_SKIP_PER_MILLE: u32 = 100;
 ///   tick — a handoff, ghost update or player input that lost the race with
 ///   the tick it would have preceded in lockstep;
 /// - a *skipped* region misses a round entirely, the way
-///   `region_thread_loop` drops an overrun deadline instead of replaying it,
-///   so its tick count drifts against its neighbours for good.
+///   `region_thread_loop` falls behind its deadline, and runs a catch-up tick
+///   next round so it stays within one tick of the round counter.
 #[derive(Debug, Clone)]
 pub struct InlineSchedule {
     rng: u64,
@@ -230,11 +230,24 @@ impl InlineSpawner {
         }
     }
 
+    /// One tick, plus catch-up ticks (at most [`crate::MAX_CATCH_UP_BURST`]
+    /// in all) while the runner is behind `world`: a skipped round is made up
+    /// next round instead of leaving the region behind for good.
+    fn tick_to(runner: &mut RegionRunner, world: crate::Tick) {
+        runner.tick();
+        let mut burst = 1;
+        while runner.current_tick() < world && burst < crate::MAX_CATCH_UP_BURST {
+            runner.tick();
+            burst += 1;
+        }
+    }
+
     pub fn tick_all(&mut self) {
         self.rounds += 1;
         let Some(schedule) = self.schedule.as_mut() else {
+            let world = self.rounds;
             for (_, (_, runner)) in self.runners.iter_mut() {
-                runner.tick();
+                Self::tick_to(runner, world);
             }
             return;
         };
@@ -246,7 +259,7 @@ impl InlineSpawner {
         for id in ids {
             if !schedule.roll(schedule.skip_per_mille) {
                 if let Some((_, runner)) = self.runners.get_mut(&id) {
-                    runner.tick();
+                    Self::tick_to(runner, self.rounds);
                 }
             }
             if schedule.roll(schedule.late_per_mille) {

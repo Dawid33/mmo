@@ -1,6 +1,7 @@
 //! One OS thread per running region, each with its own tick timer.
-//! Fully independent pacing: a slow region ticks late and catches up by
-//! skipping missed deadlines; it never blocks the manager or its neighbours.
+//! Fully independent pacing against the shared world clock: a slow region
+//! ticks late and catches up with a bounded burst (it never skips tick
+//! numbers); it never blocks the manager or its neighbours.
 use std::collections::BTreeMap;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -66,6 +67,7 @@ impl RegionSpawner for ThreadRegionSpawner {
         let (send, recv) = unbounded();
         let generator = self.generator.clone();
         let store = self.store.clone();
+        let (clock, started) = (self.clock, self.started);
         let handle = std::thread::Builder::new()
             .name(format!("region {},{}", id.x, id.z))
             .spawn(move || {
@@ -111,7 +113,7 @@ impl RegionSpawner for ThreadRegionSpawner {
                     game::perf::ms(build),
                     game::perf::ms(hash_time)
                 );
-                region_thread_loop(id, runner, recv);
+                region_thread_loop(id, runner, recv, clock, started);
             })
             .expect("failed to spawn region thread");
         self.handles.insert(id, handle);
@@ -140,14 +142,22 @@ impl RegionSpawner for ThreadRegionSpawner {
 }
 
 /// recv_deadline is the whole scheduler: handle inputs as they arrive, tick
-/// when the deadline fires. Backpressure is inherent — a slow region ticks
-/// late; missed deadlines are skipped rather than burst-replayed.
-pub fn region_thread_loop(id: RegionCoords, mut runner: RegionRunner, recv: Receiver<RegionInput>) {
-    let tick = Duration::from_millis(game::TICK_RATE);
-    let mut next = Instant::now() + tick;
+/// when the deadline fires. The deadline is when the region's next tick is due
+/// on the world clock (`started` is the clock's ms base); a region behind the
+/// world tick runs up to [`game::MAX_CATCH_UP_BURST`] ticks back to back, then
+/// services its inputs again (a past deadline returns at once).
+pub fn region_thread_loop(
+    id: RegionCoords,
+    mut runner: RegionRunner,
+    recv: Receiver<RegionInput>,
+    clock: game::WorldClock,
+    started: Instant,
+) {
+    let now_ms = || started.elapsed().as_millis() as u64;
     let mut metrics = TickMetrics::new();
     let mut first_tick = true;
     loop {
+        let next = started + Duration::from_millis(clock.ms_of(runner.current_tick() + 1));
         match recv.recv_deadline(next) {
             Ok(input) => {
                 if !runner.handle_input(input) {
@@ -155,29 +165,29 @@ pub fn region_thread_loop(id: RegionCoords, mut runner: RegionRunner, recv: Rece
                 }
             }
             Err(RecvTimeoutError::Timeout) => {
-                let compute_start = Instant::now();
-                runner.tick();
-                metrics.record_tick(compute_start.elapsed());
-                if first_tick {
-                    // The first step after genesis pays one-off physics setup
-                    // (broad-phase build, mass properties) the averages hide.
-                    first_tick = false;
-                    game::perf_event!(
-                        "region_first_tick",
-                        "region={},{} ms={}",
-                        id.x,
-                        id.z,
-                        game::perf::ms(compute_start.elapsed())
-                    );
+                let mut burst = 0;
+                loop {
+                    let compute_start = Instant::now();
+                    runner.tick();
+                    metrics.record_tick(compute_start.elapsed());
+                    if first_tick {
+                        // The first step after genesis pays one-off physics setup
+                        // (broad-phase build, mass properties) the averages hide.
+                        first_tick = false;
+                        game::perf_event!(
+                            "region_first_tick",
+                            "region={},{} ms={}",
+                            id.x,
+                            id.z,
+                            game::perf::ms(compute_start.elapsed())
+                        );
+                    }
+                    burst += 1;
+                    if burst >= game::MAX_CATCH_UP_BURST || runner.current_tick() >= clock.tick_at(now_ms()) {
+                        break;
+                    }
                 }
-                next += tick;
-                let now = Instant::now();
-                if next < now {
-                    // Fell behind (heavy tick / scheduler stall): skip the
-                    // missed deadlines instead of spiralling.
-                    metrics.overruns += 1;
-                    next = now + tick;
-                }
+                metrics.lag_ticks = clock.tick_at(now_ms()).saturating_sub(runner.current_tick());
                 metrics.maybe_report(id, &mut runner);
             }
             Err(RecvTimeoutError::Disconnected) => return,
@@ -192,9 +202,9 @@ struct TickMetrics {
     ticks: u32,
     compute_sum: Duration,
     compute_max: Duration,
-    /// Ticks that finished after their deadline had already passed (the sim
-    /// is not keeping up with the 50ms budget).
-    overruns: u32,
+    /// Ticks this region is behind the world tick after its last burst (0 =
+    /// keeping up; the sim is not keeping up with the 50ms budget otherwise).
+    lag_ticks: u64,
 }
 
 impl TickMetrics {
@@ -204,7 +214,7 @@ impl TickMetrics {
             ticks: 0,
             compute_sum: Duration::ZERO,
             compute_max: Duration::ZERO,
-            overruns: 0,
+            lag_ticks: 0,
         }
     }
 
@@ -233,14 +243,14 @@ impl TickMetrics {
             // Dropped items the pile caps destroyed (`game::item_piles`).
             let items_destroyed = runner.take_items_destroyed();
             log::info!(
-                "[region ({},{})] ticks={} avg={:.2}ms max={:.2}ms budget={:.1}% overruns={} | terrain_hash n={} sum={:.1}ms max={:.1}ms | state_hash n={} sum={:.1}ms max={:.1}ms | items_destroyed={}",
+                "[region ({},{})] ticks={} avg={:.2}ms max={:.2}ms budget={:.1}% lag_ticks={} | terrain_hash n={} sum={:.1}ms max={:.1}ms | state_hash n={} sum={:.1}ms max={:.1}ms | items_destroyed={}",
                 id.x,
                 id.z,
                 self.ticks,
                 avg_ms,
                 self.compute_max.as_secs_f32() * 1000.0,
                 budget,
-                self.overruns,
+                self.lag_ticks,
                 hash_checks,
                 game::perf::ms(hash_total),
                 game::perf::ms(hash_max),

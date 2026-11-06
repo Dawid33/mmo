@@ -351,6 +351,40 @@ fn handoff_survives_missed_ticks() {
     assert!(perturbed > 0, "missed ticks never changed the outcome — schedule is a no-op");
 }
 
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn missed_ticks_catch_up_to_world_tick() {
+    use game::RegionSpawner;
+    let mut rig = Rig::new(Some(InlineSchedule::jittery(7)));
+    rig.event(ServerEvent::connected(CLIENT));
+    for rc in SPAWN_REGION.window_3x3() {
+        rig.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(rc), CLIENT));
+    }
+    for _ in 0..200 {
+        rig.round();
+        let world = rig.manager.spawner_mut().world_tick();
+        for rc in rig.manager.running_regions() {
+            rig.manager.spawner_mut().with_region(rc, |region| {
+                // Consecutive skips may stack; the burst bound is what catch-up repairs.
+                assert!(
+                    world - region.current_tick() < u64::from(game::MAX_CATCH_UP_BURST),
+                    "{rc:?} fell too far behind"
+                );
+            });
+        }
+    }
+    rig.manager.spawner_mut().set_schedule(None);
+    rig.round();
+    let world = rig.manager.spawner_mut().world_tick();
+    let running = rig.manager.running_regions();
+    assert_eq!(running.len(), 9, "3x3 window running");
+    for rc in running {
+        rig.manager.spawner_mut().with_region(rc, |region| {
+            assert_eq!(region.current_tick(), world, "{rc:?} caught up to the world tick");
+        });
+    }
+}
+
 // --- Adventure walks across a seam ------------------------------------------
 
 /// The neighbour an adventurer walks into.
