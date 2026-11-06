@@ -262,11 +262,12 @@ pub fn settle(motion: &mut Motion, desired: &Vector, moved: &Vector, grounded: b
 /// Upward lift that puts a body sunk into terrain back on its surface, in
 /// world units. The character controller has no penetration recovery (the
 /// vendored rapier's is unimplemented), so a body that starts a tick
-/// overlapping terrain can often neither slide nor step out of it. That
-/// happens at region seams: the region a body is leaving has no floor past
-/// its edge, so on the tick it crosses, the body's rounded bottom dips over
-/// that edge (0.86 units over an edge, about 3 over a corner) and arrives in
-/// the next region sunk into its floor.
+/// overlapping terrain can often neither slide nor step out of it. It used to
+/// happen at every region seam (no floor past the edge, so a crossing body
+/// dipped and arrived sunk); the terrain halo (`halo.rs`) gives the region a
+/// floor there, and `halo::walk_across_seam_never_dips` pins that a seam
+/// crossing no longer needs it. It stays for real sinks (a body restored or
+/// built over).
 ///
 /// Zero when the body is clear, and also when even a `STEP_HEIGHT` lift
 /// would not clear it: a buried body stays put rather than being teleported
@@ -291,7 +292,13 @@ pub fn depenetration_lift(queries: &QueryPipeline, shape: &dyn Shape, pos: &Pose
         compute_impact_geometry_on_penetration: true,
     };
     match queries.cast_shape_on_continuous_surfaces(&raised, -up, shape, options, skin) {
-        Some((_, hit)) => max - hit.time_of_impact,
+        Some((_, hit)) => {
+            let lift = max - hit.time_of_impact;
+            if lift > 0.0 {
+                crate::halo::note_lift();
+            }
+            lift
+        }
         None => zero,
     }
 }

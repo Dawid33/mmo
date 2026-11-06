@@ -199,6 +199,11 @@ pub struct Region {
     /// never read (see the plan's read-after-progress invariant).
     pending_departures: Vec<(EntityBundle, RegionCoords)>,
     pending_ghosts: Vec<(GhostData, RegionCoords)>,
+    /// Terrain chunks within the halo band written since the last
+    /// [`Region::take_halo_updates`] (`halo.rs`). Not state: a client's
+    /// reconcile clears it (its replays re-write chunks whose updates the
+    /// forward ticks already sent).
+    halo_dirty: std::collections::BTreeSet<crate::ChunkIndexKey>,
     /// The finite world's regions, when it has an edge: nothing crosses
     /// out of it (walks stop at the edge tile, bodies are held at the outer
     /// seam). Not sim state — set by whoever runs the region (the manager
@@ -239,6 +244,7 @@ fn ev_desc(e: &GameEvent) -> String {
             format!("EntityArrived(c={:?})", b.client.as_ref().map(|(c, _)| *c))
         }
         GameEventKind::GhostUpdate(_) => "GhostUpdate".to_string(),
+        GameEventKind::HaloUpdate(u) => format!("HaloUpdate(from={:?}, chunks={})", u.from, u.deltas.len()),
         GameEventKind::SpawnPerson(s) => format!("SpawnPerson({s:?})"),
         GameEventKind::DespawnPerson(p) => format!("DespawnPerson({p:?})"),
         GameEventKind::WalkOut(p, to) => format!("WalkOut({p:?}, {to:?})"),
@@ -274,6 +280,7 @@ impl Region {
             base_event_id,
             pending_departures: Vec::new(),
             pending_ghosts: Vec::new(),
+            halo_dirty: Default::default(),
             map_extent: None,
             expected_hashes: BTreeMap::new(),
             last_confirmed_id: None,
@@ -508,7 +515,7 @@ impl Region {
                                     // that the server did not have is dropped
                                     // (never carried into the next slot) ...
                                     if matches!(server_kind, GameEventKind::Tick)
-                                        && matches!(e.kind, GameEventKind::GhostUpdate(_))
+                                        && matches!(e.kind, GameEventKind::GhostUpdate(_) | GameEventKind::HaloUpdate(_))
                                     {
                                         temp_log.remove(i);
                                         dropped_ghosts += 1;
@@ -516,7 +523,7 @@ impl Region {
                                     }
                                     // ... and a server mirror never takes the
                                     // place of a later slot's prediction.
-                                    if matches!(server_kind, GameEventKind::GhostUpdate(_))
+                                    if matches!(server_kind, GameEventKind::GhostUpdate(_) | GameEventKind::HaloUpdate(_))
                                         && matches!(e.kind, GameEventKind::Tick)
                                     {
                                         break;
@@ -589,6 +596,9 @@ impl Region {
         if let Some(slot) = local_arrival_slot {
             self.drop_local_inputs_before(slot);
         }
+        // Replays re-wrote chunks whose halo updates their forward ticks
+        // already sent.
+        self.halo_dirty.clear();
 
         // Id-accounting invariant: predictions are appended with ids from
         // next_game_event_id, so the log tail must sit exactly one below it.
@@ -699,6 +709,8 @@ impl Region {
         // The slot it is predicted in (see `Logged::stamp`).
         let stamp = *self.data.tick;
         let destroyed_before = crate::item_piles::items_destroyed_on_thread();
+        // Writes left over from outside an event are no region's.
+        crate::halo::take_touched_chunks();
         self.data.new_transaction();
         self.data.next_game_event_id.update(|n| *n += 1);
         let _b = &event.kind;
@@ -906,6 +918,9 @@ impl Region {
             GameEventKind::GhostUpdate(data) => {
                 self.data.apply_ghost(data);
             }
+            GameEventKind::HaloUpdate(update) => {
+                self.data.apply_halo_update_safe(&update);
+            }
             GameEventKind::UiAction(client_id, action) => {
                 let data: &mut GameData = self.data.deref_mut();
                 if let Some(c) = data.clients.get_mut(&client_id) {
@@ -941,6 +956,7 @@ impl Region {
             }
         }
         self.items_destroyed += crate::item_piles::items_destroyed_on_thread() - destroyed_before;
+        self.note_halo_writes();
         self.event_log.push_back(Logged { event: event.clone(), stamp });
         Ok(event)
     }
@@ -1066,9 +1082,33 @@ impl Region {
     /// Test hook: run an undo-safe mutation in its own forgotten
     /// transaction (teleports, state surgery in integration tests).
     pub fn with_data(&mut self, f: impl FnOnce(&mut Rollback)) {
+        crate::halo::take_touched_chunks();
         self.data.new_transaction();
         f(&mut self.data);
         self.data.forget();
+        self.note_halo_writes();
+    }
+
+    /// The chunk writes of the event just handled that a neighbour mirrors
+    /// join `halo_dirty`.
+    fn note_halo_writes(&mut self) {
+        for e in crate::halo::take_touched_chunks() {
+            let Some(c) = self.data.chunk_coords_of(e) else { continue };
+            if !crate::halo::halo_targets(c.x as i32, c.z as i32).is_empty() {
+                self.halo_dirty.insert(crate::chunk_index_key(c));
+            }
+        }
+    }
+
+    /// Halo updates for the neighbours, from the band chunks written since
+    /// the previous call (their content now), with each target. Taken right
+    /// after a tick and its slot's events, like [`Region::take_transfers`].
+    pub fn take_halo_updates(&mut self) -> Vec<(crate::HaloUpdate, RegionCoords)> {
+        if self.halo_dirty.is_empty() {
+            return Vec::new();
+        }
+        let dirty = std::mem::take(&mut self.halo_dirty);
+        self.data.halo_updates_for(&dirty)
     }
 
     /// Test hook: roll back the most recent (unforgotten) event.

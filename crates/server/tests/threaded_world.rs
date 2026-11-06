@@ -111,7 +111,13 @@ impl Rig {
     fn with_on_thread_worldgen(
         columns: impl Fn(RegionCoords) -> Vec<(ColumnCoords, Column)> + Send + Sync + Clone + 'static,
     ) -> Self {
-        let spawner = ThreadRegionSpawner::with_generator(std::sync::Arc::new(columns.clone()));
+        let window = columns.clone();
+        let spawner = ThreadRegionSpawner::with_generator(std::sync::Arc::new(columns.clone()))
+            // Halo seeds of never-run neighbours, as the server makes them:
+            // the band columns only, on the starting region's thread.
+            .with_halo_generator(std::sync::Arc::new(move |rc, xs, zs| {
+                window(rc).into_iter().filter(|(c, _)| xs.contains(&c.x) && zs.contains(&c.z)).collect()
+            }));
         Self::with_spawner(spawner, columns)
     }
 

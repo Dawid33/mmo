@@ -12,6 +12,7 @@
 
 mod common;
 mod forge_lib;
+mod halo_probe;
 mod lod_bricks;
 mod player_walk;
 mod scene_hash_golden;

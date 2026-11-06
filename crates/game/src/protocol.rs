@@ -206,6 +206,46 @@ impl WorldBlockPos {
     }
 }
 
+/// A terrain chunk in WORLD chunk coordinates (`REGION_CHUNKS` per region on
+/// x and z; `y` is the region-local chunk y — regions tile only the plane).
+/// The chunk counterpart of [`WorldBlockPos`]; keys the terrain halo
+/// (`halo.rs`), whose chunks lie in neighbouring regions.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize, state_hash::StateHash)]
+pub struct WorldChunkPos {
+    pub x: i64,
+    pub y: i32,
+    pub z: i64,
+}
+
+impl WorldChunkPos {
+    pub fn new(x: i64, y: i32, z: i64) -> Self {
+        Self { x, y, z }
+    }
+
+    /// The world chunk of local chunk `[x, y, z]` in `rc`'s chunk frame. The
+    /// local chunk need not lie inside the region: one past its edge maps to
+    /// the neighbour's.
+    pub fn from_local(rc: RegionCoords, [x, y, z]: [i32; 3]) -> Self {
+        let n = crate::REGION_CHUNKS as i64;
+        Self { x: rc.x as i64 * n + x as i64, y, z: rc.z as i64 * n + z as i64 }
+    }
+
+    /// The region owning this chunk and the chunk in its frame (floor
+    /// division, like [`WorldBlockPos::to_local`]).
+    pub fn to_local(self) -> (RegionCoords, ChunkCoords) {
+        let n = crate::REGION_CHUNKS as i64;
+        let rc = RegionCoords::new(self.x.div_euclid(n) as i32, self.z.div_euclid(n) as i32);
+        (rc, ChunkCoords::new(self.x.rem_euclid(n) as usize, self.y, self.z.rem_euclid(n) as usize))
+    }
+
+    /// This chunk in `rc`'s chunk frame, which may lie outside it (negative,
+    /// or `REGION_CHUNKS` and up).
+    pub fn local_in(self, rc: RegionCoords) -> [i32; 3] {
+        let n = crate::REGION_CHUNKS as i64;
+        [(self.x - rc.x as i64 * n) as i32, self.y, (self.z - rc.z as i64 * n) as i32]
+    }
+}
+
 /// Owned entities within this distance of a region edge are mirrored as
 /// ghosts into that neighbour (up to 3 at a corner).
 pub const GHOST_MARGIN: f32 = 32.0;
@@ -716,6 +756,10 @@ pub enum GameEventKind {
     EntityArrived(EntityBundle),
     /// Margin mirror refresh from a neighbouring region.
     GhostUpdate(GhostData),
+    /// Terrain halo refresh from a neighbouring region (`halo.rs`): its
+    /// chunks within `HALO_BLOCKS` of the shared edge, changed (or, to seed
+    /// the halo, all of them).
+    HaloUpdate(crate::HaloUpdate),
     /// A logical-space UI action from a client (inventory move, toggle, ...).
     UiAction(ClientId, crate::UiAction),
     /// A fortress order from a client (designate, erase, cancel, ...).
@@ -795,6 +839,7 @@ impl GameEventKind {
             | GameEventKind::Quit
             | GameEventKind::EntityArrived(_)
             | GameEventKind::GhostUpdate(_)
+            | GameEventKind::HaloUpdate(_)
             | GameEventKind::ClientLeft(_)
             | GameEventKind::ParkPlayer(_)
             | GameEventKind::SpawnPerson(_)
@@ -813,6 +858,7 @@ impl GameEventKind {
         match (self, other) {
             (EntityArrived(a), EntityArrived(b)) => a.id == b.id,
             (GhostUpdate(a), GhostUpdate(b)) => a.id == b.id,
+            (HaloUpdate(a), HaloUpdate(b)) => a.same_chunks(b),
             _ => self == other,
         }
     }

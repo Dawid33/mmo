@@ -97,7 +97,7 @@ impl ChunkBlocks {
     }
 }
 
-#[derive(Debug, serde::Serialize, serde::Deserialize, ::borrow::Partial, Hash, state_hash::StateHash)]
+#[derive(Debug, PartialEq, serde::Serialize, serde::Deserialize, ::borrow::Partial, Hash, state_hash::StateHash)]
 #[module(crate)]
 pub struct Chunk {
     /// Authoritative block grid, `CHUNK_BLOCK_COUNT` blocks, canonical.

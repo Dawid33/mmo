@@ -16,7 +16,9 @@
 //! `Undo::<ColliderSet>::mutate_collider_safe`).
 //!
 //! Scope: whole blocks only (a break clears chisel detail), and only inside
-//! the player's home region. A ray that leaves the region finds nothing.
+//! the player's home region. A ray that leaves the region reads the terrain
+//! halo (`halo.rs`), so it may HIT a neighbour's block, but an edit there is
+//! refused: the halo is read-only (edits past the seam are Task 6.2's).
 //!
 //! Implied ground (rock below the materialised surface band, stored only as
 //! the column's `ColumnGround` recipe) is solid to the ray. Breaking a block
@@ -130,8 +132,10 @@ impl Rollback {
         COLLIDER_REBUILDS.with(|c| c.get())
     }
 
+    /// Whether the block at `pos` stops the edit ray: this region's block,
+    /// or past its edge the halo's (`halo.rs`) — read-only there.
     pub(crate) fn block_solid(&self, pos: BlockPos) -> bool {
-        let Some((coords, local)) = locate(pos) else { return false };
+        let Some((coords, local)) = locate(pos) else { return self.halo_cell_solid(pos) };
         let Some(e) = self.chunk_key_at(coords) else {
             return self.implied_block(coords, local).is_some_and(|b| b.id != BlockId::AIR);
         };
@@ -418,7 +422,18 @@ impl Rollback {
     /// same way, with its centring offset cleared.
     fn rebuild_chunk_colliders_safe(&mut self, e: EntityKey, cells: &crate::ColliderCells) {
         let Some(body) = *self.data.ecs.rigidbody.try_get(e) else { return };
-        let user_data = e.data().as_ffi() as u128;
+        self.rebuild_body_colliders_safe(body, e.data().as_ffi() as u128, cells);
+    }
+
+    /// [`Self::rebuild_chunk_colliders_safe`] for any fixed chunk body
+    /// (`user_data` on the colliders it attaches): terrain chunks and halo
+    /// chunks (`halo.rs`).
+    pub(crate) fn rebuild_body_colliders_safe(
+        &mut self,
+        body: rapier3d::prelude::RigidBodyHandle,
+        user_data: u128,
+        cells: &crate::ColliderCells,
+    ) {
         let wanted: Vec<_> = cells
             .grids()
             .map(|(size, keys)| {

@@ -1187,6 +1187,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                     // and moved by the manager). Drop rather than forward.
                     GameEventKind::EntityArrived(_)
                     | GameEventKind::GhostUpdate(_)
+                    | GameEventKind::HaloUpdate(_)
                     | GameEventKind::CreateClient(_)
                     | GameEventKind::CreateClientAt(..)
                     | GameEventKind::SpawnPerson(_)
@@ -1390,6 +1391,16 @@ impl<S: RegionSpawner> WorldManager<S> {
                         self.send_to_region(home, RegionInput::EventAfterTick(kind, stamp));
                     }
                     home => log::debug!("[server] forward of {kind:?} from {rc:?} dropped: home {home:?}"),
+                }
+            }
+            RegionOutput::HaloDeltas(list, stamp) => {
+                for (update, target) in list {
+                    // Like ghosts: halo updates never wake a region (a
+                    // starting one is seeded afresh).
+                    let running = self.regions.get(&target).is_some_and(|link| !link.stopping);
+                    if running {
+                        self.send_to_region(target, RegionInput::Transfer(GameEventKind::HaloUpdate(update), stamp));
+                    }
                 }
             }
             RegionOutput::GhostUpdates(list, stamp) => {
@@ -1998,6 +2009,8 @@ impl<S: RegionSpawner> WorldManager<S> {
         if let Some(extent) = self.map_extent() {
             let _ = input.send(RegionInput::SetMapExtent(Some(extent)));
         }
+        // Its terrain halo, before its first tick too.
+        self.seed_halo(rc, &input);
         // Then the history's catch-up: its people here now, before anything else.
         if let Some(history) = self.history.as_mut() {
             for kind in history.region_started(rc) {
@@ -2014,6 +2027,51 @@ impl<S: RegionSpawner> WorldManager<S> {
                 resubscribe_pending: Vec::new(),
             },
         );
+    }
+
+    /// Seed the halo of `rc`, which is starting (`input` is its fresh
+    /// channel; nothing has ticked it yet), from each on-map neighbour:
+    /// - running: the neighbour answers a `HaloRequest` with its live chunks
+    ///   (a stamped Transfer); its cached terrain, if any, goes in first;
+    /// - parked or cached (its last pushed / parked terrain): from the cache;
+    /// - never run: worldgen — on the region's own thread when the spawner
+    ///   generates there (only the band columns), else here (the whole
+    ///   region, not cached: LOD keeps its own choice of pristine sources).
+    ///
+    /// Known limit (as LOD's): a neighbour saved by an earlier process that
+    /// has not run in this one is seeded from pristine worldgen.
+    fn seed_halo(&mut self, rc: RegionCoords, input: &Sender<RegionInput>) {
+        let mut generate_there = Vec::new();
+        for n in crate::halo::neighbours(rc) {
+            if crate::off_map(self.map_extent(), n) {
+                continue;
+            }
+            let running = self.regions.get(&n).is_some_and(|l| !l.stopping);
+            if let Some(snap) = self.terrain_cache.get(&n) {
+                if let Some(seed) = crate::halo::halo_seed_from_chunks(n, rc, snap.chunks.iter().map(|(c, k)| (*c, k))) {
+                    let _ = input.send(RegionInput::Event(GameEventKind::HaloUpdate(seed)));
+                }
+            } else if running {
+                // The request below is the seed.
+            } else if self.spawner.generates_columns() {
+                generate_there.push(n);
+            } else {
+                // Not cached: LOD keeps its own choice of pristine sources.
+                let snap = TerrainSnapshot::from_columns(self.generate_timed(n));
+                if let Some(seed) = crate::halo::halo_seed_from_chunks(n, rc, snap.chunks.iter().map(|(c, k)| (*c, k))) {
+                    let _ = input.send(RegionInput::Event(GameEventKind::HaloUpdate(seed)));
+                }
+            }
+            if running {
+                self.send_to_region(n, RegionInput::HaloRequest(rc));
+                // And the other way: `n` mirrors this region from whatever
+                // it was seeded with (a saved region may have changed since).
+                let _ = input.send(RegionInput::HaloRequest(n));
+            }
+        }
+        if !generate_there.is_empty() {
+            let _ = input.send(RegionInput::SeedHaloFromWorldgen(generate_there));
+        }
     }
 
     fn subscribe(&mut self, client: ClientId, rc: RegionCoords) {

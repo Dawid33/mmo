@@ -907,7 +907,7 @@ impl GameInstanceManager {
             }
             // Transfer events are relayed into regions directly (server) or
             // client-predicted (later task); never locally-originated here.
-            GameEventKind::EntityArrived(_) | GameEventKind::GhostUpdate(_) => {}
+            GameEventKind::EntityArrived(_) | GameEventKind::GhostUpdate(_) | GameEventKind::HaloUpdate(_) => {}
             GameEventKind::UiAction(_, _) | GameEventKind::Order(_, _) if !self.is_caught_up => {
                 // Same admission rule as PlayerInput: drop until the sim has
                 // caught up with the server (join/replay window).
@@ -1015,6 +1015,7 @@ impl GameInstanceManager {
                         sat_out,
                         departures: d,
                         ghosts: g,
+                        halo: h,
                         stamp,
                         #[cfg(not(target_arch = "wasm32"))]
                         perf,
@@ -1037,7 +1038,7 @@ impl GameInstanceManager {
                             }
                         }
                         // This tick's transfers, now (both hosts).
-                        self.route_transfers(id, d, g, stamp);
+                        self.route_transfers(id, d, g, h, stamp);
                     }
                     RegionReport::Reconciled {
                         stats,
@@ -1130,6 +1131,7 @@ impl GameInstanceManager {
         source: RegionCoords,
         departures: Vec<(game::EntityBundle, RegionCoords)>,
         ghosts: Vec<(game::GhostData, RegionCoords)>,
+        halo: Vec<(game::HaloUpdate, RegionCoords)>,
         stamp: game::Tick,
     ) {
         for (bundle, target) in departures {
@@ -1156,6 +1158,11 @@ impl GameInstanceManager {
                 let mut d = data;
                 d.isometry = game::rebase_isometry(&d.isometry, d.source_region, target);
                 self.host.send(target, RegionCmd::Ghost(d, stamp));
+            }
+        }
+        for (update, target) in halo {
+            if self.host.contains(&target) {
+                self.host.send(target, RegionCmd::Halo(update, stamp));
             }
         }
     }
@@ -2486,6 +2493,7 @@ mod manager_tests {
                     sat_out: false,
                     departures,
                     ghosts,
+                    halo: Vec::new(),
                     stamp,
                     perf: game::RegionTickPerf::default(),
                     took: Duration::ZERO,

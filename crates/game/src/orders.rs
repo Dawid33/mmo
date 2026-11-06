@@ -283,14 +283,24 @@ pub fn probe_column_band(
 /// buildings).
 pub const BAND_HEADROOM_CHUNKS: i32 = 4;
 
+/// Region ∪ halo: tiles outside the region read the terrain halo
+/// (`halo.rs`) — its blocks, slopes and chunk bands; never bedrock, edge
+/// locks or constructions there. `find_path` itself still keeps to the
+/// region (`pathfind::in_region`) until walks plan across seams.
 impl TileSource for Rollback {
-    /// See [`probe_column_band`].
+    /// See [`probe_column_band`]; a halo column probes its mirrored chunks
+    /// (no ground recipe is mirrored).
     fn column_band(&self, column: [i32; 2]) -> Option<(i32, i32)> {
         let cb = crate::CHUNK_BLOCKS as i32;
         let (cx, cz) = (column[0].div_euclid(cb), column[1].div_euclid(cb));
         let n = crate::REGION_CHUNKS as i32;
         if !(0..n).contains(&cx) || !(0..n).contains(&cz) {
-            return None;
+            if !crate::halo::in_halo_band(cx, cz) {
+                return None;
+            }
+            return probe_column_band(column, None, |cy| {
+                self.halo_chunk_at([cx, cy, cz]).is_some_and(|h| h.chunk.is_some())
+            });
         }
         let ground = self.data.ground.get(&crate::ColumnCoords::new(cx as usize, cz as usize));
         probe_column_band(column, ground, |cy| {
@@ -299,9 +309,7 @@ impl TileSource for Rollback {
     }
 
     fn block(&self, p: TilePos) -> BlockId {
-        crate::edit::locate(p)
-            .and_then(|(coords, local)| self.current_block(coords, local))
-            .map_or(BlockId::AIR, |b| b.id)
+        self.tile_block(p).map_or(BlockId::AIR, |b| b.id)
     }
 
     fn is_bedrock(&self, p: TilePos) -> bool {
@@ -321,20 +329,18 @@ impl TileSource for Rollback {
     }
 
     fn tree_id(&self, p: TilePos) -> u32 {
-        crate::edit::locate(p)
-            .and_then(|(coords, local)| self.current_block(coords, local))
-            .map_or(0, |b| b.tree_id())
+        self.tile_block(p).map_or(0, |b| b.tree_id())
     }
 
     fn tree_limb(&self, p: TilePos) -> u8 {
-        crate::edit::locate(p)
-            .and_then(|(coords, local)| self.current_block(coords, local))
-            .map_or(0, |b| b.limb())
+        self.tile_block(p).map_or(0, |b| b.limb())
     }
 
     /// Classifies the chisel of the block at `p`; implied ground has none.
     fn slope(&self, p: TilePos) -> Option<crate::SlopeShape> {
-        let (coords, (bx, by, bz)) = crate::edit::locate(p)?;
+        let Some((coords, (bx, by, bz))) = crate::edit::locate(p) else {
+            return self.halo_chisel(p).and_then(crate::slope::classify);
+        };
         let e = self.chunk_key_at(coords)?;
         let chunk = self.data.ecs.chunk.try_get(e).as_ref()?;
         chunk.chisel.get(&crate::BlockIndex::from_xyz(bx, by, bz)).and_then(crate::slope::classify)

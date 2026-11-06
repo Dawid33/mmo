@@ -40,7 +40,8 @@ pub const REGION_MAGIC: [u8; 8] = *b"MMOREGN\0";
 /// and `Ecs.id`, and `ghosts` / `arrivals` are keyed by it.
 /// 9: the payload is `(Rollback, Vec<SavedTransfer>)` — the crossings in flight
 /// to the region when it was saved, queued again on load.
-pub const REGION_FILE_VERSION: u32 = 9;
+/// 10: `GameData` gained `halo` (the terrain halo, `game::halo`).
+pub const REGION_FILE_VERSION: u32 = 10;
 /// magic + version + region blocks + chunk blocks + world crc + payload crc.
 const HEADER_LEN: usize = 8 + 4 * 5;
 

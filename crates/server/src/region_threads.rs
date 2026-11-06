@@ -25,6 +25,9 @@ pub struct ThreadRegionSpawner {
     /// `None` (the `Default`, used by tests that pass ready-made seeds) keeps
     /// worldgen with the manager.
     generator: Option<SharedRegionGenerator>,
+    /// Worldgen of a neighbour's band columns for halo seeds
+    /// (`RegionInput::SeedHaloFromWorldgen`), handed to every runner.
+    halo_generator: Option<game::HaloGenerator>,
     /// World autosave: a region that has not run in this process (a
     /// `RegionSeed::Deferred(None)`) is restored from its save, if any, instead
     /// of generated — read on the region's own thread.
@@ -33,7 +36,7 @@ pub struct ThreadRegionSpawner {
 
 impl Default for ThreadRegionSpawner {
     fn default() -> Self {
-        Self { started: Instant::now(), clock: game::WorldClock::starting_at(0, 0), handles: BTreeMap::new(), generator: None, store: None }
+        Self { started: Instant::now(), clock: game::WorldClock::starting_at(0, 0), handles: BTreeMap::new(), generator: None, halo_generator: None, store: None }
     }
 }
 
@@ -47,6 +50,13 @@ impl ThreadRegionSpawner {
     pub fn with_clock(mut self, clock: game::WorldClock, started: Instant) -> Self {
         self.clock = clock;
         self.started = started;
+        self
+    }
+
+    /// Seed halos of never-run neighbours with `generator` on the region's
+    /// own thread (see `game::HaloGenerator`).
+    pub fn with_halo_generator(mut self, generator: game::HaloGenerator) -> Self {
+        self.halo_generator = Some(generator);
         self
     }
 
@@ -66,6 +76,7 @@ impl RegionSpawner for ThreadRegionSpawner {
     ) -> Sender<RegionInput> {
         let (send, recv) = unbounded();
         let generator = self.generator.clone();
+        let halo_generator = self.halo_generator.clone();
         let store = self.store.clone();
         let (clock, started) = (self.clock, self.started);
         let handle = std::thread::Builder::new()
@@ -99,6 +110,10 @@ impl RegionSpawner for ThreadRegionSpawner {
                         columns
                     }),
                 };
+                let mut runner = runner;
+                if let Some(g) = halo_generator {
+                    runner.set_halo_generator(g);
+                }
                 let generate_time = generate_time.get();
                 let hash_time = runner.baseline_hash_time();
                 let build = genesis_started.elapsed() - generate_time - hash_time;

@@ -1,6 +1,8 @@
 //! Deterministic block-scale A* over region-local tiles (`TilePos`), shared by
-//! the sim and the client. Moves are DF-like: 8 horizontal neighbours at
-//! dy in {-1, 0, +1}, landing on a standable tile; no swimming.
+//! the sim and the client. The sim's `TileSource` covers the region and its
+//! terrain halo (`halo.rs`); paths themselves stay inside the region. Moves
+//! are DF-like: 8 horizontal neighbours at dy in {-1, 0, +1}, landing on a
+//! standable tile; no swimming.
 //!
 //! Solid means `block_props().is_solid` (leaves are not: no collider) and not
 //! air and not water; passable means air, or a non-solid non-water block.
@@ -44,6 +46,9 @@ fn solid_block(b: BlockId) -> bool {
     b != BlockId::AIR && !is_water(b) && block_props().is_solid(b)
 }
 
+/// Paths keep to the region. A [`TileSource`] may answer past its edge (the
+/// sim's reads its terrain halo, `halo.rs`, so a source covers region ∪
+/// halo); walks planned across a seam are a later step.
 fn in_region(p: TilePos) -> bool {
     let n = REGION_BLOCKS as i32;
     (0..n).contains(&p[0]) && (0..n).contains(&p[2])

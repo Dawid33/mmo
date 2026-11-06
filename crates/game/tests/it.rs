@@ -25,6 +25,7 @@ mod chunk_units;
 mod collider_genesis;
 mod gjk_upstream;
 mod ground;
+mod halo;
 mod handoff_manager;
 mod world_clock;
 mod handoff_protocol;

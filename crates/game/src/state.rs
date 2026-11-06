@@ -275,6 +275,10 @@ mod game_data {
         /// Block inventories (chests) by cell (`containers.rs`).
         #[undo(map)]
         containers: BTreeMap<crate::edit::BlockPos, crate::Container>,
+        /// Read-only mirror of the neighbours' terrain within
+        /// `HALO_BLOCKS` of each edge (`halo.rs`), by world chunk.
+        #[undo(map)]
+        halo: BTreeMap<crate::WorldChunkPos, crate::HaloChunk>,
     }
 
     pub struct Ecs {
@@ -678,6 +682,7 @@ impl Undo<Component<Chunk>> {
         block: Block,
         chisel: Option<ChiselData>,
     ) {
+        crate::halo::touch_chunk(key);
         let chunk = self
             .list
             .get(key)
@@ -707,6 +712,7 @@ impl Undo<Component<Chunk>> {
     /// (exact for the same reason — canonical grid, entry-for-entry chisel).
     /// `writes` must not repeat an index.
     pub fn set_chunk_blocks_safe(&mut self, key: EntityKey, writes: Vec<(BlockIndex, Block, Option<ChiselData>)>) {
+        crate::halo::touch_chunk(key);
         let chunk = self
             .list
             .get(key)
@@ -827,6 +833,7 @@ impl Rollback {
         let cells = crate::collider_cells(&chunk);
         self.ecs.chunk.set_safe(e, Some(chunk));
         self.chunk_index.insert(chunk_index_key(coords), e);
+        crate::halo::touch_chunk(e);
         let position = Pose::from_translation(Vector::new((coords.x * CHUNK_UNITS) as f32, (coords.y * CHUNK_UNITS as i32) as f32, (coords.z * CHUNK_UNITS) as f32));
         let body = RigidBodyBuilder::fixed()
             .pose(position)

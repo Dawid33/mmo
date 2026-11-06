@@ -137,14 +137,19 @@ pub struct Tolerances {
 }
 
 /// Lockstep placements vs the centred one: world poses within this many
-/// blocks. Measured ×2: the largest spread was 0.0123 blocks (2026-11-06,
-/// REGION_BLOCKS 64, CHUNK_BLOCKS 16; key walk at Seam(X)/Seam(Z)/Corner,
-/// adventure walk at Corner) — the resting height of a grounded body, which
-/// also differs between a lockstep and a jittered centred run.
-pub const POSE_TOL_BLOCKS: f32 = 0.025;
+/// blocks. Measured ×2: the largest spread was 5.3e-5 blocks (2026-11-06,
+/// with the terrain halo; REGION_BLOCKS 64, CHUNK_BLOCKS 16; adventure walk
+/// at Corner — the key walk's is 6.3e-6 at Seam(X)/Seam(Z), 3.3e-6 at
+/// Corner). Before the halo it was 0.0123 (tolerance 0.025): the body dipped
+/// past the seam (no floor there) and rested at another height. The known-red
+/// adventure Seam(X) (0.17, Task 6.5) is not part of the measurement.
+pub const POSE_TOL_BLOCKS: f32 = 1.1e-4;
 /// Lockstep velocities within this many blocks per second (bodies are at
-/// rest when the snapshot is taken). Measured ×2: 1.5e-4 (2026-11-06, as
-/// above).
+/// rest when the snapshot is taken). Measured ×2: 1.5e-4 (2026-11-06,
+/// before the halo; with it the largest is still the known-red adventure
+/// walk at a seam, 1.5e-4 lockstep and 2.3e-4 under jitter — the adventure
+/// walk at Corner is 7.6e-5, the key walk 0). Shared with
+/// [`JITTER_TOLERANCES`], which the adventure walk's seam runs still need.
 pub const VEL_TOL_BLOCKS_PER_S: f32 = 3.1e-4;
 pub const LOCKSTEP_TOLERANCES: Tolerances =
     Tolerances { pose_blocks: POSE_TOL_BLOCKS, vel_blocks_per_s: VEL_TOL_BLOCKS_PER_S, tiles: true };

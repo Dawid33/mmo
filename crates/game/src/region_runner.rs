@@ -62,6 +62,14 @@ pub enum RegionInput {
     /// World autosave: replied with `RegionOutput::Saved(state)`, a clone of
     /// the live state (like a snapshot). Does not affect sim state.
     Save,
+    /// Neighbour `.0` just started: send it this region's chunks it mirrors
+    /// as a halo seed (`RegionOutput::HaloDeltas`, stamped with this
+    /// region's tick). Does not affect this region's state.
+    HaloRequest(RegionCoords),
+    /// Seed this (just started, not yet ticked) region's halo from worldgen
+    /// for these never-run neighbours, with the runner's halo generator
+    /// ([`RegionRunner::set_halo_generator`]) — on the region's own thread.
+    SeedHaloFromWorldgen(Vec<RegionCoords>),
     /// Graceful stop; replied with `RegionOutput::Stopped(state)`.
     Shutdown,
 }
@@ -91,6 +99,11 @@ pub enum RegionOutput {
     Departures(Vec<(EntityBundle, RegionCoords)>, Tick),
     /// Margin mirrors this tick, same framing and stamp.
     GhostUpdates(Vec<(GhostData, RegionCoords)>, Tick),
+    /// Terrain halo updates (`halo.rs`) for the neighbours, same framing and
+    /// stamp: the band chunks this tick and its slot's events changed, or a
+    /// seed answering a [`RegionInput::HaloRequest`] (stamped with the tick
+    /// it was answered at).
+    HaloDeltas(Vec<(crate::HaloUpdate, RegionCoords)>, Tick),
     /// Sent on `Shutdown` just before `Stopped`: every person that had a
     /// body here, with its region-local translation. They were despawned
     /// first, so the parked blob holds no people; the manager owns them.
@@ -250,8 +263,17 @@ impl RegionSeed {
     }
 }
 
+/// Worldgen of a never-run neighbour's chunk columns `xs × zs` (its own
+/// frame) for a halo seed (`RegionInput::SeedHaloFromWorldgen`): the same
+/// columns its own generation makes.
+pub type HaloGenerator = std::sync::Arc<
+    dyn Fn(RegionCoords, std::ops::Range<usize>, std::ops::Range<usize>) -> Vec<(ColumnCoords, Column)> + Send + Sync,
+>;
+
 pub struct RegionRunner {
     id: RegionCoords,
+    /// See [`RegionRunner::set_halo_generator`].
+    halo_generator: Option<HaloGenerator>,
     region: Region,
     out: Sender<(RegionCoords, RegionOutput)>,
     /// Last-pushed terrain hash; a change past the throttle window pushes a
@@ -300,6 +322,7 @@ impl RegionRunner {
         let baseline_hash_time = hash_started.elapsed();
         Self {
             id,
+            halo_generator: None,
             region,
             out,
             last_terrain_hash,
@@ -311,6 +334,12 @@ impl RegionRunner {
             state_hash_cost: Default::default(),
             slot_start_hashes: None,
         }
+    }
+
+    /// Worldgen for [`RegionInput::SeedHaloFromWorldgen`]; without one such a
+    /// seed is skipped (logged).
+    pub fn set_halo_generator(&mut self, generator: HaloGenerator) {
+        self.halo_generator = Some(generator);
     }
 
     /// Test support: from now on record `(tick, state hash)` right after each
@@ -388,6 +417,13 @@ impl RegionRunner {
             RegionInput::Save => {
                 let _ = self.out.send((self.id, RegionOutput::Saved(Box::new(self.region.data().clone()))));
             }
+            RegionInput::HaloRequest(to) => {
+                if let Some(seed) = self.region.data().halo_seed_for(to) {
+                    let stamp = self.region.current_tick();
+                    let _ = self.out.send((self.id, RegionOutput::HaloDeltas(vec![(seed, to)], stamp)));
+                }
+            }
+            RegionInput::SeedHaloFromWorldgen(neighbours) => self.seed_halo_from_worldgen(neighbours),
             RegionInput::Shutdown => {
                 // Input must not be lost to a park.
                 for (kind, _) in std::mem::take(&mut self.held) {
@@ -408,6 +444,24 @@ impl RegionRunner {
             }
         }
         true
+    }
+
+    /// Halo seeds generated here, applied at once (before the first tick).
+    fn seed_halo_from_worldgen(&mut self, neighbours: Vec<RegionCoords>) {
+        let Some(generate) = self.halo_generator.clone() else {
+            log::warn!("region {:?}: no halo generator; {} neighbour seeds skipped", self.id, neighbours.len());
+            return;
+        };
+        for n in neighbours {
+            let columns = crate::halo::facing_windows(n, self.id)
+                .into_iter()
+                .flat_map(|(xs, zs)| generate(n, xs, zs))
+                .collect();
+            let snap = TerrainSnapshot::from_columns(columns);
+            if let Some(seed) = crate::halo::halo_seed_from_chunks(n, self.id, snap.chunks.iter().map(|(c, k)| (*c, k))) {
+                self.apply(GameEventKind::HaloUpdate(seed));
+            }
+        }
     }
 
     /// An event predicted after tick `after_tick`: held for that slot, or
@@ -563,11 +617,15 @@ impl RegionRunner {
         departures.extend(more_departures);
         ghosts.extend(more_ghosts);
         let stamp = self.region.current_tick();
+        let halo = self.region.take_halo_updates();
         if !departures.is_empty() {
             let _ = self.out.send((self.id, RegionOutput::Departures(departures, stamp)));
         }
         if !ghosts.is_empty() {
             let _ = self.out.send((self.id, RegionOutput::GhostUpdates(ghosts, stamp)));
+        }
+        if !halo.is_empty() {
+            let _ = self.out.send((self.id, RegionOutput::HaloDeltas(halo, stamp)));
         }
         if self.region.current_tick() % 10 == 0 {
             let _ = self.out.send((

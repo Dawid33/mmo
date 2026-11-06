@@ -593,7 +593,9 @@ fn pristine_lod_source_is_generated_by_the_builder_not_the_manager() {
     m.handle_server_event(ServerEvent::connected(1), 0);
     drain_region_outputs(&mut m, &region_out);
     let after_join = generated.load(Ordering::SeqCst);
-    assert_eq!(after_join, 1, "the home region itself still generates on the manager");
+    // The inline spawner generates on the manager: the home region, and its
+    // 8 never-run neighbours' halo seeds (`game::halo`).
+    assert_eq!(after_join, 1 + 8, "the home region and its halo seeds still generate on the manager");
     let cached_before = m.terrain_cache_len();
 
     let far = RegionCoords::new(100, 100);

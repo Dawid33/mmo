@@ -32,6 +32,9 @@ pub enum RegionCmd {
     Arrival(EntityBundle, game::Tick),
     /// A predicted margin mirror from a sibling region (ditto, same stamp).
     Ghost(GhostData, game::Tick),
+    /// A predicted terrain halo update from a sibling region (ditto, same
+    /// stamp), like the server's `RegionInput::Transfer(HaloUpdate)`.
+    Halo(game::HaloUpdate, game::Tick),
     Clock(ClockInput),
     SetMapExtent(Option<game::MapExtent>),
     /// Wireframe the colliders near this viewer WORLD position.
@@ -54,6 +57,9 @@ pub enum RegionReport {
         sat_out: bool,
         departures: Vec<(EntityBundle, RegionCoords)>,
         ghosts: Vec<(GhostData, RegionCoords)>,
+        /// Terrain halo updates for the neighbours (`game::halo`): band
+        /// chunks this tick changed. Targets absolute.
+        halo: Vec<(game::HaloUpdate, RegionCoords)>,
         /// The region's `current_tick()` right after this tick (T+1 for its
         /// tick T): the slot the targets apply these transfers in, as the
         /// server's `RegionOutput::Departures` stamp.
@@ -203,6 +209,7 @@ pub fn handle(
             transfer(region, st, ctx, GameEventKind::EntityArrived(bundle), stamp, out);
         }
         RegionCmd::Ghost(data, stamp) => transfer(region, st, ctx, GameEventKind::GhostUpdate(data), stamp, out),
+        RegionCmd::Halo(update, stamp) => transfer(region, st, ctx, GameEventKind::HaloUpdate(update), stamp, out),
         RegionCmd::Clock(input) => {
             let d = decide(region.current_tick(), &input);
             out.push(RegionReport::Clock(d));
@@ -256,6 +263,7 @@ fn tick(region: &mut Region, st: &mut RunnerState, ctx: &RunnerCtx, out: &mut Ve
             sat_out: true,
             departures: Vec::new(),
             ghosts: Vec::new(),
+            halo: Vec::new(),
             stamp: region.current_tick(),
             #[cfg(not(target_arch = "wasm32"))]
             perf: game::RegionTickPerf::default(),
@@ -287,11 +295,15 @@ fn tick(region: &mut Region, st: &mut RunnerState, ctx: &RunnerCtx, out: &mut Ve
     // Read right after the tick: the buffers hold this tick's scan only
     // (a reconcile replay overwrites them with stale scans, never read).
     let (departures, ghosts) = take_transfers(region, st, ctx);
+    // Band chunks written since the last tick (this tick's edits, and any a
+    // predicted event made in the slot before it).
+    let halo = region.take_halo_updates();
     let stamp = region.current_tick();
     out.push(RegionReport::Ticked {
         sat_out: false,
         departures,
         ghosts,
+        halo,
         stamp,
         #[cfg(not(target_arch = "wasm32"))]
         perf: region.take_tick_perf(),

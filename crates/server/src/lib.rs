@@ -581,7 +581,13 @@ pub fn run() {
         0,
         region_store.as_ref().and_then(|s| s.load_world_tick()).unwrap_or(0),
     );
+    // Halo seeds of never-run neighbours: only their band columns, on the
+    // starting region's thread (`game::halo`).
+    let halo_generator: game::HaloGenerator = std::sync::Arc::new(move |rc, xs, zs| {
+        worldgen::generate_columns(rc, xs, zs, world_seed, materials)
+    });
     let mut spawner = region_threads::ThreadRegionSpawner::with_generator(region_generator)
+        .with_halo_generator(halo_generator)
         .with_clock(world_clock, start);
     let tick_store = region_store.clone();
     let save_world_tick = move |start: std::time::Instant| {
