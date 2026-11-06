@@ -15,6 +15,23 @@ use game::{
 /// A chunk's edge in world units, as `f32`.
 pub const CHUNK_EDGE: f32 = CHUNK_UNITS as f32;
 
+/// Installs the real block properties (`assets/blocks/blocks.ron`) — the
+/// one process-global every test in this binary shares. It starts out as the
+/// all-solid default with no drops, no hardness and no chest block, and the
+/// first test that installs it changes it for every test still running, so a
+/// test whose outcome depends on block props (the starting kit, mining drops
+/// and hardness, leaves being non-solid) must call this BEFORE it builds any
+/// state — else it sees the default in one run and the real props in the
+/// next. Idempotent: every installer in this binary installs the same props.
+pub fn install_real_block_props() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let reg = game::BlockRegistry::from_ron(include_str!("../../../../assets/blocks/blocks.ron"))
+            .expect("assets/blocks/blocks.ron parses");
+        game::install_block_props(reg.props());
+    });
+}
+
 /// The chunk holding the world-unit position `units` (floor by `CHUNK_UNITS`).
 pub fn chunk_of(units: game::rapier3d::math::Vector) -> ChunkCoords {
     chunk_coords_from_translation(units)

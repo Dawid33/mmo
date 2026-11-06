@@ -71,6 +71,10 @@ pub struct Rig {
 
 impl Rig {
     pub fn with_floor(schedule: Option<InlineSchedule>, floor: fn(RegionCoords) -> Vec<(ColumnCoords, Column)>) -> Self {
+        // Before any region exists: the seam tests compare runs (placements,
+        // seeds) against each other, and a player's starting kit and a broken
+        // block's drops read the process-global block props.
+        super::install_real_block_props();
         let (out_send, packets) = unbounded();
         let (region_out_send, region_out) = unbounded();
         let (lod_result_send, lod_result_recv) = unbounded();

@@ -30,6 +30,8 @@ fn player_translation(region: &Region, client: game::ClientId) -> (f32, f32, f32
 
 #[test]
 fn create_client_at_lands_over_the_column() {
+    // The kit compared below reads the process-global block props.
+    crate::common::install_real_block_props();
     let mut region = region_with_floor();
     region.handle_event(GameEventKind::CreateClientAt(0, COLUMN, None)).unwrap();
     let (x, y, z) = player_translation(&region, 0);
