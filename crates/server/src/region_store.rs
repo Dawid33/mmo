@@ -34,7 +34,9 @@ pub const REGION_MAGIC: [u8; 8] = *b"MMOREGN\0";
 /// aside, like any other unreadable one.)
 /// 7: terrain slopes — pre-slope saves (half-block terrain, a `Walker` without
 /// `walk_up`) are set aside as `.bak` and their regions regenerate.
-pub const REGION_FILE_VERSION: u32 = 7;
+/// 8: `EntityId` — `GameData` gained `region` / `next_entity_serial` / `id_index`
+/// and `Ecs.id`, and `ghosts` / `arrivals` are keyed by it.
+pub const REGION_FILE_VERSION: u32 = 8;
 /// magic + version + region blocks + chunk blocks + world crc + payload crc.
 const HEADER_LEN: usize = 8 + 4 * 5;
 
@@ -267,6 +269,14 @@ mod tests {
             dir,
             PathBuf::from(format!("worlds/foo/terrain.regions/b{}-c{}", game::REGION_BLOCKS, game::CHUNK_BLOCKS))
         );
+    }
+
+    #[test]
+    fn an_older_file_version_is_refused() {
+        let store = RegionStore::new(scratch("oldver"), 7);
+        let mut bytes = store.encode(&blob());
+        bytes[8..12].copy_from_slice(&(REGION_FILE_VERSION - 1).to_le_bytes());
+        assert!(matches!(store.decode(&bytes), Err(RegionFileError::Version(v)) if v == REGION_FILE_VERSION - 1));
     }
 
     #[test]
