@@ -39,18 +39,19 @@ fn forget(region: &mut Region, ev: GameEventKind) {
 /// of block (8, 2, 8), first person, in Adventure, looking 45 degrees down
 /// (`pitch_px` of mouse motion). Setup is forgotten.
 fn region(pitch_px: f32) -> Region {
-    region_with(pitch_px, || Chunk::flat_floor(32))
+    region_with(pitch_px, |_| Chunk::flat_floor(32))
 }
 
 /// [`region`] over a custom floor chunk (the same for every column).
-fn region_with(pitch_px: f32, floor: impl Fn() -> Chunk) -> Region {
+fn region_with(pitch_px: f32, floor: impl Fn(ChunkCoords) -> Chunk) -> Region {
     let reg = BlockRegistry::from_ron(MANIFEST).unwrap();
     install_block_props(reg.props());
     let mut chunks = Vec::new();
     let around = SPAWN_CHUNK.saturating_sub(1)..=SPAWN_CHUNK + 1;
     for x in around.clone() {
         for z in around.clone() {
-            chunks.push((ChunkCoords::new(x, 0, z), floor()));
+            let at = ChunkCoords::new(x, 0, z);
+            chunks.push((at, floor(at)));
         }
     }
     let (send, recv) = crossbeam::channel::unbounded();
@@ -156,24 +157,32 @@ fn dirt_breaks_after_15_ticks() {
 
 #[test]
 fn a_mined_slope_ends_as_air_and_drops_one_dirt() {
-    const CB: usize = game::CHUNK_BLOCKS;
-    let bi = game::BlockIndex::from_xyz(8 % CB, 1 % CB, 8 % CB);
-    let mut region = region_with(DOWN_45, || {
+    // Find where the 45 degree eye ray lands on the plain floor, then make
+    // exactly that block a slope.
+    let a = target(&region(DOWN_45));
+    let (coords, (bx, by, bz)) = game::edit::locate(a).unwrap();
+    let bi = game::BlockIndex::from_xyz(bx, by, bz);
+    let mut region = region_with(DOWN_45, |at| {
         let mut c = Chunk::flat_floor(32);
-        c.set_block(8 % CB, 1 % CB, 8 % CB, Block::new(DIRT));
-        c.chisel.insert(bi, game::slope_chisel(DIRT, game::SlopeShape::Straight { low: game::Side::PosX }));
+        if at == coords {
+            c.set_block(bx, by, bz, Block::new(DIRT));
+            c.chisel.insert(bi, game::slope_chisel(DIRT, game::SlopeShape::Straight { low: game::Side::PosX }));
+        }
         c
     });
-    let a = target(&region);
+    let chisel_at = |region: &Region| {
+        let snap = region.terrain_snapshot();
+        snap.chunks.iter().find(|(c, _)| *c == coords).and_then(|(_, c)| c.chisel.get(&bi).cloned())
+    };
+    assert_eq!(target(&region), a, "the ray must still land on the same cell");
     assert_eq!(block(&region, a), DIRT);
+    let slope = game::slope_chisel(DIRT, game::SlopeShape::Straight { low: game::Side::PosX });
+    assert_eq!(chisel_at(&region), Some(slope), "the targeted cell carries the slope chisel");
     mouse(&mut region, MouseButton::Left, true);
     assert!(ticks_to_break(&mut region, a, 40).is_some(), "the slope must break");
+    assert_eq!(block(&region, a), BlockId::AIR);
+    assert_eq!(chisel_at(&region), None, "a broken block keeps no chisel");
     assert_eq!(piles(&region), vec![(a, vec![ItemStack { item: DIRT_ITEM, count: 1 }])]);
-    let snap = region.terrain_snapshot();
-    assert!(
-        snap.chunks.iter().all(|(_, c)| !c.chisel.contains_key(&bi) || c.block_at(8 % CB, 1 % CB, 8 % CB).id != BlockId::AIR),
-        "a broken block keeps no chisel"
-    );
 }
 
 #[test]
