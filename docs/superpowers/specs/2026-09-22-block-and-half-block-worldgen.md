@@ -1,3 +1,5 @@
+> **Superseded by [2026-11-06-terrain-slopes-design.md](2026-11-06-terrain-slopes-design.md)** — worldgen now emits whole blocks + slopes; half blocks are gone.
+
 # Worldgen: whole blocks and half blocks only (investigation)
 
 2026-09-22. Question: can worldgen emit only whole blocks (1 m) or half blocks

@@ -53,8 +53,8 @@ pub(crate) struct Ground {
     recipes: Vec<(ColumnCoords, game::ColumnGround)>,
     /// Surface block y per block column (the block the tree may stand on).
     surface: BTreeMap<[i32; 2], i32>,
-    /// Top of the ground, units: the surface block's top (a half block's
-    /// cuboid top).
+    /// Top of the ground, units: the surface block's top (a slope's low
+    /// quarters).
     top: BTreeMap<[i32; 2], f32>,
 }
 
@@ -108,13 +108,26 @@ pub(crate) fn flat_floor(depth: i32) -> Ground {
 }
 
 impl Ground {
-    /// Top (units) of the block at `p`: its chisel's highest cuboid, or the
-    /// whole block.
+    /// Top (units) of the block at `p`: the lowest top of its chisel's voxel
+    /// columns (a slope's low quarters: a body resting there is on the
+    /// ground, not sunk), or the whole block.
     fn block_top(&self, p: TilePos) -> f32 {
         let (coords, (x, y, z)) = game::edit::locate(p).unwrap();
         let chisel = self.chunks.get(&coords).and_then(|c| c.chisel.get(&game::BlockIndex::from_xyz(x, y, z)));
         match chisel {
-            Some(c) => p[1] as f32 * B + c.cuboids().map(|(_, max, _)| max[1]).max().unwrap_or(0) as f32,
+            Some(c) => {
+                let cuboids: Vec<_> = c.cuboids().collect();
+                let column_top = |vx: usize, vz: usize| {
+                    cuboids
+                        .iter()
+                        .filter(|(min, max, _)| (min[0]..max[0]).contains(&vx) && (min[2]..max[2]).contains(&vz))
+                        .map(|(_, max, _)| max[1])
+                        .max()
+                        .unwrap_or(0)
+                };
+                let lowest = (0..BLOCK_VOXELS).flat_map(|vx| (0..BLOCK_VOXELS).map(move |vz| (vx, vz)));
+                p[1] as f32 * B + lowest.map(|(vx, vz)| column_top(vx, vz)).min().unwrap_or(0) as f32
+            }
             None => (p[1] + 1) as f32 * B,
         }
     }
@@ -151,7 +164,13 @@ impl Ground {
     /// of the world point's column: a point resting against the side of a
     /// step (pushed `slack` into it sideways) is measured against the lower
     /// column, not as sunk the whole step deep.
+    /// Past the region's edge there is no ground in the sim (a body may hang
+    /// over the seam), so a point there is never sunk.
     fn top_at(&self, x: f32, z: f32, slack: f32) -> f32 {
+        let outside = |v: f32| !(0.0..RB as f32 * B).contains(&v);
+        if outside(x) || outside(z) {
+            return f32::NEG_INFINITY;
+        }
         let col = |v: f32| ((v / B).floor() as i32).clamp(0, RB - 1);
         let mut t = f32::INFINITY;
         for cx in col(x - slack)..=col(x + slack) {
@@ -443,7 +462,10 @@ fn young_trees_land_on_the_ground() {
     let mut failures = Vec::new();
     let mut unsettled = Vec::new();
     let mut falls = 0;
-    for sp in SPECIES.iter().filter(|s| std::env::var("TREE_FALL_SPECIES").map_or(true, |n| n == s.name)) {
+    // A single-block species (cactus) has no `_log` / `_branch` / `_leaves`
+    // blocks for `scene` to plant.
+    let species = SPECIES.iter().filter(|s| !s.single_block);
+    for sp in species.filter(|s| std::env::var("TREE_FALL_SPECIES").map_or(true, |n| n == s.name)) {
         for seed in std::env::var("TREE_FALL_SEED").ok().map_or(0..3u64, |s| { let s: u64 = s.parse().unwrap(); s..s + 1 }) {
             for age in std::env::var("TREE_FALL_AGE").ok().map_or(vec![5u16, 15, 30], |a| vec![a.parse().unwrap()]) {
                 let probe = scene(clone_ground(&ground), sp, seed, age);

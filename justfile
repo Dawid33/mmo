@@ -549,6 +549,12 @@ world-map *args:
 cross-section *args:
     VOXEL_REGION_BLOCKS={{play_blocks}} {{cap}} {{cargo}} run --release -p worldgen --example cross_section -- {{args}}
 
+# Region cost and walkability of generated terrain (test-size region, procedural
+# world): snapshot / chisel / collider sizes, slopes by shape and how many
+# one-block rises are walkable without a jump. Args: [rx rz] (default 0 0).
+quantize-probe *args:
+    {{cap}} {{cargo}} run --release -p worldgen --example quantize_probe -- {{args}}
+
 # Flags: --world <file> --region X,Z; IMPLIED_AIR=1 counts the ground under a
 # column's band as unknown. Built with `play_blocks`, like cross-section.
 # Render-brick census of a region: entities spawned, bricks with faces, buried ones

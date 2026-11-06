@@ -16,6 +16,7 @@ pub mod material;
 pub mod tile_map;
 pub mod world_store;
 pub mod trees;
+mod slopes;
 
 /// The world seed shared by every `generate_region` caller (server + offline
 /// client) so they produce the SAME world. Kept in one place so the server and
@@ -30,7 +31,7 @@ use std::collections::BTreeMap;
 
 use game::{
     Biome, Block, BlockId, BlockIndex, ChiselData, Chunk, ChunkBlocks, Column, ColumnCoords, RegionCoords, SubChunk,
-    BLOCK_VOXELS, HALF_BLOCK_VOXELS, CHUNK_BLOCKS, CHUNK_BLOCK_COUNT, BRICK_VOXELS, BRICK_VOXEL_COUNT, REGION_CHUNKS,
+    BLOCK_VOXELS, CHUNK_BLOCKS, CHUNK_BLOCK_COUNT, BRICK_VOXELS, BRICK_VOXEL_COUNT, REGION_CHUNKS,
 };
 
 use crate::forged::ColumnClimate;
@@ -79,14 +80,13 @@ fn block_center_m(b: i32) -> f64 {
     b as f64 + 0.5
 }
 
-/// Worldgen terrain is whole blocks and half blocks only — never finer voxel
-/// detail. A half block is an ordinary one-cuboid chisel (editable at voxel
-/// scale like any other); the continuous surface is rounded to the nearest half block: a
-/// block holds a half block once the surface is a quarter of the way up it, and is
-/// whole once it is three quarters up. Density falls monotonically with
-/// height, so every block under a half-or-better block is whole.
-const HALF_TEST_M: f64 = 0.25;
-const FULL_TEST_M: f64 = 0.75;
+/// Worldgen terrain is whole blocks and slopes only — never finer voxel
+/// detail. The continuous surface is rounded to whole blocks at the block's
+/// midpoint: the surface block is the highest whose density at `by + 0.5` is
+/// positive. Density falls monotonically with height, so every block under it
+/// is solid. A one-block rise then carves the higher column's top block into a
+/// slope (`slopes::slope_for`) — an ordinary chisel, editable at voxel scale.
+const SURFACE_TEST_M: f64 = 0.5;
 
 /// The scan band `(top, bottom)` (blocks) of a profile.
 fn scan_band(prof: &crate::pipeline::ColumnProfile) -> (i32, i32) {
@@ -97,7 +97,7 @@ fn scan_band(prof: &crate::pipeline::ColumnProfile) -> (i32, i32) {
     }
 }
 
-/// Highest block that is at least half full for a precomputed profile — the
+/// Highest block that is at least half full (`SURFACE_TEST_M`) for a precomputed profile — the
 /// surface block — or the band's bottom − 1 if the whole column is air.
 /// Shared by full-res and coarse generation, so any-solid LOD cells agree
 /// with the generated blocks.
@@ -111,7 +111,7 @@ fn scan_band(prof: &crate::pipeline::ColumnProfile) -> (i32, i32) {
 /// falls back to the band top.
 fn surface_from_profile(prof: &crate::pipeline::ColumnProfile) -> i32 {
     let (top, bottom) = scan_band(prof);
-    let solid = |by: i32| prof.density_at(by as f64 + HALF_TEST_M) > 0.0;
+    let solid = |by: i32| prof.density_at(by as f64 + SURFACE_TEST_M) > 0.0;
     // `as i32` saturates (NaN -> 0); the guard below covers both.
     let analytic = (prof.surface_y().ceil() as i32).saturating_add(SURFACE_SCAN_HEADROOM);
     let mut by = top.min(analytic);
@@ -127,9 +127,9 @@ fn surface_from_profile(prof: &crate::pipeline::ColumnProfile) -> i32 {
     bottom - 1
 }
 
-/// Whether the surface block `surface` is whole rather than a half block.
-fn surface_is_full(prof: &crate::pipeline::ColumnProfile, surface: i32) -> bool {
-    prof.density_at(surface as f64 + FULL_TEST_M) > 0.0
+/// Whether column `c` has ground at all (a surface inside its scan band).
+fn has_ground(c: &ColSample) -> bool {
+    c.s >= if c.unbounded { FORGED_SCAN_BOTTOM } else { SCAN_BOTTOM }
 }
 
 /// One block column as generation builds it (`column_sample`).
@@ -137,8 +137,6 @@ fn surface_is_full(prof: &crate::pipeline::ColumnProfile, surface: i32) -> bool 
 struct ColSample {
     /// The ground's surface block (soil over rock).
     s: i32,
-    /// Whether `s` is whole (else a half block).
-    full: bool,
     /// Topmost water block (`SEA_TOP_BLOCK` where the sea is all there is).
     water_top: i32,
     /// Topmost solid block: `s`, or the top of the glacier ice over it.
@@ -165,11 +163,8 @@ fn point_sample(patch: &dyn Patch, mats: &Materials, x: f64, z: f64) -> ColSampl
     let (prof, water_top, lake) = patch.sample(x, z);
     let s = surface_from_profile(&prof);
     debug_assert!(s >= scan_band(&prof).1, "surface below the scan at ({x}, {z})");
-    // Under water the surface block is always whole: a half block's empty
-    // upper half would be an air pocket.
-    let full = surface_is_full(&prof, s) || s <= water_top;
     let unbounded = prof.is_unbounded();
-    let plain = ColSample { s, full, water_top, top: s, ice_from: water_top + 1, cover: None, trees: true, unbounded };
+    let plain = ColSample { s, water_top, top: s, ice_from: water_top + 1, cover: None, trees: true, unbounded };
     if !mats.biome.enabled() {
         return plain;
     }
@@ -233,8 +228,6 @@ fn biome_column(mats: &Materials, c: &ColumnClimate, plain: ColSample, lake: boo
     let frozen = lake || water_top == SEA_TOP_BLOCK;
     let ice = if !dry && frozen { c.ice_blocks() } else { 0 };
     ColSample {
-        // Ice stands on whole blocks only (no air pocket under it).
-        full: plain.full || glacier > 0,
         top: s + glacier,
         ice_from: if ice > 0 { (water_top - ice + 1).max(s + 1) } else { water_top + 1 },
         cover: Some(cover),
@@ -275,11 +268,11 @@ fn water_material(mats: &Materials, c: &ColSample, by: i32) -> BlockId {
     if by >= c.ice_from { mats.biome.ice } else { mats.water }
 }
 
-/// The surface a tree may stand on, from a `column_sample`: dry, whole (a
-/// trunk on a half block would hang half a block above it) and a cover that
-/// grows trees. `None` = no tree.
-fn tree_ground(c: ColSample) -> Option<i32> {
-    (c.full && c.s >= c.water_top && c.trees).then_some(c.s)
+/// The surface a tree may stand on, from a `column_sample` and whether it
+/// carries a slope: dry, no slope (a trunk would hang over the slope's open
+/// front) and a cover that grows trees. `None` = no tree.
+fn tree_ground(c: ColSample, slope: bool) -> Option<i32> {
+    (!slope && c.s >= c.water_top && c.trees).then_some(c.s)
 }
 
 /// Where trees come from: the habitat and the placement seed.
@@ -531,10 +524,11 @@ fn columns_from_patch(
     let with_trees = mats.trees.enabled();
 
     // Per-block-column `column_sample` over the window plus a ring on every
-    // side: one block (the cliff rule's neighbours), or `TREE_RING_BLOCKS`
-    // with trees on (placement's surfaces). Index `[bx + ring][bz + ring]`,
-    // window-local blocks.
-    let ring = if with_trees { TREE_RING_BLOCKS } else { 1 };
+    // side: the columns whose slope is read — one block out (the cliff rule's
+    // neighbours), or `TREE_RING_BLOCKS` with trees on (placement's
+    // surfaces) — plus one more block, their slope's neighbours. Index
+    // `[bx + ring][bz + ring]`, window-local blocks.
+    let ring = if with_trees { TREE_RING_BLOCKS + 1 } else { 2 };
     let (wx, wz) = (coords.x * REGION_BLOCKS + xs.start as i32 * cb, coords.z * REGION_BLOCKS + zs.start as i32 * cb);
     let (ww, wd) = (xs.len() as i32 * cb, zs.len() as i32 * cb);
     let (nx, nz) = ((ww + 2 * ring) as usize, (wd + 2 * ring) as usize);
@@ -545,6 +539,22 @@ fn columns_from_patch(
         }
     }
     let at = |bx: i32, bz: i32| samples[(bx + ring) as usize * nz + (bz + ring) as usize];
+    // Each column's slope, over the ring minus its outer block (`None`
+    // there), indexed like `samples`.
+    let mut slope_cells = vec![None; nx * nz];
+    for bx in 1 - ring..ww + ring - 1 {
+        for bz in 1 - ring..wd + ring - 1 {
+            slope_cells[(bx + ring) as usize * nz + (bz + ring) as usize] =
+                slopes::slope_for(&at(bx, bz), |dx, dz| at(bx + dx, bz + dz));
+        }
+    }
+    let slope_at = |bx: i32, bz: i32| {
+        debug_assert!(
+            (1 - ring..ww + ring - 1).contains(&bx) && (1 - ring..wd + ring - 1).contains(&bz),
+            "slope read at window block ({bx}, {bz}), outside the decided ring"
+        );
+        slope_cells[(bx + ring) as usize * nz + (bz + ring) as usize]
+    };
 
     // Tree blocks, bucketed per chunk column of the window.
     // `(lx, lz, block y, block)`, footprint-local.
@@ -554,10 +564,10 @@ fn columns_from_patch(
         let surface = |x: i32, z: i32| {
             let (bx, bz) = (x - wx, z - wz);
             assert!(
-                (-ring..ww + ring).contains(&bx) && (-ring..wd + ring).contains(&bz),
+                (1 - ring..ww + ring - 1).contains(&bx) && (1 - ring..wd + ring - 1).contains(&bz),
                 "tree placement read the surface at ({x}, {z}), outside the sampled ring"
             );
-            tree_ground(at(bx, bz))
+            tree_ground(at(bx, bz), slope_at(bx, bz).is_some())
         };
         for ([x, y, z], placed) in tree_blocks(coords, [wx, wz, wx + ww, wz + wd], &mats, trees_from, &surface) {
             let (bx, bz) = (x - wx, z - wz);
@@ -589,10 +599,11 @@ fn columns_from_patch(
                     hi = hi.max(c.top.max(c.water_top)); // include the water column up to its surface
                     soil_max = soil_max.max(soil_depth(&c));
                     // Cliff rule: the lowest block a face neighbour leaves open
-                    // (its half block's empty upper half included).
+                    // (its slope's open quarters included).
                     for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
-                        let n = at(fx + lx + dx, fz + lz + dz);
-                        open_lo = open_lo.min(if n.full { n.top + 1 } else { n.top });
+                        let (nbx, nbz) = (fx + lx + dx, fz + lz + dz);
+                        let n = at(nbx, nbz);
+                        open_lo = open_lo.min(if slope_at(nbx, nbz).is_some() { n.top } else { n.top + 1 });
                     }
                 }
             }
@@ -604,8 +615,8 @@ fn columns_from_patch(
             lo = (lo - soil_max).min(open_lo);
 
             // Materialize whole sub-chunks [base_sub_y ..= top_sub_y]; below is
-            // the ground recipe, above air. Whole blocks, and a half-block
-            // chisel (one cuboid) where the surface rounds to half a block.
+            // the ground recipe, above air. Whole blocks, and a slope chisel
+            // on the top block of a slope column.
             let base_sub_y = lo.div_euclid(cb);
             let top_sub_y = hi.div_euclid(cb);
             let n_sub = (top_sub_y - base_sub_y + 1) as usize;
@@ -642,6 +653,7 @@ fn columns_from_patch(
             for lx in 0..CHUNK_BLOCKS {
                 for lz in 0..CHUNK_BLOCKS {
                     let c = at(fx + lx as i32, fz + lz as i32);
+                    let slope = slope_at(fx + lx as i32, fz + lz as i32);
                     let soil = soil_depth(&c);
                     for by in base_sub_y * cb..=hi {
                         let sub_i = (by.div_euclid(cb) - base_sub_y) as usize;
@@ -653,16 +665,15 @@ fn columns_from_patch(
                             // Below the soil: the recipe's rock (or bedrock).
                             blocks[bi.linear()] = ground.block_at(lx, lz, by);
                         } else if by <= c.top {
-                            // Solid: whole blocks, topped by a whole or half
-                            // block; bare rock is the recipe's.
+                            // Solid: whole blocks, the top one a slope on a
+                            // slope column; bare rock is the recipe's.
                             let block = match column_material(&mats, &c, by) {
                                 BlockId::AIR => ground.block_at(lx, lz, by),
                                 mat => Block::new(mat),
                             };
                             blocks[bi.linear()] = block;
-                            if by == c.s && !c.full {
-                                let top = [BLOCK_VOXELS, HALF_BLOCK_VOXELS, BLOCK_VOXELS];
-                                chisel.insert(bi, ChiselData::cuboid(block.id, [0, 0, 0], top));
+                            if let Some(shape) = slope.filter(|_| by == c.top) {
+                                chisel.insert(bi, game::slope_chisel(block.id, shape));
                             }
                         } else if by <= c.water_top {
                             // Above ground, below the water surface -> water
@@ -872,14 +883,38 @@ fn coarse_from_patch(
     // Trees: each a leaves column from its crown's base to its top over its
     // crown disc (and always over its trunk), into air cells only.
     if mats.trees.enabled() {
+        // Placement reads surfaces up to `m` past the key; each surface's
+        // slope reads one block further (still inside the patch's
+        // `TREE_PATCH_MARGIN`).
+        let m = TREE_PATCH_MARGIN - PATCH_MARGIN;
+        let sample_memo = std::cell::RefCell::new(std::collections::HashMap::new());
+        let sample = |x: i32, z: i32| {
+            assert!(
+                (ox - m - 1..ox + span_blocks + m + 1).contains(&x)
+                    && (oz - m - 1..oz + span_blocks + m + 1).contains(&z),
+                "a tree surface's slope read the column ({x}, {z}), outside the coarse patch"
+            );
+            let cached = sample_memo.borrow().get(&(x, z)).copied();
+            cached.unwrap_or_else(|| {
+                let c = column_sample(patch, &mats, x, z);
+                sample_memo.borrow_mut().insert((x, z), c);
+                c
+            })
+        };
         let memo = std::cell::RefCell::new(std::collections::HashMap::new());
         let surface = |x: i32, z: i32| {
-            let m = TREE_PATCH_MARGIN - PATCH_MARGIN;
             assert!(
                 (ox - m..ox + span_blocks + m).contains(&x) && (oz - m..oz + span_blocks + m).contains(&z),
                 "tree placement read the surface at ({x}, {z}), outside the coarse patch"
             );
-            *memo.borrow_mut().entry((x, z)).or_insert_with(|| tree_ground(column_sample(patch, &mats, x, z)))
+            let cached = memo.borrow().get(&(x, z)).copied();
+            cached.unwrap_or_else(|| {
+                let c = sample(x, z);
+                let slope = slopes::slope_for(&c, |dx, dz| sample(x + dx, z + dz)).is_some();
+                let g = tree_ground(c, slope);
+                memo.borrow_mut().insert((x, z), g);
+                g
+            })
         };
         let memo_habitat = MemoHabitat { inner: trees_from.habitat, memo: Default::default() };
         let (x1, z1) = (ox + span_blocks, oz + span_blocks);
@@ -995,17 +1030,17 @@ mod tests {
         assert_ne!(crc(&a), crc(&b));
     }
 
-    /// Worldgen terrain is whole blocks and half blocks only: every non-tree chisel is the
-    /// one lower-half cuboid of its block's own material, there are some (so
-    /// the half-block rounding actually ran and wrote real terrain, not just
-    /// the `below = stone` sentinel), and none is under water, where its
-    /// empty upper half would be an air pocket.
+    /// Worldgen terrain is whole blocks and slopes only: every non-tree
+    /// chisel is one of the slope shapes of its block's own material, there
+    /// are some (so placement actually ran and wrote real terrain), none sits
+    /// at or under water, where its open quarters would be air pockets, and no
+    /// one-cuboid half block is left anywhere.
     #[test]
-    fn terrain_is_whole_blocks_and_dry_half_blocks_only() {
+    fn terrain_is_whole_blocks_and_dry_slopes_only() {
         // Coast north-east of spawn: land, beach and open sea.
         let rc = RegionCoords::from_world(5632.0, -2560.0);
         let cols = generate_region(rc, WORLD_SEED, mats());
-        let mut halves = 0;
+        let mut slopes = 0;
         for (_, col) in &cols {
             for (sub_y, sub) in (col.base_sub_y()..).zip(col.sub_chunks()) {
                 let SubChunk::Dense(chunk) = sub else { continue };
@@ -1016,15 +1051,19 @@ mod tests {
                     }
                     let mat = chunk.block_at(bx, by, bz).id;
                     let cuboids: Vec<_> = chisel.cuboids().collect();
-                    assert_eq!(cuboids, vec![([0, 0, 0], [16, 8, 16], mat)], "not a half block");
-                    halves += 1;
+                    let half = vec![([0, 0, 0], [BLOCK_VOXELS, game::HALF_BLOCK_VOXELS, BLOCK_VOXELS], mat)];
+                    assert_ne!(cuboids, half, "a half block is left");
+                    assert!(cuboids.iter().all(|c| c.2 == mat), "a slope in another material");
+                    assert!(game::slope::classify(chisel).is_some(), "not a slope: {cuboids:?}");
+                    slopes += 1;
                     let y = sub_y * CHUNK_BLOCKS as i32 + by as i32;
                     let above = col.get(BlockPos::new(bx as i32, y + 1, bz as i32));
-                    assert_ne!(above.id, mats().water, "half block under water at block y {y}");
+                    assert_ne!(above.id, mats().water, "slope under water at block y {y}");
+                    assert!(y > SEA_TOP_BLOCK, "slope at or under the sea surface at block y {y}");
                 }
             }
         }
-        assert!(halves > 0, "expected half-block steps on the coast");
+        assert!(slopes > 0, "expected slopes on the coast");
     }
 
     #[test]
@@ -1043,7 +1082,7 @@ mod tests {
         // The old scan: every block of the band, top down.
         let full = |prof: &crate::pipeline::ColumnProfile| {
             let (top, bottom) = scan_band(prof);
-            (bottom..=top).rev().find(|&by| prof.density_at(by as f64 + HALF_TEST_M) > 0.0).unwrap_or(bottom - 1)
+            (bottom..=top).rev().find(|&by| prof.density_at(by as f64 + SURFACE_TEST_M) > 0.0).unwrap_or(bottom - 1)
         };
         // Procedural columns: sea, lowland and mountains, every 37 m over 30 km.
         let p = TerrainPipeline::new(WORLD_SEED);

@@ -15,6 +15,7 @@ mod forge_lib;
 mod lod_bricks;
 mod player_walk;
 mod scene_hash_golden;
+mod slopes;
 mod tile_map;
 mod tree_chop;
 mod tree_fall;

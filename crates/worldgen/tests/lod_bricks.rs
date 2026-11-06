@@ -26,10 +26,11 @@ fn far_lod_from_bricks_matches_reference_on_a_generated_region() {
     if !lod_reference::reference_applies() {
         return;
     }
-    // A land region near spawn (half blocks, soil, water) and an off-spawn one.
+    // A land region near spawn (slopes, soil, water) and an off-spawn one.
     for rc in [RegionCoords::new(0, 0), RegionCoords::new(1, -2)] {
         let chunks = TerrainSnapshot::from_columns(worldgen::generate_region(rc, worldgen::WORLD_SEED, mats())).chunks;
-        assert!(chunks.iter().any(|(_, c)| !c.chisel.is_empty()), "{rc:?}: fixture has half blocks");
+        let slopes = chunks.iter().flat_map(|(_, c)| c.chisel.values()).filter(|c| game::slope::classify(c).is_some());
+        assert!(slopes.count() > 0, "{rc:?}: fixture has slopes");
         for factor in [2u32, 4, 16] {
             let got = game::lod::downsample_chunks(chunks.clone(), factor);
             let want = lod_reference::downsample_reference(chunks.clone(), factor);

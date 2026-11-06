@@ -1,17 +1,15 @@
-//! Region cost and walkability of generated terrain (whole blocks + one-cuboid
-//! half-block chisels since 2026-09-22; the voxel-chisel era numbers are in
-//! docs/superpowers/specs/2026-09-22-block-and-half-block-worldgen.md).
-//! Reports snapshot size, collider cells per grid, region build time and how
-//! many neighbour steps need a jump.
+//! Region cost and walkability of generated terrain (whole blocks + slopes on
+//! one-block rises since 2026-11-06, docs/superpowers/specs/2026-11-06-terrain-slopes-design.md;
+//! the half-block era is docs/superpowers/specs/2026-09-22-block-and-half-block-worldgen.md).
+//! Reports snapshot size, collider cells per grid, region build time, slopes
+//! by shape and how many neighbour rises are walkable without a jump.
 //!
-//!   cargo run --release -p worldgen --example quantize_probe -- [rx rz]
+//!   just quantize-probe [rx rz]
 
 use std::collections::BTreeMap;
 use std::time::Instant;
 
-use game::{
-    BlockId, Chunk, ChunkCoords, Region, RegionCoords, BLOCK_VOXELS, CHUNK_BLOCKS,
-};
+use game::{BlockId, Chunk, ChunkCoords, Region, RegionCoords, SlopeShape, CHUNK_BLOCKS};
 
 macro_rules! size {
     ($value:expr) => {
@@ -21,31 +19,23 @@ macro_rules! size {
 
 const WATER: BlockId = BlockId(5);
 
-/// Ground height (voxels) of every block column, sampled at the block's
-/// center voxel column; water is not ground.
-fn ground_heights(chunks: &[(ChunkCoords, Chunk)]) -> BTreeMap<(i32, i32), i32> {
-    let mut out = BTreeMap::new();
-    let mid = BLOCK_VOXELS / 2;
+/// The ground's top block y of every block column, and its slope if the top
+/// block is one; water is not ground.
+fn ground_tops(chunks: &[(ChunkCoords, Chunk)]) -> BTreeMap<(i32, i32), (i32, Option<SlopeShape>)> {
+    let mut out: BTreeMap<(i32, i32), (i32, Option<SlopeShape>)> = BTreeMap::new();
     for (cc, chunk) in chunks {
         for (bi, block) in chunk.blocks.iter() {
             let (bx, by, bz) = bi.xyz();
             if block.id == BlockId::AIR || block.id == WATER {
                 continue;
             }
-            let fill = match chunk.chisel.get(&bi) {
-                Some(c) => (0..BLOCK_VOXELS).filter(|&vy| c.is_solid(mid, vy, mid)).count(),
-                None => BLOCK_VOXELS,
-            };
-            if fill == 0 {
-                continue;
+            let key = ((cc.x * CHUNK_BLOCKS + bx) as i32, (cc.z * CHUNK_BLOCKS + bz) as i32);
+            let y = cc.y * CHUNK_BLOCKS as i32 + by as i32;
+            let slope = chunk.chisel.get(&bi).and_then(game::slope::classify);
+            let e = out.entry(key).or_insert((y, slope));
+            if y > e.0 {
+                *e = (y, slope);
             }
-            let key = (
-                (cc.x * CHUNK_BLOCKS + bx) as i32,
-                (cc.z * CHUNK_BLOCKS + bz) as i32,
-            );
-            let top = (cc.y * CHUNK_BLOCKS as i32 + by as i32) * BLOCK_VOXELS as i32 + fill as i32;
-            let e = out.entry(key).or_insert(top);
-            *e = (*e).max(top);
         }
     }
     out
@@ -88,23 +78,36 @@ fn main() {
             voxel_cells += cells.voxels.len();
         }
 
-        // Rises between 4-neighbour block columns, in voxels.
-        let heights = ground_heights(&chunks);
-        let step_vox = (game::movement::STEP_HEIGHT * BLOCK_VOXELS as f32) as i32;
-        let (mut flat, mut sub_half, mut half, mut stepable, mut jump, mut cliff, mut pairs) = (0, 0, 0, 0, 0, 0, 0);
-        let mut rise_levels = std::collections::BTreeSet::new();
-        for (&(x, z), &h) in &heights {
-            for n in [(x + 1, z), (x, z + 1)] {
-                let Some(&hn) = heights.get(&n) else { continue };
-                let d = (h - hn).abs();
+        // Slopes by shape.
+        let tops = ground_tops(&chunks);
+        let (mut straight, mut outer, mut inner) = (0, 0, 0);
+        for (_, slope) in tops.values() {
+            match slope {
+                Some(SlopeShape::Straight { .. }) => straight += 1,
+                Some(SlopeShape::Outer { .. }) => outer += 1,
+                Some(SlopeShape::Inner { .. }) => inner += 1,
+                None => {}
+            }
+        }
+        // Rises between 4-neighbour block columns, in blocks: a one-block
+        // rise is walkable when the higher column's slope takes a walk-up
+        // from the lower one's side (`game::walk_up`), else it is a jump.
+        let (mut flat, mut walkable, mut jump, mut cliff, mut pairs) = (0, 0, 0, 0, 0);
+        for (&(x, z), &(h, slope)) in &tops {
+            for (dx, dz) in [(1, 0), (0, 1)] {
+                let Some(&(hn, slope_n)) = tops.get(&(x + dx, z + dz)) else { continue };
                 pairs += 1;
-                rise_levels.insert(d % BLOCK_VOXELS as i32);
-                match d {
+                match (h - hn).abs() {
                     0 => flat += 1,
-                    d if d < 8 => sub_half += 1,
-                    8 => half += 1,
-                    d if d <= step_vox => stepable += 1,
-                    d if d <= 2 * BLOCK_VOXELS as i32 => jump += 1,
+                    1 => {
+                        // The high column's slope, and the low side from it.
+                        let (high, from) = if h > hn { (slope, [dx, dz]) } else { (slope_n, [-dx, -dz]) };
+                        if high.is_some_and(|s| game::walk_up(s, from)) {
+                            walkable += 1;
+                        } else {
+                            jump += 1;
+                        }
+                    }
                     _ => cliff += 1,
                 }
             }
@@ -122,8 +125,11 @@ fn main() {
         println!("  collider cells: {block_cells} block-scale, {half_cells} half-block, {voxel_cells} voxel-scale");
         println!("  snapshot {:>6.2} MiB (colliders {:.2} MiB), wire {:.2} MiB, Region::from_chunks {build_ms:.0} ms",
             size!(&**region.data()), size!(&region.data().data.physics.colliders), wire.len() as f64 / (1024.0 * 1024.0));
-        println!("  neighbour rises ({pairs} pairs): flat {:.1}%  <0.5m {:.1}%  =0.5m {:.1}%  0.5-{}m {:.1}%  jump(<=2m) {:.1}%  cliff {:.1}%",
-            pct(flat), pct(sub_half), pct(half), game::movement::STEP_HEIGHT, pct(stepable), pct(jump), pct(cliff));
-        println!("  distinct sub-block rise remainders (voxels): {:?}", rise_levels.len());
+        println!("  slopes {}: straight {straight}, outer {outer}, inner {inner}", straight + outer + inner);
+        println!("  neighbour rises ({pairs} pairs): flat {:.1}%  1 block walkable (slope) {:.1}%  1 block jump {:.1}%  cliff (2+) {:.1}%",
+            pct(flat), pct(walkable), pct(jump), pct(cliff));
+        let rises = walkable + jump;
+        println!("  one-block rises walkable without a jump: {walkable}/{rises} ({:.1}%)",
+            100.0 * walkable as f64 / rises.max(1) as f64);
     }
 }
