@@ -85,7 +85,7 @@ pub fn take(w: &mut World, i: u32, q: u64) -> u64 {
 }
 
 /// Remove up to `q` from body `id` as a whole.
-fn take_body(w: &mut World, id: u32, q: u64) -> u64 {
+pub(crate) fn take_body(w: &mut World, id: u32, q: u64) -> u64 {
     let Some(b) = w.bodies.get(&id) else { return 0 };
     let q = q.min(b.volume);
     if q == 0 {
@@ -106,7 +106,7 @@ fn take_body(w: &mut World, id: u32, q: u64) -> u64 {
 
 /// Take from the source as planned: a CA cell, or its body by id. If the body has since split,
 /// from the part that holds `cell`; if it was removed, nothing.
-fn take_planned(w: &mut World, key: (u8, u32), cell: u32, q: u64) -> u64 {
+pub(crate) fn take_planned(w: &mut World, key: (u8, u32), cell: u32, q: u64) -> u64 {
     match key {
         (0, _) => take(w, cell, q),
         (_, id) => match w.owner[cell as usize] {
@@ -134,7 +134,7 @@ pub fn give(w: &mut World, i: u32, q: u64) -> u64 {
 }
 
 /// A source is a CA cell or a whole body.
-fn source_key(w: &World, i: u32) -> (u8, u32) {
+pub(crate) fn source_key(w: &World, i: u32) -> (u8, u32) {
     match w.owner[i as usize] {
         NO_BODY => (0, i),
         id => (1, id),

@@ -10,6 +10,7 @@ pub mod grid;
 pub mod link;
 pub mod metrics;
 pub mod scenario;
+pub mod seam;
 pub mod state;
 #[cfg(target_arch = "wasm32")]
 mod wasm;
@@ -44,6 +45,13 @@ pub const EVAP_AFTER_STEPS: u32 = 64;
 
 /// Edge of a journal brick, in cells.
 pub const BRICK: u32 = 8;
+
+/// Most units one seam face cell sends in one step.
+pub const SEAM_CAP: u64 = 512;
+/// Steps between a seam send and its arrival on the other side.
+pub const SEAM_LAG_STEPS: u32 = 1;
+/// Units of level two settled sides of a seam may still differ by.
+pub const SEAM_SETTLE_TOL: u64 = 2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {

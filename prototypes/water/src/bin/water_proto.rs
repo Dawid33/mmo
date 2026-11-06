@@ -1,9 +1,11 @@
 //! Scenario table: cost, undo bytes, state size, structural counters and hashes
-//! for both models. `--golden` prints only "<scenario> <mode> <hash>" lines.
+//! for both models. `--golden` prints only "<scenario> <mode> <hash>" lines (then one
+//! "<seam scenario> pair <hash>" line each). `--seam` prints the untimed seam table.
 
 use water_proto::Mode;
 use water_proto::state::JournalMode;
 use water_proto::scenario::{self, NAMES, drain_a_spread};
+use water_proto::seam;
 
 fn arg(args: &[String], key: &str) -> Option<String> {
     args.iter().position(|a| a == key).and_then(|i| args.get(i + 1).cloned())
@@ -12,6 +14,9 @@ fn arg(args: &[String], key: &str) -> Option<String> {
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let golden = args.iter().any(|a| a == "--golden");
+    if args.iter().any(|a| a == "--seam") {
+        std::process::exit(seam_table());
+    }
     let only = arg(&args, "--scenario");
     let modes = match arg(&args, "--mode").as_deref() {
         Some("cell") => vec![Mode::CellOnly],
@@ -83,7 +88,57 @@ fn main() {
             );
         }
     }
+    if golden && only.is_none() {
+        for name in seam::NAMES {
+            let mut p = seam::build(name);
+            p.run(seam::SEAM_MAX_STEPS);
+            println!("{name} pair {:016x}", p.hash());
+        }
+    }
     if failed {
         std::process::exit(1);
     }
+}
+
+/// `--seam`: each seam scenario run to rest (untimed). Returns the exit code.
+fn seam_table() -> i32 {
+    println!(
+        "{:<12} {:>6} {:>7} {:>9} {:>9} {:>9} {:>9} {:>9} {:>6} {:>5}",
+        "scenario", "steps", "settled", "A_mass", "A_level", "B_mass", "B_level", "bounced", "flips", "mass"
+    );
+    let level = |w: &water_proto::state::World| -> String {
+        match w.bodies.len() {
+            1 => w.bodies.values().next().unwrap().level().to_string(),
+            n => format!("{n}bod"),
+        }
+    };
+    let mut code = 0;
+    for name in seam::NAMES {
+        let mut p = seam::build(name);
+        let (mut steps, mut flips, mut last, mut mass_ok) = (0, 0, 0i64, true);
+        while steps < seam::SEAM_MAX_STEPS {
+            p.step();
+            steps += 1;
+            mass_ok &= p.accounted() == p.initial;
+            let s = p.net_flux_last_step().signum();
+            if s != 0 {
+                if last != 0 && s != last {
+                    flips += 1;
+                }
+                last = s;
+            }
+            if p.settled() {
+                break;
+            }
+        }
+        if !mass_ok {
+            code = 1;
+        }
+        println!(
+            "{:<12} {:>6} {:>7} {:>9} {:>9} {:>9} {:>9} {:>9} {:>6} {:>5}",
+            name, steps, p.settled(), p.a.mass(), level(&p.a), p.b.mass(), level(&p.b), p.bounced, flips,
+            if mass_ok { "ok" } else { "FAIL" },
+        );
+    }
+    code
 }
