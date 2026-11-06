@@ -91,6 +91,14 @@ pub enum GameDataUpdateKind {
     /// Item piles (`item_piles.rs`) set (`Some`, the whole new pile) or gone
     /// (`None`) per cell. Do carries the new views, Undo the prior ones.
     SetItemPiles(Vec<(crate::edit::BlockPos, Option<crate::PileView>)>),
+    /// Render-only, Do only: pickups this tick (`item_piles::tick_pickups_safe`)
+    /// — who took what from which cell — so the client can fly the items into
+    /// the picker. A replay re-sends it with the same tick (dedupe on that).
+    ItemsPickedUp(Vec<crate::PickupView>),
+    /// Render-only, Do only: items that came to rest somewhere other than
+    /// where they started (a pile falling or pushed up, a throw) — piles have
+    /// no physics, so the client animates the jump. Dedupe replays on `tick`.
+    ItemsLanded(Vec<crate::PileFlight>),
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]

@@ -9,7 +9,7 @@ use common::{floor_chunks, r0};
 use game::edit::BlockPos;
 use game::{
     feet_of, feet_tile, install_block_props, state_hash, Block, BlockId, BlockRegistry, ClientId,
-    GameDataTransactionKind, GameDataUpdate, GameDataUpdateKind, GameEventKind, ItemId, ItemStack, PileView,
+    GameDataTransactionKind, GameDataUpdate, GameDataUpdateKind, GameEventKind, ItemId, ItemStack, PickupView, PileFlight, PileView,
     PlayMode, Region, Rollback, BLOCK_VOXELS, INVENTORY_SLOTS, MAX_STACK, PICKUP_DELAY_TICKS, PILES_PER_REGION_MAX,
     PILE_DESPAWN_TICKS, REGION_BLOCKS, REGION_SIZE, STICK,
 };
@@ -31,13 +31,19 @@ fn install() {
 /// A region floored one block deep (y 0) over its whole area, no players:
 /// the rest cell of any open column is y 1.
 fn region() -> Region {
+    let (region, recv) = region_rx();
+    std::mem::forget(recv);
+    region
+}
+
+/// A floored region and the receiver of its render updates.
+fn region_rx() -> (Region, crossbeam::channel::Receiver<GameDataUpdate>) {
     install();
     let (send, recv) = crossbeam::channel::unbounded();
-    std::mem::forget(recv);
     let mut region = Region::new(Rollback::new(Some(send.clone())), Some(send), r0(), None);
     let chunks = floor_chunks(0.0..REGION_SIZE, 0.0..REGION_SIZE, BLOCK_VOXELS as u32);
     region.with_data(|r| r.seed_terrain_genesis(chunks));
-    region
+    (region, recv)
 }
 
 fn deposit(region: &mut Region, at: BlockPos, s: ItemStack, tick: u64) -> u32 {
@@ -425,4 +431,80 @@ fn resettle_into_full_neighbourhood_counts_loss() {
     for (c, p) in &full_piles {
         assert_eq!(&after[c], p, "{c:?} unchanged");
     }
+}
+
+/// The client animates pickups (items fly into the picker), so the sim tells
+/// the renderer who took what from which cell: one Do-only `ItemsPickedUp`
+/// per tick with pickups, naming the picker's body and the stacks taken.
+#[test]
+fn pickup_tells_the_renderer_who_took_what() {
+    let (mut region, recv) = region_rx();
+    region.handle_event(GameEventKind::CreateClient(0)).unwrap();
+    region.forget_last_event();
+    region.with_data(|r| r.clients.get_mut(&0).unwrap().mode = PlayMode::Adventure);
+    let body = *region.data().player_entites.get(&0).unwrap();
+    let data = region.data();
+    let handle = data.ecs.rigidbody.try_get(body).unwrap();
+    let tile = feet_tile(feet_of(data.physics.bodies.get(handle).unwrap().translation()));
+    deposit(&mut region, tile, stack(STICK, 5), 0);
+    recv.try_iter().count();
+    region.with_data(|r| r.tick_pickups_safe(PICKUP_DELAY_TICKS));
+    let picks: Vec<_> = recv
+        .try_iter()
+        .filter_map(|u| match u.update_kind {
+            GameDataUpdateKind::ItemsPickedUp(p) => Some((matches!(u.do_kind, GameDataTransactionKind::Do), p)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(picks.len(), 1, "one pickup update per tick with pickups");
+    let (is_do, list) = &picks[0];
+    assert!(is_do);
+    assert_eq!(
+        list,
+        &vec![PickupView { cell: tile, entity: body, stacks: vec![stack(STICK, 5)], tick: PICKUP_DELAY_TICKS }]
+    );
+}
+
+fn landings(recv: &crossbeam::channel::Receiver<GameDataUpdate>) -> Vec<PileFlight> {
+    recv.try_iter()
+        .filter_map(|u| match u.update_kind {
+            GameDataUpdateKind::ItemsLanded(f) if matches!(u.do_kind, GameDataTransactionKind::Do) => Some(f),
+            _ => None,
+        })
+        .flatten()
+        .collect()
+}
+
+/// Piles have no physics: a pile whose support goes jumps to its new rest
+/// cell. The renderer animates that fall from `ItemsLanded` (render-only).
+#[test]
+fn falling_pile_tells_the_renderer_where_it_fell_from() {
+    install();
+    let (send, recv) = crossbeam::channel::unbounded();
+    let mut r = Rollback::new(Some(send));
+    r.seed_terrain_genesis(floor_chunks(0.0..REGION_SIZE, 0.0..REGION_SIZE, BLOCK_VOXELS as u32));
+    r.new_transaction();
+    assert!(r.set_block_safe([10, 1, 10], Block::new(STONE)));
+    r.deposit_items_safe([10, 2, 10], stack(DIRT, 2), 0, 0);
+    r.forget();
+    recv.try_iter().count();
+    r.new_transaction();
+    assert!(r.set_block_safe([10, 1, 10], Block::new(BlockId::AIR)));
+    let tick = *r.tick as u64;
+    assert_eq!(landings(&recv), vec![PileFlight { from: [10, 2, 10], to: [10, 1, 10], stacks: vec![stack(DIRT, 2)], tick }]);
+}
+
+/// A deposit from above (a throw, a drop from height) lands where it settles.
+#[test]
+fn deposit_from_above_tells_the_renderer_its_origin() {
+    install();
+    let (send, recv) = crossbeam::channel::unbounded();
+    let mut r = Rollback::new(Some(send));
+    r.seed_terrain_genesis(floor_chunks(0.0..REGION_SIZE, 0.0..REGION_SIZE, BLOCK_VOXELS as u32));
+    r.new_transaction();
+    r.deposit_items_from_safe([10, 6, 10], [12, 4, 10], stack(DIRT, 3), 7, 0);
+    assert_eq!(landings(&recv), vec![PileFlight { from: [10, 6, 10], to: [12, 1, 10], stacks: vec![stack(DIRT, 3)], tick: 7 }]);
+    // A deposit that rests where it was made does not animate.
+    r.deposit_items_safe([20, 1, 20], stack(DIRT, 1), 7, 0);
+    assert!(landings(&recv).is_empty());
 }

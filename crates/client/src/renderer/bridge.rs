@@ -1221,6 +1221,17 @@ pub fn drain_region_updates(
                         msgs.write(super::item_piles::ItemPileMsg::Set { region, changes });
                     }
                 }
+                // Render-only pickup / landing events, animated by `item_flights`.
+                GameDataUpdateKind::ItemsPickedUp(picks) => {
+                    if let Some(msgs) = pile_msgs.as_mut() {
+                        msgs.write(super::item_piles::ItemPileMsg::PickedUp { region, picks });
+                    }
+                }
+                GameDataUpdateKind::ItemsLanded(flights) => {
+                    if let Some(msgs) = pile_msgs.as_mut() {
+                        msgs.write(super::item_piles::ItemPileMsg::Landed { region, flights });
+                    }
+                }
                 GameDataUpdateKind::SetFreeCam(client_id, enabled) => {
                     // Only the local player's toggle may grab this window's cursor.
                     if local_player.0 != Some(client_id) {

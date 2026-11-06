@@ -224,7 +224,8 @@ impl Rollback {
             return false;
         };
         // A loss to the pile caps is counted where it happens.
-        let _destroyed = self.deposit_items_safe(landing, stack, tick, THROWN_PICKUP_DELAY_TICKS);
+        // From the eye: the renderer arcs it to where it lands (`ItemsLanded`).
+        let _destroyed = self.deposit_items_from_safe(cell_of(eye), landing, stack, tick, THROWN_PICKUP_DELAY_TICKS);
         true
     }
 }

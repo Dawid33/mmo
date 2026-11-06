@@ -112,6 +112,27 @@ fn record_destroyed(n: u32, at: BlockPos, why: &str) -> u32 {
     n
 }
 
+/// One pickup, for the renderer (`GameDataUpdateKind::ItemsPickedUp`): the
+/// pile's cell, the body that took from it, what it took, and the tick.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct PickupView {
+    pub cell: BlockPos,
+    pub entity: crate::EntityKey,
+    pub stacks: Vec<ItemStack>,
+    pub tick: u64,
+}
+
+/// Items that moved without physics, for the renderer
+/// (`GameDataUpdateKind::ItemsLanded`): from the cell they started in to the
+/// cell they settled in (merges may spread them to its neighbours).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct PileFlight {
+    pub from: BlockPos,
+    pub to: BlockPos,
+    pub stacks: Vec<ItemStack>,
+    pub tick: u64,
+}
+
 /// What the renderer needs of a pile.
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PileView {
@@ -216,28 +237,54 @@ impl Rollback {
     /// overflow plus any evicted pile's items (0 normally); every one is
     /// counted (`record_destroyed`). Emits `SetItemPiles` both ways.
     pub fn deposit_items_safe(&mut self, at: BlockPos, stack: ItemStack, tick: u64, pickup_delay: u64) -> u32 {
+        self.deposit_items_from_safe(at, at, stack, tick, pickup_delay)
+    }
+
+    /// [`Self::deposit_items_safe`] for items that start at `origin` (a
+    /// throw's eye cell): the renderer animates them from there to where they
+    /// settle (`ItemsLanded`), the sim just places them.
+    pub fn deposit_items_from_safe(
+        &mut self,
+        origin: BlockPos,
+        at: BlockPos,
+        stack: ItemStack,
+        tick: u64,
+        pickup_delay: u64,
+    ) -> u32 {
         let mut ov = PileOverlay::new(&self.data.item_piles);
         let overflow = plan_deposit(self, &mut ov, at, stack, tick + PILE_DESPAWN_TICKS, tick + pickup_delay);
         let (changes, evicted) = self.capped(ov);
         self.write_piles_safe(changes);
+        self.send_landing(origin, self.settle_cell(at), vec![stack], tick);
         record_destroyed(overflow, at, "deposit overflow") + record_destroyed(evicted, at, "pile cap eviction")
+    }
+
+    /// Tells the renderer items went from `from` to `to` (nothing if they
+    /// did not move). Render-only.
+    fn send_landing(&self, from: BlockPos, to: BlockPos, stacks: Vec<ItemStack>, tick: u64) {
+        if from != to && !stacks.is_empty() {
+            let flight = PileFlight { from, to, stacks, tick };
+            self.data.send(GameDataUpdate::new(GameDataTransactionKind::Do, GameDataUpdateKind::ItemsLanded(vec![flight])));
+        }
     }
 
     /// Takes the pile at `cell` away and deposits its stacks again from
     /// `cell`, keeping its expiry and pickup tick: it falls if its support
     /// went, or rises out of a block placed into its cell. `tick` is the
-    /// current tick (the pile keeps its own times, so it is not read).
+    /// current tick (it stamps the render-only `ItemsLanded`; the pile keeps
+    /// its own times).
     /// Returns the items destroyed (counted, as for a deposit).
     pub fn resettle_pile_safe(&mut self, cell: BlockPos, tick: u64) -> u32 {
-        let _ = tick;
         let mut ov = PileOverlay::new(&self.data.item_piles);
         let Some(pile) = ov.slot(cell).take() else { return 0 };
+        let stacks = pile.stacks.clone();
         let mut overflow = 0;
         for s in pile.stacks {
             overflow += plan_deposit(self, &mut ov, cell, s, pile.expire_tick, pile.pickup_after_tick);
         }
         let (changes, evicted) = self.capped(ov);
         self.write_piles_safe(changes);
+        self.send_landing(cell, self.settle_cell(cell), stacks, tick);
         record_destroyed(overflow, cell, "re-settle overflow") + record_destroyed(evicted, cell, "pile cap eviction")
     }
 
@@ -268,7 +315,7 @@ impl Rollback {
         let bv = BLOCK_VOXELS as f32;
         let (r, half) = (PLAYER_CAPSULE_RADIUS, PLAYER_CAPSULE_HALF_HEIGHT + PLAYER_CAPSULE_RADIUS);
         let (h, v) = (PICKUP_REACH_H_BLOCKS, PICKUP_REACH_V_BLOCKS);
-        let mut takers: Vec<(ClientId, BlockPos, BlockPos)> = Vec::new();
+        let mut takers: Vec<(ClientId, crate::EntityKey, BlockPos, BlockPos)> = Vec::new();
         for (id, c) in self.data.clients.iter() {
             if c.mode != crate::PlayMode::Adventure {
                 continue;
@@ -280,14 +327,15 @@ impl Rollback {
             let cell = |x: f32| (x / bv).floor() as i32;
             let lo = [cell(t.x - r) - h, cell(t.y - half) - v, cell(t.z - r) - h];
             let hi = [cell(t.x + r) + h, cell(t.y + half) + v, cell(t.z + r) + h];
-            takers.push((*id, lo, hi));
+            takers.push((*id, e, lo, hi));
         }
         if takers.is_empty() {
             return;
         }
         let mut ov = PileOverlay::new(&self.data.item_piles);
         let mut gains = Vec::new();
-        for (id, lo, hi) in takers {
+        let mut picks = Vec::new();
+        for (id, entity, lo, hi) in takers {
             let mut inv = self.data.clients[&id].inventory.clone();
             let mut took = false;
             for x in lo[0]..=hi[0] {
@@ -299,10 +347,14 @@ impl Rollback {
                             continue;
                         }
                         let mut left = Vec::with_capacity(pile.stacks.len());
+                        let mut taken = Vec::new();
                         let mut moved = false;
                         for &s in &pile.stacks {
                             let rest = inv.add(s);
                             moved |= rest < s.count;
+                            if rest < s.count {
+                                taken.push(ItemStack { item: s.item, count: s.count - rest });
+                            }
                             if rest > 0 {
                                 left.push(ItemStack { item: s.item, count: rest });
                             }
@@ -311,6 +363,7 @@ impl Rollback {
                             continue;
                         }
                         took = true;
+                        picks.push(PickupView { cell: c, entity, stacks: taken, tick });
                         let slot = ov.slot(c);
                         if left.is_empty() {
                             *slot = None;
@@ -331,6 +384,9 @@ impl Rollback {
             }
         }
         self.write_piles_safe(changes);
+        if !picks.is_empty() {
+            self.data.send(GameDataUpdate::new(GameDataTransactionKind::Do, GameDataUpdateKind::ItemsPickedUp(picks)));
+        }
     }
 
     /// Removes every pile whose expiry tick is `tick` or earlier.

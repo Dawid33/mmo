@@ -69,6 +69,12 @@ pub enum ItemPileMsg {
     Set { region: RegionId, changes: Vec<(BlockPos, Option<PileView>)> },
     /// The region was removed (or replaced): drop all its piles.
     RemoveRegion(RegionId),
+    /// Pickups this tick (`GameDataUpdateKind::ItemsPickedUp`), animated by
+    /// `item_flights`.
+    PickedUp { region: RegionId, picks: Vec<game::PickupView> },
+    /// Items that moved without physics (`ItemsLanded`), animated by
+    /// `item_flights`.
+    Landed { region: RegionId, flights: Vec<game::PileFlight> },
 }
 
 /// The piles drawn now.
@@ -90,7 +96,7 @@ pub struct ItemCube {
 }
 
 #[derive(Resource)]
-struct ItemPileAssets {
+pub(crate) struct ItemPileAssets {
     registry: BlockRegistry,
     cube: Handle<Mesh>,
     quad: Handle<Mesh>,
@@ -127,7 +133,7 @@ fn texture_for(registry: &BlockRegistry, images: &mut Assets<Image>, item: ItemI
 }
 
 /// The material for `item` (made once) and whether it is a flat quad.
-fn material_for(
+pub(crate) fn material_for(
     world_assets: &mut ItemPileAssets,
     images: &mut Assets<Image>,
     mats: &mut Assets<StandardMaterial>,
@@ -158,6 +164,30 @@ pub fn pile_world_position(region: RegionId, cell: BlockPos) -> Vec3 {
     Vec3::new(o[0] + (cell[0] as f32 + 0.5) * b, o[1] + cell[1] as f32 * b, o[2] + (cell[2] as f32 + 0.5) * b)
 }
 
+/// The cubes `stacks` are drawn with: running number, offset from the cell's
+/// floor centre, mesh and material. Shared by piles and their flights.
+pub(crate) fn cube_layout(
+    assets: &mut ItemPileAssets,
+    images: &mut Assets<Image>,
+    mats: &mut Assets<StandardMaterial>,
+    stacks: &[game::ItemStack],
+) -> Vec<(usize, Vec3, Handle<Mesh>, Handle<StandardMaterial>)> {
+    let unit = game::movement::UNITS_PER_METER;
+    let half = ITEM_CUBE_SIZE_M * unit / 2.0;
+    let mut out = Vec::new();
+    for stack in stacks {
+        let (material, flat) = material_for(assets, images, mats, stack.item);
+        for _ in 0..cubes_for(stack.count) {
+            let n = out.len();
+            let [ox, oz] = OFFSETS[n % OFFSETS.len()];
+            let base = Vec3::new(ox * SPREAD_M * unit, half, oz * SPREAD_M * unit);
+            let mesh = if flat { assets.quad.clone() } else { assets.cube.clone() };
+            out.push((n, base, mesh, material.clone()));
+        }
+    }
+    out
+}
+
 fn spawn_pile(
     commands: &mut Commands,
     assets: &mut ItemPileAssets,
@@ -167,28 +197,18 @@ fn spawn_pile(
     cell: BlockPos,
     view: &PileView,
 ) -> Entity {
-    let unit = game::movement::UNITS_PER_METER;
-    let half = ITEM_CUBE_SIZE_M * unit / 2.0;
-    let mut n = 0usize;
     let mut children = Vec::new();
-    for stack in &view.stacks {
-        let (material, flat) = material_for(assets, images, mats, stack.item);
-        for _ in 0..cubes_for(stack.count) {
-            let [ox, oz] = OFFSETS[n % OFFSETS.len()];
-            let base = Vec3::new(ox * SPREAD_M * unit, half, oz * SPREAD_M * unit);
-            let mesh = if flat { assets.quad.clone() } else { assets.cube.clone() };
-            children.push(
-                commands
-                    .spawn((
-                        ItemCube { base, phase: n as f32 * 1.3 },
-                        Mesh3d(mesh),
-                        MeshMaterial3d(material.clone()),
-                        Transform::from_translation(base),
-                    ))
-                    .id(),
-            );
-            n += 1;
-        }
+    for (n, base, mesh, material) in cube_layout(assets, images, mats, &view.stacks) {
+        children.push(
+            commands
+                .spawn((
+                    ItemCube { base, phase: n as f32 * 1.3 },
+                    Mesh3d(mesh),
+                    MeshMaterial3d(material),
+                    Transform::from_translation(base),
+                ))
+                .id(),
+        );
     }
     commands
         .spawn((
@@ -222,6 +242,8 @@ fn apply_pile_msgs(
                     }
                 }
             }
+            // Animations only: `item_flights` reads these.
+            ItemPileMsg::PickedUp { .. } | ItemPileMsg::Landed { .. } => {}
             ItemPileMsg::RemoveRegion(region) => {
                 let keys: Vec<_> = roots.0.range((*region, [i32::MIN; 3])..=(*region, [i32::MAX; 3])).map(|(k, _)| *k).collect();
                 for k in keys {
@@ -245,15 +267,16 @@ fn animate_cubes(time: Res<Time>, mut cubes: Query<(&ItemCube, &mut Transform)>)
 }
 
 /// Piles at or above the working level inside the home region are hidden.
+/// A pile waiting for its landing flight (`item_flights`) is hidden too.
 fn hide_cut_piles(
     level: Res<WorkingLevel>,
     tiles: Res<TileMirror>,
-    mut roots: Query<(&ItemPileRoot, &mut Visibility)>,
+    mut roots: Query<(&ItemPileRoot, &mut Visibility, Option<&super::item_flights::LandingHold>)>,
 ) {
     let cut = camera_cut(&level, &tiles);
     let home = tiles.region().map(home_rect);
-    for (root, mut vis) in &mut roots {
-        let hide = hidden_by_cut(pile_world_position(root.region, root.cell), cut, home);
+    for (root, mut vis, hold) in &mut roots {
+        let hide = hold.is_some() || hidden_by_cut(pile_world_position(root.region, root.cell), cut, home);
         vis.set_if_neq(if hide { Visibility::Hidden } else { Visibility::Inherited });
     }
 }
@@ -268,7 +291,12 @@ impl Plugin for ItemPilesPlugin {
             .init_resource::<ItemPileAssets>()
             .init_resource::<WorkingLevel>()
             .init_resource::<TileMirror>()
-            .add_systems(Update, (apply_pile_msgs, animate_cubes, hide_cut_piles).chain());
+            .add_systems(
+                Update,
+                (apply_pile_msgs, super::item_flights::start_flights, super::item_flights::fly, animate_cubes, hide_cut_piles)
+                    .chain(),
+            )
+            .add_session_reset::<super::item_flights::RecentFlights>();
     }
 }
 
