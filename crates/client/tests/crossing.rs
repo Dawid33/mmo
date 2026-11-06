@@ -166,3 +166,70 @@ fn hold_w_across_north_seam(toggle_period: usize) {
     h.set_latency(0);
     h.assert_converged();
 }
+
+/// How much later than the latency that one input reaches the server: more
+/// than the client's lead (round trip + 1.5 ticks), so the server applies it
+/// after its slot.
+const LATE_INPUT_EXTRA_STEPS: usize = 5;
+/// Walk steps over which `server_crossing_later_converges` delays one input.
+const LATE_INPUT_STEPS: std::ops::Range<usize> = 0..24;
+
+/// The client predicts its crossing a slot EARLIER than the server: one
+/// sprint press reaches the server a step late, so the server's body lags
+/// the predicted one and crosses after it. The inputs the client then
+/// predicts in the new home in the slots before the server's arrival are
+/// applied by the server in the old region (the body is still there); the
+/// arrival must take them out of the new home's log. Swept over where in
+/// the walk the late press falls, so some sweep step lands next to the
+/// crossing. Each run converges bit-exact with no local input left pending.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn server_crossing_later_converges() {
+    for late_at in LATE_INPUT_STEPS {
+        let run = std::panic::catch_unwind(|| server_crosses_later(late_at));
+        assert!(run.is_ok(), "the late sprint press at walk step {late_at} broke convergence");
+    }
+}
+
+fn server_crosses_later(late_at: usize) {
+    use game::Key;
+    let mut h = SimHarness::with_near_radius(1);
+    h.connect();
+    h.set_latency(RUBBER_BAND_LATENCY_STEPS);
+    h.step_n(CLOCK_SETTLE_STEPS);
+    h.press(Key::KeyE);
+    h.step();
+    h.release(Key::KeyE);
+    h.step();
+    h.press(Key::Space);
+    h.step();
+    h.release(Key::Space);
+    h.step();
+    h.press(Key::Space);
+    h.step_n(20);
+    h.release(Key::Space);
+    h.step_n(4);
+
+    let start = h.player_region();
+    h.press(Key::KeyW);
+    let mut past = None;
+    for step in 0..400 {
+        if step == late_at {
+            h.press(Key::ControlLeft);
+            h.delay_next_send(LATE_INPUT_EXTRA_STEPS);
+        }
+        h.step();
+        if past.is_none() && h.player_region() != start {
+            past = Some(step);
+        }
+        if past.is_some_and(|p| step >= p + 10) {
+            break;
+        }
+    }
+    assert_eq!(h.player_region(), game::RegionCoords::new(0, -1), "crossed north");
+    h.release(Key::ControlLeft);
+    h.release(Key::KeyW);
+    h.set_latency(0);
+    h.assert_converged();
+    assert_eq!(h.pending_local_inputs(), 0, "a local input stuck in the new home's log");
+}

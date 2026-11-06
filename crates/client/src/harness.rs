@@ -57,6 +57,8 @@ pub struct SimHarness {
     to_client: VecDeque<(usize, ServerPacket)>,
     /// Steps taken (the clock `latency` counts in).
     steps: usize,
+    /// Extra steps for the next step's client packets only (`delay_next_send`).
+    extra_delay: usize,
 }
 
 /// Most server-only ticks `catch_up` runs — comfortably more than the
@@ -149,6 +151,7 @@ impl SimHarness {
             to_server: VecDeque::new(),
             to_client: VecDeque::new(),
             steps: 0,
+            extra_delay: 0,
         }
     }
 
@@ -170,9 +173,18 @@ impl SimHarness {
     }
 
     /// Client packets whose delivery step has come, on to the server.
+    /// What the client sends during the next step reaches the server
+    /// `steps` later than the latency says (a one-off late packet: the
+    /// server applies its inputs late, its sim falls behind the client's
+    /// prediction). Later packets keep their order behind it.
+    pub fn delay_next_send(&mut self, steps: usize) {
+        self.extra_delay = steps;
+    }
+
     fn deliver_to_server(&mut self) {
+        let extra = std::mem::take(&mut self.extra_delay);
         for p in self.client_out.try_iter() {
-            self.to_server.push_back((self.steps + self.latency, p));
+            self.to_server.push_back((self.steps + self.latency + extra, p));
         }
         while self.to_server.front().is_some_and(|(due, _)| *due <= self.steps) {
             let (_, p) = self.to_server.pop_front().expect("checked");
@@ -512,6 +524,17 @@ impl SimHarness {
             "player entity not queryable in the new home region after crossing"
         );
         self.settle();
+    }
+
+    /// Unconfirmed local-player inputs (PlayerInput / UiAction / Order) in
+    /// the client's home region's log.
+    pub fn pending_local_inputs(&self) -> usize {
+        let home = self.client.home_region();
+        self.client
+            .world_ref()
+            .regions
+            .get(&home)
+            .map_or(0, |r| r.pending_events().filter(|e| e.kind.input_client() == Some(LOCAL_CLIENT_ID)).count())
     }
 
     pub fn pending_events_empty(&self) -> bool {

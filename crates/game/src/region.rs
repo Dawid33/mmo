@@ -155,11 +155,33 @@ impl ReconcileStats {
     }
 }
 
+/// A predicted event in [`Region`]'s log, with the slot it was predicted in:
+/// the region's tick when it was first handled — what a client input was
+/// stamped with for the server. Replays keep it, wherever the event lands.
+#[derive(Debug, Clone)]
+struct Logged {
+    event: GameEvent,
+    stamp: Tick,
+}
+
+impl std::ops::Deref for Logged {
+    type Target = GameEvent;
+    fn deref(&self) -> &GameEvent {
+        &self.event
+    }
+}
+
+impl std::ops::DerefMut for Logged {
+    fn deref_mut(&mut self) -> &mut GameEvent {
+        &mut self.event
+    }
+}
+
 /// A region represents an portion of the world that processes game events at
 /// its own tick rate separately from other regions.
 #[allow(unused)]
 pub struct Region {
-    event_log: VecDeque<GameEvent>,
+    event_log: VecDeque<Logged>,
     data: Rollback,
     id: RegionId,
     input_buffer: BinaryHeap<Reverse<GameEvent>>,
@@ -297,14 +319,12 @@ impl Region {
         }
         let Some((tick, expected)) = self.expected_hashes.remove(&id) else { return };
         let actual = if predictions_on_top && !self.event_log.is_empty() {
-            let kinds: Vec<GameEventKind> = self.event_log.iter().map(|e| e.kind.clone()).collect();
+            let logged: Vec<Logged> = self.event_log.iter().cloned().collect();
             while self.event_log.pop_back().is_some() {
                 self.data.rollback();
             }
             let hash = crate::state_hash(&self.data);
-            for kind in kinds {
-                let _ = self.handle_event(kind);
-            }
+            self.replay(logged);
             hash
         } else {
             crate::state_hash(&self.data)
@@ -366,7 +386,7 @@ impl Region {
             self.event_log.len(),
             self.event_log
                 .front()
-                .map(ev_desc)
+                .map(|e| ev_desc(e))
                 .unwrap_or_else(|| "none".to_string()),
             self.event_log
                 .back()
@@ -386,6 +406,10 @@ impl Region {
             return Ok(stats);
         }
 
+        // The slot the authoritative arrival of the local player landed in,
+        // if this pass integrated one (see `drop_local_inputs_before`).
+        let mut local_arrival_slot = None;
+
         'outer: while !self.input_buffer.is_empty() && !self.event_log.is_empty() {
             if let Some(server_event) = self.input_buffer.pop() {
                 if let Some(event) = self.event_log.pop_front() {
@@ -396,7 +420,7 @@ impl Region {
                         ev_desc(&server_event.0)
                     );
                     if event.id == server_event.0.id {
-                        if event != server_event.0 {
+                        if event.event != server_event.0 {
                             debug!(
                                 "[reconcile r={:?}] MISPREDICT at id={}: predicted {} != server {} -> rollback+replay",
                                 self.id,
@@ -530,50 +554,10 @@ impl Region {
                                 }
                             }
 
-                            let mut replayed_log = VecDeque::with_capacity(temp_log.len());
-                            for mut event in temp_log {
-                                // Inputs follow the body: the server applies
-                                // this client's input only where its body is
-                                // (a region its body left forwards it), so a
-                                // prediction replayed where the local body is
-                                // not can never be confirmed. Its server copy
-                                // reaches the body's region on its own.
-                                if let Some(local) = self.local_client_id {
-                                    if event.kind.input_client() == Some(local)
-                                        && !self.data.clients.contains_key(&local)
-                                    {
-                                        debug!(
-                                            "[reconcile r={:?}] dropped {}: the local body is not here",
-                                            self.id,
-                                            ev_desc(&event)
-                                        );
-                                        continue;
-                                    }
-                                }
-                                let id = *self.data.next_game_event_id;
-                                match self.handle_event(event.clone().kind) {
-                                    Ok(r) => {
-                                        if r.id != event.id {
-                                            debug!(
-                                                "[reconcile r={:?}] REPLAY-ID-SKEW: temp_log says id={} but handle_event assigned id={}",
-                                                self.id, event.id, r.id
-                                            );
-                                        }
-                                        event.id = r.id;
-                                    }
-                                    Err(ref e) => {
-                                        debug!(
-                                            "[reconcile r={:?}] REPLAY-ERR for {}: {:?}",
-                                            self.id,
-                                            ev_desc(&event),
-                                            e
-                                        );
-                                        event.id = id;
-                                    }
-                                }
-                                replayed_log.push_back(event);
+                            self.replay(temp_log);
+                            if self.is_local_arrival(&server_event.0) {
+                                local_arrival_slot = Some(self.confirmed_tick());
                             }
-                            self.event_log = replayed_log;
                         } else {
                             debug!(
                                 "[reconcile r={:?}] MATCH+FORGET {}",
@@ -582,6 +566,9 @@ impl Region {
                             );
                             self.data.forget();
                             self.confirmed(server_event.0.id, true, &mut stats);
+                            if self.is_local_arrival(&server_event.0) {
+                                local_arrival_slot = Some(self.confirmed_tick());
+                            }
                         }
                     } else {
                         // IDs are incorrect, game event arrived out of order.
@@ -599,6 +586,10 @@ impl Region {
             }
         }
 
+        if let Some(slot) = local_arrival_slot {
+            self.drop_local_inputs_before(slot);
+        }
+
         // Id-accounting invariant: predictions are appended with ids from
         // next_game_event_id, so the log tail must sit exactly one below it.
         // A violation means the replay machinery desynced the counter.
@@ -610,7 +601,7 @@ impl Region {
                     self.id,
                     back.id,
                     next,
-                    self.event_log.front().map(ev_desc).unwrap_or_default(),
+                    self.event_log.front().map(|e| ev_desc(e)).unwrap_or_default(),
                 );
             }
         }
@@ -625,9 +616,88 @@ impl Region {
         Ok(stats)
     }
 
+    /// Is `event` the arrival of this client's own player?
+    fn is_local_arrival(&self, event: &GameEvent) -> bool {
+        matches!(&event.kind, GameEventKind::EntityArrived(b)
+            if self.local_client_id.is_some() && b.client.as_ref().map(|(c, _)| *c) == self.local_client_id)
+    }
+
+    /// The tick of the confirmed state: the current tick less the predicted
+    /// ticks on top of it.
+    fn confirmed_tick(&self) -> Tick {
+        let predicted = self.event_log.iter().filter(|l| matches!(l.kind, GameEventKind::Tick)).count();
+        self.current_tick() - predicted as Tick
+    }
+
+    /// Re-apply `log` (rolled back) on the current state, keeping each
+    /// prediction's stamp and renumbering ids as `handle_event` assigns them.
+    ///
+    /// Inputs follow the body: the server applies this client's input only
+    /// where its body is (a region its body left forwards it), so a local
+    /// input replayed where the local body is not can never be confirmed
+    /// and is dropped; its server copy reaches the body's region on its own.
+    /// This covers a body that left here EARLIER on the server than predicted
+    /// (`drop_local_inputs_before` covers one that arrived later).
+    fn replay(&mut self, log: impl IntoIterator<Item = Logged>) {
+        let mut replayed = VecDeque::new();
+        for mut logged in log {
+            if let Some(local) = self.local_client_id {
+                if logged.kind.input_client() == Some(local) && !self.data.clients.contains_key(&local) {
+                    debug!("[reconcile r={:?}] dropped {}: the local body is not here", self.id, ev_desc(&logged));
+                    continue;
+                }
+            }
+            let id = *self.data.next_game_event_id;
+            match self.handle_event(logged.kind.clone()) {
+                Ok(r) => {
+                    if r.id != logged.id {
+                        debug!(
+                            "[reconcile r={:?}] REPLAY-ID-SKEW: log says id={} but handle_event assigned id={}",
+                            self.id, logged.id, r.id
+                        );
+                    }
+                    logged.id = r.id;
+                }
+                Err(ref e) => {
+                    debug!("[reconcile r={:?}] REPLAY-ERR for {}: {:?}", self.id, ev_desc(&logged), e);
+                    logged.id = id;
+                }
+            }
+            replayed.push_back(logged);
+        }
+        self.event_log = replayed;
+    }
+
+    /// The authoritative arrival of the local player was just integrated
+    /// here in `slot`. A local input still predicted here with an earlier
+    /// stamp was predicted after an arrival the client expected sooner: the
+    /// server's body was still in the source region in that slot, so the
+    /// server applied it there and the arrival bundle carries its effect. It
+    /// is never confirmed here — drop it. Stamps are world ticks, so this is
+    /// exact: inputs stamped `slot` or later followed the body here.
+    fn drop_local_inputs_before(&mut self, slot: Tick) {
+        let Some(local) = self.local_client_id else { return };
+        let stale = |l: &Logged| l.kind.input_client() == Some(local) && l.stamp < slot;
+        if !self.event_log.iter().any(stale) {
+            return;
+        }
+        let kept: Vec<Logged> = self.event_log.iter().filter(|l| !stale(l)).cloned().collect();
+        debug!(
+            "[reconcile r={:?}] dropping {} local input(s) stamped before the arrival slot {slot}",
+            self.id,
+            self.event_log.len() - kept.len()
+        );
+        while self.event_log.pop_back().is_some() {
+            self.data.rollback();
+        }
+        self.replay(kept);
+    }
+
     /// Handle a client event.
     pub fn handle_event(&mut self, event: GameEventKind) -> Result<GameEvent, GameError> {
         let event = GameEvent::new(event, *self.data.next_game_event_id, self.id);
+        // The slot it is predicted in (see `Logged::stamp`).
+        let stamp = *self.data.tick;
         let destroyed_before = crate::item_piles::items_destroyed_on_thread();
         self.data.new_transaction();
         self.data.next_game_event_id.update(|n| *n += 1);
@@ -871,7 +941,7 @@ impl Region {
             }
         }
         self.items_destroyed += crate::item_piles::items_destroyed_on_thread() - destroyed_before;
-        self.event_log.push_back(event.clone());
+        self.event_log.push_back(Logged { event: event.clone(), stamp });
         Ok(event)
     }
 
@@ -920,7 +990,7 @@ impl Region {
     /// The locally-predicted events awaiting server confirmation, in order.
     /// Exposed for tests.
     pub fn pending_events(&self) -> impl Iterator<Item = &GameEvent> {
-        self.event_log.iter()
+        self.event_log.iter().map(|l| &l.event)
     }
 
     pub fn data(&self) -> &Rollback {

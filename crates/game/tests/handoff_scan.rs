@@ -350,3 +350,38 @@ fn reconcile_drops_a_local_input_where_the_body_is_not() {
     assert!(client.pending_event_ids().is_empty(), "{:?}", client.pending_event_ids());
     assert_eq!(crc(&client), crc(&server));
 }
+
+#[test]
+fn reconcile_drops_local_inputs_stamped_before_the_authoritative_arrival() {
+    // The client predicted its arrival here in slot 0 and an input after it
+    // (stamped 0); the server's body crossed a slot later (arrival in slot
+    // 1), so the server applied that input in the source region, and the
+    // arrival bundle carries its effect. Integrating the arrival drops the
+    // prediction: the body IS here on replay, so only the stamp tells.
+    let src = RegionCoords::new(0, 0);
+    let mut client_state = game::Client::default();
+    let input = game::InputEvent::Key { key: game::Key::KeyW, pressed: true };
+    let bundle = |client: game::Client| game::EntityBundle {
+        id: game::EntityId { birth_region: src, serial: 0 },
+        kind: game::EntityKind::Player,
+        body: game::BodyState::kinematic(pose(2.0, 128.0)),
+        collider: game::ColliderSpec::CapsuleY { half_height: 8.0, radius: 6.4 },
+        carried: game::Carried { camera: Some((0.0, 0.0)), motion: None, ..Default::default() },
+        client: Some((9, client)),
+        pending_inputs: Vec::new(),
+    };
+    let predicted = bundle(game::Client::default());
+    let _ = client_state.input.update(input.clone());
+    let authoritative = bundle(client_state);
+    let (server, client) = reconcile_stream(
+        &[GameEventKind::Tick, GameEventKind::EntityArrived(authoritative), GameEventKind::Tick],
+        &[
+            GameEventKind::EntityArrived(predicted),
+            GameEventKind::PlayerInput(9, input),
+            GameEventKind::Tick,
+            GameEventKind::Tick,
+        ],
+    );
+    assert!(client.pending_event_ids().is_empty(), "{:?}", client.pending_event_ids());
+    assert_eq!(crc(&client), crc(&server));
+}
