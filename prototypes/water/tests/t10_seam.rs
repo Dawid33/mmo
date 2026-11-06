@@ -1,3 +1,4 @@
+use water_proto::edit::{Edit, apply};
 use water_proto::fixture::{fill_solid, finish};
 use water_proto::grid::Dims;
 use water_proto::link::avail;
@@ -83,14 +84,31 @@ fn seam_flux_is_damped() {
 }
 
 #[test]
-fn seam_full_receiver_bounces_back() {
+fn seam_full_receiver_fills_without_bounce() {
     let mut p = seam::build("seam_bounce");
     settle(&mut p, 20_000);
     let pocket = p.b.dims.idx(0, 13, 12);
     assert_eq!(avail(&p.b, pocket), F);
     assert_eq!(p.b.mass(), F);
     assert_eq!(p.accounted(), p.initial);
-    assert_eq!(p.bounced, SEAM_CAP);
+    assert_eq!(p.bounced, 0);
+}
+
+#[test]
+fn seam_receiver_filled_during_lag_bounces_back() {
+    let mut p = seam::build("seam_bounce");
+    let a0 = p.a.mass();
+    p.step(); // A sends SEAM_CAP into the pocket, due next step
+    assert_eq!(p.inflight.len(), 1);
+    let pocket = p.b.dims.idx(0, 13, 12);
+    apply(&mut p.b, Edit::Pour(pocket, FULL)).unwrap(); // the pocket fills from its own side
+    settle(&mut p, 20_000);
+    println!("lag bounce: bounced {}", p.bounced);
+    assert!(p.bounced >= SEAM_CAP, "bounced {}", p.bounced);
+    assert_eq!(p.accounted(), p.initial + p.b.poured);
+    assert_eq!(avail(&p.b, pocket), F);
+    assert_eq!(p.b.mass(), F);
+    assert_eq!(p.a.mass(), a0, "every bounced unit returned to A");
 }
 
 #[test]
