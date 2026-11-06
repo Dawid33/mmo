@@ -599,6 +599,11 @@ model-census *paths="target/test-models":
 forge-proto *args:
     {{cap}} {{cargo}} run --release -p worldgen --example forge_proto -- {{args}}
 
+# Water prototype (prototypes/water/, standalone, no engine deps): bodies + frontier
+# CA vs cell-only CA. Plan: docs/superpowers/plans/2026-09-22-water-prototype.md.
+water-proto-test *args:
+    cd prototypes/water && {{cap}} cargo test --release {{args}}
+
 # Forge speed benchmark: one forge at `size` m / `cell` m, printing wall time and
 # max RSS (needs /usr/bin/time). Output goes to target/forge-bench/. Timing
 # run: ask before launching the default 16 km / 16 m. e.g. `just forge-bench 4096 64`.
