@@ -482,6 +482,17 @@ fn defers_until_restored(packet: &ClientPacket) -> bool {
     )
 }
 
+/// An intent or reply routed to a running region as a `Transfer` that the
+/// region has not confirmed yet (its `EventProcessed(Intent)`): it lives only
+/// in the target's held queue, so the autosave must carry it.
+#[derive(Debug, Clone)]
+struct InFlightIntent {
+    msg: crate::IntentMsg,
+    target: RegionCoords,
+    /// The autosave round it was last saved with (in some region's save).
+    saved_in: Option<u64>,
+}
+
 /// A crossing the manager has routed to its target but not yet seen applied
 /// there (`WorldManager::in_flight`).
 #[derive(Debug, Clone)]
@@ -647,6 +658,20 @@ pub struct WorldManager<S: RegionSpawner> {
     /// entity in flight is at its target). Intents and replies addressed by
     /// `EntityId` are routed by it.
     locations: BTreeMap<crate::EntityId, RegionCoords>,
+    /// Intents / replies sent to a running region and not yet confirmed by
+    /// it, in routing order. Saved exactly once per autosave round: with the
+    /// target's save (injected into the state, which lacks them), or — routed
+    /// after the target answered while their source has yet to — with the
+    /// source's (`save_owed_intents`); sent again to a target that dies.
+    in_flight_intents: Vec<InFlightIntent>,
+    /// This round's intents owed to a source's save (see `in_flight_intents`).
+    save_owed_intents: BTreeMap<RegionCoords, Vec<crate::IntentMsg>>,
+    /// Replies for an entity in a parked or stopping region: delivered when
+    /// it next runs, saved with its parked state meanwhile.
+    intent_mailbox: BTreeMap<RegionCoords, Vec<crate::IntentMsg>>,
+    /// Replies given up (no running, parked or stopping destination, or past
+    /// `MAX_INTENT_REPLY_HOPS`): each logged at warn.
+    intent_replies_lost: u64,
 }
 
 impl<S: RegionSpawner> WorldManager<S> {
@@ -706,6 +731,10 @@ impl<S: RegionSpawner> WorldManager<S> {
             save_answered: BTreeSet::new(),
             save_owed: BTreeMap::new(),
             locations: BTreeMap::new(),
+            in_flight_intents: Vec::new(),
+            save_owed_intents: BTreeMap::new(),
+            intent_mailbox: BTreeMap::new(),
+            intent_replies_lost: 0,
         }
     }
 
@@ -1223,6 +1252,11 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.clock_ms = self.clock_ms.max(now_ms);
         match output {
             RegionOutput::EventProcessed(event) => {
+                if let GameEventKind::Intent(msg) = &event.kind {
+                    if let Some(i) = self.in_flight_intents.iter().position(|f| f.target == rc && f.msg == *msg) {
+                        self.in_flight_intents.remove(i);
+                    }
+                }
                 if let GameEventKind::EntityArrived(bundle) = &event.kind {
                     if self.in_flight.get(&bundle.id).is_some_and(|f| f.target == rc) {
                         let f = self.in_flight.remove(&bundle.id).expect("checked");
@@ -1257,7 +1291,9 @@ impl<S: RegionSpawner> WorldManager<S> {
             RegionOutput::Snapshot(client, rollback) => {
                 let _ = self.out.send((Some(client), ServerPacket::Region(rc, rollback)));
             }
-            RegionOutput::Saved(rollback) => {
+            RegionOutput::Saved(mut rollback) => {
+                let intents = self.saved_intents(rc);
+                rollback.insert_saved_intents(&intents);
                 self.extract_player_saves(rc, &rollback);
                 if let Some(history) = self.history.as_mut() {
                     history.note_positions(rollback.people_here());
@@ -1448,7 +1484,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             }
             RegionOutput::Intents(list) => {
                 for msg in list {
-                    self.route_intent(msg);
+                    self.route_intent(msg, rc);
                 }
             }
             RegionOutput::HaloEntities(list, stamp) => {
@@ -1561,6 +1597,7 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.save_asked.clear();
         self.save_answered.clear();
         self.save_owed.clear();
+        self.save_owed_intents.clear();
         for (rc, link) in &self.regions {
             if link.stopping {
                 continue;
@@ -1573,7 +1610,23 @@ impl<S: RegionSpawner> WorldManager<S> {
         }
         for rc in std::mem::take(&mut self.unsaved_parked) {
             if let Some(blob) = self.parked.get(&rc) {
-                self.saves.push((rc, RegionSave::Parked(blob.clone())));
+                let blob = match self.intent_mailbox.get(&rc) {
+                    // Its mailbox goes into the saved state (the parked blob
+                    // in memory stays as it is; the mailbox is delivered
+                    // when it runs again in this process).
+                    Some(mail) => match blob.to_rollback() {
+                        Ok(mut state) => {
+                            state.insert_saved_intents(mail);
+                            SerializedRegion::from_rollback(&state)
+                        }
+                        Err(e) => {
+                            log::error!("parked {rc:?} does not decode for its save ({e}); its mailbox is not saved");
+                            blob.clone()
+                        }
+                    },
+                    None => blob.clone(),
+                };
+                self.saves.push((rc, RegionSave::Parked(blob)));
             }
         }
     }
@@ -1679,6 +1732,15 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// waiting on `rc` gets its `ParkPlayer` again behind the body; returns
     /// those clients (their parks are still in flight).
     fn restart_for_in_flight(&mut self, rc: RegionCoords) -> BTreeSet<ClientId> {
+        let intents: Vec<crate::IntentMsg> = self.in_flight_intents.iter().filter(|f| f.target == rc).map(|f| f.msg).collect();
+        self.in_flight_intents.retain(|f| f.target != rc);
+        if !intents.is_empty() {
+            self.ensure_running(rc);
+            log::warn!("{} intent(s) were in flight to lost region {rc:?}: sent again", intents.len());
+            for msg in intents {
+                self.send_intent_to(rc, msg, None);
+            }
+        }
         let ids: Vec<crate::EntityId> =
             self.in_flight.iter().filter(|(_, f)| f.target == rc).map(|(id, _)| *id).collect();
         let mut parks = BTreeSet::new();
@@ -2081,6 +2143,10 @@ impl<S: RegionSpawner> WorldManager<S> {
                 resubscribe_pending: Vec::new(),
             },
         );
+        // Replies that waited for it.
+        for msg in self.intent_mailbox.remove(&rc).unwrap_or_default() {
+            self.send_intent_to(rc, msg, None);
+        }
     }
 
     /// Seed the halo of `rc`, which is starting (`input` is its fresh
@@ -2233,14 +2299,17 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.locations.get(&id).copied()
     }
 
-    /// An intent or reply from a region's `Intents` output, to the region
-    /// owning its target (by position, or by `EntityId` through the
-    /// directory) as a `Transfer` stamped with its due tick. An intent whose
-    /// owner is not running — or is stopping — is answered
-    /// `Refused(.., OwnerNotRunning)`: an intent never wakes a region. A
-    /// reply goes where its entity is, else to its `hint`; with neither
-    /// running it is dropped (logged): its entity parked or is gone.
-    fn route_intent(&mut self, msg: crate::IntentMsg) {
+    /// An intent or reply from region `emitter`'s `Intents` output, to the
+    /// region owning its target (by position, or by `EntityId` through the
+    /// directory) as a `Transfer` stamped with its due tick, booked in flight
+    /// for the autosave.
+    /// - An intent whose owner is not running — or is stopping — is answered
+    ///   `Refused(.., OwnerNotRunning)`: an intent never wakes a region.
+    /// - A reply goes where its entity is, else to its `hint`; to a parked or
+    ///   stopping region it waits in the mailbox for its next run. With no
+    ///   such destination, or past `MAX_INTENT_REPLY_HOPS`, it is given up:
+    ///   logged at warn and counted (`intent_replies_lost`).
+    fn route_intent(&mut self, msg: crate::IntentMsg, emitter: RegionCoords) {
         use crate::{IntentMsg, IntentRefusal, IntentReply, SentReply, Target};
         let owner = match msg {
             IntentMsg::Intent(s) => match s.target {
@@ -2251,18 +2320,80 @@ impl<S: RegionSpawner> WorldManager<S> {
         };
         let running = owner.filter(|rc| self.regions.get(rc).is_some_and(|l| !l.stopping));
         match (running, msg) {
+            (_, IntentMsg::Reply(s)) if s.hops > crate::intents::MAX_INTENT_REPLY_HOPS => {
+                self.intent_replies_lost += 1;
+                log::warn!("[server] intent reply {:?} for {:?} given up after {} hops", s.reply, s.reply.to(), s.hops);
+            }
             (Some(rc), msg) => {
-                self.send_to_region(rc, RegionInput::Transfer(GameEventKind::Intent(msg), msg.due()));
+                let saved = self.book_intent(rc, emitter, msg).then_some(self.save_round);
+                self.send_intent_to(rc, msg, saved);
             }
             (None, IntentMsg::Intent(s)) => {
                 log::debug!("[server] intent {:?} at {:?}: owner {owner:?} not running; refused", s.intent, s.target);
                 let reply = IntentReply::Refused(s.intent, IntentRefusal::OwnerNotRunning);
-                self.route_intent(IntentMsg::Reply(SentReply { reply, hint: s.from, due: s.due + 1 }));
+                self.route_intent(IntentMsg::Reply(SentReply { reply, hint: s.from, due: s.due + 1, hops: 0 }), emitter);
             }
             (None, IntentMsg::Reply(s)) => {
-                log::info!("[server] intent reply for {:?} dropped: {owner:?} not running", s.reply.to());
+                let waiting = owner.filter(|rc| self.parked.contains_key(rc) || self.regions.contains_key(rc));
+                match waiting {
+                    Some(rc) => {
+                        self.intent_mailbox.entry(rc).or_default().push(msg);
+                        if self.parked.contains_key(&rc) {
+                            // Saved with it at the next autosave.
+                            self.unsaved_parked.insert(rc);
+                        }
+                    }
+                    None => {
+                        self.intent_replies_lost += 1;
+                        log::warn!("[server] intent reply {:?} for {:?} lost: {owner:?} never ran", s.reply, s.reply.to());
+                    }
+                }
             }
         }
+    }
+
+    /// Replies given up so far (see [`Self::route_intent`]).
+    pub fn intent_replies_lost(&self) -> u64 {
+        self.intent_replies_lost
+    }
+
+    /// Test support: the replies waiting for a parked or stopping region.
+    pub fn intent_mailbox(&self, rc: RegionCoords) -> Vec<crate::IntentMsg> {
+        self.intent_mailbox.get(&rc).cloned().unwrap_or_default()
+    }
+
+    /// `msg` to running `rc`, held there to its due tick, and in flight until
+    /// `rc` confirms it (`saved_in`: the round a save already holds it in).
+    fn send_intent_to(&mut self, rc: RegionCoords, msg: crate::IntentMsg, saved_in: Option<u64>) {
+        self.in_flight_intents.push(InFlightIntent { msg, target: rc, saved_in });
+        self.send_to_region(rc, RegionInput::Transfer(GameEventKind::Intent(msg), msg.due()));
+    }
+
+    /// The autosave side of routing `msg` from `emitter` to `target`: routed
+    /// after the target answered this round while the emitter has yet to,
+    /// no saved state of the round holds it unless the emitter's does — it
+    /// is owed to the emitter's save (restored there, it is sent on). If the
+    /// emitter answered first, its saved state predates the send (it sends
+    /// its outbox before answering), so no save holds it, rightly. Returns
+    /// whether it is owed (then saved this round).
+    fn book_intent(&mut self, target: RegionCoords, emitter: RegionCoords, msg: crate::IntentMsg) -> bool {
+        let owed = !self.save_asked.contains(&target) && self.save_asked.contains(&emitter);
+        if owed {
+            self.save_owed_intents.entry(emitter).or_default().push(msg);
+        }
+        owed
+    }
+
+    /// `rc` answered this round's `Save`: the intents its saved state lacks —
+    /// in flight to it and not saved this round yet — and those owed to it.
+    fn saved_intents(&mut self, rc: RegionCoords) -> Vec<crate::IntentMsg> {
+        let round = self.save_round;
+        let mut out = self.save_owed_intents.remove(&rc).unwrap_or_default();
+        for f in self.in_flight_intents.iter_mut().filter(|f| f.target == rc && f.saved_in != Some(round)) {
+            out.push(f.msg);
+            f.saved_in = Some(round);
+        }
+        out
     }
 
     fn send_to_region(&mut self, rc: RegionCoords, input: RegionInput) -> bool {

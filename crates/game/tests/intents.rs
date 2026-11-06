@@ -254,3 +254,125 @@ fn intent_applies_next_slot_across_seam() {
     let s = BreakAcross::default();
     assert_seam_invariant(&s, Some(InlineSchedule::jittery));
 }
+
+// --- Fix round 1: replies follow their entity, autosave, parking -------------
+
+/// The running region (if any) holding `id` and its inbox there, with that
+/// region's tick.
+fn find_inbox(rig: &mut Rig, id: EntityId) -> Option<(RegionCoords, u64, Vec<IntentReply>)> {
+    let mut found = None;
+    for rc in rig.manager.running_regions() {
+        rig.manager.spawner_mut().with_region(rc, |r| {
+            let inbox = r.data().intent_inbox(id);
+            if !inbox.is_empty() {
+                found = Some((rc, r.current_tick(), inbox));
+            }
+        });
+    }
+    found
+}
+
+/// The sender of a same-region intent departs across the seam in the very
+/// tick its intent applies (its reply already queued for it there): the
+/// reply leaves with it and is delivered in the new region at the same tick
+/// as without the crossing — the opening of T+2.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn reply_follows_sender_across_seam() {
+    let mut rig = Rig::with_floor(None, uniform_floor);
+    rig.join_spawn();
+    let west = RegionCoords::new(SPAWN_REGION.x - 1, SPAWN_REGION.z);
+    let (home, by) = player_id(&mut rig);
+    assert_eq!(home, SPAWN_REGION);
+    let mut sent_at = 0;
+    rig.manager.spawner_mut().with_region(home, |r| sent_at = r.current_tick());
+    rig.order(Order::DevBreakBlock(floor_block()));
+    // Tick T: the intent waits for T+1.
+    rig.round();
+    // Before tick T+1 the body is put past the west seam: tick T+1 applies
+    // the intent (queuing the reply for it here), then its scan departs it.
+    rig.manager.spawner_mut().with_region(home, |r| {
+        let key = *r.data().player_entites.get(&CLIENT).expect("the body");
+        let handle = (*r.data().ecs.rigidbody.try_get(key)).expect("a body");
+        let t = r.data().physics.bodies.get(handle).expect("its body").translation();
+        let past = -(game::FLIP_HYSTERESIS + 2.0);
+        r.with_data(|d| d.set_body_pose_safe(key, game::Pose::translation(past, t.y, t.z)));
+    });
+    let mut got = Vec::new();
+    for _ in 0..6 {
+        rig.round();
+        if let Some((rc, tick, inbox)) = find_inbox(&mut rig, by) {
+            got.push((rc, tick - sent_at, inbox));
+        }
+    }
+    assert_eq!(rig.owners(), [west], "the sender crossed");
+    assert_eq!(
+        got,
+        vec![(west, 3, vec![IntentReply::Granted(Intent::BreakBlock { by })])],
+        "delivered once, in the new region, at the opening of T+2 (seen after it)"
+    );
+    assert_eq!(rig.manager.intent_replies_lost(), 0);
+}
+
+/// An autosave taken while a cross-region intent is held at its (lagging)
+/// target: the target's saved state carries it — the source's does not —
+/// and the restored target applies it exactly once.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn autosave_holds_intent_held_at_target_once() {
+    let mut rig = Rig::with_floor(None, uniform_floor);
+    rig.join_spawn();
+    let west = RegionCoords::new(SPAWN_REGION.x - 1, SPAWN_REGION.z);
+    let local = BlockPos::new(10, 0, 10);
+    let target = WorldBlockPos::from_local(west, local);
+    // West lags: the intent waits in its channel, then in its held queue.
+    rig.manager.spawner_mut().hold(west, 3);
+    rig.order(Order::DevBreakBlock(target));
+    rig.round();
+    rig.manager.request_save();
+    rig.manager.spawner_mut().hold(west, 0);
+    rig.settle();
+    assert!(rig.manager.awaiting_save().is_empty(), "every region answered");
+    let mut saves: std::collections::BTreeMap<RegionCoords, game::Rollback> = Default::default();
+    for (rc, save) in rig.manager.take_saves() {
+        let game::RegionSave::Live(state, _) = save else { panic!("{rc:?}: running regions save live") };
+        saves.insert(rc, *state);
+    }
+    let held = |s: &game::Rollback| s.queued_intents().iter().filter(|i| i.target == game::Target::Block(target)).count();
+    let carried: Vec<_> = saves.iter().filter(|(_, s)| held(s) > 0).map(|(rc, s)| (*rc, held(s))).collect();
+    assert_eq!(carried, vec![(west, 1)], "saved once, with its target");
+    // Restored, the target applies it once.
+    let mut r = game::restore_saved(west, saves.remove(&west).unwrap());
+    for _ in 0..3 {
+        r.handle_event(GameEventKind::Tick).unwrap();
+        r.commit_server_event();
+    }
+    assert!(r.data().block_at([local.x, local.y, local.z]).is_none_or(|b| b.id == BlockId::AIR), "applied");
+    assert!(r.data().queued_intents().is_empty());
+    let granted = r.take_intents().into_iter().filter(|m| matches!(m, game::IntentMsg::Reply(s) if matches!(s.reply, IntentReply::Granted(_)))).count();
+    assert_eq!(granted, 1, "one grant, to the sender (elsewhere)");
+}
+
+/// A region that parks refuses the intents still queued in it: its parked
+/// state holds no unanswered intent; the sender (parked with it) gets the
+/// refusal queued for it.
+#[test]
+fn parking_refuses_queued_intents() {
+    let region = floor_region(&[0]);
+    let by = body_id(&region, 0);
+    let (send, recv) = crossbeam::channel::unbounded();
+    let mut runner = game::RegionRunner::new(SPAWN_REGION, region, send);
+    runner.handle_input(game::RegionInput::Event(GameEventKind::Order(0, Order::DevBreakBlock(floor_block()))));
+    assert_eq!(runner.region_mut().data().queued_intents().len(), 1);
+    assert!(!runner.handle_input(game::RegionInput::Shutdown));
+    let parked = recv
+        .try_iter()
+        .find_map(|(_, out)| match out {
+            game::RegionOutput::Stopped(blob, ..) => Some(blob.to_rollback().unwrap()),
+            _ => None,
+        })
+        .expect("stopped");
+    assert!(parked.queued_intents().is_empty(), "no unanswered intent parks");
+    let replies: Vec<IntentReply> = parked.queued_replies().iter().map(|r| r.reply).collect();
+    assert_eq!(replies, vec![IntentReply::Refused(Intent::BreakBlock { by }, IntentRefusal::OwnerNotRunning)]);
+}

@@ -23,14 +23,28 @@
 //! source's region — the manager's location directory finds it; a client,
 //! which has none, uses the `hint` (the region the intent was sent from). At
 //! the opening of its due tick a reply lands in the source entity's inbox
-//! ([`Rollback::intent_inbox`]), which holds that tick's replies only. A
-//! reply for an entity that has left its region by then is dropped (logged).
+//! ([`Rollback::intent_inbox`]), which holds that tick's replies only.
 //!
-//! **Never lost.** An intent whose owner is not running is answered
-//! `Refused(.., OwnerNotRunning)` by the manager; one to a stopping owner
-//! waits for its next run (`pending_events`); queued intents and replies are
-//! region state, so they park with it.
+//! **Replies follow their entity.** An entity that departs with replies
+//! queued for it takes them along: they leave with the departure, addressed
+//! to its target and due unchanged, so they are delivered at the same tick
+//! as without the seam. A reply that finds its entity gone at delivery is
+//! sent on (`hops` + 1) for the manager to find it by its directory; past
+//! [`MAX_INTENT_REPLY_HOPS`] the manager gives up, logged and counted.
+//!
+//! **Never lost.** An intent whose owner is not running — or is stopping —
+//! is answered `Refused(.., OwnerNotRunning)` by the manager (an intent never
+//! wakes a region). A region that parks refuses the intents still queued in
+//! it the same way. Queued replies are region state, so they park with it; a
+//! reply for a parked or stopping region waits in the manager's mailbox for
+//! its next run (and is saved with it). Intents and replies in flight
+//! between regions are saved exactly once per autosave round (the manager's
+//! `in_flight_intents`, injected into the saved state that lacks them).
 use crate::{ClientId, EntityId, RegionCoords, Rollback, Tick, WorldBlockPos};
+
+/// How many times a reply is sent on after finding its entity gone before
+/// the manager gives it up (logged at warn and counted).
+pub const MAX_INTENT_REPLY_HOPS: u8 = 4;
 
 /// What an intent is addressed to: an entity by its id, or a world position
 /// (the region holding it owns it).
@@ -148,13 +162,15 @@ pub struct SentIntent {
     pub due: Tick,
 }
 
-/// A reply on its way or queued for delivery: `hint` is where the intent
-/// came from (a client routes there; the server asks its directory first).
+/// A reply on its way or queued for delivery: `hint` is where its entity was
+/// last known to be (a client routes there; the server asks its directory
+/// first). `hops` counts the deliveries that found the entity gone.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize, state_hash::StateHash)]
 pub struct SentReply {
     pub reply: IntentReply,
     pub hint: RegionCoords,
     pub due: Tick,
+    pub hops: u8,
 }
 
 /// What travels between regions ([`crate::GameEventKind::Intent`]).
@@ -175,11 +191,12 @@ impl IntentMsg {
 
     /// The region it goes to without a location directory (a client's
     /// relay): a position target's owner, a reply's hint; `None` for an
-    /// intent to an entity.
+    /// intent to an entity, and for a reply that already found its entity
+    /// gone (only the server's directory knows where it went).
     pub fn region_hint(&self) -> Option<RegionCoords> {
         match self {
             IntentMsg::Intent(s) => s.target.region(),
-            IntentMsg::Reply(s) => Some(s.hint),
+            IntentMsg::Reply(s) => (s.hops == 0).then_some(s.hint),
         }
     }
 }
@@ -206,6 +223,35 @@ impl Rollback {
     /// Intents queued here, in application order (tests, debugging).
     pub fn queued_intents(&self) -> Vec<SentIntent> {
         self.data.intents.values().copied().collect()
+    }
+
+    /// Replies queued here for delivery, in order (tests, debugging).
+    pub fn queued_replies(&self) -> Vec<SentReply> {
+        self.data.intent_replies.values().copied().collect()
+    }
+
+    /// Put intents / replies that were in flight to (or owed by) this region
+    /// into its queues, UNLOGGED: for a saved clone only (the manager's
+    /// autosave, `WorldManager::in_flight_intents`), never a live region.
+    /// Restored, they apply / deliver at its first tick — or are sent on, if
+    /// they belong elsewhere.
+    pub fn insert_saved_intents(&mut self, msgs: &[IntentMsg]) {
+        for msg in msgs {
+            match *msg {
+                IntentMsg::Intent(sent) => {
+                    let (due, by) = (sent.due, sent.intent.by());
+                    let last = self.data.intents.range((due, by, 0)..=(due, by, u32::MAX)).next_back();
+                    let seq = last.map_or(0, |(k, _)| k.2 + 1);
+                    self.data.intents.insert_raw((due, by, seq), sent);
+                }
+                IntentMsg::Reply(sent) => {
+                    let (due, to) = (sent.due, sent.reply.to());
+                    let last = self.data.intent_replies.range((due, to, 0)..=(due, to, u32::MAX)).next_back();
+                    let seq = last.map_or(0, |(k, _)| k.2 + 1);
+                    self.data.intent_replies.insert_raw((due, to, seq), sent);
+                }
+            }
+        }
     }
 
     /// Send `intent` at `target`, due at the next tick: queued here when this
@@ -262,7 +308,10 @@ impl Rollback {
             let Some(sent) = self.data.intent_replies.remove(&k) else { continue };
             let to = sent.reply.to();
             if !self.data.id_index.contains_key(&to) {
-                log::info!("[intents] reply for {to:?} dropped at {:?}: it is not here", *self.data.region);
+                // Gone (parked, despawned, or arrived elsewhere): sent on for
+                // the manager's directory to find.
+                log::debug!("[intents] reply for {to:?} sent on from {:?}: it is not here", *self.data.region);
+                out.push(IntentMsg::Reply(SentReply { due: now + 1, hops: sent.hops.saturating_add(1), ..sent }));
                 continue;
             }
             let seq = self.data.intent_inbox.range((to, 0)..=(to, u32::MAX)).next_back().map_or(0, |(k, _)| k.1 + 1);
@@ -271,13 +320,46 @@ impl Rollback {
         let due: Vec<_> = self.data.intents.keys().copied().take_while(|k| k.0 <= now).collect();
         for k in due {
             let Some(sent) = self.data.intents.remove(&k) else { continue };
-            let reply = self.apply_intent_safe(sent.target, sent.intent);
-            let msg = SentReply { reply, hint: sent.from, due: now + 1 };
-            if self.data.id_index.contains_key(&reply.to()) {
-                self.queue_reply_safe(msg);
-            } else {
-                out.push(IntentMsg::Reply(msg));
+            // One that belongs elsewhere (restored from a save that owed it)
+            // goes on to its owner.
+            if sent.target.region().is_some_and(|rc| rc != *self.data.region) {
+                out.push(IntentMsg::Intent(sent));
+                continue;
             }
+            let reply = self.apply_intent_safe(sent.target, sent.intent);
+            self.send_reply_safe(SentReply { reply, hint: sent.from, due: now + 1, hops: 0 }, out);
+        }
+    }
+
+    /// A reply from here: queued if its entity is here, else out.
+    fn send_reply_safe(&mut self, msg: SentReply, out: &mut Vec<IntentMsg>) {
+        if self.data.id_index.contains_key(&msg.reply.to()) {
+            self.queue_reply_safe(msg);
+        } else {
+            out.push(IntentMsg::Reply(msg));
+        }
+    }
+
+    /// `id` departs to `target` this tick: the replies queued here for it go
+    /// with it, addressed there, due unchanged.
+    pub(crate) fn forward_replies_safe(&mut self, id: EntityId, target: RegionCoords, out: &mut Vec<IntentMsg>) {
+        let keys: Vec<_> = self.data.intent_replies.keys().copied().filter(|k| k.1 == id).collect();
+        for k in keys {
+            if let Some(sent) = self.data.intent_replies.remove(&k) {
+                out.push(IntentMsg::Reply(SentReply { hint: target, ..sent }));
+            }
+        }
+    }
+
+    /// The region parks: every intent still queued here is refused
+    /// `OwnerNotRunning`, so a parked region holds no unanswered intent.
+    pub(crate) fn refuse_queued_intents_safe(&mut self, out: &mut Vec<IntentMsg>) {
+        let now = *self.data.tick;
+        let keys: Vec<_> = self.data.intents.keys().copied().collect();
+        for k in keys {
+            let Some(sent) = self.data.intents.remove(&k) else { continue };
+            let reply = IntentReply::Refused(sent.intent, IntentRefusal::OwnerNotRunning);
+            self.send_reply_safe(SentReply { reply, hint: sent.from, due: now + 1, hops: 0 }, out);
         }
     }
 

@@ -859,6 +859,10 @@ impl Region {
                 #[cfg(not(target_arch = "wasm32"))]
                 let input_done = Instant::now();
                 let (departures, halo) = self.data.scan_boundaries(self.id, self.map_extent);
+                // Replies queued for a departing entity go with it.
+                for (bundle, target) in &departures {
+                    self.data.forward_replies_safe(bundle.id, *target, &mut intents_out);
+                }
                 self.pending_departures = departures;
                 self.pending_halo_entities = halo;
                 self.data.tick.update(|t| *t += 1);
@@ -1120,6 +1124,17 @@ impl Region {
     /// events, like [`Region::take_transfers`].
     pub fn take_intents(&mut self) -> Vec<crate::IntentMsg> {
         std::mem::take(&mut self.pending_intents)
+    }
+
+    /// Server, at `Shutdown`: refuse every intent still queued here
+    /// (`OwnerNotRunning`), as its own forgotten transaction; the replies to
+    /// other regions join the outbox.
+    pub fn refuse_queued_intents(&mut self) {
+        let mut out = Vec::new();
+        self.data.new_transaction();
+        self.data.refuse_queued_intents_safe(&mut out);
+        self.data.forget();
+        self.pending_intents.extend(out);
     }
 
     /// Test hook: run an undo-safe mutation in its own forgotten

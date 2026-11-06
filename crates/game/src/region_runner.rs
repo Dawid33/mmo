@@ -442,6 +442,12 @@ impl RegionRunner {
             RegionInput::StartAt(tick) => self.region.jump_clock_to(tick),
             RegionInput::SetMapExtent(extent) => self.region.set_map_extent(extent),
             RegionInput::Save => {
+                // Intents sent before the save go out before it, so the
+                // manager knows them as in flight when it books the save.
+                let intents = self.region.take_intents();
+                if !intents.is_empty() {
+                    let _ = self.out.send((self.id, RegionOutput::Intents(intents)));
+                }
                 let _ = self.out.send((self.id, RegionOutput::Saved(Box::new(self.region.data().clone()))));
             }
             RegionInput::HaloRequest(to) => {
@@ -464,7 +470,9 @@ impl RegionRunner {
                     self.apply(GameEventKind::DespawnPerson(*person));
                 }
                 let _ = self.out.send((self.id, RegionOutput::PeopleParked(people)));
-                // Intents sent since the last tick still go out.
+                // A parked region holds no unanswered intent; these and the
+                // intents sent since the last tick go out.
+                self.region.refuse_queued_intents();
                 let intents = self.region.take_intents();
                 if !intents.is_empty() {
                     let _ = self.out.send((self.id, RegionOutput::Intents(intents)));

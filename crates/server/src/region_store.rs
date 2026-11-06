@@ -45,7 +45,8 @@ pub const REGION_MAGIC: [u8; 8] = *b"MMOREGN\0";
 /// collider kept), `GameData` gained `halo_sent`.
 /// 12: `GameData` gained the intent queues (`intents`, `intent_replies`,
 /// `intent_inbox` — `game::intents`).
-pub const REGION_FILE_VERSION: u32 = 12;
+/// 13: a queued intent reply (`SentReply`) gained `hops`.
+pub const REGION_FILE_VERSION: u32 = 13;
 /// magic + version + region blocks + chunk blocks + world crc + payload crc.
 const HEADER_LEN: usize = 8 + 4 * 5;
 
