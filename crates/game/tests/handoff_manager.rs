@@ -429,3 +429,77 @@ fn slime_arrival_does_not_wake_unloaded_region() {
         assert_eq!(at, [(north, "state")], "save {round} after delivery");
     }
 }
+
+/// R29: the mailbox is bounded. A running region next to a parked one
+/// keeps pushing slimes across the seam; the mailbox never holds more than
+/// `PENDING_ARRIVALS_PER_REGION_MAX` for its target — the oldest waiting
+/// arrival is despawned (and counted) to make room — so the slime count of
+/// running regions + mailbox stays bounded, and so does what is saved.
+#[test]
+fn mailbox_is_capped_and_despawns_the_oldest() {
+    use game::{PENDING_ARRIVALS_PER_REGION_MAX as CAP, UNLOAD_GRACE_MS};
+    crate::common::install_real_block_props();
+    let mut h = harness();
+    h.event(ServerEvent::connected(0), 0);
+    h.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(SPAWN_REGION), 0), 0);
+    let north = RegionCoords::new(0, -1);
+    // North runs, then parks.
+    h.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(north), 0), 0);
+    h.tick(50);
+    h.event(ServerEvent::ClientPacket(ClientPacket::ReleaseRegionConnection(north), 0), 100);
+    let mut now = 100 + UNLOAD_GRACE_MS;
+    h.manager.maintain(now);
+    h.settle(now);
+    assert!(h.manager.parked_regions().contains(&north), "north parked");
+    h.drain_packets();
+
+    let walked = 3 * CAP;
+    let mut ids = Vec::new();
+    for i in 0..walked {
+        h.manager.spawner_mut().with_region(SPAWN_REGION, |region| {
+            let tick = region.current_tick();
+            let e = crate::common::spawn_slime(region, [128.0 + i as f32, 26.0, -(FLIP_HYSTERESIS + 2.0)], 1, 0.0, tick);
+            ids.push(region.data().ecs.id.try_get(e).expect("an EntityId"));
+        });
+        now += 50;
+        h.tick(now);
+        assert!(!h.manager.running_regions().contains(&north), "slimes never wake north");
+        assert!(h.manager.pending_arrival_count(north) <= CAP, "mailbox over its cap");
+        let mut running_slimes = 0;
+        h.manager.spawner_mut().with_region(SPAWN_REGION, |region| {
+            running_slimes = region.data().ecs.slime.iter().filter(|(_, s)| s.is_some()).count();
+        });
+        assert!(
+            running_slimes + h.manager.pending_arrival_total() <= game::slime::SLIME_CAP_PER_REGION + CAP,
+            "slimes unbounded: {running_slimes} running + {} waiting",
+            h.manager.pending_arrival_total()
+        );
+    }
+    assert_eq!(h.manager.pending_arrival_count(north), CAP);
+    assert_eq!(h.manager.arrivals_despawned(), (walked - CAP) as u64, "each overflow despawned one");
+    assert_eq!(h.manager.depths().arrivals_despawned, (walked - CAP) as u64);
+    // The NEWEST waited; the oldest were despawned.
+    let waiting: Vec<_> = h.manager.pending_arrival_ids().into_iter().map(|(id, _)| id).collect();
+    assert_eq!(waiting, ids[walked - CAP..].to_vec(), "the oldest went first");
+    // A save holds each waiting slime once and no despawned one.
+    let saves = autosave(&mut h, now);
+    let saved: Vec<(RegionCoords, game::RegionSave)> = saves;
+    let mut counts = std::collections::BTreeMap::new();
+    for (_, save) in saved {
+        let (state, transfers) = match save {
+            game::RegionSave::Live(state, transfers) => (*state, transfers),
+            parked => {
+                let s = parked.into_serialized().to_saved().expect("decodes");
+                (s.state, s.transfers)
+            }
+        };
+        for id in &ids {
+            let n = state.id_index.contains_key(id) as usize + transfers.iter().filter(|(b, _)| b.id == *id).count();
+            *counts.entry(*id).or_insert(0) += n;
+        }
+    }
+    for (i, id) in ids.iter().enumerate() {
+        let want = if i >= walked - CAP { 1 } else { 0 };
+        assert_eq!(counts[id], want, "slime {i} saved {} times", counts[id]);
+    }
+}

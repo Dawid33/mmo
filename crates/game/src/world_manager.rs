@@ -27,6 +27,18 @@ fn sites_key(history: &History) -> Vec<(SiteId, bool, u32, bool)> {
     history.site_markers().into_iter().map(|m| (m.site, m.abandoned, m.population / 10, m.returnable)).collect()
 }
 pub const UNLOAD_GRACE_MS: u64 = 5000;
+/// Most arrivals that wait in the manager's mailbox for one region that is
+/// not running ([`WorldManager::pending_arrival_count`]); past it the oldest
+/// is despawned. Twice [`crate::slime::SLIME_CAP_PER_REGION`]: room for a
+/// neighbour's whole slime population and its refill, while a region next
+/// to an unloaded one cannot pump wildlife into the mailbox (and every
+/// round's save of it) forever, nor hand the target an unbounded backlog in
+/// one burst when it starts.
+pub const PENDING_ARRIVALS_PER_REGION_MAX: usize = 2 * crate::slime::SLIME_CAP_PER_REGION;
+/// How many of the latest despawned arrivals' ids the manager remembers
+/// ([`WorldManager::recently_despawned_arrivals`], test support: the
+/// conservation check reads them as an allowed exit).
+pub const DESPAWNED_ARRIVAL_IDS_KEPT: usize = 256;
 /// LRU cap on `lod_cache`; subscribed keys are pinned past this (see
 /// `evict_lod_cache`).
 pub const LOD_CACHE_MAX_ENTRIES: usize = 8192;
@@ -437,6 +449,9 @@ pub struct ManagerDepths {
     /// Non-player arrivals waiting for a region that is not running
     /// ([`WorldManager::pending_arrival_total`]).
     pub pending_arrivals: usize,
+    /// Waiting arrivals despawned past [`PENDING_ARRIVALS_PER_REGION_MAX`]
+    /// since the manager started ([`WorldManager::arrivals_despawned`]).
+    pub arrivals_despawned: u64,
 }
 
 /// What a session is told when a new session of its player takes over
@@ -696,6 +711,13 @@ pub struct WorldManager<S: RegionSpawner> {
     /// region it left (rebased back into its frame: restored, it crosses
     /// again), and it is at its target in `locations`.
     pending_arrivals: BTreeMap<RegionCoords, Vec<PendingArrival>>,
+    /// Waiting arrivals despawned past [`PENDING_ARRIVALS_PER_REGION_MAX`]
+    /// (the `[server]` counters line), the latest of their ids
+    /// ([`DESPAWNED_ARRIVAL_IDS_KEPT`]), and the targets warned about since
+    /// they last started (one warning per region per burst).
+    arrivals_despawned: u64,
+    recently_despawned: std::collections::VecDeque<crate::EntityId>,
+    despawn_warned: BTreeSet<RegionCoords>,
     /// Replies given up (no running, parked or stopping destination, or past
     /// `MAX_INTENT_REPLY_HOPS`): each logged at warn.
     intent_replies_lost: u64,
@@ -771,6 +793,9 @@ impl<S: RegionSpawner> WorldManager<S> {
             save_owed_intents: BTreeMap::new(),
             intent_mailbox: BTreeMap::new(),
             pending_arrivals: BTreeMap::new(),
+            arrivals_despawned: 0,
+            recently_despawned: std::collections::VecDeque::new(),
+            despawn_warned: BTreeSet::new(),
             intent_replies_lost: 0,
         }
     }
@@ -1709,6 +1734,16 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.pending_arrivals.values().map(Vec::len).sum()
     }
 
+    /// Waiting arrivals despawned past [`PENDING_ARRIVALS_PER_REGION_MAX`].
+    pub fn arrivals_despawned(&self) -> u64 {
+        self.arrivals_despawned
+    }
+
+    /// Test support: the latest despawned arrivals' ids, oldest first.
+    pub fn recently_despawned_arrivals(&self) -> Vec<crate::EntityId> {
+        self.recently_despawned.iter().copied().collect()
+    }
+
     /// Test support: every arrival waiting in the mailbox, with its target.
     pub fn pending_arrival_ids(&self) -> Vec<(crate::EntityId, RegionCoords)> {
         self.pending_arrivals.iter().flat_map(|(rc, list)| list.iter().map(|p| (p.bundle.id, *rc))).collect()
@@ -1718,9 +1753,36 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// waits for `target`, which is not running. If `source` already
     /// answered this round's `Save`, its saved state holds the body.
     fn hold_arrival(&mut self, source: RegionCoords, target: RegionCoords, stamp: crate::Tick, bundle: crate::EntityBundle) {
+        debug_assert!(
+            bundle.client.is_none() && !matches!(bundle.kind, EntityKind::Person { .. }),
+            "players and people never wait in the mailbox"
+        );
         let saved_in = self.save_answered.contains(&source).then_some(self.save_round);
         self.locations.insert(bundle.id, target);
-        self.pending_arrivals.entry(target).or_default().push(PendingArrival { source, stamp, bundle, saved_in });
+        let list = self.pending_arrivals.entry(target).or_default();
+        list.push(PendingArrival { source, stamp, bundle, saved_in });
+        if list.len() <= PENDING_ARRIVALS_PER_REGION_MAX {
+            return;
+        }
+        // Full: the oldest waiting arrival makes room.
+        let gone = list.remove(0);
+        self.arrivals_despawned += 1;
+        self.locations.remove(&gone.bundle.id);
+        if self.recently_despawned.len() == DESPAWNED_ARRIVAL_IDS_KEPT {
+            self.recently_despawned.pop_front();
+        }
+        self.recently_despawned.push_back(gone.bundle.id);
+        // Its source's file may hold it (a parked source is saved once):
+        // saved again, without it. A running source is saved every round.
+        if self.parked.contains_key(&gone.source) {
+            self.unsaved_parked.insert(gone.source);
+        }
+        if self.despawn_warned.insert(target) {
+            log::warn!(
+                "[server] arrivals waiting for {target:?} past {PENDING_ARRIVALS_PER_REGION_MAX}: the oldest are despawned ({:?} first)",
+                gone.bundle.kind
+            );
+        }
     }
 
     /// `rc` just started: its waiting arrivals go to it as ordinary
@@ -1728,6 +1790,7 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// held one this round still does. A parked source is saved again at the
     /// next round, without them (its saved file holds them until then).
     fn deliver_pending_arrivals(&mut self, rc: RegionCoords) {
+        self.despawn_warned.remove(&rc);
         for p in self.pending_arrivals.remove(&rc).unwrap_or_default() {
             if self.parked.contains_key(&p.source) {
                 self.unsaved_parked.insert(p.source);
@@ -2202,6 +2265,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             terrain_cache: self.terrain_cache.len(),
             transfers_in_flight: self.in_flight_count(),
             pending_arrivals: self.pending_arrival_total(),
+            arrivals_despawned: self.arrivals_despawned(),
         }
     }
 

@@ -15,7 +15,8 @@ use std::collections::BTreeMap;
 /// The conservation invariant of a crossing: every `EntityId` is owned by
 /// exactly one running region or sits exactly once in the manager's
 /// in-flight table or arrival mailbox — never both, never twice, and (people aside, whom the
-/// history may absorb or end) never lost. Called every round.
+/// history may absorb or end, and arrivals a full mailbox despawned) never
+/// lost. Called every round.
 pub fn assert_conserved(rig: &mut Rig) {
     let mut places: BTreeMap<EntityId, Vec<Option<RegionCoords>>> = BTreeMap::new();
     let mut people = std::collections::BTreeSet::new();
@@ -40,6 +41,10 @@ pub fn assert_conserved(rig: &mut Rig) {
     }
     for (id, at) in &places {
         assert_eq!(at.len(), 1, "{id:?} is in several places at once (None = in flight): {at:?}");
+    }
+    // A waiting arrival the full mailbox despawned is an allowed exit.
+    for id in rig.manager.recently_despawned_arrivals() {
+        rig.tracked.remove(&id);
     }
     for (id, last) in &rig.tracked {
         assert!(places.contains_key(id), "{id:?} vanished (last seen {last:?}, None = in flight)");
