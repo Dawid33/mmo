@@ -61,6 +61,12 @@ pub const HORIZONTAL: [Dir; 4] = [Dir::PosX, Dir::PosZ, Dir::NegX, Dir::NegZ];
 pub const ALL: [Dir; 6] = [Dir::Down, Dir::PosX, Dir::PosZ, Dir::NegX, Dir::NegZ, Dir::Up];
 
 /// Horizontal visiting order, rotated by the step so no direction is favoured.
+/// Checkerboard colour of a cell: `(x + y + z) % 2`.
+pub fn parity(dims: Dims, i: u32) -> u32 {
+    let (x, y, z) = dims.xyz(i);
+    (x + y + z) % 2
+}
+
 pub fn horizontal_order(step: u32) -> [Dir; 4] {
     let r = (step % 4) as usize;
     core::array::from_fn(|k| HORIZONTAL[(k + r) % 4])

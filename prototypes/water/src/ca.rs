@@ -3,7 +3,7 @@
 //! expansions run, bodies whose level rose wake their shore, and the step advances.
 
 use crate::body::{self, Body};
-use crate::grid::{ALL, Dir, horizontal_order};
+use crate::grid::{ALL, Dir, horizontal_order, parity};
 use crate::state::{BodyId, NO_BODY, World};
 use crate::{ABSORB_TOL, FILM, FULL, MAX_FLOW, Mode, SEED_QUIET, SLEEP_STEPS};
 
@@ -11,23 +11,43 @@ pub fn step(w: &mut World) {
     let s = w.step;
     w.expand_requests.clear();
     let order = horizontal_order(s);
-    for c in w.active.ones() {
-        if !w.is_ca(c) {
-            w.set_active(c, false);
-            continue;
+    let all = w.active.ones();
+    let dims = w.dims;
+    // checkerboard: cells of this step's parity first, then the rest, each group ascending.
+    // Same-colour cells are never horizontal neighbours, so a group is processed order-free.
+    for colour in [s % 2, (s + 1) % 2] {
+        let group: Vec<u32> = all.iter().copied().filter(|&c| parity(dims, c) == colour).collect();
+        // (A) vertical edges
+        let mut live = Vec::with_capacity(group.len());
+        for &c in &group {
+            if !w.is_ca(c) {
+                w.set_active(c, false);
+                continue;
+            }
+            w.stats.cells_visited += 1;
+            vertical(w, c);
+            live.push(c);
         }
-        w.stats.cells_visited += 1;
-        vertical(w, c);
-        for d in order {
+        // (B) wants from the state after (A), (C) caps, (D) apply
+        let mut moves: Vec<(u32, u32, u16)> = Vec::new();
+        for &c in &live {
             if w.is_ca(c) {
-                horizontal(w, c, d);
+                donor_wants(w, c, &mut moves);
             }
         }
-        if w.mode == Mode::Bodies && w.is_ca(c) {
-            absorb_or_seed(w, c);
-        }
-        if w.is_ca(c) && s >= w.last_touch[c as usize] + SLEEP_STEPS {
-            w.set_active(c, false);
+        cap_and_apply(w, moves);
+        for c in live {
+            for d in order {
+                if w.is_ca(c) {
+                    horizontal(w, c, d);
+                }
+            }
+            if w.mode == Mode::Bodies && w.is_ca(c) {
+                absorb_or_seed(w, c);
+            }
+            if w.is_ca(c) && s >= w.last_touch[c as usize] + SLEEP_STEPS {
+                w.set_active(c, false);
+            }
         }
     }
     if w.mode == Mode::Bodies {
@@ -41,12 +61,25 @@ fn wake(w: &mut World, c: u32) {
     w.touch(c);
 }
 
+/// A cell that lost water may now sit below a sleeping neighbour: sideways flow is donor-driven,
+/// so wake the neighbours that hold water.
+fn wake_donors(w: &mut World, c: u32) {
+    for d in crate::grid::HORIZONTAL {
+        if let Some(n) = w.dims.step(c, d) {
+            if w.is_ca(n) && w.water[n as usize] > 0 {
+                wake(w, n);
+            }
+        }
+    }
+}
+
 fn move_ca(w: &mut World, from: u32, to: u32, q: u16) {
     let (a, b) = (w.water[from as usize], w.water[to as usize]);
     w.set_water(from, a - q);
     w.set_water(to, b + q);
     wake(w, from);
     wake(w, to);
+    wake_donors(w, from);
     w.stats.transfers += 1;
 }
 
@@ -55,6 +88,7 @@ fn ca_to_body(w: &mut World, from: u32, id: BodyId, q: u16) {
     w.set_water(from, a - q);
     body::add_volume(w, id, q as u64);
     wake(w, from);
+    wake_donors(w, from);
     w.stats.transfers += 1;
 }
 
@@ -129,24 +163,7 @@ fn horizontal(w: &mut World, c: u32, d: Dir) {
     }
     let wc = w.water[c as usize];
     match w.owner[n as usize] {
-        NO_BODY => {
-            let wn = w.water[n as usize];
-            let (hi, lo, whi, wlo) = if wc >= wn { (c, n, wc, wn) } else { (n, c, wn, wc) };
-            let diff = whi - wlo;
-            let q = if !w.supported(hi) {
-                0 // a donor in mid-air only falls
-            } else if !w.supported(lo) {
-                diff.div_ceil(2) // over an edge: pour, rounding up so films drain off
-            } else if whi <= FILM || diff < 2 {
-                0 // film rule
-            } else {
-                diff / 2
-            };
-            let q = q.min(MAX_FLOW);
-            if q > 0 {
-                move_ca(w, hi, lo, q);
-            }
-        }
+        NO_BODY => {} // CA<->CA sideways exchange is `split_out`
         id => {
             let y = dims.y_of(c);
             let (v, top, room, vol) = {
@@ -166,6 +183,96 @@ fn horizontal(w: &mut World, c: u32, d: Dir) {
                     ca_to_body(w, c, id, q);
                 }
             }
+        }
+    }
+}
+
+/// Amount cell `c` (as donor) sends to CA neighbour `n` under the per-edge rule.
+fn want(w: &World, c: u32, n: u32) -> u16 {
+    let (wc, wn) = (w.water[c as usize], w.water[n as usize]);
+    if wc <= wn || !w.supported(c) {
+        return 0; // not the higher cell, or a donor in mid-air only falls
+    }
+    let diff = wc - wn;
+    let q = if !w.supported(n) {
+        diff.div_ceil(2) // over an edge: pour, rounding up so films drain off
+    } else if wc <= FILM || diff < 2 {
+        0 // film rule
+    } else {
+        diff / 2
+    };
+    q.min(MAX_FLOW)
+}
+
+/// Collect cell `c`'s wants toward its CA neighbours (nothing is applied).
+fn donor_wants(w: &World, c: u32, out: &mut Vec<(u32, u32, u16)>) {
+    let dims = w.dims;
+    let start = out.len();
+    let mut sum = 0u64;
+    for d in crate::grid::HORIZONTAL {
+        let Some(n) = dims.step(c, d) else { continue };
+        if w.solid.get(n) || w.owner[n as usize] != NO_BODY {
+            continue;
+        }
+        let q = want(w, c, n);
+        if q > 0 {
+            out.push((c, n, q));
+            sum += q as u64;
+        }
+    }
+    let avail = w.water[c as usize] as u64;
+    if sum > avail {
+        for m in &mut out[start..] {
+            m.2 = (m.2 as u64 * avail / sum) as u16;
+        }
+    }
+}
+
+/// Receiver cap (incoming <= room, proportional floor), then apply in a fixed order.
+fn cap_and_apply(w: &mut World, mut moves: Vec<(u32, u32, u16)>) {
+    // incoming total and largest single want per receiver
+    let mut incoming: std::collections::BTreeMap<u32, (u64, u64)> = Default::default();
+    for &(_, n, q) in &moves {
+        let e = incoming.entry(n).or_default();
+        e.0 += q as u64;
+        e.1 = e.1.max(q as u64);
+    }
+    // room first (floor: never overfills), then the midpoint cap (ceil: equal donors still move
+    // something); simultaneous donors would otherwise overshoot and ping-pong
+    for m in &mut moves {
+        let (tot, _) = incoming[&m.1];
+        let room = (FULL - w.water[m.1 as usize]) as u64;
+        if tot > room {
+            m.2 = (m.2 as u64 * room / tot) as u16;
+        }
+    }
+    let mut after: std::collections::BTreeMap<u32, u64> = Default::default();
+    for &(_, n, q) in &moves {
+        *after.entry(n).or_default() += q as u64;
+    }
+    // floor shares, then the leftover units (cap - sum of floors) go one each to the receiver's
+    // donors in move order, so the receiver takes in exactly `biggest` when it was over-asked
+    let mut left: std::collections::BTreeMap<u32, u64> = Default::default();
+    for m in &mut moves {
+        let (_, biggest) = incoming[&m.1];
+        let tot = after[&m.1];
+        if tot > biggest {
+            let q = m.2 as u64;
+            m.2 = (q * biggest / tot) as u16;
+            *left.entry(m.1).or_insert(biggest) -= m.2 as u64;
+        }
+    }
+    for m in &mut moves {
+        if let Some(l) = left.get_mut(&m.1) {
+            if *l > 0 {
+                m.2 += 1;
+                *l -= 1;
+            }
+        }
+    }
+    for (from, to, q) in moves {
+        if q > 0 {
+            move_ca(w, from, to, q);
         }
     }
 }
