@@ -1,6 +1,6 @@
 # Water, revisited for the engine as it is in November: synthesis
 
-**Date:** 2026-11-06 · **Status:** research only, nothing implemented
+**Date:** 2026-11-06 · **Status:** static layer implemented (commits 1879620..fd8e7eb: recipe water in `ColumnGround`, swimming, buoyancy, water render pass, LOD water); flow, seams and the water cycle not implemented
 **Ask:** research how to implement water in this voxel world, including the performance
 implications of rollback and of communication between regions.
 

@@ -111,3 +111,14 @@ Seam-transparent regions follow-ups (program landed 2026-11-06/07, spec specs/20
 - Designations are still clipped to the home region (`orders.rs` `clip_to_region`): move them to world tiles + intents when workers land.
 - Mining / placing across a seam into a neighbour that is not running runs the full mining time, then `OwnerNotRunning` and the cooldown, in a loop (the halo looks mineable): a per-halo "owner running" bit, or show the refusal.
 - People wander with 2× `MAX_PATH_NODES` on unreachable goals; a voxel body's halo mirror re-sends its whole compound collider every tick (wire/CPU).
+
+Static water layer follow-ups (landed 2026-11-07, plan plans/2026-11-06-water-static-layer.md; code review pending):
+- Static limits: dug pockets under water stay dry (the recipe is per column, a dug cell reads as air above `surface + 1`); placed blocks do not relevel water; no drowning (`DROWN_DEPTH` is unused); no currents.
+- Whole-cell immersion: a player in 1-deep shoreline water swims (no jump except climbing out); people who end up in deep water cannot climb out (they never hold jump); a fall into shallow water can still hit the bed.
+- LOD water wire size and the per-rebuild worker cost (`LodWater`) are unmeasured: clamp the shipped depth and/or cache per key if they matter.
+- The water tile readiness gate scans every `PendingSnapshotVoxels` per frame while waiting.
+- Live checks pending (Dawid): Tasks 6-9 visuals (water pass, cut discard, underwater fog, LOD water), swim feel, the WebGL2 browser check.
+- Measure before the flow plans: (1) a `PERF_LOG=1` embarked run at 256 m, which Dawid runs himself; (2) the body-restructure budget prototype round.
+- Open decision 1: is the world ledger the water cycle (recommended yes)?
+- Open decision 2: should clients predict water arriving across a seam? Worth revisiting now that predicted transfers land in the server's slot, carry an identity and are conservation-checked (the research advised against it because relayed transfers orphaned).
+- Flow-plan hooks (seam spec): water flux leaves like a departure (stamped `RegionOutput` -> `RegionInput::Transfer`, applied at `max(T+1, next tick)`); level deltas ride the halo's stamped deltas; water volume joins the manager's `in_flight` conservation invariant; `pending_arrivals` needs an uncapped water ledger (never dropped by its overflow rule); step water when `tick % WATER_STEP_TICKS == 0` on the shared `WorldClock`; pumps/gates/buckets on water a region does not own are `Effects` intents.
