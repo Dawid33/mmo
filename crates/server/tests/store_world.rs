@@ -334,36 +334,59 @@ fn untiled_store_is_tiled_at_start() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A store whose tile under region (0,0) is damaged: that region's thread
-/// answers `LoadFailed` and never generates; a region on healthy tiles runs.
-#[test]
-#[ignore = "slow: >100ms — run via just test-full"]
-fn tile_load_failure_stops_region() {
+/// The default 16 km / 32 m forge (2x2 tiles, so regions on other tiles
+/// exist), forged once per process.
+fn default_world_bytes() -> Vec<u8> {
+    static BYTES: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+    BYTES
+        .get_or_init(|| {
+            let params = ForgeParams::default();
+            worldgen::forge::forge(&params).artifact(&params).to_bytes()
+        })
+        .clone()
+}
+
+type Tile = worldgen::forged_tiles::TileCoords;
+
+/// The tiles generating `rc` pins.
+fn own_tiles(world: &ForgedWorld, rc: RegionCoords) -> Vec<Tile> {
+    worldgen::prefetch_region_forged(world, rc).unwrap().coords().collect()
+}
+
+/// The tiles a region thread at `rc` pins: its 3x3 neighbourhood's.
+fn neighbourhood_tiles(world: &ForgedWorld, rc: RegionCoords) -> Vec<Tile> {
+    let mut tiles: Vec<Tile> = rc.window_3x3().into_iter().flat_map(|n| own_tiles(world, n)).collect();
+    tiles.sort_by_key(|t| (t.tz, t.tx));
+    tiles.dedup();
+    tiles
+}
+
+/// Regions out from the spawn region along both axes, nearest first.
+fn candidate_regions() -> impl Iterator<Item = RegionCoords> {
+    (0..1000).flat_map(|k: i32| {
+        [RegionCoords::new(k, 0), RegionCoords::new(-k, 0), RegionCoords::new(0, k), RegionCoords::new(0, -k)]
+    })
+}
+
+/// A tiled store on a temp sqlite whose tile `pick` chooses (from the healthy
+/// world) has one byte flipped; then a region thread spawner over it like the
+/// server's (store + `prefetch_region` on that world) is started for
+/// `failing` and `healthy`: `failing` answers `LoadFailed` naming the tile and
+/// never generates, `healthy` generates and serves its terrain.
+fn damaged_tile_run(tag: &str, pick: impl Fn(&ForgedWorld) -> (RegionCoords, Tile)) {
     use game::{RegionInput, RegionSeed};
     use server::region_threads::ThreadRegionSpawner;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    let dir = scratch("tile-failure");
+    let dir = scratch(tag);
     let url = world_store::StoreUrl::Sqlite(dir.join("w.sqlite"));
-    // The default 16 km / 32 m world: 2x2 tiles, so regions on other tiles exist.
-    let params = ForgeParams::default();
-    let bytes = worldgen::forge::forge(&params).artifact(&params).to_bytes();
     let store = world_store::StoreHandle::open(&url, world_store::Dials::BUILT).unwrap();
-    world_store::write_tiled(&store, bytes).unwrap();
+    world_store::write_tiled(&store, default_world_bytes()).unwrap();
     let (world, _) = world_store::load_forged(&store).unwrap().unwrap();
-    let tiles_of = |rc: RegionCoords| -> Vec<worldgen::forged_tiles::TileCoords> {
-        worldgen::prefetch_region_forged(&world, rc).unwrap().coords().collect()
-    };
-    let bad = tiles_of(SPAWN_REGION)[0];
-    let healthy = (1..)
-        .flat_map(|k: i32| {
-            let s = k * 8;
-            [RegionCoords::new(s, 0), RegionCoords::new(-s, 0), RegionCoords::new(0, s), RegionCoords::new(0, -s)]
-        })
-        .take(2000)
-        .find(|rc| !tiles_of(*rc).contains(&bad))
-        .expect("a region away from the damaged tile");
-    let good = world_store::StoreTiles(store.clone());
-    let good = worldgen::forged_tiles::TileLoader::load(&good, bad).unwrap();
+    let (failing, bad) = pick(&world);
+    let healthy = candidate_regions()
+        .find(|rc| !neighbourhood_tiles(&world, *rc).contains(&bad))
+        .expect("a region whose neighbourhood avoids the damaged tile");
+    let good = worldgen::forged_tiles::TileLoader::load(&world_store::StoreTiles(store.clone()), bad).unwrap();
     drop(world);
     store.shutdown();
     let mut damaged = good.clone();
@@ -392,7 +415,7 @@ fn tile_load_failure_stops_region() {
         }))
         .with_store(store.clone());
     let (out, outputs) = unbounded();
-    let to_bad = spawner.spawn(SPAWN_REGION, RegionSeed::Deferred(None), out.clone());
+    let to_bad = spawner.spawn(failing, RegionSeed::Deferred(None), out.clone());
     let to_good = spawner.spawn(healthy, RegionSeed::Deferred(None), out);
     let _ = to_good.send(RegionInput::RequestTerrain(0));
     let (mut failed, mut terrain) = (None, None);
@@ -401,7 +424,7 @@ fn tile_load_failure_stops_region() {
         let Ok((rc, output)) = outputs.recv_timeout(Duration::from_millis(100)) else { continue };
         match output {
             RegionOutput::LoadFailed(why) => {
-                assert_eq!(rc, SPAWN_REGION, "only the damaged region fails: {why}");
+                assert_eq!(rc, failing, "only the region over the damaged tile fails: {why}");
                 failed = Some(why);
             }
             RegionOutput::Terrain(_, snap) => {
@@ -411,20 +434,44 @@ fn tile_load_failure_stops_region() {
             _ => {}
         }
     }
-    let why = failed.expect("the damaged region answers LoadFailed");
+    let why = failed.expect("the region over the damaged tile answers LoadFailed");
     assert!(why.contains(&format!("({}, {})", bad.tx, bad.tz)), "names the tile: {why}");
     let terrain = terrain.expect("the healthy region runs");
     assert!(!terrain.chunks.is_empty(), "with generated terrain");
-    assert_eq!(*generated.lock().unwrap(), vec![healthy], "the damaged region never generated");
-    assert_eq!(prefetches.load(Ordering::SeqCst), 2, "both fresh regions prefetched");
+    assert_eq!(*generated.lock().unwrap(), vec![healthy], "the failing region never generated");
+    assert!(prefetches.load(Ordering::SeqCst) >= 9, "the healthy region pinned its 3x3 neighbourhood");
     let _ = to_good.send(RegionInput::Shutdown);
     drop(to_bad);
     drop(to_good);
-    spawner.reap(SPAWN_REGION);
+    spawner.reap(failing);
     spawner.reap(healthy);
     drop(world);
     store.shutdown();
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A store whose tile under region (0,0) is damaged: that region's thread
+/// answers `LoadFailed` and never generates; a region on healthy tiles runs.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn tile_load_failure_stops_region() {
+    damaged_tile_run("tile-failure", |world| (SPAWN_REGION, own_tiles(world, SPAWN_REGION)[0]));
+}
+
+/// A damaged tile that only a NEIGHBOUR of the region reads (the region's
+/// halo seed of that never-run neighbour would): the region answers
+/// `LoadFailed` before it runs — never with an empty mirror past that seam.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn neighbour_tile_failure_stops_region() {
+    damaged_tile_run("neighbour-tile-failure", |world| {
+        candidate_regions()
+            .find_map(|rc| {
+                let own = own_tiles(world, rc);
+                neighbourhood_tiles(world, rc).into_iter().find(|t| !own.contains(t)).map(|t| (rc, t))
+            })
+            .expect("a region next to a tile seam that its own generation does not cross")
+    });
 }
 
 /// `VOXEL_WORLD_FILE=procedural`: no store, nothing written anywhere — even

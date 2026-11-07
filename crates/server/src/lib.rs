@@ -567,20 +567,17 @@ pub fn run() {
     let world_clock = game::WorldClock::starting_at(0, opened.world_tick);
     // Halo seeds of never-run neighbours: only their band columns, on the
     // starting region's thread (`game::halo`).
-    // Their forged tiles are pinned first; a tile that will not load leaves
-    // that neighbour's halo unseeded (logged) rather than make terrain.
+    // The region thread pinned its 3x3 neighbourhood's forged tiles before
+    // it was built (a tile that would not load stopped it), so these reads
+    // never load; a failure here is a bug, never an empty seam.
     let halo_generator: game::HaloGenerator = std::sync::Arc::new(move |rc, xs, zs| {
-        let _pins = match worldgen::prefetch_region(rc) {
-            Ok(pins) => pins,
-            Err(e) => {
-                log::error!("[server] halo seed of {rc:?} skipped: its forged world tiles do not load: {e}");
-                return Vec::new();
-            }
-        };
+        let _pins = worldgen::prefetch_region(rc)
+            .unwrap_or_else(|e| panic!("halo seed of {rc:?}: its forged world tiles do not load: {e}"));
         worldgen::generate_columns(rc, xs, zs, world_seed, materials)
     });
-    // A fresh region pins its forged tiles before it generates; one that
-    // will not load stops the region (`RegionOutput::LoadFailed`).
+    // Each region thread pins the forged tiles of its 3x3 neighbourhood
+    // before it is built; one that will not load stops the region
+    // (`RegionOutput::LoadFailed`).
     let mut spawner = region_threads::ThreadRegionSpawner::with_generator(region_generator, halo_generator)
         .with_prefetch(std::sync::Arc::new(worldgen::prefetch_region))
         .with_clock(world_clock, start);

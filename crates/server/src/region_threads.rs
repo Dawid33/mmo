@@ -14,8 +14,8 @@ pub type SharedRegionGenerator =
     std::sync::Arc<dyn Fn(RegionCoords) -> Vec<(game::ColumnCoords, game::Column)> + Send + Sync>;
 
 /// Loads and pins the forged-world tiles generating a region reads
-/// (`worldgen::prefetch_region` on the server); held while it generates. An
-/// `Err` (a tile that will not load) stops the region instead.
+/// (`worldgen::prefetch_region` on the server). An `Err` (a tile that will
+/// not load) stops the region instead.
 pub type RegionPrefetch =
     std::sync::Arc<dyn Fn(RegionCoords) -> Result<worldgen::forged_tiles::TilePins, String> + Send + Sync>;
 
@@ -41,11 +41,12 @@ pub struct ThreadRegionSpawner {
     /// regenerated over stored data. Runners also seed the halo of stored
     /// neighbours from it (`RegionInput::SeedHaloFromStore`).
     store: Option<world_store::StoreHandle>,
-    /// Before a region generates (a never-run region with no stored state,
-    /// or a parked one whose blob is corrupt), the forged tiles it reads are
-    /// loaded and pinned. A fresh region whose tiles fail answers
-    /// `RegionOutput::LoadFailed` and never generates. `None`: no forged
-    /// world to prefetch (tests, tools with their own generators).
+    /// Every region thread loads and pins the forged tiles of its 3x3
+    /// neighbourhood before it is built and holds them for its life (its own
+    /// generation and its halo seeds of never-run neighbours read them). A
+    /// tile that will not load answers `RegionOutput::LoadFailed`: the region
+    /// never generates and never runs with an unseeded seam. `None`: no
+    /// forged world to prefetch (tests, tools with their own generators).
     prefetch: Option<RegionPrefetch>,
 }
 
@@ -148,18 +149,24 @@ impl RegionSpawner for ThreadRegionSpawner {
                     }
                 };
                 let from_store = stored.is_some();
-                // A fresh region generates: its forged tiles first, pinned
-                // until it is built (reads then never load).
-                let fresh = !from_store && matches!(seed, RegionSeed::Deferred(None));
-                let pins = match (&prefetch, fresh) {
-                    (Some(prefetch), true) => match prefetch(id) {
-                        Ok(pins) => Some(pins),
-                        Err(e) => {
-                            log::error!("[region {},{}] cannot load its forged world tiles: {e}", id.x, id.z);
-                            return fail(format!("forged world tiles: {e}"));
+                // The forged tiles of its 3x3 neighbourhood, pinned for the
+                // runner's life: its own generation (a fresh region, or a
+                // parked one whose blob is corrupt) and every halo seed of a
+                // never-run neighbour (`SeedHaloFromWorldgen`, also the
+                // fallback of `SeedHaloFromStore`, at start or on a reseed)
+                // then read only pinned tiles. A tile that will not load
+                // stops the region before it runs — never an empty seam.
+                let _pins = match &prefetch {
+                    Some(prefetch) => {
+                        match id.window_3x3().into_iter().map(|rc| prefetch(rc)).collect::<Result<Vec<_>, _>>() {
+                            Ok(pins) => pins,
+                            Err(e) => {
+                                log::error!("[region {},{}] cannot load its forged world tiles: {e}", id.x, id.z);
+                                return fail(format!("forged world tiles: {e}"));
+                            }
                         }
-                    },
-                    _ => None,
+                    }
+                    None => Vec::new(),
                 };
                 // Deferred seeds generate here, timed separately from the build.
                 let generate_time = std::cell::Cell::new(Duration::ZERO);
@@ -172,16 +179,6 @@ impl RegionSpawner for ThreadRegionSpawner {
                     }
                     None => seed.into_runner(id, out, &|rc| {
                         let started = Instant::now();
-                        // A parked region whose blob is corrupt regenerates
-                        // here: its tiles were not pinned up front. Its
-                        // blob is lost already, so a tile that fails too
-                        // ends the thread (the manager sees it die).
-                        let _late_pins = match (&prefetch, &pins) {
-                            (Some(prefetch), None) => Some(prefetch(rc).unwrap_or_else(|e| {
-                                panic!("region {rc:?}: corrupt parked blob and its forged tiles do not load: {e}")
-                            })),
-                            _ => None,
-                        };
                         let columns = match &generator {
                             Some(generate) => generate(rc),
                             None => unreachable!("Deferred seed without a region generator"),
@@ -190,7 +187,6 @@ impl RegionSpawner for ThreadRegionSpawner {
                         columns
                     }),
                 };
-                drop(pins);
                 let mut runner = runner;
                 if let Some(g) = halo_generator {
                     runner.set_halo_generator(g);

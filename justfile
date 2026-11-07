@@ -590,6 +590,8 @@ clean-old-worlds *args:
 # <url> = a .sqlite path or a postgres:// URL. A store a running server holds is
 # refused (its lock), never waited for. Built at `play_blocks`: the store's world
 # row and its world map are tied to the region size (pass region_blocks=N for others).
+# Pinned to `cap` cores ON PURPOSE, like forge-proto: the forge and the tile encoding
+# use every core they get, and this is batch work beside a desktop or a server.
 # World-store maintenance: forge a world into a store, export its forge file.
 worldctl *args:
     VOXEL_REGION_BLOCKS={{play_blocks}} {{cap}} {{cargo}} run --release -p world-store --bin worldctl -- {{args}}

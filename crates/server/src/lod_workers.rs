@@ -2,7 +2,7 @@
 //! `LodBuildJob`s so a cache-miss (worst case a full region generation)
 //! never stalls the manager thread's event routing.
 
-use crossbeam::channel::{unbounded, Sender};
+use crossbeam::channel::{unbounded, Receiver, RecvTimeoutError, Sender};
 use game::{build_lod_job, LodBuildJob, LodBuilder, LodResult, NoStoredTerrain, StoredTerrain};
 
 /// Floor on the default worker count (and the old fixed value).
@@ -40,11 +40,62 @@ pub fn lod_build_threads(value: Option<&str>) -> Result<usize, String> {
         .ok_or_else(|| format!("invalid LOD_BUILD_THREADS value `{value}` (expected integer >= 1)"))
 }
 
+/// First delay before a LOD job whose forged tiles did not load is tried
+/// again; it doubles per failed attempt up to [`LOD_RETRY_MAX_MS`].
+pub const LOD_RETRY_BASE_MS: u64 = 250;
+/// Longest delay between attempts: a permanently bad tile is retried at this
+/// pace for as long as the server runs (one prefetch per key per period).
+pub const LOD_RETRY_MAX_MS: u64 = 30_000;
+
+/// Capped exponential backoff of LOD jobs whose tiles failed to load.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Backoff {
+    pub base: std::time::Duration,
+    pub max: std::time::Duration,
+}
+
+impl Default for Backoff {
+    fn default() -> Self {
+        Self {
+            base: std::time::Duration::from_millis(LOD_RETRY_BASE_MS),
+            max: std::time::Duration::from_millis(LOD_RETRY_MAX_MS),
+        }
+    }
+}
+
+impl Backoff {
+    /// The wait after failed attempt number `attempt` (0 = the first).
+    pub fn delay(&self, attempt: u32) -> std::time::Duration {
+        let factor = 1u32.checked_shl(attempt.min(31)).unwrap_or(u32::MAX);
+        self.base.saturating_mul(factor).min(self.max)
+    }
+}
+
+/// A job on the worker queue, with how many times its tiles failed to load.
+struct Queued {
+    job: LodBuildJob,
+    attempt: u32,
+}
+
+/// What the retry thread is sent.
+enum Delayed {
+    /// Put `Queued` back on the worker queue at the instant.
+    Job(std::time::Instant, Queued),
+    /// The builder is gone: drop what waits and exit.
+    Stop,
+}
+
 pub struct ThreadLodBuilder {
-    jobs: Sender<LodBuildJob>,
+    jobs: Sender<Queued>,
+    /// The retry thread (stopped on drop: it holds a sender of `jobs`, which
+    /// would otherwise keep the workers alive).
+    retry: Sender<Delayed>,
     /// Built with a world store: saved regions' LOD is read from it.
     reads_stored: bool,
 }
+
+/// Loads and pins what a job reads (see [`prefetch_job`]).
+type JobPrefetch = dyn Fn(&LodBuildJob) -> Result<Vec<worldgen::forged_tiles::TilePins>, String>;
 
 impl ThreadLodBuilder {
     /// `coarse` must be Clone-able across workers — pass seed + materials
@@ -63,10 +114,12 @@ impl ThreadLodBuilder {
     ) -> Self {
         let reads_stored = stored.is_some();
         let stored: std::sync::Arc<dyn StoredTerrain> = stored.unwrap_or_else(|| std::sync::Arc::new(NoStoredTerrain));
-        let (jobs, job_recv) = unbounded::<LodBuildJob>();
+        let (jobs, job_recv) = unbounded::<Queued>();
+        let retry = spawn_retry_thread(jobs.clone());
         for i in 0..threads {
             let recv = job_recv.clone();
             let out = out.clone();
+            let retry = retry.clone();
             let gen_cache = gen_cache.clone();
             let stored = stored.clone();
             std::thread::Builder::new()
@@ -80,30 +133,112 @@ impl ThreadLodBuilder {
                         move |key: &game::lod::LodKey| worldgen::coarse_water(key, seed, materials);
                     let generate =
                         move |rc: game::RegionCoords| gen_cache.generate_cached(rc, seed, materials);
-                    while let Ok(job) = recv.recv() {
+                    worker_loop(&recv, &retry, Backoff::default(), &prefetch_job, &mut |job| {
                         let started = std::time::Instant::now();
-                        // The forged tiles the job reads, pinned for its
-                        // length; one that will not load drops the job.
-                        let Some(_pins) = prefetch_job(&job) else { continue };
                         let result = build_lod_job(job, &coarse, &water, &generate, stored.as_ref());
                         crate::perf::EDGE.record_lod_build(started.elapsed());
-                        let _ = out.send(result);
-                    }
+                        result
+                    }, &out);
                 })
                 .expect("spawn lod worker");
         }
-        Self { jobs, reads_stored }
+        Self { jobs, retry, reads_stored }
+    }
+}
+
+impl Drop for ThreadLodBuilder {
+    fn drop(&mut self) {
+        let _ = self.retry.send(Delayed::Stop);
+    }
+}
+
+/// One worker: pins the job's forged tiles, builds it with the pins held and
+/// sends the result. A job whose tiles do not load is never built from
+/// missing tiles: it goes to the retry thread and comes back after
+/// `backoff.delay(attempt)` (capped), so a store hiccup costs latency, not
+/// the key (the manager keeps a key in flight until its result lands). The
+/// first failure of a job is a warn, later ones debug.
+fn worker_loop(
+    recv: &Receiver<Queued>,
+    retry: &Sender<Delayed>,
+    backoff: Backoff,
+    prefetch: &JobPrefetch,
+    build: &mut dyn FnMut(LodBuildJob) -> LodResult,
+    out: &Sender<LodResult>,
+) {
+    while let Ok(Queued { job, attempt }) = recv.recv() {
+        let pins = match prefetch(&job) {
+            Ok(pins) => pins,
+            Err(e) => {
+                let delay = backoff.delay(attempt);
+                let key = job_key(&job);
+                if attempt == 0 {
+                    log::warn!("[server] LOD {key:?}: its forged world tiles do not load ({e}); retrying in {delay:?}, then backing off to {:?}", backoff.max);
+                } else {
+                    log::debug!("[server] LOD {key:?}: attempt {} failed ({e}); retrying in {delay:?}", attempt + 1);
+                }
+                let queued = Queued { job, attempt: attempt.saturating_add(1) };
+                let _ = retry.send(Delayed::Job(std::time::Instant::now() + delay, queued));
+                continue;
+            }
+        };
+        let result = build(job);
+        drop(pins);
+        let _ = out.send(result);
+    }
+}
+
+/// Holds delayed jobs and puts each back on `jobs` when it is due; exits on
+/// [`Delayed::Stop`] or when every sender is gone.
+fn spawn_retry_thread(jobs: Sender<Queued>) -> Sender<Delayed> {
+    let (send, recv) = unbounded::<Delayed>();
+    std::thread::Builder::new()
+        .name("lod-retry".into())
+        .spawn(move || {
+            let mut waiting: std::collections::BTreeMap<(std::time::Instant, u64), Queued> = Default::default();
+            let mut seq = 0u64;
+            loop {
+                let next = match waiting.first_key_value() {
+                    Some(((due, _), _)) => recv.recv_deadline(*due),
+                    None => recv.recv().map_err(|_| RecvTimeoutError::Disconnected),
+                };
+                match next {
+                    Ok(Delayed::Job(due, queued)) => {
+                        seq += 1;
+                        waiting.insert((due, seq), queued);
+                    }
+                    Ok(Delayed::Stop) | Err(RecvTimeoutError::Disconnected) => return,
+                    Err(RecvTimeoutError::Timeout) => {
+                        let now = std::time::Instant::now();
+                        while let Some(entry) = waiting.first_entry() {
+                            if entry.key().0 > now {
+                                break;
+                            }
+                            let _ = jobs.send(entry.remove());
+                        }
+                    }
+                }
+            }
+        })
+        .expect("spawn lod retry thread");
+    send
+}
+
+fn job_key(job: &LodBuildJob) -> game::lod::LodKey {
+    match job {
+        LodBuildJob::Pristine { key, .. }
+        | LodBuildJob::Stored { key, .. }
+        | LodBuildJob::Region { key, .. }
+        | LodBuildJob::Tile { key, .. } => *key,
     }
 }
 
 /// Loads and pins the forged-world tiles `job` can read: its key's coarse
 /// terrain and water (`worldgen::prefetch_lod`) and, for a job that may
 /// generate its region (`Pristine`, or `Stored` falling back to it), that
-/// region (`worldgen::prefetch_region`). `None` (logged) when a tile will not
-/// load: the job is dropped — never built from missing tiles. The key then
-/// stays in the manager's in-flight set, so it is not rebuilt in this process
-/// (the client keeps its request outstanding; that key's terrain is missing).
-fn prefetch_job(job: &LodBuildJob) -> Option<Vec<worldgen::forged_tiles::TilePins>> {
+/// region (`worldgen::prefetch_region`). An `Err` names the tile that did
+/// not load.
+fn prefetch_job(job: &LodBuildJob) -> Result<Vec<worldgen::forged_tiles::TilePins>, String> {
     prefetch_job_with(job, &worldgen::prefetch_lod, &worldgen::prefetch_region)
 }
 
@@ -114,24 +249,17 @@ fn prefetch_job_with(
     job: &LodBuildJob,
     lod: &dyn Fn(&game::lod::LodKey) -> Pinned,
     region: &dyn Fn(game::RegionCoords) -> Pinned,
-) -> Option<Vec<worldgen::forged_tiles::TilePins>> {
-    let (key, generates) = match job {
-        LodBuildJob::Pristine { key, region } | LodBuildJob::Stored { key, region } => (key, Some(*region)),
-        LodBuildJob::Region { key, .. } | LodBuildJob::Tile { key, .. } => (key, None),
+) -> Result<Vec<worldgen::forged_tiles::TilePins>, String> {
+    let generates = match job {
+        LodBuildJob::Pristine { region, .. } | LodBuildJob::Stored { region, .. } => Some(*region),
+        LodBuildJob::Region { .. } | LodBuildJob::Tile { .. } => None,
     };
-    let pinned = std::iter::once(lod(key)).chain(generates.map(region)).collect::<Result<Vec<_>, String>>();
-    match pinned {
-        Ok(pins) => Some(pins),
-        Err(e) => {
-            log::warn!("[server] LOD {key:?} dropped: its forged world tiles do not load: {e}");
-            None
-        }
-    }
+    std::iter::once(lod(&job_key(job))).chain(generates.map(region)).collect()
 }
 
 impl LodBuilder for ThreadLodBuilder {
     fn submit(&mut self, job: LodBuildJob) {
-        let _ = self.jobs.send(job);
+        let _ = self.jobs.send(Queued { job, attempt: 0 });
     }
 
     /// Worldgen for never-run regions runs on the workers, never on the
@@ -183,10 +311,67 @@ mod tests {
             ]
         };
         for (job, generates) in jobs() {
-            assert_eq!(prefetch_job_with(&job, &ok_lod, &ok_region).map(|p| p.len()), Some(1 + generates as usize));
-            assert!(prefetch_job_with(&job, &bad_lod, &ok_region).is_none(), "the key's tiles fail");
-            assert_eq!(prefetch_job_with(&job, &ok_lod, &bad_region).is_none(), generates, "the region's tiles fail");
+            assert_eq!(prefetch_job_with(&job, &ok_lod, &ok_region).map(|p| p.len()), Ok(1 + generates as usize));
+            assert!(prefetch_job_with(&job, &bad_lod, &ok_region).is_err(), "the key's tiles fail");
+            assert_eq!(prefetch_job_with(&job, &ok_lod, &bad_region).is_err(), generates, "the region's tiles fail");
         }
+    }
+
+    /// Doubling from the base, never past the cap, no overflow however many
+    /// attempts a permanently bad tile racks up.
+    #[test]
+    fn lod_retry_backoff_is_capped() {
+        let b = Backoff::default();
+        assert_eq!(b.delay(0), std::time::Duration::from_millis(LOD_RETRY_BASE_MS));
+        assert_eq!(b.delay(1), std::time::Duration::from_millis(2 * LOD_RETRY_BASE_MS));
+        let delays: Vec<_> = (0..200).chain([u32::MAX - 1, u32::MAX]).map(|a| b.delay(a)).collect();
+        assert!(delays.windows(2).all(|w| w[0] <= w[1]), "never shrinks");
+        assert!(delays.iter().all(|d| *d <= b.max), "never past the cap");
+        assert_eq!(*delays.last().unwrap(), std::time::Duration::from_millis(LOD_RETRY_MAX_MS), "reaches it");
+    }
+
+    /// A job whose tiles fail to load a few times (a store hiccup) is retried
+    /// after the backoff and then built and delivered — never dropped, never
+    /// built without its pins.
+    #[test]
+    fn lod_job_retries_until_its_tiles_load() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::Arc;
+        let key = game::lod::LodKey::for_region(16, game::RegionCoords::new(1, 2));
+        let (jobs, job_recv) = unbounded::<Queued>();
+        let retry = spawn_retry_thread(jobs.clone());
+        let (out, results) = unbounded();
+        let calls = Arc::new(AtomicU32::new(0));
+        let built = Arc::new(AtomicU32::new(0));
+        let (c, b) = (calls.clone(), built.clone());
+        let backoff = Backoff { base: std::time::Duration::from_millis(2), max: std::time::Duration::from_millis(8) };
+        let worker = {
+            let retry = retry.clone();
+            std::thread::spawn(move || {
+                let prefetch = move |_: &LodBuildJob| -> Result<Vec<worldgen::forged_tiles::TilePins>, String> {
+                    // The first three loads fail, as on a dropped connection.
+                    if c.fetch_add(1, Ordering::SeqCst) < 3 {
+                        Err("forged tile (1, 0): down".into())
+                    } else {
+                        Ok(Vec::new())
+                    }
+                };
+                worker_loop(&job_recv, &retry, backoff, &prefetch, &mut |job| {
+                    b.fetch_add(1, Ordering::SeqCst);
+                    build_lod_job(job, &|_| Vec::new(), &game::lod::LodWater::dry, &|_| Vec::new(), &NoStoredTerrain)
+                }, &out);
+            })
+        };
+        let started = std::time::Instant::now();
+        jobs.send(Queued { job: LodBuildJob::Tile { key, overlays: Vec::new(), stored: Vec::new() }, attempt: 0 }).unwrap();
+        let (got, _, _) = results.recv_timeout(std::time::Duration::from_secs(10)).expect("built after the retries");
+        assert_eq!(got, key);
+        assert_eq!(calls.load(Ordering::SeqCst), 4, "three failed prefetches, then the one that pinned");
+        assert_eq!(built.load(Ordering::SeqCst), 1);
+        assert!(started.elapsed() >= std::time::Duration::from_millis(2 + 4 + 8), "it waited out the backoff");
+        let _ = retry.send(Delayed::Stop);
+        drop(jobs);
+        worker.join().unwrap();
     }
 
     #[test]
