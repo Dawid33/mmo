@@ -23,7 +23,7 @@ pub enum MailerKind {
     Ses { from: String },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct LoginConfig {
     pub bind: SocketAddr,
     /// A `postgres://` URL, `sqlite::memory:`, `sqlite:<path>` or a bare SQLite path.
@@ -86,5 +86,54 @@ impl LoginConfig {
             require_verified,
             mailer,
         })
+    }
+}
+
+/// Shown in place of a database URL's password.
+pub const REDACTED: &str = "<redacted>";
+
+/// `url` with the password of its userinfo replaced by [`REDACTED`]
+/// (`postgres://u:pw@h/db` -> `postgres://u:<redacted>@h/db`); URLs without one are unchanged.
+pub fn redact_url(url: &str) -> String {
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return url.to_string();
+    };
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let (authority, tail) = rest.split_at(authority_end);
+    match authority.rsplit_once('@') {
+        Some((userinfo, host)) => match userinfo.split_once(':') {
+            Some((user, _)) => format!("{scheme}://{user}:{REDACTED}@{host}{tail}"),
+            None => url.to_string(),
+        },
+        None => url.to_string(),
+    }
+}
+
+impl std::fmt::Debug for LoginConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LoginConfig")
+            .field("bind", &self.bind)
+            .field("db_url", &redact_url(&self.db_url))
+            .field("keys_dir", &self.keys_dir)
+            .field("public_url", &self.public_url)
+            .field("cors_origins", &self.cors_origins)
+            .field("require_verified", &self.require_verified)
+            .field("mailer", &self.mailer)
+            .finish()
+    }
+}
+
+#[cfg(test)]
+mod redact_tests {
+    use super::*;
+
+    #[test]
+    fn redacts_password_only() {
+        assert_eq!(redact_url("postgres://u:s3cret@h:5432/db?x=1"), "postgres://u:<redacted>@h:5432/db?x=1");
+        assert_eq!(redact_url("postgres://u:p@w@h/db"), "postgres://u:<redacted>@h/db");
+        assert_eq!(redact_url("postgres://h/db"), "postgres://h/db");
+        assert_eq!(redact_url("postgres://u@h/db"), "postgres://u@h/db");
+        assert_eq!(redact_url("sqlite:target/x.sqlite"), "sqlite:target/x.sqlite");
+        assert!(!format!("{:?}", LoginConfig::from_lookup(|k| (k == "VOXEL_LOGIN_DB").then(|| "postgres://u:s3cret@h/d".into())).unwrap()).contains("s3cret"));
     }
 }

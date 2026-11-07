@@ -77,6 +77,22 @@ fn take_flag(args: &mut Vec<String>, flag: &str) -> bool {
     }
 }
 
+/// How the binary routes its command line: the global `--db <url>` (if any) and whether the
+/// command is `serve` (also when there is none).
+#[derive(Debug, PartialEq, Eq)]
+pub struct Route {
+    pub db: Option<String>,
+    pub serve: bool,
+}
+
+/// Routes `args`; `--db <url>` is stripped first, wherever it stands.
+pub fn route(args: &[String]) -> Result<Route, String> {
+    let mut rest = args.to_vec();
+    let db = take_opt(&mut rest, "--db")?;
+    let serve = rest.first().is_none_or(|c| c == "serve");
+    Ok(Route { db, serve })
+}
+
 /// [`run_ctl`] with injected dependencies.
 pub fn run_ctl_with(args: &[String], out: &mut dyn Write, deps: CtlDeps<'_>) -> Result<(), String> {
     let mut args = args.to_vec();
@@ -199,7 +215,7 @@ pub fn run_ctl_with(args: &[String], out: &mut dyn Write, deps: CtlDeps<'_>) -> 
 }
 
 async fn open(url: &str) -> Result<LoginStore, String> {
-    LoginStore::open(url).await.map_err(|e| format!("login database {url}: {e}"))
+    LoginStore::open(url).await.map_err(|e| format!("login database {}: {e}", crate::config::redact_url(url)))
 }
 
 fn block_on<T>(f: impl std::future::Future<Output = Result<T, String>>) -> Result<T, String> {
@@ -240,4 +256,26 @@ fn keygen(dir: &Path) -> Result<String, String> {
     let mut f = opts.open(&path).map_err(|e| format!("{}: {e}", path.display()))?;
     f.write_all(pem.as_bytes()).map_err(|e| e.to_string())?;
     Ok(key.kid().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn a(s: &str) -> Vec<String> {
+        s.split_whitespace().map(String::from).collect()
+    }
+
+    #[test]
+    fn routes_serve_with_and_without_db() {
+        let serve = |db: Option<&str>| Route { db: db.map(String::from), serve: true };
+        assert_eq!(route(&a("")).unwrap(), serve(None));
+        assert_eq!(route(&a("serve")).unwrap(), serve(None));
+        assert_eq!(route(&a("--db x.sqlite serve")).unwrap(), serve(Some("x.sqlite")));
+        assert_eq!(route(&a("serve --db x.sqlite")).unwrap(), serve(Some("x.sqlite")));
+        assert_eq!(route(&a("--db x.sqlite")).unwrap(), serve(Some("x.sqlite")));
+        assert!(!route(&a("--db x.sqlite world list")).unwrap().serve);
+        assert!(!route(&a("keygen")).unwrap().serve);
+        assert!(route(&a("serve --db")).is_err());
+    }
 }

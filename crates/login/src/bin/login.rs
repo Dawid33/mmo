@@ -3,16 +3,15 @@
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let _ = simplelog::SimpleLogger::init(log::LevelFilter::Info, simplelog::Config::default());
-    // `--db` may precede the command; `serve` is the default.
-    let words: Vec<&String> = args.iter().filter(|a| !a.starts_with("--")).collect();
-    let serve = args.is_empty() || words.first().is_some_and(|w| w.as_str() == "serve");
-    if serve {
+    // `--db <url>` may stand anywhere; `serve` is the default command.
+    let route = login::ctl::route(&args).unwrap_or_else(|e| fail(&e));
+    if route.serve {
         let config = match login::LoginConfig::from_env() {
             Ok(c) => c,
             Err(e) => fail(&e),
         };
-        let config = match args.iter().position(|a| a == "--db").and_then(|i| args.get(i + 1)) {
-            Some(db) => login::LoginConfig { db_url: db.clone(), ..config },
+        let config = match route.db {
+            Some(db) => login::LoginConfig { db_url: db, ..config },
             None => config,
         };
         let rt = tokio::runtime::Runtime::new().unwrap_or_else(|e| fail(&e.to_string()));
