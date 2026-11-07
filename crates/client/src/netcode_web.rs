@@ -226,7 +226,7 @@ async fn run(server: WebServer, mut incoming_to: Incoming, outgoing: Outgoing, l
     // The handshake goes first: the server starts the session once this
     // `Hello` resolves, and refuses a connection that sends anything else.
     let mut hello = Some(
-        game::encode_packet(&ClientPacket::Hello { token: crate::player_token::load_or_create_token() })
+        game::encode_packet(&ClientPacket::Hello { credential: game::Credential::Token(crate::player_token::load_or_create_token()) })
             .map_err(|e| JsValue::from_str(&format!("cannot encode Hello: {e}")))?,
     );
     spawn_local(async move {

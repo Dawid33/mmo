@@ -50,8 +50,13 @@ pub async fn resolve_hello(
     store: &SharedPlayerStore,
     first: ClientPacket,
 ) -> Result<(PlayerId, Option<PlayerRecord>), String> {
-    let ClientPacket::Hello { token } = first else {
+    let ClientPacket::Hello { credential } = first else {
         return Err("the first packet must be Hello".into());
+    };
+    let token = match credential {
+        game::Credential::Token(token) => token,
+        // Task 7 replaces this with JWT verification.
+        game::Credential::Jwt(_) => return Err("this server does not use login (single-player / dev)".into()),
     };
     if !token.is_valid() {
         return Err(format!("invalid player token {token:?}"));

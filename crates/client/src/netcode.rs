@@ -227,7 +227,7 @@ impl ServerConnection {
         // The handshake: the server starts the session once this resolves,
         // and refuses a connection whose first packet is anything else.
         let token = self.token.clone().unwrap_or_else(crate::player_token::load_or_create_token);
-        let hello = game::encode_packet(&ClientPacket::Hello { token })
+        let hello = game::encode_packet(&ClientPacket::Hello { credential: game::Credential::Token(token) })
             .map_err(|e| std::io::Error::other(format!("cannot encode Hello: {e}")))?;
         let mut stream = connection.open_uni().await.map_err(connection_lost)?;
         stream.write_all(&hello).await.map_err(connection_lost)?;

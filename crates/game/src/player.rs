@@ -52,6 +52,28 @@ impl std::fmt::Debug for PlayerToken {
     }
 }
 
+/// Longest login JWT a `Hello` may carry, in bytes.
+pub const MAX_JWT_BYTES: usize = 2048;
+
+/// What a connection proves in its `Hello`: the player's own token (single
+/// player / dev servers) or a join JWT signed by the login service.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Credential {
+    Token(PlayerToken),
+    Jwt(String),
+}
+
+impl std::fmt::Debug for Credential {
+    /// Never prints a secret: a token shows its first
+    /// [`PLAYER_TOKEN_DEBUG_CHARS`] characters, a JWT only its size.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Credential::Token(t) => write!(f, "Token({t:?})"),
+            Credential::Jwt(j) => write!(f, "Jwt(<{} bytes>)", j.len()),
+        }
+    }
+}
+
 /// What the server keeps of a player who is not online: enough to put the
 /// body back where it stood, with its state and claims.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, StateHash)]

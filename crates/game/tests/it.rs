@@ -29,6 +29,7 @@ mod chests;
 mod chop;
 mod chunk_blocks;
 mod chunk_units;
+mod credential;
 mod collider_genesis;
 mod creature_shapes;
 mod gjk_upstream;

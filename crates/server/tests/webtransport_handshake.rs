@@ -164,7 +164,7 @@ async fn webtransport_client_full_handshake() {
         .expect("connect failed");
 
     // The handshake: nothing happens until the Hello resolves a player.
-    send_packet(&conn, &ClientPacket::Hello { token: PlayerToken::generate([5; 16]) }).await;
+    send_packet(&conn, &ClientPacket::Hello { credential: game::Credential::Token(PlayerToken::generate([5; 16])) }).await;
     // CreateClient broadcast arrives first (ClientConnected fired on Hello).
     let first = recv_packet(&conn).await;
     assert!(matches!(first, ServerPacket::GameEvent(_)), "got {first:?}");
@@ -223,7 +223,7 @@ async fn first_packet_not_hello_closes() {
 
     // An invalid token: refused too.
     let conn = connect(PORT).await;
-    send_packet(&conn, &ClientPacket::Hello { token: PlayerToken("not-a-token".into()) }).await;
+    send_packet(&conn, &ClientPacket::Hello { credential: game::Credential::Token(PlayerToken("not-a-token".into())) }).await;
     let refused = tokio::time::timeout(Duration::from_secs(5), recv_packet(&conn)).await.expect("an answer");
     assert!(matches!(refused, ServerPacket::Refused(_)), "got {refused:?}");
     tokio::time::timeout(Duration::from_secs(5), conn.closed()).await.expect("the server closes the session");
@@ -235,7 +235,7 @@ async fn first_packet_not_hello_closes() {
     // The refused connections took ids 0 and 1.
     for client in [2, 3] {
         let conn = connect(PORT).await;
-        send_packet(&conn, &ClientPacket::Hello { token: token.clone() }).await;
+        send_packet(&conn, &ClientPacket::Hello { credential: game::Credential::Token(token.clone()) }).await;
         let event = loop {
             match event_recv.recv_timeout(Duration::from_secs(5)).expect("the session is announced") {
                 ServerEvent::ClientDisconnected(_) => continue, // the previous one
