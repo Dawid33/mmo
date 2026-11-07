@@ -8,6 +8,7 @@
 //!   | lod hit=0 sub=570 built=412 inflight=158 wait_terrain=0 cache=412 latency avg=310.0ms
 //!   max=2210.4ms build avg=4.1ms max=30.2ms | tx pkts=450 bytes=91234567 send sum=900.1ms
 //!   max=210.0ms timeouts=0 total_timeouts=0 | backlog in=0 region=0 tx=12
+//!   | tiles resident=212.4MB pinned=48.0MB budget=256MB loads=3 load_errors=0
 //! ```
 //! (one line in the log; wrapped here.)
 //!
@@ -21,6 +22,12 @@
 //!   packet a client will never get, i.e. a silently incomplete join.
 //! * `backlog` — queued-but-unhandled messages: client→manager, region→manager,
 //!   manager→writer. Anything that keeps growing is the stage that cannot keep up.
+//! * `tiles` — the served forged world's tile cache (only for a tiled world):
+//!   decoded MB resident (pinned ones included), MB pinned by running jobs, the
+//!   budget (`VOXEL_TILE_CACHE_MB`), and tiles loaded / failed loads in the
+//!   window. Steady `loads` means the budget is too small for the regions in
+//!   play (tiles evicted and read again); any `load_errors` is a region that
+//!   failed to start.
 //!
 //! The counters are process-wide atomics rather than channel messages: they are
 //! observability, not simulation state, and must cost nothing on the send path.
@@ -85,13 +92,35 @@ pub struct Backlog {
 
 pub struct ServerReport {
     window_start: Instant,
+    /// The tile cache's cumulative `(loads, load_errors)` at the last line.
+    tiles_seen: (u64, u64),
 }
 
 impl ServerReport {
     pub fn new() -> Self {
         ServerReport {
             window_start: Instant::now(),
+            tiles_seen: (0, 0),
         }
+    }
+
+    /// The `| tiles …` section of the line: empty unless the served world is
+    /// a tiled forged world.
+    fn tiles_section(&mut self) -> String {
+        let Some(stats) = worldgen::forged::chosen().and_then(|w| w.tile_cache()).map(|c| c.stats()) else {
+            return String::new();
+        };
+        let (loads, errors) = self.tiles_seen;
+        self.tiles_seen = (stats.loads, stats.load_errors);
+        let mb = |b: usize| b as f64 / (1u64 << 20) as f64;
+        format!(
+            " | tiles resident={:.1}MB pinned={:.1}MB budget={:.0}MB loads={} load_errors={}",
+            mb(stats.resident_bytes),
+            mb(stats.pinned_bytes),
+            mb(stats.budget_bytes),
+            stats.loads.saturating_sub(loads),
+            stats.load_errors.saturating_sub(errors),
+        )
     }
 
     /// Emit the line once per `METRICS_REPORT_INTERVAL` and reset the window.
@@ -120,6 +149,7 @@ impl ServerReport {
         }
         let lod_builds = take(&EDGE.lod_builds);
         let lod_build_ms = ns_ms(take(&EDGE.lod_build_ns));
+        let tiles = self.tiles_section();
         log::info!(
             "[server] window={:.1}s sessions={} regions={} parked={} transfers_inflight={} pending_arrivals={} arrivals_despawned={} \
              items_destroyed={} intent_replies_lost={} \
@@ -127,7 +157,7 @@ impl ServerReport {
              | lod hit={} sub={} built={} inflight={} wait_terrain={} cache={} \
              latency avg={:.1}ms max={:.1}ms build avg={:.1}ms max={:.1}ms \
              | tx pkts={} bytes={} send sum={:.1}ms max={:.1}ms timeouts={} total_timeouts={} \
-             | backlog in={} region={} tx={}",
+             | backlog in={} region={} tx={}{}",
             window.as_secs_f32(),
             d.sessions,
             d.running,
@@ -159,6 +189,7 @@ impl ServerReport {
             backlog.client_events,
             backlog.region_outputs,
             backlog.writer,
+            tiles,
         );
     }
 }

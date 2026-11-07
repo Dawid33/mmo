@@ -1618,6 +1618,12 @@ pub fn active() -> Option<&'static ForgedWorld> {
     ACTIVE.get_or_init(load_env_world).as_ref()
 }
 
+/// The world in use if it has been chosen already ([`install`] or a first
+/// [`active`]), else `None` — never loads one (observability readers).
+pub fn chosen() -> Option<&'static ForgedWorld> {
+    ACTIVE.get().and_then(Option::as_ref)
+}
+
 /// The browser has no world files: procedural unless a world was installed.
 #[cfg(target_arch = "wasm32")]
 fn load_env_world() -> Option<ForgedWorld> {
