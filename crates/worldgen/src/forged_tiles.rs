@@ -342,19 +342,30 @@ pub fn split(world: &ForgedWorld, tile_cells: u32) -> (ForgedMeta, Vec<Tile>) {
     (meta, tiles)
 }
 
-/// `magic`, the format version (u32 LE), then zstd (level 19) over `body`.
+/// Bytes before the zstd body: magic (4), format version (u32 LE), crc32 of
+/// the zstd body (u32 LE).
+#[cfg(not(target_arch = "wasm32"))]
+const HEADER_BYTES: usize = 12;
+
+/// `magic`, the format version (u32 LE), the crc32 of the compressed body
+/// (u32 LE), then zstd (level 19) over `body`. The crc makes a stored bit
+/// flip that would still decompress and deserialize a load error, never
+/// silently wrong terrain.
 #[cfg(not(target_arch = "wasm32"))]
 fn wrap(magic: &[u8; 4], body: &[u8]) -> Vec<u8> {
-    let mut out = magic.to_vec();
+    let packed = zstd::bulk::compress(body, crate::forged::ZSTD_LEVEL).expect("zstd compresses");
+    let mut out = Vec::with_capacity(HEADER_BYTES + packed.len());
+    out.extend_from_slice(magic);
     out.extend_from_slice(&TILED_FORMAT_VERSION.to_le_bytes());
-    out.extend_from_slice(&zstd::bulk::compress(body, crate::forged::ZSTD_LEVEL).expect("zstd compresses"));
+    out.extend_from_slice(&crc32fast::hash(&packed).to_le_bytes());
+    out.extend_from_slice(&packed);
     out
 }
 
-/// The body under [`wrap`]'s header.
+/// The body under [`wrap`]'s header, its crc checked.
 #[cfg(not(target_arch = "wasm32"))]
 fn unwrap(magic: &[u8; 4], what: &str, bytes: &[u8]) -> Result<Vec<u8>, ArtifactError> {
-    if bytes.len() < 8 || &bytes[..4] != magic {
+    if bytes.len() < HEADER_BYTES || &bytes[..4] != magic {
         return Err(ArtifactError::Format(format!("not a {what}")));
     }
     let version = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
@@ -363,7 +374,12 @@ fn unwrap(magic: &[u8; 4], what: &str, bytes: &[u8]) -> Result<Vec<u8>, Artifact
             "{what} format version {version} is not the {TILED_FORMAT_VERSION} this build reads"
         )));
     }
-    zstd::stream::decode_all(&bytes[8..]).map_err(|e| ArtifactError::Format(format!("corrupt {what}: {e}")))
+    let crc = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
+    let packed = &bytes[HEADER_BYTES..];
+    if crc32fast::hash(packed) != crc {
+        return Err(ArtifactError::Format(format!("corrupt {what}: crc32 mismatch")));
+    }
+    zstd::stream::decode_all(packed).map_err(|e| ArtifactError::Format(format!("corrupt {what}: {e}")))
 }
 
 #[cfg(not(target_arch = "wasm32"))]

@@ -322,6 +322,32 @@ fn meta_and_tile_codecs_roundtrip() {
     assert!(decode_tile(&bytes[..bytes.len() / 2]).is_err(), "truncated tile");
 }
 
+/// A stored bit flip is a decode error, never a tile with wrong values: every
+/// single-byte flip past the 4-byte magic of an encoded tile (and of the
+/// meta) is refused — the header's crc32 covers the compressed body.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn flipped_byte_is_a_decode_error() {
+    let f = fixture();
+    let bytes = encode_tile(&f.tiles[9]);
+    assert!(decode_tile(&bytes).is_ok());
+    let mid = bytes.len() / 2;
+    let mut one = bytes.clone();
+    one[mid] ^= 0x01;
+    assert!(decode_tile(&one).is_err(), "a flip in the middle of a tile must fail its decode");
+    for i in 4..bytes.len() {
+        let mut bad = bytes.clone();
+        bad[i] ^= 0x10;
+        assert!(decode_tile(&bad).is_err(), "tile byte {i} of {} flipped still decodes", bytes.len());
+    }
+    let meta = encode_meta(&f.meta);
+    for i in 4..meta.len() {
+        let mut bad = meta.clone();
+        bad[i] ^= 0x10;
+        assert!(decode_meta(&bad).is_err(), "meta byte {i} of {} flipped still decodes", meta.len());
+    }
+}
+
 /// What a tiled read costs over a whole one (printed, not asserted): one
 /// region and the Task 1 grid's samplers over one tile.
 #[test]
