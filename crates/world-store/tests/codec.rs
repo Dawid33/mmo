@@ -30,15 +30,15 @@ fn check<T: Serialize + DeserializeOwned + PartialEq + Debug>(name: &str, format
     assert_eq!(&back, value, "{name}: golden does not decode to the fixture value");
 }
 
-fn eid(serial: u64) -> EntityId {
+pub(crate) fn eid(serial: u64) -> EntityId {
     EntityId { birth_region: RegionCoords::new(3, -2), serial }
 }
 
-fn pos(x: i64, y: i32, z: i64) -> WorldBlockPos {
+pub(crate) fn pos(x: i64, y: i32, z: i64) -> WorldBlockPos {
     WorldBlockPos { x, y, z }
 }
 
-fn chunk() -> Chunk {
+pub(crate) fn chunk() -> Chunk {
     let mut c = Chunk::default();
     c.set_block(1, 2, 3, Block::new(BlockId(1)));
     c.set_block(1, 3, 3, Block::new(BlockId(2)));
@@ -51,7 +51,7 @@ fn chunk() -> Chunk {
     c
 }
 
-fn ground() -> ColumnGround {
+pub(crate) fn ground() -> ColumnGround {
     let mut g = ColumnGround::plain(
         (0..game::COLUMN_FOOTPRINT).map(|i| 40 + (i % 5) as i16).collect(),
         -3,
@@ -66,7 +66,7 @@ fn ground() -> ColumnGround {
     g
 }
 
-fn meta() -> RegionMeta {
+pub(crate) fn meta() -> RegionMeta {
     let mut m = RegionMeta { tick: 123_456, next_game_event_id: 99, next_entity_serial: 12, ..Default::default() };
     let cell = pos(10, 20, 30);
     m.designations.insert(
@@ -118,7 +118,7 @@ fn meta() -> RegionMeta {
     m
 }
 
-fn reply() -> SentReply {
+pub(crate) fn reply() -> SentReply {
     SentReply {
         reply: game::IntentReply::Refused(
             game::Intent::PutInContainer {
@@ -135,7 +135,7 @@ fn reply() -> SentReply {
     }
 }
 
-fn bundle() -> EntityBundle {
+pub(crate) fn bundle() -> EntityBundle {
     let pose = Pose::from_translation(Vector::new(100.5, 26.0, -40.25));
     let slime = game::slime::Slime { yaw: 0.5, target_yaw: 1.0, next_turn_tick: 900, next_hop_tick: 880, hopping: false };
     EntityBundle {
@@ -151,7 +151,7 @@ fn bundle() -> EntityBundle {
     }
 }
 
-fn player() -> PlayerRecord {
+pub(crate) fn player() -> PlayerRecord {
     let mut client = Client::default();
     client.inventory.slots[0] = Some(ItemStack { item: ItemId::block(BlockId(1)), count: 12 });
     client.inventory.slots[10] = Some(ItemStack { item: ItemId::block(BlockId(3)), count: 64 });
@@ -164,7 +164,7 @@ fn player() -> PlayerRecord {
     }
 }
 
-fn intent() -> IntentMsg {
+pub(crate) fn intent() -> IntentMsg {
     IntentMsg::Intent(SentIntent {
         target: Target::Pile(pos(-5, 12, 99)),
         intent: game::Intent::DepositItems {
@@ -188,6 +188,14 @@ fn golden_blobs_decode() {
     check("player_record", FORMAT_PLAYER_RECORD, &player());
     check("intent_msg", FORMAT_INTENT_MSG, &intent());
     check("intent_msg_reply", FORMAT_INTENT_MSG, &IntentMsg::Reply(reply()));
+    check("region_ground", FORMAT_REGION_GROUND, &region_ground());
+}
+
+/// A region's ground recipes as `regions.ground` stores them.
+pub(crate) fn region_ground() -> Vec<(game::ColumnCoords, ColumnGround)> {
+    let mut other = ground();
+    other.surface[3] = -7;
+    vec![(game::ColumnCoords::new(0, 0), ground()), (game::ColumnCoords::new(1, 0), other)]
 }
 
 #[test]

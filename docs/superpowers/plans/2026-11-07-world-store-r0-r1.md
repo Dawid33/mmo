@@ -7,7 +7,7 @@
 **Architecture:**
 - **New native-only crate `crates/world-store`.** It holds the sqlx backends (SQLite and Postgres), the two migration sets, the row codecs and one store thread.
   - The store thread owns a current-thread tokio runtime.
-  - Every other thread reaches it through a cloneable, sync `StoreHandle`, over crossbeam channels.
+  - Every other thread reaches it through a cloneable, sync `StoreHandle`: requests go over a tokio unbounded mpsc (its `send` is sync, and the store's runtime can await it; a crossbeam `recv` would block that runtime), answers come back over crossbeam channels (a tokio oneshot for `resolve_player_async`).
 - **`game` gains, all IO-free:**
   - the portable region format (`portable.rs`);
   - a world-tick save cut (`save_cut.rs` plus `WorldManager` changes): every region snapshots at the same tick T, and in-flight crossings are classified by an exact rule;

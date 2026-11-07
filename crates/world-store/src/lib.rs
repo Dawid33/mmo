@@ -1,14 +1,20 @@
 //! The world store: one world's durable state in SQLite or Postgres through sqlx
 //! (native only). This module holds the shared vocabulary; `open` opens a database,
-//! takes the world lock, runs the migrations and checks the world row.
+//! takes the world lock, runs the migrations and checks the world row; `thread` runs
+//! the `world-store` thread that every other thread reaches through [`StoreHandle`];
+//! `rows` is the SQL.
 
 mod codec;
+mod handle;
 mod open;
+mod rows;
+mod thread;
 mod url;
 
 use std::fmt;
 
 pub use codec::*;
+pub use handle::{CutCommitted, StoreHandle, WorldInfo};
 pub use open::{LockGuard, Pool, open_pool};
 pub use url::StoreUrl;
 
