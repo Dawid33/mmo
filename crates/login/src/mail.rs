@@ -67,7 +67,15 @@ pub struct SesMailer {
 
 impl SesMailer {
     pub async fn from_env(from: String) -> SesMailer {
-        let conf = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
+        use aws_smithy_http_client::{Builder, tls};
+        // Explicit rustls+ring client: the SDK's default one would pull in aws-lc-rs.
+        let http = Builder::new()
+            .tls_provider(tls::Provider::Rustls(tls::rustls_provider::CryptoMode::Ring))
+            .build_https();
+        let conf = aws_config::defaults(aws_config::BehaviorVersion::latest())
+            .http_client(http)
+            .load()
+            .await;
         SesMailer { client: aws_sdk_sesv2::Client::new(&conf), from }
     }
 }
