@@ -115,7 +115,8 @@ impl PathPlan {
     /// halo; tiles off `map` excluded): to the goal's standable tile nearest
     /// its level when it can be reached, else into the next region of the
     /// coarse route. `None` when `from` is not standable, the goal is in
-    /// `here` (or nothing of the next region can be reached) without a
+    /// `here` (or nothing of the next region — nor, for a diagonal step, of
+    /// either region beside it — can be reached) without a
     /// path, or its column lies past the `i32` region grid.
     pub fn plan(
         src: &impl TileSource,
@@ -145,12 +146,27 @@ impl PathPlan {
                 return None;
             }
         }
-        // Else into the next region of the route.
+        // Else into the next region of the route — or, when that is a
+        // diagonal step whose corner patch (`PORTAL_DEPTH_BLOCKS` past both
+        // seams) cannot be reached (water, a cliff, a tree), into either
+        // region beside it, x first: the walk re-plans from there.
         let next = next_region(here, goal_region, map);
         let toward = hint(from, &goal, here);
-        let accept = |p: TilePos| past_seam(p, here, next);
-        let path = find_path_toward(&src, from, toward, accept, max_nodes).filter(|p| p.len() > 1)?;
-        Some(PathPlan { path: world(path), reaches_goal: false })
+        let mut steps = vec![next];
+        if next.x != here.x && next.z != here.z {
+            for side in [RegionCoords::new(next.x, here.z), RegionCoords::new(here.x, next.z)] {
+                if map.is_none_or(|m| m.passable(side)) {
+                    steps.push(side);
+                }
+            }
+        }
+        for step in steps {
+            let accept = |p: TilePos| past_seam(p, here, step);
+            if let Some(path) = find_path_toward(&src, from, toward, accept, max_nodes).filter(|p| p.len() > 1) {
+                return Some(PathPlan { path: world(path), reaches_goal: false });
+            }
+        }
+        None
     }
 
     /// The path in `here`'s block frame.

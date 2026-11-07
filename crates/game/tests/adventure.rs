@@ -762,6 +762,42 @@ fn path_plan_reaches_a_goal_past_the_seam_and_heads_for_one_beyond() {
     assert_eq!(PathPlan::plan(&holed, [4, 1, 4], &here_goal([20, 20], None), here, None, max), None);
 }
 
+/// A floor everywhere but the quarter-plane `x < 0, z < 0` (the corner
+/// region of the halo beyond the origin): water, a cliff — no standing.
+struct CornerGone;
+
+impl TileSource for CornerGone {
+    fn block(&self, p: TilePos) -> BlockId {
+        if p[1] == 0 && !(p[0] < 0 && p[2] < 0) { WALL } else { BlockId::AIR }
+    }
+    fn is_bedrock(&self, _: TilePos) -> bool {
+        false
+    }
+    fn is_constructed(&self, _: TilePos) -> bool {
+        false
+    }
+    fn tree_id(&self, _: TilePos) -> u32 {
+        0
+    }
+    fn tree_limb(&self, _: TilePos) -> u8 {
+        0
+    }
+}
+
+/// A diagonal step of the coarse route whose corner patch cannot be stood
+/// on falls back to a region beside it (x first): the walk goes on from
+/// there instead of being refused.
+#[test]
+fn path_plan_diagonal_step_falls_back_to_a_side_region() {
+    let here = RegionCoords::new(0, 0);
+    let corner = Goal::local(RegionCoords::new(-2, -2), [3, 3], None);
+    let plan = PathPlan::plan(&CornerGone, [2, 1, 2], &corner, here, None, game::MAX_PATH_NODES).expect("a stretch");
+    assert!(!plan.reaches_goal);
+    let end = *plan.path.last().unwrap();
+    assert_eq!(end.to_local().0, RegionCoords::new(-1, 0), "into the side region, x first: {end:?}");
+    assert!(end.x < -(PORTAL_DEPTH_BLOCKS as i64), "{end:?}");
+}
+
 // --- Seam handoff -----------------------------------------------------------
 
 /// A walking adventurer extracted as its handoff bundle (`EntityKey` freed).
