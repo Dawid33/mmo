@@ -90,7 +90,7 @@ pub fn locate(pos: BlockPos) -> Option<(ChunkCoords, (usize, usize, usize))> {
 
 /// Whether a chunk's block cell is anything but plain air.
 fn cell_solid(chunk: &Chunk, (bx, by, bz): (usize, usize, usize)) -> bool {
-    chunk.block_at(bx, by, bz).id != BlockId::AIR
+    crate::block_props().blocks_ray(chunk.block_at(bx, by, bz).id)
         || chunk.chisel.contains_key(&BlockIndex::from_xyz(bx, by, bz))
 }
 
@@ -119,7 +119,7 @@ impl Rollback {
     pub(crate) fn block_solid(&self, pos: BlockPos) -> bool {
         let Some((coords, local)) = locate(pos) else { return self.halo_cell_solid(pos) };
         let Some(e) = self.chunk_key_at(coords) else {
-            return self.implied_block(coords, local).is_some_and(|b| b.id != BlockId::AIR);
+            return self.implied_block(coords, local).is_some_and(|b| crate::block_props().blocks_ray(b.id));
         };
         self.data.ecs.chunk.try_get(e).as_ref().is_some_and(|c| cell_solid(c, local))
     }
@@ -460,7 +460,7 @@ impl Rollback {
             }
             None => (self.implied_block(coords, local)?, None),
         };
-        if (state.0.id == BlockId::AIR && state.1.is_none()) || self.is_bedrock(coords, state.0) {
+        if (!crate::block_props().blocks_ray(state.0.id) && state.1.is_none()) || self.is_bedrock(coords, state.0) {
             return None;
         }
         Some(state)

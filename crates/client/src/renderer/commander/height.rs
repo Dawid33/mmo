@@ -40,12 +40,12 @@ impl Default for ChunkTops {
     }
 }
 
-/// Topmost voxel of voxel column `(vx, vz)` that is neither air nor `skip`
+/// Topmost voxel of voxel column `(vx, vz)` that is neither air nor liquid
 /// (local Y), read from blocks and chisel without expanding anything.
-fn top_not(chunk: &Chunk, vx: usize, vz: usize, skip: Option<BlockId>) -> Option<usize> {
+fn top_not(chunk: &Chunk, vx: usize, vz: usize) -> Option<usize> {
     let (bx, lx) = (vx / BLOCK_VOXELS, vx % BLOCK_VOXELS);
     let (bz, lz) = (vz / BLOCK_VOXELS, vz % BLOCK_VOXELS);
-    let shown = |id: BlockId| id != BlockId::AIR && Some(id) != skip;
+    let shown = |id: BlockId| id != BlockId::AIR && !game::block_props().is_liquid(id);
     for by in (0..CHUNK_BLOCKS).rev() {
         let bi = BlockIndex::from_xyz(bx, by, bz);
         let base = by * BLOCK_VOXELS;
@@ -72,7 +72,7 @@ fn top_not(chunk: &Chunk, vx: usize, vz: usize, skip: Option<BlockId>) -> Option
 }
 
 /// Scan a chunk's block-centre voxel columns, straight from its blocks.
-pub fn chunk_tops(chunk: &Chunk, water: BlockId) -> ChunkTops {
+pub fn chunk_tops(chunk: &Chunk) -> ChunkTops {
     let mut tops = ChunkTops::default();
     if chunk.is_all_air() {
         return tops;
@@ -85,8 +85,8 @@ pub fn chunk_tops(chunk: &Chunk, water: BlockId) -> ChunkTops {
             let surface = chunk.column_top(vx as u32, vz as u32);
             tops.surface[column] = surface.map_or(0, |(y, _)| (y + 1) as u16);
             tops.ground[column] = match surface {
-                Some((y, id)) if id != water => (y + 1) as u16,
-                Some(_) => top_not(chunk, vx, vz, Some(water)).map_or(0, |y| (y + 1) as u16),
+                Some((y, id)) if !game::block_props().is_liquid(id) => (y + 1) as u16,
+                Some(_) => top_not(chunk, vx, vz).map_or(0, |y| (y + 1) as u16),
                 None => 0,
             };
         }
@@ -104,7 +104,7 @@ pub fn chunk_tops(chunk: &Chunk, water: BlockId) -> ChunkTops {
         let column = bx + CHUNK_BLOCKS * bz;
         let top = ((by + 1) * BLOCK_VOXELS) as u16;
         tops.surface[column] = tops.surface[column].max(top);
-        if id != water {
+        if !game::block_props().is_liquid(id) {
             tops.ground[column] = tops.ground[column].max(top);
         }
     }
@@ -114,7 +114,7 @@ pub fn chunk_tops(chunk: &Chunk, water: BlockId) -> ChunkTops {
 #[derive(Resource)]
 pub struct HeightGrid {
     /// Per loaded block column (world block x, z): the top of its topmost
-    /// non-air voxel and of its topmost solid (non-air, non-water) voxel,
+    /// non-air voxel and of its topmost solid (non-air, non-liquid) voxel,
     /// world y in sim units; NaN where the column has none. Sparse: it covers
     /// whatever the near window has loaded, across regions.
     columns: HashMap<(i32, i32), (f32, f32)>,
@@ -122,7 +122,6 @@ pub struct HeightGrid {
     stacks: HashMap<(i32, i32), BTreeMap<i32, ChunkTops>>,
     /// Which chunk an entity's voxels were filed under, for removals.
     by_entity: HashMap<Entity, [i32; 3]>,
-    water: BlockId,
     /// Bumped on every change, so readers (the minimap) can rebuild lazily.
     pub version: u64,
 }
@@ -134,12 +133,11 @@ fn block_of(x: f32, z: f32) -> (i32, i32) {
 }
 
 impl HeightGrid {
-    pub fn new(water: BlockId) -> Self {
+    pub fn new() -> Self {
         Self {
             columns: HashMap::new(),
             stacks: HashMap::new(),
             by_entity: HashMap::new(),
-            water,
             version: 0,
         }
     }
@@ -251,9 +249,8 @@ pub fn update_height_grid(
     for entity in removed.read() {
         grid.remove_entity(entity);
     }
-    let water = grid.water;
     for (entity, chunk, tf, sim) in &changed {
-        grid.insert_chunk(entity, world_chunk_key(tf, sim), chunk_tops(&chunk.0, water));
+        grid.insert_chunk(entity, world_chunk_key(tf, sim), chunk_tops(&chunk.0));
     }
 }
 
@@ -268,6 +265,7 @@ mod tests {
     /// A chunk whose blocks are filled up to `h` voxels with `below` (a
     /// partial block as a chisel cuboid), then up to `w` with water.
     fn layered(h: usize, w: usize, below: BlockId) -> Chunk {
+        game::install_block_props(crate::blocks::load_registry().props());
         let mut chunk = Chunk::uniform(Block::new(BlockId::AIR));
         for bz in 0..CHUNK_BLOCKS {
             for bx in 0..CHUNK_BLOCKS {
@@ -328,19 +326,19 @@ mod tests {
     fn height_from_blocks_matches_voxels() {
         for (h, w) in [(8, 20), (0, 0), (CHUNK_EDGE, CHUNK_EDGE), (5, 5), (1, CHUNK_EDGE)] {
             let chunk = layered(h, w, STONE);
-            assert_eq!(chunk_tops(&chunk, WATER), tops_from_voxels(&chunk), "h={h} w={w}");
+            assert_eq!(chunk_tops(&chunk), tops_from_voxels(&chunk), "h={h} w={w}");
         }
         // A tall chunk's heights are voxel heights past u8 range.
-        let tops = chunk_tops(&layered(CHUNK_EDGE, CHUNK_EDGE, STONE), WATER);
+        let tops = chunk_tops(&layered(CHUNK_EDGE, CHUNK_EDGE, STONE));
         assert_eq!(tops.surface[0], CHUNK_EDGE as u16);
     }
 
     #[test]
     fn chunk_tops_find_the_top_face_and_the_ground_under_water() {
-        let tops = chunk_tops(&layered(8, 20, STONE), WATER);
+        let tops = chunk_tops(&layered(8, 20, STONE));
         assert_eq!(tops.surface, [20; COLUMNS]);
         assert_eq!(tops.ground, [8; COLUMNS]);
-        assert_eq!(chunk_tops(&layered(0, 0, STONE), WATER), ChunkTops::default());
+        assert_eq!(chunk_tops(&layered(0, 0, STONE)), ChunkTops::default());
     }
 
     #[test]
@@ -353,7 +351,7 @@ mod tests {
         c.set(at, BLOCK_VOXELS - 2, at, true, 0);
         chunk.blocks.set(bi, Block::new(STONE));
         chunk.chisel.insert(bi, c);
-        let tops = chunk_tops(&chunk, WATER);
+        let tops = chunk_tops(&chunk);
         let mut want = [0u16; COLUMNS];
         want[1] = (BLOCK_VOXELS - 1) as u16;
         assert_eq!(tops.surface, want);
@@ -367,22 +365,22 @@ mod tests {
             let bi = BlockIndex::from_xyz(2, 1, 3);
             chunk.blocks.set(bi, Block::new(STONE));
             chunk.chisel.insert(bi, slope_chisel(STONE, SlopeShape::Straight { low: side }));
-            let tops = chunk_tops(&chunk, WATER);
+            let tops = chunk_tops(&chunk);
             let column = 2 + CHUNK_BLOCKS * 3;
             let full = (2 * BLOCK_VOXELS) as u16;
             assert_eq!(tops.surface[column], full, "{side:?}");
             assert_eq!(tops.ground[column], full, "{side:?}");
-            assert_eq!(top_not(&chunk, 2 * BLOCK_VOXELS, 3 * BLOCK_VOXELS, Some(WATER)), Some(full as usize - 1), "{side:?}");
+            assert_eq!(top_not(&chunk, 2 * BLOCK_VOXELS, 3 * BLOCK_VOXELS), Some(full as usize - 1), "{side:?}");
         }
     }
 
     #[test]
     fn column_height_is_the_highest_chunk_and_falls_back_on_removal() {
-        let mut grid = HeightGrid::new(WATER);
+        let mut grid = HeightGrid::new();
         let (low, high) = (Entity::from_raw_u32(1).unwrap(), Entity::from_raw_u32(2).unwrap());
         let e = CHUNK_EDGE as i32;
-        grid.insert_chunk(low, [3, 0, 4], chunk_tops(&layered(CHUNK_EDGE, CHUNK_EDGE, STONE), WATER));
-        grid.insert_chunk(high, [3, 1, 4], chunk_tops(&layered(5, 5, STONE), WATER));
+        grid.insert_chunk(low, [3, 0, 4], chunk_tops(&layered(CHUNK_EDGE, CHUNK_EDGE, STONE)));
+        grid.insert_chunk(high, [3, 1, 4], chunk_tops(&layered(5, 5, STONE)));
         let (x, z) = ((3 * e + 1) as f32, (4 * e + 1) as f32);
         assert_eq!(grid.surface_at(x, z), Some((e + 5) as f32));
         let v = grid.version;
@@ -399,14 +397,14 @@ mod tests {
     /// range), and chunks below y = 0 count down from the region floor.
     #[test]
     fn heights_span_u16_and_negative_chunk_y() {
-        let full = chunk_tops(&layered(CHUNK_EDGE, CHUNK_EDGE, STONE), WATER);
+        let full = chunk_tops(&layered(CHUNK_EDGE, CHUNK_EDGE, STONE));
         assert_eq!(full.surface, [CHUNK_EDGE as u16; COLUMNS]);
         let e = CHUNK_EDGE as f32;
-        let mut grid = HeightGrid::new(WATER);
+        let mut grid = HeightGrid::new();
         let (deep, top) = (Entity::from_raw_u32(1).unwrap(), Entity::from_raw_u32(2).unwrap());
         grid.insert_chunk(deep, [0, -2, 0], full);
         assert_eq!(grid.surface_at(1.0, 1.0), Some(-e), "chunk y -2's full top is at -CHUNK_UNITS");
-        grid.insert_chunk(top, [0, -1, 0], chunk_tops(&layered(3, 3, STONE), WATER));
+        grid.insert_chunk(top, [0, -1, 0], chunk_tops(&layered(3, 3, STONE)));
         assert_eq!(grid.surface_at(1.0, 1.0), Some(3.0 - e), "chunk y -1 stacks on top");
         grid.remove_entity(top);
         grid.insert_chunk(top, [0, 1, 0], full);

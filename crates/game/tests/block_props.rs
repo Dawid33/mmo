@@ -352,3 +352,18 @@ fn manifest_has_biome_blocks() {
     }
     assert!(files > 30);
 }
+
+#[test]
+fn water_is_liquid_and_not_solid() {
+    let reg = registry();
+    let props = game::block_props();
+    let water = reg.id_of("water").unwrap();
+    assert_eq!(water, BlockId(5));
+    assert!(props.is_liquid(water));
+    assert!(!props.is_solid(water), "a liquid is always non-solid");
+    assert!(!props.blocks_ray(water));
+    assert!(!props.blocks_ray(BlockId::AIR));
+    let ice = reg.id_of("ice").unwrap();
+    assert!(props.blocks_ray(ice) && props.is_solid(ice) && !props.is_liquid(ice));
+    assert!(props.blocks_ray(reg.id_of("stone").unwrap()));
+}

@@ -3,7 +3,7 @@
 //! two parry Voxels shapes (block-scale for whole solid blocks, voxel-scale
 //! for chisel detail); the build is deterministic (bit-exact hash).
 use game::parry::shape::ShapeType;
-use game::{Chunk, ChunkCoords, Region, RegionId};
+use game::{Block, BlockId, Chunk, ChunkCoords, Region, RegionId};
 use game::StateHash;
 
 fn hash_region(r: &Region) -> u32 {
@@ -117,4 +117,29 @@ fn fixed_terrain_bodies_skip_collider_mass_properties() {
         checked += 1;
     }
     assert_eq!(checked, 2, "one body per chunk");
+}
+
+#[test]
+fn all_water_chunk_has_no_collider() {
+    crate::common::install_real_block_props();
+    let water = Block::new(BlockId(5));
+    let region = Region::from_chunks(RegionId::new(0, 0), vec![(ChunkCoords::new(0, 0, 0), Chunk::uniform(water))]);
+    assert_eq!(region.data().physics.colliders.iter().count(), 0, "water has no collider");
+
+    // Stone under water: only the stone's keys.
+    let stone_only = collider_keys(&Chunk::flat_floor(game::BLOCK_VOXELS as u32));
+    let mut chunk = Chunk::flat_floor(game::BLOCK_VOXELS as u32);
+    for bx in 0..game::CHUNK_BLOCKS {
+        for bz in 0..game::CHUNK_BLOCKS {
+            chunk.set_block(bx, 1, bz, water);
+        }
+    }
+    assert_eq!(collider_keys(&chunk), stone_only, "water adds no collider cells");
+}
+
+fn collider_keys(chunk: &Chunk) -> Vec<[i32; 3]> {
+    let cells = game::collider_cells(chunk);
+    let mut keys: Vec<[i32; 3]> = cells.blocks.iter().map(|b| b.to_array()).collect();
+    keys.sort();
+    keys
 }

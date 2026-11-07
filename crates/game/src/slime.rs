@@ -38,9 +38,6 @@ pub const SLIME_SPAWN_CHANCE_PERCENT: u64 = 50;
 pub const SLIME_CAP_PER_REGION: usize = 8;
 /// Relative odds of each size at spawn: (size, weight). Minecraft sizes.
 pub const SLIME_SIZE_WEIGHTS: [(u8, u64); 3] = [(1, 60), (2, 30), (4, 10)];
-/// Slimes never spawn on this block (water, id 5 in `assets/blocks/blocks.ron`;
-/// block ids are stable by contract).
-pub const SLIME_NO_SPAWN_BLOCK: BlockId = BlockId(5);
 /// Height above the surface a slime is dropped from, in world units.
 pub const SLIME_SPAWN_CLEARANCE: f32 = 2.0;
 
@@ -210,7 +207,7 @@ impl Rollback {
             return;
         }
         let Some((surface, top)) = self.surface_voxel(plan.vx, plan.vz) else { return };
-        if top == SLIME_NO_SPAWN_BLOCK {
+        if crate::block_props().is_liquid(top) {
             return;
         }
         let y = (surface + 1) as f32 + slime_edge_units(plan.size) / 2.0 + SLIME_SPAWN_CLEARANCE;

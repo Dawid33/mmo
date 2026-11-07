@@ -19,6 +19,16 @@ pub enum RenderMode {
     Cutout,
 }
 
+/// What a block is made of, for movement and rays. `Liquid` blocks (water)
+/// have no collider, the edit ray passes through them, and a build may
+/// replace them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum BlockKind {
+    #[default]
+    Solid,
+    Liquid,
+}
+
 /// Which grid a chiseled block's partial voxels collide on. `Voxel` (the
 /// default) keeps every solid voxel; `Half` (tree wood) rounds each 8³
 /// octant to one half-block cell, solid when at least `HALF_CELL_FILL_MIN`
@@ -45,6 +55,8 @@ pub struct BlockProps {
     pub(crate) cutout: BTreeSet<u16>,
     pub(crate) half_collider: BTreeSet<u16>,
     pub(crate) trunk: BTreeSet<u16>,
+    /// Liquid ids; always also in `non_solid`.
+    pub(crate) liquid: BTreeSet<u16>,
     /// Non-default hardness only.
     pub(crate) hardness: BTreeMap<u16, u16>,
     /// Non-`Same` drops only.
@@ -57,6 +69,17 @@ impl BlockProps {
     /// is not a block here; unknown ids are solid.
     pub fn is_solid(&self, id: BlockId) -> bool {
         !self.non_solid.contains(&id.0)
+    }
+
+    /// Whether the block is a liquid (water).
+    pub fn is_liquid(&self, id: BlockId) -> bool {
+        self.liquid.contains(&id.0)
+    }
+
+    /// Whether the edit / pick ray stops at the block: anything but air and
+    /// liquids.
+    pub fn blocks_ray(&self, id: BlockId) -> bool {
+        id != BlockId::AIR && !self.is_liquid(id)
     }
 
     /// Whether the block renders with alpha-tested (cutout) texels.
@@ -118,6 +141,7 @@ pub fn block_props() -> &'static BlockProps {
         cutout: BTreeSet::new(),
         half_collider: BTreeSet::new(),
         trunk: BTreeSet::new(),
+        liquid: BTreeSet::new(),
         hardness: BTreeMap::new(),
         drops: BTreeMap::new(),
         names: BTreeMap::new(),

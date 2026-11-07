@@ -92,7 +92,7 @@ impl Rollback {
     /// bedrock), and not water. Returns the block. The owner's check.
     pub(crate) fn mineable(&self, pos: BlockPos) -> Option<Block> {
         let (block, _) = self.clearable_block(pos)?;
-        (!crate::pathfind::is_water(block.id)).then_some(block)
+        (!crate::block_props().is_liquid(block.id)).then_some(block)
     }
 
     /// [`Self::mineable`] as this region sees `pos`, which may lie in the
@@ -103,7 +103,7 @@ impl Rollback {
             return self.mineable(pos);
         }
         let block = self.halo_mineable(pos)?;
-        (!crate::pathfind::is_water(block.id)).then_some(block)
+        (!crate::block_props().is_liquid(block.id)).then_some(block)
     }
 
     /// The id of `client`'s body, if it has one here.

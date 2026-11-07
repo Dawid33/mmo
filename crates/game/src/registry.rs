@@ -36,6 +36,9 @@ pub struct BlockDef {
     /// Whether the block collides. Default true.
     #[serde(default = "default_solid")]
     pub solid: bool,
+    /// Solid (default) or liquid. A liquid never collides.
+    #[serde(default)]
+    pub kind: crate::BlockKind,
     /// How the block is drawn. Default opaque.
     #[serde(default)]
     pub render: crate::RenderMode,
@@ -161,7 +164,10 @@ impl BlockRegistry {
     pub fn props(&self) -> crate::BlockProps {
         let mut p = crate::BlockProps::default();
         for (id, def) in self.iter() {
-            if !def.solid {
+            if def.kind == crate::BlockKind::Liquid {
+                p.liquid.insert(id.0);
+            }
+            if !def.solid || def.kind == crate::BlockKind::Liquid {
                 p.non_solid.insert(id.0);
             }
             if def.render == crate::RenderMode::Cutout {

@@ -147,7 +147,7 @@ pub fn visible_ground(
         max,
         cut,
         |x, z| grid.surface_at(x, z),
-        |p| mirror.block(p) != BlockId::AIR,
+        |p| game::block_props().blocks_ray(mirror.block(p)),
         |x, z| rect.is_some_and(|r| r.contains(Vec2::new(x, z))),
         xray,
     )

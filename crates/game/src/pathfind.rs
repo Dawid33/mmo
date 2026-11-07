@@ -33,19 +33,12 @@ pub const COLUMN_SCAN_Y_MIN: i32 = -256;
 /// Highest block `y` `nearest_standable` scans.
 pub const COLUMN_SCAN_Y_MAX: i32 = 512;
 
-/// The water block id (`assets/blocks/blocks.ron`).
-const WATER: BlockId = BlockId(5);
-
-pub fn is_water(b: BlockId) -> bool {
-    b == WATER
-}
-
 fn passable_block(b: BlockId) -> bool {
-    b == BlockId::AIR || (!is_water(b) && !block_props().is_solid(b))
+    b == BlockId::AIR || (!block_props().is_liquid(b) && !block_props().is_solid(b))
 }
 
 fn solid_block(b: BlockId) -> bool {
-    b != BlockId::AIR && !is_water(b) && block_props().is_solid(b)
+    b != BlockId::AIR && !block_props().is_liquid(b) && block_props().is_solid(b)
 }
 
 fn passable(src: &impl TileSource, p: TilePos) -> bool {

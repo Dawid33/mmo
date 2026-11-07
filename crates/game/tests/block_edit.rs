@@ -674,3 +674,30 @@ fn place_block_across_seam() {
     }
     assert_eq!(place_state(&mut rig, above), (BlockId(1), stone(2)), "refused at the owner: the item came back");
 }
+
+/// The floor chunk with a pond: stone to block y 2, water in the two blocks above.
+fn pond_floor() -> Chunk {
+    let mut chunk = Chunk::flat_floor(2 * BLOCK_VOXELS as u32);
+    for by in 2..4 {
+        for bx in 0..CHUNK_BLOCKS {
+            for bz in 0..CHUNK_BLOCKS {
+                chunk.set_block(bx, by, bz, game::Block::new(BlockId(5)));
+            }
+        }
+    }
+    chunk
+}
+
+#[test]
+fn edit_ray_passes_through_water() {
+    // Placing is a ray hit on the floor block's top face: the water above it
+    // does not stop the ray, and the placed block replaces the water cell.
+    let mut region = region(pond_floor);
+    let before = blocks(&region);
+    run(&mut region, &click(DOWN_45, MouseButton::Right));
+    let diff = changed(&before, &blocks(&region));
+    assert_eq!(diff.len(), 1, "exactly one block must change: {diff:?}");
+    let [_, y, z] = world_of(diff[0]);
+    assert_eq!((y, diff[0].2), (2, PLACE_BLOCK), "the block replaces the water cell above the floor: {diff:?}");
+    assert_eq!(z, 6, "{diff:?}");
+}

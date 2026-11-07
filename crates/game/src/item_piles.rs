@@ -351,7 +351,7 @@ impl Rollback {
     pub fn pile_support(&self, pos: WorldBlockPos) -> bool {
         self.pile_cell_seen(pos)
             && self.halo_block(pos).is_some_and(|b| {
-                b.id != BlockId::AIR && !crate::pathfind::is_water(b.id) && block_props().is_solid(b.id)
+                b.id != BlockId::AIR && !crate::block_props().is_liquid(b.id) && block_props().is_solid(b.id)
             })
     }
 

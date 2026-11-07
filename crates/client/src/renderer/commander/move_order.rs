@@ -99,7 +99,7 @@ pub fn goal_from_tile(tile: TilePos, home: RegionId) -> Goal {
 /// looks through to dug spaces (`designate::pick_visible_xray`).
 pub fn pick_move_tile(ray: (Vector, Vector), working: &WorkingLevel, mirror: &TileMirror, xray: bool) -> Option<TilePos> {
     let p = if working.cut {
-        game::pick_level_cell(ray.0, ray.1, working.level?, |p| mirror.block(p) != game::BlockId::AIR)?
+        game::pick_level_cell(ray.0, ray.1, working.level?, |p| game::block_props().blocks_ray(mirror.block(p)))?
     } else {
         designate::pick_visible_xray(ray, true, mirror, xray)?
     };

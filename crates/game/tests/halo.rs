@@ -400,3 +400,40 @@ fn stocked_chest() -> game::Container {
     c.slots[2] = Some(game::ItemStack { item: game::ItemId(1), count: 7 });
     c
 }
+
+fn east_water_floor(rc: RegionCoords) -> Vec<(game::ColumnCoords, game::Column)> {
+    if rc != east() {
+        return uniform_floor(rc);
+    }
+    let air = Block::new(BlockId::AIR);
+    let water = Block::new(BlockId(5));
+    let mut out = Vec::new();
+    for x in 0..REGION_CHUNKS {
+        for z in 0..REGION_CHUNKS {
+            let sub = game::SubChunk::Dense(Box::new(Chunk::uniform(water)));
+            out.push((game::ColumnCoords::new(x, z), game::Column::new(0, air, air, vec![sub])));
+        }
+    }
+    out
+}
+
+#[test]
+fn halo_water_chunk_has_no_collider() {
+    let mut rig = Rig::with_floor(None, east_water_floor);
+    rig.join_spawn();
+    rig.round();
+    rig.manager.spawner_mut().with_region(SPAWN_REGION, |r| {
+        let data = r.data();
+        let mut water_chunks = 0;
+        for halo in data.halo.values() {
+            let Some(chunk) = halo.chunk.as_ref() else { continue };
+            if chunk.blocks.get(game::BlockIndex::from_xyz(0, 0, 0)).id != BlockId(5) {
+                continue;
+            }
+            water_chunks += 1;
+            let body = data.physics.bodies.get(halo.body).expect("halo body");
+            assert!(body.colliders().is_empty(), "an all-water halo chunk carries no collider");
+        }
+        assert!(water_chunks > 0, "the east neighbour's water chunks are mirrored in the halo band");
+    });
+}

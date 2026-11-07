@@ -14,7 +14,7 @@
         (id: 2, name: "stone", textures: All("stone.png"), hardness: 150),
         (id: 3, name: "grass", textures: Faces(top: "grass_top.png", side: "grass_side.png", bottom: "dirt.png"), hardness: 60, drop: Item("dirt")),
         (id: 4, name: "sand",  textures: All("sand.png"), hardness: 50),
-        (id: 5, name: "water", textures: All("water.png")),
+        (id: 5, name: "water", textures: All("water.png"), kind: Liquid, drop: Nothing),
         (id: 6, name: "bedrock",      textures: All("bedrock.png")),
         (id: 7, name: "sandstone",    textures: All("sandstone.png"), hardness: 150),
         (id: 8, name: "shale",        textures: All("shale.png"), hardness: 150),

@@ -217,14 +217,14 @@ fn mass_boxes(model: &VoxelModel) -> Vec<(f64, [f64; 3], [f64; 3])> {
         let base = block_base(o);
         match chisel {
             None => {
-                if block.id != BlockId::AIR {
+                if crate::block_props().blocks_ray(block.id) {
                     let b = BLOCK_VOXELS as f64;
                     out.push((density, base, [base[0] + b, base[1] + b, base[2] + b]));
                 }
             }
             Some(c) => {
                 for (min, max, material) in c.cuboids() {
-                    if material == BlockId::AIR {
+                    if !crate::block_props().blocks_ray(material) {
                         continue;
                     }
                     let lo = [0, 1, 2].map(|a| base[a] + min[a] as f64);

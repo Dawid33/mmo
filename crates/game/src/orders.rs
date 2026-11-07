@@ -192,7 +192,7 @@ pub trait TileSource {
 pub fn validate(src: &impl TileSource, kind: DesignationKind, p: TilePos) -> Result<(), Invalid> {
     match kind {
         DesignationKind::Dig => {
-            if src.block(p) == BlockId::AIR {
+            if !crate::block_props().blocks_ray(src.block(p)) {
                 Err(Invalid::NothingToDig)
             } else if src.is_constructed(p) {
                 Err(Invalid::Built)
@@ -204,7 +204,7 @@ pub fn validate(src: &impl TileSource, kind: DesignationKind, p: TilePos) -> Res
         }
         DesignationKind::Deconstruct => src.is_constructed(p).then_some(()).ok_or(Invalid::NotBuilt),
         DesignationKind::Build(_) => {
-            if src.block(p) == BlockId::AIR {
+            if !crate::block_props().blocks_ray(src.block(p)) {
                 Ok(())
             } else {
                 Err(Invalid::Occupied)

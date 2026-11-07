@@ -610,7 +610,7 @@ impl Plugin for CommanderPlugin {
 
 /// The height grid a session starts with.
 fn fresh_height_grid() -> HeightGrid {
-    HeightGrid::new(crate::blocks::load_registry().id_of("water").unwrap_or(game::BlockId::AIR))
+    HeightGrid::new()
 }
 
 /// The commander camera gives the screen to the frontend (menu, starting

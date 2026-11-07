@@ -489,7 +489,7 @@ pub fn update_hover(
         }
         let ray = cursor_ray(window.single().ok()?, view.single().ok()?, mirror.region()?)?;
         let visible = (!working.cut).then(|| pick_visible_xray(ray, tool == Tool::Build, &mirror, xray)).flatten();
-        let p = visible.or_else(|| pick_level_cell(ray.0, ray.1, working.level?, |p| mirror.block(p) != BlockId::AIR))?;
+        let p = visible.or_else(|| pick_level_cell(ray.0, ray.1, working.level?, |p| game::block_props().blocks_ray(mirror.block(p))))?;
         Some(clamp_to_region(p))
     })();
     if state.hover != hover {
@@ -510,7 +510,7 @@ pub fn cursor_ray(window: &Window, (camera, tf): (&Camera, &Transform), region: 
 /// level ([`pick_visible_cell`]); with `face` the air cell in front of the
 /// face it entered through.
 pub fn pick_visible(ray: (Vector, Vector), face: bool, mirror: &TileMirror) -> Option<TilePos> {
-    pick_visible_cell(ray.0, ray.1, VISIBLE_PICK_REACH_BLOCKS, face, |p| mirror.block(p) != BlockId::AIR)
+    pick_visible_cell(ray.0, ray.1, VISIBLE_PICK_REACH_BLOCKS, face, |p| game::block_props().blocks_ray(mirror.block(p)))
 }
 
 /// [`pick_visible`] under the dug-space x-ray (`xray`, cut off): through
@@ -525,7 +525,7 @@ pub fn pick_visible_xray(ray: (Vector, Vector), face: bool, mirror: &TileMirror,
         ray.1,
         VISIBLE_PICK_REACH_BLOCKS,
         face,
-        |p| mirror.block(p) != BlockId::AIR,
+        |p| game::block_props().blocks_ray(mirror.block(p)),
         |p| mirror.is_dug(p),
     )
 }

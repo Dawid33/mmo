@@ -675,3 +675,13 @@ fn complete_all_batches_match_per_tile_edits() {
     assert!(batched.data().constructed().is_empty());
     assert!(build.tiles().all(|p| block_at(&batched, p) == BlockId::AIR));
 }
+
+#[test]
+fn water_cell_is_free_for_build_and_empty_for_dig() {
+    crate::common::install_real_block_props();
+    let water = BlockId(5);
+    let mut s = Src::default();
+    s.blocks.insert([0, 0, 0], water);
+    assert_eq!(validate(&s, DesignationKind::Build(game::edit::PLACE_BLOCK), [0, 0, 0]), Ok(()));
+    assert_eq!(validate(&s, DesignationKind::Dig, [0, 0, 0]), Err(Invalid::NothingToDig));
+}

@@ -457,7 +457,7 @@ impl Rollback {
     /// Whether the halo block at region-local `pos` is anything but plain air
     /// (the edit ray's solidity, past the region's edge).
     pub(crate) fn halo_cell_solid(&self, pos: [i32; 3]) -> bool {
-        self.halo_cell(pos).is_some_and(|(b, chiseled)| b.id != BlockId::AIR || chiseled)
+        self.halo_cell(pos).is_some_and(|(b, chiseled)| crate::block_props().blocks_ray(b.id) || chiseled)
     }
 
     /// The halo chunk at local chunk `[cx, cy, cz]` (outside the region).

@@ -135,7 +135,7 @@ pub fn restore_translation(rollback: &Rollback, t: Vector) -> Vector {
     let inside = (0..n).contains(&feet[0]) && (0..n).contains(&feet[2]);
     let clear = |p: crate::TilePos| {
         let b = rollback.block(p);
-        b == crate::BlockId::AIR || crate::pathfind::is_water(b) || !crate::block_props().is_solid(b)
+        b == crate::BlockId::AIR || crate::block_props().is_liquid(b) || !crate::block_props().is_solid(b)
     };
     if inside && clear(feet) && clear([feet[0], feet[1] + 1, feet[2]]) {
         return t;
