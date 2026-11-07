@@ -139,8 +139,8 @@ fn no_slope_at_or_under_water() {
                 slopes += 1;
                 assert!(t > SEA_TOP_BLOCK, "slope at block y {t} at ({x}, {z}), sea top {SEA_TOP_BLOCK}");
                 let (col, lx, lz) = b.column(x, z);
-                let above = game::ReadVol::get(col, game::BlockPos::new(lx as i32, t + 1, lz as i32));
-                assert_ne!(above.id, mats().water, "water on the slope at ({x}, {z})");
+                let recipe = col.ground().expect("a recipe").recipe_water(lx, lz);
+                assert_eq!(recipe, None, "water on the slope at ({x}, {z})");
             }
         }
     }

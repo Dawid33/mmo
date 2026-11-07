@@ -205,8 +205,11 @@ impl Rollback {
         if count >= SLIME_CAP_PER_REGION {
             return;
         }
-        let Some((surface, top)) = self.surface_voxel(plan.vx, plan.vz) else { return };
-        if crate::block_props().is_liquid(top) {
+        let Some((surface, _)) = self.surface_voxel(plan.vx, plan.vz) else { return };
+        // Never on a seabed: the cell over the top voxel holds no water.
+        let bv = crate::BLOCK_VOXELS as i32;
+        let above = crate::BlockPos::new(plan.vx.div_euclid(bv), (surface + 1).div_euclid(bv), plan.vz.div_euclid(bv));
+        if self.water_units_at(crate::WorldBlockPos::from_local(region, above)) > 0 {
             return;
         }
         let y = (surface + 1) as f32 + slime_edge_units(plan.size) / 2.0 + SLIME_SPAWN_CLEARANCE;

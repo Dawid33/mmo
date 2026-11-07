@@ -1,9 +1,9 @@
 //! Water as the sim reads it: units per cell, the DF depth levels over them,
 //! and the rules pathing and swimming derive from them. Static water is the
 //! ground recipe's (`ColumnGround::recipe_water`) over air cells, labelled
-//! into bodies at genesis ([`label_water_bodies`]); a liquid block (no
-//! collider, `BlockKind::Liquid`) still counts until worldgen stops writing
-//! them. [`Rollback::water_units_at`] is the single water read in the sim.
+//! into bodies at genesis ([`label_water_bodies`]); chunks hold no water
+//! blocks (a liquid block — `BlockKind::Liquid`, no collider — is not water
+//! by itself). [`Rollback::water_units_at`] is the single water read in the sim.
 
 use std::collections::BTreeMap;
 
@@ -11,7 +11,7 @@ use rapier3d::math::Vector;
 
 use crate::movement::{Immersion, PLAYER_EYE_HEIGHT, PLAYER_HEIGHT};
 use crate::{
-    block_props, BlockId, BlockPos, ColumnCoords, ColumnGround, EntityKey, Rollback, WorldBlockPos, WorldChunkPos,
+    BlockId, BlockPos, ColumnCoords, ColumnGround, EntityKey, Rollback, WorldBlockPos, WorldChunkPos,
     BLOCK_VOXELS, CHUNK_BLOCKS, REGION_BLOCKS,
 };
 
@@ -49,12 +49,12 @@ pub struct WaterBody {
 }
 
 /// Water units of a cell holding `block`, at block Y `y` of a column whose
-/// recipe water is `recipe` (`ColumnGround::recipe_water`): full for a
-/// liquid block, or for air inside the recipe; else none. The rule the sim
-/// and the client's tile mirror share.
+/// recipe water is `recipe` (`ColumnGround::recipe_water`): full for air
+/// inside the recipe, else none — water is the recipe's alone, chunks hold
+/// no water blocks. The rule the sim and the client's tile mirror share.
 pub fn static_water_units(block: BlockId, recipe: Option<(i32, i32)>, y: i32) -> u16 {
-    let in_recipe = || block == BlockId::AIR && recipe.is_some_and(|(lo, hi)| (lo..=hi).contains(&y));
-    if block_props().is_liquid(block) || in_recipe() { WATER_FULL } else { 0 }
+    let in_recipe = block == BlockId::AIR && recipe.is_some_and(|(lo, hi)| (lo..=hi).contains(&y));
+    if in_recipe { WATER_FULL } else { 0 }
 }
 
 /// Labels the recipe water of a region's ground into bodies: a
@@ -182,8 +182,8 @@ impl Rollback {
     }
 
     /// Water units in world block `p`, own region ∪ halo; 0 beyond them.
-    /// Static water ([`static_water_units`]): [`WATER_FULL`] for a liquid
-    /// block, or for an air cell inside its column's recipe water — the
+    /// Static water ([`static_water_units`]): [`WATER_FULL`] for an air
+    /// cell inside its column's recipe water — the
     /// region's own `ground` for its cells, the neighbour's (`halo_ground`)
     /// for halo cells.
     pub fn water_units_at(&self, p: WorldBlockPos) -> u16 {

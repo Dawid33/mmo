@@ -67,21 +67,28 @@ fn ground_survives_park_and_restore() {
 const POND_SURFACE: i16 = 67;
 /// The pond's recipe water top, block y: water at 68..=70.
 const POND_TOP: i16 = 70;
-/// The fixture's sub-chunk: block y 64..80.
-const POND_SUB_Y: i32 = 4;
+/// The fixture's lowest sub-chunk: the one holding `POND_SURFACE`.
+const POND_SUB_Y: i32 = POND_SURFACE as i32 / game::CHUNK_BLOCKS as i32;
+/// The fixture's highest sub-chunk: the one holding `POND_TOP`.
+const POND_TOP_SUB_Y: i32 = POND_TOP as i32 / game::CHUNK_BLOCKS as i32;
 const ICE: BlockId = BlockId(23);
 
-/// Chunk column (0, 0) of a region: solid up to `POND_SURFACE`, air above,
-/// with a plain ground recipe and recipe water topped at `top` over each
-/// listed block column `(lx, lz, top)`; `ice` cells (`(lx, y, lz)`) hold
-/// ice.
+/// Chunk column (0, 0) of a region: solid up to `POND_SURFACE`, air above
+/// (sub-chunks `POND_SUB_Y ..= POND_TOP_SUB_Y` materialised), with a plain
+/// ground recipe and recipe water topped at `top` over each listed block
+/// column `(lx, lz, top)`; `ice` cells (`(lx, y, lz)`) hold ice.
 fn pond_region(water: &[(usize, usize, i16)], ice: &[(usize, i32, usize)]) -> game::Region {
     crate::common::install_real_block_props();
     let cb = game::CHUNK_BLOCKS as i32;
     let floor_voxels = ((i32::from(POND_SURFACE) + 1 - POND_SUB_Y * cb) as usize * game::BLOCK_VOXELS) as u32;
-    let mut chunk = Chunk::flat_floor_with(floor_voxels, BlockId(2));
+    let mut chunks: Vec<Chunk> = (POND_SUB_Y..=POND_TOP_SUB_Y)
+        .map(|sub_y| match sub_y {
+            POND_SUB_Y => Chunk::flat_floor_with(floor_voxels, BlockId(2)),
+            _ => Chunk::uniform(air()),
+        })
+        .collect();
     for &(lx, y, lz) in ice {
-        chunk.set_block(lx, (y - POND_SUB_Y * cb) as usize, lz, Block::new(ICE));
+        chunks[(y.div_euclid(cb) - POND_SUB_Y) as usize].set_block(lx, y.rem_euclid(cb) as usize, lz, Block::new(ICE));
     }
     let mut ground = game::ColumnGround::plain(
         vec![POND_SURFACE; game::COLUMN_FOOTPRINT].into_boxed_slice(),
@@ -92,7 +99,8 @@ fn pond_region(water: &[(usize, usize, i16)], ice: &[(usize, i32, usize)]) -> ga
     for &(lx, lz, top) in water {
         ground.water_top[lx * game::CHUNK_BLOCKS + lz] = top;
     }
-    let col = Column::new(POND_SUB_Y, stone(), air(), vec![SubChunk::Dense(Box::new(chunk))]).with_ground(ground);
+    let subs = chunks.into_iter().map(|c| SubChunk::Dense(Box::new(c))).collect();
+    let col = Column::new(POND_SUB_Y, stone(), air(), subs).with_ground(ground);
     game::Region::from_columns(RegionCoords::new(0, 0), vec![(ColumnCoords::new(0, 0), col)])
 }
 

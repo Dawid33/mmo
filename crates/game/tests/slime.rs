@@ -202,3 +202,28 @@ fn wanders_across_seam() {
         }
     }
 }
+
+// ---- water ----
+
+/// No slime spawns on a seabed (water plan Task 9): the region's first
+/// spawn attempt over a floor with recipe water everywhere spawns nothing,
+/// while the same attempt over the dry floor spawns one.
+#[test]
+fn no_slime_spawns_under_recipe_water() {
+    use crate::common::water::{floor_with_water, WaterBox};
+    common::install_real_block_props();
+    let t = (1..200u64)
+        .map(|k| k * game::slime::SLIME_SPAWN_INTERVAL_TICKS)
+        .find(|&t| slime_spawn_plan(r0(), t).is_some())
+        .expect("some attempt within 200 intervals succeeds");
+    let n = game::REGION_BLOCKS as i64;
+    let sea = WaterBox { xs: 0..n, zs: 0..n, surface: 0, water_top: 3 };
+    let slimes_after_attempt = |boxes: &[WaterBox]| {
+        let mut region = Region::from_columns(r0(), floor_with_water(r0(), boxes));
+        region.jump_clock_to(t);
+        tick(&mut region);
+        region.data().ecs.slime.iter().filter(|(_, s)| s.is_some()).count()
+    };
+    assert_eq!(slimes_after_attempt(&[]), 1, "the attempt spawns over the dry floor");
+    assert_eq!(slimes_after_attempt(&[sea]), 0, "no slime on the seabed");
+}

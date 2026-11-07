@@ -263,11 +263,6 @@ fn soil_depth(c: &ColSample) -> i32 {
     c.cover.map_or(MAX_SOIL_DEPTH, |cover| cover.soil_depth.max(MAX_SOIL_DEPTH))
 }
 
-/// The water block at `by` (at or under `c.water_top`): ice from `ice_from` up.
-fn water_material(mats: &Materials, c: &ColSample, by: i32) -> BlockId {
-    if by >= c.ice_from { mats.biome.ice } else { mats.water }
-}
-
 /// The surface a tree may stand on, from a `column_sample` and whether it
 /// carries a slope: dry, no slope (a trunk would hang over the slope's open
 /// front) and a cover that grows trees. `None` = no tree.
@@ -636,7 +631,8 @@ fn columns_from_patch(
                     // (digging, implied ground and pathing see the ice top).
                     surface[lx * CHUNK_BLOCKS + lz] = c.top as i16;
                     // Recipe water: the column's water (or ice) above its
-                    // ground, the same cells the water blocks fill below.
+                    // ground — the only water there is; the chunks below
+                    // hold air there (ice at a frozen top).
                     if c.water_top > c.top {
                         water_top[lx * CHUNK_BLOCKS + lz] = c.water_top as i16;
                     }
@@ -684,12 +680,13 @@ fn columns_from_patch(
                             if let Some(shape) = slope.filter(|_| by == c.top) {
                                 chisel.insert(bi, game::slope_chisel(block.id, shape));
                             }
-                        } else if by <= c.water_top {
-                            // Above ground, below the water surface -> water
-                            // (its top frozen where it is cold).
-                            blocks[bi.linear()] = Block::new(water_material(&mats, &c, by));
+                        } else if by <= c.water_top && by >= c.ice_from {
+                            // The frozen top of the water: ice, a solid block.
+                            blocks[bi.linear()] = Block::new(mats.biome.ice);
                         }
-                        // else: air (the grid starts all air).
+                        // else: air (the grid starts all air) — the water
+                        // under the surface included: it is the recipe's
+                        // (`ColumnGround::water_top`), never a block.
                     }
                 }
             }
@@ -954,7 +951,7 @@ fn coarse_from_patch(
                     if by < c.ice_from {
                         continue;
                     }
-                    water_material(&mats, &c, by)
+                    mats.biome.ice
                 };
                 let group = [cx.div_euclid(G), cy.div_euclid(G), cz.div_euclid(G)];
                 let (lx, ly, lz) = ((cx % G) as usize, cy.rem_euclid(G) as usize, (cz % G) as usize);
@@ -1163,8 +1160,8 @@ mod tests {
                     assert!(game::slope::classify(chisel).is_some(), "not a slope: {cuboids:?}");
                     slopes += 1;
                     let y = sub_y * CHUNK_BLOCKS as i32 + by as i32;
-                    let above = col.get(BlockPos::new(bx as i32, y + 1, bz as i32));
-                    assert_ne!(above.id, mats().water, "slope under water at block y {y}");
+                    let recipe = col.ground().expect("a recipe").recipe_water(bx, bz);
+                    assert_eq!(recipe, None, "slope under water at block y {y}");
                     assert!(y > SEA_TOP_BLOCK, "slope at or under the sea surface at block y {y}");
                 }
             }

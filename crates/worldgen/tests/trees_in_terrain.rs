@@ -47,6 +47,15 @@ fn surface(rc: RegionCoords, cols: &[(ColumnCoords, Column)], x: i32, z: i32) ->
     i32::from(col.ground().unwrap().surface[(lx % CB) as usize * CHUNK_BLOCKS + (lz % CB) as usize])
 }
 
+/// The top of block column `(x, z)`'s recipe water (`ColumnGround::recipe_water`),
+/// if it has any.
+fn water_top(rc: RegionCoords, cols: &[(ColumnCoords, Column)], x: i32, z: i32) -> Option<i32> {
+    let (lx, lz) = (x - rc.x * RB, z - rc.z * RB);
+    let cc = ColumnCoords::new((lx / CB) as usize, (lz / CB) as usize);
+    let col = &cols.iter().find(|(c, _)| *c == cc).unwrap().1;
+    col.ground().unwrap().recipe_water((lx % CB) as usize, (lz % CB) as usize).map(|(_, hi)| hi)
+}
+
 /// A forested 64 m region near spawn (by world position, units), so it is the
 /// same land at any region size.
 fn forest() -> RegionCoords {
@@ -110,6 +119,7 @@ fn no_tree_blocks_below_surface_or_in_water() {
         tree_blocks += 1;
         assert!(bare.is_none_or(|(b, _)| b.id == game::BlockId::AIR), "tree block {p:?} replaced {bare:?}");
         assert!(p[1] > surface(forest(), &cols, p[0], p[2]) && p[1] > SEA_TOP_BLOCK, "tree block {p:?} too low");
+        assert!(water_top(forest(), &cols, p[0], p[2]).is_none_or(|w| p[1] > w), "tree block {p:?} in recipe water");
     }
     for (p, bare) in &without {
         assert!(with.contains_key(p) || bare.0.id == game::BlockId::AIR, "lost {p:?}");

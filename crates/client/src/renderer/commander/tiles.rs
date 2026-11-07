@@ -414,7 +414,7 @@ impl TileSource for TileMirror {
     }
 
     /// Static water, as the sim's `water_units_at` (`game::static_water_units`):
-    /// a liquid block, or air inside its column's recipe water.
+    /// air inside its column's recipe water.
     fn water_units(&self, p: TilePos) -> u16 {
         let Some((coords, (lx, _, lz))) = game::edit::locate(p) else { return 0 };
         let recipe = self.ground_at(coords.x, coords.z).and_then(|g| g.recipe_water(lx, lz));

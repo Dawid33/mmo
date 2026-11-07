@@ -125,17 +125,19 @@ impl Rollback {
 }
 
 /// Where a restored body goes: `t` (a body centre, region-local voxel units)
-/// when its feet tile and the tile above are clear of solid blocks and inside
-/// the region; else onto the standable tile nearest its feet level in its
-/// column (clamped into the region); else over the region's spawn column.
-/// Never inside terrain.
+/// when its feet tile and the tile above are clear of solid blocks and of
+/// water (`water_units_at`) and inside the region; else onto the standable
+/// tile nearest its feet level in its column (clamped into the region); else
+/// over the region's spawn column. Never inside terrain or water.
 pub fn restore_translation(rollback: &Rollback, t: Vector) -> Vector {
     let feet = crate::feet_tile(crate::feet_of(t));
     let n = crate::REGION_BLOCKS as i32;
     let inside = (0..n).contains(&feet[0]) && (0..n).contains(&feet[2]);
+    let region = *rollback.data.region;
     let clear = |p: crate::TilePos| {
         let b = rollback.block(p);
-        b == crate::BlockId::AIR || crate::block_props().is_liquid(b) || !crate::block_props().is_solid(b)
+        let cell = crate::WorldBlockPos::from_local(region, crate::BlockPos::new(p[0], p[1], p[2]));
+        (b == crate::BlockId::AIR || !crate::block_props().is_solid(b)) && rollback.water_units_at(cell) == 0
     };
     if inside && clear(feet) && clear([feet[0], feet[1] + 1, feet[2]]) {
         return t;

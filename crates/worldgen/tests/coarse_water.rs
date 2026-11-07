@@ -58,11 +58,11 @@ fn coarse_lod_terrain_has_no_liquid() {
     let props = game::block_props();
     let generated = game::TerrainSnapshot::from_columns(generate(rc)).chunks;
     assert!(
-        generated.iter().any(|(_, c)| {
+        !generated.iter().any(|(_, c)| {
             let n = game::CHUNK_BLOCKS;
             (0..n * n * n).any(|i| props.is_liquid(c.block_at(i % n, i / n % n, i / (n * n)).id))
         }),
-        "the region's chunks still hold water blocks (until Task 9)"
+        "the region's chunks hold no water blocks (water plan Task 9)"
     );
     let jobs = [
         ("pristine factor 4", LodBuildJob::Pristine { key: LodKey::for_region(4, rc), region: rc }),

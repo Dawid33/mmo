@@ -140,19 +140,27 @@ fn lake_is_flat_and_its_shore_stands_above_it() {
 }
 
 /// (top solid-or-water block, is water) for every block column of a region,
-/// keyed by region-local block (x, z).
+/// keyed by region-local block (x, z). Water is the column's recipe water
+/// (`ColumnGround::recipe_water`) over air — chunks hold no water blocks —
+/// so a column is water when its recipe tops out above its highest block
+/// (an ice top is a block: not water).
 fn tops(columns: &[(ColumnCoords, Column)]) -> std::collections::BTreeMap<(i32, i32), (i32, bool)> {
     let per = game::CHUNK_BLOCKS as i32;
     let mut out = std::collections::BTreeMap::new();
     for (cc, col) in columns {
+        let ground = col.ground().expect("every forged column carries a recipe");
         for lx in 0..per {
             for lz in 0..per {
-                let top = (0..200)
-                    .rev()
-                    .map(|y| (y, col.get(BlockPos::new(lx, y, lz)).id))
-                    .find(|(_, id)| *id != BlockId::AIR);
-                if let Some((y, id)) = top {
-                    out.insert((cc.x as i32 * per + lx, cc.z as i32 * per + lz), (y, id == mats().water));
+                let solid = (0..200).rev().find(|&y| col.get(BlockPos::new(lx, y, lz)).id != BlockId::AIR);
+                let water = ground.recipe_water(lx as usize, lz as usize).map(|(_, hi)| hi);
+                let top = match (solid, water) {
+                    (Some(s), Some(w)) if w > s => Some((w, true)),
+                    (None, Some(w)) => Some((w, true)),
+                    (Some(s), _) => Some((s, false)),
+                    (None, None) => None,
+                };
+                if let Some(top) = top {
+                    out.insert((cc.x as i32 * per + lx, cc.z as i32 * per + lz), top);
                 }
             }
         }
@@ -778,7 +786,13 @@ fn frozen_lake_has_ice_on_top() {
                 for y in level_top - ice_blocks + 1..=level_top {
                     assert_eq!(block_at_y(col, lx, lz, y), m.biome.ice, "ice at y {y}");
                 }
-                assert_eq!(block_at_y(col, lx, lz, level_top - ice_blocks), m.water, "water under the ice");
+                let under = block_at_y(col, lx, lz, level_top - ice_blocks);
+                assert_eq!(under, BlockId::AIR, "no water block under the ice");
+                let recipe = col.ground().unwrap().recipe_water(lx, lz);
+                assert!(
+                    recipe.is_some_and(|(lo, hi)| lo <= level_top - ice_blocks && hi == level_top),
+                    "recipe water under the ice: {recipe:?}"
+                );
             }
         }
     }
@@ -999,8 +1013,10 @@ fn sea_floors(world: &ForgedWorld, ax: f64) -> Vec<(BlockId, BlockId)> {
             for lz in 0..per {
                 let s = i32::from(g.surface[lx * per + lz]);
                 let above = block_at_y(col, lx, lz, s + 1);
-                if above == m.water || above == m.biome.ice {
-                    out.push((block_at_y(col, lx, lz, s), above));
+                // Water is the recipe's over air (reported as `m.water`).
+                let wet = above == BlockId::AIR && g.recipe_water(lx, lz).is_some_and(|(lo, _)| lo == s + 1);
+                if wet || above == m.biome.ice {
+                    out.push((block_at_y(col, lx, lz, s), if wet { m.water } else { above }));
                 }
             }
         }

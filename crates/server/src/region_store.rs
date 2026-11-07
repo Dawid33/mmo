@@ -66,7 +66,9 @@ pub const REGION_MAGIC: [u8; 8] = *b"MMOREGN\0";
 /// `EntityId`, and `Carried` gained `voxel_body`.
 /// 22: `ColumnGround` gained `water_top` / `water_body` (recipe water) and
 /// `GameData` gained `water_bodies`.
-pub const REGION_FILE_VERSION: u32 = 22;
+/// 23: chunks hold no water blocks — water is the recipe's alone (a v22
+/// region's sea would be liquid blocks the sim no longer reads as water).
+pub const REGION_FILE_VERSION: u32 = 23;
 /// magic + version + region blocks + chunk blocks + world crc + payload crc.
 const HEADER_LEN: usize = 8 + 4 * 5;
 
