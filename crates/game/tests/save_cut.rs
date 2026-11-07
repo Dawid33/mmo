@@ -415,8 +415,9 @@ fn park_during_pending_cut() {
         assert_eq!(cut.id, id);
         assert!(rig.manager.parked_regions().contains(&north()), "north parked");
         let (_, p) = cut.regions.iter().find(|(rc, _)| *rc == north()).expect("north is in the cut");
-        assert!(p.meta.tick < cut.tick, "its stop snapshot (tick {}), before the cut tick {}", p.meta.tick, cut.tick);
-        assert!(!rig.cut_snapshots.iter().any(|a| a.0 == north() && a.1 == id), "north answered by Stopped");
+        assert!(p.meta.tick < cut.tick, "its parked state (tick {}), before the cut tick {}", p.meta.tick, cut.tick);
+        let answer = rig.cut_snapshots.iter().find(|a| a.0 == north() && a.1 == id).expect("north answered at its Shutdown");
+        assert!(answer.3 < cut.tick, "with its state where it parked, before the cut tick: {answer:?}");
         rig.manager.cut_committed(cut.id, Vec::new());
         // Woken from its parked blob, unchanged, and cut again.
         rig.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(north()), CLIENT));
@@ -499,5 +500,218 @@ fn late_region_misses_and_retries() {
         let now = world_tick(&mut rig);
         rig.manager.begin_cut(now).expect("no cut pending");
         assert_eq!(rig.manager.pending_cut().map(|c| c.1), Some(now + SAVE_CUT_LEAD_TICKS));
+    });
+}
+
+/// A region that parks during a pending cut, before reaching its tick, with
+/// a crossing into it stamped past the cut tick held in its queue: it answers
+/// with its state before that crossing (`Shutdown` applies what is held for
+/// later slots only after the cut snapshot), so the slime — still in its
+/// source's snapshot — is saved once.
+fn target_parks_with_late_crossing(seed: u64) {
+    let mut rig = jittery_rig(seed);
+    let id = slime_by_north_seam(&mut rig);
+    rig.round();
+    // North sits out the rest: its inputs (the cut, the crossing, the
+    // Shutdown) wait in its channel, its clock stays behind.
+    rig.manager.spawner_mut().hold(north(), u32::MAX);
+    let now = world_tick(&mut rig);
+    let cut_id = rig.manager.begin_cut(now).expect("no cut pending");
+    let t = now + SAVE_CUT_LEAD_TICKS;
+    // The source answers at T; only then does the slime cross (stamped > T).
+    for _ in 0..CUT_ROUNDS {
+        if rig.manager.awaiting_cut() == [north()] {
+            break;
+        }
+        rig.round();
+    }
+    assert_eq!(rig.manager.awaiting_cut(), [north()], "everyone but north answered");
+    assert!(region_tick(&mut rig, SPAWN_REGION) >= t);
+    assert!(push_over_north_seam(&mut rig, id), "the slime is still in the spawn region");
+    for _ in 0..3 {
+        rig.round();
+    }
+    assert!(rig.manager.in_flight_ids().iter().any(|(i, rc)| *i == id && *rc == north()), "in flight to north");
+    // North's last subscriber goes; it is told to stop, then released: it
+    // reads the cut, the crossing and the Shutdown before any tick.
+    rig.event(ServerEvent::ClientPacket(ClientPacket::ReleaseRegionConnection(north()), CLIENT));
+    rig.now_ms += game::UNLOAD_GRACE_MS;
+    rig.manager.maintain(rig.now_ms);
+    assert!(region_tick(&mut rig, north()) < t, "north is behind the cut tick");
+    rig.manager.spawner_mut().hold(north(), 0);
+    rig.settle();
+    let cut = until_cut(&mut rig);
+    assert_eq!(cut.id, cut_id);
+    assert!(rig.cut_snapshots.iter().any(|a| a.0 == north() && a.1 == cut_id), "north answered with a cut snapshot");
+    let mut store = CutStore::default();
+    store.apply(&cut);
+    let at = store.places(id);
+    assert_eq!(at, [(SPAWN_REGION, "state")], "saved once, in its source's snapshot");
+    let mut again = restored(&store, seed, false);
+    assert_eq!(live_count(&mut again, id), 1, "restored once");
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn target_parks_during_cut_with_a_crossing_past_t() {
+    for_seeds("a target parking with a crossing past the cut", target_parks_with_late_crossing);
+}
+
+/// A stopping region whose thread dies before `Stopped` would hold a cut
+/// forever: past [`game::CUT_DEADLINE_LEADS`] leads the cut is aborted, and
+/// the next one leaves the silent region out and completes.
+#[test]
+fn cut_past_its_deadline_is_aborted() {
+    let mut rig = jittery_rig(0);
+    rig.event(ServerEvent::ClientPacket(ClientPacket::ReleaseRegionConnection(north()), CLIENT));
+    rig.now_ms += game::UNLOAD_GRACE_MS;
+    rig.manager.maintain(rig.now_ms);
+    // Shutdown is in its channel; the thread dies before reading it.
+    rig.kill(north());
+    let now = world_tick(&mut rig);
+    rig.manager.begin_cut(now).expect("no cut pending");
+    let deadline = now + SAVE_CUT_LEAD_TICKS * (1 + game::CUT_DEADLINE_LEADS);
+    while world_tick(&mut rig) <= deadline {
+        rig.round();
+        assert!(rig.manager.take_cut().is_none(), "the cut waits for north");
+    }
+    assert_eq!(rig.manager.awaiting_cut(), [north()]);
+    rig.manager.maintain(rig.now_ms);
+    assert_eq!(rig.manager.pending_cut(), None, "aborted past its deadline");
+    let now = world_tick(&mut rig);
+    rig.manager.begin_cut(now).expect("a new cut");
+    assert!(!rig.manager.awaiting_cut().contains(&north()), "the silent region is left out");
+    let cut = until_cut(&mut rig);
+    assert_eq!(cut.regions.len(), 8, "every other region");
+}
+
+/// A 3x3 world map around the spawn region, every tile with a dry landing.
+fn map() -> game::WorldMap {
+    let tile = game::TileSummary {
+        ground_min_m: 0.0,
+        ground_mean_m: 0.0,
+        ground_max_m: 0.0,
+        relief_m: 0.0,
+        slope: [0.0, 0.0],
+        sea_fraction: 0.0,
+        lake_fraction: 0.0,
+        lake_level_m: None,
+        rivers: 0,
+        river_max_discharge_m2: 0.0,
+        river_max_width_m: 0.0,
+        surface_rock: None,
+        landing: Some([8, 8]),
+        biome: game::Biome::Grassland,
+        region: 0,
+        temperature_c: 10.0,
+        precip_mm: 700.0,
+        savagery: 50,
+        alignment: 0,
+        volcano: false,
+    };
+    let tiles = vec![tile; 9];
+    game::WorldMap {
+        origin: RegionCoords::new(SPAWN_REGION.x - 1, SPAWN_REGION.z - 1),
+        width: 3,
+        height: 3,
+        tiles,
+        rock_names: vec![],
+        region_types: vec![],
+    }
+}
+
+fn press(rig: &mut Rig, key: game::Key) {
+    rig.input(InputEvent::Key { key, pressed: true });
+    rig.round();
+    rig.input(InputEvent::Key { key, pressed: false });
+}
+
+/// A player moved to another region (dev Play: parked out of the spawn
+/// region, created in north) around the cut tick, throwing a stone there
+/// right after it lands: its body is in one snapshot at most, and the stone
+/// — on the player, or in north's pile — is saved once.
+fn move_straddling(seed: u64, d: i64) {
+    let mut rig = Rig::with_floor(Some(InlineSchedule::jittery(seed)), uniform_floor);
+    rig.manager.set_world_map(map());
+    rig.join_spawn();
+    while world_tick(&mut rig) < SAVE_CUT_LEAD_TICKS + 4 {
+        rig.round();
+    }
+    rig.order(Order::SetMode { mode: PlayMode::Adventure, at: None });
+    rig.input(InputEvent::FpsCam(true));
+    rig.round();
+    rig.manager.spawner_mut().with_region(SPAWN_REGION, |r| {
+        r.with_data(|d| {
+            let c = d.clients.get_mut(&CLIENT).unwrap();
+            c.inventory = Inventory::new();
+            c.inventory.slots[0] = Some(stone(10));
+            c.selected = 0;
+        })
+    });
+    rig.round();
+    let mut body = None;
+    rig.manager.spawner_mut().with_region(SPAWN_REGION, |r| {
+        let data = r.data();
+        body = *data.ecs.id.try_get(*data.player_entites.get(&CLIENT).unwrap());
+    });
+    let body = body.expect("the player's body");
+    let w0 = world_tick(&mut rig);
+    let t = (w0 as i64 + 8 + d) as u64;
+    rig.manager.begin_cut(t - SAVE_CUT_LEAD_TICKS).expect("no cut pending");
+    let mut played = None;
+    let mut cut = None;
+    for round in 0..CUT_ROUNDS {
+        if played.is_none() && region_tick(&mut rig, SPAWN_REGION) + 1 >= w0 + 8 {
+            played = Some(round);
+            rig.event(ServerEvent::ClientPacket(ClientPacket::PlayRegion(north()), CLIENT));
+        }
+        if played.is_some() {
+            // A move parks the body: an allowed exit (it comes back as a new one).
+            rig.tracked.remove(&body);
+        }
+        if played.is_some_and(|r| round == r + 2) {
+            rig.input(InputEvent::FpsCam(true));
+        }
+        if played.is_some_and(|r| round == r + 3) {
+            rig.tracked.remove(&body);
+            press(&mut rig, game::Key::KeyQ);
+        }
+        rig.round();
+        if cut.is_none() {
+            cut = rig.manager.take_cut();
+        }
+        if cut.is_none() && rig.manager.pending_cut().is_none() {
+            let now = world_tick(&mut rig);
+            rig.manager.begin_cut(now).expect("no cut pending");
+        }
+        if cut.is_some() && played.is_some_and(|r| round > r + 8) {
+            break;
+        }
+    }
+    let cut = cut.expect("the cut completed");
+    let bodies: usize = cut.regions.iter().map(|(_, p)| p.players.iter().filter(|(c, _)| *c == CLIENT).count()).sum();
+    assert!(bodies <= 1, "cut at {}: the body is in {bodies} snapshots", cut.tick);
+    // Its creation may be held past the cut tick: until then it is in no region.
+    for _ in 0..2 * SAVE_CUT_LEAD_TICKS {
+        if !rig.owners().is_empty() {
+            break;
+        }
+        rig.round();
+    }
+    assert_eq!(live_stone(&mut rig), 10, "the running world keeps its stone");
+    let mut store = CutStore::default();
+    store.apply(&cut);
+    assert_eq!(stored_stone(&store), 10, "cut at {} (Play at ~{}): the stone is saved once", cut.tick, w0 + 7);
+    let mut again = restored(&store, seed, true);
+    assert_eq!(live_stone(&mut again), 10, "restored from the cut at {}", cut.tick);
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn move_straddling_cut_keeps_items_once() {
+    for_seeds("a move straddling the cut", |seed| {
+        for d in -3..=3 {
+            move_straddling(seed, d);
+        }
     });
 }

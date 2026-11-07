@@ -561,6 +561,20 @@ impl RegionRunner {
             }
             RegionInput::SeedHaloFromWorldgen(neighbours) => self.seed_halo_from_worldgen(neighbours),
             RegionInput::Shutdown => {
+                // A save cut at a tick this region will not reach now: it
+                // parks there, so its answer is its state with what is held
+                // for the slots before the cut tick applied (the slots it
+                // would have run first), taken before what is held for the
+                // cut's slot or later.
+                if let Some((id, tick)) = self.pending_cut.take() {
+                    for (kind, _) in Self::take_before(&mut self.held, tick) {
+                        self.apply(kind);
+                    }
+                    for (kind, _) in Self::take_before(&mut self.held_transfers, tick) {
+                        self.apply_input(kind);
+                    }
+                    self.send_cut_snapshot(id, tick);
+                }
                 // Input must not be lost to a park.
                 for (kind, _) in std::mem::take(&mut self.held) {
                     self.apply(kind);
@@ -594,6 +608,17 @@ impl RegionRunner {
             }
         }
         true
+    }
+
+    /// Removes and returns, in order, the entries of `queue` stamped before
+    /// `tick`.
+    fn take_before(
+        queue: &mut std::collections::VecDeque<(GameEventKind, u64)>,
+        tick: Tick,
+    ) -> Vec<(GameEventKind, u64)> {
+        let (before, rest): (Vec<_>, Vec<_>) = std::mem::take(queue).into_iter().partition(|(_, t)| *t < tick);
+        *queue = rest.into();
+        before
     }
 
     /// Halo seeds generated here, applied at once (before the first tick).

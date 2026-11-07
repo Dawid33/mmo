@@ -613,10 +613,9 @@ fn dead_target_redelivers_in_flight() {
 }
 
 /// One save cut at a time: the next begins once the last completed (or
-/// was missed), and then the last is checked — the player's body is in at
-/// most one region snapshot, and the cut holds exactly one record of it (a
-/// body in no snapshot is a crossing the cut caught; the manager
-/// debug-asserts a crossing is never also in a snapshot).
+/// was missed), and then the last is checked — the player is in exactly one
+/// place: one region snapshot, or the crossings the cut caught — and the cut
+/// holds exactly one record of it.
 struct SaveCheck {
     checked: usize,
 }
@@ -638,7 +637,8 @@ impl SaveCheck {
         if let Some(cut) = rig.manager.take_cut() {
             let bodies: usize =
                 cut.regions.iter().map(|(_, p)| p.players.iter().filter(|(c, _)| *c == CLIENT).count()).sum();
-            assert!(bodies <= 1, "cut {}: the player's body is in {bodies} snapshots", self.checked);
+            let caught = rig.manager.last_cut_caught_players().iter().filter(|p| **p == game::PlayerId(CLIENT as u64)).count();
+            assert_eq!(bodies + caught, 1, "cut {}: the player's body is in {bodies} snapshots, caught crossing {caught} times", self.checked);
             let records = cut.players.iter().filter(|(p, _)| *p == game::PlayerId(CLIENT as u64)).count();
             assert_eq!(records, 1, "cut {}: the player's record", self.checked);
             rig.manager.cut_committed(cut.id, Vec::new());

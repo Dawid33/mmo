@@ -16,7 +16,9 @@ use crate::{
     RegionOutput, RegionRunner, RegionSeed, SerializedRegion, ServerPacket, PlayRefusal, WorldMap, EmbarkRequest,
     Order, PlayMode, PlayerId, PlayerRecord,
 };
-use crate::save_cut::{CutId, InFlightRow, PendingCut, Uncommitted, WorldCut, SAVE_CUT_LEAD_MAX_TICKS, SAVE_CUT_LEAD_TICKS};
+use crate::save_cut::{
+    CutId, InFlightRow, PendingCut, Uncommitted, WorldCut, CUT_DEADLINE_LEADS, SAVE_CUT_LEAD_MAX_TICKS, SAVE_CUT_LEAD_TICKS,
+};
 
 /// Level hint for an adventure landing: above any surface, so it clamps to the
 /// column's top and the nearest standable tile is the topmost.
@@ -732,6 +734,11 @@ pub struct WorldManager<S: RegionSpawner> {
     next_cut_id: u64,
     /// Orders the player records a pending cut collects (latest wins).
     cut_order: u64,
+    /// Stopping regions a cut's deadline passed waiting for (likely dead):
+    /// left out of cuts until their `Stopped` comes.
+    silent_stopping: BTreeSet<RegionCoords>,
+    /// Test support: the players the last complete cut caught crossing a seam.
+    last_cut_caught: Vec<PlayerId>,
     /// The regions the world store holds, with their terrain version
     /// ([`Self::set_stored_regions`], [`Self::cut_committed`]).
     stored_regions: BTreeMap<RegionCoords, u64>,
@@ -854,6 +861,8 @@ impl<S: RegionSpawner> WorldManager<S> {
             cut_lead: SAVE_CUT_LEAD_TICKS,
             next_cut_id: 0,
             cut_order: 0,
+            silent_stopping: BTreeSet::new(),
+            last_cut_caught: Vec::new(),
             stored_regions: BTreeMap::new(),
             locations: BTreeMap::new(),
             in_flight_intents: Vec::new(),
@@ -1056,8 +1065,9 @@ impl<S: RegionSpawner> WorldManager<S> {
             }
         };
         self.send_play_event(m.target, GameEventKind::CreateClientAt(client, m.landing, Some(Box::new(carried))));
+        // Behind the creation, held with it if it is.
         for kind in m.then {
-            self.send_play_event(m.target, kind);
+            self.send_play_event_held(m.target, kind, true);
         }
         self.refresh_keepalive(m.from, now_ms);
         self.refresh_keepalive(m.target, now_ms);
@@ -1256,9 +1266,27 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// Deliver a server-authored Play event to `rc`, waking it if parked. A
     /// region mid-stop cannot take events (they would be dropped): queue them
     /// for when it parks.
+    ///
+    /// An event that puts a player's body in `rc` (create, restore) is held
+    /// to the slot after a pending save cut's tick while `rc` has not
+    /// answered it: the body came out of a park, which may have landed after
+    /// its old region's snapshot, so it must not be in `rc`'s too.
     fn send_play_event(&mut self, rc: RegionCoords, kind: GameEventKind) {
+        let creates = matches!(
+            kind,
+            GameEventKind::CreateClient(_) | GameEventKind::CreateClientAt(..) | GameEventKind::RestorePlayer(..)
+        );
+        self.send_play_event_held(rc, kind, creates);
+    }
+
+    /// [`Self::send_play_event`]; `hold_for_cut`: held as a body's creation is
+    /// (events that must follow a held creation).
+    fn send_play_event_held(&mut self, rc: RegionCoords, kind: GameEventKind, hold_for_cut: bool) {
         self.ensure_running(rc);
-        let input = RegionInput::Event(kind);
+        let input = match self.cut_hold_stamp(rc).filter(|_| hold_for_cut) {
+            Some(stamp) => RegionInput::Transfer(kind, stamp),
+            None => RegionInput::Event(kind),
+        };
         if self.regions.get(&rc).map_or(false, |l| l.stopping) {
             self.pending_events.entry(rc).or_default().push(input);
         } else {
@@ -1475,6 +1503,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                 self.invalidate_region_lod(rc);
             }
             RegionOutput::Stopped(serialized, far, stamp, portable) => {
+                self.silent_stopping.remove(&rc);
                 // Its final snapshot: uncommitted until a cut commits it, and
                 // its answer to a pending cut (it is parked at the cut tick).
                 self.cut_answer(rc, None, *portable);
@@ -1688,6 +1717,7 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// client's player entity parks after UNLOAD_GRACE_MS.
     pub fn maintain(&mut self, now_ms: u64) {
         self.clock_ms = self.clock_ms.max(now_ms);
+        self.expire_overdue_cut();
         if let Some(to) = self.calendar_now(now_ms) {
             self.history.as_mut().unwrap().advance(to);
             self.deliver_directives();
@@ -1770,13 +1800,14 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// are. `None` while a cut is pending or a complete one waits for
     /// [`Self::take_cut`].
     pub fn begin_cut(&mut self, now: crate::Tick) -> Option<CutId> {
+        self.expire_overdue_cut();
         if self.pending_cut.is_some() || self.ready_cut.is_some() {
             return None;
         }
         self.next_cut_id += 1;
         let id = CutId(self.next_cut_id);
         let tick = now + self.cut_lead;
-        let mut cut = PendingCut::new(id, tick);
+        let mut cut = PendingCut::new(id, tick, tick + CUT_DEADLINE_LEADS * self.cut_lead);
         // What was routed before now left its source before the cut tick.
         for f in self.in_flight.values_mut() {
             f.in_source_view = false;
@@ -1792,7 +1823,15 @@ impl<S: RegionSpawner> WorldManager<S> {
         }
         let mut dead = Vec::new();
         for (rc, link) in &self.regions {
-            if link.stopping {
+            if link.stopping && self.silent_stopping.contains(rc) {
+                // Missed an earlier cut's deadline while stopping (its thread
+                // is likely dead): at the cut tick as it last snapshotted.
+                if let Some(u) = self.uncommitted.get(rc) {
+                    cut.regions.insert(*rc, (u.region.clone(), u.seq));
+                }
+            } else if link.stopping {
+                // It parks before the cut tick: its `Stopped` answers (what it
+                // applies at `Shutdown` was all sent before this cut began).
                 cut.waiting.insert(*rc);
             } else if link.input.send(RegionInput::SaveAt(id, tick)).is_ok() {
                 cut.waiting.insert(*rc);
@@ -1894,6 +1933,12 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.cut_lead
     }
 
+    /// Test support: the players the last complete cut caught crossing a
+    /// seam (in no region snapshot; their records are from the crossing).
+    pub fn last_cut_caught_players(&self) -> &[PlayerId] {
+        &self.last_cut_caught
+    }
+
     /// Test support: the pending cut's id and tick.
     pub fn pending_cut(&self) -> Option<(CutId, crate::Tick)> {
         self.pending_cut.as_ref().map(|c| (c.id, c.tick))
@@ -1914,6 +1959,13 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// `false` with no cut pending.
     fn in_cut_view(&self, rc: RegionCoords) -> bool {
         self.pending_cut.as_ref().is_some_and(|c| !c.waiting.contains(&rc))
+    }
+
+    /// The stamp a body's creation in `rc` is held to: the slot after the
+    /// pending cut's tick, while `rc` has not answered it.
+    fn cut_hold_stamp(&self, rc: RegionCoords) -> Option<crate::Tick> {
+        let cut = self.pending_cut.as_ref()?;
+        cut.waiting.contains(&rc).then_some(cut.tick + 1)
     }
 
     /// Merge `portable`, `rc`'s newest snapshot, into its uncommitted entry;
@@ -1939,6 +1991,7 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// pending cut when it waits for `rc`.
     fn cut_answer(&mut self, rc: RegionCoords, cut: Option<(CutId, crate::Tick)>, portable: PortableRegion) {
         let players = portable.players.clone();
+        let at = portable.meta.tick;
         let seq = self.merge_uncommitted(rc, portable);
         let Some(pending) = self.pending_cut.as_ref() else { return };
         let answers = pending.waiting.contains(&rc) && cut.is_none_or(|(id, _)| id == pending.id);
@@ -1946,9 +1999,18 @@ impl<S: RegionSpawner> WorldManager<S> {
             return;
         }
         debug_assert!(cut.is_none_or(|(_, t)| t == pending.tick), "a cut snapshot at another tick");
+        if cut.is_none() && at > pending.tick {
+            // A `Stopped` answer past the cut tick is not the region at it.
+            let id = self.pending_cut.take().expect("checked").id;
+            log::error!("save cut {}: {rc:?} parked at tick {at}, past the cut tick; aborted", id.0);
+            return;
+        }
         let mut records = Vec::new();
         for (client, record) in players {
-            let Some((player, fortress, adventure)) = self.player_for(client) else { continue };
+            let Some((player, fortress, adventure)) = self.player_for(client) else {
+                log::warn!("save cut: {rc:?} holds client {client}'s body, but no player is known for it; not saved");
+                continue;
+            };
             self.cut_order += 1;
             records.push((self.cut_order, player, PlayerRecord { fortress, adventure, ..record }));
         }
@@ -1958,6 +2020,28 @@ impl<S: RegionSpawner> WorldManager<S> {
         pending.regions.insert(rc, (entry, seq));
         pending.region_players.insert(rc, records);
         self.try_complete_cut();
+    }
+
+    /// A pending cut past its deadline ([`CUT_DEADLINE_LEADS`]) is aborted;
+    /// the stopping regions it still waited for are left out of later cuts
+    /// until they park. Called by [`Self::maintain`] and [`Self::begin_cut`].
+    fn expire_overdue_cut(&mut self) {
+        let now = self.spawner.world_tick();
+        if self.pending_cut.as_ref().is_none_or(|c| now <= c.deadline) {
+            return;
+        }
+        let cut = self.pending_cut.take().expect("checked");
+        log::error!(
+            "save cut {} at tick {}: still waiting for {:?} at world tick {now}; aborted",
+            cut.id.0,
+            cut.tick,
+            cut.waiting
+        );
+        for rc in cut.waiting {
+            if self.regions.get(&rc).is_some_and(|l| l.stopping) {
+                self.silent_stopping.insert(rc);
+            }
+        }
     }
 
     /// `rc` was past the pending cut's tick when asked: the cut is aborted
@@ -2092,6 +2176,15 @@ impl<S: RegionSpawner> WorldManager<S> {
             cut.crossing_players.iter().all(|(_, p, _)| !cut.region_players.values().flatten().any(|(_, q, _)| q == p)),
             "a player crossing in the cut is also in a region snapshot"
         );
+        // A body is in one region at the cut tick.
+        debug_assert!(
+            {
+                let mut seen = BTreeSet::new();
+                cut.region_players.values().flatten().all(|(_, p, _)| seen.insert(*p))
+            },
+            "a player's body is in two snapshots of one cut"
+        );
+        self.last_cut_caught = cut.crossing_players.iter().map(|(_, p, _)| *p).collect();
         let mut ordered: Vec<(u64, PlayerId, PlayerRecord)> =
             cut.region_players.into_values().flatten().chain(cut.crossing_players).collect();
         ordered.sort_by_key(|(order, _, _)| *order);
@@ -2099,7 +2192,7 @@ impl<S: RegionSpawner> WorldManager<S> {
         for (_, player, record) in ordered {
             players.insert(player, record);
         }
-        for (player, record) in self.parked_players.iter().chain(cut.transit_players.iter()) {
+        for (player, record) in cut.parked_at_t.iter().chain(self.parked_players.iter()).chain(cut.transit_players.iter()) {
             players.entry(*player).or_insert_with(|| record.clone());
         }
         let carried: BTreeMap<RegionCoords, u64> = cut.regions.iter().map(|(rc, (_, seq))| (*rc, *seq)).collect();
@@ -2955,18 +3048,29 @@ impl<S: RegionSpawner> WorldManager<S> {
         if to.is_region() || self.locations.contains_key(&to) || self.in_flight.contains_key(&to) {
             return false;
         }
-        let parked = self.parked_bodies.get(&to).copied();
-        if let Some(record) = parked.and_then(|p| self.parked_players.get_mut(&p)) {
+        let parked = self.parked_bodies.get(&to).copied().filter(|p| self.parked_players.contains_key(p));
+        if let Some(player) = parked {
+            // Sent after its region answered the pending cut, the items are
+            // still in that region's snapshot: the cut keeps the record as
+            // it was (they reach the store with the next cut).
+            if view {
+                let before = self.parked_players[&player].clone();
+                if let Some(cut) = self.pending_cut.as_mut() {
+                    cut.parked_at_t.entry(player).or_insert(before);
+                }
+            }
+            let record = self.parked_players.get_mut(&player).expect("checked");
             stack.count = record.client.inventory.add(stack);
             if stack.count > 0 && record.client.cursor.is_none() {
                 record.client.cursor = Some(stack);
                 stack.count = 0;
             }
-            let player = parked.expect("checked");
             log::info!("[server] reply {:?} for parked {to:?}: folded into player {}'s record", s.reply, player.0);
             let record = record.clone();
             self.player_saves.push((player, record.clone()));
-            self.cut_transit(player, &record);
+            if !view {
+                self.cut_transit(player, &record);
+            }
             if stack.count == 0 {
                 return true;
             }

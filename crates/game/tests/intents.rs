@@ -372,6 +372,12 @@ fn cut_holds_intent_to_lagging_target_once() {
         assert!(r.data().queued_intents().is_empty());
     });
     assert!(broken, "applied after the restore");
+    let granted = again
+        .intents_seen
+        .iter()
+        .filter(|(rc, m)| *rc == west && matches!(m, game::IntentMsg::Reply(s) if matches!(s.reply, IntentReply::Granted(Intent::BreakBlock { .. }))))
+        .count();
+    assert_eq!(granted, 1, "one grant, to the sender (elsewhere)");
 }
 
 /// A region that parks refuses the intents still queued in it: its parked

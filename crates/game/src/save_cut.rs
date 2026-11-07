@@ -24,6 +24,15 @@
 //! [`InFlightRow`] of the cut — a player's crossing a [`PlayerRecord`]
 //! instead, a person's dropped (the history owns persons).
 //!
+//! A region that parks before T answers from `Shutdown`: what is held for
+//! slots before T is applied, the snapshot taken, then the rest. A body the
+//! manager creates or restores (a move, a reconnect) in a region that has not
+//! answered is held to slot T+1 — its park may have landed after its old
+//! region's snapshot — and a parked record keeps its state at T while the cut
+//! is pending (an item reply folded into it after its region answered goes
+//! to the next cut). A cut still waiting [`CUT_DEADLINE_LEADS`] leads past
+//! T is aborted.
+//!
 //! **Dirty tracking survives failures.** A region's snapshot carries only
 //! the chunks changed since its previous one; the manager merges every
 //! snapshot (a cut's or a `Stopped`'s, aborted cuts included) into an
@@ -44,6 +53,11 @@ use crate::{EntityBundle, IntentMsg, PlayerId, PlayerRecord, PortableRegion, Reg
 pub const SAVE_CUT_LEAD_TICKS: Tick = 20;
 /// The longest lead a retry after a missed cut doubles up to.
 pub const SAVE_CUT_LEAD_MAX_TICKS: Tick = 640;
+/// A pending cut still waiting for a region this many leads past its tick
+/// (world ticks) is aborted, logged with the regions it waited for: a region
+/// thread that died while stopping never answers. Such a stopping region is
+/// left out of later cuts until it parks.
+pub const CUT_DEADLINE_LEADS: Tick = 10;
 
 /// One save cut's id, fresh per [`crate::WorldManager::begin_cut`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
@@ -87,6 +101,8 @@ pub(crate) struct Uncommitted {
 pub(crate) struct PendingCut {
     pub id: CutId,
     pub tick: Tick,
+    /// The world tick past which it is aborted ([`CUT_DEADLINE_LEADS`]).
+    pub deadline: Tick,
     /// Regions whose answer (a `CutSnapshot`, or a `Stopped`) is still to
     /// come. Every other region's view is taken: answered, or not running
     /// (its uncommitted entry, or the store).
@@ -103,20 +119,25 @@ pub(crate) struct PendingCut {
     /// Records that passed through the manager while the cut was pending
     /// (parks, restores, moves): the fallback for a player in no snapshot.
     pub transit_players: BTreeMap<PlayerId, PlayerRecord>,
+    /// Parked records as they were before something sent after its region's
+    /// answer was folded into them (that region's snapshot still holds it).
+    pub parked_at_t: BTreeMap<PlayerId, PlayerRecord>,
     /// Crossings and intents a target confirmed after its answer.
     pub rows: Vec<InFlightRow>,
 }
 
 impl PendingCut {
-    pub fn new(id: CutId, tick: Tick) -> Self {
+    pub fn new(id: CutId, tick: Tick, deadline: Tick) -> Self {
         Self {
             id,
             tick,
+            deadline,
             waiting: BTreeSet::new(),
             regions: BTreeMap::new(),
             region_players: BTreeMap::new(),
             crossing_players: Vec::new(),
             transit_players: BTreeMap::new(),
+            parked_at_t: BTreeMap::new(),
             rows: Vec::new(),
         }
     }

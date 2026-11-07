@@ -149,6 +149,8 @@ pub struct Rig {
     pub cut_snapshots: Vec<(RegionCoords, game::CutId, u64, u64)>,
     /// Every `CutMissed`: `(region, cut, the region's tick when seen)`.
     pub cut_missed: Vec<(RegionCoords, game::CutId, u64)>,
+    /// Every intent and reply the regions sent (`RegionOutput::Intents`).
+    pub intents_seen: Vec<(RegionCoords, game::IntentMsg)>,
 }
 
 impl Rig {
@@ -196,6 +198,7 @@ impl Rig {
             snapshot_has_player: Default::default(),
             cut_snapshots: Vec::new(),
             cut_missed: Vec::new(),
+            intents_seen: Vec::new(),
         }
     }
 
@@ -206,6 +209,9 @@ impl Rig {
                 self.trace_output(rc, &out);
                 if let RegionOutput::CutSnapshot(id, tick, p) = &out {
                     self.cut_snapshots.push((rc, *id, *tick, p.meta.tick));
+                }
+                if let RegionOutput::Intents(list) = &out {
+                    self.intents_seen.extend(list.iter().map(|m| (rc, *m)));
                 }
                 if let RegionOutput::CutMissed(id) = &out {
                     let mut at = 0;
