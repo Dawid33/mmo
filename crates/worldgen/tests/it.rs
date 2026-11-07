@@ -22,6 +22,7 @@
 mod common;
 mod coarse_water;
 mod forge_lib;
+mod forged_tiles;
 mod halo_probe;
 mod lod_bricks;
 mod player_walk;

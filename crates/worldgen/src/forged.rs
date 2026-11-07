@@ -42,7 +42,7 @@ pub const WORLD_FILE_ENV: &str = "VOXEL_WORLD_FILE";
 pub const ARTIFACT_VERSION: u32 = 7;
 /// zstd level of the world file body (offline writer; reading cost is level-independent).
 #[cfg(not(target_arch = "wasm32"))]
-const ZSTD_LEVEL: i32 = 19;
+pub(crate) const ZSTD_LEVEL: i32 = 19;
 /// Read buffer between the streamed zstd decoder and bincode on load.
 #[cfg(not(target_arch = "wasm32"))]
 const LOAD_READ_BUFFER_BYTES: usize = 1 << 16;
@@ -87,7 +87,7 @@ const BANK_SLOPE: f64 = 0.7;
 /// How far from the channel edge the bank cut can reach (m).
 const BANK_REACH_M: f64 = 24.0;
 /// River segments are indexed in square buckets of this size (m).
-const BUCKET_M: f64 = 64.0;
+pub(crate) const BUCKET_M: f64 = 64.0;
 /// Inside one patch, candidates are narrowed again to cells of this size (m):
 /// a region samples ~1 M points (every voxel column of every surface block),
 /// and checking all ~20 segments of a river region at each cost 4x the rest
@@ -370,7 +370,7 @@ impl WorldArtifact {
         [&mut self.height, &mut self.uplifted, &mut self.bedding, &mut self.temperature_c, &mut self.precip_mm]
     }
 
-    fn qrasters(&self) -> [&QRaster; 5] {
+    pub(crate) fn qrasters(&self) -> [&QRaster; 5] {
         [&self.height, &self.uplifted, &self.bedding, &self.temperature_c, &self.precip_mm]
     }
 
@@ -380,7 +380,7 @@ impl WorldArtifact {
         [&mut self.drainage, &mut self.volcanism, &mut self.salinity, &mut self.biome, &mut self.savagery]
     }
 
-    fn byte_rasters(&self) -> [&Vec<u8>; 5] {
+    pub(crate) fn byte_rasters(&self) -> [&Vec<u8>; 5] {
         [&self.drainage, &self.volcanism, &self.salinity, &self.biome, &self.savagery]
     }
 
@@ -478,28 +478,7 @@ impl WorldArtifact {
         if artifact.lakes.iter().any(|lake| !lake.cells.iter().all(run_ok) || lake.level.is_nan()) {
             return Err(ArtifactError::Format("lake cells outside the raster".into()));
         }
-        // Every rock must be one this build has a block for: an unknown name
-        // would otherwise quietly become some other stone.
-        if let Some(name) = artifact.rock_names.iter().find(|name| rock_index(name).is_none()) {
-            return Err(ArtifactError::Format(format!("unknown rock {name}")));
-        }
-        if artifact.column.is_empty() {
-            return Err(ArtifactError::Format("empty rock column".into()));
-        }
-        let known = artifact.rock_names.len();
-        if let Some(&(_, rock)) = artifact.column.iter().find(|&&(_, rock)| rock as usize >= known) {
-            return Err(ArtifactError::Format(format!("rock index {rock} out of range")));
-        }
-        // `!(a >= b)` also rejects a NaN top.
-        if artifact.column.windows(2).any(|w| !(w[0].0 >= w[1].0)) {
-            return Err(ArtifactError::Format("rock column not sorted by descending top".into()));
-        }
-        if artifact.regions.len() > crate::forge::regions::MAX_REGIONS
-            || artifact.regions.iter().enumerate().any(|(i, r)| r.id as usize != i)
-        {
-            return Err(ArtifactError::Format("region records are not numbered 0..".into()));
-        }
-        Ok(())
+        validate_tables(&artifact.column, &artifact.rock_names, &artifact.regions)
     }
 
     /// Value checks on the biome and region rasters (`validate` checks their
@@ -529,6 +508,34 @@ impl WorldArtifact {
     }
 }
 
+/// The checks on a world's global tables that every reader relies on (whole
+/// and tiled worlds): known rocks, a non-empty rock column sorted by
+/// descending top (the strata lookups binary-search it), region records
+/// numbered `0..`.
+fn validate_tables(column: &[(f32, u8)], rock_names: &[String], regions: &[RegionRecord]) -> Result<(), ArtifactError> {
+    // Every rock must be one this build has a block for: an unknown name
+    // would otherwise quietly become some other stone.
+    if let Some(name) = rock_names.iter().find(|name| rock_index(name).is_none()) {
+        return Err(ArtifactError::Format(format!("unknown rock {name}")));
+    }
+    if column.is_empty() {
+        return Err(ArtifactError::Format("empty rock column".into()));
+    }
+    let known = rock_names.len();
+    if let Some(&(_, rock)) = column.iter().find(|&&(_, rock)| rock as usize >= known) {
+        return Err(ArtifactError::Format(format!("rock index {rock} out of range")));
+    }
+    // `!(a >= b)` also rejects a NaN top.
+    if column.windows(2).any(|w| !(w[0].0 >= w[1].0)) {
+        return Err(ArtifactError::Format("rock column not sorted by descending top".into()));
+    }
+    if regions.len() > crate::forge::regions::MAX_REGIONS || regions.iter().enumerate().any(|(i, r)| r.id as usize != i)
+    {
+        return Err(ArtifactError::Format("region records are not numbered 0..".into()));
+    }
+    Ok(())
+}
+
 /// The temp file [`WorldArtifact::save`] writes before renaming it to `path`:
 /// same directory (so the rename stays on one filesystem), `.<name>.tmp`.
 #[cfg(not(target_arch = "wasm32"))]
@@ -537,14 +544,15 @@ pub fn save_temp_path(path: &Path) -> PathBuf {
     path.with_file_name(format!(".{name}.tmp"))
 }
 
-/// One straight piece of a river centerline, in artifact meters.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct Segment {
-    a: (f64, f64),
-    b: (f64, f64),
-    water: (f64, f64),
-    half_width: f64,
-    depth: f64,
+/// One straight piece of a river centerline, in artifact meters (tiles carry
+/// them with their global ids, `forged_tiles::Tile::segments`).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Segment {
+    pub(crate) a: (f64, f64),
+    pub(crate) b: (f64, f64),
+    pub(crate) water: (f64, f64),
+    pub(crate) half_width: f64,
+    pub(crate) depth: f64,
 }
 
 /// The five quantised rasters (`WorldArtifact::qrasters` order).
@@ -623,6 +631,15 @@ impl WorldGlobals {
     pub fn buckets_per_side(&self) -> usize {
         buckets_per_side(self.size_m)
     }
+
+    /// What a tiled world checks before it samples (a whole world's
+    /// artifact passes `WorldArtifact::validate` instead).
+    pub fn validate(&self) -> Result<(), ArtifactError> {
+        if self.n == 0 || !(self.cell_m > 0.0) || !(self.size_m > 0.0) {
+            return Err(ArtifactError::Format("empty world".into()));
+        }
+        validate_tables(&self.column, &self.rock_names, &self.regions)
+    }
 }
 
 fn buckets_per_side(size_m: f64) -> usize {
@@ -632,13 +649,14 @@ fn buckets_per_side(size_m: f64) -> usize {
 /// The whole world's rasters in memory, plus what is derived from them at
 /// load (river index, coast distance, lake runs).
 pub(crate) struct WholeRasters {
-    artifact: WorldArtifact,
+    pub(crate) artifact: WorldArtifact,
     /// Distance (m) from the nearest sea cell (height <= 0), from `height`
     /// at load (`habitat::coast_distance_m`).
     coast_dist_m: Vec<f32>,
-    segments: Vec<Segment>,
-    /// Segment indices per BUCKET_M bucket (row-major, `buckets_per_side`^2).
-    buckets: Vec<Vec<u32>>,
+    pub(crate) segments: Vec<Segment>,
+    /// Segment indices per BUCKET_M bucket (row-major, `buckets_per_side`^2),
+    /// each list ascending (segments are pushed in id order).
+    pub(crate) buckets: Vec<Vec<u32>>,
     /// Lake water per cell as sorted, non-overlapping `(start, end, level)`
     /// runs of raster indices (`end` exclusive), from `artifact.lakes`.
     lake_runs: Vec<(u32, u32, f32)>,
@@ -698,6 +716,8 @@ impl WholeRasters {
 /// index, so a tiled store can route it to the tile holding that cell.
 pub(crate) enum Rasters {
     Whole(WholeRasters),
+    /// Tiles pulled on demand through an LRU (`forged_tiles`).
+    Tiled(crate::forged_tiles::TileCache),
 }
 
 impl Rasters {
@@ -714,6 +734,7 @@ impl Rasters {
                     QRasterId::PrecipMm => a.precip_mm.get(i),
                 }
             }
+            Rasters::Tiled(t) => t.q(r, i),
         }
     }
 
@@ -730,6 +751,7 @@ impl Rasters {
                     ByteRasterId::Savagery => a.savagery[i],
                 }
             }
+            Rasters::Tiled(t) => t.byte(r, i),
         }
     }
 
@@ -737,6 +759,7 @@ impl Rasters {
     pub(crate) fn region_id(&self, i: usize) -> u16 {
         match self {
             Rasters::Whole(w) => w.artifact.region[i],
+            Rasters::Tiled(t) => t.region_id(i),
         }
     }
 
@@ -744,6 +767,7 @@ impl Rasters {
     pub(crate) fn coast(&self, i: usize) -> f32 {
         match self {
             Rasters::Whole(w) => w.coast_dist_m[i],
+            Rasters::Tiled(t) => t.coast(i),
         }
     }
 
@@ -756,35 +780,51 @@ impl Rasters {
                 let &(_, end, level) = w.lake_runs.get(k.checked_sub(1)?)?;
                 (i < end).then_some(level)
             }
+            Rasters::Tiled(t) => t.lake_level(i),
         }
     }
 
     /// The river segments that can touch `BUCKET_M` bucket `bucket_index`
-    /// (row-major over `WorldGlobals::buckets_per_side`), in stored order.
+    /// (row-major over `WorldGlobals::buckets_per_side`), in stored order
+    /// (ascending segment id).
+    ///
+    /// # Panics
+    /// If `bucket_index` is not below `buckets_per_side()^2`: callers clamp
+    /// the bucket coordinates to the map first (`bucket_segments`, `patch`).
     pub(crate) fn bucket(&self, bucket_index: usize) -> SegmentsRef<'_> {
         match self {
-            Rasters::Whole(w) => SegmentsRef { ids: w.buckets[bucket_index].iter(), segments: &w.segments },
+            Rasters::Whole(w) => {
+                assert!(bucket_index < w.buckets.len(), "river bucket {bucket_index} outside the map");
+                SegmentsRef::Whole { ids: w.buckets[bucket_index].iter(), segments: &w.segments }
+            }
+            Rasters::Tiled(t) => t.bucket(bucket_index),
         }
     }
 
     fn artifact(&self) -> Option<&WorldArtifact> {
         match self {
             Rasters::Whole(w) => Some(&w.artifact),
+            Rasters::Tiled(_) => None,
         }
     }
 }
 
-/// The segments of one bucket: `(segment id, segment)` in stored order.
-pub(crate) struct SegmentsRef<'a> {
-    ids: std::slice::Iter<'a, u32>,
-    segments: &'a [Segment],
+/// The segments of one bucket: `(segment id, segment)` in stored order
+/// (ascending id). Segments come by value: a tiled bucket lives in a tile
+/// the iterator itself keeps alive.
+pub(crate) enum SegmentsRef<'a> {
+    Whole { ids: std::slice::Iter<'a, u32>, segments: &'a [Segment] },
+    Tiled(crate::forged_tiles::TileBucket),
 }
 
-impl<'a> Iterator for SegmentsRef<'a> {
-    type Item = (u32, &'a Segment);
+impl Iterator for SegmentsRef<'_> {
+    type Item = (u32, Segment);
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.ids.next().map(|&s| (s, &self.segments[s as usize]))
+        match self {
+            SegmentsRef::Whole { ids, segments } => ids.next().map(|&s| (s, segments[s as usize])),
+            SegmentsRef::Tiled(bucket) => bucket.next(),
+        }
     }
 }
 
@@ -882,6 +922,25 @@ impl ForgedWorld {
 
     fn with_crc(artifact: WorldArtifact, content_crc: u32) -> ForgedWorld {
         let globals = WorldGlobals::of(&artifact);
+        let rasters = Rasters::Whole(WholeRasters::new(artifact));
+        Self::with_rasters(globals, rasters, content_crc)
+    }
+
+    /// A world sampled through a tile cache over `loader` (the world store,
+    /// or [`crate::forged_tiles::MemTiles`]); bit-identical to the whole
+    /// world the tiles were split from. `content_crc` keys the worldgen
+    /// cache (the writer's crc over meta, tiles and world map).
+    pub fn from_tiles(
+        meta: crate::forged_tiles::ForgedMeta,
+        loader: std::sync::Arc<dyn crate::forged_tiles::TileLoader>,
+        content_crc: u32,
+    ) -> Result<ForgedWorld, ArtifactError> {
+        meta.validate()?;
+        let cache = crate::forged_tiles::TileCache::new(&meta, loader, crate::forged_tiles::TILE_CACHE_BYTES);
+        Ok(Self::with_rasters(meta.globals, Rasters::Tiled(cache), content_crc))
+    }
+
+    fn with_rasters(globals: WorldGlobals, rasters: Rasters, content_crc: u32) -> ForgedWorld {
         let seed = globals.seed;
         let detail = OctaveNoise::new(seed ^ 0xDE7A_11, DETAIL_FIRST_OCTAVE, vec![1.0, 0.6]);
         let dither = [
@@ -892,7 +951,7 @@ impl ForgedWorld {
         let lapse_c_per_m = crate::forge::Knobs::default().lapse_c_per_km / 1000.0;
         ForgedWorld {
             globals,
-            rasters: Rasters::Whole(WholeRasters::new(artifact)),
+            rasters,
             content_crc,
             detail,
             dither,
@@ -918,8 +977,7 @@ impl ForgedWorld {
         self.globals.seed
     }
 
-    /// The per-cell data (crate-internal tests).
-    #[cfg(test)]
+    /// The per-cell data (the tile splitter, crate-internal tests).
     pub(crate) fn rasters(&self) -> &Rasters {
         &self.rasters
     }
@@ -1239,12 +1297,12 @@ impl ForgedWorld {
     /// (meters relative to sea; artifact coordinates). `segments` are the
     /// candidates near this point, in ascending order of segment id.
     /// The third value says whether the water is a lake's (else a river's).
-    fn refine<'s>(
+    fn refine(
         &self,
         ax: f64,
         az: f64,
         mut g: f64,
-        segments: impl IntoIterator<Item = &'s Segment>,
+        segments: impl IntoIterator<Item = Segment>,
         lakes: bool,
     ) -> (f64, Option<f64>, bool) {
         // Water surfaces sit on whole blocks (sea level is one), so every
@@ -1275,7 +1333,7 @@ impl ForgedWorld {
         // Rivers: nearest centerline decides. Inside the channel the bed is
         // cut below the water surface; a levee ring outside it stands above
         // the water; further out the valley side is cut back to a bank slope.
-        let mut nearest: Option<(f64, f64, &Segment)> = None; // (distance, water, segment)
+        let mut nearest: Option<(f64, f64, Segment)> = None; // (distance, water, segment)
         for seg in segments {
             let (vx, vz) = (seg.b.0 - seg.a.0, seg.b.1 - seg.a.1);
             let len2 = vx * vx + vz * vz;
@@ -1316,7 +1374,7 @@ impl ForgedWorld {
 
     /// The river segments of the bucket holding artifact point `(ax, az)`
     /// (none off the map).
-    fn bucket_segments(&self, ax: f64, az: f64) -> impl Iterator<Item = &Segment> {
+    fn bucket_segments(&self, ax: f64, az: f64) -> impl Iterator<Item = Segment> + '_ {
         let size = self.globals.size_m;
         let index = (ax >= 0.0 && az >= 0.0 && ax < size && az < size).then(|| {
             let per = self.globals.buckets_per_side();
@@ -1356,7 +1414,7 @@ impl ForgedWorld {
             let bucket = |v: f64| ((v / BUCKET_M).floor().max(0.0) as usize).min(per - 1);
             for bz in bucket(a0.1)..=bucket(a1.1) {
                 for bx in bucket(a0.0)..=bucket(a1.0) {
-                    found.extend(self.rasters.bucket(bz * per + bx).map(|(id, seg)| (id, *seg)));
+                    found.extend(self.rasters.bucket(bz * per + bx));
                 }
             }
             found.sort_unstable_by_key(|&(id, _)| id);
@@ -1454,7 +1512,7 @@ impl crate::Patch for ForgedPatch<'_> {
             };
             &self.cells[cell(az, self.origin.1) * self.cells_per_side + cell(ax, self.origin.0)]
         };
-        let segments = candidates.iter().map(|&k| &self.segments[k as usize]);
+        let segments = candidates.iter().map(|&k| self.segments[k as usize]);
         let (g, water, lake) = self.world.refine(ax, az, prof.surface_y() - SEA_LEVEL, segments, self.lakes);
         // `refine` snapped the surface to a whole block: the topmost water
         // block is the one just under it.
