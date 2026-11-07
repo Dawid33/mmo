@@ -461,8 +461,9 @@ The water static layer (`docs/superpowers/plans/2026-11-06-water-static-layer.md
 - Modify:
   - `crates/worldgen/src/world_store.rs`:
     - add `pub const STORE_FILE: &str = "terrain.sqlite"`;
-    - `check_terrain` (:50) accepts a dir with `terrain.sqlite`, checking `meta.artifact_version` against `ARTIFACT_VERSION`, or with `terrain.world` (pending import, as today);
+    - `check_terrain` (:50) accepts a dir with `terrain.sqlite`, checking the `artifact_version` recorded in the dir's `world.json` against `ARTIFACT_VERSION` (worldgen and the client never open the sqlite or link sqlx), or with `terrain.world` (pending import, as today);
     - `WorldEntry` gains `store: PathBuf`
+    - the tests live in that file's `mod tests` (`just test-one worldgen "--lib world_store::"`)
   - `crates/client/src/local_host.rs` (`start_on` :128: also sets `VOXEL_WORLD_DB=<entry_dir>/terrain.sqlite`)
   - `crates/client/src/debug_launch.rs` (unloadable detection unchanged in shape; `--reset` still removes the dir, so it must also remove `terrain.sqlite-wal`, `-shm` and `.lock`, which happens automatically with `remove_dir_all`)
 - Test: `crates/worldgen/tests/world_store.rs` (or the existing listing tests)

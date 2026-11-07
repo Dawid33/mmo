@@ -137,6 +137,7 @@ impl LocalHost {
         let err = out.try_clone()?;
         let mut child = Command::new(binary)
             .env("VOXEL_WORLD_FILE", terrain)
+            .env("VOXEL_WORLD_DB", terrain.with_file_name(worldgen::world_store::STORE_FILE))
             .env(SINGLE_PLAYER_ENV, "1")
             .env(SERVER_PORT_ENV, port.to_string())
             .stdin(Stdio::piped())

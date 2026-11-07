@@ -13,6 +13,9 @@ use crate::forged::WorldArtifact;
 
 pub const WORLDS_DIR: &str = "worlds";
 pub const TERRAIN_FILE: &str = "terrain.world";
+/// The world store (SQLite, plus `-wal` / `-shm` / `.lock` sidecars): where a
+/// single-player world lives once the server has imported `terrain.world`.
+pub const STORE_FILE: &str = "terrain.sqlite";
 pub const META_FILE: &str = "world.json";
 pub const PREVIEW_FILE: &str = "preview.png";
 pub const LEGACY_WORLD: &str = "worlds/default.world";
@@ -41,26 +44,47 @@ pub struct WorldMeta {
 pub struct WorldEntry {
     pub dir: PathBuf,
     pub terrain: PathBuf,
+    /// `terrain.sqlite` beside the terrain file (may not exist yet).
+    pub store: PathBuf,
     pub preview: Option<PathBuf>,
     pub meta: Option<WorldMeta>,
     pub legacy: bool,
     pub loadable: Result<(), String>,
 }
 
-fn check_terrain(terrain: &Path) -> Result<(), String> {
-    if !terrain.is_file() {
-        return Err(format!("{TERRAIN_FILE} is missing"));
+/// A world is loadable from `terrain.world` (a pending import, or a legacy
+/// file) or, once the server has imported it, from the store. The store is NOT
+/// opened here (this crate does not link sqlx): its artifact version is the
+/// one `world.json` recorded.
+fn check_terrain(terrain: &Path, store: &Path, meta: &Option<WorldMeta>) -> Result<(), String> {
+    if terrain.is_file() {
+        return check_artifact_file(terrain);
     }
+    if store.is_file() {
+        let v = match meta {
+            Some(m) => m.artifact_version,
+            None => return Err(format!("{META_FILE} is missing or unreadable")),
+        };
+        return check_version(v);
+    }
+    Err(format!("{TERRAIN_FILE} is missing"))
+}
+
+fn check_artifact_file(terrain: &Path) -> Result<(), String> {
     match crate::forged::read_artifact_version(terrain) {
-        Ok(v) if v == crate::forged::ARTIFACT_VERSION => Ok(()),
-        Ok(v) if v < crate::forged::ARTIFACT_VERSION => {
-            Err(format!("needs re-forge: {}", crate::forged::ArtifactError::OldVersion { found: v }))
-        }
-        Ok(v) => Err(format!(
-            "world file version {v} is newer than the {} this build reads",
-            crate::forged::ARTIFACT_VERSION
-        )),
+        Ok(v) => check_version(v),
         Err(e) => Err(e.to_string()),
+    }
+}
+
+fn check_version(v: u32) -> Result<(), String> {
+    use crate::forged::{ArtifactError, ARTIFACT_VERSION};
+    if v == ARTIFACT_VERSION {
+        Ok(())
+    } else if v < ARTIFACT_VERSION {
+        Err(format!("needs re-forge: {}", ArtifactError::OldVersion { found: v }))
+    } else {
+        Err(format!("world file version {v} is newer than the {ARTIFACT_VERSION} this build reads"))
     }
 }
 
@@ -96,12 +120,13 @@ pub fn list(root: &Path) -> Vec<WorldEntry> {
                 continue;
             }
             let terrain = dir.join(TERRAIN_FILE);
+            let store = dir.join(STORE_FILE);
             let meta = std::fs::read(dir.join(META_FILE))
                 .ok()
                 .and_then(|b| serde_json::from_slice::<WorldMeta>(&b).ok());
             let preview = Some(dir.join(PREVIEW_FILE)).filter(|p| p.is_file());
-            let loadable = check_meta(&meta).and_then(|()| check_terrain(&terrain));
-            found.push(WorldEntry { dir, terrain, preview, meta, legacy: false, loadable });
+            let loadable = check_meta(&meta).and_then(|()| check_terrain(&terrain, &store, &meta));
+            found.push(WorldEntry { dir, terrain, store, preview, meta, legacy: false, loadable });
         }
     }
     found.sort_by(|a, b| {
@@ -112,7 +137,8 @@ pub fn list(root: &Path) -> Vec<WorldEntry> {
     if legacy.is_file() {
         found.push(WorldEntry {
             dir: root.to_path_buf(),
-            loadable: check_terrain(&legacy),
+            loadable: check_artifact_file(&legacy),
+            store: legacy.with_extension("sqlite"),
             terrain: legacy,
             preview: None,
             meta: None,
@@ -307,6 +333,40 @@ mod tests {
         assert_eq!(l[0].loadable, Ok(()));
         assert!(l[0].terrain.exists());
         assert!(l[0].preview.is_some());
+    }
+
+    #[test]
+    fn list_accepts_store_only_dir() {
+        let root = scratch("storeonly");
+        create(&root, &meta("S", "s", "2026-01-01T00:00:00Z"), &artifact(), b"png").unwrap();
+        let d = root.join("s");
+        std::fs::write(d.join(STORE_FILE), b"sqlite").unwrap();
+        std::fs::remove_file(d.join(TERRAIN_FILE)).unwrap();
+        let e = list(&root).remove(0);
+        assert_eq!(e.loadable, Ok(()));
+        assert_eq!(e.store, d.join(STORE_FILE));
+    }
+
+    #[test]
+    fn list_flags_old_artifact_in_store_dir() {
+        let root = scratch("storeold");
+        let mut m = meta("S", "s", "2026-01-01T00:00:00Z");
+        m.artifact_version = 6;
+        create(&root, &m, &artifact(), b"png").unwrap();
+        let d = root.join("s");
+        std::fs::write(d.join(STORE_FILE), b"sqlite").unwrap();
+        std::fs::remove_file(d.join(TERRAIN_FILE)).unwrap();
+        let e = list(&root).remove(0).loadable.unwrap_err();
+        assert!(e.starts_with("needs re-forge"), "{e}");
+    }
+
+    #[test]
+    fn list_accepts_pending_import_dir() {
+        let root = scratch("pending");
+        create(&root, &meta("P", "p", "2026-01-01T00:00:00Z"), &artifact(), b"png").unwrap();
+        let e = list(&root).remove(0);
+        assert!(!e.store.exists());
+        assert_eq!(e.loadable, Ok(()));
     }
 
     #[test]
