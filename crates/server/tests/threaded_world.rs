@@ -315,22 +315,8 @@ fn roaming_client_cycles_regions_across_threads() {
     }
 }
 
-/// End-to-end crossing on real region threads: a scripted client walks its
-/// player out of `SPAWN_REGION` (0,0) across the -z boundary into (0,-1) using
-/// real input, and we observe the authoritative handoff — the `PlayerRegion`
-/// home flip AND the `EntityArrived` fan-out — arrive over the packet channel.
-/// The arriving bundle is checked for STATE, not just existence: the floor
-/// spans the seam (`seam_floor_columns`), so the player must cross grounded,
-/// land just past the boundary in the arrival region's frame, and still carry
-/// its client, camera and movement state.
-///
-/// Held-input note: `InputState::step` (run once per region tick) demotes a
-/// `Pressed` key to `Held` but never clears it, and `key_held` reports both.
-/// So a single `KeyW` press keeps the player walking every tick until a
-/// release — no per-tick re-send is needed. `KeyE` enables fps-cam (the mode
-/// the walk controller requires); the toggle fires on the first tick that
-/// sees it `Pressed`. Both inputs are stamped to (0,0): the manager routes
-/// `PlayerInput` by the player's *home*, which is (0,0) until the flip lands.
+/// Two regions on real threads count the same world ticks: neither runs
+/// ahead of the world clock, and their `SyncClock` reports share numbers.
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn regions_share_tick_numbers_on_real_threads() {
@@ -367,6 +353,22 @@ fn regions_share_tick_numbers_on_real_threads() {
     assert!(common >= 2, "regions share no tick numbers: {reported:?}");
 }
 
+/// End-to-end crossing on real region threads: a scripted client walks its
+/// player out of `SPAWN_REGION` (0,0) across the -z boundary into (0,-1) using
+/// real input, and we observe the authoritative handoff — the `PlayerRegion`
+/// home flip AND the `EntityArrived` fan-out — arrive over the packet channel.
+/// The arriving bundle is checked for STATE, not just existence: the floor
+/// spans the seam (`seam_floor_columns`), so the player must cross grounded,
+/// land just past the boundary in the arrival region's frame, and still carry
+/// its client, camera and movement state.
+///
+/// Held-input note: `InputState::step` (run once per region tick) demotes a
+/// `Pressed` key to `Held` but never clears it, and `key_held` reports both.
+/// So a single `KeyW` press keeps the player walking every tick until a
+/// release — no per-tick re-send is needed. `KeyE` enables fps-cam (the mode
+/// the walk controller requires); the toggle fires on the first tick that
+/// sees it `Pressed`. Both inputs are stamped to (0,0): the manager routes
+/// `PlayerInput` by the player's *home*, which is (0,0) until the flip lands.
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn walking_input_crosses_a_boundary_on_real_threads() {

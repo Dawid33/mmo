@@ -410,6 +410,7 @@ fn expiry_removes_pile_at_tick() {
 }
 
 #[test]
+#[ignore = "slow: >100ms — run via just test-full"]
 fn clock_jump_keeps_pile_loaded_time() {
     let mut region = region();
     // Region tick 0, so the jump's delta is 10_000.
@@ -421,10 +422,10 @@ fn clock_jump_keeps_pile_loaded_time() {
     // its undo entries (tick write, pile shifts) were dropped, not left in the log.
     assert_eq!(region.data().current(), region.data().oldest(), "the jump leaves no pending transaction");
     assert_eq!(region.data().oldest(), oldest + 1, "the jump was one forgotten transaction");
-    region.handle_event(GameEventKind::Tick);
+    region.handle_event(GameEventKind::Tick).unwrap();
     assert_eq!(piles(&region).len(), 1, "the pile keeps its loaded time across the jump");
     for _ in 0..PILE_DESPAWN_TICKS {
-        region.handle_event(GameEventKind::Tick);
+        region.handle_event(GameEventKind::Tick).unwrap();
     }
     assert!(piles(&region).is_empty());
     assert!(region.data().pile_expiry().is_empty());

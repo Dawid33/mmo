@@ -1009,37 +1009,54 @@ fn body_toss_is_seam_invariant() {
     }
 }
 
-/// The toss under each schedule mode: per seed and placement it is
-/// reproducible (the same snapshot, bit for bit), ends with the lockstep
-/// centred run's entities, tiles and walks (the player within
+/// The toss under one schedule mode: per seed and placement it ends with
+/// the lockstep centred run's entities, tiles and walks (the player within
 /// `JITTER_TOLERANCES`: its landing from the placement is lag-sensitive),
 /// and its body asleep at the centred rest pose within the body tolerances;
-/// every round the body is in exactly one place (`Rig::round`).
-#[test]
-#[ignore = "slow: >100ms — run via just test-full"]
-fn body_toss_survives_jitter() {
+/// every round the body is in exactly one place (`Rig::round`). With
+/// `twice`, each run is repeated and must be reproducible (the same
+/// snapshot, bit for bit) — checked under one mode only, the cost of a
+/// second run per case. One test per mode, so they run in parallel.
+fn body_toss_under(mode: &str, schedule: fn(u64) -> InlineSchedule, twice: bool) {
     let reference = run(&TOSS, Placement::Centre, None);
     let body_ref = the_body(&reference).clone();
     let body_tol = TOSS.lockstep_tolerances();
-    let modes: [(&str, fn(u64) -> InlineSchedule); 3] =
-        [("shuffled", InlineSchedule::shuffled), ("late", InlineSchedule::late), ("jittery", InlineSchedule::jittery)];
     let mut worst = (0.0f32, 0.0f32);
-    for (mode, schedule) in modes {
-        for seed in 0..JITTER_SEEDS {
-            for placement in PLACEMENTS {
-                let what = format!("{mode} seed {seed} {placement:?}");
-                let a = run(&TOSS, placement, Some(schedule(seed)));
+    for seed in 0..JITTER_SEEDS {
+        for placement in PLACEMENTS {
+            let what = format!("{mode} seed {seed} {placement:?}");
+            let a = run(&TOSS, placement, Some(schedule(seed)));
+            if twice {
                 assert_eq!(a, run(&TOSS, placement, Some(schedule(seed))), "{what} is not reproducible");
-                let tol = Tolerances { tiles: true, ..JITTER_TOLERANCES };
-                if let Err(e) = compare(&reference, &a, &tol) {
-                    panic!("{what} differs from lockstep Centre: {e}");
-                }
-                let (pose, turn) = assert_body_matches(&body_ref, &a, &body_tol, &what);
-                worst = (worst.0.max(pose), worst.1.max(turn));
             }
+            let tol = Tolerances { tiles: true, ..JITTER_TOLERANCES };
+            if let Err(e) = compare(&reference, &a, &tol) {
+                panic!("{what} differs from lockstep Centre: {e}");
+            }
+            let (pose, turn) = assert_body_matches(&body_ref, &a, &body_tol, &what);
+            worst = (worst.0.max(pose), worst.1.max(turn));
         }
     }
-    eprintln!("[body-jitter] worst: pose {} blocks, rotation {}°", worst.0, worst.1);
+    eprintln!("[body-jitter] {mode} worst: pose {} blocks, rotation {}°", worst.0, worst.1);
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn body_toss_survives_shuffled_ticks() {
+    body_toss_under("shuffled", InlineSchedule::shuffled, false);
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn body_toss_survives_late_inputs() {
+    body_toss_under("late", InlineSchedule::late, false);
+}
+
+/// Also the reproducibility check (every run twice).
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn body_toss_survives_jitter() {
+    body_toss_under("jittery", InlineSchedule::jittery, true);
 }
 
 /// [`SLIDE`] with its body re-arrived in its OWN region (extracted and

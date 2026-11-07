@@ -111,6 +111,7 @@ fn connect_and_subscribe(h: &mut Harness) {
 }
 
 #[test]
+#[ignore = "slow: >100ms — run via just test-full"]
 fn crossing_flips_ownership_home_and_pushes_player_region() {
     let mut h = harness();
     connect_and_subscribe(&mut h);
@@ -171,6 +172,7 @@ fn halo_entity_updates_never_wake_a_cold_region() {
 }
 
 #[test]
+#[ignore = "slow: >100ms — run via just test-full"]
 fn halo_entity_updates_reach_running_neighbours() {
     let mut h = harness();
     connect_and_subscribe(&mut h);
@@ -185,6 +187,7 @@ fn halo_entity_updates_reach_running_neighbours() {
 }
 
 #[test]
+#[ignore = "slow: >100ms — run via just test-full"]
 fn input_routes_by_home_ignoring_the_stamp() {
     let mut h = harness();
     connect_and_subscribe(&mut h);
@@ -277,6 +280,7 @@ fn subscribed_and_warm() -> Harness {
 }
 
 #[test]
+#[ignore = "slow: >100ms — run via just test-full"]
 fn arrival_lands_in_slot_after_departure_tick() {
     let mut h = subscribed_and_warm();
     let target = RegionCoords::new(1, 0);
@@ -292,6 +296,7 @@ fn arrival_lands_in_slot_after_departure_tick() {
 }
 
 #[test]
+#[ignore = "slow: >100ms — run via just test-full"]
 fn transfer_to_lagging_target_waits() {
     let mut h = subscribed_and_warm();
     let target = RegionCoords::new(1, 0);
@@ -317,6 +322,7 @@ fn transfer_to_lagging_target_waits() {
 }
 
 #[test]
+#[ignore = "slow: >100ms — run via just test-full"]
 fn transfer_to_leading_target_applies_on_receipt() {
     let mut h = subscribed_and_warm();
     let target = RegionCoords::new(1, 0);

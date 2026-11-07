@@ -763,10 +763,6 @@ fn arrive(region: &mut Region, bundle: EntityBundle) -> Option<game::EntityKey> 
     e
 }
 
-fn owned(region: &Region, id: EntityId) -> game::EntityKey {
-    *region.data().id_index.get(&id).expect("owned here")
-}
-
 /// The arrived body carries the bundle's velocities and mass exactly.
 fn assert_carries(body: &RigidBody, bundle: &EntityBundle) {
     assert!(body.is_dynamic(), "a dynamic body");
@@ -966,7 +962,7 @@ fn ghost_jump_snaps_without_flinging() {
         linvel: Vector::ZERO,
         collider: capsule.clone(),
     };
-    let mut step = |region: &mut Region, x: f32| {
+    let step = |region: &mut Region, x: f32| {
         region.handle_event(GameEventKind::HaloEntity(mirror(x))).unwrap();
         region.forget_last_event();
         tick(region);
