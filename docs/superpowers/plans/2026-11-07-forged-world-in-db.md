@@ -116,9 +116,9 @@ The water static layer (`docs/superpowers/plans/2026-11-06-water-static-layer.md
 - [ ] **Step 1: Write a guard test.**
   - In `crates/worldgen/tests/forged_world.rs`, `whole_rasters_refactor_is_bit_exact`: forge 4,096 m / 16 m, seed 4. Hash with crc32 over `to_bits` the outputs of `sample`, `column_climate`, `biome_at`, `region_cell`, `cell_climate`, `snow_line_m`, `geo_offset_blocks`, `surface_rock` and `extended_cell_height` on a 7 m-stride grid covering the map + 200 m outside. Also hash `generate_region_forged` for regions (0,0) and the four corner regions.
   - Pin the crc as a constant recorded **before** the refactor. Slow-tagged.
-- [ ] **Step 2: Run** `just test-one worldgen "--test it -- --include-ignored forged_world::whole_rasters"` on the unchanged code. Record the crc in the test and commit the test alone: `test(worldgen): pin forged sampling bits before the raster refactor`.
+- [ ] **Step 2: Run** `just test-one worldgen "--test forged_world -- --include-ignored whole_rasters"` on the unchanged code (`forged_world` is its own test target, not part of `it`: it pins the process world). Record the crc in the test and commit the test alone: `test(worldgen): pin forged sampling bits before the raster refactor`.
 - [ ] **Step 3: Implement** `Rasters::Whole` and move every read behind it, with no behaviour change.
-- [ ] **Step 4: Run** the guard test, `just test-one worldgen "--test it scene_hash_golden"` and `just smoke`. Expected: PASS with unchanged constants.
+- [ ] **Step 4: Run** the guard test (`--test forged_world`), `just test-one worldgen "--test it scene_hash_golden"` and `just smoke`. Expected: PASS with unchanged constants.
 - [ ] **Step 5: Commit**: `refactor(worldgen): forged sampling reads rasters through Rasters`.
 
 ### Task 2: Tiles, the tile splitter, and `Rasters::Tiled`

@@ -1053,3 +1053,105 @@ fn cold_sea_floors_are_sand_under_the_ice() {
         assert!(bad.is_empty(), "{name}: {} sea floors not sand, e.g. {:?}", bad.len(), bad.first());
     }
 }
+
+// ---- Raster refactor guard (forged-world-in-db plan, Task 1) ----
+
+/// crc32 of every sampler output [`whole_rasters_refactor_is_bit_exact`]
+/// hashes, recorded on the code BEFORE raster reads moved behind
+/// `forged::Rasters`. Any change to it is a change in what a forged world
+/// generates.
+const WHOLE_RASTERS_GUARD_CRC: u32 = 0x5AD6_2E91;
+
+/// Every public sampler of a real forged world (4,096 m / 16 m, seed 4) on a
+/// 7 m grid over the map and 200 m past it, plus five whole regions and one
+/// region's coarse LOD and water, hashed bit-exactly (`to_bits`, bincode of
+/// structs without hash maps; fixed iteration order).
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn whole_rasters_refactor_is_bit_exact() {
+    let p = worldgen::forge::ForgeParams { size_m: 4096.0, cell_m: 16.0, seed: 4, ..Default::default() };
+    let world = ForgedWorld::new(worldgen::forge::forge(&p).artifact(&p));
+    let mut h = crc32fast::Hasher::new();
+    let f64b = |h: &mut crc32fast::Hasher, v: f64| h.update(&v.to_bits().to_le_bytes());
+    let f32b = |h: &mut crc32fast::Hasher, v: f32| h.update(&v.to_bits().to_le_bytes());
+
+    let (min, max) = world.artifact_bounds_engine_m();
+    const OUTSIDE_M: f64 = 200.0;
+    const STRIDE_M: f64 = 7.0;
+    let steps = |lo: f64, hi: f64| ((hi - lo + 2.0 * OUTSIDE_M) / STRIDE_M).ceil() as i64;
+    let (nx, nz) = (steps(min[0], max[0]), steps(min[1], max[1]));
+    let (mut wet, mut points) = (0usize, 0usize);
+    for kz in 0..=nz {
+        let z = min[1] - OUTSIDE_M + kz as f64 * STRIDE_M;
+        for kx in 0..=nx {
+            let x = min[0] - OUTSIDE_M + kx as f64 * STRIDE_M;
+            points += 1;
+            let s = world.sample(x, z);
+            f64b(&mut h, s.ground_y);
+            match s.water_y {
+                Some(w) => {
+                    wet += 1;
+                    h.update(&[1]);
+                    f64b(&mut h, w);
+                }
+                None => h.update(&[0]),
+            }
+            let c = world.column_climate(x, z);
+            h.update(&[c.biome as u8, c.salt_flat as u8, c.snow_patch as u8]);
+            f32b(&mut h, c.snow_line_m);
+            f32b(&mut h, c.temperature_c);
+            f32b(&mut h, c.glacier_share);
+            h.update(&[world.biome_at(x, z) as u8]);
+            let (id, kind) = world.region_cell(x, z);
+            h.update(&id.to_le_bytes());
+            h.update(&[kind.map_or(u8::MAX, |k| k as u8)]);
+            let cc = world.cell_climate(x, z);
+            f32b(&mut h, cc.height_m);
+            f32b(&mut h, cc.temperature_c);
+            f32b(&mut h, cc.precip_mm);
+            h.update(&[cc.drainage, cc.salinity, cc.is_lake as u8]);
+            f32b(&mut h, world.snow_line_m(x, z));
+            h.update(&world.geo_offset_blocks(x, z).to_le_bytes());
+            h.update(&[world.surface_rock(x, z).map_or(u8::MAX, |r| r)]);
+        }
+    }
+    // Raster cells, the map and 200 m past it.
+    let n = i64::from(world.artifact().n);
+    let pad = (OUTSIDE_M / world.artifact().cell_m).ceil() as i64;
+    for iz in -pad..n + pad {
+        for ix in -pad..n + pad {
+            f64b(&mut h, world.extended_cell_height(ix, iz));
+        }
+    }
+    // Whole regions: the centre and the four corners of the map.
+    let rb = game::REGION_BLOCKS as f64;
+    let rc = |x: f64, z: f64| RegionCoords::new((x / rb).floor() as i32, (z / rb).floor() as i32);
+    let regions = [
+        RegionCoords::new(0, 0),
+        rc(min[0], min[1]),
+        rc(max[0] - 1.0, min[1]),
+        rc(min[0], max[1] - 1.0),
+        rc(max[0] - 1.0, max[1] - 1.0),
+    ];
+    let mats = biome_mats();
+    for &r in &regions {
+        let columns = worldgen::generate_region_forged(&world, r, mats);
+        h.update(&bincode::serialize(&columns).unwrap());
+    }
+    let key = game::lod::LodKey::for_region(16, RegionCoords::new(0, 0));
+    for cell in worldgen::coarse_tile_forged(&world, &key, mats) {
+        h.update(&bincode::serialize(&(cell.group, &cell.grid)).unwrap());
+    }
+    h.update(&bincode::serialize(&worldgen::coarse_water_forged(&world, &key, mats)).unwrap());
+
+    let a = world.artifact();
+    let crc = h.finalize();
+    println!(
+        "guard: {points} points ({wet} wet), {} rivers, {} lakes, edges {:?}, regions {regions:?}: crc {crc:#010X}",
+        a.rivers.len(),
+        a.lakes.len(),
+        a.edges,
+    );
+    assert!(!a.rivers.is_empty() && !a.lakes.is_empty() && wet > 0, "the guard world must hold rivers and lakes");
+    assert_eq!(crc, WHOLE_RASTERS_GUARD_CRC, "forged sampling changed: crc {crc:#010X}");
+}
