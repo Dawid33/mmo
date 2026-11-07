@@ -1070,7 +1070,7 @@ fn home_block_solid(mirror: &tiles::TileMirror, eye: Vec3) -> Option<bool> {
 }
 
 /// Whether world point `eye` lies in a water cell of the home region
-/// (`TileSource::water_units` > 0: recipe water or a liquid block).
+/// (`TileSource::water_units` > 0: recipe water, `game::static_water_units`).
 pub fn eye_in_water(mirror: &tiles::TileMirror, eye: Vec3) -> bool {
     let world = eye / game::BLOCK_VOXELS as f32;
     let (bx, bz) = (world.x.floor() as i32, world.z.floor() as i32);

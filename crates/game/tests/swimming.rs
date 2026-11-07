@@ -183,6 +183,29 @@ fn swimmer_climbs_out_onto_a_one_block_ledge() {
 /// takes a body two blocks tall (or, once water flows, a shallow cell). The
 /// sampling is checked on the real region state; the wading speed through
 /// `plan_with` + `settle`, as every mover runs them.
+/// The climb-out is a surface move: head under, jump against a wall only
+/// swims up towards `SWIM_UP_SPEED` (it shot the body up at the exit speed
+/// before); at the waist the same keys climb out.
+#[test]
+fn climb_out_only_at_the_surface() {
+    let keys = MoveKeys { jump_held: true, forward: true, ..MoveKeys::default() };
+    let max_dv = game::movement::SWIM_VERTICAL_ACCEL * TICK_DT;
+    let mut m = Motion { immersion: Immersion::Head, blocked_horizontally: true, ..Motion::default() };
+    plan_with(&mut m, &keys, 0.0, 0, &MoveParams::PLAYER);
+    let want = game::movement::SWIM_UP_SPEED.min(max_dv) * UNITS_PER_METER;
+    assert!((m.vel_y - want).abs() <= 1e-3, "head under: {} vs {want}", m.vel_y);
+    for _ in 0..20 {
+        plan_with(&mut m, &keys, 0.0, 0, &MoveParams::PLAYER);
+    }
+    let up = game::movement::SWIM_UP_SPEED * UNITS_PER_METER;
+    assert!((m.vel_y - up).abs() <= 1e-3, "head under settles at SWIM_UP_SPEED: {} vs {up}", m.vel_y);
+
+    let mut m = Motion { immersion: Immersion::Waist, blocked_horizontally: true, ..Motion::default() };
+    plan_with(&mut m, &keys, 0.0, 0, &MoveParams::PLAYER);
+    let exit = game::movement::SWIM_EXIT_SPEED * UNITS_PER_METER;
+    assert_eq!(m.vel_y, exit, "at the surface: climbs out");
+}
+
 #[test]
 fn wading_slows_walking() {
     let mut w = bank_world();

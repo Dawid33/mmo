@@ -114,8 +114,10 @@ Seam-transparent regions follow-ups (program landed 2026-11-06/07, spec specs/20
 
 Static water layer follow-ups (landed 2026-11-07, plan plans/2026-11-06-water-static-layer.md; code review pending):
 - Static limits: dug pockets under water stay dry (the recipe is per column, a dug cell reads as air above `surface + 1`); placed blocks do not relevel water; no drowning (`DROWN_DEPTH` is unused); no currents.
+- A body in static (depth-7) water cannot take a move order: `current_tile` / `nearest_standable` find no standable tile for it, so only F5 swimming gets it out — and the click gives no feedback.
+- Underwater fog only inside the home region: `eye_in_water` reads the home tile mirror, so it is false in the fortress-neighbourhood regions.
 - Whole-cell immersion: a player in 1-deep shoreline water swims (no jump except climbing out); people who end up in deep water cannot climb out (they never hold jump); a fall into shallow water can still hit the bed.
-- LOD water wire size and the per-rebuild worker cost (`LodWater`) are unmeasured: clamp the shipped depth and/or cache per key if they matter.
+- LOD water wire size and the per-rebuild worker cost (`LodWater`) are unmeasured (the shipped depth is clamped at `LOD_WATER_MAX_DEPTH_BLOCKS`): cache per key if they matter.
 - The water tile readiness gate scans every `PendingSnapshotVoxels` per frame while waiting.
 - Live checks pending (Dawid): Tasks 6-9 visuals (water pass, cut discard, underwater fog, LOD water), swim feel, the WebGL2 browser check.
 - Measure before the flow plans: (1) a `PERF_LOG=1` embarked run at 256 m, which Dawid runs himself; (2) the body-restructure budget prototype round.

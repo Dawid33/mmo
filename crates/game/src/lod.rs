@@ -510,11 +510,17 @@ impl PackedLodGrid {
     }
 }
 
+/// Deepest water depth, in blocks, an [`LodWater`] column ships. The client
+/// draws water with alpha `1 − exp(−0.35 × depth_m)` capped at its
+/// `WATER_MAX_ALPHA` (0.92), which saturates at ≈ 7.2 m of depth: deeper
+/// adds nothing visible and would only break the open sea's RLE runs.
+pub const LOD_WATER_MAX_DEPTH_BLOCKS: u8 = 8;
+
 /// A key's water surface layer, streamed beside its terrain grids (water
 /// plan Task 8). LOD grids carry no liquid ([`terrain_id`]); this says, per
 /// LOD column, the topmost water block (`crate::NO_WATER` when the column
 /// is dry or its top is ice) and the water's depth in blocks over the
-/// ground (clamped to 255). It comes from the recipe on every build path,
+/// ground (clamped to [`LOD_WATER_MAX_DEPTH_BLOCKS`]). It comes from the recipe on every build path,
 /// never from chunks, so a terrain rebuild resends the same water and water
 /// never enters the terrain fingerprint.
 ///

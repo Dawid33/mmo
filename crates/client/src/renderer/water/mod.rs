@@ -9,8 +9,8 @@
 //!   snapshot loads or is replaced, its removal, and every applied
 //!   `SetBlocks` (the edited chunk's column).
 //! - A tile is built from the recipe (`ColumnGround::recipe_water`) minus the
-//!   cells holding a block that is neither air nor liquid (liquid blocks
-//!   still count as water until worldgen stops writing them), read from the
+//!   cells holding any block but air (`game::static_water_units`' rule: water
+//!   is the recipe's alone, a liquid block in a chunk is not water), read from the
 //!   bridge's `SimChunk` mirrors on the main thread ([`tile_input`]) once its
 //!   region's snapshot chunks have all landed, then meshed on the compute
 //!   pool ([`mesh::WaterMeshJob`], at most [`MAX_WATER_MESH_TASKS`] in
@@ -206,7 +206,6 @@ pub fn tile_input<'a>(
         Some((g, (x % cb) as usize, (z % cb) as usize))
     };
     let recipe = |x: i32, z: i32| column_of(x, z).and_then(|(g, lx, lz)| g.recipe_water(lx, lz));
-    let props = game::block_props();
     // Cells `lo..=hi` of column (x, z), one chunk lookup per chunk crossed.
     let cells = |x: i32, z: i32, lo: i32, hi: i32| -> Vec<Cell> {
         let surface =
@@ -222,8 +221,9 @@ pub fn tile_input<'a>(
                 cy,
                 region.z * REGION_CHUNKS as i32 + z / cb,
             ];
+            // `game::static_water_units`: only air inside the recipe is water.
             let open = |id: BlockId| {
-                if id == BlockId::AIR || props.is_liquid(id) {
+                if id == BlockId::AIR {
                     Cell::Open
                 } else {
                     Cell::Solid
@@ -527,8 +527,9 @@ mod tests {
         [(ColumnCoords::new(0, 0), g)].into_iter().collect()
     }
 
-    /// R6.1: liquid blocks count as water, other blocks are cut out of the
-    /// recipe range, and a block over the run marks it `solid_above`.
+    /// R6.1: every block but air is cut out of the recipe range — a liquid
+    /// block in a chunk too (`game::static_water_units`: water is the
+    /// recipe's alone) — and a block over the run marks it `solid_above`.
     #[test]
     fn recipe_minus_solid_blocks() {
         // Every cell below lies in chunk y 0 only with 16-block chunks.
@@ -553,7 +554,7 @@ mod tests {
             runs,
             &vec![
                 WaterRun {
-                    y0: 3,
+                    y0: 4,
                     y1: 4,
                     solid_above: true
                 },
@@ -564,6 +565,7 @@ mod tests {
                 },
             ]
         );
+        assert!(input.column(0, 0).is_solid(3), "a liquid block is not water");
         assert!(input.column(0, 0).is_solid(5));
         // The dry neighbour east (its chunk cells are air): open over the
         // whole span the pond's sides look at.
@@ -578,6 +580,15 @@ mod tests {
                 REGION_BLOCKS as i32 == WATER_TILE_BLOCKS
             ]
         );
+    }
+
+    /// The LOD water layer's depth clamp loses nothing: alpha has saturated
+    /// by then.
+    #[test]
+    fn lod_water_depth_clamp_is_past_alpha_saturation() {
+        let max = f32::from(game::lod::LOD_WATER_MAX_DEPTH_BLOCKS);
+        assert_eq!(water_alpha(max), WATER_MAX_ALPHA);
+        assert!(water_alpha(max - 1.0) < WATER_MAX_ALPHA, "the clamp is not needlessly deep");
     }
 
     #[test]

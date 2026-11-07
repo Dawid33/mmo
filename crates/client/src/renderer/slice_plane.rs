@@ -41,7 +41,7 @@ use bevy::{
     render::render_resource::{AsBindGroup, Extent3d, ShaderType, TextureDimension, TextureFormat},
     shader::ShaderRef,
 };
-use game::{RegionId, TileSource, REGION_BLOCKS, REGION_SIZE};
+use game::{BlockId, RegionId, TileSource, REGION_BLOCKS, REGION_SIZE};
 
 use super::block_textures::BlockTextureLayers;
 use super::commander::level::{camera_cut, WorkingLevel};
@@ -56,15 +56,31 @@ use super::voxel_pull::BlockArrayTexture;
 /// `AIR` (0, discarded) everywhere else: over air at `level`, and over a
 /// block open to the level above, whose own top face (full or half block)
 /// then shows at its true height, undarkened.
+///
+/// Water ([`TileSource::water_units`] > 0) is filled too: the water pass
+/// discards everything above the cut, so a cut through a lake or the sea
+/// shows its cross-section here, capped with the manifest's `water` block —
+/// where the water at `level` has water or a solid above it. A solid at
+/// `level` under water is not capped: its top face is meshed (water is not
+/// in the chunks) and lies on the cut, as under air.
 pub fn slice_ids(src: &impl TileSource, level: i32) -> Vec<u16> {
+    let props = game::block_props();
+    let water = props.id_named("water").unwrap_or(BlockId::AIR);
     (0..REGION_BLOCKS as i32)
         .flat_map(|z| {
             (0..REGION_BLOCKS as i32).map(move |x| {
                 let below = src.block([x, level, z]);
                 let above = src.block([x, level + 1, z]);
-                // Liquid is not material here (the water pass draws it).
-                let props = game::block_props();
-                if props.blocks_ray(below) && props.blocks_ray(above) { below.0 } else { 0 }
+                let above_solid = props.blocks_ray(above);
+                if props.blocks_ray(below) {
+                    if above_solid { below.0 } else { 0 }
+                } else if src.water_units([x, level, z]) > 0
+                    && (above_solid || src.water_units([x, level + 1, z]) > 0)
+                {
+                    water.0
+                } else {
+                    0
+                }
             })
         })
         .collect()
@@ -248,7 +264,7 @@ fn update_slice_plane(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use game::{BlockId, RegionId, TilePos, TileSource, REGION_BLOCKS};
+    use game::{TilePos, WATER_FULL};
 
     const STONE: BlockId = BlockId(2);
     const L: i32 = 40;
@@ -301,6 +317,57 @@ mod tests {
         assert_eq!(ids[2], 0, "L air: open to look down into");
         assert_eq!(ids[3], 0, "half block with air above: its own top shows");
         assert_eq!(ids[4], 0);
+    }
+
+    /// `Stub` plus recipe water: every non-solid cell at or below `WATER_TOP`.
+    struct Lake(fn(i32, i32, i32) -> BlockId);
+    const WATER_TOP: i32 = 45;
+
+    impl TileSource for Lake {
+        fn block(&self, p: TilePos) -> BlockId {
+            (self.0)(p[0], p[1], p[2])
+        }
+        fn is_bedrock(&self, _: TilePos) -> bool {
+            false
+        }
+        fn is_constructed(&self, _: TilePos) -> bool {
+            false
+        }
+        fn tree_id(&self, _: TilePos) -> u32 {
+            0
+        }
+        fn tree_limb(&self, _: TilePos) -> u8 {
+            0
+        }
+        fn water_units(&self, p: TilePos) -> u16 {
+            if p[1] <= WATER_TOP && self.block(p) == BlockId::AIR { WATER_FULL } else { 0 }
+        }
+    }
+
+    /// A cut below a lake's surface shows its cross-section: water at `L`
+    /// under water (or under a solid) is capped with the `water` block; the
+    /// lake bed under water keeps its own meshed top face; the water's top
+    /// level (air above) is left to the water surface.
+    #[test]
+    fn slice_ids_cap_water_below_its_surface() {
+        let reg = game::BlockRegistry::from_ron(include_str!("../../../../assets/blocks/blocks.ron")).unwrap();
+        game::install_block_props(reg.props());
+        let water = reg.id_of("water").expect("water block").0;
+        let ids = slice_ids(
+            &Lake(|x, y, _| match (x, y) {
+                // x = 1: the lake bed at L, water above.
+                (1, L) => STONE,
+                // x = 2: an ice sheet over the water at L.
+                (2, 41) => STONE,
+                _ => BlockId::AIR,
+            }),
+            L,
+        );
+        assert_eq!(ids[0], water, "water under water: the cross-section");
+        assert_eq!(ids[1], 0, "the bed's top face shows under the water");
+        assert_eq!(ids[2], water, "water under a solid");
+        let surface = slice_ids(&Lake(|_, _, _| BlockId::AIR), WATER_TOP);
+        assert_eq!(surface[0], 0, "the top water level: the surface shows");
     }
 
     #[test]

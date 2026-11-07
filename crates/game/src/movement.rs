@@ -77,8 +77,8 @@ pub const SWIM_FLOAT_UP_SPEED: f32 = 1.0;
 /// its waist is found wet) stops ~1.5 m above the bed. At 12 m/s² it hit the
 /// bed (stopping took ~7.5 m); 40 still came within 0.32 m of it.
 pub const SWIM_VERTICAL_ACCEL: f32 = 45.0;
-/// Upward speed a swimmer holding jump against a wall gets: climbs out onto
-/// a one-block ledge.
+/// Upward speed a swimmer at the surface ([`Immersion::Waist`]) holding jump
+/// against a wall gets: climbs out onto a one-block ledge.
 pub const SWIM_EXIT_SPEED: f32 = JUMP_SPEED;
 
 /// Standing height of a player body (Minecraft: 1.8 m). It fills two blocks
@@ -250,9 +250,11 @@ pub fn plan_with(
             _ if keys.descend && !keys.jump_held => -SWIM_DOWN_SPEED,
             _ => 0.0,
         } * UNITS_PER_METER;
-        let (v0, v1) = if keys.jump_held && motion.blocked_horizontally {
-            // Against a wall: out of the water onto the ledge, at full
-            // speed for as long as the wall blocks and the waist is wet.
+        let (v0, v1) = if motion.immersion == Immersion::Waist && keys.jump_held && motion.blocked_horizontally {
+            // At the surface against a wall: out of the water onto the
+            // ledge, at full speed for as long as the wall blocks and the
+            // waist is wet. Head under, jump only swims up (a wall under
+            // water is no ledge).
             let exit = SWIM_EXIT_SPEED * UNITS_PER_METER;
             (exit, exit)
         } else {

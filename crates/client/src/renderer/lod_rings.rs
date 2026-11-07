@@ -361,6 +361,16 @@ fn spawn_lod_water(
     if !water.has_water() {
         return;
     }
+    // Wire data is untrusted: a layer sized for another key would mesh past
+    // (or short of) its root, so check its side before decoding anything.
+    if water.side != LodWater::side_for(key) {
+        warn!(
+            "lod: dropping water layer of side {} for {key:?} (expected {})",
+            water.side,
+            LodWater::side_for(key)
+        );
+        return;
+    }
     if !water.is_well_formed() {
         warn!("lod: dropping undecodable water layer for {key:?}");
         return;
@@ -1072,5 +1082,24 @@ mod tests {
         }
         let slot = &app.world().resource::<LodRings>().roots[&key];
         assert_eq!(slot.retiring, Some(root), "water alone does not retire the old root");
+    }
+
+    /// A water layer whose side is not its key's (untrusted wire data) is
+    /// dropped with a warning: no water child, the root still spawns.
+    #[test]
+    fn lod_water_of_the_wrong_side_is_dropped() {
+        let mut app = rings_app();
+        app.init_asset::<WaterMaterial>()
+            .init_resource::<WaterMaterialHandle>();
+        let key = LodKey::for_region(16, game::RegionCoords::new(3, 0));
+        let side = LodWater::side_for(&key) / 2;
+        let water = LodWater::encode(&vec![DEEP; usize::from(side) * usize::from(side)], side);
+        assert!(water.is_well_formed(), "well-formed for its own side");
+        push_event(&mut app, LodEventMsg::Data(key, Vec::new(), water));
+        app.update();
+        let root = slot_root(&app, key).expect("root spawns without its water");
+        let world = app.world_mut();
+        let mut q = world.query_filtered::<&ChildOf, With<LodWaterSurface>>();
+        assert_eq!(q.iter(world).filter(|c| c.parent() == root).count(), 0, "no water child");
     }
 }

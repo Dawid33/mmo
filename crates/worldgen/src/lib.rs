@@ -769,7 +769,8 @@ pub fn coarse_tile_forged(
 /// sub-block key samples each block column once, at its centre as region
 /// generation does, and repeats it over the block's LOD columns (water is
 /// whole blocks). A column holds water iff its water top is above its
-/// ground (`water_top > top`), with depth `water_top − top` blocks; a
+/// ground (`water_top > top`), with depth `water_top − top` blocks
+/// (clamped to [`game::lod::LOD_WATER_MAX_DEPTH_BLOCKS`]); a
 /// column whose top water block is ice is dry here (the ice is LOD terrain).
 /// Pure: the same water on every build path, whatever the region's chunks.
 pub fn coarse_water(key: &game::lod::LodKey, seed: u64, mats: Materials) -> game::lod::LodWater {
@@ -796,7 +797,8 @@ fn lod_water_column(c: &ColSample) -> (i16, u8) {
     if c.water_top <= c.top || c.ice_from <= c.water_top {
         return (game::NO_WATER, 0);
     }
-    (c.water_top as i16, (c.water_top - c.top).min(i32::from(u8::MAX)) as u8)
+    let max = i32::from(game::lod::LOD_WATER_MAX_DEPTH_BLOCKS);
+    (c.water_top as i16, (c.water_top - c.top).min(max) as u8)
 }
 
 fn water_from_patch(patch: &dyn Patch, key: &game::lod::LodKey, mats: &Materials) -> game::lod::LodWater {
@@ -1054,10 +1056,35 @@ mod tests {
             unbounded: true,
         };
         assert_eq!(super::lod_water_column(&c(70, 63, 70, 64)), (game::NO_WATER, 0), "dry land");
-        assert_eq!(super::lod_water_column(&c(50, 63, 50, 64)), (63, 13), "open sea");
+        assert_eq!(super::lod_water_column(&c(58, 63, 58, 64)), (63, 5), "shallow sea");
+        let max = game::lod::LOD_WATER_MAX_DEPTH_BLOCKS;
+        assert_eq!(super::lod_water_column(&c(50, 63, 50, 64)), (63, max), "open sea clamps");
         assert_eq!(super::lod_water_column(&c(50, 63, 50, 62)), (game::NO_WATER, 0), "frozen top");
-        assert_eq!(super::lod_water_column(&c(-900, 63, -900, 64)), (63, 255), "depth clamps");
+        assert_eq!(super::lod_water_column(&c(-900, 63, -900, 64)), (63, max), "depth clamps");
         assert_eq!(super::lod_water_column(&c(60, 63, 70, 64)), (game::NO_WATER, 0), "glacier over the water top");
+    }
+
+    /// Open sea over a varying seabed is one RLE run: every depth past the
+    /// alpha's saturation ships as the clamp.
+    #[test]
+    fn open_sea_row_is_one_run() {
+        let side: u16 = 8;
+        let tops: Vec<(i16, u8)> = (0..i32::from(side) * i32::from(side))
+            .map(|i| {
+                let floor = 40 - (i * 7) % 15; // 26..=40 blocks: always deeper than the clamp
+                super::lod_water_column(&super::ColSample {
+                    s: floor,
+                    water_top: 63,
+                    top: floor,
+                    ice_from: 64,
+                    cover: None,
+                    trees: true,
+                    unbounded: true,
+                })
+            })
+            .collect();
+        let water = game::lod::LodWater::encode(&tops, side);
+        assert_eq!(water.runs, vec![(side * side, 63, game::lod::LOD_WATER_MAX_DEPTH_BLOCKS)]);
     }
 
     use super::*;

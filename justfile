@@ -866,7 +866,7 @@ test-one crate *args:
 #     own target);
 #   - server `threaded_world`: the same walk on real OS threads. Serial on
 #     purpose: each test already spawns 9+ region threads.
-# ~75s warm (game ~35 s, the real-thread layer ~35 s). Run after
+# ~80 s–2 min warm (game ~45 s, the real-thread layer ~35 s, measured 2026-11-07). Run after
 # touching handoff, the WorldManager, region_threads or anything that crosses
 # a seam. The client-side twin (bit-exact convergence under late scheduling)
 # needs a Bevy-sized test binary, so it stays an explicit opt-in:
