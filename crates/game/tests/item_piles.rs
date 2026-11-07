@@ -261,6 +261,39 @@ fn refused_deposit_goes_back_to_the_inventory() {
     assert_eq!(inventory_count(&region, 0, DIRT), 3, "the refused rest is back");
 }
 
+/// A refused region deposit that waited in the manager's mailbox while its
+/// source was parked arrives after the source's clock jumped on waking: the
+/// pile it puts down gets a fresh lifetime from now, not the original
+/// absolute expiry (long past), or it would vanish on the next tick.
+#[test]
+fn refused_deposit_after_a_long_park_keeps_a_full_lifetime() {
+    let mut region = region();
+    let cell = w([10, 1, 10]);
+    // Refused while the source was parked: stamped from before the park.
+    let refused = Intent::DepositItems {
+        cell,
+        stack: stack(DIRT, 2),
+        expire: PILE_DESPAWN_TICKS,
+        pickup: PICKUP_DELAY_TICKS,
+        by: game::EntityId::of_region(r0()),
+    };
+    let woke_at = 3 * PILE_DESPAWN_TICKS;
+    region.jump_clock_to(woke_at);
+    let reply = game::SentReply {
+        reply: game::IntentReply::Refused(refused, game::IntentRefusal::OwnerNotRunning),
+        hint: r0(),
+        due: 1,
+        hops: 0,
+    };
+    region.handle_event(GameEventKind::Intent(game::IntentMsg::Reply(reply))).unwrap();
+    for _ in 0..3 {
+        region.handle_event(GameEventKind::Tick).unwrap();
+    }
+    assert_eq!(piles(&region), vec![([10, 1, 10], vec![stack(DIRT, 2)])], "the refund is put down and kept");
+    let expires = region.data().pile_expiry().keys().next().expect("indexed").0;
+    assert!(expires >= woke_at + PILE_DESPAWN_TICKS, "a full lifetime from the wake: expires at {expires}");
+}
+
 #[test]
 fn deposit_in_water_rests_on_floor() {
     let mut region = region();

@@ -714,6 +714,12 @@ impl Rollback {
         let local = local_cell(*self.data.region, cell);
         let at = world_cell(*self.data.region, [local[0].clamp(0, n - 1), local[1], local[2].clamp(0, n - 1)]);
         log::debug!("[item_piles] region deposit of {stack:?} at {cell:?} refused ({why:?}): put down at {at:?}");
+        // The lifetimes are absolute ticks from when it was sent: a refusal
+        // that waited in the manager's mailbox while this region was parked
+        // arrives after its clock jumped (`jump_clock_to` shifts only the
+        // piles it holds). Never less than a fresh pile's from now.
+        let now = *self.data.tick;
+        let (expire, pickup) = (expire.max(now + PILE_DESPAWN_TICKS), pickup.max(now));
         let mut ov = PileOverlay::new(self);
         let overflow = plan_deposit(self, &mut ov, at, stack, expire, pickup, false);
         let (changes, evicted) = self.capped(ov);
