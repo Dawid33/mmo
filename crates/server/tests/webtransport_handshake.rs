@@ -13,6 +13,10 @@ fn memory_store() -> player_store::SharedPlayerStore {
     player_store::shared(player_store::MemoryPlayerStore::default())
 }
 
+fn token_auth() -> Arc<server::auth_edge::Authenticator> {
+    Arc::new(server::auth_edge::Authenticator::token())
+}
+
 async fn connect(port: u16) -> wtransport::Connection {
     let config = wtransport::ClientConfig::builder()
         .with_bind_default()
@@ -75,7 +79,7 @@ async fn webtransport_client_full_handshake() {
     let bind = "127.0.0.1:16467".parse().unwrap();
     let ingress_sinks = sinks.clone();
     tokio::spawn(async move {
-        webtransport::serve(bind, webtransport::CertSource::SelfSigned, event_send, ingress_sinks, next_id, memory_store())
+        webtransport::serve(bind, webtransport::CertSource::SelfSigned, event_send, ingress_sinks, next_id, memory_store(), token_auth())
             .await
             .unwrap();
     });
@@ -206,6 +210,7 @@ async fn first_packet_not_hello_closes() {
             ingress_sinks,
             Arc::new(AtomicUsize::new(0)),
             memory_store(),
+            token_auth(),
         )
         .await
         .unwrap();

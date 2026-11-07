@@ -2,6 +2,9 @@
 name = "server"
 version = "0.1.0"
 edition = "2021"
+# Integration tests are listed below: `it` (tests/it.rs) holds the files that
+# need no process of their own.
+autotests = false
 
 [lib]
 name = "server"
@@ -25,6 +28,10 @@ dashmap = { workspace = true }
 wtransport = { workspace = true }
 # The world store (regions, players, history, world tick): SQLite or Postgres.
 world-store = { path = "../world-store" }
+# Login JWTs at the edge (`VOXEL_AUTH=jwt`): the verifier and the JWKS fetch.
+auth = { workspace = true }
+login-api = { workspace = true }
+reqwest = { workspace = true }
 pyroscope = { workspace = true, optional = true }
 pyroscope_pprofrs = { workspace = true, optional = true }
 
@@ -43,3 +50,25 @@ tokio = { workspace = true, features = ["macros", "time"] }
 wtransport = { workspace = true, features = ["dangerous-configuration"] }
 # Raw SQL on a closed store (damaging a tile row in `store_world`).
 sqlx = { workspace = true }
+# JWKS bodies in the auth edge tests.
+serde_json = { workspace = true }
+
+[[test]]
+name = "it"
+path = "tests/it.rs"
+
+[[test]]
+name = "player_store"
+path = "tests/player_store.rs"
+
+[[test]]
+name = "store_world"
+path = "tests/store_world.rs"
+
+[[test]]
+name = "threaded_world"
+path = "tests/threaded_world.rs"
+
+[[test]]
+name = "webtransport_handshake"
+path = "tests/webtransport_handshake.rs"

@@ -127,6 +127,7 @@ fn build_server_runtime(worker_threads: usize) -> tokio::runtime::Runtime {
         .unwrap()
 }
 
+pub mod auth_edge;
 pub mod cuts;
 pub mod lod_workers;
 pub mod perf;
@@ -215,6 +216,8 @@ pub struct WorldIngress {
     webtransport: bool,
     /// Resolves each connection's `Hello` token before its session starts.
     players: player_store::SharedPlayerStore,
+    /// Checks each `Hello`'s credential first (`VOXEL_AUTH`).
+    auth: Arc<auth_edge::Authenticator>,
 }
 
 impl WorldIngress {
@@ -223,8 +226,9 @@ impl WorldIngress {
         port: u16,
         webtransport: bool,
         players: player_store::SharedPlayerStore,
+        auth: Arc<auth_edge::Authenticator>,
     ) -> Self {
-        Self { ip, port, webtransport, players }
+        Self { ip, port, webtransport, players, auth }
     }
 
     /// ## Network Loop
@@ -242,7 +246,12 @@ impl WorldIngress {
         let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
         let cert_der = CertificateDer::from(cert.cert);
         let priv_key = PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der());
-        let crypto = rustls::ServerConfig::builder()
+        // The provider is named, not left to rustls's process default: the
+        // workspace's unified features enable both `ring` and `aws-lc-rs`
+        // (the login service's AWS SDK), and then `builder()` panics.
+        let crypto = rustls::ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+            .with_safe_default_protocol_versions()
+            .expect("ring supports the default TLS versions")
             .with_no_client_auth()
             .with_single_cert(vec![cert_der], priv_key.into())
             .unwrap();
@@ -347,6 +356,7 @@ impl WorldIngress {
             let wt_sinks = sinks.clone();
             let wt_next = next_client_id.clone();
             let wt_players = self.players.clone();
+            let wt_auth = self.auth.clone();
             let wt_addr = std::net::SocketAddr::new(self.ip, WEBTRANSPORT_PORT);
             let certs = crate::webtransport::cert_source_from(
                 std::env::var(crate::webtransport::WT_CERT_ENV).ok().as_deref(),
@@ -361,6 +371,7 @@ impl WorldIngress {
                     wt_sinks,
                     wt_next,
                     wt_players,
+                    wt_auth,
                 )
                 .await
                 {
@@ -375,6 +386,7 @@ impl WorldIngress {
             let send = send.clone();
             let sinks = sinks.clone();
             let players = self.players.clone();
+            let auth = self.auth.clone();
             let id = next_client_id.fetch_add(1, Ordering::SeqCst);
             tokio::spawn(async move {
                 info!("accepting connection");
@@ -384,7 +396,7 @@ impl WorldIngress {
                 };
                 // The handshake comes first: no session (and no sink) exists
                 // until the connection's Hello has resolved to a player.
-                let (player, record) = match quic_hello(&connection, &players).await {
+                let (player, record) = match quic_hello(&connection, &players, &auth).await {
                     Ok(resolved) => resolved,
                     Err(why) => return refuse_quic(&connection, &why).await,
                 };
@@ -419,6 +431,7 @@ const REFUSE_FLUSH: std::time::Duration = std::time::Duration::from_secs(1);
 async fn quic_hello(
     connection: &quinn::Connection,
     players: &player_store::SharedPlayerStore,
+    auth: &auth_edge::Authenticator,
 ) -> Result<(game::PlayerId, Option<game::PlayerRecord>), String> {
     let first = tokio::time::timeout(player_store::HELLO_TIMEOUT, async {
         let mut stream = connection.accept_uni().await.map_err(|e| format!("no first packet: {e}"))?;
@@ -430,7 +443,7 @@ async fn quic_hello(
     })
     .await
     .map_err(|_| format!("no Hello within {:?}", player_store::HELLO_TIMEOUT))??;
-    player_store::resolve_hello(players, first).await
+    player_store::resolve_hello(players, auth, first).await
 }
 
 /// Tell the client why (best effort), then close the connection.
@@ -497,7 +510,17 @@ pub fn run() {
         None => player_store::shared(player_store::MemoryPlayerStore::default()),
         Some(store) => player_store::shared(player_store::StorePlayers(store.clone())),
     };
-    let mut rgi = WorldIngress::new(ip, port, webtransport_enabled(single_player), players.clone());
+    // Who may connect (`VOXEL_AUTH`): a bad setting stops the start, naming
+    // the variable. The client-spawned single-player server never sets it.
+    let auth_mode = auth_edge::AuthMode::from_env().unwrap_or_else(|e| fatal(&e));
+    match &auth_mode {
+        auth_edge::AuthMode::Token => info!("auth: player tokens (no login)"),
+        auth_edge::AuthMode::Jwt { world, login_url } => {
+            info!("auth: login tickets for world {world:?} from {login_url}")
+        }
+    }
+    let auth = Arc::new(auth_edge::Authenticator::for_mode(auth_mode));
+    let mut rgi = WorldIngress::new(ip, port, webtransport_enabled(single_player), players.clone(), auth.clone());
     let configured_worker_threads = std::env::var("TOKIO_WORKER_THREADS").ok();
     let worker_threads = server_worker_threads(configured_worker_threads.as_deref())
         .unwrap_or_else(|message| panic!("{message}"));
@@ -507,6 +530,9 @@ pub fn run() {
     // loop like a last client leaving does, so the world is saved on the way out.
     let stop_signal = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     rt.spawn(watch_stop_signals(stop_signal.clone()));
+    // The startup JWKS fetch, in the background: a login service that is
+    // down does not hold the start up (the first connect fetches again).
+    rt.spawn(async move { auth.prefetch().await });
     std::thread::spawn(move || rt.block_on(async move { rgi.listen(cps, server_recv).await }));
 
     let (region_out_send, region_out_recv) = crossbeam::channel::unbounded();

@@ -200,6 +200,8 @@ argon2 = "0.5"
 aws-config = { version = "1", default-features = false, features = ["behavior-version-latest", "rt-tokio", "default-https-client"] }
 aws-sdk-sesv2 = { version = "1", default-features = false, features = ["behavior-version-latest", "rt-tokio", "default-https-client"] }
 auth = { path = "crates/auth" }
+# The game server's JWKS fetch (crates/server, VOXEL_AUTH=jwt).
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 # Join JWTs (EdDSA) — crates/auth.
 jsonwebtoken = "9"
 ed25519-dalek = { version = "2", features = ["pkcs8", "pem", "rand_core"] }

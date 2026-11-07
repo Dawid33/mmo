@@ -134,6 +134,7 @@ pub async fn serve(
     sinks: Arc<DashMap<ClientId, ClientSink>>,
     next_client_id: Arc<AtomicUsize>,
     players: crate::player_store::SharedPlayerStore,
+    auth: Arc<crate::auth_edge::Authenticator>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let endpoint = match &certs {
         CertSource::SelfSigned => {
@@ -161,6 +162,7 @@ pub async fn serve(
         let send = send.clone();
         let sinks = sinks.clone();
         let players = players.clone();
+        let auth = auth.clone();
         let id = next_client_id.fetch_add(1, Ordering::SeqCst);
         tokio::spawn(async move {
             let session = match incoming.await {
@@ -172,7 +174,7 @@ pub async fn serve(
             };
             // The handshake comes first: no session (and no sink) exists until
             // the connection's Hello has resolved to a player.
-            let (player, record) = match web_hello(&session, &players).await {
+            let (player, record) = match web_hello(&session, &players, &auth).await {
                 Ok(resolved) => resolved,
                 Err(why) => return refuse(&session, &why).await,
             };
@@ -225,6 +227,7 @@ const REFUSE_FLUSH: Duration = Duration::from_secs(1);
 async fn web_hello(
     session: &wtransport::Connection,
     players: &crate::player_store::SharedPlayerStore,
+    auth: &crate::auth_edge::Authenticator,
 ) -> Result<(game::PlayerId, Option<game::PlayerRecord>), String> {
     let first = tokio::time::timeout(HELLO_TIMEOUT, async {
         let stream = session.accept_uni().await.map_err(|e| format!("no first packet: {e}"))?;
@@ -240,7 +243,7 @@ async fn web_hello(
     })
     .await
     .map_err(|_| format!("no Hello within {HELLO_TIMEOUT:?}"))??;
-    crate::player_store::resolve_hello(players, first).await
+    crate::player_store::resolve_hello(players, auth, first).await
 }
 
 /// Tell the client why (best effort), then close the session.

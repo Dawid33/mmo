@@ -15,8 +15,9 @@
 //!   players and regions are restored from the same world tick.
 //! - [`MemoryPlayerStore`] for procedural worlds and tests: nothing persisted.
 //!
-//! Tokens are bearer secrets, stored as they are: there is no authentication
-//! yet (it comes with the external account service).
+//! Which token a connection may claim is decided first, by the
+//! [`Authenticator`](crate::auth_edge::Authenticator): its own token on a
+//! `token` host (single-player / dev), the one in a login ticket on a `jwt` host.
 
 use std::collections::BTreeMap;
 use std::io;
@@ -44,23 +45,18 @@ pub const HELLO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10
 /// Largest first packet the edge reads (a `Hello` is a few dozen bytes).
 pub const HELLO_MAX_BYTES: usize = 4096;
 
-/// The handshake: `first` must be a `Hello` with a valid token, which the
-/// store resolves on tokio's blocking pool. `Err` is the refusal sent back.
+/// The handshake: `first` must be a `Hello` whose credential `auth` accepts
+/// (see [`crate::auth_edge`]); the store then resolves its player token on
+/// tokio's blocking pool. `Err` is the refusal sent back.
 pub async fn resolve_hello(
     store: &SharedPlayerStore,
+    auth: &crate::auth_edge::Authenticator,
     first: ClientPacket,
 ) -> Result<(PlayerId, Option<PlayerRecord>), String> {
     let ClientPacket::Hello { credential } = first else {
         return Err("the first packet must be Hello".into());
     };
-    let token = match credential {
-        game::Credential::Token(token) => token,
-        // Task 7 replaces this with JWT verification.
-        game::Credential::Jwt(_) => return Err("this server does not use login (single-player / dev)".into()),
-    };
-    if !token.is_valid() {
-        return Err(format!("invalid player token {token:?}"));
-    }
+    let token = auth.authenticate(credential).await?;
     let store = store.clone();
     let resolved = tokio::task::spawn_blocking(move || {
         let mut store = store.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
