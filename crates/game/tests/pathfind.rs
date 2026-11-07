@@ -230,17 +230,6 @@ fn flood(s: &mut Src, x: i32, z: i32, depth: u8) {
     s.water.insert([x, 1, z], WATER_FULL * u16::from(depth) / 7);
 }
 
-/// The cost of walking `path`, as the search charges it.
-fn path_cost(s: &Src, path: &[TilePos]) -> u32 {
-    path.windows(2)
-        .map(|w| {
-            let diag = w[0][0] != w[1][0] && w[0][2] != w[1][2];
-            let base = if diag { DIAG_COST } else { STEP_COST };
-            base + if df_depth(s.water_units(w[1])) > 0 { WADE_COST } else { 0 }
-        })
-        .sum()
-}
-
 #[test]
 fn deep_water_is_not_standable() {
     install();
@@ -267,7 +256,8 @@ fn shallow_water_is_wadable_at_a_cost() {
     let dry_path = path(&dry, a, b).unwrap();
     let wet_path = path(&wet, a, b).unwrap();
     assert_eq!(wet_path.len(), dry_path.len());
-    assert_eq!(path_cost(&wet, &wet_path), path_cost(&dry, &dry_path) + 3 * WADE_COST);
+    let (w, d) = (path_cost(&wet, &wet_path).unwrap(), path_cost(&dry, &dry_path).unwrap());
+    assert_eq!(w, d + 3 * WADE_COST);
 }
 
 #[test]

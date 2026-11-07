@@ -111,12 +111,22 @@ fn successors(src: &impl TileSource, p: TilePos, out: &mut Vec<(TilePos, u32)>) 
             if dy == -1 || (dy == 1 && !step_is_walk_up(src, p, q)) {
                 cost += CLIMB_COST;
             }
-            if df_depth(src.water_units(q)) > 0 {
+            if (1..=WADE_MAX_DEPTH).contains(&df_depth(src.water_units(q))) {
                 cost += WADE_COST;
             }
             out.push((q, cost));
         }
     }
+}
+
+/// The cost the search charges for walking `path` (consecutive tiles must be
+/// successors of each other); `None` when a step is not a legal move.
+pub fn path_cost(src: &impl TileSource, path: &[TilePos]) -> Option<u32> {
+    let mut next = Vec::with_capacity(16);
+    path.windows(2).try_fold(0u32, |sum, w| {
+        successors(src, w[0], &mut next);
+        next.iter().find(|(q, _)| *q == w[1]).map(|&(_, c)| sum + c)
+    })
 }
 
 /// The cheapest path `from..=to` inclusive, or `None` when unreachable, an
