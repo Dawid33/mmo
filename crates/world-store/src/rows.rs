@@ -264,7 +264,32 @@ macro_rules! engine_rows {
                 })
             }
 
+            /// The token's id and record if the token is known; reads only, so it
+            /// needs no writer lock (a joining client does not wait behind a commit).
+            pub(crate) async fn find_player(
+                pool: &Pool,
+                token: &PlayerToken,
+            ) -> Result<Option<(PlayerId, Option<PlayerRecord>)>, StoreError> {
+                let row = sqlx::query("SELECT player_id, record FROM players WHERE token = $1")
+                    .bind(token.0.as_str())
+                    .fetch_optional(pool)
+                    .await?;
+                let Some(r) = row else { return Ok(None) };
+                let id = PlayerId(u(r.try_get(0)?));
+                let record: Option<Vec<u8>> = r.try_get(1)?;
+                let record = match record {
+                    Some(blob) => Some(
+                        decode::<PlayerRecord>(FORMAT_PLAYER_RECORD, &blob)
+                            .map_err(|e| StoreError::Corrupt(format!("player {}: {e}", id.0)))?,
+                    ),
+                    None => None,
+                };
+                Ok(Some((id, record)))
+            }
+
             /// The token's id and record; a new token gets the next id, written at once.
+            /// Callers hold the writer lock (it re-reads inside its transaction, so a
+            /// token inserted since a [`find_player`] miss is found, not duplicated).
             pub(crate) async fn resolve_player(
                 pool: &Pool,
                 token: &PlayerToken,
@@ -316,6 +341,21 @@ macro_rules! engine_rows {
                 let mut versions = Vec::with_capacity(cut.regions.len());
                 for (rc, region) in &cut.regions {
                     let (rx, rz) = (rc.x as i64, rc.z as i64);
+                    if region.ground.is_none() {
+                        // `None` = "unchanged since the stored ground": a region's first
+                        // row must carry its ground, or it would be stored empty.
+                        let known = sqlx::query("SELECT 1 FROM regions WHERE rx = $1 AND rz = $2")
+                            .bind(rx)
+                            .bind(rz)
+                            .fetch_optional(&mut *tx)
+                            .await?;
+                        if known.is_none() {
+                            return Err(StoreError::Corrupt(format!(
+                                "region {rc:?}'s first save carries no ground (the store would hold it empty); \
+                                 the cut was not committed"
+                            )));
+                        }
+                    }
                     let bump = i64::from(!region.chunks.is_empty());
                     let version: i64 = sqlx::query(
                         "INSERT INTO regions (rx, rz, saved_tick, terrain_version, meta, ground) \

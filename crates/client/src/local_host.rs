@@ -28,8 +28,12 @@ use std::time::{Duration, Instant};
 use bevy::prelude::Resource;
 
 /// How long [`LocalHost::stop`] waits for the server to exit on its own (it
-/// does once its last client has left) before killing it.
-pub const STOP_GRACE: Duration = Duration::from_secs(5);
+/// does once its last client has left) before killing it. Covers the
+/// server's orderly exit: parking every region (`server::cuts::EXIT_PARK_TIMEOUT`,
+/// 10 s at most) and committing the last save cut — normally well under a
+/// second each. A kill mid-commit is safe (the commit is one transaction):
+/// the world restarts from its previous cut.
+pub const STOP_GRACE: Duration = Duration::from_secs(30);
 
 /// How often [`LocalHost::stop`] polls the child while it waits.
 const STOP_POLL: Duration = Duration::from_millis(20);
@@ -137,7 +141,7 @@ impl LocalHost {
         let err = out.try_clone()?;
         let mut child = Command::new(binary)
             .env("VOXEL_WORLD_FILE", terrain)
-            .env("VOXEL_WORLD_DB", terrain.with_file_name(worldgen::world_store::STORE_FILE))
+            .env("VOXEL_WORLD_DB", worldgen::world_store::store_path_for(terrain))
             .env(SINGLE_PLAYER_ENV, "1")
             .env(SERVER_PORT_ENV, port.to_string())
             .stdin(Stdio::piped())

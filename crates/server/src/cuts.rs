@@ -6,7 +6,7 @@
 use std::time::{Duration, Instant};
 
 use crossbeam::channel::{Receiver, TryRecvError};
-use game::{CutId, RegionSpawner, Tick, WorldManager};
+use game::{CutId, RegionCoords, RegionOutput, RegionSpawner, Tick, WorldManager};
 use world_store::{CutCommitted, StoreError, StoreHandle};
 
 struct Pending {
@@ -18,15 +18,34 @@ struct Pending {
     reply: Receiver<Result<CutCommitted, StoreError>>,
 }
 
+/// Consecutive failed commits after which world saving is reported stuck
+/// (once, at error level, plus a `world_save_stuck` perf event). Nothing is
+/// dropped: every later cut still carries everything uncommitted.
+pub const CUT_FAILURES_BEFORE_STUCK: u32 = 3;
+
+/// How long the orderly exit waits (wall time) for every region to park
+/// before it saves without the ones that have not.
+pub const EXIT_PARK_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How often the exit's park loop re-checks while no region output arrives.
+const EXIT_PARK_POLL: Duration = Duration::from_millis(20);
+
 /// The server's side of the save cuts: the store and the commits in flight.
 pub struct CutWriter {
     store: StoreHandle,
     pending: Vec<Pending>,
+    /// Commits failed in a row (reset by one that commits).
+    failed_in_a_row: u32,
 }
 
 impl CutWriter {
     pub fn new(store: StoreHandle) -> Self {
-        CutWriter { store, pending: Vec::new() }
+        CutWriter { store, pending: Vec::new(), failed_in_a_row: 0 }
+    }
+
+    /// Commits failed in a row since the last one that committed.
+    pub fn failed_in_a_row(&self) -> u32 {
+        self.failed_in_a_row
     }
 
     pub fn store(&self) -> &StoreHandle {
@@ -52,11 +71,11 @@ impl CutWriter {
                 Err(TryRecvError::Empty) => i += 1,
                 Ok(answer) => {
                     let p = self.pending.remove(i);
-                    settle(manager, p, answer);
+                    self.settle(manager, p, answer);
                 }
                 Err(TryRecvError::Disconnected) => {
                     let p = self.pending.remove(i);
-                    settle(manager, p, Err(StoreError::Backend("the world-store thread has stopped".into())));
+                    self.settle(manager, p, Err(StoreError::Backend("the world-store thread has stopped".into())));
                 }
             }
         }
@@ -92,7 +111,7 @@ impl CutWriter {
             let p = self.pending.remove(0);
             let id = p.id;
             let ok = answer.is_ok();
-            settle(manager, p, answer);
+            self.settle(manager, p, answer);
             if Some(id) == last {
                 committed = ok;
             }
@@ -101,6 +120,62 @@ impl CutWriter {
         self.store.shutdown();
         committed
     }
+
+    fn settle<S: RegionSpawner>(&mut self, manager: &mut WorldManager<S>, p: Pending, answer: Result<CutCommitted, StoreError>) {
+        match &answer {
+            Ok(_) => self.failed_in_a_row = 0,
+            Err(e) => {
+                self.failed_in_a_row += 1;
+                if self.failed_in_a_row == CUT_FAILURES_BEFORE_STUCK {
+                    log::error!(
+                        "[server] world saving is stuck: {CUT_FAILURES_BEFORE_STUCK} save cuts in a row failed, \
+                         the last with: {e} (nothing is dropped; every cut retries what is uncommitted)"
+                    );
+                    game::perf_event!("world_save_stuck", "failed={} cut={} tick={}", self.failed_in_a_row, p.id.0, p.tick);
+                }
+            }
+        }
+        settle(manager, p, answer);
+    }
+}
+
+/// The orderly exit's park: every player, then every region, parked, the
+/// region outputs handled as they come, for at most `timeout` (wall time —
+/// the world tick need not move at exit). `idle` runs every round (the
+/// server's region threads need nothing; an inline spawner is pumped there).
+/// A region still not parked at the deadline is given up
+/// ([`WorldManager::give_up_unparked`]): the exit's cut saves the rest.
+/// Returns the regions given up.
+pub fn park_for_exit<S: RegionSpawner>(
+    manager: &mut WorldManager<S>,
+    region_out: &Receiver<(RegionCoords, RegionOutput)>,
+    now_ms: impl Fn() -> u64,
+    timeout: Duration,
+    mut idle: impl FnMut(&mut WorldManager<S>),
+) -> Vec<RegionCoords> {
+    manager.park_all_players(now_ms());
+    manager.shutdown_all();
+    let deadline = Instant::now() + timeout;
+    while !manager.running_regions().is_empty() && Instant::now() < deadline {
+        idle(manager);
+        if let Ok((rc, output)) = region_out.recv_timeout(EXIT_PARK_POLL) {
+            manager.handle_region_output(rc, output, now_ms());
+            while let Ok((rc, output)) = region_out.try_recv() {
+                manager.handle_region_output(rc, output, now_ms());
+            }
+        }
+        // A park queued for a region that was mid-stop woke it again.
+        manager.shutdown_all();
+    }
+    if manager.running_regions().is_empty() {
+        return Vec::new();
+    }
+    let stuck = manager.give_up_unparked();
+    log::error!(
+        "[server] {} regions did not park within {timeout:?} and are saved as of their last snapshot (if any): {stuck:?}",
+        stuck.len()
+    );
+    stuck
 }
 
 fn settle<S: RegionSpawner>(manager: &mut WorldManager<S>, p: Pending, answer: Result<CutCommitted, StoreError>) {

@@ -48,11 +48,21 @@ struct Core {
 
 impl Core {
     fn open(store: &world_store::StoreHandle) -> Core {
+        let materials = materials();
+        Core::open_with(store, Box::new(move |rc| worldgen::generate_region(rc, worldgen::WORLD_SEED, materials)))
+    }
+
+    /// [`Core::open`] on `generate`: tests that must not touch worldgen (the
+    /// process-global forged world is chosen at its first use and installed
+    /// only by `restart_restores_world`).
+    fn open_with(
+        store: &world_store::StoreHandle,
+        generate: Box<dyn FnMut(RegionCoords) -> Vec<(game::ColumnCoords, game::Column)> + Send>,
+    ) -> Core {
         let mut regions = std::collections::BTreeMap::new();
         for rc in store.stored_regions().unwrap().into_keys() {
             regions.insert(rc, store.load_region(rc).unwrap().expect("listed, so stored"));
         }
-        let materials = materials();
         let (out_send, packets) = unbounded();
         let (region_out_send, region_out) = unbounded();
         let (lod_result_send, lod_result_recv) = unbounded();
@@ -63,7 +73,7 @@ impl Core {
         });
         let mut manager = WorldManager::new(
             InlineSpawner::with_portable(regions),
-            Box::new(move |rc| worldgen::generate_region(rc, worldgen::WORLD_SEED, materials)),
+            generate,
             out_send,
             region_out_send,
             lod_builder,
@@ -251,5 +261,106 @@ fn procedural_persists_nothing() {
     assert!(opened.store.is_none() && opened.world.is_none());
     assert_eq!(opened.world_tick, 0);
     assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0, "no file was written");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// One block of floor under every chunk column: ground without worldgen.
+fn flat_floor(_rc: RegionCoords) -> Vec<(game::ColumnCoords, game::Column)> {
+    let air = game::Block::new(BlockId::AIR);
+    let mut out = Vec::new();
+    for x in 0..game::REGION_CHUNKS {
+        for z in 0..game::REGION_CHUNKS {
+            let sub = game::SubChunk::Dense(Box::new(game::Chunk::flat_floor(game::BLOCK_VOXELS as u32)));
+            out.push((game::ColumnCoords::new(x, z), game::Column::new(0, air, air, vec![sub])));
+        }
+    }
+    out
+}
+
+/// A fresh store on a temp file (no world artifact: these tests only commit
+/// cuts) and a player resolved in it.
+fn bare_store(dir: &Path) -> (world_store::StoreHandle, game::PlayerToken, game::PlayerId) {
+    materials();
+    let url = world_store::StoreUrl::Sqlite(dir.join("w.sqlite"));
+    let store = world_store::StoreHandle::open(&url, world_store::Dials::BUILT).unwrap();
+    let token = game::PlayerToken::generate([7; game::PLAYER_TOKEN_BYTES]);
+    let (player, _) = StorePlayers(store.clone()).resolve(&token).unwrap();
+    (store, token, player)
+}
+
+/// The exit's park (`server::cuts::park_for_exit`) waits past the old fixed
+/// 2 s for a region that parks late (its inputs unread until then): its
+/// state and the player's record still go into the exit's cut.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn exit_saves_a_region_that_parks_late() {
+    let dir = scratch("late-park");
+    let (store, token, player) = bare_store(&dir);
+    let mut core = Core::open_with(&store, Box::new(flat_floor));
+    core.manager.handle_server_event(ServerEvent::ClientConnected { client: 0, player, record: None }, 0);
+    core.tick(3);
+    assert_eq!(core.manager.running_regions(), vec![SPAWN_REGION]);
+    let started = std::time::Instant::now();
+    let late = Duration::from_millis(2_200);
+    let Core { mut manager, region_out, _packets } = core;
+    let stuck = server::cuts::park_for_exit(&mut manager, &region_out, || 0, server::cuts::EXIT_PARK_TIMEOUT, |m| {
+        if started.elapsed() >= late {
+            m.spawner_mut().pump();
+        }
+    });
+    assert!(started.elapsed() >= late, "it parked only once pumped");
+    assert!(stuck.is_empty(), "nothing given up: {stuck:?}");
+    assert!(manager.running_regions().is_empty());
+    let now = manager.spawner_mut().world_tick();
+    let writer = server::cuts::CutWriter::new(store.clone());
+    assert!(writer.finish(&mut manager, now, Duration::from_secs(10)), "the exit's cut commits");
+    let store = world_store::StoreHandle::open(
+        &world_store::StoreUrl::Sqlite(dir.join("w.sqlite")),
+        world_store::Dials::BUILT,
+    )
+    .unwrap();
+    assert!(store.load_region(SPAWN_REGION).unwrap().is_some(), "the late region was saved");
+    let (again, record) = StorePlayers(store.clone()).resolve(&token).unwrap();
+    assert_eq!(again, player);
+    assert_eq!(record.expect("the player's record was saved").region, SPAWN_REGION);
+    store.shutdown();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A region that never parks at exit is given up after the park timeout and
+/// does not stop the rest from being saved.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn exit_saves_the_rest_when_a_region_never_parks() {
+    use game::ClientPacket;
+    let dir = scratch("never-parks");
+    let (store, token, player) = bare_store(&dir);
+    let mut core = Core::open_with(&store, Box::new(flat_floor));
+    core.manager.handle_server_event(ServerEvent::ClientConnected { client: 0, player, record: None }, 0);
+    let east = RegionCoords::new(SPAWN_REGION.x + 1, SPAWN_REGION.z);
+    core.manager.handle_server_event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(east), 0), 0);
+    core.tick(3);
+    let mut running = core.manager.running_regions();
+    running.sort();
+    assert!(running.contains(&SPAWN_REGION) && running.contains(&east), "{running:?}");
+    // East never reads another input: it never parks.
+    core.manager.spawner_mut().hold_inputs(east, u32::MAX);
+    let Core { mut manager, region_out, _packets } = core;
+    let stuck = server::cuts::park_for_exit(&mut manager, &region_out, || 0, Duration::from_millis(300), |m| {
+        m.spawner_mut().pump();
+    });
+    assert_eq!(stuck, vec![east]);
+    let now = manager.spawner_mut().world_tick();
+    let writer = server::cuts::CutWriter::new(store.clone());
+    assert!(writer.finish(&mut manager, now, Duration::from_secs(10)), "the rest is saved");
+    let store = world_store::StoreHandle::open(
+        &world_store::StoreUrl::Sqlite(dir.join("w.sqlite")),
+        world_store::Dials::BUILT,
+    )
+    .unwrap();
+    assert!(store.load_region(SPAWN_REGION).unwrap().is_some(), "the region that parked was saved");
+    let (_, record) = StorePlayers(store.clone()).resolve(&token).unwrap();
+    assert_eq!(record.expect("the player's record was saved").region, SPAWN_REGION);
+    store.shutdown();
     let _ = std::fs::remove_dir_all(&dir);
 }

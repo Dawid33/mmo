@@ -692,26 +692,18 @@ pub fn run() {
     }
 
     // Orderly exit: park every player (regions answer `ParkPlayer` before
-    // `Shutdown`), then everything else, and join region threads.
-    manager.park_all_players(start.elapsed().as_millis() as u64);
-    manager.shutdown_all();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-    while !manager.running_regions().is_empty() && std::time::Instant::now() < deadline {
-        let now_ms = start.elapsed().as_millis() as u64;
-        if let Ok((rc, output)) =
-            region_out_recv.recv_timeout(std::time::Duration::from_millis(100))
-        {
-            manager.handle_region_output(rc, output, now_ms);
-        }
-        // A park queued for a region that was mid-stop woke it again.
-        manager.shutdown_all();
-    }
-    let unparked = manager.running_regions();
-    if !unparked.is_empty() {
-        log::warn!("[server] {} regions did not park in time and are not saved: {unparked:?}", unparked.len());
-    }
-    // Every region has parked: the last cut is complete at once, and holds
-    // every player (parked) and the history (its people are back in it).
+    // `Shutdown`), then everything else; a region that does not park within
+    // `EXIT_PARK_TIMEOUT` is given up so the rest is still saved.
+    cuts::park_for_exit(
+        &mut manager,
+        &region_out_recv,
+        || start.elapsed().as_millis() as u64,
+        cuts::EXIT_PARK_TIMEOUT,
+        |_| {},
+    );
+    // Every region has parked (or been given up): the last cut is complete at
+    // once, and holds every player (parked) and the history (its people are
+    // back in it).
     if let Some(cuts) = cuts {
         let now = world_clock.tick_at(start.elapsed().as_millis() as u64);
         if cuts.finish(&mut manager, now, EXIT_SAVE_TIMEOUT) {

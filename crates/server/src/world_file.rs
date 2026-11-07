@@ -67,7 +67,7 @@ pub fn resolve(world_file: Option<&str>, world_db: Option<&str>) -> Result<World
 /// The store of a world file when `VOXEL_WORLD_DB` is unset: the `.sqlite`
 /// beside it (`worlds/default.world` -> `worlds/default.sqlite`).
 pub fn store_url_for(world_file: &Path) -> StoreUrl {
-    StoreUrl::Sqlite(world_file.with_extension("sqlite"))
+    StoreUrl::Sqlite(worldgen::world_store::store_path_for(world_file))
 }
 
 /// Relative world paths resolve from the repo root, like the block manifest

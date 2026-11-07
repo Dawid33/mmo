@@ -17,6 +17,15 @@ pub const TERRAIN_FILE: &str = "terrain.world";
 /// single-player world lives once the server has imported `terrain.world`.
 pub const STORE_FILE: &str = "terrain.sqlite";
 pub const META_FILE: &str = "world.json";
+
+/// The world store beside a forge file: `<terrain>.with_extension("sqlite")` —
+/// `worlds/<slug>/terrain.sqlite` (= [`STORE_FILE`]) for a menu world,
+/// `worlds/default.sqlite` for the legacy `default.world`. The one rule the
+/// menu listing, the client's spawned server and the server's default
+/// `VOXEL_WORLD_DB` share.
+pub fn store_path_for(terrain: &Path) -> PathBuf {
+    terrain.with_extension("sqlite")
+}
 pub const PREVIEW_FILE: &str = "preview.png";
 pub const LEGACY_WORLD: &str = "worlds/default.world";
 pub const META_FORMAT: u32 = 1;
@@ -120,7 +129,7 @@ pub fn list(root: &Path) -> Vec<WorldEntry> {
                 continue;
             }
             let terrain = dir.join(TERRAIN_FILE);
-            let store = dir.join(STORE_FILE);
+            let store = store_path_for(&terrain);
             let meta = std::fs::read(dir.join(META_FILE))
                 .ok()
                 .and_then(|b| serde_json::from_slice::<WorldMeta>(&b).ok());
@@ -133,12 +142,17 @@ pub fn list(root: &Path) -> Vec<WorldEntry> {
         let key = |e: &WorldEntry| e.meta.as_ref().map(|m| m.created_utc.clone()).unwrap_or_default();
         key(b).cmp(&key(a)).then_with(|| a.dir.cmp(&b.dir))
     });
+    // Listed while its forge file waits for import OR once the server has
+    // imported (and deleted) it into `default.sqlite`.
     let legacy = root.join("default.world");
-    if legacy.is_file() {
+    let legacy_store = store_path_for(&legacy);
+    if legacy.is_file() || legacy_store.is_file() {
         found.push(WorldEntry {
             dir: root.to_path_buf(),
-            loadable: check_artifact_file(&legacy),
-            store: legacy.with_extension("sqlite"),
+            // A store-only legacy world has no `world.json` to check: the
+            // server checks the stored artifact when it opens the store.
+            loadable: if legacy.is_file() { check_artifact_file(&legacy) } else { Ok(()) },
+            store: legacy_store,
             terrain: legacy,
             preview: None,
             meta: None,
@@ -424,6 +438,26 @@ mod tests {
         assert!(last.legacy);
         assert_eq!(last.loadable, Ok(()));
         assert_eq!(delete(&root, last).unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+    }
+
+    #[test]
+    fn store_path_matches_store_file_and_legacy_default() {
+        assert_eq!(store_path_for(Path::new("worlds/a").join(TERRAIN_FILE).as_path()), Path::new("worlds/a").join(STORE_FILE));
+        assert_eq!(store_path_for(Path::new(LEGACY_WORLD)), Path::new("worlds/default.sqlite"));
+    }
+
+    #[test]
+    fn legacy_store_only_default_world_is_listed() {
+        let root = scratch("legacy-store-only");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("default.sqlite"), b"sqlite").unwrap();
+        let l = list(&root);
+        assert_eq!(l.len(), 1);
+        let e = &l[0];
+        assert!(e.legacy);
+        assert_eq!(e.store, root.join("default.sqlite"));
+        assert_eq!(e.terrain, root.join("default.world"));
+        assert_eq!(e.loadable, Ok(()));
     }
 
     #[test]

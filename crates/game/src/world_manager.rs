@@ -1968,8 +1968,9 @@ impl<S: RegionSpawner> WorldManager<S> {
                         self.enter_in_flight(target, target, stamp, &bundle, false);
                         self.send_to_region(target, RegionInput::Transfer(GameEventKind::EntityArrived(bundle), stamp));
                     } else {
-                        let p = PendingArrival { source: target, stamp, bundle, in_source_view: false };
-                        self.pending_arrivals.entry(target).or_default().push(p);
+                        // The same cap as any waiting arrival (cut rows never
+                        // hold a player or a person).
+                        self.hold_arrival(target, target, stamp, bundle, false);
                     }
                 }
                 InFlightRow::Intent { target, msg } => {
@@ -2098,6 +2099,28 @@ impl<S: RegionSpawner> WorldManager<S> {
                 self.silent_stopping.insert(rc);
             }
         }
+    }
+
+    /// The orderly exit stops waiting for the regions still stopping (a
+    /// wall-time deadline: the world tick may not move at exit): they are left
+    /// out of cuts as after a missed deadline (`silent_stopping` — a later cut
+    /// carries their last uncommitted snapshot, if any), and a pending cut
+    /// still waiting for one of them is aborted, so the exit's own cut can
+    /// save the rest. Returns those regions.
+    pub fn give_up_unparked(&mut self) -> Vec<RegionCoords> {
+        let stuck: Vec<RegionCoords> =
+            self.regions.iter().filter(|(_, l)| l.stopping).map(|(rc, _)| *rc).collect();
+        self.silent_stopping.extend(stuck.iter().copied());
+        if self.pending_cut.as_ref().is_some_and(|c| stuck.iter().any(|rc| c.waiting.contains(rc))) {
+            let cut = self.pending_cut.take().expect("checked");
+            log::error!(
+                "save cut {} at tick {}: still waiting for {:?} at exit; aborted",
+                cut.id.0,
+                cut.tick,
+                cut.waiting
+            );
+        }
+        stuck
     }
 
     /// `rc` was past the pending cut's tick when asked: the cut is aborted

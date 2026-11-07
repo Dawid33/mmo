@@ -336,3 +336,28 @@ fn shutdown_drains_queued_commits() {
         h.shutdown();
     });
 }
+
+/// A region's first row must carry its ground: `ground: None` means
+/// "unchanged since the stored one", so on a new region it would be stored
+/// empty. Refused as `Corrupt`, nothing committed; on a known region it is fine.
+#[test]
+fn first_region_row_without_ground_is_refused() {
+    each_backend("noground", false, |url| {
+        let h = open(url);
+        let cut = |id, rc, ground| WorldCut {
+            id: CutId(id),
+            tick: 1000 + id,
+            regions: vec![(rc, region(1000 + id, &[(ChunkCoords::new(0, 0, 0), chunk())], ground, vec![]))],
+            in_flight: vec![],
+            players: vec![],
+            history: None,
+        };
+        let err = h.commit_cut(cut(1, A, false)).recv().unwrap().unwrap_err();
+        assert!(matches!(&err, StoreError::Corrupt(m) if m.contains("no ground")), "{err}");
+        assert_eq!(h.load_region(A).unwrap(), None, "nothing committed");
+        h.commit_cut(cut(2, A, true)).recv().unwrap().unwrap();
+        h.commit_cut(cut(3, A, false)).recv().unwrap().unwrap();
+        assert_eq!(h.load_region(A).unwrap().unwrap().ground, region_ground(), "the stored ground is kept");
+        h.shutdown();
+    });
+}

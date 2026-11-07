@@ -730,3 +730,25 @@ fn voxel_body_into_a_region_not_running_settles_at_the_seam() {
     assert_eq!(piled_items(&mut h, SPAWN_REGION).get(&item), Some(&4), "its drops lie at the seam");
     assert_eq!(h.manager.items_destroyed(), 0);
 }
+
+/// Crossings a restarted server restores from the store into a region that is
+/// not running wait under the same cap as any other: past
+/// `PENDING_ARRIVALS_PER_REGION_MAX` the oldest are despawned and counted.
+#[test]
+fn restored_in_flight_arrivals_respect_the_mailbox_cap() {
+    use game::PENDING_ARRIVALS_PER_REGION_MAX as CAP;
+    let mut h = harness();
+    let north = RegionCoords::new(0, -1);
+    let rows: Vec<game::InFlightRow> = (0..CAP as u64 + 3)
+        .map(|i| game::InFlightRow::Transfer { target: north, bundle: departing_body(i, 128.0, Vec::new()), stamp: 5 })
+        .collect();
+    let first = match &rows[0] {
+        game::InFlightRow::Transfer { bundle, .. } => bundle.id,
+        _ => unreachable!(),
+    };
+    h.manager.restore_in_flight(rows);
+    assert!(!h.manager.running_regions().contains(&north), "restored bodies never wake north");
+    assert_eq!(h.manager.pending_arrival_count(north), CAP);
+    assert_eq!(h.manager.arrivals_despawned(), 3);
+    assert!(h.manager.recently_despawned_arrivals().contains(&first), "the oldest made room");
+}
