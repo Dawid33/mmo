@@ -574,6 +574,12 @@ brick-census *args:
 history *args:
     VOXEL_REGION_BLOCKS={{play_blocks}} {{cap}} {{cargo}} run --release -p worldgen --example history -- {{args}}
 
+# Pre-store save files under worlds/ (*.regions/, *.players/, *.history, *.history.bak,
+# *.region.bak) — the ones the world store (terrain.sqlite) replaces. Lists them with
+# sizes; `--yes` deletes them. Never touches *.world, world.json, preview.png or *.sqlite*.
+clean-old-worlds *args:
+    scripts/clean_old_worlds.sh {{args}}
+
 # Front / side / top orthographic PNGs of one generated tree (one pixel per
 # voxel, coloured by part) into target/tree-view/. Flags: --species
 # oak|pine|birch|spruce|acacia|palm|jungle|cactus --seed N --age N (0..=100) --out <path stem> --scale N; --grid
