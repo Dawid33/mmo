@@ -1186,10 +1186,16 @@ impl Rollback {
     /// units): on the terrain surface, clear of the capsule — real terrain
     /// has real elevation, so a hardcoded flat-floor height would bury the
     /// player. `surface + 1` is the surface voxel's top face; capsule
-    /// half-extent + clearance sits the body above it. Falls back only if
-    /// the column is all air.
+    /// half-extent + clearance sits the body above it. Over recipe water
+    /// (`ColumnGround::recipe_water`) the surface is the water's top, not
+    /// the bed: the body starts on the water, as it would land there. Falls
+    /// back only if the column is all air and dry.
     pub fn player_spawn_y(&self, (x, z): (f32, f32)) -> f32 {
-        match self.surface_voxel_y(x as i32, z as i32) {
+        let (vx, vz) = (x as i32, z as i32);
+        let ground = self.surface_voxel_y(vx, vz);
+        let bv = crate::BLOCK_VOXELS as i32;
+        let water = self.recipe_water_top_at(vx.div_euclid(bv), vz.div_euclid(bv)).map(|top| (top + 1) * bv - 1);
+        match ground.max(water) {
             Some(surface) => {
                 (surface + 1) as f32
                     + PLAYER_CAPSULE_HALF_HEIGHT
@@ -1198,6 +1204,17 @@ impl Rollback {
             }
             None => PLAYER_SPAWN_FALLBACK_Y,
         }
+    }
+
+    /// The top block Y of the recipe water over region-local block column
+    /// `(bx, bz)`, if it has any (own `ground` only).
+    fn recipe_water_top_at(&self, bx: i32, bz: i32) -> Option<i32> {
+        let (n, cb) = (crate::REGION_BLOCKS as i32, crate::CHUNK_BLOCKS as i32);
+        if !(0..n).contains(&bx) || !(0..n).contains(&bz) {
+            return None;
+        }
+        let g = self.data.ground.get(&crate::ColumnCoords::new((bx / cb) as usize, (bz / cb) as usize))?;
+        g.recipe_water((bx % cb) as usize, (bz % cb) as usize).map(|(_, top)| top)
     }
 
     /// [`Self::create_player_safe`] over region-local `xz` (voxel units).

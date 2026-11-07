@@ -44,26 +44,38 @@ fn only_recipe_air_is_water() {
     assert_eq!(game::static_water_units(game::BlockId::AIR, Some((1, 3)), 4), 0, "above the recipe");
 }
 
-/// A parked player is never restored into recipe water: a record whose feet
-/// stand in the pond is moved to a dry place, one on dry ground keeps its
-/// position.
+/// A swimmer is restored in place: a record whose feet stand mid-pond in
+/// deep recipe water keeps its position (water is not terrain), as does
+/// one on dry ground.
 #[test]
-fn restore_is_never_into_recipe_water() {
+fn a_swimmer_is_restored_in_place() {
     crate::common::install_real_block_props();
     let rc = game::RegionCoords::new(0, 0);
-    // Clear of the spawn column (`PLAYER_SPAWN_X/Z`, block 8, 8): the fallback.
     let pond = WaterBox { xs: 20..24, zs: 20..24, surface: 0, water_top: 3 };
     let region = game::Region::from_columns(rc, floor_with_water(rc, &[pond]));
     let d = region.data();
-    let wet = |t: game::rapier3d::math::Vector| {
-        let feet = game::feet_tile(game::feet_of(t));
-        d.water_units_at(WorldBlockPos::from_local(rc, BlockPos::new(feet[0], feet[1], feet[2]))) > 0
-    };
-    let in_pond = game::body_on_tile([22, 1, 22]);
-    assert!(wet(in_pond), "the record stands in the pond");
-    let at = game::restore_translation(d, in_pond);
-    assert!(!wet(at), "restored into the water at {at:?}");
+    let mid_pond = game::body_on_tile([22, 2, 22]);
+    let feet = game::feet_tile(game::feet_of(mid_pond));
+    let cell = WorldBlockPos::from_local(rc, BlockPos::new(feet[0], feet[1], feet[2]));
+    assert_eq!(d.water_units_at(cell), WATER_FULL, "the record swims in the pond");
+    assert_eq!(game::restore_translation(d, mid_pond), mid_pond, "a swimmer keeps its place");
     let n = REGION_BLOCKS as i32;
     let dry = game::body_on_tile([n - 4, 1, n - 4]);
     assert_eq!(game::restore_translation(d, dry), dry, "a dry record keeps its place");
+}
+
+/// A body created over recipe water starts on the water's top, not on the
+/// bed under it (`player_spawn_y`); over dry ground, on the ground.
+#[test]
+fn spawn_height_over_water_is_the_water_top() {
+    crate::common::install_real_block_props();
+    let rc = game::RegionCoords::new(0, 0);
+    let pond = WaterBox { xs: 20..24, zs: 20..24, surface: 0, water_top: 3 };
+    let region = game::Region::from_columns(rc, floor_with_water(rc, &[pond]));
+    let d = region.data();
+    let bv = game::BLOCK_VOXELS as f32;
+    let centre = |b: i32| (b as f32 + 0.5) * bv;
+    let (wet, dry) = (d.player_spawn_y((centre(22), centre(22))), d.player_spawn_y((centre(40), centre(40))));
+    // The floor's top face is block 1's bottom; the water's is block 4's.
+    assert_eq!(wet - dry, 3.0 * bv, "three water levels above the floor: wet {wet}, dry {dry}");
 }

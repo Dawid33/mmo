@@ -18,7 +18,6 @@ use game::{
 const MANIFEST: &str = include_str!("../../../assets/blocks/blocks.ron");
 const DIRT: ItemId = ItemId(1);
 const STONE: BlockId = BlockId(2);
-const WATER: BlockId = BlockId(5);
 
 fn stack(item: ItemId, count: u32) -> ItemStack {
     ItemStack { item, count }
@@ -297,9 +296,10 @@ fn refused_deposit_after_a_long_park_keeps_a_full_lifetime() {
 #[test]
 fn deposit_in_water_rests_on_floor() {
     let mut region = region();
-    for y in 1..=3 {
-        set_block(&mut region, [10, y, 10], WATER);
-    }
+    // Recipe water at levels 1..=3 over the one-block floor of column (10, 10).
+    region.with_data(|d| crate::common::water::set_recipe_water(d, 10..11, 10..11, 0, 3, 0));
+    let wet = WorldBlockPos::from_local(r0(), game::BlockPos::new(10, 1, 10));
+    assert_eq!(region.data().water_units_at(wet), game::WATER_FULL, "the pile cell is under water");
     deposit(&mut region, [10, 8, 10], stack(DIRT, 1), 0);
     assert_eq!(piles(&region), vec![([10, 1, 10], vec![stack(DIRT, 1)])]);
 }
