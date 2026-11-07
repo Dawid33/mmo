@@ -5,6 +5,7 @@ members = [
   "crates/client",
   "crates/game",
   "crates/login-api",
+  "crates/login",
   "crates/auth",
   "crates/macros",
   "crates/physics-next",
@@ -192,6 +193,9 @@ rcgen = { version = "0.14", features = [
 dashmap = { version = "6.1.0", default-features = false }
 serde_json = "1.0.93"
 login-api = { path = "crates/login-api" }
+login = { path = "crates/login" }
+# Password hashing — crates/login.
+argon2 = "0.5"
 auth = { path = "crates/auth" }
 # Join JWTs (EdDSA) — crates/auth.
 jsonwebtoken = "9"

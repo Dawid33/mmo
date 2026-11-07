@@ -1,0 +1,20 @@
+[package]
+name = "login"
+version = "0.1.0"
+edition = "2024"
+description = "The login service: accounts, refresh tokens, the world registry (SQLite / Postgres)."
+# One integration-test binary: tests/it.rs.
+autotests = false
+
+[dependencies]
+login-api = { workspace = true }
+sqlx = { workspace = true }
+argon2 = { workspace = true }
+thiserror = "2"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[[test]]
+name = "it"
+path = "tests/it.rs"

@@ -913,6 +913,10 @@ test-one crate *args:
 test-pg *args:
     MMO_TEST_DATABASE_URL=postgres://mmo:mmo@127.0.0.1:55432/postgres just test-one world-store "{{args}}"
 
+# Run the login tests against the dev Postgres (needs `just pg-up`).
+test-login-pg *args:
+    MMO_TEST_DATABASE_URL=postgres://mmo:mmo@127.0.0.1:55432/postgres just test-one login "{{args}}"
+
 # Region threading: a player walking across the seam between two regions that
 # run on different threads. Two layers, both tagged slow (so smoke / test-one /
 # test skip them and only the long `test-full` sweep ran them):
