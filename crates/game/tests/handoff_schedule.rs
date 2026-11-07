@@ -1570,8 +1570,9 @@ const FLOAT_POOL_HALF: i64 = 7;
 const FLOAT_START_BLOCKS: f32 = 1.0;
 /// Height of the log's bottom above the surface at the drop, blocks.
 const FLOAT_DROP_BLOCKS: f32 = 0.5;
-/// The sideways push, m/s (split over −x and −z).
-const FLOAT_PUSH_M_PER_S: f32 = 3.0;
+/// The sideways push, m/s (split over −x and −z): enough that the water's
+/// drag leaves the log clear past the seam (about 1.5 blocks).
+const FLOAT_PUSH_M_PER_S: f32 = 8.0;
 /// Half extents of the log, blocks: 4 long (along x), 1 thick.
 const FLOAT_LOG_HALF: [f32; 3] = [2.0, 0.5, 0.5];
 /// Rounds of the scenario: the fall, the drift through the seam and the
@@ -1626,20 +1627,11 @@ impl Scenario for FloatingLog {
     fn crosser(&self) -> Option<game::EntityKind> {
         Some(game::EntityKind::Body)
     }
-
-    fn lockstep_tolerances(&self) -> Tolerances {
-        Tolerances { pose_blocks: FLOAT_REST_POS_TOL, angle_deg: FLOAT_REST_ANGLE_TOL, ..LOCKSTEP_TOLERANCES }
-    }
 }
 
-/// Rest position tolerance of the floating log against the centred lockstep
-/// run, per axis, blocks. Measured ×2: the spread was 1.26e-4 blocks in every
-/// placement (2026-11-07, REGION_BLOCKS 64, CHUNK_BLOCKS 16), the log asleep
-/// in each — a hair over [`POSE_TOL_BLOCKS`]: it bobs for seconds before it
-/// sleeps, and its path through the seam's frame change rounds differently.
-const FLOAT_REST_POS_TOL: f32 = 2.6e-4;
-/// … and rest rotation, degrees. Measured: 0° in every placement.
-const FLOAT_REST_ANGLE_TOL: f32 = 0.01;
+// The shared lockstep tolerances hold: measured spread 3.8e-6 blocks in
+// every placement, the log asleep, rotation 0° (2026-11-07, REGION_BLOCKS 64,
+// CHUNK_BLOCKS 16).
 
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]

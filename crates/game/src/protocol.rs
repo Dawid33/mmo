@@ -1271,3 +1271,32 @@ pub fn decode_packet<T: serde::de::DeserializeOwned>(frame: &[u8]) -> Result<T, 
         other => Err(PacketError::UnknownFormat(other)),
     }
 }
+
+#[cfg(test)]
+mod volume_tests {
+    use super::*;
+
+    /// One metre in units.
+    const M: f32 = crate::movement::UNITS_PER_METER;
+
+    fn close(a: f32, b: f32) -> bool {
+        (a - b).abs() <= 1e-5 * b.abs().max(1.0)
+    }
+
+    #[test]
+    fn volume_m3_of_each_shape() {
+        let cuboid = ColliderSpec::Cuboid { half_extents: Vector::new(2.0 * M, 0.5 * M, 0.25 * M) };
+        assert!(close(cuboid.volume_m3(), 2.0), "{}", cuboid.volume_m3());
+        let ball = ColliderSpec::Ball { radius: M };
+        assert!(close(ball.volume_m3(), 4.0 / 3.0 * core::f32::consts::PI), "{}", ball.volume_m3());
+        let capsule = ColliderSpec::CapsuleY { half_height: M, radius: 0.5 * M };
+        // Cylinder π·0.25·2 plus a ball of radius 0.5.
+        let want = core::f32::consts::PI * 0.5 + 4.0 / 3.0 * core::f32::consts::PI * 0.125;
+        assert!(close(capsule.volume_m3(), want), "{} vs {want}", capsule.volume_m3());
+        let compound = ColliderSpec::Compound(vec![
+            (Pose::from_translation(Vector::new(M, 0.0, 0.0)), cuboid.clone()),
+            (Pose::IDENTITY, ball.clone()),
+        ]);
+        assert!(close(compound.volume_m3(), cuboid.volume_m3() + ball.volume_m3()), "{}", compound.volume_m3());
+    }
+}

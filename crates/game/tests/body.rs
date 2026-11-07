@@ -207,9 +207,21 @@ fn dropped_cube_floats_and_dry_bodies_unchanged() {
     });
     drop(&mut wet, [24, 1 + DEPTH, 24]);
     let e = only_body(&wet);
+    // Settled: asleep, or slower than 0.1 m/s for a second — so the
+    // straddle below is the float level, not a phase of a bob.
+    const STILL_UNITS_PER_S: f32 = 0.1 * B;
+    let still_ticks_needed = (1000 / game::TICK_RATE) as usize;
+    let mut still = 0;
     for _ in 0..BODY_SETTLE_TICKS * 3 {
         tick(&mut wet);
+        let b = live_body(&wet, e);
+        let v = b.linvel();
+        still = if b.is_sleeping() || v.dot(v) < STILL_UNITS_PER_S * STILL_UNITS_PER_S { still + 1 } else { 0 };
+        if still >= still_ticks_needed {
+            break;
+        }
     }
+    assert!(still >= still_ticks_needed, "the cube settles in the water: {:?}", live_body(&wet, e).linvel());
     let surface = (1 + DEPTH) as f32 * B;
     let (lo, hi) = aabb_y(&wet, e);
     eprintln!("cube AABB y {} .. {} blocks, surface {}", lo / B, hi / B, surface / B);

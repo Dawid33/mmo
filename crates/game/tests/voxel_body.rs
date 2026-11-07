@@ -848,8 +848,8 @@ fn stone_sinks_to_the_bed() {
     assert!((lo - POOL_BED).abs() < 0.05 * B, "on the bed: bottom {} blocks vs {}", lo / B, POOL_BED / B);
 }
 
-/// 60 ticks of a log floating in the pool roll back bit-exact, and replay
-/// to the same state.
+/// 60 ticks of a log floating in the pool (through its settling) roll back
+/// bit-exact, and replay to the same state.
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn buoyancy_is_rollback_exact() {
@@ -865,12 +865,17 @@ fn buoyancy_is_rollback_exact() {
     assert!(aabb_y(region.data(), e).0 < POOL_SURFACE, "in the water");
     let before = state_hash(region.data());
     const N: usize = 60;
+    // The log floats (water drag on) and, at the water's drag, comes to rest
+    // and is settled inside the window: the rollback runs through that too.
+    let mut dragged = false;
     for _ in 0..N {
         region.handle_event(GameEventKind::Tick).unwrap();
+        let r = region.data();
+        if alive(r, e) {
+            dragged |= r.physics.bodies.get(*r.ecs.rigidbody.get(e)).unwrap().linear_damping() > 0.0;
+        }
     }
-    assert!(alive(region.data(), e), "still floating");
-    let damping = region.data().physics.bodies.get(*region.data().ecs.rigidbody.get(e)).unwrap().linear_damping();
-    assert!(damping > 0.0, "water drag on: {damping}");
+    assert!(dragged, "the log floated under the water's drag");
     let after = state_hash(region.data());
     assert_ne!(before, after);
     for _ in 0..N {

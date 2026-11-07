@@ -675,12 +675,20 @@ fn place_block_across_seam() {
     assert_eq!(place_state(&mut rig, above), (BlockId(1), stone(2)), "refused at the owner: the item came back");
 }
 
-/// The floor chunk with a pond: stone to block y 2, water in the two blocks above.
+/// Chunk-local block rows `0..POND_ROWS` (z) of [`pond_floor`] hold water;
+/// the player stands dry past them, at the spawn (block z 8), and looks
+/// toward −z over the pond.
+const POND_ROWS: usize = 7;
+
+/// The floor chunk with a pond: stone to block y 2, water in the two blocks
+/// above over rows `0..POND_ROWS`. The player must stand dry: two blocks of
+/// water are deep enough to swim in (`Immersion::Waist`), and a swimmer is
+/// never grounded, which the fixture's settle check needs.
 fn pond_floor() -> Chunk {
     let mut chunk = Chunk::flat_floor(2 * BLOCK_VOXELS as u32);
     for by in 2..4 {
         for bx in 0..CHUNK_BLOCKS {
-            for bz in 0..CHUNK_BLOCKS {
+            for bz in 0..POND_ROWS {
                 chunk.set_block(bx, by, bz, game::Block::new(BlockId(5)));
             }
         }

@@ -32,8 +32,10 @@ use crate::{BlockPos, ColliderSpec, EntityKey, EntityKind, Rollback, WorldBlockP
 /// Density of water, kg/m³.
 pub const WATER_DENSITY: f32 = 1000.0;
 /// Linear damping (1/s) of a body wholly under water; scaled by the
-/// submerged share.
-pub const WATER_LINEAR_DAMPING: f32 = 2.0;
+/// submerged share. Near-critical for floating bodies at the game's 45 m/s²
+/// gravity: at 2.0 a dropped 1 m cube leapt out of the water and still
+/// bobbed ±0.5 block after 9 s.
+pub const WATER_LINEAR_DAMPING: f32 = 6.0;
 /// Angular damping (1/s) of a body wholly under water; scaled by the
 /// submerged share, never below the body's own.
 pub const WATER_ANGULAR_DAMPING: f32 = 1.0;
@@ -87,7 +89,8 @@ impl Rollback {
                 continue;
             };
             let aabb = collider.compute_aabb();
-            let f = submerged_fraction(self, aabb.mins, aabb.maxs, body.translation());
+            // The column under its world centre of mass.
+            let f = submerged_fraction(self, aabb.mins, aabb.maxs, body.center_of_mass());
             // Dry and already in its dry state (only this pass gives a body
             // linear damping, and only in water): nothing to do — and no mass
             // to compute.
