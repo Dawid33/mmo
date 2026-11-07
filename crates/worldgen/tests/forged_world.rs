@@ -208,19 +208,23 @@ fn lake_shows_in_regions_and_in_coarse_lod() {
         "every fresh-water column of the lake region stands at the one level"
     );
 
-    // Far LOD, factor 16 (1-block cells): the same surface block is water.
+    // Far LOD, factor 16 (1-block cells): the terrain grids hold no water
+    // (the lake bed shows), and the lake's surface is in the key's water
+    // layer at its level (water plan Task 8).
     let key = game::lod::LodKey::for_region(16, rc);
     let water = mats().water;
-    let lod_water = worldgen::coarse_tile_forged(&world, &key, mats())
+    let cells = worldgen::coarse_tile_forged(&world, &key, mats());
+    assert!(
+        cells.iter().all(|cell| cell.grid.iter().all(|v| v.block != water)),
+        "coarse LOD terrain carries no water material"
+    );
+    let lod_water = worldgen::coarse_water_forged(&world, &key, mats())
+        .decode()
+        .expect("well-formed")
         .iter()
-        .filter(|cell| cell.group[1] * 32 <= level_top && level_top < cell.group[1] * 32 + 32)
-        .flat_map(|cell| {
-            let ly = (level_top - cell.group[1] * 32) as usize;
-            (0..32 * 32).map(move |k| cell.grid[(k % 32) + 32 * ly + 32 * 32 * (k / 32)].block)
-        })
-        .filter(|&block| block == water)
+        .filter(|&&(top, depth)| i32::from(top) == level_top && depth > 0)
         .count();
-    assert!(lod_water > 1000, "{lod_water} water cells at the lake level in the factor-16 LOD");
+    assert!(lod_water > 1000, "{lod_water} water columns at the lake level in the factor-16 LOD water layer");
 }
 
 /// Block at world block Y `y` of block column `(lx, lz)` of `col`: the band
@@ -863,6 +867,9 @@ fn frozen_sea_continues_past_the_sea_edge_without_a_step() {
     }
     assert_eq!(per_column.len(), (game::REGION_BLOCKS * game::REGION_BLOCKS) as usize);
     assert!(per_column.values().all(|&(y, b)| y == SEA_TOP_BLOCK && b == m.biome.ice), "LOD: flat sea ice across the edge");
+    // The ice is LOD terrain, so the water layer has nothing there (R8.2).
+    let water = worldgen::coarse_water_forged(&world, &key, m);
+    assert!(water.is_well_formed() && !water.has_water(), "ice-topped sea is dry in the LOD water layer");
 }
 
 /// A flat 20 m world of one climate, no water but the sea past its edges.

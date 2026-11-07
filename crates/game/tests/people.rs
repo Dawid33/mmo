@@ -24,6 +24,7 @@ fn harness() -> Harness {
     let (lod_result_send, lod_result_recv) = unbounded();
     let lod_builder: Box<dyn LodBuilder> = Box::new(InlineLodBuilder {
         coarse: Box::new(|_key: &game::lod::LodKey| Vec::new()),
+        water: Box::new(game::lod::LodWater::dry),
         out: lod_result_send,
     });
     Harness {

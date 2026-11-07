@@ -231,8 +231,9 @@ pub enum ClientUpdateEvent {
     /// region's render state.
     RemoveRegion(RegionId),
     /// Streamed LOD cells for one key (initial send or refresh —
-    /// replace-on-re-receipt). Decoded and spawned by the renderer.
-    LodData(LodKey, LodPayload),
+    /// replace-on-re-receipt), with the key's water surface layer. Decoded
+    /// and spawned by the renderer.
+    LodData(LodKey, LodPayload, crate::lod::LodWater),
     /// The ring assignment moved on: retire this key's render root.
     /// `near_takeover`: (one of) the key's regions just joined the near
     /// window, so the replacement is authoritative terrain still on its way

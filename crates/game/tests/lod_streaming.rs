@@ -25,7 +25,7 @@ fn manager_with_lod() -> (
         }]
     });
     let builder: Box<dyn LodBuilder> =
-        Box::new(InlineLodBuilder { coarse, out: lod_result_send });
+        Box::new(InlineLodBuilder { coarse, water: Box::new(game::lod::LodWater::dry), out: lod_result_send });
     let manager = WorldManager::new(
         InlineSpawner::default(),
         generator,
@@ -61,7 +61,7 @@ fn expect_lod_data(
     let mut hits: Vec<LodPayload> = out
         .try_iter()
         .filter_map(|(_, p)| match p {
-            ServerPacket::LodData(k, payload) if k == key => Some(payload),
+            ServerPacket::LodData(k, payload, _) if k == key => Some(payload),
             _ => None,
         })
         .collect();
@@ -107,7 +107,7 @@ fn request_lod_pristine_region_builds_downsamples_and_caches() {
         .filter(|(_, p)| matches!(p, ServerPacket::LodData(..)))
         .collect();
     assert_eq!(data.len(), 1, "one LodData reply");
-    let (target, ServerPacket::LodData(k, payload)) = &data[0] else { unreachable!() };
+    let (target, ServerPacket::LodData(k, payload, _)) = &data[0] else { unreachable!() };
     assert_eq!(*target, Some(1));
     assert_eq!(*k, key);
     assert!(!payload.is_empty(), "flat floor produces cells");
@@ -160,7 +160,7 @@ fn request_lod_running_region_downsamples_authoritative_state() {
         .filter(|(_, p)| matches!(p, ServerPacket::LodData(..)))
         .collect();
     assert_eq!(data.len(), 1, "exactly one LodData for the key arrives");
-    let (target, ServerPacket::LodData(k, payload)) = &data[0] else { unreachable!() };
+    let (target, ServerPacket::LodData(k, payload, _)) = &data[0] else { unreachable!() };
     assert_eq!(*target, Some(1));
     assert_eq!(*k, key);
     assert!(!payload.is_empty(), "flat floor produces cells");
@@ -213,7 +213,7 @@ fn release_and_disconnect_clear_subscriptions() {
         .filter(|(_, p)| matches!(p, ServerPacket::LodData(..)))
         .collect();
     assert_eq!(third.len(), 1, "client 1's later request still answers");
-    let (target, ServerPacket::LodData(k, _)) = &third[0] else { unreachable!() };
+    let (target, ServerPacket::LodData(k, ..)) = &third[0] else { unreachable!() };
     assert_eq!(*target, Some(1));
     assert_eq!(*k, key);
 }
@@ -382,7 +382,7 @@ fn terrain_change_invalidates_and_repushes_subscribed_keys() {
     let pushed: Vec<(Option<ClientId>, LodKey, LodPayload)> = out
         .try_iter()
         .filter_map(|(target, p)| match p {
-            ServerPacket::LodData(k, payload) => Some((target, k, payload)),
+            ServerPacket::LodData(k, payload, _) => Some((target, k, payload)),
             _ => None,
         })
         .collect();
@@ -616,7 +616,7 @@ fn pristine_lod_source_is_generated_by_the_builder_not_the_manager() {
 
     // The result path is unchanged: the payload fans out to the subscriber.
     out.try_iter().for_each(drop);
-    m.handle_lod_result(key, Vec::new());
+    m.handle_lod_result(key, Vec::new(), game::lod::LodWater::dry(&key));
     expect_lod_data(&out, key);
 }
 
@@ -638,8 +638,9 @@ fn pristine_job_builds_the_same_payload_as_generate_then_region_job() {
     let key = LodKey::for_region(2, region);
 
     let chunks = TerrainSnapshot::from_columns(generate(region)).chunks;
-    let (_, expected) = build_lod_job(LodBuildJob::Region { key, chunks }, &coarse, &generate);
-    let (got_key, got) = build_lod_job(LodBuildJob::Pristine { key, region }, &coarse, &generate);
+    let water = game::lod::LodWater::dry;
+    let (_, expected, _) = build_lod_job(LodBuildJob::Region { key, chunks }, &coarse, &water, &generate);
+    let (got_key, got, _) = build_lod_job(LodBuildJob::Pristine { key, region }, &coarse, &water, &generate);
 
     assert_eq!(got_key, key);
     assert!(!got.is_empty(), "the flat floors must produce LOD cells");
@@ -666,9 +667,10 @@ fn a_partial_overlay_keeps_pristine_terrain_where_it_has_no_columns() {
     };
     // Authoritative terrain: one chunk in group (0,0,0) only.
     let overlay = vec![(ChunkCoords::new(0, 0, 0), Chunk::flat_floor_with(8, BlockId(7)))];
-    let (_, payload) = game::build_lod_job(
+    let (_, payload, _) = game::build_lod_job(
         game::LodBuildJob::Tile { key, overlays: vec![(game::RegionCoords::new(0, 0), overlay)] },
         &coarse,
+        &game::lod::LodWater::dry,
         &game::no_pristine_generator,
     );
     let groups: std::collections::BTreeSet<[i32; 3]> = payload.iter().map(|(g, _)| *g).collect();
@@ -766,4 +768,161 @@ fn far_lod_from_bricks_matches_reference() {
             "factor {factor}"
         );
     }
+}
+
+// ---- LOD water surface layer (water plan Task 8) ---------------------------
+
+/// Lake floor (top block) and lake surface block of [`lake_columns`].
+const LAKE_FLOOR: i16 = 2;
+const LAKE_TOP: i16 = 8;
+
+/// One chunk column at (0, 0): stone up to `LAKE_FLOOR`, water blocks up to
+/// `LAKE_TOP`, and the ground recipe saying the same (`water_top`).
+fn lake_columns() -> Vec<(ColumnCoords, Column)> {
+    let water = block_props().id_named("water").expect("blocks.ron has water");
+    let mut chunk = Chunk::uniform(Block::new(BlockId::AIR));
+    for x in 0..CHUNK_BLOCKS {
+        for z in 0..CHUNK_BLOCKS {
+            for y in 0..=LAKE_TOP as usize {
+                let id = if y as i16 <= LAKE_FLOOR { BlockId(1) } else { water };
+                chunk.set_block(x, y, z, Block::new(id));
+            }
+        }
+    }
+    let mut ground =
+        ColumnGround::plain(vec![LAKE_FLOOR; COLUMN_FOOTPRINT].into_boxed_slice(), 0, BlockId(1), BlockId(2));
+    ground.water_top.fill(LAKE_TOP);
+    let below = Block::new(BlockId::AIR);
+    let column = Column::new(0, below, below, vec![SubChunk::Dense(Box::new(chunk))]).with_ground(ground);
+    vec![(ColumnCoords::new(0, 0), column)]
+}
+
+/// The key's water from the recipe of [`lake_columns`] (every region of the
+/// key holds the same lake), one entry per LOD column: what the server's
+/// worldgen `coarse_water` does, minus the worldgen.
+fn lake_recipe_water(key: &LodKey) -> game::lod::LodWater {
+    let side = (key.region_span() as usize * game::lod::cells_per_region(key.factor)) as u16;
+    let columns = lake_columns();
+    let ground = columns[0].1.ground().unwrap();
+    let units_per_cell = key.factor as i32;
+    let region_units = REGION_SIZE as i32;
+    let mut tops = Vec::with_capacity(usize::from(side) * usize::from(side));
+    for cz in 0..i32::from(side) {
+        for cx in 0..i32::from(side) {
+            // Block column at the LOD column's centre, region-local.
+            let block = |c: i32| ((c * units_per_cell + units_per_cell / 2) % region_units) / BLOCK_VOXELS as i32;
+            let (bx, bz) = (block(cx) as usize, block(cz) as usize);
+            let top = if bx < CHUNK_BLOCKS && bz < CHUNK_BLOCKS {
+                let i = bx * CHUNK_BLOCKS + bz;
+                let (w, s) = (ground.water_top[i], ground.surface[i]);
+                if w > s { (w, (w - s).min(255) as u8) } else { (NO_WATER, 0) }
+            } else {
+                (NO_WATER, 0)
+            };
+            tops.push(top);
+        }
+    }
+    game::lod::LodWater::encode(&tops, side)
+}
+
+fn manager_with_lake() -> (
+    WorldManager<InlineSpawner>,
+    crossbeam::channel::Receiver<(Option<ClientId>, ServerPacket)>,
+    crossbeam::channel::Receiver<(RegionCoords, RegionOutput)>,
+) {
+    let (out_send, out_recv) = unbounded();
+    let (region_out_send, region_out_recv) = unbounded();
+    let generator = Box::new(|_rc: RegionCoords| lake_columns());
+    let (lod_result_send, lod_result_recv) = unbounded();
+    let builder: Box<dyn LodBuilder> = Box::new(InlineLodBuilder {
+        coarse: Box::new(|_key: &LodKey| Vec::new()),
+        water: Box::new(lake_recipe_water),
+        out: lod_result_send,
+    });
+    let manager =
+        WorldManager::new(InlineSpawner::default(), generator, out_send, region_out_send, builder, lod_result_recv);
+    (manager, out_recv, region_out_recv)
+}
+
+/// A block edit under the lake of a running region changes the terrain
+/// fingerprint (and nothing else does), and the rebuilt key's terrain — but
+/// its `LodWater` is the recipe's, the same before and after.
+#[test]
+fn lod_water_is_recipe_not_terrain() {
+    if CHUNK_BLOCKS < 16 {
+        return; // the lake is one chunk tall
+    }
+    crate::common::install_real_block_props();
+    let rc = RegionCoords::new(0, 0);
+
+    // The fingerprint moves with the edited block only: putting it back
+    // restores it.
+    let mut region = Region::from_columns(rc, lake_columns());
+    let fp0 = region.terrain_fingerprint();
+    let under_lake = [3, i32::from(LAKE_FLOOR), 3];
+    region.with_data(|d| assert!(d.set_block_safe(under_lake, Block::new(BlockId::AIR))));
+    let edited = region.terrain_snapshot();
+    let fp1 = region.terrain_fingerprint();
+    assert_ne!(fp1, fp0, "the edit is terrain");
+    let mut restored = Region::from_columns(rc, lake_columns());
+    restored.with_data(|d| {
+        assert!(d.set_block_safe(under_lake, Block::new(BlockId::AIR)));
+        assert!(d.set_block_safe(under_lake, Block::new(BlockId(1))));
+    });
+    assert_eq!(restored.terrain_fingerprint(), fp0, "nothing but the edited block is in the fingerprint");
+
+    // The running region's key, before and after the edit's TerrainChanged.
+    let (mut m, out, region_out) = manager_with_lake();
+    m.handle_server_event(ServerEvent::connected(1), 0);
+    drain_region_outputs(&mut m, &region_out);
+    out.try_iter().for_each(drop);
+    let key = LodKey::for_region(4, rc);
+    m.handle_server_event(ServerEvent::ClientPacket(ClientPacket::RequestLod(key), 1), 0);
+    drain_region_outputs(&mut m, &region_out);
+    m.pump_lod_results();
+    let (before, water_before) = expect_lod_data_with_water(&out, key);
+    assert_eq!(water_before, lake_recipe_water(&key), "the recipe's water");
+    let tops = water_before.decode().expect("well-formed");
+    assert!(tops.iter().any(|&(top, _)| top == LAKE_TOP), "the lake is in the layer");
+
+    m.handle_region_output(rc, RegionOutput::TerrainChanged(edited), 0);
+    drain_region_outputs(&mut m, &region_out);
+    m.pump_lod_results();
+    let (after, water_after) = expect_lod_data_with_water(&out, key);
+    assert_ne!(after, before, "the rebuilt terrain shows the edit");
+    assert_eq!(water_after, water_before, "the rebuild resends the recipe's water");
+}
+
+/// `LodWater` runs must cover exactly `side²` columns.
+#[test]
+fn lod_water_rle_rejects_bad_length() {
+    use game::lod::LodWater;
+    let side = 3u16;
+    let good = LodWater::encode(&[(NO_WATER, 0); 9], side);
+    assert!(good.is_well_formed());
+    assert_eq!(good.decode(), Some(vec![(NO_WATER, 0); 9]));
+    let short = LodWater { side, runs: vec![(8, NO_WATER, 0)] };
+    assert!(!short.is_well_formed());
+    assert_eq!(short.decode(), None);
+    let long = LodWater { side, runs: vec![(9, NO_WATER, 0), (1, 5, 1)] };
+    assert!(!long.is_well_formed());
+    assert_eq!(long.decode(), None);
+    let zero = LodWater { side, runs: vec![(0, 4, 1), (9, NO_WATER, 0)] };
+    assert!(!zero.is_well_formed(), "an empty run is malformed");
+}
+
+/// Exactly one LodData for `key` in `out`; its terrain and water.
+fn expect_lod_data_with_water(
+    out: &crossbeam::channel::Receiver<(Option<ClientId>, ServerPacket)>,
+    key: LodKey,
+) -> (LodPayload, game::lod::LodWater) {
+    let mut hits: Vec<_> = out
+        .try_iter()
+        .filter_map(|(_, p)| match p {
+            ServerPacket::LodData(k, payload, water) if k == key => Some((payload, water)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(hits.len(), 1, "exactly one LodData for {key:?}");
+    hits.pop().unwrap()
 }

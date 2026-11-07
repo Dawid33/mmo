@@ -20,6 +20,7 @@
 //! - `region_load_cost`: release-mode benchmark (just bench-region).
 
 mod common;
+mod coarse_water;
 mod forge_lib;
 mod halo_probe;
 mod lod_bricks;

@@ -723,7 +723,8 @@ fn columns_from_patch(
 
 /// Cheap coarse LOD generation for one block-scale-or-coarser key
 /// (`game::lod::COARSE_MIN_FACTOR` and up): one profile sample per cell
-/// column, surface scan, then solid-below-surface + water to sea level. No
+/// column, surface scan, then solid-below-surface (+ the ice on frozen
+/// water; liquid water is not LOD terrain — see [`coarse_water`]). No
 /// block materialization, no chiseling. Pure and deterministic: same (key,
 /// seed, mats) → identical cells everywhere. A 64/256 tile is exactly one 32³
 /// grid per vertical band; a factor-16 region is 2×2 of them, grouped like
@@ -763,6 +764,75 @@ pub fn coarse_tile_forged(
     let (ox, oz, span) = (ox - ring as f64, oz - ring as f64, span + 2.0 * ring as f64);
     let trees_from = TreeSource { habitat: world, seed: world.artifact().seed };
     coarse_from_patch(&world.patch(ox, oz, span), key, mats, trees_from)
+}
+
+/// The water surface layer of LOD key `key` (water plan Task 8), from the
+/// recipe: one `point_sample` per LOD column, at the point
+/// [`coarse_tile`] samples it (a block-scale-or-coarser cell's centre); a
+/// sub-block key samples each block column once, at its centre as region
+/// generation does, and repeats it over the block's LOD columns (water is
+/// whole blocks). A column holds water iff its water top is above its
+/// ground (`water_top > top`), with depth `water_top − top` blocks; a
+/// column whose top water block is ice is dry here (the ice is LOD terrain).
+/// Pure: the same water on every build path, whatever the region's chunks.
+pub fn coarse_water(key: &game::lod::LodKey, seed: u64, mats: Materials) -> game::lod::LodWater {
+    if let Some(world) = forged::active() {
+        return coarse_water_forged(world, key, mats);
+    }
+    let (ox, oz, span) = coarse_window(key);
+    let grid = TerrainPipeline::new(seed).profile_grid(ox as f64, oz as f64, span as f64);
+    water_from_patch(&ProceduralPatch(grid), key, &mats)
+}
+
+/// `coarse_water` for an explicit forged world (tests, tools).
+pub fn coarse_water_forged(
+    world: &forged::ForgedWorld,
+    key: &game::lod::LodKey,
+    mats: Materials,
+) -> game::lod::LodWater {
+    let (ox, oz, span) = coarse_window(key);
+    water_from_patch(&world.patch(ox as f64, oz as f64, span as f64), key, &mats)
+}
+
+/// One LOD column's `(water_top, depth)` (see [`coarse_water`]).
+fn lod_water_column(c: &ColSample) -> (i16, u8) {
+    if c.water_top <= c.top || c.ice_from <= c.water_top {
+        return (game::NO_WATER, 0);
+    }
+    (c.water_top as i16, (c.water_top - c.top).min(i32::from(u8::MAX)) as u8)
+}
+
+fn water_from_patch(patch: &dyn Patch, key: &game::lod::LodKey, mats: &Materials) -> game::lod::LodWater {
+    let side = game::lod::LodWater::side_for(key);
+    let n = usize::from(side);
+    let (ox, oz, span_blocks) = coarse_window(key);
+    let mut tops = Vec::with_capacity(n * n);
+    if key.factor >= BLOCK_VOXELS as u32 {
+        // Blocks per cell edge, and the cell centre `coarse_from_patch` samples.
+        let cb = (key.factor / BLOCK_VOXELS as u32) as i32;
+        debug_assert_eq!(span_blocks / cb, i32::from(side));
+        let centre = |o: i32, c: i32| (o + c * cb) as f64 + cb as f64 * 0.5;
+        for cz in 0..i32::from(side) {
+            for cx in 0..i32::from(side) {
+                tops.push(lod_water_column(&point_sample(patch, mats, centre(ox, cx), centre(oz, cz))));
+            }
+        }
+    } else {
+        let per = (BLOCK_VOXELS as u32 / key.factor) as usize; // LOD columns per block edge
+        let blocks = span_blocks as usize;
+        debug_assert_eq!(blocks * per, n);
+        let mut row = Vec::with_capacity(blocks);
+        for bz in 0..span_blocks {
+            row.clear();
+            row.extend((0..span_blocks).map(|bx| lod_water_column(&column_sample(patch, mats, ox + bx, oz + bz))));
+            for _ in 0..per {
+                for &top in &row {
+                    tops.extend(std::iter::repeat_n(top, per));
+                }
+            }
+        }
+    }
+    game::lod::LodWater::encode(&tops, side)
 }
 
 /// World block origin and span of a coarse key.
@@ -876,8 +946,15 @@ fn coarse_from_patch(
                         mat => mat,
                     }
                 } else {
-                    // Likewise the cell's topmost water block.
-                    water_material(&mats, &c, water_top.min(cy * cb + cb - 1))
+                    // Likewise the cell's topmost water block — but only ice
+                    // is LOD terrain: a liquid cell is air (the bed shows),
+                    // its surface rides in the key's `LodWater`
+                    // (`coarse_water`).
+                    let by = water_top.min(cy * cb + cb - 1);
+                    if by < c.ice_from {
+                        continue;
+                    }
+                    water_material(&mats, &c, by)
                 };
                 let group = [cx.div_euclid(G), cy.div_euclid(G), cz.div_euclid(G)];
                 let (lx, ly, lz) = ((cx % G) as usize, cy.rem_euclid(G) as usize, (cz % G) as usize);
@@ -966,6 +1043,26 @@ fn coarse_from_patch(
 
 #[cfg(test)]
 mod tests {
+    /// R8.2: a column's LOD water — dry ground, open water, a column whose
+    /// top water block is ice (dry: the ice is LOD terrain), a glacier.
+    #[test]
+    fn coarse_water_column_rules() {
+        let c = |s: i32, water_top: i32, top: i32, ice_from: i32| super::ColSample {
+            s,
+            water_top,
+            top,
+            ice_from,
+            cover: None,
+            trees: true,
+            unbounded: true,
+        };
+        assert_eq!(super::lod_water_column(&c(70, 63, 70, 64)), (game::NO_WATER, 0), "dry land");
+        assert_eq!(super::lod_water_column(&c(50, 63, 50, 64)), (63, 13), "open sea");
+        assert_eq!(super::lod_water_column(&c(50, 63, 50, 62)), (game::NO_WATER, 0), "frozen top");
+        assert_eq!(super::lod_water_column(&c(-900, 63, -900, 64)), (63, 255), "depth clamps");
+        assert_eq!(super::lod_water_column(&c(60, 63, 70, 64)), (game::NO_WATER, 0), "glacier over the water top");
+    }
+
     use super::*;
     use game::{BlockId, Column, ColumnCoords, ReadVol, BlockPos, SubChunk, REGION_CHUNKS};
 
@@ -1146,8 +1243,10 @@ mod tests {
         }
     }
 
-    /// The sea is one flat plane in every ring: coarse sampling puts its top
-    /// cell boundary exactly on the real water surface at every coarse factor.
+    /// The sea is one flat plane in every ring: the coarse water layer puts
+    /// every sea column's surface exactly on the real water surface at every
+    /// coarse factor (water plan Task 8: it is `coarse_water`'s now — the
+    /// coarse terrain grids carry no water).
     #[test]
     fn coarse_sea_surface_is_exact_at_every_factor() {
         let surface_voxels = (SEA_TOP_BLOCK + 1) * BLOCK_VOXELS as i32;
@@ -1157,22 +1256,14 @@ mod tests {
         let rc = RegionCoords::from_world(5632.0, -2560.0);
         for factor in [16u32, 32, 64, 128, 256, 512] {
             let key = game::lod::LodKey::for_region(factor, rc);
-            let mut water_columns = 0;
             for cell in coarse_tile(&key, WORLD_SEED, mats()) {
-                for z in 0..32usize {
-                    for x in 0..32usize {
-                        let top = (0..32usize)
-                            .rev()
-                            .find(|&y| !cell.grid[x + 32 * y + 32 * 32 * z].is_air());
-                        let Some(y) = top else { continue };
-                        if cell.grid[x + 32 * y + 32 * 32 * z].block != mats().water {
-                            continue;
-                        }
-                        water_columns += 1;
-                        let top_voxels = (cell.group[1] * 32 + y as i32 + 1) * factor as i32;
-                        assert_eq!(top_voxels, surface_voxels, "factor {factor}");
-                    }
-                }
+                assert!(cell.grid.iter().all(|v| v.block != mats().water), "factor {factor}: water in the terrain");
+            }
+            let tops = coarse_water(&key, WORLD_SEED, mats()).decode().expect("well-formed");
+            let mut water_columns = 0;
+            for &(top, _) in tops.iter().filter(|&&(top, _)| top != game::NO_WATER) {
+                water_columns += 1;
+                assert_eq!((i32::from(top) + 1) * BLOCK_VOXELS as i32, surface_voxels, "factor {factor}");
             }
             assert!(water_columns > 0, "factor {factor}: the coast key has open water");
         }

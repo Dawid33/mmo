@@ -25,6 +25,7 @@ fn harness() -> Harness {
     let (lod_result_send, lod_result_recv) = unbounded();
     let lod_builder: Box<dyn LodBuilder> = Box::new(InlineLodBuilder {
         coarse: Box::new(|_key: &game::lod::LodKey| Vec::new()),
+        water: Box::new(game::lod::LodWater::dry),
         out: lod_result_send,
     });
     Harness {
@@ -330,7 +331,7 @@ fn connected_harness() -> Harness {
 /// Does the packet list carry a `LodData` for `key` addressed to client 0?
 fn has_lod_data(packets: &[(Option<ClientId>, ServerPacket)], key: game::lod::LodKey) -> bool {
     packets.iter().any(|(target, p)| {
-        *target == Some(0) && matches!(p, ServerPacket::LodData(k, _) if *k == key)
+        *target == Some(0) && matches!(p, ServerPacket::LodData(k, ..) if *k == key)
     })
 }
 
@@ -473,6 +474,7 @@ fn region_start_defers_worldgen_to_a_spawner_that_generates_columns() {
     let (lod_result_send, lod_result_recv) = unbounded();
     let lod_builder: Box<dyn LodBuilder> = Box::new(InlineLodBuilder {
         coarse: Box::new(|_key: &game::lod::LodKey| Vec::new()),
+        water: Box::new(game::lod::LodWater::dry),
         out: lod_result_send,
     });
     let seeds = Arc::new(Mutex::new(Vec::new()));
@@ -572,6 +574,7 @@ fn floored_harness_with(spawner: InlineSpawner) -> Harness {
     let (lod_result_send, lod_result_recv) = unbounded();
     let lod_builder: Box<dyn LodBuilder> = Box::new(InlineLodBuilder {
         coarse: Box::new(|_key: &game::lod::LodKey| Vec::new()),
+        water: Box::new(game::lod::LodWater::dry),
         out: lod_result_send,
     });
     Harness {

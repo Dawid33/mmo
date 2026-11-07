@@ -66,6 +66,9 @@ impl LocalServer {
             coarse: Box::new(move |key| {
                 worldgen::coarse_tile(key, worldgen::WORLD_SEED, materials)
             }),
+            water: Box::new(move |key| {
+                worldgen::coarse_water(key, worldgen::WORLD_SEED, materials)
+            }),
             out: lod_result_send,
         });
         let mut manager = WorldManager::new(

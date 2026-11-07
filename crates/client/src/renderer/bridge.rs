@@ -826,8 +826,8 @@ pub fn drain_client_updates(
                 });
                 info!("bridge: region {:?} removed", id);
             }
-            ClientUpdateEvent::LodData(key, payload) => {
-                lod_rings.pending.push(lod_rings::LodEventMsg::Data(key, payload));
+            ClientUpdateEvent::LodData(key, payload, water) => {
+                lod_rings.pending.push(lod_rings::LodEventMsg::Data(key, payload, water));
             }
             ClientUpdateEvent::RemoveLod { key, near_takeover } => {
                 lod_rings

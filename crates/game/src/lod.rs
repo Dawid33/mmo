@@ -45,8 +45,16 @@ pub fn downsample2(sources: &[Option<&[Voxel]>; 8]) -> Vec<Voxel> {
     output
 }
 
+/// A block as LOD terrain sees it: liquid is air. Water is not terrain in
+/// the LOD grids — it rides beside them as the key's [`LodWater`], taken
+/// from the recipe, so the grids show the seabed and lake beds.
+#[inline]
+pub fn terrain_id(id: BlockId) -> BlockId {
+    if id != BlockId::AIR && crate::block_props().is_liquid(id) { BlockId::AIR } else { id }
+}
+
 /// The coarse cell for one 2×2×2 source group (index `dx + 2*dy + 4*dz`,
-/// `AIR` = empty). Occupancy is any-solid — that keeps every coarse level a
+/// `AIR` = empty; liquid counts as `AIR`, [`terrain_id`]). Occupancy is any-solid — that keeps every coarse level a
 /// superset of the finer one, so rings of different factors never crack
 /// against each other. The MATERIAL is what a viewer sees from above: each of
 /// the four x/z columns contributes its topmost solid voxel, the most frequent
@@ -56,8 +64,9 @@ pub fn downsample2(sources: &[Option<&[Voxel]>; 8]) -> Vec<Voxel> {
 pub fn merge_group(group: &[BlockId; 8]) -> Voxel {
     let first = group[0];
     if group.iter().all(|&id| id == first) {
-        return Voxel::new(first); // uniform (incl. all-air): the common case
+        return Voxel::new(terrain_id(first)); // uniform (incl. all-air): the common case
     }
+    let group = group.map(terrain_id);
     let mut tops = [BlockId::AIR; 4];
     let mut n = 0;
     for dz in 0..2 {
@@ -102,10 +111,10 @@ pub fn downsample_blocks(bricks: &[Option<BrickView<'_>>; 8]) -> Vec<Voxel> {
         for bz in 0..BRICK_BLOCKS {
             for by in 0..BRICK_BLOCKS {
                 for bx in 0..BRICK_BLOCKS {
-                    let block = brick.block_at(bx, by, bz);
-                    if block.id != BlockId::AIR {
+                    let id = terrain_id(brick.block_at(bx, by, bz).id);
+                    if id != BlockId::AIR {
                         let [x, y, z] = [s[0] * BRICK_BLOCKS + bx, s[1] * BRICK_BLOCKS + by, s[2] * BRICK_BLOCKS + bz];
-                        output[x + BRICK_VOXELS * y + BRICK_VOXELS * BRICK_VOXELS * z] = Voxel::new(block.id);
+                        output[x + BRICK_VOXELS * y + BRICK_VOXELS * BRICK_VOXELS * z] = Voxel::new(id);
                     }
                 }
             }
@@ -173,7 +182,7 @@ fn write_brick_at_half_scale(grid: &mut [Voxel], octant: [usize; 3], brick: &Bri
         for z in 0..HALF_GRID {
             for y in 0..HALF_GRID {
                 let row = row_at(origin[0], origin[1] + y, origin[2] + z);
-                grid[row..row + HALF_GRID].fill(Voxel::new(block.id));
+                grid[row..row + HALF_GRID].fill(Voxel::new(terrain_id(block.id)));
             }
         }
         return;
@@ -181,7 +190,7 @@ fn write_brick_at_half_scale(grid: &mut [Voxel], octant: [usize; 3], brick: &Bri
     for bz in 0..BRICK_BLOCKS {
         for by in 0..BRICK_BLOCKS {
             for bx in 0..BRICK_BLOCKS {
-                let id = brick.block_at(bx, by, bz).id;
+                let id = terrain_id(brick.block_at(bx, by, bz).id);
                 let base = [origin[0] + bx * half, origin[1] + by * half, origin[2] + bz * half];
                 // Decoded once per chiseled block: grid order, x fastest.
                 let chisel = brick.chisel(bx, by, bz).map(crate::ChiselData::materials);
@@ -236,7 +245,7 @@ pub fn downsample_cells(cells: Vec<LodCell>) -> Vec<LodCell> {
         .collect()
 }
 
-/// Factor-16 (block scale) packing: ONE 32³ grid per 16×16-brick x/z tile and
+/// Factor-16 (block scale) packing (liquid counts as air, [`terrain_id`]): ONE 32³ grid per 16×16-brick x/z tile and
 /// 16-brick vertical band, group key = world brick coords `div_euclid` 16 —
 /// instead of one `downsample_blocks` grid per 2×2×2-brick group. A block cell
 /// is 16 world units, so a 16-brick tile fills a grid's 32×32-cell x/z span
@@ -260,14 +269,14 @@ pub fn block_scale_cells(chunks: Vec<(ChunkCoords, Chunk)>) -> Vec<LodCell> {
             let band =
                 bands.entry(group).or_insert_with(|| vec![Voxel::default(); BRICK_VOXEL_COUNT]);
             let l = w.map(|v| v.rem_euclid(BRICKS_PER_GRID) as usize * BRICK_BLOCKS);
-            let uniform = brick.uniform();
-            if uniform.is_some_and(|u| u.id == BlockId::AIR) {
+            let uniform = brick.uniform().map(|u| terrain_id(u.id));
+            if uniform == Some(BlockId::AIR) {
                 continue;
             }
             for bz in 0..BRICK_BLOCKS {
                 for by in 0..BRICK_BLOCKS {
                     for bx in 0..BRICK_BLOCKS {
-                        let id = uniform.unwrap_or_else(|| brick.block_at(bx, by, bz)).id;
+                        let id = uniform.unwrap_or_else(|| terrain_id(brick.block_at(bx, by, bz).id));
                         if id != BlockId::AIR {
                             let idx = (l[0] + bx)
                                 + BRICK_VOXELS * (l[1] + by)
@@ -498,6 +507,78 @@ impl PackedLodGrid {
             }
         }
         Some(grid)
+    }
+}
+
+/// A key's water surface layer, streamed beside its terrain grids (water
+/// plan Task 8). LOD grids carry no liquid ([`terrain_id`]); this says, per
+/// LOD column, the topmost water block (`crate::NO_WATER` when the column
+/// is dry or its top is ice) and the water's depth in blocks over the
+/// ground (clamped to 255). It comes from the recipe on every build path,
+/// never from chunks, so a terrain rebuild resends the same water and water
+/// never enters the terrain fingerprint.
+///
+/// Layout: an RLE of `(length, water_top, depth)` runs, row major (x
+/// fastest, then z) over the key's `side × side` LOD columns, where
+/// `side = region_span() × cells_per_region(factor)` ([`LodWater::side_for`]).
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+pub struct LodWater {
+    pub side: u16,
+    pub runs: Vec<(u16, i16, u8)>,
+}
+
+impl LodWater {
+    /// LOD columns per side of `key`'s water layer.
+    pub fn side_for(key: &LodKey) -> u16 {
+        let side = key.region_span() as usize * cells_per_region(key.factor);
+        u16::try_from(side).expect("a LOD key's columns per side fit a u16")
+    }
+
+    /// Encode `tops` (`side²` `(water_top, depth)` entries, row major).
+    pub fn encode(tops: &[(i16, u8)], side: u16) -> Self {
+        debug_assert_eq!(tops.len(), usize::from(side) * usize::from(side));
+        let mut runs: Vec<(u16, i16, u8)> = Vec::new();
+        for &(top, depth) in tops {
+            match runs.last_mut() {
+                Some((n, t, d)) if *t == top && *d == depth && *n < u16::MAX => *n += 1,
+                _ => runs.push((1, top, depth)),
+            }
+        }
+        Self { side, runs }
+    }
+
+    /// A dry layer for `key`: every column `NO_WATER` (builders and tests
+    /// with no water recipe).
+    pub fn dry(key: &LodKey) -> Self {
+        let side = Self::side_for(key);
+        Self::encode(&vec![(crate::NO_WATER, 0); usize::from(side) * usize::from(side)], side)
+    }
+
+    /// Whether the runs cover exactly `side²` columns with no empty run,
+    /// i.e. whether [`decode`](Self::decode) succeeds. O(runs), no
+    /// allocation: wire data is untrusted.
+    pub fn is_well_formed(&self) -> bool {
+        let side = usize::from(self.side);
+        self.runs.iter().all(|&(n, _, _)| n > 0)
+            && self.runs.iter().map(|&(n, _, _)| usize::from(n)).sum::<usize>() == side * side
+    }
+
+    /// Whether any column holds water.
+    pub fn has_water(&self) -> bool {
+        self.runs.iter().any(|&(n, top, _)| n > 0 && top != crate::NO_WATER)
+    }
+
+    /// The `side²` `(water_top, depth)` entries, row major; `None` when
+    /// malformed.
+    pub fn decode(&self) -> Option<Vec<(i16, u8)>> {
+        if !self.is_well_formed() {
+            return None;
+        }
+        let mut tops = Vec::with_capacity(usize::from(self.side) * usize::from(self.side));
+        for &(n, top, depth) in &self.runs {
+            tops.extend(std::iter::repeat_n((top, depth), usize::from(n)));
+        }
+        Some(tops)
     }
 }
 

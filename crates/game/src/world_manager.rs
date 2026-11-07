@@ -12,7 +12,7 @@ use crossbeam::channel::{unbounded, Receiver, Sender};
 use crate::history::{AdventureRefusal, CalendarTick, EmbarkRefusal, History, SiteId, TICKS_PER_DAY};
 use crate::{
     Chunk, ChunkCoords, ClientId, ClientPacket, Column, ColumnCoords, EntityKind, TerrainSnapshot, GameEventKind,
-    LodBuildJob, LodBuilder, LodKey, LodPayload, LodResult, Region, RegionCoords, RegionInput,
+    LodBuildJob, LodBuilder, LodKey, LodPayload, LodResult, LodWater, Region, RegionCoords, RegionInput,
     RegionOutput, RegionRunner, RegionSave, RegionSeed, SerializedRegion, ServerPacket, PlayRefusal, WorldMap, EmbarkRequest,
     Order, PlayMode, PlayerId, PlayerRecord,
 };
@@ -654,10 +654,10 @@ pub struct WorldManager<S: RegionSpawner> {
     region_out_send: Sender<(RegionCoords, RegionOutput)>,
     /// LOD subscriptions per key, and the reverse map for disconnects.
     lod_subscribers: BTreeMap<LodKey, BTreeSet<ClientId>>,
-    /// key -> RLE payload; LRU-evicted past LOD_CACHE_MAX_ENTRIES,
-    /// subscribed keys pinned. `u64` is a monotonically increasing access
-    /// stamp (not wall time — determinism).
-    lod_cache: BTreeMap<LodKey, (LodPayload, u64)>,
+    /// key -> RLE payload + water layer; LRU-evicted past
+    /// LOD_CACHE_MAX_ENTRIES, subscribed keys pinned. `u64` is a
+    /// monotonically increasing access stamp (not wall time — determinism).
+    lod_cache: BTreeMap<LodKey, (LodPayload, LodWater, u64)>,
     /// LRU cap on `lod_cache`; defaults to `LOD_CACHE_MAX_ENTRIES`, overridable
     /// via `set_lod_cache_max` (test hook — mirrors `LodRings.retirement_max_frames`).
     lod_cache_max: usize,
@@ -2863,12 +2863,12 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.lod_subscribers.entry(key).or_default().insert(client);
         self.lod_access_counter += 1;
         let stamp = self.lod_access_counter;
-        if let Some((payload, access)) = self.lod_cache.get_mut(&key) {
+        if let Some((payload, water, access)) = self.lod_cache.get_mut(&key) {
             *access = stamp;
             self.perf.lod_cache_hits += 1;
             let _ = self
                 .out
-                .send((Some(client), ServerPacket::LodData(key, payload.clone())));
+                .send((Some(client), ServerPacket::LodData(key, payload.clone(), water.clone())));
             return;
         }
         if !self.lod_in_flight.contains(&key) {
@@ -2987,7 +2987,7 @@ impl<S: RegionSpawner> WorldManager<S> {
         }
     }
 
-    pub fn handle_lod_result(&mut self, key: LodKey, payload: LodPayload) {
+    pub fn handle_lod_result(&mut self, key: LodKey, payload: LodPayload, water: LodWater) {
         self.lod_in_flight.remove(&key);
         self.perf.lod_built += 1;
         if let Some(watch) = self.lod_submitted_at.remove(&key) {
@@ -2996,13 +2996,13 @@ impl<S: RegionSpawner> WorldManager<S> {
             self.perf.lod_latency_max = self.perf.lod_latency_max.max(took);
         }
         self.lod_access_counter += 1;
-        self.lod_cache.insert(key, (payload.clone(), self.lod_access_counter));
+        self.lod_cache.insert(key, (payload.clone(), water.clone(), self.lod_access_counter));
         self.evict_lod_cache();
         if let Some(subs) = self.lod_subscribers.get(&key) {
             for client in subs {
                 let _ = self
                     .out
-                    .send((Some(*client), ServerPacket::LodData(key, payload.clone())));
+                    .send((Some(*client), ServerPacket::LodData(key, payload.clone(), water.clone())));
             }
         }
     }
@@ -3010,8 +3010,8 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// Drain the builder results channel (Inline path; the native server
     /// selects on the receiver instead and calls handle_lod_result directly).
     pub fn pump_lod_results(&mut self) {
-        while let Ok((key, payload)) = self.lod_results.try_recv() {
-            self.handle_lod_result(key, payload);
+        while let Ok((key, payload, water)) = self.lod_results.try_recv() {
+            self.handle_lod_result(key, payload, water);
         }
     }
 
@@ -3085,7 +3085,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                 .lod_cache
                 .iter()
                 .filter(|(k, _)| !self.lod_subscribers.contains_key(k))
-                .min_by_key(|(_, (_, access))| *access)
+                .min_by_key(|(_, (_, _, access))| *access)
                 .map(|(k, _)| *k);
             match victim {
                 Some(k) => {

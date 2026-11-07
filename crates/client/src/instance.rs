@@ -1699,7 +1699,7 @@ impl GameInstanceManager {
                     .client_event_send
                     .send(ClientUpdateEvent::PlayRefused(rc, why));
             }
-            game::ServerPacket::LodData(key, payload) => {
+            game::ServerPacket::LodData(key, payload, water) => {
                 if !self.lod_subscribed.contains(&key) {
                     // Raced a release: tell the server we really don't want it.
                     let _ = self.server_game_send.send(ClientPacket::ReleaseLod(key));
@@ -1720,7 +1720,7 @@ impl GameInstanceManager {
                 }
                 let _ = self
                     .client_event_send
-                    .send(ClientUpdateEvent::LodData(key, payload));
+                    .send(ClientUpdateEvent::LodData(key, payload, water));
             }
             game::ServerPacket::Sites(v) => {
                 let _ = self.client_event_send.send(ClientUpdateEvent::Sites(v));

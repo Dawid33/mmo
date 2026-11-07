@@ -67,11 +67,15 @@ impl ThreadLodBuilder {
                 .spawn(move || {
                     let coarse =
                         move |key: &game::lod::LodKey| worldgen::coarse_tile(key, seed, materials);
+                    // The water layer comes from the recipe on every job
+                    // kind (never from chunks): water plan Task 8.
+                    let water =
+                        move |key: &game::lod::LodKey| worldgen::coarse_water(key, seed, materials);
                     let generate =
                         move |rc: game::RegionCoords| gen_cache.generate_cached(rc, seed, materials);
                     while let Ok(job) = recv.recv() {
                         let started = std::time::Instant::now();
-                        let result = build_lod_job(job, &coarse, &generate);
+                        let result = build_lod_job(job, &coarse, &water, &generate);
                         crate::perf::EDGE.record_lod_build(started.elapsed());
                         let _ = out.send(result);
                     }

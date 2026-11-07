@@ -8,14 +8,17 @@
 //! here touches the full-res pipeline. A key that is refreshed (re-receipt)
 //! or removed keeps its old root rendering until a replacement is visibly
 //! meshed (`retire_lod_roots`), so transitions never pop the horizon to
-//! empty. A key handed over to the near window stays until that region's
+//! empty. Each root with water also gets one [`LodWaterSurface`] child: the
+//! key's `LodWater` (the grids hold no liquid) as greedy-merged top quads in
+//! the blended water material (water plan Task 8), retired with its root. A key handed over to the near window stays until that region's
 //! authoritative chunks have ALL meshed — the switch is one swap, not a LOD
 //! that vanishes while the near terrain fills in chunk by chunk.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use bevy::prelude::*;
-use game::lod::LodKey;
+use bevy::light::NotShadowCaster;
+use game::lod::{LodKey, LodWater};
 use game::{LodPayload, RegionCoords};
 
 use super::bridge::{PendingSnapshotVoxels, RegionRoots, VoxelData};
@@ -24,6 +27,8 @@ use super::meshing::lod;
 use super::meshing::lod::LodRasterReady;
 use super::meshing::visibility::ChunkConnectivity;
 use super::voxel_pull::ChunkQuads;
+use super::water::material::{WaterMaterial, WaterMaterialHandle};
+use super::water::mesh::WaterMeshData;
 
 /// Deadline for retiring/retired roots: if the replacement hasn't shown a
 /// mesh within this many frames (~10s at 60fps), despawn the old root anyway
@@ -46,8 +51,8 @@ pub const NEAR_HANDOFF_HOLD_FRAMES: u32 = 3;
 /// `apply_lod_events` the same frame.
 pub enum LodEventMsg {
     /// Streamed cells for one key — initial send or refresh
-    /// (replace-on-re-receipt).
-    Data(LodKey, LodPayload),
+    /// (replace-on-re-receipt) — and its water surface layer.
+    Data(LodKey, LodPayload, LodWater),
     /// The ring assignment moved on: retire this key's render root.
     /// `near_takeover` as on `ClientUpdateEvent::RemoveLod`.
     Remove { key: LodKey, near_takeover: bool },
@@ -117,7 +122,11 @@ pub const LOD_APPLY_CELLS_PER_FRAME: usize = 512;
 /// RLE grids; undecodable cells drop with a warning — wire data is
 /// untrusted), retire the old root on re-receipt, and move `Remove`d keys'
 /// roots to the retirement list.
-pub fn apply_lod_events(mut commands: Commands, mut rings: ResMut<LodRings>) {
+pub fn apply_lod_events(
+    mut commands: Commands,
+    mut rings: ResMut<LodRings>,
+    mut water_assets: LodWaterAssets,
+) {
     let mut pending = std::mem::take(&mut rings.pending);
     // Budgeted by decoded cells: `spawn_lod_root` expands every cell of a
     // payload to a dense 32^3 grid on this thread (~0.2 ms per cell, a
@@ -130,8 +139,8 @@ pub fn apply_lod_events(mut commands: Commands, mut rings: ResMut<LodRings>) {
         .iter()
         .position(|msg| {
             let over = cells >= LOD_APPLY_CELLS_PER_FRAME;
-            if let LodEventMsg::Data(_, payload) = msg {
-                cells += payload.len();
+            if let LodEventMsg::Data(_, payload, water) = msg {
+                cells += payload.len() + lod_water_cost(water);
             }
             over
         })
@@ -141,8 +150,9 @@ pub fn apply_lod_events(mut commands: Commands, mut rings: ResMut<LodRings>) {
     stall.add_work(pending.len() as u32);
     for msg in pending {
         match msg {
-            LodEventMsg::Data(key, payload) => {
+            LodEventMsg::Data(key, payload, water) => {
                 let root = spawn_lod_root(&mut commands, key, &payload);
+                spawn_lod_water(&mut commands, &mut water_assets, root, &key, &water);
                 match rings.roots.entry(key) {
                     std::collections::btree_map::Entry::Occupied(mut e) => {
                         let slot = e.get_mut();
@@ -256,6 +266,127 @@ fn spawn_lod_root(commands: &mut Commands, key: LodKey, payload: &LodPayload) ->
     root
 }
 
+/// A LOD root's water surface child (see the module doc).
+#[derive(Component)]
+pub struct LodWaterSurface;
+
+/// What [`spawn_lod_water`] draws with; absent in headless apps (no water
+/// child then).
+#[derive(bevy::ecs::system::SystemParam)]
+pub struct LodWaterAssets<'w> {
+    meshes: Option<ResMut<'w, Assets<Mesh>>>,
+    materials: Option<ResMut<'w, Assets<WaterMaterial>>>,
+    handle: Option<ResMut<'w, WaterMaterialHandle>>,
+    fortress: Option<Res<'w, super::fortress_view::FortressViewUniform>>,
+}
+
+/// A key's water layer in [`LOD_APPLY_CELLS_PER_FRAME`] terms: decoding and
+/// merging a cell's worth (32³) of LOD columns costs about one cell.
+fn lod_water_cost(water: &LodWater) -> usize {
+    if !water.has_water() {
+        return 0;
+    }
+    let side = usize::from(water.side);
+    (side * side).div_ceil(game::BRICK_VOXEL_COUNT)
+}
+
+/// The water surface of one LOD key: greedy-merged top quads, one per run of
+/// equal water top and equal alpha within a row, extended across the rows
+/// below it. Alpha from depth is the near pass's ([`super::water::water_alpha`]),
+/// and it saturates within a few metres, so open water still merges into a
+/// few quads. Positions are root-local world units: LOD column `(x, z)`
+/// spans `factor` units like the cell children, the surface sits on top of
+/// block `top` (`(top + 1)` blocks up). `None` when the layer is dry or
+/// malformed.
+pub fn lod_water_mesh(key: &LodKey, water: &LodWater) -> Option<WaterMeshData> {
+    let tops = water.decode()?;
+    let n = usize::from(water.side);
+    let keys: Vec<Option<(i16, u32)>> = tops
+        .iter()
+        .map(|&(top, depth)| {
+            (top != game::NO_WATER).then(|| (top, super::water::water_alpha(f32::from(depth)).to_bits()))
+        })
+        .collect();
+    let cell = key.factor as f32;
+    let block = game::BLOCK_VOXELS as f32;
+    let mut used = vec![false; n * n];
+    let mut data = WaterMeshData::default();
+    for z in 0..n {
+        let mut x = 0;
+        while x < n {
+            let i = z * n + x;
+            let Some(k) = keys[i].filter(|_| !used[i]) else {
+                x += 1;
+                continue;
+            };
+            let mut w = 1;
+            while x + w < n && !used[i + w] && keys[i + w] == Some(k) {
+                w += 1;
+            }
+            let mut h = 1;
+            while z + h < n {
+                let row = (z + h) * n + x;
+                if (row..row + w).any(|j| used[j] || keys[j] != Some(k)) {
+                    break;
+                }
+                h += 1;
+            }
+            for dz in 0..h {
+                let row = (z + dz) * n + x;
+                used[row..row + w].fill(true);
+            }
+            let y = (f32::from(k.0) + 1.0) * block;
+            data.quad(
+                [x as f32 * cell, y, z as f32 * cell],
+                [0.0, 0.0, h as f32 * cell],
+                [w as f32 * cell, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                f32::from_bits(k.1),
+            );
+            x += w;
+        }
+    }
+    (!data.is_empty()).then_some(data)
+}
+
+/// Spawn `root`'s water surface child when the key has water (a
+/// `SessionScoped` child, despawned with its root).
+fn spawn_lod_water(
+    commands: &mut Commands,
+    assets: &mut LodWaterAssets,
+    root: Entity,
+    key: &LodKey,
+    water: &LodWater,
+) {
+    if !water.has_water() {
+        return;
+    }
+    if !water.is_well_formed() {
+        warn!("lod: dropping undecodable water layer for {key:?}");
+        return;
+    }
+    let (Some(meshes), Some(materials), Some(handle)) =
+        (assets.meshes.as_mut(), assets.materials.as_mut(), assets.handle.as_mut())
+    else {
+        return;
+    };
+    let Some(mesh) = lod_water_mesh(key, water).and_then(super::water::tile_mesh) else {
+        return;
+    };
+    let material = handle.get_or_add(materials, assets.fortress.as_deref().copied().unwrap_or_default());
+    commands.spawn((
+        Name::new(format!("lod water {:?} x{}", key.coords, key.factor)),
+        Mesh3d(meshes.add(mesh)),
+        MeshMaterial3d(material),
+        Transform::default(),
+        Visibility::default(),
+        NotShadowCaster,
+        LodWaterSurface,
+        crate::session::SessionScoped,
+        ChildOf(root),
+    ));
+}
+
 /// Despawn retiring/retired LOD roots once their replacement is actually
 /// VISIBLE — the point of retirement is that a transition never pops the
 /// horizon to empty (under-draw, the design's named failure mode). Until
@@ -353,12 +484,17 @@ pub fn retire_lod_roots(
         .collect();
 }
 
-type ReadyLodCellFilter = Or<(
-    With<Mesh3d>,
-    With<ChunkQuads>,
-    With<FarVoxelReady>,
-    With<LodRasterReady>,
-)>;
+/// A meshed terrain cell. The water surface child has a `Mesh3d` too, but
+/// it is not terrain: a root showing only water has not replaced anything.
+type ReadyLodCellFilter = (
+    Or<(
+        With<Mesh3d>,
+        With<ChunkQuads>,
+        With<FarVoxelReady>,
+        With<LodRasterReady>,
+    )>,
+    Without<LodWaterSurface>,
+);
 /// A near chunk not yet on screen: its snapshot voxels are still being
 /// derived, or it has voxels but its first mesh has not attached
 /// (`apply_meshed_chunks` inserts `ChunkConnectivity` for every finished
@@ -477,7 +613,7 @@ mod tests {
             .collect();
         let keys: Vec<LodKey> = (0..3).map(|x| LodKey::for_region(2, game::RegionCoords::new(10 + x, 0))).collect();
         for key in &keys {
-            push_event(&mut app, LodEventMsg::Data(*key, big.clone()));
+            push_event(&mut app, LodEventMsg::Data(*key, big.clone(), LodWater::default()));
         }
 
         app.update();
@@ -562,7 +698,7 @@ mod tests {
             factor: 64,
             coords: [1, -1],
         };
-        push_event(&mut app, LodEventMsg::Data(key, solid_payload([0, 2, 0])));
+        push_event(&mut app, LodEventMsg::Data(key, solid_payload([0, 2, 0]), LodWater::default()));
         assert!(wait_until(&mut app, |app| slot_root(app, key).is_some()));
         let root = slot_root(&app, key).unwrap();
         let off = key.world_offset();
@@ -597,7 +733,7 @@ mod tests {
             factor: 4,
             coords: [0, 0],
         };
-        push_event(&mut app, LodEventMsg::Data(key, solid_payload([0, 0, 0])));
+        push_event(&mut app, LodEventMsg::Data(key, solid_payload([0, 0, 0]), LodWater::default()));
         assert!(
             wait_until(&mut app, |app| slot_root(app, key)
                 .is_some_and(|r| root_meshed(app, r))),
@@ -607,7 +743,7 @@ mod tests {
 
         // Refresh: the old root must survive every frame until the NEW root
         // has a meshed child (the invariant is asserted inside the wait).
-        push_event(&mut app, LodEventMsg::Data(key, solid_payload([0, 1, 0])));
+        push_event(&mut app, LodEventMsg::Data(key, solid_payload([0, 1, 0]), LodWater::default()));
         assert!(
             wait_until(&mut app, |app| {
                 let new_meshed =
@@ -641,7 +777,7 @@ mod tests {
             factor: 16,
             coords: [0, 0],
         };
-        push_event(&mut app, LodEventMsg::Data(key, solid_payload([0, 0, 0])));
+        push_event(&mut app, LodEventMsg::Data(key, solid_payload([0, 0, 0]), LodWater::default()));
         assert!(wait_until(&mut app, |app| slot_root(app, key)
             .is_some_and(|r| root_meshed(app, r))));
         let root = slot_root(&app, key).unwrap();
@@ -670,7 +806,7 @@ mod tests {
             factor: 4,
             coords: [0, 0],
         };
-        push_event(&mut app, LodEventMsg::Data(key4, solid_payload([0, 0, 0])));
+        push_event(&mut app, LodEventMsg::Data(key4, solid_payload([0, 0, 0]), LodWater::default()));
         assert!(wait_until(&mut app, |app| slot_root(app, key4)
             .is_some_and(|r| root_meshed(app, r))));
         let old_root = slot_root(&app, key4).unwrap();
@@ -689,7 +825,7 @@ mod tests {
             factor: 16,
             coords: [0, 0],
         };
-        push_event(&mut app, LodEventMsg::Data(key16, solid_payload([0, 0, 0])));
+        push_event(&mut app, LodEventMsg::Data(key16, solid_payload([0, 0, 0]), LodWater::default()));
         assert!(
             wait_until(&mut app, |app| app.world().get_entity(old_root).is_err()),
             "retired root despawns once a covering key is meshed"
@@ -734,7 +870,7 @@ mod tests {
     }
 
     fn meshed_lod_root(app: &mut App, key: LodKey) -> Entity {
-        push_event(app, LodEventMsg::Data(key, solid_payload([0, 0, 0])));
+        push_event(app, LodEventMsg::Data(key, solid_payload([0, 0, 0]), LodWater::default()));
         assert!(wait_until(app, |app| slot_root(app, key)
             .is_some_and(|r| root_meshed(app, r))));
         slot_root(app, key).unwrap()
@@ -867,7 +1003,7 @@ mod tests {
             coords: [0, 0],
         };
         let bad = vec![([0, 0, 0], PackedLodGrid(vec![(3, BlockId(1))]))]; // wrong total
-        push_event(&mut app, LodEventMsg::Data(key, bad));
+        push_event(&mut app, LodEventMsg::Data(key, bad, LodWater::default()));
         app.update();
         let root = slot_root(&app, key).expect("root spawns even if all cells drop");
         assert_eq!(
@@ -875,5 +1011,66 @@ mod tests {
             0,
             "bad cell dropped with a warning"
         );
+    }
+
+    // ---- LOD water surface (water plan Task 8) ----
+
+    const DEEP: (i16, u8) = (63, 20);
+
+    /// Runs of equal top and alpha merge across rows; alpha saturates, so
+    /// deep columns of different depths share a quad; a shallow column gets
+    /// its own lighter one; the surface sits on top of block `top`.
+    #[test]
+    fn lod_water_mesh_merges_runs_and_lifts_to_the_top() {
+        let dry = (game::NO_WATER, 0);
+        let shallow = (63, 1);
+        #[rustfmt::skip]
+        let tops = [
+            DEEP, DEEP,     dry, dry,
+            DEEP, (63, 30), dry, dry,
+            shallow, dry,   dry, dry,
+            dry, dry,       dry, dry,
+        ];
+        let key = LodKey { factor: 16, coords: [0, 0] };
+        let mesh = lod_water_mesh(&key, &LodWater::encode(&tops, 4)).expect("wet");
+        assert_eq!(mesh.indices.len(), 12, "two quads: {:?}", mesh.positions);
+        let y = 64.0 * game::BLOCK_VOXELS as f32;
+        let f = key.factor as f32;
+        let deep: Vec<_> = mesh.positions[..4].to_vec();
+        assert_eq!(deep, vec![[0.0, y, 0.0], [0.0, y, 2.0 * f], [2.0 * f, y, 2.0 * f], [2.0 * f, y, 0.0]]);
+        assert!(mesh.normals.iter().all(|n| *n == [0.0, 1.0, 0.0]));
+        assert_eq!(mesh.colors[0][3], super::super::water::WATER_MAX_ALPHA);
+        assert_eq!(mesh.positions[4], [0.0, y, 2.0 * f]);
+        assert_eq!(mesh.colors[4][3], super::super::water::water_alpha(1.0));
+        assert!(mesh.colors[4][3] < mesh.colors[0][3], "the shallows are lighter");
+
+        assert!(lod_water_mesh(&key, &LodWater::encode(&[dry; 16], 4)).is_none(), "dry");
+        assert!(lod_water_mesh(&key, &LodWater { side: 4, runs: vec![(3, 63, 2)] }).is_none(), "malformed");
+    }
+
+    /// A root with water gets one water child — and that child is not a
+    /// meshed terrain cell: a refresh whose terrain has not meshed keeps the
+    /// old root.
+    #[test]
+    fn lod_water_child_spawns_but_is_not_terrain_readiness() {
+        let mut app = rings_app();
+        app.init_asset::<WaterMaterial>()
+            .init_resource::<WaterMaterialHandle>();
+        let key = LodKey::for_region(16, game::RegionCoords::new(3, 0));
+        let side = LodWater::side_for(&key);
+        let water = LodWater::encode(&vec![DEEP; usize::from(side) * usize::from(side)], side);
+        push_event(&mut app, LodEventMsg::Data(key, Vec::new(), water.clone()));
+        app.update();
+        let root = slot_root(&app, key).expect("root");
+        let world = app.world_mut();
+        let mut q = world.query_filtered::<&ChildOf, (With<LodWaterSurface>, With<Mesh3d>)>();
+        assert_eq!(q.iter(world).filter(|c| c.parent() == root).count(), 1, "one water child");
+
+        push_event(&mut app, LodEventMsg::Data(key, Vec::new(), water));
+        for _ in 0..5 {
+            app.update();
+        }
+        let slot = &app.world().resource::<LodRings>().roots[&key];
+        assert_eq!(slot.retiring, Some(root), "water alone does not retire the old root");
     }
 }

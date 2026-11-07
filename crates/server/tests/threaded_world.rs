@@ -124,6 +124,7 @@ impl Rig {
         let (lod_result_send, lod_result_recv) = unbounded();
         let lod_builder: Box<dyn LodBuilder> = Box::new(InlineLodBuilder {
             coarse: Box::new(|_| Vec::new()),
+            water: Box::new(game::lod::LodWater::dry),
             out: lod_result_send,
         });
         let manager = WorldManager::new(

@@ -39,7 +39,8 @@ fn main() {
     let key = LodKey::for_region(factor, region);
     let coarse = |k: &LodKey| worldgen::coarse_tile(k, seed, materials);
     let generate = |rc: RegionCoords| worldgen::generate_region(rc, seed, materials);
-    let (_, payload) = build_lod_job(LodBuildJob::Pristine { key, region }, &coarse, &generate);
+    let water = |k: &LodKey| worldgen::coarse_water(k, seed, materials);
+    let (_, payload, _) = build_lod_job(LodBuildJob::Pristine { key, region }, &coarse, &water, &generate);
 
     // x/z group -> (cells, max solid voxels in one cell)
     let mut map: BTreeMap<(i32, i32), (u32, usize)> = BTreeMap::new();

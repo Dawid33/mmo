@@ -100,8 +100,9 @@ impl PaddedVoxels {
     }
 
     /// Non-air. Only the LOD mesher (`lod::lod_quads`, with
-    /// [`CutoutTable::NONE`]) asks: its grids are any-solid cells, liquid
-    /// included until the LOD water layer takes it out of them.
+    /// [`CutoutTable::NONE`]) asks: its grids are any-solid cells and hold
+    /// no liquid (the server maps it to air, `game::lod::terrain_id`; the
+    /// water rides in the key's `LodWater`), so non-air is solid there.
     pub fn is_solid(&self, x: usize, y: usize, z: usize) -> bool {
         !self.get(x, y, z).is_air()
     }

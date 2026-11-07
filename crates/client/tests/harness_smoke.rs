@@ -73,7 +73,7 @@ fn streamed_factor2_lod_arrives_for_ring_regions() {
         .drain_bridge_events()
         .into_iter()
         .filter_map(|e| match e {
-            game::ClientUpdateEvent::LodData(key, payload) => Some((key, payload)),
+            game::ClientUpdateEvent::LodData(key, payload, _) => Some((key, payload)),
             _ => None,
         })
         .collect();

@@ -8,12 +8,15 @@ use std::collections::BTreeMap;
 use crossbeam::channel::Sender;
 
 use crate::lod::{
-    copy_region_cells_into_tile, downsample_chunks, LodCell, LodKey, PackedLodGrid,
+    copy_region_cells_into_tile, downsample_chunks, LodCell, LodKey, LodWater, PackedLodGrid,
 };
 use crate::{Chunk, ChunkCoords, Column, ColumnCoords, LodPayload, RegionCoords, TerrainSnapshot, Voxel};
 
-pub type LodResult = (LodKey, LodPayload);
+pub type LodResult = (LodKey, LodPayload, LodWater);
 pub type CoarseGenerator = Box<dyn Fn(&LodKey) -> Vec<LodCell> + Send>;
+/// A key's water surface layer from the recipe (`worldgen::coarse_water`;
+/// [`LodWater::dry`] where there is none).
+pub type WaterGenerator = Box<dyn Fn(&LodKey) -> LodWater + Send>;
 /// Full-resolution worldgen for one region, run by a builder that
 /// [`generates_pristine`](LodBuilder::generates_pristine) terrain itself.
 pub type PristineGenerator = Box<dyn Fn(RegionCoords) -> Vec<(ColumnCoords, Column)> + Send>;
@@ -63,11 +66,29 @@ pub fn no_pristine_generator(region: RegionCoords) -> Vec<(ColumnCoords, Column)
 }
 
 /// The pure build. Both builder impls call this.
+///
+/// Every job kind takes its water from the recipe (`water`), never from the
+/// chunks: the grids carry no liquid (`lod::terrain_id`), a rebuild after
+/// `TerrainChanged` resends the same water, and water never enters the
+/// terrain fingerprint.
 pub fn build_lod_job(
     job: LodBuildJob,
     coarse: &dyn Fn(&LodKey) -> Vec<LodCell>,
+    water: &dyn Fn(&LodKey) -> LodWater,
     generate: &dyn Fn(RegionCoords) -> Vec<(ColumnCoords, Column)>,
 ) -> LodResult {
+    let (key, payload) = build_terrain(job, coarse, generate);
+    let water = water(&key);
+    debug_assert_eq!(water.side, LodWater::side_for(&key), "water layer of {key:?}");
+    (key, payload, water)
+}
+
+/// The terrain half of [`build_lod_job`].
+fn build_terrain(
+    job: LodBuildJob,
+    coarse: &dyn Fn(&LodKey) -> Vec<LodCell>,
+    generate: &dyn Fn(RegionCoords) -> Vec<(ColumnCoords, Column)>,
+) -> (LodKey, LodPayload) {
     match job {
         LodBuildJob::Pristine { key, region } => {
             // Same materialization the manager used to do before submitting a
@@ -129,11 +150,12 @@ fn encode_cells(cells: Vec<LodCell>) -> LodPayload {
 /// Synchronous builder: computes on submit and pushes straight to `out`.
 pub struct InlineLodBuilder {
     pub coarse: CoarseGenerator,
+    pub water: WaterGenerator,
     pub out: Sender<LodResult>,
 }
 
 impl LodBuilder for InlineLodBuilder {
     fn submit(&mut self, job: LodBuildJob) {
-        let _ = self.out.send(build_lod_job(job, &self.coarse, &no_pristine_generator));
+        let _ = self.out.send(build_lod_job(job, &self.coarse, &self.water, &no_pristine_generator));
     }
 }

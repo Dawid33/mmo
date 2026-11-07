@@ -888,8 +888,9 @@ pub enum ServerPacket {
     Region(RegionId, Rollback),
     PlayerRegion(Option<RegionId>, ClientId),
     /// Streamed LOD cells for one key (initial send AND refresh —
-    /// replace-on-re-receipt).
-    LodData(LodKey, LodPayload),
+    /// replace-on-re-receipt), with the key's water surface layer (from the
+    /// recipe; the grids hold no liquid).
+    LodData(LodKey, LodPayload, crate::lod::LodWater),
     /// The world map: per-region tile summaries of the forged world.
     WorldMap(crate::world_map::WorldMap),
     /// A `ClientPacket::PlayRegion` for this region was refused.
@@ -1155,12 +1156,14 @@ mod tests {
             ClientPacket::RequestLod(k) if k == key
         ));
         let payload: LodPayload = vec![([0, -1, 0], PackedLodGrid(vec![(100, crate::BlockId(2))]))];
-        let data = ServerPacket::LodData(key, payload.clone());
+        let water = crate::lod::LodWater::encode(&[(crate::NO_WATER, 0), (63, 3), (63, 3), (63, 4)], 2);
+        let data = ServerPacket::LodData(key, payload.clone(), water.clone());
         let bytes = bincode::serialize(&data).unwrap();
         match bincode::deserialize::<ServerPacket>(&bytes).unwrap() {
-            ServerPacket::LodData(k, p) => {
+            ServerPacket::LodData(k, p, w) => {
                 assert_eq!(k, key);
                 assert_eq!(p, payload);
+                assert_eq!(w, water);
             }
             other => panic!("wrong variant {other:?}"),
         }

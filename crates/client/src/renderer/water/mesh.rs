@@ -109,7 +109,7 @@ impl WaterMeshData {
 impl WaterMeshData {
     /// One quad at corner `p` spanned by `u` then `v` (`u × v` is the
     /// normal, so it is front-facing from outside).
-    fn quad(&mut self, p: [f32; 3], u: [f32; 3], v: [f32; 3], normal: [f32; 3], alpha: f32) {
+    pub(crate) fn quad(&mut self, p: [f32; 3], u: [f32; 3], v: [f32; 3], normal: [f32; 3], alpha: f32) {
         let base = self.positions.len() as u32;
         let add = |a: [f32; 3], b: [f32; 3]| [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
         for corner in [p, add(p, u), add(add(p, u), v), add(p, v)] {
