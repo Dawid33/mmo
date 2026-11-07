@@ -142,6 +142,53 @@ impl RegionStore {
         Some(game::Tick::from_le_bytes(bytes.try_into().ok()?))
     }
 
+    /// Where the world clock starts: the saved world tick, or — when
+    /// `world.tick` is missing or unreadable but region files exist — the
+    /// latest tick any of them was saved at (each is decoded: slow, but only
+    /// on this recovery path), with a warning. Starting at 0 instead would
+    /// leave every restored region (which never moves its clock back) waiting
+    /// for the world to catch up with it. No region files: 0.
+    pub fn start_tick(&self) -> game::Tick {
+        if let Some(tick) = self.load_world_tick() {
+            return tick;
+        }
+        let files = self.region_files();
+        if files.is_empty() {
+            return 0;
+        }
+        let mut latest: game::Tick = 0;
+        for path in &files {
+            let saved = std::fs::read(path).ok().and_then(|bytes| self.decode(&bytes).ok()).and_then(|b| b.to_saved().ok());
+            let Some(saved) = saved else { continue };
+            latest = latest.max(*saved.state.tick);
+            for (_, stamp) in &saved.transfers {
+                latest = latest.max(*stamp);
+            }
+        }
+        log::warn!(
+            "[server] {} is missing or unreadable but {} region file(s) exist: the world clock starts at tick {latest}, \
+             the latest they were saved at",
+            self.world_tick_path().display(),
+            files.len()
+        );
+        latest
+    }
+
+    /// The region files in the store's directory (`r.<x>.<z>.region`).
+    fn region_files(&self) -> Vec<PathBuf> {
+        let Ok(entries) = std::fs::read_dir(&self.dir) else { return Vec::new() };
+        let mut files: Vec<PathBuf> = entries
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with("r.") && n.ends_with(".region"))
+            })
+            .collect();
+        files.sort();
+        files
+    }
+
     pub fn path(&self, rc: RegionCoords) -> PathBuf {
         self.dir.join(format!("r.{}.{}.region", rc.x, rc.z))
     }
@@ -313,6 +360,29 @@ mod tests {
         assert_eq!(store.load_world_tick(), None);
         store.save_world_tick(123_456).unwrap();
         assert_eq!(store.load_world_tick(), Some(123_456));
+    }
+
+    /// A lost `world.tick` must not restart the clock at 0 under regions
+    /// saved at a later tick (they would wait for the world to catch up).
+    #[test]
+    fn lost_world_tick_starts_at_the_latest_region_save() {
+        let store = RegionStore::new(scratch("lost-tick"), 7);
+        assert_eq!(store.start_tick(), 0, "a new world starts at 0");
+        let at = |tick: game::Tick| {
+            let mut state = Rollback::new(None);
+            state.new_transaction();
+            state.tick.update(|t| *t = tick);
+            state.forget();
+            RegionSave::Live(Box::new(state), Vec::new()).into_serialized()
+        };
+        store.save(RegionCoords::new(0, 0), &at(5_000)).unwrap();
+        store.save(RegionCoords::new(1, 0), &at(7_000)).unwrap();
+        assert_eq!(store.start_tick(), 7_000, "world.tick missing");
+        std::fs::write(store.world_tick_path(), b"junk").unwrap();
+        assert_eq!(store.start_tick(), 7_000, "world.tick corrupt");
+        store.save_world_tick(9_000).unwrap();
+        assert_eq!(store.start_tick(), 9_000, "the saved world tick wins");
+        let _ = std::fs::remove_dir_all(store.dir());
     }
 
     #[test]

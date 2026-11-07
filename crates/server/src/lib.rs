@@ -579,7 +579,7 @@ pub fn run() {
     let start = std::time::Instant::now();
     let world_clock = game::WorldClock::starting_at(
         0,
-        region_store.as_ref().and_then(|s| s.load_world_tick()).unwrap_or(0),
+        region_store.as_ref().map_or(0, |s| s.start_tick()),
     );
     // Halo seeds of never-run neighbours: only their band columns, on the
     // starting region's thread (`game::halo`).
