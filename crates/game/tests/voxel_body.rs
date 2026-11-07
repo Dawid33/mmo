@@ -769,3 +769,116 @@ fn toppling_column_lies_down_on_the_floor() {
     assert!(low < floor_y + 1.0, "on the floor: lowest point {low}");
 }
 
+
+// --- Buoyancy (water plan Task 4) ---------------------------------------------------
+
+const WATER: BlockId = BlockId(5);
+const OAK_LOG: BlockId = BlockId(13);
+/// Depth of the pool, blocks: water from the floor's top (level 1) up.
+const POOL_DEPTH: i32 = 6;
+/// The pool's surface, units (top of its highest water block).
+const POOL_SURFACE: f32 = (1 + POOL_DEPTH) as f32 * B;
+/// The pool's bed (the floor's top), units.
+const POOL_BED: f32 = B;
+
+/// A floored region with a 6-deep pool of static water over block columns
+/// 8..24 × 8..24 (no walls: static water needs none).
+fn pond_region() -> (Region, Receiver<GameDataUpdate>) {
+    let (mut region, recv) = region_over(0..32);
+    let mut water = Vec::new();
+    for x in 8..24 {
+        for z in 8..24 {
+            for y in 1..=POOL_DEPTH {
+                water.push([x, y, z]);
+            }
+        }
+    }
+    build(&mut region, &water, Block::new(WATER));
+    while recv.try_recv().is_ok() {}
+    (region, recv)
+}
+
+/// The world AABB (mins y, maxs y) of `e`'s collider.
+fn aabb_y(r: &Rollback, e: EntityKey) -> (f32, f32) {
+    let body = r.physics.bodies.get(*r.ecs.rigidbody.get(e)).unwrap();
+    let aabb = r.physics.colliders.get(body.colliders()[0]).unwrap().compute_aabb();
+    (aabb.mins.y, aabb.maxs.y)
+}
+
+/// Detaches `blocks` (built from `id` first) above the pond and runs it
+/// until it is settled and gone: the AABB (min y, max y) at the last tick
+/// it was alive, and the ticks it took.
+fn drop_into_pond(blocks: &[[i32; 3]], id: BlockId) -> ((f32, f32), u64) {
+    let (mut region, _recv) = pond_region();
+    build(&mut region, blocks, Block::new(id));
+    let e = detach(&mut region, blocks, Vector::ZERO);
+    let mut last = aabb_y(region.data(), e);
+    for t in 0..SETTLE_TIMEOUT_TICKS + 5 {
+        tick(&mut region);
+        if !alive(region.data(), e) {
+            return (last, t + 1);
+        }
+        last = aabb_y(region.data(), e);
+    }
+    panic!("never settled: last AABB y {last:?}");
+}
+
+/// A 1×1×4 oak log dropped into a 6-deep pool floats: at rest (settled
+/// before the timeout) its top is above the surface, its bottom below.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn log_floats_in_a_pond() {
+    let log: Vec<[i32; 3]> = (9..13).map(|y| [16, y, 16]).collect();
+    let ((lo, hi), ticks) = drop_into_pond(&log, OAK_LOG);
+    eprintln!("log at rest after {ticks} ticks: AABB y {} .. {} blocks", lo / B, hi / B);
+    assert!(ticks < SETTLE_TIMEOUT_TICKS, "came to rest ({ticks} ticks), not timed out");
+    assert!(hi > POOL_SURFACE, "top above the surface: {} vs {}", hi / B, POOL_SURFACE / B);
+    assert!(lo < POOL_SURFACE, "bottom below the surface: {} vs {}", lo / B, POOL_SURFACE / B);
+    assert!(lo > POOL_BED + B, "floating, clear of the bed: bottom {} blocks", lo / B);
+}
+
+/// A stone block dropped into the same pool sinks and comes to rest on the
+/// bed.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn stone_sinks_to_the_bed() {
+    let ((lo, _), ticks) = drop_into_pond(&[[16, 9, 16]], STONE);
+    eprintln!("stone at rest after {ticks} ticks: bottom {} blocks", lo / B);
+    assert!(ticks < SETTLE_TIMEOUT_TICKS, "came to rest ({ticks} ticks), not timed out");
+    assert!((lo - POOL_BED).abs() < 0.05 * B, "on the bed: bottom {} blocks vs {}", lo / B, POOL_BED / B);
+}
+
+/// 60 ticks of a log floating in the pool roll back bit-exact, and replay
+/// to the same state.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn buoyancy_is_rollback_exact() {
+    let _mode = Mode::set(game::HashMode::Full);
+    let (mut region, _recv) = pond_region();
+    let log: Vec<[i32; 3]> = (9..13).map(|y| [16, y, 16]).collect();
+    build(&mut region, &log, Block::new(OAK_LOG));
+    let e = detach(&mut region, &log, Vector::new(0.3, 0.0, 0.2));
+    // Into the water first, so the 60 ticks are buoyant ones.
+    for _ in 0..8 {
+        tick(&mut region);
+    }
+    assert!(aabb_y(region.data(), e).0 < POOL_SURFACE, "in the water");
+    let before = state_hash(region.data());
+    const N: usize = 60;
+    for _ in 0..N {
+        region.handle_event(GameEventKind::Tick).unwrap();
+    }
+    assert!(alive(region.data(), e), "still floating");
+    let damping = region.data().physics.bodies.get(*region.data().ecs.rigidbody.get(e)).unwrap().linear_damping();
+    assert!(damping > 0.0, "water drag on: {damping}");
+    let after = state_hash(region.data());
+    assert_ne!(before, after);
+    for _ in 0..N {
+        region.rollback_last_event();
+    }
+    assert_eq!(before, state_hash(region.data()), "the float rolls back bit-exact");
+    for _ in 0..N {
+        region.handle_event(GameEventKind::Tick).unwrap();
+    }
+    assert_eq!(after, state_hash(region.data()), "replaying the float reproduces it");
+}

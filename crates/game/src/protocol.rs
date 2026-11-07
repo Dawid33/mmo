@@ -368,6 +368,29 @@ impl ColliderSpec {
         }
     }
 
+    /// The volume of the shape, m³ (lengths in units ÷
+    /// [`crate::movement::UNITS_PER_METER`]): a cuboid `8·hx·hy·hz`, a ball
+    /// `4/3·π·r³`, a Y capsule `π·r²·2h + 4/3·π·r³`, a compound the sum of
+    /// its parts (overlaps counted twice). Plain arithmetic, π a literal.
+    pub fn volume_m3(&self) -> f32 {
+        const PI: f32 = core::f32::consts::PI;
+        let m = |units: f32| units / crate::movement::UNITS_PER_METER;
+        match self {
+            ColliderSpec::CapsuleY { half_height, radius } => {
+                let (h, r) = (m(*half_height), m(*radius));
+                PI * r * r * 2.0 * h + 4.0 / 3.0 * PI * r * r * r
+            }
+            ColliderSpec::Cuboid { half_extents } => {
+                8.0 * m(half_extents.x) * m(half_extents.y) * m(half_extents.z)
+            }
+            ColliderSpec::Ball { radius } => {
+                let r = m(*radius);
+                4.0 / 3.0 * PI * r * r * r
+            }
+            ColliderSpec::Compound(parts) => parts.iter().map(|(_, part)| part.volume_m3()).sum(),
+        }
+    }
+
     /// The spec of a primitive or compound-of-primitives shape (what
     /// [`Self::shared_shape`] builds); `None` for any other shape.
     pub fn of_shape(shape: &dyn parry3d::shape::Shape) -> Option<Self> {

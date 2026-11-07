@@ -774,6 +774,8 @@ impl Region {
                 self.data.tick_intents_safe(&mut intents_out);
                 // Every mover plans this tick with the water it is in now.
                 self.data.tick_immersion_safe();
+                // Bodies in water float and are dragged (before the step).
+                self.data.tick_buoyancy_safe();
                 // Mobs set kinematic targets, like the camera controller;
                 // the physics controller's step consumes them.
                 self.data.tick_slimes_safe(self.id);

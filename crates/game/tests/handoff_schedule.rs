@@ -1551,3 +1551,111 @@ fn swim_is_seam_invariant() {
 fn swim_is_seam_invariant_under_jitter() {
     assert_seam_invariant(&SwimAcross::new(), Some(InlineSchedule::jittery));
 }
+
+// --- A body floating across a seam ---------------------------------------------------
+
+/// A 4 m log (a generic body, a cuboid at `BODY_DEFAULT_DENSITY`: lighter
+/// than water) dropped just above a 6-deep pool centred on the origin,
+/// pushed toward −x/−z: it falls in, drifts through the seam (or the
+/// corner) and ends floating, its AABB straddling the surface — in every
+/// placement, never on the bed, never lost or duplicated.
+struct FloatingLog;
+
+/// Depth of the pool, blocks: water from the floor's top (`origin.y`) up.
+const FLOAT_POOL_DEPTH: i32 = 6;
+/// The pool spans `-FLOAT_POOL_HALF..FLOAT_POOL_HALF` blocks around the
+/// origin on x and z.
+const FLOAT_POOL_HALF: i64 = 7;
+/// Blocks from the origin, along +x and +z, the log's centre starts at.
+const FLOAT_START_BLOCKS: f32 = 1.0;
+/// Height of the log's bottom above the surface at the drop, blocks.
+const FLOAT_DROP_BLOCKS: f32 = 0.5;
+/// The sideways push, m/s (split over −x and −z).
+const FLOAT_PUSH_M_PER_S: f32 = 3.0;
+/// Half extents of the log, blocks: 4 long (along x), 1 thick.
+const FLOAT_LOG_HALF: [f32; 3] = [2.0, 0.5, 0.5];
+/// Rounds of the scenario: the fall, the drift through the seam and the
+/// bobbing dying away under the water's drag.
+const FLOAT_ROUNDS: u32 = 200;
+/// The player stands this many blocks from the origin (+x, +z), dry, past
+/// the pool.
+const FLOAT_PLAYER_BLOCKS: i64 = FLOAT_POOL_HALF + 2;
+
+impl Scenario for FloatingLog {
+    fn setup(&self, rig: &mut Rig, origin: WorldBlockPos) {
+        common::install_real_block_props();
+        let p = FLOAT_PLAYER_BLOCKS;
+        place_player(rig, offset(origin, p, 0, p), false);
+        let water = Block::new(BlockId(5));
+        for dx in -FLOAT_POOL_HALF..FLOAT_POOL_HALF {
+            for dz in -FLOAT_POOL_HALF..FLOAT_POOL_HALF {
+                for dy in 0..FLOAT_POOL_DEPTH {
+                    let (rc, local) = offset(origin, dx, dy, dz).to_local();
+                    rig.manager.spawner_mut().with_region(rc, |r| {
+                        r.with_data(|d| {
+                            assert!(d.set_block_safe([local.x, local.y, local.z], water), "pool {rc:?} {local:?}")
+                        })
+                    });
+                }
+            }
+        }
+        let b = game::BLOCK_VOXELS as f32;
+        let surface = (origin.y + FLOAT_POOL_DEPTH) as f32 * b;
+        let half = Vector::new(FLOAT_LOG_HALF[0] * b, FLOAT_LOG_HALF[1] * b, FLOAT_LOG_HALF[2] * b);
+        let d = FLOAT_START_BLOCKS * b;
+        let local = Vector::new(
+            origin.x as f32 * b + d - SPAWN_REGION.x as f32 * REGION_SIZE,
+            surface + FLOAT_DROP_BLOCKS * b + half.y,
+            origin.z as f32 * b + d - SPAWN_REGION.z as f32 * REGION_SIZE,
+        );
+        let v = FLOAT_PUSH_M_PER_S * game::movement::UNITS_PER_METER / std::f32::consts::SQRT_2;
+        let log = game::ColliderSpec::Cuboid { half_extents: half };
+        rig.manager.spawner_mut().with_region(SPAWN_REGION, |region| {
+            region.with_data(|d| {
+                d.spawn_body_safe(game::Pose::from_translation(local), log, Vector::new(-v, 0.0, -v), Vector::ZERO);
+            });
+        });
+    }
+
+    fn drive(&self, _rig: &mut Rig, _round: u32) {}
+
+    fn rounds(&self) -> u32 {
+        FLOAT_ROUNDS
+    }
+
+    fn crosser(&self) -> Option<game::EntityKind> {
+        Some(game::EntityKind::Body)
+    }
+
+    fn lockstep_tolerances(&self) -> Tolerances {
+        Tolerances { pose_blocks: FLOAT_REST_POS_TOL, angle_deg: FLOAT_REST_ANGLE_TOL, ..LOCKSTEP_TOLERANCES }
+    }
+}
+
+/// Rest position tolerance of the floating log against the centred lockstep
+/// run, per axis, blocks. Measured ×2: the spread was 1.26e-4 blocks in every
+/// placement (2026-11-07, REGION_BLOCKS 64, CHUNK_BLOCKS 16), the log asleep
+/// in each — a hair over [`POSE_TOL_BLOCKS`]: it bobs for seconds before it
+/// sleeps, and its path through the seam's frame change rounds differently.
+const FLOAT_REST_POS_TOL: f32 = 2.6e-4;
+/// … and rest rotation, degrees. Measured: 0° in every placement.
+const FLOAT_REST_ANGLE_TOL: f32 = 0.01;
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn floating_body_is_seam_invariant() {
+    let end = assert_seam_invariant(&FloatingLog, None);
+    let check = |s: &WorldSnapshot, what: &str| {
+        let body = the_body(s);
+        // Blocks from the origin; the pool's surface is FLOAT_POOL_DEPTH up.
+        let (lo, hi) = (body.pos[1] - FLOAT_LOG_HALF[1], body.pos[1] + FLOAT_LOG_HALF[1]);
+        let surface = FLOAT_POOL_DEPTH as f32;
+        eprintln!("[float] {what}: body at {:?} blocks, AABB y {lo} .. {hi}", body.pos);
+        assert!(lo < surface && hi > surface, "{what}: floating, straddling the surface: {lo} .. {hi}");
+        assert!(lo > 1.0, "{what}: clear of the bed: bottom {lo} blocks");
+        assert!(body.pos[0] < -0.25 && body.pos[2] < -0.25, "{what}: drifted past the origin: {:?}", body.pos);
+    };
+    // Every other placement matched this one within the lockstep
+    // tolerances (`assert_seam_invariant`), so it floats there too.
+    check(&end, "Centre");
+}

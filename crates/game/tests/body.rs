@@ -165,3 +165,67 @@ fn unsupported_collider_shape_fails_loudly() {
         let _ = r.extract_entity_safe(e);
     });
 }
+
+/// A dev-dropped 1 m cube over a 6-deep pool ends floating (its AABB
+/// straddles the surface); the same cube dropped on dry ground keeps, after
+/// every tick, exactly the weight and damping `body_state` gave it.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn dropped_cube_floats_and_dry_bodies_unchanged() {
+    use game::body::{BODY_ANGULAR_DAMPING, BODY_GRAVITY};
+    use game::mass_props::{mass_properties, BODY_DEFAULT_DENSITY};
+    use game::movement::UNITS_PER_METER;
+    const DEPTH: i32 = 6;
+    let only_body = |region: &Region| -> EntityKey {
+        let r = region.data();
+        let all: Vec<EntityKey> =
+            r.id_index.values().copied().filter(|k| *r.ecs.kind.try_get(*k) == Some(EntityKind::Body)).collect();
+        assert_eq!(all.len(), 1);
+        all[0]
+    };
+    let drop = |region: &mut Region, at: game::TilePos| {
+        region.handle_event(GameEventKind::Order(0, game::Order::DevDropBody { at })).unwrap();
+        region.forget_last_event();
+    };
+    let aabb_y = |region: &Region, e: EntityKey| {
+        let b = live_body(region, e);
+        let c = region.data().physics.colliders.get(b.colliders()[0]).unwrap();
+        let aabb = c.compute_aabb();
+        (aabb.mins.y, aabb.maxs.y)
+    };
+
+    // Over water: a pool 6 deep from the floor's top.
+    let mut wet = floored_region();
+    wet.with_data(|r| {
+        for x in 16..32 {
+            for z in 16..32 {
+                for y in 1..=DEPTH {
+                    assert!(r.set_block_safe([x, y, z], game::Block::new(game::BlockId(5))));
+                }
+            }
+        }
+    });
+    drop(&mut wet, [24, 1 + DEPTH, 24]);
+    let e = only_body(&wet);
+    for _ in 0..BODY_SETTLE_TICKS * 3 {
+        tick(&mut wet);
+    }
+    let surface = (1 + DEPTH) as f32 * B;
+    let (lo, hi) = aabb_y(&wet, e);
+    eprintln!("cube AABB y {} .. {} blocks, surface {}", lo / B, hi / B, surface / B);
+    assert!(lo < surface && hi > surface, "floating, straddling the surface: {} .. {} blocks", lo / B, hi / B);
+
+    // On dry ground: the spawn's weight and damping, bit for bit, every tick.
+    let mut dry = floored_region();
+    drop(&mut dry, [24, 1, 24]);
+    let e = only_body(&dry);
+    let mass = mass_properties(&cube(), BODY_DEFAULT_DENSITY).mass();
+    let weight = Vector::new(0.0, -mass * BODY_GRAVITY * UNITS_PER_METER, 0.0);
+    for t in 0..BODY_SETTLE_TICKS {
+        tick(&mut dry);
+        let b = live_body(&dry, e);
+        assert_eq!(b.user_force().to_array().map(f32::to_bits), weight.to_array().map(f32::to_bits), "tick {t}: weight");
+        assert_eq!(b.linear_damping().to_bits(), 0.0f32.to_bits(), "tick {t}: no drag");
+        assert_eq!(b.angular_damping().to_bits(), BODY_ANGULAR_DAMPING.to_bits(), "tick {t}: angular damping");
+    }
+}
