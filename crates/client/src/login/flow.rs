@@ -85,6 +85,12 @@ pub enum LoginReply {
     ResetRequested(Result<(), LoginFailure>),
 }
 
+/// Whether `failure` says the refresh token itself is no good (revoked,
+/// expired, unknown), as opposed to the service being down or failing.
+fn refused_token(failure: &LoginFailure) -> bool {
+    matches!(failure, LoginFailure::Api(e) if matches!(e.code, ApiErrorCode::Revoked | ApiErrorCode::BadCredentials))
+}
+
 /// Whether a call's reply counts toward [`LoginSession::busy`] (logout does
 /// not: nothing waits for it).
 fn awaited(call: &LoginCall) -> bool {
@@ -371,8 +377,19 @@ impl LoginSession {
         }
     }
 
-    /// One reply of the service, on screen `state`.
+    /// One reply of the service, on screen `state`. A reply changes the screen
+    /// only while the player is on the login screens: one that lands after
+    /// they left (Back, then a single-player start) records what it says — the
+    /// account, a sign-out — but never pulls them out of a session.
     pub fn apply(&mut self, reply: LoginReply, state: AppState) -> Step {
+        let mut step = self.apply_reply(reply, state);
+        if !matches!(state, AppState::Login | AppState::Worlds) {
+            step.goto = None;
+        }
+        step
+    }
+
+    fn apply_reply(&mut self, reply: LoginReply, state: AppState) -> Step {
         match reply {
             LoginReply::Session { silent, result: Ok(response) } => {
                 self.refresh = Some(response.refresh_token.clone());
@@ -392,9 +409,9 @@ impl LoginSession {
                 self.account = None;
                 self.error = failure.to_string();
                 let mut step = Step::none();
-                // The service refused the kept token: forget it. Unreachable:
-                // keep it for the next try.
-                if silent && matches!(failure, LoginFailure::Api(_)) {
+                // The service refused the kept token: forget it. Unreachable,
+                // or a server-side problem: keep it for the next try.
+                if silent && refused_token(&failure) {
                     self.refresh = None;
                     step.store = StoreOp::Clear;
                 }
@@ -641,6 +658,42 @@ mod tests {
         let step = login.intent(LoginIntent::PlayOnline, AppState::MainMenu);
         assert_eq!(step.goto, Some(AppState::Login));
         assert!(matches!(step.calls.as_slice(), [LoginCall::Refresh { .. }]));
+    }
+
+    #[test]
+    fn only_a_refused_kept_token_is_forgotten() {
+        for (failure, cleared) in [
+            (api(ApiErrorCode::Revoked), true),
+            (api(ApiErrorCode::BadCredentials), true),
+            (api(ApiErrorCode::Internal), false),
+            (api(ApiErrorCode::NotVerified), false),
+            (LoginFailure::Protocol("502".into()), false),
+            (LoginFailure::Network("down".into()), false),
+        ] {
+            let mut login = session();
+            let _ = login.resume(Some("kept".into()));
+            let label = format!("{failure:?}");
+            let step = login.apply(LoginReply::Session { silent: true, result: Err(failure) }, AppState::Login);
+            assert_eq!(step.store == StoreOp::Clear, cleared, "{label}");
+            assert_eq!(login.refresh.is_none(), cleared, "{label}");
+        }
+    }
+
+    /// A reply that lands after the player left the login screens (Back,
+    /// then a single-player start) never moves them.
+    #[test]
+    fn replies_change_the_screen_only_on_the_login_screens() {
+        let mut login = session();
+        let step = login.apply(logged_in("a@b.c", "r1"), AppState::Starting);
+        assert_eq!(step.goto, None, "a late login does not leave a starting session");
+        assert_eq!(step.store, StoreOp::Save("r1".into()));
+        assert!(login.logged_in(), "the account is still recorded");
+        assert_eq!(login.apply(logged_in("a@b.c", "r2"), AppState::MainMenu).goto, None);
+
+        let step = login.apply(LoginReply::Joined(Err(api(ApiErrorCode::Revoked))), AppState::InWorld);
+        assert_eq!(step.goto, None, "a late revoke does not leave the world");
+        assert_eq!(step.store, StoreOp::Clear, "but the token is cleared");
+        assert!(!login.logged_in() && login.refresh.is_none());
     }
 
     #[test]

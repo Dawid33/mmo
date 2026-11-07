@@ -2,7 +2,7 @@
 //! `ui/worlds.slint` = screen 6, and the main menu's Play online), headless:
 //! typing into the login form and submitting it, the password drawn masked,
 //! the error line, joining a world by id, Play online only when a login
-//! service is configured.
+//! service is configured (on the browser's join-only menu too).
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
@@ -196,6 +196,15 @@ fn login_screens_go_back() {
         click(&mut overlay, x, y);
         assert_eq!(back.get(), i as u32 + 1, "screen {screen}");
     }
+    // Not while a request is in flight: its answer would land on another screen.
+    overlay.ui().set_login_busy(true);
+    for screen in [LOGIN_SCREEN, WORLDS_SCREEN] {
+        overlay.ui().set_screen(screen);
+        overlay.render();
+        let (x, y) = (overlay.ui().get_back_button_x(), overlay.ui().get_back_button_y());
+        click(&mut overlay, x, y);
+        assert_eq!(back.get(), 2, "Back disabled while busy on screen {screen}");
+    }
 }
 
 #[test]
@@ -216,9 +225,23 @@ fn play_online_hidden_without_login() {
     click(&mut overlay, x, y);
     assert_eq!(play.get(), 1, "hidden without a login service");
 
-    overlay.ui().set_online_available(true);
+    // The browser's join-only menu offers it too (its Back from the login
+    // screen lands there), under Join server.
+    let joined = counter();
+    let j = joined.clone();
+    overlay.ui().on_join_server(move |_| j.set(j.get() + 1));
     overlay.ui().set_join_only(true);
+    overlay.ui().set_server_address("127.0.0.1".into());
     overlay.render();
-    click(&mut overlay, x, y);
-    assert_eq!(play.get(), 1, "hidden on the join-only menu");
+    let (jx, jy) = (overlay.ui().get_play_online_button_x(), overlay.ui().get_play_online_button_y());
+    click(&mut overlay, jx, jy);
+    assert_eq!(play.get(), 1, "hidden on the join-only menu without a login service");
+    overlay.ui().set_online_available(true);
+    overlay.render();
+    let (jx, jy) = (overlay.ui().get_play_online_button_x(), overlay.ui().get_play_online_button_y());
+    click(&mut overlay, jx, jy);
+    assert_eq!(play.get(), 2, "shown on the join-only menu with a login service");
+    let (sx, sy) = (overlay.ui().get_join_button_x(), overlay.ui().get_join_button_y());
+    click(&mut overlay, sx, sy);
+    assert_eq!(joined.get(), 1, "Join server stays reachable");
 }

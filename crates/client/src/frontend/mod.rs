@@ -71,8 +71,20 @@ struct FrontendActions(Rc<RefCell<Vec<FrontendAction>>>);
 struct JoinAddress(Rc<RefCell<String>>);
 
 /// The login form's email and password at the last Log in / Register /
-/// Forgot password (read from the UI in the callback). Never logged.
+/// Forgot password (read from the UI in the callback). Never logged; the
+/// password is taken out when the intent is built ([`take_login_form`]).
 struct LoginForm(Rc<RefCell<(String, String)>>);
+
+/// The form's email and password, leaving only the email behind (it is kept
+/// for convenience; the password must not outlive the request).
+fn take_login_form(form: &NonSend<LoginForm>) -> (String, String) {
+    take_form(&form.0)
+}
+
+fn take_form(form: &RefCell<(String, String)>) -> (String, String) {
+    let mut form = form.borrow_mut();
+    (form.0.clone(), std::mem::take(&mut form.1))
+}
 
 /// Whether the menu is the browser's: only Join server (the browser cannot
 /// make or keep worlds, it only joins a server).
@@ -313,7 +325,7 @@ fn apply_frontend_actions(
                 exit.write(AppExit::Success);
             }
             ActionEffect::Login => {
-                let form = login_form.as_ref().map(|f| f.0.borrow().clone()).unwrap_or_default();
+                let form = login_form.as_ref().map(take_login_form).unwrap_or_default();
                 if let Some(intent) = login_intent(&action, &form) {
                     login_intents.write(intent);
                 }
@@ -448,6 +460,13 @@ mod tests {
         assert_eq!(screen_index(AppState::LoadWorld), 2);
         assert_eq!(screen_index(AppState::Starting), 3);
         assert_eq!(screen_index(AppState::InWorld), 3, "receiving the world map");
+    }
+
+    #[test]
+    fn the_form_keeps_the_email_but_not_the_password() {
+        let form = RefCell::new(("a@b.c".to_string(), "hunter2hunter2".to_string()));
+        assert_eq!(take_form(&form), ("a@b.c".to_string(), "hunter2hunter2".to_string()));
+        assert_eq!(*form.borrow(), ("a@b.c".to_string(), String::new()));
     }
 
     #[test]

@@ -5,7 +5,7 @@ import { Button, FrameFace, GraphicalSets, LabelFace, Styles, TextField, Vertica
 // world's map preview (`background-image`; empty = the plain backdrop).
 // `join-only` (the browser build, which cannot make or keep worlds) swaps the
 // buttons for a server address and Join server. `online-available` (a login
-// service is configured) adds Play online, never on the join-only menu.
+// service is configured) adds Play online to either menu.
 export component MainMenu {
     in property <image> background-image;
     in property <string> title: "Orion";
@@ -20,11 +20,13 @@ export component MainMenu {
     callback join-server(string);
     callback play-online();
 
-    property <bool> online-shown: root.online-available && !root.join-only;
-    // Play online sits between Load world and Exit, as tall as both (an `if`,
-    // so it takes no room when hidden — and has no id to measure).
-    out property <length> play-online-button-x: self.load-button-x;
-    out property <length> play-online-button-y: (self.load-button-y + self.exit-button-y) / 2;
+    // Play online sits between Load world and Exit, as tall as both — on the
+    // join-only menu right under Join server (an `if`, so it takes no room
+    // when hidden — and has no id to measure).
+    out property <length> play-online-button-x: root.join-only ? root.join-button-x : root.load-button-x;
+    out property <length> play-online-button-y: root.join-only
+        ? join-btn.absolute-position.y + join-btn.height * 1.5 + join.style.spacing
+        : (root.load-button-y + root.exit-button-y) / 2;
 
     out property <length> join-button-x: join-btn.absolute-position.x + join-btn.width / 2;
     out property <length> join-button-y: join-btn.absolute-position.y + join-btn.height / 2;
@@ -74,7 +76,7 @@ export component MainMenu {
                 enabled: root.can-load;
                 clicked => { root.load-world(); }
             }
-            if root.online-shown: Button {
+            if root.online-available && !root.join-only: Button {
                 text: "Play online";
                 clicked => { root.play-online(); }
             }
@@ -104,6 +106,10 @@ export component MainMenu {
                 text: "Join server";
                 enabled: root.server-address != "";
                 clicked => { root.join-server(root.server-address); }
+            }
+            if root.online-available && root.join-only: Button {
+                text: "Play online";
+                clicked => { root.play-online(); }
             }
             if root.join-only && root.menu-error != "": LabelFace {
                 text: root.menu-error;

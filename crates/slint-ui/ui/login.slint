@@ -98,6 +98,7 @@ export component LoginScreen {
             back-btn := Button {
                 style: Styles.back-button;
                 text: "Back";
+                enabled: !root.busy;
                 clicked => { root.back(); }
             }
         }
