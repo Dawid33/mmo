@@ -55,6 +55,17 @@ fn block_m() -> f64 {
     BLOCK_VOXELS as f64 / f64::from(UNITS_PER_METER)
 }
 
+/// Version of what [`build_world_map`] produces. The world store keeps the
+/// map it built when the world was written (never rebuilt at start) with this
+/// number beside it, and a host refuses — the server re-tiles from the
+/// archived forge file — a stored map of another version.
+///
+/// **Bump rule:** bump it on ANY change to what `build_world_map` returns for
+/// the same world — a `WorldMap` / `TileSummary` layout change, but also pure
+/// logic (summaries, landings, biome or rock picks, rounding), since a stale
+/// stored map is otherwise served silently.
+pub const WORLD_MAP_VERSION: u32 = 1;
+
 /// The map of every engine region tile intersecting `world`'s artifact, row-major
 /// by z then x. See [`summarize_tile`] for what each tile holds.
 pub fn build_world_map(world: &ForgedWorld) -> WorldMap {

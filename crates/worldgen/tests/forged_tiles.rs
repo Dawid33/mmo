@@ -39,7 +39,7 @@ fn fixture() -> &'static Fixture {
     FIXTURE.get_or_init(|| {
         let p = worldgen::forge::ForgeParams { size_m: 4096.0, cell_m: 16.0, seed: 4, ..Default::default() };
         let whole = ForgedWorld::new(worldgen::forge::forge(&p).artifact(&p));
-        let (meta, tiles) = split(&whole, FIXTURE_TILE_CELLS);
+        let (meta, tiles) = split(&whole, FIXTURE_TILE_CELLS).expect("the fixture splits");
         let mem = MemTiles(tiles.iter().map(|t| (t.origin, encode_tile(t))).collect());
         let tiled = ForgedWorld::from_tiles(meta.clone(), Arc::new(mem), whole.content_crc()).expect("tiled world");
         assert!(tiled.artifact().is_none(), "a tiled world holds no artifact");
@@ -519,9 +519,15 @@ fn prefetch_error_is_reported_not_panicked() {
     };
     assert!(err.contains("(1, 1)"), "the error names the tile: {err}");
     assert_eq!(tiled.tile_cache().unwrap().pinned_bytes(), 0, "a failed prefetch holds no pins");
+    let failed = tiled.tile_cache().unwrap().stats();
+    assert_eq!(failed.load_errors, 1, "the failed load is counted: {failed:?}");
     // Tiles away from it still prefetch.
     let (x, z) = engine(f, 5.5 * tile_m, 5.5 * tile_m);
-    assert!(tiled.prefetch_rect([x, z], [x + 1.0, z + 1.0]).is_ok());
+    let pins = tiled.prefetch_rect([x, z], [x + 1.0, z + 1.0]).unwrap();
+    let stats = tiled.tile_cache().unwrap().stats();
+    assert_eq!(stats.loads, failed.loads + pins.len() as u64, "each newly pinned tile is one load: {stats:?}");
+    assert_eq!(stats.load_errors, 1);
+    assert!(stats.pinned_bytes > 0 && stats.resident_bytes >= stats.pinned_bytes, "{stats:?}");
 }
 
 /// Regions on tile seams and corners, at the map's edges and past them:
@@ -688,4 +694,21 @@ fn loader_may_sample_on_the_same_thread() {
         let (x, z) = engine(f, 37.0 + k as f64 * 97.0, 11.0 + k as f64 * 83.0);
         assert_eq!(point_bits(&f.whole, x, z), point_bits(&tiled, x, z));
     }
+}
+
+/// `split` refuses — never panics on — a world the tiled store could not
+/// load back: cells whose sampling reads past `MAX_READ_RADIUS_CELLS` (4 m),
+/// and a tile edge that is not whole 64 m river buckets.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn split_refuses_unloadable_worlds() {
+    let p = worldgen::forge::ForgeParams { size_m: 512.0, cell_m: 4.0, seed: 4, ..Default::default() };
+    let fine = ForgedWorld::new(worldgen::forge::forge(&p).artifact(&p));
+    let err = split(&fine, worldgen::forged_tiles::TILE_CELLS).err().expect("4 m cells are refused");
+    assert!(err.to_string().contains("MAX_READ_RADIUS_CELLS"), "{err}");
+    let p = worldgen::forge::ForgeParams { size_m: 1024.0, cell_m: 16.0, seed: 4, ..Default::default() };
+    let coarse = ForgedWorld::new(worldgen::forge::forge(&p).artifact(&p));
+    let err = split(&coarse, 3).err().expect("a tile of 3 x 16 m is not whole buckets");
+    assert!(err.to_string().contains("river buckets"), "{err}");
+    assert!(split(&coarse, 4).is_ok(), "4 x 16 m tiles split");
 }

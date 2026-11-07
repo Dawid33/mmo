@@ -11,7 +11,7 @@
 use std::sync::{Arc, OnceLock};
 
 use game::RegionCoords;
-use world_store::{FORMAT_WORLD_MAP, FormatKind, StoreError, StoreHandle, StoreTiles, StoreUrl, load_forged, write_tiled};
+use world_store::{FormatKind, StoreError, StoreHandle, StoreTiles, StoreUrl, encode_world_map, load_forged, write_tiled};
 use worldgen::forged::ForgedWorld;
 use worldgen::forged_tiles::{TILE_CELLS, TileCoords, TileLoader, encode_meta, encode_tile, split};
 
@@ -148,7 +148,7 @@ fn world_map_is_stored() {
 #[ignore = "slow: >100ms — run via just test-full"]
 fn content_crc_is_stable() {
     let f = fixture();
-    let (meta, tiles) = split(&f.whole, TILE_CELLS);
+    let (meta, tiles) = split(&f.whole, TILE_CELLS).expect("the fixture splits");
     let mut tiles: Vec<_> = tiles.iter().map(|t| (t.origin, encode_tile(t))).collect();
     tiles.sort_by_key(|(c, _)| *c);
     let mut hasher = crc32fast::Hasher::new();
@@ -156,7 +156,7 @@ fn content_crc_is_stable() {
     for (_, b) in &tiles {
         hasher.update(b);
     }
-    hasher.update(&world_store::encode(FORMAT_WORLD_MAP, &worldgen::tile_map::build_world_map(&f.whole)));
+    hasher.update(&encode_world_map(&worldgen::tile_map::build_world_map(&f.whole)));
     let expected = hasher.finalize();
     each_backend("forged_crc", false, |url| {
         let h = open(url);
@@ -295,7 +295,11 @@ fn retile_from_archive_is_bit_equal() {
         h.shutdown();
         raw_exec(url, "UPDATE forged_meta SET format_version = 0");
         let h = open(url);
-        assert!(load_forged(&h).is_err(), "the old format is refused before the retile");
+        let err = load_forged(&h).err().expect("the old format is refused before the retile");
+        assert!(
+            matches!(err, StoreError::OtherFormat { kind: FormatKind::Tiles { archived: true }, .. }),
+            "{err:?}"
+        );
         h.shutdown();
 
         assert_eq!(world_store::ctl::retile(url).expect("retile"), crc);
@@ -313,5 +317,88 @@ fn retile_without_archive_says_reforge() {
     each_backend("forged_retile_none", true, |url| {
         let err = world_store::ctl::retile(url).unwrap_err();
         assert!(err.contains("re-forge"), "{err}");
+    });
+}
+
+/// `bytes` as a SQL blob literal for `url`'s engine.
+fn blob_literal(url: &StoreUrl, bytes: &[u8]) -> String {
+    let hex: String = bytes.iter().map(|x| format!("{x:02x}")).collect();
+    match url {
+        StoreUrl::Postgres(_) => format!("'\\x{hex}'::bytea"),
+        _ => format!("X'{hex}'"),
+    }
+}
+
+/// A stored world map this build does not serve — the unversioned format-1
+/// row, another `WORLD_MAP_VERSION`, a damaged row — is a re-tile-able
+/// `OtherFormat` (never "corrupt"), and `retile` rebuilds it.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn stale_world_map_is_retileable() {
+    let f = fixture();
+    let expected = worldgen::tile_map::build_world_map(&f.whole);
+    let good = encode_world_map(&expected);
+    let mut other_version = good.clone();
+    other_version[1..5].copy_from_slice(&(worldgen::tile_map::WORLD_MAP_VERSION + 1).to_le_bytes());
+    let mut damaged = good.clone();
+    let last = damaged.len() - 1;
+    damaged[last] ^= 0x40;
+    let cases: [(&str, Vec<u8>, u32); 3] = [
+        ("format 1", world_store::encode(1, &expected), 0),
+        ("other version", other_version, worldgen::tile_map::WORLD_MAP_VERSION + 1),
+        ("damaged", damaged, 0),
+    ];
+    each_backend("forged_stale_map", true, |url| {
+        let h = open(url);
+        let crc = write_tiled(&h, f.bytes.clone()).unwrap();
+        h.shutdown();
+        for (what, row, found) in &cases {
+            raw_exec(url, &format!("UPDATE forged_world_map SET bytes = {} WHERE id = 1", blob_literal(url, row)));
+            let h = open(url);
+            let err = load_forged(&h).err().unwrap_or_else(|| panic!("{what}: refused"));
+            assert_eq!(
+                err,
+                StoreError::OtherFormat { found: *found, kind: FormatKind::WorldMap { archived: true } },
+                "{what}"
+            );
+            assert!(err.to_string().contains("just worldctl retile --db"), "{what}: {err}");
+            assert!(!err.to_string().contains("corrupt"), "{what}: {err}");
+            h.shutdown();
+            assert_eq!(world_store::ctl::retile(url).expect("retile"), crc, "{what}");
+            let h = open(url);
+            let (_, map) = loaded(&h);
+            assert_eq!(map, expected, "{what}: rebuilt");
+            h.shutdown();
+        }
+        raw_exec(url, "DELETE FROM forged_archive");
+        raw_exec(url, &format!("UPDATE forged_world_map SET bytes = {} WHERE id = 1", blob_literal(url, &cases[0].1)));
+        let h = open(url);
+        let err = load_forged(&h).err().expect("still refused");
+        assert_eq!(err, StoreError::OtherFormat { found: 0, kind: FormatKind::WorldMap { archived: false } });
+        assert!(err.to_string().contains("re-forge"), "{err}");
+        h.shutdown();
+    });
+}
+
+/// A forge file whose cell size the tiled store cannot load back (4 m
+/// cells: sampling reads past `MAX_READ_RADIUS_CELLS`) is refused BEFORE
+/// anything is written: no meta, tiles, map, archive or content crc.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn unsupported_cell_size_refused_before_writing() {
+    let p = worldgen::forge::ForgeParams { size_m: 512.0, cell_m: 4.0, seed: 4, ..Default::default() };
+    let bytes = worldgen::forge::forge(&p).artifact(&p).to_bytes();
+    each_backend("forged_unsupported", false, |url| {
+        let h = open(url);
+        let err = write_tiled(&h, bytes.clone()).err().expect("4 m cells are refused");
+        assert!(
+            matches!(&err, StoreError::Unsupported(m) if m.contains("cell size 4 m is not supported by the tiled store")),
+            "{err:?}"
+        );
+        assert!(load_forged(&h).unwrap().is_none(), "no tiled world written");
+        let info = h.world_info().unwrap();
+        assert!(!info.has_artifact && info.content_crc.is_none(), "no archive, no content crc");
+        assert!(h.forged_archive().unwrap().is_none());
+        h.shutdown();
     });
 }

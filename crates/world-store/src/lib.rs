@@ -59,6 +59,20 @@ pub enum FormatKind {
     /// `archived`: the original forge file is stored, so the world can be re-tiled
     /// without re-forging.
     Tiles { archived: bool },
+    /// The forged world's stored world map (`forged_world_map`): another row
+    /// layout, another `worldgen::tile_map::WORLD_MAP_VERSION` (`found`; 0
+    /// when the row's layout predates the version or the row is damaged).
+    /// Rebuilt with the tiles by a re-tile when `archived`.
+    WorldMap { archived: bool },
+}
+
+impl FormatKind {
+    /// Whether `worldctl retile` (or the server at start) rebuilds it from
+    /// the archived forge file: a tile format or world map of another
+    /// version, with the archive row stored.
+    pub fn retileable(self) -> bool {
+        matches!(self, FormatKind::Tiles { archived: true } | FormatKind::WorldMap { archived: true })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,6 +83,10 @@ pub enum StoreError {
     /// A stored format this build does not read: the store's own
     /// (`world.format_version`) or the forged tiles' (`forged_meta`).
     OtherFormat { found: u32, kind: FormatKind },
+    /// A world this store cannot hold, refused before anything is written
+    /// (e.g. a forged world whose cell size the tiled store does not
+    /// support); the message says why.
+    Unsupported(String),
     Corrupt(String),
 }
 
@@ -94,14 +112,35 @@ impl fmt::Display for StoreError {
                     "this world's forged tiles use format {found} but this build reads format {}; ",
                     worldgen::forged_tiles::TILED_FORMAT_VERSION
                 )?;
-                if *archived {
-                    write!(f, "re-tile it from its archived forge file: `just worldctl retile --db <db>`")
-                } else {
-                    write!(f, "it keeps no archived forge file to re-tile from, so re-forge the world")
-                }
+                retile_hint(f, *archived)
             }
+            StoreError::OtherFormat { found, kind: FormatKind::WorldMap { archived } } => {
+                if *found == 0 {
+                    write!(f, "this world's stored world map has an older row layout or is damaged; ")?;
+                } else {
+                    write!(
+                        f,
+                        "this world's stored world map was built by world-map version {found} but this build builds version {}; ",
+                        worldgen::tile_map::WORLD_MAP_VERSION
+                    )?;
+                }
+                retile_hint(f, *archived)
+            }
+            StoreError::Unsupported(e) => write!(f, "{e}"),
             StoreError::Corrupt(e) => write!(f, "world store is corrupt: {e}"),
         }
+    }
+}
+
+/// The end of a re-tile-able [`StoreError::OtherFormat`] message.
+fn retile_hint(f: &mut fmt::Formatter<'_>, archived: bool) -> fmt::Result {
+    if archived {
+        write!(
+            f,
+            "re-tile it from its archived forge file: `just worldctl retile --db <db>` (lossless: saved regions, players and history are kept; the server does it by itself at start)"
+        )
+    } else {
+        write!(f, "it keeps no archived forge file to re-tile from, so re-forge the world")
     }
 }
 

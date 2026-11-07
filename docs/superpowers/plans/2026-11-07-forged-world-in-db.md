@@ -58,7 +58,7 @@
 
    The rivers' reaches, needed for exporting and for `build_world_map`, are not reconstructible from per-tile segments, so the archive is what keeps them.
 8. **`content_crc` of a tiled world** is crc32 over the meta row's bytes, then every tile row's bytes in `(tz, tx)` order, then the world-map bytes. It is computed by the writer and stored in `world.content_crc`. It keys the worldgen cache as before. Plan A's importer keeps the file's crc only until this task replaces it, so caches built from imported file worlds are invalidated once.
-9. **Versioning:** `TILED_FORMAT_VERSION: u32 = 1` is stored in `forged_meta.format_version`. It is independent of `ARTIFACT_VERSION` (still the forge file's version). A host refuses a mismatch with "re-tile: `just worldctl retile --db <db>`" when the archive row exists, else "re-forge".
+9. **Versioning:** `TILED_FORMAT_VERSION: u32 = 1` is stored in `forged_meta.format_version`. It is independent of `ARTIFACT_VERSION` (still the forge file's version). The stored world map carries `worldgen::tile_map::WORLD_MAP_VERSION` (bumped on ANY change to what `build_world_map` produces, logic included) in its row header (`encode_world_map`: format byte `FORMAT_WORLD_MAP` = 2, the version, a crc32, the zstd body). `load_forged` refuses a tile-format mismatch (`FormatKind::Tiles`) and a world-map row of another layout, another version or that does not decode (`FormatKind::WorldMap`, never "corrupt") with "re-tile: `just worldctl retile --db <db>`" when the archive row exists, else "re-forge". **Final-review ruling:** the server does not stop there — with the archive present it re-tiles at start (`[perf] event=world_retiled`), since re-tiling is lossless (saves are other rows) and a refusal would only make a single-player user run that command; without an archive it refuses. `write_tiled` refuses a world it could not load back (`split` runs the full `ForgedMeta::validate`, read radius included — cells under 8 m) as `StoreError::Unsupported` before anything is written; the server's import keeps the forge file then.
 
 ## Sequencing: runs after the water static layer and Plan A
 
@@ -202,12 +202,12 @@ The water static layer (`docs/superpowers/plans/2026-11-06-water-static-layer.md
 - **Schema 0002:**
   - `forged_meta(id = 1, format_version, bytes)`
   - `forged_tiles(tx, tz PK, bytes)`
-  - `forged_world_map(id = 1, bytes)`, holding `encode(FORMAT_WORLD_MAP, WorldMap)`
+  - `forged_world_map(id = 1, bytes)`, holding `encode_world_map(WorldMap)` (format byte, `WORLD_MAP_VERSION`, crc32, zstd body; Decision 9)
   - `forged_archive(id = 1, bytes)`, the original artifact bytes
   - Plan A's `forged_artifact` is renamed `forged_archive` by this migration (the data is kept).
 - Produces:
   - `pub fn write_tiled(handle: &StoreHandle, artifact_bytes: Vec<u8>) -> Result<u32 /* content_crc */, StoreError>`:
-    1. `ForgedWorld::from_bytes`, then `split(TILE_CELLS)`;
+    1. `ForgedWorld::from_bytes`, then `split(TILE_CELLS)` (a `Result`: a world that would not load back is `Unsupported`, nothing written);
     2. `tile_map::build_world_map`;
     3. **one transaction** writing meta, tiles, world map, archive and `world.content_crc` (Decision 8).
   - `pub struct StoreTiles(StoreHandle)`, implementing `TileLoader` (`SELECT bytes FROM forged_tiles WHERE tx = $1 AND tz = $2`)
@@ -255,7 +255,7 @@ The water static layer (`docs/superpowers/plans/2026-11-06-water-static-layer.md
   - `tile_load_failure_stops_region`: a store whose tile under region (0,0) is corrupted (default 16 km world: 2×2 tiles). On the `ThreadRegionSpawner` with the store and an explicit-world prefetch, that region answers `LoadFailed`, never generates, and a region on healthy tiles runs.
   - `neighbour_tile_failure_stops_region`: a damaged tile that only a neighbour of the region reads → the region answers `LoadFailed` before it runs; a region whose 3×3 avoids the tile runs.
   - `lod_workers` unit tests: `lod_job_retries_until_its_tiles_load` (a prefetch failing 3 times → built and delivered after the backoff), `lod_retry_backoff_is_capped`.
-  - `untiled_store_is_tiled_at_start` (R-B4): an archive-only store is tiled at start; `forged_meta.format_version = 0` is refused naming `just worldctl retile`.
+  - `untiled_store_is_tiled_at_start` (R-B4): an archive-only store is tiled at start; `forged_meta.format_version = 0` is re-tiled at start (final-review ruling, Decision 9), and refused naming re-forge once the archive is gone.
   - `worldctl_forge_writes_store`: a small forge → `load_forged` is `Some`; export gives the archive back; a held store is refused with the lock message.
   - `server_world_is_tiled` is the only test in `store_world` that installs the process-global world; the others (`restart_restores_world` included) sample explicit worlds.
 - [ ] **Step 2: Run** `just test-one server "--test store_world -- --include-ignored"` and `just test-one world-store "--test it worldctl::"`. Expected: FAIL.
@@ -270,7 +270,7 @@ The water static layer (`docs/superpowers/plans/2026-11-06-water-static-layer.md
 - Modify:
   - `crates/world-store/src/bin/worldctl.rs`: `retile --db <url>` (archive → `write_tiled` in one transaction)
   - `crates/world-store/src/handle.rs`: remove `put_artifact` / `artifact` (Plan A); `forged_archive()` stays
-  - `crates/server/src/world_file.rs`: nothing to change (the `OtherFormat` message already names `retile`)
+  - `crates/server/src/world_file.rs`: nothing to change (the `OtherFormat` message already names `retile`; since the final review the server re-tiles a re-tile-able `OtherFormat` itself at start)
 - Test: `crates/world-store/tests/forged.rs`
 
 - [ ] **Step 1: Write the failing tests:**

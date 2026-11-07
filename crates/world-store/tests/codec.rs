@@ -233,7 +233,21 @@ fn golden_blobs_decode() {
     check("intent_msg", FORMAT_INTENT_MSG, &intent());
     check("intent_msg_reply", FORMAT_INTENT_MSG, &IntentMsg::Reply(reply()));
     check("region_ground", FORMAT_REGION_GROUND, &region_ground());
-    check("world_map", FORMAT_WORLD_MAP, &world_map());
+    check_world_map();
+}
+
+/// The world-map row has its own framing (`encode_world_map`: format byte,
+/// `WORLD_MAP_VERSION`, crc32, zstd body), so it is pinned on its own; a
+/// `WORLD_MAP_VERSION` bump re-records it too.
+fn check_world_map() {
+    let encoded = encode_world_map(&world_map());
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/world_map.bin");
+    if std::env::var_os("MMO_RECORD_GOLDENS").is_some() {
+        std::fs::write(&path, &encoded).unwrap();
+    }
+    let golden = std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e} (record with MMO_RECORD_GOLDENS=1)", path.display()));
+    assert_eq!(encoded, golden, "world_map: encoding changed; re-record on purpose and bump FORMAT_WORLD_MAP / WORLD_MAP_VERSION");
+    assert_eq!(decode_world_map(&golden).unwrap(), world_map(), "world_map: golden does not decode to the fixture value");
 }
 
 /// A region's ground recipes as `regions.ground` stores them.
@@ -252,4 +266,20 @@ fn wrong_format_byte_is_corrupt() {
     bad.truncate(blob.len() / 2);
     assert!(matches!(decode::<Chunk>(FORMAT_CHUNK, &bad), Err(StoreError::Corrupt(_))));
     assert!(matches!(decode::<Chunk>(FORMAT_CHUNK, &[]), Err(StoreError::Corrupt(_))));
+}
+
+#[test]
+fn world_map_row_errors_name_their_cause() {
+    let good = encode_world_map(&world_map());
+    let old = encode(1, &world_map());
+    assert_eq!(decode_world_map(&old), Err(WorldMapRowError::Layout { format: 1 }));
+    let mut other = good.clone();
+    other[1..5].copy_from_slice(&7u32.to_le_bytes());
+    assert_eq!(decode_world_map(&other), Err(WorldMapRowError::Version { found: 7 }));
+    let mut flipped = good.clone();
+    let mid = good.len() / 2 + 5;
+    flipped[mid] ^= 1;
+    assert!(matches!(decode_world_map(&flipped), Err(WorldMapRowError::Damaged(m)) if m.contains("crc32")));
+    assert!(matches!(decode_world_map(&good[..4]), Err(WorldMapRowError::Damaged(_))));
+    assert!(matches!(decode_world_map(&[]), Err(WorldMapRowError::Damaged(_))));
 }

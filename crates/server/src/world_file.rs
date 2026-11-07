@@ -108,37 +108,66 @@ pub fn check_legacy_saves(store: &StoreHandle, world_file: Option<&Path>) -> Res
 /// with none takes it from `import` (when that file exists; the file is then
 /// deleted) else from a forge with `params` — either way written as tiles
 /// ([`world_store::write_tiled`], which keeps the forge file as the archive
-/// row). A store holding only the archive (imported before tiling) is tiled
-/// from it here. A world file that will not load is never imported (the
-/// error says so); one is never written over an existing world; a tile
-/// format this build does not read is refused (the error names the re-tile
-/// command when the archive can be re-tiled).
+/// row). A store holding only the archive (imported before tiling, ruling
+/// R-B4) is tiled from it here. A world file that will not load, or whose
+/// cell size the tiled store does not support, is never imported (the error
+/// says so, and the file is kept); one is never written over an existing
+/// world.
+///
+/// A stored tile format or world map this build does not serve
+/// (`FormatKind::Tiles` / `FormatKind::WorldMap`) is RE-TILED here from the
+/// archive row when it has one — the same `write_tiled` as `just worldctl
+/// retile`, in one transaction — rather than refused: re-tiling is lossless
+/// (the archive is the forge file; saved regions, players and history are
+/// other rows and untouched), and a refusal would only make the player run
+/// that very command before a single-player world starts again. Logged as
+/// `[server] … re-tiling` and `[perf] event=world_retiled`. Without an
+/// archive it is refused (re-forge).
 pub fn ensure_world(
     store: &StoreHandle,
     import: Option<&Path>,
     params: &ForgeParams,
 ) -> Result<(ForgedWorld, game::WorldMap), String> {
-    if let Some(loaded) = world_store::load_forged(store).map_err(|e| e.to_string())? {
-        forget_imported_file(store, import);
-        return Ok(loaded);
-    }
     let started = Instant::now();
+    match world_store::load_forged(store) {
+        Ok(Some(loaded)) => {
+            forget_imported_file(store, import);
+            return Ok(loaded);
+        }
+        Ok(None) => {}
+        Err(e @ world_store::StoreError::OtherFormat { kind, .. }) if kind.retileable() => {
+            log::warn!("[server] {e}");
+            log::info!("[server] re-tiling the world from its archived forge file (saves are kept)");
+            tile_from_archive(store)?;
+            game::perf_event!("world_retiled", "ms={} kind={kind:?}", game::perf::ms(started.elapsed()));
+            forget_imported_file(store, import);
+            return load_written(store);
+        }
+        Err(e) => return Err(e.to_string()),
+    }
     let info = store.world_info().map_err(|e| e.to_string())?;
     if info.has_artifact {
         // Imported before tiling (Plan A): the archive is the forge file.
-        let archive = store.forged_archive().map_err(|e| e.to_string())?.ok_or("the world store lost its world")?;
         log::info!("[server] the world store holds its forge file but no tiles: tiling it (once)");
-        world_store::write_tiled(store, archive)
-            .map_err(|e| format!("tiling the world store's forge file: {e} — re-create the world (delete its store)"))?;
+        tile_from_archive(store)?;
         game::perf_event!("world_tiled", "ms={} from=archive", game::perf::ms(started.elapsed()));
         forget_imported_file(store, import);
     } else if let Some(path) = import.filter(|p| p.exists()) {
         let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
         let size = bytes.len();
+        // Every refusal comes before anything is written, and the file is
+        // deleted only after the commit: an error here keeps it.
         world_store::write_tiled(store, bytes).map_err(|e| match e {
             // The only `Corrupt` before anything is written: the file does not load.
             world_store::StoreError::Corrupt(why) => {
                 format!("{}: {why} — delete it to forge a new world", path.display())
+            }
+            world_store::StoreError::Unsupported(why) => format!(
+                "{}: {why} — the file is kept; forge the world at a supported cell size (8 m or more)",
+                path.display()
+            ),
+            e @ world_store::StoreError::Backend(_) => {
+                format!("importing {}: {e} — retry; the store and the file are untouched", path.display())
             }
             e => e.to_string(),
         })?;
@@ -159,9 +188,38 @@ pub fn ensure_world(
         world_store::write_tiled(store, bytes).map_err(|e| format!("the forged world: {e}"))?;
         game::perf_event!("world_forged", "ms={} into=store", game::perf::ms(started.elapsed()));
     }
+    load_written(store)
+}
+
+/// The world [`ensure_world`] just wrote, read back.
+fn load_written(store: &StoreHandle) -> Result<(ForgedWorld, game::WorldMap), String> {
     world_store::load_forged(store)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "the world store lost its world right after writing it".to_string())
+}
+
+/// Re-writes the store's tiles and world map from its archived forge file
+/// (`write_tiled`, one transaction; nothing else in the store is touched).
+fn tile_from_archive(store: &StoreHandle) -> Result<(), String> {
+    let archive = store.forged_archive().map_err(|e| e.to_string())?.ok_or("the world store lost its world")?;
+    world_store::write_tiled(store, archive).map(drop).map_err(archive_tiling_error)
+}
+
+/// What to do when the store's own archive cannot be tiled: a backend error
+/// is transient (the write is one transaction, so nothing changed); anything
+/// else means this build cannot serve the stored world, and re-creating it
+/// throws away what the store has saved — said in so many words.
+fn archive_tiling_error(e: world_store::StoreError) -> String {
+    match e {
+        e @ world_store::StoreError::Backend(_) => {
+            format!("tiling the world store's forge file: {e} — retry; the store is untouched")
+        }
+        e => format!(
+            "tiling the world store's forge file: {e} — this build cannot serve this world; keep the store and use a \
+             build that can (`just worldctl export --db <db> <out.world>` writes its forge file out). Deleting the \
+             store re-creates the world but DISCARDS everything saved in it (regions, players, history)"
+        ),
+    }
 }
 
 /// A forge file left at `import` after its world is in the store (a crash

@@ -304,7 +304,8 @@ fn server_world_is_tiled() {
 
 /// A store imported under Plan A alone (the forge file as the archive row,
 /// no tiles): tiled from its archive at start, not refused. A tile format
-/// this build does not read is refused, naming the re-tile command.
+/// this build does not read is re-tiled from the archive at start too; with
+/// no archive it is refused, naming re-forge.
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn untiled_store_is_tiled_at_start() {
@@ -329,8 +330,78 @@ fn untiled_store_is_tiled_at_start() {
     drop(opened.world);
     store.shutdown();
     raw_exec(&url, "UPDATE forged_meta SET format_version = 0");
-    let err = open_world(&source, &small_params()).err().expect("another tile format is refused");
-    assert!(err.contains("just worldctl retile"), "{err}");
+    let opened = open_world(&source, &small_params()).expect("another tile format is re-tiled at start");
+    assert_eq!(opened.world.as_ref().unwrap().content_crc(), crc, "re-tiled to the same world");
+    drop(opened.world);
+    opened.store.unwrap().shutdown();
+    raw_exec(&url, "UPDATE forged_meta SET format_version = 0");
+    raw_exec(&url, "DELETE FROM forged_archive");
+    let err = open_world(&source, &small_params()).err().expect("no archive to re-tile from: refused");
+    assert!(err.contains("re-forge"), "{err}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A stored world map this build does not serve (here the unversioned
+/// format-1 row) is rebuilt at start from the archive — the same world, its
+/// map as this build makes it — and the store's saves (the world tick and
+/// history of the last cut) are untouched.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn stale_world_map_is_rebuilt_at_start() {
+    let dir = scratch("stale-map");
+    let world_path = dir.join("terrain.world");
+    forge_file(&world_path);
+    let source = source_for(&world_path);
+    let opened = open_world(&source, &small_params()).unwrap();
+    let crc = opened.world.as_ref().unwrap().content_crc();
+    let map = opened.map.clone().unwrap();
+    drop(opened.world);
+    let store = opened.store.unwrap();
+    let history = b"history bytes of the last cut".to_vec();
+    let cut = game::WorldCut {
+        id: game::CutId(1),
+        tick: 77,
+        regions: Vec::new(),
+        in_flight: Vec::new(),
+        players: Vec::new(),
+        history: Some(history.clone()),
+    };
+    store.commit_cut(cut).recv().unwrap().expect("the cut commits");
+    store.shutdown();
+    let url = world_store::StoreUrl::Sqlite(dir.join("terrain.sqlite"));
+    let old_row: String = world_store::encode(1, &map).iter().map(|b| format!("{b:02x}")).collect();
+    raw_exec(&url, &format!("UPDATE forged_world_map SET bytes = X'{old_row}' WHERE id = 1"));
+    let opened = open_world(&source, &small_params()).expect("a stale world map is rebuilt at start");
+    assert_eq!(opened.world.as_ref().unwrap().content_crc(), crc, "the same world");
+    assert_eq!(opened.map.as_ref(), Some(&map), "the map as this build makes it");
+    assert_eq!(opened.world_tick, 77, "the save cut is kept");
+    let store = opened.store.unwrap();
+    assert_eq!(store.load_history().unwrap(), Some(history), "the history is kept");
+    drop(opened.world);
+    store.shutdown();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A forge file the tiled store cannot hold (4 m cells: sampling reads past
+/// `MAX_READ_RADIUS_CELLS`) is refused at import with the reason, before
+/// anything is written — and the file is KEPT (no world is lost).
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn unsupported_world_file_is_kept() {
+    let dir = scratch("unsupported");
+    let world_path = dir.join("terrain.world");
+    let params = ForgeParams { size_m: 512.0, cell_m: 4.0, seed: 4, ..ForgeParams::default() };
+    worldgen::forge::forge(&params).artifact(&params).save(&world_path).unwrap();
+    let bytes = std::fs::read(&world_path).unwrap();
+    let err = open_world(&source_for(&world_path), &small_params()).err().expect("refused");
+    assert!(err.contains("cell size 4 m is not supported by the tiled store"), "{err}");
+    assert!(err.contains("the file is kept"), "{err}");
+    assert_eq!(std::fs::read(&world_path).unwrap(), bytes, "the forge file is left in place");
+    let url = world_store::StoreUrl::Sqlite(dir.join("terrain.sqlite"));
+    let store = world_store::StoreHandle::open(&url, world_store::Dials::BUILT).unwrap();
+    assert!(!store.world_info().unwrap().has_artifact, "nothing imported");
+    assert!(world_store::load_forged(&store).unwrap().is_none(), "no tiles either");
+    store.shutdown();
     let _ = std::fs::remove_dir_all(&dir);
 }
 

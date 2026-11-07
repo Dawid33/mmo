@@ -271,27 +271,26 @@ impl TileGeometry {
 /// Splits a WHOLE world into its meta and tiles of `tile_cells` cells, row
 /// by row (`tz`, then `tx`).
 ///
-/// # Panics
-/// If `world` is tiled, or `tile_cells * cell_m` is not a whole number of
-/// 64 m river buckets.
-pub fn split(world: &ForgedWorld, tile_cells: u32) -> (ForgedMeta, Vec<Tile>) {
+/// Refused (before any tile is cut) when `world` is tiled, or when the meta
+/// it would write does not pass [`ForgedMeta::validate`] — a tile edge that
+/// is not a whole number of 64 m river buckets, or a cell size whose
+/// sampling reads farther than [`MAX_READ_RADIUS_CELLS`] (cells under 8 m):
+/// a world the tiled store could not load back is never written.
+pub fn split(world: &ForgedWorld, tile_cells: u32) -> Result<(ForgedMeta, Vec<Tile>), ArtifactError> {
     let globals = world.globals();
-    assert!(
-        tile_cells > 0 && tile_is_whole_buckets(tile_cells, globals.cell_m),
-        "tile of {tile_cells} cells x {} m must be a whole number of {BUCKET_M} m river buckets",
-        globals.cell_m
-    );
-    if let Err(e) = globals.validate() {
-        panic!("split: {e}");
-    }
-    let Rasters::Whole(whole) = world.rasters() else { panic!("split needs a whole world") };
+    let check = ForgedMeta {
+        format_version: TILED_FORMAT_VERSION,
+        tile_cells,
+        globals: globals.clone(),
+        lakes: Vec::new(),
+    };
+    check.validate()?;
+    let Rasters::Whole(whole) = world.rasters() else {
+        return Err(ArtifactError::Format("split needs a whole world, not a tiled one".into()));
+    };
     let artifact = &whole.artifact;
     let rasters = world.rasters();
     let geometry = TileGeometry::new(globals, tile_cells);
-    assert!(
-        geometry.buckets_per_side <= geometry.tiles_per_side as usize * geometry.buckets_per_tile,
-        "river buckets reach past the last tile"
-    );
     let n = globals.n as usize;
     let qrasters = artifact.qrasters();
     let byte_rasters = artifact.byte_rasters();
@@ -338,8 +337,7 @@ pub fn split(world: &ForgedWorld, tile_cells: u32) -> (ForgedMeta, Vec<Tile>) {
         .iter()
         .map(|l| LakeRecord { level: l.level, area_m2: l.area_m2, max_depth: l.max_depth, outlet: l.outlet })
         .collect();
-    let meta = ForgedMeta { format_version: TILED_FORMAT_VERSION, tile_cells, globals: globals.clone(), lakes };
-    (meta, tiles)
+    Ok((ForgedMeta { lakes, ..check }, tiles))
 }
 
 /// Bytes before the zstd body: magic (4), format version (u32 LE), crc32 of
@@ -524,8 +522,27 @@ pub struct TileCache {
     pinned: AtomicUsize,
     /// The over-budget warning has been logged.
     warned: AtomicBool,
+    /// Tiles loaded (decoded and admitted) since the cache was made.
+    loads: AtomicU64,
+    /// Tile loads that failed (after [`TILE_LOAD_RETRIES`] attempts) since
+    /// the cache was made.
+    load_errors: AtomicU64,
     /// Tells this cache's tiles apart in the threads' `LAST_TILE` memos.
     id: u64,
+}
+
+/// A snapshot of a [`TileCache`]'s counters ([`TileCache::stats`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TileCacheStats {
+    /// Decoded bytes of the tiles the cache holds (pinned ones included).
+    pub resident_bytes: usize,
+    /// Decoded bytes of the resident tiles some `TilePins` holds.
+    pub pinned_bytes: usize,
+    pub budget_bytes: usize,
+    /// Tiles loaded since the cache was made (cumulative).
+    pub loads: u64,
+    /// Failed tile loads since the cache was made (cumulative).
+    pub load_errors: u64,
 }
 
 /// Source of [`TileCache`] ids.
@@ -594,6 +611,8 @@ impl TileCache {
             resident: AtomicUsize::new(0),
             pinned: AtomicUsize::new(0),
             warned: AtomicBool::new(false),
+            loads: AtomicU64::new(0),
+            load_errors: AtomicU64::new(0),
             id: NEXT_CACHE_ID.fetch_add(1, Ordering::Relaxed),
         }
     }
@@ -611,6 +630,19 @@ impl TileCache {
     /// The budget the cache evicts down to.
     pub fn budget_bytes(&self) -> usize {
         self.budget_bytes
+    }
+
+    /// The cache's counters, read with relaxed loads (observability: the
+    /// server's periodic `[server]` line). `loads` and `load_errors` count
+    /// from the cache's creation; a reader diffs them per window.
+    pub fn stats(&self) -> TileCacheStats {
+        TileCacheStats {
+            resident_bytes: self.resident_bytes(),
+            pinned_bytes: self.pinned_bytes(),
+            budget_bytes: self.budget_bytes,
+            loads: self.loads.load(Ordering::Relaxed),
+            load_errors: self.load_errors.load(Ordering::Relaxed),
+        }
     }
 
     /// The tile at `t`, loading it on a miss.
@@ -655,8 +687,16 @@ impl TileCache {
             })
             .clone();
         match &result {
-            Ok(tile) if loaded_here => self.admit(t, &slot, tile.decoded_bytes()),
-            Err(_) => self.forget(t, &slot),
+            Ok(tile) if loaded_here => {
+                self.loads.fetch_add(1, Ordering::Relaxed);
+                self.admit(t, &slot, tile.decoded_bytes())
+            }
+            Err(_) => {
+                if loaded_here {
+                    self.load_errors.fetch_add(1, Ordering::Relaxed);
+                }
+                self.forget(t, &slot)
+            }
             Ok(_) => {}
         }
         result.map(|tile| (slot, tile))
