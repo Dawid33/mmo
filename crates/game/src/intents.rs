@@ -195,18 +195,22 @@ impl Default for IntentReply {
 
 impl IntentReply {
     /// The items it hands to its entity, and the cell (a pile's or a
-    /// chest's) they came from or were meant for: a granted take, or a
-    /// refused deposit's or put's rest. A reply that carries items is never
-    /// given up silently (`WorldManager`).
-    pub fn carried_items(&self) -> Option<(WorldBlockPos, crate::ItemStack)> {
+    /// chest's) they came from or were meant for: a granted take, a refused
+    /// deposit's or put's rest, or a refused survival place's block (whose
+    /// cell the reply does not carry: `None`). A reply that carries items is
+    /// never given up silently (`WorldManager`).
+    pub fn carried_items(&self) -> Option<(Option<WorldBlockPos>, crate::ItemStack)> {
         match *self {
             IntentReply::Granted(
                 Intent::TakeFromPile { cell, item, count, .. } | Intent::TakeFromContainer { cell, item, count, .. },
-            ) => Some((cell, crate::ItemStack { item, count })),
+            ) => Some((Some(cell), crate::ItemStack { item, count })),
             IntentReply::Refused(
                 Intent::DepositItems { cell, stack, .. } | Intent::PutInContainer { cell, stack, .. },
                 _,
-            ) => Some((cell, stack)),
+            ) => Some((Some(cell), stack)),
+            IntentReply::Refused(Intent::PlaceBlock { block, survival: true, .. }, _) => {
+                Some((None, crate::ItemStack { item: crate::ItemId::block(block), count: 1 }))
+            }
             _ => None,
         }
     }

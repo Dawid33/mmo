@@ -2689,7 +2689,8 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// to the store; otherwise — once a delivery found the entity gone
     /// (`hops` > 0) — or for what the record cannot hold, they are put down
     /// as a region-sourced deposit at the reply's pile cell (its owner's
-    /// refusal comes back to that region, which puts them down itself).
+    /// refusal comes back to that region, which puts them down itself) — or,
+    /// with no cell (a refused place's block), left to be given up, counted.
     /// Returns whether the reply was dealt with here.
     fn salvage_reply(&mut self, s: crate::SentReply, emitter: RegionCoords) -> bool {
         let to = s.reply.to();
@@ -2714,6 +2715,8 @@ impl<S: RegionSpawner> WorldManager<S> {
             // First delivery to its hint: the entity may still be there.
             return false;
         }
+        // A refused place's block has no cell to go to: given up, counted.
+        let Some(cell) = cell else { return false };
         let owner = cell.to_local().0;
         log::info!("[server] reply {:?} for gone {to:?}: {stack:?} put down at {cell:?}", s.reply);
         let sent = crate::SentIntent {

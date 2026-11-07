@@ -377,3 +377,21 @@ fn parking_refuses_queued_intents() {
     let replies: Vec<IntentReply> = parked.queued_replies().iter().map(|r| r.reply).collect();
     assert_eq!(replies, vec![IntentReply::Refused(Intent::BreakBlock { by, survival: false }, IntentRefusal::OwnerNotRunning)]);
 }
+
+/// A refused survival place gives its block back: a reply that carries an
+/// item, so the manager never drops it silently when the placer is gone
+/// (parked: into its record; else given up and counted). A creative place
+/// took nothing.
+#[test]
+fn refused_survival_place_carries_its_block() {
+    let by = game::EntityId { birth_region: game::RegionCoords::new(0, 0), serial: 1 };
+    let block = game::BlockId(3);
+    let refused = |survival| {
+        game::IntentReply::Refused(game::Intent::PlaceBlock { block, by, survival }, game::IntentRefusal::OwnerNotRunning)
+    };
+    assert_eq!(
+        refused(true).carried_items(),
+        Some((None, game::ItemStack { item: game::ItemId::block(block), count: 1 }))
+    );
+    assert_eq!(refused(false).carried_items(), None);
+}

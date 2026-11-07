@@ -142,7 +142,7 @@ pub enum Order {
     MoveTo(crate::Goal),
     /// Dev / test front end of `Intent::BreakBlock` (`intents.rs`): the
     /// issuing client's body sends one at this world block, wherever it is.
-    /// Until Task 6.2 ports mining onto the intent, nothing else sends it.
+    /// (Survival mining sends the same intent from `mining.rs`.)
     DevBreakBlock(crate::WorldBlockPos),
     /// Dev panel: drop a 1 m dynamic body (`EntityKind::Body`) above this
     /// region-local tile (`Rollback::dev_drop_body_safe`).

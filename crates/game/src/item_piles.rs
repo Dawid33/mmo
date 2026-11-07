@@ -207,7 +207,6 @@ fn up(p: WorldBlockPos, dy: i32) -> WorldBlockPos {
     WorldBlockPos::new(p.x, p.y + dy, p.z)
 }
 
-
 /// Items the pile caps have destroyed on this thread so far (see
 /// `ITEMS_DESTROYED`); read before and after a unit of work for its share.
 pub fn items_destroyed_on_thread() -> u64 {
