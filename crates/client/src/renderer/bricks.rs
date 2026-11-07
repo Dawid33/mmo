@@ -160,7 +160,8 @@ pub fn derive_chunk_bricks_across(chunk: &Chunk, across: impl Fn([usize; 3], [i3
     let cutout = CutoutTable::installed();
     let outside = |b: [usize; 3], off: [i32; 3]| (0..3).any(|a| (b[a] as i32 + off[a]) < 0 || (b[a] as i32 + off[a]) >= n as i32);
     if let (Some(block), true) = (chunk.blocks.uniform(), chunk.chisel.is_empty()) {
-        if block.id == BlockId::AIR {
+        // Liquid is empty to the chunk mesher (the water pass draws it).
+        if block.id == BlockId::AIR || cutout.is_liquid(block.id) {
             return out;
         }
         // A see-through (cutout) chunk buries nothing; inside an opaque one
@@ -195,7 +196,7 @@ pub fn derive_chunk_bricks_across(chunk: &Chunk, across: impl Fn([usize; 3], [i3
                     Some(neighbor) => presents_opaque_face(neighbor, off, &cutout),
                     None => across(b, off),
                 });
-            if voxels.is_all_air() {
+            if voxels.is_all_empty(&cutout) {
                 0
             } else if buried {
                 2
@@ -235,10 +236,10 @@ fn face_layer(off: [i32; 3], own: bool) -> usize {
     if positive == own { game::CHUNK_BLOCKS - 1 } else { 0 }
 }
 
-/// An unchiselled, non-air, non-cutout block: hides the face beside it. A
-/// chiselled block may hold air, so it never counts.
+/// An unchiselled, non-air, non-liquid, non-cutout block: hides the face
+/// beside it. A chiselled block may hold air, so it never counts.
 fn block_opaque(block: game::Block, chiselled: bool, cutout: &CutoutTable) -> bool {
-    !chiselled && block.id != BlockId::AIR && !cutout.is_cutout(block.id)
+    !chiselled && block.id != BlockId::AIR && !cutout.is_liquid(block.id) && !cutout.is_cutout(block.id)
 }
 
 /// Whether every block of `chunk` at `blocks` hides the face beside it.
@@ -550,7 +551,7 @@ pub fn write_brick(world: &mut World, chunk: Entity, local: [u8; 3], voxels: Vox
             }
         }
     }
-    if voxels.is_all_air() {
+    if voxels.is_all_empty(&CutoutTable::installed()) {
         return;
     }
     let Ok(entity) = world.get_entity(chunk) else { return };

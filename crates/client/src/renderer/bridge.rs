@@ -295,12 +295,18 @@ impl VoxelData {
         self.0.iter().all(|&(_, id)| id == game::BlockId::AIR)
     }
 
-    /// Every voxel hides what is behind it: no air and no cutout block
-    /// (`cutout`) anywhere in the chunk (water counts as opaque).
+    /// Every voxel is air or liquid (`cutout`'s liquids): nothing the chunk
+    /// mesher draws.
+    pub fn is_all_empty(&self, cutout: &super::meshing::binary::CutoutTable) -> bool {
+        self.0.iter().all(|&(_, id)| id == game::BlockId::AIR || cutout.is_liquid(id))
+    }
+
+    /// Every voxel hides what is behind it: no air, no liquid and no cutout
+    /// block (`cutout`) anywhere in the chunk.
     pub fn is_opaque_throughout(&self, cutout: &super::meshing::binary::CutoutTable) -> bool {
         self.0
             .iter()
-            .all(|&(_, id)| id != game::BlockId::AIR && !cutout.is_cutout(id))
+            .all(|&(_, id)| id != game::BlockId::AIR && !cutout.is_liquid(id) && !cutout.is_cutout(id))
     }
 
     /// The cached boundary-zone hashes, if `with_boundary_zones` ran.
@@ -747,7 +753,12 @@ pub fn drain_client_updates(
                     m.iter().map(|(p, pile)| (game::local_cell(id, *p), Some(pile.view()))).collect()
                 };
                 let (piles, mirrors) = (frame(data.item_piles()), frame(data.halo_piles()));
+                // The water pass's recipe (its tiles mesh once the chunks land).
+                let water_ground = Arc::new(data.ground_recipes().clone());
                 commands.queue(move |world: &mut World| {
+                    if let Some(mut msgs) = world.get_resource_mut::<Messages<super::water::WaterMsg>>() {
+                        msgs.write(super::water::WaterMsg::Region { region: id, ground: water_ground });
+                    }
                     if let Some(mut msgs) = world.get_resource_mut::<Messages<super::item_piles::ItemPileMsg>>() {
                         msgs.write(super::item_piles::ItemPileMsg::RemoveRegion(id));
                         if !piles.is_empty() {
@@ -806,6 +817,9 @@ pub fn drain_client_updates(
                 }
                 debug_lines.0.remove(&id);
                 commands.queue(move |world: &mut World| {
+                    if let Some(mut msgs) = world.get_resource_mut::<Messages<super::water::WaterMsg>>() {
+                        msgs.write(super::water::WaterMsg::RemoveRegion { region: id });
+                    }
                     if let Some(mut msgs) = world.get_resource_mut::<Messages<super::item_piles::ItemPileMsg>>() {
                         msgs.write(super::item_piles::ItemPileMsg::RemoveRegion(id));
                     }
@@ -1137,11 +1151,17 @@ pub fn drain_region_updates(
                     // Bricks in hand: edit them (and their mirror). Still
                     // being derived (or inserted later this drain): buffer
                     // until they land.
-                    commands.queue(move |world: &mut World| super::bricks::apply_block_deltas(world, e, deltas));
+                    commands.queue(move |world: &mut World| {
+                        super::bricks::apply_block_deltas(world, e, deltas);
+                        super::water::chunk_edited(world, region, e);
+                    });
                 }
                 GameDataUpdateKind::SetVoxelComponent(key, None) => {
                     if let Some(&e) = map.0.get(&(region, key)) {
-                        commands.queue(move |world: &mut World| super::bricks::clear_chunk_voxels(world, e));
+                        commands.queue(move |world: &mut World| {
+                            super::bricks::clear_chunk_voxels(world, e);
+                            super::water::chunk_edited(world, region, e);
+                        });
                     } else {
                         warn!("bridge: SetVoxelComponent for unmapped {:?}", key);
                     }

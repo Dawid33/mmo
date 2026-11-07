@@ -76,6 +76,11 @@ impl BlockProps {
         self.liquid.contains(&id.0)
     }
 
+    /// Every liquid block id, ascending (renderers build lookup tables from it).
+    pub fn liquid_ids(&self) -> impl Iterator<Item = BlockId> + '_ {
+        self.liquid.iter().map(|&id| BlockId(id))
+    }
+
     /// Whether the edit / pick ray stops at the block: anything but air and
     /// liquids.
     pub fn blocks_ray(&self, id: BlockId) -> bool {

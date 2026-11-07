@@ -54,6 +54,7 @@ pub use slint_composite::UiCamera;
 pub mod voxel_bodies;
 mod voxel_material;
 pub mod voxel_pull;
+pub mod water;
 pub mod embark_tabs;
 pub mod history_view;
 pub mod world_map;
@@ -103,6 +104,7 @@ pub struct SimBridgePlugin {
 impl Plugin for SimBridgePlugin {
     fn build(&self, app: &mut App) {
         voxel_material::embed_voxel_texture_shader(app);
+        app.add_plugins(water::WaterPlugin);
         app.add_plugins((
             MaterialPlugin::<ExtendedMaterial<StandardMaterial, StandardVoxelMaterial>>::default(),
             bevy::diagnostic::FrameTimeDiagnosticsPlugin::default(),

@@ -116,6 +116,11 @@ pub fn coarse_records(chunk: game::Chunk, slabs: &[Slab; 6], layers: &BlockTextu
         return Vec::new();
     };
     let mut grid = cell.grid;
+    // Liquid is empty to the terrain mesh (the water pass draws it).
+    let props = game::block_props();
+    for v in grid.iter_mut().filter(|v| props.is_liquid(v.block)) {
+        *v = game::Voxel::default();
+    }
     let mut shells: std::collections::BTreeMap<[i32; 3], Vec<game::Voxel>> = Default::default();
     for (dir, slab) in FACE_DIRS.iter().zip(slabs) {
         let axis = dir.iter().position(|&d| d != 0).unwrap();
@@ -175,7 +180,7 @@ pub fn boundary_slab(neighbour: &game::Chunk, dir: [i32; 3]) -> Vec<bool> {
                 _ => [u, v, layer],
             };
             let id = neighbour.block_at(c[0], c[1], c[2]).id;
-            out[u + N * v] = id != game::BlockId::AIR
+            out[u + N * v] = game::block_props().blocks_ray(id)
                 && !game::block_props().is_cutout(id)
                 && !neighbour.chisel.contains_key(&game::BlockIndex::from_xyz(c[0], c[1], c[2]));
         }

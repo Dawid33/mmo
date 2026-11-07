@@ -20,24 +20,37 @@ use super::ao::VERTEX_AO_LUT;
 /// leaf/leaf face ("fancy"), at many more quads.
 pub const CULL_CUTOUT_CUTOUT_FACES: bool = true;
 
-/// Which block ids are cutout, as a bitset over every `u16` id (8 KiB): one
-/// lookup per voxel in the mesher's hot loops, built once per mesh task.
-pub struct CutoutTable([u64; 1024]);
+/// Which block ids are cutout, and which are liquid, as two bitsets over
+/// every `u16` id (8 KiB each): one lookup per voxel in the mesher's hot
+/// loops, built once per mesh task. Liquid blocks are EMPTY to the chunk
+/// mesher — no faces, never opaque, open space for burial and cave
+/// connectivity — since the water pass (`renderer::water`) draws them.
+pub struct CutoutTable([u64; 1024], [u64; 1024]);
 
 impl CutoutTable {
-    /// No cutout blocks: everything non-air is opaque.
-    pub const NONE: CutoutTable = CutoutTable([0; 1024]);
+    /// No cutout and no liquid blocks: everything non-air is opaque.
+    pub const NONE: CutoutTable = CutoutTable([0; 1024], [0; 1024]);
 
-    pub fn from_ids(ids: impl IntoIterator<Item = BlockId>) -> Self {
+    fn bits(ids: impl IntoIterator<Item = BlockId>) -> [u64; 1024] {
         let mut t = [0u64; 1024];
         for id in ids {
             t[id.0 as usize >> 6] |= 1 << (id.0 & 63);
         }
-        Self(t)
+        t
+    }
+
+    /// Cutout `ids`, no liquids.
+    pub fn from_ids(ids: impl IntoIterator<Item = BlockId>) -> Self {
+        Self(Self::bits(ids), [0; 1024])
+    }
+
+    /// This table with `ids` liquid.
+    pub fn with_liquids(self, ids: impl IntoIterator<Item = BlockId>) -> Self {
+        Self(self.0, Self::bits(ids))
     }
 
     pub fn from_props(props: &BlockProps) -> Self {
-        Self::from_ids(props.cutout_ids())
+        Self::from_ids(props.cutout_ids()).with_liquids(props.liquid_ids())
     }
 
     /// From the process-global props (`game::block_props`).
@@ -50,10 +63,21 @@ impl CutoutTable {
         self.0[id.0 as usize >> 6] >> (id.0 & 63) & 1 == 1
     }
 
-    /// Non-air and not cutout: hides faces, occludes AO, buries.
+    #[inline]
+    pub fn is_liquid(&self, id: BlockId) -> bool {
+        self.1[id.0 as usize >> 6] >> (id.0 & 63) & 1 == 1
+    }
+
+    /// Air or liquid: nothing the chunk mesher draws.
+    #[inline]
+    pub fn is_empty(&self, v: Voxel) -> bool {
+        v.is_air() || self.is_liquid(v.block)
+    }
+
+    /// Not empty and not cutout: hides faces, occludes AO, buries.
     #[inline]
     pub fn is_opaque(&self, v: Voxel) -> bool {
-        !v.is_air() && !self.is_cutout(v.block)
+        !self.is_empty(v) && !self.is_cutout(v.block)
     }
 }
 
@@ -75,11 +99,14 @@ impl PaddedVoxels {
         self.0[Self::index(x, y, z)]
     }
 
+    /// Non-air. Only the LOD mesher (`lod::lod_quads`, with
+    /// [`CutoutTable::NONE`]) asks: its grids are any-solid cells, liquid
+    /// included until the LOD water layer takes it out of them.
     pub fn is_solid(&self, x: usize, y: usize, z: usize) -> bool {
         !self.get(x, y, z).is_air()
     }
 
-    /// Non-air and not cutout (see [`CutoutTable::is_opaque`]).
+    /// Not empty and not cutout (see [`CutoutTable::is_opaque`]).
     pub fn is_opaque(&self, x: usize, y: usize, z: usize, cutout: &CutoutTable) -> bool {
         cutout.is_opaque(self.get(x, y, z))
     }
@@ -363,7 +390,7 @@ impl Occupancy {
             for y in 0..PADDED {
                 for x in 0..PADDED {
                     let v = p.0[i];
-                    if !v.is_air() {
+                    if !cutout.is_empty(v) {
                         cols[0][y][z] |= 1 << x;
                         cols[1][x][z] |= 1 << y;
                         cols[2][x][y] |= 1 << z;
@@ -376,7 +403,7 @@ impl Occupancy {
                             for axis in 0..3 {
                                 if pos[axis] + 1 < PADDED {
                                     let n = p.0[i + STRIDE[axis]];
-                                    if n.is_air() || !cutout.is_cutout(n.block) {
+                                    if cutout.is_empty(n) || !cutout.is_cutout(n.block) {
                                         continue;
                                     }
                                     let (ua, va) = cross_axes(axis);
@@ -520,6 +547,20 @@ mod tests {
                 assert_eq!(occ.face_bits(0, false, u, v), 0);
             }
         }
+    }
+
+    /// Liquid is empty to the chunk mesher: a stone voxel under a water
+    /// voxel shows its top face, and the water draws nothing.
+    #[test]
+    fn liquid_is_empty_to_the_chunk_mesher() {
+        let (stone, water) = (BlockId(1), BlockId(5));
+        let p = PaddedVoxels::from_interior(&interior_with(&[([5, 6, 7], stone), ([5, 7, 7], water)]));
+        let table = CutoutTable::NONE.with_liquids([water]);
+        let quads = mesh_quads(&p, &table);
+        assert_eq!(quads.len(), 6, "the stone's six faces, its top included");
+        assert!(quads.iter().all(|q| q.block == stone), "no water face");
+        assert!(!table.is_opaque(Voxel::new(water)) && table.is_empty(Voxel::new(water)));
+        assert_eq!(mesh_quads(&p, &CutoutTable::NONE).len(), 10, "without the liquid set it is a block");
     }
 
     #[test]

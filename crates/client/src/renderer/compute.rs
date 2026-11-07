@@ -36,6 +36,8 @@ pub enum JobKind {
     BodyMesh = 5,
     /// A sim chunk's coarse (block-scale) twin (`meshing::coarse`).
     CoarseMesh = 6,
+    /// One static water tile (`water::mesh`).
+    WaterMesh = 7,
 }
 
 impl JobKind {
@@ -47,6 +49,7 @@ impl JobKind {
             4 => Self::BrickEdits,
             5 => Self::BodyMesh,
             6 => Self::CoarseMesh,
+            7 => Self::WaterMesh,
             _ => return None,
         })
     }
@@ -105,6 +108,7 @@ pub fn run_encoded(kind: JobKind, input: &[u8]) -> Vec<u8> {
         JobKind::BrickEdits => go::<super::bricks::BrickEditsJob>(input),
         JobKind::BodyMesh => go::<super::voxel_bodies::BodyMeshJob>(input),
         JobKind::CoarseMesh => go::<super::meshing::coarse::CoarseMeshJob>(input),
+        JobKind::WaterMesh => go::<super::water::mesh::WaterMeshJob>(input),
     }
 }
 
@@ -208,5 +212,22 @@ mod tests {
             pull: true,
         };
         assert_eq!(round_trip(lod()), lod().run());
+    }
+
+    #[test]
+    fn water_mesh_job_round_trips() {
+        use crate::renderer::water::mesh::{WaterMeshJob, WaterRun, WaterTileInput};
+        let job = || {
+            let mut input = WaterTileInput::empty([64, 0]);
+            input.edge = [true, false, false, true];
+            for (x, z) in [(0, 0), (1, 0), (1, 1)] {
+                input.column_mut(x, z).runs = vec![WaterRun { y0: 3, y1: 6, solid_above: false }];
+            }
+            WaterMeshJob(input)
+        };
+        let direct = job().run();
+        assert!(!direct.is_empty());
+        assert_eq!(JobKind::from_u8(JobKind::WaterMesh as u8), Some(JobKind::WaterMesh));
+        assert_eq!(round_trip(job()), direct);
     }
 }

@@ -41,7 +41,7 @@ use bevy::{
     render::render_resource::{AsBindGroup, Extent3d, ShaderType, TextureDimension, TextureFormat},
     shader::ShaderRef,
 };
-use game::{BlockId, RegionId, TileSource, REGION_BLOCKS, REGION_SIZE};
+use game::{RegionId, TileSource, REGION_BLOCKS, REGION_SIZE};
 
 use super::block_textures::BlockTextureLayers;
 use super::commander::level::{camera_cut, WorkingLevel};
@@ -62,7 +62,9 @@ pub fn slice_ids(src: &impl TileSource, level: i32) -> Vec<u16> {
             (0..REGION_BLOCKS as i32).map(move |x| {
                 let below = src.block([x, level, z]);
                 let above = src.block([x, level + 1, z]);
-                if below != BlockId::AIR && above != BlockId::AIR { below.0 } else { 0 }
+                // Liquid is not material here (the water pass draws it).
+                let props = game::block_props();
+                if props.blocks_ray(below) && props.blocks_ray(above) { below.0 } else { 0 }
             })
         })
         .collect()
