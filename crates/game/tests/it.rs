@@ -58,6 +58,7 @@ mod multi_client;
 mod orders;
 mod packet_codec;
 mod pathfind;
+mod portable;
 mod player;
 mod people;
 mod physics_goldens;

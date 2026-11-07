@@ -204,23 +204,24 @@ The water static layer (`docs/superpowers/plans/2026-11-06-water-static-layer.md
 **Files:**
 - Create: `crates/game/src/portable.rs`, `crates/game/tests/portable.rs` (in `tests/it.rs`)
 - Modify:
-  - `crates/game/src/state.rs` (split `extract_entity_safe` at :1750 into a non-destructive `bundle_of` + removal; make `collider_spec_of` `pub(crate)`)
+  - `crates/game/src/state.rs` (split `extract_entity_safe` (state.rs:1787 after water) into a non-destructive `bundle_of` + removal; make `collider_spec_of` `pub(crate)`)
   - `crates/game/src/lib.rs` (re-export)
 
 **Interfaces:**
 - Produces:
-  - `pub type ChunkTerms = BTreeMap<ChunkCoords, u32>` (values from `chunk_terrain_term`, state.rs:1950)
-  - `pub struct RegionMeta { pub tick: Tick, pub next_game_event_id: usize, pub next_entity_serial: u64, pub designations, pub constructed, pub item_piles, pub containers, pub pile_takes, pub intents, pub intent_replies, pub intent_inbox }` (each with its `GameData` type)
+  - `pub type ChunkTerms = BTreeMap<ChunkCoords, u32>` (values from `chunk_terrain_term`, state.rs:1987 after water)
+  - `pub struct RegionMeta { pub tick: Tick, pub next_game_event_id: usize, pub next_entity_serial: u64, pub designations, pub constructed, pub item_piles, pub containers, pub pile_takes, pub intents, pub intent_replies, pub intent_inbox, pub water_bodies }` (each with its `GameData` type; `water_bodies` per ruling R1)
   - `pub struct PortableRegion { pub meta: RegionMeta, pub chunks: BTreeMap<ChunkCoords, Chunk>, pub ground: Option<Vec<(ColumnCoords, ColumnGround)>>, pub entities: Vec<EntityBundle>, pub players: Vec<(ClientId, PlayerRecord)> }`:
     - `chunks` holds only the chunks changed since the given terms;
     - `ground` is `Some` only in a region's first snapshot of this incarnation, when the saved terms are empty;
     - `entities` holds every entity that is not a player and not a person, sorted by `EntityId`.
   - `PortableRegion::merge(&mut self, newer: PortableRegion)`: chunks union with newer winning; meta, entities and players replaced; ground the first `Some`.
-  - `pub struct StoredRegion { pub meta: RegionMeta, pub chunks: Vec<(ChunkCoords, Chunk)>, pub ground: Vec<(ColumnCoords, ColumnGround)>, pub entities: Vec<EntityBundle> }`
+  - `pub struct StoredRegion { pub meta: RegionMeta, pub chunks: Vec<(ChunkCoords, Chunk)>, pub ground: Vec<(ColumnCoords, ColumnGround)>, pub entities: Vec<EntityBundle> }`, plus `impl From<PortableRegion> for StoredRegion` (a whole snapshot as stored; players dropped)
+  - `impl Rollback { pub fn chunk_terms(&self) -> ChunkTerms }` (the current terms; also what `restore_portable` returns)
   - `impl Rollback { pub fn bundle_of(&self, key: EntityKey) -> EntityBundle; pub fn portable_snapshot(&self, saved: &ChunkTerms) -> (PortableRegion, ChunkTerms) }` (the second value is the full current term map)
   - `pub fn restore_portable(id: RegionId, stored: StoredRegion) -> (Region, ChunkTerms)`:
-    1. `Region::from_chunks`, then `seed_ground_genesis`.
-    2. The meta maps, inserted raw and unlogged like genesis; `pile_expiry` rebuilt from `item_piles`.
+    1. A `Rollback::new(None)` seeded like `Region::from_chunks` (`seed_terrain_genesis`), then `seed_ground_genesis` and `seed_water_genesis` with the stored bodies (never `label_water_bodies`).
+    2. The meta maps, inserted raw and unlogged like genesis; `pile_expiry` rebuilt from `item_piles`; `tick` / `next_game_event_id` / `next_entity_serial` set in one forgotten transaction (cells have no raw setter). Only then `Region::new`, so its `base_event_id` is the stored `next_game_event_id` (`Region::from_chunks` would leave it 0).
     3. The entities, through `apply_arrival` inside `with_data`.
     4. `next_entity_serial` raised to at least the stored value.
 - **Classification** (pinned by `fn classify(d: &GameData)`, which destructures `GameData` and `Ecs` with **no `..`**, so a new field does not build until it is classified):
@@ -228,10 +229,11 @@ The water static layer (`docs/superpowers/plans/2026-11-06-water-static-layer.md
     - `tick` (as `RegionMeta.tick`), `next_game_event_id`, `next_entity_serial`;
     - `designations`, `constructed`, `item_piles`, `containers`, `pile_takes`;
     - `intents`, `intent_replies`, `intent_inbox`;
+    - `water_bodies` (R1);
     - `ground` (first snapshot only);
     - the `chunk` component (chunks);
-    - entities through `bundle_of`: `kind`, `id`, body state, collider spec, carried components.
-  - **Derive on load:** `physics` (all rapier sets), `isometry`, `bones`, `rigidbody`, `id_index`, `chunk_index`, `pile_expiry`, `arrivals`, `region`.
+    - entities through `bundle_of`: `kind`, `id`, body state, collider spec, carried components (`camera`, `motion` — swimming `Immersion` included — `slime`, `animator`, `voxel_body`, `walker`, `wander`).
+  - **Derive on load:** `physics` (all rapier sets), `isometry`, `bones`, `rigidbody`, the `entities` slotmap (fresh keys), `id_index`, `chunk_index`, `pile_expiry`, `arrivals`, `region`.
   - **Drop:** `halo`, `halo_ground`, `halo_entities`, `halo_piles`, `halo_containers`, `halo_sent` (reseeded by `seed_halo` at every start).
   - **Players:** `clients` and `player_entites` → `PortableRegion.players` → the `players` table.
   - **Persons:** `person_entities` (the history respawns them).
@@ -242,7 +244,9 @@ The water static layer (`docs/superpowers/plans/2026-11-06-water-static-layer.md
     - a dug block, a placed chest holding items, a pile and a designation;
     - two slimes, a dynamic `Body` and a queued intent.
     
-    Snapshot it with empty terms, restore, then snapshot again. Assert `restored == original` field by field except `meta.tick`, and assert the second snapshot's `ground` is `None` when given the restored terms.
+    - a voxel body and a labelled water body (recipe water, `common::water::floor_with_water`).
+    
+    Snapshot it with empty terms, restore, then snapshot again. Assert `restored == original` field by field except `meta.tick` (a position-based kinematic body's velocities are zeroed on both sides first: rapier derives them each step and `BodyState` applies velocities to dynamic bodies only, so a restored — or arrived — slime starts at rest), and assert the second snapshot's `ground` is `None` when given the restored terms.
   - `snapshot_sends_only_changed_chunks`: snapshot, edit one block, snapshot with the first call's terms. Exactly one chunk is in the second.
   - `players_and_people_are_not_entities`: a region with a player and a person yields `entities.len() == 0` and `players.len() == 1`.
   - `merge_keeps_uncommitted_chunks`: merging `{A}` with the newer `{B}` gives `{A, B}`; merging `{A1}` with `{A2}` gives `{A2}`.

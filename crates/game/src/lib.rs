@@ -44,6 +44,7 @@ pub mod pathfind;
 pub mod path_plan;
 pub mod perf;
 pub mod player;
+pub mod portable;
 mod clock_jump;
 mod physics;
 pub mod protocol;
@@ -104,6 +105,7 @@ pub use path_plan::{
     PORTAL_DEPTH_BLOCKS, ROUTE_MAX_RELIEF_PER_REGION_M, ROUTE_MAX_WATER_SHARE,
 };
 pub use player::*;
+pub use portable::{restore_portable, ChunkTerms, PortableRegion, RegionMeta, StoredRegion};
 pub use protocol::*;
 pub use region_runner::*;
 pub use registry::*;

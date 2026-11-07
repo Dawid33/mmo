@@ -1766,7 +1766,7 @@ impl Rollback {
     /// back exactly). Any other shape cannot cross: a bug, which fails a
     /// debug build and is logged in release, where the player capsule stands
     /// in.
-    fn collider_spec_of(&self, handle: RigidBodyHandle) -> crate::ColliderSpec {
+    pub(crate) fn collider_spec_of(&self, handle: RigidBodyHandle) -> crate::ColliderSpec {
         let spec = self
             .data
             .physics
@@ -1783,24 +1783,23 @@ impl Rollback {
         crate::ColliderSpec::CapsuleY { half_height: PLAYER_CAPSULE_HALF_HEIGHT, radius: PLAYER_CAPSULE_RADIUS }
     }
 
-    /// Assemble the bundle, then remove the entity — all undo-tracked.
-    pub fn extract_entity_safe(
-        &mut self,
-        key: EntityKey,
-    ) -> crate::EntityBundle {
+    /// The bundle `key` would leave with, read-only: kind, id, body state,
+    /// collider spec, the carried components and (a player) its client.
+    /// What [`Self::extract_entity_safe`] sends, and what the portable
+    /// region format stores (`portable.rs`).
+    pub fn bundle_of(&self, key: EntityKey) -> crate::EntityBundle {
         let kind = (*self.data.ecs.kind.try_get(key)).unwrap_or_default();
         let handle = (*self.data.ecs.rigidbody.try_get(key))
             .expect("transferable entities have bodies");
         let body = BodyState::of(self.data.physics.bodies.get(handle).unwrap());
         let collider = self.collider_spec_of(handle);
-        let client_id = self
+        let client = self
             .data
             .player_entites
             .iter()
             .find(|(_, e)| **e == key)
-            .map(|(c, _)| *c);
-        let client = client_id.map(|c| (c, self.data.clients.get(&c).unwrap().clone()));
-        let bundle = crate::EntityBundle {
+            .map(|(c, _)| (*c, self.data.clients.get(c).unwrap().clone()));
+        crate::EntityBundle {
             id: (*self.data.ecs.id.try_get(key)).expect("transferable entities have an EntityId"),
             kind,
             body,
@@ -1808,7 +1807,18 @@ impl Rollback {
             carried: self.carry_components(key),
             client,
             pending_inputs: Vec::new(),
-        };
+        }
+    }
+
+    /// Assemble the bundle ([`Self::bundle_of`]), then remove the entity —
+    /// all undo-tracked.
+    pub fn extract_entity_safe(
+        &mut self,
+        key: EntityKey,
+    ) -> crate::EntityBundle {
+        let bundle = self.bundle_of(key);
+        let kind = bundle.kind;
+        let client_id = bundle.client.as_ref().map(|(c, _)| *c);
         if let EntityKind::Person { person } = kind {
             self.data.person_entities.remove(&person);
         }
