@@ -7,6 +7,7 @@ use game::{
     RegionCoords, WorldBlockPos, WorldChunkPos, BLOCK_VOXELS, REGION_BLOCKS, REGION_CHUNKS, SPAWN_REGION,
 };
 
+use crate::common;
 use crate::common::rig::{Rig, CLIENT};
 use crate::common::seam_translate::uniform_floor;
 
@@ -436,4 +437,19 @@ fn halo_water_chunk_has_no_collider() {
         }
         assert!(water_chunks > 0, "the east neighbour's water chunks are mirrored in the halo band");
     });
+}
+
+#[test]
+fn water_units_at_reads_the_halo() {
+    common::install_real_block_props();
+    let mut rig = joined();
+    // 3 blocks inside the east neighbour.
+    let local = BlockPos::new(2, 3, 8);
+    set_block(&mut rig, east(), local, Block::new(BlockId(5)));
+    rig.round();
+    rig.round();
+    let at = WorldBlockPos::from_local(SPAWN_REGION, BlockPos::new(REGION_BLOCKS as i32 + 2, 3, 8));
+    let mut units = None;
+    rig.manager.spawner_mut().with_region(SPAWN_REGION, |r| units = Some(r.data().water_units_at(at)));
+    assert_eq!(units, Some(game::WATER_FULL));
 }

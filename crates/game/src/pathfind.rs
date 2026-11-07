@@ -6,9 +6,11 @@
 //! are DF-like: 8 horizontal neighbours at dy in {-1, 0, +1}, landing on a
 //! standable tile; no swimming.
 //!
-//! Solid means `block_props().is_solid` (leaves are not: no collider) and not
-//! air and not water; passable means air, or a non-solid non-water block.
-//! Water is neither floor nor passable.
+//! Solid means `block_props().is_solid` (leaves and water are not: no
+//! collider) and not air; passable means not solid. Water is passable but
+//! never a floor: a tile is standable only in water up to
+//! [`WADE_MAX_DEPTH`] (DF depth), and stepping onto wading-depth water costs
+//! [`WADE_COST`] more.
 //!
 //! Determinism: ordered containers only (`BinaryHeap` with a total order,
 //! `BTreeMap`), never `HashMap` iteration.
@@ -17,7 +19,7 @@ use std::cmp::Reverse;
 use std::collections::{BTreeMap, BinaryHeap};
 
 use crate::orders::{TilePos, TileSource};
-use crate::{block_props, BlockId};
+use crate::{block_props, df_depth, BlockId, WADE_COST, WADE_MAX_DEPTH};
 
 /// Default expansion budget of one search, in nodes.
 pub const MAX_PATH_NODES: u32 = 32_768;
@@ -34,11 +36,11 @@ pub const COLUMN_SCAN_Y_MIN: i32 = -256;
 pub const COLUMN_SCAN_Y_MAX: i32 = 512;
 
 fn passable_block(b: BlockId) -> bool {
-    b == BlockId::AIR || (!block_props().is_liquid(b) && !block_props().is_solid(b))
+    b == BlockId::AIR || !block_props().is_solid(b)
 }
 
 fn solid_block(b: BlockId) -> bool {
-    b != BlockId::AIR && !block_props().is_liquid(b) && block_props().is_solid(b)
+    b != BlockId::AIR && block_props().is_solid(b)
 }
 
 fn passable(src: &impl TileSource, p: TilePos) -> bool {
@@ -51,6 +53,7 @@ fn passable(src: &impl TileSource, p: TilePos) -> bool {
 pub fn standable(src: &impl TileSource, p: TilePos) -> bool {
     passable_block(src.block(p))
         && passable_block(src.block([p[0], p[1] + 1, p[2]]))
+        && df_depth(src.water_units(p)) <= WADE_MAX_DEPTH
         && solid_block(src.block([p[0], p[1] - 1, p[2]]))
 }
 
@@ -107,6 +110,9 @@ fn successors(src: &impl TileSource, p: TilePos, out: &mut Vec<(TilePos, u32)>) 
             let mut cost = if diagonal { DIAG_COST } else { STEP_COST };
             if dy == -1 || (dy == 1 && !step_is_walk_up(src, p, q)) {
                 cost += CLIMB_COST;
+            }
+            if df_depth(src.water_units(q)) > 0 {
+                cost += WADE_COST;
             }
             out.push((q, cost));
         }

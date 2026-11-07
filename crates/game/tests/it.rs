@@ -79,4 +79,5 @@ mod terrain_snapshot;
 mod ui_roundtrip;
 mod underground_edit;
 mod walking_smoothness;
+mod water;
 mod world_manager;

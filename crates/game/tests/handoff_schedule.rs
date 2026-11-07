@@ -1321,3 +1321,76 @@ fn tree_felled_across_seam() {
         }
     }
 }
+
+// --- Pathing around water ----------------------------------------------------------
+
+/// An adventurer sent diagonally through the origin, where a 4x4 pond of
+/// water blocks sits: the walk must detour around it, in every placement.
+struct PondDetour {
+    origin: std::cell::Cell<Option<WorldBlockPos>>,
+}
+
+/// Blocks from the origin, along each axis, the walk starts (+x/+z) and ends (−x/−z).
+const POND_WALK_BLOCKS: i64 = 8;
+/// The pond covers `-POND_HALF..POND_HALF` blocks around the origin on x and z.
+const POND_HALF: i64 = 2;
+/// Round budget of the walk (lockstep arrives in ~70; jitter stretches it).
+const POND_WALK_ROUNDS: u32 = 200;
+
+impl Scenario for PondDetour {
+    fn setup(&self, rig: &mut Rig, origin: WorldBlockPos) {
+        common::install_real_block_props();
+        let water = Block::new(BlockId(5));
+        for dx in -POND_HALF..POND_HALF {
+            for dz in -POND_HALF..POND_HALF {
+                let (rc, local) = offset(origin, dx, 0, dz).to_local();
+                rig.manager.spawner_mut().with_region(rc, |r| {
+                    r.with_data(|d| assert!(d.set_block_safe([local.x, local.y, local.z], water), "pond {rc:?} {local:?}"))
+                });
+            }
+        }
+        let d = POND_WALK_BLOCKS;
+        place_player(rig, offset(origin, d, 0, d), false);
+        let goal = offset(origin, -d, 0, -d);
+        rig.order(Order::MoveTo(Goal { column: [goal.x, goal.z], y: None }));
+        self.origin.set(Some(origin));
+    }
+
+    fn drive(&self, rig: &mut Rig, _round: u32) {
+        let origin = self.origin.get().expect("setup ran");
+        for rc in rig.manager.running_regions() {
+            rig.manager.spawner_mut().with_region(rc, |region| {
+                let data = region.data();
+                let Some(&e) = data.player_entites.get(&CLIENT) else { return };
+                let handle = (*data.ecs.rigidbody.try_get(e)).expect("player body");
+                let t = data.physics.bodies.get(handle).expect("body").translation();
+                let f = game::feet_tile(game::feet_of(t));
+                let w = WorldBlockPos::from_local(rc, game::BlockPos::new(f[0], f[1], f[2]));
+                let (dx, dz) = (w.x - origin.x, w.z - origin.z);
+                assert!(
+                    !((-POND_HALF..POND_HALF).contains(&dx) && (-POND_HALF..POND_HALF).contains(&dz)),
+                    "the walker stands on a pond tile {:?} (relative to the origin)",
+                    [dx, dz]
+                );
+            });
+        }
+    }
+
+    fn rounds(&self) -> u32 {
+        POND_WALK_ROUNDS
+    }
+
+    fn jitter_tolerances(&self) -> Tolerances {
+        Tolerances { tiles: true, ..JITTER_TOLERANCES }
+    }
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn pond_detour_is_seam_invariant() {
+    let end = assert_seam_invariant(&PondDetour { origin: std::cell::Cell::new(None) }, None);
+    let p = end.player();
+    let d = POND_WALK_BLOCKS;
+    assert_eq!(p.walk_goal, None, "the walk finished");
+    assert_eq!(p.tile, [-d, 0, -d], "the walk ended on its goal");
+}

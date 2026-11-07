@@ -107,6 +107,9 @@ pub trait WorldView {
     /// neighbour's (`containers.rs`); `None` elsewhere. Taking from or
     /// putting into it is an intent.
     fn container(&self, p: WorldBlockPos) -> Option<&Container>;
+    /// Water units in cell `p`, own ∪ halo (`Rollback::water_units_at`); 0
+    /// elsewhere.
+    fn water_units(&self, p: WorldBlockPos) -> u16;
 }
 
 /// One region's [`WorldView`] ([`Rollback::view`]).
@@ -174,6 +177,10 @@ impl WorldView for RegionView<'_> {
 
     fn container(&self, p: WorldBlockPos) -> Option<&Container> {
         self.data.container_seen(p)
+    }
+
+    fn water_units(&self, p: WorldBlockPos) -> u16 {
+        self.data.water_units_at(p)
     }
 
     fn raycast(&self, ray: WorldRay, max_blocks: f32) -> Option<Hit> {

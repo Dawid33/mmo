@@ -360,6 +360,9 @@ impl<S: TileSource> TileSource for OnMap<'_, S> {
     fn slope(&self, p: TilePos) -> Option<crate::SlopeShape> {
         self.on_map(p[0], p[2]).then(|| self.src.slope(p)).flatten()
     }
+    fn water_units(&self, p: TilePos) -> u16 {
+        if self.on_map(p[0], p[2]) { self.src.water_units(p) } else { 0 }
+    }
 }
 
 impl Rollback {

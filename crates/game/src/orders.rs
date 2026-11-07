@@ -186,6 +186,11 @@ pub trait TileSource {
     fn slope(&self, _p: TilePos) -> Option<crate::SlopeShape> {
         None
     }
+    /// Water units in the cell at `p` ([`crate::WATER_FULL`] = full); 0 when
+    /// dry or unknown.
+    fn water_units(&self, _p: TilePos) -> u16 {
+        0
+    }
 }
 
 /// Whether `kind` may be designated on tile `p`.
@@ -312,6 +317,11 @@ impl TileSource for Rollback {
 
     fn block(&self, p: TilePos) -> BlockId {
         self.tile_block(p).map_or(BlockId::AIR, |b| b.id)
+    }
+
+    /// Own ∪ halo, through [`Rollback::water_units_at`].
+    fn water_units(&self, p: TilePos) -> u16 {
+        self.water_units_at(crate::WorldBlockPos::from_local(*self.data.region, crate::BlockPos::new(p[0], p[1], p[2])))
     }
 
     fn is_bedrock(&self, p: TilePos) -> bool {

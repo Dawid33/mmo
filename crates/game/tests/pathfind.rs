@@ -10,6 +10,7 @@ const LEAVES: BlockId = BlockId(15);
 struct Src {
     blocks: BTreeMap<TilePos, BlockId>,
     slopes: BTreeMap<TilePos, SlopeShape>,
+    water: BTreeMap<TilePos, u16>,
 }
 
 impl Src {
@@ -49,6 +50,9 @@ impl TileSource for Src {
     }
     fn slope(&self, p: TilePos) -> Option<SlopeShape> {
         self.slopes.get(&p).copied()
+    }
+    fn water_units(&self, p: TilePos) -> u16 {
+        self.water.get(&p).copied().unwrap_or(0)
     }
 }
 
@@ -219,4 +223,72 @@ fn wrong_side_slope_is_still_a_jump_climb() {
     let p = path(&s, [5, 1, 4], on_slope).expect("a jump climb onto the slope is allowed");
     assert_eq!(p, vec![[5, 1, 4], on_slope]);
     assert_eq!(walk_ups(&s, &p), vec![false, false]);
+}
+
+/// Water of DF depth `depth` on the standing tile `[x, 1, z]`.
+fn flood(s: &mut Src, x: i32, z: i32, depth: u8) {
+    s.water.insert([x, 1, z], WATER_FULL * u16::from(depth) / 7);
+}
+
+/// The cost of walking `path`, as the search charges it.
+fn path_cost(s: &Src, path: &[TilePos]) -> u32 {
+    path.windows(2)
+        .map(|w| {
+            let diag = w[0][0] != w[1][0] && w[0][2] != w[1][2];
+            let base = if diag { DIAG_COST } else { STEP_COST };
+            base + if df_depth(s.water_units(w[1])) > 0 { WADE_COST } else { 0 }
+        })
+        .sum()
+}
+
+#[test]
+fn deep_water_is_not_standable() {
+    install();
+    let mut s = Src::floor(12);
+    flood(&mut s, 5, 5, 4);
+    assert!(!standable(&s, [5, 1, 5]));
+    flood(&mut s, 6, 5, 3);
+    assert!(standable(&s, [6, 1, 5]));
+    assert!(path(&s, [1, 1, 5], [5, 1, 5]).is_none());
+}
+
+#[test]
+fn shallow_water_is_wadable_at_a_cost() {
+    install();
+    let dry = Src::floor(12);
+    let mut wet = Src::floor(12);
+    // A band of shallows across the whole floor: no way round it.
+    for x in 4..7 {
+        for z in 0..12 {
+            flood(&mut wet, x, z, 2);
+        }
+    }
+    let (a, b) = ([1, 1, 1], [9, 1, 1]);
+    let dry_path = path(&dry, a, b).unwrap();
+    let wet_path = path(&wet, a, b).unwrap();
+    assert_eq!(wet_path.len(), dry_path.len());
+    assert_eq!(path_cost(&wet, &wet_path), path_cost(&dry, &dry_path) + 3 * WADE_COST);
+}
+
+#[test]
+fn path_detours_around_a_pond() {
+    install();
+    let mut s = Src::floor(12);
+    for x in 4..7 {
+        for z in 4..7 {
+            flood(&mut s, x, z, 7);
+        }
+    }
+    let p = path(&s, [1, 1, 5], [9, 1, 5]).unwrap();
+    assert!(p.iter().all(|t| !(4..7).contains(&t[0]) || !(4..7).contains(&t[2])), "{p:?}");
+}
+
+#[test]
+fn wading_cost_makes_short_detours_win() {
+    install();
+    let mut s = Src::floor(12);
+    flood(&mut s, 5, 1, 2);
+    // Straight is 80; around the tile via two diagonals is 88 < 80 + WADE_COST.
+    let p = path(&s, [1, 1, 1], [9, 1, 1]).unwrap();
+    assert!(!p.contains(&[5, 1, 1]), "{p:?}");
 }

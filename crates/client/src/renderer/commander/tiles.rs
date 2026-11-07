@@ -413,6 +413,11 @@ impl TileSource for TileMirror {
         self.mirrored_block(p).map_or(0, |b| b.limb())
     }
 
+    /// Static water: a liquid block is full, as the sim's `water_units_at`.
+    fn water_units(&self, p: TilePos) -> u16 {
+        if game::block_props().is_liquid(self.block(p)) { game::WATER_FULL } else { 0 }
+    }
+
     /// Same probe as `impl TileSource for Rollback`, over the mirrored chunks.
     fn column_band(&self, column: [i32; 2]) -> Option<(i32, i32)> {
         let cb = game::CHUNK_BLOCKS as i32;
@@ -502,6 +507,10 @@ impl TileSource for WithHalo<'_> {
             return self.0.tree_limb(p);
         }
         self.halo_block(p).map_or(0, |b| b.limb())
+    }
+
+    fn water_units(&self, p: TilePos) -> u16 {
+        if game::block_props().is_liquid(self.block(p)) { game::WATER_FULL } else { 0 }
     }
 
     /// As the sim's halo column: probed over the halo's chunks, no ground.
