@@ -16,7 +16,7 @@ use crate::{Dials, StoreError, StoreUrl};
 /// The world row and whether a forged artifact is stored.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WorldInfo {
-    /// The stored artifact's content crc (`None` when there is no artifact).
+    /// The stored world's content crc (`None` when there is no artifact).
     pub content_crc: Option<u32>,
     /// The tick of the last committed cut (0 for a new world).
     pub world_tick: Tick,
@@ -66,21 +66,10 @@ impl StoreHandle {
         self.ask(Request::WorldInfo)
     }
 
-    /// Stores the forged world artifact and its content crc (replacing any).
-    pub fn put_artifact(&self, bytes: Vec<u8>, content_crc: u32) -> Result<(), StoreError> {
-        self.ask(|r| Request::PutArtifact(bytes, content_crc, r))
-    }
-
-    /// Plan A's single-blob read (the `forged_archive` row); Task 6 removes it
-    /// in favour of [`StoreHandle::forged_archive`].
-    pub fn artifact(&self) -> Result<Option<Vec<u8>>, StoreError> {
-        self.ask(Request::Artifact)
-    }
-
     /// The original forge file of the stored forged world (re-tiling, export);
     /// hosts never read it.
     pub fn forged_archive(&self) -> Result<Option<Vec<u8>>, StoreError> {
-        self.ask(Request::Artifact)
+        self.ask(Request::ForgedArchive)
     }
 
     /// Writes the tiled forged world in one transaction ([`crate::write_tiled`]).

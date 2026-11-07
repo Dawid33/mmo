@@ -584,6 +584,8 @@ clean-old-worlds *args:
 #   just worldctl forge --db <url> [--preset <name>] [--size <m>] [--cell <m>] [--seed <hex>] [--set <knob>=<value>]…
 #     forges a world in process and stores it as tiles (a store that already
 #     holds a world is refused); flags as `just forge-proto` takes them;
+#   just worldctl retile --db <url>
+#     rebuilds the tiles from the archived forge file (after a tile-format change);
 #   just worldctl export --db <url> <out.world>
 #     writes the stored forge file back out, for the file-based tools
 #     (`world-map`, `cross-section`, `history`, `genesis-probe`).

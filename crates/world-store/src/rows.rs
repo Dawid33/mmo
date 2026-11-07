@@ -117,24 +117,7 @@ macro_rules! engine_rows {
                 Ok(WorldInfo { content_crc, world_tick: u(tick), has_artifact })
             }
 
-            pub(crate) async fn put_artifact(pool: &Pool, bytes: Vec<u8>, crc: u32) -> Result<(), StoreError> {
-                let mut tx = pool.begin().await?;
-                sqlx::query(
-                    "INSERT INTO forged_archive (id, bytes) VALUES (1, $1) \
-                     ON CONFLICT (id) DO UPDATE SET bytes = excluded.bytes",
-                )
-                .bind(bytes)
-                .execute(&mut *tx)
-                .await?;
-                sqlx::query("UPDATE world SET content_crc = $1 WHERE id = 1")
-                    .bind(crc as i64)
-                    .execute(&mut *tx)
-                    .await?;
-                tx.commit().await?;
-                Ok(())
-            }
-
-            pub(crate) async fn artifact(pool: &Pool) -> Result<Option<Vec<u8>>, StoreError> {
+            pub(crate) async fn forged_archive(pool: &Pool) -> Result<Option<Vec<u8>>, StoreError> {
                 let row = sqlx::query("SELECT bytes FROM forged_archive WHERE id = 1").fetch_optional(pool).await?;
                 Ok(match row {
                     Some(r) => Some(r.try_get(0)?),

@@ -46,8 +46,7 @@ impl<T> Reply<T> {
 
 pub(crate) enum Request {
     WorldInfo(Reply<WorldInfo>),
-    PutArtifact(Vec<u8>, u32, Reply<()>),
-    Artifact(Reply<Option<Vec<u8>>>),
+    ForgedArchive(Reply<Option<Vec<u8>>>),
     PutTiled(Box<crate::forged::TiledRows>, Reply<()>),
     ForgedHead(Reply<Option<crate::forged::ForgedHead>>),
     ForgedTile(worldgen::forged_tiles::TileCoords, Reply<Option<Vec<u8>>>),
@@ -150,11 +149,7 @@ async fn serve(pool: Pool, guard: LockGuard, mut rx: mpsc::UnboundedReceiver<Req
                 continue;
             }
             Request::WorldInfo(r) => tokio::spawn(async move { r.send(on_pool!(&pool, world_info())) }),
-            Request::PutArtifact(bytes, crc, r) => tokio::spawn(async move {
-                let _w = writer.lock().await;
-                r.send(on_pool!(&pool, put_artifact(bytes, crc)))
-            }),
-            Request::Artifact(r) => tokio::spawn(async move { r.send(on_pool!(&pool, artifact())) }),
+            Request::ForgedArchive(r) => tokio::spawn(async move { r.send(on_pool!(&pool, forged_archive())) }),
             Request::PutTiled(rows, r) => tokio::spawn(async move {
                 let _w = writer.lock().await;
                 r.send(on_pool!(&pool, put_tiled(rows)))

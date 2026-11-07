@@ -58,7 +58,7 @@
 
    The rivers' reaches, needed for exporting and for `build_world_map`, are not reconstructible from per-tile segments, so the archive is what keeps them.
 8. **`content_crc` of a tiled world** is crc32 over the meta row's bytes, then every tile row's bytes in `(tz, tx)` order, then the world-map bytes. It is computed by the writer and stored in `world.content_crc`. It keys the worldgen cache as before. Plan A's importer keeps the file's crc only until this task replaces it, so caches built from imported file worlds are invalidated once.
-9. **Versioning:** `TILED_FORMAT_VERSION: u32 = 1` is stored in `forged_meta.format_version`. It is independent of `ARTIFACT_VERSION` (still the forge file's version). A host refuses a mismatch with "re-tile: `just worldctl retile <db>`" when the archive row exists, else "re-forge".
+9. **Versioning:** `TILED_FORMAT_VERSION: u32 = 1` is stored in `forged_meta.format_version`. It is independent of `ARTIFACT_VERSION` (still the forge file's version). A host refuses a mismatch with "re-tile: `just worldctl retile --db <db>`" when the archive row exists, else "re-forge".
 
 ## Sequencing: runs after the water static layer and Plan A
 
@@ -269,8 +269,8 @@ The water static layer (`docs/superpowers/plans/2026-11-06-water-static-layer.md
 **Files:**
 - Modify:
   - `crates/world-store/src/bin/worldctl.rs`: `retile --db <url>` (archive → `write_tiled` in one transaction)
-  - `crates/world-store/src/handle.rs`: remove `put_artifact` / `artifact` (Plan A)
-  - `crates/server/src/lib.rs`: on `OtherFormat` with an archive, exit with the `retile` command
+  - `crates/world-store/src/handle.rs`: remove `put_artifact` / `artifact` (Plan A); `forged_archive()` stays
+  - `crates/server/src/world_file.rs`: nothing to change (the `OtherFormat` message already names `retile`)
 - Test: `crates/world-store/tests/forged.rs`
 
 - [ ] **Step 1: Write the failing tests:**

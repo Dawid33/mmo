@@ -9,6 +9,9 @@
 //!   (`worldgen::forge`, defaults = `ForgeParams::default()`, the flags as
 //!   `just forge-proto` takes them) and stores it as tiles
 //!   ([`crate::write_tiled`]). Refused when the store already holds a world.
+//! - `retile --db <url>`: rebuilds the stored tiles from the archive row after
+//!   the tile format changed (one transaction, [`crate::write_tiled`]). A
+//!   store with no archive is refused: re-forge it.
 //! - `export --db <url> <out.world>`: writes the stored forge file (the archive
 //!   row) to `out.world`, for the file-based tools (`just world-map`,
 //!   `cross-section`, `history`).
@@ -21,7 +24,7 @@ use crate::{Dials, StoreHandle, StoreUrl};
 
 /// What `worldctl` prints for a bad command line.
 pub const USAGE: &str = "usage: worldctl forge --db <url> [--preset <name>] [--size <m>] [--cell <m>] \
-[--seed <hex>] [--set <knob>=<value>]...\n       worldctl export --db <url> <out.world>";
+[--seed <hex>] [--set <knob>=<value>]...\n       worldctl retile --db <url>\n       worldctl export --db <url> <out.world>";
 
 /// Runs one `worldctl` command (`args` without the program name).
 pub fn run(args: &[String]) -> Result<(), String> {
@@ -30,6 +33,12 @@ pub fn run(args: &[String]) -> Result<(), String> {
             let (db, params) = parse_forge(&args[1..])?;
             let crc = forge_into(&db, &params)?;
             println!("worldctl: forged a {} m world at {} m cells into {db:?} (content crc {crc:#010x})", params.size_m, params.cell_m);
+            Ok(())
+        }
+        Some("retile") => {
+            let db = parse_retile(&args[1..])?;
+            let crc = retile(&db)?;
+            println!("worldctl: re-tiled {db:?} from its archive (content crc {crc:#010x})");
             Ok(())
         }
         Some("export") => {
@@ -84,6 +93,13 @@ pub fn parse_forge(args: &[String]) -> Result<(StoreUrl, ForgeParams), String> {
         }
     }
     Ok((db.ok_or_else(|| format!("forge needs --db <url>\n{USAGE}"))?, p))
+}
+
+fn parse_retile(args: &[String]) -> Result<StoreUrl, String> {
+    match args {
+        [flag, value] if flag == "--db" => parse_db(value),
+        _ => Err(USAGE.to_string()),
+    }
 }
 
 fn parse_export(args: &[String]) -> Result<(StoreUrl, String), String> {
@@ -145,4 +161,20 @@ pub fn export(db: &StoreUrl, out: &Path) -> Result<usize, String> {
             format!("{}: {e}", out.display())
         })?;
     Ok(bytes.len())
+}
+
+/// Rebuilds `db`'s tiles from its archived forge file, in one transaction
+/// (`write_tiled`); returns the world's `content_crc`. A store with no
+/// archive cannot be re-tiled.
+pub fn retile(db: &StoreUrl) -> Result<u32, String> {
+    let store = open(db)?;
+    let result = (|| {
+        let archive = store
+            .forged_archive()
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("{db:?} keeps no archived forge file to re-tile from; re-forge the world"))?;
+        crate::write_tiled(&store, archive).map_err(|e| e.to_string())
+    })();
+    store.shutdown();
+    result
 }

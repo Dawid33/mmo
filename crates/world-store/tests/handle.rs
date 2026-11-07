@@ -288,14 +288,10 @@ fn missing_region_is_none_not_error() {
         assert!(h.stored_regions().unwrap().is_empty());
         assert!(h.load_in_flight().unwrap().is_empty());
         assert_eq!(h.load_history().unwrap(), None);
-        assert_eq!(h.artifact().unwrap(), None);
+        assert_eq!(h.forged_archive().unwrap(), None);
         let info = h.world_info().unwrap();
         assert_eq!((info.content_crc, info.world_tick, info.has_artifact), (None, 0, false));
 
-        h.put_artifact(vec![5, 6, 7], 0xDEAD_BEEF).unwrap();
-        assert_eq!(h.artifact().unwrap(), Some(vec![5, 6, 7]));
-        let info = h.world_info().unwrap();
-        assert_eq!((info.content_crc, info.has_artifact), (Some(0xDEAD_BEEF), true));
         h.shutdown();
     });
 }

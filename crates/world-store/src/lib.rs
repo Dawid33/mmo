@@ -95,7 +95,7 @@ impl fmt::Display for StoreError {
                     worldgen::forged_tiles::TILED_FORMAT_VERSION
                 )?;
                 if *archived {
-                    write!(f, "re-tile it from its archived forge file: `just worldctl retile <db>`")
+                    write!(f, "re-tile it from its archived forge file: `just worldctl retile --db <db>`")
                 } else {
                     write!(f, "it keeps no archived forge file to re-tile from, so re-forge the world")
                 }

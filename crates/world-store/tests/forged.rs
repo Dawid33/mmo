@@ -122,6 +122,8 @@ fn write_then_load_bit_equal() {
         assert_eq!(tiled.content_crc(), crc);
         assert_eq!(h.forged_archive().unwrap().as_deref(), Some(&f.bytes[..]), "the archive is the forge file");
         assert_bit_equal(&f.whole, &tiled);
+        let info = h.world_info().unwrap();
+        assert_eq!((info.content_crc, info.has_artifact), (Some(crc), true));
         h.shutdown();
     });
 }
@@ -279,4 +281,37 @@ fn two_handles_read_same_tiles() {
     drop(b);
     h.shutdown();
     rt.block_on(db.drop_db());
+}
+
+/// `worldctl retile` rebuilds the tiles from the archive row after the tile
+/// format moved on: the loaded world samples bit-equal to the original.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn retile_from_archive_is_bit_equal() {
+    let f = fixture();
+    each_backend("forged_retile", true, |url| {
+        let h = open(url);
+        let crc = write_tiled(&h, f.bytes.clone()).unwrap();
+        h.shutdown();
+        raw_exec(url, "UPDATE forged_meta SET format_version = 0");
+        let h = open(url);
+        assert!(load_forged(&h).is_err(), "the old format is refused before the retile");
+        h.shutdown();
+
+        assert_eq!(world_store::ctl::retile(url).expect("retile"), crc);
+
+        let h = open(url);
+        let (tiled, _) = loaded(&h);
+        assert_eq!(tiled.content_crc(), crc);
+        assert_bit_equal(&f.whole, &tiled);
+        h.shutdown();
+    });
+}
+
+#[test]
+fn retile_without_archive_says_reforge() {
+    each_backend("forged_retile_none", true, |url| {
+        let err = world_store::ctl::retile(url).unwrap_err();
+        assert!(err.contains("re-forge"), "{err}");
+    });
 }
