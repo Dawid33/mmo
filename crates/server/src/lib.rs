@@ -511,8 +511,12 @@ pub fn run() {
         Some(store) => player_store::shared(player_store::StorePlayers(store.clone())),
     };
     // Who may connect (`VOXEL_AUTH`): a bad setting stops the start, naming
-    // the variable. The client-spawned single-player server never sets it.
-    let auth_mode = auth_edge::AuthMode::from_env().unwrap_or_else(|e| fatal(&e));
+    // the variable. A single-player server is always token mode.
+    let (auth_mode, auth_warning) =
+        auth_edge::AuthMode::resolve(single_player, |name| std::env::var(name).ok()).unwrap_or_else(|e| fatal(&e));
+    if let Some(warning) = auth_warning {
+        log::warn!("[server] {warning}");
+    }
     match &auth_mode {
         auth_edge::AuthMode::Token => info!("auth: player tokens (no login)"),
         auth_edge::AuthMode::Jwt { world, login_url } => {

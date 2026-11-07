@@ -10,7 +10,7 @@ use std::sync::Arc;
 use auth::{Jwks, Signer, SigningKey};
 use game::{ClientPacket, Credential, PlayerId, PlayerToken};
 use login_api::{JoinClaims, HOST_AUDIENCE, JOIN_JWT_TTL_SECS};
-use server::auth_edge::{AuthMode, Authenticator, Clock, JwksCache, JWKS_REFETCH_MIN_SECS};
+use server::auth_edge::{AuthMode, Authenticator, Clock, JwksCache, JWKS_REFETCH_MIN_SECS, MAX_KID_SHOWN_CHARS};
 use server::player_store::{self, resolve_hello, SharedPlayerStore};
 
 const NOW: u64 = 1_800_000_000;
@@ -195,6 +195,73 @@ async fn jwt_host_keeps_keys_when_a_fetch_fails() {
     admit(&store, &auth, signer.sign(&claims(&token(1), 1))).await.expect("cached keys survive a failed fetch");
 }
 
+/// A refetch in flight (an unknown kid, a slow login service) never stalls a
+/// connect whose key is already known.
+#[tokio::test(flavor = "multi_thread")]
+async fn jwt_host_known_kid_does_not_wait_for_a_refetch() {
+    use std::time::Duration;
+    let signer = signer();
+    let jwks = signer.jwks();
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let calls = Arc::new(AtomicU64::new(0));
+    let (fetch_gate, counted) = (gate.clone(), calls.clone());
+    let cache = JwksCache::with_fetch(Box::new(move || {
+        let first = counted.fetch_add(1, Ordering::SeqCst) == 0;
+        let (jwks, gate) = (jwks.clone(), fetch_gate.clone());
+        Box::pin(async move {
+            if !first {
+                gate.notified().await; // the login service hangs
+            }
+            Ok(jwks)
+        })
+    }));
+    let (now, clock) = clock(NOW);
+    let auth = Arc::new(Authenticator::jwt(WORLD, cache, clock));
+    let store = store();
+    auth.prefetch().await;
+    now.store(NOW + JWKS_REFETCH_MIN_SECS, Ordering::SeqCst);
+
+    let stranger = self::signer().sign(&claims(&token(1), 1));
+    let unknown = tokio::spawn({
+        let (auth, store) = (auth.clone(), store.clone());
+        async move { admit(&store, &auth, stranger).await }
+    });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while calls.load(Ordering::SeqCst) < 2 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the unknown kid starts a refetch");
+
+    let known = tokio::time::timeout(Duration::from_secs(2), admit(&store, &auth, signer.sign(&claims(&token(2), 1))))
+        .await
+        .expect("a known kid is admitted while the refetch hangs");
+    known.expect("a valid ticket");
+    assert!(!unknown.is_finished(), "the refetch is still in flight");
+
+    gate.notify_one();
+    let why = unknown.await.unwrap().unwrap_err();
+    assert!(why.contains("unknown key"), "{why}");
+}
+
+/// An attacker-chosen kid is cut short in the refusal.
+#[tokio::test(flavor = "multi_thread")]
+async fn jwt_host_cuts_a_long_kid_in_the_refusal() {
+    use base64::Engine;
+    let signer = signer();
+    let auth = jwt_host(signer.jwks());
+    let ticket = signer.sign(&claims(&token(1), 1));
+    let (_, rest) = ticket.split_once('.').unwrap();
+    let kid = "k".repeat(1000);
+    let header = format!(r#"{{"alg":"EdDSA","typ":"JWT","kid":"{kid}"}}"#);
+    let header = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(header);
+    let why = admit(&store(), &auth, format!("{header}.{rest}")).await.unwrap_err();
+    assert!(why.contains("unknown key"), "{why}");
+    assert!(why.contains(&"k".repeat(MAX_KID_SHOWN_CHARS)), "{why}");
+    assert!(!why.contains(&"k".repeat(MAX_KID_SHOWN_CHARS + 1)), "{why}");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn jwt_host_refuses_older_epoch_after_newer() {
     let signer = signer();
@@ -292,6 +359,31 @@ fn auth_mode_from_env() {
     assert!(why.contains("VOXEL_LOGIN_URL"), "{why}");
     let why = mode_of(&[("VOXEL_AUTH", "password")]).unwrap_err();
     assert!(why.contains("VOXEL_AUTH"), "{why}");
+}
+
+fn resolved(single_player: bool, vars: &[(&str, &str)]) -> Result<(AuthMode, Option<String>), String> {
+    AuthMode::resolve(single_player, |name| vars.iter().find(|(k, _)| *k == name).map(|(_, v)| v.to_string()))
+}
+
+/// A single-player server inherits the client's environment: an exported
+/// `VOXEL_AUTH=jwt` must not make it need a login service.
+#[test]
+fn single_player_is_always_token_mode() {
+    let jwt = [("VOXEL_AUTH", "jwt"), ("VOXEL_WORLD_ID", "dev"), ("VOXEL_LOGIN_URL", "http://127.0.0.1:8790")];
+    let (mode, warning) = resolved(true, &jwt).unwrap();
+    assert_eq!(mode, AuthMode::Token);
+    assert!(warning.expect("the override is reported").contains("VOXEL_AUTH"));
+    // Even an incomplete or unknown setting does not stop it.
+    assert_eq!(resolved(true, &[("VOXEL_AUTH", "jwt")]).unwrap().0, AuthMode::Token);
+    assert_eq!(resolved(true, &[("VOXEL_AUTH", "password")]).unwrap().0, AuthMode::Token);
+    assert_eq!(resolved(true, &[]).unwrap(), (AuthMode::Token, None));
+    assert_eq!(resolved(true, &[("VOXEL_AUTH", "token")]).unwrap(), (AuthMode::Token, None));
+    // A dedicated server honours it.
+    assert_eq!(
+        resolved(false, &jwt).unwrap(),
+        (AuthMode::Jwt { world: "dev".into(), login_url: "http://127.0.0.1:8790".into() }, None)
+    );
+    assert!(resolved(false, &[("VOXEL_AUTH", "jwt")]).is_err());
 }
 
 /// The production fetch: `GET {login_url}/.well-known/jwks.json` over HTTP.

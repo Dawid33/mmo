@@ -18,7 +18,7 @@ use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use auth::{Jwks, Verifier, VerifyError};
@@ -73,6 +73,28 @@ impl AuthMode {
         Self::from_lookup(|name| std::env::var(name).ok())
     }
 
+    /// The mode of this server process. A single-player server (the one a
+    /// client spawns for its own world) is always [`AuthMode::Token`]: it
+    /// inherits the client's environment, and a `VOXEL_AUTH=jwt` left
+    /// exported from dev-login experiments must not make it need a login
+    /// service. The second value is a warning to log when such a setting
+    /// was overridden.
+    pub fn resolve(
+        single_player: bool,
+        lookup: impl Fn(&str) -> Option<String>,
+    ) -> Result<(AuthMode, Option<String>), String> {
+        if !single_player {
+            return Self::from_lookup(lookup).map(|mode| (mode, None));
+        }
+        let warning = match lookup(AUTH_ENV).as_deref().map(str::trim) {
+            None | Some("") | Some("token") => None,
+            Some(other) => Some(format!(
+                "{AUTH_ENV}={other:?} ignored: a single-player server always uses player tokens"
+            )),
+        };
+        Ok((AuthMode::Token, warning))
+    }
+
     /// [`from_env`](Self::from_env) over any variable lookup.
     pub fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Result<AuthMode, String> {
         let required = |name: &str| match lookup(name) {
@@ -95,16 +117,15 @@ pub type JwksFetch = Box<dyn Fn() -> JwksFuture + Send + Sync>;
 /// The login service's public keys as this host last fetched them.
 pub struct JwksCache {
     fetch: JwksFetch,
-    /// Held across a fetch, so concurrent connects with one unknown `kid`
-    /// cause one fetch, not one each.
-    state: tokio::sync::Mutex<CacheState>,
+    /// The keys connects verify against. Read without waiting: a lock guard
+    /// is never held across an `await`, so a refetch in flight never stalls
+    /// a connect whose key is already known.
+    published: RwLock<Arc<Verifier>>,
+    /// When the last fetch was attempted (clock seconds; `None` = never).
+    /// Held across a refetch, so concurrent connects with one unknown `kid`
+    /// cause one fetch, not one each — and only they wait for it.
+    refetch: tokio::sync::Mutex<Option<u64>>,
     fetches: AtomicU64,
-}
-
-struct CacheState {
-    verifier: Arc<Verifier>,
-    /// When the last fetch was attempted (clock seconds); `None` = never.
-    last_attempt: Option<u64>,
 }
 
 impl JwksCache {
@@ -116,10 +137,8 @@ impl JwksCache {
     fn seeded(fetch: JwksFetch, jwks: &Jwks) -> JwksCache {
         JwksCache {
             fetch,
-            state: tokio::sync::Mutex::new(CacheState {
-                verifier: Arc::new(Verifier::from_jwks(jwks)),
-                last_attempt: None,
-            }),
+            published: RwLock::new(Arc::new(Verifier::from_jwks(jwks))),
+            refetch: tokio::sync::Mutex::new(None),
             fetches: AtomicU64::new(0),
         }
     }
@@ -164,43 +183,53 @@ impl JwksCache {
     /// failure is logged and does not count against the refetch throttle, so
     /// the first connect tries again.
     pub async fn prefetch(&self, now_secs: u64) {
-        let mut state = self.state.lock().await;
-        if self.refresh(&mut state).await {
-            state.last_attempt = Some(now_secs);
+        let mut last_attempt = self.refetch.lock().await;
+        if self.refresh().await {
+            *last_attempt = Some(now_secs);
         }
     }
 
-    /// A verifier that knows `kid`: the cached one, else (at most every
+    /// A verifier that knows `kid`: the published one, else (at most every
     /// [`JWKS_REFETCH_MIN_SECS`]) a refetched one. A failed fetch keeps the
-    /// cached keys.
+    /// published keys.
     pub async fn verifier_for(&self, kid: &str, now_secs: u64) -> Result<Arc<Verifier>, VerifyError> {
-        let mut state = self.state.lock().await;
-        if !state.verifier.knows(kid) {
-            let due = state.last_attempt.is_none_or(|at| now_secs >= at.saturating_add(JWKS_REFETCH_MIN_SECS));
-            if due {
-                state.last_attempt = Some(now_secs);
-                self.refresh(&mut state).await;
-            }
+        let current = self.current();
+        if current.knows(kid) {
+            return Ok(current);
         }
-        if state.verifier.knows(kid) {
-            Ok(state.verifier.clone())
+        let mut last_attempt = self.refetch.lock().await;
+        // A refetch that finished while this one waited may have brought it.
+        let current = self.current();
+        if current.knows(kid) {
+            return Ok(current);
+        }
+        let due = last_attempt.is_none_or(|at| now_secs >= at.saturating_add(JWKS_REFETCH_MIN_SECS));
+        if due {
+            *last_attempt = Some(now_secs);
+            self.refresh().await;
+        }
+        drop(last_attempt);
+        let current = self.current();
+        if current.knows(kid) {
+            Ok(current)
         } else {
             Err(VerifyError::UnknownKid(kid.to_string()))
         }
     }
 
-    /// The cached verifier, whatever keys it knows.
-    pub async fn current(&self) -> Arc<Verifier> {
-        self.state.lock().await.verifier.clone()
+    /// The published verifier, whatever keys it knows. Never waits on a fetch.
+    pub fn current(&self) -> Arc<Verifier> {
+        self.published.read().unwrap_or_else(|poisoned| poisoned.into_inner()).clone()
     }
 
-    /// Fetch and, on success, replace the keys. Whether it succeeded.
-    async fn refresh(&self, state: &mut CacheState) -> bool {
+    /// Fetch and, on success, publish the keys. Whether it succeeded.
+    async fn refresh(&self) -> bool {
         self.fetches.fetch_add(1, Ordering::SeqCst);
         match (self.fetch)().await {
             Ok(jwks) => {
                 log::info!("[auth] JWKS fetched: {} key(s)", jwks.keys.len());
-                state.verifier = Arc::new(Verifier::from_jwks(&jwks));
+                let verifier = Arc::new(Verifier::from_jwks(&jwks));
+                *self.published.write().unwrap_or_else(|poisoned| poisoned.into_inner()) = verifier;
                 true
             }
             Err(e) => {
@@ -208,6 +237,20 @@ impl JwksCache {
                 false
             }
         }
+    }
+}
+
+/// An attacker chooses the `kid` of a ticket: a refusal (sent back and
+/// logged) shows at most this many of its characters.
+pub const MAX_KID_SHOWN_CHARS: usize = 64;
+
+/// `error` with an `UnknownKid`'s kid cut to [`MAX_KID_SHOWN_CHARS`].
+fn shown(error: VerifyError) -> VerifyError {
+    match error {
+        VerifyError::UnknownKid(kid) if kid.chars().count() > MAX_KID_SHOWN_CHARS => {
+            VerifyError::UnknownKid(format!("{}…", kid.chars().take(MAX_KID_SHOWN_CHARS).collect::<String>()))
+        }
+        other => other,
     }
 }
 
@@ -293,14 +336,14 @@ impl Authenticator {
         }
         let jwks = self.jwks.as_ref().expect("a jwt host has a JWKS cache");
         let now = (self.now)();
-        let claims = match jwks.current().await.verify(jwt, now, world) {
-            Err(VerifyError::UnknownKid(kid)) => {
-                let verifier = jwks.verifier_for(&kid, now).await.map_err(|e| e.to_string())?;
-                verifier.verify(jwt, now, world)
-            }
+        let claims = match jwks.current().verify(jwt, now, world) {
+            Err(VerifyError::UnknownKid(kid)) => match jwks.verifier_for(&kid, now).await {
+                Ok(verifier) => verifier.verify(jwt, now, world),
+                Err(e) => Err(e),
+            },
             checked => checked,
         }
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| shown(e).to_string())?;
         let token = PlayerToken(claims.player_token.clone());
         if !token.is_valid() {
             log::warn!("[auth] ticket of account {} carries a malformed player token", claims.sub);

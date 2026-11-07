@@ -52,6 +52,8 @@ wtransport = { workspace = true, features = ["dangerous-configuration"] }
 sqlx = { workspace = true }
 # JWKS bodies in the auth edge tests.
 serde_json = { workspace = true }
+# Hand-made JWT headers in the auth edge tests.
+base64 = { workspace = true }
 
 [[test]]
 name = "it"
