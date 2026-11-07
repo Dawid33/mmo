@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use game::rapier3d::math::Vector;
 use game::{
     Block, BlockId, ChiselData, Carried, Chunk, Client, ColliderSpec, ColumnGround, EntityBundle, EntityId,
-    EntityKind, IntentMsg, ItemId, ItemPile, ItemStack, PlayerRecord, Pose, RegionCoords, RegionMeta, SentIntent,
+    EntityKind, IntentMsg, ItemId, ItemPile, ItemStack, PlayerRecord, Pose, RegionCoords, RegionMeta, SentIntent, SentReply,
     Target, WaterBody, WaterBodyId, WorldBlockPos, BodyState,
 };
 use serde::{Serialize, de::DeserializeOwned};
@@ -68,18 +68,71 @@ fn ground() -> ColumnGround {
 
 fn meta() -> RegionMeta {
     let mut m = RegionMeta { tick: 123_456, next_game_event_id: 99, next_entity_serial: 12, ..Default::default() };
+    let cell = pos(10, 20, 30);
+    m.designations.insert(
+        [3, 4, 5],
+        game::Designation { kind: game::DesignationKind::Chop, op: game::OpId { client: 2, seq: 7 }, priority: 6 },
+    );
+    m.designations.insert(
+        [-1, 9, 2],
+        game::Designation { kind: game::DesignationKind::Build(BlockId(3)), op: game::OpId { client: 1, seq: 8 }, priority: 2 },
+    );
+    m.constructed.insert([6, 7, 8], ());
     m.item_piles.insert(
-        pos(10, 20, 30),
+        cell,
         ItemPile {
-            stacks: vec![ItemStack { item: ItemId::block(BlockId(1)), count: 5 }],
+            stacks: vec![
+                ItemStack { item: ItemId::block(BlockId(1)), count: 5 },
+                ItemStack { item: ItemId::block(BlockId(3)), count: 64 },
+            ],
             expire_tick: 5000,
             pickup_after_tick: 100,
         },
     );
-    m.pile_takes.insert((eid(2), pos(10, 20, 30)), 120);
+    m.containers.insert(
+        pos(-4, 11, 8),
+        game::Container { slots: vec![None, Some(ItemStack { item: ItemId::block(BlockId(2)), count: 17 }), None] },
+    );
+    m.pile_takes.insert((eid(2), cell), 120);
+    let sent = SentIntent {
+        target: Target::Container(cell),
+        intent: game::Intent::TakeFromContainer {
+            cell,
+            slot: 4,
+            item: ItemId::block(BlockId(2)),
+            count: 9,
+            to_cursor: true,
+            by: eid(2),
+        },
+        from: RegionCoords::new(1, 0),
+        due: 777,
+    };
+    m.intents.insert((777, eid(2), 3), sent);
+    m.intent_replies.insert((778, eid(2), 4), reply());
+    m.intent_inbox.insert(
+        (eid(2), 5),
+        game::IntentReply::Refused(sent.intent, game::IntentRefusal::ContainerFull),
+    );
     m.water_bodies.insert(WaterBodyId(7), WaterBody { level: 4096 * 44, volume: 4096 * 4 });
     m.water_bodies.insert(WaterBodyId(8), WaterBody { level: 4096 * 12, volume: 4096 });
     m
+}
+
+fn reply() -> SentReply {
+    SentReply {
+        reply: game::IntentReply::Refused(
+            game::Intent::PutInContainer {
+                cell: pos(1, 2, 3),
+                stack: ItemStack { item: ItemId::block(BlockId(2)), count: 4 },
+                slot: Some(2),
+                by: eid(6),
+            },
+            game::IntentRefusal::ContainerFull,
+        ),
+        hint: RegionCoords::new(-2, 5),
+        due: 901,
+        hops: 2,
+    }
 }
 
 fn bundle() -> EntityBundle {
@@ -90,26 +143,37 @@ fn bundle() -> EntityBundle {
         kind: EntityKind::Slime { size: 2 },
         body: BodyState::kinematic(pose),
         collider: ColliderSpec::CapsuleY { half_height: 8.0, radius: 6.0 },
-        carried: Carried { slime: Some(slime), drops: vec![ItemStack { item: ItemId::block(BlockId(2)), count: 3 }], ..Default::default() },
+        carried: Carried {
+            slime: Some(slime),
+            motion: Some(game::Motion { vel_y: -3.5, grounded: true, last_jump_tap: Some(40), ..Default::default() }), drops: vec![ItemStack { item: ItemId::block(BlockId(2)), count: 3 }], ..Default::default() },
         client: None,
         pending_inputs: Vec::new(),
     }
 }
 
 fn player() -> PlayerRecord {
+    let mut client = Client::default();
+    client.inventory.slots[0] = Some(ItemStack { item: ItemId::block(BlockId(1)), count: 12 });
+    client.inventory.slots[10] = Some(ItemStack { item: ItemId::block(BlockId(3)), count: 64 });
     PlayerRecord {
-        client: Client::default(),
+        client,
         pose: Pose::from_translation(Vector::new(10.0, 30.0, 12.0)),
         region: RegionCoords::new(-1, 4),
-        fortress: None,
-        adventure: None,
+        fortress: Some(game::history::SiteId(4)),
+        adventure: Some(game::history::SiteId(9)),
     }
 }
 
 fn intent() -> IntentMsg {
     IntentMsg::Intent(SentIntent {
-        target: Target::Block(pos(-5, 12, 99)),
-        intent: game::Intent::BreakBlock { by: eid(1), survival: true },
+        target: Target::Pile(pos(-5, 12, 99)),
+        intent: game::Intent::DepositItems {
+            cell: pos(-5, 12, 99),
+            stack: ItemStack { item: ItemId::block(BlockId(2)), count: 7 },
+            expire: 9000,
+            pickup: 4300,
+            by: eid(1),
+        },
         from: RegionCoords::new(0, 1),
         due: 4242,
     })
@@ -123,6 +187,7 @@ fn golden_blobs_decode() {
     check("entity_bundle", FORMAT_ENTITY_BUNDLE, &bundle());
     check("player_record", FORMAT_PLAYER_RECORD, &player());
     check("intent_msg", FORMAT_INTENT_MSG, &intent());
+    check("intent_msg_reply", FORMAT_INTENT_MSG, &IntentMsg::Reply(reply()));
 }
 
 #[test]
