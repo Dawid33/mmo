@@ -1,0 +1,25 @@
+# Dev Postgres for the world store (`just pg-up`). Separate from deploy/web/compose.yml,
+# which is the game box. Nothing here is production: fixed dev credentials, bound to
+# localhost only.
+name: mmo-dev
+
+services:
+  postgres:
+    image: postgres:17-bookworm
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: mmo
+      POSTGRES_PASSWORD: mmo
+      POSTGRES_DB: mmo
+    ports:
+      - "127.0.0.1:55432:5432"
+    volumes:
+      - mmo-dev-pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mmo -d mmo"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+volumes:
+  mmo-dev-pg:

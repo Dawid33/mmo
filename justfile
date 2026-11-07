@@ -138,6 +138,11 @@ test_threads := "3"
 _default:
     @just --list
 
+
+# Dev Postgres for the world store (deploy/dev/compose.yml, `just pg-up`). The
+# database `mmo`; tests use the maintenance database and create their own.
+dev_database_url := "postgres://mmo:mmo@127.0.0.1:55432/mmo"
+
 # ---- Build ----------------------------------------------------------------
 
 # Build the whole workspace (all bins) with the configured cargo (stable by default).
@@ -798,6 +803,27 @@ deploy-push:
 deploy-logs:
     ssh {{deploy_host}} docker compose -f /srv/mmo/compose.yml logs -f --tail 200 server
 
+# ---- Dev Postgres (deploy/dev) ---------------------------------------------
+
+# Start the dev Postgres on 127.0.0.1:55432 and wait until it is healthy.
+pg-up:
+    docker compose -f deploy/dev/compose.yml up -d --wait
+    @echo "dev database: {{dev_database_url}}"
+
+# Stop the dev Postgres; its data stays in the mmo-dev-pg volume.
+pg-down:
+    docker compose -f deploy/dev/compose.yml down
+
+# Delete the dev Postgres data and start again empty.
+pg-reset:
+    docker compose -f deploy/dev/compose.yml down -v
+    docker compose -f deploy/dev/compose.yml up -d --wait
+
+# Run psql inside the dev Postgres: `just pg-psql -c 'select version()'`.
+[positional-arguments]
+pg-psql *args:
+    docker compose -f deploy/dev/compose.yml exec -T postgres psql -U mmo -d mmo "$@"
+
 # ---- Test -----------------------------------------------------------------
 
 # Scoped per-crate on purpose: first-party crates only (the vendored physics
@@ -853,6 +879,10 @@ smoke:
 # (listed at the top of each tests/it.rs).
 test-one crate *args:
     {{cap}} {{cargo}} test -p {{crate}} {{args}}
+
+# Run the world-store tests against the dev Postgres (needs `just pg-up`).
+test-pg *args:
+    MMO_TEST_DATABASE_URL=postgres://mmo:mmo@127.0.0.1:55432/postgres just test-one world-store "{{args}}"
 
 # Region threading: a player walking across the seam between two regions that
 # run on different threads. Two layers, both tagged slow (so smoke / test-one /
