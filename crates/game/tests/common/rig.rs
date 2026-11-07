@@ -147,7 +147,10 @@ pub struct Rig {
 }
 
 impl Rig {
-    pub fn with_floor(schedule: Option<InlineSchedule>, floor: fn(RegionCoords) -> Vec<(ColumnCoords, Column)>) -> Self {
+    pub fn with_floor(
+        schedule: Option<InlineSchedule>,
+        floor: impl FnMut(RegionCoords) -> Vec<(ColumnCoords, Column)> + Send + 'static,
+    ) -> Self {
         // Before any region exists: the seam tests compare runs (placements,
         // seeds) against each other, and a player's starting kit and a broken
         // block's drops read the process-global block props.

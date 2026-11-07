@@ -748,8 +748,9 @@ fn autosave_holds_a_transfer_to_a_stopping_target() {
 // --- Seam-translation invariance ----------------------------------------------
 
 use crate::common::seam_translate::{
-    assert_seam_invariant, offset, spawn_tile, Scenario, Tolerances, JITTER_TOLERANCES,
+    assert_seam_invariant, offset, spawn_tile, Floor, Scenario, Tolerances, JITTER_TOLERANCES,
 };
+use crate::common::water::{floor_with_water, WaterBox};
 use game::WorldBlockPos;
 
 /// Rounds a freshly placed body is left to land before a scenario starts.
@@ -1324,8 +1325,19 @@ fn tree_felled_across_seam() {
 
 // --- Pathing around water ----------------------------------------------------------
 
+/// Recipe water on the one-block floor over the block columns `span × span`
+/// around `origin` (x and z), up to block level `water_top`.
+fn square_pond(origin: WorldBlockPos, span: std::ops::Range<i64>, water_top: i32) -> WaterBox {
+    WaterBox {
+        xs: origin.x + span.start..origin.x + span.end,
+        zs: origin.z + span.start..origin.z + span.end,
+        surface: origin.y - 1,
+        water_top,
+    }
+}
+
 /// An adventurer sent diagonally through the origin, where a 4x4 pond of
-/// water blocks sits: the walk must detour around it, in every placement.
+/// recipe water sits: the walk must detour around it, in every placement.
 struct PondDetour {
     origin: std::cell::Cell<Option<WorldBlockPos>>,
 }
@@ -1340,15 +1352,6 @@ const POND_WALK_ROUNDS: u32 = 200;
 impl Scenario for PondDetour {
     fn setup(&self, rig: &mut Rig, origin: WorldBlockPos) {
         common::install_real_block_props();
-        let water = Block::new(BlockId(5));
-        for dx in -POND_HALF..POND_HALF {
-            for dz in -POND_HALF..POND_HALF {
-                let (rc, local) = offset(origin, dx, 0, dz).to_local();
-                rig.manager.spawner_mut().with_region(rc, |r| {
-                    r.with_data(|d| assert!(d.set_block_safe([local.x, local.y, local.z], water), "pond {rc:?} {local:?}"))
-                });
-            }
-        }
         let d = POND_WALK_BLOCKS;
         place_player(rig, offset(origin, d, 0, d), false);
         let goal = offset(origin, -d, 0, -d);
@@ -1378,6 +1381,12 @@ impl Scenario for PondDetour {
 
     fn rounds(&self) -> u32 {
         POND_WALK_ROUNDS
+    }
+
+    /// One block of recipe water on the floor over the pond.
+    fn floor(&self, origin: WorldBlockPos) -> Floor {
+        let pond = square_pond(origin, -POND_HALF..POND_HALF, origin.y);
+        Box::new(move |rc| floor_with_water(rc, std::slice::from_ref(&pond)))
     }
 
     fn jitter_tolerances(&self) -> Tolerances {
@@ -1445,19 +1454,6 @@ impl SwimAcross {
 impl Scenario for SwimAcross {
     fn setup(&self, rig: &mut Rig, origin: WorldBlockPos) {
         common::install_real_block_props();
-        let water = Block::new(BlockId(5));
-        for dx in -SWIM_POOL_BEHIND..SWIM_POOL_AHEAD {
-            for dz in -SWIM_POOL_BEHIND..SWIM_POOL_AHEAD {
-                for dy in 0..SWIM_POOL_DEPTH {
-                    let (rc, local) = offset(origin, dx, dy, dz).to_local();
-                    rig.manager.spawner_mut().with_region(rc, |r| {
-                        r.with_data(|d| {
-                            assert!(d.set_block_safe([local.x, local.y, local.z], water), "pool {rc:?} {local:?}")
-                        })
-                    });
-                }
-            }
-        }
         // Placed on the dry floor past the pool, then moved into the water.
         let d = SWIM_POOL_AHEAD + 2;
         place_player(rig, offset(origin, d, 0, d), true);
@@ -1538,6 +1534,12 @@ impl Scenario for SwimAcross {
     fn rounds(&self) -> u32 {
         SWIM_ROUNDS + 1
     }
+
+    /// The pool: recipe water `SWIM_POOL_DEPTH` deep on the floor.
+    fn floor(&self, origin: WorldBlockPos) -> Floor {
+        let pool = square_pond(origin, -SWIM_POOL_BEHIND..SWIM_POOL_AHEAD, origin.y + SWIM_POOL_DEPTH - 1);
+        Box::new(move |rc| floor_with_water(rc, std::slice::from_ref(&pool)))
+    }
 }
 
 #[test]
@@ -1587,19 +1589,6 @@ impl Scenario for FloatingLog {
         common::install_real_block_props();
         let p = FLOAT_PLAYER_BLOCKS;
         place_player(rig, offset(origin, p, 0, p), false);
-        let water = Block::new(BlockId(5));
-        for dx in -FLOAT_POOL_HALF..FLOAT_POOL_HALF {
-            for dz in -FLOAT_POOL_HALF..FLOAT_POOL_HALF {
-                for dy in 0..FLOAT_POOL_DEPTH {
-                    let (rc, local) = offset(origin, dx, dy, dz).to_local();
-                    rig.manager.spawner_mut().with_region(rc, |r| {
-                        r.with_data(|d| {
-                            assert!(d.set_block_safe([local.x, local.y, local.z], water), "pool {rc:?} {local:?}")
-                        })
-                    });
-                }
-            }
-        }
         let b = game::BLOCK_VOXELS as f32;
         let surface = (origin.y + FLOAT_POOL_DEPTH) as f32 * b;
         let half = Vector::new(FLOAT_LOG_HALF[0] * b, FLOAT_LOG_HALF[1] * b, FLOAT_LOG_HALF[2] * b);
@@ -1622,6 +1611,12 @@ impl Scenario for FloatingLog {
 
     fn rounds(&self) -> u32 {
         FLOAT_ROUNDS
+    }
+
+    /// The pool: recipe water `FLOAT_POOL_DEPTH` deep on the floor.
+    fn floor(&self, origin: WorldBlockPos) -> Floor {
+        let pool = square_pond(origin, -FLOAT_POOL_HALF..FLOAT_POOL_HALF, origin.y + FLOAT_POOL_DEPTH - 1);
+        Box::new(move |rc| floor_with_water(rc, std::slice::from_ref(&pool)))
     }
 
     fn crosser(&self) -> Option<game::EntityKind> {

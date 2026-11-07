@@ -249,7 +249,10 @@ pub fn halo_seed<'a>(
     let mut ground: Vec<(WorldChunkPos, crate::ColumnGround)> = ground
         .into_iter()
         .filter(|(c, _)| halo_targets(c.x as i32, c.z as i32).contains(&offset))
-        .map(|(c, g)| (WorldChunkPos::from_local(from, [c.x as i32, 0, c.z as i32]), g.clone()))
+        // Bodies are per region: a halo recipe carries none, whichever
+        // source (a running region's labelled ground, an unlabelled
+        // snapshot) seeded it.
+        .map(|(c, g)| (WorldChunkPos::from_local(from, [c.x as i32, 0, c.z as i32]), g.without_bodies()))
         .collect();
     ground.sort_by_key(|(k, _)| *k);
     Some(HaloUpdate { from, replace: true, deltas, ground, piles: Vec::new(), containers: Vec::new() })
@@ -536,6 +539,8 @@ impl Rollback {
     pub(crate) fn apply_halo_update_safe(&mut self, u: &HaloUpdate) {
         let mut touched = Vec::new();
         for (k, g) in &u.ground {
+            // Bodies are per region: the halo's copy carries none (see `halo_seed`).
+            let g = &g.without_bodies();
             let local = k.local_in(*self.data.region);
             if k.to_local().0 != u.from || k.y != 0 || !in_halo_band(local[0], local[2]) {
                 log::warn!("halo update from {:?}: ground for {k:?} outside its band; ignored", u.from);

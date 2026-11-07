@@ -31,3 +31,4 @@ mod tree_chop;
 mod tree_fall;
 mod trees_in_terrain;
 mod underground;
+mod water_recipe;

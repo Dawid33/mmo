@@ -10,6 +10,7 @@ use game::{
 use crate::common;
 use crate::common::rig::{Rig, CLIENT};
 use crate::common::seam_translate::uniform_floor;
+use crate::common::water::{floor_with_water, WaterBox};
 
 /// A pile of `n` dirt, pickable at once.
 fn pile(n: u32) -> game::ItemPile {
@@ -439,17 +440,76 @@ fn halo_water_chunk_has_no_collider() {
     });
 }
 
+/// Recipe water 3 blocks deep (block y 1..=3 over the one-block floor)
+/// over world block columns `x` −3..3 (straddling the spawn region's east
+/// seam), `z` 6..10.
+fn seam_pond(rc: RegionCoords) -> Vec<(game::ColumnCoords, game::Column)> {
+    let n = REGION_BLOCKS as i64;
+    let seam = east().x as i64 * n;
+    let pond = WaterBox { xs: seam - 3..seam + 3, zs: SPAWN_REGION.z as i64 * n + 6..SPAWN_REGION.z as i64 * n + 10, surface: 0, water_top: 3 };
+    floor_with_water(rc, &[pond])
+}
+
+/// Water units at world block `p` as region `rc` sees it.
+fn units_from(rig: &mut Rig, rc: RegionCoords, p: WorldBlockPos) -> Option<u16> {
+    let mut u = None;
+    rig.manager.spawner_mut().with_region(rc, |r| u = Some(r.data().water_units_at(p)));
+    u
+}
+
 #[test]
 fn water_units_at_reads_the_halo() {
     common::install_real_block_props();
-    let mut rig = joined();
-    // 3 blocks inside the east neighbour.
-    let local = BlockPos::new(2, 3, 8);
-    set_block(&mut rig, east(), local, Block::new(BlockId(5)));
+    let mut rig = Rig::with_floor(None, seam_pond);
+    rig.join_spawn();
     rig.round();
+    // 2 blocks inside the east neighbour, in its recipe water.
+    let at = WorldBlockPos::from_local(SPAWN_REGION, BlockPos::new(REGION_BLOCKS as i32 + 1, 3, 8));
+    assert_eq!(units_from(&mut rig, SPAWN_REGION, at), Some(game::WATER_FULL));
+}
+
+/// A pond whose recipe straddles the east seam reads full on both sides of
+/// it from either region (own cells and halo cells alike); a block placed
+/// into a water cell by its owner reads dry in the neighbour's halo after
+/// the T+1 halo delta.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn halo_carries_recipe_water() {
+    common::install_real_block_props();
+    let mut rig = Rig::with_floor(None, seam_pond);
+    rig.join_spawn();
     rig.round();
-    let at = WorldBlockPos::from_local(SPAWN_REGION, BlockPos::new(REGION_BLOCKS as i32 + 2, 3, 8));
-    let mut units = None;
-    rig.manager.spawner_mut().with_region(SPAWN_REGION, |r| units = Some(r.data().water_units_at(at)));
-    assert_eq!(units, Some(game::WATER_FULL));
+    let n = REGION_BLOCKS as i64;
+    let seam = east().x as i64 * n;
+    let z = SPAWN_REGION.z as i64 * n + 8;
+    for rc in [SPAWN_REGION, east()] {
+        for x in seam - 3..seam + 3 {
+            for y in 1..=3 {
+                let p = WorldBlockPos::new(x, y, z);
+                assert_eq!(units_from(&mut rig, rc, p), Some(game::WATER_FULL), "{rc:?} reads {p:?}");
+            }
+            assert_eq!(units_from(&mut rig, rc, WorldBlockPos::new(x, 0, z)), Some(0), "{rc:?}: the floor");
+            assert_eq!(units_from(&mut rig, rc, WorldBlockPos::new(x, 4, z)), Some(0), "{rc:?}: above the pond");
+        }
+        assert_eq!(units_from(&mut rig, rc, WorldBlockPos::new(seam + 3, 2, z)), Some(0), "{rc:?}: past the pond");
+    }
+    // Bodies are per region: each side labels its own half of the pond, the
+    // halo's copy of the neighbour's recipe carries none.
+    for rc in [SPAWN_REGION, east()] {
+        rig.manager.spawner_mut().with_region(rc, |r| {
+            let d = r.data();
+            assert_eq!(d.water_bodies().len(), 1, "{rc:?}: its half of the pond");
+            assert!(d.halo_grounds().values().all(|g| g.water_body.iter().all(|&b| b == game::NO_BODY)), "{rc:?}");
+            let own = WorldBlockPos::new(if rc == east() { seam } else { seam - 1 }, 2, z).to_local().1;
+            assert!(d.water_body_at(own).is_some(), "{rc:?}: own water cell");
+        });
+    }
+    // East places stone into its own water cell 1 block past the seam.
+    let cell = WorldBlockPos::new(seam + 1, 2, z);
+    let (_, local) = cell.to_local();
+    set_block(&mut rig, east(), local, Block::new(BlockId(2)));
+    assert_eq!(units_from(&mut rig, east(), cell), Some(0), "the owner reads its block at once");
+    assert_eq!(units_from(&mut rig, SPAWN_REGION, cell), Some(game::WATER_FULL), "the halo: not yet");
+    rig.round();
+    assert_eq!(units_from(&mut rig, SPAWN_REGION, cell), Some(0), "after the T+1 halo delta");
 }

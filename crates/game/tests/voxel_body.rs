@@ -772,7 +772,6 @@ fn toppling_column_lies_down_on_the_floor() {
 
 // --- Buoyancy (water plan Task 4) ---------------------------------------------------
 
-const WATER: BlockId = BlockId(5);
 const OAK_LOG: BlockId = BlockId(13);
 /// Depth of the pool, blocks: water from the floor's top (level 1) up.
 const POOL_DEPTH: i32 = 6;
@@ -781,19 +780,11 @@ const POOL_SURFACE: f32 = (1 + POOL_DEPTH) as f32 * B;
 /// The pool's bed (the floor's top), units.
 const POOL_BED: f32 = B;
 
-/// A floored region with a 6-deep pool of static water over block columns
-/// 8..24 × 8..24 (no walls: static water needs none).
+/// A floored region with a 6-deep pool of static recipe water over block
+/// columns 8..24 × 8..24 (no walls: static water needs none).
 fn pond_region() -> (Region, Receiver<GameDataUpdate>) {
     let (mut region, recv) = region_over(0..32);
-    let mut water = Vec::new();
-    for x in 8..24 {
-        for z in 8..24 {
-            for y in 1..=POOL_DEPTH {
-                water.push([x, y, z]);
-            }
-        }
-    }
-    build(&mut region, &water, Block::new(WATER));
+    region.with_data(|r| common::water::set_recipe_water(r, 8..24, 8..24, 0, POOL_DEPTH, 0));
     while recv.try_recv().is_ok() {}
     (region, recv)
 }

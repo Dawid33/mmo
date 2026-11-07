@@ -196,15 +196,7 @@ fn dropped_cube_floats_and_dry_bodies_unchanged() {
 
     // Over water: a pool 6 deep from the floor's top.
     let mut wet = floored_region();
-    wet.with_data(|r| {
-        for x in 16..32 {
-            for z in 16..32 {
-                for y in 1..=DEPTH {
-                    assert!(r.set_block_safe([x, y, z], game::Block::new(game::BlockId(5))));
-                }
-            }
-        }
-    });
+    wet.with_data(|r| crate::common::water::set_recipe_water(r, 16..32, 16..32, 0, DEPTH, 0));
     drop(&mut wet, [24, 1 + DEPTH, 24]);
     let e = only_body(&wet);
     // Settled: asleep, or slower than 0.1 m/s for a second — so the

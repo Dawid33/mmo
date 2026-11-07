@@ -75,29 +75,33 @@ use slotmapd::Key as _;
 /// second slime the scene used to get no longer spawns; 16-block values
 /// only). Then for `Motion.immersion` / `Motion.blocked_horizontally` (water
 /// plan Task 3; layout only — with both left out of the hash the state hash
-/// is the previous 0x4C3E_CFAB; 16-block values only).
+/// is the previous 0x4C3E_CFAB; 16-block values only). Then for
+/// `ColumnGround.water_top` / `water_body` and `GameData.water_bodies`
+/// (water plan Task 5, recipe water; serialized bytes + hashed layout only —
+/// with the three left out of the hash every state hash here is the previous
+/// one; 16-block values only, the voxel body scene's too).
 ///
 /// Every value is pinned per sim-chunk size (`game::CHUNK_BLOCKS`, a build
 /// dial): the same physical scene splits into different chunk entities,
 /// bodies and colliders at 2 and 16 blocks, so its bytes and hashes differ.
 /// Other sizes are not pinned and skip the comparison.
-const WASM_SCENE_DIGEST: u32 = pinned(0xFA8E_102F, 0x0A4F_F4FD);
+const WASM_SCENE_DIGEST: u32 = pinned(0xFA8E_102F, 0x25C3_6020);
 /// `game::state_hash` of the same state, on every target.
-const SCENE_STATE_HASH: u32 = pinned(0x5233_40BE, 0xAB1D_5664);
+const SCENE_STATE_HASH: u32 = pinned(0x5233_40BE, 0xC939_1267);
 const SCENE_TICKS: usize = 120;
 /// crc32 of [`underground_scene`]'s region bytes, on every target.
-const UNDERGROUND_DIGEST: u32 = pinned(0x5448_586C, 0x2DEF_E7AF);
+const UNDERGROUND_DIGEST: u32 = pinned(0x5448_586C, 0x8439_7A8D);
 /// `game::state_hash` of the same state, on every target.
-const UNDERGROUND_STATE_HASH: u32 = pinned(0x4080_B196, 0x2521_E38D);
+const UNDERGROUND_STATE_HASH: u32 = pinned(0x4080_B196, 0x4472_2ECB);
 
 /// crc32 of [`voxel_body_scene`]'s region bytes, on every target.
 /// Re-recorded for Task 7.5 (voxel bodies cross seams): the body is now an
 /// `EntityKind::Body` with an `EntityId` (`Ecs.kind` / `id`, `id_index`,
 /// `next_entity_serial`) and `VoxelBody` gained `drops` — state layout only,
 /// the same detach and fall (16-block values only).
-const VOXEL_BODY_DIGEST: u32 = pinned(0x0F43_FFD4, 0xED51_A22D);
+const VOXEL_BODY_DIGEST: u32 = pinned(0x0F43_FFD4, 0xC0F3_B295);
 /// `game::state_hash` of the same state, on every target.
-const VOXEL_BODY_STATE_HASH: u32 = pinned(0x8D9E_A328, 0x7E5C_6CD7);
+const VOXEL_BODY_STATE_HASH: u32 = pinned(0x8D9E_A328, 0x1842_10DF);
 /// Ticks of [`voxel_body_scene`] after the detach: mid-fall (it rests and
 /// despawns at ~50).
 const VOXEL_BODY_TICKS: usize = 30;

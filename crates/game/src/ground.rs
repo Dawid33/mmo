@@ -22,6 +22,15 @@ fn footprint<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Box<[i16]>, D::Er
     Ok(v.into_boxed_slice())
 }
 
+/// [`footprint`] for a `u32` per-footprint array.
+fn footprint_u32<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Box<[u32]>, D::Error> {
+    let v: Vec<u32> = serde::Deserialize::deserialize(d)?;
+    if v.len() != FOOTPRINT {
+        return Err(serde::de::Error::invalid_length(v.len(), &"one entry per block column of the footprint"));
+    }
+    Ok(v.into_boxed_slice())
+}
+
 /// Ground recipe for one column footprint. Per-footprint arrays hold
 /// `FOOTPRINT` entries indexed `lx * CHUNK_BLOCKS + lz`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, state_hash::StateHash)]
@@ -37,10 +46,21 @@ pub struct ColumnGround {
     pub bedrock: BlockId,
     /// The column's lowest materialised sub-chunk Y at genesis.
     pub band_base_sub_y: i32,
+    /// Recipe water per block column: the topmost water (or ice) block Y,
+    /// else [`crate::NO_WATER`]. The water fills `surface + 1 ..= water_top`
+    /// ([`ColumnGround::recipe_water`]).
+    #[serde(deserialize_with = "footprint")]
+    pub water_top: Box<[i16]>,
+    /// The water body each block column's recipe water belongs to
+    /// ([`crate::WaterBodyId`]'s value), else [`crate::NO_BODY`]. Labelled at
+    /// genesis, own region only: a halo copy holds `NO_BODY` everywhere.
+    #[serde(deserialize_with = "footprint_u32")]
+    pub water_body: Box<[u32]>,
 }
 
 impl Default for ColumnGround {
-    /// A zero surface and offset over every block column, no strata.
+    /// A zero surface and offset over every block column, no strata, no
+    /// water.
     fn default() -> Self {
         Self {
             surface: vec![0; FOOTPRINT].into_boxed_slice(),
@@ -48,12 +68,14 @@ impl Default for ColumnGround {
             strata: Vec::new(),
             bedrock: BlockId::default(),
             band_base_sub_y: 0,
+            water_top: vec![crate::NO_WATER; FOOTPRINT].into_boxed_slice(),
+            water_body: vec![crate::NO_BODY; FOOTPRINT].into_boxed_slice(),
         }
     }
 }
 
 impl ColumnGround {
-    /// One stone formation everywhere, bedrock `UNDERGROUND_DEPTH` below the surface.
+    /// One stone formation everywhere, bedrock `UNDERGROUND_DEPTH` below the surface, no water.
     /// `surface` holds `COLUMN_FOOTPRINT` entries.
     pub fn plain(surface: Box<[i16]>, band_base_sub_y: i32, stone: BlockId, bedrock: BlockId) -> Self {
         assert_eq!(surface.len(), FOOTPRINT, "one surface per block column of the footprint");
@@ -63,7 +85,28 @@ impl ColumnGround {
             strata: vec![(0, stone)],
             bedrock,
             band_base_sub_y,
+            water_top: vec![crate::NO_WATER; FOOTPRINT].into_boxed_slice(),
+            water_body: vec![crate::NO_BODY; FOOTPRINT].into_boxed_slice(),
         }
+    }
+
+    /// The inclusive block-Y range `(surface + 1, water_top)` of recipe
+    /// water over block column `(lx, lz)` of the footprint; `None` without
+    /// water there.
+    pub fn recipe_water(&self, lx: usize, lz: usize) -> Option<(i32, i32)> {
+        let i = lx * CHUNK_BLOCKS + lz;
+        let top = self.water_top[i];
+        let bottom = i32::from(self.surface[i]) + 1;
+        (top != crate::NO_WATER && i32::from(top) >= bottom).then_some((bottom, i32::from(top)))
+    }
+
+    /// This recipe with every block column's body cleared to
+    /// [`crate::NO_BODY`]: bodies are per region, so a neighbour's halo
+    /// copy carries none (whichever source seeded it).
+    pub fn without_bodies(&self) -> Self {
+        let mut g = self.clone();
+        g.water_body.iter_mut().for_each(|b| *b = crate::NO_BODY);
+        g
     }
 
     /// The implied block at block coords `(lx, lz)` of the footprint and block Y `y`.

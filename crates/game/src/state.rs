@@ -295,6 +295,13 @@ mod game_data {
         /// must not be used.
         #[undo(map)]
         ground: BTreeMap<crate::ColumnCoords, crate::ColumnGround>,
+        /// The region's static water bodies (`water.rs`), labelled from the
+        /// ground recipes' water at genesis (`seed_water_genesis`). Like
+        /// `ground`: never mutated, so it never needs undo; the
+        /// `#[undo(map)]` wrapper is only map plumbing, its logged mutators
+        /// must not be used.
+        #[undo(map)]
+        water_bodies: BTreeMap<crate::WaterBodyId, crate::WaterBody>,
         /// Fortress orders waiting on tiles (`orders.rs`).
         #[undo(map)]
         designations: BTreeMap<crate::TilePos, crate::Designation>,
@@ -496,6 +503,11 @@ impl GameData {
     /// The terrain halo's ground recipes, by world chunk column.
     pub fn halo_grounds(&self) -> &std::collections::BTreeMap<crate::WorldChunkPos, crate::ColumnGround> {
         &self.halo_ground
+    }
+
+    /// The region's static water bodies, labelled at genesis.
+    pub fn water_bodies(&self) -> &std::collections::BTreeMap<crate::WaterBodyId, crate::WaterBody> {
+        &self.water_bodies
     }
 
     /// The per-column ground recipes (for the client's tile mirror).
@@ -1023,6 +1035,14 @@ impl Rollback {
     pub fn seed_ground_genesis(&mut self, ground: Vec<(crate::ColumnCoords, crate::ColumnGround)>) {
         for (coords, g) in ground {
             self.ground.insert_raw(coords, g);
+        }
+    }
+
+    /// Genesis-only: raw, unlogged insert of the water bodies labelled from
+    /// the ground recipes (`label_water_bodies`).
+    pub fn seed_water_genesis(&mut self, bodies: std::collections::BTreeMap<crate::WaterBodyId, crate::WaterBody>) {
+        for (id, body) in bodies {
+            self.water_bodies.insert_raw(id, body);
         }
     }
 

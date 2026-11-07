@@ -413,9 +413,12 @@ impl TileSource for TileMirror {
         self.mirrored_block(p).map_or(0, |b| b.limb())
     }
 
-    /// Static water: a liquid block is full, as the sim's `water_units_at`.
+    /// Static water, as the sim's `water_units_at` (`game::static_water_units`):
+    /// a liquid block, or air inside its column's recipe water.
     fn water_units(&self, p: TilePos) -> u16 {
-        if game::block_props().is_liquid(self.block(p)) { game::WATER_FULL } else { 0 }
+        let Some((coords, (lx, _, lz))) = game::edit::locate(p) else { return 0 };
+        let recipe = self.ground_at(coords.x, coords.z).and_then(|g| g.recipe_water(lx, lz));
+        game::static_water_units(self.block(p), recipe, p[1])
     }
 
     /// Same probe as `impl TileSource for Rollback`, over the mirrored chunks.
@@ -509,8 +512,19 @@ impl TileSource for WithHalo<'_> {
         self.halo_block(p).map_or(0, |b| b.limb())
     }
 
+    /// As the sim's: past the home region's edge, the recipe water of the
+    /// halo's ground (`halo_ground`).
     fn water_units(&self, p: TilePos) -> u16 {
-        if game::block_props().is_liquid(self.block(p)) { game::WATER_FULL } else { 0 }
+        if game::edit::locate(p).is_some() {
+            return self.0.water_units(p);
+        }
+        let Some((key, (lx, _, lz))) = self.halo_locate(p) else { return 0 };
+        let recipe = self
+            .0
+            .home_tiles()
+            .and_then(|t| t.halo_ground.get(&game::WorldChunkPos::new(key.x, 0, key.z)))
+            .and_then(|g| g.recipe_water(lx, lz));
+        game::static_water_units(self.block(p), recipe, p[1])
     }
 
     /// As the sim's halo column: probed over the halo's chunks, no ground.
@@ -693,6 +707,48 @@ mod tests {
         assert_eq!(m.implied_chunk_block(at(band_base())), None, "the band itself is real chunks");
         assert_eq!(m.implied_chunk_block([n + 1, band_base() - 1, -2 * n]), None, "a column without a recipe");
         assert_eq!(m.implied_chunk_block([0, band_base() - 1, 0]), None, "a region not loaded");
+    }
+
+    /// Recipe water reads as the sim's `water_units_at`: air inside a
+    /// column's recipe range is full — the home ground's in the home region,
+    /// the halo ground's past its edge — and a block there wins.
+    #[test]
+    fn recipe_water_follows_the_sim_rule() {
+        let mut m = mirror();
+        let top = (SURFACE + 2) as i16;
+        let mut ground = ColumnGround::plain(vec![SURFACE as i16; game::COLUMN_FOOTPRINT].into_boxed_slice(), band_base(), STONE, BEDROCK);
+        ground.water_top[2 * CHUNK_BLOCKS + 3] = top;
+        m.apply(TileMirrorMsg::Reset {
+            region: home(),
+            ground: BTreeMap::from([(ColumnCoords::new(0, 0), ground.clone())]),
+            designations: Vec::new(),
+            constructed: Vec::new(),
+        });
+        let full = game::WATER_FULL;
+        for y in SURFACE + 1..=SURFACE + 2 {
+            assert_eq!(m.water_units([2, y, 3]), full, "y {y}");
+            assert_eq!(m.with_halo().water_units([2, y, 3]), full, "y {y}, with the halo");
+        }
+        assert_eq!(m.water_units([2, SURFACE, 3]), 0, "the bed");
+        assert_eq!(m.water_units([2, SURFACE + 3, 3]), 0, "above the surface");
+        assert_eq!(m.water_units([3, SURFACE + 1, 3]), 0, "a dry column");
+        // A block placed into the water wins.
+        let cb = CHUNK_BLOCKS as i32;
+        let mut chunk = Chunk::uniform(Block::new(BlockId::AIR));
+        chunk.set_block(2, (SURFACE + 1).rem_euclid(cb) as usize, 3, Block::new(STONE));
+        m.set_chunk([0, (SURFACE + 1).div_euclid(cb), 0], chunk_blocks(&chunk));
+        assert_eq!(m.water_units([2, SURFACE + 1, 3]), 0, "stone in the water");
+        assert_eq!(m.water_units([2, SURFACE + 2, 3]), full, "the cell above it");
+
+        // The halo's recipe, two blocks west of the home region.
+        let key = game::WorldChunkPos::from_local(home(), [-1, 0, 0]);
+        let mut halo = ground;
+        halo.water_top[2 * CHUNK_BLOCKS + 3] = game::NO_WATER;
+        halo.water_top[(CHUNK_BLOCKS - 2) * CHUNK_BLOCKS + 3] = top;
+        m.apply(TileMirrorMsg::Halo { region: home(), chunks: Vec::new(), ground: vec![(key, Some(halo))] });
+        assert_eq!(m.with_halo().water_units([-2, SURFACE + 1, 3]), full, "halo recipe water");
+        assert_eq!(m.with_halo().water_units([-2, SURFACE + 3, 3]), 0, "above it");
+        assert_eq!(m.with_halo().water_units([-1, SURFACE + 1, 3]), 0, "a dry halo column");
     }
 
     #[test]

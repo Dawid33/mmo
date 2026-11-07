@@ -66,3 +66,19 @@ fn column_ground_rejects_a_wrong_length_footprint() {
     let bytes = bincode::serialize(&g).unwrap();
     assert!(bincode::deserialize::<ColumnGround>(&bytes).is_err(), "geo of the wrong length");
 }
+
+#[test]
+fn column_ground_rejects_short_water_arrays() {
+    let mut g = ColumnGround::plain(fill(3), 0, id(1), id(2));
+    g.water_top = vec![game::NO_WATER; COLUMN_FOOTPRINT - 1].into_boxed_slice();
+    let bytes = bincode::serialize(&g).unwrap();
+    assert!(bincode::deserialize::<ColumnGround>(&bytes).is_err(), "water_top of the wrong length");
+    let mut g = ColumnGround::plain(fill(3), 0, id(1), id(2));
+    g.water_body = vec![game::NO_BODY; COLUMN_FOOTPRINT - 1].into_boxed_slice();
+    let bytes = bincode::serialize(&g).unwrap();
+    assert!(bincode::deserialize::<ColumnGround>(&bytes).is_err(), "water_body of the wrong length");
+    let g = ColumnGround::plain(fill(3), 0, id(1), id(2));
+    let back: ColumnGround = bincode::deserialize(&bincode::serialize(&g).unwrap()).unwrap();
+    assert_eq!(back, g, "full-length arrays round-trip");
+    assert!(g.water_top.iter().all(|&t| t == game::NO_WATER) && g.water_body.iter().all(|&b| b == game::NO_BODY));
+}

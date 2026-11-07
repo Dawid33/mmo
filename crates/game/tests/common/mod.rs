@@ -219,3 +219,4 @@ pub fn fixed_body_mass_count(data: &Rollback) -> (usize, usize) {
 
 pub mod rig;
 pub mod seam_translate;
+pub mod water;

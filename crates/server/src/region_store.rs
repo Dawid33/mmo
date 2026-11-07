@@ -64,7 +64,9 @@ pub const REGION_MAGIC: [u8; 8] = *b"MMOREGN\0";
 /// 20: `Carried` (in saved in-flight transfers) carries the entity's `drops`.
 /// 21: `VoxelBody` gained `drops`; voxel bodies are `EntityKind::Body` with an
 /// `EntityId`, and `Carried` gained `voxel_body`.
-pub const REGION_FILE_VERSION: u32 = 21;
+/// 22: `ColumnGround` gained `water_top` / `water_body` (recipe water) and
+/// `GameData` gained `water_bodies`.
+pub const REGION_FILE_VERSION: u32 = 22;
 /// magic + version + region blocks + chunk blocks + world crc + payload crc.
 const HEADER_LEN: usize = 8 + 4 * 5;
 

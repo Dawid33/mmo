@@ -1,5 +1,6 @@
 //! Seam-translation invariance: the acceptance oracle of seam-transparent
-//! regions. A [`Scenario`] is played on a uniform floor three ways — centred
+//! regions. A [`Scenario`] is played on a uniform floor (or its own ground,
+//! [`Scenario::floor`]) three ways — centred
 //! in a region, across a straight seam ([`Placement::Seam`]) and through a
 //! four-region corner ([`Placement::Corner`]) — and must end in the same
 //! outcome in the WORLD frame, measured from the placement's origin.
@@ -112,6 +113,9 @@ pub fn uniform_floor(_rc: RegionCoords) -> Vec<(ColumnCoords, Column)> {
     out
 }
 
+/// A region generator: the ground a scenario is played on.
+pub type Floor = Box<dyn FnMut(RegionCoords) -> Vec<(ColumnCoords, Column)> + Send>;
+
 /// A gameplay scenario the harness places three ways. `setup` gets the
 /// placement's origin (and may run rounds itself, e.g. to let a body land);
 /// then `drive(round)` runs before each of `rounds()` scheduling rounds.
@@ -119,6 +123,13 @@ pub trait Scenario {
     fn setup(&self, rig: &mut Rig, origin: WorldBlockPos);
     fn drive(&self, rig: &mut Rig, round: u32);
     fn rounds(&self) -> u32;
+    /// The ground recipes the scenario is played on, placed at `origin`
+    /// (the regions' genesis columns): [`uniform_floor`] by default. A
+    /// scenario with recipe water builds it with
+    /// `common::water::floor_with_water`, its boxes relative to `origin`.
+    fn floor(&self, _origin: WorldBlockPos) -> Floor {
+        Box::new(uniform_floor)
+    }
     /// Whether the scenario's motion crosses the seam (`run` then asserts
     /// it reached the region past it). A scenario that reaches across a
     /// seam without moving there (an edit through an intent) says `false`.
@@ -441,10 +452,10 @@ pub fn spread(a: &WorldSnapshot, b: &WorldSnapshot) -> (f32, f32, f32) {
 /// past the placement's seam at some point — the motion must cross it — or
 /// by two regions in one round.
 pub fn run<S: Scenario>(s: &S, placement: Placement, schedule: Option<InlineSchedule>) -> WorldSnapshot {
-    let mut rig = Rig::with_floor(schedule, uniform_floor);
+    let origin = placement.origin();
+    let mut rig = Rig::with_floor(schedule, s.floor(origin));
     rig.join_spawn();
     let baseline = terrain_digests(&mut rig);
-    let origin = placement.origin();
     s.setup(&mut rig, origin);
     let mut owners = std::collections::BTreeSet::new();
     let mut track = |rig: &mut Rig| {

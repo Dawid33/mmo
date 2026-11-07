@@ -627,12 +627,19 @@ fn columns_from_patch(
 
             let mut surface = vec![0i16; game::COLUMN_FOOTPRINT].into_boxed_slice();
             let mut geo = vec![0i16; game::COLUMN_FOOTPRINT].into_boxed_slice();
+            let mut water_top = vec![game::NO_WATER; game::COLUMN_FOOTPRINT].into_boxed_slice();
             for lx in 0..CHUNK_BLOCKS {
                 for lz in 0..CHUNK_BLOCKS {
                     let (bx, bz) = (fx + lx as i32, fz + lz as i32);
+                    let c = at(bx, bz);
                     // The visible top: a glacier's ice counts as ground
                     // (digging, implied ground and pathing see the ice top).
-                    surface[lx * CHUNK_BLOCKS + lz] = at(bx, bz).top as i16;
+                    surface[lx * CHUNK_BLOCKS + lz] = c.top as i16;
+                    // Recipe water: the column's water (or ice) above its
+                    // ground, the same cells the water blocks fill below.
+                    if c.water_top > c.top {
+                        water_top[lx * CHUNK_BLOCKS + lz] = c.water_top as i16;
+                    }
                     geo[lx * CHUNK_BLOCKS + lz] = patch.geo(block_center_m(wx + bx), block_center_m(wz + bz));
                 }
             }
@@ -648,6 +655,8 @@ fn columns_from_patch(
                 strata: footprint_strata(&strata, lo_s, hi_s),
                 bedrock: mats.bedrock,
                 band_base_sub_y: base_sub_y,
+                water_top,
+                water_body: vec![game::NO_BODY; game::COLUMN_FOOTPRINT].into_boxed_slice(),
             };
 
             for lx in 0..CHUNK_BLOCKS {

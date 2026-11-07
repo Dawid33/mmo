@@ -2,8 +2,9 @@
 //! water around it every tick (`tick_immersion_safe`), and `plan_with`
 //! swims at `Waist` and `Head` — floats at the surface, dives and surfaces,
 //! caps its speed, climbs out onto a one-block ledge — and wades at `Feet`.
-//! Every fixture is a hand-built region with water blocks, ticked through
-//! the real region tick.
+//! Every fixture is a hand-built region with recipe water
+//! (`common::water::set_recipe_water`), ticked through the real region tick.
+use crate::common::water::set_recipe_water;
 use crate::common::{self, body, key, r0, teleport, ticks, CHUNK_EDGE};
 use game::history::PersonId;
 use game::movement::{
@@ -13,7 +14,6 @@ use game::movement::{
 use game::rapier3d::math::Vector;
 use game::{Block, BlockId, Chunk, GameEventKind, Goal, Key, Motion, World, WorldBlockPos, BLOCK_VOXELS};
 
-const WATER: BlockId = BlockId(5);
 const STONE: BlockId = BlockId(1);
 /// Block level of the ground's top (blocks `0..BANK` are solid): a pool dug
 /// into it and filled to the brim has its surface here.
@@ -44,10 +44,10 @@ fn fill(world: &mut World, xs: std::ops::Range<i32>, ys: std::ops::Range<i32>, z
 }
 
 /// A pool dug `BANK - 1` (4) blocks deep over the block box `xs × zs`,
-/// filled with water to the brim: water at levels `1..BANK`, the bed's top
-/// at level 1.
+/// filled with recipe water to the brim: water at levels `1..BANK`, the
+/// bed's top at level 1.
 fn dig_pool(world: &mut World, xs: std::ops::Range<i32>, zs: std::ops::Range<i32>) {
-    fill(world, xs, 1..BANK, zs, WATER);
+    world.regions.get_mut(&r0()).unwrap().with_data(|d| set_recipe_water(d, xs, zs, 0, BANK - 1, BANK - 1));
 }
 
 fn player_motion(world: &World) -> Motion {
@@ -186,7 +186,8 @@ fn swimmer_climbs_out_onto_a_one_block_ledge() {
 #[test]
 fn wading_slows_walking() {
     let mut w = bank_world();
-    fill(&mut w, 7..10, BANK..BANK + 1, 7..10, WATER);
+    // One block of recipe water on the bank.
+    w.regions.get_mut(&r0()).unwrap().with_data(|d| set_recipe_water(d, 7..10, 7..10, BANK - 1, BANK, BANK - 1));
     let d = w.data(&r0());
     let feet = Vector::new(8.5 * BV, BANK as f32 * BV, 8.5 * BV);
     assert_eq!(game::immersion_at(d, feet, 2.08 * UNITS_PER_METER), Immersion::Feet, "a 2 m body wades");
@@ -234,15 +235,7 @@ fn rollback_across_water_surface_restores_hash() {
     for _ in 0..12 {
         forget(&mut region, GameEventKind::Tick);
     }
-    region.with_data(|d| {
-        for x in 3..14 {
-            for y in 1..BANK {
-                for z in 3..8 {
-                    assert!(d.set_block_safe([x, y, z], Block::new(WATER)));
-                }
-            }
-        }
-    });
+    region.with_data(|d| set_recipe_water(d, 3..14, 3..8, 0, BANK - 1, BANK - 1));
     forget(&mut region, input(Key::KeyW, true));
 
     let before = game::state_hash(region.data());
