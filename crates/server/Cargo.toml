@@ -42,3 +42,5 @@ dashmap = { workspace = true }
 bincode = { workspace = true }
 tokio = { workspace = true, features = ["macros", "time"] }
 wtransport = { workspace = true, features = ["dangerous-configuration"] }
+# Raw SQL on a closed store (damaging a tile row in `store_world`).
+sqlx = { workspace = true }

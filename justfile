@@ -580,6 +580,24 @@ history *args:
 clean-old-worlds *args:
     scripts/clean_old_worlds.sh {{args}}
 
+# World-store maintenance (`crates/world-store/src/bin/worldctl.rs`):
+#   just worldctl forge --db <url> [--preset <name>] [--size <m>] [--cell <m>] [--seed <hex>] [--set <knob>=<value>]…
+#     forges a world in process and stores it as tiles (a store that already
+#     holds a world is refused); flags as `just forge-proto` takes them;
+#   just worldctl export --db <url> <out.world>
+#     writes the stored forge file back out, for the file-based tools
+#     (`world-map`, `cross-section`, `history`, `genesis-probe`).
+# <url> = a .sqlite path or a postgres:// URL. A store a running server holds is
+# refused (its lock), never waited for. Built at `play_blocks`: the store's world
+# row and its world map are tied to the region size (pass region_blocks=N for others).
+# World-store maintenance: forge a world into a store, export its forge file.
+worldctl *args:
+    VOXEL_REGION_BLOCKS={{play_blocks}} {{cap}} {{cargo}} run --release -p world-store --bin worldctl -- {{args}}
+
+# Forge a world straight into a store: `just forge-db worlds/w.sqlite --size 32768 --cell 16`.
+forge-db db *args:
+    just region_blocks={{play_blocks}} worldctl forge --db {{db}} {{args}}
+
 # Front / side / top orthographic PNGs of one generated tree (one pixel per
 # voxel, coloured by part) into target/tree-view/. Flags: --species
 # oak|pine|birch|spruce|acacia|palm|jungle|cactus --seed N --age N (0..=100) --out <path stem> --scale N; --grid

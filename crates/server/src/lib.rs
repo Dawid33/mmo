@@ -490,7 +490,7 @@ pub fn run() {
         std::env::var(world_file::WORLD_DB_ENV).ok().as_deref(),
     )
     .unwrap_or_else(|e| fatal(&e));
-    let opened = world_file::open_world(&world_source, &worldgen::forge::ForgeParams::default())
+    let mut opened = world_file::open_world(&world_source, &worldgen::forge::ForgeParams::default())
         .unwrap_or_else(|e| fatal(&e));
     let store = opened.store.clone();
     let players: player_store::SharedPlayerStore = match &store {
@@ -524,16 +524,15 @@ pub fn run() {
             .unwrap_or_else(|| panic!("block manifest must define \"{name}\""))
     };
     let materials = worldgen::material::Materials::from_names(resolve);
-    match (&world_source, opened.world) {
-        (world_file::WorldSource::Store { url, .. }, Some(world)) => {
-            info!("[server] world: forged, in the world store {url:?}");
-            worldgen::forged::install(Some(world));
+    match &world_source {
+        world_file::WorldSource::Store { url, .. } => {
+            info!("[server] world: forged, in the world store {url:?} (sampled from its tiles)")
         }
-        _ => {
-            info!("[server] world: procedural (nothing is saved)");
-            worldgen::forged::install(None);
-        }
+        world_file::WorldSource::Procedural => info!("[server] world: procedural (nothing is saved)"),
     }
+    // The world map was built when the world was written and is read from
+    // the store with it (procedural worlds: none).
+    let world_map = world_file::install_world(&mut opened);
     let world_seed = worldgen::WORLD_SEED;
     let gen_cache = worldgen::cache::WorldgenCache::from_env(world_seed, &manifest);
     let (lod_result_send, lod_result_recv) = crossbeam::channel::unbounded();
@@ -568,34 +567,45 @@ pub fn run() {
     let world_clock = game::WorldClock::starting_at(0, opened.world_tick);
     // Halo seeds of never-run neighbours: only their band columns, on the
     // starting region's thread (`game::halo`).
+    // Their forged tiles are pinned first; a tile that will not load leaves
+    // that neighbour's halo unseeded (logged) rather than make terrain.
     let halo_generator: game::HaloGenerator = std::sync::Arc::new(move |rc, xs, zs| {
+        let _pins = match worldgen::prefetch_region(rc) {
+            Ok(pins) => pins,
+            Err(e) => {
+                log::error!("[server] halo seed of {rc:?} skipped: its forged world tiles do not load: {e}");
+                return Vec::new();
+            }
+        };
         worldgen::generate_columns(rc, xs, zs, world_seed, materials)
     });
+    // A fresh region pins its forged tiles before it generates; one that
+    // will not load stops the region (`RegionOutput::LoadFailed`).
     let mut spawner = region_threads::ThreadRegionSpawner::with_generator(region_generator, halo_generator)
+        .with_prefetch(std::sync::Arc::new(worldgen::prefetch_region))
         .with_clock(world_clock, start);
     if let Some(store) = &store {
         spawner = spawner.with_store(store.clone());
     }
     let mut manager = game::WorldManager::new(
         spawner,
-        Box::new(move |rc| gen_cache.generate_cached(rc, world_seed, materials)),
+        // Unused on the server (regions and LOD generate on their own
+        // threads); pinned like them all the same.
+        Box::new(move |rc| {
+            let _pins = worldgen::prefetch_region(rc)
+                .unwrap_or_else(|e| panic!("region {rc:?}: its forged world tiles do not load: {e}"));
+            gen_cache.generate_cached(rc, world_seed, materials)
+        }),
         server_send,
         region_out_send,
         lod_builder,
         lod_result_recv,
     );
 
-    // The world map is the forged artifact's rasters summarised per region
-    // tile — no region is generated; procedural worlds have none.
-    if let Some(world) = worldgen::forged::active() {
-        let built = std::time::Instant::now();
-        let map = worldgen::tile_map::build_world_map(world);
-        info!(
-            "[server] world map: {}x{} tiles in {} ms",
-            map.width,
-            map.height,
-            built.elapsed().as_millis()
-        );
+    // The world map (stored with the forged world: per-region tile
+    // summaries); procedural worlds have none.
+    if let Some(map) = world_map {
+        info!("[server] world map: {}x{} tiles, from the world store", map.width, map.height);
         // Forged worlds keep their history in the store (procedural: none).
         if let Some(store) = &store {
             let backup = match &world_source {

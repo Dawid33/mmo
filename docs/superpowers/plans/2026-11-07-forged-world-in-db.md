@@ -90,7 +90,7 @@ The water static layer (`docs/superpowers/plans/2026-11-06-water-static-layer.md
 2. **A river crossing tiles:** a segment whose reach spans two tiles carves both identically, and the nearest-segment tie order equals the whole world's (candidates in ascending global id). *(Task 2: `rivers_across_tiles_bit_equal`.)*
 3. **The world's outer seam:** points past a LAND edge (clamped onto the edge), past a SEA edge (`OUTSIDE_HEIGHT_M`, no water), at corners past both, and `extended_cell_height` far outside. *(Task 2: `past_edge_bit_equal`.)*
 4. **LRU eviction under a 15 km LOD view:** with the budget at 4 tiles, sampling an LOD sweep across 30 tiles evicts and reloads but stays bit-equal, and the cache never exceeds the budget beyond pinned tiles. *(Task 3: `eviction_is_transparent`, `cache_respects_budget`.)*
-5. **Two hosts reading the same tiles:** two `StoreHandle`s on one Postgres database (the SQLite lock forbids two processes, by design) load and sample concurrently with equal bits. *(Task 4: `two_handles_read_same_tiles`, pg-gated.)*
+5. **Two hosts reading the same tiles:** one `StoreHandle` and a second reader on its own raw read-only `PgPool` (a test `TileLoader` with the same SELECT) load and sample one Postgres database concurrently with equal bits. Two `StoreHandle`s cannot both open a database: Plan A's world lock (a Postgres session advisory lock; the SQLite lock forbids two processes, by design) admits one. Multi-handle reads need a lock-free reader mode or R2's owner epochs (ruling R-B3). *(Task 4: `two_handles_read_same_tiles`, pg-gated.)*
 
 ---
 
@@ -238,11 +238,13 @@ The water static layer (`docs/superpowers/plans/2026-11-06-water-static-layer.md
     - install `load_forged` (:528–543);
     - `set_world_map` from the stored map instead of `build_world_map` (:618–629);
     - `ensure_history` takes the stored map
-  - `crates/server/src/region_threads.rs`: `prefetch_region` before seeding a fresh region; an `Err` → `RegionOutput::LoadFailed` (Plan A Task 7)
-  - `crates/server/src/lod_workers.rs`: `prefetch_lod` before a pristine or tile build; an `Err` → `warn` and drop the job
-  - `crates/world-store/src/bin/worldctl.rs` (created here): subcommands `forge --db <url> [--preset <name>] [--size <m>] [--cell <m>] [--seed <n>] [--set knob=value]…` (forge in process, then `write_tiled`), `export --db <url> <out.world>` (writes the archive row)
-  - `justfile`: `worldctl *args`, `forge-db db *args`
-- Test: `crates/server/tests/store_world.rs` (Plan A's file)
+  - `crates/server/src/region_threads.rs`: `prefetch_region` before seeding a fresh region; an `Err` → `RegionOutput::LoadFailed` (Plan A Task 7). The prefetch is injected (`ThreadRegionSpawner::with_prefetch(RegionPrefetch)`; the server passes `worldgen::prefetch_region`), so tests run it on an explicit world. A parked region whose blob is corrupt prefetches inside its regeneration (a failure there ends the thread).
+  - `crates/server/src/lod_workers.rs`: `prefetch_lod` before every job (every kind reads `coarse_water`), plus `prefetch_region` for `Pristine` / `Stored` (they may generate the region); an `Err` → `warn` and drop the job. `game` stays untouched, so the dropped key stays in the manager's `lod_in_flight` and is not rebuilt in this process (the client's request stays outstanding; that key's terrain is missing).
+  - `crates/server/src/lib.rs`: the halo generator pins the neighbour's tiles first (`Err` → that halo seed is skipped, logged); the manager's own generator (unused on the server) pins too.
+  - `crates/server/src/world_file.rs`: `OpenedWorld.map` (the stored map) and `install_world(&mut OpenedWorld) -> Option<WorldMap>` (installs, `[perf] event=world_map source=store`); a store with the archive but no `forged_meta` (Plan A import) is tiled from it at start (ruling R-B4); a leftover forge file is deleted iff its bytes equal the archive row.
+  - `crates/world-store/src/ctl.rs` (the logic, `world_store::ctl::run`) + `src/bin/worldctl.rs` (created here): subcommands `forge --db <url> [--preset <name>] [--size <m>] [--cell <m>] [--seed <hex>] [--set knob=value]…` (forge in process, then `write_tiled`; `--seed` is hex like `forge-proto`'s; refused when the store already holds a world or saved regions), `export --db <url> <out.world>` (writes the archive row)
+  - `justfile`: `worldctl *args`, `forge-db db *args` (built at `play_blocks`: the world row and world map are tied to the region size)
+- Test: `crates/server/tests/store_world.rs` (Plan A's file), `crates/world-store/tests/worldctl.rs`, `crates/server/src/lod_workers.rs` (unit)
 
 **Interfaces:**
 - Consumes: Tasks 3–4, Plan A Task 7.
@@ -250,8 +252,10 @@ The water static layer (`docs/superpowers/plans/2026-11-06-water-static-layer.md
 
 - [ ] **Step 1: Write the failing tests:**
   - `server_world_is_tiled`: after start, `forged::active()` is `Tiled`, and the world map came from the store (a `[perf] event=world_map source=store` line, or an accessor).
-  - `tile_load_failure_stops_region`: a store whose tile under region (0,0) is corrupted. That region answers `LoadFailed`, never generates, and others run.
-  - `worldctl_forge_writes_store`: a small forge → `load_forged` is `Some`.
+  - `tile_load_failure_stops_region`: a store whose tile under region (0,0) is corrupted (default 16 km world: 2×2 tiles). On the `ThreadRegionSpawner` with the store and an explicit-world prefetch, that region answers `LoadFailed`, never generates, and a region on healthy tiles runs.
+  - `untiled_store_is_tiled_at_start` (R-B4): an archive-only store is tiled at start; `forged_meta.format_version = 0` is refused naming `just worldctl retile`.
+  - `worldctl_forge_writes_store`: a small forge → `load_forged` is `Some`; export gives the archive back; a held store is refused with the lock message.
+  - `server_world_is_tiled` is the only test in `store_world` that installs the process-global world; the others (`restart_restores_world` included) sample explicit worlds.
 - [ ] **Step 2: Run** `just test-one server "--test store_world -- --include-ignored"` and `just test-one world-store "--test it worldctl::"`. Expected: FAIL.
 - [ ] **Step 3: Implement** the above.
 - [ ] **Step 4: Run** the same commands, `just test-threads` and `just smoke`. Expected: PASS. Then **ask the user** before a live `just run` and before measuring resident memory on a 100 km world.

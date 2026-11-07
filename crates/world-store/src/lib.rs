@@ -4,6 +4,7 @@
 //! the `world-store` thread that every other thread reaches through [`StoreHandle`];
 //! `rows` is the SQL.
 
+pub mod ctl;
 mod codec;
 mod forged;
 mod handle;

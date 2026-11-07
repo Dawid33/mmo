@@ -1,8 +1,9 @@
 //! Which world the server serves, and where it keeps it: a forged world in a
 //! world store (`VOXEL_WORLD_DB`, by default the `.sqlite` beside the world
 //! file), imported from the forge file on first start or forged into the
-//! store when there is none; or the procedural noise world on request, which
-//! keeps nothing.
+//! store when there is none — stored as tiles with its world map and the
+//! forge file as an archive row, and served from those tiles; or the
+//! procedural noise world on request, which keeps nothing.
 
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -103,63 +104,86 @@ pub fn check_legacy_saves(store: &StoreHandle, world_file: Option<&Path>) -> Res
     Err(format!("{LEGACY_SAVES_REFUSAL} ({})", listed.join(", ")))
 }
 
-/// The world in the store. A store with none takes it from `import` (when
-/// that file exists: its bytes and their crc32 — the same `content_crc` the
-/// file had — and the file is then deleted), else from a forge with `params`.
-/// A world file that will not load is never imported (the error says so);
-/// one is never written over an existing world.
-pub fn ensure_world(store: &StoreHandle, import: Option<&Path>, params: &ForgeParams) -> Result<ForgedWorld, String> {
-    let info = store.world_info().map_err(|e| e.to_string())?;
-    if info.has_artifact {
-        if let Some(path) = import.filter(|p| p.exists()) {
-            // The import committed but the file was not deleted (a crash in
-            // between): the same bytes, so it goes now.
-            let same = std::fs::read(path).ok().is_some_and(|b| Some(crc32fast::hash(&b)) == info.content_crc);
-            if same {
-                match std::fs::remove_file(path) {
-                    Ok(()) => log::info!("[server] {} was already imported: deleted", path.display()),
-                    Err(e) => log::error!("[server] cannot delete the imported world file {}: {e}", path.display()),
-                }
-            } else {
-                log::warn!("[server] {} is ignored: the world store already holds another world file", path.display());
-            }
-        }
-        let bytes = store.artifact().map_err(|e| e.to_string())?.ok_or("the world store lost its world")?;
-        return ForgedWorld::from_bytes(&bytes)
-            .map_err(|e| format!("the world in the store: {e} — re-create the world (delete its store)"));
+/// The world in the store, as tiles, with its stored world map. A store
+/// with none takes it from `import` (when that file exists; the file is then
+/// deleted) else from a forge with `params` — either way written as tiles
+/// ([`world_store::write_tiled`], which keeps the forge file as the archive
+/// row). A store holding only the archive (imported before tiling) is tiled
+/// from it here. A world file that will not load is never imported (the
+/// error says so); one is never written over an existing world; a tile
+/// format this build does not read is refused (the error names the re-tile
+/// command when the archive can be re-tiled).
+pub fn ensure_world(
+    store: &StoreHandle,
+    import: Option<&Path>,
+    params: &ForgeParams,
+) -> Result<(ForgedWorld, game::WorldMap), String> {
+    if let Some(loaded) = world_store::load_forged(store).map_err(|e| e.to_string())? {
+        forget_imported_file(store, import);
+        return Ok(loaded);
     }
     let started = Instant::now();
-    match import.filter(|p| p.exists()) {
-        Some(path) => {
-            let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
-            let world = ForgedWorld::from_bytes(&bytes)
-                .map_err(|e| format!("{}: {e} — delete it to forge a new world", path.display()))?;
-            let crc = crc32fast::hash(&bytes);
-            let size = bytes.len();
-            store.put_artifact(bytes, crc).map_err(|e| e.to_string())?;
-            // In the store now: the file is not read again.
-            if let Err(e) = std::fs::remove_file(path) {
-                log::error!("[server] cannot delete the imported world file {}: {e}", path.display());
+    let info = store.world_info().map_err(|e| e.to_string())?;
+    if info.has_artifact {
+        // Imported before tiling (Plan A): the archive is the forge file.
+        let archive = store.forged_archive().map_err(|e| e.to_string())?.ok_or("the world store lost its world")?;
+        log::info!("[server] the world store holds its forge file but no tiles: tiling it (once)");
+        world_store::write_tiled(store, archive)
+            .map_err(|e| format!("tiling the world store's forge file: {e} — re-create the world (delete its store)"))?;
+        game::perf_event!("world_tiled", "ms={} from=archive", game::perf::ms(started.elapsed()));
+        forget_imported_file(store, import);
+    } else if let Some(path) = import.filter(|p| p.exists()) {
+        let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let size = bytes.len();
+        world_store::write_tiled(store, bytes).map_err(|e| match e {
+            // The only `Corrupt` before anything is written: the file does not load.
+            world_store::StoreError::Corrupt(why) => {
+                format!("{}: {why} — delete it to forge a new world", path.display())
             }
-            log::info!("[server] imported {} into the world store", path.display());
-            game::perf_event!(
-                "world_imported",
-                "ms={} bytes={size} path={}",
-                game::perf::ms(started.elapsed()),
-                path.display()
-            );
-            Ok(world)
+            e => e.to_string(),
+        })?;
+        // In the store now: the file is not read again.
+        if let Err(e) = std::fs::remove_file(path) {
+            log::error!("[server] cannot delete the imported world file {}: {e}", path.display());
         }
-        None => {
-            log::info!("[server] the world store has no world: forging a default world (this takes a while)");
-            let forged = forge(params);
-            let bytes = forged.artifact(params).to_bytes();
-            let world = ForgedWorld::from_bytes(&bytes).map_err(|e| format!("the forged world: {e}"))?;
-            let crc = crc32fast::hash(&bytes);
-            store.put_artifact(bytes, crc).map_err(|e| e.to_string())?;
-            game::perf_event!("world_forged", "ms={} into=store", game::perf::ms(started.elapsed()));
-            Ok(world)
+        log::info!("[server] imported {} into the world store", path.display());
+        game::perf_event!(
+            "world_imported",
+            "ms={} bytes={size} path={}",
+            game::perf::ms(started.elapsed()),
+            path.display()
+        );
+    } else {
+        log::info!("[server] the world store has no world: forging a default world (this takes a while)");
+        let bytes = forge(params).artifact(params).to_bytes();
+        world_store::write_tiled(store, bytes).map_err(|e| format!("the forged world: {e}"))?;
+        game::perf_event!("world_forged", "ms={} into=store", game::perf::ms(started.elapsed()));
+    }
+    world_store::load_forged(store)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "the world store lost its world right after writing it".to_string())
+}
+
+/// A forge file left at `import` after its world is in the store (a crash
+/// between the import's commit and the delete): deleted when its bytes are
+/// the stored archive's, else left alone with a warning.
+fn forget_imported_file(store: &StoreHandle, import: Option<&Path>) {
+    let Some(path) = import.filter(|p| p.exists()) else { return };
+    let archive = match store.forged_archive() {
+        Ok(archive) => archive,
+        Err(e) => {
+            log::warn!("[server] {} is ignored: cannot read the stored forge file to compare ({e})", path.display());
+            return;
         }
+    };
+    let same = archive.is_some_and(|archive| std::fs::read(path).ok().is_some_and(|b| b == archive));
+    if same {
+        match std::fs::remove_file(path) {
+            Ok(()) => log::info!("[server] {} was already imported: deleted", path.display()),
+            Err(e) => log::error!("[server] cannot delete the imported world file {}: {e}", path.display()),
+        }
+    } else {
+        log::warn!("[server] {} is ignored: the world store already holds another world file", path.display());
     }
 }
 
@@ -236,10 +260,14 @@ fn bootstrap_history(map: &game::WorldMap, grid: game::history::SocietyGrid) -> 
 }
 
 /// A world opened for serving: its store (none for the procedural world),
-/// its forged world (to install) and the world tick it starts at.
+/// its forged world (to install) with its stored world map, and the world
+/// tick it starts at.
 pub struct OpenedWorld {
     pub store: Option<StoreHandle>,
     pub world: Option<ForgedWorld>,
+    /// The forged world's map, read from the store (Decision 6: built once
+    /// when the world was written, never at start).
+    pub map: Option<game::WorldMap>,
     /// The tick of the store's last committed save cut (0 for a new world).
     pub world_tick: game::Tick,
 }
@@ -250,22 +278,35 @@ pub struct OpenedWorld {
 /// forged ([`ensure_world`]). The store is shut down again on an error.
 pub fn open_world(source: &WorldSource, params: &ForgeParams) -> Result<OpenedWorld, String> {
     let (url, import) = match source {
-        WorldSource::Procedural => return Ok(OpenedWorld { store: None, world: None, world_tick: 0 }),
+        WorldSource::Procedural => return Ok(OpenedWorld { store: None, world: None, map: None, world_tick: 0 }),
         WorldSource::Store { url, import } => (url, import.as_deref()),
     };
     let store = StoreHandle::open(url, world_store::Dials::BUILT).map_err(|e| format!("world store {url:?}: {e}"))?;
     let opened = check_legacy_saves(&store, import).and_then(|()| {
-        let world = ensure_world(&store, import, params)?;
+        let (world, map) = ensure_world(&store, import, params)?;
         let world_tick = store.world_info().map_err(|e| e.to_string())?.world_tick;
-        Ok((world, world_tick))
+        Ok((world, map, world_tick))
     });
     match opened {
-        Ok((world, world_tick)) => Ok(OpenedWorld { store: Some(store), world: Some(world), world_tick }),
+        Ok((world, map, world_tick)) => {
+            Ok(OpenedWorld { store: Some(store), world: Some(world), map: Some(map), world_tick })
+        }
         Err(e) => {
             store.shutdown();
             Err(e)
         }
     }
+}
+
+/// Makes the opened world the process's forged world
+/// (`worldgen::forged::install`; the procedural world installs `None`) and
+/// returns its world map — the stored one (`[perf] event=world_map
+/// source=store`). Call once, before anything asks `worldgen::forged::active`.
+pub fn install_world(opened: &mut OpenedWorld) -> Option<game::WorldMap> {
+    worldgen::forged::install(opened.world.take());
+    let map = opened.map.take()?;
+    game::perf_event!("world_map", "source=store width={} height={}", map.width, map.height);
+    Some(map)
 }
 
 #[cfg(test)]
@@ -328,6 +369,7 @@ mod tests {
         assert!(err.contains("bad.world") && err.contains("delete"), "{err}");
         assert_eq!(std::fs::read(&path).unwrap(), b"not a world", "the file is left alone");
         assert!(!store.world_info().unwrap().has_artifact, "nothing imported");
+        assert!(world_store::load_forged(&store).unwrap().is_none(), "no tiles either");
         store.shutdown();
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -337,12 +379,15 @@ mod tests {
     fn ensure_world_forges_into_the_store_once() {
         let store = memory_store();
         let params = ForgeParams { size_m: 2048.0, cell_m: 64.0, seed: 4, ..ForgeParams::default() };
-        let first = ensure_world(&store, None, &params).unwrap();
+        let (first, map) = ensure_world(&store, None, &params).unwrap();
+        assert!(first.tile_cache().is_some(), "written as tiles");
         let info = store.world_info().unwrap();
         assert!(info.has_artifact);
         assert_eq!(info.content_crc, Some(first.content_crc()));
-        let again = ensure_world(&store, None, &params).unwrap();
+        let (again, again_map) = ensure_world(&store, None, &params).unwrap();
         assert_eq!(again.content_crc(), first.content_crc(), "read back, not forged again");
+        assert_eq!(again_map, map);
+        drop((first, again));
         store.shutdown();
     }
 

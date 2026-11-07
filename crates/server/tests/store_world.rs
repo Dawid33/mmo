@@ -1,10 +1,14 @@
 //! The server on the world store: a world restarts from its store as it was
-//! saved at exit; the forge file is imported into the store and deleted; old
-//! file saves refuse the start; the procedural world keeps nothing.
+//! saved at exit; the forge file is imported into the store as tiles and
+//! deleted; the served world samples those tiles, and a tile that will not
+//! load stops its region instead of making terrain; old file saves refuse the
+//! start; the procedural world keeps nothing.
 //!
-//! Its own test binary: `restart_restores_world` installs the process-global
-//! forged world (`worldgen::forged::install`, once per process).
+//! Its own test binary: `server_world_is_tiled` installs the process-global
+//! forged world (`worldgen::forged::install`, once per process), so no other
+//! test here may touch it (they sample explicit worlds).
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use crossbeam::channel::{unbounded, Receiver};
@@ -15,6 +19,7 @@ use game::{
 use server::player_store::{PlayerStore, StorePlayers};
 use server::world_file::{self, open_world, WorldSource};
 use worldgen::forge::ForgeParams;
+use worldgen::forged::ForgedWorld;
 
 fn scratch(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("mmo-store-world-{}-{name}", std::process::id()));
@@ -47,14 +52,14 @@ struct Core {
 }
 
 impl Core {
-    fn open(store: &world_store::StoreHandle) -> Core {
+    /// Regions generate from `world` (explicitly: the process-global world is
+    /// `server_world_is_tiled`'s).
+    fn open(store: &world_store::StoreHandle, world: Arc<ForgedWorld>) -> Core {
         let materials = materials();
-        Core::open_with(store, Box::new(move |rc| worldgen::generate_region(rc, worldgen::WORLD_SEED, materials)))
+        Core::open_with(store, Box::new(move |rc| worldgen::generate_region_forged(&world, rc, materials)))
     }
 
-    /// [`Core::open`] on `generate`: tests that must not touch worldgen (the
-    /// process-global forged world is chosen at its first use and installed
-    /// only by `restart_restores_world`).
+    /// [`Core::open`] on `generate`.
     fn open_with(
         store: &world_store::StoreHandle,
         generate: Box<dyn FnMut(RegionCoords) -> Vec<(game::ColumnCoords, game::Column)> + Send>,
@@ -132,14 +137,14 @@ fn restart_restores_world() {
     let source = source_for(&world_path);
     let opened = open_world(&source, &small_params()).expect("the world opens");
     let crc = opened.world.as_ref().unwrap().content_crc();
-    worldgen::forged::install(opened.world);
+    let world = Arc::new(opened.world.expect("a forged world"));
     let store = opened.store.expect("a forged world has a store");
     let token = game::PlayerToken::generate([9; game::PLAYER_TOKEN_BYTES]);
     let (player, none) = StorePlayers(store.clone()).resolve(&token).unwrap();
     assert!(none.is_none());
 
     // Life 1: a player, a dug block and a slime in the spawn region.
-    let mut core = Core::open(&store);
+    let mut core = Core::open(&store, world.clone());
     core.manager.handle_server_event(ServerEvent::ClientConnected { client: 0, player, record: None }, 0);
     core.settle();
     let centre = game::REGION_BLOCKS as i32 / 2;
@@ -160,19 +165,20 @@ fn restart_restores_world() {
     let (dug, slime) = (dug.unwrap(), slime.expect("the slime has an EntityId"));
     core.tick(5);
     let exit_tick = core.exit_into(store);
+    drop(world);
 
     // Life 2: the forge file was imported and is gone; the store has it all.
     assert!(!world_path.exists(), "the imported forge file was deleted");
     let opened = open_world(&source, &small_params()).expect("the world opens again");
     assert_eq!(opened.world.as_ref().unwrap().content_crc(), crc, "the same world, from the store");
-    assert_eq!(worldgen::forged::active().unwrap().content_crc(), crc);
     assert!(opened.world_tick >= exit_tick, "the world tick never goes back: {} < {exit_tick}", opened.world_tick);
+    let world = Arc::new(opened.world.unwrap());
     let store = opened.store.unwrap();
     let (again, record) = StorePlayers(store.clone()).resolve(&token).unwrap();
     assert_eq!(again, player);
     let record = record.expect("the player's record was saved by the exit's cut");
     assert_eq!(record.region, SPAWN_REGION);
-    let mut core = Core::open(&store);
+    let mut core = Core::open(&store, world.clone());
     assert!(core.manager.stored_regions().contains_key(&SPAWN_REGION));
     core.manager.handle_server_event(ServerEvent::ClientConnected { client: 0, player, record: Some(record) }, 0);
     // One tick: the region reports what it holds to the manager's directory.
@@ -190,6 +196,7 @@ fn restart_restores_world() {
     assert_eq!(core.manager.in_flight_count(), 0, "nor in flight");
     assert_eq!(bodies, 1, "the player is back, once");
     drop(core);
+    drop(world);
     store.shutdown();
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -214,38 +221,209 @@ fn legacy_saves_refuse_start() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// The forge file goes into the store with its crc (the same `content_crc`
-/// as loading the file) and is deleted; the store then serves the world.
+/// The forge file goes into the store as tiles (its bytes kept as the
+/// archive row) and is deleted; the store then serves the world, with the
+/// tiled world's `content_crc` (Decision 8), not the file's crc32.
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn import_deletes_forge_file() {
     let dir = scratch("import");
     let world_path = dir.join("terrain.world");
     let bytes = forge_file(&world_path);
-    let from_file = worldgen::forged::ForgedWorld::load(&world_path).unwrap().content_crc();
-    assert_eq!(from_file, crc32fast::hash(&bytes));
     let opened = open_world(&source_for(&world_path), &small_params()).unwrap();
     assert!(!world_path.exists(), "the forge file is deleted once imported");
     assert!(dir.join("terrain.sqlite").exists(), "the store is the world file's .sqlite");
-    assert_eq!(opened.world.as_ref().unwrap().content_crc(), from_file);
+    let crc = opened.world.as_ref().unwrap().content_crc();
+    assert!(opened.world.as_ref().unwrap().tile_cache().is_some(), "served from tiles");
     let store = opened.store.unwrap();
     let info = store.world_info().unwrap();
     assert!(info.has_artifact);
-    assert_eq!(info.content_crc, Some(from_file));
+    assert_eq!(info.content_crc, Some(crc));
     assert_eq!(info.world_tick, 0);
+    assert_eq!(store.forged_archive().unwrap().as_deref(), Some(&bytes[..]), "the file is the archive row");
+    drop(opened.world);
     store.shutdown();
     // Opened again: from the store alone.
     let opened = open_world(&source_for(&world_path), &small_params()).unwrap();
-    assert_eq!(opened.world.as_ref().unwrap().content_crc(), from_file);
+    assert_eq!(opened.world.as_ref().unwrap().content_crc(), crc);
+    drop(opened.world);
     opened.store.unwrap().shutdown();
     // A crash between the import's commit and the delete left the file: the
-    // same bytes are deleted at the next start; another file is left alone.
+    // same bytes as the archive are deleted at the next start; another file
+    // is left alone.
     std::fs::write(&world_path, &bytes).unwrap();
     open_world(&source_for(&world_path), &small_params()).unwrap().store.unwrap().shutdown();
     assert!(!world_path.exists(), "an already imported forge file is deleted");
     std::fs::write(&world_path, b"another file").unwrap();
     open_world(&source_for(&world_path), &small_params()).unwrap().store.unwrap().shutdown();
     assert_eq!(std::fs::read(&world_path).unwrap(), b"another file", "a different file is kept");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Runs raw SQL against a closed store.
+fn raw_exec(url: &world_store::StoreUrl, sql: &str) {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let (pool, _guard) = world_store::open_pool(url, world_store::Dials::BUILT).await.unwrap();
+        match &pool {
+            world_store::Pool::Sqlite(p) => {
+                sqlx::query(sql).execute(p).await.unwrap();
+                p.close().await;
+            }
+            world_store::Pool::Pg(p) => {
+                sqlx::query(sql).execute(p).await.unwrap();
+                p.close().await;
+            }
+        }
+    });
+}
+
+/// The served world: installed as the process's forged world, sampled
+/// through store tiles, with the world map read from the store (never
+/// rebuilt from rasters at start).
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn server_world_is_tiled() {
+    let dir = scratch("tiled");
+    let world_path = dir.join("terrain.world");
+    forge_file(&world_path);
+    let mut opened = open_world(&source_for(&world_path), &small_params()).expect("the world opens");
+    let store = opened.store.clone().expect("a forged world has a store");
+    let map = world_file::install_world(&mut opened).expect("a forged world has a world map");
+    assert!(opened.world.is_none(), "installed: moved into the process");
+    let world = worldgen::forged::active().expect("installed");
+    assert!(world.tile_cache().is_some(), "the served world samples tiles");
+    assert_eq!(Some(world.content_crc()), store.world_info().unwrap().content_crc);
+    let (_, stored) = world_store::load_forged(&store).unwrap().expect("stored");
+    assert_eq!(map, stored, "the world map is the stored one");
+    // Region generation on the installed world pins its tiles first.
+    let pins = worldgen::prefetch_region(SPAWN_REGION).expect("the tiles load");
+    assert!(!pins.is_empty(), "a tiled world pins tiles");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A store imported under Plan A alone (the forge file as the archive row,
+/// no tiles): tiled from its archive at start, not refused. A tile format
+/// this build does not read is refused, naming the re-tile command.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn untiled_store_is_tiled_at_start() {
+    let dir = scratch("untiled");
+    let world_path = dir.join("terrain.world");
+    let bytes = forge_file(&world_path);
+    let source = source_for(&world_path);
+    let opened = open_world(&source, &small_params()).unwrap();
+    let crc = opened.world.as_ref().unwrap().content_crc();
+    drop(opened.world);
+    opened.store.unwrap().shutdown();
+    let url = world_store::StoreUrl::Sqlite(dir.join("terrain.sqlite"));
+    raw_exec(&url, "DELETE FROM forged_meta");
+    raw_exec(&url, "DELETE FROM forged_tiles");
+    raw_exec(&url, "DELETE FROM forged_world_map");
+    let opened = open_world(&source, &small_params()).expect("an archive-only store opens");
+    assert!(opened.world.as_ref().unwrap().tile_cache().is_some(), "tiled from its archive");
+    assert_eq!(opened.world.as_ref().unwrap().content_crc(), crc, "the same tiles as the import made");
+    assert!(opened.map.is_some());
+    let store = opened.store.unwrap();
+    assert_eq!(store.forged_archive().unwrap().as_deref(), Some(&bytes[..]), "the archive is kept");
+    drop(opened.world);
+    store.shutdown();
+    raw_exec(&url, "UPDATE forged_meta SET format_version = 0");
+    let err = open_world(&source, &small_params()).err().expect("another tile format is refused");
+    assert!(err.contains("just worldctl retile"), "{err}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A store whose tile under region (0,0) is damaged: that region's thread
+/// answers `LoadFailed` and never generates; a region on healthy tiles runs.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn tile_load_failure_stops_region() {
+    use game::{RegionInput, RegionSeed};
+    use server::region_threads::ThreadRegionSpawner;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let dir = scratch("tile-failure");
+    let url = world_store::StoreUrl::Sqlite(dir.join("w.sqlite"));
+    // The default 16 km / 32 m world: 2x2 tiles, so regions on other tiles exist.
+    let params = ForgeParams::default();
+    let bytes = worldgen::forge::forge(&params).artifact(&params).to_bytes();
+    let store = world_store::StoreHandle::open(&url, world_store::Dials::BUILT).unwrap();
+    world_store::write_tiled(&store, bytes).unwrap();
+    let (world, _) = world_store::load_forged(&store).unwrap().unwrap();
+    let tiles_of = |rc: RegionCoords| -> Vec<worldgen::forged_tiles::TileCoords> {
+        worldgen::prefetch_region_forged(&world, rc).unwrap().coords().collect()
+    };
+    let bad = tiles_of(SPAWN_REGION)[0];
+    let healthy = (1..)
+        .flat_map(|k: i32| {
+            let s = k * 8;
+            [RegionCoords::new(s, 0), RegionCoords::new(-s, 0), RegionCoords::new(0, s), RegionCoords::new(0, -s)]
+        })
+        .take(2000)
+        .find(|rc| !tiles_of(*rc).contains(&bad))
+        .expect("a region away from the damaged tile");
+    let good = world_store::StoreTiles(store.clone());
+    let good = worldgen::forged_tiles::TileLoader::load(&good, bad).unwrap();
+    drop(world);
+    store.shutdown();
+    let mut damaged = good.clone();
+    let mid = damaged.len() / 2;
+    damaged[mid] ^= 0x10;
+    let hex: String = damaged.iter().map(|b| format!("{b:02x}")).collect();
+    raw_exec(&url, &format!("UPDATE forged_tiles SET bytes = X'{hex}' WHERE tx = {} AND tz = {}", bad.tx, bad.tz));
+
+    let store = world_store::StoreHandle::open(&url, world_store::Dials::BUILT).unwrap();
+    let (world, _) = world_store::load_forged(&store).unwrap().unwrap();
+    let world = Arc::new(world);
+    let materials = materials();
+    let generated = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (gen_world, log) = (world.clone(), generated.clone());
+    let generate: server::region_threads::SharedRegionGenerator = Arc::new(move |rc| {
+        log.lock().unwrap().push(rc);
+        worldgen::generate_region_forged(&gen_world, rc, materials)
+    });
+    let pre_world = world.clone();
+    let prefetches = Arc::new(AtomicUsize::new(0));
+    let counted = prefetches.clone();
+    let mut spawner = ThreadRegionSpawner::with_region_generator(generate)
+        .with_prefetch(Arc::new(move |rc| {
+            counted.fetch_add(1, Ordering::SeqCst);
+            worldgen::prefetch_region_forged(&pre_world, rc)
+        }))
+        .with_store(store.clone());
+    let (out, outputs) = unbounded();
+    let to_bad = spawner.spawn(SPAWN_REGION, RegionSeed::Deferred(None), out.clone());
+    let to_good = spawner.spawn(healthy, RegionSeed::Deferred(None), out);
+    let _ = to_good.send(RegionInput::RequestTerrain(0));
+    let (mut failed, mut terrain) = (None, None);
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    while (failed.is_none() || terrain.is_none()) && std::time::Instant::now() < deadline {
+        let Ok((rc, output)) = outputs.recv_timeout(Duration::from_millis(100)) else { continue };
+        match output {
+            RegionOutput::LoadFailed(why) => {
+                assert_eq!(rc, SPAWN_REGION, "only the damaged region fails: {why}");
+                failed = Some(why);
+            }
+            RegionOutput::Terrain(_, snap) => {
+                assert_eq!(rc, healthy);
+                terrain = Some(snap);
+            }
+            _ => {}
+        }
+    }
+    let why = failed.expect("the damaged region answers LoadFailed");
+    assert!(why.contains(&format!("({}, {})", bad.tx, bad.tz)), "names the tile: {why}");
+    let terrain = terrain.expect("the healthy region runs");
+    assert!(!terrain.chunks.is_empty(), "with generated terrain");
+    assert_eq!(*generated.lock().unwrap(), vec![healthy], "the damaged region never generated");
+    assert_eq!(prefetches.load(Ordering::SeqCst), 2, "both fresh regions prefetched");
+    let _ = to_good.send(RegionInput::Shutdown);
+    drop(to_bad);
+    drop(to_good);
+    spawner.reap(SPAWN_REGION);
+    spawner.reap(healthy);
+    drop(world);
+    store.shutdown();
     let _ = std::fs::remove_dir_all(&dir);
 }
 

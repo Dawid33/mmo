@@ -13,6 +13,12 @@ use game::{RegionCoords, RegionInput, RegionOutput, RegionRunner, RegionSeed, Re
 pub type SharedRegionGenerator =
     std::sync::Arc<dyn Fn(RegionCoords) -> Vec<(game::ColumnCoords, game::Column)> + Send + Sync>;
 
+/// Loads and pins the forged-world tiles generating a region reads
+/// (`worldgen::prefetch_region` on the server); held while it generates. An
+/// `Err` (a tile that will not load) stops the region instead.
+pub type RegionPrefetch =
+    std::sync::Arc<dyn Fn(RegionCoords) -> Result<worldgen::forged_tiles::TilePins, String> + Send + Sync>;
+
 pub struct ThreadRegionSpawner {
     /// Server start: the base of the world clock's ms (the same base as the
     /// manager's `now_ms`).
@@ -35,11 +41,24 @@ pub struct ThreadRegionSpawner {
     /// regenerated over stored data. Runners also seed the halo of stored
     /// neighbours from it (`RegionInput::SeedHaloFromStore`).
     store: Option<world_store::StoreHandle>,
+    /// Before a region generates (a never-run region with no stored state,
+    /// or a parked one whose blob is corrupt), the forged tiles it reads are
+    /// loaded and pinned. A fresh region whose tiles fail answers
+    /// `RegionOutput::LoadFailed` and never generates. `None`: no forged
+    /// world to prefetch (tests, tools with their own generators).
+    prefetch: Option<RegionPrefetch>,
 }
 
 impl Default for ThreadRegionSpawner {
     fn default() -> Self {
-        Self { started: Instant::now(), clock: game::WorldClock::starting_at(0, 0), handles: BTreeMap::new(), generator: None, store: None }
+        Self {
+            started: Instant::now(),
+            clock: game::WorldClock::starting_at(0, 0),
+            handles: BTreeMap::new(),
+            generator: None,
+            store: None,
+            prefetch: None,
+        }
     }
 }
 
@@ -78,6 +97,12 @@ impl ThreadRegionSpawner {
         self.store = Some(store);
         self
     }
+
+    /// Pin a region's forged tiles with `prefetch` before it generates.
+    pub fn with_prefetch(mut self, prefetch: RegionPrefetch) -> Self {
+        self.prefetch = Some(prefetch);
+        self
+    }
 }
 
 impl RegionSpawner for ThreadRegionSpawner {
@@ -93,6 +118,7 @@ impl RegionSpawner for ThreadRegionSpawner {
             None => (None, None),
         };
         let store = self.store.clone();
+        let prefetch = self.prefetch.clone();
         let (clock, started) = (self.clock, self.started);
         let handle = std::thread::Builder::new()
             .name(format!("region {},{}", id.x, id.z))
@@ -106,19 +132,35 @@ impl RegionSpawner for ThreadRegionSpawner {
                     (RegionSeed::Deferred(None), Some(store)) => store.load_region(id),
                     _ => Ok(None),
                 };
+                // The region does not run: never regenerated over stored
+                // data, never generated without its forged tiles. Its channel
+                // stays open until the manager drops it (what it was sent is
+                // recovered there).
+                let fail = |why: String| {
+                    let _ = out.send((id, RegionOutput::LoadFailed(why)));
+                    while recv.recv().is_ok() {}
+                };
                 let stored = match loaded {
                     Ok(stored) => stored,
                     Err(e) => {
-                        // Never regenerated over stored data: the region does
-                        // not run. Its channel stays open until the manager
-                        // drops it (what it was sent is recovered there).
                         log::error!("[region {},{}] cannot load from the world store: {e}", id.x, id.z);
-                        let _ = out.send((id, RegionOutput::LoadFailed(e.to_string())));
-                        while recv.recv().is_ok() {}
-                        return;
+                        return fail(e.to_string());
                     }
                 };
                 let from_store = stored.is_some();
+                // A fresh region generates: its forged tiles first, pinned
+                // until it is built (reads then never load).
+                let fresh = !from_store && matches!(seed, RegionSeed::Deferred(None));
+                let pins = match (&prefetch, fresh) {
+                    (Some(prefetch), true) => match prefetch(id) {
+                        Ok(pins) => Some(pins),
+                        Err(e) => {
+                            log::error!("[region {},{}] cannot load its forged world tiles: {e}", id.x, id.z);
+                            return fail(format!("forged world tiles: {e}"));
+                        }
+                    },
+                    _ => None,
+                };
                 // Deferred seeds generate here, timed separately from the build.
                 let generate_time = std::cell::Cell::new(Duration::ZERO);
                 let runner = match stored {
@@ -130,6 +172,16 @@ impl RegionSpawner for ThreadRegionSpawner {
                     }
                     None => seed.into_runner(id, out, &|rc| {
                         let started = Instant::now();
+                        // A parked region whose blob is corrupt regenerates
+                        // here: its tiles were not pinned up front. Its
+                        // blob is lost already, so a tile that fails too
+                        // ends the thread (the manager sees it die).
+                        let _late_pins = match (&prefetch, &pins) {
+                            (Some(prefetch), None) => Some(prefetch(rc).unwrap_or_else(|e| {
+                                panic!("region {rc:?}: corrupt parked blob and its forged tiles do not load: {e}")
+                            })),
+                            _ => None,
+                        };
                         let columns = match &generator {
                             Some(generate) => generate(rc),
                             None => unreachable!("Deferred seed without a region generator"),
@@ -138,6 +190,7 @@ impl RegionSpawner for ThreadRegionSpawner {
                         columns
                     }),
                 };
+                drop(pins);
                 let mut runner = runner;
                 if let Some(g) = halo_generator {
                     runner.set_halo_generator(g);

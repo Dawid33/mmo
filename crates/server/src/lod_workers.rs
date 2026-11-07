@@ -82,6 +82,9 @@ impl ThreadLodBuilder {
                         move |rc: game::RegionCoords| gen_cache.generate_cached(rc, seed, materials);
                     while let Ok(job) = recv.recv() {
                         let started = std::time::Instant::now();
+                        // The forged tiles the job reads, pinned for its
+                        // length; one that will not load drops the job.
+                        let Some(_pins) = prefetch_job(&job) else { continue };
                         let result = build_lod_job(job, &coarse, &water, &generate, stored.as_ref());
                         crate::perf::EDGE.record_lod_build(started.elapsed());
                         let _ = out.send(result);
@@ -90,6 +93,39 @@ impl ThreadLodBuilder {
                 .expect("spawn lod worker");
         }
         Self { jobs, reads_stored }
+    }
+}
+
+/// Loads and pins the forged-world tiles `job` can read: its key's coarse
+/// terrain and water (`worldgen::prefetch_lod`) and, for a job that may
+/// generate its region (`Pristine`, or `Stored` falling back to it), that
+/// region (`worldgen::prefetch_region`). `None` (logged) when a tile will not
+/// load: the job is dropped — never built from missing tiles. The key then
+/// stays in the manager's in-flight set, so it is not rebuilt in this process
+/// (the client keeps its request outstanding; that key's terrain is missing).
+fn prefetch_job(job: &LodBuildJob) -> Option<Vec<worldgen::forged_tiles::TilePins>> {
+    prefetch_job_with(job, &worldgen::prefetch_lod, &worldgen::prefetch_region)
+}
+
+type Pinned = Result<worldgen::forged_tiles::TilePins, String>;
+
+/// [`prefetch_job`] over explicit prefetches.
+fn prefetch_job_with(
+    job: &LodBuildJob,
+    lod: &dyn Fn(&game::lod::LodKey) -> Pinned,
+    region: &dyn Fn(game::RegionCoords) -> Pinned,
+) -> Option<Vec<worldgen::forged_tiles::TilePins>> {
+    let (key, generates) = match job {
+        LodBuildJob::Pristine { key, region } | LodBuildJob::Stored { key, region } => (key, Some(*region)),
+        LodBuildJob::Region { key, .. } | LodBuildJob::Tile { key, .. } => (key, None),
+    };
+    let pinned = std::iter::once(lod(key)).chain(generates.map(region)).collect::<Result<Vec<_>, String>>();
+    match pinned {
+        Ok(pins) => Some(pins),
+        Err(e) => {
+            log::warn!("[server] LOD {key:?} dropped: its forged world tiles do not load: {e}");
+            None
+        }
     }
 }
 
@@ -121,6 +157,35 @@ mod tests {
     fn default_lod_build_threads_is_a_clamped_quarter_of_the_cores() {
         for (cores, expected) in [(1, 2), (4, 2), (8, 2), (11, 2), (12, 3), (16, 4), (20, 5), (24, 6), (128, 6)] {
             assert_eq!(default_lod_build_threads(cores), expected, "{cores} cores");
+        }
+    }
+
+    /// Every job pins its key; jobs that may generate their region pin it
+    /// too; any failure drops the job.
+    #[test]
+    fn prefetch_job_pins_what_the_job_reads() {
+        use game::lod::LodKey;
+        let rc = game::RegionCoords::new(3, -2);
+        let key = LodKey::for_region(2, rc);
+        let ok_lod = |_: &LodKey| -> Pinned { Ok(Default::default()) };
+        let bad_lod = |_: &LodKey| -> Pinned { Err("tile (1, 0)".into()) };
+        let ok_region = |_: game::RegionCoords| -> Pinned { Ok(Default::default()) };
+        let bad_region = |r: game::RegionCoords| -> Pinned {
+            assert_eq!(r, rc);
+            Err("tile (0, 0)".into())
+        };
+        let jobs = || {
+            [
+                (LodBuildJob::Pristine { key, region: rc }, true),
+                (LodBuildJob::Stored { key, region: rc }, true),
+                (LodBuildJob::Region { key, chunks: Vec::new() }, false),
+                (LodBuildJob::Tile { key, overlays: Vec::new(), stored: vec![rc] }, false),
+            ]
+        };
+        for (job, generates) in jobs() {
+            assert_eq!(prefetch_job_with(&job, &ok_lod, &ok_region).map(|p| p.len()), Some(1 + generates as usize));
+            assert!(prefetch_job_with(&job, &bad_lod, &ok_region).is_none(), "the key's tiles fail");
+            assert_eq!(prefetch_job_with(&job, &ok_lod, &bad_region).is_none(), generates, "the region's tiles fail");
         }
     }
 
