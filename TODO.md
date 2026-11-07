@@ -17,12 +17,12 @@ Multi-region world follow-ups (milestone landed; spec 2026-07-05-multi-region-wo
 - `just pull-smoke` is red: since 9aed311 `prepare_chunk_quads` needs `OverlayTexture`, which only `FortressOverlayPlugin` creates; the probe doesn't add it (production unaffected). Fix: `VoxelPullPlugin` falls back to a 1x1x1 placeholder overlay texture.
 
 - ~~Client per-region clock tracking (single shared tick_rate today; 9 SyncClock streams fight over it).~~ **RESOLVED 2026-11-06 (seam-transparent regions Task 5.3)**: the client keeps ONE predicted world tick (`regions::clock::PredictedClock`), steered by every region's SyncClock (all world-numbered; the newest sample per round decides); every predicted region runs to it (bounded catch-up bursts, held when ahead), so client regions close slots together like the server's.
-- Durable region persistence (parking lot is in-memory only).
-- Cross-region event relay groundwork (deferred with handoff).
+- ~~Durable region persistence (parking lot is in-memory only).~~ RESOLVED: the world autosave (`server/src/region_store.rs`, forged worlds) writes every region and the world tick.
+- ~~Cross-region event relay groundwork (deferred with handoff).~~ RESOLVED 2026-11-06 (seam-transparent regions): one world tick, stamped transfers, the terrain/entity halo and intents (`intents.rs`) carry everything across a seam.
 - Stable client identity across connections: reconnects get a fresh ClientId, so the manager's no-duplicate-player reconnect path only fires for same-id sessions; the old player entity lingers in its home region.
-- Cross-region interactions beyond collision (combat, pickup) — future spec.
+- Cross-region interactions beyond collision: pickup, piles, chests, mining and placing work across a seam through intents (seam-transparent regions, Phase 6); combat is still a future spec.
 - ~~Ghost mirrors TTL'd~~ RESOLVED 2026-11-06 (seam-transparent regions Task 5.2): the entity halo ends mirrors explicitly (`HaloEntityGone`); halos are reseeded when a region starts.
-- Seamless local-player crossing under latency — the local client's own boundary crossing
+- ~~Seamless local-player crossing under latency~~ RESOLVED (Tasks 3.2/3.3, below) — the local client's own boundary crossing
   converges bit-exact but has a transient rubber-band under active input (spec-accepted
   flip-tick divergence). Proper fix needs a protocol-level design (server-side input
   routing / predicted-authority-transfer); see docs/superpowers/2026-07-06-seamless-local-crossing-followup.md.
@@ -96,4 +96,18 @@ Terrain slopes follow-ups (landed 2026-11-06, spec specs/2026-11-06-terrain-slop
 - Feel check of `movement::GROUND_SNAP` 0.6 m: small player-made ledges now snap the body down instead of a short fall.
 - The tree_fall test skips cactus (needs a real scene for a single-block tree).
 - Fortress-mode stair building (TBD with the building rework).
-- Old saves are reset: `REGION_FILE_VERSION` 7 sets pre-slope region files aside as `.bak` and regenerates them.
+- Old saves are reset: `REGION_FILE_VERSION` 7 set pre-slope region files aside as `.bak` (superseded: see the seam-transparent regions follow-ups below — it is 21 now).
+
+Seam-transparent regions follow-ups (program landed 2026-11-06/07, spec specs/2026-11-06-region-seam-crossing-overview-and-prior-art.md):
+- **Saves reset on the live deploy**: the program bumped `REGION_FILE_VERSION` 7 → 21 (`EntityId`, halo, intents, piles/chests by world cell, world-tile walks, bodies). Every existing world's saved regions are set aside as `.bak` and regenerate from the world file (terrain edits lost); no migration was written. Player records (`PLAYER_FILE_VERSION` 5) still load.
+- **Live check of the whole program** pending (one client, `just adapter=Intel world=small run`): mining / placing / chests / piles across a seam, walking along and over a seam (halo, no dip), a felled tree across a seam, one-clock prediction (no stall at a crossing), a crossing at near radius 0 into a region the client does not hold (inputs are sent unpredicted until its snapshot loads).
+- Halo cost unmeasured at 256 m regions (~68 band columns, ~3.2 MiB serialized per seed, ~4× mirrored entities); halo traffic from neighbours the client does not run (HaloEntity / HaloUpdate / Intent) is one rollback + replay per server tick in edge regions — measure with `[client] by_kinds`; a lever: apply events from non-predicted sources without counting / rolling back.
+- Physics findings (Task 7.3, pre-existing, not seam-specific): (1) chunk-edge ghost contacts — a dynamic body sliding over the boundary of two chunk colliders stops dead or tips 90° (each chunk's `Voxels` shape knows nothing of its neighbour); will hit felled trees and voxel bodies; fixes: internal-edge correction across neighbouring `Voxels` in the fork, or one compound terrain collider per column/region. (2) Rapier fork `debug_assert` in `NarrowPhase::debug_validate_solver_graph` (`solver_graph.rs:824`, "solver contact graph size 6 != selection size 2 (full_rebuild=false)"): a `ColliderSpec::Ball { radius: 8 }` body spawned at (513.4, 24, 509.4) in a floored region with linvel (−46, −18, −37), angvel (−4.5, 2.4, 5.6) panics on its first tick; release builds skip it and solve a wrong contact set. Nothing spawns balls yet — repro in physics-next before they are used.
+- No world-wide slime cap (only the per-target mailbox cap `PENDING_ARRIVALS_PER_REGION_MAX`).
+- A neighbour saved by an earlier server process stays pristine in a running region's halo until it runs (the halo seed of a never-run-this-session region is worldgen).
+- The autosave round is not atomic across region files (a crash mid-round can save a crossing in neither or — in a narrow window — both); a stopping SOURCE at the round's start may leave a save gap (Task 3.4); no end-to-end manager restore test from saved transfers.
+- `EntityId` serials are disjoint per incarnation (`Region::start_at`: `world tick << ENTITY_SERIAL_TICK_SHIFT`), but a region regenerated after a crash that lost the world tick's progress (`world.tick` saved every `WORLD_SAVE_SECS`) can restart below the crashed process's serials; only ids persisted elsewhere by that process (a parked record written on disconnect) could collide.
+- A refused survival place's block reaching a player who is gone (not parked) is counted in `items_destroyed` instead of being put down: the reply carries no cell (`IntentReply::carried_items`).
+- Designations are still clipped to the home region (`orders.rs` `clip_to_region`): move them to world tiles + intents when workers land.
+- Mining / placing across a seam into a neighbour that is not running runs the full mining time, then `OwnerNotRunning` and the cooldown, in a loop (the halo looks mineable): a per-halo "owner running" bit, or show the refusal.
+- People wander with 2× `MAX_PATH_NODES` on unreachable goals; a voxel body's halo mirror re-sends its whole compound collider every tick (wire/CPU).

@@ -9,7 +9,10 @@
 //! every installer here installs the same `assets/blocks/blocks.ron` props,
 //! so the process flips once from the all-solid default to those. A test
 //! whose outcome reads them (starting kit, drops, solidity) must install
-//! them before it builds state (`common::install_real_block_props`), or it
+//! them before it builds state — `game::install_block_props` with the
+//! registry parsed from `blocks.ron`, as `tree_chop` / `tree_fall` do, or
+//! game's `common::install_real_block_props`, which `scene_hash_golden`
+//! mounts by `#[path]` (worldgen's own `common` has no such helper) — or it
 //! races that flip.
 //! Separate binaries:
 //! - `forged_world`: forged::install pins the process's world once.
