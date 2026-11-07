@@ -1268,8 +1268,10 @@ mod ui_action_tests {
         region.handle_event(GameEventKind::CreateClient(0)).unwrap();
         region.forget_last_event();
         region.with_data(|d| {
-            d.clients.get_mut(&0).unwrap().inventory.slots[0] =
-                Some(ItemStack { item: ItemId::block(BlockId(1)), count: 42 });
+            let c = d.clients.get_mut(&0).unwrap();
+            c.inventory.slots[0] = Some(ItemStack { item: ItemId::block(BlockId(1)), count: 42 });
+            // Clicks need an open inventory.
+            c.inventory_open = true;
         });
         let before = crate::state_hash(region.data());
 
