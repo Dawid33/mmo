@@ -46,6 +46,10 @@ pub enum AppState {
     /// A world session is starting: server launching / connecting / joining.
     Starting,
     InWorld,
+    /// Play online: the login screen (`login::flow`).
+    Login,
+    /// Play online: the login service's world list.
+    Worlds,
 }
 
 /// Root of an entity tree that belongs to the current world session.
@@ -106,6 +110,24 @@ pub struct PendingWorld {
 /// removes it. The address as typed (`web_endpoint::web_server_for`).
 #[derive(Resource, Clone, Debug, PartialEq, Eq)]
 pub struct PendingServer(pub String);
+
+/// The world the next session joins with a login ticket (the world list's
+/// join, `login::flow`), set before `AppState::Starting`; the session flow
+/// connects with `Credential::Jwt(ticket.jwt)` and removes it — native to the
+/// ticket's QUIC address (`addr`, resolved off the main thread), the browser
+/// to its WebTransport URL. Holds the JWT: no `Debug`.
+#[derive(Resource, Clone)]
+pub struct PendingJoin {
+    pub ticket: login_api::JoinTicket,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub addr: std::net::SocketAddr,
+}
+
+impl PendingJoin {
+    pub fn credential(&self) -> game::Credential {
+        game::Credential::Jwt(self.ticket.jwt.clone())
+    }
+}
 
 /// Native: the port the next [`PendingWorld`]'s server binds instead of a free
 /// one (`client debug embarked --port N`, so other clients can join it).
@@ -324,24 +346,39 @@ pub fn skip_menu() -> bool {
     }
 }
 
-/// The state the app starts in.
-pub fn initial_state(skip_menu: bool) -> AppState {
+/// The state the app starts in. `login_first`: the browser with a login
+/// service opens on the login screen (else its join-only menu).
+pub fn initial_state(skip_menu: bool, login_first: bool) -> AppState {
     // The dev bypass (`VOXEL_SKIP_MENU`, a set `VOXEL_WORLD_FILE`, the probes)
     // goes straight to InWorld with the player already embarked (`Embarked`
     // starts as `skip_menu`), connecting to an already running server.
-    if skip_menu { AppState::InWorld } else { AppState::MainMenu }
+    if skip_menu {
+        AppState::InWorld
+    } else if login_first {
+        AppState::Login
+    } else {
+        AppState::MainMenu
+    }
+}
+
+/// Where a world session's end lands: the online world list after a session
+/// joined with a login ticket, else the main menu.
+fn home_after_session(login: Option<&crate::login::flow::LoginSession>) -> AppState {
+    crate::login::flow::LoginSession::home(login)
 }
 
 /// States, the reset registry, [`SessionEnded`] and the frontend camera.
 /// Needs `StatesPlugin` (in `DefaultPlugins` with Bevy's `bevy_state` feature).
 pub struct SessionPlugin {
     pub skip_menu: bool,
+    /// Start on the login screen (`initial_state`).
+    pub login_first: bool,
 }
 
 impl Plugin for SessionPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(SkipMenu(self.skip_menu))
-            .insert_state(initial_state(self.skip_menu))
+            .insert_state(initial_state(self.skip_menu, self.login_first))
             .init_resource::<SessionResets>()
             .init_resource::<SessionMessageClears>()
             .init_resource::<SessionGeneration>()
@@ -471,8 +508,8 @@ mod flow {
     use game::GameEventKind;
 
     use super::{
-        end_session, install_dead_channels, AppState, HostPort, JoinServer, LastSessionError, PendingWorld, PreparingWorld,
-        SessionChannels,
+        end_session, home_after_session, install_dead_channels, AppState, HostPort, JoinServer, LastSessionError,
+        PendingJoin, PendingWorld, PreparingWorld, SessionChannels,
         SessionEnded, StartingLog, StartingStatus,
     };
     use crate::instance::{ClientRequest, Command};
@@ -498,6 +535,7 @@ mod flow {
             addr: std::net::SocketAddr,
             debug_flags: game::DebugFlags,
             world_scale: WorldScale,
+            credential: Option<game::Credential>,
         ) -> Command {
             Command::ConnectToServerAndScene(
                 self.game_send,
@@ -508,7 +546,7 @@ mod flow {
                 debug_flags,
                 world_scale,
                 crate::netcode::ConnectPolicy::default(),
-                None,
+                credential,
             )
         }
     }
@@ -561,6 +599,7 @@ mod flow {
         world.remove_resource::<PendingWorld>(); // a start abandoned while waiting
         world.remove_resource::<PreparingWorld>();
         world.remove_resource::<JoinServer>();
+        world.remove_resource::<PendingJoin>();
         if let Some(host) = world.remove_resource::<LocalHost>() {
             let tail = host.log_tail(SERVER_LOG_TAIL_LINES);
             if let Some(mut error) = world.get_resource_mut::<LastSessionError>() {
@@ -581,6 +620,7 @@ mod flow {
         if !world.contains_resource::<PendingWorld>()
             && !world.contains_resource::<PreparingWorld>()
             && !world.contains_resource::<JoinServer>()
+            && !world.contains_resource::<PendingJoin>()
         {
             fail_start(world, "no world was chosen to play".into());
         }
@@ -598,7 +638,13 @@ mod flow {
     pub(super) fn launch_when_ready(world: &mut World) {
         if let Some(JoinServer(addr)) = world.remove_resource::<JoinServer>() {
             info!("[session] joining the server on {addr}");
-            connect_session(world, addr);
+            connect_session(world, addr, None);
+            return;
+        }
+        if let Some(join) = world.remove_resource::<PendingJoin>() {
+            // The world id and address only: never the JWT.
+            info!("[session] joining online world {:?} on {}", join.ticket.world, join.addr);
+            connect_session(world, join.addr, Some(join.credential()));
             return;
         }
         if !world.contains_resource::<PendingWorld>() {
@@ -629,16 +675,16 @@ mod flow {
         );
         let addr = host.addr;
         world.insert_resource(host);
-        connect_session(world, addr);
+        connect_session(world, addr, None);
     }
 
     /// Fresh session channels, and the game thread told to connect them to `addr`.
-    fn connect_session(world: &mut World, addr: std::net::SocketAddr) {
+    fn connect_session(world: &mut World, addr: std::net::SocketAddr, credential: Option<game::Credential>) {
         let channels = SessionChannels::new();
         channels.install(world);
         let debug_flags = world.resource::<DebugFlagsRes>().0.clone();
         let scale = *world.resource::<WorldScale>();
-        let command = channels.connect(addr, debug_flags, scale);
+        let command = channels.connect(addr, debug_flags, scale, credential);
         if world.resource::<GameThread>().0.send(command).is_err() {
             fail_start(world, "the game thread is gone".into());
         }
@@ -678,15 +724,17 @@ mod flow {
         }
     }
 
-    /// [`SessionEnded`] while a session runs: record why, go to the menu (the
-    /// transition runs [`leave_session`]) — except a start that was lost
-    /// (`Starting` with a reason), which stays on the starting screen to show
-    /// why ([`fail_start`]).
+    /// [`SessionEnded`] while a session runs: record why, go to the menu —
+    /// or the online world list after an online session — (the transition
+    /// runs [`leave_session`]) — except a start that was lost (`Starting` with
+    /// a reason), which stays on the starting screen to show why
+    /// ([`fail_start`]).
     fn end_on_session_ended(
         mut ended: MessageReader<SessionEnded>,
         state: Res<State<AppState>>,
         mut next: ResMut<NextState<AppState>>,
         mut error: ResMut<LastSessionError>,
+        login: Option<Res<crate::login::flow::LoginSession>>,
         mut commands: Commands,
     ) {
         let Some(last) = ended.read().last() else { return };
@@ -700,7 +748,7 @@ mod flow {
             }
             (_, reason) => {
                 error.0 = reason;
-                next.set(AppState::MainMenu);
+                next.set(home_after_session(login.as_deref()));
             }
         }
     }
@@ -727,6 +775,9 @@ mod flow {
                     OnTransition { exited: AppState::InWorld, entered: AppState::MainMenu },
                     leave_session,
                 )
+                // An online session ends on the world list.
+                .add_systems(OnTransition { exited: AppState::Starting, entered: AppState::Worlds }, leave_session)
+                .add_systems(OnTransition { exited: AppState::InWorld, entered: AppState::Worlds }, leave_session)
                 .add_systems(
                     Update,
                     (
@@ -760,8 +811,8 @@ mod web_flow {
     use bevy::prelude::*;
 
     use super::{
-        end_session, install_dead_channels, AppState, LastSessionError, PendingServer, SessionChannels, SessionEnded,
-        StartingLog, StartingStatus,
+        end_session, home_after_session, install_dead_channels, AppState, LastSessionError, PendingJoin, PendingServer,
+        SessionChannels, SessionEnded, StartingLog, StartingStatus,
     };
     use crate::renderer::collider_debug::DebugFlagsRes;
     use crate::renderer::LocalPlayer;
@@ -783,6 +834,7 @@ mod web_flow {
         world.remove_resource::<SimDriverRes>();
         end_session(world);
         world.remove_resource::<PendingServer>();
+        world.remove_resource::<PendingJoin>();
     }
 
     fn set_status(world: &mut World, text: String) {
@@ -800,19 +852,31 @@ mod web_flow {
         world.resource_mut::<LastSessionError>().0 = Some(why);
     }
 
-    /// `OnEnter(Starting)`: connect to the [`PendingServer`].
+    /// `OnEnter(Starting)`: connect to the [`PendingJoin`]'s world (a login
+    /// ticket, with its JWT) or the [`PendingServer`].
     fn begin_join(world: &mut World) {
         world.resource_mut::<LastSessionError>().0 = None;
         world.get_resource_or_init::<StartingLog>().0.clear();
-        let Some(PendingServer(address)) = world.remove_resource::<PendingServer>() else {
-            fail_start(world, "no server was chosen to join".into());
-            return;
-        };
-        let server = match crate::web_endpoint::web_server_for(&address) {
-            Ok(server) => server,
-            Err(why) => {
-                fail_start(world, format!("Cannot join {address:?}: {why}"));
+        let (address, server, credential) = if let Some(join) = world.remove_resource::<PendingJoin>() {
+            let url = join.ticket.webtransport.clone().unwrap_or_default();
+            match crate::web_endpoint::web_server_for_ticket(&url, join.ticket.cert_hash.as_deref()) {
+                Ok(server) => (url, server, Some(join.credential())),
+                Err(why) => {
+                    fail_start(world, format!("Cannot join {:?}: {why}", join.ticket.world));
+                    return;
+                }
+            }
+        } else {
+            let Some(PendingServer(address)) = world.remove_resource::<PendingServer>() else {
+                fail_start(world, "no server was chosen to join".into());
                 return;
+            };
+            match crate::web_endpoint::web_server_for(&address) {
+                Ok(server) => (address, server, None),
+                Err(why) => {
+                    fail_start(world, format!("Cannot join {address:?}: {why}"));
+                    return;
+                }
             }
         };
         info!("[session] joining {address} ({server:?})");
@@ -821,7 +885,7 @@ mod web_flow {
         channels.install(world);
         let debug_flags = world.resource::<DebugFlagsRes>().0.clone();
         let config = *world.resource::<SimConfig>();
-        let driver = crate::sim_driver::start_session(server, channels, debug_flags, config.world_scale, None);
+        let driver = crate::sim_driver::start_session(server, channels, debug_flags, config.world_scale, credential);
         world.insert_resource(driver);
     }
 
@@ -839,13 +903,15 @@ mod web_flow {
     }
 
     /// [`SessionEnded`] while a session runs: record why and go to the menu
-    /// (the transition runs [`leave_session`]) — except a start that was
-    /// lost, which stays on the starting screen to show why.
+    /// — or the online world list after an online session — (the transition
+    /// runs [`leave_session`]) — except a start that was lost, which stays on
+    /// the starting screen to show why.
     fn end_on_session_ended(
         mut ended: MessageReader<SessionEnded>,
         state: Res<State<AppState>>,
         mut next: ResMut<NextState<AppState>>,
         mut error: ResMut<LastSessionError>,
+        login: Option<Res<crate::login::flow::LoginSession>>,
         mut commands: Commands,
     ) {
         let Some(last) = ended.read().last() else { return };
@@ -859,7 +925,7 @@ mod web_flow {
             }
             (_, reason) => {
                 error.0 = reason;
-                next.set(AppState::MainMenu);
+                next.set(home_after_session(login.as_deref()));
             }
         }
     }
@@ -874,6 +940,9 @@ mod web_flow {
                 .add_systems(OnEnter(AppState::InWorld), receiving_map)
                 .add_systems(OnTransition { exited: AppState::Starting, entered: AppState::MainMenu }, leave_session)
                 .add_systems(OnTransition { exited: AppState::InWorld, entered: AppState::MainMenu }, leave_session)
+                // An online session ends on the world list.
+                .add_systems(OnTransition { exited: AppState::Starting, entered: AppState::Worlds }, leave_session)
+                .add_systems(OnTransition { exited: AppState::InWorld, entered: AppState::Worlds }, leave_session)
                 .add_systems(
                     Update,
                     (
@@ -895,7 +964,7 @@ mod tests {
 
     fn app(skip_menu: bool) -> App {
         let mut app = App::new();
-        app.add_plugins((MinimalPlugins, StatesPlugin, SessionPlugin { skip_menu }));
+        app.add_plugins((MinimalPlugins, StatesPlugin, SessionPlugin { skip_menu, login_first: false }));
         app
     }
 
@@ -1211,6 +1280,35 @@ mod tests {
         assert_eq!(*app.world().resource::<State<AppState>>().get(), AppState::MainMenu);
         assert_eq!(app.world().resource::<LastSessionError>().0, None);
         assert_eq!(*app.world().resource::<Embarked>(), Embarked(false));
+    }
+
+    /// A session joined with a login ticket ends on the online world list,
+    /// left like any other (the session is torn down, the login kept).
+    #[test]
+    #[ignore = "slow: >100ms — run via just test-full"]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn an_online_session_ends_on_the_world_list() {
+        use crate::login::flow::LoginSession;
+        let mut app = app(true);
+        app.init_resource::<crate::renderer::LocalPlayer>().add_plugins(SessionFlowPlugin);
+        SessionChannels::new().install(app.world_mut());
+        let mut login = LoginSession::new(crate::login::LoginApi::new("http://127.0.0.1:1"));
+        login.account = Some("a@b.c".into());
+        login.playing_online = true;
+        app.insert_resource(login);
+        app.world_mut().write_message(SessionEnded { reason: Some("The connection was lost.".into()) });
+        app.update();
+        app.update();
+        assert_eq!(*app.world().resource::<State<AppState>>().get(), AppState::Worlds);
+        assert_eq!(*app.world().resource::<Embarked>(), Embarked(false), "the session was left");
+        assert!(app.world().resource::<LoginSession>().logged_in(), "still signed in");
+    }
+
+    #[test]
+    fn initial_state_opens_on_login_only_when_asked() {
+        assert_eq!(initial_state(false, false), AppState::MainMenu);
+        assert_eq!(initial_state(false, true), AppState::Login);
+        assert_eq!(initial_state(true, true), AppState::InWorld, "the dev bypass wins");
     }
 
     #[test]

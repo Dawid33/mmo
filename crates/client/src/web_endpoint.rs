@@ -38,6 +38,9 @@ pub enum WebServer {
     Trusted { url: String },
     /// The local dev server: pin the hash from the hash file, dial 127.0.0.1.
     PinnedLocal,
+    /// A login ticket's world on a self-signed certificate (a dev host): dial
+    /// `url` trusting exactly the SHA-256 `cert_hash` (hex) the ticket names.
+    Pinned { url: String, cert_hash: String },
 }
 
 pub(crate) fn is_local_host(host: &str) -> bool {
@@ -93,6 +96,23 @@ pub fn web_server_for(address: &str) -> Result<WebServer, String> {
     Ok(WebServer::Trusted { url: format!("https://{host}:{port}/") })
 }
 
+/// The server a login ticket names (`JoinTicket::webtransport` +
+/// `cert_hash`): its URL as is, pinned to the hash when it has one (a dev host's
+/// self-signed certificate), else trusted. `Err` names what is wrong.
+pub fn web_server_for_ticket(url: &str, cert_hash: Option<&str>) -> Result<WebServer, String> {
+    let url = url.trim();
+    if !url.starts_with("https://") {
+        return Err(format!("not a WebTransport URL: {url:?}"));
+    }
+    match cert_hash.map(str::trim).filter(|h| !h.is_empty()) {
+        None => Ok(WebServer::Trusted { url: url.into() }),
+        Some(hash) if hash.len() == 64 && hash.chars().all(|c| c.is_ascii_hexdigit()) => {
+            Ok(WebServer::Pinned { url: url.into(), cert_hash: hash.to_ascii_lowercase() })
+        }
+        Some(hash) => Err(format!("bad certificate hash {hash:?}")),
+    }
+}
+
 /// The Join server field's initial text: [`BUILT_FOR_SERVER`], else the
 /// page's own host when served over https from a real hostname
 /// (`location.protocol`, `location.hostname`), else [`LOCAL_SERVER_ADDRESS`].
@@ -118,6 +138,21 @@ mod tests {
         assert_eq!(web_server_for("https://game.example.com:7000/"), trusted("https://game.example.com:7000/"));
         assert_eq!(web_server_for("5.9.7.138"), trusted("https://5.9.7.138:6467/"));
         assert_eq!(web_server_for("[2001:db8::1]:7000"), trusted("https://[2001:db8::1]:7000/"));
+    }
+
+    #[test]
+    fn a_ticket_dials_its_url_pinned_when_it_has_a_hash() {
+        let url = "https://world.example.com:6467/";
+        assert_eq!(web_server_for_ticket(url, None), Ok(WebServer::Trusted { url: url.into() }));
+        assert_eq!(web_server_for_ticket(url, Some("")), Ok(WebServer::Trusted { url: url.into() }));
+        let hash = "AB".repeat(32);
+        assert_eq!(
+            web_server_for_ticket(url, Some(&hash)),
+            Ok(WebServer::Pinned { url: url.into(), cert_hash: "ab".repeat(32) })
+        );
+        assert!(web_server_for_ticket(url, Some("abc")).is_err(), "not a SHA-256");
+        assert!(web_server_for_ticket("", None).is_err());
+        assert!(web_server_for_ticket("http://plain:80/", None).is_err());
     }
 
     #[test]

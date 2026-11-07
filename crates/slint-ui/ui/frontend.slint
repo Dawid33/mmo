@@ -3,12 +3,15 @@ import { KnobRow, MapGenerator } from "map-generator.slint";
 import { LoadWorld, WorldRow } from "load-world.slint";
 import { Starting } from "starting.slint";
 import { Loading } from "loading.slint";
+import { LoginScreen } from "login.slint";
+import { OnlineWorldRow, WorldsScreen } from "worlds.slint";
 import { GameTheme } from "theme.slint";
 
-export { KnobRow, WorldRow }
+export { KnobRow, OnlineWorldRow, WorldRow }
 
 // Every screen outside the world: the main menu, the map generator, the world
-// list, the starting screen and the loading screen. Drawn at FRONTEND_LAYER_ORDER over the
+// list, the starting screen, the loading screen and the online screens
+// (login, the online world list). Drawn at FRONTEND_LAYER_ORDER over the
 // frontend camera's plain backdrop; `shown: false` draws nothing at all.
 export component FrontendUi inherits Window {
     init => {
@@ -16,7 +19,8 @@ export component FrontendUi inherits Window {
     }
     background: transparent;
 
-    // 0 menu, 1 generator, 2 load, 3 starting, 4 loading (over the world).
+    // 0 menu, 1 generator, 2 load, 3 starting, 4 loading (over the world),
+    // 5 login, 6 the online world list.
     in property <int> screen;
     in property <bool> shown: true;
     in property <string> game-title: "Orion";
@@ -44,6 +48,45 @@ export component FrontendUi inherits Window {
     callback join-server(string);
     out property <length> join-button-x: menu.join-button-x;
     out property <length> join-button-y: menu.join-button-y;
+    // A login service is configured: the menu offers Play online (never on
+    // the join-only menu).
+    in property <bool> online-available;
+    callback play-online();
+    out property <length> play-online-button-x: menu.play-online-button-x;
+    out property <length> play-online-button-y: menu.play-online-button-y;
+
+    // The login screen (screen 5, login.slint) and the online world list
+    // (screen 6, worlds.slint); their Back is `back` above. `login-error`,
+    // `login-notice` and `login-busy` are shared by both.
+    in-out property <string> login-email <=> login.email;
+    in-out property <string> login-password <=> login.password;
+    in property <bool> login-show-password <=> login.show-password;
+    in property <string> login-error;
+    in property <string> login-notice;
+    in property <bool> login-busy;
+    // The signed-in account's email.
+    in property <string> login-account;
+    in property <[OnlineWorldRow]> worlds;
+    callback login-submit();
+    callback login-register();
+    callback login-forgot();
+    callback world-join(string);
+    callback logout();
+    out property <length> login-email-x: login.email-x;
+    out property <length> login-email-y: login.email-y;
+    out property <length> login-password-x: login.password-x;
+    out property <length> login-password-y: login.password-y;
+    out property <length> login-submit-x: login.submit-x;
+    out property <length> login-submit-y: login.submit-y;
+    out property <length> login-register-x: login.register-x;
+    out property <length> login-register-y: login.register-y;
+    out property <length> login-forgot-x: login.forgot-x;
+    out property <length> login-forgot-y: login.forgot-y;
+    out property <length> worlds-row-x: online-worlds.row-x;
+    out property <length> worlds-row0-y: online-worlds.row0-y;
+    out property <length> worlds-row-pitch: online-worlds.row-pitch;
+    out property <length> logout-x: online-worlds.logout-x;
+    out property <length> logout-y: online-worlds.logout-y;
 
     out property <length> new-button-x: menu.new-button-x;
     out property <length> new-button-y: menu.new-button-y;
@@ -52,8 +95,10 @@ export component FrontendUi inherits Window {
     out property <length> exit-button-x: menu.exit-button-x;
     out property <length> exit-button-y: menu.exit-button-y;
     // The shown screen's Back.
-    out property <length> back-button-x: root.screen == 1 ? generator.back-x : root.screen == 2 ? loader.back-x : starting.back-x;
-    out property <length> back-button-y: root.screen == 1 ? generator.back-y : root.screen == 2 ? loader.back-y : starting.back-y;
+    out property <length> back-button-x: root.screen == 1 ? generator.back-x : root.screen == 2 ? loader.back-x
+        : root.screen == 5 ? login.back-x : root.screen == 6 ? online-worlds.back-x : starting.back-x;
+    out property <length> back-button-y: root.screen == 1 ? generator.back-y : root.screen == 2 ? loader.back-y
+        : root.screen == 5 ? login.back-y : root.screen == 6 ? online-worlds.back-y : starting.back-y;
 
     // The world list (screen 2, load-world.slint), forwarded with a `load-`
     // prefix; its Back is `back` above.
@@ -132,10 +177,12 @@ export component FrontendUi inherits Window {
         menu-error: root.menu-error;
         background-image: root.menu-background;
         join-only: root.join-only;
+        online-available: root.online-available;
         new-world => { root.new-world(); }
         load-world => { root.load-world(); }
         exit => { root.exit(); }
         join-server(address) => { root.join-server(address); }
+        play-online => { root.play-online(); }
     }
     generator := MapGenerator {
         visible: root.shown && root.screen == 1;
@@ -153,6 +200,31 @@ export component FrontendUi inherits Window {
         visible: root.shown && root.screen == 3;
         width: root.width;
         height: root.height;
+        back => { root.back(); }
+    }
+    login := LoginScreen {
+        visible: root.shown && root.screen == 5;
+        width: root.width;
+        height: root.height;
+        error: root.login-error;
+        notice: root.login-notice;
+        busy: root.login-busy;
+        submit => { root.login-submit(); }
+        register => { root.login-register(); }
+        forgot => { root.login-forgot(); }
+        back => { root.back(); }
+    }
+    online-worlds := WorldsScreen {
+        visible: root.shown && root.screen == 6;
+        width: root.width;
+        height: root.height;
+        worlds: root.worlds;
+        account: root.login-account;
+        error: root.login-error;
+        notice: root.login-notice;
+        busy: root.login-busy;
+        join(id) => { root.world-join(id); }
+        logout => { root.logout(); }
         back => { root.back(); }
     }
     loading := Loading {

@@ -201,7 +201,7 @@ fn main() {
         let app_ends = (channels.game_send.clone(), channels.client_recv.clone(), channels.request_send.clone());
         if skip_menu {
             let addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 6466));
-            command_send.send(channels.connect(addr, debug_flags.clone(), world_scale)).unwrap();
+            command_send.send(channels.connect(addr, debug_flags.clone(), world_scale, None)).unwrap();
         }
         let (game_send, client_recv, request_send) = app_ends;
         (command_send, game_send, client_recv, request_send)
@@ -289,8 +289,10 @@ fn main() {
     .insert_resource(world_scale)
     .insert_resource(view_distance);
     // App states + the session reset registry + the frontend camera. The menu
-    // is the default; the dev bypass starts straight in the world.
-    app.add_plugins(client::session::SessionPlugin { skip_menu });
+    // is the default; the dev bypass starts straight in the world; the browser
+    // with a login service opens on the login screen (else its join-only menu).
+    let login_first = cfg!(target_arch = "wasm32") && client::login::login_url().is_some();
+    app.add_plugins(client::session::SessionPlugin { skip_menu, login_first });
     // The menu screens: on every build, since a bypass session can still end
     // up in the menu (leave, lost server). `skip_menu` only picks the initial
     // state; the browser's menu only joins a server (`frontend::JOIN_ONLY`).

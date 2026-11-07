@@ -3,7 +3,8 @@
 //! [`FrontendCamera`](crate::session::FrontendCamera)'s plain backdrop).
 //!
 //! The screen shown follows [`AppState`] (menu 0, generator 1, load 2,
-//! starting 3 — also `InWorld` until the world map arrives); the layer draws
+//! starting 3 — also `InWorld` until the world map arrives — login 5, the
+//! online world list 6, whose flow is `login::flow`); the layer draws
 //! only while [`frontend_ui_shown`]: the frontend owns the screen and the
 //! arrival map (the game UI's world map, before the first Play) is not up.
 //! The generator lives in [`generator`], the world list in [`load_world`] and
@@ -24,15 +25,17 @@ use std::rc::Rc;
 
 use bevy::app::AppExit;
 use bevy::prelude::*;
+use slint_ui::slint::ComponentHandle;
 use slint_ui::FrontendUi;
 
 use crate::renderer::slint_overlay::{render_slint_layer, SlintLayer, SlintLayerPlugin, FRONTEND_LAYER_ORDER};
 use crate::session::SessionResetExt;
+use crate::login::flow::{LoginIntent, LoginSession};
 use crate::renderer::world_map::WorldMapState;
 use crate::session::{frontend_ui_shown, AppState, Embarked, LastSessionError, StartingLog, StartingStatus};
 
 /// What a frontend button asked for.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FrontendAction {
     NewWorld,
     LoadWorld,
@@ -40,6 +43,25 @@ pub enum FrontendAction {
     Back,
     /// The browser menu's Join server, with the address in [`JoinAddress`].
     JoinServer,
+    /// The main menu's Play online.
+    PlayOnline,
+    /// The login screen's Log in / Register / Forgot password, with the typed
+    /// fields in [`LoginForm`].
+    LoginSubmit,
+    Register,
+    ForgotPassword,
+    /// The online world list's pick, by world id.
+    JoinWorld(String),
+    Logout,
+}
+
+/// What an action does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ActionEffect {
+    Goto(AppState),
+    Exit,
+    /// Handed to the login flow (`login::flow::LoginIntent`).
+    Login,
 }
 
 /// Actions queued by Slint callbacks, applied by [`apply_frontend_actions`].
@@ -47,6 +69,10 @@ struct FrontendActions(Rc<RefCell<Vec<FrontendAction>>>);
 
 /// The address the last Join server named (the Slint callback's argument).
 struct JoinAddress(Rc<RefCell<String>>);
+
+/// The login form's email and password at the last Log in / Register /
+/// Forgot password (read from the UI in the callback). Never logged.
+struct LoginForm(Rc<RefCell<(String, String)>>);
 
 /// Whether the menu is the browser's: only Join server (the browser cannot
 /// make or keep worlds, it only joins a server).
@@ -58,6 +84,9 @@ pub struct CanLoad(pub bool);
 
 /// `FrontendUi.screen` of the loading screen ([`loading`]).
 pub const LOADING_SCREEN: i32 = 4;
+/// `FrontendUi.screen` of the login screen and the online world list.
+pub const LOGIN_SCREEN: i32 = 5;
+pub const WORLDS_SCREEN: i32 = 6;
 
 /// The `FrontendUi.screen` an [`AppState`] shows (`InWorld` shows the
 /// starting screen: the layer is visible there only until the world map
@@ -68,6 +97,8 @@ pub fn screen_index(state: AppState) -> i32 {
         AppState::MapGenerator => 1,
         AppState::LoadWorld => 2,
         AppState::Starting | AppState::InWorld => 3,
+        AppState::Login => LOGIN_SCREEN,
+        AppState::Worlds => WORLDS_SCREEN,
     }
 }
 
@@ -96,15 +127,37 @@ pub fn starting_lines(status: &str, launched: bool, in_world: bool, failed: bool
     lines
 }
 
-/// The state an action leads to (`None`: no state change, `Exit` quits the app).
-pub fn action_target(action: FrontendAction) -> Option<AppState> {
+/// What an action does: the state it leads to, quitting the app, or a login
+/// call. (Back from a session's starting screen goes where the session ends —
+/// [`apply_frontend_actions`] adjusts that.)
+pub fn action_target(action: &FrontendAction) -> ActionEffect {
     match action {
-        FrontendAction::NewWorld => Some(AppState::MapGenerator),
-        FrontendAction::LoadWorld => Some(AppState::LoadWorld),
-        FrontendAction::Back => Some(AppState::MainMenu),
-        FrontendAction::JoinServer => Some(AppState::Starting),
-        FrontendAction::Exit => None,
+        FrontendAction::NewWorld => ActionEffect::Goto(AppState::MapGenerator),
+        FrontendAction::LoadWorld => ActionEffect::Goto(AppState::LoadWorld),
+        FrontendAction::Back => ActionEffect::Goto(AppState::MainMenu),
+        FrontendAction::JoinServer => ActionEffect::Goto(AppState::Starting),
+        FrontendAction::Exit => ActionEffect::Exit,
+        FrontendAction::PlayOnline
+        | FrontendAction::LoginSubmit
+        | FrontendAction::Register
+        | FrontendAction::ForgotPassword
+        | FrontendAction::JoinWorld(_)
+        | FrontendAction::Logout => ActionEffect::Login,
     }
+}
+
+/// The login call an action makes (`form`: the typed email and password).
+pub fn login_intent(action: &FrontendAction, form: &(String, String)) -> Option<LoginIntent> {
+    let (email, password) = form.clone();
+    Some(match action {
+        FrontendAction::PlayOnline => LoginIntent::PlayOnline,
+        FrontendAction::LoginSubmit => LoginIntent::Submit { email, password },
+        FrontendAction::Register => LoginIntent::Register { email, password },
+        FrontendAction::ForgotPassword => LoginIntent::Forgot { email },
+        FrontendAction::JoinWorld(id) => LoginIntent::JoinWorld(id.clone()),
+        FrontendAction::Logout => LoginIntent::Logout,
+        _ => return None,
+    })
 }
 
 pub struct FrontendPlugin;
@@ -119,7 +172,15 @@ impl Plugin for FrontendPlugin {
         .init_resource::<StartingLog>()
         .add_systems(OnEnter(AppState::MainMenu), refresh_can_load)
         .add_session_reset::<loading::LoadingCover>()
-        .add_systems(Update, apply_frontend_actions)
+        // Play online (`login::flow`): the login outlives world sessions, so
+        // none of it is session-reset.
+        .add_message::<LoginIntent>()
+        .add_systems(Startup, crate::login::flow::setup_login)
+        .add_systems(OnEnter(AppState::Worlds), crate::login::flow::refresh_worlds)
+        .add_systems(
+            Update,
+            (apply_frontend_actions, crate::login::flow::start_login, crate::login::flow::poll_login).chain(),
+        )
         // After every Update system that embarks or re-arms the camera, so the
         // loading screen is drawn on the very frame the world camera takes over.
         .add_systems(
@@ -135,7 +196,7 @@ fn connect_frontend(ui: &FrontendUi, world: &mut World) {
     let actions = Rc::new(RefCell::new(Vec::new()));
     let push = |action: FrontendAction| {
         let queue = actions.clone();
-        move || queue.borrow_mut().push(action)
+        move || queue.borrow_mut().push(action.clone())
     };
     ui.on_new_world(push(FrontendAction::NewWorld));
     ui.on_load_world(push(FrontendAction::LoadWorld));
@@ -149,6 +210,28 @@ fn connect_frontend(ui: &FrontendUi, world: &mut World) {
             queue.borrow_mut().push(FrontendAction::JoinServer);
         });
     }
+    ui.on_play_online(push(FrontendAction::PlayOnline));
+    ui.on_logout(push(FrontendAction::Logout));
+    {
+        let queue = actions.clone();
+        ui.on_world_join(move |id| queue.borrow_mut().push(FrontendAction::JoinWorld(id.to_string())));
+    }
+    // The form is read when its button is pressed, so the flow gets exactly
+    // what was on screen.
+    let form = Rc::new(RefCell::new((String::new(), String::new())));
+    let push_form = |action: FrontendAction| {
+        let (queue, form, weak) = (actions.clone(), form.clone(), ui.as_weak());
+        move || {
+            if let Some(ui) = weak.upgrade() {
+                *form.borrow_mut() = (ui.get_login_email().to_string(), ui.get_login_password().to_string());
+            }
+            queue.borrow_mut().push(action.clone());
+        }
+    };
+    ui.on_login_submit(push_form(FrontendAction::LoginSubmit));
+    ui.on_login_register(push_form(FrontendAction::Register));
+    ui.on_login_forgot(push_form(FrontendAction::ForgotPassword));
+    world.insert_non_send(LoginForm(form));
     ui.set_join_only(JOIN_ONLY);
     #[cfg(target_arch = "wasm32")]
     ui.set_server_address(initial_server_address().into());
@@ -183,6 +266,11 @@ fn initial_server_address() -> String {
 fn apply_frontend_actions(
     actions: Option<NonSend<FrontendActions>>,
     join_address: Option<NonSend<JoinAddress>>,
+    (login_form, login, mut login_intents): (
+        Option<NonSend<LoginForm>>,
+        Option<Res<LoginSession>>,
+        MessageWriter<LoginIntent>,
+    ),
     mut commands: Commands,
     state: Res<State<AppState>>,
     embarked: Res<Embarked>,
@@ -212,10 +300,23 @@ fn apply_frontend_actions(
             }
             commands.insert_resource(crate::session::PendingServer(address));
         }
-        match action_target(action) {
-            Some(target) => next.set(target),
-            None => {
+        match action_target(&action) {
+            // Back from a session's starting screen: where the session ends
+            // (the online world list after a ticket join).
+            ActionEffect::Goto(AppState::MainMenu)
+                if matches!(state.get(), AppState::Starting | AppState::InWorld) =>
+            {
+                next.set(LoginSession::home(login.as_deref()));
+            }
+            ActionEffect::Goto(target) => next.set(target),
+            ActionEffect::Exit => {
                 exit.write(AppExit::Success);
+            }
+            ActionEffect::Login => {
+                let form = login_form.as_ref().map(|f| f.0.borrow().clone()).unwrap_or_default();
+                if let Some(intent) = login_intent(&action, &form) {
+                    login_intents.write(intent);
+                }
             }
         }
     }
@@ -234,6 +335,7 @@ fn push_frontend_state(
     #[cfg(not(target_arch = "wasm32"))] host: Option<Res<crate::local_host::LocalHost>>,
     (cover, time): (Res<loading::LoadingCover>, Res<Time<Real>>),
     mut shown_lines: Local<Vec<String>>,
+    (login, mut shown_worlds): (Option<ResMut<LoginSession>>, Local<Vec<(String, String, bool)>>),
 ) {
     let Some(layer) = layer else { return };
     let ui = layer.overlay.ui();
@@ -292,6 +394,47 @@ fn push_frontend_state(
     if ui.get_start_log() != start_log {
         ui.set_start_log(start_log.into());
     }
+    push_login_state(ui, login, &mut shown_worlds);
+}
+
+/// The login screens' properties from the [`LoginSession`] (none: no login
+/// service, so no Play online).
+fn push_login_state(ui: &FrontendUi, login: Option<ResMut<LoginSession>>, shown_worlds: &mut Vec<(String, String, bool)>) {
+    use slint_ui::slint::{ModelRc, VecModel};
+    if ui.get_online_available() != login.is_some() {
+        ui.set_online_available(login.is_some());
+    }
+    let Some(mut login) = login else { return };
+    if login.clear_password {
+        login.clear_password = false;
+        ui.set_login_password("".into());
+    }
+    if ui.get_login_error() != login.error.as_str() {
+        ui.set_login_error(login.error.as_str().into());
+    }
+    if ui.get_login_notice() != login.notice.as_str() {
+        ui.set_login_notice(login.notice.as_str().into());
+    }
+    if ui.get_login_busy() != login.busy() {
+        ui.set_login_busy(login.busy());
+    }
+    let account = login.account.as_deref().unwrap_or("");
+    if ui.get_login_account() != account {
+        ui.set_login_account(account.into());
+    }
+    let worlds: Vec<(String, String, bool)> = login
+        .worlds
+        .iter()
+        .map(|w| (w.id.clone(), w.name.clone(), w.status == login_api::WorldStatus::Open))
+        .collect();
+    if *shown_worlds != worlds {
+        let rows: Vec<slint_ui::OnlineWorldRow> = worlds
+            .iter()
+            .map(|(id, name, open)| slint_ui::OnlineWorldRow { id: id.into(), name: name.into(), open: *open })
+            .collect();
+        ui.set_worlds(ModelRc::new(VecModel::from(rows)));
+        *shown_worlds = worlds;
+    }
 }
 
 #[cfg(test)]
@@ -308,6 +451,37 @@ mod tests {
     }
 
     #[test]
+    fn screen_index_login_and_worlds() {
+        assert_eq!(screen_index(AppState::Login), 5);
+        assert_eq!(screen_index(AppState::Worlds), 6);
+    }
+
+    #[test]
+    fn login_actions_go_to_the_login_flow() {
+        let form = ("a@b.c".to_string(), "hunter2hunter2".to_string());
+        for action in [
+            FrontendAction::PlayOnline,
+            FrontendAction::LoginSubmit,
+            FrontendAction::Register,
+            FrontendAction::ForgotPassword,
+            FrontendAction::JoinWorld("alpha".into()),
+            FrontendAction::Logout,
+        ] {
+            assert_eq!(action_target(&action), ActionEffect::Login, "{action:?}");
+            assert!(login_intent(&action, &form).is_some(), "{action:?}");
+        }
+        assert!(matches!(
+            login_intent(&FrontendAction::LoginSubmit, &form),
+            Some(LoginIntent::Submit { email, password }) if email == "a@b.c" && password == "hunter2hunter2"
+        ));
+        assert!(matches!(
+            login_intent(&FrontendAction::JoinWorld("alpha".into()), &form),
+            Some(LoginIntent::JoinWorld(id)) if id == "alpha"
+        ));
+        assert!(login_intent(&FrontendAction::Back, &form).is_none());
+    }
+
+    #[test]
     fn starting_lines_follow_the_steps() {
         assert_eq!(starting_lines("", false, false, false), [STARTING_SERVER]);
         assert_eq!(starting_lines("", true, false, false), [STARTING_SERVER, CONNECTING]);
@@ -318,10 +492,10 @@ mod tests {
 
     #[test]
     fn actions_lead_to_states() {
-        assert_eq!(action_target(FrontendAction::NewWorld), Some(AppState::MapGenerator));
-        assert_eq!(action_target(FrontendAction::LoadWorld), Some(AppState::LoadWorld));
-        assert_eq!(action_target(FrontendAction::Back), Some(AppState::MainMenu));
-        assert_eq!(action_target(FrontendAction::JoinServer), Some(AppState::Starting));
-        assert_eq!(action_target(FrontendAction::Exit), None);
+        assert_eq!(action_target(&FrontendAction::NewWorld), ActionEffect::Goto(AppState::MapGenerator));
+        assert_eq!(action_target(&FrontendAction::LoadWorld), ActionEffect::Goto(AppState::LoadWorld));
+        assert_eq!(action_target(&FrontendAction::Back), ActionEffect::Goto(AppState::MainMenu));
+        assert_eq!(action_target(&FrontendAction::JoinServer), ActionEffect::Goto(AppState::Starting));
+        assert_eq!(action_target(&FrontendAction::Exit), ActionEffect::Exit);
     }
 }

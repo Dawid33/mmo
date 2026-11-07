@@ -131,7 +131,7 @@ fn app() -> App {
     // the extract plugins' removal hooks still report into its queue.
     .add_plugins(bevy::render::sync_world::SyncWorldPlugin)
     .insert_resource(WorldScale::TINY)
-    .add_plugins(SessionPlugin { skip_menu: true });
+    .add_plugins(SessionPlugin { skip_menu: true, login_first: false });
     // Placeholder channels: each session swaps in its own.
     let (game_send, _) = unbounded();
     let (_, client_recv) = unbounded();

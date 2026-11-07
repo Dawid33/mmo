@@ -16,4 +16,5 @@ mod frontend;
 mod game_panel;
 mod hud;
 mod inventory;
+mod login_screen;
 mod world_map;

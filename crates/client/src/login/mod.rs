@@ -4,6 +4,7 @@
 //! serde DTOs (`login-api`), never on the service itself.
 
 pub mod api;
+pub mod flow;
 pub mod store;
 
 pub use api::{login_url, LoginApi, LoginFailure};

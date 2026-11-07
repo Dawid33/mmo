@@ -2274,7 +2274,7 @@ mod tests {
     fn body_camera_yields_to_the_frontend() {
         use crate::session::{AppState, Embarked, SessionPlugin};
         let mut app = App::new();
-        app.add_plugins((MinimalPlugins, bevy::state::app::StatesPlugin, SessionPlugin { skip_menu: false }))
+        app.add_plugins((MinimalPlugins, bevy::state::app::StatesPlugin, SessionPlugin { skip_menu: false, login_first: false }))
             .init_resource::<HudStatus>()
             .add_systems(PreUpdate, enforce_single_active_camera);
         let cam = app

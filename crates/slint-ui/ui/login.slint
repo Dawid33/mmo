@@ -1,0 +1,105 @@
+// The login screen (Play online): email, password, Log in / Register /
+// Forgot password, and a line saying what happened. The client
+// (crates/client/src/login/flow.rs) talks to the login service; this screen
+// only reports what the player did. `busy` (a request in flight) disables
+// every button.
+
+import { Button, FrameFace, GraphicalSets, LabelFace, Styles, TextField, VerticalFlow } from "@widgets";
+
+export component LoginScreen {
+    in-out property <string> email;
+    in-out property <string> password;
+    // Draw the password in the clear (headless tests compare the two).
+    in property <bool> show-password;
+    in property <string> error;
+    // Not an error: "Check your email to verify your account", …
+    in property <string> notice;
+    in property <bool> busy;
+    callback submit();
+    callback register();
+    callback forgot();
+    callback back();
+
+    property <bool> filled: root.email != "" && root.password != "";
+
+    // Where things are, for the headless tests (absolute, logical px).
+    out property <length> email-x: email-field.absolute-position.x + email-field.width / 2;
+    out property <length> email-y: email-field.absolute-position.y + email-field.height / 2;
+    out property <length> password-x: password-field.absolute-position.x + password-field.width / 2;
+    out property <length> password-y: password-field.absolute-position.y + password-field.height / 2;
+    out property <length> submit-x: submit-btn.absolute-position.x + submit-btn.width / 2;
+    out property <length> submit-y: submit-btn.absolute-position.y + submit-btn.height / 2;
+    out property <length> register-x: register-btn.absolute-position.x + register-btn.width / 2;
+    out property <length> register-y: register-btn.absolute-position.y + register-btn.height / 2;
+    out property <length> forgot-x: forgot-btn.absolute-position.x + forgot-btn.width / 2;
+    out property <length> forgot-y: forgot-btn.absolute-position.y + forgot-btn.height / 2;
+    out property <length> back-x: back-btn.absolute-position.x + back-btn.width / 2;
+    out property <length> back-y: back-btn.absolute-position.y + back-btn.height / 2;
+
+    frame := FrameFace {
+        title: "Play online";
+        width: max(420px, self.content-x + body.preferred-width
+            + Styles.frame.box.padding.right + GraphicalSets.inset(Styles.frame.graphics).right);
+        height: self.content-y + body.preferred-height
+            + Styles.frame.box.padding.bottom + GraphicalSets.inset(Styles.frame.graphics).bottom;
+        x: (root.width - self.width) / 2;
+        y: (root.height - self.height) / 2;
+
+        body := VerticalFlow {
+            x: frame.content-x;
+            y: frame.content-y;
+            width: frame.content-right - frame.content-x;
+
+            LabelFace {
+                text: "Email";
+            }
+            email-field := TextField {
+                text <=> root.email;
+                enabled: !root.busy;
+            }
+            LabelFace {
+                text: "Password";
+            }
+            password-field := TextField {
+                text <=> root.password;
+                password: !root.show-password;
+                enabled: !root.busy;
+                accepted => {
+                    if !root.busy && root.filled { root.submit(); }
+                }
+            }
+            submit-btn := Button {
+                text: "Log in";
+                style: Styles.confirm-button;
+                enabled: !root.busy && root.filled;
+                clicked => { root.submit(); }
+            }
+            register-btn := Button {
+                text: "Register";
+                enabled: !root.busy && root.filled;
+                clicked => { root.register(); }
+            }
+            forgot-btn := Button {
+                text: "Forgot password";
+                enabled: !root.busy && root.email != "";
+                clicked => { root.forgot(); }
+            }
+            if root.busy: LabelFace {
+                style: Styles.caption-label;
+                text: "Talking to the login server\u{2026}";
+            }
+            if root.error != "": LabelFace {
+                style: Styles.bold-red-label;
+                text: root.error;
+            }
+            if root.notice != "": LabelFace {
+                text: root.notice;
+            }
+            back-btn := Button {
+                style: Styles.back-button;
+                text: "Back";
+                clicked => { root.back(); }
+            }
+        }
+    }
+}

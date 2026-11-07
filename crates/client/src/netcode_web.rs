@@ -333,6 +333,7 @@ async fn open_transport(server: &WebServer) -> Result<WebTransport, JsValue> {
             Ok(transport)
         }
         WebServer::PinnedLocal => open_pinned_local().await,
+        WebServer::Pinned { url, cert_hash } => open_pinned(url, cert_hash).await,
     }
 }
 
@@ -360,6 +361,12 @@ async fn open_pinned_local() -> Result<WebTransport, JsValue> {
         .ok_or_else(|| JsValue::from_str("hash file not text"))?;
     let (hash_hex, port) =
         parse_hash_json(&text).ok_or_else(|| JsValue::from_str("malformed cert hash file"))?;
+    open_pinned(&format!("https://127.0.0.1:{port}/"), &hash_hex).await
+}
+
+/// Open a session to `url` trusting exactly the certificate whose SHA-256 is
+/// `hash_hex` (the dev server's hash file, or a login ticket's `cert_hash`).
+async fn open_pinned(url: &str, hash_hex: &str) -> Result<WebTransport, JsValue> {
     // Guard the slicing too: odd-length or non-ASCII hex would panic on
     // `&hash_hex[i..i + 2]` before from_str_radix ever saw it.
     if hash_hex.len() % 2 != 0 || !hash_hex.is_ascii() {
@@ -382,7 +389,7 @@ async fn open_pinned_local() -> Result<WebTransport, JsValue> {
     let options = WebTransportOptions::new();
     // Takes a slice of hashes directly, not a JS Array wrapper.
     options.set_server_certificate_hashes(&[hash]);
-    let transport = WebTransport::new_with_options(&format!("https://127.0.0.1:{port}/"), &options)?;
+    let transport = WebTransport::new_with_options(url, &options)?;
     JsFuture::from(transport.ready()).await?;
     Ok(transport)
 }

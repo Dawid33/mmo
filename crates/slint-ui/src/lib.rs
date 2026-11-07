@@ -30,7 +30,7 @@ pub mod wheel;
 // parallel and a .slint edit regenerates only its half; re-exported so users
 // keep one `slint_ui::` path. The asset viewer / controls harness are in
 // `slint-ui-tools`, outside the game build.
-pub use slint_ui_frontend::{FrontendUi, KnobRow, WorldRow};
+pub use slint_ui_frontend::{FrontendUi, KnobRow, OnlineWorldRow, WorldRow};
 pub use slint_ui_game::*;
 
 thread_local! {

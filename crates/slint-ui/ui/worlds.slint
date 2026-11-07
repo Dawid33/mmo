@@ -1,0 +1,111 @@
+// The online world list (Play online, once logged in): one button per world
+// the login service lists (a closed world is shown, disabled), the signed-in
+// account, Log out and Back. The client (crates/client/src/login/flow.rs)
+// asks the login service for a join ticket when a world is picked.
+
+import { Button, FrameFace, GraphicalSets, LabelFace, Styles } from "@widgets";
+
+// One world of the login service's registry (`login_api::WorldEntry`). Not
+// the Load screen's `WorldRow`: that one is a saved single-player world.
+export struct OnlineWorldRow {
+    id: string,
+    name: string,
+    open: bool,
+}
+
+export component WorldsScreen {
+    in property <[OnlineWorldRow]> worlds;
+    // The signed-in account's email.
+    in property <string> account;
+    in property <string> error;
+    in property <string> notice;
+    in property <bool> busy;
+    callback join(string);
+    callback logout();
+    callback back();
+
+    property <length> line-height: 28px;
+    property <length> row-height: 32px;
+    property <length> row-gap: 6px;
+    property <length> gap: 12px;
+    property <length> bar-height: 32px;
+    // The list keeps a row's room when empty (for the "no worlds" line).
+    property <int> shown-rows: max(1, root.worlds.length);
+
+    // Where things are, for the headless tests (absolute, logical px).
+    out property <length> row-x: frame.absolute-position.x + (frame.content-x + frame.content-right) / 2;
+    out property <length> row0-y: frame.absolute-position.y + frame.list-top + root.row-height / 2;
+    out property <length> row-pitch: root.row-height + root.row-gap;
+    out property <length> logout-x: logout-btn.absolute-position.x + logout-btn.width / 2;
+    out property <length> logout-y: logout-btn.absolute-position.y + logout-btn.height / 2;
+    out property <length> back-x: back-btn.absolute-position.x + back-btn.width / 2;
+    out property <length> back-y: back-btn.absolute-position.y + back-btn.height / 2;
+
+    frame := FrameFace {
+        title: "Worlds";
+        width: min(root.width - 48px, 520px);
+        height: self.list-top + root.shown-rows * (root.row-height + root.row-gap) + root.gap
+            + 2 * root.line-height + root.gap + root.bar-height
+            + Styles.frame.box.padding.bottom + GraphicalSets.inset(Styles.frame.graphics).bottom;
+        x: (root.width - self.width) / 2;
+        y: (root.height - self.height) / 2;
+
+        property <length> list-top: self.content-y + root.line-height + root.gap;
+        property <length> list-bottom: self.list-top + root.shown-rows * (root.row-height + root.row-gap);
+        property <length> inner-width: self.content-right - self.content-x;
+
+        LabelFace {
+            x: frame.content-x;
+            y: frame.content-y;
+            width: frame.inner-width;
+            height: root.line-height;
+            text: root.account == "" ? "" : "Signed in as " + root.account;
+        }
+        for world[i] in root.worlds: Button {
+            x: frame.content-x;
+            y: frame.list-top + i * (root.row-height + root.row-gap);
+            width: frame.inner-width;
+            height: root.row-height;
+            text: world.open ? world.name : world.name + " (closed)";
+            enabled: world.open && !root.busy;
+            clicked => { root.join(world.id); }
+        }
+        if root.worlds.length == 0: LabelFace {
+            x: frame.content-x;
+            y: frame.list-top;
+            width: frame.inner-width;
+            height: root.row-height;
+            style: Styles.caption-label;
+            text: root.busy ? "Fetching the world list\u{2026}" : "No worlds are listed right now";
+        }
+        LabelFace {
+            x: frame.content-x;
+            y: frame.list-bottom + root.gap;
+            width: frame.inner-width;
+            height: root.line-height;
+            style: root.error != "" ? Styles.bold-red-label : Styles.caption-label;
+            text: root.error != "" ? root.error
+                : root.busy && root.worlds.length > 0 ? "Talking to the login server\u{2026}"
+                : root.notice;
+        }
+
+        back-btn := Button {
+            x: frame.content-x;
+            y: frame.list-bottom + root.gap + 2 * root.line-height + root.gap;
+            width: 140px;
+            height: root.bar-height;
+            style: Styles.back-button;
+            text: "Back";
+            clicked => { root.back(); }
+        }
+        logout-btn := Button {
+            x: frame.content-right - 160px;
+            y: back-btn.y;
+            width: 160px;
+            height: root.bar-height;
+            text: "Log out";
+            enabled: !root.busy;
+            clicked => { root.logout(); }
+        }
+    }
+}
