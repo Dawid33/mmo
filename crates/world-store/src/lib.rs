@@ -2,11 +2,13 @@
 //! (native only). This module holds the shared vocabulary; `open` opens a database,
 //! takes the world lock, runs the migrations and checks the world row.
 
+mod codec;
 mod open;
 mod url;
 
 use std::fmt;
 
+pub use codec::*;
 pub use open::{LockGuard, Pool, open_pool};
 pub use url::StoreUrl;
 
