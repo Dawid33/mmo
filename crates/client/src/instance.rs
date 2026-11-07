@@ -895,12 +895,14 @@ impl GameInstanceManager {
             }
             e @ GameEventKind::PlayerInput(_, _) => {
                 if let Some(home) = self.home_region {
-                    // Belt-and-braces: desired_window pins home in the
-                    // subscription set, so it should always be loaded — but
-                    // never route input into a hole. The home region
-                    // predicts it and sends it to the server itself.
+                    // The home region predicts it and sends it to the server
+                    // itself. A home not loaded yet (the body crossed into a
+                    // region outside the window; desired_window pins it, so
+                    // its snapshot is on the way) cannot predict it, but the
+                    // server must still get it — a lost key release would
+                    // leave the key held there.
                     if !self.host.contains(&home) {
-                        warn!("dropping PlayerInput: home region {:?} not loaded", home);
+                        self.send_unpredicted(home, e);
                         return Ok(true);
                     }
                     self.host.send(home, RegionCmd::Predict(e));
@@ -933,7 +935,7 @@ impl GameInstanceManager {
             e @ (GameEventKind::UiAction(_, _) | GameEventKind::Order(_, _)) => {
                 if let Some(home) = self.home_region {
                     if !self.host.contains(&home) {
-                        warn!("dropping {:?}: home region {:?} not loaded", e, home);
+                        self.send_unpredicted(home, e);
                         return Ok(true);
                     }
                     self.host.send(home, RegionCmd::Predict(e));
@@ -941,6 +943,21 @@ impl GameInstanceManager {
             }
         }
         Ok(true)
+    }
+
+    /// One of this client's inputs (or orders) for a home region it does not
+    /// predict (not loaded yet): sent to the server unpredicted, stamped with
+    /// the world clock's tick like a predicted one, so the server applies it
+    /// in that slot. The server routes it by the player's home, not by the
+    /// stamp's region; the region's snapshot, when it arrives, holds its effect.
+    fn send_unpredicted(&mut self, home: RegionCoords, kind: GameEventKind) {
+        log::info!("[client] {kind:?} for home {home:?}, not loaded: sent to the server unpredicted");
+        let event = game::GameEvent::new(kind, 0, home);
+        let packet = match self.clock.tick() {
+            Some(tick) => ClientPacket::GameEventAfterTick(event, tick),
+            None => ClientPacket::GameEvent(event),
+        };
+        let _ = self.server_game_send.send(packet);
     }
 
     /// Route every report the regions produced since the last drain, until
@@ -1110,6 +1127,8 @@ impl GameInstanceManager {
                     Some(home) if home != id && self.host.contains(&home) => {
                         self.host.send(home, RegionCmd::Predict(kind));
                     }
+                    // The new home is not loaded: the server still gets it.
+                    Some(home) if home != id => self.send_unpredicted(home, kind),
                     _ => warn!("dropping {kind:?}: predicted in {id:?} after the player left it"),
                 }
             }
@@ -2531,6 +2550,85 @@ mod manager_tests {
                 ClientPacket::GameEventAfterTick(ev, _) if ev.kind == input && ev.region_id == target
             )),
             "the forwarded input was predicted in the new home and sent: {sent:?}"
+        );
+    }
+
+    /// The body crosses into a region the client does not hold (outside its
+    /// window, e.g. at near radius 0): the key release forwarded from the
+    /// old home, and inputs sent before the new home's snapshot arrives,
+    /// still reach the server — unpredicted, stamped — so the server's body
+    /// never keeps walking on a lost release; and the new home is requested.
+    #[test]
+    fn inputs_for_an_unloaded_home_still_reach_the_server() {
+        let (mut manager, server_send, server_recv, _client_recv, game_send) = manager_with_player();
+        // The play config: a one-region window, so the neighbour is not held.
+        manager.set_lod_table(&[]);
+        manager.set_near_radius(0);
+        let home = RegionCoords::new(0, 0);
+        let target = RegionCoords::new(1, 0);
+        server_send.send(ServerPacket::PlayerRegion(Some(home), 0)).unwrap();
+        manager.pump(&server_recv).unwrap();
+        let mut world = game::World::new();
+        let mut home_region = Region::from_chunks(home, Vec::new());
+        home_region.handle_event(GameEventKind::CreateClient(0)).unwrap();
+        home_region.forget_last_event();
+        world.load(&home, home_region);
+        server_send.send(world.build_region_server_packet(&home)).unwrap();
+        manager.pump(&server_recv).unwrap();
+        manager.is_caught_up = true;
+        while manager.client_packet_recv().try_recv().is_ok() {}
+        assert!(!manager.host.contains(&target), "the target is not loaded");
+
+        let (departures, halo_entities, stamp) = {
+            let w = manager.world_mut();
+            let key = *w.data(&home).player_entites.get(&0).unwrap();
+            let region = w.regions.get_mut(&home).unwrap();
+            region.with_data(|d| {
+                d.set_body_pose_safe(
+                    key,
+                    game::Pose::translation(game::REGION_SIZE + game::FLIP_HYSTERESIS + 2.0, 26.0, 128.0),
+                )
+            });
+            region.handle_event(GameEventKind::Tick).unwrap();
+            let (departures, halo_entities) = region.take_transfers();
+            (departures, halo_entities, region.current_tick())
+        };
+        let release = GameEventKind::PlayerInput(0, game::InputEvent::Key { key: game::Key::KeyW, pressed: false });
+        let batch = vec![
+            (
+                home,
+                RegionReport::Ticked {
+                    sat_out: false,
+                    departures,
+                    halo_entities,
+                    halo: Vec::new(),
+                    intents: Vec::new(),
+                    stamp,
+                    perf: game::RegionTickPerf::default(),
+                    took: Duration::ZERO,
+                },
+            ),
+            (home, RegionReport::Forward(release.clone())),
+        ];
+        manager.route_reports(batch).unwrap();
+        manager.drain_reports().unwrap();
+        assert_eq!(manager.home_region, Some(target), "home flipped");
+        // A fresh input while the new home is still not loaded.
+        let press = GameEventKind::PlayerInput(0, game::InputEvent::Key { key: game::Key::KeyS, pressed: true });
+        game_send.send(press.clone()).unwrap();
+        manager.pump(&server_recv).unwrap();
+        manager.send_tick();
+        manager.pump(&server_recv).unwrap();
+
+        let sent: Vec<ClientPacket> = manager.client_packet_recv().try_iter().collect();
+        let reached = |kind: &GameEventKind| {
+            sent.iter().any(|p| matches!(p, ClientPacket::GameEventAfterTick(ev, _) if ev.kind == *kind))
+        };
+        assert!(reached(&release), "the forwarded release reached the server: {sent:?}");
+        assert!(reached(&press), "the input sent before the snapshot reached the server: {sent:?}");
+        assert!(
+            sent.iter().any(|p| matches!(p, ClientPacket::RequestRegionConnection(rc) if *rc == target)),
+            "the new home is requested: {sent:?}"
         );
     }
 
