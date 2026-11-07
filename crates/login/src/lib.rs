@@ -3,6 +3,7 @@
 
 pub mod api;
 pub mod config;
+pub mod ctl;
 pub mod mail;
 pub mod pages;
 pub mod password;
@@ -58,5 +59,27 @@ pub async fn serve(config: LoginConfig) -> io::Result<()> {
         Arc::new(config),
         system_clock(),
     );
-    axum::serve(listener, router(state)).await
+    axum::serve(listener, router(state))
+        .with_graceful_shutdown(shutdown_signal())
+        .await
+}
+
+/// Resolves on ctrl-c or SIGTERM.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    #[cfg(unix)]
+    let term = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut s) => {
+                s.recv().await;
+            }
+            Err(_) => std::future::pending::<()>().await,
+        }
+    };
+    #[cfg(not(unix))]
+    let term = std::future::pending::<()>();
+    tokio::select! { _ = ctrl_c => {}, _ = term => {} }
+    log::info!("[login] shutting down");
 }

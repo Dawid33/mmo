@@ -3,6 +3,7 @@
 
 mod api;
 mod common;
+mod ctl;
 mod mail;
 mod password;
 mod schema;

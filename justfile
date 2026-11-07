@@ -898,6 +898,49 @@ smoke:
     step {{cargo}} check -q -p client --lib --bins --tests
     echo ">> smoke ok in $(( $(date +%s) - deadline + {{smoke_timeout}} ))s"
 
+# ---- Login service (crates/login) -------------------------------------------
+
+# The login service / its admin commands: `just login` serves on 127.0.0.1:8790
+# (VOXEL_LOGIN_* env, database target/dev-login/login.sqlite); `just login world list`,
+# `just login account verify a@b.c`, ... Built capped, then run.
+login *args='serve':
+    {{cap}} {{cargo}} build -p login --bin login
+    ./target/debug/login {{args}}
+
+# Make the next signing key in target/dev-login/keys (prints its kid).
+login-keygen:
+    just login keygen
+
+# Register a world: `just login-world-add dev --name "Dev world" --quic 127.0.0.1:6466 --wt https://127.0.0.1:6467/`.
+login-world-add *args:
+    just login world add {{args}}
+
+login-world-list:
+    just login world list
+
+# A dev server that requires login, with the login service beside it: ensures a signing
+# key and the world `dev`, runs `login serve` in the background and the dev server
+# (VOXEL_AUTH=jwt, play region size) in the foreground; SIGTERMs the login service on exit.
+dev-login:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export VOXEL_REGION_BLOCKS={{play_blocks}}
+    {{cap}} {{cargo}} build -p login --bin login
+    {{cap}} {{cargo}} build --bin server
+    login=./target/debug/login
+    if ! ls target/dev-login/keys/*.pem >/dev/null 2>&1; then
+        $login keygen
+    fi
+    if ! $login world list | grep -q '^dev'$'\t'; then
+        $login world add dev --name "Dev world" --quic 127.0.0.1:6466 --wt https://127.0.0.1:6467/
+    fi
+    mkdir -p target/dev-login
+    $login serve >target/dev-login/login.log 2>&1 </dev/null &
+    lpid=$!
+    trap 'echo "dev-login: stopping the login service"; kill -TERM $lpid 2>/dev/null; wait $lpid 2>/dev/null || true' EXIT
+    echo "dev-login: login service on http://127.0.0.1:8790 (log: target/dev-login/login.log)"
+    VOXEL_AUTH=jwt VOXEL_WORLD_ID=dev VOXEL_LOGIN_URL=http://127.0.0.1:8790 ./target/debug/server
+
 # Run exactly the tests a change touches, by crate + cargo-test arguments:
 #   just test-one game "--test it lod_streaming::pristine"
 #   just test-one client "--lib world_scale::"
