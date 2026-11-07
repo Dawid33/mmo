@@ -142,7 +142,10 @@ async fn check_world_row(pool: &Pool, dials: Dials) -> Result<(), StoreError> {
         return Ok(());
     };
     if format != STORE_FORMAT_VERSION as i64 {
-        return Err(StoreError::OtherFormat { found: format.clamp(0, u32::MAX as i64) as u32 });
+        return Err(StoreError::OtherFormat {
+            found: format.clamp(0, u32::MAX as i64) as u32,
+            kind: crate::FormatKind::Store,
+        });
     }
     let stored = Dials { region_blocks: region as u32, chunk_blocks: chunk as u32 };
     if stored != dials {

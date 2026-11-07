@@ -19,7 +19,7 @@ const B: RegionCoords = RegionCoords { x: 1, z: -1 };
 
 /// Runs `body` once per backend. `reopen`: SQLite on a temp file instead of in
 /// memory (the body opens the store more than once).
-fn each_backend(tag: &str, reopen: bool, body: impl Fn(&StoreUrl)) {
+pub(crate) fn each_backend(tag: &str, reopen: bool, body: impl Fn(&StoreUrl)) {
     if reopen {
         let dir = std::env::temp_dir().join(format!(
             "mmo_ws_handle_{tag}_{}_{}",
@@ -39,12 +39,12 @@ fn each_backend(tag: &str, reopen: bool, body: impl Fn(&StoreUrl)) {
     rt.block_on(db.drop_db());
 }
 
-fn open(url: &StoreUrl) -> StoreHandle {
+pub(crate) fn open(url: &StoreUrl) -> StoreHandle {
     StoreHandle::open(url, Dials::BUILT).unwrap()
 }
 
 /// Runs raw SQL against a closed store (the handle must have shut down).
-fn raw_exec(url: &StoreUrl, sql: &str) {
+pub(crate) fn raw_exec(url: &StoreUrl, sql: &str) {
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
         let (pool, _guard) = open_pool(url, Dials::BUILT).await.unwrap();

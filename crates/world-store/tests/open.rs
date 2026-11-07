@@ -89,7 +89,7 @@ async fn newer_format_refused() {
         sqlite_of(&pool).close().await;
     }
     let err = open_pool(&url, Dials::BUILT).await.err().unwrap();
-    assert_eq!(err, StoreError::OtherFormat { found: 2 });
+    assert_eq!(err, StoreError::OtherFormat { found: 2, kind: world_store::FormatKind::Store });
     let _ = std::fs::remove_dir_all(dir);
 }
 

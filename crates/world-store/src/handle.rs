@@ -51,6 +51,12 @@ impl StoreHandle {
     }
 
     fn ask<T>(&self, make: impl FnOnce(Reply<T>) -> Request) -> Result<T, StoreError> {
+        if thread::on_store_thread() {
+            // Its answer would come from this very thread: refuse rather than hang.
+            return Err(StoreError::Backend(
+                "a blocking world-store call was made on the world-store thread itself".into(),
+            ));
+        }
         let (tx, rx) = crossbeam::channel::bounded(1);
         self.tx.send(make(Reply::Sync(tx))).map_err(|_| stopped())?;
         rx.recv().map_err(|_| stopped())?
@@ -65,8 +71,34 @@ impl StoreHandle {
         self.ask(|r| Request::PutArtifact(bytes, content_crc, r))
     }
 
+    /// Plan A's single-blob read (the `forged_archive` row); Task 6 removes it
+    /// in favour of [`StoreHandle::forged_archive`].
     pub fn artifact(&self) -> Result<Option<Vec<u8>>, StoreError> {
         self.ask(Request::Artifact)
+    }
+
+    /// The original forge file of the stored forged world (re-tiling, export);
+    /// hosts never read it.
+    pub fn forged_archive(&self) -> Result<Option<Vec<u8>>, StoreError> {
+        self.ask(Request::Artifact)
+    }
+
+    /// Writes the tiled forged world in one transaction ([`crate::write_tiled`]).
+    pub(crate) fn put_tiled(&self, rows: Box<crate::forged::TiledRows>) -> Result<(), StoreError> {
+        self.ask(|r| Request::PutTiled(rows, r))
+    }
+
+    pub(crate) fn forged_head(&self) -> Result<Option<crate::forged::ForgedHead>, StoreError> {
+        self.ask(Request::ForgedHead)
+    }
+
+    /// One encoded tile row, `None` if the store holds no such tile.
+    pub(crate) fn forged_tile(&self, t: worldgen::forged_tiles::TileCoords) -> Result<Option<Vec<u8>>, StoreError> {
+        self.ask(|r| Request::ForgedTile(t, r))
+    }
+
+    pub(crate) fn forged_world_map(&self) -> Result<Option<Vec<u8>>, StoreError> {
+        self.ask(Request::ForgedWorldMap)
     }
 
     /// The region as last committed; `None` if it never was (it never ran).

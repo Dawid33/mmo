@@ -4,5 +4,6 @@
 mod codec;
 mod handle;
 mod common;
+mod forged;
 mod open;
 mod schema;

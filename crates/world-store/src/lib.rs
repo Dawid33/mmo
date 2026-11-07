@@ -5,6 +5,7 @@
 //! `rows` is the SQL.
 
 mod codec;
+mod forged;
 mod handle;
 mod open;
 mod rows;
@@ -15,6 +16,7 @@ mod url;
 use std::fmt;
 
 pub use codec::*;
+pub use forged::{StoreTiles, load_forged, write_tiled};
 pub use handle::{CutCommitted, StoreHandle, WorldInfo};
 pub use open::{LockGuard, Pool, open_pool};
 pub use terrain::TerrainFromStore;
@@ -47,12 +49,25 @@ impl fmt::Display for Dials {
     }
 }
 
+/// Which stored format [`StoreError::OtherFormat`] is about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FormatKind {
+    /// The store's schema/format generation (`STORE_FORMAT_VERSION`).
+    Store,
+    /// The forged world's tiles (`worldgen::forged_tiles::TILED_FORMAT_VERSION`);
+    /// `archived`: the original forge file is stored, so the world can be re-tiled
+    /// without re-forging.
+    Tiles { archived: bool },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StoreError {
     Backend(String),
     Locked(String),
     OtherDials { stored: Dials, built: Dials },
-    OtherFormat { found: u32 },
+    /// A stored format this build does not read: the store's own
+    /// (`world.format_version`) or the forged tiles' (`forged_meta`).
+    OtherFormat { found: u32, kind: FormatKind },
     Corrupt(String),
 }
 
@@ -68,10 +83,22 @@ impl fmt::Display for StoreError {
                 f,
                 "this world was made with {stored} but this build has {built}; rebuild with the stored dials (just region_blocks=N chunk_blocks=N …) or use another world"
             ),
-            StoreError::OtherFormat { found } => write!(
+            StoreError::OtherFormat { found, kind: FormatKind::Store } => write!(
                 f,
                 "this world uses store format {found} but this build reads format {STORE_FORMAT_VERSION}; use a build that matches, or re-create the world"
             ),
+            StoreError::OtherFormat { found, kind: FormatKind::Tiles { archived } } => {
+                write!(
+                    f,
+                    "this world's forged tiles use format {found} but this build reads format {}; ",
+                    worldgen::forged_tiles::TILED_FORMAT_VERSION
+                )?;
+                if *archived {
+                    write!(f, "re-tile it from its archived forge file: `just worldctl retile <db>`")
+                } else {
+                    write!(f, "it keeps no archived forge file to re-tile from, so re-forge the world")
+                }
+            }
             StoreError::Corrupt(e) => write!(f, "world store is corrupt: {e}"),
         }
     }

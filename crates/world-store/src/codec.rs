@@ -16,6 +16,9 @@ pub const FORMAT_INTENT_MSG: u8 = 1;
 /// `regions.ground`: a region's `Vec<(ColumnCoords, ColumnGround)>`.
 pub const FORMAT_REGION_GROUND: u8 = 1;
 
+/// `forged_world_map.bytes`: the forged world's `game::WorldMap`.
+pub const FORMAT_WORLD_MAP: u8 = 1;
+
 /// zstd level of every stored blob.
 pub const ZSTD_LEVEL: i32 = 3;
 

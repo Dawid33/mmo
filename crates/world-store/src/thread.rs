@@ -13,6 +13,17 @@ use tokio::sync::{Mutex, mpsc, oneshot};
 use crate::rows;
 use crate::{CutCommitted, Dials, LockGuard, Pool, StoreError, StoreUrl, WorldInfo, open_pool};
 
+thread_local! {
+    /// Set on the `world-store` thread: a blocking [`crate::StoreHandle`] call
+    /// made there would wait on the very thread that has to answer it.
+    static ON_STORE_THREAD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Whether the caller is the `world-store` thread itself.
+pub(crate) fn on_store_thread() -> bool {
+    ON_STORE_THREAD.with(|f| f.get())
+}
+
 /// Where a request's answer goes: a blocking caller's channel or an async one's.
 pub(crate) enum Reply<T> {
     Sync(crossbeam::channel::Sender<Result<T, StoreError>>),
@@ -37,6 +48,10 @@ pub(crate) enum Request {
     WorldInfo(Reply<WorldInfo>),
     PutArtifact(Vec<u8>, u32, Reply<()>),
     Artifact(Reply<Option<Vec<u8>>>),
+    PutTiled(Box<crate::forged::TiledRows>, Reply<()>),
+    ForgedHead(Reply<Option<crate::forged::ForgedHead>>),
+    ForgedTile(worldgen::forged_tiles::TileCoords, Reply<Option<Vec<u8>>>),
+    ForgedWorldMap(Reply<Option<Vec<u8>>>),
     LoadRegion(RegionCoords, Reply<Option<game::StoredRegion>>),
     LoadTerrain(RegionCoords, Reply<Option<game::TerrainSnapshot>>),
     StoredRegions(Reply<std::collections::BTreeMap<RegionCoords, u64>>),
@@ -70,6 +85,7 @@ pub(crate) fn spawn(
     let join = std::thread::Builder::new()
         .name("world-store".into())
         .spawn(move || {
+            ON_STORE_THREAD.with(|f| f.set(true));
             let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
                 Ok(rt) => rt,
                 Err(e) => {
@@ -139,6 +155,13 @@ async fn serve(pool: Pool, guard: LockGuard, mut rx: mpsc::UnboundedReceiver<Req
                 r.send(on_pool!(&pool, put_artifact(bytes, crc)))
             }),
             Request::Artifact(r) => tokio::spawn(async move { r.send(on_pool!(&pool, artifact())) }),
+            Request::PutTiled(rows, r) => tokio::spawn(async move {
+                let _w = writer.lock().await;
+                r.send(on_pool!(&pool, put_tiled(rows)))
+            }),
+            Request::ForgedHead(r) => tokio::spawn(async move { r.send(on_pool!(&pool, forged_head())) }),
+            Request::ForgedTile(t, r) => tokio::spawn(async move { r.send(on_pool!(&pool, forged_tile(t))) }),
+            Request::ForgedWorldMap(r) => tokio::spawn(async move { r.send(on_pool!(&pool, forged_world_map())) }),
             Request::LoadRegion(rc, r) => tokio::spawn(async move { r.send(on_pool!(&pool, load_region(rc))) }),
             Request::LoadTerrain(rc, r) => tokio::spawn(async move { r.send(on_pool!(&pool, load_terrain(rc))) }),
             Request::StoredRegions(r) => tokio::spawn(async move { r.send(on_pool!(&pool, stored_regions())) }),

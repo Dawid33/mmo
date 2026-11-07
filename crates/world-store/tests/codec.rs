@@ -30,6 +30,50 @@ fn check<T: Serialize + DeserializeOwned + PartialEq + Debug>(name: &str, format
     assert_eq!(&back, value, "{name}: golden does not decode to the fixture value");
 }
 
+/// A 2 x 1 world map: one land tile with every optional field set, one sea tile.
+pub(crate) fn world_map() -> game::WorldMap {
+    let land = game::TileSummary {
+        ground_min_m: 12.5,
+        ground_mean_m: 40.25,
+        ground_max_m: 96.0,
+        relief_m: 83.5,
+        slope: [0.125, -0.25],
+        sea_fraction: 0.0,
+        lake_fraction: 0.0625,
+        lake_level_m: Some(30.0),
+        rivers: 2,
+        river_max_width_m: 14.0,
+        river_max_discharge_m2: 3.5,
+        surface_rock: Some(3),
+        landing: Some([17, 201]),
+        biome: game::Biome::BroadleafForest,
+        region: 1,
+        temperature_c: 11.5,
+        precip_mm: 900.0,
+        savagery: 33,
+        alignment: -1,
+        volcano: true,
+    };
+    let sea = game::TileSummary {
+        lake_level_m: None,
+        surface_rock: None,
+        landing: None,
+        biome: game::Biome::Ocean,
+        region: 0,
+        sea_fraction: 1.0,
+        volcano: false,
+        ..land.clone()
+    };
+    game::WorldMap {
+        origin: RegionCoords::new(-1, 4),
+        width: 2,
+        height: 1,
+        tiles: vec![land, sea],
+        rock_names: vec!["granite".into(), "basalt".into(), "limestone".into(), "slate".into()],
+        region_types: vec![game::RegionType::Ocean, game::RegionType::Forest],
+    }
+}
+
 pub(crate) fn eid(serial: u64) -> EntityId {
     EntityId { birth_region: RegionCoords::new(3, -2), serial }
 }
@@ -189,6 +233,7 @@ fn golden_blobs_decode() {
     check("intent_msg", FORMAT_INTENT_MSG, &intent());
     check("intent_msg_reply", FORMAT_INTENT_MSG, &IntentMsg::Reply(reply()));
     check("region_ground", FORMAT_REGION_GROUND, &region_ground());
+    check("world_map", FORMAT_WORLD_MAP, &world_map());
 }
 
 /// A region's ground recipes as `regions.ground` stores them.

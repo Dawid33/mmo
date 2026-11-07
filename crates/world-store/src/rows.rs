@@ -13,6 +13,7 @@ use game::{
 };
 
 use crate::codec::*;
+use crate::forged::{ForgedHead, TiledRows};
 use crate::{CutCommitted, StoreError, WorldInfo};
 
 /// u64 → i64, bit for bit.
@@ -102,7 +103,7 @@ macro_rules! engine_rows {
                     .ok_or_else(|| StoreError::Corrupt("the world row is missing".into()))?;
                 let crc: i64 = row.try_get(0)?;
                 let tick: i64 = row.try_get(1)?;
-                let artifacts: i64 = sqlx::query("SELECT COUNT(*) FROM forged_artifact")
+                let artifacts: i64 = sqlx::query("SELECT COUNT(*) FROM forged_archive")
                     .fetch_one(&mut *tx)
                     .await?
                     .try_get(0)?;
@@ -119,7 +120,7 @@ macro_rules! engine_rows {
             pub(crate) async fn put_artifact(pool: &Pool, bytes: Vec<u8>, crc: u32) -> Result<(), StoreError> {
                 let mut tx = pool.begin().await?;
                 sqlx::query(
-                    "INSERT INTO forged_artifact (id, bytes) VALUES (1, $1) \
+                    "INSERT INTO forged_archive (id, bytes) VALUES (1, $1) \
                      ON CONFLICT (id) DO UPDATE SET bytes = excluded.bytes",
                 )
                 .bind(bytes)
@@ -134,7 +135,105 @@ macro_rules! engine_rows {
             }
 
             pub(crate) async fn artifact(pool: &Pool) -> Result<Option<Vec<u8>>, StoreError> {
-                let row = sqlx::query("SELECT bytes FROM forged_artifact WHERE id = 1").fetch_optional(pool).await?;
+                let row = sqlx::query("SELECT bytes FROM forged_archive WHERE id = 1").fetch_optional(pool).await?;
+                Ok(match row {
+                    Some(r) => Some(r.try_get(0)?),
+                    None => None,
+                })
+            }
+
+            /// The tiled forged world, all of it in one transaction: the meta, every
+            /// tile (the old ones first deleted), the world map, the archive and
+            /// `world.content_crc`. Callers hold the writer lock.
+            pub(crate) async fn put_tiled(pool: &Pool, rows: Box<TiledRows>) -> Result<(), StoreError> {
+                let TiledRows { format_version, meta, tiles, world_map, archive, content_crc } = *rows;
+                let mut tx = pool.begin().await?;
+                sqlx::query(
+                    "INSERT INTO forged_meta (id, format_version, bytes) VALUES (1, $1, $2) \
+                     ON CONFLICT (id) DO UPDATE SET format_version = excluded.format_version, bytes = excluded.bytes",
+                )
+                .bind(i64::from(format_version))
+                .bind(meta)
+                .execute(&mut *tx)
+                .await?;
+                sqlx::query("DELETE FROM forged_tiles").execute(&mut *tx).await?;
+                for (t, bytes) in tiles {
+                    sqlx::query("INSERT INTO forged_tiles (tx, tz, bytes) VALUES ($1, $2, $3)")
+                        .bind(i64::from(t.tx))
+                        .bind(i64::from(t.tz))
+                        .bind(bytes)
+                        .execute(&mut *tx)
+                        .await?;
+                }
+                sqlx::query(
+                    "INSERT INTO forged_world_map (id, bytes) VALUES (1, $1) \
+                     ON CONFLICT (id) DO UPDATE SET bytes = excluded.bytes",
+                )
+                .bind(world_map)
+                .execute(&mut *tx)
+                .await?;
+                sqlx::query(
+                    "INSERT INTO forged_archive (id, bytes) VALUES (1, $1) \
+                     ON CONFLICT (id) DO UPDATE SET bytes = excluded.bytes",
+                )
+                .bind(archive)
+                .execute(&mut *tx)
+                .await?;
+                sqlx::query("UPDATE world SET content_crc = $1 WHERE id = 1")
+                    .bind(i64::from(content_crc))
+                    .execute(&mut *tx)
+                    .await?;
+                tx.commit().await?;
+                Ok(())
+            }
+
+            /// The tiled world's meta row with the world's content crc and whether
+            /// the archive row exists (one read transaction), or `None`.
+            pub(crate) async fn forged_head(pool: &Pool) -> Result<Option<ForgedHead>, StoreError> {
+                let mut tx = begin_read(pool).await?;
+                let row = sqlx::query("SELECT format_version, bytes FROM forged_meta WHERE id = 1")
+                    .fetch_optional(&mut *tx)
+                    .await?;
+                let Some(row) = row else {
+                    tx.commit().await?;
+                    return Ok(None);
+                };
+                let format_version: i64 = row.try_get(0)?;
+                let meta: Vec<u8> = row.try_get(1)?;
+                let crc: i64 = sqlx::query("SELECT content_crc FROM world WHERE id = 1")
+                    .fetch_optional(&mut *tx)
+                    .await?
+                    .ok_or_else(|| StoreError::Corrupt("the world row is missing".into()))?
+                    .try_get(0)?;
+                let archived: i64 = sqlx::query("SELECT COUNT(*) FROM forged_archive")
+                    .fetch_one(&mut *tx)
+                    .await?
+                    .try_get(0)?;
+                tx.commit().await?;
+                let content_crc =
+                    u32::try_from(crc).map_err(|_| StoreError::Corrupt(format!("content_crc {crc}")))?;
+                let format_version = u32::try_from(format_version)
+                    .map_err(|_| StoreError::Corrupt(format!("forged_meta.format_version {format_version}")))?;
+                Ok(Some(ForgedHead { format_version, meta, content_crc, archived: archived > 0 }))
+            }
+
+            pub(crate) async fn forged_tile(
+                pool: &Pool,
+                t: worldgen::forged_tiles::TileCoords,
+            ) -> Result<Option<Vec<u8>>, StoreError> {
+                let row = sqlx::query("SELECT bytes FROM forged_tiles WHERE tx = $1 AND tz = $2")
+                    .bind(i64::from(t.tx))
+                    .bind(i64::from(t.tz))
+                    .fetch_optional(pool)
+                    .await?;
+                Ok(match row {
+                    Some(r) => Some(r.try_get(0)?),
+                    None => None,
+                })
+            }
+
+            pub(crate) async fn forged_world_map(pool: &Pool) -> Result<Option<Vec<u8>>, StoreError> {
+                let row = sqlx::query("SELECT bytes FROM forged_world_map WHERE id = 1").fetch_optional(pool).await?;
                 Ok(match row {
                     Some(r) => Some(r.try_get(0)?),
                     None => None,

@@ -211,19 +211,22 @@ The water static layer (`docs/superpowers/plans/2026-11-06-water-static-layer.md
     2. `tile_map::build_world_map`;
     3. **one transaction** writing meta, tiles, world map, archive and `world.content_crc` (Decision 8).
   - `pub struct StoreTiles(StoreHandle)`, implementing `TileLoader` (`SELECT bytes FROM forged_tiles WHERE tx = $1 AND tz = $2`)
-  - `pub fn load_forged(handle: &StoreHandle) -> Result<Option<(ForgedWorld, WorldMap)>, StoreError>`: refuses `TILED_FORMAT_VERSION` mismatch with `StoreError::OtherFormat`, whose message names `just worldctl retile` when the archive exists.
+  - `pub fn load_forged(handle: &StoreHandle) -> Result<Option<(ForgedWorld, WorldMap)>, StoreError>`: refuses `TILED_FORMAT_VERSION` mismatch with `StoreError::OtherFormat { found, kind: FormatKind::Tiles { archived } }` (Plan A's variant gained `kind`; the store's own format is `FormatKind::Store`), whose message names `just worldctl retile` when the archive exists, else re-forge.
   - `StoreHandle::forged_archive(&self) -> Result<Option<Vec<u8>>, StoreError>`
+  - The tile codec (worldgen) carries a crc32 of each tile's / the meta's zstd body in its header, so a stored bit flip is a load error.
+  - A blocking `StoreHandle` call made on the `world-store` thread itself returns a `Backend` error instead of deadlocking (so `StoreTiles::load` there cannot hang).
 
 - [ ] **Step 1: Write the failing tests** (SQLite memory, the same on pg):
   - `write_then_load_bit_equal`: the Task 2 grid subset, through the store.
   - `world_map_is_stored`: equal to `build_world_map(&whole)`.
   - `content_crc_is_stable`: two writes of the same bytes give the same crc.
   - `old_tile_format_refused`.
-  - `two_handles_read_same_tiles` (pg only).
+  - `damaged_tile_row_fails_its_load`: one byte flipped in a stored tile row → the prefetch fails naming the tile.
+  - `two_handles_read_same_tiles` (pg only). Plan A's world lock (a session advisory lock) lets only ONE `StoreHandle` open a world database, so the second host is its own Postgres pool + `TileLoader` (same `SELECT`) over the stored meta row; both sample concurrently, bit-equal to the whole world. Two real `StoreHandle`s become possible once R2's owner epochs replace the lock.
   - `schemas_match` (Plan A test, still green).
 - [ ] **Step 2: Run** `just test-one world-store "--test it forged::"` and `just test-pg "--test it forged::"`. Expected: FAIL.
 - [ ] **Step 3: Implement** the writer, the loader and the migrations.
-- [ ] **Step 4: Run** the same commands plus `just test-one world-store "--test it schema::"`. Expected: PASS.
+- [ ] **Step 4: Run** the same commands plus `just test-one world-store "--test it schema::"` (and `just test-pg` of it). Expected: PASS. The forged tests are slow-tagged: run them with `-- --include-ignored`.
 - [ ] **Step 5: Commit**: `feat(world-store): forged world as tiles + stored WorldMap`.
 
 ### Task 5: Server and tools on the tiled world
