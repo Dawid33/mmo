@@ -542,7 +542,7 @@ impl Plugin for CommanderPlugin {
                         .chain(),
                     (follow_terrain, follow::follow_camera, bounds::clamp_to_window, level::track_camera_level)
                         .chain(),
-                    underground_view,
+                    (underground_view, first_person_water_fog),
                     (top_down::sync_top_down_projection, apply_camera_transform).chain(),
                     (
                         designate::designate_keys,
@@ -1069,6 +1069,39 @@ fn home_block_solid(mirror: &tiles::TileMirror, eye: Vec3) -> Option<bool> {
     Some(id != game::BlockId::AIR && game::block_props().is_solid(id))
 }
 
+/// Whether world point `eye` lies in a water cell of the home region
+/// (`TileSource::water_units` > 0: recipe water or a liquid block).
+pub fn eye_in_water(mirror: &tiles::TileMirror, eye: Vec3) -> bool {
+    let world = eye / game::BLOCK_VOXELS as f32;
+    let (bx, bz) = (world.x.floor() as i32, world.z.floor() as i32);
+    if !mirror.in_home(bx, bz) {
+        return false;
+    }
+    let n = game::REGION_BLOCKS as i32;
+    game::TileSource::water_units(mirror, [bx.rem_euclid(n), world.y.floor() as i32, bz.rem_euclid(n)]) > 0
+}
+
+/// Keeps the first-person (body) camera's fog in step with the water: the
+/// underwater fog while its eye is in water, the distance fog otherwise.
+/// (`underground_view` only drives the commander camera; this camera has the
+/// sky and sun as they are and swaps nothing else.)
+pub fn first_person_water_fog(
+    mirror: Res<tiles::TileMirror>,
+    view: Option<Res<crate::renderer::atmosphere::ViewDistance>>,
+    mut cams: Query<(&GlobalTransform, &mut bevy::pbr::DistanceFog), (With<Camera3d>, With<crate::renderer::bridge::LocalBody>)>,
+) {
+    for (gt, mut fog) in &mut cams {
+        let want = if eye_in_water(&mirror, gt.translation()) {
+            crate::renderer::atmosphere::underwater_fog()
+        } else {
+            crate::renderer::atmosphere::distance_fog(&view.as_deref().copied().unwrap_or_default())
+        };
+        if fog.color != want.color {
+            *fog = want;
+        }
+    }
+}
+
 /// Inside a block: no sun shadows (everything down there is shadowed), a
 /// brighter ambient, the rock backdrop instead of the sky and the fog closed
 /// in on it (`skybox::UndergroundCubemap`, `atmosphere::underground_fog`);
@@ -1086,21 +1119,23 @@ fn underground_view(
     mut surface_ambient: Local<Option<f32>>,
     td: Option<Res<top_down::TopDown>>,
     working: Res<level::WorkingLevel>,
-    mut fog_choice: crate::session::SessionLocal<Option<(bool, bool)>>,
+    mut fog_choice: crate::session::SessionLocal<Option<(bool, bool, bool)>>,
     view: Option<Res<crate::renderer::atmosphere::ViewDistance>>,
 ) {
     let Some(mut ambient) = ambient else { return };
     // Top-down: its eye is always in the air; underground is the working
     // level below the surface at the focus, and there is no fog.
     let top = td.is_some_and(|t| t.on);
-    let under = if top {
-        top_down::top_down_underground(working.level, top_down::lowest_surface_level(grid.surface_range()))
+    // Underground beats underwater beats open air.
+    let (under, wet) = if top {
+        (top_down::top_down_underground(working.level, top_down::lowest_surface_level(grid.surface_range())), false)
     } else {
         let eye = camera_transform(focus_point(&cam), cam.distance, cam.yaw, cam.pitch).translation;
-        eye_in_block(home_block_solid(&mirror, eye), eye, grid.surface_at(eye.x, eye.z))
+        let under = eye_in_block(home_block_solid(&mirror, eye), eye, grid.surface_at(eye.x, eye.z));
+        (under, !under && eye_in_water(&mirror, eye))
     };
     let fog_choice = fog_choice.get();
-    let new_fog = *fog_choice != Some((top, under));
+    let new_fog = *fog_choice != Some((top, under, wet));
     for (skybox, fog) in &mut views {
         if let (Some(mut skybox), Some(sky), Some(rock)) = (skybox, sky.as_deref(), rock.as_deref()) {
             let want = if under { &rock.0 } else { &sky.0 };
@@ -1113,6 +1148,8 @@ fn underground_view(
                 crate::renderer::atmosphere::top_down_fog()
             } else if under {
                 crate::renderer::atmosphere::underground_fog()
+            } else if wet {
+                crate::renderer::atmosphere::underwater_fog()
             } else {
                 crate::renderer::atmosphere::distance_fog(&view.as_deref().copied().unwrap_or_default())
             };
@@ -1122,7 +1159,7 @@ fn underground_view(
                 *fog = want;
             }
             // Recorded only once a fog was there to take it.
-            *fog_choice = Some((top, under));
+            *fog_choice = Some((top, under, wet));
         }
     }
     let base = *surface_ambient.get_or_insert(ambient.brightness);

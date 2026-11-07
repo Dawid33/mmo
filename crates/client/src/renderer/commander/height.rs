@@ -122,6 +122,9 @@ pub struct HeightGrid {
     stacks: HashMap<(i32, i32), BTreeMap<i32, ChunkTops>>,
     /// Which chunk an entity's voxels were filed under, for removals.
     by_entity: HashMap<Entity, [i32; 3]>,
+    /// Recipe water per world block column: the topmost water block y
+    /// (`ColumnGround::water_top`), from the regions' ground recipes.
+    water_tops: HashMap<(i32, i32), i16>,
     /// Bumped on every change, so readers (the minimap) can rebuild lazily.
     pub version: u64,
 }
@@ -138,6 +141,7 @@ impl HeightGrid {
             columns: HashMap::new(),
             stacks: HashMap::new(),
             by_entity: HashMap::new(),
+            water_tops: HashMap::new(),
             version: 0,
         }
     }
@@ -162,6 +166,34 @@ impl HeightGrid {
             .map(|c| c.1)
             .filter(|h| !h.is_nan())
             .fold(None, |r, h| Some(r.map_or((h, h), |(lo, hi)| (lo.min(h), hi.max(h)))))
+    }
+
+    /// Take `region`'s recipe water (its `Reset`'s ground recipes): a column's
+    /// surface then reaches the water's top (`water_top + 1`), its ground
+    /// does not. Replaces the region's earlier recipe water.
+    pub fn set_recipe_water(&mut self, region: game::RegionId, ground: &std::collections::BTreeMap<game::ColumnCoords, game::ColumnGround>) {
+        let n = game::REGION_BLOCKS as i32;
+        let (x0, z0) = (region.x * n, region.z * n);
+        self.water_tops.retain(|&(x, z), _| !(x0..x0 + n).contains(&x) || !(z0..z0 + n).contains(&z));
+        for (coords, g) in ground {
+            for lx in 0..CHUNK_BLOCKS {
+                for lz in 0..CHUNK_BLOCKS {
+                    if g.recipe_water(lx, lz).is_some() {
+                        let key = (x0 + (coords.x * CHUNK_BLOCKS + lx) as i32, z0 + (coords.z * CHUNK_BLOCKS + lz) as i32);
+                        self.water_tops.insert(key, g.water_top[lx * CHUNK_BLOCKS + lz]);
+                    }
+                }
+            }
+        }
+        let per = game::REGION_CHUNKS as i32;
+        for cz in region.z * per..(region.z + 1) * per {
+            for cx in region.x * per..(region.x + 1) * per {
+                if self.stacks.contains_key(&(cx, cz)) {
+                    self.recompute(cx, cz);
+                }
+            }
+        }
+        self.version += 1;
     }
 
     /// File a chunk's tops under its key (chunk coordinates, world / `CHUNK_UNITS`).
@@ -220,7 +252,12 @@ impl HeightGrid {
                         .find(|(_, t)| pick(t)[column] > 0)
                         .map_or(f32::NAN, |(cy, t)| *cy as f32 * chunk + pick(t)[column] as f32)
                 };
-                self.columns.insert(block, (top(|t| &t.surface), top(|t| &t.ground)));
+                let (mut surface, ground) = (top(|t| &t.surface), top(|t| &t.ground));
+                // Recipe water stands over the ground; the column must be loaded.
+                if let Some(&water) = self.water_tops.get(&block) {
+                    surface = surface.max((i32::from(water) + 1) as f32 * BLOCK_VOXELS as f32);
+                }
+                self.columns.insert(block, (surface, ground));
             }
         }
         self.version += 1;
@@ -243,9 +280,15 @@ fn world_chunk_key(tf: &Transform, sim: &SimEntity) -> [i32; 3] {
 /// Keep the grid in step with the sim chunks' blocks.
 pub fn update_height_grid(
     mut grid: ResMut<HeightGrid>,
+    mut msgs: MessageReader<super::tiles::TileMirrorMsg>,
     changed: Query<(Entity, &SimChunk, &Transform, &SimEntity), Changed<SimChunk>>,
     mut removed: RemovedComponents<SimChunk>,
 ) {
+    for msg in msgs.read() {
+        if let super::tiles::TileMirrorMsg::Reset { region, ground, .. } = msg {
+            grid.set_recipe_water(*region, ground);
+        }
+    }
     for entity in removed.read() {
         grid.remove_entity(entity);
     }
@@ -339,6 +382,30 @@ mod tests {
         assert_eq!(tops.surface, [20; COLUMNS]);
         assert_eq!(tops.ground, [8; COLUMNS]);
         assert_eq!(chunk_tops(&layered(0, 0, STONE)), ChunkTops::default());
+    }
+
+    /// Recipe water raises a column's surface to its top (`water_top + 1`)
+    /// but never its ground, with or without a water block in the chunks.
+    #[test]
+    fn recipe_water_raises_surface_not_ground() {
+        use std::collections::BTreeMap;
+        let bv = BLOCK_VOXELS as f32;
+        let mut grid = HeightGrid::new();
+        // One stone block at world block y 64 (chunk y 64 / CHUNK_BLOCKS, block 0 of it).
+        let cy = 64 / CHUNK_BLOCKS as i32;
+        assert_eq!(64 % CHUNK_BLOCKS, 0);
+        let entity = Entity::from_raw_u32(1).unwrap();
+        grid.insert_chunk(entity, [0, cy, 0], chunk_tops(&layered(BLOCK_VOXELS, BLOCK_VOXELS, STONE)));
+        let (x, z) = (bv * 3.0 + 1.0, bv * 2.0 + 1.0);
+        assert_eq!(grid.column_at(x, z), Some((65.0 * bv, 65.0 * bv)), "dry before the recipe");
+        let mut ground = game::ColumnGround::plain(vec![64; game::COLUMN_FOOTPRINT].into_boxed_slice(), 0, STONE, STONE);
+        ground.water_top[3 * CHUNK_BLOCKS + 2] = 70;
+        let v = grid.version;
+        grid.set_recipe_water(game::RegionCoords::new(0, 0), &BTreeMap::from([(game::ColumnCoords::new(0, 0), ground)]));
+        assert!(grid.version > v);
+        assert_eq!(grid.column_at(x, z), Some((71.0 * bv, 65.0 * bv)));
+        // A column beside it stays dry.
+        assert_eq!(grid.column_at(bv * 4.0 + 1.0, z), Some((65.0 * bv, 65.0 * bv)));
     }
 
     #[test]

@@ -262,6 +262,25 @@ pub fn underground_fog() -> DistanceFog {
     }
 }
 
+/// With the eye in water the fog closes in short and blue: clear to START
+/// metres, gone by END. The sky and the sun's shadows stay; only the fog swaps.
+pub const UNDERWATER_FOG_START_M: f32 = 2.0;
+pub const UNDERWATER_FOG_END_M: f32 = 24.0;
+/// The underwater fog colour, sRGB (scaled to the skybox's exposure units like the other fogs).
+pub const UNDERWATER_FOG_COLOR: [f32; 3] = [0.06, 0.22, 0.30];
+
+/// The fog while the eye is in water ([`UNDERWATER_FOG_COLOR`], linear over `START..END`).
+pub fn underwater_fog() -> DistanceFog {
+    let c = LinearRgba::from(Color::srgb(UNDERWATER_FOG_COLOR[0], UNDERWATER_FOG_COLOR[1], UNDERWATER_FOG_COLOR[2]));
+    let scale = skybox::BRIGHTNESS * Exposure::default().exposure();
+    let unit = game::movement::UNITS_PER_METER;
+    DistanceFog {
+        color: Color::LinearRgba(LinearRgba::rgb(c.red * scale, c.green * scale, c.blue * scale)),
+        falloff: FogFalloff::Linear { start: UNDERWATER_FOG_START_M * unit, end: UNDERWATER_FOG_END_M * unit },
+        ..Default::default()
+    }
+}
+
 /// The fog in the top-down view: none. Its eye is far above the ground
 /// (`top_down::TOP_DOWN_EYE_HEIGHT_M`), so eye-distance fog would haze the
 /// working level; the levels below darken by depth instead
@@ -312,6 +331,16 @@ pub fn attach_fog(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn underwater_fog_is_short_and_blue() {
+        let fog = underwater_fog();
+        let FogFalloff::Linear { start, end } = fog.falloff else { panic!("linear") };
+        let unit = game::movement::UNITS_PER_METER;
+        assert!(start < end && end <= 24.0 * unit, "{start}..{end}");
+        let c = LinearRgba::from(fog.color);
+        assert!(c.blue > c.red, "{c:?}");
+    }
 
     #[test]
     fn fog_colour_matches_the_rendered_skybox_horizon() {
