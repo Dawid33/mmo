@@ -46,11 +46,12 @@ pub fn connect(
     server_send: Sender<ServerPacket>,
     client_recv: Receiver<ClientPacket>,
     lost: Sender<String>,
+    credential: Option<game::Credential>,
 ) {
     let incoming = Incoming::Packets(server_send);
     let outgoing = Outgoing::Packets(client_recv);
     spawn_local(async move {
-        if let Err(e) = run(server, incoming, outgoing, lost.clone()).await {
+        if let Err(e) = run(server, incoming, outgoing, lost.clone(), credential).await {
             connection_lost(&lost, &js_error_text(&e));
         }
     });
@@ -65,10 +66,11 @@ pub fn connect_frames(
     on_frame: impl FnMut(Vec<u8>) + 'static,
     outgoing: Receiver<Vec<u8>>,
     lost: Sender<String>,
+    credential: Option<game::Credential>,
 ) {
     let incoming = Incoming::Frames(Box::new(on_frame));
     spawn_local(async move {
-        if let Err(e) = run(server, incoming, Outgoing::Frames(outgoing), lost.clone()).await {
+        if let Err(e) = run(server, incoming, Outgoing::Frames(outgoing), lost.clone(), credential).await {
             connection_lost(&lost, &js_error_text(&e));
         }
     });
@@ -138,7 +140,13 @@ const CONNECT_RETRY_LOG_EVERY: u32 = 10;
 /// at most this long for the wire.
 const WRITE_POLL_MS: i32 = 4;
 
-async fn run(server: WebServer, mut incoming_to: Incoming, outgoing: Outgoing, lost: Sender<String>) -> Result<(), JsValue> {
+async fn run(
+    server: WebServer,
+    mut incoming_to: Incoming,
+    outgoing: Outgoing,
+    lost: Sender<String>,
+    credential: Option<game::Credential>,
+) -> Result<(), JsValue> {
     let started = js_sys::Date::now();
     let mut attempt = 1u32;
     let transport = loop {
@@ -225,8 +233,11 @@ async fn run(server: WebServer, mut incoming_to: Incoming, outgoing: Outgoing, l
     //    a task that yields to the event loop between drains.
     // The handshake goes first: the server starts the session once this
     // `Hello` resolves, and refuses a connection that sends anything else.
+    // `credential` is a join JWT from the login service; `None` = this
+    // browser's player token.
+    let credential = credential.unwrap_or_else(|| game::Credential::Token(crate::player_token::load_or_create_token()));
     let mut hello = Some(
-        game::encode_packet(&ClientPacket::Hello { credential: game::Credential::Token(crate::player_token::load_or_create_token()) })
+        game::encode_packet(&ClientPacket::Hello { credential })
             .map_err(|e| JsValue::from_str(&format!("cannot encode Hello: {e}")))?,
     );
     spawn_local(async move {

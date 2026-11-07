@@ -193,7 +193,7 @@ impl fmt::Display for WorldScale {
 /// One parameter of a page URL's query string (`?world=small`,
 /// `?port=1&world=tiny&view=3000`), for the browser build's [`WorldScale`].
 #[cfg(any(target_arch = "wasm32", test))]
-fn query_param<'a>(search: &'a str, name: &str) -> Option<&'a str> {
+pub(crate) fn query_param<'a>(search: &'a str, name: &str) -> Option<&'a str> {
     search
         .trim_start_matches('?')
         .split('&')

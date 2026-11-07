@@ -48,9 +48,10 @@ pub fn start_session(
     channels: SessionChannels,
     debug_flags: game::DebugFlags,
     world_scale: crate::world_scale::WorldScale,
+    credential: Option<game::Credential>,
 ) -> SimDriverRes {
     if crate::web_worker::enabled() {
-        match crate::web_worker::sim::SimWorker::start(server.clone(), channels.clone(), debug_flags.clone(), world_scale)
+        match crate::web_worker::sim::SimWorker::start(server.clone(), channels.clone(), debug_flags.clone(), world_scale, credential.clone())
         {
             Ok(worker) => return SimDriverRes(SyncCell::new(SimBackend::Worker(Box::new(worker)))),
             Err(e) => error!("[session] sim worker failed to start ({e:?}): running the sim on the main thread"),
@@ -66,7 +67,7 @@ pub fn start_session(
     // Same subscription scale as the native game thread (`?world=` here).
     manager.set_world_scale(world_scale);
     manager.set_request_recv(request_recv);
-    crate::netcode_web::connect(server, server_send, manager.client_packet_recv(), lost_send);
+    crate::netcode_web::connect(server, server_send, manager.client_packet_recv(), lost_send, credential);
     manager.start();
     let driver = SimDriver { manager, server_recv, lost, client_tick_ms: 0.0 };
     SimDriverRes(SyncCell::new(SimBackend::Inline(Box::new(driver))))

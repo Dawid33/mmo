@@ -40,7 +40,7 @@ pub enum WebServer {
     PinnedLocal,
 }
 
-fn is_local_host(host: &str) -> bool {
+pub(crate) fn is_local_host(host: &str) -> bool {
     host.is_empty()
         || host == "localhost"
         || host.ends_with(".localhost")

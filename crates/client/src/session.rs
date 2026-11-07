@@ -508,6 +508,7 @@ mod flow {
                 debug_flags,
                 world_scale,
                 crate::netcode::ConnectPolicy::default(),
+                None,
             )
         }
     }
@@ -820,7 +821,7 @@ mod web_flow {
         channels.install(world);
         let debug_flags = world.resource::<DebugFlagsRes>().0.clone();
         let config = *world.resource::<SimConfig>();
-        let driver = crate::sim_driver::start_session(server, channels, debug_flags, config.world_scale);
+        let driver = crate::sim_driver::start_session(server, channels, debug_flags, config.world_scale, None);
         world.insert_resource(driver);
     }
 

@@ -17,6 +17,9 @@ path = "src/main.rs"
 [dependencies]
 bbmodel = { workspace = true }
 game = { workspace = true }
+# The login service's HTTP DTOs (serde only) and its client: native rustls (ring), browser fetch.
+login-api = { workspace = true }
+reqwest = { workspace = true }
 # Player-facing game UI (Factorio-style Slint widgets, software-rendered):
 # composited by `renderer/slint_overlay.rs`.
 slint-ui = { workspace = true }

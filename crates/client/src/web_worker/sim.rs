@@ -363,6 +363,7 @@ impl SimWorker {
         channels: SessionChannels,
         debug_flags: game::DebugFlags,
         world_scale: WorldScale,
+        credential: Option<game::Credential>,
     ) -> Result<Self, JsValue> {
         let worker = super::spawn("sim", "orion-sim")?;
         let wireframes = debug_flags.collider_wireframes();
@@ -415,6 +416,7 @@ impl SimWorker {
             },
             frames_recv,
             lost_send,
+            credential,
         );
 
         let SessionChannels { game_recv, client_send, request_recv, .. } = channels;

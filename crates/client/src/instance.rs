@@ -78,6 +78,8 @@ pub enum Command {
         game::DebugFlags,
         crate::world_scale::WorldScale,
         crate::netcode::ConnectPolicy,
+        // What the Hello carries; `None` = this machine's player token.
+        Option<game::Credential>,
     ),
     /// Quit the game thread. Should only be send when quitting the application.
     Quit,
@@ -99,12 +101,14 @@ pub fn start_game_thread() -> Sender<Command> {
                 debug_flags,
                 world_scale,
                 connect_policy,
+                credential,
             )) => {
                 let mut manager =
                     GameInstanceManager::new(sender, receiver, client_sender, server, debug_flags);
                 manager.set_world_scale(world_scale);
                 manager.set_request_recv(request_recv);
                 manager.set_connect_policy(connect_policy);
+                manager.set_credential(credential);
                 // The manager owns `client_sender`; keep a handle to report
                 // how the session ended. Exactly one report per session,
                 // then wait for the next command: a lost server must not
@@ -159,6 +163,9 @@ pub struct GameInstanceManager {
     /// How `connect_and_run` retries the initial connect (tests shorten it).
     #[cfg(not(target_arch = "wasm32"))]
     connect_policy: crate::netcode::ConnectPolicy,
+    /// The Hello's credential (`None` = the machine's player token).
+    #[cfg(not(target_arch = "wasm32"))]
+    credential: Option<game::Credential>,
 
     server_game_send: Sender<ClientPacket>,
     server_game_recv: Receiver<ClientPacket>,
@@ -658,6 +665,8 @@ impl GameInstanceManager {
             server,
             #[cfg(not(target_arch = "wasm32"))]
             connect_policy: crate::netcode::ConnectPolicy::default(),
+            #[cfg(not(target_arch = "wasm32"))]
+            credential: None,
             host: crate::regions::host::RegionHost::inline(),
             world_started: false,
             views: BTreeMap::new(),
@@ -714,6 +723,13 @@ impl GameInstanceManager {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn set_connect_policy(&mut self, policy: crate::netcode::ConnectPolicy) {
         self.connect_policy = policy;
+    }
+
+    /// Identify with this credential instead of the machine's player token
+    /// (a join JWT from the login service).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn set_credential(&mut self, credential: Option<game::Credential>) {
+        self.credential = credential;
     }
 
     /// Take UI requests (`ClientRequest`) from this channel.
@@ -1802,6 +1818,7 @@ impl GameInstanceManager {
             self.server,
         )
         .with_connect_policy(self.connect_policy)
+        .with_credential(self.credential.clone())
         .with_cancel(cancel_recv);
         // The netcode thread's result says why the connection ended; it is
         // read once `server_recv` closes (the thread dropped its sender).
@@ -3164,6 +3181,7 @@ mod tests {
                     retry_interval: Duration::from_millis(10),
                     deadline: Duration::from_millis(150),
                 },
+                None,
             ))
             .unwrap();
         let deadline = Instant::now() + Duration::from_secs(2);
@@ -3223,6 +3241,7 @@ mod tests {
                     retry_interval: Duration::from_millis(10),
                     deadline: Duration::from_secs(60),
                 },
+                None,
             ))
             .unwrap();
         assert!(
