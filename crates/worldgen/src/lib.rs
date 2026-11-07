@@ -397,7 +397,7 @@ pub fn generate_columns(
     let (x, z) = (coords.x * REGION_BLOCKS + xs.start as i32 * cb, coords.z * REGION_BLOCKS + zs.start as i32 * cb);
     let (ox, oz, span) = patch_window(x, z, xs.len().max(zs.len()) as i32 * cb, &mats);
     if let Some(world) = forged::active() {
-        let trees_from = TreeSource { habitat: world, seed: world.artifact().seed };
+        let trees_from = TreeSource { habitat: world, seed: world.seed() };
         return columns_from_patch(&world.patch(ox, oz, span), coords, xs, zs, mats, trees_from);
     }
     let grid = TerrainPipeline::new(seed).profile_grid(ox, oz, span);
@@ -425,7 +425,7 @@ pub fn generate_region_forged(
     mats: Materials,
 ) -> Vec<(ColumnCoords, Column)> {
     let (ox, oz, span) = patch_window(coords.x * REGION_BLOCKS, coords.z * REGION_BLOCKS, REGION_BLOCKS, &mats);
-    let trees_from = TreeSource { habitat: world, seed: world.artifact().seed };
+    let trees_from = TreeSource { habitat: world, seed: world.seed() };
     columns_from_patch(&world.patch(ox, oz, span), coords, 0..REGION_CHUNKS, 0..REGION_CHUNKS, mats, trees_from)
 }
 
@@ -759,7 +759,7 @@ pub fn coarse_tile_forged(
     let ring = (cb + lattice - 1) / lattice * lattice;
     let (ox, oz, span) = coarse_patch_window(key, &mats);
     let (ox, oz, span) = (ox - ring as f64, oz - ring as f64, span + 2.0 * ring as f64);
-    let trees_from = TreeSource { habitat: world, seed: world.artifact().seed };
+    let trees_from = TreeSource { habitat: world, seed: world.seed() };
     coarse_from_patch(&world.patch(ox, oz, span), key, mats, trees_from)
 }
 

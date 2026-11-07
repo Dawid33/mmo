@@ -83,7 +83,7 @@ fn grid_covers_the_artifact() {
         assert!(tx < x1 && tx + tile_m() > x0 && tz < z1 && tz + tile_m() > z0, "{rc:?} misses the artifact");
     }
     assert!(map.tile(RegionCoords::new(map.origin.x - 1, map.origin.z)).is_none());
-    assert_eq!(map.rock_names, world.artifact().rock_names);
+    assert_eq!(map.rock_names, world.globals().rock_names);
 }
 
 #[test]
@@ -349,7 +349,7 @@ fn summary_carries_dominant_biome() {
     a.volcanoes = vec![volcano];
     let world = ForgedWorld::new(a);
     let map = build_world_map(&world);
-    let a = world.artifact();
+    let a = world.artifact().expect("whole world");
     assert_eq!(map.region_types, a.regions.iter().map(|r| r.kind).collect::<Vec<_>>());
     for (i, t) in map.tiles.iter().enumerate() {
         let rc = map.coords(i);

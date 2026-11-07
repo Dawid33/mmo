@@ -306,7 +306,7 @@ fn biome_cell_is_classify_of_cell_climate() {
     }
     // Clamped outside the map.
     assert_eq!(world.biome_cell(-1.0e6, -1.0e6), world.biome_cell(cell(0, 0).0, cell(0, 0).1));
-    let a = world.artifact();
+    let a = world.artifact().expect("whole world");
     assert_eq!(a.regions.iter().map(|r| r.cells as usize).sum::<usize>(), N * N);
     assert!(a.region.iter().all(|&r| (r as usize) < a.regions.len()));
 }
@@ -406,7 +406,7 @@ fn artifact_v3_round_trip_preserves_samples() {
     let after = ForgedWorld::load(&path);
     let _ = std::fs::remove_file(&path);
     let after = after.unwrap();
-    assert_eq!(after.artifact(), &artifact);
+    assert_eq!(after.artifact(), Some(&artifact));
     let mut state = 42u64;
     for _ in 0..200 {
         // Engine meters of a random point inside the artifact.
@@ -1034,7 +1034,7 @@ fn cold_sea_floors_are_sand_under_the_ice() {
     // The glacier half meets the frozen sea strip at artifact x 960.
     let glacier_coast = sea_floors(&two_biome_world(), EAST_SEA_FROM as f64 * CELL_M);
     // A tundra coast: the same sea strip next to -8 C tundra.
-    let mut a = one_climate_world(-8.0, 300.0, 50).artifact().clone();
+    let mut a = one_climate_world(-8.0, 300.0, 50).artifact().expect("whole world").clone();
     let mut height = a.height.to_f32();
     for (i, h) in height.iter_mut().enumerate() {
         if i % N >= EAST_SEA_FROM {
@@ -1116,8 +1116,8 @@ fn whole_rasters_refactor_is_bit_exact() {
         }
     }
     // Raster cells, the map and 200 m past it.
-    let n = i64::from(world.artifact().n);
-    let pad = (OUTSIDE_M / world.artifact().cell_m).ceil() as i64;
+    let n = i64::from(world.globals().n);
+    let pad = (OUTSIDE_M / world.globals().cell_m).ceil() as i64;
     for iz in -pad..n + pad {
         for ix in -pad..n + pad {
             f64b(&mut h, world.extended_cell_height(ix, iz));
@@ -1144,7 +1144,7 @@ fn whole_rasters_refactor_is_bit_exact() {
     }
     h.update(&bincode::serialize(&worldgen::coarse_water_forged(&world, &key, mats)).unwrap());
 
-    let a = world.artifact();
+    let a = world.artifact().expect("whole world");
     let crc = h.finalize();
     println!(
         "guard: {points} points ({wet} wet), {} rivers, {} lakes, edges {:?}, regions {regions:?}: crc {crc:#010X}",

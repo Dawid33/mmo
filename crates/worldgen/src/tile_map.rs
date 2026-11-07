@@ -58,6 +58,7 @@ fn block_m() -> f64 {
 /// The map of every engine region tile intersecting `world`'s artifact, row-major
 /// by z then x. See [`summarize_tile`] for what each tile holds.
 pub fn build_world_map(world: &ForgedWorld) -> WorldMap {
+    let a = world.artifact().expect("whole world");
     let (min, max) = world.artifact_bounds_engine_m();
     let t = tile_m();
     let first = |v: f64| (v / t).floor() as i32;
@@ -71,10 +72,9 @@ pub fn build_world_map(world: &ForgedWorld) -> WorldMap {
         for dx in 0..width as i32 {
             let rc = RegionCoords::new(origin.x + dx, origin.z + dz);
             let rivers = reaches.get(&(rc.x, rc.z)).map_or(&[][..], Vec::as_slice);
-            tiles.push(summarize_tile_with(world, rc, rivers.iter().map(|&k| &world.artifact().rivers[k]).collect()));
+            tiles.push(summarize_tile_with(world, rc, rivers.iter().map(|&k| &a.rivers[k]).collect()));
         }
     }
-    let a = world.artifact();
     WorldMap {
         origin,
         width,
@@ -102,7 +102,7 @@ fn reaches_by_tile(world: &ForgedWorld) -> std::collections::HashMap<(i32, i32),
     let (min, _) = world.artifact_bounds_engine_m();
     let t = tile_m();
     let mut by_tile: std::collections::HashMap<(i32, i32), Vec<usize>> = Default::default();
-    for (k, reach) in world.artifact().rivers.iter().enumerate() {
+    for (k, reach) in world.artifact().expect("whole world").rivers.iter().enumerate() {
         for p in &reach.points {
             let guess = (
                 ((min[0] + f64::from(p.x)) / t).floor() as i32,
@@ -147,14 +147,14 @@ struct Cell {
 /// climate and savagery their means, `alignment` the mode region's; a tile
 /// with no cell centre inside the artifact reads the nearest edge cell.
 pub fn summarize_tile(world: &ForgedWorld, rc: RegionCoords) -> TileSummary {
-    let reaches =
-        world.artifact().rivers.iter().filter(|r| r.points.iter().any(|p| in_footprint(world, rc, p.x, p.z))).collect();
+    let rivers = &world.artifact().expect("whole world").rivers;
+    let reaches = rivers.iter().filter(|r| r.points.iter().any(|p| in_footprint(world, rc, p.x, p.z))).collect();
     summarize_tile_with(world, rc, reaches)
 }
 
 /// [`summarize_tile`] with the tile's river reaches already found.
 fn summarize_tile_with(world: &ForgedWorld, rc: RegionCoords, reaches: Vec<&crate::forged::RiverReach>) -> TileSummary {
-    let a = world.artifact();
+    let a = world.artifact().expect("whole world");
     let n = i64::from(a.n);
     let cell_m = a.cell_m;
     let (min, _) = world.artifact_bounds_engine_m();
@@ -260,7 +260,7 @@ struct TileClimate {
 
 /// The stored per-cell fields over `cells` (see [`summarize_tile`]).
 fn climate(world: &ForgedWorld, cells: &[Cell]) -> TileClimate {
-    let a = world.artifact();
+    let a = world.artifact().expect("whole world");
     let n = i64::from(a.n);
     let mut index: Vec<usize> =
         cells.iter().filter(|c| c.inside).map(|c| (c.iz * n + c.ix) as usize).collect();

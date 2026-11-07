@@ -7,7 +7,7 @@
 //!
 //! Only + - * /, floor and sqrt are used (the `noise.rs` determinism policy).
 
-use crate::forged::ForgedWorld;
+use crate::forged::{ForgedWorld, QRasterId};
 use game::Biome;
 use crate::noise::OctaveNoise;
 use crate::pipeline::{TerrainPipeline, SEA_TOP_BLOCK};
@@ -104,10 +104,9 @@ impl HabitatSource for ForgedWorld {
     /// is not used. The biome is the column's dithered one.
     fn habitat(&self, x_m: f64, z_m: f64, _surface_block: i32) -> Habitat {
         let (ax, az) = self.to_artifact_m(x_m, z_m);
-        let a = self.artifact();
-        let rain = (self.bilinear(&a.precip_mm, ax, az).max(0.0) as f32) / REFERENCE_PRECIP_MM;
-        let temperature_c = self.bilinear(&a.temperature_c, ax, az) as f32;
-        let coast = self.bilinear(self.coast_dist_m(), ax, az) as f32;
+        let rain = (self.bilinear_q(QRasterId::PrecipMm, ax, az).max(0.0) as f32) / REFERENCE_PRECIP_MM;
+        let temperature_c = self.bilinear_q(QRasterId::TemperatureC, ax, az) as f32;
+        let coast = self.bilinear_coast(ax, az) as f32;
         let slope = gradient_magnitude(|x, z| self.ground_engine_m(x, z), x_m, z_m);
         let h = assemble(rain, temperature_c, slope, 1.0 - coast / SALT_REACH_M, Some(self.biome_at(x_m, z_m)));
         Habitat { moisture: h.moisture.min(FORGED_MOISTURE_SATURATION), ..h }
@@ -257,7 +256,7 @@ mod tests {
         let world = coast_world();
         let h = world.habitat(122.0, 120.0, SEA_TOP_BLOCK + 10);
         assert_eq!(h.biome, Some(world.biome_at(122.0, 120.0)));
-        let mut a = world.artifact().clone();
+        let mut a = world.artifact().expect("whole world").clone();
         a.precip_mm = QRaster::fit(&vec![6_000.0; N * N], PRECIP_STEP_MM);
         let wet = ForgedWorld::new(a).habitat(122.0, 120.0, SEA_TOP_BLOCK + 10);
         assert!(wet.rain > 6.0 && wet.moisture == FORGED_MOISTURE_SATURATION, "{wet:?}");
@@ -289,14 +288,15 @@ mod tests {
 
     #[test]
     fn artifact_round_trips_rain_and_coast() {
-        let mut artifact = coast_world().artifact().clone();
+        let mut artifact = coast_world().artifact().expect("whole world").clone();
         artifact.precip_mm.data[5] = 1750;
         artifact.temperature_c.data[6] = 333;
         let back = WorldArtifact::from_bytes(&artifact.to_bytes()).expect("loads");
         assert_eq!(back.precip_mm, artifact.precip_mm);
         assert_eq!(back.temperature_c, artifact.temperature_c);
         // Coast distance is not stored: it is recomputed from the height.
-        assert_eq!(ForgedWorld::new(back.clone()).coast_dist_m(), coast_world().coast_dist_m());
+        let (reloaded, original) = (ForgedWorld::new(back.clone()), coast_world());
+        assert!((0..N * N).all(|i| reloaded.rasters().coast(i) == original.rasters().coast(i)));
         assert_eq!(back.height, artifact.height);
         assert_eq!(back.version, ARTIFACT_VERSION);
     }

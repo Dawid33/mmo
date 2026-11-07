@@ -538,7 +538,8 @@ pub fn save_temp_path(path: &Path) -> PathBuf {
 }
 
 /// One straight piece of a river centerline, in artifact meters.
-struct Segment {
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Segment {
     a: (f64, f64),
     b: (f64, f64),
     water: (f64, f64),
@@ -546,22 +547,254 @@ struct Segment {
     depth: f64,
 }
 
-/// A loaded world plus what sampling needs: the river index and detail noise.
-pub struct ForgedWorld {
+/// The five quantised rasters (`WorldArtifact::qrasters` order).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QRasterId {
+    Height,
+    Uplifted,
+    Bedding,
+    TemperatureC,
+    PrecipMm,
+}
+
+impl QRasterId {
+    pub const ALL: [QRasterId; 5] =
+        [QRasterId::Height, QRasterId::Uplifted, QRasterId::Bedding, QRasterId::TemperatureC, QRasterId::PrecipMm];
+}
+
+/// The five `u8` (0..100) rasters (`WorldArtifact::byte_rasters` order).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ByteRasterId {
+    Drainage,
+    Volcanism,
+    Salinity,
+    Biome,
+    Savagery,
+}
+
+impl ByteRasterId {
+    pub const ALL: [ByteRasterId; 5] = [
+        ByteRasterId::Drainage,
+        ByteRasterId::Volcanism,
+        ByteRasterId::Salinity,
+        ByteRasterId::Biome,
+        ByteRasterId::Savagery,
+    ];
+}
+
+/// A forged world's fields that are not per-cell rasters: small, always
+/// resident, read through [`ForgedWorld::globals`].
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct WorldGlobals {
+    pub seed: u64,
+    pub size_m: f64,
+    pub cell_m: f64,
+    pub n: u32,
+    /// Where players start, artifact meters (`WorldArtifact::spawn`).
+    pub spawn: [f64; 2],
+    pub edges: [EdgeKind; 4],
+    /// Formations from the top down (`WorldArtifact::column`).
+    pub column: Vec<(f32, u8)>,
+    pub rock_names: Vec<String>,
+    pub regions: Vec<RegionRecord>,
+    pub volcanoes: Vec<[f32; 2]>,
+    /// `(min, step)` of each quantised raster, in [`QRasterId::ALL`] order.
+    pub q_scale: [(f32, f32); 5],
+}
+
+impl WorldGlobals {
+    pub fn of(a: &WorldArtifact) -> WorldGlobals {
+        WorldGlobals {
+            seed: a.seed,
+            size_m: a.size_m,
+            cell_m: a.cell_m,
+            n: a.n,
+            spawn: a.spawn,
+            edges: a.edges,
+            column: a.column.clone(),
+            rock_names: a.rock_names.clone(),
+            regions: a.regions.clone(),
+            volcanoes: a.volcanoes.clone(),
+            q_scale: a.qrasters().map(|r| (r.min, r.step)),
+        }
+    }
+
+    /// River buckets per side of the map (`BUCKET_M` each).
+    pub fn buckets_per_side(&self) -> usize {
+        buckets_per_side(self.size_m)
+    }
+}
+
+fn buckets_per_side(size_m: f64) -> usize {
+    (size_m / BUCKET_M).ceil().max(1.0) as usize
+}
+
+/// The whole world's rasters in memory, plus what is derived from them at
+/// load (river index, coast distance, lake runs).
+pub(crate) struct WholeRasters {
     artifact: WorldArtifact,
-    /// crc32 of the file bytes: part of the worldgen disk-cache key.
-    content_crc: u32,
-    segments: Vec<Segment>,
-    /// Segment indices per BUCKET_M bucket (row-major, `buckets_per_side`^2).
-    buckets: Vec<Vec<u32>>,
-    buckets_per_side: usize,
-    detail: OctaveNoise,
     /// Distance (m) from the nearest sea cell (height <= 0), from `height`
     /// at load (`habitat::coast_distance_m`).
     coast_dist_m: Vec<f32>,
+    segments: Vec<Segment>,
+    /// Segment indices per BUCKET_M bucket (row-major, `buckets_per_side`^2).
+    buckets: Vec<Vec<u32>>,
     /// Lake water per cell as sorted, non-overlapping `(start, end, level)`
     /// runs of raster indices (`end` exclusive), from `artifact.lakes`.
     lake_runs: Vec<(u32, u32, f32)>,
+}
+
+impl WholeRasters {
+    fn new(artifact: WorldArtifact) -> WholeRasters {
+        let buckets_per_side = buckets_per_side(artifact.size_m);
+        let mut segments = Vec::new();
+        let mut buckets = vec![Vec::new(); buckets_per_side * buckets_per_side];
+        for reach in &artifact.rivers {
+            let half_width = reach.width_m as f64 * 0.5;
+            let depth = (CHANNEL_DEPTH_PER_SQRT_M * (reach.width_m as f64).sqrt())
+                .clamp(CHANNEL_DEPTH_M.0, CHANNEL_DEPTH_M.1);
+            for pair in reach.points.windows(2) {
+                let (p, q) = (pair[0], pair[1]);
+                if p.in_lake && q.in_lake {
+                    continue; // the lake's own water covers this stretch
+                }
+                let seg = Segment {
+                    a: (p.x as f64, p.z as f64),
+                    b: (q.x as f64, q.z as f64),
+                    water: (p.water as f64, q.water as f64),
+                    half_width,
+                    depth,
+                };
+                let reach_m = half_width + LEVEE_WIDTH_M + BANK_REACH_M;
+                let bucket = |v: f64| ((v / BUCKET_M).floor().max(0.0) as usize).min(buckets_per_side - 1);
+                let (x0, x1) = (bucket(seg.a.0.min(seg.b.0) - reach_m), bucket(seg.a.0.max(seg.b.0) + reach_m));
+                let (z0, z1) = (bucket(seg.a.1.min(seg.b.1) - reach_m), bucket(seg.a.1.max(seg.b.1) + reach_m));
+                for bz in z0..=z1 {
+                    for bx in x0..=x1 {
+                        buckets[bz * buckets_per_side + bx].push(segments.len() as u32);
+                    }
+                }
+                segments.push(seg);
+            }
+        }
+        // Height is held once, as the artifact's `QRaster`: the sampler reads
+        // it through `QRaster::get` (one multiply-add, the same values a
+        // decoded `f32` copy held), which saves 4 B/cell over keeping both.
+        let height = &artifact.height;
+        let coast_dist_m =
+            crate::habitat::coast_distance_by(artifact.n as usize, artifact.cell_m, |i| height.get(i) <= 0.0);
+        let mut lake_runs: Vec<(u32, u32, f32)> = artifact
+            .lakes
+            .iter()
+            .flat_map(|lake| lake.cells.iter().map(move |&(start, len)| (start, start + len, lake.level)))
+            .collect();
+        lake_runs.sort_by_key(|run| run.0);
+        WholeRasters { artifact, coast_dist_m, segments, buckets, lake_runs }
+    }
+}
+
+/// Where a forged world's per-cell data lives. Every read takes a CLAMPED
+/// global raster index (`iz * n + ix`, both in `0..n`) or a global bucket
+/// index, so a tiled store can route it to the tile holding that cell.
+pub(crate) enum Rasters {
+    Whole(WholeRasters),
+}
+
+impl Rasters {
+    /// Quantised raster `r` at cell `i`.
+    pub(crate) fn q(&self, r: QRasterId, i: usize) -> f32 {
+        match self {
+            Rasters::Whole(w) => {
+                let a = &w.artifact;
+                match r {
+                    QRasterId::Height => a.height.get(i),
+                    QRasterId::Uplifted => a.uplifted.get(i),
+                    QRasterId::Bedding => a.bedding.get(i),
+                    QRasterId::TemperatureC => a.temperature_c.get(i),
+                    QRasterId::PrecipMm => a.precip_mm.get(i),
+                }
+            }
+        }
+    }
+
+    /// `u8` raster `r` at cell `i`.
+    pub(crate) fn byte(&self, r: ByteRasterId, i: usize) -> u8 {
+        match self {
+            Rasters::Whole(w) => {
+                let a = &w.artifact;
+                match r {
+                    ByteRasterId::Drainage => a.drainage[i],
+                    ByteRasterId::Volcanism => a.volcanism[i],
+                    ByteRasterId::Salinity => a.salinity[i],
+                    ByteRasterId::Biome => a.biome[i],
+                    ByteRasterId::Savagery => a.savagery[i],
+                }
+            }
+        }
+    }
+
+    /// Forge region id of cell `i`.
+    pub(crate) fn region_id(&self, i: usize) -> u16 {
+        match self {
+            Rasters::Whole(w) => w.artifact.region[i],
+        }
+    }
+
+    /// Distance (m) from cell `i` to the sea.
+    pub(crate) fn coast(&self, i: usize) -> f32 {
+        match self {
+            Rasters::Whole(w) => w.coast_dist_m[i],
+        }
+    }
+
+    /// Water level of cell `i` if it is lake.
+    pub(crate) fn lake_level(&self, i: usize) -> Option<f32> {
+        match self {
+            Rasters::Whole(w) => {
+                let i = i as u32;
+                let k = w.lake_runs.partition_point(|run| run.0 <= i);
+                let &(_, end, level) = w.lake_runs.get(k.checked_sub(1)?)?;
+                (i < end).then_some(level)
+            }
+        }
+    }
+
+    /// The river segments that can touch `BUCKET_M` bucket `bucket_index`
+    /// (row-major over `WorldGlobals::buckets_per_side`), in stored order.
+    pub(crate) fn bucket(&self, bucket_index: usize) -> SegmentsRef<'_> {
+        match self {
+            Rasters::Whole(w) => SegmentsRef { ids: w.buckets[bucket_index].iter(), segments: &w.segments },
+        }
+    }
+
+    fn artifact(&self) -> Option<&WorldArtifact> {
+        match self {
+            Rasters::Whole(w) => Some(&w.artifact),
+        }
+    }
+}
+
+/// The segments of one bucket: `(segment id, segment)` in stored order.
+pub(crate) struct SegmentsRef<'a> {
+    ids: std::slice::Iter<'a, u32>,
+    segments: &'a [Segment],
+}
+
+impl<'a> Iterator for SegmentsRef<'a> {
+    type Item = (u32, &'a Segment);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.ids.next().map(|&s| (s, &self.segments[s as usize]))
+    }
+}
+
+/// A loaded world plus what sampling needs: the rasters and detail noise.
+pub struct ForgedWorld {
+    globals: WorldGlobals,
+    rasters: Rasters,
+    /// crc32 of the file bytes: part of the worldgen disk-cache key.
+    content_crc: u32,
+    detail: OctaveNoise,
     /// Biome border displacement noise, x and z (`BIOME_DITHER_M`).
     dither: [OctaveNoise; 2],
     /// Tundra snow patches.
@@ -640,79 +873,55 @@ impl ForgedWorld {
 
     /// A world from a world file's bytes (as [`Self::load`] reads them, or
     /// as the world store keeps them); `content_crc` is their crc32.
+    /// Native only, like the file codec.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn from_bytes(bytes: &[u8]) -> Result<ForgedWorld, ArtifactError> {
         let artifact = WorldArtifact::from_bytes(bytes)?;
         Ok(Self::with_crc(artifact, crc32fast::hash(bytes)))
     }
 
     fn with_crc(artifact: WorldArtifact, content_crc: u32) -> ForgedWorld {
-        let buckets_per_side = (artifact.size_m / BUCKET_M).ceil().max(1.0) as usize;
-        let mut segments = Vec::new();
-        let mut buckets = vec![Vec::new(); buckets_per_side * buckets_per_side];
-        for reach in &artifact.rivers {
-            let half_width = reach.width_m as f64 * 0.5;
-            let depth = (CHANNEL_DEPTH_PER_SQRT_M * (reach.width_m as f64).sqrt())
-                .clamp(CHANNEL_DEPTH_M.0, CHANNEL_DEPTH_M.1);
-            for pair in reach.points.windows(2) {
-                let (p, q) = (pair[0], pair[1]);
-                if p.in_lake && q.in_lake {
-                    continue; // the lake's own water covers this stretch
-                }
-                let seg = Segment {
-                    a: (p.x as f64, p.z as f64),
-                    b: (q.x as f64, q.z as f64),
-                    water: (p.water as f64, q.water as f64),
-                    half_width,
-                    depth,
-                };
-                let reach_m = half_width + LEVEE_WIDTH_M + BANK_REACH_M;
-                let bucket = |v: f64| ((v / BUCKET_M).floor().max(0.0) as usize).min(buckets_per_side - 1);
-                let (x0, x1) = (bucket(seg.a.0.min(seg.b.0) - reach_m), bucket(seg.a.0.max(seg.b.0) + reach_m));
-                let (z0, z1) = (bucket(seg.a.1.min(seg.b.1) - reach_m), bucket(seg.a.1.max(seg.b.1) + reach_m));
-                for bz in z0..=z1 {
-                    for bx in x0..=x1 {
-                        buckets[bz * buckets_per_side + bx].push(segments.len() as u32);
-                    }
-                }
-                segments.push(seg);
-            }
-        }
-        let detail = OctaveNoise::new(artifact.seed ^ 0xDE7A_11, DETAIL_FIRST_OCTAVE, vec![1.0, 0.6]);
-        // Height is held once, as the artifact's `QRaster`: the sampler reads
-        // it through `QRaster::get` (one multiply-add, the same values a
-        // decoded `f32` copy held), which saves 4 B/cell over keeping both.
-        let height = &artifact.height;
-        let coast_dist_m =
-            crate::habitat::coast_distance_by(artifact.n as usize, artifact.cell_m, |i| height.get(i) <= 0.0);
-        let mut lake_runs: Vec<(u32, u32, f32)> = artifact
-            .lakes
-            .iter()
-            .flat_map(|lake| lake.cells.iter().map(move |&(start, len)| (start, start + len, lake.level)))
-            .collect();
-        lake_runs.sort_by_key(|run| run.0);
+        let globals = WorldGlobals::of(&artifact);
+        let seed = globals.seed;
+        let detail = OctaveNoise::new(seed ^ 0xDE7A_11, DETAIL_FIRST_OCTAVE, vec![1.0, 0.6]);
         let dither = [
-            OctaveNoise::new(artifact.seed ^ 0xB10E_D17A, BIOME_DITHER_FIRST_OCTAVE, vec![1.0, 1.0]),
-            OctaveNoise::new(artifact.seed ^ 0xB10E_D17B, BIOME_DITHER_FIRST_OCTAVE, vec![1.0, 1.0]),
+            OctaveNoise::new(seed ^ 0xB10E_D17A, BIOME_DITHER_FIRST_OCTAVE, vec![1.0, 1.0]),
+            OctaveNoise::new(seed ^ 0xB10E_D17B, BIOME_DITHER_FIRST_OCTAVE, vec![1.0, 1.0]),
         ];
-        let snow_patch = OctaveNoise::new(artifact.seed ^ 0x5_0B47, TUNDRA_SNOW_FIRST_OCTAVE, vec![1.0, 0.6]);
+        let snow_patch = OctaveNoise::new(seed ^ 0x5_0B47, TUNDRA_SNOW_FIRST_OCTAVE, vec![1.0, 0.6]);
         let lapse_c_per_m = crate::forge::Knobs::default().lapse_c_per_km / 1000.0;
         ForgedWorld {
-            artifact,
+            globals,
+            rasters: Rasters::Whole(WholeRasters::new(artifact)),
             content_crc,
-            segments,
-            buckets,
-            buckets_per_side,
             detail,
-            coast_dist_m,
-            lake_runs,
             dither,
             snow_patch,
             lapse_c_per_m,
         }
     }
 
-    pub fn artifact(&self) -> &WorldArtifact {
-        &self.artifact
+    /// The whole artifact, when the world holds it in memory (`None` for a
+    /// tiled world). Tools that need every raster at once (the world map,
+    /// examples) run on whole worlds only.
+    pub fn artifact(&self) -> Option<&WorldArtifact> {
+        self.rasters.artifact()
+    }
+
+    /// The world's non-raster fields.
+    pub fn globals(&self) -> &WorldGlobals {
+        &self.globals
+    }
+
+    /// The world's seed (tree placement, detail noise).
+    pub fn seed(&self) -> u64 {
+        self.globals.seed
+    }
+
+    /// The per-cell data (crate-internal tests).
+    #[cfg(test)]
+    pub(crate) fn rasters(&self) -> &Rasters {
+        &self.rasters
     }
 
     pub fn content_crc(&self) -> u32 {
@@ -721,40 +930,35 @@ impl ForgedWorld {
 
     /// Engine world meters -> artifact meters.
     fn to_artifact(&self, x: f64, z: f64) -> (f64, f64) {
-        (x - ENGINE_SPAWN_M + self.artifact.spawn[0], z - ENGINE_SPAWN_M + self.artifact.spawn[1])
+        (x - ENGINE_SPAWN_M + self.globals.spawn[0], z - ENGINE_SPAWN_M + self.globals.spawn[1])
     }
 
     fn cell(&self, ix: i64, iz: i64) -> f64 {
-        Self::raster_cell(&self.artifact.height, self.artifact.n, ix, iz)
+        self.q_cell(QRasterId::Height, ix, iz)
     }
 
-    /// One cell of an `n * n` raster, clamped to the edge.
-    fn raster_cell<R: RasterRead + ?Sized>(raster: &R, n: u32, ix: i64, iz: i64) -> f64 {
-        let n = n as i64;
+    /// Global index of raster cell `(ix, iz)`, clamped to the edge.
+    fn clamped(&self, ix: i64, iz: i64) -> usize {
+        let n = i64::from(self.globals.n);
         let (ix, iz) = (ix.clamp(0, n - 1), iz.clamp(0, n - 1));
-        raster.value((iz * n + ix) as usize) as f64
+        (iz * n + ix) as usize
     }
 
-    /// Distance (m) to the sea per raster cell.
-    pub(crate) fn coast_dist_m(&self) -> &[f32] {
-        &self.coast_dist_m
+    /// One cell of quantised raster `r`, clamped to the edge.
+    fn q_cell(&self, r: QRasterId, ix: i64, iz: i64) -> f64 {
+        self.rasters.q(r, self.clamped(ix, iz)) as f64
     }
 
     /// Water level of raster cell `i` if it is lake.
     pub(crate) fn lake_level_of(&self, i: usize) -> Option<f32> {
-        let i = i as u32;
-        let k = self.lake_runs.partition_point(|run| run.0 <= i);
-        let &(_, end, level) = self.lake_runs.get(k.checked_sub(1)?)?;
-        (i < end).then_some(level)
+        self.rasters.lake_level(i)
     }
 
     /// Bilinear interpolation of `uplifted + bedding` between cell centers
     /// (artifact meters), clamped to the edge outside the artifact.
     fn geo_offset_m(&self, ax: f64, az: f64) -> f64 {
-        let a = &self.artifact;
-        let at = |ix: i64, iz: i64| {
-            Self::raster_cell(&a.uplifted, a.n, ix, iz) + Self::raster_cell(&a.bedding, a.n, ix, iz)
-        };
+        let a = &self.globals;
+        let at = |ix: i64, iz: i64| self.q_cell(QRasterId::Uplifted, ix, iz) + self.q_cell(QRasterId::Bedding, ix, iz);
         let (u, v) = (ax / a.cell_m - 0.5, az / a.cell_m - 0.5);
         let (iu, iv) = (u.floor(), v.floor());
         let (tu, tv) = (u - iu, v - iv);
@@ -767,17 +971,15 @@ impl ForgedWorld {
         self.to_artifact(x, z)
     }
 
-    /// Bilinear interpolation of one of the artifact's `n * n` rasters at
-    /// artifact meters (same lattice as `geo_offset_m`, edge-clamped).
-    pub(crate) fn bilinear<R: RasterRead + ?Sized>(&self, raster: &R, ax: f64, az: f64) -> f64 {
-        let a = &self.artifact;
-        let at = |ix: i64, iz: i64| Self::raster_cell(raster, a.n, ix, iz);
-        let (u, v) = (ax / a.cell_m - 0.5, az / a.cell_m - 0.5);
-        let (iu, iv) = (u.floor(), v.floor());
-        let (tu, tv) = (u - iu, v - iv);
-        let (iu, iv) = (iu as i64, iv as i64);
-        let row = |iz: i64| at(iu, iz) + tu * (at(iu + 1, iz) - at(iu, iz));
-        row(iv) + tv * (row(iv + 1) - row(iv))
+    /// Bilinear interpolation of quantised raster `r` at artifact meters
+    /// (same lattice as `geo_offset_m`, edge-clamped).
+    pub(crate) fn bilinear_q(&self, r: QRasterId, ax: f64, az: f64) -> f64 {
+        self.bilinear_cells(ax, az, |i| f64::from(self.rasters.q(r, i)))
+    }
+
+    /// Bilinear interpolation of the coast distance (m) at artifact meters.
+    pub(crate) fn bilinear_coast(&self, ax: f64, az: f64) -> f64 {
+        self.bilinear_cells(ax, az, |i| f64::from(self.rasters.coast(i)))
     }
 
     /// Ground height (m relative to sea) at engine meters, as `sample` sees it
@@ -800,7 +1002,7 @@ impl ForgedWorld {
     /// The artifact's rock column in blocks: formation tops (in `s`, top
     /// down) rounded to whole blocks, each rock resolved to its block.
     pub fn strata_blocks(&self, mats: &Materials) -> Vec<(i16, BlockId)> {
-        let a = &self.artifact;
+        let a = &self.globals;
         a.column
             .iter()
             .map(|&(top, rock)| {
@@ -814,7 +1016,7 @@ impl ForgedWorld {
     /// Engine world meters covered by the artifact: `([min_x, min_z], [max_x, max_z])`,
     /// max exclusive.
     pub fn artifact_bounds_engine_m(&self) -> ([f64; 2], [f64; 2]) {
-        let a = &self.artifact;
+        let a = &self.globals;
         let min = [ENGINE_SPAWN_M - a.spawn[0], ENGINE_SPAWN_M - a.spawn[1]];
         (min, [min[0] + a.size_m, min[1] + a.size_m])
     }
@@ -828,20 +1030,20 @@ impl ForgedWorld {
     /// river carving). `None` outside the artifact.
     pub fn surface_rock(&self, x_m: f64, z_m: f64) -> Option<u8> {
         let (ax, az) = self.to_artifact(x_m, z_m);
-        let size = self.artifact.size_m;
+        let size = self.globals.size_m;
         if ax < 0.0 || az < 0.0 || ax >= size || az >= size {
             return None;
         }
         let s = self.bicubic(ax, az) - self.geo_offset_m(ax, az);
-        let column = &self.artifact.column;
+        let column = &self.globals.column;
         column.iter().rev().find(|&&(top, _)| f64::from(top) > s).or(column.first()).map(|&(_, rock)| rock)
     }
 
     /// Raster cell nearest engine world metres `(x, z)` (clamped to the map).
     fn nearest_cell(&self, x_m: f64, z_m: f64) -> usize {
         let (ax, az) = self.to_artifact(x_m, z_m);
-        let n = i64::from(self.artifact.n);
-        let at = |v: f64| ((v / self.artifact.cell_m).floor() as i64).clamp(0, n - 1);
+        let n = i64::from(self.globals.n);
+        let at = |v: f64| ((v / self.globals.cell_m).floor() as i64).clamp(0, n - 1);
         (at(az) * n + at(ax)) as usize
     }
 
@@ -849,27 +1051,35 @@ impl ForgedWorld {
     /// metres `(x, z)` (clamped to the map).
     pub fn cell_climate(&self, x_m: f64, z_m: f64) -> CellClimate {
         let i = self.nearest_cell(x_m, z_m);
-        self.artifact.cell_climate_at(i, self.lake_level_of(i).is_some())
+        let r = &self.rasters;
+        CellClimate {
+            height_m: r.q(QRasterId::Height, i),
+            temperature_c: r.q(QRasterId::TemperatureC, i),
+            precip_mm: r.q(QRasterId::PrecipMm, i),
+            drainage: r.byte(ByteRasterId::Drainage, i),
+            salinity: r.byte(ByteRasterId::Salinity, i),
+            is_lake: self.lake_level_of(i).is_some(),
+        }
     }
 
     /// The stored biome of the raster cell nearest engine world metres
     /// `(x, z)` (clamped to the map); no dither.
     pub fn biome_cell(&self, x_m: f64, z_m: f64) -> Biome {
-        let b = self.artifact.biome[self.nearest_cell(x_m, z_m)];
+        let b = self.rasters.byte(ByteRasterId::Biome, self.nearest_cell(x_m, z_m));
         Biome::from_u8(b).expect("validated biome raster")
     }
 
     /// The forge region of the raster cell nearest engine world metres
     /// `(x, z)` (clamped to the map): its id and type.
     pub fn region_cell(&self, x_m: f64, z_m: f64) -> (u16, Option<game::RegionType>) {
-        let id = self.artifact.region[self.nearest_cell(x_m, z_m)];
-        (id, self.artifact.regions.get(usize::from(id)).map(|r| r.kind))
+        let id = self.rasters.region_id(self.nearest_cell(x_m, z_m));
+        (id, self.globals.regions.get(usize::from(id)).map(|r| r.kind))
     }
 
     /// Bilinear interpolation (artifact metres, cell-centre lattice,
     /// edge-clamped) of `f` over raster cell indices.
     fn bilinear_cells(&self, ax: f64, az: f64, f: impl Fn(usize) -> f64) -> f64 {
-        let a = &self.artifact;
+        let a = &self.globals;
         let n = i64::from(a.n);
         let at = |ix: i64, iz: i64| f((iz.clamp(0, n - 1) * n + ix.clamp(0, n - 1)) as usize);
         let (u, v) = (ax / a.cell_m - 0.5, az / a.cell_m - 0.5);
@@ -902,10 +1112,10 @@ impl ForgedWorld {
     /// bilinear between cells.
     pub fn snow_line_m(&self, x_m: f64, z_m: f64) -> f32 {
         let (ax, az) = self.to_artifact(x_m, z_m);
-        let a = &self.artifact;
+        let r = &self.rasters;
         let line = |i: usize| {
-            let ground = f64::from(a.height.get(i)).max(0.0);
-            ground + f64::from(a.temperature_c.get(i) - SNOW_LINE_C) / self.lapse_c_per_m
+            let ground = f64::from(r.q(QRasterId::Height, i)).max(0.0);
+            ground + f64::from(r.q(QRasterId::TemperatureC, i) - SNOW_LINE_C) / self.lapse_c_per_m
         };
         self.bilinear_cells(ax, az, line) as f32
     }
@@ -916,14 +1126,15 @@ impl ForgedWorld {
         let (dx, dz) = self.dithered(x_m, z_m);
         let biome = self.biome_cell(dx, dz); // = biome_at(x_m, z_m)
         let (ax, az) = self.to_artifact(x_m, z_m);
-        let a = &self.artifact;
-        let temperature_c = self.bilinear(&a.temperature_c, ax, az) as f32;
+        let r = &self.rasters;
+        let temperature_c = self.bilinear_q(QRasterId::TemperatureC, ax, az) as f32;
         let glacier = Biome::Glacier as u8;
-        let glacier_share = self.bilinear_cells(ax, az, |i| f64::from(u8::from(a.biome[i] == glacier))) as f32;
+        let glacier_share =
+            self.bilinear_cells(ax, az, |i| f64::from(u8::from(r.byte(ByteRasterId::Biome, i) == glacier))) as f32;
         let salt_flat = {
             let (dax, daz) = self.to_artifact(dx, dz);
-            self.bilinear_cells(dax, daz, |i| f64::from(a.salinity[i])) >= SALT_FLAT_MIN_SALINITY
-                && self.bilinear(self.coast_dist_m(), ax, az) > f64::from(crate::habitat::SALT_REACH_M)
+            self.bilinear_cells(dax, daz, |i| f64::from(r.byte(ByteRasterId::Salinity, i))) >= SALT_FLAT_MIN_SALINITY
+                && self.bilinear_coast(ax, az) > f64::from(crate::habitat::SALT_REACH_M)
         };
         let snow_patch = biome == Biome::Tundra && self.snow_patch.sample2(x_m, z_m) > TUNDRA_SNOW_PATCH_MIN;
         ColumnClimate {
@@ -941,13 +1152,13 @@ impl ForgedWorld {
     /// or past a sea edge. A point past two edges (a corner) is sea if
     /// either is.
     fn place(&self, ax: f64, az: f64) -> Place {
-        let size = self.artifact.size_m;
+        let size = self.globals.size_m;
         // `edges` order: north (z < 0), east (x >= size), south (z >= size), west (x < 0).
         let past = [az < 0.0, ax >= size, az >= size, ax < 0.0];
         if !past.contains(&true) {
             return Place::Inside;
         }
-        if (0..4).any(|e| past[e] && self.artifact.edges[e] == EdgeKind::Sea) {
+        if (0..4).any(|e| past[e] && self.globals.edges[e] == EdgeKind::Sea) {
             return Place::Sea;
         }
         Place::Land(ax.clamp(0.0, size), az.clamp(0.0, size))
@@ -957,9 +1168,9 @@ impl ForgedWorld {
     /// cell itself inside, the nearest border cell past a land edge, and
     /// [`OUTSIDE_HEIGHT_M`] past a sea edge (`place`'s rules, by cell).
     pub fn extended_cell_height(&self, ix: i64, iz: i64) -> f64 {
-        let n = i64::from(self.artifact.n);
+        let n = i64::from(self.globals.n);
         let past = [iz < 0, ix >= n, iz >= n, ix < 0];
-        if (0..4).any(|e| past[e] && self.artifact.edges[e] == EdgeKind::Sea) {
+        if (0..4).any(|e| past[e] && self.globals.edges[e] == EdgeKind::Sea) {
             return OUTSIDE_HEIGHT_M;
         }
         self.cell(ix, iz)
@@ -975,7 +1186,7 @@ impl ForgedWorld {
                     + t * (2.0 * p[0] - 5.0 * p[1] + 4.0 * p[2] - p[3]
                         + t * (3.0 * (p[1] - p[2]) + p[3] - p[0])))
         }
-        let (u, v) = (ax / self.artifact.cell_m - 0.5, az / self.artifact.cell_m - 0.5);
+        let (u, v) = (ax / self.globals.cell_m - 0.5, az / self.globals.cell_m - 0.5);
         let (iu, iv) = (u.floor(), v.floor());
         let (tu, tv) = (u - iu, v - iv);
         let (iu, iv) = (iu as i64, iv as i64);
@@ -1006,7 +1217,7 @@ impl ForgedWorld {
         if fade <= 0.0 {
             return g;
         }
-        let e = self.artifact.cell_m * 0.5;
+        let e = self.globals.cell_m * 0.5;
         let (dx, dz) = (
             (self.bicubic(ax + e, az) - self.bicubic(ax - e, az)) / (2.0 * e),
             (self.bicubic(ax, az + e) - self.bicubic(ax, az - e)) / (2.0 * e),
@@ -1017,7 +1228,7 @@ impl ForgedWorld {
     }
 
     fn lake_level_at(&self, ix: i64, iz: i64) -> Option<f64> {
-        let n = self.artifact.n as i64;
+        let n = self.globals.n as i64;
         if ix < 0 || iz < 0 || ix >= n || iz >= n {
             return None;
         }
@@ -1026,9 +1237,16 @@ impl ForgedWorld {
 
     /// Water features applied to an already-interpolated ground height `g`
     /// (meters relative to sea; artifact coordinates). `segments` are the
-    /// candidates near this point.
+    /// candidates near this point, in ascending order of segment id.
     /// The third value says whether the water is a lake's (else a river's).
-    fn refine(&self, ax: f64, az: f64, mut g: f64, segments: &[u32], lakes: bool) -> (f64, Option<f64>, bool) {
+    fn refine<'s>(
+        &self,
+        ax: f64,
+        az: f64,
+        mut g: f64,
+        segments: impl IntoIterator<Item = &'s Segment>,
+        lakes: bool,
+    ) -> (f64, Option<f64>, bool) {
         // Water surfaces sit on whole blocks (sea level is one), so every
         // level is snapped BEFORE banks are measured against it: a bank built
         // to the raw level could end up under a surface that rounded up.
@@ -1037,7 +1255,7 @@ impl ForgedWorld {
         // Lakes: water where the cell is lake and the ground lies below its
         // level; a berm on the dry cells around it, so the basin holds water
         // even where interpolation left the rim a little low.
-        let (ix, iz) = ((ax / self.artifact.cell_m).floor() as i64, (az / self.artifact.cell_m).floor() as i64);
+        let (ix, iz) = ((ax / self.globals.cell_m).floor() as i64, (az / self.globals.cell_m).floor() as i64);
         if !lakes {
             // The caller knows no lake cell is near this window.
         } else if let Some(level) = self.lake_level_at(ix, iz) {
@@ -1058,8 +1276,7 @@ impl ForgedWorld {
         // cut below the water surface; a levee ring outside it stands above
         // the water; further out the valley side is cut back to a bank slope.
         let mut nearest: Option<(f64, f64, &Segment)> = None; // (distance, water, segment)
-        for &s in segments {
-            let seg = &self.segments[s as usize];
+        for seg in segments {
             let (vx, vz) = (seg.b.0 - seg.a.0, seg.b.1 - seg.a.1);
             let len2 = vx * vx + vz * vz;
             let t = if len2 > 0.0 {
@@ -1097,12 +1314,16 @@ impl ForgedWorld {
         (g, water, lake && water.is_some())
     }
 
-    fn bucket_segments(&self, ax: f64, az: f64) -> &[u32] {
-        if ax < 0.0 || az < 0.0 || ax >= self.artifact.size_m || az >= self.artifact.size_m {
-            return &[];
-        }
-        let (bx, bz) = ((ax / BUCKET_M) as usize, (az / BUCKET_M) as usize);
-        &self.buckets[bz.min(self.buckets_per_side - 1) * self.buckets_per_side + bx.min(self.buckets_per_side - 1)]
+    /// The river segments of the bucket holding artifact point `(ax, az)`
+    /// (none off the map).
+    fn bucket_segments(&self, ax: f64, az: f64) -> impl Iterator<Item = &Segment> {
+        let size = self.globals.size_m;
+        let index = (ax >= 0.0 && az >= 0.0 && ax < size && az < size).then(|| {
+            let per = self.globals.buckets_per_side();
+            let (bx, bz) = ((ax / BUCKET_M) as usize, (az / BUCKET_M) as usize);
+            bz.min(per - 1) * per + bx.min(per - 1)
+        });
+        index.map(|b| self.rasters.bucket(b)).into_iter().flatten().map(|(_, seg)| seg)
     }
 
     /// Exact (un-latticed) sample at one engine-world point: map renderers, tests.
@@ -1128,17 +1349,21 @@ impl ForgedWorld {
         });
         // Every river segment that can touch the window.
         let (a0, a1) = (self.to_artifact(origin_x, origin_z), self.to_artifact(origin_x + span_m, origin_z + span_m));
-        let mut segments: Vec<u32> = Vec::new();
-        if a1.0 >= 0.0 && a1.1 >= 0.0 && a0.0 < self.artifact.size_m && a0.1 < self.artifact.size_m {
-            let bucket = |v: f64| ((v / BUCKET_M).floor().max(0.0) as usize).min(self.buckets_per_side - 1);
+        let size = self.globals.size_m;
+        let mut found: Vec<(u32, Segment)> = Vec::new();
+        if a1.0 >= 0.0 && a1.1 >= 0.0 && a0.0 < size && a0.1 < size {
+            let per = self.globals.buckets_per_side();
+            let bucket = |v: f64| ((v / BUCKET_M).floor().max(0.0) as usize).min(per - 1);
             for bz in bucket(a0.1)..=bucket(a1.1) {
                 for bx in bucket(a0.0)..=bucket(a1.0) {
-                    segments.extend_from_slice(&self.buckets[bz * self.buckets_per_side + bx]);
+                    found.extend(self.rasters.bucket(bz * per + bx).map(|(id, seg)| (id, *seg)));
                 }
             }
-            segments.sort_unstable();
-            segments.dedup();
+            found.sort_unstable_by_key(|&(id, _)| id);
+            found.dedup_by_key(|&mut (id, _)| id);
         }
+        // Ascending segment id, as `refine` expects; cells index into it.
+        let segments: Vec<Segment> = found.into_iter().map(|(_, seg)| seg).collect();
         // Narrow to PATCH_CELL_M cells (artifact coordinates, window-local).
         let cells_per_side = (span_m / PATCH_CELL_M).ceil() as usize + 1;
         let mut cells = vec![Vec::new(); if segments.is_empty() { 0 } else { cells_per_side * cells_per_side }];
@@ -1146,8 +1371,8 @@ impl ForgedWorld {
             let cell = |v: f64, origin: f64| {
                 (((v - origin) / PATCH_CELL_M).floor().max(0.0) as usize).min(cells_per_side - 1)
             };
-            for &s in &segments {
-                let seg = &self.segments[s as usize];
+            for (s, seg) in segments.iter().enumerate() {
+                let s = s as u32;
                 let reach = seg.half_width + LEVEE_WIDTH_M + BANK_REACH_M;
                 let (x0, x1) = (seg.a.0.min(seg.b.0) - reach, seg.a.0.max(seg.b.0) + reach);
                 let (z0, z1) = (seg.a.1.min(seg.b.1) - reach, seg.a.1.max(seg.b.1) + reach);
@@ -1162,16 +1387,16 @@ impl ForgedWorld {
             }
         }
         // Any lake cell in the window, one cell of margin for the shore berm?
-        let cell_m = self.artifact.cell_m;
-        let n = self.artifact.n as i64;
+        let cell_m = self.globals.cell_m;
+        let n = self.globals.n as i64;
         let range = |lo: f64, hi: f64| {
             (((lo / cell_m).floor() as i64 - 1).clamp(0, n - 1), ((hi / cell_m).floor() as i64 + 1).clamp(0, n - 1))
         };
         let ((x0, x1), (z0, z1)) = (range(a0.0, a1.0), range(a0.1, a1.1));
-        let inside = a1.0 >= 0.0 && a1.1 >= 0.0 && a0.0 < self.artifact.size_m && a0.1 < self.artifact.size_m;
+        let inside = a1.0 >= 0.0 && a1.1 >= 0.0 && a0.0 < size && a0.1 < size;
         let lakes = inside
             && (z0..=z1).any(|iz| (x0..=x1).any(|ix| self.lake_level_of((iz * n + ix) as usize).is_some()));
-        ForgedPatch { world: self, grid, origin: a0, cells, cells_per_side, lakes }
+        ForgedPatch { world: self, grid, origin: a0, segments, cells, cells_per_side, lakes }
     }
 }
 
@@ -1191,7 +1416,10 @@ pub struct ForgedPatch<'a> {
     grid: ProfileGrid,
     /// Window origin in artifact meters.
     origin: (f64, f64),
-    /// River segment candidates per PATCH_CELL_M cell; empty = no rivers here.
+    /// Every river segment that can touch the window, by ascending id.
+    segments: Vec<Segment>,
+    /// River segment candidates per PATCH_CELL_M cell (indices into
+    /// `segments`, ascending); empty = no rivers here.
     cells: Vec<Vec<u32>>,
     cells_per_side: usize,
     /// Whether any lake cell lies in or next to the window.
@@ -1218,7 +1446,7 @@ impl crate::Patch for ForgedPatch<'_> {
             // No rivers or lakes off the map: they stop at its edge.
             return (ColumnProfile::from_surface(prof.surface_y()), SEA_TOP_BLOCK, false);
         }
-        let segments: &[u32] = if self.cells.is_empty() {
+        let candidates: &[u32] = if self.cells.is_empty() {
             &[]
         } else {
             let cell = |v: f64, origin: f64| {
@@ -1226,6 +1454,7 @@ impl crate::Patch for ForgedPatch<'_> {
             };
             &self.cells[cell(az, self.origin.1) * self.cells_per_side + cell(ax, self.origin.0)]
         };
+        let segments = candidates.iter().map(|&k| &self.segments[k as usize]);
         let (g, water, lake) = self.world.refine(ax, az, prof.surface_y() - SEA_LEVEL, segments, self.lakes);
         // `refine` snapped the surface to a whole block: the topmost water
         // block is the one just under it.
@@ -1292,10 +1521,11 @@ fn load_env_world() -> Option<ForgedWorld> {
     let path = file.display();
     match ForgedWorld::load(&file) {
         Ok(world) => {
-            let a = world.artifact();
+            let g = world.globals();
+            let (rivers, lakes) = world.artifact().map_or((0, 0), |a| (a.rivers.len(), a.lakes.len()));
             log::info!(
-                "worldgen: serving forged world {path} (seed {:#X}, {} m, {} m cells, {} river reaches, {} lakes)",
-                a.seed, a.size_m, a.cell_m, a.rivers.len(), a.lakes.len()
+                "worldgen: serving forged world {path} (seed {:#X}, {} m, {} m cells, {rivers} river reaches, {lakes} lakes)",
+                g.seed, g.size_m, g.cell_m
             );
             Some(world)
         }
