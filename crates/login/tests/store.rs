@@ -114,3 +114,49 @@ async fn file_database_persists() {
     assert!(s.account_by_email("a@b.c").await.unwrap().is_some());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+const RACERS: usize = 8;
+
+/// `RACERS` concurrent takes of one token / email token: exactly one wins.
+async fn race_takes(store: LoginStore) {
+    let a = store.create_account("a@b.c", "h", 0).await.unwrap().unwrap();
+    store.insert_refresh([1; 32], a, [9; 16], 1000).await.unwrap();
+    store.insert_email_token([2; 32], a, 0, 1000).await.unwrap();
+    let mut refresh = Vec::new();
+    let mut email = Vec::new();
+    for _ in 0..RACERS {
+        let (s1, s2) = (store.clone(), store.clone());
+        refresh.push(tokio::spawn(async move { s1.take_refresh([1; 32], 10).await.unwrap() }));
+        email.push(tokio::spawn(async move { s2.use_email_token([2; 32], 0, 10).await.unwrap() }));
+    }
+    let mut valid = 0;
+    for h in refresh {
+        match h.await.unwrap() {
+            RefreshOutcome::Valid { .. } => valid += 1,
+            RefreshOutcome::Reused { .. } => {}
+            RefreshOutcome::Unknown => panic!("a racer saw Unknown"),
+        }
+    }
+    assert_eq!(valid, 1, "exactly one concurrent refresh take is Valid");
+    let mut used = 0;
+    for h in email {
+        used += usize::from(h.await.unwrap().is_some());
+    }
+    assert_eq!(used, 1, "exactly one concurrent email-token use succeeds");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_takes_sqlite_file() {
+    let dir = std::env::temp_dir().join(format!("login-race-{}", std::process::id()));
+    let path = dir.join("login.sqlite");
+    race_takes(LoginStore::open(path.to_str().unwrap()).await.unwrap()).await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_takes_postgres() {
+    let Some(admin) = crate::common::pg_admin_url() else { return crate::common::skip_msg() };
+    let db = crate::common::PgTestDb::create(&admin).await;
+    race_takes(LoginStore::open(&db.url).await.unwrap()).await;
+    db.drop_db().await;
+}
