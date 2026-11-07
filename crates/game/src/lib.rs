@@ -288,7 +288,7 @@ pub enum ClientUpdateEvent {
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use region::RegionTickPerf;
-pub use region::{ReconcileStats, Region};
+pub use region::{ReconcileStats, Region, ENTITY_SERIAL_TICK_SHIFT};
 
 pub trait Controller: Send {
     fn on_tick<'a>(&mut self, _t: &mut Undo<GameData>) {}

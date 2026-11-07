@@ -58,7 +58,8 @@ pub enum RegionInput {
     /// (`Region::set_route_map`): the manager sends it right after spawning,
     /// before any tick, when it has a map.
     SetRouteMap(Option<std::sync::Arc<crate::RouteMap>>),
-    /// Start the region's tick count at this world tick (`Region::jump_clock_to`).
+    /// Start the region's tick count at this world tick, and its entity ids
+    /// past every earlier incarnation's (`Region::start_at`).
     /// The manager sends it FIRST after spawning, before `SetRouteMap`.
     StartAt(crate::Tick),
     /// World autosave: replied with `RegionOutput::Saved(state)`, a clone of
@@ -148,6 +149,36 @@ pub enum RegionOutput {
     /// It still holds this session's players and the history's people —
     /// [`restore_saved`] strips both when it is loaded again.
     Saved(Box<Rollback>),
+    /// Never sent by a runner: the manager puts it on the output channel
+    /// just before it spawns a region's runner, so it can tell a dead
+    /// runner's late outputs (before the marker) from the new one's.
+    Incarnation(u64),
+}
+
+impl RegionOutput {
+    /// The variant's name, for logs.
+    pub fn name(&self) -> &'static str {
+        match self {
+            RegionOutput::EventProcessed(_) => "EventProcessed",
+            RegionOutput::EventProcessedHashed(..) => "EventProcessedHashed",
+            RegionOutput::Snapshot(..) => "Snapshot",
+            RegionOutput::Terrain(..) => "Terrain",
+            RegionOutput::TerrainChanged(_) => "TerrainChanged",
+            RegionOutput::SyncClock { .. } => "SyncClock",
+            RegionOutput::Stopped(..) => "Stopped",
+            RegionOutput::Departures(..) => "Departures",
+            RegionOutput::HaloEntities(..) => "HaloEntities",
+            RegionOutput::HaloDeltas(..) => "HaloDeltas",
+            RegionOutput::PeopleParked(_) => "PeopleParked",
+            RegionOutput::PlayerParked(..) => "PlayerParked",
+            RegionOutput::Forward(..) => "Forward",
+            RegionOutput::Intents(_) => "Intents",
+            RegionOutput::Spawned(_) => "Spawned",
+            RegionOutput::Despawned(_) => "Despawned",
+            RegionOutput::Saved(_) => "Saved",
+            RegionOutput::Incarnation(_) => "Incarnation",
+        }
+    }
 }
 
 /// A crossing saved with a region: the bundle (in that region's frame) and
@@ -444,7 +475,7 @@ impl RegionRunner {
                     RegionOutput::Terrain(client_id, self.terrain()),
                 ));
             }
-            RegionInput::StartAt(tick) => self.region.jump_clock_to(tick),
+            RegionInput::StartAt(tick) => self.region.start_at(tick),
             RegionInput::SetRouteMap(route) => self.region.set_route_map(route),
             RegionInput::Save => {
                 // Intents sent before the save go out before it, so the

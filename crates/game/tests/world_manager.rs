@@ -8,6 +8,8 @@ use game::{
 struct Harness {
     manager: WorldManager<InlineSpawner>,
     region_out: Receiver<(RegionCoords, RegionOutput)>,
+    /// The runners' output channel, for tests that inject an output.
+    region_out_send: crossbeam::channel::Sender<(RegionCoords, RegionOutput)>,
     packets: Receiver<(Option<ClientId>, ServerPacket)>,
 }
 
@@ -30,11 +32,12 @@ fn harness() -> Harness {
             InlineSpawner::default(),
             generator,
             out_send,
-            region_out_send,
+            region_out_send.clone(),
             lod_builder,
             lod_result_recv,
         ),
         region_out,
+        region_out_send,
         packets,
     }
 }
@@ -201,6 +204,70 @@ fn dead_region_respawns_and_resnapshots_subscribers() {
     assert!(h.drain_packets().iter().any(|(target, p)| {
         *target == Some(0) && matches!(p, ServerPacket::Region(id, _) if *id == rc)
     }));
+}
+
+/// A region generated afresh after its thread died must not hand out the
+/// `EntityId`s of its earlier incarnation's entities (which may live on in
+/// other regions, the directory or a parked record): its serials start past
+/// `world tick << ENTITY_SERIAL_TICK_SHIFT`.
+#[test]
+fn respawned_region_allocates_fresh_entity_ids() {
+    let mut h = harness();
+    h.event(ServerEvent::connected(0), 0);
+    let rc = RegionCoords::new(2, 0);
+    h.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(rc), 0), 0);
+    for _ in 0..5 {
+        h.manager.spawner_mut().tick_all();
+        h.settle(0);
+    }
+    let serial = |h: &mut Harness| {
+        let mut out = None;
+        h.manager.spawner_mut().with_region(rc, |r| out = Some(*r.data().next_entity_serial));
+        out.expect("running")
+    };
+    let first = serial(&mut h);
+    h.manager.spawner_mut().kill(rc);
+    h.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(rc), 0), 500);
+    let world_tick = game::RegionSpawner::world_tick(h.manager.spawner_mut());
+    assert!(world_tick > 0);
+    let second = serial(&mut h);
+    assert!(
+        second >= world_tick << game::ENTITY_SERIAL_TICK_SHIFT && second > first,
+        "respawned serials {second} overlap the dead incarnation's (< {first}, world tick {world_tick})"
+    );
+}
+
+/// Outputs a dead runner left in the channel (it died after sending them,
+/// and was respawned at once) are not the new incarnation's: dropped, not
+/// fanned out to clients.
+#[test]
+fn dead_incarnations_late_outputs_are_dropped() {
+    let mut h = harness();
+    h.event(ServerEvent::connected(0), 0);
+    let rc = RegionCoords::new(2, 0);
+    h.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(rc), 0), 0);
+    h.drain_packets();
+    h.manager.spawner_mut().kill(rc);
+    // What the dead runner sent just before it died, still unread.
+    let stale_id = 987_654;
+    let stale = GameEvent::new(GameEventKind::Tick, stale_id, rc);
+    h.region_out_send.send((rc, RegionOutput::EventProcessed(stale))).unwrap();
+    // Death detected and the region respawned before the channel is read.
+    assert!(h.manager.handle_server_event(
+        ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(rc), 0),
+        500
+    ));
+    h.settle(500);
+    assert!(h.manager.running_regions().contains(&rc));
+    let packets = h.drain_packets();
+    assert!(
+        !packets.iter().any(|(_, p)| matches!(p, ServerPacket::GameEvent(e) if e.id == stale_id)),
+        "a dead runner's late event reached the client"
+    );
+    assert!(
+        packets.iter().any(|(_, p)| matches!(p, ServerPacket::Region(id, _) if *id == rc)),
+        "the new incarnation's snapshot is delivered"
+    );
 }
 
 #[test]
@@ -512,11 +579,12 @@ fn floored_harness_with(spawner: InlineSpawner) -> Harness {
             spawner,
             Box::new(crate::history_handover::floored_region),
             out_send,
-            region_out_send,
+            region_out_send.clone(),
             lod_builder,
             lod_result_recv,
         ),
         region_out,
+        region_out_send,
         packets,
     }
 }

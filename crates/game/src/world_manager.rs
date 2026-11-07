@@ -454,6 +454,12 @@ pub struct ManagerDepths {
     /// Waiting arrivals despawned past [`PENDING_ARRIVALS_PER_REGION_MAX`]
     /// since the manager started ([`WorldManager::arrivals_despawned`]).
     pub arrivals_despawned: u64,
+    /// Items in replies that had nowhere to go, since the manager started
+    /// ([`WorldManager::items_destroyed`]).
+    pub items_destroyed: u64,
+    /// Intent replies given up, since the manager started
+    /// ([`WorldManager::intent_replies_lost`]).
+    pub intent_replies_lost: u64,
 }
 
 /// What a session is told when a new session of its player takes over
@@ -741,6 +747,15 @@ pub struct WorldManager<S: RegionSpawner> {
     parked_bodies: BTreeMap<crate::EntityId, PlayerId>,
     /// Items in replies that had nowhere to go (logged at warn).
     items_destroyed: u64,
+    /// Each running region's incarnation: a fresh number per
+    /// `ensure_running`, announced on the output channel by
+    /// `RegionOutput::Incarnation` just before the runner is spawned.
+    incarnation: BTreeMap<RegionCoords, u64>,
+    /// The last incarnation marker seen on the output channel, per region:
+    /// while it is not the current one, the outputs read are a dead runner's
+    /// late ones and are dropped.
+    incarnation_seen: BTreeMap<RegionCoords, u64>,
+    next_incarnation: u64,
 }
 
 impl<S: RegionSpawner> WorldManager<S> {
@@ -811,6 +826,9 @@ impl<S: RegionSpawner> WorldManager<S> {
             recently_despawned: std::collections::VecDeque::new(),
             despawn_warned: BTreeSet::new(),
             intent_replies_lost: 0,
+            incarnation: BTreeMap::new(),
+            incarnation_seen: BTreeMap::new(),
+            next_incarnation: 0,
         }
     }
 
@@ -1328,7 +1346,21 @@ impl<S: RegionSpawner> WorldManager<S> {
 
     pub fn handle_region_output(&mut self, rc: RegionCoords, output: RegionOutput, now_ms: u64) {
         self.clock_ms = self.clock_ms.max(now_ms);
+        if let RegionOutput::Incarnation(n) = output {
+            self.incarnation_seen.insert(rc, n);
+            return;
+        }
+        // A runner that died and was respawned at once can leave outputs in
+        // the channel: they precede the new runner's marker. (No marker seen
+        // yet = the region's first runner, or an output injected by a test.)
+        if let Some(seen) = self.incarnation_seen.get(&rc) {
+            if self.incarnation.get(&rc) != Some(seen) {
+                log::info!("[server] late output of a dead incarnation of {rc:?} dropped: {}", output.name());
+                return;
+            }
+        }
         match output {
+            RegionOutput::Incarnation(_) => unreachable!("handled above"),
             RegionOutput::EventProcessed(event) => {
                 if let GameEventKind::Intent(msg) = &event.kind {
                     if let Some(i) = self.in_flight_intents.iter().position(|f| f.target == rc && f.msg == *msg) {
@@ -1542,7 +1574,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                     Some(home) if home != rc && self.regions.contains_key(&home) => {
                         self.send_to_region(home, RegionInput::EventAfterTick(kind, stamp));
                     }
-                    home => log::debug!("[server] forward of {kind:?} from {rc:?} dropped: home {home:?}"),
+                    home => log::info!("[server] forward of {kind:?} from {rc:?} dropped: home {home:?}"),
                 }
             }
             RegionOutput::HaloDeltas(list, stamp) => {
@@ -2322,6 +2354,8 @@ impl<S: RegionSpawner> WorldManager<S> {
             transfers_in_flight: self.in_flight_count(),
             pending_arrivals: self.pending_arrival_total(),
             arrivals_despawned: self.arrivals_despawned(),
+            items_destroyed: self.items_destroyed(),
+            intent_replies_lost: self.intent_replies_lost(),
         }
     }
 
@@ -2368,6 +2402,12 @@ impl<S: RegionSpawner> WorldManager<S> {
                 None => RegionSeed::Fresh(columns),
             }
         };
+        // Its incarnation marker goes on the output channel BEFORE the runner
+        // exists: everything a previous (dead) runner left there comes
+        // before it, everything this one sends after.
+        self.next_incarnation += 1;
+        self.incarnation.insert(rc, self.next_incarnation);
+        let _ = self.region_out_send.send((rc, RegionOutput::Incarnation(self.next_incarnation)));
         let input = self.spawner.spawn(rc, seed, self.region_out_send.clone());
         // Very first: join the world's tick numbering before anything else.
         let _ = input.send(RegionInput::StartAt(self.spawner.world_tick()));
@@ -2545,9 +2585,15 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// entries go.
     fn forget_locations(&mut self, rc: RegionCoords) {
         self.locations.retain(|_, at| *at != rc);
-        // Arrivals waiting for it are still on their way there.
+        // Arrivals waiting for it, and crossings in flight to it (sent again
+        // to its next run), are still on their way there.
         for p in self.pending_arrivals.get(&rc).into_iter().flatten() {
             self.locations.insert(p.bundle.id, rc);
+        }
+        for (id, f) in &self.in_flight {
+            if f.target == rc {
+                self.locations.insert(*id, rc);
+            }
         }
     }
 

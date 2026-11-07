@@ -17,6 +17,12 @@ use crate::{
     RegionCoords, RegionId, ServerPacket,
 };
 
+/// A region started at world tick `t` ([`Region::start_at`]) allocates its
+/// `EntityId` serials from `t << ENTITY_SERIAL_TICK_SHIFT`: 2^20 ids per
+/// tick of headroom between incarnations, and 2^44 ticks (~28,000 years at
+/// 50 ms) before the product leaves `u64`.
+pub const ENTITY_SERIAL_TICK_SHIFT: u32 = 20;
+
 /// Opens or closes the inventory. Closing (in either play mode) closes the
 /// chest shown in it and returns the cursor stack to the inventory; what does
 /// not fit is returned, for the caller to drop as a pile at the player's feet
@@ -1060,6 +1066,27 @@ impl Region {
     /// Start this region's tick count at the world tick `tick` (a region woken
     /// late joins the world's numbering). Unlogged state surgery: only before
     /// the first tick, and a no-op when `tick` is not ahead of the region.
+    /// A runner's start ([`crate::RegionInput::StartAt`]): the region joins
+    /// the world's tick numbering ([`Self::jump_clock_to`]) and its
+    /// `EntityId` serials move to at least `tick << ENTITY_SERIAL_TICK_SHIFT`.
+    /// A region generated afresh (procedural respawn after a thread death, a
+    /// forged region before its first save, a set-aside file) starts at
+    /// serial 0, so without that floor it would hand out the ids of its
+    /// earlier incarnation's entities, which may still live elsewhere. Every
+    /// incarnation starts at a later world tick, so their serials are
+    /// disjoint while no region allocates `1 << ENTITY_SERIAL_TICK_SHIFT` ids
+    /// per tick. Server-only: the client gets the floor in the snapshot.
+    pub fn start_at(&mut self, tick: Tick) {
+        self.jump_clock_to(tick);
+        let floor = tick.saturating_mul(1 << ENTITY_SERIAL_TICK_SHIFT);
+        if *self.data.next_entity_serial < floor {
+            // Its own forgotten transaction, like `jump_clock_to`.
+            self.data.new_transaction();
+            self.data.next_entity_serial.update(|n| *n = floor);
+            self.data.forget();
+        }
+    }
+
     pub fn jump_clock_to(&mut self, tick: Tick) {
         let now = self.current_tick();
         if tick <= now {
