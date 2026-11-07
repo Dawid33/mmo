@@ -11,8 +11,9 @@ pub const DEFAULT_DB: &str = "target/dev-login/login.sqlite";
 pub const DEFAULT_KEYS_DIR: &str = "target/dev-login/keys";
 /// `VOXEL_LOGIN_PUBLIC_URL` unset: where mailed links point.
 pub const DEFAULT_PUBLIC_URL: &str = "http://127.0.0.1:8790";
-/// `VOXEL_LOGIN_CORS_ORIGINS` unset: the dev browser build's page (`just web`).
-pub const DEFAULT_CORS_ORIGINS: &str = "http://127.0.0.1:1334";
+/// `VOXEL_LOGIN_CORS_ORIGINS` unset: the dev browser build's page (`just web`), by IP or as
+/// `localhost` (browsers treat the two as different origins).
+pub const DEFAULT_CORS_ORIGINS: &str = "http://127.0.0.1:1334,http://localhost:1334";
 
 /// How mail goes out.
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -401,7 +401,11 @@ async fn reset_page_form_round_trip() {
     assert_eq!(page.status, StatusCode::OK);
     let html = page.text();
     assert!(page.headers[header::CONTENT_TYPE].to_str().unwrap().starts_with("text/html"));
-    assert!(html.contains("<form") && html.contains("method=\"post\"") && html.contains("action=\"/reset\""), "{html}");
+    // Relative, so it works behind a path prefix (`/login/reset` posts to `/login/reset`).
+    assert!(html.contains("<form") && html.contains("method=\"post\"") && html.contains("action=\"reset\""), "{html}");
+    // The URL carries the token: never cached, never sent on as a Referer.
+    assert_eq!(page.headers[header::CACHE_CONTROL], "no-store");
+    assert_eq!(page.headers[header::REFERRER_POLICY], "no-referrer");
     assert!(html.contains(&format!("value=\"{token}\"")));
     assert!(!html.contains("<script"));
     let done = a.send(form_post("/reset", format!("token={token}&password=a+brand+new+password"))).await;
@@ -424,6 +428,8 @@ async fn verify_page_confirms() {
     let token = a.mailed_token("/verify");
     let page = a.get(&format!("/verify?token={token}")).await;
     assert_eq!(page.status, StatusCode::OK);
+    assert_eq!(page.headers[header::CACHE_CONTROL], "no-store");
+    assert_eq!(page.headers[header::REFERRER_POLICY], "no-referrer");
     assert!(page.text().to_lowercase().contains("verified"), "{}", page.text());
     assert_eq!(a.login(EMAIL, PASSWORD).await.status, StatusCode::OK);
     let again = a.get(&format!("/verify?token={token}")).await;
@@ -438,7 +444,7 @@ fn config_defaults_and_overrides() {
     assert_eq!(d.db_url, "target/dev-login/login.sqlite");
     assert_eq!(d.keys_dir, std::path::PathBuf::from("target/dev-login/keys"));
     assert_eq!(d.public_url, "http://127.0.0.1:8790");
-    assert_eq!(d.cors_origins, vec![ORIGIN_OK.to_string()]);
+    assert_eq!(d.cors_origins, vec![ORIGIN_OK.to_string(), "http://localhost:1334".to_string()]);
     assert!(!d.require_verified);
     assert_eq!(d.mailer, MailerKind::Log);
     let env = |k: &str| {

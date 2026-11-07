@@ -1,10 +1,13 @@
 //! The plain-HTML pages mailed links open (no JavaScript): `GET /verify?token=` confirms an
 //! address; `GET /reset?token=` shows a new-password form that POSTs to `/reset`; `GET /reset`
 //! without a token shows a form asking for the address, which POSTs to `/reset/request`.
-//! Everything echoed back is HTML-escaped.
+//! Everything echoed back is HTML-escaped. The forms post to RELATIVE targets, so the pages
+//! keep working behind a path prefix (an Ingress serving the service under `/login`), and every
+//! page is sent with [`PAGE_CACHE_CONTROL`] / [`PAGE_REFERRER_POLICY`]: their URLs carry
+//! single-use tokens, which must not sit in a cache or leak in a `Referer`.
 
 use axum::extract::{Form, Query, State};
-use axum::http::StatusCode;
+use axum::http::{StatusCode, header};
 use axum::response::Html;
 use axum::routing::{get, post};
 use axum::Router;
@@ -20,6 +23,14 @@ pub const PAGE_VERIFY: &str = "/verify";
 pub const PAGE_RESET: &str = "/reset";
 /// The "mail me a reset link" form's target.
 pub const PAGE_RESET_REQUEST: &str = "/reset/request";
+/// The new-password form's `action`, relative to [`PAGE_RESET`] (the page it is on).
+pub const FORM_RESET_ACTION: &str = "reset";
+/// The address form's `action`, relative to [`PAGE_RESET`]: [`PAGE_RESET_REQUEST`].
+pub const FORM_RESET_REQUEST_ACTION: &str = "reset/request";
+/// `Cache-Control` on every page.
+pub const PAGE_CACHE_CONTROL: &str = "no-store";
+/// `Referrer-Policy` on every page.
+pub const PAGE_REFERRER_POLICY: &str = "no-referrer";
 
 #[derive(Deserialize)]
 struct TokenQuery {
@@ -40,7 +51,7 @@ struct ResetRequestForm {
     email: String,
 }
 
-type Page = (StatusCode, Html<String>);
+type Page = (StatusCode, [(header::HeaderName, &'static str); 2], Html<String>);
 
 /// Minimal HTML escaping for text and attribute values.
 pub fn escape(s: &str) -> String {
@@ -63,6 +74,7 @@ fn page(status: StatusCode, title: &str, body: &str) -> Page {
     let title = escape(title);
     (
         status,
+        [(header::CACHE_CONTROL, PAGE_CACHE_CONTROL), (header::REFERRER_POLICY, PAGE_REFERRER_POLICY)],
         Html(format!(
             "<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">\
              <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
@@ -79,7 +91,7 @@ fn failed(title: &str, f: Fail) -> Page {
 fn reset_form(token: &str, note: Option<&str>) -> String {
     let note = note.map(|n| format!("<p>{}</p>\n", escape(n))).unwrap_or_default();
     format!(
-        "{note}<form method=\"post\" action=\"{PAGE_RESET}\">\n\
+        "{note}<form method=\"post\" action=\"{FORM_RESET_ACTION}\">\n\
          <input type=\"hidden\" name=\"token\" value=\"{}\">\n\
          <p><label>New password ({PASSWORD_MIN_CHARS}–{PASSWORD_MAX_CHARS} characters)<br>\
          <input type=\"password\" name=\"password\" minlength=\"{PASSWORD_MIN_CHARS}\" maxlength=\"{PASSWORD_MAX_CHARS}\" \
@@ -110,7 +122,7 @@ async fn reset_page(Query(q): Query<TokenQuery>) -> Page {
             StatusCode::OK,
             "Reset your password",
             &format!(
-                "<form method=\"post\" action=\"{PAGE_RESET_REQUEST}\">\n\
+                "<form method=\"post\" action=\"{FORM_RESET_REQUEST_ACTION}\">\n\
                  <p><label>Email address<br><input type=\"email\" name=\"email\" autocomplete=\"email\" required></label></p>\n\
                  <p><button type=\"submit\">Mail me a reset link</button></p>\n</form>"
             ),

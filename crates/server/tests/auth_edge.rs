@@ -78,6 +78,30 @@ async fn jwt_host_accepts_valid_ticket() {
     assert_ne!(first, other);
 }
 
+/// The login service mints a ticket's `player_token` itself
+/// (`crates/login/src/api.rs` `new_player_token`: `PLAYER_TOKEN_BYTES` random
+/// bytes as lowercase hex), while hosts parse it as a `game::PlayerToken`
+/// (`crates/game/src/player.rs`). The two definitions are kept apart on
+/// purpose (no `login` dependency here): this pins that a token in login's
+/// format is one the host accepts.
+#[tokio::test(flavor = "multi_thread")]
+async fn jwt_host_accepts_a_player_token_in_the_login_services_format() {
+    // Login's format, spelled out: 16 bytes, each as two lowercase hex digits.
+    const LOGIN_PLAYER_TOKEN_BYTES: usize = 16;
+    assert_eq!(LOGIN_PLAYER_TOKEN_BYTES, game::PLAYER_TOKEN_BYTES, "login and game agree on the size");
+    let bytes: [u8; LOGIN_PLAYER_TOKEN_BYTES] = std::array::from_fn(|i| (i as u8).wrapping_mul(37).wrapping_add(0xA5));
+    let minted: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    assert!(PlayerToken(minted.clone()).is_valid(), "{minted}");
+    assert_eq!(PlayerToken::generate(bytes).0, minted, "the same text as game's own generator");
+
+    let signer = signer();
+    let auth = jwt_host(signer.jwks());
+    let store = store();
+    let mut ticket = claims(&token(0), 1);
+    ticket.player_token = minted;
+    admit(&store, &auth, signer.sign(&ticket)).await.expect("a login-minted player token is admitted");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn jwt_host_refuses_expired() {
     let signer = signer();
