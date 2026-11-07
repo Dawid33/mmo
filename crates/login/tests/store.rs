@@ -160,3 +160,76 @@ async fn concurrent_takes_postgres() {
     race_takes(LoginStore::open(&db.url).await.unwrap()).await;
     db.drop_db().await;
 }
+
+/// `RACERS` concurrent rotations of one token, each with its own successor: exactly one is
+/// `Valid`, and once every `Reused` racer has revoked the family (as the handler does), no token
+/// of that family is live — the winner's successor included.
+async fn race_rotations(store: LoginStore) {
+    const FAMILY: [u8; 16] = [5; 16];
+    let a = store.create_account("r@b.c", "h", 0).await.unwrap().unwrap();
+    store.insert_refresh([1; 32], a, FAMILY, 1000).await.unwrap();
+    let mut racers = Vec::new();
+    for i in 0..RACERS {
+        let s = store.clone();
+        racers.push(tokio::spawn(async move {
+            let successor = [100 + i as u8; 32];
+            let out = s.rotate_refresh([1; 32], successor, 1000, 10).await.unwrap();
+            if let RefreshOutcome::Reused { family, .. } = &out {
+                s.revoke_family(*family, 10).await.unwrap();
+            }
+            (successor, out)
+        }));
+    }
+    let mut winners = Vec::new();
+    for h in racers {
+        match h.await.unwrap() {
+            (succ, RefreshOutcome::Valid { account, family }) => {
+                assert_eq!((account, family), (a, FAMILY));
+                winners.push(succ);
+            }
+            (_, RefreshOutcome::Reused { family, .. }) => assert_eq!(family, FAMILY),
+            (_, RefreshOutcome::Unknown) => panic!("a racer saw Unknown"),
+        }
+    }
+    assert_eq!(winners.len(), 1, "exactly one concurrent rotation is Valid");
+    // Every successor: the winner's is revoked, the losers' were never inserted.
+    for i in 0..RACERS {
+        let succ = [100 + i as u8; 32];
+        let out = store.take_refresh(succ, 11).await.unwrap();
+        if succ == winners[0] {
+            assert_eq!(out, RefreshOutcome::Reused { account: a, family: FAMILY }, "winner's successor revoked");
+        } else {
+            assert_eq!(out, RefreshOutcome::Unknown, "a loser's successor was inserted");
+        }
+    }
+}
+
+#[tokio::test]
+async fn rotate_refresh_inserts_successor_in_family() {
+    let s = store().await;
+    let a = s.create_account("a@b.c", "h", 0).await.unwrap().unwrap();
+    s.insert_refresh([1; 32], a, [9; 16], 1000).await.unwrap();
+    assert_eq!(s.rotate_refresh([1; 32], [2; 32], 2000, 10).await.unwrap(), RefreshOutcome::Valid { account: a, family: [9; 16] });
+    assert_eq!(s.rotate_refresh([1; 32], [3; 32], 2000, 11).await.unwrap(), RefreshOutcome::Reused { account: a, family: [9; 16] });
+    assert_eq!(s.rotate_refresh([7; 32], [4; 32], 2000, 11).await.unwrap(), RefreshOutcome::Unknown);
+    // Only the Valid rotation inserted its successor, in the old family.
+    assert_eq!(s.take_refresh([3; 32], 12).await.unwrap(), RefreshOutcome::Unknown);
+    assert_eq!(s.take_refresh([4; 32], 12).await.unwrap(), RefreshOutcome::Unknown);
+    assert_eq!(s.take_refresh([2; 32], 12).await.unwrap(), RefreshOutcome::Valid { account: a, family: [9; 16] });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_rotations_sqlite_file() {
+    let dir = std::env::temp_dir().join(format!("login-rot-race-{}", std::process::id()));
+    let path = dir.join("login.sqlite");
+    race_rotations(LoginStore::open(path.to_str().unwrap()).await.unwrap()).await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_rotations_postgres() {
+    let Some(admin) = crate::common::pg_admin_url() else { return crate::common::skip_msg() };
+    let db = crate::common::PgTestDb::create(&admin).await;
+    race_rotations(LoginStore::open(&db.url).await.unwrap()).await;
+    db.drop_db().await;
+}

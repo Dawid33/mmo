@@ -220,13 +220,71 @@ impl LoginStore {
     pub async fn take_refresh(&self, hash: [u8; 32], now: i64) -> Result<RefreshOutcome, LoginError> {
         const TAKE: &str = "UPDATE refresh_tokens SET revoked_at = $1 \
              WHERE token_hash = $2 AND revoked_at IS NULL AND expires_at > $1 RETURNING account_id, family";
-        const LOOK: &str = "SELECT account_id, family, revoked_at FROM refresh_tokens WHERE token_hash = $1";
         let taken: Option<(i64, Vec<u8>)> =
             on!(self, p => sqlx::query(TAKE).bind(now).bind(&hash[..]).fetch_optional(p).await?
                 .map(|r| (r.get(0), r.get(1))));
         if let Some((account, family)) = taken {
             return Ok(RefreshOutcome::Valid { account, family: family_of(family) });
         }
+        self.not_taken(hash).await
+    }
+
+    /// Rotate a refresh token: take `old` (as [`take_refresh`](Self::take_refresh)) and, if it was
+    /// live, insert `new` in its family — ONE transaction, so a successor is never inserted after a
+    /// concurrent reuse revoked the family.
+    ///
+    /// Why that is enough (the caller revokes the family on `Reused`):
+    /// - Postgres (READ COMMITTED): a concurrent take of `old` blocks on the winner's row lock until
+    ///   the winner commits — with its successor — then re-checks, sees `old` revoked and answers
+    ///   `Reused`; its `revoke_family` runs after that commit, so it revokes the successor too.
+    /// - SQLite: writers are serialised, and the take UPDATE is the transaction's first statement,
+    ///   so the deferred transaction takes the write lock before reading anything (no stale
+    ///   snapshot to upgrade); a loser's reuse lookup runs after the winner committed.
+    pub async fn rotate_refresh(
+        &self,
+        old: [u8; 32],
+        new: [u8; 32],
+        new_expires_at: i64,
+        now: i64,
+    ) -> Result<RefreshOutcome, LoginError> {
+        const TAKE: &str = "UPDATE refresh_tokens SET revoked_at = $1 \
+             WHERE token_hash = $2 AND revoked_at IS NULL AND expires_at > $1 RETURNING account_id, family";
+        const INS: &str = "INSERT INTO refresh_tokens (token_hash, account_id, family, expires_at) VALUES ($1, $2, $3, $4)";
+        let taken: Option<(i64, Vec<u8>)> = match &self.pool {
+            Pool::Sqlite(p) => {
+                let mut tx = p.begin().await?;
+                let taken: Option<(i64, Vec<u8>)> = sqlx::query(TAKE)
+                    .bind(now).bind(&old[..]).fetch_optional(&mut *tx).await?
+                    .map(|r| (r.get(0), r.get(1)));
+                if let Some((account, family)) = &taken {
+                    sqlx::query(INS).bind(&new[..]).bind(account).bind(&family[..]).bind(new_expires_at)
+                        .execute(&mut *tx).await?;
+                }
+                tx.commit().await?;
+                taken
+            }
+            Pool::Pg(p) => {
+                let mut tx = p.begin().await?;
+                let taken: Option<(i64, Vec<u8>)> = sqlx::query(TAKE)
+                    .bind(now).bind(&old[..]).fetch_optional(&mut *tx).await?
+                    .map(|r| (r.get(0), r.get(1)));
+                if let Some((account, family)) = &taken {
+                    sqlx::query(INS).bind(&new[..]).bind(account).bind(&family[..]).bind(new_expires_at)
+                        .execute(&mut *tx).await?;
+                }
+                tx.commit().await?;
+                taken
+            }
+        };
+        if let Some((account, family)) = taken {
+            return Ok(RefreshOutcome::Valid { account, family: family_of(family) });
+        }
+        self.not_taken(old).await
+    }
+
+    /// A refresh token that could not be taken: `Reused` if it was revoked, else `Unknown`.
+    async fn not_taken(&self, hash: [u8; 32]) -> Result<RefreshOutcome, LoginError> {
+        const LOOK: &str = "SELECT account_id, family, revoked_at FROM refresh_tokens WHERE token_hash = $1";
         let seen: Option<(i64, Vec<u8>, Option<i64>)> =
             on!(self, p => sqlx::query(LOOK).bind(&hash[..]).fetch_optional(p).await?
                 .map(|r| (r.get(0), r.get(1), r.get(2))));

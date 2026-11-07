@@ -9,7 +9,8 @@
 //! - **Refresh tokens** are [`TOKEN_BYTES`] random bytes, base64url without padding; the database
 //!   holds SHA-256 over the token's base64url STRING bytes ([`token_hash`]) — so any presented
 //!   string hashes, and a malformed one is simply unknown. Email tokens use the same scheme.
-//!   Every refresh / join rotates the token within its family; presenting a spent token revokes
+//!   Every refresh / join rotates the token within its family (take + successor in one
+//!   transaction, `LoginStore::rotate_refresh`); presenting a spent token revokes
 //!   the whole family.
 //! - **Nothing secret is logged**: no password, refresh / email token or whole JWT, and no request
 //!   or response body (the `login-api` DTOs' `Debug` prints them). Joins log account id + `kid`.
@@ -218,10 +219,14 @@ async fn verify_password(state: &AppState, password: String, phc: String) -> Res
 /// Store a new refresh token in `family` for `account`; the token.
 async fn issue_refresh(state: &AppState, account: i64, family: [u8; FAMILY_BYTES]) -> Result<String, Fail> {
     let token = new_token();
-    let ttl = REFRESH_TTL_DAYS * SECS_PER_DAY;
-    let expires = i64::try_from(state.now().saturating_add(ttl)).unwrap_or(i64::MAX);
-    state.store.insert_refresh(token_hash(&token), account, family, expires).await?;
+    state.store.insert_refresh(token_hash(&token), account, family, refresh_expiry(state)).await?;
     Ok(token)
+}
+
+/// When a refresh token issued now expires.
+fn refresh_expiry(state: &AppState) -> i64 {
+    let ttl = REFRESH_TTL_DAYS * SECS_PER_DAY;
+    i64::try_from(state.now().saturating_add(ttl)).unwrap_or(i64::MAX)
 }
 
 fn login_response(account: &AccountRow, refresh_token: String) -> LoginResponse {
@@ -232,20 +237,24 @@ fn login_response(account: &AccountRow, refresh_token: String) -> LoginResponse 
     }
 }
 
-/// Spend `presented` (rotation): the live account and the token's family. A spent token revokes
-/// its family; an unknown / expired one, a deleted account or (with `require_verified`) an
-/// unverified one is refused. The caller issues the successor in the same family.
-async fn take_refresh(state: &AppState, presented: &str) -> Result<(AccountRow, [u8; FAMILY_BYTES]), Fail> {
+/// Rotate `presented`: spend it and store its successor in the same family, atomically
+/// ([`LoginStore::rotate_refresh`]); the live account and the successor token. A spent token
+/// revokes its family; an unknown / expired one, a deleted account or (with `require_verified`)
+/// an unverified one is refused (the successor is then never handed out; it dies with the family
+/// at the next reuse or expiry).
+async fn rotate_refresh(state: &AppState, presented: &str) -> Result<(AccountRow, String), Fail> {
     let now = state.now_db();
-    match state.store.take_refresh(token_hash(presented), now).await? {
-        RefreshOutcome::Valid { account, family } => {
+    let successor = new_token();
+    let expires = refresh_expiry(state);
+    match state.store.rotate_refresh(token_hash(presented), token_hash(&successor), expires, now).await? {
+        RefreshOutcome::Valid { account, .. } => {
             let Some(row) = state.store.account(account).await? else {
                 return Err(Fail::revoked());
             };
             if state.config.require_verified && row.email_verified_at.is_none() {
                 return Err(Fail::not_verified());
             }
-            Ok((row, family))
+            Ok((row, successor))
         }
         RefreshOutcome::Reused { account, family } => {
             log::warn!("[login] refresh token reused: account {account}'s token family revoked");
@@ -296,8 +305,7 @@ async fn login(State(s): State<AppState>, ApiJson(req): ApiJson<LoginRequest>) -
 }
 
 async fn refresh(State(s): State<AppState>, ApiJson(req): ApiJson<RefreshRequest>) -> Result<Json<LoginResponse>, Fail> {
-    let (account, family) = take_refresh(&s, &req.refresh_token).await?;
-    let token = issue_refresh(&s, account.account_id, family).await?;
+    let (account, token) = rotate_refresh(&s, &req.refresh_token).await?;
     Ok(Json(login_response(&account, token)))
 }
 
@@ -327,8 +335,7 @@ async fn join(State(s): State<AppState>, ApiJson(req): ApiJson<JoinRequest>) -> 
     if world.status != WorldStatus::Open {
         return Err(Fail::new(StatusCode::FORBIDDEN, ApiErrorCode::WorldClosed, "this world is closed"));
     }
-    let (account, family) = take_refresh(&s, &req.refresh_token).await?;
-    let refresh_token = issue_refresh(&s, account.account_id, family).await?;
+    let (account, refresh_token) = rotate_refresh(&s, &req.refresh_token).await?;
     let now = s.now();
     let player_token =
         s.store.player_token_for(account.account_id, &world.world_id, s.now_db(), new_player_token).await?;
