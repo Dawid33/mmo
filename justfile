@@ -771,6 +771,11 @@ render-bench backend="direct+raster" adapter="" repetitions="3" threads="4":
 # so a dev page prefills 127.0.0.1 (the local `just server`).
 web_server := "orion.factoriosurvivalworld.com"
 
+# The login service the browser page should use (`just login=http://127.0.0.1:8790 web`):
+# `web` prints the page URL with `?login=<url>`, which makes the join-only menu offer
+# Play online. Empty = the plain Join-server menu.
+login := ""
+
 # The browser has no worlds of its own: it opens on the main menu, whose Join
 # server connects to a running server. So this starts the dev server too (the
 # same as `just server`, built with the same dials; log in target/web-server.log)
@@ -793,6 +798,11 @@ web:
         RUST_BACKTRACE=1 ./target/debug/server >target/web-server.log 2>&1 </dev/null &
         server=$!
         trap 'echo "web: stopping the dev server (saving the world)"; kill -TERM $server 2>/dev/null; wait $server 2>/dev/null || true' EXIT
+    fi
+    if [ -n "{{login}}" ]; then
+        echo "web: open http://127.0.0.1:1334/?login={{login}}"
+    else
+        echo "web: open http://127.0.0.1:1334/ (add ?login=<login service url> for Play online)"
     fi
     WASM_SERVER_RUNNER_CUSTOM_INDEX_HTML=crates/client/index.html \
         {{cargo}} run -p client --target wasm32-unknown-unknown
@@ -918,9 +928,13 @@ login-world-add *args:
 login-world-list:
     just login world list
 
+with_web := ""
+
 # A dev server that requires login, with the login service beside it: ensures a signing
 # key and the world `dev`, runs `login serve` in the background and the dev server
 # (VOXEL_AUTH=jwt, play region size) in the foreground; SIGTERMs the login service on exit.
+# `just with_web=1 dev-login` also serves the browser page (wasm-server-runner, :1334)
+# and prints its `?login=` URL (log target/dev-login/web.log).
 dev-login:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -939,6 +953,15 @@ dev-login:
     lpid=$!
     trap 'echo "dev-login: stopping the login service"; kill -TERM $lpid 2>/dev/null; wait $lpid 2>/dev/null || true' EXIT
     echo "dev-login: login service on http://127.0.0.1:8790 (log: target/dev-login/login.log)"
+    if [ -n "{{with_web}}" ]; then
+        # the browser page beside it: wasm-server-runner on :1334 (the dev server above
+        # keeps UDP 6466/6467); open the printed URL
+        echo "dev-login: browser page: http://127.0.0.1:1334/?login=http://127.0.0.1:8790"
+        WASM_SERVER_RUNNER_CUSTOM_INDEX_HTML=crates/client/index.html \
+            {{cargo}} run -p client --target wasm32-unknown-unknown >target/dev-login/web.log 2>&1 </dev/null &
+        wpid=$!
+        trap 'echo "dev-login: stopping the login service and page"; kill -TERM $lpid $wpid 2>/dev/null; wait $lpid $wpid 2>/dev/null || true' EXIT
+    fi
     VOXEL_AUTH=jwt VOXEL_WORLD_ID=dev VOXEL_LOGIN_URL=http://127.0.0.1:8790 ./target/debug/server
 
 # Run exactly the tests a change touches, by crate + cargo-test arguments:
