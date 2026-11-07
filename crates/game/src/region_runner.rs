@@ -160,6 +160,11 @@ pub enum RegionOutput {
     /// slot `tick`: the manager aborts that cut and retries with a longer
     /// lead.
     CutMissed(crate::CutId),
+    /// The region's stored state could not be read from the world store
+    /// (the spawner's load at start; the reason): its thread ends without
+    /// running. The manager keeps it stopped until a retry
+    /// ([`crate::STORE_LOAD_RETRY_SECS`]) — never regenerated over stored data.
+    LoadFailed(String),
     /// Sent just before a `CutSnapshot`: where the people with a body here
     /// stand (region-local translations), for the history
     /// (`History::note_positions`) — the snapshot itself holds no people.
@@ -192,89 +197,11 @@ impl RegionOutput {
             RegionOutput::Despawned(_) => "Despawned",
             RegionOutput::CutSnapshot(..) => "CutSnapshot",
             RegionOutput::CutMissed(_) => "CutMissed",
+            RegionOutput::LoadFailed(_) => "LoadFailed",
             RegionOutput::PeoplePositions(_) => "PeoplePositions",
             RegionOutput::Incarnation(_) => "Incarnation",
         }
     }
-}
-
-/// A crossing saved with a region: the bundle (in that region's frame) and
-/// its stamp. Restored, it is queued again as a held
-/// [`RegionInput::Transfer`] (see [`RegionRunner::requeue_saved`]).
-pub type SavedTransfer = (EntityBundle, Tick);
-
-/// The legacy region-file format (`server::region_store`, deleted by world
-/// store Task 7 — TODO(world-store Task 7)); the `WorldManager` no longer
-/// produces it (save cuts replaced it). One region's state: a running region's live clone
-/// (`RegionOutput::Saved`) with the crossings in flight to it that its state
-/// does not hold yet (from the manager's in-flight table), or a parked blob (which holds every arrival:
-/// `Shutdown` applies what is held). Either also carries, rebased back into
-/// its frame, what departed from it into a region that is not running and
-/// waits there (the manager's arrival mailbox). Either restores through
-/// [`restore_saved`] + [`RegionRunner::requeue_saved`].
-#[derive(Debug)]
-pub enum RegionSave {
-    Live(Box<Rollback>, Vec<SavedTransfer>),
-    Parked(SerializedRegion, Vec<SavedTransfer>),
-}
-
-impl RegionSave {
-    /// The region file's payload: bincode of `(Rollback, Vec<SavedTransfer>)`.
-    /// Its state prefix is a parking blob, so [`SerializedRegion::to_rollback`]
-    /// still reads it; [`SerializedRegion::to_saved`] reads both.
-    pub fn into_serialized(self) -> SerializedRegion {
-        let (mut bytes, transfers) = match self {
-            RegionSave::Live(rollback, transfers) => (SerializedRegion::from_rollback(&rollback).0, transfers),
-            RegionSave::Parked(serialized, transfers) => (serialized.0, transfers),
-        };
-        bincode::serialize_into(&mut bytes, &transfers).expect("saved transfers must serialize");
-        SerializedRegion(bytes)
-    }
-}
-
-/// A region file's payload, decoded ([`SerializedRegion::to_saved`]).
-#[derive(Debug)]
-pub struct SavedRegion {
-    pub state: Rollback,
-    pub transfers: Vec<SavedTransfer>,
-}
-
-impl SerializedRegion {
-    /// Decode a region file's payload ([`RegionSave::into_serialized`]).
-    pub fn to_saved(&self) -> Result<SavedRegion, Box<bincode::ErrorKind>> {
-        let (state, transfers) = bincode::deserialize(&self.0)?;
-        Ok(SavedRegion { state, transfers })
-    }
-}
-
-/// A region restored from a saved state of an EARLIER server process. Its
-/// player bodies belong to sessions that no longer exist (client ids restart
-/// at 0, so a stale one would collide with a new connection) and its people
-/// belong to the history, which spawns them again as the region starts
-/// (`History::region_started`) — both are removed before the region runs.
-/// In-process parked blobs never need this: their people were despawned at
-/// `Shutdown` and their players are still this process's.
-pub fn restore_saved(id: RegionId, rollback: Rollback) -> Region {
-    let mut region = Region::new(rollback, None, id, None);
-    let clients: Vec<ClientId> = region.data().clients.keys().copied().collect();
-    let people: Vec<crate::history::PersonId> = region.data().person_entities.keys().copied().collect();
-    let events = clients
-        .into_iter()
-        .filter(|c| region.data().player_entites.contains_key(c))
-        .map(GameEventKind::ClientLeft)
-        .chain(people.into_iter().map(GameEventKind::DespawnPerson));
-    for kind in events.collect::<Vec<_>>() {
-        if let Err(e) = region.handle_event(kind) {
-            log::error!("restoring saved region {id:?}: {e:?}");
-        }
-        region.commit_server_event();
-    }
-    // A client entry without a body (none expected) is stale all the same.
-    let stale: Vec<ClientId> = region.data().clients.keys().copied().collect();
-    if !stale.is_empty() {
-        log::warn!("restoring saved region {id:?}: {} client entries without a body kept", stale.len());
-    }
-    region
 }
 
 /// How to build a region when it spawns: restored from the parking lot if
@@ -916,29 +843,6 @@ impl RegionRunner {
         }
         if !gone.is_empty() {
             let _ = self.out.send((self.id, RegionOutput::Despawned(gone)));
-        }
-    }
-
-    /// A restored region's saved crossings ([`SavedRegion::transfers`]) are
-    /// queued again with their stamps, as if just received. A player's or a
-    /// person's is dropped, like their bodies in [`restore_saved`]: the
-    /// player store and the history put them back. One already here (it
-    /// cannot be, by how the manager saves them — defensive) is dropped too.
-    pub fn requeue_saved(&mut self, transfers: Vec<SavedTransfer>) {
-        let mut dropped = 0;
-        for (bundle, stamp) in transfers {
-            let stale = bundle.client.is_some() || matches!(bundle.kind, crate::EntityKind::Person { .. });
-            if stale || self.region.data().entity_by_id(bundle.id).is_some() {
-                dropped += 1;
-                continue;
-            }
-            self.held_transfers.push_back((GameEventKind::EntityArrived(bundle), stamp));
-        }
-        if dropped > 0 {
-            log::info!(
-                "restoring region {:?}: {dropped} saved crossings dropped (players, people, already present)",
-                self.id
-            );
         }
     }
 

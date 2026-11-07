@@ -12,7 +12,7 @@ use game::portable::{classify, ChunkTerms, PortableRegion, RegionMeta};
 use game::rapier3d::math::Vector;
 use game::{
     chest_block, restore_portable, state_hash, Block, BlockId, ChunkCoords, ColliderSpec, Container, DesignationKind,
-    EntityBundle, EntityKey, GameEventKind, Intent, IntentMsg, ItemId, ItemStack, OpId, Order, Pose, Region, RegionCoords,
+    EntityBundle, EntityKey, GameEventKind, Intent, ItemId, ItemStack, OpId, Order, Pose, Region, RegionCoords,
     Rollback, SentIntent, SettlePolicy, StoredRegion, Target, TileBox, WorldBlockPos, REGION_BLOCKS,
 };
 
@@ -108,7 +108,8 @@ fn furnished_region() -> Region {
             from: rc(),
             due,
         };
-        r.insert_saved_intents(&[IntentMsg::Intent(sent)]);
+        // Queued raw, as `restore_portable` puts back stored intents.
+        r.data.intents.insert_raw((due, by, 0), sent);
     });
     region
 }

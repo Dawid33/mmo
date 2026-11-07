@@ -1101,6 +1101,7 @@ pub fn refusal_text(why: PlayRefusal) -> &'static str {
         PlayRefusal::OffMap => "Not on the map",
         PlayRefusal::NoDryLand => "No dry land there",
         PlayRefusal::AlreadyHere => "You are already here",
+        PlayRefusal::RegionUnavailable => "That region could not be loaded; try again shortly",
     }
 }
 

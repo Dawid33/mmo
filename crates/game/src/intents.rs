@@ -307,30 +307,6 @@ impl Rollback {
         self.data.intent_replies.values().copied().collect()
     }
 
-    /// Put intents / replies that were in flight to (or owed by) this region
-    /// into its queues, UNLOGGED: for a saved clone only, never a live region.
-    /// (The pre-cut autosave used it; save cuts carry them as rows.)
-    /// Restored, they apply / deliver at its first tick — or are sent on, if
-    /// they belong elsewhere.
-    pub fn insert_saved_intents(&mut self, msgs: &[IntentMsg]) {
-        for msg in msgs {
-            match *msg {
-                IntentMsg::Intent(sent) => {
-                    let (due, by) = (sent.due, sent.intent.by());
-                    let last = self.data.intents.range((due, by, 0)..=(due, by, u32::MAX)).next_back();
-                    let seq = last.map_or(0, |(k, _)| k.2 + 1);
-                    self.data.intents.insert_raw((due, by, seq), sent);
-                }
-                IntentMsg::Reply(sent) => {
-                    let (due, to) = (sent.due, sent.reply.to());
-                    let last = self.data.intent_replies.range((due, to, 0)..=(due, to, u32::MAX)).next_back();
-                    let seq = last.map_or(0, |(k, _)| k.2 + 1);
-                    self.data.intent_replies.insert_raw((due, to, seq), sent);
-                }
-            }
-        }
-    }
-
     /// Send `intent` at `target`, due at the next tick: queued here when this
     /// region owns the target, else into `out`.
     pub(crate) fn send_intent_safe(&mut self, target: Target, intent: Intent, out: &mut Vec<IntentMsg>) {

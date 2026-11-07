@@ -28,10 +28,12 @@ pub struct ThreadRegionSpawner {
     /// (`RegionInput::SeedHaloFromWorldgen`), handed to every runner — one
     /// field, so a spawner that generates regions always seeds halos too.
     generator: Option<(SharedRegionGenerator, game::HaloGenerator)>,
-    /// World autosave: a region that has not run in this process (a
-    /// `RegionSeed::Deferred(None)`) is restored from its save, if any, instead
-    /// of generated — read on the region's own thread.
-    store: Option<std::sync::Arc<crate::region_store::RegionStore>>,
+    /// The world store: a region that has not run in this process (a
+    /// `RegionSeed::Deferred(None)`) is restored from its stored state, if
+    /// any, instead of generated — read on the region's own thread. A read
+    /// that fails stops the region (`RegionOutput::LoadFailed`): it is never
+    /// regenerated over stored data.
+    store: Option<world_store::StoreHandle>,
 }
 
 impl Default for ThreadRegionSpawner {
@@ -70,9 +72,9 @@ impl ThreadRegionSpawner {
         self
     }
 
-    /// Restore never-run regions from `store` (see [`crate::region_store`]).
-    pub fn with_store(mut self, store: crate::region_store::RegionStore) -> Self {
-        self.store = Some(std::sync::Arc::new(store));
+    /// Restore never-run regions from the world store.
+    pub fn with_store(mut self, store: world_store::StoreHandle) -> Self {
+        self.store = Some(store);
         self
     }
 }
@@ -98,18 +100,31 @@ impl RegionSpawner for ThreadRegionSpawner {
                 // region never stalls the manager.
                 let genesis_started = Instant::now();
                 let parked = matches!(seed, RegionSeed::Parked(..) | RegionSeed::Deferred(Some(_)));
-                // Never run in this process: the world autosave may have it.
-                let saved = match (&seed, &store) {
-                    (RegionSeed::Deferred(None), Some(store)) => store.load(id),
-                    _ => None,
+                // Never run in this process: the world store may have it.
+                let loaded = match (&seed, &store) {
+                    (RegionSeed::Deferred(None), Some(store)) => store.load_region(id),
+                    _ => Ok(None),
                 };
-                let stored = saved.is_some();
+                let stored = match loaded {
+                    Ok(stored) => stored,
+                    Err(e) => {
+                        // Never regenerated over stored data: the region does
+                        // not run. Its channel stays open until the manager
+                        // drops it (what it was sent is recovered there).
+                        log::error!("[region {},{}] cannot load from the world store: {e}", id.x, id.z);
+                        let _ = out.send((id, RegionOutput::LoadFailed(e.to_string())));
+                        while recv.recv().is_ok() {}
+                        return;
+                    }
+                };
+                let from_store = stored.is_some();
                 // Deferred seeds generate here, timed separately from the build.
                 let generate_time = std::cell::Cell::new(Duration::ZERO);
-                let runner = match saved {
-                    Some(saved) => {
-                        let mut runner = RegionRunner::new(id, game::restore_saved(id, saved.state), out);
-                        runner.requeue_saved(saved.transfers);
+                let runner = match stored {
+                    Some(stored) => {
+                        let (region, terms) = game::restore_portable(id, stored);
+                        let mut runner = RegionRunner::new(id, region, out);
+                        runner.set_saved_terms(terms);
                         runner
                     }
                     None => seed.into_runner(id, out, &|rc| {
@@ -130,13 +145,13 @@ impl RegionSpawner for ThreadRegionSpawner {
                 let hash_time = runner.baseline_hash_time();
                 let build = genesis_started.elapsed() - generate_time - hash_time;
                 // `generate_ms` = worldgen on this thread (deferred seeds);
-                // `build_ms` = deserialize (parked; `stored` = read from the
-                // world autosave) or chunk flatten + collider genesis (fresh);
+                // `build_ms` = deserialize (parked), restore (`stored` = read
+                // from the world store) or chunk flatten + collider genesis (fresh);
                 // `terrain_hash_ms` = the runner's baseline
                 // terrain hash (timed inside `RegionRunner::new`).
                 game::perf_event!(
                     "region_genesis",
-                    "region={},{} ms={} generate_ms={} build_ms={} terrain_hash_ms={} parked={parked} stored={stored}",
+                    "region={},{} ms={} generate_ms={} build_ms={} terrain_hash_ms={} parked={parked} stored={from_store}",
                     id.x,
                     id.z,
                     game::perf::ms(genesis_started.elapsed()),

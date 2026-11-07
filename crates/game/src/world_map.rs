@@ -137,4 +137,7 @@ pub enum PlayRefusal {
     OffMap,
     NoDryLand,
     AlreadyHere,
+    /// The region's stored state could not be read from the world store; it
+    /// is retried after `STORE_LOAD_RETRY_SECS`.
+    RegionUnavailable,
 }

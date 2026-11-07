@@ -676,13 +676,14 @@ fn disconnect_parks_player_no_orphan_body() {
     h.event(ServerEvent::ClientDisconnected(0), 10);
     assert_eq!(bodies_in(&mut h, SPAWN_REGION), 0, "no orphan body");
     assert!(client_in(&mut h, SPAWN_REGION, 0).is_none(), "no orphan client entry");
-    let saves = h.manager.take_player_saves();
-    assert_eq!(saves.len(), 1, "{saves:?}");
-    let (player, record) = &saves[0];
-    assert_eq!(*player, PlayerId(0));
+    let record = h.manager.parked_record(PlayerId(0)).expect("the park is kept").clone();
     assert_eq!(record.region, SPAWN_REGION);
     assert!(rearranged(&record.client), "the record keeps the inventory: {:?}", record.client.inventory);
-    assert!(h.manager.take_player_saves().is_empty(), "taken once");
+    // Records reach the store only in cuts (Decision 12): once, the parked one.
+    let cut = cut_now(&mut h);
+    let mine: Vec<_> = cut.players.iter().filter(|(p, _)| *p == PlayerId(0)).collect();
+    assert_eq!(mine.len(), 1, "{:?}", cut.players);
+    assert_eq!(mine[0].1, record);
 }
 
 #[test]
@@ -731,7 +732,7 @@ fn second_session_takes_over() {
     h.event(ServerEvent::ClientDisconnected(0), 20);
     assert_eq!(h.manager.depths().sessions, 1);
     assert_eq!(body_of(&mut h, SPAWN_REGION, 1), Some(at));
-    assert_eq!(h.manager.take_player_saves().len(), 1, "one park: the takeover's");
+    assert!(h.manager.parked_record(PlayerId(0)).is_none(), "the takeover's park went into the new session");
 }
 
 #[test]
@@ -816,7 +817,7 @@ fn cut_carries_online_player_records() {
     assert_eq!(cut.players[0].1.region, SPAWN_REGION);
     assert!(rearranged(&cut.players[0].1.client));
     assert_eq!(bodies_in(&mut h, SPAWN_REGION), 1, "a cut parks nobody");
-    assert!(h.manager.take_player_saves().is_empty(), "records of online players go only into cuts");
+    assert!(h.manager.parked_record(PlayerId(3)).is_none(), "an online player's record goes only into cuts");
 }
 
 #[test]
@@ -894,10 +895,9 @@ fn disconnect_mid_crossing_parks_the_body_where_it_went() {
     let east = RegionCoords::new(1, 0);
     assert_eq!(bodies_in(&mut h, SPAWN_REGION), 0);
     assert_eq!(bodies_in(&mut h, east), 0, "no orphan body where it crossed to");
-    let saves = h.manager.take_player_saves();
-    assert_eq!(saves.len(), 1, "{saves:?}");
-    assert_eq!(saves[0].1.region, east);
-    assert!(rearranged(&saves[0].1.client));
+    let record = h.manager.parked_record(PlayerId(0)).expect("parked where it went");
+    assert_eq!(record.region, east);
+    assert!(rearranged(&record.client));
     // And it comes back there.
     h.event(session(1, 0, None), 20);
     assert_eq!(bodies_in(&mut h, east), 1);
@@ -925,4 +925,186 @@ fn starting_kit_only_for_new_player() {
     h.event(session(1, 1, Some(record)), 0);
     let back = client_in(&mut h, SPAWN_REGION, 1).expect("restored");
     assert_eq!(back.inventory, game::Inventory::new());
+}
+
+// ---- A region whose stored state cannot be read (world store Task 7) ----
+
+/// An inline spawner whose `fail` region answers `LoadFailed` (its store
+/// read failed) on its first `failures` starts; it keeps the dead start's
+/// input channel open until the manager reaps it, as the server's region
+/// thread does.
+struct FailingSpawner {
+    inner: InlineSpawner,
+    fail: RegionCoords,
+    failures: u32,
+    starts: Vec<RegionCoords>,
+    dead: std::collections::BTreeMap<RegionCoords, Receiver<game::RegionInput>>,
+}
+
+impl game::RegionSpawner for FailingSpawner {
+    fn spawn(
+        &mut self,
+        id: RegionCoords,
+        seed: game::RegionSeed,
+        out: crossbeam::channel::Sender<(RegionCoords, RegionOutput)>,
+    ) -> crossbeam::channel::Sender<game::RegionInput> {
+        self.starts.push(id);
+        if id == self.fail && self.failures > 0 {
+            self.failures -= 1;
+            let (send, recv) = unbounded();
+            self.dead.insert(id, recv);
+            let _ = out.send((id, RegionOutput::LoadFailed("test: the world store refused the read".into())));
+            return send;
+        }
+        self.inner.spawn(id, seed, out)
+    }
+
+    fn reap(&mut self, id: RegionCoords) {
+        self.dead.remove(&id);
+        self.inner.reap(id);
+    }
+
+    fn world_tick(&self) -> game::Tick {
+        self.inner.world_tick()
+    }
+}
+
+/// Review focus 3: a region whose store read fails does not start and is
+/// never regenerated; what crosses into it waits in the mailbox, Play there
+/// is refused `RegionUnavailable`, and after `STORE_LOAD_RETRY_SECS` of
+/// world time it is started again (here by a Play), getting its arrivals.
+#[test]
+fn region_load_failure_never_regenerates() {
+    crate::common::install_real_block_props();
+    let east = RegionCoords::new(1, 0);
+    let spawner =
+        FailingSpawner { inner: InlineSpawner::default(), fail: east, failures: 1, starts: Vec::new(), dead: Default::default() };
+    let (out_send, packets) = unbounded();
+    let (region_out_send, region_out) = unbounded();
+    let (lod_result_send, lod_result_recv) = unbounded();
+    let lod_builder: Box<dyn LodBuilder> = Box::new(InlineLodBuilder {
+        coarse: Box::new(|_key: &game::lod::LodKey| Vec::new()),
+        water: Box::new(game::lod::LodWater::dry),
+        out: lod_result_send,
+    });
+    let mut manager = WorldManager::new(
+        spawner,
+        Box::new(crate::history_handover::floored_region),
+        out_send,
+        region_out_send,
+        lod_builder,
+        lod_result_recv,
+    );
+    // 3x3 tiles around the spawn region, every one with a dry landing.
+    let tiles = (0..9).map(|_| play_tile()).collect();
+    manager.set_world_map(game::WorldMap {
+        origin: RegionCoords::new(-1, -1),
+        width: 3,
+        height: 3,
+        tiles,
+        rock_names: vec![],
+        region_types: vec![],
+    });
+    let settle = |m: &mut WorldManager<FailingSpawner>, now: u64| {
+        for _ in 0..3 {
+            m.spawner_mut().inner.pump();
+            while let Ok((rc, out)) = region_out.try_recv() {
+                m.handle_region_output(rc, out, now);
+            }
+            m.pump_lod_results();
+        }
+    };
+    manager.handle_server_event(session(0, 0, None), 0);
+    settle(&mut manager, 0);
+
+    // A slime departs the spawn region eastwards, and the east region is
+    // started (subscribed) before the departure is routed: the crossing goes
+    // to it, then its load fails.
+    let edge = game::REGION_SIZE;
+    let mut slime = None;
+    manager.spawner_mut().inner.with_region(SPAWN_REGION, |region| {
+        let y = game::BLOCK_VOXELS as f32 + 10.0;
+        let e = crate::common::spawn_slime(region, [edge + game::FLIP_HYSTERESIS + 2.0, y, 128.0], 1, 0.0, 0);
+        slime = *region.data().ecs.id.try_get(e);
+    });
+    let slime = slime.expect("the slime has an EntityId");
+    manager.spawner_mut().inner.tick_all();
+    manager.spawner_mut().inner.pump();
+    manager.handle_server_event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(east), 0), 10);
+    settle(&mut manager, 10);
+
+    assert!(manager.is_unavailable(east), "the failed region is marked unavailable");
+    assert!(!manager.running_regions().contains(&east), "and does not run");
+    assert_eq!(manager.pending_arrival_count(east), 1, "the slime waits in the mailbox");
+    assert_eq!(manager.location_of(slime), Some(east), "on its way to east");
+    let mut in_spawn = true;
+    manager.spawner_mut().inner.with_region(SPAWN_REGION, |r| in_spawn = r.data().id_index.contains_key(&slime));
+    assert!(!in_spawn, "the slime left its source");
+
+    // Play there is refused; asking for it again does not start it.
+    packets.try_iter().count();
+    manager.handle_server_event(ServerEvent::ClientPacket(ClientPacket::PlayRegion(east), 0), 20);
+    manager.handle_server_event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(east), 0), 20);
+    settle(&mut manager, 20);
+    let refused = packets.try_iter().any(|(to, p)| {
+        to == Some(0) && matches!(p, ServerPacket::PlayRefused(rc, game::PlayRefusal::RegionUnavailable) if rc == east)
+    });
+    assert!(refused, "Play into an unavailable region is refused RegionUnavailable");
+    assert_eq!(manager.spawner_mut().starts.iter().filter(|rc| **rc == east).count(), 1, "never started again (no regeneration)");
+
+    // World time passes (the spawn region sits it out: no ticks to pay).
+    let retry = game::STORE_LOAD_RETRY_TICKS;
+    assert_eq!(retry, game::STORE_LOAD_RETRY_SECS * 1000 / game::TICK_RATE);
+    manager.spawner_mut().inner.hold(SPAWN_REGION, retry as u32 + 2);
+    for _ in 0..retry - 2 {
+        manager.spawner_mut().inner.tick_all();
+    }
+    assert!(manager.is_unavailable(east), "still unavailable before the retry tick");
+    for _ in 0..4 {
+        manager.spawner_mut().inner.tick_all();
+    }
+    manager.spawner_mut().inner.hold(SPAWN_REGION, 0);
+    assert!(!manager.is_unavailable(east));
+    // The subscriber still asks for it: the retry starts it again, and the
+    // slime is delivered before its first tick.
+    manager.maintain(30);
+    settle(&mut manager, 30);
+    assert_eq!(manager.spawner_mut().starts.iter().filter(|rc| **rc == east).count(), 2, "started again after the retry tick");
+    assert!(manager.running_regions().contains(&east));
+    assert_eq!(manager.pending_arrival_count(east), 0, "the waiting slime was delivered");
+    manager.spawner_mut().inner.tick_all();
+    settle(&mut manager, 40);
+    let mut arrived = false;
+    manager.spawner_mut().inner.with_region(east, |r| arrived = r.data().id_index.contains_key(&slime));
+    assert!(arrived, "the slime is in east, once");
+    // And Play there is accepted now.
+    packets.try_iter().count();
+    manager.handle_server_event(ServerEvent::ClientPacket(ClientPacket::PlayRegion(east), 0), 50);
+    settle(&mut manager, 50);
+    assert!(!packets.try_iter().any(|(_, p)| matches!(p, ServerPacket::PlayRefused(..))));
+}
+
+fn play_tile() -> game::TileSummary {
+    game::TileSummary {
+        ground_min_m: 0.0,
+        ground_mean_m: 0.0,
+        ground_max_m: 0.0,
+        relief_m: 0.0,
+        slope: [0.0, 0.0],
+        sea_fraction: 0.0,
+        lake_fraction: 0.0,
+        lake_level_m: None,
+        rivers: 0,
+        river_max_discharge_m2: 0.0,
+        river_max_width_m: 0.0,
+        surface_rock: None,
+        landing: Some([2, 2]),
+        biome: game::Biome::Grassland,
+        region: 0,
+        temperature_c: 10.0,
+        precip_mm: 700.0,
+        savagery: 50,
+        alignment: 0,
+        volcano: false,
+    }
 }

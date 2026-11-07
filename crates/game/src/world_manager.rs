@@ -202,11 +202,6 @@ pub struct InlineSpawner {
     /// Regions whose input queue stays untouched until after their next tick
     /// (see [`InlineSchedule`]). Always empty without a schedule.
     late: BTreeSet<RegionCoords>,
-    /// Region states saved by an earlier process (a restarted server's
-    /// store): a region that has not run in this one starts from its save,
-    /// through [`crate::restore_saved`], as `ThreadRegionSpawner::with_store`
-    /// does on the server.
-    saved: BTreeMap<RegionCoords, crate::SavedRegion>,
     /// Regions in the world store's portable format (a restarted server's
     /// store, [`Self::with_portable`]): a region that has not run in this
     /// process starts from it, through [`crate::restore_portable`].
@@ -244,20 +239,6 @@ impl InlineSpawner {
 
     pub fn with_schedule(schedule: InlineSchedule) -> Self {
         Self { schedule: Some(schedule), ..Self::default() }
-    }
-
-    /// Regions that have not run yet start from `saved` (a restarted server).
-    pub fn with_saved(saved: BTreeMap<RegionCoords, crate::Rollback>) -> Self {
-        let saved = saved
-            .into_iter()
-            .map(|(rc, state)| (rc, crate::SavedRegion { state, transfers: Vec::new() }))
-            .collect();
-        Self::with_saved_regions(saved)
-    }
-
-    /// [`Self::with_saved`], with the crossings saved alongside each state.
-    pub fn with_saved_regions(saved: BTreeMap<RegionCoords, crate::SavedRegion>) -> Self {
-        Self { saved, ..Self::default() }
     }
 
     /// Regions that have not run yet start from the world store's `regions`
@@ -408,20 +389,14 @@ impl RegionSpawner for InlineSpawner {
         let (send, recv) = unbounded();
         let never_ran = matches!(seed, RegionSeed::Fresh(_) | RegionSeed::Deferred(None));
         let stored = if never_ran { self.portable.remove(&id) } else { None };
-        let saved = if never_ran && stored.is_none() { self.saved.remove(&id) } else { None };
-        let runner = match (stored, saved) {
-            (Some(stored), _) => {
+        let runner = match stored {
+            Some(stored) => {
                 let (region, terms) = crate::restore_portable(id, stored);
                 let mut runner = RegionRunner::new(id, region, out);
                 runner.set_saved_terms(terms);
                 runner
             }
-            (None, Some(saved)) => {
-                let mut runner = RegionRunner::new(id, crate::restore_saved(id, saved.state), out);
-                runner.requeue_saved(saved.transfers);
-                runner
-            }
-            (None, None) => seed.into_runner(
+            None => seed.into_runner(
                 id,
                 out,
                 &|rc| unreachable!("InlineSpawner never generates columns ({rc:?})"),
@@ -508,6 +483,18 @@ pub struct ManagerDepths {
 /// What a session is told when a new session of its player takes over
 /// (`ServerPacket::Refused`); the server edge then closes it.
 pub const LOGGED_IN_ELSEWHERE: &str = "logged in elsewhere";
+
+/// How long a region whose stored state could not be read
+/// ([`RegionOutput::LoadFailed`]) stays stopped before a start is tried
+/// again, in seconds of world time.
+pub const STORE_LOAD_RETRY_SECS: u64 = 10;
+
+/// [`STORE_LOAD_RETRY_SECS`] in world ticks (`TICK_RATE` is the tick period in ms).
+pub const STORE_LOAD_RETRY_TICKS: crate::Tick = STORE_LOAD_RETRY_SECS * 1000 / crate::TICK_RATE;
+
+/// Why a session whose body was to be in a region that could not be loaded
+/// is ended ([`ServerPacket::Refused`]).
+pub const REGION_UNAVAILABLE_REFUSAL: &str = "your region could not be loaded from the world store; try again shortly";
 
 /// A park in flight (`WorldManager::parking`).
 #[derive(Clone, Copy, Debug)]
@@ -637,7 +624,7 @@ pub struct WorldManager<S: RegionSpawner> {
     calendar_anchor: (u64, CalendarTick),
     /// The fortress each connected client plays (embarked or returned to, not
     /// retired). On disconnect it moves into the player's record (`parking`, then
-    /// `parked_players` and the player store), and a reconnect of the same player
+    /// `parked_players` and the next save cut), and a reconnect of the same player
     /// restores it unless someone else has returned to that fortress meanwhile.
     fortress_of: BTreeMap<ClientId, SiteId>,
     /// The site each connected client started its adventure at (Adventure play
@@ -667,14 +654,15 @@ pub struct WorldManager<S: RegionSpawner> {
     /// Requests that move the player (Play, embark, …) from a session whose
     /// restore waits for its park: replayed once it is restored.
     deferred_packets: BTreeMap<ClientId, Vec<ClientPacket>>,
-    /// Player records for the player store, collected since the last
-    /// [`Self::take_player_saves`]: parks, oldest first.
-    // TODO(world-store Task 7): records reach the store only in cuts
-    // (Decision 12); this goes once the server writes cuts.
-    player_saves: Vec<(PlayerId, PlayerRecord)>,
     /// The `now_ms` of the latest call in (server event, region output,
     /// maintenance), for paths that learn of a lost region without one.
     clock_ms: u64,
+    /// Regions whose stored state could not be read
+    /// ([`RegionOutput::LoadFailed`]), with the world tick from which a start
+    /// is tried again: until then nothing starts them (Play, embark and
+    /// return there are refused `RegionUnavailable`, arrivals wait in the
+    /// mailbox). Never regenerated over stored data.
+    unavailable: BTreeMap<RegionCoords, crate::Tick>,
     /// The calendar day last broadcast (`ServerPacket::Calendar`).
     calendar_day: Option<u64>,
     /// What clients were last told of the sites, bucketed: (site, abandoned, population
@@ -832,10 +820,10 @@ impl<S: RegionSpawner> WorldManager<S> {
             parked_players: BTreeMap::new(),
             awaiting_park: BTreeMap::new(),
             deferred_packets: BTreeMap::new(),
-            player_saves: Vec::new(),
             parked_bodies: BTreeMap::new(),
             items_destroyed: 0,
             clock_ms: 0,
+            unavailable: BTreeMap::new(),
             calendar_day: None,
             sites_key: Vec::new(),
             out,
@@ -987,6 +975,9 @@ impl<S: RegionSpawner> WorldManager<S> {
         let Some(tile) = map.tile(target) else {
             return refuse(self, PlayRefusal::OffMap);
         };
+        if self.is_unavailable(target) {
+            return refuse(self, PlayRefusal::RegionUnavailable);
+        }
         let home = self.homes.get(&id).copied();
         if home == Some(target) {
             return refuse(self, PlayRefusal::AlreadyHere);
@@ -1104,6 +1095,9 @@ impl<S: RegionSpawner> WorldManager<S> {
         if (self.fortress_of.contains_key(&id) || self.adventurer_of.contains_key(&id)) && self.history.is_some() {
             return self.embark_result(id, Err(EmbarkRefusal::AlreadyHasFortress));
         }
+        if self.history.is_some() && self.is_unavailable(req.region) {
+            return self.embark_result(id, Err(EmbarkRefusal::RegionUnavailable));
+        }
         let Some(history) = self.history.as_mut() else {
             return self.embark_result(id, Err(EmbarkRefusal::NoHistory));
         };
@@ -1165,6 +1159,9 @@ impl<S: RegionSpawner> WorldManager<S> {
             return self.embark_result(id, Err(EmbarkRefusal::InUse));
         }
         let region = history.site(site).expect("returnable").region;
+        if self.is_unavailable(region) {
+            return self.embark_result(id, Err(EmbarkRefusal::RegionUnavailable));
+        }
         let landing = self.landing_in(region);
         self.move_client(id, region, landing, now_ms);
         self.fortress_of.insert(id, site);
@@ -1197,6 +1194,9 @@ impl<S: RegionSpawner> WorldManager<S> {
             return self.adventure_result(id, Err(AdventureRefusal::AlreadyPlaying));
         }
         let region = s.region;
+        if self.is_unavailable(region) {
+            return self.adventure_result(id, Err(AdventureRefusal::RegionUnavailable));
+        }
         let landing = self.landing_in(region);
         // Already at home in that region: `move_client` only resends `PlayerRegion`
         // and the body stays put, so the order itself carries the landing tile
@@ -1473,6 +1473,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             }
             RegionOutput::CutSnapshot(id, tick, portable) => self.cut_answer(rc, Some((id, tick)), *portable),
             RegionOutput::CutMissed(id) => self.cut_missed(rc, id),
+            RegionOutput::LoadFailed(why) => self.region_load_failed(rc, why, now_ms),
             RegionOutput::PeoplePositions(people) => {
                 if let Some(history) = self.history.as_mut() {
                     history.note_positions(people);
@@ -1568,11 +1569,22 @@ impl<S: RegionSpawner> WorldManager<S> {
                 let view = self.in_cut_view(rc);
                 for (mut bundle, target) in list {
                     let client = bundle.client.as_ref().map(|(c, _)| *c);
-                    if crate::off_map(self.map_extent(), target) {
-                        // Regions hold bodies at the outer seam, so this is a
-                        // region that was not bounded: refuse the crossing and
-                        // hand the entity back to where it left, on its seam.
-                        log::error!("departure from {rc:?} into off-map {target:?} refused: returned");
+                    let off_map = crate::off_map(self.map_extent(), target);
+                    // Bodies that would wake their target: a player, a person no
+                    // history absorbs.
+                    let waking = client.is_some()
+                        || (matches!(bundle.kind, EntityKind::Person { .. }) && self.history.is_none());
+                    if off_map || (waking && self.is_unavailable(target)) {
+                        // Off the map: regions hold bodies at the outer seam, so
+                        // this is a region that was not bounded. Unavailable: its
+                        // stored state could not be read, so it cannot take the
+                        // body. Either way the crossing is refused and the entity
+                        // handed back to where it left, on its seam.
+                        if off_map {
+                            log::error!("departure from {rc:?} into off-map {target:?} refused: returned");
+                        } else {
+                            log::warn!("departure from {rc:?} into unavailable {target:?} refused: returned");
+                        }
                         let t = &mut bundle.body.pose.translation;
                         t.x = t.x.clamp(0.0, crate::REGION_SIZE);
                         t.z = t.z.clamp(0.0, crate::REGION_SIZE);
@@ -1718,6 +1730,7 @@ impl<S: RegionSpawner> WorldManager<S> {
     pub fn maintain(&mut self, now_ms: u64) {
         self.clock_ms = self.clock_ms.max(now_ms);
         self.expire_overdue_cut();
+        self.retry_unavailable();
         if let Some(to) = self.calendar_now(now_ms) {
             self.history.as_mut().unwrap().advance(to);
             self.deliver_directives();
@@ -2427,12 +2440,6 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.parked.keys().copied().collect()
     }
 
-    /// A parked region's in-memory blob (the server's exit-time save until
-    /// the world store writes cuts).
-    pub fn parked_blob(&self, rc: RegionCoords) -> Option<&SerializedRegion> {
-        self.parked.get(&rc)
-    }
-
     pub fn spawner_mut(&mut self) -> &mut S {
         &mut self.spawner
     }
@@ -2476,7 +2483,15 @@ impl<S: RegionSpawner> WorldManager<S> {
             if let Some(target) = target {
                 self.refresh_keepalive(target, now_ms);
             }
-        } else if let Some(home) = self.homes.remove(&id) {
+        } else if let Some(home) = self.homes.remove(&id).filter(|h| {
+            // A home whose start failed (`region_load_failed`) holds no body:
+            // nothing to park; the player keeps its stored record.
+            let lost = !self.regions.contains_key(h) && self.unavailable.contains_key(h);
+            if lost {
+                log::warn!("client {id}: its home {h:?} could not be loaded; nothing to park");
+            }
+            !lost
+        }) {
             match player {
                 Some(player) => {
                     self.parking.insert(id, Parking { player, region: home, fortress, adventure });
@@ -2490,20 +2505,13 @@ impl<S: RegionSpawner> WorldManager<S> {
     }
 
     /// The orderly exit's first step: every connected player is parked (as on a
-    /// disconnect), so its record reaches the player store before the process
-    /// ends. Then [`Self::shutdown_all`]; regions answer `ParkPlayer` first.
+    /// disconnect), so its record is in the exit's save cut before the
+    /// process ends. Then [`Self::shutdown_all`]; regions answer `ParkPlayer` first.
     pub fn park_all_players(&mut self, now_ms: u64) {
         let online: Vec<ClientId> = self.sessions.keys().copied().collect();
         for id in online {
             self.client_disconnected(id, now_ms);
         }
-    }
-
-    /// Player records for the player store collected since the last call
-    /// (parks and autosave extracts, oldest first: a later one for the same
-    /// player supersedes an earlier).
-    pub fn take_player_saves(&mut self) -> Vec<(PlayerId, PlayerRecord)> {
-        std::mem::take(&mut self.player_saves)
     }
 
     /// A session started. A session of the same player already online is
@@ -2558,6 +2566,21 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// off the map (the world changed) lands at the spawn region with its
     /// `Client` (no claims); no record = a fresh player at the spawn region.
     fn place_player(&mut self, id: ClientId, record: Option<PlayerRecord>, now_ms: u64) {
+        let target = match &record {
+            Some(r) if !crate::off_map(self.map_extent(), r.region) => r.region,
+            _ => SPAWN_REGION,
+        };
+        if self.is_unavailable(target) {
+            // Its region's stored state could not be read: the session is
+            // ended, the record kept for the next try.
+            log::warn!("client {id}: its region {target:?} is unavailable; session refused");
+            if let (Some(record), Some(player)) = (record, self.player_of.get(&id).copied()) {
+                self.parked_players.insert(player, record);
+            }
+            let _ = self.out.send((Some(id), ServerPacket::Refused(REGION_UNAVAILABLE_REFUSAL.to_string())));
+            self.client_disconnected(id, now_ms);
+            return;
+        }
         match record {
             Some(record) if !crate::off_map(self.map_extent(), record.region) => self.restore_player(id, record, now_ms),
             Some(record) => {
@@ -2651,7 +2674,6 @@ impl<S: RegionSpawner> WorldManager<S> {
                 let record = PlayerRecord { fortress: p.fortress, adventure: p.adventure, ..*record };
                 self.parked_players.insert(p.player, record.clone());
                 self.cut_transit(p.player, &record);
-                self.player_saves.push((p.player, record));
                 if let Some(body) = body {
                     self.parked_bodies.insert(body, p.player);
                 }
@@ -2749,9 +2771,108 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.perf.lod_submitted += 1;
     }
 
+    /// Whether `rc` is unavailable now: its stored state could not be read
+    /// and its retry tick has not come ([`STORE_LOAD_RETRY_SECS`]).
+    pub fn is_unavailable(&self, rc: RegionCoords) -> bool {
+        self.unavailable.get(&rc).is_some_and(|&retry| self.spawner.world_tick() < retry)
+    }
+
+    /// The regions that are unavailable now (tests, the `[server]` line).
+    pub fn unavailable_regions(&self) -> Vec<RegionCoords> {
+        self.unavailable.keys().copied().filter(|rc| self.is_unavailable(*rc)).collect()
+    }
+
+    /// Regions whose retry tick has come are started again if a session
+    /// still subscribes to them; the others start on their next demand.
+    fn retry_unavailable(&mut self) {
+        if self.unavailable.is_empty() {
+            return;
+        }
+        let now = self.spawner.world_tick();
+        let due: Vec<RegionCoords> = self.unavailable.iter().filter(|(_, &t)| now >= t).map(|(rc, _)| *rc).collect();
+        for rc in due {
+            self.unavailable.remove(&rc);
+            let subscribers: Vec<ClientId> =
+                self.sessions.iter().filter(|(_, s)| s.subscribed.contains(&rc)).map(|(c, _)| *c).collect();
+            if !subscribers.is_empty() {
+                log::info!("[server] retrying {rc:?} for {} subscriber(s)", subscribers.len());
+            }
+            for client in subscribers {
+                self.subscribe(client, rc);
+            }
+        }
+    }
+
+    /// `rc`'s spawner could not read its stored state (`LoadFailed`): its
+    /// thread has ended without running. It stays stopped until world tick
+    /// now + [`STORE_LOAD_RETRY_TICKS`] — never regenerated over stored data
+    /// — and what was sent to it waits for its next run: crossings back in
+    /// the arrival mailbox, intents in the intent mailbox, a crossing
+    /// player's record parked; the people the history placed there go back
+    /// to the history. Sessions whose body was to be there are ended
+    /// (`Refused`): they have no body, and keep their stored record.
+    fn region_load_failed(&mut self, rc: RegionCoords, why: String, now_ms: u64) {
+        let retry = self.spawner.world_tick() + STORE_LOAD_RETRY_TICKS;
+        log::error!(
+            "[server] region {rc:?} could not be loaded from the world store: {why} — it stays stopped \
+             (never regenerated over stored data); retried from world tick {retry}"
+        );
+        if self.regions.remove(&rc).is_none() {
+            return;
+        }
+        self.unavailable.insert(rc, retry);
+        self.spawner.reap(rc);
+        // It never ran in this process, so it has nothing uncommitted: the
+        // pending cut stops waiting for it (the store keeps what it holds).
+        if let Some(cut) = self.pending_cut.as_mut() {
+            cut.waiting.remove(&rc);
+        }
+        self.history_region_lost(rc);
+        let intents: Vec<InFlightIntent> = self.in_flight_intents.iter().filter(|f| f.target == rc).cloned().collect();
+        self.in_flight_intents.retain(|f| f.target != rc);
+        for f in intents {
+            self.intent_mailbox.entry(rc).or_default().push(Mail { msg: f.msg, in_source_view: f.in_source_view });
+        }
+        let ids: Vec<crate::EntityId> =
+            self.in_flight.iter().filter(|(_, f)| f.target == rc).map(|(id, _)| *id).collect();
+        for id in ids {
+            let f = self.in_flight.remove(&id).expect("listed");
+            if matches!(f.bundle.kind, EntityKind::Person { .. }) && self.history.is_some() {
+                continue; // The history took its people back.
+            }
+            if f.bundle.client.is_some() {
+                match self.crossing_record(rc, &f.bundle) {
+                    Some((player, record)) => {
+                        log::error!("player {} was crossing into unavailable {rc:?}: parked", player.0);
+                        self.parked_players.insert(player, record);
+                    }
+                    None => log::error!("{id:?}, a player crossing into unavailable {rc:?}, has no player: lost"),
+                }
+                continue;
+            }
+            let p = PendingArrival { source: rc, stamp: f.stamp, bundle: f.bundle, in_source_view: f.in_source_view };
+            self.pending_arrivals.entry(rc).or_default().push(p);
+        }
+        self.forget_locations(rc);
+        let homed: Vec<ClientId> = self.sessions.keys().copied().filter(|c| self.homes.get(c) == Some(&rc)).collect();
+        for client in homed {
+            let _ = self.out.send((Some(client), ServerPacket::Refused(REGION_UNAVAILABLE_REFUSAL.to_string())));
+            self.client_disconnected(client, now_ms);
+        }
+        self.settle_lost_parks(rc, &BTreeSet::new());
+        self.try_complete_cut();
+    }
+
     fn ensure_running(&mut self, rc: RegionCoords) {
         if self.regions.contains_key(&rc) {
             return;
+        }
+        if let Some(&retry) = self.unavailable.get(&rc) {
+            if self.spawner.world_tick() < retry {
+                log::debug!("[server] {rc:?} is unavailable until world tick {retry}: not started");
+                return;
+            }
+            self.unavailable.remove(&rc);
         }
         let seed = if self.spawner.generates_columns() {
             // Worldgen happens on the region's thread (and not at all for a
@@ -2881,7 +3002,8 @@ impl<S: RegionSpawner> WorldManager<S> {
         };
         session.subscribed.insert(rc);
         self.ensure_running(rc);
-        let link = self.regions.get_mut(&rc).unwrap();
+        // Unavailable (its store read failed): subscribed again at its retry.
+        let Some(link) = self.regions.get_mut(&rc) else { return };
         if link.stopping {
             // Recorded in session.subscribed above, so a disconnect (or
             // release) before Stopped arrives still reaches
@@ -3067,7 +3189,6 @@ impl<S: RegionSpawner> WorldManager<S> {
             }
             log::info!("[server] reply {:?} for parked {to:?}: folded into player {}'s record", s.reply, player.0);
             let record = record.clone();
-            self.player_saves.push((player, record.clone()));
             if !view {
                 self.cut_transit(player, &record);
             }

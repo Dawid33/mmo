@@ -635,10 +635,14 @@ impl ForgedWorld {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn load(path: &Path) -> Result<ForgedWorld, ArtifactError> {
         let bytes = std::fs::read(path).map_err(ArtifactError::Io)?;
-        let artifact = WorldArtifact::from_bytes(&bytes)?;
-        let content_crc = crc32fast::hash(&bytes);
-        drop(bytes);
-        Ok(Self::with_crc(artifact, content_crc))
+        Self::from_bytes(&bytes)
+    }
+
+    /// A world from a world file's bytes (as [`Self::load`] reads them, or
+    /// as the world store keeps them); `content_crc` is their crc32.
+    pub fn from_bytes(bytes: &[u8]) -> Result<ForgedWorld, ArtifactError> {
+        let artifact = WorldArtifact::from_bytes(bytes)?;
+        Ok(Self::with_crc(artifact, crc32fast::hash(bytes)))
     }
 
     fn with_crc(artifact: WorldArtifact, content_crc: u32) -> ForgedWorld {

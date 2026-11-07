@@ -87,8 +87,8 @@ pub fn parked_client(client: &Client) -> Client {
 }
 
 /// Every player body in `rollback` as a record (claims empty — the
-/// `WorldManager` holds those), keyed by session. The world autosave extracts
-/// online players from each region's `Saved` state with this.
+/// `WorldManager` holds those), keyed by session. A save cut takes the
+/// online players from each region's snapshot with this.
 pub fn players_in(rollback: &Rollback, region: RegionCoords) -> Vec<(ClientId, PlayerRecord)> {
     rollback
         .player_entites

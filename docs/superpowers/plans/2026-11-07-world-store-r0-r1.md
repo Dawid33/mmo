@@ -401,8 +401,8 @@ The water static layer (`docs/superpowers/plans/2026-11-06-water-static-layer.md
   - `world_file::store_url_for(world_file: &Path) -> StoreUrl` (= `with_extension("sqlite")`)
 - **Startup:**
   1. Resolve, then open the handle (a refusal is fatal and prints the `StoreError` sentence).
-  2. If the store has no artifact: import `VOXEL_WORLD_FILE` if it exists (`put_artifact` with the file bytes and their crc32, which keeps `content_crc` identical to today), then delete the file; else forge into the store.
-  3. If the store has no regions and a legacy `<world>.regions/` dir exists, exit with: `this world has file saves from before the world store; delete them with: just clean-old-worlds`.
+  2. If the store has no regions and a legacy `<world>.regions/` dir (or `<world>.players/`, `<world>.history`) exists, exit with: `this world has file saves from before the world store; delete them with: just clean-old-worlds`. *(As built: checked before the import, so a refused start changes nothing.)*
+  3. If the store has no artifact: import `VOXEL_WORLD_FILE` if it exists (`put_artifact` with the file bytes and their crc32, which keeps `content_crc` identical to today), then delete the file; else forge into the store.
   4. `ForgedWorld::from_bytes`, then install.
   5. The clock starts at `world_info().world_tick`; `manager.set_stored_regions(stored_regions())` and `restore_in_flight(load_in_flight())`.
 - **Main loop:** every `WORLD_SAVE_SECS`, `begin_cut(world_tick_now)`. Each iteration, `take_cut()` → `commit_cut`, and polled replies → `cut_committed` / `cut_failed`.
@@ -410,13 +410,13 @@ The water static layer (`docs/superpowers/plans/2026-11-06-water-static-layer.md
   - `Ok(Some)` → `restore_portable`, runner `saved_terms` = the returned terms;
   - `Ok(None)` → generate;
   - `Err(e)` → send `LoadFailed(e.to_string())` and end the thread.
-- **Manager on `LoadFailed`:** drop the link, mark the region unavailable until world tick + `STORE_LOAD_RETRY_SECS` × 20 ticks, keep arrivals in the mailbox, refuse `PlayRegion` / embark / return there with `RegionUnavailable`, and log `error`.
+- **Manager on `LoadFailed`:** drop the link, mark the region unavailable until world tick + `STORE_LOAD_RETRY_TICKS` (= `STORE_LOAD_RETRY_SECS * 1000 / TICK_RATE`), keep arrivals in the mailbox, refuse `PlayRegion` / embark / return (and adventure start) there with `RegionUnavailable`, and log `error`. *(As built: the failed thread keeps its input channel open until the manager drops the link, so nothing sent meanwhile hits the dead-region respawn path; what was in flight to it goes back to the mailboxes; a session whose body was to be there is ended with `Refused`, keeping its stored record; a session still subscribed is subscribed again at the retry tick.)*
 - **Orderly exit:** park all regions, then `begin_cut` (all parked, so it completes at once), then `take_cut` → `commit_cut`, wait for its reply, then `handle.shutdown()`.
 
 - [ ] **Step 1: Write the failing tests.**
   - In `crates/game/tests/world_manager.rs`, `region_load_failure_never_regenerates`: a test spawner whose region (1, 0) answers `LoadFailed`. A slime crossing into it waits in the mailbox; `PlayRegion` there is refused `RegionUnavailable`; after the retry tick the manager spawns it again.
   - In `crates/server/tests/store_world.rs`, on a temp dir:
-    - `restart_restores_world`: an inline server core on a forged 16 km test world, with a dug block and a slime. Exit, reopen, and the block is still dug, the slime exists once, and `world_tick ≥` the old one.
+    - `restart_restores_world`: an inline server core on a forged test world (as built: 2 km / 64 m cells, seconds to forge), with a dug block and a slime. Exit, reopen, and the block is still dug, the slime exists once, and `world_tick ≥` the old one.
     - `legacy_saves_refuse_start`.
     - `import_deletes_forge_file`.
     - `procedural_persists_nothing`.

@@ -127,10 +127,10 @@ fn build_server_runtime(worker_threads: usize) -> tokio::runtime::Runtime {
         .unwrap()
 }
 
+pub mod cuts;
 pub mod lod_workers;
 pub mod perf;
 pub mod player_store;
-pub mod region_store;
 pub mod region_threads;
 pub mod webtransport;
 pub mod world_file;
@@ -484,18 +484,18 @@ pub fn run() {
     let configured_bind = std::env::var(BIND_ADDR_ENV).ok();
     let ip = bind_ip_from(configured_bind.as_deref()).unwrap_or_else(|message| panic!("{message}"));
     // The world is chosen before anything calls `forged::active()` (below), and
-    // before the ingress starts: its player store sits next to a forged world.
-    let world_source = world_file::resolve(std::env::var(worldgen::forged::WORLD_FILE_ENV).ok().as_deref());
-    let players: player_store::SharedPlayerStore = match &world_source {
-        world_file::WorldSource::Procedural => player_store::shared(player_store::MemoryPlayerStore::default()),
-        world_file::WorldSource::Forged(path) => {
-            let dir = player_store::players_dir_for(&world_file::from_repo_root(path));
-            let store = player_store::FilePlayerStore::open(dir.clone()).unwrap_or_else(|e| {
-                panic!("cannot open the player store {}: {e} — move it away to start without players", dir.display())
-            });
-            info!("[server] players: {}", dir.display());
-            player_store::shared(store)
-        }
+    // before the ingress starts: its player store is the world store.
+    let world_source = world_file::resolve(
+        std::env::var(worldgen::forged::WORLD_FILE_ENV).ok().as_deref(),
+        std::env::var(world_file::WORLD_DB_ENV).ok().as_deref(),
+    )
+    .unwrap_or_else(|e| fatal(&e));
+    let opened = world_file::open_world(&world_source, &worldgen::forge::ForgeParams::default())
+        .unwrap_or_else(|e| fatal(&e));
+    let store = opened.store.clone();
+    let players: player_store::SharedPlayerStore = match &store {
+        None => player_store::shared(player_store::MemoryPlayerStore::default()),
+        Some(store) => player_store::shared(player_store::StorePlayers(store.clone())),
     };
     let mut rgi = WorldIngress::new(ip, port, webtransport_enabled(single_player), players.clone());
     let configured_worker_threads = std::env::var("TOKIO_WORKER_THREADS").ok();
@@ -524,32 +524,16 @@ pub fn run() {
             .unwrap_or_else(|| panic!("block manifest must define \"{name}\""))
     };
     let materials = worldgen::material::Materials::from_names(resolve);
-    let mut history_world_path: Option<std::path::PathBuf> = None;
-    match world_source {
-        world_file::WorldSource::Procedural => {
-            info!("[server] world: procedural");
+    match (&world_source, opened.world) {
+        (world_file::WorldSource::Store { url, .. }, Some(world)) => {
+            info!("[server] world: forged, in the world store {url:?}");
+            worldgen::forged::install(Some(world));
+        }
+        _ => {
+            info!("[server] world: procedural (nothing is saved)");
             worldgen::forged::install(None);
         }
-        world_file::WorldSource::Forged(path) => {
-            let path = world_file::from_repo_root(&path);
-            world_file::ensure_forged(&path, &worldgen::forge::ForgeParams::default())
-                .unwrap_or_else(|e| panic!("{e}"));
-            let world = worldgen::forged::ForgedWorld::load(&path).unwrap_or_else(|e| {
-                panic!("{}: {e} — delete it to forge a new default world", path.display())
-            });
-            info!("[server] world: forged {}", path.display());
-            worldgen::forged::install(Some(world));
-            history_world_path = Some(path);
-        }
     }
-    // World autosave: forged worlds keep their regions next to the world file
-    // (procedural worlds, like their missing history, keep nothing).
-    let region_store = history_world_path.as_ref().map(|path| {
-        let world = worldgen::forged::active().expect("a forged world is installed");
-        let store = region_store::RegionStore::new(region_store::regions_dir_for(path), world.content_crc());
-        info!("[server] region saves: {}", store.dir().display());
-        store
-    });
     let world_seed = worldgen::WORLD_SEED;
     let gen_cache = worldgen::cache::WorldgenCache::from_env(world_seed, &manifest);
     let (lod_result_send, lod_result_recv) = crossbeam::channel::unbounded();
@@ -575,12 +559,10 @@ pub fn run() {
     let region_generator: region_threads::SharedRegionGenerator =
         std::sync::Arc::new(move |rc| region_gen_cache.generate_cached(rc, world_seed, materials));
     // The world clock: ms since `start` (the manager's `now_ms` base) -> world
-    // tick, continuing from the saved tick (procedural worlds: from 0, never saved).
+    // tick, continuing from the last committed cut's tick (procedural worlds:
+    // from 0, never saved).
     let start = std::time::Instant::now();
-    let world_clock = game::WorldClock::starting_at(
-        0,
-        region_store.as_ref().map_or(0, |s| s.start_tick()),
-    );
+    let world_clock = game::WorldClock::starting_at(0, opened.world_tick);
     // Halo seeds of never-run neighbours: only their band columns, on the
     // starting region's thread (`game::halo`).
     let halo_generator: game::HaloGenerator = std::sync::Arc::new(move |rc, xs, zs| {
@@ -588,28 +570,9 @@ pub fn run() {
     });
     let mut spawner = region_threads::ThreadRegionSpawner::with_generator(region_generator, halo_generator)
         .with_clock(world_clock, start);
-    let tick_store = region_store.clone();
-    let save_world_tick = move |start: std::time::Instant| {
-        if let Some(store) = &tick_store {
-            let tick = world_clock.tick_at(start.elapsed().as_millis() as u64);
-            if let Err(e) = store.save_world_tick(tick) {
-                log::error!("[server] cannot save the world tick: {e}");
-            }
-        }
-    };
-    if let Some(store) = &region_store {
+    if let Some(store) = &store {
         spawner = spawner.with_store(store.clone());
     }
-    let saver = region_store.map(region_store::spawn_saver);
-    if saver.is_some() {
-        // TODO(world-store Task 7): the world store writes `WorldManager`
-        // save cuts (`begin_cut` / `take_cut`); until then regions are saved
-        // only at the orderly exit (every region parked in this process).
-        log::warn!("[server] periodic region autosave is off until the world store lands; regions are saved at exit");
-    }
-    // Parked players and the autosave's online players go to the player store
-    // on their own thread (procedural worlds: the in-memory store).
-    let player_saver = player_store::spawn_saver(players.clone());
     let mut manager = game::WorldManager::new(
         spawner,
         Box::new(move |rc| gen_cache.generate_cached(rc, world_seed, materials)),
@@ -630,14 +593,29 @@ pub fn run() {
             map.height,
             built.elapsed().as_millis()
         );
-        // Forged worlds have a history next to the world file (procedural: none).
-        if let Some(path) = &history_world_path {
-            if let Some(history) = world_file::ensure_history(path, &map).unwrap_or_else(|e| panic!("{e}")) {
+        // Forged worlds keep their history in the store (procedural: none).
+        if let Some(store) = &store {
+            if let Some(history) = world_file::ensure_history(store, &map).unwrap_or_else(|e| fatal(&e)) {
                 manager.set_history(history, 0);
             }
         }
         manager.set_world_map(map);
     }
+    // What the store holds: which regions have stored state (their start
+    // reads it), and what its last cut caught on its way (into the mailboxes).
+    let mut cuts = store.map(|store| {
+        let stored = store.stored_regions().unwrap_or_else(|e| fatal(&e.to_string()));
+        let in_flight = store.load_in_flight().unwrap_or_else(|e| fatal(&e.to_string()));
+        info!(
+            "[server] world store: {} stored regions, {} crossings / intents in flight, world tick {}",
+            stored.len(),
+            in_flight.len(),
+            opened.world_tick
+        );
+        manager.set_stored_regions(stored);
+        manager.restore_in_flight(in_flight);
+        cuts::CutWriter::new(store)
+    });
 
     let mut report = perf::ServerReport::new();
     let mut ever_connected = false;
@@ -682,12 +660,15 @@ pub fn run() {
         }
         manager.maintain(now_ms);
         manager.pump_lod_results();
-        if last_world_save.elapsed() >= save_every {
-            last_world_save = std::time::Instant::now();
-            save_history(&history_world_path, &manager);
-            save_world_tick(start);
+        if let Some(cuts) = cuts.as_mut() {
+            if last_world_save.elapsed() >= save_every {
+                last_world_save = std::time::Instant::now();
+                // Regions, players, history and what is in flight, at one
+                // world tick a lead ahead (`save_cut.rs`).
+                manager.begin_cut(world_clock.tick_at(start.elapsed().as_millis() as u64));
+            }
+            cuts.pump(&mut manager);
         }
-        forward_player_saves(&player_saver.0, &mut manager);
         report.maybe_report(
             &mut manager,
             perf::Backlog {
@@ -717,24 +698,16 @@ pub fn run() {
     if !unparked.is_empty() {
         log::warn!("[server] {} regions did not park in time and are not saved: {unparked:?}", unparked.len());
     }
-    // Every region that parked in this process is saved (its parked blob).
-    save_world_tick(start);
-    forward_parked_regions(&saver, &manager);
-    if let Some((send, handle)) = saver {
-        drop(send);
-        if handle.join().is_err() {
-            log::error!("[server] the world saver panicked");
+    // Every region has parked: the last cut is complete at once, and holds
+    // every player (parked) and the history (its people are back in it).
+    if let Some(cuts) = cuts {
+        let now = world_clock.tick_at(start.elapsed().as_millis() as u64);
+        if cuts.finish(&mut manager, now, EXIT_SAVE_TIMEOUT) {
+            info!("[server] world saved");
+        } else {
+            log::error!("[server] the world was not saved at exit; it restarts from its last committed save");
         }
     }
-    // Every player parked: their records are written before the process ends.
-    forward_player_saves(&player_saver.0, &mut manager);
-    let (send, handle) = player_saver;
-    drop(send);
-    if handle.join().is_err() {
-        log::error!("[server] the player saver panicked");
-    }
-    // Every region is parked, so its people are back in the history.
-    save_history(&history_world_path, &manager);
     #[cfg(feature = "pyroscope")]
     if let Some(agent) = agent_running {
         let agent_ready = agent.stop().unwrap();
@@ -742,11 +715,21 @@ pub fn run() {
     }
 }
 
-/// How often the main loop saves the world — the history and the world tick
-/// (regions only at the orderly exit until the world store lands: TODO(world-store
-/// Task 7)). Both are also saved after the orderly-exit loop has parked every
-/// region.
+/// How often the main loop starts a save cut of the world (regions, players,
+/// history, the world tick and what is in flight, at one world tick) into the
+/// world store. The orderly exit saves once more after parking every region.
 pub const WORLD_SAVE_SECS: u64 = 60;
+
+/// How long the orderly exit waits for the world store to commit its last save.
+pub const EXIT_SAVE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// A start-up error the server cannot run with: logged and printed, then the
+/// process exits (status 1).
+fn fatal(message: &str) -> ! {
+    log::error!("[server] {message}");
+    eprintln!("server: {message}");
+    std::process::exit(1)
+}
 
 /// Overrides [`WORLD_SAVE_SECS`] (whole seconds, at least 1) — for testing.
 pub const WORLD_SAVE_SECS_ENV: &str = "VOXEL_SAVE_SECS";
@@ -763,37 +746,6 @@ pub fn world_save_secs(env_value: Option<&str>) -> u64 {
                 WORLD_SAVE_SECS
             }
         },
-    }
-}
-
-/// Hand every region parked in this process to the saver thread, as its
-/// parked blob. The orderly exit's stopgap until the world store writes save
-/// cuts: crossings and replies waiting in the manager's mailboxes are not
-/// saved with them.
-// TODO(world-store Task 7): replaced by the store's cut commit.
-fn forward_parked_regions<S: game::RegionSpawner>(
-    saver: &Option<(
-        crossbeam::channel::Sender<(game::RegionCoords, game::RegionSave)>,
-        std::thread::JoinHandle<()>,
-    )>,
-    manager: &game::WorldManager<S>,
-) {
-    let Some((send, _)) = saver else { return };
-    for rc in manager.parked_regions() {
-        if let Some(blob) = manager.parked_blob(rc) {
-            let _ = send.send((rc, game::RegionSave::Parked(blob.clone(), Vec::new())));
-        }
-    }
-}
-
-/// Hand the manager's collected player records to the player-saver thread.
-fn forward_player_saves<S: game::RegionSpawner>(
-    send: &crossbeam::channel::Sender<player_store::PlayerSaves>,
-    manager: &mut game::WorldManager<S>,
-) {
-    let saves = manager.take_player_saves();
-    if !saves.is_empty() {
-        let _ = send.send(saves);
     }
 }
 
@@ -823,15 +775,6 @@ async fn watch_stop_signals(stop: std::sync::Arc<std::sync::atomic::AtomicBool>)
             log::warn!("[server] second stop signal: exiting without saving");
             std::process::exit(130);
         }
-    }
-}
-
-fn save_history<S: game::RegionSpawner>(
-    path: &Option<std::path::PathBuf>,
-    manager: &game::WorldManager<S>,
-) {
-    if let (Some(path), Some(history)) = (path, manager.history()) {
-        world_file::save_history(path, history);
     }
 }
 

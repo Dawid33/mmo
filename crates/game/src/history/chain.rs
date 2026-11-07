@@ -32,6 +32,9 @@ pub enum EmbarkRefusal {
     /// The player's embark: the region is a mountainside
     /// ([`crate::too_steep_to_embark`]).
     TooSteep,
+    /// The region's stored state could not be read from the world store; it
+    /// is retried after `STORE_LOAD_RETRY_SECS`.
+    RegionUnavailable,
 }
 
 /// Why the server refuses `ClientPacket::StartAdventure`.
@@ -47,6 +50,8 @@ pub enum AdventureRefusal {
     Unpopulated,
     /// The player already plays a fortress or an adventure.
     AlreadyPlaying,
+    /// The site's region could not be loaded from the world store.
+    RegionUnavailable,
 }
 
 impl AdventureRefusal {
@@ -58,6 +63,7 @@ impl AdventureRefusal {
             Self::SiteAbandoned => "That site is abandoned",
             Self::Unpopulated => "Nobody lives there",
             Self::AlreadyPlaying => "Already playing: retire or end it first",
+            Self::RegionUnavailable => "That region could not be loaded; try again shortly",
         }
     }
 }

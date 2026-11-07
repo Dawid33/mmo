@@ -570,22 +570,69 @@ fn walking_into_a_cold_region_wakes_its_thread_and_returns() {
     );
 }
 
-/// Region saving on the server's spawn path: a region parked by the orderly
-/// exit goes to the store; a fresh manager (a restarted server) wakes that
-/// region from the file on its own thread — same clock, and only the new
-/// session's player. (The periodic live autosave waits for the world store:
-/// TODO(world-store Task 7).)
+/// A world store on a fresh temp `.sqlite` (its directory, its URL).
+fn temp_store(name: &str) -> (std::path::PathBuf, world_store::StoreUrl) {
+    let dir = std::env::temp_dir().join(format!("mmo-threaded-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let url = world_store::StoreUrl::Sqlite(dir.join("w.sqlite"));
+    (dir, url)
+}
+
+fn open_store(url: &world_store::StoreUrl) -> world_store::StoreHandle {
+    world_store::StoreHandle::open(url, world_store::Dials::BUILT).expect("the store opens")
+}
+
+/// The server's spawn path on `store`, as `server::run` builds it: regions
+/// generate on their own thread, a region with stored state starts from it,
+/// and the world clock continues from the last committed cut's tick.
+fn stored_rig(store: &world_store::StoreHandle) -> Rig {
+    let info = store.world_info().unwrap();
+    let spawner = ThreadRegionSpawner::with_region_generator(std::sync::Arc::new(|_| lightweight_columns()))
+        .with_store(store.clone())
+        .with_clock(game::WorldClock::starting_at(0, info.world_tick), Instant::now());
+    let mut rig = Rig::with_spawner(spawner, |_| lightweight_columns());
+    rig.manager.set_stored_regions(store.stored_regions().unwrap());
+    rig.manager.restore_in_flight(store.load_in_flight().unwrap());
+    rig
+}
+
+impl Rig {
+    /// The server's orderly exit: every player parked, then every region,
+    /// then the last save cut committed into `store` (shut down after).
+    fn exit_into(&mut self, store: world_store::StoreHandle) {
+        use game::RegionSpawner;
+        self.manager.park_all_players(self.now_ms());
+        self.manager.shutdown_all();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !self.manager.running_regions().is_empty() && Instant::now() < deadline {
+            if let Ok((rc, output)) = self.region_out.recv_timeout(Duration::from_millis(50)) {
+                self.absorb(rc, output);
+            }
+            self.manager.shutdown_all();
+        }
+        assert!(self.manager.running_regions().is_empty(), "every region parked");
+        let now = self.manager.spawner_mut().world_tick();
+        let writer = server::cuts::CutWriter::new(store);
+        assert!(writer.finish(&mut self.manager, now, Duration::from_secs(10)), "the exit's save cut commits");
+    }
+}
+
+/// Region saving on the server's spawn path: the orderly exit's save cut
+/// writes the parked region to the world store; a fresh manager (a restarted
+/// server) wakes that region from the store on its own thread — the clock
+/// continued, and only the new session's player.
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn saved_region_is_restored_by_a_restarted_server() {
-    use server::region_store::RegionStore;
-    let dir = std::env::temp_dir().join(format!("mmo-threaded-save-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    let store = RegionStore::new(dir.clone(), 42);
-    let spawner = || ThreadRegionSpawner::with_region_generator(std::sync::Arc::new(|_| lightweight_columns())).with_store(store.clone());
-
-    let mut rig = Rig::with_spawner(spawner(), |_| lightweight_columns());
-    rig.event(ServerEvent::connected(0));
+    use server::player_store::{PlayerStore, StorePlayers};
+    let (dir, url) = temp_store("save");
+    let store = open_store(&url);
+    // Every player in a save cut has a players row (the edge resolved it).
+    let token = game::PlayerToken::generate([3; game::PLAYER_TOKEN_BYTES]);
+    let (player, _) = StorePlayers(store.clone()).resolve(&token).unwrap();
+    let mut rig = stored_rig(&store);
+    rig.event(ServerEvent::ClientConnected { client: 0, player, record: None });
     rig.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(SPAWN_REGION), 0));
     rig.wait_for_snapshots(&[SPAWN_REGION], REGION_STARTUP_BUDGET);
     // Let the clock run so a regenerated region (tick ~0) is told apart.
@@ -595,21 +642,16 @@ fn saved_region_is_restored_by_a_restarted_server() {
             rig.absorb(rc, output);
         }
     }
-    rig.manager.shutdown_all();
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !rig.manager.running_regions().is_empty() && Instant::now() < deadline {
-        if let Ok((rc, output)) = rig.region_out.recv_timeout(Duration::from_millis(50)) {
-            rig.absorb(rc, output);
-        }
-    }
-    let blob = rig.manager.parked_blob(SPAWN_REGION).expect("the region parked").clone();
-    let saved_tick = *blob.to_rollback().unwrap().tick;
-    assert!(saved_tick >= 10, "the region ran: tick {saved_tick}");
-    store.save(SPAWN_REGION, &game::RegionSave::Parked(blob, Vec::new()).into_serialized()).unwrap();
+    rig.exit_into(store);
     drop(rig);
 
-    // A new process: client ids start at 0 again.
-    let mut rig = Rig::with_spawner(spawner(), |_| lightweight_columns());
+    // A new process: client ids start at 0 again (another player now).
+    let store = open_store(&url);
+    let saved_tick = store.world_info().unwrap().world_tick;
+    assert!(saved_tick >= 10, "the region ran: world tick {saved_tick}");
+    let stored = store.load_region(SPAWN_REGION).unwrap().expect("the region is stored");
+    assert!(stored.entities.iter().all(|b| b.client.is_none()), "no player body in the stored region");
+    let mut rig = stored_rig(&store);
     rig.event(ServerEvent::connected(0));
     rig.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(SPAWN_REGION), 0));
     let mut log = Vec::new();
@@ -622,29 +664,26 @@ fn saved_region_is_restored_by_a_restarted_server() {
         _ => false,
     });
     let (tick, players, clients) = restored.expect("snapshot of the restored region");
-    assert!(tick >= saved_tick, "restored from the save (tick {tick} < saved {saved_tick})");
-    assert_eq!((players, clients), (1, 1), "the old session's player was dropped, the new one created");
+    assert!(tick >= saved_tick, "restored from the store (tick {tick} < saved {saved_tick})");
+    assert_eq!((players, clients), (1, 1), "only the new session's player");
     rig.manager.shutdown_all();
+    drop(rig);
+    store.shutdown();
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A player's body and inventory outlive the server on its own spawn path: the
-/// orderly exit parks the player (its record goes through the player store) and
-/// every region (saved to the region store); a restarted server strips the old
-/// session's body from the region file and restores the player, with its
-/// inventory, from the record the store resolves for its token.
+/// orderly exit parks the player and every region, and its save cut writes
+/// both to the world store; a restarted server resolves the token to the same
+/// player with its record, and restores it once — with its inventory.
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn player_is_restored_by_a_restarted_server() {
-    use server::player_store::{MemoryPlayerStore, PlayerStore};
-    use server::region_store::RegionStore;
-    let dir = std::env::temp_dir().join(format!("mmo-threaded-players-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    let store = RegionStore::new(dir.clone(), 42);
-    let spawner = || ThreadRegionSpawner::with_region_generator(std::sync::Arc::new(|_| lightweight_columns())).with_store(store.clone());
-    let mut players = MemoryPlayerStore::default();
+    use server::player_store::{PlayerStore, StorePlayers};
+    let (dir, url) = temp_store("players");
+    let store = open_store(&url);
     let token = game::PlayerToken::generate([7; game::PLAYER_TOKEN_BYTES]);
-    let (player, record) = players.resolve(&token).unwrap();
+    let (player, record) = StorePlayers(store.clone()).resolve(&token).unwrap();
     assert!(record.is_none(), "a new player");
 
     // The first session starts from a record that carries a main-slot stack
@@ -659,31 +698,18 @@ fn player_is_restored_by_a_restarted_server() {
         fortress: None,
         adventure: None,
     };
-    let mut rig = Rig::with_spawner(spawner(), |_| lightweight_columns());
+    let mut rig = stored_rig(&store);
     rig.event(ServerEvent::ClientConnected { client: 0, player, record: Some(first) });
     rig.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(SPAWN_REGION), 0));
     rig.wait_for_snapshots(&[SPAWN_REGION], REGION_STARTUP_BUDGET);
     let swap = GameEventKind::Order(0, game::Order::SetMode { mode: game::PlayMode::Adventure, at: None });
     rig.event(ServerEvent::ClientPacket(ClientPacket::GameEvent(GameEvent::new(swap, 0, SPAWN_REGION)), 0));
-    // The server's orderly exit.
-    rig.manager.park_all_players(rig.now_ms());
-    rig.manager.shutdown_all();
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !rig.manager.running_regions().is_empty() && Instant::now() < deadline {
-        if let Ok((rc, output)) = rig.region_out.recv_timeout(Duration::from_millis(50)) {
-            rig.absorb(rc, output);
-        }
-    }
-    assert!(rig.manager.running_regions().is_empty(), "every region parked");
-    for rc in rig.manager.parked_regions() {
-        let blob = rig.manager.parked_blob(rc).unwrap().clone();
-        store.save(rc, &game::RegionSave::Parked(blob, Vec::new()).into_serialized()).unwrap();
-    }
-    players.store(rig.manager.take_player_saves()).unwrap();
+    rig.exit_into(store);
     drop(rig);
 
     // A new process: client ids start at 0 again; the edge resolves the token.
-    let (again, record) = players.resolve(&token).unwrap();
+    let store = open_store(&url);
+    let (again, record) = StorePlayers(store.clone()).resolve(&token).unwrap();
     assert_eq!(again, player);
     let record = record.expect("the player's record was stored");
     assert!(record.client.mode == game::PlayMode::Adventure);
@@ -692,7 +718,7 @@ fn player_is_restored_by_a_restarted_server() {
     let cursor_stack = Some(game::ItemStack { item: game::ItemId(6), count: 2 });
     assert_eq!(record.client.cursor, None);
     assert!(record.client.inventory.slots.contains(&cursor_stack), "{:?}", record.client.inventory);
-    let mut rig = Rig::with_spawner(spawner(), |_| lightweight_columns());
+    let mut rig = stored_rig(&store);
     rig.event(ServerEvent::ClientConnected { client: 0, player, record: Some(record) });
     rig.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(SPAWN_REGION), 0));
     let mut log = Vec::new();
@@ -712,6 +738,8 @@ fn player_is_restored_by_a_restarted_server() {
     assert_eq!(client.cursor, None, "{client:?}");
     assert!(client.inventory.slots.contains(&cursor_stack), "{client:?}");
     rig.manager.shutdown_all();
+    drop(rig);
+    store.shutdown();
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -783,9 +811,9 @@ fn walk_through_cold_regions_reaches_its_goal_on_real_threads() {
 
 /// A tumbling body crosses a seam on real region threads. Tossed (spinning
 /// about Y) from just inside the spawn region's −z seam, it crosses in the
-/// air and lands in the north neighbour. The spawn region starts from a
-/// world save holding the body mid-launch (the server's own load path: a
-/// region file read on its thread), so nothing is injected into a live
+/// air and lands in the north neighbour. The spawn region starts from the
+/// world store holding the body mid-launch (the server's own load path: a
+/// stored region read on its thread), so nothing is injected into a live
 /// thread. Of every region output, only the source's directory record and
 /// departure, then the target's arrival and record, name the body — it is
 /// never owned by two regions — and
@@ -794,13 +822,11 @@ fn walk_through_cold_regions_reaches_its_goal_on_real_threads() {
 #[ignore = "slow: >100ms — run via just test-full"]
 fn body_crosses_seam_on_real_threads() {
     use game::rapier3d::math::Vector;
-    use server::region_store::RegionStore;
     let north = RegionCoords::new(0, -1);
-    let dir = std::env::temp_dir().join(format!("mmo-threaded-body-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    let store = RegionStore::new(dir.clone(), 42);
+    let (dir, url) = temp_store("body");
+    let store = open_store(&url);
 
-    // The spawn region with the body in it, as a world save.
+    // The spawn region with the body in it, as the world store holds it.
     let b = game::BLOCK_VOXELS as f32;
     let units = movement::UNITS_PER_METER;
     let mut region = game::RegionSeed::Fresh(seam_floor_columns(SPAWN_REGION)).into_region(SPAWN_REGION);
@@ -812,13 +838,22 @@ fn body_crosses_seam_on_real_threads() {
     let mut key = None;
     region.with_data(|d| key = Some(d.spawn_body_safe(pose, cube, linvel, angvel)));
     let id = (*region.data().ecs.id.try_get(key.unwrap())).expect("the body has an EntityId");
-    let save = game::RegionSave::Live(Box::new(region.data().clone()), Vec::new());
-    store.save(SPAWN_REGION, &save.into_serialized()).unwrap();
+    let (portable, _) = region.data().portable_snapshot(&Default::default());
+    let cut = game::WorldCut {
+        id: game::CutId(1),
+        tick: *region.data().tick,
+        regions: vec![(SPAWN_REGION, portable)],
+        in_flight: Vec::new(),
+        players: Vec::new(),
+        history: None,
+    };
+    store.commit_cut(cut).recv().unwrap().expect("the region is stored");
     drop(region);
 
     let generate: server::region_threads::SharedRegionGenerator = std::sync::Arc::new(seam_floor_columns);
-    let spawner = ThreadRegionSpawner::with_region_generator(generate).with_store(store);
+    let spawner = ThreadRegionSpawner::with_region_generator(generate).with_store(store.clone());
     let mut rig = Rig::with_spawner(spawner, seam_floor_columns);
+    rig.manager.set_stored_regions(store.stored_regions().unwrap());
     rig.event(ServerEvent::connected(0));
     for rc in SPAWN_REGION.window_3x3() {
         rig.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(rc), 0));
@@ -888,5 +923,41 @@ fn body_crosses_seam_on_real_threads() {
     let z = body.translation().z;
     assert!(z < REGION_SIZE - b && z > REGION_SIZE - 4.0 * b, "landed a block or more past the seam: z {z}");
     rig.manager.shutdown_all();
+    drop(rig);
+    store.shutdown();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Review focus 3 on the server's spawn path: a region whose stored state
+/// cannot be read (here every read fails: the store has stopped) does not
+/// start and is never generated instead — its thread answers `LoadFailed`,
+/// the manager marks it unavailable, and the session whose body was to be
+/// there is ended with the reason.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn store_read_failure_stops_the_region_on_real_threads() {
+    let (dir, url) = temp_store("load-failure");
+    let store = open_store(&url);
+    let dead = store.clone();
+    store.shutdown();
+    let generated = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = generated.clone();
+    let spawner = ThreadRegionSpawner::with_region_generator(std::sync::Arc::new(move |_| {
+        counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        lightweight_columns()
+    }))
+    .with_store(dead);
+    let mut rig = Rig::with_spawner(spawner, |_| lightweight_columns());
+    rig.event(ServerEvent::connected(0));
+    let mut log = Vec::new();
+    let refused = rig.pump_until(REGION_STARTUP_BUDGET, &mut log, |p| {
+        matches!(p, ServerPacket::Refused(why) if why == game::REGION_UNAVAILABLE_REFUSAL)
+    });
+    assert!(refused, "the session is ended with the reason; packets: {log:#?}");
+    assert!(rig.manager.is_unavailable(SPAWN_REGION), "the region is marked unavailable");
+    assert!(!rig.manager.running_regions().contains(&SPAWN_REGION), "and does not run");
+    assert!(!log.iter().any(|p| p.starts_with("Region(")), "no snapshot of a generated region: {log:#?}");
+    assert_eq!(generated.load(std::sync::atomic::Ordering::SeqCst), 0, "never generated over stored data");
+    assert_eq!(rig.manager.depths().sessions, 0);
     let _ = std::fs::remove_dir_all(&dir);
 }
