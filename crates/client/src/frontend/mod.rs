@@ -305,6 +305,11 @@ fn apply_frontend_actions(
             error.0 = None;
             log.0.clear();
         }
+        // Back off the login screens abandons the login calls in flight (a
+        // hung one must not leave Play online busy).
+        if action == FrontendAction::Back && matches!(state.get(), AppState::Login | AppState::Worlds) {
+            login_intents.write(LoginIntent::Back);
+        }
         if action == FrontendAction::JoinServer {
             let address = join_address.as_ref().map(|a| a.0.borrow().clone()).unwrap_or_default();
             if address.is_empty() || *state.get() != AppState::MainMenu {

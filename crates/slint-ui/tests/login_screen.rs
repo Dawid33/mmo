@@ -196,14 +196,15 @@ fn login_screens_go_back() {
         click(&mut overlay, x, y);
         assert_eq!(back.get(), i as u32 + 1, "screen {screen}");
     }
-    // Not while a request is in flight: its answer would land on another screen.
+    // Also while a request is in flight: Back abandons it (a hung call must
+    // not strand the player; the client ignores its answer's screen change).
     overlay.ui().set_login_busy(true);
-    for screen in [LOGIN_SCREEN, WORLDS_SCREEN] {
+    for (i, screen) in [LOGIN_SCREEN, WORLDS_SCREEN].into_iter().enumerate() {
         overlay.ui().set_screen(screen);
         overlay.render();
         let (x, y) = (overlay.ui().get_back_button_x(), overlay.ui().get_back_button_y());
         click(&mut overlay, x, y);
-        assert_eq!(back.get(), 2, "Back disabled while busy on screen {screen}");
+        assert_eq!(back.get(), i as u32 + 3, "Back enabled while busy on screen {screen}");
     }
 }
 

@@ -101,21 +101,38 @@ pub fn read_at(path: &std::path::Path) -> Option<String> {
     (!text.is_empty()).then(|| text.to_string())
 }
 
-/// Writes `token` to `path` atomically (temp file + rename), owner-only.
+/// Unix permissions of the refresh file (and its temp file, from creation:
+/// the token is never readable by anyone else, not even for a moment).
+#[cfg(all(unix, not(target_arch = "wasm32")))]
+pub const REFRESH_FILE_MODE: u32 = 0o600;
+
+/// Writes `token` to `path` atomically, owner-only: a fresh temp file created
+/// with [`REFRESH_FILE_MODE`] (a stale one from a crashed write is removed
+/// first), written, fsynced, then renamed over `path`.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn write_at(path: &std::path::Path, token: &str) -> std::io::Result<()> {
+    use std::io::Write;
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
     let mut tmp = path.as_os_str().to_owned();
     tmp.push(".tmp");
     let tmp = std::path::PathBuf::from(tmp);
-    std::fs::write(&tmp, format!("{token}\n"))?;
+    match std::fs::remove_file(&tmp) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e),
+        _ => {}
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(REFRESH_FILE_MODE);
     }
+    let mut file = options.open(&tmp)?;
+    file.write_all(format!("{token}\n").as_bytes())?;
+    file.sync_all()?;
+    drop(file);
     std::fs::rename(&tmp, path)
 }
 
@@ -139,7 +156,23 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let path = dir.join("nested").join(REFRESH_FILE_NAME);
         assert_eq!(read_at(&path), None, "nothing kept yet");
+        // A stale temp file (a crashed write), even a world-readable one, is
+        // replaced, never reused.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let stale = path.with_file_name(format!("{REFRESH_FILE_NAME}.tmp"));
+            std::fs::write(&stale, "stale").unwrap();
+            std::fs::set_permissions(&stale, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
         write_at(&path, "first-token").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, REFRESH_FILE_MODE);
+            assert!(!path.with_file_name(format!("{REFRESH_FILE_NAME}.tmp")).exists(), "renamed away");
+        }
         assert_eq!(read_at(&path).as_deref(), Some("first-token"));
         write_at(&path, "second-token").unwrap();
         assert_eq!(read_at(&path).as_deref(), Some("second-token"), "replaced");

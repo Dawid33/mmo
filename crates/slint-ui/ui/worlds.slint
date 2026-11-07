@@ -96,7 +96,7 @@ export component WorldsScreen {
             height: root.bar-height;
             style: Styles.back-button;
             text: "Back";
-            enabled: !root.busy;
+            // Enabled while busy: Back abandons the call in flight.
             clicked => { root.back(); }
         }
         logout-btn := Button {

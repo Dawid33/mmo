@@ -2,7 +2,7 @@
 // Forgot password, and a line saying what happened. The client
 // (crates/client/src/login/flow.rs) talks to the login service; this screen
 // only reports what the player did. `busy` (a request in flight) disables
-// every button.
+// every button but Back (which abandons the request).
 
 import { Button, FrameFace, GraphicalSets, LabelFace, Styles, TextField, VerticalFlow } from "@widgets";
 
@@ -95,10 +95,10 @@ export component LoginScreen {
             if root.notice != "": LabelFace {
                 text: root.notice;
             }
+            // Back works while busy: it abandons the call in flight.
             back-btn := Button {
                 style: Styles.back-button;
                 text: "Back";
-                enabled: !root.busy;
                 clicked => { root.back(); }
             }
         }

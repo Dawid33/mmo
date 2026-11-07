@@ -22,13 +22,14 @@ use serde::de::DeserializeOwned;
 pub const LOGIN_URL_ENV: &str = "VOXEL_LOGIN_URL";
 /// The browser's query parameter (`?login=<url>`) that overrides it.
 pub const LOGIN_URL_QUERY: &str = "login";
-/// Where the login service sits behind the page's own origin.
-pub const LOGIN_PATH_ON_PAGE_ORIGIN: &str = "/login";
-/// Longest a login request may take before it fails as a network error.
-/// Native only: reqwest's fetch backend has no timeout (the browser's own
-/// applies).
+/// Longest a login request may take before it fails as a network error
+/// (native: reqwest's own timeout).
 #[cfg(not(target_arch = "wasm32"))]
 pub const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+/// The browser's equivalent of [`REQUEST_TIMEOUT`]: reqwest's fetch backend
+/// has no timeout, so each call races a `setTimeout` of this many seconds.
+#[cfg(target_arch = "wasm32")]
+pub const WASM_REQUEST_TIMEOUT_SECS: i32 = 15;
 
 /// Why a login call failed. `Display` is the player-facing line and never
 /// contains a credential.
@@ -143,11 +144,44 @@ impl LoginApi {
     }
 
     async fn answer<T: DeserializeOwned>(&self, request: reqwest::RequestBuilder) -> Result<T, LoginFailure> {
-        let response = request.send().await.map_err(network)?;
-        let status: StatusCode = response.status();
-        let body = response.bytes().await.map_err(network)?;
-        parse_response(status.as_u16(), &body)
+        let call = async {
+            let response = request.send().await.map_err(network)?;
+            let status: StatusCode = response.status();
+            let body = response.bytes().await.map_err(network)?;
+            parse_response(status.as_u16(), &body)
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            call.await
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            with_timeout(call, WASM_REQUEST_TIMEOUT_SECS).await
+        }
     }
+}
+
+/// `call`, or [`LoginFailure::Network`] once `secs` have passed (the
+/// browser's fetch never times out by itself; dropping the call abandons it).
+#[cfg(target_arch = "wasm32")]
+async fn with_timeout<T>(
+    call: impl std::future::Future<Output = Result<T, LoginFailure>>,
+    secs: i32,
+) -> Result<T, LoginFailure> {
+    use std::future::Future;
+    use std::task::Poll;
+    let mut call = std::pin::pin!(call);
+    let mut timer = std::pin::pin!(crate::web_worker::sleep_ms(secs.saturating_mul(1000)));
+    std::future::poll_fn(|cx| {
+        if let Poll::Ready(answer) = call.as_mut().poll(cx) {
+            return Poll::Ready(answer);
+        }
+        if timer.as_mut().poll(cx).is_ready() {
+            return Poll::Ready(Err(LoginFailure::Network(format!("no answer within {secs} s"))));
+        }
+        Poll::Pending
+    })
+    .await
 }
 
 /// A transport error as a failure, without its URL (which could carry a
@@ -156,32 +190,18 @@ fn network(e: reqwest::Error) -> LoginFailure {
     LoginFailure::Network(e.without_url().to_string())
 }
 
-/// What the browser page says about itself (decision 15's last fallback).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PageInfo {
-    /// `location.origin`, e.g. `https://game.example.com`.
-    pub origin: String,
-    /// `location.protocol`, e.g. `https:`.
-    pub protocol: String,
-    pub hostname: String,
-}
-
-/// Decision 15 as a pure function. `explicit` is the runtime override (native
-/// env, browser `?login=`), `built` the build-time `VOXEL_LOGIN_URL`, `page`
-/// the browser page (`None` on native): else an `https:` page on a real host
-/// (`web_endpoint`'s rule) has the service at `{origin}/login`. Empty
-/// strings count as unset; a trailing `/` is dropped.
-pub fn resolve_login_url(explicit: Option<&str>, built: Option<&str>, page: Option<PageInfo>) -> Option<String> {
+/// Where the client finds the login service, as a pure function: `explicit`
+/// is the runtime override (native `VOXEL_LOGIN_URL` env, browser `?login=`),
+/// else `built`, the build-time `VOXEL_LOGIN_URL`, else none (no Play online:
+/// the menu stays as it was). Empty strings count as unset; a trailing `/` is
+/// dropped.
+///
+/// There is deliberately no `{page origin}/login` fallback: nothing serves
+/// `/login` on the public site yet, so a deployed page would open on a dead
+/// login screen. R5 restores it once the service sits behind `/login`.
+pub fn resolve_login_url(explicit: Option<&str>, built: Option<&str>) -> Option<String> {
     let set = |v: Option<&str>| v.map(str::trim).filter(|v| !v.is_empty()).map(|v| v.trim_end_matches('/').to_string());
-    if let Some(url) = set(explicit).or_else(|| set(built)) {
-        return Some(url);
-    }
-    let page = page?;
-    if page.protocol != "https:" || crate::web_endpoint::is_local_host(&page.hostname) {
-        return None;
-    }
-    let origin = set(Some(&page.origin))?;
-    Some(format!("{origin}{LOGIN_PATH_ON_PAGE_ORIGIN}"))
+    set(explicit).or_else(|| set(built))
 }
 
 /// The login service this client talks to, if there is one (no "Play online"
@@ -190,20 +210,15 @@ pub fn login_url() -> Option<String> {
     let built = option_env!("VOXEL_LOGIN_URL");
     #[cfg(not(target_arch = "wasm32"))]
     {
-        resolve_login_url(std::env::var(LOGIN_URL_ENV).ok().as_deref(), built, None)
+        resolve_login_url(std::env::var(LOGIN_URL_ENV).ok().as_deref(), built)
     }
     #[cfg(target_arch = "wasm32")]
     {
         let location = web_sys::window().map(|w| w.location());
         let search = location.as_ref().and_then(|l| l.search().ok()).unwrap_or_default();
-        let page = location.as_ref().map(|l| PageInfo {
-            origin: l.origin().unwrap_or_default(),
-            protocol: l.protocol().unwrap_or_default(),
-            hostname: l.hostname().unwrap_or_default(),
-        });
         let explicit = crate::world_scale::query_param(&search, LOGIN_URL_QUERY)
             .map(|v| js_sys::decode_uri_component(v).ok().and_then(|s| s.as_string()).unwrap_or_else(|| v.to_string()));
-        resolve_login_url(explicit.as_deref(), built, page)
+        resolve_login_url(explicit.as_deref(), built)
     }
 }
 
@@ -257,31 +272,14 @@ mod tests {
 
     #[test]
     fn login_url_resolution() {
-        let page = |origin: &str, protocol: &str, hostname: &str| {
-            Some(PageInfo { origin: origin.into(), protocol: protocol.into(), hostname: hostname.into() })
-        };
         // The runtime override wins, then the build-time value.
-        assert_eq!(resolve_login_url(Some("http://l:1/"), Some("http://b"), None).as_deref(), Some("http://l:1"));
-        assert_eq!(resolve_login_url(None, Some("http://b/"), None).as_deref(), Some("http://b"));
+        assert_eq!(resolve_login_url(Some("http://l:1/"), Some("http://b")).as_deref(), Some("http://l:1"));
+        assert_eq!(resolve_login_url(None, Some("http://b/")).as_deref(), Some("http://b"));
         // Empty = unset.
-        assert_eq!(resolve_login_url(Some(""), Some("  "), None), None);
-        assert_eq!(resolve_login_url(Some(""), Some("http://b"), None).as_deref(), Some("http://b"));
-        // Native has no page: nothing configured, no login.
-        assert_eq!(resolve_login_url(None, None, None), None);
-        // A browser page: https on a real host -> origin + /login.
-        assert_eq!(
-            resolve_login_url(None, None, page("https://game.example.com", "https:", "game.example.com")).as_deref(),
-            Some("https://game.example.com/login")
-        );
-        // Explicit still wins over the page.
-        assert_eq!(
-            resolve_login_url(Some("http://x"), None, page("https://game.example.com", "https:", "game.example.com"))
-                .as_deref(),
-            Some("http://x")
-        );
-        // Not https, or a local host: none (the join-only dev menu stays).
-        assert_eq!(resolve_login_url(None, None, page("http://game.example.com", "http:", "game.example.com")), None);
-        assert_eq!(resolve_login_url(None, None, page("https://localhost", "https:", "localhost")), None);
-        assert_eq!(resolve_login_url(None, None, page("http://127.0.0.1:1334", "http:", "127.0.0.1")), None);
+        assert_eq!(resolve_login_url(Some(""), Some("  ")), None);
+        assert_eq!(resolve_login_url(Some(""), Some("http://b")).as_deref(), Some("http://b"));
+        // Nothing configured: no login (no page-origin fallback until R5,
+        // so a deployed page keeps its join-only menu).
+        assert_eq!(resolve_login_url(None, None), None);
     }
 }

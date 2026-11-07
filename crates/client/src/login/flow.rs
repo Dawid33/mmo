@@ -10,6 +10,21 @@
 //! out over crossbeam. Browser: `wasm_bindgen_futures::spawn_local` per call,
 //! replies back over the same channel type.
 //!
+//! Every refresh token the service hands out replaces the previous one, and
+//! presenting a replaced one revokes the whole login (the service's reuse
+//! detection). Several clients on one machine (two native clients, two
+//! browser tabs) share one kept token, so before every call that presents it
+//! (refresh, join, logout) the session re-reads the store and adopts what is
+//! kept there ([`LoginSession::adopt_kept`]) — another client may have rotated
+//! it meanwhile. For the same reason the native client never refreshes at
+//! startup: the kept token is used only when the player presses Play online.
+//! The browser opens on its login screen, so it still refreshes at startup.
+//!
+//! Back leaves the login screens even while a call is in flight: the calls
+//! are tagged with a generation, Back starts a new one (the screens are idle
+//! again), and a reply of an older generation still records its token and
+//! account but changes no screen and no line on it.
+//!
 //! A join rotates the refresh token (kept BEFORE connecting), then hands the
 //! session flow a [`PendingJoin`]: native connects to the ticket's QUIC
 //! address (resolved on the `login-http` thread), the browser to its
@@ -50,13 +65,22 @@ pub enum LoginIntent {
     Forgot { email: String },
     JoinWorld(String),
     Logout,
+    /// Back on the login or world screen: abandon the calls in flight.
+    Back,
 }
+
+/// Whether the native client refreshes a kept token at startup. Only the
+/// browser does (it opens on the login screen); a native client uses the kept
+/// token only on Play online, so two clients started on one machine do not
+/// both rotate it at once.
+pub const REFRESH_AT_STARTUP: bool = cfg!(target_arch = "wasm32");
 
 /// One call to the login service. Holds secrets: no `Debug`.
 pub enum LoginCall {
     Login { email: String, password: String },
     Register { email: String, password: String },
-    /// `silent`: the startup refresh of a kept token (no screen asked).
+    /// `silent`: the refresh of a kept token (the browser's startup, or Play
+    /// online with a kept token) rather than a typed login.
     Refresh { token: String, silent: bool },
     Worlds,
     Join { token: String, world: String },
@@ -75,7 +99,7 @@ pub struct Joined {
 
 /// One answer of the login service. Holds secrets: no `Debug`.
 pub enum LoginReply {
-    /// A login or a refresh (`silent`: the startup refresh).
+    /// A login or a refresh (`silent`: of a kept token).
     Session { silent: bool, result: Result<LoginResponse, LoginFailure> },
     Registered(Result<(), LoginFailure>),
     Worlds(Result<Vec<WorldEntry>, LoginFailure>),
@@ -141,19 +165,23 @@ pub fn resolve_quic(quic: Option<&str>) -> Result<SocketAddr, String> {
     }
 }
 
-/// Where calls go and replies come back.
+/// Which batch of calls a reply belongs to: [`LoginSession::back`] starts a
+/// new generation, and replies of older ones no longer count as in flight.
+pub type Generation = u64;
+
+/// Where calls go and replies come back (each tagged with its generation).
 struct LoginWorker {
     calls: CallSink,
-    replies: Receiver<LoginReply>,
+    replies: Receiver<(Generation, LoginReply)>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-struct CallSink(Sender<LoginCall>);
+struct CallSink(Sender<(Generation, LoginCall)>);
 
 #[cfg(target_arch = "wasm32")]
 struct CallSink {
     api: LoginApi,
-    replies: Sender<LoginReply>,
+    replies: Sender<(Generation, LoginReply)>,
 }
 
 impl LoginWorker {
@@ -161,7 +189,7 @@ impl LoginWorker {
     /// dropped).
     #[cfg(not(target_arch = "wasm32"))]
     fn start(api: LoginApi) -> Self {
-        let (call_send, call_recv) = unbounded::<LoginCall>();
+        let (call_send, call_recv) = unbounded::<(Generation, LoginCall)>();
         let (reply_send, replies) = unbounded();
         let spawned = std::thread::Builder::new().name("login-http".into()).spawn(move || {
             let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
@@ -171,8 +199,8 @@ impl LoginWorker {
                     return;
                 }
             };
-            for call in call_recv {
-                if reply_send.send(runtime.block_on(perform(&api, call))).is_err() {
+            for (generation, call) in call_recv {
+                if reply_send.send((generation, runtime.block_on(perform(&api, call)))).is_err() {
                     break;
                 }
             }
@@ -190,16 +218,16 @@ impl LoginWorker {
     }
 
     /// Sends `call`; `false` if the worker is gone (the reply never comes).
-    fn send(&self, call: LoginCall) -> bool {
+    fn send(&self, generation: Generation, call: LoginCall) -> bool {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            self.calls.0.send(call).is_ok()
+            self.calls.0.send((generation, call)).is_ok()
         }
         #[cfg(target_arch = "wasm32")]
         {
             let (api, replies) = (self.calls.api.clone(), self.calls.replies.clone());
             wasm_bindgen_futures::spawn_local(async move {
-                let _ = replies.send(perform(&api, call).await);
+                let _ = replies.send((generation, perform(&api, call).await));
             });
             true
         }
@@ -260,10 +288,19 @@ pub struct LoginSession {
     pub playing_online: bool,
     /// The password field is to be emptied (after a login).
     pub clear_password: bool,
-    /// Calls whose reply has not come back (instead of the brief's single
-    /// `pending` task: the replies come over [`LoginWorker`]'s channel).
+    /// Calls of the current [`Generation`] whose reply has not come back
+    /// (the replies come over [`LoginWorker`]'s channel).
     in_flight: u32,
+    /// The current generation (bumped by [`Self::back`]).
+    generation: Generation,
     worker: Option<LoginWorker>,
+}
+
+/// The refresh token to present: the kept one when there is one (another
+/// client on this machine may have rotated it since this one last did), else
+/// the one in memory.
+pub fn adopt(current: Option<String>, kept: Option<String>) -> Option<String> {
+    kept.or(current)
 }
 
 impl LoginSession {
@@ -279,8 +316,23 @@ impl LoginSession {
             playing_online: false,
             clear_password: false,
             in_flight: 0,
+            generation: 0,
             worker: None,
         }
+    }
+
+    /// Re-reads what the store keeps ([`adopt`]): call before anything that
+    /// presents the refresh token.
+    pub fn adopt_kept(&mut self, kept: Option<String>) {
+        self.refresh = adopt(self.refresh.take(), kept);
+    }
+
+    /// Back on the login screens: the calls in flight are abandoned (their
+    /// replies still record a token or an account, see [`Self::receive`]) and
+    /// the screens are usable again.
+    pub fn back(&mut self) {
+        self.generation += 1;
+        self.in_flight = 0;
     }
 
     /// A request is in flight: the screens' buttons are disabled.
@@ -314,7 +366,8 @@ impl LoginSession {
         self.playing_online = false;
     }
 
-    /// The startup step: a kept refresh token is refreshed silently.
+    /// The browser's startup step ([`REFRESH_AT_STARTUP`]): a kept refresh
+    /// token is refreshed silently.
     pub fn resume(&mut self, kept: Option<String>) -> Step {
         let Some(token) = kept else { return Step::none() };
         self.refresh = Some(token.clone());
@@ -332,11 +385,16 @@ impl LoginSession {
                     return Step::goto(AppState::Worlds);
                 }
                 let mut step = Step::goto(AppState::Login);
-                // A kept login whose refresh failed (no network): try again.
+                // A kept login (native: never refreshed yet; browser: its
+                // startup refresh failed): refresh it now.
                 if let (Some(token), false) = (self.refresh.clone(), busy) {
                     step.calls.push(LoginCall::Refresh { token, silent: true });
                 }
                 step
+            }
+            LoginIntent::Back => {
+                self.back();
+                Step::none()
             }
             _ if busy => Step::none(),
             LoginIntent::Submit { email, password } => {
@@ -375,6 +433,32 @@ impl LoginSession {
                 step
             }
         }
+    }
+
+    /// One reply of `generation`, on screen `state`. A reply of an older
+    /// generation (sent before a Back) no longer counts as in flight and is
+    /// applied as if the player had left the login screens: its token and
+    /// account are recorded, but it changes no screen, starts no session and
+    /// leaves the screens' lines alone.
+    pub fn receive(&mut self, generation: Generation, reply: LoginReply, state: AppState) -> Step {
+        if generation != self.generation {
+            let lines = (std::mem::take(&mut self.error), std::mem::take(&mut self.notice));
+            let step = self.apply(reply, AppState::MainMenu);
+            (self.error, self.notice) = lines;
+            return step;
+        }
+        if !matches!(reply, LoginReply::LoggedOut) {
+            self.in_flight = self.in_flight.saturating_sub(1);
+        }
+        self.apply(reply, state)
+    }
+
+    /// The login worker is gone (its thread died): nothing in flight will
+    /// answer. The next call starts a new worker.
+    fn worker_lost(&mut self) {
+        self.worker = None;
+        self.back();
+        self.error = LoginFailure::Network("the login client stopped".into()).to_string();
     }
 
     /// One reply of the service, on screen `state`. A reply changes the screen
@@ -482,7 +566,7 @@ impl LoginSession {
         for call in calls {
             let worker = self.worker.get_or_insert_with(|| LoginWorker::start(self.api.clone()));
             let counted = awaited(&call);
-            if worker.send(call) {
+            if worker.send(self.generation, call) {
                 self.in_flight += u32::from(counted);
             } else {
                 self.error = LoginFailure::Network("the login client stopped".into()).to_string();
@@ -508,15 +592,24 @@ fn perform_step(step: Step, login: &mut LoginSession, commands: &mut Commands, n
     }
 }
 
-/// `Startup`: with a login service configured, the [`LoginSession`], and a
-/// kept refresh token refreshed silently.
+/// `Startup`: with a login service configured, the [`LoginSession`]; in the
+/// browser ([`REFRESH_AT_STARTUP`]) a kept refresh token is refreshed
+/// silently.
 pub fn setup_login(mut commands: Commands) {
     let Some(url) = super::login_url() else { return };
     info!("[login] login service at {url}");
     let mut login = LoginSession::new(LoginApi::new(url));
-    let step = login.resume(store::load_refresh());
-    login.send(step.calls);
+    if REFRESH_AT_STARTUP {
+        let step = login.resume(store::load_refresh());
+        login.send(step.calls);
+    }
     commands.insert_resource(login);
+}
+
+/// Whether `intent` presents the refresh token (so the kept one is re-read
+/// first).
+fn presents_token(intent: &LoginIntent) -> bool {
+    matches!(intent, LoginIntent::PlayOnline | LoginIntent::JoinWorld(_) | LoginIntent::Logout)
 }
 
 /// The frontend's [`LoginIntent`]s, sent.
@@ -532,6 +625,9 @@ pub fn start_login(
         return;
     };
     for intent in intents.read() {
+        if presents_token(intent) {
+            login.adopt_kept(store::load_refresh());
+        }
         let step = login.intent(intent.clone(), *state.get());
         perform_step(step, &mut login, &mut commands, &mut next);
     }
@@ -545,16 +641,21 @@ pub fn poll_login(
     mut next: ResMut<NextState<AppState>>,
 ) {
     let Some(mut login) = login else { return };
-    let replies: Vec<LoginReply> = match &login.worker {
-        Some(worker) => worker.replies.try_iter().collect(),
+    let (replies, lost): (Vec<(Generation, LoginReply)>, bool) = match &login.worker {
+        Some(worker) => {
+            let replies = worker.replies.try_iter().collect();
+            let lost = matches!(worker.replies.try_recv(), Err(crossbeam::channel::TryRecvError::Disconnected));
+            (replies, lost)
+        }
         None => return,
     };
-    for reply in replies {
-        if !matches!(reply, LoginReply::LoggedOut) {
-            login.in_flight = login.in_flight.saturating_sub(1);
-        }
-        let step = login.apply(reply, *state.get());
+    for (generation, reply) in replies {
+        let step = login.receive(generation, reply, *state.get());
         perform_step(step, &mut login, &mut commands, &mut next);
+    }
+    if lost {
+        error!("[login] the login-http worker stopped");
+        login.worker_lost();
     }
 }
 
@@ -711,6 +812,94 @@ mod tests {
             AppState::Login,
         );
         assert_eq!(login.error, "Wrong email or password");
+    }
+
+    #[test]
+    fn the_kept_token_is_adopted_when_it_differs() {
+        assert_eq!(adopt(Some("mine".into()), Some("rotated-elsewhere".into())).as_deref(), Some("rotated-elsewhere"));
+        assert_eq!(adopt(Some("same".into()), Some("same".into())).as_deref(), Some("same"));
+        assert_eq!(adopt(Some("mine".into()), None).as_deref(), Some("mine"), "nothing kept: keep ours");
+        assert_eq!(adopt(None, Some("kept".into())).as_deref(), Some("kept"));
+        assert_eq!(adopt(None, None), None);
+
+        // A join presents the adopted token, not the stale one in memory.
+        let mut login = session();
+        let _ = login.apply(logged_in("a@b.c", "r1"), AppState::Login);
+        login.adopt_kept(Some("r2".into()));
+        let step = login.intent(LoginIntent::JoinWorld("alpha".into()), AppState::Worlds);
+        assert!(matches!(step.calls.as_slice(), [LoginCall::Join { token, .. }] if token == "r2"));
+    }
+
+    /// Native: no refresh at startup; Play online with a kept token refreshes
+    /// it, and its answer moves on from the login screen to the list.
+    #[test]
+    fn play_online_refreshes_a_kept_token_then_shows_the_list() {
+        let mut login = session();
+        login.adopt_kept(Some("kept".into()));
+        let step = login.intent(LoginIntent::PlayOnline, AppState::MainMenu);
+        assert_eq!(step.goto, Some(AppState::Login));
+        assert!(matches!(step.calls.as_slice(), [LoginCall::Refresh { token, silent: true }] if token == "kept"));
+        let ok = LoginReply::Session {
+            silent: true,
+            result: Ok(LoginResponse { refresh_token: "r2".into(), account_email: "a@b.c".into(), email_verified: true }),
+        };
+        let step = login.receive(0, ok, AppState::Login);
+        assert_eq!(step.goto, Some(AppState::Worlds));
+        assert_eq!(step.store, StoreOp::Save("r2".into()));
+        // Refused instead: the login screen stays, the token is forgotten.
+        let mut login = session();
+        login.adopt_kept(Some("kept".into()));
+        let _ = login.intent(LoginIntent::PlayOnline, AppState::MainMenu);
+        let refused = LoginReply::Session { silent: true, result: Err(api(ApiErrorCode::Revoked)) };
+        let step = login.receive(0, refused, AppState::Login);
+        assert_eq!((step.goto, step.store), (None, StoreOp::Clear));
+        assert_eq!(REFRESH_AT_STARTUP, cfg!(target_arch = "wasm32"), "only the browser refreshes at startup");
+    }
+
+    /// Back while a call hangs: the screens are idle again at once; the late
+    /// reply records its token but moves nothing and does not underflow the
+    /// counter, and the next call counts normally.
+    #[test]
+    fn back_abandons_calls_in_flight() {
+        let mut login = session();
+        login.in_flight = 1; // a login call of generation 0 hangs
+        assert!(login.busy());
+        let _ = login.intent(LoginIntent::Back, AppState::Login);
+        assert!(!login.busy(), "Back makes the screens usable");
+
+        // The player is back on the login screen (pressed Play online again)
+        // when the old reply lands.
+        login.error = "typed-screen line".into();
+        let step = login.receive(0, logged_in("a@b.c", "late"), AppState::Login);
+        assert_eq!(step.goto, None, "a stale reply changes no screen");
+        assert!(step.join.is_none());
+        assert_eq!(step.store, StoreOp::Save("late".into()), "but its token is kept");
+        assert!(login.logged_in(), "and its account recorded");
+        assert_eq!(login.error, "typed-screen line", "and the screen's lines are left alone");
+        assert_eq!(login.in_flight, 0, "no underflow");
+
+        // A stale join never starts a session.
+        let stale_join = LoginReply::Joined(Ok(joined(ticket(Some("127.0.0.1:6466"), Some("https://127.0.0.1:6467/")))));
+        let step = login.receive(0, stale_join, AppState::Worlds);
+        assert!(step.join.is_none() && step.goto.is_none());
+        assert!(!login.playing_online);
+
+        // Calls of the new generation count and settle as usual.
+        login.in_flight = 1;
+        let _ = login.receive(1, LoginReply::Worlds(Ok(Vec::new())), AppState::Worlds);
+        assert!(!login.busy());
+        let _ = login.receive(1, LoginReply::Worlds(Ok(Vec::new())), AppState::Worlds);
+        assert_eq!(login.in_flight, 0, "an extra reply saturates");
+    }
+
+    #[test]
+    fn a_lost_worker_frees_the_screens() {
+        let mut login = session();
+        login.in_flight = 2;
+        login.worker_lost();
+        assert!(!login.busy());
+        assert!(login.worker.is_none());
+        assert_eq!(login.error, "Can't reach the login server");
     }
 
     #[test]

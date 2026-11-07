@@ -48,8 +48,8 @@ export component FrontendUi inherits Window {
     callback join-server(string);
     out property <length> join-button-x: menu.join-button-x;
     out property <length> join-button-y: menu.join-button-y;
-    // A login service is configured: the menu offers Play online (never on
-    // the join-only menu).
+    // A login service is configured: the menu offers Play online (the
+    // browser's join-only menu too, beside Join server).
     in property <bool> online-available;
     callback play-online();
     out property <length> play-online-button-x: menu.play-online-button-x;

@@ -98,13 +98,19 @@ pub fn web_server_for(address: &str) -> Result<WebServer, String> {
 
 /// The server a login ticket names (`JoinTicket::webtransport` +
 /// `cert_hash`): its URL as is, pinned to the hash when it has one (a dev host's
-/// self-signed certificate), else trusted. `Err` names what is wrong.
+/// self-signed certificate). Without a hash, a local URL is the dev server on
+/// this machine, whose self-signed certificate changes every start (so the
+/// registry cannot hold its hash — `just dev-login` registers none): it is
+/// pinned from the dev hash file exactly like a typed local address
+/// ([`WebServer::PinnedLocal`]); any other URL is trusted. `Err` names what is
+/// wrong.
 pub fn web_server_for_ticket(url: &str, cert_hash: Option<&str>) -> Result<WebServer, String> {
     let url = url.trim();
     if !url.starts_with("https://") {
         return Err(format!("not a WebTransport URL: {url:?}"));
     }
     match cert_hash.map(str::trim).filter(|h| !h.is_empty()) {
+        None if is_local_host(split_address(url)?.0) => Ok(WebServer::PinnedLocal),
         None => Ok(WebServer::Trusted { url: url.into() }),
         Some(hash) if hash.len() == 64 && hash.chars().all(|c| c.is_ascii_hexdigit()) => {
             Ok(WebServer::Pinned { url: url.into(), cert_hash: hash.to_ascii_lowercase() })
@@ -153,6 +159,31 @@ mod tests {
         assert!(web_server_for_ticket(url, Some("abc")).is_err(), "not a SHA-256");
         assert!(web_server_for_ticket("", None).is_err());
         assert!(web_server_for_ticket("http://plain:80/", None).is_err());
+    }
+
+    /// `just dev-login` registers the dev world with a local WebTransport URL
+    /// and no hash (its certificate changes every start): that ticket pins the
+    /// dev hash file like a typed local address; a hash, or a remote host, is
+    /// taken as the ticket says.
+    #[test]
+    fn a_ticket_for_this_machine_without_a_hash_pins_the_dev_server() {
+        let hash = "ab".repeat(32);
+        for local in ["https://127.0.0.1:6467/", "https://localhost:6467/", "https://[::1]:6467/"] {
+            assert_eq!(web_server_for_ticket(local, None), Ok(WebServer::PinnedLocal), "local, no hash: {local}");
+            assert_eq!(web_server_for_ticket(local, Some(" ")), Ok(WebServer::PinnedLocal), "blank hash: {local}");
+            assert_eq!(
+                web_server_for_ticket(local, Some(&hash)),
+                Ok(WebServer::Pinned { url: local.into(), cert_hash: hash.clone() }),
+                "local with hash: {local}"
+            );
+        }
+        let remote = "https://world.example.com:6467/";
+        assert_eq!(web_server_for_ticket(remote, None), Ok(WebServer::Trusted { url: remote.into() }), "remote, no hash");
+        assert_eq!(
+            web_server_for_ticket(remote, Some(&hash)),
+            Ok(WebServer::Pinned { url: remote.into(), cert_hash: hash.clone() }),
+            "remote with hash"
+        );
     }
 
     #[test]
