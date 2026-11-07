@@ -58,6 +58,29 @@ pub const AUTOSTEP_MIN_WIDTH_M: f32 = 0.3;
 /// 0.5 m half-steps went airborne for 3-4 ticks.
 pub const GROUND_SNAP: f32 = 0.6;
 
+/// Horizontal swimming speed (at [`Immersion::Waist`] or deeper).
+pub const SWIM_SPEED: f32 = 2.2;
+/// Horizontal swimming speed while sprinting.
+pub const SWIM_SPRINT_SPEED: f32 = 3.0;
+/// Walking speed multiplier with only the feet in water ([`Immersion::Feet`]).
+pub const WADE_SPEED_FACTOR: f32 = 0.75;
+/// Rise speed while swimming with jump held, head under.
+pub const SWIM_UP_SPEED: f32 = 2.4;
+/// Dive speed while swimming with descend held.
+pub const SWIM_DOWN_SPEED: f32 = 2.4;
+/// Idle swimmers rise back to the surface: the rise speed, head under, with
+/// neither jump nor descend held.
+pub const SWIM_FLOAT_UP_SPEED: f32 = 1.0;
+/// Rate (m/s²) at which a swimmer's vertical speed approaches its target.
+/// As strong as [`GRAVITY`]: water stops a fall as hard as gravity starts
+/// one, so a body walking off a bank into four-deep water (~13.5 m/s when
+/// its waist is found wet) stops ~1.5 m above the bed. At 12 m/s² it hit the
+/// bed (stopping took ~7.5 m); 40 still came within 0.32 m of it.
+pub const SWIM_VERTICAL_ACCEL: f32 = 45.0;
+/// Upward speed a swimmer holding jump against a wall gets: climbs out onto
+/// a one-block ledge.
+pub const SWIM_EXIT_SPEED: f32 = JUMP_SPEED;
+
 /// Standing height of a player body (Minecraft: 1.8 m). It fills two blocks
 /// while still fitting through a two-block-high gap: a body of exactly 2 m
 /// could not, because the character controller keeps a skin offset.
@@ -101,6 +124,29 @@ pub struct Motion {
     /// Tick of an unanswered jump tap, for the double-tap fly toggle.
     /// u64, not usize: this is serialized across the 64-bit↔wasm32 seam.
     pub last_jump_tap: Option<u64>,
+    /// How deep the body is in water, as of the start of this tick
+    /// (`Rollback::tick_immersion_safe`).
+    pub immersion: Immersion,
+    /// The last tick's horizontal move was blocked (it made less than half
+    /// the distance it wanted): a swimmer holding jump climbs out.
+    pub blocked_horizontally: bool,
+}
+
+/// How deep a body is in water: the deepest of its feet, waist and eye that
+/// is in a wet cell (`crate::immersion_at`).
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+    state_hash::StateHash,
+)]
+pub enum Immersion {
+    #[default]
+    Dry,
+    /// Only the feet are wet: the body wades.
+    Feet,
+    /// The waist is wet, the eye is not: the body swims at the surface.
+    Waist,
+    /// The eye is under.
+    Head,
 }
 
 /// One tick of movement intent, already reduced from whatever produced it.
@@ -150,10 +196,12 @@ pub fn plan_with(
     tick: u64,
     params: &MoveParams,
 ) -> Vector {
+    // Flying ignores water; a swimmer's jump swims, never toggles flight.
+    let swimming = !motion.flying && motion.immersion >= Immersion::Waist;
     if !params.allow_flight {
         motion.flying = false;
         motion.last_jump_tap = None;
-    } else if keys.jump_pressed {
+    } else if keys.jump_pressed && !swimming {
         let window = DOUBLE_TAP_WINDOW_MS / TICK_RATE;
         match motion.last_jump_tap {
             Some(t) if tick.saturating_sub(t) <= window => {
@@ -174,11 +222,16 @@ pub fn plan_with(
     }
     // Sprinting needs forward motion, as in Minecraft.
     let sprint = keys.sprint && keys.forward && !keys.back;
-    let speed = match (motion.flying, sprint) {
-        (false, false) => params.walk_speed,
-        (false, true) => SPRINT_SPEED,
-        (true, false) => FLY_SPEED,
-        (true, true) => FLY_SPRINT_SPEED,
+    let land = if sprint { SPRINT_SPEED } else { params.walk_speed };
+    let speed = if motion.flying {
+        if sprint { FLY_SPRINT_SPEED } else { FLY_SPEED }
+    } else if swimming {
+        // Never faster than the body moves on land (slow movers swim slow).
+        (if sprint { SWIM_SPRINT_SPEED } else { SWIM_SPEED }).min(land)
+    } else if motion.immersion == Immersion::Feet {
+        land * WADE_SPEED_FACTOR
+    } else {
+        land
     };
     let step = speed * UNITS_PER_METER * TICK_DT;
     // Horizontal movement follows yaw only — speed stays full regardless of
@@ -187,6 +240,28 @@ pub fn plan_with(
 
     let dy = if motion.flying {
         axis(keys.jump_held, keys.descend) * FLY_VERTICAL_SPEED * UNITS_PER_METER * TICK_DT
+    } else if swimming {
+        let target = match motion.immersion {
+            Immersion::Head if keys.jump_held => SWIM_UP_SPEED,
+            Immersion::Head if keys.descend => -SWIM_DOWN_SPEED,
+            Immersion::Head => SWIM_FLOAT_UP_SPEED,
+            // At the surface: jump holds it there (and climbs out below),
+            // descend dives, neither floats.
+            _ if keys.descend && !keys.jump_held => -SWIM_DOWN_SPEED,
+            _ => 0.0,
+        } * UNITS_PER_METER;
+        let (v0, v1) = if keys.jump_held && motion.blocked_horizontally {
+            // Against a wall: out of the water onto the ledge, at full
+            // speed for as long as the wall blocks and the waist is wet.
+            let exit = SWIM_EXIT_SPEED * UNITS_PER_METER;
+            (exit, exit)
+        } else {
+            let v0 = motion.vel_y;
+            let max_dv = SWIM_VERTICAL_ACCEL * UNITS_PER_METER * TICK_DT;
+            (v0, v0 + (target - v0).clamp(-max_dv, max_dv))
+        };
+        motion.vel_y = v1;
+        (v0 + v1) * 0.5 * TICK_DT
     } else {
         // Holding jump re-jumps on every landing, as in Minecraft.
         let v0 = if motion.grounded && keys.jump_held {
@@ -246,6 +321,10 @@ pub fn walk_body_with(
 /// Folds the collision result of this tick's move back into `motion`.
 pub fn settle(motion: &mut Motion, desired: &Vector, moved: &Vector, grounded: bool) {
     motion.grounded = grounded;
+    let wanted = desired.x * desired.x + desired.z * desired.z;
+    let made = moved.x * moved.x + moved.z * moved.z;
+    // Less than half the distance it wanted (a quarter, squared).
+    motion.blocked_horizontally = wanted > 0.0 && made < 0.25 * wanted;
     if motion.flying {
         // Touching down ends flight, as in Minecraft.
         if grounded && desired.y < 0.0 {
@@ -348,9 +427,10 @@ pub fn sweep_character(
 }
 
 /// The character controller for this tick's move. Walking bodies step up
-/// ledges and stick to the ground; flying (or rising) bodies do neither.
+/// ledges and stick to the ground; flying and swimming (waist deep or more)
+/// bodies do neither.
 pub fn character_controller(motion: &Motion) -> KinematicCharacterController {
-    let walking = !motion.flying;
+    let walking = !motion.flying && motion.immersion < Immersion::Waist;
     KinematicCharacterController {
         autostep: walking.then(|| CharacterAutostep {
             max_height: CharacterLength::Absolute(STEP_HEIGHT * UNITS_PER_METER),

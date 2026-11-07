@@ -772,6 +772,8 @@ impl Region {
                 // The tick opens with the intents due at it (sent at the
                 // previous tick, here or across a seam) and their replies.
                 self.data.tick_intents_safe(&mut intents_out);
+                // Every mover plans this tick with the water it is in now.
+                self.data.tick_immersion_safe();
                 // Mobs set kinematic targets, like the camera controller;
                 // the physics controller's step consumes them.
                 self.data.tick_slimes_safe(self.id);

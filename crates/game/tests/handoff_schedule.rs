@@ -1394,3 +1394,160 @@ fn pond_detour_is_seam_invariant() {
     assert_eq!(p.walk_goal, None, "the walk finished");
     assert_eq!(p.tile, [-d, 0, -d], "the walk ended on its goal");
 }
+
+// --- Swimming across a seam ----------------------------------------------------------
+
+/// A player floating in a 6-deep pool centred on the origin swims diagonally
+/// toward −x/−z (through the seam, or the corner) for [`SWIM_ROUNDS`] holding
+/// W+A, and dives with descend for the middle [`SWIM_DIVE_ROUNDS`]. Every
+/// round, wherever the seam lies, the body over the pool is never `Dry`, and
+/// its feet never reach the bed while descend is up.
+struct SwimAcross {
+    origin: std::cell::Cell<Option<WorldBlockPos>>,
+    descending: std::cell::Cell<bool>,
+    /// The dive put the head under at some round of this run.
+    dove: std::cell::Cell<bool>,
+}
+
+/// Depth of the pool, blocks: water from the floor's top (`STAND_LEVEL`) up.
+const SWIM_POOL_DEPTH: i32 = 6;
+/// The pool spans `-SWIM_POOL_BEHIND..SWIM_POOL_AHEAD` blocks around the
+/// origin on x and z (the swim runs from +3 to about −1.2).
+const SWIM_POOL_BEHIND: i64 = 4;
+const SWIM_POOL_AHEAD: i64 = 6;
+/// Blocks from the origin, along +x and +z, the swim starts at.
+const SWIM_START_BLOCKS: i64 = 3;
+/// Feet below the surface at the start, blocks: inside the `Waist` band.
+const SWIM_START_DEPTH_BLOCKS: f32 = 1.3;
+/// Rounds after the move into the pool before the swim (and its checks)
+/// starts.
+const SWIM_SETTLE_ROUNDS: usize = 2;
+/// Rounds W+A are held: 3 s of swimming.
+const SWIM_ROUNDS: u32 = (3000 / TICK_RATE) as u32;
+/// Rounds descend is held, from halfway through the swim.
+const SWIM_DIVE_ROUNDS: u32 = SWIM_ROUNDS / 6;
+
+impl SwimAcross {
+    fn new() -> Self {
+        Self {
+            origin: std::cell::Cell::new(None),
+            descending: std::cell::Cell::new(false),
+            dove: std::cell::Cell::new(false),
+        }
+    }
+
+    fn over_pool(origin: WorldBlockPos, w: WorldBlockPos) -> bool {
+        let span = -SWIM_POOL_BEHIND..SWIM_POOL_AHEAD;
+        span.contains(&(w.x - origin.x)) && span.contains(&(w.z - origin.z))
+    }
+}
+
+impl Scenario for SwimAcross {
+    fn setup(&self, rig: &mut Rig, origin: WorldBlockPos) {
+        common::install_real_block_props();
+        let water = Block::new(BlockId(5));
+        for dx in -SWIM_POOL_BEHIND..SWIM_POOL_AHEAD {
+            for dz in -SWIM_POOL_BEHIND..SWIM_POOL_AHEAD {
+                for dy in 0..SWIM_POOL_DEPTH {
+                    let (rc, local) = offset(origin, dx, dy, dz).to_local();
+                    rig.manager.spawner_mut().with_region(rc, |r| {
+                        r.with_data(|d| {
+                            assert!(d.set_block_safe([local.x, local.y, local.z], water), "pool {rc:?} {local:?}")
+                        })
+                    });
+                }
+            }
+        }
+        // Placed on the dry floor past the pool, then moved into the water.
+        let d = SWIM_POOL_AHEAD + 2;
+        place_player(rig, offset(origin, d, 0, d), true);
+        let start = offset(origin, SWIM_START_BLOCKS, 0, SWIM_START_BLOCKS);
+        let (rc, local) = start.to_local();
+        assert_eq!(rig.owners(), [rc], "the player starts in the start's region");
+        let bv = game::BLOCK_VOXELS as f32;
+        let surface = (origin.y + SWIM_POOL_DEPTH) as f32;
+        let feet = (surface - SWIM_START_DEPTH_BLOCKS) * bv;
+        let centre = feet + game::movement::PLAYER_HEIGHT * game::movement::UNITS_PER_METER / 2.0;
+        let pose = game::Pose::translation((local.x as f32 + 0.5) * bv, centre, (local.z as f32 + 0.5) * bv);
+        rig.manager.spawner_mut().with_region(rc, |r| {
+            r.with_data(|d| {
+                let e = *d.data.player_entites.get(&CLIENT).expect("player");
+                d.set_body_pose_safe(e, pose);
+            })
+        });
+        // A body's immersion is read at the opening of a tick: let it read
+        // the water it was moved into.
+        for _ in 0..SWIM_SETTLE_ROUNDS {
+            rig.round();
+        }
+        self.origin.set(Some(origin));
+        self.descending.set(false);
+        self.dove.set(false);
+    }
+
+    fn drive(&self, rig: &mut Rig, round: u32) {
+        let origin = self.origin.get().expect("setup ran");
+        let dive_from = SWIM_ROUNDS / 2;
+        match round {
+            0 => [Key::KeyW, Key::KeyA].into_iter().for_each(|k| rig.key(k, true)),
+            r if r == dive_from => {
+                rig.key(Key::ShiftLeft, true);
+                self.descending.set(true);
+            }
+            r if r == dive_from + SWIM_DIVE_ROUNDS => {
+                rig.key(Key::ShiftLeft, false);
+                self.descending.set(false);
+            }
+            SWIM_ROUNDS => {
+                [Key::KeyW, Key::KeyA].into_iter().for_each(|k| rig.key(k, false));
+                assert!(self.dove.get(), "the dive put the head under");
+            }
+            _ => {}
+        }
+        let descending = self.descending.get();
+        for rc in rig.manager.running_regions() {
+            rig.manager.spawner_mut().with_region(rc, |region| {
+                let data = region.data();
+                let Some(&e) = data.player_entites.get(&CLIENT) else { return };
+                let handle = (*data.ecs.rigidbody.try_get(e)).expect("player body");
+                let t = data.physics.bodies.get(handle).expect("body").translation();
+                let feet = game::feet_of(t);
+                let bv = game::BLOCK_VOXELS as f32;
+                let column = game::BlockPos::new((feet.x / bv).floor() as i32, 0, (feet.z / bv).floor() as i32);
+                if !SwimAcross::over_pool(origin, WorldBlockPos::from_local(rc, column)) {
+                    return;
+                }
+                let m = data.ecs.motion.try_get(e).unwrap_or_default();
+                assert_ne!(m.immersion, game::Immersion::Dry, "round {round}: over the pool, yet dry: {m:?}");
+                if m.immersion == game::Immersion::Head {
+                    self.dove.set(true);
+                }
+                let bed = origin.y as f32 * bv;
+                if !descending {
+                    assert!(
+                        feet.y > bed + 0.25 * bv,
+                        "round {round}: feet {} blocks reached the bed ({}) with descend up: {m:?}",
+                        feet.y / bv,
+                        origin.y
+                    );
+                }
+            });
+        }
+    }
+
+    fn rounds(&self) -> u32 {
+        SWIM_ROUNDS + 1
+    }
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn swim_is_seam_invariant() {
+    assert_seam_invariant(&SwimAcross::new(), None);
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn swim_is_seam_invariant_under_jitter() {
+    assert_seam_invariant(&SwimAcross::new(), Some(InlineSchedule::jittery));
+}

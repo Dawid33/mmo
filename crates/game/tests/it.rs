@@ -75,6 +75,7 @@ mod slope_walk;
 mod spawn_surface;
 mod state_hash;
 mod sunk_body;
+mod swimming;
 mod terrain_snapshot;
 mod ui_roundtrip;
 mod underground_edit;

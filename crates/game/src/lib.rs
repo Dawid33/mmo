@@ -94,7 +94,7 @@ pub use lod::*;
 pub use lod_builder::*;
 pub use mining::*;
 pub use migrate::Carried;
-pub use movement::Motion;
+pub use movement::{Immersion, Motion};
 pub use orders::*;
 pub use pathfind::*;
 pub use path_plan::{

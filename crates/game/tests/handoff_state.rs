@@ -155,6 +155,8 @@ fn arrival_preserves_movement_state() {
         grounded: false,
         flying: true,
         last_jump_tap: Some(41),
+        immersion: game::Immersion::Waist,
+        blocked_horizontally: true,
     };
 
     donor_rb.new_transaction();
@@ -568,7 +570,7 @@ fn loaded_donor() -> (Rollback, game::EntityKey, Client) {
     rb.data.clients.insert(9, client.clone());
     rb.data.ecs.motion.set_safe(
         key,
-        Some(game::Motion { vel_y: -3.5, grounded: false, flying: true, last_jump_tap: Some(12) }),
+        Some(game::Motion { vel_y: -3.5, grounded: false, flying: true, last_jump_tap: Some(12), ..Default::default() }),
     );
     rb.data.ecs.slime.set_safe(
         key,
@@ -614,6 +616,33 @@ fn bundle_round_trip_is_state_exact() {
     // Every carried component is bit-equal: extracting again yields it.
     let again = rb.extract_entity_safe(e);
     assert_eq!(again.carried, want, "every carried component is bit-equal");
+}
+
+/// A swimming body's immersion and its blocked flag (the climb-out rule
+/// reads it next tick) travel in `Carried.motion`, bit-equal.
+#[test]
+fn bundle_carries_immersion() {
+    let (mut donor_rb, key, _) = loaded_donor();
+    let swimming = game::Motion {
+        vel_y: -1.25,
+        immersion: game::Immersion::Head,
+        blocked_horizontally: true,
+        ..Default::default()
+    };
+    donor_rb.new_transaction();
+    donor_rb.data.ecs.motion.set_safe(key, Some(swimming));
+    donor_rb.forget();
+    donor_rb.new_transaction();
+    let bundle = donor_rb.extract_entity_safe(key);
+
+    let (send, _recv) = crossbeam::channel::unbounded();
+    let mut rb = Rollback::new(Some(send));
+    rb.new_transaction();
+    let e = rb.apply_arrival(bundle).expect("arrives");
+    let m = rb.data.ecs.motion.try_get(e).expect("motion travelled");
+    assert_eq!(m.immersion, game::Immersion::Head);
+    assert!(m.blocked_horizontally);
+    assert_eq!(m, swimming, "the whole motion is bit-equal");
 }
 
 #[test]
