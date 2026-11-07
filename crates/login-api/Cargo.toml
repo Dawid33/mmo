@@ -1,0 +1,11 @@
+[package]
+name = "login-api"
+version = "0.1.0"
+edition = "2024"
+description = "Wire DTOs and constants of the login service's HTTP API (serde only, wasm-safe)."
+
+[dependencies]
+serde = { workspace = true, features = ["std"] }
+
+[dev-dependencies]
+serde_json = { workspace = true }
