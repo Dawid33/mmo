@@ -196,6 +196,9 @@ login-api = { path = "crates/login-api" }
 login = { path = "crates/login" }
 # Password hashing — crates/login.
 argon2 = "0.5"
+# Amazon SES v2 mail — crates/login only (rustls HTTP client, tokio runtime).
+aws-config = { version = "1", default-features = false, features = ["behavior-version-latest", "rt-tokio", "default-https-client"] }
+aws-sdk-sesv2 = { version = "1", default-features = false, features = ["behavior-version-latest", "rt-tokio", "default-https-client"] }
 auth = { path = "crates/auth" }
 # Join JWTs (EdDSA) — crates/auth.
 jsonwebtoken = "9"

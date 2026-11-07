@@ -1,5 +1,6 @@
 //! The login service's core: its database ([`LoginStore`]) and password handling.
 
+pub mod mail;
 pub mod password;
 pub mod store;
 

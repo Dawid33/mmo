@@ -2,6 +2,7 @@
 //! Postgres tests run only with `MMO_TEST_DATABASE_URL` set (`just pg-up`, `just test-login-pg`).
 
 mod common;
+mod mail;
 mod password;
 mod schema;
 mod store;
