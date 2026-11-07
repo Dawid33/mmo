@@ -514,10 +514,15 @@ impl RegionRunner {
     pub fn handle_input(&mut self, input: RegionInput) -> bool {
         match input {
             RegionInput::Event(kind) if kind.input_client().is_some() => self.route_input(kind, None),
-            RegionInput::Event(kind) => self.apply_input(kind),
+            RegionInput::Event(kind) => match self.behind_held_creation(&kind) {
+                Some(stamp) => self.held_transfers.push_back((kind, stamp)),
+                None => self.apply_input(kind),
+            },
             RegionInput::Transfer(kind, stamp) => {
                 if stamp > self.region.current_tick() {
                     self.held_transfers.push_back((kind, stamp));
+                } else if let Some(created) = self.behind_held_creation(&kind) {
+                    self.held_transfers.push_back((kind, created.max(stamp)));
                 } else {
                     self.apply_input(kind);
                 }
@@ -525,7 +530,10 @@ impl RegionRunner {
             RegionInput::EventAfterTick(kind, after_tick) if kind.input_client().is_some() => {
                 self.route_input(kind, Some(after_tick))
             }
-            RegionInput::EventAfterTick(kind, after_tick) => self.hold_or_apply(kind, after_tick),
+            RegionInput::EventAfterTick(kind, after_tick) => match self.behind_held_creation(&kind) {
+                Some(stamp) => self.held_transfers.push_back((kind, stamp.max(after_tick))),
+                None => self.hold_or_apply(kind, after_tick),
+            },
             RegionInput::RequestSnapshot(client_id) => {
                 let _ = self.out.send((
                     self.id,
@@ -610,6 +618,30 @@ impl RegionRunner {
         true
     }
 
+    /// The stamp of `client`'s body creation held here (a create or restore
+    /// the manager held past a save cut's tick), if any.
+    fn held_creation(&self, client: ClientId) -> Option<Tick> {
+        self.held_transfers.iter().find_map(|(k, t)| match k {
+            GameEventKind::CreateClient(c) | GameEventKind::CreateClientAt(c, ..) | GameEventKind::RestorePlayer(c, _)
+                if *c == client =>
+            {
+                Some(*t)
+            }
+            _ => None,
+        })
+    }
+
+    /// No event for a client is applied before its held creation: the stamp
+    /// to queue `kind` (a server event for a client — park, leave, …) behind
+    /// it, when there is one.
+    fn behind_held_creation(&self, kind: &GameEventKind) -> Option<Tick> {
+        let client = match kind {
+            GameEventKind::ParkPlayer(c) | GameEventKind::ClientLeft(c) => Some(*c),
+            k => k.origin_client(),
+        }?;
+        self.held_creation(client)
+    }
+
     /// Removes and returns, in order, the entries of `queue` stamped before
     /// `tick`.
     fn take_before(
@@ -668,6 +700,8 @@ impl RegionRunner {
                 GameEventKind::EntityArrived(b) if b.client.as_ref().map(|(c, _)| *c) == Some(client) => Some(*t),
                 _ => None,
             });
+            // Or its creation, held past a save cut (`WorldManager::send_play_event`).
+            let arrival = arrival.or_else(|| self.held_creation(client));
             if let Some(arrives) = arrival {
                 let now = self.region.current_tick() as u64;
                 match stamp {

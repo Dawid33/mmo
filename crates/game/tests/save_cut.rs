@@ -715,3 +715,95 @@ fn move_straddling_cut_keeps_items_once() {
         }
     });
 }
+
+/// Bodies of any player in every running region.
+fn player_bodies(rig: &mut Rig) -> usize {
+    let mut n = 0;
+    for rc in rig.manager.running_regions() {
+        rig.manager.spawner_mut().with_region(rc, |r| n += r.data().player_entites.len());
+    }
+    n
+}
+
+/// Rounds with the conservation check's memory cleared each time: a moved
+/// or parked player's body is an allowed exit (it comes back as a new one).
+fn rounds_moving(rig: &mut Rig, n: usize) {
+    for _ in 0..n {
+        rig.tracked.clear();
+        rig.round();
+    }
+}
+
+/// An Adventure player with ten stone at the spawn region, a world map, and
+/// a cut pending whose tick is a full lead ahead: north has not answered.
+fn mover_with_pending_cut(seed: u64) -> Rig {
+    let mut rig = Rig::with_floor(Some(InlineSchedule::jittery(seed)), uniform_floor);
+    rig.manager.set_world_map(map());
+    rig.join_spawn();
+    rig.order(Order::SetMode { mode: PlayMode::Adventure, at: None });
+    rig.round();
+    rig.manager.spawner_mut().with_region(SPAWN_REGION, |r| {
+        r.with_data(|d| {
+            let c = d.clients.get_mut(&CLIENT).unwrap();
+            c.inventory = Inventory::new();
+            c.inventory.slots[3] = Some(stone(10));
+        })
+    });
+    rig.round();
+    let now = world_tick(&mut rig);
+    rig.manager.begin_cut(now).expect("no cut pending");
+    // Into north, which has not answered: the creation is held past the cut.
+    rig.event(ServerEvent::ClientPacket(ClientPacket::PlayRegion(north()), CLIENT));
+    // The park out of the spawn region (late reads may delay it).
+    for _ in 0..12 {
+        if player_bodies(&mut rig) == 0 {
+            break;
+        }
+        rounds_moving(&mut rig, 1);
+    }
+    let (owners, pending, waiting, missed) = (rig.owners(), rig.manager.pending_cut(), rig.manager.awaiting_cut(), rig.cut_missed.clone());
+    assert_eq!(player_bodies(&mut rig), 0, "parked out of the spawn region, its creation held: owners {owners:?} pending {pending:?} waiting {waiting:?} missed {missed:?}");
+    assert!(rig.manager.awaiting_cut().contains(&north()));
+    rig
+}
+
+/// (a) The player disconnects while its creation in north is held: the park
+/// waits behind the creation, so no body is left behind, the parked record
+/// keeps the stone, and a reconnect restores it.
+fn disconnect_behind_held_creation(seed: u64) {
+    let mut rig = mover_with_pending_cut(seed);
+    rig.event(ServerEvent::ClientDisconnected(CLIENT));
+    rounds_moving(&mut rig, 2 * SAVE_CUT_LEAD_TICKS as usize);
+    assert_eq!(player_bodies(&mut rig), 0, "no orphan body");
+    let record = rig.manager.parked_record(PlayerId(CLIENT as u64)).cloned().expect("the park's record");
+    assert_eq!(client_stone(&record.client), 10, "the record keeps the stone");
+    rig.event(ServerEvent::ClientConnected { client: 1, player: PlayerId(CLIENT as u64), record: None });
+    rounds_moving(&mut rig, 2 * SAVE_CUT_LEAD_TICKS as usize);
+    assert_eq!(player_bodies(&mut rig), 1, "restored once");
+    assert_eq!(live_stone(&mut rig), 10, "with its stone");
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn disconnect_while_creation_is_held() {
+    for_seeds("a disconnect behind a held creation", disconnect_behind_held_creation);
+}
+
+/// (b) A second move while the first's creation in north is held: north
+/// parks the body only after creating it, so exactly one body ends up in the
+/// second target, with the stone.
+fn second_move_behind_held_creation(seed: u64) {
+    let mut rig = mover_with_pending_cut(seed);
+    let east = RegionCoords::new(SPAWN_REGION.x + 1, SPAWN_REGION.z);
+    rig.event(ServerEvent::ClientPacket(ClientPacket::PlayRegion(east), CLIENT));
+    rounds_moving(&mut rig, 3 * SAVE_CUT_LEAD_TICKS as usize);
+    assert_eq!(player_bodies(&mut rig), 1, "exactly one body");
+    assert_eq!(rig.owners(), [east], "in the second target");
+    assert_eq!(live_stone(&mut rig), 10, "with its stone");
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn second_move_while_creation_is_held() {
+    for_seeds("a second move behind a held creation", second_move_behind_held_creation);
+}
