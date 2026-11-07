@@ -11,8 +11,8 @@ orders" stand-in, incl. top-down deconstruction scheduling); then stockpiles and
 Multi-region world follow-ups (milestone landed; spec 2026-07-05-multi-region-world):
 - Cell mode removed 2026-10-30 (plans/2026-10-30-remove-cell-mode.md): whole regions + seams; a client never simulates more than its own window. Play regions are 512 m since 2026-10-30 (one-region window, single factor-16 LOD ring); live run at 512 pending.
 
-- World map + Play follow-ups: embark (choosing a site/party, not just a tile); adventure-mode travel between map tiles (Play, not walking; walks reach only one region away, see below); real biomes on the map tiles (today a summary of height/water/geology); `just clippy` is red on toolchain 1.99.1 in macros / bbmodel / slotmapd / block-mesh; the live check of the world map (Esc menu, M, tile panel, Play, camera landing, old region parking) is still pending.
-- Adventure mode landed 2026-10-31 (plans/2026-10-30-adventure-mode.md: PlayMode + SetMode, MoveTo + A* Walker, seam handoff, Follow, near-window bounds, right-click orders with a path preview). Live check pending (one client, adapter=Intel: Adventure, select the dwarf, hover draws the path / red cross, right-click walks it, Follow, walk across a seam with the camera staying on it). Deferred: swimming/wading, ladders/ramps, falls over one block, following a non-player entity across a seam, a sim-emitted drawn route, orders for other entities (workers), goals more than one region away; the hover preview searches at most PREVIEW_MAX_PATH_NODES (2048) of the sim's 32 768 (a long detour shows an amber "not previewed" cross; the click then searches at the full budget).
+- World map + Play follow-ups: embark (choosing a site/party, not just a tile); adventure-mode travel between map tiles (Play, not walking; walks now plan across regions with PathPlan); real biomes on the map tiles (today a summary of height/water/geology); `just clippy` is red on toolchain 1.99.1 in macros / bbmodel / slotmapd / block-mesh; the live check of the world map (Esc menu, M, tile panel, Play, camera landing, old region parking) is still pending.
+- Adventure mode landed 2026-10-31 (plans/2026-10-30-adventure-mode.md: PlayMode + SetMode, MoveTo + A* Walker, seam handoff, Follow, near-window bounds, right-click orders with a path preview). Live check pending (one client, adapter=Intel: Adventure, select the dwarf, hover draws the path / red cross, right-click walks it, Follow, walk across a seam with the camera staying on it). Deferred: swimming/wading, ladders/ramps, falls over one block, following a non-player entity across a seam, a sim-emitted drawn route, orders for other entities (workers); the hover preview searches at most PREVIEW_MAX_PATH_NODES (2048) of the sim's 32 768 (a long detour shows an amber "not previewed" cross; the click then searches at the full budget).
 - Chunk-16 follow-up (needs Dawid's go-ahead to measure): client brick landing per frame (a whole chunk is ~200-300 bricks/frame vs the cap of 160), client replay churn when a predicted break materialises ground (RemoveEntity + AddTerrainChunk re-spawns bricks per replay), and a solid chunk's first-edit full collider rebuild; then fix what the numbers show.
 - `just pull-smoke` is red: since 9aed311 `prepare_chunk_quads` needs `OverlayTexture`, which only `FortressOverlayPlugin` creates; the probe doesn't add it (production unaffected). Fix: `VoxelPullPlugin` falls back to a 1x1x1 placeholder overlay texture.
 
@@ -21,7 +21,7 @@ Multi-region world follow-ups (milestone landed; spec 2026-07-05-multi-region-wo
 - Cross-region event relay groundwork (deferred with handoff).
 - Stable client identity across connections: reconnects get a fresh ClientId, so the manager's no-duplicate-player reconnect path only fires for same-id sessions; the old player entity lingers in its home region.
 - Cross-region interactions beyond collision (combat, pickup) — future spec.
-- Ghost mirrors for parked-region persistence are TTL'd, not persisted.
+- ~~Ghost mirrors TTL'd~~ RESOLVED 2026-11-06 (seam-transparent regions Task 5.2): the entity halo ends mirrors explicitly (`HaloEntityGone`); halos are reseeded when a region starts.
 - Seamless local-player crossing under latency — the local client's own boundary crossing
   converges bit-exact but has a transient rubber-band under active input (spec-accepted
   flip-tick divergence). Proper fix needs a protocol-level design (server-side input
@@ -64,10 +64,7 @@ Multi-region world follow-ups (milestone landed; spec 2026-07-05-multi-region-wo
 - ~~**Adventure walk is not seam invariant**~~ FIXED (Task 6.5, `path_plan.rs`): walks plan in world
   tiles over region ∪ halo and walk on along the carried path after a hand-off, so
   `handoff_schedule::adventure_walk_is_seam_invariant` passes lockstep (Seam(X)/Seam(Z) 2.3e-5 blocks,
-  was 0.17; Corner 5.3e-5). Open: the coarse region route (`next_region`) is a straight line over the
-  region grid bounded by the map's extent — it does not read `WorldMap` tile summaries (sea, relief),
-  so a goal past a sea or a mountain range relies on the fine A* finding a way within each region ∪
-  halo, and gives up (walk dropped) where none is.
+  was 0.17; Corner 5.3e-5). The coarse route now reads `WorldMap` tile summaries (`RouteMap`, Ruling R28): it walks around sea and mountain regions.
 - **Dynamic bodies across seams (Task 7.5, 2026-11-06)**: voxel bodies (felled trees, detached
   terrain) are `EntityKind::Body`s that cross seams with their model and `DropItems` drops
   (`Carried::voxel_body` / `Carried::drops`); `TIP_EDGE_MARGIN_BLOCKS` is gone, a tree falls across a
@@ -86,7 +83,7 @@ item icons/textures, drag-drop UX, additional screens, and the deferred diegetic
 world-space panel case (needs in-engine taffy + deterministic text measurement).
 
 Adventure survival follow-ups (landed 2026-11-05, plans/2026-11-05-adventure-survival-items.md; live run pending):
-- Not built: tools, crafting, health, hunger, fall damage; authentication for player tokens (comes with the external database behind `PlayerStore`); a thrown-item arc animation; a block-crack overlay (progress is a bar under the crosshair); fortress dig orders yielding items (one `deposit_items_safe` call in `clear_tiles_safe`); item piles crossing region seams (deposits clamp into the region).
+- Not built: tools, crafting, health, hunger, fall damage; authentication for player tokens (comes with the external database behind `PlayerStore`); a thrown-item arc animation; a block-crack overlay (progress is a bar under the crosshair); fortress dig orders yielding items (one `deposit_items_safe` call in `clear_tiles_safe`).
 - Restore keeps position, inventory and mode only: a walk in progress and animation state of a parked player are lost.
 - A parked owner's fortress claim can be taken by another player while they are away.
 - Chests: opening uses the eye ray within `edit::REACH` (5 blocks), staying open `CONTAINER_REACH_BLOCKS` (6) from the feet tile, so a chest ~5 blocks above the eye silently cannot be opened; an open chest and the inventory screen are carried across a seam by design (Task 6.4: closed by reach / an unseen chest; mining and its cooldown still reset in `Client::arrive`).
