@@ -22,7 +22,6 @@ use std::f32::consts::{FRAC_PI_4, PI, TAU};
 
 use crate::movement::{self, MoveKeys, MoveParams, UNITS_PER_METER};
 use crate::protocol::{ColliderSpec, RegionCoords, REGION_SIZE};
-use crate::registry::BlockId;
 use crate::{
     EntityKey, EntityKind, GameDataTransactionKind, GameDataUpdate, GameDataUpdateKind,
     Pose, Rollback, BLOCK_VOXELS,

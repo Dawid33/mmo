@@ -17,7 +17,7 @@
 
 use bevy::prelude::*;
 use game::rapier3d::math::Vector;
-use game::{BlockId, RegionId, TilePos, TileSource, BLOCK_VOXELS};
+use game::{RegionId, TilePos, TileSource, BLOCK_VOXELS};
 
 use super::height::HeightGrid;
 use super::level::{cut_plane_world_y, WorkingLevel};

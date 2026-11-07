@@ -32,7 +32,7 @@ use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use game::rapier3d::math::Vector;
 use game::{
-    pick_level_cell, pick_visible_cell, validate, BlockId, Designation, DesignationKind, Invalid, OpId, Order, OrderSummary,
+    pick_level_cell, pick_visible_cell, validate, Designation, DesignationKind, Invalid, OpId, Order, OrderSummary,
     RegionId, TileBox, TilePos, TileSource, BLOCK_VOXELS, DEFAULT_PRIORITY, MAX_ORDER_TILES, MAX_PRIORITY,
     REGION_BLOCKS,
 };
