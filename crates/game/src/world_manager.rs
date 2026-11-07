@@ -663,6 +663,11 @@ pub struct WorldManager<S: RegionSpawner> {
     /// return there are refused `RegionUnavailable`, arrivals wait in the
     /// mailbox). Never regenerated over stored data.
     unavailable: BTreeMap<RegionCoords, crate::Tick>,
+    /// The record a body's creation carries (a move's `CreateClientAt`, a
+    /// restore's `RestorePlayer`), by client, with its target region: the only
+    /// copy until the target applies the creation (its `EventProcessed`).
+    /// A target whose load fails puts it back into `parked_players`.
+    creating: BTreeMap<ClientId, (RegionCoords, PlayerId, PlayerRecord)>,
     /// The calendar day last broadcast (`ServerPacket::Calendar`).
     calendar_day: Option<u64>,
     /// What clients were last told of the sites, bucketed: (site, abandoned, population
@@ -824,6 +829,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             items_destroyed: 0,
             clock_ms: 0,
             unavailable: BTreeMap::new(),
+            creating: BTreeMap::new(),
             calendar_day: None,
             sites_key: Vec::new(),
             out,
@@ -1048,6 +1054,20 @@ impl<S: RegionSpawner> WorldManager<S> {
             // In no region while its creation is on its way to the target.
             self.cut_transit(player, &PlayerRecord { fortress, adventure, ..(**record).clone() });
         }
+        let full = match (&record, self.player_for(client)) {
+            (Some(record), Some((player, fortress, adventure))) => {
+                Some((player, PlayerRecord { fortress, adventure, ..(**record).clone() }))
+            }
+            _ => None,
+        };
+        if self.is_unavailable(m.target) {
+            // Its target could not be loaded meanwhile: the record stays parked.
+            if let Some((player, record)) = full {
+                log::warn!("move of client {client}: {:?} is unavailable; player {} parked", m.target, player.0);
+                self.parked_players.insert(player, record);
+            }
+            return;
+        }
         let carried = match record {
             Some(record) => record.client,
             None => {
@@ -1055,6 +1075,9 @@ impl<S: RegionSpawner> WorldManager<S> {
                 crate::Client::default()
             }
         };
+        if let Some((player, record)) = full {
+            self.creating.insert(client, (m.target, player, record));
+        }
         self.send_play_event(m.target, GameEventKind::CreateClientAt(client, m.landing, Some(Box::new(carried))));
         // Behind the creation, held with it if it is.
         for kind in m.then {
@@ -1435,6 +1458,12 @@ impl<S: RegionSpawner> WorldManager<S> {
                     if let Some(i) = self.in_flight_intents.iter().position(|f| f.target == rc && f.msg == *msg) {
                         let f = self.in_flight_intents.remove(i);
                         self.cut_confirmed_intent(f);
+                    }
+                }
+                if let GameEventKind::CreateClientAt(c, ..) | GameEventKind::RestorePlayer(c, _) = &event.kind {
+                    // The body exists: its record is no longer only in transit.
+                    if self.creating.get(c).is_some_and(|(target, ..)| *target == rc) {
+                        self.creating.remove(c);
                     }
                 }
                 if let GameEventKind::EntityArrived(bundle) = &event.kind {
@@ -2615,6 +2644,9 @@ impl<S: RegionSpawner> WorldManager<S> {
             .filter(|&site| known(site) && !self.fortress_of.values().any(|&s| s == site));
         let adventure = record.adventure.filter(|&site| fortress.is_none() && known(site));
         self.homes.insert(id, region);
+        if let Some(&player) = self.player_of.get(&id) {
+            self.creating.insert(id, (region, player, record.clone()));
+        }
         self.send_play_event(region, GameEventKind::RestorePlayer(id, Box::new(record)));
         if let Some(site) = fortress {
             self.fortress_of.insert(id, site);
@@ -2854,6 +2886,14 @@ impl<S: RegionSpawner> WorldManager<S> {
             self.pending_arrivals.entry(rc).or_default().push(p);
         }
         self.forget_locations(rc);
+        // Bodies created there never existed: the records they carried are
+        // parked again (the next cut carries them, a reconnect restores them).
+        let lost: Vec<ClientId> = self.creating.iter().filter(|(_, (t, ..))| *t == rc).map(|(c, _)| *c).collect();
+        for client in lost {
+            let (_, player, record) = self.creating.remove(&client).expect("listed");
+            log::warn!("player {}'s body was to be created in unavailable {rc:?}: its record is parked", player.0);
+            self.parked_players.insert(player, record);
+        }
         let homed: Vec<ClientId> = self.sessions.keys().copied().filter(|c| self.homes.get(c) == Some(&rc)).collect();
         for client in homed {
             let _ = self.out.send((Some(client), ServerPacket::Refused(REGION_UNAVAILABLE_REFUSAL.to_string())));

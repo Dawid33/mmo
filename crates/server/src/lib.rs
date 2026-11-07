@@ -595,7 +595,15 @@ pub fn run() {
         );
         // Forged worlds keep their history in the store (procedural: none).
         if let Some(store) = &store {
-            if let Some(history) = world_file::ensure_history(store, &map).unwrap_or_else(|e| fatal(&e)) {
+            let backup = match &world_source {
+                world_file::WorldSource::Store { url: world_store::StoreUrl::Sqlite(db), .. } => {
+                    Some(world_file::history_backup_path(db))
+                }
+                _ => None,
+            };
+            if let Some(history) =
+                world_file::ensure_history(store, &map, backup.as_deref()).unwrap_or_else(|e| fatal(&e))
+            {
                 manager.set_history(history, 0);
             }
         }
@@ -661,7 +669,8 @@ pub fn run() {
         manager.maintain(now_ms);
         manager.pump_lod_results();
         if let Some(cuts) = cuts.as_mut() {
-            if last_world_save.elapsed() >= save_every {
+            // Backpressure: no new cut while the store still commits one.
+            if last_world_save.elapsed() >= save_every && cuts.in_flight() == 0 {
                 last_world_save = std::time::Instant::now();
                 // Regions, players, history and what is in flight, at one
                 // world tick a lead ahead (`save_cut.rs`).

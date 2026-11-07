@@ -939,6 +939,30 @@ struct FailingSpawner {
     failures: u32,
     starts: Vec<RegionCoords>,
     dead: std::collections::BTreeMap<RegionCoords, Receiver<game::RegionInput>>,
+    /// Test support: the failure is reported only by [`Self::report_failures`]
+    /// (a store read slower than the region's other traffic).
+    deferred: bool,
+    unreported: Vec<(RegionCoords, crossbeam::channel::Sender<(RegionCoords, RegionOutput)>)>,
+}
+
+impl FailingSpawner {
+    fn new(fail: RegionCoords) -> Self {
+        FailingSpawner {
+            inner: InlineSpawner::default(),
+            fail,
+            failures: 1,
+            starts: Vec::new(),
+            dead: Default::default(),
+            deferred: false,
+            unreported: Vec::new(),
+        }
+    }
+
+    fn report_failures(&mut self) {
+        for (id, out) in self.unreported.drain(..) {
+            let _ = out.send((id, RegionOutput::LoadFailed("test: the world store refused the read".into())));
+        }
+    }
 }
 
 impl game::RegionSpawner for FailingSpawner {
@@ -953,7 +977,10 @@ impl game::RegionSpawner for FailingSpawner {
             self.failures -= 1;
             let (send, recv) = unbounded();
             self.dead.insert(id, recv);
-            let _ = out.send((id, RegionOutput::LoadFailed("test: the world store refused the read".into())));
+            self.unreported.push((id, out));
+            if !self.deferred {
+                self.report_failures();
+            }
             return send;
         }
         self.inner.spawn(id, seed, out)
@@ -977,8 +1004,7 @@ impl game::RegionSpawner for FailingSpawner {
 fn region_load_failure_never_regenerates() {
     crate::common::install_real_block_props();
     let east = RegionCoords::new(1, 0);
-    let spawner =
-        FailingSpawner { inner: InlineSpawner::default(), fail: east, failures: 1, starts: Vec::new(), dead: Default::default() };
+    let spawner = FailingSpawner::new(east);
     let (out_send, packets) = unbounded();
     let (region_out_send, region_out) = unbounded();
     let (lod_result_send, lod_result_recv) = unbounded();
@@ -1108,3 +1134,189 @@ fn play_tile() -> game::TileSummary {
         volcano: false,
     }
 }
+
+/// A manager over a [`FailingSpawner`] on floored regions, with a 3x3 world
+/// map around the spawn region.
+struct FailHarness {
+    manager: WorldManager<FailingSpawner>,
+    region_out: Receiver<(RegionCoords, RegionOutput)>,
+    packets: Receiver<(Option<ClientId>, ServerPacket)>,
+}
+
+impl FailHarness {
+    fn new(spawner: FailingSpawner) -> Self {
+        let (out_send, packets) = unbounded();
+        let (region_out_send, region_out) = unbounded();
+        let (lod_result_send, lod_result_recv) = unbounded();
+        let lod_builder: Box<dyn LodBuilder> = Box::new(InlineLodBuilder {
+            coarse: Box::new(|_key: &game::lod::LodKey| Vec::new()),
+            water: Box::new(game::lod::LodWater::dry),
+            out: lod_result_send,
+        });
+        let mut manager = WorldManager::new(
+            spawner,
+            Box::new(crate::history_handover::floored_region),
+            out_send,
+            region_out_send,
+            lod_builder,
+            lod_result_recv,
+        );
+        let tiles = (0..9).map(|_| play_tile()).collect();
+        manager.set_world_map(game::WorldMap {
+            origin: RegionCoords::new(-1, -1),
+            width: 3,
+            height: 3,
+            tiles,
+            rock_names: vec![],
+            region_types: vec![],
+        });
+        FailHarness { manager, region_out, packets }
+    }
+
+    fn settle(&mut self) {
+        for _ in 0..3 {
+            self.manager.spawner_mut().inner.pump();
+            while let Ok((rc, out)) = self.region_out.try_recv() {
+                self.manager.handle_region_output(rc, out, 0);
+            }
+            self.manager.pump_lod_results();
+        }
+    }
+
+    fn event(&mut self, ev: ServerEvent) {
+        self.manager.handle_server_event(ev, 0);
+        self.settle();
+    }
+
+    /// A save cut at the next tick, taken.
+    fn cut(&mut self) -> game::WorldCut {
+        use game::RegionSpawner;
+        let world = self.manager.spawner_mut().world_tick();
+        self.manager.begin_cut((world + 2).saturating_sub(game::SAVE_CUT_LEAD_TICKS)).expect("no cut pending");
+        for _ in 0..game::SAVE_CUT_LEAD_TICKS + 4 {
+            if let Some(cut) = self.manager.take_cut() {
+                self.manager.cut_committed(cut.id, Vec::new());
+                return cut;
+            }
+            self.manager.spawner_mut().inner.tick_all();
+            self.settle();
+        }
+        panic!("the cut never completed; waiting for {:?}", self.manager.awaiting_cut());
+    }
+
+    /// World time passes beyond the retry of every failed region (the
+    /// running regions sit it out).
+    fn pass_retry(&mut self) {
+        for rc in self.manager.running_regions() {
+            self.manager.spawner_mut().inner.hold(rc, game::STORE_LOAD_RETRY_TICKS as u32 + 2);
+        }
+        for _ in 0..game::STORE_LOAD_RETRY_TICKS + 2 {
+            self.manager.spawner_mut().inner.tick_all();
+        }
+        for rc in self.manager.running_regions() {
+            self.manager.spawner_mut().inner.hold(rc, 0);
+        }
+    }
+
+    fn client_in(&mut self, rc: RegionCoords, client: ClientId) -> Option<game::Client> {
+        let mut out = None;
+        self.manager.spawner_mut().inner.with_region(rc, |r| out = r.data().clients.get(&client).cloned());
+        out
+    }
+}
+
+/// The marker stacks of `rearrange_inventory`, kept as a park keeps them
+/// (the cursor stack folded into the inventory).
+fn holds_markers(client: &game::Client) -> bool {
+    client.inventory.slots[MARK_SLOT] == Some(MARK_STACK)
+        && client.cursor.is_none()
+        && client.inventory.slots.iter().any(|s| *s == Some(MARK_CURSOR))
+}
+
+fn count_markers(cut: &game::WorldCut) -> (usize, usize) {
+    let main = cut.players.iter().filter(|(_, r)| r.client.inventory.slots.contains(&Some(MARK_STACK))).count();
+    let cursor = cut.players.iter().filter(|(_, r)| r.client.inventory.slots.contains(&Some(MARK_CURSOR))).count();
+    (main, cursor)
+}
+
+/// A Play whose target's load fails AFTER the park answered: the move's
+/// creation carried the only copy of the player's record. It is parked
+/// again, so the next cut carries it once (items gained since the last cut
+/// kept, none duplicated), and a reconnect restores it.
+#[test]
+fn record_of_a_move_into_a_failed_region_is_kept() {
+    crate::common::install_real_block_props();
+    let east = RegionCoords::new(1, 0);
+    let mut spawner = FailingSpawner::new(east);
+    spawner.deferred = true;
+    let mut h = FailHarness::new(spawner);
+    h.event(session(0, 0, None));
+    let before = h.cut();
+    assert_eq!(count_markers(&before), (0, 0), "the last cut predates the items");
+    // Items gained since the last cut.
+    h.manager.spawner_mut().inner.with_region(SPAWN_REGION, |region| {
+        region.with_data(|d| {
+            let c = d.clients.get_mut(&0).expect("the player");
+            c.inventory.slots[MARK_SLOT] = Some(MARK_STACK);
+            c.cursor = Some(MARK_CURSOR);
+        });
+    });
+    // Play east: the park answers, the creation goes out, then east's load fails.
+    h.event(ServerEvent::ClientPacket(ClientPacket::PlayRegion(east), 0));
+    h.manager.spawner_mut().report_failures();
+    h.settle();
+    assert!(h.manager.is_unavailable(east));
+    let refused = h.packets.try_iter().any(|(to, p)| {
+        to == Some(0) && matches!(&p, ServerPacket::Refused(why) if why == game::REGION_UNAVAILABLE_REFUSAL)
+    });
+    assert!(refused, "the session whose body was to be in east is ended");
+    let parked = h.manager.parked_record(PlayerId(0)).expect("the carried record is parked again").clone();
+    assert!(holds_markers(&parked.client), "{:?}", parked.client.inventory);
+    let cut = h.cut();
+    let mine: Vec<_> = cut.players.iter().filter(|(p, _)| *p == PlayerId(0)).collect();
+    assert_eq!(mine.len(), 1, "{:?}", cut.players);
+    assert_eq!(mine[0].1, parked, "the cut carries the carried record");
+    assert_eq!(count_markers(&cut), (1, 1), "items conserved, none duplicated");
+    // A reconnect restores it (in the region it left).
+    h.event(session(1, 0, None));
+    let back = h.client_in(SPAWN_REGION, 1).expect("restored where it stood");
+    assert!(holds_markers(&back), "{:?}", back.inventory);
+}
+
+/// A reconnect restored into a region whose load fails: the record it
+/// carried (the store's) is parked again — in the next cut once, and
+/// restored by a reconnect after the retry.
+#[test]
+fn record_of_a_restore_into_a_failed_region_is_kept() {
+    crate::common::install_real_block_props();
+    let east = RegionCoords::new(1, 0);
+    let mut h = FailHarness::new(FailingSpawner::new(east));
+    let mut client = game::Client::default();
+    client.inventory.slots[MARK_SLOT] = Some(MARK_STACK);
+    client.inventory.slots[MARK_SLOT + 1] = Some(MARK_CURSOR);
+    let stored = PlayerRecord {
+        client,
+        pose: game::Pose::from_translation(body_on_tile([5, 1, 7])),
+        region: east,
+        fortress: None,
+        adventure: None,
+    };
+    h.event(session(0, 4, Some(stored.clone())));
+    assert!(h.manager.is_unavailable(east));
+    assert_eq!(h.manager.depths().sessions, 0, "the session is ended");
+    assert_eq!(h.manager.parked_record(PlayerId(4)), Some(&stored), "the record is parked again");
+    // Refused again while east is unavailable, the record kept.
+    h.event(session(1, 4, None));
+    assert_eq!(h.manager.depths().sessions, 0);
+    let cut = h.cut();
+    let mine: Vec<_> = cut.players.iter().filter(|(p, _)| *p == PlayerId(4)).collect();
+    assert_eq!(mine.len(), 1);
+    assert_eq!(mine[0].1, stored);
+    assert_eq!(count_markers(&cut), (1, 1));
+    // After the retry east loads, and the player is restored there.
+    h.pass_retry();
+    h.event(session(2, 4, None));
+    let back = h.client_in(east, 2).expect("restored in east");
+    assert_eq!(back.inventory.slots[MARK_SLOT], Some(MARK_STACK));
+}
+

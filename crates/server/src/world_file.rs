@@ -112,7 +112,17 @@ pub fn ensure_world(store: &StoreHandle, import: Option<&Path>, params: &ForgePa
     let info = store.world_info().map_err(|e| e.to_string())?;
     if info.has_artifact {
         if let Some(path) = import.filter(|p| p.exists()) {
-            log::warn!("[server] {} is ignored: the world store already holds this world", path.display());
+            // The import committed but the file was not deleted (a crash in
+            // between): the same bytes, so it goes now.
+            let same = std::fs::read(path).ok().is_some_and(|b| Some(crc32fast::hash(&b)) == info.content_crc);
+            if same {
+                match std::fs::remove_file(path) {
+                    Ok(()) => log::info!("[server] {} was already imported: deleted", path.display()),
+                    Err(e) => log::error!("[server] cannot delete the imported world file {}: {e}", path.display()),
+                }
+            } else {
+                log::warn!("[server] {} is ignored: the world store already holds another world file", path.display());
+            }
         }
         let bytes = store.artifact().map_err(|e| e.to_string())?.ok_or("the world store lost its world")?;
         return ForgedWorld::from_bytes(&bytes)
@@ -153,22 +163,47 @@ pub fn ensure_world(store: &StoreHandle, import: Option<&Path>, params: &ForgePa
     }
 }
 
+/// Where [`ensure_history`] keeps a stored history it replaces, beside a
+/// `.sqlite` store: `<db>.history.bak`.
+pub fn history_backup_path(db: &Path) -> PathBuf {
+    let mut name = db.as_os_str().to_owned();
+    name.push(".history.bak");
+    PathBuf::from(name)
+}
+
 /// The world's history from the store, else bootstrapped from the world map
 /// (it reaches the store with the next save cut). One of another world or an
 /// older version (the world id is derived from code-built map summaries, so
-/// a code change can orphan it) is replaced by a new one, with a warning —
-/// the next cut writes over it. Any other one that will not load stops the
-/// server: it holds the world's people.
-pub fn ensure_history(store: &StoreHandle, map: &game::WorldMap) -> Result<Option<game::history::History>, String> {
+/// a code change can orphan it) is replaced by a new one — the next cut
+/// writes over it — after its bytes are copied to `backup` (a write failure
+/// stops the server: it is never discarded silently; with no backup path, a
+/// Postgres store, the log says it is discarded). Any other one that will
+/// not load stops the server: it holds the world's people.
+pub fn ensure_history(
+    store: &StoreHandle,
+    map: &game::WorldMap,
+    backup: Option<&Path>,
+) -> Result<Option<game::history::History>, String> {
     use game::history::persist::{self, HistoryLoadError};
     use game::history::SocietyGrid;
     let grid = SocietyGrid::from_world_map(map);
     if let Some(bytes) = store.load_history().map_err(|e| e.to_string())? {
         match persist::decode(&bytes, grid.clone()) {
             Ok(h) => return Ok(Some(h)),
-            Err(e @ (HistoryLoadError::OtherWorld | HistoryLoadError::OldVersion { .. })) => {
-                log::warn!("[server] the stored history: {e} — bootstrapping a new one (the next save replaces it)");
-            }
+            Err(e @ (HistoryLoadError::OtherWorld | HistoryLoadError::OldVersion { .. })) => match backup {
+                Some(bak) => {
+                    std::fs::write(bak, &bytes).map_err(|io| {
+                        format!("the stored history: {e}; cannot keep a copy in {}: {io}", bak.display())
+                    })?;
+                    log::warn!(
+                        "[server] the stored history: {e} — kept as {}; bootstrapping a new one (the next save replaces it)",
+                        bak.display()
+                    );
+                }
+                None => log::error!(
+                    "[server] the stored history: {e} — this store keeps no backup, so it is DISCARDED; bootstrapping a new one"
+                ),
+            },
             Err(e) => return Err(format!("the world store's history does not load: {e}")),
         }
     }
@@ -354,8 +389,8 @@ mod tests {
     fn ensure_history_bootstraps_without_a_stored_one() {
         let store = memory_store();
         let map = land_map(48, 48, |x, z| x < 2 || z < 2 || x >= 46 || z >= 46);
-        let first = ensure_history(&store, &map).unwrap().unwrap();
-        let second = ensure_history(&store, &map).unwrap().unwrap();
+        let first = ensure_history(&store, &map, None).unwrap().unwrap();
+        let second = ensure_history(&store, &map, None).unwrap().unwrap();
         assert_eq!(
             bincode::serialize(&first).unwrap(),
             bincode::serialize(&second).unwrap(),
@@ -380,25 +415,31 @@ mod tests {
     fn ensure_history_loads_the_stored_one() {
         let store = memory_store();
         let map = land_map(48, 48, |x, z| x < 2 || z < 2 || x >= 46 || z >= 46);
-        let mut history = ensure_history(&store, &map).unwrap().unwrap();
+        let mut history = ensure_history(&store, &map, None).unwrap().unwrap();
         // Time passes: the stored history is not the bootstrap's.
         let later = game::history::CalendarTick(history.now().0 + 3 * game::history::DAYS_PER_YEAR * game::history::TICKS_PER_DAY);
         history.advance(later);
         store_history(&store, &history);
-        let loaded = ensure_history(&store, &map).unwrap().unwrap();
+        let loaded = ensure_history(&store, &map, None).unwrap().unwrap();
         assert_eq!(bincode::serialize(&loaded).unwrap(), bincode::serialize(&history).unwrap());
-        // Another world's (the map changed): replaced by a new bootstrap.
+        // Another world's (the map changed): replaced by a new bootstrap, the
+        // stored one kept beside the store.
+        let dir = scratch("history-bak");
+        let bak = history_backup_path(&dir.join("w.sqlite"));
+        assert!(bak.ends_with("w.sqlite.history.bak"));
         let other = land_map(48, 48, |x, z| x < 3 || z < 2 || x >= 46 || z >= 46);
-        let fresh = ensure_history(&store, &other).unwrap().expect("a new history for the other world");
+        let fresh = ensure_history(&store, &other, Some(&bak)).unwrap().expect("a new history for the other world");
         assert_ne!(bincode::serialize(&fresh).unwrap(), bincode::serialize(&history).unwrap());
+        assert_eq!(std::fs::read(&bak).unwrap(), game::history::persist::encode(&history), "the old one is kept");
         store.shutdown();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn ensure_history_refuses_a_corrupt_one() {
         let store = memory_store();
         let map = land_map(48, 48, |x, z| x < 2 || z < 2 || x >= 46 || z >= 46);
-        let history = ensure_history(&store, &map).unwrap().unwrap();
+        let history = ensure_history(&store, &map, None).unwrap().unwrap();
         let mut bytes = game::history::persist::encode(&history);
         bytes.truncate(bytes.len() / 2);
         let cut = game::WorldCut {
@@ -410,7 +451,7 @@ mod tests {
             history: Some(bytes),
         };
         store.commit_cut(cut).recv().unwrap().expect("the cut commits");
-        let err = ensure_history(&store, &map).err().expect("refused");
+        let err = ensure_history(&store, &map, None).err().expect("refused");
         assert!(err.contains("history"), "{err}");
         store.shutdown();
     }
@@ -419,7 +460,7 @@ mod tests {
     fn ensure_history_without_habitable_land_runs_without_history() {
         let store = memory_store();
         let sea = land_map(16, 16, |_, _| true);
-        assert!(ensure_history(&store, &sea).unwrap().is_none());
+        assert!(ensure_history(&store, &sea, None).unwrap().is_none());
         store.shutdown();
     }
 }

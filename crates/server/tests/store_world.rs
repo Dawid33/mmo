@@ -228,6 +228,14 @@ fn import_deletes_forge_file() {
     let opened = open_world(&source_for(&world_path), &small_params()).unwrap();
     assert_eq!(opened.world.as_ref().unwrap().content_crc(), from_file);
     opened.store.unwrap().shutdown();
+    // A crash between the import's commit and the delete left the file: the
+    // same bytes are deleted at the next start; another file is left alone.
+    std::fs::write(&world_path, &bytes).unwrap();
+    open_world(&source_for(&world_path), &small_params()).unwrap().store.unwrap().shutdown();
+    assert!(!world_path.exists(), "an already imported forge file is deleted");
+    std::fs::write(&world_path, b"another file").unwrap();
+    open_world(&source_for(&world_path), &small_params()).unwrap().store.unwrap().shutdown();
+    assert_eq!(std::fs::read(&world_path).unwrap(), b"another file", "a different file is kept");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
