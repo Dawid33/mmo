@@ -1,0 +1,24 @@
+[package]
+name = "world-store"
+version = "0.1.0"
+edition = "2024"
+# One integration-test binary: tests/it.rs.
+autotests = false
+
+[dependencies]
+game = { workspace = true }
+worldgen = { workspace = true }
+sqlx = { workspace = true }
+tokio = { workspace = true, features = ["rt"] }
+crossbeam = { workspace = true }
+zstd = "0.13"
+bincode = { workspace = true }
+serde = { workspace = true }
+log = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[[test]]
+name = "it"
+path = "tests/it.rs"
