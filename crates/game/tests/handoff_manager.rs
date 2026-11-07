@@ -706,3 +706,36 @@ fn mailbox_overflow_puts_a_bodys_drops_down() {
         assert!(c.z <= 1 && (c.x - col).abs() <= 1, "pile at {c:?}, not at the seam cell (x {col}, z 0)");
     }
 }
+
+/// A falling voxel body (a felled tree, `DropItems`) that tips into a region
+/// that is not running does not wait out the park in the mailbox, logs and
+/// all: it settles at once, its drops put down at the seam cell on the side
+/// of the region it left. North is not woken.
+#[test]
+fn voxel_body_into_a_region_not_running_settles_at_the_seam() {
+    crate::common::install_real_block_props();
+    let mut h = harness();
+    h.event(ServerEvent::connected(0), 0);
+    h.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(SPAWN_REGION), 0), 0);
+    h.drain_packets();
+    let north = RegionCoords::new(0, -1);
+    let item = game::ItemId::block(game::BlockId(1));
+    let mut now = 50;
+    h.tick(now);
+    let mut stamp = 0;
+    h.manager.spawner_mut().with_region(SPAWN_REGION, |r| stamp = r.current_tick());
+    let mut body = departing_body(0, 128.0, vec![game::ItemStack { item, count: 4 }]);
+    body.carried.voxel_body =
+        Some(game::voxel_body::VoxelBody { policy: game::voxel_body::SettlePolicy::DropItems, ..Default::default() });
+    let id = body.id;
+    h.manager.handle_region_output(SPAWN_REGION, RegionOutput::Departures(vec![(body, north)], stamp), now);
+    assert!(!h.manager.running_regions().contains(&north), "a body never wakes north");
+    assert_eq!(h.manager.pending_arrival_count(north), 0, "it does not wait in the mailbox");
+    assert_eq!(h.manager.location_of(id), None, "it is gone from the directory");
+    for _ in 0..3 {
+        now += 50;
+        h.tick(now);
+    }
+    assert_eq!(piled_items(&mut h, SPAWN_REGION).get(&item), Some(&4), "its drops lie at the seam");
+    assert_eq!(h.manager.items_destroyed(), 0);
+}

@@ -1520,11 +1520,20 @@ impl<S: RegionSpawner> WorldManager<S> {
                     // A player's arrival wakes its target (parked blob or
                     // gen), as does a person's with no history to absorb
                     // them; anything else into a region that is not running
-                    // — absent, parked or stopping — waits for it to run.
+                    // — absent, parked or stopping — waits for it to run
+                    // (a voxel body settles at the seam instead).
                     let wakes = client.is_some() || matches!(bundle.kind, EntityKind::Person { .. });
                     let running = self.regions.get(&target).is_some_and(|l| !l.stopping);
                     if !wakes && !running {
-                        self.hold_arrival(rc, target, stamp, bundle);
+                        if bundle.carried.voxel_body.is_some() {
+                            // A falling voxel body does not wait out a park
+                            // (with its logs) in the mailbox: it settles now,
+                            // on the seam on its source's side — its policy's
+                            // drops put down there, or nothing.
+                            self.settle_at_seam(rc, target, bundle);
+                        } else {
+                            self.hold_arrival(rc, target, stamp, bundle);
+                        }
                         continue;
                     }
                     self.ensure_running(target);
@@ -1830,21 +1839,31 @@ impl<S: RegionSpawner> WorldManager<S> {
                 gone.bundle.kind
             );
         }
-        self.put_down_drops(gone, target);
+        self.put_down_drops(gone.source, target, gone.bundle);
     }
 
-    /// `gone`, a waiting arrival for `target` despawned past the cap, leaves
-    /// its drops (if any) as piles at the seam cell on its source's side:
+    /// A voxel body departing `source` into `target`, which is not running:
+    /// settled at once instead of waiting in the mailbox — its drops (a
+    /// `DropItems` body's, in `Carried::drops`) put down at the seam cell on
+    /// the source's side, like a mailbox overflow's ([`Self::put_down_drops`]);
+    /// a `Despawn` body leaves nothing.
+    fn settle_at_seam(&mut self, source: RegionCoords, target: RegionCoords, bundle: crate::EntityBundle) {
+        log::debug!("[server] voxel body {:?} into {target:?}, not running: settled at the seam", bundle.id);
+        self.locations.remove(&bundle.id);
+        self.put_down_drops(source, target, bundle);
+    }
+
+    /// `bundle`, a body from `source` gone on its way to `target` (a waiting
+    /// arrival despawned past the cap, or a voxel body settled at the seam),
+    /// leaves its drops (if any) as piles at the seam cell on its source's side:
     /// the cell under its body, clamped into the source (see
     /// `pending_arrivals`). Region-sourced deposits, so a refusal (the
     /// source not running) comes back to the source, which puts them down
     /// itself when it next runs.
-    fn put_down_drops(&mut self, gone: PendingArrival, target: RegionCoords) {
-        if gone.bundle.carried.drops.is_empty() {
+    fn put_down_drops(&mut self, source: RegionCoords, target: RegionCoords, mut bundle: crate::EntityBundle) {
+        if bundle.carried.drops.is_empty() {
             return;
         }
-        let source = gone.source;
-        let mut bundle = gone.bundle;
         bundle.rebase(target, source);
         let t = bundle.body.pose.translation;
         let b = crate::BLOCK_VOXELS as f32;
@@ -1855,7 +1874,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             crate::BlockPos::new(local[0].clamp(0, n - 1), local[1], local[2].clamp(0, n - 1)),
         );
         let due = self.spawner.world_tick();
-        log::info!("[server] waiting {:?} despawned: its drops {:?} put down at {cell:?}", bundle.id, bundle.carried.drops);
+        log::info!("[server] {:?} gone on its way to {target:?}: its drops {:?} put down at {cell:?}", bundle.id, bundle.carried.drops);
         for stack in bundle.carried.drops {
             let sent = crate::SentIntent {
                 target: crate::Target::Pile(cell),
