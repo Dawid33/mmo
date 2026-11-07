@@ -638,6 +638,13 @@ impl WorldGlobals {
         if self.n == 0 || !(self.cell_m > 0.0) || !(self.size_m > 0.0) {
             return Err(ArtifactError::Format("empty world".into()));
         }
+        // Tile geometry and the river buckets assume the raster spans the map exactly.
+        if f64::from(self.n) * self.cell_m != self.size_m {
+            return Err(ArtifactError::Format(format!(
+                "{} cells x {} m is not the world's {} m",
+                self.n, self.cell_m, self.size_m
+            )));
+        }
         validate_tables(&self.column, &self.rock_names, &self.regions)
     }
 }
@@ -717,7 +724,7 @@ impl WholeRasters {
 pub(crate) enum Rasters {
     Whole(WholeRasters),
     /// Tiles pulled on demand through an LRU (`forged_tiles`).
-    Tiled(crate::forged_tiles::TileCache),
+    Tiled(std::sync::Arc<crate::forged_tiles::TileCache>),
 }
 
 impl Rasters {
@@ -810,11 +817,11 @@ impl Rasters {
 }
 
 /// The segments of one bucket: `(segment id, segment)` in stored order
-/// (ascending id). Segments come by value: a tiled bucket lives in a tile
-/// the iterator itself keeps alive.
+/// (ascending id). Segments come by value: a tiled bucket is copied out of
+/// its tile.
 pub(crate) enum SegmentsRef<'a> {
     Whole { ids: std::slice::Iter<'a, u32>, segments: &'a [Segment] },
-    Tiled(crate::forged_tiles::TileBucket),
+    Tiled(std::vec::IntoIter<(u32, Segment)>),
 }
 
 impl Iterator for SegmentsRef<'_> {
@@ -935,9 +942,53 @@ impl ForgedWorld {
         loader: std::sync::Arc<dyn crate::forged_tiles::TileLoader>,
         content_crc: u32,
     ) -> Result<ForgedWorld, ArtifactError> {
+        let budget = crate::forged_tiles::tile_cache_budget_from_env();
+        Self::from_tiles_with_budget(meta, loader, content_crc, budget)
+    }
+
+    /// [`Self::from_tiles`] with an explicit tile cache budget (decoded
+    /// bytes) instead of `VOXEL_TILE_CACHE_MB` / `TILE_CACHE_BYTES`.
+    pub fn from_tiles_with_budget(
+        meta: crate::forged_tiles::ForgedMeta,
+        loader: std::sync::Arc<dyn crate::forged_tiles::TileLoader>,
+        content_crc: u32,
+        budget_bytes: usize,
+    ) -> Result<ForgedWorld, ArtifactError> {
         meta.validate()?;
-        let cache = crate::forged_tiles::TileCache::new(&meta, loader, crate::forged_tiles::TILE_CACHE_BYTES);
-        Ok(Self::with_rasters(meta.globals, Rasters::Tiled(cache), content_crc))
+        let cache = crate::forged_tiles::TileCache::new(&meta, loader, budget_bytes);
+        Ok(Self::with_rasters(meta.globals, Rasters::Tiled(std::sync::Arc::new(cache)), content_crc))
+    }
+
+    /// The tile cache of a tiled world (`None` for a whole one).
+    pub fn tile_cache(&self) -> Option<&crate::forged_tiles::TileCache> {
+        match &self.rasters {
+            Rasters::Tiled(cache) => Some(cache.as_ref()),
+            Rasters::Whole(_) => None,
+        }
+    }
+
+    /// Loads and pins every tile a sampling read at engine metres inside
+    /// `[min_m, max_m]` can touch: the rect grown by
+    /// [`crate::forged_tiles::MAX_READ_RADIUS_CELLS`] cells (every cross-cell
+    /// read) and one river bucket (`BUCKET_M`; a point's bucket lives in its
+    /// own tile, the extra bucket is slack), clamped to the map as reads are.
+    /// While the returned pins live, reads of those tiles never load. A tile
+    /// that fails to load is an `Err` naming it — never terrain. A no-op
+    /// `Ok` on a whole world.
+    pub fn prefetch_rect(&self, min_m: [f64; 2], max_m: [f64; 2]) -> Result<crate::forged_tiles::TilePins, String> {
+        let Rasters::Tiled(cache) = &self.rasters else {
+            return Ok(crate::forged_tiles::TilePins::default());
+        };
+        let g = &self.globals;
+        let grow = f64::from(crate::forged_tiles::MAX_READ_RADIUS_CELLS) * g.cell_m + BUCKET_M;
+        let (a0, a1) = (self.to_artifact(min_m[0], min_m[1]), self.to_artifact(max_m[0], max_m[1]));
+        let n = i64::from(g.n);
+        let cell = |v: f64| ((v / g.cell_m).floor() as i64).clamp(0, n - 1) as u32;
+        let (t0, t1) = cache.tiles_of_cells(
+            (cell(a0.0.min(a1.0) - grow), cell(a0.1.min(a1.1) - grow)),
+            (cell(a0.0.max(a1.0) + grow), cell(a0.1.max(a1.1) + grow)),
+        );
+        cache.pin_rect(t0, t1)
     }
 
     fn with_rasters(globals: WorldGlobals, rasters: Rasters, content_crc: u32) -> ForgedWorld {

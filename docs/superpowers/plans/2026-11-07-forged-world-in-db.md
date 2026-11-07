@@ -164,18 +164,20 @@ The water static layer (`docs/superpowers/plans/2026-11-06-water-static-layer.md
 **Files:**
 - Modify:
   - `crates/worldgen/src/forged_tiles.rs`
-  - `crates/worldgen/src/lib.rs`: `generate_columns` (:404) and `coarse_tile_forged` (:743) take a pinned world view
-  - `crates/worldgen/src/forged.rs`: `patch` (:1117) reads through pins when present
+  - `crates/worldgen/src/lib.rs`: the prefetch functions (`generate_columns` / `coarse_tile_forged` keep their signatures — see the Rule)
+  - `crates/worldgen/src/forged.rs`: `prefetch_rect`, `from_tiles_with_budget`, `tile_cache`
 - Test: `crates/worldgen/tests/forged_tiles.rs`
 
 **Interfaces:**
 - Produces:
-  - `pub struct TilePins(Vec<Arc<Tile>>)`, whose drop unpins
+  - `pub struct TilePins` (the pinned `Arc<Tile>`s plus the cache they are pinned in), whose drop unpins and trims the cache back to its budget
   - `ForgedWorld::prefetch_rect(&self, min_m: [f64; 2], max_m: [f64; 2]) -> Result<TilePins, String>`: loads and pins every tile under the rect grown by `MAX_READ_RADIUS_CELLS` (4) cells and the river bucket reach. It is a no-op `Ok` on `Whole`.
-  - `pub fn prefetch_region(rc: RegionCoords) -> Result<TilePins, String>` and `pub fn prefetch_lod(key: &LodKey) -> Result<TilePins, String>` in `worldgen` (on `forged::active()`)
+  - `pub fn prefetch_region(rc: RegionCoords) -> Result<TilePins, String>` and `pub fn prefetch_lod(key: &LodKey) -> Result<TilePins, String>` in `worldgen` (on `forged::active()`), plus `prefetch_region_forged` / `prefetch_lod_forged` for an explicit world
   - `pub const TILE_CACHE_BYTES: usize = 256 << 20`, `pub const TILE_LOAD_RETRIES: u32 = 3`
-  - `TileCache::resident_bytes(&self) -> usize`
+  - `TileCache::resident_bytes(&self) -> usize`, `TileCache::pinned_bytes(&self) -> usize`
+  - `ForgedWorld::from_tiles_with_budget(meta, loader, crc, budget_bytes)`; `from_tiles` takes `VOXEL_TILE_CACHE_MB` (`forged_tiles::tile_cache_budget_from_env`, the one place it is read)
 - **Rule:** a read first checks the pins (a per-call last-tile memo), then the LRU. `MAX_READ_RADIUS_CELLS` is asserted ≥ the Decision 1 reach for the world's `cell_m` at load (the formula is in its doc comment).
+  - As built: pins are a count on the cache's slot (a pinned slot is never an eviction victim), so a pinned tile is always in the cache and the read path stays memo → cache with no pinned view threaded through `generate_columns` / `coarse_tile_forged` / `patch`; callers hold the `TilePins` across the job.
 
 - [ ] **Step 1: Write the failing tests:**
   - `eviction_is_transparent`: budget = 4 tiles; an LOD-style sweep with a 512 m stride over the whole fixture, bit-equal to whole.
@@ -184,7 +186,7 @@ The water static layer (`docs/superpowers/plans/2026-11-06-water-static-layer.md
   - `pinned_generation_needs_no_loads`: a counting loader shows that `generate_region_forged` after `prefetch_region` performs zero loads.
 - [ ] **Step 2: Run** `just test-one worldgen "--test it -- --include-ignored forged_tiles::"`. Expected: FAIL.
 - [ ] **Step 3: Implement** the pins, the prefetch functions and the budgeted LRU.
-- [ ] **Step 4: Run** the same command, `just test-one worldgen "--test it scene_hash_golden"` and `just smoke`. Expected: PASS.
+- [ ] **Step 4: Run** the same command, `just test-one worldgen "--test it -- --include-ignored scene_hash_golden"` (slow-tagged: without the flag it is skipped) and `just smoke`. Expected: PASS.
 - [ ] **Step 5: Commit**: `feat(worldgen): tile prefetch + pins; budgeted LRU`.
 
 ### Task 4: Store tables, writer, loader

@@ -22,7 +22,7 @@
 //! decoders return an error.
 
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock, RwLock};
 
 use serde::{Deserialize, Serialize};
@@ -36,10 +36,53 @@ pub const TILE_CELLS: u32 = 256;
 /// file's `ARTIFACT_VERSION`. A mismatch is refused: re-tile or re-forge.
 pub const TILED_FORMAT_VERSION: u32 = 1;
 /// Decoded bytes the tile cache keeps before it evicts the least recently
-/// used tile (Decision 4).
+/// used tile (Decision 4); `VOXEL_TILE_CACHE_MB` overrides it
+/// ([`tile_cache_budget_from_env`]).
 pub const TILE_CACHE_BYTES: usize = 256 << 20;
+/// Env var: the tile cache budget in MiB (unset or unparsable = [`TILE_CACHE_BYTES`]).
+pub const TILE_CACHE_MB_ENV: &str = "VOXEL_TILE_CACHE_MB";
 /// Attempts at loading one tile before the read fails.
 pub const TILE_LOAD_RETRIES: u32 = 3;
+/// How far (raster cells, per axis, from the cell holding a sampled point)
+/// any sampling read can land: [`ForgedWorld::prefetch_rect`] grows its rect
+/// by this many cells, and a world whose [`read_radius_cells`] exceeds it is
+/// refused at load ([`ForgedMeta::validate`]). 4 covers 8 m cells and up.
+pub const MAX_READ_RADIUS_CELLS: u32 = 4;
+
+/// The cross-cell reach of sampling at `cell_m` (Decision 1), in raster cells
+/// from the cell holding the sampled point. With `c = cell_m`, a read's cells
+/// cover these metre spans around the point:
+/// - bicubic height: `±1.5 c`; plus its detail-slope gradient at `±c/2`: `±2 c`;
+/// - the habitat slope probe (`habitat::SLOPE_PROBE_M`) of that ground:
+///   `±(SLOPE_PROBE_M + 2 c)`;
+/// - the biome dither (`forged::BIOME_DITHER_M`): nearest cell at the
+///   displaced point, plus the salt-flat bilinear there: `±(BIOME_DITHER_M + c/2)`;
+/// - every other bilinear: `±c/2`; the lake berm and lake window: `±1` cell.
+///
+/// so `ceil(max(SLOPE_PROBE_M + 2 c, BIOME_DITHER_M + c/2) / c)`, at least 1
+/// (3 cells at 16 m, 4 at 8 m). River segments are read by 64 m bucket, which
+/// `prefetch_rect` covers separately.
+pub fn read_radius_cells(cell_m: f64) -> u32 {
+    let reach_m =
+        (crate::habitat::SLOPE_PROBE_M + 2.0 * cell_m).max(crate::forged::BIOME_DITHER_M + 0.5 * cell_m);
+    ((reach_m / cell_m).ceil() as u32).max(1)
+}
+
+/// The tile cache budget for worlds the host loads: `VOXEL_TILE_CACHE_MB`
+/// MiB, else [`TILE_CACHE_BYTES`]. The one place the env var is read; tests
+/// pass explicit budgets (`ForgedWorld::from_tiles_with_budget`).
+pub fn tile_cache_budget_from_env() -> usize {
+    match std::env::var(TILE_CACHE_MB_ENV) {
+        Err(_) => TILE_CACHE_BYTES,
+        Ok(v) => match v.trim().parse::<usize>() {
+            Ok(mb) if mb > 0 => mb.saturating_mul(1 << 20),
+            _ => {
+                log::warn!("[forged-tiles] {TILE_CACHE_MB_ENV}={v:?} is not a positive number of MiB; using the default");
+                TILE_CACHE_BYTES
+            }
+        },
+    }
+}
 
 #[cfg(not(target_arch = "wasm32"))]
 const META_MAGIC: &[u8; 4] = b"VXTM";
@@ -143,6 +186,13 @@ impl ForgedMeta {
                 self.tile_cells, self.globals.cell_m
             )));
         }
+        let reach = read_radius_cells(self.globals.cell_m);
+        if reach > MAX_READ_RADIUS_CELLS {
+            return Err(ArtifactError::Format(format!(
+                "{} m cells: sampling reads {reach} cells away, past MAX_READ_RADIUS_CELLS ({MAX_READ_RADIUS_CELLS})",
+                self.globals.cell_m
+            )));
+        }
         let g = TileGeometry::new(&self.globals, self.tile_cells);
         if g.buckets_per_side > g.tiles_per_side as usize * g.buckets_per_tile {
             return Err(ArtifactError::Format("river buckets reach past the last tile".into()));
@@ -231,6 +281,9 @@ pub fn split(world: &ForgedWorld, tile_cells: u32) -> (ForgedMeta, Vec<Tile>) {
         "tile of {tile_cells} cells x {} m must be a whole number of {BUCKET_M} m river buckets",
         globals.cell_m
     );
+    if let Err(e) = globals.validate() {
+        panic!("split: {e}");
+    }
     let Rasters::Whole(whole) = world.rasters() else { panic!("split needs a whole world") };
     let artifact = &whole.artifact;
     let rasters = world.rasters();
@@ -397,19 +450,49 @@ impl TileLoader for MemTiles {
 
 /// One cached tile. Concurrent misses share the `OnceLock`, so a tile is
 /// loaded once however many threads want it; a failed load is dropped from
-/// the cache so the next read tries again.
+/// the cache so the next read tries again. `bytes`, `pins` and `evicted`
+/// change only under the cache's write lock (atomics so readers can look
+/// without it).
 struct Slot {
     tile: OnceLock<Result<Arc<Tile>, String>>,
     /// The cache clock at the last read (LRU).
     last_use: AtomicU64,
-    /// Decoded bytes counted against the budget (0 until loaded).
+    /// Decoded bytes counted against the budget (0 until admitted).
     bytes: AtomicUsize,
+    /// Live [`TilePins`] holding this tile: a pinned tile is never evicted.
+    pins: AtomicUsize,
+    /// Set when the slot leaves the cache: the threads' memos stop serving it.
+    evicted: AtomicBool,
+}
+
+impl Slot {
+    fn new(now: u64) -> Slot {
+        Slot {
+            tile: OnceLock::new(),
+            last_use: AtomicU64::new(now),
+            bytes: AtomicUsize::new(0),
+            pins: AtomicUsize::new(0),
+            evicted: AtomicBool::new(false),
+        }
+    }
 }
 
 /// Decoded tiles over a [`TileLoader`]: thread-safe, loads outside the
-/// lock, least recently used tiles evicted once the decoded bytes pass the
-/// budget. Readers hold `Arc<Tile>`s, so eviction never pulls a tile from
-/// under a read.
+/// lock, least recently used unpinned tiles evicted once the decoded bytes
+/// pass the budget. Readers hold `Arc<Tile>`s, so eviction never pulls a
+/// tile from under a read.
+///
+/// A read checks the calling thread's last-tile memo, then the cache; a
+/// pinned tile ([`ForgedWorld::prefetch_rect`]) is always in the cache, so a
+/// read of it never loads.
+///
+/// Memory bound: [`Self::resident_bytes`] ≤ budget + [`Self::pinned_bytes`]
+/// whenever the budget holds the largest tile (the cache goes over only
+/// while jobs pin more than fits; it logs that once). Not counted there: a
+/// thread's memo keeps the last tile it read alive until its next read of a
+/// tiled world, so up to one evicted tile per thread that has not read since
+/// the eviction (or since the world was dropped) — memo hits never serve an
+/// evicted tile, they fall through to the cache.
 pub struct TileCache {
     loader: Arc<dyn TileLoader>,
     budget_bytes: usize,
@@ -421,6 +504,10 @@ pub struct TileCache {
     slots: RwLock<Vec<Option<Arc<Slot>>>>,
     clock: AtomicU64,
     resident: AtomicUsize,
+    /// Decoded bytes of the resident tiles that are pinned.
+    pinned: AtomicUsize,
+    /// The over-budget warning has been logged.
+    warned: AtomicBool,
     /// Tells this cache's tiles apart in the threads' `LAST_TILE` memos.
     id: u64,
 }
@@ -428,14 +515,52 @@ pub struct TileCache {
 /// Source of [`TileCache`] ids.
 static NEXT_CACHE_ID: AtomicU64 = AtomicU64::new(0);
 
+/// A thread's last tile read (`LAST_TILE`).
+struct Memo {
+    cache: u64,
+    coords: TileCoords,
+    slot: Arc<Slot>,
+    tile: Arc<Tile>,
+}
+
 thread_local! {
-    /// The tile this thread read last: `(cache id, coords, tile)`. It keeps
-    /// at most one tile per thread alive past its eviction (tiles are
-    /// immutable, so a remembered one is never stale); a memo hit does not
-    /// refresh the tile's LRU stamp, so a hot tile may be evicted and later
-    /// reloaded by another thread — results are unaffected.
-    static LAST_TILE: std::cell::RefCell<Option<(u64, TileCoords, Arc<Tile>)>> =
-        const { std::cell::RefCell::new(None) };
+    /// The tile this thread read last. A hit costs no lock and no shared
+    /// write (the LRU stamp is refreshed only when the cache clock has moved
+    /// since); a hit on a tile evicted since falls through to the cache.
+    static LAST_TILE: std::cell::RefCell<Option<Memo>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Tiles held in the cache for a job (region generation, an LOD build):
+/// while it lives they are never evicted, so the job's reads never load.
+/// Dropping it unpins them (and trims the cache back to its budget).
+#[derive(Default)]
+pub struct TilePins {
+    tiles: Vec<(TileCoords, Arc<Tile>)>,
+    cache: Option<Arc<TileCache>>,
+}
+
+impl TilePins {
+    /// Number of pinned tiles (0 for a whole world).
+    pub fn len(&self) -> usize {
+        self.tiles.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.tiles.is_empty()
+    }
+
+    /// The pinned tiles' coordinates, row by row.
+    pub fn coords(&self) -> impl Iterator<Item = TileCoords> + '_ {
+        self.tiles.iter().map(|(t, _)| *t)
+    }
+}
+
+impl Drop for TilePins {
+    fn drop(&mut self) {
+        if let Some(cache) = &self.cache {
+            cache.unpin(&self.tiles);
+        }
+    }
 }
 
 impl TileCache {
@@ -451,13 +576,25 @@ impl TileCache {
             slots: RwLock::new(vec![None; (geometry.tiles_per_side as usize).pow(2)]),
             clock: AtomicU64::new(0),
             resident: AtomicUsize::new(0),
+            pinned: AtomicUsize::new(0),
+            warned: AtomicBool::new(false),
             id: NEXT_CACHE_ID.fetch_add(1, Ordering::Relaxed),
         }
     }
 
-    /// Decoded bytes of the tiles the cache holds.
+    /// Decoded bytes of the tiles the cache holds (pinned ones included).
     pub fn resident_bytes(&self) -> usize {
         self.resident.load(Ordering::Relaxed)
+    }
+
+    /// Decoded bytes of the resident tiles some [`TilePins`] holds.
+    pub fn pinned_bytes(&self) -> usize {
+        self.pinned.load(Ordering::Relaxed)
+    }
+
+    /// The budget the cache evicts down to.
+    pub fn budget_bytes(&self) -> usize {
+        self.budget_bytes
     }
 
     /// The tile at `t`, loading it on a miss.
@@ -465,31 +602,33 @@ impl TileCache {
     /// # Panics
     /// If the tile cannot be loaded after [`TILE_LOAD_RETRIES`] attempts:
     /// generation never makes terrain without its tiles (generating paths
-    /// load theirs up front).
+    /// pin theirs up front).
     pub fn tile(&self, t: TileCoords) -> Arc<Tile> {
         self.try_tile(t).unwrap_or_else(|e| panic!("forged tile ({}, {}): {e}", t.tx, t.tz))
     }
 
     /// [`Self::tile`] that reports a failed load instead of panicking.
     pub fn try_tile(&self, t: TileCoords) -> Result<Arc<Tile>, String> {
+        self.fetch(t).map(|(_, tile)| tile)
+    }
+
+    /// The slot and tile at `t`, loading on a miss; stamps the slot.
+    fn fetch(&self, t: TileCoords) -> Result<(Arc<Slot>, Arc<Tile>), String> {
         let per_side = self.geometry.tiles_per_side;
         if t.tx >= per_side || t.tz >= per_side {
             return Err(format!("outside the {per_side}x{per_side} tile grid"));
         }
         let index = self.slot_index(t);
-        let now = self.clock.fetch_add(1, Ordering::Relaxed);
+        let now = self.clock.fetch_add(1, Ordering::Relaxed) + 1;
         let found = self.slots.read().expect("tile cache lock")[index].clone();
         let slot = found.unwrap_or_else(|| {
             let mut slots = self.slots.write().expect("tile cache lock");
-            slots[index]
-                .get_or_insert_with(|| {
-                    Arc::new(Slot { tile: OnceLock::new(), last_use: AtomicU64::new(now), bytes: AtomicUsize::new(0) })
-                })
-                .clone()
+            slots[index].get_or_insert_with(|| Arc::new(Slot::new(now))).clone()
         });
         slot.last_use.store(now, Ordering::Relaxed);
         if let Some(Ok(tile)) = slot.tile.get() {
-            return Ok(tile.clone());
+            let tile = tile.clone();
+            return Ok((slot, tile));
         }
         let mut loaded_here = false;
         let result = slot
@@ -504,11 +643,58 @@ impl TileCache {
             Err(_) => self.forget(t, &slot),
             Ok(_) => {}
         }
-        result
+        result.map(|tile| (slot, tile))
     }
 
     fn slot_index(&self, t: TileCoords) -> usize {
         t.tz as usize * self.geometry.tiles_per_side as usize + t.tx as usize
+    }
+
+    /// Loads and pins every tile in `tx0..=tx1` x `tz0..=tz1` (clamped to the
+    /// grid), row by row. The first tile that fails ends it with an error
+    /// naming the tile; the tiles pinned so far are unpinned.
+    pub(crate) fn pin_rect(self: &Arc<Self>, (tx0, tz0): (u32, u32), (tx1, tz1): (u32, u32)) -> Result<TilePins, String> {
+        let last = self.geometry.tiles_per_side - 1;
+        let mut pins = TilePins { tiles: Vec::new(), cache: Some(self.clone()) };
+        for tz in tz0.min(last)..=tz1.min(last) {
+            for tx in tx0.min(last)..=tx1.min(last) {
+                let t = TileCoords { tx, tz };
+                let tile = self.pin(t).map_err(|e| format!("forged tile ({tx}, {tz}): {e}"))?;
+                pins.tiles.push((t, tile));
+            }
+        }
+        Ok(pins)
+    }
+
+    /// Loads tile `t` and pins it in the cache.
+    fn pin(&self, t: TileCoords) -> Result<Arc<Tile>, String> {
+        let index = self.slot_index(t);
+        loop {
+            let tile = self.try_tile(t)?;
+            let slots = self.slots.write().expect("tile cache lock");
+            let Some(slot) = &slots[index] else { continue }; // evicted since: load again
+            if !slot.tile.get().is_some_and(|r| r.as_ref().is_ok_and(|cur| Arc::ptr_eq(cur, &tile))) {
+                continue;
+            }
+            if slot.pins.fetch_add(1, Ordering::Relaxed) == 0 {
+                // 0 while not yet admitted: `admit` counts it then.
+                self.pinned.fetch_add(slot.bytes.load(Ordering::Relaxed), Ordering::Relaxed);
+            }
+            return Ok(tile);
+        }
+    }
+
+    /// Releases pins taken by [`Self::pin_rect`], then trims the cache back
+    /// to its budget.
+    fn unpin(&self, tiles: &[(TileCoords, Arc<Tile>)]) {
+        let mut slots = self.slots.write().expect("tile cache lock");
+        for (t, _) in tiles {
+            let slot = slots[self.slot_index(*t)].as_ref().expect("a pinned tile stays cached");
+            if slot.pins.fetch_sub(1, Ordering::Relaxed) == 1 {
+                self.pinned.fetch_sub(slot.bytes.load(Ordering::Relaxed), Ordering::Relaxed);
+            }
+        }
+        self.trim(&mut slots, None);
     }
 
     /// Loads and checks tile `t`, retrying the loader.
@@ -525,10 +711,10 @@ impl TileCache {
 
     /// A decoded tile that is the one asked for and fits this world: what
     /// the read path relies on (sizes, bucket lists naming carried segments,
-    /// region ids and biomes in range).
+    /// region ids and biomes in range, lake runs inside the tile, no NaN).
     fn decode_checked(&self, t: TileCoords, bytes: &[u8]) -> Result<Tile, String> {
         let tile = decode_tile(bytes).map_err(|e| e.to_string())?;
-        let (_, _, w, h) = self.geometry.cells(t);
+        let (x0, z0, w, h) = self.geometry.cells(t);
         if tile.origin != t || tile.w != w || tile.h != h {
             return Err(format!("holds tile {:?} of {}x{} cells, not the {w}x{h} asked for", tile.origin, tile.w, tile.h));
         }
@@ -549,29 +735,74 @@ impl TileCache {
         if tile.bytes[ByteRasterId::Biome as usize].iter().any(|&b| game::Biome::from_u8(b).is_none()) {
             return Err("unknown biome".into());
         }
+        if tile.coast.iter().any(|c| c.is_nan()) {
+            return Err("NaN coast distance".into());
+        }
+        // Lake runs: non-empty, ascending and disjoint, each inside one row
+        // of the tile's own cells, with a real level — `lake_level` looks a
+        // cell up by binary search and trusts all of that.
+        let n = self.geometry.n as u64;
+        let inside = |start: u32, end: u32| {
+            let (first, last) = (u64::from(start), u64::from(end) - 1);
+            let (row, col) = (first / n, first % n);
+            last / n == row
+                && (u64::from(z0)..u64::from(z0 + h)).contains(&row)
+                && col >= u64::from(x0)
+                && last % n < u64::from(x0 + w)
+        };
+        let mut prev_end = 0u32;
+        for &(start, end, level) in &tile.lake_runs {
+            if start >= end || start < prev_end || !inside(start, end) || !level.is_finite() {
+                return Err(format!("bad lake run ({start}, {end}, {level})"));
+            }
+            prev_end = end;
+        }
         Ok(tile)
     }
 
     /// Counts a freshly loaded tile against the budget and evicts the least
-    /// recently used others while the cache is over it.
+    /// recently used unpinned others while the cache is over it.
     fn admit(&self, t: TileCoords, slot: &Arc<Slot>, bytes: usize) {
         let index = self.slot_index(t);
         let mut slots = self.slots.write().expect("tile cache lock");
         if !slots[index].as_ref().is_some_and(|s| Arc::ptr_eq(s, slot)) {
-            return; // evicted while it loaded: not resident
+            return; // not resident (cannot happen today: loading slots are never victims)
         }
         slot.bytes.store(bytes, Ordering::Relaxed);
-        let mut resident = self.resident.load(Ordering::Relaxed) + bytes;
+        self.resident.fetch_add(bytes, Ordering::Relaxed);
+        if slot.pins.load(Ordering::Relaxed) > 0 {
+            self.pinned.fetch_add(bytes, Ordering::Relaxed);
+        }
+        self.trim(&mut slots, Some(index));
+    }
+
+    /// Evicts least recently used, unpinned, loaded tiles (never `keep`)
+    /// until the cache is within budget; logs once if pins hold it over.
+    fn trim(&self, slots: &mut [Option<Arc<Slot>>], keep: Option<usize>) {
+        let mut resident = self.resident.load(Ordering::Relaxed);
         while resident > self.budget_bytes {
             let victim = slots
                 .iter()
                 .enumerate()
                 .filter_map(|(k, s)| Some((k, s.as_ref()?)))
-                .filter(|&(k, s)| k != index && s.bytes.load(Ordering::Relaxed) > 0)
+                .filter(|&(k, s)| {
+                    Some(k) != keep && s.bytes.load(Ordering::Relaxed) > 0 && s.pins.load(Ordering::Relaxed) == 0
+                })
                 .min_by_key(|(_, s)| s.last_use.load(Ordering::Relaxed))
                 .map(|(k, _)| k);
-            let Some(victim) = victim else { break };
+            let Some(victim) = victim else {
+                if !self.warned.swap(true, Ordering::Relaxed) {
+                    log::warn!(
+                        "[forged-tiles] tile cache over its budget: {resident} B resident, {} B pinned, budget {} B \
+                         (jobs pin more tiles than fit; raise {TILE_CACHE_MB_ENV}) — logged once",
+                        self.pinned.load(Ordering::Relaxed),
+                        self.budget_bytes
+                    );
+                }
+                break;
+            };
             let gone = slots[victim].take().expect("victim present");
+            gone.evicted.store(true, Ordering::Relaxed);
             resident -= gone.bytes.load(Ordering::Relaxed);
         }
         self.resident.store(resident, Ordering::Relaxed);
@@ -586,22 +817,40 @@ impl TileCache {
         }
     }
 
+    /// `f` over tile `t`. The calling thread's memo of the last tile it read
+    /// (`LAST_TILE`) makes the hot path one thread-local lookup: no lock, no
+    /// shared write unless the cache clock moved since the tile's stamp. The
+    /// memo is not borrowed across a load, so a loader may itself sample a
+    /// tiled world on this thread.
+    fn with_tile<R>(&self, t: TileCoords, f: impl FnOnce(&Tile) -> R) -> R {
+        let mut f = Some(f);
+        let hit = LAST_TILE.with(|memo| {
+            let memo = memo.borrow();
+            let m = memo.as_ref().filter(|m| m.cache == self.id && m.coords == t)?;
+            if m.slot.evicted.load(Ordering::Relaxed) {
+                return None;
+            }
+            let now = self.clock.load(Ordering::Relaxed);
+            if m.slot.last_use.load(Ordering::Relaxed) < now {
+                m.slot.last_use.store(now, Ordering::Relaxed);
+            }
+            Some((f.take().expect("unused"))(&m.tile))
+        });
+        if let Some(r) = hit {
+            return r;
+        }
+        let (slot, tile) = self.fetch(t).unwrap_or_else(|e| panic!("forged tile ({}, {}): {e}", t.tx, t.tz));
+        let r = (f.take().expect("unused"))(&tile);
+        let old = LAST_TILE.with(|memo| memo.replace(Some(Memo { cache: self.id, coords: t, slot, tile })));
+        drop(old); // outside the borrow
+        r
+    }
+
     /// `f` over the tile holding CLAMPED global cell `i` and the cell's
-    /// local index. The calling thread remembers the last tile it read
-    /// (`LAST_TILE`), so the hot path is one thread-local lookup: no lock and
-    /// no shared atomic, which would make every region thread contend on
-    /// every raster read.
+    /// local index.
     fn with_cell<R>(&self, i: usize, f: impl FnOnce(&Tile, usize) -> R) -> R {
         let (t, lz, lx) = self.geometry.route_cell(i);
-        LAST_TILE.with(|memo| {
-            let mut memo = memo.borrow_mut();
-            let hit = memo.as_ref().is_some_and(|(id, c, _)| *id == self.id && *c == t);
-            if !hit {
-                *memo = Some((self.id, t, self.tile(t)));
-            }
-            let tile = &memo.as_ref().expect("just filled").2;
-            f(tile, lz * tile.w as usize + lx as usize)
-        })
+        self.with_tile(t, |tile| f(tile, lz * tile.w as usize + lx as usize))
     }
 
     pub(crate) fn q(&self, r: QRasterId, i: usize) -> f32 {
@@ -631,28 +880,25 @@ impl TileCache {
         })
     }
 
-    /// Global bucket `b`'s segments (see `Rasters::bucket`).
+    /// Global bucket `b`'s segments (see `Rasters::bucket`), copied out of
+    /// the tile through the memo (no lock, no shared refcount on a hit).
     pub(crate) fn bucket(&self, b: usize) -> crate::forged::SegmentsRef<'static> {
         let (t, local) = self.geometry.route_bucket(b);
-        crate::forged::SegmentsRef::Tiled(TileBucket { tile: self.tile(t), bucket: local, next: 0 })
+        let segments = self.with_tile(t, |tile| {
+            tile.buckets[local]
+                .iter()
+                .map(|&id| {
+                    let k = tile.segments.binary_search_by_key(&id, |&(s, _)| s).expect("checked at load");
+                    tile.segments[k]
+                })
+                .collect::<Vec<_>>()
+        });
+        crate::forged::SegmentsRef::Tiled(segments.into_iter())
     }
-}
 
-/// The segments of one bucket of a tile, `(global id, segment)` ascending;
-/// keeps its tile alive.
-pub(crate) struct TileBucket {
-    tile: Arc<Tile>,
-    bucket: usize,
-    next: usize,
-}
-
-impl Iterator for TileBucket {
-    type Item = (u32, Segment);
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let &id = self.tile.buckets[self.bucket].get(self.next)?;
-        self.next += 1;
-        let k = self.tile.segments.binary_search_by_key(&id, |&(s, _)| s).expect("checked at load");
-        Some(self.tile.segments[k])
+    /// The tiles holding raster cells `x0..=x1` x `z0..=z1` (clamped).
+    pub(crate) fn tiles_of_cells(&self, (x0, z0): (u32, u32), (x1, z1): (u32, u32)) -> ((u32, u32), (u32, u32)) {
+        let c = self.geometry.tile_cells;
+        ((x0 / c, z0 / c), (x1 / c, z1 / c))
     }
 }

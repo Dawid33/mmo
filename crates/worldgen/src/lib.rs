@@ -419,6 +419,51 @@ fn patch_window(x: i32, z: i32, span: i32, mats: &Materials) -> (f64, f64, f64) 
     ((x - m) as f64, (z - m) as f64, (span + 2 * m) as f64)
 }
 
+/// Engine-metre rect `[min, max]` that every patch a job builds lies in,
+/// for a block window at `(x, z)` of `span` blocks with `margin` blocks of
+/// patch margin: the patch's lattice runs up to one lattice step past its
+/// span (`ProfileGrid::from_fn`).
+fn read_rect(x: f64, z: f64, span: f64, margin: i32) -> ([f64; 2], [f64; 2]) {
+    let m = f64::from(margin);
+    let far = span + m + PROFILE_LATTICE_BLOCKS as f64;
+    ([x - m, z - m], [x + far, z + far])
+}
+
+/// Loads and pins the tiles of the installed forged world
+/// ([`forged::active`]) that generating region `rc` reads — any window of it
+/// through [`generate_columns`] / [`generate_region`]. Hold the pins while
+/// generating: the reads then never load, and a tile that cannot be loaded
+/// is this `Err` (naming the tile), never terrain. Empty without a world or
+/// for a whole one.
+pub fn prefetch_region(rc: RegionCoords) -> Result<forged_tiles::TilePins, String> {
+    forged::active().map_or_else(|| Ok(Default::default()), |world| prefetch_region_forged(world, rc))
+}
+
+/// [`prefetch_region`] for an explicit forged world.
+pub fn prefetch_region_forged(world: &forged::ForgedWorld, rc: RegionCoords) -> Result<forged_tiles::TilePins, String> {
+    // The wider (trees on) margin, whatever the materials.
+    let (x, z) = (f64::from(rc.x * REGION_BLOCKS), f64::from(rc.z * REGION_BLOCKS));
+    let (min, max) = read_rect(x, z, f64::from(REGION_BLOCKS), TREE_PATCH_MARGIN);
+    world.prefetch_rect(min, max)
+}
+
+/// Loads and pins the tiles of the installed forged world that building LOD
+/// key `key` reads ([`coarse_tile`] and [`coarse_water`]); see
+/// [`prefetch_region`].
+pub fn prefetch_lod(key: &game::lod::LodKey) -> Result<forged_tiles::TilePins, String> {
+    forged::active().map_or_else(|| Ok(Default::default()), |world| prefetch_lod_forged(world, key))
+}
+
+/// [`prefetch_lod`] for an explicit forged world.
+pub fn prefetch_lod_forged(world: &forged::ForgedWorld, key: &game::lod::LodKey) -> Result<forged_tiles::TilePins, String> {
+    // `coarse_tile_forged`'s window with the trees' margin (it contains
+    // `coarse_water_forged`'s).
+    let (ox, oz, span) = coarse_window(key);
+    let margin = TREE_PATCH_MARGIN + coarse_ring(key);
+    let (min, max) = read_rect(f64::from(ox), f64::from(oz), f64::from(span), margin);
+    world.prefetch_rect(min, max)
+}
+
 /// `generate_region` for an explicit forged world (tests, tools).
 pub fn generate_region_forged(
     world: &forged::ForgedWorld,
@@ -755,13 +800,19 @@ pub fn coarse_tile_forged(
     // One cell column of margin past the key, for the steep-face fill's
     // neighbours (rounded to the profile lattice, so surfaces stay
     // bit-identical to any other window's).
-    let cb = (key.factor / BLOCK_VOXELS as u32) as i32;
-    let lattice = PROFILE_LATTICE_BLOCKS as i32;
-    let ring = (cb + lattice - 1) / lattice * lattice;
+    let ring = coarse_ring(key);
     let (ox, oz, span) = coarse_patch_window(key, &mats);
     let (ox, oz, span) = (ox - ring as f64, oz - ring as f64, span + 2.0 * ring as f64);
     let trees_from = TreeSource { habitat: world, seed: world.seed() };
     coarse_from_patch(&world.patch(ox, oz, span), key, mats, trees_from)
+}
+
+/// The cell-column margin (blocks) `coarse_tile_forged` adds past a key,
+/// for the steep-face fill's neighbours, rounded up to the profile lattice.
+fn coarse_ring(key: &game::lod::LodKey) -> i32 {
+    let cb = (key.factor / BLOCK_VOXELS as u32) as i32;
+    let lattice = PROFILE_LATTICE_BLOCKS as i32;
+    (cb + lattice - 1) / lattice * lattice
 }
 
 /// The water surface layer of LOD key `key` (water plan Task 8), from the

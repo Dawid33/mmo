@@ -4,17 +4,23 @@
 //! on tile edges and corners, along rivers that cross tiles, and past the
 //! map's land and sea edges.
 //!
+//! Task 3 adds the cache's behaviour: eviction under a small budget stays
+//! bit-equal, the budget holds beyond pinned tiles, prefetch pins every tile a
+//! region or LOD job reads (a counting loader sees no load during
+//! generation), and a failing or corrupt tile is an error, never terrain.
+//!
 //! Fixture: a real forge (4,096 m / 16 m, seed 4 — the Task 1 guard's world)
 //! split into 32-cell tiles (512 m, 8 x 8 = 64 tiles) and served from memory.
 //! Every assertion compares `to_bits()`. Only explicit worlds — nothing
 //! process-global — so this file lives in the shared `it` binary.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use game::RegionCoords;
 use worldgen::forged::ForgedWorld;
 use worldgen::forged_tiles::{
-    decode_meta, decode_tile, encode_meta, encode_tile, split, ForgedMeta, MemTiles, Tile,
+    decode_meta, decode_tile, encode_meta, encode_tile, split, ForgedMeta, MemTiles, Tile, TileCoords, TileLoader,
 };
 
 /// Tile edge of the fixture (cells): 512 m at 16 m cells, a multiple of the
@@ -335,5 +341,325 @@ fn tiled_read_cost() {
             std::hint::black_box(point_bits(w, x, z));
         }
         println!("{name}: 4 regions {regions:?}, 100k point samples {:?}", t.elapsed());
+    }
+}
+
+/// The fixture's tiles behind a loader that counts its loads and fails the
+/// tiles in `failing`.
+struct CountingLoader {
+    tiles: MemTiles,
+    loads: AtomicUsize,
+    failing: Vec<TileCoords>,
+}
+
+impl TileLoader for CountingLoader {
+    fn load(&self, t: TileCoords) -> Result<Vec<u8>, String> {
+        self.loads.fetch_add(1, Ordering::Relaxed);
+        if self.failing.contains(&t) {
+            return Err("injected failure".into());
+        }
+        self.tiles.load(t)
+    }
+}
+
+fn counting(f: &Fixture, failing: Vec<TileCoords>) -> Arc<CountingLoader> {
+    let tiles = MemTiles(f.tiles.iter().map(|t| (t.origin, encode_tile(t))).collect());
+    Arc::new(CountingLoader { tiles, loads: AtomicUsize::new(0), failing })
+}
+
+/// A fresh tiled world over `loader` with a cache of `budget` bytes.
+fn tiled_with(f: &Fixture, loader: Arc<dyn TileLoader>, budget: usize) -> ForgedWorld {
+    ForgedWorld::from_tiles_with_budget(f.meta.clone(), loader, f.whole.content_crc(), budget).expect("tiled world")
+}
+
+/// The decoded size of the fixture's largest tile.
+fn max_tile_bytes(f: &Fixture) -> usize {
+    f.tiles.iter().map(Tile::decoded_bytes).max().expect("tiles")
+}
+
+/// Windows of an LOD-style sweep: 512 m steps over the fixture and one step
+/// past each edge, row by row (engine metres, min corner).
+fn sweep_windows(f: &Fixture) -> Vec<(f64, f64)> {
+    const STRIDE_M: f64 = 512.0;
+    let (min, max) = f.whole.artifact_bounds_engine_m();
+    let steps = ((max[0] - min[0]) / STRIDE_M) as i64;
+    (-1..=steps)
+        .flat_map(|kz| (-1..=steps).map(move |kx| (kx, kz)))
+        .map(|(kx, kz)| (min[0] + kx as f64 * STRIDE_M, min[1] + kz as f64 * STRIDE_M))
+        .collect()
+}
+
+/// One sweep window: prefetch it (pins held, as an LOD job would), compare
+/// a 32 m grid of point samples, and (with `lod`) the factor-16 key there.
+fn sweep_window(f: &Fixture, tiled: &ForgedWorld, (x0, z0): (f64, f64), lod: bool, mut check: impl FnMut()) {
+    const WINDOW_M: f64 = 512.0;
+    const GRID_M: f64 = 32.0;
+    let pins = tiled.prefetch_rect([x0, z0], [x0 + WINDOW_M, z0 + WINDOW_M]).expect("prefetch");
+    let steps = (WINDOW_M / GRID_M) as i64;
+    for j in 0..steps {
+        for i in 0..steps {
+            let (x, z) = (x0 + i as f64 * GRID_M + 3.0, z0 + j as f64 * GRID_M + 5.0);
+            assert_eq!(point_bits(&f.whole, x, z), point_bits(tiled, x, z), "sweep point ({x}, {z})");
+        }
+    }
+    if lod {
+        let rb = game::REGION_BLOCKS as f64;
+        let rc = RegionCoords::new((x0 / rb).floor() as i32, (z0 / rb).floor() as i32);
+        let key = game::lod::LodKey::for_region(16, rc);
+        let mats = materials();
+        let cells = |w: &ForgedWorld| {
+            worldgen::coarse_tile_forged(w, &key, mats)
+                .into_iter()
+                .map(|c| bincode::serialize(&(c.group, &c.grid)).unwrap())
+                .collect::<Vec<_>>()
+        };
+        assert!(cells(&f.whole) == cells(tiled), "coarse_tile_forged({key:?}) under eviction");
+    }
+    check();
+    drop(pins);
+}
+
+/// Review Focus 4: with the budget at 4 tiles, an LOD-style sweep over all
+/// 64 tiles (on 4 threads, so eviction races reads) evicts and reloads, and
+/// every answer stays bit-equal to the whole world's.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn eviction_is_transparent() {
+    let f = fixture();
+    let loader = counting(f, Vec::new());
+    let budget = 4 * max_tile_bytes(f);
+    let tiled = tiled_with(f, loader.clone(), budget);
+    let windows = sweep_windows(f);
+    let next = AtomicUsize::new(0);
+    std::thread::scope(|s| {
+        for _ in 0..4 {
+            s.spawn(|| {
+                loop {
+                    let k = next.fetch_add(1, Ordering::Relaxed);
+                    let Some(&w) = windows.get(k) else { break };
+                    sweep_window(f, &tiled, w, true, || {});
+                }
+            });
+        }
+    });
+    let loads = loader.loads.load(Ordering::Relaxed);
+    assert!(loads > f.tiles.len(), "the sweep must evict and reload ({loads} loads of {} tiles)", f.tiles.len());
+    println!("{} windows, {loads} tile loads of {} tiles", windows.len(), f.tiles.len());
+}
+
+/// After every window (pins held) the cache holds no more than the budget
+/// plus the pinned tiles, and with no pins left, no more than the budget.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn cache_respects_budget() {
+    let f = fixture();
+    let budget = 4 * max_tile_bytes(f);
+    let tiled = tiled_with(f, counting(f, Vec::new()), budget);
+    let cache = tiled.tile_cache().expect("a tiled world has a tile cache");
+    let mut peak_pinned = 0;
+    for w in sweep_windows(f) {
+        sweep_window(f, &tiled, w, false, || {
+            let (resident, pinned) = (cache.resident_bytes(), cache.pinned_bytes());
+            peak_pinned = peak_pinned.max(pinned);
+            assert!(resident <= budget + pinned, "resident {resident} > budget {budget} + pinned {pinned}");
+        });
+        assert_eq!(cache.pinned_bytes(), 0, "dropping the pins unpins");
+        assert!(cache.resident_bytes() <= budget, "resident {} > budget {budget}", cache.resident_bytes());
+    }
+    assert!(peak_pinned > 0, "the sweep pinned tiles");
+    // A job pinning more than the budget: the cache goes over (it logs once)
+    // but never evicts a pinned tile.
+    let (min, max) = f.whole.artifact_bounds_engine_m();
+    let all = tiled.prefetch_rect(min, max).expect("prefetch the whole map");
+    assert_eq!(all.len(), f.tiles.len());
+    assert_eq!(cache.pinned_bytes(), cache.resident_bytes(), "every tile pinned and resident");
+    drop(all);
+    assert!(cache.resident_bytes() <= budget, "unpinning trims the cache back to the budget");
+}
+
+/// A tile that cannot be loaded makes `prefetch_rect` over it an `Err` naming
+/// the tile — no panic, no terrain — and holds no pins.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn prefetch_error_is_reported_not_panicked() {
+    let f = fixture();
+    let bad = TileCoords { tx: 1, tz: 1 };
+    let tiled = tiled_with(f, counting(f, vec![bad]), usize::MAX);
+    let tile_m = f64::from(FIXTURE_TILE_CELLS) * f.whole.globals().cell_m;
+    let (x, z) = engine(f, 1.5 * tile_m, 1.5 * tile_m);
+    let err = match tiled.prefetch_rect([x, z], [x + 1.0, z + 1.0]) {
+        Ok(_) => panic!("prefetch over a failing tile must fail"),
+        Err(e) => e,
+    };
+    assert!(err.contains("(1, 1)"), "the error names the tile: {err}");
+    assert_eq!(tiled.tile_cache().unwrap().pinned_bytes(), 0, "a failed prefetch holds no pins");
+    // Tiles away from it still prefetch.
+    let (x, z) = engine(f, 5.5 * tile_m, 5.5 * tile_m);
+    assert!(tiled.prefetch_rect([x, z], [x + 1.0, z + 1.0]).is_ok());
+}
+
+/// Regions on tile seams and corners, at the map's edges and past them:
+/// after `prefetch_region_forged`, generating the region loads nothing — even
+/// with a one-tile budget, which only the pins hold back.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn pinned_generation_needs_no_loads() {
+    let f = fixture();
+    let mats = materials();
+    let per_tile = (f64::from(FIXTURE_TILE_CELLS) * f.whole.globals().cell_m) as i32 / game::REGION_BLOCKS as i32;
+    let (min, max) = f.whole.artifact_bounds_engine_m();
+    let rb = game::REGION_BLOCKS as f64;
+    let (r0x, r0z) = ((min[0] / rb).floor() as i32, (min[1] / rb).floor() as i32);
+    let (r1x, r1z) = (((max[0] - 1.0) / rb).floor() as i32, ((max[1] - 1.0) / rb).floor() as i32);
+    let mut regions = Vec::new();
+    // On seams and corners, and one region short of a seam on either side
+    // (the patch margin stops short of it; only the read reach crosses).
+    let spots = [
+        (-1, -1),
+        (0, 0),
+        (per_tile - 1, per_tile - 1),
+        (per_tile, per_tile),
+        (per_tile, 2 * per_tile - 1),
+        (per_tile - 2, per_tile + 3),
+        (per_tile + 1, 2 * per_tile - 2),
+        (2 * per_tile + 3, per_tile + 1),
+    ];
+    for (dx, dz) in spots {
+        regions.push(RegionCoords::new(r0x + dx, r0z + dz));
+    }
+    regions.extend([RegionCoords::new(r1x, r1z), RegionCoords::new(r1x + 1, r0z + 3), RegionCoords::new(r1x + 2, r1z + 2)]);
+    for rc in regions {
+        let loader = counting(f, Vec::new());
+        let tiled = tiled_with(f, loader.clone(), max_tile_bytes(f));
+        let pins = worldgen::prefetch_region_forged(&tiled, rc).expect("prefetch region");
+        let before = loader.loads.load(Ordering::Relaxed);
+        assert_eq!(before, pins.len(), "prefetch loads each pinned tile once");
+        let a = bincode::serialize(&worldgen::generate_region_forged(&f.whole, rc, mats)).unwrap();
+        let b = bincode::serialize(&worldgen::generate_region_forged(&tiled, rc, mats)).unwrap();
+        assert!(a == b, "generate_region_forged({rc:?}) after prefetch");
+        assert_eq!(loader.loads.load(Ordering::Relaxed), before, "region {rc:?} loaded a tile prefetch missed");
+    }
+}
+
+/// The same for LOD keys: a per-region factor (16) and tile factors (64,
+/// 256), on tile seams, at an edge and past it — `coarse_tile_forged` and
+/// `coarse_water_forged` after `prefetch_lod_forged` load nothing.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn pinned_lod_needs_no_loads() {
+    let f = fixture();
+    let mats = materials();
+    let per_tile = (f64::from(FIXTURE_TILE_CELLS) * f.whole.globals().cell_m) as i32 / game::REGION_BLOCKS as i32;
+    let (min, _) = f.whole.artifact_bounds_engine_m();
+    let rb = game::REGION_BLOCKS as f64;
+    let (r0x, r0z) = ((min[0] / rb).floor() as i32, (min[1] / rb).floor() as i32);
+    let n_regions = (f.whole.globals().size_m / rb) as i32;
+    let spots = [
+        (-1, -1),
+        (per_tile - 1, per_tile),
+        (per_tile, per_tile - 1),
+        (per_tile - 2, per_tile + 3),
+        (per_tile + 1, 2 * per_tile - 2),
+        (n_regions - 1, 2),
+        (n_regions, n_regions),
+    ];
+    for factor in [16, 64, 256] {
+        for (dx, dz) in spots {
+            let key = game::lod::LodKey::for_region(factor, RegionCoords::new(r0x + dx, r0z + dz));
+            let loader = counting(f, Vec::new());
+            let tiled = tiled_with(f, loader.clone(), max_tile_bytes(f));
+            let pins = worldgen::prefetch_lod_forged(&tiled, &key).expect("prefetch lod");
+            let before = loader.loads.load(Ordering::Relaxed);
+            assert_eq!(before, pins.len());
+            let cells = |w: &ForgedWorld| {
+                worldgen::coarse_tile_forged(w, &key, mats)
+                    .into_iter()
+                    .map(|c| bincode::serialize(&(c.group, &c.grid)).unwrap())
+                    .collect::<Vec<_>>()
+            };
+            assert!(cells(&f.whole) == cells(&tiled), "coarse_tile_forged({key:?}) after prefetch");
+            let water = |w: &ForgedWorld| bincode::serialize(&worldgen::coarse_water_forged(w, &key, mats)).unwrap();
+            assert!(water(&f.whole) == water(&tiled), "coarse_water_forged({key:?}) after prefetch");
+            assert_eq!(loader.loads.load(Ordering::Relaxed), before, "LOD {key:?} loaded a tile prefetch missed");
+        }
+    }
+}
+
+/// A tile whose lake runs, coast or segments are corrupt fails its load:
+/// prefetch reports it, nothing samples wrong answers.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn corrupt_tile_fails_the_load() {
+    let f = fixture();
+    let t = TileCoords { tx: 2, tz: 3 };
+    let good = f.tiles.iter().find(|x| x.origin == t).expect("tile").clone();
+    let n = f.whole.globals().n;
+    let first = t.tz * FIXTURE_TILE_CELLS * n + t.tx * FIXTURE_TILE_CELLS;
+    let corruptions: Vec<(&str, Box<dyn Fn(&mut Tile)>)> = vec![
+        ("lake run outside the tile", Box::new(|x: &mut Tile| x.lake_runs.push((0, 1, 5.0)))),
+        ("lake run across rows", Box::new(move |x: &mut Tile| x.lake_runs = vec![(first, first + n, 5.0)])),
+        ("NaN lake level", Box::new(move |x: &mut Tile| x.lake_runs = vec![(first, first + 1, f32::NAN)])),
+        ("empty lake run", Box::new(move |x: &mut Tile| x.lake_runs = vec![(first + 1, first + 1, 5.0)])),
+        (
+            "unsorted lake runs",
+            Box::new(move |x: &mut Tile| x.lake_runs = vec![(first + 3, first + 4, 5.0), (first, first + 1, 5.0)]),
+        ),
+        ("NaN coast", Box::new(|x: &mut Tile| x.coast[7] = f32::NAN)),
+    ];
+    for (what, corrupt) in corruptions {
+        let mut bad = good.clone();
+        corrupt(&mut bad);
+        let mut tiles: std::collections::BTreeMap<_, _> = f.tiles.iter().map(|x| (x.origin, encode_tile(x))).collect();
+        tiles.insert(t, encode_tile(&bad));
+        let tiled = tiled_with(f, Arc::new(MemTiles(tiles)), usize::MAX);
+        let tile_m = f64::from(FIXTURE_TILE_CELLS) * f.whole.globals().cell_m;
+        let (x, z) = engine(f, (f64::from(t.tx) + 0.5) * tile_m, (f64::from(t.tz) + 0.5) * tile_m);
+        let err = tiled.prefetch_rect([x, z], [x + 1.0, z + 1.0]).err();
+        assert!(err.is_some_and(|e| e.contains("(2, 3)")), "{what}: the load must fail naming the tile");
+    }
+}
+
+/// The meta is refused when its size is not `n * cell_m`, or its cells are
+/// so small that sampling reads past `MAX_READ_RADIUS_CELLS`.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn meta_validate_checks_geometry() {
+    let f = fixture();
+    assert!(f.meta.validate().is_ok());
+    let mut m = f.meta.clone();
+    m.globals.size_m += 16.0;
+    assert!(m.validate().is_err(), "size_m != n * cell_m");
+    let mut m = f.meta.clone();
+    m.globals.cell_m = 4.0;
+    m.globals.size_m = f64::from(m.globals.n) * 4.0;
+    assert!(worldgen::forged_tiles::read_radius_cells(4.0) > worldgen::forged_tiles::MAX_READ_RADIUS_CELLS);
+    assert!(m.validate().is_err(), "4 m cells read past MAX_READ_RADIUS_CELLS");
+    for cell_m in [8.0, 16.0, 32.0, 64.0, 128.0] {
+        assert!(worldgen::forged_tiles::read_radius_cells(cell_m) <= worldgen::forged_tiles::MAX_READ_RADIUS_CELLS);
+    }
+    assert_eq!(worldgen::forged_tiles::read_radius_cells(8.0), 4, "Decision 1: 4 cells at 8 m");
+    assert_eq!(worldgen::forged_tiles::read_radius_cells(16.0), 3, "Decision 1: 3 cells at 16 m");
+}
+
+/// A loader may sample another tiled world on the same thread (the memo is
+/// not borrowed across a load).
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn loader_may_sample_on_the_same_thread() {
+    struct Reentrant(MemTiles);
+    impl TileLoader for Reentrant {
+        fn load(&self, t: TileCoords) -> Result<Vec<u8>, String> {
+            let f = fixture();
+            let (x, z) = engine(f, 100.0 + f64::from(t.tx) * 600.0, 100.0 + f64::from(t.tz) * 600.0);
+            std::hint::black_box(f.tiled.sample(x, z));
+            self.0.load(t)
+        }
+    }
+    let f = fixture();
+    let tiles = MemTiles(f.tiles.iter().map(|t| (t.origin, encode_tile(t))).collect());
+    let tiled = tiled_with(f, Arc::new(Reentrant(tiles)), 2 * max_tile_bytes(f));
+    for k in 0..40 {
+        let (x, z) = engine(f, 37.0 + k as f64 * 97.0, 11.0 + k as f64 * 83.0);
+        assert_eq!(point_bits(&f.whole, x, z), point_bits(&tiled, x, z));
     }
 }
