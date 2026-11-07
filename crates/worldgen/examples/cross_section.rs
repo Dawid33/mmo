@@ -3,10 +3,14 @@
 //! (materialised band from the column, deeper blocks from `block_at`), so what
 //! it shows is what the game would build.
 //!
-//! Run: just cross-section                       (default world if present, else procedural)
+//! Run: just cross-section                       (the default world file, worlds/default.world)
 //!      just cross-section --world target/world-forge/xsec.world --region 1,0 --axis z --at 20
+//!      just cross-section --world procedural      (the noise world)
 //!
-//! Flags: --world <file> --region X,Z --axis x|z --at <block in region> --out <png> --seed <hex>.
+//! Flags: --world <file>|procedural --region X,Z --axis x|z --at <block in region> --out <png> --seed <hex>.
+//! A missing world file is an error, never a silent procedural slice: worlds
+//! live in world stores now, so write the file out first with
+//! `just worldctl export --db <store> <out.world>`.
 //! `just cross-section` builds at the play region size (`play_chunks`), so
 //! `--region` / `--at` address the same grid as the game; an `--at` outside
 //! the region is an error.
@@ -60,8 +64,18 @@ fn main() {
             other => panic!("unknown argument {other}; flags: --world --region --axis --at --out --seed"),
         }
     }
-    if world.is_none() && std::path::Path::new(DEFAULT_WORLD).exists() {
-        world = Some(PathBuf::from(DEFAULT_WORLD));
+    let world = match world {
+        Some(path) if path.as_os_str() == worldgen::forged::PROCEDURAL_KEYWORD => None,
+        Some(path) => Some(path),
+        None => Some(PathBuf::from(DEFAULT_WORLD)),
+    };
+    if let Some(path) = world.as_ref().filter(|p| !p.exists()) {
+        eprintln!(
+            "{}: no such world file; export one from its store with `just worldctl export --db <store> <out.world>` \
+             (or pass --world procedural for the noise world)",
+            path.display()
+        );
+        std::process::exit(2);
     }
 
     let manifest = include_str!("../../../assets/blocks/blocks.ron");

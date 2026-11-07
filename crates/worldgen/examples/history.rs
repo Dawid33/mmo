@@ -42,6 +42,13 @@ fn main() {
         }
     }
 
+    if !world.exists() {
+        eprintln!(
+            "{}: no such world file; export one from its store with `just worldctl export --db <store> <out.world>`",
+            world.display()
+        );
+        std::process::exit(2);
+    }
     let t = Instant::now();
     let forged = worldgen::forged::ForgedWorld::load(&world).unwrap_or_else(|e| panic!("{}: {e}", world.display()));
     let map = worldgen::tile_map::build_world_map(&forged);

@@ -548,8 +548,9 @@ world-map *args:
 
 # Vertical slice of the generated ground (soil, forge rock layers, bedrock) as a
 # PNG in target/cross-section/, read through the engine's own Column/ColumnGround.
-# Flags: --world <file> --region X,Z --axis x|z --at <block> --out <png>; without
-# --world it uses worlds/default.world if present, else procedural. Built with
+# Flags: --world <file>|procedural --region X,Z --axis x|z --at <block> --out <png>;
+# without --world it uses worlds/default.world, and a missing file is an error
+# (export one: just worldctl export --db <store> <out.world>). Built with
 # `play_blocks`, so --region / --at address the same grid as `just run`.
 cross-section *args:
     VOXEL_REGION_BLOCKS={{play_blocks}} {{cap}} {{cargo}} run --release -p worldgen --example cross_section -- {{args}}
