@@ -10,7 +10,10 @@ use crossbeam::channel::Sender;
 use crate::lod::{
     copy_region_cells_into_tile, downsample_chunks, LodCell, LodKey, LodWater, PackedLodGrid,
 };
-use crate::{Chunk, ChunkCoords, Column, ColumnCoords, LodPayload, RegionCoords, TerrainSnapshot, Voxel};
+use crate::{
+    load_stored_or_warn, Chunk, ChunkCoords, Column, ColumnCoords, LodPayload, NoStoredTerrain, RegionCoords,
+    StoredTerrain, TerrainSnapshot, Voxel,
+};
 
 pub type LodResult = (LodKey, LodPayload, LodWater);
 pub type CoarseGenerator = Box<dyn Fn(&LodKey) -> Vec<LodCell> + Send>;
@@ -38,6 +41,14 @@ pub enum LodBuildJob {
     /// latency for every client (measured 24 calls / 8.7 s for one LOD ring,
     /// tripping the client's keep-up warning).
     Pristine { key: LodKey, region: RegionCoords },
+    /// Sub-block factors for a region the world store holds that has not run
+    /// in this process (not running, not in the manager's terrain cache):
+    /// the builder reads its stored terrain and downsamples it — pristine
+    /// (as [`LodBuildJob::Pristine`]) when the store does not have it or
+    /// cannot be read. Only submitted to builders that
+    /// [`reads_stored`](LodBuilder::reads_stored) terrain and
+    /// [`generates_pristine`](LodBuilder::generates_pristine) (the fallback).
+    Stored { key: LodKey, region: RegionCoords },
     /// Block-scale and coarser factors (`COARSE_MIN_FACTOR` and up):
     /// coarse-generate the key, then overlay each region that has
     /// authoritative state. Pristine regions never pay for full generation
@@ -45,6 +56,11 @@ pub enum LodBuildJob {
     Tile {
         key: LodKey,
         overlays: Vec<(RegionCoords, Vec<(ChunkCoords, Chunk)>)>,
+        /// Regions of the key the builder overlays from the world store
+        /// (what `Stored` is for sub-block factors); one it cannot read
+        /// stays coarse (pristine). Only non-empty for builders that
+        /// [`reads_stored`](LodBuilder::reads_stored).
+        stored: Vec<RegionCoords>,
     },
 }
 
@@ -56,6 +72,14 @@ pub trait LodBuilder: Send {
     /// (and LRU-caching) pristine terrain itself — right for a synchronous
     /// builder, which has no other thread to offload to.
     fn generates_pristine(&self) -> bool {
+        false
+    }
+
+    /// Whether this builder reads stored terrain (the `stored` argument of
+    /// [`build_lod_job`]), i.e. accepts [`LodBuildJob::Stored`] and a
+    /// non-empty `Tile::stored`. `false` keeps the manager treating stored
+    /// regions it has no terrain for as pristine.
+    fn reads_stored(&self) -> bool {
         false
     }
 }
@@ -70,14 +94,19 @@ pub fn no_pristine_generator(region: RegionCoords) -> Vec<(ColumnCoords, Column)
 /// Every job kind takes its water from the recipe (`water`), never from the
 /// chunks: the grids carry no liquid (`lod::terrain_id`), a rebuild after
 /// `TerrainChanged` resends the same water, and water never enters the
-/// terrain fingerprint.
+/// terrain fingerprint. That includes `Stored` jobs: a store holds the same
+/// recipe (`ColumnGround::water_top`) worldgen made.
+///
+/// `stored` serves `Stored` jobs and `Tile::stored` regions; a region it does
+/// not have, or cannot read, is built pristine (logged).
 pub fn build_lod_job(
     job: LodBuildJob,
     coarse: &dyn Fn(&LodKey) -> Vec<LodCell>,
     water: &dyn Fn(&LodKey) -> LodWater,
     generate: &dyn Fn(RegionCoords) -> Vec<(ColumnCoords, Column)>,
+    stored: &dyn StoredTerrain,
 ) -> LodResult {
-    let (key, payload) = build_terrain(job, coarse, generate);
+    let (key, payload) = build_terrain(job, coarse, generate, stored);
     let water = water(&key);
     debug_assert_eq!(water.side, LodWater::side_for(&key), "water layer of {key:?}");
     (key, payload, water)
@@ -88,8 +117,26 @@ fn build_terrain(
     job: LodBuildJob,
     coarse: &dyn Fn(&LodKey) -> Vec<LodCell>,
     generate: &dyn Fn(RegionCoords) -> Vec<(ColumnCoords, Column)>,
+    stored: &dyn StoredTerrain,
 ) -> (LodKey, LodPayload) {
+    let job = match job {
+        LodBuildJob::Stored { key, region } => match load_stored_or_warn(stored, region, "LOD build") {
+            Some(snap) => LodBuildJob::Region { key, chunks: snap.chunks },
+            None => LodBuildJob::Pristine { key, region },
+        },
+        LodBuildJob::Tile { key, mut overlays, stored: regions } => {
+            for rc in regions {
+                // Not read: the coarse (pristine) terrain stays.
+                if let Some(snap) = load_stored_or_warn(stored, rc, "LOD tile build") {
+                    overlays.push((rc, snap.chunks));
+                }
+            }
+            LodBuildJob::Tile { key, overlays, stored: Vec::new() }
+        }
+        job => job,
+    };
     match job {
+        LodBuildJob::Stored { .. } => unreachable!("resolved above"),
         LodBuildJob::Pristine { key, region } => {
             // Same materialization the manager used to do before submitting a
             // `Region` job, so the payload is bit-identical.
@@ -101,7 +148,7 @@ fn build_terrain(
             let cells = downsample_chunks(chunks, key.factor);
             (key, encode_cells(cells))
         }
-        LodBuildJob::Tile { key, overlays } if key.region_span() == 1 => {
+        LodBuildJob::Tile { key, overlays, .. } if key.region_span() == 1 => {
             // One region, possibly several grids per band (factor 16). The
             // overlay is authoritative for every grid COLUMN it has chunks in;
             // columns it lacks keep the pristine coarse terrain. A region
@@ -122,7 +169,7 @@ fn build_terrain(
             };
             (key, encode_cells(cells))
         }
-        LodBuildJob::Tile { key, overlays } => {
+        LodBuildJob::Tile { key, overlays, .. } => {
             let mut tile: BTreeMap<[i32; 3], Vec<Voxel>> =
                 coarse(&key).into_iter().map(|c| (c.group, c.grid)).collect();
             for (rc, chunks) in overlays {
@@ -156,6 +203,12 @@ pub struct InlineLodBuilder {
 
 impl LodBuilder for InlineLodBuilder {
     fn submit(&mut self, job: LodBuildJob) {
-        let _ = self.out.send(build_lod_job(job, &self.coarse, &self.water, &no_pristine_generator));
+        let _ = self.out.send(build_lod_job(
+            job,
+            &self.coarse,
+            &self.water,
+            &no_pristine_generator,
+            &NoStoredTerrain,
+        ));
     }
 }

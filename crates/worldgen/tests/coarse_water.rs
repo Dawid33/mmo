@@ -66,15 +66,15 @@ fn coarse_lod_terrain_has_no_liquid() {
     );
     let jobs = [
         ("pristine factor 4", LodBuildJob::Pristine { key: LodKey::for_region(4, rc), region: rc }),
-        ("coarse factor 16", LodBuildJob::Tile { key: LodKey::for_region(16, rc), overlays: vec![] }),
+        ("coarse factor 16", LodBuildJob::Tile { key: LodKey::for_region(16, rc), overlays: vec![], stored: vec![] }),
         (
             "overlaid factor 16",
-            LodBuildJob::Tile { key: LodKey::for_region(16, rc), overlays: vec![(rc, generated.clone())] },
+            LodBuildJob::Tile { key: LodKey::for_region(16, rc), overlays: vec![(rc, generated.clone())], stored: vec![] },
         ),
-        ("overlaid factor 64", LodBuildJob::Tile { key: LodKey::for_region(64, rc), overlays: vec![(rc, generated)] }),
+        ("overlaid factor 64", LodBuildJob::Tile { key: LodKey::for_region(64, rc), overlays: vec![(rc, generated)], stored: vec![] }),
     ];
     for (what, job) in jobs {
-        let (key, payload, lod_water) = build_lod_job(job, &coarse, &water, &generate);
+        let (key, payload, lod_water) = build_lod_job(job, &coarse, &water, &generate, &game::NoStoredTerrain);
         assert!(!payload.is_empty(), "{what}: terrain");
         for (group, packed) in &payload {
             let grid = packed.decode().expect("well-formed");

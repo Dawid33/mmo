@@ -432,7 +432,8 @@ The water static layer (`docs/superpowers/plans/2026-11-06-water-static-layer.md
 - Modify:
   - `crates/game/src/lod_builder.rs`: `LodBuildJob` (:22) gains `Stored { key, region }`; `Tile` gains `stored: Vec<RegionCoords>`; `build_lod_job` (:66) takes `stored: &dyn StoredTerrain`
   - `crates/game/src/world_manager.rs`: `start_lod_build` (:2897), `start_tile_build` (:2949), `seed_halo` (:2477), `set_stored_regions`
-  - `crates/server/src/lod_workers.rs`, `crates/server/src/region_threads.rs` (the halo generator consults the store first)
+  - `crates/game/src/region_runner.rs`: `RegionInput::SeedHaloFromStore(Vec<RegionCoords>)`, `RegionRunner::set_stored_terrain`
+  - `crates/server/src/lod_workers.rs` (`ThreadLodBuilder::new` takes the optional store), `crates/server/src/region_threads.rs` (each runner gets `TerrainFromStore`)
 - Create: `crates/game/src/stored_terrain.rs`; `crates/world-store/src/terrain.rs` (`pub struct TerrainFromStore(pub StoreHandle)`, implementing `game::StoredTerrain` via `load_terrain`)
 
 **Interfaces:**
@@ -440,16 +441,17 @@ The water static layer (`docs/superpowers/plans/2026-11-06-water-static-layer.md
   - `pub trait StoredTerrain: Send + Sync { fn load_terrain(&self, rc: RegionCoords) -> Result<Option<TerrainSnapshot>, String>; }`
   - `pub struct NoStoredTerrain` (tests and wasm)
   - `WorldManager::set_stored_regions(&mut self, regions: BTreeMap<RegionCoords, u64>)`
+  - `LodBuilder::reads_stored(&self) -> bool` (default `false`; the server's workers: `true` with a store). `InlineLodBuilder` reads no store, so tests/wasm keep treating stored regions as pristine.
 - **Rule:**
-  - A region that is not running, not in `terrain_cache` and in `stored_regions` is built as `Stored`. The worker loads it and caches nothing in the manager.
+  - A region that is not running, not in `terrain_cache` and in `stored_regions` is built as `Stored` (tiles: listed in `Tile::stored`) when the builder `reads_stored()` (and, for `Stored`, `generates_pristine()` — the fallback). The worker loads it and caches nothing in the manager.
   - A load error or `None` logs `warn` and builds pristine; LOD shows terrain, it never stops a region.
   - `cut_committed` invalidates LOD keys of regions whose `terrain_version` rose and that are not running (running ones already push `TerrainChanged`).
-  - `seed_halo` for a stored, not-running neighbour sends `SeedHaloFromWorldgen` as today, but the server's halo generator closure returns the stored chunks in the facing windows when the store has the region.
+  - `seed_halo` for a stored, not-running, not-cached neighbour sends `SeedHaloFromStore` (when the spawner generates columns): the runner reads the neighbour's stored terrain (`set_stored_terrain`) and seeds from it with `halo_seed_from_snapshot`, falling back to its halo generator. (As built: the generator closure returns `Column`s, which a stored `TerrainSnapshot` cannot be turned back into losslessly, so the store is consulted by the runner, not inside the closure.) An inline spawner keeps worldgen seeds.
 
 - [ ] **Step 1: Write the failing tests** in `crates/game/tests/lod_streaming.rs`:
   - `stored_region_lod_shows_saved_edit`: a fake `StoredTerrain` returns a region with one dug column. The `RequestLod` result for that region differs from pristine exactly there.
-  - `tile_overlays_include_stored`.
-  - `stored_neighbour_seeds_halo_from_store` (halo test file).
+  - `stored_region_lod_unreadable_builds_pristine`, `stored_tile_overlays_include_stored` (prefixed so the `stored` filter runs it), `stored_version_rise_rebuilds_lod`.
+  - `stored_neighbour_seeds_halo_from_store`, `stored_neighbours_are_seeded_from_the_store_by_their_region` (halo test file).
 - [ ] **Step 2: Run** `just test-one game "--test it lod_streaming::stored"` and `just test-one game "--test it halo::stored"`. Expected: FAIL.
 - [ ] **Step 3: Implement** the rule.
 - [ ] **Step 4: Run** the same commands, then `just test-threads` and `just smoke`. Expected: PASS.

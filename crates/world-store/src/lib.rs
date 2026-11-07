@@ -8,6 +8,7 @@ mod codec;
 mod handle;
 mod open;
 mod rows;
+mod terrain;
 mod thread;
 mod url;
 
@@ -16,6 +17,7 @@ use std::fmt;
 pub use codec::*;
 pub use handle::{CutCommitted, StoreHandle, WorldInfo};
 pub use open::{LockGuard, Pool, open_pool};
+pub use terrain::TerrainFromStore;
 pub use url::StoreUrl;
 
 /// The schema/format generation this build writes and reads.

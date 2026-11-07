@@ -32,7 +32,8 @@ pub struct ThreadRegionSpawner {
     /// `RegionSeed::Deferred(None)`) is restored from its stored state, if
     /// any, instead of generated — read on the region's own thread. A read
     /// that fails stops the region (`RegionOutput::LoadFailed`): it is never
-    /// regenerated over stored data.
+    /// regenerated over stored data. Runners also seed the halo of stored
+    /// neighbours from it (`RegionInput::SeedHaloFromStore`).
     store: Option<world_store::StoreHandle>,
 }
 
@@ -140,6 +141,11 @@ impl RegionSpawner for ThreadRegionSpawner {
                 let mut runner = runner;
                 if let Some(g) = halo_generator {
                     runner.set_halo_generator(g);
+                }
+                // Halo seeds of stored neighbours that have not run here
+                // (`RegionInput::SeedHaloFromStore`) read the same store.
+                if let Some(store) = &store {
+                    runner.set_stored_terrain(std::sync::Arc::new(world_store::TerrainFromStore(store.clone())));
                 }
                 let generate_time = generate_time.get();
                 let hash_time = runner.baseline_hash_time();

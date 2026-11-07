@@ -1921,7 +1921,21 @@ impl<S: RegionSpawner> WorldManager<S> {
         } else {
             log::warn!("cut {} committed but not outstanding", id.0);
         }
-        self.stored_regions.extend(versions);
+        // A region whose stored terrain moved on and that is not running (a
+        // running one pushes `TerrainChanged` itself): its LOD keys may have
+        // been built from the older stored (or pristine) terrain.
+        let mut stale = Vec::new();
+        for (rc, version) in versions {
+            let rose = self.stored_regions.get(&rc).is_none_or(|old| *old < version);
+            let running = self.regions.get(&rc).is_some_and(|l| !l.stopping);
+            if rose && !running {
+                stale.push(rc);
+            }
+            self.stored_regions.insert(rc, version);
+        }
+        for rc in stale {
+            self.invalidate_region_lod(rc);
+        }
     }
 
     /// The store failed to commit cut `id`: its entries stay uncommitted, so
@@ -2988,12 +3002,15 @@ impl<S: RegionSpawner> WorldManager<S> {
     ///   final terrain, on `Stopped`);
     /// - never run: worldgen — on the region's own thread when the spawner
     ///   generates there (only the band columns), else here (the whole
-    ///   region, not cached: LOD keeps its own choice of pristine sources).
-    ///
-    /// Known limit (as LOD's): a neighbour saved by an earlier process that
-    /// has not run in this one is seeded from pristine worldgen.
+    ///   region, not cached: LOD keeps its own choice of pristine sources);
+    /// - saved by an earlier process, not run in this one (`stored_regions`):
+    ///   from the world store on the region's own thread
+    ///   (`RegionInput::SeedHaloFromStore`, worldgen if the store cannot
+    ///   serve it) when the spawner generates there; a spawner that does not
+    ///   (inline: tests, wasm — no store) gets worldgen here, as above.
     fn seed_halo(&mut self, rc: RegionCoords, input: &Sender<RegionInput>) {
         let mut generate_there = Vec::new();
+        let mut load_there = Vec::new();
         for n in crate::halo::neighbours(rc) {
             if crate::off_map(self.map_extent(), n) {
                 continue;
@@ -3005,6 +3022,8 @@ impl<S: RegionSpawner> WorldManager<S> {
                 }
             } else if running {
                 // The request below is the seed.
+            } else if self.spawner.generates_columns() && self.stored_regions.contains_key(&n) {
+                load_there.push(n);
             } else if self.spawner.generates_columns() {
                 generate_there.push(n);
             } else {
@@ -3023,6 +3042,9 @@ impl<S: RegionSpawner> WorldManager<S> {
         }
         if !generate_there.is_empty() {
             let _ = input.send(RegionInput::SeedHaloFromWorldgen(generate_there));
+        }
+        if !load_there.is_empty() {
+            let _ = input.send(RegionInput::SeedHaloFromStore(load_there));
         }
     }
 
@@ -3414,6 +3436,12 @@ impl<S: RegionSpawner> WorldManager<S> {
                 // and re-enters via lod_terrain_ready.
                 self.lod_pending_terrain.entry(rc).or_default().insert(key);
                 self.send_to_region(rc, RegionInput::RequestTerrain(client));
+            } else if self.lod_reads_stored(rc) && self.lod_builder.generates_pristine() {
+                // Saved by an earlier process, not run in this one: the
+                // builder reads the store (pristine if it cannot). Nothing is
+                // kept here, as for `Pristine`.
+                self.mark_lod_in_flight(key);
+                self.lod_builder.submit(LodBuildJob::Stored { key, region: rc });
             } else if self.lod_builder.generates_pristine() {
                 // Never-run region: the builder's own threads generate it.
                 // Nothing full-resolution is kept here — the LOD payload is
@@ -3467,8 +3495,24 @@ impl<S: RegionSpawner> WorldManager<S> {
             .into_iter()
             .filter_map(|rc| self.terrain_cache.get(&rc).map(|snap| (rc, snap.chunks.clone())))
             .collect();
+        // Saved regions with no terrain here: the builder overlays them from
+        // the store (none of them is running — those were waited for above).
+        let stored: Vec<RegionCoords> = key
+            .regions()
+            .into_iter()
+            .filter(|rc| !self.terrain_cache.contains_key(rc) && self.lod_reads_stored(*rc))
+            .collect();
         self.mark_lod_in_flight(key);
-        self.lod_builder.submit(LodBuildJob::Tile { key, overlays });
+        self.lod_builder.submit(LodBuildJob::Tile { key, overlays, stored });
+    }
+
+    /// Whether LOD of `rc` comes from the world store: the store holds it,
+    /// it is not running and the builder reads stored terrain (callers have
+    /// already found no `terrain_cache` entry).
+    fn lod_reads_stored(&self, rc: RegionCoords) -> bool {
+        self.lod_builder.reads_stored()
+            && self.stored_regions.contains_key(&rc)
+            && !self.regions.get(&rc).is_some_and(|l| !l.stopping)
     }
 
     /// A region's terrain just landed in terrain_cache: submit any LOD builds

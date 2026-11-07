@@ -3,7 +3,7 @@
 //! never stalls the manager thread's event routing.
 
 use crossbeam::channel::{unbounded, Sender};
-use game::{build_lod_job, LodBuildJob, LodBuilder, LodResult};
+use game::{build_lod_job, LodBuildJob, LodBuilder, LodResult, NoStoredTerrain, StoredTerrain};
 
 /// Floor on the default worker count (and the old fixed value).
 pub const LOD_BUILD_THREADS: usize = 2;
@@ -42,6 +42,8 @@ pub fn lod_build_threads(value: Option<&str>) -> Result<usize, String> {
 
 pub struct ThreadLodBuilder {
     jobs: Sender<LodBuildJob>,
+    /// Built with a world store: saved regions' LOD is read from it.
+    reads_stored: bool,
 }
 
 impl ThreadLodBuilder {
@@ -49,19 +51,24 @@ impl ThreadLodBuilder {
     /// and rebuild the closure per thread. `gen_cache` is the same worldgen
     /// disk cache the manager uses for region starts; each worker gets its
     /// own handle and generates pristine LOD sources through it
-    /// (`LodBuildJob::Pristine`).
+    /// (`LodBuildJob::Pristine`). `stored` (the world store, if any) serves
+    /// `LodBuildJob::Stored` and stored tile overlays.
     pub fn new(
         seed: u64,
         materials: worldgen::material::Materials,
         gen_cache: worldgen::cache::WorldgenCache,
+        stored: Option<std::sync::Arc<dyn StoredTerrain>>,
         out: Sender<LodResult>,
         threads: usize,
     ) -> Self {
+        let reads_stored = stored.is_some();
+        let stored: std::sync::Arc<dyn StoredTerrain> = stored.unwrap_or_else(|| std::sync::Arc::new(NoStoredTerrain));
         let (jobs, job_recv) = unbounded::<LodBuildJob>();
         for i in 0..threads {
             let recv = job_recv.clone();
             let out = out.clone();
             let gen_cache = gen_cache.clone();
+            let stored = stored.clone();
             std::thread::Builder::new()
                 .name(format!("lod-worker-{i}"))
                 .spawn(move || {
@@ -75,14 +82,14 @@ impl ThreadLodBuilder {
                         move |rc: game::RegionCoords| gen_cache.generate_cached(rc, seed, materials);
                     while let Ok(job) = recv.recv() {
                         let started = std::time::Instant::now();
-                        let result = build_lod_job(job, &coarse, &water, &generate);
+                        let result = build_lod_job(job, &coarse, &water, &generate, stored.as_ref());
                         crate::perf::EDGE.record_lod_build(started.elapsed());
                         let _ = out.send(result);
                     }
                 })
                 .expect("spawn lod worker");
         }
-        Self { jobs }
+        Self { jobs, reads_stored }
     }
 }
 
@@ -95,6 +102,12 @@ impl LodBuilder for ThreadLodBuilder {
     /// manager thread.
     fn generates_pristine(&self) -> bool {
         true
+    }
+
+    /// With a world store, `Stored` jobs and tile overlays read it on the
+    /// workers (pristine when it cannot serve a region).
+    fn reads_stored(&self) -> bool {
+        self.reads_stored
     }
 }
 

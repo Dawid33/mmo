@@ -548,6 +548,9 @@ pub fn run() {
         world_seed,
         materials,
         gen_cache.clone(),
+        // Saved regions that have not run in this process: their LOD is
+        // built from the store (procedural worlds: none).
+        store.clone().map(|s| std::sync::Arc::new(world_store::TerrainFromStore(s)) as std::sync::Arc<dyn game::StoredTerrain>),
         lod_result_send,
         lod_threads,
     ));

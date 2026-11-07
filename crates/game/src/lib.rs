@@ -56,6 +56,7 @@ pub mod people;
 pub mod slime;
 pub mod slope;
 pub mod state;
+pub mod stored_terrain;
 pub mod trees;
 pub mod ui;
 pub mod volume;
@@ -114,6 +115,7 @@ pub use registry::*;
 // Not a glob: `slope::classify` would collide with `biome::classify`; call it as `slope::classify`.
 pub use slope::{display_name, slope_chisel, walk_up, Side, SlopeShape};
 pub use state::*;
+pub use stored_terrain::{load_stored_or_warn, NoStoredTerrain, StoredTerrain};
 pub use ui::*;
 pub use volume::*;
 pub use voxel::*;

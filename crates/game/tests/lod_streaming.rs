@@ -639,8 +639,8 @@ fn pristine_job_builds_the_same_payload_as_generate_then_region_job() {
 
     let chunks = TerrainSnapshot::from_columns(generate(region)).chunks;
     let water = game::lod::LodWater::dry;
-    let (_, expected, _) = build_lod_job(LodBuildJob::Region { key, chunks }, &coarse, &water, &generate);
-    let (got_key, got, _) = build_lod_job(LodBuildJob::Pristine { key, region }, &coarse, &water, &generate);
+    let (_, expected, _) = build_lod_job(LodBuildJob::Region { key, chunks }, &coarse, &water, &generate, &NoStoredTerrain);
+    let (got_key, got, _) = build_lod_job(LodBuildJob::Pristine { key, region }, &coarse, &water, &generate, &NoStoredTerrain);
 
     assert_eq!(got_key, key);
     assert!(!got.is_empty(), "the flat floors must produce LOD cells");
@@ -668,10 +668,11 @@ fn a_partial_overlay_keeps_pristine_terrain_where_it_has_no_columns() {
     // Authoritative terrain: one chunk in group (0,0,0) only.
     let overlay = vec![(ChunkCoords::new(0, 0, 0), Chunk::flat_floor_with(8, BlockId(7)))];
     let (_, payload, _) = game::build_lod_job(
-        game::LodBuildJob::Tile { key, overlays: vec![(game::RegionCoords::new(0, 0), overlay)] },
+        game::LodBuildJob::Tile { key, overlays: vec![(game::RegionCoords::new(0, 0), overlay)], stored: vec![] },
         &coarse,
         &game::lod::LodWater::dry,
         &game::no_pristine_generator,
+        &game::NoStoredTerrain,
     );
     let groups: std::collections::BTreeSet<[i32; 3]> = payload.iter().map(|(g, _)| *g).collect();
     assert_eq!(groups.len() as i32, per_side * per_side, "every column keeps terrain: {groups:?}");
@@ -925,4 +926,253 @@ fn expect_lod_data_with_water(
         .collect();
     assert_eq!(hits.len(), 1, "exactly one LodData for {key:?}");
     hits.pop().unwrap()
+}
+
+/// A world store stand-in: what `load_terrain` answers, per region.
+#[derive(Clone, Default)]
+struct FakeStore(std::sync::Arc<std::sync::Mutex<std::collections::BTreeMap<RegionCoords, Result<TerrainSnapshot, String>>>>);
+
+impl FakeStore {
+    fn put(&self, rc: RegionCoords, answer: Result<TerrainSnapshot, String>) {
+        self.0.lock().unwrap().insert(rc, answer);
+    }
+}
+
+impl StoredTerrain for FakeStore {
+    fn load_terrain(&self, rc: RegionCoords) -> Result<Option<TerrainSnapshot>, String> {
+        match self.0.lock().unwrap().get(&rc) {
+            Some(Ok(snap)) => Ok(Some(snap.clone())),
+            Some(Err(e)) => Err(e.clone()),
+            None => Ok(None),
+        }
+    }
+}
+
+/// The native workers' shape, synchronously: reads the store and generates
+/// pristine terrain itself (`reads_stored`, `generates_pristine`).
+struct StoreBuilder {
+    coarse: CoarseGenerator,
+    water: WaterGenerator,
+    generate: PristineGenerator,
+    store: FakeStore,
+    out: crossbeam::channel::Sender<LodResult>,
+}
+
+impl LodBuilder for StoreBuilder {
+    fn submit(&mut self, job: LodBuildJob) {
+        let _ = self.out.send(build_lod_job(job, &self.coarse, &self.water, &self.generate, &self.store));
+    }
+    fn generates_pristine(&self) -> bool {
+        true
+    }
+    fn reads_stored(&self) -> bool {
+        true
+    }
+}
+
+/// A manager over [`lake_columns`] (coarse: the `BlockId(42)` marker) whose
+/// LOD builder reads `store`; client 1 joined at the spawn region.
+fn manager_with_store(
+    store: &FakeStore,
+) -> (
+    WorldManager<InlineSpawner>,
+    crossbeam::channel::Receiver<(Option<ClientId>, ServerPacket)>,
+    crossbeam::channel::Receiver<(RegionCoords, RegionOutput)>,
+) {
+    let (out_send, out) = unbounded();
+    let (region_out_send, region_out) = unbounded();
+    let (lod_result_send, lod_result_recv) = unbounded();
+    let builder: Box<dyn LodBuilder> = Box::new(StoreBuilder {
+        coarse: Box::new(|_key: &LodKey| {
+            vec![LodCell { group: [0, 0, 0], grid: vec![Voxel::new(BlockId(42)); BRICK_VOXEL_COUNT] }]
+        }),
+        water: Box::new(lake_recipe_water),
+        generate: Box::new(|_rc| lake_columns()),
+        store: store.clone(),
+        out: lod_result_send,
+    });
+    let mut m = WorldManager::new(
+        InlineSpawner::default(),
+        Box::new(|_rc: RegionCoords| lake_columns()),
+        out_send,
+        region_out_send,
+        builder,
+        lod_result_recv,
+    );
+    m.handle_server_event(ServerEvent::connected(1), 0);
+    drain_region_outputs(&mut m, &region_out);
+    out.try_iter().for_each(drop);
+    (m, out, region_out)
+}
+
+/// The block column dug in [`dug_lake`]: (x, z) in region blocks.
+const DUG: (usize, usize) = (3, 5);
+
+/// [`lake_columns`] as a store would hold it after a player dug block column
+/// [`DUG`] out under the lake, down to y 0.
+fn dug_lake() -> TerrainSnapshot {
+    let mut snap = TerrainSnapshot::from_columns(lake_columns());
+    let (_, chunk) = snap.chunks.iter_mut().find(|(c, _)| *c == ChunkCoords::new(0, 0, 0)).expect("the lake chunk");
+    for y in 0..=LAKE_FLOOR as usize {
+        chunk.set_block(DUG.0, y, DUG.1, Block::new(BlockId::AIR));
+    }
+    snap
+}
+
+/// Every voxel of a payload, keyed by (group, index in the grid).
+fn voxels_of(payload: &LodPayload) -> std::collections::BTreeMap<([i32; 3], usize), BlockId> {
+    let mut out = std::collections::BTreeMap::new();
+    for (group, packed) in payload {
+        for (i, v) in packed.decode().expect("well-formed").iter().enumerate() {
+            out.insert((*group, i), v.block);
+        }
+    }
+    out
+}
+
+/// A region the store holds, not run in this process: its LOD is built from
+/// its saved terrain (the old known limit: pristine worldgen). It differs
+/// from pristine exactly in the dug column's cells, and its water is the
+/// recipe's, as a `Region` build's.
+#[test]
+fn stored_region_lod_shows_saved_edit() {
+    if CHUNK_BLOCKS < 16 {
+        return; // the lake is one chunk tall
+    }
+    crate::common::install_real_block_props();
+    let rc = RegionCoords::new(5, 5); // never run, not cached
+    let store = FakeStore::default();
+    store.put(rc, Ok(dug_lake()));
+    let (mut m, out, region_out) = manager_with_store(&store);
+    m.set_stored_regions([(rc, 1)].into());
+
+    let factor = 4;
+    let key = LodKey::for_region(factor, rc);
+    m.handle_server_event(ServerEvent::ClientPacket(ClientPacket::RequestLod(key), 1), 0);
+    drain_region_outputs(&mut m, &region_out);
+    m.pump_lod_results();
+    let (got, water) = expect_lod_data_with_water(&out, key);
+
+    let no_coarse = |_: &LodKey| Vec::new();
+    let generate = |_rc: RegionCoords| lake_columns();
+    let (_, pristine, pristine_water) =
+        build_lod_job(LodBuildJob::Pristine { key, region: rc }, &no_coarse, &lake_recipe_water, &generate, &NoStoredTerrain);
+    let (_, saved, saved_water) = build_lod_job(
+        LodBuildJob::Region { key, chunks: dug_lake().chunks },
+        &no_coarse,
+        &lake_recipe_water,
+        &generate,
+        &NoStoredTerrain,
+    );
+    assert_eq!(got, saved, "the saved terrain, downsampled");
+    assert_ne!(got, pristine, "not pristine worldgen");
+    assert_eq!(water, saved_water, "the water layer is a Region build's");
+    assert_eq!(water, pristine_water, "and the recipe's");
+    assert!(water.decode().unwrap().iter().any(|&(top, _)| top == LAKE_TOP), "the lake is in the layer");
+
+    // Exactly the dug column's cells differ: block DUG is cells
+    // [DUG * cells_per_block, +cells_per_block) of group 0 on x and z.
+    let per_block = BLOCK_VOXELS / factor as usize;
+    let (a, b) = (voxels_of(&got), voxels_of(&pristine));
+    let keys: std::collections::BTreeSet<_> = a.keys().chain(b.keys()).copied().collect();
+    let differing: Vec<_> = keys.into_iter().filter(|k| a.get(k) != b.get(k)).collect();
+    assert!(!differing.is_empty(), "the dug column shows");
+    for (group, i) in differing {
+        let (x, z) = (i % 32, i / (32 * 32));
+        assert!(
+            group[0] == 0
+                && group[2] == 0
+                && (DUG.0 * per_block..(DUG.0 + 1) * per_block).contains(&x)
+                && (DUG.1 * per_block..(DUG.1 + 1) * per_block).contains(&z),
+            "a difference outside the dug column: group {group:?} cell ({x}, {z})"
+        );
+    }
+}
+
+/// A store that cannot serve a listed region (missing, or a read error):
+/// the LOD is pristine, never an error or a gap.
+#[test]
+fn stored_region_lod_unreadable_builds_pristine() {
+    if CHUNK_BLOCKS < 16 {
+        return;
+    }
+    crate::common::install_real_block_props();
+    let (missing, broken) = (RegionCoords::new(5, 5), RegionCoords::new(6, 5));
+    let store = FakeStore::default();
+    store.put(broken, Err("disk on fire".into()));
+    let (mut m, out, region_out) = manager_with_store(&store);
+    m.set_stored_regions([(missing, 1), (broken, 1)].into());
+    let no_coarse = |_: &LodKey| Vec::new();
+    let generate = |_rc: RegionCoords| lake_columns();
+    for rc in [missing, broken] {
+        let key = LodKey::for_region(4, rc);
+        m.handle_server_event(ServerEvent::ClientPacket(ClientPacket::RequestLod(key), 1), 0);
+        drain_region_outputs(&mut m, &region_out);
+        m.pump_lod_results();
+        let (got, _) = expect_lod_data_with_water(&out, key);
+        let (_, pristine, _) =
+            build_lod_job(LodBuildJob::Pristine { key, region: rc }, &no_coarse, &lake_recipe_water, &generate, &NoStoredTerrain);
+        assert_eq!(got, pristine, "{rc:?}: pristine");
+    }
+}
+
+/// Tile keys overlay a stored region from the store, like one with terrain
+/// in the manager's cache; the store's other regions stay coarse.
+#[test]
+fn stored_tile_overlays_include_stored() {
+    if CHUNK_BLOCKS < 16 {
+        return;
+    }
+    crate::common::install_real_block_props();
+    let stored = RegionCoords::new(1, 1);
+    let store = FakeStore::default();
+    let floor = Chunk::flat_floor_with(8, BlockId(7));
+    store.put(stored, Ok(TerrainSnapshot { chunks: vec![(ChunkCoords::new(0, 0, 0), floor)], ground: Vec::new() }));
+    let (mut m, out, region_out) = manager_with_store(&store);
+    m.set_stored_regions([(stored, 1)].into());
+
+    let key = LodKey { factor: 64, coords: [0, 0] }; // regions (0..2, 0..2) at the test size
+    assert!(key.regions().contains(&stored), "fixture: the tile covers the stored region");
+    m.handle_server_event(ServerEvent::ClientPacket(ClientPacket::RequestLod(key), 1), 0);
+    drain_region_outputs(&mut m, &region_out);
+    m.pump_lod_results();
+    let payload = expect_lod_data(&out, key);
+    let cells = game::lod::cells_per_region(64);
+    let r = cells * stored.x as usize..cells * (stored.x as usize + 1);
+    let blocks = rect_blocks(&payload, r.clone(), r);
+    assert!(blocks.iter().any(|b| *b == BlockId(7)), "the stored floor is overlaid");
+    assert!(blocks.iter().all(|b| *b != BlockId(42)), "over the coarse marker");
+}
+
+/// A cut that raises a stored region's terrain version rebuilds its
+/// subscribed LOD keys from the new stored terrain (the region is not
+/// running, so no `TerrainChanged` would).
+#[test]
+fn stored_version_rise_rebuilds_lod() {
+    if CHUNK_BLOCKS < 16 {
+        return;
+    }
+    crate::common::install_real_block_props();
+    let rc = RegionCoords::new(5, 5);
+    let store = FakeStore::default();
+    store.put(rc, Ok(TerrainSnapshot::from_columns(lake_columns())));
+    let (mut m, out, region_out) = manager_with_store(&store);
+    m.set_stored_regions([(rc, 1)].into());
+    let key = LodKey::for_region(4, rc);
+    m.handle_server_event(ServerEvent::ClientPacket(ClientPacket::RequestLod(key), 1), 0);
+    drain_region_outputs(&mut m, &region_out);
+    m.pump_lod_results();
+    let (before, _) = expect_lod_data_with_water(&out, key);
+
+    store.put(rc, Ok(dug_lake()));
+    m.cut_committed(CutId(7), vec![(rc, 1)]);
+    m.pump_lod_results();
+    assert!(
+        !out.try_iter().any(|(_, p)| matches!(p, ServerPacket::LodData(k, ..) if k == key)),
+        "an unchanged version rebuilds nothing"
+    );
+    m.cut_committed(CutId(8), vec![(rc, 2)]);
+    m.pump_lod_results();
+    let (after, _) = expect_lod_data_with_water(&out, key);
+    assert_ne!(after, before, "rebuilt from the newer stored terrain");
 }

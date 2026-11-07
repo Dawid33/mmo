@@ -76,6 +76,13 @@ pub enum RegionInput {
     /// for these never-run neighbours, with the runner's halo generator
     /// ([`RegionRunner::set_halo_generator`]) — on the region's own thread.
     SeedHaloFromWorldgen(Vec<RegionCoords>),
+    /// Seed this (just started, not yet ticked) region's halo for these
+    /// neighbours that the world store holds and that have not run in this
+    /// process, from their stored terrain
+    /// ([`RegionRunner::set_stored_terrain`]) — on the region's own thread.
+    /// A neighbour the store cannot serve is seeded from worldgen, as
+    /// [`RegionInput::SeedHaloFromWorldgen`].
+    SeedHaloFromStore(Vec<RegionCoords>),
     /// Graceful stop; replied with `RegionOutput::Stopped(state)`.
     Shutdown,
 }
@@ -278,6 +285,8 @@ pub struct RegionRunner {
     id: RegionCoords,
     /// See [`RegionRunner::set_halo_generator`].
     halo_generator: Option<HaloGenerator>,
+    /// See [`RegionRunner::set_stored_terrain`].
+    stored_terrain: Option<std::sync::Arc<dyn crate::StoredTerrain>>,
     region: Region,
     out: Sender<(RegionCoords, RegionOutput)>,
     /// Last-pushed terrain hash; a change past the throttle window pushes a
@@ -341,6 +350,7 @@ impl RegionRunner {
         Self {
             id,
             halo_generator: None,
+            stored_terrain: None,
             region,
             out,
             last_terrain_hash,
@@ -393,6 +403,12 @@ impl RegionRunner {
     /// seed is skipped (logged).
     pub fn set_halo_generator(&mut self, generator: HaloGenerator) {
         self.halo_generator = Some(generator);
+    }
+
+    /// The world store's terrain for [`RegionInput::SeedHaloFromStore`];
+    /// without one such seeds come from worldgen.
+    pub fn set_stored_terrain(&mut self, stored: std::sync::Arc<dyn crate::StoredTerrain>) {
+        self.stored_terrain = Some(stored);
     }
 
     /// Test support: from now on record `(tick, state hash)` right after each
@@ -495,6 +511,7 @@ impl RegionRunner {
                 }
             }
             RegionInput::SeedHaloFromWorldgen(neighbours) => self.seed_halo_from_worldgen(neighbours),
+            RegionInput::SeedHaloFromStore(neighbours) => self.seed_halo_from_store(neighbours),
             RegionInput::Shutdown => {
                 // A save cut at a tick this region will not reach now: it
                 // parks there, so its answer is its state with what is held
@@ -578,6 +595,33 @@ impl RegionRunner {
         let (before, rest): (Vec<_>, Vec<_>) = std::mem::take(queue).into_iter().partition(|(_, t)| *t < tick);
         *queue = rest.into();
         before
+    }
+
+    /// Halo seeds read from the world store here, applied at once (before
+    /// the first tick); a neighbour the store cannot serve (logged) is
+    /// seeded from worldgen.
+    fn seed_halo_from_store(&mut self, neighbours: Vec<RegionCoords>) {
+        let mut generate = Vec::new();
+        for n in neighbours {
+            let snap = match &self.stored_terrain {
+                Some(stored) => crate::load_stored_or_warn(stored.as_ref(), n, "halo seed"),
+                None => {
+                    log::warn!("region {:?}: no stored terrain source; halo of {n:?} from worldgen", self.id);
+                    None
+                }
+            };
+            match snap {
+                Some(snap) => {
+                    if let Some(seed) = crate::halo::halo_seed_from_snapshot(n, self.id, &snap) {
+                        self.apply(GameEventKind::HaloUpdate(seed));
+                    }
+                }
+                None => generate.push(n),
+            }
+        }
+        if !generate.is_empty() {
+            self.seed_halo_from_worldgen(generate);
+        }
     }
 
     /// Halo seeds generated here, applied at once (before the first tick).

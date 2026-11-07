@@ -513,3 +513,111 @@ fn halo_carries_recipe_water() {
     rig.round();
     assert_eq!(units_from(&mut rig, SPAWN_REGION, cell), Some(0), "after the T+1 halo delta");
 }
+
+/// A world store stand-in holding one neighbour's terrain.
+struct OneStored(RegionCoords, game::TerrainSnapshot);
+
+impl game::StoredTerrain for OneStored {
+    fn load_terrain(&self, rc: RegionCoords) -> Result<Option<game::TerrainSnapshot>, String> {
+        Ok((rc == self.0).then(|| self.1.clone()))
+    }
+}
+
+/// East as an earlier process saved it: the floor, with a block on its west
+/// edge (facing the spawn region) dug out.
+fn east_saved_dug() -> (BlockPos, game::TerrainSnapshot) {
+    let dug = BlockPos::new(1, 0, 7);
+    let mut snap = game::TerrainSnapshot::from_columns(uniform_floor(east()));
+    let cb = game::CHUNK_BLOCKS as i32;
+    let at = ChunkCoords::new((dug.x / cb) as usize, 0, (dug.z / cb) as usize);
+    let (_, chunk) = snap.chunks.iter_mut().find(|(c, _)| *c == at).expect("the floor chunk");
+    chunk.set_block((dug.x % cb) as usize, 0, (dug.z % cb) as usize, Block::new(BlockId::AIR));
+    (dug, snap)
+}
+
+/// A neighbour the store holds that has not run in this process seeds the
+/// halo from its saved terrain (the old known limit: pristine worldgen); one
+/// the store cannot serve falls back to worldgen.
+#[test]
+fn stored_neighbour_seeds_halo_from_store() {
+    crate::common::install_real_block_props();
+    let (out, _out_recv) = crossbeam::channel::unbounded();
+    let region = Region::from_columns(SPAWN_REGION, uniform_floor(SPAWN_REGION));
+    let mut runner = game::RegionRunner::new(SPAWN_REGION, region, out);
+    runner.set_halo_generator(std::sync::Arc::new(|rc, xs, zs| {
+        uniform_floor(rc).into_iter().filter(|(c, _)| xs.contains(&c.x) && zs.contains(&c.z)).collect()
+    }));
+    let (dug, snap) = east_saved_dug();
+    runner.set_stored_terrain(std::sync::Arc::new(OneStored(east(), snap)));
+    // North is listed but the store has nothing for it: worldgen.
+    runner.handle_input(game::RegionInput::SeedHaloFromStore(vec![east(), north()]));
+
+    let data = runner.region_mut().data();
+    let east_block = |p: BlockPos| data.halo_block(WorldBlockPos::from_local(east(), p)).map(|b| b.id);
+    assert_eq!(east_block(dug), Some(BlockId::AIR), "the saved dig is in the halo");
+    let beside = BlockPos::new(dug.x, 0, dug.z + 1);
+    assert!(east_block(beside).is_some_and(|b| b != BlockId::AIR), "the rest of the saved floor too");
+    let n = REGION_BLOCKS as i32;
+    let north_floor = data.halo_block(WorldBlockPos::from_local(north(), BlockPos::new(10, 0, n - 2)));
+    assert!(north_floor.is_some_and(|b| b.id != BlockId::AIR), "an unserved neighbour comes from worldgen");
+}
+
+/// The manager sends `SeedHaloFromStore` for a starting region's stored,
+/// never-run neighbours, and worldgen seeds for the rest, when regions
+/// generate on their own threads.
+#[test]
+fn stored_neighbours_are_seeded_from_the_store_by_their_region() {
+    use std::sync::{Arc, Mutex};
+    struct Recording(Arc<Mutex<Vec<(RegionCoords, crossbeam::channel::Receiver<game::RegionInput>)>>>);
+    impl game::RegionSpawner for Recording {
+        fn world_tick(&self) -> game::Tick {
+            0
+        }
+        fn spawn(
+            &mut self,
+            id: RegionCoords,
+            _seed: game::RegionSeed,
+            _out: crossbeam::channel::Sender<(RegionCoords, game::RegionOutput)>,
+        ) -> crossbeam::channel::Sender<game::RegionInput> {
+            let (send, recv) = crossbeam::channel::unbounded();
+            self.0.lock().unwrap().push((id, recv));
+            send
+        }
+        fn generates_columns(&self) -> bool {
+            true
+        }
+    }
+    let spawned = Arc::new(Mutex::new(Vec::new()));
+    let (out_send, _packets) = crossbeam::channel::unbounded();
+    let (region_out_send, _region_out) = crossbeam::channel::unbounded();
+    let (lod_result_send, lod_result_recv) = crossbeam::channel::unbounded();
+    let lod_builder: Box<dyn game::LodBuilder> = Box::new(game::InlineLodBuilder {
+        coarse: Box::new(|_key: &game::lod::LodKey| Vec::new()),
+        water: Box::new(game::lod::LodWater::dry),
+        out: lod_result_send,
+    });
+    let mut m = game::WorldManager::new(
+        Recording(spawned.clone()),
+        Box::new(|_rc: RegionCoords| Vec::new()),
+        out_send,
+        region_out_send,
+        lod_builder,
+        lod_result_recv,
+    );
+    m.set_stored_regions([(east(), 3)].into());
+    m.handle_server_event(game::ServerEvent::connected(1), 0);
+
+    let spawned = spawned.lock().unwrap();
+    let (_, inputs) = spawned.iter().find(|(id, _)| *id == SPAWN_REGION).expect("the spawn region started");
+    let (mut from_store, mut from_worldgen) = (Vec::new(), Vec::new());
+    for input in inputs.try_iter() {
+        match input {
+            game::RegionInput::SeedHaloFromStore(n) => from_store.extend(n),
+            game::RegionInput::SeedHaloFromWorldgen(n) => from_worldgen.extend(n),
+            _ => {}
+        }
+    }
+    assert_eq!(from_store, vec![east()]);
+    assert_eq!(from_worldgen.len(), 7, "the other neighbours: {from_worldgen:?}");
+    assert!(!from_worldgen.contains(&east()));
+}
