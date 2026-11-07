@@ -315,43 +315,63 @@ fn reply_follows_sender_across_seam() {
     assert_eq!(rig.manager.intent_replies_lost(), 0);
 }
 
-/// An autosave taken while a cross-region intent is held at its (lagging)
-/// target: the target's saved state carries it — the source's does not —
-/// and the restored target applies it exactly once.
+/// A save cut taken while a cross-region intent is on its way to a lagging
+/// target: the cut holds it exactly once — queued in the target's snapshot,
+/// or as an in-flight row (the sender's snapshot does not) — and a world
+/// restored from the cut applies it.
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
-fn autosave_holds_intent_held_at_target_once() {
+fn cut_holds_intent_to_lagging_target_once() {
+    use game::RegionSpawner;
     let mut rig = Rig::with_floor(None, uniform_floor);
     rig.join_spawn();
     let west = RegionCoords::new(SPAWN_REGION.x - 1, SPAWN_REGION.z);
     let local = BlockPos::new(10, 0, 10);
     let target = WorldBlockPos::from_local(west, local);
-    // West lags: the intent waits in its channel, then in its held queue.
-    rig.manager.spawner_mut().hold(west, 3);
-    rig.order(Order::DevBreakBlock(target));
-    rig.round();
-    rig.manager.request_save();
-    rig.manager.spawner_mut().hold(west, 0);
+    // Every region knows the cut (its tick a few ticks ahead); then west's
+    // inputs lag: it reaches the cut tick and answers before the intent,
+    // sent before the sender's answer, reaches it.
+    while rig.manager.spawner_mut().world_tick() < game::SAVE_CUT_LEAD_TICKS {
+        rig.round();
+    }
+    let world = rig.manager.spawner_mut().world_tick();
+    rig.manager.begin_cut((world + 4).saturating_sub(game::SAVE_CUT_LEAD_TICKS)).expect("no cut pending");
     rig.settle();
-    assert!(rig.manager.awaiting_save().is_empty(), "every region answered");
-    let mut saves: std::collections::BTreeMap<RegionCoords, game::Rollback> = Default::default();
-    for (rc, save) in rig.manager.take_saves() {
-        let game::RegionSave::Live(state, _) = save else { panic!("{rc:?}: running regions save live") };
-        saves.insert(rc, *state);
+    rig.manager.spawner_mut().hold_inputs(west, 8);
+    rig.order(Order::DevBreakBlock(target));
+    let mut cut = None;
+    for _ in 0..8 {
+        rig.round();
+        if let Some(c) = rig.manager.take_cut() {
+            cut = Some(c);
+            break;
+        }
     }
-    let held = |s: &game::Rollback| s.queued_intents().iter().filter(|i| i.target == game::Target::Block(target)).count();
-    let carried: Vec<_> = saves.iter().filter(|(_, s)| held(s) > 0).map(|(rc, s)| (*rc, held(s))).collect();
-    assert_eq!(carried, vec![(west, 1)], "saved once, with its target");
-    // Restored, the target applies it once.
-    let mut r = game::restore_saved(west, saves.remove(&west).unwrap());
-    for _ in 0..3 {
-        r.handle_event(GameEventKind::Tick).unwrap();
-        r.commit_server_event();
+    let cut = cut.expect("the cut completed");
+    let mut store = crate::common::cut_store::CutStore::default();
+    store.apply(&cut);
+    let is_it = |s: &game::SentIntent| s.target == game::Target::Block(target);
+    let queued = store.regions.get(&west).map_or(0, |r| r.meta.intents.values().filter(|s| is_it(s)).count());
+    let rows = store
+        .in_flight
+        .iter()
+        .filter(|row| matches!(row, game::InFlightRow::Intent { target: t, msg: game::IntentMsg::Intent(s) } if *t == west && is_it(s)))
+        .count();
+    assert_eq!((queued, rows), (0, 1), "saved once, on its way (west answered before it arrived)");
+    // Restored, the target applies it.
+    let spawner = game::InlineSpawner::with_portable(store.regions.clone());
+    let mut again = Rig::with_spawner(spawner, uniform_floor);
+    again.join_spawn();
+    again.manager.restore_in_flight(store.in_flight.clone());
+    for _ in 0..4 {
+        again.round();
     }
-    assert!(r.data().block_at([local.x, local.y, local.z]).is_none_or(|b| b.id == BlockId::AIR), "applied");
-    assert!(r.data().queued_intents().is_empty());
-    let granted = r.take_intents().into_iter().filter(|m| matches!(m, game::IntentMsg::Reply(s) if matches!(s.reply, IntentReply::Granted(_)))).count();
-    assert_eq!(granted, 1, "one grant, to the sender (elsewhere)");
+    let mut broken = false;
+    again.manager.spawner_mut().with_region(west, |r| {
+        broken = r.data().block_at([local.x, local.y, local.z]).is_none_or(|b| b.id == BlockId::AIR);
+        assert!(r.data().queued_intents().is_empty());
+    });
+    assert!(broken, "applied after the restore");
 }
 
 /// A region that parks refuses the intents still queued in it: its parked

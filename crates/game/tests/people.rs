@@ -542,7 +542,8 @@ fn shutdown_reports_and_strips_people() {
     let RegionOutput::PeopleParked(list) = &outs[parked_at] else { unreachable!() };
     assert_eq!(*list, expected);
     assert_eq!(list.len(), 2);
-    let RegionOutput::Stopped(blob, _, _) = &outs[stopped_at] else { unreachable!() };
+    let RegionOutput::Stopped(blob, _, _, portable) = &outs[stopped_at] else { unreachable!() };
+    assert!(portable.entities.iter().all(|b| !matches!(b.kind, game::EntityKind::Person { .. })), "no people in the stop snapshot");
     let restored = blob.to_rollback().unwrap();
     assert!(restored.people_here().is_empty());
     assert!(restored.data.ecs.kind.iter().all(|(_, k)| !matches!(k, Some(game::EntityKind::Person { .. }))));
@@ -649,62 +650,83 @@ fn client_replica_converges_on_person_events() {
     assert_eq!(client.data(&common::r0()).people_here(), here);
 }
 
-// ---- world autosave ----
+// ---- world save cuts ----
 
 #[test]
-fn saved_region_restores_without_players_or_people() {
+fn cut_snapshot_restores_without_players_or_people() {
     let (mut r, out) = person_runner();
     r.handle_input(RegionInput::Event(GameEventKind::CreateClient(4)));
     r.handle_input(spawn_ev(PersonId(2), SpawnAt::Column([10, 10])));
     for _ in 0..3 {
         r.tick();
     }
-    assert!(r.handle_input(RegionInput::Save), "Save does not stop the region");
-    let saved = out
-        .try_iter()
-        .find_map(|(_, o)| match o {
-            RegionOutput::Saved(rb) => Some(rb),
-            _ => None,
-        })
-        .expect("Saved");
-    assert_eq!(saved.people_here().len(), 1, "the save is the live state");
-    assert!(saved.player_entites.contains_key(&4));
-    let (tick, terrain) = (r.region_mut().current_tick(), r.region_mut().terrain_fingerprint());
-    // Through the disk format (bincode) and back, as a restarted server loads it.
-    let blob = game::RegionSave::Live(saved, Vec::new()).into_serialized();
-    let restored = game::restore_saved(common::r0(), blob.to_rollback().unwrap());
+    let at = r.current_tick() + 1;
+    assert!(r.handle_input(RegionInput::SaveAt(game::CutId(1), at)), "SaveAt does not stop the region");
+    r.tick();
+    let outs: Vec<RegionOutput> = out.try_iter().map(|(_, o)| o).collect();
+    let people = outs.iter().position(|o| matches!(o, RegionOutput::PeoplePositions(_))).expect("PeoplePositions");
+    let snap = outs.iter().position(|o| matches!(o, RegionOutput::CutSnapshot(..))).expect("CutSnapshot");
+    assert!(people < snap, "the positions come first");
+    let RegionOutput::PeoplePositions(list) = &outs[people] else { unreachable!() };
+    assert_eq!(list.iter().map(|(p, _)| *p).collect::<Vec<_>>(), vec![PersonId(2)]);
+    let RegionOutput::CutSnapshot(id, tick, portable) = &outs[snap] else { unreachable!() };
+    assert_eq!((*id, *tick, portable.meta.tick), (game::CutId(1), at, at));
+    assert_eq!(portable.players.iter().map(|(c, _)| *c).collect::<Vec<_>>(), vec![4], "the player as a record");
+    assert!(portable.entities.iter().all(|b| b.client.is_none() && !matches!(b.kind, game::EntityKind::Person { .. })));
+    let terrain = r.region_mut().terrain_fingerprint();
+    let (restored, _) = game::restore_portable(common::r0(), game::StoredRegion::from((**portable).clone()));
     let data = restored.data();
     assert!(data.people_here().is_empty(), "the history respawns its people");
     assert!(data.player_entites.is_empty() && data.clients.is_empty(), "no stale sessions");
-    assert!(data.data.ecs.kind.iter().all(|(_, k)| !matches!(k, Some(game::EntityKind::Person { .. }))));
-    assert_eq!(restored.current_tick(), tick);
+    assert_eq!(restored.current_tick(), at);
     assert_eq!(restored.terrain_fingerprint(), terrain);
+    // A cut whose tick the region has passed is missed.
+    assert!(r.handle_input(RegionInput::SaveAt(game::CutId(2), at)));
+    assert!(out.try_iter().any(|(_, o)| matches!(o, RegionOutput::CutMissed(game::CutId(2)))));
 }
 
 #[test]
-fn request_save_collects_running_then_parked_regions_once() {
+fn cut_carries_running_then_parked_regions_until_committed() {
+    use game::RegionSpawner;
     let mut h = harness();
     connect_and_subscribe(&mut h);
-    let running = h.manager.running_regions();
+    let mut running = h.manager.running_regions();
+    running.sort();
     assert!(!running.is_empty());
-    h.manager.request_save();
-    h.settle(0);
-    let saves = h.manager.take_saves();
-    assert_eq!(saves.len(), running.len(), "every running region answers");
-    assert!(saves.iter().all(|(_, s)| matches!(s, game::RegionSave::Live(..))));
+    let world = h.manager.spawner_mut().world_tick();
+    h.manager.begin_cut((world + 2).saturating_sub(game::SAVE_CUT_LEAD_TICKS)).expect("no cut pending");
+    let mut cut = None;
+    for _ in 0..game::SAVE_CUT_LEAD_TICKS + 4 {
+        h.tick(0);
+        cut = h.manager.take_cut();
+        if cut.is_some() {
+            break;
+        }
+    }
+    let cut = cut.expect("every running region answered");
+    let mut answered: Vec<_> = cut.regions.iter().map(|(rc, _)| *rc).collect();
+    answered.sort();
+    assert_eq!(answered, running, "every running region answers");
+    h.manager.cut_committed(cut.id, Vec::new());
+    assert!(h.manager.uncommitted_regions().is_empty(), "committed");
     h.manager.shutdown_all();
     h.settle(0);
     assert!(h.manager.running_regions().is_empty());
-    h.manager.request_save();
-    let saves = h.manager.take_saves();
-    let mut parked: Vec<_> = saves.iter().map(|(rc, _)| *rc).collect();
+    // Nothing runs: the next cut is complete at once and carries every stop
+    // snapshot (each since the last commit).
+    h.manager.begin_cut(0).expect("no cut pending");
+    let cut = h.manager.take_cut().expect("complete at once");
+    let mut parked: Vec<_> = cut.regions.iter().map(|(rc, _)| *rc).collect();
     parked.sort();
-    let mut expected = running.clone();
-    expected.sort();
-    assert_eq!(parked, expected, "each parked region once");
-    assert!(saves.iter().all(|(_, s)| matches!(s, game::RegionSave::Parked(..))));
-    h.manager.request_save();
-    assert!(h.manager.take_saves().is_empty(), "an unchanged parked blob is not saved twice");
+    assert_eq!(parked, running, "each parked region once");
+    assert!(cut.regions.iter().all(|(_, p)| p.chunks.is_empty()), "nothing changed since the committed cut");
+    h.manager.cut_failed(cut.id);
+    h.manager.begin_cut(0).expect("no cut pending");
+    let again = h.manager.take_cut().expect("complete at once");
+    assert_eq!(again.regions.len(), running.len(), "a failed cut's regions are carried again");
+    h.manager.cut_committed(again.id, Vec::new());
+    h.manager.begin_cut(0).expect("no cut pending");
+    assert!(h.manager.take_cut().expect("complete at once").regions.is_empty(), "committed parked regions are not carried twice");
 }
 
 // ---- wandering across a seam ----

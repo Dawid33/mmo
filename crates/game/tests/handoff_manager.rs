@@ -346,37 +346,35 @@ fn transfer_to_leading_target_applies_on_receipt() {
     assert!(!in_source, "the body left the source");
 }
 
-/// Where `id` is in one autosave round's saves: `(region, "state" | "transfer")`.
-fn saved_places(saves: Vec<(RegionCoords, game::RegionSave)>, id: game::EntityId) -> Vec<(RegionCoords, &'static str, Option<game::EntityBundle>)> {
-    let mut at = Vec::new();
-    for (rc, save) in saves {
-        let (state, transfers) = match save {
-            game::RegionSave::Live(state, transfers) => (*state, transfers),
-            parked => {
-                let saved = parked.into_serialized().to_saved().expect("parked blob decodes");
-                (saved.state, saved.transfers)
-            }
-        };
-        if state.id_index.contains_key(&id) {
-            at.push((rc, "state", None));
+/// One whole save cut at the next tick (lockstep: every region reaches it
+/// in one round): asked, answered, taken, and committed into `store`.
+fn cut_into(h: &mut Harness, store: &mut crate::common::cut_store::CutStore, now_ms: u64) -> game::WorldCut {
+    use game::RegionSpawner;
+    let world = h.manager.spawner_mut().world_tick();
+    h.manager.begin_cut((world + 2).saturating_sub(game::SAVE_CUT_LEAD_TICKS)).expect("no cut pending");
+    for _ in 0..game::SAVE_CUT_LEAD_TICKS + 4 {
+        if let Some(cut) = h.manager.take_cut() {
+            store.apply(&cut);
+            h.manager.cut_committed(cut.id, Vec::new());
+            return cut;
         }
-        at.extend(transfers.into_iter().filter(|(b, _)| b.id == id).map(|(b, _)| (rc, "transfer", Some(b))));
+        h.tick(now_ms);
     }
-    at
+    panic!("the cut never completed; waiting for {:?}", h.manager.awaiting_cut());
 }
 
-/// One whole autosave round: asked, answered, collected.
-fn autosave(h: &mut Harness, now_ms: u64) -> Vec<(RegionCoords, game::RegionSave)> {
-    h.manager.request_save();
-    h.settle(now_ms);
-    assert!(h.manager.awaiting_save().is_empty(), "every region asked answered");
-    h.manager.take_saves()
+/// The in-flight row of `id` in `store`, if any.
+fn row_of(store: &crate::common::cut_store::CutStore, id: game::EntityId) -> Option<game::EntityBundle> {
+    store.in_flight.iter().find_map(|row| match row {
+        game::InFlightRow::Transfer { bundle, .. } if bundle.id == id => Some(bundle.clone()),
+        _ => None,
+    })
 }
 
 /// Decision 3: a slime crossing into a region that is not running does not
-/// wake it. It waits in the manager's mailbox — saved exactly once per
-/// autosave round, with the region it left (rebased back, so restored it
-/// crosses again) — and is delivered when the region next starts.
+/// wake it. It waits in the manager's mailbox — in every save cut exactly
+/// once, as an in-flight row to its target (in the target's frame) — and is
+/// delivered when the region next starts.
 #[test]
 fn slime_arrival_does_not_wake_unloaded_region() {
     crate::common::install_real_block_props();
@@ -401,15 +399,15 @@ fn slime_arrival_does_not_wake_unloaded_region() {
         assert!(!region.data().id_index.contains_key(&id), "the slime left its source");
     });
 
+    let mut store = crate::common::cut_store::CutStore::default();
     for round in 0..3 {
         h.tick(150 + round * 50);
-        let at = saved_places(autosave(&mut h, 150 + round * 50), id);
-        assert_eq!(at.len(), 1, "save {round}: the waiting slime is saved in {:?}", at.iter().map(|a| (a.0, a.1)).collect::<Vec<_>>());
-        let (rc, what, bundle) = &at[0];
-        assert_eq!((*rc, *what), (SPAWN_REGION, "transfer"), "saved with the region it left");
-        let bundle = bundle.as_ref().unwrap();
+        cut_into(&mut h, &mut store, 150 + round * 50);
+        let at = store.places(id);
+        assert_eq!(at, [(north, "row")], "cut {round}: the waiting slime is saved once, on its way to its target");
+        let bundle = row_of(&store, id).unwrap();
         assert!(matches!(bundle.kind, game::EntityKind::Slime { size: 1 }));
-        assert!(bundle.body.pose.translation.z < 0.0, "in its source's frame, past the seam: restored, it crosses again");
+        assert!(bundle.body.pose.translation.z > REGION_SIZE / 2.0, "in its target's frame, just past the seam");
     }
     assert!(!h.manager.running_regions().contains(&north), "saving did not wake it either");
 
@@ -431,9 +429,8 @@ fn slime_arrival_does_not_wake_unloaded_region() {
 
     for round in 0..2 {
         h.tick(450 + round * 50);
-        let at = saved_places(autosave(&mut h, 450 + round * 50), id);
-        let at: Vec<_> = at.into_iter().map(|a| (a.0, a.1)).collect();
-        assert_eq!(at, [(north, "state")], "save {round} after delivery");
+        cut_into(&mut h, &mut store, 450 + round * 50);
+        assert_eq!(store.places(id), [(north, "state")], "cut {round} after delivery");
     }
 }
 
@@ -488,26 +485,13 @@ fn mailbox_is_capped_and_despawns_the_oldest() {
     // The NEWEST waited; the oldest were despawned.
     let waiting: Vec<_> = h.manager.pending_arrival_ids().into_iter().map(|(id, _)| id).collect();
     assert_eq!(waiting, ids[walked - CAP..].to_vec(), "the oldest went first");
-    // A save holds each waiting slime once and no despawned one.
-    let saves = autosave(&mut h, now);
-    let saved: Vec<(RegionCoords, game::RegionSave)> = saves;
-    let mut counts = std::collections::BTreeMap::new();
-    for (_, save) in saved {
-        let (state, transfers) = match save {
-            game::RegionSave::Live(state, transfers) => (*state, transfers),
-            parked => {
-                let s = parked.into_serialized().to_saved().expect("decodes");
-                (s.state, s.transfers)
-            }
-        };
-        for id in &ids {
-            let n = state.id_index.contains_key(id) as usize + transfers.iter().filter(|(b, _)| b.id == *id).count();
-            *counts.entry(*id).or_insert(0) += n;
-        }
-    }
+    // A cut holds each waiting slime once and no despawned one.
+    let mut store = crate::common::cut_store::CutStore::default();
+    cut_into(&mut h, &mut store, now);
     for (i, id) in ids.iter().enumerate() {
         let want = if i >= walked - CAP { 1 } else { 0 };
-        assert_eq!(counts[id], want, "slime {i} saved {} times", counts[id]);
+        let n = store.places(*id).len();
+        assert_eq!(n, want, "slime {i} saved {n} times");
     }
 }
 

@@ -601,6 +601,12 @@ pub fn run() {
         spawner = spawner.with_store(store.clone());
     }
     let saver = region_store.map(region_store::spawn_saver);
+    if saver.is_some() {
+        // TODO(world-store Task 7): the world store writes `WorldManager`
+        // save cuts (`begin_cut` / `take_cut`); until then regions are saved
+        // only at the orderly exit (every region parked in this process).
+        log::warn!("[server] periodic region autosave is off until the world store lands; regions are saved at exit");
+    }
     // Parked players and the autosave's online players go to the player store
     // on their own thread (procedural worlds: the in-memory store).
     let player_saver = player_store::spawn_saver(players.clone());
@@ -680,9 +686,7 @@ pub fn run() {
             last_world_save = std::time::Instant::now();
             save_history(&history_world_path, &manager);
             save_world_tick(start);
-            manager.request_save();
         }
-        forward_saves(&saver, &mut manager);
         forward_player_saves(&player_saver.0, &mut manager);
         report.maybe_report(
             &mut manager,
@@ -713,10 +717,9 @@ pub fn run() {
     if !unparked.is_empty() {
         log::warn!("[server] {} regions did not park in time and are not saved: {unparked:?}", unparked.len());
     }
-    // Every region that parked is saved (its blob since the last autosave).
+    // Every region that parked in this process is saved (its parked blob).
     save_world_tick(start);
-    manager.request_save();
-    forward_saves(&saver, &mut manager);
+    forward_parked_regions(&saver, &manager);
     if let Some((send, handle)) = saver {
         drop(send);
         if handle.join().is_err() {
@@ -739,9 +742,10 @@ pub fn run() {
     }
 }
 
-/// How often the main loop saves the world — the history and every region
-/// (running regions' live state; parked ones once after they park). Both are
-/// also saved after the orderly-exit loop has parked every region.
+/// How often the main loop saves the world — the history and the world tick
+/// (regions only at the orderly exit until the world store lands: TODO(world-store
+/// Task 7)). Both are also saved after the orderly-exit loop has parked every
+/// region.
 pub const WORLD_SAVE_SECS: u64 = 60;
 
 /// Overrides [`WORLD_SAVE_SECS`] (whole seconds, at least 1) — for testing.
@@ -762,18 +766,22 @@ pub fn world_save_secs(env_value: Option<&str>) -> u64 {
     }
 }
 
-/// Hand the manager's collected region states to the saver thread.
-fn forward_saves<S: game::RegionSpawner>(
+/// Hand every region parked in this process to the saver thread, as its
+/// parked blob. The orderly exit's stopgap until the world store writes save
+/// cuts: crossings and replies waiting in the manager's mailboxes are not
+/// saved with them.
+// TODO(world-store Task 7): replaced by the store's cut commit.
+fn forward_parked_regions<S: game::RegionSpawner>(
     saver: &Option<(
         crossbeam::channel::Sender<(game::RegionCoords, game::RegionSave)>,
         std::thread::JoinHandle<()>,
     )>,
-    manager: &mut game::WorldManager<S>,
+    manager: &game::WorldManager<S>,
 ) {
-    let saves = manager.take_saves();
-    if let Some((send, _)) = saver {
-        for save in saves {
-            let _ = send.send(save);
+    let Some((send, _)) = saver else { return };
+    for rc in manager.parked_regions() {
+        if let Some(blob) = manager.parked_blob(rc) {
+            let _ = send.send((rc, game::RegionSave::Parked(blob.clone(), Vec::new())));
         }
     }
 }

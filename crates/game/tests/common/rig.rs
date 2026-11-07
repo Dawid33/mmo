@@ -144,11 +144,25 @@ pub struct Rig {
     /// Latest region snapshot sent to the client, per region: whether it
     /// held the client's player.
     pub snapshot_has_player: std::collections::BTreeMap<RegionCoords, bool>,
+    /// Every `CutSnapshot` the regions sent: `(region, cut, its tick, the
+    /// snapshot's meta tick)`.
+    pub cut_snapshots: Vec<(RegionCoords, game::CutId, u64, u64)>,
+    /// Every `CutMissed`: `(region, cut, the region's tick when seen)`.
+    pub cut_missed: Vec<(RegionCoords, game::CutId, u64)>,
 }
 
 impl Rig {
     pub fn with_floor(
         schedule: Option<InlineSchedule>,
+        floor: impl FnMut(RegionCoords) -> Vec<(ColumnCoords, Column)> + Send + 'static,
+    ) -> Self {
+        let spawner = schedule.map_or_else(InlineSpawner::default, InlineSpawner::with_schedule);
+        Self::with_spawner(spawner, floor)
+    }
+
+    /// [`Rig::with_floor`] over a given spawner (a restarted world's).
+    pub fn with_spawner(
+        spawner: InlineSpawner,
         floor: impl FnMut(RegionCoords) -> Vec<(ColumnCoords, Column)> + Send + 'static,
     ) -> Self {
         // Before any region exists: the seam tests compare runs (placements,
@@ -163,7 +177,6 @@ impl Rig {
             water: Box::new(game::lod::LodWater::dry),
             out: lod_result_send,
         });
-        let spawner = schedule.map_or_else(InlineSpawner::default, InlineSpawner::with_schedule);
         Rig {
             manager: WorldManager::new(
                 spawner,
@@ -181,6 +194,8 @@ impl Rig {
             tracked: Default::default(),
             settling: Default::default(),
             snapshot_has_player: Default::default(),
+            cut_snapshots: Vec::new(),
+            cut_missed: Vec::new(),
         }
     }
 
@@ -189,6 +204,14 @@ impl Rig {
             self.manager.spawner_mut().pump();
             while let Ok((rc, out)) = self.region_out.try_recv() {
                 self.trace_output(rc, &out);
+                if let RegionOutput::CutSnapshot(id, tick, p) = &out {
+                    self.cut_snapshots.push((rc, *id, *tick, p.meta.tick));
+                }
+                if let RegionOutput::CutMissed(id) = &out {
+                    let mut at = 0;
+                    self.manager.spawner_mut().with_region(rc, |r| at = r.current_tick());
+                    self.cut_missed.push((rc, *id, at));
+                }
                 self.manager.handle_region_output(rc, out, self.now_ms);
             }
         }

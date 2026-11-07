@@ -43,8 +43,9 @@
 //! it the same way. Queued replies are region state, so they park with it; a
 //! reply for a parked or stopping region waits in the manager's mailbox for
 //! its next run (and is saved with it). Intents and replies in flight
-//! between regions are saved exactly once per autosave round (the manager's
-//! `in_flight_intents`, injected into the saved state that lacks them).
+//! between regions are in a save cut exactly once: queued in the target's
+//! snapshot, or as an in-flight row when neither the sender's nor the
+//! target's snapshot holds them (`save_cut.rs`).
 use crate::{ClientId, EntityId, RegionCoords, Rollback, Tick, WorldBlockPos};
 
 /// How many times a reply is sent on after finding its entity gone before
@@ -307,8 +308,8 @@ impl Rollback {
     }
 
     /// Put intents / replies that were in flight to (or owed by) this region
-    /// into its queues, UNLOGGED: for a saved clone only (the manager's
-    /// autosave, `WorldManager::in_flight_intents`), never a live region.
+    /// into its queues, UNLOGGED: for a saved clone only, never a live region.
+    /// (The pre-cut autosave used it; save cuts carry them as rows.)
     /// Restored, they apply / deliver at its first tick — or are sent on, if
     /// they belong elsewhere.
     pub fn insert_saved_intents(&mut self, msgs: &[IntentMsg]) {

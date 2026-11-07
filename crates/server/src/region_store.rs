@@ -17,10 +17,10 @@
 //! and the region is generated afresh — it is never silently overwritten by the
 //! next autosave.
 //!
-//! Who writes: [`spawn_saver`]'s thread, fed by the main loop from
-//! `WorldManager::take_saves` (running regions' live clones every
-//! [`crate::WORLD_SAVE_SECS`], parked blobs once after they park, everything
-//! once more on an orderly exit). Who reads: the region's own thread, when a
+//! Who writes: [`spawn_saver`]'s thread, fed by the orderly exit with every
+//! region parked in this process (`WorldManager::parked_blob`). The periodic
+//! autosave is off until the world store writes save cuts —
+//! TODO(world-store Task 7): this file goes then. Who reads: the region's own thread, when a
 //! region that has not run in this process starts (`region_threads`).
 
 use std::path::{Path, PathBuf};

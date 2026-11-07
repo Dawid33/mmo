@@ -69,6 +69,7 @@ mod region_from_chunks;
 mod region_from_columns;
 mod region_runner;
 mod rollback_restore;
+mod save_cut;
 mod shape_cast_grazing;
 mod simple;
 mod slime;

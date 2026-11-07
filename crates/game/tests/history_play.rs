@@ -859,26 +859,22 @@ fn fortress_claim_survives_restart() {
     let site = w.embark(A, EmbarkRequest { civ, people: people[..2].to_vec(), region: target }).unwrap();
     w.tick();
     w.take(A);
-    // The server's orderly exit: park every player, then every region; save.
+    // The server's orderly exit: park every player, then every region; a
+    // save cut (nothing runs, so it is complete at once) holds them all.
     w.manager.park_all_players(w.now_ms);
     w.manager.shutdown_all();
     w.settle();
     assert!(w.manager.running_regions().is_empty());
-    w.manager.request_save();
-    let regions: std::collections::BTreeMap<RegionCoords, game::Rollback> = w
-        .manager
-        .take_saves()
-        .into_iter()
-        .map(|(rc, save)| (rc, save.into_serialized().to_rollback().unwrap()))
-        .collect();
-    let records: std::collections::BTreeMap<game::PlayerId, game::PlayerRecord> =
-        w.manager.take_player_saves().into_iter().collect();
-    let record = records.get(&game::PlayerId(A as u64)).cloned().expect("A's record");
+    w.manager.begin_cut(0).expect("no cut pending");
+    let cut = w.manager.take_cut().expect("nothing runs: the cut is complete");
+    let mut store = crate::common::cut_store::CutStore::default();
+    store.apply(&cut);
+    let record = store.players.get(&game::PlayerId(A as u64)).cloned().expect("A's record");
     assert_eq!(record.fortress, Some(site));
     let history = w.history().clone();
     drop(w);
 
-    let mut w = World::over(history, InlineSpawner::with_saved(regions));
+    let mut w = World::over(history, InlineSpawner::with_portable(store.regions));
     w.send(ServerEvent::ClientConnected { client: 0, player: game::PlayerId(A as u64), record: Some(record) });
     let to_a = w.take(0);
     assert_eq!(fortress_in(&to_a), Some(Some(site)), "the fortress is held again: {to_a:?}");

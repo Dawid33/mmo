@@ -15,7 +15,6 @@ use game::{
 
 use crate::common;
 use crate::common::rig::{north, north_west, seam_floor_columns, Rig, Seen, CLIENT, LEG_ROUNDS};
-use game::EntityId;
 use std::collections::BTreeMap;
 
 /// Seeds swept per schedule mode.
@@ -613,62 +612,54 @@ fn dead_target_redelivers_in_flight() {
     assert_settled_in(&mut rig, north());
 }
 
-/// One autosave at a time: the next is requested once every region asked
-/// for the last has answered, and then the last is checked.
+/// One save cut at a time: the next begins once the last completed (or
+/// was missed), and then the last is checked — the player's body is in at
+/// most one region snapshot, and the cut holds exactly one record of it (a
+/// body in no snapshot is a crossing the cut caught; the manager
+/// debug-asserts a crossing is never also in a snapshot).
 struct SaveCheck {
-    id: EntityId,
-    requested: bool,
-    got: BTreeMap<RegionCoords, game::RegionSave>,
     checked: usize,
 }
 
+/// Ticks ahead of the world tick each cut is placed, past the next few
+/// ticks: only a region read late that many rounds in a row misses it.
+const CHECK_CUT_LEAD: u64 = 8;
+
 impl SaveCheck {
-    fn new(rig: &mut Rig) -> Self {
-        let mut id = None;
-        rig.manager.spawner_mut().with_region(SPAWN_REGION, |region| {
-            let data = region.data();
-            id = *data.ecs.id.try_get(*data.player_entites.get(&CLIENT).unwrap());
-        });
-        Self { id: id.expect("the player has an EntityId"), requested: false, got: BTreeMap::new(), checked: 0 }
+    fn new(_rig: &mut Rig) -> Self {
+        Self { checked: 0 }
     }
 
     fn round(&mut self, rig: &mut Rig) {
-        self.got.extend(rig.manager.take_saves());
-        if !rig.manager.awaiting_save().is_empty() {
+        use game::RegionSpawner;
+        if rig.manager.pending_cut().is_some() {
             return;
         }
-        if self.requested {
-            let mut at = Vec::new();
-            for (rc, save) in std::mem::take(&mut self.got) {
-                let (state, transfers) = match save {
-                    game::RegionSave::Live(state, transfers) => (*state, transfers),
-                    parked => {
-                        let saved = parked.into_serialized().to_saved().expect("parked blob decodes");
-                        (saved.state, saved.transfers)
-                    }
-                };
-                if state.id_index.contains_key(&self.id) {
-                    at.push((rc, "state"));
-                }
-                at.extend(transfers.iter().filter(|(b, _)| b.id == self.id).map(|_| (rc, "transfer")));
-            }
-            assert_eq!(at.len(), 1, "save {}: the player is saved in {at:?}", self.checked);
+        if let Some(cut) = rig.manager.take_cut() {
+            let bodies: usize =
+                cut.regions.iter().map(|(_, p)| p.players.iter().filter(|(c, _)| *c == CLIENT).count()).sum();
+            assert!(bodies <= 1, "cut {}: the player's body is in {bodies} snapshots", self.checked);
+            let records = cut.players.iter().filter(|(p, _)| *p == game::PlayerId(CLIENT as u64)).count();
+            assert_eq!(records, 1, "cut {}: the player's record", self.checked);
+            rig.manager.cut_committed(cut.id, Vec::new());
             self.checked += 1;
         }
-        self.got.clear();
-        self.requested = true;
-        rig.manager.request_save();
+        let world = rig.manager.spawner_mut().world_tick();
+        let lead = rig.manager.cut_lead();
+        rig.manager.begin_cut((world + CHECK_CUT_LEAD).saturating_sub(lead));
     }
 }
 
-/// Autosaves through the crossing, one after another (each once every
-/// region asked has answered): the player's `EntityId` is in exactly one of
-/// them each time — in a saved state, or as a transfer saved with its
-/// target (or, when the target answered before the departure, rebased back
-/// into its source).
+/// Save cuts through the crossing, one after another (each once the last
+/// completed): each holds the player exactly once — a body in one region
+/// snapshot, or the crossing the cut caught.
 fn saves_through_crossing(schedule: Option<InlineSchedule>, lagging: Option<RegionCoords>) {
     let mut rig = rig_at_spawn(schedule);
     let mut saves = SaveCheck::new(&mut rig);
+    // Past the lead, so each cut is placed CHECK_CUT_LEAD ticks ahead.
+    while { use game::RegionSpawner; rig.manager.spawner_mut().world_tick() } < game::SAVE_CUT_LEAD_TICKS {
+        rig.round();
+    }
     use game::movement::{TICK_DT, UNITS_PER_METER, WALK_SPEED};
     let margin = FAULT_LEAD_TICKS * WALK_SPEED * UNITS_PER_METER * TICK_DT;
     rig.key(Key::KeyW, true);
@@ -686,7 +677,7 @@ fn saves_through_crossing(schedule: Option<InlineSchedule>, lagging: Option<Regi
             let at = *settled_at.get_or_insert(round);
             if round > at + 12 {
                 saves.round(&mut rig);
-                assert!(saves.checked > 10, "only {} saves checked", saves.checked);
+                assert!(saves.checked >= 4, "only {} cuts checked; pending {:?} waiting {:?} lead {} missed {:?} world {}", saves.checked, rig.manager.pending_cut(), rig.manager.awaiting_cut(), rig.manager.cut_lead(), rig.cut_missed, { use game::RegionSpawner; rig.manager.spawner_mut().world_tick() });
                 return;
             }
         }
@@ -707,10 +698,10 @@ fn autosave_holds_each_transfer_exactly_once() {
     }
 }
 
-/// Autosaves while the crossing waits on a stopping target: the body departs
-/// in one save round towards a region that is mid-stop (never asked to save),
-/// the next round starts before that region has parked, and only then is it
-/// woken with the body. Every round's saves still hold the player once.
+/// Save cuts while the crossing waits on a stopping target: the body departs
+/// towards a region that is mid-stop (it answers cuts with its `Stopped`),
+/// the next cut starts before that region has parked, and only then is it
+/// woken with the body. Every cut still holds the player once.
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn autosave_holds_a_transfer_to_a_stopping_target() {
@@ -742,7 +733,7 @@ fn autosave_holds_a_transfer_to_a_stopping_target() {
     }
     saves.round(&mut rig);
     assert_eq!(rig.owners(), [north()]);
-    assert!(saves.checked > checked_in_flight + 2, "saves checked after the wake: {}", saves.checked);
+    assert!(saves.checked > checked_in_flight, "cuts checked after the wake: {} (before: {checked_in_flight})", saves.checked);
 }
 
 // --- Seam-translation invariance ----------------------------------------------

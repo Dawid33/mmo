@@ -570,9 +570,11 @@ fn walking_into_a_cold_region_wakes_its_thread_and_returns() {
     );
 }
 
-/// World autosave on the server's spawn path: a running region's save goes to
-/// the store; a fresh manager (a restarted server) wakes that region from the
-/// file on its own thread — same clock, and only the new session's player.
+/// Region saving on the server's spawn path: a region parked by the orderly
+/// exit goes to the store; a fresh manager (a restarted server) wakes that
+/// region from the file on its own thread — same clock, and only the new
+/// session's player. (The periodic live autosave waits for the world store:
+/// TODO(world-store Task 7).)
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn saved_region_is_restored_by_a_restarted_server() {
@@ -593,21 +595,6 @@ fn saved_region_is_restored_by_a_restarted_server() {
             rig.absorb(rc, output);
         }
     }
-    rig.manager.request_save();
-    let deadline = Instant::now() + Duration::from_secs(10);
-    let mut saves = Vec::new();
-    while saves.is_empty() && Instant::now() < deadline {
-        if let Ok((rc, output)) = rig.region_out.recv_timeout(Duration::from_millis(50)) {
-            rig.absorb(rc, output);
-        }
-        saves = rig.manager.take_saves();
-    }
-    let (rc, save) = saves.pop().expect("the running region answered Save");
-    assert_eq!(rc, SPAWN_REGION);
-    let game::RegionSave::Live(live, _) = &save else { panic!("a running region saves its live state") };
-    let saved_tick = *live.tick;
-    assert!(saved_tick >= 10, "the region ran: tick {saved_tick}");
-    store.save(rc, &save.into_serialized()).unwrap();
     rig.manager.shutdown_all();
     let deadline = Instant::now() + Duration::from_secs(10);
     while !rig.manager.running_regions().is_empty() && Instant::now() < deadline {
@@ -615,6 +602,10 @@ fn saved_region_is_restored_by_a_restarted_server() {
             rig.absorb(rc, output);
         }
     }
+    let blob = rig.manager.parked_blob(SPAWN_REGION).expect("the region parked").clone();
+    let saved_tick = *blob.to_rollback().unwrap().tick;
+    assert!(saved_tick >= 10, "the region ran: tick {saved_tick}");
+    store.save(SPAWN_REGION, &game::RegionSave::Parked(blob, Vec::new()).into_serialized()).unwrap();
     drop(rig);
 
     // A new process: client ids start at 0 again.
@@ -684,9 +675,9 @@ fn player_is_restored_by_a_restarted_server() {
         }
     }
     assert!(rig.manager.running_regions().is_empty(), "every region parked");
-    rig.manager.request_save();
-    for (rc, save) in rig.manager.take_saves() {
-        store.save(rc, &save.into_serialized()).unwrap();
+    for rc in rig.manager.parked_regions() {
+        let blob = rig.manager.parked_blob(rc).unwrap().clone();
+        store.save(rc, &game::RegionSave::Parked(blob, Vec::new()).into_serialized()).unwrap();
     }
     players.store(rig.manager.take_player_saves()).unwrap();
     drop(rig);

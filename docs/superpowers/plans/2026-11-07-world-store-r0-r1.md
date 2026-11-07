@@ -323,10 +323,15 @@ The water static layer (`docs/superpowers/plans/2026-11-06-water-static-layer.md
   - `straddling_intent_is_saved_exactly_once`: the same for a chest put across the seam. Count items: after restore the total equals the total before.
   - `park_during_pending_cut`: begin a cut, then park a region before it reaches T. The cut completes with that region's stop snapshot. Respawn it from the parked blob, edit nothing and cut again: the union of the two cuts' chunks equals all its chunks.
   - `failed_cut_keeps_uncommitted`: `cut_failed`, then a cut in which only one other chunk changed. The second cut still carries the first cut's chunks.
-  - `late_region_misses_and_retries`: a region held back past T answers `CutMissed`; the next `begin_cut` uses lead 40.
+  - `late_region_misses_and_retries`: a region whose inputs are held back past T (it keeps ticking: `InlineSpawner::hold_inputs`) answers `CutMissed`; the next `begin_cut` uses lead 40.
 - [ ] **Step 2: Run** `just test-one game "--test it -- --include-ignored save_cut::"`. Expected: FAIL.
 - [ ] **Step 3: Implement** the runner and manager rules above. Delete the old save bookkeeping.
 - [ ] **Step 4: Run** `just test-one game "--test it -- --include-ignored save_cut::"`, then `just test-threads`, then `just smoke`. Expected: PASS.
+- As built (Task 5 implementation notes):
+  - The exact in-flight rule is decided by the per-region output channel's order: at the snapshot point the runner first flushes the Tick's `Departures` and the intents sent so far, then sends `CutSnapshot`. An item routed while its source has not answered is not in the source's view; it is in the cut iff its target confirmed it after its own answer (or not at all). Equivalent to the stamp rule, and it also covers what the manager makes of an item (refusals, salvage deposits, mailbox drops inherit the flag).
+  - Extra output `RegionOutput::PeoplePositions` just before each `CutSnapshot` (the history's `note_positions`, which the old `Saved` fed). Extra API: `WorldManager::cut_lead`, `pending_cut`, `awaiting_cut`, `uncommitted_regions`, `stored_regions`, `parked_blob` (the server's exit-time stopgap until Task 7).
+  - Any region loss while a cut is pending aborts it (no lead doubling).
+  - A region respawned from its in-process parked blob starts with empty chunk terms (its first snapshot is whole again): safe over a thread death that lost newer stored chunks; costs a full snapshot per resume.
 - [ ] **Step 5: Commit**: `feat(game): world-tick save cut with exact in-flight rule; replaces per-region autosave bookkeeping`.
 
 ### Task 6: The store thread and `StoreHandle`

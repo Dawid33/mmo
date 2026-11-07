@@ -563,8 +563,7 @@ fn leave_packet_removes_the_session() {
 
 // ---- Players park and restore across disconnects and restarts (Task 2) ----
 
-use game::{body_on_tile, feet_of, feet_tile, standable, PlayMode, PlayerId, PlayerRecord, Rollback, TilePos};
-use std::collections::BTreeMap;
+use game::{body_on_tile, feet_of, feet_tile, standable, PlayMode, PlayerId, PlayerRecord, TilePos};
 
 /// A harness whose regions are a whole floor (block 0 solid, block 1 air),
 /// built over `spawner`.
@@ -740,10 +739,8 @@ fn park_in_dead_region_does_not_lock_out() {
     let mut h = floored_harness();
     h.event(session(0, 0, None), 0);
     rearrange_inventory(&mut h, 0);
-    // What the store holds for the player: the last autosave's record.
-    h.manager.request_save();
-    h.settle(0);
-    let (_, stored) = h.manager.take_player_saves().pop().expect("autosaved");
+    // What the store holds for the player: the last save cut's record.
+    let stored = cut_now(&mut h).players.pop().expect("the player is in the cut").1;
     // The park goes out, then the region thread dies before answering it.
     h.manager.handle_server_event(ServerEvent::ClientDisconnected(0), 10);
     h.manager.spawner_mut().kill(SPAWN_REGION);
@@ -792,20 +789,34 @@ fn restore_into_built_over_cell_lands_standable() {
     assert_eq!(tile, [5, 3, 7], "on top of the pillar");
 }
 
+/// A save cut at the next tick (lockstep), taken.
+fn cut_now(h: &mut Harness) -> game::WorldCut {
+    use game::RegionSpawner;
+    let world = h.manager.spawner_mut().world_tick();
+    h.manager.begin_cut((world + 2).saturating_sub(game::SAVE_CUT_LEAD_TICKS)).expect("no cut pending");
+    for _ in 0..game::SAVE_CUT_LEAD_TICKS + 4 {
+        if let Some(cut) = h.manager.take_cut() {
+            return cut;
+        }
+        h.manager.spawner_mut().tick_all();
+        h.settle(0);
+    }
+    panic!("the cut never completed; waiting for {:?}", h.manager.awaiting_cut());
+}
+
 #[test]
-fn autosave_extracts_online_player_records() {
+fn cut_carries_online_player_records() {
     let mut h = floored_harness();
     h.event(session(0, 3, None), 0);
     rearrange_inventory(&mut h, 0);
-    h.manager.request_save();
-    h.settle(0);
-    assert_eq!(h.manager.take_saves().len(), 1);
-    let saves = h.manager.take_player_saves();
-    assert_eq!(saves.len(), 1, "{saves:?}");
-    assert_eq!(saves[0].0, PlayerId(3));
-    assert_eq!(saves[0].1.region, SPAWN_REGION);
-    assert!(rearranged(&saves[0].1.client));
-    assert_eq!(bodies_in(&mut h, SPAWN_REGION), 1, "an autosave parks nobody");
+    let cut = cut_now(&mut h);
+    assert_eq!(cut.regions.len(), 1);
+    assert_eq!(cut.players.len(), 1, "{:?}", cut.players);
+    assert_eq!(cut.players[0].0, PlayerId(3));
+    assert_eq!(cut.players[0].1.region, SPAWN_REGION);
+    assert!(rearranged(&cut.players[0].1.client));
+    assert_eq!(bodies_in(&mut h, SPAWN_REGION), 1, "a cut parks nobody");
+    assert!(h.manager.take_player_saves().is_empty(), "records of online players go only into cuts");
 }
 
 #[test]
@@ -838,15 +849,6 @@ fn fast_reconnect_waits_for_park() {
     );
 }
 
-/// Every region state a manager saved, as a restarted server's store would
-/// hand them back.
-fn saved_states(saves: Vec<(RegionCoords, game::RegionSave)>) -> BTreeMap<RegionCoords, Rollback> {
-    saves
-        .into_iter()
-        .map(|(rc, save)| (rc, save.into_serialized().to_rollback().expect("decodes")))
-        .collect()
-}
-
 #[test]
 fn restart_restores_player() {
     let mut h = floored_harness();
@@ -861,15 +863,15 @@ fn restart_restores_player() {
     h.manager.shutdown_all();
     h.settle(100);
     assert!(h.manager.running_regions().is_empty());
-    h.manager.request_save();
-    let regions = saved_states(h.manager.take_saves());
-    let mut store: BTreeMap<PlayerId, PlayerRecord> = BTreeMap::new();
-    store.extend(h.manager.take_player_saves());
+    // Nothing runs: the save cut is complete at once.
+    h.manager.begin_cut(0).expect("no cut pending");
+    let mut store = crate::common::cut_store::CutStore::default();
+    store.apply(&h.manager.take_cut().expect("complete"));
     drop(h);
 
     // A new process: client ids start at 0 again; the edge resolves the token.
-    let mut h = floored_harness_with(InlineSpawner::with_saved(regions));
-    h.event(session(0, 0, store.get(&PlayerId(0)).cloned()), 0);
+    let mut h = floored_harness_with(InlineSpawner::with_portable(store.regions));
+    h.event(session(0, 0, store.players.get(&PlayerId(0)).cloned()), 0);
     assert_eq!(bodies_in(&mut h, SPAWN_REGION), 1, "the saved body was stripped, the player restored once");
     assert_eq!(body_of(&mut h, SPAWN_REGION, 0), Some(at));
     assert!(rearranged(&client_in(&mut h, SPAWN_REGION, 0).unwrap()));

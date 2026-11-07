@@ -95,7 +95,7 @@ fn shutdown_stops_and_park_restore_is_hash_exact() {
     };
 
     assert!(!r.handle_input(RegionInput::Shutdown), "Shutdown must stop the runner");
-    let RegionOutput::Stopped(serialized, _far, _) = out.try_iter().map(|(_, o)| o).last().unwrap()
+    let RegionOutput::Stopped(serialized, _far, _, _) = out.try_iter().map(|(_, o)| o).last().unwrap()
     else {
         panic!("expected Stopped");
     };

@@ -12,10 +12,11 @@ use crossbeam::channel::{unbounded, Receiver, Sender};
 use crate::history::{AdventureRefusal, CalendarTick, EmbarkRefusal, History, SiteId, TICKS_PER_DAY};
 use crate::{
     Chunk, ChunkCoords, ClientId, ClientPacket, Column, ColumnCoords, EntityKind, TerrainSnapshot, GameEventKind,
-    LodBuildJob, LodBuilder, LodKey, LodPayload, LodResult, LodWater, Region, RegionCoords, RegionInput,
-    RegionOutput, RegionRunner, RegionSave, RegionSeed, SerializedRegion, ServerPacket, PlayRefusal, WorldMap, EmbarkRequest,
+    LodBuildJob, LodBuilder, LodKey, LodPayload, LodResult, LodWater, PortableRegion, Region, RegionCoords, RegionInput,
+    RegionOutput, RegionRunner, RegionSeed, SerializedRegion, ServerPacket, PlayRefusal, WorldMap, EmbarkRequest,
     Order, PlayMode, PlayerId, PlayerRecord,
 };
+use crate::save_cut::{CutId, InFlightRow, PendingCut, Uncommitted, WorldCut, SAVE_CUT_LEAD_MAX_TICKS, SAVE_CUT_LEAD_TICKS};
 
 /// Level hint for an adventure landing: above any surface, so it clamps to the
 /// column's top and the nearest standable tile is the topmost.
@@ -204,6 +205,13 @@ pub struct InlineSpawner {
     /// through [`crate::restore_saved`], as `ThreadRegionSpawner::with_store`
     /// does on the server.
     saved: BTreeMap<RegionCoords, crate::SavedRegion>,
+    /// Regions in the world store's portable format (a restarted server's
+    /// store, [`Self::with_portable`]): a region that has not run in this
+    /// process starts from it, through [`crate::restore_portable`].
+    portable: BTreeMap<RegionCoords, crate::StoredRegion>,
+    /// Test support ([`InlineSpawner::hold_inputs`]): regions that keep
+    /// ticking but leave their inputs unread for the next `n` rounds.
+    inputs_held: BTreeMap<RegionCoords, u32>,
     /// Rounds advanced by `tick_all`: the world tick of this lockstep world.
     rounds: crate::Tick,
     /// Test support ([`InlineSpawner::hold`]): regions that sit out the next
@@ -250,6 +258,26 @@ impl InlineSpawner {
         Self { saved, ..Self::default() }
     }
 
+    /// Regions that have not run yet start from the world store's `regions`
+    /// (a restarted server): restored by [`crate::restore_portable`], their
+    /// runner knowing the stored chunk terms. The world tick starts at the
+    /// latest stored region's tick, as the server's restored world clock.
+    pub fn with_portable(regions: BTreeMap<RegionCoords, crate::StoredRegion>) -> Self {
+        let rounds = regions.values().map(|r| r.meta.tick).max().unwrap_or(0);
+        Self { portable: regions, rounds, ..Self::default() }
+    }
+
+    /// Test support: `rc` keeps ticking but leaves its inputs unread for the
+    /// next `rounds` calls of `tick_all` — a region thread whose input
+    /// channel lags far behind its clock. `rounds == 0` releases it now.
+    pub fn hold_inputs(&mut self, rc: RegionCoords, rounds: u32) {
+        if rounds > 0 {
+            self.inputs_held.insert(rc, rounds);
+        } else {
+            self.inputs_held.remove(&rc);
+        }
+    }
+
     /// Swap the schedule on a live spawner (`None` = back to lockstep), for
     /// harnesses that construct their server before choosing one.
     pub fn set_schedule(&mut self, schedule: Option<InlineSchedule>) {
@@ -275,7 +303,7 @@ impl InlineSpawner {
             .runners
             .keys()
             .copied()
-            .filter(|id| !self.late.contains(id) && !self.held.contains_key(id))
+            .filter(|id| !self.late.contains(id) && !self.held.contains_key(id) && !self.inputs_held.contains_key(id))
             .collect();
         for id in ids {
             let mut stopped = false;
@@ -311,6 +339,10 @@ impl InlineSpawner {
         // for the next `pump`.
         let held: BTreeSet<RegionCoords> = self.held.keys().copied().collect();
         self.held.retain(|_, n| {
+            *n -= 1;
+            *n > 0
+        });
+        self.inputs_held.retain(|_, n| {
             *n -= 1;
             *n > 0
         });
@@ -351,6 +383,7 @@ impl InlineSpawner {
         self.runners.remove(&id);
         // A respawned region is a new thread: not held, not late.
         self.held.remove(&id);
+        self.inputs_held.remove(&id);
         self.late.remove(&id);
     }
 
@@ -372,13 +405,21 @@ impl RegionSpawner for InlineSpawner {
     ) -> Sender<RegionInput> {
         let (send, recv) = unbounded();
         let never_ran = matches!(seed, RegionSeed::Fresh(_) | RegionSeed::Deferred(None));
-        let runner = match self.saved.remove(&id).filter(|_| never_ran) {
-            Some(saved) => {
+        let stored = if never_ran { self.portable.remove(&id) } else { None };
+        let saved = if never_ran && stored.is_none() { self.saved.remove(&id) } else { None };
+        let runner = match (stored, saved) {
+            (Some(stored), _) => {
+                let (region, terms) = crate::restore_portable(id, stored);
+                let mut runner = RegionRunner::new(id, region, out);
+                runner.set_saved_terms(terms);
+                runner
+            }
+            (None, Some(saved)) => {
                 let mut runner = RegionRunner::new(id, crate::restore_saved(id, saved.state), out);
                 runner.requeue_saved(saved.transfers);
                 runner
             }
-            None => seed.into_runner(
+            (None, None) => seed.into_runner(
                 id,
                 out,
                 &|rc| unreachable!("InlineSpawner never generates columns ({rc:?})"),
@@ -510,48 +551,29 @@ fn defers_until_restored(packet: &ClientPacket) -> bool {
 
 /// An intent or reply routed to a running region as a `Transfer` that the
 /// region has not confirmed yet (its `EventProcessed(Intent)`): it lives only
-/// in the target's held queue, so the autosave must carry it.
+/// in the target's held queue, so a save cut may have to carry it.
 #[derive(Debug, Clone)]
 struct InFlightIntent {
     msg: crate::IntentMsg,
     target: RegionCoords,
-    /// The autosave round it was last saved with (in some region's save).
-    saved_in: Option<u64>,
+    /// Routed after its source's answer to the pending save cut: the
+    /// source's snapshot predates sending it, so the cut must not carry it
+    /// (`save_cut.rs`). Cleared by every `begin_cut`.
+    in_source_view: bool,
 }
 
 /// A crossing the manager has routed to its target but not yet seen applied
 /// there (`WorldManager::in_flight`).
 #[derive(Debug, Clone)]
 struct InFlight {
-    source: RegionCoords,
     target: RegionCoords,
     stamp: crate::Tick,
     /// In the target's frame.
     bundle: crate::EntityBundle,
-    /// The autosave round ([`WorldManager::request_save`]) it departed in, and
-    /// whether its source had already answered that round's `Save` — then the
-    /// source's saved state still holds it.
-    save_round: u64,
-    in_source_save: bool,
-    /// The autosave round it was last saved with, as a transfer.
-    saved_in: Option<u64>,
-}
-
-impl InFlight {
-    /// Whether this round's save of the SOURCE must carry this crossing
-    /// (given it is in no save yet): its target's save of the round will not
-    /// hold it, because the target is not (or no longer) asked —
-    /// - it departed this round and the target answered before that, or the
-    ///   target was never asked (stopping);
-    /// - it departed in an earlier round and the target was never asked this
-    ///   round: a stopping target, woken with the body only after this round
-    ///   began. (Had the target answered this round, it was in flight then
-    ///   and went with that save.)
-    fn source_saves(&self, round: u64, asked: &BTreeSet<RegionCoords>, answered: &BTreeSet<RegionCoords>) -> bool {
-        self.source != self.target
-            && !asked.contains(&self.target)
-            && (self.save_round == round || !answered.contains(&self.target))
-    }
+    /// Departed after its source's answer to the pending save cut: the
+    /// source's snapshot still holds the body (`save_cut.rs`). Cleared by
+    /// every `begin_cut`.
+    in_source_view: bool,
 }
 
 /// A non-player crossing into a region that was not running (plan Decision
@@ -559,14 +581,22 @@ impl InFlight {
 /// waits in [`WorldManager::pending_arrivals`] until the region next runs.
 #[derive(Debug, Clone)]
 struct PendingArrival {
-    /// The region it left, which saves it meanwhile.
+    /// The region it left (where a despawned one's drops are put down).
     source: RegionCoords,
     stamp: crate::Tick,
     /// In the target's frame.
     bundle: crate::EntityBundle,
-    /// The autosave round a save last held it in (its source's: as the body
-    /// in a state saved before it departed, or as a saved transfer).
-    saved_in: Option<u64>,
+    /// As [`InFlight::in_source_view`].
+    in_source_view: bool,
+}
+
+/// A reply (or a restored intent) waiting for a region that is not running
+/// (`WorldManager::intent_mailbox`).
+#[derive(Debug, Clone)]
+struct Mail {
+    msg: crate::IntentMsg,
+    /// As [`InFlightIntent::in_source_view`].
+    in_source_view: bool,
 }
 
 pub struct WorldManager<S: RegionSpawner> {
@@ -574,10 +604,6 @@ pub struct WorldManager<S: RegionSpawner> {
     generator: RegionGenerator,
     regions: BTreeMap<RegionCoords, RegionLink>,
     parked: BTreeMap<RegionCoords, SerializedRegion>,
-    /// Parked since the last [`Self::request_save`]: their blob is not saved yet.
-    unsaved_parked: BTreeSet<RegionCoords>,
-    /// World autosave states waiting for [`Self::take_saves`].
-    saves: Vec<(RegionCoords, RegionSave)>,
     /// Frozen terrain for parked / never-run regions, so LOD builds never
     /// wake a region. Refreshed on TerrainChanged and on park (Stopped).
     terrain_cache: BTreeMap<RegionCoords, TerrainSnapshot>,
@@ -640,7 +666,9 @@ pub struct WorldManager<S: RegionSpawner> {
     /// restore waits for its park: replayed once it is restored.
     deferred_packets: BTreeMap<ClientId, Vec<ClientPacket>>,
     /// Player records for the player store, collected since the last
-    /// [`Self::take_player_saves`]: parks and autosave extracts, oldest first.
+    /// [`Self::take_player_saves`]: parks, oldest first.
+    // TODO(world-store Task 7): records reach the store only in cuts
+    // (Decision 12); this goes once the server writes cuts.
     player_saves: Vec<(PlayerId, PlayerRecord)>,
     /// The `now_ms` of the latest call in (server event, region output,
     /// maintenance), for paths that learn of a lost region without one.
@@ -684,41 +712,48 @@ pub struct WorldManager<S: RegionSpawner> {
     /// target has not confirmed yet (its `EventProcessed(EntityArrived)`):
     /// every crossing entity is always in exactly one of its source's state,
     /// here, or its target's state / held queue. A target that dies is sent
-    /// these again once respawned; an autosave saves them with the target
-    /// whose saved state does not hold them yet.
+    /// these again once respawned; a save cut carries those in neither its
+    /// source's nor its target's snapshot (`save_cut.rs`).
     in_flight: BTreeMap<crate::EntityId, InFlight>,
-    /// Autosave rounds started ([`Self::request_save`]); the regions asked in
-    /// the current one that have not answered yet, and those that have.
-    save_round: u64,
-    save_asked: BTreeSet<RegionCoords>,
-    save_answered: BTreeSet<RegionCoords>,
-    /// Crossings of the current round that landed in a target whose save had
-    /// already been taken, from a source still to answer: they go with the
-    /// source's save (see [`Self::owe_source_save`]).
-    save_owed: BTreeMap<RegionCoords, Vec<crate::SavedTransfer>>,
+    /// The save cut asked for and not complete yet (`save_cut.rs`).
+    pending_cut: Option<PendingCut>,
+    /// A complete cut waiting for [`Self::take_cut`], with the `seq` of each
+    /// uncommitted entry it carries.
+    ready_cut: Option<(WorldCut, BTreeMap<RegionCoords, u64>)>,
+    /// Cuts taken and not committed or failed yet: the uncommitted entries
+    /// (`seq`) each carries.
+    outstanding_cuts: BTreeMap<CutId, BTreeMap<RegionCoords, u64>>,
+    /// Every region snapshot not committed yet, merged per region.
+    uncommitted: BTreeMap<RegionCoords, Uncommitted>,
+    uncommitted_seq: u64,
+    /// The lead of the next cut: [`SAVE_CUT_LEAD_TICKS`], doubled after each
+    /// missed one (up to [`SAVE_CUT_LEAD_MAX_TICKS`]).
+    cut_lead: crate::Tick,
+    next_cut_id: u64,
+    /// Orders the player records a pending cut collects (latest wins).
+    cut_order: u64,
+    /// The regions the world store holds, with their terrain version
+    /// ([`Self::set_stored_regions`], [`Self::cut_committed`]).
+    stored_regions: BTreeMap<RegionCoords, u64>,
     /// Where each entity is owned (spec P2's directory): from the regions'
     /// `Spawned` / `Despawned` reports and the `Departures` routed here (an
     /// entity in flight is at its target). Intents and replies addressed by
     /// `EntityId` are routed by it.
     locations: BTreeMap<crate::EntityId, RegionCoords>,
     /// Intents / replies sent to a running region and not yet confirmed by
-    /// it, in routing order. Saved exactly once per autosave round: with the
-    /// target's save (injected into the state, which lacks them), or — routed
-    /// after the target answered while their source has yet to — with the
-    /// source's (`save_owed_intents`); sent again to a target that dies.
+    /// it, in routing order. A save cut carries those in neither their
+    /// source's nor their target's snapshot; sent again to a target that dies.
     in_flight_intents: Vec<InFlightIntent>,
-    /// This round's intents owed to a source's save (see `in_flight_intents`).
-    save_owed_intents: BTreeMap<RegionCoords, Vec<crate::IntentMsg>>,
-    /// Replies for an entity in a parked or stopping region: delivered when
-    /// it next runs, saved with its parked state meanwhile.
-    intent_mailbox: BTreeMap<RegionCoords, Vec<crate::IntentMsg>>,
+    /// Replies for an entity in a parked or stopping region (and intents a
+    /// restore put back on their way): delivered when it next runs, carried
+    /// by save cuts meanwhile.
+    intent_mailbox: BTreeMap<RegionCoords, Vec<Mail>>,
     /// Non-player arrivals (slimes, dynamic bodies — anything but players
     /// and people) into a region that is not running (absent, parked or
     /// stopping), by target, in arrival order: they do not wake it, and are
     /// delivered — before its first tick — when it next starts. Meanwhile
-    /// each is saved exactly once per autosave round, with the region it
-    /// left (rebased back into its frame: restored, it crosses again), and
-    /// it is at its target in `locations` (kept when the target parks).
+    /// a save cut carries it (unless its source's snapshot still holds it),
+    /// and it is at its target in `locations` (kept when the target parks).
     ///
     /// Overflow ([`PENDING_ARRIVALS_PER_REGION_MAX`], `hold_arrival`): the
     /// oldest waiting arrival is despawned and counted
@@ -772,8 +807,6 @@ impl<S: RegionSpawner> WorldManager<S> {
             generator,
             regions: BTreeMap::new(),
             parked: BTreeMap::new(),
-            unsaved_parked: BTreeSet::new(),
-            saves: Vec::new(),
             terrain_cache: BTreeMap::new(),
             pristine_terrain: BTreeMap::new(),
             pristine_terrain_max: PRISTINE_TERRAIN_CACHE_MAX,
@@ -813,13 +846,17 @@ impl<S: RegionSpawner> WorldManager<S> {
             lod_results,
             directive_stamps: BTreeMap::new(),
             in_flight: BTreeMap::new(),
-            save_round: 0,
-            save_asked: BTreeSet::new(),
-            save_answered: BTreeSet::new(),
-            save_owed: BTreeMap::new(),
+            pending_cut: None,
+            ready_cut: None,
+            outstanding_cuts: BTreeMap::new(),
+            uncommitted: BTreeMap::new(),
+            uncommitted_seq: 0,
+            cut_lead: SAVE_CUT_LEAD_TICKS,
+            next_cut_id: 0,
+            cut_order: 0,
+            stored_regions: BTreeMap::new(),
             locations: BTreeMap::new(),
             in_flight_intents: Vec::new(),
-            save_owed_intents: BTreeMap::new(),
             intent_mailbox: BTreeMap::new(),
             pending_arrivals: BTreeMap::new(),
             arrivals_despawned: 0,
@@ -1007,6 +1044,10 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// starting kit, which is only for players new to the world.
     fn finish_move(&mut self, client: ClientId, record: Option<Box<PlayerRecord>>, now_ms: u64) {
         let Some(m) = self.moving.remove(&client) else { return };
+        if let (Some(record), Some((player, fortress, adventure))) = (&record, self.player_for(client)) {
+            // In no region while its creation is on its way to the target.
+            self.cut_transit(player, &PlayerRecord { fortress, adventure, ..(**record).clone() });
+        }
         let carried = match record {
             Some(record) => record.client,
             None => {
@@ -1364,13 +1405,14 @@ impl<S: RegionSpawner> WorldManager<S> {
             RegionOutput::EventProcessed(event) => {
                 if let GameEventKind::Intent(msg) = &event.kind {
                     if let Some(i) = self.in_flight_intents.iter().position(|f| f.target == rc && f.msg == *msg) {
-                        self.in_flight_intents.remove(i);
+                        let f = self.in_flight_intents.remove(i);
+                        self.cut_confirmed_intent(f);
                     }
                 }
                 if let GameEventKind::EntityArrived(bundle) = &event.kind {
                     if self.in_flight.get(&bundle.id).is_some_and(|f| f.target == rc) {
                         let f = self.in_flight.remove(&bundle.id).expect("checked");
-                        self.owe_source_save(f);
+                        self.cut_confirmed_arrival(f);
                     }
                 }
                 if let Some(link) = self.regions.get(&rc) {
@@ -1401,15 +1443,12 @@ impl<S: RegionSpawner> WorldManager<S> {
             RegionOutput::Snapshot(client, rollback) => {
                 let _ = self.out.send((Some(client), ServerPacket::Region(rc, rollback)));
             }
-            RegionOutput::Saved(mut rollback) => {
-                let intents = self.saved_intents(rc);
-                rollback.insert_saved_intents(&intents);
-                self.extract_player_saves(rc, &rollback);
+            RegionOutput::CutSnapshot(id, tick, portable) => self.cut_answer(rc, Some((id, tick)), *portable),
+            RegionOutput::CutMissed(id) => self.cut_missed(rc, id),
+            RegionOutput::PeoplePositions(people) => {
                 if let Some(history) = self.history.as_mut() {
-                    history.note_positions(rollback.people_here());
+                    history.note_positions(people);
                 }
-                let transfers = self.saved_transfers(rc);
-                self.saves.push((rc, RegionSave::Live(rollback, transfers)));
             }
             RegionOutput::PlayerParked(client, record, body) => self.player_parked(rc, client, record, body, now_ms),
             RegionOutput::SyncClock { tick_rate, tick } => {
@@ -1435,7 +1474,10 @@ impl<S: RegionSpawner> WorldManager<S> {
                 self.cache_authoritative_terrain(rc, snap);
                 self.invalidate_region_lod(rc);
             }
-            RegionOutput::Stopped(serialized, far, stamp) => {
+            RegionOutput::Stopped(serialized, far, stamp, portable) => {
+                // Its final snapshot: uncommitted until a cut commits it, and
+                // its answer to a pending cut (it is parked at the cut tick).
+                self.cut_answer(rc, None, *portable);
                 // `PeopleParked` comes first; a region that sent none gave nobody back.
                 if self.history.as_ref().is_some_and(|h| h.region_live(rc)) {
                     self.history_region_lost(rc);
@@ -1460,7 +1502,6 @@ impl<S: RegionSpawner> WorldManager<S> {
                 // What it held parks with it (its next run reports it again).
                 self.forget_locations(rc);
                 self.parked.insert(rc, serialized);
-                self.unsaved_parked.insert(rc);
                 let pending = self
                     .regions
                     .remove(&rc)
@@ -1493,6 +1534,9 @@ impl<S: RegionSpawner> WorldManager<S> {
                 }
             }
             RegionOutput::Departures(list, stamp) => {
+                // Departed after `rc` answered the pending cut: its snapshot
+                // still holds them (`save_cut.rs`).
+                let view = self.in_cut_view(rc);
                 for (mut bundle, target) in list {
                     let client = bundle.client.as_ref().map(|(c, _)| *c);
                     if crate::off_map(self.map_extent(), target) {
@@ -1503,7 +1547,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                         let t = &mut bundle.body.pose.translation;
                         t.x = t.x.clamp(0.0, crate::REGION_SIZE);
                         t.z = t.z.clamp(0.0, crate::REGION_SIZE);
-                        self.enter_in_flight(rc, rc, stamp, &bundle);
+                        self.enter_in_flight(rc, rc, stamp, &bundle, view);
                         self.locations.insert(bundle.id, rc);
                         self.send_to_region(rc, RegionInput::Transfer(GameEventKind::EntityArrived(bundle), stamp));
                         continue;
@@ -1530,14 +1574,14 @@ impl<S: RegionSpawner> WorldManager<S> {
                             // (with its logs) in the mailbox: it settles now,
                             // on the seam on its source's side — its policy's
                             // drops put down there, or nothing.
-                            self.settle_at_seam(rc, target, bundle);
+                            self.settle_at_seam(rc, target, bundle, view);
                         } else {
-                            self.hold_arrival(rc, target, stamp, bundle);
+                            self.hold_arrival(rc, target, stamp, bundle, view);
                         }
                         continue;
                     }
                     self.ensure_running(target);
-                    self.enter_in_flight(rc, target, stamp, &bundle);
+                    self.enter_in_flight(rc, target, stamp, &bundle, view);
                     self.locations.insert(bundle.id, target);
                     self.send_to_region(
                         target,
@@ -1611,8 +1655,11 @@ impl<S: RegionSpawner> WorldManager<S> {
                 }
             }
             RegionOutput::Intents(list) => {
+                // Sent after `rc` answered the pending cut: its snapshot
+                // predates them (`save_cut.rs`).
+                let view = self.in_cut_view(rc);
                 for msg in list {
-                    self.route_intent(msg, rc);
+                    self.route_intent(msg, rc, view);
                 }
             }
             RegionOutput::HaloEntities(list, stamp) => {
@@ -1671,6 +1718,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             if link.input.send(RegionInput::Shutdown).is_err() {
                 // Already dead: nothing to park (state lost), just clean up.
                 log::error!("region {:?} died before shutdown", rc);
+                self.cut_region_lost(rc);
                 self.regions.remove(&rc);
                 self.pending_events.remove(&rc);
                 self.spawner.reap(rc);
@@ -1701,6 +1749,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             }
         }
         for rc in dead {
+            self.cut_region_lost(rc);
             self.regions.remove(&rc);
             self.pending_events.remove(&rc);
             self.spawner.reap(rc);
@@ -1714,70 +1763,370 @@ impl<S: RegionSpawner> WorldManager<S> {
         }
     }
 
-    /// World autosave: every running region (not stopping) is asked for its
-    /// state — it arrives as `RegionOutput::Saved` — and every region parked
-    /// since the last call is queued at once. A stopping region is saved once
-    /// it has parked, by the next call. Collect them with [`Self::take_saves`].
-    /// A live save carries the crossings in flight that no saved state of the
-    /// round holds (`saved_transfers`), so each is saved exactly once.
-    pub fn request_save(&mut self) {
-        self.save_round += 1;
-        self.save_asked.clear();
-        self.save_answered.clear();
-        self.save_owed.clear();
-        self.save_owed_intents.clear();
+    /// Start a save cut at world tick `now + lead` (`save_cut.rs`): every
+    /// running region is asked for its snapshot at the opening of that slot
+    /// (`SaveAt`), a stopping one answers with its `Stopped`, and the
+    /// uncommitted snapshots of the regions not running are carried as they
+    /// are. `None` while a cut is pending or a complete one waits for
+    /// [`Self::take_cut`].
+    pub fn begin_cut(&mut self, now: crate::Tick) -> Option<CutId> {
+        if self.pending_cut.is_some() || self.ready_cut.is_some() {
+            return None;
+        }
+        self.next_cut_id += 1;
+        let id = CutId(self.next_cut_id);
+        let tick = now + self.cut_lead;
+        let mut cut = PendingCut::new(id, tick);
+        // What was routed before now left its source before the cut tick.
+        for f in self.in_flight.values_mut() {
+            f.in_source_view = false;
+        }
+        for f in &mut self.in_flight_intents {
+            f.in_source_view = false;
+        }
+        for p in self.pending_arrivals.values_mut().flatten() {
+            p.in_source_view = false;
+        }
+        for m in self.intent_mailbox.values_mut().flatten() {
+            m.in_source_view = false;
+        }
+        let mut dead = Vec::new();
         for (rc, link) in &self.regions {
             if link.stopping {
-                continue;
-            }
-            if link.input.send(RegionInput::Save).is_err() {
-                log::error!("region {:?} died before it could be saved", rc);
+                cut.waiting.insert(*rc);
+            } else if link.input.send(RegionInput::SaveAt(id, tick)).is_ok() {
+                cut.waiting.insert(*rc);
             } else {
-                self.save_asked.insert(*rc);
+                dead.push(*rc);
             }
         }
-        for rc in std::mem::take(&mut self.unsaved_parked) {
-            if !self.parked.contains_key(&rc) {
-                continue;
+        // The regions not running are at the cut tick as they parked.
+        for (rc, u) in &self.uncommitted {
+            if !self.regions.contains_key(rc) {
+                cut.regions.insert(*rc, (u.region.clone(), u.seq));
             }
-            let transfers = self.saved_pending_arrivals(rc);
-            if let Some(blob) = self.parked.get(&rc) {
-                let blob = match self.intent_mailbox.get(&rc) {
-                    // Its mailbox goes into the saved state (the parked blob
-                    // in memory stays as it is; the mailbox is delivered
-                    // when it runs again in this process).
-                    Some(mail) => match blob.to_rollback() {
-                        Ok(mut state) => {
-                            state.insert_saved_intents(mail);
-                            SerializedRegion::from_rollback(&state)
-                        }
-                        Err(e) => {
-                            log::error!("parked {rc:?} does not decode for its save ({e}); its mailbox is not saved");
-                            blob.clone()
-                        }
-                    },
-                    None => blob.clone(),
-                };
-                self.saves.push((rc, RegionSave::Parked(blob, transfers)));
+        }
+        log::debug!("[server] save cut {} at tick {tick}: {} regions asked", id.0, cut.waiting.len());
+        self.pending_cut = Some(cut);
+        if !dead.is_empty() {
+            // A region thread that died: its state is lost, so this cut cannot
+            // hold it. Aborted; the respawn comes with the next send to it.
+            log::error!("save cut {}: regions {dead:?} died before they could be asked; aborted", id.0);
+            self.pending_cut = None;
+            return None;
+        }
+        self.try_complete_cut();
+        Some(id)
+    }
+
+    /// The complete cut, once every region asked has answered. Its
+    /// uncommitted entries stay until [`Self::cut_committed`].
+    pub fn take_cut(&mut self) -> Option<WorldCut> {
+        let (cut, carried) = self.ready_cut.take()?;
+        self.outstanding_cuts.insert(cut.id, carried);
+        Some(cut)
+    }
+
+    /// The store committed cut `id`: the uncommitted entries it carried are
+    /// cleared (unless a newer snapshot was merged since), and `versions`
+    /// (each written region's terrain version) are what the store holds.
+    pub fn cut_committed(&mut self, id: CutId, versions: Vec<(RegionCoords, u64)>) {
+        if let Some(carried) = self.outstanding_cuts.remove(&id) {
+            for (rc, seq) in carried {
+                if self.uncommitted.get(&rc).is_some_and(|u| u.seq == seq) {
+                    self.uncommitted.remove(&rc);
+                }
+            }
+        } else {
+            log::warn!("cut {} committed but not outstanding", id.0);
+        }
+        self.stored_regions.extend(versions);
+    }
+
+    /// The store failed to commit cut `id`: its entries stay uncommitted, so
+    /// the next cut carries them again.
+    pub fn cut_failed(&mut self, id: CutId) {
+        self.outstanding_cuts.remove(&id);
+    }
+
+    /// The regions the world store holds, with their terrain versions (set
+    /// at startup from the store; kept current by [`Self::cut_committed`]).
+    pub fn set_stored_regions(&mut self, regions: BTreeMap<RegionCoords, u64>) {
+        self.stored_regions = regions;
+    }
+
+    /// See [`Self::set_stored_regions`].
+    pub fn stored_regions(&self) -> &BTreeMap<RegionCoords, u64> {
+        &self.stored_regions
+    }
+
+    /// What a cut caught in flight, put back on its way (a restarted
+    /// server, from the store): a crossing waits in its target's arrival
+    /// mailbox and an intent or reply in its intent mailbox, both delivered
+    /// when the target runs — at once, if it already does.
+    pub fn restore_in_flight(&mut self, rows: Vec<InFlightRow>) {
+        for row in rows {
+            match row {
+                InFlightRow::Transfer { target, bundle, stamp } => {
+                    self.locations.insert(bundle.id, target);
+                    if self.regions.get(&target).is_some_and(|l| !l.stopping) {
+                        self.enter_in_flight(target, target, stamp, &bundle, false);
+                        self.send_to_region(target, RegionInput::Transfer(GameEventKind::EntityArrived(bundle), stamp));
+                    } else {
+                        let p = PendingArrival { source: target, stamp, bundle, in_source_view: false };
+                        self.pending_arrivals.entry(target).or_default().push(p);
+                    }
+                }
+                InFlightRow::Intent { target, msg } => {
+                    if self.regions.get(&target).is_some_and(|l| !l.stopping) {
+                        self.send_intent_to(target, msg, false);
+                    } else {
+                        self.intent_mailbox.entry(target).or_default().push(Mail { msg, in_source_view: false });
+                    }
+                }
             }
         }
     }
 
-    /// Region states for the world autosave collected since the last call.
-    pub fn take_saves(&mut self) -> Vec<(RegionCoords, RegionSave)> {
-        std::mem::take(&mut self.saves)
+    /// The lead the next cut is placed at ([`SAVE_CUT_LEAD_TICKS`], doubled
+    /// after each missed cut, reset by a complete one).
+    pub fn cut_lead(&self) -> crate::Tick {
+        self.cut_lead
+    }
+
+    /// Test support: the pending cut's id and tick.
+    pub fn pending_cut(&self) -> Option<(CutId, crate::Tick)> {
+        self.pending_cut.as_ref().map(|c| (c.id, c.tick))
+    }
+
+    /// Test support: the regions the pending cut still waits for.
+    pub fn awaiting_cut(&self) -> Vec<RegionCoords> {
+        self.pending_cut.as_ref().map(|c| c.waiting.iter().copied().collect()).unwrap_or_default()
+    }
+
+    /// Test support: the regions with snapshots not committed yet.
+    pub fn uncommitted_regions(&self) -> Vec<RegionCoords> {
+        self.uncommitted.keys().copied().collect()
+    }
+
+    /// Whether `rc`'s view of the pending cut is taken (answered, or not
+    /// running when the cut began): what it sends now is not in the cut.
+    /// `false` with no cut pending.
+    fn in_cut_view(&self, rc: RegionCoords) -> bool {
+        self.pending_cut.as_ref().is_some_and(|c| !c.waiting.contains(&rc))
+    }
+
+    /// Merge `portable`, `rc`'s newest snapshot, into its uncommitted entry;
+    /// returns the entry's new `seq`.
+    fn merge_uncommitted(&mut self, rc: RegionCoords, portable: PortableRegion) -> u64 {
+        self.uncommitted_seq += 1;
+        let seq = self.uncommitted_seq;
+        match self.uncommitted.get_mut(&rc) {
+            Some(u) => {
+                u.region.merge(portable);
+                u.seq = seq;
+            }
+            None => {
+                self.uncommitted.insert(rc, Uncommitted { region: portable, seq });
+            }
+        }
+        seq
+    }
+
+    /// `rc` sent a snapshot: a `CutSnapshot` (`cut` = its id and tick) or its
+    /// `Stopped` one (`None`). Always merged into the uncommitted entry (a
+    /// stale cut's too: the region's terms moved on); the answer of the
+    /// pending cut when it waits for `rc`.
+    fn cut_answer(&mut self, rc: RegionCoords, cut: Option<(CutId, crate::Tick)>, portable: PortableRegion) {
+        let players = portable.players.clone();
+        let seq = self.merge_uncommitted(rc, portable);
+        let Some(pending) = self.pending_cut.as_ref() else { return };
+        let answers = pending.waiting.contains(&rc) && cut.is_none_or(|(id, _)| id == pending.id);
+        if !answers {
+            return;
+        }
+        debug_assert!(cut.is_none_or(|(_, t)| t == pending.tick), "a cut snapshot at another tick");
+        let mut records = Vec::new();
+        for (client, record) in players {
+            let Some((player, fortress, adventure)) = self.player_for(client) else { continue };
+            self.cut_order += 1;
+            records.push((self.cut_order, player, PlayerRecord { fortress, adventure, ..record }));
+        }
+        let entry = self.uncommitted[&rc].region.clone();
+        let pending = self.pending_cut.as_mut().expect("checked");
+        pending.waiting.remove(&rc);
+        pending.regions.insert(rc, (entry, seq));
+        pending.region_players.insert(rc, records);
+        self.try_complete_cut();
+    }
+
+    /// `rc` was past the pending cut's tick when asked: the cut is aborted
+    /// and the next one doubles its lead.
+    fn cut_missed(&mut self, rc: RegionCoords, id: CutId) {
+        if self.pending_cut.as_ref().is_none_or(|c| c.id != id) {
+            return;
+        }
+        let tick = self.pending_cut.as_ref().map_or(0, |c| c.tick);
+        self.pending_cut = None;
+        self.cut_lead = (self.cut_lead * 2).min(SAVE_CUT_LEAD_MAX_TICKS);
+        log::warn!("save cut {} at tick {tick}: {rc:?} was already past it; aborted (next lead {})", id.0, self.cut_lead);
+    }
+
+    /// `rc` was lost (its thread died): a pending cut is aborted — what the
+    /// region held since it answered (or would have) died with it, and its
+    /// respawn is not the state the cut saw.
+    fn cut_region_lost(&mut self, rc: RegionCoords) {
+        if let Some(cut) = self.pending_cut.take() {
+            log::error!("save cut {}: {rc:?} was lost while it was pending; aborted", cut.id.0);
+        }
+    }
+
+    /// A region started (`ensure_running`) at world tick `start`: a pending
+    /// cut whose tick it has not passed asks it too (its answer replaces a
+    /// `Stopped` one).
+    fn cut_region_started(&mut self, rc: RegionCoords, start: crate::Tick, input: &Sender<RegionInput>) {
+        let Some(cut) = self.pending_cut.as_mut() else { return };
+        if start <= cut.tick && input.send(RegionInput::SaveAt(cut.id, cut.tick)).is_ok() {
+            cut.waiting.insert(rc);
+        }
+    }
+
+    /// A record passing through the manager (park, restore, move) while a
+    /// cut is pending: the cut's fallback for a player in no snapshot.
+    fn cut_transit(&mut self, player: PlayerId, record: &PlayerRecord) {
+        if let Some(cut) = self.pending_cut.as_mut() {
+            cut.transit_players.insert(player, record.clone());
+        }
+    }
+
+    /// The player behind `client` and its claims, for a cut's record: an
+    /// online session's, or a park's in flight.
+    fn player_for(&self, client: ClientId) -> Option<(PlayerId, Option<SiteId>, Option<SiteId>)> {
+        if let Some(&player) = self.player_of.get(&client) {
+            return Some((player, self.fortress_of.get(&client).copied(), self.adventurer_of.get(&client).copied()));
+        }
+        self.parking.get(&client).map(|p| (p.player, p.fortress, p.adventure))
+    }
+
+    /// A player crossing in `bundle` (in `target`'s frame) as its record.
+    fn crossing_record(&self, target: RegionCoords, bundle: &crate::EntityBundle) -> Option<(PlayerId, PlayerRecord)> {
+        let (client, c) = bundle.client.as_ref()?;
+        let (player, fortress, adventure) = self.player_for(*client)?;
+        let record = PlayerRecord {
+            client: crate::parked_client(c),
+            pose: bundle.body.pose,
+            region: target,
+            fortress,
+            adventure,
+        };
+        Some((player, record))
+    }
+
+    /// The cut's place for crossing `f`, in neither its source's nor its
+    /// target's view: a row, a player's record, or nothing (a person).
+    fn cut_crossing(&mut self, f: &InFlight) {
+        if matches!(f.bundle.kind, EntityKind::Person { .. }) {
+            return;
+        }
+        if f.bundle.client.is_some() {
+            let record = self.crossing_record(f.target, &f.bundle);
+            self.cut_order += 1;
+            let order = self.cut_order;
+            if let (Some((player, record)), Some(cut)) = (record, self.pending_cut.as_mut()) {
+                cut.crossing_players.push((order, player, record));
+            }
+            return;
+        }
+        if let Some(cut) = self.pending_cut.as_mut() {
+            cut.rows.push(InFlightRow::Transfer { target: f.target, bundle: f.bundle.clone(), stamp: f.stamp });
+        }
+    }
+
+    /// Crossing `f` was just applied by its target: if the target's view of
+    /// the pending cut is taken and the source's snapshot did not hold it, the
+    /// cut carries it.
+    fn cut_confirmed_arrival(&mut self, f: InFlight) {
+        if self.pending_cut.is_some() && !f.in_source_view && self.in_cut_view(f.target) {
+            self.cut_crossing(&f);
+        }
+    }
+
+    /// The same for an intent or reply.
+    fn cut_confirmed_intent(&mut self, f: InFlightIntent) {
+        if !f.in_source_view && self.in_cut_view(f.target) {
+            if let Some(cut) = self.pending_cut.as_mut() {
+                cut.rows.push(InFlightRow::Intent { target: f.target, msg: f.msg });
+            }
+        }
+    }
+
+    /// Every region asked has answered: the cut is complete — its regions,
+    /// what is still on its way and in no snapshot, and the players.
+    fn try_complete_cut(&mut self) {
+        if self.pending_cut.as_ref().is_none_or(|c| !c.waiting.is_empty()) {
+            return;
+        }
+        // Still in flight and in neither view.
+        let crossings: Vec<InFlight> = self.in_flight.values().filter(|f| !f.in_source_view).cloned().collect();
+        for f in &crossings {
+            self.cut_crossing(f);
+        }
+        let mut cut = self.pending_cut.take().expect("checked");
+        for (target, list) in &self.pending_arrivals {
+            for p in list.iter().filter(|p| !p.in_source_view) {
+                cut.rows.push(InFlightRow::Transfer { target: *target, bundle: p.bundle.clone(), stamp: p.stamp });
+            }
+        }
+        for f in self.in_flight_intents.iter().filter(|f| !f.in_source_view) {
+            cut.rows.push(InFlightRow::Intent { target: f.target, msg: f.msg });
+        }
+        for (target, list) in &self.intent_mailbox {
+            for m in list.iter().filter(|m| !m.in_source_view) {
+                cut.rows.push(InFlightRow::Intent { target: *target, msg: m.msg });
+            }
+        }
+        // Players: the latest record of each in the snapshots and crossings,
+        // then the parked ones, then those that passed through meanwhile.
+        // A crossing the cut caught is in no snapshot (the in-flight rule).
+        debug_assert!(
+            cut.crossing_players.iter().all(|(_, p, _)| !cut.region_players.values().flatten().any(|(_, q, _)| q == p)),
+            "a player crossing in the cut is also in a region snapshot"
+        );
+        let mut ordered: Vec<(u64, PlayerId, PlayerRecord)> =
+            cut.region_players.into_values().flatten().chain(cut.crossing_players).collect();
+        ordered.sort_by_key(|(order, _, _)| *order);
+        let mut players: BTreeMap<PlayerId, PlayerRecord> = BTreeMap::new();
+        for (_, player, record) in ordered {
+            players.insert(player, record);
+        }
+        for (player, record) in self.parked_players.iter().chain(cut.transit_players.iter()) {
+            players.entry(*player).or_insert_with(|| record.clone());
+        }
+        let carried: BTreeMap<RegionCoords, u64> = cut.regions.iter().map(|(rc, (_, seq))| (*rc, *seq)).collect();
+        let world_cut = WorldCut {
+            id: cut.id,
+            tick: cut.tick,
+            regions: cut.regions.into_iter().map(|(rc, (p, _))| (rc, p)).collect(),
+            in_flight: cut.rows,
+            players: players.into_iter().collect(),
+            history: self.history.as_ref().map(crate::history::persist::encode),
+        };
+        log::debug!(
+            "[server] save cut {} at tick {} complete: {} regions, {} in flight, {} players",
+            world_cut.id.0,
+            world_cut.tick,
+            world_cut.regions.len(),
+            world_cut.in_flight.len(),
+            world_cut.players.len()
+        );
+        self.ready_cut = Some((world_cut, carried));
+        self.cut_lead = SAVE_CUT_LEAD_TICKS;
     }
 
     /// Crossings routed but not yet confirmed by their target (the `[server]`
     /// counters line).
     pub fn in_flight_count(&self) -> usize {
         self.in_flight.len()
-    }
-
-    /// Test support: regions asked for this round's save that have not
-    /// answered yet (a stopping region is never asked).
-    pub fn awaiting_save(&self) -> Vec<RegionCoords> {
-        self.save_asked.iter().copied().collect()
     }
 
     /// Non-player arrivals waiting in the mailbox for `rc` to run.
@@ -1806,17 +2155,23 @@ impl<S: RegionSpawner> WorldManager<S> {
     }
 
     /// `bundle` (in `target`'s frame), departed from `source` at `stamp`,
-    /// waits for `target`, which is not running. If `source` already
-    /// answered this round's `Save`, its saved state holds the body.
-    fn hold_arrival(&mut self, source: RegionCoords, target: RegionCoords, stamp: crate::Tick, bundle: crate::EntityBundle) {
+    /// waits for `target`, which is not running. `in_source_view`: departed
+    /// after `source` answered the pending cut.
+    fn hold_arrival(
+        &mut self,
+        source: RegionCoords,
+        target: RegionCoords,
+        stamp: crate::Tick,
+        bundle: crate::EntityBundle,
+        in_source_view: bool,
+    ) {
         debug_assert!(
             bundle.client.is_none() && !matches!(bundle.kind, EntityKind::Person { .. }),
             "players and people never wait in the mailbox"
         );
-        let saved_in = self.save_answered.contains(&source).then_some(self.save_round);
         self.locations.insert(bundle.id, target);
         let list = self.pending_arrivals.entry(target).or_default();
-        list.push(PendingArrival { source, stamp, bundle, saved_in });
+        list.push(PendingArrival { source, stamp, bundle, in_source_view });
         if list.len() <= PENDING_ARRIVALS_PER_REGION_MAX {
             return;
         }
@@ -1828,18 +2183,13 @@ impl<S: RegionSpawner> WorldManager<S> {
             self.recently_despawned.pop_front();
         }
         self.recently_despawned.push_back(gone.bundle.id);
-        // Its source's file may hold it (a parked source is saved once):
-        // saved again, without it. A running source is saved every round.
-        if self.parked.contains_key(&gone.source) {
-            self.unsaved_parked.insert(gone.source);
-        }
         if self.despawn_warned.insert(target) {
             log::warn!(
                 "[server] arrivals waiting for {target:?} past {PENDING_ARRIVALS_PER_REGION_MAX}: the oldest are despawned ({:?} first)",
                 gone.bundle.kind
             );
         }
-        self.put_down_drops(gone.source, target, gone.bundle);
+        self.put_down_drops(gone.source, target, gone.bundle, gone.in_source_view);
     }
 
     /// A voxel body departing `source` into `target`, which is not running:
@@ -1847,10 +2197,10 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// `DropItems` body's, in `Carried::drops`) put down at the seam cell on
     /// the source's side, like a mailbox overflow's ([`Self::put_down_drops`]);
     /// a `Despawn` body leaves nothing.
-    fn settle_at_seam(&mut self, source: RegionCoords, target: RegionCoords, bundle: crate::EntityBundle) {
+    fn settle_at_seam(&mut self, source: RegionCoords, target: RegionCoords, bundle: crate::EntityBundle, view: bool) {
         log::debug!("[server] voxel body {:?} into {target:?}, not running: settled at the seam", bundle.id);
         self.locations.remove(&bundle.id);
-        self.put_down_drops(source, target, bundle);
+        self.put_down_drops(source, target, bundle, view);
     }
 
     /// `bundle`, a body from `source` gone on its way to `target` (a waiting
@@ -1859,8 +2209,9 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// the cell under its body, clamped into the source (see
     /// `pending_arrivals`). Region-sourced deposits, so a refusal (the
     /// source not running) comes back to the source, which puts them down
-    /// itself when it next runs.
-    fn put_down_drops(&mut self, source: RegionCoords, target: RegionCoords, mut bundle: crate::EntityBundle) {
+    /// itself when it next runs. `view`: the body was in its source's view of
+    /// the pending cut (its deposits are then not in the cut either).
+    fn put_down_drops(&mut self, source: RegionCoords, target: RegionCoords, mut bundle: crate::EntityBundle, view: bool) {
         if bundle.carried.drops.is_empty() {
             return;
         }
@@ -1888,28 +2239,20 @@ impl<S: RegionSpawner> WorldManager<S> {
                 from: source,
                 due,
             };
-            self.route_intent(crate::IntentMsg::Intent(sent), source);
+            self.route_intent(crate::IntentMsg::Intent(sent), source, view);
         }
     }
 
     /// `rc` just started: its waiting arrivals go to it as ordinary
-    /// crossings in flight, the save bookkeeping carried over — a save that
-    /// held one this round still does. A parked source is saved again at the
-    /// next round, without them (its saved file holds them until then).
+    /// crossings in flight, their cut view carried over.
     fn deliver_pending_arrivals(&mut self, rc: RegionCoords) {
         self.despawn_warned.remove(&rc);
         for p in self.pending_arrivals.remove(&rc).unwrap_or_default() {
-            if self.parked.contains_key(&p.source) {
-                self.unsaved_parked.insert(p.source);
-            }
             let entry = InFlight {
-                source: p.source,
                 target: rc,
                 stamp: p.stamp,
                 bundle: p.bundle.clone(),
-                save_round: self.save_round,
-                in_source_save: false,
-                saved_in: p.saved_in,
+                in_source_view: p.in_source_view,
             };
             if let Some(old) = self.in_flight.insert(p.bundle.id, entry) {
                 log::error!("{:?} waited for {rc:?} while in flight to {:?}", p.bundle.id, old.target);
@@ -1917,23 +2260,6 @@ impl<S: RegionSpawner> WorldManager<S> {
             self.locations.insert(p.bundle.id, rc);
             self.send_to_region(rc, RegionInput::Transfer(GameEventKind::EntityArrived(p.bundle), p.stamp));
         }
-    }
-
-    /// This round's save of `source` (live or parked) carries the arrivals
-    /// waiting elsewhere that departed from it and are not saved this round
-    /// yet, rebased back into its frame.
-    fn saved_pending_arrivals(&mut self, source: RegionCoords) -> Vec<crate::SavedTransfer> {
-        let round = self.save_round;
-        let mut out = Vec::new();
-        for (target, list) in self.pending_arrivals.iter_mut() {
-            for p in list.iter_mut().filter(|p| p.source == source && p.saved_in != Some(round)) {
-                let mut bundle = p.bundle.clone();
-                bundle.rebase(*target, source);
-                out.push((bundle, p.stamp));
-                p.saved_in = Some(round);
-            }
-        }
-        out
     }
 
     /// Test support: every crossing in flight, with its target.
@@ -1948,69 +2274,11 @@ impl<S: RegionSpawner> WorldManager<S> {
         target: RegionCoords,
         stamp: crate::Tick,
         bundle: &crate::EntityBundle,
+        in_source_view: bool,
     ) {
-        let entry = InFlight {
-            source,
-            target,
-            stamp,
-            bundle: bundle.clone(),
-            save_round: self.save_round,
-            in_source_save: self.save_answered.contains(&source),
-            saved_in: None,
-        };
+        let entry = InFlight { target, stamp, bundle: bundle.clone(), in_source_view };
         if let Some(old) = self.in_flight.insert(bundle.id, entry) {
             log::error!("{:?} departed {source:?} while still in flight to {:?}", bundle.id, old.target);
-        }
-    }
-
-    /// `rc` answered this round's `Save`: the crossings in flight that its
-    /// saved state lacks and no other save of the round holds — so each one
-    /// is saved exactly once per round:
-    /// - in flight to `rc` (unless the source's save, answered before the
-    ///   departure, still holds the body);
-    /// - departed from `rc` to a target whose save of this round will not
-    ///   hold it ([`InFlight::source_saves`]): saved here, rebased back into
-    ///   `rc`'s frame — restored, it arrives just past the seam and crosses
-    ///   again.
-    fn saved_transfers(&mut self, rc: RegionCoords) -> Vec<crate::SavedTransfer> {
-        self.save_asked.remove(&rc);
-        self.save_answered.insert(rc);
-        let round = self.save_round;
-        let mut out = self.save_owed.remove(&rc).unwrap_or_default();
-        out.extend(self.saved_pending_arrivals(rc));
-        let (asked, answered) = (&self.save_asked, &self.save_answered);
-        for f in self.in_flight.values_mut() {
-            if f.saved_in == Some(round) || (f.save_round == round && f.in_source_save) {
-                continue;
-            }
-            if f.target == rc {
-                out.push((f.bundle.clone(), f.stamp));
-            } else if f.source == rc && f.source_saves(round, asked, answered) {
-                let mut bundle = f.bundle.clone();
-                bundle.rebase(f.target, f.source);
-                out.push((bundle, f.stamp));
-            } else {
-                continue;
-            }
-            f.saved_in = Some(round);
-        }
-        out
-    }
-
-    /// `f` just landed in its target. If the target's save of this round does
-    /// not hold it ([`InFlight::source_saves`]) and its source has yet to
-    /// answer, no saved state of the round holds it — the source's save takes
-    /// it, rebased back into the source's frame, as for one still in flight.
-    fn owe_source_save(&mut self, f: InFlight) {
-        let round = self.save_round;
-        let in_a_save = f.saved_in == Some(round) || (f.save_round == round && f.in_source_save);
-        if !in_a_save
-            && f.source_saves(round, &self.save_asked, &self.save_answered)
-            && self.save_asked.contains(&f.source)
-        {
-            let mut bundle = f.bundle;
-            bundle.rebase(f.target, f.source);
-            self.save_owed.entry(f.source).or_default().push((bundle, f.stamp));
         }
     }
 
@@ -2021,13 +2289,13 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// waiting on `rc` gets its `ParkPlayer` again behind the body; returns
     /// those clients (their parks are still in flight).
     fn restart_for_in_flight(&mut self, rc: RegionCoords) -> BTreeSet<ClientId> {
-        let intents: Vec<crate::IntentMsg> = self.in_flight_intents.iter().filter(|f| f.target == rc).map(|f| f.msg).collect();
+        let intents: Vec<InFlightIntent> = self.in_flight_intents.iter().filter(|f| f.target == rc).cloned().collect();
         self.in_flight_intents.retain(|f| f.target != rc);
         if !intents.is_empty() {
             self.ensure_running(rc);
             log::warn!("{} intent(s) were in flight to lost region {rc:?}: sent again", intents.len());
-            for msg in intents {
-                self.send_intent_to(rc, msg, None);
+            for f in intents {
+                self.send_intent_to(rc, f.msg, f.in_source_view);
             }
         }
         let ids: Vec<crate::EntityId> =
@@ -2064,6 +2332,12 @@ impl<S: RegionSpawner> WorldManager<S> {
 
     pub fn parked_regions(&self) -> Vec<RegionCoords> {
         self.parked.keys().copied().collect()
+    }
+
+    /// A parked region's in-memory blob (the server's exit-time save until
+    /// the world store writes cuts).
+    pub fn parked_blob(&self, rc: RegionCoords) -> Option<&SerializedRegion> {
+        self.parked.get(&rc)
     }
 
     pub fn spawner_mut(&mut self) -> &mut S {
@@ -2283,6 +2557,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             Some(record) => {
                 let record = PlayerRecord { fortress: p.fortress, adventure: p.adventure, ..*record };
                 self.parked_players.insert(p.player, record.clone());
+                self.cut_transit(p.player, &record);
                 self.player_saves.push((p.player, record));
                 if let Some(body) = body {
                     self.parked_bodies.insert(body, p.player);
@@ -2337,21 +2612,6 @@ impl<S: RegionSpawner> WorldManager<S> {
             .collect();
         for client in lost_moves {
             self.finish_move(client, None, self.clock_ms);
-        }
-    }
-
-    /// The world autosave keeps online players too: each body in a region's
-    /// saved state becomes its player's record, so a crash loses at most the
-    /// autosave interval ([`crate::restore_saved`] strips the bodies on load).
-    fn extract_player_saves(&mut self, rc: RegionCoords, rollback: &crate::Rollback) {
-        for (client, record) in crate::players_in(rollback, rc) {
-            let Some(&player) = self.player_of.get(&client) else { continue };
-            let record = PlayerRecord {
-                fortress: self.fortress_of.get(&client).copied(),
-                adventure: self.adventurer_of.get(&client).copied(),
-                ..record
-            };
-            self.player_saves.push((player, record));
         }
     }
 
@@ -2429,7 +2689,11 @@ impl<S: RegionSpawner> WorldManager<S> {
         let _ = self.region_out_send.send((rc, RegionOutput::Incarnation(self.next_incarnation)));
         let input = self.spawner.spawn(rc, seed, self.region_out_send.clone());
         // Very first: join the world's tick numbering before anything else.
-        let _ = input.send(RegionInput::StartAt(self.spawner.world_tick()));
+        let start = self.spawner.world_tick();
+        let _ = input.send(RegionInput::StartAt(start));
+        // A pending save cut it has not passed asks it too, before anything
+        // reaches it.
+        self.cut_region_started(rc, start, &input);
         // Next, so it is bounded before its first tick.
         if let Some(route) = &self.route_map {
             let _ = input.send(RegionInput::SetRouteMap(Some(route.clone())));
@@ -2456,8 +2720,8 @@ impl<S: RegionSpawner> WorldManager<S> {
         // tick (their stamps are past, so it applies them on receipt).
         self.deliver_pending_arrivals(rc);
         // Replies that waited for it.
-        for msg in self.intent_mailbox.remove(&rc).unwrap_or_default() {
-            self.send_intent_to(rc, msg, None);
+        for m in self.intent_mailbox.remove(&rc).unwrap_or_default() {
+            self.send_intent_to(rc, m.msg, m.in_source_view);
         }
     }
 
@@ -2631,10 +2895,12 @@ impl<S: RegionSpawner> WorldManager<S> {
     ///   stopping region it waits in the mailbox for its next run. With no
     ///   such destination, or past `MAX_INTENT_REPLY_HOPS`, it is given up:
     ///   logged at warn and counted (`intent_replies_lost`).
-    fn route_intent(&mut self, msg: crate::IntentMsg, emitter: RegionCoords) {
+    /// `view`: sent after the emitter answered the pending cut (`save_cut.rs`);
+    /// what the manager makes of it (a refusal, a salvage) inherits it.
+    fn route_intent(&mut self, msg: crate::IntentMsg, emitter: RegionCoords, view: bool) {
         use crate::{IntentMsg, IntentRefusal, IntentReply, SentReply, Target};
         if let IntentMsg::Reply(s) = msg {
-            if self.salvage_reply(s, emitter) {
+            if self.salvage_reply(s, emitter, view) {
                 return;
             }
         }
@@ -2654,25 +2920,16 @@ impl<S: RegionSpawner> WorldManager<S> {
                 log::warn!("[server] intent reply {:?} for {:?} given up after {} hops", s.reply, s.reply.to(), s.hops);
                 self.items_lost(&s.reply);
             }
-            (Some(rc), msg) => {
-                let saved = self.book_intent(rc, emitter, msg).then_some(self.save_round);
-                self.send_intent_to(rc, msg, saved);
-            }
+            (Some(rc), msg) => self.send_intent_to(rc, msg, view),
             (None, IntentMsg::Intent(s)) => {
                 log::debug!("[server] intent {:?} at {:?}: owner {owner:?} not running; refused", s.intent, s.target);
                 let reply = IntentReply::Refused(s.intent, IntentRefusal::OwnerNotRunning);
-                self.route_intent(IntentMsg::Reply(SentReply { reply, hint: s.from, due: s.due + 1, hops: 0 }), emitter);
+                self.route_intent(IntentMsg::Reply(SentReply { reply, hint: s.from, due: s.due + 1, hops: 0 }), emitter, view);
             }
             (None, IntentMsg::Reply(s)) => {
                 let waiting = owner.filter(|rc| self.parked.contains_key(rc) || self.regions.contains_key(rc));
                 match waiting {
-                    Some(rc) => {
-                        self.intent_mailbox.entry(rc).or_default().push(msg);
-                        if self.parked.contains_key(&rc) {
-                            // Saved with it at the next autosave.
-                            self.unsaved_parked.insert(rc);
-                        }
-                    }
+                    Some(rc) => self.intent_mailbox.entry(rc).or_default().push(Mail { msg, in_source_view: view }),
                     None => {
                         self.intent_replies_lost += 1;
                         log::warn!("[server] intent reply {:?} for {:?} lost: {owner:?} never ran", s.reply, s.reply.to());
@@ -2692,7 +2949,7 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// refusal comes back to that region, which puts them down itself) — or,
     /// with no cell (a refused place's block), left to be given up, counted.
     /// Returns whether the reply was dealt with here.
-    fn salvage_reply(&mut self, s: crate::SentReply, emitter: RegionCoords) -> bool {
+    fn salvage_reply(&mut self, s: crate::SentReply, emitter: RegionCoords, view: bool) -> bool {
         let to = s.reply.to();
         let Some((cell, mut stack)) = s.reply.carried_items() else { return false };
         if to.is_region() || self.locations.contains_key(&to) || self.in_flight.contains_key(&to) {
@@ -2707,7 +2964,9 @@ impl<S: RegionSpawner> WorldManager<S> {
             }
             let player = parked.expect("checked");
             log::info!("[server] reply {:?} for parked {to:?}: folded into player {}'s record", s.reply, player.0);
+            let record = record.clone();
             self.player_saves.push((player, record.clone()));
+            self.cut_transit(player, &record);
             if stack.count == 0 {
                 return true;
             }
@@ -2731,7 +2990,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             from: owner,
             due: s.due,
         };
-        self.route_intent(crate::IntentMsg::Intent(sent), emitter);
+        self.route_intent(crate::IntentMsg::Intent(sent), emitter, view);
         true
     }
 
@@ -2754,7 +3013,11 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// forgotten (a late reply to it is put down where it came from).
     fn take_parked(&mut self, player: PlayerId) -> Option<PlayerRecord> {
         self.parked_bodies.retain(|_, p| *p != player);
-        self.parked_players.remove(&player)
+        let record = self.parked_players.remove(&player);
+        if let Some(record) = &record {
+            self.cut_transit(player, record);
+        }
+        record
     }
 
     /// Test support: `player`'s parked record.
@@ -2769,41 +3032,14 @@ impl<S: RegionSpawner> WorldManager<S> {
 
     /// Test support: the replies waiting for a parked or stopping region.
     pub fn intent_mailbox(&self, rc: RegionCoords) -> Vec<crate::IntentMsg> {
-        self.intent_mailbox.get(&rc).cloned().unwrap_or_default()
+        self.intent_mailbox.get(&rc).into_iter().flatten().map(|m| m.msg).collect()
     }
 
     /// `msg` to running `rc`, held there to its due tick, and in flight until
-    /// `rc` confirms it (`saved_in`: the round a save already holds it in).
-    fn send_intent_to(&mut self, rc: RegionCoords, msg: crate::IntentMsg, saved_in: Option<u64>) {
-        self.in_flight_intents.push(InFlightIntent { msg, target: rc, saved_in });
+    /// `rc` confirms it (`in_source_view`: see [`InFlightIntent`]).
+    fn send_intent_to(&mut self, rc: RegionCoords, msg: crate::IntentMsg, in_source_view: bool) {
+        self.in_flight_intents.push(InFlightIntent { msg, target: rc, in_source_view });
         self.send_to_region(rc, RegionInput::Transfer(GameEventKind::Intent(msg), msg.due()));
-    }
-
-    /// The autosave side of routing `msg` from `emitter` to `target`: routed
-    /// after the target answered this round while the emitter has yet to,
-    /// no saved state of the round holds it unless the emitter's does — it
-    /// is owed to the emitter's save (restored there, it is sent on). If the
-    /// emitter answered first, its saved state predates the send (it sends
-    /// its outbox before answering), so no save holds it, rightly. Returns
-    /// whether it is owed (then saved this round).
-    fn book_intent(&mut self, target: RegionCoords, emitter: RegionCoords, msg: crate::IntentMsg) -> bool {
-        let owed = !self.save_asked.contains(&target) && self.save_asked.contains(&emitter);
-        if owed {
-            self.save_owed_intents.entry(emitter).or_default().push(msg);
-        }
-        owed
-    }
-
-    /// `rc` answered this round's `Save`: the intents its saved state lacks —
-    /// in flight to it and not saved this round yet — and those owed to it.
-    fn saved_intents(&mut self, rc: RegionCoords) -> Vec<crate::IntentMsg> {
-        let round = self.save_round;
-        let mut out = self.save_owed_intents.remove(&rc).unwrap_or_default();
-        for f in self.in_flight_intents.iter_mut().filter(|f| f.target == rc && f.saved_in != Some(round)) {
-            out.push(f.msg);
-            f.saved_in = Some(round);
-        }
-        out
     }
 
     fn send_to_region(&mut self, rc: RegionCoords, input: RegionInput) -> bool {
@@ -2829,6 +3065,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             return true;
         }
         log::error!("region {:?} thread died; respawning", rc);
+        self.cut_region_lost(rc);
         let subscribers = self.regions.remove(&rc).unwrap().subscribers;
         self.pending_events.remove(&rc);
         self.spawner.reap(rc);

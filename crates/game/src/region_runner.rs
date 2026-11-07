@@ -62,9 +62,12 @@ pub enum RegionInput {
     /// past every earlier incarnation's (`Region::start_at`).
     /// The manager sends it FIRST after spawning, before `SetRouteMap`.
     StartAt(crate::Tick),
-    /// World autosave: replied with `RegionOutput::Saved(state)`, a clone of
-    /// the live state (like a snapshot). Does not affect sim state.
-    Save,
+    /// World save cut `.0` at world tick `.1` (`save_cut.rs`): this region's
+    /// portable snapshot at the opening of slot `.1` — after slot `.1 − 1`
+    /// closed, before any slot-`.1` input — comes back as
+    /// `RegionOutput::CutSnapshot`, or `RegionOutput::CutMissed` when the
+    /// region is already past that point. Does not affect sim state.
+    SaveAt(crate::CutId, Tick),
     /// Neighbour `.0` just started: send it this region's chunks it mirrors
     /// as a halo seed (`RegionOutput::HaloDeltas`, stamped with this
     /// region's tick). Does not affect this region's state.
@@ -96,8 +99,10 @@ pub enum RegionOutput {
     /// The parked state, its final terrain, and its final stamp (its
     /// `current_tick()` at `Shutdown`: what the manager stamps the final
     /// terrain's halo reseed with, so it lands after every delta this region
-    /// sent before).
-    Stopped(SerializedRegion, TerrainSnapshot, Tick),
+    /// sent before), and its final portable snapshot (against the terms of
+    /// its previous one): a pending save cut takes it as this region's
+    /// answer, and the manager keeps it uncommitted until a cut commits it.
+    Stopped(SerializedRegion, TerrainSnapshot, Tick, Box<crate::PortableRegion>),
     /// Boundary crossings this tick: bundles + ABSOLUTE target regions.
     /// Isometries are still source-local; the manager rebases. The stamp is
     /// the source's `current_tick()` right after the tick that produced
@@ -145,10 +150,20 @@ pub enum RegionOutput {
     /// Entities no longer owned here, departures excepted (despawned,
     /// parked, left): the manager forgets their location.
     Despawned(Vec<crate::EntityId>),
-    /// Reply to `Save`: the live state, serialized off the region thread.
-    /// It still holds this session's players and the history's people —
-    /// [`restore_saved`] strips both when it is loaded again.
-    Saved(Box<Rollback>),
+    /// Reply to `SaveAt(id, tick)`: the region's portable snapshot at the
+    /// opening of slot `tick` (only the chunks changed since its previous
+    /// snapshot). Everything the region sent before it on the output channel
+    /// happened before that point — the Tick's departures and the intents
+    /// sent so far are flushed first — and everything after it, after.
+    CutSnapshot(crate::CutId, Tick, Box<crate::PortableRegion>),
+    /// Reply to `SaveAt(id, tick)` from a region already past the opening of
+    /// slot `tick`: the manager aborts that cut and retries with a longer
+    /// lead.
+    CutMissed(crate::CutId),
+    /// Sent just before a `CutSnapshot`: where the people with a body here
+    /// stand (region-local translations), for the history
+    /// (`History::note_positions`) — the snapshot itself holds no people.
+    PeoplePositions(Vec<(crate::history::PersonId, [f32; 3])>),
     /// Never sent by a runner: the manager puts it on the output channel
     /// just before it spawns a region's runner, so it can tell a dead
     /// runner's late outputs (before the marker) from the new one's.
@@ -175,7 +190,9 @@ impl RegionOutput {
             RegionOutput::Intents(_) => "Intents",
             RegionOutput::Spawned(_) => "Spawned",
             RegionOutput::Despawned(_) => "Despawned",
-            RegionOutput::Saved(_) => "Saved",
+            RegionOutput::CutSnapshot(..) => "CutSnapshot",
+            RegionOutput::CutMissed(_) => "CutMissed",
+            RegionOutput::PeoplePositions(_) => "PeoplePositions",
             RegionOutput::Incarnation(_) => "Incarnation",
         }
     }
@@ -186,7 +203,9 @@ impl RegionOutput {
 /// [`RegionInput::Transfer`] (see [`RegionRunner::requeue_saved`]).
 pub type SavedTransfer = (EntityBundle, Tick);
 
-/// One region's state for the world autosave: a running region's live clone
+/// The legacy region-file format (`server::region_store`, deleted by world
+/// store Task 7 — TODO(world-store Task 7)); the `WorldManager` no longer
+/// produces it (save cuts replaced it). One region's state: a running region's live clone
 /// (`RegionOutput::Saved`) with the crossings in flight to it that its state
 /// does not hold yet (from the manager's in-flight table), or a parked blob (which holds every arrival:
 /// `Shutdown` applies what is held). Either also carries, rebased back into
@@ -366,6 +385,16 @@ pub struct RegionRunner {
     /// `Despawned` are its diffs). Starts empty, so a region's first tick
     /// reports everything it holds.
     known_ids: std::collections::BTreeSet<crate::EntityId>,
+    /// The chunk terms of this region's previous portable snapshot (empty:
+    /// none yet in this incarnation, so the next one is whole). Set by the
+    /// spawner for a region restored from the store
+    /// ([`RegionRunner::set_saved_terms`]).
+    saved_terms: crate::ChunkTerms,
+    /// A `SaveAt` waiting for its slot to open.
+    pending_cut: Option<(crate::CutId, Tick)>,
+    /// The last slot [`RegionRunner::tick`] opened (`None`: not ticked yet
+    /// in this incarnation).
+    opened: Option<Tick>,
 }
 
 /// Furthest ahead of a region's tick a client event may be stamped and still
@@ -396,7 +425,41 @@ impl RegionRunner {
             state_hash_cost: Default::default(),
             slot_start_hashes: None,
             known_ids: Default::default(),
+            saved_terms: Default::default(),
+            pending_cut: None,
+            opened: None,
         }
+    }
+
+    /// The chunk terms of the stored state this region was restored from
+    /// ([`crate::restore_portable`]): its first snapshot then sends only
+    /// what changed since.
+    pub fn set_saved_terms(&mut self, terms: crate::ChunkTerms) {
+        self.saved_terms = terms;
+    }
+
+    /// Takes the portable snapshot against the previous one's terms, and
+    /// advances them.
+    fn portable_snapshot(&mut self) -> Box<crate::PortableRegion> {
+        let (portable, terms) = self.region.data().portable_snapshot(&self.saved_terms);
+        self.saved_terms = terms;
+        Box::new(portable)
+    }
+
+    /// The cut snapshot, at the opening of slot `tick`: the intents sent so
+    /// far go out first (so the manager knows them as sent before it), then
+    /// the people's positions, then the snapshot.
+    fn send_cut_snapshot(&mut self, id: crate::CutId, tick: Tick) {
+        let intents = self.region.take_intents();
+        if !intents.is_empty() {
+            let _ = self.out.send((self.id, RegionOutput::Intents(intents)));
+        }
+        let people = self.region.data().people_here();
+        if !people.is_empty() {
+            let _ = self.out.send((self.id, RegionOutput::PeoplePositions(people)));
+        }
+        let snapshot = self.portable_snapshot();
+        let _ = self.out.send((self.id, RegionOutput::CutSnapshot(id, tick, snapshot)));
     }
 
     /// Worldgen for [`RegionInput::SeedHaloFromWorldgen`]; without one such a
@@ -477,14 +540,18 @@ impl RegionRunner {
             }
             RegionInput::StartAt(tick) => self.region.start_at(tick),
             RegionInput::SetRouteMap(route) => self.region.set_route_map(route),
-            RegionInput::Save => {
-                // Intents sent before the save go out before it, so the
-                // manager knows them as in flight when it books the save.
-                let intents = self.region.take_intents();
-                if !intents.is_empty() {
-                    let _ = self.out.send((self.id, RegionOutput::Intents(intents)));
+            RegionInput::SaveAt(id, tick) => {
+                let now = self.region.current_tick();
+                if now < tick {
+                    // Answered when `tick` brings the counter to it.
+                    self.pending_cut = Some((id, tick));
+                } else if now == tick && self.opened != Some(tick) {
+                    // At `tick`, its slot not opened yet (a region started at
+                    // `tick`, or restored there, before its first tick).
+                    self.send_cut_snapshot(id, tick);
+                } else {
+                    let _ = self.out.send((self.id, RegionOutput::CutMissed(id)));
                 }
-                let _ = self.out.send((self.id, RegionOutput::Saved(Box::new(self.region.data().clone()))));
             }
             RegionInput::HaloRequest(to) => {
                 if let Some(seed) = self.region.data().halo_seed_for(to) {
@@ -521,7 +588,8 @@ impl RegionRunner {
                 }
                 let serialized = SerializedRegion::from_rollback(self.region.data());
                 let far = self.terrain();
-                let _ = self.out.send((self.id, RegionOutput::Stopped(serialized, far, stamp)));
+                let portable = self.portable_snapshot();
+                let _ = self.out.send((self.id, RegionOutput::Stopped(serialized, far, stamp, portable)));
                 return false;
             }
         }
@@ -667,6 +735,7 @@ impl RegionRunner {
         };
         let _ = self.out.send((self.id, output));
         let now = self.region.current_tick() as u64;
+        self.opened = Some(now);
         // This tick's crossings, before the slot opens: a departing client's
         // inputs held for this slot or later go with its body.
         let (mut departures, mut halo_entities) = self.region.take_transfers();
@@ -679,6 +748,27 @@ impl RegionRunner {
             self.held = stay.into();
             bundle.pending_inputs.extend(follow);
             self.departed.insert(client, (*target, now));
+        }
+        // A save cut at this tick is taken here, at the opening of the slot:
+        // what departed in the Tick goes out first (it is not in the
+        // snapshot), then the snapshot (`send_cut_snapshot`).
+        let mut departed_ids: Vec<crate::EntityId> = Vec::new();
+        match self.pending_cut {
+            Some((id, tick)) if tick == now => {
+                self.pending_cut = None;
+                departed_ids.extend(departures.iter().map(|(b, _)| b.id));
+                if !departures.is_empty() {
+                    let _ = self.out.send((self.id, RegionOutput::Departures(std::mem::take(&mut departures), now)));
+                }
+                self.send_cut_snapshot(id, tick);
+            }
+            Some((id, tick)) if tick < now => {
+                // Never: the counter steps one tick at a time and the cut was
+                // asked for ahead. Defensive.
+                self.pending_cut = None;
+                let _ = self.out.send((self.id, RegionOutput::CutMissed(id)));
+            }
+            _ => {}
         }
         // Slot `now`: events predicted after the tick that just ran, then
         // transfers stamped for it, each in arrival order.
@@ -706,7 +796,7 @@ impl RegionRunner {
         halo_entities.extend(more_halo);
         let stamp = self.region.current_tick();
         let halo = self.region.take_halo_updates();
-        let departed_ids: Vec<crate::EntityId> = departures.iter().map(|(b, _)| b.id).collect();
+        departed_ids.extend(departures.iter().map(|(b, _)| b.id));
         if !departures.is_empty() {
             let _ = self.out.send((self.id, RegionOutput::Departures(departures, stamp)));
         }
