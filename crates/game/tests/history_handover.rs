@@ -692,6 +692,41 @@ use game::{
 };
 use std::collections::BTreeMap;
 
+/// Install `h` behind an inline coordinator link: lockstep (today's synchronous
+/// ordering) unless `schedule` delays the link (`InlineSchedule::coordinator_delay`).
+pub fn install_history<S: game::RegionSpawner>(m: &mut WorldManager<S>, h: History, now_ms: u64) {
+    install_history_with(m, h, now_ms, None);
+}
+
+/// [`install_history`] with the link's delay taken from `schedule`.
+pub fn install_history_with<S: game::RegionSpawner>(
+    m: &mut WorldManager<S>,
+    h: History,
+    now_ms: u64,
+    schedule: Option<&game::InlineSchedule>,
+) {
+    let link = game::InlineWorldLink::new(game::Coordinator::new(h, now_ms));
+    let link = match schedule {
+        Some(s) => link.with_schedule(s),
+        None => link,
+    };
+    m.set_world_link(Box::new(link), now_ms);
+}
+
+/// The history of the manager's inline coordinator.
+pub fn history_of<S: game::RegionSpawner>(m: &WorldManager<S>) -> &History {
+    m.world_link().and_then(|l| l.as_inline()).expect("an inline world link is installed").coordinator().history()
+}
+
+/// [`history_of`], to change directly (what it decides goes out at the next pump).
+pub fn history_mut_of<S: game::RegionSpawner>(m: &mut WorldManager<S>) -> &mut History {
+    m.world_link_mut()
+        .and_then(|l| l.as_inline_mut())
+        .expect("an inline world link is installed")
+        .coordinator_mut()
+        .history_mut()
+}
+
 /// A one-block floor under the whole of every region.
 pub fn floored_region(_rc: RegionCoords) -> Vec<(ColumnCoords, Column)> {
     let air = Block::new(BlockId::AIR);
@@ -774,7 +809,7 @@ impl World {
         );
         manager.set_world_map(map);
         if let Some(h) = history {
-            manager.set_history(h, 0);
+            install_history(&mut manager, h, 0);
         }
         World { manager, region_out, packets, now_ms: 0 }
     }
@@ -816,7 +851,7 @@ impl World {
     }
 
     fn history(&self) -> &History {
-        self.manager.history().expect("a history is installed")
+        history_of(&self.manager)
     }
 
     fn running(&self, r: RegionCoords) -> bool {
@@ -825,7 +860,7 @@ impl World {
 
     fn check(&mut self, when: &str) {
         let census = bodies(&mut self.manager);
-        assert_one_place(self.manager.history().unwrap(), &census, when);
+        assert_one_place(history_of(&self.manager), &census, when);
     }
 
     /// Move the player's body in `r` to region-local `x`, `z` (height kept).
@@ -883,7 +918,7 @@ fn site_region_start_spawns_its_people() {
     let mut w = World::new(land_map(3, 1), None);
     w.send(ServerEvent::connected(CLIENT));
     assert!(bodies(&mut w.manager).is_empty());
-    w.manager.set_history(h, w.now_ms);
+    install_history(&mut w.manager, h, w.now_ms);
     w.settle();
     assert_site_0_embodied(&mut w, &a, &b);
 }
@@ -938,10 +973,7 @@ fn walk_out_does_not_wake_neighbour() {
     let mut w = World::new(land_map(3, 1), Some(h));
     // The player's home keeps (0, 0) running; nobody asks for (1, 0).
     w.send(ServerEvent::connected(CLIENT));
-    let j = w
-        .manager
-        .history_mut()
-        .unwrap()
+    let j = history_mut_of(&mut w.manager)
         .start_journey(vec![a[0]], SiteId(0), rc(2, 0), Purpose::Migrate { to: SiteId(1) })
         .expect("a route to site 1");
     let mut absorbed = false;
@@ -982,7 +1014,7 @@ fn no_person_twice_across_park_cycles() {
         w.wait(half_year);
         w.check(&format!("cycle {cycle}: half a year running"));
         if cycle == 1 {
-            journey = w.manager.history_mut().unwrap().start_journey(
+            journey = history_mut_of(&mut w.manager).start_journey(
                 vec![a[0]],
                 SiteId(0),
                 rc(2, 0),
@@ -1021,7 +1053,7 @@ fn calendar_follows_now_ms() {
     let t0 = h.now();
     let mut w = World::new(land_map(3, 1), None);
     assert_eq!(w.manager.calendar_now(0), None);
-    w.manager.set_history(h, 5_000);
+    install_history(&mut w.manager, h, 5_000);
     assert_eq!(w.manager.calendar_now(5_000), Some(t0));
     assert_eq!(w.manager.calendar_now(5_000 + 7 * TICK_RATE + 3), Some(CalendarTick(t0.0 + 7)));
     w.now_ms = 5_000;
@@ -1149,7 +1181,7 @@ fn site_founded_in_running_region_has_bodies() {
     w.send(ServerEvent::connected(CLIENT));
     w.packet(ClientPacket::PlayRegion(rc(1, 0)));
     w.tick();
-    let history = w.manager.history_mut().unwrap();
+    let history = history_mut_of(&mut w.manager);
     let born = years_before(history.now(), 20);
     let founders: Vec<_> = (0..4).map(|_| history.add_founder(Sex::Male, born)).collect();
     let site = history.found_site(CivId(0), rc(1, 0), &founders, None, true);
@@ -1165,9 +1197,9 @@ fn site_founded_in_running_region_has_bodies() {
 
 #[test]
 #[cfg(debug_assertions)]
-#[should_panic(expected = "history is already installed")]
+#[should_panic(expected = "world link is already installed")]
 fn set_history_twice_is_a_bug() {
     let (h, _, _) = manager_history();
     let mut w = World::new(land_map(3, 1), Some(h.clone()));
-    w.manager.set_history(h, 0);
+    install_history(&mut w.manager, h, 0);
 }

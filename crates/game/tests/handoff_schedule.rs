@@ -283,7 +283,9 @@ fn walk_into_neighbour_region() {
 
 // --- A history traveller crosses a seam ---------------------------------------
 
-use crate::history_handover::{assert_one_place, bodies, floored_region, land_map, start, years_before};
+use crate::history_handover::{
+    assert_one_place, bodies, floored_region, history_mut_of, history_of, install_history, land_map, start, years_before,
+};
 use game::history::{History, Location, Purpose, Race, Sex, SiteId, SocietyGrid};
 
 /// Where people land, in block columns: a few blocks short of the spawn region's −z seam.
@@ -309,16 +311,13 @@ fn travel_north(seed: u64) {
     h.found_site(civ, north(), &[host], None, false);
 
     let mut rig = Rig::with_floor(Some(InlineSchedule::jittery(seed)), floored_region);
-    rig.manager.set_history(h, rig.now_ms);
+    install_history(&mut rig.manager, h, rig.now_ms);
     rig.event(ServerEvent::connected(CLIENT));
     for rc in SPAWN_REGION.window_3x3() {
         rig.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(rc), CLIENT));
     }
     rig.walk_until_owned_by(SPAWN_REGION, "spawn");
-    let j = rig
-        .manager
-        .history_mut()
-        .unwrap()
+    let j = history_mut_of(&mut rig.manager)
         .start_journey(vec![traveller], SiteId(0), north(), Purpose::Migrate { to: SiteId(1) })
         .expect("a route north");
     let mut delivered = false;
@@ -330,7 +329,7 @@ fn travel_north(seed: u64) {
         for (p, at) in &census {
             assert!(at.len() <= 1, "seed {seed} round {round}: {p:?} has bodies in {at:?}");
         }
-        let h = rig.manager.history().unwrap();
+        let h = history_of(&rig.manager);
         let loc = h.person(traveller).unwrap().location;
         if !matches!(loc, Location::InRegion(_)) {
             panic!("seed {seed} round {round}: the traveller was absorbed ({loc:?})");
@@ -347,7 +346,7 @@ fn travel_north(seed: u64) {
         rig.settle();
     }
     let census = bodies(&mut rig.manager);
-    let h = rig.manager.history().unwrap();
+    let h = history_of(&rig.manager);
     assert_one_place(h, &census, &format!("seed {seed}: delivered"));
     assert!(h.journey(j).is_none(), "seed {seed}: the journey ended on arrival");
     let p = h.person(traveller).unwrap();

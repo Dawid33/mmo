@@ -2,7 +2,7 @@
 //! calendar / notice broadcasts and person info — driven through a real `WorldManager`
 //! over `InlineSpawner` regions with a bootstrapped history.
 
-use crate::history_handover::{assert_one_place, bodies, floored_region, land_map};
+use crate::history_handover::{assert_one_place, bodies, floored_region, history_mut_of, history_of, install_history, land_map};
 use crossbeam::channel::{unbounded, Receiver};
 use game::history::bootstrap::{bootstrap, BootstrapParams};
 use game::history::log::LogKind;
@@ -91,7 +91,7 @@ impl World {
             lod_result_recv,
         );
         manager.set_world_map(strip());
-        manager.set_history(history, 0);
+        install_history(&mut manager, history, 0);
         World { manager, region_out, packets, inbox: Vec::new(), now_ms: 0 }
     }
 
@@ -210,7 +210,7 @@ impl World {
     }
 
     fn history(&self) -> &History {
-        self.manager.history().expect("a history is installed")
+        history_of(&self.manager)
     }
 
     fn running(&self, r: RegionCoords) -> bool {
@@ -237,7 +237,7 @@ impl World {
 
     fn check(&mut self, when: &str) {
         let census = bodies(&mut self.manager);
-        assert_one_place(self.manager.history().unwrap(), &census, when);
+        assert_one_place(history_of(&self.manager), &census, when);
     }
 }
 
@@ -352,7 +352,7 @@ fn embark_refuses_unavailable_people() {
     let dead = people[1];
     let traveller = people[2];
     {
-        let h = w.manager.history_mut().unwrap();
+        let h = history_mut_of(&mut w.manager);
         h.record_death(dead, DeathCause::OldAge);
         h.start_journey(vec![traveller], home, free[1], Purpose::Embark { civ, from: home }).expect("a route");
     }
@@ -527,7 +527,7 @@ fn notices_only_to_home_region() {
     w.take(B);
     // A death in A's fortress: only A hears of it.
     let victim = people[0];
-    w.manager.history_mut().unwrap().record_death(victim, DeathCause::OldAge);
+    history_mut_of(&mut w.manager).record_death(victim, DeathCause::OldAge);
     w.tick();
     let (to_a, to_b) = (notices_in(&w.take(A)), notices_in(&w.take(B)));
     assert_eq!(to_a.len(), 1, "{to_a:?}");
@@ -536,12 +536,12 @@ fn notices_only_to_home_region() {
     // One at the unplayed bootstrap site: nobody hears.
     let far_away = people[5];
     assert_eq!(w.history().person(far_away).unwrap().location, Location::AtSite(home));
-    w.manager.history_mut().unwrap().record_death(far_away, DeathCause::OldAge);
+    history_mut_of(&mut w.manager).record_death(far_away, DeathCause::OldAge);
     w.tick();
     assert!(notices_in(&w.take(A)).is_empty());
     assert!(notices_in(&w.take(B)).is_empty());
     // One in B's: only B.
-    w.manager.history_mut().unwrap().record_death(people[2], DeathCause::OldAge);
+    history_mut_of(&mut w.manager).record_death(people[2], DeathCause::OldAge);
     w.tick();
     assert!(notices_in(&w.take(A)).is_empty());
     assert_eq!(notices_in(&w.take(B)).len(), 1);
@@ -782,7 +782,7 @@ fn adventure_refuses_unpopulated_and_abandoned() {
     assert_eq!(w.adventure(A, home), Err(AdventureRefusal::SiteAbandoned));
     // A site whose members are all dead but which is not yet abandoned.
     {
-        let h = w.manager.history_mut().unwrap();
+        let h = history_mut_of(&mut w.manager);
         let members: Vec<PersonId> = h.site(first).unwrap().members.iter().copied().collect();
         assert!(!members.is_empty());
         for m in members {

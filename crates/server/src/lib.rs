@@ -666,7 +666,9 @@ pub fn run() -> claims::ServerExit {
             if let Some(history) =
                 world_file::ensure_history(store, &map, backup.as_deref()).unwrap_or_else(|e| fatal(&e))
             {
-                manager.set_history(history, 0);
+                // In-process world services for now (R2b Task 9 picks the link per role).
+                let coordinator = game::Coordinator::new(history, 0);
+                manager.set_world_link(Box::new(game::InlineWorldLink::new(coordinator)), 0);
             }
         }
         manager.set_world_map(map);

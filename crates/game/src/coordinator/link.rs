@@ -24,6 +24,10 @@ pub trait WorldLink {
     fn as_inline_mut(&mut self) -> Option<&mut InlineWorldLink> {
         None
     }
+    /// [`WorldLink::as_inline_mut`], read-only.
+    fn as_inline(&self) -> Option<&InlineWorldLink> {
+        None
+    }
 }
 
 /// splitmix64 of `seed` and `i`: the stateless roll behind the inline link's delays.
@@ -127,6 +131,10 @@ impl WorldLink for InlineWorldLink {
     }
 
     fn as_inline_mut(&mut self) -> Option<&mut InlineWorldLink> {
+        Some(self)
+    }
+
+    fn as_inline(&self) -> Option<&InlineWorldLink> {
         Some(self)
     }
 }
