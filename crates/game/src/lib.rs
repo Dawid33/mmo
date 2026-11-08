@@ -22,6 +22,7 @@ pub mod body;
 pub mod buoyancy;
 pub mod camera;
 pub mod containers;
+pub mod coordinator;
 pub mod creature_shapes;
 pub mod debug_render;
 pub mod edit;
@@ -88,6 +89,10 @@ pub use block_props::*;
 pub use buoyancy::*;
 pub use camera::*;
 pub use containers::*;
+pub use coordinator::{
+    Claim, CoordMsg, Coordinator, CoordinatorState, HostMsg, InlineWorldLink, RequestId, RunningRegion, WorldLink,
+    WorldReply, WorldRequest,
+};
 pub use ground::*;
 pub use halo::{HaloChunk, HaloDelta, HaloUpdate, HALO_BLOCKS, HALO_CHUNKS};
 pub use debug_render::{ColliderDebug, DebugFlags, DebugLine, DEBUG_COLLIDER_RADIUS};

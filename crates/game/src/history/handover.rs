@@ -17,10 +17,19 @@ use super::History;
 use crate::{GameEventKind, Goal, PersonSpawn, RegionCoords, SpawnAt, REGION_BLOCKS};
 
 /// An event history wants applied in a running region (spawn, despawn, walk out).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Directive {
     pub region: RegionCoords,
     pub event: GameEventKind,
+}
+
+/// The person a history directive's event is about.
+fn event_person(e: &GameEventKind) -> Option<PersonId> {
+    match e {
+        GameEventKind::SpawnPerson(s) => Some(s.person),
+        GameEventKind::DespawnPerson(p) | GameEventKind::WalkOut(p, _) => Some(*p),
+        _ => None,
+    }
 }
 
 /// The region's centre column, as a walk goal.
@@ -324,7 +333,115 @@ impl History {
                 i += 1;
             }
         }
+        self.redeliver_bounced(rc, &mut events);
         events
+    }
+
+    /// A host could not apply `d` (its region had stopped, or was not running there):
+    /// held for the region's next [`History::region_started`], which delivers it once —
+    /// unless that start supersedes it (see [`History::redeliver_bounced`]).
+    pub fn defer_directive(&mut self, d: Directive) {
+        self.bounced.push(d);
+    }
+
+    /// Append to `events` (the catch-up of `rc` starting) every bounced directive for `rc`
+    /// still true of the history: a spawn or walk-out of someone it has embodied in `rc`,
+    /// a despawn of someone it has not. One about a person the catch-up already places is
+    /// superseded and dropped — after a park the history took that person back, and the
+    /// catch-up is the one body.
+    fn redeliver_bounced(&mut self, rc: RegionCoords, events: &mut Vec<GameEventKind>) {
+        if !self.bounced.iter().any(|d| d.region == rc) {
+            return;
+        }
+        let (mine, rest): (Vec<Directive>, Vec<Directive>) =
+            std::mem::take(&mut self.bounced).into_iter().partition(|d| d.region == rc);
+        self.bounced = rest;
+        let placed: BTreeSet<PersonId> = events.iter().filter_map(event_person).collect();
+        for d in mine {
+            let keep = match event_person(&d.event) {
+                Some(p) if placed.contains(&p) => false,
+                Some(p) => {
+                    let here = self.people.get(&p).is_some_and(|q| q.alive() && q.location == Location::InRegion(rc));
+                    match d.event {
+                        GameEventKind::DespawnPerson(_) => !here,
+                        _ => here,
+                    }
+                }
+                None => true,
+            };
+            if keep {
+                events.push(d.event);
+            } else {
+                ::log::debug!("history: bounced directive for {rc:?} superseded by its restart: {:?}", d.event);
+            }
+        }
+    }
+
+    /// Regions running or stopping (holding bodies), in order.
+    pub(crate) fn live_regions(&self) -> Vec<RegionCoords> {
+        self.running.union(&self.stopping).copied().collect()
+    }
+
+    /// A host that kept running while this history was away (a restarted coordinator)
+    /// reports `rc` running with `present`'s bodies in it: `rc` runs again, with no
+    /// catch-up. Bodies are the truth for the living: each present living person is
+    /// embodied in `rc` (their abstract home kept, their journey held there), nothing
+    /// spawned. The history is the truth for the dead: a present person dead, unknown, or
+    /// embodied in another live region gets a `DespawnPerson` (returned, not queued).
+    /// Anyone the history had in `rc` whose body is absent goes back to the abstract
+    /// history; residents with no body stay abstract until `rc` next starts.
+    pub fn reattach_region(&mut self, rc: RegionCoords, present: &[(PersonId, [f32; 3])]) -> Vec<Directive> {
+        self.stopping.remove(&rc);
+        self.running.insert(rc);
+        let here: BTreeSet<PersonId> = present.iter().map(|(p, _)| *p).collect();
+        let absent: Vec<PersonId> = self
+            .people
+            .values()
+            .filter(|q| q.location == Location::InRegion(rc) && !here.contains(&q.id))
+            .map(|q| q.id)
+            .collect();
+        for p in absent {
+            self.restore(p, rc);
+        }
+        let mut despawn = Vec::new();
+        let mut seen = BTreeSet::new();
+        for &(p, _) in present {
+            if !seen.insert(p) {
+                continue;
+            }
+            let Some(q) = self.people.get(&p).filter(|q| q.alive()) else {
+                despawn.push(Directive { region: rc, event: GameEventKind::DespawnPerson(p) });
+                continue;
+            };
+            match q.location {
+                Location::InRegion(r) if r == rc => {}
+                Location::InRegion(r) if self.region_live(r) => {
+                    ::log::warn!("history: {p:?} has a body in {r:?} and in reattached {rc:?}; despawning the second");
+                    despawn.push(Directive { region: rc, event: GameEventKind::DespawnPerson(p) });
+                }
+                _ => {
+                    let home = q.abstract_location();
+                    self.embody(p, rc, home);
+                    if let Location::Journey(j) = home {
+                        self.hold_reattached(j, rc);
+                    }
+                }
+            }
+        }
+        self.note_positions(present.iter().filter(|(p, _)| self.embodied_in(*p) == Some(rc)).copied().collect());
+        despawn
+    }
+
+    /// Journey `j` has bodies in reattached `rc`: held there (as it was before the load
+    /// released it) when it is held nowhere and `rc` is on its route.
+    fn hold_reattached(&mut self, j: JourneyId, rc: RegionCoords) {
+        let Some(jr) = self.journeys.get_mut(&j) else { return };
+        if jr.held_in.is_some() {
+            return;
+        }
+        let Some(idx) = jr.route.iter().position(|r| *r == rc) else { return };
+        jr.leg = idx as u32;
+        self.hold(j, rc);
     }
 
     /// Region `rc` is shutting down: steps acting on its people wait until it has parked.
@@ -373,6 +490,7 @@ impl History {
         self.running.clear();
         self.stopping.clear();
         self.held_since.clear();
+        self.bounced.clear();
         self.stray_candidates = self
             .people
             .values()

@@ -147,6 +147,11 @@ pub const SCHEDULE_SKIP_PER_MILLE: u32 = 100;
 #[derive(Debug, Clone)]
 pub struct InlineSchedule {
     rng: u64,
+    /// The seed the schedule started from (the coordinator link's delays roll from it).
+    seed: u64,
+    /// Most pumps an inline coordinator link holds each output back
+    /// ([`Self::coordinator_delay`]); 0 = none.
+    pub coordinator_delay_steps: u32,
     /// Chance, per region per round, that its inputs arrive a tick late.
     pub late_per_mille: u32,
     /// Chance, per region per round, that it misses its tick.
@@ -157,7 +162,19 @@ impl InlineSchedule {
     /// Permuted tick order only — every region still ticks once per round and
     /// nothing arrives late.
     pub fn shuffled(seed: u64) -> Self {
-        Self { rng: seed, late_per_mille: 0, skip_per_mille: 0 }
+        Self { rng: seed, seed, coordinator_delay_steps: 0, late_per_mille: 0, skip_per_mille: 0 }
+    }
+
+    /// Also delay each output of an inline coordinator link
+    /// ([`crate::coordinator::InlineWorldLink::with_schedule`]) by 0..=`max_steps` pumps.
+    pub fn coordinator_delay(mut self, max_steps: u32) -> Self {
+        self.coordinator_delay_steps = max_steps;
+        self
+    }
+
+    /// `(seed, max_steps)` of the coordinator link's delay, if it has one.
+    pub fn coordinator_link_delay(&self) -> Option<(u64, u32)> {
+        (self.coordinator_delay_steps > 0).then_some((self.seed, self.coordinator_delay_steps))
     }
 
     /// Permuted order plus late inputs; tick counts stay in lockstep (for

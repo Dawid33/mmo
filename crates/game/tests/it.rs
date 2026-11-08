@@ -31,6 +31,7 @@ mod chunk_blocks;
 mod chunk_units;
 mod credential;
 mod collider_genesis;
+mod coordinator;
 mod creature_shapes;
 mod gjk_upstream;
 mod ground;

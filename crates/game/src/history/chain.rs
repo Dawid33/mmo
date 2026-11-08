@@ -35,6 +35,8 @@ pub enum EmbarkRefusal {
     /// The region's stored state could not be read from the world store; it
     /// is retried after `STORE_LOAD_RETRY_SECS`.
     RegionUnavailable,
+    /// The world coordinator did not answer within `WORLD_REQUEST_TIMEOUT_SECS`.
+    WorldUnavailable,
 }
 
 /// Why the server refuses `ClientPacket::StartAdventure`.
@@ -52,6 +54,8 @@ pub enum AdventureRefusal {
     AlreadyPlaying,
     /// The site's region could not be loaded from the world store.
     RegionUnavailable,
+    /// The world coordinator did not answer within `WORLD_REQUEST_TIMEOUT_SECS`.
+    WorldUnavailable,
 }
 
 impl AdventureRefusal {
@@ -64,6 +68,7 @@ impl AdventureRefusal {
             Self::Unpopulated => "Nobody lives there",
             Self::AlreadyPlaying => "Already playing: retire or end it first",
             Self::RegionUnavailable => "That region could not be loaded; try again shortly",
+            Self::WorldUnavailable => "The world is not answering; try again shortly",
         }
     }
 }

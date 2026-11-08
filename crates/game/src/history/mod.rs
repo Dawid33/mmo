@@ -66,6 +66,11 @@ pub struct History {
     /// Decided but not yet taken by [`History::take_directives`].
     #[serde(skip)]
     directives: Vec<Directive>,
+    /// Directives a host could not apply (their region had stopped), held for that
+    /// region's next start ([`History::defer_directive`]). Not saved: a load returns
+    /// every body to the abstract history, which supersedes them.
+    #[serde(skip)]
+    bounced: Vec<Directive>,
     /// Everyone who may be a stray citizen (`Wandering` with a site): a superset, checked
     /// on use, filled where hand-over makes strays and rebuilt by [`History::after_load`].
     #[serde(skip)]
@@ -115,6 +120,7 @@ impl HistoryV2 {
             running: BTreeSet::new(),
             stopping: BTreeSet::new(),
             directives: Vec::new(),
+            bounced: Vec::new(),
             stray_candidates: BTreeSet::new(),
             held_since: BTreeMap::new(),
             notices: Vec::new(),
@@ -155,6 +161,7 @@ impl History {
             running: BTreeSet::new(),
             stopping: BTreeSet::new(),
             directives: Vec::new(),
+            bounced: Vec::new(),
             stray_candidates: BTreeSet::new(),
             held_since: BTreeMap::new(),
             notices: Vec::new(),

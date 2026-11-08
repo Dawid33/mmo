@@ -298,6 +298,7 @@ pub fn embark_refusal_text(why: EmbarkRefusal) -> &'static str {
         EmbarkRefusal::InUse => "Another player is in that fortress",
         EmbarkRefusal::TooSteep => "Too steep: the side of a mountain",
         EmbarkRefusal::RegionUnavailable => "That region could not be loaded; try again shortly",
+        EmbarkRefusal::WorldUnavailable => "The world is not answering; try again shortly",
     }
 }
 
