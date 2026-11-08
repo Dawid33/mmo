@@ -689,8 +689,11 @@ enum WorldAttach {
     /// incarnation) is asked for its people. Lifecycle messages made meanwhile are
     /// `held` and follow the `Attach`; requests and claim messages go to the outbox.
     /// A running region enters the `Attach` only with its exact list for this epoch
-    /// (`RegionOutput::PeopleListed`) or as its park / loss left it — never guessed: past
-    /// [`ATTACH_WAIT_MS`] the stragglers are logged (`warned`) and the host keeps waiting.
+    /// (`RegionOutput::PeopleListed`) or as its park / loss left it — never guessed — and
+    /// the `Attach` waits until no region is stopping (a stopping region's bodies are in
+    /// no list): past [`ATTACH_WAIT_MS`] the stragglers are logged (`warned`) and the host
+    /// keeps waiting. A region started meanwhile is not listed (its `RegionStarted` is
+    /// held and follows the `Attach`).
     Gathering {
         epoch: u64,
         since_ms: u64,
@@ -1261,7 +1264,12 @@ impl<S: RegionSpawner> WorldManager<S> {
                 *warned = true;
                 let waiting: Vec<RegionCoords> =
                     regions.iter().filter(|(_, (_, l))| l.is_none()).map(|(rc, _)| *rc).collect();
-                log::warn!("attach {epoch}: still waiting after {ATTACH_WAIT_MS} ms for {waiting:?} to list their people");
+                let stopping: Vec<RegionCoords> =
+                    self.regions.iter().filter(|(_, l)| l.stopping).map(|(rc, _)| *rc).collect();
+                log::warn!(
+                    "attach {epoch}: still waiting after {ATTACH_WAIT_MS} ms for {waiting:?} to list their people \
+                     and {stopping:?} to park"
+                );
             }
         }
     }
@@ -1285,6 +1293,13 @@ impl<S: RegionSpawner> WorldManager<S> {
     fn try_finish_attach(&mut self) {
         let WorldAttach::Gathering { regions, .. } = &self.world_attach else { return };
         if regions.values().any(|(_, listed)| listed.is_none()) {
+            return;
+        }
+        // No region may be stopping: its bodies are in no list (a stopping region is not
+        // attached), so a resident whose body stands there would be spawned again at home
+        // by the attach's catch-up while that body still waits for the park. A stop always
+        // ends — the park, or the loss of a dead thread — and that output retries this.
+        if self.regions.values().any(|l| l.stopping) {
             return;
         }
         let WorldAttach::Gathering { epoch, regions, held, mut moved, .. } =
@@ -2098,6 +2113,14 @@ impl<S: RegionSpawner> WorldManager<S> {
     }
 
     pub fn handle_region_output(&mut self, rc: RegionCoords, output: RegionOutput, now_ms: u64) {
+        self.region_output(rc, output, now_ms);
+        // A park or loss may have ended the last stop an attach being gathered waits for.
+        if matches!(self.world_attach, WorldAttach::Gathering { .. }) {
+            self.try_finish_attach();
+        }
+    }
+
+    fn region_output(&mut self, rc: RegionCoords, output: RegionOutput, now_ms: u64) {
         self.clock_ms = self.clock_ms.max(now_ms);
         if let RegionOutput::Incarnation(n) = output {
             self.incarnation_seen.insert(rc, n);
@@ -2435,6 +2458,8 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.retry_unavailable();
         self.expire_world_requests(now_ms);
         self.warn_attach_stragglers(now_ms);
+        // A stop ended by a loss found by the upkeep (a dead region thread).
+        self.try_finish_attach();
         self.pump_world(self.world_ms);
         self.route_notices();
         let connected_homes: BTreeSet<RegionCoords> = self

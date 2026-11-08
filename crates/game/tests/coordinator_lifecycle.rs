@@ -497,3 +497,71 @@ fn crossing_while_the_attach_gathers_keeps_one_body() {
     assert!(raced.into_inner() > 0, "no seed brought the link back with a departure queued");
     assert!(raced_absorbed.into_inner() > 0, "no seed raced an absorbed crossing");
 }
+
+/// A resident of (1, 0) wandered into (2, 0); (by the seed) the coordinator restarts
+/// (everyone abstract to it), and (2, 0) is released while the link is down and is still
+/// stopping — its `Shutdown` unread for a seeded number of rounds, its
+/// bodies standing — when the link comes back. A stopping region is not attached, so
+/// the resident is in no list: an `Attach` sent now would let the history take them back
+/// and its catch-up spawn them at home beside the body still in (2, 0). The host waits
+/// for the park: the person never has two bodies, and once drained the history and the
+/// bodies agree.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn resident_in_a_stopping_neighbour_keeps_one_body_across_the_attach() {
+    each_seed("resident_in_a_stopping_neighbour_keeps_one_body_across_the_attach", |seed| {
+        let (h, a, _) = strip_history();
+        let mut w = World::with_player(seed, h);
+        w.packet(ClientPacket::PlayRegion(rc(1, 0)));
+        w.packet(ClientPacket::RequestRegionConnection(rc(2, 0)));
+        w.drain();
+        // A resident of site 0 wanders over the +x seam into (2, 0).
+        let mut wanderer = None;
+        for _ in 0..WANDER_ROUNDS {
+            w.tick();
+            let census = bodies(&mut w.manager);
+            wanderer = a.iter().copied().find(|p| census.get(p).is_some_and(|at| at == &[rc(2, 0)]));
+            if wanderer.is_some() {
+                break;
+            }
+        }
+        let p = wanderer.unwrap_or_else(|| panic!("seed {seed}: no resident wandered into (2, 0)"));
+        w.drain();
+        assert_eq!(w.history().person(p).unwrap().home_location, Location::AtSite(SiteId(0)), "seed {seed}");
+        // Down; (2, 0) released and stopping, its Shutdown left unread for a while.
+        w.manager.world_link_mut().and_then(|l| l.as_inline_mut()).expect("inline").set_up(false);
+        if roll(seed, 6, 2) == 0 {
+            // The coordinator restarts meanwhile (from its state as saved): everyone is
+            // abstract to it until the attach.
+            let link = w.manager.world_link_mut().and_then(|l| l.as_inline_mut()).expect("inline");
+            let state = link.coordinator().state();
+            let grid = SocietyGrid::from_world_map(&strip());
+            *link.coordinator_mut() = game::Coordinator::from_state(state, grid, w.now_ms).expect("the state loads");
+        }
+        w.packet(ClientPacket::ReleaseRegionConnection(rc(2, 0)));
+        let unread = 6 + roll(seed, 5, 6) as u32;
+        w.manager.spawner_mut().hold_inputs(rc(2, 0), unread);
+        w.now_ms += UNLOAD_GRACE_MS;
+        w.tick();
+        assert!(w.running(rc(2, 0)), "seed {seed}: (2, 0) is stopping, not parked");
+        // Back while it stops.
+        w.manager.world_link_mut().and_then(|l| l.as_inline_mut()).expect("inline").set_up(true);
+        let mut waited = false;
+        for round in 0..unread as usize + 3 * DRAIN_ROUNDS {
+            w.tick();
+            if w.running(rc(2, 0)) {
+                // Still stopping: the attach waits for its park.
+                assert!(!w.manager.world_attached(), "seed {seed} round {round}: attached while (2, 0) stops");
+                waited = true;
+            }
+            for (q, at) in bodies(&mut w.manager) {
+                assert_eq!(at.len(), 1, "seed {seed} round {round}: {q:?} has bodies in {at:?}");
+            }
+        }
+        assert!(waited, "seed {seed}: (2, 0) was still stopping when the link came back");
+        assert!(!w.running(rc(2, 0)), "seed {seed}: (2, 0) parked");
+        assert!(w.manager.world_attached(), "seed {seed}: attached once it parked");
+        w.drain();
+        w.check_settled("after the attach");
+    });
+}
