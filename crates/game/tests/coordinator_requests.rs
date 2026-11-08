@@ -91,9 +91,6 @@ impl WorldLink for Recording {
     fn pump(&mut self, now_ms: u64) {
         self.inner.pump(now_ms);
     }
-    fn history_snapshot(&mut self) -> Option<Vec<u8>> {
-        self.inner.history_snapshot()
-    }
     fn as_inline_mut(&mut self) -> Option<&mut InlineWorldLink> {
         Some(&mut self.inner)
     }

@@ -245,7 +245,7 @@ fn forget_imported_file(store: &StoreHandle, import: Option<&Path>) {
     }
 }
 
-/// Where [`ensure_history`] keeps a stored history it replaces, beside a
+/// Where [`ensure_coordinator_state`] keeps an R1 history row it cannot use, beside a
 /// `.sqlite` store: `<db>.history.bak`.
 pub fn history_backup_path(db: &Path) -> PathBuf {
     let mut name = db.as_os_str().to_owned();
@@ -253,43 +253,115 @@ pub fn history_backup_path(db: &Path) -> PathBuf {
     PathBuf::from(name)
 }
 
-/// The world's history from the store, else bootstrapped from the world map
-/// (it reaches the store with the next save cut). One of another world or an
-/// older version (the world id is derived from code-built map summaries, so
-/// a code change can orphan it) is replaced by a new one — the next cut
-/// writes over it — after its bytes are copied to `backup` (a write failure
-/// stops the server: it is never discarded silently; with no backup path, a
-/// Postgres store, the log says it is discarded). Any other one that will
-/// not load stops the server: it holds the world's people.
-pub fn ensure_history(
+/// Where [`ensure_coordinator_state`] keeps a coordinator state it replaces, beside a
+/// `.sqlite` store: `<db>.coordinator.bak`.
+pub fn coordinator_backup_path(db: &Path) -> PathBuf {
+    let mut name = db.as_os_str().to_owned();
+    name.push(".coordinator.bak");
+    PathBuf::from(name)
+}
+
+/// Where the world coordinator's starting state came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CoordinatorSource {
+    /// Its own `coordinator` row.
+    Stored,
+    /// An R1 world's `history` row (no `coordinator` row yet): the history with no
+    /// claims and an empty answer memo. The `history` row is left as it is and never
+    /// written again.
+    Migrated,
+    /// A new history for the world map (none stored, or the stored one was of another
+    /// world / an older version).
+    Bootstrapped,
+}
+
+impl CoordinatorSource {
+    /// Whether the runtime saves at once: the store does not hold this state yet.
+    pub fn needs_save(self) -> bool {
+        self != CoordinatorSource::Stored
+    }
+}
+
+/// The world coordinator to start ([`crate::coordinator_rt::CoordinatorRuntime`]).
+pub struct CoordinatorStart {
+    /// Its calendar anchored at `now_ms` 0: the runtime's clock starts with it.
+    pub coordinator: game::Coordinator,
+    pub source: CoordinatorSource,
+}
+
+/// The world coordinator's state: its `coordinator` row, else an R1 world's `history`
+/// row migrated into one (claims empty — a player's record claim is taken back when the
+/// player comes online — and no memo), else a history bootstrapped from the world map.
+/// The runtime saves a migrated or bootstrapped one at once
+/// ([`CoordinatorSource::needs_save`]).
+///
+/// A stored state or history of another world or an older version (the world id is
+/// derived from code-built map summaries, so a code change can orphan it) is replaced by
+/// a new bootstrap after its bytes are copied beside a SQLite store (`sqlite_db`:
+/// [`coordinator_backup_path`] / [`history_backup_path`]; a copy that cannot be written
+/// stops the server — it is never discarded silently; with no path, a Postgres store, the
+/// log says it is discarded). Anything else that will not load stops the server: it holds
+/// the world's people. `None`: a world nobody can live in (playable, no history).
+pub fn ensure_coordinator_state(
     store: &StoreHandle,
     map: &game::WorldMap,
-    backup: Option<&Path>,
-) -> Result<Option<game::history::History>, String> {
+    sqlite_db: Option<&Path>,
+) -> Result<Option<CoordinatorStart>, String> {
     use game::history::persist::{self, HistoryLoadError};
     use game::history::SocietyGrid;
     let grid = SocietyGrid::from_world_map(map);
-    if let Some(bytes) = store.load_history().map_err(|e| e.to_string())? {
+    let replaceable = |e: &HistoryLoadError| matches!(e, HistoryLoadError::OtherWorld | HistoryLoadError::OldVersion { .. });
+    if let Some(bytes) = store.load_coordinator().map_err(|e| e.to_string())? {
+        let state = game::CoordinatorState::decode(&bytes)
+            .map_err(|e| format!("the world store's coordinator state does not load: {e}"))?;
+        match game::Coordinator::from_state(state, grid.clone(), 0) {
+            Ok(coordinator) => return Ok(Some(CoordinatorStart { coordinator, source: CoordinatorSource::Stored })),
+            Err(e) if replaceable(&e) => {
+                keep_replaced("coordinator state", &e, &bytes, sqlite_db.map(coordinator_backup_path))?
+            }
+            Err(e) => return Err(format!("the world store's coordinator state does not load: {e}")),
+        }
+    } else if let Some(bytes) = store.load_history().map_err(|e| e.to_string())? {
         match persist::decode(&bytes, grid.clone()) {
-            Ok(h) => return Ok(Some(h)),
-            Err(e @ (HistoryLoadError::OtherWorld | HistoryLoadError::OldVersion { .. })) => match backup {
-                Some(bak) => {
-                    std::fs::write(bak, &bytes).map_err(|io| {
-                        format!("the stored history: {e}; cannot keep a copy in {}: {io}", bak.display())
-                    })?;
-                    log::warn!(
-                        "[server] the stored history: {e} — kept as {}; bootstrapping a new one (the next save replaces it)",
-                        bak.display()
-                    );
-                }
-                None => log::error!(
-                    "[server] the stored history: {e} — this store keeps no backup, so it is DISCARDED; bootstrapping a new one"
-                ),
-            },
+            Ok(_) => {
+                let state = game::CoordinatorState { history: bytes, claims: Vec::new(), memo: Vec::new() };
+                let coordinator = game::Coordinator::from_state(state, grid, 0)
+                    .map_err(|e| format!("the world store's history does not load: {e}"))?;
+                log::info!("[server] migrating the world's history row into the coordinator's state");
+                return Ok(Some(CoordinatorStart { coordinator, source: CoordinatorSource::Migrated }));
+            }
+            Err(e) if replaceable(&e) => keep_replaced("history", &e, &bytes, sqlite_db.map(history_backup_path))?,
             Err(e) => return Err(format!("the world store's history does not load: {e}")),
         }
     }
-    Ok(bootstrap_history(map, grid))
+    Ok(bootstrap_history(map, grid).map(|history| CoordinatorStart {
+        coordinator: game::Coordinator::new(history, 0),
+        source: CoordinatorSource::Bootstrapped,
+    }))
+}
+
+/// A stored `what` that is replaced by a bootstrap: copied to `backup` first (a write
+/// failure is the error), or logged as discarded when there is nowhere to keep it.
+fn keep_replaced(
+    what: &str,
+    why: &game::history::persist::HistoryLoadError,
+    bytes: &[u8],
+    backup: Option<PathBuf>,
+) -> Result<(), String> {
+    match backup {
+        Some(bak) => {
+            std::fs::write(&bak, bytes)
+                .map_err(|io| format!("the stored {what}: {why}; cannot keep a copy in {}: {io}", bak.display()))?;
+            log::warn!(
+                "[server] the stored {what}: {why} — kept as {}; bootstrapping a new history (saved at once)",
+                bak.display()
+            );
+        }
+        None => log::error!(
+            "[server] the stored {what}: {why} — this store keeps no backup, so it is DISCARDED; bootstrapping a new history"
+        ),
+    }
+    Ok(())
 }
 
 /// A new history for `map`; `None` for a world nobody can live in (still
@@ -489,64 +561,33 @@ mod tests {
         }
     }
 
+    fn history_bytes(start: &CoordinatorStart) -> Vec<u8> {
+        game::history::persist::encode(start.coordinator.history())
+    }
+
+    fn ensure(store: &StoreHandle, map: &game::WorldMap, db: Option<&Path>) -> CoordinatorStart {
+        ensure_coordinator_state(store, map, db).unwrap().expect("a habitable world has a history")
+    }
+
+    fn save_state(store: &StoreHandle, state: Vec<u8>) {
+        let fence = store.claim_coordinator().unwrap();
+        store.save_coordinator(state, fence).recv().unwrap().expect("the state saves");
+    }
+
     #[test]
-    fn ensure_history_bootstraps_without_a_stored_one() {
+    fn coordinator_state_bootstraps_without_a_stored_one() {
         let store = memory_store();
         let map = land_map(48, 48, |x, z| x < 2 || z < 2 || x >= 46 || z >= 46);
-        let first = ensure_history(&store, &map, None).unwrap().unwrap();
-        let second = ensure_history(&store, &map, None).unwrap().unwrap();
-        assert_eq!(
-            bincode::serialize(&first).unwrap(),
-            bincode::serialize(&second).unwrap(),
-            "a bootstrap is deterministic (until a cut stores it)"
-        );
+        let first = ensure(&store, &map, None);
+        let second = ensure(&store, &map, None);
+        assert_eq!(first.source, CoordinatorSource::Bootstrapped);
+        assert!(first.source.needs_save());
+        assert_eq!(history_bytes(&first), history_bytes(&second), "a bootstrap is deterministic (until it is saved)");
         store.shutdown();
     }
 
-    fn store_history(store: &StoreHandle, history: &game::history::History) {
-        let cut = game::WorldCut {
-            host: 0,
-            id: game::CutId(1),
-            tick: 1,
-            regions: Vec::new(),
-            in_flight: Vec::new(),
-            players: Vec::new(),
-            history: Some(game::history::persist::encode(history)),
-        };
-        store.commit_cut(cut, world_store::Fence::default()).recv().unwrap().expect("the cut commits");
-    }
-
-    #[test]
-    fn ensure_history_loads_the_stored_one() {
-        let store = memory_store();
-        let map = land_map(48, 48, |x, z| x < 2 || z < 2 || x >= 46 || z >= 46);
-        let mut history = ensure_history(&store, &map, None).unwrap().unwrap();
-        // Time passes: the stored history is not the bootstrap's.
-        let later = game::history::CalendarTick(history.now().0 + 3 * game::history::DAYS_PER_YEAR * game::history::TICKS_PER_DAY);
-        history.advance(later);
-        store_history(&store, &history);
-        let loaded = ensure_history(&store, &map, None).unwrap().unwrap();
-        assert_eq!(bincode::serialize(&loaded).unwrap(), bincode::serialize(&history).unwrap());
-        // Another world's (the map changed): replaced by a new bootstrap, the
-        // stored one kept beside the store.
-        let dir = scratch("history-bak");
-        let bak = history_backup_path(&dir.join("w.sqlite"));
-        assert!(bak.ends_with("w.sqlite.history.bak"));
-        let other = land_map(48, 48, |x, z| x < 3 || z < 2 || x >= 46 || z >= 46);
-        let fresh = ensure_history(&store, &other, Some(&bak)).unwrap().expect("a new history for the other world");
-        assert_ne!(bincode::serialize(&fresh).unwrap(), bincode::serialize(&history).unwrap());
-        assert_eq!(std::fs::read(&bak).unwrap(), game::history::persist::encode(&history), "the old one is kept");
-        store.shutdown();
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn ensure_history_refuses_a_corrupt_one() {
-        let store = memory_store();
-        let map = land_map(48, 48, |x, z| x < 2 || z < 2 || x >= 46 || z >= 46);
-        let history = ensure_history(&store, &map, None).unwrap().unwrap();
-        let mut bytes = game::history::persist::encode(&history);
-        bytes.truncate(bytes.len() / 2);
+    /// An R1 history row, as an R1 cut wrote it.
+    fn store_history(store: &StoreHandle, bytes: Vec<u8>) {
         let cut = game::WorldCut {
             host: 0,
             id: game::CutId(1),
@@ -557,16 +598,79 @@ mod tests {
             history: Some(bytes),
         };
         store.commit_cut(cut, world_store::Fence::default()).recv().unwrap().expect("the cut commits");
-        let err = ensure_history(&store, &map, None).err().expect("refused");
-        assert!(err.contains("history"), "{err}");
+    }
+
+    #[test]
+    fn coordinator_state_migrates_an_r1_history_row_then_prefers_its_own() {
+        let store = memory_store();
+        let map = land_map(48, 48, |x, z| x < 2 || z < 2 || x >= 46 || z >= 46);
+        let mut history = ensure(&store, &map, None).coordinator.history().clone();
+        // Time passes: the stored history is not the bootstrap's.
+        let later = game::history::CalendarTick(history.now().0 + 3 * game::history::DAYS_PER_YEAR * game::history::TICKS_PER_DAY);
+        history.advance(later);
+        let r1 = game::history::persist::encode(&history);
+        store_history(&store, r1.clone());
+        let migrated = ensure(&store, &map, None);
+        assert_eq!(migrated.source, CoordinatorSource::Migrated);
+        assert_eq!(history_bytes(&migrated), r1, "the R1 history, as stored");
+        // Its own row wins over the history row from then on.
+        let mut ahead = history.clone();
+        ahead.advance(game::history::CalendarTick(later.0 + game::history::TICKS_PER_DAY));
+        let state = game::CoordinatorState { history: game::history::persist::encode(&ahead), claims: vec![], memo: vec![] };
+        save_state(&store, state.encode());
+        let stored = ensure(&store, &map, None);
+        assert_eq!(stored.source, CoordinatorSource::Stored);
+        assert!(!stored.source.needs_save());
+        assert_eq!(history_bytes(&stored), game::history::persist::encode(&ahead));
+        assert_eq!(store.load_history().unwrap(), Some(r1), "the history row is left as it is");
         store.shutdown();
     }
 
     #[test]
-    fn ensure_history_without_habitable_land_runs_without_history() {
+    fn coordinator_state_of_another_world_is_kept_and_replaced() {
+        let store = memory_store();
+        let map = land_map(48, 48, |x, z| x < 2 || z < 2 || x >= 46 || z >= 46);
+        let history = ensure(&store, &map, None).coordinator.history().clone();
+        let stored = game::CoordinatorState { history: game::history::persist::encode(&history), claims: vec![], memo: vec![] }.encode();
+        save_state(&store, stored.clone());
+        // Another world's (the map changed): replaced by a new bootstrap, the stored
+        // state kept beside the store.
+        let dir = scratch("coordinator-bak");
+        let db = dir.join("w.sqlite");
+        assert!(coordinator_backup_path(&db).ends_with("w.sqlite.coordinator.bak"));
+        assert!(history_backup_path(&db).ends_with("w.sqlite.history.bak"));
+        let other = land_map(48, 48, |x, z| x < 3 || z < 2 || x >= 46 || z >= 46);
+        let fresh = ensure(&store, &other, Some(&db));
+        assert_eq!(fresh.source, CoordinatorSource::Bootstrapped);
+        assert_ne!(history_bytes(&fresh), game::history::persist::encode(&history));
+        assert_eq!(std::fs::read(coordinator_backup_path(&db)).unwrap(), stored, "the old one is kept");
+        store.shutdown();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn coordinator_state_refuses_a_corrupt_one() {
+        let map = land_map(48, 48, |x, z| x < 2 || z < 2 || x >= 46 || z >= 46);
+        // A corrupt R1 history row.
+        let store = memory_store();
+        let history = ensure(&store, &map, None).coordinator.history().clone();
+        let mut bytes = game::history::persist::encode(&history);
+        bytes.truncate(bytes.len() / 2);
+        store_history(&store, bytes);
+        let err = ensure_coordinator_state(&store, &map, None).err().expect("refused");
+        assert!(err.contains("history"), "{err}");
+        // A corrupt coordinator row.
+        save_state(&store, vec![game::coordinator::COORDINATOR_STATE_VERSION, 1, 2, 3]);
+        let err = ensure_coordinator_state(&store, &map, None).err().expect("refused");
+        assert!(err.contains("coordinator state"), "{err}");
+        store.shutdown();
+    }
+
+    #[test]
+    fn coordinator_state_without_habitable_land_runs_without_history() {
         let store = memory_store();
         let sea = land_map(16, 16, |_, _| true);
-        assert!(ensure_history(&store, &sea, None).unwrap().is_none());
+        assert!(ensure_coordinator_state(&store, &sea, None).unwrap().is_none());
         store.shutdown();
     }
 }

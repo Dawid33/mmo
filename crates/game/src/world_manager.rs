@@ -2847,7 +2847,8 @@ impl<S: RegionSpawner> WorldManager<S> {
             regions: cut.regions.into_iter().map(|(rc, (p, _))| (rc, p)).collect(),
             in_flight: cut.rows,
             players: players.into_iter().collect(),
-            history: self.world.as_mut().and_then(|w| w.history_snapshot()),
+            // The coordinator saves the history itself (durable before visible).
+            history: None,
         };
         log::debug!(
             "[server] save cut {} at tick {} complete: {} regions, {} in flight, {} players",

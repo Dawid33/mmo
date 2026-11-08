@@ -362,7 +362,6 @@ fn inline_link_without_delay_answers_on_the_pump() {
     assert_eq!(replies(&got).len(), 1, "answered on the same pump: {got:?}");
     let inline = link.as_inline_mut().expect("the inline link");
     assert_eq!(inline.coordinator_mut().history().sites().count(), 1);
-    assert!(link.history_snapshot().is_some(), "transitional: the inline link hands out its history");
 }
 
 /// Sends a person-info request before each of 20 pumps, then pumps until all are read.

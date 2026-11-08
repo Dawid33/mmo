@@ -2,6 +2,7 @@
 //! Cloneable and `Send + Sync`; its methods block on the answer unless noted.
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use game::{
@@ -38,6 +39,8 @@ pub struct StoreHandle {
     join: Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
     /// `world.super_region_regions`, read at open.
     super_region_regions: u32,
+    /// Test hook ([`StoreHandle::fail_next_writes`]): queued writes still to fail.
+    fail_writes: Arc<AtomicU32>,
 }
 
 fn stopped() -> StoreError {
@@ -49,7 +52,32 @@ impl StoreHandle {
     /// is open (a [`OpenMode::Writer`] creates a missing store and migrates it).
     pub fn open(url: &StoreUrl, dials: Dials, mode: OpenMode) -> Result<StoreHandle, StoreError> {
         let (tx, join, super_region_regions) = thread::spawn(url, dials, mode)?;
-        Ok(StoreHandle { tx, join: Arc::new(Mutex::new(Some(join))), super_region_regions })
+        Ok(StoreHandle {
+            tx,
+            join: Arc::new(Mutex::new(Some(join))),
+            super_region_regions,
+            fail_writes: Arc::new(AtomicU32::new(0)),
+        })
+    }
+
+    /// Test hook: the next `n` queued writes — cut commits ([`StoreHandle::commit_cut`])
+    /// and coordinator saves ([`StoreHandle::save_coordinator`]), whichever come first —
+    /// fail with a `Backend` error (not `Fenced`) and write nothing. Shared by every clone.
+    pub fn fail_next_writes(&self, n: u32) {
+        self.fail_writes.store(n, Ordering::SeqCst);
+    }
+
+    /// Test hook: writes [`StoreHandle::fail_next_writes`] has still to fail.
+    pub fn failing_writes_left(&self) -> u32 {
+        self.fail_writes.load(Ordering::SeqCst)
+    }
+
+    /// Takes one of [`StoreHandle::fail_next_writes`]' failures, if any are left.
+    fn injected_failure(&self) -> Option<StoreError> {
+        self.fail_writes
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+            .ok()
+            .map(|_| StoreError::Backend("injected write failure (StoreHandle::fail_next_writes)".into()))
     }
 
     /// Regions per super-region side (`world.super_region_regions`): what
@@ -137,6 +165,10 @@ impl StoreHandle {
         fence: Fence,
     ) -> crossbeam::channel::Receiver<Result<CutCommitted, StoreError>> {
         let (tx, rx) = crossbeam::channel::bounded(1);
+        if let Some(e) = self.injected_failure() {
+            let _ = tx.send(Err(e));
+            return rx;
+        }
         if let Err(mpsc::error::SendError(req)) = self.tx.send(Request::CommitCut(Box::new(cut), fence, Reply::Sync(tx))) {
             if let Request::CommitCut(_, _, reply) = req {
                 reply.send(Err(stopped()));
@@ -184,6 +216,10 @@ impl StoreHandle {
         fence: CoordinatorFence,
     ) -> crossbeam::channel::Receiver<Result<(), StoreError>> {
         let (tx, rx) = crossbeam::channel::bounded(1);
+        if let Some(e) = self.injected_failure() {
+            let _ = tx.send(Err(e));
+            return rx;
+        }
         if let Err(mpsc::error::SendError(req)) = self.tx.send(Request::SaveCoordinator(state, fence, Reply::Sync(tx))) {
             if let Request::SaveCoordinator(_, _, reply) = req {
                 reply.send(Err(stopped()));

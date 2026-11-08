@@ -76,8 +76,8 @@ pub enum InFlightRow {
 }
 
 /// The world at one tick, for the store: every region snapshot not committed
-/// yet (each the merge of its uncommitted snapshots), what was in flight, the
-/// players, and the history (`history::persist::encode`).
+/// yet (each the merge of its uncommitted snapshots), what was in flight and the
+/// players.
 #[derive(Debug, Clone)]
 pub struct WorldCut {
     pub id: CutId,
@@ -87,6 +87,9 @@ pub struct WorldCut {
     pub regions: Vec<(RegionCoords, PortableRegion)>,
     pub in_flight: Vec<InFlightRow>,
     pub players: Vec<(PlayerId, PlayerRecord)>,
+    /// The R1 history row. A host's cut never carries it any more (`None`): the world
+    /// coordinator is the only writer of history state (its own `coordinator` row); an R1
+    /// world's row is read once, to migrate it.
     pub history: Option<Vec<u8>>,
 }
 

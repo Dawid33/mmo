@@ -12,6 +12,7 @@ use game::{CutId, RegionCoords, RegionOutput, RegionSpawner, Tick, WorldManager}
 use world_store::{CutCommitted, StoreError, StoreHandle};
 
 use crate::claims::{Fenced, HostClaims, ServerExit, FENCED_REFUSAL};
+use crate::coordinator_rt::CoordinatorThread;
 
 struct Pending {
     id: CutId,
@@ -201,17 +202,25 @@ pub fn park_for_exit<S: RegionSpawner>(
 }
 
 /// The orderly exit, in one place: a fenced process saves nothing and parks
-/// nothing (its clients are refused, [`FENCED_REFUSAL`]); otherwise players
-/// and regions park ([`park_for_exit`]) and the last cut is committed — unless
-/// a region was given up: its state is only as of its last snapshot, and a
-/// cut written without it could be inconsistent with what it left in flight,
-/// so the world stays as of the last periodic cut. `cuts` is `None` when
-/// nothing is saved (procedural worlds).
+/// nothing (its clients are refused, [`FENCED_REFUSAL`]; the coordinator stops
+/// without a last save); otherwise players and regions park ([`park_for_exit`]),
+/// the world coordinator (`AllInOne`: the thread in `coordinator`) handles their
+/// parks and saves its state once more, and the host's last cut is committed —
+/// unless a region was given up: its state is only as of its last snapshot, and
+/// a cut written without it could be inconsistent with what it left in flight,
+/// so the world stays as of the last periodic cut (the coordinator's save is
+/// still taken: history ahead of the regions is safe, R2b Decision 7). The
+/// coordinator saves before the host's cut because the cut writer shuts the
+/// shared store down; both come after every park, so neither holds anything
+/// the other lacks. A coordinator save refused as fenced makes the exit fenced.
+/// `cuts` is `None` when nothing is saved (procedural worlds).
+#[allow(clippy::too_many_arguments)]
 pub fn exit_world<S: RegionSpawner>(
     manager: &mut WorldManager<S>,
     region_out: &Receiver<(RegionCoords, RegionOutput)>,
     now_ms: impl Fn() -> u64,
     cuts: Option<CutWriter>,
+    coordinator: Option<CoordinatorThread>,
     fenced: &Fenced,
     park_timeout: Duration,
     save_timeout: Duration,
@@ -221,6 +230,9 @@ pub fn exit_world<S: RegionSpawner>(
     let fenced_now = fenced.is_set() || cuts.as_ref().is_some_and(|c| c.fenced().is_set());
     if fenced_now {
         manager.refuse_all_sessions(FENCED_REFUSAL);
+        if let Some(coordinator) = coordinator {
+            coordinator.stop_without_save();
+        }
         match cuts {
             Some(cuts) => cuts.finish_without_cut(manager),
             None => {}
@@ -229,6 +241,15 @@ pub fn exit_world<S: RegionSpawner>(
         return ServerExit::Fenced;
     }
     let given_up = park_for_exit(manager, region_out, now_ms, park_timeout, idle);
+    let coordinator_exit = coordinator.map_or(ServerExit::Clean, |c| c.shutdown(save_timeout));
+    if coordinator_exit == ServerExit::Fenced || fenced.is_set() {
+        manager.refuse_all_sessions(FENCED_REFUSAL);
+        if let Some(cuts) = cuts {
+            cuts.finish_without_cut(manager);
+        }
+        log::error!("[server] fenced: another process took over this world's coordinator; nothing more is saved");
+        return ServerExit::Fenced;
+    }
     let Some(mut cuts) = cuts else { return ServerExit::Clean };
     if !given_up.is_empty() {
         log::error!(

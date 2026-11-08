@@ -129,6 +129,7 @@ fn build_server_runtime(worker_threads: usize) -> tokio::runtime::Runtime {
 
 pub mod auth_edge;
 pub mod claims;
+pub mod coordinator_rt;
 pub mod cuts;
 pub mod lod_workers;
 pub mod perf;
@@ -651,24 +652,29 @@ pub fn run() -> claims::ServerExit {
     );
     manager.set_ownership(ownership, super_region_regions);
 
+    // The world coordinator's thread and its link's wake-up (none without a history).
+    let mut coordinator: Option<coordinator_rt::CoordinatorThread> = None;
+    let mut world_wake = crossbeam::channel::never::<()>();
     // The world map (stored with the forged world: per-region tile
     // summaries); procedural worlds have none.
     if let Some(map) = world_map {
         info!("[server] world map: {}x{} tiles, from the world store", map.width, map.height);
-        // Forged worlds keep their history in the store (procedural: none).
+        // Forged worlds keep their history in the store (procedural: none): the
+        // world coordinator, the only writer of history state, runs on its own
+        // `coordinator` thread joined by a channel link (`AllInOne`).
         if let Some(store) = &store {
-            let backup = match &world_source {
-                world_file::WorldSource::Store { url: world_store::StoreUrl::Sqlite(db), .. } => {
-                    Some(world_file::history_backup_path(db))
-                }
+            let sqlite_db = match &world_source {
+                world_file::WorldSource::Store { url: world_store::StoreUrl::Sqlite(db), .. } => Some(db.as_path()),
                 _ => None,
             };
-            if let Some(history) =
-                world_file::ensure_history(store, &map, backup.as_deref()).unwrap_or_else(|e| fatal(&e))
+            if let Some(start) =
+                world_file::ensure_coordinator_state(store, &map, sqlite_db).unwrap_or_else(|e| fatal(&e))
             {
-                // In-process world services for now (R2b Task 9 picks the link per role).
-                let coordinator = game::Coordinator::new(history, 0);
-                manager.set_world_link(Box::new(game::InlineWorldLink::new(coordinator)), host_boot(), 0);
+                let (link, thread) =
+                    coordinator_rt::start_all_in_one(store.clone(), start, fenced.clone()).unwrap_or_else(|e| fatal(&e));
+                world_wake = link.wake();
+                coordinator = Some(thread);
+                manager.set_world_link(Box::new(link), host_boot(), 0);
             }
         }
         manager.set_world_map(map);
@@ -718,6 +724,8 @@ pub fn run() -> claims::ServerExit {
                     manager.handle_region_output(rc, output, now_ms);
                 }
             },
+            // The coordinator sent something: `maintain` below reads it.
+            recv(world_wake) -> _ => {},
             default(std::time::Duration::from_millis(200)) => {}
         }
         let sessions = manager.depths().sessions;
@@ -728,7 +736,11 @@ pub fn run() -> claims::ServerExit {
             break 'main;
         }
         if fenced.is_set() {
-            log::error!("[server] fenced: another process claimed this server's super-regions; stopping");
+            log::error!("[server] fenced: another process claimed this server's super-regions or its coordinator; stopping");
+            break 'main;
+        }
+        if coordinator.as_ref().is_some_and(coordinator_rt::CoordinatorThread::is_finished) {
+            log::error!("[server] the world coordinator thread stopped; stopping");
             break 'main;
         }
         if stop_signal.load(std::sync::atomic::Ordering::SeqCst) {
@@ -741,7 +753,7 @@ pub fn run() -> claims::ServerExit {
             // Backpressure: no new cut while the store still commits one.
             if last_world_save.elapsed() >= save_every && cuts.in_flight() == 0 && !fenced.is_set() {
                 last_world_save = std::time::Instant::now();
-                // Regions, players, history and what is in flight, at one
+                // Regions, players and what is in flight, at one
                 // world tick a lead ahead (`save_cut.rs`).
                 manager.begin_cut(world_clock.tick_at(start.elapsed().as_millis() as u64));
             }
@@ -758,9 +770,10 @@ pub fn run() -> claims::ServerExit {
     }
 
     // Orderly exit: park every player (regions answer `ParkPlayer` before
-    // `Shutdown`), then everything else; a region that does not park within
-    // `EXIT_PARK_TIMEOUT` is given up, and then no last cut is written (the
-    // world restarts from its last periodic save). A fenced process parks and
+    // `Shutdown`), then everything else; the coordinator saves once more; a
+    // region that does not park within `EXIT_PARK_TIMEOUT` is given up, and
+    // then no last cut is written (the world restarts from its last periodic
+    // save). A fenced process parks and
     // saves nothing: its clients are refused and it exits `EXIT_FENCED`.
     let had_sessions = manager.depths().sessions > 0;
     let outcome = cuts::exit_world(
@@ -768,6 +781,7 @@ pub fn run() -> claims::ServerExit {
         &region_out_recv,
         || start.elapsed().as_millis() as u64,
         cuts,
+        coordinator,
         &fenced,
         cuts::EXIT_PARK_TIMEOUT,
         EXIT_SAVE_TIMEOUT,
@@ -791,8 +805,9 @@ pub fn run() -> claims::ServerExit {
 const FENCED_EXIT_FLUSH: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// How often the main loop starts a save cut of the world (regions, players,
-/// history, the world tick and what is in flight, at one world tick) into the
-/// world store. The orderly exit saves once more after parking every region.
+/// the world tick and what is in flight, at one world tick) into the world
+/// store; the coordinator saves the history itself. The orderly exit saves once
+/// more after parking every region.
 pub const WORLD_SAVE_SECS: u64 = 60;
 
 /// How long the orderly exit waits for the world store to commit its last save.

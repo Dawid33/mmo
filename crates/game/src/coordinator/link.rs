@@ -14,11 +14,6 @@ pub trait WorldLink {
     /// Drive a coordinator that runs in the caller's thread ([`InlineWorldLink`]); the
     /// host calls it before draining [`WorldLink::recv`]. A no-op for a real link.
     fn pump(&mut self, _now_ms: u64) {}
-    /// TRANSITIONAL (R2b Task 5 → Task 7 removes it): the history for the host's save cut,
-    /// while the cut still carries it. `None`: the coordinator saves its own state.
-    fn history_snapshot(&mut self) -> Option<Vec<u8>> {
-        None
-    }
     /// The inline link behind a boxed link, for tests and tools that reach the
     /// coordinator core (`InlineWorldLink::coordinator_mut`). `None` for any other link.
     fn as_inline_mut(&mut self) -> Option<&mut InlineWorldLink> {
@@ -149,10 +144,6 @@ impl WorldLink for InlineWorldLink {
             floor = floor.max(self.step + lag);
             self.out_q.push_back((floor, msg));
         }
-    }
-
-    fn history_snapshot(&mut self) -> Option<Vec<u8>> {
-        Some(crate::history::persist::encode(self.coord.history()))
     }
 
     fn as_inline_mut(&mut self) -> Option<&mut InlineWorldLink> {
