@@ -511,3 +511,159 @@ fn directive_on_the_link_at_reconnect_is_dropped() {
     assert!(stale > 0, "no seed had the spawn on the link at the reconnect");
     assert!(stale < SEEDS, "no seed landed the spawn before the drop");
 }
+
+/// The people each region was attached with, from the `Attach`es handed over since `mark`.
+fn attached_people(w: &World, mark: usize) -> Vec<Vec<game::RunningRegion>> {
+    w.sent_since(mark)
+        .into_iter()
+        .filter_map(|m| match m {
+            HostMsg::Attach { running, .. } => Some(running),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The people with a body in `r`, sorted (what an exact list holds).
+fn people_in(w: &mut World, r: RegionCoords) -> Vec<PersonId> {
+    bodies(&mut w.manager).into_iter().filter(|(_, at)| at.contains(&r)).map(|(p, _)| p).collect()
+}
+
+/// A region's people list emitted for a save cut just before the link came back (its
+/// `PeoplePositions` in flight at link-up) is not the region's answer to the attach:
+/// only its `PeopleListed` of that epoch is.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn cut_positions_in_flight_do_not_satisfy_the_attach() {
+    use game::RegionSpawner;
+    each_seed("cut_positions_in_flight_do_not_satisfy_the_attach", |seed| {
+        let mut w = World::with(seed, &[A]);
+        let site_region = w.history().sites().next().unwrap().region;
+        w.packet(A, ClientPacket::RequestRegionConnection(site_region));
+        w.drain();
+        // A cut whose answers (each region's people, then its snapshot) are held back.
+        let now = w.manager.spawner_mut().world_tick();
+        w.manager.begin_cut(now).expect("no cut pending");
+        let mut held = Vec::new();
+        for _ in 0..64 {
+            w.manager.spawner_mut().pump();
+            w.manager.spawner_mut().tick_all();
+            held.extend(w.region_out.try_iter());
+            let positions = held.iter().any(|(r, o)| *r == site_region && matches!(o, RegionOutput::PeoplePositions(_)));
+            if positions && held.iter().any(|(r, o)| *r == site_region && matches!(o, RegionOutput::CutSnapshot(..))) {
+                break;
+            }
+        }
+        assert!(
+            held.iter().any(|(r, o)| *r == site_region && matches!(o, RegionOutput::PeoplePositions(_))),
+            "seed {seed}: the cut listed the site's people"
+        );
+        // The link drops and comes back: the attach asks every region; the cut's lists
+        // arrive first.
+        w.set_up(false);
+        w.manager.pump_world(w.now_ms);
+        let mark = w.mark();
+        w.set_up(true);
+        w.manager.pump_world(w.now_ms);
+        for (r, o) in held {
+            w.manager.handle_region_output(r, o, w.now_ms);
+        }
+        // Every other region lists its people; the site region has not read its ask yet.
+        w.manager.spawner_mut().hold_inputs(site_region, 1);
+        w.manager.spawner_mut().pump();
+        let answers: Vec<_> = w.region_out.try_iter().collect();
+        for (r, o) in answers {
+            w.manager.handle_region_output(r, o, w.now_ms);
+        }
+        assert!(attached_people(&w, mark).is_empty(), "seed {seed}: no Attach on the cut's lists");
+        w.manager.spawner_mut().hold_inputs(site_region, 0);
+        assert!(!w.manager.world_attached(), "seed {seed}");
+        w.drain();
+        let attaches = attached_people(&w, mark);
+        assert_eq!(attaches.len(), 1, "seed {seed}: one Attach");
+        let listed = attaches[0].iter().find(|r| r.rc == site_region).expect("the site region attached");
+        let mut listed: Vec<PersonId> = listed.people.iter().map(|(p, _)| *p).collect();
+        listed.sort();
+        assert_eq!(listed, people_in(&mut w, site_region), "seed {seed}: attached with exactly its bodies");
+        w.check_settled("reattached");
+    });
+}
+
+/// A region that lists its people late (its inputs unread past `ATTACH_WAIT_MS`) is
+/// waited for, never attached with a guessed list; once it answers it is attached with
+/// exactly its bodies, and nobody gets a second one.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn late_listing_region_is_attached_exactly() {
+    each_seed("late_listing_region_is_attached_exactly", |seed| {
+        let mut w = World::with(seed, &[A]);
+        let site_region = w.history().sites().next().unwrap().region;
+        w.packet(A, ClientPacket::RequestRegionConnection(site_region));
+        w.drain();
+        let census = people_in(&mut w, site_region);
+        assert!(!census.is_empty(), "seed {seed}: the site's people stand there");
+        w.set_up(false);
+        w.manager.pump_world(w.now_ms);
+        let late_rounds = (game::ATTACH_WAIT_MS / TICK_RATE) as u32 + 3 + roll(seed, 6, 4) as u32;
+        w.manager.spawner_mut().hold_inputs(site_region, late_rounds);
+        let mark = w.mark();
+        w.set_up(true);
+        for round in 0..late_rounds.saturating_sub(1) {
+            w.tick();
+            w.check_lagging(&format!("waiting, round {round}"));
+            assert!(attached_people(&w, mark).is_empty(), "seed {seed} round {round}: no Attach before the list");
+        }
+        assert!(!w.manager.world_attached(), "seed {seed}: still waiting past ATTACH_WAIT_MS");
+        for round in 0..DRAIN_ROUNDS {
+            w.tick();
+            w.check_lagging(&format!("attaching, round {round}"));
+        }
+        w.drain();
+        let attaches = attached_people(&w, mark);
+        assert_eq!(attaches.len(), 1, "seed {seed}: one Attach");
+        let listed = attaches[0].iter().find(|r| r.rc == site_region).expect("the site region attached");
+        let mut listed: Vec<PersonId> = listed.people.iter().map(|(p, _)| *p).collect();
+        listed.sort();
+        assert_eq!(listed, census, "seed {seed}: attached with exactly its bodies");
+        w.check_settled("reattached");
+        assert_eq!(people_in(&mut w, site_region), census, "seed {seed}: the same bodies, once each");
+    });
+}
+
+/// An embark the coordinator applied whose reply was lost, the link down past the
+/// timeout: the player is told `WorldUnavailable`; after the link is back the request is
+/// sent again (answered from the memo), its claim given back, and the player may embark
+/// again. The first request founded exactly one site.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn expired_sent_embark_gives_back_its_claim() {
+    let ran = std::sync::atomic::AtomicU64::new(0);
+    each_seed("expired_sent_embark_gives_back_its_claim", |seed| {
+        let mut w = World::with(seed, &[A]);
+        let req = w.embark_request();
+        w.manager.handle_server_event(ServerEvent::ClientPacket(ClientPacket::Embark(req), A), w.now_ms);
+        if w.manager.pending_world_requests() == 0 {
+            return; // Answered at once (no lag by this seed): nothing in flight to lose.
+        }
+        ran.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        w.set_up(false);
+        w.link().lose_in_transit();
+        let site = w.player_sites();
+        assert_eq!(site.len(), 1, "seed {seed}: the coordinator applied it");
+        assert_eq!(w.coordinator().claim_of(PlayerId(A as u64)), Some(game::Claim::Fortress(site[0])));
+        w.now_ms += WORLD_REQUEST_TIMEOUT_SECS * 1000;
+        w.tick();
+        assert_eq!(w.embark_results(A), vec![Err(EmbarkRefusal::WorldUnavailable)], "seed {seed}");
+        assert_eq!(w.manager.pending_world_requests(), 0, "seed {seed}: forgotten toward the client");
+        for _ in 0..roll(seed, 7, 4) {
+            w.tick();
+        }
+        w.set_up(true);
+        w.drain();
+        assert_eq!(w.coordinator().claim_of(PlayerId(A as u64)), None, "seed {seed}: the claim was given back");
+        assert!(w.embark_results(A).is_empty(), "seed {seed}: the late reply is not shown");
+        assert_eq!(w.player_sites(), site, "seed {seed}: one site, the first request's");
+        assert!(w.history().returnable(site[0]), "seed {seed}: the site stays");
+        assert!(w.ask(A, ClientPacket::Embark(w.embark_request())).is_ok(), "seed {seed}: may embark again");
+    });
+    assert!(ran.into_inner() > 0, "no seed had the reply in flight");
+}

@@ -83,10 +83,12 @@ pub enum RegionInput {
     /// A neighbour the store cannot serve is seeded from worldgen, as
     /// [`RegionInput::SeedHaloFromWorldgen`].
     SeedHaloFromStore(Vec<RegionCoords>),
-    /// The history people whose bodies stand here now: answered with
-    /// [`RegionOutput::PeoplePositions`] (empty included) — the host's `Attach`
-    /// to a (re)connected world coordinator. Does not affect sim state.
-    ListPeople,
+    /// The history people whose bodies stand here, for the host's `Attach` (of
+    /// this epoch) to a (re)connected world coordinator: answered with
+    /// [`RegionOutput::PeopleListed`] (empty included) once every transfer held
+    /// when it arrived has been applied (a spawn or an arrival waiting for its
+    /// slot is a body too). Does not affect sim state.
+    ListPeople(u64),
     /// Graceful stop; replied with `RegionOutput::Stopped(state)`.
     Shutdown,
 }
@@ -179,8 +181,10 @@ pub enum RegionOutput {
     /// Sent just before a `CutSnapshot`: where the people with a body here
     /// stand (region-local translations), for the history
     /// (`History::note_positions`) — the snapshot itself holds no people.
-    /// Also the answer to [`RegionInput::ListPeople`].
     PeoplePositions(Vec<(crate::history::PersonId, [f32; 3])>),
+    /// The answer to [`RegionInput::ListPeople`] of this epoch: exactly the history
+    /// people with a body here (region-local translations).
+    PeopleListed(u64, Vec<(crate::history::PersonId, [f32; 3])>),
     /// Never sent by a runner: the manager puts it on the output channel
     /// just before it spawns a region's runner, so it can tell a dead
     /// runner's late outputs (before the marker) from the new one's.
@@ -211,6 +215,7 @@ impl RegionOutput {
             RegionOutput::CutMissed(_) => "CutMissed",
             RegionOutput::LoadFailed(_) => "LoadFailed",
             RegionOutput::PeoplePositions(_) => "PeoplePositions",
+            RegionOutput::PeopleListed(..) => "PeopleListed",
             RegionOutput::Incarnation(_) => "Incarnation",
         }
     }
@@ -308,6 +313,9 @@ pub struct RegionRunner {
     /// order. Also holds the inputs of a client whose arrival is in here,
     /// behind it, so they follow the body (see [`RegionRunner::route_input`]).
     held_transfers: std::collections::VecDeque<(GameEventKind, Tick)>,
+    /// A [`RegionInput::ListPeople`] (its epoch) waiting for the transfers held
+    /// when it came, until the slot of the latest of them.
+    people_list_due: Option<(u64, Tick)>,
     /// Clients whose body left this region during the last
     /// [`MAX_INPUT_LEAD_TICKS`] ticks: where to and the departure stamp.
     /// Their late inputs come back as [`RegionOutput::Forward`]. Transient,
@@ -362,6 +370,7 @@ impl RegionRunner {
             terrain_hash_cost: Default::default(),
             held: Default::default(),
             held_transfers: Default::default(),
+            people_list_due: None,
             departed: Default::default(),
             baseline_hash_time,
             state_hash_cost: Default::default(),
@@ -517,9 +526,12 @@ impl RegionRunner {
             }
             RegionInput::SeedHaloFromWorldgen(neighbours) => self.seed_halo_from_worldgen(neighbours),
             RegionInput::SeedHaloFromStore(neighbours) => self.seed_halo_from_store(neighbours),
-            RegionInput::ListPeople => {
-                let people = self.region.data().people_here();
-                let _ = self.out.send((self.id, RegionOutput::PeoplePositions(people)));
+            RegionInput::ListPeople(epoch) => {
+                let due = self.held_transfers.iter().map(|(_, t)| *t).max();
+                match due.filter(|&t| t > self.region.current_tick()) {
+                    Some(t) => self.people_list_due = Some((epoch, t)),
+                    None => self.send_people_listed(epoch),
+                }
             }
             RegionInput::Shutdown => {
                 // A save cut at a tick this region will not reach now: it
@@ -747,6 +759,12 @@ impl RegionRunner {
         let _ = self.out.send((self.id, RegionOutput::EventProcessed(event)));
     }
 
+    /// [`RegionOutput::PeopleListed`]: the people with a body here now.
+    fn send_people_listed(&mut self, epoch: u64) {
+        let people = self.region.data().people_here();
+        let _ = self.out.send((self.id, RegionOutput::PeopleListed(epoch, people)));
+    }
+
     /// One sim tick + the every-10-ticks SyncClock self-report. The caller
     /// owns pacing (thread timer on the server, frame accumulator on wasm).
     pub fn tick(&mut self) {
@@ -827,6 +845,12 @@ impl RegionRunner {
                 self.apply_input(kind);
             } else {
                 i += 1;
+            }
+        }
+        if let Some((epoch, due)) = self.people_list_due {
+            if due <= now {
+                self.people_list_due = None;
+                self.send_people_listed(epoch);
             }
         }
         // (The slot's events cross nothing; the Tick's scan did.)

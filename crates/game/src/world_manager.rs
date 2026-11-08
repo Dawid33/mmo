@@ -633,7 +633,16 @@ enum WorldAttach {
     /// The link is up and the `Attach` is being gathered: each listed region (with its
     /// incarnation) is asked for its people. Lifecycle messages made meanwhile are
     /// `held` and follow the `Attach`; requests and claim messages go to the outbox.
-    Gathering { epoch: u64, since_ms: u64, regions: BTreeMap<RegionCoords, (u64, Listed)>, held: Vec<HostMsg> },
+    /// A running region enters the `Attach` only with its exact list for this epoch
+    /// (`RegionOutput::PeopleListed`) or as its park / loss left it — never guessed: past
+    /// [`ATTACH_WAIT_MS`] the stragglers are logged (`warned`) and the host keeps waiting.
+    Gathering {
+        epoch: u64,
+        since_ms: u64,
+        regions: BTreeMap<RegionCoords, (u64, Listed)>,
+        held: Vec<HostMsg>,
+        warned: bool,
+    },
     /// The `Attach` of `epoch` is sent; until the coordinator echoes it
     /// ([`CoordMsg::Attached`]) every `SpawnPeople` / `Directive` that arrives was decided
     /// before it and is dropped.
@@ -718,10 +727,13 @@ pub struct WorldManager<S: RegionSpawner> {
     next_request_seq: u64,
     /// Player world requests not answered yet.
     pending_requests: BTreeMap<RequestId, PendingRequest>,
-    /// State-changing requests that timed out after they were sent, with the player and
-    /// when: a claim their late answer grants is given back (`ReleaseClaim`). Forgotten
-    /// one more timeout later.
-    expired_requests: BTreeMap<RequestId, (PlayerId, u64)>,
+    /// State-changing requests (embark, return, adventure start) that had been sent when
+    /// they timed out toward the client: the coordinator may have applied them. Kept
+    /// until their answer comes — sent again after every `Attach` (the memo answers
+    /// without re-executing) — and a claim that answer grants is given back
+    /// (`ReleaseClaim`; the site stays). They never age: a claim the player does not
+    /// know it holds would refuse its every embark.
+    expired_requests: BTreeMap<RequestId, (PlayerId, WorldRequest)>,
     /// Requests and claim messages made while the link is down (or the `Attach` is being
     /// gathered), in order: sent right after the `Attach`.
     outbox: VecDeque<HostMsg>,
@@ -1121,8 +1133,9 @@ impl<S: RegionSpawner> WorldManager<S> {
 
     /// The link came up (at start, or after it was down): the host attaches. Every region
     /// announced and running (not stopping) is asked for its people
-    /// (`RegionInput::ListPeople`); once all have answered (or [`ATTACH_WAIT_MS`] passed)
-    /// the `Attach` goes, then the requests whose answer never came, then the outbox, then
+    /// (`RegionInput::ListPeople`); once all have answered exactly (however long it
+    /// takes; [`ATTACH_WAIT_MS`] only logs the stragglers) the `Attach` goes, then the
+    /// requests whose answer never came, then the outbox, then
     /// the lifecycle messages made meanwhile. A stopping region is not listed: the
     /// coordinator parks it empty (its people back in the abstract history; a park never
     /// keeps bodies) and its own park sends nothing.
@@ -1146,34 +1159,52 @@ impl<S: RegionSpawner> WorldManager<S> {
         log::info!("world link up: gathering attach {epoch} over {} regions", listed.len());
         let regions =
             listed.iter().map(|rc| (*rc, (self.incarnation.get(rc).copied().unwrap_or(0), None))).collect();
-        self.world_attach = WorldAttach::Gathering { epoch, since_ms: now_ms, regions, held: Vec::new() };
+        self.world_attach =
+            WorldAttach::Gathering { epoch, since_ms: now_ms, regions, held: Vec::new(), warned: false };
         for rc in listed {
-            self.send_to_region(rc, RegionInput::ListPeople);
+            self.send_to_region(rc, RegionInput::ListPeople(epoch));
         }
-        self.try_finish_attach(false);
+        self.try_finish_attach();
     }
 
-    /// A listed region answered (its people, or its park / loss): the `Attach` goes once
-    /// every one has, or at once when `force`d ([`ATTACH_WAIT_MS`]).
-    fn note_listed(&mut self, rc: RegionCoords, people: &[(PersonId, [f32; 3])], answer: bool) {
-        if let WorldAttach::Gathering { regions, .. } = &mut self.world_attach {
+    /// A listed region's exact people for the attach being gathered: its
+    /// `PeopleListed` of that epoch, or what its park / loss left (the park's bodies;
+    /// none when lost). The `Attach` goes once every listed region has one.
+    fn note_listed(&mut self, rc: RegionCoords, epoch: Option<u64>, people: &[(PersonId, [f32; 3])]) {
+        if let WorldAttach::Gathering { epoch: gathering, regions, .. } = &mut self.world_attach {
+            if epoch.is_some_and(|e| e != *gathering) {
+                log::debug!("{rc:?} listed its people for attach {epoch:?}, not {gathering}: ignored");
+                return;
+            }
             if let Some((_, listed)) = regions.get_mut(&rc) {
-                if answer || listed.is_none() {
-                    *listed = Some(people.to_vec());
-                }
+                *listed = Some(people.to_vec());
             }
         }
-        self.try_finish_attach(false);
+        self.try_finish_attach();
     }
 
-    /// Send the `Attach` being gathered once every listed region answered (`force`: with
-    /// what it has; a region that did not answer is listed with no people — the history
-    /// takes them back), then the requests sent before the link went down whose answer
-    /// never came (the coordinator's memo answers a state-changing one once), the
-    /// outbox, and the lifecycle messages held meanwhile, in that order.
-    fn try_finish_attach(&mut self, force: bool) {
+    /// Past [`ATTACH_WAIT_MS`]: log the regions the attach still waits for (once); it
+    /// keeps waiting — a running region is never attached with a guessed list (its
+    /// unlisted people would go back to the history while their bodies run).
+    fn warn_attach_stragglers(&mut self, now_ms: u64) {
+        if let WorldAttach::Gathering { epoch, since_ms, regions, warned, .. } = &mut self.world_attach {
+            if !*warned && now_ms.saturating_sub(*since_ms) >= ATTACH_WAIT_MS {
+                *warned = true;
+                let waiting: Vec<RegionCoords> =
+                    regions.iter().filter(|(_, (_, l))| l.is_none()).map(|(rc, _)| *rc).collect();
+                log::warn!("attach {epoch}: still waiting after {ATTACH_WAIT_MS} ms for {waiting:?} to list their people");
+            }
+        }
+    }
+
+    /// Send the `Attach` being gathered once every listed region answered, then the
+    /// requests whose answer never came (sent before the link went down, or timed out
+    /// toward the client after they left — the coordinator's memo answers a
+    /// state-changing one once), the outbox, and the lifecycle messages held meanwhile,
+    /// in that order.
+    fn try_finish_attach(&mut self) {
         let WorldAttach::Gathering { regions, .. } = &self.world_attach else { return };
-        if !force && regions.values().any(|(_, listed)| listed.is_none()) {
+        if regions.values().any(|(_, listed)| listed.is_none()) {
             return;
         }
         let WorldAttach::Gathering { epoch, regions, held, .. } =
@@ -1184,11 +1215,10 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.world_attach = WorldAttach::Sent { epoch };
         let running: Vec<RunningRegion> = regions
             .into_iter()
-            .map(|(rc, (incarnation, listed))| {
-                if listed.is_none() {
-                    log::warn!("attach {epoch}: {rc:?} did not list its people in {ATTACH_WAIT_MS} ms; attached empty");
-                }
-                RunningRegion { rc, incarnation, people: listed.unwrap_or_default() }
+            .map(|(rc, (incarnation, listed))| RunningRegion {
+                rc,
+                incarnation,
+                people: listed.expect("every listed region answered"),
             })
             .collect();
         for r in &running {
@@ -1210,13 +1240,19 @@ impl<S: RegionSpawner> WorldManager<S> {
                 _ => None,
             })
             .collect();
-        let resend: Vec<HostMsg> = self
+        let mut resend: BTreeMap<RequestId, HostMsg> = self
             .pending_requests
             .iter()
             .filter(|(id, _)| !queued.contains(id))
-            .map(|(id, p)| HostMsg::Request { id: *id, player: p.player, req: p.req.clone() })
+            .map(|(id, p)| (*id, HostMsg::Request { id: *id, player: p.player, req: p.req.clone() }))
             .collect();
-        for m in resend.into_iter().chain(std::mem::take(&mut self.outbox)).chain(held) {
+        resend.extend(
+            self.expired_requests
+                .iter()
+                .map(|(id, (player, req))| (*id, HostMsg::Request { id: *id, player: *player, req: req.clone() })),
+        );
+        let resend = resend.into_values();
+        for m in resend.chain(std::mem::take(&mut self.outbox)).chain(held) {
             self.link_send(m);
         }
     }
@@ -1410,7 +1446,7 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.directive_stamps.remove(&rc);
         if self.world_live.remove(&rc) {
             // An attach being gathered lists it as it parked; the park follows the attach.
-            self.note_listed(rc, &people, false);
+            self.note_listed(rc, None, &people);
             self.world_send(HostMsg::RegionParked { rc, people });
         }
     }
@@ -1697,8 +1733,8 @@ impl<S: RegionSpawner> WorldManager<S> {
     }
 
     /// Requests waiting longer than the timeout: the player is told the world is
-    /// unavailable and the request forgotten (out of the outbox too). One that had left
-    /// may still be answered; a claim that answer grants is given back.
+    /// unavailable and the request forgotten (out of the outbox too). A state-changing
+    /// one that had left is kept in `expired_requests` until its answer comes.
     fn expire_world_requests(&mut self, now_ms: u64) {
         let timeout = self.world_request_timeout_ms;
         let expired: Vec<RequestId> = self
@@ -1713,14 +1749,13 @@ impl<S: RegionSpawner> WorldManager<S> {
             let queued = self.outbox.iter().any(is_it);
             self.outbox.retain(|m| !is_it(m));
             if !queued && p.req.changes_state() {
-                self.expired_requests.insert(id, (p.player, now_ms));
+                self.expired_requests.insert(id, (p.player, p.req.clone()));
             }
             log::warn!("world request {id:?} of client {} unanswered in {timeout} ms: {:?}", p.client, p.req);
             if self.sessions.contains_key(&p.client) {
                 self.answer_unavailable(p.client, &p.req);
             }
         }
-        self.expired_requests.retain(|_, (_, at)| now_ms.saturating_sub(*at) < timeout);
     }
 
     /// The coordinator answered request `id`. The first answer wins (a replayed request
@@ -2031,10 +2066,8 @@ impl<S: RegionSpawner> WorldManager<S> {
             RegionOutput::CutSnapshot(id, tick, portable) => self.cut_answer(rc, Some((id, tick)), *portable),
             RegionOutput::CutMissed(id) => self.cut_missed(rc, id),
             RegionOutput::LoadFailed(why) => self.region_load_failed(rc, why, now_ms),
+            RegionOutput::PeopleListed(epoch, people) => self.note_listed(rc, Some(epoch), &people),
             RegionOutput::PeoplePositions(people) => {
-                // An attach being gathered takes the latest list as the region's answer
-                // (`ListPeople`'s, or a cut's just before it: as current).
-                self.note_listed(rc, &people, true);
                 if self.world_live.contains(&rc) {
                     self.world_send(HostMsg::Positions(people));
                 }
@@ -2291,11 +2324,7 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.expire_overdue_cut();
         self.retry_unavailable();
         self.expire_world_requests(now_ms);
-        if let WorldAttach::Gathering { since_ms, .. } = self.world_attach {
-            if now_ms.saturating_sub(since_ms) >= ATTACH_WAIT_MS {
-                self.try_finish_attach(true);
-            }
-        }
+        self.warn_attach_stragglers(now_ms);
         self.pump_world(self.world_ms);
         self.route_notices();
         let connected_homes: BTreeSet<RegionCoords> = self

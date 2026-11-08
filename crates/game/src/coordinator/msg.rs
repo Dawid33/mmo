@@ -136,9 +136,10 @@ pub enum CoordMsg {
     Calendar(CalendarTick),
     /// The sites changed (founded, abandoned, a population crossing a multiple of 10).
     Sites(Vec<SiteMarker>),
-    /// The sites as they stand right after a request granted a claim, for the host's own
-    /// view (the region of a founded site, the markers a retiring player is shown);
-    /// not broadcast to clients, who get [`CoordMsg::Sites`] at the day's turn.
+    /// The sites as they stand right after a request granted a claim, for the host's view
+    /// of them (the region of a founded site). Not fanned out at once: connected clients
+    /// get [`CoordMsg::Sites`] at the day's turn, but the host's view reaches a player who
+    /// retires or ends an adventure and every new connection straight away.
     SiteMarkers(Vec<SiteMarker>),
     /// A history log line for the clients whose home is `region`.
     Notice { region: RegionCoords, line: String },
