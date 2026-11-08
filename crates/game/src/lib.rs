@@ -40,6 +40,7 @@ pub mod mass_props;
 mod migrate;
 pub mod movement;
 pub mod orders;
+pub mod ownership;
 pub mod pathfind;
 pub mod path_plan;
 pub mod perf;
@@ -101,6 +102,7 @@ pub use mining::*;
 pub use migrate::Carried;
 pub use movement::{Immersion, Motion};
 pub use orders::*;
+pub use ownership::{super_region_of, DEFAULT_SUPER_REGION_REGIONS};
 pub use pathfind::*;
 pub use path_plan::{
     line_step, next_region, route_blocked, PathPlan, RouteMap, HINT_LEVEL_REACH, HINT_REACH_BLOCKS, MAX_ROUTE_NODES,

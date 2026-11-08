@@ -40,7 +40,7 @@ pub struct ThreadRegionSpawner {
     /// that fails stops the region (`RegionOutput::LoadFailed`): it is never
     /// regenerated over stored data. Runners also seed the halo of stored
     /// neighbours from it (`RegionInput::SeedHaloFromStore`).
-    store: Option<world_store::StoreHandle>,
+    store: Option<crate::claim_on_touch::ClaimOnTouch>,
     /// Every region thread loads and pins the forged tiles of its 3x3
     /// neighbourhood before it is built and holds them for its life (its own
     /// generation and its halo seeds of never-run neighbours read them). A
@@ -94,7 +94,8 @@ impl ThreadRegionSpawner {
     }
 
     /// Restore never-run regions from the world store.
-    pub fn with_store(mut self, store: world_store::StoreHandle) -> Self {
+    /// Loads are fenced through `store` (shared with the cut writer).
+    pub fn with_store(mut self, store: crate::claim_on_touch::ClaimOnTouch) -> Self {
         self.store = Some(store);
         self
     }
@@ -194,7 +195,7 @@ impl RegionSpawner for ThreadRegionSpawner {
                 // Halo seeds of stored neighbours that have not run here
                 // (`RegionInput::SeedHaloFromStore`) read the same store.
                 if let Some(store) = &store {
-                    runner.set_stored_terrain(std::sync::Arc::new(world_store::TerrainFromStore(store.clone())));
+                    runner.set_stored_terrain(std::sync::Arc::new(world_store::TerrainFromStore(store.store().clone())));
                 }
                 let generate_time = generate_time.get();
                 let hash_time = runner.baseline_hash_time();

@@ -13,6 +13,7 @@ use game::{
     ServerEvent, ServerPacket, SubChunk, WorldManager, FLIP_HYSTERESIS, REGION_SIZE, SPAWN_REGION,
     UNLOAD_GRACE_MS,
 };
+use server::claim_on_touch::ClaimOnTouch;
 use server::region_threads::ThreadRegionSpawner;
 
 const REGION_STARTUP_BUDGET: Duration = Duration::from_secs(10);
@@ -580,7 +581,7 @@ fn temp_store(name: &str) -> (std::path::PathBuf, world_store::StoreUrl) {
 }
 
 fn open_store(url: &world_store::StoreUrl) -> world_store::StoreHandle {
-    world_store::StoreHandle::open(url, world_store::Dials::BUILT).expect("the store opens")
+    world_store::StoreHandle::open(url, world_store::Dials::BUILT, world_store::OpenMode::Writer).expect("the store opens")
 }
 
 /// The server's spawn path on `store`, as `server::run` builds it: regions
@@ -589,7 +590,7 @@ fn open_store(url: &world_store::StoreUrl) -> world_store::StoreHandle {
 fn stored_rig(store: &world_store::StoreHandle) -> Rig {
     let info = store.world_info().unwrap();
     let spawner = ThreadRegionSpawner::with_region_generator(std::sync::Arc::new(|_| lightweight_columns()))
-        .with_store(store.clone())
+        .with_store(ClaimOnTouch::new(store.clone()))
         .with_clock(game::WorldClock::starting_at(0, info.world_tick), Instant::now());
     let mut rig = Rig::with_spawner(spawner, |_| lightweight_columns());
     rig.manager.set_stored_regions(store.stored_regions().unwrap());
@@ -613,7 +614,7 @@ impl Rig {
         }
         assert!(self.manager.running_regions().is_empty(), "every region parked");
         let now = self.manager.spawner_mut().world_tick();
-        let writer = server::cuts::CutWriter::new(store);
+        let writer = server::cuts::CutWriter::new(ClaimOnTouch::new(store));
         assert!(writer.finish(&mut self.manager, now, Duration::from_secs(10)), "the exit's save cut commits");
     }
 }
@@ -649,7 +650,7 @@ fn saved_region_is_restored_by_a_restarted_server() {
     let store = open_store(&url);
     let saved_tick = store.world_info().unwrap().world_tick;
     assert!(saved_tick >= 10, "the region ran: world tick {saved_tick}");
-    let stored = store.load_region(SPAWN_REGION).unwrap().expect("the region is stored");
+    let stored = ClaimOnTouch::new(store.clone()).load_region(SPAWN_REGION).unwrap().expect("the region is stored");
     assert!(stored.entities.iter().all(|b| b.client.is_none()), "no player body in the stored region");
     let mut rig = stored_rig(&store);
     rig.event(ServerEvent::connected(0));
@@ -848,11 +849,12 @@ fn body_crosses_seam_on_real_threads() {
         players: Vec::new(),
         history: None,
     };
-    store.commit_cut(cut).recv().unwrap().expect("the region is stored");
+    let fence = ClaimOnTouch::new(store.clone()).fence_for_cut(&cut).unwrap();
+    store.commit_cut(cut, fence).recv().unwrap().expect("the region is stored");
     drop(region);
 
     let generate: server::region_threads::SharedRegionGenerator = std::sync::Arc::new(seam_floor_columns);
-    let spawner = ThreadRegionSpawner::with_region_generator(generate).with_store(store.clone());
+    let spawner = ThreadRegionSpawner::with_region_generator(generate).with_store(ClaimOnTouch::new(store.clone()));
     let mut rig = Rig::with_spawner(spawner, seam_floor_columns);
     rig.manager.set_stored_regions(store.stored_regions().unwrap());
     rig.event(ServerEvent::connected(0));
@@ -947,7 +949,7 @@ fn store_read_failure_stops_the_region_on_real_threads() {
         counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         lightweight_columns()
     }))
-    .with_store(dead);
+    .with_store(ClaimOnTouch::new(dead));
     let mut rig = Rig::with_spawner(spawner, |_| lightweight_columns());
     rig.event(ServerEvent::connected(0));
     let mut log = Vec::new();

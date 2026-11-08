@@ -57,6 +57,7 @@ mod log_model;
 mod mass_props;
 mod multi_client;
 mod orders;
+mod ownership;
 mod packet_codec;
 mod pathfind;
 mod portable;

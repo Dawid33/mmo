@@ -11,7 +11,7 @@ use game::{
 use tokio::sync::{mpsc, oneshot};
 
 use crate::thread::{self, Reply, Request};
-use crate::{Dials, StoreError, StoreUrl};
+use crate::{CoordinatorFence, Dials, Fence, OpenMode, StoreError, StoreUrl, SuperRegion};
 
 /// The world row and whether a forged artifact is stored.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -36,6 +36,8 @@ pub struct CutCommitted {
 pub struct StoreHandle {
     tx: mpsc::UnboundedSender<Request>,
     join: Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
+    /// `world.super_region_regions`, read at open.
+    super_region_regions: u32,
 }
 
 fn stopped() -> StoreError {
@@ -43,11 +45,17 @@ fn stopped() -> StoreError {
 }
 
 impl StoreHandle {
-    /// Opens (creating it if missing) the store at `url` on a new
-    /// `world-store` thread; returns once it is open and migrated.
-    pub fn open(url: &StoreUrl, dials: Dials) -> Result<StoreHandle, StoreError> {
-        let (tx, join) = thread::spawn(url, dials)?;
-        Ok(StoreHandle { tx, join: Arc::new(Mutex::new(Some(join))) })
+    /// Opens the store at `url` on a new `world-store` thread; returns once it
+    /// is open (a [`OpenMode::Writer`] creates a missing store and migrates it).
+    pub fn open(url: &StoreUrl, dials: Dials, mode: OpenMode) -> Result<StoreHandle, StoreError> {
+        let (tx, join, super_region_regions) = thread::spawn(url, dials, mode)?;
+        Ok(StoreHandle { tx, join: Arc::new(Mutex::new(Some(join))), super_region_regions })
+    }
+
+    /// Regions per super-region side (`world.super_region_regions`): what
+    /// `game::super_region_of` takes for this store's fences.
+    pub fn super_region_regions(&self) -> u32 {
+        self.super_region_regions
     }
 
     fn ask<T>(&self, make: impl FnOnce(Reply<T>) -> Request) -> Result<T, StoreError> {
@@ -91,11 +99,14 @@ impl StoreHandle {
     }
 
     /// The region as last committed; `None` if it never was (it never ran).
-    pub fn load_region(&self, rc: RegionCoords) -> Result<Option<StoredRegion>, StoreError> {
-        self.ask(|r| Request::LoadRegion(rc, r))
+    /// Fenced: refused with `Fenced` unless `fence` still holds its super-region.
+    pub fn load_region(&self, rc: RegionCoords, fence: &Fence) -> Result<Option<StoredRegion>, StoreError> {
+        let fence = fence.clone();
+        self.ask(|r| Request::LoadRegion(rc, fence, r))
     }
 
     /// Only the region's terrain (chunks + ground); `None` if never committed.
+    /// Unfenced: what LOD and halo seeding read of regions this process need not own.
     pub fn load_terrain(&self, rc: RegionCoords) -> Result<Option<TerrainSnapshot>, StoreError> {
         self.ask(|r| Request::LoadTerrain(rc, r))
     }
@@ -116,10 +127,17 @@ impl StoreHandle {
 
     /// Queues the cut's commit (one transaction, all or nothing) and returns at
     /// once; the answer arrives on the receiver. Commits run in call order.
-    pub fn commit_cut(&self, cut: WorldCut) -> crossbeam::channel::Receiver<Result<CutCommitted, StoreError>> {
+    /// Fenced: `Fenced` (nothing written) unless `fence` still holds every
+    /// super-region it claimed and every one the cut touches
+    /// ([`crate::touched_super_regions`]).
+    pub fn commit_cut(
+        &self,
+        cut: WorldCut,
+        fence: Fence,
+    ) -> crossbeam::channel::Receiver<Result<CutCommitted, StoreError>> {
         let (tx, rx) = crossbeam::channel::bounded(1);
-        if let Err(mpsc::error::SendError(req)) = self.tx.send(Request::CommitCut(Box::new(cut), Reply::Sync(tx))) {
-            if let Request::CommitCut(_, reply) = req {
+        if let Err(mpsc::error::SendError(req)) = self.tx.send(Request::CommitCut(Box::new(cut), fence, Reply::Sync(tx))) {
+            if let Request::CommitCut(_, _, reply) = req {
                 reply.send(Err(stopped()));
             }
         }
@@ -145,8 +163,41 @@ impl StoreHandle {
         rx.await.map_err(|_| stopped())?
     }
 
+    /// Claims `srs` for `owner` (one transaction): each super-region's epoch
+    /// goes up by one (a new one starts at 1), fencing whoever held it.
+    pub fn claim_super_regions(&self, owner: u32, srs: Vec<SuperRegion>) -> Result<Fence, StoreError> {
+        self.ask(|r| Request::ClaimSuperRegions(owner, srs, r))
+    }
+
+    /// Claims the coordinator row (its epoch up by one), fencing the coordinator that held it.
+    pub fn claim_coordinator(&self) -> Result<CoordinatorFence, StoreError> {
+        self.ask(Request::ClaimCoordinator)
+    }
+
+    /// Queues a write of the coordinator's state and returns at once; the
+    /// answer (`Fenced` when another coordinator claimed the row since)
+    /// arrives on the receiver.
+    pub fn save_coordinator(
+        &self,
+        state: Vec<u8>,
+        fence: CoordinatorFence,
+    ) -> crossbeam::channel::Receiver<Result<(), StoreError>> {
+        let (tx, rx) = crossbeam::channel::bounded(1);
+        if let Err(mpsc::error::SendError(req)) = self.tx.send(Request::SaveCoordinator(state, fence, Reply::Sync(tx))) {
+            if let Request::SaveCoordinator(_, _, reply) = req {
+                reply.send(Err(stopped()));
+            }
+        }
+        rx
+    }
+
+    /// The coordinator's last saved state; `None` before the first save.
+    pub fn load_coordinator(&self) -> Result<Option<Vec<u8>>, StoreError> {
+        self.ask(Request::LoadCoordinator)
+    }
+
     /// Commits everything queued before this call, then stops the thread and
-    /// joins it (closing the pool and releasing the world lock). Other clones'
+    /// joins it (closing the pool and releasing SQLite's world lock). Other clones'
     /// later calls fail with a `Backend` error.
     pub fn shutdown(self) {
         let _ = self.tx.send(Request::Shutdown);

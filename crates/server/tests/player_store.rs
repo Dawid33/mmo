@@ -3,6 +3,7 @@
 //! comes back once a save cut has written it, and local names never collide
 //! with online accounts.
 use game::{PlayerId, PlayerName, PlayerRecord, PlayerToken};
+use server::claim_on_touch::ClaimOnTouch;
 use server::player_store::{MemoryPlayerStore, PlayerKey, PlayerStore, StorePlayers};
 use world_store::{Dials, StoreHandle, StoreUrl};
 
@@ -37,7 +38,7 @@ fn resolve_same_token_same_id_across_reopen() {
     let dir = scratch("reopen");
     let url = StoreUrl::Sqlite(dir.join("w.sqlite"));
     let (a, b) = {
-        let handle = StoreHandle::open(&url, Dials::BUILT).unwrap();
+        let handle = StoreHandle::open(&url, Dials::BUILT, world_store::OpenMode::Writer).unwrap();
         let mut store = StorePlayers(handle.clone());
         let (a, ra) = store.resolve(&token(1)).unwrap();
         let (b, _) = store.resolve(&token(2)).unwrap();
@@ -54,11 +55,12 @@ fn resolve_same_token_same_id_across_reopen() {
             players: vec![(a, record(4))],
             history: None,
         };
-        handle.commit_cut(cut).recv().unwrap().expect("the cut commits");
+        let fence = ClaimOnTouch::new(handle.clone()).fence_for_cut(&cut).unwrap();
+        handle.commit_cut(cut, fence).recv().unwrap().expect("the cut commits");
         handle.shutdown();
         (a, b)
     };
-    let handle = StoreHandle::open(&url, Dials::BUILT).unwrap();
+    let handle = StoreHandle::open(&url, Dials::BUILT, world_store::OpenMode::Writer).unwrap();
     let mut store = StorePlayers(handle.clone());
     assert_eq!(store.resolve(&token(1)).unwrap(), (a, Some(record(4))), "the cut's record survives a reopen");
     assert_eq!(store.resolve(&token(2)).unwrap(), (b, None));
@@ -101,7 +103,7 @@ fn store_players_resolve_local_names_across_reopen() {
     let dir = scratch("local");
     let url = StoreUrl::Sqlite(dir.join("w.sqlite"));
     let (bob, online) = {
-        let handle = StoreHandle::open(&url, Dials::BUILT).unwrap();
+        let handle = StoreHandle::open(&url, Dials::BUILT, world_store::OpenMode::Writer).unwrap();
         let mut store = StorePlayers(handle.clone());
         let bob = store.resolve(&local("bob")).unwrap().0;
         let online = store.resolve(&token(1)).unwrap().0;
@@ -109,7 +111,7 @@ fn store_players_resolve_local_names_across_reopen() {
         handle.shutdown();
         (bob, online)
     };
-    let handle = StoreHandle::open(&url, Dials::BUILT).unwrap();
+    let handle = StoreHandle::open(&url, Dials::BUILT, world_store::OpenMode::Writer).unwrap();
     let mut store = StorePlayers(handle.clone());
     assert_eq!(store.resolve(&local("bob")).unwrap().0, bob);
     assert_eq!(store.resolve(&token(1)).unwrap().0, online);

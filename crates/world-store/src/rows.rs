@@ -3,7 +3,8 @@
 //! u64 values (ticks, serials, player ids) are stored as i64 by bit cast.
 //!
 //! Writes go through the store thread's writer lock (`thread.rs`), so two
-//! write transactions never race on SQLite's deferred upgrade.
+//! write transactions never race on SQLite's deferred upgrade. Fenced writes
+//! and loads check the owner epochs first in their own transaction (`fence.rs`).
 
 use std::collections::BTreeMap;
 
@@ -13,8 +14,31 @@ use game::{
 };
 
 use crate::codec::*;
+use crate::fence::{CoordinatorFence, Fence, SuperRegion, commit_check_set, load_check};
 use crate::forged::{ForgedHead, TiledRows};
 use crate::{CutCommitted, StoreError, WorldInfo};
+
+/// Super-regions checked per fence query (two binds each).
+const FENCE_CHECK_BATCH: usize = 200;
+
+/// The fence query over `n` super-regions, `lock` appended (Postgres:
+/// `FOR SHARE`, in key order so it never deadlocks with a claim's upserts).
+fn fence_check_sql(n: usize, lock: &str) -> String {
+    let wanted: Vec<String> = (0..n).map(|k| format!("(sx = ${} AND sz = ${})", 2 * k + 1, 2 * k + 2)).collect();
+    format!("SELECT sx, sz, owner, epoch FROM super_regions WHERE {} ORDER BY sx, sz{lock}", wanted.join(" OR "))
+}
+
+/// A fence check that lost a race with a claim (Postgres: a serialization
+/// failure under REPEATABLE READ, or a deadlock) is fenced: claims always
+/// bump the epoch, so the row it waited on no longer holds this claim.
+fn fence_race(e: sqlx::Error, sr: SuperRegion) -> StoreError {
+    match &e {
+        sqlx::Error::Database(d) if matches!(d.code().as_deref(), Some("40001") | Some("40P01")) => {
+            StoreError::Fenced { sr: Some(sr) }
+        }
+        _ => e.into(),
+    }
+}
 
 /// u64 → i64, bit for bit.
 fn i(v: u64) -> i64 {
@@ -76,7 +100,7 @@ fn ground_blob(ground: Option<&Vec<(ColumnCoords, ColumnGround)>>) -> Vec<u8> {
 }
 
 macro_rules! engine_rows {
-    ($module:ident, $db:ty, $read_prelude:expr) => {
+    ($module:ident, $db:ty, $read_prelude:expr, $share_lock:expr) => {
         pub(crate) mod $module {
             use sqlx::Row;
 
@@ -115,6 +139,122 @@ macro_rules! engine_rows {
                     None
                 };
                 Ok(WorldInfo { content_crc, world_tick: u(tick), has_artifact })
+            }
+
+            /// `world.super_region_regions`: the super-region side the fences use.
+            pub(crate) async fn super_region_regions(pool: &Pool) -> Result<u32, StoreError> {
+                let s: i64 = sqlx::query("SELECT super_region_regions FROM world WHERE id = 1")
+                    .fetch_optional(pool)
+                    .await?
+                    .ok_or_else(|| StoreError::Corrupt("the world row is missing".into()))?
+                    .try_get(0)?;
+                u32::try_from(s)
+                    .ok()
+                    .filter(|s| *s > 0)
+                    .ok_or_else(|| StoreError::Corrupt(format!("world.super_region_regions {s}")))
+            }
+
+            /// Claims every super-region of `srs` for `owner` in one transaction:
+            /// a new row gets epoch 1, a known one epoch + 1 (whoever held it is
+            /// fenced). Rows are upserted in key order. Callers hold the writer lock.
+            pub(crate) async fn claim_super_regions(
+                pool: &Pool,
+                owner: u32,
+                srs: Vec<SuperRegion>,
+            ) -> Result<Fence, StoreError> {
+                let srs: std::collections::BTreeSet<SuperRegion> = srs.into_iter().collect();
+                let mut tx = pool.begin().await?;
+                let mut epochs = BTreeMap::new();
+                for (sx, sz) in srs {
+                    let epoch: i64 = sqlx::query(
+                        "INSERT INTO super_regions (sx, sz, owner, epoch) VALUES ($1, $2, $3, 1) \
+                         ON CONFLICT (sx, sz) DO UPDATE SET owner = excluded.owner, epoch = super_regions.epoch + 1 \
+                         RETURNING epoch",
+                    )
+                    .bind(i64::from(sx))
+                    .bind(i64::from(sz))
+                    .bind(i64::from(owner))
+                    .fetch_one(&mut *tx)
+                    .await?
+                    .try_get(0)?;
+                    epochs.insert((sx, sz), u(epoch));
+                }
+                tx.commit().await?;
+                Ok(Fence { owner, epochs })
+            }
+
+            /// Locks (Postgres: `FOR SHARE`) and checks every super-region of
+            /// `srs` in `tx`: each must be claimed in `fence` and stored with its
+            /// owner and epoch. The first that is not → `Fenced`.
+            async fn check_fence(
+                tx: &mut Tx,
+                fence: &Fence,
+                srs: &std::collections::BTreeSet<SuperRegion>,
+            ) -> Result<(), StoreError> {
+                let srs: Vec<SuperRegion> = srs.iter().copied().collect();
+                for batch in srs.chunks(FENCE_CHECK_BATCH) {
+                    let sql = fence_check_sql(batch.len(), $share_lock);
+                    let mut q = sqlx::query(&sql);
+                    for (sx, sz) in batch {
+                        q = q.bind(i64::from(*sx)).bind(i64::from(*sz));
+                    }
+                    let rows = q.fetch_all(&mut **tx).await.map_err(|e| fence_race(e, batch[0]))?;
+                    let mut stored = BTreeMap::new();
+                    for r in rows {
+                        let (sx, sz): (i64, i64) = (r.try_get(0)?, r.try_get(1)?);
+                        let (owner, epoch): (i64, i64) = (r.try_get(2)?, r.try_get(3)?);
+                        stored.insert((sx, sz), (owner, u(epoch)));
+                    }
+                    for &(sx, sz) in batch {
+                        let held = fence.epochs.get(&(sx, sz)).copied();
+                        let row = stored.get(&(i64::from(sx), i64::from(sz))).copied();
+                        let ok = matches!((held, row), (Some(e), Some((o, se))) if o == i64::from(fence.owner) && se == e);
+                        if !ok {
+                            return Err(StoreError::Fenced { sr: Some((sx, sz)) });
+                        }
+                    }
+                }
+                Ok(())
+            }
+
+            /// Claims the coordinator row: epoch 1 on a new store, else epoch + 1
+            /// (a coordinator that held it is fenced). Callers hold the writer lock.
+            pub(crate) async fn claim_coordinator(pool: &Pool) -> Result<CoordinatorFence, StoreError> {
+                let epoch: i64 = sqlx::query(
+                    "INSERT INTO coordinator (id, epoch) VALUES (1, 1) \
+                     ON CONFLICT (id) DO UPDATE SET epoch = coordinator.epoch + 1 RETURNING epoch",
+                )
+                .fetch_one(pool)
+                .await?
+                .try_get(0)?;
+                Ok(CoordinatorFence { epoch: u(epoch) })
+            }
+
+            /// Writes the coordinator's state if `fence` still holds its row (the
+            /// check is the update's own `WHERE`). Callers hold the writer lock.
+            pub(crate) async fn save_coordinator(
+                pool: &Pool,
+                state: Vec<u8>,
+                fence: CoordinatorFence,
+            ) -> Result<(), StoreError> {
+                let done = sqlx::query("UPDATE coordinator SET state = $1, saved_utc = $2 WHERE id = 1 AND epoch = $3")
+                    .bind(state)
+                    .bind(crate::open::utc_now())
+                    .bind(i(fence.epoch))
+                    .execute(pool)
+                    .await?;
+                if done.rows_affected() == 0 {
+                    return Err(StoreError::Fenced { sr: None });
+                }
+                Ok(())
+            }
+
+            pub(crate) async fn load_coordinator(pool: &Pool) -> Result<Option<Vec<u8>>, StoreError> {
+                let row = sqlx::query("SELECT state FROM coordinator WHERE id = 1").fetch_optional(pool).await?;
+                Ok(match row {
+                    Some(r) => r.try_get(0)?,
+                    None => None,
+                })
             }
 
             pub(crate) async fn forged_archive(pool: &Pool) -> Result<Option<Vec<u8>>, StoreError> {
@@ -259,8 +399,16 @@ macro_rules! engine_rows {
                     .map_err(|e| StoreError::Corrupt(format!("region {rc:?} ground: {e}")))
             }
 
-            pub(crate) async fn load_region(pool: &Pool, rc: RegionCoords) -> Result<Option<StoredRegion>, StoreError> {
+            /// The region as last committed, if `fence` still holds its
+            /// super-region (checked first, in the same read transaction).
+            pub(crate) async fn load_region(
+                pool: &Pool,
+                rc: RegionCoords,
+                fence: &Fence,
+                s: u32,
+            ) -> Result<Option<StoredRegion>, StoreError> {
                 let mut tx = begin_read(pool).await?;
+                check_fence(&mut tx, fence, &[load_check(rc, s)].into()).await?;
                 let Some((meta, ground)) = region_row(&mut tx, rc).await? else {
                     tx.commit().await?;
                     return Ok(None);
@@ -387,9 +535,17 @@ macro_rules! engine_rows {
             }
 
             /// The whole cut in one transaction; any error rolls all of it back.
-            pub(crate) async fn commit_cut(pool: &Pool, cut: &WorldCut) -> Result<CutCommitted, StoreError> {
+            /// First the fence: every super-region the cut touches and every one
+            /// `fence` claimed must still be held ([`commit_check_set`]).
+            pub(crate) async fn commit_cut(
+                pool: &Pool,
+                cut: &WorldCut,
+                fence: &Fence,
+                s: u32,
+            ) -> Result<CutCommitted, StoreError> {
                 let t = i(cut.tick);
                 let mut tx = pool.begin().await?;
+                check_fence(&mut tx, fence, &commit_check_set(cut, fence, s)).await?;
                 // Every region's entities go first, so an entity that moved between two
                 // regions of the cut is not seen twice.
                 for (rc, _) in &cut.regions {
@@ -529,5 +685,7 @@ macro_rules! engine_rows {
     };
 }
 
-engine_rows!(sqlite, sqlx::Sqlite, None);
-engine_rows!(pg, sqlx::Postgres, Some("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ"));
+// SQLite needs no row lock: claims and commits all hold the store's writer
+// lock and one writer process holds the file lock.
+engine_rows!(sqlite, sqlx::Sqlite, None, "");
+engine_rows!(pg, sqlx::Postgres, Some("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ"), " FOR SHARE");

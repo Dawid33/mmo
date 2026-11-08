@@ -226,9 +226,9 @@ fn damaged_tile_row_fails_its_load() {
 }
 
 /// A `TileLoader` over its own Postgres pool: a second host's reads of the
-/// same database. (Two `StoreHandle`s cannot both open one world database
-/// while Plan A's world lock — a session advisory lock — stands; R2's owner
-/// epochs replace it.)
+/// same database. (Written while Postgres had a world lock; two
+/// `StoreHandle`s may open one database now, but a bare pool is still the
+/// smallest second reader.)
 struct PoolTiles {
     rt: tokio::runtime::Runtime,
     pool: sqlx::PgPool,

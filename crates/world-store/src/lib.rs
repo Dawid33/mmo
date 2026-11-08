@@ -1,11 +1,12 @@
 //! The world store: one world's durable state in SQLite or Postgres through sqlx
-//! (native only). This module holds the shared vocabulary; `open` opens a database,
-//! takes the world lock, runs the migrations and checks the world row; `thread` runs
-//! the `world-store` thread that every other thread reaches through [`StoreHandle`];
-//! `rows` is the SQL.
+//! (native only). This module holds the shared vocabulary; `open` opens a database
+//! (a writer: SQLite's file lock, the migrations, the world row; or read-only),
+//! `thread` runs the `world-store` thread that every other thread reaches through
+//! [`StoreHandle`]; `fence` is the owner-epoch fencing of writes; `rows` is the SQL.
 
 pub mod ctl;
 mod codec;
+mod fence;
 mod forged;
 mod handle;
 mod open;
@@ -17,16 +18,15 @@ mod url;
 use std::fmt;
 
 pub use codec::*;
+pub use fence::{CoordinatorFence, Fence, SuperRegion, touched_super_regions};
 pub use forged::{StoreTiles, load_forged, write_tiled};
 pub use handle::{CutCommitted, StoreHandle, WorldInfo};
-pub use open::{LockGuard, Pool, open_pool};
+pub use open::{LockGuard, OpenMode, Pool, newest_migration, open_pool};
 pub use terrain::TerrainFromStore;
 pub use url::StoreUrl;
 
 /// The schema/format generation this build writes and reads.
 pub const STORE_FORMAT_VERSION: u32 = 1;
-/// Postgres advisory-lock key of "one process owns this world database".
-pub const WORLD_LOCK_KEY: i64 = 0x4D4D_4F57_4F52_4C44; // "MMOWORLD"
 /// Largest connection pool of a store (the writer plus readers).
 pub const STORE_POOL_MAX: u32 = 4;
 
@@ -64,6 +64,10 @@ pub enum FormatKind {
     /// when the row's layout predates the version or the row is damaged).
     /// Rebuilt with the tiles by a re-tile when `archived`.
     WorldMap { archived: bool },
+    /// The schema's applied migrations (`_sqlx_migrations`' newest version,
+    /// 0 when none): a read-only handle never migrates, so it opens only a
+    /// store at exactly this build's newest migration ([`newest_migration`]).
+    Schema,
 }
 
 impl FormatKind {
@@ -88,6 +92,12 @@ pub enum StoreError {
     /// support); the message says why.
     Unsupported(String),
     Corrupt(String),
+    /// A fenced write or load whose claim is no longer the stored one:
+    /// another process claimed the super-region (`sr`) — or, with `sr` `None`,
+    /// the coordinator row — since. Nothing was written.
+    Fenced { sr: Option<SuperRegion> },
+    /// A write asked of a handle opened [`OpenMode::ReadOnly`].
+    ReadOnly,
 }
 
 impl fmt::Display for StoreError {
@@ -126,6 +136,21 @@ impl fmt::Display for StoreError {
                 }
                 retile_hint(f, *archived)
             }
+            StoreError::OtherFormat { found, kind: FormatKind::Schema } => write!(
+                f,
+                "this world's schema is at migration {found} but this build reads migration {}; \
+                 a read-only open never migrates — open it once with this build's server, or use a build that matches",
+                newest_migration()
+            ),
+            StoreError::Fenced { sr: Some((sx, sz)) } => write!(
+                f,
+                "super-region ({sx}, {sz}) was claimed by another process since this one claimed it; nothing was written"
+            ),
+            StoreError::Fenced { sr: None } => write!(
+                f,
+                "the world coordinator was claimed by another process since this one claimed it; nothing was written"
+            ),
+            StoreError::ReadOnly => write!(f, "this world store was opened read-only; it writes nothing"),
             StoreError::Unsupported(e) => write!(f, "{e}"),
             StoreError::Corrupt(e) => write!(f, "world store is corrupt: {e}"),
         }

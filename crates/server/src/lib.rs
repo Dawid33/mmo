@@ -128,6 +128,7 @@ fn build_server_runtime(worker_threads: usize) -> tokio::runtime::Runtime {
 }
 
 pub mod auth_edge;
+pub mod claim_on_touch;
 pub mod cuts;
 pub mod lod_workers;
 pub mod perf;
@@ -611,8 +612,11 @@ pub fn run() {
     let mut spawner = region_threads::ThreadRegionSpawner::with_generator(region_generator, halo_generator)
         .with_prefetch(std::sync::Arc::new(worldgen::prefetch_region))
         .with_clock(world_clock, start);
-    if let Some(store) = &store {
-        spawner = spawner.with_store(store.clone());
+    // Region loads and cut commits are fenced; until Task 3 claims at start,
+    // one lazily claiming fence is shared by both (`claim_on_touch`).
+    let claims = store.clone().map(claim_on_touch::ClaimOnTouch::new);
+    if let Some(claims) = &claims {
+        spawner = spawner.with_store(claims.clone());
     }
     let mut manager = game::WorldManager::new(
         spawner,
@@ -651,7 +655,8 @@ pub fn run() {
     }
     // What the store holds: which regions have stored state (their start
     // reads it), and what its last cut caught on its way (into the mailboxes).
-    let mut cuts = store.map(|store| {
+    let mut cuts = claims.map(|claims| {
+        let store = claims.store().clone();
         let stored = store.stored_regions().unwrap_or_else(|e| fatal(&e.to_string()));
         let in_flight = store.load_in_flight().unwrap_or_else(|e| fatal(&e.to_string()));
         info!(
@@ -662,7 +667,7 @@ pub fn run() {
         );
         manager.set_stored_regions(stored);
         manager.restore_in_flight(in_flight);
-        cuts::CutWriter::new(store)
+        cuts::CutWriter::new(claims)
     });
 
     let mut report = perf::ServerReport::new();

@@ -16,6 +16,7 @@ use game::{
     BlockId, ClientId, InlineLodBuilder, InlineSpawner, LodBuilder, RegionCoords, RegionOutput, RegionSpawner,
     ServerEvent, ServerPacket, WorldManager, SPAWN_REGION,
 };
+use server::claim_on_touch::ClaimOnTouch;
 use server::player_store::{PlayerStore, StorePlayers};
 use server::world_file::{self, open_world, WorldSource};
 use worldgen::forge::ForgeParams;
@@ -66,7 +67,7 @@ impl Core {
     ) -> Core {
         let mut regions = std::collections::BTreeMap::new();
         for rc in store.stored_regions().unwrap().into_keys() {
-            regions.insert(rc, store.load_region(rc).unwrap().expect("listed, so stored"));
+            regions.insert(rc, ClaimOnTouch::new(store.clone()).load_region(rc).unwrap().expect("listed, so stored"));
         }
         let (out_send, packets) = unbounded();
         let (region_out_send, region_out) = unbounded();
@@ -113,7 +114,7 @@ impl Core {
         self.settle();
         assert!(self.manager.running_regions().is_empty(), "every region parked");
         let now = self.manager.spawner_mut().world_tick();
-        let writer = server::cuts::CutWriter::new(store);
+        let writer = server::cuts::CutWriter::new(ClaimOnTouch::new(store));
         assert!(writer.finish(&mut self.manager, now, Duration::from_secs(10)), "the exit's save cut commits");
         now
     }
@@ -264,7 +265,7 @@ fn import_deletes_forge_file() {
 fn raw_exec(url: &world_store::StoreUrl, sql: &str) {
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
-        let (pool, _guard) = world_store::open_pool(url, world_store::Dials::BUILT).await.unwrap();
+        let (pool, _guard) = world_store::open_pool(url, world_store::Dials::BUILT, world_store::OpenMode::Writer).await.unwrap();
         match &pool {
             world_store::Pool::Sqlite(p) => {
                 sqlx::query(sql).execute(p).await.unwrap();
@@ -367,7 +368,8 @@ fn stale_world_map_is_rebuilt_at_start() {
         players: Vec::new(),
         history: Some(history.clone()),
     };
-    store.commit_cut(cut).recv().unwrap().expect("the cut commits");
+    let fence = ClaimOnTouch::new(store.clone()).fence_for_cut(&cut).unwrap();
+    store.commit_cut(cut, fence).recv().unwrap().expect("the cut commits");
     store.shutdown();
     let url = world_store::StoreUrl::Sqlite(dir.join("terrain.sqlite"));
     let old_row: String = world_store::encode(1, &map).iter().map(|b| format!("{b:02x}")).collect();
@@ -399,7 +401,7 @@ fn unsupported_world_file_is_kept() {
     assert!(err.contains("the file is kept"), "{err}");
     assert_eq!(std::fs::read(&world_path).unwrap(), bytes, "the forge file is left in place");
     let url = world_store::StoreUrl::Sqlite(dir.join("terrain.sqlite"));
-    let store = world_store::StoreHandle::open(&url, world_store::Dials::BUILT).unwrap();
+    let store = world_store::StoreHandle::open(&url, world_store::Dials::BUILT, world_store::OpenMode::Writer).unwrap();
     assert!(!store.world_info().unwrap().has_artifact, "nothing imported");
     assert!(world_store::load_forged(&store).unwrap().is_none(), "no tiles either");
     store.shutdown();
@@ -451,7 +453,7 @@ fn damaged_tile_run(tag: &str, pick: impl Fn(&ForgedWorld) -> (RegionCoords, Til
     use std::sync::atomic::{AtomicUsize, Ordering};
     let dir = scratch(tag);
     let url = world_store::StoreUrl::Sqlite(dir.join("w.sqlite"));
-    let store = world_store::StoreHandle::open(&url, world_store::Dials::BUILT).unwrap();
+    let store = world_store::StoreHandle::open(&url, world_store::Dials::BUILT, world_store::OpenMode::Writer).unwrap();
     world_store::write_tiled(&store, default_world_bytes()).unwrap();
     let (world, _) = world_store::load_forged(&store).unwrap().unwrap();
     let (failing, bad) = pick(&world);
@@ -467,7 +469,7 @@ fn damaged_tile_run(tag: &str, pick: impl Fn(&ForgedWorld) -> (RegionCoords, Til
     let hex: String = damaged.iter().map(|b| format!("{b:02x}")).collect();
     raw_exec(&url, &format!("UPDATE forged_tiles SET bytes = X'{hex}' WHERE tx = {} AND tz = {}", bad.tx, bad.tz));
 
-    let store = world_store::StoreHandle::open(&url, world_store::Dials::BUILT).unwrap();
+    let store = world_store::StoreHandle::open(&url, world_store::Dials::BUILT, world_store::OpenMode::Writer).unwrap();
     let (world, _) = world_store::load_forged(&store).unwrap().unwrap();
     let world = Arc::new(world);
     let materials = materials();
@@ -485,7 +487,7 @@ fn damaged_tile_run(tag: &str, pick: impl Fn(&ForgedWorld) -> (RegionCoords, Til
             counted.fetch_add(1, Ordering::SeqCst);
             worldgen::prefetch_region_forged(&pre_world, rc)
         }))
-        .with_store(store.clone());
+        .with_store(ClaimOnTouch::new(store.clone()));
     let (out, outputs) = unbounded();
     let to_bad = spawner.spawn(failing, RegionSeed::Deferred(None), out.clone());
     let to_good = spawner.spawn(healthy, RegionSeed::Deferred(None), out);
@@ -579,7 +581,7 @@ fn flat_floor(_rc: RegionCoords) -> Vec<(game::ColumnCoords, game::Column)> {
 fn bare_store(dir: &Path) -> (world_store::StoreHandle, server::player_store::PlayerKey, game::PlayerId) {
     materials();
     let url = world_store::StoreUrl::Sqlite(dir.join("w.sqlite"));
-    let store = world_store::StoreHandle::open(&url, world_store::Dials::BUILT).unwrap();
+    let store = world_store::StoreHandle::open(&url, world_store::Dials::BUILT, world_store::OpenMode::Writer).unwrap();
     let token = server::player_store::PlayerKey::Online(game::PlayerToken::generate([7; game::PLAYER_TOKEN_BYTES]));
     let (player, _) = StorePlayers(store.clone()).resolve(&token).unwrap();
     (store, token, player)
@@ -609,14 +611,15 @@ fn exit_saves_a_region_that_parks_late() {
     assert!(stuck.is_empty(), "nothing given up: {stuck:?}");
     assert!(manager.running_regions().is_empty());
     let now = manager.spawner_mut().world_tick();
-    let writer = server::cuts::CutWriter::new(store.clone());
+    let writer = server::cuts::CutWriter::new(ClaimOnTouch::new(store.clone()));
     assert!(writer.finish(&mut manager, now, Duration::from_secs(10)), "the exit's cut commits");
     let store = world_store::StoreHandle::open(
         &world_store::StoreUrl::Sqlite(dir.join("w.sqlite")),
         world_store::Dials::BUILT,
+        world_store::OpenMode::Writer,
     )
     .unwrap();
-    assert!(store.load_region(SPAWN_REGION).unwrap().is_some(), "the late region was saved");
+    assert!(ClaimOnTouch::new(store.clone()).load_region(SPAWN_REGION).unwrap().is_some(), "the late region was saved");
     let (again, record) = StorePlayers(store.clone()).resolve(&token).unwrap();
     assert_eq!(again, player);
     assert_eq!(record.expect("the player's record was saved").region, SPAWN_REGION);
@@ -648,14 +651,15 @@ fn exit_saves_the_rest_when_a_region_never_parks() {
     });
     assert_eq!(stuck, vec![east]);
     let now = manager.spawner_mut().world_tick();
-    let writer = server::cuts::CutWriter::new(store.clone());
+    let writer = server::cuts::CutWriter::new(ClaimOnTouch::new(store.clone()));
     assert!(writer.finish(&mut manager, now, Duration::from_secs(10)), "the rest is saved");
     let store = world_store::StoreHandle::open(
         &world_store::StoreUrl::Sqlite(dir.join("w.sqlite")),
         world_store::Dials::BUILT,
+        world_store::OpenMode::Writer,
     )
     .unwrap();
-    assert!(store.load_region(SPAWN_REGION).unwrap().is_some(), "the region that parked was saved");
+    assert!(ClaimOnTouch::new(store.clone()).load_region(SPAWN_REGION).unwrap().is_some(), "the region that parked was saved");
     let (_, record) = StorePlayers(store.clone()).resolve(&token).unwrap();
     assert_eq!(record.expect("the player's record was saved").region, SPAWN_REGION);
     store.shutdown();

@@ -1,5 +1,5 @@
 use sqlx::Row;
-use world_store::{Dials, Pool, StoreError, StoreUrl, open_pool};
+use world_store::{Dials, OpenMode, Pool, StoreError, StoreUrl, open_pool};
 
 use crate::common;
 
@@ -27,7 +27,7 @@ fn parse_urls() {
 
 #[tokio::test]
 async fn fresh_open_writes_world_row() {
-    let (pool, _g) = open_pool(&StoreUrl::Memory, Dials::BUILT).await.unwrap();
+    let (pool, _g) = open_pool(&StoreUrl::Memory, Dials::BUILT, OpenMode::Writer).await.unwrap();
     let row = sqlx::query("SELECT format_version, region_blocks, chunk_blocks FROM world WHERE id = 1")
         .fetch_one(sqlite_of(&pool))
         .await
@@ -42,13 +42,12 @@ async fn fresh_open_on_postgres() {
     let Some(admin) = common::pg_admin_url() else { return common::skip_msg() };
     let db = common::PgTestDb::create(&admin).await;
     {
-        let (pool, _g) = open_pool(&StoreUrl::Postgres(db.url.clone()), Dials::BUILT).await.unwrap();
+        let (pool, _g) = open_pool(&StoreUrl::Postgres(db.url.clone()), Dials::BUILT, OpenMode::Writer).await.unwrap();
         let Pool::Pg(p) = &pool else { panic!() };
         let v: i64 = sqlx::query("SELECT format_version FROM world WHERE id = 1").fetch_one(p).await.unwrap().get(0);
         assert_eq!(v, 1);
-        // A second process on the same database is refused.
-        let second = open_pool(&StoreUrl::Postgres(db.url.clone()), Dials::BUILT).await;
-        assert!(matches!(second, Err(StoreError::Locked(_))));
+        // No world lock on Postgres: a second writer opens too (owner epochs
+        // fence the writes — `fence::two_pg_writers_open_without_lock`).
         p.close().await;
     }
     db.drop_db().await;
@@ -58,8 +57,8 @@ async fn fresh_open_on_postgres() {
 async fn other_dials_refused() {
     let (dir, url) = temp_url("dials");
     let seeded = Dials { region_blocks: 512, chunk_blocks: Dials::BUILT.chunk_blocks };
-    drop(open_pool(&url, seeded).await.unwrap());
-    let err = open_pool(&url, Dials::BUILT).await.err().unwrap();
+    drop(open_pool(&url, seeded, OpenMode::Writer).await.unwrap());
+    let err = open_pool(&url, Dials::BUILT, OpenMode::Writer).await.err().unwrap();
     match &err {
         StoreError::OtherDials { stored, .. } => assert_eq!(stored.region_blocks, 512),
         e => panic!("{e:?}"),
@@ -68,11 +67,12 @@ async fn other_dials_refused() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// SQLite keeps its file lock: one writer process per world file.
 #[tokio::test]
 async fn second_open_is_locked() {
     let (dir, url) = temp_url("lock");
-    let (pool, _guard) = open_pool(&url, Dials::BUILT).await.unwrap();
-    let second = open_pool(&url, Dials::BUILT).await;
+    let (pool, _guard) = open_pool(&url, Dials::BUILT, OpenMode::Writer).await.unwrap();
+    let second = open_pool(&url, Dials::BUILT, OpenMode::Writer).await;
     assert!(matches!(second, Err(StoreError::Locked(_))), "{:?}", second.err());
     // The first stays usable.
     let n: i64 = sqlx::query("SELECT COUNT(*) FROM world").fetch_one(sqlite_of(&pool)).await.unwrap().get(0);
@@ -84,18 +84,18 @@ async fn second_open_is_locked() {
 async fn newer_format_refused() {
     let (dir, url) = temp_url("format");
     {
-        let (pool, _g) = open_pool(&url, Dials::BUILT).await.unwrap();
+        let (pool, _g) = open_pool(&url, Dials::BUILT, OpenMode::Writer).await.unwrap();
         sqlx::query("UPDATE world SET format_version = 2").execute(sqlite_of(&pool)).await.unwrap();
         sqlite_of(&pool).close().await;
     }
-    let err = open_pool(&url, Dials::BUILT).await.err().unwrap();
+    let err = open_pool(&url, Dials::BUILT, OpenMode::Writer).await.err().unwrap();
     assert_eq!(err, StoreError::OtherFormat { found: 2, kind: world_store::FormatKind::Store });
     let _ = std::fs::remove_dir_all(dir);
 }
 
 #[tokio::test]
 async fn sqlite_dollar_placeholders_bind_in_order() {
-    let (pool, _g) = open_pool(&StoreUrl::Memory, Dials::BUILT).await.unwrap();
+    let (pool, _g) = open_pool(&StoreUrl::Memory, Dials::BUILT, OpenMode::Writer).await.unwrap();
     let p = sqlite_of(&pool);
     sqlx::query("INSERT INTO history (id, bytes) VALUES ($1, $2)")
         .bind(7_i64)

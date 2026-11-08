@@ -1,8 +1,9 @@
 //! `worldctl`: world-store maintenance from the command line
 //! (`src/bin/worldctl.rs` is `run` over `std::env::args`; `just worldctl …`,
-//! `just forge-db <db> …`). Every command opens the store, which takes its
-//! single-writer lock: a store another process holds (a running server) is
-//! refused at once with the lock message, never waited for.
+//! `just forge-db <db> …`). `forge` and `retile` open the store as its writer,
+//! which on SQLite takes its single-writer lock: a store another process holds
+//! (a running server) is refused at once with the lock message, never waited
+//! for. `export` only reads: it opens read-only, beside a running server.
 //!
 //! - `forge --db <url> [--preset <name>] [--size <m>] [--cell <m>] [--seed <hex>]
 //!   [--set <knob>=<value>]…`: forges a world in process
@@ -20,7 +21,7 @@ use std::path::Path;
 
 use worldgen::forge::{self, ForgeParams};
 
-use crate::{Dials, StoreHandle, StoreUrl};
+use crate::{Dials, OpenMode, StoreHandle, StoreUrl};
 
 /// What `worldctl` prints for a bad command line.
 pub const USAGE: &str = "usage: worldctl forge --db <url> [--preset <name>] [--size <m>] [--cell <m>] \
@@ -118,15 +119,15 @@ fn parse_export(args: &[String]) -> Result<(StoreUrl, String), String> {
     }
 }
 
-fn open(db: &StoreUrl) -> Result<StoreHandle, String> {
-    StoreHandle::open(db, Dials::BUILT).map_err(|e| format!("world store {db:?}: {e}"))
+fn open(db: &StoreUrl, mode: OpenMode) -> Result<StoreHandle, String> {
+    StoreHandle::open(db, Dials::BUILT, mode).map_err(|e| format!("world store {db:?}: {e}"))
 }
 
 /// Forges `params` and stores it in `db` as tiles; returns the world's
 /// `content_crc`. Refused (before forging) when `db` already holds a world
 /// or saved regions: a world is never written over another.
 pub fn forge_into(db: &StoreUrl, params: &ForgeParams) -> Result<u32, String> {
-    let store = open(db)?;
+    let store = open(db, OpenMode::Writer)?;
     let result = (|| {
         let info = store.world_info().map_err(|e| e.to_string())?;
         let regions = store.stored_regions().map_err(|e| e.to_string())?;
@@ -144,7 +145,7 @@ pub fn forge_into(db: &StoreUrl, params: &ForgeParams) -> Result<u32, String> {
 /// Writes `db`'s archived forge file to `out` (atomically: a temp file
 /// renamed into place); returns its size.
 pub fn export(db: &StoreUrl, out: &Path) -> Result<usize, String> {
-    let store = open(db)?;
+    let store = open(db, OpenMode::ReadOnly)?;
     let archive = store.forged_archive();
     store.shutdown();
     let bytes = archive
@@ -167,7 +168,7 @@ pub fn export(db: &StoreUrl, out: &Path) -> Result<usize, String> {
 /// (`write_tiled`); returns the world's `content_crc`. A store with no
 /// archive cannot be re-tiled.
 pub fn retile(db: &StoreUrl) -> Result<u32, String> {
-    let store = open(db)?;
+    let store = open(db, OpenMode::Writer)?;
     let result = (|| {
         let archive = store
             .forged_archive()

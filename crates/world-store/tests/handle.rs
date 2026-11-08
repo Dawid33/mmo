@@ -9,7 +9,7 @@ use game::{
     Chunk, ChunkCoords, CutId, EntityBundle, EntityId, InFlightRow, IntentMsg, PlayerToken, PortableRegion,
     RegionCoords, StoredRegion, WorldCut,
 };
-use world_store::{Dials, Pool, StoreError, StoreHandle, StoreUrl, open_pool};
+use world_store::{Dials, Fence, OpenMode, Pool, StoreError, StoreHandle, StoreUrl, SuperRegion, open_pool};
 
 use crate::codec::{bundle, chunk, intent, meta, player, region_ground, reply};
 use crate::common;
@@ -40,14 +40,23 @@ pub(crate) fn each_backend(tag: &str, reopen: bool, body: impl Fn(&StoreUrl)) {
 }
 
 pub(crate) fn open(url: &StoreUrl) -> StoreHandle {
-    StoreHandle::open(url, Dials::BUILT).unwrap()
+    StoreHandle::open(url, Dials::BUILT, OpenMode::Writer).unwrap()
+}
+
+/// The super-regions these tests write into at the default side (16): A's,
+/// B's and the test player record's (region (-1, 4)).
+pub(crate) const TEST_SUPER_REGIONS: [SuperRegion; 3] = [(0, 0), (0, -1), (-1, 0)];
+
+/// Claims [`TEST_SUPER_REGIONS`] as owner 0: the fence of a test's writes.
+pub(crate) fn fence(h: &StoreHandle) -> Fence {
+    h.claim_super_regions(0, TEST_SUPER_REGIONS.to_vec()).unwrap()
 }
 
 /// Runs raw SQL against a closed store (the handle must have shut down).
 pub(crate) fn raw_exec(url: &StoreUrl, sql: &str) {
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
-        let (pool, _guard) = open_pool(url, Dials::BUILT).await.unwrap();
+        let (pool, _guard) = open_pool(url, Dials::BUILT, OpenMode::Writer).await.unwrap();
         match &pool {
             Pool::Sqlite(p) => {
                 sqlx::query(sql).execute(p).await.unwrap();
@@ -129,17 +138,18 @@ fn stored(p: &PortableRegion) -> StoredRegion {
 fn cut_roundtrip() {
     each_backend("roundtrip", false, |url| {
         let h = open(url);
+        let f = fence(&h);
         let cut = first_cut(&h);
-        let rx = h.commit_cut(cut.clone());
+        let rx = h.commit_cut(cut.clone(), f.clone());
         // A load while the commit runs neither deadlocks nor sees half a cut.
-        let mid = h.load_region(A).unwrap();
+        let mid = h.load_region(A, &f).unwrap();
         assert!(mid.is_none() || mid == Some(stored(&cut.regions[0].1)));
         let done = rx.recv().unwrap().unwrap();
         assert_eq!(done.id, CutId(1));
         assert_eq!(done.versions, vec![(A, 1), (B, 1)]);
 
         for (rc, p) in &cut.regions {
-            assert_eq!(h.load_region(*rc).unwrap().as_ref(), Some(&stored(p)), "region {rc:?}");
+            assert_eq!(h.load_region(*rc, &f).unwrap().as_ref(), Some(&stored(p)), "region {rc:?}");
             let terrain = h.load_terrain(*rc).unwrap().unwrap();
             assert_eq!(terrain.chunks, stored(p).chunks);
             assert_eq!(terrain.ground, region_ground());
@@ -159,8 +169,9 @@ fn cut_roundtrip() {
 fn second_cut_writes_only_given_chunks() {
     each_backend("second", false, |url| {
         let h = open(url);
+        let f = fence(&h);
         let first = first_cut(&h);
-        h.commit_cut(first.clone()).recv().unwrap().unwrap();
+        h.commit_cut(first.clone(), f.clone()).recv().unwrap().unwrap();
 
         let changed = ChunkCoords::new(1, -2, 3);
         let mut new_chunk = other_chunk();
@@ -177,16 +188,16 @@ fn second_cut_writes_only_given_chunks() {
             players: vec![],
             history: None,
         };
-        let done = h.commit_cut(second).recv().unwrap().unwrap();
+        let done = h.commit_cut(second, f.clone()).recv().unwrap().unwrap();
         assert_eq!(done.versions, vec![(A, 2), (B, 1)]);
         assert_eq!(h.stored_regions().unwrap(), BTreeMap::from([(A, 2), (B, 1)]));
 
-        let a = h.load_region(A).unwrap().unwrap();
+        let a = h.load_region(A, &f).unwrap().unwrap();
         assert_eq!(a.meta.tick, 1100);
         assert_eq!(a.chunks, vec![(ChunkCoords::new(0, 0, 0), chunk()), (changed, new_chunk)]);
         assert_eq!(a.ground, region_ground(), "ground kept when the cut has none");
         assert_eq!(a.entities, vec![entity(A, 2)]);
-        let b = h.load_region(B).unwrap().unwrap();
+        let b = h.load_region(B, &f).unwrap().unwrap();
         assert_eq!(b.chunks, vec![(ChunkCoords::new(2, 5, 0), chunk())]);
         assert_eq!(b.entities, vec![entity(A, 7), entity(B, 1)], "an entity moved A -> B in one cut");
         assert_eq!(h.load_in_flight().unwrap(), vec![]);
@@ -201,8 +212,9 @@ fn second_cut_writes_only_given_chunks() {
 fn commit_cut_is_atomic() {
     each_backend("atomic", false, |url| {
         let h = open(url);
+        let f = fence(&h);
         let first = first_cut(&h);
-        h.commit_cut(first.clone()).recv().unwrap().unwrap();
+        h.commit_cut(first.clone(), f.clone()).recv().unwrap().unwrap();
 
         let bad = WorldCut {
             host: 0,
@@ -220,11 +232,11 @@ fn commit_cut_is_atomic() {
             })],
             history: Some(vec![9]),
         };
-        let err = h.commit_cut(bad).recv().unwrap().unwrap_err();
+        let err = h.commit_cut(bad, f.clone()).recv().unwrap().unwrap_err();
         assert!(matches!(&err, StoreError::Corrupt(m) if m.contains("two regions")), "{err}");
 
         for (rc, p) in &first.regions {
-            assert_eq!(h.load_region(*rc).unwrap().as_ref(), Some(&stored(p)), "region {rc:?} unchanged");
+            assert_eq!(h.load_region(*rc, &f).unwrap().as_ref(), Some(&stored(p)), "region {rc:?} unchanged");
         }
         assert_eq!(h.stored_regions().unwrap(), BTreeMap::from([(A, 1), (B, 1)]));
         assert_eq!(h.load_in_flight().unwrap(), first.in_flight);
@@ -247,6 +259,7 @@ fn resolve_player_is_stable() {
         h.shutdown();
 
         let h = open(url);
+
         assert_eq!(h.resolve_player(&token(1)).unwrap(), (p1, None), "same id across a reopen");
         let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
         let (p3, r3) = rt.block_on(h.resolve_player_async(&token(3))).unwrap();
@@ -262,6 +275,9 @@ fn u64_max_serial_roundtrips() {
         let h = open(url);
         let (pid, _) = h.resolve_player(&token(1)).unwrap();
         let far = RegionCoords::new(i32::MIN, i32::MAX);
+        let mut srs = TEST_SUPER_REGIONS.to_vec();
+        srs.push(game::super_region_of(far, h.super_region_regions()));
+        let f = h.claim_super_regions(0, srs).unwrap();
         let max = entity(far, u64::MAX);
         let mut p = region(u64::MAX, &[(ChunkCoords::new(0, i32::MIN, 0), chunk())], true, vec![max.clone()]);
         p.meta.next_entity_serial = u64::MAX;
@@ -276,9 +292,9 @@ fn u64_max_serial_roundtrips() {
             players: vec![(pid, player())],
             history: None,
         };
-        let done = h.commit_cut(cut.clone()).recv().unwrap().unwrap();
+        let done = h.commit_cut(cut.clone(), f.clone()).recv().unwrap().unwrap();
         assert_eq!(done.id, CutId(u64::MAX));
-        assert_eq!(h.load_region(far).unwrap(), Some(stored(&p)));
+        assert_eq!(h.load_region(far, &f).unwrap(), Some(stored(&p)));
         assert_eq!(h.load_in_flight().unwrap(), cut.in_flight);
         assert_eq!(h.world_info().unwrap().world_tick, i64::MAX as u64);
         h.shutdown();
@@ -289,7 +305,8 @@ fn u64_max_serial_roundtrips() {
 fn missing_region_is_none_not_error() {
     each_backend("missing", false, |url| {
         let h = open(url);
-        assert_eq!(h.load_region(A).unwrap(), None);
+        let f = fence(&h);
+        assert_eq!(h.load_region(A, &f).unwrap(), None);
         assert!(h.load_terrain(A).unwrap().is_none());
         assert!(h.stored_regions().unwrap().is_empty());
         assert!(h.load_in_flight().unwrap().is_empty());
@@ -306,8 +323,9 @@ fn missing_region_is_none_not_error() {
 fn corrupt_chunk_is_error() {
     each_backend("corrupt", true, |url| {
         let h = open(url);
+        let f = fence(&h);
         let cut = first_cut(&h);
-        h.commit_cut(cut).recv().unwrap().unwrap();
+        h.commit_cut(cut, f.clone()).recv().unwrap().unwrap();
         h.shutdown();
 
         let garbage = match url {
@@ -317,10 +335,12 @@ fn corrupt_chunk_is_error() {
         raw_exec(url, &format!("UPDATE chunks SET data = {garbage} WHERE rx = 0 AND rz = 0 AND cx = 0"));
 
         let h = open(url);
-        let err = h.load_region(A).unwrap_err();
+
+        let f = fence(&h);
+        let err = h.load_region(A, &f).unwrap_err();
         assert!(matches!(err, StoreError::Corrupt(_)), "{err}");
         assert!(matches!(h.load_terrain(A), Err(StoreError::Corrupt(_))));
-        assert!(h.load_region(B).unwrap().is_some(), "other regions still load");
+        assert!(h.load_region(B, &f).unwrap().is_some(), "other regions still load");
         h.shutdown();
     });
 }
@@ -329,8 +349,9 @@ fn corrupt_chunk_is_error() {
 fn shutdown_drains_queued_commits() {
     each_backend("drain", true, |url| {
         let h = open(url);
+        let f = fence(&h);
         let cut = first_cut(&h);
-        let rx = h.commit_cut(cut);
+        let rx = h.commit_cut(cut, f.clone());
         h.shutdown();
         assert!(rx.recv().unwrap().is_ok(), "a commit queued before shutdown is committed");
         let h = open(url);
@@ -346,6 +367,7 @@ fn shutdown_drains_queued_commits() {
 fn first_region_row_without_ground_is_refused() {
     each_backend("noground", false, |url| {
         let h = open(url);
+        let f = fence(&h);
         let cut = |id, rc, ground| WorldCut {
             host: 0,
             id: CutId(id),
@@ -355,12 +377,12 @@ fn first_region_row_without_ground_is_refused() {
             players: vec![],
             history: None,
         };
-        let err = h.commit_cut(cut(1, A, false)).recv().unwrap().unwrap_err();
+        let err = h.commit_cut(cut(1, A, false), f.clone()).recv().unwrap().unwrap_err();
         assert!(matches!(&err, StoreError::Corrupt(m) if m.contains("no ground")), "{err}");
-        assert_eq!(h.load_region(A).unwrap(), None, "nothing committed");
-        h.commit_cut(cut(2, A, true)).recv().unwrap().unwrap();
-        h.commit_cut(cut(3, A, false)).recv().unwrap().unwrap();
-        assert_eq!(h.load_region(A).unwrap().unwrap().ground, region_ground(), "the stored ground is kept");
+        assert_eq!(h.load_region(A, &f).unwrap(), None, "nothing committed");
+        h.commit_cut(cut(2, A, true), f.clone()).recv().unwrap().unwrap();
+        h.commit_cut(cut(3, A, false), f.clone()).recv().unwrap().unwrap();
+        assert_eq!(h.load_region(A, &f).unwrap().unwrap().ground, region_ground(), "the stored ground is kept");
         h.shutdown();
     });
 }

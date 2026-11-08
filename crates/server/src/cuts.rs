@@ -2,12 +2,15 @@
 //! cut is queued for commit at once (`StoreHandle::commit_cut` does not
 //! block), and each answer goes back to the manager — `cut_committed` clears
 //! what it carried, `cut_failed` keeps it for the next cut (nothing is lost).
+//! Commits are fenced ([`ClaimOnTouch`]).
 
 use std::time::{Duration, Instant};
 
 use crossbeam::channel::{Receiver, TryRecvError};
 use game::{CutId, RegionCoords, RegionOutput, RegionSpawner, Tick, WorldManager};
 use world_store::{CutCommitted, StoreError, StoreHandle};
+
+use crate::claim_on_touch::ClaimOnTouch;
 
 struct Pending {
     id: CutId,
@@ -32,15 +35,15 @@ const EXIT_PARK_POLL: Duration = Duration::from_millis(20);
 
 /// The server's side of the save cuts: the store and the commits in flight.
 pub struct CutWriter {
-    store: StoreHandle,
+    claims: ClaimOnTouch,
     pending: Vec<Pending>,
     /// Commits failed in a row (reset by one that commits).
     failed_in_a_row: u32,
 }
 
 impl CutWriter {
-    pub fn new(store: StoreHandle) -> Self {
-        CutWriter { store, pending: Vec::new(), failed_in_a_row: 0 }
+    pub fn new(claims: ClaimOnTouch) -> Self {
+        CutWriter { claims, pending: Vec::new(), failed_in_a_row: 0 }
     }
 
     /// Commits failed in a row since the last one that committed.
@@ -49,7 +52,7 @@ impl CutWriter {
     }
 
     pub fn store(&self) -> &StoreHandle {
-        &self.store
+        self.claims.store()
     }
 
     /// Commits still unanswered.
@@ -58,11 +61,21 @@ impl CutWriter {
     }
 
     /// Queue the manager's complete cut (if any) for commit, and hand every
-    /// answer that has come back to the manager. Never blocks.
+    /// answer that has come back to the manager. Never blocks (but for the
+    /// transitional first claim of a super-region no region load claimed —
+    /// `ClaimOnTouch`).
     pub fn pump<S: RegionSpawner>(&mut self, manager: &mut WorldManager<S>) {
         while let Some(cut) = manager.take_cut() {
             let (id, tick, regions, players) = (cut.id, cut.tick, cut.regions.len(), cut.players.len());
-            let reply = self.store.commit_cut(cut);
+            let reply = match self.claims.fence_for_cut(&cut) {
+                Ok(fence) => self.claims.store().commit_cut(cut, fence),
+                Err(e) => {
+                    // Not committed: the cut fails like a refused commit.
+                    let (tx, rx) = crossbeam::channel::bounded(1);
+                    let _ = tx.send(Err(e));
+                    rx
+                }
+            };
             self.pending.push(Pending { id, tick, regions, players, queued: Instant::now(), reply });
         }
         let mut i = 0;
@@ -117,7 +130,7 @@ impl CutWriter {
             }
         }
         // Commits still queued are drained before the store thread stops.
-        self.store.shutdown();
+        self.claims.store().clone().shutdown();
         committed
     }
 

@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 
 use sqlx::Row;
-use world_store::{Dials, Pool, StoreUrl, open_pool};
+use world_store::{Dials, OpenMode, Pool, StoreUrl, open_pool};
 
 use crate::common;
 
@@ -109,14 +109,14 @@ fn expected() -> BTreeSet<Col> {
 
 #[tokio::test]
 async fn schemas_match() {
-    let (sqlite, _g) = open_pool(&StoreUrl::Memory, Dials::BUILT).await.unwrap();
+    let (sqlite, _g) = open_pool(&StoreUrl::Memory, Dials::BUILT, OpenMode::Writer).await.unwrap();
     let lite = introspect(&sqlite).await;
     assert_eq!(lite, expected(), "SQLite schema differs from the checked-in list");
 
     let Some(admin) = common::pg_admin_url() else { return common::skip_msg() };
     let db = common::PgTestDb::create(&admin).await;
     {
-        let (pg, _g) = open_pool(&StoreUrl::Postgres(db.url.clone()), Dials::BUILT).await.unwrap();
+        let (pg, _g) = open_pool(&StoreUrl::Postgres(db.url.clone()), Dials::BUILT, OpenMode::Writer).await.unwrap();
         assert_eq!(introspect(&pg).await, lite, "Postgres schema differs from SQLite");
         if let Pool::Pg(p) = &pg {
             p.close().await;

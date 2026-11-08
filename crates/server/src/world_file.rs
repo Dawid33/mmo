@@ -339,7 +339,8 @@ pub fn open_world(source: &WorldSource, params: &ForgeParams) -> Result<OpenedWo
         WorldSource::Procedural => return Ok(OpenedWorld { store: None, world: None, map: None, world_tick: 0 }),
         WorldSource::Store { url, import } => (url, import.as_deref()),
     };
-    let store = StoreHandle::open(url, world_store::Dials::BUILT).map_err(|e| format!("world store {url:?}: {e}"))?;
+    let store = StoreHandle::open(url, world_store::Dials::BUILT, world_store::OpenMode::Writer)
+        .map_err(|e| format!("world store {url:?}: {e}"))?;
     let opened = check_legacy_saves(&store, import).and_then(|()| {
         let (world, map) = ensure_world(&store, import, params)?;
         let world_tick = store.world_info().map_err(|e| e.to_string())?.world_tick;
@@ -370,6 +371,7 @@ pub fn install_world(opened: &mut OpenedWorld) -> Option<game::WorldMap> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::claim_on_touch::ClaimOnTouch;
 
     fn scratch(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("mmo-world-file-{}-{name}", std::process::id()));
@@ -379,7 +381,7 @@ mod tests {
     }
 
     fn memory_store() -> StoreHandle {
-        StoreHandle::open(&StoreUrl::Memory, world_store::Dials::BUILT).unwrap()
+        StoreHandle::open(&StoreUrl::Memory, world_store::Dials::BUILT, world_store::OpenMode::Writer).unwrap()
     }
 
     #[test]
@@ -512,7 +514,8 @@ mod tests {
             players: Vec::new(),
             history: Some(game::history::persist::encode(history)),
         };
-        store.commit_cut(cut).recv().unwrap().expect("the cut commits");
+        let fence = ClaimOnTouch::new(store.clone()).fence_for_cut(&cut).unwrap();
+        store.commit_cut(cut, fence).recv().unwrap().expect("the cut commits");
     }
 
     #[test]
@@ -555,7 +558,8 @@ mod tests {
             players: Vec::new(),
             history: Some(bytes),
         };
-        store.commit_cut(cut).recv().unwrap().expect("the cut commits");
+        let fence = ClaimOnTouch::new(store.clone()).fence_for_cut(&cut).unwrap();
+        store.commit_cut(cut, fence).recv().unwrap().expect("the cut commits");
         let err = ensure_history(&store, &map, None).err().expect("refused");
         assert!(err.contains("history"), "{err}");
         store.shutdown();

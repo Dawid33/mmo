@@ -3,6 +3,7 @@
 
 mod codec;
 mod cut;
+mod fence;
 mod handle;
 mod common;
 mod forged;
