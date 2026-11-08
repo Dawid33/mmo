@@ -151,25 +151,17 @@ async fn check_schema(pool: &Pool) -> Result<(), StoreError> {
     Ok(())
 }
 
+/// Checks the world row's format and dials; a writer first inserts it if
+/// missing. The insert is `ON CONFLICT DO NOTHING` and the row is read back
+/// after it: two writers opening a fresh database at once (no world lock on
+/// Postgres) both succeed, and the one whose dials lost is refused.
 async fn check_world_row(pool: &Pool, dials: Dials, writer: bool) -> Result<(), StoreError> {
     const SELECT: &str = "SELECT format_version, region_blocks, chunk_blocks FROM world WHERE id = 1";
     const INSERT: &str = "INSERT INTO world (id, format_version, region_blocks, chunk_blocks, content_crc, \
-         world_tick, super_region_regions, created_utc) VALUES (1, $1, $2, $3, 0, 0, $4, $5)";
-    let created = utc_now();
-    let row: Option<(i64, i64, i64)> = match pool {
-        Pool::Sqlite(p) => sqlx::query(SELECT)
-            .fetch_optional(p)
-            .await?
-            .map(|r| (r.get(0), r.get(1), r.get(2))),
-        Pool::Pg(p) => sqlx::query(SELECT)
-            .fetch_optional(p)
-            .await?
-            .map(|r| (r.get(0), r.get(1), r.get(2))),
-    };
-    let Some((format, region, chunk)) = row else {
-        if !writer {
-            return Err(StoreError::Corrupt("the world row is missing".into()));
-        }
+         world_tick, super_region_regions, created_utc) VALUES (1, $1, $2, $3, 0, 0, $4, $5) \
+         ON CONFLICT (id) DO NOTHING";
+    if writer {
+        let created = utc_now();
         macro_rules! insert {
             ($p:expr) => {
                 sqlx::query(INSERT)
@@ -187,7 +179,19 @@ async fn check_world_row(pool: &Pool, dials: Dials, writer: bool) -> Result<(), 
             Pool::Sqlite(p) => insert!(p),
             Pool::Pg(p) => insert!(p),
         }
-        return Ok(());
+    }
+    let row: Option<(i64, i64, i64)> = match pool {
+        Pool::Sqlite(p) => sqlx::query(SELECT)
+            .fetch_optional(p)
+            .await?
+            .map(|r| (r.get(0), r.get(1), r.get(2))),
+        Pool::Pg(p) => sqlx::query(SELECT)
+            .fetch_optional(p)
+            .await?
+            .map(|r| (r.get(0), r.get(1), r.get(2))),
+    };
+    let Some((format, region, chunk)) = row else {
+        return Err(StoreError::Corrupt("the world row is missing".into()));
     };
     if format != STORE_FORMAT_VERSION as i64 {
         return Err(StoreError::OtherFormat {

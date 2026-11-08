@@ -124,3 +124,14 @@ async fn schemas_match() {
     }
     db.drop_db().await;
 }
+
+/// Both engines carry the same migration versions, so `newest_migration()`
+/// (read from the Postgres set) is what a read-only SQLite open expects too.
+#[test]
+fn migration_sets_have_the_same_versions() {
+    let versions = |m: sqlx::migrate::Migrator| m.iter().map(|m| m.version).collect::<Vec<_>>();
+    let pg = versions(sqlx::migrate!("migrations/pg"));
+    let sqlite = versions(sqlx::migrate!("migrations/sqlite"));
+    assert_eq!(pg, sqlite, "the two engines' migrations differ");
+    assert_eq!(sqlite.iter().copied().max(), Some(world_store::newest_migration()));
+}

@@ -158,6 +158,41 @@ fn two_pg_writers_open_without_lock() {
     rt.block_on(db.drop_db());
 }
 
+/// Two writers opening a fresh Postgres database at the same moment (no
+/// world lock any more: coordinator and host start together) both succeed,
+/// and the database holds one world row.
+#[test]
+fn two_pg_writers_open_a_fresh_database_at_once() {
+    let Some(admin) = common::pg_admin_url() else { return common::skip_msg() };
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let db = rt.block_on(common::PgTestDb::create(&admin));
+    let url = StoreUrl::Postgres(db.url.clone());
+    let start = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let openers: Vec<_> = (0..2)
+        .map(|_| {
+            let (url, start) = (url.clone(), start.clone());
+            std::thread::spawn(move || {
+                start.wait();
+                StoreHandle::open(&url, Dials::BUILT, OpenMode::Writer)
+            })
+        })
+        .collect();
+    let handles: Vec<StoreHandle> =
+        openers.into_iter().map(|t| t.join().unwrap().expect("both writers open")).collect();
+    let rows: i64 = rt.block_on(async {
+        let (pool, _g) = open_pool(&url, Dials::BUILT, OpenMode::ReadOnly).await.unwrap();
+        let Pool::Pg(p) = &pool else { panic!("expected postgres") };
+        let n = sqlx::query_scalar("SELECT COUNT(*) FROM world").fetch_one(p).await.unwrap();
+        p.close().await;
+        n
+    });
+    assert_eq!(rows, 1);
+    for h in handles {
+        h.shutdown();
+    }
+    rt.block_on(db.drop_db());
+}
+
 #[test]
 fn read_only_refuses_writes_and_unknown_schema() {
     each_backend("fence_ro", true, |url| {

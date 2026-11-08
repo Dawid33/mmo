@@ -48,6 +48,8 @@ fn source_for(world_file: &Path) -> WorldSource {
 /// wires it to the store (stored regions start from the store).
 struct Core {
     manager: WorldManager<InlineSpawner>,
+    /// The rig's one fence (loads at open, the exit's commit), as `server::run` shares it.
+    claims: ClaimOnTouch,
     region_out: Receiver<(RegionCoords, RegionOutput)>,
     _packets: Receiver<(Option<ClientId>, ServerPacket)>,
 }
@@ -65,9 +67,10 @@ impl Core {
         store: &world_store::StoreHandle,
         generate: Box<dyn FnMut(RegionCoords) -> Vec<(game::ColumnCoords, game::Column)> + Send>,
     ) -> Core {
+        let claims = ClaimOnTouch::new(store.clone());
         let mut regions = std::collections::BTreeMap::new();
         for rc in store.stored_regions().unwrap().into_keys() {
-            regions.insert(rc, ClaimOnTouch::new(store.clone()).load_region(rc).unwrap().expect("listed, so stored"));
+            regions.insert(rc, claims.load_region(rc).unwrap().expect("listed, so stored"));
         }
         let (out_send, packets) = unbounded();
         let (region_out_send, region_out) = unbounded();
@@ -87,7 +90,7 @@ impl Core {
         );
         manager.set_stored_regions(store.stored_regions().unwrap());
         manager.restore_in_flight(store.load_in_flight().unwrap());
-        Core { manager, region_out, _packets: packets }
+        Core { manager, claims, region_out, _packets: packets }
     }
 
     fn settle(&mut self) {
@@ -107,14 +110,15 @@ impl Core {
         }
     }
 
-    /// The orderly exit: players and regions parked, the last cut committed.
-    fn exit_into(mut self, store: world_store::StoreHandle) -> game::Tick {
+    /// The orderly exit: players and regions parked, the last cut committed
+    /// (the store is shut down after).
+    fn exit(mut self) -> game::Tick {
         self.manager.park_all_players(0);
         self.manager.shutdown_all();
         self.settle();
         assert!(self.manager.running_regions().is_empty(), "every region parked");
         let now = self.manager.spawner_mut().world_tick();
-        let writer = server::cuts::CutWriter::new(ClaimOnTouch::new(store));
+        let writer = server::cuts::CutWriter::new(self.claims.clone());
         assert!(writer.finish(&mut self.manager, now, Duration::from_secs(10)), "the exit's save cut commits");
         now
     }
@@ -165,7 +169,7 @@ fn restart_restores_world() {
     });
     let (dug, slime) = (dug.unwrap(), slime.expect("the slime has an EntityId"));
     core.tick(5);
-    let exit_tick = core.exit_into(store);
+    let exit_tick = core.exit();
     drop(world);
 
     // Life 2: the forge file was imported and is gone; the store has it all.
@@ -601,7 +605,7 @@ fn exit_saves_a_region_that_parks_late() {
     assert_eq!(core.manager.running_regions(), vec![SPAWN_REGION]);
     let started = std::time::Instant::now();
     let late = Duration::from_millis(2_200);
-    let Core { mut manager, region_out, _packets } = core;
+    let Core { mut manager, claims, region_out, _packets } = core;
     let stuck = server::cuts::park_for_exit(&mut manager, &region_out, || 0, server::cuts::EXIT_PARK_TIMEOUT, |m| {
         if started.elapsed() >= late {
             m.spawner_mut().pump();
@@ -611,7 +615,7 @@ fn exit_saves_a_region_that_parks_late() {
     assert!(stuck.is_empty(), "nothing given up: {stuck:?}");
     assert!(manager.running_regions().is_empty());
     let now = manager.spawner_mut().world_tick();
-    let writer = server::cuts::CutWriter::new(ClaimOnTouch::new(store.clone()));
+    let writer = server::cuts::CutWriter::new(claims);
     assert!(writer.finish(&mut manager, now, Duration::from_secs(10)), "the exit's cut commits");
     let store = world_store::StoreHandle::open(
         &world_store::StoreUrl::Sqlite(dir.join("w.sqlite")),
@@ -645,13 +649,13 @@ fn exit_saves_the_rest_when_a_region_never_parks() {
     assert!(running.contains(&SPAWN_REGION) && running.contains(&east), "{running:?}");
     // East never reads another input: it never parks.
     core.manager.spawner_mut().hold_inputs(east, u32::MAX);
-    let Core { mut manager, region_out, _packets } = core;
+    let Core { mut manager, claims, region_out, _packets } = core;
     let stuck = server::cuts::park_for_exit(&mut manager, &region_out, || 0, Duration::from_millis(300), |m| {
         m.spawner_mut().pump();
     });
     assert_eq!(stuck, vec![east]);
     let now = manager.spawner_mut().world_tick();
-    let writer = server::cuts::CutWriter::new(ClaimOnTouch::new(store.clone()));
+    let writer = server::cuts::CutWriter::new(claims);
     assert!(writer.finish(&mut manager, now, Duration::from_secs(10)), "the rest is saved");
     let store = world_store::StoreHandle::open(
         &world_store::StoreUrl::Sqlite(dir.join("w.sqlite")),

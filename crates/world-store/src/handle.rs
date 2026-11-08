@@ -129,7 +129,8 @@ impl StoreHandle {
     /// once; the answer arrives on the receiver. Commits run in call order.
     /// Fenced: `Fenced` (nothing written) unless `fence` still holds every
     /// super-region it claimed and every one the cut touches
-    /// ([`crate::touched_super_regions`]).
+    /// ([`crate::touched_super_regions`]). An empty fence with a cut that
+    /// touches no super-region performs no check at all.
     pub fn commit_cut(
         &self,
         cut: WorldCut,

@@ -259,7 +259,6 @@ fn resolve_player_is_stable() {
         h.shutdown();
 
         let h = open(url);
-
         assert_eq!(h.resolve_player(&token(1)).unwrap(), (p1, None), "same id across a reopen");
         let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
         let (p3, r3) = rt.block_on(h.resolve_player_async(&token(3))).unwrap();
@@ -335,7 +334,6 @@ fn corrupt_chunk_is_error() {
         raw_exec(url, &format!("UPDATE chunks SET data = {garbage} WHERE rx = 0 AND rz = 0 AND cx = 0"));
 
         let h = open(url);
-
         let f = fence(&h);
         let err = h.load_region(A, &f).unwrap_err();
         assert!(matches!(err, StoreError::Corrupt(_)), "{err}");

@@ -39,7 +39,9 @@ pub fn touched_super_regions(cut: &WorldCut, s: u32) -> BTreeSet<SuperRegion> {
 
 /// The super-regions a commit with `fence` must find still held: the cut's
 /// touched ones and every one the fence claimed (a host fenced anywhere
-/// commits nothing — not even its in-flight rows or the world tick).
+/// commits nothing — not even its in-flight rows or the world tick). An
+/// empty fence with a cut that touches no super-region checks nothing: that
+/// commit (in-flight rows, the world tick) is unfenced.
 pub(crate) fn commit_check_set(cut: &WorldCut, fence: &Fence, s: u32) -> BTreeSet<SuperRegion> {
     let mut set = touched_super_regions(cut, s);
     set.extend(fence.epochs.keys().copied());

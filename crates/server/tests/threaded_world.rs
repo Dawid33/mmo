@@ -587,21 +587,24 @@ fn open_store(url: &world_store::StoreUrl) -> world_store::StoreHandle {
 /// The server's spawn path on `store`, as `server::run` builds it: regions
 /// generate on their own thread, a region with stored state starts from it,
 /// and the world clock continues from the last committed cut's tick.
-fn stored_rig(store: &world_store::StoreHandle) -> Rig {
+/// Returns the rig and its one fence, shared by its loads and its exit's
+/// commit as `server::run` shares it.
+fn stored_rig(store: &world_store::StoreHandle) -> (Rig, ClaimOnTouch) {
     let info = store.world_info().unwrap();
+    let claims = ClaimOnTouch::new(store.clone());
     let spawner = ThreadRegionSpawner::with_region_generator(std::sync::Arc::new(|_| lightweight_columns()))
-        .with_store(ClaimOnTouch::new(store.clone()))
+        .with_store(claims.clone())
         .with_clock(game::WorldClock::starting_at(0, info.world_tick), Instant::now());
     let mut rig = Rig::with_spawner(spawner, |_| lightweight_columns());
     rig.manager.set_stored_regions(store.stored_regions().unwrap());
     rig.manager.restore_in_flight(store.load_in_flight().unwrap());
-    rig
+    (rig, claims)
 }
 
 impl Rig {
     /// The server's orderly exit: every player parked, then every region,
-    /// then the last save cut committed into `store` (shut down after).
-    fn exit_into(&mut self, store: world_store::StoreHandle) {
+    /// then the last save cut committed through `claims` (its store shut down after).
+    fn exit_into(&mut self, claims: ClaimOnTouch) {
         use game::RegionSpawner;
         self.manager.park_all_players(self.now_ms());
         self.manager.shutdown_all();
@@ -614,7 +617,7 @@ impl Rig {
         }
         assert!(self.manager.running_regions().is_empty(), "every region parked");
         let now = self.manager.spawner_mut().world_tick();
-        let writer = server::cuts::CutWriter::new(ClaimOnTouch::new(store));
+        let writer = server::cuts::CutWriter::new(claims);
         assert!(writer.finish(&mut self.manager, now, Duration::from_secs(10)), "the exit's save cut commits");
     }
 }
@@ -632,7 +635,7 @@ fn saved_region_is_restored_by_a_restarted_server() {
     // Every player in a save cut has a players row (the edge resolved it).
     let token = server::player_store::PlayerKey::Online(game::PlayerToken::generate([3; game::PLAYER_TOKEN_BYTES]));
     let (player, _) = StorePlayers(store.clone()).resolve(&token).unwrap();
-    let mut rig = stored_rig(&store);
+    let (mut rig, claims) = stored_rig(&store);
     rig.event(ServerEvent::ClientConnected { client: 0, player, record: None });
     rig.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(SPAWN_REGION), 0));
     rig.wait_for_snapshots(&[SPAWN_REGION], REGION_STARTUP_BUDGET);
@@ -643,16 +646,16 @@ fn saved_region_is_restored_by_a_restarted_server() {
             rig.absorb(rc, output);
         }
     }
-    rig.exit_into(store);
+    rig.exit_into(claims);
     drop(rig);
 
     // A new process: client ids start at 0 again (another player now).
     let store = open_store(&url);
     let saved_tick = store.world_info().unwrap().world_tick;
     assert!(saved_tick >= 10, "the region ran: world tick {saved_tick}");
-    let stored = ClaimOnTouch::new(store.clone()).load_region(SPAWN_REGION).unwrap().expect("the region is stored");
+    let (mut rig, claims) = stored_rig(&store);
+    let stored = claims.load_region(SPAWN_REGION).unwrap().expect("the region is stored");
     assert!(stored.entities.iter().all(|b| b.client.is_none()), "no player body in the stored region");
-    let mut rig = stored_rig(&store);
     rig.event(ServerEvent::connected(0));
     rig.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(SPAWN_REGION), 0));
     let mut log = Vec::new();
@@ -699,13 +702,13 @@ fn player_is_restored_by_a_restarted_server() {
         fortress: None,
         adventure: None,
     };
-    let mut rig = stored_rig(&store);
+    let (mut rig, claims) = stored_rig(&store);
     rig.event(ServerEvent::ClientConnected { client: 0, player, record: Some(first) });
     rig.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(SPAWN_REGION), 0));
     rig.wait_for_snapshots(&[SPAWN_REGION], REGION_STARTUP_BUDGET);
     let swap = GameEventKind::Order(0, game::Order::SetMode { mode: game::PlayMode::Adventure, at: None });
     rig.event(ServerEvent::ClientPacket(ClientPacket::GameEvent(GameEvent::new(swap, 0, SPAWN_REGION)), 0));
-    rig.exit_into(store);
+    rig.exit_into(claims);
     drop(rig);
 
     // A new process: client ids start at 0 again; the edge resolves the token.
@@ -719,7 +722,7 @@ fn player_is_restored_by_a_restarted_server() {
     let cursor_stack = Some(game::ItemStack { item: game::ItemId(6), count: 2 });
     assert_eq!(record.client.cursor, None);
     assert!(record.client.inventory.slots.contains(&cursor_stack), "{:?}", record.client.inventory);
-    let mut rig = stored_rig(&store);
+    let (mut rig, _claims) = stored_rig(&store);
     rig.event(ServerEvent::ClientConnected { client: 0, player, record: Some(record) });
     rig.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(SPAWN_REGION), 0));
     let mut log = Vec::new();
@@ -849,12 +852,13 @@ fn body_crosses_seam_on_real_threads() {
         players: Vec::new(),
         history: None,
     };
-    let fence = ClaimOnTouch::new(store.clone()).fence_for_cut(&cut).unwrap();
+    let claims = ClaimOnTouch::new(store.clone());
+    let fence = claims.fence_for_cut(&cut).unwrap();
     store.commit_cut(cut, fence).recv().unwrap().expect("the region is stored");
     drop(region);
 
     let generate: server::region_threads::SharedRegionGenerator = std::sync::Arc::new(seam_floor_columns);
-    let spawner = ThreadRegionSpawner::with_region_generator(generate).with_store(ClaimOnTouch::new(store.clone()));
+    let spawner = ThreadRegionSpawner::with_region_generator(generate).with_store(claims);
     let mut rig = Rig::with_spawner(spawner, seam_floor_columns);
     rig.manager.set_stored_regions(store.stored_regions().unwrap());
     rig.event(ServerEvent::connected(0));
