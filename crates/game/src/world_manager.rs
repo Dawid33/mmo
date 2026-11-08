@@ -674,6 +674,31 @@ fn exact_across_seams(
     }
 }
 
+/// One seam step of a person's body during a gather, seen in region `here` (the region
+/// it left, or the one it arrived in).
+#[derive(Debug, Clone, Copy)]
+enum Step {
+    Into { to: RegionCoords, at: [f32; 3] },
+    Absorbed { at: [f32; 3] },
+}
+
+/// Record `step` of `person` seen in `here`: the latest step wins, but `from` stays the
+/// region the person was first seen in during this gather — the one whose list their
+/// held crossings replay from (a multi-hop through regions not listed must still fall
+/// back to a listed one).
+fn record_move(moved: &mut BTreeMap<PersonId, Moved>, person: PersonId, here: RegionCoords, step: Step) {
+    let from = moved
+        .get(&person)
+        .map_or(here, |m| match *m {
+            Moved::Into { from, .. } | Moved::Absorbed { from, .. } => from,
+        });
+    let m = match step {
+        Step::Into { to, at } => Moved::Into { from, to, at },
+        Step::Absorbed { at } => Moved::Absorbed { from, at },
+    };
+    moved.insert(person, m);
+}
+
 fn bundle_at(bundle: &crate::EntityBundle) -> [f32; 3] {
     let t = bundle.body.pose.translation;
     [t.x, t.y, t.z]
@@ -1276,12 +1301,9 @@ impl<S: RegionSpawner> WorldManager<S> {
 
     /// While an `Attach` is gathered: `person`'s body moved over a seam (`moved` of the
     /// region it was first seen leaving, if it moved before during this gather).
-    fn note_moved(&mut self, person: PersonId, moved: impl FnOnce(Option<RegionCoords>) -> Moved) {
-        if let WorldAttach::Gathering { moved: all, .. } = &mut self.world_attach {
-            let first_from = all.get(&person).map(|m| match *m {
-                Moved::Into { from, .. } | Moved::Absorbed { from, .. } => from,
-            });
-            all.insert(person, moved(first_from));
+    fn note_moved(&mut self, person: PersonId, here: RegionCoords, step: Step) {
+        if let WorldAttach::Gathering { moved, .. } = &mut self.world_attach {
+            record_move(moved, person, here, step);
         }
     }
 
@@ -2152,7 +2174,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                 }
                 if let GameEventKind::EntityArrived(bundle) = &event.kind {
                     if let EntityKind::Person { person } = bundle.kind {
-                        self.note_moved(person, |from| Moved::Into { from: from.unwrap_or(rc), to: rc, at: bundle_at(bundle) });
+                        self.note_moved(person, rc, Step::Into { to: rc, at: bundle_at(bundle) });
                     }
                     if self.in_flight.get(&bundle.id).is_some_and(|f| f.target == rc) {
                         let f = self.in_flight.remove(&bundle.id).expect("checked");
@@ -2315,9 +2337,9 @@ impl<S: RegionSpawner> WorldManager<S> {
                             let mut there = bundle.clone();
                             there.rebase(rc, target);
                             let at = bundle_at(&there);
-                            self.note_moved(person, |_| Moved::Into { from: rc, to: target, at });
+                            self.note_moved(person, rc, Step::Into { to: target, at });
                         } else {
-                            self.note_moved(person, |_| Moved::Absorbed { from: rc, at });
+                            self.note_moved(person, rc, Step::Absorbed { at });
                         }
                         self.world_send(HostMsg::PersonCrossed { person, to: target, delivered });
                         if !delivered {
@@ -4423,3 +4445,37 @@ impl<S: RegionSpawner> WorldManager<S> {
         }
     }
 }
+
+#[cfg(test)]
+mod attach_lists_tests {
+    use super::*;
+
+    fn rc(x: i32, z: i32) -> RegionCoords {
+        RegionCoords::new(x, z)
+    }
+
+    /// P leaves listed A before A lists (A's list lacks P), is delivered into C — started
+    /// during the gather, so not listed — and crosses on out of C (absorbed, or into D,
+    /// also unlisted). The held crossings replay A → C → …, so P must be in A's list,
+    /// and in no other; a fallback to C would leave P in no list (the catch-up then
+    /// respawns P at A beside a ghost or a second body).
+    #[test]
+    fn multi_hop_through_unlisted_regions_lists_the_first_region_left() {
+        let (a, b, c, d) = (rc(1, 0), rc(2, 0), rc(3, 0), rc(4, 0));
+        let (p, q) = (PersonId(7), PersonId(8));
+        for absorbed in [true, false] {
+            let mut moved = BTreeMap::new();
+            record_move(&mut moved, p, a, Step::Into { to: c, at: [1.0; 3] });
+            record_move(&mut moved, p, c, Step::Into { to: c, at: [2.0; 3] });
+            let last = if absorbed { Step::Absorbed { at: [3.0; 3] } } else { Step::Into { to: d, at: [3.0; 3] } };
+            record_move(&mut moved, p, c, last);
+            let mut lists = BTreeMap::from([(a, (1, vec![(q, [0.0; 3])])), (b, (1, Vec::new()))]);
+            exact_across_seams(&mut lists, &moved);
+            let holding: Vec<RegionCoords> =
+                lists.iter().filter(|(_, (_, l))| l.iter().any(|(x, _)| *x == p)).map(|(r, _)| *r).collect();
+            assert_eq!(holding, vec![a], "absorbed {absorbed}: P in A's list only: {lists:?}");
+            assert!(lists[&a].1.iter().any(|(x, _)| *x == q), "A keeps its own people");
+        }
+    }
+}
+
