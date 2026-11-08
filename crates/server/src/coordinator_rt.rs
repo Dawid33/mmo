@@ -171,17 +171,36 @@ impl ListenerHosts {
                         log::debug!("[coordinator] host {ordinal} left; a message for it is lost");
                     }
                 }
-                None => log::debug!("[coordinator] host {ordinal} is not connected; {msg:?} lost"),
+                None => log::debug!("[coordinator] host {ordinal} is not connected; {} lost", describe(&msg)),
             },
             Target::Every => {
                 for peer in self.routes.hosts.keys() {
                     self.senders.send(*peer, msg.clone());
                 }
             }
-            Target::Nobody => {
-                log::warn!("[coordinator] no host is known to run the region of {msg:?}; dropped (R3 routes it)")
-            }
+            // `route` said why.
+            Target::Nobody => {}
         }
+    }
+}
+
+/// A coordinator message's kind and region, for logs (a `SpawnPeople` or `View` can be
+/// large).
+fn describe(msg: &CoordMsg) -> String {
+    match msg {
+        CoordMsg::View { sites, .. } => format!("View ({} sites)", sites.len()),
+        CoordMsg::SpawnPeople { rc, incarnation, events } => {
+            format!("SpawnPeople for {rc:?} incarnation {incarnation} ({} events)", events.len())
+        }
+        CoordMsg::Directive { directive, incarnation } => {
+            format!("Directive for {:?} incarnation {incarnation}", directive.region)
+        }
+        CoordMsg::Reply { id, .. } => format!("Reply to {id:?}"),
+        CoordMsg::Calendar(t) => format!("Calendar({})", t.0),
+        CoordMsg::Sites(s) => format!("Sites ({})", s.len()),
+        CoordMsg::SiteMarkers(s) => format!("SiteMarkers ({})", s.len()),
+        CoordMsg::Notice { region, .. } => format!("Notice for {region:?}"),
+        CoordMsg::Attached { epoch } => format!("Attached {{ epoch: {epoch} }}"),
     }
 }
 
@@ -192,6 +211,12 @@ impl ListenerHosts {
 /// (it re-attaches when it is back: its `Attach` and resent requests cover it).
 #[derive(Default)]
 struct Routes {
+    /// The one host ordinal this coordinator serves: the first to connect. Until R3 the
+    /// core is single-host — another host's `Attach` would park every region it does not
+    /// list, the first host's running ones included — so any other ordinal is refused.
+    host: Option<u32>,
+    /// Peers refused ([`Routes::admit`]); their messages are ignored.
+    refused: BTreeSet<PeerId>,
     /// Connected host peers and their ordinals (a reconnect is a new peer).
     hosts: BTreeMap<PeerId, u32>,
     /// Which host runs each region, as announced.
@@ -201,6 +226,28 @@ struct Routes {
 }
 
 impl Routes {
+    /// A host peer said hello as `ordinal`: admitted if it is this coordinator's host (the
+    /// first ordinal to connect; a reconnect of it is a new peer), else refused (logged
+    /// with both ordinals). Returns whether it was admitted.
+    fn admit(&mut self, peer: PeerId, ordinal: u32) -> bool {
+        match self.host {
+            Some(served) if served != ordinal => {
+                log::error!(
+                    "[coordinator] refusing host {ordinal} (peer {}): this coordinator serves host {served} only \
+                     (one host per world until R3; another host's Attach would park host {served}'s regions)",
+                    peer.0
+                );
+                self.refused.insert(peer);
+                false
+            }
+            _ => {
+                self.host = Some(ordinal);
+                self.hosts.insert(peer, ordinal);
+                true
+            }
+        }
+    }
+
     /// Note what routes later messages from `msg`, sent by host `ordinal`.
     fn note(&mut self, ordinal: u32, msg: &HostMsg) {
         match msg {
@@ -232,8 +279,8 @@ impl Routes {
             CoordMsg::Attached { epoch } => match self.attaches.iter().position(|(_, e)| e == epoch) {
                 Some(i) => Target::Host(self.attaches.remove(i).expect("found").0),
                 None => {
-                    log::warn!("[coordinator] attach echo {epoch} matches no Attach; sent to every host");
-                    Target::Every
+                    log::warn!("[coordinator] attach echo {epoch} matches no Attach; dropped");
+                    Target::Nobody
                 }
             },
             CoordMsg::SpawnPeople { rc, .. } => self.region_target(*rc),
@@ -254,7 +301,10 @@ impl Routes {
         let ordinals: BTreeSet<u32> = self.hosts.values().copied().collect();
         match ordinals.len() {
             1 => Target::Every,
-            _ => Target::Nobody,
+            _ => {
+                log::warn!("[coordinator] no host is known to run {rc:?}; its message is dropped (R3 routes it)");
+                Target::Nobody
+            }
         }
     }
 
@@ -273,10 +323,14 @@ enum Stop {
     WithoutSave,
 }
 
+/// A look at the running core ([`CoordinatorThread::inspect`]).
+type Inspect = Box<dyn FnOnce(&Coordinator) + Send>;
+
 /// The running coordinator thread.
 pub struct CoordinatorThread {
     join: std::thread::JoinHandle<ServerExit>,
     stop: Sender<Stop>,
+    inspect: Sender<Inspect>,
 }
 
 impl CoordinatorThread {
@@ -293,6 +347,22 @@ impl CoordinatorThread {
     pub fn stop_without_save(self) -> ServerExit {
         let _ = self.stop.send(Stop::WithoutSave);
         self.join()
+    }
+
+    /// Test hook: `f` of the core as it stands after the host messages handled so far;
+    /// `None` if the thread does not answer within `timeout` (stopped).
+    #[doc(hidden)]
+    pub fn inspect<R: Send + 'static>(
+        &self,
+        f: impl FnOnce(&Coordinator) -> R + Send + 'static,
+        timeout: Duration,
+    ) -> Option<R> {
+        let (tx, rx) = crossbeam::channel::bounded(1);
+        let ask: Inspect = Box::new(move |core| {
+            let _ = tx.send(f(core));
+        });
+        self.inspect.send(ask).ok()?;
+        rx.recv_timeout(timeout).ok()
     }
 
     /// The thread ended on its own (fenced, or it panicked).
@@ -385,6 +455,7 @@ impl CoordinatorRuntime {
         fenced: Fenced,
     ) -> CoordinatorThread {
         let (stop_tx, stop_rx) = crossbeam::channel::bounded(1);
+        let (inspect_tx, inspect_rx) = crossbeam::channel::unbounded();
         let mut core = start.coordinator;
         if start.source.needs_save() {
             core.request_save();
@@ -402,18 +473,18 @@ impl CoordinatorRuntime {
         };
         let join = std::thread::Builder::new()
             .name("coordinator".into())
-            .spawn(move || runtime.run(stop_rx))
+            .spawn(move || runtime.run(stop_rx, inspect_rx))
             .expect("spawn the coordinator thread");
-        CoordinatorThread { join, stop: stop_tx }
+        CoordinatorThread { join, stop: stop_tx, inspect: inspect_tx }
     }
 
     fn now_ms(&self) -> u64 {
         self.started.elapsed().as_millis() as u64
     }
 
-    fn run(mut self, stop: Receiver<Stop>) -> ServerExit {
+    fn run(mut self, stop: Receiver<Stop>, inspect: Receiver<Inspect>) -> ServerExit {
         loop {
-            self.wait(&stop);
+            self.wait(&stop, &inspect);
             // The stop is read before the hosts are drained: whatever a host sent
             // before asking to stop is already queued and is handled below.
             let stopping = match stop.try_recv() {
@@ -424,6 +495,9 @@ impl CoordinatorRuntime {
             };
             let now = self.now_ms();
             self.drain_hosts(now);
+            for f in inspect.try_iter() {
+                f(&self.core);
+            }
             self.core.maintain(now);
             if self.pump_save(now).is_err() {
                 return self.fence_out();
@@ -443,9 +517,10 @@ impl CoordinatorRuntime {
 
     /// Block until a host message, the save's answer or a stop arrives, at most
     /// [`COORDINATOR_TICK_MS`]. Nothing is taken off the channels here.
-    fn wait(&self, stop: &Receiver<Stop>) {
+    fn wait(&self, stop: &Receiver<Stop>, inspect: &Receiver<Inspect>) {
         let mut sel = Select::new();
         sel.recv(stop);
+        sel.recv(inspect);
         match &self.links.links {
             Links::Channels(hosts) => {
                 for h in hosts.iter().filter(|h| !h.gone) {
@@ -484,8 +559,9 @@ impl CoordinatorRuntime {
                     match event {
                         LinkEvent::Up(hello) => match hello.role {
                             PeerRole::Host { ordinal, boot } => {
-                                log::info!("[coordinator] host {ordinal} connected (peer {}, boot {boot:#x})", peer.0);
-                                l.routes.hosts.insert(peer, ordinal);
+                                if l.routes.admit(peer, ordinal) {
+                                    log::info!("[coordinator] host {ordinal} connected (peer {}, boot {boot:#x})", peer.0);
+                                }
                             }
                             other => log::warn!("[coordinator] peer {} is {other:?}, not a host: ignored", peer.0),
                         },
@@ -494,9 +570,13 @@ impl CoordinatorRuntime {
                                 l.routes.note(ordinal, &msg);
                                 self.core.handle(msg, now);
                             }
+                            None if l.routes.refused.contains(&peer) => {
+                                log::debug!("[coordinator] a message from refused peer {} ignored", peer.0)
+                            }
                             None => log::warn!("[coordinator] a message from non-host peer {} ignored", peer.0),
                         },
                         LinkEvent::Down(why) => {
+                            l.routes.refused.remove(&peer);
                             if let Some(ordinal) = l.routes.hosts.remove(&peer) {
                                 log::warn!("[coordinator] host {ordinal} (peer {}) left: {why}", peer.0);
                             }
@@ -658,6 +738,18 @@ mod tests {
     fn attach(host: u32, epoch: u64, regions: &[RegionCoords]) -> HostMsg {
         let running = regions.iter().map(|r| RunningRegion { rc: *r, incarnation: 1, people: Vec::new() }).collect();
         HostMsg::Attach { host, epoch, running, online: Vec::new() }
+    }
+
+    #[test]
+    fn only_the_first_host_ordinal_is_served() {
+        let mut r = Routes::default();
+        assert!(r.admit(PeerId(2), 4), "the first host, whatever its ordinal");
+        assert!(!r.admit(PeerId(3), 0), "another ordinal is refused");
+        assert!(r.admit(PeerId(5), 4), "the same host reconnecting");
+        assert_eq!(r.peer_of(4), Some(PeerId(5)));
+        assert_eq!(r.peer_of(0), None);
+        assert!(r.refused.contains(&PeerId(3)));
+        assert_eq!(r.route(&CoordMsg::Attached { epoch: 9 }), Target::Nobody, "an unmatched echo goes nowhere");
     }
 
     #[test]

@@ -1081,6 +1081,8 @@ coordinator: _dev-r2-token
 # (static ownership), dialing the coordinator at 127.0.0.1:6480 (started first or later —
 # it waits for the pin); clients connect on 127.0.0.1:6466 as with `just server`.
 # Local player names unless VOXEL_AUTH=jwt is set (see `dev-r2`). Play region size.
+# R2 runs ONE host per world: keep the defaults. `ordinal` != 0 / `hosts` > 1 is R3 work —
+# the coordinator refuses a second host ordinal, and a second host would also bind 6466.
 host ordinal="0" hosts="1": _dev-r2-token
     #!/usr/bin/env bash
     set -euo pipefail
@@ -1096,7 +1098,10 @@ host ordinal="0" hosts="1": _dev-r2-token
 # service, the coordinator (log target/dev-r2/coordinator.log) and, once it has written
 # its pin, host 0 in the foreground (VOXEL_AUTH=jwt, world `dev`). SIGTERMs the
 # coordinator and the login service on exit. Connect with `just run-online`-style login
-# (`client debug online`) or the login screens.
+# (`client debug online`) or the login screens. The first start on an empty dev database
+# forges the world in the coordinator, which can take longer than the `online_wait_secs`
+# (180 s) wait for its pin: then rerun (the world is kept), or raise it once with
+# `just online_wait_secs=900 dev-r2`.
 dev-r2: pg-up _dev-login-setup _dev-r2-token
     #!/usr/bin/env bash
     set -euo pipefail

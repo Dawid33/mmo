@@ -148,6 +148,14 @@ fn embark_request(h: &History) -> EmbarkRequest {
     EmbarkRequest { civ: s.civ, people: s.members.iter().copied().take(2).collect(), region }
 }
 
+/// The coordinator's saved history.
+fn stored_history(store: &StoreHandle, map: &WorldMap) -> History {
+    let bytes = store.load_coordinator().unwrap().expect("a saved coordinator state");
+    let state = game::CoordinatorState::decode(&bytes).expect("the saved state decodes");
+    let grid = game::history::SocietyGrid::from_world_map(map);
+    game::history::persist::decode(&state.history, grid).expect("its history decodes")
+}
+
 /// The player-founded sites in the coordinator's saved state.
 fn stored_player_sites(store: &StoreHandle, map: &WorldMap) -> Vec<SiteId> {
     let Some(bytes) = store.load_coordinator().unwrap() else { return Vec::new() };
@@ -493,5 +501,93 @@ fn host_survives_coordinator_absence_at_start() {
     assert_eq!(host.exit(), ServerExit::Clean);
     host_store.shutdown();
     coordinator.stop();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Until R3 a coordinator serves one host: a second host ordinal that dials it is
+/// refused, and its `Attach` (which, from a host running nothing, would park every live
+/// region) is never applied — the first host's people keep their bodies, and it keeps
+/// being answered.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn second_host_ordinal_is_refused() {
+    install_props();
+    let Some(db) = PgDb::create("second") else { return };
+    let map = land_map();
+    let dir = scratch("second");
+    let cert_file = dir.join("coordinator.cert-sha256");
+    let (coordinator, addr) = Coordinator::start(&db, &map, "127.0.0.1:0".parse().unwrap(), cert_file.clone());
+    let deadline = Instant::now() + WAIT;
+    while coordinator.store.load_coordinator().unwrap().is_none() {
+        assert!(Instant::now() < deadline, "the bootstrap was never saved");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let req = embark_request(&stored_history(&coordinator.store, &map));
+    let host_store = db.open();
+    let a_key = PlayerKey::Local(game::PlayerName::parse("a").unwrap());
+    let (a, _) = StorePlayers(host_store.clone()).resolve(&a_key).unwrap();
+    let link = quic_link(addr, cert_file.clone(), 1);
+    let mut host = Host::start(&host_store, &map, Ownership::Static { ordinal: 0, hosts: 1 }, Box::new(link), None, 1);
+    host.until("attached", |h| h.manager.world_attached());
+    host.send(ServerEvent::ClientConnected { client: A, player: a, record: None });
+    host.send(ServerEvent::ClientPacket(ClientPacket::Embark(req.clone()), A));
+    host.until("embarked", |h| !h.embark_results(A).is_empty());
+    let site = host.embark_results(A)[0].expect("embarked");
+    for _ in 0..20 {
+        host.round();
+    }
+
+    let party = req.people.clone();
+    let embodied = coordinator
+        .thread
+        .inspect(move |c| party.iter().all(|p| c.history().person(*p).is_some_and(|q| q.location == game::history::Location::InRegion(req.region))), WAIT)
+        .expect("the coordinator answers");
+    assert!(embodied, "the party stands in host 0's fortress");
+
+    // Host 1 dials and attaches running nothing.
+    let pin = svc_link::read_cert_hash("MMO_ROLES_TEST_UNSET_PIN", &cert_file).unwrap();
+    let hello = svc_link::LinkHello::new(TOKEN.into(), svc_link::PeerRole::Host { ordinal: 1, boot: 2 });
+    let (stray, stray_events) = svc_link::LinkDialer::connect::<game::CoordMsg, game::HostMsg>(addr, pin, hello);
+    let deadline = Instant::now() + WAIT;
+    loop {
+        match stray_events.recv_timeout(Duration::from_millis(50)) {
+            Ok(svc_link::LinkEvent::Up(_)) => break,
+            _ => assert!(Instant::now() < deadline, "host 1's link never came up"),
+        }
+        host.round();
+    }
+    stray.send(game::HostMsg::Attach { host: 1, epoch: 1, running: Vec::new(), online: Vec::new() }).unwrap();
+    let until = Instant::now() + Duration::from_millis(500);
+    while Instant::now() < until {
+        host.round();
+    }
+    assert!(
+        !stray_events.try_iter().any(|e| matches!(e, svc_link::LinkEvent::Msg(_))),
+        "the refused host is told nothing (no attach echo, no view)"
+    );
+    // Host 0 is still served.
+    let query = LegendsQuery { filter: LegendsFilter::Site(site), before: None, limit: 5 };
+    host.send(ServerEvent::ClientPacket(ClientPacket::RequestLegends(query), A));
+    host.until("legends for host 0", |h| h.legends_pages(A) == 1);
+
+    let party = req.people.clone();
+    let locations = coordinator
+        .thread
+        .inspect(
+            move |c| party.iter().map(|p| c.history().person(*p).map(|q| q.location)).collect::<Vec<_>>(),
+            WAIT,
+        )
+        .expect("the coordinator answers");
+    for (p, at) in req.people.iter().zip(locations) {
+        assert_eq!(
+            at,
+            Some(game::history::Location::InRegion(req.region)),
+            "{p:?} keeps its body in host 0's fortress (the history did not park it)"
+        );
+    }
+    drop(stray);
+    coordinator.stop();
+    drop(host);
+    host_store.shutdown();
     let _ = std::fs::remove_dir_all(&dir);
 }

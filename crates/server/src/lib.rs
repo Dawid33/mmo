@@ -525,6 +525,13 @@ pub fn run() -> claims::ServerExit {
     let super_region_regions = claims::super_region_regions_from(std::env::var(claims::SUPER_REGION_REGIONS_ENV).ok().as_deref())
         .unwrap_or_else(|e| fatal(&e));
     info!("[server] ownership: {ownership:?}, {super_region_regions} regions per super-region side");
+    if role == roles::Role::Host && ownership == game::Ownership::AllInOne {
+        log::warn!(
+            "[server] role host with {} unset (all): this host claims every super-region — right for R2's one \
+             host per world (`just host` sets static 0 of 1)",
+            game::ownership::OWNERSHIP_ENV
+        );
+    }
     let players: player_store::SharedPlayerStore = match &store {
         None => player_store::shared(player_store::MemoryPlayerStore::default()),
         Some(store) => player_store::shared(player_store::StorePlayers(store.clone())),

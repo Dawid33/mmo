@@ -75,16 +75,26 @@ struct Recording {
     sent: Arc<Mutex<Vec<HostMsg>>>,
     /// The connection generation the link reports ([`World::reconnect_between_looks`]).
     generation: Arc<std::sync::atomic::AtomicU64>,
+    /// `Some` while the connection is dead but the host still believes it up
+    /// ([`World::begin_stale`]): what the host sends waits here, nothing is readable.
+    stale: Arc<Mutex<Option<Vec<HostMsg>>>>,
 }
 
 impl WorldLink for Recording {
     fn send(&mut self, msg: HostMsg) {
+        if let Some(held) = self.stale.lock().unwrap().as_mut() {
+            held.push(msg);
+            return;
+        }
         if self.inner.is_up() {
             self.sent.lock().unwrap().push(msg.clone());
         }
         self.inner.send(msg);
     }
     fn recv(&mut self) -> Option<game::CoordMsg> {
+        if self.stale.lock().unwrap().is_some() {
+            return None;
+        }
         self.inner.recv()
     }
     fn is_up(&self) -> bool {
@@ -114,6 +124,7 @@ struct World {
     seed: u64,
     sent: Arc<Mutex<Vec<HostMsg>>>,
     generation: Arc<std::sync::atomic::AtomicU64>,
+    stale: Arc<Mutex<Option<Vec<HostMsg>>>>,
 }
 
 impl World {
@@ -139,9 +150,10 @@ impl World {
         let sent = Arc::new(Mutex::new(Vec::new()));
         let generation = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let inner = InlineWorldLink::new(Coordinator::new(history(), 0)).with_schedule(&schedule);
-        let link = Recording { inner, sent: sent.clone(), generation: generation.clone() };
+        let stale = Arc::new(Mutex::new(None));
+        let link = Recording { inner, sent: sent.clone(), generation: generation.clone(), stale: stale.clone() };
         manager.set_world_link(Box::new(link), seed, 0);
-        World { manager, region_out, packets, inbox: Vec::new(), now_ms: 0, seed, sent, generation }
+        World { manager, region_out, packets, inbox: Vec::new(), now_ms: 0, seed, sent, generation, stale }
     }
 
     /// Connected players `clients`, the link drained.
@@ -202,6 +214,30 @@ impl World {
     fn reconnect_between_looks(&mut self) {
         self.link().lose_in_transit();
         self.generation.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// The connection dies unnoticed: the host keeps sending as if up (held, see
+    /// [`Recording::stale`]) and reads nothing.
+    fn begin_stale(&mut self) {
+        *self.stale.lock().unwrap() = Some(Vec::new());
+    }
+
+    /// The link reconnected: each message sent under the stale belief was lost with the
+    /// old connection or (by the seed) lands on the new one — ahead of the `Attach`, which
+    /// the host sends only once it sees the new generation. Returns those delivered.
+    fn end_stale(&mut self) -> Vec<HostMsg> {
+        let held = self.stale.lock().unwrap().take().expect("a stale window");
+        self.link().lose_in_transit();
+        let mut landed = Vec::new();
+        for (i, msg) in held.into_iter().enumerate() {
+            if roll(self.seed, 100 + i as u64, 3) > 0 {
+                landed.push(msg.clone());
+                self.sent.lock().unwrap().push(msg.clone());
+                self.link().send(msg);
+            }
+        }
+        self.generation.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        landed
     }
 
     /// Ticks until the link is empty and every request answered.
@@ -414,6 +450,60 @@ fn reconnect_between_looks_reattaches() {
         assert_eq!(w.players_in(req.region), vec![A], "seed {seed}: moved in once");
         w.check_settled("reattached");
     });
+}
+
+/// Lifecycle messages the host sent while it still believed a dead connection up (a
+/// region starting, or stopping and parking with its bodies) land on the new connection
+/// ahead of the `Attach` (svc-link is at-least-once around a reconnect), or are lost with
+/// the old one. Either way each person keeps at most one body throughout and ends in
+/// exactly one place.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn lifecycle_on_stale_link_lands_before_attach() {
+    let ahead = std::sync::atomic::AtomicU64::new(0);
+    each_seed("lifecycle_on_stale_link_lands_before_attach", |seed| {
+        let mut w = World::with(seed, &[A]);
+        let site_region = w.history().sites().next().unwrap().region;
+        let parking = roll(seed, 5, 2) == 1;
+        if parking {
+            w.packet(A, ClientPacket::RequestRegionConnection(site_region));
+            w.drain();
+            w.check_settled("running");
+        }
+        let mark = w.mark();
+        w.begin_stale();
+        if parking {
+            w.packet(A, ClientPacket::ReleaseRegionConnection(site_region));
+            w.now_ms += UNLOAD_GRACE_MS;
+        } else {
+            w.packet(A, ClientPacket::RequestRegionConnection(site_region));
+        }
+        for round in 0..2 + roll(seed, 6, 4) {
+            w.tick();
+            w.check_lagging(&format!("stale, round {round}"));
+        }
+        let landed = w.end_stale();
+        for round in 0..DRAIN_ROUNDS {
+            w.tick();
+            w.check_lagging(&format!("reattached, round {round}"));
+        }
+        w.drain();
+        w.check_settled("reattached");
+        let sent = w.sent_since(mark);
+        let attach_at = sent.iter().position(|m| matches!(m, HostMsg::Attach { .. })).expect("an Attach");
+        let lifecycle = |m: &HostMsg| {
+            matches!(m, HostMsg::RegionStarted { .. } | HostMsg::RegionStopping { .. } | HostMsg::RegionParked { .. })
+        };
+        if sent[..attach_at].iter().any(lifecycle) {
+            assert!(landed.iter().any(lifecycle), "seed {seed}: only stale messages precede the Attach");
+            ahead.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        // The region runs (or restarts) afterwards with each resident once.
+        w.packet(A, ClientPacket::RequestRegionConnection(site_region));
+        w.drain();
+        w.check_settled("after");
+    });
+    assert!(ahead.into_inner() > 0, "no seed landed a lifecycle message ahead of the Attach");
 }
 
 /// A request already sent when the link drops — its reply lost with the connection, or
