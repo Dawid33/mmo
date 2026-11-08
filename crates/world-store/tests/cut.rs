@@ -27,6 +27,8 @@ fn in_flight_replace_is_per_host() {
         h.commit_cut(cut(2, 1, 11, h1.clone())).recv().unwrap().unwrap();
         let all = h.load_in_flight().unwrap();
         assert_eq!(all.len(), 3, "both hosts' rows are present");
+        assert_eq!(&all[..2], &h0[..], "host 0's rows keep their order, ahead of host 1's");
+        assert_eq!(&all[2..], &h1[..]);
         for r in h0.iter().chain(&h1) {
             assert!(all.contains(r));
         }

@@ -486,11 +486,9 @@ macro_rules! engine_rows {
                     }
                 }
                 sqlx::query("DELETE FROM in_flight WHERE host = $1").bind(cut.host as i64).execute(&mut *tx).await?;
-                // `seq` is the table's key across all hosts: continue after other hosts' rows.
-                let base: i64 = sqlx::query("SELECT COALESCE(MAX(seq) + 1, 0) FROM in_flight")
-                    .fetch_one(&mut *tx)
-                    .await?
-                    .try_get(0)?;
+                // `seq` is the table's key across all hosts: each host owns a range
+                // (`host << 32`), so concurrent commits never collide and need no MAX read.
+                let base = (cut.host as i64) << 32;
                 for (seq, row) in cut.in_flight.iter().enumerate() {
                     let (kind, target, stamp, payload) = match row {
                         InFlightRow::Transfer { target, bundle, stamp } => {
@@ -504,7 +502,7 @@ macro_rules! engine_rows {
                         "INSERT INTO in_flight (seq, kind, target_rx, target_rz, stamp, payload, host) \
                          VALUES ($1, $2, $3, $4, $5, $6, $7)",
                     )
-                    .bind(base + seq as i64)
+                    .bind(base | seq as i64)
                     .bind(kind)
                     .bind(target.x as i64)
                     .bind(target.z as i64)

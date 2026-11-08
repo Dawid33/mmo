@@ -10,6 +10,7 @@ const PER_THREAD: usize = 50;
 #[test]
 fn concurrent_resolve_assigns_distinct_ids() {
     each_backend("players", false, |url| {
+        // TODO(Task 2): two StoreHandles on one database once the advisory lock is gone.
         // One handle cloned across two threads: the world lock allows one open
         // store per database until the owner-epoch fence replaces it (Task 2).
         let h = open(url);
