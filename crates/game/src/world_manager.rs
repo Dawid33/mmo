@@ -721,6 +721,9 @@ pub struct WorldManager<S: RegionSpawner> {
     world_attach: WorldAttach,
     /// `Attach`es sent so far (the epoch the coordinator echoes).
     attach_epoch: u64,
+    /// The link's [`WorldLink::generation`] when the host last looked: a change while up
+    /// is a reconnect.
+    world_generation: u64,
     /// Random per host process start ([`Self::set_world_link`]): requests' ids stay unique
     /// across restarts.
     world_boot: u64,
@@ -953,6 +956,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             world_notices: Vec::new(),
             world_attach: WorldAttach::Down,
             attach_epoch: 0,
+            world_generation: 0,
             world_boot: 0,
             next_request_seq: 0,
             pending_requests: BTreeMap::new(),
@@ -1039,6 +1043,7 @@ impl<S: RegionSpawner> WorldManager<S> {
     pub fn set_world_link(&mut self, link: Box<dyn WorldLink + Send>, boot: u64, now_ms: u64) {
         debug_assert!(self.world.is_none(), "a world link is already installed");
         let up = link.is_up();
+        self.world_generation = link.generation();
         self.world = Some(link);
         self.world_boot = boot;
         self.world_ms = self.world_ms.max(now_ms);
@@ -1264,10 +1269,18 @@ impl<S: RegionSpawner> WorldManager<S> {
         }
     }
 
-    /// Notice the link going down (or coming back up).
+    /// Notice the link going down (or coming back up). A new connection generation while
+    /// up ([`WorldLink::generation`]) is a reconnect missed between two looks: it counts
+    /// as down, then up (a fresh `Attach`).
     fn watch_world_link(&mut self, now_ms: u64) {
         let Some(link) = self.world.as_ref() else { return };
-        match (&self.world_attach, link.is_up()) {
+        let (up, generation) = (link.is_up(), link.generation());
+        if up && generation != self.world_generation && !matches!(self.world_attach, WorldAttach::Down) {
+            log::warn!("world link reconnected (generation {generation}): re-attaching");
+            self.world_attach = WorldAttach::Down;
+        }
+        self.world_generation = generation;
+        match (&self.world_attach, up) {
             (WorldAttach::Down, true) => self.world_link_up(now_ms),
             (WorldAttach::Down, false) | (_, true) => {}
             (_, false) => {

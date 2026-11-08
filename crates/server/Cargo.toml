@@ -28,6 +28,8 @@ dashmap = { workspace = true }
 wtransport = { workspace = true }
 # The world store (regions, players, history, world tick): SQLite or Postgres.
 world-store = { path = "../world-store" }
+# The service link to the world coordinator (`VOXEL_ROLE=host|coordinator`).
+svc-link = { path = "../svc-link" }
 # Login JWTs at the edge (`VOXEL_AUTH=jwt`): the verifier and the JWKS fetch.
 auth = { workspace = true }
 login-api = { workspace = true }
@@ -66,6 +68,10 @@ path = "tests/coordinator_rt.rs"
 [[test]]
 name = "player_store"
 path = "tests/player_store.rs"
+
+[[test]]
+name = "roles"
+path = "tests/roles.rs"
 
 [[test]]
 name = "store_world"

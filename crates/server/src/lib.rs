@@ -135,6 +135,7 @@ pub mod lod_workers;
 pub mod perf;
 pub mod player_store;
 pub mod region_threads;
+pub mod roles;
 pub mod webtransport;
 pub mod world_file;
 
@@ -488,7 +489,16 @@ pub fn run() -> claims::ServerExit {
     };
 
     simplelog::SimpleLogger::init(log::LevelFilter::Info, simplelog::Config::default()).unwrap();
+    // `VOXEL_ROLE`: the whole world here (`all`), its regions only (`host`), or its
+    // coordinator only (`coordinator`, no client edge, no regions).
+    let role = roles::Role::from_env().unwrap_or_else(|e| fatal(&e));
+    if role == roles::Role::Coordinator {
+        game::perf::init("coordinator");
+        info!("[server] role: coordinator");
+        return roles::run_coordinator();
+    }
     game::perf::init("server");
+    info!("[server] role: {role:?}");
 
     let (client_packet_send, client_packet_recv) = crossbeam::channel::unbounded();
     let (server_send, server_recv) = crossbeam::channel::unbounded();
@@ -505,6 +515,7 @@ pub fn run() -> claims::ServerExit {
         std::env::var(world_file::WORLD_DB_ENV).ok().as_deref(),
     )
     .unwrap_or_else(|e| fatal(&e));
+    role.check_store(&world_source).unwrap_or_else(|e| fatal(&e));
     let mut opened = world_file::open_world(&world_source, &worldgen::forge::ForgeParams::default())
         .unwrap_or_else(|e| fatal(&e));
     let store = opened.store.clone();
@@ -661,8 +672,14 @@ pub fn run() -> claims::ServerExit {
         info!("[server] world map: {}x{} tiles, from the world store", map.width, map.height);
         // Forged worlds keep their history in the store (procedural: none): the
         // world coordinator, the only writer of history state, runs on its own
-        // `coordinator` thread joined by a channel link (`AllInOne`).
-        if let Some(store) = &store {
+        // `coordinator` thread joined by a channel link (`all`), or is its own
+        // process dialed over the service link (`host`).
+        if role == roles::Role::Host {
+            let boot = host_boot();
+            let link = host_world_link(ownership.ordinal(), boot).unwrap_or_else(|e| fatal(&e));
+            world_wake = link.wake();
+            manager.set_world_link(Box::new(link), boot, 0);
+        } else if let Some(store) = &store {
             let sqlite_db = match &world_source {
                 world_file::WorldSource::Store { url: world_store::StoreUrl::Sqlite(db), .. } => Some(db.as_path()),
                 _ => None,
@@ -778,14 +795,16 @@ pub fn run() -> claims::ServerExit {
     let had_sessions = manager.depths().sessions > 0;
     let outcome = cuts::exit_world(
         &mut manager,
-        &region_out_recv,
-        || start.elapsed().as_millis() as u64,
-        cuts,
-        coordinator,
-        &fenced,
-        cuts::EXIT_PARK_TIMEOUT,
-        EXIT_SAVE_TIMEOUT,
-        || world_clock.tick_at(start.elapsed().as_millis() as u64),
+        cuts::ExitParams {
+            region_out: &region_out_recv,
+            now_ms: || start.elapsed().as_millis() as u64,
+            cuts,
+            coordinator,
+            fenced: &fenced,
+            park_timeout: cuts::EXIT_PARK_TIMEOUT,
+            save_timeout: EXIT_SAVE_TIMEOUT,
+            now_tick: || world_clock.tick_at(start.elapsed().as_millis() as u64),
+        },
         |_| {},
     );
     if outcome == claims::ServerExit::Fenced && had_sessions {
@@ -815,7 +834,7 @@ pub const EXIT_SAVE_TIMEOUT: std::time::Duration = std::time::Duration::from_sec
 
 /// A start-up error the server cannot run with: logged and printed, then the
 /// process exits (status 1).
-fn fatal(message: &str) -> ! {
+pub(crate) fn fatal(message: &str) -> ! {
     log::error!("[server] {message}");
     eprintln!("server: {message}");
     std::process::exit(1)
@@ -841,7 +860,7 @@ pub fn world_save_secs(env_value: Option<&str>) -> u64 {
 
 /// Sets `stop` on the first SIGINT / SIGTERM; a second one exits at once
 /// (an orderly exit that hangs can still be interrupted).
-async fn watch_stop_signals(stop: std::sync::Arc<std::sync::atomic::AtomicBool>) {
+pub(crate) async fn watch_stop_signals(stop: std::sync::Arc<std::sync::atomic::AtomicBool>) {
     #[cfg(unix)]
     let mut term = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
         Ok(term) => term,
@@ -998,6 +1017,26 @@ mod tests {
         assert!(malformed.contains("TOKIO_WORKER_THREADS"));
         assert!(malformed.contains("positive integer"));
     }
+}
+
+/// A host's link to the world coordinator process (`VOXEL_ROLE=host`): it dials
+/// `VOXEL_COORDINATOR_ADDR` with the service token, pinning the coordinator's
+/// certificate (`VOXEL_COORDINATOR_CERT_SHA256`, else the cert-hash file — waited for
+/// if the coordinator has not written it yet).
+fn host_world_link(ordinal: u32, boot: u64) -> Result<roles::QuicWorldLink, String> {
+    let addr = roles::coordinator_addr_from(
+        roles::COORDINATOR_ADDR_ENV,
+        std::env::var(roles::COORDINATOR_ADDR_ENV).ok().as_deref(),
+    )?;
+    let token = svc_link::service_token_from_env().map_err(|e| format!("the service link's token: {e}"))?;
+    let cert_file = roles::cert_hash_file_from(std::env::var(roles::COORDINATOR_CERT_HASH_FILE_ENV).ok().as_deref());
+    let hello = svc_link::LinkHello::new(token, svc_link::PeerRole::Host { ordinal, boot });
+    info!("[server] the world coordinator is a separate process at {addr} (pin from {})", cert_file.display());
+    Ok(roles::QuicWorldLink::connect(
+        addr,
+        move || svc_link::read_cert_hash(roles::COORDINATOR_CERT_SHA256_ENV, &cert_file),
+        hello,
+    ))
 }
 
 /// A number distinct per host process start (its world requests' `RequestId::boot`): the

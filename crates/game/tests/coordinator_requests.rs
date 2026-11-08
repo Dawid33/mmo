@@ -73,6 +73,8 @@ fn history() -> History {
 struct Recording {
     inner: InlineWorldLink,
     sent: Arc<Mutex<Vec<HostMsg>>>,
+    /// The connection generation the link reports ([`World::reconnect_between_looks`]).
+    generation: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl WorldLink for Recording {
@@ -87,6 +89,9 @@ impl WorldLink for Recording {
     }
     fn is_up(&self) -> bool {
         self.inner.is_up()
+    }
+    fn generation(&self) -> u64 {
+        self.generation.load(std::sync::atomic::Ordering::SeqCst)
     }
     fn pump(&mut self, now_ms: u64) {
         self.inner.pump(now_ms);
@@ -108,6 +113,7 @@ struct World {
     now_ms: u64,
     seed: u64,
     sent: Arc<Mutex<Vec<HostMsg>>>,
+    generation: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl World {
@@ -131,9 +137,11 @@ impl World {
         manager.set_world_map(strip());
         let schedule = InlineSchedule::shuffled(seed).coordinator_delay(LINK_DELAY);
         let sent = Arc::new(Mutex::new(Vec::new()));
+        let generation = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let inner = InlineWorldLink::new(Coordinator::new(history(), 0)).with_schedule(&schedule);
-        manager.set_world_link(Box::new(Recording { inner, sent: sent.clone() }), seed, 0);
-        World { manager, region_out, packets, inbox: Vec::new(), now_ms: 0, seed, sent }
+        let link = Recording { inner, sent: sent.clone(), generation: generation.clone() };
+        manager.set_world_link(Box::new(link), seed, 0);
+        World { manager, region_out, packets, inbox: Vec::new(), now_ms: 0, seed, sent, generation }
     }
 
     /// Connected players `clients`, the link drained.
@@ -187,6 +195,13 @@ impl World {
 
     fn set_up(&mut self, up: bool) {
         self.link().set_up(up);
+    }
+
+    /// The link dropped and came back between two of the host's looks: up before and
+    /// after, a new connection generation, and what was on the old connection lost.
+    fn reconnect_between_looks(&mut self) {
+        self.link().lose_in_transit();
+        self.generation.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Ticks until the link is empty and every request answered.
@@ -363,6 +378,41 @@ fn requests_queue_while_link_down_and_replay_once() {
         assert_eq!(w.player_sites().len(), 1, "seed {seed}: one site");
         assert_eq!(w.manager.world_outbox_len(), 0);
         assert_eq!(w.players_in(req.region), vec![A]);
+    });
+}
+
+/// A reconnect the host never saw as down (a QUIC link that dropped and came back
+/// between two pumps: `is_up` true both times, a new connection generation) still makes
+/// it attach again — a fresh `Attach` epoch, then the unanswered request resent — and
+/// the embark is answered once, one site.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn reconnect_between_looks_reattaches() {
+    each_seed("reconnect_between_looks_reattaches", |seed| {
+        let mut w = World::with(seed, &[A]);
+        let req = w.embark_request();
+        let mark = w.mark();
+        w.packet(A, ClientPacket::Embark(req.clone()));
+        for _ in 0..roll(seed, 2, 4) {
+            w.tick();
+        }
+        w.reconnect_between_looks();
+        w.drain();
+        let epochs: Vec<u64> = w
+            .sent_since(mark)
+            .iter()
+            .filter_map(|m| match m {
+                HostMsg::Attach { epoch, .. } => Some(*epoch),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(epochs, vec![2], "seed {seed}: one fresh Attach after the reconnect");
+        let results = w.embark_results(A);
+        assert_eq!(results.len(), 1, "seed {seed}: one EmbarkResult: {results:?}");
+        assert!(results[0].is_ok(), "seed {seed}: embarked");
+        assert_eq!(w.player_sites().len(), 1, "seed {seed}: one site");
+        assert_eq!(w.players_in(req.region), vec![A], "seed {seed}: moved in once");
+        w.check_settled("reattached");
     });
 }
 

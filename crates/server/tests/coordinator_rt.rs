@@ -238,14 +238,16 @@ impl Life {
         let now = self.manager.spawner_mut().world_tick();
         server::cuts::exit_world(
             &mut self.manager,
-            &self.region_out,
-            || 0,
-            Some(writer),
-            self.coordinator.take(),
-            &fenced,
-            Duration::from_secs(10),
-            Duration::from_secs(10),
-            || now,
+            server::cuts::ExitParams {
+                region_out: &self.region_out,
+                now_ms: || 0,
+                cuts: Some(writer),
+                coordinator: self.coordinator.take(),
+                fenced: &fenced,
+                park_timeout: Duration::from_secs(10),
+                save_timeout: Duration::from_secs(10),
+                now_tick: || now,
+            },
             |m| m.spawner_mut().pump(),
         )
     }

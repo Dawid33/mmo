@@ -685,14 +685,16 @@ fn exit_with_given_up_region_skips_exit_cut() {
     assert!(now > last_periodic, "the world moved on since the last cut");
     let exit = server::cuts::exit_world(
         &mut manager,
-        &region_out,
-        || 0,
-        Some(writer),
-        None,
-        claims.fenced(),
-        Duration::from_millis(300),
-        Duration::from_secs(10),
-        || now,
+        server::cuts::ExitParams {
+            region_out: &region_out,
+            now_ms: || 0,
+            cuts: Some(writer),
+            coordinator: None,
+            fenced: claims.fenced(),
+            park_timeout: Duration::from_millis(300),
+            save_timeout: Duration::from_secs(10),
+            now_tick: || now,
+        },
         |m| m.spawner_mut().pump(),
     );
     assert_eq!(exit, server::claims::ServerExit::Clean);
@@ -785,14 +787,16 @@ fn fenced_host_run(url: &world_store::StoreUrl, thief: impl FnOnce(&world_store:
     let Core { mut manager, claims, region_out, _packets } = core;
     let exit = server::cuts::exit_world(
         &mut manager,
-        &region_out,
-        || 0,
-        Some(writer),
-        None,
-        claims.fenced(),
-        Duration::from_secs(5),
-        Duration::from_secs(5),
-        || panic!("a fenced exit takes no last cut"),
+        server::cuts::ExitParams {
+            region_out: &region_out,
+            now_ms: || 0,
+            cuts: Some(writer),
+            coordinator: None,
+            fenced: claims.fenced(),
+            park_timeout: Duration::from_secs(5),
+            save_timeout: Duration::from_secs(5),
+            now_tick: || -> game::Tick { panic!("a fenced exit takes no last cut") },
+        },
         |_| {},
     );
     assert_eq!(exit, server::claims::ServerExit::Fenced);

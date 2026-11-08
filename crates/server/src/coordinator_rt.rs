@@ -8,20 +8,24 @@
 //! meanwhile.
 //!
 //! In `AllInOne` the host's `WorldManager` reaches it over a crossbeam
-//! [`ChannelWorldLink`] ([`start_all_in_one`]); the inline link
-//! ([`game::InlineWorldLink`]) stays for tests and wasm single-player.
+//! [`ChannelWorldLink`] ([`start_all_in_one`]); as its own process
+//! (`VOXEL_ROLE=coordinator`) it serves the host processes on a service-link listener
+//! ([`start_listening`], the hosts' end is [`crate::roles::QuicWorldLink`]); the inline
+//! link ([`game::InlineWorldLink`]) stays for tests and wasm single-player.
 //!
 //! A save refused as `Fenced` (another coordinator claimed the row) fences the whole
 //! process: the shared [`Fenced`] flag is set — the server's main loop sees it and exits
 //! [`crate::claims::EXIT_FENCED`] through `cuts::exit_world` — the link goes down and the
 //! thread ends with [`ServerExit::Fenced`]. Library code never calls `process::exit`.
 
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crossbeam::channel::{Receiver, RecvTimeoutError, Select, Sender, TryRecvError};
-use game::{CoordMsg, Coordinator, HostMsg, WorldLink};
+use game::{CoordMsg, Coordinator, HostMsg, RegionCoords, WorldLink};
+use svc_link::{LinkEvent, LinkListener, PeerId, PeerRole, PeerSenders};
 use world_store::{CoordinatorFence, StoreError, StoreHandle};
 
 use crate::claims::{Fenced, ServerExit};
@@ -106,16 +110,157 @@ pub fn channel_link() -> (ChannelWorldLink, HostEnd) {
     )
 }
 
-/// The hosts a coordinator serves. R2 runs one host per world (`AllInOne`, or one
-/// `Host` process): every outgoing message goes to each host in the set. Per-host routing
-/// is R3's.
+/// The hosts a coordinator serves: in-process channel links (`AllInOne`, tests), or the
+/// host processes connected to its service-link listener (`VOXEL_ROLE=coordinator`).
 pub struct LinkSet {
-    hosts: Vec<HostEnd>,
+    links: Links,
+}
+
+enum Links {
+    /// Every outgoing message goes to each host (R2: one host per process).
+    Channels(Vec<HostEnd>),
+    Listener(ListenerHosts),
 }
 
 impl LinkSet {
     pub fn one(host: HostEnd) -> Self {
-        LinkSet { hosts: vec![host] }
+        LinkSet { links: Links::Channels(vec![host]) }
+    }
+
+    /// The hosts that connect to `listener`; its events and senders are the ones
+    /// [`LinkListener::bind`] returned. The listener is dropped (the port freed) when the
+    /// coordinator stops.
+    pub fn listener(
+        listener: LinkListener,
+        events: Receiver<(PeerId, LinkEvent<HostMsg>)>,
+        senders: PeerSenders<CoordMsg>,
+    ) -> Self {
+        LinkSet {
+            links: Links::Listener(ListenerHosts {
+                listener: Some(listener),
+                events,
+                senders,
+                routes: Routes::default(),
+            }),
+        }
+    }
+}
+
+/// Where a coordinator message goes.
+#[derive(Debug, PartialEq, Eq)]
+enum Target {
+    Host(u32),
+    Every,
+    Nobody,
+}
+
+/// The hosts on the coordinator's service-link listener.
+struct ListenerHosts {
+    listener: Option<LinkListener>,
+    events: Receiver<(PeerId, LinkEvent<HostMsg>)>,
+    senders: PeerSenders<CoordMsg>,
+    routes: Routes,
+}
+
+impl ListenerHosts {
+    fn send(&mut self, msg: CoordMsg) {
+        match self.routes.route(&msg) {
+            Target::Host(ordinal) => match self.routes.peer_of(ordinal) {
+                Some(peer) => {
+                    if !self.senders.send(peer, msg) {
+                        log::debug!("[coordinator] host {ordinal} left; a message for it is lost");
+                    }
+                }
+                None => log::debug!("[coordinator] host {ordinal} is not connected; {msg:?} lost"),
+            },
+            Target::Every => {
+                for peer in self.routes.hosts.keys() {
+                    self.senders.send(*peer, msg.clone());
+                }
+            }
+            Target::Nobody => {
+                log::warn!("[coordinator] no host is known to run the region of {msg:?}; dropped (R3 routes it)")
+            }
+        }
+    }
+}
+
+/// What routes a coordinator message to one of the connected hosts: a reply to the host
+/// its request id names, a region's messages to the host that announced the region (its
+/// `Attach` / `RegionStarted`), the attach echo to the host whose `Attach` it answers,
+/// the world's view to every host. A message for a host that is not connected is lost
+/// (it re-attaches when it is back: its `Attach` and resent requests cover it).
+#[derive(Default)]
+struct Routes {
+    /// Connected host peers and their ordinals (a reconnect is a new peer).
+    hosts: BTreeMap<PeerId, u32>,
+    /// Which host runs each region, as announced.
+    region_host: BTreeMap<RegionCoords, u32>,
+    /// `Attach`es handled whose echo has not been routed yet: (host, epoch), in order.
+    attaches: VecDeque<(u32, u64)>,
+}
+
+impl Routes {
+    /// Note what routes later messages from `msg`, sent by host `ordinal`.
+    fn note(&mut self, ordinal: u32, msg: &HostMsg) {
+        match msg {
+            HostMsg::Attach { host, epoch, running, .. } => {
+                if *host != ordinal {
+                    log::warn!("[coordinator] host {ordinal}'s Attach names host {host}; routed by its link");
+                }
+                self.region_host.retain(|_, h| *h != ordinal);
+                for r in running {
+                    self.region_host.insert(r.rc, ordinal);
+                }
+                self.attaches.push_back((ordinal, *epoch));
+            }
+            HostMsg::RegionStarted { rc, .. } => {
+                self.region_host.insert(*rc, ordinal);
+            }
+            HostMsg::RegionParked { rc, .. } => {
+                if self.region_host.get(rc) == Some(&ordinal) {
+                    self.region_host.remove(rc);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn route(&mut self, msg: &CoordMsg) -> Target {
+        match msg {
+            CoordMsg::Reply { id, .. } => Target::Host(id.host),
+            CoordMsg::Attached { epoch } => match self.attaches.iter().position(|(_, e)| e == epoch) {
+                Some(i) => Target::Host(self.attaches.remove(i).expect("found").0),
+                None => {
+                    log::warn!("[coordinator] attach echo {epoch} matches no Attach; sent to every host");
+                    Target::Every
+                }
+            },
+            CoordMsg::SpawnPeople { rc, .. } => self.region_target(*rc),
+            CoordMsg::Directive { directive, .. } => self.region_target(directive.region),
+            CoordMsg::Notice { region, .. } => self.region_target(*region),
+            CoordMsg::View { .. } | CoordMsg::Calendar(_) | CoordMsg::Sites(_) | CoordMsg::SiteMarkers(_) => {
+                Target::Every
+            }
+        }
+    }
+
+    /// The host that announced `rc`; with none, the only connected host (R2's one host
+    /// per world), else nobody (several hosts and an unannounced region: R3 routes it).
+    fn region_target(&self, rc: RegionCoords) -> Target {
+        if let Some(h) = self.region_host.get(&rc) {
+            return Target::Host(*h);
+        }
+        let ordinals: BTreeSet<u32> = self.hosts.values().copied().collect();
+        match ordinals.len() {
+            1 => Target::Every,
+            _ => Target::Nobody,
+        }
+    }
+
+    /// The newest connection of host `ordinal`.
+    fn peer_of(&self, ordinal: u32) -> Option<PeerId> {
+        self.hosts.iter().rev().find(|(_, o)| **o == ordinal).map(|(p, _)| *p)
     }
 }
 
@@ -176,6 +321,41 @@ pub fn start_all_in_one(
     let (link, host) = channel_link();
     let thread = CoordinatorRuntime::spawn(store, fence, start, LinkSet::one(host), fenced);
     Ok((link, thread))
+}
+
+/// A coordinator serving host processes over the service link
+/// ([`start_listening`]): its thread, and where and with which pin hosts dial it.
+pub struct ListeningCoordinator {
+    pub thread: CoordinatorThread,
+    pub addr: std::net::SocketAddr,
+    /// The listener certificate's SHA-256 (also written to the cert-hash file, if one).
+    pub cert_sha256: String,
+}
+
+/// The coordinator for a `VOXEL_ROLE=coordinator` process: claims the coordinator row
+/// (fencing any coordinator that held it), listens on `bind` for hosts presenting
+/// `token` (the certificate's pin written to `cert_hash_file`, its cert and key kept
+/// beside it), and runs `start` on its thread serving them.
+pub fn start_listening(
+    store: StoreHandle,
+    start: CoordinatorStart,
+    bind: std::net::SocketAddr,
+    token: String,
+    cert_hash_file: Option<std::path::PathBuf>,
+    fenced: Fenced,
+) -> Result<ListeningCoordinator, String> {
+    let (listener, events, senders) = LinkListener::bind::<HostMsg, CoordMsg>(bind, token, cert_hash_file.clone())
+        .map_err(|e| format!("the coordinator's service link on {bind}: {e}"))?;
+    let fence = store.claim_coordinator().map_err(|e| format!("claiming the world coordinator: {e}"))?;
+    let (addr, cert_sha256) = (listener.local_addr(), listener.cert_sha256().to_string());
+    log::info!(
+        "[coordinator] claimed the world coordinator (epoch {}), state {:?}; hosts dial {addr} (pin {cert_sha256}{})",
+        fence.epoch,
+        start.source,
+        cert_hash_file.map(|f| format!(", in {}", f.display())).unwrap_or_default()
+    );
+    let thread = CoordinatorRuntime::spawn(store, fence, start, LinkSet::listener(listener, events, senders), fenced);
+    Ok(ListeningCoordinator { thread, addr, cert_sha256 })
 }
 
 /// The coordinator core with its store and fence (see the module docs).
@@ -266,8 +446,15 @@ impl CoordinatorRuntime {
     fn wait(&self, stop: &Receiver<Stop>) {
         let mut sel = Select::new();
         sel.recv(stop);
-        for h in self.links.hosts.iter().filter(|h| !h.gone) {
-            sel.recv(&h.rx);
+        match &self.links.links {
+            Links::Channels(hosts) => {
+                for h in hosts.iter().filter(|h| !h.gone) {
+                    sel.recv(&h.rx);
+                }
+            }
+            Links::Listener(l) => {
+                sel.recv(&l.events);
+            }
         }
         if let Some(save) = &self.pending_save {
             sel.recv(save);
@@ -277,18 +464,43 @@ impl CoordinatorRuntime {
 
     /// Hand every queued host message to the core, in each host's order.
     fn drain_hosts(&mut self, now: u64) {
-        for i in 0..self.links.hosts.len() {
-            loop {
-                let host = &mut self.links.hosts[i];
-                if host.gone {
-                    break;
+        match &mut self.links.links {
+            Links::Channels(hosts) => {
+                for host in hosts.iter_mut() {
+                    while !host.gone {
+                        match host.rx.try_recv() {
+                            Ok(msg) => self.core.handle(msg, now),
+                            Err(TryRecvError::Empty) => break,
+                            Err(TryRecvError::Disconnected) => {
+                                log::info!("[coordinator] a host closed its link");
+                                host.gone = true;
+                            }
+                        }
+                    }
                 }
-                match host.rx.try_recv() {
-                    Ok(msg) => self.core.handle(msg, now),
-                    Err(TryRecvError::Empty) => break,
-                    Err(TryRecvError::Disconnected) => {
-                        log::info!("[coordinator] a host closed its link");
-                        host.gone = true;
+            }
+            Links::Listener(l) => {
+                while let Ok((peer, event)) = l.events.try_recv() {
+                    match event {
+                        LinkEvent::Up(hello) => match hello.role {
+                            PeerRole::Host { ordinal, boot } => {
+                                log::info!("[coordinator] host {ordinal} connected (peer {}, boot {boot:#x})", peer.0);
+                                l.routes.hosts.insert(peer, ordinal);
+                            }
+                            other => log::warn!("[coordinator] peer {} is {other:?}, not a host: ignored", peer.0),
+                        },
+                        LinkEvent::Msg(msg) => match l.routes.hosts.get(&peer).copied() {
+                            Some(ordinal) => {
+                                l.routes.note(ordinal, &msg);
+                                self.core.handle(msg, now);
+                            }
+                            None => log::warn!("[coordinator] a message from non-host peer {} ignored", peer.0),
+                        },
+                        LinkEvent::Down(why) => {
+                            if let Some(ordinal) = l.routes.hosts.remove(&peer) {
+                                log::warn!("[coordinator] host {ordinal} (peer {}) left: {why}", peer.0);
+                            }
+                        }
                     }
                 }
             }
@@ -350,11 +562,20 @@ impl CoordinatorRuntime {
         if out.is_empty() {
             return;
         }
-        for host in self.links.hosts.iter().filter(|h| !h.gone) {
-            for msg in &out {
-                let _ = host.tx.send(msg.clone());
+        match &mut self.links.links {
+            Links::Channels(hosts) => {
+                for host in hosts.iter().filter(|h| !h.gone) {
+                    for msg in &out {
+                        let _ = host.tx.send(msg.clone());
+                    }
+                    let _ = host.wake.try_send(());
+                }
             }
-            let _ = host.wake.try_send(());
+            Links::Listener(l) => {
+                for msg in out {
+                    l.send(msg);
+                }
+            }
         }
     }
 
@@ -411,10 +632,77 @@ impl CoordinatorRuntime {
         ServerExit::Fenced
     }
 
-    /// Every host's link goes down.
-    fn down(&self) {
-        for host in &self.links.hosts {
-            host.up.store(false, Ordering::SeqCst);
+    /// Every host's link goes down (the listener stops: its port is freed).
+    fn down(&mut self) {
+        match &mut self.links.links {
+            Links::Channels(hosts) => {
+                for host in hosts.iter() {
+                    host.up.store(false, Ordering::SeqCst);
+                }
+            }
+            Links::Listener(l) => drop(l.listener.take()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use game::history::{Directive, PersonId};
+    use game::{RequestId, RunningRegion};
+
+    fn rc(x: i32, z: i32) -> RegionCoords {
+        RegionCoords::new(x, z)
+    }
+
+    fn attach(host: u32, epoch: u64, regions: &[RegionCoords]) -> HostMsg {
+        let running = regions.iter().map(|r| RunningRegion { rc: *r, incarnation: 1, people: Vec::new() }).collect();
+        HostMsg::Attach { host, epoch, running, online: Vec::new() }
+    }
+
+    #[test]
+    fn messages_route_to_the_host_they_are_for() {
+        let mut r = Routes::default();
+        // Host 3 connected twice (the newer peer wins), host 5 once; neither is peer 0.
+        r.hosts.insert(PeerId(4), 3);
+        r.hosts.insert(PeerId(7), 5);
+        r.hosts.insert(PeerId(9), 3);
+        r.note(3, &attach(3, 1, &[rc(1, 1)]));
+        r.note(5, &attach(5, 1, &[rc(2, 2)]));
+        r.note(5, &HostMsg::RegionStarted { rc: rc(4, 4), incarnation: 2 });
+        assert_eq!(r.peer_of(3), Some(PeerId(9)));
+        assert_eq!(r.peer_of(5), Some(PeerId(7)));
+        assert_eq!(r.peer_of(1), None);
+        // Both attached with epoch 1: the echoes go back in the order handled.
+        assert_eq!(r.route(&CoordMsg::Attached { epoch: 1 }), Target::Host(3));
+        assert_eq!(r.route(&CoordMsg::Attached { epoch: 1 }), Target::Host(5));
+        let reply = |host| CoordMsg::Reply {
+            id: RequestId { host, boot: 1, seq: 1 },
+            reply: game::WorldReply::PersonInfo(None),
+        };
+        assert_eq!(r.route(&reply(5)), Target::Host(5));
+        assert_eq!(r.route(&reply(3)), Target::Host(3));
+        let spawn = |at| CoordMsg::SpawnPeople { rc: at, incarnation: 1, events: Vec::new() };
+        assert_eq!(r.route(&spawn(rc(1, 1))), Target::Host(3));
+        assert_eq!(r.route(&spawn(rc(4, 4))), Target::Host(5));
+        let directive = CoordMsg::Directive {
+            directive: Directive { region: rc(2, 2), event: game::GameEventKind::DespawnPerson(PersonId(1)) },
+            incarnation: 1,
+        };
+        assert_eq!(r.route(&directive), Target::Host(5));
+        assert_eq!(r.route(&CoordMsg::Notice { region: rc(1, 1), line: "x".into() }), Target::Host(3));
+        assert_eq!(r.route(&CoordMsg::Calendar(game::history::CalendarTick(1))), Target::Every);
+        // An unannounced region with two hosts: nobody (R3); a park forgets the region.
+        assert_eq!(r.route(&spawn(rc(9, 9))), Target::Nobody);
+        r.note(5, &HostMsg::RegionParked { rc: rc(4, 4), people: Vec::new() });
+        assert_eq!(r.route(&spawn(rc(4, 4))), Target::Nobody);
+        // One host left: everything unannounced goes to it.
+        r.hosts.retain(|_, o| *o == 3);
+        assert_eq!(r.route(&spawn(rc(9, 9))), Target::Every);
+        // A re-attach replaces the host's regions.
+        r.note(3, &attach(3, 2, &[rc(6, 6)]));
+        r.hosts.insert(PeerId(10), 5);
+        assert_eq!(r.route(&spawn(rc(1, 1))), Target::Nobody);
+        assert_eq!(r.route(&spawn(rc(6, 6))), Target::Host(3));
     }
 }

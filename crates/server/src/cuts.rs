@@ -201,6 +201,27 @@ pub fn park_for_exit<S: RegionSpawner>(
     stuck
 }
 
+/// What [`exit_world`] works with.
+pub struct ExitParams<'a, NowMs, NowTick> {
+    /// The region threads' outputs (their parks).
+    pub region_out: &'a Receiver<(RegionCoords, RegionOutput)>,
+    /// Wall ms on the manager's clock.
+    pub now_ms: NowMs,
+    /// The host's save cuts; `None` when nothing is saved (procedural worlds).
+    pub cuts: Option<CutWriter>,
+    /// The in-process world coordinator (`AllInOne`); `None` for a host whose
+    /// coordinator is another process, or a world without one.
+    pub coordinator: Option<CoordinatorThread>,
+    /// The process's fenced flag.
+    pub fenced: &'a Fenced,
+    /// How long the regions may take to park ([`EXIT_PARK_TIMEOUT`]).
+    pub park_timeout: Duration,
+    /// How long each last save may take.
+    pub save_timeout: Duration,
+    /// The world tick the exit's cut is taken at.
+    pub now_tick: NowTick,
+}
+
 /// The orderly exit, in one place: a fenced process saves nothing and parks
 /// nothing (its clients are refused, [`FENCED_REFUSAL`]; the coordinator stops
 /// without a last save); otherwise players and regions park ([`park_for_exit`]),
@@ -213,20 +234,12 @@ pub fn park_for_exit<S: RegionSpawner>(
 /// coordinator saves before the host's cut because the cut writer shuts the
 /// shared store down; both come after every park, so neither holds anything
 /// the other lacks. A coordinator save refused as fenced makes the exit fenced.
-/// `cuts` is `None` when nothing is saved (procedural worlds).
-#[allow(clippy::too_many_arguments)]
 pub fn exit_world<S: RegionSpawner>(
     manager: &mut WorldManager<S>,
-    region_out: &Receiver<(RegionCoords, RegionOutput)>,
-    now_ms: impl Fn() -> u64,
-    cuts: Option<CutWriter>,
-    coordinator: Option<CoordinatorThread>,
-    fenced: &Fenced,
-    park_timeout: Duration,
-    save_timeout: Duration,
-    now_tick: impl Fn() -> Tick,
+    params: ExitParams<'_, impl Fn() -> u64, impl Fn() -> Tick>,
     idle: impl FnMut(&mut WorldManager<S>),
 ) -> ServerExit {
+    let ExitParams { region_out, now_ms, cuts, coordinator, fenced, park_timeout, save_timeout, now_tick } = params;
     let fenced_now = fenced.is_set() || cuts.as_ref().is_some_and(|c| c.fenced().is_set());
     if fenced_now {
         manager.refuse_all_sessions(FENCED_REFUSAL);

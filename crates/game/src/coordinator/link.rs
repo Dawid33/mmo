@@ -11,6 +11,13 @@ pub trait WorldLink {
     fn send(&mut self, msg: HostMsg);
     fn recv(&mut self) -> Option<CoordMsg>;
     fn is_up(&self) -> bool;
+    /// The link's connection generation: it changes on every (re)connect. A host that
+    /// sees it change while [`WorldLink::is_up`] stayed true (the link dropped and came
+    /// back between two looks) re-attaches as after a down link. A link that never
+    /// reconnects (inline, in-process) keeps the default 0.
+    fn generation(&self) -> u64 {
+        0
+    }
     /// Drive a coordinator that runs in the caller's thread ([`InlineWorldLink`]); the
     /// host calls it before draining [`WorldLink::recv`]. A no-op for a real link.
     fn pump(&mut self, _now_ms: u64) {}

@@ -1045,6 +1045,90 @@ run-online: _dev-login-setup
     VOXEL_LOGIN_URL=$login_url VOXEL_LOGIN_EMAIL={{dev_email}} VOXEL_LOGIN_PASSWORD={{dev_password}} \
         RUST_BACKTRACE=1 ./target/debug/client debug online
 
+# ---- Split roles: world coordinator + region host (R2b) ---------------------------------
+
+# The world as two processes on the dev Postgres world: `coordinator` (history, claims,
+# world requests; no client edge, no regions) and `host` (regions, the client edge, save
+# cuts) dialing it over the service link. Dev secrets live under the git-ignored
+# target/dev-r2/: the shared service token (`service-token`) and the coordinator's
+# certificate pin (`coordinator.cert-sha256`, its cert and private key beside it).
+dev_r2_dir := "target/dev-r2"
+
+# Make target/dev-r2/service-token (random, mode 0600) unless it exists.
+_dev-r2-token:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p {{dev_r2_dir}}
+    if [ ! -s {{dev_r2_dir}}/service-token ]; then
+        (umask 077; head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' >{{dev_r2_dir}}/service-token)
+        echo "made {{dev_r2_dir}}/service-token"
+    fi
+
+# The world coordinator alone (VOXEL_ROLE=coordinator) for the dev Postgres world
+# (`just pg-up` first): serves hosts on 127.0.0.1:6480 and writes its pin to
+# target/dev-r2/coordinator.cert-sha256. Play region size.
+coordinator: _dev-r2-token
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export VOXEL_REGION_BLOCKS={{play_blocks}}
+    {{cap}} {{cargo}} build --bin server
+    VOXEL_ROLE=coordinator VOXEL_WORLD_DB={{dev_database_url}} \
+        VOXEL_SERVICE_TOKEN_FILE={{dev_r2_dir}}/service-token \
+        VOXEL_COORDINATOR_CERT_HASH_FILE={{dev_r2_dir}}/coordinator.cert-sha256 \
+        RUST_BACKTRACE=1 ./target/debug/server
+
+# A region host (VOXEL_ROLE=host) of the dev Postgres world: host `ordinal` of `hosts`
+# (static ownership), dialing the coordinator at 127.0.0.1:6480 (started first or later —
+# it waits for the pin); clients connect on 127.0.0.1:6466 as with `just server`.
+# Local player names unless VOXEL_AUTH=jwt is set (see `dev-r2`). Play region size.
+host ordinal="0" hosts="1": _dev-r2-token
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export VOXEL_REGION_BLOCKS={{play_blocks}}
+    {{cap}} {{cargo}} build --bin server
+    VOXEL_ROLE=host VOXEL_OWNERSHIP=static VOXEL_HOST_ORDINAL={{ordinal}} VOXEL_HOSTS={{hosts}} \
+        VOXEL_WORLD_DB={{dev_database_url}} \
+        VOXEL_SERVICE_TOKEN_FILE={{dev_r2_dir}}/service-token \
+        VOXEL_COORDINATOR_CERT_HASH_FILE={{dev_r2_dir}}/coordinator.cert-sha256 \
+        RUST_BACKTRACE=1 ./target/debug/server
+
+# The split world with login: the dev Postgres (`pg-up`), the `dev-login` setup and login
+# service, the coordinator (log target/dev-r2/coordinator.log) and, once it has written
+# its pin, host 0 in the foreground (VOXEL_AUTH=jwt, world `dev`). SIGTERMs the
+# coordinator and the login service on exit. Connect with `just run-online`-style login
+# (`client debug online`) or the login screens.
+dev-r2: pg-up _dev-login-setup _dev-r2-token
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export VOXEL_REGION_BLOCKS={{play_blocks}}
+    {{cap}} {{cargo}} build --bin server
+    pin={{dev_r2_dir}}/coordinator.cert-sha256
+    rm -f "$pin"
+    ./target/debug/login serve >target/dev-login/login.log 2>&1 </dev/null &
+    lpid=$!
+    cpid=""
+    trap 'echo "dev-r2: stopping the coordinator and the login service"; kill -TERM $cpid $lpid 2>/dev/null; wait $cpid $lpid 2>/dev/null || true' EXIT
+    VOXEL_ROLE=coordinator VOXEL_WORLD_DB={{dev_database_url}} \
+        VOXEL_SERVICE_TOKEN_FILE={{dev_r2_dir}}/service-token VOXEL_COORDINATOR_CERT_HASH_FILE="$pin" \
+        ./target/debug/server >{{dev_r2_dir}}/coordinator.log 2>&1 </dev/null &
+    cpid=$!
+    echo "dev-r2: login on http://127.0.0.1:8790 (target/dev-login/login.log), coordinator on 127.0.0.1:6480 ({{dev_r2_dir}}/coordinator.log)"
+    deadline=$(( SECONDS + {{online_wait_secs}} ))
+    until [ -s "$pin" ]; do
+        if ! kill -0 $cpid 2>/dev/null; then
+            echo "dev-r2: the coordinator exited; see {{dev_r2_dir}}/coordinator.log" >&2; exit 1
+        fi
+        if (( SECONDS >= deadline )); then
+            echo "dev-r2: no coordinator pin after {{online_wait_secs}} s; see {{dev_r2_dir}}/coordinator.log" >&2; exit 1
+        fi
+        sleep 0.5
+    done
+    VOXEL_ROLE=host VOXEL_OWNERSHIP=static VOXEL_HOST_ORDINAL=0 VOXEL_HOSTS=1 \
+        VOXEL_WORLD_DB={{dev_database_url}} \
+        VOXEL_SERVICE_TOKEN_FILE={{dev_r2_dir}}/service-token VOXEL_COORDINATOR_CERT_HASH_FILE="$pin" \
+        VOXEL_AUTH=jwt VOXEL_WORLD_ID=dev VOXEL_LOGIN_URL=http://127.0.0.1:8790 \
+        RUST_BACKTRACE=1 ./target/debug/server
+
 # Run exactly the tests a change touches, by crate + cargo-test arguments:
 #   just test-one game "--test it lod_streaming::pristine"
 #   just test-one client "--lib world_scale::"
@@ -1063,6 +1147,11 @@ test-pg *args:
 # Run the login tests against the dev Postgres (needs `just pg-up`).
 test-login-pg *args:
     MMO_TEST_DATABASE_URL=postgres://mmo:mmo@127.0.0.1:55432/postgres just test-one login "{{args}}"
+
+# The split-roles end-to-end tests (crates/server/tests/roles.rs, all slow): a coordinator
+# and a host over a real service link on localhost, against the dev Postgres (`pg-up`).
+test-r2:
+    MMO_TEST_DATABASE_URL=postgres://mmo:mmo@127.0.0.1:55432/postgres just test-one server "--test roles -- --include-ignored"
 
 # Region threading: a player walking across the seam between two regions that
 # run on different threads. Two layers, both tagged slow (so smoke / test-one /
