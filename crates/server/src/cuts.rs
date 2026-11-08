@@ -2,7 +2,8 @@
 //! cut is queued for commit at once (`StoreHandle::commit_cut` does not
 //! block), and each answer goes back to the manager — `cut_committed` clears
 //! what it carried, `cut_failed` keeps it for the next cut (nothing is lost).
-//! Commits are fenced ([`ClaimOnTouch`]).
+//! Commits are fenced ([`HostClaims`]): a refusal as fenced makes the whole
+//! process fenced (`Fenced`), and nothing more is written.
 
 use std::time::{Duration, Instant};
 
@@ -10,7 +11,7 @@ use crossbeam::channel::{Receiver, TryRecvError};
 use game::{CutId, RegionCoords, RegionOutput, RegionSpawner, Tick, WorldManager};
 use world_store::{CutCommitted, StoreError, StoreHandle};
 
-use crate::claim_on_touch::ClaimOnTouch;
+use crate::claims::{Fenced, HostClaims, ServerExit, FENCED_REFUSAL};
 
 struct Pending {
     id: CutId,
@@ -35,14 +36,14 @@ const EXIT_PARK_POLL: Duration = Duration::from_millis(20);
 
 /// The server's side of the save cuts: the store and the commits in flight.
 pub struct CutWriter {
-    claims: ClaimOnTouch,
+    claims: HostClaims,
     pending: Vec<Pending>,
     /// Commits failed in a row (reset by one that commits).
     failed_in_a_row: u32,
 }
 
 impl CutWriter {
-    pub fn new(claims: ClaimOnTouch) -> Self {
+    pub fn new(claims: HostClaims) -> Self {
         CutWriter { claims, pending: Vec::new(), failed_in_a_row: 0 }
     }
 
@@ -61,21 +62,11 @@ impl CutWriter {
     }
 
     /// Queue the manager's complete cut (if any) for commit, and hand every
-    /// answer that has come back to the manager. Never blocks (but for the
-    /// transitional first claim of a super-region no region load claimed —
-    /// `ClaimOnTouch`).
+    /// answer that has come back to the manager. Never blocks.
     pub fn pump<S: RegionSpawner>(&mut self, manager: &mut WorldManager<S>) {
         while let Some(cut) = manager.take_cut() {
             let (id, tick, regions, players) = (cut.id, cut.tick, cut.regions.len(), cut.players.len());
-            let reply = match self.claims.fence_for_cut(&cut) {
-                Ok(fence) => self.claims.store().commit_cut(cut, fence),
-                Err(e) => {
-                    // Not committed: the cut fails like a refused commit.
-                    let (tx, rx) = crossbeam::channel::bounded(1);
-                    let _ = tx.send(Err(e));
-                    rx
-                }
-            };
+            let reply = self.claims.commit_cut(cut);
             self.pending.push(Pending { id, tick, regions, players, queued: Instant::now(), reply });
         }
         let mut i = 0;
@@ -134,7 +125,25 @@ impl CutWriter {
         committed
     }
 
+    /// The exit when no last cut may be written (a region was given up, or
+    /// the host was fenced): commits already queued are drained and answered,
+    /// then the store is shut down. The world is as of its last committed cut.
+    pub fn finish_without_cut<S: RegionSpawner>(mut self, manager: &mut WorldManager<S>) {
+        self.pump(manager);
+        self.claims.store().clone().shutdown();
+    }
+
+    /// Whether this process was fenced.
+    pub fn fenced(&self) -> &Fenced {
+        self.claims.fenced()
+    }
+
     fn settle<S: RegionSpawner>(&mut self, manager: &mut WorldManager<S>, p: Pending, answer: Result<CutCommitted, StoreError>) {
+        if let Err(e) = &answer {
+            if self.claims.fenced().note(e) {
+                log::error!("[server] save cut {} was refused: {e}; this server was replaced and stops", p.id.0);
+            }
+        }
         match &answer {
             Ok(_) => self.failed_in_a_row = 0,
             Err(e) => {
@@ -189,6 +198,61 @@ pub fn park_for_exit<S: RegionSpawner>(
         stuck.len()
     );
     stuck
+}
+
+/// The orderly exit, in one place: a fenced process saves nothing and parks
+/// nothing (its clients are refused, [`FENCED_REFUSAL`]); otherwise players
+/// and regions park ([`park_for_exit`]) and the last cut is committed — unless
+/// a region was given up: its state is only as of its last snapshot, and a
+/// cut written without it could be inconsistent with what it left in flight,
+/// so the world stays as of the last periodic cut. `cuts` is `None` when
+/// nothing is saved (procedural worlds).
+pub fn exit_world<S: RegionSpawner>(
+    manager: &mut WorldManager<S>,
+    region_out: &Receiver<(RegionCoords, RegionOutput)>,
+    now_ms: impl Fn() -> u64,
+    cuts: Option<CutWriter>,
+    fenced: &Fenced,
+    park_timeout: Duration,
+    save_timeout: Duration,
+    now_tick: impl Fn() -> Tick,
+    idle: impl FnMut(&mut WorldManager<S>),
+) -> ServerExit {
+    let fenced_now = fenced.is_set() || cuts.as_ref().is_some_and(|c| c.fenced().is_set());
+    if fenced_now {
+        manager.refuse_all_sessions(FENCED_REFUSAL);
+        match cuts {
+            Some(cuts) => cuts.finish_without_cut(manager),
+            None => {}
+        }
+        log::error!("[server] fenced: another process owns this server's super-regions; nothing more is saved");
+        return ServerExit::Fenced;
+    }
+    let given_up = park_for_exit(manager, region_out, now_ms, park_timeout, idle);
+    let Some(mut cuts) = cuts else { return ServerExit::Clean };
+    if !given_up.is_empty() {
+        log::error!(
+            "[server] no exit save: {} region(s) did not park ({given_up:?}); the world restarts from its last committed save",
+            given_up.len()
+        );
+        cuts.finish_without_cut(manager);
+        return ServerExit::Clean;
+    }
+    // A fence refusal while parking (a cut answered late) still counts.
+    cuts.pump(manager);
+    if cuts.fenced().is_set() {
+        cuts.finish_without_cut(manager);
+        return ServerExit::Fenced;
+    }
+    let fenced = cuts.fenced().clone();
+    if cuts.finish(manager, now_tick(), save_timeout) {
+        log::info!("[server] world saved");
+    } else if fenced.is_set() {
+        return ServerExit::Fenced;
+    } else {
+        log::error!("[server] the world was not saved at exit; it restarts from its last committed save");
+    }
+    ServerExit::Clean
 }
 
 fn settle<S: RegionSpawner>(manager: &mut WorldManager<S>, p: Pending, answer: Result<CutCommitted, StoreError>) {

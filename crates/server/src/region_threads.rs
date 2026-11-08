@@ -40,7 +40,7 @@ pub struct ThreadRegionSpawner {
     /// that fails stops the region (`RegionOutput::LoadFailed`): it is never
     /// regenerated over stored data. Runners also seed the halo of stored
     /// neighbours from it (`RegionInput::SeedHaloFromStore`).
-    store: Option<crate::claim_on_touch::ClaimOnTouch>,
+    store: Option<crate::claims::HostClaims>,
     /// Every region thread loads and pins the forged tiles of its 3x3
     /// neighbourhood before it is built and holds them for its life (its own
     /// generation and its halo seeds of never-run neighbours read them). A
@@ -95,7 +95,7 @@ impl ThreadRegionSpawner {
 
     /// Restore never-run regions from the world store.
     /// Loads are fenced through `store` (shared with the cut writer).
-    pub fn with_store(mut self, store: crate::claim_on_touch::ClaimOnTouch) -> Self {
+    pub fn with_store(mut self, store: crate::claims::HostClaims) -> Self {
         self.store = Some(store);
         self
     }
@@ -146,7 +146,10 @@ impl RegionSpawner for ThreadRegionSpawner {
                     Ok(stored) => stored,
                     Err(e) => {
                         log::error!("[region {},{}] cannot load from the world store: {e}", id.x, id.z);
-                        return fail(e.to_string());
+                        // A fenced host is replaced for good (the claims set the
+                        // process-wide flag); the region just does not run.
+                        let why = if matches!(e, world_store::StoreError::Fenced { .. }) { "fenced".to_string() } else { e.to_string() };
+                        return fail(why);
                     }
                 };
                 let from_store = stored.is_some();

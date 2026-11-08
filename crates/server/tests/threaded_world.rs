@@ -13,7 +13,7 @@ use game::{
     ServerEvent, ServerPacket, SubChunk, WorldManager, FLIP_HYSTERESIS, REGION_SIZE, SPAWN_REGION,
     UNLOAD_GRACE_MS,
 };
-use server::claim_on_touch::ClaimOnTouch;
+use server::claims::HostClaims;
 use server::region_threads::ThreadRegionSpawner;
 
 const REGION_STARTUP_BUDGET: Duration = Duration::from_secs(10);
@@ -589,9 +589,9 @@ fn open_store(url: &world_store::StoreUrl) -> world_store::StoreHandle {
 /// and the world clock continues from the last committed cut's tick.
 /// Returns the rig and its one fence, shared by its loads and its exit's
 /// commit as `server::run` shares it.
-fn stored_rig(store: &world_store::StoreHandle) -> (Rig, ClaimOnTouch) {
+fn stored_rig(store: &world_store::StoreHandle) -> (Rig, HostClaims) {
     let info = store.world_info().unwrap();
-    let claims = ClaimOnTouch::new(store.clone());
+    let claims = HostClaims::claim_around(store.clone(), SPAWN_REGION, 3).unwrap();
     let spawner = ThreadRegionSpawner::with_region_generator(std::sync::Arc::new(|_| lightweight_columns()))
         .with_store(claims.clone())
         .with_clock(game::WorldClock::starting_at(0, info.world_tick), Instant::now());
@@ -604,7 +604,7 @@ fn stored_rig(store: &world_store::StoreHandle) -> (Rig, ClaimOnTouch) {
 impl Rig {
     /// The server's orderly exit: every player parked, then every region,
     /// then the last save cut committed through `claims` (its store shut down after).
-    fn exit_into(&mut self, claims: ClaimOnTouch) {
+    fn exit_into(&mut self, claims: HostClaims) {
         use game::RegionSpawner;
         self.manager.park_all_players(self.now_ms());
         self.manager.shutdown_all();
@@ -852,9 +852,8 @@ fn body_crosses_seam_on_real_threads() {
         players: Vec::new(),
         history: None,
     };
-    let claims = ClaimOnTouch::new(store.clone());
-    let fence = claims.fence_for_cut(&cut).unwrap();
-    store.commit_cut(cut, fence).recv().unwrap().expect("the region is stored");
+    let claims = HostClaims::claim_around(store.clone(), SPAWN_REGION, 3).unwrap();
+    claims.commit_cut(cut).recv().unwrap().expect("the region is stored");
     drop(region);
 
     let generate: server::region_threads::SharedRegionGenerator = std::sync::Arc::new(seam_floor_columns);
@@ -945,7 +944,7 @@ fn body_crosses_seam_on_real_threads() {
 fn store_read_failure_stops_the_region_on_real_threads() {
     let (dir, url) = temp_store("load-failure");
     let store = open_store(&url);
-    let dead = store.clone();
+    let dead = HostClaims::claim_around(store.clone(), SPAWN_REGION, 1).unwrap();
     store.shutdown();
     let generated = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let counter = generated.clone();
@@ -953,7 +952,7 @@ fn store_read_failure_stops_the_region_on_real_threads() {
         counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         lightweight_columns()
     }))
-    .with_store(ClaimOnTouch::new(dead));
+    .with_store(dead);
     let mut rig = Rig::with_spawner(spawner, |_| lightweight_columns());
     rig.event(ServerEvent::connected(0));
     let mut log = Vec::new();

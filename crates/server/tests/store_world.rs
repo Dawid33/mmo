@@ -16,7 +16,7 @@ use game::{
     BlockId, ClientId, InlineLodBuilder, InlineSpawner, LodBuilder, RegionCoords, RegionOutput, RegionSpawner,
     ServerEvent, ServerPacket, WorldManager, SPAWN_REGION,
 };
-use server::claim_on_touch::ClaimOnTouch;
+use server::claims::HostClaims;
 use server::player_store::{PlayerStore, StorePlayers};
 use server::world_file::{self, open_world, WorldSource};
 use worldgen::forge::ForgeParams;
@@ -49,7 +49,7 @@ fn source_for(world_file: &Path) -> WorldSource {
 struct Core {
     manager: WorldManager<InlineSpawner>,
     /// The rig's one fence (loads at open, the exit's commit), as `server::run` shares it.
-    claims: ClaimOnTouch,
+    claims: HostClaims,
     region_out: Receiver<(RegionCoords, RegionOutput)>,
     _packets: Receiver<(Option<ClientId>, ServerPacket)>,
 }
@@ -67,7 +67,7 @@ impl Core {
         store: &world_store::StoreHandle,
         generate: Box<dyn FnMut(RegionCoords) -> Vec<(game::ColumnCoords, game::Column)> + Send>,
     ) -> Core {
-        let claims = ClaimOnTouch::new(store.clone());
+        let claims = HostClaims::claim_around(store.clone(), SPAWN_REGION, 3).unwrap();
         let mut regions = std::collections::BTreeMap::new();
         for rc in store.stored_regions().unwrap().into_keys() {
             regions.insert(rc, claims.load_region(rc).unwrap().expect("listed, so stored"));
@@ -372,8 +372,7 @@ fn stale_world_map_is_rebuilt_at_start() {
         players: Vec::new(),
         history: Some(history.clone()),
     };
-    let fence = ClaimOnTouch::new(store.clone()).fence_for_cut(&cut).unwrap();
-    store.commit_cut(cut, fence).recv().unwrap().expect("the cut commits");
+    store.commit_cut(cut, world_store::Fence::default()).recv().unwrap().expect("the cut commits");
     store.shutdown();
     let url = world_store::StoreUrl::Sqlite(dir.join("terrain.sqlite"));
     let old_row: String = world_store::encode(1, &map).iter().map(|b| format!("{b:02x}")).collect();
@@ -491,7 +490,14 @@ fn damaged_tile_run(tag: &str, pick: impl Fn(&ForgedWorld) -> (RegionCoords, Til
             counted.fetch_add(1, Ordering::SeqCst);
             worldgen::prefetch_region_forged(&pre_world, rc)
         }))
-        .with_store(ClaimOnTouch::new(store.clone()));
+        .with_store(
+            HostClaims::claim_srs(
+                store.clone(),
+                0,
+                [failing, healthy].map(|rc| game::super_region_of(rc, store.super_region_regions())).to_vec(),
+            )
+            .unwrap(),
+        );
     let (out, outputs) = unbounded();
     let to_bad = spawner.spawn(failing, RegionSeed::Deferred(None), out.clone());
     let to_good = spawner.spawn(healthy, RegionSeed::Deferred(None), out);
@@ -623,7 +629,7 @@ fn exit_saves_a_region_that_parks_late() {
         world_store::OpenMode::Writer,
     )
     .unwrap();
-    assert!(ClaimOnTouch::new(store.clone()).load_region(SPAWN_REGION).unwrap().is_some(), "the late region was saved");
+    assert!(HostClaims::claim_around(store.clone(), SPAWN_REGION, 0).unwrap().load_region(SPAWN_REGION).unwrap().is_some(), "the late region was saved");
     let (again, record) = StorePlayers(store.clone()).resolve(&token).unwrap();
     assert_eq!(again, player);
     assert_eq!(record.expect("the player's record was saved").region, SPAWN_REGION);
@@ -631,14 +637,34 @@ fn exit_saves_a_region_that_parks_late() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A region that never parks at exit is given up after the park timeout and
-/// does not stop the rest from being saved.
+/// Runs `core`'s next periodic cut to its commit: begin, run through the cut
+/// slot, hand it to `writer`, wait for the answer. Returns the cut's tick.
+fn periodic_cut(core: &mut Core, writer: &mut server::cuts::CutWriter) -> game::Tick {
+    let now = core.manager.spawner_mut().world_tick();
+    let id = core.manager.begin_cut(now).expect("no cut pending");
+    let (_, tick) = core.manager.pending_cut().expect("the cut waits for its slot");
+    core.tick(game::SAVE_CUT_LEAD_TICKS as usize + 3);
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        writer.pump(&mut core.manager);
+        if writer.in_flight() == 0 && core.manager.pending_cut().is_none() {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "cut {id:?} did not settle");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    tick
+}
+
+/// A region that never parks at exit is given up after the park timeout, and
+/// then NO exit cut is written (a cut without it could disagree with what it
+/// left in flight): the store keeps the last periodic cut.
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
-fn exit_saves_the_rest_when_a_region_never_parks() {
+fn exit_with_given_up_region_skips_exit_cut() {
     use game::ClientPacket;
     let dir = scratch("never-parks");
-    let (store, token, player) = bare_store(&dir);
+    let (store, _token, player) = bare_store(&dir);
     let mut core = Core::open_with(&store, Box::new(flat_floor));
     core.manager.handle_server_event(ServerEvent::ClientConnected { client: 0, player, record: None }, 0);
     let east = RegionCoords::new(SPAWN_REGION.x + 1, SPAWN_REGION.z);
@@ -647,25 +673,157 @@ fn exit_saves_the_rest_when_a_region_never_parks() {
     let mut running = core.manager.running_regions();
     running.sort();
     assert!(running.contains(&SPAWN_REGION) && running.contains(&east), "{running:?}");
+    let mut writer = server::cuts::CutWriter::new(core.claims.clone());
+    let last_periodic = periodic_cut(&mut core, &mut writer);
+    assert_eq!(store.world_info().unwrap().world_tick, last_periodic, "the periodic cut is in the store");
+    core.tick(5);
     // East never reads another input: it never parks.
     core.manager.spawner_mut().hold_inputs(east, u32::MAX);
     let Core { mut manager, claims, region_out, _packets } = core;
-    let stuck = server::cuts::park_for_exit(&mut manager, &region_out, || 0, Duration::from_millis(300), |m| {
-        m.spawner_mut().pump();
-    });
-    assert_eq!(stuck, vec![east]);
     let now = manager.spawner_mut().world_tick();
-    let writer = server::cuts::CutWriter::new(claims);
-    assert!(writer.finish(&mut manager, now, Duration::from_secs(10)), "the rest is saved");
+    assert!(now > last_periodic, "the world moved on since the last cut");
+    let exit = server::cuts::exit_world(
+        &mut manager,
+        &region_out,
+        || 0,
+        Some(writer),
+        claims.fenced(),
+        Duration::from_millis(300),
+        Duration::from_secs(10),
+        || now,
+        |m| m.spawner_mut().pump(),
+    );
+    assert_eq!(exit, server::claims::ServerExit::Clean);
     let store = world_store::StoreHandle::open(
         &world_store::StoreUrl::Sqlite(dir.join("w.sqlite")),
         world_store::Dials::BUILT,
         world_store::OpenMode::Writer,
     )
     .unwrap();
-    assert!(ClaimOnTouch::new(store.clone()).load_region(SPAWN_REGION).unwrap().is_some(), "the region that parked was saved");
-    let (_, record) = StorePlayers(store.clone()).resolve(&token).unwrap();
-    assert_eq!(record.expect("the player's record was saved").region, SPAWN_REGION);
+    assert_eq!(store.world_info().unwrap().world_tick, last_periodic, "no exit cut was committed");
     store.shutdown();
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A throwaway Postgres database from `MMO_TEST_DATABASE_URL` (`just test-pg`
+/// sets it); `None` (with a message) when it is unset.
+struct PgDb {
+    admin: String,
+    name: String,
+    url: String,
+}
+
+impl PgDb {
+    fn create() -> Option<PgDb> {
+        use sqlx::Connection;
+        let Some(admin) = std::env::var("MMO_TEST_DATABASE_URL").ok().filter(|s| !s.is_empty()) else {
+            eprintln!("skipped: MMO_TEST_DATABASE_URL unset");
+            return None;
+        };
+        let name = format!("mmo_srv_test_{:x}_{}", std::process::id(), std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            let mut c = sqlx::PgConnection::connect(&admin).await.expect("connect to MMO_TEST_DATABASE_URL");
+            sqlx::query(&format!("CREATE DATABASE {name}")).execute(&mut c).await.expect("create database");
+        });
+        let (base, _) = admin.rsplit_once('/').expect("a url with a database name");
+        let url = format!("{base}/{name}");
+        Some(PgDb { admin, name, url })
+    }
+
+    fn drop_db(self) {
+        use sqlx::Connection;
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            let mut c = sqlx::PgConnection::connect(&self.admin).await.expect("connect");
+            let _ = sqlx::query(&format!("DROP DATABASE IF EXISTS {} WITH (FORCE)", self.name)).execute(&mut c).await;
+        });
+    }
+}
+
+/// The fenced-host run on the world store at `url` (`thief`: how a second
+/// process opens it): another claim of the host's super-regions fences it;
+/// its next cut and region load are refused and write nothing, the process
+/// is fenced, and its exit refuses its clients, parks and saves nothing and
+/// maps to exit status 3.
+fn fenced_host_run(url: &world_store::StoreUrl, thief: impl FnOnce(&world_store::StoreHandle) -> world_store::StoreHandle) {
+    let store = world_store::StoreHandle::open(url, world_store::Dials::BUILT, world_store::OpenMode::Writer).unwrap();
+    materials();
+    let token = server::player_store::PlayerKey::Online(game::PlayerToken::generate([9; game::PLAYER_TOKEN_BYTES]));
+    let (player, _) = StorePlayers(store.clone()).resolve(&token).unwrap();
+    let mut core = Core::open_with(&store, Box::new(flat_floor));
+    core.manager.handle_server_event(ServerEvent::ClientConnected { client: 0, player, record: None }, 0);
+    core.tick(3);
+    let mut writer = server::cuts::CutWriter::new(core.claims.clone());
+    periodic_cut(&mut core, &mut writer);
+    assert!(!core.claims.fenced().is_set(), "not fenced while it holds its claims");
+
+    // A second process claims the same ordinal's super-regions.
+    let srs: Vec<_> = core.claims.fence().epochs.keys().copied().collect();
+    let thief = thief(&store);
+    thief.claim_super_regions(core.claims.fence().owner, srs).expect("the second claim");
+    let tick_at_claim = store.world_info().unwrap().world_tick;
+
+    // The next cut is refused, nothing is written, the process is fenced.
+    let now = core.manager.spawner_mut().world_tick();
+    core.manager.begin_cut(now).expect("no cut pending");
+    core.tick(game::SAVE_CUT_LEAD_TICKS as usize + 3);
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while !core.claims.fenced().is_set() {
+        writer.pump(&mut core.manager);
+        assert!(std::time::Instant::now() < deadline, "the fenced commit was never refused");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(store.world_info().unwrap().world_tick, tick_at_claim, "the refused cut wrote nothing");
+    let err = core.claims.load_region(SPAWN_REGION).err().expect("a fenced load is refused");
+    assert!(matches!(err, world_store::StoreError::Fenced { .. }), "{err}");
+
+    // The exit: no park, no save, clients refused, status 3.
+    let Core { mut manager, claims, region_out, _packets } = core;
+    let exit = server::cuts::exit_world(
+        &mut manager,
+        &region_out,
+        || 0,
+        Some(writer),
+        claims.fenced(),
+        Duration::from_secs(5),
+        Duration::from_secs(5),
+        || panic!("a fenced exit takes no last cut"),
+        |_| {},
+    );
+    assert_eq!(exit, server::claims::ServerExit::Fenced);
+    assert_eq!(exit.code(), 3);
+    assert_eq!(server::claims::EXIT_FENCED, 3);
+    assert!(!manager.running_regions().is_empty(), "nothing was parked");
+    let refused = _packets.try_iter().any(|(to, p)| {
+        to == Some(0) && matches!(&p, ServerPacket::Refused(why) if why == server::claims::FENCED_REFUSAL)
+    });
+    assert!(refused, "the client is told the server was replaced");
+    manager.shutdown_all();
+    thief.shutdown();
+}
+
+/// Self-fencing on SQLite: the second claim comes through the same handle
+/// (SQLite has one process per world).
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn fenced_host_stops_and_writes_nothing_sqlite() {
+    let dir = scratch("fenced-sqlite");
+    fenced_host_run(&world_store::StoreUrl::Sqlite(dir.join("w.sqlite")), |store| store.clone());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Self-fencing on Postgres (`just test-pg`-style URL in `MMO_TEST_DATABASE_URL`;
+/// skipped without): the second claim is a second connection to the database.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn fenced_host_stops_and_writes_nothing() {
+    let Some(db) = PgDb::create() else { return };
+    let url = world_store::StoreUrl::Postgres(db.url.clone());
+    let second = url.clone();
+    fenced_host_run(&url, move |_| {
+        world_store::StoreHandle::open(&second, world_store::Dials::BUILT, world_store::OpenMode::Writer).unwrap()
+    });
+    db.drop_db();
 }

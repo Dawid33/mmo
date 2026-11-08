@@ -1,5 +1,5 @@
 use server::run;
 
 fn main() {
-    run();
+    std::process::exit(run().code());
 }

@@ -1320,3 +1320,43 @@ fn record_of_a_restore_into_a_failed_region_is_kept() {
     assert_eq!(back.inventory.slots[MARK_SLOT], Some(MARK_STACK));
 }
 
+
+/// Ownership (`set_ownership`): a region another host owns is never started
+/// here; Play into it is refused `RegionUnavailable` and nothing is spawned.
+#[test]
+fn non_owned_region_is_unavailable() {
+    crate::common::install_real_block_props();
+    let s = 1; // every region its own super-region
+    let mine = game::rendezvous_owner(game::super_region_of(SPAWN_REGION, s), 2);
+    let ownership = game::Ownership::Static { ordinal: mine, hosts: 2 };
+    let target = (-1..=1)
+        .flat_map(|x| (-1..=1).map(move |z| RegionCoords::new(x, z)))
+        .find(|rc| !ownership.owns(*rc, s))
+        .expect("a 3x3 block has a region the other of two hosts owns");
+    let mut h = floored_harness();
+    h.manager.set_ownership(ownership, s);
+    h.manager.set_world_map(game::WorldMap {
+        origin: RegionCoords::new(-1, -1),
+        width: 3,
+        height: 3,
+        tiles: (0..9).map(|_| play_tile()).collect(),
+        rock_names: vec![],
+        region_types: vec![],
+    });
+    h.event(session(0, 0, None), 0);
+    h.drain_packets();
+    assert!(h.manager.is_unavailable(target), "a region another host owns is unavailable");
+    assert!(!h.manager.is_unavailable(SPAWN_REGION));
+    h.event(ServerEvent::ClientPacket(ClientPacket::PlayRegion(target), 0), 10);
+    h.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(target), 0), 10);
+    let refused = h.drain_packets().into_iter().any(|(to, p)| {
+        to == Some(0) && matches!(p, ServerPacket::PlayRefused(rc, game::PlayRefusal::RegionUnavailable) if rc == target)
+    });
+    assert!(refused, "Play into a region another host owns is refused RegionUnavailable");
+    assert!(!h.manager.running_regions().contains(&target), "nothing was spawned for it");
+    // No retry timer: world time does not make it available.
+    h.manager.maintain(1_000_000);
+    h.settle(1_000_000);
+    assert!(h.manager.is_unavailable(target));
+    assert!(!h.manager.running_regions().contains(&target));
+}

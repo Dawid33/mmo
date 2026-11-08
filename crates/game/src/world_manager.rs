@@ -663,6 +663,11 @@ pub struct WorldManager<S: RegionSpawner> {
     /// return there are refused `RegionUnavailable`, arrivals wait in the
     /// mailbox). Never regenerated over stored data.
     unavailable: BTreeMap<RegionCoords, crate::Tick>,
+    /// Which regions this process simulates, and the super-region side the
+    /// policy groups them by (`set_ownership`). A region it does not own is
+    /// never started here and counts as unavailable (no retry timer: the
+    /// owning process serves it).
+    ownership: (crate::Ownership, u32),
     /// The record a body's creation carries (a move's `CreateClientAt`, a
     /// restore's `RestorePlayer`), by client, with its target region: the only
     /// copy until the target applies the creation (its `EventProcessed`).
@@ -829,6 +834,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             items_destroyed: 0,
             clock_ms: 0,
             unavailable: BTreeMap::new(),
+            ownership: (crate::Ownership::AllInOne, crate::DEFAULT_SUPER_REGION_REGIONS),
             creating: BTreeMap::new(),
             calendar_day: None,
             sites_key: Vec::new(),
@@ -2276,7 +2282,7 @@ impl<S: RegionSpawner> WorldManager<S> {
         }
         let carried: BTreeMap<RegionCoords, u64> = cut.regions.iter().map(|(rc, (_, seq))| (*rc, *seq)).collect();
         let world_cut = WorldCut {
-            host: 0,
+            host: self.ownership.0.ordinal(),
             id: cut.id,
             tick: cut.tick,
             regions: cut.regions.into_iter().map(|(rc, (p, _))| (rc, p)).collect(),
@@ -2841,10 +2847,31 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.perf.lod_submitted += 1;
     }
 
-    /// Whether `rc` is unavailable now: its stored state could not be read
-    /// and its retry tick has not come ([`STORE_LOAD_RETRY_SECS`]).
+    /// Ends every session with `Refused(why)` (the server edge closes the
+    /// connections) and changes nothing else: for a process that stops
+    /// serving at once (fenced) and saves nothing.
+    pub fn refuse_all_sessions(&mut self, why: &str) {
+        for client in self.sessions.keys().copied() {
+            let _ = self.out.send((Some(client), ServerPacket::Refused(why.to_string())));
+        }
+    }
+
+    /// Which regions this process simulates (default: all), with `s` regions
+    /// per super-region side. Set before the first session.
+    pub fn set_ownership(&mut self, ownership: crate::Ownership, s: u32) {
+        self.ownership = (ownership, s);
+    }
+
+    /// Whether this process owns `rc` (another process simulates it if not).
+    pub fn owns(&self, rc: RegionCoords) -> bool {
+        self.ownership.0.owns(rc, self.ownership.1)
+    }
+
+    /// Whether `rc` is unavailable now: another process owns it, or its
+    /// stored state could not be read and its retry tick has not come
+    /// ([`STORE_LOAD_RETRY_SECS`]).
     pub fn is_unavailable(&self, rc: RegionCoords) -> bool {
-        self.unavailable.get(&rc).is_some_and(|&retry| self.spawner.world_tick() < retry)
+        !self.owns(rc) || self.unavailable.get(&rc).is_some_and(|&retry| self.spawner.world_tick() < retry)
     }
 
     /// The regions that are unavailable now (tests, the `[server]` line).
@@ -2943,6 +2970,10 @@ impl<S: RegionSpawner> WorldManager<S> {
 
     fn ensure_running(&mut self, rc: RegionCoords) {
         if self.regions.contains_key(&rc) {
+            return;
+        }
+        if !self.owns(rc) {
+            log::debug!("[server] {rc:?} is owned by another host: not started");
             return;
         }
         if let Some(&retry) = self.unavailable.get(&rc) {

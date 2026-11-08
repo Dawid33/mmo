@@ -128,7 +128,7 @@ fn build_server_runtime(worker_threads: usize) -> tokio::runtime::Runtime {
 }
 
 pub mod auth_edge;
-pub mod claim_on_touch;
+pub mod claims;
 pub mod cuts;
 pub mod lod_workers;
 pub mod perf;
@@ -460,7 +460,7 @@ async fn refuse_quic(connection: &quinn::Connection, why: &str) {
     connection.close(1u32.into(), b"refused");
 }
 
-pub fn run() {
+pub fn run() -> claims::ServerExit {
     game::perf::pin_origin();
     // Per-entry undo verification is Full by default (HASH_MODE=delta|off
     // trades it for speed); client/server desync is checked by the
@@ -507,6 +507,12 @@ pub fn run() {
     let mut opened = world_file::open_world(&world_source, &worldgen::forge::ForgeParams::default())
         .unwrap_or_else(|e| fatal(&e));
     let store = opened.store.clone();
+    // Which regions this process simulates, and the super-region side that
+    // decides it: a bad setting stops the start, naming the variable.
+    let ownership = game::Ownership::from_env().unwrap_or_else(|e| fatal(&e));
+    let super_region_regions = claims::super_region_regions_from(std::env::var(claims::SUPER_REGION_REGIONS_ENV).ok().as_deref())
+        .unwrap_or_else(|e| fatal(&e));
+    info!("[server] ownership: {ownership:?}, {super_region_regions} regions per super-region side");
     let players: player_store::SharedPlayerStore = match &store {
         None => player_store::shared(player_store::MemoryPlayerStore::default()),
         Some(store) => player_store::shared(player_store::StorePlayers(store.clone())),
@@ -612,9 +618,20 @@ pub fn run() {
     let mut spawner = region_threads::ThreadRegionSpawner::with_generator(region_generator, halo_generator)
         .with_prefetch(std::sync::Arc::new(worldgen::prefetch_region))
         .with_clock(world_clock, start);
-    // Region loads and cut commits are fenced; until Task 3 claims at start,
-    // one lazily claiming fence is shared by both (`claim_on_touch`).
-    let claims = store.clone().map(claim_on_touch::ClaimOnTouch::new);
+    // Region loads and cut commits are fenced: the super-regions this process
+    // owns are claimed now, once (procedural worlds keep nothing: no claims).
+    // One claim is shared by the region threads and the cut writer.
+    let claims = store.clone().map(|store| {
+        let extent = world_map.as_ref().map(game::WorldMap::extent);
+        let claimed = claims::HostClaims::claim(store, ownership, extent, super_region_regions).unwrap_or_else(|e| fatal(&e));
+        info!(
+            "[server] claimed {} super-regions as host {}",
+            claimed.fence().epochs.len(),
+            claimed.fence().owner
+        );
+        claimed
+    });
+    let fenced = claims.as_ref().map(|c| c.fenced().clone()).unwrap_or_default();
     if let Some(claims) = &claims {
         spawner = spawner.with_store(claims.clone());
     }
@@ -632,6 +649,7 @@ pub fn run() {
         lod_builder,
         lod_result_recv,
     );
+    manager.set_ownership(ownership, super_region_regions);
 
     // The world map (stored with the forged world: per-region tile
     // summaries); procedural worlds have none.
@@ -707,6 +725,10 @@ pub fn run() {
             info!("[server] single-player: {why}, exiting");
             break 'main;
         }
+        if fenced.is_set() {
+            log::error!("[server] fenced: another process claimed this server's super-regions; stopping");
+            break 'main;
+        }
         if stop_signal.load(std::sync::atomic::Ordering::SeqCst) {
             info!("[server] stop signal: saving the world and exiting");
             break 'main;
@@ -735,31 +757,36 @@ pub fn run() {
 
     // Orderly exit: park every player (regions answer `ParkPlayer` before
     // `Shutdown`), then everything else; a region that does not park within
-    // `EXIT_PARK_TIMEOUT` is given up so the rest is still saved.
-    cuts::park_for_exit(
+    // `EXIT_PARK_TIMEOUT` is given up, and then no last cut is written (the
+    // world restarts from its last periodic save). A fenced process parks and
+    // saves nothing: its clients are refused and it exits `EXIT_FENCED`.
+    let had_sessions = manager.depths().sessions > 0;
+    let outcome = cuts::exit_world(
         &mut manager,
         &region_out_recv,
         || start.elapsed().as_millis() as u64,
+        cuts,
+        &fenced,
         cuts::EXIT_PARK_TIMEOUT,
+        EXIT_SAVE_TIMEOUT,
+        || world_clock.tick_at(start.elapsed().as_millis() as u64),
         |_| {},
     );
-    // Every region has parked (or been given up): the last cut is complete at
-    // once, and holds every player (parked) and the history (its people are
-    // back in it).
-    if let Some(cuts) = cuts {
-        let now = world_clock.tick_at(start.elapsed().as_millis() as u64);
-        if cuts.finish(&mut manager, now, EXIT_SAVE_TIMEOUT) {
-            info!("[server] world saved");
-        } else {
-            log::error!("[server] the world was not saved at exit; it restarts from its last committed save");
-        }
+    if outcome == claims::ServerExit::Fenced && had_sessions {
+        // The refusals are on their way out through the writer task.
+        std::thread::sleep(FENCED_EXIT_FLUSH);
     }
     #[cfg(feature = "pyroscope")]
     if let Some(agent) = agent_running {
         let agent_ready = agent.stop().unwrap();
         agent_ready.shutdown();
     }
+    outcome
 }
+
+/// How long a fenced server waits, before it exits, for its clients'
+/// `Refused` packets to leave the writer task.
+const FENCED_EXIT_FLUSH: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// How often the main loop starts a save cut of the world (regions, players,
 /// history, the world tick and what is in flight, at one world tick) into the

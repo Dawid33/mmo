@@ -371,7 +371,6 @@ pub fn install_world(opened: &mut OpenedWorld) -> Option<game::WorldMap> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::claim_on_touch::ClaimOnTouch;
 
     fn scratch(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("mmo-world-file-{}-{name}", std::process::id()));
@@ -514,8 +513,7 @@ mod tests {
             players: Vec::new(),
             history: Some(game::history::persist::encode(history)),
         };
-        let fence = ClaimOnTouch::new(store.clone()).fence_for_cut(&cut).unwrap();
-        store.commit_cut(cut, fence).recv().unwrap().expect("the cut commits");
+        store.commit_cut(cut, world_store::Fence::default()).recv().unwrap().expect("the cut commits");
     }
 
     #[test]
@@ -558,8 +556,7 @@ mod tests {
             players: Vec::new(),
             history: Some(bytes),
         };
-        let fence = ClaimOnTouch::new(store.clone()).fence_for_cut(&cut).unwrap();
-        store.commit_cut(cut, fence).recv().unwrap().expect("the cut commits");
+        store.commit_cut(cut, world_store::Fence::default()).recv().unwrap().expect("the cut commits");
         let err = ensure_history(&store, &map, None).err().expect("refused");
         assert!(err.contains("history"), "{err}");
         store.shutdown();
