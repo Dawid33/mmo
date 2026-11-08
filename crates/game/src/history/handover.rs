@@ -398,7 +398,8 @@ impl History {
     /// are the truth for the living: each present living person is embodied where their
     /// body stands (their abstract home kept, their journey held there), nothing spawned.
     /// The history is the truth for the dead: a present person dead, unknown, or embodied
-    /// in another listed region already gets a `DespawnPerson` (returned, not queued).
+    /// in another listed region already gets a `DespawnPerson` (returned, not queued), and
+    /// a present traveller whose journey is held there gets its `WalkOut` again.
     /// Residents with no body stay abstract until their region next starts.
     pub fn reattach_regions(&mut self, regions: &[(RegionCoords, Vec<(PersonId, [f32; 3])>)]) -> Vec<Directive> {
         for (rc, present) in regions {
@@ -425,8 +426,28 @@ impl History {
                 }
             }
             self.note_positions(present.iter().filter(|(p, _)| self.embodied_in(*p) == Some(*rc)).copied().collect());
+            despawn.extend(self.walk_out_reattached(*rc, &seen));
         }
         despawn
+    }
+
+    /// The travellers present in reattached `rc` whose journey is held there walk on
+    /// toward its next route region again: a `WalkOut` decided before the attach may
+    /// never have reached the body (the host drops what it receives ahead of the
+    /// attach), and walking out again a body already walking that way changes nothing.
+    fn walk_out_reattached(&self, rc: RegionCoords, present: &BTreeSet<PersonId>) -> Vec<Directive> {
+        let mut out = Vec::new();
+        for &p in present {
+            if self.embodied_in(p) != Some(rc) {
+                continue;
+            }
+            let Some(Location::Journey(j)) = self.people.get(&p).map(|q| q.home_location) else { continue };
+            let Some(jr) = self.journeys.get(&j).filter(|jr| jr.held_in == Some(rc)) else { continue };
+            if let Some(&next) = jr.route.get(jr.leg as usize + 1) {
+                out.push(Directive { region: rc, event: GameEventKind::WalkOut(p, next) });
+            }
+        }
+        out
     }
 
     /// A host put `person`'s body in `rc` although the history absorbed them (it did not

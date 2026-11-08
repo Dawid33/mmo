@@ -87,7 +87,10 @@ pub struct RunningRegion {
 pub enum HostMsg {
     /// The host's first message on a (re)connected link: everything it runs and who is
     /// online, superseding whatever lifecycle messages were lost while the link was down.
-    Attach { host: u32, running: Vec<RunningRegion>, online: Vec<(PlayerId, Option<Claim>)> },
+    /// `epoch` counts the host's attaches; the coordinator echoes it first
+    /// ([`CoordMsg::Attached`]), so the host knows which of its messages were decided
+    /// before the attach (stale) and which after.
+    Attach { host: u32, epoch: u64, running: Vec<RunningRegion>, online: Vec<(PlayerId, Option<Claim>)> },
     /// Region `rc` started (its `incarnation`-th start on the host): answered with
     /// [`CoordMsg::SpawnPeople`] for that incarnation.
     RegionStarted { rc: RegionCoords, incarnation: u64 },
@@ -133,8 +136,16 @@ pub enum CoordMsg {
     Calendar(CalendarTick),
     /// The sites changed (founded, abandoned, a population crossing a multiple of 10).
     Sites(Vec<SiteMarker>),
+    /// The sites as they stand right after a request granted a claim, for the host's own
+    /// view (the region of a founded site, the markers a retiring player is shown);
+    /// not broadcast to clients, who get [`CoordMsg::Sites`] at the day's turn.
+    SiteMarkers(Vec<SiteMarker>),
     /// A history log line for the clients whose home is `region`.
     Notice { region: RegionCoords, line: String },
+    /// The coordinator has applied the host's [`HostMsg::Attach`] of this `epoch`: every
+    /// `SpawnPeople` / `Directive` after this was decided from it; the host drops those
+    /// that came before (the attach re-decided their regions from the bodies listed).
+    Attached { epoch: u64 },
 }
 
 impl CoordMsg {

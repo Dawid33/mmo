@@ -4,13 +4,13 @@
 //! (OS threads on the server, inline for wasm/tests), and time arrives as
 //! an explicit `now_ms` so the core stays deterministic and wasm-safe.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::time::Duration;
 
 use crossbeam::channel::{unbounded, Receiver, Sender};
 
-use crate::coordinator::{CoordMsg, HostMsg, WorldLink};
-use crate::history::{AdventureRefusal, CalendarTick, EmbarkRefusal, History, SiteId};
+use crate::coordinator::{Claim, CoordMsg, HostMsg, RequestId, RunningRegion, WorldLink, WorldReply, WorldRequest};
+use crate::history::{AdventureRefusal, CalendarTick, EmbarkRefusal, PersonId, SiteId, SocietyGrid};
 use crate::{
     Chunk, ChunkCoords, ClientId, ClientPacket, Column, ColumnCoords, EntityKind, TerrainSnapshot, GameEventKind,
     LodBuildJob, LodBuilder, LodKey, LodPayload, LodResult, LodWater, PortableRegion, Region, RegionCoords, RegionInput,
@@ -27,6 +27,15 @@ const ADVENTURE_LANDING_HINT_Y: i32 = 1 << 20;
 pub const SPAWN_REGION: RegionCoords = RegionCoords { x: 0, z: 0 };
 
 pub const UNLOAD_GRACE_MS: u64 = 5000;
+/// Seconds a player's world request (embark, return, adventure, legends, person info,
+/// embark options) waits for the coordinator's answer, queued while the link is down
+/// included; past it an embark / return / adventure start is answered `WorldUnavailable`
+/// and the request forgotten (a query just goes unanswered).
+pub const WORLD_REQUEST_TIMEOUT_SECS: u64 = 120;
+/// Most ms the host waits for its running regions to list their people
+/// (`RegionInput::ListPeople`) before it sends its `Attach` to a (re)connected world
+/// coordinator with what it has.
+pub const ATTACH_WAIT_MS: u64 = 2000;
 /// Most arrivals that wait in the manager's mailbox for one region that is
 /// not running ([`WorldManager::pending_arrival_count`]); past it the oldest
 /// is despawned — one carrying drops leaves them as item piles at the seam
@@ -602,6 +611,51 @@ struct Mail {
     in_source_view: bool,
 }
 
+/// A player's world request sent (or queued) to the coordinator and not answered yet.
+#[derive(Debug, Clone)]
+struct PendingRequest {
+    client: ClientId,
+    player: PlayerId,
+    req: WorldRequest,
+    /// When the client asked: the timeout runs from here.
+    sent_ms: u64,
+}
+
+/// People bodies a region listed for an `Attach` (`None`: not answered yet).
+type Listed = Option<Vec<(PersonId, [f32; 3])>>;
+
+/// Where the host stands with the world coordinator.
+#[derive(Debug)]
+enum WorldAttach {
+    /// The link is down: lifecycle messages are dropped (the next `Attach` supersedes
+    /// them), requests and claim messages wait in the outbox.
+    Down,
+    /// The link is up and the `Attach` is being gathered: each listed region (with its
+    /// incarnation) is asked for its people. Lifecycle messages made meanwhile are
+    /// `held` and follow the `Attach`; requests and claim messages go to the outbox.
+    Gathering { epoch: u64, since_ms: u64, regions: BTreeMap<RegionCoords, (u64, Listed)>, held: Vec<HostMsg> },
+    /// The `Attach` of `epoch` is sent; until the coordinator echoes it
+    /// ([`CoordMsg::Attached`]) every `SpawnPeople` / `Directive` that arrives was decided
+    /// before it and is dropped.
+    Sent { epoch: u64 },
+    /// Attached: everything flows.
+    Attached,
+}
+
+/// What the host did with coordinator messages it could not apply (tests, the
+/// `[server]` counters).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WorldLinkCounters {
+    /// Directives answered with `DirectiveBounced` (their region's incarnation stopped,
+    /// or its people had not landed yet).
+    pub directives_bounced: u64,
+    /// `SpawnPeople` for an incarnation that had stopped.
+    pub spawns_dropped: u64,
+    /// `SpawnPeople` / `Directive`s that arrived between the link going down and the
+    /// coordinator's `Attached`: decided before the attach, superseded by it.
+    pub stale_dropped: u64,
+}
+
 /// What the world coordinator last told the host of the world
 /// ([`CoordMsg::View`], `Calendar`, `Sites`).
 #[derive(Debug, Clone)]
@@ -654,6 +708,30 @@ pub struct WorldManager<S: RegionSpawner> {
     /// [`HostMsg::RegionParked`] has not been sent yet: exactly one park per start, and
     /// never a new start before it (the coordinator relies on it).
     world_live: BTreeSet<RegionCoords>,
+    /// Where the host stands with the coordinator (link down, gathering its `Attach`, …).
+    world_attach: WorldAttach,
+    /// `Attach`es sent so far (the epoch the coordinator echoes).
+    attach_epoch: u64,
+    /// Random per host process start ([`Self::set_world_link`]): requests' ids stay unique
+    /// across restarts.
+    world_boot: u64,
+    next_request_seq: u64,
+    /// Player world requests not answered yet.
+    pending_requests: BTreeMap<RequestId, PendingRequest>,
+    /// State-changing requests that timed out after they were sent, with the player and
+    /// when: a claim their late answer grants is given back (`ReleaseClaim`). Forgotten
+    /// one more timeout later.
+    expired_requests: BTreeMap<RequestId, (PlayerId, u64)>,
+    /// Requests and claim messages made while the link is down (or the `Attach` is being
+    /// gathered), in order: sent right after the `Attach`.
+    outbox: VecDeque<HostMsg>,
+    /// [`WORLD_REQUEST_TIMEOUT_SECS`] in ms (a test hook may shorten it).
+    world_request_timeout_ms: u64,
+    world_counters: WorldLinkCounters,
+    /// Each site's region, as the coordinator told it (view, sites, replies).
+    site_regions: BTreeMap<SiteId, RegionCoords>,
+    /// The society grid of the world map (landings where a tile has none).
+    society_grid: Option<SocietyGrid>,
     /// The `now_ms` of the latest `maintain`: the link is pumped at it between upkeeps,
     /// so only `maintain` moves the coordinator's calendar.
     world_ms: u64,
@@ -861,6 +939,17 @@ impl<S: RegionSpawner> WorldManager<S> {
             world_live: BTreeSet::new(),
             world_ms: 0,
             world_notices: Vec::new(),
+            world_attach: WorldAttach::Down,
+            attach_epoch: 0,
+            world_boot: 0,
+            next_request_seq: 0,
+            pending_requests: BTreeMap::new(),
+            expired_requests: BTreeMap::new(),
+            outbox: VecDeque::new(),
+            world_request_timeout_ms: WORLD_REQUEST_TIMEOUT_SECS * 1000,
+            world_counters: WorldLinkCounters::default(),
+            site_regions: BTreeMap::new(),
+            society_grid: None,
             fortress_of: BTreeMap::new(),
             adventurer_of: BTreeMap::new(),
             player_of: BTreeMap::new(),
@@ -921,6 +1010,7 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// world's outer seam.
     pub fn set_world_map(&mut self, map: WorldMap) {
         let route = std::sync::Arc::new(crate::RouteMap::from_world_map(&map));
+        self.society_grid = Some(SocietyGrid::from_world_map(&map));
         self.world_map = Some(map);
         self.route_map = Some(route.clone());
         let running: Vec<RegionCoords> = self.regions.keys().copied().collect();
@@ -929,13 +1019,21 @@ impl<S: RegionSpawner> WorldManager<S> {
         }
     }
 
-    /// Link the world coordinator (its history and world services); `now_ms` is when.
-    /// Every region already running is announced to it at once (its people spawned).
-    /// Installed once: a second link would orphan the bodies the first one placed.
-    pub fn set_world_link(&mut self, link: Box<dyn WorldLink + Send>, now_ms: u64) {
+    /// Link the world coordinator (its history and world services); `boot` is random per
+    /// host process start (request ids), `now_ms` is when. The host attaches at once if
+    /// the link is up ([`Self::world_link_up`]), and every region already running is
+    /// announced to it (its people spawned). Installed once: a second link would orphan
+    /// the bodies the first one placed.
+    pub fn set_world_link(&mut self, link: Box<dyn WorldLink + Send>, boot: u64, now_ms: u64) {
         debug_assert!(self.world.is_none(), "a world link is already installed");
+        let up = link.is_up();
         self.world = Some(link);
+        self.world_boot = boot;
         self.world_ms = self.world_ms.max(now_ms);
+        self.world_attach = WorldAttach::Down;
+        if up {
+            self.world_link_up(now_ms);
+        }
         let running: Vec<RegionCoords> =
             self.regions.iter().filter(|(_, l)| !l.stopping).map(|(rc, _)| *rc).collect();
         for rc in running {
@@ -946,6 +1044,11 @@ impl<S: RegionSpawner> WorldManager<S> {
 
     /// The calendar at `now_ms`: as the coordinator last told it, plus one tick per
     /// `TICK_RATE` ms since. `None` before it has told any (or without a world link).
+    ///
+    /// The tick is taken as of its arrival, so the host's calendar trails the
+    /// coordinator's by the link's latency (well under a tick on one machine) until the
+    /// next `Calendar`; the two processes share no clock to correct it by, and nothing
+    /// in the simulation reads it (clients show it).
     pub fn calendar_now(&self, now_ms: u64) -> Option<CalendarTick> {
         let (ms, tick) = self.world_view.as_ref()?.calendar;
         Some(CalendarTick(tick.0 + now_ms.saturating_sub(ms) / crate::TICK_RATE))
@@ -964,32 +1067,177 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.world.as_deref_mut()
     }
 
-    /// TRANSITIONAL (R2b Task 6 turns these into world requests): the history of an
-    /// inline coordinator, for the player-facing reads and the embark the manager still
-    /// does itself. `None` over any other link.
-    fn inline_history(&self) -> Option<&History> {
-        Some(self.world.as_deref()?.as_inline()?.coordinator().history())
+    /// What the host did with coordinator messages it could not apply.
+    pub fn world_link_counters(&self) -> WorldLinkCounters {
+        self.world_counters
     }
 
-    /// TRANSITIONAL: [`Self::inline_history`], to change (a player's embark).
-    fn inline_history_mut(&mut self) -> Option<&mut History> {
-        Some(self.world.as_deref_mut()?.as_inline_mut()?.coordinator_mut().history_mut())
+    /// Player world requests not answered yet (sent or queued).
+    pub fn pending_world_requests(&self) -> usize {
+        self.pending_requests.len()
     }
 
-    /// The site markers clients are told: the inline history's own (current), else the
-    /// coordinator's last broadcast.
+    /// Requests and claim messages waiting for the link ([`Self::world_link_up`]).
+    pub fn world_outbox_len(&self) -> usize {
+        self.outbox.len()
+    }
+
+    /// Whether the coordinator has applied the host's latest `Attach`.
+    pub fn world_attached(&self) -> bool {
+        matches!(self.world_attach, WorldAttach::Attached)
+    }
+
+    /// Test hook: [`WORLD_REQUEST_TIMEOUT_SECS`], in ms, for this manager.
+    pub fn set_world_request_timeout_ms(&mut self, ms: u64) {
+        self.world_request_timeout_ms = ms;
+    }
+
+    /// The site markers clients are told: the coordinator's last view / broadcast.
     fn world_sites(&self) -> Vec<crate::SiteMarker> {
-        match self.inline_history() {
-            Some(h) => h.site_markers(),
-            None => self.world_view.as_ref().map(|v| v.sites.values().cloned().collect()).unwrap_or_default(),
-        }
+        self.world_view.as_ref().map(|v| v.sites.values().cloned().collect()).unwrap_or_default()
     }
 
     /// The civ markers clients are told ([`Self::world_sites`]' rule).
     fn world_civs(&self) -> Vec<crate::CivMarker> {
-        match self.inline_history() {
-            Some(h) => h.civ_markers(),
-            None => self.world_view.as_ref().map(|v| v.civs.clone()).unwrap_or_default(),
+        self.world_view.as_ref().map(|v| v.civs.clone()).unwrap_or_default()
+    }
+
+    /// The host's number in request ids and its `Attach`: its ordinal in a static
+    /// ownership, else 0.
+    fn world_host(&self) -> u32 {
+        match self.ownership.0 {
+            crate::Ownership::Static { ordinal, .. } => ordinal,
+            crate::Ownership::AllInOne => 0,
+        }
+    }
+
+    /// What `client` plays, as a claim.
+    fn claim_of_client(&self, client: ClientId) -> Option<Claim> {
+        self.fortress_of
+            .get(&client)
+            .map(|&s| Claim::Fortress(s))
+            .or_else(|| self.adventurer_of.get(&client).map(|&s| Claim::Adventure(s)))
+    }
+
+    /// The link came up (at start, or after it was down): the host attaches. Every region
+    /// announced and running (not stopping) is asked for its people
+    /// (`RegionInput::ListPeople`); once all have answered (or [`ATTACH_WAIT_MS`] passed)
+    /// the `Attach` goes, then the requests whose answer never came, then the outbox, then
+    /// the lifecycle messages made meanwhile. A stopping region is not listed: the
+    /// coordinator parks it empty (its people back in the abstract history; a park never
+    /// keeps bodies) and its own park sends nothing.
+    pub fn world_link_up(&mut self, now_ms: u64) {
+        if self.world.is_none() {
+            return;
+        }
+        self.attach_epoch += 1;
+        let epoch = self.attach_epoch;
+        let listed: BTreeSet<RegionCoords> = self
+            .world_live
+            .iter()
+            .copied()
+            .filter(|rc| self.regions.get(rc).is_some_and(|l| !l.stopping))
+            .collect();
+        for rc in self.world_live.difference(&listed) {
+            log::info!("world link up: {rc:?} is stopping; not attached (its people go back to the history)");
+            self.spawn_waiting.remove(rc);
+        }
+        self.world_live = listed.clone();
+        log::info!("world link up: gathering attach {epoch} over {} regions", listed.len());
+        let regions =
+            listed.iter().map(|rc| (*rc, (self.incarnation.get(rc).copied().unwrap_or(0), None))).collect();
+        self.world_attach = WorldAttach::Gathering { epoch, since_ms: now_ms, regions, held: Vec::new() };
+        for rc in listed {
+            self.send_to_region(rc, RegionInput::ListPeople);
+        }
+        self.try_finish_attach(false);
+    }
+
+    /// A listed region answered (its people, or its park / loss): the `Attach` goes once
+    /// every one has, or at once when `force`d ([`ATTACH_WAIT_MS`]).
+    fn note_listed(&mut self, rc: RegionCoords, people: &[(PersonId, [f32; 3])], answer: bool) {
+        if let WorldAttach::Gathering { regions, .. } = &mut self.world_attach {
+            if let Some((_, listed)) = regions.get_mut(&rc) {
+                if answer || listed.is_none() {
+                    *listed = Some(people.to_vec());
+                }
+            }
+        }
+        self.try_finish_attach(false);
+    }
+
+    /// Send the `Attach` being gathered once every listed region answered (`force`: with
+    /// what it has; a region that did not answer is listed with no people — the history
+    /// takes them back), then the requests sent before the link went down whose answer
+    /// never came (the coordinator's memo answers a state-changing one once), the
+    /// outbox, and the lifecycle messages held meanwhile, in that order.
+    fn try_finish_attach(&mut self, force: bool) {
+        let WorldAttach::Gathering { regions, .. } = &self.world_attach else { return };
+        if !force && regions.values().any(|(_, listed)| listed.is_none()) {
+            return;
+        }
+        let WorldAttach::Gathering { epoch, regions, held, .. } =
+            std::mem::replace(&mut self.world_attach, WorldAttach::Down)
+        else {
+            unreachable!("checked")
+        };
+        self.world_attach = WorldAttach::Sent { epoch };
+        let running: Vec<RunningRegion> = regions
+            .into_iter()
+            .map(|(rc, (incarnation, listed))| {
+                if listed.is_none() {
+                    log::warn!("attach {epoch}: {rc:?} did not list its people in {ATTACH_WAIT_MS} ms; attached empty");
+                }
+                RunningRegion { rc, incarnation, people: listed.unwrap_or_default() }
+            })
+            .collect();
+        for r in &running {
+            // Its people as they stand are the history's now: no `SpawnPeople` comes.
+            if self.spawn_waiting.get(&r.rc) == Some(&r.incarnation) {
+                self.spawn_waiting.remove(&r.rc);
+            }
+        }
+        let online: Vec<(PlayerId, Option<Claim>)> =
+            self.player_of.iter().map(|(c, p)| (*p, self.claim_of_client(*c))).collect();
+        log::info!("attach {epoch}: {} regions, {} online, {} queued", running.len(), online.len(), self.outbox.len());
+        let host = self.world_host();
+        self.link_send(HostMsg::Attach { host, epoch, running, online });
+        let queued: BTreeSet<RequestId> = self
+            .outbox
+            .iter()
+            .filter_map(|m| match m {
+                HostMsg::Request { id, .. } => Some(*id),
+                _ => None,
+            })
+            .collect();
+        let resend: Vec<HostMsg> = self
+            .pending_requests
+            .iter()
+            .filter(|(id, _)| !queued.contains(id))
+            .map(|(id, p)| HostMsg::Request { id: *id, player: p.player, req: p.req.clone() })
+            .collect();
+        for m in resend.into_iter().chain(std::mem::take(&mut self.outbox)).chain(held) {
+            self.link_send(m);
+        }
+    }
+
+    /// Straight onto the link.
+    fn link_send(&mut self, msg: HostMsg) {
+        if let Some(link) = self.world.as_mut() {
+            link.send(msg);
+        }
+    }
+
+    /// Notice the link going down (or coming back up).
+    fn watch_world_link(&mut self, now_ms: u64) {
+        let Some(link) = self.world.as_ref() else { return };
+        match (&self.world_attach, link.is_up()) {
+            (WorldAttach::Down, true) => self.world_link_up(now_ms),
+            (WorldAttach::Down, false) | (_, true) => {}
+            (_, false) => {
+                log::warn!("world link down: lifecycle messages dropped, requests queued until it is back");
+                self.world_attach = WorldAttach::Down;
+            }
         }
     }
 
@@ -998,6 +1246,7 @@ impl<S: RegionSpawner> WorldManager<S> {
     pub fn pump_world(&mut self, now_ms: u64) {
         let Some(link) = self.world.as_mut() else { return };
         link.pump(now_ms);
+        self.watch_world_link(now_ms);
         // Each message is taken before it is applied: applying one may start a region,
         // which pumps the link again (`ensure_running`).
         while let Some(msg) = self.world.as_mut().and_then(|l| l.recv()) {
@@ -1011,14 +1260,46 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.pump_world(self.world_ms);
     }
 
+    /// Send `msg` to the coordinator as the link stands: while it is down a request or
+    /// claim message waits in the outbox and a lifecycle message is dropped (the next
+    /// `Attach` supersedes it); while the `Attach` is gathered both wait (lifecycle held
+    /// behind it).
     fn world_send(&mut self, msg: HostMsg) {
-        if let Some(link) = self.world.as_mut() {
-            link.send(msg);
+        let Some(link) = self.world.as_ref() else { return };
+        if !link.is_up() && !matches!(self.world_attach, WorldAttach::Down) {
+            log::warn!("world link down: lifecycle messages dropped, requests queued until it is back");
+            self.world_attach = WorldAttach::Down;
+        }
+        let queued = matches!(
+            msg,
+            HostMsg::Request { .. }
+                | HostMsg::PlayerOnline { .. }
+                | HostMsg::PlayerOffline { .. }
+                | HostMsg::ReleaseClaim { .. }
+        );
+        match &mut self.world_attach {
+            WorldAttach::Down | WorldAttach::Gathering { .. } if queued => self.outbox.push_back(msg),
+            WorldAttach::Down => log::debug!("world link down: {msg:?} dropped"),
+            WorldAttach::Gathering { held, .. } => held.push(msg),
+            WorldAttach::Sent { .. } | WorldAttach::Attached => self.link_send(msg),
         }
     }
 
     fn apply_world_msg(&mut self, msg: CoordMsg, now_ms: u64) {
         match msg {
+            CoordMsg::SpawnPeople { .. } | CoordMsg::Directive { .. } if !self.world_attached() => {
+                // Decided before the coordinator applied our latest `Attach`, which
+                // re-decided every listed region from its bodies: stale.
+                log::debug!("coordinator message from before the attach dropped: {msg:?}");
+                self.world_counters.stale_dropped += 1;
+            }
+            CoordMsg::Attached { epoch } => match self.world_attach {
+                WorldAttach::Sent { epoch: sent } if sent == epoch => {
+                    log::info!("world link: attach {epoch} applied");
+                    self.world_attach = WorldAttach::Attached;
+                }
+                _ => log::debug!("world link: stale attach echo {epoch} ignored"),
+            },
             CoordMsg::SpawnPeople { rc, incarnation, events } => {
                 let current = self.spawn_waiting.get(&rc) == Some(&incarnation)
                     && self.incarnation.get(&rc) == Some(&incarnation)
@@ -1027,6 +1308,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                     // That incarnation's `RegionParked` went ahead of this on the link: the
                     // history restored everyone it placed there.
                     log::debug!("people for {rc:?} incarnation {incarnation}, which has stopped, dropped");
+                    self.world_counters.spawns_dropped += 1;
                     return;
                 }
                 self.spawn_waiting.remove(&rc);
@@ -1043,6 +1325,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                     && self.regions.get(&rc).is_some_and(|l| !l.stopping);
                 if !applies {
                     log::debug!("history directive for {rc:?} incarnation {incarnation} bounced: {:?}", directive.event);
+                    self.world_counters.directives_bounced += 1;
                     return self.world_send(HostMsg::DirectiveBounced { directive, incarnation });
                 }
                 let input = match self.directive_stamps.get(&rc) {
@@ -1054,6 +1337,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                 self.send_to_region(rc, input);
             }
             CoordMsg::View { civs, sites, calendar } => {
+                self.site_regions.extend(sites.iter().map(|m| (m.site, m.region)));
                 self.world_view = Some(WorldViewCache {
                     civs: civs.clone(),
                     sites: sites.iter().map(|m| (m.site, m.clone())).collect(),
@@ -1074,6 +1358,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                 }
             }
             CoordMsg::Sites(sites) => {
+                self.site_regions.extend(sites.iter().map(|m| (m.site, m.region)));
                 if let Some(v) = self.world_view.as_mut() {
                     v.sites = sites.iter().map(|m| (m.site, m.clone())).collect();
                 }
@@ -1081,13 +1366,16 @@ impl<S: RegionSpawner> WorldManager<S> {
                     let _ = self.out.send((Some(*c), ServerPacket::Sites(sites.clone())));
                 }
             }
+            CoordMsg::SiteMarkers(sites) => {
+                self.site_regions.extend(sites.iter().map(|m| (m.site, m.region)));
+                if let Some(v) = self.world_view.as_mut() {
+                    v.sites = sites.into_iter().map(|m| (m.site, m)).collect();
+                }
+            }
             // Routed at the end of the client event or upkeep that made it, to the homes
             // as they stand then (a player embarking moves home after its region starts).
             CoordMsg::Notice { region, line } => self.world_notices.push((region, line)),
-            CoordMsg::Reply { id, reply } => {
-                // R2b Task 6 sends requests; nothing asks yet.
-                log::warn!("world reply {id:?} with no request: {reply:?}");
-            }
+            CoordMsg::Reply { id, reply } => self.world_reply(id, reply, now_ms),
         }
     }
 
@@ -1121,6 +1409,8 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.spawn_waiting.remove(&rc);
         self.directive_stamps.remove(&rc);
         if self.world_live.remove(&rc) {
+            // An attach being gathered lists it as it parked; the park follows the attach.
+            self.note_listed(rc, &people, false);
             self.world_send(HostMsg::RegionParked { rc, people });
         }
     }
@@ -1265,7 +1555,7 @@ impl<S: RegionSpawner> WorldManager<S> {
     fn landing_in(&self, rc: RegionCoords) -> [u32; 2] {
         let edge = crate::REGION_BLOCKS as u32;
         let on_map = self.world_map.as_ref().and_then(|m| m.tile(rc)).and_then(|t| t.landing);
-        let on_grid = self.inline_history().and_then(|h| h.grid().landing(rc));
+        let on_grid = self.society_grid.as_ref().and_then(|g| g.landing(rc));
         on_map
             .or(on_grid)
             .filter(|l| l[0] < edge && l[1] < edge)
@@ -1274,7 +1564,7 @@ impl<S: RegionSpawner> WorldManager<S> {
 
     fn send_fortress(&self, id: ClientId) {
         let held = self.fortress_of.get(&id).and_then(|&site| {
-            let region = self.inline_history()?.site(site)?.region;
+            let region = *self.site_regions.get(&site)?;
             Some(crate::HeldFortress { site, region })
         });
         let _ = self.out.send((Some(id), ServerPacket::Fortress(held)));
@@ -1284,129 +1574,72 @@ impl<S: RegionSpawner> WorldManager<S> {
         let _ = self.out.send((Some(id), ServerPacket::EmbarkResult(r)));
     }
 
-    /// The player's embark: one fortress per player; the history validates and founds
-    /// the site at once, then the player moves in (the region's catch-up, or the
-    /// founding itself when it already runs, spawns the party).
+    /// The player's embark: one fortress per player (checked here and by the coordinator,
+    /// which validates and founds the site); the move happens when the coordinator's
+    /// answer comes ([`Self::world_reply`]).
     fn embark(&mut self, id: ClientId, req: EmbarkRequest, now_ms: u64) {
-        let has_world = self.inline_history().is_some();
-        if (self.fortress_of.contains_key(&id) || self.adventurer_of.contains_key(&id)) && has_world {
+        if self.world.is_none() {
+            return self.embark_result(id, Err(EmbarkRefusal::NoHistory));
+        }
+        if self.fortress_of.contains_key(&id) || self.adventurer_of.contains_key(&id) {
             return self.embark_result(id, Err(EmbarkRefusal::AlreadyHasFortress));
         }
-        if has_world && self.is_unavailable(req.region) {
+        if self.is_unavailable(req.region) {
             return self.embark_result(id, Err(EmbarkRefusal::RegionUnavailable));
         }
-        let Some(history) = self.inline_history_mut() else {
-            return self.embark_result(id, Err(EmbarkRefusal::NoHistory));
-        };
-        let site = match history.player_embark(&req) {
-            Ok(site) => site,
-            Err(e) => return self.embark_result(id, Err(e)),
-        };
-        let landing = self.landing_in(req.region);
-        self.move_client(id, req.region, landing, now_ms);
-        self.fortress_of.insert(id, site);
-        self.embark_result(id, Ok(site));
-        self.send_fortress(id);
-        crate::perf_event!(
-            "embark",
-            "client={id} site={} people={} to={},{}",
-            site.0,
-            req.people.len(),
-            req.region.x,
-            req.region.z
-        );
+        self.world_request(id, WorldRequest::Embark(req), now_ms);
     }
 
-    /// Retire: the player stops playing its fortress and moves back where a fresh
-    /// connection starts (`SPAWN_REGION`); the fortress region parks by the usual grace
-    /// rule (its people go back to the abstract history). No fortress = no-op.
+    /// Retire: the player stops playing its fortress (its claim given back; the site
+    /// stays, returnable) and moves back where a fresh connection starts (`SPAWN_REGION`);
+    /// the fortress region parks by the usual grace rule (its people go back to the
+    /// abstract history). No fortress = no-op.
     fn retire(&mut self, id: ClientId, now_ms: u64) {
         if self.fortress_of.remove(&id).is_none() {
             return;
         }
         let landing = self.landing_in(SPAWN_REGION);
         self.move_client(id, SPAWN_REGION, landing, now_ms);
+        self.release_claim_of(id);
         if self.world.is_some() {
             let _ = self.out.send((Some(id), ServerPacket::Sites(self.world_sites())));
         }
         self.send_fortress(id);
     }
 
-    /// Return to a retired fortress.
-    ///
-    /// "Return only to a fortress you founded" is implemented as "only to a
-    /// **player-founded** site no other *connected* player is playing" — the same in
-    /// single player. A disconnected player's claim lives in its record; it is
-    /// dropped when that player comes back to find someone else playing there.
+    /// Return to a retired fortress: asked of the coordinator, which allows it only to a
+    /// **player-founded** site no other *online* player plays (an offline claimant loses
+    /// it, and finds it gone when it comes back).
     fn return_to(&mut self, id: ClientId, site: SiteId, now_ms: u64) {
-        let Some(history) = self.inline_history() else {
+        if self.world.is_none() {
             return self.embark_result(id, Err(EmbarkRefusal::NoHistory));
-        };
+        }
         if self.fortress_of.contains_key(&id) || self.adventurer_of.contains_key(&id) {
             return self.embark_result(id, Err(EmbarkRefusal::AlreadyHasFortress));
         }
-        if !history.returnable(site) {
-            return self.embark_result(id, Err(EmbarkRefusal::NotPlayerFounded));
-        }
-        let in_use = self
-            .fortress_of
-            .iter()
-            .any(|(c, s)| *s == site && *c != id && self.sessions.contains_key(c));
-        if in_use {
-            return self.embark_result(id, Err(EmbarkRefusal::InUse));
-        }
-        let region = history.site(site).expect("returnable").region;
-        if self.is_unavailable(region) {
+        if self.site_regions.get(&site).is_some_and(|&rc| self.is_unavailable(rc)) {
             return self.embark_result(id, Err(EmbarkRefusal::RegionUnavailable));
         }
-        let landing = self.landing_in(region);
-        self.move_client(id, region, landing, now_ms);
-        self.fortress_of.insert(id, site);
-        self.embark_result(id, Ok(site));
-        self.send_fortress(id);
+        self.world_request(id, WorldRequest::ReturnTo(site), now_ms);
     }
 
     fn adventure_result(&self, id: ClientId, r: Result<SiteId, AdventureRefusal>) {
         let _ = self.out.send((Some(id), ServerPacket::AdventureResult(r)));
     }
 
-    /// Start an adventure at a populated site: the player moves to the site's region
-    /// and a server-originated `Order::SetMode` puts it in Adventure play mode
-    /// (sequenced after its `CreateClientAt` there, so client and server agree). One
-    /// at a time: no adventure while a fortress or another adventure is held.
+    /// Start an adventure at a populated site (the coordinator validates it): one at a
+    /// time, no adventure while a fortress or another adventure is held.
     fn start_adventure(&mut self, id: ClientId, site: SiteId, now_ms: u64) {
-        let Some(history) = self.inline_history() else {
+        if self.world.is_none() {
             return self.adventure_result(id, Err(AdventureRefusal::NoHistory));
-        };
-        let Some(s) = history.site(site) else {
-            return self.adventure_result(id, Err(AdventureRefusal::UnknownSite));
-        };
-        if s.abandoned.is_some() {
-            return self.adventure_result(id, Err(AdventureRefusal::SiteAbandoned));
-        }
-        if !s.members.iter().any(|&p| history.person(p).is_some_and(|p| p.died.is_none())) {
-            return self.adventure_result(id, Err(AdventureRefusal::Unpopulated));
         }
         if self.fortress_of.contains_key(&id) || self.adventurer_of.contains_key(&id) {
             return self.adventure_result(id, Err(AdventureRefusal::AlreadyPlaying));
         }
-        let region = s.region;
-        if self.is_unavailable(region) {
+        if self.site_regions.get(&site).is_some_and(|&rc| self.is_unavailable(rc)) {
             return self.adventure_result(id, Err(AdventureRefusal::RegionUnavailable));
         }
-        let landing = self.landing_in(region);
-        // Already at home in that region: `move_client` only resends `PlayerRegion`
-        // and the body stays put, so the order itself carries the landing tile
-        // (a high level clamps to the column's top and `nearest_standable` searches
-        // down). Elsewhere `CreateClientAt` has placed the body.
-        let at = (self.homes.get(&id) == Some(&region))
-            .then(|| [landing[0] as i32, ADVENTURE_LANDING_HINT_Y, landing[1] as i32]);
-        self.move_client(id, region, landing, now_ms);
-        self.send_player_event(id, region, GameEventKind::Order(id, Order::SetMode { mode: PlayMode::Adventure, at }));
-        self.adventurer_of.insert(id, site);
-        self.adventure_result(id, Ok(site));
-        self.send_fortress(id);
-        crate::perf_event!("adventure_start", "client={id} site={} to={},{}", site.0, region.x, region.z);
+        self.world_request(id, WorldRequest::StartAdventure(site), now_ms);
     }
 
     /// End the adventure: back to Fortress mode, then to `SPAWN_REGION` like
@@ -1425,8 +1658,157 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.adventurer_of.remove(&id);
         let landing = self.landing_in(SPAWN_REGION);
         self.move_client(id, SPAWN_REGION, landing, now_ms);
+        self.release_claim_of(id);
         if self.world.is_some() {
             let _ = self.out.send((Some(id), ServerPacket::Sites(self.world_sites())));
+        }
+    }
+
+    /// `id`'s player gave up what it played: the coordinator frees the claim.
+    fn release_claim_of(&mut self, id: ClientId) {
+        if let Some(&player) = self.player_of.get(&id) {
+            self.world_send(HostMsg::ReleaseClaim { player });
+        }
+    }
+
+    /// Ask the coordinator `req` for `client`'s player: sent at once, or queued while the
+    /// link is down ([`Self::world_send`]); answered by [`Self::world_reply`], or
+    /// `WorldUnavailable` after [`WORLD_REQUEST_TIMEOUT_SECS`].
+    fn world_request(&mut self, client: ClientId, req: WorldRequest, now_ms: u64) {
+        let Some(&player) = self.player_of.get(&client) else {
+            log::warn!("client {client}: a world request with no player; refused");
+            return self.answer_unavailable(client, &req);
+        };
+        let id = RequestId { host: self.world_host(), boot: self.world_boot, seq: self.next_request_seq };
+        self.next_request_seq += 1;
+        self.pending_requests.insert(id, PendingRequest { client, player, req: req.clone(), sent_ms: now_ms });
+        self.world_send(HostMsg::Request { id, player, req });
+    }
+
+    /// The answer a request gets when the world services cannot give one.
+    fn answer_unavailable(&self, client: ClientId, req: &WorldRequest) {
+        match req {
+            WorldRequest::Embark(_) | WorldRequest::ReturnTo(_) => {
+                self.embark_result(client, Err(EmbarkRefusal::WorldUnavailable))
+            }
+            WorldRequest::StartAdventure(_) => self.adventure_result(client, Err(AdventureRefusal::WorldUnavailable)),
+            WorldRequest::EmbarkOptions | WorldRequest::Legends(_) | WorldRequest::PersonInfo(_) => {}
+        }
+    }
+
+    /// Requests waiting longer than the timeout: the player is told the world is
+    /// unavailable and the request forgotten (out of the outbox too). One that had left
+    /// may still be answered; a claim that answer grants is given back.
+    fn expire_world_requests(&mut self, now_ms: u64) {
+        let timeout = self.world_request_timeout_ms;
+        let expired: Vec<RequestId> = self
+            .pending_requests
+            .iter()
+            .filter(|(_, p)| now_ms.saturating_sub(p.sent_ms) >= timeout)
+            .map(|(id, _)| *id)
+            .collect();
+        for id in expired {
+            let p = self.pending_requests.remove(&id).expect("listed");
+            let is_it = |m: &HostMsg| matches!(m, HostMsg::Request { id: i, .. } if *i == id);
+            let queued = self.outbox.iter().any(is_it);
+            self.outbox.retain(|m| !is_it(m));
+            if !queued && p.req.changes_state() {
+                self.expired_requests.insert(id, (p.player, now_ms));
+            }
+            log::warn!("world request {id:?} of client {} unanswered in {timeout} ms: {:?}", p.client, p.req);
+            if self.sessions.contains_key(&p.client) {
+                self.answer_unavailable(p.client, &p.req);
+            }
+        }
+        self.expired_requests.retain(|_, (_, at)| now_ms.saturating_sub(*at) < timeout);
+    }
+
+    /// The coordinator answered request `id`. The first answer wins (a replayed request
+    /// may be answered twice); an answer for a client that has gone gives back the claim
+    /// it grants (the site stays, returnable).
+    fn world_reply(&mut self, id: RequestId, reply: WorldReply, now_ms: u64) {
+        let Some(p) = self.pending_requests.remove(&id) else {
+            match self.expired_requests.remove(&id) {
+                Some((player, _)) => {
+                    log::info!("world reply {id:?} came after its request timed out: {reply:?}");
+                    if reply.grants_claim() {
+                        self.world_send(HostMsg::ReleaseClaim { player });
+                    }
+                }
+                None => log::debug!("world reply {id:?} answered already: dropped"),
+            }
+            return;
+        };
+        let client = p.client;
+        if !self.sessions.contains_key(&client) || self.player_of.get(&client) != Some(&p.player) {
+            log::info!("world reply {id:?} for client {client}, which has gone: {reply:?}");
+            if reply.grants_claim() {
+                self.world_send(HostMsg::ReleaseClaim { player: p.player });
+            }
+            return;
+        }
+        match reply {
+            WorldReply::EmbarkOptions(options) => {
+                let _ = self.out.send((Some(client), ServerPacket::EmbarkOptions(options)));
+            }
+            WorldReply::Legends(page) => {
+                let _ = self.out.send((Some(client), ServerPacket::Legends(page)));
+            }
+            WorldReply::PersonInfo(info) => {
+                if let Some(info) = info {
+                    let _ = self.out.send((Some(client), ServerPacket::PersonInfo(info)));
+                }
+            }
+            WorldReply::EmbarkRefused(e) => self.embark_result(client, Err(e)),
+            WorldReply::AdventureRefused(e) => self.adventure_result(client, Err(e)),
+            WorldReply::Embarked { site, region } | WorldReply::Returned { site, region } => {
+                self.site_regions.insert(site, region);
+                if self.is_unavailable(region) {
+                    self.world_send(HostMsg::ReleaseClaim { player: p.player });
+                    return self.embark_result(client, Err(EmbarkRefusal::RegionUnavailable));
+                }
+                // The site is founded (or taken up): the player moves in (the region's
+                // catch-up, or the founding itself when it already runs, spawns the party).
+                let landing = self.landing_in(region);
+                self.move_client(client, region, landing, now_ms);
+                self.fortress_of.insert(client, site);
+                self.embark_result(client, Ok(site));
+                self.send_fortress(client);
+                if let WorldRequest::Embark(req) = &p.req {
+                    crate::perf_event!(
+                        "embark",
+                        "client={client} site={} people={} to={},{}",
+                        site.0,
+                        req.people.len(),
+                        region.x,
+                        region.z
+                    );
+                }
+            }
+            WorldReply::AdventureStarted { site, region } => {
+                self.site_regions.insert(site, region);
+                if self.is_unavailable(region) {
+                    self.world_send(HostMsg::ReleaseClaim { player: p.player });
+                    return self.adventure_result(client, Err(AdventureRefusal::RegionUnavailable));
+                }
+                let landing = self.landing_in(region);
+                // Already at home in that region: `move_client` only resends `PlayerRegion`
+                // and the body stays put, so the order itself carries the landing tile
+                // (a high level clamps to the column's top and `nearest_standable` searches
+                // down). Elsewhere `CreateClientAt` has placed the body.
+                let at = (self.homes.get(&client) == Some(&region))
+                    .then(|| [landing[0] as i32, ADVENTURE_LANDING_HINT_Y, landing[1] as i32]);
+                self.move_client(client, region, landing, now_ms);
+                self.send_player_event(
+                    client,
+                    region,
+                    GameEventKind::Order(client, Order::SetMode { mode: PlayMode::Adventure, at }),
+                );
+                self.adventurer_of.insert(client, site);
+                self.adventure_result(client, Ok(site));
+                self.send_fortress(client);
+                crate::perf_event!("adventure_start", "client={client} site={} to={},{}", site.0, region.x, region.z);
+            }
         }
     }
 
@@ -1488,9 +1870,11 @@ impl<S: RegionSpawner> WorldManager<S> {
                 ClientPacket::ReleaseLod(key) => self.lod_unsubscribe(id, key),
                 ClientPacket::PlayRegion(rc) => self.play_region(id, rc, now_ms),
                 ClientPacket::Leave => self.client_disconnected(id, now_ms),
+                ClientPacket::RequestEmbarkOptions if self.world.is_some() => {
+                    self.world_request(id, WorldRequest::EmbarkOptions, now_ms);
+                }
                 ClientPacket::RequestEmbarkOptions => {
-                    let options = self.inline_history().map(History::embark_options).unwrap_or_default();
-                    let _ = self.out.send((Some(id), ServerPacket::EmbarkOptions(options)));
+                    let _ = self.out.send((Some(id), ServerPacket::EmbarkOptions(Default::default())));
                 }
                 ClientPacket::Embark(req) => self.embark(id, req, now_ms),
                 ClientPacket::Retire => self.retire(id, now_ms),
@@ -1498,13 +1882,13 @@ impl<S: RegionSpawner> WorldManager<S> {
                 ClientPacket::StartAdventure(site) => self.start_adventure(id, site, now_ms),
                 ClientPacket::EndAdventure => self.end_adventure(id, now_ms),
                 ClientPacket::RequestPersonInfo(person) => {
-                    if let Some(info) = self.inline_history().and_then(|h| h.person_info(person)) {
-                        let _ = self.out.send((Some(id), ServerPacket::PersonInfo(info)));
+                    if self.world.is_some() {
+                        self.world_request(id, WorldRequest::PersonInfo(person), now_ms);
                     }
                 }
                 ClientPacket::RequestLegends(query) => {
-                    if let Some(history) = self.inline_history() {
-                        let _ = self.out.send((Some(id), ServerPacket::Legends(history.legends(&query))));
+                    if self.world.is_some() {
+                        self.world_request(id, WorldRequest::Legends(query), now_ms);
                     }
                 }
                 packet @ (ClientPacket::GameEvent(_) | ClientPacket::GameEventAfterTick(..)) => {
@@ -1648,6 +2032,9 @@ impl<S: RegionSpawner> WorldManager<S> {
             RegionOutput::CutMissed(id) => self.cut_missed(rc, id),
             RegionOutput::LoadFailed(why) => self.region_load_failed(rc, why, now_ms),
             RegionOutput::PeoplePositions(people) => {
+                // An attach being gathered takes the latest list as the region's answer
+                // (`ListPeople`'s, or a cut's just before it: as current).
+                self.note_listed(rc, &people, true);
                 if self.world_live.contains(&rc) {
                     self.world_send(HostMsg::Positions(people));
                 }
@@ -1903,6 +2290,12 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.world_ms = self.world_ms.max(now_ms);
         self.expire_overdue_cut();
         self.retry_unavailable();
+        self.expire_world_requests(now_ms);
+        if let WorldAttach::Gathering { since_ms, .. } = self.world_attach {
+            if now_ms.saturating_sub(since_ms) >= ATTACH_WAIT_MS {
+                self.try_finish_attach(true);
+            }
+        }
         self.pump_world(self.world_ms);
         self.route_notices();
         let connected_homes: BTreeSet<RegionCoords> = self
@@ -2642,6 +3035,11 @@ impl<S: RegionSpawner> WorldManager<S> {
         parks
     }
 
+    /// The incarnation `rc` runs (a fresh number per start), if it runs.
+    pub fn region_incarnation(&self, rc: RegionCoords) -> Option<u64> {
+        self.regions.contains_key(&rc).then(|| self.incarnation.get(&rc).copied()).flatten()
+    }
+
     pub fn running_regions(&self) -> Vec<RegionCoords> {
         self.regions.keys().copied().collect()
     }
@@ -2665,6 +3063,11 @@ impl<S: RegionSpawner> WorldManager<S> {
         let player = self.player_of.remove(&id);
         let fortress = self.fortress_of.remove(&id);
         let adventure = self.adventurer_of.remove(&id);
+        if let Some(player) = player {
+            // Its claim stays (in its record too); another player may take an offline
+            // claimant's fortress up.
+            self.world_send(HostMsg::PlayerOffline { player });
+        }
         self.deferred_packets.remove(&id);
         self.awaiting_park.retain(|_, (c, _)| *c != id);
         if let Some(session) = self.sessions.remove(&id) {
@@ -2766,9 +3169,21 @@ impl<S: RegionSpawner> WorldManager<S> {
             let _ = self.out.send((Some(id), ServerPacket::Civs(self.world_civs())));
             if !self.restore_pending(id) {
                 self.send_claims(id);
+                self.world_player_online(id);
             }
         }
         true
+    }
+
+    /// `id`'s player is online with what it plays (its claims are settled: restored, or
+    /// none): the coordinator counts its fortress as in use.
+    fn world_player_online(&mut self, id: ClientId) {
+        if self.world.is_none() || !self.sessions.contains_key(&id) {
+            return;
+        }
+        let Some(&player) = self.player_of.get(&id) else { return };
+        let claim = self.claim_of_client(id);
+        self.world_send(HostMsg::PlayerOnline { player, claim });
     }
 
     /// Whether `id` waits for its player's park before it is restored.
@@ -2827,8 +3242,8 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// history still knows it.
     fn restore_player(&mut self, id: ClientId, record: PlayerRecord, now_ms: u64) {
         let region = record.region;
-        let history = self.inline_history();
-        let known = |site: SiteId| history.map_or(true, |h| h.site(site).is_some());
+        // Before the coordinator's first view the host cannot tell: the claim stands.
+        let known = |site: SiteId| self.world_view.is_none() || self.site_regions.contains_key(&site);
         let fortress = record
             .fortress
             .filter(|&site| known(site) && !self.fortress_of.values().any(|&s| s == site));
@@ -2916,8 +3331,9 @@ impl<S: RegionSpawner> WorldManager<S> {
         }
         let record = self.take_parked(player).or(edge_record);
         self.place_player(waiting, record, now_ms);
-        if self.world.is_some() {
+        if self.world.is_some() && self.sessions.contains_key(&waiting) {
             self.send_claims(waiting);
+            self.world_player_online(waiting);
         }
         for packet in self.deferred_packets.remove(&waiting).unwrap_or_default() {
             self.handle_server_event(ServerEvent::ClientPacket(packet, waiting), now_ms);
@@ -3179,6 +3595,8 @@ impl<S: RegionSpawner> WorldManager<S> {
                 resubscribe_pending: Vec::new(),
             },
         );
+        // A new incarnation: no arrival stamp of an earlier one applies.
+        self.directive_stamps.remove(&rc);
         // Then the history's catch-up: its people here now (at once through an inline
         // coordinator), before anything else.
         self.world_region_started(rc);

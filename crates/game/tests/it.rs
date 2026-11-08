@@ -33,6 +33,7 @@ mod credential;
 mod collider_genesis;
 mod coordinator;
 mod coordinator_lifecycle;
+mod coordinator_requests;
 mod creature_shapes;
 mod gjk_upstream;
 mod ground;

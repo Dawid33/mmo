@@ -83,6 +83,10 @@ pub enum RegionInput {
     /// A neighbour the store cannot serve is seeded from worldgen, as
     /// [`RegionInput::SeedHaloFromWorldgen`].
     SeedHaloFromStore(Vec<RegionCoords>),
+    /// The history people whose bodies stand here now: answered with
+    /// [`RegionOutput::PeoplePositions`] (empty included) — the host's `Attach`
+    /// to a (re)connected world coordinator. Does not affect sim state.
+    ListPeople,
     /// Graceful stop; replied with `RegionOutput::Stopped(state)`.
     Shutdown,
 }
@@ -175,6 +179,7 @@ pub enum RegionOutput {
     /// Sent just before a `CutSnapshot`: where the people with a body here
     /// stand (region-local translations), for the history
     /// (`History::note_positions`) — the snapshot itself holds no people.
+    /// Also the answer to [`RegionInput::ListPeople`].
     PeoplePositions(Vec<(crate::history::PersonId, [f32; 3])>),
     /// Never sent by a runner: the manager puts it on the output channel
     /// just before it spawns a region's runner, so it can tell a dead
@@ -512,6 +517,10 @@ impl RegionRunner {
             }
             RegionInput::SeedHaloFromWorldgen(neighbours) => self.seed_halo_from_worldgen(neighbours),
             RegionInput::SeedHaloFromStore(neighbours) => self.seed_halo_from_store(neighbours),
+            RegionInput::ListPeople => {
+                let people = self.region.data().people_here();
+                let _ = self.out.send((self.id, RegionOutput::PeoplePositions(people)));
+            }
             RegionInput::Shutdown => {
                 // A save cut at a tick this region will not reach now: it
                 // parks there, so its answer is its state with what is held

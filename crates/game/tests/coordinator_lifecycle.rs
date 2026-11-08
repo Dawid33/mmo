@@ -258,13 +258,14 @@ fn spawn_for_stopped_incarnation_is_returned() {
         // Start the site region and stop everything at once, no settling: its people
         // land before the stop or after it, by the seed.
         w.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(rc(1, 0)), CLIENT));
-        if w.in_transit() > 0 {
-            dropped.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        }
+        let before = w.manager.world_link_counters().spawns_dropped;
         w.manager.shutdown_all();
         for _ in 0..DRAIN_ROUNDS {
             w.settle();
             w.manager.pump_world(w.now_ms);
+        }
+        if w.manager.world_link_counters().spawns_dropped > before {
+            dropped.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
         assert_eq!(w.in_transit(), 0, "seed {seed}: the link drained");
         assert!(w.manager.running_regions().is_empty(), "seed {seed}: every region parked");
@@ -309,9 +310,17 @@ fn person_crossing_under_delay_conserves_people() {
         // the seam rather than parked with (2, 0)).
         let mut in_east: std::collections::BTreeSet<PersonId> = Default::default();
         let (mut seen_delivered, mut seen_absorbed) = (false, false);
+        let east = w.manager.region_incarnation(rc(2, 0)).expect("(2, 0) runs");
         for round in 0..WALK_ROUNDS {
             w.tick_upkeep_first();
             w.check_lagging(&format!("round {round}"));
+            // Delivered only into a running region that is not stopping: a walker reaching
+            // (2, 0) while it stops is absorbed, never queued for it — a queued arrival
+            // would wake it again right after its park (a second incarnation).
+            if let Some(now) = w.manager.region_incarnation(rc(2, 0)) {
+                assert_eq!(now, east, "seed {seed} round {round}: (2, 0) woke after its park");
+            }
+            assert_eq!(w.manager.pending_arrival_count(rc(2, 0)), 0, "seed {seed} round {round}: nothing waits for (2, 0)");
             let h = w.history();
             let alive = h.people().filter(|q| q.alive()).count();
             assert_eq!(alive, population, "seed {seed} round {round}: the population");
@@ -364,13 +373,14 @@ fn directive_for_stopping_region_bounces_and_lands_once() {
         w.manager.pump_world(w.now_ms);
         // The stop: what is still on the link reaches a stopping region and bounces.
         w.now_ms += UNLOAD_GRACE_MS;
+        let before = w.manager.world_link_counters().directives_bounced;
         w.manager.maintain(w.now_ms);
-        if w.in_transit() > 0 {
-            bounced.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        }
         for round in 0..DRAIN_ROUNDS {
             w.tick();
             w.check_lagging(&format!("stopping, round {round}"));
+        }
+        if w.manager.world_link_counters().directives_bounced > before {
+            bounced.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
         assert!(!w.running(rc(1, 0)), "seed {seed}: parked");
         w.drain();

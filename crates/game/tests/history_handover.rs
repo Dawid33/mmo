@@ -710,7 +710,7 @@ pub fn install_history_with<S: game::RegionSpawner>(
         Some(s) => link.with_schedule(s),
         None => link,
     };
-    m.set_world_link(Box::new(link), now_ms);
+    m.set_world_link(Box::new(link), 0, now_ms);
 }
 
 /// The history of the manager's inline coordinator.

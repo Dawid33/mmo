@@ -1,0 +1,513 @@
+//! R2b Task 6: a player's world requests (embark, return, adventure, legends, …) are
+//! coordinator requests with ids, queued in the host's outbox while the world link is
+//! down and replayed after its `Attach`, answered once, or `WorldUnavailable` after the
+//! timeout. Driven through a `WorldManager` over `InlineSpawner` regions and an inline
+//! coordinator link whose every output is held back 0..=3 pumps by the seed
+//! (`InlineSchedule::coordinator_delay`); the link is taken down and up with
+//! `InlineWorldLink::set_up`. Each test sweeps [`SEEDS`] seeds; a failure names the seed
+//! to replay.
+
+use std::sync::{Arc, Mutex};
+
+use crate::history_handover::{assert_one_place, bodies, floored_region, history_mut_of, history_of, land_map, years_before};
+use crossbeam::channel::{unbounded, Receiver};
+use game::history::bootstrap::{bootstrap, BootstrapParams};
+use game::history::*;
+use game::{
+    Biome, ClientId, ClientPacket, Coordinator, EmbarkRequest, HostMsg, InlineLodBuilder, InlineSchedule, InlineSpawner,
+    InlineWorldLink, LodBuilder, PlayerId, RegionCoords, RegionOutput, ServerEvent, ServerPacket, WorldLink,
+    WorldManager, WorldMap, WorldRequest, TICK_RATE, UNLOAD_GRACE_MS, WORLD_REQUEST_TIMEOUT_SECS,
+};
+
+/// Seeds swept per test.
+const SEEDS: u64 = 32;
+/// Most pumps the link holds each coordinator output back.
+const LINK_DELAY: u32 = 3;
+/// Rounds that drain the link and let the regions settle.
+const DRAIN_ROUNDS: usize = 10;
+
+const A: ClientId = 0;
+const B: ClientId = 1;
+/// Player `A` again after a reconnect: client ids are per connection.
+const A2: ClientId = 2;
+
+fn rc(x: i32, z: i32) -> RegionCoords {
+    RegionCoords::new(x, z)
+}
+
+/// Run `f(seed)` for every seed; a failure names the seed.
+fn each_seed(test: &str, f: impl Fn(u64) + std::panic::RefUnwindSafe) {
+    for seed in 0..SEEDS {
+        if let Err(e) = std::panic::catch_unwind(|| f(seed)) {
+            let why = e
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| e.downcast_ref::<&str>().map(|s| s.to_string()))
+                .unwrap_or_default();
+            panic!("{test}: seed {seed} failed (replay with that seed): {why}");
+        }
+    }
+}
+
+/// A roll in `0..n` from the seed and a salt.
+fn roll(seed: u64, salt: u64, n: u64) -> u64 {
+    let mut z = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ salt.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 31)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    (z ^ (z >> 29)) % n
+}
+
+/// A 16 × 1 strip of grassland whose first tile — the spawn region (0, 0) — is ocean.
+fn strip() -> WorldMap {
+    let mut m = land_map(16, 1);
+    m.tiles[0].biome = Biome::Ocean;
+    m
+}
+
+/// One civ of ten founders, no years run.
+fn history() -> History {
+    let p = BootstrapParams { seed: 7, civs: 1, founders_per_civ: 10, years: 0, ..BootstrapParams::default() };
+    bootstrap(&strip(), &p).expect("the strip holds a civ")
+}
+
+/// The inline link, recording every message the coordinator was handed (sent while up).
+struct Recording {
+    inner: InlineWorldLink,
+    sent: Arc<Mutex<Vec<HostMsg>>>,
+}
+
+impl WorldLink for Recording {
+    fn send(&mut self, msg: HostMsg) {
+        if self.inner.is_up() {
+            self.sent.lock().unwrap().push(msg.clone());
+        }
+        self.inner.send(msg);
+    }
+    fn recv(&mut self) -> Option<game::CoordMsg> {
+        self.inner.recv()
+    }
+    fn is_up(&self) -> bool {
+        self.inner.is_up()
+    }
+    fn pump(&mut self, now_ms: u64) {
+        self.inner.pump(now_ms);
+    }
+    fn history_snapshot(&mut self) -> Option<Vec<u8>> {
+        self.inner.history_snapshot()
+    }
+    fn as_inline_mut(&mut self) -> Option<&mut InlineWorldLink> {
+        Some(&mut self.inner)
+    }
+    fn as_inline(&self) -> Option<&InlineWorldLink> {
+        Some(&self.inner)
+    }
+}
+
+/// A `WorldManager` over a bootstrapped history whose world link lags by the seed.
+struct World {
+    manager: WorldManager<InlineSpawner>,
+    region_out: Receiver<(RegionCoords, RegionOutput)>,
+    packets: Receiver<(Option<ClientId>, ServerPacket)>,
+    inbox: Vec<(Option<ClientId>, ServerPacket)>,
+    now_ms: u64,
+    seed: u64,
+    sent: Arc<Mutex<Vec<HostMsg>>>,
+}
+
+impl World {
+    fn new(seed: u64) -> Self {
+        let (out_send, packets) = unbounded();
+        let (region_out_send, region_out) = unbounded();
+        let (lod_result_send, lod_result_recv) = unbounded();
+        let lod_builder: Box<dyn LodBuilder> = Box::new(InlineLodBuilder {
+            coarse: Box::new(|_key: &game::lod::LodKey| Vec::new()),
+            water: Box::new(game::lod::LodWater::dry),
+            out: lod_result_send,
+        });
+        let mut manager = WorldManager::new(
+            InlineSpawner::default(),
+            Box::new(floored_region),
+            out_send,
+            region_out_send,
+            lod_builder,
+            lod_result_recv,
+        );
+        manager.set_world_map(strip());
+        let schedule = InlineSchedule::shuffled(seed).coordinator_delay(LINK_DELAY);
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let inner = InlineWorldLink::new(Coordinator::new(history(), 0)).with_schedule(&schedule);
+        manager.set_world_link(Box::new(Recording { inner, sent: sent.clone() }), seed, 0);
+        World { manager, region_out, packets, inbox: Vec::new(), now_ms: 0, seed, sent }
+    }
+
+    /// Connected players `clients`, the link drained.
+    fn with(seed: u64, clients: &[ClientId]) -> Self {
+        let mut w = World::new(seed);
+        for &c in clients {
+            w.send(ServerEvent::connected(c));
+        }
+        w.drain();
+        w.inbox.clear();
+        w
+    }
+
+    fn settle(&mut self) {
+        for _ in 0..4 {
+            self.manager.spawner_mut().pump();
+            while let Ok((rc, out)) = self.region_out.try_recv() {
+                self.manager.handle_region_output(rc, out, self.now_ms);
+            }
+        }
+        for (to, p) in self.packets.try_iter() {
+            if !matches!(
+                p,
+                ServerPacket::Region(..) | ServerPacket::GameEvent(_) | ServerPacket::SyncClock(..) | ServerPacket::LodData(..)
+            ) {
+                self.inbox.push((to, p));
+            }
+        }
+    }
+
+    fn send(&mut self, ev: ServerEvent) {
+        assert!(self.manager.handle_server_event(ev, self.now_ms));
+        self.settle();
+    }
+
+    fn packet(&mut self, c: ClientId, packet: ClientPacket) {
+        self.send(ServerEvent::ClientPacket(packet, c));
+    }
+
+    fn tick(&mut self) {
+        self.now_ms += TICK_RATE;
+        self.manager.spawner_mut().tick_all();
+        self.settle();
+        self.manager.maintain(self.now_ms);
+        self.settle();
+    }
+
+    fn link(&mut self) -> &mut InlineWorldLink {
+        self.manager.world_link_mut().and_then(|l| l.as_inline_mut()).expect("an inline link")
+    }
+
+    fn set_up(&mut self, up: bool) {
+        self.link().set_up(up);
+    }
+
+    /// Ticks until the link is empty and every request answered.
+    fn drain(&mut self) {
+        for _ in 0..DRAIN_ROUNDS {
+            self.tick();
+        }
+        assert_eq!(self.link().in_transit(), 0, "seed {}: the link drained", self.seed);
+        assert_eq!(self.manager.pending_world_requests(), 0, "seed {}: every request answered", self.seed);
+        assert!(self.manager.world_attached(), "seed {}: attached", self.seed);
+    }
+
+    fn history(&self) -> &History {
+        history_of(&self.manager)
+    }
+
+    fn coordinator(&mut self) -> &Coordinator {
+        self.link().coordinator()
+    }
+
+    /// Every `EmbarkResult` sent to `c` since the last call.
+    fn embark_results(&mut self, c: ClientId) -> Vec<Result<SiteId, EmbarkRefusal>> {
+        let mut out = Vec::new();
+        self.inbox.retain(|(to, p)| match p {
+            ServerPacket::EmbarkResult(r) if *to == Some(c) => {
+                out.push(*r);
+                false
+            }
+            _ => true,
+        });
+        out
+    }
+
+    /// Every `Legends` page sent to `c` since the last call.
+    fn legends(&mut self, c: ClientId) -> usize {
+        let before = self.inbox.len();
+        self.inbox.retain(|(to, p)| !(matches!(p, ServerPacket::Legends(_)) && *to == Some(c)));
+        before - self.inbox.len()
+    }
+
+    /// `c` asks `packet`, then the world drains: its one `EmbarkResult`.
+    fn ask(&mut self, c: ClientId, packet: ClientPacket) -> Result<SiteId, EmbarkRefusal> {
+        self.packet(c, packet);
+        self.drain();
+        let results = self.embark_results(c);
+        assert_eq!(results.len(), 1, "seed {}: one EmbarkResult: {results:?}", self.seed);
+        results[0]
+    }
+
+    /// The bootstrapped site's civ and people, and a region a new site may go in.
+    fn embark_request(&self) -> EmbarkRequest {
+        let h = self.history();
+        let s = h.sites().next().expect("a site");
+        let region = (0..16).map(|x| rc(x, 0)).find(|r| h.embark_allowed(*r).is_ok()).expect("room to embark");
+        EmbarkRequest { civ: s.civ, people: s.members.iter().copied().take(2).collect(), region }
+    }
+
+    fn player_sites(&self) -> Vec<SiteId> {
+        self.history().sites().filter(|s| s.player_founded).map(|s| s.id).collect()
+    }
+
+    fn players_in(&mut self, r: RegionCoords) -> Vec<ClientId> {
+        let mut out = Vec::new();
+        if self.manager.running_regions().contains(&r) {
+            self.manager.spawner_mut().with_region(r, |region| out.extend(region.data().clients.keys().copied()));
+        }
+        out
+    }
+
+    /// The messages the coordinator was handed since `mark`.
+    fn sent_since(&self, mark: usize) -> Vec<HostMsg> {
+        self.sent.lock().unwrap()[mark..].to_vec()
+    }
+
+    fn mark(&self) -> usize {
+        self.sent.lock().unwrap().len()
+    }
+
+    /// At most one body per person, only for the living, only where the history has it.
+    fn check_lagging(&mut self, when: &str) {
+        let census = bodies(&mut self.manager);
+        let h = history_of(&self.manager);
+        for (p, at) in &census {
+            assert_eq!(at.len(), 1, "seed {} {when}: {p:?} has bodies in {at:?}", self.seed);
+            let q = h.person(*p).unwrap_or_else(|| panic!("seed {} {when}: a body for unknown {p:?}", self.seed));
+            assert_eq!(q.location, Location::InRegion(at[0]), "seed {} {when}: {p:?}'s body", self.seed);
+        }
+    }
+
+    fn check_settled(&mut self, when: &str) {
+        let census = bodies(&mut self.manager);
+        assert_one_place(history_of(&self.manager), &census, &format!("seed {} {when}", self.seed));
+    }
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn embark_round_trip_moves_player_once() {
+    each_seed("embark_round_trip_moves_player_once", |seed| {
+        let mut w = World::with(seed, &[A]);
+        let req = w.embark_request();
+        let site = w.ask(A, ClientPacket::Embark(req.clone())).expect("embarked");
+        assert_eq!(w.player_sites(), vec![site], "seed {seed}: one site founded");
+        assert_eq!(w.coordinator().claim_of(PlayerId(A as u64)), Some(game::Claim::Fortress(site)));
+        assert_eq!(w.players_in(req.region), vec![A], "seed {seed}: the player moved in once");
+        for p in &req.people {
+            assert_eq!(bodies(&mut w.manager).get(p), Some(&vec![req.region]), "seed {seed}: {p:?} in the fortress");
+        }
+        w.check_settled("embarked");
+        // A second embark of the same player: refused by the host, nothing sent.
+        let again = w.ask(A, ClientPacket::Embark(req));
+        assert_eq!(again, Err(EmbarkRefusal::AlreadyHasFortress));
+    });
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn embark_reply_after_disconnect_releases_claim() {
+    each_seed("embark_reply_after_disconnect_releases_claim", |seed| {
+        let mut w = World::with(seed, &[A, B]);
+        let req = w.embark_request();
+        // Down: the embark waits in the outbox; its player leaves before it is answered.
+        w.set_up(false);
+        w.packet(A, ClientPacket::Embark(req.clone()));
+        w.send(ServerEvent::ClientDisconnected(A));
+        assert_eq!(w.manager.pending_world_requests(), 1);
+        w.set_up(true);
+        w.drain();
+        assert!(w.embark_results(A).is_empty(), "seed {seed}: nobody to tell");
+        let sites = w.player_sites();
+        assert_eq!(sites.len(), 1, "seed {seed}: the site is founded once");
+        let site = sites[0];
+        assert!(w.history().returnable(site), "seed {seed}: the site stays, returnable");
+        assert_eq!(w.coordinator().claim_of(PlayerId(A as u64)), None, "seed {seed}: the claim was given back");
+        assert!(w.players_in(req.region).is_empty(), "seed {seed}: nobody moved in");
+        assert_eq!(w.ask(B, ClientPacket::ReturnTo(site)), Ok(site), "seed {seed}: free for another player");
+        w.check_settled("returned");
+    });
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn requests_queue_while_link_down_and_replay_once() {
+    each_seed("requests_queue_while_link_down_and_replay_once", |seed| {
+        let mut w = World::with(seed, &[A]);
+        let req = w.embark_request();
+        let query = LegendsQuery { filter: LegendsFilter::All, before: None, limit: 5 };
+        w.set_up(false);
+        w.packet(A, ClientPacket::Embark(req.clone()));
+        w.packet(A, ClientPacket::RequestLegends(query.clone()));
+        assert_eq!(w.manager.world_outbox_len(), 2, "seed {seed}: both queued");
+        for _ in 0..roll(seed, 1, 4) {
+            w.tick();
+        }
+        assert!(w.embark_results(A).is_empty() && w.legends(A) == 0, "seed {seed}: unanswered while down");
+        let mark = w.mark();
+        w.set_up(true);
+        w.drain();
+        let sent = w.sent_since(mark);
+        assert!(matches!(sent.first(), Some(HostMsg::Attach { .. })), "seed {seed}: the Attach first: {sent:?}");
+        let requests: Vec<&WorldRequest> = sent
+            .iter()
+            .filter_map(|m| match m {
+                HostMsg::Request { req, .. } => Some(req),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            matches!(requests[..], [WorldRequest::Embark(_), WorldRequest::Legends(_)]),
+            "seed {seed}: each request once, in order: {requests:?}"
+        );
+        assert_eq!(w.embark_results(A).len(), 1, "seed {seed}: one EmbarkResult");
+        assert_eq!(w.legends(A), 1, "seed {seed}: one Legends page");
+        assert_eq!(w.player_sites().len(), 1, "seed {seed}: one site");
+        assert_eq!(w.manager.world_outbox_len(), 0);
+        assert_eq!(w.players_in(req.region), vec![A]);
+    });
+}
+
+/// A request already sent when the link drops — its reply lost with the connection, or
+/// still on its way — is sent again after the `Attach`: the coordinator answers it from
+/// its memo, and the host takes the first reply only (a second one for the same id is
+/// dropped).
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn sent_request_replayed_after_reconnect_answers_once() {
+    let replayed = std::sync::atomic::AtomicU64::new(0);
+    each_seed("sent_request_replayed_after_reconnect_answers_once", |seed| {
+        let mut w = World::with(seed, &[A]);
+        let req = w.embark_request();
+        let mark = w.mark();
+        w.manager.handle_server_event(ServerEvent::ClientPacket(ClientPacket::Embark(req.clone()), A), w.now_ms);
+        for _ in 0..roll(seed, 2, 3) {
+            w.manager.pump_world(w.now_ms);
+        }
+        // Down before anything else pumps the link (every region output handled does);
+        // a dropped connection may lose the reply on it.
+        w.set_up(false);
+        if roll(seed, 5, 2) == 0 {
+            w.link().lose_in_transit();
+        }
+        w.tick();
+        w.set_up(true);
+        w.drain();
+        let embark_requests: Vec<HostMsg> = w
+            .sent_since(mark)
+            .into_iter()
+            .filter(|m| matches!(m, HostMsg::Request { req: WorldRequest::Embark(_), .. }))
+            .collect();
+        if embark_requests.len() > 1 {
+            replayed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        let site = w.embark_results(A);
+        assert!(matches!(site[..], [Ok(_)]), "seed {seed}: one EmbarkResult: {site:?}");
+        assert_eq!(w.player_sites().len(), 1, "seed {seed}: one site");
+        assert_eq!(w.players_in(req.region), vec![A], "seed {seed}: one body");
+        // The same request once more (a replay racing its first reply): answered from
+        // the memo, the second reply dropped by id.
+        w.link().send(embark_requests[0].clone());
+        w.drain();
+        assert!(w.embark_results(A).is_empty(), "seed {seed}: the second reply is dropped");
+        assert_eq!(w.player_sites().len(), 1, "seed {seed}: still one site");
+        assert_eq!(w.players_in(req.region), vec![A], "seed {seed}: still one body");
+    });
+    assert!(replayed.into_inner() > 0, "no seed replayed a sent request");
+}
+
+#[test]
+fn request_times_out_with_world_unavailable() {
+    let mut w = World::with(0, &[A]);
+    let req = w.embark_request();
+    w.set_up(false);
+    w.packet(A, ClientPacket::Embark(req.clone()));
+    w.packet(A, ClientPacket::RequestLegends(LegendsQuery { filter: LegendsFilter::All, before: None, limit: 5 }));
+    w.now_ms += WORLD_REQUEST_TIMEOUT_SECS * 1000 - TICK_RATE;
+    w.tick();
+    assert_eq!(w.embark_results(A), vec![Err(EmbarkRefusal::WorldUnavailable)]);
+    assert_eq!(w.manager.pending_world_requests(), 0, "forgotten");
+    assert_eq!(w.manager.world_outbox_len(), 0, "out of the outbox");
+    w.set_up(true);
+    w.drain();
+    assert!(w.embark_results(A).is_empty(), "never answered again");
+    assert_eq!(w.legends(A), 0, "a query just goes unanswered");
+    assert!(w.player_sites().is_empty(), "never founded");
+    // The world is back: the player may embark.
+    assert!(w.ask(A, ClientPacket::Embark(req)).is_ok());
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn return_in_use_across_reconnect() {
+    each_seed("return_in_use_across_reconnect", |seed| {
+        let mut w = World::with(seed, &[A, B]);
+        let site = w.ask(A, ClientPacket::Embark(w.embark_request())).expect("embarked");
+        assert_eq!(w.ask(B, ClientPacket::ReturnTo(site)), Err(EmbarkRefusal::InUse), "seed {seed}: A plays it");
+        w.send(ServerEvent::ClientDisconnected(A));
+        assert_eq!(w.ask(B, ClientPacket::ReturnTo(site)), Ok(site), "seed {seed}: A is offline");
+        // A comes back with its record's claim: B plays the fortress now.
+        w.send(ServerEvent::ClientConnected { client: A2, player: PlayerId(A as u64), record: None });
+        w.drain();
+        assert_eq!(w.coordinator().claim_of(PlayerId(A as u64)), None, "seed {seed}: A's claim is gone");
+        assert_eq!(w.ask(A2, ClientPacket::ReturnTo(site)), Err(EmbarkRefusal::InUse), "seed {seed}");
+    });
+}
+
+/// A history directive on the link when it drops (a spawn into a running region) reaches
+/// the host after its `Attach`: the attach re-decided the region from its bodies, so the
+/// host drops it rather than make a second body; restarted, the region spawns the person
+/// exactly once.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn directive_on_the_link_at_reconnect_is_dropped() {
+    let stale = std::sync::atomic::AtomicU64::new(0);
+    each_seed("directive_on_the_link_at_reconnect_is_dropped", |seed| {
+        let mut w = World::with(seed, &[A]);
+        let site_region = w.history().sites().next().unwrap().region;
+        w.packet(A, ClientPacket::RequestRegionConnection(site_region));
+        w.drain();
+        w.check_settled("running");
+        // A site founded into the running region: its founder's spawn is a directive,
+        // decided at the next pump and held on the link by the seed.
+        let history = history_mut_of(&mut w.manager);
+        let born = years_before(history.now(), 20);
+        let founder = history.add_founder(Sex::Male, born);
+        let civ = history.sites().next().unwrap().civ;
+        let new_site = history.found_site(civ, site_region, &[founder], None, true);
+        for _ in 0..roll(seed, 3, 3) {
+            w.manager.pump_world(w.now_ms);
+        }
+        let before = w.manager.world_link_counters().stale_dropped;
+        w.set_up(false);
+        for round in 0..roll(seed, 4, 3) {
+            w.tick();
+            w.check_lagging(&format!("down, round {round}"));
+        }
+        w.set_up(true);
+        for round in 0..DRAIN_ROUNDS {
+            w.tick();
+            w.check_lagging(&format!("reattached, round {round}"));
+        }
+        w.drain();
+        w.check_settled("reattached");
+        if w.manager.world_link_counters().stale_dropped > before {
+            stale.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        // Restarted: the founder lands exactly once, whether its spawn landed before the
+        // drop or was superseded by the attach.
+        w.packet(A, ClientPacket::ReleaseRegionConnection(site_region));
+        w.now_ms += UNLOAD_GRACE_MS;
+        w.drain();
+        assert!(!w.manager.running_regions().contains(&site_region), "seed {seed}: parked");
+        assert_eq!(w.history().person(founder).unwrap().location, Location::AtSite(new_site), "seed {seed}");
+        w.packet(A, ClientPacket::RequestRegionConnection(site_region));
+        w.drain();
+        w.check_settled("restarted");
+        assert_eq!(bodies(&mut w.manager).get(&founder), Some(&vec![site_region]), "seed {seed}: one body");
+    });
+    let stale = stale.into_inner();
+    assert!(stale > 0, "no seed had the spawn on the link at the reconnect");
+    assert!(stale < SEEDS, "no seed landed the spawn before the drop");
+}

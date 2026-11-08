@@ -151,7 +151,7 @@ impl Coordinator {
         self.clock_ms = self.clock_ms.max(now_ms);
         self.dirty_since_save = true;
         match msg {
-            HostMsg::Attach { host, running, online } => self.attach(host, running, online),
+            HostMsg::Attach { host, epoch, running, online } => self.attach(host, epoch, running, online),
             HostMsg::RegionStarted { rc, incarnation } => {
                 self.incarnations.insert(rc, incarnation);
                 let events = self.history.region_started(rc);
@@ -326,8 +326,8 @@ impl Coordinator {
     }
 
     /// Forget every directive not yet handed out (waiting or free to leave): an `Attach`
-    /// re-decides every region from its bodies, so they are stale. Directives already
-    /// handed to a link are the host's concern (R2b Task 6).
+    /// re-decides every region from its bodies, so they are stale. Those already handed
+    /// to the link reach the host ahead of [`CoordMsg::Attached`], and it drops them.
     fn drop_unsent_directives(&mut self) {
         let is_directive = |m: &CoordMsg| matches!(m, CoordMsg::Directive { .. });
         let before = self.gated.len() + self.out.len();
@@ -371,12 +371,24 @@ impl Coordinator {
         }
     }
 
-    /// A host (re)attached: its running regions are re-embodied as they stand (regions the
-    /// history had live but the host does not run park empty), its online players are the
-    /// online ones, and it gets the view.
-    fn attach(&mut self, host: u32, running: Vec<RunningRegion>, online: Vec<(PlayerId, Option<Claim>)>) {
-        log::info!("coordinator: host {host} attached with {} running regions, {} online", running.len(), online.len());
+    /// A host (re)attached: it is told so first ([`CoordMsg::Attached`], ahead of every
+    /// directive decided from here on), its running regions are re-embodied as they stand
+    /// (regions the history had live but the host does not run park empty), its online
+    /// players are the online ones, and it gets the view.
+    fn attach(
+        &mut self,
+        host: u32,
+        epoch: u64,
+        running: Vec<RunningRegion>,
+        online: Vec<(PlayerId, Option<Claim>)>,
+    ) {
+        log::info!(
+            "coordinator: host {host} attached (epoch {epoch}) with {} running regions, {} online",
+            running.len(),
+            online.len()
+        );
         self.drop_unsent_directives();
+        self.push(CoordMsg::Attached { epoch });
         let listed: std::collections::BTreeSet<RegionCoords> = running.iter().map(|r| r.rc).collect();
         for rc in self.history.live_regions() {
             if !listed.contains(&rc) {
@@ -404,18 +416,27 @@ impl Coordinator {
     }
 
     /// `player` is online. The coordinator's claim stands; without one, the host's claim
-    /// (from the player's record) is taken when its site is free.
+    /// (from the player's record) is taken unless another *online* player holds its site
+    /// (an offline claimant loses it, as to a return — the host's own rule when it
+    /// restores the claim: only if no connected player plays that fortress).
     fn player_online(&mut self, player: PlayerId, claim: Option<Claim>) {
         match (self.player_claims.get(&player).copied(), claim) {
             (Some(mine), Some(theirs)) if mine != theirs => {
                 log::warn!("coordinator: {player:?} comes online claiming {theirs:?}; it holds {mine:?}");
             }
             (None, Some(Claim::Fortress(site))) => {
-                if let Some((other, _)) = self.claims.get(&site).filter(|(o, _)| *o != player) {
-                    log::info!("coordinator: {player:?}'s fortress {site:?} is {other:?}'s now; claim dropped");
-                } else {
-                    self.claims.insert(site, (player, true));
-                    self.player_claims.insert(player, Claim::Fortress(site));
+                match self.claims.get(&site).copied() {
+                    Some((other, true)) if other != player => {
+                        log::info!("coordinator: {player:?}'s fortress {site:?} is {other:?}'s now; claim dropped");
+                    }
+                    claimed => {
+                        if let Some((other, _)) = claimed.filter(|(o, _)| *o != player) {
+                            log::info!("coordinator: {player:?} comes back to {site:?}; offline {other:?} loses it");
+                            self.player_claims.remove(&other);
+                        }
+                        self.claims.insert(site, (player, true));
+                        self.player_claims.insert(player, Claim::Fortress(site));
+                    }
                 }
             }
             (None, Some(c @ Claim::Adventure(_))) => {
@@ -462,7 +483,13 @@ impl Coordinator {
         if memoise {
             self.remember(id, reply.clone());
         }
+        let granted = reply.grants_claim();
         self.push(CoordMsg::Reply { id, reply });
+        if granted {
+            // The host's view of the sites follows at once (a founded site, its claim);
+            // clients still get them at the day's turn.
+            self.push(CoordMsg::SiteMarkers(self.history.site_markers()));
+        }
     }
 
     fn remember(&mut self, id: RequestId, reply: WorldReply) {

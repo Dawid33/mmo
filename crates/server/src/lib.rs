@@ -668,7 +668,7 @@ pub fn run() -> claims::ServerExit {
             {
                 // In-process world services for now (R2b Task 9 picks the link per role).
                 let coordinator = game::Coordinator::new(history, 0);
-                manager.set_world_link(Box::new(game::InlineWorldLink::new(coordinator)), 0);
+                manager.set_world_link(Box::new(game::InlineWorldLink::new(coordinator)), host_boot(), 0);
             }
         }
         manager.set_world_map(map);
@@ -983,4 +983,13 @@ mod tests {
         assert!(malformed.contains("TOKIO_WORKER_THREADS"));
         assert!(malformed.contains("positive integer"));
     }
+}
+
+/// A number distinct per host process start (its world requests' `RequestId::boot`): the
+/// wall clock's nanoseconds mixed with the process id.
+fn host_boot() -> u64 {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos() as u64);
+    nanos ^ (u64::from(std::process::id()) << 32)
 }

@@ -291,7 +291,7 @@ fn reattach_keeps_bodies_and_despawns_the_dead() {
     let mut c = Coordinator::from_state(state, grid(), 60_000).expect("state loads");
     assert!(matches!(c.take_out().as_slice(), [CoordMsg::View { .. }]));
     let running = RunningRegion { rc: r, incarnation: 1, people: vec![(p, [1.0, 2.0, 3.0]), (q, [4.0, 5.0, 6.0])] };
-    c.handle(HostMsg::Attach { host: 0, running: vec![running], online: Vec::new() }, 60_000);
+    c.handle(HostMsg::Attach { host: 0, epoch: 1, running: vec![running], online: Vec::new() }, 60_000);
     let out = commit(&mut c);
     assert!(!out.iter().any(|m| matches!(m, CoordMsg::SpawnPeople { .. })), "a reattach spawns nothing: {out:?}");
     assert_eq!(events_about(&out, q), Vec::<GameEventKind>::new(), "Q's body stands");
@@ -499,7 +499,7 @@ fn attach_supersedes_unsent_directives() {
     assert!(c.take_out().is_empty());
     // The link dropped; the host re-attaches running `r` with no body of P.
     let running = RunningRegion { rc: r, incarnation: 1, people: Vec::new() };
-    c.handle(HostMsg::Attach { host: 0, running: vec![running], online: vec![(A, None)] }, 0);
+    c.handle(HostMsg::Attach { host: 0, epoch: 1, running: vec![running], online: vec![(A, None)] }, 0);
     let out = commit(&mut c);
     assert!(directives_for(&out, r).is_empty(), "the stale spawn is dropped: {out:?}");
     assert!(matches!(reply_to(&out, 1), WorldReply::Embarked { .. }), "the reply still leaves");
@@ -533,7 +533,7 @@ fn reattach_keeps_a_body_that_crossed_between_listed_regions() {
         if order {
             running.reverse();
         }
-        c.handle(HostMsg::Attach { host: 0, running, online: Vec::new() }, 0);
+        c.handle(HostMsg::Attach { host: 0, epoch: 1, running, online: Vec::new() }, 0);
         let out = commit(&mut c);
         assert_eq!(body_delta(&out, p), 0, "order {order}: no despawn of P's only body: {out:?}");
         assert_eq!(c.history().person(p).unwrap().location, Location::InRegion(r1), "order {order}");

@@ -57,11 +57,13 @@ pub struct InlineWorldLink {
     step: u64,
     /// Outputs released so far (the roll's index).
     released: u64,
+    /// Test hook ([`InlineWorldLink::set_up`]): `false` simulates a link that dropped.
+    up: bool,
 }
 
 impl InlineWorldLink {
     pub fn new(coord: Coordinator) -> Self {
-        InlineWorldLink { coord, in_q: VecDeque::new(), out_q: VecDeque::new(), delay: None, step: 0, released: 0 }
+        InlineWorldLink { coord, in_q: VecDeque::new(), out_q: VecDeque::new(), delay: None, step: 0, released: 0, up: true }
     }
 
     /// Each output readable 0..=`max_steps` pumps after the one that made it.
@@ -90,14 +92,37 @@ impl InlineWorldLink {
     pub fn in_transit(&self) -> usize {
         self.out_q.len()
     }
+
+    /// Test hook: take the link down (`false`) or bring it back (`true`). While down,
+    /// [`WorldLink::is_up`] is false, whatever the host sends is lost (as on a dropped
+    /// connection) and nothing is readable; the coordinator keeps running (its calendar
+    /// moves on each pump), and what it sent meanwhile — or had on the link before —
+    /// is read once the link is up again: stale messages arriving after a reconnect.
+    pub fn set_up(&mut self, up: bool) {
+        self.up = up;
+    }
+
+    /// Test hook: lose every output not read yet, as a dropped connection loses what was
+    /// on it (the coordinator still made them: a request it answered is answered again
+    /// from its memo when the host replays it).
+    pub fn lose_in_transit(&mut self) {
+        self.out_q.clear();
+    }
 }
 
 impl WorldLink for InlineWorldLink {
     fn send(&mut self, msg: HostMsg) {
-        self.in_q.push_back(msg);
+        if self.up {
+            self.in_q.push_back(msg);
+        } else {
+            log::debug!("inline world link down: {msg:?} lost");
+        }
     }
 
     fn recv(&mut self) -> Option<CoordMsg> {
+        if !self.up {
+            return None;
+        }
         if self.out_q.front().is_some_and(|(due, _)| *due <= self.step) {
             self.out_q.pop_front().map(|(_, m)| m)
         } else {
@@ -106,7 +131,7 @@ impl WorldLink for InlineWorldLink {
     }
 
     fn is_up(&self) -> bool {
-        true
+        self.up
     }
 
     fn pump(&mut self, now_ms: u64) {
