@@ -21,7 +21,7 @@ pub const KEY_DIR_MODE: u32 = 0o700;
 /// What [`run_ctl_with`] needs from outside, so tests can inject cheap hashing and a password.
 pub struct CtlDeps<'a> {
     pub hasher: Hasher,
-    /// Where `account set-password` reads the password (one line).
+    /// Where `account set-password` / `account ensure` read the password (one line).
     pub stdin: &'a mut dyn BufRead,
 }
 
@@ -31,6 +31,7 @@ const USAGE: &str = "usage: login [--db <url>] <command>
   world add <id> --name <n> [--quic host:port] [--wt url] [--cert-hash h] [--closed]
   world list | remove <id> | open <id> | close <id>
   account set-password <email>   (password on stdin)
+  account ensure <email> [--verified]   (password on stdin; creates or updates)
   account verify <email>";
 
 /// Run one admin command with the real hasher and stdin.
@@ -103,6 +104,7 @@ pub fn run_ctl_with(args: &[String], out: &mut dyn Write, deps: CtlDeps<'_>) -> 
     let wt = take_opt(&mut args, "--wt")?;
     let cert_hash = take_opt(&mut args, "--cert-hash")?;
     let closed = take_flag(&mut args, "--closed");
+    let verified = take_flag(&mut args, "--verified");
     let words: Vec<&str> = args.iter().map(String::as_str).collect();
 
     let config = || LoginConfig::from_env();
@@ -178,11 +180,8 @@ pub fn run_ctl_with(args: &[String], out: &mut dyn Write, deps: CtlDeps<'_>) -> 
         }
         ["account", "set-password", email] => {
             let email = normalize_email(email).map_err(|e| e.to_string())?;
-            let mut line = String::new();
-            deps.stdin.read_line(&mut line).map_err(io)?;
-            let password = line.trim_end_matches(['\n', '\r']);
-            check_password(password).map_err(|e| e.to_string())?;
-            let hash = deps.hasher.hash(password);
+            let password = read_password(deps.stdin)?;
+            let hash = deps.hasher.hash(&password);
             block_on(async {
                 let store = open(&db_url()?).await?;
                 let acc = store
@@ -195,6 +194,39 @@ pub fn run_ctl_with(args: &[String], out: &mut dyn Write, deps: CtlDeps<'_>) -> 
                 store.revoke_account_refresh(acc.account_id, now_secs()).await.map_err(|e| e.to_string())
             })?;
             writeln!(out, "password set for {email}; refresh tokens revoked").map_err(io)
+        }
+        ["account", "ensure", email] => {
+            // Idempotent: create the account if missing, else make its password this one
+            // (an unchanged password keeps its refresh tokens); `--verified` marks it verified.
+            let email = normalize_email(email).map_err(|e| e.to_string())?;
+            let password = read_password(deps.stdin)?;
+            let hasher = &deps.hasher;
+            let what = block_on(async {
+                let store = open(&db_url()?).await?;
+                let err = |e: crate::LoginError| e.to_string();
+                let (id, what) = match store.account_by_email(&email).await.map_err(err)? {
+                    Some(acc) if hasher.verify(&password, &acc.password_hash) => (acc.account_id, "unchanged"),
+                    Some(acc) => {
+                        store.set_password(acc.account_id, &hasher.hash(&password)).await.map_err(err)?;
+                        store.revoke_account_refresh(acc.account_id, now_secs()).await.map_err(err)?;
+                        (acc.account_id, "password set")
+                    }
+                    None => {
+                        let id = store
+                            .create_account(&email, &hasher.hash(&password), now_secs())
+                            .await
+                            .map_err(err)?
+                            .ok_or_else(|| format!("account {email:?} appeared concurrently; run again"))?;
+                        (id, "created")
+                    }
+                };
+                if verified {
+                    store.mark_verified(id, now_secs()).await.map_err(err)?;
+                }
+                Ok(what)
+            })?;
+            let v = if verified { ", verified" } else { "" };
+            writeln!(out, "account {email}: {what}{v}").map_err(io)
         }
         ["account", "verify", email] => {
             let email = normalize_email(email).map_err(|e| e.to_string())?;
@@ -212,6 +244,15 @@ pub fn run_ctl_with(args: &[String], out: &mut dyn Write, deps: CtlDeps<'_>) -> 
         ["serve"] => Err("`serve` is run by the binary itself".into()),
         _ => Err(USAGE.into()),
     }
+}
+
+/// One line of `stdin`, checked against the password policy. Never echoed.
+fn read_password(stdin: &mut dyn BufRead) -> Result<String, String> {
+    let mut line = String::new();
+    stdin.read_line(&mut line).map_err(|e| e.to_string())?;
+    let password = line.trim_end_matches(['\n', '\r']).to_string();
+    check_password(&password).map_err(|e| e.to_string())?;
+    Ok(password)
 }
 
 async fn open(url: &str) -> Result<LoginStore, String> {

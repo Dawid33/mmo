@@ -107,3 +107,39 @@ async fn set_password_then_login() {
     assert!(row.email_verified_at.is_some());
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn account_ensure_creates_then_updates() {
+    let root = temp_dir("ensure");
+    let db = root.join("l.sqlite");
+    let db = db.to_str().unwrap().to_string();
+    let d = db.clone();
+    tokio::task::spawn_blocking(move || {
+        assert!(run(&d, "account ensure dev@localhost", "short\n").is_err());
+        let out = run(&d, "account ensure Dev@Localhost --verified", "dev-password\n").unwrap();
+        assert!(out.contains("created") && out.contains("verified"), "{out}");
+        assert!(!out.contains("dev-password"));
+        // Same password again: nothing to change.
+        let out = run(&d, "account ensure dev@localhost --verified", "dev-password\n").unwrap();
+        assert!(out.contains("unchanged"), "{out}");
+        // A new password replaces the old one.
+        let out = run(&d, "account ensure dev@localhost", "another-password\n").unwrap();
+        assert!(out.contains("password set") && !out.contains("another-password"), "{out}");
+    })
+    .await
+    .unwrap();
+    let store = LoginStore::open(&db).await.unwrap();
+    let row = store.account_by_email("dev@localhost").await.unwrap().unwrap();
+    assert!(Hasher::for_tests().verify("another-password", &row.password_hash));
+    assert!(!Hasher::for_tests().verify("dev-password", &row.password_hash));
+    assert!(row.email_verified_at.is_some());
+    // Without --verified a new account stays unverified.
+    drop(store);
+    let d = db.clone();
+    tokio::task::spawn_blocking(move || run(&d, "account ensure other@localhost", "other-password\n").unwrap())
+        .await
+        .unwrap();
+    let store = LoginStore::open(&db).await.unwrap();
+    assert!(store.account_by_email("other@localhost").await.unwrap().unwrap().email_verified_at.is_none());
+    let _ = std::fs::remove_dir_all(&root);
+}

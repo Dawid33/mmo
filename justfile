@@ -930,17 +930,20 @@ login-world-list:
 
 with_web := ""
 
-# A dev server that requires login, with the login service beside it: ensures a signing
-# key and the world `dev`, runs `login serve` in the background and the dev server
-# (VOXEL_AUTH=jwt, play region size) in the foreground; SIGTERMs the login service on exit.
-# `just with_web=1 dev-login` also serves the browser page (wasm-server-runner, :1334)
-# and prints its `?login=` URL (log target/dev-login/web.log).
-dev-login:
+# The dev account `dev-login` / `run-online` ensure (verified). Local dev database
+# (target/dev-login/login.sqlite) only — not a secret.
+dev_email := "dev@localhost"
+dev_password := "dev-password"
+
+# How long `run-online` waits for the login service and the server to come up.
+online_wait_secs := "180"
+
+# What `dev-login` and `run-online` need in the dev login database: a signing key,
+# the world `dev` (127.0.0.1:6466 / :6467) and the verified account `dev_email`.
+_dev-login-setup:
     #!/usr/bin/env bash
     set -euo pipefail
-    export VOXEL_REGION_BLOCKS={{play_blocks}}
     {{cap}} {{cargo}} build -p login --bin login
-    {{cap}} {{cargo}} build --bin server
     login=./target/debug/login
     if ! ls target/dev-login/keys/*.pem >/dev/null 2>&1; then
         $login keygen
@@ -948,6 +951,20 @@ dev-login:
     if ! $login world list | grep -q '^dev'$'\t'; then
         $login world add dev --name "Dev world" --quic 127.0.0.1:6466 --wt https://127.0.0.1:6467/
     fi
+    printf '%s\n' "{{dev_password}}" | $login account ensure {{dev_email}} --verified
+
+# A dev server that requires login, with the login service beside it: ensures a signing
+# key, the world `dev` and the dev account (`dev_email` / `dev_password`), runs `login serve`
+# in the background and the dev server (VOXEL_AUTH=jwt, play region size) in the
+# foreground; SIGTERMs the login service on exit.
+# `just with_web=1 dev-login` also serves the browser page (wasm-server-runner, :1334)
+# and prints its `?login=` URL (log target/dev-login/web.log).
+dev-login: _dev-login-setup
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export VOXEL_REGION_BLOCKS={{play_blocks}}
+    {{cap}} {{cargo}} build --bin server
+    login=./target/debug/login
     mkdir -p target/dev-login
     $login serve >target/dev-login/login.log 2>&1 </dev/null &
     lpid=$!
@@ -963,6 +980,50 @@ dev-login:
         trap 'echo "dev-login: stopping the login service and page"; kill -TERM $lpid $wpid 2>/dev/null; wait $lpid $wpid 2>/dev/null || true' EXIT
     fi
     VOXEL_AUTH=jwt VOXEL_WORLD_ID=dev VOXEL_LOGIN_URL=http://127.0.0.1:8790 ./target/debug/server
+
+# The `dev-login` setup, then the login service and the jwt dev server in the
+# background (logs target/dev-login/{login,server}.log), and once both answer (at most
+# `online_wait_secs`) the client in the foreground as `client debug online`: it logs in
+# as `dev_email`, joins world `dev` with the ticket's JWT and embarks (returning to the
+# account's fortress if it has one). Closing the client SIGTERMs the server (it saves
+# the world) and the login service. Honours `adapter` / `world` like `run`; play
+# region size. Refuses to start if UDP 6466 or TCP 8790 is already taken.
+# Straight into the game WITH login, as the pre-created dev account (no screens).
+run-online: _dev-login-setup
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if ss -Hlun 'sport = :6466' | grep -q . || ss -Hltn 'sport = :8790' | grep -q .; then
+        echo "run-online: UDP 6466 or TCP 8790 is already in use (a server / dev-login running?); stop it first" >&2
+        exit 1
+    fi
+    export VOXEL_REGION_BLOCKS={{play_blocks}}
+    if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
+    {{cap}} {{cargo}} build --bin server --bin client
+    mkdir -p target/dev-login
+    login_url=http://127.0.0.1:8790
+    ./target/debug/login serve >target/dev-login/login.log 2>&1 </dev/null &
+    lpid=$!
+    spid=""
+    trap 'echo "run-online: stopping the server and the login service"; kill -TERM $spid $lpid 2>/dev/null; wait $spid $lpid 2>/dev/null || true' EXIT
+    VOXEL_AUTH=jwt VOXEL_WORLD_ID=dev VOXEL_LOGIN_URL=$login_url \
+        ./target/debug/server >target/dev-login/server.log 2>&1 </dev/null &
+    spid=$!
+    echo "run-online: waiting for the login service ($login_url) and the server (UDP 6466)..."
+    deadline=$(( SECONDS + {{online_wait_secs}} ))
+    until curl -fsS -o /dev/null "$login_url/healthz" 2>/dev/null && ss -Hlun 'sport = :6466' | grep -q .; do
+        if ! kill -0 $lpid 2>/dev/null; then
+            echo "run-online: the login service exited; see target/dev-login/login.log" >&2; exit 1
+        fi
+        if ! kill -0 $spid 2>/dev/null; then
+            echo "run-online: the server exited; see target/dev-login/server.log" >&2; exit 1
+        fi
+        if (( SECONDS >= deadline )); then
+            echo "run-online: not up after {{online_wait_secs}} s; see target/dev-login/login.log and server.log" >&2; exit 1
+        fi
+        sleep 0.5
+    done
+    VOXEL_LOGIN_URL=$login_url VOXEL_LOGIN_EMAIL={{dev_email}} VOXEL_LOGIN_PASSWORD={{dev_password}} \
+        RUST_BACKTRACE=1 ./target/debug/client debug online
 
 # Run exactly the tests a change touches, by crate + cargo-test arguments:
 #   just test-one game "--test it lod_streaming::pristine"

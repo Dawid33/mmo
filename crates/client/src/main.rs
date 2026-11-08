@@ -178,10 +178,12 @@ fn main() {
     #[cfg(not(target_arch = "wasm32"))]
     let debug_scenario = {
         let args: Vec<String> = std::env::args().skip(1).collect();
-        client::debug_launch::parse_args(&args).unwrap_or_else(|message| {
-            eprintln!("{message}");
-            std::process::exit(2);
-        })
+        client::debug_launch::parse_args(&args)
+            .and_then(|scenario| scenario.map(client::debug_launch::DebugLaunchPlugin::from_env).transpose())
+            .unwrap_or_else(|message| {
+                eprintln!("{message}");
+                std::process::exit(2);
+            })
     };
     #[cfg(target_arch = "wasm32")]
     let debug_scenario: Option<()> = None;
@@ -324,9 +326,9 @@ fn main() {
     #[cfg(feature = "dev_ui")]
     app.add_plugins(renderer::dev_ui::DevUiPlugin);
     #[cfg(not(target_arch = "wasm32"))]
-    if let Some(scenario) = debug_scenario {
-        info!("[client] debug launch: {scenario:?}");
-        app.add_plugins(client::debug_launch::DebugLaunchPlugin { scenario });
+    if let Some(launch) = debug_scenario {
+        info!("[client] debug launch: {:?}", launch.scenario);
+        app.add_plugins(launch);
     }
 
     // Joining and leaving servers from the browser's menu.
