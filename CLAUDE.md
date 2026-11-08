@@ -141,6 +141,28 @@ reads (workers have no ECS; they install the embedded block registry themselves)
 (sim and meshing back on the main thread), `?workers=N` sizes the pool. Round-trip tests: `just test-one client
 "--lib compute::"`.
 
+### Role split (R2)
+
+- **Role split (R2, `VOXEL_ROLE=all|host|coordinator`, default `all` = one process as before; plan
+  `docs/superpowers/plans/2026-11-07-r2b-role-split.md`)**: the coordinator (`game::coordinator`, claims,
+  embark/return, history, sites, the coordinator row) and the host (`WorldManager` + regions) talk only via
+  `HostMsg`/`CoordMsg` over a `WorldLink` — `InlineWorldLink`/channel in `all`, `QuicWorldLink` over
+  `svc-link` (QUIC, shared `VOXEL_SERVICE_TOKEN[_FILE]`, pinned self-signed cert) when split. Split roles
+  need Postgres (`VOXEL_WORLD_DB`) and refuse anything else. Env: `VOXEL_COORDINATOR_BIND`/`_ADDR`
+  (127.0.0.1:6480), `VOXEL_COORDINATOR_CERT_HASH_FILE`/`_CERT_SHA256`, `VOXEL_HOST_LINK_BIND` (login→host
+  push, 127.0.0.1:6490) + `_CERT_HASH_FILE`, `VOXEL_OWNERSHIP=allinone|static`, `VOXEL_HOST_ORDINAL`,
+  `VOXEL_HOSTS`, `VOXEL_SUPER_REGION_REGIONS` (16; checked against the world row). `just dev-r2` runs
+  login + coordinator + host 0 (state in git-ignored `target/dev-r2/`); `just coordinator|host`, `just test-r2`.
+- **Owner epochs & fencing**: a host claims super-regions (`super_region_of`, `game::ownership`) in Postgres
+  with an epoch; every cut / region load / coordinator save is fenced on it (`StoreError::Fenced`) — a fenced
+  process stops writing and exits `EXIT_FENCED` (3); a dead coordinator thread exits `EXIT_COORDINATOR_FAILED`
+  (4). No advisory lock any more (SQLite keeps its flock). `OpenMode::ReadOnly` handles (export, tools) write
+  nothing and need the newest schema. Never add a store write that skips the fence.
+- **Link rules**: a re-`Attach` after any reconnect rebuilds the coordinator's view; requests are memoised by
+  `RequestId` (idempotent resend); the Attach waits for exact people lists ("wait, never guess" — conservation
+  beats latency). Login pushes `SpawnPlayer`/`Kick` to the host's link; kicks are durable until acked
+  (login migration 0003). Until R3 the coordinator serves exactly one host ordinal (0).
+
 ### Profiling
 
 Measure in **release** (`just diag`, `just client-release`, the `profiling` profile). The dev
