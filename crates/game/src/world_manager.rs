@@ -2647,8 +2647,12 @@ impl<S: RegionSpawner> WorldManager<S> {
             // Its region's stored state could not be read: the session is
             // ended, the record kept for the next try.
             log::warn!("client {id}: its region {target:?} is unavailable; session refused");
-            if let (Some(record), Some(player)) = (record, self.player_of.get(&id).copied()) {
-                self.parked_players.insert(player, record);
+            // A region another host owns: the store holds the record already,
+            // unchanged (our cut must not write it back).
+            if self.owns(target) {
+                if let (Some(record), Some(player)) = (record, self.player_of.get(&id).copied()) {
+                    self.parked_players.insert(player, record);
+                }
             }
             let _ = self.out.send((Some(id), ServerPacket::Refused(REGION_UNAVAILABLE_REFUSAL.to_string())));
             self.client_disconnected(id, now_ms);

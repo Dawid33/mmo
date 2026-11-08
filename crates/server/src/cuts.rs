@@ -140,7 +140,7 @@ impl CutWriter {
 
     fn settle<S: RegionSpawner>(&mut self, manager: &mut WorldManager<S>, p: Pending, answer: Result<CutCommitted, StoreError>) {
         if let Err(e) = &answer {
-            if self.claims.fenced().note(e) {
+            if self.claims.note_refusal(e) {
                 log::error!("[server] save cut {} was refused: {e}; this server was replaced and stops", p.id.0);
             }
         }
@@ -241,6 +241,7 @@ pub fn exit_world<S: RegionSpawner>(
     // A fence refusal while parking (a cut answered late) still counts.
     cuts.pump(manager);
     if cuts.fenced().is_set() {
+        manager.refuse_all_sessions(FENCED_REFUSAL);
         cuts.finish_without_cut(manager);
         return ServerExit::Fenced;
     }
@@ -248,6 +249,7 @@ pub fn exit_world<S: RegionSpawner>(
     if cuts.finish(manager, now_tick(), save_timeout) {
         log::info!("[server] world saved");
     } else if fenced.is_set() {
+        manager.refuse_all_sessions(FENCED_REFUSAL);
         return ServerExit::Fenced;
     } else {
         log::error!("[server] the world was not saved at exit; it restarts from its last committed save");

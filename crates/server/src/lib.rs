@@ -737,7 +737,7 @@ pub fn run() -> claims::ServerExit {
         manager.pump_lod_results();
         if let Some(cuts) = cuts.as_mut() {
             // Backpressure: no new cut while the store still commits one.
-            if last_world_save.elapsed() >= save_every && cuts.in_flight() == 0 {
+            if last_world_save.elapsed() >= save_every && cuts.in_flight() == 0 && !fenced.is_set() {
                 last_world_save = std::time::Instant::now();
                 // Regions, players, history and what is in flight, at one
                 // world tick a lead ahead (`save_cut.rs`).

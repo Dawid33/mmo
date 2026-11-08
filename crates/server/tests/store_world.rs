@@ -642,7 +642,8 @@ fn exit_saves_a_region_that_parks_late() {
 fn periodic_cut(core: &mut Core, writer: &mut server::cuts::CutWriter) -> game::Tick {
     let now = core.manager.spawner_mut().world_tick();
     let id = core.manager.begin_cut(now).expect("no cut pending");
-    let (_, tick) = core.manager.pending_cut().expect("the cut waits for its slot");
+    // No running region: the cut is complete at once.
+    let tick = core.manager.pending_cut().map_or(now, |(_, tick)| tick);
     core.tick(game::SAVE_CUT_LEAD_TICKS as usize + 3);
     let deadline = std::time::Instant::now() + Duration::from_secs(20);
     loop {
@@ -826,4 +827,60 @@ fn fenced_host_stops_and_writes_nothing() {
         world_store::StoreHandle::open(&second, world_store::Dials::BUILT, world_store::OpenMode::Writer).unwrap()
     });
     db.drop_db();
+}
+
+/// Static ordinal `mine` of 2: a player whose stored record lies in a region
+/// the other host owns connects here. The session is refused, the record is
+/// not carried into this host's cuts, so the periodic cut commits, the host
+/// is not fenced, and the stored record is unchanged.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn foreign_record_does_not_fence_a_healthy_host() {
+    let dir = scratch("foreign-record");
+    let (store, token, player) = bare_store(&dir);
+    let s = store.super_region_regions();
+    let mine = game::rendezvous_owner(game::super_region_of(SPAWN_REGION, s), 2);
+    let ownership = game::Ownership::Static { ordinal: mine, hosts: 2 };
+    let foreign = (2..64)
+        .map(|k| RegionCoords::new(k * s as i32, 0))
+        .find(|rc| !ownership.owns(*rc, s))
+        .expect("a region the other host owns");
+    let foreign_sr = game::super_region_of(foreign, s);
+    // The record, as the other host saved it.
+    let record = game::PlayerRecord {
+        client: game::Client::default(),
+        pose: game::Pose::from_translation(game::math::Vec3::new(1.5, 20.0, -3.0)),
+        region: foreign,
+        fortress: None,
+        adventure: None,
+    };
+    let cut = game::WorldCut {
+        host: 1 - mine,
+        id: game::CutId(1),
+        tick: 5,
+        regions: Vec::new(),
+        in_flight: Vec::new(),
+        players: vec![(player, record.clone())],
+        history: None,
+    };
+    let other = HostClaims::claim_srs(store.clone(), 1 - mine, vec![foreign_sr]).unwrap();
+    other.commit_cut(cut).recv().unwrap().expect("the other host's cut commits");
+    let (_, stored) = StorePlayers(store.clone()).resolve(&token).unwrap();
+    assert_eq!(stored.as_ref(), Some(&record));
+
+    let mut core = Core::open_with(&store, Box::new(flat_floor));
+    assert!(!core.claims.fence().epochs.contains_key(&foreign_sr), "the foreign super-region is not ours");
+    core.manager.set_ownership(ownership, s);
+    core.manager.handle_server_event(ServerEvent::ClientConnected { client: 0, player, record: stored }, 0);
+    core.tick(3);
+    let refused = core._packets.try_iter().any(|(to, p)| to == Some(0) && matches!(p, ServerPacket::Refused(_)));
+    assert!(refused, "the session is refused: its region is another host's");
+    assert!(core.manager.parked_record(player).is_none(), "the record is not parked here");
+    let mut writer = server::cuts::CutWriter::new(core.claims.clone());
+    periodic_cut(&mut core, &mut writer);
+    assert!(!core.claims.fenced().is_set(), "a healthy host is not fenced by it");
+    let (_, after) = StorePlayers(store.clone()).resolve(&token).unwrap();
+    assert_eq!(after.as_ref(), Some(&record), "the stored record is unchanged");
+    store.shutdown();
+    let _ = std::fs::remove_dir_all(&dir);
 }

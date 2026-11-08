@@ -126,12 +126,27 @@ impl HostClaims {
         &self.fenced
     }
 
+    /// Sets the [`Fenced`] flag if `error` is a fence refusal that concerns
+    /// this process's claims (the coordinator row, or a super-region it
+    /// holds). A refusal naming a super-region it never claimed is a stray
+    /// write of ours, not a takeover: logged, flag untouched. Returns whether
+    /// the process is now fenced by `error`.
+    pub fn note_refusal(&self, error: &StoreError) -> bool {
+        match error {
+            StoreError::Fenced { sr: Some(sr) } if !self.fence.epochs.contains_key(sr) => {
+                log::error!("[server] a write touched super-region {sr:?}, which this host never claimed; refused (not a takeover)");
+                false
+            }
+            other => self.fenced.note(other),
+        }
+    }
+
     /// Loads `rc` from the store under the fence; a fence refusal also sets
     /// the [`Fenced`] flag.
     pub fn load_region(&self, rc: RegionCoords) -> Result<Option<StoredRegion>, StoreError> {
         let loaded = self.store.load_region(rc, &self.fence);
         if let Err(e) = &loaded {
-            self.fenced.note(e);
+            self.note_refusal(e);
         }
         loaded
     }
