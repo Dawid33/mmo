@@ -71,6 +71,18 @@ async fn world_add_list_remove() {
         run(&d, "world open dev", "").unwrap();
         assert!(run(&d, "world list", "").unwrap().contains("open"));
         assert!(run(&d, "world close nope", "").is_err());
+        // The host's service link: both flags or neither; a pin is 64 hex digits.
+        let pin = "AB".repeat(32);
+        let linked = format!("world add dev --name Dev --link 127.0.0.1:6490 --link-cert {pin}");
+        run(&d, &linked, "").unwrap();
+        assert!(run(&d, "world list", "").unwrap().contains("link=127.0.0.1:6490"));
+        assert!(run(&d, "world add dev --name Dev --link 127.0.0.1:6490", "").is_err());
+        assert!(run(&d, "world add dev --name Dev --link nope --link-cert 00", "").is_err());
+        assert!(run(&d, &format!("world add dev --name Dev --link 127.0.0.1:6490 --link-cert {}", "zz".repeat(32)), "").is_err());
+        run(&d, "world close dev", "").unwrap();
+        assert!(run(&d, "world list", "").unwrap().contains("link=127.0.0.1:6490"), "close keeps the link");
+        run(&d, "world add dev --name Dev", "").unwrap();
+        assert!(run(&d, "world list", "").unwrap().contains("link=-"), "re-adding without a link clears it");
         run(&d, "world remove dev", "").unwrap();
         assert!(run(&d, "world remove dev", "").is_err());
         assert!(!run(&d, "world list", "").unwrap().contains("dev"));

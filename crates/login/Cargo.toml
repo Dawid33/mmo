@@ -19,7 +19,10 @@ aws-smithy-http-client = { workspace = true }
 auth = { workspace = true }
 axum = { workspace = true }
 tower-http = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "signal"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "signal", "sync", "time"] }
+# The service link to world hosts (`SpawnPlayer` / `Kick`; crate `host_link`).
+svc-link = { path = "../svc-link" }
+crossbeam = { workspace = true }
 serde = { workspace = true, features = ["std"] }
 rand_core = { workspace = true }
 sha2 = { workspace = true }

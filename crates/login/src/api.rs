@@ -32,6 +32,7 @@ use sha2::{Digest, Sha256};
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use crate::config::LoginConfig;
+use crate::host_link::HostLinks;
 use crate::mail::{
     Mail, Mailer, RESET_TOKEN_TTL_SECS, VERIFY_TOKEN_TTL_SECS, already_registered_mail, reset_mail,
     verify_mail,
@@ -55,6 +56,11 @@ const BAD_CREDENTIALS_MSG: &str = "wrong email or password";
 const REVOKED_MSG: &str = "signed out: please log in again";
 const NOT_VERIFIED_MSG: &str = "confirm your email address first (see the mail we sent)";
 const BAD_LINK_MSG: &str = "this link is invalid, used or expired";
+const WORLD_UNAVAILABLE_MSG: &str = "the world server is not reachable right now; try again shortly";
+/// The `Refused` text a kicked session gets after a logout everywhere.
+pub const KICK_LOGOUT_ALL: &str = "signed out everywhere";
+/// The `Refused` text a kicked session gets after a password reset.
+pub const KICK_PASSWORD_RESET: &str = "the account's password was reset; log in again";
 
 /// What every handler shares. Cheap to clone.
 #[derive(Clone)]
@@ -66,6 +72,8 @@ pub struct AppState {
     pub config: Arc<LoginConfig>,
     /// Seconds since the Unix epoch.
     pub clock: Arc<dyn Fn() -> u64 + Send + Sync>,
+    /// The world hosts' service links (`SpawnPlayer` / `Kick`).
+    pub host_links: Arc<HostLinks>,
     /// A PHC string of [`DUMMY_PASSWORD`] under `hasher`, so an unknown email costs one verify.
     dummy_phc: Arc<str>,
 }
@@ -80,7 +88,21 @@ impl AppState {
         clock: Arc<dyn Fn() -> u64 + Send + Sync>,
     ) -> AppState {
         let dummy_phc = hasher.hash(DUMMY_PASSWORD).into();
-        AppState { store, signer, hasher: Arc::new(hasher), mailer, config, clock, dummy_phc }
+        let host_links = Arc::new(HostLinks::new(None, store.clone(), clock.clone()));
+        AppState { store, signer, hasher: Arc::new(hasher), mailer, config, clock, host_links, dummy_phc }
+    }
+
+    /// Dial world hosts with the service `token` (without one, a world with a `host_link` is
+    /// unavailable to join).
+    pub fn with_service_token(self, token: Option<String>) -> AppState {
+        let links = HostLinks::new(token, self.store.clone(), self.clock.clone());
+        self.with_host_links(links)
+    }
+
+    /// Use these host links (tests: a short ack timeout).
+    pub fn with_host_links(mut self, links: HostLinks) -> AppState {
+        self.host_links = Arc::new(links);
+        self
     }
 
     fn now(&self) -> u64 {
@@ -138,6 +160,9 @@ impl Fail {
     }
     fn not_verified() -> Fail {
         Fail::new(StatusCode::FORBIDDEN, ApiErrorCode::NotVerified, NOT_VERIFIED_MSG)
+    }
+    fn world_unavailable() -> Fail {
+        Fail::new(StatusCode::SERVICE_UNAVAILABLE, ApiErrorCode::WorldUnavailable, WORLD_UNAVAILABLE_MSG)
     }
     fn internal() -> Fail {
         Fail::new(StatusCode::INTERNAL_SERVER_ERROR, ApiErrorCode::Internal, "internal error")
@@ -309,10 +334,17 @@ async fn refresh(State(s): State<AppState>, ApiJson(req): ApiJson<RefreshRequest
     Ok(Json(login_response(&account, token)))
 }
 
-/// Always 204: revokes the token's family if the token is known.
-async fn logout(State(s): State<AppState>, ApiJson(req): ApiJson<RefreshRequest>) -> Result<StatusCode, Fail> {
+/// Always 204: revokes the token's family if the token is known. With `all` (and a live
+/// token), every refresh token of the account too, and its session in every world is kicked.
+async fn logout(State(s): State<AppState>, ApiJson(req): ApiJson<LogoutRequest>) -> Result<StatusCode, Fail> {
     let now = s.now_db();
     match s.store.take_refresh(token_hash(&req.refresh_token), now).await? {
+        RefreshOutcome::Valid { account, family } if req.all => {
+            s.store.revoke_family(family, now).await?;
+            s.store.revoke_account_refresh(account, now).await?;
+            log::info!("[login] account {account} logged out everywhere");
+            kick_everywhere(&s, account, KICK_LOGOUT_ALL).await?;
+        }
         RefreshOutcome::Valid { account, family } | RefreshOutcome::Reused { account, family } => {
             s.store.revoke_family(family, now).await?;
             log::info!("[login] account {account} logged out");
@@ -320,6 +352,28 @@ async fn logout(State(s): State<AppState>, ApiJson(req): ApiJson<RefreshRequest>
         RefreshOutcome::Unknown => {}
     }
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// `Kick` the account's player out of every world it has an open session in (whose host has a
+/// link), concurrently; each waits at most `SPAWN_ACK_TIMEOUT_MS` for its link.
+async fn kick_everywhere(s: &AppState, account: i64, reason: &str) -> Result<(), Fail> {
+    let mut kicks = Vec::new();
+    for session in s.store.open_sessions(account).await? {
+        let Some(world) = s.store.world(&session.world_id).await? else { continue };
+        if world.host_link.is_none() {
+            continue;
+        }
+        let (links, reason) = (s.host_links.clone(), reason.to_string());
+        kicks.push(tokio::spawn(async move {
+            if links.kick(&world, &session.player_token, &reason).await {
+                log::info!("[login] account {account}: kicked from world {}", world.world_id);
+            }
+        }));
+    }
+    for kick in kicks {
+        let _ = kick.await;
+    }
+    Ok(())
 }
 
 async fn worlds(State(s): State<AppState>) -> Result<Json<Vec<WorldEntry>>, Fail> {
@@ -335,11 +389,39 @@ async fn join(State(s): State<AppState>, ApiJson(req): ApiJson<JoinRequest>) -> 
     if world.status != WorldStatus::Open {
         return Err(Fail::new(StatusCode::FORBIDDEN, ApiErrorCode::WorldClosed, "this world is closed"));
     }
-    let (account, refresh_token) = rotate_refresh(&s, &req.refresh_token).await?;
+    // The account first, WITHOUT spending the token: a host that does not take the spawn order
+    // answers 503 and the client keeps its refresh token. The rotation comes after the ack.
+    let presented = token_hash(&req.refresh_token);
+    let Some(account_id) = s.store.live_refresh_account(presented, s.now_db()).await? else {
+        // Not live: the rotation answers it (a spent token revokes its family).
+        rotate_refresh(&s, &req.refresh_token).await?;
+        return Err(Fail::revoked());
+    };
+    let Some(account) = s.store.account(account_id).await? else {
+        return Err(Fail::revoked());
+    };
+    if s.config.require_verified && account.email_verified_at.is_none() {
+        return Err(Fail::not_verified());
+    }
     let now = s.now();
     let player_token =
         s.store.player_token_for(account.account_id, &world.world_id, s.now_db(), new_player_token).await?;
     let session_epoch = s.store.bump_session(account.account_id, &world.world_id, s.now_db()).await?;
+    // The host parks any session of this player now (newest wins) and admits this epoch only.
+    if let Err(e) = s.host_links.spawn(&world, &player_token, session_epoch).await {
+        log::warn!(
+            "[login] join: account {} world {} epoch {session_epoch}: {e}",
+            account.account_id,
+            world.world_id
+        );
+        return Err(Fail::world_unavailable());
+    }
+    // Two joins racing with one token: the loser's spawn order is superseded by the winner's or
+    // expires unused at the host; its rotation answers Reused (the family is revoked).
+    let (rotated, refresh_token) = rotate_refresh(&s, &req.refresh_token).await?;
+    if rotated.account_id != account.account_id {
+        return Err(Fail::revoked());
+    }
     let claims = JoinClaims {
         sub: account.account_id.to_string(),
         world: world.world_id.clone(),
@@ -406,7 +488,7 @@ pub(crate) async fn confirm_reset(s: &AppState, token: &str, password: String) -
     s.store.revoke_account_refresh(account, now).await?;
     s.store.mark_verified(account, now).await?;
     log::info!("[login] account {account} reset its password");
-    Ok(())
+    kick_everywhere(s, account, KICK_PASSWORD_RESET).await
 }
 
 async fn verify(State(s): State<AppState>, ApiJson(req): ApiJson<VerifyRequest>) -> Result<StatusCode, Fail> {

@@ -48,6 +48,19 @@ pub struct WorldRow {
     pub webtransport: Option<String>,
     pub cert_hash: Option<String>,
     pub created_at: i64,
+    /// The world host's service link (`host:port`): `join` pushes `SpawnPlayer` there and waits
+    /// for its ack. `None` = no push (R2a: the host checks tickets by epoch alone).
+    pub host_link: Option<String>,
+    /// The SHA-256 pin of the host link's certificate (64 hex digits).
+    pub host_link_cert: Option<String>,
+}
+
+/// A session of an account that has not ended: where to send a `Kick`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OpenSession {
+    pub world_id: String,
+    pub player_token: String,
+    pub session_epoch: u64,
 }
 
 #[derive(Clone)]
@@ -122,12 +135,15 @@ macro_rules! world_row {
             webtransport: $r.get(4),
             cert_hash: $r.get(5),
             created_at: $r.get(6),
+            host_link: $r.get(7),
+            host_link_cert: $r.get(8),
         }
     };
 }
 
 const ACCOUNT_COLS: &str = "account_id, email, password_hash, email_verified_at, created_at";
-const WORLD_COLS: &str = "world_id, name, status, quic, webtransport, cert_hash, created_at";
+const WORLD_COLS: &str =
+    "world_id, name, status, quic, webtransport, cert_hash, created_at, host_link, host_link_cert";
 
 impl LoginStore {
     /// Open and migrate: a `postgres://` URL, `sqlite::memory:`, `sqlite:<path>` or a bare path.
@@ -331,13 +347,16 @@ impl LoginStore {
 
     /// Insert or replace a world of the registry (`created_at` of an existing one is kept).
     pub async fn put_world(&self, w: &WorldRow) -> Result<(), LoginError> {
-        const SQL: &str = "INSERT INTO worlds (world_id, name, status, quic, webtransport, cert_hash, created_at) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (world_id) DO UPDATE SET \
+        const SQL: &str = "INSERT INTO worlds (world_id, name, status, quic, webtransport, cert_hash, created_at, \
+             host_link, host_link_cert) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) ON CONFLICT (world_id) DO UPDATE SET \
              name = excluded.name, status = excluded.status, quic = excluded.quic, \
-             webtransport = excluded.webtransport, cert_hash = excluded.cert_hash";
+             webtransport = excluded.webtransport, cert_hash = excluded.cert_hash, \
+             host_link = excluded.host_link, host_link_cert = excluded.host_link_cert";
         exec!(self, p => sqlx::query(SQL)
             .bind(&w.world_id).bind(&w.name).bind(status_int(w.status))
             .bind(&w.quic).bind(&w.webtransport).bind(&w.cert_hash).bind(w.created_at)
+            .bind(&w.host_link).bind(&w.host_link_cert)
             .execute(p).await?);
         Ok(())
     }
@@ -381,14 +400,46 @@ impl LoginStore {
         Ok(on!(self, p => sqlx::query(SEL).bind(account).bind(world).fetch_one(p).await?.get(0)))
     }
 
-    /// Upsert; the new epoch, starting at 1.
+    /// Upsert; the new epoch, starting at 1. The session is open again (`ended_at` cleared).
     pub async fn bump_session(&self, account: AccountId, world: &str, now: i64) -> Result<u64, LoginError> {
         const SQL: &str = "INSERT INTO sessions (account_id, world_id, session_epoch, started_at) \
              VALUES ($1, $2, 1, $3) ON CONFLICT (account_id, world_id) DO UPDATE SET \
-             session_epoch = sessions.session_epoch + 1, started_at = excluded.started_at \
+             session_epoch = sessions.session_epoch + 1, started_at = excluded.started_at, ended_at = NULL \
              RETURNING session_epoch";
         let epoch: i64 =
             on!(self, p => sqlx::query(SQL).bind(account).bind(world).bind(now).fetch_one(p).await?.get(0));
         Ok(epoch as u64)
+    }
+
+    /// The account of a live (unrevoked, unexpired) refresh token, without spending it. `join`
+    /// reads it before pushing a spawn order, so a world host that is down does not cost the
+    /// client its token (the rotation happens after the ack).
+    pub async fn live_refresh_account(&self, hash: [u8; 32], now: i64) -> Result<Option<AccountId>, LoginError> {
+        const SQL: &str =
+            "SELECT account_id FROM refresh_tokens WHERE token_hash = $1 AND revoked_at IS NULL AND expires_at > $2";
+        Ok(on!(self, p => sqlx::query(SQL).bind(&hash[..]).bind(now).fetch_optional(p).await?
+            .map(|r| r.get::<i64, _>(0))))
+    }
+
+    /// A host reported the session of `player_token` in `world` admitted with `epoch` ended.
+    /// Only that epoch's session ends (a late report never ends a newer join). Whether it did.
+    pub async fn end_session(&self, world: &str, player_token: &str, epoch: u64, now: i64) -> Result<bool, LoginError> {
+        const SQL: &str = "UPDATE sessions SET ended_at = $1 \
+             WHERE world_id = $2 AND session_epoch = $3 AND ended_at IS NULL AND account_id = \
+             (SELECT account_id FROM world_players WHERE world_id = $2 AND player_token = $4)";
+        let epoch = i64::try_from(epoch).unwrap_or(i64::MAX);
+        let n = on!(self, p => sqlx::query(SQL).bind(now).bind(world).bind(epoch).bind(player_token)
+            .execute(p).await?.rows_affected());
+        Ok(n > 0)
+    }
+
+    /// The account's sessions that have not ended, by world.
+    pub async fn open_sessions(&self, account: AccountId) -> Result<Vec<OpenSession>, LoginError> {
+        const SQL: &str = "SELECT s.world_id, w.player_token, s.session_epoch FROM sessions s \
+             JOIN world_players w ON w.account_id = s.account_id AND w.world_id = s.world_id \
+             WHERE s.account_id = $1 AND s.ended_at IS NULL ORDER BY s.world_id";
+        Ok(on!(self, p => sqlx::query(SQL).bind(account).fetch_all(p).await?.into_iter()
+            .map(|r| OpenSession { world_id: r.get(0), player_token: r.get(1), session_epoch: r.get::<i64, _>(2) as u64 })
+            .collect()))
     }
 }

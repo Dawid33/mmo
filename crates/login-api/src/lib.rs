@@ -86,6 +86,15 @@ pub struct RefreshRequest {
     pub refresh_token: String,
 }
 
+/// `POST /v1/logout`: revokes `refresh_token`'s family; with `all`, every session of its account
+/// (all its refresh tokens, and a `Kick` to every world host it has a session in).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LogoutRequest {
+    pub refresh_token: String,
+    #[serde(default)]
+    pub all: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JoinRequest {
     pub refresh_token: String,
@@ -146,7 +155,35 @@ pub enum ApiErrorCode {
     Revoked,
     UnknownWorld,
     WorldClosed,
+    /// The world's host did not take the spawn order (its link is down or it did not answer in
+    /// time): try again later. HTTP 503.
+    WorldUnavailable,
     Internal,
+}
+
+/// How long `/v1/join` waits for the world host's [`HostToLogin::SpawnAck`].
+pub const SPAWN_ACK_TIMEOUT_MS: u64 = 3000;
+/// How long a host keeps a spawn order it has not seen a matching `Hello` for.
+pub const SPAWN_PENDING_TTL_SECS: u64 = 120;
+
+/// The login service to a world host, over the service link (`svc-link`, role `Login`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LoginToHost {
+    /// A join was granted: the host admits exactly this epoch's ticket for the player (and
+    /// parks any session of the player it has, newest-wins), then acks.
+    SpawnPlayer { player_token: String, session_epoch: u64 },
+    /// Revocation (logout everywhere, password reset): the host parks the player's session,
+    /// refusing it with `reason`, and drops any spawn order it holds for it.
+    Kick { player_token: String, reason: String },
+}
+
+/// A world host to the login service, over the service link.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HostToLogin {
+    /// The answer to one [`LoginToHost::SpawnPlayer`] (matched by token and epoch).
+    SpawnAck { player_token: String, session_epoch: u64, ok: bool },
+    /// The session admitted with this epoch's ticket disconnected.
+    SessionEnded { player_token: String, session_epoch: u64 },
 }
 
 #[cfg(test)]

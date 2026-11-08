@@ -28,6 +28,11 @@ struct App {
 }
 
 async fn app_with(require_verified: bool) -> App {
+    app_from(require_verified, |state| state).await
+}
+
+/// [`app_with`] whose state `adjust` changes (host links).
+async fn app_from(require_verified: bool, adjust: impl FnOnce(AppState) -> AppState) -> App {
     let store = LoginStore::open("sqlite::memory:").await.unwrap();
     for (id, status) in [("w1", WorldStatus::Open), ("w2", WorldStatus::Open), ("shut", WorldStatus::Closed)] {
         store
@@ -39,6 +44,8 @@ async fn app_with(require_verified: bool) -> App {
                 webtransport: Some(format!("https://{id}.example:6467/")),
                 cert_hash: None,
                 created_at: 1,
+                host_link: None,
+                host_link_cert: None,
             })
             .await
             .unwrap();
@@ -57,7 +64,7 @@ async fn app_with(require_verified: bool) -> App {
         Arc::new(config),
         Arc::new(move || c.load(Ordering::SeqCst)),
     );
-    App { router: router(state), mailer, clock, store }
+    App { router: router(adjust(state)), mailer, clock, store }
 }
 
 async fn app() -> App {
@@ -467,4 +474,265 @@ fn config_defaults_and_overrides() {
     assert!(LoginConfig::from_lookup(|k| (k == "VOXEL_MAILER").then(|| "ses".to_string())).is_err());
     assert!(LoginConfig::from_lookup(|k| (k == "VOXEL_MAILER").then(|| "smtp".to_string())).is_err());
     assert!(LoginConfig::from_lookup(|k| (k == "VOXEL_LOGIN_BIND").then(|| "nope".to_string())).is_err());
+}
+
+// ---- Host links: SpawnPlayer / Kick / SessionEnded (R2b) --------------------------------------
+
+mod host_link {
+    use std::sync::Mutex;
+    use std::time::Duration;
+
+    use crossbeam::channel::Receiver;
+    use login::host_link::HostLinks;
+    use svc_link::{LinkEvent, LinkListener, PeerId, PeerRole, PeerSenders};
+
+    use super::*;
+
+    const SERVICE_TOKEN: &str = "test-service-token";
+    /// How long a test waits for something to arrive over a real link.
+    const LINK_WAIT: Duration = Duration::from_secs(5);
+
+    /// How a fake host answers a spawn order: `Some(ok)` acks, `None` stays silent.
+    type AckPolicy = Box<dyn Fn(&str, u64) -> Option<bool> + Send>;
+
+    /// A world host's login link on localhost: records every message, acks by policy.
+    struct FakeHost {
+        link: String,
+        cert: String,
+        seen: Arc<Mutex<Vec<LoginToHost>>>,
+        peers: PeerSenders<HostToLogin>,
+        listener: Option<LinkListener>,
+    }
+
+    impl FakeHost {
+        fn start(ack: AckPolicy) -> FakeHost {
+            let (listener, events, peers) = LinkListener::bind::<LoginToHost, HostToLogin>(
+                "127.0.0.1:0".parse().unwrap(),
+                SERVICE_TOKEN.into(),
+                None,
+            )
+            .unwrap();
+            let seen: Arc<Mutex<Vec<LoginToHost>>> = Arc::default();
+            let (record, answer) = (seen.clone(), peers.clone());
+            std::thread::spawn(move || serve(events, answer, record, ack));
+            FakeHost {
+                link: listener.local_addr().to_string(),
+                cert: listener.cert_sha256().to_string(),
+                seen,
+                peers,
+                listener: Some(listener),
+            }
+        }
+
+        fn acking() -> FakeHost {
+            Self::start(Box::new(|_, _| Some(true)))
+        }
+
+        fn world(&self, id: &str) -> WorldRow {
+            WorldRow {
+                world_id: id.into(),
+                name: format!("World {id}"),
+                status: WorldStatus::Open,
+                quic: Some(format!("{id}.example:6466")),
+                webtransport: None,
+                cert_hash: None,
+                created_at: 1,
+                host_link: Some(self.link.clone()),
+                host_link_cert: Some(self.cert.clone()),
+            }
+        }
+
+        fn seen(&self) -> Vec<LoginToHost> {
+            self.seen.lock().unwrap().clone()
+        }
+
+        /// Wait until `want` holds for what this host has seen.
+        async fn wait_seen(&self, want: impl Fn(&[LoginToHost]) -> bool) -> Vec<LoginToHost> {
+            let deadline = tokio::time::Instant::now() + LINK_WAIT;
+            loop {
+                let seen = self.seen();
+                if want(&seen) || tokio::time::Instant::now() >= deadline {
+                    return seen;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }
+    }
+
+    impl Drop for FakeHost {
+        fn drop(&mut self) {
+            // The listener owns a multi-thread runtime: drop it off the test's runtime.
+            if let Some(listener) = self.listener.take() {
+                std::thread::spawn(move || drop(listener)).join().unwrap();
+            }
+        }
+    }
+
+    fn serve(
+        events: Receiver<(PeerId, LinkEvent<LoginToHost>)>,
+        peers: PeerSenders<HostToLogin>,
+        seen: Arc<Mutex<Vec<LoginToHost>>>,
+        ack: AckPolicy,
+    ) {
+        for (peer, event) in events.iter() {
+            match event {
+                LinkEvent::Up(hello) => assert_eq!(hello.role, PeerRole::Login),
+                LinkEvent::Msg(msg) => {
+                    seen.lock().unwrap().push(msg.clone());
+                    if let LoginToHost::SpawnPlayer { player_token, session_epoch } = msg
+                        && let Some(ok) = ack(&player_token, session_epoch)
+                    {
+                        peers.send(peer, HostToLogin::SpawnAck { player_token, session_epoch, ok });
+                    }
+                }
+                LinkEvent::Down(_) => {}
+            }
+        }
+    }
+
+    /// An app whose host links dial with the service token; `ack_timeout` bounds each join.
+    async fn linked_app(worlds: &[WorldRow], ack_timeout: Duration) -> App {
+        let a = app_from(false, |state| {
+            let links = HostLinks::new(Some(SERVICE_TOKEN.into()), state.store.clone(), state.clock.clone())
+                .with_ack_timeout(ack_timeout);
+            state.with_host_links(links)
+        })
+        .await;
+        for w in worlds {
+            a.store.put_world(w).await.unwrap();
+        }
+        a
+    }
+
+    fn epoch_of(a: &App, verifier: &Verifier, j: &JoinResponse) -> (String, u64) {
+        let c = verifier.verify(&j.ticket.jwt, a.now(), &j.ticket.world).unwrap();
+        (c.player_token, c.session_epoch)
+    }
+
+    #[tokio::test]
+    async fn join_pushes_spawn_player_and_waits_for_its_ack() {
+        let host = FakeHost::acking();
+        let a = linked_app(&[host.world("lw")], Duration::from_millis(SPAWN_ACK_TIMEOUT_MS)).await;
+        let refresh = a.account().await;
+        let r = a.join(&refresh, "lw").await;
+        assert_eq!(r.status, StatusCode::OK, "{}", r.text());
+        let j: JoinResponse = r.json();
+        let (token, epoch) = epoch_of(&a, &a.verifier().await, &j);
+        assert_eq!(epoch, 1);
+        // The order reached the host before the ticket was handed out.
+        assert_eq!(host.seen(), vec![LoginToHost::SpawnPlayer { player_token: token.clone(), session_epoch: 1 }]);
+        // A world without a host link pushes nothing (R2a).
+        let r = a.join(&j.refresh_token, "w1").await;
+        assert_eq!(r.status, StatusCode::OK, "{}", r.text());
+        assert_eq!(host.seen().len(), 1);
+        // The host reports the session's end: it is no longer open (no kick goes there).
+        let account = a.store.account_by_email("dwarf@example.org").await.unwrap().unwrap().account_id;
+        assert_eq!(a.store.open_sessions(account).await.unwrap().len(), 2);
+        host.peers.broadcast(HostToLogin::SessionEnded { player_token: token, session_epoch: 1 });
+        let deadline = tokio::time::Instant::now() + LINK_WAIT;
+        while a.store.open_sessions(account).await.unwrap().len() == 2 && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let open: Vec<String> = a.store.open_sessions(account).await.unwrap().into_iter().map(|s| s.world_id).collect();
+        assert_eq!(open, vec!["w1".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn join_fails_503_when_host_link_down() {
+        // A link to a port nobody listens on (a pin that matches nothing).
+        let probe = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let addr = probe.local_addr().unwrap().to_string();
+        drop(probe);
+        let world = WorldRow {
+            host_link: Some(addr),
+            host_link_cert: Some("ab".repeat(32)),
+            ..FakeHost::acking().world("down")
+        };
+        let a = linked_app(&[world], Duration::from_millis(50)).await;
+        let refresh = a.account().await;
+        let r = a.join(&refresh, "down").await;
+        assert_eq!((r.status, r.error()), (StatusCode::SERVICE_UNAVAILABLE, ApiErrorCode::WorldUnavailable));
+        // The refresh token was not spent: the client may simply try again.
+        let r = a.post(PATH_REFRESH, &RefreshRequest { refresh_token: refresh }).await;
+        assert_eq!(r.status, StatusCode::OK, "{}", r.text());
+    }
+
+    #[tokio::test]
+    async fn join_fails_503_when_the_host_refuses_or_has_no_service_token() {
+        let host = FakeHost::start(Box::new(|_, _| Some(false)));
+        let a = linked_app(&[host.world("lw")], Duration::from_millis(SPAWN_ACK_TIMEOUT_MS)).await;
+        let refresh = a.account().await;
+        let r = a.join(&refresh, "lw").await;
+        assert_eq!((r.status, r.error()), (StatusCode::SERVICE_UNAVAILABLE, ApiErrorCode::WorldUnavailable));
+        // Without a service token a linked world cannot be joined (and nothing is dialed).
+        let b = app().await;
+        b.store.put_world(&host.world("lw")).await.unwrap();
+        let refresh = b.account().await;
+        let r = b.join(&refresh, "lw").await;
+        assert_eq!((r.status, r.error()), (StatusCode::SERVICE_UNAVAILABLE, ApiErrorCode::WorldUnavailable));
+    }
+
+    #[tokio::test]
+    #[ignore = "slow: >100ms — run via just test-full"]
+    async fn late_ack_never_answers_a_later_join() {
+        // The host acks nothing on its own; the test sends acks by hand.
+        let host = FakeHost::start(Box::new(|_, _| None));
+        let a = linked_app(&[host.world("lw")], Duration::from_millis(300)).await;
+        let refresh = a.account().await;
+        let r = a.join(&refresh, "lw").await;
+        assert_eq!(r.status, StatusCode::SERVICE_UNAVAILABLE);
+        let seen = host.wait_seen(|s| !s.is_empty()).await;
+        let LoginToHost::SpawnPlayer { player_token, session_epoch } = seen[0].clone() else { panic!("{seen:?}") };
+        assert_eq!(session_epoch, 1);
+        // Epoch 1's ack arrives late, while the next join (epoch 2) waits: it must not count.
+        let (peers, token) = (host.peers.clone(), player_token.clone());
+        let late = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            peers.broadcast(HostToLogin::SpawnAck { player_token: token, session_epoch: 1, ok: true });
+        });
+        let r = a.join(&refresh, "lw").await;
+        late.await.unwrap();
+        assert_eq!(r.status, StatusCode::SERVICE_UNAVAILABLE, "{}", r.text());
+        assert!(host.seen().contains(&LoginToHost::SpawnPlayer { player_token, session_epoch: 2 }));
+    }
+
+    #[tokio::test]
+    async fn logout_all_sends_kick_to_each_world_with_a_session() {
+        let (h1, h2, h3) = (FakeHost::acking(), FakeHost::acking(), FakeHost::acking());
+        let a = linked_app(&[h1.world("a"), h2.world("b"), h3.world("c")], Duration::from_millis(SPAWN_ACK_TIMEOUT_MS)).await;
+        let refresh = a.account().await;
+        let v = a.verifier().await;
+        let ja: JoinResponse = a.join(&refresh, "a").await.json();
+        let jb: JoinResponse = a.join(&ja.refresh_token, "b").await.json();
+        let jw: JoinResponse = a.join(&jb.refresh_token, "w1").await.json();
+        let (ta, tb) = (epoch_of(&a, &v, &ja).0, epoch_of(&a, &v, &jb).0);
+        // A plain logout kicks nobody.
+        let other = a.login(EMAIL, PASSWORD).await.json::<LoginResponse>().refresh_token;
+        let out = a.post(PATH_LOGOUT, &LogoutRequest { refresh_token: other, all: false }).await;
+        assert_eq!(out.status, StatusCode::NO_CONTENT);
+        let out = a.post(PATH_LOGOUT, &LogoutRequest { refresh_token: jw.refresh_token.clone(), all: true }).await;
+        assert_eq!(out.status, StatusCode::NO_CONTENT);
+        let kick = |token: &str| LoginToHost::Kick { player_token: token.into(), reason: login::api::KICK_LOGOUT_ALL.into() };
+        assert!(h1.wait_seen(|s| s.contains(&kick(&ta))).await.contains(&kick(&ta)));
+        assert!(h2.wait_seen(|s| s.contains(&kick(&tb))).await.contains(&kick(&tb)));
+        assert!(h3.seen().is_empty(), "no session in world c: {:?}", h3.seen());
+        // Every refresh token of the account is revoked.
+        let r = a.post(PATH_REFRESH, &RefreshRequest { refresh_token: jw.refresh_token }).await;
+        assert_eq!(r.status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn password_reset_kicks_the_accounts_sessions() {
+        let host = FakeHost::acking();
+        let a = linked_app(&[host.world("a")], Duration::from_millis(SPAWN_ACK_TIMEOUT_MS)).await;
+        let refresh = a.account().await;
+        let j: JoinResponse = a.join(&refresh, "a").await.json();
+        let token = epoch_of(&a, &a.verifier().await, &j).0;
+        a.post(PATH_RESET_REQUEST, &ResetRequest { email: EMAIL.into() }).await;
+        let reset = a.mailed_token("/reset");
+        let ok = a.post(PATH_RESET_CONFIRM, &ResetConfirm { token: reset, password: "a brand new password".into() }).await;
+        assert_eq!(ok.status, StatusCode::NO_CONTENT, "{}", ok.text());
+        let kick = LoginToHost::Kick { player_token: token, reason: login::api::KICK_PASSWORD_RESET.into() };
+        assert!(host.wait_seen(|s| s.contains(&kick)).await.contains(&kick));
+    }
 }

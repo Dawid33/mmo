@@ -10,8 +10,12 @@
 //! - `jwt` (server worlds): a join JWT the login service signed for THIS world
 //!   ([`VOXEL_WORLD_ID`](WORLD_ID_ENV)), checked against the service's public
 //!   keys ([`JwksCache`], fetched from [`LOGIN_URL_ENV`] + `PATH_JWKS`):
-//!   signature, expiry, audience, world, and that its `session_epoch` is not
-//!   older than the newest this host has admitted for the same player.
+//!   signature, expiry, audience, world, and then its `session_epoch`:
+//!   - with a login link ([`crate::login_link`]; a host with a service
+//!     token): it must be the epoch of a pending spawn order the login
+//!     service pushed, which the connect consumes;
+//!   - without one (R2a; a registry world without `host_link`): not older
+//!     than the newest this host has admitted for the same player.
 //!
 //! The JWT is checked only at connect. A refusal's text is sent to the client;
 //! nothing here logs a whole JWT (only its `sub` / `kid`).
@@ -26,6 +30,7 @@ use std::time::Duration;
 use auth::{Jwks, Verifier, VerifyError};
 use game::{Credential, PlayerName, PlayerToken};
 
+use crate::login_link::SpawnOrders;
 use crate::player_store::PlayerKey;
 
 /// `local` (default; alias `token`) or `jwt`.
@@ -258,21 +263,49 @@ fn shown(error: VerifyError) -> VerifyError {
     }
 }
 
+/// Which ticket epoch a `jwt` host admits.
+enum Admission {
+    /// No login link (R2a: a world without `host_link`): the newest
+    /// `session_epoch` admitted per `player_token`. In memory and never
+    /// pruned: one entry per player that ever connected to this process.
+    Newest(Mutex<BTreeMap<String, u64>>),
+    /// The login service pushes spawn orders: exactly a pending order's epoch, once.
+    SpawnOrders(Arc<SpawnOrders>),
+}
+
+/// A session the login service's spawn order admitted: reported back
+/// ([`Authenticator::session_ended`]) when its connection ends.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SessionTicket {
+    pub player_token: String,
+    pub session_epoch: u64,
+}
+
+/// A credential the edge accepted.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Admitted {
+    pub key: PlayerKey,
+    /// `Some` for a session admitted against a spawn order.
+    pub ticket: Option<SessionTicket>,
+}
+
 /// The connect edge's credential check. Shared by every connection task.
 pub struct Authenticator {
     mode: AuthMode,
     jwks: Option<JwksCache>,
-    /// The newest `session_epoch` admitted per `player_token`. In memory and
-    /// never pruned: one entry per player that ever connected to this
-    /// process (R2b replaces it with the login service's pending spawn).
-    epochs: Mutex<BTreeMap<String, u64>>,
+    admission: Admission,
     now: Clock,
 }
 
 impl Authenticator {
     /// A `local` host: players by free name, no login.
     pub fn local() -> Authenticator {
-        Authenticator { mode: AuthMode::Local, jwks: None, epochs: Mutex::default(), now: system_clock() }
+        Authenticator {
+            mode: AuthMode::Local,
+            jwks: None,
+            admission: Admission::Newest(Mutex::default()),
+            now: system_clock(),
+        }
     }
 
     /// A `jwt` host for `world`, checking tickets against `jwks` at `now`.
@@ -284,9 +317,21 @@ impl Authenticator {
         Authenticator {
             mode: AuthMode::Jwt { world, login_url },
             jwks: Some(jwks),
-            epochs: Mutex::default(),
+            admission: Admission::Newest(Mutex::default()),
             now,
         }
+    }
+
+    /// Admit tickets only against `orders` (the login link's spawn orders)
+    /// instead of by newest epoch.
+    pub fn with_spawn_orders(mut self, orders: Arc<SpawnOrders>) -> Authenticator {
+        self.admission = Admission::SpawnOrders(orders);
+        self
+    }
+
+    /// Whether tickets are admitted against the login link's spawn orders.
+    pub fn uses_spawn_orders(&self) -> bool {
+        matches!(self.admission, Admission::SpawnOrders(_))
     }
 
     /// The production authenticator for `mode` (wall clock, HTTP JWKS).
@@ -322,20 +367,32 @@ impl Authenticator {
     /// host), or the refusal text. A local name is re-validated: the wire
     /// form is not trusted to have gone through [`PlayerName::parse`].
     pub async fn authenticate(&self, credential: Credential) -> Result<PlayerKey, String> {
+        self.admit(credential).await.map(|admitted| admitted.key)
+    }
+
+    /// [`authenticate`](Self::authenticate), with the spawn-order session to
+    /// report when the connection ends ([`session_ended`](Self::session_ended)).
+    pub async fn admit(&self, credential: Credential) -> Result<Admitted, String> {
         match (&self.mode, credential) {
             (AuthMode::Local, Credential::Local(name)) => match PlayerName::parse(&name.0) {
-                Ok(name) => Ok(PlayerKey::Local(name)),
+                Ok(name) => Ok(Admitted { key: PlayerKey::Local(name), ticket: None }),
                 Err(why) => Err(format!("invalid player name: {why}")),
             },
             (AuthMode::Local, Credential::Jwt(_)) => Err(REFUSE_JWT_ON_LOCAL_HOST.into()),
             (AuthMode::Jwt { .. }, Credential::Local(_)) => Err(REFUSE_LOCAL_ON_JWT_HOST.into()),
-            (AuthMode::Jwt { world, .. }, Credential::Jwt(jwt)) => {
-                self.check_jwt(world, &jwt).await.map(PlayerKey::Online)
-            }
+            (AuthMode::Jwt { world, .. }, Credential::Jwt(jwt)) => self.check_jwt(world, &jwt).await,
         }
     }
 
-    async fn check_jwt(&self, world: &str, jwt: &str) -> Result<PlayerToken, String> {
+    /// The connection of a session admitted with `ticket` ended (or never
+    /// started): the login link forgets it and tells the login service.
+    pub fn session_ended(&self, ticket: &SessionTicket) {
+        if let Admission::SpawnOrders(orders) = &self.admission {
+            orders.ended(&ticket.player_token, ticket.session_epoch);
+        }
+    }
+
+    async fn check_jwt(&self, world: &str, jwt: &str) -> Result<Admitted, String> {
         if jwt.len() > game::MAX_JWT_BYTES {
             return Err(REFUSE_TOO_LARGE.into());
         }
@@ -354,9 +411,25 @@ impl Authenticator {
             log::warn!("[auth] ticket of account {} carries a malformed player token", claims.sub);
             return Err("login ticket carries an invalid player token".into());
         }
+        let epochs = match &self.admission {
+            Admission::SpawnOrders(orders) => {
+                return match orders.admit(&claims.player_token, claims.session_epoch) {
+                    Ok(()) => {
+                        log::info!("[auth] account {} admitted by its spawn order (epoch {})", claims.sub, claims.session_epoch);
+                        let ticket = SessionTicket { player_token: claims.player_token, session_epoch: claims.session_epoch };
+                        Ok(Admitted { key: PlayerKey::Online(token), ticket: Some(ticket) })
+                    }
+                    Err(why) => {
+                        log::info!("[auth] account {} ticket epoch {} refused: {why}", claims.sub, claims.session_epoch);
+                        Err(why.into())
+                    }
+                };
+            }
+            Admission::Newest(epochs) => epochs,
+        };
         // Checked and recorded under one lock: of two racing tickets the
         // older can never be admitted after the newer.
-        let mut epochs = self.epochs.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut epochs = epochs.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let newest = epochs.entry(claims.player_token).or_insert(claims.session_epoch);
         if claims.session_epoch < *newest {
             log::info!(
@@ -369,6 +442,6 @@ impl Authenticator {
         }
         *newest = claims.session_epoch;
         log::info!("[auth] account {} admitted (epoch {})", claims.sub, claims.session_epoch);
-        Ok(token)
+        Ok(Admitted { key: PlayerKey::Online(token), ticket: None })
     }
 }

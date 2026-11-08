@@ -76,6 +76,16 @@ pub const HELLO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10
 /// Largest first packet the edge reads (a `Hello` is a few dozen bytes).
 pub const HELLO_MAX_BYTES: usize = 4096;
 
+/// A connection's resolved handshake.
+#[derive(Debug)]
+pub struct HelloSession {
+    pub player: PlayerId,
+    pub record: Option<PlayerRecord>,
+    /// A session a login spawn order admitted: the edge reports its end
+    /// ([`Authenticator::session_ended`](crate::auth_edge::Authenticator::session_ended)).
+    pub ticket: Option<crate::auth_edge::SessionTicket>,
+}
+
 /// The handshake: `first` must be a `Hello` whose credential `auth` accepts
 /// (see [`crate::auth_edge`]); the store then resolves its player key on
 /// tokio's blocking pool. `Err` is the refusal sent back.
@@ -84,21 +94,43 @@ pub async fn resolve_hello(
     auth: &crate::auth_edge::Authenticator,
     first: ClientPacket,
 ) -> Result<(PlayerId, Option<PlayerRecord>), String> {
+    resolve_session(store, auth, first).await.map(|s| (s.player, s.record))
+}
+
+/// [`resolve_hello`] with the session's spawn-order ticket. A ticket whose
+/// player the store cannot resolve is ended at once (no session started).
+pub async fn resolve_session(
+    store: &SharedPlayerStore,
+    auth: &crate::auth_edge::Authenticator,
+    first: ClientPacket,
+) -> Result<HelloSession, String> {
     let ClientPacket::Hello { credential } = first else {
         return Err("the first packet must be Hello".into());
     };
-    let key = auth.authenticate(credential).await?;
+    let admitted = auth.admit(credential).await?;
     let store = store.clone();
+    let key = admitted.key;
     let resolved = tokio::task::spawn_blocking(move || {
         let mut store = store.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         store.resolve(&key)
     })
     .await
-    .map_err(|e| format!("player store task failed: {e}"))?;
-    resolved.map_err(|e| {
-        log::error!("[server] player store: {e}");
-        format!("the player store failed: {e}")
-    })
+    .map_err(|e| format!("player store task failed: {e}"))
+    .and_then(|r| {
+        r.map_err(|e| {
+            log::error!("[server] player store: {e}");
+            format!("the player store failed: {e}")
+        })
+    });
+    match resolved {
+        Ok((player, record)) => Ok(HelloSession { player, record, ticket: admitted.ticket }),
+        Err(why) => {
+            if let Some(ticket) = &admitted.ticket {
+                auth.session_ended(ticket);
+            }
+            Err(why)
+        }
+    }
 }
 
 /// Nothing persisted: ids from 0 per process, no records (a player parked

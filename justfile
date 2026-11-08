@@ -942,6 +942,8 @@ login-keygen:
     just login keygen
 
 # Register a world: `just login-world-add dev --name "Dev world" --quic 127.0.0.1:6466 --wt https://127.0.0.1:6467/`.
+# `--link host:port --link-cert <sha256>` names the host's service link: joins then push
+# `SpawnPlayer` there (the login service needs VOXEL_SERVICE_TOKEN[_FILE]); see `dev-r2`.
 login-world-add *args:
     just login world add {{args}}
 
@@ -959,7 +961,9 @@ dev_password := "dev-password"
 online_wait_secs := "180"
 
 # What `dev-login` and `run-online` need in the dev login database: a signing key,
-# the world `dev` (127.0.0.1:6466 / :6467) and the verified account `dev_email`.
+# the world `dev` (127.0.0.1:6466 / :6467) and the verified account `dev_email`. The world
+# is (re)registered WITHOUT a host link (R2a: the jwt server checks tickets by epoch), undoing
+# the link a `dev-r2` run registers.
 _dev-login-setup:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -968,9 +972,7 @@ _dev-login-setup:
     if ! ls target/dev-login/keys/*.pem >/dev/null 2>&1; then
         $login keygen
     fi
-    if ! $login world list | grep -q '^dev'$'\t'; then
-        $login world add dev --name "Dev world" --quic 127.0.0.1:6466 --wt https://127.0.0.1:6467/
-    fi
+    $login world add dev --name "Dev world" --quic 127.0.0.1:6466 --wt https://127.0.0.1:6467/
     printf '%s\n' "{{dev_password}}" | $login account ensure {{dev_email}} --verified
 
 # A dev server that requires login, with the login service beside it: ensures a signing
@@ -1080,7 +1082,8 @@ coordinator: _dev-r2-token
 # A region host (VOXEL_ROLE=host) of the dev Postgres world: host `ordinal` of `hosts`
 # (static ownership), dialing the coordinator at 127.0.0.1:6480 (started first or later —
 # it waits for the pin); clients connect on 127.0.0.1:6466 as with `just server`.
-# Local player names unless VOXEL_AUTH=jwt is set (see `dev-r2`). Play region size.
+# Local player names unless VOXEL_AUTH=jwt is set (see `dev-r2`; with jwt the host also
+# takes the login service's SpawnPlayer / Kick on 127.0.0.1:6490). Play region size.
 # R2 runs ONE host per world: keep the defaults. `ordinal` != 0 / `hosts` > 1 is R3 work —
 # the coordinator serves host ordinal 0 only, and a second host would also bind 6466.
 host ordinal="0" hosts="1": _dev-r2-token
@@ -1096,8 +1099,11 @@ host ordinal="0" hosts="1": _dev-r2-token
 
 # The split world with login: the dev Postgres (`pg-up`), the `dev-login` setup and login
 # service, the coordinator (log target/dev-r2/coordinator.log) and, once it has written
-# its pin, host 0 in the foreground (VOXEL_AUTH=jwt, world `dev`). SIGTERMs the
-# coordinator and the login service on exit. Connect with `just run-online`-style login
+# its pin, host 0 in the foreground (VOXEL_AUTH=jwt, world `dev`). The host listens for the
+# login service's push on 127.0.0.1:6490 (pin target/dev-r2/host-0.cert-sha256); once it has
+# written that pin, world `dev` is re-registered with the link, so joins push `SpawnPlayer`
+# and the host admits a ticket only against it. SIGTERMs the coordinator and the login
+# service on exit. Connect with `just run-online`-style login
 # (`client debug online`) or the login screens. The first start on an empty dev database
 # forges the world in the coordinator, which can take longer than the `online_wait_secs`
 # (180 s) wait for its pin: then rerun (the world is kept), or raise it once with
@@ -1108,11 +1114,21 @@ dev-r2: pg-up _dev-login-setup _dev-r2-token
     export VOXEL_REGION_BLOCKS={{play_blocks}}
     {{cap}} {{cargo}} build --bin server
     pin={{dev_r2_dir}}/coordinator.cert-sha256
-    rm -f "$pin"
-    ./target/debug/login serve >target/dev-login/login.log 2>&1 </dev/null &
+    host_pin={{dev_r2_dir}}/host-0.cert-sha256
+    rm -f "$pin" "$host_pin"
+    VOXEL_SERVICE_TOKEN_FILE={{dev_r2_dir}}/service-token \
+        ./target/debug/login serve >target/dev-login/login.log 2>&1 </dev/null &
     lpid=$!
     cpid=""
-    trap 'echo "dev-r2: stopping the coordinator and the login service"; kill -TERM $cpid $lpid 2>/dev/null; wait $cpid $lpid 2>/dev/null || true' EXIT
+    # Once the host has written its login-link pin: world `dev` gets the link.
+    (
+        until [ -s "$host_pin" ]; do sleep 0.5; done
+        ./target/debug/login world add dev --name "Dev world" --quic 127.0.0.1:6466 --wt https://127.0.0.1:6467/ \
+            --link 127.0.0.1:6490 --link-cert "$(cat "$host_pin")" >/dev/null
+        echo "dev-r2: world dev registered with the host's login link (127.0.0.1:6490)"
+    ) &
+    rpid=$!
+    trap 'echo "dev-r2: stopping the coordinator and the login service"; kill -TERM $cpid $lpid $rpid 2>/dev/null; wait $cpid $lpid 2>/dev/null || true' EXIT
     VOXEL_ROLE=coordinator VOXEL_WORLD_DB={{dev_database_url}} \
         VOXEL_SERVICE_TOKEN_FILE={{dev_r2_dir}}/service-token VOXEL_COORDINATOR_CERT_HASH_FILE="$pin" \
         ./target/debug/server >{{dev_r2_dir}}/coordinator.log 2>&1 </dev/null &
@@ -1131,6 +1147,7 @@ dev-r2: pg-up _dev-login-setup _dev-r2-token
     VOXEL_ROLE=host VOXEL_OWNERSHIP=static VOXEL_HOST_ORDINAL=0 VOXEL_HOSTS=1 \
         VOXEL_WORLD_DB={{dev_database_url}} \
         VOXEL_SERVICE_TOKEN_FILE={{dev_r2_dir}}/service-token VOXEL_COORDINATOR_CERT_HASH_FILE="$pin" \
+        VOXEL_HOST_LINK_BIND=127.0.0.1:6490 VOXEL_HOST_LINK_CERT_HASH_FILE="$host_pin" \
         VOXEL_AUTH=jwt VOXEL_WORLD_ID=dev VOXEL_LOGIN_URL=http://127.0.0.1:8790 \
         RUST_BACKTRACE=1 ./target/debug/server
 

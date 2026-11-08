@@ -29,6 +29,7 @@ const USAGE: &str = "usage: login [--db <url>] <command>
   serve
   keygen [--dir <d>]
   world add <id> --name <n> [--quic host:port] [--wt url] [--cert-hash h] [--closed]
+            [--link host:port --link-cert <sha256>]   (the host's service link: join pushes SpawnPlayer)
   world list | remove <id> | open <id> | close <id>
   account set-password <email>   (password on stdin)
   account ensure <email> [--verified]   (password on stdin; creates or updates)
@@ -103,6 +104,8 @@ pub fn run_ctl_with(args: &[String], out: &mut dyn Write, deps: CtlDeps<'_>) -> 
     let quic = take_opt(&mut args, "--quic")?;
     let wt = take_opt(&mut args, "--wt")?;
     let cert_hash = take_opt(&mut args, "--cert-hash")?;
+    let link = take_opt(&mut args, "--link")?;
+    let link_cert = take_opt(&mut args, "--link-cert")?;
     let closed = take_flag(&mut args, "--closed");
     let verified = take_flag(&mut args, "--verified");
     let words: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -122,6 +125,7 @@ pub fn run_ctl_with(args: &[String], out: &mut dyn Write, deps: CtlDeps<'_>) -> 
         }
         ["world", "add", id] => {
             let name = name.ok_or("world add needs --name")?;
+            let (host_link, host_link_cert) = host_link_args(link, link_cert)?;
             let row = WorldRow {
                 world_id: id.to_string(),
                 name,
@@ -130,6 +134,8 @@ pub fn run_ctl_with(args: &[String], out: &mut dyn Write, deps: CtlDeps<'_>) -> 
                 webtransport: wt,
                 cert_hash,
                 created_at: now_secs(),
+                host_link,
+                host_link_cert,
             };
             block_on(async {
                 let store = open(&db_url()?).await?;
@@ -146,12 +152,13 @@ pub fn run_ctl_with(args: &[String], out: &mut dyn Write, deps: CtlDeps<'_>) -> 
                 };
                 writeln!(
                     out,
-                    "{}\t{status}\t{}\tquic={}\twt={}\tcert_hash={}",
+                    "{}\t{status}\t{}\tquic={}\twt={}\tcert_hash={}\tlink={}",
                     w.world_id,
                     w.name,
                     w.quic.as_deref().unwrap_or("-"),
                     w.webtransport.as_deref().unwrap_or("-"),
                     w.cert_hash.as_deref().unwrap_or("-"),
+                    w.host_link.as_deref().unwrap_or("-"),
                 )
                 .map_err(io)?;
             }
@@ -243,6 +250,23 @@ pub fn run_ctl_with(args: &[String], out: &mut dyn Write, deps: CtlDeps<'_>) -> 
         }
         ["serve"] => Err("`serve` is run by the binary itself".into()),
         _ => Err(USAGE.into()),
+    }
+}
+
+/// `--link host:port` and `--link-cert <sha256>` go together; the address must parse and the
+/// pin be 64 hex digits (stored lowercase).
+fn host_link_args(link: Option<String>, cert: Option<String>) -> Result<(Option<String>, Option<String>), String> {
+    match (link, cert) {
+        (None, None) => Ok((None, None)),
+        (Some(link), Some(cert)) => {
+            link.parse::<std::net::SocketAddr>().map_err(|e| format!("--link {link:?}: {e} (expected ip:port)"))?;
+            let cert = cert.trim().to_ascii_lowercase();
+            if cert.len() != 64 || !cert.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return Err("--link-cert is the host link's SHA-256 pin: 64 hex digits".into());
+            }
+            Ok((Some(link), Some(cert)))
+        }
+        _ => Err("--link and --link-cert go together".into()),
     }
 }
 

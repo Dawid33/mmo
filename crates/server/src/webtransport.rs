@@ -174,10 +174,11 @@ pub async fn serve(
             };
             // The handshake comes first: no session (and no sink) exists until
             // the connection's Hello has resolved to a player.
-            let (player, record) = match web_hello(&session, &players, &auth).await {
-                Ok(resolved) => resolved,
-                Err(why) => return refuse(&session, &why).await,
-            };
+            let crate::player_store::HelloSession { player, record, ticket } =
+                match web_hello(&session, &players, &auth).await {
+                    Ok(resolved) => resolved,
+                    Err(why) => return refuse(&session, &why).await,
+                };
             info!("webtransport client {id} connected (player {})", player.0);
             game::perf_event!("client_connected", "client={id} player={} transport=webtransport", player.0);
             sinks.insert(id, ClientSink::Web(session.clone()));
@@ -214,6 +215,9 @@ pub async fn serve(
             }
             sinks.remove(&id);
             let _ = send.send(ServerEvent::ClientDisconnected(id));
+            if let Some(ticket) = &ticket {
+                auth.session_ended(ticket);
+            }
         });
     }
 }
@@ -228,7 +232,7 @@ async fn web_hello(
     session: &wtransport::Connection,
     players: &crate::player_store::SharedPlayerStore,
     auth: &crate::auth_edge::Authenticator,
-) -> Result<(game::PlayerId, Option<game::PlayerRecord>), String> {
+) -> Result<crate::player_store::HelloSession, String> {
     let first = tokio::time::timeout(HELLO_TIMEOUT, async {
         let stream = session.accept_uni().await.map_err(|e| format!("no first packet: {e}"))?;
         let mut buf = Vec::new();
@@ -243,7 +247,7 @@ async fn web_hello(
     })
     .await
     .map_err(|_| format!("no Hello within {HELLO_TIMEOUT:?}"))??;
-    crate::player_store::resolve_hello(players, auth, first).await
+    crate::player_store::resolve_session(players, auth, first).await
 }
 
 /// Tell the client why (best effort), then close the session.

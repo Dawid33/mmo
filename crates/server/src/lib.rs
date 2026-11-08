@@ -132,6 +132,7 @@ pub mod claims;
 pub mod coordinator_rt;
 pub mod cuts;
 pub mod lod_workers;
+pub mod login_link;
 pub mod perf;
 pub mod player_store;
 pub mod region_threads;
@@ -399,10 +400,11 @@ impl WorldIngress {
                 };
                 // The handshake comes first: no session (and no sink) exists
                 // until the connection's Hello has resolved to a player.
-                let (player, record) = match quic_hello(&connection, &players, &auth).await {
-                    Ok(resolved) => resolved,
-                    Err(why) => return refuse_quic(&connection, &why).await,
-                };
+                let player_store::HelloSession { player, record, ticket } =
+                    match quic_hello(&connection, &players, &auth).await {
+                        Ok(resolved) => resolved,
+                        Err(why) => return refuse_quic(&connection, &why).await,
+                    };
                 game::perf_event!("client_connected", "client={id} player={} transport=quic", player.0);
                 sinks.insert(id, ClientSink::Quinn(connection.clone()));
                 // Announce before any of this client's other packets can be
@@ -419,6 +421,10 @@ impl WorldIngress {
                     // The world must know: unsubscribe everywhere, let the
                     // home region's grace timer start.
                     let _ = send.send(ServerEvent::ClientDisconnected(id));
+                    // And the login service, for a session its spawn order admitted.
+                    if let Some(ticket) = &ticket {
+                        auth.session_ended(ticket);
+                    }
                 });
             });
         }
@@ -435,7 +441,7 @@ async fn quic_hello(
     connection: &quinn::Connection,
     players: &player_store::SharedPlayerStore,
     auth: &auth_edge::Authenticator,
-) -> Result<(game::PlayerId, Option<game::PlayerRecord>), String> {
+) -> Result<player_store::HelloSession, String> {
     let first = tokio::time::timeout(player_store::HELLO_TIMEOUT, async {
         let mut stream = connection.accept_uni().await.map_err(|e| format!("no first packet: {e}"))?;
         let bytes = stream
@@ -446,7 +452,7 @@ async fn quic_hello(
     })
     .await
     .map_err(|_| format!("no Hello within {:?}", player_store::HELLO_TIMEOUT))??;
-    player_store::resolve_hello(players, auth, first).await
+    player_store::resolve_session(players, auth, first).await
 }
 
 /// Tell the client why (best effort), then close the connection.
@@ -549,13 +555,48 @@ pub fn run() -> claims::ServerExit {
             info!("auth: login tickets for world {world:?} from {login_url}")
         }
     }
-    let auth = Arc::new(auth_edge::Authenticator::for_mode(auth_mode));
+    // A `jwt` host with a service token takes the login service's push (`SpawnPlayer` /
+    // `Kick`) and admits tickets only against its spawn orders; without a token it keeps
+    // R2a's newest-epoch check (registry worlds without a `host_link`: `just dev-login`).
+    let spawn_orders = match &auth_mode {
+        auth_edge::AuthMode::Jwt { .. } => {
+            match login_link::service_token_if_configured(|name| std::env::var(name).ok()).unwrap_or_else(|e| fatal(&e)) {
+                Some(token) => Some((Arc::new(login_link::SpawnOrders::new(auth_edge::system_clock())), token)),
+                None => {
+                    info!("auth: no service token, so no login link: tickets are admitted by newest epoch (R2a)");
+                    None
+                }
+            }
+        }
+        auth_edge::AuthMode::Local => None,
+    };
+    let mut authenticator = auth_edge::Authenticator::for_mode(auth_mode);
+    if let Some((orders, _)) = &spawn_orders {
+        authenticator = authenticator.with_spawn_orders(orders.clone());
+    }
+    let auth = Arc::new(authenticator);
     let mut rgi = WorldIngress::new(ip, port, webtransport_enabled(single_player), players.clone(), auth.clone());
     let configured_worker_threads = std::env::var("TOKIO_WORKER_THREADS").ok();
     let worker_threads = server_worker_threads(configured_worker_threads.as_deref())
         .unwrap_or_else(|message| panic!("{message}"));
     let rt = build_server_runtime(worker_threads);
     let cps = client_packet_send.clone();
+    // The login service's push: a listener (dropped at the end of `run`, sync code).
+    let _login_link = spawn_orders.map(|(orders, token)| {
+        let bind = login_link::bind_from(std::env::var(login_link::HOST_LINK_BIND_ENV).ok().as_deref())
+            .unwrap_or_else(|e| fatal(&e));
+        let pin_file =
+            login_link::cert_hash_file_from(std::env::var(login_link::HOST_LINK_CERT_HASH_FILE_ENV).ok().as_deref());
+        let link = login_link::start(bind, token, Some(pin_file.clone()), orders, players.clone(), client_packet_send.clone())
+            .unwrap_or_else(|e| fatal(&format!("the login link on {bind}: {e}")));
+        info!(
+            "auth: login tickets need the login service's spawn orders, pushed to {} (pin {} in {})",
+            link.local_addr(),
+            link.cert_sha256(),
+            pin_file.display()
+        );
+        link
+    });
     // SIGINT / SIGTERM (`just run` stops its server with TERM) end the main
     // loop like a last client leaving does, so the world is saved on the way out.
     let stop_signal = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));

@@ -143,9 +143,12 @@ const EXPECTED: &[(&str, &str)] = &[
     ("accounts", "account_id:I*, email:T, password_hash:T, email_verified_at:I?, created_at:I"),
     ("refresh_tokens", "token_hash:B*, account_id:I, family:B, expires_at:I, revoked_at:I?"),
     ("email_tokens", "token_hash:B*, account_id:I, kind:I, expires_at:I, used_at:I?"),
-    ("worlds", "world_id:T*, name:T, status:I, quic:T?, webtransport:T?, cert_hash:T?, created_at:I"),
+    (
+        "worlds",
+        "world_id:T*, name:T, status:I, quic:T?, webtransport:T?, cert_hash:T?, created_at:I, host_link:T?, host_link_cert:T?",
+    ),
     ("world_players", "account_id:I*, world_id:T*, player_token:T, created_at:I"),
-    ("sessions", "account_id:I*, world_id:T*, session_epoch:I, started_at:I"),
+    ("sessions", "account_id:I*, world_id:T*, session_epoch:I, started_at:I, ended_at:I?"),
 ];
 
 fn expected() -> BTreeSet<Col> {

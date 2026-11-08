@@ -90,6 +90,8 @@ async fn world_registry() {
         webtransport: None,
         cert_hash: None,
         created_at: 5,
+        host_link: Some("127.0.0.1:6490".into()),
+        host_link_cert: Some("ab".repeat(32)),
     };
     s.put_world(&w).await.unwrap();
     assert_eq!(s.world("w1").await.unwrap().unwrap(), w);
@@ -232,4 +234,48 @@ async fn concurrent_rotations_postgres() {
     let db = crate::common::PgTestDb::create(&admin).await;
     race_rotations(LoginStore::open(&db.url).await.unwrap()).await;
     db.drop_db().await;
+}
+
+/// Sessions end per epoch (a late end never closes a newer join), and a join re-opens one.
+async fn session_ends(s: LoginStore) {
+    let t = s.player_token_for(1, "w1", 0, || "aaa".into()).await.unwrap();
+    s.player_token_for(1, "w2", 0, || "bbb".into()).await.unwrap();
+    assert_eq!(s.bump_session(1, "w1", 1).await.unwrap(), 1);
+    assert_eq!(s.bump_session(1, "w2", 1).await.unwrap(), 1);
+    let worlds = |v: Vec<login::OpenSession>| v.into_iter().map(|o| (o.world_id, o.player_token, o.session_epoch)).collect::<Vec<_>>();
+    assert_eq!(worlds(s.open_sessions(1).await.unwrap()), vec![("w1".into(), t.clone(), 1), ("w2".into(), "bbb".into(), 1)]);
+    assert_eq!(s.bump_session(1, "w1", 2).await.unwrap(), 2);
+    assert!(!s.end_session("w1", &t, 1, 3).await.unwrap(), "epoch 1's end is late: epoch 2 is open");
+    assert!(!s.end_session("w1", "nobody", 2, 3).await.unwrap());
+    assert!(s.end_session("w1", &t, 2, 3).await.unwrap());
+    assert!(!s.end_session("w1", &t, 2, 4).await.unwrap(), "once");
+    assert_eq!(worlds(s.open_sessions(1).await.unwrap()), vec![("w2".into(), "bbb".into(), 1)]);
+    assert_eq!(s.bump_session(1, "w1", 5).await.unwrap(), 3);
+    assert_eq!(s.open_sessions(1).await.unwrap().len(), 2, "a join re-opens it");
+    assert!(s.open_sessions(2).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn session_ends_sqlite() {
+    session_ends(store().await).await;
+}
+
+#[tokio::test]
+async fn session_ends_postgres() {
+    let Some(admin) = crate::common::pg_admin_url() else { return crate::common::skip_msg() };
+    let db = crate::common::PgTestDb::create(&admin).await;
+    session_ends(LoginStore::open(&db.url).await.unwrap()).await;
+    db.drop_db().await;
+}
+
+/// A refresh token's account is read without spending it.
+#[tokio::test]
+async fn live_refresh_account_reads_without_spending() {
+    let s = store().await;
+    s.insert_refresh([1; 32], 7, [9; 16], 100).await.unwrap();
+    assert_eq!(s.live_refresh_account([1; 32], 50).await.unwrap(), Some(7));
+    assert_eq!(s.live_refresh_account([1; 32], 100).await.unwrap(), None, "expired");
+    assert_eq!(s.live_refresh_account([2; 32], 50).await.unwrap(), None);
+    assert!(matches!(s.take_refresh([1; 32], 50).await.unwrap(), RefreshOutcome::Valid { account: 7, .. }));
+    assert_eq!(s.live_refresh_account([1; 32], 51).await.unwrap(), None, "spent");
 }

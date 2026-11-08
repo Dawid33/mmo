@@ -89,6 +89,12 @@ pub enum ServerEvent {
         record: Option<crate::PlayerRecord>,
     },
     ClientDisconnected(ClientId),
+    /// The login service gave `player` a newer login (`SpawnPlayer`, reason
+    /// [`LOGGED_IN_ELSEWHERE`]) or revoked it (`Kick`, its reason): every
+    /// session of the player is refused with `reason` and parked, as a
+    /// takeover does. The new login's session, when it connects, is restored
+    /// from that park. No session: nothing happens.
+    Supersede { player: crate::PlayerId, reason: String },
 }
 
 impl ServerEvent {
@@ -2023,6 +2029,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                 }
             }
             ServerEvent::ClientDisconnected(id) => self.client_disconnected(id, now_ms),
+            ServerEvent::Supersede { player, reason } => self.supersede(player, &reason, now_ms),
             ServerEvent::ClientPacket(packet, id) if self.restore_pending(id) && defers_until_restored(&packet) => {
                 self.deferred_packets.entry(id).or_default().push(packet);
             }
@@ -3310,6 +3317,18 @@ impl<S: RegionSpawner> WorldManager<S> {
     pub fn park_all_players(&mut self, now_ms: u64) {
         let online: Vec<ClientId> = self.sessions.keys().copied().collect();
         for id in online {
+            self.client_disconnected(id, now_ms);
+        }
+    }
+
+    /// Every session of `player` is told `reason` and ended (the server edge
+    /// closes it); its player parks.
+    fn supersede(&mut self, player: PlayerId, reason: &str, now_ms: u64) {
+        let sessions: Vec<ClientId> =
+            self.player_of.iter().filter(|(_, p)| **p == player).map(|(c, _)| *c).collect();
+        for id in sessions {
+            log::info!("client {id}: player {} superseded by the login service ({reason})", player.0);
+            let _ = self.out.send((Some(id), ServerPacket::Refused(reason.to_string())));
             self.client_disconnected(id, now_ms);
         }
     }

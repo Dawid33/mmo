@@ -4,6 +4,7 @@
 pub mod api;
 pub mod config;
 pub mod ctl;
+pub mod host_link;
 pub mod mail;
 pub mod pages;
 pub mod password;
@@ -15,7 +16,7 @@ use std::sync::Arc;
 pub use api::{AppState, router, system_clock};
 pub use config::{LoginConfig, MailerKind};
 pub use password::{Hasher, check_password, normalize_email};
-pub use store::{AccountId, AccountRow, LoginError, LoginStore, RefreshOutcome, WorldRow};
+pub use store::{AccountId, AccountRow, LoginError, LoginStore, OpenSession, RefreshOutcome, WorldRow};
 
 /// Kind of an email token: verify the address.
 pub const EMAIL_TOKEN_VERIFY: i64 = 0;
@@ -51,6 +52,14 @@ pub async fn serve(config: LoginConfig) -> io::Result<()> {
         signer.jwks().keys.len(),
         config.require_verified
     );
+    // The service token world hosts' links are dialed with (worlds with a `host_link`).
+    let service_token = match svc_link::service_token_from_env() {
+        Ok(token) => Some(token),
+        Err(why) => {
+            log::info!("[login] no service token ({why}): worlds with a host link cannot be joined");
+            None
+        }
+    };
     let state = AppState::new(
         store,
         Arc::new(signer),
@@ -58,7 +67,8 @@ pub async fn serve(config: LoginConfig) -> io::Result<()> {
         mailer,
         Arc::new(config),
         system_clock(),
-    );
+    )
+    .with_service_token(service_token);
     axum::serve(listener, router(state))
         .with_graceful_shutdown(shutdown_signal())
         .await

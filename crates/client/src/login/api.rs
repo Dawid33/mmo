@@ -53,6 +53,9 @@ impl fmt::Display for LoginFailure {
                 ApiErrorCode::Revoked => f.write_str("Your login expired \u{2014} please log in again"),
                 ApiErrorCode::UnknownWorld => f.write_str("That world does not exist"),
                 ApiErrorCode::WorldClosed => f.write_str("That world is closed"),
+                ApiErrorCode::WorldUnavailable => {
+                    f.write_str("That world's server is not reachable right now \u{2014} try again shortly")
+                }
                 ApiErrorCode::BadRequest => f.write_str(&e.message),
                 ApiErrorCode::Internal => f.write_str("The login server had a problem \u{2014} try again later"),
             },
