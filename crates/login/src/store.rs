@@ -55,6 +55,16 @@ pub struct WorldRow {
     pub host_link_cert: Option<String>,
 }
 
+/// A kick the world host has not acknowledged yet (`pending_kicks`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingKick {
+    pub world_id: String,
+    pub player_token: String,
+    /// Revokes the player's sessions and orders up to this epoch.
+    pub session_epoch: u64,
+    pub reason: String,
+}
+
 /// A session of an account that has not ended: where to send a `Kick`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OpenSession {
@@ -441,5 +451,57 @@ impl LoginStore {
         Ok(on!(self, p => sqlx::query(SQL).bind(account).fetch_all(p).await?.into_iter()
             .map(|r| OpenSession { world_id: r.get(0), player_token: r.get(1), session_epoch: r.get::<i64, _>(2) as u64 })
             .collect()))
+    }
+
+    /// Revoke every refresh token of `account` and, in the SAME transaction, queue a kick (with
+    /// `reason`) for each of its open sessions in a world with a host link — so a revocation
+    /// is never committed without its kicks. A kick already queued for that player is replaced
+    /// (the newest epoch and reason). How many kicks were queued.
+    pub async fn revoke_account_with_kicks(&self, account: AccountId, now: i64, reason: &str) -> Result<u64, LoginError> {
+        const REVOKE: &str = "UPDATE refresh_tokens SET revoked_at = $1 WHERE account_id = $2 AND revoked_at IS NULL";
+        const QUEUE: &str = "INSERT INTO pending_kicks (world_id, player_token, session_epoch, reason, created_at) \
+             SELECT s.world_id, p.player_token, s.session_epoch, CAST($2 AS TEXT), CAST($3 AS BIGINT) \
+             FROM sessions s \
+             JOIN world_players p ON p.account_id = s.account_id AND p.world_id = s.world_id \
+             JOIN worlds w ON w.world_id = s.world_id \
+             WHERE s.account_id = $1 AND s.ended_at IS NULL AND w.host_link IS NOT NULL \
+             ON CONFLICT (world_id, player_token) DO UPDATE SET \
+             session_epoch = excluded.session_epoch, reason = excluded.reason, created_at = excluded.created_at";
+        macro_rules! tx {
+            ($p:expr) => {{
+                let mut tx = $p.begin().await?;
+                sqlx::query(REVOKE).bind(now).bind(account).execute(&mut *tx).await?;
+                let n = sqlx::query(QUEUE).bind(account).bind(reason).bind(now).execute(&mut *tx).await?.rows_affected();
+                tx.commit().await?;
+                n
+            }};
+        }
+        Ok(match &self.pool {
+            Pool::Sqlite(p) => tx!(p),
+            Pool::Pg(p) => tx!(p),
+        })
+    }
+
+    /// Every kick not acknowledged yet, by world.
+    pub async fn pending_kicks(&self) -> Result<Vec<PendingKick>, LoginError> {
+        const SQL: &str = "SELECT world_id, player_token, session_epoch, reason FROM pending_kicks \
+             ORDER BY world_id, player_token";
+        Ok(on!(self, p => sqlx::query(SQL).fetch_all(p).await?.into_iter()
+            .map(|r| PendingKick {
+                world_id: r.get(0),
+                player_token: r.get(1),
+                session_epoch: r.get::<i64, _>(2) as u64,
+                reason: r.get(3),
+            })
+            .collect()))
+    }
+
+    /// The host applied the kick of `player_token` in `world` up to `epoch`: forgotten, unless
+    /// a newer one was queued since. Whether a row went.
+    pub async fn kick_acked(&self, world: &str, player_token: &str, epoch: u64) -> Result<bool, LoginError> {
+        const SQL: &str = "DELETE FROM pending_kicks WHERE world_id = $1 AND player_token = $2 AND session_epoch <= $3";
+        let epoch = i64::try_from(epoch).unwrap_or(i64::MAX);
+        let n = on!(self, p => sqlx::query(SQL).bind(world).bind(player_token).bind(epoch).execute(p).await?.rows_affected());
+        Ok(n > 0)
     }
 }

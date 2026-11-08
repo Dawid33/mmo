@@ -61,6 +61,8 @@ const WORLD_UNAVAILABLE_MSG: &str = "the world server is not reachable right now
 pub const KICK_LOGOUT_ALL: &str = "signed out everywhere";
 /// The `Refused` text a kicked session gets after a password reset.
 pub const KICK_PASSWORD_RESET: &str = "the account's password was reset; log in again";
+/// The `Refused` text a kicked session gets after an admin set the password (`login account`).
+pub const KICK_PASSWORD_SET: &str = "the account's password was changed; log in again";
 
 /// What every handler shares. Cheap to clone.
 #[derive(Clone)]
@@ -100,8 +102,10 @@ impl AppState {
     }
 
     /// Use these host links (tests: a short ack timeout).
+    /// Starts their kick sweeper when called on a runtime.
     pub fn with_host_links(mut self, links: HostLinks) -> AppState {
         self.host_links = Arc::new(links);
+        self.host_links.start();
         self
     }
 
@@ -341,9 +345,9 @@ async fn logout(State(s): State<AppState>, ApiJson(req): ApiJson<LogoutRequest>)
     match s.store.take_refresh(token_hash(&req.refresh_token), now).await? {
         RefreshOutcome::Valid { account, family } if req.all => {
             s.store.revoke_family(family, now).await?;
-            s.store.revoke_account_refresh(account, now).await?;
-            log::info!("[login] account {account} logged out everywhere");
-            kick_everywhere(&s, account, KICK_LOGOUT_ALL).await?;
+            let kicks = s.store.revoke_account_with_kicks(account, now, KICK_LOGOUT_ALL).await?;
+            log::info!("[login] account {account} logged out everywhere ({kicks} kick(s) queued)");
+            s.host_links.wake_kicks();
         }
         RefreshOutcome::Valid { account, family } | RefreshOutcome::Reused { account, family } => {
             s.store.revoke_family(family, now).await?;
@@ -352,28 +356,6 @@ async fn logout(State(s): State<AppState>, ApiJson(req): ApiJson<LogoutRequest>)
         RefreshOutcome::Unknown => {}
     }
     Ok(StatusCode::NO_CONTENT)
-}
-
-/// `Kick` the account's player out of every world it has an open session in (whose host has a
-/// link), concurrently; each waits at most `SPAWN_ACK_TIMEOUT_MS` for its link.
-async fn kick_everywhere(s: &AppState, account: i64, reason: &str) -> Result<(), Fail> {
-    let mut kicks = Vec::new();
-    for session in s.store.open_sessions(account).await? {
-        let Some(world) = s.store.world(&session.world_id).await? else { continue };
-        if world.host_link.is_none() {
-            continue;
-        }
-        let (links, reason) = (s.host_links.clone(), reason.to_string());
-        kicks.push(tokio::spawn(async move {
-            if links.kick(&world, &session.player_token, &reason).await {
-                log::info!("[login] account {account}: kicked from world {}", world.world_id);
-            }
-        }));
-    }
-    for kick in kicks {
-        let _ = kick.await;
-    }
-    Ok(())
 }
 
 async fn worlds(State(s): State<AppState>) -> Result<Json<Vec<WorldEntry>>, Fail> {
@@ -485,10 +467,11 @@ pub(crate) async fn confirm_reset(s: &AppState, token: &str, password: String) -
     };
     let phc = hash_password(s, password).await?;
     s.store.set_password(account, &phc).await?;
-    s.store.revoke_account_refresh(account, now).await?;
+    let kicks = s.store.revoke_account_with_kicks(account, now, KICK_PASSWORD_RESET).await?;
     s.store.mark_verified(account, now).await?;
-    log::info!("[login] account {account} reset its password");
-    kick_everywhere(s, account, KICK_PASSWORD_RESET).await
+    log::info!("[login] account {account} reset its password ({kicks} kick(s) queued)");
+    s.host_links.wake_kicks();
+    Ok(())
 }
 
 async fn verify(State(s): State<AppState>, ApiJson(req): ApiJson<VerifyRequest>) -> Result<StatusCode, Fail> {

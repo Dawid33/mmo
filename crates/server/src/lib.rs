@@ -400,17 +400,19 @@ impl WorldIngress {
                 };
                 // The handshake comes first: no session (and no sink) exists
                 // until the connection's Hello has resolved to a player.
-                let player_store::HelloSession { player, record, ticket } =
+                let hello =
                     match quic_hello(&connection, &players, &auth).await {
                         Ok(resolved) => resolved,
                         Err(why) => return refuse_quic(&connection, &why).await,
                     };
+                let (player, ticket) = (hello.player, hello.ticket.clone());
                 game::perf_event!("client_connected", "client={id} player={} transport=quic", player.0);
                 sinks.insert(id, ClientSink::Quinn(connection.clone()));
                 // Announce before any of this client's other packets can be
                 // read: guarantees the player exists before its first request
                 // is served.
-                send.send(ServerEvent::ClientConnected { client: id, player, record }).unwrap();
+                // (and supersedes it at once if a kick revoked it meanwhile).
+                crate::player_store::announce_session(&send, id, &hello, &auth);
 
                 let fut = handle_connection(connection, send.clone(), id);
                 tokio::spawn(async move {
@@ -563,7 +565,13 @@ pub fn run() -> claims::ServerExit {
             match login_link::service_token_if_configured(|name| std::env::var(name).ok()).unwrap_or_else(|e| fatal(&e)) {
                 Some(token) => Some((Arc::new(login_link::SpawnOrders::new(auth_edge::system_clock())), token)),
                 None => {
-                    info!("auth: no service token, so no login link: tickets are admitted by newest epoch (R2a)");
+                    log::warn!(
+                        "auth: jwt without a service token ({} / {} unset): NO login link — tickets are admitted by \
+                         newest epoch (R2a), the login service cannot order spawns, and its Kick (logout everywhere, \
+                         password reset) never reaches this host; set the token for a world registered with a host link",
+                        svc_link::SERVICE_TOKEN_ENV,
+                        svc_link::SERVICE_TOKEN_FILE_ENV
+                    );
                     None
                 }
             }

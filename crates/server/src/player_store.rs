@@ -133,6 +133,24 @@ pub async fn resolve_session(
     }
 }
 
+/// The edge announces a resolved session to the manager: `ClientConnected`,
+/// then — for a spawn-order session — a `Supersede` if a `Kick` revoked it
+/// between its admission and this announcement (that kick found no session).
+/// Both go on the manager's one event channel, in this order.
+pub fn announce_session(
+    send: &crossbeam::channel::Sender<game::ServerEvent>,
+    client: game::ClientId,
+    session: &HelloSession,
+    auth: &crate::auth_edge::Authenticator,
+) {
+    let player = session.player;
+    let _ = send.send(game::ServerEvent::ClientConnected { client, player, record: session.record.clone() });
+    if let Some(reason) = session.ticket.as_ref().and_then(|t| auth.revoked(t)) {
+        log::info!("[server] client {client}: its login was revoked while it connected");
+        let _ = send.send(game::ServerEvent::Supersede { player, reason });
+    }
+}
+
 /// Nothing persisted: ids from 0 per process, no records (a player parked
 /// in this process comes back from the manager's parked records).
 /// Procedural worlds and tests.

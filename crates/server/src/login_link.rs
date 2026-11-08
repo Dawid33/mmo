@@ -1,5 +1,5 @@
 //! The host's side of the login service's push (`svc-link`, role `Login`): `SpawnPlayer` and
-//! `Kick` in, `SpawnAck` and `SessionEnded` out.
+//! `Kick` in, `SpawnAck`, `KickAck` and `SessionEnded` out.
 //!
 //! A `jwt` host that has a service token listens on [`HOST_LINK_BIND_ENV`] and admits a login
 //! ticket only against a pending spawn order ([`SpawnOrders`]): the login service pushes
@@ -12,10 +12,20 @@
 //!   ([`ServerEvent::Supersede`], `Refused(LOGGED_IN_ELSEWHERE)`) — before the newer ticket
 //!   exists, so newest-wins holds across login replicas and processes — and an older ticket is
 //!   refused ([`REFUSE_SUPERSEDED`](crate::auth_edge::REFUSE_SUPERSEDED));
-//! - `Kick` parks the session with its reason and drops (and fences off) any pending order.
+//! - `Kick { up to epoch }` parks the session with its reason and drops (and fences off) any
+//!   order up to that epoch; a newer login is untouched. It is acked (`KickAck`) after it is
+//!   applied: the login service resends it until then (kicks are durable there), and a copy
+//!   applies nothing new. A kick that lands while a revoked ticket's connect is between its
+//!   admission and its `ClientConnected` is caught by the edge, which checks
+//!   [`SpawnOrders::revoked`] after announcing the session.
 //!
 //! The link is at-least-once around reconnects: an order repeated with an epoch already known
-//! is acked again and changes nothing (no second park of the session it admitted).
+//! (ordered, live, or used within [`SPAWN_PENDING_TTL_SECS`]) is acked again and changes
+//! nothing (no second park of the session it admitted, no re-armed ticket).
+//!
+//! `SessionEnded` is best effort: it goes to the login peers connected at that moment and is
+//! lost while the link is down (the login service then keeps the session open in its
+//! registry; a kick for it later is a no-op here).
 //!
 //! The order is consumed and the supersede queued on this link's thread BEFORE the ack goes
 //! out, and the supersede shares the manager's event channel with the connects: the new
@@ -87,28 +97,40 @@ pub enum SpawnOrder {
     Stale,
 }
 
+/// A `Kick` the host applied: every epoch up to `up_to` is revoked, until `expires`.
+struct Kicked {
+    up_to: u64,
+    expires: u64,
+    reason: String,
+}
+
 #[derive(Default)]
 struct OrderState {
     pending: PendingSpawns,
     /// The epoch of each player's live session (admitted, not ended).
     admitted: BTreeMap<String, u64>,
-    /// After a `Kick`: the newest epoch it revoked, until it expires (a late resend of a
-    /// revoked order must not re-open it).
-    kicked: BTreeMap<String, (u64, u64)>,
+    /// The newest epoch whose ticket was used, after its session ended, until it expires
+    /// (a very late resend of that order must not re-arm the used ticket).
+    used: BTreeMap<String, (u64, u64)>,
+    /// After a `Kick`: what it revoked, until it expires (a late resend of a revoked order
+    /// must not re-open it).
+    kicked: BTreeMap<String, Kicked>,
 }
 
 impl OrderState {
-    /// The newest epoch known for `token` (ordered, admitted or kicked).
+    /// The newest epoch known for `token` (ordered, admitted, used or kicked).
     fn known(&self, token: &str, now: u64) -> Option<u64> {
         let pending = self.pending.by_token.get(token).map(|(epoch, _)| *epoch);
         let admitted = self.admitted.get(token).copied();
-        let kicked = self.kicked.get(token).filter(|(_, expires)| now < *expires).map(|(epoch, _)| *epoch);
-        pending.max(admitted).max(kicked)
+        let used = self.used.get(token).filter(|(_, expires)| now < *expires).map(|(epoch, _)| *epoch);
+        let kicked = self.kicked.get(token).filter(|k| now < k.expires).map(|k| k.up_to);
+        pending.max(admitted).max(used).max(kicked)
     }
 
     fn prune(&mut self, now: u64) {
         self.pending.by_token.retain(|_, (_, expires)| now < *expires);
-        self.kicked.retain(|_, (_, expires)| now < *expires);
+        self.used.retain(|_, (_, expires)| now < *expires);
+        self.kicked.retain(|_, k| now < k.expires);
     }
 }
 
@@ -146,7 +168,7 @@ impl SpawnOrders {
         let now = (self.now)();
         let mut state = self.state();
         state.prune(now);
-        if state.kicked.get(token).is_some_and(|(revoked, _)| epoch <= *revoked) {
+        if state.kicked.get(token).is_some_and(|k| epoch <= k.up_to) {
             return SpawnOrder::Stale;
         }
         match state.known(token, now) {
@@ -160,16 +182,28 @@ impl SpawnOrders {
         }
     }
 
-    /// `Kick { token }`: the pending order is dropped, and no order up to the newest epoch
-    /// known now is taken again for [`SPAWN_PENDING_TTL_SECS`].
-    pub fn kick(&self, token: &str) {
+    /// `Kick { token, up_to, reason }`: a pending order up to `up_to` is dropped, and no order
+    /// or ticket up to it is taken for [`SPAWN_PENDING_TTL_SECS`]. Whether the player's live
+    /// session (if any) is revoked by it — a session of a newer login is not. Applying the
+    /// same kick again changes nothing.
+    pub fn kick(&self, token: &str, up_to: u64, reason: &str) -> bool {
         let now = (self.now)();
         let mut state = self.state();
         state.prune(now);
-        if let Some(newest) = state.known(token, now) {
-            state.kicked.insert(token.to_string(), (newest, now.saturating_add(SPAWN_PENDING_TTL_SECS)));
+        let ceiling = state.kicked.get(token).map_or(up_to, |k| k.up_to.max(up_to));
+        let expires = now.saturating_add(SPAWN_PENDING_TTL_SECS);
+        state.kicked.insert(token.to_string(), Kicked { up_to: ceiling, expires, reason: reason.to_string() });
+        if state.pending.by_token.get(token).is_some_and(|(epoch, _)| *epoch <= up_to) {
+            state.pending.by_token.remove(token);
         }
-        state.pending.by_token.remove(token);
+        state.admitted.get(token).is_none_or(|epoch| *epoch <= up_to)
+    }
+
+    /// The kick's reason if the session admitted with (`token`, `epoch`) was revoked since.
+    pub fn revoked(&self, token: &str, epoch: u64) -> Option<String> {
+        let now = (self.now)();
+        let state = self.state();
+        state.kicked.get(token).filter(|k| now < k.expires && epoch <= k.up_to).map(|k| k.reason.clone())
     }
 
     /// A verified ticket of `token` with `epoch` connects: admitted (its order consumed) only
@@ -195,10 +229,13 @@ impl SpawnOrders {
     /// the player is live) and reported to the login service.
     pub fn ended(&self, token: &str, epoch: u64) {
         {
+            let now = (self.now)();
             let mut state = self.state();
             if state.admitted.get(token) == Some(&epoch) {
                 state.admitted.remove(token);
             }
+            let newest = state.used.get(token).map_or(epoch, |(used, _)| (*used).max(epoch));
+            state.used.insert(token.to_string(), (newest, now.saturating_add(SPAWN_PENDING_TTL_SECS)));
         }
         if let Some(login) = self.login.get() {
             let peers = login.peers.lock().unwrap_or_else(|p| p.into_inner()).clone();
@@ -291,7 +328,10 @@ fn serve(
                         let ok = spawn(&orders, &players, &events, &player_token, session_epoch);
                         senders.send(peer, HostToLogin::SpawnAck { player_token, session_epoch, ok });
                     }
-                    LoginToHost::Kick { player_token, reason } => kick(&orders, &players, &events, &player_token, reason),
+                    LoginToHost::Kick { player_token, session_epoch, reason } => {
+                        kick(&orders, &players, &events, &player_token, session_epoch, reason);
+                        senders.send(peer, HostToLogin::KickAck { player_token, session_epoch });
+                    }
                 }
             }
         }
@@ -341,11 +381,22 @@ fn spawn(
     }
 }
 
-/// `Kick`: the order is dropped and the session parked with `reason`.
-fn kick(orders: &SpawnOrders, players: &SharedPlayerStore, events: &Sender<ServerEvent>, token: &str, reason: String) {
-    orders.kick(token);
+/// `Kick`: orders up to `up_to` are dropped and a revoked session parked with `reason`. The
+/// revocation is recorded before the supersede is queued (the edge's re-check relies on it).
+fn kick(
+    orders: &SpawnOrders,
+    players: &SharedPlayerStore,
+    events: &Sender<ServerEvent>,
+    token: &str,
+    up_to: u64,
+    reason: String,
+) {
+    if !orders.kick(token, up_to, &reason) {
+        log::info!("[login-link] kick up to epoch {up_to}: the live session is a newer login; kept");
+        return;
+    }
     if let Some(player) = player_of(players, token) {
-        log::info!("[login-link] kick of player {}: {reason}", player.0);
+        log::info!("[login-link] kick of player {} (up to epoch {up_to}): {reason}", player.0);
         let _ = events.send(ServerEvent::Supersede { player, reason });
     }
 }
@@ -389,14 +440,31 @@ mod tests {
     fn kick_drops_the_order_and_fences_its_resend() {
         let (clock, o) = orders_at(1000);
         assert_eq!(o.order("t", 3), SpawnOrder::New);
-        o.kick("t");
+        assert!(o.kick("t", 3, "bye"), "no live session: nothing newer to keep");
+        assert!(o.kick("t", 3, "bye"), "a copy");
+        assert_eq!(o.revoked("t", 3).as_deref(), Some("bye"));
         assert_eq!(o.admit("t", 3), Err(REFUSE_NO_SPAWN_ORDER));
         assert_eq!(o.order("t", 3), SpawnOrder::Stale, "a late resend of the revoked order");
         assert_eq!(o.admit("t", 3), Err(REFUSE_NO_SPAWN_ORDER));
         assert_eq!(o.order("t", 4), SpawnOrder::New, "a new login after the kick");
         assert_eq!(o.admit("t", 4), Ok(()));
+        assert_eq!(o.revoked("t", 4), None);
+        assert!(!o.kick("t", 3, "bye"), "a late copy of the old kick keeps the newer session");
+        assert_eq!(o.revoked("t", 4), None);
         clock.store(1000 + SPAWN_PENDING_TTL_SECS, Ordering::SeqCst);
         assert_eq!(o.order("t", 4), SpawnOrder::Repeat, "admitted and live");
+    }
+
+    #[test]
+    fn a_used_ticket_stays_used_after_its_session_ends() {
+        let (clock, o) = orders_at(1000);
+        assert_eq!(o.order("t", 5), SpawnOrder::New);
+        assert_eq!(o.admit("t", 5), Ok(()));
+        o.ended("t", 5);
+        assert_eq!(o.order("t", 5), SpawnOrder::Repeat, "a very late resend after the session ended");
+        assert_eq!(o.admit("t", 5), Err(REFUSE_NO_SPAWN_ORDER), "does not re-arm the used ticket");
+        clock.store(1000 + SPAWN_PENDING_TTL_SECS, Ordering::SeqCst);
+        assert_eq!(o.order("t", 6), SpawnOrder::New);
     }
 
     #[test]

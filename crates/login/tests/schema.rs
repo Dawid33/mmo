@@ -149,6 +149,7 @@ const EXPECTED: &[(&str, &str)] = &[
     ),
     ("world_players", "account_id:I*, world_id:T*, player_token:T, created_at:I"),
     ("sessions", "account_id:I*, world_id:T*, session_epoch:I, started_at:I, ended_at:I?"),
+    ("pending_kicks", "world_id:T*, player_token:T*, session_epoch:I, reason:T, created_at:I"),
 ];
 
 fn expected() -> BTreeSet<Col> {

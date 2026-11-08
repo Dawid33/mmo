@@ -12,6 +12,18 @@
 //! Delivery is at-least-once around reconnects (`svc-link`): a join resends its spawn order
 //! when the link comes back before the ack, and the host treats a repeated epoch as the same
 //! order (re-ack, nothing parked again).
+//!
+//! **Kicks are durable** (revocation must not fail open): a logout-everywhere / password
+//! reset queues them in `pending_kicks` in the revocation's own transaction
+//! ([`LoginStore::revoke_account_with_kicks`]), and the kick sweeper ([`HostLinks::start`])
+//! sends every pending kick on each link `Up`, and again every [`KICK_RESEND_MS`] while up,
+//! until the host's [`HostToLogin::KickAck`] deletes it. A kick revokes up to an epoch, so a
+//! resend is harmless (the host applies it once, and never to a newer login). The sweeper also
+//! dials the links of worlds with pending kicks, so kicks queued by the admin ctl (another
+//! process) or before a restart go out too.
+//!
+//! `SessionEnded` is best effort: one sent while the link is down is lost, and the session
+//! then stays open in the registry (a later kick for it is a no-op on the host).
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
@@ -21,7 +33,10 @@ use std::time::Duration;
 use crossbeam::channel::{Receiver, Sender};
 use login_api::{HostToLogin, LoginToHost, SPAWN_ACK_TIMEOUT_MS};
 use svc_link::{LinkDialer, LinkEvent, LinkHello, PeerRole};
-use tokio::sync::{oneshot, watch};
+use tokio::sync::{Notify, oneshot, watch};
+
+/// How often pending kicks are resent while their link is up (and new ones looked for).
+pub const KICK_RESEND_MS: u64 = 2000;
 
 use crate::{LoginStore, WorldRow};
 
@@ -67,6 +82,8 @@ pub struct HostLinks {
     clock: Arc<dyn Fn() -> u64 + Send + Sync>,
     ack_timeout: Duration,
     links: Mutex<BTreeMap<String, Arc<HostLink>>>,
+    /// Wakes the kick sweeper: a link came up, or kicks were queued.
+    kicks: Arc<Notify>,
 }
 
 impl HostLinks {
@@ -79,6 +96,68 @@ impl HostLinks {
             clock,
             ack_timeout: Duration::from_millis(SPAWN_ACK_TIMEOUT_MS),
             links: Mutex::default(),
+            kicks: Arc::new(Notify::new()),
+        }
+    }
+
+    /// Start the kick sweeper on the current runtime (it ends when these links are dropped).
+    /// Without a runtime (or a service token) there is nothing to start.
+    pub fn start(self: &Arc<Self>) {
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else { return };
+        if self.token.is_none() {
+            return;
+        }
+        let (links, wake) = (Arc::downgrade(self), self.kicks.clone());
+        runtime.spawn(async move {
+            loop {
+                let Some(links) = links.upgrade() else { return };
+                links.send_pending_kicks().await;
+                drop(links);
+                tokio::select! {
+                    _ = tokio::time::sleep(Duration::from_millis(KICK_RESEND_MS)) => {}
+                    _ = wake.notified() => {}
+                }
+            }
+        });
+    }
+
+    /// Kicks were queued: send them now.
+    pub fn wake_kicks(&self) {
+        self.kicks.notify_one();
+    }
+
+    /// Every pending kick, over its world's link (dialed if need be) if that link is up.
+    async fn send_pending_kicks(&self) {
+        let kicks = match self.store.pending_kicks().await {
+            Ok(kicks) => kicks,
+            Err(e) => return log::error!("[login] reading pending kicks: {e}"),
+        };
+        let mut world: Option<(String, Option<Arc<HostLink>>)> = None;
+        for kick in kicks {
+            if world.as_ref().is_none_or(|(id, _)| *id != kick.world_id) {
+                let link = match self.store.world(&kick.world_id).await {
+                    Ok(Some(row)) => match self.link(&row) {
+                        Ok(link) => link,
+                        Err(e) => {
+                            log::warn!("[login] kicks for world {}: {e}", kick.world_id);
+                            None
+                        }
+                    },
+                    // A removed world: its kicks wait (and go if it is registered again).
+                    Ok(None) => None,
+                    Err(e) => return log::error!("[login] reading world {}: {e}", kick.world_id),
+                };
+                world = Some((kick.world_id.clone(), link));
+            }
+            if let Some((_, Some(link))) = &world
+                && *link.up.borrow()
+            {
+                let _ = link.tx.send(LoginToHost::Kick {
+                    player_token: kick.player_token,
+                    session_epoch: kick.session_epoch,
+                    reason: kick.reason,
+                });
+            }
         }
     }
 
@@ -116,6 +195,7 @@ impl HostLinks {
             store: self.store.clone(),
             clock: self.clock.clone(),
             runtime,
+            kicks: self.kicks.clone(),
         };
         std::thread::Builder::new()
             .name(format!("host-link-{}", world.world_id))
@@ -160,30 +240,6 @@ impl HostLinks {
             Ok(None) | Err(_) => Err(SpawnError::Timeout),
         }
     }
-
-    /// Send `Kick` to `world`'s host once its link is up (waiting at most
-    /// [`SPAWN_ACK_TIMEOUT_MS`]). Whether it was handed to the link; a world without a host
-    /// link has nothing to kick (`false`).
-    pub async fn kick(&self, world: &WorldRow, player_token: &str, reason: &str) -> bool {
-        let link = match self.link(world) {
-            Ok(Some(link)) => link,
-            Ok(None) => return false,
-            Err(e) => {
-                log::warn!("[login] kick in world {}: {e}", world.world_id);
-                return false;
-            }
-        };
-        let mut up = link.up.clone();
-        let sent = tokio::time::timeout(self.ack_timeout, up.wait_for(|u| *u)).await.is_ok_and(|r| r.is_ok())
-            && link
-                .tx
-                .send(LoginToHost::Kick { player_token: player_token.to_string(), reason: reason.to_string() })
-                .is_ok();
-        if !sent {
-            log::warn!("[login] kick in world {}: its host link is down; not sent", world.world_id);
-        }
-        sent
-    }
 }
 
 /// A link's event pump (its own thread): up / down into the watch, acks to their joins,
@@ -196,6 +252,8 @@ struct Pump {
     store: LoginStore,
     clock: Arc<dyn Fn() -> u64 + Send + Sync>,
     runtime: tokio::runtime::Handle,
+    /// Woken on every `Up`: pending kicks go out at once.
+    kicks: Arc<Notify>,
 }
 
 impl Pump {
@@ -205,6 +263,7 @@ impl Pump {
                 LinkEvent::Up(_) => {
                     log::info!("[login] host link for world {} up", self.world);
                     self.up.send_replace(true);
+                    self.kicks.notify_one();
                 }
                 LinkEvent::Down(why) => {
                     if *self.up.borrow() {
@@ -221,6 +280,16 @@ impl Pump {
                         // Answered already (a resend's second ack) or given up on (503).
                         None => log::debug!("[login] world {}: ack for epoch {session_epoch} nobody waits for", self.world),
                     }
+                }
+                LinkEvent::Msg(HostToLogin::KickAck { player_token, session_epoch }) => {
+                    let (store, world) = (self.store.clone(), self.world.clone());
+                    self.runtime.spawn(async move {
+                        match store.kick_acked(&world, &player_token, session_epoch).await {
+                            Ok(true) => log::info!("[login] world {world}: kick (epoch {session_epoch}) acknowledged"),
+                            Ok(false) => {}
+                            Err(e) => log::error!("[login] world {world}: recording a kick ack: {e}"),
+                        }
+                    });
                 }
                 LinkEvent::Msg(HostToLogin::SessionEnded { player_token, session_epoch }) => {
                     let (store, world) = (self.store.clone(), self.world.clone());

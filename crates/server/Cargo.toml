@@ -56,6 +56,8 @@ sqlx = { workspace = true }
 serde_json = { workspace = true }
 # Hand-made JWT headers in the auth edge tests.
 base64 = { workspace = true }
+# The login service's own kick queue and host links, end to end in `login_link`.
+login = { workspace = true }
 
 [[test]]
 name = "it"

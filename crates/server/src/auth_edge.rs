@@ -392,6 +392,16 @@ impl Authenticator {
         }
     }
 
+    /// The kick's reason if the session admitted with `ticket` was revoked
+    /// since (a `Kick` that landed before the session was announced): the
+    /// edge checks this after sending `ClientConnected` and supersedes it.
+    pub fn revoked(&self, ticket: &SessionTicket) -> Option<String> {
+        match &self.admission {
+            Admission::SpawnOrders(orders) => orders.revoked(&ticket.player_token, ticket.session_epoch),
+            Admission::Newest(_) => None,
+        }
+    }
+
     async fn check_jwt(&self, world: &str, jwt: &str) -> Result<Admitted, String> {
         if jwt.len() > game::MAX_JWT_BYTES {
             return Err(REFUSE_TOO_LARGE.into());

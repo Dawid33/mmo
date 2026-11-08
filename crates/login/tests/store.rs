@@ -279,3 +279,51 @@ async fn live_refresh_account_reads_without_spending() {
     assert!(matches!(s.take_refresh([1; 32], 50).await.unwrap(), RefreshOutcome::Valid { account: 7, .. }));
     assert_eq!(s.live_refresh_account([1; 32], 51).await.unwrap(), None, "spent");
 }
+
+/// Revocation and its kicks commit together; an ack forgets only up to its epoch.
+async fn kick_queue(s: LoginStore) {
+    let link = WorldRow {
+        world_id: "linked".into(),
+        name: "L".into(),
+        status: WorldStatus::Open,
+        quic: None,
+        webtransport: None,
+        cert_hash: None,
+        created_at: 1,
+        host_link: Some("127.0.0.1:6490".into()),
+        host_link_cert: Some("ab".repeat(32)),
+    };
+    s.put_world(&link).await.unwrap();
+    s.put_world(&WorldRow { world_id: "plain".into(), host_link: None, host_link_cert: None, ..link.clone() }).await.unwrap();
+    for w in ["linked", "plain"] {
+        s.player_token_for(1, w, 0, || format!("tok-{w}")).await.unwrap();
+        s.bump_session(1, w, 0).await.unwrap();
+    }
+    s.bump_session(1, "linked", 0).await.unwrap(); // epoch 2
+    s.insert_refresh([1; 32], 1, [9; 16], 100).await.unwrap();
+    assert_eq!(s.revoke_account_with_kicks(1, 10, "bye").await.unwrap(), 1, "only the linked world");
+    assert!(matches!(s.take_refresh([1; 32], 11).await.unwrap(), RefreshOutcome::Reused { .. }), "revoked");
+    let kick = login::PendingKick { world_id: "linked".into(), player_token: "tok-linked".into(), session_epoch: 2, reason: "bye".into() };
+    assert_eq!(s.pending_kicks().await.unwrap(), vec![kick.clone()]);
+    // Queued again (a second revocation): replaced, not duplicated.
+    s.bump_session(1, "linked", 0).await.unwrap(); // epoch 3
+    s.revoke_account_with_kicks(1, 12, "again").await.unwrap();
+    let newer = login::PendingKick { session_epoch: 3, reason: "again".into(), ..kick };
+    assert_eq!(s.pending_kicks().await.unwrap(), vec![newer]);
+    assert!(!s.kick_acked("linked", "tok-linked", 2).await.unwrap(), "an older kick's ack keeps the newer");
+    assert!(s.kick_acked("linked", "tok-linked", 3).await.unwrap());
+    assert!(s.pending_kicks().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn kick_queue_sqlite() {
+    kick_queue(store().await).await;
+}
+
+#[tokio::test]
+async fn kick_queue_postgres() {
+    let Some(admin) = crate::common::pg_admin_url() else { return crate::common::skip_msg() };
+    let db = crate::common::PgTestDb::create(&admin).await;
+    kick_queue(LoginStore::open(&db.url).await.unwrap()).await;
+    db.drop_db().await;
+}

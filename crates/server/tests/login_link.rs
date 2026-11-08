@@ -38,29 +38,42 @@ struct Host {
     players: SharedPlayerStore,
     /// What the link sends the manager (supersedes).
     events: Receiver<ServerEvent>,
+    events_tx: Sender<ServerEvent>,
     signer: Signer,
     runtime: tokio::runtime::Runtime,
 }
 
 impl Host {
     fn start() -> Host {
+        let mut host = Self::unlinked();
+        host.listen("127.0.0.1:0".parse().unwrap(), None);
+        host
+    }
+
+    /// The link to the login service is not listening yet ([`listen`](Self::listen)).
+    fn unlinked() -> Host {
         let clock: Clock = Arc::new(|| NOW);
         let orders = Arc::new(SpawnOrders::new(clock.clone()));
         let signer = Signer::new(vec![SigningKey::generate().0]).unwrap_or_else(|_| unreachable!());
         let auth = Authenticator::jwt(WORLD, JwksCache::fixed(signer.jwks()), clock).with_spawn_orders(orders.clone());
         let players = player_store::shared(player_store::MemoryPlayerStore::default());
         let (events_tx, events) = unbounded();
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        Host { link: None, orders, auth, players, events, events_tx, signer, runtime }
+    }
+
+    /// Start listening for the login service (once).
+    fn listen(&mut self, bind: std::net::SocketAddr, pin_file: Option<std::path::PathBuf>) {
         let link = login_link::start(
-            "127.0.0.1:0".parse().unwrap(),
+            bind,
             SERVICE_TOKEN.into(),
-            None,
-            orders.clone(),
-            players.clone(),
-            events_tx,
+            pin_file,
+            self.orders.clone(),
+            self.players.clone(),
+            self.events_tx.clone(),
         )
         .unwrap();
-        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-        Host { link: Some(link), orders, auth, players, events, signer, runtime }
+        self.link = Some(link);
     }
 
     fn ticket(&self, player: &PlayerToken, epoch: u64) -> String {
@@ -136,8 +149,16 @@ impl Login {
         }
     }
 
-    fn kick(&self, player: &PlayerToken, reason: &str) {
-        self.tx.send(LoginToHost::Kick { player_token: player.0.clone(), reason: reason.into() }).unwrap();
+    /// Push `Kick` up to `epoch` and wait for its ack (sent once it was applied).
+    fn kick(&self, player: &PlayerToken, epoch: u64, reason: &str) {
+        let kick = LoginToHost::Kick { player_token: player.0.clone(), session_epoch: epoch, reason: reason.into() };
+        self.tx.send(kick).unwrap();
+        match self.next(LINK_WAIT) {
+            Some(HostToLogin::KickAck { player_token, session_epoch }) => {
+                assert_eq!((player_token.as_str(), session_epoch), (player.0.as_str(), epoch));
+            }
+            other => panic!("no kick ack for epoch {epoch}: {other:?}"),
+        }
     }
 }
 
@@ -275,7 +296,12 @@ impl World {
         for ev in host.drain_events() {
             self.event(ev);
         }
-        self.event(ServerEvent::ClientConnected { client, player: session.player, record: session.record.clone() });
+        // The edge's own announcement (with its revocation re-check).
+        let (edge, announced) = unbounded();
+        player_store::announce_session(&edge, client, session, &host.auth);
+        for ev in announced.try_iter() {
+            self.event(ev);
+        }
         self.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(SPAWN_REGION), client));
     }
 
@@ -413,7 +439,7 @@ fn kick_parks_and_refuses() {
 
     // An order for a second login is pending when the account is signed out everywhere.
     assert!(login.spawn(&alice, 2));
-    login.kick(&alice, KICK_REASON);
+    login.kick(&alice, 2, KICK_REASON);
     let mut log = Vec::new();
     let parked = world.pump_until(&host, &mut log, |m, _| m.parked_record(a.player).is_some());
     assert!(parked, "A's record was parked");
@@ -431,11 +457,137 @@ fn kick_parks_and_refuses() {
     let c = host.hello(&alice, 3).unwrap();
     world.connect(&host, 2, &c);
     assert_eq!(world.snapshot_for(&host, 2), (1, BTreeSet::from([2])));
-    login.kick(&alice, KICK_REASON);
+    // A late copy of the old kick (up to epoch 2) keeps the newer login.
+    login.kick(&alice, 2, KICK_REASON);
+    let mut log = Vec::new();
+    world.pump_for(&host, Duration::from_millis(200), &mut log, |_, _| false);
+    assert!(refusals(&log, 2).is_empty(), "{log:?}");
+    login.kick(&alice, 3, KICK_REASON);
     let mut log = Vec::new();
     let parked = world.pump_until(&host, &mut log, |m, _| m.parked_record(c.player).is_some());
     assert!(parked, "the kicked session's record was parked");
-    assert_eq!(refusals(&log, 2), vec![KICK_REASON.to_string()]);
+    // A copy of the kick (the login service resends until acked) changes nothing.
+    login.kick(&alice, 3, KICK_REASON);
+    world.pump_for(&host, Duration::from_millis(200), &mut log, |_, _| false);
+    assert_eq!(refusals(&log, 2), vec![KICK_REASON.to_string()], "refused and parked once");
+    assert!(world.manager.parked_record(c.player).is_some());
     assert_eq!(world.manager.depths().sessions, 0);
     assert_eq!(host.hello(&alice, 3).unwrap_err(), REFUSE_NO_SPAWN_ORDER);
+}
+
+/// A kick landing between a ticket's admission and its session's announcement finds no
+/// session; the edge's re-check after announcing supersedes it.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn kick_during_connect_still_parks_the_session() {
+    let host = Host::start();
+    let login = host.login(PeerRole::Login);
+    let mut world = World::new();
+    let alice = token(1);
+    assert!(login.spawn(&alice, 1));
+    let a = host.hello(&alice, 1).unwrap(); // admitted, not announced yet
+    login.kick(&alice, 1, KICK_REASON);
+    for ev in host.drain_events() {
+        world.event(ev); // the kick's supersede: no session yet
+    }
+    world.connect(&host, 0, &a);
+    let mut log = Vec::new();
+    let parked = world.pump_until(&host, &mut log, |m, _| m.parked_record(a.player).is_some() && m.depths().sessions == 0);
+    assert!(parked, "the revoked session was parked: {log:?}");
+    assert_eq!(refusals(&log, 0), vec![KICK_REASON.to_string()]);
+}
+
+/// End to end with the login service's own code (store + `HostLinks`): the account is
+/// signed out everywhere while the host's link is down; the kick is durable, goes out when
+/// the link comes up, parks the session and revokes the pending ticket, and its ack clears
+/// the login service's queue.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn kick_queued_while_the_link_is_down_parks_once_it_is_up() {
+    // The host's link address and pin, known before it listens (a host that ran before).
+    let dir = std::env::temp_dir().join(format!("login-link-e2e-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let pin_file = dir.join("host.cert-sha256");
+    let (bind, pin) = {
+        let (probe, _events, _senders) = svc_link::LinkListener::bind::<LoginToHost, HostToLogin>(
+            "127.0.0.1:0".parse().unwrap(),
+            SERVICE_TOKEN.into(),
+            Some(pin_file.clone()),
+        )
+        .unwrap();
+        (probe.local_addr(), probe.cert_sha256().to_string())
+    };
+
+    // Alice plays (epoch 1) and has a second join ordered (epoch 2, not connected yet).
+    let mut host = Host::unlinked();
+    let mut world = World::new();
+    let alice = token(1);
+    assert_eq!(host.orders.order(&alice.0, 1), login_link::SpawnOrder::New);
+    let a = host.hello(&alice, 1).unwrap();
+    world.connect(&host, 0, &a);
+    assert_eq!(world.snapshot_for(&host, 0), (1, BTreeSet::from([0])));
+    assert_eq!(host.orders.order(&alice.0, 2), login_link::SpawnOrder::New);
+
+    // The login service knows the same: a world with the host's link, two joins.
+    let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
+    let (store, links) = rt.block_on(async {
+        let store = login::LoginStore::open("sqlite::memory:").await.unwrap();
+        store
+            .put_world(&login::WorldRow {
+                world_id: WORLD.into(),
+                name: "Alpha".into(),
+                status: login_api::WorldStatus::Open,
+                quic: None,
+                webtransport: None,
+                cert_hash: None,
+                created_at: 1,
+                host_link: Some(bind.to_string()),
+                host_link_cert: Some(pin),
+            })
+            .await
+            .unwrap();
+        let account = store.create_account("alice@example.org", "x", 1).await.unwrap().unwrap();
+        let token = alice.0.clone();
+        assert_eq!(store.player_token_for(account, WORLD, 1, move || token).await.unwrap(), alice.0);
+        store.bump_session(account, WORLD, 1).await.unwrap();
+        assert_eq!(store.bump_session(account, WORLD, 2).await.unwrap(), 2);
+        let links = Arc::new(login::host_link::HostLinks::new(
+            Some(SERVICE_TOKEN.into()),
+            store.clone(),
+            Arc::new(|| NOW),
+        ));
+        links.start();
+        // Signed out everywhere while the host is not reachable.
+        assert_eq!(store.revoke_account_with_kicks(account, 3, KICK_REASON).await.unwrap(), 1);
+        links.wake_kicks();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(store.pending_kicks().await.unwrap().len(), 1, "the kick waits, durably");
+        (store, links)
+    });
+    let mut log = Vec::new();
+    world.pump_for(&host, Duration::from_millis(100), &mut log, |_, _| false);
+    assert!(refusals(&log, 0).is_empty(), "nothing reached the host yet");
+
+    // The host's link comes up: the kick arrives, parks Alice and revokes the epoch-2 ticket.
+    host.listen(bind, Some(pin_file));
+    let parked = world.pump_until(&host, &mut log, |m, _| m.parked_record(a.player).is_some());
+    assert!(parked, "Alice's record was parked: {log:?}");
+    assert_eq!(refusals(&log, 0), vec![KICK_REASON.to_string()]);
+    assert_eq!(host.hello(&alice, 2).unwrap_err(), REFUSE_NO_SPAWN_ORDER);
+    assert_eq!(host.hello(&alice, 1).unwrap_err(), REFUSE_SUPERSEDED);
+    // Its ack clears the queue (no more resends).
+    let acked = rt.block_on(async {
+        let deadline = tokio::time::Instant::now() + LINK_WAIT;
+        while !store.pending_kicks().await.unwrap().is_empty() {
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        true
+    });
+    assert!(acked, "the host's ack deleted the pending kick");
+    drop(links);
+    drop(rt);
+    let _ = std::fs::remove_dir_all(&dir);
 }

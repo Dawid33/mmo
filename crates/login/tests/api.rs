@@ -506,12 +506,14 @@ mod host_link {
 
     impl FakeHost {
         fn start(ack: AckPolicy) -> FakeHost {
-            let (listener, events, peers) = LinkListener::bind::<LoginToHost, HostToLogin>(
-                "127.0.0.1:0".parse().unwrap(),
-                SERVICE_TOKEN.into(),
-                None,
-            )
-            .unwrap();
+            Self::start_with("127.0.0.1:0", None, ack)
+        }
+
+        /// On `bind`, with its cert kept beside `pin_file` (a restart keeps its pin).
+        fn start_with(bind: &str, pin_file: Option<std::path::PathBuf>, ack: AckPolicy) -> FakeHost {
+            let (listener, events, peers) =
+                LinkListener::bind::<LoginToHost, HostToLogin>(bind.parse().unwrap(), SERVICE_TOKEN.into(), pin_file)
+                    .unwrap();
             let seen: Arc<Mutex<Vec<LoginToHost>>> = Arc::default();
             let (record, answer) = (seen.clone(), peers.clone());
             std::thread::spawn(move || serve(events, answer, record, ack));
@@ -579,10 +581,16 @@ mod host_link {
                 LinkEvent::Up(hello) => assert_eq!(hello.role, PeerRole::Login),
                 LinkEvent::Msg(msg) => {
                     seen.lock().unwrap().push(msg.clone());
-                    if let LoginToHost::SpawnPlayer { player_token, session_epoch } = msg
-                        && let Some(ok) = ack(&player_token, session_epoch)
-                    {
-                        peers.send(peer, HostToLogin::SpawnAck { player_token, session_epoch, ok });
+                    match msg {
+                        LoginToHost::SpawnPlayer { player_token, session_epoch } => {
+                            if let Some(ok) = ack(&player_token, session_epoch) {
+                                peers.send(peer, HostToLogin::SpawnAck { player_token, session_epoch, ok });
+                            }
+                        }
+                        // Kicks are always applied and acked.
+                        LoginToHost::Kick { player_token, session_epoch, .. } => {
+                            peers.send(peer, HostToLogin::KickAck { player_token, session_epoch });
+                        }
                     }
                 }
                 LinkEvent::Down(_) => {}
@@ -712,13 +720,65 @@ mod host_link {
         assert_eq!(out.status, StatusCode::NO_CONTENT);
         let out = a.post(PATH_LOGOUT, &LogoutRequest { refresh_token: jw.refresh_token.clone(), all: true }).await;
         assert_eq!(out.status, StatusCode::NO_CONTENT);
-        let kick = |token: &str| LoginToHost::Kick { player_token: token.into(), reason: login::api::KICK_LOGOUT_ALL.into() };
+        let kick = |token: &str| LoginToHost::Kick {
+            player_token: token.into(),
+            session_epoch: 1,
+            reason: login::api::KICK_LOGOUT_ALL.into(),
+        };
         assert!(h1.wait_seen(|s| s.contains(&kick(&ta))).await.contains(&kick(&ta)));
         assert!(h2.wait_seen(|s| s.contains(&kick(&tb))).await.contains(&kick(&tb)));
         assert!(h3.seen().is_empty(), "no session in world c: {:?}", h3.seen());
         // Every refresh token of the account is revoked.
         let r = a.post(PATH_REFRESH, &RefreshRequest { refresh_token: jw.refresh_token }).await;
         assert_eq!(r.status, StatusCode::UNAUTHORIZED);
+        // The hosts' acks clear the queue.
+        assert!(wait_no_pending_kicks(&a).await, "{:?}", a.store.pending_kicks().await.unwrap());
+    }
+
+    /// Wait until every kick was acknowledged; whether it was.
+    async fn wait_no_pending_kicks(a: &App) -> bool {
+        let deadline = tokio::time::Instant::now() + LINK_WAIT * 2;
+        while !a.store.pending_kicks().await.unwrap().is_empty() {
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        true
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "slow: >100ms — run via just test-full"]
+    async fn kick_sent_while_the_link_is_down_goes_out_when_it_comes_back() {
+        // A host that has run before (its pin is known), down now.
+        let dir = std::env::temp_dir().join(format!("login-kick-durable-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pin = dir.join("host.cert-sha256");
+        let first = FakeHost::start_with("127.0.0.1:0", Some(pin.clone()), Box::new(|_, _| Some(true)));
+        let (bind, world) = (first.link.clone(), first.world("a"));
+        drop(first);
+        let a = linked_app(&[world], Duration::from_millis(SPAWN_ACK_TIMEOUT_MS)).await;
+        let refresh = a.account().await;
+        // The account has a session there (its join happened while the host was up).
+        let account = a.store.account_by_email("dwarf@example.org").await.unwrap().unwrap().account_id;
+        let token = a.store.player_token_for(account, "a", 0, || "ab".repeat(16)).await.unwrap();
+        assert_eq!(a.store.bump_session(account, "a", 0).await.unwrap(), 1);
+        // Signed out everywhere while the host is down: the kick waits, durably.
+        let out = a.post(PATH_LOGOUT, &LogoutRequest { refresh_token: refresh, all: true }).await;
+        assert_eq!(out.status, StatusCode::NO_CONTENT);
+        tokio::time::sleep(Duration::from_millis(300)).await; // the sweeper dials and fails
+        assert_eq!(a.store.pending_kicks().await.unwrap().len(), 1, "the kick is durable");
+        // The host comes back on the same address and pin: the kick goes out and is acked.
+        let host = FakeHost::start_with(&bind, Some(pin), Box::new(|_, _| Some(true)));
+        let kick = LoginToHost::Kick { player_token: token, session_epoch: 1, reason: login::api::KICK_LOGOUT_ALL.into() };
+        let deadline = tokio::time::Instant::now() + LINK_WAIT * 2;
+        while !host.seen().contains(&kick) && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(host.seen().contains(&kick), "{:?}", host.seen());
+        assert!(wait_no_pending_kicks(&a).await, "the ack deletes it");
+        drop(host);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
@@ -732,7 +792,8 @@ mod host_link {
         let reset = a.mailed_token("/reset");
         let ok = a.post(PATH_RESET_CONFIRM, &ResetConfirm { token: reset, password: "a brand new password".into() }).await;
         assert_eq!(ok.status, StatusCode::NO_CONTENT, "{}", ok.text());
-        let kick = LoginToHost::Kick { player_token: token, reason: login::api::KICK_PASSWORD_RESET.into() };
+        let kick = LoginToHost::Kick { player_token: token, session_epoch: 1, reason: login::api::KICK_PASSWORD_RESET.into() };
         assert!(host.wait_seen(|s| s.contains(&kick)).await.contains(&kick));
+        assert!(wait_no_pending_kicks(&a).await);
     }
 }

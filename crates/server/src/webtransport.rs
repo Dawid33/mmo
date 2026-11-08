@@ -174,17 +174,19 @@ pub async fn serve(
             };
             // The handshake comes first: no session (and no sink) exists until
             // the connection's Hello has resolved to a player.
-            let crate::player_store::HelloSession { player, record, ticket } =
+            let hello =
                 match web_hello(&session, &players, &auth).await {
                     Ok(resolved) => resolved,
                     Err(why) => return refuse(&session, &why).await,
                 };
+            let (player, ticket) = (hello.player, hello.ticket.clone());
             info!("webtransport client {id} connected (player {})", player.0);
             game::perf_event!("client_connected", "client={id} player={} transport=webtransport", player.0);
             sinks.insert(id, ClientSink::Web(session.clone()));
             // Announce before reading any other packets, mirroring the quinn
             // path: guarantees the player exists before its first request is served.
-            send.send(ServerEvent::ClientConnected { client: id, player, record }).unwrap();
+            // (and supersedes it at once if a kick revoked it meanwhile).
+            crate::player_store::announce_session(&send, id, &hello, &auth);
 
             loop {
                 let stream = match session.accept_uni().await {

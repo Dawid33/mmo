@@ -197,10 +197,14 @@ pub fn run_ctl_with(args: &[String], out: &mut dyn Write, deps: CtlDeps<'_>) -> 
                     .map_err(|e| e.to_string())?
                     .ok_or_else(|| format!("no account {email:?}"))?;
                 store.set_password(acc.account_id, &hash).await.map_err(|e| e.to_string())?;
-                // An admin reset logs old sessions out.
-                store.revoke_account_refresh(acc.account_id, now_secs()).await.map_err(|e| e.to_string())
+                // An admin reset logs old sessions out: refresh tokens revoked, and kicks queued
+                // for the running login service to send (its sweeper picks them up).
+                store
+                    .revoke_account_with_kicks(acc.account_id, now_secs(), crate::api::KICK_PASSWORD_SET)
+                    .await
+                    .map_err(|e| e.to_string())
             })?;
-            writeln!(out, "password set for {email}; refresh tokens revoked").map_err(io)
+            writeln!(out, "password set for {email}; refresh tokens revoked, sessions kicked").map_err(io)
         }
         ["account", "ensure", email] => {
             // Idempotent: create the account if missing, else make its password this one
@@ -215,7 +219,10 @@ pub fn run_ctl_with(args: &[String], out: &mut dyn Write, deps: CtlDeps<'_>) -> 
                     Some(acc) if hasher.verify(&password, &acc.password_hash) => (acc.account_id, "unchanged"),
                     Some(acc) => {
                         store.set_password(acc.account_id, &hasher.hash(&password)).await.map_err(err)?;
-                        store.revoke_account_refresh(acc.account_id, now_secs()).await.map_err(err)?;
+                        store
+                            .revoke_account_with_kicks(acc.account_id, now_secs(), crate::api::KICK_PASSWORD_SET)
+                            .await
+                            .map_err(err)?;
                         (acc.account_id, "password set")
                     }
                     None => {

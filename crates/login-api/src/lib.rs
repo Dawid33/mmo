@@ -172,9 +172,12 @@ pub enum LoginToHost {
     /// A join was granted: the host admits exactly this epoch's ticket for the player (and
     /// parks any session of the player it has, newest-wins), then acks.
     SpawnPlayer { player_token: String, session_epoch: u64 },
-    /// Revocation (logout everywhere, password reset): the host parks the player's session,
-    /// refusing it with `reason`, and drops any spawn order it holds for it.
-    Kick { player_token: String, reason: String },
+    /// Revocation (logout everywhere, password reset): every session and spawn order of the
+    /// player up to `session_epoch` (the newest join when it was revoked) is revoked — the host
+    /// parks such a session, refusing it with `reason`, and drops such an order; a newer login
+    /// is untouched. Durable: resent until [`HostToLogin::KickAck`]; applying it twice is the
+    /// same as once.
+    Kick { player_token: String, session_epoch: u64, reason: String },
 }
 
 /// A world host to the login service, over the service link.
@@ -182,8 +185,11 @@ pub enum LoginToHost {
 pub enum HostToLogin {
     /// The answer to one [`LoginToHost::SpawnPlayer`] (matched by token and epoch).
     SpawnAck { player_token: String, session_epoch: u64, ok: bool },
-    /// The session admitted with this epoch's ticket disconnected.
+    /// The session admitted with this epoch's ticket disconnected (best effort: lost while the
+    /// link is down).
     SessionEnded { player_token: String, session_epoch: u64 },
+    /// The host applied the [`LoginToHost::Kick`] up to this epoch (sent for every copy).
+    KickAck { player_token: String, session_epoch: u64 },
 }
 
 #[cfg(test)]
