@@ -67,7 +67,7 @@ impl ChannelWorldLink {
 impl WorldLink for ChannelWorldLink {
     fn send(&mut self, msg: HostMsg) {
         if !self.is_up() {
-            log::debug!("coordinator link down: {msg:?} lost");
+            log::debug!("coordinator link down: {} lost", describe_host(&msg));
             return;
         }
         if self.tx.send(msg).is_err() {
@@ -204,6 +204,35 @@ fn describe(msg: &CoordMsg) -> String {
     }
 }
 
+/// A host message's kind and region, for logs (an `Attach` or `Positions` can be large).
+pub(crate) fn describe_host(msg: &HostMsg) -> String {
+    match msg {
+        HostMsg::Attach { host, epoch, running, online } => {
+            format!("Attach {{ host: {host}, epoch: {epoch} }} ({} regions, {} online)", running.len(), online.len())
+        }
+        HostMsg::RegionStarted { rc, incarnation } => format!("RegionStarted {rc:?} incarnation {incarnation}"),
+        HostMsg::RegionStopping { rc } => format!("RegionStopping {rc:?}"),
+        HostMsg::RegionParked { rc, people } => format!("RegionParked {rc:?} ({} people)", people.len()),
+        HostMsg::PersonCrossed { person, to, delivered } => {
+            format!("PersonCrossed {person:?} into {to:?} (delivered {delivered})")
+        }
+        HostMsg::Positions(people) => format!("Positions ({})", people.len()),
+        HostMsg::DirectiveBounced { directive, incarnation } => {
+            format!("DirectiveBounced for {:?} incarnation {incarnation}", directive.region)
+        }
+        HostMsg::Request { id, .. } => format!("Request {id:?}"),
+        HostMsg::PlayerOnline { player, .. } => format!("PlayerOnline {player:?}"),
+        HostMsg::PlayerOffline { player } => format!("PlayerOffline {player:?}"),
+        HostMsg::ReleaseClaim { player } => format!("ReleaseClaim {player:?}"),
+    }
+}
+
+/// The one host ordinal a coordinator serves until R3: the core is single-host — another
+/// host's `Attach` would park every region it does not list, host 0's running ones
+/// included — so any other ordinal is refused. Fixed, not "the first to connect": a stray
+/// host winning the race to a restarted coordinator must not take the world over.
+pub const SERVED_HOST_ORDINAL: u32 = 0;
+
 /// What routes a coordinator message to one of the connected hosts: a reply to the host
 /// its request id names, a region's messages to the host that announced the region (its
 /// `Attach` / `RegionStarted`), the attach echo to the host whose `Attach` it answers,
@@ -211,10 +240,6 @@ fn describe(msg: &CoordMsg) -> String {
 /// (it re-attaches when it is back: its `Attach` and resent requests cover it).
 #[derive(Default)]
 struct Routes {
-    /// The one host ordinal this coordinator serves: the first to connect. Until R3 the
-    /// core is single-host — another host's `Attach` would park every region it does not
-    /// list, the first host's running ones included — so any other ordinal is refused.
-    host: Option<u32>,
     /// Peers refused ([`Routes::admit`]); their messages are ignored.
     refused: BTreeSet<PeerId>,
     /// Connected host peers and their ordinals (a reconnect is a new peer).
@@ -226,26 +251,22 @@ struct Routes {
 }
 
 impl Routes {
-    /// A host peer said hello as `ordinal`: admitted if it is this coordinator's host (the
-    /// first ordinal to connect; a reconnect of it is a new peer), else refused (logged
-    /// with both ordinals). Returns whether it was admitted.
+    /// A host peer said hello as `ordinal`: admitted if it is [`SERVED_HOST_ORDINAL`] (a
+    /// reconnect is a new peer), else refused (logged with both ordinals). Returns whether
+    /// it was admitted.
     fn admit(&mut self, peer: PeerId, ordinal: u32) -> bool {
-        match self.host {
-            Some(served) if served != ordinal => {
-                log::error!(
-                    "[coordinator] refusing host {ordinal} (peer {}): this coordinator serves host {served} only \
-                     (one host per world until R3; another host's Attach would park host {served}'s regions)",
-                    peer.0
-                );
-                self.refused.insert(peer);
-                false
-            }
-            _ => {
-                self.host = Some(ordinal);
-                self.hosts.insert(peer, ordinal);
-                true
-            }
+        if ordinal != SERVED_HOST_ORDINAL {
+            log::error!(
+                "[coordinator] refusing host {ordinal} (peer {}): this coordinator serves host {SERVED_HOST_ORDINAL} \
+                 only (one host per world until R3; another host's Attach would park host \
+                 {SERVED_HOST_ORDINAL}'s regions)",
+                peer.0
+            );
+            self.refused.insert(peer);
+            return false;
         }
+        self.hosts.insert(peer, ordinal);
+        true
     }
 
     /// Note what routes later messages from `msg`, sent by host `ordinal`.
@@ -319,18 +340,21 @@ enum Stop {
     /// Handle what the hosts sent before the stop, save once more (forced), and wait for
     /// the save at most this long.
     Save(Duration),
-    /// Stop at once: no final save (a fenced process; the next start loads the last save).
+    /// Stop at once, before handling, saving or sending anything more (a fenced process;
+    /// a test's crash): the next start loads the last committed save.
     WithoutSave,
 }
 
 /// A look at the running core ([`CoordinatorThread::inspect`]).
-type Inspect = Box<dyn FnOnce(&Coordinator) + Send>;
+type Inspect = Box<dyn FnOnce(&mut Coordinator) + Send>;
 
 /// The running coordinator thread.
 pub struct CoordinatorThread {
     join: std::thread::JoinHandle<ServerExit>,
     stop: Sender<Stop>,
     inspect: Sender<Inspect>,
+    /// [`CoordinatorThread::crash_before_claim_reply`] is armed.
+    crash_before_claim_reply: Arc<AtomicBool>,
 }
 
 impl CoordinatorThread {
@@ -342,11 +366,27 @@ impl CoordinatorThread {
         self.join()
     }
 
-    /// Stop without a final save (the process was fenced, or a test drops the
-    /// coordinator mid-play); the store keeps its last committed save.
+    /// Stop without a final save (the process was fenced): the thread returns as soon as
+    /// it sees the stop, before it handles, saves or sends anything more; the store keeps
+    /// its last committed save (a save already handed to the store may still commit).
     pub fn stop_without_save(self) -> ServerExit {
         let _ = self.stop.send(Stop::WithoutSave);
         self.join()
+    }
+
+    /// Test hook: the coordinator process crashes — [`Self::stop_without_save`]: nothing
+    /// handled after this is saved or sent, and its hosts' links drop.
+    #[doc(hidden)]
+    pub fn kill(self) {
+        let _ = self.stop_without_save();
+    }
+
+    /// Test hook: the coordinator crashes right after the save that releases its next
+    /// claim-granting reply commits, before that reply (or anything released with it)
+    /// leaves. Wait for it with [`Self::is_finished`].
+    #[doc(hidden)]
+    pub fn crash_before_claim_reply(&self) {
+        self.crash_before_claim_reply.store(true, Ordering::SeqCst);
     }
 
     /// Test hook: `f` of the core as it stands after the host messages handled so far;
@@ -355,6 +395,18 @@ impl CoordinatorThread {
     pub fn inspect<R: Send + 'static>(
         &self,
         f: impl FnOnce(&Coordinator) -> R + Send + 'static,
+        timeout: Duration,
+    ) -> Option<R> {
+        self.with_core(move |core: &mut Coordinator| f(core), timeout)
+    }
+
+    /// Test hook: `f` of the core, to change it (a test forcing history — the core's
+    /// `history_mut`); what it decides goes out as the core's own decisions do (gated
+    /// directives after their save). `None` if the thread does not answer within `timeout`.
+    #[doc(hidden)]
+    pub fn with_core<R: Send + 'static>(
+        &self,
+        f: impl FnOnce(&mut Coordinator) -> R + Send + 'static,
         timeout: Duration,
     ) -> Option<R> {
         let (tx, rx) = crossbeam::channel::bounded(1);
@@ -370,10 +422,11 @@ impl CoordinatorThread {
         self.join.is_finished()
     }
 
+    /// The thread's end; a panic is [`ServerExit::CoordinatorFailed`].
     fn join(self) -> ServerExit {
         self.join.join().unwrap_or_else(|_| {
             log::error!("[coordinator] the coordinator thread panicked");
-            ServerExit::Clean
+            ServerExit::CoordinatorFailed
         })
     }
 }
@@ -437,6 +490,8 @@ pub struct CoordinatorRuntime {
     pending_save: Option<Receiver<Result<(), StoreError>>>,
     links: LinkSet,
     fenced: Fenced,
+    /// Test hook ([`CoordinatorThread::crash_before_claim_reply`]).
+    crash_before_claim_reply: Arc<AtomicBool>,
     /// The core's `now_ms` 0 (its calendar was anchored there).
     started: Instant,
     /// No save is taken before this `now_ms` (after a failure).
@@ -456,6 +511,7 @@ impl CoordinatorRuntime {
     ) -> CoordinatorThread {
         let (stop_tx, stop_rx) = crossbeam::channel::bounded(1);
         let (inspect_tx, inspect_rx) = crossbeam::channel::unbounded();
+        let crash_before_claim_reply = Arc::new(AtomicBool::new(false));
         let mut core = start.coordinator;
         if start.source.needs_save() {
             core.request_save();
@@ -467,6 +523,7 @@ impl CoordinatorRuntime {
             pending_save: None,
             links,
             fenced,
+            crash_before_claim_reply: crash_before_claim_reply.clone(),
             started: Instant::now(),
             retry_at_ms: 0,
             failed_in_a_row: 0,
@@ -475,7 +532,7 @@ impl CoordinatorRuntime {
             .name("coordinator".into())
             .spawn(move || runtime.run(stop_rx, inspect_rx))
             .expect("spawn the coordinator thread");
-        CoordinatorThread { join, stop: stop_tx, inspect: inspect_tx }
+        CoordinatorThread { join, stop: stop_tx, inspect: inspect_tx, crash_before_claim_reply }
     }
 
     fn now_ms(&self) -> u64 {
@@ -488,29 +545,38 @@ impl CoordinatorRuntime {
             // The stop is read before the hosts are drained: whatever a host sent
             // before asking to stop is already queued and is handled below.
             let stopping = match stop.try_recv() {
-                Ok(s) => Some(s),
+                Ok(Stop::WithoutSave) => {
+                    // Nothing more is handled, saved or sent.
+                    log::info!("[coordinator] stopped without a final save");
+                    self.down();
+                    return ServerExit::Clean;
+                }
+                Ok(Stop::Save(timeout)) => Some(timeout),
                 Err(TryRecvError::Empty) => None,
                 // The handle is gone (its owner unwound): stop as an orderly exit would.
-                Err(TryRecvError::Disconnected) => Some(Stop::Save(crate::EXIT_SAVE_TIMEOUT)),
+                Err(TryRecvError::Disconnected) => Some(crate::EXIT_SAVE_TIMEOUT),
             };
             let now = self.now_ms();
             self.drain_hosts(now);
             for f in inspect.try_iter() {
-                f(&self.core);
+                f(&mut self.core);
             }
             self.core.maintain(now);
             if self.pump_save(now).is_err() {
                 return self.fence_out();
             }
-            self.send_out();
-            match stopping {
-                None => {}
-                Some(Stop::WithoutSave) => {
-                    log::info!("[coordinator] stopped without a final save");
-                    self.down();
-                    return ServerExit::Clean;
-                }
-                Some(Stop::Save(timeout)) => return self.finish(timeout),
+            let out = self.core.take_out();
+            if self.crash_before_claim_reply.load(Ordering::SeqCst)
+                && out.iter().any(|m| matches!(m, CoordMsg::Reply { reply, .. } if reply.grants_claim()))
+            {
+                // Its save committed (the reply is gated); it never leaves.
+                log::warn!("[coordinator] test crash before a claim-granting reply left");
+                self.down();
+                return ServerExit::Clean;
+            }
+            self.send(out);
+            if let Some(timeout) = stopping {
+                return self.finish(timeout);
             }
         }
     }
@@ -639,6 +705,10 @@ impl CoordinatorRuntime {
     /// What the core lets out, to every host, in order.
     fn send_out(&mut self) {
         let out = self.core.take_out();
+        self.send(out);
+    }
+
+    fn send(&mut self, out: Vec<CoordMsg>) {
         if out.is_empty() {
             return;
         }
@@ -741,14 +811,17 @@ mod tests {
     }
 
     #[test]
-    fn only_the_first_host_ordinal_is_served() {
+    fn only_host_ordinal_zero_is_served() {
         let mut r = Routes::default();
-        assert!(r.admit(PeerId(2), 4), "the first host, whatever its ordinal");
-        assert!(!r.admit(PeerId(3), 0), "another ordinal is refused");
-        assert!(r.admit(PeerId(5), 4), "the same host reconnecting");
-        assert_eq!(r.peer_of(4), Some(PeerId(5)));
-        assert_eq!(r.peer_of(0), None);
-        assert!(r.refused.contains(&PeerId(3)));
+        // A stray ordinal first to connect (a restarted coordinator's race) is refused...
+        assert!(!r.admit(PeerId(2), 4), "ordinal 4 is refused, first or not");
+        assert!(r.admit(PeerId(3), 0), "host 0 is served");
+        assert!(!r.admit(PeerId(4), 1), "another ordinal is refused");
+        assert!(r.admit(PeerId(5), 0), "host 0 reconnecting");
+        assert_eq!(r.peer_of(0), Some(PeerId(5)));
+        assert_eq!(r.peer_of(4), None);
+        assert_eq!(r.peer_of(1), None);
+        assert!(r.refused.contains(&PeerId(2)) && r.refused.contains(&PeerId(4)));
         assert_eq!(r.route(&CoordMsg::Attached { epoch: 9 }), Target::Nobody, "an unmatched echo goes nowhere");
     }
 

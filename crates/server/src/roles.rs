@@ -188,7 +188,7 @@ impl QuicWorldLink {
 impl WorldLink for QuicWorldLink {
     fn send(&mut self, msg: HostMsg) {
         if !self.up {
-            log::debug!("coordinator link down: {msg:?} lost");
+            log::debug!("coordinator link down: {} lost", crate::coordinator_rt::describe_host(&msg));
             return;
         }
         let _ = self.out.send(msg);

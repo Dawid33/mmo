@@ -16,6 +16,12 @@ use world_store::{Fence, StoreError, StoreHandle, SuperRegion};
 /// super-regions): non-zero, and distinct from a start-up error (1).
 pub const EXIT_FENCED: i32 = 3;
 
+/// The process exit status after the world coordinator thread failed (panicked): the
+/// host skips its exit cut — the coordinator's last save may lack parks and crossings
+/// the cut would record — and the world restarts from its last committed saves.
+/// Non-zero and distinct from a start-up error (1) and a fence ([`EXIT_FENCED`]).
+pub const EXIT_COORDINATOR_FAILED: i32 = 4;
+
 /// What the client sees when its server was fenced.
 pub const FENCED_REFUSAL: &str = "this server was replaced; reconnect";
 
@@ -26,6 +32,8 @@ pub enum ServerExit {
     Clean,
     /// Another process claimed this one's super-regions.
     Fenced,
+    /// The world coordinator thread failed (panicked); nothing more was saved.
+    CoordinatorFailed,
 }
 
 impl ServerExit {
@@ -34,6 +42,7 @@ impl ServerExit {
         match self {
             ServerExit::Clean => 0,
             ServerExit::Fenced => EXIT_FENCED,
+            ServerExit::CoordinatorFailed => EXIT_COORDINATOR_FAILED,
         }
     }
 }
@@ -235,5 +244,7 @@ mod tests {
         assert_eq!(ServerExit::Clean.code(), 0);
         assert_eq!(ServerExit::Fenced.code(), 3);
         assert_eq!(EXIT_FENCED, 3);
+        assert_eq!(ServerExit::CoordinatorFailed.code(), 4);
+        assert_eq!(EXIT_COORDINATOR_FAILED, 4);
     }
 }

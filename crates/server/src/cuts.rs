@@ -233,7 +233,9 @@ pub struct ExitParams<'a, NowMs, NowTick> {
 /// still taken: history ahead of the regions is safe, R2b Decision 7). The
 /// coordinator saves before the host's cut because the cut writer shuts the
 /// shared store down; both come after every park, so neither holds anything
-/// the other lacks. A coordinator save refused as fenced makes the exit fenced.
+/// the other lacks. A coordinator save refused as fenced makes the exit fenced; a
+/// coordinator thread that failed (panicked) makes it
+/// [`ServerExit::CoordinatorFailed`] with no exit cut.
 pub fn exit_world<S: RegionSpawner>(
     manager: &mut WorldManager<S>,
     params: ExitParams<'_, impl Fn() -> u64, impl Fn() -> Tick>,
@@ -255,6 +257,17 @@ pub fn exit_world<S: RegionSpawner>(
     }
     let given_up = park_for_exit(manager, region_out, now_ms, park_timeout, idle);
     let coordinator_exit = coordinator.map_or(ServerExit::Clean, |c| c.shutdown(save_timeout));
+    if coordinator_exit == ServerExit::CoordinatorFailed {
+        // Its last save may lack parks and crossings it handled: a cut holding them
+        // would put the regions ahead of a history that never heard of them.
+        log::error!(
+            "[server] the world coordinator failed: no exit save; the world restarts from its last committed saves"
+        );
+        if let Some(cuts) = cuts {
+            cuts.finish_without_cut(manager);
+        }
+        return ServerExit::CoordinatorFailed;
+    }
     if coordinator_exit == ServerExit::Fenced || fenced.is_set() {
         manager.refuse_all_sessions(FENCED_REFUSAL);
         if let Some(cuts) = cuts {

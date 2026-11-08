@@ -463,3 +463,42 @@ fn fenced_coordinator_stops() {
     store.shutdown();
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The coordinator thread fails (panics) mid-play: the host's exit skips its cut — the
+/// coordinator's last save may lack parks and crossings that cut would record — and
+/// exits `CoordinatorFailed` (process status `EXIT_COORDINATOR_FAILED`, non-zero); the
+/// world restarts from its last committed saves (here: no cut ever, so no player record).
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn coordinator_panic_skips_the_exit_cut() {
+    install_props();
+    let dir = scratch("panic");
+    let map = land_map();
+    let a_key = PlayerKey::Local(game::PlayerName::parse("a").unwrap());
+    let store = open_store(&dir);
+    let (a, _) = StorePlayers(store.clone()).resolve(&a_key).unwrap();
+    let start = ensure_coordinator_state(&store, &map, None).unwrap().expect("a history");
+    let req = embark_request(start.coordinator.history());
+    let mut life = Life::start(&store, &map, start, 1);
+    life.send(ServerEvent::ClientConnected { client: 0, player: a, record: None });
+    life.round();
+    let site = life.ask(0, ClientPacket::Embark(req)).expect("embarked");
+    for _ in 0..5 {
+        life.round();
+    }
+    let thread = life.coordinator.as_ref().expect("the coordinator");
+    assert_eq!(thread.inspect(|_| -> () { panic!("test: the coordinator fails") }, Duration::from_secs(1)), None);
+    life.until("the coordinator thread ended", |l| l.coordinator.as_ref().unwrap().is_finished());
+    assert_eq!(life.exit(), ServerExit::CoordinatorFailed);
+    assert_eq!(ServerExit::CoordinatorFailed.code(), server::claims::EXIT_COORDINATOR_FAILED);
+    assert_ne!(server::claims::EXIT_COORDINATOR_FAILED, 0);
+
+    let store = open_store(&dir);
+    let (_, record) = StorePlayers(store.clone()).resolve(&a_key).unwrap();
+    assert!(record.as_ref().is_none_or(|r| r.fortress.is_none()), "no exit cut wrote A's record: {record:?}");
+    assert!(store.stored_regions().unwrap().is_empty(), "no exit cut wrote a region");
+    let (saved, _) = stored_state(&store, &map).expect("the coordinator's own saves stand");
+    assert_eq!(player_sites(&saved), vec![site]);
+    store.shutdown();
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -1082,7 +1082,7 @@ coordinator: _dev-r2-token
 # it waits for the pin); clients connect on 127.0.0.1:6466 as with `just server`.
 # Local player names unless VOXEL_AUTH=jwt is set (see `dev-r2`). Play region size.
 # R2 runs ONE host per world: keep the defaults. `ordinal` != 0 / `hosts` > 1 is R3 work —
-# the coordinator refuses a second host ordinal, and a second host would also bind 6466.
+# the coordinator serves host ordinal 0 only, and a second host would also bind 6466.
 host ordinal="0" hosts="1": _dev-r2-token
     #!/usr/bin/env bash
     set -euo pipefail
