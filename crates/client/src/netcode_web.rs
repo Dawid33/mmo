@@ -234,8 +234,8 @@ async fn run(
     // The handshake goes first: the server starts the session once this
     // `Hello` resolves, and refuses a connection that sends anything else.
     // `credential` is a join JWT from the login service; `None` = this
-    // browser's player token.
-    let credential = credential.unwrap_or_else(|| game::Credential::Token(crate::player_token::load_or_create_token()));
+    // browser's local player name (`player_name`).
+    let credential = credential.unwrap_or_else(|| game::Credential::Local(crate::player_name::player_name()));
     let mut hello = Some(
         game::encode_packet(&ClientPacket::Hello { credential })
             .map_err(|e| JsValue::from_str(&format!("cannot encode Hello: {e}")))?,

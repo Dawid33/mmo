@@ -10,7 +10,7 @@ pub mod adapter_pick;
 // integration tests need LocalServer in a normal (non-cfg(test)) lib build.
 pub mod local_server;
 pub mod login; // the login service's HTTP client + refresh-token store (R2a)
-pub mod player_token; // this machine's player identity, sent first on every connection
+pub mod player_name; // the local player name, sent first on every connection to a local server
 #[cfg(target_arch = "wasm32")]
 pub mod netcode_web;
 #[cfg(target_arch = "wasm32")]

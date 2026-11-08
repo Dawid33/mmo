@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use game::{PlayerId, PlayerRecord, PlayerToken, RegionCoords, WorldCut};
+use game::{PlayerId, PlayerRecord, RegionCoords, WorldCut};
 use tokio::sync::{Mutex, mpsc, oneshot};
 
 use crate::rows;
@@ -57,7 +57,7 @@ pub(crate) enum Request {
     LoadInFlight(Reply<Vec<game::InFlightRow>>),
     LoadHistory(Reply<Option<Vec<u8>>>),
     CommitCut(Box<WorldCut>, Reply<CutCommitted>),
-    ResolvePlayer(PlayerToken, Reply<(PlayerId, Option<PlayerRecord>)>),
+    ResolvePlayer(String, Reply<(PlayerId, Option<PlayerRecord>)>),
     /// Finish the queued commits, then stop.
     Shutdown,
 }

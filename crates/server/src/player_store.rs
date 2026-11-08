@@ -1,6 +1,6 @@
-//! Who a connection is: the [`PlayerStore`] turns the [`PlayerToken`] a client
-//! sends in its `Hello` into a stable [`PlayerId`], plus the [`PlayerRecord`]
-//! kept for that player while it is offline.
+//! Who a connection is: the [`PlayerStore`] turns the [`PlayerKey`] a
+//! connection's `Hello` proved into a stable [`PlayerId`], plus the
+//! [`PlayerRecord`] kept for that player while it is offline.
 //!
 //! Resolution happens at the network edge (QUIC and WebTransport ingress), on
 //! tokio's blocking pool, BEFORE the session is announced to the
@@ -10,26 +10,57 @@
 //!
 //! Two stores:
 //! - [`StorePlayers`] for forged worlds: the world store's `players` table. A
-//!   new token's id is written at once (the one write outside save cuts);
+//!   new key's id is written at once (the one write outside save cuts);
 //!   records reach the store only in save cuts (`WorldManager::take_cut`), so
 //!   players and regions are restored from the same world tick.
 //! - [`MemoryPlayerStore`] for procedural worlds and tests: nothing persisted.
 //!
-//! Which token a connection may claim is decided first, by the
-//! [`Authenticator`](crate::auth_edge::Authenticator): its own token on a
-//! `token` host (single-player / dev), the one in a login ticket on a `jwt` host.
+//! Which key a connection may claim is decided first, by the
+//! [`Authenticator`](crate::auth_edge::Authenticator): any player name it
+//! chooses on a `local` host (single-player / LAN / dev), the account token in
+//! a login ticket on a `jwt` host.
 
 use std::collections::BTreeMap;
 use std::io;
 use std::sync::{Arc, Mutex};
 
-use game::{ClientPacket, PlayerId, PlayerRecord, PlayerToken};
+use game::{ClientPacket, PlayerId, PlayerName, PlayerRecord, PlayerToken};
 
-/// Resolves tokens to players and keeps their offline records.
+/// Who a connection is, as the [`Authenticator`](crate::auth_edge::Authenticator)
+/// admitted it.
+///
+/// A `local` host trusts the name a client sends (Factorio's LAN model): a
+/// second connection with the same name IS that player and takes the first
+/// one over, as a reconnect does. Only an online (`jwt`) host proves identity.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum PlayerKey {
+    /// A freely chosen name (single-player / LAN / dev).
+    Local(PlayerName),
+    /// A login-service account's player token (online).
+    Online(PlayerToken),
+}
+
+/// The prefix of a local key in the store. A [`PlayerToken`] is lowercase
+/// hex and never contains `:`, so a name can never collide with an account.
+pub const LOCAL_KEY_PREFIX: &str = "local:";
+
+impl PlayerKey {
+    /// The key as the world store's `players.token` column holds it: an
+    /// online token bare (as before local names existed), a name as
+    /// `local:<name>`.
+    pub fn store_key(&self) -> String {
+        match self {
+            PlayerKey::Local(name) => format!("{LOCAL_KEY_PREFIX}{}", name.0),
+            PlayerKey::Online(token) => token.0.clone(),
+        }
+    }
+}
+
+/// Resolves player keys to players and keeps their offline records.
 pub trait PlayerStore: Send {
-    /// The player of `token` and its record (if one was stored). An unknown
-    /// token becomes a new player with a fresh id, never reused.
-    fn resolve(&mut self, token: &PlayerToken) -> io::Result<(PlayerId, Option<PlayerRecord>)>;
+    /// The player of `key` and its record (if one was stored). An unknown
+    /// key becomes a new player with a fresh id, never reused.
+    fn resolve(&mut self, key: &PlayerKey) -> io::Result<(PlayerId, Option<PlayerRecord>)>;
 }
 
 /// The store as the network edge shares it between connection tasks.
@@ -46,7 +77,7 @@ pub const HELLO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10
 pub const HELLO_MAX_BYTES: usize = 4096;
 
 /// The handshake: `first` must be a `Hello` whose credential `auth` accepts
-/// (see [`crate::auth_edge`]); the store then resolves its player token on
+/// (see [`crate::auth_edge`]); the store then resolves its player key on
 /// tokio's blocking pool. `Err` is the refusal sent back.
 pub async fn resolve_hello(
     store: &SharedPlayerStore,
@@ -56,11 +87,11 @@ pub async fn resolve_hello(
     let ClientPacket::Hello { credential } = first else {
         return Err("the first packet must be Hello".into());
     };
-    let token = auth.authenticate(credential).await?;
+    let key = auth.authenticate(credential).await?;
     let store = store.clone();
     let resolved = tokio::task::spawn_blocking(move || {
         let mut store = store.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        store.resolve(&token)
+        store.resolve(&key)
     })
     .await
     .map_err(|e| format!("player store task failed: {e}"))?;
@@ -75,13 +106,13 @@ pub async fn resolve_hello(
 /// Procedural worlds and tests.
 #[derive(Default)]
 pub struct MemoryPlayerStore {
-    ids: BTreeMap<PlayerToken, PlayerId>,
+    ids: BTreeMap<String, PlayerId>,
     next_id: u64,
 }
 
 impl PlayerStore for MemoryPlayerStore {
-    fn resolve(&mut self, token: &PlayerToken) -> io::Result<(PlayerId, Option<PlayerRecord>)> {
-        let id = *self.ids.entry(token.clone()).or_insert_with(|| {
+    fn resolve(&mut self, key: &PlayerKey) -> io::Result<(PlayerId, Option<PlayerRecord>)> {
+        let id = *self.ids.entry(key.store_key()).or_insert_with(|| {
             let id = PlayerId(self.next_id);
             self.next_id += 1;
             id
@@ -94,7 +125,7 @@ impl PlayerStore for MemoryPlayerStore {
 pub struct StorePlayers(pub world_store::StoreHandle);
 
 impl PlayerStore for StorePlayers {
-    fn resolve(&mut self, token: &PlayerToken) -> io::Result<(PlayerId, Option<PlayerRecord>)> {
-        self.0.resolve_player(token).map_err(io::Error::other)
+    fn resolve(&mut self, key: &PlayerKey) -> io::Result<(PlayerId, Option<PlayerRecord>)> {
+        self.0.resolve_player(&key.store_key()).map_err(io::Error::other)
     }
 }

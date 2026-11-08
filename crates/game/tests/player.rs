@@ -1,4 +1,4 @@
-//! Player identity: the token a client holds and the record a store keeps.
+//! Player identity: an online account's token and the record a store keeps.
 use game::{PlayerId, PlayerRecord, PlayerToken};
 
 #[test]

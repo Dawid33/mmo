@@ -6,15 +6,19 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use dashmap::DashMap;
-use game::{ClientPacket, PlayerToken, RegionCoords, ServerEvent, ServerPacket};
+use game::{ClientPacket, PlayerName, RegionCoords, ServerEvent, ServerPacket};
 use server::{player_store, webtransport, ClientSink};
 
 fn memory_store() -> player_store::SharedPlayerStore {
     player_store::shared(player_store::MemoryPlayerStore::default())
 }
 
-fn token_auth() -> Arc<server::auth_edge::Authenticator> {
-    Arc::new(server::auth_edge::Authenticator::token())
+fn local_auth() -> Arc<server::auth_edge::Authenticator> {
+    Arc::new(server::auth_edge::Authenticator::local())
+}
+
+fn hello(name: &str) -> ClientPacket {
+    ClientPacket::Hello { credential: game::Credential::Local(PlayerName(name.into())) }
 }
 
 async fn connect(port: u16) -> wtransport::Connection {
@@ -79,7 +83,7 @@ async fn webtransport_client_full_handshake() {
     let bind = "127.0.0.1:16467".parse().unwrap();
     let ingress_sinks = sinks.clone();
     tokio::spawn(async move {
-        webtransport::serve(bind, webtransport::CertSource::SelfSigned, event_send, ingress_sinks, next_id, memory_store(), token_auth())
+        webtransport::serve(bind, webtransport::CertSource::SelfSigned, event_send, ingress_sinks, next_id, memory_store(), local_auth())
             .await
             .unwrap();
     });
@@ -168,7 +172,7 @@ async fn webtransport_client_full_handshake() {
         .expect("connect failed");
 
     // The handshake: nothing happens until the Hello resolves a player.
-    send_packet(&conn, &ClientPacket::Hello { credential: game::Credential::Token(PlayerToken::generate([5; 16])) }).await;
+    send_packet(&conn, &hello("alice")).await;
     // CreateClient broadcast arrives first (ClientConnected fired on Hello).
     let first = recv_packet(&conn).await;
     assert!(matches!(first, ServerPacket::GameEvent(_)), "got {first:?}");
@@ -210,7 +214,7 @@ async fn first_packet_not_hello_closes() {
             ingress_sinks,
             Arc::new(AtomicUsize::new(0)),
             memory_store(),
-            token_auth(),
+            local_auth(),
         )
         .await
         .unwrap();
@@ -226,21 +230,20 @@ async fn first_packet_not_hello_closes() {
     assert!(event_recv.try_recv().is_err(), "a refused connection is never announced");
     assert!(sinks.is_empty());
 
-    // An invalid token: refused too.
+    // An invalid name: refused too.
     let conn = connect(PORT).await;
-    send_packet(&conn, &ClientPacket::Hello { credential: game::Credential::Token(PlayerToken("not-a-token".into())) }).await;
+    send_packet(&conn, &hello("   ")).await;
     let refused = tokio::time::timeout(Duration::from_secs(5), recv_packet(&conn)).await.expect("an answer");
     assert!(matches!(refused, ServerPacket::Refused(_)), "got {refused:?}");
     tokio::time::timeout(Duration::from_secs(5), conn.closed()).await.expect("the server closes the session");
     assert!(event_recv.try_recv().is_err());
 
-    // A Hello: announced with its player, and the same token is the same player.
-    let token = PlayerToken::generate([7; 16]);
+    // A Hello: announced with its player, and the same name is the same player.
     let mut players = Vec::new();
     // The refused connections took ids 0 and 1.
     for client in [2, 3] {
         let conn = connect(PORT).await;
-        send_packet(&conn, &ClientPacket::Hello { credential: game::Credential::Token(token.clone()) }).await;
+        send_packet(&conn, &hello("bob")).await;
         let event = loop {
             match event_recv.recv_timeout(Duration::from_secs(5)).expect("the session is announced") {
                 ServerEvent::ClientDisconnected(_) => continue, // the previous one
@@ -257,5 +260,5 @@ async fn first_packet_not_hello_closes() {
         }
         drop(conn);
     }
-    assert_eq!(players[0], players[1], "one token, one player");
+    assert_eq!(players[0], players[1], "one name, one player");
 }

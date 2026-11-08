@@ -78,7 +78,7 @@ pub enum Command {
         game::DebugFlags,
         crate::world_scale::WorldScale,
         crate::netcode::ConnectPolicy,
-        // What the Hello carries; `None` = this machine's player token.
+        // What the Hello carries; `None` = the local player name.
         Option<game::Credential>,
     ),
     /// Quit the game thread. Should only be send when quitting the application.
@@ -163,7 +163,7 @@ pub struct GameInstanceManager {
     /// How `connect_and_run` retries the initial connect (tests shorten it).
     #[cfg(not(target_arch = "wasm32"))]
     connect_policy: crate::netcode::ConnectPolicy,
-    /// The Hello's credential (`None` = the machine's player token).
+    /// The Hello's credential (`None` = the local player name).
     #[cfg(not(target_arch = "wasm32"))]
     credential: Option<game::Credential>,
 
@@ -725,7 +725,7 @@ impl GameInstanceManager {
         self.connect_policy = policy;
     }
 
-    /// Identify with this credential instead of the machine's player token
+    /// Identify with this credential instead of the local player name
     /// (a join JWT from the login service).
     #[cfg(not(target_arch = "wasm32"))]
     pub fn set_credential(&mut self, credential: Option<game::Credential>) {

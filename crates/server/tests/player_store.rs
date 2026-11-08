@@ -1,8 +1,9 @@
-//! The server's player stores: a token resolves to the same `PlayerId` every
-//! time (across reopening the world store), ids are never reused, and a
-//! record comes back once a save cut has written it.
-use game::{PlayerId, PlayerRecord, PlayerToken};
-use server::player_store::{MemoryPlayerStore, PlayerStore, StorePlayers};
+//! The server's player stores: a key resolves to the same `PlayerId` every
+//! time (across reopening the world store), ids are never reused, a record
+//! comes back once a save cut has written it, and local names never collide
+//! with online accounts.
+use game::{PlayerId, PlayerName, PlayerRecord, PlayerToken};
+use server::player_store::{MemoryPlayerStore, PlayerKey, PlayerStore, StorePlayers};
 use world_store::{Dials, StoreHandle, StoreUrl};
 
 fn scratch(name: &str) -> std::path::PathBuf {
@@ -12,8 +13,12 @@ fn scratch(name: &str) -> std::path::PathBuf {
     dir
 }
 
-fn token(n: u8) -> PlayerToken {
-    PlayerToken::generate([n; 16])
+fn token(n: u8) -> PlayerKey {
+    PlayerKey::Online(PlayerToken::generate([n; 16]))
+}
+
+fn local(name: &str) -> PlayerKey {
+    PlayerKey::Local(PlayerName::parse(name).unwrap())
 }
 
 fn record(x: i32) -> PlayerRecord {
@@ -70,4 +75,43 @@ fn memory_store_keeps_ids_only() {
     assert_eq!(memory.resolve(&token(7)).unwrap(), (m, None));
     assert_ne!(memory.resolve(&token(8)).unwrap().0, m);
     let _: PlayerId = m;
+}
+
+#[test]
+fn store_keys_keep_local_and_online_apart() {
+    let hex = PlayerToken::generate([5; 16]);
+    // Online keys are the bare token, as rows written before local names were.
+    assert_eq!(PlayerKey::Online(hex.clone()).store_key(), hex.0);
+    assert_eq!(local("bob").store_key(), "local:bob");
+    // A player who names themself after an account's token is still not that account.
+    let mut memory = MemoryPlayerStore::default();
+    let (online, _) = memory.resolve(&PlayerKey::Online(hex.clone())).unwrap();
+    let (named, _) = memory.resolve(&local(&hex.0)).unwrap();
+    assert_ne!(online, named);
+    // Names are exact (case matters) and stable.
+    let (bob, _) = memory.resolve(&local("bob")).unwrap();
+    assert_eq!(memory.resolve(&local(" bob ")).unwrap().0, bob, "parse trims");
+    assert_ne!(memory.resolve(&local("Bob")).unwrap().0, bob);
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn store_players_resolve_local_names_across_reopen() {
+    let dir = scratch("local");
+    let url = StoreUrl::Sqlite(dir.join("w.sqlite"));
+    let (bob, online) = {
+        let handle = StoreHandle::open(&url, Dials::BUILT).unwrap();
+        let mut store = StorePlayers(handle.clone());
+        let bob = store.resolve(&local("bob")).unwrap().0;
+        let online = store.resolve(&token(1)).unwrap().0;
+        assert_ne!(bob, online);
+        handle.shutdown();
+        (bob, online)
+    };
+    let handle = StoreHandle::open(&url, Dials::BUILT).unwrap();
+    let mut store = StorePlayers(handle.clone());
+    assert_eq!(store.resolve(&local("bob")).unwrap().0, bob);
+    assert_eq!(store.resolve(&token(1)).unwrap().0, online);
+    handle.shutdown();
+    let _ = std::fs::remove_dir_all(&dir);
 }

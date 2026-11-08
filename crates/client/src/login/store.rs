@@ -1,6 +1,6 @@
 //! Where the login refresh token is kept between runs (never logged):
 //!
-//! - native: the file `login_refresh` next to the player token
+//! - native: the file `login_refresh` in the client's data directory
 //!   (`$XDG_DATA_HOME/mmo/`, else `~/.local/share/mmo/`), owner-only, written
 //!   atomically; [`REFRESH_FILE_ENV`] overrides the path;
 //! - browser: `localStorage[`[`REFRESH_STORAGE_KEY`]`]`.
@@ -9,7 +9,7 @@
 pub const REFRESH_FILE_ENV: &str = "VOXEL_LOGIN_REFRESH_FILE";
 /// The browser's `localStorage` key.
 pub const REFRESH_STORAGE_KEY: &str = "mmo.login_refresh";
-/// The native file's name, beside `player_token`.
+/// The native file's name, in `player_name::data_dir`.
 pub const REFRESH_FILE_NAME: &str = "login_refresh";
 
 /// The kept refresh token, if any.
@@ -64,24 +64,21 @@ pub fn clear_refresh() {
 }
 
 /// The refresh file: [`REFRESH_FILE_ENV`], else `login_refresh` in the
-/// directory of the player token's file.
+/// client's data directory (`player_name::data_dir`).
 #[cfg(not(target_arch = "wasm32"))]
 pub fn refresh_path() -> Option<std::path::PathBuf> {
     let var = |name: &str| std::env::var(name).ok();
     refresh_path_from(
         var(REFRESH_FILE_ENV).as_deref(),
-        var(crate::player_token::PLAYER_TOKEN_FILE_ENV).as_deref(),
         var("XDG_DATA_HOME").as_deref(),
         var("HOME").as_deref(),
     )
 }
 
-/// [`refresh_path`] from the variables' values (empty counts as unset). With
-/// only the token file overridden, the refresh file sits beside it.
+/// [`refresh_path`] from the variables' values (empty counts as unset).
 #[cfg(not(target_arch = "wasm32"))]
 pub fn refresh_path_from(
     refresh_override: Option<&str>,
-    token_override: Option<&str>,
     xdg_data_home: Option<&str>,
     home: Option<&str>,
 ) -> Option<std::path::PathBuf> {
@@ -89,8 +86,7 @@ pub fn refresh_path_from(
     if let Some(file) = set(refresh_override) {
         return Some(file);
     }
-    let token = crate::player_token::token_path_from(token_override, xdg_data_home, home)?;
-    Some(token.with_file_name(REFRESH_FILE_NAME))
+    Some(crate::player_name::data_dir_from(xdg_data_home, home)?.join(REFRESH_FILE_NAME))
 }
 
 /// The token in `path`, trimmed; `None` when missing or empty.
@@ -188,18 +184,14 @@ mod tests {
     }
 
     #[test]
-    fn refresh_path_prefers_override_then_sits_beside_the_token() {
+    fn refresh_path_prefers_override_then_the_data_dir() {
         use std::path::PathBuf;
-        assert_eq!(refresh_path_from(Some("/r/f"), Some("/t/tok"), None, None), Some(PathBuf::from("/r/f")));
-        assert_eq!(refresh_path_from(Some(" "), Some("/t/tok"), None, None), Some(PathBuf::from("/t/login_refresh")));
+        assert_eq!(refresh_path_from(Some("/r/f"), Some("/x"), None), Some(PathBuf::from("/r/f")));
+        assert_eq!(refresh_path_from(Some(" "), Some("/x"), Some("/h")), Some(PathBuf::from("/x/mmo/login_refresh")));
         assert_eq!(
-            refresh_path_from(None, None, Some("/x"), Some("/h")),
-            Some(PathBuf::from("/x/mmo/login_refresh"))
-        );
-        assert_eq!(
-            refresh_path_from(None, None, None, Some("/h")),
+            refresh_path_from(None, None, Some("/h")),
             Some(PathBuf::from("/h/.local/share/mmo/login_refresh"))
         );
-        assert_eq!(refresh_path_from(None, None, None, None), None);
+        assert_eq!(refresh_path_from(None, None, None), None);
     }
 }

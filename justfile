@@ -39,6 +39,14 @@ export VOXEL_WORLD := world
 view := env_var_or_default("VOXEL_VIEW_DISTANCE_M", "")
 export VOXEL_VIEW_DISTANCE_M := view
 
+# The player name on local (single-player / LAN / dev) servers — Factorio's
+# model: no login, you are whoever you say (crates/client/src/player_name.rs).
+# Empty = $VOXEL_PLAYER_NAME, else the saved name, else the OS user.
+# `just user=bob run`; the play/run/client recipes export it as
+# VOXEL_PLAYER_NAME; `web` prints the page URL with `?name=`. Online (login)
+# servers ignore it.
+user := ""
+
 # World the server serves. Empty (default) = the default forged world,
 # worlds/default.world, forged on first start if missing (ForgeParams::default():
 # a 16 km / 32 m continent, ~5-10 s).
@@ -177,6 +185,7 @@ client:
     export VOXEL_REGION_BLOCKS={{play_blocks}}
     export VOXEL_SKIP_MENU=1
     if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
+    if [ -n "{{user}}" ]; then export VOXEL_PLAYER_NAME="{{user}}"; fi
     RUST_BACKTRACE=1 {{cargo}} run --bin client
 
 # Debug launch: straight into a small generated world with a fortress embarked
@@ -190,6 +199,7 @@ run *args:
     set -euo pipefail
     export VOXEL_REGION_BLOCKS={{play_blocks}}
     if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
+    if [ -n "{{user}}" ]; then export VOXEL_PLAYER_NAME="{{user}}"; fi
     {{cap}} {{cargo}} build --bin client --bin server
     RUST_BACKTRACE=1 ./target/debug/client debug embarked {{args}}
 
@@ -209,6 +219,7 @@ run-two *args:
     set -euo pipefail
     export VOXEL_REGION_BLOCKS={{play_blocks}}
     if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
+    if [ -n "{{user}}" ]; then export VOXEL_PLAYER_NAME="{{user}}"; fi
     {{cap}} {{cargo}} build --bin client --bin server
     port={{run_two_port}}
     if [ -n "$(ss -Huln "sport = :$port")" ]; then
@@ -231,8 +242,8 @@ run-two *args:
         site=$(grep -aoE 'embarked: fortress site=[0-9]+' "$log" | head -n1 | grep -oE '[0-9]+$' || true)
     done
     echo "[run-two] client 1 holds fortress site $site; client 2 adventures there"
-    # Its own player token: with the machine's, the server would see client 1's player.
-    VOXEL_PLAYER_TOKEN_FILE=target/run-two/player2_token RUST_BACKTRACE=1 \
+    # Its own player name: with client 1's, the server would see client 1's player.
+    VOXEL_PLAYER_NAME="${VOXEL_PLAYER_NAME:-${USER:-player}}-2" RUST_BACKTRACE=1 \
         ./target/debug/client debug embarked --join "127.0.0.1:$port" --adventure-at "$site" \
         > >(sed -u 's/^/[client 2] /') 2>&1 &
     pids+=("$!")
@@ -249,6 +260,7 @@ play:
     set -euo pipefail
     export VOXEL_REGION_BLOCKS={{play_blocks}}
     if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
+    if [ -n "{{user}}" ]; then export VOXEL_PLAYER_NAME="{{user}}"; fi
     {{cap}} {{cargo}} build --bin client --bin server
     RUST_BACKTRACE=1 ./target/debug/client
 
@@ -258,6 +270,7 @@ play-release:
     set -euo pipefail
     export VOXEL_REGION_BLOCKS={{play_blocks}}
     if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
+    if [ -n "{{user}}" ]; then export VOXEL_PLAYER_NAME="{{user}}"; fi
     {{cap}} {{cargo}} build --release --bin client --bin server
     RUST_BACKTRACE=1 ./target/release/client
 
@@ -278,6 +291,7 @@ client-release:
     export VOXEL_REGION_BLOCKS={{play_blocks}}
     export VOXEL_SKIP_MENU=1
     if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
+    if [ -n "{{user}}" ]; then export VOXEL_PLAYER_NAME="{{user}}"; fi
     RUST_BACKTRACE=1 {{cargo}} run --release --bin client
 
 # `run` in release mode: the embarked debug world (`just run-release --reset`
@@ -287,6 +301,7 @@ run-release *args:
     set -euo pipefail
     export VOXEL_REGION_BLOCKS={{play_blocks}}
     if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
+    if [ -n "{{user}}" ]; then export VOXEL_PLAYER_NAME="{{user}}"; fi
     {{cap}} {{cargo}} build --release --bin client --bin server
     RUST_BACKTRACE=1 ./target/release/client debug embarked {{args}}
 
@@ -799,10 +814,15 @@ web:
         server=$!
         trap 'echo "web: stopping the dev server (saving the world)"; kill -TERM $server 2>/dev/null; wait $server 2>/dev/null || true' EXIT
     fi
+    # The page's own player name (local servers): `just user=bob web` -> ?name=bob.
+    name=""
+    if [ -n "{{user}}" ]; then name="name=$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "{{user}}")"; fi
     if [ -n "{{login}}" ]; then
-        echo "web: open http://127.0.0.1:1334/?login={{login}}"
+        echo "web: open http://127.0.0.1:1334/?login={{login}}${name:+&$name}"
+    elif [ -n "$name" ]; then
+        echo "web: open http://127.0.0.1:1334/?$name (add &login=<login service url> for Play online)"
     else
-        echo "web: open http://127.0.0.1:1334/ (add ?login=<login service url> for Play online)"
+        echo "web: open http://127.0.0.1:1334/ (add ?login=<login service url> for Play online; ?name=<you> picks your player name)"
     fi
     WASM_SERVER_RUNNER_CUSTOM_INDEX_HTML=crates/client/index.html \
         {{cargo}} run -p client --target wasm32-unknown-unknown

@@ -3,8 +3,10 @@
 //! the `WorldManager`.
 //!
 //! [`AuthMode`] (`VOXEL_AUTH`) picks the check:
-//! - `token` (the default; single-player and dev servers): the client's own
-//!   [`PlayerToken`], as before login existed. Works with no login service.
+//! - `local` (the default; `token` is an alias — single-player, LAN and dev
+//!   servers, Factorio's model): the client says who it is with a free
+//!   [`PlayerName`]. No secret and no login service: anyone may claim any
+//!   name, so a public server should run `jwt`.
 //! - `jwt` (server worlds): a join JWT the login service signed for THIS world
 //!   ([`VOXEL_WORLD_ID`](WORLD_ID_ENV)), checked against the service's public
 //!   keys ([`JwksCache`], fetched from [`LOGIN_URL_ENV`] + `PATH_JWKS`):
@@ -22,9 +24,11 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use auth::{Jwks, Verifier, VerifyError};
-use game::{Credential, PlayerToken};
+use game::{Credential, PlayerName, PlayerToken};
 
-/// `token` (default) or `jwt`.
+use crate::player_store::PlayerKey;
+
+/// `local` (default; alias `token`) or `jwt`.
 pub const AUTH_ENV: &str = "VOXEL_AUTH";
 /// The registry id of the world this host serves (required by `jwt`).
 pub const WORLD_ID_ENV: &str = "VOXEL_WORLD_ID";
@@ -36,11 +40,11 @@ pub const JWKS_REFETCH_MIN_SECS: u64 = 30;
 /// How long one JWKS fetch may take.
 pub const JWKS_FETCH_TIMEOUT_SECS: u64 = 5;
 
-/// The refusal a `token` host gives a login ticket.
-pub const REFUSE_JWT_ON_TOKEN_HOST: &str =
+/// The refusal a `local` host gives a login ticket.
+pub const REFUSE_JWT_ON_LOCAL_HOST: &str =
     "this server does not use login (single-player / dev)";
-/// The refusal a `jwt` host gives a player token.
-pub const REFUSE_TOKEN_ON_JWT_HOST: &str = "this server requires login";
+/// The refusal a `jwt` host gives a player name.
+pub const REFUSE_LOCAL_ON_JWT_HOST: &str = "this server requires login";
 /// The refusal of a ticket older than one this host already admitted.
 pub const REFUSE_SUPERSEDED: &str = "superseded by a newer login";
 /// The refusal of a ticket over [`game::MAX_JWT_BYTES`].
@@ -62,7 +66,7 @@ pub fn system_clock() -> Clock {
 /// How this host checks a connection's credential.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AuthMode {
-    Token,
+    Local,
     Jwt { world: String, login_url: String },
 }
 
@@ -74,7 +78,7 @@ impl AuthMode {
     }
 
     /// The mode of this server process. A single-player server (the one a
-    /// client spawns for its own world) is always [`AuthMode::Token`]: it
+    /// client spawns for its own world) is always [`AuthMode::Local`]: it
     /// inherits the client's environment, and a `VOXEL_AUTH=jwt` left
     /// exported from dev-login experiments must not make it need a login
     /// service. The second value is a warning to log when such a setting
@@ -87,12 +91,12 @@ impl AuthMode {
             return Self::from_lookup(lookup).map(|mode| (mode, None));
         }
         let warning = match lookup(AUTH_ENV).as_deref().map(str::trim) {
-            None | Some("") | Some("token") => None,
+            None | Some("") | Some("local") | Some("token") => None,
             Some(other) => Some(format!(
-                "{AUTH_ENV}={other:?} ignored: a single-player server always uses player tokens"
+                "{AUTH_ENV}={other:?} ignored: a single-player server always uses local player names"
             )),
         };
-        Ok((AuthMode::Token, warning))
+        Ok((AuthMode::Local, warning))
     }
 
     /// [`from_env`](Self::from_env) over any variable lookup.
@@ -102,9 +106,9 @@ impl AuthMode {
             _ => Err(format!("{AUTH_ENV}=jwt requires {name}")),
         };
         match lookup(AUTH_ENV).as_deref().map(str::trim) {
-            None | Some("") | Some("token") => Ok(AuthMode::Token),
+            None | Some("") | Some("local") | Some("token") => Ok(AuthMode::Local),
             Some("jwt") => Ok(AuthMode::Jwt { world: required(WORLD_ID_ENV)?, login_url: required(LOGIN_URL_ENV)? }),
-            Some(other) => Err(format!("{AUTH_ENV}={other:?}: expected `token` or `jwt`")),
+            Some(other) => Err(format!("{AUTH_ENV}={other:?}: expected `local` or `jwt`")),
         }
     }
 }
@@ -266,9 +270,9 @@ pub struct Authenticator {
 }
 
 impl Authenticator {
-    /// A `token` host: the player's own token, no login.
-    pub fn token() -> Authenticator {
-        Authenticator { mode: AuthMode::Token, jwks: None, epochs: Mutex::default(), now: system_clock() }
+    /// A `local` host: players by free name, no login.
+    pub fn local() -> Authenticator {
+        Authenticator { mode: AuthMode::Local, jwks: None, epochs: Mutex::default(), now: system_clock() }
     }
 
     /// A `jwt` host for `world`, checking tickets against `jwks` at `now`.
@@ -288,7 +292,7 @@ impl Authenticator {
     /// The production authenticator for `mode` (wall clock, HTTP JWKS).
     pub fn for_mode(mode: AuthMode) -> Authenticator {
         match mode {
-            AuthMode::Token => Self::token(),
+            AuthMode::Local => Self::local(),
             AuthMode::Jwt { world, login_url } => {
                 let jwks = JwksCache::from_login(&login_url);
                 Self::jwt_from(world, login_url, jwks, system_clock())
@@ -305,7 +309,7 @@ impl Authenticator {
         self.jwks.as_ref()
     }
 
-    /// The startup JWKS fetch of a `jwt` host (a no-op for `token`). Never
+    /// The startup JWKS fetch of a `jwt` host (a no-op for `local`). Never
     /// fails: the server starts without the login service and fetches again
     /// on the first connect.
     pub async fn prefetch(&self) {
@@ -314,19 +318,20 @@ impl Authenticator {
         }
     }
 
-    /// The player `credential` proves, or the refusal text.
-    pub async fn authenticate(&self, credential: Credential) -> Result<PlayerToken, String> {
+    /// The player `credential` claims (a `local` host) or proves (a `jwt`
+    /// host), or the refusal text. A local name is re-validated: the wire
+    /// form is not trusted to have gone through [`PlayerName::parse`].
+    pub async fn authenticate(&self, credential: Credential) -> Result<PlayerKey, String> {
         match (&self.mode, credential) {
-            (AuthMode::Token, Credential::Token(token)) => {
-                if token.is_valid() {
-                    Ok(token)
-                } else {
-                    Err(format!("invalid player token {token:?}"))
-                }
+            (AuthMode::Local, Credential::Local(name)) => match PlayerName::parse(&name.0) {
+                Ok(name) => Ok(PlayerKey::Local(name)),
+                Err(why) => Err(format!("invalid player name: {why}")),
+            },
+            (AuthMode::Local, Credential::Jwt(_)) => Err(REFUSE_JWT_ON_LOCAL_HOST.into()),
+            (AuthMode::Jwt { .. }, Credential::Local(_)) => Err(REFUSE_LOCAL_ON_JWT_HOST.into()),
+            (AuthMode::Jwt { world, .. }, Credential::Jwt(jwt)) => {
+                self.check_jwt(world, &jwt).await.map(PlayerKey::Online)
             }
-            (AuthMode::Token, Credential::Jwt(_)) => Err(REFUSE_JWT_ON_TOKEN_HOST.into()),
-            (AuthMode::Jwt { .. }, Credential::Token(_)) => Err(REFUSE_TOKEN_ON_JWT_HOST.into()),
-            (AuthMode::Jwt { world, .. }, Credential::Jwt(jwt)) => self.check_jwt(world, &jwt).await,
         }
     }
 

@@ -61,8 +61,8 @@ pub(crate) fn raw_exec(url: &StoreUrl, sql: &str) {
     });
 }
 
-fn token(n: u8) -> PlayerToken {
-    PlayerToken::generate([n; 16])
+fn token(n: u8) -> String {
+    PlayerToken::generate([n; 16]).0
 }
 
 fn entity(birth: RegionCoords, serial: u64) -> EntityBundle {

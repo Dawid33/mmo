@@ -1,6 +1,6 @@
 //! The connect edge's credential check (`VOXEL_AUTH`): a `jwt` host admits a
-//! connection only with a valid login ticket for its world, a `token` host
-//! (single-player / dev) only with a player token. Driven through
+//! connection only with a valid login ticket for its world, a `local` host
+//! (single-player / LAN / dev) only with a player name. Driven through
 //! `player_store::resolve_hello` — the very function both ingress paths call —
 //! plus one end-to-end refusal over real QUIC.
 
@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use auth::{Jwks, Signer, SigningKey};
-use game::{ClientPacket, Credential, PlayerId, PlayerToken};
+use game::{ClientPacket, Credential, PlayerId, PlayerName, PlayerToken};
 use login_api::{JoinClaims, HOST_AUDIENCE, JOIN_JWT_TTL_SECS};
 use server::auth_edge::{AuthMode, Authenticator, Clock, JwksCache, JWKS_REFETCH_MIN_SECS, MAX_KID_SHOWN_CHARS};
 use server::player_store::{self, resolve_hello, SharedPlayerStore};
@@ -55,8 +55,8 @@ fn hello_jwt(jwt: String) -> ClientPacket {
     ClientPacket::Hello { credential: Credential::Jwt(jwt) }
 }
 
-fn hello_token(token: PlayerToken) -> ClientPacket {
-    ClientPacket::Hello { credential: Credential::Token(token) }
+fn hello_name(name: &str) -> ClientPacket {
+    ClientPacket::Hello { credential: Credential::Local(PlayerName(name.into())) }
 }
 
 async fn admit(store: &SharedPlayerStore, auth: &Authenticator, jwt: String) -> Result<PlayerId, String> {
@@ -336,30 +336,38 @@ async fn jwt_host_refuses_an_oversized_ticket() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn jwt_host_refuses_token_credential() {
+async fn jwt_host_refuses_a_player_name() {
     let auth = jwt_host(signer().jwks());
-    let why = resolve_hello(&store(), &auth, hello_token(token(1))).await.unwrap_err();
+    let why = resolve_hello(&store(), &auth, hello_name("bob")).await.unwrap_err();
     assert_eq!(why, "this server requires login");
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn token_host_refuses_jwt() {
+async fn local_host_refuses_jwt() {
     let signer = signer();
-    let auth = Authenticator::token();
+    let auth = Authenticator::local();
     let why = admit(&store(), &auth, signer.sign(&claims(&token(1), 1))).await.unwrap_err();
     assert!(why.contains("single-player / dev"), "{why}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn token_host_unchanged() {
-    let auth = Authenticator::token();
+async fn local_host_admits_any_valid_name() {
+    let auth = Authenticator::local();
     let store = store();
-    let (a, record) = resolve_hello(&store, &auth, hello_token(token(1))).await.expect("a valid token");
+    let (a, record) = resolve_hello(&store, &auth, hello_name("bob")).await.expect("a valid name");
     assert!(record.is_none());
-    let (b, _) = resolve_hello(&store, &auth, hello_token(token(1))).await.unwrap();
+    // The same name is the same player (no secret: Factorio's LAN model).
+    let (b, _) = resolve_hello(&store, &auth, hello_name("bob")).await.unwrap();
     assert_eq!(a, b);
-    let why = resolve_hello(&store, &auth, hello_token(PlayerToken("nope".into()))).await.unwrap_err();
-    assert!(why.contains("invalid player token"), "{why}");
+    // The server re-validates: the wire form bypasses `PlayerName::parse`.
+    let (c, _) = resolve_hello(&store, &auth, hello_name("  bob ")).await.unwrap();
+    assert_eq!(a, c, "trimmed on the server too");
+    let (d, _) = resolve_hello(&store, &auth, hello_name("Żółw")).await.unwrap();
+    assert_ne!(a, d);
+    for bad in ["", "   ", "a\u{0}b", &"x".repeat(game::PLAYER_NAME_MAX_CHARS + 1)] {
+        let why = resolve_hello(&store, &auth, hello_name(bad)).await.unwrap_err();
+        assert!(why.contains("invalid player name"), "{bad:?}: {why}");
+    }
     let why = resolve_hello(&store, &auth, ClientPacket::RequestPlayerRegion).await.unwrap_err();
     assert!(why.contains("Hello"), "{why}");
 }
@@ -370,9 +378,10 @@ fn mode_of(vars: &[(&str, &str)]) -> Result<AuthMode, String> {
 
 #[test]
 fn auth_mode_from_env() {
-    assert_eq!(mode_of(&[]), Ok(AuthMode::Token));
-    assert_eq!(mode_of(&[("VOXEL_AUTH", "")]), Ok(AuthMode::Token));
-    assert_eq!(mode_of(&[("VOXEL_AUTH", "token")]), Ok(AuthMode::Token));
+    assert_eq!(mode_of(&[]), Ok(AuthMode::Local));
+    assert_eq!(mode_of(&[("VOXEL_AUTH", "")]), Ok(AuthMode::Local));
+    assert_eq!(mode_of(&[("VOXEL_AUTH", "local")]), Ok(AuthMode::Local));
+    assert_eq!(mode_of(&[("VOXEL_AUTH", "token")]), Ok(AuthMode::Local), "the old name is an alias");
     assert_eq!(
         mode_of(&[("VOXEL_AUTH", "jwt"), ("VOXEL_WORLD_ID", "dev"), ("VOXEL_LOGIN_URL", "http://127.0.0.1:8790")]),
         Ok(AuthMode::Jwt { world: "dev".into(), login_url: "http://127.0.0.1:8790".into() })
@@ -392,16 +401,17 @@ fn resolved(single_player: bool, vars: &[(&str, &str)]) -> Result<(AuthMode, Opt
 /// A single-player server inherits the client's environment: an exported
 /// `VOXEL_AUTH=jwt` must not make it need a login service.
 #[test]
-fn single_player_is_always_token_mode() {
+fn single_player_is_always_local_mode() {
     let jwt = [("VOXEL_AUTH", "jwt"), ("VOXEL_WORLD_ID", "dev"), ("VOXEL_LOGIN_URL", "http://127.0.0.1:8790")];
     let (mode, warning) = resolved(true, &jwt).unwrap();
-    assert_eq!(mode, AuthMode::Token);
+    assert_eq!(mode, AuthMode::Local);
     assert!(warning.expect("the override is reported").contains("VOXEL_AUTH"));
     // Even an incomplete or unknown setting does not stop it.
-    assert_eq!(resolved(true, &[("VOXEL_AUTH", "jwt")]).unwrap().0, AuthMode::Token);
-    assert_eq!(resolved(true, &[("VOXEL_AUTH", "password")]).unwrap().0, AuthMode::Token);
-    assert_eq!(resolved(true, &[]).unwrap(), (AuthMode::Token, None));
-    assert_eq!(resolved(true, &[("VOXEL_AUTH", "token")]).unwrap(), (AuthMode::Token, None));
+    assert_eq!(resolved(true, &[("VOXEL_AUTH", "jwt")]).unwrap().0, AuthMode::Local);
+    assert_eq!(resolved(true, &[("VOXEL_AUTH", "password")]).unwrap().0, AuthMode::Local);
+    assert_eq!(resolved(true, &[]).unwrap(), (AuthMode::Local, None));
+    assert_eq!(resolved(true, &[("VOXEL_AUTH", "token")]).unwrap(), (AuthMode::Local, None));
+    assert_eq!(resolved(true, &[("VOXEL_AUTH", "local")]).unwrap(), (AuthMode::Local, None));
     // A dedicated server honours it.
     assert_eq!(
         resolved(false, &jwt).unwrap(),
@@ -436,11 +446,11 @@ async fn jwks_is_fetched_from_the_login_service() {
     assert!(request.starts_with("GET /.well-known/jwks.json "), "{request}");
 }
 
-/// End to end: a `jwt` host refuses a token `Hello` over real QUIC with
+/// End to end: a `jwt` host refuses a player-name `Hello` over real QUIC with
 /// `Refused` and closes the connection; the world never hears of it.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "slow: >100ms — run via just test-full"]
-async fn jwt_host_refuses_token_hello_over_quic() {
+async fn jwt_host_refuses_name_hello_over_quic() {
     use std::time::Duration;
     let port = std::net::UdpSocket::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
     let auth = Arc::new(jwt_host(signer().jwks()));
@@ -452,7 +462,7 @@ async fn jwt_host_refuses_token_hello_over_quic() {
 
     let connection = quic::connect(port).await;
     let mut hello = connection.open_uni().await.unwrap();
-    hello.write_all(&game::encode_packet(&hello_token(token(1))).unwrap()).await.unwrap();
+    hello.write_all(&game::encode_packet(&hello_name("bob")).unwrap()).await.unwrap();
     hello.finish().unwrap();
     let mut answer = tokio::time::timeout(Duration::from_secs(5), connection.accept_uni())
         .await

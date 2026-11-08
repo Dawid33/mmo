@@ -629,7 +629,7 @@ fn saved_region_is_restored_by_a_restarted_server() {
     let (dir, url) = temp_store("save");
     let store = open_store(&url);
     // Every player in a save cut has a players row (the edge resolved it).
-    let token = game::PlayerToken::generate([3; game::PLAYER_TOKEN_BYTES]);
+    let token = server::player_store::PlayerKey::Online(game::PlayerToken::generate([3; game::PLAYER_TOKEN_BYTES]));
     let (player, _) = StorePlayers(store.clone()).resolve(&token).unwrap();
     let mut rig = stored_rig(&store);
     rig.event(ServerEvent::ClientConnected { client: 0, player, record: None });
@@ -682,7 +682,7 @@ fn player_is_restored_by_a_restarted_server() {
     use server::player_store::{PlayerStore, StorePlayers};
     let (dir, url) = temp_store("players");
     let store = open_store(&url);
-    let token = game::PlayerToken::generate([7; game::PLAYER_TOKEN_BYTES]);
+    let token = server::player_store::PlayerKey::Online(game::PlayerToken::generate([7; game::PLAYER_TOKEN_BYTES]));
     let (player, record) = StorePlayers(store.clone()).resolve(&token).unwrap();
     assert!(record.is_none(), "a new player");
 

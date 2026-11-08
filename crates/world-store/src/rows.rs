@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 
 use game::{
     Chunk, ChunkCoords, ColumnCoords, ColumnGround, EntityBundle, EntityId, EntityKind, InFlightRow, IntentMsg,
-    PlayerId, PlayerRecord, PlayerToken, RegionCoords, RegionMeta, StoredRegion, TerrainSnapshot, Tick, WorldCut,
+    PlayerId, PlayerRecord, RegionCoords, RegionMeta, StoredRegion, TerrainSnapshot, Tick, WorldCut,
 };
 
 use crate::codec::*;
@@ -350,10 +350,10 @@ macro_rules! engine_rows {
             /// needs no writer lock (a joining client does not wait behind a commit).
             pub(crate) async fn find_player(
                 pool: &Pool,
-                token: &PlayerToken,
+                token: &str,
             ) -> Result<Option<(PlayerId, Option<PlayerRecord>)>, StoreError> {
                 let row = sqlx::query("SELECT player_id, record FROM players WHERE token = $1")
-                    .bind(token.0.as_str())
+                    .bind(token)
                     .fetch_optional(pool)
                     .await?;
                 let Some(r) = row else { return Ok(None) };
@@ -374,11 +374,11 @@ macro_rules! engine_rows {
             /// token inserted since a [`find_player`] miss is found, not duplicated).
             pub(crate) async fn resolve_player(
                 pool: &Pool,
-                token: &PlayerToken,
+                token: &str,
             ) -> Result<(PlayerId, Option<PlayerRecord>), StoreError> {
                 let mut tx = pool.begin().await?;
                 let row = sqlx::query("SELECT player_id, record FROM players WHERE token = $1")
-                    .bind(token.0.as_str())
+                    .bind(token)
                     .fetch_optional(&mut *tx)
                     .await?;
                 if let Some(r) = row {
@@ -400,7 +400,7 @@ macro_rules! engine_rows {
                     .try_get(0)?;
                 sqlx::query("INSERT INTO players (player_id, token) VALUES ($1, $2)")
                     .bind(next)
-                    .bind(token.0.as_str())
+                    .bind(token)
                     .execute(&mut *tx)
                     .await?;
                 tx.commit().await?;

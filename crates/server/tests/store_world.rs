@@ -139,7 +139,7 @@ fn restart_restores_world() {
     let crc = opened.world.as_ref().unwrap().content_crc();
     let world = Arc::new(opened.world.expect("a forged world"));
     let store = opened.store.expect("a forged world has a store");
-    let token = game::PlayerToken::generate([9; game::PLAYER_TOKEN_BYTES]);
+    let token = server::player_store::PlayerKey::Online(game::PlayerToken::generate([9; game::PLAYER_TOKEN_BYTES]));
     let (player, none) = StorePlayers(store.clone()).resolve(&token).unwrap();
     assert!(none.is_none());
 
@@ -575,11 +575,11 @@ fn flat_floor(_rc: RegionCoords) -> Vec<(game::ColumnCoords, game::Column)> {
 
 /// A fresh store on a temp file (no world artifact: these tests only commit
 /// cuts) and a player resolved in it.
-fn bare_store(dir: &Path) -> (world_store::StoreHandle, game::PlayerToken, game::PlayerId) {
+fn bare_store(dir: &Path) -> (world_store::StoreHandle, server::player_store::PlayerKey, game::PlayerId) {
     materials();
     let url = world_store::StoreUrl::Sqlite(dir.join("w.sqlite"));
     let store = world_store::StoreHandle::open(&url, world_store::Dials::BUILT).unwrap();
-    let token = game::PlayerToken::generate([7; game::PLAYER_TOKEN_BYTES]);
+    let token = server::player_store::PlayerKey::Online(game::PlayerToken::generate([7; game::PLAYER_TOKEN_BYTES]));
     let (player, _) = StorePlayers(store.clone()).resolve(&token).unwrap();
     (store, token, player)
 }

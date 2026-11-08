@@ -511,14 +511,14 @@ pub fn run() {
         Some(store) => player_store::shared(player_store::StorePlayers(store.clone())),
     };
     // Who may connect (`VOXEL_AUTH`): a bad setting stops the start, naming
-    // the variable. A single-player server is always token mode.
+    // the variable. A single-player server is always local (player names).
     let (auth_mode, auth_warning) =
         auth_edge::AuthMode::resolve(single_player, |name| std::env::var(name).ok()).unwrap_or_else(|e| fatal(&e));
     if let Some(warning) = auth_warning {
         log::warn!("[server] {warning}");
     }
     match &auth_mode {
-        auth_edge::AuthMode::Token => info!("auth: player tokens (no login)"),
+        auth_edge::AuthMode::Local => info!("auth: local player names (no login; anyone may claim any name)"),
         auth_edge::AuthMode::Jwt { world, login_url } => {
             info!("auth: login tickets for world {world:?} from {login_url}")
         }

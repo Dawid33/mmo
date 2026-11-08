@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use game::{
-    CutId, InFlightRow, PlayerId, PlayerRecord, PlayerToken, RegionCoords, StoredRegion, TerrainSnapshot, Tick,
+    CutId, InFlightRow, PlayerId, PlayerRecord, RegionCoords, StoredRegion, TerrainSnapshot, Tick,
     WorldCut,
 };
 use tokio::sync::{mpsc, oneshot};
@@ -126,21 +126,22 @@ impl StoreHandle {
         rx
     }
 
-    /// The token's player id and saved record. A token never seen gets the
-    /// next id, written at once (the one write outside cuts); its record is
-    /// `None` until a cut writes one.
-    pub fn resolve_player(&self, token: &PlayerToken) -> Result<(PlayerId, Option<PlayerRecord>), StoreError> {
-        let token = token.clone();
-        self.ask(|r| Request::ResolvePlayer(token, r))
+    /// The player id and saved record of `key` (the `players.token` column:
+    /// the caller's namespaced player key — `server::player_store::PlayerKey`).
+    /// A key never seen gets the next id, written at once (the one write
+    /// outside cuts); its record is `None` until a cut writes one.
+    pub fn resolve_player(&self, key: &str) -> Result<(PlayerId, Option<PlayerRecord>), StoreError> {
+        let key = key.to_string();
+        self.ask(|r| Request::ResolvePlayer(key, r))
     }
 
     /// [`StoreHandle::resolve_player`] for async callers (the network edge).
     pub async fn resolve_player_async(
         &self,
-        token: &PlayerToken,
+        key: &str,
     ) -> Result<(PlayerId, Option<PlayerRecord>), StoreError> {
         let (tx, rx) = oneshot::channel();
-        self.tx.send(Request::ResolvePlayer(token.clone(), Reply::Async(tx))).map_err(|_| stopped())?;
+        self.tx.send(Request::ResolvePlayer(key.to_string(), Reply::Async(tx))).map_err(|_| stopped())?;
         rx.await.map_err(|_| stopped())?
     }
 
