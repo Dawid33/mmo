@@ -298,6 +298,24 @@ impl History {
         self.stopping.remove(&rc);
         self.running.insert(rc);
         let mark = self.directives.len();
+        self.embody_abstract_residents(rc);
+        let mut events = Vec::new();
+        let mut i = mark;
+        while i < self.directives.len() {
+            if self.directives[i].region == rc {
+                events.push(self.directives.remove(i).event);
+            } else {
+                i += 1;
+            }
+        }
+        self.redeliver_bounced(rc, &mut events);
+        events
+    }
+
+    /// The catch-up of live `rc`: its abstract residents — site people and strays — are
+    /// spawned at its landing and embodied, parties walking through it enter at the edge
+    /// they came in by (directives emitted).
+    fn embody_abstract_residents(&mut self, rc: RegionCoords) {
         let residents: Vec<(PersonId, Location)> = self
             .people
             .values()
@@ -324,17 +342,6 @@ impl History {
         for (j, idx) in passing {
             self.enter_running(j, idx);
         }
-        let mut events = Vec::new();
-        let mut i = mark;
-        while i < self.directives.len() {
-            if self.directives[i].region == rc {
-                events.push(self.directives.remove(i).event);
-            } else {
-                i += 1;
-            }
-        }
-        self.redeliver_bounced(rc, &mut events);
-        events
     }
 
     /// A host could not apply `d` (its region had stopped, or was not running there):
@@ -391,16 +398,20 @@ impl History {
 
     /// A host that kept running while this history was away (a restarted coordinator, a
     /// link that dropped) reports `regions` running, each with the bodies in it: they run
-    /// again, with no catch-up and no bounced directive left for them. First, anyone the
+    /// again, with no bounced directive left for them. First, anyone the
     /// history had in a listed region whose body is absent from that region's list goes
     /// back to the abstract history — for every region before any is embodied, so a body
     /// that crossed between two listed regions is never taken for a duplicate. Then bodies
     /// are the truth for the living: each present living person is embodied where their
-    /// body stands (their abstract home kept, their journey held there), nothing spawned.
+    /// body stands (their abstract home kept, their journey held there).
     /// The history is the truth for the dead: a present person dead, unknown, or embodied
     /// in another listed region already gets a `DespawnPerson` (returned, not queued), and
-    /// a present traveller whose journey is held there gets its `WalkOut` again.
-    /// Residents with no body stay abstract until their region next starts.
+    /// a present traveller whose journey is held there gets its `WalkOut` again. Last, each
+    /// listed region gets [`History::region_started`]'s catch-up for what has no body
+    /// there (the lists are exact): its abstract residents spawn at its landing, parties
+    /// passing through enter — a resident that left over a seam while the history was
+    /// away, every resident of a region that started unannounced, a spawn that never
+    /// reached the host. All of it is returned.
     pub fn reattach_regions(&mut self, regions: &[(RegionCoords, Vec<(PersonId, [f32; 3])>)]) -> Vec<Directive> {
         for (rc, present) in regions {
             self.stopping.remove(rc);
@@ -428,6 +439,15 @@ impl History {
             self.note_positions(present.iter().filter(|(p, _)| self.embodied_in(*p) == Some(*rc)).copied().collect());
             despawn.extend(self.walk_out_reattached(*rc, &seen));
         }
+        // The lists are exact: an abstract resident of a reattached region has no body
+        // there (it left over a seam while the link was down and was restored above, or the
+        // region started unannounced, or the history was reloaded). It gets one, as at the
+        // region's start — else it would stay bodiless until the region restarts.
+        let mark = self.directives.len();
+        for (rc, _) in regions {
+            self.embody_abstract_residents(*rc);
+        }
+        despawn.extend(self.directives.drain(mark..));
         despawn
     }
 

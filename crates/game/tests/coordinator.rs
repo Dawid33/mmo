@@ -483,8 +483,33 @@ fn stale_bounce_is_dropped() {
     assert_eq!(bodies, 1, "P keeps exactly one body: {out:?}");
 }
 
+/// A region that started while the link was down (its `RegionStarted` lost) is listed
+/// by the next `Attach` with its exact bodies — none: its residents get the start's
+/// catch-up then (spawned once each, after the echo), not at the region's next start; a
+/// later attach listing their bodies spawns nobody again.
+#[test]
+fn attach_of_an_unannounced_region_spawns_its_residents_once() {
+    let (mut c, _, people) = coordinator();
+    let r = rc(0, 0);
+    let running = |bodies: Vec<(PersonId, [f32; 3])>| RunningRegion { rc: r, incarnation: 1, people: bodies };
+    c.handle(HostMsg::Attach { host: 0, epoch: 1, running: vec![running(Vec::new())], online: Vec::new() }, 0);
+    let out = commit(&mut c);
+    let attached = out.iter().position(|m| matches!(m, CoordMsg::Attached { epoch: 1 })).expect("the echo");
+    for p in &people {
+        assert_eq!(body_delta(&out[attached..], *p), 1, "{p:?} spawned once: {out:?}");
+        assert_eq!(c.history().person(*p).unwrap().location, Location::InRegion(r));
+    }
+    // Re-attached with every body there: nothing more.
+    let bodies: Vec<(PersonId, [f32; 3])> = people.iter().map(|p| (*p, [0.0; 3])).collect();
+    c.handle(HostMsg::Attach { host: 0, epoch: 2, running: vec![running(bodies)], online: Vec::new() }, 0);
+    let out = commit(&mut c);
+    assert!(directives_for(&out, r).is_empty(), "{out:?}");
+}
+
 /// A directive waiting on a save when the host re-attaches is superseded: the attach
-/// re-decides the region from its bodies, and the stale spawn never leaves.
+/// re-decides the region from its bodies — the stale spawn never leaves, and P, a
+/// resident of the running region with no body there, gets one fresh spawn decided after
+/// the attach (its catch-up), not one per decision.
 #[test]
 fn attach_supersedes_unsent_directives() {
     let (mut c, civ, people) = coordinator();
@@ -500,14 +525,16 @@ fn attach_supersedes_unsent_directives() {
     let running = RunningRegion { rc: r, incarnation: 1, people: Vec::new() };
     c.handle(HostMsg::Attach { host: 0, epoch: 1, running: vec![running], online: vec![(A, None)] }, 0);
     let out = commit(&mut c);
-    assert!(directives_for(&out, r).is_empty(), "the stale spawn is dropped: {out:?}");
+    let attached = out.iter().position(|m| matches!(m, CoordMsg::Attached { epoch: 1 })).expect("the echo");
+    assert!(directives_for(&out[..attached], r).is_empty(), "the stale spawn is dropped: {out:?}");
     assert!(matches!(reply_to(&out, 1), WorldReply::Embarked { .. }), "the reply still leaves");
     assert!(matches!(reply_to(&out, 2), WorldReply::PersonInfo(Some(_))));
-    let pr = c.history().person(p).unwrap();
-    assert_ne!(pr.location, Location::InRegion(r), "P has no body, so the history has P abstract");
-    // `r` starts again: P is spawned once by its catch-up.
+    assert_eq!(body_delta(&out[attached..], p), 1, "one spawn of P, decided by the attach: {out:?}");
+    assert_eq!(directives_for(&out[attached..], r).iter().map(|d| d.1).collect::<Vec<_>>(), vec![1]);
+    assert_eq!(c.history().person(p).unwrap().location, Location::InRegion(r), "P is embodied in r");
+    // `r` parks with P's body and starts again: P is spawned once by its catch-up.
     c.handle(HostMsg::RegionStopping { rc: r }, 0);
-    c.handle(HostMsg::RegionParked { rc: r, people: Vec::new() }, 0);
+    c.handle(HostMsg::RegionParked { rc: r, people: vec![(p, [0.0; 3])] }, 0);
     c.handle(HostMsg::RegionStarted { rc: r, incarnation: 2 }, 0);
     assert_eq!(body_delta(&commit(&mut c), p), 1);
 }
