@@ -425,6 +425,9 @@ impl LinkDialer {
     /// sender is dropped, or when the receiver is dropped and the next event send fails (an idle
     /// link notices only then). The dialer threads are detached; shutdown takes up to one backoff
     /// plus one attempt.
+    ///
+    /// Delivery is at-least-once around reconnects, never lossy after `Up`: a message sent just
+    /// before the owner observes `Up` may also be delivered, so owners must be idempotent.
     pub fn connect<In, Out>(
         addr: SocketAddr,
         cert_sha256: String,
@@ -533,12 +536,14 @@ async fn dial_loop<In, Out>(
                     break;
                 }
                 log::info!("[svc-link] up to {addr}");
+                // Hold the slot lock across `Up`: the out thread blocks on it until the slot is
+                // open, so anything the owner sends after seeing `Up` lands on this link.
+                let mut open = slot.lock().unwrap();
                 if events.send(LinkEvent::Up(hello.clone())).is_err() {
                     break;
                 }
-                // Open for sends only after `Up` is out: whatever the owner sent before it saw
-                // `Up` was sent "while down" and is dropped (its outbox resends after `Up`).
-                *slot.lock().unwrap() = Some(tx);
+                *open = Some(tx);
+                drop(open);
                 if stop.load(Ordering::SeqCst) {
                     slot.lock().unwrap().take();
                     break;

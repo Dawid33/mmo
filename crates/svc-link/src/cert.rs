@@ -83,7 +83,18 @@ fn sibling(hash_file: &Path, ext: &str) -> PathBuf {
 /// create does not fix an existing file).
 fn write_atomic(path: &Path, bytes: &[u8], secret: bool) -> io::Result<()> {
     let tmp = sibling(path, &format!(".tmp{}", std::process::id()));
-    std::fs::write(&tmp, bytes)?;
+    {
+        use std::io::Write;
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        if secret {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let _ = std::fs::remove_file(&tmp);
+        opts.open(&tmp)?.write_all(bytes)?;
+    }
     #[cfg(unix)]
     if secret {
         use std::os::unix::fs::PermissionsExt;

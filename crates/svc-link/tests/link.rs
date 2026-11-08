@@ -283,3 +283,25 @@ fn forged_compressed_hello_refused_before_decoding() {
     });
     nothing(&from_peers);
 }
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn messages_sent_right_after_up_are_never_lost() {
+    let (listener, from_peers, _senders) = LinkListener::bind::<Msg, Msg>(loopback(), TOKEN.into(), None).unwrap();
+    let pin = listener.cert_sha256().to_string();
+    // Send the instant Up is seen, over many fresh links: the slot must already be open.
+    for round in 0..25u64 {
+        let (tx, rx) = LinkDialer::connect::<Msg, Msg>(listener.local_addr(), pin.clone(), hello(TOKEN));
+        expect_up(&rx);
+        tx.send(Msg::Num(round)).unwrap();
+        loop {
+            match next(&from_peers) {
+                (_, LinkEvent::Msg(Msg::Num(n))) => {
+                    assert_eq!(n, round);
+                    break;
+                }
+                _ => {}
+            }
+        }
+    }
+}
