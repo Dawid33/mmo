@@ -86,7 +86,9 @@ const EXPECTED: &[(&str, &str)] = &[
     ("entities", "birth_rx:I*, birth_rz:I*, serial:I*, rx:I, rz:I, saved_tick:I, kind:I, bundle:B"),
     ("players", "player_id:I*, token:T, record:B?, saved_tick:I?"),
     ("history", "id:I*, bytes:B"),
-    ("in_flight", "seq:I*, kind:I, target_rx:I, target_rz:I, stamp:I, payload:B"),
+    ("in_flight", "seq:I*, kind:I, target_rx:I, target_rz:I, stamp:I, payload:B, host:I"),
+    ("super_regions", "sx:I*, sz:I*, owner:I, epoch:I"),
+    ("coordinator", "id:I*, epoch:I, state:B?, saved_utc:T?"),
 ];
 
 fn expected() -> BTreeSet<Col> {

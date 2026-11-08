@@ -81,6 +81,8 @@ pub enum InFlightRow {
 #[derive(Debug, Clone)]
 pub struct WorldCut {
     pub id: CutId,
+    /// The region host that cut it (0 = the only one); scopes the in-flight rows it replaces.
+    pub host: u32,
     pub tick: Tick,
     pub regions: Vec<(RegionCoords, PortableRegion)>,
     pub in_flight: Vec<InFlightRow>,

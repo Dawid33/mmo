@@ -46,6 +46,7 @@ fn resolve_same_token_same_id_across_reopen() {
         assert!(ra.is_none(), "a new player has no record");
         // Records reach the store only in save cuts.
         let cut = game::WorldCut {
+            host: 0,
             id: game::CutId(1),
             tick: 5,
             regions: Vec::new(),

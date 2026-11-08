@@ -504,6 +504,7 @@ mod tests {
 
     fn store_history(store: &StoreHandle, history: &game::history::History) {
         let cut = game::WorldCut {
+            host: 0,
             id: game::CutId(1),
             tick: 1,
             regions: Vec::new(),
@@ -546,6 +547,7 @@ mod tests {
         let mut bytes = game::history::persist::encode(&history);
         bytes.truncate(bytes.len() / 2);
         let cut = game::WorldCut {
+            host: 0,
             id: game::CutId(1),
             tick: 1,
             regions: Vec::new(),

@@ -369,42 +369,21 @@ macro_rules! engine_rows {
                 Ok(Some((id, record)))
             }
 
-            /// The token's id and record; a new token gets the next id, written at once.
-            /// Callers hold the writer lock (it re-reads inside its transaction, so a
-            /// token inserted since a [`find_player`] miss is found, not duplicated).
+            /// The token's id and record; a new token gets an id from the database
+            /// (identity column / rowid), written at once. Safe across processes and
+            /// threads: the insert is a no-op for a known token, so concurrent first
+            /// resolves of one token agree.
             pub(crate) async fn resolve_player(
                 pool: &Pool,
                 token: &str,
             ) -> Result<(PlayerId, Option<PlayerRecord>), StoreError> {
-                let mut tx = pool.begin().await?;
-                let row = sqlx::query("SELECT player_id, record FROM players WHERE token = $1")
+                sqlx::query("INSERT INTO players (token) VALUES ($1) ON CONFLICT (token) DO NOTHING")
                     .bind(token)
-                    .fetch_optional(&mut *tx)
+                    .execute(pool)
                     .await?;
-                if let Some(r) = row {
-                    tx.commit().await?;
-                    let id = PlayerId(u(r.try_get(0)?));
-                    let record: Option<Vec<u8>> = r.try_get(1)?;
-                    let record = match record {
-                        Some(blob) => Some(
-                            decode::<PlayerRecord>(FORMAT_PLAYER_RECORD, &blob)
-                                .map_err(|e| StoreError::Corrupt(format!("player {}: {e}", id.0)))?,
-                        ),
-                        None => None,
-                    };
-                    return Ok((id, record));
-                }
-                let next: i64 = sqlx::query("SELECT COALESCE(MAX(player_id) + 1, 0) FROM players")
-                    .fetch_one(&mut *tx)
+                find_player(pool, token)
                     .await?
-                    .try_get(0)?;
-                sqlx::query("INSERT INTO players (player_id, token) VALUES ($1, $2)")
-                    .bind(next)
-                    .bind(token)
-                    .execute(&mut *tx)
-                    .await?;
-                tx.commit().await?;
-                Ok((PlayerId(u(next)), None))
+                    .ok_or_else(|| StoreError::Corrupt(format!("player token {token:?} vanished after its insert")))
             }
 
             /// The whole cut in one transaction; any error rolls all of it back.
@@ -506,7 +485,12 @@ macro_rules! engine_rows {
                         )));
                     }
                 }
-                sqlx::query("DELETE FROM in_flight").execute(&mut *tx).await?;
+                sqlx::query("DELETE FROM in_flight WHERE host = $1").bind(cut.host as i64).execute(&mut *tx).await?;
+                // `seq` is the table's key across all hosts: continue after other hosts' rows.
+                let base: i64 = sqlx::query("SELECT COALESCE(MAX(seq) + 1, 0) FROM in_flight")
+                    .fetch_one(&mut *tx)
+                    .await?
+                    .try_get(0)?;
                 for (seq, row) in cut.in_flight.iter().enumerate() {
                     let (kind, target, stamp, payload) = match row {
                         InFlightRow::Transfer { target, bundle, stamp } => {
@@ -517,15 +501,16 @@ macro_rules! engine_rows {
                         }
                     };
                     sqlx::query(
-                        "INSERT INTO in_flight (seq, kind, target_rx, target_rz, stamp, payload) \
-                         VALUES ($1, $2, $3, $4, $5, $6)",
+                        "INSERT INTO in_flight (seq, kind, target_rx, target_rz, stamp, payload, host) \
+                         VALUES ($1, $2, $3, $4, $5, $6, $7)",
                     )
-                    .bind(seq as i64)
+                    .bind(base + seq as i64)
                     .bind(kind)
                     .bind(target.x as i64)
                     .bind(target.z as i64)
                     .bind(i(stamp))
                     .bind(payload)
+                    .bind(cut.host as i64)
                     .execute(&mut *tx)
                     .await?;
                 }
@@ -538,7 +523,7 @@ macro_rules! engine_rows {
                     .execute(&mut *tx)
                     .await?;
                 }
-                sqlx::query("UPDATE world SET world_tick = $1 WHERE id = 1").bind(t).execute(&mut *tx).await?;
+                sqlx::query("UPDATE world SET world_tick = $1 WHERE id = 1 AND world_tick < $1").bind(t).execute(&mut *tx).await?;
                 tx.commit().await?;
                 Ok(CutCommitted { id: cut.id, versions })
             }

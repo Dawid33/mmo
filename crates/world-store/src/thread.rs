@@ -163,14 +163,13 @@ async fn serve(pool: Pool, guard: LockGuard, mut rx: mpsc::UnboundedReceiver<Req
             Request::LoadInFlight(r) => tokio::spawn(async move { r.send(on_pool!(&pool, load_in_flight())) }),
             Request::LoadHistory(r) => tokio::spawn(async move { r.send(on_pool!(&pool, load_history())) }),
             Request::ResolvePlayer(token, r) => tokio::spawn(async move {
-                // A known token is a read: no wait behind a long commit. Only a
-                // new one takes the writer lock to insert its id.
+                // A known token is a read: no wait behind a long commit. A new one
+                // inserts and reads back; the database assigns the id, so no writer lock.
                 match on_pool!(&pool, find_player(&token)) {
                     Ok(Some(found)) => return r.send(Ok(found)),
                     Ok(None) => {}
                     Err(e) => return r.send(Err(e)),
                 }
-                let _w = writer.lock().await;
                 r.send(on_pool!(&pool, resolve_player(&token)))
             }),
         };

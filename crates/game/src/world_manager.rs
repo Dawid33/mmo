@@ -2276,6 +2276,7 @@ impl<S: RegionSpawner> WorldManager<S> {
         }
         let carried: BTreeMap<RegionCoords, u64> = cut.regions.iter().map(|(rc, (_, seq))| (*rc, *seq)).collect();
         let world_cut = WorldCut {
+            host: 0,
             id: cut.id,
             tick: cut.tick,
             regions: cut.regions.into_iter().map(|(rc, (p, _))| (rc, p)).collect(),

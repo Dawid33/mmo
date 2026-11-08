@@ -840,6 +840,7 @@ fn body_crosses_seam_on_real_threads() {
     let id = (*region.data().ecs.id.try_get(key.unwrap())).expect("the body has an EntityId");
     let (portable, _) = region.data().portable_snapshot(&Default::default());
     let cut = game::WorldCut {
+        host: 0,
         id: game::CutId(1),
         tick: *region.data().tick,
         regions: vec![(SPAWN_REGION, portable)],

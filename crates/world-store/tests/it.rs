@@ -2,9 +2,11 @@
 //! Postgres tests run only with `MMO_TEST_DATABASE_URL` set (`just pg-up`, `just test-pg`).
 
 mod codec;
+mod cut;
 mod handle;
 mod common;
 mod forged;
 mod open;
+mod players;
 mod schema;
 mod worldctl;

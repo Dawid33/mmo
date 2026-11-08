@@ -93,6 +93,7 @@ fn first_cut(h: &StoreHandle) -> WorldCut {
     let (pid, rec) = h.resolve_player(&token(1)).unwrap();
     assert_eq!(rec, None);
     WorldCut {
+        host: 0,
         id: CutId(1),
         tick: 1000,
         regions: vec![
@@ -165,6 +166,7 @@ fn second_cut_writes_only_given_chunks() {
         let mut new_chunk = other_chunk();
         new_chunk.set_block(0, 1, 0, game::Block::new(game::BlockId(7)));
         let second = WorldCut {
+            host: 0,
             id: CutId(2),
             tick: 1100,
             regions: vec![
@@ -203,6 +205,7 @@ fn commit_cut_is_atomic() {
         h.commit_cut(first.clone()).recv().unwrap().unwrap();
 
         let bad = WorldCut {
+            host: 0,
             id: CutId(2),
             tick: 1200,
             regions: vec![
@@ -263,8 +266,11 @@ fn u64_max_serial_roundtrips() {
         let mut p = region(u64::MAX, &[(ChunkCoords::new(0, i32::MIN, 0), chunk())], true, vec![max.clone()]);
         p.meta.next_entity_serial = u64::MAX;
         let cut = WorldCut {
+            host: 0,
             id: CutId(u64::MAX),
-            tick: u64::MAX,
+            // Ticks are stored as i64 and the world tick only moves forward (a signed
+            // compare), so the largest tick is i64::MAX; serials and stamps go to u64::MAX.
+            tick: i64::MAX as u64,
             regions: vec![(far, p.clone())],
             in_flight: vec![InFlightRow::Transfer { target: far, bundle: entity(A, u64::MAX - 1), stamp: u64::MAX }],
             players: vec![(pid, player())],
@@ -274,7 +280,7 @@ fn u64_max_serial_roundtrips() {
         assert_eq!(done.id, CutId(u64::MAX));
         assert_eq!(h.load_region(far).unwrap(), Some(stored(&p)));
         assert_eq!(h.load_in_flight().unwrap(), cut.in_flight);
-        assert_eq!(h.world_info().unwrap().world_tick, u64::MAX);
+        assert_eq!(h.world_info().unwrap().world_tick, i64::MAX as u64);
         h.shutdown();
     });
 }
@@ -341,6 +347,7 @@ fn first_region_row_without_ground_is_refused() {
     each_backend("noground", false, |url| {
         let h = open(url);
         let cut = |id, rc, ground| WorldCut {
+            host: 0,
             id: CutId(id),
             tick: 1000 + id,
             regions: vec![(rc, region(1000 + id, &[(ChunkCoords::new(0, 0, 0), chunk())], ground, vec![]))],

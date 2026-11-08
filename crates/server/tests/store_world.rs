@@ -359,6 +359,7 @@ fn stale_world_map_is_rebuilt_at_start() {
     let store = opened.store.unwrap();
     let history = b"history bytes of the last cut".to_vec();
     let cut = game::WorldCut {
+        host: 0,
         id: game::CutId(1),
         tick: 77,
         regions: Vec::new(),
