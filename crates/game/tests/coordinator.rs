@@ -506,6 +506,51 @@ fn attach_of_an_unannounced_region_spawns_its_residents_once() {
     assert!(directives_for(&out, r).is_empty(), "{out:?}");
 }
 
+/// A person crossing a seam while the host gathers its `Attach` is in neither region's
+/// own list; the host puts them in exactly one (`WorldManager`'s exact-across-seams rule):
+/// delivered into listed B → B's list, absorbed at the seam → the list of A they left.
+/// With the held `PersonCrossed` following the `Attach`, P keeps exactly one body — the
+/// attach's catch-up spawns nobody beside it — and an absorbed P none.
+#[test]
+fn crossing_held_behind_the_attach_keeps_one_body() {
+    let (mut c, _, people) = coordinator();
+    let (a, b, x) = (rc(0, 0), rc(1, 0), rc(2, 0));
+    c.handle(HostMsg::RegionStarted { rc: a, incarnation: 1 }, 0);
+    c.handle(HostMsg::RegionStarted { rc: b, incarnation: 1 }, 0);
+    let out = commit(&mut c);
+    let (p, q) = (people[0], people[1]);
+    // Bodies on the host: everyone spawned into A once.
+    let mut count = |p, out: &[CoordMsg], n: &mut i32| *n += body_delta(out, p);
+    let (mut p_bodies, mut q_bodies) = (0, 0);
+    count(p, &out, &mut p_bodies);
+    count(q, &out, &mut q_bodies);
+    assert_eq!((p_bodies, q_bodies), (1, 1), "{out:?}");
+    // P crosses into B (delivered, in flight), Q is absorbed at the seam into X: the
+    // host lists P in B and Q still in A; their crossings follow the attach.
+    q_bodies -= 1;
+    let at = [0.0; 3];
+    let a_list: Vec<(PersonId, [f32; 3])> = people.iter().filter(|&&r| r != p).map(|r| (*r, at)).collect();
+    let running = vec![
+        RunningRegion { rc: a, incarnation: 1, people: a_list },
+        RunningRegion { rc: b, incarnation: 1, people: vec![(p, at)] },
+    ];
+    c.handle(HostMsg::Attach { host: 0, epoch: 1, running, online: Vec::new() }, 0);
+    let out = commit(&mut c);
+    count(p, &out, &mut p_bodies);
+    count(q, &out, &mut q_bodies);
+    assert_eq!((p_bodies, q_bodies), (1, 0), "nobody spawned beside a crossing: {out:?}");
+    assert_eq!(c.history().person(p).unwrap().location, Location::InRegion(b));
+    c.handle(HostMsg::PersonCrossed { person: p, to: b, delivered: true }, 0);
+    c.handle(HostMsg::PersonCrossed { person: q, to: x, delivered: false }, 0);
+    c.maintain(0);
+    let out = commit(&mut c);
+    count(p, &out, &mut p_bodies);
+    count(q, &out, &mut q_bodies);
+    assert_eq!((p_bodies, q_bodies), (1, 0), "{out:?}");
+    assert_eq!(c.history().person(p).unwrap().location, Location::InRegion(b));
+    assert!(!matches!(c.history().person(q).unwrap().location, Location::InRegion(_)), "Q is abstract");
+}
+
 /// A directive waiting on a save when the host re-attaches is superseded: the attach
 /// re-decides the region from its bodies — the stale spawn never leaves, and P, a
 /// resident of the running region with no body there, gets one fresh spawn decided after

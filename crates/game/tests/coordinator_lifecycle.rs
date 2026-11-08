@@ -26,6 +26,9 @@ const NEAR_EAST_SEAM: [u32; 2] = [REGION_BLOCKS as u32 - 4, 30];
 /// Rounds the walkers of [`person_crossing_under_delay_conserves_people`] walk (they
 /// reach the +x seam in about ten).
 const WALK_ROUNDS: usize = 40;
+/// Rounds of [`crossing_while_the_attach_gathers_keeps_one_body`]: its residents, landed
+/// near the +x seam, wander over it in about 260.
+const WANDER_ROUNDS: usize = 300;
 /// (2, 0) stops within this many rounds of the walk's start, by the seed.
 const STOP_WITHIN_ROUNDS: u64 = 16;
 
@@ -404,4 +407,93 @@ fn directive_for_stopping_region_bounces_and_lands_once() {
     let bounced = bounced.into_inner();
     assert!(bounced > 0, "no seed held a directive past the stop");
     assert!(bounced < SEEDS, "no seed landed the directives before the stop");
+}
+
+/// Whether `out` carries a person's departure over a seam.
+fn person_departs(out: &RegionOutput) -> bool {
+    matches!(out, RegionOutput::Departures(list, _)
+        if list.iter().any(|(b, _)| matches!(b.kind, game::EntityKind::Person { .. })))
+}
+
+/// People — residents wandering, or travellers walking out, by the seed — cross a seam
+/// while the host gathers its `Attach`: the link comes back (by the seed) right when a
+/// departure out of (1, 0) is queued but not yet handled, so
+/// (1, 0) lists its people without the walker (its departure was handled first) and
+/// (2, 0) may list before the walker's body lands — a crossing in flight is in neither
+/// region's own list. (2, 0) runs (delivered) or not (absorbed at the seam) by the seed.
+/// The `Attach` must still be exact: never two bodies of one person, and once drained
+/// the history and the bodies agree (no spawned body beside a landing one, no body for a
+/// person a held crossing absorbed).
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn crossing_while_the_attach_gathers_keeps_one_body() {
+    let raced = std::sync::atomic::AtomicU64::new(0);
+    let raced_absorbed = std::sync::atomic::AtomicU64::new(0);
+    each_seed("crossing_while_the_attach_gathers_keeps_one_body", |seed| {
+        let (h, a, b) = strip_history();
+        let population = a.len() + b.len();
+        let mut w = World::with_player(seed, h);
+        w.packet(ClientPacket::PlayRegion(rc(1, 0)));
+        let east_runs = roll(seed, 2, 4) != 0;
+        if east_runs {
+            w.packet(ClientPacket::RequestRegionConnection(rc(2, 0)));
+        }
+        w.drain();
+        w.check_settled("start");
+        let travellers = roll(seed, 4, 2) == 0;
+        if travellers {
+            // Travellers walking out; else residents wandering over the seam.
+            let walkers: Vec<PersonId> = a[..4].to_vec();
+            history_mut_of(&mut w.manager)
+                .start_journey(walkers, SiteId(0), rc(2, 0), Purpose::Migrate { to: SiteId(1) })
+                .expect("a route to site 1");
+        }
+        // The walk-outs reach the bodies (the link lags at most `LINK_DELAY` pumps); then
+        // the link drops, well before anyone reaches the seam.
+        for _ in 0..3 {
+            w.tick();
+        }
+        w.manager.world_link_mut().and_then(|l| l.as_inline_mut()).expect("inline").set_up(false);
+        // The link comes back at the first queued departure (residents cross one by
+        // one), or at a later one of the travellers'.
+        let up_after = if travellers { roll(seed, 3, 4) } else { 0 };
+        let (mut departures, mut up) = (0, false);
+        for round in 0..WANDER_ROUNDS {
+            w.now_ms += TICK_RATE;
+            w.manager.spawner_mut().tick_all();
+            // The regions' outputs, queued but not yet handled.
+            let mut queued = Vec::new();
+            for _ in 0..4 {
+                w.manager.spawner_mut().pump();
+                queued.extend(w.region_out.try_iter());
+            }
+            departures += queued.iter().filter(|(_, o)| person_departs(o)).count() as u64;
+            if !up && departures > up_after {
+                // Back now: the attach is gathered while those departures wait.
+                w.manager.world_link_mut().and_then(|l| l.as_inline_mut()).expect("inline").set_up(true);
+                w.manager.maintain(w.now_ms);
+                up = true;
+                raced.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if !east_runs {
+                    raced_absorbed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+            for (r, out) in queued {
+                w.manager.handle_region_output(r, out, w.now_ms);
+            }
+            w.settle();
+            w.manager.maintain(w.now_ms);
+            w.settle();
+            for (p, at) in bodies(&mut w.manager) {
+                assert_eq!(at.len(), 1, "seed {seed} round {round}: {p:?} has bodies in {at:?}");
+            }
+        }
+        w.manager.world_link_mut().and_then(|l| l.as_inline_mut()).expect("inline").set_up(true);
+        w.drain();
+        w.drain();
+        w.check_settled("after the walk");
+        assert_eq!(w.history().people().filter(|q| q.alive()).count(), population, "seed {seed}: the population");
+    });
+    assert!(raced.into_inner() > 0, "no seed brought the link back with a departure queued");
+    assert!(raced_absorbed.into_inner() > 0, "no seed raced an absorbed crossing");
 }

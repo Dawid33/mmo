@@ -383,7 +383,7 @@ impl CoordinatorThread {
 
     /// Test hook: the coordinator crashes right after the save that releases its next
     /// claim-granting reply commits, before that reply (or anything released with it)
-    /// leaves. Wait for it with [`Self::is_finished`].
+    /// leaves; the thread ends [`ServerExit::CoordinatorFailed`]. Wait for it with [`Self::is_finished`].
     #[doc(hidden)]
     pub fn crash_before_claim_reply(&self) {
         self.crash_before_claim_reply.store(true, Ordering::SeqCst);
@@ -572,7 +572,7 @@ impl CoordinatorRuntime {
                 // Its save committed (the reply is gated); it never leaves.
                 log::warn!("[coordinator] test crash before a claim-granting reply left");
                 self.down();
-                return ServerExit::Clean;
+                return ServerExit::CoordinatorFailed;
             }
             self.send(out);
             if let Some(timeout) = stopping {

@@ -624,6 +624,61 @@ struct PendingRequest {
 /// People bodies a region listed for an `Attach` (`None`: not answered yet).
 type Listed = Option<Vec<(PersonId, [f32; 3])>>;
 
+/// Where a person's body went over a seam while an `Attach` was gathered (the latest
+/// move wins), so the lists can be made exact across seams ([`WorldManager::try_finish_attach`]).
+#[derive(Debug, Clone, Copy)]
+enum Moved {
+    /// Delivered into `to` (in flight there, or arrived): the body is `to`'s.
+    Into { from: RegionCoords, to: RegionCoords, at: [f32; 3] },
+    /// Absorbed at the seam out of `from` (its target was not running): no body is left;
+    /// the `PersonCrossed { delivered: false }` held behind the `Attach` says so.
+    Absorbed { from: RegionCoords, at: [f32; 3] },
+}
+
+/// Make the gathered `Attach` lists exact across seams. A region's outputs are FIFO, so
+/// a body that left a region before it answered `ListPeople` is not in that region's
+/// list (its departure was handled first), and one that lands in its target after the
+/// target answered is not in the target's: a person crossing while the attach is
+/// gathered can be in no list — the history would take them back and the attach's
+/// catch-up spawn a second body beside the one landing — or, having left after its
+/// source listed it, in two. Each person in `moved` ends up in exactly one list:
+/// - delivered into a listed region: that region's (the body is, or lands, there; the
+///   held `PersonCrossed` then agrees);
+/// - delivered into a region not listed (it started during the gather: its
+///   `RegionStarted` is held too), or absorbed at the seam: the list of the region it
+///   first left during the gather, so the held crossings replay the move from there
+///   (an absorbed one is taken back by its own `PersonCrossed`, not by the attach —
+///   the attach would otherwise re-spawn a person whose crossing then absorbs them).
+fn exact_across_seams(
+    lists: &mut BTreeMap<RegionCoords, (u64, Vec<(PersonId, [f32; 3])>)>,
+    moved: &BTreeMap<PersonId, Moved>,
+) {
+    for (p, m) in moved {
+        let (home, at) = match *m {
+            Moved::Into { to, at, .. } if lists.contains_key(&to) => (to, at),
+            Moved::Into { from, at, .. } | Moved::Absorbed { from, at } => (from, at),
+        };
+        if !lists.contains_key(&home) {
+            continue;
+        }
+        let mut kept = None;
+        for (rc, (_, people)) in lists.iter_mut() {
+            if let Some(i) = people.iter().position(|(q, _)| q == p) {
+                let (_, pos) = people.remove(i);
+                if *rc == home {
+                    kept = Some(pos);
+                }
+            }
+        }
+        lists.get_mut(&home).expect("checked").1.push((*p, kept.unwrap_or(at)));
+    }
+}
+
+fn bundle_at(bundle: &crate::EntityBundle) -> [f32; 3] {
+    let t = bundle.body.pose.translation;
+    [t.x, t.y, t.z]
+}
+
 /// Where the host stands with the world coordinator.
 #[derive(Debug)]
 enum WorldAttach {
@@ -642,6 +697,8 @@ enum WorldAttach {
         regions: BTreeMap<RegionCoords, (u64, Listed)>,
         held: Vec<HostMsg>,
         warned: bool,
+        /// Person bodies that crossed a seam meanwhile ([`Moved`]), by person.
+        moved: BTreeMap<PersonId, Moved>,
     },
     /// The `Attach` of `epoch` is sent; until the coordinator echoes it
     /// ([`CoordMsg::Attached`]) every `SpawnPeople` / `Directive` that arrives was decided
@@ -1165,7 +1222,14 @@ impl<S: RegionSpawner> WorldManager<S> {
         let regions =
             listed.iter().map(|rc| (*rc, (self.incarnation.get(rc).copied().unwrap_or(0), None))).collect();
         self.world_attach =
-            WorldAttach::Gathering { epoch, since_ms: now_ms, regions, held: Vec::new(), warned: false };
+            WorldAttach::Gathering {
+                epoch,
+                since_ms: now_ms,
+                regions,
+                held: Vec::new(),
+                warned: false,
+                moved: BTreeMap::new(),
+            };
         for rc in listed {
             self.send_to_region(rc, RegionInput::ListPeople(epoch));
         }
@@ -1202,6 +1266,17 @@ impl<S: RegionSpawner> WorldManager<S> {
         }
     }
 
+    /// While an `Attach` is gathered: `person`'s body moved over a seam (`moved` of the
+    /// region it was first seen leaving, if it moved before during this gather).
+    fn note_moved(&mut self, person: PersonId, moved: impl FnOnce(Option<RegionCoords>) -> Moved) {
+        if let WorldAttach::Gathering { moved: all, .. } = &mut self.world_attach {
+            let first_from = all.get(&person).map(|m| match *m {
+                Moved::Into { from, .. } | Moved::Absorbed { from, .. } => from,
+            });
+            all.insert(person, moved(first_from));
+        }
+    }
+
     /// Send the `Attach` being gathered once every listed region answered, then the
     /// requests whose answer never came (sent before the link went down, or timed out
     /// toward the client after they left — the coordinator's memo answers a
@@ -1212,19 +1287,29 @@ impl<S: RegionSpawner> WorldManager<S> {
         if regions.values().any(|(_, listed)| listed.is_none()) {
             return;
         }
-        let WorldAttach::Gathering { epoch, regions, held, .. } =
+        let WorldAttach::Gathering { epoch, regions, held, mut moved, .. } =
             std::mem::replace(&mut self.world_attach, WorldAttach::Down)
         else {
             unreachable!("checked")
         };
         self.world_attach = WorldAttach::Sent { epoch };
-        let running: Vec<RunningRegion> = regions
+        let mut lists: BTreeMap<RegionCoords, (u64, Vec<(PersonId, [f32; 3])>)> = regions
             .into_iter()
-            .map(|(rc, (incarnation, listed))| RunningRegion {
-                rc,
-                incarnation,
-                people: listed.expect("every listed region answered"),
-            })
+            .map(|(rc, (incarnation, listed))| (rc, (incarnation, listed.expect("every listed region answered"))))
+            .collect();
+        // A body still in flight is its target's, whenever it left.
+        for f in self.in_flight.values() {
+            if let EntityKind::Person { person } = f.bundle.kind {
+                let from = moved.get(&person).map_or(f.target, |m| match *m {
+                    Moved::Into { from, .. } | Moved::Absorbed { from, .. } => from,
+                });
+                moved.insert(person, Moved::Into { from, to: f.target, at: bundle_at(&f.bundle) });
+            }
+        }
+        exact_across_seams(&mut lists, &moved);
+        let running: Vec<RunningRegion> = lists
+            .into_iter()
+            .map(|(rc, (incarnation, people))| RunningRegion { rc, incarnation, people })
             .collect();
         for r in &running {
             // Its people as they stand are the history's now: no `SpawnPeople` comes.
@@ -2043,6 +2128,9 @@ impl<S: RegionSpawner> WorldManager<S> {
                     }
                 }
                 if let GameEventKind::EntityArrived(bundle) = &event.kind {
+                    if let EntityKind::Person { person } = bundle.kind {
+                        self.note_moved(person, |from| Moved::Into { from: from.unwrap_or(rc), to: rc, at: bundle_at(bundle) });
+                    }
                     if self.in_flight.get(&bundle.id).is_some_and(|f| f.target == rc) {
                         let f = self.in_flight.remove(&bundle.id).expect("checked");
                         self.cut_confirmed_arrival(f);
@@ -2199,6 +2287,15 @@ impl<S: RegionSpawner> WorldManager<S> {
                         // A person is delivered only into a running region; the history
                         // absorbs anyone walking into one that is not (no wake).
                         let delivered = self.regions.get(&target).is_some_and(|l| !l.stopping);
+                        let at = bundle_at(&bundle);
+                        if delivered {
+                            let mut there = bundle.clone();
+                            there.rebase(rc, target);
+                            let at = bundle_at(&there);
+                            self.note_moved(person, |_| Moved::Into { from: rc, to: target, at });
+                        } else {
+                            self.note_moved(person, |_| Moved::Absorbed { from: rc, at });
+                        }
                         self.world_send(HostMsg::PersonCrossed { person, to: target, delivered });
                         if !delivered {
                             self.locations.remove(&bundle.id);

@@ -691,11 +691,15 @@ fn couple_embark_request(h: &History) -> EmbarkRequest {
 }
 
 impl Coordinator {
-    /// The coordinator process crashes: nothing more is saved or sent, its links drop;
-    /// what its store already has is all a restart gets.
+    /// The coordinator process crashes: nothing more is handled, saved or sent, its
+    /// links drop. Its store handle is dropped, not shut down — nothing waits for it to
+    /// drain: a save the runtime had already handed the store still commits whenever its
+    /// thread gets to it (as one that reached the database before the crash would), before
+    /// or after the restart's claim (after it, refused as fenced). A save lost with the
+    /// process is the `fail_next_writes` scenario.
     fn kill(self) {
         self.thread.kill();
-        self.store.shutdown();
+        drop(self.store);
     }
 
     /// Asserts `check` of its live history, or fails naming `when`.
