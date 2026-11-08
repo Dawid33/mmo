@@ -383,53 +383,85 @@ impl History {
     }
 
     /// A host that kept running while this history was away (a restarted coordinator)
-    /// reports `rc` running with `present`'s bodies in it: `rc` runs again, with no
-    /// catch-up. Bodies are the truth for the living: each present living person is
-    /// embodied in `rc` (their abstract home kept, their journey held there), nothing
-    /// spawned. The history is the truth for the dead: a present person dead, unknown, or
-    /// embodied in another live region gets a `DespawnPerson` (returned, not queued).
-    /// Anyone the history had in `rc` whose body is absent goes back to the abstract
-    /// history; residents with no body stay abstract until `rc` next starts.
+    /// reports `rc` running with `present`'s bodies in it: [`History::reattach_regions`]
+    /// for that one region.
     pub fn reattach_region(&mut self, rc: RegionCoords, present: &[(PersonId, [f32; 3])]) -> Vec<Directive> {
-        self.stopping.remove(&rc);
-        self.running.insert(rc);
-        let here: BTreeSet<PersonId> = present.iter().map(|(p, _)| *p).collect();
-        let absent: Vec<PersonId> = self
-            .people
-            .values()
-            .filter(|q| q.location == Location::InRegion(rc) && !here.contains(&q.id))
-            .map(|q| q.id)
-            .collect();
-        for p in absent {
-            self.restore(p, rc);
+        self.reattach_regions(&[(rc, present.to_vec())])
+    }
+
+    /// A host that kept running while this history was away (a restarted coordinator, a
+    /// link that dropped) reports `regions` running, each with the bodies in it: they run
+    /// again, with no catch-up and no bounced directive left for them. First, anyone the
+    /// history had in a listed region whose body is absent from that region's list goes
+    /// back to the abstract history — for every region before any is embodied, so a body
+    /// that crossed between two listed regions is never taken for a duplicate. Then bodies
+    /// are the truth for the living: each present living person is embodied where their
+    /// body stands (their abstract home kept, their journey held there), nothing spawned.
+    /// The history is the truth for the dead: a present person dead, unknown, or embodied
+    /// in another listed region already gets a `DespawnPerson` (returned, not queued).
+    /// Residents with no body stay abstract until their region next starts.
+    pub fn reattach_regions(&mut self, regions: &[(RegionCoords, Vec<(PersonId, [f32; 3])>)]) -> Vec<Directive> {
+        for (rc, present) in regions {
+            self.stopping.remove(rc);
+            self.running.insert(*rc);
+            self.bounced.retain(|d| d.region != *rc);
+            let here: BTreeSet<PersonId> = present.iter().map(|(p, _)| *p).collect();
+            let absent: Vec<PersonId> = self
+                .people
+                .values()
+                .filter(|q| q.location == Location::InRegion(*rc) && !here.contains(&q.id))
+                .map(|q| q.id)
+                .collect();
+            for p in absent {
+                self.restore(p, *rc);
+            }
         }
         let mut despawn = Vec::new();
-        let mut seen = BTreeSet::new();
-        for &(p, _) in present {
-            if !seen.insert(p) {
-                continue;
+        for (rc, present) in regions {
+            let mut seen = BTreeSet::new();
+            for &(p, _) in present {
+                if seen.insert(p) {
+                    despawn.extend(self.embody_present(*rc, p));
+                }
             }
-            let Some(q) = self.people.get(&p).filter(|q| q.alive()) else {
-                despawn.push(Directive { region: rc, event: GameEventKind::DespawnPerson(p) });
-                continue;
-            };
-            match q.location {
-                Location::InRegion(r) if r == rc => {}
-                Location::InRegion(r) if self.region_live(r) => {
-                    ::log::warn!("history: {p:?} has a body in {r:?} and in reattached {rc:?}; despawning the second");
-                    despawn.push(Directive { region: rc, event: GameEventKind::DespawnPerson(p) });
+            self.note_positions(present.iter().filter(|(p, _)| self.embodied_in(*p) == Some(*rc)).copied().collect());
+        }
+        despawn
+    }
+
+    /// A host put `person`'s body in `rc` although the history absorbed them (it did not
+    /// have `rc` running): the host's view of running wins. `rc` runs (no catch-up) and the
+    /// body is taken as [`History::reattach_regions`] takes one; a dead or duplicate body
+    /// gets the returned `DespawnPerson`.
+    pub fn adopt_body(&mut self, rc: RegionCoords, person: PersonId) -> Option<Directive> {
+        if !self.running.contains(&rc) {
+            ::log::warn!("history: a body crossed into {rc:?}, which the history had not running; it runs now");
+            self.stopping.remove(&rc);
+            self.running.insert(rc);
+        }
+        self.embody_present(rc, person)
+    }
+
+    /// `person`'s body stands in live `rc`: embodied there, unless dead, unknown or
+    /// embodied in another live region (then the despawn for this body).
+    fn embody_present(&mut self, rc: RegionCoords, p: PersonId) -> Option<Directive> {
+        let despawn = Some(Directive { region: rc, event: GameEventKind::DespawnPerson(p) });
+        let Some(q) = self.people.get(&p).filter(|q| q.alive()) else { return despawn };
+        match q.location {
+            Location::InRegion(r) if r == rc => None,
+            Location::InRegion(r) if self.region_live(r) => {
+                ::log::warn!("history: {p:?} has a body in {r:?} and in {rc:?}; despawning the second");
+                despawn
+            }
+            _ => {
+                let home = q.abstract_location();
+                self.embody(p, rc, home);
+                if let Location::Journey(j) = home {
+                    self.hold_reattached(j, rc);
                 }
-                _ => {
-                    let home = q.abstract_location();
-                    self.embody(p, rc, home);
-                    if let Location::Journey(j) = home {
-                        self.hold_reattached(j, rc);
-                    }
-                }
+                None
             }
         }
-        self.note_positions(present.iter().filter(|(p, _)| self.embodied_in(*p) == Some(rc)).copied().collect());
-        despawn
     }
 
     /// Journey `j` has bodies in reattached `rc`: held there (as it was before the load

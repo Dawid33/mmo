@@ -23,7 +23,7 @@ use std::collections::{BTreeMap, VecDeque};
 
 use crate::history::persist::HistoryLoadError;
 use crate::history::{
-    AdventureRefusal, CalendarTick, EmbarkRefusal, History, SiteId, SocietyGrid, TICKS_PER_DAY,
+    AdventureRefusal, CalendarTick, Directive, EmbarkRefusal, History, SiteId, SocietyGrid, TICKS_PER_DAY,
 };
 use crate::{EmbarkRequest, PlayerId, RegionCoords};
 
@@ -48,6 +48,9 @@ pub struct Coordinator {
     claims: BTreeMap<SiteId, (PlayerId, bool)>,
     /// What each player plays (one fortress or one adventure at a time).
     player_claims: BTreeMap<PlayerId, Claim>,
+    /// Each region's latest incarnation seen start (`RegionStarted`, `Attach`): the stamp
+    /// on its directives, and the bar a bounce must meet to be deferred.
+    incarnations: BTreeMap<RegionCoords, u64>,
     /// Answers of state-changing requests, replayed for a repeated id.
     memo: BTreeMap<RequestId, WorldReply>,
     /// `memo`'s ids, oldest first (eviction order, and the saved order).
@@ -86,6 +89,7 @@ impl Coordinator {
             history,
             claims: BTreeMap::new(),
             player_claims: BTreeMap::new(),
+            incarnations: BTreeMap::new(),
             memo: BTreeMap::new(),
             memo_order: VecDeque::new(),
             gated: VecDeque::new(),
@@ -149,6 +153,7 @@ impl Coordinator {
         match msg {
             HostMsg::Attach { host, running, online } => self.attach(host, running, online),
             HostMsg::RegionStarted { rc, incarnation } => {
+                self.incarnations.insert(rc, incarnation);
                 let events = self.history.region_started(rc);
                 self.push(CoordMsg::SpawnPeople { rc, incarnation, events });
             }
@@ -163,9 +168,26 @@ impl Coordinator {
                         if decided { "delivered" } else { "absorbed" },
                     );
                 }
+                if delivered && !decided {
+                    // The host's view of running wins: the body stands in `to`.
+                    if let Some(d) = self.history.adopt_body(to, person) {
+                        self.push_directive(d);
+                    }
+                }
             }
             HostMsg::Positions(people) => self.history.note_positions(people),
-            HostMsg::DirectiveBounced(d) => self.history.defer_directive(d),
+            HostMsg::DirectiveBounced { directive, incarnation } => {
+                let latest = self.incarnations.get(&directive.region).copied().unwrap_or(0);
+                if incarnation < latest {
+                    log::debug!(
+                        "coordinator: bounce for {:?} incarnation {incarnation} (latest {latest}) dropped: {:?}",
+                        directive.region,
+                        directive.event
+                    );
+                } else {
+                    self.history.defer_directive(directive);
+                }
+            }
             HostMsg::Request { id, player, req } => self.request(id, player, req),
             HostMsg::PlayerOnline { player, claim } => self.player_online(player, claim),
             HostMsg::PlayerOffline { player } => self.set_online(player, false),
@@ -235,7 +257,8 @@ impl Coordinator {
     }
 
     /// The save taken by [`Self::take_save`] failed: what it held stays waiting, and the
-    /// next [`Self::take_save`] tries again.
+    /// next [`Self::take_save`] tries again. While saves keep failing nothing behind the
+    /// first waiting message leaves either — ungated ones included (the order is kept).
     pub fn save_failed(&mut self) {
         if self.save_in_flight.take().is_some() {
             self.dirty_since_save = true;
@@ -247,6 +270,7 @@ impl Coordinator {
     /// counts as committed, without encoding a save — the same as [`Self::take_save`] +
     /// [`Self::saved`] for a store that cannot fail.
     pub fn commit_unstored(&mut self) {
+        debug_assert!(self.save_in_flight.is_none(), "commit_unstored with a stored save in flight");
         if self.save_due() {
             self.begin_save();
             self.saved();
@@ -291,7 +315,35 @@ impl Coordinator {
 
     fn push_directives(&mut self) {
         for d in self.history.take_directives() {
-            self.push(CoordMsg::Directive(d));
+            self.push_directive(d);
+        }
+    }
+
+    /// Queue a directive stamped with its region's latest started incarnation.
+    fn push_directive(&mut self, directive: Directive) {
+        let incarnation = self.incarnations.get(&directive.region).copied().unwrap_or(0);
+        self.push(CoordMsg::Directive { directive, incarnation });
+    }
+
+    /// Forget every directive not yet handed out (waiting or free to leave): an `Attach`
+    /// re-decides every region from its bodies, so they are stale. Directives already
+    /// handed to a link are the host's concern (R2b Task 6).
+    fn drop_unsent_directives(&mut self) {
+        let is_directive = |m: &CoordMsg| matches!(m, CoordMsg::Directive { .. });
+        let before = self.gated.len() + self.out.len();
+        if let Some(n) = self.save_in_flight.as_mut() {
+            let covered_dropped = self.gated.iter().take(*n).filter(|m| is_directive(m)).count();
+            *n -= covered_dropped;
+        }
+        self.gated.retain(|m| !is_directive(m));
+        self.out.retain(|m| !is_directive(m));
+        if self.save_in_flight.is_none() {
+            // What waited only behind a dropped directive may leave.
+            self.release(0);
+        }
+        let dropped = before - self.gated.len() - self.out.len();
+        if dropped > 0 {
+            log::info!("coordinator: {dropped} unsent directives superseded by an attach");
         }
     }
 
@@ -324,6 +376,7 @@ impl Coordinator {
     /// online ones, and it gets the view.
     fn attach(&mut self, host: u32, running: Vec<RunningRegion>, online: Vec<(PlayerId, Option<Claim>)>) {
         log::info!("coordinator: host {host} attached with {} running regions, {} online", running.len(), online.len());
+        self.drop_unsent_directives();
         let listed: std::collections::BTreeSet<RegionCoords> = running.iter().map(|r| r.rc).collect();
         for rc in self.history.live_regions() {
             if !listed.contains(&rc) {
@@ -331,11 +384,16 @@ impl Coordinator {
                 self.history.region_parked(rc, Vec::new());
             }
         }
-        for r in running {
-            for d in self.history.reattach_region(r.rc, &r.people) {
-                self.push(CoordMsg::Directive(d));
-            }
+        for r in &running {
+            self.incarnations.insert(r.rc, r.incarnation);
         }
+        let regions: Vec<(RegionCoords, Vec<(crate::history::PersonId, [f32; 3])>)> =
+            running.into_iter().map(|r| (r.rc, r.people)).collect();
+        for d in self.history.reattach_regions(&regions) {
+            self.push_directive(d);
+        }
+        // TODO(R3): one host per world. With several hosts an `Attach` must mark offline
+        // only that host's players, not every claimant.
         for (_, on) in self.claims.values_mut() {
             *on = false;
         }

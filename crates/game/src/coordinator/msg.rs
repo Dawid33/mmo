@@ -99,8 +99,12 @@ pub enum HostMsg {
     PersonCrossed { person: PersonId, to: RegionCoords, delivered: bool },
     /// Where embodied people stand now (the autosave's note).
     Positions(Vec<(PersonId, [f32; 3])>),
-    /// A directive the host could not apply: its region was not running.
-    DirectiveBounced(Directive),
+    /// A directive the host could not apply ([`CoordMsg::Directive`]'s rule), with the
+    /// incarnation it was stamped for.
+    DirectiveBounced { directive: Directive, incarnation: u64 },
+    /// A player's world request. A replay of an id whose first reply is still on its way
+    /// (in the coordinator's queue or on the link) is answered again from the memo, so one
+    /// id may get two `Reply`s: the host answers the first and drops any later one by id.
     Request { id: RequestId, player: PlayerId, req: WorldRequest },
     PlayerOnline { player: PlayerId, claim: Option<Claim> },
     PlayerOffline { player: PlayerId },
@@ -117,7 +121,13 @@ pub enum CoordMsg {
     View { civs: Vec<CivMarker>, sites: Vec<SiteMarker>, calendar: CalendarTick },
     /// The answer to [`HostMsg::RegionStarted`]: the history's people for that start.
     SpawnPeople { rc: RegionCoords, incarnation: u64, events: Vec<GameEventKind> },
-    Directive(Directive),
+    /// A history directive, stamped with the latest incarnation of its region the
+    /// coordinator saw start. The host applies it only if the region runs that very
+    /// incarnation and that incarnation's `SpawnPeople` has been delivered; otherwise it
+    /// answers [`HostMsg::DirectiveBounced`] with the same incarnation (the coordinator
+    /// drops a bounce for an incarnation older than the region's latest start — the park
+    /// in between restored the person and the newer catch-up decided afresh).
+    Directive { directive: Directive, incarnation: u64 },
     Reply { id: RequestId, reply: WorldReply },
     /// A calendar day turned.
     Calendar(CalendarTick),
@@ -132,7 +142,7 @@ impl CoordMsg {
     /// the state that produced it is saved.
     pub fn is_gated(&self) -> bool {
         match self {
-            Self::Directive(_) => true,
+            Self::Directive { .. } => true,
             Self::Reply { reply, .. } => reply.grants_claim(),
             _ => false,
         }

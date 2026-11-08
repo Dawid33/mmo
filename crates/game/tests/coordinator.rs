@@ -89,7 +89,7 @@ fn events_about(msgs: &[CoordMsg], person: PersonId) -> Vec<GameEventKind> {
     for m in msgs {
         match m {
             CoordMsg::SpawnPeople { events, .. } => out.extend(events.iter().filter(|e| names(e)).cloned()),
-            CoordMsg::Directive(d) if names(&d.event) => out.push(d.event.clone()),
+            CoordMsg::Directive { directive: d, .. } if names(&d.event) => out.push(d.event.clone()),
             _ => {}
         }
     }
@@ -227,7 +227,10 @@ fn directive_bounce_is_redelivered_once() {
     let spawns: Vec<_> = out
         .iter()
         .filter_map(|m| match m {
-            CoordMsg::Directive(d) if d.region == r => Some(d.clone()),
+            CoordMsg::Directive { directive, incarnation } if directive.region == r => {
+                assert_eq!(*incarnation, 1, "stamped with the region's running incarnation");
+                Some(directive.clone())
+            }
             _ => None,
         })
         .collect();
@@ -235,7 +238,7 @@ fn directive_bounce_is_redelivered_once() {
 
     // The host was stopping `r`: the first spawn bounces, `r` starts again before parking.
     c.handle(HostMsg::RegionStopping { rc: r }, 0);
-    c.handle(HostMsg::DirectiveBounced(spawns[0].clone()), 0);
+    c.handle(HostMsg::DirectiveBounced { directive: spawns[0].clone(), incarnation: 1 }, 0);
     c.handle(HostMsg::RegionStarted { rc: r, incarnation: 2 }, 0);
     let out = commit(&mut c);
     assert_eq!(events_about(&out, party[0]).len(), 1, "the bounced spawn is delivered once: {out:?}");
@@ -245,7 +248,7 @@ fn directive_bounce_is_redelivered_once() {
     // Now both spawns bounce and `r` parks before it starts again: the catch-up is the one body.
     c.handle(HostMsg::RegionStopping { rc: r }, 0);
     for d in &spawns {
-        c.handle(HostMsg::DirectiveBounced(d.clone()), 0);
+        c.handle(HostMsg::DirectiveBounced { directive: d.clone(), incarnation: 2 }, 0);
     }
     c.handle(HostMsg::RegionParked { rc: r, people: Vec::new() }, 0);
     c.handle(HostMsg::RegionStarted { rc: r, incarnation: 3 }, 0);
@@ -421,4 +424,138 @@ fn replayed_embark_under_delay_founds_once() {
         assert!(matches!(answers[0], WorldReply::Embarked { .. }), "seed {seed}: {answers:?}");
         assert_eq!(link.coordinator().history().sites().count(), sites + 1, "seed {seed}: one site founded");
     }
+}
+
+/// The person's body count as the host would apply `msgs` (spawns +1, despawns -1).
+fn body_delta(msgs: &[CoordMsg], person: PersonId) -> i32 {
+    events_about(msgs, person)
+        .iter()
+        .map(|e| match e {
+            GameEventKind::SpawnPerson(_) => 1,
+            GameEventKind::DespawnPerson(_) => -1,
+            _ => 0,
+        })
+        .sum()
+}
+
+/// The directives for `r` in `msgs`, with their incarnations.
+fn directives_for(msgs: &[CoordMsg], r: RegionCoords) -> Vec<(Directive, u64)> {
+    msgs.iter()
+        .filter_map(|m| match m {
+            CoordMsg::Directive { directive, incarnation } if directive.region == r => {
+                Some((directive.clone(), *incarnation))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// A spawn decided for incarnation 1 reaches the host after the region parked and
+/// started again (incarnation 2): its bounce is stale and dropped, so a later stop and
+/// start without a park cannot hand the person a second body.
+#[test]
+fn stale_bounce_is_dropped() {
+    let (mut c, civ, people) = coordinator();
+    let r = rc(8, 0);
+    c.handle(HostMsg::RegionStarted { rc: r, incarnation: 1 }, 0);
+    commit(&mut c);
+    let p = people[0];
+    c.handle(embark(1, A, civ, &[p], r), 0);
+    let out = commit(&mut c);
+    let spawn = directives_for(&out, r);
+    assert_eq!(spawn.len(), 1, "{out:?}");
+    assert_eq!(spawn[0].1, 1);
+    let mut bodies = 0; // P's bodies on the host: the spawn has not been applied yet
+    // The host parks `r` (no body of P in it) and starts it again before the spawn lands.
+    c.handle(HostMsg::RegionStopping { rc: r }, 0);
+    c.handle(HostMsg::RegionParked { rc: r, people: Vec::new() }, 0);
+    c.handle(HostMsg::RegionStarted { rc: r, incarnation: 2 }, 0);
+    let out = commit(&mut c);
+    bodies += body_delta(&out, p);
+    assert_eq!(bodies, 1, "incarnation 2's catch-up spawns P: {out:?}");
+    // The delayed incarnation-1 spawn is bounced by the host (wrong incarnation).
+    c.handle(HostMsg::DirectiveBounced { directive: spawn[0].0.clone(), incarnation: 1 }, 0);
+    // Stop and start again without a park (P's body stays).
+    c.handle(HostMsg::RegionStopping { rc: r }, 0);
+    c.handle(HostMsg::RegionStarted { rc: r, incarnation: 3 }, 0);
+    c.maintain(0);
+    let out = commit(&mut c);
+    bodies += body_delta(&out, p);
+    assert_eq!(bodies, 1, "P keeps exactly one body: {out:?}");
+}
+
+/// A directive waiting on a save when the host re-attaches is superseded: the attach
+/// re-decides the region from its bodies, and the stale spawn never leaves.
+#[test]
+fn attach_supersedes_unsent_directives() {
+    let (mut c, civ, people) = coordinator();
+    let r = rc(8, 0);
+    c.handle(HostMsg::RegionStarted { rc: r, incarnation: 1 }, 0);
+    commit(&mut c);
+    let p = people[0];
+    c.handle(embark(1, A, civ, &[p], r), 0);
+    // A later ungated message waits behind the spawn.
+    c.handle(request(2, B, WorldRequest::PersonInfo(people[3])), 0);
+    assert!(c.take_out().is_empty());
+    // The link dropped; the host re-attaches running `r` with no body of P.
+    let running = RunningRegion { rc: r, incarnation: 1, people: Vec::new() };
+    c.handle(HostMsg::Attach { host: 0, running: vec![running], online: vec![(A, None)] }, 0);
+    let out = commit(&mut c);
+    assert!(directives_for(&out, r).is_empty(), "the stale spawn is dropped: {out:?}");
+    assert!(matches!(reply_to(&out, 1), WorldReply::Embarked { .. }), "the reply still leaves");
+    assert!(matches!(reply_to(&out, 2), WorldReply::PersonInfo(Some(_))));
+    let pr = c.history().person(p).unwrap();
+    assert_ne!(pr.location, Location::InRegion(r), "P has no body, so the history has P abstract");
+    // `r` starts again: P is spawned once by its catch-up.
+    c.handle(HostMsg::RegionStopping { rc: r }, 0);
+    c.handle(HostMsg::RegionParked { rc: r, people: Vec::new() }, 0);
+    c.handle(HostMsg::RegionStarted { rc: r, incarnation: 2 }, 0);
+    assert_eq!(body_delta(&commit(&mut c), p), 1);
+}
+
+/// A body that crossed between two running regions while the link was down is listed
+/// in its new region only: whichever region is reattached first, it keeps that body.
+#[test]
+fn reattach_keeps_a_body_that_crossed_between_listed_regions() {
+    for order in [false, true] {
+        let (mut c, _civ, people) = coordinator();
+        let (r0, r1) = (rc(0, 0), rc(1, 0));
+        c.handle(HostMsg::RegionStarted { rc: r0, incarnation: 1 }, 0);
+        c.handle(HostMsg::RegionStarted { rc: r1, incarnation: 1 }, 0);
+        commit(&mut c);
+        let p = people[0];
+        assert_eq!(c.history().person(p).unwrap().location, Location::InRegion(r0));
+        let others: Vec<_> = people[1..].iter().map(|q| (*q, [0.0; 3])).collect();
+        let mut running = vec![
+            RunningRegion { rc: r0, incarnation: 1, people: others },
+            RunningRegion { rc: r1, incarnation: 1, people: vec![(p, [0.0; 3])] },
+        ];
+        if order {
+            running.reverse();
+        }
+        c.handle(HostMsg::Attach { host: 0, running, online: Vec::new() }, 0);
+        let out = commit(&mut c);
+        assert_eq!(body_delta(&out, p), 0, "order {order}: no despawn of P's only body: {out:?}");
+        assert_eq!(c.history().person(p).unwrap().location, Location::InRegion(r1), "order {order}");
+    }
+}
+
+/// The host delivered a crossing body into a region the history did not have running:
+/// the host wins, and the history has the person embodied there.
+#[test]
+fn delivered_crossing_is_adopted() {
+    let (mut c, _civ, people) = coordinator();
+    let (r0, r1) = (rc(0, 0), rc(1, 0));
+    c.handle(HostMsg::RegionStarted { rc: r0, incarnation: 1 }, 0);
+    commit(&mut c);
+    let p = people[0];
+    c.handle(HostMsg::PersonCrossed { person: p, to: r1, delivered: true }, 0);
+    let out = commit(&mut c);
+    assert_eq!(body_delta(&out, p), 0, "{out:?}");
+    let pr = c.history().person(p).unwrap();
+    assert_eq!(pr.location, Location::InRegion(r1));
+    // Parking `r1` hands P back to the abstract history.
+    c.handle(HostMsg::RegionStopping { rc: r1 }, 0);
+    c.handle(HostMsg::RegionParked { rc: r1, people: vec![(p, [0.0; 3])] }, 0);
+    assert_ne!(c.history().person(p).unwrap().location, Location::InRegion(r1));
 }
