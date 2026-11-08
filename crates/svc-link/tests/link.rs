@@ -216,3 +216,70 @@ fn large_frame_ok_and_oversize_refused() {
         other => panic!("the oversize frame must not arrive: {other:?}"),
     }
 }
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn forged_compressed_hello_refused_before_decoding() {
+    use quinn::rustls;
+    // A raw QUIC client (no pin check needed for this test) sends a hello tagged lz4 that claims
+    // a huge output: the listener must refuse it without decoding.
+    let (listener, from_peers, _senders) = LinkListener::bind::<Msg, Msg>(loopback(), TOKEN.into(), None).unwrap();
+    let addr = listener.local_addr();
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    rt.block_on(async {
+        #[derive(Debug)]
+        struct AcceptAny(std::sync::Arc<rustls::crypto::CryptoProvider>);
+        impl rustls::client::danger::ServerCertVerifier for AcceptAny {
+            fn verify_server_cert(
+                &self,
+                _: &rustls::pki_types::CertificateDer<'_>,
+                _: &[rustls::pki_types::CertificateDer<'_>],
+                _: &rustls::pki_types::ServerName<'_>,
+                _: &[u8],
+                _: rustls::pki_types::UnixTime,
+            ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+                Ok(rustls::client::danger::ServerCertVerified::assertion())
+            }
+            fn verify_tls12_signature(
+                &self,
+                m: &[u8],
+                c: &rustls::pki_types::CertificateDer<'_>,
+                d: &rustls::DigitallySignedStruct,
+            ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+                rustls::crypto::verify_tls12_signature(m, c, d, &self.0.signature_verification_algorithms)
+            }
+            fn verify_tls13_signature(
+                &self,
+                m: &[u8],
+                c: &rustls::pki_types::CertificateDer<'_>,
+                d: &rustls::DigitallySignedStruct,
+            ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+                rustls::crypto::verify_tls13_signature(m, c, d, &self.0.signature_verification_algorithms)
+            }
+            fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+                self.0.signature_verification_algorithms.supported_schemes()
+            }
+        }
+        let provider = std::sync::Arc::new(rustls::crypto::ring::default_provider());
+        let mut crypto = rustls::ClientConfig::builder_with_provider(provider.clone())
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .dangerous()
+            .with_custom_certificate_verifier(std::sync::Arc::new(AcceptAny(provider)))
+            .with_no_client_auth();
+        crypto.alpn_protocols = vec![b"mmo-svc-link/1".to_vec()];
+        let config = quinn::ClientConfig::new(std::sync::Arc::new(
+            quinn::crypto::rustls::QuicClientConfig::try_from(crypto).unwrap(),
+        ));
+        let endpoint = quinn::Endpoint::client(([127, 0, 0, 1], 0).into()).unwrap();
+        let conn = endpoint.connect_with(config, addr, "localhost").unwrap().await.unwrap();
+        let (mut send, _recv) = conn.open_bi().await.unwrap();
+        // tag 1 (lz4), claimed output 0x7fff_ffff bytes, no payload.
+        let body = [1u8, 0xff, 0xff, 0xff, 0x7f];
+        send.write_all(&(body.len() as u32).to_be_bytes()).await.unwrap();
+        send.write_all(&body).await.unwrap();
+        let closed = tokio::time::timeout(WAIT, conn.closed()).await.expect("listener closes the connection");
+        assert!(closed.to_string().contains("plain"), "refused for its framing: {closed}");
+    });
+    nothing(&from_peers);
+}

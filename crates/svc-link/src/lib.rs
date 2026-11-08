@@ -133,6 +133,7 @@ impl<Out> PeerSenders<Out> {
 }
 
 /// Owns the listening endpoint and its runtime; dropping it stops the listener and frees the port.
+/// Drop it from synchronous code only: it drops a multi-thread tokio runtime.
 pub struct LinkListener {
     runtime: Option<tokio::runtime::Runtime>,
     endpoint: Endpoint,
@@ -162,6 +163,9 @@ fn runtime(name: &str) -> io::Result<tokio::runtime::Runtime> {
 
 /// Why a hello is refused, if it is.
 fn check_hello(hello: &LinkHello, token: &str) -> Result<(), String> {
+    if !cert::ct_eq(hello.token.as_bytes(), token.as_bytes()) {
+        return Err("bad service token".to_string());
+    }
     if hello.protocol != LINK_PROTOCOL_VERSION {
         return Err(format!("link protocol {} != {LINK_PROTOCOL_VERSION}", hello.protocol));
     }
@@ -173,9 +177,6 @@ fn check_hello(hello: &LinkHello, token: &str) -> Result<(), String> {
             game::REGION_BLOCKS,
             game::CHUNK_BLOCKS
         ));
-    }
-    if !cert::ct_eq(hello.token.as_bytes(), token.as_bytes()) {
-        return Err("bad service token".to_string());
     }
     Ok(())
 }
@@ -267,7 +268,7 @@ async fn serve_peer<In, Out>(
     let handshake = tokio::time::timeout(LINK_HELLO_TIMEOUT, async {
         let (send, mut recv) = connection.accept_bi().await.map_err(|e| format!("no hello stream: {e}"))?;
         let hello: LinkHello =
-            frame::read_frame(&mut recv, LINK_HELLO_MAX_BYTES).await.map_err(|e| format!("hello: {e}"))?;
+            frame::read_frame(&mut recv, LINK_HELLO_MAX_BYTES, true).await.map_err(|e| format!("hello: {e}"))?;
         Ok::<_, String>((send, recv, hello))
     })
     .await;
@@ -315,7 +316,7 @@ where
     // Two tasks, not one `select!`: a read cancelled mid-frame would desync the stream.
     let mut reader = tokio::spawn(async move {
         loop {
-            match frame::read_frame::<In>(&mut recv, LINK_MAX_FRAME_BYTES).await {
+            match frame::read_frame::<In>(&mut recv, LINK_MAX_FRAME_BYTES, false).await {
                 Ok(msg) => {
                     if !deliver(msg) {
                         return "owner dropped the receiver".to_string();
@@ -421,7 +422,9 @@ impl LinkDialer {
     /// Dial `addr`, pinning the listener's certificate to `cert_sha256`, and keep the link up:
     /// reconnect forever with backoff. `Down` is sent when a link drops or the first attempt of a
     /// down period fails; messages sent while down are dropped. The link ends when the returned
-    /// sender or receiver is dropped.
+    /// sender is dropped, or when the receiver is dropped and the next event send fails (an idle
+    /// link notices only then). The dialer threads are detached; shutdown takes up to one backoff
+    /// plus one attempt.
     pub fn connect<In, Out>(
         addr: SocketAddr,
         cert_sha256: String,
@@ -479,7 +482,7 @@ async fn attempt(
     let handshake = tokio::time::timeout(LINK_HELLO_TIMEOUT, async {
         let (mut send, mut recv) = connection.open_bi().await.map_err(|e| e.to_string())?;
         frame::write_frame(&mut send, hello).await.map_err(|e| e.to_string())?;
-        let ok: bool = frame::read_frame(&mut recv, LINK_HELLO_MAX_BYTES).await.map_err(|e| e.to_string())?;
+        let ok: bool = frame::read_frame(&mut recv, LINK_HELLO_MAX_BYTES, true).await.map_err(|e| e.to_string())?;
         if ok { Ok((send, recv)) } else { Err("hello not accepted".to_string()) }
     })
     .await;
@@ -526,12 +529,18 @@ async fn dial_loop<In, Out>(
             Ok((connection, send, recv)) => {
                 backoff = LINK_RETRY_MIN_MS;
                 let (tx, rx) = unbounded_channel::<Out>();
-                *slot.lock().unwrap() = Some(tx);
                 if stop.load(Ordering::SeqCst) {
                     break;
                 }
                 log::info!("[svc-link] up to {addr}");
                 if events.send(LinkEvent::Up(hello.clone())).is_err() {
+                    break;
+                }
+                // Open for sends only after `Up` is out: whatever the owner sent before it saw
+                // `Up` was sent "while down" and is dropped (its outbox resends after `Up`).
+                *slot.lock().unwrap() = Some(tx);
+                if stop.load(Ordering::SeqCst) {
+                    slot.lock().unwrap().take();
                     break;
                 }
                 let deliver_events = events.clone();

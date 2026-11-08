@@ -45,7 +45,14 @@ pub(crate) async fn write_frame<T: Serialize>(send: &mut SendStream, msg: &T) ->
     write_packet(send, &encode(msg)?).await
 }
 
-pub(crate) async fn read_frame<T: DeserializeOwned>(recv: &mut RecvStream, max: usize) -> Result<T, FrameError> {
+/// `game::encode_packet`'s tag for an uncompressed frame (the constant is private to `game`).
+const PACKET_TAG_RAW: u8 = 0;
+
+/// Read one frame. `max` bounds the announced length. With `raw_only` (the pre-auth hello and
+/// its ack) a compressed frame is refused before decoding: an lz4 header claims its own output
+/// size, up to the decompression cap, which an unauthenticated peer must not get to allocate.
+/// Post-auth frames may claim up to that cap (trusted peers).
+pub(crate) async fn read_frame<T: DeserializeOwned>(recv: &mut RecvStream, max: usize, raw_only: bool) -> Result<T, FrameError> {
     let mut len = [0u8; 4];
     recv.read_exact(&mut len).await.map_err(|e| FrameError::Io(e.to_string()))?;
     let len = u32::from_be_bytes(len) as usize;
@@ -56,5 +63,8 @@ pub(crate) async fn read_frame<T: DeserializeOwned>(recv: &mut RecvStream, max: 
     }
     let mut body = vec![0u8; len];
     recv.read_exact(&mut body).await.map_err(|e| FrameError::Io(e.to_string()))?;
+    if raw_only && body.first() != Some(&PACKET_TAG_RAW) {
+        return Err(FrameError::Protocol("compressed or malformed frame where a plain one is required".into()));
+    }
     game::decode_packet(&body).map_err(|e| FrameError::Protocol(format!("frame does not decode: {e}")))
 }

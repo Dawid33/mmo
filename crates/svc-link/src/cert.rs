@@ -78,38 +78,53 @@ fn sibling(hash_file: &Path, ext: &str) -> PathBuf {
     PathBuf::from(name)
 }
 
-fn write_secret(path: &Path, bytes: &[u8]) -> io::Result<()> {
+/// Write `bytes` to `path` via a temp file in the same directory and a rename, so a reader
+/// never sees a truncated file. `secret` files end up mode 0600 (set explicitly: the mode on
+/// create does not fix an existing file).
+fn write_atomic(path: &Path, bytes: &[u8], secret: bool) -> io::Result<()> {
+    let tmp = sibling(path, &format!(".tmp{}", std::process::id()));
+    std::fs::write(&tmp, bytes)?;
     #[cfg(unix)]
-    {
-        use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(path)?;
-        f.write_all(bytes)
+    if secret {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
     }
     #[cfg(not(unix))]
-    {
-        std::fs::write(path, bytes)
-    }
+    let _ = secret;
+    std::fs::rename(&tmp, path).inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp);
+    })
+}
+
+/// A stored cert and key that still belong together.
+fn stored_pair_valid(cert_der: &[u8], key_der: &[u8]) -> bool {
+    let Ok(pair) = rcgen::KeyPair::try_from(key_der) else { return false };
+    // The cert's public key must be the key's.
+    cert_der.windows(pair.public_key_raw().len()).any(|w| w == pair.public_key_raw())
 }
 
 /// The listener's identity. With a `hash_file` the cert and key persist beside it
 /// (`<file>.cert`, `<file>.key`, key mode 0600) so a restarted listener keeps the pin its
-/// dialers hold; without one the identity is ephemeral.
+/// dialers hold; without one the identity is ephemeral. A stored pair that fails to load or
+/// does not match is regenerated.
 pub(crate) fn load_or_generate(hash_file: Option<&Path>) -> io::Result<LinkIdentity> {
     if let Some(file) = hash_file {
         let (cert_path, key_path) = (sibling(file, ".cert"), sibling(file, ".key"));
         if let (Ok(cert_der), Ok(key_der)) = (std::fs::read(&cert_path), std::fs::read(&key_path)) {
-            std::fs::write(file, cert_sha256_hex(&cert_der))?;
-            return Ok(LinkIdentity { cert_der, key_der });
+            if stored_pair_valid(&cert_der, &key_der) {
+                write_atomic(file, cert_sha256_hex(&cert_der).as_bytes(), false)?;
+                return Ok(LinkIdentity { cert_der, key_der });
+            }
+            log::warn!("[svc-link] stored link cert/key under {} do not match; regenerating", file.display());
         }
     }
     let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()])
         .map_err(|e| io::Error::other(format!("link certificate: {e}")))?;
     let id = LinkIdentity { cert_der: cert.cert.der().to_vec(), key_der: cert.signing_key.serialize_der() };
     if let Some(file) = hash_file {
-        write_secret(&sibling(file, ".key"), &id.key_der)?;
-        std::fs::write(sibling(file, ".cert"), &id.cert_der)?;
-        std::fs::write(file, cert_sha256_hex(&id.cert_der))?;
+        write_atomic(&sibling(file, ".key"), &id.key_der, true)?;
+        write_atomic(&sibling(file, ".cert"), &id.cert_der, false)?;
+        write_atomic(file, cert_sha256_hex(&id.cert_der).as_bytes(), false)?;
     }
     Ok(id)
 }
