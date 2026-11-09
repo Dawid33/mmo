@@ -90,8 +90,8 @@ pub use buoyancy::*;
 pub use camera::*;
 pub use containers::*;
 pub use coordinator::{
-    Claim, CoordMsg, Coordinator, CoordinatorState, HostMsg, InlineWorldLink, RequestId, RunningRegion, WorldLink,
-    WorldReply, WorldRequest,
+    Claim, CoordMsg, Coordinator, CoordinatorState, HostMsg, InlineWorldLink, OnlinePlayer, RequestId, RunningRegion,
+    WorldLink, WorldReply, WorldRequest,
 };
 pub use ground::*;
 pub use halo::{HaloChunk, HaloDelta, HaloUpdate, HALO_BLOCKS, HALO_CHUNKS};

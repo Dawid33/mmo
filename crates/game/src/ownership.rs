@@ -34,8 +34,11 @@ fn splitmix64(mut z: u64) -> u64 {
 /// host with the highest weight for it, ties to the lower ordinal. Growing
 /// the host count moves only the super-regions the new host wins.
 pub fn rendezvous_owner(sr: (i32, i32), hosts: u32) -> u32 {
+    // Each coordinate in its own 32 bits (no sign extension: `(-1, 0)` and `(0, -1)`
+    // must not share a key), mixed, then mixed again with the ordinal.
     let (sx, sz) = sr;
-    let weight = |ordinal: u32| splitmix64(sx as u64 ^ (sz as u64).rotate_left(32) ^ (ordinal as u64) << 48);
+    let key = splitmix64(u64::from(sx as u32) | u64::from(sz as u32) << 32);
+    let weight = |ordinal: u32| splitmix64(key ^ u64::from(ordinal));
     let mut best = (0, weight(0));
     for ordinal in 1..hosts.max(1) {
         let w = weight(ordinal);
@@ -60,9 +63,14 @@ impl Ownership {
     /// Whether this process owns (simulates) region `rc`, with `s` regions
     /// per super-region side.
     pub fn owns(&self, rc: RegionCoords, s: u32) -> bool {
+        self.owns_super_region(super_region_of(rc, s))
+    }
+
+    /// Whether this process owns super-region `sr`.
+    pub fn owns_super_region(&self, sr: (i32, i32)) -> bool {
         match *self {
             Ownership::AllInOne => true,
-            Ownership::Static { ordinal, hosts } => rendezvous_owner(super_region_of(rc, s), hosts) == ordinal,
+            Ownership::Static { ordinal, hosts } => rendezvous_owner(sr, hosts) == ordinal,
         }
     }
 
@@ -86,11 +94,7 @@ impl Ownership {
         let mut set = std::collections::BTreeSet::new();
         for sx in lo.0..=hi.0 {
             for sz in lo.1..=hi.1 {
-                let owned = match *self {
-                    Ownership::AllInOne => true,
-                    Ownership::Static { ordinal, hosts } => rendezvous_owner((sx, sz), hosts) == ordinal,
-                };
-                if owned {
+                if self.owns_super_region((sx, sz)) {
                     set.insert((sx, sz));
                 }
             }

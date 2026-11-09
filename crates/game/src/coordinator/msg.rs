@@ -82,6 +82,17 @@ pub struct RunningRegion {
     pub people: Vec<(PersonId, [f32; 3])>,
 }
 
+/// An online player as its host reports it: what it plays, and whether a claim-changing
+/// request of the player is still unsettled on the host (pending toward the client, or
+/// timed out and waiting for its answer). Without one the host's `claim` is the truth
+/// for the coordinator (its own may be a save behind, or ahead of a lost release).
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
+pub struct OnlinePlayer {
+    pub player: PlayerId,
+    pub claim: Option<Claim>,
+    pub claim_pending: bool,
+}
+
 /// Host → coordinator.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub enum HostMsg {
@@ -90,7 +101,7 @@ pub enum HostMsg {
     /// `epoch` counts the host's attaches; the coordinator echoes it first
     /// ([`CoordMsg::Attached`]), so the host knows which of its messages were decided
     /// before the attach (stale) and which after.
-    Attach { host: u32, epoch: u64, running: Vec<RunningRegion>, online: Vec<(PlayerId, Option<Claim>)> },
+    Attach { host: u32, epoch: u64, running: Vec<RunningRegion>, online: Vec<OnlinePlayer> },
     /// Region `rc` started (its `incarnation`-th start on the host): answered with
     /// [`CoordMsg::SpawnPeople`] for that incarnation.
     RegionStarted { rc: RegionCoords, incarnation: u64 },
@@ -109,7 +120,13 @@ pub enum HostMsg {
     /// (in the coordinator's queue or on the link) is answered again from the memo, so one
     /// id may get two `Reply`s: the host answers the first and drops any later one by id.
     Request { id: RequestId, player: PlayerId, req: WorldRequest },
-    PlayerOnline { player: PlayerId, claim: Option<Claim> },
+    /// A state-changing request that timed out toward its client (who was told the world
+    /// is unavailable), sent again after an `Attach` to learn its fate — never to run it:
+    /// the coordinator answers from its memo if it applied the request, else it memoises
+    /// and answers a `WorldUnavailable` refusal without executing (a request its player
+    /// was told failed must never complete later).
+    Settle { id: RequestId, req: WorldRequest },
+    PlayerOnline(OnlinePlayer),
     PlayerOffline { player: PlayerId },
     /// The player gave up its claim (retired, ended the adventure, or left before the
     /// claim's reply reached it). The site stays.
@@ -141,6 +158,9 @@ pub enum CoordMsg {
     /// get [`CoordMsg::Sites`] at the day's turn, but the host's view reaches a player who
     /// retires or ends an adventure and every new connection straight away.
     SiteMarkers(Vec<SiteMarker>),
+    /// The host reported `player` online holding fortress `site`, which another online
+    /// player holds: the host drops it from the player (the fortress is not theirs).
+    FortressRefused { player: PlayerId, site: SiteId },
     /// A history log line for the clients whose home is `region`.
     Notice { region: RegionCoords, line: String },
     /// The coordinator has applied the host's [`HostMsg::Attach`] of this `epoch`: every

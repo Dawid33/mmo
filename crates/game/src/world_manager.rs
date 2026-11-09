@@ -9,7 +9,9 @@ use std::time::Duration;
 
 use crossbeam::channel::{unbounded, Receiver, Sender};
 
-use crate::coordinator::{Claim, CoordMsg, HostMsg, RequestId, RunningRegion, WorldLink, WorldReply, WorldRequest};
+use crate::coordinator::{
+    Claim, CoordMsg, HostMsg, OnlinePlayer, RequestId, RunningRegion, WorldLink, WorldReply, WorldRequest,
+};
 use crate::history::{AdventureRefusal, CalendarTick, EmbarkRefusal, PersonId, SiteId, SocietyGrid};
 use crate::{
     Chunk, ChunkCoords, ClientId, ClientPacket, Column, ColumnCoords, EntityKind, TerrainSnapshot, GameEventKind,
@@ -655,6 +657,11 @@ enum Moved {
 ///   first left during the gather, so the held crossings replay the move from there
 ///   (an absorbed one is taken back by its own `PersonCrossed`, not by the attach —
 ///   the attach would otherwise re-spawn a person whose crossing then absorbs them).
+///
+/// A listed region lost during the gather (its thread died) is listed as its loss left
+/// it: empty. A person delivered into it still goes into that empty list — their body
+/// went down with the region — and its `RegionParked { people: [] }`, held behind the
+/// `Attach`, then gives them back to the history like everyone else it had there.
 fn exact_across_seams(
     lists: &mut BTreeMap<RegionCoords, (u64, Vec<(PersonId, [f32; 3])>)>,
     moved: &BTreeMap<PersonId, Moved>,
@@ -1343,10 +1350,7 @@ impl<S: RegionSpawner> WorldManager<S> {
         // A body still in flight is its target's, whenever it left.
         for f in self.in_flight.values() {
             if let EntityKind::Person { person } = f.bundle.kind {
-                let from = moved.get(&person).map_or(f.target, |m| match *m {
-                    Moved::Into { from, .. } | Moved::Absorbed { from, .. } => from,
-                });
-                moved.insert(person, Moved::Into { from, to: f.target, at: bundle_at(&f.bundle) });
+                record_move(&mut moved, person, f.target, Step::Into { to: f.target, at: bundle_at(&f.bundle) });
             }
         }
         exact_across_seams(&mut lists, &moved);
@@ -1360,8 +1364,14 @@ impl<S: RegionSpawner> WorldManager<S> {
                 self.spawn_waiting.remove(&r.rc);
             }
         }
-        let online: Vec<(PlayerId, Option<Claim>)> =
-            self.player_of.iter().map(|(c, p)| (*p, self.claim_of_client(*c))).collect();
+        let online: Vec<OnlinePlayer> = self
+            .player_of
+            .iter()
+            .map(|(c, p)| OnlinePlayer { player: *p, claim: self.claim_of_client(*c), claim_pending: self.claim_pending(*p) })
+            .collect();
+        // The `Attach` names who is online as things stand: a queued `PlayerOnline` /
+        // `PlayerOffline` would only repeat an older report after it.
+        self.outbox.retain(|m| !matches!(m, HostMsg::PlayerOnline(_) | HostMsg::PlayerOffline { .. }));
         log::info!("attach {epoch}: {} regions, {} online, {} queued", running.len(), online.len(), self.outbox.len());
         let host = self.world_host();
         self.link_send(HostMsg::Attach { host, epoch, running, online });
@@ -1379,10 +1389,9 @@ impl<S: RegionSpawner> WorldManager<S> {
             .filter(|(id, _)| !queued.contains(id))
             .map(|(id, p)| (*id, HostMsg::Request { id: *id, player: p.player, req: p.req.clone() }))
             .collect();
+        // Settle-only: a request its client was told failed is never executed now.
         resend.extend(
-            self.expired_requests
-                .iter()
-                .map(|(id, (player, req))| (*id, HostMsg::Request { id: *id, player: *player, req: req.clone() })),
+            self.expired_requests.iter().map(|(id, (_, req))| (*id, HostMsg::Settle { id: *id, req: req.clone() })),
         );
         let resend = resend.into_values();
         for m in resend.chain(std::mem::take(&mut self.outbox)).chain(held) {
@@ -1450,7 +1459,8 @@ impl<S: RegionSpawner> WorldManager<S> {
         let queued = matches!(
             msg,
             HostMsg::Request { .. }
-                | HostMsg::PlayerOnline { .. }
+                | HostMsg::Settle { .. }
+                | HostMsg::PlayerOnline(_)
                 | HostMsg::PlayerOffline { .. }
                 | HostMsg::ReleaseClaim { .. }
         );
@@ -1553,6 +1563,19 @@ impl<S: RegionSpawner> WorldManager<S> {
             // as they stand then (a player embarking moves home after its region starts).
             CoordMsg::Notice { region, line } => self.world_notices.push((region, line)),
             CoordMsg::Reply { id, reply } => self.world_reply(id, reply, now_ms),
+            CoordMsg::FortressRefused { player, site } => {
+                let holders: Vec<ClientId> = self
+                    .player_of
+                    .iter()
+                    .filter(|(c, p)| **p == player && self.fortress_of.get(c) == Some(&site))
+                    .map(|(c, _)| *c)
+                    .collect();
+                for c in holders {
+                    log::info!("client {c}: fortress {site:?} is another player's; dropped");
+                    self.fortress_of.remove(&c);
+                    self.send_fortress(c);
+                }
+            }
         }
     }
 
@@ -2496,11 +2519,16 @@ impl<S: RegionSpawner> WorldManager<S> {
             .keys()
             .filter_map(|c| self.homes.get(c).copied())
             .collect();
+        // No keep-alive expiry while an `Attach` is gathered: it waits for every stopping
+        // region to park, so new stops could postpone it indefinitely. The grace resumes
+        // once attached (a dead region thread still ends its region, above and below).
+        let gathering = matches!(self.world_attach, WorldAttach::Gathering { .. });
         let expired: Vec<RegionCoords> = self
             .regions
             .iter()
             .filter(|(rc, link)| {
-                !link.stopping
+                !gathering
+                    && !link.stopping
                     && link.subscribers.is_empty()
                     && !connected_homes.contains(*rc)
                     && link
@@ -3389,7 +3417,16 @@ impl<S: RegionSpawner> WorldManager<S> {
         }
         let Some(&player) = self.player_of.get(&id) else { return };
         let claim = self.claim_of_client(id);
-        self.world_send(HostMsg::PlayerOnline { player, claim });
+        let claim_pending = self.claim_pending(player);
+        self.world_send(HostMsg::PlayerOnline(OnlinePlayer { player, claim, claim_pending }));
+    }
+
+    /// Whether a claim-changing request of `player` is unsettled here (pending toward its
+    /// client, or timed out and waiting for its answer): until it settles the
+    /// coordinator's claim for the player stands over the one reported.
+    fn claim_pending(&self, player: PlayerId) -> bool {
+        self.pending_requests.values().any(|p| p.player == player && p.req.changes_state())
+            || self.expired_requests.values().any(|(p, _)| *p == player)
     }
 
     /// Whether `id` waits for its player's park before it is restored.

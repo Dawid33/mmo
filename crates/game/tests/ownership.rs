@@ -83,3 +83,13 @@ fn ownership_from_values() {
         assert!(Ownership::from_values(bad.0, bad.1, bad.2).is_err(), "{bad:?}");
     }
 }
+
+/// Mirrored super-regions are distinct keys: `(-1, 0)` and `(0, -1)` (and every pair a
+/// sign-extended coordinate would alias) get independent owners across host counts.
+#[test]
+fn rendezvous_keys_mirrored_super_regions_apart() {
+    for (a, b) in [((-1, 0), (0, -1)), ((-1, 3), (3, -1)), ((-7, -2), (-2, -7)), ((-1, -1), (0, 0))] {
+        let owners = |sr| (2..=32).map(|hosts| rendezvous_owner(sr, hosts)).collect::<Vec<_>>();
+        assert_ne!(owners(a), owners(b), "{a:?} and {b:?} share an owner at every host count");
+    }
+}

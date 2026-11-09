@@ -390,7 +390,8 @@ fn directive_not_sent_before_save() {
     let (mut link, thread) = coordinator_rt::start_all_in_one(store.clone(), start, fenced.clone()).unwrap();
     let player = PlayerId(1);
     let id = RequestId { host: 0, boot: 1, seq: 1 };
-    link.send(HostMsg::Attach { host: 0, epoch: 1, running: Vec::new(), online: vec![(player, None)] });
+    let online = vec![game::OnlinePlayer { player, claim: None, claim_pending: false }];
+    link.send(HostMsg::Attach { host: 0, epoch: 1, running: Vec::new(), online });
     // The fortress region runs: the founding embodies the party there by directives.
     link.send(HostMsg::RegionStarted { rc: req.region, incarnation: 1 });
     link.send(HostMsg::Request { id, player, req: WorldRequest::Embark(req.clone()) });
@@ -449,7 +450,8 @@ fn fenced_coordinator_stops() {
     // Another coordinator takes the row; this one's next save is refused.
     store.claim_coordinator().unwrap();
     let player = PlayerId(1);
-    link.send(HostMsg::Attach { host: 0, epoch: 1, running: Vec::new(), online: vec![(player, None)] });
+    let online = vec![game::OnlinePlayer { player, claim: None, claim_pending: false }];
+    link.send(HostMsg::Attach { host: 0, epoch: 1, running: Vec::new(), online });
     link.send(HostMsg::Request { id: RequestId { host: 0, boot: 1, seq: 1 }, player, req: WorldRequest::Embark(req) });
     while !thread.is_finished() {
         assert!(Instant::now() < deadline, "the fenced coordinator kept running");

@@ -201,6 +201,7 @@ fn describe(msg: &CoordMsg) -> String {
         CoordMsg::SiteMarkers(s) => format!("SiteMarkers ({})", s.len()),
         CoordMsg::Notice { region, .. } => format!("Notice for {region:?}"),
         CoordMsg::Attached { epoch } => format!("Attached {{ epoch: {epoch} }}"),
+        CoordMsg::FortressRefused { player, site } => format!("FortressRefused {player:?} {site:?}"),
     }
 }
 
@@ -221,7 +222,8 @@ pub(crate) fn describe_host(msg: &HostMsg) -> String {
             format!("DirectiveBounced for {:?} incarnation {incarnation}", directive.region)
         }
         HostMsg::Request { id, .. } => format!("Request {id:?}"),
-        HostMsg::PlayerOnline { player, .. } => format!("PlayerOnline {player:?}"),
+        HostMsg::Settle { id, .. } => format!("Settle {id:?}"),
+        HostMsg::PlayerOnline(p) => format!("PlayerOnline {:?}", p.player),
         HostMsg::PlayerOffline { player } => format!("PlayerOffline {player:?}"),
         HostMsg::ReleaseClaim { player } => format!("ReleaseClaim {player:?}"),
     }
@@ -310,6 +312,9 @@ impl Routes {
             CoordMsg::View { .. } | CoordMsg::Calendar(_) | CoordMsg::Sites(_) | CoordMsg::SiteMarkers(_) => {
                 Target::Every
             }
+            // About a player online on the host that reported it: R2's one host ordinal
+            // (R3 routes it by the player's host).
+            CoordMsg::FortressRefused { .. } => Target::Host(SERVED_HOST_ORDINAL),
         }
     }
 

@@ -189,7 +189,8 @@ impl Coordinator {
                 }
             }
             HostMsg::Request { id, player, req } => self.request(id, player, req),
-            HostMsg::PlayerOnline { player, claim } => self.player_online(player, claim),
+            HostMsg::Settle { id, req } => self.settle(id, req),
+            HostMsg::PlayerOnline(p) => self.player_online(p),
             HostMsg::PlayerOffline { player } => self.set_online(player, false),
             HostMsg::ReleaseClaim { player } => self.release_claim(player),
         }
@@ -380,7 +381,7 @@ impl Coordinator {
         host: u32,
         epoch: u64,
         running: Vec<RunningRegion>,
-        online: Vec<(PlayerId, Option<Claim>)>,
+        online: Vec<OnlinePlayer>,
     ) {
         log::info!(
             "coordinator: host {host} attached (epoch {epoch}) with {} running regions, {} online",
@@ -409,42 +410,62 @@ impl Coordinator {
         for (_, on) in self.claims.values_mut() {
             *on = false;
         }
-        for (player, claim) in online {
-            self.player_online(player, claim);
+        for p in online {
+            self.player_online(p);
         }
         self.push_view();
     }
 
-    /// `player` is online. The coordinator's claim stands; without one, the host's claim
-    /// (from the player's record) is taken unless another *online* player holds its site
-    /// (an offline claimant loses it, as to a return — the host's own rule when it
-    /// restores the claim: only if no connected player plays that fortress).
-    fn player_online(&mut self, player: PlayerId, claim: Option<Claim>) {
-        match (self.player_claims.get(&player).copied(), claim) {
-            (Some(mine), Some(theirs)) if mine != theirs => {
-                log::warn!("coordinator: {player:?} comes online claiming {theirs:?}; it holds {mine:?}");
+    /// `player` is online, as its host reports it. With a claim-changing request of the
+    /// player unsettled on the host (`claim_pending`) the coordinator's claim stands (that
+    /// request's answer, or the host's `ReleaseClaim` after it, settles it); without one
+    /// the host's claim is the truth: the coordinator's own may be a save behind (a crash
+    /// lost a grant) or ahead (a crash lost a release). A claim the host reports and the
+    /// coordinator lacks is taken unless another *online* player holds its fortress (an
+    /// offline claimant loses it, as to a return); then the host is told to drop it
+    /// ([`CoordMsg::FortressRefused`]) — one fortress never has two players.
+    fn player_online(&mut self, report: OnlinePlayer) {
+        let OnlinePlayer { player, claim, claim_pending } = report;
+        let mine = self.player_claims.get(&player).copied();
+        match (mine, claim) {
+            (Some(mine), Some(theirs)) if mine == theirs => {}
+            (Some(mine), theirs) if claim_pending => {
+                log::debug!("coordinator: {player:?} comes online with {theirs:?} and a request unsettled; it holds {mine:?}");
             }
-            (None, Some(Claim::Fortress(site))) => {
-                match self.claims.get(&site).copied() {
-                    Some((other, true)) if other != player => {
-                        log::info!("coordinator: {player:?}'s fortress {site:?} is {other:?}'s now; claim dropped");
-                    }
-                    claimed => {
-                        if let Some((other, _)) = claimed.filter(|(o, _)| *o != player) {
-                            log::info!("coordinator: {player:?} comes back to {site:?}; offline {other:?} loses it");
-                            self.player_claims.remove(&other);
-                        }
-                        self.claims.insert(site, (player, true));
-                        self.player_claims.insert(player, Claim::Fortress(site));
-                    }
+            (Some(mine), theirs) => {
+                log::warn!("coordinator: {player:?} comes online with {theirs:?}; its {mine:?} here is dropped");
+                self.release_claim(player);
+                if let Some(theirs) = theirs {
+                    self.adopt_claim(player, theirs);
                 }
             }
-            (None, Some(c @ Claim::Adventure(_))) => {
-                self.player_claims.insert(player, c);
-            }
-            _ => {}
+            (None, Some(theirs)) => self.adopt_claim(player, theirs),
+            (None, None) => {}
         }
         self.set_online(player, true);
+    }
+
+    /// Take the claim the host reports for `player` (who holds none here).
+    fn adopt_claim(&mut self, player: PlayerId, claim: Claim) {
+        match claim {
+            Claim::Fortress(site) => match self.claims.get(&site).copied() {
+                Some((other, true)) if other != player => {
+                    log::info!("coordinator: {player:?}'s fortress {site:?} is {other:?}'s now; the host drops it");
+                    self.push(CoordMsg::FortressRefused { player, site });
+                }
+                claimed => {
+                    if let Some((other, _)) = claimed.filter(|(o, _)| *o != player) {
+                        log::info!("coordinator: {player:?} comes back to {site:?}; offline {other:?} loses it");
+                        self.player_claims.remove(&other);
+                    }
+                    self.claims.insert(site, (player, true));
+                    self.player_claims.insert(player, Claim::Fortress(site));
+                }
+            },
+            Claim::Adventure(_) => {
+                self.player_claims.insert(player, claim);
+            }
+        }
     }
 
     fn set_online(&mut self, player: PlayerId, online: bool) {
@@ -457,12 +478,41 @@ impl Coordinator {
         }
     }
 
+    /// `player` gives up what it plays. Saved at once ([`Self::request_save`]): a release
+    /// lost to a crash would leave a claim the host no longer knows of.
     fn release_claim(&mut self, player: PlayerId) {
-        if let Some(Claim::Fortress(site)) = self.player_claims.remove(&player) {
+        let Some(claim) = self.player_claims.remove(&player) else { return };
+        if let Claim::Fortress(site) = claim {
             if self.claims.get(&site).is_some_and(|(p, _)| *p == player) {
                 self.claims.remove(&site);
             }
         }
+        self.request_save();
+    }
+
+    /// Settle a timed-out state-changing request ([`HostMsg::Settle`]): its memoised
+    /// answer if it was applied, else a `WorldUnavailable` refusal, memoised without
+    /// executing it (a later copy of the request gets that refusal too).
+    fn settle(&mut self, id: RequestId, req: WorldRequest) {
+        let reply = match self.memo.get(&id) {
+            Some(reply) => reply.clone(),
+            None => {
+                let refusal = match req {
+                    WorldRequest::Embark(_) | WorldRequest::ReturnTo(_) => {
+                        WorldReply::EmbarkRefused(EmbarkRefusal::WorldUnavailable)
+                    }
+                    WorldRequest::StartAdventure(_) => WorldReply::AdventureRefused(AdventureRefusal::WorldUnavailable),
+                    other => {
+                        log::warn!("coordinator: settle of {id:?} for a query {other:?}: nothing to settle");
+                        return;
+                    }
+                };
+                log::info!("coordinator: {id:?} settled unapplied: refused");
+                self.remember(id, refusal.clone());
+                refusal
+            }
+        };
+        self.push(CoordMsg::Reply { id, reply });
     }
 
     fn request(&mut self, id: RequestId, player: PlayerId, req: WorldRequest) {

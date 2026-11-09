@@ -203,8 +203,12 @@ fn return_in_use_only_while_online() {
     assert_eq!(c.claim_of(B), Some(Claim::Fortress(site)));
     assert_eq!(c.claim_of(A), None, "the offline claimant lost it");
     // A comes back holding the old claim in its record: it is B's now.
-    c.handle(HostMsg::PlayerOnline { player: A, claim: Some(Claim::Fortress(site)) }, 0);
+    c.handle(online(A, Some(Claim::Fortress(site)), false), 0);
     assert_eq!(c.claim_of(A), None);
+    assert!(
+        c.take_out().contains(&CoordMsg::FortressRefused { player: A, site }),
+        "A's host is told to drop the fortress B plays"
+    );
     c.handle(request(5, A, WorldRequest::ReturnTo(site)), 0);
     assert_eq!(reply_to(&commit(&mut c), 5), WorldReply::EmbarkRefused(EmbarkRefusal::InUse));
     // B retires: the site is free again.
@@ -568,7 +572,8 @@ fn attach_supersedes_unsent_directives() {
     assert!(c.take_out().is_empty());
     // The link dropped; the host re-attaches running `r` with no body of P.
     let running = RunningRegion { rc: r, incarnation: 1, people: Vec::new() };
-    c.handle(HostMsg::Attach { host: 0, epoch: 1, running: vec![running], online: vec![(A, None)] }, 0);
+    let online = vec![OnlinePlayer { player: A, claim: None, claim_pending: true }];
+    c.handle(HostMsg::Attach { host: 0, epoch: 1, running: vec![running], online }, 0);
     let out = commit(&mut c);
     let attached = out.iter().position(|m| matches!(m, CoordMsg::Attached { epoch: 1 })).expect("the echo");
     assert!(directives_for(&out[..attached], r).is_empty(), "the stale spawn is dropped: {out:?}");
@@ -629,4 +634,97 @@ fn delivered_crossing_is_adopted() {
     c.handle(HostMsg::RegionStopping { rc: r1 }, 0);
     c.handle(HostMsg::RegionParked { rc: r1, people: vec![(p, [0.0; 3])] }, 0);
     assert_ne!(c.history().person(p).unwrap().location, Location::InRegion(r1));
+}
+
+/// The same bounce twice (a resent message) before the region starts again: the spawn is
+/// redelivered once.
+#[test]
+fn duplicated_bounce_is_redelivered_once() {
+    let (mut c, civ, people) = coordinator();
+    let r = rc(8, 0);
+    c.handle(HostMsg::RegionStarted { rc: r, incarnation: 1 }, 0);
+    commit(&mut c);
+    let p = people[0];
+    c.handle(embark(1, A, civ, &[p], r), 0);
+    let spawn = directives_for(&commit(&mut c), r);
+    assert_eq!(spawn.len(), 1);
+    c.handle(HostMsg::RegionStopping { rc: r }, 0);
+    for _ in 0..2 {
+        c.handle(HostMsg::DirectiveBounced { directive: spawn[0].0.clone(), incarnation: 1 }, 0);
+    }
+    c.handle(HostMsg::RegionStarted { rc: r, incarnation: 2 }, 0);
+    let out = commit(&mut c);
+    assert_eq!(body_delta(&out, p), 1, "one spawn of P: {out:?}");
+}
+
+fn online(player: PlayerId, claim: Option<Claim>, claim_pending: bool) -> HostMsg {
+    HostMsg::PlayerOnline(OnlinePlayer { player, claim, claim_pending })
+}
+
+/// The host's report is the truth for an online player without an unsettled request: a
+/// claim it does not hold is dropped (a release lost to a crash), one it holds and the
+/// coordinator lacks is taken when free (a grant lost to a crash), and a fortress another
+/// online player holds is refused back to the host. With a request unsettled the
+/// coordinator's claim stands.
+#[test]
+fn host_report_reconciles_claims() {
+    let (mut c, civ, people) = coordinator();
+    c.handle(embark(1, A, civ, &people[0..2], rc(8, 0)), 0);
+    let WorldReply::Embarked { site, .. } = reply_to(&commit(&mut c), 1) else { panic!("embarks") };
+    // A request of A unsettled on the host: the claim stands.
+    c.handle(online(A, None, true), 0);
+    assert_eq!(c.claim_of(A), Some(Claim::Fortress(site)));
+    // Settled, and the host holds nothing: the claim goes (and is saved at once).
+    commit(&mut c);
+    c.handle(online(A, None, false), 0);
+    assert_eq!(c.claim_of(A), None);
+    assert!(c.save_due(), "a dropped claim is saved at once");
+    commit(&mut c);
+    // The host holds the fortress the coordinator lost: taken back.
+    c.handle(online(A, Some(Claim::Fortress(site)), false), 0);
+    assert_eq!(c.claim_of(A), Some(Claim::Fortress(site)));
+    // B's host claims the same fortress while A plays it: refused, never two holders.
+    c.handle(online(B, Some(Claim::Fortress(site)), false), 0);
+    assert_eq!(c.claim_of(B), None);
+    assert!(commit(&mut c).contains(&CoordMsg::FortressRefused { player: B, site }));
+    // A's host reports an adventure instead: the fortress is freed, the adventure taken.
+    c.handle(online(A, Some(Claim::Adventure(SiteId(0))), false), 0);
+    assert_eq!(c.claim_of(A), Some(Claim::Adventure(SiteId(0))));
+    c.handle(request(2, B, WorldRequest::ReturnTo(site)), 0);
+    assert!(matches!(reply_to(&commit(&mut c), 2), WorldReply::Returned { .. }), "the fortress is free");
+}
+
+/// A release is saved at once: the state saved right after it holds no claim.
+#[test]
+fn release_claim_forces_a_save() {
+    let (mut c, civ, people) = coordinator();
+    c.handle(embark(1, A, civ, &people[0..2], rc(8, 0)), 0);
+    commit(&mut c);
+    assert!(!c.save_due());
+    c.handle(HostMsg::ReleaseClaim { player: A }, 0);
+    let state = c.take_save().expect("a release forces a save");
+    assert!(state.claims.is_empty(), "{:?}", state.claims);
+}
+
+/// A timed-out request is settled, never executed: unapplied, it is refused (and the
+/// refusal memoised, so a late copy of the request founds nothing); applied, its memo
+/// answers.
+#[test]
+fn settle_answers_without_executing() {
+    let (mut c, civ, people) = coordinator();
+    let sites = c.history().sites().count();
+    let req = WorldRequest::Embark(EmbarkRequest { civ, people: people[0..2].to_vec(), region: rc(8, 0) });
+    c.handle(HostMsg::Settle { id: rid(1), req: req.clone() }, 0);
+    assert_eq!(reply_to(&commit(&mut c), 1), WorldReply::EmbarkRefused(EmbarkRefusal::WorldUnavailable));
+    c.handle(request(1, A, req.clone()), 0);
+    assert_eq!(reply_to(&commit(&mut c), 1), WorldReply::EmbarkRefused(EmbarkRefusal::WorldUnavailable));
+    assert_eq!(c.history().sites().count(), sites, "nothing founded");
+    assert_eq!(c.claim_of(A), None);
+    // Applied before the settle: the memo answers.
+    c.handle(request(2, A, req.clone()), 0);
+    let first = reply_to(&commit(&mut c), 2);
+    assert!(matches!(first, WorldReply::Embarked { .. }));
+    c.handle(HostMsg::Settle { id: rid(2), req }, 0);
+    assert_eq!(reply_to(&commit(&mut c), 2), first);
+    assert_eq!(c.history().sites().count(), sites + 1);
 }

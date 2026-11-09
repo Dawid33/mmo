@@ -804,3 +804,79 @@ fn expired_sent_embark_gives_back_its_claim() {
     });
     assert!(ran.into_inner() > 0, "no seed had the reply in flight");
 }
+
+/// The coordinator holds a claim the host does not (B-C1), with nothing of the player
+/// unsettled on the host: (a) it restarts from a save taken before A retired (the
+/// release lost); (b) an all-in-one crash after an embark: the coordinator saved the
+/// embark's reply, the restarted host has no record of the player. Either way the host's
+/// report is the truth: A is never locked out with `AlreadyHasFortress`, and the fortress
+/// has at most one player.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn coordinator_claim_older_than_the_host_never_locks_out() {
+    each_seed("coordinator_claim_older_than_the_host_never_locks_out", |seed| {
+        let a = PlayerId(A as u64);
+        let mut w = World::with(seed, &[A, B]);
+        let site = w.ask(A, ClientPacket::Embark(w.embark_request())).expect("embarked");
+        let embarked = w.coordinator().state();
+        // (a) A retires; the coordinator then restarts from the save before the release.
+        w.packet(A, ClientPacket::Retire);
+        w.drain();
+        assert_eq!(w.coordinator().claim_of(a), None, "seed {seed}: released");
+        let now_ms = w.now_ms;
+        let older = Coordinator::from_state(embarked.clone(), SocietyGrid::from_world_map(&strip()), now_ms);
+        *w.link().coordinator_mut() = older.expect("the state loads");
+        assert_eq!(w.coordinator().claim_of(a), Some(game::Claim::Fortress(site)), "seed {seed}: the old claim");
+        w.reconnect_between_looks();
+        w.drain();
+        assert_eq!(w.coordinator().claim_of(a), None, "seed {seed} (a): the stale claim is dropped");
+        assert_eq!(w.ask(B, ClientPacket::ReturnTo(site)), Ok(site), "seed {seed} (a): the fortress is free");
+        assert_eq!(w.ask(A, ClientPacket::ReturnTo(site)), Err(EmbarkRefusal::InUse), "seed {seed} (a): one player");
+        assert!(w.ask(A, ClientPacket::Embark(w.embark_request())).is_ok(), "seed {seed} (a): A is not locked out");
+        // (b) A new host (no record of A) over the coordinator as saved with the embark.
+        let mut w = World::new(seed);
+        let restarted = Coordinator::from_state(embarked, SocietyGrid::from_world_map(&strip()), 0);
+        *w.link().coordinator_mut() = restarted.expect("the state loads");
+        w.send(ServerEvent::connected(A));
+        w.send(ServerEvent::connected(B));
+        w.drain();
+        w.inbox.clear();
+        assert_eq!(w.coordinator().claim_of(a), None, "seed {seed} (b): the claim the host lost is dropped");
+        assert_eq!(w.ask(B, ClientPacket::ReturnTo(site)), Ok(site), "seed {seed} (b): the fortress is free");
+        assert!(w.ask(A, ClientPacket::Embark(w.embark_request())).is_ok(), "seed {seed} (b): A is not locked out");
+    });
+}
+
+/// An embark sent on a connection that died unnoticed times out (its player told
+/// `WorldUnavailable`); by the seed the old connection lost it or delivered it. After the
+/// re-attach the host only settles it (B-I1): lost, it is refused unapplied and never
+/// founds a site later; delivered, its memo answers and the claim is given back. Either
+/// way the player holds nothing and may embark again.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn expired_embark_is_settled_never_executed() {
+    let lost = std::sync::atomic::AtomicU64::new(0);
+    each_seed("expired_embark_is_settled_never_executed", |seed| {
+        let mut w = World::with(seed, &[A]);
+        w.begin_stale();
+        w.packet(A, ClientPacket::Embark(w.embark_request()));
+        w.now_ms += WORLD_REQUEST_TIMEOUT_SECS * 1000;
+        w.tick();
+        assert_eq!(w.embark_results(A), vec![Err(EmbarkRefusal::WorldUnavailable)], "seed {seed}");
+        let landed = w.end_stale();
+        let delivered = landed.iter().any(|m| matches!(m, HostMsg::Request { req: WorldRequest::Embark(_), .. }));
+        w.drain();
+        assert!(w.embark_results(A).is_empty(), "seed {seed}: the settle's answer is not shown");
+        assert_eq!(w.coordinator().claim_of(PlayerId(A as u64)), None, "seed {seed}: no claim");
+        if delivered {
+            assert_eq!(w.player_sites().len(), 1, "seed {seed}: delivered, it founded its site once");
+        } else {
+            lost.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            assert!(w.player_sites().is_empty(), "seed {seed}: lost, it never runs");
+        }
+        let sites = w.player_sites().len();
+        assert!(w.ask(A, ClientPacket::Embark(w.embark_request())).is_ok(), "seed {seed}: may embark again");
+        assert_eq!(w.player_sites().len(), sites + 1, "seed {seed}: the new embark founds one site");
+    });
+    assert!(lost.into_inner() > 0, "no seed lost the embark with the old connection");
+}

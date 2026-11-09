@@ -355,7 +355,8 @@ impl History {
     /// still true of the history: a spawn or walk-out of someone it has embodied in `rc`,
     /// a despawn of someone it has not. One about a person the catch-up already places is
     /// superseded and dropped — after a park the history took that person back, and the
-    /// catch-up is the one body.
+    /// catch-up is the one body — and a repeated one (the same bounce twice, or a second
+    /// spawn of one person) is delivered once.
     fn redeliver_bounced(&mut self, rc: RegionCoords, events: &mut Vec<GameEventKind>) {
         if !self.bounced.iter().any(|d| d.region == rc) {
             return;
@@ -364,9 +365,15 @@ impl History {
             std::mem::take(&mut self.bounced).into_iter().partition(|d| d.region == rc);
         self.bounced = rest;
         let placed: BTreeSet<PersonId> = events.iter().filter_map(event_person).collect();
+        // What is redelivered so far: a bounce that reached the history twice (a resent
+        // message) is delivered once, and a person gets at most one spawn.
+        let mut kept: Vec<GameEventKind> = Vec::new();
+        let mut spawned: BTreeSet<PersonId> = BTreeSet::new();
         for d in mine {
             let keep = match event_person(&d.event) {
                 Some(p) if placed.contains(&p) => false,
+                Some(_) if kept.contains(&d.event) => false,
+                Some(p) if matches!(d.event, GameEventKind::SpawnPerson(_)) && spawned.contains(&p) => false,
                 Some(p) => {
                     let here = self.people.get(&p).is_some_and(|q| q.alive() && q.location == Location::InRegion(rc));
                     match d.event {
@@ -377,9 +384,15 @@ impl History {
                 None => true,
             };
             if keep {
+                if let Some(p) = event_person(&d.event) {
+                    if matches!(d.event, GameEventKind::SpawnPerson(_)) {
+                        spawned.insert(p);
+                    }
+                    kept.push(d.event.clone());
+                }
                 events.push(d.event);
             } else {
-                ::log::debug!("history: bounced directive for {rc:?} superseded by its restart: {:?}", d.event);
+                ::log::debug!("history: bounced directive for {rc:?} superseded or repeated: {:?}", d.event);
             }
         }
     }
