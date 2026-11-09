@@ -75,7 +75,7 @@ fn stale_owner_commit_is_refused_and_writes_nothing() {
         assert!(matches!(err, StoreError::Fenced { sr: Some(_) }), "{err}");
         assert_eq!(h.load_region(A, &fence_b).unwrap(), None, "no region row");
         assert!(h.stored_regions().unwrap().is_empty());
-        assert!(h.load_in_flight().unwrap().is_empty(), "no in-flight rows");
+        assert!(h.load_in_flight(None).unwrap().is_empty(), "no in-flight rows");
         assert_eq!(h.world_info().unwrap().world_tick, 0, "the world tick did not move");
         assert_eq!(h.resolve_player("local:fenced").unwrap().1, None, "no player record");
 
@@ -94,7 +94,7 @@ fn stale_owner_commit_is_refused_and_writes_nothing() {
         let empty = WorldCut { regions: vec![], players: vec![], ..cut(&h, 4) };
         let err = h.commit_cut(empty, fence_a).recv().unwrap().unwrap_err();
         assert!(matches!(err, StoreError::Fenced { .. }), "{err}");
-        assert_eq!(h.load_in_flight().unwrap().len(), 1, "fence B's in-flight row is kept");
+        assert_eq!(h.load_in_flight(None).unwrap().len(), 1, "fence B's in-flight row is kept");
         h.shutdown();
     });
 }

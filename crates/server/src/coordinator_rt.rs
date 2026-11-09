@@ -150,6 +150,8 @@ impl LinkSet {
 #[derive(Debug, PartialEq, Eq)]
 enum Target {
     Host(u32),
+    /// One connection (an attach echo goes to the connection whose `Attach` it answers).
+    Peer(PeerId),
     Every,
     Nobody,
 }
@@ -173,6 +175,11 @@ impl ListenerHosts {
                 }
                 None => log::debug!("[coordinator] host {ordinal} is not connected; {} lost", describe(&msg)),
             },
+            Target::Peer(peer) => {
+                if !self.senders.send(peer, msg) {
+                    log::debug!("[coordinator] peer {} left; its attach echo is lost", peer.0);
+                }
+            }
             Target::Every => {
                 for peer in self.routes.hosts.keys() {
                     self.senders.send(*peer, msg.clone());
@@ -237,26 +244,49 @@ pub const SERVED_HOST_ORDINAL: u32 = 0;
 
 /// What routes a coordinator message to one of the connected hosts: a reply to the host
 /// its request id names, a region's messages to the host that announced the region (its
-/// `Attach` / `RegionStarted`), the attach echo to the host whose `Attach` it answers,
-/// the world's view to every host. A message for a host that is not connected is lost
-/// (it re-attaches when it is back: its `Attach` and resent requests cover it).
+/// `Attach` / `RegionStarted`), the attach echo to the connection whose `Attach` it
+/// answers, the world's view to every host. A message for a host that is not connected is
+/// lost (it re-attaches when it is back: its `Attach` and resent requests cover it).
+///
+/// One live connection per host ordinal ([`Routes::admit`]): a host process that is
+/// replaced (a restart, a second process of the ordinal) keeps running until its next cut
+/// is fenced, and its messages — a park, a crossing, positions — would otherwise be
+/// applied beside its replacement's (two bodies of one person).
 #[derive(Default)]
 struct Routes {
-    /// Peers refused ([`Routes::admit`]); their messages are ignored.
+    /// Peers refused or replaced ([`Routes::admit`]); their messages are ignored.
     refused: BTreeSet<PeerId>,
     /// Connected host peers and their ordinals (a reconnect is a new peer).
     hosts: BTreeMap<PeerId, u32>,
+    /// The live connection of each ordinal, with the claim epoch its hello carried.
+    live: BTreeMap<u32, (PeerId, u64)>,
+    /// The highest claim epoch each ordinal's hello has carried (kept after its connection
+    /// ends: a stale process must not take the ordinal while its replacement reconnects).
+    best_epoch: BTreeMap<u32, u64>,
     /// Which host runs each region, as announced.
     region_host: BTreeMap<RegionCoords, u32>,
-    /// `Attach`es handled whose echo has not been routed yet: (host, epoch), in order.
-    attaches: VecDeque<(u32, u64)>,
+    /// `Attach`es handled whose echo has not been routed yet: (connection, epoch), in order.
+    attaches: VecDeque<(PeerId, u64)>,
+}
+
+/// What [`Routes::admit`] decided.
+#[derive(Debug, PartialEq, Eq)]
+enum Admit {
+    /// Refused: its connection is closed, its messages ignored.
+    Refused,
+    /// The ordinal's live connection now; `replaced` is the one it took over from (closed,
+    /// its messages ignored from now on).
+    Admitted { replaced: Option<PeerId> },
 }
 
 impl Routes {
-    /// A host peer said hello as `ordinal`: admitted if it is [`SERVED_HOST_ORDINAL`] (a
-    /// reconnect is a new peer), else refused (logged with both ordinals). Returns whether
-    /// it was admitted.
-    fn admit(&mut self, peer: PeerId, ordinal: u32) -> bool {
+    /// A host peer said hello as `ordinal` with claim `epoch`. Refused unless it is
+    /// [`SERVED_HOST_ORDINAL`] (logged with both ordinals). The ordinal's highest claim
+    /// epoch wins, ties to the newer connection: a process that claimed its super-regions
+    /// later replaces the live one; one with a lower epoch is a stale process (its claims
+    /// taken over, fenced at its next cut) and is refused, so it cannot take the ordinal
+    /// back.
+    fn admit(&mut self, peer: PeerId, ordinal: u32, epoch: u64) -> Admit {
         if ordinal != SERVED_HOST_ORDINAL {
             log::error!(
                 "[coordinator] refusing host {ordinal} (peer {}): this coordinator serves host {SERVED_HOST_ORDINAL} \
@@ -265,14 +295,51 @@ impl Routes {
                 peer.0
             );
             self.refused.insert(peer);
-            return false;
+            return Admit::Refused;
         }
+        let best = self.best_epoch.get(&ordinal).copied().unwrap_or(0);
+        if epoch < best {
+            log::error!(
+                "[coordinator] refusing host {ordinal} (peer {}) with claim epoch {epoch}: epoch {best} has \
+                 connected (a stale host process, fenced at its next cut)",
+                peer.0
+            );
+            self.refused.insert(peer);
+            return Admit::Refused;
+        }
+        self.best_epoch.insert(ordinal, epoch);
+        let replaced = match self.live.get(&ordinal).copied() {
+            Some((live, live_epoch)) => {
+                log::warn!(
+                    "[coordinator] host {ordinal}: peer {} (claim epoch {epoch}) replaces peer {} (epoch {live_epoch}); \
+                     the old connection is closed and its messages ignored",
+                    peer.0,
+                    live.0
+                );
+                self.hosts.remove(&live);
+                self.refused.insert(live);
+                self.attaches.retain(|(p, _)| *p != live);
+                Some(live)
+            }
+            None => None,
+        };
+        self.live.insert(ordinal, (peer, epoch));
         self.hosts.insert(peer, ordinal);
-        true
+        Admit::Admitted { replaced }
     }
 
-    /// Note what routes later messages from `msg`, sent by host `ordinal`.
-    fn note(&mut self, ordinal: u32, msg: &HostMsg) {
+    /// `peer`'s connection ended.
+    fn gone(&mut self, peer: PeerId) -> Option<u32> {
+        self.refused.remove(&peer);
+        let ordinal = self.hosts.remove(&peer)?;
+        if self.live.get(&ordinal).is_some_and(|(p, _)| *p == peer) {
+            self.live.remove(&ordinal);
+        }
+        Some(ordinal)
+    }
+
+    /// Note what routes later messages from `msg`, sent by host `ordinal` on `peer`.
+    fn note(&mut self, peer: PeerId, ordinal: u32, msg: &HostMsg) {
         match msg {
             HostMsg::Attach { host, epoch, running, .. } => {
                 if *host != ordinal {
@@ -282,7 +349,7 @@ impl Routes {
                 for r in running {
                     self.region_host.insert(r.rc, ordinal);
                 }
-                self.attaches.push_back((ordinal, *epoch));
+                self.attaches.push_back((peer, *epoch));
             }
             HostMsg::RegionStarted { rc, .. } => {
                 self.region_host.insert(*rc, ordinal);
@@ -300,7 +367,7 @@ impl Routes {
         match msg {
             CoordMsg::Reply { id, .. } => Target::Host(id.host),
             CoordMsg::Attached { epoch } => match self.attaches.iter().position(|(_, e)| e == epoch) {
-                Some(i) => Target::Host(self.attaches.remove(i).expect("found").0),
+                Some(i) => Target::Peer(self.attaches.remove(i).expect("found").0),
                 None => {
                     log::warn!("[coordinator] attach echo {epoch} matches no Attach; dropped");
                     Target::Nobody
@@ -436,18 +503,17 @@ impl CoordinatorThread {
     }
 }
 
-/// The coordinator for an `AllInOne` process: claims the coordinator row (fencing any
-/// coordinator that held it), and runs `start` on its thread over a fresh
+/// The coordinator for an `AllInOne` process: runs `start` (its row claimed before its
+/// state was loaded, [`CoordinatorStart::fence`]) on its thread over a fresh
 /// [`ChannelWorldLink`] — the host's end, to install with `WorldManager::set_world_link`.
 pub fn start_all_in_one(
     store: StoreHandle,
     start: CoordinatorStart,
     fenced: Fenced,
 ) -> Result<(ChannelWorldLink, CoordinatorThread), String> {
-    let fence = store.claim_coordinator().map_err(|e| format!("claiming the world coordinator: {e}"))?;
-    log::info!("[coordinator] claimed the world coordinator (epoch {}), state {:?}", fence.epoch, start.source);
+    log::info!("[coordinator] the world coordinator (epoch {}), state {:?}", start.fence.epoch, start.source);
     let (link, host) = channel_link();
-    let thread = CoordinatorRuntime::spawn(store, fence, start, LinkSet::one(host), fenced);
+    let thread = CoordinatorRuntime::spawn(store, start, LinkSet::one(host), fenced);
     Ok((link, thread))
 }
 
@@ -460,8 +526,8 @@ pub struct ListeningCoordinator {
     pub cert_sha256: String,
 }
 
-/// The coordinator for a `VOXEL_ROLE=coordinator` process: claims the coordinator row
-/// (fencing any coordinator that held it), listens on `bind` for hosts presenting
+/// The coordinator for a `VOXEL_ROLE=coordinator` process (its row claimed before its
+/// state was loaded, [`CoordinatorStart::fence`]): listens on `bind` for hosts presenting
 /// `token` (the certificate's pin written to `cert_hash_file`, its cert and key kept
 /// beside it), and runs `start` on its thread serving them.
 pub fn start_listening(
@@ -474,15 +540,14 @@ pub fn start_listening(
 ) -> Result<ListeningCoordinator, String> {
     let (listener, events, senders) = LinkListener::bind::<HostMsg, CoordMsg>(bind, token, cert_hash_file.clone())
         .map_err(|e| format!("the coordinator's service link on {bind}: {e}"))?;
-    let fence = store.claim_coordinator().map_err(|e| format!("claiming the world coordinator: {e}"))?;
     let (addr, cert_sha256) = (listener.local_addr(), listener.cert_sha256().to_string());
     log::info!(
-        "[coordinator] claimed the world coordinator (epoch {}), state {:?}; hosts dial {addr} (pin {cert_sha256}{})",
-        fence.epoch,
+        "[coordinator] the world coordinator (epoch {}), state {:?}; hosts dial {addr} (pin {cert_sha256}{})",
+        start.fence.epoch,
         start.source,
         cert_hash_file.map(|f| format!(", in {}", f.display())).unwrap_or_default()
     );
-    let thread = CoordinatorRuntime::spawn(store, fence, start, LinkSet::listener(listener, events, senders), fenced);
+    let thread = CoordinatorRuntime::spawn(store, start, LinkSet::listener(listener, events, senders), fenced);
     Ok(ListeningCoordinator { thread, addr, cert_sha256 })
 }
 
@@ -506,10 +571,9 @@ pub struct CoordinatorRuntime {
 
 impl CoordinatorRuntime {
     /// Runs `start`'s coordinator on a new `coordinator` thread serving `links`, saving
-    /// into `store` under `fence`. A migrated or bootstrapped state is saved at once.
+    /// into `store` under its fence. A migrated or bootstrapped state is saved at once.
     pub fn spawn(
         store: StoreHandle,
-        fence: CoordinatorFence,
         start: CoordinatorStart,
         links: LinkSet,
         fenced: Fenced,
@@ -517,6 +581,7 @@ impl CoordinatorRuntime {
         let (stop_tx, stop_rx) = crossbeam::channel::bounded(1);
         let (inspect_tx, inspect_rx) = crossbeam::channel::unbounded();
         let crash_before_claim_reply = Arc::new(AtomicBool::new(false));
+        let fence = start.fence;
         let mut core = start.coordinator;
         if start.source.needs_save() {
             core.request_save();
@@ -629,16 +694,28 @@ impl CoordinatorRuntime {
                 while let Ok((peer, event)) = l.events.try_recv() {
                     match event {
                         LinkEvent::Up(hello) => match hello.role {
-                            PeerRole::Host { ordinal, boot } => {
-                                if l.routes.admit(peer, ordinal) {
-                                    log::info!("[coordinator] host {ordinal} connected (peer {}, boot {boot:#x})", peer.0);
+                            PeerRole::Host { ordinal, boot, epoch } => match l.routes.admit(peer, ordinal, epoch) {
+                                Admit::Admitted { replaced } => {
+                                    log::info!(
+                                        "[coordinator] host {ordinal} connected (peer {}, boot {boot:#x}, claim epoch {epoch})",
+                                        peer.0
+                                    );
+                                    if let Some(old) = replaced {
+                                        l.senders.close(old);
+                                    }
                                 }
+                                Admit::Refused => {
+                                    l.senders.close(peer);
+                                }
+                            },
+                            other => {
+                                log::warn!("[coordinator] peer {} is {other:?}, not a host: closed", peer.0);
+                                l.senders.close(peer);
                             }
-                            other => log::warn!("[coordinator] peer {} is {other:?}, not a host: ignored", peer.0),
                         },
                         LinkEvent::Msg(msg) => match l.routes.hosts.get(&peer).copied() {
                             Some(ordinal) => {
-                                l.routes.note(ordinal, &msg);
+                                l.routes.note(peer, ordinal, &msg);
                                 self.core.handle(msg, now);
                             }
                             None if l.routes.refused.contains(&peer) => {
@@ -647,8 +724,7 @@ impl CoordinatorRuntime {
                             None => log::warn!("[coordinator] a message from non-host peer {} ignored", peer.0),
                         },
                         LinkEvent::Down(why) => {
-                            l.routes.refused.remove(&peer);
-                            if let Some(ordinal) = l.routes.hosts.remove(&peer) {
+                            if let Some(ordinal) = l.routes.gone(peer) {
                                 log::warn!("[coordinator] host {ordinal} (peer {}) left: {why}", peer.0);
                             }
                         }
@@ -819,10 +895,10 @@ mod tests {
     fn only_host_ordinal_zero_is_served() {
         let mut r = Routes::default();
         // A stray ordinal first to connect (a restarted coordinator's race) is refused...
-        assert!(!r.admit(PeerId(2), 4), "ordinal 4 is refused, first or not");
-        assert!(r.admit(PeerId(3), 0), "host 0 is served");
-        assert!(!r.admit(PeerId(4), 1), "another ordinal is refused");
-        assert!(r.admit(PeerId(5), 0), "host 0 reconnecting");
+        assert_eq!(r.admit(PeerId(2), 4, 1), Admit::Refused, "ordinal 4 is refused, first or not");
+        assert_eq!(r.admit(PeerId(3), 0, 1), Admit::Admitted { replaced: None }, "host 0 is served");
+        assert_eq!(r.admit(PeerId(4), 1, 1), Admit::Refused, "another ordinal is refused");
+        assert_eq!(r.admit(PeerId(5), 0, 1), Admit::Admitted { replaced: Some(PeerId(3)) }, "host 0 reconnecting");
         assert_eq!(r.peer_of(0), Some(PeerId(5)));
         assert_eq!(r.peer_of(4), None);
         assert_eq!(r.peer_of(1), None);
@@ -837,15 +913,15 @@ mod tests {
         r.hosts.insert(PeerId(4), 3);
         r.hosts.insert(PeerId(7), 5);
         r.hosts.insert(PeerId(9), 3);
-        r.note(3, &attach(3, 1, &[rc(1, 1)]));
-        r.note(5, &attach(5, 1, &[rc(2, 2)]));
-        r.note(5, &HostMsg::RegionStarted { rc: rc(4, 4), incarnation: 2 });
+        r.note(PeerId(9), 3, &attach(3, 1, &[rc(1, 1)]));
+        r.note(PeerId(7), 5, &attach(5, 1, &[rc(2, 2)]));
+        r.note(PeerId(7), 5, &HostMsg::RegionStarted { rc: rc(4, 4), incarnation: 2 });
         assert_eq!(r.peer_of(3), Some(PeerId(9)));
         assert_eq!(r.peer_of(5), Some(PeerId(7)));
         assert_eq!(r.peer_of(1), None);
         // Both attached with epoch 1: the echoes go back in the order handled.
-        assert_eq!(r.route(&CoordMsg::Attached { epoch: 1 }), Target::Host(3));
-        assert_eq!(r.route(&CoordMsg::Attached { epoch: 1 }), Target::Host(5));
+        assert_eq!(r.route(&CoordMsg::Attached { epoch: 1 }), Target::Peer(PeerId(9)));
+        assert_eq!(r.route(&CoordMsg::Attached { epoch: 1 }), Target::Peer(PeerId(7)));
         let reply = |host| CoordMsg::Reply {
             id: RequestId { host, boot: 1, seq: 1 },
             reply: game::WorldReply::PersonInfo(None),
@@ -864,15 +940,47 @@ mod tests {
         assert_eq!(r.route(&CoordMsg::Calendar(game::history::CalendarTick(1))), Target::Every);
         // An unannounced region with two hosts: nobody (R3); a park forgets the region.
         assert_eq!(r.route(&spawn(rc(9, 9))), Target::Nobody);
-        r.note(5, &HostMsg::RegionParked { rc: rc(4, 4), people: Vec::new() });
+        r.note(PeerId(7), 5, &HostMsg::RegionParked { rc: rc(4, 4), people: Vec::new() });
         assert_eq!(r.route(&spawn(rc(4, 4))), Target::Nobody);
         // One host left: everything unannounced goes to it.
         r.hosts.retain(|_, o| *o == 3);
         assert_eq!(r.route(&spawn(rc(9, 9))), Target::Every);
         // A re-attach replaces the host's regions.
-        r.note(3, &attach(3, 2, &[rc(6, 6)]));
+        r.note(PeerId(9), 3, &attach(3, 2, &[rc(6, 6)]));
         r.hosts.insert(PeerId(10), 5);
         assert_eq!(r.route(&spawn(rc(1, 1))), Target::Nobody);
         assert_eq!(r.route(&spawn(rc(6, 6))), Target::Host(3));
+    }
+
+    /// One live connection per ordinal: the highest claim epoch wins (ties: the newer
+    /// connection); the replaced or stale connection is refused, its pending attach echo
+    /// dropped, and only the live one is routed to.
+    #[test]
+    fn one_live_peer_per_ordinal_by_claim_epoch() {
+        let mut r = Routes::default();
+        assert_eq!(r.admit(PeerId(1), 0, 5), Admit::Admitted { replaced: None });
+        r.note(PeerId(1), 0, &attach(0, 3, &[rc(1, 1)]));
+        // A stale process (lower epoch) cannot take the ordinal back.
+        assert_eq!(r.admit(PeerId(2), 0, 4), Admit::Refused);
+        assert!(r.refused.contains(&PeerId(2)));
+        assert_eq!(r.peer_of(0), Some(PeerId(1)));
+        // Its replacement (higher epoch) takes over: the old connection is refused and its
+        // attach echo goes nowhere.
+        assert_eq!(r.admit(PeerId(3), 0, 6), Admit::Admitted { replaced: Some(PeerId(1)) });
+        assert!(r.refused.contains(&PeerId(1)) && !r.hosts.contains_key(&PeerId(1)));
+        assert_eq!(r.route(&CoordMsg::Attached { epoch: 3 }), Target::Nobody);
+        r.note(PeerId(3), 0, &attach(0, 1, &[rc(2, 2)]));
+        assert_eq!(r.route(&CoordMsg::Attached { epoch: 1 }), Target::Peer(PeerId(3)));
+        assert_eq!(r.peer_of(0), Some(PeerId(3)));
+        // The same epoch reconnecting (a dropped link of the live process): the newer wins.
+        assert_eq!(r.admit(PeerId(4), 0, 6), Admit::Admitted { replaced: Some(PeerId(3)) });
+        // The old connection's Down does not unseat the live one.
+        assert_eq!(r.gone(PeerId(3)), None);
+        assert_eq!(r.peer_of(0), Some(PeerId(4)));
+        assert_eq!(r.gone(PeerId(4)), Some(0));
+        assert_eq!(r.peer_of(0), None);
+        // With nobody live, a stale epoch is still refused; the live epoch is admitted.
+        assert_eq!(r.admit(PeerId(5), 0, 5), Admit::Refused);
+        assert_eq!(r.admit(PeerId(6), 0, 6), Admit::Admitted { replaced: None });
     }
 }

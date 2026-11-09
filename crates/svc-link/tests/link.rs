@@ -217,62 +217,65 @@ fn large_frame_ok_and_oversize_refused() {
     }
 }
 
+/// A raw QUIC client config that accepts any certificate (the tests that use it play an
+/// unauthenticated peer; no pin check is needed).
+fn raw_client_config() -> quinn::ClientConfig {
+    use quinn::rustls;
+    #[derive(Debug)]
+    struct AcceptAny(std::sync::Arc<rustls::crypto::CryptoProvider>);
+    impl rustls::client::danger::ServerCertVerifier for AcceptAny {
+        fn verify_server_cert(
+            &self,
+            _: &rustls::pki_types::CertificateDer<'_>,
+            _: &[rustls::pki_types::CertificateDer<'_>],
+            _: &rustls::pki_types::ServerName<'_>,
+            _: &[u8],
+            _: rustls::pki_types::UnixTime,
+        ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+            Ok(rustls::client::danger::ServerCertVerified::assertion())
+        }
+        fn verify_tls12_signature(
+            &self,
+            m: &[u8],
+            c: &rustls::pki_types::CertificateDer<'_>,
+            d: &rustls::DigitallySignedStruct,
+        ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+            rustls::crypto::verify_tls12_signature(m, c, d, &self.0.signature_verification_algorithms)
+        }
+        fn verify_tls13_signature(
+            &self,
+            m: &[u8],
+            c: &rustls::pki_types::CertificateDer<'_>,
+            d: &rustls::DigitallySignedStruct,
+        ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+            rustls::crypto::verify_tls13_signature(m, c, d, &self.0.signature_verification_algorithms)
+        }
+        fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+            self.0.signature_verification_algorithms.supported_schemes()
+        }
+    }
+    let provider = std::sync::Arc::new(rustls::crypto::ring::default_provider());
+    let mut crypto = rustls::ClientConfig::builder_with_provider(provider.clone())
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .dangerous()
+        .with_custom_certificate_verifier(std::sync::Arc::new(AcceptAny(provider)))
+        .with_no_client_auth();
+    crypto.alpn_protocols = vec![b"mmo-svc-link/1".to_vec()];
+    quinn::ClientConfig::new(std::sync::Arc::new(quinn::crypto::rustls::QuicClientConfig::try_from(crypto).unwrap()))
+}
+
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn forged_compressed_hello_refused_before_decoding() {
-    use quinn::rustls;
-    // A raw QUIC client (no pin check needed for this test) sends a hello tagged lz4 that claims
-    // a huge output: the listener must refuse it without decoding.
+    // A raw QUIC client sends a hello tagged lz4 that claims a huge output: the listener
+    // must refuse it without decoding.
     let (listener, from_peers, _senders) = LinkListener::bind::<Msg, Msg>(loopback(), TOKEN.into(), None).unwrap();
     let addr = listener.local_addr();
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     rt.block_on(async {
-        #[derive(Debug)]
-        struct AcceptAny(std::sync::Arc<rustls::crypto::CryptoProvider>);
-        impl rustls::client::danger::ServerCertVerifier for AcceptAny {
-            fn verify_server_cert(
-                &self,
-                _: &rustls::pki_types::CertificateDer<'_>,
-                _: &[rustls::pki_types::CertificateDer<'_>],
-                _: &rustls::pki_types::ServerName<'_>,
-                _: &[u8],
-                _: rustls::pki_types::UnixTime,
-            ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
-                Ok(rustls::client::danger::ServerCertVerified::assertion())
-            }
-            fn verify_tls12_signature(
-                &self,
-                m: &[u8],
-                c: &rustls::pki_types::CertificateDer<'_>,
-                d: &rustls::DigitallySignedStruct,
-            ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-                rustls::crypto::verify_tls12_signature(m, c, d, &self.0.signature_verification_algorithms)
-            }
-            fn verify_tls13_signature(
-                &self,
-                m: &[u8],
-                c: &rustls::pki_types::CertificateDer<'_>,
-                d: &rustls::DigitallySignedStruct,
-            ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-                rustls::crypto::verify_tls13_signature(m, c, d, &self.0.signature_verification_algorithms)
-            }
-            fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-                self.0.signature_verification_algorithms.supported_schemes()
-            }
-        }
-        let provider = std::sync::Arc::new(rustls::crypto::ring::default_provider());
-        let mut crypto = rustls::ClientConfig::builder_with_provider(provider.clone())
-            .with_safe_default_protocol_versions()
-            .unwrap()
-            .dangerous()
-            .with_custom_certificate_verifier(std::sync::Arc::new(AcceptAny(provider)))
-            .with_no_client_auth();
-        crypto.alpn_protocols = vec![b"mmo-svc-link/1".to_vec()];
-        let config = quinn::ClientConfig::new(std::sync::Arc::new(
-            quinn::crypto::rustls::QuicClientConfig::try_from(crypto).unwrap(),
-        ));
         let endpoint = quinn::Endpoint::client(([127, 0, 0, 1], 0).into()).unwrap();
-        let conn = endpoint.connect_with(config, addr, "localhost").unwrap().await.unwrap();
+        let conn = endpoint.connect_with(raw_client_config(), addr, "localhost").unwrap().await.unwrap();
         let (mut send, _recv) = conn.open_bi().await.unwrap();
         // tag 1 (lz4), claimed output 0x7fff_ffff bytes, no payload.
         let body = [1u8, 0xff, 0xff, 0xff, 0x7f];
@@ -282,6 +285,56 @@ fn forged_compressed_hello_refused_before_decoding() {
         assert!(closed.to_string().contains("plain"), "refused for its framing: {closed}");
     });
     nothing(&from_peers);
+}
+
+/// An unauthenticated peer gets one bidirectional stream and no unidirectional one (it
+/// cannot make the listener buffer per-stream windows by the hundred), and at most
+/// [`LINK_MAX_PENDING_HANDSHAKES`] connections wait in the hello at once: one more is refused.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn unauthenticated_peers_are_bounded() {
+    const PENDING: usize = 16; // svc_link's LINK_MAX_PENDING_HANDSHAKES
+    let (listener, from_peers, _senders) = LinkListener::bind::<Msg, Msg>(loopback(), TOKEN.into(), None).unwrap();
+    let addr = listener.local_addr();
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    rt.block_on(async {
+        let endpoint = quinn::Endpoint::client(([127, 0, 0, 1], 0).into()).unwrap();
+        let mut held = Vec::new();
+        for _ in 0..PENDING {
+            held.push(endpoint.connect_with(raw_client_config(), addr, "localhost").unwrap().await.unwrap());
+        }
+        let first = &held[0];
+        let short = Duration::from_millis(300);
+        assert!(tokio::time::timeout(short, first.open_uni()).await.is_err(), "no unidirectional stream is allowed");
+        let _bi = first.open_bi().await.expect("one bidirectional stream");
+        assert!(tokio::time::timeout(short, first.open_bi()).await.is_err(), "a second one is not allowed");
+        let over = endpoint.connect_with(raw_client_config(), addr, "localhost").unwrap();
+        let refused = tokio::time::timeout(WAIT, over).await.expect("answered");
+        assert!(refused.is_err(), "the {}th pending handshake is refused", PENDING + 1);
+    });
+    nothing(&from_peers);
+}
+
+/// The listener closes one peer's connection: the dialer sees its link go down.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn listener_closes_a_peer() {
+    let (listener, from_peers, senders) = LinkListener::bind::<Msg, Msg>(loopback(), TOKEN.into(), None).unwrap();
+    let (_tx, rx) = LinkDialer::connect::<Msg, Msg>(listener.local_addr(), listener.cert_sha256().to_string(), hello(TOKEN));
+    expect_up(&rx);
+    let peer = expect_peer_up(&from_peers);
+    assert!(senders.close(peer));
+    assert!(matches!(next(&rx), LinkEvent::Down(_)), "the dialer's link went down");
+    assert!(matches!(next(&from_peers), (p, LinkEvent::Down(_)) if p == peer));
+    assert!(!senders.send(peer, Msg::Num(1)), "closed");
+}
+
+#[test]
+fn hello_debug_never_shows_the_token() {
+    let h = LinkHello::new("s3cret-token".into(), PeerRole::Host { ordinal: 0, boot: 1, epoch: 2 });
+    let shown = format!("{h:?}");
+    assert!(!shown.contains("s3cret"), "{shown}");
+    assert!(shown.contains("redacted") && shown.contains("epoch: 2"), "{shown}");
 }
 
 #[test]

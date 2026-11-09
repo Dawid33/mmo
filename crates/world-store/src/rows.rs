@@ -180,7 +180,7 @@ macro_rules! engine_rows {
                     epochs.insert((sx, sz), u(epoch));
                 }
                 tx.commit().await?;
-                Ok(Fence { owner, epochs })
+                Ok(Fence { owner, epochs, all_hosts: false })
             }
 
             /// Locks (Postgres: `FOR SHARE`) and checks every super-region of
@@ -456,10 +456,13 @@ macro_rules! engine_rows {
                 Ok(out)
             }
 
-            pub(crate) async fn load_in_flight(pool: &Pool) -> Result<Vec<InFlightRow>, StoreError> {
+            /// The in-flight rows of host `host` (`None`: of every host), in order.
+            pub(crate) async fn load_in_flight(pool: &Pool, host: Option<u32>) -> Result<Vec<InFlightRow>, StoreError> {
                 let rows = sqlx::query(
-                    "SELECT seq, kind, target_rx, target_rz, stamp, payload FROM in_flight ORDER BY seq",
+                    "SELECT seq, kind, target_rx, target_rz, stamp, payload FROM in_flight \
+                     WHERE $1 IS NULL OR host = $1 ORDER BY seq",
                 )
+                .bind(host.map(i64::from))
                 .fetch_all(pool)
                 .await?;
                 let mut out = Vec::with_capacity(rows.len());
@@ -641,7 +644,12 @@ macro_rules! engine_rows {
                         )));
                     }
                 }
-                sqlx::query("DELETE FROM in_flight WHERE host = $1").bind(cut.host as i64).execute(&mut *tx).await?;
+                // The rows this process adopted at start ([`Fence::in_flight_scope`]): its
+                // own host's, or (all-in-one) every host's.
+                sqlx::query("DELETE FROM in_flight WHERE $1 IS NULL OR host = $1")
+                    .bind(fence.in_flight_scope().map(|_| cut.host as i64))
+                    .execute(&mut *tx)
+                    .await?;
                 // `seq` is the table's key across all hosts: each host owns a range
                 // (`host << 32`), so concurrent commits never collide and need no MAX read.
                 let base = (cut.host as i64) << 32;

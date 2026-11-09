@@ -7,7 +7,11 @@ use super::{Claim, RequestId, WorldReply};
 use crate::history::persist::HistoryLoadError;
 use crate::PlayerId;
 
-/// The format byte leading an encoded [`CoordinatorState`].
+/// The format byte leading an encoded [`CoordinatorState`]. A stored state of another
+/// format is NOT migrated or replaced: the server refuses to start (`Corrupt`, fatal in
+/// `ensure_coordinator_state`) — the state holds the world's people, claims and replies.
+/// Bumping it therefore needs a migration of the old format (decode it, re-encode), or
+/// every world saved before stops loading.
 pub const COORDINATOR_STATE_VERSION: u8 = 1;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]

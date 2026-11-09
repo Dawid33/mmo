@@ -155,7 +155,7 @@ fn cut_roundtrip() {
             assert_eq!(terrain.ground, region_ground());
         }
         assert_eq!(h.stored_regions().unwrap(), BTreeMap::from([(A, 1), (B, 1)]));
-        assert_eq!(h.load_in_flight().unwrap(), cut.in_flight);
+        assert_eq!(h.load_in_flight(None).unwrap(), cut.in_flight);
         assert_eq!(h.load_history().unwrap(), Some(vec![1, 2, 3, 4]));
         assert_eq!(h.world_info().unwrap().world_tick, 1000);
         let (pid, rec) = h.resolve_player(&token(1)).unwrap();
@@ -200,7 +200,7 @@ fn second_cut_writes_only_given_chunks() {
         let b = h.load_region(B, &f).unwrap().unwrap();
         assert_eq!(b.chunks, vec![(ChunkCoords::new(2, 5, 0), chunk())]);
         assert_eq!(b.entities, vec![entity(A, 7), entity(B, 1)], "an entity moved A -> B in one cut");
-        assert_eq!(h.load_in_flight().unwrap(), vec![]);
+        assert_eq!(h.load_in_flight(None).unwrap(), vec![]);
         assert_eq!(h.load_history().unwrap(), Some(vec![1, 2, 3, 4]), "history kept when the cut has none");
         assert_eq!(h.resolve_player(&token(1)).unwrap().1, Some(player()), "player kept");
         assert_eq!(h.world_info().unwrap().world_tick, 1100);
@@ -239,7 +239,7 @@ fn commit_cut_is_atomic() {
             assert_eq!(h.load_region(*rc, &f).unwrap().as_ref(), Some(&stored(p)), "region {rc:?} unchanged");
         }
         assert_eq!(h.stored_regions().unwrap(), BTreeMap::from([(A, 1), (B, 1)]));
-        assert_eq!(h.load_in_flight().unwrap(), first.in_flight);
+        assert_eq!(h.load_in_flight(None).unwrap(), first.in_flight);
         assert_eq!(h.load_history().unwrap(), Some(vec![1, 2, 3, 4]));
         assert_eq!(h.resolve_player(&token(1)).unwrap().1, Some(player()));
         assert_eq!(h.world_info().unwrap().world_tick, 1000);
@@ -294,7 +294,7 @@ fn u64_max_serial_roundtrips() {
         let done = h.commit_cut(cut.clone(), f.clone()).recv().unwrap().unwrap();
         assert_eq!(done.id, CutId(u64::MAX));
         assert_eq!(h.load_region(far, &f).unwrap(), Some(stored(&p)));
-        assert_eq!(h.load_in_flight().unwrap(), cut.in_flight);
+        assert_eq!(h.load_in_flight(None).unwrap(), cut.in_flight);
         assert_eq!(h.world_info().unwrap().world_tick, i64::MAX as u64);
         h.shutdown();
     });
@@ -308,7 +308,7 @@ fn missing_region_is_none_not_error() {
         assert_eq!(h.load_region(A, &f).unwrap(), None);
         assert!(h.load_terrain(A).unwrap().is_none());
         assert!(h.stored_regions().unwrap().is_empty());
-        assert!(h.load_in_flight().unwrap().is_empty());
+        assert!(h.load_in_flight(None).unwrap().is_empty());
         assert_eq!(h.load_history().unwrap(), None);
         assert_eq!(h.forged_archive().unwrap(), None);
         let info = h.world_info().unwrap();

@@ -312,7 +312,7 @@ mod tests {
     }
 
     fn hello() -> LinkHello {
-        LinkHello::new("t".into(), svc_link::PeerRole::Host { ordinal: 0, boot: 1 })
+        LinkHello::new("t".into(), svc_link::PeerRole::Host { ordinal: 0, boot: 1, epoch: 1 })
     }
 
     fn calendar(t: u64) -> CoordMsg {

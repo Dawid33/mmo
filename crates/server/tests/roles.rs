@@ -195,8 +195,9 @@ impl Coordinator {
 }
 
 /// A host's link to the coordinator at `addr`, its pin read from `cert_file` (waited for).
+/// Claim epoch 0 for every host life: equal epochs, so the newest connection is the live one.
 fn quic_link(addr: std::net::SocketAddr, cert_file: PathBuf, boot: u64) -> QuicWorldLink {
-    let hello = svc_link::LinkHello::new(TOKEN.into(), svc_link::PeerRole::Host { ordinal: 0, boot });
+    let hello = svc_link::LinkHello::new(TOKEN.into(), svc_link::PeerRole::Host { ordinal: 0, boot, epoch: 0 });
     QuicWorldLink::connect(addr, move || svc_link::read_cert_hash("MMO_ROLES_TEST_UNSET_PIN", &cert_file), hello)
 }
 
@@ -248,7 +249,7 @@ impl Host {
         );
         manager.set_ownership(ownership, store.super_region_regions());
         manager.set_stored_regions(store.stored_regions().unwrap());
-        manager.restore_in_flight(store.load_in_flight().unwrap());
+        manager.restore_in_flight(store.load_in_flight(claims.fence().in_flight_scope()).unwrap());
         manager.set_world_link(link, boot, 0);
         manager.set_world_map(map.clone());
         Host { manager, claims, coordinator, region_out, packets, inbox: Vec::new(), started: Instant::now() }
@@ -550,7 +551,7 @@ fn second_host_ordinal_is_refused() {
 
     // Host 1 dials and attaches running nothing.
     let pin = svc_link::read_cert_hash("MMO_ROLES_TEST_UNSET_PIN", &cert_file).unwrap();
-    let hello = svc_link::LinkHello::new(TOKEN.into(), svc_link::PeerRole::Host { ordinal: 1, boot: 2 });
+    let hello = svc_link::LinkHello::new(TOKEN.into(), svc_link::PeerRole::Host { ordinal: 1, boot: 2, epoch: 1 });
     let (stray, stray_events) = svc_link::LinkDialer::connect::<game::CoordMsg, game::HostMsg>(addr, pin, hello);
     let deadline = Instant::now() + WAIT;
     loop {

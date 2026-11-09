@@ -732,7 +732,8 @@ pub fn run() -> claims::ServerExit {
         // process dialed over the service link (`host`).
         if role == roles::Role::Host {
             let boot = host_boot();
-            let link = host_world_link(ownership.ordinal(), boot).unwrap_or_else(|e| fatal(&e));
+            let epoch = claims.as_ref().map_or(0, |c| c.fence().claim_epoch());
+            let link = host_world_link(ownership.ordinal(), boot, epoch).unwrap_or_else(|e| fatal(&e));
             world_wake = link.wake();
             manager.set_world_link(Box::new(link), boot, 0);
         } else if let Some(store) = &store {
@@ -757,7 +758,8 @@ pub fn run() -> claims::ServerExit {
     let mut cuts = claims.map(|claims| {
         let store = claims.store().clone();
         let stored = store.stored_regions().unwrap_or_else(|e| fatal(&e.to_string()));
-        let in_flight = store.load_in_flight().unwrap_or_else(|e| fatal(&e.to_string()));
+        let in_flight =
+            store.load_in_flight(claims.fence().in_flight_scope()).unwrap_or_else(|e| fatal(&e.to_string()));
         info!(
             "[server] world store: {} stored regions, {} crossings / intents in flight, world tick {}",
             stored.len(),
@@ -1079,14 +1081,16 @@ mod tests {
 /// `VOXEL_COORDINATOR_ADDR` with the service token, pinning the coordinator's
 /// certificate (`VOXEL_COORDINATOR_CERT_SHA256`, else the cert-hash file — waited for
 /// if the coordinator has not written it yet).
-fn host_world_link(ordinal: u32, boot: u64) -> Result<roles::QuicWorldLink, String> {
+/// `epoch`: the host's claim epoch ([`world_store::Fence::claim_epoch`]), in its hello: the
+/// coordinator keeps one connection per ordinal, the highest epoch's.
+fn host_world_link(ordinal: u32, boot: u64, epoch: u64) -> Result<roles::QuicWorldLink, String> {
     let addr = roles::coordinator_addr_from(
         roles::COORDINATOR_ADDR_ENV,
         std::env::var(roles::COORDINATOR_ADDR_ENV).ok().as_deref(),
     )?;
     let token = svc_link::service_token_from_env().map_err(|e| format!("the service link's token: {e}"))?;
     let cert_file = roles::cert_hash_file_from(std::env::var(roles::COORDINATOR_CERT_HASH_FILE_ENV).ok().as_deref());
-    let hello = svc_link::LinkHello::new(token, svc_link::PeerRole::Host { ordinal, boot });
+    let hello = svc_link::LinkHello::new(token, svc_link::PeerRole::Host { ordinal, boot, epoch });
     info!("[server] the world coordinator is a separate process at {addr} (pin from {})", cert_file.display());
     Ok(roles::QuicWorldLink::connect(
         addr,

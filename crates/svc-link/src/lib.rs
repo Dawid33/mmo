@@ -36,8 +36,8 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 pub use cert::{SERVICE_TOKEN_ENV, SERVICE_TOKEN_FILE_ENV, cert_sha256_hex, read_cert_hash, service_token_from_env};
 pub use frame::{FrameError, LINK_MAX_FRAME_BYTES};
 
-/// Wire version of the hello; a mismatch is refused.
-pub const LINK_PROTOCOL_VERSION: u32 = 1;
+/// Wire version of the hello; a mismatch is refused. 2: a host's hello carries its claim epoch.
+pub const LINK_PROTOCOL_VERSION: u32 = 2;
 /// First reconnect delay; doubles per failed attempt up to [`LINK_RETRY_MAX_MS`].
 pub const LINK_RETRY_MIN_MS: u64 = 250;
 pub const LINK_RETRY_MAX_MS: u64 = 5000;
@@ -48,6 +48,15 @@ const LINK_HELLO_MAX_BYTES: usize = 4096;
 const LINK_KEEP_ALIVE: Duration = Duration::from_secs(5);
 const LINK_IDLE_TIMEOUT: Duration = Duration::from_secs(15);
 const LINK_ALPN: &[u8] = b"mmo-svc-link/1";
+/// Most connections a listener carries through the QUIC handshake and hello at once; more
+/// are refused until one finishes (an unauthenticated peer must not make it hold unbounded
+/// handshakes).
+const LINK_MAX_PENDING_HANDSHAKES: usize = 16;
+/// Per-stream and per-connection flow-control windows: what a peer can make the other end
+/// buffer before it reads (the link's one stream is read as it arrives; a frame larger than
+/// the window still passes, paced by flow control).
+const LINK_STREAM_WINDOW: u32 = 1024 * 1024;
+const LINK_CONNECTION_WINDOW: u32 = 2 * 1024 * 1024;
 /// The certificate's name; the pin, not the name, is what is verified.
 const LINK_SERVER_NAME: &str = "localhost";
 /// QUIC application close codes.
@@ -56,19 +65,35 @@ const CLOSE_NORMAL: u32 = 0;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PeerRole {
-    Host { ordinal: u32, boot: u64 },
+    /// A region host: its ordinal, its process start (`boot`), and its claim `epoch` (the
+    /// highest owner epoch of the super-regions it claimed): a process that claimed later
+    /// has the higher one, so a listener keeping one peer per ordinal can tell a stale
+    /// process (about to be fenced) from its replacement.
+    Host { ordinal: u32, boot: u64, epoch: u64 },
     Login,
     Coordinator,
 }
 
-/// The first frame a dialer sends.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// The first frame a dialer sends. Its `Debug` never shows the token.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LinkHello {
     pub token: String,
     pub role: PeerRole,
     pub region_blocks: u32,
     pub chunk_blocks: u32,
     pub protocol: u32,
+}
+
+impl std::fmt::Debug for LinkHello {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LinkHello")
+            .field("token", &"<redacted>")
+            .field("role", &self.role)
+            .field("region_blocks", &self.region_blocks)
+            .field("chunk_blocks", &self.chunk_blocks)
+            .field("protocol", &self.protocol)
+            .finish()
+    }
 }
 
 impl LinkHello {
@@ -130,6 +155,14 @@ impl<Out> PeerSenders<Out> {
     pub fn peers(&self) -> Vec<PeerId> {
         self.peers.lock().unwrap().keys().copied().collect()
     }
+
+    /// Close `peer`'s connection: nothing more is sent to it, and its link ends (its
+    /// `Down` follows; messages it sent before may still arrive ahead of that). False if it
+    /// was not connected.
+    pub fn close(&self, peer: PeerId) -> bool {
+        // Dropping its queue's sender ends the link's writer, and so the link.
+        self.peers.lock().unwrap().remove(&peer).is_some()
+    }
 }
 
 /// Owns the listening endpoint and its runtime; dropping it stops the listener and frees the port.
@@ -154,6 +187,13 @@ fn transport() -> Arc<TransportConfig> {
     let mut t = TransportConfig::default();
     t.keep_alive_interval(Some(LINK_KEEP_ALIVE));
     t.max_idle_timeout(Some(LINK_IDLE_TIMEOUT.try_into().expect("idle timeout fits")));
+    // One bidirectional stream (the dialer's) and no unidirectional ones: quinn's defaults
+    // (100 + 100 streams, ~1.25 MB each) would let an unauthenticated peer make the other
+    // end buffer hundreds of MB during the hello.
+    t.max_concurrent_bidi_streams(1u32.into());
+    t.max_concurrent_uni_streams(0u32.into());
+    t.stream_receive_window(LINK_STREAM_WINDOW.into());
+    t.receive_window(LINK_CONNECTION_WINDOW.into());
     Arc::new(t)
 }
 
@@ -227,12 +267,21 @@ impl LinkListener {
         runtime.spawn(async move {
             let next_peer = Arc::new(AtomicU64::new(1));
             let token = Arc::new(token);
+            let handshakes = Arc::new(tokio::sync::Semaphore::new(LINK_MAX_PENDING_HANDSHAKES));
             while let Some(incoming) = accept_endpoint.accept().await {
+                let Ok(permit) = handshakes.clone().try_acquire_owned() else {
+                    log::warn!(
+                        "[svc-link] refusing {}: {LINK_MAX_PENDING_HANDSHAKES} handshakes already pending",
+                        incoming.remote_address()
+                    );
+                    incoming.refuse();
+                    continue;
+                };
                 let (event_tx, peers, token) = (event_tx.clone(), peers.clone(), token.clone());
                 let peer = PeerId(next_peer.fetch_add(1, Ordering::Relaxed));
                 tokio::spawn(async move {
-                    let Ok(connection) = incoming.await else { return };
-                    serve_peer(connection, peer, token, event_tx, peers).await;
+                    let Ok(Ok(connection)) = tokio::time::timeout(LINK_HELLO_TIMEOUT, incoming).await else { return };
+                    serve_peer(connection, peer, token, event_tx, peers, permit).await;
                 });
             }
         });
@@ -261,6 +310,7 @@ async fn serve_peer<In, Out>(
     token: Arc<String>,
     events: Sender<(PeerId, LinkEvent<In>)>,
     peers: Arc<Mutex<BTreeMap<PeerId, UnboundedSender<Out>>>>,
+    handshake_permit: tokio::sync::OwnedSemaphorePermit,
 ) where
     In: DeserializeOwned + Send + 'static,
     Out: Serialize + Send + 'static,
@@ -280,6 +330,8 @@ async fn serve_peer<In, Out>(
     if let Err(why) = check_hello(&hello, &token) {
         return refuse(&connection, &why).await;
     }
+    // Authenticated: no longer a pending handshake.
+    drop(handshake_permit);
     if frame::write_frame(&mut send, &true).await.is_err() {
         return;
     }

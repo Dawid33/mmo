@@ -597,7 +597,7 @@ fn stored_rig(store: &world_store::StoreHandle) -> (Rig, HostClaims) {
         .with_clock(game::WorldClock::starting_at(0, info.world_tick), Instant::now());
     let mut rig = Rig::with_spawner(spawner, |_| lightweight_columns());
     rig.manager.set_stored_regions(store.stored_regions().unwrap());
-    rig.manager.restore_in_flight(store.load_in_flight().unwrap());
+    rig.manager.restore_in_flight(store.load_in_flight(claims.fence().in_flight_scope()).unwrap());
     (rig, claims)
 }
 

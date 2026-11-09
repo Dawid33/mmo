@@ -123,6 +123,12 @@ pub fn check_legacy_saves(store: &StoreHandle, world_file: Option<&Path>) -> Res
 /// that very command before a single-player world starts again. Logged as
 /// `[server] … re-tiling` and `[perf] event=world_retiled`. Without an
 /// archive it is refused (re-forge).
+///
+/// Split roles on one Postgres world: the coordinator and every host run this at start.
+/// After a build that changes the tile format two of them may re-tile at once; the
+/// re-tile is one transaction, so one wins and a concurrent one may fail its start (start
+/// it again — it then finds the new tiles). Bump a split world's processes one at a time
+/// (coordinator first), or re-tile it once beforehand with `just worldctl retile`.
 pub fn ensure_world(
     store: &StoreHandle,
     import: Option<&Path>,
@@ -287,9 +293,15 @@ pub struct CoordinatorStart {
     /// Its calendar anchored at `now_ms` 0: the runtime's clock starts with it.
     pub coordinator: game::Coordinator,
     pub source: CoordinatorSource,
+    /// The coordinator row's fence, claimed BEFORE the state was loaded: a coordinator
+    /// still running can commit nothing after that load, so the state loaded is the
+    /// last one any coordinator committed (loading first would let it commit a newer
+    /// state — a site, a claim, a released reply — that this start then runs without).
+    pub fence: world_store::CoordinatorFence,
 }
 
-/// The world coordinator's state: its `coordinator` row, else an R1 world's `history`
+/// Claims the coordinator row ([`StoreHandle::claim_coordinator`], fencing any coordinator
+/// that held it), then loads the world coordinator's state: its `coordinator` row, else an R1 world's `history`
 /// row migrated into one (claims empty — a player's record claim is taken back when the
 /// player comes online — and no memo), else a history bootstrapped from the world map.
 /// The runtime saves a migrated or bootstrapped one at once
@@ -301,7 +313,9 @@ pub struct CoordinatorStart {
 /// [`coordinator_backup_path`] / [`history_backup_path`]; a copy that cannot be written
 /// stops the server — it is never discarded silently; with no path, a Postgres store, the
 /// log says it is discarded). Anything else that will not load stops the server: it holds
-/// the world's people. `None`: a world nobody can live in (playable, no history).
+/// the world's people — among it a coordinator state whose format byte is not this build's
+/// [`game::coordinator::COORDINATOR_STATE_VERSION`] (never replaced, never migrated
+/// silently). `None`: a world nobody can live in (playable, no history).
 pub fn ensure_coordinator_state(
     store: &StoreHandle,
     map: &game::WorldMap,
@@ -311,11 +325,14 @@ pub fn ensure_coordinator_state(
     use game::history::SocietyGrid;
     let grid = SocietyGrid::from_world_map(map);
     let replaceable = |e: &HistoryLoadError| matches!(e, HistoryLoadError::OtherWorld | HistoryLoadError::OldVersion { .. });
+    // Claim first, then load (see `CoordinatorStart::fence`).
+    let fence = store.claim_coordinator().map_err(|e| format!("claiming the world coordinator: {e}"))?;
+    log::info!("[coordinator] claimed the world coordinator (epoch {})", fence.epoch);
     if let Some(bytes) = store.load_coordinator().map_err(|e| e.to_string())? {
         let state = game::CoordinatorState::decode(&bytes)
             .map_err(|e| format!("the world store's coordinator state does not load: {e}"))?;
         match game::Coordinator::from_state(state, grid.clone(), 0) {
-            Ok(coordinator) => return Ok(Some(CoordinatorStart { coordinator, source: CoordinatorSource::Stored })),
+            Ok(coordinator) => return Ok(Some(CoordinatorStart { coordinator, source: CoordinatorSource::Stored, fence })),
             Err(e) if replaceable(&e) => {
                 keep_replaced("coordinator state", &e, &bytes, sqlite_db.map(coordinator_backup_path))?
             }
@@ -328,7 +345,7 @@ pub fn ensure_coordinator_state(
                 let coordinator = game::Coordinator::from_state(state, grid, 0)
                     .map_err(|e| format!("the world store's history does not load: {e}"))?;
                 log::info!("[server] migrating the world's history row into the coordinator's state");
-                return Ok(Some(CoordinatorStart { coordinator, source: CoordinatorSource::Migrated }));
+                return Ok(Some(CoordinatorStart { coordinator, source: CoordinatorSource::Migrated, fence }));
             }
             Err(e) if replaceable(&e) => keep_replaced("history", &e, &bytes, sqlite_db.map(history_backup_path))?,
             Err(e) => return Err(format!("the world store's history does not load: {e}")),
@@ -337,6 +354,7 @@ pub fn ensure_coordinator_state(
     Ok(bootstrap_history(map, grid).map(|history| CoordinatorStart {
         coordinator: game::Coordinator::new(history, 0),
         source: CoordinatorSource::Bootstrapped,
+        fence,
     }))
 }
 

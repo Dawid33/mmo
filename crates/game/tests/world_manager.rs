@@ -1321,6 +1321,37 @@ fn record_of_a_restore_into_a_failed_region_is_kept() {
 }
 
 
+/// A record whose region is off the map (the world changed) lands at the spawn region;
+/// with the spawn region unavailable the session is refused and the record is NOT parked
+/// again: the store holds it already, and a cut writing it would touch a super-region off
+/// the map that no host claims — refused as fenced, that cut (and every later one) would
+/// fail for good.
+#[test]
+fn off_map_record_refused_at_an_unavailable_spawn_is_not_parked() {
+    crate::common::install_real_block_props();
+    let mut h = FailHarness::new(FailingSpawner::new(SPAWN_REGION));
+    let off_map = RegionCoords::new(0, 5);
+    let stored = PlayerRecord {
+        client: game::Client::default(),
+        pose: game::Pose::from_translation(body_on_tile([5, 1, 7])),
+        region: off_map,
+        fortress: None,
+        adventure: None,
+    };
+    h.event(session(0, 4, Some(stored.clone())));
+    h.manager.spawner_mut().report_failures();
+    h.settle();
+    assert!(h.manager.is_unavailable(SPAWN_REGION));
+    h.event(session(1, 4, Some(stored)));
+    assert_eq!(h.manager.depths().sessions, 0, "refused");
+    let cut = h.cut();
+    assert!(
+        cut.players.iter().all(|(_, r)| r.region != off_map),
+        "no off-map record in the cut: {:?}",
+        cut.players.iter().map(|(p, r)| (*p, r.region)).collect::<Vec<_>>()
+    );
+}
+
 /// Ownership (`set_ownership`): a region another host owns is never started
 /// here; Play into it is refused `RegionUnavailable` and nothing is spawned.
 #[test]

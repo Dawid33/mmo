@@ -3447,10 +3447,16 @@ impl<S: RegionSpawner> WorldManager<S> {
             // ended, the record kept for the next try.
             log::warn!("client {id}: its region {target:?} is unavailable; session refused");
             // A region another host owns: the store holds the record already,
-            // unchanged (our cut must not write it back).
+            // unchanged (our cut must not write it back). Nor is an off-map record
+            // parked again (only the store can hold one): a cut writing it would touch a
+            // super-region nobody claims, and be refused as fenced for good.
             if self.owns(target) {
                 if let (Some(record), Some(player)) = (record, self.player_of.get(&id).copied()) {
-                    self.parked_players.insert(player, record);
+                    if crate::off_map(self.map_extent(), record.region) {
+                        log::warn!("client {id}: its off-map record is left as stored");
+                    } else {
+                        self.parked_players.insert(player, record);
+                    }
                 }
             }
             let _ = self.out.send((Some(id), ServerPacket::Refused(REGION_UNAVAILABLE_REFUSAL.to_string())));

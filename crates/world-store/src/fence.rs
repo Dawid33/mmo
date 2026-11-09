@@ -20,6 +20,26 @@ pub type SuperRegion = (i32, i32);
 pub struct Fence {
     pub owner: u32,
     pub epochs: BTreeMap<SuperRegion, u64>,
+    /// The process runs every host's regions (`Ownership::AllInOne`): it adopts every
+    /// host's in-flight rows ([`Fence::in_flight_scope`]) and its cuts replace them all.
+    /// Otherwise a host adopts and replaces only the rows of `owner` — never another
+    /// host's, which that host still re-commits (adopting them would deliver them twice).
+    pub all_hosts: bool,
+}
+
+impl Fence {
+    /// Whose in-flight rows this process adopts at start
+    /// ([`crate::StoreHandle::load_in_flight`]): `None` = every host's.
+    pub fn in_flight_scope(&self) -> Option<u32> {
+        (!self.all_hosts).then_some(self.owner)
+    }
+
+    /// The claim's epoch as one number: the highest owner epoch it set (0 with no
+    /// super-regions). A later claim of the same super-regions bumps every epoch, so the
+    /// process that claimed last has the higher one (its service-link hello carries it).
+    pub fn claim_epoch(&self) -> u64 {
+        self.epochs.values().copied().max().unwrap_or(0)
+    }
 }
 
 /// What the coordinator claimed: the epoch of its row.

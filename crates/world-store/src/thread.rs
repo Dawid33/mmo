@@ -58,7 +58,7 @@ pub(crate) enum Request {
     LoadRegion(RegionCoords, Fence, Reply<Option<game::StoredRegion>>),
     LoadTerrain(RegionCoords, Reply<Option<game::TerrainSnapshot>>),
     StoredRegions(Reply<std::collections::BTreeMap<RegionCoords, u64>>),
-    LoadInFlight(Reply<Vec<game::InFlightRow>>),
+    LoadInFlight(Option<u32>, Reply<Vec<game::InFlightRow>>),
     LoadHistory(Reply<Option<Vec<u8>>>),
     CommitCut(Box<WorldCut>, Fence, Reply<CutCommitted>),
     ResolvePlayer(String, Reply<(PlayerId, Option<PlayerRecord>)>),
@@ -182,17 +182,26 @@ async fn serve(pool: Pool, guard: LockGuard, s: u32, read_only: bool, mut rx: mp
             }
             Request::LoadTerrain(rc, r) => tokio::spawn(async move { r.send(on_pool!(&pool, load_terrain(rc))) }),
             Request::StoredRegions(r) => tokio::spawn(async move { r.send(on_pool!(&pool, stored_regions())) }),
-            Request::LoadInFlight(r) => tokio::spawn(async move { r.send(on_pool!(&pool, load_in_flight())) }),
+            Request::LoadInFlight(host, r) => {
+                tokio::spawn(async move { r.send(on_pool!(&pool, load_in_flight(host))) })
+            }
             Request::LoadHistory(r) => tokio::spawn(async move { r.send(on_pool!(&pool, load_history())) }),
             Request::ResolvePlayer(token, r) => tokio::spawn(async move {
                 // A known token is a read: no wait behind a long commit. A new one
-                // inserts and reads back; the database assigns the id, so no writer lock.
+                // inserts and reads back; the database assigns the id. On SQLite the
+                // insert takes the writer lock: a write beside a commit would either wait
+                // out the busy timeout or (the commit's transaction having read first) fail
+                // the commit with SQLITE_BUSY_SNAPSHOT. Postgres needs none.
                 match on_pool!(&pool, find_player(&token)) {
                     Ok(Some(found)) => return r.send(Ok(found)),
                     Ok(None) if read_only => return r.send(Err(StoreError::ReadOnly)),
                     Ok(None) => {}
                     Err(e) => return r.send(Err(e)),
                 }
+                let _w = match &pool {
+                    Pool::Sqlite(_) => Some(writer.lock().await),
+                    Pool::Pg(_) => None,
+                };
                 r.send(on_pool!(&pool, resolve_player(&token)))
             }),
             Request::ClaimSuperRegions(owner, srs, r) => tokio::spawn(async move {

@@ -89,7 +89,7 @@ impl Core {
             lod_result_recv,
         );
         manager.set_stored_regions(store.stored_regions().unwrap());
-        manager.restore_in_flight(store.load_in_flight().unwrap());
+        manager.restore_in_flight(store.load_in_flight(claims.fence().in_flight_scope()).unwrap());
         Core { manager, claims, region_out, _packets: packets }
     }
 

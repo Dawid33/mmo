@@ -150,7 +150,7 @@ impl Life {
             lod_result_recv,
         );
         manager.set_stored_regions(store.stored_regions().unwrap());
-        manager.restore_in_flight(store.load_in_flight().unwrap());
+        manager.restore_in_flight(store.load_in_flight(claims.fence().in_flight_scope()).unwrap());
         let (link, thread) = coordinator_rt::start_all_in_one(store.clone(), start, claims.fenced().clone()).unwrap();
         manager.set_world_link(Box::new(link), boot, 0);
         manager.set_world_map(map.clone());
@@ -462,6 +462,57 @@ fn fenced_coordinator_stops() {
     assert_eq!(thread.shutdown(Duration::from_secs(1)), ServerExit::Fenced);
     let (saved, _) = stored_state(&store, &map).unwrap();
     assert!(player_sites(&saved).is_empty(), "the fenced founding was never written");
+    store.shutdown();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A second coordinator starts while the first still runs (an overlapping restart):
+/// `ensure_coordinator_state` claims the row BEFORE it loads, so the first one — its
+/// founding's save failing and retried — can commit nothing after that load: it is
+/// fenced, and the state the second one runs from is the last one committed (loading
+/// first would let the first commit a newer state the second never sees).
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn overlapping_start_claims_before_it_loads() {
+    let dir = scratch("overlap");
+    let map = land_map();
+    let store = open_store(&dir);
+    let first = ensure_coordinator_state(&store, &map, None).unwrap().unwrap();
+    let first_epoch = first.fence.epoch;
+    let req = embark_request(first.coordinator.history());
+    let fenced = server::claims::Fenced::default();
+    let (mut link, thread) = coordinator_rt::start_all_in_one(store.clone(), first, fenced.clone()).unwrap();
+    let deadline = Instant::now() + WAIT;
+    while store.load_coordinator().unwrap().is_none() {
+        assert!(Instant::now() < deadline, "the bootstrap was never saved");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    // The founding's saves fail for a while (retried every 250 ms).
+    store.fail_next_writes(2);
+    let player = PlayerId(1);
+    let online = vec![game::OnlinePlayer { player, claim: None, claim_pending: false }];
+    link.send(HostMsg::Attach { host: 0, epoch: 1, running: Vec::new(), online });
+    link.send(HostMsg::Request { id: RequestId { host: 0, boot: 1, seq: 1 }, player, req: WorldRequest::Embark(req) });
+    while store.failing_writes_left() > 1 {
+        assert!(Instant::now() < deadline, "the founding's save was never tried");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    // The second coordinator starts now.
+    let second = ensure_coordinator_state(&store, &map, None).unwrap().unwrap();
+    assert!(second.fence.epoch > first_epoch, "claimed over the first");
+    while !thread.is_finished() {
+        assert!(Instant::now() < deadline, "the first coordinator kept running after the second claimed");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(fenced.is_set(), "the first is fenced");
+    assert_eq!(thread.shutdown(Duration::from_secs(1)), ServerExit::Fenced);
+    let (saved, _) = stored_state(&store, &map).unwrap();
+    assert_eq!(
+        player_sites(&saved),
+        player_sites(second.coordinator.history()),
+        "the second runs from the last committed state"
+    );
+    assert!(player_sites(&saved).is_empty(), "the first committed nothing after the second's load");
     store.shutdown();
     let _ = std::fs::remove_dir_all(&dir);
 }

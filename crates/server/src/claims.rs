@@ -101,7 +101,12 @@ impl HostClaims {
             ));
         }
         let srs: Vec<SuperRegion> = ownership.claim_set(extent, stored).into_iter().collect();
-        HostClaims::claim_srs(store, ownership.ordinal(), srs).map_err(|e| format!("claiming the super-regions: {e}"))
+        let mut claims = HostClaims::claim_srs(store, ownership.ordinal(), srs)
+            .map_err(|e| format!("claiming the super-regions: {e}"))?;
+        // All-in-one runs every host's regions: it adopts (and its cuts replace) every
+        // host's in-flight rows.
+        Arc::make_mut(&mut claims.fence).all_hosts = matches!(ownership, Ownership::AllInOne);
+        Ok(claims)
     }
 
     /// Claims exactly `srs` as `owner`.

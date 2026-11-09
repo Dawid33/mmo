@@ -63,11 +63,13 @@ impl StoreHandle {
     /// Test hook: the next `n` queued writes — cut commits ([`StoreHandle::commit_cut`])
     /// and coordinator saves ([`StoreHandle::save_coordinator`]), whichever come first —
     /// fail with a `Backend` error (not `Fenced`) and write nothing. Shared by every clone.
+    #[doc(hidden)]
     pub fn fail_next_writes(&self, n: u32) {
         self.fail_writes.store(n, Ordering::SeqCst);
     }
 
     /// Test hook: writes [`StoreHandle::fail_next_writes`] has still to fail.
+    #[doc(hidden)]
     pub fn failing_writes_left(&self) -> u32 {
         self.fail_writes.load(Ordering::SeqCst)
     }
@@ -144,9 +146,10 @@ impl StoreHandle {
         self.ask(Request::StoredRegions)
     }
 
-    /// The last committed cut's in-flight rows, in their order.
-    pub fn load_in_flight(&self) -> Result<Vec<InFlightRow>, StoreError> {
-        self.ask(Request::LoadInFlight)
+    /// The in-flight rows the last committed cuts left, in their order: host `host`'s
+    /// (`None`: every host's — pass [`crate::Fence::in_flight_scope`]).
+    pub fn load_in_flight(&self, host: Option<u32>) -> Result<Vec<InFlightRow>, StoreError> {
+        self.ask(|r| Request::LoadInFlight(host, r))
     }
 
     pub fn load_history(&self) -> Result<Option<Vec<u8>>, StoreError> {
