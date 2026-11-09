@@ -133,22 +133,22 @@ pub async fn resolve_session(
     }
 }
 
-/// The edge announces a resolved session to the manager: `ClientConnected`,
-/// then — for a spawn-order session — a `Supersede` if a `Kick` revoked it
-/// between its admission and this announcement (that kick found no session).
-/// Both go on the manager's one event channel, in this order.
+/// The edge announces a resolved session to the manager: `ClientConnected` — for a
+/// spawn-order session under the login link's lock, and only if no `Kick` revoked it and no
+/// newer login of its player is known since its admission ([`crate::login_link::SpawnOrders::announce`]).
+/// `Err` is the refusal: nothing was announced; the edge refuses the connection and ends
+/// the ticket's session ([`crate::auth_edge::Authenticator::session_ended`]).
 pub fn announce_session(
     send: &crossbeam::channel::Sender<game::ServerEvent>,
     client: game::ClientId,
     session: &HelloSession,
     auth: &crate::auth_edge::Authenticator,
-) {
+) -> Result<(), String> {
     let player = session.player;
-    let _ = send.send(game::ServerEvent::ClientConnected { client, player, record: session.record.clone() });
-    if let Some(reason) = session.ticket.as_ref().and_then(|t| auth.revoked(t)) {
-        log::info!("[server] client {client}: its login was revoked while it connected");
-        let _ = send.send(game::ServerEvent::Supersede { player, reason });
-    }
+    auth.announce(session.ticket.as_ref(), || {
+        let _ = send.send(game::ServerEvent::ClientConnected { client, player, record: session.record.clone() });
+    })
+    .inspect_err(|why| log::info!("[server] client {client}: its login was revoked while it connected: {why}"))
 }
 
 /// Nothing persisted: ids from 0 per process, no records (a player parked

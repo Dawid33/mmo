@@ -338,12 +338,15 @@ async fn refresh(State(s): State<AppState>, ApiJson(req): ApiJson<RefreshRequest
     Ok(Json(login_response(&account, token)))
 }
 
-/// Always 204: revokes the token's family if the token is known. With `all` (and a live
-/// token), every refresh token of the account too, and its session in every world is kicked.
+/// Always 204: revokes the token's family if the token is known. With `all` (and a known
+/// token, live or already rotated), every refresh token of the account too, and its session
+/// in every world is kicked.
 async fn logout(State(s): State<AppState>, ApiJson(req): ApiJson<LogoutRequest>) -> Result<StatusCode, Fail> {
     let now = s.now_db();
     match s.store.take_refresh(token_hash(&req.refresh_token), now).await? {
-        RefreshOutcome::Valid { account, family } if req.all => {
+        // A reused (already rotated) token with `all` signs out everywhere too: it may be the
+        // stolen copy's owner who saw the theft — its sessions must not survive.
+        RefreshOutcome::Valid { account, family } | RefreshOutcome::Reused { account, family } if req.all => {
             s.store.revoke_family(family, now).await?;
             let kicks = s.store.revoke_account_with_kicks(account, now, KICK_LOGOUT_ALL).await?;
             log::info!("[login] account {account} logged out everywhere ({kicks} kick(s) queued)");
@@ -390,6 +393,9 @@ async fn join(State(s): State<AppState>, ApiJson(req): ApiJson<JoinRequest>) -> 
         s.store.player_token_for(account.account_id, &world.world_id, s.now_db(), new_player_token).await?;
     let session_epoch = s.store.bump_session(account.account_id, &world.world_id, s.now_db()).await?;
     // The host parks any session of this player now (newest wins) and admits this epoch only.
+    // A 503 does not mean nothing happened: an order that reached the host and was applied
+    // (its ack lost, or later than the timeout) has already parked the player's online
+    // session there — the player is then logged out of that world and must join again.
     if let Err(e) = s.host_links.spawn(&world, &player_token, session_epoch).await {
         log::warn!(
             "[login] join: account {} world {} epoch {session_epoch}: {e}",
@@ -462,13 +468,16 @@ pub(crate) async fn request_reset(s: &AppState, email: &str) -> Result<(), Fail>
 pub(crate) async fn confirm_reset(s: &AppState, token: &str, password: String) -> Result<(), Fail> {
     check_password(&password).map_err(Fail::bad_request)?;
     let now = s.now_db();
-    let Some(account) = s.store.use_email_token(token_hash(token), EMAIL_TOKEN_RESET, now).await? else {
+    // The link is checked before the slow hash, and spent only with the reset itself: one
+    // transaction sets the password, revokes every session and queues their kicks.
+    if s.store.peek_email_token(token_hash(token), EMAIL_TOKEN_RESET, now).await?.is_none() {
         return Err(Fail::bad_request(BAD_LINK_MSG));
-    };
+    }
     let phc = hash_password(s, password).await?;
-    s.store.set_password(account, &phc).await?;
-    let kicks = s.store.revoke_account_with_kicks(account, now, KICK_PASSWORD_RESET).await?;
-    s.store.mark_verified(account, now).await?;
+    let reset = s.store.reset_password(token_hash(token), EMAIL_TOKEN_RESET, &phc, now, KICK_PASSWORD_RESET).await?;
+    let Some((account, kicks)) = reset else {
+        return Err(Fail::bad_request(BAD_LINK_MSG)); // spent meanwhile (a second click)
+    };
     log::info!("[login] account {account} reset its password ({kicks} kick(s) queued)");
     s.host_links.wake_kicks();
     Ok(())

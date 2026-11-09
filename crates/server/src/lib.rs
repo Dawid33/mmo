@@ -406,13 +406,19 @@ impl WorldIngress {
                         Err(why) => return refuse_quic(&connection, &why).await,
                     };
                 let (player, ticket) = (hello.player, hello.ticket.clone());
-                game::perf_event!("client_connected", "client={id} player={} transport=quic", player.0);
                 sinks.insert(id, ClientSink::Quinn(connection.clone()));
                 // Announce before any of this client's other packets can be
                 // read: guarantees the player exists before its first request
-                // is served.
-                // (and supersedes it at once if a kick revoked it meanwhile).
-                crate::player_store::announce_session(&send, id, &hello, &auth);
+                // is served. A login revoked meanwhile (kicked, or a newer one)
+                // is refused instead.
+                if let Err(why) = crate::player_store::announce_session(&send, id, &hello, &auth) {
+                    sinks.remove(&id);
+                    if let Some(ticket) = &ticket {
+                        auth.session_ended(ticket);
+                    }
+                    return refuse_quic(&connection, &why).await;
+                }
+                game::perf_event!("client_connected", "client={id} player={} transport=quic", player.0);
 
                 let fut = handle_connection(connection, send.clone(), id);
                 tokio::spawn(async move {

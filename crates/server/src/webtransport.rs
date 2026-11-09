@@ -180,13 +180,19 @@ pub async fn serve(
                     Err(why) => return refuse(&session, &why).await,
                 };
             let (player, ticket) = (hello.player, hello.ticket.clone());
-            info!("webtransport client {id} connected (player {})", player.0);
-            game::perf_event!("client_connected", "client={id} player={} transport=webtransport", player.0);
             sinks.insert(id, ClientSink::Web(session.clone()));
             // Announce before reading any other packets, mirroring the quinn
             // path: guarantees the player exists before its first request is served.
-            // (and supersedes it at once if a kick revoked it meanwhile).
-            crate::player_store::announce_session(&send, id, &hello, &auth);
+            // A login revoked meanwhile (kicked, or a newer one) is refused instead.
+            if let Err(why) = crate::player_store::announce_session(&send, id, &hello, &auth) {
+                sinks.remove(&id);
+                if let Some(ticket) = &ticket {
+                    auth.session_ended(ticket);
+                }
+                return refuse(&session, &why).await;
+            }
+            info!("webtransport client {id} connected (player {})", player.0);
+            game::perf_event!("client_connected", "client={id} player={} transport=webtransport", player.0);
 
             loop {
                 let stream = match session.accept_uni().await {

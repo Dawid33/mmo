@@ -327,3 +327,46 @@ async fn kick_queue_postgres() {
     kick_queue(LoginStore::open(&db.url).await.unwrap()).await;
     db.drop_db().await;
 }
+
+/// A password reset is one transaction: when a later step fails (here the kick queue is
+/// gone), the password is unchanged, the reset token is not spent and the account's refresh
+/// tokens stay — never a changed password with the old sessions alive.
+#[tokio::test]
+async fn reset_password_is_all_or_nothing() {
+    let dir = std::env::temp_dir().join(format!("login-reset-tx-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let db = dir.join("login.sqlite");
+    let _ = std::fs::remove_file(&db);
+    let s = LoginStore::open(db.to_str().unwrap()).await.unwrap();
+    let a = s.create_account("a@b.c", "old", 0).await.unwrap().unwrap();
+    s.insert_email_token([7; 32], a, 1, 1000).await.unwrap();
+    s.insert_refresh([1; 32], a, [9; 16], 1000).await.unwrap();
+    // Break the transaction's last step from outside.
+    let raw = sqlx::SqlitePool::connect(&format!("sqlite:{}", db.display())).await.unwrap();
+    sqlx::query("DROP TABLE pending_kicks").execute(&raw).await.unwrap();
+    raw.close().await;
+    assert!(s.reset_password([7; 32], 1, "new", 10, "reset").await.is_err());
+    assert_eq!(s.account(a).await.unwrap().unwrap().password_hash, "old", "the password is unchanged");
+    assert_eq!(s.peek_email_token([7; 32], 1, 10).await.unwrap(), Some(a), "the reset token is not spent");
+    assert_eq!(s.take_refresh([1; 32], 10).await.unwrap(), RefreshOutcome::Valid { account: a, family: [9; 16] });
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The happy path: token spent, password set, verified, refresh tokens revoked; a dead
+/// token changes nothing.
+#[tokio::test]
+async fn reset_password_spends_sets_and_revokes() {
+    let s = store().await;
+    let a = s.create_account("a@b.c", "old", 0).await.unwrap().unwrap();
+    s.insert_email_token([7; 32], a, 1, 1000).await.unwrap();
+    s.insert_refresh([1; 32], a, [9; 16], 1000).await.unwrap();
+    assert_eq!(s.reset_password([8; 32], 1, "new", 10, "reset").await.unwrap(), None, "unknown token");
+    assert_eq!(s.account(a).await.unwrap().unwrap().password_hash, "old");
+    assert_eq!(s.reset_password([7; 32], 1, "new", 10, "reset").await.unwrap(), Some((a, 0)));
+    let row = s.account(a).await.unwrap().unwrap();
+    assert_eq!((row.password_hash.as_str(), row.email_verified_at), ("new", Some(10)));
+    assert_eq!(s.peek_email_token([7; 32], 1, 11).await.unwrap(), None, "spent");
+    assert_ne!(s.take_refresh([1; 32], 11).await.unwrap(), RefreshOutcome::Valid { account: a, family: [9; 16] });
+    assert_eq!(s.set_password_with_kicks(a, "newer", 12, "set").await.unwrap(), 0);
+    assert_eq!(s.account(a).await.unwrap().unwrap().password_hash, "newer");
+}

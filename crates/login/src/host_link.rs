@@ -84,6 +84,9 @@ pub struct HostLinks {
     links: Mutex<BTreeMap<String, Arc<HostLink>>>,
     /// Wakes the kick sweeper: a link came up, or kicks were queued.
     kicks: Arc<Notify>,
+    /// Per world, why its kicks cannot be sent (as last logged): the sweeper warns once per
+    /// change, not every round.
+    kick_blocked: Mutex<BTreeMap<String, String>>,
 }
 
 impl HostLinks {
@@ -97,6 +100,7 @@ impl HostLinks {
             ack_timeout: Duration::from_millis(SPAWN_ACK_TIMEOUT_MS),
             links: Mutex::default(),
             kicks: Arc::new(Notify::new()),
+            kick_blocked: Mutex::default(),
         }
     }
 
@@ -137,9 +141,12 @@ impl HostLinks {
             if world.as_ref().is_none_or(|(id, _)| *id != kick.world_id) {
                 let link = match self.store.world(&kick.world_id).await {
                     Ok(Some(row)) => match self.link(&row) {
-                        Ok(link) => link,
+                        Ok(link) => {
+                            self.kick_blocked(&kick.world_id, None);
+                            link
+                        }
                         Err(e) => {
-                            log::warn!("[login] kicks for world {}: {e}", kick.world_id);
+                            self.kick_blocked(&kick.world_id, Some(e.to_string()));
                             None
                         }
                     },
@@ -157,6 +164,23 @@ impl HostLinks {
                     session_epoch: kick.session_epoch,
                     reason: kick.reason,
                 });
+            }
+        }
+    }
+
+    /// Note why `world`'s kicks cannot go (`None`: they can): warned once per change.
+    fn kick_blocked(&self, world: &str, why: Option<String>) {
+        let mut blocked = self.kick_blocked.lock().unwrap_or_else(|p| p.into_inner());
+        match why {
+            Some(why) if blocked.get(world) != Some(&why) => {
+                log::warn!("[login] kicks for world {world} cannot be sent: {why} (they wait)");
+                blocked.insert(world.to_string(), why);
+            }
+            Some(_) => {}
+            None => {
+                if blocked.remove(world).is_some() {
+                    log::info!("[login] kicks for world {world} can be sent again");
+                }
             }
         }
     }

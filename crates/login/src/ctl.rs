@@ -137,10 +137,22 @@ pub fn run_ctl_with(args: &[String], out: &mut dyn Write, deps: CtlDeps<'_>) -> 
                 host_link,
                 host_link_cert,
             };
-            block_on(async {
+            let cleared = block_on(async {
                 let store = open(&db_url()?).await?;
-                store.put_world(&row).await.map_err(|e| e.to_string())
+                // `world add` replaces the row: a world that had a host link loses it unless
+                // `--link` is given again (joins stop pushing, its kicks wait) — said aloud.
+                let before = store.world(&row.world_id).await.map_err(|e| e.to_string())?;
+                store.put_world(&row).await.map_err(|e| e.to_string())?;
+                Ok::<_, String>(before.and_then(|w| w.host_link).filter(|_| row.host_link.is_none()))
             })?;
+            if let Some(old) = cleared {
+                writeln!(
+                    out,
+                    "warning: world {id} had host link {old}; without --link it is cleared (joins no longer \
+                     push SpawnPlayer, kicks wait) — run `world add` again with --link/--link-cert to keep it"
+                )
+                .map_err(io)?;
+            }
             writeln!(out, "world {id} added").map_err(io)
         }
         ["world", "list"] => {
@@ -196,11 +208,11 @@ pub fn run_ctl_with(args: &[String], out: &mut dyn Write, deps: CtlDeps<'_>) -> 
                     .await
                     .map_err(|e| e.to_string())?
                     .ok_or_else(|| format!("no account {email:?}"))?;
-                store.set_password(acc.account_id, &hash).await.map_err(|e| e.to_string())?;
                 // An admin reset logs old sessions out: refresh tokens revoked, and kicks queued
-                // for the running login service to send (its sweeper picks them up).
+                // for the running login service to send (its sweeper picks them up) — in the
+                // password's own transaction.
                 store
-                    .revoke_account_with_kicks(acc.account_id, now_secs(), crate::api::KICK_PASSWORD_SET)
+                    .set_password_with_kicks(acc.account_id, &hash, now_secs(), crate::api::KICK_PASSWORD_SET)
                     .await
                     .map_err(|e| e.to_string())
             })?;
@@ -218,9 +230,9 @@ pub fn run_ctl_with(args: &[String], out: &mut dyn Write, deps: CtlDeps<'_>) -> 
                 let (id, what) = match store.account_by_email(&email).await.map_err(err)? {
                     Some(acc) if hasher.verify(&password, &acc.password_hash) => (acc.account_id, "unchanged"),
                     Some(acc) => {
-                        store.set_password(acc.account_id, &hasher.hash(&password)).await.map_err(err)?;
+                        let hash = hasher.hash(&password);
                         store
-                            .revoke_account_with_kicks(acc.account_id, now_secs(), crate::api::KICK_PASSWORD_SET)
+                            .set_password_with_kicks(acc.account_id, &hash, now_secs(), crate::api::KICK_PASSWORD_SET)
                             .await
                             .map_err(err)?;
                         (acc.account_id, "password set")

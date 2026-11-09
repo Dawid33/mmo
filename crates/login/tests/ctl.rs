@@ -81,8 +81,10 @@ async fn world_add_list_remove() {
         assert!(run(&d, &format!("world add dev --name Dev --link 127.0.0.1:6490 --link-cert {}", "zz".repeat(32)), "").is_err());
         run(&d, "world close dev", "").unwrap();
         assert!(run(&d, "world list", "").unwrap().contains("link=127.0.0.1:6490"), "close keeps the link");
-        run(&d, "world add dev --name Dev", "").unwrap();
+        let readded = run(&d, "world add dev --name Dev", "").unwrap();
+        assert!(readded.contains("warning") && readded.contains("127.0.0.1:6490"), "the cleared link is said: {readded}");
         assert!(run(&d, "world list", "").unwrap().contains("link=-"), "re-adding without a link clears it");
+        assert!(!run(&d, "world add dev --name Dev", "").unwrap().contains("warning"), "nothing to clear now");
         run(&d, "world remove dev", "").unwrap();
         assert!(run(&d, "world remove dev", "").is_err());
         assert!(!run(&d, "world list", "").unwrap().contains("dev"));

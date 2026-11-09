@@ -392,13 +392,26 @@ impl Authenticator {
         }
     }
 
-    /// The kick's reason if the session admitted with `ticket` was revoked
-    /// since (a `Kick` that landed before the session was announced): the
-    /// edge checks this after sending `ClientConnected` and supersedes it.
+    /// Why the session admitted with `ticket` may no longer play (a kick's
+    /// reason, or a newer login of the player), if it may not.
     pub fn revoked(&self, ticket: &SessionTicket) -> Option<String> {
         match &self.admission {
             Admission::SpawnOrders(orders) => orders.revoked(&ticket.player_token, ticket.session_epoch),
             Admission::Newest(_) => None,
+        }
+    }
+
+    /// Announce a session: `connected` (its `ClientConnected`) is called — for
+    /// a spawn-order ticket under the orders' lock
+    /// ([`SpawnOrders::announce`]) — unless the ticket was revoked meanwhile
+    /// (the refusal is returned; nothing is announced).
+    pub fn announce(&self, ticket: Option<&SessionTicket>, connected: impl FnOnce()) -> Result<(), String> {
+        match (&self.admission, ticket) {
+            (Admission::SpawnOrders(orders), Some(t)) => orders.announce(&t.player_token, t.session_epoch, connected),
+            _ => {
+                connected();
+                Ok(())
+            }
         }
     }
 

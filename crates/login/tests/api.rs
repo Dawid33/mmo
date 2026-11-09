@@ -735,6 +735,23 @@ mod host_link {
         assert!(wait_no_pending_kicks(&a).await, "{:?}", a.store.pending_kicks().await.unwrap());
     }
 
+    /// C-I4: logout-all with a token already rotated (a thief may hold the live one) still
+    /// signs out everywhere: every session is kicked.
+    #[tokio::test]
+    async fn logout_all_with_a_reused_token_still_kicks() {
+        let host = FakeHost::acking();
+        let a = linked_app(&[host.world("a")], Duration::from_millis(SPAWN_ACK_TIMEOUT_MS)).await;
+        let refresh = a.account().await;
+        let j: JoinResponse = a.join(&refresh, "a").await.json(); // rotates `refresh`
+        let token = epoch_of(&a, &a.verifier().await, &j).0;
+        let out = a.post(PATH_LOGOUT, &LogoutRequest { refresh_token: refresh, all: true }).await;
+        assert_eq!(out.status, StatusCode::NO_CONTENT);
+        let kick = LoginToHost::Kick { player_token: token, session_epoch: 1, reason: login::api::KICK_LOGOUT_ALL.into() };
+        assert!(host.wait_seen(|s| s.contains(&kick)).await.contains(&kick), "{:?}", host.seen());
+        let r = a.post(PATH_REFRESH, &RefreshRequest { refresh_token: j.refresh_token }).await;
+        assert_eq!(r.status, StatusCode::UNAUTHORIZED, "the live token is revoked too");
+    }
+
     /// Wait until every kick was acknowledged; whether it was.
     async fn wait_no_pending_kicks(a: &App) -> bool {
         let deadline = tokio::time::Instant::now() + LINK_WAIT * 2;

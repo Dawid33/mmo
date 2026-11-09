@@ -293,16 +293,23 @@ impl World {
     /// supersede is queued before its ack (so before its ticket can connect): what the link
     /// sent so far is handled first.
     fn connect(&mut self, host: &Host, client: ClientId, session: &HelloSession) {
+        self.try_connect(host, client, session).expect("announced");
+    }
+
+    /// [`connect`](Self::connect), or the edge's refusal (nothing announced).
+    fn try_connect(&mut self, host: &Host, client: ClientId, session: &HelloSession) -> Result<(), String> {
         for ev in host.drain_events() {
             self.event(ev);
         }
-        // The edge's own announcement (with its revocation re-check).
+        // The edge's own announcement (refused if the login was revoked meanwhile).
         let (edge, announced) = unbounded();
-        player_store::announce_session(&edge, client, session, &host.auth);
+        let result = player_store::announce_session(&edge, client, session, &host.auth);
         for ev in announced.try_iter() {
             self.event(ev);
         }
+        result?;
         self.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(SPAWN_REGION), client));
+        Ok(())
     }
 
     /// Feed the link's events and the region threads' outputs to the manager until `done`
@@ -475,11 +482,11 @@ fn kick_parks_and_refuses() {
     assert_eq!(host.hello(&alice, 3).unwrap_err(), REFUSE_NO_SPAWN_ORDER);
 }
 
-/// A kick landing between a ticket's admission and its session's announcement finds no
-/// session; the edge's re-check after announcing supersedes it.
+/// A kick landing between a ticket's admission and its session's announcement: the edge
+/// refuses the session at its announcement with the kick's reason — it never plays.
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
-fn kick_during_connect_still_parks_the_session() {
+fn kick_during_connect_refuses_the_session() {
     let host = Host::start();
     let login = host.login(PeerRole::Login);
     let mut world = World::new();
@@ -487,13 +494,57 @@ fn kick_during_connect_still_parks_the_session() {
     assert!(login.spawn(&alice, 1));
     let a = host.hello(&alice, 1).unwrap(); // admitted, not announced yet
     login.kick(&alice, 1, KICK_REASON);
-    for ev in host.drain_events() {
-        world.event(ev); // the kick's supersede: no session yet
-    }
-    world.connect(&host, 0, &a);
+    assert_eq!(world.try_connect(&host, 0, &a), Err(KICK_REASON.to_string()));
     let mut log = Vec::new();
-    let parked = world.pump_until(&host, &mut log, |m, _| m.parked_record(a.player).is_some() && m.depths().sessions == 0);
-    assert!(parked, "the revoked session was parked: {log:?}");
+    world.pump_for(&host, Duration::from_millis(200), &mut log, |_, _| false);
+    assert_eq!(world.manager.player_of(0), None, "never announced");
+    assert_eq!(world.manager.depths().sessions, 0);
+}
+
+/// A player store that fails while `failing` is set.
+struct FlakyPlayers {
+    inner: player_store::MemoryPlayerStore,
+    failing: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl player_store::PlayerStore for FlakyPlayers {
+    fn resolve(&mut self, key: &player_store::PlayerKey) -> std::io::Result<(game::PlayerId, Option<game::PlayerRecord>)> {
+        if self.failing.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(std::io::Error::other("the player store is down"));
+        }
+        self.inner.resolve(key)
+    }
+}
+
+/// C-I1: a kick whose revoked session's player cannot be resolved (the player store fails)
+/// is not acked — the login service keeps it and resends — and nothing claims it applied;
+/// the resend once the store is back parks the session and is acked.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn kick_is_not_acked_until_its_session_is_parked() {
+    let failing = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut host = Host::unlinked();
+    host.players = player_store::shared(FlakyPlayers { inner: Default::default(), failing: failing.clone() });
+    host.listen("127.0.0.1:0".parse().unwrap(), None);
+    let login = host.login(PeerRole::Login);
+    let mut world = World::new();
+    let alice = token(1);
+    assert!(login.spawn(&alice, 1));
+    let a = host.hello(&alice, 1).unwrap();
+    world.connect(&host, 0, &a);
+    assert_eq!(world.snapshot_for(&host, 0), (1, BTreeSet::from([0])));
+
+    failing.store(true, std::sync::atomic::Ordering::SeqCst);
+    let kick = LoginToHost::Kick { player_token: alice.0.clone(), session_epoch: 1, reason: KICK_REASON.into() };
+    login.tx.send(kick.clone()).unwrap();
+    assert_eq!(login.next(Duration::from_millis(700)), None, "no ack while the session could not be parked");
+    assert!(host.drain_events().is_empty(), "nothing parked it");
+
+    failing.store(false, std::sync::atomic::Ordering::SeqCst);
+    login.kick(&alice, 1, KICK_REASON); // the login service's resend
+    let mut log = Vec::new();
+    let parked = world.pump_until(&host, &mut log, |m, _| m.parked_record(a.player).is_some());
+    assert!(parked, "the resend parked the session: {log:?}");
     assert_eq!(refusals(&log, 0), vec![KICK_REASON.to_string()]);
 }
 
