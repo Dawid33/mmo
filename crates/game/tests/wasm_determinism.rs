@@ -85,23 +85,38 @@ use slotmapd::Key as _;
 /// dial): the same physical scene splits into different chunk entities,
 /// bodies and colliders at 2 and 16 blocks, so its bytes and hashes differ.
 /// Other sizes are not pinned and skip the comparison.
-const WASM_SCENE_DIGEST: u32 = pinned(0xFA8E_102F, 0x25C3_6020);
+// Stud chunks (2026-11-09): the 16-block scene/underground/voxel-body values below were
+// re-recorded for the new stud layout (`Ecs.stud`, `GameData.stud_index`, body scale) —
+// layout only, no stud in these scenes.
+// Stud world P1 (2026-11-09): re-recorded again for `BodyScale.height_m` / `radius_m`
+// (`GameData.body_scale`) — layout only: the voxel capsule is the same expression, and
+// `physics_goldens` (trajectories) did not move. 16-block values only.
+// Stud world P2 (2026-11-09): and for `GameData.stud_ground` (empty in these scenes) —
+// layout only, `physics_goldens` unchanged. 16-block values only.
+// Stud world P4 (2026-11-09): and for `GameData.stud_halo` / `stud_halo_ground` (the stud
+// halo's maps, empty in these scenes) — layout only, `physics_goldens` unchanged.
+// 16-block values only.
+// Stud world P6b (2026-11-09): and for the `Ecs` `stud_body` component slot
+// (`game::stud_body`; empty in these scenes, the voxel body scene's too) — layout only,
+// `physics_goldens` unchanged (voxel bodies still take `model_mass_properties`' sums in
+// the same order, voxel walkers rapier's default slide angle). 16-block values only.
+const WASM_SCENE_DIGEST: u32 = pinned(0xFA8E_102F, 0x60B6_386A);
 /// `game::state_hash` of the same state, on every target.
-const SCENE_STATE_HASH: u32 = pinned(0x5233_40BE, 0xC939_1267);
+const SCENE_STATE_HASH: u32 = pinned(0x5233_40BE, 0xFC53_45B5);
 const SCENE_TICKS: usize = 120;
 /// crc32 of [`underground_scene`]'s region bytes, on every target.
-const UNDERGROUND_DIGEST: u32 = pinned(0x5448_586C, 0x8439_7A8D);
+const UNDERGROUND_DIGEST: u32 = pinned(0x5448_586C, 0x6E9C_D4DF);
 /// `game::state_hash` of the same state, on every target.
-const UNDERGROUND_STATE_HASH: u32 = pinned(0x4080_B196, 0x4472_2ECB);
+const UNDERGROUND_STATE_HASH: u32 = pinned(0x4080_B196, 0x4F26_0F66);
 
 /// crc32 of [`voxel_body_scene`]'s region bytes, on every target.
 /// Re-recorded for Task 7.5 (voxel bodies cross seams): the body is now an
 /// `EntityKind::Body` with an `EntityId` (`Ecs.kind` / `id`, `id_index`,
 /// `next_entity_serial`) and `VoxelBody` gained `drops` — state layout only,
 /// the same detach and fall (16-block values only).
-const VOXEL_BODY_DIGEST: u32 = pinned(0x0F43_FFD4, 0xC0F3_B295);
+const VOXEL_BODY_DIGEST: u32 = pinned(0x0F43_FFD4, 0x52FC_9318);
 /// `game::state_hash` of the same state, on every target.
-const VOXEL_BODY_STATE_HASH: u32 = pinned(0x8D9E_A328, 0x1842_10DF);
+const VOXEL_BODY_STATE_HASH: u32 = pinned(0x8D9E_A328, 0xFD58_5519);
 /// Ticks of [`voxel_body_scene`] after the detach: mid-fall (it rests and
 /// despawns at ~50).
 const VOXEL_BODY_TICKS: usize = 30;

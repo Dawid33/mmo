@@ -30,7 +30,7 @@ pub fn assert_conserved(rig: &mut Rig) {
                 if matches!(data.ecs.kind.try_get(key), Some(game::EntityKind::Person { .. })) {
                     people.insert(*id);
                 }
-                if data.ecs.voxel_body.try_get(key).is_some() {
+                if data.ecs.voxel_body.try_get(key).is_some() || data.ecs.stud_body.try_get(key).is_some() {
                     settling.insert(*id);
                 }
             }
@@ -52,7 +52,7 @@ pub fn assert_conserved(rig: &mut Rig) {
     for id in rig.manager.recently_despawned_arrivals() {
         rig.tracked.remove(&id);
     }
-    // A voxel body settles (its policy) where it is owned: an allowed exit
+    // A voxel or stud body settles (its policy) where it is owned: an allowed exit
     // from a region, never from flight.
     let settled: Vec<EntityId> = rig
         .tracked
@@ -151,6 +151,9 @@ pub struct Rig {
     pub cut_missed: Vec<(RegionCoords, game::CutId, u64)>,
     /// Every intent and reply the regions sent (`RegionOutput::Intents`).
     pub intents_seen: Vec<(RegionCoords, game::IntentMsg)>,
+    /// `Some`: every event the regions processed since it was set, in output
+    /// order — each region's authoritative stream, as a client replays it.
+    pub events_seen: Option<Vec<(RegionCoords, GameEventKind)>>,
 }
 
 impl Rig {
@@ -199,6 +202,7 @@ impl Rig {
             cut_snapshots: Vec::new(),
             cut_missed: Vec::new(),
             intents_seen: Vec::new(),
+            events_seen: None,
         }
     }
 
@@ -212,6 +216,11 @@ impl Rig {
                 }
                 if let RegionOutput::Intents(list) = &out {
                     self.intents_seen.extend(list.iter().map(|m| (rc, *m)));
+                }
+                if let (Some(seen), RegionOutput::EventProcessed(e) | RegionOutput::EventProcessedHashed(e, ..)) =
+                    (self.events_seen.as_mut(), &out)
+                {
+                    seen.push((rc, e.kind.clone()));
                 }
                 if let RegionOutput::CutMissed(id) = &out {
                     let mut at = 0;

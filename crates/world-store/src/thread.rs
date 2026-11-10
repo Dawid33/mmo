@@ -66,6 +66,8 @@ pub(crate) enum Request {
     ClaimCoordinator(Reply<CoordinatorFence>),
     SaveCoordinator(Vec<u8>, CoordinatorFence, Reply<()>),
     LoadCoordinator(Reply<Option<Vec<u8>>>),
+    BindTerrain(crate::TerrainKind, Reply<()>),
+    TerrainKind(Reply<Option<crate::TerrainKind>>),
     /// Finish the queued commits, then stop.
     Shutdown,
 }
@@ -217,6 +219,11 @@ async fn serve(pool: Pool, guard: LockGuard, s: u32, read_only: bool, mut rx: mp
                 r.send(on_pool!(&pool, save_coordinator(state, fence)))
             }),
             Request::LoadCoordinator(r) => tokio::spawn(async move { r.send(on_pool!(&pool, load_coordinator())) }),
+            Request::BindTerrain(kind, r) => tokio::spawn(async move {
+                let _w = writer.lock().await;
+                r.send(on_pool!(&pool, bind_terrain(kind)))
+            }),
+            Request::TerrainKind(r) => tokio::spawn(async move { r.send(on_pool!(&pool, terrain_kind())) }),
         };
         tasks.push(task);
     }
@@ -246,6 +253,7 @@ fn refuse_if_read_only(req: Request, read_only: bool) -> Option<Request> {
         Request::ClaimSuperRegions(_, _, r) => r.send(Err(StoreError::ReadOnly)),
         Request::ClaimCoordinator(r) => r.send(Err(StoreError::ReadOnly)),
         Request::SaveCoordinator(_, _, r) => r.send(Err(StoreError::ReadOnly)),
+        Request::BindTerrain(_, r) => r.send(Err(StoreError::ReadOnly)),
         req => return Some(req),
     }
     None

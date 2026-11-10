@@ -92,7 +92,8 @@ pub fn track_join_timeline(
     mut state: crate::session::SessionLocal<JoinTimelineState>,
     // Paired: the function is at Bevy's 16-parameter limit.
     (time, mut world_ready): (Res<Time<Real>>, ResMut<WorldReady>),
-    scale: Option<Res<WorldScale>>,
+    // Paired for the same limit: a stud world's rings run on their own table.
+    (scale, body_scale): (Option<Res<WorldScale>>, Option<Res<super::stud::ClientBodyScale>>),
     hud: Res<HudStatus>,
     roots: Res<RegionRoots>,
     rings: Res<LodRings>,
@@ -133,11 +134,15 @@ pub fn track_join_timeline(
     if state.expected_lod_keys.is_none() && roots.0.len() >= scale.near_region_count() {
         if let Some(viewer) = hud.viewer_region {
             let near: BTreeSet<game::RegionCoords> = roots.0.keys().copied().collect();
+            // The table the instance subscribes with (`use_stud_lod_table`): the
+            // near regions are loaded by now, so the terrain kind is known.
+            let stud = body_scale.is_some_and(|b| game::TerrainKind::of(b.0) == game::TerrainKind::Stud);
+            let stud_table = stud.then(|| game::stud_ring_table(scale.lod_table));
             let (_, keys) = crate::instance::desired_lod(
                 viewer,
                 &near,
                 &BTreeMap::new(),
-                scale.lod_table,
+                stud_table.as_deref().unwrap_or(scale.lod_table),
                 game::lod::LOD_STICKY_BAND,
             );
             state.expected_lod_keys = Some(keys.len());

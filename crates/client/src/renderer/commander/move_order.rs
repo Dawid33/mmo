@@ -34,7 +34,7 @@
 use bevy::prelude::*;
 use game::movement::UNITS_PER_METER;
 use game::rapier3d::math::Vector;
-use game::{Goal, Order, PathPlan, RouteMap, RegionCoords, RegionId, TilePos, TileSource, BLOCK_VOXELS, REGION_BLOCKS};
+use game::{Goal, Order, PathPlan, RouteMap, RegionCoords, RegionId, TerrainKind, TilePos, TileSource, REGION_BLOCKS};
 
 use super::adventure::ClientPlayMode;
 use super::designate::{self, HiddenEdgeGizmos};
@@ -81,8 +81,8 @@ pub fn is_click(accumulated_motion_px: f32) -> bool {
 /// its block column, at the hovered level when the pick is `exact` and in
 /// `home`; elsewhere the level is left to the sim (`y: None`, the topmost
 /// standable tile of the column).
-pub fn goal_from_hover(region: RegionId, local: Vec3, exact: bool, home: RegionId) -> Goal {
-    let t = game::feet_tile(Vector::new(local.x, local.y, local.z));
+pub fn goal_from_hover(kind: TerrainKind, region: RegionId, local: Vec3, exact: bool, home: RegionId) -> Goal {
+    let t = kind.feet_tile(Vector::new(local.x, local.y, local.z));
     Goal::local(region, [t[0], t[2]], (exact && region == home).then_some(t[1]))
 }
 
@@ -99,7 +99,7 @@ pub fn goal_from_tile(tile: TilePos, home: RegionId) -> Goal {
 /// looks through to dug spaces (`designate::pick_visible_xray`).
 pub fn pick_move_tile(ray: (Vector, Vector), working: &WorkingLevel, mirror: &TileMirror, xray: bool) -> Option<TilePos> {
     let p = if working.cut {
-        game::pick_level_cell(ray.0, ray.1, working.level?, |p| game::block_props().blocks_ray(mirror.block(p)))?
+        designate::pick_level(ray, working.level?, mirror)?
     } else {
         designate::pick_visible_xray(ray, true, mirror, xray)?
     };
@@ -109,9 +109,9 @@ pub fn pick_move_tile(ray: (Vector, Vector), working: &WorkingLevel, mirror: &Ti
 
 /// The hovered tile in `home`'s block coordinates (outside `0..REGION_BLOCKS`
 /// for a hover in another region): the preview's key.
-pub fn hover_tile(region: RegionId, local: Vec3, home: RegionId) -> TilePos {
+pub fn hover_tile(kind: TerrainKind, region: RegionId, local: Vec3, home: RegionId) -> TilePos {
     let n = REGION_BLOCKS as i32;
-    let t = game::feet_tile(Vector::new(local.x, local.y, local.z));
+    let t = kind.feet_tile(Vector::new(local.x, local.y, local.z));
     [t[0] + (region.x - home.x) * n, t[1], t[2] + (region.z - home.z) * n]
 }
 
@@ -219,11 +219,13 @@ fn body_tile(
     bodies: &Query<(&SimEntity, &GlobalTransform), With<LocalBody>>,
     mirror: &impl TileSource,
     home: RegionId,
+    scale: game::movement::BodyScale,
 ) -> Option<(TilePos, (RegionId, game::EntityKey))> {
     let (sim, gt) = bodies.iter().find(|(s, _)| s.region == home)?;
     let o = home.world_offset();
     let t = gt.translation();
-    let feet = game::feet_of(Vector::new(t.x - o[0], t.y - o[1], t.z - o[2]));
+    // `Rollback::feet_of`: the bottom of the region's body capsule.
+    let feet = Vector::new(t.x - o[0], t.y - o[1] - (scale.capsule_half_height() + scale.capsule_radius()), t.z - o[2]);
     Some((game::current_tile(mirror, feet)?, (sim.region, sim.key)))
 }
 
@@ -243,12 +245,14 @@ pub fn update_path_preview(
     world_map: Option<Res<crate::renderer::world_map::WorldMapState>>,
     mut preview: ResMut<PathPreview>,
     mut sent: ResMut<SentPath>,
+    body_scale: Res<crate::renderer::stud::ClientBodyScale>,
 ) {
     let home = mirror.region();
+    let kind = mirror.terrain();
     let tiles = mirror.with_halo();
     let route = route_of(world_map.as_deref());
     let map = route.as_deref();
-    let body = home.and_then(|home| body_tile(&bodies, &tiles, home).map(|b| (home, b)));
+    let body = home.and_then(|home| body_tile(&bodies, &tiles, home, body_scale.0).map(|b| (home, b)));
     // The sent path is done once the body stands on its end, or left with it.
     if !sent.path.is_empty() {
         let arrived = body.is_some_and(|(_, (tile, _))| sent.beyond.is_none() && sent.path.last() == Some(&tile));
@@ -277,12 +281,12 @@ pub fn update_path_preview(
     // Block selection's tile first; the ground pick only off the region's blocks.
     let ray = window.single().ok().zip(view.single().ok()).and_then(|(w, v)| designate::cursor_ray(w, v, home));
     if let Some(tile) = ray.and_then(|ray| pick_move_tile(ray, &working, &mirror, crate::renderer::voxel_pull::xray::xray_on(xray.as_deref(), working.cut))) {
-        preview.update(&tiles, from, tile, goal_from_tile(tile, home), home, map, tile_point(tile, home));
+        preview.update(&tiles, from, tile, goal_from_tile(tile, home), home, map, tile_point(kind, tile, home));
         return;
     }
-    let goal = goal_from_hover(region, local, pick.1, home);
+    let goal = goal_from_hover(kind, region, local, pick.1, home);
     let world = local + Vec3::from_array(region.world_offset());
-    preview.update(&tiles, from, hover_tile(region, local, home), goal, home, map, world);
+    preview.update(&tiles, from, hover_tile(kind, region, local, home), goal, home, map, world);
 }
 
 /// The world's coarse-route map, as the sim's regions are bounded by it and
@@ -354,8 +358,13 @@ pub fn send_move_order(
     world_map: Option<Res<crate::renderer::world_map::WorldMapState>>,
     mut pending: crate::session::SessionLocal<Option<PressedHover>>,
     mut sent: ResMut<SentPath>,
+    build: Res<crate::renderer::stud::build::StudBuild>,
 ) {
     let pending = pending.get();
+    if build.on {
+        *pending = None;
+        return;
+    }
     if buttons.just_pressed(MouseButton::Right) && press.at.is_some() {
         *pending = match (preview.key, preview.goal) {
             (Some(key), Some(goal)) if !preview.unreachable => {
@@ -389,10 +398,10 @@ pub fn send_move_order(
 
 /// World point of tile `p`'s floor centre in `home`, lifted
 /// [`PATH_LIFT_M`].
-fn tile_point(p: TilePos, home: RegionId) -> Vec3 {
-    let bv = BLOCK_VOXELS as f32;
+fn tile_point(kind: TerrainKind, p: TilePos, home: RegionId) -> Vec3 {
+    let (cx, cz) = kind.column_centre([p[0], p[2]]);
     let o = Vec3::from_array(home.world_offset());
-    o + Vec3::new((p[0] as f32 + 0.5) * bv, p[1] as f32 * bv + PATH_LIFT_M * UNITS_PER_METER, (p[2] as f32 + 0.5) * bv)
+    o + Vec3::new(cx, kind.level_bottom_units(p[1]) + PATH_LIFT_M * UNITS_PER_METER, cz)
 }
 
 /// A dashed line from `a` to `b`.
@@ -411,6 +420,7 @@ fn dashed(gizmos: &mut Gizmos, a: Vec3, b: Vec3, color: Color) {
 }
 
 fn draw_path(
+    kind: TerrainKind,
     gizmos: &mut Gizmos,
     hidden: &mut Gizmos<HiddenEdgeGizmos>,
     path: &[TilePos],
@@ -418,7 +428,7 @@ fn draw_path(
     home: RegionId,
     color: Color,
 ) {
-    let points: Vec<Vec3> = path.iter().map(|&p| tile_point(p, home)).collect();
+    let points: Vec<Vec3> = path.iter().map(|&p| tile_point(kind, p, home)).collect();
     gizmos.linestrip(points.iter().copied(), color);
     hidden.linestrip(points.iter().copied(), color.with_alpha(color.alpha() * HIDDEN_PATH_ALPHA));
     if let (Some(end), Some(b)) = (points.last(), beyond) {
@@ -439,10 +449,10 @@ pub fn draw_paths(
     let Some(home) = mirror.region() else { return };
     if sent.region == Some(home) && !sent.path.is_empty() {
         let dim = PATH_COLOR_OK.with_alpha(SENT_PATH_ALPHA);
-        draw_path(&mut gizmos, &mut hidden, &sent.path, sent.beyond, home, dim);
+        draw_path(mirror.terrain(), &mut gizmos, &mut hidden, &sent.path, sent.beyond, home, dim);
     }
     match (&preview.path, preview.hover) {
-        (Some(plan), _) => draw_path(&mut gizmos, &mut hidden, &plan.local_path(home), preview.beyond, home, PATH_COLOR_OK),
+        (Some(plan), _) => draw_path(mirror.terrain(), &mut gizmos, &mut hidden, &plan.local_path(home), preview.beyond, home, PATH_COLOR_OK),
         (None, Some(at)) => {
             let color = if preview.unreachable { PATH_COLOR_NONE } else { PATH_COLOR_UNKNOWN };
             let r = NO_PATH_CROSS_M * UNITS_PER_METER;
@@ -671,13 +681,13 @@ mod tests {
     fn goal_from_hover_in_neighbour_region() {
         let home = RegionCoords { x: 0, z: 0 };
         let east = RegionCoords { x: 1, z: 0 };
-        let bv = BLOCK_VOXELS as f32;
+        let bv = game::BLOCK_VOXELS as f32;
         let local = Vec3::new(5.5 * bv, 3.0 * bv, 12.25 * bv);
         let n = REGION_BLOCKS as i64;
-        assert_eq!(goal_from_hover(east, local, true, home), Goal { column: [n + 5, 12], y: None });
+        assert_eq!(goal_from_hover(TerrainKind::Voxel, east, local, true, home), Goal { column: [n + 5, 12], y: None });
         // At home an exact pick keeps its level; an inexact one does not.
-        assert_eq!(goal_from_hover(home, local, true, home), Goal { column: [5, 12], y: Some(3) });
-        assert_eq!(goal_from_hover(home, local, false, home).y, None);
-        assert_eq!(hover_tile(east, local, home), [5 + n as i32, 3, 12]);
+        assert_eq!(goal_from_hover(TerrainKind::Voxel, home, local, true, home), Goal { column: [5, 12], y: Some(3) });
+        assert_eq!(goal_from_hover(TerrainKind::Voxel, home, local, false, home).y, None);
+        assert_eq!(hover_tile(TerrainKind::Voxel, east, local, home), [5 + n as i32, 3, 12]);
     }
 }

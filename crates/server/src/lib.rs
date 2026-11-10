@@ -533,6 +533,21 @@ pub fn run() -> claims::ServerExit {
     let mut opened = world_file::open_world(&world_source, &worldgen::forge::ForgeParams::default())
         .unwrap_or_else(|e| fatal(&e));
     let store = opened.store.clone();
+    // The terrain a stored world's regions run on (`VOXEL_TERRAIN`): the world is
+    // tied to it before any region is loaded or saved, and a world saved on the
+    // other kind does not start (its regions would come back without terrain).
+    let configured_terrain = std::env::var(world_file::TERRAIN_ENV).ok();
+    let terrain = world_file::terrain_from(configured_terrain.as_deref()).unwrap_or_else(|e| fatal(&e));
+    match &store {
+        Some(store) => store.bind_terrain(terrain).unwrap_or_else(|e| fatal(&e.to_string())),
+        None if configured_terrain.as_deref().is_some_and(|v| !v.trim().is_empty()) => log::warn!(
+            "[server] {} is ignored: this world has no store ({} names its terrain)",
+            world_file::TERRAIN_ENV,
+            worldgen::forged::WORLD_FILE_ENV
+        ),
+        None => {}
+    }
+    let store_studs = store.is_some() && terrain == world_store::TerrainKind::Studs;
     // Which regions this process simulates, and the super-region side that
     // decides it: a bad setting stops the start, naming the variable.
     let ownership = game::Ownership::from_env().unwrap_or_else(|e| fatal(&e));
@@ -636,10 +651,15 @@ pub fn run() -> claims::ServerExit {
     };
     let materials = worldgen::material::Materials::from_names(resolve);
     match &world_source {
-        world_file::WorldSource::Store { url, .. } => {
-            info!("[server] world: forged, in the world store {url:?} (sampled from its tiles)")
-        }
+        world_file::WorldSource::Store { url, .. } => info!(
+            "[server] world: forged, in the world store {url:?} (sampled from its tiles), terrain: {terrain} ({})",
+            world_file::TERRAIN_ENV
+        ),
         world_file::WorldSource::Procedural => info!("[server] world: procedural (nothing is saved)"),
+        world_file::WorldSource::Studs => info!("[server] world: studs (toy bricks, nothing is saved)"),
+        world_file::WorldSource::StudsProcedural => {
+            info!("[server] world: procedural on stud terrain (nothing is saved)")
+        }
     }
     // The world map was built when the world was written and is read from
     // the store with it (procedural worlds: none).
@@ -654,23 +674,40 @@ pub fn run() -> claims::ServerExit {
         "[server] lod workers: {lod_threads} ({})",
         if configured_lod_threads.is_some() { "LOD_BUILD_THREADS" } else { "default: cores / 4, clamped 2..=6" }
     );
-    let lod_builder: Box<dyn game::LodBuilder> = Box::new(lod_workers::ThreadLodBuilder::new(
-        world_seed,
-        materials,
-        gen_cache.clone(),
-        // Saved regions that have not run in this process: their LOD is
-        // built from the store (procedural worlds: none).
-        store.clone().map(|s| std::sync::Arc::new(world_store::TerrainFromStore(s)) as std::sync::Arc<dyn game::StoredTerrain>),
-        lod_result_send,
-        lod_threads,
-    ));
+    let toy_studs = matches!(world_source, world_file::WorldSource::Studs);
+    // Stud terrain: the store-less stud worlds, or a stored world on `VOXEL_TERRAIN=studs`.
+    let studs = toy_studs || store_studs || matches!(world_source, world_file::WorldSource::StudsProcedural);
+    let lod_builder: Box<dyn game::LodBuilder> = if toy_studs {
+        // The 3x3 toy world has nothing beyond its regions.
+        Box::new(game::NullLodBuilder::default())
+    } else if studs {
+        // Far terrain of a stud world: height-field tiles from the ground recipe
+        // (`game::stud_lod`), for the procedural and the stored worlds alike. The
+        // voxel result channel stays empty.
+        drop(lod_result_send);
+        Box::new(lod_workers::ThreadStudLodBuilder::new(world_seed, lod_threads))
+    } else {
+        Box::new(lod_workers::ThreadLodBuilder::new(
+            world_seed,
+            materials,
+            gen_cache.clone(),
+            // Saved regions that have not run in this process: their LOD is
+            // built from the store (procedural worlds: none).
+            store.clone().map(|s| std::sync::Arc::new(world_store::TerrainFromStore(s)) as std::sync::Arc<dyn game::StoredTerrain>),
+            lod_result_send,
+            lod_threads,
+        ))
+    };
     // Kept only to read the manager→writer backlog for the `[server]` line.
     let writer_backlog = server_send.clone();
     // Region starts generate on their own thread; the manager's copy of the
     // generator is only reached by paths that stay synchronous by design.
     let region_gen_cache = gen_cache.clone();
-    let region_generator: region_threads::SharedRegionGenerator =
-        std::sync::Arc::new(move |rc| region_gen_cache.generate_cached(rc, world_seed, materials));
+    let region_generator: region_threads::SharedRegionGenerator = if studs {
+        std::sync::Arc::new(|_| Vec::new())
+    } else {
+        std::sync::Arc::new(move |rc| region_gen_cache.generate_cached(rc, world_seed, materials))
+    };
     // The world clock: ms since `start` (the manager's `now_ms` base) -> world
     // tick, continuing from the last committed cut's tick (procedural worlds:
     // from 0, never saved).
@@ -681,17 +718,40 @@ pub fn run() -> claims::ServerExit {
     // The region thread pinned its 3x3 neighbourhood's forged tiles before
     // it was built (a tile that would not load stopped it), so these reads
     // never load; a failure here is a bug, never an empty seam.
-    let halo_generator: game::HaloGenerator = std::sync::Arc::new(move |rc, xs, zs| {
-        let _pins = worldgen::prefetch_region(rc)
-            .unwrap_or_else(|e| panic!("halo seed of {rc:?}: its forged world tiles do not load: {e}"));
-        worldgen::generate_columns(rc, xs, zs, world_seed, materials)
-    });
+    let halo_generator: game::HaloGenerator = if studs {
+        std::sync::Arc::new(|_, _, _| Vec::new())
+    } else {
+        std::sync::Arc::new(move |rc, xs, zs| {
+            let _pins = worldgen::prefetch_region(rc)
+                .unwrap_or_else(|e| panic!("halo seed of {rc:?}: its forged world tiles do not load: {e}"));
+            worldgen::generate_columns(rc, xs, zs, world_seed, materials)
+        })
+    };
     // Each region thread pins the forged tiles of its 3x3 neighbourhood
     // before it is built; one that will not load stops the region
     // (`RegionOutput::LoadFailed`).
     let mut spawner = region_threads::ThreadRegionSpawner::with_generator(region_generator, halo_generator)
-        .with_prefetch(std::sync::Arc::new(worldgen::prefetch_region))
         .with_clock(world_clock, start);
+    spawner = if toy_studs {
+        spawner.with_genesis(std::sync::Arc::new(worldgen::stud_world::region_seed))
+    } else if studs {
+        // Halo seeds of never-run neighbours generate only their band columns
+        // (`generate_stud_columns` is window-independent; no features yet). The region
+        // thread pinned its 3x3 neighbourhood's forged tiles, as for voxel halo seeds.
+        spawner
+            .with_stud_halo(std::sync::Arc::new(move |rc, xs, zs| game::StudRegionSeed {
+                ground: worldgen::stud_gen::generate_stud_columns(rc, xs, zs, world_seed),
+                features: Vec::new(),
+            }))
+            .with_genesis(std::sync::Arc::new(move |rc| worldgen::stud_gen::generate_stud_region(rc, world_seed)))
+    } else {
+        spawner
+    };
+    // A stored world's stud genesis samples the forged tiles too: pinned first, like
+    // voxel generation (the store-less stud worlds have no forged world to pin).
+    if !studs || store_studs {
+        spawner = spawner.with_prefetch(std::sync::Arc::new(worldgen::prefetch_region));
+    }
     // Region loads and cut commits are fenced: the super-regions this process
     // owns are claimed now, once (procedural worlds keep nothing: no claims).
     // One claim is shared by the region threads and the cut writer.
@@ -713,11 +773,15 @@ pub fn run() -> claims::ServerExit {
         spawner,
         // Unused on the server (regions and LOD generate on their own
         // threads); pinned like them all the same.
-        Box::new(move |rc| {
-            let _pins = worldgen::prefetch_region(rc)
-                .unwrap_or_else(|e| panic!("region {rc:?}: its forged world tiles do not load: {e}"));
-            gen_cache.generate_cached(rc, world_seed, materials)
-        }),
+        if studs {
+            Box::new(|_| Vec::new())
+        } else {
+            Box::new(move |rc| {
+                let _pins = worldgen::prefetch_region(rc)
+                    .unwrap_or_else(|e| panic!("region {rc:?}: its forged world tiles do not load: {e}"));
+                gen_cache.generate_cached(rc, world_seed, materials)
+            })
+        },
         server_send,
         region_out_send,
         lod_builder,

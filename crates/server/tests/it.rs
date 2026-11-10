@@ -3,3 +3,4 @@
 //! own `[[test]]` targets (see `Cargo.toml`).
 
 mod auth_edge;
+mod stud_world;

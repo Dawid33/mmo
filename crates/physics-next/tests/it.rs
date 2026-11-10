@@ -19,6 +19,7 @@ mod pair_filter;
 mod pipeline_memo;
 mod state_hash_parity;
 mod step_journal;
+mod stud_voxels;
 mod sunk_body;
 mod upstream_movement_probe;
 mod voxels_batch_edit;

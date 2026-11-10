@@ -16,7 +16,8 @@
 struct SliceParams {
     // xz: home region world origin; y: unused; w: brightness (1 - CAP_DARKEN).
     origin: vec4<f32>,
-    // x: the working level's layer in the overlay texture; y: overlay on (0/1).
+    // x: the working level's layer in the overlay texture; y: overlay on (0/1);
+    // z: 1 = stud terrain (cells coloured from `colors`, not `ids`).
     overlay: vec4<u32>,
 }
 
@@ -30,6 +31,9 @@ struct SliceParams {
 // The designation overlay voxel_pull.wgsl reads (fortress_view.rs
 // OverlayGrid): texel (x, z, layer); the plane's cells are the working level's.
 @group(#{MATERIAL_BIND_GROUP}) @binding(5) var overlay: texture_3d<u32>;
+// Stud terrain: the cap's colour per tile (slice_plane.rs stud_slice_colors),
+// alpha 0 where there is no cap. 1 x 1 and unread on voxel terrain.
+@group(#{MATERIAL_BIND_GROUP}) @binding(6) var colors: texture_2d<f32>;
 
 const BLOCK_VOXELS: f32 = 16.0;
 
@@ -144,7 +148,12 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     // Designations on the working level, as voxel_pull.wgsl tints a cap
     // (same uv: world xz in blocks) — implied rock has no face to carry them.
     let marked = textureLoad(overlay, vec3<i32>(cell, i32(params.overlay.x)), 0).r;
-    let albedo = overlay_tint(tex.rgb, uv, select(0u, marked, params.overlay.y != 0u));
+    // Stud terrain has no block textures: a flat colour per tile instead.
+    let stud = params.overlay.z != 0u;
+    let stud_cell = clamp(cell, vec2<i32>(0), vec2<i32>(textureDimensions(colors)) - vec2<i32>(1));
+    let stud_color = textureLoad(colors, stud_cell, 0);
+    let surface = select(tex.rgb, stud_color.rgb, stud);
+    let albedo = overlay_tint(surface, uv, select(0u, marked, params.overlay.y != 0u));
 
     // Lit as an up-facing terrain face in voxel_pull.wgsl (no AO).
     let n = vec3<f32>(0.0, 1.0, 0.0);
@@ -168,7 +177,7 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let color = apply_distance_fog(albedo * lit * params.origin.w, p.xyz);
     // Air: the level is open here; look down into it. Last, after every
     // derivative (see voxel_pull.wgsl's discard).
-    if (id == 0u) {
+    if ((!stud && id == 0u) || (stud && stud_color.a == 0.0)) {
         discard;
     }
     return vec4<f32>(color, 1.0);

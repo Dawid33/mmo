@@ -110,6 +110,41 @@ pub trait WorldView {
     /// Water units in cell `p`, own ∪ halo (`Rollback::water_units_at`); 0
     /// elsewhere.
     fn water_units(&self, p: WorldBlockPos) -> u16;
+    /// Stud terrain: the material at world stud cell `cell`, own region ∪ stud halo
+    /// (`stud_halo.rs`; the recipe's implied ground included); `None` is air, or
+    /// outside them.
+    fn stud_material_at(&self, cell: crate::WorldStudCell) -> Option<u16>;
+    /// Stud terrain: the first occupied stud cell along `ray` within `max_units` sim
+    /// units, over the materialised chunks of own ∪ stud halo. A ray longer than the
+    /// halo panics in debug, as [`Self::raycast`].
+    fn stud_raycast(&self, ray: WorldRay, max_units: f32) -> Option<StudWorldHit>;
+}
+
+/// What a [`WorldView::stud_raycast`] met: the chunk (world chunk, `y` = stud layer —
+/// the viewing region's or a neighbour's), the cell in it, the face it entered through
+/// (the unit step back toward the origin; zero when the ray started inside) and the
+/// distance along the ray in sim units.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StudWorldHit {
+    pub chunk: crate::WorldChunkPos,
+    pub cell: [u8; 3],
+    pub normal: [i8; 3],
+    pub t: f32,
+}
+
+impl StudWorldHit {
+    /// The brick a build click would place against this hit and the world chunk it
+    /// goes into (`stud::placement_for_ray`): the body of an `Order::PlaceStudAt`.
+    pub fn placement(&self, part: u16, rot: u8, material: u16) -> Option<(crate::WorldChunkPos, crate::StudBrick)> {
+        let hit = crate::StudRayHit {
+            chunk: [self.chunk.x, self.chunk.y as i64, self.chunk.z],
+            cell: self.cell,
+            normal: self.normal,
+            t: self.t,
+        };
+        let ([x, y, z], brick) = crate::stud::placement_for_ray(&hit, part, rot, material)?;
+        Some((crate::WorldChunkPos::new(x, y as i32, z), brick))
+    }
 }
 
 /// One region's [`WorldView`] ([`Rollback::view`]).
@@ -181,6 +216,25 @@ impl WorldView for RegionView<'_> {
 
     fn water_units(&self, p: WorldBlockPos) -> u16 {
         self.data.water_units_at(p)
+    }
+
+    fn stud_material_at(&self, cell: crate::WorldStudCell) -> Option<u16> {
+        self.data.stud_material_seen(crate::local_stud_cell(*self.data.region, cell))
+    }
+
+    fn stud_raycast(&self, ray: WorldRay, max_units: f32) -> Option<StudWorldHit> {
+        debug_assert!(max_units <= crate::halo::HALO_UNITS, "a {max_units}-unit stud ray reads past the halo: send an intent");
+        let o = origin(self.data);
+        let local = rapier3d::math::Vector::new(
+            (ray.origin[0] - o[0]) as f32,
+            ray.origin[1] as f32,
+            (ray.origin[2] - o[2]) as f32,
+        );
+        let dir = rapier3d::math::Vector::new(ray.dir[0], ray.dir[1], ray.dir[2]);
+        let hit = self.data.raycast_studs_seen(local, dir, max_units)?;
+        let [x, y, z] = hit.chunk;
+        let chunk = crate::WorldChunkPos::from_local(*self.data.region, [x as i32, y as i32, z as i32]);
+        Some(StudWorldHit { chunk, cell: hit.cell, normal: hit.normal, t: hit.t })
     }
 
     fn raycast(&self, ray: WorldRay, max_blocks: f32) -> Option<Hit> {

@@ -196,7 +196,8 @@ pub fn apply_dev_action(action: DevAction, world: &mut World) {
         DevAction::DropBody => {
             let target = world.get_resource::<DevDropTarget>().and_then(|t| t.0);
             let home = world.get_resource::<HudStatus>().and_then(|h| h.home_region);
-            if let (Some(client), Some(order)) = (world.resource::<LocalPlayer>().0, drop_body_order(target, home)) {
+            let kind = world.get_resource::<super::commander::tiles::TileMirror>().map_or(game::TerrainKind::Voxel, |m| m.terrain());
+            if let (Some(client), Some(order)) = (world.resource::<LocalPlayer>().0, drop_body_order(kind, target, home)) {
                 let _ = world.resource::<GameEvents>().0.send(game::GameEventKind::Order(client, order));
             }
         }
@@ -207,9 +208,13 @@ pub fn apply_dev_action(action: DevAction, world: &mut World) {
 /// its local frame): the tile under it in the `home` region's block
 /// coordinates — orders run in the home region, which refuses a tile off its
 /// columns. `None` without a point or a home.
-pub fn drop_body_order(target: Option<(game::RegionCoords, Vec3)>, home: Option<game::RegionCoords>) -> Option<game::Order> {
+pub fn drop_body_order(
+    kind: game::TerrainKind,
+    target: Option<(game::RegionCoords, Vec3)>,
+    home: Option<game::RegionCoords>,
+) -> Option<game::Order> {
     let ((region, local), home) = (target?, home?);
-    Some(game::Order::DevDropBody { at: super::commander::move_order::hover_tile(region, local, home) })
+    Some(game::Order::DevDropBody { at: super::commander::move_order::hover_tile(kind, region, local, home) })
 }
 
 /// Keeps [`DevDropTarget`] on the ground under the cursor while the cursor
@@ -450,14 +455,14 @@ mod tests {
         let home = game::RegionCoords::new(0, 0);
         let b = game::BLOCK_VOXELS as f32;
         // Region-local ground point → the home region's tile under it.
-        let at = drop_body_order(Some((home, Vec3::new(3.5 * b, b, 9.25 * b))), Some(home));
+        let at = drop_body_order(game::TerrainKind::Voxel, Some((home, Vec3::new(3.5 * b, b, 9.25 * b))), Some(home));
         assert_eq!(at, Some(game::Order::DevDropBody { at: [3, 1, 9] }));
         // A point in the west neighbour is in home's frame (the sim refuses it).
         let west = game::RegionCoords::new(-1, 0);
-        let at = drop_body_order(Some((west, Vec3::new(2.5 * b, b, 1.5 * b))), Some(home));
+        let at = drop_body_order(game::TerrainKind::Voxel, Some((west, Vec3::new(2.5 * b, b, 1.5 * b))), Some(home));
         assert_eq!(at, Some(game::Order::DevDropBody { at: [2 - game::REGION_BLOCKS as i32, 1, 1] }));
-        assert_eq!(drop_body_order(None, Some(home)), None, "no ground seen");
-        assert_eq!(drop_body_order(Some((home, Vec3::ZERO)), None), None, "no home yet");
+        assert_eq!(drop_body_order(game::TerrainKind::Voxel, None, Some(home)), None, "no ground seen");
+        assert_eq!(drop_body_order(game::TerrainKind::Voxel, Some((home, Vec3::ZERO)), None), None, "no home yet");
     }
 
     #[test]

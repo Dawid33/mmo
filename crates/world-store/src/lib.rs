@@ -50,6 +50,48 @@ impl fmt::Display for Dials {
     }
 }
 
+/// The terrain a world's regions are saved in (`world.terrain`): one kind per
+/// world, set by the first server that serves it ([`StoreHandle::bind_terrain`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TerrainKind {
+    /// Voxel chunks (`chunks`, `regions.ground`).
+    Voxels,
+    /// Stud terrain (`stud_chunks`, `regions.stud_ground`).
+    Studs,
+}
+
+impl TerrainKind {
+    /// The `world.terrain` value.
+    pub fn code(self) -> i64 {
+        match self {
+            TerrainKind::Voxels => 0,
+            TerrainKind::Studs => 1,
+        }
+    }
+
+    pub fn from_code(code: i64) -> Option<TerrainKind> {
+        match code {
+            0 => Some(TerrainKind::Voxels),
+            1 => Some(TerrainKind::Studs),
+            _ => None,
+        }
+    }
+
+    /// The `VOXEL_TERRAIN` word for it.
+    pub fn name(self) -> &'static str {
+        match self {
+            TerrainKind::Voxels => "voxels",
+            TerrainKind::Studs => "studs",
+        }
+    }
+}
+
+impl fmt::Display for TerrainKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
 /// Which stored format [`StoreError::OtherFormat`] is about.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FormatKind {
@@ -84,6 +126,9 @@ pub enum StoreError {
     Backend(String),
     Locked(String),
     OtherDials { stored: Dials, built: Dials },
+    /// The world's regions are saved in another terrain kind than the one this
+    /// server was started with ([`StoreHandle::bind_terrain`]).
+    OtherTerrain { stored: TerrainKind, wanted: TerrainKind },
     /// A stored format this build does not read: the store's own
     /// (`world.format_version`) or the forged tiles' (`forged_meta`).
     OtherFormat { found: u32, kind: FormatKind },
@@ -111,6 +156,11 @@ impl fmt::Display for StoreError {
             StoreError::OtherDials { stored, built } => write!(
                 f,
                 "this world was made with {stored} but this build has {built}; rebuild with the stored dials (just region_blocks=N chunk_blocks=N …) or use another world"
+            ),
+            StoreError::OtherTerrain { stored, wanted } => write!(
+                f,
+                "this world is saved on {stored} terrain but this server was started for {wanted} terrain; \
+                 start it with VOXEL_TERRAIN={stored}, or use another world (terrain is never converted)"
             ),
             StoreError::OtherFormat { found, kind: FormatKind::Store } => write!(
                 f,

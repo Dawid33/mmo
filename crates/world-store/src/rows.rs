@@ -10,13 +10,14 @@ use std::collections::BTreeMap;
 
 use game::{
     Chunk, ChunkCoords, ColumnCoords, ColumnGround, EntityBundle, EntityId, EntityKind, InFlightRow, IntentMsg,
-    PlayerId, PlayerRecord, RegionCoords, RegionMeta, StoredRegion, TerrainSnapshot, Tick, WorldCut,
+    PlayerId, PlayerRecord, RegionCoords, RegionMeta, StoredRegion, StudChunkCoords, StudChunkRecord, StudColumnGround,
+    TerrainSnapshot, Tick, WorldCut,
 };
 
 use crate::codec::*;
 use crate::fence::{CoordinatorFence, Fence, SuperRegion, commit_check_set, load_check};
 use crate::forged::{ForgedHead, TiledRows};
-use crate::{CutCommitted, StoreError, WorldInfo};
+use crate::{CutCommitted, StoreError, TerrainKind, WorldInfo};
 
 /// Super-regions checked per fence query (two binds each).
 const FENCE_CHECK_BATCH: usize = 200;
@@ -78,6 +79,27 @@ fn chunk_of(rc: RegionCoords, cx: i64, cy: i64, cz: i64) -> Result<ChunkCoords, 
         i32::try_from(cy).map_err(|_| bad())?,
         usize::try_from(cz).map_err(|_| bad())?,
     ))
+}
+
+fn stud_chunk_of(rc: RegionCoords, cx: i64, cy: i64, cz: i64) -> Result<StudChunkCoords, StoreError> {
+    let bad = || StoreError::Corrupt(format!("region {rc:?}: stud chunk ({cx}, {cy}, {cz}) out of range"));
+    let y = i32::try_from(cy).ok().filter(|y| game::stud_layer_ok(*y)).ok_or_else(bad)?;
+    let side = |v: i64| usize::try_from(v).ok().filter(|v| *v < game::REGION_CHUNKS).ok_or_else(bad);
+    Ok(StudChunkCoords { x: side(cx)?, y, z: side(cz)? })
+}
+
+/// `regions.stud_ground` of a save: the recipes' blob, NULL for a region with none.
+fn stud_ground_blob(ground: Option<&Vec<(ColumnCoords, StudColumnGround)>>) -> Option<Vec<u8>> {
+    ground.filter(|g| !g.is_empty()).map(|g| encode(FORMAT_STUD_GROUND, g))
+}
+
+fn terrain_of(code: Option<i64>) -> Result<Option<TerrainKind>, StoreError> {
+    match code {
+        None => Ok(None),
+        Some(c) => TerrainKind::from_code(c)
+            .map(Some)
+            .ok_or_else(|| StoreError::Corrupt(format!("world.terrain {c} is no terrain kind"))),
+    }
 }
 
 /// An entity insert failing on the primary key is the same entity in two
@@ -381,17 +403,81 @@ macro_rules! engine_rows {
                 Ok(chunks)
             }
 
-            /// The `regions` row's `(meta, ground)` blobs, if the region was ever saved.
-            async fn region_row(tx: &mut Tx, rc: RegionCoords) -> Result<Option<(Vec<u8>, Vec<u8>)>, StoreError> {
-                let row = sqlx::query("SELECT meta, ground FROM regions WHERE rx = $1 AND rz = $2")
+            /// The region's stud rows and recipes. Any row that does not decode, lies
+            /// outside the region, or is a pristine marker with no recipe to derive
+            /// it from is `Corrupt`: stud terrain is never loaded partly.
+            async fn load_studs(
+                tx: &mut Tx,
+                rc: RegionCoords,
+                ground: Option<Vec<u8>>,
+            ) -> Result<(Vec<(StudChunkCoords, StudChunkRecord)>, Vec<(ColumnCoords, StudColumnGround)>), StoreError> {
+                let ground: Vec<(ColumnCoords, StudColumnGround)> = match ground {
+                    Some(blob) => decode(FORMAT_STUD_GROUND, &blob)
+                        .map_err(|e| StoreError::Corrupt(format!("region {rc:?} stud ground: {e}")))?,
+                    None => Vec::new(),
+                };
+                let rows = sqlx::query("SELECT cx, cy, cz, data FROM stud_chunks WHERE rx = $1 AND rz = $2")
+                    .bind(rc.x as i64)
+                    .bind(rc.z as i64)
+                    .fetch_all(&mut **tx)
+                    .await?;
+                let columns: std::collections::BTreeSet<ColumnCoords> = ground.iter().map(|(c, _)| *c).collect();
+                let mut chunks = Vec::with_capacity(rows.len());
+                for r in rows {
+                    let coords = stud_chunk_of(rc, r.try_get(0)?, r.try_get(1)?, r.try_get(2)?)?;
+                    let data: Vec<u8> = r.try_get(3)?;
+                    let record: StudChunkRecord = decode(FORMAT_STUD_CHUNK, &data)
+                        .map_err(|e| StoreError::Corrupt(format!("region {rc:?} stud chunk {coords:?}: {e}")))?;
+                    if record == StudChunkRecord::Pristine && !columns.contains(&ColumnCoords::new(coords.x, coords.z)) {
+                        return Err(StoreError::Corrupt(format!(
+                            "region {rc:?} stud chunk {coords:?} is stored as pristine but its column has no ground recipe"
+                        )));
+                    }
+                    chunks.push((coords, record));
+                }
+                chunks.sort_by_key(|(c, _)| *c);
+                Ok((chunks, ground))
+            }
+
+            /// The `regions` row's `(meta, ground, stud_ground)` blobs, if the region was ever saved.
+            async fn region_row(
+                tx: &mut Tx,
+                rc: RegionCoords,
+            ) -> Result<Option<(Vec<u8>, Vec<u8>, Option<Vec<u8>>)>, StoreError> {
+                let row = sqlx::query("SELECT meta, ground, stud_ground FROM regions WHERE rx = $1 AND rz = $2")
                     .bind(rc.x as i64)
                     .bind(rc.z as i64)
                     .fetch_optional(&mut **tx)
                     .await?;
                 Ok(match row {
-                    Some(r) => Some((r.try_get(0)?, r.try_get(1)?)),
+                    Some(r) => Some((r.try_get(0)?, r.try_get(1)?, r.try_get(2)?)),
                     None => None,
                 })
+            }
+
+            /// `world.terrain`: the kind the world is tied to, if any yet.
+            pub(crate) async fn terrain_kind(pool: &Pool) -> Result<Option<TerrainKind>, StoreError> {
+                let code: Option<i64> = sqlx::query("SELECT terrain FROM world WHERE id = 1")
+                    .fetch_optional(pool)
+                    .await?
+                    .ok_or_else(|| StoreError::Corrupt("the world row is missing".into()))?
+                    .try_get(0)?;
+                terrain_of(code)
+            }
+
+            /// Ties the world to `kind` if it is tied to none (the update's own
+            /// `WHERE`: set once, never changed), then checks what it is tied to.
+            /// Callers hold the writer lock.
+            pub(crate) async fn bind_terrain(pool: &Pool, kind: TerrainKind) -> Result<(), StoreError> {
+                sqlx::query("UPDATE world SET terrain = $1 WHERE id = 1 AND terrain IS NULL")
+                    .bind(kind.code())
+                    .execute(pool)
+                    .await?;
+                match terrain_kind(pool).await? {
+                    Some(stored) if stored == kind => Ok(()),
+                    Some(stored) => Err(StoreError::OtherTerrain { stored, wanted: kind }),
+                    None => Err(StoreError::Corrupt("world.terrain is unset after it was written".into())),
+                }
             }
 
             fn decode_ground(rc: RegionCoords, blob: &[u8]) -> Result<Vec<(ColumnCoords, ColumnGround)>, StoreError> {
@@ -409,7 +495,7 @@ macro_rules! engine_rows {
             ) -> Result<Option<StoredRegion>, StoreError> {
                 let mut tx = begin_read(pool).await?;
                 check_fence(&mut tx, fence, &[load_check(rc, s)].into()).await?;
-                let Some((meta, ground)) = region_row(&mut tx, rc).await? else {
+                let Some((meta, ground, stud_ground)) = region_row(&mut tx, rc).await? else {
                     tx.commit().await?;
                     return Ok(None);
                 };
@@ -417,6 +503,7 @@ macro_rules! engine_rows {
                     .map_err(|e| StoreError::Corrupt(format!("region {rc:?} meta: {e}")))?;
                 let ground = decode_ground(rc, &ground)?;
                 let chunks = load_chunks(&mut tx, rc).await?;
+                let (stud_chunks, stud_ground) = load_studs(&mut tx, rc, stud_ground).await?;
                 let rows = sqlx::query("SELECT bundle FROM entities WHERE rx = $1 AND rz = $2")
                     .bind(rc.x as i64)
                     .bind(rc.z as i64)
@@ -426,24 +513,34 @@ macro_rules! engine_rows {
                 let mut entities = Vec::with_capacity(rows.len());
                 for r in rows {
                     let blob: Vec<u8> = r.try_get(0)?;
-                    let bundle: EntityBundle = decode(FORMAT_ENTITY_BUNDLE, &blob)
+                    let bundle: EntityBundle = decode_entity_bundle(&blob)
                         .map_err(|e| StoreError::Corrupt(format!("region {rc:?} entity: {e}")))?;
                     entities.push(bundle);
                 }
                 entities.sort_by_key(|b| b.id);
-                Ok(Some(StoredRegion { meta, chunks, ground, entities }))
+                Ok(Some(StoredRegion { meta, chunks, ground, entities, stud_chunks, stud_ground }))
             }
 
             pub(crate) async fn load_terrain(pool: &Pool, rc: RegionCoords) -> Result<Option<TerrainSnapshot>, StoreError> {
                 let mut tx = begin_read(pool).await?;
-                let Some((_, ground)) = region_row(&mut tx, rc).await? else {
+                let Some((_, ground, stud_ground)) = region_row(&mut tx, rc).await? else {
                     tx.commit().await?;
                     return Ok(None);
                 };
                 let ground = decode_ground(rc, &ground)?;
                 let chunks = load_chunks(&mut tx, rc).await?;
+                // Stud terrain: only the edge columns, which is all a neighbour's
+                // halo seed reads (`game::stud_halo`).
+                let (stud_chunks, stud_ground) = load_studs(&mut tx, rc, stud_ground).await?;
                 tx.commit().await?;
-                Ok(Some(TerrainSnapshot { chunks, ground }))
+                let stud = game::StudEdge::from_stored(
+                    &stud_ground,
+                    stud_chunks.into_iter().map(|(c, record)| match record {
+                        StudChunkRecord::Pristine => (c, None),
+                        StudChunkRecord::Edited(chunk) => (c, Some(chunk)),
+                    }),
+                );
+                Ok(Some(TerrainSnapshot { chunks, ground, stud }))
             }
 
             pub(crate) async fn stored_regions(pool: &Pool) -> Result<BTreeMap<RegionCoords, u64>, StoreError> {
@@ -476,7 +573,7 @@ macro_rules! engine_rows {
                     out.push(match kind {
                         IN_FLIGHT_TRANSFER => InFlightRow::Transfer {
                             target,
-                            bundle: decode(FORMAT_ENTITY_BUNDLE, &payload).map_err(bad)?,
+                            bundle: decode_entity_bundle(&payload).map_err(bad)?,
                             stamp: u(stamp),
                         },
                         IN_FLIGHT_INTENT => InFlightRow::Intent {
@@ -576,15 +673,16 @@ macro_rules! engine_rows {
                             )));
                         }
                     }
-                    let bump = i64::from(!region.chunks.is_empty());
+                    let bump = i64::from(!region.chunks.is_empty() || !region.stud_chunks.is_empty());
                     let version: i64 = sqlx::query(
-                        "INSERT INTO regions (rx, rz, saved_tick, terrain_version, meta, ground) \
-                         VALUES ($1, $2, $3, $4, $5, $6) \
+                        "INSERT INTO regions (rx, rz, saved_tick, terrain_version, meta, ground, stud_ground) \
+                         VALUES ($1, $2, $3, $4, $5, $6, $8) \
                          ON CONFLICT (rx, rz) DO UPDATE SET \
                            saved_tick = excluded.saved_tick, \
                            terrain_version = regions.terrain_version + excluded.terrain_version, \
                            meta = excluded.meta, \
-                           ground = CASE WHEN $7 = 1 THEN excluded.ground ELSE regions.ground END \
+                           ground = CASE WHEN $7 = 1 THEN excluded.ground ELSE regions.ground END, \
+                           stud_ground = CASE WHEN $9 = 1 THEN excluded.stud_ground ELSE regions.stud_ground END \
                          RETURNING terrain_version",
                     )
                     .bind(rx)
@@ -594,10 +692,45 @@ macro_rules! engine_rows {
                     .bind(encode(FORMAT_REGION_META, &region.meta))
                     .bind(ground_blob(region.ground.as_ref()))
                     .bind(i64::from(region.ground.is_some()))
+                    .bind(stud_ground_blob(region.stud_ground.as_ref()))
+                    .bind(i64::from(region.stud_ground.is_some()))
                     .fetch_one(&mut *tx)
                     .await?
                     .try_get(0)?;
                     versions.push((*rc, u(version)));
+                    // Stud rows: a record is written, `None` deletes the row (the chunk
+                    // is what its recipe gives again).
+                    for (c, record) in &region.stud_chunks {
+                        let (cx, cy, cz) = (c.x as i64, c.y as i64, c.z as i64);
+                        match record {
+                            Some(record) => {
+                                sqlx::query(
+                                    "INSERT INTO stud_chunks (rx, rz, cx, cy, cz, data) VALUES ($1, $2, $3, $4, $5, $6) \
+                                     ON CONFLICT (rx, rz, cx, cy, cz) DO UPDATE SET data = excluded.data",
+                                )
+                                .bind(rx)
+                                .bind(rz)
+                                .bind(cx)
+                                .bind(cy)
+                                .bind(cz)
+                                .bind(encode(FORMAT_STUD_CHUNK, record))
+                                .execute(&mut *tx)
+                                .await?;
+                            }
+                            None => {
+                                sqlx::query(
+                                    "DELETE FROM stud_chunks WHERE rx = $1 AND rz = $2 AND cx = $3 AND cy = $4 AND cz = $5",
+                                )
+                                .bind(rx)
+                                .bind(rz)
+                                .bind(cx)
+                                .bind(cy)
+                                .bind(cz)
+                                .execute(&mut *tx)
+                                .await?;
+                            }
+                        }
+                    }
                     for (c, chunk) in &region.chunks {
                         sqlx::query(
                             "INSERT INTO chunks (rx, rz, cx, cy, cz, data) VALUES ($1, $2, $3, $4, $5, $6) \

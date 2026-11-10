@@ -52,6 +52,8 @@ use crate::renderer::world_map::WorldMapState;
 use crate::renderer::ClientRequests;
 use crate::session::{AppState, Embarked, LastSessionError, PendingWorld, PreparingWorld, SessionEnded, StartingStatus};
 
+/// The `studs` preset's entry dir under `worlds/` (only its `server.log`).
+pub const DEBUG_STUDS_SLUG: &str = "debug-studs";
 /// `worlds/<this>/`: the `embarked` preset's world.
 pub const DEBUG_EMBARKED_SLUG: &str = "debug-embarked";
 /// Its display name (`world_store::slug_for` turns it into [`DEBUG_EMBARKED_SLUG`]).
@@ -72,7 +74,8 @@ fn debug_world_override() -> Option<String> {
 }
 
 pub const USAGE: &str = "usage: client [debug embarked [--reset | --port N | --join HOST:PORT] [--adventure-at SITE]]\n       \
-    client [debug online [--world ID]]\n\
+    client [debug online [--world ID]]\n       \
+    client [debug studs]\n\
     \n\
     With no arguments the client opens on the main menu.\n\
     \n\
@@ -84,7 +87,11 @@ pub const USAGE: &str = "usage: client [debug embarked [--reset | --port N | --j
                  starts an adventure at site SITE (a number) instead of embarking\n  \
       online     log in (VOXEL_LOGIN_URL, VOXEL_LOGIN_EMAIL, VOXEL_LOGIN_PASSWORD), join the\n             \
                  login service's world ID (default `dev`) and embark as `embarked` does\n             \
-                 (`just run-online` starts the login service and a server for it)";
+                 (`just run-online` starts the login service and a server for it)\n  \
+      studs      the toy-brick test world: 3x3 regions of stud chunks, no store, no menu;\n             \
+                 --procedural plays the procedural noise world on stud terrain instead.\n             \
+                 Run it via `just run-studs`, which sets near radius 1 and, for the toy\n             \
+                 world, disables the LOD rings (a bare `client debug studs` keeps the defaults)";
 
 /// The `online` preset's world when `--world` is not given (`just dev-login`'s).
 pub const DEFAULT_ONLINE_WORLD: &str = "dev";
@@ -101,13 +108,16 @@ pub enum DebugScenario {
     Embarked { reset: bool, port: Option<u16>, join: Option<std::net::SocketAddr>, adventure_at: Option<SiteId> },
     /// Log in, join the login service's `world`, embark.
     Online { world: String },
+    /// The toy-brick stud world on a single-player server (no store, no history).
+    /// `procedural`: the procedural noise world on stud terrain, instead of the toy world.
+    Studs { procedural: bool },
 }
 
 impl DebugScenario {
     fn adventure_at(&self) -> Option<SiteId> {
         match self {
             DebugScenario::Embarked { adventure_at, .. } => *adventure_at,
-            DebugScenario::Online { .. } => None,
+            DebugScenario::Online { .. } | DebugScenario::Studs { .. } => None,
         }
     }
 }
@@ -151,6 +161,7 @@ pub fn parse_args<S: AsRef<str>>(args: &[S]) -> Result<Option<DebugScenario>, St
             let mut join = None;
             let mut adventure_at = None;
             let mut world = None;
+            let mut procedural = false;
             let mut flags = flags.iter();
             while let Some(flag) = flags.next() {
                 let mut value = || {
@@ -158,6 +169,7 @@ pub fn parse_args<S: AsRef<str>>(args: &[S]) -> Result<Option<DebugScenario>, St
                 };
                 match *flag {
                     "--reset" => reset = true,
+                    "--procedural" => procedural = true,
                     "--port" => {
                         let v = value()?;
                         port = Some(v.parse::<u16>().map_err(|e| format!("bad --port `{v}`: {e}\n\n{USAGE}"))?);
@@ -193,7 +205,15 @@ pub fn parse_args<S: AsRef<str>>(args: &[S]) -> Result<Option<DebugScenario>, St
                 "online" if !reset && port.is_none() && join.is_none() && adventure_at.is_none() => {
                     Ok(Some(DebugScenario::Online { world: world.unwrap_or_else(|| DEFAULT_ONLINE_WORLD.into()) }))
                 }
-                "embarked" | "online" => Err(format!("flags not valid for `debug {preset}`\n\n{USAGE}")),
+                "studs" if !game::stud::STUDS_SUPPORTED => Err(format!(
+                    "`debug studs` needs 256-unit sim chunks (chunk_blocks=16); this build has CHUNK_UNITS={}",
+                    game::block::CHUNK_UNITS
+                )),
+                "studs" if !reset && port.is_none() && join.is_none() && adventure_at.is_none() && world.is_none() => {
+                    Ok(Some(DebugScenario::Studs { procedural }))
+                }
+                "embarked" | "online" if procedural => Err(format!("--procedural is a `debug studs` flag\n\n{USAGE}")),
+                "embarked" | "online" | "studs" => Err(format!("flags not valid for `debug {preset}`\n\n{USAGE}")),
                 other => Err(format!("unknown debug preset `{other}`\n\n{USAGE}")),
             }
         }
@@ -345,7 +365,7 @@ impl DebugLaunchPlugin {
                 |key| std::env::var(key).ok(),
                 crate::login::login_url().as_deref(),
             )?),
-            DebugScenario::Embarked { .. } => None,
+            DebugScenario::Embarked { .. } | DebugScenario::Studs { .. } => None,
         };
         Ok(Self { scenario, online })
     }
@@ -397,6 +417,26 @@ fn boot(
             info!("[debug] logging in to join the login service's world {world}");
             launch.phase = Phase::Online(OnlineStep::Login);
             next.set(AppState::Login);
+            return;
+        }
+        DebugScenario::Studs { procedural } => {
+            // `terrain` is passed verbatim as VOXEL_WORLD_FILE: `studs` is the server's toy stud
+            // world, `studs-procedural` the procedural world on stud terrain.
+            // Only `server.log` lives in the entry dir. The toy world has no far terrain:
+            // `just run-studs` sets `VOXEL_LOD_RINGS=off` for it (not for `--procedural`, which
+            // streams stud far terrain), because `WorldScale::from_env` runs in `main` before this system.
+            let dir = worlds_root().join(DEBUG_STUDS_SLUG);
+            if let Err(e) = std::fs::create_dir_all(&dir) {
+                error!("[debug] could not create {}: {e}", dir.display());
+                error.0 = Some(format!("could not create {}: {e}", dir.display()));
+                launch.phase = Phase::Done;
+                return;
+            }
+            let terrain = if *procedural { "studs-procedural" } else { "studs" };
+            info!("[debug] studs: world `{terrain}`, log in {}", dir.display());
+            commands.insert_resource(PendingWorld { entry_dir: dir, terrain: terrain.into(), name: "Studs".into() });
+            launch.phase = Phase::Embarking(Sent::Nothing);
+            next.set(AppState::Starting);
             return;
         }
     };
@@ -610,6 +650,16 @@ fn auto_embark(
     {
         return;
     }
+    if matches!(launch.scenario, DebugScenario::Studs { .. }) {
+        // A store-less world never sends a world map: connected is embarked.
+        info!("[debug] studs: playing the spawn region");
+        embarked.0 = true;
+        if let Some(mut cam) = cam {
+            cam.placed = false;
+        }
+        launch.phase = Phase::Done;
+        return;
+    }
     let (Some(map), Some(requests)) = (world_map.map.as_ref(), requests) else { return };
     if let Some(site) = launch.scenario.adventure_at() {
         // `apply_adventure_result` sets `Embarked` on success (seen next frame).
@@ -707,6 +757,19 @@ mod tests {
         let plain = |reset| Ok(Some(DebugScenario::Embarked { reset, port: None, join: None, adventure_at: None }));
         assert_eq!(parse_args(&["debug", "embarked"]), plain(false));
         assert_eq!(parse_args(&["debug", "embarked", "--reset"]), plain(true));
+    }
+
+    #[test]
+    fn debug_studs_parses_without_flags() {
+        if !game::stud::STUDS_SUPPORTED {
+            // Not a 256-unit sim chunk build: the preset errors out.
+            assert!(parse_args(&["debug", "studs"]).unwrap_err().contains("256-unit sim chunks"));
+            return;
+        }
+        assert_eq!(parse_args(&["debug", "studs"]), Ok(Some(DebugScenario::Studs { procedural: false })));
+        assert_eq!(parse_args(&["debug", "studs", "--procedural"]), Ok(Some(DebugScenario::Studs { procedural: true })));
+        assert!(parse_args(&["debug", "embarked", "--procedural"]).is_err());
+        assert!(parse_args(&["debug", "studs", "--reset"]).is_err());
     }
 
     #[test]

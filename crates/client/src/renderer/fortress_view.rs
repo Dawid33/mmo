@@ -427,7 +427,7 @@ mod tests {
     #[test]
     fn uniform_tracks_working_level() {
         let home = Some(RegionId { x: 0, z: 0 });
-        let working = WorkingLevel { level: Some(10), cut: true };
+        let working = WorkingLevel { level: Some(10), cut: true, ..Default::default() };
         let u = build_uniform(&working, home);
         assert!(cutaway_active(&u));
         assert_eq!(u.cut.x, 176.0);
@@ -436,12 +436,12 @@ mod tests {
         assert_eq!(u.origin.w, (10 - 15) as f32, "the working level is the top layer");
         assert_eq!(u.overlay_dims, UVec4::new(REGION_BLOCKS as u32, REGION_BLOCKS as u32, OVERLAY_LEVELS, 0));
 
-        let off = WorkingLevel { level: Some(10), cut: false };
+        let off = WorkingLevel { level: Some(10), cut: false, ..Default::default() };
         assert!(!cutaway_active(&build_uniform(&off, home)));
         assert_eq!(build_uniform(&off, home).cut.z, 1.0, "the overlay stays on with the cut off");
         assert!(!cutaway_active(&build_uniform(&working, None)));
         assert_eq!(build_uniform(&working, None).cut.z, 0.0);
-        assert_eq!(build_uniform(&WorkingLevel { level: None, cut: true }, home).cut.z, 0.0);
+        assert_eq!(build_uniform(&WorkingLevel { level: None, cut: true, ..Default::default() }, home).cut.z, 0.0);
     }
 
     #[test]
@@ -600,7 +600,7 @@ mod tests {
     /// origin.xz + cut.w.
     #[test]
     fn uniform_carries_the_home_region_rect() {
-        let working = WorkingLevel { level: Some(10), cut: true };
+        let working = WorkingLevel { level: Some(10), cut: true, ..Default::default() };
         let u = build_uniform(&working, Some(RegionId { x: 2, z: -1 }));
         assert_eq!(u.origin.truncate(), Vec3::new(2.0, 0.0, -1.0) * REGION_SIZE);
         assert_eq!(u.cut.w, REGION_SIZE);

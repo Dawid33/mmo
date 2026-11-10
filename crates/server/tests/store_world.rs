@@ -304,7 +304,107 @@ fn server_world_is_tiled() {
     // Region generation on the installed world pins its tiles first.
     let pins = worldgen::prefetch_region(SPAWN_REGION).expect("the tiles load");
     assert!(!pins.is_empty(), "a tiled world pins tiles");
+    drop(pins);
+    stored_world_on_stud_terrain(&store);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The installed forged world served on stud terrain (`VOXEL_TERRAIN=studs`), wired as
+/// the server wires it: a fresh region pins its tiles, is seeded from recipes sampled
+/// from the forged world, is edited and saved; started again it comes back from the
+/// store with the edit, and genesis does not run again. Part of `server_world_is_tiled`
+/// (the forged world is installed once per process).
+fn stored_world_on_stud_terrain(store: &world_store::StoreHandle) {
+    if !game::stud::STUDS_SUPPORTED {
+        return;
+    }
+    use game::{RegionInput, RegionSeed, StudChunkCoords};
+    use server::region_threads::ThreadRegionSpawner;
+    use std::collections::BTreeMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    const WAIT: Duration = Duration::from_secs(120);
+    store.bind_terrain(world_store::TerrainKind::Studs).expect("a world with no saved region takes stud terrain");
+    assert!(matches!(
+        store.bind_terrain(world_store::TerrainKind::Voxels),
+        Err(world_store::StoreError::OtherTerrain { .. })
+    ));
+    let seed = worldgen::WORLD_SEED;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let spawner = || {
+        let counted = calls.clone();
+        ThreadRegionSpawner::with_region_generator(Arc::new(|_| Vec::new()))
+            .with_prefetch(Arc::new(worldgen::prefetch_region))
+            .with_genesis(Arc::new(move |rc| {
+                counted.fetch_add(1, Ordering::SeqCst);
+                worldgen::stud_gen::generate_stud_region(rc, seed)
+            }))
+            .with_store(HostClaims::claim_around(store.clone(), SPAWN_REGION, 0).unwrap())
+    };
+    let snapshot = |send: &crossbeam::channel::Sender<RegionInput>,
+                    recv: &crossbeam::channel::Receiver<(RegionCoords, RegionOutput)>| {
+        send.send(RegionInput::RequestSnapshot(0)).unwrap();
+        loop {
+            match recv.recv_timeout(WAIT).expect("region snapshot") {
+                (_, RegionOutput::Snapshot(_, rollback)) => return rollback,
+                (_, RegionOutput::LoadFailed(why)) => panic!("the region did not load: {why}"),
+                _ => {}
+            }
+        }
+    };
+    let studs = |r: &game::Rollback| -> BTreeMap<StudChunkCoords, game::StudChunk> {
+        r.stud_index.iter().map(|(c, _)| (*c, r.stud_chunk_at(*c).unwrap().clone())).collect()
+    };
+
+    let mut s = spawner();
+    let (out, recv) = unbounded();
+    let send = s.spawn(SPAWN_REGION, RegionSeed::Deferred(None), out);
+    let recipes = {
+        let _pins = worldgen::prefetch_region(SPAWN_REGION).unwrap();
+        worldgen::stud_gen::generate_stud_region(SPAWN_REGION, seed).ground
+    };
+    assert_eq!(recipes.len(), game::REGION_CHUNKS * game::REGION_CHUNKS);
+    let (col, g) = &recipes[0];
+    let air = StudChunkCoords { x: col.x, y: *g.surface_layers().end() + 2, z: col.z };
+    let part = game::stud_catalog::STUD_PARTS.iter().position(|p| p.number == "3001").unwrap() as u16;
+    let brick = game::StudBrick::part_at([3, 0, 3], part, 0, 4);
+    send.send(RegionInput::Event(game::GameEventKind::Order(0, game::Order::PlaceStud { chunk: air, brick }))).unwrap();
+    let before = snapshot(&send, &recv);
+    assert_eq!(before.body_scale(), game::movement::BodyScale::STUD);
+    assert_eq!(before.stud_chunk_at(air).and_then(|c| c.brick_at([3, 0, 3])), Some(&brick));
+    let top = g.surface(9, 9);
+    let cell = [(col.x * game::STUD_CHUNK_STUDS + 9) as i32, top - 1, (col.z * game::STUD_CHUNK_STUDS + 9) as i32];
+    assert!(before.stud_material_at(cell).is_some(), "forged ground under the recipe's surface");
+    send.send(RegionInput::Shutdown).unwrap();
+    let (tick, portable) = loop {
+        if let (_, RegionOutput::Stopped(_, _, tick, portable)) = recv.recv_timeout(WAIT).expect("region stops") {
+            break (tick, *portable);
+        }
+    };
+    s.reap(SPAWN_REGION);
+    assert_eq!(portable.stud_ground.as_ref(), Some(&recipes), "the stored recipes are the forged world's");
+    assert_eq!(portable.stud_chunks.len(), 1, "only the brick's chunk is stored: {:?}", portable.stud_chunks.keys());
+    let cut = game::WorldCut {
+        id: game::CutId(1),
+        host: 0,
+        tick,
+        regions: vec![(SPAWN_REGION, portable)],
+        in_flight: vec![],
+        players: vec![],
+        history: None,
+    };
+    HostClaims::claim_around(store.clone(), SPAWN_REGION, 0).unwrap().commit_cut(cut).recv().unwrap().expect("the cut commits");
+
+    let mut s = spawner();
+    let (out, recv) = unbounded();
+    let send = s.spawn(SPAWN_REGION, RegionSeed::Deferred(None), out);
+    let after = snapshot(&send, &recv);
+    assert_eq!(calls.load(Ordering::SeqCst), 1, "genesis re-ran on a stored region");
+    assert_eq!(after.body_scale(), game::movement::BodyScale::STUD);
+    assert_eq!(studs(&after), studs(&before), "the same stud chunks, from the store and the stored recipes");
+    assert_eq!(after.stud_material_at(cell), before.stud_material_at(cell));
+    send.send(RegionInput::Shutdown).unwrap();
+    while !matches!(recv.recv_timeout(WAIT).expect("region stops"), (_, RegionOutput::Stopped(..))) {}
+    s.reap(SPAWN_REGION);
 }
 
 /// A store imported under Plan A alone (the forge file as the archive row,

@@ -188,25 +188,24 @@ impl Rollback {
 }
 
 /// Where a restored body goes: `t` (a body centre, region-local voxel units)
-/// when its feet tile and the tile above are clear of solid blocks and inside
+/// when it is clear of terrain there (`body_fits`: on voxel terrain its feet
+/// tile and the tile above are clear of solid blocks) and inside
 /// the region — water is clear, so a swimmer is restored in place; else onto
 /// the standable tile nearest its feet level in its column (clamped into the
 /// region); else over the region's spawn column (on its water's top where
 /// it has any, `player_spawn_y`). Never inside terrain.
 pub fn restore_translation(rollback: &Rollback, t: Vector) -> Vector {
-    let feet = crate::feet_tile(crate::feet_of(t));
+    let src = rollback.tiles();
+    let feet_at = rollback.feet_of(t);
+    let feet = src.terrain().feet_tile(feet_at);
     let n = crate::REGION_BLOCKS as i32;
     let inside = (0..n).contains(&feet[0]) && (0..n).contains(&feet[2]);
-    let clear = |p: crate::TilePos| {
-        let b = rollback.block(p);
-        b == crate::BlockId::AIR || !crate::block_props().is_solid(b)
-    };
-    if inside && clear(feet) && clear([feet[0], feet[1] + 1, feet[2]]) {
+    if inside && crate::body_fits(&src, feet_at) {
         return t;
     }
     let column = [feet[0].clamp(0, n - 1), feet[2].clamp(0, n - 1)];
-    match crate::nearest_standable(rollback, column, Some(feet[1])) {
-        Some(tile) => crate::body_on_tile(tile),
+    match crate::nearest_standable(&src, column, Some(feet[1])) {
+        Some(tile) => rollback.body_centre_on(tile),
         None => {
             let xz = rollback.spawn_xz();
             Vector::new(xz.0, rollback.player_spawn_y(xz), xz.1)

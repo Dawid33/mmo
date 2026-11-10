@@ -1636,3 +1636,570 @@ fn floating_body_is_seam_invariant() {
     // tolerances (`assert_seam_invariant`), so it floats there too.
     check(&end, "Centre");
 }
+
+// --- Stud terrain across a seam (stud world plan P4) -------------------------
+
+/// Surface plate of the flat stud ground (layer 0).
+const STUD_TOP: i32 = 30;
+/// Seeds swept per schedule mode over the stud scenario (it runs nine stud regions).
+const STUD_SEEDS: u64 = 3;
+/// How far (sim units) the walker's body may rise or sink on level stud ground: under
+/// a plate (3.2 units).
+const STUD_LEVEL_TOLERANCE: f32 = 2.0;
+
+fn stud_flat() -> game::StudColumnGround {
+    let soil = game::StudProfile { cover: game::MAT_GRASS, cover_plates: 1, soil: game::MAT_DIRT, soil_plates: 5 };
+    game::StudColumnGround::flat(STUD_TOP, soil, game::MAT_STONE, -2000)
+}
+
+/// Flat stud ground under every region.
+fn stud_flat_seed(_rc: RegionCoords) -> game::StudRegionSeed {
+    let n = game::REGION_CHUNKS;
+    let ground = (0..n).flat_map(|x| (0..n).map(move |z| (ColumnCoords::new(x, z), stud_flat()))).collect();
+    game::StudRegionSeed { ground, features: Vec::new() }
+}
+
+fn stud_rig(schedule: Option<InlineSchedule>) -> Rig {
+    let spawner = schedule.map_or_else(game::InlineSpawner::default, game::InlineSpawner::with_schedule);
+    Rig::with_spawner(spawner.with_stud_genesis(std::sync::Arc::new(stud_flat_seed)), |_| Vec::new())
+}
+
+/// The player's body height and whether it stands, in the region owning it (`None`
+/// while a handoff is in flight).
+fn stud_walker(rig: &mut Rig) -> Option<(f32, bool)> {
+    let owners = rig.owners();
+    let rc = *owners.first()?;
+    let mut out = None;
+    rig.manager.spawner_mut().with_region(rc, |region| {
+        let data = region.data();
+        let e = *data.player_entites.get(&CLIENT).expect("player owned here");
+        let handle = *data.ecs.rigidbody.get(e);
+        let y = data.physics.bodies.get(handle).unwrap().translation().y;
+        let grounded = data.ecs.motion.try_get(e).as_ref().is_some_and(|m| m.grounded);
+        out = Some((y, grounded));
+    });
+    out
+}
+
+/// Every running region's stud halo holds exactly what its running neighbours have
+/// materialised in the columns it mirrors, brick for brick.
+fn assert_stud_halos_agree(rig: &mut Rig) {
+    type Chunks = BTreeMap<game::WorldChunkPos, game::StudChunk>;
+    let mut own: BTreeMap<RegionCoords, Chunks> = BTreeMap::new();
+    let mut halo: BTreeMap<RegionCoords, Chunks> = BTreeMap::new();
+    for rc in rig.manager.running_regions() {
+        rig.manager.spawner_mut().with_region(rc, |region| {
+            let d = region.data();
+            let chunks = d.stud_index.keys().map(|c| {
+                (game::WorldChunkPos::from_local(rc, [c.x as i32, c.y, c.z as i32]), d.stud_chunk_at(*c).unwrap().clone())
+            });
+            own.insert(rc, chunks.collect());
+            halo.insert(rc, d.stud_halo().iter().filter_map(|(k, h)| Some((*k, h.chunk.clone()?))).collect());
+        });
+    }
+    let mut checked = 0;
+    for (viewer, mirrored) in &halo {
+        for (owner, chunks) in &own {
+            let offset = (viewer.x - owner.x, viewer.z - owner.z);
+            if offset == (0, 0) || offset.0.abs() > 1 || offset.1.abs() > 1 {
+                continue;
+            }
+            let want: Chunks = chunks
+                .iter()
+                .filter(|(k, _)| {
+                    let c = k.to_local().1;
+                    game::halo::halo_targets(c.x as i32, c.z as i32).contains(&offset)
+                })
+                .map(|(k, c)| (*k, c.clone()))
+                .collect();
+            let have: Chunks = mirrored.iter().filter(|(k, _)| k.to_local().0 == *owner).map(|(k, c)| (*k, c.clone())).collect();
+            assert!(!want.is_empty(), "{owner:?} has an edge");
+            assert_eq!(have.keys().collect::<Vec<_>>(), want.keys().collect::<Vec<_>>(), "{viewer:?} mirrors {owner:?}");
+            assert!(have == want, "{viewer:?}'s halo of {owner:?} holds its bricks");
+            checked += 1;
+        }
+    }
+    assert!(checked >= 2, "at least the two regions of the scenario mirror each other");
+}
+
+/// The stud chunk `c` of `rc`, as its owner holds it.
+fn stud_chunk(rig: &mut Rig, rc: RegionCoords, c: game::StudChunkCoords) -> Option<game::StudChunk> {
+    let mut out = None;
+    rig.manager.spawner_mut().with_region(rc, |region| out = region.data().stud_chunk_at(c).cloned());
+    out
+}
+
+/// On flat stud ground under a 3x3 window: walk the body north across the seam
+/// (level and standing all the way, never lifted out of the ground), carve a box
+/// straddling the seam back toward the spawn region, place a brick into the spawn
+/// region from the far side — then both owners hold exactly the right bricks, every
+/// halo agrees with its owner, and a replica fed each region's event stream ends in
+/// the same state hash. Returns the final fingerprint.
+fn stud_seam_scenario(schedule: Option<InlineSchedule>) -> Vec<(RegionCoords, u64, u32)> {
+    let (cw, n) = (game::STUD_CHUNK_STUDS as i32, game::REGION_CHUNKS as i32);
+    let mut rig = stud_rig(schedule);
+    rig.join_spawn();
+    for _ in 0..PAST_SEAM_ROUNDS {
+        rig.round();
+    }
+    rig.manager.spawner_mut().with_region(SPAWN_REGION, |region| {
+        assert_eq!(region.data().body_scale(), game::movement::BodyScale::STUD);
+        assert!(region.data().stud_halo_chunk_at([0, 0, -1]).is_some(), "the north neighbour's edge is mirrored");
+    });
+
+    // From here on, replicas of the two regions the scenario plays in follow their
+    // event streams (what a client does with a region snapshot).
+    let mut replicas: BTreeMap<RegionCoords, game::Region> = BTreeMap::new();
+    for rc in [SPAWN_REGION, north()] {
+        rig.manager.spawner_mut().with_region(rc, |region| {
+            replicas.insert(rc, game::Region::new(region.data().clone(), None, rc, None));
+        });
+    }
+    rig.events_seen = Some(Vec::new());
+
+    // --- Walk across the seam.
+    let (y0, standing) = stud_walker(&mut rig).expect("the player stands in the spawn region");
+    assert!(standing, "spawned standing on the studs");
+    let lifts = game::halo::depenetration_lifts();
+    rig.key(Key::KeyE, true);
+    rig.key(Key::KeyE, false);
+    rig.key(Key::KeyW, true);
+    let (mut arrived, mut past) = (false, 0);
+    for _ in 0..LEG_ROUNDS {
+        rig.round();
+        if let Some((y, grounded)) = stud_walker(&mut rig) {
+            assert!((y - y0).abs() <= STUD_LEVEL_TOLERANCE, "the body left level ground: y {y0} -> {y}");
+            assert!(grounded, "the body lost the ground at y {y}");
+        }
+        arrived |= rig.owners() == [north()];
+        past += usize::from(arrived);
+        if past > PAST_SEAM_ROUNDS {
+            break;
+        }
+    }
+    assert!(arrived, "the walker never reached {:?}; owners {:?}", north(), rig.owners());
+    rig.key(Key::KeyW, false);
+    assert_eq!(rig.owners(), [north()], "no thrash back across the seam");
+    assert_eq!(game::halo::depenetration_lifts(), lifts, "a crossing body was lifted out of the ground");
+    rig.manager.spawner_mut().with_region(north(), |region| {
+        assert_eq!(region.data().body_scale(), game::movement::BodyScale::STUD, "the same body on both sides");
+    });
+
+    // --- Carve a box straddling the north region's +z seam (4 studs on each side),
+    // ordered in the north (the player's home).
+    let edge = n * cw;
+    let (x0, x1) = (2 * cw + 8, 2 * cw + 12);
+    rig.order(Order::CarveStud { lo: [x0, STUD_TOP - 6, edge - 4], hi: [x1, STUD_TOP, edge + 4] });
+    for _ in 0..PAST_SEAM_ROUNDS {
+        rig.round();
+    }
+    // --- Place a brick into the spawn region's edge chunk, against the seam.
+    let part = game::stud_catalog::STUD_PARTS.iter().position(|p| p.number == "3001").unwrap() as u16;
+    let placed = game::StudBrick::part_at([4, STUD_TOP as u8, 0], part, 0, 4);
+    rig.order(Order::PlaceStudAt { chunk: game::WorldChunkPos::from_local(SPAWN_REGION, [1, 0, 0]), brick: placed });
+    for _ in 0..PAST_SEAM_ROUNDS {
+        rig.round();
+    }
+    // Drain in lockstep: nothing is left in flight.
+    rig.manager.spawner_mut().set_schedule(None);
+    for _ in 0..PAST_SEAM_ROUNDS {
+        rig.round();
+    }
+
+    // Both owners lost exactly the box's cells: each chunk is its pristine one with
+    // the local part of the box carved out.
+    let at = |x: i32, z: i32| game::StudChunkCoords { x: x as usize, y: 0, z: z as usize };
+    let carved = |lo: [u8; 3], hi: [u8; 3]| {
+        let mut chunk = stud_flat().pristine_chunk(0).unwrap();
+        let removed: u32 = chunk.carve(lo, hi).iter().map(|&(_, cells)| cells).sum();
+        assert_eq!(removed, 4 * 6 * 4);
+        chunk
+    };
+    let (lx, top) = (8u8, STUD_TOP as u8);
+    assert!(
+        stud_chunk(&mut rig, north(), at(2, n - 1)) == Some(carved([lx, top - 6, cw as u8 - 4], [lx + 4, top, cw as u8])),
+        "the north's part of the box"
+    );
+    assert!(
+        stud_chunk(&mut rig, SPAWN_REGION, at(2, 0)) == Some(carved([lx, top - 6, 0], [lx + 4, top, 4])),
+        "the spawn region's part of the box"
+    );
+    let mut with_brick = stud_flat().pristine_chunk(0).unwrap();
+    with_brick.place(placed).unwrap();
+    assert!(stud_chunk(&mut rig, SPAWN_REGION, at(1, 0)) == Some(with_brick), "the brick placed across the seam");
+    assert_stud_halos_agree(&mut rig);
+    let granted = rig
+        .intents_seen
+        .iter()
+        .filter(|(rc, m)| *rc == SPAWN_REGION && matches!(m, game::IntentMsg::Reply(r) if matches!(r.reply, game::IntentReply::Granted(_))))
+        .count();
+    assert_eq!(granted, 2, "the carve and the placement were granted by the spawn region");
+
+    // Server vs replay: each replica, fed its region's events, hashes like the region.
+    for (rc, kind) in rig.events_seen.take().unwrap() {
+        if let Some(replica) = replicas.get_mut(&rc) {
+            replica.handle_event(kind).expect("the replica replays the stream");
+            replica.commit_server_event();
+        }
+    }
+    for (rc, replica) in &replicas {
+        let mut server = 0;
+        rig.manager.spawner_mut().with_region(*rc, |region| server = game::state_hash(region.data()));
+        assert_eq!(game::state_hash(replica.data()), server, "{rc:?}: the replayed stream ends in the server's state");
+    }
+    rig.fingerprint()
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn stud_seam_walk_carve_and_place_in_lockstep() {
+    stud_seam_scenario(None);
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn stud_seam_survives_scheduling_jitter() {
+    let modes: [(&str, fn(u64) -> InlineSchedule); 3] =
+        [("shuffled", InlineSchedule::shuffled), ("late", InlineSchedule::late), ("jittery", InlineSchedule::jittery)];
+    for (mode, schedule) in modes {
+        for seed in 0..STUD_SEEDS {
+            let run = || {
+                std::panic::catch_unwind(|| stud_seam_scenario(Some(schedule(seed))))
+                    .unwrap_or_else(|_| panic!("the stud seam broke under schedule `{mode}`, seed {seed}"))
+            };
+            assert_eq!(run(), run(), "stud seam under schedule `{mode}` seed {seed} is not reproducible");
+        }
+    }
+}
+
+// --- Stud tiles at a seam (stud world plan P6a) --------------------------------
+
+/// On flat stud ground: a dig order whose box straddles the north seam, completed.
+/// A designation belongs to the region it is ordered in (a tile never straddles a
+/// seam; the box is clipped), so the spawn region digs exactly its own tiles — a shaft
+/// from the surface into the implied layer below — and the north region, untouched,
+/// sees the shaft through its stud halo: open tiles, a floor to stand on at its
+/// bottom, and its own implied ground behind the shaft's wall materialised. A replica
+/// fed each region's event stream ends in the same state hash. Returns the fingerprint.
+fn stud_dig_at_seam_scenario(schedule: Option<InlineSchedule>) -> Vec<(RegionCoords, u64, u32)> {
+    use game::{TileFill, TileSource};
+    let n = (game::REGION_CHUNKS * game::STUD_CHUNK_TILES) as i32;
+    let chunks = game::REGION_CHUNKS as i32;
+    let top = STUD_TOP / game::TILE_PLATES as i32 - 1;
+    let mut rig = stud_rig(schedule);
+    rig.join_spawn();
+    for _ in 0..PAST_SEAM_ROUNDS {
+        rig.round();
+    }
+    let mut replicas: BTreeMap<RegionCoords, game::Region> = BTreeMap::new();
+    for rc in [SPAWN_REGION, north()] {
+        rig.manager.spawner_mut().with_region(rc, |region| {
+            assert_eq!(region.data().terrain_kind(), game::TerrainKind::Stud);
+            replicas.insert(rc, game::Region::new(region.data().clone(), None, rc, None));
+        });
+    }
+    rig.events_seen = Some(Vec::new());
+
+    // Tiles x 40..=41, levels -1..=top, z -2..=1: z < 0 is the north region's.
+    let area = game::TileBox::new([40, top, -2], [41, -1, 1]);
+    let op = game::OpId { client: CLIENT, seq: 1 };
+    rig.order(Order::Designate { op, kind: game::DesignationKind::Dig, priority: game::DEFAULT_PRIORITY, area });
+    for _ in 0..PAST_SEAM_ROUNDS {
+        rig.round();
+    }
+    rig.manager.spawner_mut().with_region(SPAWN_REGION, |region| {
+        let d = region.data().designations();
+        assert_eq!(d.len() as i32, 2 * (top + 2) * 2, "its own tiles of the box");
+        assert!(d.keys().all(|p| (0..=1).contains(&p[2])));
+    });
+    rig.manager.spawner_mut().with_region(north(), |region| {
+        assert!(region.data().designations().is_empty(), "a designation is the ordering region's");
+    });
+    rig.order(Order::DevCompleteAll);
+    for _ in 0..PAST_SEAM_ROUNDS {
+        rig.round();
+    }
+    // A fill box straddling the same seam, over the surface east of the shaft: the
+    // north region's part goes to it as an intent.
+    let (fx, fy) = (2 * 48, STUD_TOP);
+    rig.order(Order::FillStud { lo: [fx, fy, -3], hi: [fx + 4, fy + 6, 3], material: game::MAT_SAND });
+    for _ in 0..PAST_SEAM_ROUNDS {
+        rig.round();
+    }
+    // Drain in lockstep: nothing is left in flight.
+    rig.manager.spawner_mut().set_schedule(None);
+    for _ in 0..PAST_SEAM_ROUNDS {
+        rig.round();
+    }
+    let edge = (game::REGION_CHUNKS * game::STUD_CHUNK_STUDS) as i32;
+    for (rc, zs, tile_z) in [(SPAWN_REGION, 0..3, 0), (north(), edge - 3..edge, n - 1)] {
+        rig.manager.spawner_mut().with_region(rc, |region| {
+            let d = region.data();
+            for z in zs.clone() {
+                assert_eq!(d.stud_material_at([fx, fy + 5, z]), Some(game::MAT_SAND), "{rc:?} filled its part at z {z}");
+            }
+            assert_eq!(d.tile_fill([48, top + 1, tile_z]), TileFill::Solid);
+            // ... and sees the other side's part through its halo.
+            let across = if rc == SPAWN_REGION { -1 } else { n };
+            assert_eq!(d.tile_fill([48, top + 1, across]), TileFill::Solid, "{rc:?} sees the fill across the seam");
+            assert_eq!(d.tile_material([48, top + 1, across]), Some(game::MAT_SAND));
+        });
+    }
+    let granted = rig
+        .intents_seen
+        .iter()
+        .filter(|(rc, m)| *rc == north() && matches!(m, game::IntentMsg::Reply(r) if matches!(r.reply, game::IntentReply::Granted(game::Intent::FillStud { .. }))))
+        .count();
+    assert_eq!(granted, 1, "the north region granted its part of the fill");
+
+    rig.manager.spawner_mut().with_region(SPAWN_REGION, |region| {
+        let d = region.data();
+        for y in -1..=top {
+            for x in 40..=41 {
+                for z in 0..=1 {
+                    assert_eq!(d.tile_fill([x, y, z]), TileFill::Open, "dug {x},{y},{z}");
+                }
+                assert_eq!(d.tile_fill([x, y, 2]), TileFill::Solid, "the shaft's south wall at level {y}");
+                // The north region's tiles, read through this region's halo.
+                assert_eq!(d.tile_fill([x, y, -1]), TileFill::Solid, "the north's ground at level {y}");
+            }
+        }
+        assert!(d.designations().is_empty());
+        assert!(d.stud_chunk_at(game::StudChunkCoords { x: 2, y: -1, z: 0 }).is_some(), "the layer under the surface");
+        assert!(game::standable(d, [40, -1, 0]), "the shaft's bottom");
+    });
+    rig.manager.spawner_mut().with_region(north(), |region| {
+        let d = region.data();
+        for y in -1..=top {
+            // The spawn region's tile z 0 is this region's z `n`.
+            assert_eq!(d.tile_fill([40, y, n]), TileFill::Open, "the shaft seen through the halo, level {y}");
+            assert_eq!(d.tile_fill([40, y, n + 2]), TileFill::Solid);
+            assert_eq!(d.tile_fill([40, y, n - 1]), TileFill::Solid, "its own ground is untouched");
+        }
+        assert_eq!(d.tile_fill([40, -2, n]), TileFill::Solid);
+        assert!(game::standable(d, [40, -1, n]), "a path may end on the neighbour's shaft floor");
+        assert!(!game::standable(d, [40, top + 1, n]), "nothing to stand on over the shaft");
+        assert_eq!(d.column_band([40, n]).map(|(lo, _)| lo), Some(-(game::STUD_LAYER_TILES as i32)));
+        let behind = game::StudChunkCoords { x: 2, y: -1, z: chunks as usize - 1 };
+        assert!(d.stud_chunk_at(behind).is_some(), "the ground behind the neighbour's shaft is materialised");
+    });
+    assert_stud_halos_agree(&mut rig);
+
+    for (rc, kind) in rig.events_seen.take().unwrap() {
+        if let Some(replica) = replicas.get_mut(&rc) {
+            replica.handle_event(kind).expect("the replica replays the stream");
+            replica.commit_server_event();
+        }
+    }
+    for (rc, replica) in &replicas {
+        let mut server = 0;
+        rig.manager.spawner_mut().with_region(*rc, |region| server = game::state_hash(region.data()));
+        assert_eq!(game::state_hash(replica.data()), server, "{rc:?}: the replayed stream ends in the server's state");
+    }
+    rig.fingerprint()
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn stud_dig_at_a_seam_in_lockstep() {
+    stud_dig_at_seam_scenario(None);
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn stud_dig_at_a_seam_survives_scheduling_jitter() {
+    let modes: [(&str, fn(u64) -> InlineSchedule); 3] =
+        [("shuffled", InlineSchedule::shuffled), ("late", InlineSchedule::late), ("jittery", InlineSchedule::jittery)];
+    for (mode, schedule) in modes {
+        for seed in 0..STUD_SEEDS {
+            let run = || {
+                std::panic::catch_unwind(|| stud_dig_at_seam_scenario(Some(schedule(seed))))
+                    .unwrap_or_else(|_| panic!("the stud dig at a seam broke under schedule `{mode}`, seed {seed}"))
+            };
+            assert_eq!(run(), run(), "stud dig at a seam under schedule `{mode}` seed {seed} is not reproducible");
+        }
+    }
+}
+
+// --- Stud drops and stud bodies at a seam (stud world plan P6b) ------------------
+
+/// Tile column of the scenario's tree, in the spawn region: two tiles south of the
+/// north seam, so the felled tree lands across it.
+const STUD_TREE_TILE: [i32; 2] = [40, 2];
+const STUD_TREE_ID: u16 = 21;
+/// The tree's trunk: 2 x 2 studs, this many plates tall.
+const STUD_TRUNK_PLATES: u8 = 48;
+
+/// [`stud_flat_seed`], with one tree in the spawn region at [`STUD_TREE_TILE`]: a
+/// trunk of four 12-plate segments, each a stud further north than the one under it
+/// (it leans toward the seam, so that is the way it tips), and leaves on top.
+fn stud_tree_seed(rc: RegionCoords) -> game::StudRegionSeed {
+    let mut seed = stud_flat_seed(rc);
+    if rc == SPAWN_REGION {
+        let tiles = game::STUD_CHUNK_TILES as i32;
+        let chunk = game::StudChunkCoords { x: (STUD_TREE_TILE[0] / tiles) as usize, y: 0, z: (STUD_TREE_TILE[1] / tiles) as usize };
+        let local = |tile: i32| ((tile % tiles) * game::TILE_STUDS as i32) as u8;
+        let (x, z) = (local(STUD_TREE_TILE[0]), local(STUD_TREE_TILE[1]));
+        let mut bricks = Vec::new();
+        let segment = STUD_TRUNK_PLATES / 4;
+        for k in 0..4u8 {
+            game::fill_box([x, STUD_TOP as u8 + k * segment, z - k], [2, segment, 2], game::MAT_WOOD, STUD_TREE_ID, &mut bricks);
+        }
+        game::fill_box([x - 2, STUD_TOP as u8 + STUD_TRUNK_PLATES, 0], [6, 3, 4], game::MAT_LEAVES, STUD_TREE_ID, &mut bricks);
+        seed.features.push((chunk, bricks));
+    }
+    seed
+}
+
+/// Logs (the stud wood's drop) lying in `rc`'s piles, and its stud bodies.
+fn stud_logs_and_bodies(rig: &mut Rig, rc: RegionCoords) -> (u32, usize) {
+    let mut out = (0, 0);
+    rig.manager.spawner_mut().with_region(rc, |region| {
+        let d = region.data();
+        let log = game::ItemId::block(game::block_props().id_named(game::STUD_WOOD_DROP_BLOCK).unwrap());
+        let logs = d.item_piles().values().flat_map(|p| &p.stacks).filter(|s| s.item == log).map(|s| s.count).sum();
+        out = (logs, d.ecs.stud_body.iter().filter(|(_, v)| v.is_some()).count());
+    });
+    out
+}
+
+/// A tree chopped at its foot two tiles from a seam falls across it: the falling
+/// bricks are one stud body that the spawn region hands to the north region (with its
+/// model, settle state and drops) when its centre of mass crosses; it comes to rest
+/// there and turns into its logs in the NORTH region's piles, while the cut's own log
+/// lies at the stump. Then a carve order straddling the seam drops what each side's
+/// part removed into that side's piles. Nothing is lost or doubled, and a replica fed
+/// each region's event stream ends in the server's state hash. Returns the fingerprint.
+fn stud_tree_across_seam_scenario(schedule: Option<InlineSchedule>) -> Vec<(RegionCoords, u64, u32)> {
+    let spawner = schedule.map_or_else(game::InlineSpawner::default, game::InlineSpawner::with_schedule);
+    let mut rig = Rig::with_spawner(spawner.with_stud_genesis(std::sync::Arc::new(stud_tree_seed)), |_| Vec::new());
+    rig.join_spawn();
+    for _ in 0..PAST_SEAM_ROUNDS {
+        rig.round();
+    }
+    let mut replicas: BTreeMap<RegionCoords, game::Region> = BTreeMap::new();
+    for rc in [SPAWN_REGION, north()] {
+        rig.manager.spawner_mut().with_region(rc, |region| {
+            replicas.insert(rc, game::Region::new(region.data().clone(), None, rc, None));
+        });
+    }
+    rig.events_seen = Some(Vec::new());
+
+    let level = STUD_TOP / game::TILE_PLATES as i32;
+    let foot = [STUD_TREE_TILE[0], level, STUD_TREE_TILE[1]];
+    rig.manager.spawner_mut().with_region(SPAWN_REGION, |region| {
+        assert_eq!(region.data().stud_tree_at(foot), Some(STUD_TREE_ID));
+    });
+    let op = game::OpId { client: CLIENT, seq: 1 };
+    let area = game::TileBox::new(foot, foot);
+    rig.order(Order::Designate { op, kind: game::DesignationKind::Chop, priority: game::DEFAULT_PRIORITY, area });
+    rig.order(Order::DevCompleteAll);
+    // Until the body has settled (at most its timeout, and the rounds a crossing takes).
+    let (mut seen_here, mut seen_north) = (false, false);
+    let mut rounds = 0;
+    loop {
+        rig.round();
+        rounds += 1;
+        let (here, there) = (stud_logs_and_bodies(&mut rig, SPAWN_REGION).1, stud_logs_and_bodies(&mut rig, north()).1);
+        assert!(here + there <= 1, "the body is never in two regions at once");
+        seen_here |= here == 1;
+        seen_north |= there == 1;
+        if seen_here && here + there == 0 && rounds > PAST_SEAM_ROUNDS {
+            // Gone from both: settled — or in flight; a few more rounds tell.
+            let mut gone = true;
+            for _ in 0..PAST_SEAM_ROUNDS {
+                rig.round();
+                rounds += 1;
+                let now = stud_logs_and_bodies(&mut rig, SPAWN_REGION).1 + stud_logs_and_bodies(&mut rig, north()).1;
+                seen_north |= stud_logs_and_bodies(&mut rig, north()).1 == 1;
+                gone &= now == 0;
+            }
+            if gone {
+                break;
+            }
+        }
+        assert!(rounds < 2 * game::SETTLE_TIMEOUT_TICKS as usize + 200, "the felled tree never settled");
+    }
+    assert!(seen_here, "the tree fell as a body in its own region");
+    assert!(seen_north, "the body crossed the seam: the north region held it");
+    // 24 wood cells cut (one log, at the stump); the rest of the trunk fell (7 logs).
+    let trunk_cells = 4 * u32::from(STUD_TRUNK_PLATES);
+    let expected = |cells: u32| game::stud_drops(&[(game::MAT_WOOD, cells)]).iter().map(|s| s.count).sum::<u32>();
+    let (at_stump, fallen) = (expected(4 * game::TILE_PLATES as u32), expected(trunk_cells - 4 * game::TILE_PLATES as u32));
+    assert_eq!((at_stump, fallen), (1, 7));
+    let (here, there) = (stud_logs_and_bodies(&mut rig, SPAWN_REGION).0, stud_logs_and_bodies(&mut rig, north()).0);
+    assert_eq!(here + there, at_stump + fallen, "every log of the tree lies somewhere, once: {here} + {there}");
+    assert!(there >= fallen, "the fallen part's logs lie where it came to rest, across the seam: {here} + {there}");
+    rig.manager.spawner_mut().with_region(SPAWN_REGION, |region| {
+        let d = region.data();
+        assert!(d.stud_tree_at(foot).is_none(), "the tree is gone");
+        let left = d.stud_index.keys().flat_map(|c| d.stud_chunk_at(*c).unwrap().bricks()).filter(|b| b.data == STUD_TREE_ID).count();
+        assert_eq!(left, 0, "no brick of it is left standing");
+    });
+
+    // A carve straddling the seam, east of the tree: each side drops its own part.
+    let dirt = |rig: &mut Rig, rc: RegionCoords| {
+        let mut n = 0;
+        rig.manager.spawner_mut().with_region(rc, |region| {
+            let dirt = game::ItemId::block(game::block_props().id_named("dirt").unwrap());
+            n = region.data().item_piles().values().flat_map(|p| &p.stacks).filter(|s| s.item == dirt).map(|s| s.count).sum::<u32>();
+        });
+        n
+    };
+    let before = (dirt(&mut rig, SPAWN_REGION), dirt(&mut rig, north()));
+    let x = 2 * 60;
+    rig.order(Order::CarveStud { lo: [x, STUD_TOP - 6, -4], hi: [x + 4, STUD_TOP, 4] });
+    for _ in 0..PAST_SEAM_ROUNDS {
+        rig.round();
+    }
+    rig.manager.spawner_mut().set_schedule(None);
+    for _ in 0..PAST_SEAM_ROUNDS {
+        rig.round();
+    }
+    let after = (dirt(&mut rig, SPAWN_REGION), dirt(&mut rig, north()));
+    let side = after.0 - before.0;
+    assert!(side >= 1, "the spawn region's part dropped into its own piles");
+    assert_eq!(after.1 - before.1, side, "the north region's equal part dropped into ITS piles, not back across");
+    let dropped = rig
+        .intents_seen
+        .iter()
+        .filter(|(rc, m)| *rc == north() && matches!(m, game::IntentMsg::Reply(r) if matches!(r.reply, game::IntentReply::Granted(game::Intent::CarveStud { .. }))))
+        .count();
+    assert_eq!(dropped, 1, "the north region granted its part of the carve");
+    assert_stud_halos_agree(&mut rig);
+
+    for (rc, kind) in rig.events_seen.take().unwrap() {
+        if let Some(replica) = replicas.get_mut(&rc) {
+            replica.handle_event(kind).expect("the replica replays the stream");
+            replica.commit_server_event();
+        }
+    }
+    for (rc, replica) in &replicas {
+        let mut server = 0;
+        rig.manager.spawner_mut().with_region(*rc, |region| server = game::state_hash(region.data()));
+        assert_eq!(game::state_hash(replica.data()), server, "{rc:?}: the replayed stream ends in the server's state");
+    }
+    rig.fingerprint()
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn stud_tree_falls_across_a_seam_in_lockstep() {
+    stud_tree_across_seam_scenario(None);
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn stud_tree_across_a_seam_survives_scheduling_jitter() {
+    let modes: [(&str, fn(u64) -> InlineSchedule); 3] =
+        [("shuffled", InlineSchedule::shuffled), ("late", InlineSchedule::late), ("jittery", InlineSchedule::jittery)];
+    for (mode, schedule) in modes {
+        for seed in 0..STUD_SEEDS {
+            let run = || {
+                std::panic::catch_unwind(|| stud_tree_across_seam_scenario(Some(schedule(seed))))
+                    .unwrap_or_else(|_| panic!("the stud tree across a seam broke under schedule `{mode}`, seed {seed}"))
+            };
+            assert_eq!(run(), run(), "stud tree across a seam under schedule `{mode}` seed {seed} is not reproducible");
+        }
+    }
+}

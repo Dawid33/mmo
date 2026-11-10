@@ -10,11 +10,19 @@ use crate::StoreError;
 pub const FORMAT_REGION_META: u8 = 1;
 pub const FORMAT_CHUNK: u8 = 1;
 pub const FORMAT_COLUMN_GROUND: u8 = 1;
-pub const FORMAT_ENTITY_BUNDLE: u8 = 1;
+/// `entities.bundle` and in-flight transfers: a `game::EntityBundle`. Format 2 added
+/// `Carried::stud_body`; format 1 rows are still read ([`decode_entity_bundle`]).
+pub const FORMAT_ENTITY_BUNDLE: u8 = 2;
+/// The entity bundle layout before stud bodies (`game::EntityBundleV1`).
+pub const FORMAT_ENTITY_BUNDLE_V1: u8 = 1;
 pub const FORMAT_PLAYER_RECORD: u8 = 1;
 pub const FORMAT_INTENT_MSG: u8 = 1;
 /// `regions.ground`: a region's `Vec<(ColumnCoords, ColumnGround)>`.
 pub const FORMAT_REGION_GROUND: u8 = 1;
+/// `stud_chunks.data`: a `game::StudChunkRecord`.
+pub const FORMAT_STUD_CHUNK: u8 = 1;
+/// `regions.stud_ground`: a region's `Vec<(ColumnCoords, StudColumnGround)>`.
+pub const FORMAT_STUD_GROUND: u8 = 1;
 
 /// `forged_world_map.bytes`: the forged world's `game::WorldMap`, framed by
 /// [`encode_world_map`] (not [`encode`]): format 1 was the plain
@@ -45,6 +53,18 @@ pub fn decode<T: DeserializeOwned>(expected: u8, bytes: &[u8]) -> Result<T, Stor
     let mut raw = Vec::new();
     zstd::stream::copy_decode(body, &mut raw).map_err(|e| StoreError::Corrupt(format!("{name}: zstd: {e}")))?;
     bincode::deserialize(&raw).map_err(|e| StoreError::Corrupt(format!("{name}: bincode: {e}")))
+}
+
+/// A stored entity bundle of either format: the current one, or format 1 (no stud
+/// body, `game::EntityBundleV1`) converted. Rows are rewritten in the current format
+/// by the next save that writes them.
+pub fn decode_entity_bundle(bytes: &[u8]) -> Result<game::EntityBundle, StoreError> {
+    match bytes.first() {
+        Some(&FORMAT_ENTITY_BUNDLE_V1) => {
+            decode::<game::EntityBundleV1>(FORMAT_ENTITY_BUNDLE_V1, bytes).map(game::EntityBundle::from)
+        }
+        _ => decode(FORMAT_ENTITY_BUNDLE, bytes),
+    }
 }
 
 /// Bytes of the world-map row before its zstd body: the format byte, the

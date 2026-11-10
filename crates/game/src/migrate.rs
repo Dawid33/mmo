@@ -27,8 +27,33 @@ pub struct Carried {
     /// What the entity leaves behind as item piles if it is destroyed on
     /// its way (the manager's mailbox overflow, `WorldManager::hold_arrival`):
     /// it must never vanish with them. A `DropItems` voxel body's
-    /// `VoxelBody::drops`, put back into it on arrival.
+    /// `VoxelBody::drops` (or a stud body's), put back into it on arrival.
     pub drops: Vec<crate::ItemStack>,
+    /// A stud body (`stud_body.rs`): its bricks, settle state and policy, with
+    /// its `drops` moved out into [`Carried::drops`] (empty here). Nothing in
+    /// it is region-local. Appended: [`CarriedV1`] is the layout before it.
+    pub stud_body: Option<crate::stud_body::StudBody>,
+}
+
+/// [`Carried`] as stored before stud bodies (world-store entity bundle
+/// format 1): every field but `stud_body`, in the same order. Decode-only.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct CarriedV1 {
+    pub camera: Option<(f32, f32)>,
+    pub motion: Option<crate::Motion>,
+    pub slime: Option<crate::slime::Slime>,
+    pub animator: Option<crate::anim::Animator>,
+    pub walker: Option<crate::Walker>,
+    pub wander: Option<crate::people::Wander>,
+    pub voxel_body: Option<crate::voxel_body::VoxelBody>,
+    pub drops: Vec<crate::ItemStack>,
+}
+
+impl From<CarriedV1> for Carried {
+    fn from(c: CarriedV1) -> Self {
+        let CarriedV1 { camera, motion, slime, animator, walker, wander, voxel_body, drops } = c;
+        Carried { camera, motion, slime, animator, walker, wander, voxel_body, drops, stud_body: None }
+    }
 }
 
 impl Client {
@@ -96,9 +121,17 @@ impl Rollback {
             wander,
             // Travels as `EntityBundle::id`.
             id: _,
+            // Terrain only (stud world); never travels.
+            stud: _,
+            stud_body,
         } = &*self.data.ecs;
         let mut voxel_body = voxel_body.try_get(key).clone();
-        let drops = voxel_body.as_mut().map(|vb| std::mem::take(&mut vb.drops)).unwrap_or_default();
+        let mut drops = voxel_body.as_mut().map(|vb| std::mem::take(&mut vb.drops)).unwrap_or_default();
+        // An entity is one or the other, so the drops are one body's.
+        let mut stud_body = stud_body.try_get(key).clone();
+        if let Some(sb) = stud_body.as_mut() {
+            drops.append(&mut sb.drops);
+        }
         Carried {
             camera: camera.try_get(key).as_ref().map(|c| (c.yaw, c.pitch)),
             motion: *motion.try_get(key),
@@ -108,6 +141,7 @@ impl Rollback {
             wander: *wander.try_get(key),
             voxel_body,
             drops,
+            stud_body,
         }
     }
 
@@ -159,13 +193,30 @@ impl Rollback {
     fn restore_voxel_body_safe(&mut self, e: EntityKey, c: &Carried) {
         let handle = *self.data.ecs.rigidbody.try_get(e);
         let pose = handle.and_then(|h| self.data.physics.bodies.get(h)).map(|b| *b.position());
+        if let Some(sb) = &c.stud_body {
+            // A stud body: the same steps (its collider's material is the voxel
+            // body's, and not in the `ColliderSpec` either).
+            if let Some(handle) = handle {
+                self.set_voxel_body_material_safe(handle);
+            }
+            if self.data.ecs.stud_body.try_get(e).is_none() {
+                self.data.send(GameDataUpdate::new(
+                    GameDataTransactionKind::Do,
+                    GameDataUpdateKind::AddStudBody(e, pose.unwrap_or_else(rapier3d::math::Pose::identity), Box::new(sb.model.clone())),
+                ));
+            }
+            let sb = crate::stud_body::StudBody { drops: c.drops.clone(), ..sb.clone() };
+            self.data.ecs.stud_body.set_safe(e, Some(sb));
+            return;
+        }
         let Some(vb) = &c.voxel_body else {
             if !c.drops.is_empty() {
                 log::error!("drops {:?} arrived on {e:?} with no voxel body to hold them: put down", c.drops);
                 if let Some(pose) = pose {
                     let t = pose.translation;
-                    let bv = crate::BLOCK_VOXELS as f32;
-                    let cell = [t.x, t.y, t.z].map(|v| (v / bv).floor() as i32);
+                    let kind = self.terrain_kind();
+                    let (bw, bh) = (kind.tile_width_units(), kind.tile_height_units());
+                    let cell = [(t.x / bw).floor() as i32, (t.y / bh).floor() as i32, (t.z / bw).floor() as i32];
                     let tick = *self.data.tick;
                     self.deposit_drops_safe(cell, &c.drops, tick);
                 }

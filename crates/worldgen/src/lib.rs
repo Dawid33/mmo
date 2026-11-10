@@ -16,6 +16,9 @@ pub mod pipeline;
 pub mod material;
 pub mod tile_map;
 pub mod world_store;
+pub mod stud_gen;
+pub mod stud_trees;
+pub mod stud_world;
 pub mod trees;
 mod slopes;
 
@@ -161,18 +164,25 @@ fn column_sample(patch: &dyn Patch, mats: &Materials, bx: i32, bz: i32) -> ColSa
 /// The column at world metres `(x, z)` of `patch` (a block centre, or a
 /// coarse LOD cell's).
 fn point_sample(patch: &dyn Patch, mats: &Materials, x: f64, z: f64) -> ColSample {
+    profile_sample(patch, mats, x, z).0
+}
+
+/// [`point_sample`] plus the profile it was read from and whether the column's water
+/// is a lake's.
+fn profile_sample(patch: &dyn Patch, mats: &Materials, x: f64, z: f64) -> (ColSample, crate::pipeline::ColumnProfile) {
     let (prof, water_top, lake) = patch.sample(x, z);
     let s = surface_from_profile(&prof);
     debug_assert!(s >= scan_band(&prof).1, "surface below the scan at ({x}, {z})");
     let unbounded = prof.is_unbounded();
     let plain = ColSample { s, water_top, top: s, ice_from: water_top + 1, cover: None, trees: true, unbounded };
     if !mats.biome.enabled() {
-        return plain;
+        return (plain, prof);
     }
-    match patch.climate(x, z) {
+    let sample = match patch.climate(x, z) {
         None => plain,
         Some(c) => biome_column(mats, &c, plain, lake),
-    }
+    };
+    (sample, prof)
 }
 
 /// Biomes that never carry trees: frozen tundra, glacier, or an open mud

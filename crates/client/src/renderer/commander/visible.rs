@@ -17,7 +17,7 @@
 
 use bevy::prelude::*;
 use game::rapier3d::math::Vector;
-use game::{RegionId, TilePos, TileSource, BLOCK_VOXELS};
+use game::{RegionId, TerrainKind, TilePos, BLOCK_VOXELS};
 
 use super::height::HeightGrid;
 use super::level::{cut_plane_world_y, WorkingLevel};
@@ -32,12 +32,14 @@ pub struct Cut {
     pub level: i32,
     pub region: RegionId,
     pub plane_y: f32,
+    /// The home region's terrain: its tiles' height is what the walk steps in.
+    pub terrain: TerrainKind,
 }
 
 impl Cut {
     pub fn of(level: &WorkingLevel, home: Option<RegionId>) -> Option<Self> {
         let (at, region) = (level.level?, home?);
-        level.cut.then(|| Cut { level: at, region, plane_y: cut_plane_world_y(at, region) })
+        level.cut.then(|| Cut { level: at, region, plane_y: cut_plane_world_y(level.terrain, at, region), terrain: level.terrain })
     }
 }
 
@@ -102,20 +104,21 @@ pub fn visible_ground_with(
     } else {
         0.0
     };
+    // Tiles are `size` wide and `cut.terrain`'s tile height tall: the walk runs
+    // in tile space (every tile a `size` cube), the hit box is back in units.
     let size = BLOCK_VOXELS as f32;
+    let tile = Vec3::new(size, cut.terrain.tile_height_units(), size);
     let offset = Vec3::from_array(cut.region.world_offset());
     let start = origin + dir * t0 - offset;
     let reach = ((max - t0) / size).max(0.0);
     let level = cut.level;
-    let inside = game::edit::raycast_blocks(
-        Vector::new(start.x, start.y, start.z),
-        Vector::new(dir.x, dir.y, dir.z),
-        reach,
-        |p| p[1] <= level && solid(p),
-    )
-    .map(|hit| {
-        let min = Vec3::new(hit.block[0] as f32, hit.block[1] as f32, hit.block[2] as f32) * size;
-        box_entry(start, dir, min, min + Vec3::splat(size)) + offset
+    let (ray_o, ray_d) = super::tiles::tile_ray(
+        cut.terrain,
+        (Vector::new(start.x, start.y, start.z), Vector::new(dir.x, dir.y, dir.z)),
+    );
+    let inside = game::edit::raycast_blocks(ray_o, ray_d, reach, |p| p[1] <= level && solid(p)).map(|hit| {
+        let min = Vec3::new(hit.block[0] as f32, hit.block[1] as f32, hit.block[2] as f32) * tile;
+        box_entry(start, dir, min, min + tile) + offset
     });
     match (inside, outside) {
         (Some(a), Some(b)) => Some(if a.distance(origin) <= b.distance(origin) { a } else { b }),
@@ -147,7 +150,7 @@ pub fn visible_ground(
         max,
         cut,
         |x, z| grid.surface_at(x, z),
-        |p| game::block_props().blocks_ray(mirror.block(p)),
+        |p| mirror.pick_solid(p),
         |x, z| rect.is_some_and(|r| r.contains(Vec2::new(x, z))),
         xray,
     )
@@ -164,7 +167,7 @@ mod tests {
     }
 
     fn cut_at(level: i32) -> Cut {
-        Cut { level, region: home(), plane_y: cut_plane_world_y(level, home()) }
+        Cut { level, region: home(), plane_y: cut_plane_world_y(TerrainKind::Voxel, level, home()), terrain: TerrainKind::Voxel }
     }
 
     /// A column of terrain 30 blocks high with a pit at block column (3, 3)

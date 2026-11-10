@@ -18,9 +18,46 @@ pub const DEFAULT_WORLD_PATH: &str = "worlds/default.world";
 /// `VOXEL_WORLD_FILE` value that selects the procedural noise world.
 pub const PROCEDURAL_KEYWORD: &str = worldgen::forged::PROCEDURAL_KEYWORD;
 
+/// `VOXEL_WORLD_FILE` value that selects the toy-brick stud test world.
+pub const STUDS_KEYWORD: &str = "studs";
+
+/// `VOXEL_WORLD_FILE` value that selects the procedural noise world on stud terrain.
+pub const STUDS_PROCEDURAL_KEYWORD: &str = "studs-procedural";
+
 /// The world store: a `.sqlite` path or a `postgres://` URL. Unset or empty =
 /// [`store_url_for`] the world file.
 pub const WORLD_DB_ENV: &str = "VOXEL_WORLD_DB";
+
+/// The terrain a stored (forged) world's regions run on: `voxels` (unset: the
+/// default) or `studs` — stud terrain generated from the forged world
+/// (`worldgen::stud_gen`) and saved in the store. A world keeps the kind it was
+/// first served with (`world.terrain`); the other is refused at start. Worlds
+/// without a store ignore it (their `VOXEL_WORLD_FILE` keyword names the terrain).
+pub const TERRAIN_ENV: &str = "VOXEL_TERRAIN";
+
+/// [`TERRAIN_ENV`]'s value -> the terrain kind; unset or empty is voxels.
+pub fn terrain_from(value: Option<&str>) -> Result<world_store::TerrainKind, String> {
+    use world_store::TerrainKind;
+    match value.map(str::trim) {
+        None | Some("") => Ok(TerrainKind::Voxels),
+        Some(v) if v == TerrainKind::Voxels.name() => Ok(TerrainKind::Voxels),
+        Some(v) if v == TerrainKind::Studs.name() => {
+            if !game::stud::STUDS_SUPPORTED {
+                return Err(format!(
+                    "{TERRAIN_ENV}={v}: stud terrain needs 256-unit sim chunks (chunk_blocks=16); this build has \
+                     CHUNK_UNITS={}",
+                    game::block::CHUNK_UNITS
+                ));
+            }
+            Ok(TerrainKind::Studs)
+        }
+        Some(v) => Err(format!(
+            "{TERRAIN_ENV}={v:?} is no terrain kind; use {} or {}",
+            TerrainKind::Voxels.name(),
+            TerrainKind::Studs.name()
+        )),
+    }
+}
 
 /// Why a world with save files from before the world store is not started.
 pub const LEGACY_SAVES_REFUSAL: &str =
@@ -30,6 +67,11 @@ pub const LEGACY_SAVES_REFUSAL: &str =
 pub enum WorldSource {
     /// The noise world: no store, nothing persisted.
     Procedural,
+    /// The toy-brick stud test world: no store, no map, no history, nothing persisted.
+    Studs,
+    /// The noise world generated as stud terrain (`worldgen::stud_gen`): no store, nothing
+    /// persisted.
+    StudsProcedural,
     /// A forged world in the store at `url`. `import`: the world file (forge
     /// file) the store takes its world from when it has none yet — it may not
     /// exist — and next to which old file saves would sit.
@@ -49,6 +91,19 @@ pub fn resolve(world_file: Option<&str>, world_db: Option<&str>) -> Result<World
                 log::warn!("[server] {WORLD_DB_ENV} is ignored: the procedural world keeps nothing");
             }
             return Ok(WorldSource::Procedural);
+        }
+        Some(keyword @ (STUDS_KEYWORD | STUDS_PROCEDURAL_KEYWORD)) => {
+            if !game::stud::STUDS_SUPPORTED {
+                return Err(format!(
+                    "VOXEL_WORLD_FILE={keyword}: the stud world needs 256-unit sim chunks \
+                     (chunk_blocks=16); this build has CHUNK_UNITS={}",
+                    game::block::CHUNK_UNITS
+                ));
+            }
+            if world_db.is_some() {
+                log::warn!("[server] {WORLD_DB_ENV} is ignored: the studs world keeps nothing");
+            }
+            return Ok(if keyword == STUDS_KEYWORD { WorldSource::Studs } else { WorldSource::StudsProcedural });
         }
         None | Some("") if world_db.is_some() => None,
         None | Some("") => Some(from_repo_root(Path::new(DEFAULT_WORLD_PATH))),
@@ -426,7 +481,7 @@ pub struct OpenedWorld {
 /// forged ([`ensure_world`]). The store is shut down again on an error.
 pub fn open_world(source: &WorldSource, params: &ForgeParams) -> Result<OpenedWorld, String> {
     let (url, import) = match source {
-        WorldSource::Procedural => return Ok(OpenedWorld { store: None, world: None, map: None, world_tick: 0 }),
+        WorldSource::Procedural | WorldSource::Studs | WorldSource::StudsProcedural => return Ok(OpenedWorld { store: None, world: None, map: None, world_tick: 0 }),
         WorldSource::Store { url, import } => (url, import.as_deref()),
     };
     let store = StoreHandle::open(url, world_store::Dials::BUILT, world_store::OpenMode::Writer)
@@ -481,6 +536,33 @@ mod tests {
         assert_eq!(resolve(Some(""), Some(" ")).unwrap(), want);
         assert_eq!(store_url_for(&default), StoreUrl::Sqlite(default.with_extension("sqlite")));
         assert!(default.with_extension("sqlite").ends_with("worlds/default.sqlite"));
+    }
+
+    #[test]
+    fn terrain_env_values() {
+        use world_store::TerrainKind;
+        assert_eq!(terrain_from(None), Ok(TerrainKind::Voxels));
+        assert_eq!(terrain_from(Some(" ")), Ok(TerrainKind::Voxels));
+        assert_eq!(terrain_from(Some("voxels")), Ok(TerrainKind::Voxels));
+        if game::stud::STUDS_SUPPORTED {
+            assert_eq!(terrain_from(Some("studs")), Ok(TerrainKind::Studs));
+        } else {
+            assert!(terrain_from(Some("studs")).unwrap_err().contains("chunk_blocks=16"));
+        }
+        assert!(terrain_from(Some("bricks")).unwrap_err().contains(TERRAIN_ENV));
+    }
+
+    #[test]
+    fn resolve_studs_keyword() {
+        if !game::stud::STUDS_SUPPORTED {
+            // Not a 256-unit sim chunk build: the stud world is refused with a clear error.
+            let err = resolve(Some("studs"), None).unwrap_err();
+            assert!(err.contains("256-unit sim chunks"), "{err}");
+            return;
+        }
+        assert_eq!(resolve(Some("studs"), None).unwrap(), WorldSource::Studs);
+        assert_eq!(resolve(Some("studs"), Some("x.sqlite")).unwrap(), WorldSource::Studs);
+        assert_eq!(resolve(Some("studs-procedural"), None).unwrap(), WorldSource::StudsProcedural);
     }
 
     #[test]

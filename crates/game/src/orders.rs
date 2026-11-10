@@ -134,6 +134,15 @@ pub enum Order {
     Erase { area: TileBox, only: Option<DesignationKind> },
     CancelOp(OpId),
     DevCompleteAll,
+    /// Stud world: place a brick in a stud chunk of this region (invalid = no-op).
+    PlaceStud { chunk: crate::StudChunkCoords, brick: crate::StudBrick },
+    /// Stud world: remove the brick covering `cell` of a stud chunk (none = no-op).
+    RemoveStud { chunk: crate::StudChunkCoords, cell: [u8; 3] },
+    /// Stud world, dev: carve the box of region stud cells `lo .. hi` (`[stud x, plate y,
+    /// stud z]`, `hi` exclusive; plate 0 is the bottom of layer 0). Too big or empty = no-op.
+    /// The box may reach past the region's edge: that part is carved by the neighbour
+    /// owning it (`Intent::CarveStud`, one tick later).
+    CarveStud { lo: [i32; 3], hi: [i32; 3] },
     /// Switch the issuing client's play mode; `at` is read only when
     /// entering Adventure (the tile to put the body on).
     SetMode { mode: crate::PlayMode, at: Option<TilePos> },
@@ -147,6 +156,15 @@ pub enum Order {
     /// Dev panel: drop a 1 m dynamic body (`EntityKind::Body`) above this
     /// region-local tile (`Rollback::dev_drop_body_safe`).
     DevDropBody { at: TilePos },
+    /// Stud world: place a brick in the stud chunk at world chunk `chunk` (`y` = stud
+    /// layer), this region's or — seen through the stud halo — a neighbour's, which
+    /// gets it as an `Intent::PlaceStud` (`intents.rs`). Invalid = no-op.
+    PlaceStudAt { chunk: crate::WorldChunkPos, brick: crate::StudBrick },
+    /// Stud world, dev: fill the empty cells of the box of region stud cells `lo .. hi`
+    /// (as [`Order::CarveStud`]'s) with bricks of stud material `material`. Too big,
+    /// empty or an unknown material = no-op. The part past the region's edge is filled
+    /// by the neighbour owning it (`Intent::FillStud`, one tick later).
+    FillStud { lo: [i32; 3], hi: [i32; 3], material: u16 },
 }
 
 /// Why a tile refuses a designation.
@@ -191,10 +209,29 @@ pub trait TileSource {
     fn water_units(&self, _p: TilePos) -> u16 {
         0
     }
+    /// Which terrain the tiles lie on (`tiles.rs`): it decides a tile's size and the
+    /// rules for standing on, walking between and designating tiles. Voxel unless a
+    /// source says otherwise.
+    fn terrain(&self) -> crate::TerrainKind {
+        crate::TerrainKind::Voxel
+    }
+    /// How much of tile `p` is filled; `Open` when unknown. A voxel source answers
+    /// from [`Self::block`]; a stud source from its stud cells (`tiles.rs`).
+    fn tile_fill(&self, p: TilePos) -> crate::TileFill {
+        crate::voxel_tile_fill(self.block(p))
+    }
+    /// Stud terrain: the dominant stud material of tile `p` (`StudTile::material`);
+    /// `None` for an open or unknown tile, and on voxel terrain.
+    fn tile_material(&self, _p: TilePos) -> Option<u16> {
+        None
+    }
 }
 
 /// Whether `kind` may be designated on tile `p`.
 pub fn validate(src: &impl TileSource, kind: DesignationKind, p: TilePos) -> Result<(), Invalid> {
+    if src.terrain() == crate::TerrainKind::Stud {
+        return validate_stud(src, kind, p);
+    }
     match kind {
         DesignationKind::Dig => {
             if !crate::block_props().blocks_ray(src.block(p)) {
@@ -219,6 +256,32 @@ pub fn validate(src: &impl TileSource, kind: DesignationKind, p: TilePos) -> Res
             let is_wood = crate::block_props().is_solid(src.block(p)) && src.tree_id(p) != 0;
             is_wood.then_some(()).ok_or(Invalid::NotTree)
         }
+    }
+}
+
+/// [`validate`] on stud terrain: a dig needs something in the tile (any fill), not
+/// built and not bedrock (its dominant material cannot be dug); a build needs room
+/// (anything but a solid tile — it fills the tile's empty cells); a deconstruct a
+/// built tile; a chop a tile holding tree wood (`Rollback::stud_tree_at`).
+fn validate_stud(src: &impl TileSource, kind: DesignationKind, p: TilePos) -> Result<(), Invalid> {
+    use crate::TileFill;
+    match kind {
+        DesignationKind::Dig => {
+            if src.tile_fill(p) == TileFill::Open {
+                Err(Invalid::NothingToDig)
+            } else if src.is_constructed(p) {
+                Err(Invalid::Built)
+            } else if src.is_bedrock(p) {
+                Err(Invalid::Bedrock)
+            } else {
+                Ok(())
+            }
+        }
+        DesignationKind::Deconstruct => src.is_constructed(p).then_some(()).ok_or(Invalid::NotBuilt),
+        DesignationKind::Build(_) => {
+            if src.tile_fill(p) == TileFill::Solid { Err(Invalid::Occupied) } else { Ok(()) }
+        }
+        DesignationKind::Chop => (src.tree_id(p) != 0).then_some(()).ok_or(Invalid::NotTree),
     }
 }
 
@@ -298,6 +361,9 @@ impl TileSource for Rollback {
     /// See [`probe_column_band`]; a halo column probes its mirrored chunks
     /// (no ground recipe is mirrored).
     fn column_band(&self, column: [i32; 2]) -> Option<(i32, i32)> {
+        if self.terrain_kind() == crate::TerrainKind::Stud {
+            return self.stud_column_band(column);
+        }
         let cb = crate::CHUNK_BLOCKS as i32;
         let (cx, cz) = (column[0].div_euclid(cb), column[1].div_euclid(cb));
         let n = crate::REGION_CHUNKS as i32;
@@ -324,7 +390,28 @@ impl TileSource for Rollback {
         self.water_units_at(crate::WorldBlockPos::from_local(*self.data.region, crate::BlockPos::new(p[0], p[1], p[2])))
     }
 
+    fn terrain(&self) -> crate::TerrainKind {
+        self.terrain_kind()
+    }
+
+    fn tile_fill(&self, p: TilePos) -> crate::TileFill {
+        match self.terrain_kind() {
+            crate::TerrainKind::Voxel => crate::voxel_tile_fill(TileSource::block(self, p)),
+            crate::TerrainKind::Stud => self.stud_tile(p).fill(),
+        }
+    }
+
+    fn tile_material(&self, p: TilePos) -> Option<u16> {
+        match self.terrain_kind() {
+            crate::TerrainKind::Voxel => None,
+            crate::TerrainKind::Stud => self.stud_tile(p).material(),
+        }
+    }
+
     fn is_bedrock(&self, p: TilePos) -> bool {
+        if self.terrain_kind() == crate::TerrainKind::Stud {
+            return self.stud_tile(p).is_bedrock();
+        }
         let Some((coords, local)) = crate::edit::locate(p) else { return false };
         self.current_block(coords, local).is_some_and(|b| {
             crate::edit::is_bedrock_at(self.data.ground.get(&crate::ColumnCoords::new(coords.x, coords.z)), b)
@@ -335,7 +422,11 @@ impl TileSource for Rollback {
         self.data.constructed.contains_key(&p)
     }
 
+    /// On stud terrain: the tree whose wood is in the tile (`stud_tree_at`).
     fn tree_id(&self, p: TilePos) -> u32 {
+        if self.terrain_kind() == crate::TerrainKind::Stud {
+            return self.stud_tree_at(p).map_or(0, u32::from);
+        }
         self.tile_block(p).map_or(0, |b| b.tree_id())
     }
 
@@ -368,17 +459,26 @@ impl Rollback {
                 if op.client != client || !(1..=MAX_PRIORITY).contains(&priority) {
                     return false;
                 }
-                if matches!(kind, DesignationKind::Build(id) if id != crate::edit::PLACE_BLOCK) {
+                // Voxel builds place the one creative block. A stud build names its
+                // material by block (`stud_material_of_block`): any block but air.
+                let buildable = |id: BlockId| match self.terrain_kind() {
+                    crate::TerrainKind::Voxel => id == crate::edit::PLACE_BLOCK,
+                    crate::TerrainKind::Stud => id != BlockId::AIR,
+                };
+                if matches!(kind, DesignationKind::Build(id) if !buildable(id)) {
                     return false;
                 }
                 let Some(area) = order_area(area) else { return false };
                 let d = Designation { kind, op, priority };
-                let changes: Vec<_> = area
-                    .tiles()
-                    .filter(|&p| validate(self, kind, p).is_ok())
-                    .filter(|p| self.data.designations.get(p) != Some(&d))
-                    .map(|p| (p, Some(d)))
-                    .collect();
+                // Through the memoising view: a large area reads each stud chunk once.
+                let changes: Vec<_> = {
+                    let src = self.tiles();
+                    area.tiles()
+                        .filter(|&p| validate(&src, kind, p).is_ok())
+                        .filter(|p| self.data.designations.get(p) != Some(&d))
+                        .map(|p| (p, Some(d)))
+                        .collect()
+                };
                 self.set_designations_safe(changes);
             }
             Order::Erase { area, only } => {
@@ -413,6 +513,20 @@ impl Rollback {
             // Sends an intent: `Region::handle_event` routes it too.
             Order::DevBreakBlock(_) => return false,
             Order::DevDropBody { at } => return self.dev_drop_body_safe(at),
+            Order::PlaceStud { chunk, brick } => return self.place_stud_safe(chunk, brick),
+            Order::RemoveStud { chunk, cell } => return self.remove_stud_safe(chunk, cell),
+            // This region's part only: `Region::handle_event` routes these to
+            // `carve_stud_order_safe` / `fill_stud_order_safe` / `place_stud_order_safe`,
+            // which also send the neighbours' part as intents.
+            Order::CarveStud { lo, hi } => {
+                return self.carve_stud_boxes_dropping_safe(&[(lo, hi)]).pop().is_some_and(|r| !r.is_empty());
+            }
+            Order::FillStud { lo, hi, material } => return self.fill_stud_box_safe(lo, hi, material) > 0,
+            Order::PlaceStudAt { chunk, brick } => {
+                let (rc, c) = chunk.to_local();
+                return rc == *self.data.region
+                    && self.place_stud_safe(crate::StudChunkCoords { x: c.x, y: c.y, z: c.z }, brick);
+            }
         }
         true
     }
@@ -423,6 +537,9 @@ impl Rollback {
     /// and detaches each falling part of the tree into a voxel body that
     /// despawns at rest.
     fn dev_complete_all_safe(&mut self) {
+        if self.terrain_kind() == crate::TerrainKind::Stud {
+            return self.dev_complete_all_stud_safe();
+        }
         let all: Vec<(TilePos, Designation)> =
             self.data.designations.iter().map(|(p, d)| (*p, *d)).collect();
         let is_build = |d: &Designation| matches!(d.kind, DesignationKind::Build(_));
@@ -466,6 +583,93 @@ impl Rollback {
             }
         }
         self.clear_tiles_safe(&mut clearing, &mut constructed);
+        self.set_constructed_safe(constructed);
+        self.set_designations_safe(all.into_iter().map(|(p, _)| (p, None)).collect());
+    }
+
+    /// [`Self::dev_complete_all_safe`] on stud terrain: builds bottom up (each fills
+    /// the empty cells of its tile box with bricks of its block's material,
+    /// `stud_material_of_block`, and marks the tile constructed), then digs and
+    /// deconstructions top down (each carves its tile box; a deconstructed tile loses
+    /// its constructed mark), skipping tiles that no longer validate, and clears
+    /// every designation. Each chunk is written once per batch. Chops come last, top
+    /// down, each felling its tree (`fell_stud_safe`) if its tile still holds tree
+    /// wood. Unlike the voxel shortcut, everything removed yields its items: a carve's
+    /// as piles at its tile (`carve_stud_boxes_dropping_safe`), a felled part's where
+    /// it comes to rest (`SettlePolicy::DropItems`).
+    fn dev_complete_all_stud_safe(&mut self) {
+        let all: Vec<(TilePos, Designation)> =
+            self.data.designations.iter().map(|(p, d)| (*p, *d)).collect();
+        let mut builds: Vec<(TilePos, BlockId)> = all
+            .iter()
+            .filter_map(|(p, d)| match d.kind {
+                DesignationKind::Build(id) => Some((*p, id)),
+                _ => None,
+            })
+            .collect();
+        builds.sort_by_key(|(p, _)| p[1]);
+        let mut removals: Vec<TilePos> = all
+            .iter()
+            .filter(|(_, d)| matches!(d.kind, DesignationKind::Dig | DesignationKind::Deconstruct))
+            .map(|(p, _)| *p)
+            .collect();
+        removals.sort_by_key(|p| std::cmp::Reverse(p[1]));
+        let mut constructed = Vec::new();
+        // A tile's validity never depends on another tile's dig or build, so each
+        // batch is validated against the state before it.
+        let (mut tiles, mut boxes) = (Vec::new(), Vec::new());
+        // A build of the chest block puts a chest in the tile (`place_stud_chest_safe`:
+        // an open tile only), after the plain builds.
+        let chest = crate::chest_block();
+        let mut chests = Vec::new();
+        {
+            let src = self.tiles();
+            for (p, id) in builds {
+                if validate(&src, DesignationKind::Build(id), p).is_ok() {
+                    if chest == Some(id) {
+                        chests.push(p);
+                    } else if let Some((lo, hi)) = crate::stud_tile_box(p) {
+                        tiles.push(p);
+                        boxes.push((lo, hi, crate::stud_material_of_block(id)));
+                    }
+                }
+            }
+        }
+        let filled = self.fill_stud_boxes_safe(&boxes);
+        constructed.extend(tiles.iter().zip(filled).filter(|(_, cells)| *cells > 0).map(|(p, _)| (*p, true)));
+        for p in chests {
+            if self.place_stud_chest_safe(p) {
+                constructed.push((p, true));
+            }
+        }
+        let (mut tiles, mut boxes) = (Vec::new(), Vec::new());
+        {
+            let src = self.tiles();
+            for p in removals {
+                let kind = self.data.designations.get(&p).map_or(DesignationKind::Dig, |d| d.kind);
+                if validate(&src, kind, p).is_ok() {
+                    if let Some((lo, hi)) = crate::stud_tile_box(p) {
+                        tiles.push(p);
+                        boxes.push((lo, hi));
+                    }
+                }
+            }
+        }
+        let removed = self.carve_stud_boxes_dropping_safe(&boxes);
+        constructed.extend(
+            tiles
+                .iter()
+                .zip(removed)
+                .filter(|(p, cells)| !cells.is_empty() && self.data.constructed.contains_key(*p))
+                .map(|(p, _)| (*p, false)),
+        );
+        let mut chops: Vec<TilePos> =
+            all.iter().filter(|(_, d)| d.kind == DesignationKind::Chop).map(|(p, _)| *p).collect();
+        chops.sort_by_key(|p| std::cmp::Reverse(p[1]));
+        for p in chops {
+            // Validated against the state now: an earlier chop may have felled it.
+            let _ = self.fell_stud_safe(p, crate::SettlePolicy::DropItems);
+        }
         self.set_constructed_safe(constructed);
         self.set_designations_safe(all.into_iter().map(|(p, _)| (p, None)).collect());
     }

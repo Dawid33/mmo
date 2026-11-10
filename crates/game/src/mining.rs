@@ -77,6 +77,40 @@ pub fn break_ticks(props: &BlockProps, block: Block) -> u32 {
     if props.is_trunk(block.id) { hand * FELL_TICKS_FACTOR } else { hand }
 }
 
+/// Stud cells in one tile (`TILE_STUDS`² x `TILE_PLATES`).
+pub const STUD_TILE_CELLS: u32 = (crate::TILE_STUDS * crate::TILE_STUDS * crate::TILE_PLATES) as u32;
+/// Hand ticks per work unit on stud terrain, as a fraction: a material's
+/// `StudMaterialDef::hardness` is work units per stud cell, and a whole tile of stone
+/// (8 x 24 = 192 units) takes the 45 ticks a stone block does; dirt (2 x 24 = 48) 12
+/// against a dirt block's 15.
+pub const STUD_HAND_TICKS_NUM: u32 = 15;
+pub const STUD_HAND_TICKS_DEN: u32 = 64;
+
+/// Ticks of holding the button to dig `cells` stud cells of `material` by hand:
+/// `ceil(hardness * cells * STUD_HAND_TICKS_NUM / STUD_HAND_TICKS_DEN)`, at least 1.
+/// `None` for an unknown material or one that cannot be dug (bedrock).
+pub fn stud_break_ticks(material: u16, cells: u32) -> Option<u32> {
+    let m = crate::stud_material(material).filter(|m| m.hardness != u16::MAX)?;
+    let work = u64::from(m.hardness) * u64::from(cells) * u64::from(STUD_HAND_TICKS_NUM);
+    Some(work.div_ceil(u64::from(STUD_HAND_TICKS_DEN)).clamp(1, u64::from(u32::MAX)) as u32)
+}
+
+/// What digging stud cells yields, until items are ported to stud materials: per
+/// material of `removed` (a carve's cell counts), what breaking the voxel block of
+/// the same name drops ([`drop_of`]), one per whole tile's worth of cells
+/// ([`STUD_TILE_CELLS`], rounded to the nearest, half up). A material with no such
+/// block (a plastic) or whose block drops nothing yields nothing.
+pub fn stud_drops(removed: &[(u16, u32)]) -> Vec<ItemStack> {
+    removed
+        .iter()
+        .filter_map(|&(material, cells)| {
+            let count = (2 * u64::from(cells) + u64::from(STUD_TILE_CELLS)) / (2 * u64::from(STUD_TILE_CELLS));
+            let stack = drop_of(Block::new(crate::block_of_stud_material(material)?))?;
+            (count > 0).then(|| ItemStack { count: (u64::from(stack.count) * count).min(u64::from(u32::MAX)) as u32, ..stack })
+        })
+        .collect()
+}
+
 /// `client`'s mining progress at `now` (the region's current tick, i.e. after
 /// the ticks so far), or `None` while it mines nothing.
 pub fn mining_view(client: &Client, now: u64) -> Option<MiningView> {
@@ -87,6 +121,14 @@ pub fn mining_view(client: &Client, now: u64) -> Option<MiningView> {
 }
 
 impl Rollback {
+    /// Ticks to dig stud tile `p` by hand ([`stud_break_ticks`] of its dominant
+    /// material over the cells under its columns' tops); `None` for an open tile or
+    /// bedrock. Stud terrain only.
+    pub fn stud_tile_break_ticks(&self, p: crate::TilePos) -> Option<u32> {
+        let tile = self.stud_tile(p);
+        stud_break_ticks(tile.material()?, tile.cells_under_tops())
+    }
+
     /// Whether an Adventure player may mine the block at `pos` (this
     /// region's): what a break may clear (`clearable_block`: not air, not
     /// bedrock), and not water. Returns the block. The owner's check.

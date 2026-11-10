@@ -291,10 +291,19 @@ pub type HaloGenerator = std::sync::Arc<
     dyn Fn(RegionCoords, std::ops::Range<usize>, std::ops::Range<usize>) -> Vec<(ColumnCoords, Column)> + Send + Sync,
 >;
 
+/// Worldgen of a never-run neighbour's STUD terrain for a halo seed: what its chunk
+/// columns `xs × zs` (its own frame) would start from — the recipes, and the feature
+/// bricks of those columns (`stud_halo.rs`). The stud twin of [`HaloGenerator`].
+pub type StudHaloGenerator = std::sync::Arc<
+    dyn Fn(RegionCoords, std::ops::Range<usize>, std::ops::Range<usize>) -> crate::StudRegionSeed + Send + Sync,
+>;
+
 pub struct RegionRunner {
     id: RegionCoords,
     /// See [`RegionRunner::set_halo_generator`].
     halo_generator: Option<HaloGenerator>,
+    /// See [`RegionRunner::set_stud_halo_generator`].
+    stud_halo_generator: Option<StudHaloGenerator>,
     /// See [`RegionRunner::set_stored_terrain`].
     stored_terrain: Option<std::sync::Arc<dyn crate::StoredTerrain>>,
     region: Region,
@@ -338,7 +347,7 @@ pub struct RegionRunner {
     /// none yet in this incarnation, so the next one is whole). Set by the
     /// spawner for a region restored from the store
     /// ([`RegionRunner::set_saved_terms`]).
-    saved_terms: crate::ChunkTerms,
+    saved_terms: crate::SaveTerms,
     /// A `SaveAt` waiting for its slot to open.
     pending_cut: Option<(crate::CutId, Tick)>,
     /// The last slot [`RegionRunner::tick`] opened (`None`: not ticked yet
@@ -363,6 +372,7 @@ impl RegionRunner {
         Self {
             id,
             halo_generator: None,
+            stud_halo_generator: None,
             stored_terrain: None,
             region,
             out,
@@ -385,7 +395,7 @@ impl RegionRunner {
     /// The chunk terms of the stored state this region was restored from
     /// ([`crate::restore_portable`]): its first snapshot then sends only
     /// what changed since.
-    pub fn set_saved_terms(&mut self, terms: crate::ChunkTerms) {
+    pub fn set_saved_terms(&mut self, terms: crate::SaveTerms) {
         self.saved_terms = terms;
     }
 
@@ -417,6 +427,12 @@ impl RegionRunner {
     /// seed is skipped (logged).
     pub fn set_halo_generator(&mut self, generator: HaloGenerator) {
         self.halo_generator = Some(generator);
+    }
+
+    /// Stud worldgen for [`RegionInput::SeedHaloFromWorldgen`]: with one, a
+    /// never-run neighbour's seed also carries its stud edge.
+    pub fn set_stud_halo_generator(&mut self, generator: StudHaloGenerator) {
+        self.stud_halo_generator = Some(generator);
     }
 
     /// The world store's terrain for [`RegionInput::SeedHaloFromStore`];
@@ -660,7 +676,16 @@ impl RegionRunner {
                 .into_iter()
                 .flat_map(|(xs, zs)| generate(n, xs, zs))
                 .collect();
-            let snap = TerrainSnapshot::from_columns(columns);
+            let mut snap = TerrainSnapshot::from_columns(columns);
+            if let Some(studs) = &self.stud_halo_generator {
+                let mut seed = crate::StudRegionSeed::default();
+                for (xs, zs) in crate::halo::facing_windows(n, self.id) {
+                    let part = studs(n, xs, zs);
+                    seed.ground.extend(part.ground);
+                    seed.features.extend(part.features);
+                }
+                snap.stud = crate::StudEdge::from_seed(&seed);
+            }
             if let Some(seed) = crate::halo::halo_seed_from_snapshot(n, self.id, &snap) {
                 self.apply(GameEventKind::HaloUpdate(seed));
             }

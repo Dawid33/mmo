@@ -236,6 +236,20 @@ impl StoreHandle {
         self.ask(Request::LoadCoordinator)
     }
 
+    /// Ties the world to terrain `kind`: a world no server has served yet takes
+    /// it (written once, never changed); one already tied to the other kind is
+    /// refused with `OtherTerrain` and nothing is written. Call before any
+    /// region is loaded or saved.
+    pub fn bind_terrain(&self, kind: crate::TerrainKind) -> Result<(), StoreError> {
+        self.ask(|r| Request::BindTerrain(kind, r))
+    }
+
+    /// The terrain kind the world is tied to; `None` before the first
+    /// [`StoreHandle::bind_terrain`].
+    pub fn terrain_kind(&self) -> Result<Option<crate::TerrainKind>, StoreError> {
+        self.ask(Request::TerrainKind)
+    }
+
     /// Commits everything queued before this call, then stops the thread and
     /// joins it (closing the pool and releasing SQLite's world lock). Other clones'
     /// later calls fail with a `Backend` error.

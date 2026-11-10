@@ -31,9 +31,10 @@ use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use game::rapier3d::math::Vector;
+use game::TerrainKind;
 use game::{
     pick_level_cell, pick_visible_cell, validate, Designation, DesignationKind, Invalid, OpId, Order, OrderSummary,
-    RegionId, TileBox, TilePos, TileSource, BLOCK_VOXELS, DEFAULT_PRIORITY, MAX_ORDER_TILES, MAX_PRIORITY,
+    RegionId, TileBox, TilePos, DEFAULT_PRIORITY, MAX_ORDER_TILES, MAX_PRIORITY,
     REGION_BLOCKS,
 };
 
@@ -50,8 +51,11 @@ use crate::renderer::{GameEvents, LocalPlayer};
 pub enum Tool {
     Dig,
     Deconstruct,
-    /// Fills exactly the picked box with [`game::edit::PLACE_BLOCK`]; a wall
-    /// or a tower is a box whose corners sit on different levels.
+    /// Fills exactly the picked box with the build block
+    /// ([`DesignateState::build`]: [`game::edit::PLACE_BLOCK`] unless another
+    /// material was picked — on stud terrain the sim builds the stud material
+    /// of that block's name); a wall or a tower is a box whose corners sit on
+    /// different levels.
     Build,
     /// Fells the part of a tree beyond each picked log or branch block.
     Chop,
@@ -102,12 +106,18 @@ const HOVER_COLOR: Color = Color::srgba(1.0, 1.0, 1.0, 0.8);
 const HIDDEN_EDGE_ALPHA: f32 = 0.3;
 
 impl Tool {
-    /// What the tool designates; `None` for the erase tool.
+    /// What the tool designates with the default build block; `None` for the
+    /// erase tool.
     pub fn kind(self) -> Option<DesignationKind> {
+        self.kind_with(game::edit::PLACE_BLOCK)
+    }
+
+    /// What the tool designates when builds use `build`; `None` for the erase tool.
+    pub fn kind_with(self, build: game::BlockId) -> Option<DesignationKind> {
         match self {
             Tool::Dig => Some(DesignationKind::Dig),
             Tool::Deconstruct => Some(DesignationKind::Deconstruct),
-            Tool::Build => Some(DesignationKind::Build(game::edit::PLACE_BLOCK)),
+            Tool::Build => Some(DesignationKind::Build(build)),
             Tool::Chop => Some(DesignationKind::Chop),
             Tool::Erase => None,
         }
@@ -226,6 +236,9 @@ pub fn step_corners(phase: &mut CornerPhase, ev: CornerEvent, drag_threshold_px:
 pub struct DesignateState {
     pub tool: Option<Tool>,
     pub priority: u8,
+    /// The block the Build tool designates ([`Tool::kind_with`]); picked in
+    /// the tool's material list on stud terrain (`stud/palette_ui.rs`).
+    pub build: game::BlockId,
     /// The two-corner pick; `drag` is `Some` exactly while it is not idle.
     pub corners: CornerPhase,
     pub drag: Option<Drag>,
@@ -242,6 +255,7 @@ impl Default for DesignateState {
         Self {
             tool: None,
             priority: DEFAULT_PRIORITY,
+            build: game::edit::PLACE_BLOCK,
             corners: CornerPhase::Idle,
             drag: None,
             hover: None,
@@ -304,7 +318,12 @@ pub fn no_tool_active(state: Res<DesignateState>) -> bool {
 /// The order a committed box sends: an erase for the erase tool or with
 /// Ctrl (of the tool's kind only), otherwise the tool's designation.
 pub fn order_for(tool: Tool, area: TileBox, erase: bool, op: OpId, priority: u8) -> Order {
-    match tool.kind() {
+    order_for_build(tool, game::edit::PLACE_BLOCK, area, erase, op, priority)
+}
+
+/// [`order_for`] with the Build tool designating `build`.
+pub fn order_for_build(tool: Tool, build: game::BlockId, area: TileBox, erase: bool, op: OpId, priority: u8) -> Order {
+    match tool.kind_with(build) {
         Some(kind) if !erase => Order::Designate { op, kind, priority, area },
         only => Order::Erase { area, only },
     }
@@ -331,12 +350,6 @@ pub fn merge_runs(tiles: impl Iterator<Item = TilePos>) -> Vec<TileBox> {
     out
 }
 
-/// "x × z × levels" of a box.
-fn size_text(area: TileBox) -> String {
-    let len = |i: usize| i64::from(area.max[i]) - i64::from(area.min[i]) + 1;
-    format!("{} × {} × {}", len(0), len(2), len(1))
-}
-
 fn verb(kind: Option<DesignationKind>) -> &'static str {
     match kind {
         Some(DesignationKind::Dig) => "to dig",
@@ -361,7 +374,14 @@ fn reason(why: Invalid) -> &'static str {
 /// The drag readout: size (x × z × levels), the tiles the order takes, then
 /// each refusal reason with its count, in [`Invalid`] order.
 pub fn drag_text(area: TileBox, kind: Option<DesignationKind>, summary: &OrderSummary) -> String {
-    let mut text = format!("{} — {} {}", size_text(area), summary.valid, verb(kind));
+    drag_text_on(TerrainKind::Voxel, area, kind, summary)
+}
+
+/// [`drag_text`] on terrain `terrain`: on studs, where a level is 1.2 m, the
+/// size is followed by the box in metres (`stud::palette::size_text`).
+pub fn drag_text_on(terrain: TerrainKind, area: TileBox, kind: Option<DesignationKind>, summary: &OrderSummary) -> String {
+    let size = crate::renderer::stud::palette::size_text(terrain, area);
+    let mut text = format!("{size} — {} {}", summary.valid, verb(kind));
     for (why, n) in &summary.invalid {
         text.push_str(&format!(" · {n} {}", reason(*why)));
     }
@@ -380,8 +400,8 @@ fn summary_of(cells: &[(TilePos, Result<(), Invalid>)]) -> OrderSummary {
     out
 }
 
-fn too_large_text(area: TileBox) -> String {
-    format!("{} — too large", size_text(area))
+fn too_large_text(terrain: TerrainKind, area: TileBox) -> String {
+    format!("{} — too large", crate::renderer::stud::palette::size_text(terrain, area))
 }
 
 /// Erase previews: how many designations the erase would remove.
@@ -489,7 +509,7 @@ pub fn update_hover(
         }
         let ray = cursor_ray(window.single().ok()?, view.single().ok()?, mirror.region()?)?;
         let visible = (!working.cut).then(|| pick_visible_xray(ray, tool == Tool::Build, &mirror, xray)).flatten();
-        let p = visible.or_else(|| pick_level_cell(ray.0, ray.1, working.level?, |p| game::block_props().blocks_ray(mirror.block(p))))?;
+        let p = visible.or_else(|| pick_level(ray, working.level?, &mirror))?;
         Some(clamp_to_region(p))
     })();
     if state.hover != hover {
@@ -509,8 +529,20 @@ pub fn cursor_ray(window: &Window, (camera, tf): (&Camera, &Transform), region: 
 /// The block the cursor ray meets first in the mirrored region, at whatever
 /// level ([`pick_visible_cell`]); with `face` the air cell in front of the
 /// face it entered through.
+///
+/// `ray` is in region-local sim units; the walk runs in the mirror's tile space
+/// ([`TileMirror::tile_ray`]), so on stud terrain the tiles it returns are stud
+/// tiles (anything in a tile stops the ray: `TileMirror::pick_solid`).
 pub fn pick_visible(ray: (Vector, Vector), face: bool, mirror: &TileMirror) -> Option<TilePos> {
-    pick_visible_cell(ray.0, ray.1, VISIBLE_PICK_REACH_BLOCKS, face, |p| game::block_props().blocks_ray(mirror.block(p)))
+    let ray = mirror.tile_ray(ray);
+    pick_visible_cell(ray.0, ray.1, VISIBLE_PICK_REACH_BLOCKS, face, |p| mirror.pick_solid(p))
+}
+
+/// The tile under the cursor ray (region-local sim units) at working level
+/// `level` of the mirrored region ([`pick_level_cell`], in tile space).
+pub fn pick_level(ray: (Vector, Vector), level: i32, mirror: &TileMirror) -> Option<TilePos> {
+    let ray = mirror.tile_ray(ray);
+    pick_level_cell(ray.0, ray.1, level, |p| mirror.pick_solid(p))
 }
 
 /// [`pick_visible`] under the dug-space x-ray (`xray`, cut off): through
@@ -520,14 +552,8 @@ pub fn pick_visible_xray(ray: (Vector, Vector), face: bool, mirror: &TileMirror,
     if !xray {
         return pick_visible(ray, face, mirror);
     }
-    game::pick_xray_cell(
-        ray.0,
-        ray.1,
-        VISIBLE_PICK_REACH_BLOCKS,
-        face,
-        |p| game::block_props().blocks_ray(mirror.block(p)),
-        |p| mirror.is_dug(p),
-    )
+    let ray = mirror.tile_ray(ray);
+    game::pick_xray_cell(ray.0, ray.1, VISIBLE_PICK_REACH_BLOCKS, face, |p| mirror.pick_solid(p), |p| mirror.is_dug(p))
 }
 
 /// Left presses and releases → corners ([`step_corners`]) and orders; a
@@ -544,11 +570,17 @@ pub fn drag_input(
     events: Res<GameEvents>,
     local: Res<LocalPlayer>,
     mut state: ResMut<DesignateState>,
+    build: Res<crate::renderer::stud::build::StudBuild>,
     // Mouse travel since the right press; `None` while the button is up or
     // the press was not ours (UI / overlay).
     mut right_travel: crate::session::SessionLocal<Option<f32>>,
 ) {
     let right_travel = right_travel.get();
+    // Stud build mode owns the clicks.
+    if build.on {
+        *right_travel = None;
+        return;
+    }
     let Ok(window) = window.single() else { return };
     // A right press is a click unless the mouse travels: orbiting holds the
     // pointer still, so the travel is the raw motion, not the cursor.
@@ -608,7 +640,7 @@ pub fn drag_input(
         return;
     }
     let op = OpId { client, seq: state.next_seq };
-    let order = order_for(tool, area, drag.erase, op, state.priority);
+    let order = order_for_build(tool, state.build, area, drag.erase, op, state.priority);
     if matches!(order, Order::Designate { .. }) {
         state.next_seq += 1;
         state.sent.push(op);
@@ -642,7 +674,8 @@ pub fn update_drag_preview(
     };
     let erasing = erase || tool == Tool::Erase;
     // An erase previews the box only (the overlay keeps each tile's kind).
-    let kind = if erasing { None } else { tool.kind() };
+    let kind = if erasing { None } else { tool.kind_with(state.build) };
+    let terrain = mirror.terrain();
     let key = Some((area, kind, erasing, mirror.version()));
     if built.key == key {
         return;
@@ -654,24 +687,24 @@ pub fn update_drag_preview(
         Some(a) if count <= MAX_ORDER_TILES => match kind {
             Some(k) => {
                 let cells: Vec<_> = a.tiles().map(|p| (p, validate(&*mirror, k, p))).collect();
-                (drag_text(area, kind, &summary_of(&cells)), cells)
+                (drag_text_on(terrain, area, kind, &summary_of(&cells)), cells)
             }
             None => {
-                let only = if tool == Tool::Erase { None } else { tool.kind() };
+                let only = if tool == Tool::Erase { None } else { tool.kind_with(state.build) };
                 let summary = erase_summary(mirror.designations(), a, only);
-                (drag_text(area, None, &summary), a.tiles().map(|p| (p, Ok(()))).collect())
+                (drag_text_on(terrain, area, None, &summary), a.tiles().map(|p| (p, Ok(()))).collect())
             }
         },
-        Some(_) => (too_large_text(area), Vec::new()),
-        None => (drag_text(area, kind, &OrderSummary::default()), Vec::new()),
+        Some(_) => (too_large_text(terrain, area), Vec::new()),
+        None => (drag_text_on(terrain, area, kind, &OrderSummary::default()), Vec::new()),
     };
     *preview = DragPreview { area: Some(area), kind, cells };
     readout.0 = text;
 }
 
 /// A world-space gizmo cuboid over the tiles of `b` (region-local) in `region`.
-fn tile_box_transform(b: TileBox, region: RegionId, inflate: f32) -> Transform {
-    let size = BLOCK_VOXELS as f32;
+pub fn tile_box_transform(kind: game::TerrainKind, b: TileBox, region: RegionId, inflate: f32) -> Transform {
+    let size = Vec3::new(kind.tile_width_units(), kind.tile_height_units(), kind.tile_width_units());
     let min = Vec3::new(b.min[0] as f32, b.min[1] as f32, b.min[2] as f32) * size;
     let max = Vec3::new(b.max[0] as f32 + 1.0, b.max[1] as f32 + 1.0, b.max[2] as f32 + 1.0) * size;
     let offset = Vec3::from_array(region.world_offset());
@@ -707,6 +740,7 @@ pub fn draw_designate_gizmos(
 ) {
     let ghosts = ghosts.get();
     let Some(region) = mirror.region() else { return };
+    let kind = mirror.terrain();
     if let Some(level) = working.level {
         let key = Some((mirror.version(), level));
         if ghosts.key != key {
@@ -723,18 +757,18 @@ pub fn draw_designate_gizmos(
             ghosts.boxes.truncate(MAX_GHOST_BOXES);
         }
         for b in &ghosts.boxes {
-            gizmos.cube(tile_box_transform(*b, region, 0.0), BUILD_COLOR);
+            gizmos.cube(tile_box_transform(kind, *b, region, 0.0), BUILD_COLOR);
         }
     }
     if let Some((_, area, _)) = state.drag_area() {
         let too_large = area.clip_to_region().is_some_and(|a| a.tile_count() > MAX_ORDER_TILES);
         let color = if too_large { TOO_LARGE_COLOR } else { kind_color(preview.kind) };
-        let tf = tile_box_transform(area, region, HOVER_INFLATE);
+        let tf = tile_box_transform(kind, area, region, HOVER_INFLATE);
         gizmos.cube(tf, color);
         hidden.cube(tf, color.with_alpha(HIDDEN_EDGE_ALPHA));
     }
     if let (Some(_), Some(p)) = (state.tool, state.hover) {
-        gizmos.cube(tile_box_transform(TileBox { min: p, max: p }, region, HOVER_INFLATE), HOVER_COLOR);
+        gizmos.cube(tile_box_transform(kind, TileBox { min: p, max: p }, region, HOVER_INFLATE), HOVER_COLOR);
     }
 }
 

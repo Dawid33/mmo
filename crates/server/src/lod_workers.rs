@@ -3,7 +3,8 @@
 //! never stalls the manager thread's event routing.
 
 use crossbeam::channel::{unbounded, Receiver, RecvTimeoutError, Sender};
-use game::{build_lod_job, LodBuildJob, LodBuilder, LodResult, NoStoredTerrain, StoredTerrain};
+use game::lod::LodKey;
+use game::{build_lod_job, LodBuildJob, LodBuilder, LodResult, NoStoredTerrain, StoredTerrain, StudLodResult};
 
 /// Floor on the default worker count (and the old fixed value).
 pub const LOD_BUILD_THREADS: usize = 2;
@@ -71,16 +72,17 @@ impl Backoff {
     }
 }
 
-/// A job on the worker queue, with how many times its tiles failed to load.
-struct Queued {
-    job: LodBuildJob,
+/// A job on the worker queue (a voxel [`LodBuildJob`], or a stud world's key), with
+/// how many times its tiles failed to load.
+struct Queued<J = LodBuildJob> {
+    job: J,
     attempt: u32,
 }
 
 /// What the retry thread is sent.
-enum Delayed {
+enum Delayed<J = LodBuildJob> {
     /// Put `Queued` back on the worker queue at the instant.
-    Job(std::time::Instant, Queued),
+    Job(std::time::Instant, Queued<J>),
     /// The builder is gone: drop what waits and exit.
     Stop,
 }
@@ -190,12 +192,12 @@ fn worker_loop(
 
 /// Holds delayed jobs and puts each back on `jobs` when it is due; exits on
 /// [`Delayed::Stop`] or when every sender is gone.
-fn spawn_retry_thread(jobs: Sender<Queued>) -> Sender<Delayed> {
-    let (send, recv) = unbounded::<Delayed>();
+fn spawn_retry_thread<J: Send + 'static>(jobs: Sender<Queued<J>>) -> Sender<Delayed<J>> {
+    let (send, recv) = unbounded::<Delayed<J>>();
     std::thread::Builder::new()
         .name("lod-retry".into())
         .spawn(move || {
-            let mut waiting: std::collections::BTreeMap<(std::time::Instant, u64), Queued> = Default::default();
+            let mut waiting: std::collections::BTreeMap<(std::time::Instant, u64), Queued<J>> = Default::default();
             let mut seq = 0u64;
             loop {
                 let next = match waiting.first_key_value() {
@@ -275,9 +277,171 @@ impl LodBuilder for ThreadLodBuilder {
     }
 }
 
+/// The LOD builder of a stud world (`game::stud_lod`): a pool of threads building
+/// each key's far-terrain tile from the ground recipe (`worldgen::stud_lod_tile`).
+/// It takes no voxel job. Like [`ThreadLodBuilder`], a worker pins the forged tiles
+/// its key reads first, and a key whose tiles do not load is retried with backoff,
+/// never built from missing tiles and never dropped.
+pub struct ThreadStudLodBuilder {
+    jobs: Sender<Queued<LodKey>>,
+    retry: Sender<Delayed<LodKey>>,
+    results: Receiver<StudLodResult>,
+}
+
+impl ThreadStudLodBuilder {
+    pub fn new(seed: u64, threads: usize) -> Self {
+        Self::with(threads, Backoff::default(), std::sync::Arc::new(move |key: &LodKey| {
+            let _pins = worldgen::prefetch_lod(key)?;
+            Ok(worldgen::stud_gen::stud_lod_tile(key, seed))
+        }))
+    }
+
+    /// A pool whose workers answer a key with `build` (`Err` = its tiles did not
+    /// load: retried after `backoff`).
+    fn with(
+        threads: usize,
+        backoff: Backoff,
+        build: std::sync::Arc<dyn Fn(&LodKey) -> Result<game::StudLodTile, String> + Send + Sync>,
+    ) -> Self {
+        let (jobs, job_recv) = unbounded::<Queued<LodKey>>();
+        let (out, results) = unbounded();
+        let retry = spawn_retry_thread(jobs.clone());
+        for i in 0..threads {
+            let (recv, out, retry, build) = (job_recv.clone(), out.clone(), retry.clone(), build.clone());
+            std::thread::Builder::new()
+                .name(format!("stud-lod-worker-{i}"))
+                .spawn(move || stud_worker_loop(&recv, &retry, backoff, build.as_ref(), &out))
+                .expect("spawn stud lod worker");
+        }
+        Self { jobs, retry, results }
+    }
+}
+
+impl Drop for ThreadStudLodBuilder {
+    fn drop(&mut self) {
+        let _ = self.retry.send(Delayed::Stop);
+    }
+}
+
+fn stud_worker_loop(
+    recv: &Receiver<Queued<LodKey>>,
+    retry: &Sender<Delayed<LodKey>>,
+    backoff: Backoff,
+    build: &(dyn Fn(&LodKey) -> Result<game::StudLodTile, String> + Send + Sync),
+    out: &Sender<StudLodResult>,
+) {
+    while let Ok(Queued { job: key, attempt }) = recv.recv() {
+        let started = std::time::Instant::now();
+        match build(&key) {
+            Ok(tile) => {
+                crate::perf::EDGE.record_lod_build(started.elapsed());
+                let _ = out.send((key, tile));
+            }
+            Err(e) => {
+                let delay = backoff.delay(attempt);
+                if attempt == 0 {
+                    log::warn!("[server] stud LOD {key:?}: its forged world tiles do not load ({e}); retrying in {delay:?}, then backing off to {:?}", backoff.max);
+                } else {
+                    log::debug!("[server] stud LOD {key:?}: attempt {} failed ({e}); retrying in {delay:?}", attempt + 1);
+                }
+                let queued = Queued { job: key, attempt: attempt.saturating_add(1) };
+                let _ = retry.send(Delayed::Job(std::time::Instant::now() + delay, queued));
+            }
+        }
+    }
+}
+
+impl LodBuilder for ThreadStudLodBuilder {
+    /// A stud world has no voxel LOD: the manager sends none (`stud_terrain`).
+    fn submit(&mut self, job: LodBuildJob) {
+        log::debug!("[server] stud LOD: dropping voxel job for {:?}", job_key(&job));
+    }
+
+    fn stud_terrain(&self) -> bool {
+        true
+    }
+
+    fn submit_stud(&mut self, key: LodKey) {
+        let _ = self.jobs.send(Queued { job: key, attempt: 0 });
+    }
+
+    fn poll_stud(&mut self) -> Option<StudLodResult> {
+        self.results.try_recv().ok()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A stud builder's threads answer every submitted key with its tile, once; a key
+    /// whose tiles fail to load is retried until they do. No voxel job builds anything.
+    #[test]
+    #[ignore = "slow: >100ms — run via just test-full"]
+    fn stud_builder_threads_build_every_key_and_retry_failed_loads() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::Arc;
+        let tile_of = |key: &LodKey| {
+            let side = game::StudLodTile::side_for(key);
+            let sample = game::StudLodSample::of_column(key.coords[0] * 10 + key.coords[1], game::MAT_GRASS, None);
+            game::StudLodTile::encode(side, &vec![sample; game::StudLodTile::sample_count(side)])
+        };
+        let flaky = LodKey { factor: 64, coords: [9, 9] };
+        let failures = Arc::new(AtomicU32::new(0));
+        let f = failures.clone();
+        let backoff = Backoff { base: std::time::Duration::from_millis(2), max: std::time::Duration::from_millis(8) };
+        let mut builder = ThreadStudLodBuilder::with(3, backoff, Arc::new(move |key: &LodKey| {
+            // The flaky key's tiles fail to load twice.
+            if *key == flaky && f.fetch_add(1, Ordering::SeqCst) < 2 {
+                return Err("forged tile (1, 0): down".into());
+            }
+            Ok(tile_of(key))
+        }));
+        assert!(builder.stud_terrain() && !builder.generates_pristine() && !builder.reads_stored());
+        builder.submit(LodBuildJob::Tile { key: flaky, overlays: Vec::new(), stored: Vec::new() });
+        let mut keys: Vec<LodKey> = (0..20).map(|i| LodKey { factor: 64, coords: [i % 5, i / 5] }).collect();
+        keys.push(flaky);
+        for key in &keys {
+            builder.submit_stud(*key);
+        }
+        let mut got = std::collections::BTreeMap::new();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while got.len() < keys.len() && std::time::Instant::now() < deadline {
+            match builder.poll_stud() {
+                Some((key, tile)) => assert!(got.insert(key, tile).is_none(), "{key:?} answered twice"),
+                None => std::thread::sleep(std::time::Duration::from_millis(1)),
+            }
+        }
+        assert_eq!(got.len(), keys.len(), "every key is answered");
+        for key in &keys {
+            assert_eq!(got[key], tile_of(key), "{key:?}");
+        }
+        assert_eq!(failures.load(Ordering::SeqCst), 3, "two failed loads of the flaky key, then the one that built");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        assert!(builder.poll_stud().is_none(), "nothing else arrives (the voxel job built nothing)");
+    }
+
+    /// The real stud builder builds the procedural world's tile: what
+    /// `worldgen::stud_gen::stud_lod_tile` gives the key.
+    #[test]
+    #[ignore = "slow: >100ms — run via just test-full"]
+    fn stud_builder_builds_the_recipe_tile() {
+        let seed = 7;
+        let key = LodKey::for_region(game::stud_ring_table(game::lod::LOD_RING_TABLE)[0].1, game::RegionCoords::new(2, -1));
+        let mut builder = ThreadStudLodBuilder::new(seed, 2);
+        builder.submit_stud(key);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let (got, tile) = loop {
+            if let Some(result) = builder.poll_stud() {
+                break result;
+            }
+            assert!(std::time::Instant::now() < deadline, "the tile never arrived");
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        };
+        assert_eq!(got, key);
+        assert_eq!(tile, worldgen::stud_gen::stud_lod_tile(&key, seed));
+        assert!(tile.decode().is_some());
+    }
 
     /// A quarter of the machine, never fewer than the old fixed two, never
     /// more than six: LOD fill is background work next to region sim threads.

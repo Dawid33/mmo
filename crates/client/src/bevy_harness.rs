@@ -100,6 +100,7 @@ impl BevyInputHarness {
             .init_resource::<SnapshotVoxelQueue>()
             .init_resource::<RetiredRegionRoots>()
             .init_resource::<crate::renderer::cursor::CursorPolicy>()
+            .init_resource::<crate::renderer::stud::ClientBodyScale>()
             .insert_resource(ClientUpdates(bridge_recv))
             .insert_resource(GameEvents(tap_send))
             // Same ordering SimBridgePlugin uses: forward_input BEFORE the drains.

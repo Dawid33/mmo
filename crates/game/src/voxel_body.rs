@@ -243,20 +243,25 @@ fn mass_boxes(model: &VoxelModel) -> Vec<(f64, [f64; 3], [f64; 3])> {
 /// model axes (products of inertia dropped — no eigen solve; the principal
 /// frame is the identity). Zero for a massless model. Pure.
 pub fn model_mass_properties(model: &VoxelModel) -> MassProperties {
-    let boxes = mass_boxes(model);
+    mass_properties_of_boxes(&mass_boxes(model))
+}
+
+/// [`model_mass_properties`] for any set of solid boxes `(mass kg, min, max)` in model
+/// units (a stud body's bricks, `stud_body.rs`): the same sums in the same order.
+pub(crate) fn mass_properties_of_boxes(boxes: &[(f64, [f64; 3], [f64; 3])]) -> MassProperties {
     let mass: f64 = boxes.iter().map(|b| b.0).sum();
     if mass <= 0.0 {
         return MassProperties::default();
     }
     let mut com = [0.0f64; 3];
-    for (m, lo, hi) in &boxes {
+    for (m, lo, hi) in boxes {
         for a in 0..3 {
             com[a] += m * (lo[a] + hi[a]) * 0.5;
         }
     }
     let com = com.map(|c| c / mass);
     let mut inertia = [0.0f64; 3];
-    for (m, lo, hi) in &boxes {
+    for (m, lo, hi) in boxes {
         let e = [0, 1, 2].map(|a| hi[a] - lo[a]);
         let d = [0, 1, 2].map(|a| (lo[a] + hi[a]) * 0.5 - com[a]);
         for a in 0..3 {

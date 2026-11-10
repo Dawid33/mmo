@@ -63,6 +63,12 @@ pub const CONTAINER_REACH_BLOCKS: i32 = 6;
 pub const STARTING_CHESTS: u32 = 2;
 /// The block a chest is, by manifest name.
 pub const CHEST_BLOCK_NAME: &str = "chest";
+/// Stud terrain: the material of a chest's bricks (the plastic of LDraw colour 70,
+/// reddish brown) and the tag they carry in `StudBrick::data`. A chest is the tile
+/// holding a brick with both; its contents are the tile's `Container`, as on voxels.
+pub const STUD_CHEST_MATERIAL: u16 = 70;
+pub const STUD_CHEST_TAG: u16 = 1;
+const _: () = assert!(STUD_CHEST_MATERIAL < crate::stud_material::NATURAL_BASE);
 
 /// One block's inventory.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, state_hash::StateHash)]
@@ -177,9 +183,93 @@ fn put_into(slots: &mut [Option<ItemStack>], slot: Option<u8>, stack: ItemStack)
 }
 
 impl Rollback {
-    /// Whether local `pos` holds a chest block.
+    /// Whether local `pos` holds a chest block (on stud terrain: chest bricks,
+    /// [`Self::stud_chest_at`]).
     fn is_chest_at(&self, pos: BlockPos) -> bool {
+        if self.terrain_kind() == crate::TerrainKind::Stud {
+            return self.stud_chest_at(pos);
+        }
         chest_block().is_some_and(|chest| self.block_at(pos).is_some_and(|b| b.id == chest))
+    }
+
+    /// Whether stud tile `p` of this region holds chest bricks: a brick of
+    /// [`STUD_CHEST_MATERIAL`] tagged [`STUD_CHEST_TAG`] meets it.
+    pub fn stud_chest_at(&self, p: BlockPos) -> bool {
+        let (n, l) = (crate::STUD_CHUNK_TILES as i32, crate::STUD_LAYER_TILES as i32);
+        let (cx, cz) = (p[0].div_euclid(n), p[2].div_euclid(n));
+        let rn = crate::REGION_CHUNKS as i32;
+        if !(0..rn).contains(&cx) || !(0..rn).contains(&cz) {
+            return false;
+        }
+        let c = crate::StudChunkCoords { x: cx as usize, y: p[1].div_euclid(l), z: cz as usize };
+        let (Some(chunk), Some((lo, hi))) = (self.stud_chunk_at(c), crate::stud_tile_box(p)) else { return false };
+        let base = [cx * crate::STUD_CHUNK_STUDS as i32, c.y * crate::STUD_CHUNK_PLATES as i32, cz * crate::STUD_CHUNK_STUDS as i32];
+        chunk.bricks().any(|b| {
+            let size = b.size();
+            b.material == STUD_CHEST_MATERIAL
+                && b.data == STUD_CHEST_TAG
+                && (0..3).all(|a| {
+                    let min = base[a] + i32::from(b.min[a]);
+                    min < hi[a] && lo[a] < min + i32::from(size[a])
+                })
+        })
+    }
+
+    /// Puts a chest into stud tile `p` of this region, undo-safely: the tile is
+    /// filled with chest bricks and gets an empty container. `false`, nothing
+    /// changed, unless the tile is open (nothing in it), in the region, and holds
+    /// no container.
+    pub fn place_stud_chest_safe(&mut self, p: BlockPos) -> bool {
+        let n = crate::REGION_BLOCKS as i32;
+        if !(0..n).contains(&p[0]) || !(0..n).contains(&p[2]) {
+            return false;
+        }
+        let w = WorldBlockPos::from_local(*self.data.region, crate::BlockPos::new(p[0], p[1], p[2]));
+        let Some((lo, hi)) = crate::stud_tile_box(p) else { return false };
+        if self.stud_tile(p).fill() != crate::TileFill::Open || self.data.containers.contains_key(&w) {
+            return false;
+        }
+        let filled = self.fill_stud_boxes_tagged_safe(&[(lo, hi, STUD_CHEST_MATERIAL, STUD_CHEST_TAG)]);
+        if filled.first().is_none_or(|&cells| cells == 0) {
+            return false;
+        }
+        self.write_container_safe(w, Some(Container::chest()));
+        true
+    }
+
+    /// After a stud write removed cells in the region stud cells `lo .. hi` (a carve,
+    /// a removed brick, bricks detached): every container of a tile the box touches
+    /// whose chest bricks are gone spills into the piles there, with the chest's own
+    /// item (as a mined chest block drops itself). Returns the items destroyed
+    /// (counted where it happens).
+    pub(crate) fn stud_containers_after_write_safe(&mut self, lo: [i32; 3], hi: [i32; 3]) -> u32 {
+        if self.data.containers.is_empty() {
+            return 0;
+        }
+        let (ts, tp) = (crate::TILE_STUDS as i32, crate::TILE_PLATES as i32);
+        let tlo = [lo[0].div_euclid(ts), lo[1].div_euclid(tp), lo[2].div_euclid(ts)];
+        let thi = [(hi[0] - 1).div_euclid(ts), (hi[1] - 1).div_euclid(tp), (hi[2] - 1).div_euclid(ts)];
+        let rc = *self.data.region;
+        let gone: Vec<WorldBlockPos> = self
+            .data
+            .containers
+            .keys()
+            .copied()
+            .filter(|w| {
+                let c = crate::item_piles::local_cell(rc, *w);
+                (0..3).all(|a| (tlo[a]..=thi[a]).contains(&c[a])) && !self.stud_chest_at(c)
+            })
+            .collect();
+        let tick = *self.data.tick;
+        let mut destroyed = 0;
+        for w in gone {
+            destroyed += self.spill_container_safe(w, tick);
+            if let Some(chest) = chest_block() {
+                let stack = ItemStack { item: crate::ItemId::block(chest), count: 1 };
+                destroyed += self.deposit_items_safe(crate::item_piles::local_cell(rc, w), stack, tick, PICKUP_DELAY_TICKS);
+            }
+        }
+        destroyed
     }
 
     /// Whether `client`'s feet tile is within [`CONTAINER_REACH_BLOCKS`] of
@@ -188,7 +278,7 @@ impl Rollback {
     fn in_container_reach(&self, client: ClientId, p: WorldBlockPos) -> bool {
         let Some(&e) = self.data.player_entites.get(&client) else { return false };
         let Some(feet) = self.body_feet(e) else { return false };
-        let t = crate::feet_tile(feet);
+        let t = self.terrain_kind().feet_tile(feet);
         let t = WorldBlockPos::from_local(*self.data.region, crate::BlockPos::new(t[0], t[1], t[2]));
         let d2 = (t.x - p.x).pow(2) + i64::from(t.y - p.y).pow(2) + (t.z - p.z).pow(2);
         d2 <= i64::from(CONTAINER_REACH_BLOCKS).pow(2)

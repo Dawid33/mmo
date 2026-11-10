@@ -15,6 +15,7 @@ pub mod atmosphere;
 mod autopilot;
 mod avatar;
 mod block_textures;
+pub mod block_target;
 pub mod bricks;
 pub mod bridge;
 pub(crate) mod collider_debug;
@@ -54,6 +55,7 @@ pub use slint_composite::UiCamera;
 pub mod voxel_bodies;
 mod voxel_material;
 pub mod voxel_pull;
+pub mod stud;
 pub mod water;
 pub mod embark_tabs;
 pub mod history_view;
@@ -105,6 +107,7 @@ impl Plugin for SimBridgePlugin {
     fn build(&self, app: &mut App) {
         voxel_material::embed_voxel_texture_shader(app);
         app.add_plugins(water::WaterPlugin);
+        app.add_plugins(stud::StudPlugin);
         app.add_plugins((
             MaterialPlugin::<ExtendedMaterial<StandardMaterial, StandardVoxelMaterial>>::default(),
             bevy::diagnostic::FrameTimeDiagnosticsPlugin::default(),
@@ -113,6 +116,7 @@ impl Plugin for SimBridgePlugin {
             far_voxel::FarVoxelPlugin,
             model::BbModelPlugin,
             item_piles::ItemPilesPlugin,
+            block_target::BlockTargetPlugin,
         ))
         .insert_resource(ClientUpdates(self.client_recv.clone()))
         .insert_resource(GameEvents(self.game_send.clone()))
@@ -188,6 +192,7 @@ impl Plugin for SimBridgePlugin {
                     // the frontend (menu) when no world is running.
                     bridge::enforce_single_active_camera,
                     slint_overlay::drain_ui_updates.run_if(world_systems_enabled()),
+                    cursor::sync_world_loading,
                     cursor::apply_cursor_policy,
                 )
                     .chain(),

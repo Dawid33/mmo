@@ -62,6 +62,9 @@ pub enum Target {
     Block(WorldBlockPos),
     Pile(WorldBlockPos),
     Container(WorldBlockPos),
+    /// Stud terrain of the region holding this world chunk (`y` = stud layer):
+    /// `Intent::CarveStud` / `Intent::PlaceStud`.
+    Stud(crate::WorldChunkPos),
 }
 
 /// Required by the rollback map; never a real target.
@@ -78,6 +81,7 @@ impl Target {
         match self {
             Target::Entity(_) => None,
             Target::Block(p) | Target::Pile(p) | Target::Container(p) => Some(p.to_local().0),
+            Target::Stud(c) => Some(c.to_local().0),
         }
     }
 }
@@ -133,6 +137,23 @@ pub enum Intent {
         to_cursor: bool,
         by: EntityId,
     },
+    /// Stud world: carve the box of WORLD stud cells `lo .. hi`
+    /// (`stud_halo::WorldStudCell`, `hi` exclusive) out of the owner's stud
+    /// terrain (`Rollback::carve_stud_safe`): the part of a carve that reached
+    /// past its sender's edge (a `Target::Stud` in the owner). Granted when it
+    /// removed something, else `Refused(.., NothingThere)`. What it removed is
+    /// not handed to anyone yet (there are no stud drops).
+    CarveStud { lo: [i64; 3], hi: [i64; 3], by: EntityId },
+    /// Stud world: place `brick` into the stud chunk `chunk` (world chunk, `y` =
+    /// stud layer) of its owner (`Rollback::place_stud_safe`). Granted, or
+    /// `Refused(.., Occupied)` when it is invalid there or overlaps a brick.
+    PlaceStud { chunk: crate::WorldChunkPos, brick: crate::StudBrick, by: EntityId },
+    /// Stud world: fill the empty cells of the box of WORLD stud cells `lo .. hi` with
+    /// bricks of `material` in the owner's stud terrain
+    /// (`Rollback::fill_stud_box_safe`): the part of a fill that reached past its
+    /// sender's edge (a `Target::Stud` in the owner). Granted when it filled
+    /// something, else `Refused(.., Occupied)`.
+    FillStud { lo: [i64; 3], hi: [i64; 3], material: u16, by: EntityId },
 }
 
 /// Required by the rollback map; never a real intent.
@@ -151,7 +172,10 @@ impl Intent {
             | Intent::DepositItems { by, .. }
             | Intent::TakeFromPile { by, .. }
             | Intent::PutInContainer { by, .. }
-            | Intent::TakeFromContainer { by, .. } => *by,
+            | Intent::TakeFromContainer { by, .. }
+            | Intent::CarveStud { by, .. }
+            | Intent::PlaceStud { by, .. }
+            | Intent::FillStud { by, .. } => *by,
         }
     }
 }
@@ -443,6 +467,13 @@ impl Rollback {
                 }
                 return self.apply_container_intent_safe(p, intent);
             }
+            (Target::Stud(c), Intent::CarveStud { .. } | Intent::PlaceStud { .. } | Intent::FillStud { .. }) => {
+                if c.to_local().0 != *self.data.region {
+                    log::warn!("[intents] {intent:?} for {c:?} reached {:?}, not its owner", *self.data.region);
+                    return refused(IntentRefusal::BadTarget);
+                }
+                return self.apply_stud_intent_safe(intent);
+            }
             (Target::Block(p), Intent::BreakBlock { .. } | Intent::PlaceBlock { .. }) => p,
             _ => return refused(IntentRefusal::BadTarget),
         };
@@ -477,13 +508,152 @@ impl Rollback {
             Intent::DepositItems { .. }
             | Intent::TakeFromPile { .. }
             | Intent::PutInContainer { .. }
-            | Intent::TakeFromContainer { .. } => unreachable!("pile and chest intents returned above"),
+            | Intent::TakeFromContainer { .. }
+            | Intent::CarveStud { .. }
+            | Intent::PlaceStud { .. }
+            | Intent::FillStud { .. } => unreachable!("pile, chest and stud intents returned above"),
         };
         if done {
             IntentReply::Granted(intent)
         } else {
             refused(IntentRefusal::NothingThere)
         }
+    }
+
+    /// A stud intent as the owner (the caller checked the target is here).
+    fn apply_stud_intent_safe(&mut self, intent: Intent) -> IntentReply {
+        let refused = |why| IntentReply::Refused(intent, why);
+        let region = *self.data.region;
+        let cell = |c: [i64; 3]| -> Option<[i32; 3]> {
+            Some([i32::try_from(c[0]).ok()?, i32::try_from(c[1]).ok()?, i32::try_from(c[2]).ok()?])
+        };
+        match intent {
+            Intent::FillStud { lo, hi, material, .. } => {
+                let (lo, hi) = (crate::local_stud_cell(region, lo), crate::local_stud_cell(region, hi));
+                let (Some(lo), Some(hi)) = (cell(lo), cell(hi)) else { return refused(IntentRefusal::BadTarget) };
+                if self.fill_stud_box_safe(lo, hi, material) > 0 {
+                    IntentReply::Granted(intent)
+                } else {
+                    refused(IntentRefusal::Occupied)
+                }
+            }
+            Intent::CarveStud { lo, hi, .. } => {
+                let (lo, hi) = (crate::local_stud_cell(region, lo), crate::local_stud_cell(region, hi));
+                let (Some(lo), Some(hi)) = (cell(lo), cell(hi)) else { return refused(IntentRefusal::BadTarget) };
+                // What the carve removes goes into this region's piles (the owner's,
+                // as a mined block's does) — never back across the seam.
+                let removed = self.carve_stud_boxes_dropping_safe(&[(lo, hi)]).pop().unwrap_or_default();
+                if removed.is_empty() { refused(IntentRefusal::NothingThere) } else { IntentReply::Granted(intent) }
+            }
+            Intent::PlaceStud { chunk, brick, .. } => {
+                let c = chunk.to_local().1;
+                if self.place_stud_safe(crate::StudChunkCoords { x: c.x, y: c.y, z: c.z }, brick) {
+                    IntentReply::Granted(intent)
+                } else {
+                    refused(IntentRefusal::Occupied)
+                }
+            }
+            _ => refused(IntentRefusal::BadTarget),
+        }
+    }
+
+    /// Who a client's stud edit is sent `by`: its body here, else this region (a
+    /// commander has no body; the reply then comes back to the region, which drops it).
+    fn stud_edit_source(&self, client: ClientId) -> EntityId {
+        let body = self.data.player_entites.get(&client).and_then(|&k| self.entity_id(k));
+        body.unwrap_or_else(|| EntityId::of_region(*self.data.region))
+    }
+
+    /// `Order::CarveStud`: this region's part of the box is carved now
+    /// (`carve_stud_safe`); the part past each edge goes to the neighbour owning it
+    /// as an `Intent::CarveStud`, applied there at the next tick — its halo delta
+    /// brings the hole back here. An empty or oversized box does nothing anywhere.
+    pub(crate) fn carve_stud_order_safe(&mut self, client: ClientId, lo: [i32; 3], hi: [i32; 3], out: &mut Vec<IntentMsg>) {
+        self.stud_box_order_safe(client, lo, hi, None, out);
+    }
+
+    /// `Order::FillStud`: as [`Self::carve_stud_order_safe`], filling the box's empty
+    /// cells with `material` (`fill_stud_box_safe` here, `Intent::FillStud` to each
+    /// neighbour the box reaches into). An unknown material does nothing anywhere.
+    pub(crate) fn fill_stud_order_safe(
+        &mut self,
+        client: ClientId,
+        lo: [i32; 3],
+        hi: [i32; 3],
+        material: u16,
+        out: &mut Vec<IntentMsg>,
+    ) {
+        if crate::stud_material(material).is_some() {
+            self.stud_box_order_safe(client, lo, hi, Some(material), out);
+        }
+    }
+
+    /// A box edit of stud cells ordered here: carved (`fill` `None`) or filled with a
+    /// material, this region's part at once and each neighbour's part as an intent.
+    fn stud_box_order_safe(
+        &mut self,
+        client: ClientId,
+        lo: [i32; 3],
+        hi: [i32; 3],
+        fill: Option<u16>,
+        out: &mut Vec<IntentMsg>,
+    ) {
+        let (lo, hi) = (lo.map(i64::from), hi.map(i64::from));
+        if (0..3).any(|i| hi[i] <= lo[i] || hi[i] - lo[i] > crate::stud_ops::STUD_CARVE_MAX[i] as i64) {
+            return;
+        }
+        let n = crate::REGION_STUDS;
+        let region = *self.data.region;
+        let by = self.stud_edit_source(client);
+        match fill {
+            None => {
+                self.carve_stud_boxes_dropping_safe(&[(lo.map(|v| v as i32), hi.map(|v| v as i32))]);
+            }
+            Some(material) => {
+                self.fill_stud_box_safe(lo.map(|v| v as i32), hi.map(|v| v as i32), material);
+            }
+        }
+        for dx in -1..=1i64 {
+            for dz in -1..=1i64 {
+                if (dx, dz) == (0, 0) {
+                    continue;
+                }
+                // The box clipped to that neighbour's cells, in this region's frame.
+                let l = [lo[0].max(dx * n), lo[1], lo[2].max(dz * n)];
+                let h = [hi[0].min(dx * n + n), hi[1], hi[2].min(dz * n + n)];
+                if l[0] >= h[0] || l[2] >= h[2] {
+                    continue;
+                }
+                let (wl, wh) = (crate::world_stud_cell(region, l), crate::world_stud_cell(region, h));
+                let target = Target::Stud(crate::stud_chunk_of_cell(wl));
+                let intent = match fill {
+                    None => Intent::CarveStud { lo: wl, hi: wh, by },
+                    Some(material) => Intent::FillStud { lo: wl, hi: wh, material, by },
+                };
+                RegionEffects { data: self, out }.send(target, intent);
+            }
+        }
+    }
+
+    /// `Order::PlaceStudAt`: placed now when this region owns the chunk, else sent
+    /// to its owner as an `Intent::PlaceStud` (applied there at the next tick).
+    pub(crate) fn place_stud_order_safe(
+        &mut self,
+        client: ClientId,
+        chunk: crate::WorldChunkPos,
+        brick: crate::StudBrick,
+        out: &mut Vec<IntentMsg>,
+    ) {
+        let (rc, c) = chunk.to_local();
+        if rc == *self.data.region {
+            self.place_stud_safe(crate::StudChunkCoords { x: c.x, y: c.y, z: c.z }, brick);
+            return;
+        }
+        if !matches!(brick.shape, crate::StudShape::Part { .. }) || !crate::stud::stud_layer_ok(chunk.y) {
+            return;
+        }
+        let by = self.stud_edit_source(client);
+        RegionEffects { data: self, out }.send(Target::Stud(chunk), Intent::PlaceStud { chunk, brick, by });
     }
 
     /// `Order::DevBreakBlock`: `client`'s body sends `BreakBlock` at `p`.

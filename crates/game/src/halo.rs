@@ -137,6 +137,14 @@ pub struct HaloUpdate {
     /// `piles` (`containers.rs`). A delta carries every written band cell in
     /// both lists (a cell's current pile and chest, either may be `None`).
     pub containers: Vec<(crate::WorldBlockPos, Option<crate::Container>)>,
+    /// `from`'s stud chunks (`stud_halo.rs`; `chunk.y` is the stud layer). On a seed:
+    /// only the band chunks its recipes cannot give back — the receiver derives the
+    /// pristine chunk of every surface layer itself and drops any other chunk of
+    /// `from` not listed. On a delta: the band chunks written, whole.
+    pub studs: Vec<crate::StudHaloDelta>,
+    /// `from`'s stud ground recipes for the band's chunk columns, by world chunk
+    /// column (`y` 0) — on seeds; empty on deltas (recipes never change).
+    pub stud_ground: Vec<(WorldChunkPos, crate::StudColumnGround)>,
 }
 
 impl HaloUpdate {
@@ -151,6 +159,10 @@ impl HaloUpdate {
             && self.piles.iter().zip(&other.piles).all(|(a, b)| a.0 == b.0)
             && self.containers.len() == other.containers.len()
             && self.containers.iter().zip(&other.containers).all(|(a, b)| a.0 == b.0)
+            && self.studs.len() == other.studs.len()
+            && self.studs.iter().zip(&other.studs).all(|(a, b)| a.chunk == b.chunk)
+            && self.stud_ground.len() == other.stud_ground.len()
+            && self.stud_ground.iter().zip(&other.stud_ground).all(|(a, b)| a.0 == b.0)
     }
 }
 
@@ -220,12 +232,14 @@ pub fn halo_seed_from_chunks<'a>(
 /// [`halo_seed_from_chunks`] from a terrain snapshot, its ground recipes
 /// included (what the receiver's halo reads below the band).
 pub fn halo_seed_from_snapshot(from: RegionCoords, to: RegionCoords, snap: &crate::TerrainSnapshot) -> Option<HaloUpdate> {
-    halo_seed(
+    let mut seed = halo_seed(
         from,
         to,
         snap.chunks.iter().map(|(c, k)| (*c, k)),
         snap.ground.iter().map(|(c, g)| (*c, g)),
-    )
+    )?;
+    (seed.studs, seed.stud_ground) = snap.stud.seed_parts(from, neighbour_offset(from, to)?);
+    Some(seed)
 }
 
 /// A seed of `from`'s `chunks` and column `ground` recipes (its own frame)
@@ -255,7 +269,16 @@ pub fn halo_seed<'a>(
         .map(|(c, g)| (WorldChunkPos::from_local(from, [c.x as i32, 0, c.z as i32]), g.without_bodies()))
         .collect();
     ground.sort_by_key(|(k, _)| *k);
-    Some(HaloUpdate { from, replace: true, deltas, ground, piles: Vec::new(), containers: Vec::new() })
+    Some(HaloUpdate {
+        from,
+        replace: true,
+        deltas,
+        ground,
+        piles: Vec::new(),
+        containers: Vec::new(),
+        studs: Vec::new(),
+        stud_ground: Vec::new(),
+    })
 }
 
 /// The chunk columns `xs × zs` of `from` (its own frame) that neighbour `to`
@@ -481,6 +504,7 @@ impl Rollback {
         let mut seed = halo_seed(from, to, chunks, self.data.ground.iter().map(|(c, g)| (*c, g)))?;
         seed.piles = self.pile_seed_for(to);
         seed.containers = self.container_seed_for(to);
+        (seed.studs, seed.stud_ground) = self.stud_edge().seed_parts(from, neighbour_offset(from, to)?);
         Some(seed)
     }
 
@@ -492,6 +516,7 @@ impl Rollback {
         &self,
         keys: &std::collections::BTreeSet<crate::ChunkIndexKey>,
         piles: &std::collections::BTreeSet<crate::WorldBlockPos>,
+        studs: &std::collections::BTreeSet<crate::StudChunkCoords>,
     ) -> Vec<(HaloUpdate, RegionCoords)> {
         type Pending = (
             Vec<HaloDelta>,
@@ -522,11 +547,25 @@ impl Rollback {
                 e.2.push((p, chest.clone()));
             }
         }
+        let mut stud_deltas = self.stud_halo_deltas_for(studs);
+        for t in stud_deltas.keys() {
+            by_target.entry(*t).or_default();
+        }
         by_target
             .into_iter()
             .map(|((dx, dz), (mut deltas, piles, containers))| {
                 deltas.sort_by_key(|d| d.chunk);
-                let update = HaloUpdate { from, replace: false, deltas, ground: Vec::new(), piles, containers };
+                let studs = stud_deltas.remove(&(dx, dz)).unwrap_or_default();
+                let update = HaloUpdate {
+                    from,
+                    replace: false,
+                    deltas,
+                    ground: Vec::new(),
+                    piles,
+                    containers,
+                    studs,
+                    stud_ground: Vec::new(),
+                };
                 (update, RegionCoords::new(from.x + dx, from.z + dz))
             })
             .collect()
@@ -631,6 +670,7 @@ impl Rollback {
             touched.push(d.chunk);
         }
         self.materialize_behind_halo_safe(&touched);
+        self.apply_stud_halo_update_safe(u);
     }
 
     /// One halo chunk takes its new content, undo-safely: the stored chunk

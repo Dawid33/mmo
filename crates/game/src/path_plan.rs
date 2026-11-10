@@ -363,6 +363,15 @@ impl<S: TileSource> TileSource for OnMap<'_, S> {
     fn water_units(&self, p: TilePos) -> u16 {
         if self.on_map(p[0], p[2]) { self.src.water_units(p) } else { 0 }
     }
+    fn terrain(&self) -> crate::TerrainKind {
+        self.src.terrain()
+    }
+    fn tile_fill(&self, p: TilePos) -> crate::TileFill {
+        if self.on_map(p[0], p[2]) { self.src.tile_fill(p) } else { crate::TileFill::Open }
+    }
+    fn tile_material(&self, p: TilePos) -> Option<u16> {
+        self.on_map(p[0], p[2]).then(|| self.src.tile_material(p)).flatten()
+    }
 }
 
 impl Rollback {
@@ -378,7 +387,8 @@ impl Rollback {
     /// Dropped otherwise. No walker: no change.
     pub fn continue_walk_safe(&mut self, e: crate::EntityKey, here: RegionCoords, map: Option<&RouteMap>) {
         let Some(old) = self.data.ecs.walker.try_get(e).clone() else { return };
-        let src = OnMap { src: &*self, here, map: map.map(RouteMap::extent) };
+        let tiles = self.tiles();
+        let src = OnMap { src: &tiles, here, map: map.map(RouteMap::extent) };
         let rest = old.path.get(old.next as usize..).unwrap_or_default();
         let walkable = rest.iter().all(|&p| standable(&src, crate::local_tile(p, here)));
         if old.to_goal && !rest.is_empty() && walkable {

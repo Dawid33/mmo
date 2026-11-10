@@ -194,6 +194,8 @@ fn halo_updates_roll_back_bit_exact() {
         piles: vec![(WorldBlockPos::from_local(SPAWN_REGION, game::BlockPos::new(REGION_BLOCKS as i32, 1, 3)), Some(pile(3)))],
         // And a chest beside it (Task 6.4).
         containers: vec![(chest_cell(), Some(game::Container::chest()))],
+        studs: Vec::new(),
+        stud_ground: Vec::new(),
     };
     let before = game::state_hash(region.data());
     region.handle_event(GameEventKind::HaloUpdate(seed.clone())).unwrap();
@@ -222,6 +224,8 @@ fn halo_updates_roll_back_bit_exact() {
         ground: Vec::new(),
         piles: vec![(WorldBlockPos::from_local(SPAWN_REGION, game::BlockPos::new(REGION_BLOCKS as i32, 1, 3)), Some(pile(5)))],
         containers: vec![(chest_cell(), Some(stocked_chest()))],
+        studs: Vec::new(),
+        stud_ground: Vec::new(),
     };
     region.handle_event(GameEventKind::HaloUpdate(patch)).unwrap();
     assert_ne!(game::state_hash(region.data()), seeded);

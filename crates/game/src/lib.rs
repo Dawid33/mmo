@@ -59,6 +59,19 @@ pub mod slime;
 pub mod slope;
 pub mod state;
 pub mod stored_terrain;
+pub mod stud;
+pub mod stud_assets;
+pub mod stud_body;
+pub mod stud_carve;
+pub mod stud_trees;
+pub mod stud_catalog;
+pub mod stud_collider;
+pub mod stud_ground;
+pub mod stud_halo;
+pub mod stud_lod;
+pub mod stud_material;
+mod stud_ops;
+pub mod tiles;
 pub mod trees;
 pub mod ui;
 pub mod volume;
@@ -104,7 +117,7 @@ pub use item_piles::*;
 pub use lod::*;
 pub use lod_builder::*;
 pub use mining::*;
-pub use migrate::Carried;
+pub use migrate::{Carried, CarriedV1};
 pub use movement::{Immersion, Motion};
 pub use orders::*;
 pub use ownership::{rendezvous_owner, super_region_of, Ownership, DEFAULT_SUPER_REGION_REGIONS};
@@ -114,7 +127,10 @@ pub use path_plan::{
     PORTAL_DEPTH_BLOCKS, ROUTE_MAX_RELIEF_PER_REGION_M, ROUTE_MAX_WATER_SHARE,
 };
 pub use player::*;
-pub use portable::{restore_portable, ChunkTerms, PortableRegion, RegionMeta, StoredRegion};
+pub use portable::{
+    restore_portable, ChunkTerms, PortableRegion, RegionMeta, SaveTerms, StoredRegion, StudChunkRecord, StudKept, StudTerm,
+    StudTerms,
+};
 pub use protocol::*;
 pub use region_runner::*;
 pub use save_cut::{CutId, InFlightRow, WorldCut, CUT_DEADLINE_LEADS, SAVE_CUT_LEAD_MAX_TICKS, SAVE_CUT_LEAD_TICKS};
@@ -129,8 +145,18 @@ pub use voxel::*;
 pub use trees::*;
 pub use voxel_body::*;
 pub use water::*;
-pub use world_view::{EntityRef, Hit, RegionView, WorldAabb, WorldRay, WorldView};
+pub use world_view::{EntityRef, Hit, RegionView, StudWorldHit, WorldAabb, WorldRay, WorldView};
 pub use world_clock::{ticks_due, WorldClock, MAX_CATCH_UP_BURST};
+pub use stud::*;
+pub use stud_body::*;
+pub use stud_carve::*;
+pub use stud_trees::*;
+pub use stud_collider::*;
+pub use stud_ground::*;
+pub use stud_halo::*;
+pub use stud_lod::*;
+pub use stud_material::*;
+pub use tiles::*;
 pub use world_manager::*;
 pub use world_map::*;
 
@@ -247,6 +273,9 @@ pub enum ClientUpdateEvent {
     /// replace-on-re-receipt), with the key's water surface layer. Decoded
     /// and spawned by the renderer.
     LodData(LodKey, LodPayload, crate::lod::LodWater),
+    /// A stud world's far terrain for one key (initial send or refresh —
+    /// replace-on-re-receipt). Meshed and spawned by the renderer.
+    StudLodData(LodKey, crate::stud_lod::StudLodTile),
     /// The ring assignment moved on: retire this key's render root.
     /// `near_takeover`: (one of) the key's regions just joined the near
     /// window, so the replacement is authoritative terrain still on its way

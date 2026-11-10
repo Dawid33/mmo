@@ -562,7 +562,7 @@ impl Plugin for CommanderPlugin {
                     )
                         .chain()
                         .run_if(first_person::inactive),
-                    selection::select_input.run_if(designate::no_tool_active).run_if(first_person::inactive),
+                    selection::select_input.run_if(designate::no_tool_active).run_if(crate::renderer::stud::build::build_off).run_if(first_person::inactive),
                     follow::rekey_local_player,
                     selection::prune_selection,
                     selection::draw_selection_rings,
@@ -740,7 +740,7 @@ fn place_on_body(
     cam.ground_y = surface;
     cam.rise = 0.0;
     cam.pivot = None;
-    level.level = Some(level::surface_level(surface));
+    level.level = Some(level::surface_level(level.terrain, surface));
     cam.placed = true;
 }
 
@@ -765,7 +765,7 @@ pub struct RightPress {
 /// `Confined` and the hidden pointer would otherwise wander (native only —
 /// winit cannot warp on the web, where pointer lock is real). The press and
 /// its motion are recorded in [`RightPress`].
-fn hold_pointer_while_orbiting(
+pub(crate) fn hold_pointer_while_orbiting(
     buttons: Res<ButtonInput<MouseButton>>,
     motion: Res<AccumulatedMouseMotion>,
     mut window: Query<&mut Window, With<PrimaryWindow>>,
@@ -1056,23 +1056,23 @@ pub fn eye_in_block(home_block: Option<bool>, eye: Vec3, terrain_under_eye: Opti
 /// Whether world point `eye` lies in a solid home-region block (`None`
 /// outside the home region).
 fn home_block_solid(mirror: &tiles::TileMirror, eye: Vec3) -> Option<bool> {
-    let size = game::BLOCK_VOXELS as f32;
-    let world = eye / size;
+    let kind = mirror.terrain();
+    let world = eye / Vec3::new(kind.tile_width_units(), kind.tile_height_units(), kind.tile_width_units());
     let (bx, bz) = (world.x.floor() as i32, world.z.floor() as i32);
     if !mirror.in_home(bx, bz) {
         return None;
     }
     let n = game::REGION_BLOCKS as i32;
     let tile = [bx.rem_euclid(n), world.y.floor() as i32, bz.rem_euclid(n)];
-    // `is_solid` answers for blocks only (air is not one, and reads solid).
-    let id = game::TileSource::block(mirror, tile);
-    Some(id != game::BlockId::AIR && game::block_props().is_solid(id))
+    // A colliding block; on stud terrain a tile filled to its top.
+    Some(game::TileSource::tile_fill(mirror, tile) == game::TileFill::Solid)
 }
 
 /// Whether world point `eye` lies in a water cell of the home region
 /// (`TileSource::water_units` > 0: recipe water, `game::static_water_units`).
 pub fn eye_in_water(mirror: &tiles::TileMirror, eye: Vec3) -> bool {
-    let world = eye / game::BLOCK_VOXELS as f32;
+    let kind = mirror.terrain();
+    let world = eye / Vec3::new(kind.tile_width_units(), kind.tile_height_units(), kind.tile_width_units());
     let (bx, bz) = (world.x.floor() as i32, world.z.floor() as i32);
     if !mirror.in_home(bx, bz) {
         return false;
@@ -1128,7 +1128,7 @@ fn underground_view(
     let top = td.is_some_and(|t| t.on);
     // Underground beats underwater beats open air.
     let (under, wet) = if top {
-        (top_down::top_down_underground(working.level, top_down::lowest_surface_level(grid.surface_range())), false)
+        (top_down::top_down_underground(working.level, top_down::lowest_surface_level(working.terrain, grid.surface_range())), false)
     } else {
         let eye = camera_transform(focus_point(&cam), cam.distance, cam.yaw, cam.pitch).translation;
         let under = eye_in_block(home_block_solid(&mirror, eye), eye, grid.surface_at(eye.x, eye.z));

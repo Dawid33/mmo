@@ -13,10 +13,11 @@
 use std::collections::{BTreeMap, HashMap};
 
 use bevy::prelude::*;
-use game::{BlockId, BlockIndex, Chunk, BLOCK_VOXELS, CHUNK_BLOCKS, CHUNK_UNITS};
+use game::{BlockId, BlockIndex, Chunk, StudChunk, BLOCK_VOXELS, CHUNK_BLOCKS, CHUNK_UNITS, STUD_CHUNK_HEIGHT_UNITS};
 
 use crate::renderer::bricks::SimChunk;
 use crate::renderer::bridge::SimEntity;
+use crate::renderer::stud::SimStudChunk;
 
 /// Voxels along a chunk edge.
 const CHUNK_EDGE: usize = CHUNK_UNITS;
@@ -111,6 +112,42 @@ pub fn chunk_tops(chunk: &Chunk) -> ChunkTops {
     tops
 }
 
+/// One stud chunk's contribution: per block column (`bx + CHUNK_BLOCKS * bz`,
+/// each covering 2x2 stud columns), the highest brick top over those stud
+/// columns in sim units above the stud chunk's floor; `0.0` = none. Studs have
+/// no water, so a stud surface is its ground.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StudTops {
+    pub surface: [f32; COLUMNS],
+}
+
+impl Default for StudTops {
+    fn default() -> Self {
+        Self { surface: [0.0; COLUMNS] }
+    }
+}
+
+/// Tops of a stud chunk's block columns, in one pass over its bricks.
+pub fn stud_chunk_tops(chunk: &StudChunk) -> StudTops {
+    let studs_per_block = game::STUD_CHUNK_STUDS / CHUNK_BLOCKS;
+    let mut plates = [0u8; COLUMNS];
+    for b in chunk.bricks() {
+        let [w, h, d] = b.size();
+        let top = b.min[1] + h;
+        for sz in b.min[2]..b.min[2] + d {
+            for sx in b.min[0]..b.min[0] + w {
+                let column = sx as usize / studs_per_block + CHUNK_BLOCKS * (sz as usize / studs_per_block);
+                plates[column] = plates[column].max(top);
+            }
+        }
+    }
+    let mut tops = StudTops::default();
+    for (out, &p) in tops.surface.iter_mut().zip(&plates) {
+        *out = game::plate_units(i32::from(p));
+    }
+    tops
+}
+
 #[derive(Resource)]
 pub struct HeightGrid {
     /// Per loaded block column (world block x, z): the top of its topmost
@@ -125,6 +162,10 @@ pub struct HeightGrid {
     /// Recipe water per world block column: the topmost water block y
     /// (`ColumnGround::water_top`), from the regions' ground recipes.
     water_tops: HashMap<(i32, i32), i16>,
+    /// Per chunk column (cx, cz), the tops of each loaded stud chunk by its layer.
+    stud_stacks: HashMap<(i32, i32), BTreeMap<i32, StudTops>>,
+    /// Which stud chunk (world cx, layer, cz) an entity was filed under.
+    stud_by_entity: HashMap<Entity, [i32; 3]>,
     /// Bumped on every change, so readers (the minimap) can rebuild lazily.
     pub version: u64,
 }
@@ -142,6 +183,8 @@ impl HeightGrid {
             stacks: HashMap::new(),
             by_entity: HashMap::new(),
             water_tops: HashMap::new(),
+            stud_stacks: HashMap::new(),
+            stud_by_entity: HashMap::new(),
             version: 0,
         }
     }
@@ -213,7 +256,31 @@ impl HeightGrid {
         self.recompute(key[0], key[2]);
     }
 
+    /// File a stud chunk's tops under `key` (world cx, stud layer, cz).
+    pub fn insert_stud_chunk(&mut self, entity: Entity, key: [i32; 3], tops: StudTops) {
+        if let Some(old) = self.stud_by_entity.insert(entity, key) {
+            if old != key {
+                self.remove_stud_key(old);
+            }
+        }
+        self.stud_stacks.entry((key[0], key[2])).or_default().insert(key[1], tops);
+        self.recompute(key[0], key[2]);
+    }
+
+    fn remove_stud_key(&mut self, key: [i32; 3]) {
+        if let Some(stack) = self.stud_stacks.get_mut(&(key[0], key[2])) {
+            stack.remove(&key[1]);
+            if stack.is_empty() {
+                self.stud_stacks.remove(&(key[0], key[2]));
+            }
+        }
+        self.recompute(key[0], key[2]);
+    }
+
     pub fn remove_entity(&mut self, entity: Entity) {
+        if let Some(key) = self.stud_by_entity.remove(&entity) {
+            self.remove_stud_key(key);
+        }
         if let Some(key) = self.by_entity.remove(&entity) {
             self.remove_key(key);
         }
@@ -234,25 +301,30 @@ impl HeightGrid {
         let chunk = CHUNK_EDGE as f32;
         let blocks = CHUNK_BLOCKS as i32;
         let stack = self.stacks.get(&(cx, cz));
+        let studs = self.stud_stacks.get(&(cx, cz));
         for bz in 0..CHUNK_BLOCKS {
             for bx in 0..CHUNK_BLOCKS {
                 let block = (cx * blocks + bx as i32, cz * blocks + bz as i32);
-                let Some(stack) = stack else {
+                if stack.is_none() && studs.is_none() {
                     self.columns.remove(&block);
                     continue;
-                };
+                }
                 let column = bx + CHUNK_BLOCKS * bz;
                 let top = |pick: fn(&ChunkTops) -> &[u16; COLUMNS]| {
                     // Highest chunk first: the first with a top in this column
                     // wins. A loaded column of only air reads as NaN: there is
                     // no ground to stand the camera or a pick on.
                     stack
-                        .iter()
-                        .rev()
-                        .find(|(_, t)| pick(t)[column] > 0)
+                        .and_then(|s| s.iter().rev().find(|(_, t)| pick(t)[column] > 0))
                         .map_or(f32::NAN, |(cy, t)| *cy as f32 * chunk + pick(t)[column] as f32)
                 };
-                let (mut surface, ground) = (top(|t| &t.surface), top(|t| &t.ground));
+                let (mut surface, mut ground) = (top(|t| &t.surface), top(|t| &t.ground));
+                // Stud chunks: highest layer with a top; f32::max drops the NaN of "no voxels".
+                if let Some((layer, t)) = studs.and_then(|s| s.iter().rev().find(|(_, t)| t.surface[column] > 0.0)) {
+                    let y = *layer as f32 * STUD_CHUNK_HEIGHT_UNITS as f32 + t.surface[column];
+                    surface = surface.max(y);
+                    ground = ground.max(y);
+                }
                 // Recipe water stands over the ground; the column must be loaded.
                 if let Some(&water) = self.water_tops.get(&block) {
                     surface = surface.max((i32::from(water) + 1) as f32 * BLOCK_VOXELS as f32);
@@ -283,6 +355,8 @@ pub fn update_height_grid(
     mut msgs: MessageReader<super::tiles::TileMirrorMsg>,
     changed: Query<(Entity, &SimChunk, &Transform, &SimEntity), Changed<SimChunk>>,
     mut removed: RemovedComponents<SimChunk>,
+    changed_studs: Query<(Entity, &SimStudChunk, &SimEntity), Changed<SimStudChunk>>,
+    mut removed_studs: RemovedComponents<SimStudChunk>,
 ) {
     for msg in msgs.read() {
         if let super::tiles::TileMirrorMsg::Reset { region, ground, .. } = msg {
@@ -291,6 +365,14 @@ pub fn update_height_grid(
     }
     for entity in removed.read() {
         grid.remove_entity(entity);
+    }
+    for entity in removed_studs.read() {
+        grid.remove_entity(entity);
+    }
+    for (entity, stud, sim) in &changed_studs {
+        let [ox, _, oz] = sim.region.world_offset().map(|v| (v / CHUNK_EDGE as f32).round() as i32);
+        let key = [ox + stud.coords.x as i32, stud.coords.y, oz + stud.coords.z as i32];
+        grid.insert_stud_chunk(entity, key, stud_chunk_tops(&stud.chunk));
     }
     for (entity, chunk, tf, sim) in &changed {
         grid.insert_chunk(entity, world_chunk_key(tf, sim), chunk_tops(&chunk.0));
@@ -476,6 +558,82 @@ mod tests {
         grid.remove_entity(top);
         grid.insert_chunk(top, [0, 1, 0], full);
         assert_eq!(grid.surface_at(1.0, 1.0), Some(2.0 * e), "a full chunk at y 1 tops out at 2·CHUNK_UNITS");
+    }
+
+    fn filler(min: [u8; 3], size: [u8; 3]) -> game::StudBrick {
+        game::StudBrick { min, shape: game::StudShape::Filler { size }, material: 4, data: 0 }
+    }
+
+    #[test]
+    fn stud_chunk_sets_surface() {
+        let chunk = StudChunk::new([filler([0, 0, 0], [32, 50, 32])]).unwrap();
+        let mut grid = HeightGrid::new();
+        grid.insert_stud_chunk(Entity::from_raw_u32(1).unwrap(), [0, 0, 0], stud_chunk_tops(&chunk));
+        let c = CHUNK_EDGE as f32 / 2.0;
+        assert_eq!(grid.surface_at(c, c), Some(game::plate_units(50)));
+        assert_eq!(grid.column_at(c, c), Some((game::plate_units(50), game::plate_units(50))));
+    }
+
+    #[test]
+    fn stud_and_voxel_take_the_max() {
+        let mut grid = HeightGrid::new();
+        let (v, s) = (Entity::from_raw_u32(1).unwrap(), Entity::from_raw_u32(2).unwrap());
+        let stud = stud_chunk_tops(&StudChunk::new([filler([0, 0, 0], [32, 50, 32])]).unwrap());
+        grid.insert_chunk(v, [0, 0, 0], chunk_tops(&layered(5, 5, STONE)));
+        grid.insert_stud_chunk(s, [0, 0, 0], stud);
+        assert_eq!(grid.surface_at(1.0, 1.0), Some(game::plate_units(50)));
+        grid.remove_entity(s);
+        assert_eq!(grid.surface_at(1.0, 1.0), Some(5.0));
+        grid.insert_chunk(v, [0, -1, 0], chunk_tops(&layered(CHUNK_EDGE, CHUNK_EDGE, STONE)));
+        grid.insert_stud_chunk(s, [0, 0, 0], stud);
+        assert_eq!(grid.surface_at(1.0, 1.0), Some(game::plate_units(50)));
+    }
+
+    #[test]
+    fn removing_stud_entity_clears_columns() {
+        let mut grid = HeightGrid::new();
+        let s = Entity::from_raw_u32(2).unwrap();
+        grid.insert_stud_chunk(s, [1, 2, 3], stud_chunk_tops(&StudChunk::new([filler([0, 0, 0], [2, 5, 2])]).unwrap()));
+        let (x, z) = (CHUNK_EDGE as f32 + 1.0, 3.0 * CHUNK_EDGE as f32 + 1.0);
+        assert_eq!(grid.surface_at(x, z), Some(2.0 * STUD_CHUNK_HEIGHT_UNITS as f32 + game::plate_units(5)));
+        assert_eq!(grid.surface_at(x + 20.0, z), None, "a column beside stays empty (no top)");
+        grid.remove_entity(s);
+        assert_eq!(grid.column_at(x, z), None);
+    }
+
+    #[test]
+    fn voxel_higher_than_stud_wins() {
+        let mut grid = HeightGrid::new();
+        let (v, s) = (Entity::from_raw_u32(1).unwrap(), Entity::from_raw_u32(2).unwrap());
+        grid.insert_stud_chunk(s, [0, 0, 0], stud_chunk_tops(&StudChunk::new([filler([0, 0, 0], [32, 5, 32])]).unwrap()));
+        grid.insert_chunk(v, [0, 0, 0], chunk_tops(&layered(100, 100, STONE)));
+        assert_eq!(grid.surface_at(1.0, 1.0), Some(100.0));
+    }
+
+    #[test]
+    fn block_column_takes_the_max_of_its_stud_columns() {
+        // Block column 0 covers studs x 0..2, z 0..2: several bricks of differing top.
+        let chunk = StudChunk::new([
+            filler([0, 0, 0], [1, 3, 1]),
+            filler([1, 0, 0], [1, 9, 1]),
+            filler([0, 0, 1], [1, 6, 1]),
+        ])
+        .unwrap();
+        let tops = stud_chunk_tops(&chunk);
+        assert_eq!(tops.surface[0], game::plate_units(9));
+        assert_eq!(tops.surface[1], 0.0);
+    }
+
+    #[test]
+    fn empty_upper_stud_layer_falls_back_to_the_lower() {
+        let mut grid = HeightGrid::new();
+        let (lo, hi) = (Entity::from_raw_u32(1).unwrap(), Entity::from_raw_u32(2).unwrap());
+        grid.insert_stud_chunk(lo, [0, 0, 0], stud_chunk_tops(&StudChunk::new([filler([0, 0, 0], [32, 7, 32])]).unwrap()));
+        // The upper layer only covers stud column (30, 30), not the sampled block column 0.
+        grid.insert_stud_chunk(hi, [0, 1, 0], stud_chunk_tops(&StudChunk::new([filler([30, 0, 30], [1, 4, 1])]).unwrap()));
+        assert_eq!(grid.surface_at(1.0, 1.0), Some(game::plate_units(7)));
+        let far = CHUNK_EDGE as f32 - 1.0;
+        assert_eq!(grid.surface_at(far, far), Some(STUD_CHUNK_HEIGHT_UNITS as f32 + game::plate_units(4)));
     }
 
     /// A sim chunk's key is its region-local position plus the region's

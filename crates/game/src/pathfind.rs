@@ -19,6 +19,8 @@ use std::cmp::Reverse;
 use std::collections::{BTreeMap, BinaryHeap};
 
 use crate::orders::{TilePos, TileSource};
+use crate::stud::TILE_PLATES;
+use crate::tiles::{TerrainKind, TileFill, STUD_BODY_PLATES, STUD_DROP_PLATES, STUD_STEP_PLATES};
 use crate::{block_props, df_depth, BlockId, WADE_COST, WADE_MAX_DEPTH};
 
 /// Default expansion budget of one search, in nodes.
@@ -51,6 +53,9 @@ fn passable(src: &impl TileSource, p: TilePos) -> bool {
 /// the tile below is solid. Anywhere the source answers — the sim's covers
 /// region ∪ halo; an unknown floor reads as air, so it is never standable.
 pub fn standable(src: &impl TileSource, p: TilePos) -> bool {
+    if src.terrain() == TerrainKind::Stud {
+        return stud_standable(src, p);
+    }
     passable_block(src.block(p))
         && passable_block(src.block([p[0], p[1] + 1, p[2]]))
         && df_depth(src.water_units(p)) <= WADE_MAX_DEPTH
@@ -62,18 +67,151 @@ pub fn standable(src: &impl TileSource, p: TilePos) -> bool {
 /// charged — a slope walk-up climbs for free. Admissible and consistent (one
 /// step moves at most one level, and a step down pays the `CLIMB_COST` the
 /// heuristic drops).
-fn heuristic(a: TilePos, b: TilePos) -> u32 {
+///
+/// On stud terrain a level can be descended in steps that cost nothing extra, so
+/// the descent is not charged there (plain octile distance).
+fn heuristic(kind: TerrainKind, a: TilePos, b: TilePos) -> u32 {
     let dx = a[0].abs_diff(b[0]);
     let dz = a[2].abs_diff(b[2]);
     let (lo, hi) = (dx.min(dz), dx.max(dz));
-    let down = (a[1] - b[1]).max(0) as u32;
+    let down = match kind {
+        TerrainKind::Voxel => (a[1] - b[1]).max(0) as u32,
+        TerrainKind::Stud => 0,
+    };
     DIAG_COST * lo + STEP_COST * (hi - lo) + CLIMB_COST * down
+}
+
+// --- Stud terrain (`tiles.rs`) -------------------------------------------------
+//
+// Heights below are in plates. A body standing in tile `p` rests on a FLOOR `o`
+// plates above the tile's bottom, `STUD_FLOOR_MIN_PLATES..=STUD_STEP_PLATES`
+// (-2..=3): every floor height belongs to exactly one tile, the one whose bottom is
+// nearest below-or-just-above it — the stud form of "the level nearest the feet".
+
+/// The floor a body standing in stud tile `p` rests on, plates above the tile's
+/// bottom: the tile's own partial fill when that is no higher than a step
+/// (`Floor(1..=3)`), else — the tile open — the top of the tile below when that is
+/// solid (0) or a partial fill higher than a step (`Floor(4..=6)`: -2..=0). `None`
+/// when the tile holds no such floor: it is solid or filled higher than a step, or
+/// open over nothing (or over a low floor, which belongs to the tile below).
+fn stud_floor(src: &impl TileSource, p: TilePos) -> Option<i32> {
+    match src.tile_fill(p) {
+        TileFill::Solid => None,
+        TileFill::Floor(k) => (i32::from(k) <= STUD_STEP_PLATES).then_some(i32::from(k)),
+        TileFill::Open => match src.tile_fill([p[0], p[1] - 1, p[2]]) {
+            TileFill::Solid => Some(0),
+            TileFill::Floor(k) if i32::from(k) > STUD_STEP_PLATES => Some(i32::from(k) - TILE_PLATES as i32),
+            _ => None,
+        },
+    }
+}
+
+/// The absolute plate of tile level `y`'s bottom.
+fn level_plate(y: i32) -> i64 {
+    i64::from(y) * TILE_PLATES as i64
+}
+
+/// Whether stud tile column `[x, z]` has room for a body whose feet are at absolute
+/// plate `from`: every tile meeting the [`STUD_BODY_PLATES`] above it is open —
+/// except the one holding `from`, which may be filled up to it. Tile-grained, so
+/// conservative: anything in a tile the body reaches into blocks it.
+fn stud_clear(src: &impl TileSource, column: [i32; 2], from: i64) -> bool {
+    let tp = TILE_PLATES as i64;
+    let (first, last) = (from.div_euclid(tp), (from + i64::from(STUD_BODY_PLATES) - 1).div_euclid(tp));
+    (first..=last).all(|ty| match src.tile_fill([column[0], ty as i32, column[1]]) {
+        TileFill::Open => true,
+        TileFill::Floor(k) => ty * tp + i64::from(k) <= from,
+        TileFill::Solid => false,
+    })
+}
+
+/// The absolute plate of the floor a body standing in stud tile `p` rests on, when
+/// it can stand there: the tile has a floor ([`stud_floor`]) with room for the body
+/// over it ([`stud_clear`]). In tiles: over a floor up to 1 plate above the tile's
+/// bottom the tile above must be open; over a higher one (2 or 3 plates) the tile
+/// two above as well — a 2.2 m body is 11 plates, two tiles are 12.
+///
+/// Water is never a floor, as on voxels: the tile is standable only in water up to
+/// [`WADE_MAX_DEPTH`] (`Rollback::stud_water_units`: 2 plates over the tile's floor).
+fn stud_stand(src: &impl TileSource, p: TilePos) -> Option<i64> {
+    let floor = level_plate(p[1]) + i64::from(stud_floor(src, p)?);
+    (stud_clear(src, [p[0], p[2]], floor) && df_depth(src.water_units(p)) <= WADE_MAX_DEPTH).then_some(floor)
+}
+
+fn stud_standable(src: &impl TileSource, p: TilePos) -> bool {
+    stud_stand(src, p).is_some()
+}
+
+/// How far above tile `p`'s bottom (sim units) the feet of a body standing in it
+/// rest: 0 on voxel terrain (the top of the block below); on stud terrain the height
+/// of its floor (negative when the floor is in the tile below), 0 where it has none.
+pub fn stand_offset_units(src: &impl TileSource, p: TilePos) -> f32 {
+    match src.terrain() {
+        TerrainKind::Voxel => 0.0,
+        TerrainKind::Stud => crate::stud::plate_units(stud_floor(src, p).unwrap_or(0)),
+    }
+}
+
+/// Whether a body with feet at `feet` (region-local sim units) is clear of terrain
+/// where it is: on voxel terrain its feet tile and the tile above hold no solid
+/// block (water is clear); on stud terrain its column has room from the plate
+/// its feet stand on ([`stud_clear`]).
+pub fn body_fits(src: &impl TileSource, feet: rapier3d::math::Vector) -> bool {
+    let kind = src.terrain();
+    let t = kind.feet_tile(feet);
+    match kind {
+        TerrainKind::Voxel => passable(src, t) && passable(src, [t[0], t[1] + 1, t[2]]),
+        TerrainKind::Stud => stud_clear(src, [t[0], t[2]], TerrainKind::feet_plate(feet.y)),
+    }
+}
+
+/// [`successors`] on stud terrain. From a standable tile to each of the 8
+/// neighbouring columns, landing on a standable tile one level up, level or down,
+/// when the floors differ by no more than a step UP ([`STUD_STEP_PLATES`]: walked,
+/// never jumped) or a tile DOWN ([`STUD_DROP_PLATES`]: a drop, charged `CLIMB_COST`
+/// when deeper than a step). The lower column must have room for the body at the
+/// higher floor; a diagonal step needs that room in both columns beside it too.
+fn stud_successors(src: &impl TileSource, p: TilePos, out: &mut Vec<(TilePos, u32)>) {
+    let Some(sp) = stud_stand(src, p) else { return };
+    for [dx, dz] in DIRS {
+        for dy in [0, 1, -1] {
+            let q = [p[0] + dx, p[1] + dy, p[2] + dz];
+            let Some(sq) = stud_stand(src, q) else { continue };
+            let rise = sq - sp;
+            if rise > i64::from(STUD_STEP_PLATES) || rise < -i64::from(STUD_DROP_PLATES) {
+                continue;
+            }
+            let high = sp.max(sq);
+            if rise > 0 && !stud_clear(src, [p[0], p[2]], high) {
+                continue;
+            }
+            if rise < 0 && !stud_clear(src, [q[0], q[2]], high) {
+                continue;
+            }
+            let diagonal = dx != 0 && dz != 0;
+            if diagonal && !(stud_clear(src, [p[0] + dx, p[2]], high) && stud_clear(src, [p[0], p[2] + dz], high)) {
+                continue;
+            }
+            let mut cost = if diagonal { DIAG_COST } else { STEP_COST };
+            if rise < -i64::from(STUD_STEP_PLATES) {
+                cost += CLIMB_COST;
+            }
+            if (1..=WADE_MAX_DEPTH).contains(&df_depth(src.water_units(q))) {
+                cost += WADE_COST;
+            }
+            out.push((q, cost));
+        }
+    }
 }
 
 /// Whether the `dy = +1` step `from -> to` walks up a slope: `to`'s floor is
 /// a slope entered from its low side ([`crate::walk_up`]). Every other climb
-/// is a jump.
+/// is a jump. On stud terrain every step of a path is walked (a path never rises
+/// more than the step height at once), so every step is a walk-up.
 pub fn step_is_walk_up(src: &impl TileSource, from: TilePos, to: TilePos) -> bool {
+    if src.terrain() == TerrainKind::Stud {
+        return true;
+    }
     to[1] == from[1] + 1
         && src.slope([to[0], to[1] - 1, to[2]]).is_some_and(|s| crate::walk_up(s, [from[0] - to[0], from[2] - to[2]]))
 }
@@ -91,6 +229,9 @@ const DIRS: [[i32; 2]; 8] =
 
 fn successors(src: &impl TileSource, p: TilePos, out: &mut Vec<(TilePos, u32)>) {
     out.clear();
+    if src.terrain() == TerrainKind::Stud {
+        return stud_successors(src, p, out);
+    }
     for [dx, dz] in DIRS {
         for dy in [0, 1, -1] {
             let q = [p[0] + dx, p[1] + dy, p[2] + dz];
@@ -155,6 +296,8 @@ pub fn find_path_toward(
         return None;
     }
     let to = toward;
+    let kind = src.terrain();
+    let heuristic = |a: TilePos, b: TilePos| heuristic(kind, a, b);
     if accept(from) {
         return Some(vec![from]);
     }

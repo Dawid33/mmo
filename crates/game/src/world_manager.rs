@@ -130,9 +130,21 @@ pub trait RegionSpawner {
         false
     }
 
+    /// What never-run region `rc` would start from as stud terrain, for a
+    /// spawner that seeds fresh regions with it but does not generate on the
+    /// region's thread (the inline spawner): the manager cuts the halo seeds
+    /// of `rc`'s starting neighbours from it (`seed_halo`). `None`: no stud
+    /// terrain here.
+    fn stud_genesis(&self, _rc: RegionCoords) -> Option<crate::StudRegionSeed> {
+        None
+    }
+
     /// The world's current tick: where a region spawned now starts counting.
     fn world_tick(&self) -> crate::Tick;
 }
+
+/// What a fresh stud region starts from (`InlineSpawner::with_stud_genesis`).
+pub type InlineStudGenesis = std::sync::Arc<dyn Fn(RegionCoords) -> crate::StudRegionSeed + Send + Sync>;
 
 /// Chance (per mille, per region per round) that [`InlineSchedule::jittery`]
 /// delivers a region's inputs a tick late.
@@ -247,6 +259,9 @@ pub struct InlineSpawner {
     held: BTreeMap<RegionCoords, u32>,
     /// Test support ([`InlineSpawner::record_slot_start_hashes`]).
     record_slot_hashes: bool,
+    /// Stud terrain seeded into every region built fresh
+    /// ([`InlineSpawner::with_stud_genesis`]).
+    stud_genesis: Option<InlineStudGenesis>,
 }
 
 impl InlineSpawner {
@@ -270,6 +285,15 @@ impl InlineSpawner {
 
     pub fn with_schedule(schedule: InlineSchedule) -> Self {
         Self { schedule: Some(schedule), ..Self::default() }
+    }
+
+    /// A stud world: every region built fresh (never run, not stored) is seeded
+    /// with `genesis(rc)` (`Region::seed_stud_world`), as the server's region
+    /// threads do; the manager seeds the halos of never-run neighbours from the
+    /// same function.
+    pub fn with_stud_genesis(mut self, genesis: InlineStudGenesis) -> Self {
+        self.stud_genesis = Some(genesis);
+        self
     }
 
     /// Regions that have not run yet start from the world store's `regions`
@@ -427,11 +451,15 @@ impl RegionSpawner for InlineSpawner {
                 runner.set_saved_terms(terms);
                 runner
             }
-            None => seed.into_runner(
-                id,
-                out,
-                &|rc| unreachable!("InlineSpawner never generates columns ({rc:?})"),
-            ),
+            None => {
+                let mut region =
+                    seed.into_region_with(id, &|rc| unreachable!("InlineSpawner never generates columns ({rc:?})"));
+                // Before the runner takes its baseline hash.
+                if let (true, Some(genesis)) = (never_ran, &self.stud_genesis) {
+                    region.seed_stud_world(genesis(id));
+                }
+                RegionRunner::new(id, region, out)
+            }
         };
         let mut runner = runner;
         if self.record_slot_hashes {
@@ -439,6 +467,10 @@ impl RegionSpawner for InlineSpawner {
         }
         self.runners.insert(id, (recv, runner));
         send
+    }
+
+    fn stud_genesis(&self, rc: RegionCoords) -> Option<crate::StudRegionSeed> {
+        self.stud_genesis.as_ref().map(|g| g(rc))
     }
 
     fn world_tick(&self) -> crate::Tick {
@@ -910,6 +942,9 @@ pub struct WorldManager<S: RegionSpawner> {
     /// LOD_CACHE_MAX_ENTRIES, subscribed keys pinned. `u64` is a
     /// monotonically increasing access stamp (not wall time — determinism).
     lod_cache: BTreeMap<LodKey, (LodPayload, LodWater, u64)>,
+    /// A stud world's `lod_cache` (`stud_lod.rs`): key -> tile + access stamp, under
+    /// the same cap and pinning. Empty in a voxel world, as `lod_cache` is in a stud one.
+    stud_lod_cache: BTreeMap<LodKey, (crate::StudLodTile, u64)>,
     /// LRU cap on `lod_cache`; defaults to `LOD_CACHE_MAX_ENTRIES`, overridable
     /// via `set_lod_cache_max` (test hook — mirrors `LodRings.retirement_max_frames`).
     lod_cache_max: usize,
@@ -1082,6 +1117,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             region_out_send,
             lod_subscribers: BTreeMap::new(),
             lod_cache: BTreeMap::new(),
+            stud_lod_cache: BTreeMap::new(),
             lod_cache_max: LOD_CACHE_MAX_ENTRIES,
             lod_access_counter: 0,
             lod_in_flight: BTreeSet::new(),
@@ -2386,7 +2422,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                     let wakes = client.is_some() || matches!(bundle.kind, EntityKind::Person { .. });
                     let running = self.regions.get(&target).is_some_and(|l| !l.stopping);
                     if !wakes && !running {
-                        if bundle.carried.voxel_body.is_some() {
+                        if bundle.carried.voxel_body.is_some() || bundle.carried.stud_body.is_some() {
                             // A falling voxel body does not wait out a park
                             // (with its logs) in the mailbox: it settles now,
                             // on the seam on its source's side — its policy's
@@ -3376,6 +3412,10 @@ impl<S: RegionSpawner> WorldManager<S> {
             self.client_disconnected(old, now_ms);
         }
         self.sessions.entry(id).or_default();
+        if self.lod_builder.stud_terrain() {
+            // Ahead of everything that makes the client ask for LOD.
+            let _ = self.out.send((Some(id), ServerPacket::StudTerrain));
+        }
         self.player_of.insert(id, player);
         let in_flight = self.parking.values().any(|p| p.player == player);
         if self.homes.contains_key(&id) {
@@ -3630,7 +3670,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             lod_in_flight: self.lod_in_flight.len(),
             lod_waiting_terrain: self.lod_pending_terrain.values().map(BTreeSet::len).sum::<usize>()
                 + self.lod_tile_waiting.len(),
-            lod_cache: self.lod_cache.len(),
+            lod_cache: self.lod_cache.len() + self.stud_lod_cache.len(),
             terrain_cache: self.terrain_cache.len(),
             transfers_in_flight: self.in_flight_count(),
             pending_arrivals: self.pending_arrival_total(),
@@ -3893,7 +3933,10 @@ impl<S: RegionSpawner> WorldManager<S> {
                 generate_there.push(n);
             } else {
                 // Not cached: LOD keeps its own choice of pristine sources.
-                let snap = TerrainSnapshot::from_columns(self.generate_timed(n));
+                let mut snap = TerrainSnapshot::from_columns(self.generate_timed(n));
+                if let Some(studs) = self.spawner.stud_genesis(n) {
+                    snap.stud = crate::StudEdge::from_seed(&studs);
+                }
                 if let Some(seed) = crate::halo::halo_seed_from_snapshot(n, rc, &snap) {
                     let _ = input.send(RegionInput::Event(GameEventKind::HaloUpdate(seed)));
                 }
@@ -4248,10 +4291,29 @@ impl<S: RegionSpawner> WorldManager<S> {
             log::debug!("dropping RequestLod from sessionless client {client}");
             return;
         };
+        if self.lod_builder.stud_terrain() && !crate::stud_lod_supported(&key) {
+            // Finer than a stud column, or too wide a tile: a client still on the
+            // voxel ring table (it has not seen a stud region yet).
+            log::debug!("dropping RequestLod {key:?}: no stud far terrain at that factor");
+            return;
+        }
         session.lod_subscribed.insert(key);
         self.lod_subscribers.entry(key).or_default().insert(client);
         self.lod_access_counter += 1;
         let stamp = self.lod_access_counter;
+        if self.lod_builder.stud_terrain() {
+            // Far terrain of a stud world is a function of the key (the recipe):
+            // no terrain round-trip, no overlay, never invalidated.
+            if let Some((tile, access)) = self.stud_lod_cache.get_mut(&key) {
+                *access = stamp;
+                self.perf.lod_cache_hits += 1;
+                let _ = self.out.send((Some(client), ServerPacket::StudLodData(key, tile.clone())));
+            } else if !self.lod_in_flight.contains(&key) {
+                self.mark_lod_in_flight(key);
+                self.lod_builder.submit_stud(key);
+            }
+            return;
+        }
         if let Some((payload, water, access)) = self.lod_cache.get_mut(&key) {
             *access = stamp;
             self.perf.lod_cache_hits += 1;
@@ -4424,12 +4486,39 @@ impl<S: RegionSpawner> WorldManager<S> {
         while let Ok((key, payload, water)) = self.lod_results.try_recv() {
             self.handle_lod_result(key, payload, water);
         }
+        while let Some((key, tile)) = self.lod_builder.poll_stud() {
+            self.handle_stud_lod_result(key, tile);
+        }
+    }
+
+    /// [`handle_lod_result`](Self::handle_lod_result) for a stud world's tile.
+    pub fn handle_stud_lod_result(&mut self, key: LodKey, tile: crate::StudLodTile) {
+        self.lod_in_flight.remove(&key);
+        self.perf.lod_built += 1;
+        if let Some(watch) = self.lod_submitted_at.remove(&key) {
+            let took = watch.elapsed();
+            self.perf.lod_latency_total += took;
+            self.perf.lod_latency_max = self.perf.lod_latency_max.max(took);
+        }
+        self.lod_access_counter += 1;
+        if let Some(subs) = self.lod_subscribers.get(&key) {
+            for client in subs {
+                let _ = self.out.send((Some(*client), ServerPacket::StudLodData(key, tile.clone())));
+            }
+        }
+        self.stud_lod_cache.insert(key, (tile, self.lod_access_counter));
+        self.evict_lod_cache();
     }
 
     /// A region's terrain changed (cadence push) or it parked: every LOD key
     /// depending on it is stale. Drop them from the cache; rebuild the ones
     /// with live subscribers (the fresh terrain_cache entry is the new source).
     fn invalidate_region_lod(&mut self, rc: RegionCoords) {
+        if self.lod_builder.stud_terrain() {
+            // Stud far terrain shows the recipe only (edits are not in it): a
+            // region's terrain push changes none of its keys.
+            return;
+        }
         for factor in crate::lod::LOD_FACTORS {
             let key = LodKey::for_region(factor, rc);
             self.lod_cache.remove(&key);
@@ -4444,7 +4533,7 @@ impl<S: RegionSpawner> WorldManager<S> {
 
     /// Test hook: current cache size (`lod_cache_evicts_unsubscribed_lru_but_pins_subscribed`).
     pub fn lod_cache_len(&self) -> usize {
-        self.lod_cache.len()
+        self.lod_cache.len() + self.stud_lod_cache.len()
     }
 
     /// Test hook: shrink/grow the LRU cap below `LOD_CACHE_MAX_ENTRIES` so
@@ -4503,6 +4592,20 @@ impl<S: RegionSpawner> WorldManager<S> {
                     self.lod_cache.remove(&k);
                 }
                 None => break, // everything pinned by subscribers
+            }
+        }
+        while self.stud_lod_cache.len() > self.lod_cache_max {
+            let victim = self
+                .stud_lod_cache
+                .iter()
+                .filter(|(k, _)| !self.lod_subscribers.contains_key(k))
+                .min_by_key(|(_, (_, access))| *access)
+                .map(|(k, _)| *k);
+            match victim {
+                Some(k) => {
+                    self.stud_lod_cache.remove(&k);
+                }
+                None => break,
             }
         }
     }

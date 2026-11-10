@@ -52,6 +52,13 @@ pub fn submerged_fraction(rb: &Rollback, aabb_min: Vector, aabb_max: Vector, com
     if height <= 0.0 {
         return 0.0;
     }
+    if rb.terrain_kind() == crate::TerrainKind::Stud {
+        // Stud water: the recipe's surface over the stud column under `com`, exact.
+        return match rb.stud_water_surface_units(com.x, com.z) {
+            Some(surface) => ((surface - aabb_min.y) / height).clamp(0.0, 1.0),
+            None => 0.0,
+        };
+    }
     let here = *rb.data.region;
     let (x, z) = ((com.x / bv).floor() as i32, (com.z / bv).floor() as i32);
     let (y0, y1) = ((aabb_min.y / bv).floor() as i32, (aabb_max.y / bv).floor() as i32);
@@ -106,7 +113,14 @@ impl Rollback {
                     VOXEL_BODY_GRAVITY,
                     if vb.landed { VOXEL_BODY_LANDED_ANGULAR_DAMPING } else { VOXEL_BODY_ANGULAR_DAMPING },
                 ),
-                None => (mass_properties(&spec, BODY_DEFAULT_DENSITY).mass(), BODY_GRAVITY, BODY_ANGULAR_DAMPING),
+                None => match self.data.ecs.stud_body.try_get(e) {
+                    Some(sb) => (
+                        crate::stud_body::stud_model_mass_properties(&sb.model).mass(),
+                        VOXEL_BODY_GRAVITY,
+                        VOXEL_BODY_ANGULAR_DAMPING,
+                    ),
+                    None => (mass_properties(&spec, BODY_DEFAULT_DENSITY).mass(), BODY_GRAVITY, BODY_ANGULAR_DAMPING),
+                },
             };
             let (force, linear, angular) = if f == 0.0 {
                 (Vector::new(0.0, -mass * gravity * UNITS_PER_METER, 0.0), 0.0, base_angular)

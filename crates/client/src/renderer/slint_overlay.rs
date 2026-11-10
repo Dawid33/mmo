@@ -557,14 +557,15 @@ impl Plugin for SlintOverlayPlugin {
 #[derive(Resource, Default)]
 pub struct UiUpdates(pub Option<crossbeam::channel::Receiver<game::UiUpdate>>);
 
-/// The sim's item UI as last projected: the hotbar and mining progress the
-/// HUD draws in Adventure first person, and the inventory / chest screen.
+/// The sim's item UI as last projected: the hotbar the HUD draws in
+/// Adventure first person, the block being mined (cracked by
+/// `block_target`), and the inventory / chest screen.
 #[derive(Resource, Default, Debug, Clone, PartialEq)]
 pub struct HudItems {
     pub hotbar: game::HotbarView,
     pub inventory: game::InventoryView,
-    /// Mining progress, 0..=1000.
-    pub mining: Option<u32>,
+    /// The block being mined (home region) and its progress, 0..=1000.
+    pub mining: Option<game::MiningView>,
 }
 
 /// Apply the sim's UI projection: the cursor grab it asks for, the play
@@ -632,7 +633,7 @@ fn push_hud_state(
     let Some(hud) = hud else { return };
     let ui = hud.overlay.ui();
 
-    // The hotbar strip and the mining bar: Adventure first person only.
+    // The hotbar strip: Adventure first person only.
     let hotbar_on = adventure.is_some_and(|m| m.adventure()) && first_person.is_some_and(|f| f.on);
     let hotbar_shown = hotbar_shown.get();
     match items {
@@ -643,14 +644,9 @@ fn push_hud_state(
                 ui.set_hotbar_selected(items.hotbar.selected as i32);
                 *hotbar_shown = Some(items.hotbar.clone());
             }
-            let progress = items.mining.map_or(0.0, |m| m as f32 / 1000.0);
-            if ui.get_mining_progress() != progress {
-                ui.set_mining_progress(progress);
-            }
         }
         _ if hotbar_shown.is_some() => {
             ui.set_hotbar(ModelRc::new(VecModel::from(Vec::<slint_ui::ItemSlot>::new())));
-            ui.set_mining_progress(0.0);
             *hotbar_shown = None;
         }
         _ => {}
@@ -835,6 +831,7 @@ fn connect_game_ui(ui: &GameUi, world: &mut World) {
     ui.on_inventory_slot_pressed(move |container, index, right| queue.borrow_mut().push((container, index, right)));
     world.insert_non_send(InventoryClicks(clicks));
     world.insert_non_send(GameUiActions(actions));
+    super::stud::palette_ui::connect(ui, world);
     #[cfg(feature = "dev_ui")]
     super::dev_ui::connect_debug_tab(ui, world);
 }
@@ -1799,13 +1796,10 @@ fn tool_wheel(
 
 /// The level readout: the working level and how far it is from the surface
 /// under the camera focus (just the level while that column isn't loaded).
+/// Voxel terrain's wording; [`super::stud::palette::level_text`] is the form
+/// for either terrain (on studs a level is a 1.2 m tile, and it says so).
 pub fn level_text(level: i32, surface_level: Option<i32>) -> String {
-    match surface_level.map(|surface| level - surface) {
-        None => format!("Level {level}"),
-        Some(0) => format!("Level {level} · surface"),
-        Some(d) if d < 0 => format!("Level {level} · {} below surface", -d),
-        Some(d) => format!("Level {level} · {d} above surface"),
-    }
+    super::stud::palette::level_text(game::TerrainKind::Voxel, level, surface_level)
 }
 
 /// What the tool wheel's state and the readouts read. All optional: the
@@ -1871,12 +1865,17 @@ fn sync_toolbar(ui: &slint_ui::GameUi, ui_scale: f32, p: &mut ToolbarParams) {
         ui.set_priority(state.priority as i32);
     }
 
+    let kind = p.level.as_ref().map_or(game::TerrainKind::Voxel, |l| l.terrain);
     let surface = match (&p.grid, &p.cam) {
-        (Some(grid), Some(cam)) => focus_surface(grid, cam.focus).map(surface_level),
+        (Some(grid), Some(cam)) => focus_surface(grid, cam.focus).map(|y| surface_level(kind, y)),
         _ => None,
     };
-    let level: SharedString =
-        p.level.as_ref().and_then(|l| l.level).map_or(String::new(), |l| level_text(l, surface)).into();
+    let level: SharedString = p
+        .level
+        .as_ref()
+        .and_then(|l| l.level)
+        .map_or(String::new(), |l| super::stud::palette::level_text(kind, l, surface))
+        .into();
     if ui.get_level_text() != level {
         ui.set_level_text(level);
     }

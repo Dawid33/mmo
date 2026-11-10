@@ -10,6 +10,7 @@ use crossbeam::channel::Sender;
 use crate::lod::{
     copy_region_cells_into_tile, downsample_chunks, LodCell, LodKey, LodWater, PackedLodGrid,
 };
+use crate::stud_lod::StudLodTile;
 use crate::{
     load_stored_or_warn, Chunk, ChunkCoords, Column, ColumnCoords, LodPayload, NoStoredTerrain, RegionCoords,
     StoredTerrain, TerrainSnapshot, Voxel,
@@ -81,6 +82,72 @@ pub trait LodBuilder: Send {
     /// regions it has no terrain for as pristine.
     fn reads_stored(&self) -> bool {
         false
+    }
+
+    /// Whether this builder serves a STUD world. Then the manager sends it no
+    /// [`LodBuildJob`] at all: every key goes to [`submit_stud`](Self::submit_stud)
+    /// and its tile comes back through [`poll_stud`](Self::poll_stud), a sibling of
+    /// the voxel job / result path (`stud_lod.rs`; the voxel payload types and the
+    /// `LodResult` channel are untouched).
+    fn stud_terrain(&self) -> bool {
+        false
+    }
+
+    /// Build `key`'s stud far terrain (only called when
+    /// [`stud_terrain`](Self::stud_terrain)).
+    fn submit_stud(&mut self, _key: LodKey) {}
+
+    /// The next finished stud tile, if one is ready (never blocks).
+    fn poll_stud(&mut self) -> Option<StudLodResult> {
+        None
+    }
+}
+
+/// A finished stud far-terrain build.
+pub type StudLodResult = (LodKey, StudLodTile);
+/// A key's stud far terrain from the recipe (`worldgen::stud_lod_tile`).
+pub type StudLodGenerator = Box<dyn Fn(&LodKey) -> StudLodTile + Send>;
+
+/// Synchronous stud builder (tests, the in-page server): builds on submit.
+pub struct InlineStudLodBuilder {
+    pub tile: StudLodGenerator,
+    done: std::collections::VecDeque<StudLodResult>,
+}
+
+impl InlineStudLodBuilder {
+    pub fn new(tile: StudLodGenerator) -> Self {
+        Self { tile, done: Default::default() }
+    }
+}
+
+impl LodBuilder for InlineStudLodBuilder {
+    /// A stud world has no voxel LOD: a voxel job is dropped.
+    fn submit(&mut self, _job: LodBuildJob) {}
+
+    fn stud_terrain(&self) -> bool {
+        true
+    }
+
+    fn submit_stud(&mut self, key: LodKey) {
+        self.done.push_back((key, (self.tile)(&key)));
+    }
+
+    fn poll_stud(&mut self) -> Option<StudLodResult> {
+        self.done.pop_front()
+    }
+}
+
+/// For worlds with no LOD (the stud test world): every job is dropped.
+#[derive(Debug, Default)]
+pub struct NullLodBuilder {
+    logged: bool,
+}
+
+impl LodBuilder for NullLodBuilder {
+    fn submit(&mut self, _job: LodBuildJob) {
+        if !std::mem::replace(&mut self.logged, true) {
+            log::info!("[server] lod: none for this world");
+        }
     }
 }
 

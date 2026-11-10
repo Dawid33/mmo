@@ -36,7 +36,6 @@ use rapier3d::math::Vector;
 use rapier3d::prelude::ColliderBuilder;
 use slotmapd::Key as _;
 
-use crate::movement::PLAYER_EYE_OFFSET;
 use crate::{
     Block, BlockDelta, BlockId, BlockIndex, Chunk, ChunkBlocks, ChunkCoords, ClientId, EntityKey, GameDataTransactionKind,
     GameDataUpdate, GameDataUpdateKind, Pose, MouseButton, Rollback, BLOCK_VOXELS, CHUNK_BLOCKS,
@@ -609,7 +608,7 @@ impl Rollback {
         let handle = (*self.data.ecs.rigidbody.try_get(e))?;
         let body = self.data.physics.bodies.get(handle)?;
         let camera = self.data.ecs.camera.try_get(e).as_ref()?;
-        let eye = body.translation() + Vector::new(0.0, PLAYER_EYE_OFFSET, 0.0);
+        let eye = body.translation() + Vector::new(0.0, self.body_scale().eye_offset(), 0.0);
         // Cameras look down -Z, as the renderer's Camera3d does.
         let dir = crate::look_quat(camera.yaw, camera.pitch) * Vector::new(0.0, 0.0, -1.0);
         Some((eye, dir))

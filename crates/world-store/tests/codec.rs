@@ -223,12 +223,40 @@ pub(crate) fn intent() -> IntentMsg {
     })
 }
 
+/// A stored stud chunk: a filler and a catalog part.
+pub(crate) fn stud_chunk() -> game::StudChunkRecord {
+    let chunk = game::StudChunk::new([
+        game::StudBrick::filler([0, 0, 0], [4, 6, 4], game::MAT_STONE),
+        game::StudBrick::part_at([8, 6, 8], 0, 1, 4),
+    ])
+    .unwrap();
+    game::StudChunkRecord::Edited(chunk)
+}
+
+/// Stud ground recipes of two chunk columns: flat ground at plates 30 and 95.
+pub(crate) fn stud_ground() -> Vec<(game::ColumnCoords, game::StudColumnGround)> {
+    let soil = game::StudProfile { cover: game::MAT_GRASS, cover_plates: 1, soil: game::MAT_DIRT, soil_plates: 5 };
+    vec![
+        (game::ColumnCoords::new(0, 0), game::StudColumnGround::flat(30, soil, game::MAT_STONE, -2000)),
+        (game::ColumnCoords::new(1, 0), game::StudColumnGround::flat(95, soil, game::MAT_STONE, -2000)),
+    ]
+}
+
 #[test]
 fn golden_blobs_decode() {
+    check("stud_chunk", FORMAT_STUD_CHUNK, &stud_chunk());
+    check("stud_chunk_pristine", FORMAT_STUD_CHUNK, &game::StudChunkRecord::Pristine);
+    check("stud_ground", FORMAT_STUD_GROUND, &stud_ground());
     check("region_meta", FORMAT_REGION_META, &meta());
     check("chunk", FORMAT_CHUNK, &chunk());
     check("column_ground", FORMAT_COLUMN_GROUND, &ground());
     check("entity_bundle", FORMAT_ENTITY_BUNDLE, &bundle());
+    // Format 1 (before `Carried::stud_body`) is still read: the golden recorded then.
+    let v1 = std::fs::read(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/entity_bundle_v1.bin")).unwrap();
+    assert_eq!(v1[0], FORMAT_ENTITY_BUNDLE_V1);
+    assert_eq!(decode_entity_bundle(&v1).unwrap(), bundle(), "a format 1 bundle decodes to the same bundle, no stud body");
+    assert_eq!(decode_entity_bundle(&encode(FORMAT_ENTITY_BUNDLE, &bundle())).unwrap(), bundle());
+    assert!(decode_entity_bundle(&[9, 1, 2]).is_err() && decode_entity_bundle(&[]).is_err());
     check("player_record", FORMAT_PLAYER_RECORD, &player());
     check("intent_msg", FORMAT_INTENT_MSG, &intent());
     check("intent_msg_reply", FORMAT_INTENT_MSG, &IntentMsg::Reply(reply()));

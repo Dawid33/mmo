@@ -55,9 +55,9 @@ pub enum UiUpdate {
     /// The inventory / chest screen's contents; sent only when they change
     /// (`InventoryView::default()` = closed).
     Inventory(InventoryView),
-    /// The block being mined, 0..=1000 (`None` = not mining); sent only when
-    /// it changes.
-    Mining(Option<u32>),
+    /// The block being mined (region-local, in the home region) and how far
+    /// along, 0..=1000 (`None` = not mining); sent only when it changes.
+    Mining(Option<crate::MiningView>),
 }
 
 /// What the inventory screen shows while it is open (client-side projection).

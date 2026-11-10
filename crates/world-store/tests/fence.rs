@@ -25,6 +25,7 @@ fn region_a() -> PortableRegion {
         ground: Some(region_ground()),
         entities: vec![],
         players: vec![],
+        ..Default::default()
     }
 }
 

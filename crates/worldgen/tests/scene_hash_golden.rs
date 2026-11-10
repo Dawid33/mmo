@@ -69,11 +69,21 @@ use game::{state_hash, GameEventKind, InputEvent, Key, Region, RegionCoords};
 /// `GameData.water_bodies` (water plan Task 5, recipe water) — hashed
 /// layout only: with the three left out of the hash the scene still ends in
 /// the previous 0xB599_589B; 16 only.
+/// Then (2026-11-09) for the stud-chunk layout (`Ecs.stud`, `GameData.stud_index`,
+/// `body_scale`) and `BodyScale.height_m` / `radius_m` — the value had gone stale at
+/// 0xD130_CAC4 when the stud layout landed, so this step was NOT separately checked to
+/// be layout-only; `physics_goldens` (trajectories) did not move. 16 only.
+/// Then for `GameData.stud_ground` (empty here) — hashed layout only, previous
+/// 0x2097_CF72; 16 only.
+/// Then (stud world P4) for `GameData.stud_halo` / `stud_halo_ground` (empty here) —
+/// hashed layout only, previous 0x00C6_4B11; `physics_goldens` did not move. 16 only.
+/// Then (stud world P6b) for the `Ecs` `stud_body` component slot (empty here) — hashed
+/// layout only, previous 0x8AF3_6A7C; `physics_goldens` did not move. 16 only.
 /// Pinned per sim-chunk size (`game::CHUNK_BLOCKS`): the same world splits
 /// into other chunk entities, bodies and colliders at 2 and 16 blocks.
 const SCENE_HASH: u32 = match game::CHUNK_BLOCKS {
     2 => 0x1EA6_B476,
-    16 => 0xD130_CAC4,
+    16 => 0xD0F2_E7D3,
     _ => 0,
 };
 /// Ticks of scripted input.

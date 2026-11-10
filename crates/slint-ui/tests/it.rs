@@ -17,4 +17,5 @@ mod game_panel;
 mod hud;
 mod inventory;
 mod login_screen;
+mod stud_palette;
 mod world_map;

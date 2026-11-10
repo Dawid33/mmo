@@ -29,6 +29,7 @@ pub fn interpolate_transforms(
         (
             Without<super::bricks::ChunkBricks>,
             Without<super::bridge::PendingSnapshotVoxels>,
+            Without<super::stud::SimStudChunk>,
         ),
     >,
 ) {

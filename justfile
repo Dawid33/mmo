@@ -59,6 +59,16 @@ user := ""
 world_file := env_var_or_default("VOXEL_WORLD_FILE", "")
 export VOXEL_WORLD_FILE := world_file
 
+# Terrain of a stored (forged) world's regions, read by the server: empty or
+# `voxels` (default), or `studs` — stud terrain generated from the forged world
+# and saved in the world store (stud world plan, P5). A world keeps the kind it
+# was first served with; the other kind is refused at start (make a new world):
+#   just terrain=studs world_file=target/studs-test.world server
+# Server side only so far: no client recipe draws a stored stud world yet.
+# Defaults to $VOXEL_TERRAIN. The store-less stud worlds (`run-studs`) ignore it.
+terrain := env_var_or_default("VOXEL_TERRAIN", "")
+export VOXEL_TERRAIN := terrain
+
 # Region edge in BLOCKS (1 block = 1 m) — a BUILD-time constant
 # (`game::REGION_BLOCKS`), unlike `world`: 64 = 1024-unit / 64 m regions
 # (default), 128 = 2048-unit, 256 = 4096-unit, 512 = 8192-unit regions, each
@@ -202,6 +212,30 @@ run *args:
     if [ -n "{{user}}" ]; then export VOXEL_PLAYER_NAME="{{user}}"; fi
     {{cap}} {{cargo}} build --bin client --bin server
     RUST_BACKTRACE=1 ./target/debug/client debug embarked {{args}}
+
+# Debug launch into the toy-brick test world: 3x3 regions of stud chunks, no store, no menu.
+# `just run-studs --procedural` plays the procedural noise world on stud terrain instead,
+# with far terrain (stud world plan, P8): the server streams a coarse height field per LOD
+# key (`game::stud_lod`) and the client draws it beyond the loaded regions. Its dials are
+# the voxel rings': `world=tiny|small|full`, `view=<m>` (e.g. `just view=4000 run-studs
+# --procedural` for a cheap short view) and VOXEL_LOD_RINGS=off|small|full|"bound:factor,..."
+# — on stud terrain the client turns whichever table that gives into the stud one
+# (`game::stud_ring_table`: the same reach, cells 4x coarser, never finer than a stud or
+# wider than 256 cells a tile). LOD_BUILD_THREADS sizes the server's builder pool.
+# The toy world has nothing beyond its 3x3 regions, so it runs with VOXEL_LOD_RINGS=off
+# (set here: the world scale is read in `main`, before the launch plugin runs).
+run-studs *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export VOXEL_REGION_BLOCKS={{play_blocks}}
+    case " {{args}} " in
+        *" --procedural "*) ;;
+        *) export VOXEL_LOD_RINGS=off ;;
+    esac
+    export VOXEL_NEAR_RADIUS=1
+    if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
+    {{cap}} {{cargo}} build --bin client --bin server
+    RUST_BACKTRACE=1 ./target/debug/client debug studs {{args}}
 
 run_two_port := "6476"
 
@@ -497,6 +531,11 @@ asset-viewer *args:
 # the manifest creatures.json. No ids: every source. Then `just creature-check`.
 creatures *ids:
     python3 tools/creatures/build.py {{ids}}
+
+# Bake the LDraw parts in tools/ldraw-bake/parts.txt into crates/game/src/stud_catalog.rs and
+# assets/studs/ (LDRAW_DIR overrides assets/ldraw, which is git-ignored). `just ldraw-bake --check` verifies.
+ldraw-bake *args:
+    {{cap}} {{cargo}} run -p ldraw-bake --release -- --ldraw "${LDRAW_DIR:-assets/ldraw}" {{args}}
 
 # Sources for giants and animal people whose base creature is built
 # (tools/creatures/derive.py); existing ones are kept unless --force.
@@ -827,6 +866,14 @@ web:
     WASM_SERVER_RUNNER_CUSTOM_INDEX_HTML=crates/client/index.html \
         {{cargo}} run -p client --target wasm32-unknown-unknown
 
+# Type-check the client for the browser (wasm32-unknown-unknown) without
+# building, bundling or serving it: the cheap answer to "does this still compile
+# for the web" after touching the renderer, compute jobs or anything cfg'd on
+# wasm (no wasm-bindgen, no binaryen, no server; a few minutes cold, seconds
+# warm). At the default (test) region size, like `smoke`.
+web-check:
+    {{cap}} {{cargo}} check -p client --lib --bins --target wasm32-unknown-unknown
+
 # The browser release bundle in target/web/ (scripts/web_release.sh): the
 # `wasm-release` profile, wasm-bindgen (the Cargo.lock-matched CLI, installed under
 # target/tools on first use), wasm-opt -O3 from a pinned binaryen release (also
@@ -861,6 +908,10 @@ deploy-push:
 # Follow the deployed server's log.
 deploy-logs:
     ssh {{deploy_host}} docker compose -f /srv/mmo/compose.yml logs -f --tail 200 server
+
+# Forward the deploy box's k3s API to localhost:6443 (kubeconfig context `orion`).
+tunnel:
+    scripts/tunnel.sh {{deploy_host}}
 
 # ---- Dev Postgres (deploy/dev) ---------------------------------------------
 

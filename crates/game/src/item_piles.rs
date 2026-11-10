@@ -57,11 +57,10 @@ use std::collections::BTreeMap;
 
 use crate::edit::BlockPos;
 use crate::intents::{Effects as _, RegionEffects};
-use crate::movement::{PLAYER_CAPSULE_HALF_HEIGHT, PLAYER_CAPSULE_RADIUS};
 use crate::{
     block_props, BlockId, ClientId, EntityId, GameDataTransactionKind, GameDataUpdate, GameDataUpdateKind, Intent,
     IntentMsg, IntentRefusal, IntentReply, ItemId, ItemStack, RegionCoords, Rollback, Target, WorldBlockPos,
-    BLOCK_VOXELS, HALO_BLOCKS, MAX_STACK, REGION_BLOCKS,
+    HALO_BLOCKS, MAX_STACK, REGION_BLOCKS,
 };
 
 /// Most stacks one pile (one cell) holds.
@@ -348,17 +347,62 @@ impl Rollback {
     /// floor rule (not air, not water, solid by the manifest) over the block
     /// this region sees there — its own (implied ground included) or the
     /// halo's. A cell it does not see ([`Self::pile_cell_seen`]): no.
+    ///
+    /// On stud terrain a cell is a tile, and the tile holds a pile up (and
+    /// out) when it is `Solid` or its floor belongs to the tile above
+    /// (`Floor(k)` over [`crate::STUD_STEP_PLATES`], as for a standing body).
     pub fn pile_support(&self, pos: WorldBlockPos) -> bool {
+        if self.terrain_kind() == crate::TerrainKind::Stud {
+            return self.pile_cell_seen(pos)
+                && match self.stud_tile(local_cell(*self.data.region, pos)).fill() {
+                    crate::TileFill::Open => false,
+                    crate::TileFill::Floor(k) => i32::from(k) > crate::STUD_STEP_PLATES,
+                    crate::TileFill::Solid => true,
+                };
+        }
         self.pile_cell_seen(pos)
             && self.halo_block(pos).is_some_and(|b| {
                 b.id != BlockId::AIR && !crate::block_props().is_liquid(b.id) && block_props().is_solid(b.id)
             })
     }
 
+    /// Whether a pile in world cell `p` stays there: the cell below holds it
+    /// up ([`Self::pile_support`]) — or, on stud terrain, `p` itself has a low
+    /// floor (`Floor(1..=STUD_STEP_PLATES)`: the floor a body in `p` stands on).
+    pub fn pile_rests_in(&self, p: WorldBlockPos) -> bool {
+        if self.terrain_kind() == crate::TerrainKind::Stud
+            && self.pile_cell_seen(p)
+            && matches!(self.stud_tile(local_cell(*self.data.region, p)).fill(), crate::TileFill::Floor(k) if i32::from(k) <= crate::STUD_STEP_PLATES)
+        {
+            return true;
+        }
+        self.pile_support(up(p, -1))
+    }
+
     /// Whether this region sees world cell `p`: its own, or a halo column
     /// it was seeded with. A deposit's search uses only cells it sees.
     pub fn pile_cell_seen(&self, p: WorldBlockPos) -> bool {
-        p.to_local().0 == *self.data.region || (self.halo_block(p).is_some() && self.halo_column_known(p))
+        if p.to_local().0 == *self.data.region {
+            return true;
+        }
+        if self.terrain_kind() == crate::TerrainKind::Stud {
+            return self.stud_halo_column_known(p);
+        }
+        self.halo_block(p).is_some() && self.halo_column_known(p)
+    }
+
+    /// [`Self::halo_column_known`] on stud terrain: world tile `p`'s column is a
+    /// neighbour's this region holds a stud recipe or a stud halo chunk of.
+    fn stud_halo_column_known(&self, p: WorldBlockPos) -> bool {
+        let ct = crate::STUD_CHUNK_TILES as i64;
+        let (cx, cz) = (p.x.div_euclid(ct), p.z.div_euclid(ct));
+        if self.data.stud_halo_ground.contains_key(&crate::WorldChunkPos::new(cx, 0, cz)) {
+            return true;
+        }
+        self.data
+            .stud_halo
+            .range(crate::WorldChunkPos::new(cx, i32::MIN, i64::MIN)..=crate::WorldChunkPos::new(cx, i32::MAX, i64::MAX))
+            .any(|(k, h)| k.z == cz && h.chunk.is_some())
     }
 
     /// Where a pile put at `from` comes to rest (Decision 2): up out of solid
@@ -373,7 +417,7 @@ impl Rollback {
             rose += 1;
         }
         let mut fell = 0;
-        while fell < MAX_PILE_FALL_BLOCKS && self.pile_cell_seen(up(p, -1)) && !self.pile_support(up(p, -1)) {
+        while fell < MAX_PILE_FALL_BLOCKS && self.pile_cell_seen(up(p, -1)) && !self.pile_rests_in(p) {
             p = up(p, -1);
             fell += 1;
         }
@@ -496,6 +540,36 @@ impl Rollback {
         }
     }
 
+    /// [`Self::piles_after_write_safe`] for a stud write to the region stud cells
+    /// `lo .. hi` (a carve or a fill): every own pile in a tile the box touches, or
+    /// the tile above one, that no longer rests where it is settles again (down a
+    /// dug hole, up out of a filled tile). Returns the items destroyed (counted).
+    pub(crate) fn stud_piles_after_write_safe(&mut self, lo: [i32; 3], hi: [i32; 3]) -> u32 {
+        if self.data.item_piles.is_empty() {
+            return 0;
+        }
+        let (ts, tp) = (crate::TILE_STUDS as i32, crate::TILE_PLATES as i32);
+        let tlo = [lo[0].div_euclid(ts), lo[1].div_euclid(tp), lo[2].div_euclid(ts)];
+        let thi = [(hi[0] - 1).div_euclid(ts), (hi[1] - 1).div_euclid(tp) + 1, (hi[2] - 1).div_euclid(ts)];
+        let rc = *self.data.region;
+        let moved: Vec<BlockPos> = self
+            .data
+            .item_piles
+            .keys()
+            .map(|w| local_cell(rc, *w))
+            .filter(|c| (0..3).all(|a| (tlo[a]..=thi[a]).contains(&c[a])))
+            .collect();
+        let tick = *self.data.tick;
+        let mut destroyed = 0;
+        for cell in moved {
+            let w = world_cell(rc, cell);
+            if self.data.item_piles.contains_key(&w) && self.settle_cell(w) != w {
+                destroyed += self.resettle_pile_safe(cell, tick);
+            }
+        }
+        destroyed
+    }
+
     /// Every Adventure client's body picks up the piles in its reach
     /// (Decision 4) whose pickup tick has come: clients in id order, cells in
     /// key order, each pile's stacks in order, as far as the inventory has
@@ -511,8 +585,12 @@ impl Rollback {
             return;
         }
         let rc = *self.data.region;
-        let bv = BLOCK_VOXELS as f32;
-        let (r, half) = (PLAYER_CAPSULE_RADIUS, PLAYER_CAPSULE_HALF_HEIGHT + PLAYER_CAPSULE_RADIUS);
+        // Cells are tiles of this region's terrain, the body is this region's
+        // (`BodyScale`): on voxels a block and the 1.8 m capsule, as ever.
+        let kind = self.terrain_kind();
+        let (bw, bh) = (kind.tile_width_units(), kind.tile_height_units());
+        let scale = *self.data.body_scale;
+        let (r, half) = (scale.capsule_radius(), scale.capsule_half_height() + scale.capsule_radius());
         let (h, v) = (PICKUP_REACH_H_BLOCKS, PICKUP_REACH_V_BLOCKS);
         let mut takers: Vec<(ClientId, crate::EntityKey, Option<EntityId>, BlockPos, BlockPos)> = Vec::new();
         for (id, c) in self.data.clients.iter() {
@@ -523,9 +601,10 @@ impl Rollback {
             let Some(handle) = *self.data.ecs.rigidbody.try_get(e) else { continue };
             let Some(body) = self.data.physics.bodies.get(handle) else { continue };
             let t = body.translation();
-            let cell = |x: f32| (x / bv).floor() as i32;
-            let lo = [cell(t.x - r) - h, cell(t.y - half) - v, cell(t.z - r) - h];
-            let hi = [cell(t.x + r) + h, cell(t.y + half) + v, cell(t.z + r) + h];
+            let cell = |x: f32| (x / bw).floor() as i32;
+            let level = |y: f32| (y / bh).floor() as i32;
+            let lo = [cell(t.x - r) - h, level(t.y - half) - v, cell(t.z - r) - h];
+            let hi = [cell(t.x + r) + h, level(t.y + half) + v, cell(t.z + r) + h];
             takers.push((*id, e, self.entity_id(e), lo, hi));
         }
         if takers.is_empty() {

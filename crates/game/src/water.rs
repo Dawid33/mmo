@@ -9,6 +9,9 @@ use std::collections::BTreeMap;
 
 use rapier3d::math::Vector;
 
+/// Region-local tile `[x, level, z]` (`orders::TilePos`).
+type BlockPos3 = [i32; 3];
+
 use crate::movement::{Immersion, PLAYER_EYE_HEIGHT, PLAYER_HEIGHT};
 use crate::{
     BlockId, BlockPos, ColumnCoords, ColumnGround, EntityKey, Rollback, WorldBlockPos, WorldChunkPos,
@@ -132,6 +135,21 @@ const FEET_SAMPLE_UNITS: f32 = 1.0;
 /// whose cell is wet (`water_units_at > 0`). Reads own ∪ halo, so a body at
 /// a seam feels its neighbour's water.
 pub fn immersion_at(rb: &Rollback, feet: Vector, height_units: f32) -> Immersion {
+    if rb.terrain_kind() == crate::TerrainKind::Stud {
+        // Stud water has a surface on the plate grid: the samples are compared with
+        // it exactly (a tile is 1.2 m: too coarse to tell feet from waist).
+        let Some(surface) = rb.stud_water_surface_units(feet.x, feet.z) else { return Immersion::Dry };
+        let wet = |y: f32| y < surface;
+        return if wet(feet.y + height_units * (PLAYER_EYE_HEIGHT / PLAYER_HEIGHT)) {
+            Immersion::Head
+        } else if wet(feet.y + height_units * 0.5) {
+            Immersion::Waist
+        } else if wet(feet.y + FEET_SAMPLE_UNITS) {
+            Immersion::Feet
+        } else {
+            Immersion::Dry
+        };
+    }
     let here = *rb.data.region;
     let bv = BLOCK_VOXELS as f32;
     let (x, z) = ((feet.x / bv).floor() as i32, (feet.z / bv).floor() as i32);
@@ -186,12 +204,83 @@ impl Rollback {
     /// cell inside its column's recipe water — the
     /// region's own `ground` for its cells, the neighbour's (`halo_ground`)
     /// for halo cells.
+    ///
+    /// On stud terrain `p` is a world TILE and the answer is graded:
+    /// [`Self::stud_water_units`].
     pub fn water_units_at(&self, p: WorldBlockPos) -> u16 {
+        if self.terrain_kind() == crate::TerrainKind::Stud {
+            return self.stud_water_units(crate::item_piles::local_cell(*self.data.region, p));
+        }
         let Some(block) = self.halo_block(p) else { return 0 };
         let cb = CHUNK_BLOCKS as i64;
         let (lx, lz) = (p.x.rem_euclid(cb) as usize, p.z.rem_euclid(cb) as usize);
         let recipe = self.recipe_ground_at(p).and_then(|g| g.recipe_water(lx, lz));
         static_water_units(block.id, recipe, p.y)
+    }
+
+    /// One past the top water plate of region stud column `[x, z]` (plates; it may
+    /// lie past the region's edge, in the stud halo), when the column's recipe holds
+    /// water over its ground (`StudColumnGround::water_top` above its `surface`).
+    /// Static water, as on voxels: it is the recipe's alone — digging beside or under
+    /// it moves none of it.
+    pub fn stud_water_top(&self, column: [i64; 2]) -> Option<i32> {
+        self.stud_water_span(column).map(|(_, top)| top)
+    }
+
+    /// The plates of recipe water of region stud column `[x, z]`: from the recipe's
+    /// ground top up to (not including) the water top. `None` for a dry column.
+    fn stud_water_span(&self, column: [i64; 2]) -> Option<(i32, i32)> {
+        let n = crate::STUD_CHUNK_STUDS as i64;
+        let (cx, cz) = (column[0].div_euclid(n), column[1].div_euclid(n));
+        let (sx, sz) = (column[0].rem_euclid(n) as usize, column[1].rem_euclid(n) as usize);
+        let rn = crate::REGION_CHUNKS as i64;
+        let g = if (0..rn).contains(&cx) && (0..rn).contains(&cz) {
+            self.data.stud_ground.get(&ColumnCoords::new(cx as usize, cz as usize))?
+        } else {
+            let key = WorldChunkPos::from_local(*self.data.region, [cx as i32, 0, cz as i32]);
+            self.data.stud_halo_ground.get(&key)?
+        };
+        let bed = g.surface(sx, sz);
+        g.water_top(sx, sz).filter(|&top| top > bed).map(|top| (bed, top))
+    }
+
+    /// The water surface (region-local sim units) over the stud column holding
+    /// `(x, z)`, if it holds recipe water.
+    pub fn stud_water_surface_units(&self, x: f32, z: f32) -> Option<f32> {
+        let s = crate::STUD_UNITS as f32;
+        let top = self.stud_water_top([(x / s).floor() as i64, (z / s).floor() as i64])?;
+        Some(crate::stud::plate_units(top))
+    }
+
+    /// Water units in stud tile `p` (region-local; own ∪ stud halo): `WATER_FULL` x
+    /// the plates of water standing over the tile's own solid top (the highest water
+    /// top of its four stud columns, less the highest filled plate in the tile), out
+    /// of a tile's [`crate::TILE_PLATES`]. 0 for a solid tile, a dry one, or one
+    /// whose bricks reach the surface. So a tile's DF depth is how deep a body
+    /// standing on the tile's floor wades: 2 plates (0.4 m) is the deepest wading.
+    pub fn stud_water_units(&self, p: BlockPos3) -> u16 {
+        let (ts, tp) = (crate::TILE_STUDS as i64, crate::TILE_PLATES as i64);
+        let bottom = i64::from(p[1]) * tp;
+        let mut level = 0;
+        for dz in 0..ts {
+            for dx in 0..ts {
+                let column = [i64::from(p[0]) * ts + dx, i64::from(p[2]) * ts + dz];
+                // A tile wholly under the recipe's lake bed holds none, dug out or not.
+                if let Some((bed, top)) = self.stud_water_span(column).filter(|&(bed, _)| i64::from(bed) < bottom + tp) {
+                    let _ = bed;
+                    level = level.max((i64::from(top) - bottom).clamp(0, tp));
+                }
+            }
+        }
+        if level == 0 {
+            return 0;
+        }
+        // Only now the bricks: dry tiles (most) never scan a chunk.
+        let solid = i64::from(self.stud_tile(p).floor_plates());
+        if level <= solid {
+            return 0;
+        }
+        (i64::from(WATER_FULL) * (level - solid) / tp) as u16
     }
 
     /// The ground recipe of world block `p`'s column: own (`ground`) inside

@@ -8,7 +8,7 @@
 use crate::common;
 
 use common::water::{floor_with_water, WaterBox};
-use game::portable::{classify, ChunkTerms, PortableRegion, RegionMeta};
+use game::portable::{classify, PortableRegion, RegionMeta, SaveTerms};
 use game::rapier3d::math::Vector;
 use game::{
     chest_block, restore_portable, state_hash, Block, BlockId, ChunkCoords, ColliderSpec, Container, DesignationKind,
@@ -64,7 +64,7 @@ fn ticks(region: &mut Region, n: usize) {
     }
 }
 
-fn snapshot(region: &Region, saved: &ChunkTerms) -> (PortableRegion, ChunkTerms) {
+fn snapshot(region: &Region, saved: &SaveTerms) -> (PortableRegion, SaveTerms) {
     region.data().portable_snapshot(saved)
 }
 
@@ -156,7 +156,7 @@ fn bundle_of_matches_extract() {
 #[test]
 fn snapshot_roundtrip_is_equivalent() {
     let region = furnished_region();
-    let (original, terms) = snapshot(&region, &ChunkTerms::new());
+    let (original, terms) = snapshot(&region, &SaveTerms::default());
     // The fixture has what the test is about.
     assert!(original.ground.is_some(), "a first snapshot carries the ground");
     assert_eq!(original.meta.water_bodies.len(), 1, "the pond is one body");
@@ -167,13 +167,14 @@ fn snapshot_roundtrip_is_equivalent() {
     assert_eq!(original.entities.len(), 4, "two slimes, a body and a voxel body");
     assert!(original.entities.iter().any(|b| b.carried.voxel_body.is_some()));
     assert!(original.players.is_empty());
-    assert_eq!(original.chunks.len(), terms.len(), "empty terms: every chunk");
+    assert_eq!(original.chunks.len(), terms.chunks.len(), "empty terms: every chunk");
 
     let (restored_region, restored_terms) = restore_portable(rc(), stored(original.clone()));
     assert_eq!(restored_terms, terms, "the restored chunks have the saved terms");
-    let (restored, _) = snapshot(&restored_region, &ChunkTerms::new());
+    let (restored, _) = snapshot(&restored_region, &SaveTerms::default());
 
-    let PortableRegion { meta, chunks, ground, entities, players } = restored;
+    let PortableRegion { meta, chunks, ground, entities, players, stud_chunks, stud_ground } = restored;
+    assert!(stud_chunks.is_empty() && stud_ground == Some(Vec::new()), "a voxel region has no stud terrain");
     let RegionMeta {
         tick: _,
         next_game_event_id,
@@ -218,7 +219,7 @@ fn snapshot_roundtrip_is_equivalent() {
 #[test]
 fn snapshot_sends_only_changed_chunks() {
     let mut region = pond_region();
-    let (_, terms) = snapshot(&region, &ChunkTerms::new());
+    let (_, terms) = snapshot(&region, &SaveTerms::default());
     region.with_data(|r| assert!(r.set_block_safe([3, 1, 3], Block::new(BlockId(1)))));
     // A block placed on the floor: one chunk changes, none appears.
     let (second, _) = snapshot(&region, &terms);
@@ -235,7 +236,7 @@ fn players_and_people_are_not_entities() {
     region.with_data(|r| {
         r.spawn_person_safe(game::history::PersonId(4), (300.0, 300.0)).expect("a person");
     });
-    let (p, _) = snapshot(&region, &ChunkTerms::new());
+    let (p, _) = snapshot(&region, &SaveTerms::default());
     assert_eq!(p.entities.len(), 0);
     assert_eq!(p.players.len(), 1);
     assert_eq!(p.players[0].0, 0);

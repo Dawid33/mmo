@@ -19,6 +19,9 @@ pub type SharedRegionGenerator =
 pub type RegionPrefetch =
     std::sync::Arc<dyn Fn(RegionCoords) -> Result<worldgen::forged_tiles::TilePins, String> + Send + Sync>;
 
+/// What a freshly built stud region starts from (`worldgen::stud_world::region_seed`).
+pub type StudGenesis = std::sync::Arc<dyn Fn(RegionCoords) -> game::StudRegionSeed + Send + Sync>;
+
 pub struct ThreadRegionSpawner {
     /// Server start: the base of the world clock's ms (the same base as the
     /// manager's `now_ms`).
@@ -48,6 +51,13 @@ pub struct ThreadRegionSpawner {
     /// never generates and never runs with an unseeded seam. `None`: no
     /// forged world to prefetch (tests, tools with their own generators).
     prefetch: Option<RegionPrefetch>,
+    /// Stud chunks seeded into a region built fresh (`RegionSeed::Deferred(None)`
+    /// that the store did not have), before the runner's baseline hash.
+    /// Parked and restored regions never get it.
+    genesis: Option<StudGenesis>,
+    /// Stud worldgen of a never-run neighbour's band columns for halo seeds, handed
+    /// to every runner (`RegionRunner::set_stud_halo_generator`). Set with `genesis`.
+    stud_halo: Option<game::StudHaloGenerator>,
 }
 
 impl Default for ThreadRegionSpawner {
@@ -59,6 +69,8 @@ impl Default for ThreadRegionSpawner {
             generator: None,
             store: None,
             prefetch: None,
+            genesis: None,
+            stud_halo: None,
         }
     }
 }
@@ -100,6 +112,33 @@ impl ThreadRegionSpawner {
         self
     }
 
+    /// Seed a freshly built region with `genesis`'s stud chunks. The stud halo of a
+    /// never-run neighbour is cut from the same function (the neighbour generated
+    /// whole, its band columns kept) unless [`Self::with_stud_halo`] gives a
+    /// window generator: a stud region always has a floor past its seams.
+    pub fn with_genesis(mut self, genesis: StudGenesis) -> Self {
+        let whole = genesis.clone();
+        self.stud_halo.get_or_insert_with(|| {
+            std::sync::Arc::new(move |rc, xs: std::ops::Range<usize>, zs: std::ops::Range<usize>| {
+                let seed = whole(rc);
+                game::StudRegionSeed {
+                    ground: seed.ground.into_iter().filter(|(c, _)| xs.contains(&c.x) && zs.contains(&c.z)).collect(),
+                    features: seed.features.into_iter().filter(|(c, _)| xs.contains(&c.x) && zs.contains(&c.z)).collect(),
+                }
+            })
+        });
+        self.genesis = Some(genesis);
+        self
+    }
+
+    /// Stud halo seeds of never-run neighbours generate only the band columns with
+    /// `halo` (which must give the same recipes and features as the genesis does
+    /// for those columns).
+    pub fn with_stud_halo(mut self, halo: game::StudHaloGenerator) -> Self {
+        self.stud_halo = Some(halo);
+        self
+    }
+
     /// Pin a region's forged tiles with `prefetch` before it generates.
     pub fn with_prefetch(mut self, prefetch: RegionPrefetch) -> Self {
         self.prefetch = Some(prefetch);
@@ -121,6 +160,8 @@ impl RegionSpawner for ThreadRegionSpawner {
         };
         let store = self.store.clone();
         let prefetch = self.prefetch.clone();
+        let genesis = self.genesis.clone();
+        let stud_halo = self.stud_halo.clone();
         let (clock, started) = (self.clock, self.started);
         let handle = std::thread::Builder::new()
             .name(format!("region {},{}", id.x, id.z))
@@ -181,19 +222,32 @@ impl RegionSpawner for ThreadRegionSpawner {
                         runner.set_saved_terms(terms);
                         runner
                     }
-                    None => seed.into_runner(id, out, &|rc| {
-                        let started = Instant::now();
-                        let columns = match &generator {
-                            Some(generate) => generate(rc),
-                            None => unreachable!("Deferred seed without a region generator"),
-                        };
-                        generate_time.set(started.elapsed());
-                        columns
-                    }),
+                    None => {
+                        let fresh = matches!(seed, RegionSeed::Deferred(None));
+                        let mut region = seed.into_region_with(id, &|rc| {
+                            let started = Instant::now();
+                            let columns = match &generator {
+                                Some(generate) => generate(rc),
+                                None => unreachable!("Deferred seed without a region generator"),
+                            };
+                            generate_time.set(started.elapsed());
+                            columns
+                        });
+                        // Before the runner takes its baseline hash.
+                        if fresh {
+                            if let Some(g) = &genesis {
+                                region.seed_stud_world(g(id));
+                            }
+                        }
+                        RegionRunner::new(id, region, out)
+                    }
                 };
                 let mut runner = runner;
                 if let Some(g) = halo_generator {
                     runner.set_halo_generator(g);
+                }
+                if let Some(g) = stud_halo {
+                    runner.set_stud_halo_generator(g);
                 }
                 // Halo seeds of stored neighbours that have not run here
                 // (`RegionInput::SeedHaloFromStore`) read the same store.

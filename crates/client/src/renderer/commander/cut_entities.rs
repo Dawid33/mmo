@@ -6,8 +6,9 @@
 //! home region, like the terrain cut (ruling R10).
 //!
 //! Feet: a sim entity's `Transform` is its body centre, region-local under
-//! the region root at `RegionId::world_offset()`. Players are a capsule
-//! `PLAYER_HEIGHT` tall, slimes a cube `slime_edge_units(size)` tall, both
+//! the region root at `RegionId::world_offset()`. Players and people are a
+//! capsule as tall as the region's body (`BodyScale`: 1.8 m on voxel terrain,
+//! 2.2 m on studs), slimes a cube `slime_edge_units(size)` tall, both
 //! centred on the pose, so feet = world y − half the body height
 //! ([`feet_offset`]).
 //!
@@ -20,6 +21,7 @@
 //! never un-hide something another system hid.
 
 use bevy::prelude::*;
+use game::movement::BodyScale;
 use game::{EntityKind, RegionId, REGION_SIZE};
 
 use super::level::{camera_cut, WorkingLevel};
@@ -34,10 +36,11 @@ pub const FEET_EPSILON: f32 = 1.0;
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CutHidden(pub Visibility);
 
-/// Body centre → feet, in world units.
-pub fn feet_offset(kind: EntityKind) -> f32 {
+/// Body centre → feet, in world units, for bodies of the region's `scale`
+/// (`ClientBodyScale`: players and people are the region's capsule).
+pub fn feet_offset(kind: EntityKind, scale: BodyScale) -> f32 {
     match kind {
-        EntityKind::Player | EntityKind::Person { .. } => game::movement::PLAYER_CAPSULE_HALF_HEIGHT + game::movement::PLAYER_CAPSULE_RADIUS,
+        EntityKind::Player | EntityKind::Person { .. } => scale.capsule_half_height() + scale.capsule_radius(),
         EntityKind::Slime { size } => game::slime::slime_edge_units(size) / 2.0,
         // Placeholder: the 1 m dev cube (bodies of other shapes come later).
         EntityKind::Body => game::BLOCK_VOXELS as f32 / 2.0,
@@ -63,13 +66,15 @@ pub fn hide_cut_entities(
     mut commands: Commands,
     level: Res<WorkingLevel>,
     tiles: Res<TileMirror>,
+    body_scale: Option<Res<crate::renderer::stud::ClientBodyScale>>,
     mut entities: Query<(Entity, &SimEntity, &SimKind, &Transform, &mut Visibility, Option<&mut CutHidden>)>,
 ) {
+    let scale = body_scale.map_or(BodyScale::VOXEL, |s| s.0);
     let cut = camera_cut(&level, &tiles);
     let home = tiles.region().map(home_rect);
     for (e, sim, kind, tf, mut vis, held) in &mut entities {
         let o = sim.region.world_offset();
-        let feet = tf.translation + Vec3::new(o[0], o[1] - feet_offset(kind.0), o[2]);
+        let feet = tf.translation + Vec3::new(o[0], o[1] - feet_offset(kind.0, scale), o[2]);
         let hide = hidden_by_cut(feet, cut, home);
         match (hide, held) {
             (true, None) => {
@@ -145,8 +150,42 @@ mod tests {
     #[test]
     fn feet_are_below_the_body_centre() {
         let h = game::movement::PLAYER_HEIGHT * game::movement::UNITS_PER_METER;
-        assert!((feet_offset(EntityKind::Player) - h / 2.0).abs() < 1e-4);
-        assert_eq!(feet_offset(EntityKind::Slime { size: 2 }), game::slime::slime_edge_units(2) / 2.0);
+        assert!((feet_offset(EntityKind::Player, BodyScale::VOXEL) - h / 2.0).abs() < 1e-4);
+        assert_eq!(feet_offset(EntityKind::Slime { size: 2 }, BodyScale::VOXEL), game::slime::slime_edge_units(2) / 2.0);
+    }
+
+    /// On stud terrain people are the 2.2 m stud capsule: their feet are that
+    /// much further under the pose, slimes are not rescaled.
+    #[test]
+    fn feet_follow_the_regions_body_scale() {
+        let h = game::movement::STUD_PLAYER_HEIGHT_M * game::movement::UNITS_PER_METER;
+        for kind in [EntityKind::Player, EntityKind::Person { person: game::history::PersonId(1) }] {
+            assert!((feet_offset(kind, BodyScale::STUD) - h / 2.0).abs() < 1e-4, "{kind:?}");
+            assert!(feet_offset(kind, BodyScale::STUD) > feet_offset(kind, BodyScale::VOXEL));
+        }
+        let slime = EntityKind::Slime { size: 2 };
+        assert_eq!(feet_offset(slime, BodyScale::STUD), feet_offset(slime, BodyScale::VOXEL));
+    }
+
+    /// A stud-sized person standing ON the working level of a stud region is
+    /// drawn; with the voxel offset its feet would read 0.2 m high.
+    #[test]
+    fn a_stud_person_on_the_working_level_is_not_cut() {
+        let kind = game::TerrainKind::Stud;
+        let cut = super::super::level::cut_plane_world_y(kind, 10, home());
+        let floor = kind.level_bottom_units(10) + home().world_offset()[1];
+        let pose_y = floor + feet_offset(EntityKind::Player, BodyScale::STUD);
+        let o = home().world_offset();
+        let at = |offset: f32| Vec3::new(o[0] + 100.0, pose_y - offset, o[2] + 100.0);
+        assert!(!hidden_by_cut(at(feet_offset(EntityKind::Player, BodyScale::STUD)), Some(cut), Some(home_rect(home()))));
+        // One level up: hidden, with the stud offset.
+        let up = Vec3::Y * kind.tile_height_units();
+        assert!(hidden_by_cut(at(feet_offset(EntityKind::Player, BodyScale::STUD)) + up, Some(cut), Some(home_rect(home()))));
+        // The voxel offset on a stud body puts the feet 0.2 m too high: a body
+        // standing a level BELOW a 1-tile-high... it still reads on-level here, but
+        // the two offsets differ by exactly the height difference.
+        let d = feet_offset(EntityKind::Player, BodyScale::STUD) - feet_offset(EntityKind::Player, BodyScale::VOXEL);
+        assert!((d - 0.2 * game::movement::UNITS_PER_METER).abs() < 1e-3, "{d}");
     }
 
     fn app(level: i32) -> App {
@@ -155,7 +194,7 @@ mod tests {
         let mut tiles = TileMirror::default();
         tiles.set_home(Some(home()));
         app.insert_resource(tiles)
-            .insert_resource(WorkingLevel { level: Some(level), cut: true })
+            .insert_resource(WorkingLevel { level: Some(level), cut: true, ..Default::default() })
             .add_systems(Update, hide_cut_entities);
         app
     }
@@ -164,7 +203,7 @@ mod tests {
     fn spawn(app: &mut App, feet_y: f32, vis: Visibility) -> Entity {
         let kind = EntityKind::Slime { size: 1 };
         let o = home().world_offset();
-        let local = Vec3::new(100.0, feet_y - o[1] + feet_offset(kind), 100.0);
+        let local = Vec3::new(100.0, feet_y - o[1] + feet_offset(kind, BodyScale::VOXEL), 100.0);
         app.world_mut()
             .spawn((
                 SimEntity { region: home(), key: EntityKey::default() },
@@ -180,13 +219,13 @@ mod tests {
     }
 
     fn set_level(app: &mut App, level: Option<i32>, cut: bool) {
-        *app.world_mut().resource_mut::<WorkingLevel>() = WorkingLevel { level, cut };
+        *app.world_mut().resource_mut::<WorkingLevel>() = WorkingLevel { level, cut, ..Default::default() };
     }
 
     #[test]
     fn visibility_follows_the_cut_and_restores() {
         let mut app = app(10);
-        let cut = super::super::level::cut_plane_world_y(10, home());
+        let cut = super::super::level::cut_plane_world_y(game::TerrainKind::Voxel, 10, home());
         let e = spawn(&mut app, cut, Visibility::Inherited);
         app.update();
         assert_eq!(vis(&app, e), Visibility::Hidden);
@@ -210,7 +249,7 @@ mod tests {
     #[test]
     fn hidden_by_another_system_stays_hidden() {
         let mut app = app(10);
-        let cut = super::super::level::cut_plane_world_y(10, home());
+        let cut = super::super::level::cut_plane_world_y(game::TerrainKind::Voxel, 10, home());
         // Hidden before the cut touched it.
         let before = spawn(&mut app, cut, Visibility::Hidden);
         // Hidden by another system while the cut held it.

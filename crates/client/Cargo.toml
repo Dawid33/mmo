@@ -32,6 +32,8 @@ bevy = { workspace = true }
 image = { workspace = true }
 bytemuck = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+# `assets/studs/colors.ron` (renderer/stud/mesh.rs); same version as game's, no extra build.
+ron = "0.12"
 # Serde + bincode: native session wire bits, and on wasm the messages to and
 # from the Web Workers (`src/web_worker/`).
 serde = { workspace = true, features = ["std"] }

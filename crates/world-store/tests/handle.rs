@@ -89,6 +89,7 @@ fn region(tick: u64, chunks: &[(ChunkCoords, Chunk)], ground: bool, entities: Ve
         ground: ground.then(region_ground),
         entities,
         players: Vec::new(),
+        ..Default::default()
     }
 }
 

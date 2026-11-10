@@ -114,9 +114,20 @@ impl Walker {
             top = top.max(coords.1 + 1);
             add_chunk(&mut w, coords, &chunk);
         }
-        let spawn = Vector::new(SPAWN[0], top as f32 * CHUNK + PLAYER_CAPSULE_HALF_HEIGHT + PLAYER_CAPSULE_RADIUS, SPAWN[1]);
+        Self::over(w, top as f32 * CHUNK)
+    }
+
+    /// A player dropped at the spawn column from above `top_units` onto the
+    /// terrain already in `w`, settled on the ground.
+    pub fn over(w: PhysicsWorld, top_units: f32) -> Self {
+        Self::over_capsule(w, top_units, PLAYER_CAPSULE_HALF_HEIGHT, PLAYER_CAPSULE_RADIUS)
+    }
+
+    /// [`Self::over`] with a capsule of the given half height and radius (units).
+    pub fn over_capsule(mut w: PhysicsWorld, top_units: f32, half_height: f32, radius: f32) -> Self {
+        let spawn = Vector::new(SPAWN[0], top_units + half_height + radius, SPAWN[1]);
         let body = w.bodies.insert(RigidBodyBuilder::kinematic_position_based().translation(spawn));
-        let capsule = ColliderBuilder::capsule_y(PLAYER_CAPSULE_HALF_HEIGHT, PLAYER_CAPSULE_RADIUS);
+        let capsule = ColliderBuilder::capsule_y(half_height, radius);
         w.colliders.insert_with_parent(capsule, body, &mut w.bodies);
         let mut pipeline = PhysicsPipeline::new();
         w.step(&mut pipeline);

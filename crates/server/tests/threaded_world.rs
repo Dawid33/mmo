@@ -967,3 +967,84 @@ fn store_read_failure_stops_the_region_on_real_threads() {
     assert_eq!(rig.manager.depths().sessions, 0);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// --- Stud terrain across a seam (stud world plan P4) -------------------------
+
+/// Flat stud ground (surface at plate 30) under every region.
+fn stud_flat_seed(_rc: RegionCoords) -> game::StudRegionSeed {
+    let soil = game::StudProfile { cover: game::MAT_GRASS, cover_plates: 1, soil: game::MAT_DIRT, soil_plates: 5 };
+    let n = game::REGION_CHUNKS;
+    let ground = (0..n)
+        .flat_map(|x| (0..n).map(move |z| (ColumnCoords::new(x, z), game::StudColumnGround::flat(30, soil, game::MAT_STONE, -2000))))
+        .collect();
+    game::StudRegionSeed { ground, features: Vec::new() }
+}
+
+/// One cross-seam carve end to end on real threads, on the server's stud spawn path
+/// (regions seed their own stud genesis and the stud halo of never-run neighbours on
+/// their own threads): a box ordered in the spawn region that straddles its -z seam is
+/// carved by both owners — the north's part through an `Intent::CarveStud` the manager
+/// routes — and each side's hole reaches the other as a stud halo delta.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn stud_carve_crosses_a_seam_on_real_threads() {
+    let spawner = ThreadRegionSpawner::with_region_generator(std::sync::Arc::new(|_| Vec::new()))
+        .with_genesis(std::sync::Arc::new(stud_flat_seed));
+    let mut rig = Rig::with_spawner(spawner, |_| Vec::new());
+    rig.event(ServerEvent::connected(0));
+    let window = SPAWN_REGION.window_3x3();
+    for rc in &window {
+        rig.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(*rc), 0));
+    }
+    rig.wait_for_snapshots(&window, REGION_STARTUP_BUDGET);
+    // The spawn region's snapshot already mirrors the north's edge, whichever way it
+    // was seeded (worldgen for a not-yet-running neighbour, its live state after).
+    let north = RegionCoords::new(0, -1);
+    let mut mirrored = false;
+    for (_to, p) in rig.packets.try_iter() {
+        if let ServerPacket::Region(rc, state) = p {
+            if rc == SPAWN_REGION {
+                mirrored = state.stud_halo_chunk_at([1, 0, -1]).is_some();
+                assert_eq!(state.body_scale(), movement::BodyScale::STUD);
+            }
+        }
+    }
+    assert!(mirrored, "the spawn region's snapshot holds the north's stud edge");
+
+    // Studs 40..44 on x (chunk 1, local 8..12), the top 6 plates, 4 studs each side.
+    let order = game::Order::CarveStud { lo: [40, 24, -4], hi: [44, 30, 4] };
+    rig.event(ServerEvent::ClientPacket(
+        ClientPacket::GameEvent(GameEvent::new(GameEventKind::Order(0, order), 0, SPAWN_REGION)),
+        0,
+    ));
+    let last = game::STUD_CHUNK_STUDS as u8 - 1;
+    // A stud halo delta relayed in `viewer` that shows `cell` of `from`'s chunk empty.
+    let hole = |p: &ServerPacket, viewer: RegionCoords, from: RegionCoords, chunk: [i32; 3], cell: [u8; 3]| match p {
+        ServerPacket::GameEvent(ev) if ev.region_id == viewer => match &ev.kind {
+            GameEventKind::HaloUpdate(u) if u.from == from && !u.replace => u.studs.iter().any(|d| {
+                d.chunk == game::WorldChunkPos::from_local(from, chunk)
+                    && d.data.as_ref().is_some_and(|c| c.brick_at(cell).is_none() && c.brick_at([0, 29, 0]).is_some())
+            }),
+            _ => false,
+        },
+        _ => false,
+    };
+    let n = game::REGION_CHUNKS as i32;
+    let (mut north_hole, mut spawn_hole, mut granted) = (false, false, false);
+    let mut log = Vec::new();
+    rig.pump_until(Duration::from_secs(30), &mut log, |p| {
+        // The north's part, seen from the spawn region; and the spawn region's, from the north.
+        north_hole |= hole(p, SPAWN_REGION, north, [1, 0, n - 1], [8, 29, last]);
+        spawn_hole |= hole(p, north, SPAWN_REGION, [1, 0, 0], [8, 29, 0]);
+        if let ServerPacket::GameEvent(ev) = p {
+            if let GameEventKind::Intent(game::IntentMsg::Reply(r)) = &ev.kind {
+                granted |= matches!(r.reply, game::IntentReply::Granted(game::Intent::CarveStud { .. }));
+            }
+        }
+        north_hole && spawn_hole && granted
+    });
+    log.retain(|p| !p.contains("Tick"));
+    assert!(spawn_hole, "the spawn region's own part never reached the north's halo; packets: {}", log.len());
+    assert!(north_hole, "the north never carved its part (or its halo delta never came back); packets: {}", log.len());
+    assert!(granted, "the owner's grant never came back to the sender's region");
+}

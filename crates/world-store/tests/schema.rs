@@ -76,13 +76,14 @@ async fn introspect(pool: &Pool) -> BTreeSet<Col> {
 
 /// table: columns as `name:I|T|B` with `?` = nullable, `*` = primary key.
 const EXPECTED: &[(&str, &str)] = &[
-    ("world", "id:I*, format_version:I, region_blocks:I, chunk_blocks:I, content_crc:I, world_tick:I, super_region_regions:I, created_utc:T"),
+    ("world", "id:I*, format_version:I, region_blocks:I, chunk_blocks:I, content_crc:I, world_tick:I, super_region_regions:I, created_utc:T, terrain:I?"),
     ("forged_archive", "id:I*, bytes:B"),
     ("forged_meta", "id:I*, format_version:I, bytes:B"),
     ("forged_tiles", "tx:I*, tz:I*, bytes:B"),
     ("forged_world_map", "id:I*, bytes:B"),
-    ("regions", "rx:I*, rz:I*, saved_tick:I, terrain_version:I, meta:B, ground:B"),
+    ("regions", "rx:I*, rz:I*, saved_tick:I, terrain_version:I, meta:B, ground:B, stud_ground:B?"),
     ("chunks", "rx:I*, rz:I*, cx:I*, cy:I*, cz:I*, data:B"),
+    ("stud_chunks", "rx:I*, rz:I*, cx:I*, cy:I*, cz:I*, data:B"),
     ("entities", "birth_rx:I*, birth_rz:I*, serial:I*, rx:I, rz:I, saved_tick:I, kind:I, bundle:B"),
     ("players", "player_id:I*, token:T, record:B?, saved_tick:I?"),
     ("history", "id:I*, bytes:B"),

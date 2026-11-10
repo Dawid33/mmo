@@ -237,7 +237,7 @@ pub fn top_down_input(
         if keys.any_pressed(super::level::LEVEL_FAST_KEYS) {
             zoom += super::level::wheel_level_steps(notches, &mut carry[1]);
         } else if let Some(current) = working.level {
-            let range = grid.surface_range().map_or((current, current), super::level::level_range);
+            let range = grid.surface_range().map_or((current, current), |s| super::level::level_range(working.terrain, s));
             let next = super::level::wheel_step_level(current, notches, &mut carry[0], false, range);
             if next != current {
                 working.level = Some(next);
@@ -253,8 +253,8 @@ pub fn top_down_input(
 }
 
 /// The surface level of the lowest loaded ground (`HeightGrid::surface_range`).
-pub fn lowest_surface_level(surface_range: Option<(f32, f32)>) -> Option<i32> {
-    surface_range.map(|(lo, _)| super::level::surface_level(lo))
+pub fn lowest_surface_level(kind: game::TerrainKind, surface_range: Option<(f32, f32)>) -> Option<i32> {
+    surface_range.map(|(lo, _)| super::level::surface_level(kind, lo))
 }
 
 /// Whether the top-down view looks at an underground level: the working
@@ -417,7 +417,7 @@ mod tests {
 
     fn rig() -> (TopDown, CommanderCamera, WorkingLevel) {
         let cam = CommanderCamera { yaw: 1.0, pitch: 0.7, distance: 300.0, target_distance: 320.0, ..default() };
-        (TopDown::default(), cam, WorkingLevel { level: Some(70), cut: false })
+        (TopDown::default(), cam, WorkingLevel { level: Some(70), cut: false, ..Default::default() })
     }
 
     #[test]
@@ -450,10 +450,10 @@ mod tests {
     #[test]
     fn underground_is_below_the_lowest_loaded_surface() {
         let b = BLOCK_VOXELS as f32;
-        assert_eq!(lowest_surface_level(Some((40.5 * b, 90.0 * b))), Some(40));
-        assert_eq!(lowest_surface_level(None), None);
+        assert_eq!(lowest_surface_level(game::TerrainKind::Voxel, Some((40.5 * b, 90.0 * b))), Some(40));
+        assert_eq!(lowest_surface_level(game::TerrainKind::Voxel, None), None);
         // A hill under the focus does not make the valley's level underground.
-        let lowest = lowest_surface_level(Some((40.0 * b, 90.0 * b)));
+        let lowest = lowest_surface_level(game::TerrainKind::Voxel, Some((40.0 * b, 90.0 * b)));
         assert!(!top_down_underground(Some(45), lowest));
         assert!(top_down_underground(Some(39), lowest));
     }

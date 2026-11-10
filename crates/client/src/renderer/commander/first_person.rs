@@ -124,6 +124,7 @@ pub fn sync_first_person_camera(
     mut commands: Commands,
     fp: Res<FirstPerson>,
     mirror: Res<TileMirror>,
+    body_scale: Res<crate::renderer::stud::ClientBodyScale>,
     bodies: Query<(Entity, &SimEntity, &SimTarget, Has<Camera3d>), With<LocalBody>>,
 ) {
     let home = mirror.region();
@@ -138,7 +139,7 @@ pub fn sync_first_person_camera(
                         far: game::lod::LOD_HORIZON_UNITS,
                         ..default()
                     }),
-                    SimTarget::camera(target.pos, target.rot),
+                    SimTarget::camera_eyed(target.pos, target.rot, body_scale.0.eye_offset()),
                 ));
             }
             (false, true) => {

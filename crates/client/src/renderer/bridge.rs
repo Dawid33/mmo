@@ -157,6 +157,12 @@ impl SimTarget {
         }
     }
     pub fn camera(pos: Vec3, rot: Quat) -> Self {
+        Self::camera_eyed(pos, rot, game::movement::PLAYER_EYE_OFFSET)
+    }
+
+    /// [`Self::camera`] with the eye `eye` above the body origin (the region's
+    /// `BodyScale::eye_offset`).
+    pub fn camera_eyed(pos: Vec3, rot: Quat, eye: f32) -> Self {
         // The render camera SNAPS its rotation (rot_smoothing = 1.0) so
         // there's no slerp-arc tilt during turns, but LERPS its position so
         // movement glides instead of stepping. The snapped per-tick sim look
@@ -168,7 +174,7 @@ impl SimTarget {
             rot_smoothing: 1.0,
             pos_snap: 0.008,
             rot_snap: 0.001,
-            offset: EYE_OFFSET,
+            offset: Vec3::new(0.0, eye, 0.0),
         }
     }
 
@@ -755,7 +761,12 @@ pub fn drain_client_updates(
                 let (piles, mirrors) = (frame(data.item_piles()), frame(data.halo_piles()));
                 // The water pass's recipe (its tiles mesh once the chunks land).
                 let water_ground = Arc::new(data.ground_recipes().clone());
+                // The stud mirror: terrain kind, stud recipes and the stud halo.
+                let stud_msg = super::stud::world::StudWorldMsg::of_snapshot(id, &data);
                 commands.queue(move |world: &mut World| {
+                    if let Some(mut msgs) = world.get_resource_mut::<Messages<super::stud::world::StudWorldMsg>>() {
+                        msgs.write(stud_msg);
+                    }
                     if let Some(mut msgs) = world.get_resource_mut::<Messages<super::water::WaterMsg>>() {
                         msgs.write(super::water::WaterMsg::Region { region: id, ground: water_ground });
                     }
@@ -828,6 +839,9 @@ pub fn drain_client_updates(
             }
             ClientUpdateEvent::LodData(key, payload, water) => {
                 lod_rings.pending.push(lod_rings::LodEventMsg::Data(key, payload, water));
+            }
+            ClientUpdateEvent::StudLodData(key, tile) => {
+                lod_rings.pending.push(lod_rings::LodEventMsg::StudData(key, tile));
             }
             ClientUpdateEvent::RemoveLod { key, near_takeover } => {
                 lod_rings
@@ -929,6 +943,8 @@ fn spawn_region_snapshot(
     commander: bool,
 ) {
     let mut chunk_entities: Vec<(Entity, EntityKey, Vec3)> = Vec::new();
+    let body_scale = *data.body_scale;
+    commands.insert_resource(super::stud::ClientBodyScale(body_scale));
     // Every player in the snapshot has a sim camera, but only the local
     // player's may become this window's active Camera3d.
     let local_camera_key = local_player.and_then(|id| data.player_entites.get(&id).copied());
@@ -942,18 +958,29 @@ fn spawn_region_snapshot(
         // Terrain under the static region root, everything else under the
         // bodies root (see `RegionRoots`).
         let is_chunk = data.ecs.chunk.try_get(key).is_some();
+        let stud = data.ecs.stud.try_get(key).as_ref().cloned();
         let mut e = commands.spawn((
             SimEntity { region, key },
             Transform::IDENTITY,
             Visibility::default(),
-            ChildOf(if is_chunk { root } else { bodies }),
+            ChildOf(if is_chunk || stud.is_some() { root } else { bodies }),
         ));
         let mut local_position = Vec3::ZERO;
+        let mut has_pose = false;
         if let Some(handle) = data.ecs.rigidbody.try_get(key) {
             if let Some(body) = data.physics.bodies.get(*handle) {
+                has_pose = true;
                 let tf = iso_to_transform(body.position());
                 local_position = tf.translation;
                 e.insert((tf, SimTarget::body(tf.translation, tf.rotation)));
+            }
+        }
+        if let Some(chunk) = stud {
+            if has_pose {
+                let coords = game::StudChunkCoords::from_origin(local_position.to_array().into());
+                e.insert(super::stud::SimStudChunk { coords, chunk });
+            } else {
+                warn!("bridge: stud chunk {:?} in snapshot has no body pose; skipped", key);
             }
         }
         if is_chunk {
@@ -967,7 +994,7 @@ fn spawn_region_snapshot(
                 if let Some(handle) = cam.view_matrix {
                     if let Some(body) = data.physics.bodies.get(handle) {
                         let mut tf = iso_to_transform(body.position());
-                        let target = SimTarget::camera(tf.translation, tf.rotation);
+                        let target = SimTarget::camera_eyed(tf.translation, tf.rotation, body_scale.eye_offset());
                         tf.translation = target.goal();
                         e.insert((
                             Camera3d::default(),
@@ -990,6 +1017,9 @@ fn spawn_region_snapshot(
         }
         if let Some(body) = data.ecs.voxel_body.try_get(key) {
             e.insert((super::voxel_bodies::PendingVoxelBody(Arc::new(body.model.clone())), super::voxel_bodies::VoxelBodyModel));
+        }
+        if let Some(body) = data.ecs.stud_body.try_get(key) {
+            e.insert((super::stud::bodies::PendingStudBody(Arc::new(body.model.clone())), super::voxel_bodies::VoxelBodyModel));
         }
         map.0.insert((region, key), e.id());
     }
@@ -1037,6 +1067,7 @@ pub fn drain_region_updates(
     camera_mode: Option<Res<super::commander::CameraMode>>,
     mut tile_msgs: Option<ResMut<Messages<TileMirrorMsg>>>,
     mut pile_msgs: Option<ResMut<Messages<super::item_piles::ItemPileMsg>>>,
+    body_scale: Res<super::stud::ClientBodyScale>,
 ) {
     let commander = commander(camera_mode.as_deref());
     // Local cameras inserted by Commands this drain, not yet queryable: a
@@ -1127,7 +1158,7 @@ pub fn drain_region_updates(
                         // from the region origin: a chunk created at runtime
                         // is keyed for meshing by where its Transform is.
                         let target = if new_cameras.contains(&e) {
-                            SimTarget::camera(tf.translation, tf.rotation)
+                            SimTarget::camera_eyed(tf.translation, tf.rotation, body_scale.0.eye_offset())
                         } else {
                             SimTarget::body(tf.translation, tf.rotation)
                         };
@@ -1181,7 +1212,7 @@ pub fn drain_region_updates(
                             Visibility::Hidden,
                         ));
                     } else if local_player.0 == Some(client_id) {
-                        let target = SimTarget::camera(tf.translation, tf.rotation);
+                        let target = SimTarget::camera_eyed(tf.translation, tf.rotation, body_scale.0.eye_offset());
                         let tf = Transform { translation: target.goal(), ..tf };
                         new_cameras.push(e);
                         commands.entity(e).insert((
@@ -1221,7 +1252,7 @@ pub fn drain_region_updates(
                         target.pos = tf.translation;
                         target.rot = tf.rotation;
                     } else {
-                        commands.entity(e).insert(SimTarget::camera(tf.translation, tf.rotation));
+                        commands.entity(e).insert(SimTarget::camera_eyed(tf.translation, tf.rotation, body_scale.0.eye_offset()));
                     }
                 }
                 GameDataUpdateKind::SetEntityKind(key, kind) => {
@@ -1286,6 +1317,71 @@ pub fn drain_region_updates(
                 GameDataUpdateKind::ItemsLanded(flights) => {
                     if let Some(msgs) = pile_msgs.as_mut() {
                         msgs.write(super::item_piles::ItemPileMsg::Landed { region, flights });
+                    }
+                }
+                GameDataUpdateKind::AddStudChunk(key, coords, chunk) => {
+                    // Like `AddTerrainChunk`: adopt the entity a runtime
+                    // `CreateEntity` already made, else spawn one. Stud chunks
+                    // live under the terrain root and never move, so the pose
+                    // is the chunk origin.
+                    let origin = coords.origin();
+                    let bundle = (
+                        SimEntity { region, key },
+                        Transform::from_xyz(origin.x, origin.y, origin.z),
+                        Visibility::default(),
+                        super::stud::SimStudChunk { coords, chunk: *chunk },
+                        ChildOf(root),
+                    );
+                    if let Some(&existing) = map.0.get(&(region, key)) {
+                        commands.entity(existing).insert(bundle);
+                    } else {
+                        let e = commands.spawn(bundle).id();
+                        map.0.insert((region, key), e);
+                    }
+                }
+                GameDataUpdateKind::SetStudChunk(key, chunk) => {
+                    // Queued (not a query): the entity's `SimStudChunk` may be
+                    // inserted by Commands earlier in this same drain.
+                    match map.0.get(&(region, key)) {
+                        Some(&e) => commands.queue(move |world: &mut World| {
+                            match world.get_mut::<super::stud::SimStudChunk>(e) {
+                                Some(mut mirror) => mirror.chunk = *chunk,
+                                None => warn!("bridge: SetStudChunk for unmirrored {:?}", key),
+                            }
+                        }),
+                        None => warn!("bridge: SetStudChunk for unmapped {:?}", key),
+                    }
+                }
+                // Detached bricks (`game::stud_body`): meshed by `stud::bodies` into
+                // children that ride the entity's interpolated pose, as a voxel
+                // body's; `RemoveEntity` despawns them with it.
+                GameDataUpdateKind::AddStudBody(key, iso, model) => {
+                    let tf = iso_to_transform(&iso);
+                    let bundle = (
+                        tf,
+                        SimTarget::body(tf.translation, tf.rotation),
+                        super::stud::bodies::PendingStudBody(Arc::new(*model)),
+                        super::voxel_bodies::VoxelBodyModel,
+                    );
+                    if let Some(&e) = map.0.get(&(region, key)) {
+                        commands.entity(e).insert(bundle);
+                    } else {
+                        let e = commands
+                            .spawn((SimEntity { region, key }, Visibility::default(), ChildOf(bodies), bundle))
+                            .id();
+                        map.0.insert((region, key), e);
+                    }
+                }
+                // The stud halo (render-only mirror): for the stud index (edge
+                // culling) and the tile mirror. Queued so it lands after this
+                // region's snapshot message.
+                kind @ (GameDataUpdateKind::SetStudHalo(_) | GameDataUpdateKind::SetStudHaloGround(_)) => {
+                    if let Some(msg) = super::stud::world::StudWorldMsg::from_update(region, &kind) {
+                        commands.queue(move |world: &mut World| {
+                            if let Some(mut msgs) = world.get_resource_mut::<Messages<super::stud::world::StudWorldMsg>>() {
+                                msgs.write(msg);
+                            }
+                        });
                     }
                 }
                 GameDataUpdateKind::SetFreeCam(client_id, enabled) => {
@@ -1472,6 +1568,7 @@ mod tests {
             .init_resource::<SnapshotVoxelQueue>()
             .init_resource::<crate::renderer::cursor::CursorPolicy>()
             .init_resource::<RetiredRegionRoots>()
+            .init_resource::<crate::renderer::stud::ClientBodyScale>()
             .add_systems(
                 PreUpdate,
                 (
@@ -1494,6 +1591,87 @@ mod tests {
             .send(ClientUpdateEvent::NewRegion(region_id, (*rb.data).clone(), update_recv))
             .unwrap();
         (app, client_send, update_send, region_id)
+    }
+
+    /// `AddStudChunk` then `SetStudChunk` drained in ONE call: the set must
+    /// land on the mirror even though the add is still deferred Commands.
+    #[test]
+    fn set_stud_chunk_in_same_drain_as_add() {
+        use crate::renderer::stud::SimStudChunk;
+        let (mut app, _client, updates, region) = test_app();
+        app.update();
+        let mut rb = Rollback::new(None);
+        rb.new_transaction();
+        let key = rb.create_mesh(game::ChunkCoords::new(0, 0, 0), game::Chunk::flat_floor(8));
+        let brick = |min| game::StudBrick { min, shape: game::StudShape::Filler { size: [1, 1, 1] }, material: 0, data: 0 };
+        let first = game::StudChunk::new([brick([0, 0, 0])]).unwrap();
+        let second = game::StudChunk::new([brick([1, 0, 0]), brick([2, 0, 0])]).unwrap();
+        let coords = game::StudChunkCoords { x: 1, y: 0, z: 2 };
+        let send = |kind| updates.send(GameDataUpdate::new(GameDataTransactionKind::Do, kind)).unwrap();
+        send(GameDataUpdateKind::AddStudChunk(key, coords, Box::new(first)));
+        send(GameDataUpdateKind::SetStudChunk(key, Box::new(second.clone())));
+        app.update();
+        app.update();
+        let e = *app.world().resource::<SimEntityMap>().0.get(&(region, key)).unwrap();
+        let mirror = app.world().get::<SimStudChunk>(e).expect("mirror");
+        assert_eq!(mirror.chunk, second);
+        assert_eq!(mirror.coords, coords);
+    }
+
+    /// The stud halo's render updates reach the stud index as messages (never as
+    /// entities), and a stud body's model is tagged for meshing on its entity.
+    #[test]
+    fn stud_halo_updates_and_stud_bodies_reach_the_stud_systems() {
+        use crate::renderer::stud::bodies::PendingStudBody;
+        use crate::renderer::stud::world::{StudWorld, StudWorldMsg};
+        let (mut app, _client, updates, region) = test_app();
+        app.add_message::<StudWorldMsg>().init_resource::<StudWorld>();
+        // Stand-in for the stud plugin's index system.
+        app.add_systems(Update, |mut w: ResMut<StudWorld>, mut msgs: MessageReader<StudWorldMsg>| {
+            for m in msgs.read() {
+                w.apply(m);
+            }
+        });
+        app.update();
+        let count = |app: &mut App| app.world_mut().query::<Entity>().iter(app.world()).count();
+        let entities_before = count(&mut app);
+        let brick = game::StudBrick::filler([0, 0, 0], [1, 1, 1], 4);
+        let chunk = game::StudChunk::new([brick]).unwrap();
+        let at = game::WorldChunkPos::from_local(region, [-1, 0, 0]);
+        let send = |kind| updates.send(GameDataUpdate::new(GameDataTransactionKind::Do, kind)).unwrap();
+        // Before the region's snapshot message the index drops it; the test app's
+        // region has none, so announce it the way a snapshot does.
+        app.world_mut().resource_mut::<Messages<StudWorldMsg>>().write(StudWorldMsg::Region {
+            region,
+            terrain: game::TerrainKind::Stud,
+            ground: Default::default(),
+            halo: Vec::new(),
+            halo_ground: Vec::new(),
+        });
+        send(GameDataUpdateKind::SetStudHalo(vec![(at, Some(chunk.clone()))]));
+        for _ in 0..3 {
+            app.update();
+        }
+        assert_eq!(app.world().resource::<StudWorld>().halo_chunk(at), Some(&chunk));
+        assert_eq!(count(&mut app), entities_before, "a halo chunk is data: nothing is spawned to draw");
+        send(GameDataUpdateKind::SetStudHalo(vec![(at, None)]));
+        for _ in 0..3 {
+            app.update();
+        }
+        assert_eq!(app.world().resource::<StudWorld>().halo_chunk(at), None);
+
+        let mut rb = Rollback::new(None);
+        rb.new_transaction();
+        let key = rb.create_mesh(game::ChunkCoords::new(0, 0, 0), game::Chunk::flat_floor(8));
+        let model = game::stud_body::StudModel {
+            bricks: vec![game::stud_body::StudModelBrick { min: [0, 0, 0], shape: brick.shape, material: 4, data: 0 }],
+        };
+        send(GameDataUpdateKind::AddStudBody(key, game::Pose::identity(), Box::new(model.clone())));
+        app.update();
+        app.update();
+        let e = *app.world().resource::<SimEntityMap>().0.get(&(region, key)).unwrap();
+        assert_eq!(*app.world().get::<PendingStudBody>(e).expect("tagged for meshing").0, model);
+        assert!(app.world().get::<crate::renderer::voxel_bodies::VoxelBodyModel>(e).is_some(), "no placeholder box");
     }
 
     fn test_proj() -> game::Perspective3 {

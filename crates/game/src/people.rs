@@ -5,10 +5,10 @@
 //! (`extract_entity_safe` / `apply_arrival`).
 
 use crate::history::PersonId;
-use crate::movement::{self, MoveKeys, PLAYER_CAPSULE_HALF_HEIGHT, PLAYER_CAPSULE_RADIUS};
+use crate::movement::{self, MoveKeys};
 use crate::{
     PersonSpawn, SpawnAt,
-    current_tile, feet_of, nearest_standable, steer, ColliderSpec, EntityKey, EntityKind, GameDataTransactionKind,
+    current_tile, nearest_standable, steer_on, ColliderSpec, EntityKey, EntityKind, GameDataTransactionKind,
     GameDataUpdate, GameDataUpdateKind, Goal, Pose, RouteMap, RegionCoords, Rollback, REGION_BLOCKS,
 };
 use rapier3d::math::Vector;
@@ -49,14 +49,12 @@ impl Rollback {
         let e = self.data.ecs.create_entity_safe();
         self.assign_entity_id_safe(e);
         let pose = Pose::from_translation(Vector::new(xz.0, y, xz.1));
-        self.build_kinematic_body_safe(
-            e,
-            pose,
-            &ColliderSpec::CapsuleY {
-                half_height: PLAYER_CAPSULE_HALF_HEIGHT,
-                radius: PLAYER_CAPSULE_RADIUS,
-            },
-        );
+        // The region's body size, as a player's (`BodyScale`): the voxel constants
+        // on voxel terrain, the stud body on stud terrain — what its paths are
+        // planned for (`pathfind.rs`).
+        let scale = self.body_scale();
+        let (half_height, radius) = (scale.capsule_half_height(), scale.capsule_radius());
+        self.build_kinematic_body_safe(e, pose, &ColliderSpec::CapsuleY { half_height, radius });
         let kind = EntityKind::Person { person };
         self.data.send(GameDataUpdate::new(
             GameDataTransactionKind::Do,
@@ -71,7 +69,7 @@ impl Rollback {
         self.attach_rig_safe(
             e,
             crate::anim::Animator::idle(crate::anim::RigId::Dwarf),
-            -(PLAYER_CAPSULE_HALF_HEIGHT + PLAYER_CAPSULE_RADIUS),
+            -(half_height + radius),
         );
         self.data.person_entities.insert(person, e);
         Some(e)
@@ -228,8 +226,11 @@ impl Rollback {
         let t = body.translation();
         let rot0 = body.position().rotation;
         let motion0 = (*self.data.ecs.motion.try_get(e)).unwrap_or_default();
+        let scale = self.body_scale();
         let (keys, yaw) = match self.data.ecs.walker.try_get(e) {
-            Some(w) => steer(w, feet_of(t), motion0.grounded, *self.data.region),
+            Some(w) => {
+                steer_on(self.terrain_kind(), scale.step_height_m, w, self.feet_of(t), motion0.grounded, *self.data.region)
+            }
             None => (MoveKeys::default(), 0.0),
         };
         let walking = self.data.ecs.walker.try_get(e).is_some();
@@ -240,7 +241,9 @@ impl Rollback {
             return;
         }
         let mut motion = motion0;
-        let corrected = movement::walk_body(
+        // Fitted to the region's body size, as a player's walk (`camera.rs`); with
+        // `BodyScale::VOXEL` this is `walk_body`, bit for bit.
+        let corrected = movement::walk_body_scaled(
             &mut motion,
             &keys,
             yaw,
@@ -250,6 +253,8 @@ impl Rollback {
             &self.data.physics.bodies,
             &self.data.physics.colliders,
             handle,
+            &scale.move_params(movement::MoveParams::PLAYER),
+            scale,
         );
         if motion != motion0 {
             self.data.ecs.motion.set_safe(e, Some(motion));

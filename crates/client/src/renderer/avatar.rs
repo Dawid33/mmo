@@ -8,6 +8,8 @@ use game::EntityKind;
 #[derive(Resource, Default)]
 pub struct AvatarAssets {
     player: Option<(Handle<Mesh>, Handle<StandardMaterial>)>,
+    /// The body scale `player`'s capsule was built for.
+    player_scale: Option<game::movement::BodyScale>,
     slime: Option<SlimeAssets>,
     body: Option<(Handle<Mesh>, Handle<StandardMaterial>)>,
 }
@@ -47,7 +49,12 @@ pub fn attach_avatars(
     mut assets: ResMut<AvatarAssets>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    body_scale: Res<super::stud::ClientBodyScale>,
 ) {
+    if assets.player_scale != Some(body_scale.0) {
+        assets.player = None;
+        assets.player_scale = Some(body_scale.0);
+    }
     for e in &modelled {
         commands.entity(e).remove::<(BodyBox, Mesh3d, MeshMaterial3d<StandardMaterial>)>();
     }
@@ -84,8 +91,8 @@ pub fn attach_avatars(
                             // Mirrors the sim capsule in create_player_safe
                             // (Capsule3d takes the full cylinder length).
                             meshes.add(Capsule3d::new(
-                                game::movement::PLAYER_CAPSULE_RADIUS,
-                                2.0 * game::movement::PLAYER_CAPSULE_HALF_HEIGHT,
+                                body_scale.0.capsule_radius(),
+                                2.0 * body_scale.0.capsule_half_height(),
                             )),
                             materials.add(StandardMaterial {
                                 base_color: Color::srgb(0.8, 0.3, 0.3),
@@ -276,6 +283,7 @@ mod tests {
         app.init_asset::<Mesh>();
         app.init_asset::<StandardMaterial>();
         app.init_resource::<AvatarAssets>();
+        app.init_resource::<crate::renderer::stud::ClientBodyScale>();
         app.add_systems(Update, attach_avatars);
         app
     }

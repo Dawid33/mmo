@@ -1,0 +1,139 @@
+import { Button, FrameFace, GraphicalSets, LabelFace, Styles, VerticalFlow } from "@widgets";
+import { PickList } from "controls.slint";
+
+// One plastic of the stud build palette: its LDraw colour and name.
+export struct StudSwatch {
+    color: color,
+    name: string,
+}
+
+export global StudBuildLayout {
+    out property <length> width: 320px;
+    // Flush with the screen corner (bottom right; the minimap is bottom left).
+    out property <length> margin: 0px;
+    // Rows shown before a list scrolls.
+    out property <int> part-rows: 6;
+    out property <int> natural-rows: 5;
+    // A colour swatch's edge and the gap to the next: every baked LDraw
+    // colour (some 320) fits in a dozen rows.
+    out property <length> swatch: 11px;
+    out property <length> swatch-gap: 1px;
+}
+
+// The stud build palette (bottom right while the stud build mode is on —
+// crates/client/src/renderer/stud/build.rs): the part to place (the baked
+// catalog, name and footprint), its rotation, and its material — a natural
+// terrain material by name, or the plastic of one of the LDraw colours — with
+// the current selection on top. Embedded in `GameUi`; the client fills it and
+// takes the picks (renderer/stud/palette_ui.rs). The build keys keep working.
+export component StudBuildPalette {
+    // "Brick 2 x 4 — 4 × 2 studs, 3 plates", in catalog order.
+    in property <[string]> parts;
+    in property <int> part: -1;
+    // "Rotation 90°".
+    in property <string> rotation-text;
+    in property <[string]> naturals;
+    // -1 while a plastic is picked.
+    in property <int> natural: -1;
+    in property <[StudSwatch]> colors;
+    // -1 while a natural material is picked.
+    in property <int> color: -1;
+    // "Brick 2 x 4 · 90° · Stone".
+    in property <string> selection-text;
+    callback pick-part(int);
+    callback rotate();
+    callback pick-natural(int);
+    callback pick-color(int);
+    callback close();
+
+    // Probes for the headless tests (window logical pixels): the Rotate and
+    // Close buttons' centres, the first part row, the first natural row, and
+    // the swatch grid (swatch `i` is at column `mod(i, swatch-columns)`).
+    out property <length> rotate-x: rotate-button.absolute-position.x + rotate-button.width / 2;
+    out property <length> rotate-y: rotate-button.absolute-position.y + rotate-button.height / 2;
+    out property <length> close-x: close-button.absolute-position.x + close-button.width / 2;
+    out property <length> close-y: close-button.absolute-position.y + close-button.height / 2;
+    out property <length> parts-x: parts-list.absolute-position.x + parts-list.width / 2;
+    out property <length> parts-first-y: parts-list.absolute-position.y + parts-list.first-item-y;
+    out property <length> parts-row-height: parts-list.row-height;
+    out property <length> naturals-first-y: naturals-list.absolute-position.y + naturals-list.first-item-y;
+    out property <length> swatches-x: swatches.absolute-position.x;
+    out property <length> swatches-y: swatches.absolute-position.y;
+    out property <length> swatch-pitch: root.pitch;
+    out property <int> swatch-columns: root.columns;
+
+    width: StudBuildLayout.width;
+    height: frame.height;
+
+    property <length> pitch: StudBuildLayout.swatch + StudBuildLayout.swatch-gap;
+    property <length> inner: frame.content-right - frame.content-x;
+    property <int> columns: max(1, floor(root.inner / root.pitch));
+    property <int> rows: ceil(root.colors.length / root.columns);
+
+    // Swallows presses on the palette's own background, so a click between
+    // two widgets never places a brick behind it.
+    TouchArea { }
+
+    frame := FrameFace {
+        title: "Bricks";
+        width: 100%;
+        height: self.content-y + body.preferred-height + Styles.frame.box.padding.bottom
+            + GraphicalSets.inset(Styles.frame.graphics).bottom;
+
+        body := VerticalFlow {
+            x: frame.content-x;
+            y: frame.content-y;
+            width: root.inner;
+
+            LabelFace {
+                style: Styles.caption-label;
+                text: root.selection-text;
+            }
+            parts-list := PickList {
+                height: self.natural-height;
+                max-visible: StudBuildLayout.part-rows;
+                items: root.parts;
+                selected: root.part;
+                picked(i) => { root.pick-part(i); }
+            }
+            HorizontalLayout {
+                alignment: start;
+                spacing: 8px;
+                rotate-button := Button {
+                    text: "Rotate  [R]";
+                    clicked => { root.rotate(); }
+                }
+                LabelFace { text: root.rotation-text; }
+            }
+            LabelFace { text: "Material"; }
+            naturals-list := PickList {
+                height: self.natural-height;
+                max-visible: StudBuildLayout.natural-rows;
+                items: root.naturals;
+                selected: root.natural;
+                picked(i) => { root.pick-natural(i); }
+            }
+            LabelFace { text: "Plastic"; }
+            swatches := Rectangle {
+                height: root.rows * root.pitch;
+                for swatch[i] in root.colors: Rectangle {
+                    x: mod(i, root.columns) * root.pitch;
+                    y: floor(i / root.columns) * root.pitch;
+                    width: StudBuildLayout.swatch;
+                    height: StudBuildLayout.swatch;
+                    background: swatch.color;
+                    border-width: i == root.color ? 2px : 0px;
+                    border-color: white;
+                    TouchArea {
+                        clicked => { root.pick-color(i); }
+                    }
+                }
+            }
+            LabelFace { text: "[,] [.] part · [H] colour · [N] close"; }
+            close-button := Button {
+                text: "Close";
+                clicked => { root.close(); }
+            }
+        }
+    }
+}

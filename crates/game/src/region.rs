@@ -55,7 +55,7 @@ impl Rollback {
         match feet {
             Some(feet) => {
                 let tick = *self.data.tick;
-                let at = crate::feet_tile(feet);
+                let at = self.terrain_kind().feet_tile(feet);
                 // From the body: a part a neighbour's piles cannot hold
                 // comes back to it. A loss to the caps is counted where it
                 // happens.
@@ -217,6 +217,9 @@ pub struct Region {
     /// [`Region::take_halo_updates`] (`item_piles.rs`); cleared like
     /// `halo_dirty`.
     halo_pile_dirty: std::collections::BTreeSet<crate::WorldBlockPos>,
+    /// Own stud chunks in the halo band written since the last
+    /// [`Region::take_halo_updates`] (`stud_halo.rs`); cleared like `halo_dirty`.
+    halo_stud_dirty: std::collections::BTreeSet<crate::StudChunkCoords>,
     /// Intents and replies this region's events sent to other regions
     /// (`intents.rs`), each with its own due tick; taken after each tick
     /// ([`Region::take_intents`]). Not state, and not filled by a client's
@@ -269,7 +272,9 @@ fn ev_desc(e: &GameEvent) -> String {
         GameEventKind::HaloEntity(d) => format!("HaloEntity({:?})", d.id),
         GameEventKind::HaloEntityGone(g) => format!("HaloEntityGone({:?})", g.id),
         GameEventKind::HaloSourceGone(rc) => format!("HaloSourceGone({rc:?})"),
-        GameEventKind::HaloUpdate(u) => format!("HaloUpdate(from={:?}, chunks={})", u.from, u.deltas.len()),
+        GameEventKind::HaloUpdate(u) => {
+            format!("HaloUpdate(from={:?}, chunks={}, studs={})", u.from, u.deltas.len(), u.studs.len())
+        }
         GameEventKind::SpawnPerson(s) => format!("SpawnPerson({s:?})"),
         GameEventKind::DespawnPerson(p) => format!("DespawnPerson({p:?})"),
         GameEventKind::WalkOut(p, to) => format!("WalkOut({p:?}, {to:?})"),
@@ -308,6 +313,7 @@ impl Region {
             pending_halo_entities: Vec::new(),
             halo_dirty: Default::default(),
             halo_pile_dirty: Default::default(),
+            halo_stud_dirty: Default::default(),
             pending_intents: Vec::new(),
             replaying: false,
             map_extent: None,
@@ -646,6 +652,7 @@ impl Region {
         // already sent.
         self.halo_dirty.clear();
         self.halo_pile_dirty.clear();
+        self.halo_stud_dirty.clear();
 
         // Id-accounting invariant: predictions are appended with ids from
         // next_game_event_id, so the log tail must sit exactly one below it.
@@ -758,6 +765,7 @@ impl Region {
         let destroyed_before = crate::item_piles::items_destroyed_on_thread();
         // Writes left over from outside an event are no region's.
         crate::halo::take_touched_chunks();
+        crate::stud_halo::take_touched_stud_chunks();
         crate::item_piles::take_touched_piles();
         crate::item_piles::take_pile_intents();
         self.data.new_transaction();
@@ -795,6 +803,7 @@ impl Region {
                 // Voxel bodies that came to rest (or left) are settled.
                 let tick = *self.data.tick;
                 self.data.tick_voxel_bodies_safe(tick);
+                self.data.tick_stud_bodies_safe(tick);
                 #[cfg(not(target_arch = "wasm32"))]
                 let controllers_done = Instant::now();
                 // Block edits: a click this tick breaks or places, from the
@@ -1033,6 +1042,16 @@ impl Region {
             GameEventKind::Order(client_id, crate::Order::DevBreakBlock(p)) => {
                 self.data.dev_break_block_safe(client_id, p, &mut intents_out);
             }
+            // Stud edits that may reach a neighbour: its part goes as intents.
+            GameEventKind::Order(client_id, crate::Order::CarveStud { lo, hi }) => {
+                self.data.carve_stud_order_safe(client_id, lo, hi, &mut intents_out);
+            }
+            GameEventKind::Order(client_id, crate::Order::FillStud { lo, hi, material }) => {
+                self.data.fill_stud_order_safe(client_id, lo, hi, material, &mut intents_out);
+            }
+            GameEventKind::Order(client_id, crate::Order::PlaceStudAt { chunk, brick }) => {
+                self.data.place_stud_order_safe(client_id, chunk, brick, &mut intents_out);
+            }
             GameEventKind::Intent(msg) => self.data.receive_intent_safe(msg),
             // A walk is planned against this region's identity.
             GameEventKind::Order(client_id, crate::Order::MoveTo(goal)) => {
@@ -1149,6 +1168,26 @@ impl Region {
         region
     }
 
+    /// Genesis for the stud world: seeds the stud chunks raw
+    /// (`Rollback::seed_stud_genesis`) and sets the region's player body to
+    /// `BodyScale::STUD`. Fresh regions only — base state, unlogged.
+    pub fn seed_studs(&mut self, chunks: Vec<(crate::StudChunkCoords, crate::StudChunk)>) {
+        self.data.seed_stud_genesis(chunks);
+        self.data.set_body_scale_raw(crate::movement::BodyScale::STUD);
+    }
+
+    /// Genesis for a stud world from ground recipes
+    /// (`Rollback::seed_stud_ground_genesis`), plus `features`: extra bricks
+    /// (trees, structures) placed into their chunks, skipped where they would
+    /// overlap. Sets the player body to `BodyScale::STUD`. Fresh regions only.
+    pub fn seed_stud_world(&mut self, seed: crate::StudRegionSeed) {
+        // Features go into the pristine chunk before it is seeded: one collider build.
+        let extra = seed.feature_chunks();
+        let ground = seed.ground;
+        self.data.seed_stud_ground_genesis(ground, extra);
+        self.data.set_body_scale_raw(crate::movement::BodyScale::STUD);
+    }
+
     /// Seed a region from vertical columns: flatten each column's materialized
     /// (Dense) sub-chunks into the existing per-chunk mesh/collider path.
     /// The ground recipes' water is labelled into bodies first
@@ -1229,6 +1268,7 @@ impl Region {
     /// intents it sends join the outbox.
     pub fn with_data(&mut self, f: impl FnOnce(&mut Rollback)) {
         crate::halo::take_touched_chunks();
+        crate::stud_halo::take_touched_stud_chunks();
         crate::item_piles::take_touched_piles();
         crate::item_piles::take_pile_intents();
         self.data.new_transaction();
@@ -1247,6 +1287,11 @@ impl Region {
                 self.halo_dirty.insert(crate::chunk_index_key(c));
             }
         }
+        for c in crate::stud_halo::take_touched_stud_chunks() {
+            if !crate::halo::halo_targets(c.x as i32, c.z as i32).is_empty() {
+                self.halo_stud_dirty.insert(c);
+            }
+        }
         for p in crate::item_piles::take_touched_piles() {
             let l = crate::item_piles::local_cell(self.id, p);
             if !crate::item_piles::pile_halo_targets(l[0], l[2]).is_empty() {
@@ -1260,12 +1305,13 @@ impl Region {
     /// target. Taken right after a tick and its slot's events, like
     /// [`Region::take_transfers`].
     pub fn take_halo_updates(&mut self) -> Vec<(crate::HaloUpdate, RegionCoords)> {
-        if self.halo_dirty.is_empty() && self.halo_pile_dirty.is_empty() {
+        if self.halo_dirty.is_empty() && self.halo_pile_dirty.is_empty() && self.halo_stud_dirty.is_empty() {
             return Vec::new();
         }
         let dirty = std::mem::take(&mut self.halo_dirty);
         let piles = std::mem::take(&mut self.halo_pile_dirty);
-        self.data.halo_updates_for(&dirty, &piles)
+        let studs = std::mem::take(&mut self.halo_stud_dirty);
+        self.data.halo_updates_for(&dirty, &piles, &studs)
     }
 
     /// Test hook: roll back the most recent (unforgotten) event.

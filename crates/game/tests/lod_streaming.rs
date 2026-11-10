@@ -1127,7 +1127,7 @@ fn stored_tile_overlays_include_stored() {
     let stored = RegionCoords::new(1, 1);
     let store = FakeStore::default();
     let floor = Chunk::flat_floor_with(8, BlockId(7));
-    store.put(stored, Ok(TerrainSnapshot { chunks: vec![(ChunkCoords::new(0, 0, 0), floor)], ground: Vec::new() }));
+    store.put(stored, Ok(TerrainSnapshot { chunks: vec![(ChunkCoords::new(0, 0, 0), floor)], ground: Vec::new(), stud: Default::default() }));
     let (mut m, out, region_out) = manager_with_store(&store);
     m.set_stored_regions([(stored, 1)].into());
 

@@ -31,6 +31,17 @@ impl CutStore {
                 stored.ground = ground.clone();
             }
             stored.entities = p.entities.clone();
+            let mut studs: BTreeMap<_, _> = std::mem::take(&mut stored.stud_chunks).into_iter().collect();
+            for (c, record) in &p.stud_chunks {
+                match record {
+                    Some(r) => studs.insert(*c, r.clone()),
+                    None => studs.remove(c),
+                };
+            }
+            stored.stud_chunks = studs.into_iter().collect();
+            if let Some(ground) = &p.stud_ground {
+                stored.stud_ground = ground.clone();
+            }
         }
         self.in_flight = cut.in_flight.clone();
         self.players.extend(cut.players.iter().cloned());

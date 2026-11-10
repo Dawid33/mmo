@@ -97,6 +97,7 @@ pub fn slime_move_params(size: u8) -> MoveParams {
         walk_speed: SLIME_HOP_SPEED_BASE + SLIME_HOP_SPEED_PER_SIZE * size as f32,
         jump_speed: SLIME_JUMP_SPEED,
         allow_flight: false,
+        gravity_scale: 1.0,
     }
 }
 

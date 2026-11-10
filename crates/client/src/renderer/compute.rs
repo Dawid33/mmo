@@ -38,6 +38,10 @@ pub enum JobKind {
     CoarseMesh = 6,
     /// One static water tile (`water::mesh`).
     WaterMesh = 7,
+    /// One stud chunk, or a detached stud body's model (`stud::mesh`).
+    StudMesh = 8,
+    /// One far-terrain tile of a stud world (`stud::far`).
+    StudLodMesh = 9,
 }
 
 impl JobKind {
@@ -50,6 +54,8 @@ impl JobKind {
             5 => Self::BodyMesh,
             6 => Self::CoarseMesh,
             7 => Self::WaterMesh,
+            8 => Self::StudMesh,
+            9 => Self::StudLodMesh,
             _ => return None,
         })
     }
@@ -109,6 +115,8 @@ pub fn run_encoded(kind: JobKind, input: &[u8]) -> Vec<u8> {
         JobKind::BodyMesh => go::<super::voxel_bodies::BodyMeshJob>(input),
         JobKind::CoarseMesh => go::<super::meshing::coarse::CoarseMeshJob>(input),
         JobKind::WaterMesh => go::<super::water::mesh::WaterMeshJob>(input),
+        JobKind::StudMesh => go::<super::stud::mesh::StudMeshJob>(input),
+        JobKind::StudLodMesh => go::<super::stud::far::StudLodMeshJob>(input),
     }
 }
 

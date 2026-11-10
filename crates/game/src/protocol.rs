@@ -600,6 +600,26 @@ pub struct EntityBundle {
     pub pending_inputs: Vec<(crate::GameEventKind, Tick)>,
 }
 
+/// [`EntityBundle`] as stored before stud bodies (world-store entity bundle
+/// format 1): the same fields around a [`crate::CarriedV1`]. Decode-only.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+pub struct EntityBundleV1 {
+    pub id: EntityId,
+    pub kind: EntityKind,
+    pub body: BodyState,
+    pub collider: ColliderSpec,
+    pub carried: crate::CarriedV1,
+    pub client: Option<(ClientId, Client)>,
+    pub pending_inputs: Vec<(crate::GameEventKind, Tick)>,
+}
+
+impl From<EntityBundleV1> for EntityBundle {
+    fn from(b: EntityBundleV1) -> Self {
+        let EntityBundleV1 { id, kind, body, collider, carried, client, pending_inputs } = b;
+        EntityBundle { id, kind, body, collider, carried: carried.into(), client, pending_inputs }
+    }
+}
+
 impl EntityBundle {
     /// Move the bundle from region `from`'s local frame into `to`'s: the
     /// body pose and a voxel body's region-local block `origin` (everything
@@ -699,6 +719,10 @@ pub struct TerrainSnapshot {
     /// column: what a neighbour's halo reads below these chunks. Not part of
     /// [`TerrainSnapshot::terrain_hash`] (it never changes).
     pub ground: Vec<(ColumnCoords, crate::ColumnGround)>,
+    /// The stud terrain of the region's edge chunk columns (`stud_halo.rs`):
+    /// what a neighbour's stud halo is seeded from. Empty for a voxel region;
+    /// not part of [`TerrainSnapshot::terrain_hash`].
+    pub stud: crate::StudEdge,
 }
 
 impl TerrainSnapshot {
@@ -721,7 +745,7 @@ impl TerrainSnapshot {
         // ECS-insertion-order output, since both are hashed positionally via
         // bincode.
         chunks.sort_by_key(|(c, _)| (c.x, c.y, c.z));
-        Self { chunks, ground }
+        Self { chunks, ground, stud: Default::default() }
     }
 
     /// crc32 of the terrain (the chunks), for cheap change detection on the
@@ -914,6 +938,14 @@ pub enum ServerPacket {
     Legends(crate::history::LegendsPage),
     /// The answer to `ClientPacket::StartAdventure`: the site the adventure starts at.
     AdventureResult(Result<crate::history::SiteId, crate::history::AdventureRefusal>),
+    /// A stud world's answer to `RequestLod`, in place of `LodData`: the key's far
+    /// terrain as a coarse height field (`stud_lod.rs`; initial send AND refresh).
+    /// Appended: every other packet keeps its bytes.
+    StudLodData(LodKey, crate::stud_lod::StudLodTile),
+    /// On connect, before the first `PlayerRegion`, from a world that streams stud far
+    /// terrain: the client subscribes its LOD rings on the stud ring table
+    /// (`stud_lod::stud_ring_table`) from its first request. Appended.
+    StudTerrain,
 }
 
 /// A Game event

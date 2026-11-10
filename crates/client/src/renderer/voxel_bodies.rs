@@ -247,6 +247,7 @@ mod tests {
             .init_resource::<SnapshotVoxelQueue>()
             .init_resource::<crate::renderer::cursor::CursorPolicy>()
             .init_resource::<RetiredRegionRoots>()
+            .init_resource::<crate::renderer::stud::ClientBodyScale>()
             .init_resource::<ChunkGrid>()
             .init_resource::<RemeshQueue>()
             .init_resource::<FrameUploads>()
