@@ -185,7 +185,20 @@ impl Rollback {
     pub(crate) fn block_overlaps_body(&self, pos: BlockPos) -> bool {
         let size = BLOCK_VOXELS as f32;
         let lo = [pos[0] as f32 * size, pos[1] as f32 * size, pos[2] as f32 * size];
-        let hi = [lo[0] + size, lo[1] + size, lo[2] + size];
+        self.box_overlaps_body(lo, [lo[0] + size, lo[1] + size, lo[2] + size])
+    }
+
+    /// [`Self::block_overlaps_body`] for stud TILE `p` (its 1 m x 1.2 m x 1 m box).
+    pub(crate) fn stud_tile_overlaps_body(&self, p: crate::TilePos) -> bool {
+        let kind = crate::TerrainKind::Stud;
+        let (w, h) = (kind.tile_width_units(), kind.tile_height_units());
+        let lo = [p[0] as f32 * w, kind.level_bottom_units(p[1]), p[2] as f32 * w];
+        self.box_overlaps_body(lo, [lo[0] + w, lo[1] + h, lo[2] + w])
+    }
+
+    /// True if any non-fixed body's collider AABB overlaps the box `lo .. hi`
+    /// (region-local sim units).
+    fn box_overlaps_body(&self, lo: [f32; 3], hi: [f32; 3]) -> bool {
         for (_, handle) in self.data.ecs.rigidbody.iter() {
             let Some(handle) = handle else { continue };
             let Some(body) = self.data.physics.bodies.get(*handle) else { continue };
@@ -637,6 +650,28 @@ impl Rollback {
     /// checks again.
     pub fn player_edit_safe(&mut self, client: ClientId, action: EditAction, out: &mut Vec<crate::IntentMsg>) -> bool {
         use crate::intents::Effects as _;
+        if self.terrain_kind() == crate::TerrainKind::Stud {
+            // Stud terrain: the same pair of intents, addressed to a TILE — the tile
+            // under the crosshair breaks whole, the tile against the hit face is
+            // filled (`Rollback::apply_stud_tile_intent_safe`).
+            let Some(hit) = self.eye_stud_hit(client) else { return false };
+            let Some(by) = self.client_body_id(client) else { return false };
+            let (tile, intent) = match action {
+                EditAction::Break => (hit.tile, crate::Intent::BreakBlock { by, survival: false }),
+                EditAction::Place => {
+                    if hit.inside
+                        || self.stud_tile(hit.outside).fill() == crate::TileFill::Solid
+                        || self.stud_tile_overlaps_body(hit.outside)
+                    {
+                        return false;
+                    }
+                    (hit.outside, crate::Intent::PlaceBlock { block: PLACE_BLOCK, by, survival: false })
+                }
+            };
+            let p = crate::WorldBlockPos::from_local(*self.data.region, crate::BlockPos::new(tile[0], tile[1], tile[2]));
+            crate::intents::RegionEffects { data: self, out }.send(crate::Target::Block(p), intent);
+            return true;
+        }
         let Some(hit) = self.eye_hit(client) else { return false };
         let (pos, intent) = match action {
             EditAction::Break => {

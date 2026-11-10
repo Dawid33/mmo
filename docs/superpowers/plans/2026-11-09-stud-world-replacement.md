@@ -656,6 +656,146 @@ D1–D5 accepted as recommended ("make it so", 2026-11-09).
     and off; `VOXEL_SHADOW_CASCADES=1` / `VOXEL_SHADOW_DISTANCE_M=100` as an A/B if it is still
     slow (shadow passes re-draw the bodies); `VOXEL_LOD_RINGS=off` to see what the far field
     costs; T-junction pixel cracks on merged faces; seam lines popping at 40 m.
+- **P10a defaults flipped (2026-11-10): stud terrain is what every entry point plays; NO voxel code
+  was deleted. Nothing was launched — the play checklist at the end of this entry must pass before
+  the deletion half of P10.**
+  - **What now runs on studs.** The switch is one place: `server::world_file::terrain_from` —
+    an unset / empty `VOXEL_TERRAIN` is `DEFAULT_TERRAIN` = studs (voxels only in a `chunk_blocks=2`
+    build, where stud chunks cannot exist). Everything reaches a world through the server binary, so
+    this covers: `just run` / `run-two` (`client debug embarked`; the client spawns its server with
+    its own environment), `just play` (menu → generator → world map → embark; same single-player
+    server), `just server` + `just client`, `just web*` (the page only joins a server), `just dev-r2`
+    / `just host` (the host binds the terrain; the coordinator has none), `run-online`. A stored
+    (forged) world: genesis through `generate_stud_region` (recipes with water, trees as features),
+    restores from stud rows, stud halo and stud far terrain — the P3–P8 paths, now the default.
+    `world_file=procedural` follows the switch too (it IS `studs-procedural` now; that keyword and
+    the toy `studs` world stay as debug presets behind `just run-studs`).
+  - **THE ESCAPE HATCH (delete with the voxel code): `VOXEL_TERRAIN=voxels`** — `just terrain=voxels
+    run|play|server …`. It is the only way to voxel terrain; the tests' in-process voxel harnesses
+    (`LocalServer`, `Region::from_columns`) never go through the server binary and are untouched.
+  - **Old worlds (D5).** A stored world is tied to a terrain kind (`world.terrain`, P5); one last
+    served as voxels is refused at start by `world_file::bind_world_terrain` with the stored kind,
+    the hatch, and the way out ("re-forge it — the debug world: `just run --reset`; a menu world:
+    make a new one"). Nothing is written to it. The client shows this as the failed start's server
+    log tail. A world forged but never served takes studs. **`worlds/debug-embarked/` and every menu
+    world played before today are voxel worlds: `just run --reset` once.** The client cannot see the
+    kind before it starts the server (it does not link the store), so there is no earlier warning in
+    the world list.
+  - **Gameplay gaps closed (sim, all with the rollback bar on every tick/event).**
+    - *Survival mining / placing / throwing / chest by click on stud tiles* (`mining.rs`, `edit.rs`,
+      `intents.rs` `apply_stud_tile_intent_safe`). The eye ray is a stud ray over own ∪ stud halo
+      (`eye_stud_hit` → `StudEyeHit { tile, outside, inside }`). The unit is the TILE: a held button
+      mines the tile under the crosshair in `stud_mine_ticks` (= `stud_tile_break_ticks`, x
+      `FELL_TICKS_FACTOR` on tree wood) and it breaks on that tick, with the voxel cooldown; the
+      break and the place are the SAME `Intent::BreakBlock` / `PlaceBlock` (`Target::Block` whose
+      cell is a world tile, as piles and chests are addressed on studs), so seams, refusals and the
+      refund of a refused survival place are the voxel code unchanged. Owner side: a break carves
+      the tile box and drops `stud_drops` into the OWNER's piles (a tile of tree wood fells the tree
+      with `DropItems`; a chest tile spills and drops the chest); a place fills the empty cells of
+      the tile against the hit face with `stud_material_of_block(item)` — the fortress Build rule —
+      or `place_stud_chest_safe` for the chest item; `Occupied` for a solid tile or a body in it.
+      A right click on a chest tile opens it. Q / Ctrl+Q land in the tile the stud ray stops before.
+      The first-person creative edit of Fortress clients (`player_edit_safe`) is the same pair
+      without drops. No hashed layout changed (`Mining.target` is a `TilePos` there).
+    - *`Order::RemoveStudAt { chunk: WorldChunkPos, cell }`* + `Intent::RemoveStud` (both appended):
+      removal across a seam like `PlaceStudAt`; the client build tool sends it (a right click on a
+      neighbour's brick in the halo band now works).
+    - *`settle_at_seam` in tiles*: `put_down_drops` takes the tile height for a stud body's drops.
+    - *Spawning*: `player_spawn_y` stands a body on recipe water over stud ground (was: on the bed);
+      **slimes spawn on stud terrain** (`maybe_spawn_slime_safe` read only voxel surfaces — a stud
+      world had no wildlife), never over water.
+    - *Client*: the first-person outline is the TILE under the crosshair (`LookedAtStud`), mining
+      cracks are drawn on the mined tile (the crack cube stretched to 1 x 1.2 x 1 m), item piles and
+      their flights sit at tile heights (`pile_world_position(.., TerrainKind)`; they were drawn at
+      block heights — 20 % too low per level, metres off at altitude).
+    - `debug_launch`: `debug embarked --procedural` parsed as a plain `embarked` (arm order; the
+      failing `debug_studs_parses_without_flags`) — fixed.
+  - **Snapshot size — measured, NOT reduced.** `worldgen` `stud_trees::stud_snapshot_census`
+    (ignored diagnostic) on three 64 m procedural regions with trees: wire 0.22 / 0.32 / 0.80 MiB
+    (x16 for 256 m = 3.5–12.8 MB, the launch's 6–10 MB). Packed composition: **bricks 33–54 %,
+    colliders 44–64 %, recipes 2–4 %** (raw: colliders 64–75 % — a `Voxels` shape per chunk).
+    Dropping pristine chunks alone saves little because trees stand in almost every surface chunk:
+    1 of 23, 5 of 32 and 24 of 38 (a mountain's buried layers) chunks equal their pristine chunk.
+    The client cannot regenerate trees (it has no forged tiles; the server is another process even
+    in single player). The right fix, not contained, so not done: (1) send each chunk as a DELTA
+    against its pristine chunk (added bricks + removed mins; trees are pure additions, so the wire
+    carries tree bricks and edits only) — ~1 ms of `pristine_chunk` per chunk on each side, so do it
+    on the region thread with the `SaveTerms` digests as the "is pristine" cache; (2) rebuild chunk
+    colliders on the client from the bricks instead of sending them — needs a test that a rebuilt
+    `Voxels` equals the incrementally edited one bit for bit, and the collider arena's allocator
+    state restored exactly (handles are hashed). Estimated, not measured: (1) alone 20–45 % of the wire; with (2) most of the rest.
+  - **Failing tests triaged.** `debug_launch::tests::debug_studs_parses_without_flags`: stud work
+    (fixed, above). The 8 voxel `renderer::lod_rings::tests`: NOT stud work — all eight stop at the
+    same `root_meshed` wait on the voxel `LodEventMsg::Data` path; `meshing/` and `lod.rs` are
+    byte-identical to `4a81dfd9~1`, `lod_tiles.rs` (cells with a `LodGroup` merged into tiles, which
+    `pipeline_app` never rebuilds) came with `04ba4222` (2026-11-02), and the stud diff of
+    `lod_rings.rs` only adds the `StudData` arm; they go with the voxel LOD. The 3 game `lod::tests`
+    (`downsample_chunks_dispatches_every_factor`, `many_brick_chunks_place…`,
+    `bucketed_sub_block_cells…`): NOT stud work — reproduced with just
+    `just test-one game "--lib -- lod::tests slope::tests::display_names"` (2–3 fail, racily):
+    `slope::tests::display_names` installs the real block props process-wide, where id 5 is water
+    (`kind: Liquid` since the water work, 2026-11-07) and the lod tests use raw ids under the default
+    props; `lod.rs`, `slope.rs`, `block_props.rs` are unchanged by the stud work. Voxel LOD code, to
+    be deleted. `block_target::stages_grow_the_same_cracks` (28 crack texels < 40, a fixed-seed pure
+    function) and `selection::click_anywhere_on_a_tall_body_hits_it` (test and `ScreenBody::distance`
+    disagree since `04ba4222`): pre-existing, as traced in P7b; still failing, untouched.
+  - **Tests** (all via `just`): `just smoke`, `just web-check`, `just test-threads` (99 + 3 + 11),
+    `just determinism-wasm` pass; no golden moved, `physics_goldens` untouched. New: `game`
+    `stud_gameplay::` (+7: mine, place, chest, refund, throw, trunk, slime spawn — 20 pass), `stud_halo::` (+2:
+    removal across a seam; an Adventure player mining and placing into the neighbour's tile through
+    the halo, the drop in the owner's piles — 14 pass with ignored); `server` `stud_world::
+    a_voxel_world_is_refused_by_the_stud_default`, `store_world::server_world_is_tiled` (the forged
+    world boots on the DEFAULT terrain, saves, restores), `world_file::tests` (default = studs);
+    client `block_target::`, `item_piles::`, `item_flights::`, `stud::build::`, `debug_launch::`
+    (33 pass, the one pre-existing failure above). `game --test it` with
+    `stud_ handoff_schedule::stud_ slime:: mining:: intents:: item_piles:: chests:: packet_codec::
+    spawn_surface:: block_edit:: orders:: world_manager:: handoff_manager:: player::`, ignored
+    included: 309 pass (the seeded stud seam replicas still end in the server's hash with slimes
+    now spawning). `server --test roles`: compiles and passes without a database (its end-to-end
+    cases skip); **`just test-r2` was not run (needs the dev Postgres)**.
+  - **Still open (found or left, precisely).**
+    - Join snapshots are as big as before (above).
+    - Halo seeds of NEVER-RUN neighbours carry recipes only, no trees (`with_stud_halo` in
+      `server::run`): at the default one-region window the band past the home edge collides and
+      mirrors without its trees until that region runs.
+    - A survival place on a low natural floor tops up the SAME tile (the hit face lies inside it);
+      placed tiles are not marked `constructed` (Dig removes them, Deconstruct refuses); a place
+      right beside the player can be refused by the rig's bone colliders (as on voxels).
+    - Drops round per material per tile (4 cells of grass yield nothing; a grass tile gives 1 dirt);
+      non-natural block items build plastic 71 (`STUD_BUILD_FALLBACK_MATERIAL`).
+    - A trunk seen through the halo is mined at the plain break time (`stud_tree_at` is own-region);
+      its owner still fells it. Generated trees never cross a seam.
+    - A pile resting on a low floor INSIDE its tile is drawn at the tile's bottom (up to 0.6 m low).
+    - `chunk_blocks=2` builds default to voxels (studs unsupported there).
+    - `CLAUDE.md` still describes a voxel game and does not name the terrain switch (not edited by
+      this phase); the deployed web world is a voxel world — the next `just deploy` is refused by
+      its own store until it is re-forged (D5; plan that deploy first) or started on the hatch.
+    - Unchanged from earlier phases: x-ray, `stud_pull`, far trees / built structures in the far
+      field, species materials, slope parts, the wire's `StudDelta`.
+  - **Play session that must pass before deleting voxel code** (adapter pinned, note the
+    `AdapterInfo` line and the `[perf] event=stud_region_meshed` lines):
+    1. `just run` on the existing `worlds/debug-embarked/`: the start FAILS with the terrain message
+       in the server log tail (not a silent voxel or empty world). Then `just run --reset`: forge,
+       auto-embark, a fortress on brick terrain with trees and water; dwarves stand on the ground.
+    2. Fortress: move the camera and the working level (cut, darkening, slice cap); designate Dig,
+       Build (two materials), a chest, Chop on a trunk, Erase; `DevCompleteAll` (dev panel) — holes,
+       walls, the chest, a falling tree that leaves logs; select a dwarf, give a move order, watch it
+       walk steps and stairs; wait for a slime to hop about.
+    3. Enter Adventure (first person): the outline is a tile; hold left on soil, then stone — cracks
+       grow on the tile, it breaks, a pile lies there and is picked up; fell a tree by mining its
+       trunk; right click places the hotbar block (also against a wall, and from one region into
+       the next at a region edge); place the chest from the starting kit, right click opens it, move
+       items, mine it and get it back; Q and Ctrl+Q throw; walk into water (wading, swimming), die /
+       respawn if reachable. Toggle back to Fortress.
+    4. Build mode (`N`): place bricks, right click removes one — also a brick across a region edge.
+    5. Quit to the menu and `just run` again: the fortress, the edits, the chest's contents and the
+       piles are back (the server log shows the stored stud regions, no genesis).
+    6. `just run-two`: client 2 adventures in client 1's fortress; both see each other's edits.
+    7. `just play`: New world (16 km / 32 m for speed) → world map → embark → the same checks
+       briefly; leave, Load world, return to the fortress; start an Adventure from the map.
+    8. `just world_file=procedural server` + `just client`; and once `just terrain=voxels
+       world_file=procedural server` + `just client` to see the hatch still gives the voxel world.
+    9. `just web` against a local server (WebGL2 path), if the web build is to stay.
 - Goldens re-recorded on purpose (16-block values): once for P6b (above); `wasm_determinism` and `scene_hash_golden` once
   more for P4 (`GameData.stud_halo`, `stud_halo_ground`; `physics_goldens` did not move); before
   that `wasm_determinism` twice (`BodyScale` fields,

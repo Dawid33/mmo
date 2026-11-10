@@ -165,6 +165,12 @@ pub enum Order {
     /// empty or an unknown material = no-op. The part past the region's edge is filled
     /// by the neighbour owning it (`Intent::FillStud`, one tick later).
     FillStud { lo: [i32; 3], hi: [i32; 3], material: u16 },
+    /// Stud world: remove the brick covering `cell` of the stud chunk at world chunk
+    /// `chunk` (`y` = stud layer), this region's or — seen through the stud halo — a
+    /// neighbour's, which gets it as an `Intent::RemoveStud`. None there = no-op.
+    /// The world-addressed form of [`Order::RemoveStud`], as `PlaceStudAt` is of
+    /// `PlaceStud`. Appended.
+    RemoveStudAt { chunk: crate::WorldChunkPos, cell: [u8; 3] },
 }
 
 /// Why a tile refuses a designation.
@@ -516,7 +522,8 @@ impl Rollback {
             Order::PlaceStud { chunk, brick } => return self.place_stud_safe(chunk, brick),
             Order::RemoveStud { chunk, cell } => return self.remove_stud_safe(chunk, cell),
             // This region's part only: `Region::handle_event` routes these to
-            // `carve_stud_order_safe` / `fill_stud_order_safe` / `place_stud_order_safe`,
+            // `carve_stud_order_safe` / `fill_stud_order_safe` / `place_stud_order_safe` /
+            // `remove_stud_order_safe`,
             // which also send the neighbours' part as intents.
             Order::CarveStud { lo, hi } => {
                 return self.carve_stud_boxes_dropping_safe(&[(lo, hi)]).pop().is_some_and(|r| !r.is_empty());
@@ -526,6 +533,11 @@ impl Rollback {
                 let (rc, c) = chunk.to_local();
                 return rc == *self.data.region
                     && self.place_stud_safe(crate::StudChunkCoords { x: c.x, y: c.y, z: c.z }, brick);
+            }
+            Order::RemoveStudAt { chunk, cell } => {
+                let (rc, c) = chunk.to_local();
+                return rc == *self.data.region
+                    && self.remove_stud_safe(crate::StudChunkCoords { x: c.x, y: c.y, z: c.z }, cell);
             }
         }
         true

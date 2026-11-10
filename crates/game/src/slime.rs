@@ -206,6 +206,18 @@ impl Rollback {
         if count >= SLIME_CAP_PER_REGION {
             return;
         }
+        if self.terrain_kind() == crate::TerrainKind::Stud {
+            // Stud terrain: on the bricks' top of the plan's stud column, never where
+            // recipe water stands over it (a seabed).
+            let (x, z) = (plan.vx as f32, plan.vz as f32);
+            let Some(top) = self.stud_surface_y(x, z) else { return };
+            if self.stud_water_surface_units(x, z).is_some_and(|w| w > top) {
+                return;
+            }
+            let y = top + crate::stud_cap_units() + slime_edge_units(plan.size) / 2.0 + SLIME_SPAWN_CLEARANCE;
+            self.spawn_slime_safe(Vector::new(x, y, z), plan.size, plan.yaw, tick);
+            return;
+        }
         let Some((surface, _)) = self.surface_voxel(plan.vx, plan.vz) else { return };
         // Never on a seabed: the cell over the top voxel holds no water.
         let bv = crate::BLOCK_VOXELS as i32;

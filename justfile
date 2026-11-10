@@ -50,7 +50,7 @@ user := ""
 # World the server serves. Empty (default) = the default forged world,
 # worlds/default.world, forged on first start if missing (ForgeParams::default():
 # a 16 km / 32 m continent, ~5-10 s).
-# `procedural` = the noise world. Any other value = that world file (e.g. one
+# `procedural` = the noise world (on stud terrain unless `terrain=voxels`). Any other value = that world file (e.g. one
 # from `just forge-proto`, one finite world — by default a 16 km continent):
 #   just forge-proto --seed D5C0DE021A --out target/world-forge/best
 #   just world_file=target/world-forge/best.world server   # then `just client`
@@ -59,13 +59,23 @@ user := ""
 world_file := env_var_or_default("VOXEL_WORLD_FILE", "")
 export VOXEL_WORLD_FILE := world_file
 
-# Terrain of a stored (forged) world's regions, read by the server: empty or
-# `voxels` (default), or `studs` — stud terrain generated from the forged world
-# and saved in the world store (stud world plan, P5). A world keeps the kind it
-# was first served with; the other kind is refused at start (make a new world):
-#   just terrain=studs world_file=target/studs-test.world server
-# Server side only so far: no client recipe draws a stored stud world yet.
-# Defaults to $VOXEL_TERRAIN. The store-less stud worlds (`run-studs`) ignore it.
+# Terrain the server's regions run on: empty or `studs` (the default since the stud
+# cutover, P10a) — stud terrain (toy bricks) generated from the forged world, or
+# from the noise world for `world_file=procedural`, and saved in the world store —
+# or `voxels`, the ESCAPE HATCH to the old voxel world, kept only for comparison
+# until the voxel code is deleted:
+#   just terrain=voxels world_file=target/voxel-test.world server   # then `just client`
+#   just terrain=voxels world_file=procedural server
+# A stored world keeps the kind it was first served with; the other kind is refused
+# at start with a message (terrain is never converted: re-forge — `just run --reset`
+# for the debug world — or make a new world). The client spawns its single-player
+# server with the same environment, so `just terrain=voxels run` / `play` work too
+# (on a world that is a voxel world or was never served).
+# Every recipe that starts a server follows it — the perf ones too (diag, perf-*,
+# fps-steady, fly-probe, shuttle-probe, play-test, …): numbers recorded before the
+# cutover are voxel numbers, so compare only within one terrain. Tests never go
+# through the server binary and keep their own terrain.
+# Defaults to $VOXEL_TERRAIN. `run-studs`' keyword worlds ignore it.
 terrain := env_var_or_default("VOXEL_TERRAIN", "")
 export VOXEL_TERRAIN := terrain
 
@@ -199,10 +209,12 @@ client:
     RUST_BACKTRACE=1 {{cargo}} run --bin client
 
 # Debug launch: straight into a small generated world with a fortress embarked
-# (`client debug embarked`, crates/client/src/debug_launch.rs). The world is
-# worlds/debug-embarked/ (16 km / 32 m, forged on first run) and is REUSED, with
-# its fortress, on every later run; `just run --reset` (or deleting the
-# directory) re-forges it and embarks afresh. Builds both binaries — the client
+# (`client debug embarked`, crates/client/src/debug_launch.rs), on stud terrain
+# (`terrain=` above). The world is worlds/debug-embarked/ (16 km / 32 m, forged on
+# first run) and is REUSED, with its fortress, on every later run; `just run --reset`
+# (or deleting the directory) re-forges it and embarks afresh. A debug world last
+# played as a voxel world is refused by its server (the starting screen shows the
+# server log's reason): `just run --reset`. Builds both binaries — the client
 # spawns the world's server itself, like a menu start.
 run *args:
     #!/usr/bin/env bash
@@ -213,15 +225,18 @@ run *args:
     {{cap}} {{cargo}} build --bin client --bin server
     RUST_BACKTRACE=1 ./target/debug/client debug embarked {{args}}
 
-# Debug launch into the toy-brick test world: 3x3 regions of stud chunks, no store, no menu.
-# `just run-studs --procedural` plays the procedural noise world on stud terrain instead,
-# with far terrain (stud world plan, P8): the server streams a coarse height field per LOD
-# key (`game::stud_lod`) and the client draws it beyond the loaded regions. Its dials are
-# the voxel rings': `world=tiny|small|full`, `view=<m>` (e.g. `just view=4000 run-studs
-# --procedural` for a cheap short view) and VOXEL_LOD_RINGS=off|small|full|"bound:factor,..."
-# — on stud terrain the client turns whichever table that gives into the stud one
-# (`game::stud_ring_table`: the same reach, cells 4x coarser, never finer than a stud or
-# wider than 256 cells a tile). LOD_BUILD_THREADS sizes the server's builder pool.
+# Debug launch into the toy-brick TEST world: 3x3 regions of hand-made stud chunks, no
+# store, no map, no history, no menu — a debug preset only; the real game (`run`,
+# `play`, `server`) is on stud terrain by default.
+# `just run-studs --procedural` plays the procedural noise world on stud terrain without
+# a store (the same terrain as `just world_file=procedural server` + `just client`).
+# Far terrain: the server streams a coarse height field per LOD key (`game::stud_lod`)
+# and the client draws it beyond the loaded regions. Its dials are the ring dials:
+# `world=tiny|small|full`, `view=<m>` (e.g. `just view=4000 run` for a cheap short view)
+# and VOXEL_LOD_RINGS=off|small|full|"bound:factor,..." — on stud terrain the client
+# turns whichever table that gives into the stud one (`game::stud_ring_table`: the same
+# reach, cells 4x coarser, never finer than a stud or wider than 256 cells a tile).
+# LOD_BUILD_THREADS sizes the server's builder pool.
 # The toy world has nothing beyond its 3x3 regions, so it runs with VOXEL_LOD_RINGS=off
 # (set here: the world scale is read in `main`, before the launch plugin runs).
 run-studs *args:

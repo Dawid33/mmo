@@ -569,3 +569,151 @@ fn the_render_stream_mirrors_the_stud_halo_do_and_undo() {
     fold(&mut chunks, &mut grounds);
     assert!(chunks == before && chunks == halo_of(&west_region), "the undo sent the prior chunk");
 }
+
+#[test]
+fn a_removal_in_the_neighbour_is_an_intent_too() {
+    let mut east_region = region(east());
+    let mut west_region = region(west());
+    seed(&east_region, &mut west_region, west());
+    let target = WorldChunkPos::from_local(east(), [0, 0, 2]);
+    let b = brick([0, TOP as u8, 5]);
+    // The east builds a brick on its edge; the west sees it through its halo.
+    apply(&mut east_region, GameEventKind::Order(0, Order::PlaceStudAt { chunk: target, brick: b }));
+    deliver(&mut east_region, &mut west_region, west());
+    let seen = [REGION_STUDS + 1, TOP as i64, 2 * CW as i64 + 5];
+    assert_eq!(west_region.data().view().stud_material_at(seen), Some(4));
+
+    // The world-addressed removal, ordered in the west: an intent to the owner.
+    let cell = [1, TOP as u8, 5];
+    apply_checked(&mut west_region, GameEventKind::Order(0, Order::RemoveStudAt { chunk: target, cell }), "the order");
+    let (_, intents) = deliver(&mut west_region, &mut east_region, east());
+    assert!(
+        matches!(intents[..], [IntentMsg::Intent(SentIntent { target: Target::Stud(c), intent: Intent::RemoveStud { .. }, .. })] if c == target),
+        "{intents:?}"
+    );
+    assert!(east_region.data().stud_chunk_at(at(0, 0, 2)).unwrap().brick_at(cell).is_some(), "not before its due tick");
+    tick(&mut east_region);
+    tick(&mut east_region);
+    assert!(east_region.data().stud_chunk_at(at(0, 0, 2)).unwrap().brick_at(cell).is_none(), "the owner removed it");
+    let (updates, replies) = deliver(&mut east_region, &mut west_region, west());
+    assert_eq!(updates, 1, "the gap comes back as a halo delta");
+    assert!(matches!(replies[..], [IntentMsg::Reply(SentReply { reply: IntentReply::Granted(Intent::RemoveStud { .. }), .. })]));
+    assert_halo_agrees(&west_region, west(), &east_region, east());
+    assert_eq!(west_region.data().view().stud_material_at(seen), None);
+
+    // Nothing there any more: refused by the owner, nothing written.
+    apply(&mut west_region, GameEventKind::Order(0, Order::RemoveStudAt { chunk: target, cell }));
+    deliver(&mut west_region, &mut east_region, east());
+    tick(&mut east_region);
+    tick(&mut east_region);
+    let replies = east_region.take_intents();
+    assert!(
+        matches!(replies[..], [IntentMsg::Reply(SentReply { reply: IntentReply::Refused(_, IntentRefusal::NothingThere), .. })]),
+        "refused: {replies:?}"
+    );
+    assert!(east_region.take_halo_updates().is_empty());
+
+    // An own brick goes at once, with no intent.
+    let own = WorldChunkPos::from_local(west(), [N - 1, 0, 2]);
+    apply(&mut west_region, GameEventKind::Order(0, Order::PlaceStudAt { chunk: own, brick: b }));
+    apply_checked(&mut west_region, GameEventKind::Order(0, Order::RemoveStudAt { chunk: own, cell }), "an own removal");
+    assert!(west_region.data().stud_chunk_at(at(N - 1, 0, 2)).unwrap().brick_at(cell).is_none());
+    assert!(west_region.take_intents().is_empty());
+}
+
+/// Survival on stud terrain across a seam (P10a): an Adventure player at the west's
+/// east edge mines a tile of the EAST region seen through the stud halo, then places
+/// a block into it — both the ordinary `BreakBlock` / `PlaceBlock` intents addressed
+/// to the tile, applied by the owner, whose piles take the drop.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn survival_mining_and_placing_reach_across_the_seam() {
+    const CLIENT: ClientId = 3;
+    crate::common::install_real_block_props();
+    let tiles = REGION_BLOCKS as i32;
+    let stand = TOP / TILE_PLATES as i32;
+    let mut east_region = region(east());
+    let mut west_region = region(west());
+    seed(&east_region, &mut west_region, west());
+    seed(&west_region, &mut east_region, east());
+    apply(&mut west_region, GameEventKind::CreateClient(CLIENT));
+    let at_tile = [tiles - 2, stand, 20];
+    apply(&mut west_region, GameEventKind::Order(CLIENT, Order::SetMode { mode: PlayMode::Adventure, at: Some(at_tile) }));
+    apply(&mut west_region, GameEventKind::PlayerInput(CLIENT, InputEvent::FpsCam(true)));
+    west_region.with_data(|d| d.clients.get_mut(&CLIENT).unwrap().inventory = Inventory::new());
+    // The two regions tick together (one world clock: an intent is due by it).
+    for _ in 0..10 {
+        tick(&mut west_region);
+        tick(&mut east_region);
+    }
+    // A quarter turn to face +x (east), 45 degrees down: 0.0026 rad per pixel.
+    let quarter = std::f32::consts::FRAC_PI_2 / 0.0026;
+    apply(&mut west_region, GameEventKind::PlayerInput(CLIENT, InputEvent::MouseMotion { dx: quarter, dy: 302.0 }));
+    for _ in 0..3 {
+        tick(&mut west_region);
+        tick(&mut east_region);
+    }
+    let hit = west_region.data().eye_stud_hit(CLIENT).expect("the ground ahead");
+    assert!(hit.tile[0] >= tiles, "the tile under the crosshair is the east's: {hit:?}");
+    let p = hit.tile;
+    let east_tile = [p[0] - tiles, p[1], p[2]];
+    assert_eq!(east_region.data().tile_fill(east_tile), TileFill::Solid);
+    let need = west_region.data().stud_mine_ticks(p).expect("a halo tile is mined like an own one");
+    assert_eq!(Some(need), east_region.data().stud_mine_ticks(east_tile), "the same break time on both sides");
+
+    // --- Mine it: the break is sent on the tick before the last one held.
+    apply(&mut west_region, GameEventKind::PlayerInput(CLIENT, InputEvent::MouseButton { button: MouseButton::Left, pressed: true }));
+    let mut sent = Vec::new();
+    for _ in 0..need {
+        tick(&mut west_region);
+        tick(&mut east_region);
+        let (_, intents) = deliver(&mut west_region, &mut east_region, east());
+        sent.extend(intents);
+        deliver(&mut east_region, &mut west_region, west());
+    }
+    apply(&mut west_region, GameEventKind::PlayerInput(CLIENT, InputEvent::MouseButton { button: MouseButton::Left, pressed: false }));
+    let world_tile = WorldBlockPos::from_local(east(), BlockPos::new(east_tile[0], east_tile[1], east_tile[2]));
+    assert!(
+        matches!(sent[..], [IntentMsg::Intent(SentIntent { target: Target::Block(t), intent: Intent::BreakBlock { survival: true, .. }, .. })] if t == world_tile),
+        "one survival break, addressed to the east's tile: {sent:?}"
+    );
+    for _ in 0..3 {
+        tick(&mut east_region);
+        tick(&mut west_region);
+        deliver(&mut east_region, &mut west_region, west());
+        deliver(&mut west_region, &mut east_region, east());
+    }
+    assert_eq!(east_region.data().tile_fill(east_tile), TileFill::Open, "the owner dug the tile");
+    assert_eq!(west_region.data().tile_fill(p), TileFill::Open, "and the hole came back through the halo");
+    let dirt = ItemId::block(block_props().id_named("dirt").expect("real block props"));
+    let piled = |r: &Region| r.data().item_piles().values().flat_map(|p| &p.stacks).filter(|s| s.item == dirt).map(|s| s.count).sum::<u32>();
+    assert!(piled(&east_region) >= 1, "the drop lies in the OWNER's piles");
+    assert_eq!(piled(&west_region), 0, "never on the sender's side");
+
+    // --- Place stone into the hole: taken from the hotbar when sent, built by the owner.
+    let stone = block_props().id_named("stone").unwrap();
+    west_region.with_data(|d| d.clients.get_mut(&CLIENT).unwrap().inventory.slots[0] = Some(ItemStack { item: ItemId::block(stone), count: 2 }));
+    let target = west_region.data().eye_stud_hit(CLIENT).expect("the hole's floor or wall").outside;
+    assert!(target[0] >= tiles, "the tile against the hit face is the east's too: {target:?}");
+    apply(&mut west_region, GameEventKind::PlayerInput(CLIENT, InputEvent::MouseButton { button: MouseButton::Right, pressed: true }));
+    tick(&mut west_region);
+    tick(&mut east_region);
+    apply(&mut west_region, GameEventKind::PlayerInput(CLIENT, InputEvent::MouseButton { button: MouseButton::Right, pressed: false }));
+    assert_eq!(west_region.data().clients[&CLIENT].inventory.slots[0].map(|s| s.count), Some(1), "one stone taken");
+    let (_, intents) = deliver(&mut west_region, &mut east_region, east());
+    assert!(
+        matches!(intents[..], [IntentMsg::Intent(SentIntent { intent: Intent::PlaceBlock { survival: true, .. }, .. })]),
+        "{intents:?}"
+    );
+    for _ in 0..3 {
+        tick(&mut east_region);
+        tick(&mut west_region);
+        deliver(&mut east_region, &mut west_region, west());
+        deliver(&mut west_region, &mut east_region, east());
+    }
+    let east_target = [target[0] - tiles, target[1], target[2]];
+    assert_eq!(east_region.data().stud_tile(east_target).material(), Some(MAT_STONE), "the owner built it");
+    assert_ne!(east_region.data().tile_fill(east_target), TileFill::Open);
+    assert_eq!(west_region.data().clients[&CLIENT].inventory.slots[0].map(|s| s.count), Some(1), "granted: nothing refunded");
+    assert_halo_agrees(&west_region, west(), &east_region, east());
+}

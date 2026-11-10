@@ -257,3 +257,57 @@ fn a_generated_tree_is_felled_whole_at_its_foot() {
     let model = region.data().ecs.stud_body.try_get(body).clone().unwrap().model;
     assert!(model.bricks.len() < bricks_of_tree && model.bricks.len() + 16 >= bricks_of_tree, "all but the cut is in the body");
 }
+
+/// What a stud region's join snapshot (`ServerPacket::Region`) is made of, on the
+/// wire and before compression (P10a: "6-10 MB a region" at 256 m).
+#[test]
+#[ignore = "diagnostic: prints the wire size breakdown of a stud region snapshot"]
+fn stud_snapshot_census() {
+    let mib = |n: u64| n as f64 / (1024.0 * 1024.0);
+    macro_rules! size {
+        ($v:expr) => {
+            bincode::serialized_size($v).unwrap_or(0)
+        };
+    }
+    for (rc, seed) in seeds() {
+        let (send, _recv) = crossbeam::channel::unbounded();
+        let mut region = game::Region::new(game::Rollback::new(Some(send.clone())), Some(send), rc, None);
+        region.seed_stud_world(seed);
+        let rollback = region.data();
+        let data = &rollback.data;
+        let chunks: Vec<&StudChunk> = data.ecs.stud.iter().filter_map(|(_, c)| c.as_ref()).collect();
+        let bricks: usize = chunks.iter().map(|c| c.len()).sum();
+        let lz4 = |v: &[u8]| game::encode_packet(&v.to_vec()).map_or(0, |w| w.len() as u64);
+        let part = |name: &str, bytes: Vec<u8>| {
+            eprintln!("    {:>8.3} MiB raw {:>8.3} MiB packed  {name}", mib(bytes.len() as u64), mib(lz4(&bytes)));
+        };
+        eprintln!("{rc:?}: {} stud chunks, {bricks} bricks; whole GameData {:.3} MiB raw", chunks.len(), mib(size!(&**data)));
+        part("ecs.stud (the bricks)", bincode::serialize(&data.ecs.stud).unwrap());
+        part("ecs (all components)", bincode::serialize(&data.ecs).unwrap());
+        part("stud_ground (recipes)", bincode::serialize(&*data.stud_ground).unwrap());
+        part("physics.colliders", bincode::serialize(&data.physics.colliders).unwrap());
+        part("physics.bodies", bincode::serialize(&data.physics.bodies).unwrap());
+        part("physics.broad_phase", bincode::serialize(&data.physics.broad_phase).unwrap());
+        part("physics.narrow_phase", bincode::serialize(&data.physics.narrow_phase).unwrap());
+        part("physics (all)", bincode::serialize(&data.physics).unwrap());
+        // What "pristine chunks are never sent" (D1) would leave of the bricks: only the
+        // chunks that differ from their recipe's pristine chunk (edited, or holding trees).
+        let mut kept = Vec::new();
+        let (mut pristine, mut differing, mut kept_bricks) = (0, 0, 0);
+        for (c, _) in rollback.stud_index.iter() {
+            let chunk = rollback.stud_chunk_at(*c).unwrap();
+            let derived = data.stud_ground.get(&game::ColumnCoords::new(c.x, c.z)).and_then(|g| g.pristine_chunk(c.y));
+            if derived.as_ref() == Some(chunk) {
+                pristine += 1;
+            } else {
+                differing += 1;
+                kept_bricks += chunk.len();
+                kept.push(chunk.clone());
+            }
+        }
+        eprintln!("    {pristine} chunks equal their pristine chunk, {differing} differ ({kept_bricks} bricks)");
+        part("ecs.stud without pristine chunks", bincode::serialize(&kept).unwrap());
+        let wire = game::encode_packet(&game::ServerPacket::Region(rc, rollback.clone())).expect("the packet encodes");
+        eprintln!("    {:>8.3} MiB on the wire (ServerPacket::Region)", mib(wire.len() as u64));
+    }
+}

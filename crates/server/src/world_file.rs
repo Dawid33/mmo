@@ -28,18 +28,25 @@ pub const STUDS_PROCEDURAL_KEYWORD: &str = "studs-procedural";
 /// [`store_url_for`] the world file.
 pub const WORLD_DB_ENV: &str = "VOXEL_WORLD_DB";
 
-/// The terrain a stored (forged) world's regions run on: `voxels` (unset: the
-/// default) or `studs` — stud terrain generated from the forged world
-/// (`worldgen::stud_gen`) and saved in the store. A world keeps the kind it was
-/// first served with (`world.terrain`); the other is refused at start. Worlds
-/// without a store ignore it (their `VOXEL_WORLD_FILE` keyword names the terrain).
+/// The terrain the world's regions run on: `studs` (unset: the default since the
+/// stud cutover, P10a) — stud terrain generated from the forged world or the noise
+/// world (`worldgen::stud_gen`), saved in the store if there is one — or `voxels`,
+/// THE ESCAPE HATCH to the old voxel world (`VOXEL_TERRAIN=voxels`; it goes away
+/// with the voxel code). A stored world keeps the kind it was first served with
+/// (`world.terrain`); the other is refused at start. The `procedural` world follows
+/// it too; the `studs` / `studs-procedural` keywords name their terrain themselves.
 pub const TERRAIN_ENV: &str = "VOXEL_TERRAIN";
 
-/// [`TERRAIN_ENV`]'s value -> the terrain kind; unset or empty is voxels.
+/// The terrain of a server started without [`TERRAIN_ENV`]: studs, except in a build
+/// whose sim chunk cannot hold stud chunks (`chunk_blocks=2`), which keeps voxels.
+pub const DEFAULT_TERRAIN: world_store::TerrainKind =
+    if game::stud::STUDS_SUPPORTED { world_store::TerrainKind::Studs } else { world_store::TerrainKind::Voxels };
+
+/// [`TERRAIN_ENV`]'s value -> the terrain kind; unset or empty is [`DEFAULT_TERRAIN`].
 pub fn terrain_from(value: Option<&str>) -> Result<world_store::TerrainKind, String> {
     use world_store::TerrainKind;
     match value.map(str::trim) {
-        None | Some("") => Ok(TerrainKind::Voxels),
+        None | Some("") => Ok(DEFAULT_TERRAIN),
         Some(v) if v == TerrainKind::Voxels.name() => Ok(TerrainKind::Voxels),
         Some(v) if v == TerrainKind::Studs.name() => {
             if !game::stud::STUDS_SUPPORTED {
@@ -59,13 +66,29 @@ pub fn terrain_from(value: Option<&str>) -> Result<world_store::TerrainKind, Str
     }
 }
 
+/// Ties the stored world to `terrain` before any region is loaded or saved
+/// (`StoreHandle::bind_terrain`: set once, never changed). A world tied to the other
+/// kind is refused — terrain is never converted (stud plan D5) — with what to do about
+/// it: since the cutover an unset [`TERRAIN_ENV`] is studs, so a world played before
+/// it (a voxel world) must be re-forged, or started on the escape hatch.
+pub fn bind_world_terrain(store: &StoreHandle, terrain: world_store::TerrainKind) -> Result<(), String> {
+    store.bind_terrain(terrain).map_err(|e| match e {
+        world_store::StoreError::OtherTerrain { .. } => format!(
+            "{e}. A world played before the stud cutover is a voxel world: re-forge it (the debug world: \
+             `just run --reset`; a menu world: make a new one)"
+        ),
+        e => e.to_string(),
+    })
+}
+
 /// Why a world with save files from before the world store is not started.
 pub const LEGACY_SAVES_REFUSAL: &str =
     "this world has file saves from before the world store; delete them with: just clean-old-worlds";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorldSource {
-    /// The noise world: no store, nothing persisted.
+    /// The noise world: no store, nothing persisted. Its terrain is [`TERRAIN_ENV`]'s
+    /// (stud terrain by default).
     Procedural,
     /// The toy-brick stud test world: no store, no map, no history, nothing persisted.
     Studs,
@@ -541,8 +564,10 @@ mod tests {
     #[test]
     fn terrain_env_values() {
         use world_store::TerrainKind;
-        assert_eq!(terrain_from(None), Ok(TerrainKind::Voxels));
-        assert_eq!(terrain_from(Some(" ")), Ok(TerrainKind::Voxels));
+        // Unset is stud terrain (P10a); voxels only by name, or where studs cannot run.
+        assert_eq!(terrain_from(None), Ok(DEFAULT_TERRAIN));
+        assert_eq!(terrain_from(Some(" ")), Ok(DEFAULT_TERRAIN));
+        assert_eq!(DEFAULT_TERRAIN == TerrainKind::Studs, game::stud::STUDS_SUPPORTED);
         assert_eq!(terrain_from(Some("voxels")), Ok(TerrainKind::Voxels));
         if game::stud::STUDS_SUPPORTED {
             assert_eq!(terrain_from(Some("studs")), Ok(TerrainKind::Studs));

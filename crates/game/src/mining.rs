@@ -29,6 +29,19 @@
 //!   intent to its owner (`item_piles.rs`).
 //!
 //! Fortress clients keep `edit.rs`'s creative edit (also intents).
+//!
+//! **On stud terrain** (`TerrainKind::Stud`) the same three actions work on TILES
+//! (1 m x 1.2 m x 1 m, `tiles.rs`) — the unit digging and building have there:
+//! the eye ray is a stud ray over own ∪ stud halo ([`Rollback::eye_stud_hit`]),
+//! `Mining::target` is the tile holding the hit cell and takes
+//! [`Rollback::stud_tile_break_ticks`] (twice that for a tile of tree wood), the
+//! break and the place are the SAME two intents addressed to the tile (a
+//! `Target::Block` whose cell is a world tile, as piles and chests are addressed
+//! there; the owner's half is `Rollback::apply_stud_tile_intent_safe` in
+//! `intents.rs`): a break carves the tile and drops `stud_drops` into the owner's
+//! piles (a tree tile fells the tree), a place fills the tile against the hit face
+//! with the block's stud material (the chest block: a chest), refused places
+//! refund as on voxels, and a throw lands in the tile the stud ray stops before.
 
 use crate::edit::{BlockPos, BREAK_BUTTON};
 use crate::intents::{Effects as _, RegionEffects};
@@ -120,7 +133,59 @@ pub fn mining_view(client: &Client, now: u64) -> Option<MiningView> {
     Some(MiningView { target: m.target, progress_per_mille: progress })
 }
 
+/// What a stud ray met, in tiles ([`Rollback::stud_ray_tiles`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StudEyeHit {
+    /// The tile holding the stud cell the ray hit (region-local; it may lie past
+    /// the edge, in the stud halo).
+    pub tile: BlockPos,
+    /// The tile holding the cell just outside the hit face: where a place goes. It
+    /// is `tile` itself when the face lies inside the tile (a low floor: the place
+    /// fills the rest of it).
+    pub outside: BlockPos,
+    /// The ray began inside a brick (no face was crossed): nothing can be placed.
+    pub inside: bool,
+}
+
+/// The tile holding region-local point `p` (sim units) on `kind` terrain — plain
+/// floors, with none of `TerrainKind::feet_tile`'s slack for a standing body.
+fn tile_of_point(kind: crate::TerrainKind, p: rapier3d::math::Vector) -> BlockPos {
+    let (w, h) = (kind.tile_width_units(), kind.tile_height_units());
+    [libm::floorf(p.x / w) as i32, libm::floorf(p.y / h) as i32, libm::floorf(p.z / w) as i32]
+}
+
 impl Rollback {
+    /// The first stud cell along a ray (region-local units) within `reach` units, own
+    /// ∪ stud halo (`raycast_studs_seen`), as tiles.
+    pub fn stud_ray_tiles(&self, origin: rapier3d::math::Vector, dir: rapier3d::math::Vector, reach: f32) -> Option<StudEyeHit> {
+        let hit = self.raycast_studs_seen(origin, dir, reach)?;
+        let (cs, cp) = (crate::STUD_CHUNK_STUDS as i64, crate::STUD_CHUNK_PLATES as i64);
+        let cell = [
+            hit.chunk[0] * cs + i64::from(hit.cell[0]),
+            hit.chunk[1] * cp + i64::from(hit.cell[1]),
+            hit.chunk[2] * cs + i64::from(hit.cell[2]),
+        ];
+        let (ts, tp) = (crate::TILE_STUDS as i64, crate::TILE_PLATES as i64);
+        let tile_of = |c: [i64; 3]| [c[0].div_euclid(ts) as i32, c[1].div_euclid(tp) as i32, c[2].div_euclid(ts) as i32];
+        let out = [0, 1, 2].map(|a| cell[a] + i64::from(hit.normal[a]));
+        Some(StudEyeHit { tile: tile_of(cell), outside: tile_of(out), inside: hit.normal == [0; 3] })
+    }
+
+    /// The stud tile under `client`'s crosshair within [`crate::edit::REACH`] metres:
+    /// the stud-terrain form of [`Self::eye_hit`].
+    pub fn eye_stud_hit(&self, client: ClientId) -> Option<StudEyeHit> {
+        let (eye, dir) = self.eye_ray(client)?;
+        self.stud_ray_tiles(eye, dir, crate::edit::REACH * crate::movement::UNITS_PER_METER)
+    }
+
+    /// Ticks to mine stud tile `p` by hand as this region sees it (own ∪ stud halo):
+    /// [`Self::stud_tile_break_ticks`], times [`FELL_TICKS_FACTOR`] for a tile of
+    /// tree wood (its break fells the tree). `None`: nothing to mine (open, bedrock).
+    pub fn stud_mine_ticks(&self, p: BlockPos) -> Option<u32> {
+        let ticks = self.stud_tile_break_ticks(p)?;
+        Some(if self.stud_tree_at(p).is_some() { ticks.saturating_mul(FELL_TICKS_FACTOR) } else { ticks })
+    }
+
     /// Ticks to dig stud tile `p` by hand ([`stud_break_ticks`] of its dominant
     /// material over the cells under its columns' tops); `None` for an open tile or
     /// bedrock. Stud terrain only.
@@ -179,18 +244,23 @@ impl Rollback {
             && c.input.mouse_held(&BREAK_BUTTON)
             && tick >= c.break_cooldown_until;
         let current = c.mining;
-        let target = if active {
-            self.eye_hit(client).and_then(|hit| self.mineable_seen(hit.block).map(|b| (hit.block, b)))
-        } else {
+        // The cell under the crosshair and the ticks it takes: a block, or on stud
+        // terrain a tile (`stud_mine_ticks`).
+        let target = if !active {
             None
+        } else if self.terrain_kind() == crate::TerrainKind::Stud {
+            self.eye_stud_hit(client).and_then(|hit| self.stud_mine_ticks(hit.tile).map(|t| (hit.tile, t)))
+        } else {
+            self.eye_hit(client)
+                .and_then(|hit| self.mineable_seen(hit.block).map(|b| (hit.block, break_ticks(block_props(), b))))
         };
-        let Some((target, block)) = target else {
+        let Some((target, needed_ticks)) = target else {
             self.set_mining_safe(client, None, None);
             return;
         };
         let mining = match current {
             Some(m) if m.target == target => m,
-            _ => Mining { target, started_tick: tick, needed_ticks: break_ticks(block_props(), block) },
+            _ => Mining { target, started_tick: tick, needed_ticks },
         };
         // Held through this tick and the next one counts the needed ticks:
         // the break, applied at the next tick's opening, is due now.
@@ -247,10 +317,20 @@ impl Rollback {
     /// empty slot, a hit from inside a block, a cell seen occupied or a body
     /// in the way place nothing.
     pub(crate) fn survival_place_safe(&mut self, client: ClientId, out: &mut Vec<IntentMsg>) -> bool {
-        let Some(hit) = self.eye_hit(client) else { return false };
+        // The cell hit and the cell against the hit face (`None` from inside
+        // one): blocks, or on stud terrain tiles.
+        let stud = self.terrain_kind() == crate::TerrainKind::Stud;
+        let (hit_cell, against) = if stud {
+            let Some(hit) = self.eye_stud_hit(client) else { return false };
+            (hit.tile, (!hit.inside).then_some(hit.outside))
+        } else {
+            let Some(hit) = self.eye_hit(client) else { return false };
+            let against = [hit.block[0] + hit.normal[0], hit.block[1] + hit.normal[1], hit.block[2] + hit.normal[2]];
+            (hit.block, (hit.normal != [0; 3]).then_some(against))
+        };
         // A chest under the crosshair — here, or a neighbour's seen through
         // the halo — opens instead (Decision 10).
-        let [x, y, z] = hit.block;
+        let [x, y, z] = hit_cell;
         let cell = WorldBlockPos::from_local(*self.data.region, crate::BlockPos::new(x, y, z));
         if self.data.container_seen(cell).is_some() {
             self.open_container_safe(client, cell);
@@ -263,11 +343,13 @@ impl Rollback {
             return false;
         }
         let Some(id) = stack.item.as_block().filter(|id| *id != BlockId::AIR) else { return false };
-        if hit.normal == [0; 3] {
-            return false;
-        }
-        let target = [hit.block[0] + hit.normal[0], hit.block[1] + hit.normal[1], hit.block[2] + hit.normal[2]];
-        if self.block_solid(target) || self.block_overlaps_body(target) {
+        let Some(target) = against else { return false };
+        let blocked = if stud {
+            self.stud_tile(target).fill() == crate::TileFill::Solid || self.stud_tile_overlaps_body(target)
+        } else {
+            self.block_solid(target) || self.block_overlaps_body(target)
+        };
+        if blocked {
             return false;
         }
         let Some(by) = self.client_body_id(client) else { return false };
@@ -317,12 +399,25 @@ impl Rollback {
             return false;
         }
         let bv = BLOCK_VOXELS as f32;
-        let cell_of = |p: rapier3d::math::Vector| [(p.x / bv).floor() as i32, (p.y / bv).floor() as i32, (p.z / bv).floor() as i32];
-        let landing = match self.raycast_block_in(eye, dir, THROW_DISTANCE_BLOCKS) {
-            // Inside a block already: from the eye's own cell.
-            Some(hit) if hit.normal == [0; 3] => cell_of(eye),
-            Some(hit) => [hit.block[0] + hit.normal[0], hit.block[1] + hit.normal[1], hit.block[2] + hit.normal[2]],
-            None => cell_of(eye + dir * (THROW_DISTANCE_BLOCKS * bv)),
+        let kind = self.terrain_kind();
+        // Pile cells: blocks, or on stud terrain tiles.
+        let cell_of = |p: rapier3d::math::Vector| match kind {
+            crate::TerrainKind::Voxel => [(p.x / bv).floor() as i32, (p.y / bv).floor() as i32, (p.z / bv).floor() as i32],
+            crate::TerrainKind::Stud => tile_of_point(kind, p),
+        };
+        let landing = match kind {
+            crate::TerrainKind::Voxel => match self.raycast_block_in(eye, dir, THROW_DISTANCE_BLOCKS) {
+                // Inside a block already: from the eye's own cell.
+                Some(hit) if hit.normal == [0; 3] => cell_of(eye),
+                Some(hit) => [hit.block[0] + hit.normal[0], hit.block[1] + hit.normal[1], hit.block[2] + hit.normal[2]],
+                None => cell_of(eye + dir * (THROW_DISTANCE_BLOCKS * bv)),
+            },
+            // The tile the stud ray stops before (the same distance, in metres).
+            crate::TerrainKind::Stud => match self.stud_ray_tiles(eye, dir, THROW_DISTANCE_BLOCKS * bv) {
+                Some(hit) if hit.inside => cell_of(eye),
+                Some(hit) => hit.outside,
+                None => cell_of(eye + dir * (THROW_DISTANCE_BLOCKS * bv)),
+            },
         };
         let n = if whole_stack { MAX_STACK } else { 1 };
         let Some(stack) = self.data.clients.get_mut(&client).and_then(|c| c.inventory.take_selected(selected, n)) else {

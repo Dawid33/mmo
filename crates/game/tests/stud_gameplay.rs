@@ -640,3 +640,277 @@ fn stud_water_is_static_under_edits() {
     rb.deposit_items_safe([10, STAND + 2, 6], stack("sand", 1), 0, 0);
     assert_eq!(piles(&rb), vec![([10, STAND - 2, 6], vec![stack("sand", 1)])]);
 }
+
+// --- Survival: mining, placing, throwing, chests by click (P10a) ------------------
+
+/// About 45 degrees down: 302 px * 0.0026 rad/px at the default sensitivity.
+const DOWN_45: f32 = 302.0;
+
+fn input(r: &mut Region, ev: InputEvent) {
+    r.handle_event(GameEventKind::PlayerInput(CLIENT, ev)).unwrap();
+    r.forget_last_event();
+}
+
+fn mouse(r: &mut Region, button: MouseButton, pressed: bool) {
+    input(r, InputEvent::MouseButton { button, pressed });
+}
+
+/// One tick, with the rollback bar: applied and undone the hash is the one before.
+fn barred_tick(r: &mut Region, what: &str) {
+    let h = state_hash(r.data());
+    r.handle_event(GameEventKind::Tick).unwrap();
+    r.rollback_last_event();
+    assert_eq!(state_hash(r.data()), h, "{what}: a tick undone");
+    tick(r);
+}
+
+/// An Adventure player on tile `at` of `seed`'s region, in first person, facing -z,
+/// looking `pitch_px` of mouse motion down, with an empty inventory.
+fn survivor_in(seed: StudRegionSeed, at: TilePos, pitch_px: f32) -> Region {
+    let mut r = region_of(seed);
+    r.handle_event(GameEventKind::CreateClient(CLIENT)).unwrap();
+    r.forget_last_event();
+    r.handle_event(GameEventKind::Order(CLIENT, Order::SetMode { mode: PlayMode::Adventure, at: Some(at) })).unwrap();
+    r.forget_last_event();
+    input(&mut r, InputEvent::FpsCam(true));
+    r.with_data(|d| d.clients.get_mut(&CLIENT).unwrap().inventory = Inventory::new());
+    for _ in 0..10 {
+        tick(&mut r);
+    }
+    input(&mut r, InputEvent::MouseMotion { dx: 0.0, dy: pitch_px });
+    for _ in 0..3 {
+        tick(&mut r);
+    }
+    assert!(r.data().clients[&CLIENT].fps_cam_mode && r.data().clients[&CLIENT].mode == PlayMode::Adventure);
+    r
+}
+
+fn survivor(pitch_px: f32) -> Region {
+    survivor_in(StudRegionSeed { ground: flat_ground(REGION_CHUNKS), features: Vec::new() }, [20, STAND, 20], pitch_px)
+}
+
+fn set_slot(r: &mut Region, slot: usize, stack: Option<ItemStack>) {
+    r.with_data(|d| d.clients.get_mut(&CLIENT).unwrap().inventory.slots[slot] = stack);
+}
+
+fn slot(r: &Region, slot: usize) -> Option<ItemStack> {
+    r.data().clients[&CLIENT].inventory.slots[slot]
+}
+
+/// Right press with the selected slot, one tick, release, one more (the place is an
+/// intent, applied at the next tick's opening).
+fn right_click(r: &mut Region) {
+    mouse(r, MouseButton::Right, true);
+    barred_tick(r, "a right click");
+    mouse(r, MouseButton::Right, false);
+    barred_tick(r, "the tick after a right click");
+}
+
+#[test]
+fn a_held_button_mines_the_stud_tile_under_the_crosshair() {
+    let mut r = survivor(DOWN_45);
+    let hit = r.data().eye_stud_hit(CLIENT).expect("the eye ray meets the ground");
+    let p = hit.tile;
+    assert_eq!((p[1], hit.outside, hit.inside), (STAND - 1, [p[0], STAND, p[2]], false), "the ground tile ahead, from above");
+    assert_eq!(r.data().tile_fill(p), TileFill::Solid);
+    let need = r.data().stud_mine_ticks(p).expect("grass over dirt can be mined");
+    assert_eq!(Some(need), r.data().stud_tile_break_ticks(p), "no tree: the tile's own break time");
+    assert!(need > 2, "a tile of soil takes a while: {need}");
+    mouse(&mut r, MouseButton::Left, true);
+    let mut held = 0;
+    while r.data().tile_fill(p) != TileFill::Open {
+        barred_tick(&mut r, "mining");
+        held += 1;
+        if held < need {
+            assert_eq!(r.data().clients[&CLIENT].mining.map(|m| (m.target, m.needed_ticks)), Some((p, need)));
+            assert_eq!(r.data().tile_fill(p), TileFill::Solid, "not before its {need} ticks ({held})");
+        }
+        assert!(held <= need + 2, "never broke");
+    }
+    assert_eq!(held, need, "it breaks on the tick its break time ends");
+    // 20 cells of dirt and 4 of grass: one dirt, lying where the tile was (it settles
+    // onto the tile under it).
+    let (lo, hi) = tile_box(p);
+    let per_tile: u32 = stud_drops(&world(2).carve_stud_safe(lo, hi)).iter().map(|s| s.count).sum();
+    assert!(per_tile >= 1);
+    assert_eq!(piled(r.data(), item("dirt")), per_tile, "what a dug tile of this ground yields");
+    assert_eq!(piles(r.data()).iter().map(|(at, _)| *at).collect::<Vec<_>>(), vec![p]);
+    // The cooldown: the next tile is not started at once.
+    // The cooldown: nothing is mined for a few ticks, though the button stays down.
+    barred_tick(&mut r, "the cooldown");
+    assert_eq!(r.data().clients[&CLIENT].mining, None);
+    for _ in 0..BREAK_COOLDOWN_TICKS + 2 {
+        tick(&mut r);
+    }
+    let next = r.data().eye_stud_hit(CLIENT).expect("something behind the hole").tile;
+    assert_ne!(next, p);
+    assert_eq!(r.data().clients[&CLIENT].mining.map(|m| m.target), Some(next), "then the tile behind it is mined");
+    // Released: progress is dropped.
+    mouse(&mut r, MouseButton::Left, false);
+    barred_tick(&mut r, "the release");
+    assert_eq!(r.data().clients[&CLIENT].mining, None);
+    // Bedrock and air are not mined.
+    assert_eq!(r.data().stud_mine_ticks([p[0], BEDROCK / TILE_PLATES as i32 - 1, p[2]]), None, "bedrock");
+    assert_eq!(r.data().stud_mine_ticks([p[0], STAND + 3, p[2]]), None, "air");
+}
+
+#[test]
+fn a_right_click_fills_the_tile_against_the_face_from_the_hotbar() {
+    let mut r = survivor(DOWN_45);
+    let at = r.data().eye_stud_hit(CLIENT).unwrap().outside;
+    assert_eq!(r.data().tile_fill(at), TileFill::Open);
+    set_slot(&mut r, 0, Some(stack("stone", 3)));
+    right_click(&mut r);
+    assert_eq!(r.data().tile_fill(at), TileFill::Solid, "a tile of stone on the hit face");
+    assert_eq!(r.data().stud_tile(at).material(), Some(MAT_STONE));
+    assert_eq!(slot(&r, 0), Some(stack("stone", 2)));
+    // A stick is not a block: nothing placed, nothing taken.
+    let next = r.data().eye_stud_hit(CLIENT).unwrap();
+    assert_eq!(next.tile, at, "the new tile is under the crosshair now");
+    set_slot(&mut r, 0, Some(ItemStack { item: STICK, count: 1 }));
+    right_click(&mut r);
+    assert_eq!(r.data().tile_fill(next.outside), TileFill::Open);
+    assert_eq!(slot(&r, 0), Some(ItemStack { item: STICK, count: 1 }));
+}
+
+#[test]
+fn the_chest_item_places_a_chest_and_a_click_opens_it() {
+    let mut r = survivor(DOWN_45);
+    let at = r.data().eye_stud_hit(CLIENT).unwrap().outside;
+    let chest = ItemId::block(chest_block().expect("the manifest has a chest"));
+    set_slot(&mut r, 0, Some(ItemStack { item: chest, count: 2 }));
+    right_click(&mut r);
+    assert!(r.data().stud_chest_at(at), "a chest in the tile on the ground ahead");
+    assert_eq!(r.data().containers().get(&w(at)), Some(&Container::chest()));
+    assert_eq!(slot(&r, 0), Some(ItemStack { item: chest, count: 1 }));
+    // It is under the crosshair now: a right click opens it instead of placing.
+    assert_eq!(r.data().eye_stud_hit(CLIENT).unwrap().tile, at);
+    right_click(&mut r);
+    assert_eq!(r.data().clients[&CLIENT].open_container, Some(w(at)), "the click opened it");
+    assert_eq!(slot(&r, 0), Some(ItemStack { item: chest, count: 1 }), "and placed nothing");
+    assert_eq!(r.data().containers().len(), 1);
+    // Closed and mined, it spills: the chest lies there as an item.
+    r.handle_event(GameEventKind::UiAction(CLIENT, UiAction::CloseInventory)).unwrap();
+    r.forget_last_event();
+    let need = r.data().stud_mine_ticks(at).expect("a chest can be mined");
+    mouse(&mut r, MouseButton::Left, true);
+    for _ in 0..need {
+        barred_tick(&mut r, "mining the chest");
+    }
+    mouse(&mut r, MouseButton::Left, false);
+    assert!(!r.data().stud_chest_at(at) && r.data().containers().is_empty(), "chest and container gone");
+    assert_eq!(piled(r.data(), ItemId::block(chest_block().unwrap())), 1, "the chest itself drops");
+}
+
+#[test]
+fn a_place_the_owner_refuses_gives_the_item_back() {
+    let mut r = survivor(DOWN_45);
+    let at = r.data().eye_stud_hit(CLIENT).unwrap().outside;
+    set_slot(&mut r, 0, Some(stack("stone", 1)));
+    mouse(&mut r, MouseButton::Right, true);
+    barred_tick(&mut r, "the place is sent");
+    mouse(&mut r, MouseButton::Right, false);
+    assert_eq!(slot(&r, 0), None, "taken when sent");
+    // Before it lands the tile fills up (another player's build): the owner refuses.
+    r.with_data(|d| {
+        let (lo, hi) = stud_tile_box(at).unwrap();
+        assert!(d.fill_stud_box_safe(lo, hi, MAT_DIRT) > 0);
+    });
+    for _ in 0..3 {
+        barred_tick(&mut r, "the refusal and the refund");
+    }
+    assert_eq!(r.data().stud_tile(at).material(), Some(MAT_DIRT), "nothing was placed over it");
+    assert_eq!(slot(&r, 0), Some(stack("stone", 1)), "the stone came back");
+}
+
+#[test]
+fn a_thrown_item_lands_in_the_tile_ahead() {
+    // Looking level, facing -z.
+    let mut r = survivor(0.0);
+    set_slot(&mut r, 0, Some(stack("dirt", 5)));
+    input(&mut r, InputEvent::Key { key: Key::KeyQ, pressed: true });
+    barred_tick(&mut r, "a throw");
+    input(&mut r, InputEvent::Key { key: Key::KeyQ, pressed: false });
+    // Two metres ahead (-z), settled onto the ground: the tile over the surface.
+    assert_eq!(piles(r.data()), vec![([20, STAND, 18], vec![stack("dirt", 1)])]);
+    assert_eq!(slot(&r, 0), Some(stack("dirt", 4)));
+    // A wall a tile ahead stops it short: it lands before the wall.
+    r.with_data(|d| {
+        for level in STAND..STAND + 3 {
+            let (lo, hi) = stud_tile_box([20, level, 19]).unwrap();
+            d.fill_stud_box_safe(lo, hi, MAT_STONE);
+        }
+    });
+    tick(&mut r);
+    input(&mut r, InputEvent::Key { key: Key::KeyQ, pressed: true });
+    barred_tick(&mut r, "a throw at a wall");
+    assert_eq!(slot(&r, 0), Some(stack("dirt", 3)));
+    let at: Vec<TilePos> = piles(r.data()).iter().map(|(p, _)| *p).collect();
+    assert_eq!(at, vec![[20, STAND, 18], [20, STAND, 20]], "the second one fell at the thrower's feet, short of the wall");
+}
+
+#[test]
+fn mining_a_trunk_fells_the_stud_tree() {
+    // Three tiles south of the trunk at tile column (8, 8), looking level at it.
+    let mut r = survivor_in(tree_seed(), [8, STAND, 11], 0.0);
+    let p = r.data().eye_stud_hit(CLIENT).expect("the trunk is in reach").tile;
+    assert_eq!([p[0], p[2]], [8, 8], "the trunk");
+    assert!(p[1] > STAND, "at eye height: {p:?}");
+    assert_eq!(r.data().stud_tree_at(p), Some(TREE));
+    let plain = r.data().stud_tile_break_ticks(p).unwrap();
+    let need = r.data().stud_mine_ticks(p).unwrap();
+    assert_eq!(need, plain * FELL_TICKS_FACTOR, "wood of a tree takes the felling factor");
+    let wood = tree_cells(r.data(), TREE)[&MAT_WOOD];
+    mouse(&mut r, MouseButton::Left, true);
+    for _ in 0..need {
+        barred_tick(&mut r, "chopping");
+    }
+    mouse(&mut r, MouseButton::Left, false);
+    assert_eq!(r.data().tile_fill(p), TileFill::Open, "the cut");
+    assert_eq!(stud_bodies(r.data()).len(), 1, "the top falls as one body");
+    assert!(tree_cells(r.data(), TREE)[&MAT_WOOD] < wood, "only the stump stands");
+    assert!(piled(r.data(), item(STUD_WOOD_DROP_BLOCK)) >= 1, "the cut's log lies at the stump");
+    assert_eq!(tree_cells(r.data(), 9)[&MAT_WOOD], 48, "the other tree is untouched");
+}
+
+// --- Wildlife (P10a) ---------------------------------------------------------------
+
+/// Slimes spawn on stud terrain, on the bricks' tops, and never where recipe water
+/// stands over the ground — the stud twin of `slime::no_slime_spawns_under_recipe_water`.
+#[test]
+fn slimes_spawn_on_stud_ground_but_not_under_its_water() {
+    use game::slime::{slime_edge_units, slime_spawn_plan, SLIME_SPAWN_INTERVAL_TICKS};
+    let rc = RegionCoords::new(0, 0);
+    let (t, plan) = (1..200u64)
+        .map(|k| k * SLIME_SPAWN_INTERVAL_TICKS)
+        .find_map(|t| slime_spawn_plan(rc, t).map(|p| (t, p)))
+        .expect("some attempt within 200 intervals succeeds");
+    let everywhere = |g: fn() -> StudColumnGround| StudRegionSeed {
+        ground: (0..REGION_CHUNKS).flat_map(|x| (0..REGION_CHUNKS).map(move |z| (ColumnCoords::new(x, z), g()))).collect(),
+        features: Vec::new(),
+    };
+    let slimes = |r: &Region| -> Vec<EntityKey> { r.data().ecs.slime.iter().filter_map(|(k, s)| s.as_ref().map(|_| k)).collect() };
+    // Dry ground: the attempt spawns one, over the surface of its stud column.
+    let mut dry = region_of(everywhere(flat));
+    dry.jump_clock_to(t);
+    let h = state_hash(dry.data());
+    dry.handle_event(GameEventKind::Tick).unwrap();
+    let born = slimes(&dry);
+    assert_eq!(born.len(), 1, "the attempt spawns on stud ground");
+    let y = {
+        let d = dry.data();
+        d.physics.bodies.get(d.ecs.rigidbody.try_get(born[0]).unwrap()).unwrap().translation().y
+    };
+    let top = plate_units(TOP);
+    let edge = slime_edge_units(plan.size);
+    assert!(y > top + edge / 2.0 - 1.0 && y < top + edge / 2.0 + 16.0, "its body starts just over the bricks: y {y}, top {top}");
+    dry.rollback_last_event();
+    assert_eq!(state_hash(dry.data()), h, "the spawn tick undone");
+    assert!(slimes(&dry).is_empty());
+    // The same attempt over a lake everywhere: nothing spawns on the bed.
+    let mut wet = region_of(everywhere(lake));
+    assert!(wet.data().stud_water_surface_units(plan.vx as f32, plan.vz as f32).is_some(), "water over the planned column");
+    wet.jump_clock_to(t);
+    tick(&mut wet);
+    assert!(slimes(&wet).is_empty(), "no slime on the lake bed");
+}

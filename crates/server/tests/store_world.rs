@@ -309,7 +309,8 @@ fn server_world_is_tiled() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// The installed forged world served on stud terrain (`VOXEL_TERRAIN=studs`), wired as
+/// The installed forged world served on stud terrain — what a server started with
+/// `VOXEL_TERRAIN` unset serves since the cutover (P10a) — wired as
 /// the server wires it: a fresh region pins its tiles, is seeded from recipes sampled
 /// from the forged world, is edited and saved; started again it comes back from the
 /// store with the edit, and genesis does not run again. Part of `server_world_is_tiled`
@@ -323,11 +324,15 @@ fn stored_world_on_stud_terrain(store: &world_store::StoreHandle) {
     use std::collections::BTreeMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
     const WAIT: Duration = Duration::from_secs(120);
-    store.bind_terrain(world_store::TerrainKind::Studs).expect("a world with no saved region takes stud terrain");
-    assert!(matches!(
-        store.bind_terrain(world_store::TerrainKind::Voxels),
-        Err(world_store::StoreError::OtherTerrain { .. })
-    ));
+    // The server's own binding, with the terrain of an unset `VOXEL_TERRAIN`: studs.
+    let default = server::world_file::terrain_from(None).unwrap();
+    assert_eq!(default, world_store::TerrainKind::Studs, "a server started without VOXEL_TERRAIN serves studs");
+    server::world_file::bind_world_terrain(store, default).expect("a world with no saved region takes stud terrain");
+    assert_eq!(store.terrain_kind().unwrap(), Some(world_store::TerrainKind::Studs));
+    // The escape hatch on a stud world is refused, naming the hatch and the way out.
+    let voxels = server::world_file::terrain_from(Some("voxels")).unwrap();
+    let why = server::world_file::bind_world_terrain(store, voxels).unwrap_err();
+    assert!(why.contains("VOXEL_TERRAIN=studs") && why.contains("never converted"), "{why}");
     let seed = worldgen::WORLD_SEED;
     let calls = Arc::new(AtomicUsize::new(0));
     let spawner = || {

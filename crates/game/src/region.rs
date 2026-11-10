@@ -1052,6 +1052,9 @@ impl Region {
             GameEventKind::Order(client_id, crate::Order::PlaceStudAt { chunk, brick }) => {
                 self.data.place_stud_order_safe(client_id, chunk, brick, &mut intents_out);
             }
+            GameEventKind::Order(client_id, crate::Order::RemoveStudAt { chunk, cell }) => {
+                self.data.remove_stud_order_safe(client_id, chunk, cell, &mut intents_out);
+            }
             GameEventKind::Intent(msg) => self.data.receive_intent_safe(msg),
             // A walk is planned against this region's identity.
             GameEventKind::Order(client_id, crate::Order::MoveTo(goal)) => {

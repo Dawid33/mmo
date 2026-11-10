@@ -538,16 +538,20 @@ pub fn run() -> claims::ServerExit {
     // other kind does not start (its regions would come back without terrain).
     let configured_terrain = std::env::var(world_file::TERRAIN_ENV).ok();
     let terrain = world_file::terrain_from(configured_terrain.as_deref()).unwrap_or_else(|e| fatal(&e));
+    let keyword_studs =
+        matches!(world_source, world_file::WorldSource::Studs | world_file::WorldSource::StudsProcedural);
     match &store {
-        Some(store) => store.bind_terrain(terrain).unwrap_or_else(|e| fatal(&e.to_string())),
-        None if configured_terrain.as_deref().is_some_and(|v| !v.trim().is_empty()) => log::warn!(
-            "[server] {} is ignored: this world has no store ({} names its terrain)",
+        Some(store) => world_file::bind_world_terrain(store, terrain).unwrap_or_else(|e| fatal(&e)),
+        None if keyword_studs && configured_terrain.as_deref().is_some_and(|v| !v.trim().is_empty()) => log::warn!(
+            "[server] {} is ignored: {} names this world's terrain",
             world_file::TERRAIN_ENV,
             worldgen::forged::WORLD_FILE_ENV
         ),
         None => {}
     }
-    let store_studs = store.is_some() && terrain == world_store::TerrainKind::Studs;
+    // Stud terrain from `VOXEL_TERRAIN` (the default): a stored world's, or the noise world's.
+    let terrain_studs = !keyword_studs && terrain == world_store::TerrainKind::Studs;
+    let store_studs = store.is_some() && terrain_studs;
     // Which regions this process simulates, and the super-region side that
     // decides it: a bad setting stops the start, naming the variable.
     let ownership = game::Ownership::from_env().unwrap_or_else(|e| fatal(&e));
@@ -655,7 +659,9 @@ pub fn run() -> claims::ServerExit {
             "[server] world: forged, in the world store {url:?} (sampled from its tiles), terrain: {terrain} ({})",
             world_file::TERRAIN_ENV
         ),
-        world_file::WorldSource::Procedural => info!("[server] world: procedural (nothing is saved)"),
+        world_file::WorldSource::Procedural => {
+            info!("[server] world: procedural, terrain: {terrain} ({}; nothing is saved)", world_file::TERRAIN_ENV)
+        }
         world_file::WorldSource::Studs => info!("[server] world: studs (toy bricks, nothing is saved)"),
         world_file::WorldSource::StudsProcedural => {
             info!("[server] world: procedural on stud terrain (nothing is saved)")
@@ -675,8 +681,8 @@ pub fn run() -> claims::ServerExit {
         if configured_lod_threads.is_some() { "LOD_BUILD_THREADS" } else { "default: cores / 4, clamped 2..=6" }
     );
     let toy_studs = matches!(world_source, world_file::WorldSource::Studs);
-    // Stud terrain: the store-less stud worlds, or a stored world on `VOXEL_TERRAIN=studs`.
-    let studs = toy_studs || store_studs || matches!(world_source, world_file::WorldSource::StudsProcedural);
+    // Stud terrain: the keyword stud worlds, or any other world unless `VOXEL_TERRAIN=voxels`.
+    let studs = keyword_studs || terrain_studs;
     let lod_builder: Box<dyn game::LodBuilder> = if toy_studs {
         // The 3x3 toy world has nothing beyond its regions.
         Box::new(game::NullLodBuilder::default())

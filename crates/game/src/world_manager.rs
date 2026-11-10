@@ -3186,7 +3186,13 @@ impl<S: RegionSpawner> WorldManager<S> {
         let t = bundle.body.pose.translation;
         let b = crate::BLOCK_VOXELS as f32;
         let n = crate::REGION_BLOCKS as i32;
-        let local = [(t.x / b).floor() as i32, (t.y / b).floor() as i32, (t.z / b).floor() as i32];
+        // Pile cells are blocks, or on stud terrain tiles (as wide, 1.2 m tall): a
+        // stud body's drops go to the tile under it.
+        let cell_height = match bundle.carried.stud_body {
+            Some(_) => crate::TerrainKind::Stud.tile_height_units(),
+            None => b,
+        };
+        let local = [(t.x / b).floor() as i32, (t.y / cell_height).floor() as i32, (t.z / b).floor() as i32];
         let cell = crate::WorldBlockPos::from_local(
             source,
             crate::BlockPos::new(local[0].clamp(0, n - 1), local[1], local[2].clamp(0, n - 1)),

@@ -3,7 +3,11 @@
 //!
 //! Presets:
 //! - `embarked` — a small generated world (`ForgeParams::default()`: the 16 km /
-//!   32 m continent) in `worlds/debug-embarked/`, played with a fortress embarked.
+//!   32 m continent) in `worlds/debug-embarked/`, played with a fortress embarked,
+//!   on stud terrain (the server's default; `VOXEL_TERRAIN=voxels` is the old voxel
+//!   world). The world's server refuses a world last served on the other terrain
+//!   (terrain is never converted): the start fails with the server log's reason,
+//!   and `--reset` re-forges.
 //!   The world and its fortress are REUSED between runs: an existing world is
 //!   loaded (not re-forged) and the client returns to the fortress it founded
 //!   there (the server keeps it in the world's `terrain.history`). Only deleting
@@ -80,7 +84,8 @@ pub const USAGE: &str = "usage: client [debug embarked [--reset | --port N | --j
     With no arguments the client opens on the main menu.\n\
     \n\
     presets:\n  \
-      embarked   a small generated world with a fortress embarked (worlds/debug-embarked/);\n             \
+      embarked   a small generated world with a fortress embarked (worlds/debug-embarked/),\n             \
+                 on stud terrain; a world last played on voxel terrain is refused: --reset;\n             \
                  reused between runs, --reset re-forges it and embarks afresh;\n             \
                  --port N hosts its server on UDP port N, --join HOST:PORT joins a\n             \
                  running server instead (several clients on one world); --adventure-at SITE\n             \
@@ -88,7 +93,8 @@ pub const USAGE: &str = "usage: client [debug embarked [--reset | --port N | --j
       online     log in (VOXEL_LOGIN_URL, VOXEL_LOGIN_EMAIL, VOXEL_LOGIN_PASSWORD), join the\n             \
                  login service's world ID (default `dev`) and embark as `embarked` does\n             \
                  (`just run-online` starts the login service and a server for it)\n  \
-      studs      the toy-brick test world: 3x3 regions of stud chunks, no store, no menu;\n             \
+      studs      the toy-brick TEST world: 3x3 regions of stud chunks, no store, no menu\n             \
+                 (`embarked` and the menu play real worlds on stud terrain);\n             \
                  --procedural plays the procedural noise world on stud terrain instead.\n             \
                  Run it via `just run-studs`, which sets near radius 1 and, for the toy\n             \
                  world, disables the LOD rings (a bare `client debug studs` keeps the defaults)";
@@ -201,8 +207,8 @@ pub fn parse_args<S: AsRef<str>>(args: &[S]) -> Result<Option<DebugScenario>, St
                 return Err(format!("--join plays on another client's world: not with --reset or --port\n\n{USAGE}"));
             }
             match *preset {
-                "embarked" if world.is_none() => Ok(Some(DebugScenario::Embarked { reset, port, join, adventure_at })),
-                "online" if !reset && port.is_none() && join.is_none() && adventure_at.is_none() => {
+                "embarked" if world.is_none() && !procedural => Ok(Some(DebugScenario::Embarked { reset, port, join, adventure_at })),
+                "online" if !reset && !procedural && port.is_none() && join.is_none() && adventure_at.is_none() => {
                     Ok(Some(DebugScenario::Online { world: world.unwrap_or_else(|| DEFAULT_ONLINE_WORLD.into()) }))
                 }
                 "studs" if !game::stud::STUDS_SUPPORTED => Err(format!(

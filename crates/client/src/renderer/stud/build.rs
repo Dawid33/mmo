@@ -5,8 +5,9 @@
 //! loaded region's chunks, else the stud halo), and a placement is sent as the
 //! world-addressed `Order::PlaceStudAt`, which the home region applies itself or
 //! hands to the neighbour that owns the chunk — so placing against, or into, a
-//! neighbouring region works. Removal (`Order::RemoveStud`) is region-local in
-//! the sim: a right click removes only a brick of the home region.
+//! neighbouring region works. Removal is the world-addressed `Order::RemoveStudAt`
+//! the same way: a right click removes the brick under the cursor in the home
+//! region or in a neighbour's chunk of its halo band.
 //!
 //! While the mode is on the Slint build palette is shown (`palette.rs`,
 //! `palette_ui.rs`, `ui/stud-build.slint`): the part list, the rotation, the
@@ -20,7 +21,7 @@ use bevy::window::PrimaryWindow;
 use game::movement::UNITS_PER_METER;
 use game::stud_catalog::STUD_PARTS;
 use game::rapier3d::math::Vector;
-use game::{plate_units, Order, RegionId, StudBrick, StudChunk, StudChunkCoords, StudShape, StudWorldHit, WorldChunkPos, STUD_UNITS};
+use game::{plate_units, Order, RegionId, StudBrick, StudChunk, StudShape, StudWorldHit, WorldChunkPos, STUD_UNITS};
 
 use super::mesh::{body_mesh, stud_assets, stud_mesh, StudAssets, StudMeshData, StudNeighbours};
 use super::systems::to_mesh;
@@ -98,8 +99,9 @@ pub struct StudTarget {
     pub place: Option<(WorldChunkPos, StudBrick)>,
     /// Whether the placement has room (and lies where the home region can reach).
     pub valid: bool,
-    /// The home-region brick a right click removes (`None` for a hit in another region).
-    pub remove: Option<(StudChunkCoords, [u8; 3])>,
+    /// The brick a right click removes: the hit cell and its world chunk (`None`
+    /// where the home region's sim does not reach: beyond its halo band).
+    pub remove: Option<(WorldChunkPos, [u8; 3])>,
 }
 
 impl StudTarget {
@@ -111,7 +113,7 @@ impl StudTarget {
 
     /// The order a right click sends.
     pub fn remove_order(&self) -> Option<Order> {
-        self.remove.map(|(chunk, cell)| Order::RemoveStud { chunk, cell })
+        self.remove.map(|(chunk, cell)| Order::RemoveStudAt { chunk, cell })
     }
 }
 
@@ -146,8 +148,11 @@ pub fn build_target<'a>(
             None => !world.recipe(key.x, key.z).is_some_and(|g| key.y < *g.surface_layers().start()),
         }
     });
-    let (region, c) = hit.chunk.to_local();
-    let remove = (region == home).then_some((StudChunkCoords { x: c.x, y: c.y, z: c.z }, hit.cell));
+    // As far as the home region's sim reaches: its own chunks and its halo band.
+    let local = hit.chunk.local_in(home);
+    let n = game::REGION_CHUNKS as i32;
+    let reached = ((0..n).contains(&local[0]) && (0..n).contains(&local[2])) || game::halo::in_halo_band(local[0], local[2]);
+    let remove = reached.then_some((hit.chunk, hit.cell));
     Some(StudTarget { hit: Some(hit), place, valid, remove })
 }
 
@@ -384,7 +389,11 @@ mod tests {
         assert_eq!(chunk, b);
         assert_eq!(chunk.to_local().0, RegionCoords::new(1, 0));
         assert_eq!(brick.min, [0, 3, 2]);
-        assert_eq!(t.remove_order(), None, "removal stays region-local: nothing for a neighbour's brick");
+        assert_eq!(
+            t.remove_order(),
+            Some(Order::RemoveStudAt { chunk: b, cell: [0, 2, 2] }),
+            "a neighbour's brick is removed by the world-addressed order"
+        );
 
         // Against the west face of the neighbour's pillar from the east side, low
         // enough to see it: the brick lands beside it, still in the neighbour.
@@ -399,7 +408,7 @@ mod tests {
         let t = build_target(&build(), &w, chunk_of, home, origin, Vector::new(0.0, -1.0, 0.0)).expect("the home floor");
         assert_eq!(t.hit.unwrap().chunk, a);
         assert!(matches!(t.place_order(), Some(Order::PlaceStudAt { chunk, .. }) if chunk == a));
-        assert!(matches!(t.remove_order(), Some(Order::RemoveStud { chunk, .. }) if chunk.x == a.x as usize));
+        assert!(matches!(t.remove_order(), Some(Order::RemoveStudAt { chunk, .. }) if chunk == a));
     }
 
     #[test]

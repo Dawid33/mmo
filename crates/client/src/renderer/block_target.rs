@@ -222,26 +222,24 @@ pub fn update_looked_at(
     looked.set_if_neq(LookedAtBlock(hit));
 }
 
-/// The brick the first-person eye ray hits on stud terrain, as its world-space
-/// box (min, max) — in whichever loaded region (or stud halo) it lies.
+/// The TILE the first-person eye ray hits on stud terrain, as its world-space box
+/// (min, max) — in whichever loaded region (or stud halo) it lies. A tile, not the
+/// brick: it is what mining breaks and what a placed block fills (`game::mining`).
 #[derive(Resource, Default, Debug, Clone, Copy, PartialEq)]
 pub struct LookedAtStud(pub Option<(Vec3, Vec3)>);
 
-/// The world-space box of the brick a stud ray hit (the hit cell alone when the
-/// chunk no longer holds a brick there).
-pub fn stud_hit_box(hit: &game::StudWorldHit, chunk: Option<&game::StudChunk>) -> (Vec3, Vec3) {
-    let (min, size) = match chunk.and_then(|c| c.brick_at(hit.cell)) {
-        Some(b) => (b.min, b.size()),
-        None => (hit.cell, [1, 1, 1]),
-    };
+/// The world-space box of the tile holding the cell a stud ray hit (a tile never
+/// straddles a chunk).
+pub fn stud_hit_box(hit: &game::StudWorldHit) -> (Vec3, Vec3) {
+    let (ts, tp) = (game::TILE_STUDS as i32, game::TILE_PLATES as i32);
     let cell = |c: [i32; 3]| Vec3::new((c[0] * game::STUD_UNITS as i32) as f32, game::plate_units(c[1]), (c[2] * game::STUD_UNITS as i32) as f32);
     let origin = super::stud::world::world_chunk_origin(hit.chunk);
-    let lo = min.map(i32::from);
-    let hi = [lo[0] + size[0] as i32, lo[1] + size[1] as i32, lo[2] + size[2] as i32];
-    (origin + cell(lo), origin + cell(hi))
+    let c = hit.cell.map(i32::from);
+    let lo = [c[0] / ts * ts, c[1] / tp * tp, c[2] / ts * ts];
+    (origin + cell(lo), origin + cell([lo[0] + ts, lo[1] + tp, lo[2] + ts]))
 }
 
-/// Find the brick under the first-person crosshair on stud terrain: the sim's
+/// Find the tile under the first-person crosshair on stud terrain: the sim's
 /// `WorldView::stud_raycast` walk over the client's stud mirror, within the
 /// block reach.
 pub fn update_looked_at_stud(
@@ -267,16 +265,12 @@ pub fn update_looked_at_stud(
             Vector::new(dir.x, dir.y, dir.z),
             reach,
         )?;
-        let chunk = match world.entity_at(hit.chunk) {
-            Some(e) => chunk_of(e),
-            None => world.halo_chunk(hit.chunk),
-        };
-        Some(stud_hit_box(&hit, chunk))
+        Some(stud_hit_box(&hit))
     })();
     looked.set_if_neq(LookedAtStud(hit));
 }
 
-/// Outline the looked-at brick (stud terrain).
+/// Outline the looked-at tile (stud terrain).
 pub fn draw_stud_highlight(looked: Res<LookedAtStud>, mut gizmos: Gizmos<BlockHighlightGizmos>) {
     let Some((lo, hi)) = looked.0 else { return };
     let tf = Transform::from_translation((lo + hi) / 2.0).with_scale((hi - lo) * HIGHLIGHT_INFLATE);
@@ -294,21 +288,29 @@ pub fn draw_highlight(
     gizmos.cube(Transform::from_translation(block_centre(region, p)).with_scale(Vec3::splat(edge)), HIGHLIGHT_COLOR);
 }
 
-/// Where the crack cube goes and at which stage: the block being mined in
-/// `region`, once it has taken damage. Nothing on stud terrain: the cube and
-/// its texture are a voxel BLOCK's (a metre cube on the block grid), and the
-/// sim has no survival mining on studs yet — should it report one before the
-/// cracks are ported to bricks, a block-sized cube must not be drawn on them.
+/// Where the crack cube goes, its scale and its stage: the block being mined in
+/// `region`, once it has taken damage. On stud terrain the sim mines TILES
+/// (`game::mining`): the cube is stretched to the tile's 1 m x 1.2 m x 1 m box.
 pub fn crack_target(
     mining: Option<game::MiningView>,
     region: Option<game::RegionId>,
     terrain: game::TerrainKind,
-) -> Option<(Vec3, usize)> {
-    if terrain == game::TerrainKind::Stud {
+) -> Option<(Vec3, Vec3, usize)> {
+    let (m, region) = (mining?, region?);
+    if m.progress_per_mille == 0 {
         return None;
     }
-    let (m, region) = (mining?, region?);
-    (m.progress_per_mille > 0).then(|| (block_centre(region, m.target), crack_stage(m.progress_per_mille)))
+    let stage = crack_stage(m.progress_per_mille);
+    match terrain {
+        game::TerrainKind::Voxel => Some((block_centre(region, m.target), Vec3::ONE, stage)),
+        game::TerrainKind::Stud => {
+            let (w, h) = (terrain.tile_width_units(), terrain.tile_height_units());
+            let [x, y, z] = m.target;
+            let local = Vec3::new((x as f32 + 0.5) * w, terrain.level_bottom_units(y) + h / 2.0, (z as f32 + 0.5) * w);
+            let scale = Vec3::new(w, h, w) / BLOCK_VOXELS as f32;
+            Some((local + Vec3::from_array(region.world_offset()), scale, stage))
+        }
+    }
 }
 
 /// Show the crack stage of the block being mined, or hide the overlay.
@@ -323,21 +325,24 @@ pub fn update_cracks(
     let want = crack_target(items.as_ref().and_then(|i| i.mining), mirror.region(), mirror.terrain());
     let existing = overlay.0.and_then(|e| shown.get_mut(e).ok());
     match (want, existing) {
-        (Some((at, stage)), Some((mut tf, mut mat, mut vis))) => {
+        (Some((at, scale, stage)), Some((mut tf, mut mat, mut vis))) => {
             if tf.translation != at {
                 tf.translation = at;
+            }
+            if tf.scale != scale {
+                tf.scale = scale;
             }
             if mat.0 != assets.stages[stage] {
                 mat.0 = assets.stages[stage].clone();
             }
             vis.set_if_neq(Visibility::Visible);
         }
-        (Some((at, stage)), None) => {
+        (Some((at, scale, stage)), None) => {
             let e = commands
                 .spawn((
                     Mesh3d(assets.mesh.clone()),
                     MeshMaterial3d(assets.stages[stage].clone()),
-                    Transform::from_translation(at),
+                    Transform::from_translation(at).with_scale(scale),
                     Visibility::Visible,
                     NotShadowCaster,
                     NotShadowReceiver,
@@ -401,32 +406,37 @@ mod tests {
     }
 
     #[test]
-    fn cracks_are_drawn_on_voxel_blocks_only() {
+    fn cracks_sit_on_the_mined_block_or_stud_tile() {
         let region = Some(game::RegionCoords::new(0, 0));
         let mining = Some(game::MiningView { target: [3, 4, 5], progress_per_mille: 500 });
-        let (at, stage) = crack_target(mining, region, game::TerrainKind::Voxel).expect("a damaged block");
+        let (at, scale, stage) = crack_target(mining, region, game::TerrainKind::Voxel).expect("a damaged block");
         assert_eq!(at, Vec3::new(3.5, 4.5, 5.5) * BLOCK_VOXELS as f32);
+        assert_eq!((scale, stage), (Vec3::ONE, crack_stage(500)));
+        // A stud tile: as wide as a block, 1.2 m tall, its bottom at level 4's.
+        let stud = game::TerrainKind::Stud;
+        let (at, scale, stage) = crack_target(mining, region, stud).expect("a damaged tile");
+        let bv = BLOCK_VOXELS as f32;
+        assert!(at.abs_diff_eq(Vec3::new(3.5 * bv, stud.level_bottom_units(4) + 0.6 * bv, 5.5 * bv), 1e-3), "{at}");
+        assert!(scale.abs_diff_eq(Vec3::new(1.0, 1.2, 1.0), 1e-5), "{scale}");
         assert_eq!(stage, crack_stage(500));
-        assert_eq!(crack_target(mining, region, game::TerrainKind::Stud), None, "no block-sized cube on bricks");
-        let untouched = Some(game::MiningView { target: [3, 4, 5], progress_per_mille: 0 });
-        assert_eq!(crack_target(untouched, region, game::TerrainKind::Voxel), None);
-        assert_eq!(crack_target(None, region, game::TerrainKind::Voxel), None);
-        assert_eq!(crack_target(mining, None, game::TerrainKind::Voxel), None);
+        for terrain in [game::TerrainKind::Voxel, stud] {
+            let untouched = Some(game::MiningView { target: [3, 4, 5], progress_per_mille: 0 });
+            assert_eq!(crack_target(untouched, region, terrain), None);
+            assert_eq!(crack_target(None, region, terrain), None);
+            assert_eq!(crack_target(mining, None, terrain), None);
+        }
     }
 
     #[test]
-    fn the_stud_highlight_is_the_whole_hit_brick() {
-        use game::{plate_units, StudBrick, StudChunk, WorldChunkPos, CHUNK_UNITS, STUD_CHUNK_HEIGHT_UNITS, STUD_UNITS};
-        let chunk = StudChunk::new([StudBrick::filler([4, 3, 6], [2, 3, 4], 4)]).unwrap();
+    fn the_stud_highlight_is_the_tile_of_the_hit_cell() {
+        use game::{plate_units, WorldChunkPos, CHUNK_UNITS, STUD_CHUNK_HEIGHT_UNITS, STUD_UNITS};
         let hit = game::StudWorldHit { chunk: WorldChunkPos::new(-1, 2, 3), cell: [5, 4, 8], normal: [0, 1, 0], t: 1.0 };
         let o = Vec3::new(-(CHUNK_UNITS as f32), 2.0 * STUD_CHUNK_HEIGHT_UNITS as f32, 3.0 * CHUNK_UNITS as f32);
         let s = STUD_UNITS as f32;
-        let (lo, hi) = stud_hit_box(&hit, Some(&chunk));
-        assert_eq!(lo, o + Vec3::new(4.0 * s, plate_units(3), 6.0 * s));
-        assert_eq!(hi, o + Vec3::new(6.0 * s, plate_units(6), 10.0 * s));
-        // No chunk content at hand: the hit cell.
-        let (lo, hi) = stud_hit_box(&hit, None);
-        assert!((hi - lo).abs_diff_eq(Vec3::new(s, plate_units(1), s), 1e-3));
+        // Cell (5, 4, 8) lies in the tile of studs 4..6, plates 0..6, studs 8..10.
+        let (lo, hi) = stud_hit_box(&hit);
+        assert!(lo.abs_diff_eq(o + Vec3::new(4.0 * s, plate_units(0), 8.0 * s), 1e-3), "{lo}");
+        assert!(hi.abs_diff_eq(o + Vec3::new(6.0 * s, plate_units(6), 10.0 * s), 1e-3), "{hi}");
     }
 
     #[test]

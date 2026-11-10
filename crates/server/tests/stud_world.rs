@@ -450,3 +450,44 @@ fn stored_stud_region_keeps_its_trees_and_a_falling_one() {
     store.shutdown();
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The cutover's default against old worlds (P10a, D5: no conversion): a store last
+/// served as a voxel world is refused by a server started without `VOXEL_TERRAIN`
+/// (studs), with a message naming the re-forge and the escape hatch; nothing is
+/// written, so the escape hatch still opens it. A world nobody served yet takes studs.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn a_voxel_world_is_refused_by_the_stud_default() {
+    use world_store::TerrainKind;
+    let default = server::world_file::terrain_from(None).unwrap();
+    assert_eq!(default, TerrainKind::Studs, "an unset VOXEL_TERRAIN is studs since the cutover");
+    let dir = scratch("voxel-world");
+    let url = world_store::StoreUrl::Sqlite(dir.join("w.sqlite"));
+    let open = || world_store::StoreHandle::open(&url, world_store::Dials::BUILT, world_store::OpenMode::Writer).unwrap();
+    // A world from before the cutover: tied to voxels by the server that served it.
+    let store = open();
+    server::world_file::bind_world_terrain(&store, TerrainKind::Voxels).unwrap();
+    store.shutdown();
+
+    let store = open();
+    let why = server::world_file::bind_world_terrain(&store, default).unwrap_err();
+    assert!(why.contains("voxels terrain") && why.contains("VOXEL_TERRAIN=voxels"), "names the stored kind and the hatch: {why}");
+    assert!(why.contains("re-forge") && why.contains("just run --reset"), "says how to get a stud world: {why}");
+    assert_eq!(store.terrain_kind().unwrap(), Some(TerrainKind::Voxels), "nothing was changed");
+    // The escape hatch (`VOXEL_TERRAIN=voxels`) still serves it.
+    let hatch = server::world_file::terrain_from(Some("voxels")).unwrap();
+    server::world_file::bind_world_terrain(&store, hatch).expect("the voxel world on the escape hatch");
+    store.shutdown();
+
+    // A world no server has served yet becomes a stud world by default.
+    let fresh = scratch("fresh-world");
+    let url = world_store::StoreUrl::Sqlite(fresh.join("w.sqlite"));
+    let store = world_store::StoreHandle::open(&url, world_store::Dials::BUILT, world_store::OpenMode::Writer).unwrap();
+    assert_eq!(store.terrain_kind().unwrap(), None);
+    server::world_file::bind_world_terrain(&store, default).unwrap();
+    assert_eq!(store.terrain_kind().unwrap(), Some(TerrainKind::Studs));
+    store.shutdown();
+    for d in [dir, fresh] {
+        let _ = std::fs::remove_dir_all(&d);
+    }
+}

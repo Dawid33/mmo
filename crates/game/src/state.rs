@@ -1287,7 +1287,12 @@ impl Rollback {
         let water = self.recipe_water_top_at(vx.div_euclid(bv), vz.div_euclid(bv)).map(|top| (top + 1) * bv - 1);
         // The voxel surface's top face, or a stud surface above it.
         let voxel_top = ground.max(water).map(|surface| (surface + 1) as f32);
-        let top = match (voxel_top, self.stud_surface_y(x, z)) {
+        // Stud terrain: the bricks' top, or the recipe water standing over it.
+        let stud_top = match (self.stud_surface_y(x, z), self.stud_water_surface_units(x, z)) {
+            (Some(s), Some(w)) => Some(s.max(w)),
+            (s, w) => s.or(w),
+        };
+        let top = match (voxel_top, stud_top) {
             (Some(v), Some(s)) => Some(v.max(s)),
             (v, s) => v.or(s),
         };
