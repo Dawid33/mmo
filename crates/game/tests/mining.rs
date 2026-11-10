@@ -1,27 +1,19 @@
-//! Survival mining (`game::mining`, plan 2026-11-05 Decisions 7, 8, 11): an
-//! Adventure player holding the left button on a block breaks it after
-//! `break_ticks` ticks (the hand rule), it drops its item as a pile, a short
-//! cooldown follows; the right button places the selected hotbar block
-//! (consuming it), and Q / Ctrl+Q throw the selected item two blocks ahead.
-//! Fortress clients keep the instant creative edit (`block_edit.rs`).
-use crate::common;
+//! Survival mining on stud tiles (`game::mining`, plan 2026-11-05 Decisions 7,
+//! 8, 11; stud world plan P10a): an Adventure player holding the left button
+//! on a tile breaks it after its break time, it drops its yield as a pile, a
+//! short cooldown follows; the right button places the selected hotbar block
+//! (consuming it). This file holds what `stud_gameplay::` (break, drop, place,
+//! throw, trunk — each tick with the rollback bar) does not: retargeting,
+//! exact cooldown counts, the state a body must not carry across a seam or a
+//! restore, a whole session rolled back, and a break across a seam in every
+//! placement.
+use crate::common::{self, r0, STAND};
 
-use common::r0;
 use game::edit::BlockPos;
 use game::{
-    install_block_props, state_hash, Block, BlockId, BlockRegistry, Chunk, ChunkCoords, GameEventKind, InputEvent,
-    ItemId, ItemStack, Key, MouseButton, PlayMode, Pose, Region, Rollback, BREAK_COOLDOWN_TICKS, CHUNK_UNITS,
-    STICK, THROWN_PICKUP_DELAY_TICKS,
+    state_hash, GameEventKind, InputEvent, ItemId, ItemStack, Key, MouseButton, Order, PlayMode, Region, Rollback,
+    TileFill, TileSource, BREAK_COOLDOWN_TICKS,
 };
-
-const MANIFEST: &str = include_str!("../../../assets/blocks/blocks.ron");
-const DIRT: BlockId = BlockId(1);
-const GRASS: BlockId = BlockId(3);
-const OAK_LEAVES: BlockId = BlockId(15);
-const DIRT_ITEM: ItemId = ItemId(1);
-
-/// Chunk column holding the player spawn (128, 128).
-const SPAWN_CHUNK: usize = 128 / CHUNK_UNITS;
 
 /// About 45 degrees down: 302 px * 0.0026 rad/px at the default sensitivity.
 const DOWN_45: f32 = 302.0;
@@ -35,44 +27,27 @@ fn forget(region: &mut Region, ev: GameEventKind) {
     region.forget_last_event();
 }
 
-/// A two-block dirt floor around the spawn, player 0 settled in the middle
-/// of block (8, 2, 8), first person, in Adventure, looking 45 degrees down
-/// (`pitch_px` of mouse motion). Setup is forgotten.
-fn region(pitch_px: f32) -> Region {
-    region_with(pitch_px, |_| Chunk::flat_floor(32))
+fn dirt() -> ItemId {
+    ItemId::block(game::block_props().id_named("dirt").expect("the manifest has dirt"))
 }
 
-/// [`region`] over a custom floor chunk (the same for every column).
-fn region_with(pitch_px: f32, floor: impl Fn(ChunkCoords) -> Chunk) -> Region {
-    let reg = BlockRegistry::from_ron(MANIFEST).unwrap();
-    install_block_props(reg.props());
-    let mut chunks = Vec::new();
-    let around = SPAWN_CHUNK.saturating_sub(1)..=SPAWN_CHUNK + 1;
-    for x in around.clone() {
-        for z in around.clone() {
-            let at = ChunkCoords::new(x, 0, z);
-            chunks.push((at, floor(at)));
-        }
-    }
+/// Flat stud ground (grass over dirt over stone) under the whole region,
+/// player 0 standing on tile (8, `STAND`, 8), first person, in Adventure,
+/// facing −z and looking `pitch_px` of mouse motion down, its inventory
+/// empty. Setup is forgotten.
+fn region(pitch_px: f32) -> Region {
+    common::install_real_block_props();
     let (send, recv) = crossbeam::channel::unbounded();
     std::mem::forget(recv);
     let mut region = Region::new(Rollback::new(Some(send.clone())), Some(send), r0(), None);
-    region.with_data(|r| r.seed_terrain_genesis(chunks));
+    region.seed_stud_world(common::uniform_seed());
     forget(&mut region, GameEventKind::CreateClient(0));
+    forget(&mut region, GameEventKind::Order(0, Order::SetMode { mode: PlayMode::Adventure, at: Some([8, STAND, 8]) }));
     forget(&mut region, input(InputEvent::FpsCam(true)));
-    region.with_data(|r| {
-        let c = r.clients.get_mut(&0).unwrap();
-        c.mode = PlayMode::Adventure;
-        c.inventory = game::Inventory::new();
-    });
+    region.with_data(|r| r.clients.get_mut(&0).unwrap().inventory = game::Inventory::new());
     for _ in 0..12 {
         forget(&mut region, GameEventKind::Tick);
     }
-    let y = body(&region)[1];
-    region.with_data(|r| {
-        let e = *r.data.player_entites.get(&0).unwrap();
-        r.set_body_pose_safe(e, Pose::translation(136.0, y, 136.0));
-    });
     forget(&mut region, input(InputEvent::MouseMotion { dx: 0.0, dy: pitch_px }));
     for _ in 0..3 {
         forget(&mut region, GameEventKind::Tick);
@@ -81,30 +56,22 @@ fn region_with(pitch_px: f32, floor: impl Fn(ChunkCoords) -> Chunk) -> Region {
     region
 }
 
-fn body(region: &Region) -> [f32; 3] {
-    let data = region.data();
-    let e = *data.player_entites.get(&0).unwrap();
-    data.physics.bodies.get(*data.ecs.rigidbody.get(e)).unwrap().translation().to_array()
-}
-
+/// The tile under the crosshair.
 fn target(region: &Region) -> BlockPos {
-    region.data().eye_hit(0).expect("the eye ray must hit a block").block
+    region.data().eye_stud_hit(0).expect("the eye ray must hit a tile").tile
 }
 
-fn block(region: &Region, p: BlockPos) -> BlockId {
-    region.data().block_at(p).map_or(BlockId::AIR, |b| b.id)
+fn open(region: &Region, p: BlockPos) -> bool {
+    common::tile_open(region.data(), p)
 }
 
-fn set_block(region: &mut Region, p: BlockPos, id: BlockId) {
-    region.with_data(|r| assert!(r.set_block_safe(p, Block::new(id)), "write at {p:?}"));
+/// Ticks the hand needs for tile `p`.
+fn need(region: &Region, p: BlockPos) -> usize {
+    region.data().stud_mine_ticks(p).expect("a tile that can be mined") as usize
 }
 
 fn mouse(region: &mut Region, button: MouseButton, pressed: bool) {
     region.handle_event(input(InputEvent::MouseButton { button, pressed })).unwrap();
-}
-
-fn key(region: &mut Region, key: Key, pressed: bool) {
-    region.handle_event(input(InputEvent::Key { key, pressed })).unwrap();
 }
 
 fn ticks(region: &mut Region, n: usize) {
@@ -125,12 +92,12 @@ fn slot(region: &Region, slot: usize) -> Option<ItemStack> {
     region.data().clients[&0].inventory.slots[slot]
 }
 
-/// Ticks until `p` turns to air while the left button is held (at most
+/// Ticks until tile `p` is open while the left button is held (at most
 /// `limit`), counting the tick that breaks it.
 fn ticks_to_break(region: &mut Region, p: BlockPos, limit: usize) -> Option<usize> {
     for n in 1..=limit {
         ticks(region, 1);
-        if block(region, p) == BlockId::AIR {
+        if open(region, p) {
             return Some(n);
         }
     }
@@ -138,131 +105,54 @@ fn ticks_to_break(region: &mut Region, p: BlockPos, limit: usize) -> Option<usiz
 }
 
 #[test]
-fn dirt_breaks_after_15_ticks() {
-    let mut region = region(DOWN_45);
-    let a = target(&region);
-    assert_eq!(block(&region, a), DIRT);
-    mouse(&mut region, MouseButton::Left, true);
-    ticks(&mut region, 14);
-    assert_eq!(block(&region, a), DIRT, "still solid after 14 ticks");
-    let view = game::mining_view(&region.data().clients[&0], region.current_tick() as u64).unwrap();
-    assert_eq!(view.target, a);
-    assert_eq!(view.progress_per_mille, 14 * 1000 / 15);
-    ticks(&mut region, 1);
-    assert_eq!(block(&region, a), BlockId::AIR, "broken on the 15th tick");
-    // One dirt resting in the hole, on the block below it.
-    assert_eq!(piles(&region), vec![(a, vec![ItemStack { item: DIRT_ITEM, count: 1 }])]);
-    assert!(region.data().clients[&0].mining.is_none());
-}
-
-#[test]
-fn a_mined_slope_ends_as_air_and_drops_one_dirt() {
-    // Find where the 45 degree eye ray lands on the plain floor, then make
-    // exactly that block a slope.
-    let a = target(&region(DOWN_45));
-    let (coords, (bx, by, bz)) = game::edit::locate(a).unwrap();
-    let bi = game::BlockIndex::from_xyz(bx, by, bz);
-    let mut region = region_with(DOWN_45, |at| {
-        let mut c = Chunk::flat_floor(32);
-        if at == coords {
-            c.set_block(bx, by, bz, Block::new(DIRT));
-            c.chisel.insert(bi, game::slope_chisel(DIRT, game::SlopeShape::Straight { low: game::Side::PosX }));
-        }
-        c
-    });
-    let chisel_at = |region: &Region| {
-        let snap = region.terrain_snapshot();
-        snap.chunks.iter().find(|(c, _)| *c == coords).and_then(|(_, c)| c.chisel.get(&bi).cloned())
-    };
-    assert_eq!(target(&region), a, "the ray must still land on the same cell");
-    assert_eq!(block(&region, a), DIRT);
-    let slope = game::slope_chisel(DIRT, game::SlopeShape::Straight { low: game::Side::PosX });
-    assert_eq!(chisel_at(&region), Some(slope), "the targeted cell carries the slope chisel");
-    mouse(&mut region, MouseButton::Left, true);
-    assert!(ticks_to_break(&mut region, a, 40).is_some(), "the slope must break");
-    assert_eq!(block(&region, a), BlockId::AIR);
-    assert_eq!(chisel_at(&region), None, "a broken block keeps no chisel");
-    assert_eq!(piles(&region), vec![(a, vec![ItemStack { item: DIRT_ITEM, count: 1 }])]);
-}
-
-#[test]
 fn release_cancels_progress() {
     let mut region = region(DOWN_45);
     let a = target(&region);
+    let n = need(&region, a);
+    assert!(n > 4, "a tile of soil takes a while: {n}");
     mouse(&mut region, MouseButton::Left, true);
-    ticks(&mut region, 10);
+    ticks(&mut region, n - 2);
     mouse(&mut region, MouseButton::Left, false);
     ticks(&mut region, 1);
     assert!(region.data().clients[&0].mining.is_none(), "release cancels");
+    assert!(!open(&region, a));
     mouse(&mut region, MouseButton::Left, true);
-    assert_eq!(ticks_to_break(&mut region, a, 40), Some(15), "progress starts over");
+    assert_eq!(ticks_to_break(&mut region, a, 3 * n), Some(n), "progress starts over");
 }
 
 #[test]
 fn retarget_restarts() {
     let mut region = region(DOWN_45);
     let a = target(&region);
+    let n = need(&region, a);
     mouse(&mut region, MouseButton::Left, true);
-    ticks(&mut region, 10);
-    // A quarter turn: another block.
+    ticks(&mut region, n - 2);
+    // A quarter turn: another tile.
     region.handle_event(input(InputEvent::MouseMotion { dx: 604.0, dy: 0.0 })).unwrap();
     ticks(&mut region, 1);
     let b = target(&region);
     assert_ne!(a, b);
-    assert_eq!(block(&region, b), DIRT);
+    assert_eq!(region.data().tile_fill(b), TileFill::Solid);
+    let nb = need(&region, b);
     let m = region.data().clients[&0].mining.clone().unwrap();
     assert_eq!(m.target, b);
-    assert_eq!(m.needed_ticks, 15);
-    // That tick counted for b: 14 more.
-    assert_eq!(ticks_to_break(&mut region, b, 40), Some(14));
-    assert_eq!(block(&region, a), DIRT, "the first target was left alone");
+    assert_eq!(m.needed_ticks as usize, nb);
+    // That tick counted for b: one less.
+    assert_eq!(ticks_to_break(&mut region, b, 3 * nb), Some(nb - 1));
+    assert_eq!(region.data().tile_fill(a), TileFill::Solid, "the first target was left alone");
 }
 
 #[test]
-fn cooldown_blocks_next_break_for_6_ticks() {
+fn cooldown_blocks_next_break() {
     let mut region = region(DOWN_45);
     let a = target(&region);
+    let n = need(&region, a);
     mouse(&mut region, MouseButton::Left, true);
-    assert_eq!(ticks_to_break(&mut region, a, 40), Some(15));
+    assert_eq!(ticks_to_break(&mut region, a, 3 * n), Some(n));
     let b = target(&region);
     assert_ne!(a, b);
-    assert_eq!(block(&region, b), DIRT);
-    assert_eq!(ticks_to_break(&mut region, b, 60), Some(BREAK_COOLDOWN_TICKS as usize + 15));
-}
-
-#[test]
-fn leaves_drop_nothing() {
-    let mut region = region(DOWN_45);
-    let a = target(&region);
-    set_block(&mut region, a, OAK_LEAVES);
-    assert_eq!(target(&region), a, "leaves stop the eye ray");
-    mouse(&mut region, MouseButton::Left, true);
-    // Hardness 20: ceil(20 * 30 / 100) = 6.
-    assert_eq!(ticks_to_break(&mut region, a, 40), Some(6));
-    assert!(piles(&region).is_empty(), "{:?}", piles(&region));
-}
-
-#[test]
-fn grass_drops_dirt() {
-    let mut region = region(DOWN_45);
-    let a = target(&region);
-    set_block(&mut region, a, GRASS);
-    mouse(&mut region, MouseButton::Left, true);
-    // Hardness 60: 18 ticks.
-    assert_eq!(ticks_to_break(&mut region, a, 40), Some(18));
-    assert_eq!(piles(&region), vec![(a, vec![ItemStack { item: DIRT_ITEM, count: 1 }])]);
-}
-
-#[test]
-fn break_ticks_follow_the_hand_rule() {
-    let reg = BlockRegistry::from_ron(MANIFEST).unwrap();
-    let props = reg.props();
-    let id = |n: &str| props.id_named(n).unwrap();
-    assert_eq!(game::break_ticks(&props, Block::new(DIRT)), 15);
-    assert_eq!(game::break_ticks(&props, Block::new(id("stone"))), 45);
-    assert_eq!(game::break_ticks(&props, Block::new(id("oak_branch"))), 30);
-    // A trunk takes FELL_TICKS_FACTOR times as long.
-    assert_eq!(game::break_ticks(&props, Block::new(id("oak_log"))), 60 * game::FELL_TICKS_FACTOR);
+    let nb = need(&region, b);
+    assert_eq!(ticks_to_break(&mut region, b, 4 * nb), Some(BREAK_COOLDOWN_TICKS as usize + nb));
 }
 
 /// Right click with the selected slot, one tick, release.
@@ -274,64 +164,23 @@ fn right_click(region: &mut Region) {
 }
 
 #[test]
-fn place_consumes_selected_and_refuses_non_block() {
-    let mut region = region(DOWN_45);
-    let hit = region.data().eye_hit(0).unwrap();
-    let at = [hit.block[0] + hit.normal[0], hit.block[1] + hit.normal[1], hit.block[2] + hit.normal[2]];
-    set_slot(&mut region, 0, Some(ItemStack { item: ItemId(2), count: 3 }));
-    right_click(&mut region);
-    assert_eq!(block(&region, at), BlockId(2), "stone placed on the hit face");
-    assert_eq!(slot(&region, 0), Some(ItemStack { item: ItemId(2), count: 2 }));
-
-    // A stick is not a block: nothing placed, nothing taken.
-    let hit = region.data().eye_hit(0).unwrap();
-    let at = [hit.block[0] + hit.normal[0], hit.block[1] + hit.normal[1], hit.block[2] + hit.normal[2]];
-    set_slot(&mut region, 0, Some(ItemStack { item: STICK, count: 1 }));
-    right_click(&mut region);
-    assert_eq!(block(&region, at), BlockId::AIR);
-    assert_eq!(slot(&region, 0), Some(ItemStack { item: STICK, count: 1 }));
-}
-
-#[test]
 fn place_with_empty_slot_does_nothing() {
     let mut region = region(DOWN_45);
-    let hit = region.data().eye_hit(0).unwrap();
-    let at = [hit.block[0] + hit.normal[0], hit.block[1] + hit.normal[1], hit.block[2] + hit.normal[2]];
+    let at = region.data().eye_stud_hit(0).unwrap().outside;
+    assert!(open(&region, at));
     // The selected slot (0) is empty; another slot holds dirt.
-    set_slot(&mut region, 3, Some(ItemStack { item: DIRT_ITEM, count: 5 }));
+    set_slot(&mut region, 3, Some(ItemStack { item: dirt(), count: 5 }));
     right_click(&mut region);
-    assert_eq!(block(&region, at), BlockId::AIR);
-    assert_eq!(slot(&region, 3), Some(ItemStack { item: DIRT_ITEM, count: 5 }));
-}
-
-#[test]
-fn throw_lands_two_blocks_ahead_on_ground() {
-    // Looking level, facing -z.
-    let mut region = region(0.0);
-    set_slot(&mut region, 0, Some(ItemStack { item: DIRT_ITEM, count: 5 }));
-    let t = region.current_tick() as u64;
-    key(&mut region, Key::KeyQ, true);
-    ticks(&mut region, 1);
-    key(&mut region, Key::KeyQ, false);
-    // Body block (8, 2, 8); two blocks ahead (-z) on the floor (y 2).
-    assert_eq!(piles(&region), vec![([8, 2, 6], vec![ItemStack { item: DIRT_ITEM, count: 1 }])]);
-    assert_eq!(region.data().item_piles()[&game::WorldBlockPos::from_local(r0(), game::BlockPos::new(8, 2, 6))].pickup_after_tick, t + THROWN_PICKUP_DELAY_TICKS);
-    assert_eq!(slot(&region, 0), Some(ItemStack { item: DIRT_ITEM, count: 4 }));
-
-    // Ctrl+Q: the whole stack.
-    ticks(&mut region, 1);
-    key(&mut region, Key::ControlLeft, true);
-    key(&mut region, Key::KeyQ, true);
-    ticks(&mut region, 1);
-    assert_eq!(piles(&region), vec![([8, 2, 6], vec![ItemStack { item: DIRT_ITEM, count: 5 }])]);
-    assert_eq!(slot(&region, 0), None);
+    assert!(open(&region, at));
+    assert_eq!(slot(&region, 3), Some(ItemStack { item: dirt(), count: 5 }));
 }
 
 #[test]
 fn mining_undo_roundtrip() {
     let mut region = region(DOWN_45);
     let a = target(&region);
-    set_slot(&mut region, 0, Some(ItemStack { item: DIRT_ITEM, count: 5 }));
+    let n = need(&region, a);
+    set_slot(&mut region, 0, Some(ItemStack { item: dirt(), count: 5 }));
     let before = state_hash(region.data());
     let mut events = 0;
     let mut run = |region: &mut Region, ev: GameEventKind| {
@@ -339,27 +188,30 @@ fn mining_undo_roundtrip() {
         events += 1;
     };
     run(&mut region, input(InputEvent::MouseButton { button: MouseButton::Left, pressed: true }));
-    for _ in 0..20 {
+    for _ in 0..n + 1 {
         run(&mut region, GameEventKind::Tick);
     }
-    assert_eq!(block(&region, a), BlockId::AIR, "the break happened");
+    assert!(open(&region, a), "the break happened");
     assert!(!piles(&region).is_empty());
     run(&mut region, input(InputEvent::MouseButton { button: MouseButton::Left, pressed: false }));
-    // Places dirt back into the hole (pushing the pile up), then throws.
+    // Places dirt against the face now under the crosshair, then throws.
+    let at = region.data().eye_stud_hit(0).expect("the hole's wall").outside;
     run(&mut region, input(InputEvent::MouseButton { button: MouseButton::Right, pressed: true }));
     run(&mut region, GameEventKind::Tick);
-    // The place is an intent to the cell's owner: it lands at the next tick.
+    // The place is an intent to the tile's owner: it lands at the next tick.
     run(&mut region, GameEventKind::Tick);
-    assert_eq!(block(&region, a), DIRT, "placed back");
+    assert!(!open(&region, at), "placed");
+    assert_eq!(slot(&region, 0), Some(ItemStack { item: dirt(), count: 4 }));
+    run(&mut region, input(InputEvent::MouseButton { button: MouseButton::Right, pressed: false }));
     run(&mut region, input(InputEvent::Key { key: Key::KeyQ, pressed: true }));
     run(&mut region, GameEventKind::Tick);
-    assert_eq!(slot(&region, 0), Some(ItemStack { item: DIRT_ITEM, count: 3 }));
+    assert_eq!(slot(&region, 0), Some(ItemStack { item: dirt(), count: 3 }));
     for _ in 0..events {
         region.rollback_last_event();
     }
     assert_eq!(state_hash(region.data()), before, "mining, place and throw roll back bit-exact");
     assert!(piles(&region).is_empty());
-    assert_eq!(slot(&region, 0), Some(ItemStack { item: DIRT_ITEM, count: 5 }));
+    assert_eq!(slot(&region, 0), Some(ItemStack { item: dirt(), count: 5 }));
 }
 
 /// A stale mining state and a cooldown far in the future, as a client
@@ -369,7 +221,7 @@ fn stale_mining(region: &mut Region) {
     region.with_data(|r| {
         let c = r.clients.get_mut(&0).unwrap();
         c.break_cooldown_until = 1_000_000;
-        c.mining = Some(game::Mining { target: [3, 1, 3], started_tick: 999_990, needed_ticks: 15 });
+        c.mining = Some(game::Mining { target: [3, STAND - 1, 3], started_tick: 999_990, needed_ticks: 15 });
     });
 }
 
@@ -377,6 +229,7 @@ fn stale_mining(region: &mut Region) {
 fn cooldown_does_not_cross_into_a_younger_region() {
     let mut region = region(DOWN_45);
     let a = target(&region);
+    let n = need(&region, a);
     stale_mining(&mut region);
     // The body arrives over a seam (here: from region (1, 0)).
     region.with_data(|r| {
@@ -389,13 +242,14 @@ fn cooldown_does_not_cross_into_a_younger_region() {
     assert_eq!((c.break_cooldown_until, c.mining), (0, None), "region-local state reset on arrival");
     assert_eq!(target(&region), a);
     mouse(&mut region, MouseButton::Left, true);
-    assert_eq!(ticks_to_break(&mut region, a, 40), Some(15), "mining progresses at once");
+    assert_eq!(ticks_to_break(&mut region, a, 3 * n), Some(n), "mining progresses at once");
 }
 
 #[test]
 fn cooldown_does_not_survive_a_restore() {
     let mut region = region(DOWN_45);
     let a = target(&region);
+    let n = need(&region, a);
     stale_mining(&mut region);
     let record = region.data().player_record(0, r0()).expect("a record");
     assert_eq!((record.client.break_cooldown_until, record.client.mining), (0, None), "the record drops it");
@@ -410,7 +264,7 @@ fn cooldown_does_not_survive_a_restore() {
     ticks(&mut region, 3);
     assert_eq!(target(&region), a);
     mouse(&mut region, MouseButton::Left, true);
-    assert_eq!(ticks_to_break(&mut region, a, 40), Some(15), "mining progresses at once");
+    assert_eq!(ticks_to_break(&mut region, a, 3 * n), Some(n), "mining progresses at once");
 }
 
 // --- Across a seam (Task 6.2) -------------------------------------------------
@@ -419,26 +273,38 @@ use std::cell::RefCell;
 
 use crate::common::rig::Rig;
 use crate::common::seam_translate::{assert_seam_invariant, offset, spawn_tile, Scenario};
-use game::{InlineSchedule, Order, WorldBlockPos};
+use game::{InlineSchedule, WorldBlockPos};
 
-/// Rounds the button is held at most (dirt: 15 ticks to break).
+/// The dirt a dug tile of the flat ground's top level yields (`stud_drops` of
+/// its carve: grass and dirt both drop dirt).
+fn floor_tile_yield() -> u32 {
+    let mut region = common::region_of(r0(), common::uniform_seed());
+    let mut removed = Vec::new();
+    region.with_data(|d| {
+        let (lo, hi) = game::stud_tile_box([8, STAND - 1, 8]).expect("a tile");
+        removed = d.carve_stud_safe(lo, hi);
+    });
+    let drops = game::stud_drops(&removed);
+    assert!(drops.iter().all(|s| s.item == dirt()) && !drops.is_empty(), "{drops:?}");
+    drops.iter().map(|s| s.count).sum()
+}
+
+/// Rounds the button is held at most (a tile of grass over dirt breaks in
+/// well under a second).
 const MINE_ROUNDS: u32 = 30;
 
-/// The world block `p`'s owner sees, and that owner's tick.
-fn owner_block(rig: &mut Rig, p: WorldBlockPos) -> (BlockId, u64) {
+/// Whether world tile `p` is open at its owner, and that owner's tick.
+fn owner_open(rig: &mut Rig, p: WorldBlockPos) -> (bool, u64) {
     let (rc, local) = p.to_local();
     let mut out = None;
     rig.manager.spawner_mut().with_region(rc, |r| {
-        out = Some((
-            r.data().block_at([local.x, local.y, local.z]).map_or(BlockId::AIR, |b| b.id),
-            r.current_tick(),
-        ));
+        out = Some((common::tile_open(r.data(), [local.x, local.y, local.z]), r.current_tick()));
     });
     out.expect("the owner runs")
 }
 
-/// An Adventure player two blocks from the seam (+x/+z of the origin)
-/// mines the floor block one block across it (−x/−z): the last tick sends
+/// An Adventure player two tiles from the seam (+x/+z of the origin)
+/// mines the floor tile one tile across it (−x/−z): the last tick sends
 /// the break to the block's owner. Records, per run, how many ticks after
 /// the press the block broke at its owner, and whether the drop is a pile
 /// there.
@@ -459,7 +325,7 @@ impl Scenario for MineAcross {
             rig.round();
         }
         let target = offset(origin, -1, -1, -1);
-        // The middle of its top face: the ray meets no other solid block.
+        // The middle of its top face: the ray meets no other tile.
         rig.aim_at([target.x as f64 + 0.5, target.y as f64 + 1.0, target.z as f64 + 0.5]);
         assert_eq!(rig.eye_hit().map(|h| h.0), Some(target), "the crosshair is on the block across the seam");
         let home = rig.owners()[0];
@@ -477,8 +343,8 @@ impl Scenario for MineAcross {
         if entry.0.is_some() {
             return;
         }
-        let (id, tick) = owner_block(rig, target);
-        if id == BlockId::AIR {
+        let (open, tick) = owner_open(rig, target);
+        if open {
             entry.0 = Some(tick - pressed_at);
             let (rc, _) = target.to_local();
             rig.manager.spawner_mut().with_region(rc, |r| entry.1 = !r.data().item_piles().is_empty());
@@ -504,8 +370,8 @@ fn break_block_across_seam() {
     assert!(end.terrain.values().any(|d| d.is_some()), "the block broke: {:?}", end.terrain);
     assert_eq!(
         end.piles.values().cloned().collect::<Vec<_>>(),
-        vec![vec![ItemStack { item: DIRT_ITEM, count: 1 }]],
-        "one dirt dropped"
+        vec![vec![ItemStack { item: dirt(), count: floor_tile_yield() }]],
+        "what a dug tile of this ground yields, in one pile"
     );
     let seen = s.seen.borrow().clone();
     assert_eq!(seen.len(), 4, "one entry per placement");

@@ -1,9 +1,8 @@
 use crate::common;
 use crossbeam::channel::{unbounded, Receiver};
 use game::{
-    Block, BlockId, Chunk, ClientId, ClientPacket, Column, ColumnCoords,
-    InlineLodBuilder, InlineSpawner, LodBuilder, RegionCoords, RegionOutput,
-    ServerEvent, ServerPacket, SubChunk, WorldManager, FLIP_HYSTERESIS, REGION_SIZE, SPAWN_REGION,
+    ClientId, ClientPacket, InlineSpawner, RegionCoords, RegionOutput, ServerEvent, ServerPacket, WorldManager,
+    FLIP_HYSTERESIS, REGION_SIZE, SPAWN_REGION,
 };
 
 struct Harness {
@@ -15,27 +14,10 @@ struct Harness {
 fn harness() -> Harness {
     let (out_send, packets) = unbounded();
     let (region_out_send, region_out) = unbounded();
-    let generator = Box::new(|_rc: RegionCoords| -> Vec<(ColumnCoords, Column)> {
-        let below = Block::new(BlockId::AIR);
-        let above = Block::new(BlockId::AIR);
-        let sub = SubChunk::Dense(Box::new(Chunk::flat_floor(8)));
-        vec![(ColumnCoords::new(0, 0), Column::new(0, below, above, vec![sub]))]
-    });
-    let (lod_result_send, lod_result_recv) = unbounded();
-    let lod_builder: Box<dyn LodBuilder> = Box::new(InlineLodBuilder {
-        coarse: Box::new(|_key: &game::lod::LodKey| Vec::new()),
-        water: Box::new(game::lod::LodWater::dry),
-        out: lod_result_send,
-    });
+    // Flat stud ground under chunk column (0, 0) of every region.
+    let spawner = common::stud_spawner(|_rc| common::floor_seed(0.0..1.0, 0.0..1.0, common::FLOOR_PLATES));
     Harness {
-        manager: WorldManager::new(
-            InlineSpawner::default(),
-            generator,
-            out_send,
-            region_out_send,
-            lod_builder,
-            lod_result_recv,
-        ),
+        manager: common::stud_manager(spawner, out_send, region_out_send),
         region_out,
         packets,
     }
@@ -71,7 +53,7 @@ impl Harness {
             region.with_data(|d| {
                 d.set_body_pose_safe(
                     key,
-                    game::Pose::from_translation(game::rapier3d::math::Vector::new(x, 26.0, z)),
+                    game::Pose::from_translation(game::rapier3d::math::Vector::new(x, common::above_floor_y(), z)),
                 )
             });
         });
@@ -92,9 +74,9 @@ use game::rapier3d::math::Vector;
 
 fn flat_region() -> game::Region {
     let (send, _recv) = crossbeam::channel::unbounded();
-    let chunks = common::floor_chunks(0.0..2.0 * common::CHUNK_EDGE, 0.0..2.0 * common::CHUNK_EDGE, 16);
+    let seed = common::floor_seed(0.0..2.0 * common::CHUNK_EDGE, 0.0..2.0 * common::CHUNK_EDGE, common::FLOOR_PLATES);
     let mut region = game::Region::new(game::Rollback::new(Some(send.clone())), Some(send), common::r0(), None);
-    region.with_data(|r| r.seed_terrain_genesis(chunks));
+    region.seed_stud_world(seed);
     region
 }
 
@@ -134,9 +116,9 @@ fn people_here_lists_bodies_in_id_order() {
 
 fn flat_rollback() -> game::Rollback {
     let (send, recv) = crossbeam::channel::unbounded();
-    let chunks = common::floor_chunks(0.0..2.0 * common::CHUNK_EDGE, 0.0..2.0 * common::CHUNK_EDGE, 16);
+    let seed = common::floor_seed(0.0..2.0 * common::CHUNK_EDGE, 0.0..2.0 * common::CHUNK_EDGE, common::FLOOR_PLATES);
     let mut r = game::Rollback::new(Some(send));
-    r.seed_terrain_genesis(chunks);
+    common::seed_studs(&mut r, seed);
     while recv.try_recv().is_ok() {}
     std::mem::forget(recv);
     r
@@ -210,13 +192,13 @@ fn arrival_of_a_person_with_a_body_is_ignored() {
 
 // ---- walking ----
 
-use game::{Goal, GameEventKind, Region, BLOCK_VOXELS, REGION_BLOCKS};
+use game::{Goal, GameEventKind, Region, REGION_BLOCKS};
 
 fn floored_region() -> Region {
     let (send, _recv) = crossbeam::channel::unbounded();
     let mut region = Region::new(game::Rollback::new(Some(send.clone())), Some(send), common::r0(), None);
     let size = REGION_SIZE;
-    region.with_data(|r| r.seed_terrain_genesis(common::floor_chunks(0.0..size, 0.0..size, 16)));
+    region.seed_stud_world(common::floor_seed(0.0..size, 0.0..size, common::FLOOR_PLATES));
     region
 }
 
@@ -226,7 +208,7 @@ fn tick(region: &mut Region) {
 }
 
 fn column_xz(c: [i32; 2]) -> (f32, f32) {
-    let bv = BLOCK_VOXELS as f32;
+    let bv = common::TILE_W;
     ((c[0] as f32 + 0.5) * bv, (c[1] as f32 + 0.5) * bv)
 }
 
@@ -273,14 +255,14 @@ fn person_wanders_near_spawn() {
     region.with_data(|d| {
         d.spawn_person_safe(P, start).unwrap();
     });
-    let limit = (game::people::WANDER_RADIUS_BLOCKS as f32 + 2.0) * BLOCK_VOXELS as f32;
+    let limit = (game::people::WANDER_RADIUS_BLOCKS as f32 + 2.0) * common::TILE_W;
     let mut moved = false;
     for _ in 0..2000 {
         tick(&mut region);
         let (x, z) = person_xz(&region);
         let d = (x - start.0).abs().max((z - start.1).abs());
         assert!(d <= limit, "wandered {d} units from spawn");
-        moved |= d > BLOCK_VOXELS as f32;
+        moved |= d > common::TILE_W;
     }
     assert!(moved, "the person wandered at least once");
 }
@@ -376,9 +358,10 @@ fn idle_person_falls_when_the_ground_is_dug() {
     assert!(region.data().ecs.walker.try_get(e).is_none());
     let y0 = region.data().people_here()[0].1[1];
     region.with_data(|d| {
+        // The floor's top tile, five tiles each way around the person.
         for x in 28..=32 {
             for z in 28..=32 {
-                assert!(d.set_block_safe([x, 0, z], game::Block::new(game::BlockId::AIR)));
+                assert!(common::carve_tile(d, [x, common::STAND - 1, z]));
             }
         }
     });
@@ -387,7 +370,7 @@ fn idle_person_falls_when_the_ground_is_dug() {
     }
     assert!(region.data().ecs.walker.try_get(e).is_none(), "still idle");
     let y = region.data().people_here()[0].1[1];
-    assert!(y < y0 - BLOCK_VOXELS as f32 / 2.0, "fell from {y0} to {y}");
+    assert!(y < y0 - common::tile_h() / 2.0, "fell from {y0} to {y}");
 }
 
 // ---- undo: every new mutator rolls back bit-exact (HashMode::Full default) ----
@@ -414,6 +397,7 @@ fn tick_and_undo(region: &mut Region) {
 }
 
 #[test]
+#[ignore = "slow: >100ms — run via just test-full"]
 fn wander_tick_undo_restores_hash() {
     let (mut region, e) = region_with_person(column_xz([30, 30]));
     let mut checked = false;
@@ -491,7 +475,7 @@ fn spawn_person_event_spawns() {
     let here = r.region_mut().data().people_here();
     assert_eq!(here.len(), 1);
     assert_eq!(here[0].0, P);
-    let bv = BLOCK_VOXELS as f32;
+    let bv = common::TILE_W;
     assert_eq!((here[0].1[0], here[0].1[2]), (10.5 * bv, 12.5 * bv));
     r.handle_input(RegionInput::Event(GameEventKind::DespawnPerson(P)));
     assert!(r.region_mut().data().people_here().is_empty());
@@ -504,7 +488,7 @@ fn spawn_near_person() {
     r.handle_input(spawn_ev(PersonId(8), SpawnAt::NearPerson(P)));
     let here = r.region_mut().data().people_here();
     assert_eq!(here.len(), 2);
-    let bv = BLOCK_VOXELS as f32;
+    let bv = common::TILE_W;
     let (a, b) = (here[0].1, here[1].1);
     let (dx, dz) = (((b[0] - a[0]) / bv).abs(), ((b[2] - a[2]) / bv).abs());
     assert!(dx <= 2.0 && dz <= 2.0 && (dx > 0.0 || dz > 0.0), "dx={dx} dz={dz}");
@@ -517,7 +501,7 @@ fn spawn_near_person() {
 fn spawn_at_edge_is_on_edge() {
     let (mut r, _out) = person_runner();
     r.handle_input(spawn_ev(P, SpawnAt::Edge { from: RegionCoords::new(-1, 0), along_per_mille: 500 }));
-    let bv = BLOCK_VOXELS as f32;
+    let bv = common::TILE_W;
     let here = r.region_mut().data().people_here();
     assert!(here[0].1[0] < bv, "x block column 0, got {}", here[0].1[0]);
     let mid = REGION_BLOCKS as f32 * bv / 2.0;
@@ -592,7 +576,7 @@ fn client_replica_converges_on_person_events() {
     let (send, _server_updates) = crossbeam::channel::unbounded();
     let mut server_region =
         Region::new(game::Rollback::new(Some(send.clone())), Some(send), common::r0(), None);
-    server_region.with_data(|r| r.seed_terrain_genesis(common::floor_chunks(0.0..REGION_SIZE, 0.0..REGION_SIZE, 16)));
+    server_region.seed_stud_world(common::floor_seed(0.0..REGION_SIZE, 0.0..REGION_SIZE, common::FLOOR_PLATES));
     server_region.set_map_extent(extent);
     let mut server = game::World::new();
     server.load(&common::r0(), server_region);
@@ -644,7 +628,7 @@ fn client_replica_converges_on_person_events() {
         }
     }
     assert!(wandered, "the idle person wandered");
-    assert!(furthest_x > (n - 2) as f32 * BLOCK_VOXELS as f32, "walked out to the +x edge: x {furthest_x}");
+    assert!(furthest_x > (n - 2) as f32 * common::TILE_W, "walked out to the +x edge: x {furthest_x}");
     let here = server.data(&common::r0()).people_here();
     assert_eq!(here.iter().map(|(p, _)| *p).collect::<Vec<_>>(), vec![P], "on the map's edge, not over it");
     assert_eq!(client.data(&common::r0()).people_here(), here);
@@ -673,13 +657,20 @@ fn cut_snapshot_restores_without_players_or_people() {
     assert_eq!((*id, *tick, portable.meta.tick), (game::CutId(1), at, at));
     assert_eq!(portable.players.iter().map(|(c, _)| *c).collect::<Vec<_>>(), vec![4], "the player as a record");
     assert!(portable.entities.iter().all(|b| b.client.is_none() && !matches!(b.kind, game::EntityKind::Person { .. })));
-    let terrain = r.region_mut().terrain_fingerprint();
+    // The terrain as the save would write it from nothing: the recipes and the
+    // rows of chunks that differ from them (none on this untouched ground).
+    let terrain = |d: &game::Rollback| {
+        let (p, _) = d.portable_snapshot(&Default::default());
+        (p.stud_ground, p.stud_chunks, d.stud_index.len())
+    };
+    let saved = terrain(r.region_mut().data());
+    assert!(saved.0.as_ref().is_some_and(|g| !g.is_empty()) && saved.2 > 0);
     let (restored, _) = game::restore_portable(common::r0(), game::StoredRegion::from((**portable).clone()));
     let data = restored.data();
     assert!(data.people_here().is_empty(), "the history respawns its people");
     assert!(data.player_entites.is_empty() && data.clients.is_empty(), "no stale sessions");
     assert_eq!(restored.current_tick(), at);
-    assert_eq!(restored.terrain_fingerprint(), terrain);
+    assert!(terrain(restored.data()) == saved, "the restored region has the saved terrain");
     // A cut whose tick the region has passed is missed.
     assert!(r.handle_input(RegionInput::SaveAt(game::CutId(2), at)));
     assert!(out.try_iter().any(|(_, o)| matches!(o, RegionOutput::CutMissed(game::CutId(2)))));
@@ -775,7 +766,7 @@ fn wander_across_seam() {
             if rc != north() {
                 continue;
             }
-            let bv = BLOCK_VOXELS as f32;
+            let bv = common::TILE_W;
             let reached = goals.iter().any(|g| {
                 let (gx, gz) = ((g.column[0] as f32 + 0.5) * bv, (g.column[1] as f32 + 0.5) * bv);
                 ((x - gx).powi(2) + (z - gz).powi(2)).sqrt() <= reach

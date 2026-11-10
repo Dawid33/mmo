@@ -205,7 +205,7 @@ fn runtime_and_genesis_colliders_agree() {
 
 #[test]
 fn player_spawns_above_stud_surface() {
-    let mut region = Region::from_chunks(RegionCoords::new(0, 0), vec![]);
+    let mut region = Region::new(Rollback::new(None), None, RegionCoords::new(0, 0), None);
     let (sx, sz) = region.data().spawn_xz();
     let c = StudChunkCoords {
         x: sx as usize / CHUNK_UNITS,
@@ -215,21 +215,11 @@ fn player_spawns_above_stud_surface() {
     region.seed_studs(vec![(c, chunk([filler([32, 50, 32], [0, 0, 0])]))]);
     assert_eq!(region.data().body_scale(), movement::BodyScale::STUD);
     let y = region.data().player_spawn_y((sx, sz));
-    assert!(y > plate_units(50), "spawn y {y}");
-}
-
-#[test]
-fn stud_chunks_never_enter_chunk_index() {
-    let (r, _rx) = genesis(chunk([filler([32, 50, 32], [0, 0, 0])]));
-    for y in -2..4 {
-        assert_eq!(r.chunk_key_at(ChunkCoords::new(C.x, y, C.z)), None);
-    }
-    let (x, z) = (
-        (C.x * CHUNK_UNITS + 8) as i32,
-        (C.z * CHUNK_UNITS + 8) as i32,
-    );
-    assert_eq!(r.surface_voxel_y(x, z), None);
-    assert_eq!(r.stud_surface_y(x as f32, z as f32), Some(plate_units(50)));
+    // On the bricks' top: the stud capsule's half extent, then the spawn
+    // clearance (3.6 units) scaled with the body.
+    let s = movement::BodyScale::STUD;
+    let want = plate_units(50) + s.capsule_half_height() + s.capsule_radius() + 3.6 * s.factor;
+    assert!((y - want).abs() < 1e-3, "spawn y {y} vs {want}");
 }
 
 /// Shape hashes of `key`'s ENABLED colliders, in body order.

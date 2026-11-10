@@ -273,7 +273,7 @@ mod tests {
         let mut app = app();
         let region = RegionId::new(0, 0);
         let key = EntityKey::default();
-        let body_at = pile_world_position(region, [3, 2, 3], game::TerrainKind::Voxel) + Vec3::Y * 16.0;
+        let body_at = pile_world_position(region, [3, 2, 3], game::TerrainKind::Stud) + Vec3::Y * 16.0;
         let body = app.world_mut().spawn((Transform::from_translation(body_at), GlobalTransform::from_translation(body_at))).id();
         app.world_mut().resource_mut::<SimEntityMap>().0.insert((region, key), body);
         let pick = PickupView { cell: [3, 1, 3], entity: key, stacks: dirt(20), tick: 9 };
@@ -297,13 +297,13 @@ mod tests {
         app.world_mut().write_message(ItemPileMsg::Set { region, changes: vec![(to, Some(PileView { stacks: dirt(1) }))] });
         app.world_mut().write_message(ItemPileMsg::Landed { region, flights: vec![PileFlight { from, to, stacks: dirt(1), tick: 3 }] });
         steps(&mut app, 2);
-        let start = pile_world_position(region, from, game::TerrainKind::Voxel).y;
+        let start = pile_world_position(region, from, game::TerrainKind::Stud).y;
         let f = flights(&mut app);
         assert_eq!(f.len(), 1);
-        assert!(f[0].y < start + 16.0 && f[0].y > pile_world_position(region, to, game::TerrainKind::Voxel).y, "in the air between the cells");
+        assert!(f[0].y < start + 16.0 && f[0].y > pile_world_position(region, to, game::TerrainKind::Stud).y, "in the air between the cells");
         let mut q = app.world_mut().query::<(&ItemPileRoot, &Visibility)>();
         assert!(q.iter(app.world()).all(|(_, v)| *v == Visibility::Hidden), "the pile waits for its flight");
-        let secs = landing_secs(pile_world_position(region, from, game::TerrainKind::Voxel), pile_world_position(region, to, game::TerrainKind::Voxel));
+        let secs = landing_secs(pile_world_position(region, from, game::TerrainKind::Stud), pile_world_position(region, to, game::TerrainKind::Stud));
         steps(&mut app, (secs / 0.05) as usize + 3);
         assert!(flights(&mut app).is_empty(), "landed");
         let mut q = app.world_mut().query::<(&ItemPileRoot, &Visibility)>();

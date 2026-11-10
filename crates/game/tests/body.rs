@@ -1,23 +1,30 @@
 //! The generic dynamic body (`game::body`, `EntityKind::Body`): it falls
 //! under the world's gravity, comes to rest asleep on the floor, and every
 //! tick of its tumble rolls back bit-exact.
-use crate::common::{floor_chunks, install_real_block_props, r0};
+use crate::common::{floor_seed, install_real_block_props, r0, FLOOR_PLATES, TILE_W};
 use game::body::BODY_SETTLE_TICKS;
 use game::rapier3d::math::Vector;
 use game::{
-    state_hash, ColliderSpec, EntityKey, EntityKind, GameEventKind, Pose, Region, Rollback, BLOCK_VOXELS, REGION_SIZE,
+    state_hash, ColliderSpec, EntityKey, EntityKind, GameEventKind, Pose, Region, Rollback, REGION_SIZE,
 };
 
-const B: f32 = BLOCK_VOXELS as f32;
-/// The floor's top surface (one block deep from y 0), units.
-const FLOOR_TOP: f32 = B;
+/// One metre (a tile's width), sim units.
+const B: f32 = TILE_W;
+/// The floor's top surface (flat stud ground at `FLOOR_PLATES`), units: 3.2 units a
+/// plate, exact in `f32` for 30 plates.
+pub const FLOOR_TOP: f32 = FLOOR_PLATES as f32 * 3.2;
 
-/// A region floored one block deep edge to edge, no players.
+/// The y of a body's lowest point resting on the studded floor: on the stud caps.
+pub fn caps_top() -> f32 {
+    FLOOR_TOP + game::stud_cap_units()
+}
+
+/// A region of flat stud ground edge to edge, no players.
 pub fn floored_region() -> Region {
     install_real_block_props();
     let (send, _recv) = crossbeam::channel::unbounded();
     let mut region = Region::new(Rollback::new(Some(send.clone())), Some(send), r0(), None);
-    region.with_data(|r| r.seed_terrain_genesis(floor_chunks(0.0..REGION_SIZE, 0.0..REGION_SIZE, BLOCK_VOXELS as u32)));
+    region.seed_stud_world(floor_seed(0.0..REGION_SIZE, 0.0..REGION_SIZE, FLOOR_PLATES));
     region
 }
 
@@ -61,7 +68,8 @@ fn body_falls_and_sleeps() {
     }
     let body = live_body(&region, e);
     assert!(slept_at.is_some(), "asleep within {BODY_SETTLE_TICKS} ticks (y {})", body.translation().y);
-    let rest = FLOOR_TOP + B / 2.0;
+    // A studded floor: the cube rests on the stud caps.
+    let rest = caps_top() + B / 2.0;
     // 1 cm = 0.16 units.
     assert!((body.translation().y - rest).abs() < 0.01 * B, "resting on the floor: y {} vs {rest}", body.translation().y);
 }
@@ -110,7 +118,8 @@ fn spawn_rolls_back_bit_exact() {
 }
 
 /// `Order::DevDropBody`: a 1 m cube [`game::body::DEV_DROP_HEIGHT_BLOCKS`]
-/// above the tile, spinning a little (at most
+/// metres above `at` (whose level the order reads in metres, on stud terrain
+/// too), spinning a little (at most
 /// [`game::body::DEV_DROP_SPIN_RAD_PER_S`] about each axis, rolled from the
 /// tick — the same on every replay); a tile off the region's columns is
 /// refused.
@@ -126,13 +135,14 @@ fn dev_drop_body_drops_a_spinning_cube_above_the_tile() {
         region.forget_last_event();
     };
     let mut region = floored_region();
-    let at = [20, 1, 24];
+    // A level (metres) above the floor.
+    let at = [20, (FLOOR_TOP / B).ceil() as i32 + 1, 24];
     drop(&mut region, at);
     let all = bodies(&region);
     assert_eq!(all.len(), 1, "one body dropped");
     let b = live_body(&region, all[0]);
     let t = b.translation();
-    let want = Vector::new(20.5 * B, (1 + DEV_DROP_HEIGHT_BLOCKS) as f32 * B + B / 2.0, 24.5 * B);
+    let want = Vector::new(20.5 * B, (at[1] + DEV_DROP_HEIGHT_BLOCKS) as f32 * B + B / 2.0, 24.5 * B);
     assert_eq!(t, want);
     let w = b.angvel();
     assert!(w != Vector::ZERO, "it spins");
@@ -144,8 +154,8 @@ fn dev_drop_body_drops_a_spinning_cube_above_the_tile() {
     drop(&mut again, at);
     assert_eq!(live_body(&again, bodies(&again)[0]).angvel(), w);
     // Off the region's columns: refused.
-    drop(&mut region, [-1, 1, 24]);
-    drop(&mut region, [game::REGION_BLOCKS as i32, 1, 24]);
+    drop(&mut region, [-1, at[1], 24]);
+    drop(&mut region, [game::REGION_BLOCKS as i32, at[1], 24]);
     assert_eq!(bodies(&region).len(), 1, "off-region drops refused");
 }
 
@@ -166,7 +176,7 @@ fn unsupported_collider_shape_fails_loudly() {
     });
 }
 
-/// A dev-dropped 1 m cube over a 6-deep pool ends floating (its AABB
+/// A dev-dropped 1 m cube over a pool 6 tiles deep ends floating (its AABB
 /// straddles the surface); the same cube dropped on dry ground keeps, after
 /// every tick, exactly the weight and damping `body_state` gave it.
 #[test]
@@ -194,10 +204,17 @@ fn dropped_cube_floats_and_dry_bodies_unchanged() {
         (aabb.mins.y, aabb.maxs.y)
     };
 
-    // Over water: a pool 6 deep from the floor's top.
-    let mut wet = floored_region();
-    wet.with_data(|r| crate::common::water::set_recipe_water(r, 16..32, 16..32, 0, DEPTH, 0));
-    drop(&mut wet, [24, 1 + DEPTH, 24]);
+    // Over water: recipe water standing 6 tiles deep on the floor's top.
+    use crate::common::water::{floor_with_water, level_top_plates, WaterBox};
+    use crate::common::STAND;
+    install_real_block_props();
+    let pool = WaterBox { xs: 16..32, zs: 16..32, surface: STAND - 1, water_top: STAND - 1 + DEPTH };
+    let (send, _recv) = crossbeam::channel::unbounded();
+    let mut wet = Region::new(Rollback::new(Some(send.clone())), Some(send), r0(), None);
+    wet.seed_stud_world(floor_with_water(r0(), &[pool]));
+    let surface = game::plate_units(level_top_plates(STAND - 1 + DEPTH));
+    // The order's level is in metres: the first whole metre above the water.
+    drop(&mut wet, [24, (surface / B).ceil() as i32, 24]);
     let e = only_body(&wet);
     // Settled: asleep, or slower than 0.1 m/s for a second — so the
     // straddle below is the float level, not a phase of a bob.
@@ -214,14 +231,13 @@ fn dropped_cube_floats_and_dry_bodies_unchanged() {
         }
     }
     assert!(still >= still_ticks_needed, "the cube settles in the water: {:?}", live_body(&wet, e).linvel());
-    let surface = (1 + DEPTH) as f32 * B;
     let (lo, hi) = aabb_y(&wet, e);
     eprintln!("cube AABB y {} .. {} blocks, surface {}", lo / B, hi / B, surface / B);
     assert!(lo < surface && hi > surface, "floating, straddling the surface: {} .. {} blocks", lo / B, hi / B);
 
     // On dry ground: the spawn's weight and damping, bit for bit, every tick.
     let mut dry = floored_region();
-    drop(&mut dry, [24, 1, 24]);
+    drop(&mut dry, [24, (FLOOR_TOP / B).ceil() as i32, 24]);
     let e = only_body(&dry);
     let mass = mass_properties(&cube(), BODY_DEFAULT_DENSITY).mass();
     let weight = Vector::new(0.0, -mass * BODY_GRAVITY * UNITS_PER_METER, 0.0);

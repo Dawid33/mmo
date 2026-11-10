@@ -9,7 +9,7 @@
 //! is on, and the local body gets the render camera ([`sync_first_person_camera`],
 //! re-attached to whichever body is home, so a seam crossing keeps it). The
 //! commander camera, its input systems ([`inactive`]) and the body's own model
-//! stand aside; the cut and the dug-space x-ray are switched off (they would
+//! stand aside; the cut is switched off (it would
 //! clip the view) and put back on the way out, and the commander camera comes
 //! back over the body. Esc opens the menu and frees the pointer, so the panel
 //! button works from there too. Leaving Adventure leaves first person.
@@ -24,7 +24,6 @@ use super::tiles::TileMirror;
 use super::CommanderCamera;
 use crate::renderer::bridge::{LocalBody, SimEntity, SimTarget};
 use crate::renderer::cursor::CursorPolicy;
-use crate::renderer::voxel_pull::xray::XraySettings;
 use crate::renderer::{GameEvents, LocalPlayer, UiCamera};
 
 /// Toggles first person (Minecraft's perspective key).
@@ -39,8 +38,8 @@ pub const FIRST_PERSON_NEAR_M: f32 = 0.05;
 #[derive(Resource, Default, Debug)]
 pub struct FirstPerson {
     pub on: bool,
-    /// The cut and the x-ray switch as they were on entry.
-    saved: Option<(bool, bool)>,
+    /// The cut as it was on entry.
+    saved: Option<bool>,
 }
 
 /// Toggle first person (the F9 panel's button that wrote it is gone; F5
@@ -69,7 +68,6 @@ pub fn toggle_first_person(
     mut policy: ResMut<CursorPolicy>,
     mut fp: ResMut<FirstPerson>,
     mut working: ResMut<WorkingLevel>,
-    mut xray: Option<ResMut<XraySettings>>,
     events: Res<GameEvents>,
     local: Res<LocalPlayer>,
     mirror: Res<TileMirror>,
@@ -91,17 +89,11 @@ pub fn toggle_first_person(
         if let Some(td) = top_down.as_mut().filter(|td| td.on) {
             super::top_down::leave(td, &mut cam, &mut working, None);
         }
-        fp.saved = Some((working.cut, xray.as_ref().is_some_and(|x| x.enabled)));
+        fp.saved = Some(working.cut);
         working.cut = false;
-        if let Some(x) = xray.as_mut() {
-            x.enabled = false;
-        }
     } else {
-        if let Some((cut, x)) = fp.saved.take() {
+        if let Some(cut) = fp.saved.take() {
             working.cut = cut;
-            if let Some(xray) = xray.as_mut() {
-                xray.enabled = x;
-            }
         }
         // Back over the body, where the eyes were.
         let home = mirror.region();

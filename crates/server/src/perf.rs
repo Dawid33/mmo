@@ -1,22 +1,19 @@
 //! The periodic `[server]` counters line: what the per-region tick line cannot
-//! see — manager-thread worldgen, the LOD pipeline, the shared writer task, and
-//! channel backlogs. Same cadence and style as `[region (x,z)]`
+//! see — the LOD pipeline, the shared writer task and channel backlogs. Same cadence and style as `[region (x,z)]`
 //! (`region_threads.rs`), so the two interleave in one log.
 //!
 //! ```text
-//! [server] window=5.0s sessions=1 regions=9 parked=0 | gen n=9 sum=812.0ms max=120.3ms
-//!   | lod hit=0 sub=570 built=412 inflight=158 wait_terrain=0 cache=412 latency avg=310.0ms
+//! [server] window=5.0s sessions=1 regions=9 parked=0
+//!   | lod hit=0 sub=570 built=412 inflight=158 cache=412 latency avg=310.0ms
 //!   max=2210.4ms build avg=4.1ms max=30.2ms | tx pkts=450 bytes=91234567 send sum=900.1ms
 //!   max=210.0ms timeouts=0 total_timeouts=0 | backlog in=0 region=0 tx=12
 //!   | tiles resident=212.4MB pinned=48.0MB budget=256MB loads=3 load_errors=0
 //! ```
 //! (one line in the log; wrapped here.)
 //!
-//! * `gen` — synchronous worldgen calls on the manager thread. While one runs
-//!   no packet is routed for anyone, so `max` is a routing stall.
-//! * `lod latency` is submit → result (queue wait + build); `lod build` is the
-//!   worker's own time. Latency far above build means the pool is the
-//!   bottleneck (`LOD_BUILD_THREADS`), not the downsampler.
+//! * `lod` — far-terrain tiles (`game::stud_lod`). `latency` is submit → result
+//!   (queue wait + build); `build` is the worker's own time. Latency far above build
+//!   means the pool is the bottleneck (`LOD_BUILD_THREADS`).
 //! * `tx send` is time the ONE writer task spent awaiting client sends;
 //!   `timeouts` counts `send to client timed out; skipping` — each one is a
 //!   packet a client will never get, i.e. a silently incomplete join.
@@ -144,7 +141,7 @@ impl ServerReport {
         let tx_packets = take(&EDGE.tx_packets);
         // An idle server (nobody connected, nothing running, nothing sent) says
         // nothing, like the region line when it has no ticks to report.
-        if d.sessions == 0 && d.running == 0 && tx_packets == 0 && m.generated == 0 {
+        if d.sessions == 0 && d.running == 0 && tx_packets == 0 {
             return;
         }
         let lod_builds = take(&EDGE.lod_builds);
@@ -153,8 +150,7 @@ impl ServerReport {
         log::info!(
             "[server] window={:.1}s sessions={} regions={} parked={} transfers_inflight={} pending_arrivals={} arrivals_despawned={} \
              items_destroyed={} intent_replies_lost={} \
-             | gen n={} sum={:.1}ms max={:.1}ms \
-             | lod hit={} sub={} built={} inflight={} wait_terrain={} cache={} \
+             | lod hit={} sub={} built={} inflight={} cache={} \
              latency avg={:.1}ms max={:.1}ms build avg={:.1}ms max={:.1}ms \
              | tx pkts={} bytes={} send sum={:.1}ms max={:.1}ms timeouts={} total_timeouts={} \
              | backlog in={} region={} tx={}{}",
@@ -167,14 +163,10 @@ impl ServerReport {
             d.arrivals_despawned,
             d.items_destroyed,
             d.intent_replies_lost,
-            m.generated,
-            game::perf::ms(m.generate_total),
-            game::perf::ms(m.generate_max),
             m.lod_cache_hits,
             m.lod_submitted,
             m.lod_built,
             d.lod_in_flight,
-            d.lod_waiting_terrain,
             d.lod_cache,
             avg(game::perf::ms(m.lod_latency_total), m.lod_built as u64),
             game::perf::ms(m.lod_latency_max),

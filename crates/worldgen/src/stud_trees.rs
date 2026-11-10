@@ -1,6 +1,5 @@
-//! Trees on stud terrain: the voxel generator's trees (same placement, species, seeds
-//! and skeletons — `trees::trees_in`, `trees::skeleton`) laid as feature bricks instead
-//! of blocks. Only the shape → blocks step (`trees::rasterize`) is replaced.
+//! Trees on stud terrain: placement, species, seeds and skeletons
+//! (`trees::trees_in`, `trees::skeleton`) laid as feature bricks.
 //!
 //! A tree is rasterised onto the stud cell grid (a stud wide, a plate tall) from its
 //! skeleton with integer arithmetic only: wood along the trunk and limb segments, leaves
@@ -9,8 +8,8 @@
 //! (`game::fill_box`). Every brick carries the tree's id in `StudBrick::data`
 //! ([`stud_tree_id`]): felling needs it.
 //!
-//! Like voxel trees, a tree belongs to the region of its base and never writes outside
-//! it, so a region's features are a pure function of the region.
+//! A tree belongs to the region of its base and never writes outside it, so a region's
+//! features are a pure function of the region.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
@@ -21,13 +20,13 @@ use game::{
 use super::*;
 use crate::stud_gen::STUDS_PER_M;
 
-/// Voxels (1/16 m, the skeleton's unit) per stud.
-const STUD_VOXELS: i32 = BLOCK_VOXELS as i32 / STUDS_PER_M;
+/// Voxels (the skeleton's unit, `trees::skeleton::VOXELS_PER_M` to the metre) per stud.
+const STUD_VOXELS: i32 = trees::skeleton::VOXELS_PER_M / STUDS_PER_M;
 /// Fifths of a voxel per stud and per plate: a plate is 3.2 voxels, so cell centres
 /// and distances are whole numbers in fifths.
 const STUD_FIFTHS: i64 = STUD_VOXELS as i64 * 5;
 const PLATE_FIFTHS: i64 = 16;
-const _: () = assert!(BLOCK_VOXELS == 16 && STUD_VOXELS == 8);
+const _: () = assert!(trees::skeleton::VOXELS_PER_M == 16 && STUD_VOXELS == 8);
 /// Wood is laid in courses this many plates tall (one brick), counted from the tree's
 /// base plate: per-plate cells made a leaning limb a stair of 1 x 1 plates.
 pub const WOOD_COURSE_PLATES: i32 = 3;
@@ -51,7 +50,7 @@ const STUD_ID_AXIS_BITS: u32 = 8;
 const STUD_ZERO_TREE_ID: u16 = 0x8080;
 
 /// The tree id a stud tree's bricks carry in `StudBrick::data`: the low
-/// [`STUD_ID_AXIS_BITS`] bits of each axis of the voxel tree id (a lattice cell,
+/// [`STUD_ID_AXIS_BITS`] bits of each axis of the placement's tree id (a lattice cell,
 /// `trees::placement::tree_id`), so non-zero and shared only by trees a multiple of
 /// 128 lattice cells (1024 m) apart on both axes — never by two trees of one region or
 /// of two neighbouring ones (regions are at most 512 m wide).
@@ -230,7 +229,7 @@ fn lay_cells(
 ///
 /// A tree stands on the highest of the four stud columns of its base block (its trunk
 /// reaches down to the others'), keeps only cells inside the region and above the
-/// ground, and where trees overlap wood wins over leaves, else the lower voxel tree id.
+/// ground, and where trees overlap wood wins over leaves, else the lower placement id.
 pub(crate) fn stud_tree_features(
     patch: &dyn Patch,
     coords: RegionCoords,
@@ -239,8 +238,8 @@ pub(crate) fn stud_tree_features(
     ground: &[(game::ColumnCoords, StudColumnGround)],
 ) -> Vec<(StudChunkCoords, Vec<StudBrick>)> {
     let (rx, rz) = (coords.x * REGION_BLOCKS, coords.z * REGION_BLOCKS);
-    // Placement reads surfaces up to `m` past the region; each surface's slope reads
-    // one block further (still inside the patch's margin) — as the LOD's trees do.
+    // Placement reads surfaces up to `m` past the region; each surface's step-edge
+    // test reads one block further (still inside the patch's margin).
     let m = TREE_PATCH_MARGIN - PATCH_MARGIN;
     let sample_memo = std::cell::RefCell::new(std::collections::HashMap::new());
     let sample = |x: i32, z: i32| {
@@ -260,8 +259,7 @@ pub(crate) fn stud_tree_features(
         let cached = memo.borrow().get(&(x, z)).copied();
         cached.unwrap_or_else(|| {
             let c = sample(x, z);
-            let slope = slopes::slope_for(&c, |dx, dz| sample(x + dx, z + dz)).is_some();
-            let g = tree_ground(c, slope);
+            let g = tree_ground(c, slopes::step_edge(&c, |dx, dz| sample(x + dx, z + dz)));
             memo.borrow_mut().insert((x, z), g);
             g
         })
@@ -281,7 +279,7 @@ pub(crate) fn stud_tree_features(
         Some(g.surface((sx % n) as usize, (sz % n) as usize))
     };
 
-    // Each tree's cells in region stud cells, in voxel tree id order.
+    // Each tree's cells in region stud cells, in placement id order.
     let mut trees_cells: Vec<(u16, BTreeSet<[i32; 3]>, BTreeSet<[i32; 3]>)> = Vec::with_capacity(placed.len());
     for tree in &placed {
         let species = &trees::SPECIES[tree.species as usize];

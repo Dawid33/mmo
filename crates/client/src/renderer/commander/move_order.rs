@@ -95,13 +95,12 @@ pub fn goal_from_tile(tile: TilePos, home: RegionId) -> Goal {
 /// The tile block selection picks under the cursor ray in the mirrored
 /// home region: with the cut off the air in front of the first block face
 /// the ray meets, at any level; with it on the working level's cell. `None`
-/// when the ray meets none of the region's blocks. `xray`: the cut-off view
-/// looks through to dug spaces (`designate::pick_visible_xray`).
-pub fn pick_move_tile(ray: (Vector, Vector), working: &WorkingLevel, mirror: &TileMirror, xray: bool) -> Option<TilePos> {
+/// when the ray meets none of the region's blocks.
+pub fn pick_move_tile(ray: (Vector, Vector), working: &WorkingLevel, mirror: &TileMirror) -> Option<TilePos> {
     let p = if working.cut {
         designate::pick_level(ray, working.level?, mirror)?
     } else {
-        designate::pick_visible_xray(ray, true, mirror, xray)?
+        designate::pick_visible(ray, true, mirror)?
     };
     let n = REGION_BLOCKS as i32;
     ((0..n).contains(&p[0]) && (0..n).contains(&p[2])).then_some(p)
@@ -241,7 +240,6 @@ pub fn update_path_preview(
     window: Query<&Window, With<PrimaryWindow>>,
     view: Query<(&Camera, &Transform), With<CommanderView>>,
     bodies: Query<(&SimEntity, &GlobalTransform), With<LocalBody>>,
-    xray: Option<Res<crate::renderer::voxel_pull::xray::XraySettings>>,
     world_map: Option<Res<crate::renderer::world_map::WorldMapState>>,
     mut preview: ResMut<PathPreview>,
     mut sent: ResMut<SentPath>,
@@ -249,10 +247,11 @@ pub fn update_path_preview(
 ) {
     let home = mirror.region();
     let kind = mirror.terrain();
-    let tiles = mirror.with_halo();
+    // The mirror reads own ∪ stud halo, as the sim plans walks.
+    let tiles: &TileMirror = &mirror;
     let route = route_of(world_map.as_deref());
     let map = route.as_deref();
-    let body = home.and_then(|home| body_tile(&bodies, &tiles, home, body_scale.0).map(|b| (home, b)));
+    let body = home.and_then(|home| body_tile(&bodies, tiles, home, body_scale.0).map(|b| (home, b)));
     // The sent path is done once the body stands on its end, or left with it.
     if !sent.path.is_empty() {
         let arrived = body.is_some_and(|(_, (tile, _))| sent.beyond.is_none() && sent.path.last() == Some(&tile));
@@ -280,13 +279,13 @@ pub fn update_path_preview(
     };
     // Block selection's tile first; the ground pick only off the region's blocks.
     let ray = window.single().ok().zip(view.single().ok()).and_then(|(w, v)| designate::cursor_ray(w, v, home));
-    if let Some(tile) = ray.and_then(|ray| pick_move_tile(ray, &working, &mirror, crate::renderer::voxel_pull::xray::xray_on(xray.as_deref(), working.cut))) {
-        preview.update(&tiles, from, tile, goal_from_tile(tile, home), home, map, tile_point(kind, tile, home));
+    if let Some(tile) = ray.and_then(|ray| pick_move_tile(ray, &working, &mirror)) {
+        preview.update(tiles, from, tile, goal_from_tile(tile, home), home, map, tile_point(kind, tile, home));
         return;
     }
     let goal = goal_from_hover(kind, region, local, pick.1, home);
     let world = local + Vec3::from_array(region.world_offset());
-    preview.update(&tiles, from, hover_tile(kind, region, local, home), goal, home, map, world);
+    preview.update(tiles, from, hover_tile(kind, region, local, home), goal, home, map, world);
 }
 
 /// The world's coarse-route map, as the sim's regions are bounded by it and
@@ -380,7 +379,7 @@ pub fn send_move_order(
         return;
     }
     let route = route_of(world_map.as_deref());
-    let order = click_order(&mirror.with_halo(), hover.key.0, &hover.goal, here, route.as_deref(), hover.path, hover.beyond);
+    let order = click_order(&*mirror, hover.key.0, &hover.goal, here, route.as_deref(), hover.path, hover.beyond);
     let ClickOrder::Send { plan, beyond } = order else {
         // Truly unreachable: show it, for as long as the hover stays.
         if preview.key == Some(hover.key) && preview.path.is_none() {
@@ -481,15 +480,21 @@ mod tests {
         assert!(!is_click(40.0));
     }
 
-    /// A flat one-block floor at y = 0 that counts its block reads.
+    /// A flat floor of solid tiles at level 0 that counts its tile reads.
     struct CountingFloor {
         reads: Cell<u32>,
     }
 
     impl TileSource for CountingFloor {
-        fn block(&self, p: TilePos) -> BlockId {
+        fn block(&self, _: TilePos) -> BlockId {
+            BlockId::AIR
+        }
+        fn terrain(&self) -> TerrainKind {
+            TerrainKind::Stud
+        }
+        fn tile_fill(&self, p: TilePos) -> game::TileFill {
             self.reads.set(self.reads.get() + 1);
-            if p[1] == 0 { BlockId(1) } else { BlockId::AIR }
+            if p[1] == 0 { game::TileFill::Solid } else { game::TileFill::Open }
         }
         fn is_bedrock(&self, _: TilePos) -> bool {
             false
@@ -523,9 +528,9 @@ mod tests {
         assert!(src.reads.get() > reads);
     }
 
-    /// A flat floor at y = 0 over the region, split by a wall along x =
-    /// `WALL_X` (z < `gap`), so a walk from one side to the other detours
-    /// around its end.
+    /// A flat floor of solid tiles at level 0 over the region, split by a wall
+    /// along x = `WALL_X` (z < `gap`), so a walk from one side to the other
+    /// detours around its end.
     struct WalledFloor {
         gap: i32,
     }
@@ -533,12 +538,18 @@ mod tests {
     const WALL_X: i32 = 40;
 
     impl TileSource for WalledFloor {
-        fn block(&self, p: TilePos) -> BlockId {
+        fn block(&self, _: TilePos) -> BlockId {
+            BlockId::AIR
+        }
+        fn terrain(&self) -> TerrainKind {
+            TerrainKind::Stud
+        }
+        fn tile_fill(&self, p: TilePos) -> game::TileFill {
             let wall = p[0] == WALL_X && p[2] < self.gap && (1..4).contains(&p[1]);
             // Floored inside the region only: past its edge nothing is known.
             let n = REGION_BLOCKS as i32;
             let inside = (0..n).contains(&p[0]) && (0..n).contains(&p[2]);
-            if (p[1] == 0 && inside) || wall { BlockId(1) } else { BlockId::AIR }
+            if (p[1] == 0 && inside) || wall { game::TileFill::Solid } else { game::TileFill::Open }
         }
         fn is_bedrock(&self, _: TilePos) -> bool {
             false
@@ -577,53 +588,64 @@ mod tests {
         assert_eq!(click_path(&closed, from, &goal, home, None, None), None);
     }
 
-    /// The preview plans with the sim's `PathPlan` over the mirror with the
-    /// home region's own halo — mirrored from the predicted region's state
-    /// and render updates, as the bridge does, with no neighbour region
+    /// The preview plans with the sim's `PathPlan` over the mirror, which
+    /// reads the home region ∪ its stud halo — mirrored from the predicted
+    /// region's snapshot, as the bridge does, with no neighbour region
     /// loaded (an unsubscribed neighbour): for a goal across the seam and
     /// one two regions away, the preview's path is the one the sim's
     /// `MoveTo` walks. A goal past what the mirror knows is still sent.
     #[test]
+    #[ignore = "slow: >100ms — run via just test-full"]
     fn preview_path_is_the_sims_path_across_a_seam() {
-        use game::{Chunk, ChunkCoords, GameEventKind, Region, Rollback};
         use super::super::tiles::TileMirrorMsg;
+        use crate::renderer::stud::world::StudWorldMsg;
+        use game::{ColumnCoords, GameEventKind, Region, Rollback, StudColumnGround, StudProfile, StudRegionSeed};
         const CLIENT: game::ClientId = 3;
+        /// Surface plate of the flat ground: the top of tile level 4, so bodies stand in level 5.
+        const TOP: i32 = 30;
+        const STAND: i32 = TOP / game::TILE_PLATES as i32;
         let home = RegionCoords::new(0, 0);
-        let n = game::REGION_CHUNKS as i32;
-        let chunks: Vec<(ChunkCoords, Chunk)> = (0..n as usize)
-            .flat_map(|x| (0..n as usize).map(move |z| (ChunkCoords::new(x, 0, z), Chunk::flat_floor(16))))
-            .collect();
-        // The predicted region: floored, its halo seeded from floored
+        let flat = || {
+            let soil = StudProfile { cover: game::MAT_GRASS, cover_plates: 1, soil: game::MAT_DIRT, soil_plates: 5 };
+            let n = game::REGION_CHUNKS;
+            let ground = (0..n)
+                .flat_map(|x| (0..n).map(move |z| (ColumnCoords::new(x, z), StudColumnGround::flat(TOP, soil, game::MAT_STONE, -2000))))
+                .collect();
+            StudRegionSeed { ground, features: Vec::new() }
+        };
+        let stud_region = |rc| {
+            let (send, updates) = crossbeam::channel::unbounded();
+            // The updates go nowhere (the receiver is leaked so sends never fail).
+            std::mem::forget(updates);
+            let mut region = Region::new(Rollback::new(Some(send.clone())), Some(send), rc, None);
+            region.seed_stud_world(flat());
+            region
+        };
+        // The predicted region: flat ground, its stud halo seeded from flat
         // neighbours (east and its corners only: west stays unknown).
-        let (send, updates) = crossbeam::channel::unbounded();
-        let mut region = Region::new(Rollback::new(Some(send.clone())), Some(send), home, None);
-        region.with_data(|r| r.seed_terrain_genesis(chunks.clone()));
-        let mut mirror = TileMirror::default();
-        mirror.set_home(Some(home));
-        mirror.apply(TileMirrorMsg::Reset {
-            region: home,
-            ground: Default::default(),
-            designations: Vec::new(),
-            constructed: Vec::new(),
-        });
-        mirror.apply(TileMirrorMsg::halo_of(home, region.data()));
+        let mut region = stud_region(home);
         for from in [RegionCoords::new(1, -1), RegionCoords::new(1, 0), RegionCoords::new(1, 1)] {
-            let seed = game::halo::halo_seed_from_chunks(from, home, chunks.iter().map(|(c, ch)| (*c, ch))).unwrap();
+            let seed = stud_region(from).data().halo_seed_for(home).expect("neighbours");
             region.handle_event(GameEventKind::HaloUpdate(seed)).unwrap();
             region.forget_last_event();
         }
-        // The render updates the bridge forwards (only the home region is
-        // loaded: no neighbour chunk reaches the mirror any other way).
-        for u in updates.try_iter() {
-            if let Some(msg) = TileMirrorMsg::from_update(home, &u.update_kind) {
-                mirror.apply(msg);
-            }
-        }
-        for (c, chunk) in &chunks {
-            mirror.set_chunk_from([c.x as i32, c.y, c.z as i32], chunk);
+        // What the bridge mirrors of it (only the home region is loaded: no
+        // neighbour chunk reaches the mirror any other way).
+        let mut mirror = TileMirror::default();
+        mirror.set_home(Some(home));
+        mirror.apply(TileMirrorMsg::Reset { region: home, designations: Vec::new(), constructed: Vec::new() });
+        mirror.apply_stud(&StudWorldMsg::of_snapshot(home, region.data()));
+        let mut n = 0;
+        for (key, chunk) in region.data().ecs.stud.iter() {
+            let Some(chunk) = chunk.as_ref() else { continue };
+            let handle = region.data().ecs.rigidbody.try_get(key).expect("a stud chunk has a body");
+            let origin = region.data().physics.bodies.get(handle).unwrap().translation();
+            let c = game::StudChunkCoords::from_origin(origin);
+            n += 1;
+            mirror.set_stud_chunk(Entity::from_raw_u32(n).unwrap(), [c.x as i32, c.y, c.z as i32], chunk);
         }
         let blocks = REGION_BLOCKS as i32;
-        let start = [blocks - 4, 1, 12];
+        let start = [blocks - 4, STAND, 12];
         region.handle_event(GameEventKind::CreateClient(CLIENT)).unwrap();
         let mode = Order::SetMode { mode: game::PlayMode::Adventure, at: Some(start) };
         region.handle_event(GameEventKind::Order(CLIENT, mode)).unwrap();
@@ -634,10 +656,10 @@ mod tests {
         let feet = {
             let data = region.data();
             let handle = data.ecs.rigidbody.try_get(e).unwrap();
-            game::feet_of(data.physics.bodies.get(handle).unwrap().translation())
+            data.feet_of(data.physics.bodies.get(handle).unwrap().translation())
         };
-        let tiles = mirror.with_halo();
-        let from = game::current_tile(&tiles, feet).expect("the body stands");
+        let tiles = &mirror;
+        let from = game::current_tile(tiles, feet).expect("the body stands");
         assert_eq!(from, start);
         let east = RegionCoords::new(1, 0);
         for (goal, to_goal) in
@@ -645,23 +667,23 @@ mod tests {
         {
             region.handle_event(GameEventKind::Order(CLIENT, Order::MoveTo(goal))).unwrap();
             let walk = region.data().ecs.walker.try_get(e).clone().expect("the sim walks");
-            let preview = click_path(&tiles, from, &goal, home, None, preview_path(&tiles, from, &goal, home, None))
+            let preview = click_path(tiles, from, &goal, home, None, preview_path(tiles, from, &goal, home, None))
                 .expect("the preview finds it over the halo");
             assert_eq!(preview.path, walk.path, "{goal:?}");
             assert_eq!((preview.reaches_goal, walk.to_goal), (to_goal, to_goal), "{goal:?}");
             assert!(preview.path.last().unwrap().x >= blocks as i64, "the path crosses the seam");
-            let order = click_order(&tiles, from, &goal, home, None, None, Some(Vec3::ONE));
+            let order = click_order(tiles, from, &goal, home, None, None, Some(Vec3::ONE));
             assert!(matches!(order, ClickOrder::Send { plan: Some(_), .. }), "{order:?}");
         }
         // West is not mirrored (nor in the sim's halo here): no path is
         // known, yet the order is sent — the sim decides; the hover stays
         // amber, never the red "no path".
         let west = Goal::local(RegionCoords::new(-1, 0), [blocks - 3, 12], None);
-        assert_eq!(preview_path(&tiles, from, &west, home, None), None);
-        let order = click_order(&tiles, from, &west, home, None, None, Some(Vec3::ONE));
+        assert_eq!(preview_path(tiles, from, &west, home, None), None);
+        let order = click_order(tiles, from, &west, home, None, None, Some(Vec3::ONE));
         assert_eq!(order, ClickOrder::Send { plan: None, beyond: Some(Vec3::ONE) });
         let mut preview = PathPreview::default();
-        preview.update(&tiles, from, [-3, 1, 12], west, home, None, Vec3::ONE);
+        preview.update(tiles, from, [-3, STAND, 12], west, home, None, Vec3::ONE);
         assert!(preview.path.is_none() && !preview.unreachable, "amber, not red");
         // A goal at home with no path is refused, as before.
         let walled = WalledFloor { gap: blocks };

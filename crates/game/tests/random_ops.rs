@@ -3,7 +3,8 @@
 //! rollback system.
 use game::StateHash;
 
-use game::{ChunkCoords, EntityKey, Rollback};
+use crate::common::{sc, slab_chunk};
+use game::{EntityKey, Rollback};
 
 fn state_hash(r: &Rollback) -> u32 {
     let mut hasher = crc32fast::Hasher::new();
@@ -34,7 +35,7 @@ fn random_op_sequences_roll_back_to_every_boundary() {
                         r.player_entites.remove(&k);
                     }
                     4 => {
-                        r.create_mesh(ChunkCoords::new(0, 0, 0), game::Chunk::flat_floor(8));
+                        r.create_stud_chunk_safe(sc(0, 0, 0), slab_chunk(3));
                     }
                     _ => {
                         r.ecs.create_entity_safe();
@@ -51,44 +52,57 @@ fn random_op_sequences_roll_back_to_every_boundary() {
     }
 }
 
-/// Seeded per-block writes on one chunk (blocks, chisel entries, writes that
-/// densify a uniform grid and writes that collapse it back), one transaction
-/// each; undoing them one by one must hit every earlier hash exactly. The
-/// inverse restores only the old block + chisel entry through
-/// `ChunkBlocks::set`, which is exact because `set` normalises canonically
-/// in both directions.
+/// Seeded stud writes on flat ground (bricks placed, bricks removed, boxes
+/// carved — also into implied ground, which materialises chunks — and boxes
+/// filled), one transaction each; undoing them one by one must hit every
+/// earlier hash exactly.
 #[test]
-fn per_block_writes_undo_to_every_step() {
-    use game::{Block, BlockId, BlockIndex, ChiselData, CHUNK_BLOCK_COUNT};
+#[ignore = "slow: >100ms — run via just test-full"]
+fn per_brick_writes_undo_to_every_step() {
+    use crate::common::{floor_seed, seed_studs, CHUNK_EDGE, FLOOR_PLATES};
+    use game::stud_catalog::STUD_PARTS;
     game::set_hash_mode(game::HashMode::Full);
+    let part = STUD_PARTS.iter().position(|p| p.number == "3001").expect("the 2 x 4 brick") as u16;
     for seed in 0u64..8 {
         let mut rng = oorandom::Rand64::new(seed as u128);
         let (send, _recv) = crossbeam::channel::unbounded();
         let mut r = Rollback::new(Some(send));
-        r.new_transaction();
-        let key = r.create_mesh(ChunkCoords::new(0, 0, 0), game::Chunk::uniform(Block::new(BlockId(1))));
+        seed_studs(&mut r, floor_seed(0.0..2.0 * CHUNK_EDGE, 0.0..2.0 * CHUNK_EDGE, FLOOR_PLATES));
         let mut steps = vec![state_hash(&r)];
-        for step in 0..48 {
+        let mut changed = 0;
+        for _ in 0..48 {
             r.new_transaction();
-            // Every 12th step floods the chunk with one block, so the grid
-            // collapses to Uniform and the next write densifies it again.
-            if step % 12 == 11 {
-                let fill = Block::new(BlockId(rng.rand_range(0..3) as _));
-                for i in 0..CHUNK_BLOCK_COUNT {
-                    r.ecs.chunk.set_chunk_block_safe(key, BlockIndex::from_linear(i), fill, None);
+            // A stud column of the 2 x 2 chunk columns, clear of their far edges.
+            let (x, z) = (rng.rand_range(0..56) as i32, rng.rand_range(0..56) as i32);
+            match rng.rand_range(0..4) {
+                0 => {
+                    // A brick somewhere above the ground of chunk (0, 0).
+                    let min = [(x % 28) as u8, FLOOR_PLATES as u8 + rng.rand_range(0..9) as u8, (z % 28) as u8];
+                    r.place_stud_safe(sc(0, 0, 0), game::StudBrick::part_at(min, part, rng.rand_range(0..4) as u8, 4));
                 }
-            } else {
-                let index = BlockIndex::from_linear(rng.rand_range(0..CHUNK_BLOCK_COUNT as u64) as usize);
-                let id = BlockId(rng.rand_range(0..3) as _);
-                let chisel = (rng.rand_range(0..3) == 0)
-                    .then(|| ChiselData::cuboid(id, [0, 0, 0], [16, rng.rand_range(1..16) as usize, 16]));
-                r.ecs.chunk.set_chunk_block_safe(key, index, Block::new(id), chisel);
+                1 => {
+                    let cell = [(x % 32) as u8, FLOOR_PLATES as u8 - 1 + rng.rand_range(0..6) as u8, (z % 32) as u8];
+                    r.remove_stud_safe(sc(0, 0, 0), cell);
+                }
+                2 => {
+                    // Down from the surface, or a pocket in the implied ground below layer 0.
+                    let top = if rng.rand_range(0..3) == 0 { -(rng.rand_range(1..40) as i32) } else { FLOOR_PLATES };
+                    let depth = 1 + rng.rand_range(0..8) as i32;
+                    r.carve_stud_safe([x, top - depth, z], [x + 1 + rng.rand_range(0..6) as i32, top, z + 1 + rng.rand_range(0..6) as i32]);
+                }
+                _ => {
+                    let lo = [x, FLOOR_PLATES - 4 + rng.rand_range(0..8) as i32, z];
+                    r.fill_stud_box_safe(lo, [lo[0] + 2, lo[1] + 1 + rng.rand_range(0..6) as i32, lo[2] + 2], game::MAT_STONE);
+                }
             }
-            steps.push(state_hash(&r));
+            let now = state_hash(&r);
+            changed += usize::from(Some(&now) != steps.last());
+            steps.push(now);
         }
+        assert!(changed > 24, "seed {seed}: most writes change the terrain ({changed} of 48)");
         for expected in steps.iter().rev().skip(1) {
             r.rollback();
-            assert_eq!(*expected, state_hash(&r), "seed {seed}: per-block undo step mismatch");
+            assert_eq!(*expected, state_hash(&r), "seed {seed}: per-brick undo step mismatch");
         }
     }
 }

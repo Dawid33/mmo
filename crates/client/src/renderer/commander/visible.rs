@@ -9,11 +9,6 @@
 //! blocks ([`super::tiles::TileMirror`]) from where it comes down through the
 //! cut plane, taking only blocks at or below the level. Outside the home
 //! region nothing is cut, so the height grid still answers there.
-//!
-//! With the cut off and the dug-space x-ray on (`voxel_pull::xray`), the
-//! terrain in front of a dug space is not drawn: a ray that passes through
-//! dug air in the home region sees the first block after it
-//! ([`game::xray_through`]), wherever the top surface lies.
 
 use bevy::prelude::*;
 use game::rapier3d::math::Vector;
@@ -56,18 +51,9 @@ fn box_entry(origin: Vec3, dir: Vec3, min: Vec3, max: Vec3) -> Vec3 {
     origin + dir * t
 }
 
-/// The dug-space x-ray, as the ray walk needs it: the home region (whose
-/// blocks are walked) and which of its tiles are dug air.
-pub struct Xray<D> {
-    pub region: RegionId,
-    pub dug: D,
-}
-
 /// The pure core of [`visible_ground`]. `surface(x, z)` is the top surface
 /// (world), `solid(p)` a home-region block (region-local), `in_home(x, z)`
-/// whether a world column is inside the home region; `xray` (cut off only)
-/// looks through dug spaces.
-#[allow(clippy::too_many_arguments)] // a pure function over injected lookups
+/// whether a world column is inside the home region.
 pub fn visible_ground_with(
     origin: Vec3,
     dir: Vec3,
@@ -76,22 +62,10 @@ pub fn visible_ground_with(
     surface: impl Fn(f32, f32) -> Option<f32>,
     solid: impl Fn(TilePos) -> bool,
     in_home: impl Fn(f32, f32) -> bool,
-    xray: Option<Xray<impl Fn(TilePos) -> bool>>,
 ) -> Option<Vec3> {
     let dir = dir.normalize_or_zero();
     let step = PICK_STEP_M * UNITS_PER_METER;
-    let Some(cut) = cut else {
-        let size = BLOCK_VOXELS as f32;
-        let through = xray.and_then(|x| {
-            let offset = Vec3::from_array(x.region.world_offset());
-            let start = origin - offset;
-            let v = |p: Vec3| Vector::new(p.x, p.y, p.z);
-            let hit = game::xray_through(v(start), v(dir), max / size, &solid, &x.dug)?;
-            let min = Vec3::new(hit.block[0] as f32, hit.block[1] as f32, hit.block[2] as f32) * size;
-            Some(box_entry(start, dir, min, min + Vec3::splat(size)) + offset)
-        });
-        return through.or_else(|| march_height(origin, dir, surface, step, max));
-    };
+    let Some(cut) = cut else { return march_height(origin, dir, surface, step, max) };
     // Outside the home region nothing is cut: the top surface stands, so
     // the march skips home columns (the block walk answers those).
     let outside = march_height(origin, dir, |x, z| (!in_home(x, z)).then(|| surface(x, z)).flatten(), step, max);
@@ -126,9 +100,8 @@ pub fn visible_ground_with(
     }
 }
 
-/// The first visible ground along a ray, honouring the cut and (`xray`,
-/// `voxel_pull::xray::xray_on`) the dug-space x-ray; `None` when the ray
-/// meets nothing within `max` sim units.
+/// The first visible ground along a ray, honouring the cut; `None` when the
+/// ray meets nothing within `max` sim units.
 pub fn visible_ground(
     origin: Vec3,
     dir: Vec3,
@@ -136,14 +109,10 @@ pub fn visible_ground(
     grid: &HeightGrid,
     level: &WorkingLevel,
     mirror: &TileMirror,
-    xray: bool,
 ) -> Option<Vec3> {
     let home = mirror.region();
     let rect = home.map(super::cut_entities::home_rect);
     let cut = Cut::of(level, home);
-    let xray = home
-        .filter(|_| xray && cut.is_none())
-        .map(|region| Xray { region, dug: |p: TilePos| mirror.is_dug(p) });
     visible_ground_with(
         origin,
         dir,
@@ -152,7 +121,6 @@ pub fn visible_ground(
         |x, z| grid.surface_at(x, z),
         |p| mirror.pick_solid(p),
         |x, z| rect.is_some_and(|r| r.contains(Vec2::new(x, z))),
-        xray,
     )
 }
 
@@ -186,14 +154,6 @@ mod tests {
         true
     }
 
-    const NO_XRAY: Option<Xray<fn(TilePos) -> bool>> = None;
-
-    /// A room under the solid-to-29 terrain at block column (1, 1): air
-    /// y 10..=12, under a top surface of 30 (so dug).
-    fn with_room(p: TilePos) -> bool {
-        solid(p) && !((p[0], p[2]) == (1, 1) && (10..=12).contains(&p[1]))
-    }
-
     /// The top-down view's rays (`top_down`): parallel, straight down, from
     /// an eye `TOP_DOWN_EYE_HEIGHT_M` above the cut.
     #[test]
@@ -204,48 +164,33 @@ mod tests {
         let reach = super::super::selection::PICK_REACH_M * UNITS_PER_METER;
         // Solid ground (to 29, cut at 20): the cut level's block top, not the
         // cut-away rock above it.
-        let hit = visible_ground_with(Vec3::new(1.5 * S, eye_y, 1.5 * S), Vec3::NEG_Y, reach, Some(cut), surface, solid, everywhere, NO_XRAY)
+        let hit = visible_ground_with(Vec3::new(1.5 * S, eye_y, 1.5 * S), Vec3::NEG_Y, reach, Some(cut), surface, solid, everywhere)
             .unwrap();
         assert!((hit.y - (level + 1) as f32 * S).abs() < 1e-3, "the cut level's top: {hit:?}");
         // Over the pit (floor block 5): the pit's floor, below the level.
-        let hit = visible_ground_with(Vec3::new(3.5 * S, eye_y, 3.5 * S), Vec3::NEG_Y, reach, Some(cut), surface, solid, everywhere, NO_XRAY)
+        let hit = visible_ground_with(Vec3::new(3.5 * S, eye_y, 3.5 * S), Vec3::NEG_Y, reach, Some(cut), surface, solid, everywhere)
             .unwrap();
         assert!((hit.y - 6.0 * S).abs() < 1e-3, "the pit's floor: {hit:?}");
     }
 
     #[test]
-    fn xray_with_the_cut_off_sees_the_floor_of_a_room_under_the_ground() {
-        let eye = Vec3::new(1.5 * S, 60.0 * S, 1.5 * S);
-        let xray = Some(Xray { region: home(), dug: |p: TilePos| !with_room(p) && game::is_dug_air(p[1], 30) });
-        let hit = visible_ground_with(eye, Vec3::NEG_Y, 1e5, None, surface, with_room, everywhere, xray).unwrap();
-        assert!((hit.y - 10.0 * S).abs() < 1e-3, "the room's floor (block 9's top): {hit:?}");
-        // Without it, the top surface; and elsewhere the x-ray changes nothing.
-        let plain = visible_ground_with(eye, Vec3::NEG_Y, 1e5, None, surface, with_room, everywhere, NO_XRAY).unwrap();
-        assert!((plain.y - 30.0 * S).abs() < 1.0, "{plain:?}");
-        let eye = Vec3::new(5.5 * S, 60.0 * S, 5.5 * S);
-        let xray = Some(Xray { region: home(), dug: |p: TilePos| !with_room(p) && game::is_dug_air(p[1], 30) });
-        let hit = visible_ground_with(eye, Vec3::NEG_Y, 1e5, None, surface, with_room, everywhere, xray).unwrap();
-        assert!((hit.y - 30.0 * S).abs() < 1.0, "no room on this ray: {hit:?}");
-    }
-
-    #[test]
     fn cut_off_sees_the_top_surface() {
         let eye = Vec3::new(3.5 * S, 60.0 * S, 3.5 * S);
-        let hit = visible_ground_with(eye, Vec3::NEG_Y, 1e5, None, surface, solid, everywhere, NO_XRAY).unwrap();
+        let hit = visible_ground_with(eye, Vec3::NEG_Y, 1e5, None, surface, solid, everywhere).unwrap();
         assert!((hit.y - 6.0 * S).abs() < 1.0, "{hit:?}");
     }
 
     #[test]
     fn cut_on_sees_the_level_floor_not_the_cut_away_top() {
         let eye = Vec3::new(1.5 * S, 60.0 * S, 1.5 * S);
-        let hit = visible_ground_with(eye, Vec3::NEG_Y, 1e5, Some(cut_at(12)), surface, solid, everywhere, NO_XRAY).unwrap();
+        let hit = visible_ground_with(eye, Vec3::NEG_Y, 1e5, Some(cut_at(12)), surface, solid, everywhere).unwrap();
         assert!((hit.y - 13.0 * S).abs() < 1e-3, "the top of level 12's blocks: {hit:?}");
     }
 
     #[test]
     fn cut_on_sees_down_a_pit() {
         let eye = Vec3::new(3.5 * S, 60.0 * S, 3.5 * S);
-        let hit = visible_ground_with(eye, Vec3::NEG_Y, 1e5, Some(cut_at(12)), surface, solid, everywhere, NO_XRAY).unwrap();
+        let hit = visible_ground_with(eye, Vec3::NEG_Y, 1e5, Some(cut_at(12)), surface, solid, everywhere).unwrap();
         assert!((hit.y - 6.0 * S).abs() < 1e-3, "the pit floor: {hit:?}");
     }
 
@@ -254,7 +199,7 @@ mod tests {
         // The camera rides level 12's floor, under 17 blocks of cut-away rock.
         let eye = Vec3::new(1.5 * S, 20.0 * S, 1.5 * S);
         let dir = Vec3::new(0.0, -1.0, -1.0).normalize();
-        let hit = visible_ground_with(eye, dir, 1e5, Some(cut_at(12)), surface, solid, everywhere, NO_XRAY).unwrap();
+        let hit = visible_ground_with(eye, dir, 1e5, Some(cut_at(12)), surface, solid, everywhere).unwrap();
         assert!((hit.y - 13.0 * S).abs() < 1e-3, "{hit:?}");
         assert!(hit.distance(eye) > S, "not the camera itself");
     }
@@ -263,7 +208,7 @@ mod tests {
     fn outside_the_home_region_nothing_is_cut() {
         let eye = Vec3::new(1.5 * S, 60.0 * S, 1.5 * S);
         let nowhere = |_: f32, _: f32| false;
-        let hit = visible_ground_with(eye, Vec3::NEG_Y, 1e5, Some(cut_at(12)), surface, |_| false, nowhere, NO_XRAY).unwrap();
+        let hit = visible_ground_with(eye, Vec3::NEG_Y, 1e5, Some(cut_at(12)), surface, |_| false, nowhere).unwrap();
         assert!((hit.y - 30.0 * S).abs() < 1.0, "{hit:?}");
     }
 }

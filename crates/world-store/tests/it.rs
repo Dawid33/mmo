@@ -11,4 +11,5 @@ mod open;
 mod players;
 mod schema;
 mod studs;
+mod voxel_refusal;
 mod worldctl;

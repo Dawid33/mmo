@@ -5,45 +5,30 @@
 //! number of regions away, re-planning once when stuck.
 use crate::common;
 
-use common::floor_chunks;
+use common::STAND;
 use game::rapier3d::math::Vector;
 use game::{
-    feet_of, feet_tile, line_step, next_region, PathPlan, RouteMap, WorldBlockPos, PORTAL_DEPTH_BLOCKS, play_mode_update, slope_chisel, state_hash, steer, Block, BlockId, BlockIndex, EntityKey,
-    GameEventKind, InputEvent, Key, Goal, Motion, Order, PlayMode, Region, RegionCoords, Rollback, Side, SlopeShape, TilePos,
-    TileSource, UiUpdate, Walker, BLOCK_VOXELS, CHUNK_BLOCKS, REGION_BLOCKS, STUCK_TICKS, TICK_RATE, WALK_UP_JUMP_AFTER_STALL_TICKS,
+    line_step, next_region, play_mode_update, state_hash, steer_on, BlockId, EntityKey, GameEventKind, Goal, InputEvent,
+    Key, Motion, Order, PathPlan, PlayMode, Region, RegionCoords, Rollback, RouteMap, TerrainKind, TileFill, TilePos,
+    TileSource, UiUpdate, Walker, WorldBlockPos, PORTAL_DEPTH_BLOCKS, REGION_BLOCKS, STUCK_TICKS, TICK_RATE,
+    WALK_UP_JUMP_AFTER_STALL_TICKS,
 };
 
-const CLIENT: game::ClientId = 7;
-/// The tile the adventurer is put on: the air above the one-block floor.
-const TILE: TilePos = [10, 1, 12];
+/// The tile level bodies stand in on the flat floor (its top tile is `L - 1`).
+const L: i32 = STAND;
 
-/// One region with a flat one-block floor around the spawn and one player
+const CLIENT: game::ClientId = 7;
+/// The tile the adventurer is put on: the open tile over the floor.
+const TILE: TilePos = [10, L, 12];
+
+/// One region with flat stud ground around the spawn and one player
 /// settled on it, with a render channel (rollback needs one).
 fn region_with_player() -> (Region, EntityKey) {
-    region_with_player_on(&[])
-}
-
-/// [`region_with_player`] with `cells` built into the terrain before genesis:
-/// each a [`WALL`] block, chiselled into the slope when one is given.
-fn region_with_player_on(cells: &[(TilePos, Option<SlopeShape>)]) -> (Region, EntityKey) {
     let (send, _recv) = crossbeam::channel::unbounded();
     let mut region = Region::new(Rollback::new(Some(send.clone())), Some(send), RegionCoords::new(0, 0), None);
     let (x, z) = region.data().spawn_xz();
     let edge = common::CHUNK_EDGE;
-    let mut chunks = floor_chunks(x - edge..x + edge, z - edge..z + edge, 16);
-    let cb = CHUNK_BLOCKS as i32;
-    for &(p, slope) in cells {
-        let (_, chunk) = chunks
-            .iter_mut()
-            .find(|(c, _)| [c.x as i32, c.y as i32, c.z as i32] == [p[0].div_euclid(cb), p[1].div_euclid(cb), p[2].div_euclid(cb)])
-            .unwrap_or_else(|| panic!("no floor chunk under {p:?}"));
-        let l = p.map(|v| v.rem_euclid(cb) as usize);
-        chunk.set_block(l[0], l[1], l[2], Block::new(WALL));
-        if let Some(shape) = slope {
-            chunk.chisel.insert(BlockIndex::from_xyz(l[0], l[1], l[2]), slope_chisel(WALL, shape));
-        }
-    }
-    region.with_data(|r| r.seed_terrain_genesis(chunks));
+    region.seed_stud_world(common::floor_seed(x - edge..x + edge, z - edge..z + edge, common::FLOOR_PLATES));
     region.handle_event(GameEventKind::CreateClient(CLIENT)).unwrap();
     let e = *region.data().player_entites.get(&CLIENT).unwrap();
     for _ in 0..20 {
@@ -52,72 +37,57 @@ fn region_with_player_on(cells: &[(TilePos, Option<SlopeShape>)]) -> (Region, En
     (region, e)
 }
 
-/// Chunk layer holding the high floor of [`high_region`] (block 2,000).
-const HIGH_CHUNK_Y: i32 = 125;
+/// The tile level bodies stand in on the high ground of [`high_region`]: far
+/// past the pathfinder's fixed scan constants (stud layer 133).
+const HIGH: i32 = 2000;
 
-/// Like `region_with_player`, but the one-block floor lies at block y 2,000
-/// (chunk layer 125, ground recipes with surface 2,000 and nothing below the
-/// band): far past the pathfinder's fixed scan constants.
+/// Like `region_with_player`, but the ground's top is the bottom of tile
+/// level [`HIGH`] (2,400 m up).
 fn high_region() -> Region {
     let (send, _recv) = crossbeam::channel::unbounded();
     let mut region = Region::new(Rollback::new(Some(send.clone())), Some(send), RegionCoords::new(0, 0), None);
     let (x, z) = region.data().spawn_xz();
     let edge = common::CHUNK_EDGE;
-    let chunks = floor_chunks(x - edge..x + edge, z - edge..z + edge, 16)
-        .into_iter()
-        .map(|(c, chunk)| (game::ChunkCoords::new(c.x, HIGH_CHUNK_Y, c.z), chunk))
-        .collect::<Vec<_>>();
-    let ground = chunks
-        .iter()
-        .map(|(c, _)| {
-            let surface = vec![(HIGH_CHUNK_Y * game::CHUNK_BLOCKS as i32) as i16; game::COLUMN_FOOTPRINT];
-            let g = game::ColumnGround::plain(surface.into_boxed_slice(), HIGH_CHUNK_Y, WALL, BlockId(2));
-            (game::ColumnCoords::new(c.x, c.z), g)
-        })
-        .collect::<Vec<_>>();
-    region.with_data(|r| {
-        r.seed_ground_genesis(ground);
-        r.seed_terrain_genesis(chunks);
-    });
+    let plates = HIGH * game::TILE_PLATES as i32;
+    region.seed_stud_world(common::floor_seed(x - edge..x + edge, z - edge..z + edge, plates));
     region.handle_event(GameEventKind::CreateClient(CLIENT)).unwrap();
     region
 }
 
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
-fn walker_paths_on_ground_above_block_512() {
+fn walker_paths_on_ground_far_above_the_scan_range() {
     let mut region = high_region();
     let e = *region.data().player_entites.get(&CLIENT).unwrap();
-    let floor = HIGH_CHUNK_Y * game::CHUNK_BLOCKS as i32;
-    assert_eq!(region.data().column_band([4, 4]), Some((floor, floor + game::CHUNK_BLOCKS as i32 - 1)));
+    let stand = HIGH;
+    let band = region.data().column_band([4, 4]).expect("the column's band is known");
+    assert!(band.0 < stand && stand <= band.1 + 1, "the band holds the high ground: {band:?}");
     region
-        .handle_event(GameEventKind::Order(CLIENT, Order::SetMode { mode: PlayMode::Adventure, at: Some([4, floor + 1, 4]) }))
+        .handle_event(GameEventKind::Order(CLIENT, Order::SetMode { mode: PlayMode::Adventure, at: Some([4, stand, 4]) }))
         .unwrap();
     region.forget_last_event();
     for _ in 0..5 {
         tick(&mut region);
     }
-    assert_eq!(body_tile(&region, e), [4, floor + 1, 4], "the body must be put on the high floor");
+    assert_eq!(body_tile(&region, e), [4, stand, 4], "the body must be put on the high floor");
     move_to(&mut region, here_goal([20, 20], None));
-    assert!(walker(&region, e).is_some(), "MoveTo must find a path at block {floor}");
+    assert!(walker(&region, e).is_some(), "MoveTo must find a path at level {stand}");
     walk_until_arrived(&mut region, e, walk_budget(40.0));
-    assert_eq!(body_tile(&region, e), [20, floor + 1, 20]);
+    assert_eq!(body_tile(&region, e), [20, stand, 20]);
 }
 
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
-fn walker_paths_in_dug_space_below_the_band_base() {
+fn walker_paths_in_dug_space_below_the_surface_layer() {
     let mut region = high_region();
     let e = *region.data().player_entites.get(&CLIENT).unwrap();
-    let floor = HIGH_CHUNK_Y * game::CHUNK_BLOCKS as i32;
-    // A tunnel 30 blocks under the surface: chunk layer 123, well below the
-    // band base (layer 125), so its chunks materialise out of implied ground.
-    let tunnel_y = floor - 30;
-    assert!(tunnel_y < HIGH_CHUNK_Y * game::CHUNK_BLOCKS as i32 - 3);
+    // A tunnel 30 tiles under the surface: two stud layers below the
+    // surface's, so its chunks materialise out of implied ground.
+    let tunnel_y = HIGH - 30;
     region.with_data(|d| {
         for x in 4..=20 {
             for y in [tunnel_y, tunnel_y + 1] {
-                assert!(d.set_block_safe([x, y, 4], Block::new(BlockId::AIR)), "dig {x},{y}");
+                assert!(common::carve_tile(d, [x, y, 4]), "dig {x},{y}");
             }
         }
     });
@@ -164,7 +134,7 @@ fn set_mode_adventure_places_body_on_tile() {
     assert_eq!(mode(&region), PlayMode::Adventure);
     let handle = data.ecs.rigidbody.try_get(e).unwrap();
     let t = data.physics.bodies.get(handle).unwrap().translation();
-    let bv = BLOCK_VOXELS as f32;
+    let bv = common::TILE_W;
     let (cx, cz) = ((TILE[0] as f32 + 0.5) * bv, (TILE[2] as f32 + 0.5) * bv);
     assert!((t.x - cx).abs() <= 0.5 * bv && (t.z - cz).abs() <= 0.5 * bv, "body at {t:?}, tile centre ({cx}, {cz})");
     assert!(data.ecs.motion.try_get(e).unwrap_or_default().grounded, "body at {t:?} must be grounded");
@@ -188,7 +158,7 @@ fn set_mode_adventure_twice_is_a_noop() {
     region.forget_last_event();
     let before = state_hash(region.data());
     let mut accepted = false;
-    region.with_data(|r| accepted = r.set_play_mode_safe(CLIENT, PlayMode::Adventure, Some([20, 1, 20])));
+    region.with_data(|r| accepted = r.set_play_mode_safe(CLIENT, PlayMode::Adventure, Some([20, L, 20])));
     assert!(accepted);
     assert_eq!(before, state_hash(region.data()));
 }
@@ -227,16 +197,8 @@ fn set_mode_teleport_clears_fall_velocity() {
 
 // --- Walker (MoveTo) ---------------------------------------------------------
 
-/// Floor block placed for steps and walls (`edit::PLACE_BLOCK`, solid).
-const WALL: BlockId = BlockId(1);
-
 fn adventure_at(at: TilePos) -> (Region, EntityKey) {
-    adventure_on(at, &[])
-}
-
-/// [`adventure_at`] on terrain with `cells` built in ([`region_with_player_on`]).
-fn adventure_on(at: TilePos, cells: &[(TilePos, Option<SlopeShape>)]) -> (Region, EntityKey) {
-    let (mut region, e) = region_with_player_on(cells);
+    let (mut region, e) = region_with_player();
     region
         .handle_event(GameEventKind::Order(CLIENT, Order::SetMode { mode: PlayMode::Adventure, at: Some(at) }))
         .unwrap();
@@ -268,14 +230,14 @@ fn walker(region: &Region, e: EntityKey) -> Option<Walker> {
 fn body_tile(region: &Region, e: EntityKey) -> TilePos {
     let data = region.data();
     let handle = data.ecs.rigidbody.try_get(e).unwrap();
-    feet_tile(feet_of(data.physics.bodies.get(handle).unwrap().translation()))
+    data.terrain_kind().feet_tile(data.feet_of(data.physics.bodies.get(handle).unwrap().translation()))
 }
 
 fn place(region: &mut Region, tiles: impl IntoIterator<Item = TilePos>) {
     let tiles: Vec<_> = tiles.into_iter().collect();
     region.with_data(|d| {
         for p in tiles {
-            assert!(d.set_block_safe(p, Block::new(WALL)), "place {p:?}");
+            assert!(common::fill_tile(d, p) > 0, "place {p:?}");
         }
     });
 }
@@ -298,16 +260,16 @@ fn walk_budget(metres: f32) -> u32 {
 
 #[test]
 fn move_to_walks_body_to_goal() {
-    let (mut region, e) = adventure_at([4, 1, 4]);
+    let (mut region, e) = adventure_at([4, L, 4]);
     move_to(&mut region, here_goal([20, 20], None));
     assert!(walker(&region, e).is_some(), "MoveTo must start a walk");
     walk_until_arrived(&mut region, e, walk_budget(40.0));
-    assert_eq!(body_tile(&region, e), [20, 1, 20]);
+    assert_eq!(body_tile(&region, e), [20, L, 20]);
 }
 
 #[test]
 fn walker_driven_body_plays_a_gait() {
-    let (mut region, e) = adventure_at([4, 1, 4]);
+    let (mut region, e) = adventure_at([4, L, 4]);
     move_to(&mut region, here_goal([20, 20], None));
     for _ in 0..20 {
         tick(&mut region);
@@ -320,7 +282,7 @@ fn walker_driven_body_plays_a_gait() {
 
 #[test]
 fn first_person_ends_the_walk_and_the_keyboard_drives() {
-    let (mut region, e) = adventure_at([4, 1, 4]);
+    let (mut region, e) = adventure_at([4, L, 4]);
     move_to(&mut region, here_goal([20, 20], None));
     tick(&mut region);
     assert!(walker(&region, e).is_some());
@@ -352,10 +314,10 @@ fn move_to_refused_in_fortress_mode() {
 
 #[test]
 fn move_to_unreachable_changes_nothing() {
-    let (mut region, e) = adventure_at([4, 1, 4]);
+    let (mut region, e) = adventure_at([4, L, 4]);
     // A 2-high ring around (20, 20): no step is that tall.
     let ring = (-1..=1).flat_map(|dx| (-1..=1).map(move |dz| (dx, dz))).filter(|&d| d != (0, 0));
-    place(&mut region, ring.flat_map(|(dx, dz)| [1, 2].map(|y| [20 + dx, y, 20 + dz])));
+    place(&mut region, ring.flat_map(|(dx, dz)| [L, L + 1].map(|y| [20 + dx, y, 20 + dz])));
     let before = state_hash(region.data());
     let mut accepted = true;
     region.with_data(|d| accepted = d.move_to_safe(CLIENT, here_goal([20, 20], None), RegionCoords::new(0, 0), None));
@@ -368,7 +330,7 @@ fn move_to_unreachable_changes_nothing() {
 /// known, so a goal beyond it has no way on.
 #[test]
 fn move_to_far_goal_with_no_way_on_changes_nothing() {
-    let (mut region, e) = adventure_at([4, 1, 4]);
+    let (mut region, e) = adventure_at([4, L, 4]);
     let before = state_hash(region.data());
     let mut accepted = true;
     let goal = Goal::local(RegionCoords::new(2, 0), [4, 4], None);
@@ -380,7 +342,7 @@ fn move_to_far_goal_with_no_way_on_changes_nothing() {
 
 #[test]
 fn extreme_untrusted_coordinates_are_refused_without_panic() {
-    let (mut region, e) = adventure_at([4, 1, 4]);
+    let (mut region, e) = adventure_at([4, L, 4]);
     let before = state_hash(region.data());
     for v in [i32::MAX, i32::MIN, -1, REGION_BLOCKS as i32] {
         for goal in [
@@ -394,11 +356,11 @@ fn extreme_untrusted_coordinates_are_refused_without_panic() {
             region.with_data(|d| accepted = d.move_to_safe(CLIENT, goal, RegionCoords::new(0, 0), None));
             assert!(!accepted, "{goal:?}");
         }
-        let order = Order::SetMode { mode: PlayMode::Adventure, at: Some([v, 1, 5]) };
+        let order = Order::SetMode { mode: PlayMode::Adventure, at: Some([v, L, 5]) };
         let mut ok = true;
         region.with_data(|d| ok = d.apply_order_safe(CLIENT, order));
         assert!(!ok);
-        let order = Order::SetMode { mode: PlayMode::Fortress, at: Some([5, 1, v]) };
+        let order = Order::SetMode { mode: PlayMode::Fortress, at: Some([5, L, v]) };
         region.with_data(|d| ok = d.apply_order_safe(CLIENT, order));
         assert!(!ok);
     }
@@ -413,13 +375,22 @@ fn extreme_untrusted_coordinates_are_refused_without_panic() {
 
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
-fn move_to_climbs_step() {
-    let (mut region, e) = adventure_at([4, 1, 10]);
-    // A one-block platform on the route, the goal on top of it.
-    place(&mut region, (12..24).flat_map(|x| (6..15).map(move |z| [x, 1, z])));
+fn move_to_climbs_a_brick_step() {
+    let (mut region, e) = adventure_at([4, L, 10]);
+    // A platform one tile high on the route, the goal on top of it, fronted by
+    // a brick step (`STUD_STEP_PLATES` high: a stud body walks up a step, it
+    // cannot climb a whole tile).
+    place(&mut region, (12..24).flat_map(|x| (6..15).map(move |z| [x, L, z])));
+    region.with_data(|d| {
+        for z in 6..15 {
+            let (lo, hi) = game::stud_tile_box([11, L, z]).unwrap();
+            assert!(d.fill_stud_box_safe(lo, [hi[0], lo[1] + game::STUD_STEP_PLATES, hi[2]], game::MAT_STONE) > 0);
+        }
+    });
     move_to(&mut region, here_goal([20, 10], None));
-    walk_until_arrived(&mut region, e, walk_budget(16.0) + 20);
-    assert_eq!(body_tile(&region, e), [20, 2, 10], "the body must end on the upper level");
+    let vel_y = walk_max_vel_y(&mut region, e, walk_budget(16.0) + 20);
+    assert!(vel_y <= 0.0, "the body jumped (vel_y {vel_y}): a stud walk steps up");
+    assert_eq!(body_tile(&region, e), [20, L + 1, 10], "the body must end on the upper level");
 }
 
 /// Walks until the walker is gone (like [`walk_until_arrived`]); the highest
@@ -439,43 +410,8 @@ fn walk_max_vel_y(region: &mut Region, e: EntityKey, max: u32) -> f32 {
 }
 
 #[test]
-#[ignore = "slow: >100ms — run via just test-full"]
-fn walker_walks_up_a_slope_without_jumping() {
-    // A one-block platform (x 13..24) fronted by a row of slopes at x = 12,
-    // low side toward the start.
-    let slopes = (6..15).map(|z| ([12, 1, z], Some(SlopeShape::Straight { low: Side::NegX })));
-    let platform = (13..24).flat_map(|x| (6..15).map(move |z| ([x, 1, z], None)));
-    let cells: Vec<_> = slopes.chain(platform).collect();
-    let (mut region, e) = adventure_on([4, 1, 10], &cells);
-    move_to(&mut region, here_goal([20, 10], None));
-    let w = walker(&region, e).expect("MoveTo must start a walk");
-    assert_eq!(w.walk_up.len(), w.path.len());
-    assert!(w.walk_up.contains(&true), "the path walks up the slope: {:?}", w.path);
-    let vel_y = walk_max_vel_y(&mut region, e, walk_budget(16.0) + 20);
-    assert!(vel_y <= 0.0, "the body jumped (vel_y {vel_y})");
-    assert_eq!(body_tile(&region, e), [20, 2, 10], "the body must end on the upper level");
-}
-
-#[test]
-#[ignore = "slow: >100ms — run via just test-full"]
-fn walker_jumps_onto_a_slope_from_its_side() {
-    // One slope whose low side (and both its diagonals) is walled off 2 high:
-    // the only way up is a lateral jump climb.
-    let slope = ([12, 1, 10], Some(SlopeShape::Straight { low: Side::NegX }));
-    let walls = (9..=11).flat_map(|z| [1, 2].map(|y| ([11, y, z], None)));
-    let cells: Vec<_> = std::iter::once(slope).chain(walls).collect();
-    let (mut region, e) = adventure_on([12, 1, 4], &cells);
-    move_to(&mut region, here_goal([12, 10], Some(2)));
-    let w = walker(&region, e).expect("MoveTo must start a walk");
-    assert!(!w.walk_up.contains(&true), "no walk-up from the side: {:?}", w.path);
-    let vel_y = walk_max_vel_y(&mut region, e, walk_budget(8.0) + 20);
-    assert_eq!(body_tile(&region, e), [12, 2, 10], "the body must end on the slope");
-    assert!(vel_y > 0.0, "the climb from the side is a jump");
-}
-
-#[test]
 fn move_to_undo_bit_exact() {
-    let (mut region, _) = adventure_at([4, 1, 4]);
+    let (mut region, _) = adventure_at([4, L, 4]);
     let before = state_hash(region.data());
     region.handle_event(GameEventKind::Order(CLIENT, Order::MoveTo(here_goal([20, 20], None)))).unwrap();
     for _ in 0..10 {
@@ -489,7 +425,7 @@ fn move_to_undo_bit_exact() {
 
 #[test]
 fn fortress_mode_ends_the_walk() {
-    let (mut region, e) = adventure_at([4, 1, 4]);
+    let (mut region, e) = adventure_at([4, L, 4]);
     move_to(&mut region, here_goal([20, 20], None));
     assert!(walker(&region, e).is_some());
     region
@@ -502,11 +438,11 @@ fn fortress_mode_ends_the_walk() {
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn walker_replans_once_then_gives_up() {
-    let (mut region, e) = adventure_at([4, 1, 10]);
+    let (mut region, e) = adventure_at([4, L, 10]);
     move_to(&mut region, here_goal([20, 10], None));
     assert!(walker(&region, e).is_some());
     // A 2-high wall right ahead, across the whole floor (z 0..32).
-    place(&mut region, (0..32).flat_map(|z| [1, 2].map(|y| [5, y, z])));
+    place(&mut region, (0..32).flat_map(|z| [L, L + 1].map(|y| [5, y, z])));
     let mut replanned = false;
     for _ in 0..2 * STUCK_TICKS + 5 {
         tick(&mut region);
@@ -519,19 +455,30 @@ fn walker_replans_once_then_gives_up() {
     assert!(replanned, "it must re-plan once before giving up");
 }
 
+/// `steer_on` as the sim calls it for a stud body.
+fn steer(w: &Walker, feet: Vector, grounded: bool) -> (game::movement::MoveKeys, f32) {
+    let step = game::movement::BodyScale::STUD.step_height_m;
+    steer_on(TerrainKind::Stud, step, w, feet, grounded, RegionCoords::new(0, 0))
+}
+
+/// Feet on the floor in the middle of tile (4, L, 4).
+fn feet_on_start() -> Vector {
+    let bv = common::TILE_W;
+    Vector::new(4.5 * bv, TerrainKind::Stud.level_bottom_units(L), 4.5 * bv)
+}
+
 #[test]
 fn steer_points_at_next_waypoint() {
-    let bv = BLOCK_VOXELS as f32;
-    let feet = Vector::new(4.5 * bv, bv, 4.5 * bv);
+    let feet = feet_on_start();
+    // A planned stud path: every step is a walk-up (`step_is_walk_up`).
     let walk = |next: TilePos| Walker {
-        path: vec![world([4, 1, 4]), world(next)],
+        path: vec![world([4, L, 4]), world(next)],
+        walk_up: vec![true, true],
         next: 1,
         ..Walker::default()
     };
-    let here = RegionCoords::new(0, 0);
-    let steer = |w: &Walker, feet, grounded| steer(w, feet, grounded, here);
     // +x: the yaw look_quat turns forward (-Z) onto +X, and plan walks +x.
-    let (keys, yaw) = steer(&walk([5, 1, 4]), feet, true);
+    let (keys, yaw) = steer(&walk([5, L, 4]), feet, true);
     assert!(keys.forward && !keys.sprint && !keys.jump_held && !keys.jump_pressed);
     let fwd = game::look_quat(yaw, 0.0) * Vector::new(0.0, 0.0, -1.0);
     assert!((fwd - Vector::X).length() < 1e-5, "forward {fwd:?}");
@@ -539,50 +486,53 @@ fn steer_points_at_next_waypoint() {
     let d = game::movement::plan(&mut m, &keys, yaw, 0);
     assert!(d.x > 0.0 && d.z.abs() < 1e-4, "plan moved {d:?}");
     // +z likewise.
-    let (_, yaw) = steer(&walk([4, 1, 5]), feet, true);
+    let (_, yaw) = steer(&walk([4, L, 5]), feet, true);
     let fwd = game::look_quat(yaw, 0.0) * Vector::new(0.0, 0.0, -1.0);
     assert!((fwd - Vector::Z).length() < 1e-5, "forward {fwd:?}");
-    // Jump only toward a higher tile, and only when grounded.
-    assert!(steer(&walk([5, 2, 4]), feet, true).0.jump_held);
-    assert!(!steer(&walk([5, 2, 4]), feet, false).0.jump_held);
-    assert!(!steer(&walk([5, 0, 4]), feet, true).0.jump_held);
-    // No jump onto a slope walked up from its low side.
-    let up = Walker { walk_up: vec![false, true], ..walk([5, 2, 4]) };
-    assert!(!steer(&up, feet, true).0.jump_held);
+    // A stud walk never jumps a step it planned: up, level or down.
+    for next in [[5, L + 1, 4], [5, L, 4], [5, L - 1, 4]] {
+        assert!(!steer(&walk(next), feet, true).0.jump_held, "{next:?}");
+        assert!(!steer(&walk(next), feet, false).0.jump_held, "{next:?}");
+    }
 }
 
 #[test]
-fn steer_jumps_a_stalled_walk_up() {
-    let bv = BLOCK_VOXELS as f32;
-    let feet = Vector::new(4.5 * bv, bv, 4.5 * bv);
-    let here = RegionCoords::new(0, 0);
-    let steer = |w: &Walker, feet, grounded| steer(w, feet, grounded, here);
+fn steer_jumps_a_stalled_walk() {
+    let feet = feet_on_start();
     let up = |next: TilePos, stalled: u32| Walker {
-        path: vec![world([4, 1, 4]), world(next)],
-        walk_up: vec![false, true],
+        path: vec![world([4, L, 4]), world(next)],
+        walk_up: vec![true, true],
         next: 1,
         stalled,
         ..Walker::default()
     };
     assert!(WALK_UP_JUMP_AFTER_STALL_TICKS > 0 && WALK_UP_JUMP_AFTER_STALL_TICKS < STUCK_TICKS);
-    assert!(!steer(&up([5, 2, 4], 0), feet, true).0.jump_held);
-    assert!(!steer(&up([5, 2, 4], WALK_UP_JUMP_AFTER_STALL_TICKS - 1), feet, true).0.jump_held);
+    assert!(!steer(&up([5, L + 1, 4], 0), feet, true).0.jump_held);
+    assert!(!steer(&up([5, L + 1, 4], WALK_UP_JUMP_AFTER_STALL_TICKS - 1), feet, true).0.jump_held);
     for stalled in [WALK_UP_JUMP_AFTER_STALL_TICKS, STUCK_TICKS] {
-        assert!(steer(&up([5, 2, 4], stalled), feet, true).0.jump_held, "stalled {stalled}");
-        // Still only on a climb, and only when grounded.
-        assert!(!steer(&up([5, 1, 4], stalled), feet, true).0.jump_held);
-        assert!(!steer(&up([5, 2, 4], stalled), feet, false).0.jump_held);
+        // The safety net: a stalled stud walk jumps whatever the rise …
+        assert!(steer(&up([5, L + 1, 4], stalled), feet, true).0.jump_held, "stalled {stalled}");
+        assert!(steer(&up([5, L, 4], stalled), feet, true).0.jump_held, "stalled {stalled}, level");
+        // … but only when grounded.
+        assert!(!steer(&up([5, L + 1, 4], stalled), feet, false).0.jump_held);
     }
 }
 
-/// A flat one-block floor over every column except `holes`.
+/// A flat stud floor (solid tiles at level `L - 1`) over every column except `holes`.
 struct Flat {
     holes: Vec<[i32; 2]>,
 }
 
 impl TileSource for Flat {
-    fn block(&self, p: TilePos) -> BlockId {
-        if p[1] == 0 && !self.holes.contains(&[p[0], p[2]]) { WALL } else { BlockId::AIR }
+    fn terrain(&self) -> TerrainKind {
+        TerrainKind::Stud
+    }
+    fn tile_fill(&self, p: TilePos) -> TileFill {
+        if p[1] == L - 1 && !self.holes.contains(&[p[0], p[2]]) { TileFill::Solid } else { TileFill::Open }
+    }
+    // P10b: the trait's voxel half — a stud source has no blocks or trees.
+    fn block(&self, _: TilePos) -> BlockId {
+        BlockId::AIR
     }
     fn is_bedrock(&self, _: TilePos) -> bool {
         false
@@ -720,7 +670,7 @@ fn path_plan_crosses_into_the_routes_next_region() {
     let extent = game::MapExtent { origin: here, width: 3, height: 2 };
     let map = RouteMap::with_blocked(extent, [RegionCoords::new(1, 0)]);
     let goal = Goal::local(RegionCoords::new(2, 0), [3, 12], None);
-    let plan = PathPlan::plan(&flat, [n - 4, 1, n - 4], &goal, here, Some(&map), game::MAX_PATH_NODES).expect("a stretch");
+    let plan = PathPlan::plan(&flat, [n - 4, L, n - 4], &goal, here, Some(&map), game::MAX_PATH_NODES).expect("a stretch");
     assert!(!plan.reaches_goal);
     assert_eq!(plan.path.last().unwrap().to_local().0, RegionCoords::new(1, 1), "{:?}", plan.path.last());
 }
@@ -731,23 +681,23 @@ fn path_plan_reaches_a_goal_past_the_seam_and_heads_for_one_beyond() {
     let here = RegionCoords::new(0, 0);
     // `Flat` answers everywhere, like a region whose halo is all floor.
     let flat = Flat { holes: vec![] };
-    let from = [n - 4, 1, 12];
+    let from = [n - 4, L, 12];
     let max = game::MAX_PATH_NODES;
     // Within the halo: the path runs over the seam to the goal itself.
     let east = Goal::local(RegionCoords::new(1, 0), [3, 12], None);
     let plan = PathPlan::plan(&flat, from, &east, here, None, max).expect("a path");
     assert!(plan.reaches_goal);
     assert_eq!(plan.path.first(), Some(&world(from)));
-    assert_eq!(plan.path.last(), Some(&world([n + 3, 1, 12])));
+    assert_eq!(plan.path.last(), Some(&world([n + 3, L, 12])));
     // Two regions away: a stretch ending PORTAL_DEPTH_BLOCKS into the next
     // region of the route, straight toward the goal.
     let far = Goal::local(RegionCoords::new(2, 0), [3, 12], None);
     let plan = PathPlan::plan(&flat, from, &far, here, None, max).expect("a stretch");
     assert!(!plan.reaches_goal);
-    assert_eq!(plan.path.last(), Some(&world([n + PORTAL_DEPTH_BLOCKS, 1, 12])));
+    assert_eq!(plan.path.last(), Some(&world([n + PORTAL_DEPTH_BLOCKS, L, 12])));
     // Diagonally two regions away: into the corner region.
     let corner = Goal::local(RegionCoords::new(-2, -2), [3, 3], None);
-    let plan = PathPlan::plan(&flat, [2, 1, 2], &corner, here, None, max).expect("a stretch");
+    let plan = PathPlan::plan(&flat, [2, L, 2], &corner, here, None, max).expect("a stretch");
     let end = *plan.path.last().unwrap();
     assert_eq!(end.to_local().0, RegionCoords::new(-1, -1));
     assert!(end.x < -(PORTAL_DEPTH_BLOCKS as i64) && end.z < -(PORTAL_DEPTH_BLOCKS as i64), "{end:?}");
@@ -755,11 +705,11 @@ fn path_plan_reaches_a_goal_past_the_seam_and_heads_for_one_beyond() {
     let map = RouteMap::open(game::MapExtent { origin: here, width: 1, height: 1 });
     let plan = PathPlan::plan(&flat, from, &far, here, Some(&map), max).expect("a path");
     assert!(plan.reaches_goal);
-    assert_eq!(plan.path.last(), Some(&world([n - 1, 1, 12])));
+    assert_eq!(plan.path.last(), Some(&world([n - 1, L, 12])));
     assert!(plan.path.iter().all(|p| p.to_local().0 == here), "never off the map");
     // A goal in this region with no path: nothing, even with a way out.
     let holed = Flat { holes: vec![[20, 20]] };
-    assert_eq!(PathPlan::plan(&holed, [4, 1, 4], &here_goal([20, 20], None), here, None, max), None);
+    assert_eq!(PathPlan::plan(&holed, [4, L, 4], &here_goal([20, 20], None), here, None, max), None);
 }
 
 /// A floor everywhere but the quarter-plane `x < 0, z < 0` (the corner
@@ -767,8 +717,15 @@ fn path_plan_reaches_a_goal_past_the_seam_and_heads_for_one_beyond() {
 struct CornerGone;
 
 impl TileSource for CornerGone {
-    fn block(&self, p: TilePos) -> BlockId {
-        if p[1] == 0 && !(p[0] < 0 && p[2] < 0) { WALL } else { BlockId::AIR }
+    fn terrain(&self) -> TerrainKind {
+        TerrainKind::Stud
+    }
+    fn tile_fill(&self, p: TilePos) -> TileFill {
+        if p[1] == L - 1 && !(p[0] < 0 && p[2] < 0) { TileFill::Solid } else { TileFill::Open }
+    }
+    // P10b: the trait's voxel half.
+    fn block(&self, _: TilePos) -> BlockId {
+        BlockId::AIR
     }
     fn is_bedrock(&self, _: TilePos) -> bool {
         false
@@ -791,7 +748,7 @@ impl TileSource for CornerGone {
 fn path_plan_diagonal_step_falls_back_to_a_side_region() {
     let here = RegionCoords::new(0, 0);
     let corner = Goal::local(RegionCoords::new(-2, -2), [3, 3], None);
-    let plan = PathPlan::plan(&CornerGone, [2, 1, 2], &corner, here, None, game::MAX_PATH_NODES).expect("a stretch");
+    let plan = PathPlan::plan(&CornerGone, [2, L, 2], &corner, here, None, game::MAX_PATH_NODES).expect("a stretch");
     assert!(!plan.reaches_goal);
     let end = *plan.path.last().unwrap();
     assert_eq!(end.to_local().0, RegionCoords::new(-1, 0), "into the side region, x first: {end:?}");
@@ -802,7 +759,7 @@ fn path_plan_diagonal_step_falls_back_to_a_side_region() {
 
 /// A walking adventurer extracted as its handoff bundle (`EntityKey` freed).
 fn walking_bundle(goal: Goal) -> game::EntityBundle {
-    let (mut src, e) = adventure_at([4, 1, 4]);
+    let (mut src, e) = adventure_at([4, L, 4]);
     move_to(&mut src, goal);
     for _ in 0..5 {
         tick(&mut src);
@@ -818,7 +775,7 @@ fn floored_region(at: RegionCoords) -> Region {
     let mut region = Region::new(Rollback::new(Some(send.clone())), Some(send), at, None);
     let (x, z) = region.data().spawn_xz();
     let edge = common::CHUNK_EDGE;
-    region.with_data(|r| r.seed_terrain_genesis(floor_chunks(x - edge..x + edge, z - edge..z + edge, 16)));
+    region.seed_stud_world(common::floor_seed(x - edge..x + edge, z - edge..z + edge, common::FLOOR_PLATES));
     region
 }
 
@@ -855,7 +812,7 @@ fn arrived_walker_with_no_way_on_is_dropped() {
 fn feet_of_body(region: &Region, e: EntityKey) -> Vector {
     let data = region.data();
     let handle = data.ecs.rigidbody.try_get(e).unwrap();
-    feet_of(data.physics.bodies.get(handle).unwrap().translation())
+    data.feet_of(data.physics.bodies.get(handle).unwrap().translation())
 }
 
 // --- The world's outer seam -------------------------------------------------
@@ -872,7 +829,7 @@ fn floored_adventurer(extent: Option<game::MapExtent>) -> (Region, EntityKey) {
     let mut region = Region::new(Rollback::new(Some(send.clone())), Some(send), RegionCoords::new(0, 0), None);
     region.set_map_extent(extent);
     let size = game::REGION_SIZE;
-    region.with_data(|r| r.seed_terrain_genesis(floor_chunks(0.0..size, 0.0..size, 16)));
+    region.seed_stud_world(common::floor_seed(0.0..size, 0.0..size, common::FLOOR_PLATES));
     region.handle_event(GameEventKind::CreateClient(CLIENT)).unwrap();
     region.forget_last_event();
     let e = *region.data().player_entites.get(&CLIENT).unwrap();
@@ -906,7 +863,7 @@ fn walker_never_leaves_the_map() {
     move_to(&mut region, goal);
     let w = walker(&region, e).expect("MoveTo off the map still walks to the edge");
     assert!(w.to_goal, "the goal moves onto the map");
-    assert_eq!(w.path.last(), Some(&world([n - 1, 1, TILE[2]])), "the last tile inside the map");
+    assert_eq!(w.path.last(), Some(&world([n - 1, L, TILE[2]])), "the last tile inside the map");
     let mut departed = 0;
     for _ in 0..walk_budget((n - TILE[0]) as f32) {
         tick(&mut region);
@@ -918,14 +875,14 @@ fn walker_never_leaves_the_map() {
     assert!(walker(&region, e).is_none(), "the walk ends at the edge, body on {:?}", body_tile(&region, e));
     departed += departures_over(&mut region, 20);
     assert_eq!(departed, 0, "nothing hands off out of the world");
-    assert_eq!(body_tile(&region, e), [n - 1, 1, TILE[2]], "the walk ends on the last tile inside the map");
+    assert_eq!(body_tile(&region, e), [n - 1, L, TILE[2]], "the walk ends on the last tile inside the map");
 
     // Unbounded (procedural), the same order walks out across the seam.
     let (mut region, e) = floored_adventurer(None);
     common::seed_floor_halo(&mut region, RegionCoords::new(0, 0));
     move_to(&mut region, goal);
     let w = walker(&region, e).expect("a walk over the seam");
-    assert_eq!(w.path.last(), Some(&world([n + 5, 1, TILE[2]])), "to the goal, through the halo");
+    assert_eq!(w.path.last(), Some(&world([n + 5, L, TILE[2]])), "to the goal, through the halo");
     assert!(departures_over(&mut region, walk_budget((n - TILE[0]) as f32 + 2.0)) > 0, "the walker leaves the region");
 }
 
@@ -983,7 +940,7 @@ fn motion_of(region: &Region, e: EntityKey) -> Motion {
 
 #[test]
 fn no_flight_in_adventure() {
-    let (mut region, e) = adventure_at([4, 1, 4]);
+    let (mut region, e) = adventure_at([4, L, 4]);
     send(&mut region, InputEvent::FpsCam(true));
     tick(&mut region);
     double_tap_space(&mut region);
@@ -1005,7 +962,7 @@ fn fortress_body_still_flies() {
 
 #[test]
 fn e_toggles_inventory_in_adventure() {
-    let (mut region, _e) = adventure_at([4, 1, 4]);
+    let (mut region, _e) = adventure_at([4, L, 4]);
     send(&mut region, InputEvent::FpsCam(true));
     tick(&mut region);
     let open = |r: &Region| r.data().clients.get(&CLIENT).unwrap().inventory_open;
@@ -1020,7 +977,7 @@ fn e_toggles_inventory_in_adventure() {
 
 #[test]
 fn closing_inventory_returns_the_cursor_stack() {
-    let (mut region, _e) = adventure_at([4, 1, 4]);
+    let (mut region, _e) = adventure_at([4, L, 4]);
     send(&mut region, InputEvent::FpsCam(true));
     tap(&mut region, Key::KeyE);
     let stack = game::ItemStack { item: game::ItemId::block(BlockId(1)), count: 5 };
@@ -1034,7 +991,7 @@ fn closing_inventory_returns_the_cursor_stack() {
 
 #[test]
 fn digits_and_wheel_select_slot() {
-    let (mut region, _e) = adventure_at([4, 1, 4]);
+    let (mut region, _e) = adventure_at([4, L, 4]);
     send(&mut region, InputEvent::FpsCam(true));
     let selected = |r: &Region| r.data().clients.get(&CLIENT).unwrap().selected;
     tap(&mut region, Key::Digit3);
@@ -1067,7 +1024,7 @@ fn flying_body_entering_adventure_lands() {
 
 #[test]
 fn wheel_ignored_while_inventory_open() {
-    let (mut region, _e) = adventure_at([4, 1, 4]);
+    let (mut region, _e) = adventure_at([4, L, 4]);
     send(&mut region, InputEvent::FpsCam(true));
     tap(&mut region, Key::KeyE);
     send(&mut region, InputEvent::MouseWheel { x: 0.0, y: 1.0 });

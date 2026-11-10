@@ -29,9 +29,8 @@ use std::collections::BTreeMap;
 
 use super::rig::Rig;
 use game::{
-    Chunk, ColumnCoords, Column, EntityId, EntityKind, InlineSchedule, Inventory, ItemStack, PlayMode,
-    RegionCoords, StateHash, StateHasher, SubChunk, WorldBlockPos, BLOCK_VOXELS, CHUNK_BLOCKS, REGION_BLOCKS,
-    REGION_CHUNKS, REGION_SIZE, SPAWN_REGION,
+    EntityId, EntityKind, InlineSchedule, Inventory, ItemStack, PlayMode, RegionCoords, StateHash, StateHasher,
+    StudRegionSeed, WorldBlockPos, CHUNK_BLOCKS, REGION_BLOCKS, REGION_CHUNKS, REGION_SIZE, SPAWN_REGION,
 };
 
 /// A straight seam's axis: `X` is the seam crossed moving along x (x = 0
@@ -57,9 +56,9 @@ pub enum Placement {
 pub const PLACEMENTS: [Placement; 4] =
     [Placement::Centre, Placement::Seam(Axis::X), Placement::Seam(Axis::Z), Placement::Corner];
 
-/// The block level a body stands on over [`uniform_floor`] (the floor is one
-/// block thick at block y 0).
-pub const STAND_LEVEL: i32 = 1;
+/// The tile level a body stands in over [`uniform_floor`] (flat stud ground
+/// whose surface is the top of level `STAND_LEVEL - 1`).
+pub const STAND_LEVEL: i32 = super::STAND;
 
 impl Placement {
     /// The world block the scenario is centred on.
@@ -99,22 +98,14 @@ pub fn spawn_tile(pos: WorldBlockPos) -> game::TilePos {
     [local.x, local.y, local.z]
 }
 
-/// A one-block floor under every chunk column of every region: the same
+/// Flat stud ground under every chunk column of every region: the same
 /// ground in the world frame wherever a scenario is placed.
-pub fn uniform_floor(_rc: RegionCoords) -> Vec<(ColumnCoords, Column)> {
-    let air = game::Block::new(game::BlockId::AIR);
-    let mut out = Vec::new();
-    for x in 0..REGION_CHUNKS {
-        for z in 0..REGION_CHUNKS {
-            let sub = SubChunk::Dense(Box::new(Chunk::flat_floor(BLOCK_VOXELS as u32)));
-            out.push((ColumnCoords::new(x, z), Column::new(0, air, air, vec![sub])));
-        }
-    }
-    out
+pub fn uniform_floor(_rc: RegionCoords) -> StudRegionSeed {
+    super::uniform_seed()
 }
 
 /// A region generator: the ground a scenario is played on.
-pub type Floor = Box<dyn FnMut(RegionCoords) -> Vec<(ColumnCoords, Column)> + Send>;
+pub type Floor = game::InlineStudGenesis;
 
 /// A gameplay scenario the harness places three ways. `setup` gets the
 /// placement's origin (and may run rounds itself, e.g. to let a body land);
@@ -124,11 +115,11 @@ pub trait Scenario {
     fn drive(&self, rig: &mut Rig, round: u32);
     fn rounds(&self) -> u32;
     /// The ground recipes the scenario is played on, placed at `origin`
-    /// (the regions' genesis columns): [`uniform_floor`] by default. A
+    /// (the regions' stud genesis): [`uniform_floor`] by default. A
     /// scenario with recipe water builds it with
     /// `common::water::floor_with_water`, its boxes relative to `origin`.
     fn floor(&self, _origin: WorldBlockPos) -> Floor {
-        Box::new(uniform_floor)
+        std::sync::Arc::new(uniform_floor)
     }
     /// Whether the scenario's motion crosses the seam (`run` then asserts
     /// it reached the region past it). A scenario that reaches across a
@@ -181,7 +172,7 @@ pub const POSE_TOL_BLOCKS: f32 = 1.1e-4;
 /// before the halo; with it the adventure walk at a seam was 1.5e-4 lockstep
 /// and 2.3e-4 under jitter until walks planned across seams — since then
 /// (Task 6.5) the adventure walk is 7.6e-5 in every placement, lockstep and
-/// jittery, the key walk 0). Shared with [`JITTER_TOLERANCES`].
+/// jittery, the key walk 0).
 pub const VEL_TOL_BLOCKS_PER_S: f32 = 3.1e-4;
 pub const LOCKSTEP_TOLERANCES: Tolerances = Tolerances {
     pose_blocks: POSE_TOL_BLOCKS,
@@ -196,10 +187,16 @@ pub const LOCKSTEP_TOLERANCES: Tolerances = Tolerances {
 /// the key walk's largest spread over 4 jittery seeds was 0.763 blocks
 /// (2026-11-06, as above).
 pub const JITTER_POSE_TOL_BLOCKS: f32 = 1.53;
+/// A jittery run's velocities, blocks per second. Looser than the lockstep
+/// bound: a body standing on stud caps keeps a residual vertical velocity
+/// (the controller's snap onto the caps) whose phase depends on the tick the
+/// walk stopped, which jitter shifts — in the centred placement as much as at
+/// a seam. Measured ×2 (2026-11-10, stud ground, REGION_BLOCKS 64): 0.0029.
+pub const JITTER_VEL_TOL_BLOCKS_PER_S: f32 = 0.006;
 pub const JITTER_TOLERANCES: Tolerances =
     Tolerances {
         pose_blocks: JITTER_POSE_TOL_BLOCKS,
-        vel_blocks_per_s: VEL_TOL_BLOCKS_PER_S,
+        vel_blocks_per_s: JITTER_VEL_TOL_BLOCKS_PER_S,
         tiles: false,
         angle_deg: f32::INFINITY,
     };
@@ -256,20 +253,19 @@ impl WorldSnapshot {
     }
 }
 
-/// World chunk coordinates (absolute) -> content digest of every terrain
-/// chunk in the running regions.
+/// World chunk coordinates (absolute, `y` = stud layer) -> content digest of
+/// every materialised stud chunk in the running regions.
 fn terrain_digests(rig: &mut Rig) -> BTreeMap<[i64; 3], u32> {
     let mut out = BTreeMap::new();
     let n = REGION_CHUNKS as i64;
     for rc in rig.manager.running_regions() {
         rig.manager.spawner_mut().with_region(rc, |region| {
             let data = region.data();
-            for (&(x, z, y), &key) in data.chunk_index.iter() {
-                if let Some(chunk) = data.ecs.chunk.try_get(key) {
-                    let mut h = StateHasher::new();
-                    chunk.state_hash(&mut h);
-                    out.insert([rc.x as i64 * n + x as i64, y as i64, rc.z as i64 * n + z as i64], h.finalize());
-                }
+            for c in data.stud_index.keys() {
+                let chunk = data.stud_chunk_at(*c).expect("an indexed stud chunk");
+                let mut h = StateHasher::new();
+                chunk.state_hash(&mut h);
+                out.insert([rc.x as i64 * n + c.x as i64, c.y as i64, rc.z as i64 * n + c.z as i64], h.finalize());
             }
         });
     }
@@ -281,8 +277,10 @@ fn terrain_digests(rig: &mut Rig) -> BTreeMap<[i64; 3], u32> {
 /// `FLIP_HYSTERESIS` past a seam would trip this: scenarios end clear of
 /// seams).
 pub fn snapshot(rig: &mut Rig, origin: WorldBlockPos, baseline: &BTreeMap<[i64; 3], u32>) -> WorldSnapshot {
-    let bv = BLOCK_VOXELS as f64;
-    let o = [origin.x as f64 * bv, origin.y as f64 * bv, origin.z as f64 * bv];
+    // A tile is one "block" wide (1 m); `origin.y` is a tile level. Poses and
+    // velocities are reported in tile widths (metres) on every axis.
+    let bv = super::TILE_W as f64;
+    let o = [origin.x as f64 * bv, origin.y as f64 * super::tile_h() as f64, origin.z as f64 * bv];
     let mut entities = BTreeMap::new();
     let mut piles = BTreeMap::new();
     let mut containers = BTreeMap::new();
@@ -309,7 +307,7 @@ pub fn snapshot(rig: &mut Rig, origin: WorldBlockPos, baseline: &BTreeMap<[i64; 
                     (world[2] / REGION_SIZE as f64).floor() as i32,
                 );
                 assert_eq!(owner, rc, "{id:?} is owned by {rc:?} but stands in {owner:?} (world {world:?})");
-                let tile = game::feet_tile(game::feet_of(t));
+                let tile = data.terrain_kind().feet_tile(data.feet_of(t));
                 let tile = WorldBlockPos::from_local(rc, game::BlockPos::new(tile[0], tile[1], tile[2]));
                 let walk_goal = data.ecs.walker.try_get(key).as_ref().map(|w| {
                     let g = w.goal;
@@ -453,7 +451,10 @@ pub fn spread(a: &WorldSnapshot, b: &WorldSnapshot) -> (f32, f32, f32) {
 /// by two regions in one round.
 pub fn run<S: Scenario>(s: &S, placement: Placement, schedule: Option<InlineSchedule>) -> WorldSnapshot {
     let origin = placement.origin();
-    let mut rig = Rig::with_floor(schedule, s.floor(origin));
+    let mut rig = Rig::with_genesis(
+        schedule.map_or_else(game::InlineSpawner::default, game::InlineSpawner::with_schedule),
+        s.floor(origin),
+    );
     rig.join_spawn();
     let baseline = terrain_digests(&mut rig);
     s.setup(&mut rig, origin);

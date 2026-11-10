@@ -181,7 +181,6 @@ pub fn update_ground_pick(
     grid: Res<HeightGrid>,
     working: Res<WorkingLevel>,
     tiles: Res<TileMirror>,
-    xray: Option<Res<crate::renderer::voxel_pull::xray::XraySettings>>,
     mut pick: ResMut<GroundPick>,
 ) {
     pick.0 = (|| {
@@ -197,7 +196,6 @@ pub fn update_ground_pick(
             &grid,
             &working,
             &tiles,
-            crate::renderer::voxel_pull::xray::xray_on(xray.as_deref(), working.cut),
         )?;
         let region = RegionId::from_world(hit.x, hit.z);
         Some((region, hit - Vec3::from_array(region.world_offset())))
@@ -316,7 +314,7 @@ pub fn select_input(
     let Some(end) = cursor else { return };
     let Ok((camera, tf)) = view.single() else { return };
     let gt = GlobalTransform::from(*tf);
-    let scale = body_scale.map_or(BodyScale::VOXEL, |s| s.0);
+    let scale = body_scale.map_or(BodyScale::STUD, |s| s.0);
     let candidates = projected(camera, &gt, &entities, mode.adventure(), scale);
     let picked: Vec<_> = if dragging(start, end) {
         box_pick(start, end, candidates.into_iter().map(|(k, b)| (k, b.centre)))
@@ -354,7 +352,7 @@ pub fn draw_selection_rings(
     body_scale: Option<Res<crate::renderer::stud::ClientBodyScale>>,
     mut gizmos: Gizmos,
 ) {
-    let scale = body_scale.map_or(BodyScale::VOXEL, |s| s.0);
+    let scale = body_scale.map_or(BodyScale::STUD, |s| s.0);
     for key in &selection.0 {
         let Some(&e) = map.0.get(key) else { continue };
         let Ok((kind, gt)) = entities.get(e) else { continue };

@@ -5,11 +5,11 @@
 
 use std::time::Duration;
 
-use game::{ChunkCoords, CutId, InFlightRow, PortableRegion, RegionCoords, WorldCut};
+use game::{CutId, InFlightRow, PortableRegion, RegionCoords, StudChunkCoords, WorldCut};
 use sqlx::Connection;
 use world_store::{Dials, FormatKind, OpenMode, Pool, StoreError, StoreHandle, StoreUrl, newest_migration, open_pool};
 
-use crate::codec::{chunk, intent, meta, player, region_ground};
+use crate::codec::{intent, meta, player, stud_chunk, stud_ground};
 use crate::common;
 use crate::handle::{TEST_SUPER_REGIONS, each_backend, open};
 
@@ -21,8 +21,9 @@ const BLOCKED_FOR: Duration = Duration::from_millis(300);
 fn region_a() -> PortableRegion {
     PortableRegion {
         meta: meta(),
-        chunks: [(ChunkCoords::new(0, 0, 0), chunk())].into_iter().collect(),
-        ground: Some(region_ground()),
+        stud_chunks: [(StudChunkCoords { x: 0, y: 0, z: 0 }, Some(stud_chunk()))].into_iter().collect(),
+        ground: Some(Vec::new()),
+        stud_ground: Some(stud_ground()),
         entities: vec![],
         players: vec![],
         ..Default::default()

@@ -1,10 +1,4 @@
-use bevy::asset::RenderAssetUsages;
-use bevy::image::{ImageAddressMode, ImageSampler, ImageSamplerDescriptor};
-use bevy::pbr::{ExtendedMaterial, MaterialPlugin};
 use bevy::prelude::*;
-use bevy::render::render_resource::{
-    Extent3d, TextureDimension, TextureFormat, TextureViewDescriptor, TextureViewDimension,
-};
 use crossbeam::channel::{Receiver, Sender};
 use game::{ClientId, ClientUpdateEvent, GameEventKind};
 
@@ -14,9 +8,7 @@ pub mod atmosphere;
 #[cfg(not(target_arch = "wasm32"))]
 mod autopilot;
 mod avatar;
-mod block_textures;
 pub mod block_target;
-pub mod bricks;
 pub mod bridge;
 pub(crate) mod collider_debug;
 pub mod commander;
@@ -31,7 +23,6 @@ pub mod compute; // off-main-thread jobs: Bevy's pool natively, Web Workers on w
 pub mod config;
 pub mod convert;
 pub(crate) mod diag;
-pub mod far_voxel;
 pub(crate) mod grid_debug;
 pub mod hud;
 pub(crate) mod input;
@@ -43,25 +34,19 @@ pub mod item_icons;
 pub mod item_flights;
 pub mod item_piles;
 pub mod lod_rings;
-pub mod meshing;
 pub mod model;
-#[cfg(not(target_arch = "wasm32"))]
-pub mod render_bench;
 pub mod rigs;
 mod skybox;
 pub mod slint_composite;
 pub mod slint_overlay;
 pub use slint_composite::UiCamera;
-pub mod voxel_bodies;
-mod voxel_material;
-pub mod voxel_pull;
 pub mod stud;
 pub mod water;
 pub mod embark_tabs;
 pub mod history_view;
 pub mod world_map;
-use block_textures::build_layers;
-use voxel_material::StandardVoxelMaterial;
+#[cfg(test)]
+pub(crate) mod shader_test;
 
 /// `RenderPlugin` with Bevy's default (env-driven) `WgpuSettings`, minus the
 /// adapter features that break device creation. Bevy requests every feature
@@ -105,15 +90,11 @@ pub struct SimBridgePlugin {
 
 impl Plugin for SimBridgePlugin {
     fn build(&self, app: &mut App) {
-        voxel_material::embed_voxel_texture_shader(app);
         app.add_plugins(water::WaterPlugin);
         app.add_plugins(stud::StudPlugin);
         app.add_plugins((
-            MaterialPlugin::<ExtendedMaterial<StandardMaterial, StandardVoxelMaterial>>::default(),
             bevy::diagnostic::FrameTimeDiagnosticsPlugin::default(),
-            voxel_pull::VoxelPullPlugin,
-            fortress_view::FortressOverlayPlugin,
-            far_voxel::FarVoxelPlugin,
+            fortress_view::FortressViewPlugin,
             model::BbModelPlugin,
             item_piles::ItemPilesPlugin,
             block_target::BlockTargetPlugin,
@@ -135,7 +116,6 @@ impl Plugin for SimBridgePlugin {
         .add_session_reset::<bridge::Regions>()
         .add_session_reset::<bridge::RegionRoots>()
         .add_session_reset::<bridge::SimEntityMap>()
-        .add_session_reset::<bridge::SnapshotVoxelQueue>()
         .add_session_reset::<bridge::RetiredRegionRoots>()
         .add_session_reset::<hud::HudStatus>()
         .add_session_reset::<hud::RegionTickTimes>()
@@ -149,20 +129,6 @@ impl Plugin for SimBridgePlugin {
         .init_resource::<grid_debug::GridDebug>()
         .init_resource::<cursor::CursorPolicy>()
         .add_session_reset_with(cursor::reset_session_grab)
-        .add_session_reset::<meshing::queue::ChunkGrid>()
-        .add_session_reset::<meshing::queue::RemeshQueue>()
-        .init_resource::<meshing::queue::MeshBudgets>()
-        .init_resource::<meshing::queue::MeshBudgetPolicy>()
-        .add_session_reset::<meshing::queue::FrameUploads>()
-        .add_session_reset::<meshing::lod::LodBuildQueue>()
-        .add_session_reset::<meshing::lod::FarFrameUploads>()
-        .add_session_reset::<bricks::SkippedBricks>()
-        .add_session_reset::<bricks::SimChunkIndex>()
-        // Cave culling starts OFF: the world has no caves yet, and the flood
-        // cost 5-8.5 ms per turning frame at the 5x5 window (2026-09-23
-        // bench) for nothing to hide. F4 / the F3 dev panel turn it on.
-        .insert_resource(meshing::visibility::CullingConfig { graph_enabled: false })
-        .init_resource::<config::TerrainRenderConfig>()
         .init_resource::<input::MouseCoalesceWindow>()
         .add_session_reset::<look::LocalLook>()
         .add_session_reset::<lod_rings::LodRings>()
@@ -183,7 +149,6 @@ impl Plugin for SimBridgePlugin {
                         bridge::drain_client_updates,
                         bridge::despawn_retired_regions,
                         bridge::drain_region_updates,
-                        bridge::apply_snapshot_voxels,
                         bridge::dedupe_halo_entities,
                     )
                         .chain()
@@ -199,51 +164,18 @@ impl Plugin for SimBridgePlugin {
             )
                 .chain(),
         )
-        .add_plugins(meshing::visibility::cull_plugin)
         .add_systems(Startup, (setup_scene, skybox::setup_skybox))
         .add_systems(
             Update,
             (
-                (
-                    // Rate-based budgets: re-derived from the real frame delta
-                    // before any lane reads them.
-                    meshing::queue::scale_mesh_budgets,
-                    meshing::queue::mark_remesh_dirty,
-                    meshing::queue::prune_chunk_grid,
-                    meshing::queue::remesh_awaiting_ground,
-                    meshing::queue::spawn_mesh_tasks,
-                    meshing::apply_meshed_chunks,
-                    meshing::chunk_mesh::rebuild_chunk_meshes,
-                    // LOD meshes land in the same chain; culling moved to
-                    // cull_plugin (PostUpdate) so it sees the current
-                    // frame's frustum — it runs after this chain either way.
-                    far_voxel::lifecycle::sync_far_pass_readiness,
-                    far_voxel::lifecycle::resolve_far_upload_results,
-                    meshing::lod::spawn_lod_mesh_tasks,
-                    far_voxel::lifecycle::queue_far_brick_tasks,
-                    meshing::lod::apply_lod_meshes,
-                    meshing::lod_tiles::rebuild_lod_tiles,
-                    far_voxel::lifecycle::remove_far_voxel_cells,
-                    far_voxel::lifecycle::refresh_far_neighbors,
-                    far_voxel::lifecycle::apply_far_brick_tasks,
-                    far_voxel::gpu::publish_far_uploads,
-                )
-                    .chain(),
-                // LOD rings run in Update but outside the meshing chain:
-                // they only spawn/despawn LOD roots and children, which
-                // the LOD mesh systems pick up on later frames.
+                // LOD rings only spawn/despawn far-tile roots; their meshes
+                // land from `stud::far`.
                 (
                     lod_rings::apply_lod_events,
                     lod_rings::retire_lod_roots,
                 )
                     .chain(),
                 interpolate::interpolate_transforms,
-                (voxel_bodies::spawn_voxel_body_meshes, voxel_bodies::apply_voxel_body_meshes).chain(),
-                // Coarse twins of sim chunks (distance LOD in the simulated
-                // neighbourhood): dirtied by `rebuild_chunk_meshes`.
-                (meshing::coarse::apply_coarse_tasks, meshing::coarse::spawn_coarse_tasks)
-                    .chain()
-                    .after(meshing::chunk_mesh::rebuild_chunk_meshes),
                 world_map::apply_world_map_msgs,
                 history_view::apply_history_msgs,
                 // Per-frame mouse look replaces the per-tick sim look that
@@ -254,7 +186,6 @@ impl Plugin for SimBridgePlugin {
                 join_timeline::track_join_timeline,
                 avatar::attach_avatars,
                 avatar::squish_slimes.after(interpolate::interpolate_transforms),
-                meshing::visibility::toggle_culling,
                 collider_debug::draw_collider_wireframes,
                 (boundaries::toggle_boundary_overlay, boundaries::update_boundary_uniform).chain(),
                 grid_debug::toggle_grid_debug,
@@ -298,18 +229,8 @@ impl Plugin for SimBridgePlugin {
         #[cfg(not(target_arch = "wasm32"))]
         app.add_systems(Update, config::configure_native_antialiasing);
         #[cfg(not(target_arch = "wasm32"))]
-        if meshing::visibility::native_occlusion_enabled() {
-            app.add_systems(Update, meshing::visibility::enable_native_occlusion);
-        }
-
-        #[cfg(not(target_arch = "wasm32"))]
         if let Some(pilot) = autopilot::Autopilot::from_env() {
             autopilot::plugin(app, pilot);
-        }
-
-        #[cfg(not(target_arch = "wasm32"))]
-        if let Some(benchmark) = render_bench::RenderBenchmarkPlugin::from_env() {
-            app.add_plugins(benchmark);
         }
 
         // Opt-in (DIAG=1): per-render-pass GPU/CPU ms + pipeline stats, dumped to
@@ -599,102 +520,13 @@ const EMBEDDED_BLOCK_TEXTURES: &[(&str, &[u8])] = &[
     ),
 ];
 
-/// Anisotropic filtering samples for the block array texture (wgpu's maximum).
-pub const BLOCK_TEXTURE_ANISOTROPY: u16 = 16;
-
-fn setup_scene(
-    mut commands: Commands,
-    mut images: ResMut<Assets<Image>>,
-    mut voxel_materials: ResMut<Assets<ExtendedMaterial<StandardMaterial, StandardVoxelMaterial>>>,
-) {
-    let registry = crate::blocks::load_registry();
-
-    // Loader: native reads PNGs from assets/blocks/; wasm resolves from the
-    // embedded texture map. Returns None on any failure (build_layers then
-    // falls the block back to the layer-0 missing texture).
-    let (rgba_layers, block_layers) = build_layers(&registry, load_block_texture);
-
-    let (w, h) = (rgba_layers[0].width(), rgba_layers[0].height());
-    // Every layer carries its full mip chain (see `block_textures::mip_chain`),
-    // laid out layer-major — each layer's levels back to back — which is the
-    // order `Image::data_order`'s default uploads.
-    let mut mip_level_count = 1;
-    let mut data: Vec<u8> = Vec::new();
-    for layer in &rgba_layers {
-        let chain = block_textures::mip_chain(layer);
-        mip_level_count = chain.len() as u32;
-        for level in &chain {
-            data.extend_from_slice(level.as_raw());
-        }
-    }
-    // `new_uninit`, not `new`: `new` asserts the data is exactly one mip level.
-    let mut array_image = Image::new_uninit(
-        Extent3d {
-            width: w,
-            height: h,
-            depth_or_array_layers: rgba_layers.len() as u32,
-        },
-        TextureDimension::D2,
-        TextureFormat::Rgba8UnormSrgb,
-        RenderAssetUsages::RENDER_WORLD,
-    );
-    array_image.texture_descriptor.mip_level_count = mip_level_count;
-    array_image.data = Some(data);
-    // Repeat addressing: the shader's block-cell UVs (position / BLOCK_VOXELS)
-    // exceed 1.0 past the first block. All filters linear because anisotropic
-    // filtering requires it (wgpu rejects anisotropy with a nearest filter),
-    // and grazing-angle ground needs anisotropy or trilinear smears it into
-    // shimmering noise. The crisp near look is kept in the shaders instead:
-    // `crisp_uv` snaps magnified samples to texel centres, antialiasing only
-    // the one-pixel seam between texels. Minification blends texels and mip
-    // levels so distant terrain converges on each block's average colour.
-    let mut sampler = ImageSamplerDescriptor::linear();
-    sampler.anisotropy_clamp = BLOCK_TEXTURE_ANISOTROPY;
-    sampler.address_mode_u = ImageAddressMode::Repeat;
-    sampler.address_mode_v = ImageAddressMode::Repeat;
-    sampler.address_mode_w = ImageAddressMode::Repeat;
-    array_image.sampler = ImageSampler::Descriptor(sampler);
-    // wgpu's default texture-view dimension for a `D2` texture collapses to plain `D2`
-    // when `depth_or_array_layers == 1` (per the WebGPU default-view algorithm), which
-    // mismatches the `dimension = "2d_array"` binding `StandardVoxelMaterial` declares as
-    // soon as there's only a single block texture. Force the view to stay an array so
-    // the bind group is valid regardless of layer count.
-    array_image.texture_view_descriptor = Some(TextureViewDescriptor {
-        dimension: Some(TextureViewDimension::D2Array),
-        ..Default::default()
-    });
-    let handle = images.add(array_image);
-
-    // The pulled render path binds the same array texture directly (no material).
-    commands.insert_resource(voxel_pull::BlockArrayTexture(handle.clone()));
-    commands.insert_resource(voxel_pull::BlockTopLayers(std::sync::Arc::new(
-        block_layers.side_to_top(),
-    )));
-    commands.insert_resource(meshing::ChunkMaterial(voxel_materials.add(
-        ExtendedMaterial {
-            base: StandardMaterial {
-                perceptual_roughness: 0.9,
-                // Cutout blocks (leaves) drop their alpha-0 texels in
-                // voxel_texture.wgsl's `alpha_discard`. One material serves
-                // every chunk, which is fine: every other block texture is
-                // fully opaque (alpha 255), so only leaves lose texels.
-                alpha_mode: AlphaMode::Mask(0.5),
-                ..Default::default()
-            },
-            extension: StandardVoxelMaterial {
-                voxels_texture: handle,
-                fortress: Default::default(),
-                top_layers: images.add(voxel_material::top_layers_image(&block_layers.side_to_top())),
-            },
-        },
-    )));
-    commands.insert_resource(block_layers);
-
+fn setup_scene(mut commands: Commands) {
     atmosphere::spawn_lights(&mut commands);
 }
 
-/// Load one block texture as RGBA8. Native reads `assets/blocks/<path>`; wasm
-/// resolves it from the compiled-in texture table. `None` on any failure.
+/// Load one block texture as RGBA8 (item icons and item piles). Native reads
+/// `assets/blocks/<path>`; wasm resolves it from the compiled-in texture table.
+/// `None` on any failure.
 fn load_block_texture(path: &str) -> Option<image::RgbaImage> {
     #[cfg(not(target_arch = "wasm32"))]
     {

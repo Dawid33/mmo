@@ -14,8 +14,8 @@ use crate::coordinator::{
 };
 use crate::history::{AdventureRefusal, CalendarTick, EmbarkRefusal, PersonId, SiteId, SocietyGrid};
 use crate::{
-    Chunk, ChunkCoords, ClientId, ClientPacket, Column, ColumnCoords, EntityKind, TerrainSnapshot, GameEventKind,
-    LodBuildJob, LodBuilder, LodKey, LodPayload, LodResult, LodWater, PortableRegion, Region, RegionCoords, RegionInput,
+    ClientId, ClientPacket, EntityKind, TerrainSnapshot, GameEventKind,
+    LodBuilder, LodKey, PortableRegion, Region, RegionCoords, RegionInput,
     RegionOutput, RegionRunner, RegionSeed, SerializedRegion, ServerPacket, PlayRefusal, WorldMap, EmbarkRequest,
     Order, PlayMode, PlayerId, PlayerRecord,
 };
@@ -55,28 +55,6 @@ pub const DESPAWNED_ARRIVAL_IDS_KEPT: usize = 256;
 /// LRU cap on `lod_cache`; subscribed keys are pinned past this (see
 /// `evict_lod_cache`).
 pub const LOD_CACHE_MAX_ENTRIES: usize = 8192;
-/// LRU cap on *pristine* `terrain_cache` entries — full-resolution snapshots
-/// generated only to feed a factor 2/4/16 LOD build for a region that has
-/// never run. Only reached with a builder that does not
-/// `generates_pristine()` (the synchronous `InlineLodBuilder`: wasm, tests);
-/// the native server's thread pool generates in its workers and retains
-/// nothing here (each snapshot measured ~43 MB). One production-scale join touches ~280 of them and nothing
-/// used to drop them. They are pure worldgen output, so eviction only costs a
-/// regeneration; authoritative entries (running/parked regions) are never
-/// evicted — they are the only copy of edited terrain outside the region.
-/// A snapshot grows with region AREA, so the entry count shrinks with it and
-/// the memory ceiling (~2.7 GB) stays where it was: 64 entries at the default
-/// `REGION_BLOCKS`, 16 at 128.
-pub const PRISTINE_TERRAIN_CACHE_MAX: usize = pristine_cache_max(crate::REGION_BLOCKS);
-
-/// 64 entries at 64 blocks, shrinking with region area; never 0 (it was from
-/// 512 chunks up: every insert evicted at once). Written in blocks so it does
-/// not change meaning with `CHUNK_BLOCKS`.
-pub const fn pristine_cache_max(region_blocks: usize) -> usize {
-    let n = 64 * (64 * 64) / (region_blocks * region_blocks);
-    if n == 0 { 1 } else { n }
-}
-
 /// Internal event handled by the world manager. (Moved from
 /// crates/server/src/main.rs; ServerTickTimer is gone — regions self-tick.)
 #[derive(Debug)]
@@ -107,8 +85,6 @@ impl ServerEvent {
     }
 }
 
-pub type RegionGenerator = Box<dyn FnMut(RegionCoords) -> Vec<(ColumnCoords, Column)> + Send>;
-
 pub trait RegionSpawner {
     fn spawn(
         &mut self,
@@ -121,20 +97,20 @@ pub trait RegionSpawner {
     /// `RegionOutput::Stopped` or when a dead region is detected.
     fn reap(&mut self, _id: RegionCoords) {}
 
-    /// Whether this spawner runs worldgen itself, on the region's own thread.
-    /// `true` makes the manager hand out [`RegionSeed::Deferred`] instead of
-    /// generating the columns synchronously in `ensure_running`. `false` (the
-    /// inline spawner: wasm, tests) keeps the manager generating — there is no
-    /// other thread to move the work to.
-    fn generates_columns(&self) -> bool {
+    /// Whether this spawner's regions cut the halo seeds of neighbours that
+    /// are not running themselves, on their own thread
+    /// (`RegionInput::SeedHaloFromWorldgen` / `SeedHaloFromStore`): worldgen
+    /// and store reads then cost the manager thread nothing. `false` (the
+    /// inline spawner: wasm, tests — no other thread to move the work to)
+    /// keeps the manager cutting them from [`Self::stud_genesis`].
+    fn seeds_halos_on_region_threads(&self) -> bool {
         false
     }
 
-    /// What never-run region `rc` would start from as stud terrain, for a
-    /// spawner that seeds fresh regions with it but does not generate on the
-    /// region's thread (the inline spawner): the manager cuts the halo seeds
-    /// of `rc`'s starting neighbours from it (`seed_halo`). `None`: no stud
-    /// terrain here.
+    /// What never-run region `rc` would start from, for a spawner that does
+    /// not seed halos on its region threads: the manager cuts the halo seeds
+    /// of `rc`'s starting neighbours from it (`seed_halo`). `None`: no
+    /// terrain there (the neighbours' seeds of it are empty).
     fn stud_genesis(&self, _rc: RegionCoords) -> Option<crate::StudRegionSeed> {
         None
     }
@@ -262,6 +238,11 @@ pub struct InlineSpawner {
     /// Stud terrain seeded into every region built fresh
     /// ([`InlineSpawner::with_stud_genesis`]).
     stud_genesis: Option<InlineStudGenesis>,
+    /// Starts that failed (`RegionOutput::LoadFailed`): their input channels,
+    /// kept open until the manager reaps them — as a region thread that does
+    /// not run keeps its own — so what was sent there is recovered by the
+    /// manager, not mistaken for a crashed region.
+    failed: BTreeMap<RegionCoords, Receiver<RegionInput>>,
 }
 
 impl InlineSpawner {
@@ -442,8 +423,7 @@ impl RegionSpawner for InlineSpawner {
         out: Sender<(RegionCoords, RegionOutput)>,
     ) -> Sender<RegionInput> {
         let (send, recv) = unbounded();
-        let never_ran = matches!(seed, RegionSeed::Fresh(_) | RegionSeed::Deferred(None));
-        let stored = if never_ran { self.portable.remove(&id) } else { None };
+        let stored = if matches!(seed, RegionSeed::Fresh) { self.portable.remove(&id) } else { None };
         let runner = match stored {
             Some(stored) => {
                 let (region, terms) = crate::restore_portable(id, stored);
@@ -451,15 +431,16 @@ impl RegionSpawner for InlineSpawner {
                 runner.set_saved_terms(terms);
                 runner
             }
-            None => {
-                let mut region =
-                    seed.into_region_with(id, &|rc| unreachable!("InlineSpawner never generates columns ({rc:?})"));
-                // Before the runner takes its baseline hash.
-                if let (true, Some(genesis)) = (never_ran, &self.stud_genesis) {
-                    region.seed_stud_world(genesis(id));
+            None => match seed.into_region(id, || self.stud_genesis.as_ref().map(|g| g(id))) {
+                Ok(region) => RegionRunner::new(id, region, out),
+                // It does not run, and is never regenerated.
+                Err(why) => {
+                    log::error!("region {id:?}: {why}");
+                    let _ = out.send((id, RegionOutput::LoadFailed(why)));
+                    self.failed.insert(id, recv);
+                    return send;
                 }
-                RegionRunner::new(id, region, out)
-            }
+            },
         };
         let mut runner = runner;
         if self.record_slot_hashes {
@@ -467,6 +448,10 @@ impl RegionSpawner for InlineSpawner {
         }
         self.runners.insert(id, (recv, runner));
         send
+    }
+
+    fn reap(&mut self, id: RegionCoords) {
+        self.failed.remove(&id);
     }
 
     fn stud_genesis(&self, rc: RegionCoords) -> Option<crate::StudRegionSeed> {
@@ -501,11 +486,6 @@ struct RegionLink {
 /// so this is observability only: nothing in the simulation may read it.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct ManagerPerfCounters {
-    /// Synchronous worldgen calls on the manager thread (region starts and
-    /// pristine LOD sources) and their cost — while one runs, no packet routes.
-    pub generated: u32,
-    pub generate_total: std::time::Duration,
-    pub generate_max: std::time::Duration,
     /// `RequestLod`s answered straight from `lod_cache`.
     pub lod_cache_hits: u32,
     /// LOD builds handed to the builder, and results received back.
@@ -523,8 +503,6 @@ pub struct ManagerDepths {
     pub running: usize,
     pub parked: usize,
     pub lod_in_flight: usize,
-    /// LOD keys parked behind a terrain reply (region- plus tile-keyed).
-    pub lod_waiting_terrain: usize,
     pub lod_cache: usize,
     pub terrain_cache: usize,
     /// Crossings routed but not yet confirmed ([`WorldManager::in_flight_count`]).
@@ -807,18 +785,12 @@ struct WorldViewCache {
 
 pub struct WorldManager<S: RegionSpawner> {
     spawner: S,
-    generator: RegionGenerator,
     regions: BTreeMap<RegionCoords, RegionLink>,
     parked: BTreeMap<RegionCoords, SerializedRegion>,
-    /// Frozen terrain for parked / never-run regions, so LOD builds never
-    /// wake a region. Refreshed on TerrainChanged and on park (Stopped).
+    /// The last terrain each region pushed (`TerrainChanged`) or parked with
+    /// (`Stopped`): what a starting neighbour's halo is seeded from without
+    /// waking it.
     terrain_cache: BTreeMap<RegionCoords, TerrainSnapshot>,
-    /// Which `terrain_cache` entries are pristine worldgen output (evictable),
-    /// with their last-use stamp from `lod_access_counter`.
-    pristine_terrain: BTreeMap<RegionCoords, u64>,
-    /// LRU cap on `pristine_terrain`; defaults to `PRISTINE_TERRAIN_CACHE_MAX`,
-    /// overridable via `set_pristine_terrain_max` (test hook).
-    pristine_terrain_max: usize,
     /// Connected clients and their subscriptions.
     sessions: BTreeMap<ClientId, Session>,
     /// Survives disconnects: which region holds this client's player entity.
@@ -938,13 +910,10 @@ pub struct WorldManager<S: RegionSpawner> {
     region_out_send: Sender<(RegionCoords, RegionOutput)>,
     /// LOD subscriptions per key, and the reverse map for disconnects.
     lod_subscribers: BTreeMap<LodKey, BTreeSet<ClientId>>,
-    /// key -> RLE payload + water layer; LRU-evicted past
+    /// key -> far-terrain tile (`stud_lod.rs`); LRU-evicted past
     /// LOD_CACHE_MAX_ENTRIES, subscribed keys pinned. `u64` is a
     /// monotonically increasing access stamp (not wall time — determinism).
-    lod_cache: BTreeMap<LodKey, (LodPayload, LodWater, u64)>,
-    /// A stud world's `lod_cache` (`stud_lod.rs`): key -> tile + access stamp, under
-    /// the same cap and pinning. Empty in a voxel world, as `lod_cache` is in a stud one.
-    stud_lod_cache: BTreeMap<LodKey, (crate::StudLodTile, u64)>,
+    lod_cache: BTreeMap<LodKey, (crate::StudLodTile, u64)>,
     /// LRU cap on `lod_cache`; defaults to `LOD_CACHE_MAX_ENTRIES`, overridable
     /// via `set_lod_cache_max` (test hook — mirrors `LodRings.retirement_max_frames`).
     lod_cache_max: usize,
@@ -954,14 +923,7 @@ pub struct WorldManager<S: RegionSpawner> {
     /// When each in-flight build was submitted (metrics only, see `perf`).
     lod_submitted_at: BTreeMap<LodKey, crate::perf::Stopwatch>,
     perf: ManagerPerfCounters,
-    /// Region-keyed builds waiting on a running region's terrain reply.
-    lod_pending_terrain: BTreeMap<RegionCoords, BTreeSet<LodKey>>,
-    /// Tile-keyed builds waiting on a subset of `key.regions()` whose terrain
-    /// reply hasn't landed yet. Settled incrementally by `lod_terrain_ready`
-    /// as each awaited region's reply seeds `terrain_cache`.
-    lod_tile_waiting: BTreeMap<LodKey, BTreeSet<RegionCoords>>,
     lod_builder: Box<dyn LodBuilder>,
-    lod_results: Receiver<LodResult>,
     /// Running regions handed arrivals (`Departures`), with the latest
     /// arrival's stamp: a history directive for one (a delivered person's
     /// walk-on) goes as a `Transfer` of that stamp, so it lands behind the
@@ -1062,20 +1024,15 @@ pub struct WorldManager<S: RegionSpawner> {
 impl<S: RegionSpawner> WorldManager<S> {
     pub fn new(
         spawner: S,
-        generator: RegionGenerator,
         out: Sender<(Option<ClientId>, ServerPacket)>,
         region_out_send: Sender<(RegionCoords, RegionOutput)>,
         lod_builder: Box<dyn LodBuilder>,
-        lod_results: Receiver<LodResult>,
     ) -> Self {
         Self {
             spawner,
-            generator,
             regions: BTreeMap::new(),
             parked: BTreeMap::new(),
             terrain_cache: BTreeMap::new(),
-            pristine_terrain: BTreeMap::new(),
-            pristine_terrain_max: PRISTINE_TERRAIN_CACHE_MAX,
             sessions: BTreeMap::new(),
             homes: BTreeMap::new(),
             world_map: None,
@@ -1117,16 +1074,12 @@ impl<S: RegionSpawner> WorldManager<S> {
             region_out_send,
             lod_subscribers: BTreeMap::new(),
             lod_cache: BTreeMap::new(),
-            stud_lod_cache: BTreeMap::new(),
             lod_cache_max: LOD_CACHE_MAX_ENTRIES,
             lod_access_counter: 0,
             lod_in_flight: BTreeSet::new(),
             lod_submitted_at: BTreeMap::new(),
             perf: ManagerPerfCounters::default(),
-            lod_pending_terrain: BTreeMap::new(),
-            lod_tile_waiting: BTreeMap::new(),
             lod_builder,
-            lod_results,
             directive_stamps: BTreeMap::new(),
             in_flight: BTreeMap::new(),
             pending_cut: None,
@@ -2102,7 +2055,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                 }
                 ClientPacket::RequestRegionConnection(rc) => self.subscribe(id, rc),
                 ClientPacket::ReleaseRegionConnection(rc) => self.unsubscribe(id, rc, now_ms),
-                ClientPacket::RequestLod(key) => self.lod_subscribe(id, key, now_ms),
+                ClientPacket::RequestLod(key) => self.lod_subscribe(id, key),
                 ClientPacket::ReleaseLod(key) => self.lod_unsubscribe(id, key),
                 ClientPacket::PlayRegion(rc) => self.play_region(id, rc, now_ms),
                 ClientPacket::Leave => self.client_disconnected(id, now_ms),
@@ -2295,14 +2248,9 @@ impl<S: RegionSpawner> WorldManager<S> {
                     }
                 }
             }
-            RegionOutput::Terrain(client, snap) => {
-                self.cache_authoritative_terrain(rc, snap);
-                self.lod_terrain_ready(rc, client);
-            }
             RegionOutput::PeopleParked(people) => self.world_region_parked(rc, people),
             RegionOutput::TerrainChanged(snap) => {
-                self.cache_authoritative_terrain(rc, snap);
-                self.invalidate_region_lod(rc);
+                self.terrain_cache.insert(rc, snap);
             }
             RegionOutput::Stopped(serialized, far, stamp, portable) => {
                 self.silent_stopping.remove(&rc);
@@ -2328,8 +2276,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                         self.send_to_region(n, RegionInput::Transfer(GameEventKind::HaloUpdate(seed), stamp));
                     }
                 }
-                self.cache_authoritative_terrain(rc, far);
-                self.invalidate_region_lod(rc);
+                self.terrain_cache.insert(rc, far);
                 // What it held parks with it (its next run reports it again).
                 self.forget_locations(rc);
                 self.parked.insert(rc, serialized);
@@ -2714,21 +2661,7 @@ impl<S: RegionSpawner> WorldManager<S> {
         } else {
             log::warn!("cut {} committed but not outstanding", id.0);
         }
-        // A region whose stored terrain moved on and that is not running (a
-        // running one pushes `TerrainChanged` itself): its LOD keys may have
-        // been built from the older stored (or pristine) terrain.
-        let mut stale = Vec::new();
-        for (rc, version) in versions {
-            let rose = self.stored_regions.get(&rc).is_none_or(|old| *old < version);
-            let running = self.regions.get(&rc).is_some_and(|l| !l.stopping);
-            if rose && !running {
-                stale.push(rc);
-            }
-            self.stored_regions.insert(rc, version);
-        }
-        for rc in stale {
-            self.invalidate_region_lod(rc);
-        }
+        self.stored_regions.extend(versions);
     }
 
     /// The store failed to commit cut `id`: its entries stay uncommitted, so
@@ -3418,10 +3351,6 @@ impl<S: RegionSpawner> WorldManager<S> {
             self.client_disconnected(old, now_ms);
         }
         self.sessions.entry(id).or_default();
-        if self.lod_builder.stud_terrain() {
-            // Ahead of everything that makes the client ask for LOD.
-            let _ = self.out.send((Some(id), ServerPacket::StudTerrain));
-        }
         self.player_of.insert(id, player);
         let in_flight = self.parking.values().any(|p| p.player == player);
         if self.homes.contains_key(&id) {
@@ -3674,9 +3603,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             running: self.regions.len(),
             parked: self.parked.len(),
             lod_in_flight: self.lod_in_flight.len(),
-            lod_waiting_terrain: self.lod_pending_terrain.values().map(BTreeSet::len).sum::<usize>()
-                + self.lod_tile_waiting.len(),
-            lod_cache: self.lod_cache.len() + self.stud_lod_cache.len(),
+            lod_cache: self.lod_cache.len(),
             terrain_cache: self.terrain_cache.len(),
             transfers_in_flight: self.in_flight_count(),
             pending_arrivals: self.pending_arrival_total(),
@@ -3684,24 +3611,6 @@ impl<S: RegionSpawner> WorldManager<S> {
             items_destroyed: self.items_destroyed(),
             intent_replies_lost: self.intent_replies_lost(),
         }
-    }
-
-    /// The injected generator, timed. It runs synchronously on the manager
-    /// thread, so its cost is routing latency for every connected client.
-    fn generate_timed(&mut self, rc: RegionCoords) -> Vec<(ColumnCoords, Column)> {
-        let watch = crate::perf::Stopwatch::start();
-        let columns = (self.generator)(rc);
-        let took = watch.elapsed();
-        self.perf.generated += 1;
-        self.perf.generate_total += took;
-        self.perf.generate_max = self.perf.generate_max.max(took);
-        columns
-    }
-
-    fn mark_lod_in_flight(&mut self, key: LodKey) {
-        self.lod_in_flight.insert(key);
-        self.lod_submitted_at.insert(key, crate::perf::Stopwatch::start());
-        self.perf.lod_submitted += 1;
     }
 
     /// Ends every session with `Refused(why)` (the server edge closes the
@@ -3840,26 +3749,11 @@ impl<S: RegionSpawner> WorldManager<S> {
             }
             self.unavailable.remove(&rc);
         }
-        let seed = if self.spawner.generates_columns() {
-            // Worldgen happens on the region's thread (and not at all for a
-            // parked region with a healthy blob).
-            RegionSeed::Deferred(self.parked.remove(&rc))
-        } else {
-            let watch = crate::perf::Stopwatch::start();
-            let columns = self.generate_timed(rc); // now Vec<(ColumnCoords, Column)>
-            let parked = self.parked.contains_key(&rc);
-            crate::perf_event!(
-                "region_generate",
-                "region={},{} ms={} columns={} parked={parked}",
-                rc.x,
-                rc.z,
-                crate::perf::ms(watch.elapsed()),
-                columns.len()
-            );
-            match self.parked.remove(&rc) {
-                Some(serialized) => RegionSeed::Parked(serialized, columns),
-                None => RegionSeed::Fresh(columns),
-            }
+        // Built on the spawner's side (a region thread, for the server): the
+        // manager thread pays for no worldgen and no deserialisation.
+        let seed = match self.parked.remove(&rc) {
+            Some(serialized) => RegionSeed::Parked(serialized),
+            None => RegionSeed::Fresh,
         };
         // Its incarnation marker goes on the output channel BEFORE the runner
         // exists: everything a previous (dead) runner left there comes
@@ -3912,13 +3806,13 @@ impl<S: RegionSpawner> WorldManager<S> {
     ///   (a region that parks also reseeds its running neighbours from its
     ///   final terrain, on `Stopped`);
     /// - never run: worldgen — on the region's own thread when the spawner
-    ///   generates there (only the band columns), else here (the whole
-    ///   region, not cached: LOD keeps its own choice of pristine sources);
+    ///   seeds halos there (only the band columns), else here, from the
+    ///   spawner's stud genesis (the whole region, not cached);
     /// - saved by an earlier process, not run in this one (`stored_regions`):
     ///   from the world store on the region's own thread
     ///   (`RegionInput::SeedHaloFromStore`, worldgen if the store cannot
-    ///   serve it) when the spawner generates there; a spawner that does not
-    ///   (inline: tests, wasm — no store) gets worldgen here, as above.
+    ///   serve it) when the spawner seeds halos there; a spawner that does
+    ///   not (inline: tests, wasm — no store) gets worldgen here, as above.
     fn seed_halo(&mut self, rc: RegionCoords, input: &Sender<RegionInput>) {
         let mut generate_there = Vec::new();
         let mut load_there = Vec::new();
@@ -3933,16 +3827,14 @@ impl<S: RegionSpawner> WorldManager<S> {
                 }
             } else if running {
                 // The request below is the seed.
-            } else if self.spawner.generates_columns() && self.stored_regions.contains_key(&n) {
+            } else if self.spawner.seeds_halos_on_region_threads() && self.stored_regions.contains_key(&n) {
                 load_there.push(n);
-            } else if self.spawner.generates_columns() {
+            } else if self.spawner.seeds_halos_on_region_threads() {
                 generate_there.push(n);
             } else {
-                // Not cached: LOD keeps its own choice of pristine sources.
-                let mut snap = TerrainSnapshot::from_columns(self.generate_timed(n));
-                if let Some(studs) = self.spawner.stud_genesis(n) {
-                    snap.stud = crate::StudEdge::from_seed(&studs);
-                }
+                // No genesis: the neighbour has no terrain, and the seed says so.
+                let studs = self.spawner.stud_genesis(n).unwrap_or_default();
+                let snap = TerrainSnapshot::of_stud_edge(crate::StudEdge::from_seed(&studs));
                 if let Some(seed) = crate::halo::halo_seed_from_snapshot(n, rc, &snap) {
                     let _ = input.send(RegionInput::Event(GameEventKind::HaloUpdate(seed)));
                 }
@@ -4288,7 +4180,7 @@ impl<S: RegionSpawner> WorldManager<S> {
         false
     }
 
-    fn lod_subscribe(&mut self, client: ClientId, key: LodKey, _now_ms: u64) {
+    fn lod_subscribe(&mut self, client: ClientId, key: LodKey) {
         if !crate::lod::LOD_FACTORS.contains(&key.factor) {
             log::debug!("dropping RequestLod with invalid factor {}", key.factor);
             return;
@@ -4297,9 +4189,9 @@ impl<S: RegionSpawner> WorldManager<S> {
             log::debug!("dropping RequestLod from sessionless client {client}");
             return;
         };
-        if self.lod_builder.stud_terrain() && !crate::stud_lod_supported(&key) {
-            // Finer than a stud column, or too wide a tile: a client still on the
-            // voxel ring table (it has not seen a stud region yet).
+        if !crate::stud_lod_supported(&key) {
+            // No tile at that factor (finer than a stud, or too wide to ship):
+            // the client's stud ring table never asks for one.
             log::debug!("dropping RequestLod {key:?}: no stud far terrain at that factor");
             return;
         }
@@ -4307,31 +4199,18 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.lod_subscribers.entry(key).or_default().insert(client);
         self.lod_access_counter += 1;
         let stamp = self.lod_access_counter;
-        if self.lod_builder.stud_terrain() {
-            // Far terrain of a stud world is a function of the key (the recipe):
-            // no terrain round-trip, no overlay, never invalidated.
-            if let Some((tile, access)) = self.stud_lod_cache.get_mut(&key) {
-                *access = stamp;
-                self.perf.lod_cache_hits += 1;
-                let _ = self.out.send((Some(client), ServerPacket::StudLodData(key, tile.clone())));
-            } else if !self.lod_in_flight.contains(&key) {
-                self.mark_lod_in_flight(key);
-                self.lod_builder.submit_stud(key);
-            }
-            return;
-        }
-        if let Some((payload, water, access)) = self.lod_cache.get_mut(&key) {
+        // Far terrain is the recipe's: a function of the key, so no region is
+        // asked for anything and nothing ever invalidates a cached tile.
+        if let Some((tile, access)) = self.lod_cache.get_mut(&key) {
             *access = stamp;
             self.perf.lod_cache_hits += 1;
-            let _ = self
-                .out
-                .send((Some(client), ServerPacket::LodData(key, payload.clone(), water.clone())));
-            return;
+            let _ = self.out.send((Some(client), ServerPacket::StudLodData(key, tile.clone())));
+        } else if !self.lod_in_flight.contains(&key) {
+            self.lod_in_flight.insert(key);
+            self.lod_submitted_at.insert(key, crate::perf::Stopwatch::start());
+            self.perf.lod_submitted += 1;
+            self.lod_builder.submit(key);
         }
-        if !self.lod_in_flight.contains(&key) {
-            self.start_lod_build(key, client);
-        }
-        // else: result fans out to all subscribers when it lands.
     }
 
     fn lod_unsubscribe(&mut self, client: ClientId, key: LodKey) {
@@ -4346,159 +4225,15 @@ impl<S: RegionSpawner> WorldManager<S> {
         }
     }
 
-    /// Kick off a build for `key`. Sub-block factors: authoritative terrain if
-    /// the region has state (running-and-seeded or parked-with-cache), request
-    /// terrain if running-but-unseeded, generate otherwise. Block-scale and
-    /// coarser factors coarse-sample instead (`start_tile_build`). `client` is
-    /// the requester used for terrain round-trips.
-    fn start_lod_build(&mut self, key: LodKey, client: ClientId) {
-        if key.factor < crate::lod::COARSE_MIN_FACTOR {
-            debug_assert_eq!(key.region_span(), 1, "sub-block factors key per region");
-            let rc = key.origin_region();
-            let running = self.regions.get(&rc).map_or(false, |l| !l.stopping);
-            if let Some(snap) = self.terrain_cache.get(&rc) {
-                if let Some(stamp) = self.pristine_terrain.get_mut(&rc) {
-                    self.lod_access_counter += 1;
-                    *stamp = self.lod_access_counter;
-                }
-                let chunks = snap.chunks.clone();
-                self.mark_lod_in_flight(key);
-                self.lod_builder.submit(LodBuildJob::Region { key, chunks });
-            } else if running {
-                // Terrain reply (RegionOutput::Terrain) seeds terrain_cache
-                // and re-enters via lod_terrain_ready.
-                self.lod_pending_terrain.entry(rc).or_default().insert(key);
-                self.send_to_region(rc, RegionInput::RequestTerrain(client));
-            } else if self.lod_reads_stored(rc) && self.lod_builder.generates_pristine() {
-                // Saved by an earlier process, not run in this one: the
-                // builder reads the store (pristine if it cannot). Nothing is
-                // kept here, as for `Pristine`.
-                self.mark_lod_in_flight(key);
-                self.lod_builder.submit(LodBuildJob::Stored { key, region: rc });
-            } else if self.lod_builder.generates_pristine() {
-                // Never-run region: the builder's own threads generate it.
-                // Nothing full-resolution is kept here — the LOD payload is
-                // what gets cached (`lod_cache`), and a region that later
-                // runs or parks reports authoritative terrain itself.
-                self.mark_lod_in_flight(key);
-                self.lod_builder.submit(LodBuildJob::Pristine { key, region: rc });
-            } else {
-                let columns = self.generate_timed(rc);
-                let snap = TerrainSnapshot::from_columns(columns);
-                self.terrain_cache.insert(rc, snap.clone());
-                self.lod_access_counter += 1;
-                self.pristine_terrain.insert(rc, self.lod_access_counter);
-                self.evict_pristine_terrain();
-                self.mark_lod_in_flight(key);
-                self.lod_builder
-                    .submit(LodBuildJob::Region { key, chunks: snap.chunks });
-            }
-        } else {
-            self.start_tile_build(key, client);
-        }
-    }
-
-    /// Coarse keys (`COARSE_MIN_FACTOR` and up, region- or tile-keyed): coarse
-    /// base + one overlay per region with
-    /// authoritative state. Regions running-but-unseeded are requested and
-    /// the build deferred until every such reply has landed; pristine and
-    /// parked-with-cache regions need nothing. Pristine regions are NOT
-    /// generated here — coarse sampling covers them (the point of tiles).
-    ///
-    /// Caveat: `terrain_cache` reflects the LAST pushed/parked terrain of a
-    /// running region — mid-cadence edits appear on the next
-    /// `TerrainChanged` (invalidation + rebuild), matching the spec's
-    /// freshness decision.
-    fn start_tile_build(&mut self, key: LodKey, client: ClientId) {
-        let mut waiting = BTreeSet::new();
-        for rc in key.regions() {
-            let running = self.regions.get(&rc).map_or(false, |l| !l.stopping);
-            if running && !self.terrain_cache.contains_key(&rc) {
-                waiting.insert(rc);
-                self.lod_pending_terrain.entry(rc).or_default().insert(key);
-                self.send_to_region(rc, RegionInput::RequestTerrain(client));
-            }
-        }
-        if !waiting.is_empty() {
-            self.lod_tile_waiting.insert(key, waiting);
-            return;
-        }
-        let overlays: Vec<(RegionCoords, Vec<(ChunkCoords, Chunk)>)> = key
-            .regions()
-            .into_iter()
-            .filter_map(|rc| self.terrain_cache.get(&rc).map(|snap| (rc, snap.chunks.clone())))
-            .collect();
-        // Saved regions with no terrain here: the builder overlays them from
-        // the store (none of them is running — those were waited for above).
-        let stored: Vec<RegionCoords> = key
-            .regions()
-            .into_iter()
-            .filter(|rc| !self.terrain_cache.contains_key(rc) && self.lod_reads_stored(*rc))
-            .collect();
-        self.mark_lod_in_flight(key);
-        self.lod_builder.submit(LodBuildJob::Tile { key, overlays, stored });
-    }
-
-    /// Whether LOD of `rc` comes from the world store: the store holds it,
-    /// it is not running and the builder reads stored terrain (callers have
-    /// already found no `terrain_cache` entry).
-    fn lod_reads_stored(&self, rc: RegionCoords) -> bool {
-        self.lod_builder.reads_stored()
-            && self.stored_regions.contains_key(&rc)
-            && !self.regions.get(&rc).is_some_and(|l| !l.stopping)
-    }
-
-    /// A region's terrain just landed in terrain_cache: submit any LOD builds
-    /// that were waiting on it, region- or tile-keyed.
-    fn lod_terrain_ready(&mut self, rc: RegionCoords, client: ClientId) {
-        let Some(keys) = self.lod_pending_terrain.remove(&rc) else { return };
-        for key in keys {
-            if let Some(waiting) = self.lod_tile_waiting.get_mut(&key) {
-                waiting.remove(&rc);
-                if !waiting.is_empty() {
-                    continue;
-                }
-                self.lod_tile_waiting.remove(&key);
-            }
-            if !self.lod_in_flight.contains(&key) {
-                self.start_lod_build(key, client);
-            }
-        }
-    }
-
-    pub fn handle_lod_result(&mut self, key: LodKey, payload: LodPayload, water: LodWater) {
-        self.lod_in_flight.remove(&key);
-        self.perf.lod_built += 1;
-        if let Some(watch) = self.lod_submitted_at.remove(&key) {
-            let took = watch.elapsed();
-            self.perf.lod_latency_total += took;
-            self.perf.lod_latency_max = self.perf.lod_latency_max.max(took);
-        }
-        self.lod_access_counter += 1;
-        self.lod_cache.insert(key, (payload.clone(), water.clone(), self.lod_access_counter));
-        self.evict_lod_cache();
-        if let Some(subs) = self.lod_subscribers.get(&key) {
-            for client in subs {
-                let _ = self
-                    .out
-                    .send((Some(*client), ServerPacket::LodData(key, payload.clone(), water.clone())));
-            }
-        }
-    }
-
-    /// Drain the builder results channel (Inline path; the native server
-    /// selects on the receiver instead and calls handle_lod_result directly).
+    /// Take every tile the builder has finished (never blocks).
     pub fn pump_lod_results(&mut self) {
-        while let Ok((key, payload, water)) = self.lod_results.try_recv() {
-            self.handle_lod_result(key, payload, water);
-        }
-        while let Some((key, tile)) = self.lod_builder.poll_stud() {
-            self.handle_stud_lod_result(key, tile);
+        while let Some((key, tile)) = self.lod_builder.poll() {
+            self.handle_lod_result(key, tile);
         }
     }
 
-    /// [`handle_lod_result`](Self::handle_lod_result) for a stud world's tile.
-    pub fn handle_stud_lod_result(&mut self, key: LodKey, tile: crate::StudLodTile) {
+    /// A finished tile: sent to the key's subscribers and cached.
+    pub fn handle_lod_result(&mut self, key: LodKey, tile: crate::StudLodTile) {
         self.lod_in_flight.remove(&key);
         self.perf.lod_built += 1;
         if let Some(watch) = self.lod_submitted_at.remove(&key) {
@@ -4512,77 +4247,20 @@ impl<S: RegionSpawner> WorldManager<S> {
                 let _ = self.out.send((Some(*client), ServerPacket::StudLodData(key, tile.clone())));
             }
         }
-        self.stud_lod_cache.insert(key, (tile, self.lod_access_counter));
+        self.lod_cache.insert(key, (tile, self.lod_access_counter));
         self.evict_lod_cache();
     }
 
-    /// A region's terrain changed (cadence push) or it parked: every LOD key
-    /// depending on it is stale. Drop them from the cache; rebuild the ones
-    /// with live subscribers (the fresh terrain_cache entry is the new source).
-    fn invalidate_region_lod(&mut self, rc: RegionCoords) {
-        if self.lod_builder.stud_terrain() {
-            // Stud far terrain shows the recipe only (edits are not in it): a
-            // region's terrain push changes none of its keys.
-            return;
-        }
-        for factor in crate::lod::LOD_FACTORS {
-            let key = LodKey::for_region(factor, rc);
-            self.lod_cache.remove(&key);
-            let has_subs = self.lod_subscribers.get(&key).is_some_and(|s| !s.is_empty());
-            if has_subs && !self.lod_in_flight.contains(&key) {
-                // Any subscriber works as the terrain-request correlator.
-                let client = *self.lod_subscribers[&key].iter().next().unwrap();
-                self.start_lod_build(key, client);
-            }
-        }
-    }
-
-    /// Test hook: current cache size (`lod_cache_evicts_unsubscribed_lru_but_pins_subscribed`).
+    /// Test hook: current cache size.
     pub fn lod_cache_len(&self) -> usize {
-        self.lod_cache.len() + self.stud_lod_cache.len()
+        self.lod_cache.len()
     }
 
-    /// Test hook: shrink/grow the LRU cap below `LOD_CACHE_MAX_ENTRIES` so
-    /// eviction is exercisable without filling thousands of real entries.
+    /// Test hook: shrink the cap so eviction is exercisable without building
+    /// thousands of keys. Evicts immediately if already over the new cap.
     pub fn set_lod_cache_max(&mut self, n: usize) {
         self.lod_cache_max = n;
         self.evict_lod_cache();
-    }
-
-    /// A region reported its own terrain: the entry is now authoritative and
-    /// must never be evicted as pristine worldgen output.
-    fn cache_authoritative_terrain(&mut self, rc: RegionCoords, snap: TerrainSnapshot) {
-        self.pristine_terrain.remove(&rc);
-        self.terrain_cache.insert(rc, snap);
-    }
-
-    /// Test hook: total `terrain_cache` entries (pristine + authoritative).
-    pub fn terrain_cache_len(&self) -> usize {
-        self.terrain_cache.len()
-    }
-
-    /// Test hook: shrink the pristine cap so eviction is exercisable without
-    /// generating dozens of regions.
-    pub fn set_pristine_terrain_max(&mut self, n: usize) {
-        self.pristine_terrain_max = n;
-        self.evict_pristine_terrain();
-    }
-
-    /// Drop least-recently-used pristine snapshots past the cap. In-flight
-    /// builds own a clone of the chunks, so eviction never races a job.
-    fn evict_pristine_terrain(&mut self) {
-        while self.pristine_terrain.len() > self.pristine_terrain_max {
-            let Some(victim) = self
-                .pristine_terrain
-                .iter()
-                .min_by_key(|(_, stamp)| **stamp)
-                .map(|(rc, _)| *rc)
-            else {
-                break;
-            };
-            self.pristine_terrain.remove(&victim);
-            self.terrain_cache.remove(&victim);
-        }
     }
 
     fn evict_lod_cache(&mut self) {
@@ -4591,27 +4269,13 @@ impl<S: RegionSpawner> WorldManager<S> {
                 .lod_cache
                 .iter()
                 .filter(|(k, _)| !self.lod_subscribers.contains_key(k))
-                .min_by_key(|(_, (_, _, access))| *access)
+                .min_by_key(|(_, (_, access))| *access)
                 .map(|(k, _)| *k);
             match victim {
                 Some(k) => {
                     self.lod_cache.remove(&k);
                 }
                 None => break, // everything pinned by subscribers
-            }
-        }
-        while self.stud_lod_cache.len() > self.lod_cache_max {
-            let victim = self
-                .stud_lod_cache
-                .iter()
-                .filter(|(k, _)| !self.lod_subscribers.contains_key(k))
-                .min_by_key(|(_, (_, access))| *access)
-                .map(|(k, _)| *k);
-            match victim {
-                Some(k) => {
-                    self.stud_lod_cache.remove(&k);
-                }
-                None => break,
             }
         }
     }

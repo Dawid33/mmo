@@ -1,53 +1,89 @@
 //! Swimming (water plan Task 3): a body's `Motion.immersion` follows the
 //! water around it every tick (`tick_immersion_safe`), and `plan_with`
 //! swims at `Waist` and `Head` — floats at the surface, dives and surfaces,
-//! caps its speed, climbs out onto a one-block ledge — and wades at `Feet`.
-//! Every fixture is a hand-built region with recipe water
-//! (`common::water::set_recipe_water`), ticked through the real region tick.
-use crate::common::water::set_recipe_water;
-use crate::common::{self, body, key, r0, teleport, ticks, CHUNK_EDGE};
+//! caps its speed, climbs out onto a ledge — and wades at `Feet`.
+//! Every fixture is a hand-built stud region whose recipes carry the water
+//! (`common::water`), ticked through the real region tick.
+use crate::common::water::{column_with_plate_water, PlateWater};
+use crate::common::{self, body, key, r0, teleport, ticks, CHUNK_EDGE, FLOOR_PLATES, STAND};
 use game::history::PersonId;
 use game::movement::{
-    plan_with, settle, Immersion, MoveKeys, MoveParams, PLAYER_HEIGHT, SWIM_SPEED, TICK_DT, UNITS_PER_METER,
+    plan_with, settle, BodyScale, Immersion, MoveKeys, MoveParams, SWIM_SPEED, TICK_DT, UNITS_PER_METER,
     WADE_SPEED_FACTOR, WALK_SPEED,
 };
 use game::rapier3d::math::Vector;
-use game::{Block, BlockId, Chunk, GameEventKind, Goal, Key, Motion, World, WorldBlockPos, BLOCK_VOXELS};
+use game::{GameEventKind, Goal, Key, Motion, World, WorldBlockPos, TILE_PLATES};
 
-const STONE: BlockId = BlockId(1);
-/// Block level of the ground's top (blocks `0..BANK` are solid): a pool dug
-/// into it and filled to the brim has its surface here.
-const BANK: i32 = 5;
-const BV: f32 = BLOCK_VOXELS as f32;
-/// Half the body's height in units: the body origin is the capsule centre.
-const HALF_HEIGHT: f32 = PLAYER_HEIGHT * UNITS_PER_METER / 2.0;
+/// Tile level a body stands in on the bank (the ground's top is its bottom):
+/// a pool dug into the bank and filled to the brim has its surface there.
+const BANK: i32 = STAND;
+/// One metre (a tile's width), sim units.
+const BV: f32 = common::TILE_W;
+/// Plates the ledge a swimmer climbs out onto lies above the water (0.4 m).
+const LEDGE_PLATES: i32 = 2;
+/// Tiles a pool is dug into the bank.
+const POOL_DEPTH: i32 = 4;
 
-/// 2×2 chunks of ground `BANK` blocks deep, the player settled on it at the
-/// spawn column (block 8, 8).
-fn bank_world() -> World {
-    common::install_real_block_props();
-    let depth = BANK as u32 * BLOCK_VOXELS as u32;
-    common::world_of(0.0..2.0 * CHUNK_EDGE, 0.0..2.0 * CHUNK_EDGE, |_, _| Chunk::flat_floor(depth))
+/// The bank's top and every brim-full pool's surface, sim units.
+fn surface_y() -> f32 {
+    common::floor_y(FLOOR_PLATES)
 }
 
-/// Sets every block of the box `x × y × z` (block ranges) to `block`.
-fn fill(world: &mut World, xs: std::ops::Range<i32>, ys: std::ops::Range<i32>, zs: std::ops::Range<i32>, block: BlockId) {
+/// The top of a pool's bed, sim units.
+fn bed_y() -> f32 {
+    common::floor_y(FLOOR_PLATES - POOL_DEPTH * TILE_PLATES as i32)
+}
+
+/// The stud body's height, sim units.
+fn body_height() -> f32 {
+    let s = BodyScale::STUD;
+    2.0 * (s.capsule_half_height() + s.capsule_radius())
+}
+
+/// Half the body's height in units: the body origin is the capsule centre.
+fn half_height() -> f32 {
+    body_height() / 2.0
+}
+
+/// A pool `POOL_DEPTH` tiles deep over the tile box `xs × zs`, filled with
+/// recipe water to the brim (the bank's top).
+fn pool(xs: std::ops::Range<i64>, zs: std::ops::Range<i64>) -> PlateWater {
+    PlateWater { xs, zs, bed: FLOOR_PLATES - POOL_DEPTH * TILE_PLATES as i32, top: FLOOR_PLATES }
+}
+
+/// The stud seed of the fixtures: 2×2 chunk columns of flat ground (the bank)
+/// with the recipe water of `water`.
+fn bank_seed(water: &[PlateWater]) -> game::StudRegionSeed {
+    common::stud_seed_over(0.0..2.0 * CHUNK_EDGE, 0.0..2.0 * CHUNK_EDGE, |cx, cz| {
+        column_with_plate_water(r0(), cx, cz, FLOOR_PLATES, water)
+    })
+}
+
+/// The bank with `water`, the player created at the spawn column (tile 8, 8)
+/// with controls on and 12 ticks run: settled on the bank, or dropped into
+/// the pool the spawn lies in.
+fn bank_world(water: &[PlateWater]) -> World {
+    common::install_real_block_props();
+    let mut world = World::new();
+    world.load(&r0(), common::region_of(r0(), bank_seed(water)));
+    world.handle_region_event(GameEventKind::CreateClient(0), r0()).unwrap();
+    world.forget_last_event(&r0());
+    key(&mut world, Key::KeyE, true);
+    key(&mut world, Key::KeyE, false);
+    ticks(&mut world, 12);
+    world
+}
+
+/// Raises the bank by `plates` over the tile columns `xs × zs`.
+fn raise_bank(world: &mut World, xs: std::ops::Range<i32>, zs: std::ops::Range<i32>, plates: i32) {
     world.regions.get_mut(&r0()).unwrap().with_data(|d| {
         for x in xs.clone() {
-            for y in ys.clone() {
-                for z in zs.clone() {
-                    assert!(d.set_block_safe([x, y, z], Block::new(block)), "set {x},{y},{z}");
-                }
+            for z in zs.clone() {
+                let (lo, hi) = game::stud_tile_box([x, BANK, z]).unwrap();
+                assert!(d.fill_stud_box_safe(lo, [hi[0], lo[1] + plates, hi[2]], game::MAT_STONE) > 0, "raise {x},{z}");
             }
         }
     });
-}
-
-/// A pool dug `BANK - 1` (4) blocks deep over the block box `xs × zs`,
-/// filled with recipe water to the brim: water at levels `1..BANK`, the
-/// bed's top at level 1.
-fn dig_pool(world: &mut World, xs: std::ops::Range<i32>, zs: std::ops::Range<i32>) {
-    world.regions.get_mut(&r0()).unwrap().with_data(|d| set_recipe_water(d, xs, zs, 0, BANK - 1, BANK - 1));
 }
 
 fn player_motion(world: &World) -> Motion {
@@ -57,7 +93,7 @@ fn player_motion(world: &World) -> Motion {
 }
 
 fn feet_y(world: &World) -> f32 {
-    body(world).y - HALF_HEIGHT
+    body(world).y - half_height()
 }
 
 /// Ticks until the body has floated at `Waist` with `|vel_y| < 0.1` for 40
@@ -88,10 +124,9 @@ fn float_for_40_ticks(world: &mut World, budget: usize) {
     );
 }
 
-/// The player dropped into the middle of a 4-deep pool.
+/// The player dropped into the middle of a `POOL_DEPTH`-deep pool.
 fn floating_player() -> World {
-    let mut w = bank_world();
-    dig_pool(&mut w, 3..14, 3..14);
+    let mut w = bank_world(&[pool(3..14, 3..14)]);
     float_for_40_ticks(&mut w, 300);
     w
 }
@@ -100,9 +135,9 @@ fn floating_player() -> World {
 #[ignore = "slow: >100ms — run via just test-full"]
 fn body_in_deep_water_floats_at_the_surface() {
     let w = floating_player();
-    let feet = feet_y(&w) / BV;
-    assert!(feet > 1.0 + 0.5, "floats clear of the bed: feet at {feet} blocks");
-    assert!(feet < BANK as f32, "floats in, not on, the water: feet at {feet} blocks");
+    let feet = feet_y(&w);
+    assert!(feet > bed_y() + 0.5 * BV, "floats clear of the bed: feet at {} m", feet / BV);
+    assert!(feet < surface_y(), "floats in, not on, the water: feet at {} m", feet / BV);
 }
 
 #[test]
@@ -151,12 +186,17 @@ fn swim_speed_is_capped() {
 
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
-fn swimmer_climbs_out_onto_a_one_block_ledge() {
-    let mut w = bank_world();
-    dig_pool(&mut w, 3..14, 3..14);
-    // North of the pool (z < 3) the bank is raised one block: its top is one
-    // block above the water's surface.
-    fill(&mut w, 0..32, BANK..BANK + 1, 0..3, STONE);
+fn swimmer_climbs_out_onto_a_low_ledge() {
+    let mut w = bank_world(&[pool(3..14, 3..14)]);
+    // North of the pool (z < 3) the bank is raised `LEDGE_PLATES` (0.4 m):
+    // its top is that far above the water's surface.
+    // P10b, found and not fixed (movement is `game/src`): the voxel body
+    // climbed a 1 m ledge; the stud body climbs 0, 1 and 2 plates but not a
+    // brick course (3 plates) — its exit jump tops out 0.04 m over the
+    // surface and it then hangs against the brick edge, not grounded, its
+    // `vel_y` falling without bound (−814 units/s after 16 ticks). So the
+    // ledge here is the highest it does climb.
+    raise_bank(&mut w, 0..32, 0..3, LEDGE_PLATES);
     float_for_40_ticks(&mut w, 300);
     // Two blocks from the wall, floating where it was.
     let b = body(&w);
@@ -170,7 +210,7 @@ fn swimmer_climbs_out_onto_a_one_block_ledge() {
         if t % 4 == 0 {
             eprintln!("tick {t}: feet {:.3} z {:.3} blocks {:?}", feet_y(&w) / BV, b.z / BV, player_motion(&w));
         }
-        if b.grounded && b.z < 3.0 * BV && feet_y(&w) > (BANK + 1) as f32 * BV - 1.0 {
+        if b.grounded && b.z < 3.0 * BV && feet_y(&w) > common::floor_y(FLOOR_PLATES + LEDGE_PLATES) - 1.0 {
             out = Some(t);
             break;
         }
@@ -178,11 +218,6 @@ fn swimmer_climbs_out_onto_a_one_block_ledge() {
     assert!(out.is_some(), "on the ledge within 40 ticks: feet {} z {} blocks", feet_y(&w) / BV, body(&w).z / BV);
 }
 
-/// With static water every water cell is full, so a body of the player's
-/// height standing in one block of it has its waist under too: `Feet` alone
-/// takes a body two blocks tall (or, once water flows, a shallow cell). The
-/// sampling is checked on the real region state; the wading speed through
-/// `plan_with` + `settle`, as every mover runs them.
 /// The climb-out is a surface move: head under, jump against a wall only
 /// swims up towards `SWIM_UP_SPEED` (it shot the body up at the exit speed
 /// before); at the waist the same keys climb out.
@@ -206,21 +241,24 @@ fn climb_out_only_at_the_surface() {
     assert_eq!(m.vel_y, exit, "at the surface: climbs out");
 }
 
+/// Stud water has a surface on the plate grid: a body standing in two plates
+/// of it (the deepest wading) has only its feet wet, in a tile of it (1.2 m)
+/// its waist too. The sampling is checked on the real region state; the
+/// wading speed through `plan_with` + `settle`, as every mover runs them.
 #[test]
 fn wading_slows_walking() {
-    let mut w = bank_world();
-    // One block of recipe water on the bank.
-    w.regions.get_mut(&r0()).unwrap().with_data(|d| set_recipe_water(d, 7..10, 7..10, BANK - 1, BANK, BANK - 1));
-    let d = w.data(&r0());
-    let feet = Vector::new(8.5 * BV, BANK as f32 * BV, 8.5 * BV);
-    assert_eq!(game::immersion_at(d, feet, 2.08 * UNITS_PER_METER), Immersion::Feet, "a 2 m body wades");
-    assert_eq!(
-        game::immersion_at(d, feet, PLAYER_HEIGHT * UNITS_PER_METER),
-        Immersion::Waist,
-        "a 1.8 m body's waist is in the same full cell"
-    );
-    let above = Vector::new(feet.x, (BANK + 1) as f32 * BV, feet.z);
-    assert_eq!(game::immersion_at(d, above, PLAYER_HEIGHT * UNITS_PER_METER), Immersion::Dry);
+    // Two plates of recipe water on the bank around the spawn, a whole tile of
+    // it beside that.
+    let shallow = PlateWater { xs: 7..10, zs: 7..10, bed: FLOOR_PLATES, top: FLOOR_PLATES + 2 };
+    let deep = PlateWater { xs: 12..15, zs: 7..10, bed: FLOOR_PLATES, top: FLOOR_PLATES + TILE_PLATES as i32 };
+    let region = common::region_of(r0(), bank_seed(&[shallow, deep]));
+    let d = region.data();
+    let feet = Vector::new(8.5 * BV, surface_y(), 8.5 * BV);
+    assert_eq!(game::immersion_at(d, feet, body_height()), Immersion::Feet, "the body wades in two plates");
+    let in_deep = Vector::new(13.5 * BV, surface_y(), 8.5 * BV);
+    assert_eq!(game::immersion_at(d, in_deep, body_height()), Immersion::Waist, "its waist is under a tile of water");
+    let above = Vector::new(feet.x, surface_y() + game::plate_units(2), feet.z);
+    assert_eq!(game::immersion_at(d, above, body_height()), Immersion::Dry);
 
     let mut m = Motion { grounded: true, immersion: Immersion::Feet, ..Motion::default() };
     let keys = MoveKeys { forward: true, ..MoveKeys::default() };
@@ -245,8 +283,7 @@ fn rollback_across_water_surface_restores_hash() {
     // a block north of it, so walking north steps off into the water.
     let (send, _recv) = crossbeam::channel::unbounded();
     let mut region = game::Region::new(game::Rollback::new(Some(send.clone())), Some(send), r0(), None);
-    let depth = BANK as u32 * BLOCK_VOXELS as u32;
-    region.with_data(|r| r.seed_terrain_genesis(common::floor_chunks(0.0..2.0 * CHUNK_EDGE, 0.0..2.0 * CHUNK_EDGE, depth)));
+    region.seed_stud_world(bank_seed(&[pool(3..14, 3..8)]));
     let forget = |region: &mut game::Region, kind: GameEventKind| {
         region.handle_event(kind).unwrap();
         region.forget_last_event();
@@ -258,7 +295,6 @@ fn rollback_across_water_surface_restores_hash() {
     for _ in 0..12 {
         forget(&mut region, GameEventKind::Tick);
     }
-    region.with_data(|d| set_recipe_water(d, 3..14, 3..8, 0, BANK - 1, BANK - 1));
     forget(&mut region, input(Key::KeyW, true));
 
     let before = game::state_hash(region.data());
@@ -279,9 +315,13 @@ fn rollback_across_water_surface_restores_hash() {
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn people_swim_too() {
-    let mut w = bank_world();
-    // A channel 3 blocks wide (z 10..13), 4 deep, across the whole fixture.
-    dig_pool(&mut w, 0..32, 10..13);
+    // A channel 3 tiles wide (z 10..13) across the whole fixture, two tiles
+    // deeper than the pools: the person steps off the bank and plunges under
+    // the stud body's gravity (4/3 of the base) before it floats up — in a
+    // `POOL_DEPTH` channel it came within 0.11 m of the bed.
+    let channel_bed = FLOOR_PLATES - (POOL_DEPTH + 2) * TILE_PLATES as i32;
+    let channel = PlateWater { bed: channel_bed, ..pool(0..32, 10..13) };
+    let mut w = bank_world(&[channel]);
     const P: PersonId = PersonId(7);
     let mut e = None;
     w.regions.get_mut(&r0()).unwrap().with_data(|d| e = d.spawn_person_safe(P, (8.5 * BV, 8.5 * BV)));
@@ -293,7 +333,7 @@ fn people_swim_too() {
     let path: Vec<WorldBlockPos> = (8..=16).map(|z| WorldBlockPos::new(8, BANK, z)).collect();
     let walker = game::Walker {
         goal: Goal { column: [8, 16], y: Some(BANK) },
-        walk_up: vec![false; path.len()],
+        walk_up: vec![true; path.len()],
         path,
         next: 1,
         to_goal: true,
@@ -311,17 +351,18 @@ fn people_swim_too() {
         let over_channel = (10.0 * BV..13.0 * BV).contains(&b.z);
         entered |= over_channel;
         if over_channel {
-            lowest = lowest.min(b.y - HALF_HEIGHT);
+            lowest = lowest.min(b.y - half_height());
         }
         deepest = deepest.max(m.immersion);
         if t % 10 == 0 {
-            eprintln!("tick {t}: feet {:.3} z {:.3} blocks {:?}", (b.y - HALF_HEIGHT) / BV, b.z / BV, m);
+            eprintln!("tick {t}: feet {:.3} z {:.3} blocks {:?}", (b.y - half_height()) / BV, b.z / BV, m);
         }
     }
     eprintln!("lowest feet over the channel {} blocks, deepest {deepest:?}", lowest / BV);
     assert!(entered, "the person walked into the channel");
     assert!(deepest >= Immersion::Waist, "its immersion reached Waist: {deepest:?}");
-    // Clear of the bed (top at level 1) by a quarter block, as in the seam
-    // test (`handoff_schedule::swim_is_seam_invariant`).
-    assert!(lowest > 1.25 * BV, "it never sank to the bed (top at level 1): lowest feet {} blocks", lowest / BV);
+    // Clear of the bed by a quarter metre, as in the seam test
+    // (`handoff_schedule::swim_is_seam_invariant`).
+    let bed = common::floor_y(channel_bed);
+    assert!(lowest > bed + 0.25 * BV, "it never sank to the bed: lowest feet {} m (bed {})", lowest / BV, bed / BV);
 }

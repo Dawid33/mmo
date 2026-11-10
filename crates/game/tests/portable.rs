@@ -1,5 +1,5 @@
 //! The portable region format (`game::portable`, world store R0+R1 Task 3):
-//! what a region keeps in the store — its meta maps, the chunks changed
+//! what a region keeps in the store — its meta maps, the stud chunks changed
 //! since the last save, the ground recipes once, and its owned non-player,
 //! non-person entities as bundles — and the region rebuilt from it. A
 //! restored region is not expected to hash-match its pre-save self (its
@@ -11,28 +11,29 @@ use common::water::{floor_with_water, WaterBox};
 use game::portable::{classify, PortableRegion, RegionMeta, SaveTerms};
 use game::rapier3d::math::Vector;
 use game::{
-    chest_block, restore_portable, state_hash, Block, BlockId, ChunkCoords, ColliderSpec, Container, DesignationKind,
-    EntityBundle, EntityKey, GameEventKind, Intent, ItemId, ItemStack, OpId, Order, Pose, Region, RegionCoords,
-    Rollback, SentIntent, SettlePolicy, StoredRegion, Target, TileBox, WorldBlockPos, REGION_BLOCKS,
+    restore_portable, state_hash, ColliderSpec, Container, DesignationKind, EntityBundle, EntityKey, GameEventKind,
+    Intent, ItemId, ItemStack, OpId, Order, Pose, Region, RegionCoords, Rollback, SentIntent, SettlePolicy,
+    StoredRegion, StudChunkRecord, Target, TileBox, WorldBlockPos, REGION_BLOCKS,
 };
 
-/// Block units per block.
-const B: f32 = 16.0;
+/// One metre (a tile's width), sim units.
+const B: f32 = common::TILE_W;
+/// The level of the ground's top (solid) tile; things rest in `G + 1`.
+const G: i32 = common::STAND - 1;
 
 fn rc() -> RegionCoords {
     common::r0()
 }
 
-/// A one-block floor (block y 0) over the whole region with ground recipes,
-/// and a pond of recipe water (block levels 1..=3) over world blocks
-/// 40..48 × 40..48 — one labelled water body.
+/// Flat stud ground over the whole region, and a pond of recipe water (tile
+/// levels `G + 1 ..= G + 3`) over world tiles 40..48 × 40..48.
 fn pond_region() -> Region {
     common::install_real_block_props();
     let n = REGION_BLOCKS as i64;
     let x0 = rc().x as i64 * n;
     let z0 = rc().z as i64 * n;
-    let pond = WaterBox { xs: x0 + 40..x0 + 48, zs: z0 + 40..z0 + 48, surface: 0, water_top: 3 };
-    Region::from_columns(rc(), floor_with_water(rc(), &[pond]))
+    let pond = WaterBox { xs: x0 + 40..x0 + 48, zs: z0 + 40..z0 + 48, surface: G, water_top: G + 3 };
+    common::region_of(rc(), floor_with_water(rc(), &[pond]))
 }
 
 fn wc(p: [i32; 3]) -> WorldBlockPos {
@@ -68,33 +69,52 @@ fn snapshot(region: &Region, saved: &SaveTerms) -> (PortableRegion, SaveTerms) {
     region.data().portable_snapshot(saved)
 }
 
-/// The region the snapshot test checks: a dug floor block, a chest with
-/// items, a pile, a designation, two slimes, a dynamic body, a voxel body,
-/// a queued intent and the pond's water body.
+/// A 2 x 4 brick placed in the air over chunk column (3, 1) (min cell
+/// `BRICK`) and detached into a falling stud body.
+fn detach_a_brick(region: &mut Region) -> EntityKey {
+    use game::stud_catalog::STUD_PARTS;
+    const BRICK: [u8; 3] = [4, 60, 4];
+    let part = STUD_PARTS.iter().position(|p| p.number == "3001").expect("the 2 x 4 brick") as u16;
+    let at = common::sc(3, 0, 1);
+    let mut body = None;
+    region.with_data(|r| {
+        assert!(r.place_stud_safe(at, game::StudBrick::part_at(BRICK, part, 0, 4)), "a brick in the air");
+        let picks = std::collections::BTreeMap::from([(at, [BRICK].into())]);
+        body = r.detach_studs_safe(&picks, SettlePolicy::Despawn, Vector::ZERO, None);
+    });
+    body.expect("a stud body")
+}
+
+/// A body-centre height a few metres over the floor: where the fixture's
+/// slimes and body start falling from.
+fn over_floor(metres: f32) -> f32 {
+    common::floor_y(common::FLOOR_PLATES) + metres * B
+}
+
+/// The region the snapshot test checks: a dug floor tile, a chest with
+/// items, a pile, a designation, two slimes, a dynamic body, a stud body,
+/// a queued intent and the pond's recipe water.
 fn furnished_region() -> Region {
     let mut region = pond_region();
-    let chest = chest_block().expect("the manifest has a chest");
     region.with_data(|r| {
-        assert!(r.set_block_safe([10, 0, 10], Block::new(BlockId::AIR)), "dig a floor block");
-        assert!(r.set_block_safe([20, 1, 20], Block::new(chest)), "place a chest");
+        assert!(common::carve_tile(r, [10, G, 10]), "dig a floor tile");
+        assert!(r.place_stud_chest_safe([20, G + 1, 20]), "place a chest");
         let mut slots = vec![None; game::CHEST_SLOTS];
         slots[0] = Some(ItemStack { item: ItemId(1), count: 5 });
         slots[3] = Some(ItemStack { item: ItemId(2), count: 7 });
-        r.write_container_safe(wc([20, 1, 20]), Some(Container { slots }));
+        r.write_container_safe(wc([20, G + 1, 20]), Some(Container { slots }));
         let tick = *r.tick;
-        assert_eq!(r.deposit_items_safe([30, 1, 30], ItemStack { item: ItemId(1), count: 3 }, tick, 0), 0);
+        assert_eq!(r.deposit_items_safe([30, G + 1, 30], ItemStack { item: ItemId(1), count: 3 }, tick, 0), 0);
         let op = OpId { client: 0, seq: 1 };
-        let area = TileBox { min: [12, 0, 12], max: [13, 0, 12] };
+        let area = TileBox { min: [12, G, 12], max: [13, G, 12] };
         assert!(r.apply_order_safe(0, Order::Designate { op, kind: DesignationKind::Dig, priority: 4, area }));
     });
-    common::spawn_slime(&mut region, [200.0, 40.0, 200.0], 2, 0.0, 1);
-    common::spawn_slime(&mut region, [400.0, 40.0, 300.0], 1, 1.0, 2);
-    spawn_body(&mut region, [300.0, 80.0, 500.0]);
-    region.with_data(|r| {
-        r.detach_blocks_safe(&[[50, 0, 20], [51, 0, 20]], SettlePolicy::Despawn, Vector::ZERO).expect("a voxel body");
-    });
+    common::spawn_slime(&mut region, [200.0, over_floor(1.5), 200.0], 2, 0.0, 1);
+    common::spawn_slime(&mut region, [400.0, over_floor(1.5), 300.0], 1, 1.0, 2);
+    spawn_body(&mut region, [300.0, over_floor(4.0), 500.0]);
+    detach_a_brick(&mut region);
     ticks(&mut region, 3);
-    // An intent queued for the next tick: a break of a floor block, sent by
+    // An intent queued for the next tick: a break of a floor tile, sent by
     // the first slime.
     let by = {
         let d = region.data();
@@ -103,7 +123,7 @@ fn furnished_region() -> Region {
     let due = region.current_tick() + 1;
     region.with_data(|r| {
         let sent = SentIntent {
-            target: Target::Block(wc([5, 0, 5])),
+            target: Target::Block(wc([5, G, 5])),
             intent: Intent::BreakBlock { by, survival: false },
             from: rc(),
             due,
@@ -135,15 +155,11 @@ fn stored(p: PortableRegion) -> StoredRegion {
 #[test]
 fn bundle_of_matches_extract() {
     let mut region = pond_region();
-    let slime = common::spawn_slime(&mut region, [200.0, 40.0, 200.0], 2, 0.0, 1);
-    let body = spawn_body(&mut region, [300.0, 80.0, 500.0]);
-    let mut voxel = None;
-    region.with_data(|r| {
-        voxel = r.detach_blocks_safe(&[[30, 0, 30], [31, 0, 30]], SettlePolicy::Despawn, Vector::ZERO);
-    });
-    let voxel = voxel.expect("a voxel body");
+    let slime = common::spawn_slime(&mut region, [200.0, over_floor(1.5), 200.0], 2, 0.0, 1);
+    let body = spawn_body(&mut region, [300.0, over_floor(4.0), 500.0]);
+    let bricks = detach_a_brick(&mut region);
     ticks(&mut region, 2);
-    for key in [slime, body, voxel] {
+    for key in [slime, body, bricks] {
         let before = state_hash(region.data());
         let bundle: EntityBundle = region.data().bundle_of(key);
         assert_eq!(before, state_hash(region.data()), "bundle_of is read-only");
@@ -158,23 +174,29 @@ fn snapshot_roundtrip_is_equivalent() {
     let region = furnished_region();
     let (original, terms) = snapshot(&region, &SaveTerms::default());
     // The fixture has what the test is about.
-    assert!(original.ground.is_some(), "a first snapshot carries the ground");
-    assert_eq!(original.meta.water_bodies.len(), 1, "the pond is one body");
+    assert!(original.stud_ground.as_ref().is_some_and(|g| !g.is_empty()), "a first snapshot carries the recipes");
     assert_eq!(original.meta.containers.len(), 1);
     assert_eq!(original.meta.item_piles.len(), 1);
     assert_eq!(original.meta.designations.len(), 2);
     assert_eq!(original.meta.intents.len(), 1);
-    assert_eq!(original.entities.len(), 4, "two slimes, a body and a voxel body");
-    assert!(original.entities.iter().any(|b| b.carried.voxel_body.is_some()));
+    assert_eq!(original.entities.len(), 4, "two slimes, a body and a stud body");
+    assert!(original.entities.iter().any(|b| b.carried.stud_body.is_some()));
     assert!(original.players.is_empty());
-    assert_eq!(original.chunks.len(), terms.chunks.len(), "empty terms: every chunk");
+    // Empty terms: every chunk has a term; the rows are the chunks that differ
+    // from their recipe (the dug tile's, the chest's).
+    assert_eq!(terms.studs.len(), region.data().stud_index.len());
+    let edited = original.stud_chunks.values().filter(|r| matches!(r, Some(StudChunkRecord::Edited(_)))).count();
+    assert_eq!(edited, 2, "the dug chunk and the chest's: {:?}", original.stud_chunks.keys().collect::<Vec<_>>());
 
     let (restored_region, restored_terms) = restore_portable(rc(), stored(original.clone()));
     assert_eq!(restored_terms, terms, "the restored chunks have the saved terms");
     let (restored, _) = snapshot(&restored_region, &SaveTerms::default());
 
+    // Exhaustive on purpose: a new field must be compared (or named as not
+    // stored). P10b: `chunks`, `ground` and `water_bodies` are the voxel
+    // world's and hold nothing for a stud region.
     let PortableRegion { meta, chunks, ground, entities, players, stud_chunks, stud_ground } = restored;
-    assert!(stud_chunks.is_empty() && stud_ground == Some(Vec::new()), "a voxel region has no stud terrain");
+    assert!(chunks.is_empty() && ground == Some(Vec::new()), "a stud region has no voxel terrain");
     let RegionMeta {
         tick: _,
         next_game_event_id,
@@ -201,8 +223,8 @@ fn snapshot_roundtrip_is_equivalent() {
     assert_eq!(intent_replies, o.intent_replies);
     assert_eq!(intent_inbox, o.intent_inbox);
     assert_eq!(water_bodies, o.water_bodies);
-    assert_eq!(chunks, original.chunks);
-    assert_eq!(ground, original.ground);
+    assert_eq!(stud_chunks, original.stud_chunks);
+    assert_eq!(stud_ground, original.stud_ground);
     assert_eq!(derived_velocities_zeroed(entities), derived_velocities_zeroed(original.entities.clone()));
     assert_eq!(players, original.players);
     assert_eq!(
@@ -212,20 +234,8 @@ fn snapshot_roundtrip_is_equivalent() {
     );
 
     let (again, _) = snapshot(&restored_region, &restored_terms);
-    assert!(again.ground.is_none(), "the ground goes only into a first snapshot");
-    assert!(again.chunks.is_empty(), "nothing changed since the restore");
-}
-
-#[test]
-fn snapshot_sends_only_changed_chunks() {
-    let mut region = pond_region();
-    let (_, terms) = snapshot(&region, &SaveTerms::default());
-    region.with_data(|r| assert!(r.set_block_safe([3, 1, 3], Block::new(BlockId(1)))));
-    // A block placed on the floor: one chunk changes, none appears.
-    let (second, _) = snapshot(&region, &terms);
-    let changed: Vec<ChunkCoords> = second.chunks.keys().copied().collect();
-    assert_eq!(changed, vec![ChunkCoords::new(0, 0, 0)]);
-    assert!(second.ground.is_none());
+    assert!(again.stud_ground.is_none(), "the recipes go only into a first snapshot");
+    assert!(again.stud_chunks.is_empty(), "nothing changed since the restore");
 }
 
 #[test]
@@ -242,33 +252,37 @@ fn players_and_people_are_not_entities() {
     assert_eq!(p.players[0].0, 0);
 }
 
-fn chunk_map(entries: &[(ChunkCoords, u32)]) -> PortableRegion {
+/// A snapshot holding the stud rows `entries`: a slab `plates` thick, or a delete.
+fn chunk_map(entries: &[(game::StudChunkCoords, Option<u8>)]) -> PortableRegion {
     let mut p = PortableRegion::default();
-    for &(c, floor) in entries {
-        p.chunks.insert(c, game::Chunk::flat_floor(floor));
+    for &(c, plates) in entries {
+        p.stud_chunks.insert(c, plates.map(|n| StudChunkRecord::Edited(common::slab_chunk(n))));
     }
     p
 }
 
 #[test]
 fn merge_keeps_uncommitted_chunks() {
-    let a = ChunkCoords::new(0, 0, 0);
-    let b = ChunkCoords::new(1, 0, 0);
-    let mut older = chunk_map(&[(a, 1)]);
-    older.merge(chunk_map(&[(b, 2)]));
-    assert_eq!(older.chunks.keys().copied().collect::<Vec<_>>(), vec![a, b]);
+    let a = common::sc(0, 0, 0);
+    let b = common::sc(1, 0, 0);
+    let mut older = chunk_map(&[(a, Some(1))]);
+    older.merge(chunk_map(&[(b, Some(2))]));
+    assert_eq!(older.stud_chunks.keys().copied().collect::<Vec<_>>(), vec![a, b]);
 
-    let mut older = chunk_map(&[(a, 1)]);
-    let newer = chunk_map(&[(a, 2)]);
-    let a2 = newer.chunks[&a].clone();
+    let mut older = chunk_map(&[(a, Some(1))]);
+    let newer = chunk_map(&[(a, Some(2))]);
+    let a2 = newer.stud_chunks[&a].clone();
     older.merge(newer);
-    assert_eq!(older.chunks.len(), 1);
-    assert_eq!(older.chunks[&a], a2, "the newer chunk wins");
+    assert_eq!(older.stud_chunks.len(), 1);
+    assert_eq!(older.stud_chunks[&a], a2, "the newer chunk wins");
+    // A newer delete replaces an older write.
+    older.merge(chunk_map(&[(a, None)]));
+    assert_eq!(older.stud_chunks[&a], None);
 
-    // Ground: the first Some.
-    let mut first = PortableRegion { ground: Some(Vec::new()), ..Default::default() };
+    // The recipes: the first Some.
+    let mut first = PortableRegion { stud_ground: Some(Vec::new()), ..Default::default() };
     first.merge(PortableRegion::default());
-    assert_eq!(first.ground, Some(Vec::new()));
+    assert_eq!(first.stud_ground, Some(Vec::new()));
 }
 
 #[test]

@@ -14,17 +14,15 @@
 struct FortressView {
     cut: vec4<f32>,
     origin: vec4<f32>,
-    overlay_dims: vec4<u32>,
 }
 @group(#{MATERIAL_BIND_GROUP}) @binding(100) var<uniform> fortress: FortressView;
 
-// Mirrored from voxel_texture.wgsl / fortress_view.rs.
+// The "cut off" value of fortress_view.rs (f32::MAX) and the slack at the plane.
 const CUT_OFF: f32 = 3.0e38;
 const CUT_EPSILON: f32 = 0.01;
 
 // Whether the cut applies at world column `p` (x, z): inside the home
-// region while the cut is on — voxel_texture.wgsl's chunk_cut_applies, per
-// fragment instead of per chunk (a tile never straddles a seam either).
+// region while the cut is on (stud_terrain.wgsl's cut_applies).
 fn cut_applies(p: vec2<f32>) -> bool {
     let lo = fortress.origin.xz;
     let hi = lo + vec2<f32>(fortress.cut.w);

@@ -4,10 +4,9 @@
 //! alone, so the sun-to-ambient ratio IS the shadow contrast, and the fog
 //! colour has to match the skybox horizon or the terrain's far edge shows.
 //!
-//! The terrain shaders (`voxel_pull.wgsl`, `far_voxel.wgsl`) do their own
-//! lighting, so they read these through Bevy's view uniforms (the directional
-//! light, `GlobalAmbientLight`, and the camera's `DistanceFog`) rather than
-//! duplicating the numbers; the per-chunk fallback gets them through PBR.
+//! The terrain materials draw through Bevy's PBR path, which reads these (the
+//! directional light, `GlobalAmbientLight`, and the camera's `DistanceFog`);
+//! the slice plane's own shader reads them through the view uniforms.
 
 use bevy::camera::Exposure;
 use bevy::light::{CascadeShadowConfig, CascadeShadowConfigBuilder};

@@ -147,29 +147,3 @@ fn world_map_tile_lookup() {
     assert!(map.tile(RegionCoords::new(-2, 0)).is_none());
     assert_eq!(map.coords(4), RegionCoords::new(0, 0));
 }
-
-/// Water plan Task 8: `LodData` carries the key's `LodWater` surface layer
-/// next to its terrain grids, through the shared wire framing.
-#[test]
-fn lod_data_round_trips_with_water() {
-    use game::lod::{LodKey, LodWater, PackedLodGrid};
-    let key = LodKey { factor: 16, coords: [-2, 3] };
-    let side = 4u16;
-    let mut tops = vec![(game::NO_WATER, 0u8); usize::from(side) * usize::from(side)];
-    tops[5] = (63, 12);
-    tops[6] = (63, 12);
-    tops[11] = (70, 255);
-    let water = LodWater::encode(&tops, side);
-    assert!(water.is_well_formed());
-    assert_eq!(water.decode().as_deref(), Some(&tops[..]));
-    let payload = vec![([0, 1, 0], PackedLodGrid(vec![(32 * 32 * 32, game::BlockId(2))]))];
-    let wire = encode_packet(&ServerPacket::LodData(key, payload.clone(), water.clone())).unwrap();
-    match decode_packet::<ServerPacket>(&wire).unwrap() {
-        ServerPacket::LodData(k, p, w) => {
-            assert_eq!(k, key);
-            assert_eq!(p, payload);
-            assert_eq!(w, water);
-        }
-        other => panic!("wrong variant {other:?}"),
-    }
-}

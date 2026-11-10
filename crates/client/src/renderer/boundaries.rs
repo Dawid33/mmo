@@ -1,14 +1,13 @@
 //! Terrain boundary overlay: a thin warm line along the perimeter of the
 //! player's home region, just outside it (a quarter block wide, never under
 //! ~1.5 px; nothing is drawn inside the play area), with the world outside it slightly dimmed and desaturated. Painted by
-//! `voxel_pull.wgsl` from one small uniform (group(1) binding 5), so it hugs
-//! every slope and reaches the LOD rings with no geometry of its own. (Only
+//! the stud terrain material (`stud_terrain.wgsl`) from one small uniform, so it hugs
+//! every slope and reaches the far tiles with no geometry of its own. (Only
 //! the home region is simulated at the play region size, so it also marks the
-//! simulated / unsimulated edge.) F8 (or the F3 panel) toggles it. Not drawn by
-//! the per-chunk Mesh fallback (WebGL2) or the brick far renderer.
+//! simulated / unsimulated edge.) F8 (or the F3 panel) toggles it.
 
 use bevy::prelude::*;
-use bevy::render::{extract_resource::ExtractResource, render_resource::ShaderType};
+use bevy::render::render_resource::ShaderType;
 use game::{RegionCoords, REGION_SIZE};
 
 use super::hud::HudStatus;
@@ -41,9 +40,9 @@ impl Default for BoundaryOverlay {
 }
 
 /// The overlay uniform, layout mirrored by `TerrainBoundaries` in
-/// `voxel_pull.wgsl`. An opacity of 0 turns it off. Extracted into the render
-/// world, where `prepare_chunk_quads` uploads it.
-#[derive(Resource, Clone, Copy, Default, PartialEq, ShaderType, ExtractResource)]
+/// `stud_terrain.wgsl`. An opacity of 0 turns it off; `stud::material::sync_stud_materials`
+/// copies it into the stud materials.
+#[derive(Resource, Clone, Copy, Default, PartialEq, ShaderType)]
 pub struct BoundaryUniform {
     /// Home region rect on the ground: min x, min z, max x, max z.
     pub home_rect: Vec4,

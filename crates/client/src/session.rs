@@ -26,8 +26,7 @@
 //! The frontend camera is spawned when the frontend takes the screen and
 //! despawned when it hands it back, rather than kept around inactive: several
 //! world systems read "the" camera as the first `Camera3d` they find
-//! (`meshing/queue.rs` ranks chunks by `camera.iter().next()`, the render
-//! benchmark and autopilot iterate every `Camera3d`), and a parked camera at the
+//! (the autopilot iterates every `Camera3d`), and a parked camera at the
 //! origin would skew them.
 
 use bevy::camera::visibility::RenderLayers;
@@ -149,20 +148,10 @@ pub struct JoinServer(pub std::net::SocketAddr);
 #[derive(Resource, Clone, Copy, Default, Debug, PartialEq, Eq)]
 pub struct PreparingWorld;
 
-/// The menu screens' camera; see the module docs for when it exists.
-/// Extracted to the render world, where the custom terrain passes (near
-/// voxel_pull forward / prepass / shadows / x-ray, the far-voxel pass) skip
-/// its view ([`view_draws_world`]): they bin into every view and would
-/// otherwise draw (or at least render) the world behind the frontend —
-/// `RenderLayers` only filter Bevy's own mesh queues.
-#[derive(Component, Clone, Copy, Default, Debug, bevy::render::extract_component::ExtractComponent)]
+/// The menu screens' camera; see the module docs for when it exists. The
+/// world draws through Bevy's mesh queues only, which its `RenderLayers` filter.
+#[derive(Component, Clone, Copy, Default, Debug)]
 pub struct FrontendCamera;
-
-/// Whether a render view draws the world: every view but the
-/// [`FrontendCamera`]'s (`is_frontend_view` = it has the extracted marker).
-pub fn view_draws_world(is_frontend_view: bool) -> bool {
-    !is_frontend_view
-}
 
 /// Render layer the frontend camera sees — no world entity is on it, so the
 /// camera draws only its clear colour (and the Slint composite on top).
@@ -323,12 +312,11 @@ pub fn frontend_owns_screen()
 /// The dev-bypass rule, over an env lookup (`|k| std::env::var(k).ok()`).
 pub fn skip_menu_from_env(get: impl Fn(&str) -> Option<String>) -> bool {
     // "Set" the way the features themselves read it: non-empty, and for the
-    // two run modes also not "0" (`render_bench::enabled`, `Autopilot::from_env`).
+    // run mode also not "0" (`Autopilot::from_env`).
     let non_empty = |key: &str| get(key).is_some_and(|v| !v.is_empty());
     let switched_on = |key: &str| get(key).is_some_and(|v| !v.is_empty() && v != "0");
     let bypass = get("VOXEL_SKIP_MENU").as_deref() == Some("1")
         || non_empty("VOXEL_WORLD_FILE")
-        || switched_on("RENDER_BENCH")
         || switched_on("VOXEL_AUTOPILOT");
     bypass
 }
@@ -389,11 +377,6 @@ impl Plugin for SessionPlugin {
             .init_resource::<StartingLog>()
             .add_message::<SessionEnded>()
             .add_systems(Update, sync_frontend_camera);
-        // Only with a renderer (added after `DefaultPlugins`): the extraction's
-        // sync hooks need the render world's resources, which headless apps lack.
-        if app.get_sub_app(bevy::render::RenderApp).is_some() {
-            app.add_plugins(bevy::render::extract_component::ExtractComponentPlugin::<FrontendCamera>::default());
-        }
     }
 }
 
@@ -1244,12 +1227,6 @@ mod tests {
     }
 
     #[test]
-    fn only_world_views_draw_the_world() {
-        assert!(view_draws_world(false));
-        assert!(!view_draws_world(true), "the frontend camera's view draws no terrain");
-    }
-
-    #[test]
     fn exactly_one_layer_has_the_screen() {
         use AppState::*;
         // (state, embarked, map arrived) → frontend screens shown, arrival map shown
@@ -1329,8 +1306,6 @@ mod tests {
             (&[("VOXEL_WORLD_FILE", "worlds/a.world")], true),
             (&[("VOXEL_SKIP_MENU", "1")], true),
             (&[("VOXEL_SKIP_MENU", "0")], false),
-            (&[("RENDER_BENCH", "1")], true),
-            (&[("RENDER_BENCH", "0")], false),
             (&[("VOXEL_AUTOPILOT", "shuttle")], true),
             (&[("VOXEL_AUTOPILOT", "")], false),
         ];

@@ -23,16 +23,17 @@ use crossbeam::channel::{unbounded, Receiver};
 use game::ServerPacket;
 
 use client::renderer::bridge::{RegionRoots, SimEntity, SimEntityMap};
-use client::renderer::bricks::BrickOf;
 use client::renderer::commander::selection::Selection;
 use client::renderer::commander::tiles::TileMirror;
 use client::renderer::commander::{CameraMode, CommanderCamera, CommanderView};
-use client::renderer::far_voxel::residency::FarVoxelResidency;
 use client::renderer::hud::HudStatus;
 use client::renderer::join_timeline::WorldReady;
 use client::renderer::lod_rings::LodRings;
-use client::renderer::meshing::queue::{ChunkGrid, RemeshQueue};
 use client::renderer::slint_overlay::SlintLayer;
+use client::renderer::stud::far::StudLodTasks;
+use client::renderer::stud::systems::{StudMeshChildren, StudMeshTasks};
+use client::renderer::stud::world::StudWorld;
+use client::renderer::stud::SimStudChunk;
 use client::renderer::history_view::HistoryView;
 use client::renderer::world_map::WorldMapState;
 use client::renderer::{ClientUpdates, GameEvents, LocalPlayer, SimBridgePlugin, UiCamera};
@@ -66,10 +67,10 @@ impl Session {
         client.set_lod_table(&[]);
         client.set_near_radius(0);
         let (server_to_client_send, server_to_client) = unbounded();
-        let server = LocalServer::new_with_generator(
+        let server = LocalServer::new_with_genesis(
             client.client_packet_recv(),
             server_to_client_send,
-            client::local_server::lightweight_test_generator(),
+            client::local_server::lightweight_test_genesis(),
         )
         .expect("local server");
         app.insert_resource(ClientUpdates(bridge_recv)).insert_resource(GameEvents(game_send));
@@ -204,12 +205,15 @@ fn live_hud(app: &App) -> Vec<(&'static str, String)> {
 fn assert_no_world_state(app: &mut App, fresh_ui: &[(&'static str, String)], fresh_hud: &[(&'static str, String)]) {
     assert_eq!(count::<With<SessionScoped>>(app), 0, "SessionScoped trees survived");
     assert_eq!(count::<With<SimEntity>>(app), 0, "sim entities survived");
-    assert_eq!(count::<With<BrickOf>>(app), 0, "render bricks survived");
+    assert_eq!(count::<With<SimStudChunk>>(app), 0, "stud chunks survived");
+    assert_eq!(count::<With<StudMeshChildren>>(app), 0, "chunk meshes survived");
     let w = app.world();
     assert!(w.resource::<RegionRoots>().0.is_empty(), "RegionRoots");
     assert!(w.resource::<SimEntityMap>().0.is_empty(), "SimEntityMap");
-    assert!(w.resource::<ChunkGrid>().0.is_empty(), "ChunkGrid");
-    assert!(w.resource::<RemeshQueue>().dirty.is_empty(), "RemeshQueue");
+    let studs = w.resource::<StudWorld>();
+    assert!(studs.chunk_count() == 0 && studs.queued() == 0 && studs.grounds().next().is_none(), "StudWorld");
+    assert!(w.resource::<StudMeshTasks>().is_empty(), "StudMeshTasks");
+    assert!(w.resource::<StudLodTasks>().is_empty(), "StudLodTasks");
     let rings = w.resource::<LodRings>();
     assert!(rings.roots.is_empty() && rings.retired.is_empty() && rings.pending.is_empty(), "LodRings");
     assert_eq!(w.resource::<TileMirror>().region(), None, "TileMirror");
@@ -230,7 +234,6 @@ fn assert_no_world_state(app: &mut App, fresh_ui: &[(&'static str, String)], fre
             && hv.embark_refusal.is_none(),
         "HistoryView"
     );
-    assert_eq!(w.resource::<FarVoxelResidency>().resident_count(), 0, "far residency");
     assert!(!w.resource::<WorldReady>().0, "WorldReady");
     assert_eq!(w.resource::<LocalPlayer>().0, None, "LocalPlayer");
     assert_eq!(w.resource::<HudStatus>().home_region, None, "HudStatus");
@@ -283,7 +286,7 @@ fn second_session_starts_clean() {
     let mut first = Session::start(&mut app);
     first.join(&mut app);
     assert!(count::<With<SessionScoped>>(&mut app) > 0, "the first session spawned its region");
-    assert!(!app.world().resource::<ChunkGrid>().0.is_empty(), "the first session meshed terrain");
+    assert!(count::<With<StudMeshChildren>>(&mut app) > 0, "the first session meshed terrain");
     assert_ne!(live_game_ui(&app), fresh_ui, "the first session showed itself in the game UI");
     assert_eq!(active_ui_cameras(&mut app), vec![(false, true)], "in the world the commander camera has the UI");
     // A played fortress and a half-made embark choice, which must not reach the next world.
@@ -330,7 +333,7 @@ fn leave_during_join_then_rejoin() {
 
     let mut first = Session::start(&mut app);
     first.step_until(&mut app, "NewRegion", |w| !w.resource::<RegionRoots>().0.is_empty());
-    // One more frame: snapshot voxel and meshing tasks are in flight.
+    // One more frame: meshing tasks are in flight.
     first.step(&mut app);
     assert!(!app.world().resource::<WorldReady>().0, "left before the world was ready");
 

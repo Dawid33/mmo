@@ -1,4 +1,4 @@
-//! The world store as the game's [`game::StoredTerrain`]: LOD builds and halo
+//! The world store as the game's [`game::StoredTerrain`]: halo
 //! seeds of regions that have not run in this process read their saved
 //! terrain through it.
 

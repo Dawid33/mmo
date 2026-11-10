@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use crossbeam::channel::{unbounded, Receiver};
 use game::history::{EmbarkRefusal, History, SiteId};
 use game::{
-    Claim, ClientId, ClientPacket, CoordMsg, EmbarkRequest, HostMsg, InlineLodBuilder, InlineSpawner, LodBuilder,
+    Claim, ClientId, ClientPacket, CoordMsg, EmbarkRequest, HostMsg, InlineSpawner,
     PlayerId, RegionCoords, RegionOutput, RegionSpawner, RequestId, ServerEvent, ServerPacket, WorldLink, WorldManager, WorldMap,
     WorldReply, WorldRequest,
 };
@@ -75,16 +75,16 @@ fn land_map() -> WorldMap {
     WorldMap { origin: RegionCoords::new(0, 0), width: 48, height: 48, tiles, rock_names: vec![], region_types: vec![] }
 }
 
-fn flat_floor(_rc: RegionCoords) -> Vec<(game::ColumnCoords, game::Column)> {
-    let air = game::Block::new(game::BlockId::AIR);
-    let mut out = Vec::new();
-    for x in 0..game::REGION_CHUNKS {
-        for z in 0..game::REGION_CHUNKS {
-            let sub = game::SubChunk::Dense(Box::new(game::Chunk::flat_floor(game::BLOCK_VOXELS as u32)));
-            out.push((game::ColumnCoords::new(x, z), game::Column::new(0, air, air, vec![sub])));
-        }
-    }
-    out
+/// Flat stud ground under every chunk column of every region: ground without worldgen.
+fn stud_flat_seed(_rc: RegionCoords) -> game::StudRegionSeed {
+    let soil = game::StudProfile { cover: game::MAT_GRASS, cover_plates: 1, soil: game::MAT_DIRT, soil_plates: 5 };
+    let n = game::REGION_CHUNKS;
+    let ground = (0..n)
+        .flat_map(|x| {
+            (0..n).map(move |z| (game::ColumnCoords::new(x, z), game::StudColumnGround::flat(30, soil, game::MAT_STONE, -2000)))
+        })
+        .collect();
+    game::StudRegionSeed { ground, features: Vec::new() }
 }
 
 /// A player-founded site's request: two members of the first site, into the first
@@ -127,6 +127,8 @@ impl Life {
     /// `boot`: this host process start's number in its request ids (unique per life, as
     /// `server::run`'s `host_boot`; a repeated one would be answered from the memo).
     fn start(store: &StoreHandle, map: &WorldMap, start: CoordinatorStart, boot: u64) -> Life {
+        // As `server::run`: the store is tied to stud terrain before any region loads.
+        server::world_file::bind_world_terrain(store).expect("a stud world");
         let claims = HostClaims::claim(store.clone(), game::Ownership::AllInOne, Some(map.extent()), store.super_region_regions())
             .unwrap();
         let mut regions = std::collections::BTreeMap::new();
@@ -135,19 +137,11 @@ impl Life {
         }
         let (out_send, packets) = unbounded();
         let (region_out_send, region_out) = unbounded();
-        let (lod_result_send, lod_result_recv) = unbounded();
-        let lod_builder: Box<dyn LodBuilder> = Box::new(InlineLodBuilder {
-            coarse: Box::new(|_key: &game::lod::LodKey| Vec::new()),
-            water: Box::new(game::lod::LodWater::dry),
-            out: lod_result_send,
-        });
         let mut manager = WorldManager::new(
-            InlineSpawner::with_portable(regions),
-            Box::new(flat_floor),
+            InlineSpawner::with_portable(regions).with_stud_genesis(std::sync::Arc::new(stud_flat_seed)),
             out_send,
             region_out_send,
-            lod_builder,
-            lod_result_recv,
+            Box::new(game::NullLodBuilder::default()),
         );
         manager.set_stored_regions(store.stored_regions().unwrap());
         manager.restore_in_flight(store.load_in_flight(claims.fence().in_flight_scope()).unwrap());
@@ -187,7 +181,7 @@ impl Life {
         for (to, p) in self.packets.try_iter() {
             if !matches!(
                 p,
-                ServerPacket::Region(..) | ServerPacket::GameEvent(_) | ServerPacket::SyncClock(..) | ServerPacket::LodData(..)
+                ServerPacket::Region(..) | ServerPacket::GameEvent(_) | ServerPacket::SyncClock(..)
             ) {
                 self.inbox.push((to, p));
             }

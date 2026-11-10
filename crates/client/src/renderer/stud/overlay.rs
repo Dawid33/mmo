@@ -1,9 +1,7 @@
-//! Designations shown on stud terrain. The voxel overlay tints block faces in
-//! the pulled-quad shader (`fortress_view.rs`), which stud meshes do not go
-//! through, so a stud home region gets one plain mesh instead: a translucent
-//! box per run of designated tiles, coloured by kind, rebuilt when the tile
-//! mirror changes. Cheap and correct rather than pretty (stud world plan P7a);
-//! the shader overlay on stud materials replaces it later.
+//! Designations shown on the terrain: the home region gets one plain mesh, a
+//! translucent box per run of designated tiles, coloured by kind, rebuilt when
+//! the tile mirror changes. Cheap and correct rather than pretty (stud world
+//! plan P7a); a shader overlay on the stud materials may replace it later.
 //!
 //! **The cut.** The boxes are not drawn with the terrain's fortress material:
 //! a box stands [`OVERLAY_INFLATE`] out of its tiles, so the top of a box on the

@@ -11,7 +11,7 @@ use std::path::PathBuf;
 
 use game::rapier3d::math::Vector;
 use game::{
-    Block, BlockId, ChiselData, Carried, Chunk, Client, ColliderSpec, ColumnGround, EntityBundle, EntityId,
+    BlockId, Carried, Client, ColliderSpec, EntityBundle, EntityId,
     EntityKind, IntentMsg, ItemId, ItemPile, ItemStack, PlayerRecord, Pose, RegionCoords, RegionMeta, SentIntent, SentReply,
     Target, WaterBody, WaterBodyId, WorldBlockPos, BodyState,
 };
@@ -80,34 +80,6 @@ pub(crate) fn eid(serial: u64) -> EntityId {
 
 pub(crate) fn pos(x: i64, y: i32, z: i64) -> WorldBlockPos {
     WorldBlockPos { x, y, z }
-}
-
-pub(crate) fn chunk() -> Chunk {
-    let mut c = Chunk::default();
-    c.set_block(1, 2, 3, Block::new(BlockId(1)));
-    c.set_block(1, 3, 3, Block::new(BlockId(2)));
-    c.set_block(5, 0, 7, Block::new(BlockId(3)));
-    c.set_block(6, 6, 6, Block::new(BlockId(2)));
-    c.set_block(6, 7, 6, Block::new(BlockId(1)));
-    c.set_block(0, 0, 0, Block { id: BlockId(4), data: [1, 2, 3] });
-    c.set_block(2, 2, 2, Block::new(BlockId(1)));
-    c.chisel.insert(game::BlockIndex(0), ChiselData::cuboid(BlockId(4), [0, 0, 0], [4, 8, 4]));
-    c
-}
-
-pub(crate) fn ground() -> ColumnGround {
-    let mut g = ColumnGround::plain(
-        (0..game::COLUMN_FOOTPRINT).map(|i| 40 + (i % 5) as i16).collect(),
-        -3,
-        BlockId(1),
-        BlockId(9),
-    );
-    g.strata = vec![(0, BlockId(1)), (-8, BlockId(2)), (-20, BlockId(3))];
-    for i in [0usize, 1, 2, 17] {
-        g.water_top[i] = g.surface[i] + 3;
-        g.water_body[i] = 7;
-    }
-    g
 }
 
 pub(crate) fn meta() -> RegionMeta {
@@ -248,8 +220,6 @@ fn golden_blobs_decode() {
     check("stud_chunk_pristine", FORMAT_STUD_CHUNK, &game::StudChunkRecord::Pristine);
     check("stud_ground", FORMAT_STUD_GROUND, &stud_ground());
     check("region_meta", FORMAT_REGION_META, &meta());
-    check("chunk", FORMAT_CHUNK, &chunk());
-    check("column_ground", FORMAT_COLUMN_GROUND, &ground());
     check("entity_bundle", FORMAT_ENTITY_BUNDLE, &bundle());
     // Format 1 (before `Carried::stud_body`) is still read: the golden recorded then.
     let v1 = std::fs::read(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/entity_bundle_v1.bin")).unwrap();
@@ -260,7 +230,6 @@ fn golden_blobs_decode() {
     check("player_record", FORMAT_PLAYER_RECORD, &player());
     check("intent_msg", FORMAT_INTENT_MSG, &intent());
     check("intent_msg_reply", FORMAT_INTENT_MSG, &IntentMsg::Reply(reply()));
-    check("region_ground", FORMAT_REGION_GROUND, &region_ground());
     check_world_map();
 }
 
@@ -278,22 +247,16 @@ fn check_world_map() {
     assert_eq!(decode_world_map(&golden).unwrap(), world_map(), "world_map: golden does not decode to the fixture value");
 }
 
-/// A region's ground recipes as `regions.ground` stores them.
-pub(crate) fn region_ground() -> Vec<(game::ColumnCoords, ColumnGround)> {
-    let mut other = ground();
-    other.surface[3] = -7;
-    vec![(game::ColumnCoords::new(0, 0), ground()), (game::ColumnCoords::new(1, 0), other)]
-}
-
 #[test]
 fn wrong_format_byte_is_corrupt() {
-    let blob = encode(FORMAT_CHUNK, &chunk());
-    let err = decode::<Chunk>(FORMAT_CHUNK + 1, &blob).unwrap_err();
-    assert!(matches!(&err, StoreError::Corrupt(m) if m.contains("Chunk")), "{err}");
+    use game::StudChunkRecord;
+    let blob = encode(FORMAT_STUD_CHUNK, &stud_chunk());
+    let err = decode::<StudChunkRecord>(FORMAT_STUD_CHUNK + 1, &blob).unwrap_err();
+    assert!(matches!(&err, StoreError::Corrupt(m) if m.contains("StudChunkRecord")), "{err}");
     let mut bad = blob.clone();
     bad.truncate(blob.len() / 2);
-    assert!(matches!(decode::<Chunk>(FORMAT_CHUNK, &bad), Err(StoreError::Corrupt(_))));
-    assert!(matches!(decode::<Chunk>(FORMAT_CHUNK, &[]), Err(StoreError::Corrupt(_))));
+    assert!(matches!(decode::<StudChunkRecord>(FORMAT_STUD_CHUNK, &bad), Err(StoreError::Corrupt(_))));
+    assert!(matches!(decode::<StudChunkRecord>(FORMAT_STUD_CHUNK, &[]), Err(StoreError::Corrupt(_))));
 }
 
 #[test]

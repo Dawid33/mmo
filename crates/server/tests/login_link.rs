@@ -11,9 +11,8 @@ use std::time::{Duration, Instant};
 use auth::{Signer, SigningKey};
 use crossbeam::channel::{unbounded, Receiver, Sender};
 use game::{
-    Block, BlockId, Chunk, ClientId, ClientPacket, Column, ColumnCoords, Credential, InlineLodBuilder, LodBuilder,
-    PlayerToken, RegionCoords, RegionOutput, ServerEvent, ServerPacket, SubChunk, WorldManager, LOGGED_IN_ELSEWHERE,
-    SPAWN_REGION,
+    ClientId, ClientPacket, Credential, PlayerToken, RegionCoords, RegionOutput, ServerEvent, ServerPacket,
+    WorldManager, LOGGED_IN_ELSEWHERE, SPAWN_REGION,
 };
 use login_api::{HostToLogin, JoinClaims, LoginToHost, HOST_AUDIENCE, JOIN_JWT_TTL_SECS};
 use server::auth_edge::{Authenticator, Clock, JwksCache, REFUSE_SUPERSEDED};
@@ -229,25 +228,16 @@ fn only_the_login_service_may_order() {
 
 // ---- With a world: real region threads -----------------------------------------------------
 
-fn floor_columns(_rc: RegionCoords) -> Vec<(ColumnCoords, Column)> {
-    // The chunk under the spawn column.
-    let edge = game::CHUNK_UNITS as f32;
-    let span = |a: f32, b: f32| (a / edge).floor() as usize..(b / edge).ceil() as usize;
-    span(128.0, 160.0)
+/// Flat stud ground under every chunk column of every region: ground without worldgen.
+fn stud_flat_seed(_rc: RegionCoords) -> game::StudRegionSeed {
+    let soil = game::StudProfile { cover: game::MAT_GRASS, cover_plates: 1, soil: game::MAT_DIRT, soil_plates: 5 };
+    let n = game::REGION_CHUNKS;
+    let ground = (0..n)
         .flat_map(|x| {
-            span(128.0, 160.0).map(move |z| {
-                (
-                    ColumnCoords::new(x, z),
-                    Column::new(
-                        0,
-                        Block::new(BlockId::AIR),
-                        Block::new(BlockId::AIR),
-                        vec![SubChunk::Dense(Box::new(Chunk::flat_floor(8)))],
-                    ),
-                )
-            })
+            (0..n).map(move |z| (game::ColumnCoords::new(x, z), game::StudColumnGround::flat(30, soil, game::MAT_STONE, -2000)))
         })
-        .collect()
+        .collect();
+    game::StudRegionSeed { ground, features: Vec::new() }
 }
 
 /// A manager over real region threads, fed by the host's link events.
@@ -262,19 +252,11 @@ impl World {
     fn new() -> World {
         let (out_send, packets) = unbounded();
         let (region_out_send, region_out) = unbounded();
-        let (lod_result_send, lod_result_recv) = unbounded();
-        let lod_builder: Box<dyn LodBuilder> = Box::new(InlineLodBuilder {
-            coarse: Box::new(|_| Vec::new()),
-            water: Box::new(game::lod::LodWater::dry),
-            out: lod_result_send,
-        });
         let manager = WorldManager::new(
-            ThreadRegionSpawner::default(),
-            Box::new(floor_columns),
+            ThreadRegionSpawner::default().with_genesis(Arc::new(stud_flat_seed)),
             out_send,
             region_out_send,
-            lod_builder,
-            lod_result_recv,
+            Box::new(game::NullLodBuilder::default()),
         );
         World { manager, region_out, packets, start: Instant::now() }
     }

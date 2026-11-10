@@ -1,15 +1,14 @@
 //! The stud terrain material: Bevy's `StandardMaterial` (vertex colours carry
 //! the brick colours) extended with the fortress view, so the commander
 //! camera's z-level cut, its cap and the darkening of the levels below apply to
-//! stud chunks, stud tops and falling stud bodies as they do to voxel terrain.
+//! stud chunks, stud tops and falling stud bodies.
 //!
-//! The extension reads the very [`FortressViewUniform`] the voxel per-chunk
-//! material binds (`voxel_material.rs`), copied in by [`sync_stud_materials`];
-//! its cut plane is already a TILE boundary of the home terrain
-//! (`commander::level::cut_y` goes through `TerrainKind`). What the voxel
-//! shaders bake as constants — the level height and the depth-darkening curve —
-//! travels in [`StudFortressParams`], built from the same Rust consts
-//! ([`fortress_params`]), so `assets/shaders/stud_terrain.wgsl` restates no number.
+//! The extension reads the [`FortressViewUniform`] (also bound by the water
+//! material), copied in by [`sync_stud_materials`]; its cut plane is a TILE
+//! boundary of the home terrain (`commander::level::cut_y` goes through
+//! `TerrainKind`). The level height and the depth-darkening curve travel in
+//! [`StudFortressParams`], built from the Rust consts ([`fortress_params`]), so
+//! `assets/shaders/stud_terrain.wgsl` restates no number.
 //!
 //! Three materials per session ([`StudMaterials`]):
 //! - **outside** — everything that never lies in the home region's rect: the
@@ -29,12 +28,10 @@
 //!   `mesh.rs`): alpha-blended, cut away above the plane, darkened below, no cap.
 //!
 //! All of them also paint the home region's boundary line and dim what lies outside
-//! it (`boundaries.rs`' [`BoundaryUniform`], the function copied from
-//! `voxel_pull.wgsl`), which the voxel per-chunk fallback never did.
+//! it (`boundaries.rs`' [`BoundaryUniform`]).
 //!
 //! Works on WebGL2: three small uniform buffers beside the standard material's.
-//! Not done here: the x-ray (`voxel_pull/xray.rs`) and the designation overlay
-//! texture (stud designations are boxes — `overlay.rs`).
+//! Designations are not drawn here: they are boxes (`overlay.rs`).
 
 use bevy::{
     mesh::MeshVertexBufferLayoutRef,
@@ -64,8 +61,11 @@ pub const STUD_MASK_CUTOFF: f32 = 0.5;
 /// between it and a face's 1.
 pub const STUD_SEAM_ALPHA_BELOW: f32 = (1.0 + STUD_EDGE_ALPHA) / 2.0;
 
-/// `assets/shaders/stud_terrain.wgsl`, compiled in (no hot reload; see
-/// `voxel_material::VOXEL_TEXTURE_SHADER` for why shaders are embedded).
+/// `assets/shaders/stud_terrain.wgsl`, compiled into the binary instead of
+/// loaded from `assets/` (no hot reload): its uniform layouts change with the
+/// Rust that fills them, and a browser serves a cached `.wgsl` across rebuilds
+/// (the dev server and the deployed file server send no cache headers).
+/// Embedded, the shader always matches its Rust side.
 pub const STUD_TERRAIN_SHADER: Handle<Shader> = bevy::asset::uuid_handle!("7c2e41b8-9d53-4a06-b1f7-3e8a5d0c6f92");
 
 /// Register [`STUD_TERRAIN_SHADER`] (before the material is used).
@@ -246,8 +246,7 @@ impl StudMaterials {
 }
 
 /// Copy the fortress view, the boundary overlay and the home terrain's params into the stud
-/// materials when they change (as `voxel_material::sync_chunk_material_cut`
-/// does for the voxel per-chunk material), and switch the opaque material's
+/// materials when they change, and switch the opaque material's
 /// alpha mode with the cut. A material made after the last change is brought
 /// in step here too (it is created with the default view).
 pub fn sync_stud_materials(
@@ -626,11 +625,10 @@ fn calculate_motion_vector(world_position: vec4<f32>, previous_world_position: v
     /// colours), and the prepass with no fragment output, with the shadow
     /// pass's depth emulation, and with the normal / motion-vector targets.
     /// (Against stubs of Bevy's PBR modules, like every shader test here: an
-    /// upstream signature change needs `just pull-smoke` on a real adapter.)
+    /// upstream signature change only shows on a real adapter.)
     #[test]
     fn stud_terrain_shader_is_valid_wgsl_in_every_variant() {
-        use crate::renderer::far_voxel::pipeline::tests::validate_shader;
-        use crate::renderer::voxel_pull::pipeline::tests::IMPORTS;
+        use crate::renderer::shader_test::{validate_shader, IMPORTS};
         use bevy::shader::ShaderDefVal;
         let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/shaders/stud_terrain.wgsl"))
             .expect("stud_terrain.wgsl");
@@ -663,15 +661,14 @@ fn calculate_motion_vector(world_position: vec4<f32>, previous_world_position: v
         assert!(source.contains("@binding(100) var<uniform> fortress: FortressView;"));
         assert!(source.contains("@binding(101) var<uniform> params: StudFortressParams;"));
         assert!(source.contains("@binding(102) var<uniform> boundaries: TerrainBoundaries;"));
-        // The boundary line is voxel_pull.wgsl's: same field use, same luma weights.
-        let pull = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/shaders/voxel_pull.wgsl")).expect("voxel_pull.wgsl");
+        // The boundary line's shape (`boundaries.rs` is the source of the fields).
         for line in [
             "let q = max(b.home_rect.xy - p, p - b.home_rect.zw);",
             "let sd = length(max(q, vec2<f32>(0.0))) + min(max(q.x, q.y), 0.0);",
             "let w = max(b.shape.x * unit_px, b.shape.y);",
             "let line = smoothstep(0.0, 1.0, sd_px) * (1.0 - smoothstep(w, w + 1.0, sd_px));",
         ] {
-            assert!(pull.contains(line) && source.contains(line), "boundary line drifted: `{line}`");
+            assert!(source.contains(line), "boundary line drifted: `{line}`");
         }
     }
 }

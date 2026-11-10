@@ -796,6 +796,119 @@ D1–D5 accepted as recommended ("make it so", 2026-11-09).
     8. `just world_file=procedural server` + `just client`; and once `just terrain=voxels
        world_file=procedural server` + `just client` to see the hatch still gives the voxel world.
     9. `just web` against a local server (WebGL2 path), if the web build is to stay.
+- **P10b voxel system deletion — IN PROGRESS (2026-11-10; nothing committed, nothing launched; the
+  P10a play checklist above was NOT run before the deletion started — the voxel code is in git at
+  `6251fa09`).** Staged leaf-first; refresh this entry at every stage boundary.
+  - **Stage 1 client — DONE.** The client only knows stud terrain (−35.7k lines): `renderer/meshing/`,
+    `far_voxel/`, `voxel_pull/` (x-ray with it), `render_bench*`, `bricks.rs`, `voxel_bodies.rs`,
+    `voxel_material.rs`, `block_textures.rs`, shaders `voxel_pull*.wgsl` / `far_voxel.wgsl` /
+    `voxel_texture.wgsl`, examples `mesh_bench` / `pull_smoke`, tests `mesh_parity` /
+    `near_gpu_missing_hzb`, the voxel halves of `bridge.rs`, `lod_rings.rs`, `water/`,
+    `fortress_view.rs` (overlay texture), `slice_plane`, `commander/tiles.rs` / `height.rs`,
+    `block_target.rs`, `config.rs` (backend enums), `compute.rs` job kinds 1–7; env vars
+    `VOXEL_NEAR_RENDER`, `VOXEL_FAR_RENDER`, `VOXEL_OCCLUSION`, `VOXEL_FACE_CULL`,
+    `VOXEL_NEAR_DETAIL_M`, `VOXEL_PULL_DEBUG`, `RENDER_BENCH*`; recipes `pull-smoke`, `render-bench`.
+    `LocalServer` / `SimHarness` / `BevyInputHarness` are flat stud worlds (`new_with_genesis`,
+    `lightweight_test_genesis`). Gates then: `just smoke`, `just web-check` ok; client `--lib` 496
+    pass / 4 fail (the two known ones + `instance::…desired_window_adventurer_neighbourhood_follows_home`
+    and `atmosphere::…shadows_reach_past_the_farthest_commander_zoom`, both in files without a
+    functional diff — check against HEAD); `--test it` 14 + 10 ignored pass.
+    Lost coverage: `lod_rings::plain_removal_waits_for_a_fully_meshed_near_region` (asserted behaviour
+    the code never had), mesh parity against `block-mesh`, the GPU `pull_smoke` probe (no automated
+    real-adapter run of stud terrain exists).
+    Still in the client until the game stage: ignore arms for the voxel update kinds / `LodData`,
+    `TerrainKind` parameters of pure conversions, `BLOCK_VOXELS` as the 1 m constant,
+    `TileSource::block` stubs, `use_stud_lod_table`.
+  - **Stage 1 server — DONE.** `VOXEL_TERRAIN` / `TERRAIN_ENV` / `terrain_from` / `DEFAULT_TERRAIN` /
+    `WorldSource::StudsProcedural` / every `STUDS_SUPPORTED` check / the voxel `ThreadLodBuilder` /
+    `SharedRegionGenerator` / the voxel halo and region generators are gone; the justfile `terrain=`
+    dial too. `WorldSource` = `Procedural` (stud noise world) | `Studs` (toy preset) | `Store`;
+    `studs-procedural` is still accepted as an ALIAS of `procedural` (remove once
+    `client/src/debug_launch.rs` / `local_host.rs` stop passing it). `bind_world_terrain(store)`
+    always binds studs and refuses a voxel world with the server's own re-forge message
+    (`stud_world::a_voxel_world_is_refused`); a stray `VOXEL_TERRAIN` is silently ignored, and a
+    `chunk_blocks=2` server no longer refuses to start (both go away with the dial in the game
+    stage). **A parked blob that does not decode is now a failed load** on the threaded spawner
+    (`LoadFailed`, retried — the retry reads the store's last cut; genesis never runs over it:
+    `stud_world::corrupt_parked_region_fails_its_load_and_is_never_regenerated`). Before, it was
+    regenerated (voxel code since before the store) and the next cut would have saved fresh ground
+    over the stored region. `game::RegionSeed::into_region_with` (inline spawner: tests, the
+    in-page server; no store behind it) still regenerates — rework it in the game stage. All server tests stand on flat stud ground.
+    Gates: server `--lib` 43, `--test it -- --include-ignored` 33, `threaded_world` 11, `roles` 1
+    (+7 skipped, no Postgres), `just smoke` — all pass.
+    Lost coverage: real-thread regions from manager-supplied `RegionSeed::Fresh`; generation from an
+    explicit (non-global) forged world in `restart_restores_world` / `damaged_tile_run`; voxel LOD of
+    stored regions.
+    Still in the server until the game stage: the empty column generator and unused
+    `Receiver<LodResult>` passed to `WorldManager::new`, `into_region_with(&|_| Vec::new())`, the
+    empty `set_halo_generator`, `ThreadStudLodBuilder::submit` no-op, `gen n/sum/max` counters (0).
+    Stale text elsewhere: `world-store/src/lib.rs` `OtherTerrain` message names `VOXEL_TERRAIN`.
+  - **Stage 1 game tests — DONE** (no `game/src` change). Every file in `crates/game/tests` stands on
+    stud ground; shared harness in `tests/common/` (`stud_flat`, `floor_seed`, `region_of`,
+    `stud_manager`, `stud_spawner`, `Rig::with_floor`, `seam_translate::uniform_floor`, water boxes).
+    Deleted with a stud twin: `chunk_blocks`, `ground`, `region_from_chunks`, `region_from_columns`,
+    `collider_genesis`, `slope_walk`, `underground_edit`, `lod_streaming` (+ `support/lod_reference.rs`),
+    `terrain_snapshot`, `voxel_body` (own target; `test-threads` updated), `block_edit`,
+    `spawn_surface`. Gates: `--test it -- --include-ignored` 833 pass (422 s; `save_cut::` alone
+    ~340 s now), `--test it` 701 + 132 ignored, `just test-threads` 93 + 11, `just determinism-wasm`,
+    `hash_mode` 8, `state_hash_check` 1.
+    Goldens: all eight `physics_goldens` scenes stood on voxel terrain → rebuilt on stud ground with
+    the stud body and re-recorded (three renamed: `walk_brick_step`, `jump_up_one_tile`,
+    `terrace_uphill_1_plate`; `PHYSICS_GOLDENS_RECORD=1 just test-one game "--test it physics_goldens::"`);
+    `wasm_determinism` six constants re-recorded for the new stud scenes
+    (`WASM_SCENE_HASH_PRINT=1 just test-one game "--test wasm_determinism -- --nocapture"`).
+    Tolerances loosened, measured: `JITTER_VEL_TOL_BLOCKS_PER_S` 0.006 (new; bodies on stud caps
+    keep a residual vertical velocity), `SLIDE_POSE_TOL_BLOCKS` 0.078 → 0.103.
+    Lost coverage: `orders::failed_deconstruct_keeps_constructed_flag`; stud-body buoyancy and a
+    replayed stud-body arrival keeping one copy of its drops (only indirectly, via the jittery
+    `stud_tree_*` replicas); clicks ignored while the inventory is open / a click at the sky;
+    `chop::player_mining_a_tree_leaf_breaks_it_alone`; the tree-across-a-seam case covers the
+    north seam only (the voxel test ran four placements).
+  - **Stage 2 world-store — DONE.** Migration `0005_drop_voxel_terrain` (sqlite + pg):
+    `DROP TABLE chunks; ALTER TABLE regions DROP COLUMN ground;`. **An old voxel world is refused at
+    OPEN, before any migration, byte-for-byte untouched** (`open.rs` `refuse_voxel_world`: chunk rows,
+    or `world.terrain = 0` at schema 4, or saved regions at schema 1–3 →
+    `StoreError::OtherTerrain`, writer and read-only alike; `tests/voxel_refusal.rs`). So the
+    server's `bind_world_terrain` hint is now reachable only artificially; this build cannot
+    `worldctl export` an old voxel world (an older build must). `STORE_FORMAT_VERSION` stays 1: an
+    older build opening a migrated store fails in sqlx (`VersionMissing(5)`) before it reads the
+    version. Codecs `FORMAT_CHUNK` / `FORMAT_COLUMN_GROUND` / `FORMAT_REGION_GROUND` and fixtures
+    removed; a save carrying voxel terrain is `Unsupported` inside the fenced transaction (goes
+    when game drops the fields). Gates: world-store `-- --include-ignored` 57 pass (50 Postgres
+    bodies skipped), server `--test it` 33, `threaded_world` 11, smoke ok.
+    **Postgres: compiled only** — run `just test-pg` / `just test-r2` before shipping. The pg
+    check-then-migrate is not one transaction.
+  - **Stage 2 worldgen — DONE** (−6.3k lines). `generate_region` / `generate_columns` /
+    `columns_from_patch` / `coarse_tile` / `coarse_water` / tree rasteriser / `WorldgenCache` / the
+    `worldgen` bin are gone; `stud_gen` is the only generator (`generate_stud_region_forged`,
+    `stud_lod_tile_forged` added). `WORLD_MAP_VERSION` unchanged (`build_world_map` output is
+    identical). Tools deleted with recipes: `worldgen`, `worldgen-bench`, `collider-bench`,
+    `quantize-probe`, `brick-census`, `tree-view`, `bench-region`, `worldgen-cache-clear`; ported
+    (compiled, never run): `cross-section`, `bench-column`, `genesis_profile`,
+    `client_region_load_cost`. `scene_hash_golden` (`crates/worldgen/tests/scene_hash_golden.rs`)
+    rebuilt on `generate_stud_region`, `0x6D9E_67C7`; re-record with `SCENE_HASH_PRINT=1 just
+    test-one worldgen "--test it -- --include-ignored --nocapture scene_hash_golden"`.
+    `forged_sampling_is_bit_exact` has two new guard CRCs (the old one also hashed voxel regions).
+    Gates: `--lib` 182, `--test it -- --include-ignored` 65, `forged_world` 36, smoke ok.
+    Lost coverage: frozen lake / sea ice (never in stud gen — `ColumnClimate::ice_blocks()` is
+    kept, unused), cliffs closed at genesis on a forged cliff world, tree window-independence,
+    step-edge seam agreement on real terrain, the halo memory probe.
+    Found, not fixed: covers are decided on the 1 m surface but water on the plate surface — a
+    waterline column under 1–2 plates of water keeps its land cover (39 "snow" sea floors in the
+    glacier-coast region).
+  - **Stud sim behaviour found by the test port — NOT fixed, own pass:** (1) a swimmer climbs a
+    ledge of 0–2 plates but hangs on a 3-plate one, `vel_y` falling without bound; (2) slides over
+    stud caps are chaotic (seam placement rests 0.28 m from the centred run when launched at
+    12 m/s); (3) stepping off a bank plunges to within 0.11 m of a 4-tile-deep bed; (4) a pristine
+    surface tile yields 2 dirt (grass brick + dirt); (5) an instant carve / `DevBreakBlock` of a
+    chest tile always spills the chest item; (6) dev-complete digs drop on studs; (7)
+    `Order::DevDropBody` reads its level in metres, not tiles.
+  - **Not started:** game `src` voxel deletion (`Chunk`, chisel, slope, volume, voxel ground / halo /
+    lod / edit / voxel_body, update kinds, packets, `WorldManager::new` voxel generator + LOD
+    channel, `RegionGenerator`, `RegionSeed` columns — the inline spawner must fail a corrupt parked
+    blob too —, `set_halo_generator`, `TerrainSnapshot` / `PortableRegion` voxel fields, `TileSource`
+    voxel methods, `TerrainKind` / `BodyScale` collapse, `chunk_blocks` dial), then goldens,
+    `CLAUDE.md` / `TODO.md` / justfile clean-up, the wide gate.
 - Goldens re-recorded on purpose (16-block values): once for P6b (above); `wasm_determinism` and `scene_hash_golden` once
   more for P4 (`GameData.stud_halo`, `stud_halo_ground`; `physics_goldens` did not move); before
   that `wasm_determinism` twice (`BodyScale` fields,

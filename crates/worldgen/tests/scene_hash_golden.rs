@@ -1,9 +1,10 @@
-//! Same-engine regression golden: a canonical scene — the generated region
-//! (0, 0), one player, one slime, 60 ticks of scripted input — must end in
-//! exactly [`SCENE_HASH`] (`game::state_hash`, whose Full-mode crc32 is the
-//! default). Any change to worldgen, the sim or the physics engine that moves
-//! a single bit of state shows up here; behaviour across an engine switch is
-//! judged by `crates/game/tests/physics_goldens.rs` instead.
+//! Same-engine regression golden: a canonical scene — the generated stud
+//! region (0, 0) of the procedural world (ground recipes and trees), one
+//! player, one slime, 60 ticks of scripted input — must end in exactly
+//! [`SCENE_HASH`] (`game::state_hash`, whose Full-mode crc32 is the default).
+//! Any change to worldgen, the sim or the physics engine that moves a single
+//! bit of state shows up here; behaviour across an engine switch is judged by
+//! `crates/game/tests/physics_goldens.rs` instead.
 //!
 //! The constant changes only in a commit whose message says why. Regenerate:
 //!
@@ -12,99 +13,32 @@
 //! ```
 //!
 //! It lives in `worldgen` because `game` can't depend on it (worldgen
-//! depends on game). It holds for the default build dials only (both pinned
-//! chunk sizes, 2 and 16): another region size, cell mode, spawn island size or a forged world file is a
+//! depends on game). It holds for the default build dials only: another
+//! region size, chunk size, spawn island size or a forged world file is a
 //! different world, and the test says so and skips.
 // The game crate's movement rig: every read of physics-engine types.
 #[path = "../../game/tests/common/mod.rs"]
 mod common;
 
-use common::{entity_body, spawn_slime};
+use common::{entity_body, region_of, spawn_slime};
 use game::{state_hash, GameEventKind, InputEvent, Key, Region, RegionCoords};
 
-/// `state_hash` after the scene's last tick. Re-recorded for the rapier 0.36
-/// / parry 0.31 switch (with the continuous-surfaces tie-break, `dt` =
-/// `TICK_DT` and the kinematic `can_sleep(false)` fix), then for the lazy
-/// underground: columns carry `ColumnGround` recipes, keep their stone band
-/// bottoms, fill the band's bottom sub-chunk, and reach down cliff faces;
-/// then (already stale at 0xB42B_F7B3 after an earlier worldgen change) for
-/// the `ChunkBlocks` uniform/dense grid, `u16` `BlockIndex` and boxed
-/// `ColumnGround` footprints — hashed layout only, geometry unchanged.
-/// Then for the `Ecs` `animator` / `bones` component slots (sim-owned
-/// animation, `game::anim`), and again for players being rigged dwarves.
-/// Then for cell mode's removal (16 only; 2 still needs a re-record).
-/// Then for the `Ecs` `voxel_body` component slot (`game::voxel_body`;
-/// hashed layout only, no body in the scene) — both sizes.
-/// Then for `Client.mode` (`game::adventure`; 16 only).
-/// Then for the `Ecs` `walker` component slot (`game::adventure`; hashed
-/// layout only, nobody walks in the scene; 16 only).
-/// Then for `GameData.item_piles` / `pile_expiry` (`game::item_piles`;
-/// hashed layout only, no pile in the scene; 16 only).
-/// Then for `GameData.containers` + `Client.open_container`
-/// (`game::containers`), with the starting kit now holding 2 chests (the
-/// manifest has a `chest`; 16 only).
-/// Then for whole-block terrain with slopes on one-block rises instead of
-/// half blocks (`worldgen::slopes`; both sizes).
-/// Then for `GameData.region` / `next_entity_serial` / `id_index` and the
-/// `Ecs` `id` slot (stable `EntityId`s) and `GameData.halo` (the terrain
-/// halo, empty in this lone region) — hashed layout only; 16 only.
-/// Then for the entity halo (`ghosts` -> `halo_entities`, new
-/// `GameData.halo_sent`; empty here) — hashed layout only; 16 only.
-/// Then for `GameData.intents` / `intent_replies` / `intent_inbox` and
-/// `GameData.halo_ground` (empty here) — hashed layout only; 16 only.
-/// Then for the scene installing the real block props itself (it raced
-/// other tests of the `it` binary for them: with the default props the
-/// starting kit had no chests); 16 only.
-/// Then for item piles keyed by `WorldBlockPos` and the new
-/// `GameData.halo_piles` / `pile_takes` (Task 6.3; empty here) — hashed
-/// layout only; 16 only.
-/// Then for chests keyed by `WorldBlockPos`, the new
-/// `GameData.halo_containers` and `Client.open_container` as a
-/// `WorldBlockPos` (Task 6.4; no chest placed here) — hashed layout only;
-/// 16 only.
-/// Then for `Motion.immersion` / `Motion.blocked_horizontally` (water plan
-/// Task 3) — hashed layout only: with both fields left out of the hash the
-/// scene still ends in the previous 0x127F_E343; 16 only.
-/// Then for `ColumnGround.water_top` / `water_body` and
-/// `GameData.water_bodies` (water plan Task 5, recipe water) — hashed
-/// layout only: with the three left out of the hash the scene still ends in
-/// the previous 0xB599_589B; 16 only.
-/// Then (2026-11-09) for the stud-chunk layout (`Ecs.stud`, `GameData.stud_index`,
-/// `body_scale`) and `BodyScale.height_m` / `radius_m` — the value had gone stale at
-/// 0xD130_CAC4 when the stud layout landed, so this step was NOT separately checked to
-/// be layout-only; `physics_goldens` (trajectories) did not move. 16 only.
-/// Then for `GameData.stud_ground` (empty here) — hashed layout only, previous
-/// 0x2097_CF72; 16 only.
-/// Then (stud world P4) for `GameData.stud_halo` / `stud_halo_ground` (empty here) —
-/// hashed layout only, previous 0x00C6_4B11; `physics_goldens` did not move. 16 only.
-/// Then (stud world P6b) for the `Ecs` `stud_body` component slot (empty here) — hashed
-/// layout only, previous 0x8AF3_6A7C; `physics_goldens` did not move. 16 only.
-/// Pinned per sim-chunk size (`game::CHUNK_BLOCKS`): the same world splits
-/// into other chunk entities, bodies and colliders at 2 and 16 blocks.
+/// `state_hash` after the scene's last tick.
+///
+/// Recorded 2026-11-10 (stud world P10b): the scene was rebuilt on stud ground
+/// (`generate_stud_region` -> `Region::seed_stud_world`) when worldgen's voxel
+/// generator was deleted, so this value has no predecessor to compare with —
+/// the voxel scene's history (last value 0xD0F2_E7D3) is in git up to
+/// `6251fa09`. `physics_goldens` judges trajectories.
 const SCENE_HASH: u32 = match game::CHUNK_BLOCKS {
-    2 => 0x1EA6_B476,
-    16 => 0xD0F2_E7D3,
+    16 => 0x6D9E_67C7,
     _ => 0,
 };
 /// Ticks of scripted input.
 const SCENE_TICKS: usize = 60;
 
-fn mats() -> worldgen::material::Materials {
-    worldgen::material::Materials {
-        stone: game::BlockId(2),
-        dirt: game::BlockId(1),
-        grass: game::BlockId(3),
-        sand: game::BlockId(4),
-        water: game::BlockId(5),
-        bedrock: game::BlockId(6),
-        rocks: [7, 8, 9, 10, 11, 12].map(game::BlockId),
-        trees: worldgen::material::TreeBlocks::NONE,
-        biome: worldgen::material::BiomeBlocks::NONE,
-    }
-}
-
 fn default_dials() -> bool {
-    matches!(game::CHUNK_BLOCKS, 2 | 16)
+    game::CHUNK_BLOCKS == 16
         && game::REGION_BLOCKS == 64
         && option_env!("VOXEL_ISLAND_CELLS").is_none_or(|v| v.is_empty() || v == "0" || v == "16")
         && std::env::var_os(worldgen::forged::WORLD_FILE_ENV).is_none_or(|v| v.is_empty())
@@ -141,7 +75,7 @@ fn canonical_scene_state_hash() {
         return;
     }
     let rc = RegionCoords::new(0, 0);
-    let mut region = Region::from_columns(rc, worldgen::generate_region(rc, worldgen::WORLD_SEED, mats()));
+    let mut region = region_of(rc, worldgen::stud_gen::generate_stud_region(rc, worldgen::WORLD_SEED));
     let apply = |region: &mut Region, ev| {
         region.handle_event(ev).unwrap();
         region.forget_last_event();
@@ -154,8 +88,8 @@ fn canonical_scene_state_hash() {
     let spawn = player(&region);
     // One slime, a few blocks off the player's spawn, dropped onto the surface.
     let (x, z) = (spawn[0] + 48.0, spawn[1] + 48.0);
-    let surface = region.data().surface_voxel_y(x as i32, z as i32).expect("land next to the spawn");
-    spawn_slime(&mut region, [x, surface as f32 + 24.0, z], 1, 0.0, 0);
+    let surface = region.data().stud_surface_y(x, z).expect("ground next to the spawn");
+    spawn_slime(&mut region, [x, surface + 24.0, z], 1, 0.0, 0);
     let start = player(&region);
     let events = script();
     assert_eq!(events.iter().filter(|e| matches!(e, GameEventKind::Tick)).count(), SCENE_TICKS);

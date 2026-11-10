@@ -69,7 +69,7 @@ pub fn hide_cut_entities(
     body_scale: Option<Res<crate::renderer::stud::ClientBodyScale>>,
     mut entities: Query<(Entity, &SimEntity, &SimKind, &Transform, &mut Visibility, Option<&mut CutHidden>)>,
 ) {
-    let scale = body_scale.map_or(BodyScale::VOXEL, |s| s.0);
+    let scale = body_scale.map_or(BodyScale::STUD, |s| s.0);
     let cut = camera_cut(&level, &tiles);
     let home = tiles.region().map(home_rect);
     for (e, sim, kind, tf, mut vis, held) in &mut entities {
@@ -203,7 +203,7 @@ mod tests {
     fn spawn(app: &mut App, feet_y: f32, vis: Visibility) -> Entity {
         let kind = EntityKind::Slime { size: 1 };
         let o = home().world_offset();
-        let local = Vec3::new(100.0, feet_y - o[1] + feet_offset(kind, BodyScale::VOXEL), 100.0);
+        let local = Vec3::new(100.0, feet_y - o[1] + feet_offset(kind, BodyScale::STUD), 100.0);
         app.world_mut()
             .spawn((
                 SimEntity { region: home(), key: EntityKey::default() },
@@ -225,7 +225,7 @@ mod tests {
     #[test]
     fn visibility_follows_the_cut_and_restores() {
         let mut app = app(10);
-        let cut = super::super::level::cut_plane_world_y(game::TerrainKind::Voxel, 10, home());
+        let cut = super::super::level::cut_plane_world_y(WorkingLevel::default().terrain, 10, home());
         let e = spawn(&mut app, cut, Visibility::Inherited);
         app.update();
         assert_eq!(vis(&app, e), Visibility::Hidden);
@@ -249,7 +249,7 @@ mod tests {
     #[test]
     fn hidden_by_another_system_stays_hidden() {
         let mut app = app(10);
-        let cut = super::super::level::cut_plane_world_y(game::TerrainKind::Voxel, 10, home());
+        let cut = super::super::level::cut_plane_world_y(WorkingLevel::default().terrain, 10, home());
         // Hidden before the cut touched it.
         let before = spawn(&mut app, cut, Visibility::Hidden);
         // Hidden by another system while the cut held it.

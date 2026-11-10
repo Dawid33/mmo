@@ -143,7 +143,7 @@ fn click_out_of_range_is_noop() {
 
 #[test]
 fn ui_click_event_undoes() {
-    let mut region = Region::from_chunks(RegionCoords::new(0, 0), Vec::new());
+    let mut region = crate::common::empty_region(RegionCoords::new(0, 0));
     region.handle_event(GameEventKind::CreateClient(0)).unwrap();
     region.with_data(|d| {
         let c = d.clients.get_mut(&0).unwrap();
@@ -162,7 +162,7 @@ fn ui_click_event_undoes() {
 /// A region with client 0 (Fortress, no body needed) holding `slot0` in slot
 /// 0; setup forgotten.
 fn one_client(slot0: Option<ItemStack>) -> Region {
-    let mut region = Region::from_chunks(RegionCoords::new(0, 0), Vec::new());
+    let mut region = crate::common::empty_region(RegionCoords::new(0, 0));
     region.handle_event(GameEventKind::CreateClient(0)).unwrap();
     region.with_data(|d| {
         let c = d.clients.get_mut(&0).unwrap();

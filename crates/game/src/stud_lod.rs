@@ -1,8 +1,8 @@
 //! Far terrain of stud worlds: one coarse height field per [`LodKey`].
 //!
-//! A stud world has no voxel LOD grids. Its far field is a [`StudLodTile`]: the ground
+//! The far field is a [`StudLodTile`] per key: the ground
 //! recipe point-sampled on the key's **cell-corner lattice** — `side + 1` samples per
-//! edge, `side = LodWater::side_for(key)` cells of `key.factor` sim units each. A sample
+//! edge, `side = StudLodTile::side_for(key)` cells of `key.factor` sim units each. A sample
 //! is the recipe of the stud column whose min corner is the lattice point: its top
 //! (**plates**, the recipe's frame), the material showing there, and the water standing
 //! over it. Tiles of one factor share their border samples, and every coarser lattice
@@ -14,7 +14,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::lod::{LodKey, LodWater, LOD_FACTORS};
+use crate::lod::{cells_per_region, LodKey, LOD_FACTORS};
 use crate::stud::STUD_UNITS;
 
 /// The finest stud LOD cell: one stud column (a factor is a cell edge in sim units).
@@ -22,10 +22,11 @@ pub const STUD_LOD_MIN_FACTOR: u32 = STUD_UNITS as u32;
 /// Most cells per tile edge the server builds: a finer key is refused (a tile is one
 /// mesh on the client, and `side + 1` squared samples on the wire).
 pub const STUD_LOD_MAX_SIDE: u16 = 256;
-/// How much coarser a stud ring's cells are than the voxel ring table's at the same
-/// distance ([`stud_ring_table`]). The voxel table spends its pixel budget on 8-byte
-/// quad records in one GPU arena; a stud tile is an ordinary vertex mesh, ~16x the
-/// bytes per cell, so it takes 4x the cell edge (1/16 of the cells).
+/// How much coarser a stud ring's cells are than the base ring table's
+/// (`lod::LOD_RING_TABLE`, cut to a pixel budget per cell) at the same distance
+/// ([`stud_ring_table`]). That budget was sized for 8-byte quad records in one GPU
+/// arena; a stud tile is an ordinary vertex mesh, ~16x the bytes per cell, so it
+/// takes 4x the cell edge (1/16 of the cells).
 pub const STUD_LOD_COARSEN: u32 = 4;
 /// `water` of a sample with no water standing over its ground.
 pub const STUD_LOD_NO_WATER: i16 = i16::MIN;
@@ -93,9 +94,10 @@ fn expand_runs<T: Copy>(runs: &[(u16, T)], count: usize) -> Option<Vec<T>> {
 }
 
 impl StudLodTile {
-    /// Cells per edge of `key`'s tile: the key's LOD columns ([`LodWater::side_for`]).
+    /// Cells per edge of `key`'s tile: `region_span() × cells_per_region(factor)`.
     pub fn side_for(key: &LodKey) -> u16 {
-        LodWater::side_for(key)
+        let side = key.region_span() as usize * cells_per_region(key.factor);
+        u16::try_from(side).expect("a LOD key's cells per edge fit a u16")
     }
 
     /// Samples of a tile of `side` cells.
@@ -166,11 +168,11 @@ pub fn stud_lod_supported(key: &LodKey) -> bool {
 /// The coarsest streamable factor.
 const MAX_FACTOR: u32 = LOD_FACTORS[LOD_FACTORS.len() - 1];
 
-/// The ring table a stud world subscribes with, from the voxel one for the same view
+/// The ring table a client subscribes with, from the base one for the same view
 /// (`LOD_RING_TABLE`, a `VOXEL_LOD_RINGS` / view-distance table): the same bounds with
 /// every factor [`STUD_LOD_COARSEN`] times coarser, raised until its tiles are
 /// [`stud_lod_supported`] and capped at the coarsest factor; neighbouring rings that
-/// end up equal are one ring. The reach is the voxel table's.
+/// end up equal are one ring. The reach is the base table's.
 pub fn stud_ring_table(table: &[(i32, u32)]) -> Vec<(i32, u32)> {
     let mut out: Vec<(i32, u32)> = Vec::new();
     for &(bound, factor) in table {
@@ -255,15 +257,15 @@ mod tests {
 
     #[test]
     fn the_stud_ring_table_keeps_the_reach_with_coarser_supported_tiles() {
-        let voxel = crate::lod::LOD_RING_TABLE;
-        let stud = stud_ring_table(voxel);
-        assert_eq!(stud.last().map(|r| r.0), voxel.last().map(|r| r.0), "same reach");
+        let base = crate::lod::LOD_RING_TABLE;
+        let stud = stud_ring_table(base);
+        assert_eq!(stud.last().map(|r| r.0), base.last().map(|r| r.0), "same reach");
         assert!(stud.windows(2).all(|w| w[0].0 < w[1].0 && w[0].1 < w[1].1), "bounds and factors ascend: {stud:?}");
         for &(_, f) in &stud {
             assert!(stud_lod_supported(&LodKey { factor: f, coords: [0, 0] }), "factor {f}");
         }
-        // Every voxel ring is covered by a ring at least as coarse as the rule asks.
-        for &(bound, f) in voxel {
+        // Every base ring is covered by a ring at least as coarse as the rule asks.
+        for &(bound, f) in base {
             let ring = stud.iter().find(|r| bound <= r.0).unwrap();
             assert!(ring.1 >= (f * STUD_LOD_COARSEN).min(MAX_FACTOR));
         }

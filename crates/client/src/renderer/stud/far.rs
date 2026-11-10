@@ -14,11 +14,11 @@
 //!
 //! Water is the recipe's: a flat blended sheet over every cell with a wet
 //! corner, at the highest of its corners' levels (the ground rises through it
-//! at the shore), in the voxel water pass's material.
+//! at the shore), in the water material (`water::material`).
 //!
 //! Meshes are built in a compute job ([`StudLodMeshJob`]) and hang under the
 //! key's root, which `lod_rings` owns (subscription, re-receipt, retirement and
-//! the hand-over to the near window are the voxel rings').
+//! the hand-over to the near window are `lod_rings`').
 
 use bevy::light::NotShadowCaster;
 use bevy::prelude::*;

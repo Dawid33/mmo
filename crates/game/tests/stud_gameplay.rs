@@ -1,6 +1,5 @@
 //! Gameplay ported onto stud terrain (stud world plan P6b): item piles, drops,
-//! chests, tree felling, stud bodies and water — the stud twins of `item_piles`,
-//! `containers`, `tree_fall` / `voxel_body` and `water`, each with the rollback bar.
+//! chests, tree felling, stud bodies and water, each with the rollback bar.
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::common;

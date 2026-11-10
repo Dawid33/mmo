@@ -10,8 +10,8 @@ use game::history::persist;
 use game::history::rules::EMBARK_PLAYER_PARTY_MAX;
 use game::history::*;
 use game::{
-    Biome, ClientId, ClientPacket, EmbarkRequest, GameEvent, GameEventKind, InlineLodBuilder, InlineSpawner,
-    LodBuilder, PersonSpawn, PlayMode, RegionCoords, RegionOutput, ServerEvent, ServerPacket, SiteMarker, SpawnAt, WorldManager,
+    Biome, ClientId, ClientPacket, EmbarkRequest, GameEvent, GameEventKind, InlineSpawner,
+    PersonSpawn, PlayMode, RegionCoords, RegionOutput, ServerEvent, ServerPacket, SiteMarker, SpawnAt, WorldManager,
     WorldMap, SPAWN_REGION, TICK_RATE, UNLOAD_GRACE_MS,
 };
 
@@ -76,19 +76,10 @@ impl World {
     fn over(history: History, spawner: InlineSpawner) -> Self {
         let (out_send, packets) = unbounded();
         let (region_out_send, region_out) = unbounded();
-        let (lod_result_send, lod_result_recv) = unbounded();
-        let lod_builder: Box<dyn LodBuilder> = Box::new(InlineLodBuilder {
-            coarse: Box::new(|_key: &game::lod::LodKey| Vec::new()),
-            water: Box::new(game::lod::LodWater::dry),
-            out: lod_result_send,
-        });
-        let mut manager = WorldManager::new(
-            spawner,
-            Box::new(floored_region),
+        let mut manager = crate::common::stud_manager(
+            spawner.with_stud_genesis(std::sync::Arc::new(floored_region)),
             out_send,
             region_out_send,
-            lod_builder,
-            lod_result_recv,
         );
         manager.set_world_map(strip());
         install_history(&mut manager, history, 0);
@@ -105,7 +96,10 @@ impl World {
         for (to, p) in self.packets.try_iter() {
             if !matches!(
                 p,
-                ServerPacket::Region(..) | ServerPacket::GameEvent(_) | ServerPacket::SyncClock(..) | ServerPacket::LodData(..)
+                ServerPacket::Region(..)
+                    | ServerPacket::GameEvent(_)
+                    | ServerPacket::SyncClock(..)
+                    | ServerPacket::StudLodData(..)
             ) {
                 self.inbox.push((to, p));
             }
@@ -173,7 +167,7 @@ impl World {
                 let d = region.data();
                 let handle = d.player_entites.get(&c).and_then(|&k| *d.ecs.rigidbody.try_get(k));
                 if let Some(t) = handle.and_then(|h| d.physics.bodies.get(h)).map(|b| b.position().translation) {
-                    let bv = game::BLOCK_VOXELS as f32;
+                    let bv = crate::common::TILE_W;
                     out = Some([(t.x / bv).floor() as i32, (t.z / bv).floor() as i32]);
                 }
             });
@@ -904,7 +898,7 @@ fn autosave_positions_are_respawn_positions() {
     let who = people[0];
     let landing = spawn_at(&events, who).expect("spawns at the landing");
     // The autosave sees them far from the landing: block (3, 5), region-local units.
-    let b = game::BLOCK_VOXELS as f32;
+    let b = crate::common::TILE_W;
     h.note_positions(vec![(who, [3.5 * b, 40.0, 5.5 * b])]);
     // A server restart: save, load (bodies go back to the abstract history), region starts.
     let grid = h.grid().clone();
@@ -1028,7 +1022,7 @@ fn off_map_record_restores_at_spawn_with_its_client() {
     client.inventory.slots[20] = Some(MARK_STACK);
     let record = game::PlayerRecord {
         client,
-        pose: game::Pose::from_translation(game::body_on_tile([3, 1, 3])),
+        pose: game::Pose::translation(3.5 * crate::common::TILE_W, crate::common::above_floor_y(), 3.5 * crate::common::TILE_W),
         region: rc(0, 5),
         fortress: None,
         adventure: None,

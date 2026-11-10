@@ -1,12 +1,17 @@
-//! Deterministic world generation. `generate_region` is a pure function of
-//! region coordinates: same coords → identical output on every machine,
-//! which is what makes "cycle out = park, cycle in = restore-or-regenerate"
-//! safe for the multi-region world.
+//! Deterministic world generation. A region's stud terrain
+//! (`stud_gen::generate_stud_region`) is a pure function of region
+//! coordinates (and the installed forged world): same coords → identical
+//! output on every machine, which is what makes "cycle out = park, cycle in
+//! = restore-or-regenerate" safe for the multi-region world.
+//!
+//! This file holds the column sampling every generator shares: a `Patch`
+//! (the noise pipeline or a forged world) read at a point gives a
+//! `ColSample` — surface, water, biome cover — in 1 m block units; `stud_gen`
+//! quantises it to plates and studs.
 
 mod noise;
 mod spline;
 mod density;
-pub mod cache;
 pub mod forge;
 pub mod forged;
 pub mod forged_tiles;
@@ -22,7 +27,7 @@ pub mod stud_world;
 pub mod trees;
 mod slopes;
 
-/// The world seed shared by every `generate_region` caller (server + offline
+/// The world seed shared by every generator caller (server + offline
 /// client) so they produce the SAME world. Kept in one place so the server and
 /// client can never silently drift to different seeds.
 // Picked by examples/seed_scan.rs (re-picked for FEATURE_SCALE = 0.5): dry
@@ -31,23 +36,18 @@ mod slopes;
 // Re-run the scan if terrain shaping changes.
 pub const WORLD_SEED: u64 = 0x00D5_C0DE_007B;
 
-use std::collections::BTreeMap;
-
-use game::{
-    Biome, Block, BlockId, BlockIndex, ChiselData, Chunk, ChunkBlocks, Column, ColumnCoords, RegionCoords, SubChunk,
-    BLOCK_VOXELS, CHUNK_BLOCKS, CHUNK_BLOCK_COUNT, BRICK_VOXELS, BRICK_VOXEL_COUNT, REGION_CHUNKS,
-};
+use game::{Biome, BlockId, RegionCoords};
 
 use crate::forged::ColumnClimate;
 use crate::material::{GroundCover, Materials};
-use crate::pipeline::{ProfileGrid, TerrainPipeline, PROFILE_LATTICE_BLOCKS, SEA_TOP_BLOCK};
+use crate::pipeline::{ProfileGrid, PROFILE_LATTICE_BLOCKS, SEA_TOP_BLOCK};
 
 // Region span in blocks (the game's dial, as i32 for coordinate math).
 const REGION_BLOCKS: i32 = game::REGION_BLOCKS as i32; // 64 at the test default
 // Vertical scan bounds (blocks) of a procedural column. Terrain lives well
 // inside this band (the density ramp clamps outside it). They bound surfaces
-// only: the ground below a surface is the column's `ColumnGround` recipe,
-// which has no lower bound.
+// only: the ground below a surface is the column's ground recipe, which has
+// no lower bound.
 const SCAN_TOP: i32 = 320;
 const SCAN_BOTTOM: i32 = -64;
 /// Scan bounds (blocks) of a forged (unbounded) column: the sea plus the
@@ -84,12 +84,11 @@ fn block_center_m(b: i32) -> f64 {
     b as f64 + 0.5
 }
 
-/// Worldgen terrain is whole blocks and slopes only — never finer voxel
-/// detail. The continuous surface is rounded to whole blocks at the block's
-/// midpoint: the surface block is the highest whose density at `by + 0.5` is
-/// positive. Density falls monotonically with height, so every block under it
-/// is solid. A one-block rise then carves the higher column's top block into a
-/// slope (`slopes::slope_for`) — an ordinary chisel, editable at voxel scale.
+/// Where a block column's surface is read: the surface block is the highest
+/// whose density at `by + 0.5` is positive. Density falls monotonically with
+/// height, so every block under it is solid. (Stud recipes quantise the same
+/// profile to plates, `stud_gen::surface_plate`; this block surface is what
+/// covers, snow lines and tree placement are decided on.)
 const SURFACE_TEST_M: f64 = 0.5;
 
 /// The scan band `(top, bottom)` (blocks) of a profile.
@@ -103,8 +102,6 @@ fn scan_band(prof: &crate::pipeline::ColumnProfile) -> (i32, i32) {
 
 /// Highest block that is at least half full (`SURFACE_TEST_M`) for a precomputed profile — the
 /// surface block — or the band's bottom − 1 if the whole column is air.
-/// Shared by full-res and coarse generation, so any-solid LOD cells agree
-/// with the generated blocks.
 ///
 /// The scan starts just above the analytic surface rather than at the band
 /// top, so its cost does not grow with the band. Density falls monotonically
@@ -145,8 +142,6 @@ struct ColSample {
     water_top: i32,
     /// Topmost solid block: `s`, or the top of the glacier ice over it.
     top: i32,
-    /// Lowest water block that is ice; above `water_top` when none is.
-    ice_from: i32,
     /// Biome ground cover (forged worlds with biome blocks); `None` keeps
     /// `solid_material` (the procedural world, bit-identical).
     cover: Option<GroundCover>,
@@ -161,26 +156,26 @@ fn column_sample(patch: &dyn Patch, mats: &Materials, bx: i32, bz: i32) -> ColSa
     point_sample(patch, mats, block_center_m(bx), block_center_m(bz))
 }
 
-/// The column at world metres `(x, z)` of `patch` (a block centre, or a
-/// coarse LOD cell's).
+/// The column at world metres `(x, z)` of `patch`.
 fn point_sample(patch: &dyn Patch, mats: &Materials, x: f64, z: f64) -> ColSample {
     profile_sample(patch, mats, x, z).0
 }
 
-/// [`point_sample`] plus the profile it was read from and whether the column's water
-/// is a lake's.
+/// [`point_sample`] plus the profile it was read from.
 fn profile_sample(patch: &dyn Patch, mats: &Materials, x: f64, z: f64) -> (ColSample, crate::pipeline::ColumnProfile) {
-    let (prof, water_top, lake) = patch.sample(x, z);
+    // The lake flag is what frozen water tops were decided on (ice on cold lakes
+    // and seas, `ColumnClimate::ice_blocks`); stud recipes hold liquid water only.
+    let (prof, water_top, _lake) = patch.sample(x, z);
     let s = surface_from_profile(&prof);
     debug_assert!(s >= scan_band(&prof).1, "surface below the scan at ({x}, {z})");
     let unbounded = prof.is_unbounded();
-    let plain = ColSample { s, water_top, top: s, ice_from: water_top + 1, cover: None, trees: true, unbounded };
+    let plain = ColSample { s, water_top, top: s, cover: None, trees: true, unbounded };
     if !mats.biome.enabled() {
         return (plain, prof);
     }
     let sample = match patch.climate(x, z) {
         None => plain,
-        Some(c) => biome_column(mats, &c, plain, lake),
+        Some(c) => biome_column(mats, &c, plain),
     };
     (sample, prof)
 }
@@ -210,10 +205,8 @@ fn forest(b: Biome) -> bool {
 
 /// `plain` (a forged column's ground and water) dressed by its climate:
 /// ground cover per biome, snow above the snow line (patches in tundra),
-/// salt flats, glacier ice over dry glacier ground, ice on cold lake and sea
-/// water (`lake` = the water is a lake's; above the sea and not a lake it is
-/// a river, which stays liquid).
-fn biome_column(mats: &Materials, c: &ColumnClimate, plain: ColSample, lake: bool) -> ColSample {
+/// salt flats, glacier ice over dry glacier ground.
+fn biome_column(mats: &Materials, c: &ColumnClimate, plain: ColSample) -> ColSample {
     let ColSample { s, water_top, .. } = plain;
     let dry = s >= water_top;
     let ground_m = (s - SEA_TOP_BLOCK) as f32; // top of block `s`, m above sea
@@ -236,11 +229,8 @@ fn biome_column(mats: &Materials, c: &ColumnClimate, plain: ColSample, lake: boo
         mats.ground_cover(c.biome, snowy, s)
     };
     let glacier = if dry { c.glacier_blocks() } else { 0 };
-    let frozen = lake || water_top == SEA_TOP_BLOCK;
-    let ice = if !dry && frozen { c.ice_blocks() } else { 0 };
     ColSample {
         top: s + glacier,
-        ice_from: if ice > 0 { (water_top - ice + 1).max(s + 1) } else { water_top + 1 },
         cover: Some(cover),
         trees: glacier == 0 && !salt_flat && !treeless(c.biome) && (!snowy || forest(c.biome)),
         ..plain
@@ -275,10 +265,11 @@ fn soil_depth(c: &ColSample) -> i32 {
 }
 
 /// The surface a tree may stand on, from a `column_sample` and whether it
-/// carries a slope: dry, no slope (a trunk would hang over the slope's open
+/// is a step edge (`slopes::step_edge`): dry, no step edge (where voxel
+/// terrain carved a slope — tree placement is unchanged from those worlds)
 /// front) and a cover that grows trees. `None` = no tree.
-fn tree_ground(c: ColSample, slope: bool) -> Option<i32> {
-    (!slope && c.s >= c.water_top && c.trees).then_some(c.s)
+fn tree_ground(c: ColSample, step_edge: bool) -> Option<i32> {
+    (!step_edge && c.s >= c.water_top && c.trees).then_some(c.s)
 }
 
 /// Where trees come from: the habitat and the placement seed.
@@ -329,11 +320,6 @@ fn trees_for_window(
     )
 }
 
-/// Whether world block `(x, z)` lies in region `coords`.
-fn in_region(coords: RegionCoords, x: i32, z: i32) -> bool {
-    x.div_euclid(REGION_BLOCKS) == coords.x && z.div_euclid(REGION_BLOCKS) == coords.z
-}
-
 /// The terrain of one region- or LOD-tile-sized window, whatever it comes
 /// from: the noise pipeline, or a forged world file (`forged.rs`).
 pub(crate) trait Patch {
@@ -362,23 +348,6 @@ pub(crate) trait Patch {
     }
 }
 
-/// The rock of `strata` (top-down) at block Y `y` of a column with
-/// stratigraphic offset `geo`: `game::ColumnGround::block_at`'s rule without
-/// bedrock (coarse LOD shows bare rock with it).
-fn strata_rock(strata: &[(i16, BlockId)], geo: i16, y: i32) -> BlockId {
-    let s = y - i32::from(geo);
-    strata.iter().rev().find(|(top, _)| i32::from(*top) > s).or(strata.first()).map_or(BlockId::AIR, |&(_, id)| id)
-}
-
-/// The formations of `strata` (top-down) that `s` in `lo_s..=hi_s` can hit
-/// under `ColumnGround::block_at`'s rule, plus one more above and below.
-fn footprint_strata(strata: &[(i16, BlockId)], lo_s: i32, hi_s: i32) -> Vec<(i16, BlockId)> {
-    let holding = |s: i32| strata.partition_point(|&(top, _)| i32::from(top) > s).saturating_sub(1);
-    let first = holding(hi_s).saturating_sub(1);
-    let last = (holding(lo_s) + 1).min(strata.len() - 1);
-    strata[first..=last].to_vec()
-}
-
 struct ProceduralPatch(ProfileGrid);
 
 impl Patch for ProceduralPatch {
@@ -387,46 +356,10 @@ impl Patch for ProceduralPatch {
     }
 }
 
-/// The full REGION_CHUNKS x REGION_CHUNKS column grid for one region. Pure and
-/// deterministic. With `VOXEL_WORLD_FILE` set the region comes from that
-/// forged world and `seed` is ignored (see `forged.rs`).
-pub fn generate_region(coords: RegionCoords, seed: u64, mats: Materials) -> Vec<(ColumnCoords, Column)> {
-    generate_columns(coords, 0..REGION_CHUNKS, 0..REGION_CHUNKS, seed, mats)
-}
-
-/// The columns `xs × zs` (region-local chunk columns) of region `coords`:
-/// exactly the same columns `generate_region` makes, however the region is
-/// split into windows.
-pub fn generate_columns(
-    coords: RegionCoords,
-    xs: std::ops::Range<usize>,
-    zs: std::ops::Range<usize>,
-    seed: u64,
-    mats: Materials,
-) -> Vec<(ColumnCoords, Column)> {
-    let cb = CHUNK_BLOCKS as i32;
-    let (x, z) = (coords.x * REGION_BLOCKS + xs.start as i32 * cb, coords.z * REGION_BLOCKS + zs.start as i32 * cb);
-    let (ox, oz, span) = patch_window(x, z, xs.len().max(zs.len()) as i32 * cb, &mats);
-    if let Some(world) = forged::active() {
-        let trees_from = TreeSource { habitat: world, seed: world.seed() };
-        return columns_from_patch(&world.patch(ox, oz, span), coords, xs, zs, mats, trees_from);
-    }
-    let grid = TerrainPipeline::new(seed).profile_grid(ox, oz, span);
-    let habitat = habitat::ProceduralHabitat::new(seed);
-    columns_from_patch(&ProceduralPatch(grid), coords, xs, zs, mats, TreeSource { habitat: &habitat, seed })
-}
-
-/// Patch margin (blocks) past a window: wider when trees are on, which read
-/// surfaces further out (`TREE_RING_BLOCKS`).
-fn patch_margin(mats: &Materials) -> i32 {
-    if mats.trees.enabled() { TREE_PATCH_MARGIN } else { PATCH_MARGIN }
-}
-
 /// Patch origin and span (meters) for the window of `span` blocks at world
-/// block `(x, z)`, margin included.
-fn patch_window(x: i32, z: i32, span: i32, mats: &Materials) -> (f64, f64, f64) {
-    let m = patch_margin(mats);
-    ((x - m) as f64, (z - m) as f64, (span + 2 * m) as f64)
+/// block `(x, z)` with `margin` blocks of patch margin on every side.
+fn patch_window(x: i32, z: i32, span: i32, margin: i32) -> (f64, f64, f64) {
+    ((x - margin) as f64, (z - margin) as f64, (span + 2 * margin) as f64)
 }
 
 /// Engine-metre rect `[min, max]` that every patch a job builds lies in,
@@ -441,7 +374,8 @@ fn read_rect(x: f64, z: f64, span: f64, margin: i32) -> ([f64; 2], [f64; 2]) {
 
 /// Loads and pins the tiles of the installed forged world
 /// ([`forged::active`]) that generating region `rc` reads — any window of it
-/// through [`generate_columns`] / [`generate_region`]. Hold the pins while
+/// through [`stud_gen::generate_stud_columns`] /
+/// [`stud_gen::generate_stud_region`]. Hold the pins while
 /// generating: the reads then never load, and a tile that cannot be loaded
 /// is this `Err` (naming the tile), never terrain. Empty without a world or
 /// for a whole one.
@@ -451,38 +385,25 @@ pub fn prefetch_region(rc: RegionCoords) -> Result<forged_tiles::TilePins, Strin
 
 /// [`prefetch_region`] for an explicit forged world.
 pub fn prefetch_region_forged(world: &forged::ForgedWorld, rc: RegionCoords) -> Result<forged_tiles::TilePins, String> {
-    // The wider (trees on) margin, whatever the materials.
+    // The region generator's margin (tree placement reads that far out); the
+    // column windows' is inside it.
     let (x, z) = (f64::from(rc.x * REGION_BLOCKS), f64::from(rc.z * REGION_BLOCKS));
     let (min, max) = read_rect(x, z, f64::from(REGION_BLOCKS), TREE_PATCH_MARGIN);
     world.prefetch_rect(min, max)
 }
 
 /// Loads and pins the tiles of the installed forged world that building LOD
-/// key `key` reads ([`coarse_tile`] and [`coarse_water`]); see
-/// [`prefetch_region`].
+/// key `key` reads ([`stud_gen::stud_lod_tile`]); see [`prefetch_region`].
 pub fn prefetch_lod(key: &game::lod::LodKey) -> Result<forged_tiles::TilePins, String> {
     forged::active().map_or_else(|| Ok(Default::default()), |world| prefetch_lod_forged(world, key))
 }
 
 /// [`prefetch_lod`] for an explicit forged world.
 pub fn prefetch_lod_forged(world: &forged::ForgedWorld, key: &game::lod::LodKey) -> Result<forged_tiles::TilePins, String> {
-    // `coarse_tile_forged`'s window with the trees' margin (it contains
-    // `coarse_water_forged`'s).
-    let (ox, oz, span) = coarse_window(key);
-    let margin = TREE_PATCH_MARGIN + coarse_ring(key);
-    let (min, max) = read_rect(f64::from(ox), f64::from(oz), f64::from(span), margin);
+    // `stud_lod_tile_forged`'s patch.
+    let (ox, oz, span) = lod_window(key);
+    let (min, max) = read_rect(f64::from(ox), f64::from(oz), f64::from(span), PATCH_MARGIN);
     world.prefetch_rect(min, max)
-}
-
-/// `generate_region` for an explicit forged world (tests, tools).
-pub fn generate_region_forged(
-    world: &forged::ForgedWorld,
-    coords: RegionCoords,
-    mats: Materials,
-) -> Vec<(ColumnCoords, Column)> {
-    let (ox, oz, span) = patch_window(coords.x * REGION_BLOCKS, coords.z * REGION_BLOCKS, REGION_BLOCKS, &mats);
-    let trees_from = TreeSource { habitat: world, seed: world.seed() };
-    columns_from_patch(&world.patch(ox, oz, span), coords, 0..REGION_CHUNKS, 0..REGION_CHUNKS, mats, trees_from)
 }
 
 /// Material of a solid block: sand under standing water (lake and river
@@ -495,662 +416,16 @@ fn solid_material(mats: &Materials, depth: i32, by: i32, surface: i32, water_top
     }
 }
 
-/// One generated tree block: its block, and its voxel mask if partial.
-struct PlacedTreeBlock {
-    block: Block,
-    chisel: Option<ChiselData>,
-    wood: bool,
-}
-
-/// The tree blocks of the window `[x0, x1) x [z0, z1)` (world blocks), keyed
-/// by world `(x, y, z)`. Where trees overlap, wood wins over leaves, else the
-/// lower tree id: a block's covering trees are the same in every window, so
-/// the result is too.
-fn tree_blocks(
-    coords: RegionCoords,
-    window: [i32; 4],
-    mats: &Materials,
-    trees_from: TreeSource,
-    surface: &dyn Fn(i32, i32) -> Option<i32>,
-) -> BTreeMap<[i32; 3], PlacedTreeBlock> {
-    let [x0, z0, x1, z1] = window;
-    let mut out: BTreeMap<[i32; 3], PlacedTreeBlock> = BTreeMap::new();
-    for tree in trees_for_window(coords, window, trees_from, surface) {
-        let blocks = mats.trees.species[tree.species as usize];
-        let sk = trees::skeleton(&trees::SPECIES[tree.species as usize], tree.seed, tree.age);
-        for b in trees::rasterize(&sk) {
-            let p = [tree.base[0] + b.offset[0], tree.base[1] + b.offset[1], tree.base[2] + b.offset[2]];
-            if p[0] < x0 || p[0] >= x1 || p[2] < z0 || p[2] >= z1 || !in_region(coords, p[0], p[2]) {
-                continue;
-            }
-            let (id, wood) = match b.part {
-                trees::TreePart::Log => (blocks.log, true),
-                trees::TreePart::Branch => (blocks.branch, true),
-                trees::TreePart::Leaves => (blocks.leaves, false),
-            };
-            let chisel = b.chisel.map(|mask| {
-                ChiselData::from_fn(vec![id], |vx, vy, vz| {
-                    mask[vx + BLOCK_VOXELS * (vy + BLOCK_VOXELS * vz)].then_some(0)
-                })
-            });
-            let placed = PlacedTreeBlock { block: Block::with_tree(id, tree.id, b.limb), chisel, wood };
-            match out.entry(p) {
-                std::collections::btree_map::Entry::Vacant(e) => {
-                    e.insert(placed);
-                }
-                std::collections::btree_map::Entry::Occupied(mut e) => {
-                    if wood && !e.get().wood {
-                        e.insert(placed);
-                    }
-                }
-            }
-        }
-    }
-    out
-}
-
-/// The columns `xs × zs` (region-local chunk columns) of region `coords`,
-/// sampled from `patch` — which must cover them plus `patch_margin(&mats)`.
-/// Trees (when `mats.trees` is on) come from `trees_from`.
-///
-/// Every column carries a `ColumnGround` recipe for the ground below its band
-/// (the sim reads missing chunks under the band from it), and the band's
-/// solids deeper than soil are that recipe's blocks, so band and implied
-/// ground never disagree. The band reaches down far enough that no air or
-/// water block faces implied ground: past the footprint's deepest soil, and
-/// to the lowest open block of every face-neighbouring block column (the
-/// cliff rule — a cliff's face is materialised, not implied).
-fn columns_from_patch(
-    patch: &dyn Patch,
-    coords: RegionCoords,
-    xs: std::ops::Range<usize>,
-    zs: std::ops::Range<usize>,
-    mats: Materials,
-    trees_from: TreeSource,
-) -> Vec<(ColumnCoords, Column)> {
-    let cb = CHUNK_BLOCKS as i32;
-    let air = Block::new(BlockId::AIR);
-    let stone = Block::new(mats.stone);
-    let strata = patch.strata(&mats);
-    let with_trees = mats.trees.enabled();
-
-    // Per-block-column `column_sample` over the window plus a ring on every
-    // side: the columns whose slope is read — one block out (the cliff rule's
-    // neighbours), or `TREE_RING_BLOCKS` with trees on (placement's
-    // surfaces) — plus one more block, their slope's neighbours. Index
-    // `[bx + ring][bz + ring]`, window-local blocks.
-    let ring = if with_trees { TREE_RING_BLOCKS + 1 } else { 2 };
-    let (wx, wz) = (coords.x * REGION_BLOCKS + xs.start as i32 * cb, coords.z * REGION_BLOCKS + zs.start as i32 * cb);
-    let (ww, wd) = (xs.len() as i32 * cb, zs.len() as i32 * cb);
-    let (nx, nz) = ((ww + 2 * ring) as usize, (wd + 2 * ring) as usize);
-    let mut samples = Vec::with_capacity(nx * nz);
-    for i in 0..nx {
-        for j in 0..nz {
-            samples.push(column_sample(patch, &mats, wx + i as i32 - ring, wz + j as i32 - ring));
-        }
-    }
-    let at = |bx: i32, bz: i32| samples[(bx + ring) as usize * nz + (bz + ring) as usize];
-    // Each column's slope, over the ring minus its outer block (`None`
-    // there), indexed like `samples`.
-    let mut slope_cells = vec![None; nx * nz];
-    for bx in 1 - ring..ww + ring - 1 {
-        for bz in 1 - ring..wd + ring - 1 {
-            slope_cells[(bx + ring) as usize * nz + (bz + ring) as usize] =
-                slopes::slope_for(&at(bx, bz), |dx, dz| at(bx + dx, bz + dz));
-        }
-    }
-    let slope_at = |bx: i32, bz: i32| {
-        debug_assert!(
-            (1 - ring..ww + ring - 1).contains(&bx) && (1 - ring..wd + ring - 1).contains(&bz),
-            "slope read at window block ({bx}, {bz}), outside the decided ring"
-        );
-        slope_cells[(bx + ring) as usize * nz + (bz + ring) as usize]
-    };
-
-    // Tree blocks, bucketed per chunk column of the window.
-    // `(lx, lz, block y, block)`, footprint-local.
-    let mut tree_cols: Vec<Vec<(usize, usize, i32, PlacedTreeBlock)>> =
-        (0..xs.len() * zs.len()).map(|_| Vec::new()).collect();
-    if with_trees {
-        let surface = |x: i32, z: i32| {
-            let (bx, bz) = (x - wx, z - wz);
-            assert!(
-                (1 - ring..ww + ring - 1).contains(&bx) && (1 - ring..wd + ring - 1).contains(&bz),
-                "tree placement read the surface at ({x}, {z}), outside the sampled ring"
-            );
-            tree_ground(at(bx, bz), slope_at(bx, bz).is_some())
-        };
-        for ([x, y, z], placed) in tree_blocks(coords, [wx, wz, wx + ww, wz + wd], &mats, trees_from, &surface) {
-            let (bx, bz) = (x - wx, z - wz);
-            let col = (bx / cb) as usize * zs.len() + (bz / cb) as usize;
-            tree_cols[col].push(((bx % cb) as usize, (bz % cb) as usize, y, placed));
-        }
-    }
-
-    let mut columns = Vec::with_capacity(xs.len() * zs.len());
-    for cx in xs.clone() {
-        for cz in zs.clone() {
-            // This Column covers CHUNK_BLOCKS x CHUNK_BLOCKS blocks, from
-            // window-local block (fx, fz).
-            let fx = (cx - xs.start) as i32 * cb;
-            let fz = (cz - zs.start) as i32 * cb;
-            let col_trees = std::mem::take(&mut tree_cols[(cx - xs.start) * zs.len() + (cz - zs.start)]);
-
-            // Every footprint has samples, so these only seed the min/max
-            // (procedural results equal the old SCAN_TOP / SCAN_BOTTOM - 1 seeds:
-            // `lo - MAX_SOIL_DEPTH` is always under SCAN_TOP).
-            let mut lo = i32::MAX;
-            let mut hi = i32::MIN;
-            let mut open_lo = i32::MAX;
-            let mut soil_max = MAX_SOIL_DEPTH;
-            for lx in 0..cb {
-                for lz in 0..cb {
-                    let c = at(fx + lx, fz + lz);
-                    lo = lo.min(c.s);
-                    hi = hi.max(c.top.max(c.water_top)); // include the water column up to its surface
-                    soil_max = soil_max.max(soil_depth(&c));
-                    // Cliff rule: the lowest block a face neighbour leaves open
-                    // (its slope's open quarters included).
-                    for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
-                        let (nbx, nbz) = (fx + lx + dx, fz + lz + dz);
-                        let n = at(nbx, nbz);
-                        open_lo = open_lo.min(if slope_at(nbx, nbz).is_some() { n.top } else { n.top + 1 });
-                    }
-                }
-            }
-            // The band reaches the highest tree block too.
-            hi = col_trees.iter().fold(hi, |hi, t| hi.max(t.2));
-            // Extend the band bottom past the shallowest surface in the footprint
-            // so the deepest soil (dirt/sand) of the lowest column is still
-            // materialized, and down to every open neighbour block.
-            lo = (lo - soil_max).min(open_lo);
-
-            // Materialize whole sub-chunks [base_sub_y ..= top_sub_y]; below is
-            // the ground recipe, above air. Whole blocks, and a slope chisel
-            // on the top block of a slope column.
-            let base_sub_y = lo.div_euclid(cb);
-            let top_sub_y = hi.div_euclid(cb);
-            let n_sub = (top_sub_y - base_sub_y + 1) as usize;
-            // Linear block grids + chisel maps per sub-chunk, made canonical
-            // `Chunk`s once filled.
-            let mut chunks: Vec<(Vec<Block>, BTreeMap<BlockIndex, ChiselData>)> =
-                (0..n_sub).map(|_| (vec![Block::default(); CHUNK_BLOCK_COUNT], BTreeMap::new())).collect();
-
-            let mut surface = vec![0i16; game::COLUMN_FOOTPRINT].into_boxed_slice();
-            let mut geo = vec![0i16; game::COLUMN_FOOTPRINT].into_boxed_slice();
-            let mut water_top = vec![game::NO_WATER; game::COLUMN_FOOTPRINT].into_boxed_slice();
-            for lx in 0..CHUNK_BLOCKS {
-                for lz in 0..CHUNK_BLOCKS {
-                    let (bx, bz) = (fx + lx as i32, fz + lz as i32);
-                    let c = at(bx, bz);
-                    // The visible top: a glacier's ice counts as ground
-                    // (digging, implied ground and pathing see the ice top).
-                    surface[lx * CHUNK_BLOCKS + lz] = c.top as i16;
-                    // Recipe water: the column's water (or ice) above its
-                    // ground — the only water there is; the chunks below
-                    // hold air there (ice at a frozen top).
-                    if c.water_top > c.top {
-                        water_top[lx * CHUNK_BLOCKS + lz] = c.water_top as i16;
-                    }
-                    geo[lx * CHUNK_BLOCKS + lz] = patch.geo(block_center_m(wx + bx), block_center_m(wz + bz));
-                }
-            }
-            // Only the formations this footprint's ground can reach, from its
-            // highest surface down to bedrock under its lowest.
-            let (s_lo, s_hi) = (surface.iter().min().unwrap(), surface.iter().max().unwrap());
-            let (g_lo, g_hi) = (geo.iter().min().unwrap(), geo.iter().max().unwrap());
-            let lo_s = i32::from(*s_lo) - game::UNDERGROUND_DEPTH - i32::from(*g_hi);
-            let hi_s = i32::from(*s_hi) - i32::from(*g_lo);
-            let ground = game::ColumnGround {
-                surface,
-                geo,
-                strata: footprint_strata(&strata, lo_s, hi_s),
-                bedrock: mats.bedrock,
-                band_base_sub_y: base_sub_y,
-                water_top,
-                water_body: vec![game::NO_BODY; game::COLUMN_FOOTPRINT].into_boxed_slice(),
-            };
-
-            for lx in 0..CHUNK_BLOCKS {
-                for lz in 0..CHUNK_BLOCKS {
-                    let c = at(fx + lx as i32, fz + lz as i32);
-                    let slope = slope_at(fx + lx as i32, fz + lz as i32);
-                    let soil = soil_depth(&c);
-                    for by in base_sub_y * cb..=hi {
-                        let sub_i = (by.div_euclid(cb) - base_sub_y) as usize;
-                        let local_by = by.rem_euclid(cb) as usize;
-                        let bi = BlockIndex::from_xyz(lx, local_by, lz);
-                        let (blocks, chisel) = &mut chunks[sub_i];
-                        let depth = c.s - by;
-                        if depth > soil {
-                            // Below the soil: the recipe's rock (or bedrock).
-                            blocks[bi.linear()] = ground.block_at(lx, lz, by);
-                        } else if by <= c.top {
-                            // Solid: whole blocks, the top one a slope on a
-                            // slope column; bare rock is the recipe's.
-                            let block = match column_material(&mats, &c, by) {
-                                BlockId::AIR => ground.block_at(lx, lz, by),
-                                mat => Block::new(mat),
-                            };
-                            blocks[bi.linear()] = block;
-                            if let Some(shape) = slope.filter(|_| by == c.top) {
-                                chisel.insert(bi, game::slope_chisel(block.id, shape));
-                            }
-                        } else if by <= c.water_top && by >= c.ice_from {
-                            // The frozen top of the water: ice, a solid block.
-                            blocks[bi.linear()] = Block::new(mats.biome.ice);
-                        }
-                        // else: air (the grid starts all air) — the water
-                        // under the surface included: it is the recipe's
-                        // (`ColumnGround::water_top`), never a block.
-                    }
-                }
-            }
-            // Trees, into the air above the ground and any water only.
-            for (lx, lz, by, placed) in col_trees {
-                let c = at(fx + lx as i32, fz + lz as i32);
-                if by <= c.top || by <= c.water_top {
-                    continue;
-                }
-                let bi = BlockIndex::from_xyz(lx, by.rem_euclid(cb) as usize, lz);
-                let (blocks, chisel) = &mut chunks[(by.div_euclid(cb) - base_sub_y) as usize];
-                blocks[bi.linear()] = placed.block;
-                if let Some(c) = placed.chisel {
-                    chisel.insert(bi, c);
-                }
-            }
-
-            let subs: Vec<SubChunk> = chunks
-                .into_iter()
-                .map(|(blocks, chisel)| {
-                    SubChunk::Dense(Box::new(Chunk { blocks: ChunkBlocks::from_vec(blocks), chisel }))
-                })
-                .collect();
-            // `above = air` trims air tops; the bottom is kept (`grounded`).
-            let column = Column::grounded(base_sub_y, stone, air, subs, ground);
-            columns.push((ColumnCoords::new(cx, cz), column));
-        }
-    }
-    columns
-}
-
-/// Cheap coarse LOD generation for one block-scale-or-coarser key
-/// (`game::lod::COARSE_MIN_FACTOR` and up): one profile sample per cell
-/// column, surface scan, then solid-below-surface (+ the ice on frozen
-/// water; liquid water is not LOD terrain — see [`coarse_water`]). No
-/// block materialization, no chiseling. Pure and deterministic: same (key,
-/// seed, mats) → identical cells everywhere. A 64/256 tile is exactly one 32³
-/// grid per vertical band; a factor-16 region is 2×2 of them, grouped like
-/// `game::lod::block_scale_cells`.
-/// Point-sampling is NOT bit-consistent with downsampled full generation
-/// (accepted, sub-pixel at these distances — see the design spec §3);
-/// `coarse_tile_tracks_downsampled_full_generation` bounds the divergence.
-pub fn coarse_tile(
-    key: &game::lod::LodKey,
-    seed: u64,
-    mats: Materials,
-) -> Vec<game::lod::LodCell> {
-    if let Some(world) = forged::active() {
-        return coarse_tile_forged(world, key, mats);
-    }
-    let (ox, oz, span) = coarse_patch_window(key, &mats);
-    let grid = TerrainPipeline::new(seed).profile_grid(ox, oz, span);
-    let habitat = habitat::ProceduralHabitat::new(seed);
-    coarse_from_patch(&ProceduralPatch(grid), key, mats, TreeSource { habitat: &habitat, seed })
-}
-
-/// `coarse_tile` for an explicit forged world (tests, tools). A coarse cell is
-/// point-sampled at its center, so rivers narrower than a cell come and go
-/// with distance; lakes and valleys survive every ring.
-pub fn coarse_tile_forged(
-    world: &forged::ForgedWorld,
-    key: &game::lod::LodKey,
-    mats: Materials,
-) -> Vec<game::lod::LodCell> {
-    // One cell column of margin past the key, for the steep-face fill's
-    // neighbours (rounded to the profile lattice, so surfaces stay
-    // bit-identical to any other window's).
-    let ring = coarse_ring(key);
-    let (ox, oz, span) = coarse_patch_window(key, &mats);
-    let (ox, oz, span) = (ox - ring as f64, oz - ring as f64, span + 2.0 * ring as f64);
-    let trees_from = TreeSource { habitat: world, seed: world.seed() };
-    coarse_from_patch(&world.patch(ox, oz, span), key, mats, trees_from)
-}
-
-/// The cell-column margin (blocks) `coarse_tile_forged` adds past a key,
-/// for the steep-face fill's neighbours, rounded up to the profile lattice.
-fn coarse_ring(key: &game::lod::LodKey) -> i32 {
-    let cb = (key.factor / BLOCK_VOXELS as u32) as i32;
-    let lattice = PROFILE_LATTICE_BLOCKS as i32;
-    (cb + lattice - 1) / lattice * lattice
-}
-
-/// The water surface layer of LOD key `key` (water plan Task 8), from the
-/// recipe: one `point_sample` per LOD column, at the point
-/// [`coarse_tile`] samples it (a block-scale-or-coarser cell's centre); a
-/// sub-block key samples each block column once, at its centre as region
-/// generation does, and repeats it over the block's LOD columns (water is
-/// whole blocks). A column holds water iff its water top is above its
-/// ground (`water_top > top`), with depth `water_top − top` blocks
-/// (clamped to [`game::lod::LOD_WATER_MAX_DEPTH_BLOCKS`]); a
-/// column whose top water block is ice is dry here (the ice is LOD terrain).
-/// Pure: the same water on every build path, whatever the region's chunks.
-pub fn coarse_water(key: &game::lod::LodKey, seed: u64, mats: Materials) -> game::lod::LodWater {
-    if let Some(world) = forged::active() {
-        return coarse_water_forged(world, key, mats);
-    }
-    let (ox, oz, span) = coarse_window(key);
-    let grid = TerrainPipeline::new(seed).profile_grid(ox as f64, oz as f64, span as f64);
-    water_from_patch(&ProceduralPatch(grid), key, &mats)
-}
-
-/// `coarse_water` for an explicit forged world (tests, tools).
-pub fn coarse_water_forged(
-    world: &forged::ForgedWorld,
-    key: &game::lod::LodKey,
-    mats: Materials,
-) -> game::lod::LodWater {
-    let (ox, oz, span) = coarse_window(key);
-    water_from_patch(&world.patch(ox as f64, oz as f64, span as f64), key, &mats)
-}
-
-/// One LOD column's `(water_top, depth)` (see [`coarse_water`]).
-fn lod_water_column(c: &ColSample) -> (i16, u8) {
-    if c.water_top <= c.top || c.ice_from <= c.water_top {
-        return (game::NO_WATER, 0);
-    }
-    let max = i32::from(game::lod::LOD_WATER_MAX_DEPTH_BLOCKS);
-    (c.water_top as i16, (c.water_top - c.top).min(max) as u8)
-}
-
-fn water_from_patch(patch: &dyn Patch, key: &game::lod::LodKey, mats: &Materials) -> game::lod::LodWater {
-    let side = game::lod::LodWater::side_for(key);
-    let n = usize::from(side);
-    let (ox, oz, span_blocks) = coarse_window(key);
-    let mut tops = Vec::with_capacity(n * n);
-    if key.factor >= BLOCK_VOXELS as u32 {
-        // Blocks per cell edge, and the cell centre `coarse_from_patch` samples.
-        let cb = (key.factor / BLOCK_VOXELS as u32) as i32;
-        debug_assert_eq!(span_blocks / cb, i32::from(side));
-        let centre = |o: i32, c: i32| (o + c * cb) as f64 + cb as f64 * 0.5;
-        for cz in 0..i32::from(side) {
-            for cx in 0..i32::from(side) {
-                tops.push(lod_water_column(&point_sample(patch, mats, centre(ox, cx), centre(oz, cz))));
-            }
-        }
-    } else {
-        let per = (BLOCK_VOXELS as u32 / key.factor) as usize; // LOD columns per block edge
-        let blocks = span_blocks as usize;
-        debug_assert_eq!(blocks * per, n);
-        let mut row = Vec::with_capacity(blocks);
-        for bz in 0..span_blocks {
-            row.clear();
-            row.extend((0..span_blocks).map(|bx| lod_water_column(&column_sample(patch, mats, ox + bx, oz + bz))));
-            for _ in 0..per {
-                for &top in &row {
-                    tops.extend(std::iter::repeat_n(top, per));
-                }
-            }
-        }
-    }
-    game::lod::LodWater::encode(&tops, side)
-}
-
-/// World block origin and span of a coarse key.
-fn coarse_window(key: &game::lod::LodKey) -> (i32, i32, i32) {
+/// World block origin and span of a LOD key.
+fn lod_window(key: &game::lod::LodKey) -> (i32, i32, i32) {
     let origin = key.origin_region();
     (origin.x * REGION_BLOCKS, origin.z * REGION_BLOCKS, key.region_span() * REGION_BLOCKS)
 }
 
-/// The patch a coarse key samples: its window, plus the trees' margin.
-fn coarse_patch_window(key: &game::lod::LodKey, mats: &Materials) -> (f64, f64, f64) {
-    let (ox, oz, span) = coarse_window(key);
-    let m = if mats.trees.enabled() { TREE_PATCH_MARGIN } else { 0 };
-    ((ox - m) as f64, (oz - m) as f64, (span + 2 * m) as f64)
-}
-
-/// A tree's crown as coarse LOD shows it: block offsets from its base of the
-/// crown's lowest and highest leaf block, and the crown disc's radius in
-/// blocks; `None` for a tree with no leaves.
-fn crown_extent(tree: &trees::TreeSeed) -> Option<(i32, i32, i32)> {
-    let species = &trees::SPECIES[tree.species as usize];
-    let sk = trees::skeleton(species, tree.seed, tree.age);
-    let bv = BLOCK_VOXELS as i32;
-    let axis = (bv / 2) as f64;
-    let (mut lo, mut hi, mut reach) = (i32::MAX, i32::MIN, 0.0f64);
-    for &(c, r) in &sk.leaves {
-        lo = lo.min((c[1] - r).max(0).div_euclid(bv));
-        hi = hi.max((c[1] + r).div_euclid(bv));
-        let (dx, dz) = (c[0] as f64 - axis, c[2] as f64 - axis);
-        reach = reach.max((dx * dx + dz * dz).sqrt() + r as f64);
-    }
-    let radius = ((reach / bv as f64).ceil() as i32).min(species.crown_radius_blocks);
-    (lo <= hi).then_some((lo, hi, radius))
-}
-
-fn coarse_from_patch(
-    patch: &dyn Patch,
-    key: &game::lod::LodKey,
-    mats: Materials,
-    trees_from: TreeSource,
-) -> Vec<game::lod::LodCell> {
-    use game::lod::LodCell;
-    use game::Voxel;
-
-    // A LOD grid's edge in cells: the 32³ render/LOD brick.
-    const G: i32 = BRICK_VOXELS as i32;
-    // Blocks per cell edge: 1 at factor 16, 2 at 32, 4 at 64, 16 at 256.
-    debug_assert!(key.factor >= game::lod::COARSE_MIN_FACTOR, "sub-block factor {}", key.factor);
-    let cb = (key.factor / BLOCK_VOXELS as u32) as i32;
-    let span_blocks = key.region_span() * REGION_BLOCKS;
-    let cells = span_blocks / cb; // cell columns per key edge: 64 at factor 16, else 32
-    debug_assert_eq!(cells % G, 0, "a key is a whole number of 32³ grids");
-
-    let (ox, oz, _) = coarse_window(key);
-
-    // Centre (world metres) of cell column (cx, cz).
-    let centre = |cx: i32, cz: i32| {
-        ((ox + cx * cb) as f64 + cb as f64 * 0.5, (oz + cz * cb) as f64 + cb as f64 * 0.5)
-    };
-    // The column of cell column (cx, cz), sampled at its centre (with
-    // whether it is unbounded); cell columns just outside the key are
-    // sampled too.
-    let cell_sample = |cx: i32, cz: i32| {
-        let (mx, mz) = centre(cx, cz);
-        point_sample(patch, &mats, mx, mz)
-    };
-    let samples: Vec<ColSample> =
-        (0..cells).flat_map(|cz| (0..cells).map(move |cx| (cx, cz))).map(|(cx, cz)| cell_sample(cx, cz)).collect();
-    let surface_of = |cx: i32, cz: i32| {
-        if (0..cells).contains(&cx) && (0..cells).contains(&cz) {
-            samples[(cz * cells + cx) as usize].top
-        } else {
-            cell_sample(cx, cz).top
-        }
-    };
-    let strata = patch.strata(&mats);
-
-    let mut grids: std::collections::BTreeMap<[i32; 3], Vec<Voxel>> = Default::default();
-    for cz in 0..cells {
-        for cx in 0..cells {
-            let c = samples[(cz * cells + cx) as usize];
-            let (surface, water_top, unbounded) = (c.s, c.water_top, c.unbounded);
-
-            // Under the soil band; a forged column also reaches down to its
-            // lowest face neighbour's surface, so a steep face (forged
-            // mountains) has no gaps. Procedural columns keep the soil band
-            // only, which keeps their tiles bit-identical.
-            let mut solid_lo_block = surface - MAX_SOIL_DEPTH;
-            if unbounded {
-                for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
-                    solid_lo_block = solid_lo_block.min(surface_of(cx + dx, cz + dz));
-                }
-            }
-            let solid_lo = solid_lo_block.div_euclid(cb);
-            let solid_hi = c.top.div_euclid(cb);
-            let top_cell = c.top.max(water_top).div_euclid(cb);
-            for cy in solid_lo..=top_cell {
-                let is_solid = cy <= solid_hi;
-                // Water only where the cell's bottom block is at/below the surface.
-                if !is_solid && cy * cb > water_top {
-                    continue;
-                }
-                let mat = if is_solid {
-                    // The cell's topmost block of terrain — what shows from
-                    // above, matching `game::lod::merge_group`.
-                    let top = c.top.min(cy * cb + cb - 1);
-                    match column_material(&mats, &c, top) {
-                        BlockId::AIR => {
-                            let (mx, mz) = centre(cx, cz);
-                            strata_rock(&strata, patch.geo(mx, mz), top)
-                        }
-                        mat => mat,
-                    }
-                } else {
-                    // Likewise the cell's topmost water block — but only ice
-                    // is LOD terrain: a liquid cell is air (the bed shows),
-                    // its surface rides in the key's `LodWater`
-                    // (`coarse_water`).
-                    let by = water_top.min(cy * cb + cb - 1);
-                    if by < c.ice_from {
-                        continue;
-                    }
-                    mats.biome.ice
-                };
-                let group = [cx.div_euclid(G), cy.div_euclid(G), cz.div_euclid(G)];
-                let (lx, ly, lz) = ((cx % G) as usize, cy.rem_euclid(G) as usize, (cz % G) as usize);
-                let g = grids
-                    .entry(group)
-                    .or_insert_with(|| vec![Voxel::default(); BRICK_VOXEL_COUNT]);
-                g[lx + BRICK_VOXELS * ly + BRICK_VOXELS * BRICK_VOXELS * lz] = Voxel::new(mat);
-            }
-        }
-    }
-
-    // Trees: each a leaves column from its crown's base to its top over its
-    // crown disc (and always over its trunk), into air cells only.
-    if mats.trees.enabled() {
-        // Placement reads surfaces up to `m` past the key; each surface's
-        // slope reads one block further (still inside the patch's
-        // `TREE_PATCH_MARGIN`).
-        let m = TREE_PATCH_MARGIN - PATCH_MARGIN;
-        let sample_memo = std::cell::RefCell::new(std::collections::HashMap::new());
-        let sample = |x: i32, z: i32| {
-            assert!(
-                (ox - m - 1..ox + span_blocks + m + 1).contains(&x)
-                    && (oz - m - 1..oz + span_blocks + m + 1).contains(&z),
-                "a tree surface's slope read the column ({x}, {z}), outside the coarse patch"
-            );
-            let cached = sample_memo.borrow().get(&(x, z)).copied();
-            cached.unwrap_or_else(|| {
-                let c = column_sample(patch, &mats, x, z);
-                sample_memo.borrow_mut().insert((x, z), c);
-                c
-            })
-        };
-        let memo = std::cell::RefCell::new(std::collections::HashMap::new());
-        let surface = |x: i32, z: i32| {
-            assert!(
-                (ox - m..ox + span_blocks + m).contains(&x) && (oz - m..oz + span_blocks + m).contains(&z),
-                "tree placement read the surface at ({x}, {z}), outside the coarse patch"
-            );
-            let cached = memo.borrow().get(&(x, z)).copied();
-            cached.unwrap_or_else(|| {
-                let c = sample(x, z);
-                let slope = slopes::slope_for(&c, |dx, dz| sample(x + dx, z + dz)).is_some();
-                let g = tree_ground(c, slope);
-                memo.borrow_mut().insert((x, z), g);
-                g
-            })
-        };
-        let memo_habitat = MemoHabitat { inner: trees_from.habitat, memo: Default::default() };
-        let (x1, z1) = (ox + span_blocks, oz + span_blocks);
-        for tree in trees::trees_in(ox, oz, x1, z1, trees_from.seed, &memo_habitat, &surface) {
-            let Some((lo, hi, radius)) = crown_extent(&tree) else { continue };
-            let leaves = Voxel::new(mats.trees.species[tree.species as usize].leaves);
-            let [bx, by, bz] = tree.base;
-            let (cy0, cy1) = ((by + lo).div_euclid(cb), (by + hi).div_euclid(cb));
-            let cells_of = |a: i32, o: i32| ((a - radius).max(o) - o) / cb..=((a + radius).min(o + span_blocks - 1) - o) / cb;
-            for cx in cells_of(bx, ox) {
-                for cz in cells_of(bz, oz) {
-                    // Cell centre to trunk axis, blocks.
-                    let (dx, dz) = (
-                        (ox + cx * cb) as f64 + cb as f64 * 0.5 - (bx as f64 + 0.5),
-                        (oz + cz * cb) as f64 + cb as f64 * 0.5 - (bz as f64 + 0.5),
-                    );
-                    let trunk = (ox + cx * cb..ox + cx * cb + cb).contains(&bx)
-                        && (oz + cz * cb..oz + cz * cb + cb).contains(&bz);
-                    if !trunk && dx * dx + dz * dz > (radius as f64 + 0.5) * (radius as f64 + 0.5) {
-                        continue;
-                    }
-                    for cy in cy0..=cy1 {
-                        let group = [cx.div_euclid(G), cy.div_euclid(G), cz.div_euclid(G)];
-                        let (lx, ly, lz) = ((cx % G) as usize, cy.rem_euclid(G) as usize, (cz % G) as usize);
-                        let g = grids.entry(group).or_insert_with(|| vec![Voxel::default(); BRICK_VOXEL_COUNT]);
-                        let v = &mut g[lx + BRICK_VOXELS * ly + BRICK_VOXELS * BRICK_VOXELS * lz];
-                        if v.is_air() {
-                            *v = leaves;
-                        }
-                    }
-                }
-            }
-        }
-    }
-    grids
-        .into_iter()
-        .map(|(group, grid)| LodCell { group, grid })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
-    /// R8.2: a column's LOD water — dry ground, open water, a column whose
-    /// top water block is ice (dry: the ice is LOD terrain), a glacier.
-    #[test]
-    fn coarse_water_column_rules() {
-        let c = |s: i32, water_top: i32, top: i32, ice_from: i32| super::ColSample {
-            s,
-            water_top,
-            top,
-            ice_from,
-            cover: None,
-            trees: true,
-            unbounded: true,
-        };
-        assert_eq!(super::lod_water_column(&c(70, 63, 70, 64)), (game::NO_WATER, 0), "dry land");
-        assert_eq!(super::lod_water_column(&c(58, 63, 58, 64)), (63, 5), "shallow sea");
-        let max = game::lod::LOD_WATER_MAX_DEPTH_BLOCKS;
-        assert_eq!(super::lod_water_column(&c(50, 63, 50, 64)), (63, max), "open sea clamps");
-        assert_eq!(super::lod_water_column(&c(50, 63, 50, 62)), (game::NO_WATER, 0), "frozen top");
-        assert_eq!(super::lod_water_column(&c(-900, 63, -900, 64)), (63, max), "depth clamps");
-        assert_eq!(super::lod_water_column(&c(60, 63, 70, 64)), (game::NO_WATER, 0), "glacier over the water top");
-    }
-
-    /// Open sea over a varying seabed is one RLE run: every depth past the
-    /// alpha's saturation ships as the clamp.
-    #[test]
-    fn open_sea_row_is_one_run() {
-        let side: u16 = 8;
-        let tops: Vec<(i16, u8)> = (0..i32::from(side) * i32::from(side))
-            .map(|i| {
-                let floor = 40 - (i * 7) % 15; // 26..=40 blocks: always deeper than the clamp
-                super::lod_water_column(&super::ColSample {
-                    s: floor,
-                    water_top: 63,
-                    top: floor,
-                    ice_from: 64,
-                    cover: None,
-                    trees: true,
-                    unbounded: true,
-                })
-            })
-            .collect();
-        let water = game::lod::LodWater::encode(&tops, side);
-        assert_eq!(water.runs, vec![(side * side, 63, game::lod::LOD_WATER_MAX_DEPTH_BLOCKS)]);
-    }
-
     use super::*;
-    use game::{BlockId, Column, ColumnCoords, ReadVol, BlockPos, SubChunk, REGION_CHUNKS};
+    use crate::pipeline::TerrainPipeline;
 
     /// `treeless` (no trees dressed onto the column) and
     /// `trees::BIOME_TREE_DENSITY` (no trees placed) are two sources of truth:
@@ -1182,93 +457,6 @@ mod tests {
         assert_eq!(species, engine);
     }
 
-    fn mats() -> crate::material::Materials {
-        crate::material::Materials {
-            stone: BlockId(2),
-            dirt: BlockId(1),
-            grass: BlockId(3),
-            sand: BlockId(4),
-            water: BlockId(5),
-            bedrock: game::BlockId(6),
-            rocks: [7, 8, 9, 10, 11, 12].map(game::BlockId),
-            trees: crate::material::TreeBlocks::NONE,
-            biome: crate::material::BiomeBlocks::NONE,
-        }
-    }
-
-    fn crc(cols: &[(ColumnCoords, Column)]) -> u32 {
-        let mut h = crc32fast::Hasher::new();
-        h.update(&bincode::serialize(cols).unwrap());
-        h.finalize()
-    }
-
-    #[test]
-    fn produces_sixty_four_columns() {
-        let cols = generate_region(RegionCoords::new(0, 0), 1, mats());
-        assert_eq!(cols.len(), REGION_CHUNKS * REGION_CHUNKS);
-    }
-
-    #[test]
-    fn deterministic_same_seed() {
-        let a = generate_region(RegionCoords::new(-3, 7), 99, mats());
-        let b = generate_region(RegionCoords::new(-3, 7), 99, mats());
-        assert_eq!(crc(&a), crc(&b));
-    }
-
-    #[test]
-    fn different_seed_differs() {
-        let a = generate_region(RegionCoords::new(0, 0), 1, mats());
-        let b = generate_region(RegionCoords::new(0, 0), 2, mats());
-        assert_ne!(crc(&a), crc(&b));
-    }
-
-    /// Worldgen terrain is whole blocks and slopes only: every non-tree
-    /// chisel is one of the slope shapes of its block's own material, there
-    /// are some (so placement actually ran and wrote real terrain), none sits
-    /// at or under water, where its open quarters would be air pockets, and no
-    /// one-cuboid half block is left anywhere.
-    #[test]
-    fn terrain_is_whole_blocks_and_dry_slopes_only() {
-        // Coast north-east of spawn: land, beach and open sea.
-        let rc = RegionCoords::from_world(5632.0, -2560.0);
-        let cols = generate_region(rc, WORLD_SEED, mats());
-        let mut slopes = 0;
-        for (_, col) in &cols {
-            for (sub_y, sub) in (col.base_sub_y()..).zip(col.sub_chunks()) {
-                let SubChunk::Dense(chunk) = sub else { continue };
-                for (bi, chisel) in &chunk.chisel {
-                    let (bx, by, bz) = bi.xyz();
-                    if chunk.block_at(bx, by, bz).tree_id() != 0 {
-                        continue; // tree wood, not terrain
-                    }
-                    let mat = chunk.block_at(bx, by, bz).id;
-                    let cuboids: Vec<_> = chisel.cuboids().collect();
-                    let half = vec![([0, 0, 0], [BLOCK_VOXELS, game::HALF_BLOCK_VOXELS, BLOCK_VOXELS], mat)];
-                    assert_ne!(cuboids, half, "a half block is left");
-                    assert!(cuboids.iter().all(|c| c.2 == mat), "a slope in another material");
-                    assert!(game::slope::classify(chisel).is_some(), "not a slope: {cuboids:?}");
-                    slopes += 1;
-                    let y = sub_y * CHUNK_BLOCKS as i32 + by as i32;
-                    let recipe = col.ground().expect("a recipe").recipe_water(bx, bz);
-                    assert_eq!(recipe, None, "slope under water at block y {y}");
-                    assert!(y > SEA_TOP_BLOCK, "slope at or under the sea surface at block y {y}");
-                }
-            }
-        }
-        assert!(slopes > 0, "expected slopes on the coast");
-    }
-
-    #[test]
-    fn columns_contain_solid_ground() {
-        let cols = generate_region(RegionCoords::new(5, 5), 3, mats());
-
-        // Sanity: `get()` still reads solid ground somewhere too.
-        let any_solid = cols.iter().any(|(_, col)| {
-            (0..64).any(|y| col.get(BlockPos::new(0, y, 0)).id != BlockId::AIR)
-        });
-        assert!(any_solid, "expected some solid ground in the region");
-    }
-
     #[test]
     fn analytic_surface_scan_matches_the_full_band_scan() {
         // The old scan: every block of the band, top down.
@@ -1294,192 +482,4 @@ mod tests {
         }
     }
 
-    #[test]
-    fn coarse_tile_is_deterministic_and_key_local() {
-        let key = game::lod::LodKey { factor: 64, coords: [0, 0] };
-        // One grid per band when the factor-64 grid covers the whole key;
-        // several (2x2 at 256 blocks) when a region is bigger than it.
-        let grids_per_axis = ((game::REGION_SIZE as i32) / (32 * 64)).max(1);
-        let a = coarse_tile(&key, WORLD_SEED, mats());
-        let b = coarse_tile(&key, WORLD_SEED, mats());
-        assert_eq!(a.len(), b.len());
-        for (ca, cb) in a.iter().zip(&b) {
-            assert_eq!(ca.group, cb.group);
-            assert_eq!(ca.grid, cb.grid);
-            assert!(
-                (0..grids_per_axis).contains(&ca.group[0]) && (0..grids_per_axis).contains(&ca.group[2]),
-                "key-local groups: {:?}",
-                ca.group
-            );
-        }
-        assert!(!a.is_empty(), "sea-level world always materializes at least one band");
-        // Sea level (block 64) must be covered: some cell is water or solid.
-        assert!(a.iter().any(|c| c.grid.iter().any(|v| !v.is_air())));
-    }
-
-    /// Coarse point-sampling vs exact generate+downsample: per cell column the
-    /// highest solid cell must match within one cell for the vast majority of
-    /// columns. This bounds the accepted §3 inexactness; tighten the threshold
-    /// only with measurement.
-    #[test]
-    fn sea_surface_sits_on_every_lod_lattice() {
-        let surface_voxels = (SEA_TOP_BLOCK + 1) as u32 * BLOCK_VOXELS as u32;
-        for factor in game::lod::LOD_FACTORS {
-            assert_eq!(surface_voxels % factor, 0, "factor {factor} would round the sea up");
-        }
-    }
-
-    /// The sea is one flat plane in every ring: the coarse water layer puts
-    /// every sea column's surface exactly on the real water surface at every
-    /// coarse factor (water plan Task 8: it is `coarse_water`'s now — the
-    /// coarse terrain grids carry no water).
-    #[test]
-    fn coarse_sea_surface_is_exact_at_every_factor() {
-        let surface_voxels = (SEA_TOP_BLOCK + 1) * BLOCK_VOXELS as i32;
-        // Coast north-east of spawn: grass, beach and open sea. Named by WORLD position
-        // — region (5, -3) at the default size — so it is the same coast at any
-        // `REGION_CHUNKS`.
-        let rc = RegionCoords::from_world(5632.0, -2560.0);
-        for factor in [16u32, 32, 64, 128, 256, 512] {
-            let key = game::lod::LodKey::for_region(factor, rc);
-            for cell in coarse_tile(&key, WORLD_SEED, mats()) {
-                assert!(cell.grid.iter().all(|v| v.block != mats().water), "factor {factor}: water in the terrain");
-            }
-            let tops = coarse_water(&key, WORLD_SEED, mats()).decode().expect("well-formed");
-            let mut water_columns = 0;
-            for &(top, _) in tops.iter().filter(|&&(top, _)| top != game::NO_WATER) {
-                water_columns += 1;
-                assert_eq!((i32::from(top) + 1) * BLOCK_VOXELS as i32, surface_voxels, "factor {factor}");
-            }
-            assert!(water_columns > 0, "factor {factor}: the coast key has open water");
-        }
-    }
-
-    /// The region-keyed coarse factors replace full generation for pristine
-    /// terrain, so they must reproduce it, not merely resemble it: same
-    /// surface cell and same visible material in nearly every column.
-    #[test]
-    #[ignore = "slow: >100ms — run via just test-full"]
-    fn region_coarse_factors_match_downsampled_full_generation() {
-        let rc = RegionCoords::from_world(5632.0, -2560.0); // coast north-east of spawn (region (5, -3) at the default size): grass, beach and open sea
-        let started = std::time::Instant::now();
-        let chunks: Vec<(game::ChunkCoords, game::Chunk)> = generate_region(rc, WORLD_SEED, mats())
-            .into_iter()
-            .flat_map(|(cc, col)| {
-                col.materialized_sub_chunks()
-                    .into_iter()
-                    .map(move |(sub_y, ch)| (game::ChunkCoords::new(cc.x, sub_y, cc.z), ch))
-            })
-            .collect();
-        println!("generate_region: {:?}", started.elapsed());
-
-        // Topmost solid cell (absolute cell y, block id) per cell column.
-        let tops = |cells: &[game::lod::LodCell], per: usize| {
-            let mut out = std::collections::BTreeMap::new();
-            for c in cells {
-                for z in 0..32usize {
-                    for x in 0..32usize {
-                        let col = (c.group[0] as usize * 32 + x, c.group[2] as usize * 32 + z);
-                        if col.0 >= per || col.1 >= per {
-                            continue;
-                        }
-                        for y in (0..32usize).rev() {
-                            let v = c.grid[x + 32 * y + 32 * 32 * z];
-                            if !v.is_air() {
-                                let top = (c.group[1] * 32 + y as i32, v.block);
-                                let e = out.entry(col).or_insert(top);
-                                *e = (*e).max(top);
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-            out
-        };
-
-        for factor in [16u32, 32] {
-            let key = game::lod::LodKey::for_region(factor, rc);
-            let started = std::time::Instant::now();
-            let coarse = coarse_tile(&key, WORLD_SEED, mats());
-            println!("coarse_tile factor {factor}: {:?}", started.elapsed());
-            let exact = game::lod::downsample_chunks(chunks.clone(), factor);
-
-            let per = game::lod::cells_per_region(factor);
-            let (a, b) = (tops(&coarse, per), tops(&exact, per));
-            assert_eq!(a.len(), per * per, "factor {factor}: every column has terrain or sea");
-            let (mut height_hits, mut material_hits) = (0, 0);
-            for (col, (ay, amat)) in &a {
-                let (by, bmat) = b[col];
-                height_hits += (*ay == by) as usize;
-                material_hits += (*ay == by && *amat == bmat) as usize;
-            }
-            println!("factor {factor}: height {height_hits}/{}, material {material_hits}", a.len());
-            assert!(height_hits * 100 >= a.len() * 95, "factor {factor}: surface cell matches");
-            assert!(material_hits * 100 >= a.len() * 90, "factor {factor}: visible material matches");
-        }
-    }
-
-    #[test]
-    #[ignore = "slow: >100ms — run via just test-full"]
-    fn coarse_tile_tracks_downsampled_full_generation() {
-        // A tile spanning several regions: factor 64 (2x2) at the default
-        // region size, 256 once a factor-64 grid is one region or less.
-        let factor = if game::lod::tile_regions(64) > 1 { 64 } else { 256 };
-        if game::lod::tile_regions(factor) <= 1 {
-            return; // large cell-mode regions: no tile spans several regions
-        }
-        let key = game::lod::LodKey { factor, coords: [0, 0] };
-        let coarse = coarse_tile(&key, WORLD_SEED, mats());
-
-        // Exact: generate each covered region, downsample to 64, overlay into a tile.
-        let mut exact: std::collections::BTreeMap<[i32; 3], Vec<game::Voxel>> = Default::default();
-        for rc in key.regions() {
-            let columns = generate_region(rc, WORLD_SEED, mats());
-            let chunks: Vec<(game::ChunkCoords, game::Chunk)> = columns
-                .into_iter()
-                .flat_map(|(cc, col)| {
-                    col.materialized_sub_chunks()
-                        .into_iter()
-                        .map(move |(sub_y, ch)| (game::ChunkCoords::new(cc.x, sub_y, cc.z), ch))
-                })
-                .collect();
-            let cells = game::lod::downsample_chunks(chunks, key.factor);
-            game::lod::copy_region_cells_into_tile(&mut exact, &cells, rc, &key);
-        }
-
-        let top_of = |grids: &std::collections::BTreeMap<[i32; 3], Vec<game::Voxel>>,
-                      x: usize,
-                      z: usize| {
-            grids
-                .iter()
-                .flat_map(|(g, grid)| {
-                    (0..32).rev().find_map(|y| {
-                        (!grid[x + 32 * y + 32 * 32 * z].is_air())
-                            .then(|| g[1] * 32 + y as i32)
-                    })
-                })
-                .max()
-        };
-        let coarse_map: std::collections::BTreeMap<[i32; 3], Vec<game::Voxel>> =
-            coarse.iter().map(|c| (c.group, c.grid.clone())).collect();
-
-        let (mut hits, mut total) = (0, 0);
-        for x in 0..32 {
-            for z in 0..32 {
-                let (a, b) = (top_of(&coarse_map, x, z), top_of(&exact, x, z));
-                if let (Some(a), Some(b)) = (a, b) {
-                    total += 1;
-                    if (a - b).abs() <= 1 {
-                        hits += 1;
-                    }
-                }
-            }
-        }
-        assert!(total > 200, "most columns have terrain (total={total})");
-        assert!(
-            hits * 10 >= total * 9,
-            "coarse surface within ±1 cell for >=90% of columns ({hits}/{total})"
-        );
-    }
 }

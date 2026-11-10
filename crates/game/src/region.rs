@@ -12,7 +12,7 @@ use crate::input::Key;
 use crate::{Chunk, Client, ClientId, GameData, Rollback, Tick};
 
 use crate::{
-    camera::CameraController, physics::PhysicsController, ChunkCoords, Column, ColumnCoords,
+    camera::CameraController, physics::PhysicsController, ChunkCoords,
     Controller, EntityBundle, GameDataUpdate, GameError, GameEvent, GameEventKind, HaloEntityMsg,
     RegionCoords, RegionId, ServerPacket,
 };
@@ -1189,39 +1189,6 @@ impl Region {
         let ground = seed.ground;
         self.data.seed_stud_ground_genesis(ground, extra);
         self.data.set_body_scale_raw(crate::movement::BodyScale::STUD);
-    }
-
-    /// Seed a region from vertical columns: flatten each column's materialized
-    /// (Dense) sub-chunks into the existing per-chunk mesh/collider path.
-    /// The ground recipes' water is labelled into bodies first
-    /// (`label_water_bodies`; a recipe cell holding a solid block — ice —
-    /// is no volume).
-    pub fn from_columns(id: RegionId, columns: Vec<(ColumnCoords, Column)>) -> Self {
-        let mut ground: Vec<(ColumnCoords, crate::ColumnGround)> =
-            columns.iter().filter_map(|(c, col)| col.ground().map(|g| (*c, g.clone()))).collect();
-        let bodies = {
-            let by_coords: std::collections::BTreeMap<ColumnCoords, &Column> = columns.iter().map(|(c, col)| (*c, col)).collect();
-            crate::label_water_bodies(&mut ground, |c, (lx, lz), y| {
-                use crate::ReadVol;
-                by_coords.get(&c).is_some_and(|col| {
-                    let b = col.get(crate::volume::BlockPos::new(lx as i32, y, lz as i32)).id;
-                    b != crate::BlockId::AIR && !crate::block_props().is_liquid(b)
-                })
-            })
-        };
-        let chunks: Vec<(ChunkCoords, Chunk)> = columns
-            .into_iter()
-            .flat_map(|(col, column)| {
-                column
-                    .materialized_sub_chunks()
-                    .into_iter()
-                    .map(move |(sub_y, chunk)| (ChunkCoords::new(col.x, sub_y, col.z), chunk))
-            })
-            .collect();
-        let mut region = Region::from_chunks(id, chunks);
-        region.data.seed_ground_genesis(ground);
-        region.data.seed_water_genesis(bodies);
-        region
     }
 
     /// Server-side commit of the event just handled: forget its undo

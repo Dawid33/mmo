@@ -20,8 +20,8 @@
 //! - messages are bincode bytes in a transferred `ArrayBuffer`
 //!   ([`post_bytes`] / [`message_bytes`]);
 //! - roles: [`sim`] (the game manager + the WebTransport connection — the
-//!   native game thread) and [`pool`] (the compute pool: meshing and brick
-//!   derivation jobs, Bevy's `AsyncComputeTaskPool` on native).
+//!   native game thread) and [`pool`] (the compute pool: meshing jobs,
+//!   Bevy's `AsyncComputeTaskPool` on native).
 //!
 //! `?workers=0` in the page URL turns all of it off (everything back on the
 //! main thread, as before); `?workers=N` sizes the compute pool. A page without

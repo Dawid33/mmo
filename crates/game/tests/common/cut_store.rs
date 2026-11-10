@@ -1,9 +1,7 @@
 //! A stand-in for the world store (Task 6 writes the real one): what the
 //! store holds after committing a sequence of save cuts
 //! ([`game::WorldCut`]), and the places an entity is saved in.
-use game::{
-    ChunkCoords, Chunk, EntityId, InFlightRow, PlayerId, PlayerRecord, RegionCoords, StoredRegion, WorldCut,
-};
+use game::{EntityId, InFlightRow, PlayerId, PlayerRecord, RegionCoords, StoredRegion, WorldCut};
 use std::collections::BTreeMap;
 
 #[derive(Default, Debug)]
@@ -17,19 +15,13 @@ pub struct CutStore {
 }
 
 impl CutStore {
-    /// Commits `cut`: each region's meta and entities replaced, its chunks
-    /// upserted, its ground set once; the in-flight rows replaced; the
+    /// Commits `cut`: each region's meta and entities replaced, its stud chunk
+    /// rows upserted or deleted, its recipes set once; the in-flight rows replaced; the
     /// players upserted.
     pub fn apply(&mut self, cut: &WorldCut) {
         for (rc, p) in &cut.regions {
             let stored = self.regions.entry(*rc).or_default();
             stored.meta = p.meta.clone();
-            let mut chunks: BTreeMap<ChunkCoords, Chunk> = std::mem::take(&mut stored.chunks).into_iter().collect();
-            chunks.extend(p.chunks.iter().map(|(c, k)| (*c, k.clone())));
-            stored.chunks = chunks.into_iter().collect();
-            if let Some(ground) = &p.ground {
-                stored.ground = ground.clone();
-            }
             stored.entities = p.entities.clone();
             let mut studs: BTreeMap<_, _> = std::mem::take(&mut stored.stud_chunks).into_iter().collect();
             for (c, record) in &p.stud_chunks {

@@ -3,7 +3,6 @@
 //! bodies' sweeps hit, and whose animated ticks undo bit-exact.
 use crate::common;
 
-use common::floor_chunks;
 use game::anim::{self, Animator, RigId, REST_CLIP};
 use game::rapier3d::math::Vector;
 use game::rapier3d::prelude::{ColliderHandle, QueryFilter, Ray};
@@ -18,7 +17,7 @@ fn region_with_player() -> (Region, EntityKey, crossbeam::channel::Receiver<game
     let mut region = Region::new(Rollback::new(Some(send.clone())), Some(send), RegionCoords::new(0, 0), None);
     let (x, z) = region.data().spawn_xz();
     let edge = common::CHUNK_EDGE;
-    region.with_data(|r| r.seed_terrain_genesis(floor_chunks(x - edge..x + edge, z - edge..z + edge, 16)));
+    region.seed_stud_world(common::floor_seed(x - edge..x + edge, z - edge..z + edge, common::FLOOR_PLATES));
     region.handle_event(GameEventKind::CreateClient(CLIENT)).unwrap();
     // FPS cam on, so held keys move the body.
     region

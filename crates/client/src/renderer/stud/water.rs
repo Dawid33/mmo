@@ -1,8 +1,8 @@
-//! Recipe water on stud terrain. As on voxels, water is recipe data, never
+//! Recipe water on stud terrain. Water is recipe data, never
 //! bricks: each stud column's `StudColumnGround::water_top` (plates) over its
 //! `surface`. It is drawn as the water SURFACE only — one mesh per chunk column
 //! holding water, a quad per rectangle of stud columns at one water level —
-//! with the voxel water pass's material (`water::material`: blended, tinted by
+//! with the water material (`water::material`: blended, tinted by
 //! vertex colour, cut with the working level).
 //!
 //! Static, like the sim's (`water.rs`): the recipe alone decides, so a hole dug

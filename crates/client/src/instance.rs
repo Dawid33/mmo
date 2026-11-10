@@ -204,13 +204,13 @@ pub struct GameInstanceManager {
     /// Last ring-factor assignment per region (the stickiness `prev` for the
     /// next `desired_lod` call).
     lod_assigned: BTreeMap<RegionCoords, u32>,
-    /// Ring table driving `update_lod_window` — a field (defaulting to
-    /// `LOD_RING_TABLE`) so test harnesses can shrink it: every key it
-    /// yields costs the server a real build, which headless suites pay
-    /// synchronously through `InlineLodBuilder`.
-    lod_table: &'static [(i32, u32)],
-    /// `lod_table` has been swapped for the stud one (`use_stud_lod_table`).
-    stud_lod_table: bool,
+    /// Ring table driving `update_lod_window`: the stud table
+    /// (`game::stud_ring_table`: coarser cells over the same reach) of the
+    /// world scale's base table, `LOD_RING_TABLE` by default. A field so
+    /// test harnesses can shrink it (`set_lod_table`): every key it yields
+    /// costs the server a real build, which headless suites pay synchronously
+    /// through `InlineStudLodBuilder`.
+    lod_table: Vec<(i32, u32)>,
     /// Radius of the near (authoritative) window: 1 = 3x3 here; the binaries
     /// apply the production `WorldScale` (5x5) via `set_world_scale`.
     /// Headless suites shrink it to 0 — each region costs a full worldgen +
@@ -693,8 +693,7 @@ impl GameInstanceManager {
             window_center: None,
             subscribed: std::collections::BTreeSet::new(),
             lod_assigned: BTreeMap::new(),
-            lod_table: game::lod::LOD_RING_TABLE,
-            stud_lod_table: false,
+            lod_table: game::stud_ring_table(game::lod::LOD_RING_TABLE),
             near_radius: 1,
             fortress_radius: 0,
             fortress_region: None,
@@ -803,11 +802,12 @@ impl GameInstanceManager {
         self.server_game_recv.clone()
     }
 
-    /// Override the LOD ring table (test/harness hook): headless suites pay
-    /// every requested key as a synchronous server-side build, so they shrink
-    /// (or empty) the table unless LOD is what they're testing.
-    pub fn set_lod_table(&mut self, table: &'static [(i32, u32)]) {
-        self.lod_table = table;
+    /// Override the base LOD ring table (test/harness hook; subscribed with
+    /// as its `game::stud_ring_table`): headless suites pay every requested
+    /// key as a synchronous server-side build, so they shrink (or empty) the
+    /// table unless LOD is what they're testing.
+    pub fn set_lod_table(&mut self, table: &[(i32, u32)]) {
+        self.lod_table = game::stud_ring_table(table);
     }
 
     /// Shrink the near window (test/harness hook). Radius 0 subscribes to the
@@ -821,7 +821,8 @@ impl GameInstanceManager {
     /// Call before `start()`: the join burst reads both halves.
     pub fn set_world_scale(&mut self, scale: crate::world_scale::WorldScale) {
         info!("[client] world scale: {scale}");
-        self.lod_table = scale.lod_table;
+        self.set_lod_table(scale.lod_table);
+        info!("[client] LOD rings {:?} (from {:?})", self.lod_table, scale.lod_table);
         self.near_radius = scale.near_radius;
         self.fortress_radius = scale.fortress_radius;
     }
@@ -1533,28 +1534,6 @@ impl GameInstanceManager {
         true
     }
 
-    /// A stud world's far terrain is streamed on its own ring table
-    /// (`game::stud_ring_table`: coarser cells over the same reach). The server
-    /// says so on connect (`ServerPacket::StudTerrain`), before anything makes
-    /// us ask for LOD; a stud region snapshot swaps the table too (a world that
-    /// sent no such packet), and keys asked for on the voxel table before that
-    /// are released by the next `update_lod_window` diff. The table is leaked,
-    /// like an explicit `VOXEL_LOD_RINGS` one: once per session.
-    fn use_stud_lod_table(&mut self) {
-        if self.stud_lod_table {
-            return;
-        }
-        self.stud_lod_table = true;
-        if self.lod_table.is_empty() {
-            return;
-        }
-        let table = game::stud_ring_table(self.lod_table);
-        info!("[client] stud terrain: LOD rings {:?} (from {:?})", table, self.lod_table);
-        self.lod_table = Box::leak(table.into_boxed_slice());
-        // Ring assignments made on the voxel table are not sticky on this one.
-        self.lod_assigned.clear();
-    }
-
     /// Diff the desired LOD key set against current subscriptions. Runs
     /// right after `update_window`, so the near-window exclusion set it
     /// subtracts is already current — streamed LOD and simulated regions
@@ -1568,7 +1547,7 @@ impl GameInstanceManager {
             center,
             &excluded,
             &self.lod_assigned,
-            self.lod_table,
+            &self.lod_table,
             game::lod::LOD_STICKY_BAND,
         );
         self.lod_assigned = assigned;
@@ -1730,9 +1709,6 @@ impl GameInstanceManager {
                 let pending = self.pending_events.remove(&id);
                 #[cfg(not(target_arch = "wasm32"))]
                 let snap_start = Instant::now();
-                if raw_game_data.terrain_kind() == game::TerrainKind::Stud {
-                    self.use_stud_lod_table();
-                }
                 // Replace-on-re-receipt: crash-respawn/resubscribe resyncs.
                 self.drop_region(id);
                 self.new_region(id, raw_game_data);
@@ -1780,15 +1756,6 @@ impl GameInstanceManager {
                     .client_event_send
                     .send(ClientUpdateEvent::PlayRefused(rc, why));
             }
-            game::ServerPacket::LodData(key, payload, water) => {
-                if !self.lod_arrived(key) {
-                    return Ok(());
-                }
-                let _ = self
-                    .client_event_send
-                    .send(ClientUpdateEvent::LodData(key, payload, water));
-            }
-            game::ServerPacket::StudTerrain => self.use_stud_lod_table(),
             game::ServerPacket::StudLodData(key, tile) => {
                 if !self.lod_arrived(key) {
                     return Ok(());
@@ -2913,37 +2880,24 @@ mod manager_tests {
         assert!(client_recv.try_recv().is_err());
     }
 
-    /// A stud world streams its far terrain on the stud ring table: the first
-    /// stud snapshot swaps the table (once), the keys asked for on the voxel
-    /// table are released, and only keys the server builds stud tiles for are
-    /// requested; a `StudLodData` for a held key goes to the renderer, one for
-    /// a released key is answered with a `ReleaseLod`.
+    /// Far terrain is subscribed on the stud ring table from the first
+    /// request: only keys the server builds tiles for are requested; a
+    /// `StudLodData` for a held key goes to the renderer, one for a released
+    /// key is answered with a `ReleaseLod`.
     #[test]
-    fn a_stud_world_subscribes_on_the_stud_ring_table() {
+    fn lod_is_subscribed_on_the_stud_ring_table() {
         let (game_send, game_recv) = crossbeam::channel::unbounded();
         let (client_send, client_recv) = crossbeam::channel::unbounded::<ClientUpdateEvent>();
         let dummy_addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 0));
         let mut manager = GameInstanceManager::new(game_send, game_recv, client_send, dummy_addr, game::DebugFlags::default());
         let home = RegionCoords::new(0, 0);
         manager.home_region = Some(home);
-        let voxel_table = manager.lod_table;
         let packets = manager.client_packet_recv();
-        // A first tick on the voxel table, before any snapshot.
-        manager.update_lod_window();
-        let early: std::collections::BTreeSet<game::lod::LodKey> = packets
-            .try_iter()
-            .map(|p| match p {
-                ClientPacket::RequestLod(key) => key,
-                _ => panic!("only RequestLod expected"),
-            })
-            .collect();
-        assert!(!early.is_empty());
-
-        manager.use_stud_lod_table();
-        let stud_table = game::stud_ring_table(voxel_table);
-        assert_eq!(manager.lod_table, stud_table.as_slice());
-        manager.use_stud_lod_table();
-        assert_eq!(manager.lod_table, stud_table.as_slice(), "swapped once, not coarsened again");
+        let stud_table = game::stud_ring_table(game::lod::LOD_RING_TABLE);
+        assert_eq!(manager.lod_table, stud_table);
+        // An overridden base table is subscribed with as its stud table too.
+        manager.set_lod_table(game::lod::LOD_RING_TABLE);
+        assert_eq!(manager.lod_table, stud_table);
 
         let excluded = desired_window(home, Some(home), manager.near_radius, 0, None, 0);
         let (_, expected) = desired_lod(home, &excluded, &BTreeMap::new(), &stud_table, game::lod::LOD_STICKY_BAND);
@@ -2959,10 +2913,8 @@ mod manager_tests {
                 }
             }
         }
-        let stale: std::collections::BTreeSet<_> = early.difference(&expected).copied().collect();
-        assert_eq!(released, stale, "what the voxel table asked for and the stud one does not want");
-        let fresh: std::collections::BTreeSet<_> = expected.difference(&early).copied().collect();
-        assert_eq!(requested, fresh);
+        assert!(released.is_empty());
+        assert_eq!(requested, expected);
         assert_eq!(manager.lod_subscribed, expected);
 
         // A tile for a held key reaches the renderer; one for a released key does not.
@@ -2999,7 +2951,7 @@ mod manager_tests {
             home,
             &excluded,
             &BTreeMap::new(),
-            game::lod::LOD_RING_TABLE,
+            &manager.lod_table,
             game::lod::LOD_STICKY_BAND,
         );
         assert!(expected.len() > LOD_REQUESTS_PER_TICK, "table must need pacing");

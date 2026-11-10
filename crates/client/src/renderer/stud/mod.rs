@@ -36,8 +36,15 @@ pub struct SimStudChunk {
 
 /// The player body's size in the region(s) being played (`GameData::body_scale`),
 /// set from region snapshots. All regions of one world share one scale.
-#[derive(Resource, Default, Clone, Copy)]
+#[derive(Resource, Clone, Copy)]
 pub struct ClientBodyScale(pub game::movement::BodyScale);
+
+impl Default for ClientBodyScale {
+    /// A stud world's body, until the first snapshot says so itself.
+    fn default() -> Self {
+        Self(game::movement::BodyScale::STUD)
+    }
+}
 
 pub struct StudPlugin;
 
@@ -48,7 +55,7 @@ impl Plugin for StudPlugin {
             .add_session_reset::<ClientBodyScale>()
             .add_session_reset::<material::StudMaterials>()
             // After the fortress view is rebuilt this frame (the commander
-            // plugin's `update_fortress_view`), like the voxel chunk material's sync.
+            // plugin's `update_fortress_view`).
             .add_systems(
                 Update,
                 (material::sync_stud_materials, material::retarget_stud_materials)

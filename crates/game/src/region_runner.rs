@@ -6,7 +6,7 @@
 //! wasm build LocalServer pumps runners inline (crates/client).
 
 use crate::{
-    ClientId, Column, ColumnCoords, EntityBundle, TerrainSnapshot, GameEvent, GameEventKind, HaloEntityMsg, Region,
+    ClientId, EntityBundle, TerrainSnapshot, GameEvent, GameEventKind, HaloEntityMsg, Region,
     RegionCoords, RegionId, Rollback, Tick,
     TERRAIN_HASH_INTERVAL_TICKS, TICK_RATE,
 };
@@ -51,9 +51,6 @@ pub enum RegionInput {
     /// A new subscriber needs the full state; replied with
     /// `RegionOutput::Snapshot(client, ...)`.
     RequestSnapshot(ClientId),
-    /// An LOD build needs read-only terrain; replied with
-    /// `RegionOutput::Terrain(client, ...)`. Does not affect sim state.
-    RequestTerrain(ClientId),
     /// The finite world's extent and coarse-route map
     /// (`Region::set_route_map`): the manager sends it right after spawning,
     /// before any tick, when it has a map.
@@ -74,7 +71,7 @@ pub enum RegionInput {
     HaloRequest(RegionCoords),
     /// Seed this (just started, not yet ticked) region's halo from worldgen
     /// for these never-run neighbours, with the runner's halo generator
-    /// ([`RegionRunner::set_halo_generator`]) — on the region's own thread.
+    /// ([`RegionRunner::set_stud_halo_generator`]) — on the region's own thread.
     SeedHaloFromWorldgen(Vec<RegionCoords>),
     /// Seed this (just started, not yet ticked) region's halo for these
     /// neighbours that the world store holds and that have not run in this
@@ -104,8 +101,6 @@ pub enum RegionOutput {
     /// Fields: the event, the tick it ran, the hash.
     EventProcessedHashed(GameEvent, Tick, u32),
     Snapshot(ClientId, Rollback),
-    /// Reply to `RequestTerrain`: read-only terrain for one requester.
-    Terrain(ClientId, TerrainSnapshot),
     /// Throttled push when this region's terrain changed; manager fans out.
     TerrainChanged(TerrainSnapshot),
     SyncClock { tick_rate: u64, tick: Tick },
@@ -198,7 +193,6 @@ impl RegionOutput {
             RegionOutput::EventProcessed(_) => "EventProcessed",
             RegionOutput::EventProcessedHashed(..) => "EventProcessedHashed",
             RegionOutput::Snapshot(..) => "Snapshot",
-            RegionOutput::Terrain(..) => "Terrain",
             RegionOutput::TerrainChanged(_) => "TerrainChanged",
             RegionOutput::SyncClock { .. } => "SyncClock",
             RegionOutput::Stopped(..) => "Stopped",
@@ -221,87 +215,57 @@ impl RegionOutput {
     }
 }
 
-/// How to build a region when it spawns: restored from the parking lot if
-/// possible, else generated. The fallback chunks make a corrupt parked blob
-/// recoverable (log + regenerate deterministically).
+/// What a region is built from when it spawns.
 pub enum RegionSeed {
-    Fresh(Vec<(ColumnCoords, Column)>),
-    Parked(SerializedRegion, Vec<(ColumnCoords, Column)>),
-    /// The spawner generates the columns itself, on the region's own thread
-    /// (`RegionSpawner::generates_columns`): `None` = never run, `Some` = the
-    /// parked blob to restore. Worldgen then costs the manager thread nothing
-    /// (it measured 0.1-0.9 s per region start, sequentially — 6-7 s for a 3x3
-    /// join), and a parked region generates only if its blob is corrupt.
-    Deferred(Option<SerializedRegion>),
+    /// Not run in this process, or not since its parked state was given up:
+    /// the spawner restores it from its store when that holds it, else builds
+    /// it from its stud genesis.
+    Fresh,
+    /// It ran in this process and stopped: its parked blob, its whole state.
+    Parked(SerializedRegion),
 }
 
 impl RegionSeed {
-    /// For spawners that never receive a [`RegionSeed::Deferred`] (they do not
-    /// `generates_columns`).
-    pub fn into_region(self, id: RegionId) -> Region {
-        self.into_region_with(id, &|rc| {
-            unreachable!("Deferred seed for {rc:?} reached a spawner that does not generate columns")
-        })
-    }
-
-    /// `generate` is only called for a deferred seed that actually needs
-    /// columns: a never-run region, or a parked one whose blob is corrupt.
-    pub fn into_region_with(
+    /// The region itself. `Fresh` (not in the spawner's store): built empty
+    /// and seeded with `genesis()` when that gives terrain — before any
+    /// runner takes its baseline hash. `Parked`: restored from its blob;
+    /// `genesis` is not called.
+    ///
+    /// `Err` when the blob does not decode. That is a failed load like a
+    /// store's: the spawner answers [`RegionOutput::LoadFailed`] and the
+    /// region does not run. It is never regenerated — the blob was its whole
+    /// state (edits, entities, piles), and fresh ground in its place would be
+    /// saved over the stored region by the next cut.
+    pub fn into_region(
         self,
         id: RegionId,
-        generate: &dyn Fn(RegionCoords) -> Vec<(ColumnCoords, Column)>,
-    ) -> Region {
-        let restore = |serialized: SerializedRegion, fallback: &mut dyn FnMut() -> Vec<(ColumnCoords, Column)>| {
-            match serialized.to_rollback() {
-                Ok(rollback) => Region::new(rollback, None, id, None),
-                Err(e) => {
-                    log::error!("parked region {:?} corrupt ({e}); regenerating", id);
-                    Region::from_columns(id, fallback())
-                }
-            }
-        };
+        genesis: impl FnOnce() -> Option<crate::StudRegionSeed>,
+    ) -> Result<Region, String> {
         match self {
-            RegionSeed::Fresh(columns) => Region::from_columns(id, columns),
-            RegionSeed::Parked(serialized, fallback) => {
-                let mut fallback = Some(fallback);
-                restore(serialized, &mut || fallback.take().unwrap_or_default())
+            RegionSeed::Fresh => {
+                let mut region = Region::new(Rollback::new(None), None, id, None);
+                if let Some(terrain) = genesis() {
+                    region.seed_stud_world(terrain);
+                }
+                Ok(region)
             }
-            RegionSeed::Deferred(None) => Region::from_columns(id, generate(id)),
-            RegionSeed::Deferred(Some(serialized)) => restore(serialized, &mut || generate(id)),
+            RegionSeed::Parked(serialized) => match serialized.to_rollback() {
+                Ok(rollback) => Ok(Region::new(rollback, None, id, None)),
+                Err(e) => Err(format!("parked state corrupt: {e}")),
+            },
         }
     }
 }
 
-impl RegionSeed {
-    /// Build this seed's runner.
-    pub fn into_runner(
-        self,
-        id: RegionId,
-        out: Sender<(RegionCoords, RegionOutput)>,
-        generate: &dyn Fn(RegionCoords) -> Vec<(ColumnCoords, Column)>,
-    ) -> RegionRunner {
-        RegionRunner::new(id, self.into_region_with(id, generate), out)
-    }
-}
-
-/// Worldgen of a never-run neighbour's chunk columns `xs × zs` (its own
-/// frame) for a halo seed (`RegionInput::SeedHaloFromWorldgen`): the same
-/// columns its own generation makes.
-pub type HaloGenerator = std::sync::Arc<
-    dyn Fn(RegionCoords, std::ops::Range<usize>, std::ops::Range<usize>) -> Vec<(ColumnCoords, Column)> + Send + Sync,
->;
-
 /// Worldgen of a never-run neighbour's STUD terrain for a halo seed: what its chunk
 /// columns `xs × zs` (its own frame) would start from — the recipes, and the feature
-/// bricks of those columns (`stud_halo.rs`). The stud twin of [`HaloGenerator`].
+/// bricks of those columns (`stud_halo.rs`): the same ones its own genesis makes.
 pub type StudHaloGenerator = std::sync::Arc<
     dyn Fn(RegionCoords, std::ops::Range<usize>, std::ops::Range<usize>) -> crate::StudRegionSeed + Send + Sync,
 >;
 
 pub struct RegionRunner {
     id: RegionCoords,
-    /// See [`RegionRunner::set_halo_generator`].
-    halo_generator: Option<HaloGenerator>,
     /// See [`RegionRunner::set_stud_halo_generator`].
     stud_halo_generator: Option<StudHaloGenerator>,
     /// See [`RegionRunner::set_stored_terrain`].
@@ -371,7 +335,6 @@ impl RegionRunner {
         let baseline_hash_time = hash_started.elapsed();
         Self {
             id,
-            halo_generator: None,
             stud_halo_generator: None,
             stored_terrain: None,
             region,
@@ -425,12 +388,6 @@ impl RegionRunner {
 
     /// Worldgen for [`RegionInput::SeedHaloFromWorldgen`]; without one such a
     /// seed is skipped (logged).
-    pub fn set_halo_generator(&mut self, generator: HaloGenerator) {
-        self.halo_generator = Some(generator);
-    }
-
-    /// Stud worldgen for [`RegionInput::SeedHaloFromWorldgen`]: with one, a
-    /// never-run neighbour's seed also carries its stud edge.
     pub fn set_stud_halo_generator(&mut self, generator: StudHaloGenerator) {
         self.stud_halo_generator = Some(generator);
     }
@@ -471,7 +428,8 @@ impl RegionRunner {
         self.baseline_hash_time
     }
 
-    /// The region's whole terrain, for LOD.
+    /// The region's terrain as the manager keeps it (halo seeds of starting
+    /// neighbours are cut from it).
     fn terrain(&self) -> TerrainSnapshot {
         self.region.terrain_snapshot()
     }
@@ -511,12 +469,6 @@ impl RegionRunner {
                 let _ = self.out.send((
                     self.id,
                     RegionOutput::Snapshot(client_id, self.region.data().clone()),
-                ));
-            }
-            RegionInput::RequestTerrain(client_id) => {
-                let _ = self.out.send((
-                    self.id,
-                    RegionOutput::Terrain(client_id, self.terrain()),
                 ));
             }
             RegionInput::StartAt(tick) => self.region.start_at(tick),
@@ -663,29 +615,21 @@ impl RegionRunner {
 
     /// Halo seeds generated here, applied at once (before the first tick).
     fn seed_halo_from_worldgen(&mut self, neighbours: Vec<RegionCoords>) {
-        // Only a spawner that generates columns asks for this, and every
-        // such spawner hands its runners a halo generator (server
-        // `ThreadRegionSpawner::with_generator` takes both).
-        let Some(generate) = self.halo_generator.clone() else {
+        // Only a spawner that seeds halos on its region threads asks for
+        // this, and every such spawner hands its runners a generator.
+        let Some(studs) = self.stud_halo_generator.clone() else {
             debug_assert!(false, "region {:?}: halo seed from worldgen without a halo generator", self.id);
             log::error!("region {:?}: no halo generator; {} neighbour seeds skipped", self.id, neighbours.len());
             return;
         };
         for n in neighbours {
-            let columns = crate::halo::facing_windows(n, self.id)
-                .into_iter()
-                .flat_map(|(xs, zs)| generate(n, xs, zs))
-                .collect();
-            let mut snap = TerrainSnapshot::from_columns(columns);
-            if let Some(studs) = &self.stud_halo_generator {
-                let mut seed = crate::StudRegionSeed::default();
-                for (xs, zs) in crate::halo::facing_windows(n, self.id) {
-                    let part = studs(n, xs, zs);
-                    seed.ground.extend(part.ground);
-                    seed.features.extend(part.features);
-                }
-                snap.stud = crate::StudEdge::from_seed(&seed);
+            let mut seed = crate::StudRegionSeed::default();
+            for (xs, zs) in crate::halo::facing_windows(n, self.id) {
+                let part = studs(n, xs, zs);
+                seed.ground.extend(part.ground);
+                seed.features.extend(part.features);
             }
+            let snap = TerrainSnapshot::of_stud_edge(crate::StudEdge::from_seed(&seed));
             if let Some(seed) = crate::halo::halo_seed_from_snapshot(n, self.id, &snap) {
                 self.apply(GameEventKind::HaloUpdate(seed));
             }
@@ -909,8 +853,7 @@ impl RegionRunner {
             ));
         }
         // Push-on-change, throttled: the check cadence is the throttle. The
-        // manager invalidates this region's LOD keys and rebuilds the
-        // subscribed ones.
+        // manager keeps it for the halo seeds of starting neighbours.
         if self.region.current_tick() % TERRAIN_HASH_INTERVAL_TICKS as crate::Tick == 0 {
             let watch = crate::perf::Stopwatch::start();
             // In-place fingerprint: the (large) snapshot is only built below,

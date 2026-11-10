@@ -14,9 +14,9 @@ fn tile_m() -> f64 {
     f64::from(game::REGION_SIZE / game::movement::UNITS_PER_METER)
 }
 
-/// Engine metres per block column.
+/// Engine metres per block column (the map's 1 m sampling columns).
 fn block_m() -> f64 {
-    game::BLOCK_VOXELS as f64 / f64::from(game::movement::UNITS_PER_METER)
+    1.0
 }
 
 /// The region tile holding artifact point `(ax, az)`.

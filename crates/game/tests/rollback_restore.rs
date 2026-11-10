@@ -35,17 +35,17 @@ fn rollback_after_slot_reuse_restores_camera_hash() {
     let mut r = Rollback::new(Some(send));
     let before = state_hash(&r);
 
-    // tx1: create a mesh entity — camera/kind slots exist but hold None.
+    // tx1: create a stud chunk entity — camera/kind slots exist but hold None.
     r.new_transaction();
-    let a = r.create_mesh(game::ChunkCoords::new(0, 0, 0), game::Chunk::flat_floor(8));
+    let a = r.create_stud_chunk_safe(crate::common::sc(0, 0, 0), crate::common::slab_chunk(3));
 
     // tx2: remove it, freeing its entities slot index for reuse.
     r.new_transaction();
     r.remove_entity_safe(a, None);
 
-    // tx3: create another mesh — reuses the just-freed slot index.
+    // tx3: create another chunk — reuses the just-freed slot index.
     r.new_transaction();
-    let _b = r.create_mesh(game::ChunkCoords::new(0, 0, 0), game::Chunk::flat_floor(8));
+    let _b = r.create_stud_chunk_safe(crate::common::sc(0, 0, 0), crate::common::slab_chunk(3));
 
     // Roll the whole batch back. Per-transaction hash self-verification panics
     // inside rollback if any undo isn't a bit-exact inverse.
@@ -89,31 +89,14 @@ fn sim_survives_dropped_render_receiver() {
 }
 
 #[test]
-fn rollback_of_create_mesh_restores_state() {
+fn rollback_of_a_created_stud_chunk_restores_state() {
     let (send, _recv) = crossbeam::channel::unbounded();
     let mut r = Rollback::new(Some(send));
     let before = state_hash(&r);
 
     r.new_transaction();
-    r.create_mesh(game::ChunkCoords::new(0, 0, 0), game::Chunk::flat_floor(8));
-    assert_ne!(before, state_hash(&r), "create_mesh changed nothing");
-
-    r.rollback();
-    assert_eq!(before, state_hash(&r), "rollback did not restore state");
-}
-
-#[test]
-fn rollback_of_mixed_scale_create_mesh_restores_state() {
-    // flat_floor(24) yields both whole solid blocks (block-scale collider)
-    // and chiseled blocks (voxel-scale collider): two attaches, two
-    // PhysicsState snapshots, both must unwind bit-exactly.
-    let (send, _recv) = crossbeam::channel::unbounded();
-    let mut r = Rollback::new(Some(send));
-    let before = state_hash(&r);
-
-    r.new_transaction();
-    r.create_mesh(game::ChunkCoords::new(0, 0, 0), game::Chunk::flat_floor(24));
-    assert_ne!(before, state_hash(&r), "create_mesh changed nothing");
+    r.create_stud_chunk_safe(crate::common::sc(0, 0, 0), crate::common::slab_chunk(3));
+    assert_ne!(before, state_hash(&r), "the new chunk changed nothing");
 
     r.rollback();
     assert_eq!(before, state_hash(&r), "rollback did not restore state");

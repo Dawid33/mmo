@@ -6,12 +6,12 @@
 use std::collections::BTreeMap;
 
 use game::{
-    Chunk, ChunkCoords, CutId, EntityBundle, EntityId, InFlightRow, IntentMsg, PlayerToken, PortableRegion,
-    RegionCoords, StoredRegion, WorldCut,
+    CutId, EntityBundle, EntityId, InFlightRow, IntentMsg, PlayerToken, PortableRegion, RegionCoords, StoredRegion,
+    StudBrick, StudChunk, StudChunkCoords, StudChunkRecord, WorldCut,
 };
 use world_store::{Dials, Fence, OpenMode, Pool, StoreError, StoreHandle, StoreUrl, SuperRegion, open_pool};
 
-use crate::codec::{bundle, chunk, intent, meta, player, region_ground, reply};
+use crate::codec::{bundle, intent, meta, player, reply, stud_chunk, stud_ground};
 use crate::common;
 
 const A: RegionCoords = RegionCoords { x: 0, z: 0 };
@@ -80,23 +80,29 @@ fn entity(birth: RegionCoords, serial: u64) -> EntityBundle {
     b
 }
 
-fn region(tick: u64, chunks: &[(ChunkCoords, Chunk)], ground: bool, entities: Vec<EntityBundle>) -> PortableRegion {
+/// A stud chunk row's coordinates.
+fn at(x: usize, y: i32, z: usize) -> StudChunkCoords {
+    StudChunkCoords { x, y, z }
+}
+
+/// A region's save: its changed stud rows, with the ground recipes when `ground`
+/// (a first save; the voxel list is empty, as `game` sends it for a stud region).
+fn region(tick: u64, chunks: &[(StudChunkCoords, StudChunkRecord)], ground: bool, entities: Vec<EntityBundle>) -> PortableRegion {
     let mut m = meta();
     m.tick = tick;
     PortableRegion {
         meta: m,
-        chunks: chunks.iter().cloned().collect(),
-        ground: ground.then(region_ground),
+        ground: ground.then(Vec::new),
+        stud_ground: ground.then(stud_ground),
+        stud_chunks: chunks.iter().cloned().map(|(c, r)| (c, Some(r))).collect(),
         entities,
         players: Vec::new(),
         ..Default::default()
     }
 }
 
-fn other_chunk() -> Chunk {
-    let mut c = chunk();
-    c.set_block(9, 9, 9, game::Block::new(game::BlockId(5)));
-    c
+fn other_chunk() -> StudChunkRecord {
+    StudChunkRecord::Edited(StudChunk::new([StudBrick::filler([1, 2, 3], [2, 3, 2], game::MAT_DIRT)]).unwrap())
 }
 
 fn first_cut(h: &StoreHandle) -> WorldCut {
@@ -111,12 +117,12 @@ fn first_cut(h: &StoreHandle) -> WorldCut {
                 A,
                 region(
                     1000,
-                    &[(ChunkCoords::new(0, 0, 0), chunk()), (ChunkCoords::new(1, -2, 3), other_chunk())],
+                    &[(at(0, 0, 0), stud_chunk()), (at(1, -2, 3), other_chunk())],
                     true,
                     vec![entity(A, 2), entity(B, 1)],
                 ),
             ),
-            (B, region(1000, &[(ChunkCoords::new(2, 5, 0), chunk())], true, vec![entity(A, 7)])),
+            (B, region(1000, &[(at(2, 5, 0), stud_chunk())], true, vec![entity(A, 7)])),
         ],
         in_flight: vec![
             InFlightRow::Transfer { target: B, bundle: entity(A, 9), stamp: 998 },
@@ -152,8 +158,8 @@ fn cut_roundtrip() {
         for (rc, p) in &cut.regions {
             assert_eq!(h.load_region(*rc, &f).unwrap().as_ref(), Some(&stored(p)), "region {rc:?}");
             let terrain = h.load_terrain(*rc).unwrap().unwrap();
-            assert_eq!(terrain.chunks, stored(p).chunks);
-            assert_eq!(terrain.ground, region_ground());
+            assert!(!terrain.stud.ground.is_empty(), "the stored region's stud edge (studs::stored_terrain_carries_the_stud_edge)");
+            assert!(terrain.chunks.is_empty() && terrain.ground.is_empty());
         }
         assert_eq!(h.stored_regions().unwrap(), BTreeMap::from([(A, 1), (B, 1)]));
         assert_eq!(h.load_in_flight(None).unwrap(), cut.in_flight);
@@ -174,9 +180,9 @@ fn second_cut_writes_only_given_chunks() {
         let first = first_cut(&h);
         h.commit_cut(first.clone(), f.clone()).recv().unwrap().unwrap();
 
-        let changed = ChunkCoords::new(1, -2, 3);
-        let mut new_chunk = other_chunk();
-        new_chunk.set_block(0, 1, 0, game::Block::new(game::BlockId(7)));
+        let changed = at(1, -2, 3);
+        let new_chunk =
+            StudChunkRecord::Edited(StudChunk::new([StudBrick::filler([0, 1, 0], [2, 3, 2], game::MAT_STONE)]).unwrap());
         let second = WorldCut {
             host: 0,
             id: CutId(2),
@@ -195,11 +201,11 @@ fn second_cut_writes_only_given_chunks() {
 
         let a = h.load_region(A, &f).unwrap().unwrap();
         assert_eq!(a.meta.tick, 1100);
-        assert_eq!(a.chunks, vec![(ChunkCoords::new(0, 0, 0), chunk()), (changed, new_chunk)]);
-        assert_eq!(a.ground, region_ground(), "ground kept when the cut has none");
+        assert_eq!(a.stud_chunks, vec![(at(0, 0, 0), stud_chunk()), (changed, new_chunk)]);
+        assert_eq!(a.stud_ground, stud_ground(), "ground kept when the cut has none");
         assert_eq!(a.entities, vec![entity(A, 2)]);
         let b = h.load_region(B, &f).unwrap().unwrap();
-        assert_eq!(b.chunks, vec![(ChunkCoords::new(2, 5, 0), chunk())]);
+        assert_eq!(b.stud_chunks, vec![(at(2, 5, 0), stud_chunk())]);
         assert_eq!(b.entities, vec![entity(A, 7), entity(B, 1)], "an entity moved A -> B in one cut");
         assert_eq!(h.load_in_flight(None).unwrap(), vec![]);
         assert_eq!(h.load_history().unwrap(), Some(vec![1, 2, 3, 4]), "history kept when the cut has none");
@@ -222,7 +228,7 @@ fn commit_cut_is_atomic() {
             id: CutId(2),
             tick: 1200,
             regions: vec![
-                (A, region(1200, &[(ChunkCoords::new(0, 0, 0), other_chunk())], false, vec![entity(A, 2)])),
+                (A, region(1200, &[(at(0, 0, 0), other_chunk())], false, vec![entity(A, 2)])),
                 (B, region(1200, &[], false, vec![entity(A, 2)])),
             ],
             in_flight: vec![],
@@ -279,7 +285,7 @@ fn u64_max_serial_roundtrips() {
         srs.push(game::super_region_of(far, h.super_region_regions()));
         let f = h.claim_super_regions(0, srs).unwrap();
         let max = entity(far, u64::MAX);
-        let mut p = region(u64::MAX, &[(ChunkCoords::new(0, i32::MIN, 0), chunk())], true, vec![max.clone()]);
+        let mut p = region(u64::MAX, &[(at(0, -3, 0), stud_chunk())], true, vec![max.clone()]);
         p.meta.next_entity_serial = u64::MAX;
         let cut = WorldCut {
             host: 0,
@@ -332,7 +338,7 @@ fn corrupt_chunk_is_error() {
             StoreUrl::Postgres(_) => "'\\x01ff00ff'::bytea",
             _ => "x'01ff00ff'",
         };
-        raw_exec(url, &format!("UPDATE chunks SET data = {garbage} WHERE rx = 0 AND rz = 0 AND cx = 0"));
+        raw_exec(url, &format!("UPDATE stud_chunks SET data = {garbage} WHERE rx = 0 AND rz = 0 AND cx = 0"));
 
         let h = open(url);
         let f = fence(&h);
@@ -371,7 +377,7 @@ fn first_region_row_without_ground_is_refused() {
             host: 0,
             id: CutId(id),
             tick: 1000 + id,
-            regions: vec![(rc, region(1000 + id, &[(ChunkCoords::new(0, 0, 0), chunk())], ground, vec![]))],
+            regions: vec![(rc, region(1000 + id, &[(at(0, 0, 0), stud_chunk())], ground, vec![]))],
             in_flight: vec![],
             players: vec![],
             history: None,
@@ -381,7 +387,50 @@ fn first_region_row_without_ground_is_refused() {
         assert_eq!(h.load_region(A, &f).unwrap(), None, "nothing committed");
         h.commit_cut(cut(2, A, true), f.clone()).recv().unwrap().unwrap();
         h.commit_cut(cut(3, A, false), f.clone()).recv().unwrap().unwrap();
-        assert_eq!(h.load_region(A, &f).unwrap().unwrap().ground, region_ground(), "the stored ground is kept");
+        assert_eq!(h.load_region(A, &f).unwrap().unwrap().stud_ground, stud_ground(), "the stored ground is kept");
+        h.shutdown();
+    });
+}
+
+/// The store holds no voxel terrain: a save that still carries some (voxel chunks, or
+/// voxel ground recipes — `game`'s `PortableRegion` has the fields until its voxel
+/// types go) is refused whole as `Unsupported`, never stored without it. A stale
+/// owner is told it is fenced first. Delete with those fields.
+#[test]
+fn voxel_terrain_in_a_save_is_refused() {
+    each_backend("voxelsave", false, |url| {
+        let h = open(url);
+        let f = fence(&h);
+        let cut = |id, a: PortableRegion| WorldCut {
+            host: 0,
+            id: CutId(id),
+            tick: 1000 + id,
+            regions: vec![(B, region(1000 + id, &[], true, vec![entity(B, 1)])), (A, a)],
+            in_flight: vec![InFlightRow::Intent { target: A, msg: intent() }],
+            players: vec![],
+            history: Some(vec![7]),
+        };
+        let mut chunks = region(1001, &[(at(0, 0, 0), stud_chunk())], true, vec![]);
+        chunks.chunks.insert(game::ChunkCoords::new(0, 0, 0), game::Chunk::default());
+        let mut recipes = region(1002, &[(at(0, 0, 0), stud_chunk())], true, vec![]);
+        let surface = vec![40_i16; game::COLUMN_FOOTPRINT].into();
+        let recipe = game::ColumnGround::plain(surface, -3, game::BlockId(1), game::BlockId(9));
+        recipes.ground = Some(vec![(game::ColumnCoords::new(0, 0), recipe)]);
+        for (id, a) in [(1, chunks.clone()), (2, recipes)] {
+            let err = h.commit_cut(cut(id, a), f.clone()).recv().unwrap().unwrap_err();
+            assert!(matches!(&err, StoreError::Unsupported(m) if m.contains("voxel terrain") && m.contains("not committed")), "{err}");
+            assert!(h.stored_regions().unwrap().is_empty(), "no region of the cut was committed");
+            assert!(h.load_in_flight(None).unwrap().is_empty() && h.load_history().unwrap().is_none());
+            assert_eq!(h.world_info().unwrap().world_tick, 0);
+        }
+        let stale = f.clone();
+        let f = h.claim_super_regions(1, TEST_SUPER_REGIONS.to_vec()).unwrap();
+        let err = h.commit_cut(cut(3, chunks), stale).recv().unwrap().unwrap_err();
+        assert!(matches!(err, StoreError::Fenced { .. }), "the fence is checked first: {err}");
+        // The same cut without the voxel fields commits.
+        h.commit_cut(cut(4, region(1004, &[(at(0, 0, 0), stud_chunk())], true, vec![])), f.clone()).recv().unwrap().unwrap();
+        let a = h.load_region(A, &f).unwrap().unwrap();
+        assert!(a.chunks.is_empty() && a.ground.is_empty(), "a loaded region's voxel fields are empty");
         h.shutdown();
     });
 }

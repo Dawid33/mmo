@@ -4,7 +4,6 @@
 //! spawn included — undo bit-exact and replay identically.
 use crate::common;
 
-use common::floor_chunks;
 use game::slime::{slime_edge_units, slime_spawn_plan, SLIME_HOP_DELAY_MIN_TICKS};
 use crossbeam::channel::Receiver;
 use game::{
@@ -17,23 +16,24 @@ fn r0() -> RegionCoords {
     RegionCoords::new(0, 0)
 }
 
-/// Flat floor (top face at y = 16) over chunk columns `xs × zs`, with a
+/// Flat stud floor (top at `FLOOR_PLATES`) over chunk columns `xs × zs`, with a
 /// render-update channel as client regions (the ones that roll back) have.
 fn floor_region(
     x_units: std::ops::Range<f32>,
     z_units: std::ops::Range<f32>,
 ) -> (Region, Receiver<GameDataUpdate>) {
-    let chunks = floor_chunks(x_units, z_units, 16);
+    let seed = common::floor_seed(x_units, z_units, common::FLOOR_PLATES);
     let (send, recv) = crossbeam::channel::unbounded();
     let mut region = Region::new(game::Rollback::new(Some(send.clone())), Some(send), r0(), None);
-    region.with_data(|r| r.seed_terrain_genesis(chunks));
+    region.seed_stud_world(seed);
     (region, recv)
 }
 
 fn spawn(region: &mut Region, x: f32, z: f32, size: u8, yaw: f32) -> EntityKey {
     let mut key = None;
     region.with_data(|d| {
-        let pos = Vector::new(x, 40.0, z);
+        // A metre and a half over the floor.
+        let pos = Vector::new(x, common::floor_y(common::FLOOR_PLATES) + 24.0, z);
         key = Some(d.spawn_slime_safe(pos, size, yaw, 0));
     });
     key.unwrap()
@@ -65,7 +65,8 @@ fn slime_rests_then_hops_forward() {
         trace.push(pose(&region, e));
     }
     // It lands on the floor: body centre half a cube above the top face.
-    let rest_y = 16.0 + slime_edge_units(1) / 2.0;
+    // On the studded floor: the caps, then half the slime's edge.
+    let rest_y = common::floor_y(common::FLOOR_PLATES) + game::stud_cap_units() + slime_edge_units(1) / 2.0;
     let first_ground = trace.iter().position(|(_, g)| *g).expect("slime must land");
     assert!((trace[first_ground].0[1] - rest_y).abs() < 1.0, "rests on the floor: {:?}", trace[first_ground]);
 
@@ -163,7 +164,7 @@ fn slime_crosses_north(schedule: Option<InlineSchedule>) {
     let mut id: Option<EntityId> = None;
     rig.manager.spawner_mut().with_region(SPAWN_REGION, |region| {
         let tick = region.current_tick();
-        let e = common::spawn_slime(region, [200.0, 24.0, game::movement::UNITS_PER_METER], 1, 0.0, tick);
+        let e = common::spawn_slime(region, [200.0, common::above_floor_y(), game::movement::UNITS_PER_METER], 1, 0.0, tick);
         region.with_data(|d| {
             let mut s = (*d.data.ecs.slime.try_get(e)).expect("a slime");
             s.next_turn_tick = u64::MAX;
@@ -217,9 +218,9 @@ fn no_slime_spawns_under_recipe_water() {
         .find(|&t| slime_spawn_plan(r0(), t).is_some())
         .expect("some attempt within 200 intervals succeeds");
     let n = game::REGION_BLOCKS as i64;
-    let sea = WaterBox { xs: 0..n, zs: 0..n, surface: 0, water_top: 3 };
+    let sea = WaterBox { xs: 0..n, zs: 0..n, surface: common::STAND - 1, water_top: common::STAND + 2 };
     let slimes_after_attempt = |boxes: &[WaterBox]| {
-        let mut region = Region::from_columns(r0(), floor_with_water(r0(), boxes));
+        let mut region = common::region_of(r0(), floor_with_water(r0(), boxes));
         region.jump_clock_to(t);
         tick(&mut region);
         region.data().ecs.slime.iter().filter(|(_, s)| s.is_some()).count()

@@ -5,7 +5,7 @@
 //! Run: just world-map            (defaults: 8192 m span around spawn, 1024 px)
 //!      just world-map --span 65536 --size 2048 --center 0,0 --out target/world-map/wide
 //!      just world-map --world target/world-forge/f1-best.world --span 600
-//!          (a FORGED world, sampled exactly as generate_region samples it:
+//!          (a FORGED world, sampled exactly as the generator samples it:
 //!           carved river channels, lake and river water above sea level)
 //!
 //! Writes `<out>-color.png` (hypsometric tint + hillshade, water by depth) and
@@ -25,7 +25,7 @@
 //! packet the server sends on connect.
 //!
 //! Heights come straight from `TerrainPipeline::column` (the exact field, not
-//! the 4 m `ProfileGrid` lattice `generate_region` interpolates — the two agree
+//! the 4 m `ProfileGrid` lattice the generator interpolates — the two agree
 //! to well under a block), so a map costs one profile per pixel and never
 //! materializes a region.
 

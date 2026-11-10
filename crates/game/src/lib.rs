@@ -138,7 +138,7 @@ pub use registry::*;
 // Not a glob: `slope::classify` would collide with `biome::classify`; call it as `slope::classify`.
 pub use slope::{display_name, slope_chisel, walk_up, Side, SlopeShape};
 pub use state::*;
-pub use stored_terrain::{load_stored_or_warn, NoStoredTerrain, StoredTerrain};
+pub use stored_terrain::{load_stored_or_warn, StoredTerrain};
 pub use ui::*;
 pub use volume::*;
 pub use voxel::*;
@@ -269,11 +269,7 @@ pub enum ClientUpdateEvent {
     /// The window moved on (or a region is being replaced): tear down this
     /// region's render state.
     RemoveRegion(RegionId),
-    /// Streamed LOD cells for one key (initial send or refresh —
-    /// replace-on-re-receipt), with the key's water surface layer. Decoded
-    /// and spawned by the renderer.
-    LodData(LodKey, LodPayload, crate::lod::LodWater),
-    /// A stud world's far terrain for one key (initial send or refresh —
+    /// Far terrain for one key (initial send or refresh —
     /// replace-on-re-receipt). Meshed and spawned by the renderer.
     StudLodData(LodKey, crate::stud_lod::StudLodTile),
     /// The ring assignment moved on: retire this key's render root.

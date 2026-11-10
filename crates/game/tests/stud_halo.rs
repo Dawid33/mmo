@@ -484,7 +484,7 @@ fn every_seed_source_gives_the_same_halo() {
     let mut a = region(west());
     let mut b = region(west());
     seed(&east_region, &mut a, west());
-    let snap = TerrainSnapshot { chunks: Vec::new(), ground: Vec::new(), stud: from_store };
+    let snap = crate::common::stud_terrain_snapshot(from_store);
     let update = game::halo::halo_seed_from_snapshot(east(), west(), &snap).unwrap();
     apply(&mut b, GameEventKind::HaloUpdate(update));
     assert!(a.data().stud_halo() == b.data().stud_halo());

@@ -142,7 +142,7 @@ pub fn sync_stud_ui(
     }
 
     let tool = designate.as_ref().and_then(|d| d.tool);
-    let terrain = mirror.as_ref().map_or(TerrainKind::Voxel, |m| m.terrain());
+    let terrain = mirror.as_ref().map_or(TerrainKind::Stud, |m| m.terrain());
     let block = designate.as_ref().map_or(game::edit::PLACE_BLOCK, |d| d.build);
     let key = (tool, terrain, block);
     let wanted = tool == Some(Tool::Build) && terrain == TerrainKind::Stud;

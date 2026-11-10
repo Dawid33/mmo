@@ -1,18 +1,24 @@
-//! Stud ground recipes from the same column sampling as voxel terrain: the forged world
-//! (or the procedural pipeline) read at stud columns, surfaces quantised to plates.
+//! The terrain generator: stud ground recipes from the crate's column sampling — the
+//! forged world (or the procedural pipeline) read at stud columns, surfaces quantised to
+//! plates.
 //!
-//! Biome covers, soils, snow, glaciers, lake beds and rock strata come from the very
-//! functions voxel generation uses (`profile_sample`, `column_material`), fed a material
-//! table in stud material ids ([`stud_materials`]). Like `generate_columns`, the result
-//! for a chunk column does not depend on the window it was generated in.
+//! Biome covers, soils, snow, glaciers, lake beds and rock strata come from
+//! `profile_sample` / `column_material` (1 m block units), fed a material table in stud
+//! material ids ([`stud_materials`]). The result for a chunk column does not depend on
+//! the window it was generated in.
 //!
 //! Trees come from `stud_trees.rs` (`generate_stud_region` only: a region's features).
 
-use game::{ColumnCoords, StudColumnGround, StudProfile, StudRegionSeed, MAT_STONE, STUD_CHUNK_STUDS, STUD_NO_WATER};
+use game::{
+    ColumnCoords, StudColumnGround, StudProfile, StudRegionSeed, CHUNK_BLOCKS, MAT_STONE, REGION_CHUNKS, STUD_CHUNK_STUDS,
+    STUD_NO_WATER,
+};
 
 use super::*;
+use crate::forged::ForgedWorld;
+use crate::pipeline::TerrainPipeline;
 
-/// Plates per metre (a plate is 0.2 m); a voxel block is one metre.
+/// Plates per metre (a plate is 0.2 m); a sampled block column is one metre.
 pub const PLATES_PER_M: i32 = 5;
 /// Stud columns per metre (a stud is 0.5 m).
 pub const STUDS_PER_M: i32 = 2;
@@ -25,9 +31,8 @@ const SCAN_HEADROOM_PLATES: i32 = 2;
 const N: usize = STUD_CHUNK_STUDS;
 const _: () = assert!(STUD_CHUNK_STUDS as i32 == CHUNK_BLOCKS as i32 * STUDS_PER_M || CHUNK_BLOCKS != 16);
 
-/// The worldgen material table in stud material ids (`BlockId(id)`), resolved by the
-/// voxel block names. Tree BLOCKS are off (their names are not stud materials): stud
-/// trees are feature bricks of wood and leaves (`stud_trees.rs`).
+/// The worldgen material table in stud material ids (`BlockId(id)`), resolved by
+/// material name.
 pub fn stud_materials() -> Materials {
     Materials::from_names(|name| BlockId(game::stud_material_id(name).unwrap_or(0)))
 }
@@ -187,7 +192,7 @@ fn recipes_from_patch(
 
 /// The stud ground recipes of chunk columns `xs × zs` of region `coords`: the same
 /// recipes whatever window they are generated in. With a forged world installed they
-/// come from it and `seed` is ignored, as in [`generate_columns`].
+/// come from it and `seed` is ignored.
 pub fn generate_stud_columns(
     coords: RegionCoords,
     xs: std::ops::Range<usize>,
@@ -197,7 +202,7 @@ pub fn generate_stud_columns(
     let mats = stud_materials();
     let cb = CHUNK_BLOCKS as i32;
     let (x, z) = (coords.x * REGION_BLOCKS + xs.start as i32 * cb, coords.z * REGION_BLOCKS + zs.start as i32 * cb);
-    let (ox, oz, span) = patch_window(x, z, xs.len().max(zs.len()) as i32 * cb, &mats);
+    let (ox, oz, span) = patch_window(x, z, xs.len().max(zs.len()) as i32 * cb, PATCH_MARGIN);
     if let Some(world) = forged::active() {
         return recipes_from_patch(&world.patch(ox, oz, span), coords, xs, zs, &mats);
     }
@@ -207,29 +212,37 @@ pub fn generate_stud_columns(
 
 /// What a fresh stud region of the forged (or procedural) world starts from: the
 /// recipes of [`generate_stud_columns`] for the whole region, plus its trees as feature
-/// bricks (`stud_trees.rs`: the voxel generator's placement over the same surfaces). A
-/// pure function of the region (and the installed forged world).
+/// bricks (`stud_trees.rs`). A pure function of the region (and the installed forged
+/// world).
 pub fn generate_stud_region(coords: RegionCoords, seed: u64) -> StudRegionSeed {
-    let mats = stud_materials();
-    // One patch for both, wide enough for tree placement. The wider margin is a whole
-    // number of profile lattice steps, so the recipes are bit-identical to
-    // `generate_stud_columns`' (pinned by `stud_gen::a_region_is_its_columns_plus_trees`).
-    let m = TREE_PATCH_MARGIN;
-    let (x, z) = (coords.x * REGION_BLOCKS, coords.z * REGION_BLOCKS);
-    let (ox, oz, span) = ((x - m) as f64, (z - m) as f64, (REGION_BLOCKS + 2 * m) as f64);
-    let all = 0..REGION_CHUNKS;
     if let Some(world) = forged::active() {
-        let patch = world.patch(ox, oz, span);
-        let ground = recipes_from_patch(&patch, coords, all.clone(), all, &mats);
-        let trees_from = TreeSource { habitat: world, seed: world.seed() };
-        let features = crate::stud_trees::stud_tree_features(&patch, coords, &mats, trees_from, &ground);
-        return StudRegionSeed { ground, features };
+        return generate_stud_region_forged(world, coords);
     }
+    let (ox, oz, span) = region_patch_window(coords);
     let patch = ProceduralPatch(TerrainPipeline::new(seed).profile_grid(ox, oz, span));
-    let ground = recipes_from_patch(&patch, coords, all.clone(), all, &mats);
     let habitat = habitat::ProceduralHabitat::new(seed);
-    let trees_from = TreeSource { habitat: &habitat, seed };
-    let features = crate::stud_trees::stud_tree_features(&patch, coords, &mats, trees_from, &ground);
+    region_from_patch(&patch, coords, TreeSource { habitat: &habitat, seed })
+}
+
+/// [`generate_stud_region`] for an explicit forged world (tests, tools).
+pub fn generate_stud_region_forged(world: &ForgedWorld, coords: RegionCoords) -> StudRegionSeed {
+    let (ox, oz, span) = region_patch_window(coords);
+    region_from_patch(&world.patch(ox, oz, span), coords, TreeSource { habitat: world, seed: world.seed() })
+}
+
+/// The patch of a whole region: one for recipes and trees, wide enough for tree
+/// placement. The wider margin is a whole number of profile lattice steps, so the
+/// recipes are bit-identical to `generate_stud_columns`' (pinned by
+/// `stud_trees::a_region_is_its_columns_plus_trees`).
+fn region_patch_window(coords: RegionCoords) -> (f64, f64, f64) {
+    patch_window(coords.x * REGION_BLOCKS, coords.z * REGION_BLOCKS, REGION_BLOCKS, TREE_PATCH_MARGIN)
+}
+
+fn region_from_patch(patch: &dyn Patch, coords: RegionCoords, trees_from: TreeSource) -> StudRegionSeed {
+    let mats = stud_materials();
+    let all = 0..REGION_CHUNKS;
+    let ground = recipes_from_patch(patch, coords, all.clone(), all, &mats);
+    let features = crate::stud_trees::stud_tree_features(patch, coords, &mats, trees_from, &ground);
     StudRegionSeed { ground, features }
 }
 
@@ -241,21 +254,31 @@ pub fn generate_stud_region(coords: RegionCoords, seed: u64) -> StudRegionSeed {
 /// through. With a forged world installed it comes from it and `seed` is ignored.
 /// Trees are not in it.
 pub fn stud_lod_tile(key: &game::lod::LodKey, seed: u64) -> game::StudLodTile {
-    let mats = stud_materials();
-    let (ox, oz, span) = coarse_window(key);
-    let (px, pz, pspan) = patch_window(ox, oz, span, &mats);
     if let Some(world) = forged::active() {
-        return lod_tile_from_patch(&world.patch(px, pz, pspan), key, &mats);
+        return stud_lod_tile_forged(world, key);
     }
+    let (px, pz, pspan) = lod_patch_window(key);
     let grid = TerrainPipeline::new(seed).profile_grid(px, pz, pspan);
-    lod_tile_from_patch(&ProceduralPatch(grid), key, &mats)
+    lod_tile_from_patch(&ProceduralPatch(grid), key, &stud_materials())
+}
+
+/// [`stud_lod_tile`] for an explicit forged world (tests, tools).
+pub fn stud_lod_tile_forged(world: &ForgedWorld, key: &game::lod::LodKey) -> game::StudLodTile {
+    let (px, pz, pspan) = lod_patch_window(key);
+    lod_tile_from_patch(&world.patch(px, pz, pspan), key, &stud_materials())
+}
+
+/// The patch of a LOD key (`prefetch_lod_forged` pins the same rect).
+fn lod_patch_window(key: &game::lod::LodKey) -> (f64, f64, f64) {
+    let (ox, oz, span) = lod_window(key);
+    patch_window(ox, oz, span, PATCH_MARGIN)
 }
 
 fn lod_tile_from_patch(patch: &dyn Patch, key: &game::lod::LodKey, mats: &Materials) -> game::StudLodTile {
     assert!(key.factor >= game::STUD_LOD_MIN_FACTOR, "stud far terrain at factor {}: finer than a stud", key.factor);
     let side = game::StudLodTile::side_for(key);
     let cell_studs = i64::from(key.factor / game::STUD_LOD_MIN_FACTOR);
-    let (ox, oz, span) = coarse_window(key);
+    let (ox, oz, span) = lod_window(key);
     debug_assert_eq!(i64::from(side) * cell_studs, i64::from(span) * i64::from(STUDS_PER_M));
     let strata = stud_strata(patch, mats);
     let n = i64::from(side) + 1;

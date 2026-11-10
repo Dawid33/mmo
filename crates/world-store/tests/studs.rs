@@ -1,4 +1,4 @@
-//! Stud terrain rows (migration 0004): `stud_chunks`, `regions.stud_ground` and the
+//! Stud terrain rows (migration 0004; the only terrain rows since 0005): `stud_chunks`, `regions.stud_ground` and the
 //! world's terrain kind. Written only in a fenced cut; a row that does not read back
 //! is an error, never an empty region.
 
@@ -124,20 +124,6 @@ fn stored_terrain_carries_the_stud_edge() {
         assert!(!snap.stud.ground.is_empty(), "the fixture's recipes lie in edge columns");
         assert!(snap.stud.chunks.iter().any(|(c, _)| *c == at(0, 0, 0)), "the edited edge chunk");
         assert!(snap.chunks.is_empty() && snap.ground.is_empty());
-        h.shutdown();
-    });
-}
-
-/// A voxel region's row has no stud ground and no stud rows.
-#[test]
-fn voxel_region_has_no_stud_terrain() {
-    each_backend("studs_voxel", false, |url| {
-        let h = open(url);
-        let f = fence(&h);
-        let voxel = PortableRegion { meta: meta(), ground: Some(crate::codec::region_ground()), ..Default::default() };
-        h.commit_cut(cut(1, voxel), f.clone()).recv().unwrap().unwrap();
-        let got = h.load_region(A, &f).unwrap().unwrap();
-        assert!(got.stud_chunks.is_empty() && got.stud_ground.is_empty());
         h.shutdown();
     });
 }

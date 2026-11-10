@@ -44,7 +44,7 @@ use super::selection::DRAG_THRESHOLD_PX;
 use super::tiles::TileMirror;
 use super::CommanderView;
 use crate::renderer::cursor::CursorPolicy;
-use crate::renderer::fortress_view::{overlay_base_level, DragPreview};
+use crate::renderer::fortress_view::DragPreview;
 use crate::renderer::{GameEvents, LocalPlayer};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,10 +86,12 @@ pub const PRIORITY_KEYS: [KeyCode; MAX_PRIORITY as usize] = [
 
 /// At most this many merged build-ghost cuboids are drawn per frame.
 pub const MAX_GHOST_BOXES: usize = 4096;
-/// Build ghosts are drawn from the overlay's base level up to this many
-/// levels above the working level, so the top of a two-level wall built
-/// from the level below still shows above the cut.
+/// Build ghosts are drawn up to this many levels above the working level, so
+/// the top of a two-level wall built from the level below still shows above
+/// the cut ...
 pub const GHOST_LEVELS_ABOVE: i32 = 1;
+/// ... and down to this many levels below it.
+pub const GHOST_LEVELS_BELOW: i32 = 15;
 
 /// How much the hover outline is grown past its cell, in sim units, so it
 /// does not z-fight the block faces.
@@ -371,14 +373,9 @@ fn reason(why: Invalid) -> &'static str {
     }
 }
 
-/// The drag readout: size (x × z × levels), the tiles the order takes, then
-/// each refusal reason with its count, in [`Invalid`] order.
-pub fn drag_text(area: TileBox, kind: Option<DesignationKind>, summary: &OrderSummary) -> String {
-    drag_text_on(TerrainKind::Voxel, area, kind, summary)
-}
-
-/// [`drag_text`] on terrain `terrain`: on studs, where a level is 1.2 m, the
-/// size is followed by the box in metres (`stud::palette::size_text`).
+/// The drag readout on terrain `terrain`: size (x × z × levels, followed by
+/// the box in metres — `stud::palette::size_text`), the tiles the order
+/// takes, then each refusal reason with its count, in [`Invalid`] order.
 pub fn drag_text_on(terrain: TerrainKind, area: TileBox, kind: Option<DesignationKind>, summary: &OrderSummary) -> String {
     let size = crate::renderer::stud::palette::size_text(terrain, area);
     let mut text = format!("{size} — {} {}", summary.valid, verb(kind));
@@ -498,17 +495,15 @@ pub fn update_hover(
     policy: Res<CursorPolicy>,
     mirror: Res<TileMirror>,
     working: Res<WorkingLevel>,
-    xray: Option<Res<crate::renderer::voxel_pull::xray::XraySettings>>,
     mut state: ResMut<DesignateState>,
 ) {
-    let xray = crate::renderer::voxel_pull::xray::xray_on(xray.as_deref(), working.cut);
     let hover = (|| {
         let tool = state.tool?;
         if policy.blocks_game() || policy.ui_pointer {
             return None;
         }
         let ray = cursor_ray(window.single().ok()?, view.single().ok()?, mirror.region()?)?;
-        let visible = (!working.cut).then(|| pick_visible_xray(ray, tool == Tool::Build, &mirror, xray)).flatten();
+        let visible = (!working.cut).then(|| pick_visible(ray, tool == Tool::Build, &mirror)).flatten();
         let p = visible.or_else(|| pick_level(ray, working.level?, &mirror))?;
         Some(clamp_to_region(p))
     })();
@@ -543,17 +538,6 @@ pub fn pick_visible(ray: (Vector, Vector), face: bool, mirror: &TileMirror) -> O
 pub fn pick_level(ray: (Vector, Vector), level: i32, mirror: &TileMirror) -> Option<TilePos> {
     let ray = mirror.tile_ray(ray);
     pick_level_cell(ray.0, ray.1, level, |p| mirror.pick_solid(p))
-}
-
-/// [`pick_visible`] under the dug-space x-ray (`xray`, cut off): through
-/// the terrain in front of a dug space, onto the floor or wall seen there
-/// ([`game::pick_xray_cell`]).
-pub fn pick_visible_xray(ray: (Vector, Vector), face: bool, mirror: &TileMirror, xray: bool) -> Option<TilePos> {
-    if !xray {
-        return pick_visible(ray, face, mirror);
-    }
-    let ray = mirror.tile_ray(ray);
-    game::pick_xray_cell(ray.0, ray.1, VISIBLE_PICK_REACH_BLOCKS, face, |p| mirror.pick_solid(p), |p| mirror.is_dug(p))
 }
 
 /// Left presses and releases → corners ([`step_corners`]) and orders; a
@@ -655,7 +639,6 @@ pub struct PreviewBuilt {
 }
 
 /// The drag → [`DragPreview`] (box, kind, per-tile validity) and the readout.
-/// Must run before `fortress_view::update_overlay_grid`.
 pub fn update_drag_preview(
     state: Res<DesignateState>,
     mirror: Res<TileMirror>,
@@ -745,7 +728,7 @@ pub fn draw_designate_gizmos(
         let key = Some((mirror.version(), level));
         if ghosts.key != key {
             ghosts.key = key;
-            let (lo, hi) = (overlay_base_level(level), level + GHOST_LEVELS_ABOVE);
+            let (lo, hi) = (level - GHOST_LEVELS_BELOW, level + GHOST_LEVELS_ABOVE);
             let mut builds: Vec<TilePos> = mirror
                 .designations()
                 .iter()
@@ -937,8 +920,8 @@ mod tests {
             invalid: [(Invalid::Built, 1), (Invalid::Bedrock, 3)].into_iter().collect(),
         };
         assert_eq!(
-            drag_text(area, Some(DesignationKind::Dig), &summary),
-            "4 × 3 × 2 — 20 to dig · 3 bedrock · 1 built"
+            drag_text_on(TerrainKind::Stud, area, Some(DesignationKind::Dig), &summary),
+            "4 × 3 × 2 (4 × 3 × 2.4 m) — 20 to dig · 3 bedrock · 1 built"
         );
     }
 
@@ -995,6 +978,6 @@ mod tests {
         let area = TileBox::new([0, 0, 0], [2, 0, 0]);
         assert_eq!(erase_summary(&marks, area, None).valid, 2);
         assert_eq!(erase_summary(&marks, area, Some(DesignationKind::Dig)).valid, 1);
-        assert_eq!(drag_text(area, None, &erase_summary(&marks, area, None)), "3 × 1 × 1 — 2 to erase");
+        assert_eq!(drag_text_on(TerrainKind::Stud, area, None, &erase_summary(&marks, area, None)), "3 × 1 × 1 (3 × 1 × 1.2 m) — 2 to erase");
     }
 }

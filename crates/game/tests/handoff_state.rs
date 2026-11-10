@@ -388,10 +388,10 @@ fn stage2_ghost_collider_blocks_a_walking_player() {
     // held. With both keys pressed before any tick (as the brief sketched)
     // only two moves land, so an uncollided walk would already stop at 112 —
     // a false green. Proven by the bite-check in the task report.
-    use game::{GameEventKind, InputEvent, Key, Region};
+    use game::{GameEventKind, InputEvent, Key};
     let (_, src_key) = donor();
     let id = RegionCoords::new(0, 0);
-    let mut region = Region::from_chunks(id, Vec::new());
+    let mut region = crate::common::empty_region(id);
     region.handle_event(GameEventKind::CreateClient(1)).unwrap();
     region.forget_last_event();
     let player = *region.data().player_entites.get(&1).unwrap();
@@ -712,7 +712,7 @@ fn ignored_duplicate_person_arrival_drops_its_mirror() {
 
 // ---- dynamic bodies: EntityKind::Body (Task 7.2) ----
 
-use crate::body::{cube, floored_region, live_body, spawn, tick};
+use crate::body::{caps_top, cube, floored_region, live_body, spawn, tick};
 use game::rapier3d::dynamics::{RigidBody, RigidBodyActivation};
 use game::{BodyKind, BodyState, EntityId, GameEventKind, Region};
 
@@ -891,7 +891,8 @@ fn replayed_dynamic_arrival_is_bit_exact() {
 #[test]
 fn sleeping_body_arrives_asleep() {
     let mut a = floored_region();
-    let rest = game::BLOCK_VOXELS as f32 * 1.5;
+    // A 1 m cube resting on the floor's stud caps.
+    let rest = caps_top() + crate::common::TILE_W / 2.0;
     let e = spawn(&mut a, pose(512.0, rest, 512.0), cube(), Vector::ZERO, Vector::ZERO);
     for _ in 0..game::body::BODY_SETTLE_TICKS {
         tick(&mut a);
@@ -921,7 +922,7 @@ fn sleeping_body_arrives_asleep() {
     }
     assert!(live_body(&b, f).is_sleeping(), "asleep again");
     let moved = (live_body(&b, f).translation() - at).length();
-    assert!(moved < 0.01 * game::BLOCK_VOXELS as f32, "where it lay: moved {moved}");
+    assert!(moved < 0.01 * crate::common::TILE_W, "where it lay: moved {moved}");
 }
 
 /// A halo mirror moved toward a resting body pushes it (one way: the
@@ -929,8 +930,8 @@ fn sleeping_body_arrives_asleep() {
 #[test]
 fn ghost_pushes_dynamic_body_one_way() {
     let mut region = floored_region();
-    let b = game::BLOCK_VOXELS as f32;
-    let e = spawn(&mut region, pose(512.0, b * 1.5, 512.0), cube(), Vector::ZERO, Vector::ZERO);
+    let b = crate::common::TILE_W;
+    let e = spawn(&mut region, pose(512.0, caps_top() + b / 2.0, 512.0), cube(), Vector::ZERO, Vector::ZERO);
     for _ in 0..10 {
         tick(&mut region);
     }
@@ -938,7 +939,7 @@ fn ghost_pushes_dynamic_body_one_way() {
     // A slime-sized capsule mirror standing on the floor, 3 blocks to -x,
     // walking +x at 2 units/tick: it reaches the cube in ~20 ticks.
     let capsule = ColliderSpec::CapsuleY { half_height: 8.0, radius: 6.4 };
-    let y = b + 8.0 + 6.4;
+    let y = caps_top() + 8.0 + 6.4;
     let mut x = 512.0 - 3.0 * b;
     let mirror = |x: f32| HaloEntityDelta {
         id: body_id(5),
@@ -976,13 +977,13 @@ fn ghost_pushes_dynamic_body_one_way() {
 fn ghost_jump_snaps_without_flinging() {
     use game::halo::MIRROR_SNAP_DISTANCE_UNITS;
     let mut region = floored_region();
-    let b = game::BLOCK_VOXELS as f32;
-    let e = spawn(&mut region, pose(512.0, b * 1.5, 512.0), cube(), Vector::ZERO, Vector::ZERO);
+    let b = crate::common::TILE_W;
+    let e = spawn(&mut region, pose(512.0, caps_top() + b / 2.0, 512.0), cube(), Vector::ZERO, Vector::ZERO);
     for _ in 0..10 {
         tick(&mut region);
     }
     let capsule = ColliderSpec::CapsuleY { half_height: 8.0, radius: 6.4 };
-    let y = b + 8.0 + 6.4;
+    let y = caps_top() + 8.0 + 6.4;
     let mirror = |x: f32| HaloEntityDelta {
         id: body_id(5),
         source_region: body_src(),

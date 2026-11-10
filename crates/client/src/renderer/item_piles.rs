@@ -188,9 +188,9 @@ pub fn pile_world_position(region: RegionId, cell: BlockPos, kind: game::Terrain
 }
 
 /// The terrain the session's regions run on (all regions of a world share it), from
-/// the body scale the region snapshots set; voxel before any arrived.
+/// the body scale the region snapshots set (stud terrain before any arrived).
 pub(crate) fn session_terrain(scale: Option<&super::stud::ClientBodyScale>) -> game::TerrainKind {
-    scale.map_or(game::TerrainKind::Voxel, |s| game::TerrainKind::of(s.0))
+    scale.map_or(game::TerrainKind::Stud, |s| game::TerrainKind::of(s.0))
 }
 
 /// The cubes `stacks` are drawn with: running number, offset from the cell's
@@ -443,14 +443,12 @@ mod tests {
         let r = roots(&mut app);
         assert_eq!(r.len(), 1);
         assert_eq!(r[0].1, 3, "40 items = 3 cubes");
-        assert_eq!(r[0].2, pile_world_position(region, cell, game::TerrainKind::Voxel));
-        // On stud terrain the cell is a tile: 1.2 m levels.
-        let stud = pile_world_position(region, cell, game::TerrainKind::Stud);
-        assert_eq!((stud.x, stud.z), (r[0].2.x, r[0].2.z));
-        assert!((stud.y - 5.0 * 1.2 * BLOCK_VOXELS as f32).abs() < 1e-3, "{stud}");
+        assert_eq!(r[0].2, pile_world_position(region, cell, game::TerrainKind::Stud));
+        // The cell is a tile: a metre wide, 1.2 m levels.
         let o = region.world_offset();
         let b = BLOCK_VOXELS as f32;
-        assert_eq!(r[0].2, Vec3::new(o[0] + 3.5 * b, 5.0 * b, o[2] + 7.5 * b));
+        assert_eq!((r[0].2.x, r[0].2.z), (o[0] + 3.5 * b, o[2] + 7.5 * b));
+        assert!((r[0].2.y - 5.0 * 1.2 * b).abs() < 1e-3, "{}", r[0].2);
 
         // A change replaces the pile.
         app.world_mut().write_message(ItemPileMsg::Set { region, changes: vec![(cell, Some(view(1)))] });

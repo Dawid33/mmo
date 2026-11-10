@@ -1794,14 +1794,6 @@ fn tool_wheel(
     set_screens(ui, to, &mut world_map, status.home_region, policy.as_mut(), embarked);
 }
 
-/// The level readout: the working level and how far it is from the surface
-/// under the camera focus (just the level while that column isn't loaded).
-/// Voxel terrain's wording; [`super::stud::palette::level_text`] is the form
-/// for either terrain (on studs a level is a 1.2 m tile, and it says so).
-pub fn level_text(level: i32, surface_level: Option<i32>) -> String {
-    super::stud::palette::level_text(game::TerrainKind::Voxel, level, surface_level)
-}
-
 /// What the tool wheel's state and the readouts read. All optional: the
 /// commander resources exist only in commander mode.
 #[derive(SystemParam)]
@@ -1865,7 +1857,7 @@ fn sync_toolbar(ui: &slint_ui::GameUi, ui_scale: f32, p: &mut ToolbarParams) {
         ui.set_priority(state.priority as i32);
     }
 
-    let kind = p.level.as_ref().map_or(game::TerrainKind::Voxel, |l| l.terrain);
+    let kind = p.level.as_ref().map_or(game::TerrainKind::Stud, |l| l.terrain);
     let surface = match (&p.grid, &p.cam) {
         (Some(grid), Some(cam)) => focus_surface(grid, cam.focus).map(|y| surface_level(kind, y)),
         _ => None,
@@ -2662,13 +2654,6 @@ mod tests {
         assert_eq!(unpremultiply(p(64, 0, 128, 128)), [128, 0, 255, 128]);
     }
 
-    #[test]
-    fn level_text_above_and_below_surface() {
-        assert_eq!(level_text(64, Some(70)), "Level 64 · 6 below surface");
-        assert_eq!(level_text(72, Some(70)), "Level 72 · 2 above surface");
-        assert_eq!(level_text(70, Some(70)), "Level 70 · surface");
-        assert_eq!(level_text(70, None), "Level 70");
-    }
 
     #[test]
     fn ui_actions_map_tool_indices() {

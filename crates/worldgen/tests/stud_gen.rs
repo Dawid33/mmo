@@ -21,7 +21,6 @@ fn every_worldgen_material_is_a_stud_material() {
     for id in ids.iter().chain(&more).chain(&m.rocks) {
         assert!(id.0 >= game::NATURAL_BASE && stud_material(id.0).is_some(), "{id:?}");
     }
-    assert!(!m.trees.enabled());
 }
 
 #[test]

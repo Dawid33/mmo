@@ -2,7 +2,8 @@
 //! log-model refactor. Uses only public API that exists in both worlds.
 use game::StateHash;
 
-use game::{ChunkCoords, Rollback};
+use crate::common::{sc, slab_chunk};
+use game::Rollback;
 
 fn state_hash(r: &Rollback) -> u32 {
     let mut hasher = crc32fast::Hasher::new();
@@ -24,7 +25,7 @@ fn multi_transaction_rollback_restores_each_boundary() {
     let h0 = state_hash(&r);
 
     r.new_transaction();
-    r.create_mesh(ChunkCoords::new(0, 0, 0), game::Chunk::flat_floor(8));
+    r.create_stud_chunk_safe(sc(0, 0, 0), slab_chunk(3));
     let h1 = state_hash(&r);
 
     r.new_transaction();
@@ -42,7 +43,7 @@ fn forget_drops_oldest_transaction_and_keeps_state() {
     let (mut r, _recv) = new_rollback();
 
     r.new_transaction();
-    r.create_mesh(ChunkCoords::new(0, 0, 0), game::Chunk::flat_floor(8));
+    r.create_stud_chunk_safe(sc(0, 0, 0), slab_chunk(3));
     r.new_transaction();
     r.create_player_safe(7);
     let h2 = state_hash(&r);
@@ -211,10 +212,7 @@ fn undocell_set_is_rolled_back() {
 fn genesis_is_unlogged_base_state() {
     let (mut r, recv) = new_rollback();
     r.new_transaction();
-    r.seed_terrain_genesis(vec![
-        (ChunkCoords::new(0, 0, 0), game::Chunk::flat_floor(8)),
-        (ChunkCoords::new(1, 0, 0), game::Chunk::flat_floor(32)),
-    ]);
+    r.seed_stud_genesis(vec![(sc(0, 0, 0), slab_chunk(3)), (sc(1, 0, 0), slab_chunk(12))]);
     let h_genesis = state_hash(&r);
 
     // Genesis is the base state: it must produce no undo entries, so rolling

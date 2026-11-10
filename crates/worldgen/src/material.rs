@@ -12,12 +12,9 @@ pub struct Materials {
     pub dirt: BlockId,
     pub grass: BlockId,
     pub sand: BlockId,
-    pub water: BlockId,
     pub bedrock: BlockId,
     /// Indexed like `forge::geology::ROCKS`.
     pub rocks: [BlockId; 6],
-    /// Tree blocks; `TreeBlocks::NONE` generates no trees.
-    pub trees: TreeBlocks,
     /// Biome ground-cover, snow and ice blocks; `BiomeBlocks::NONE` keeps
     /// forged worlds on `material_at` (no biome covers, ice or glaciers).
     pub biome: BiomeBlocks,
@@ -117,66 +114,17 @@ impl GroundCover {
     }
 }
 
-/// One species' blocks.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct SpeciesBlocks {
-    pub log: BlockId,
-    pub branch: BlockId,
-    pub leaves: BlockId,
-}
-
-/// Tree blocks per species, indexed like `trees::SPECIES`.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct TreeBlocks {
-    pub species: [SpeciesBlocks; crate::trees::SPECIES.len()],
-}
-
-impl TreeBlocks {
-    /// Trees disabled (every block air).
-    pub const NONE: TreeBlocks = TreeBlocks {
-        species: [SpeciesBlocks { log: BlockId::AIR, branch: BlockId::AIR, leaves: BlockId::AIR };
-            crate::trees::SPECIES.len()],
-    };
-
-    pub fn enabled(&self) -> bool {
-        *self != TreeBlocks::NONE
-    }
-
-    /// Resolve `<species>_log` / `_branch` / `_leaves` for every species;
-    /// a `single_block` species (cactus) is its one block `<species>` for
-    /// every part (it has no leaves).
-    pub fn from_names(resolve: impl Fn(&str) -> BlockId) -> TreeBlocks {
-        TreeBlocks {
-            species: crate::trees::SPECIES.map(|s| {
-                if s.single_block {
-                    // Leafless: `leaves` is never placed; the block itself
-                    // (not air) keeps "a species' blocks" free of air.
-                    let b = resolve(s.name);
-                    return SpeciesBlocks { log: b, branch: b, leaves: b };
-                }
-                SpeciesBlocks {
-                    log: resolve(&format!("{}_log", s.name)),
-                    branch: resolve(&format!("{}_branch", s.name)),
-                    leaves: resolve(&format!("{}_leaves", s.name)),
-                }
-            }),
-        }
-    }
-}
-
 impl Materials {
-    /// Resolve every material by block name (the registry lookup of the
-    /// server / local server / harnesses).
+    /// Resolve every material by name (`stud_gen::stud_materials`: the stud
+    /// material table; tests: the block registry).
     pub fn from_names(resolve: impl Fn(&str) -> BlockId) -> Materials {
         Materials {
             stone: resolve("stone"),
             dirt: resolve("dirt"),
             grass: resolve("grass"),
             sand: resolve("sand"),
-            water: resolve("water"),
             bedrock: resolve("bedrock"),
             rocks: crate::forge::geology::ROCKS.map(|r| resolve(r.name)),
-            trees: TreeBlocks::from_names(&resolve),
             biome: BiomeBlocks::from_names(&resolve),
         }
     }
@@ -277,10 +225,8 @@ mod tests {
             dirt: BlockId(1),
             grass: BlockId(3),
             sand: BlockId(4),
-            water: BlockId(5),
             bedrock: game::BlockId(6),
             rocks: [7, 8, 9, 10, 11, 12].map(game::BlockId),
-            trees: crate::material::TreeBlocks::NONE,
             biome: BiomeBlocks::NONE,
         }
     }
@@ -356,7 +302,7 @@ mod tests {
     fn manifest_defines_terrain_materials() {
         let manifest = include_str!("../../../assets/blocks/blocks.ron");
         let reg = game::BlockRegistry::from_ron(manifest).expect("valid manifest");
-        for name in ["stone", "dirt", "grass", "sand", "water"] {
+        for name in ["stone", "dirt", "grass", "sand"] {
             assert!(reg.id_of(name).is_some(), "manifest must define {name}");
         }
     }
@@ -368,9 +314,6 @@ mod tests {
         let m = Materials::from_names(|n| reg.id_of(n).unwrap_or_else(|| panic!("missing {n}")));
         assert_eq!(m.bedrock, BlockId(6));
         assert_eq!(m.rocks, [7, 8, 9, 10, 11, 12].map(BlockId));
-        assert!(m.trees.enabled());
-        assert_eq!(m.trees.species[0], SpeciesBlocks { log: BlockId(13), branch: BlockId(14), leaves: BlockId(15) });
-        assert_eq!(m.trees.species[2].leaves, BlockId(21));
         assert!(m.biome.enabled());
         assert_eq!((m.biome.snow, m.biome.salt), (BlockId(22), BlockId(32)));
     }

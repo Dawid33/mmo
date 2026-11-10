@@ -113,7 +113,6 @@ fn stud_region_round_trips() {
     );
     assert_eq!(original.stud_chunks[&at(1, -1, 0)], Some(StudChunkRecord::Pristine));
     assert_eq!(original.stud_ground.as_ref().map(Vec::len), Some(3), "a first snapshot carries the recipes");
-    assert!(original.chunks.is_empty() && original.ground == Some(Vec::new()), "no voxel terrain");
     assert_eq!(terms.studs.len(), 6, "every materialised chunk has a term");
     assert_eq!(terms.studs[&at(0, 0, 1)].kept, StudKept::Derived);
 

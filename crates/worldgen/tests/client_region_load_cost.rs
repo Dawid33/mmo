@@ -6,20 +6,6 @@
 //! `just bench-client-region`.
 use std::time::{Duration, Instant};
 
-fn mats() -> worldgen::material::Materials {
-    worldgen::material::Materials {
-        stone: game::BlockId(2),
-        dirt: game::BlockId(1),
-        grass: game::BlockId(3),
-        sand: game::BlockId(4),
-        water: game::BlockId(5),
-        bedrock: game::BlockId(6),
-        rocks: [7, 8, 9, 10, 11, 12].map(game::BlockId),
-        trees: worldgen::material::TreeBlocks::NONE,
-        biome: worldgen::material::BiomeBlocks::NONE,
-    }
-}
-
 #[test]
 #[ignore = "benchmark; run explicitly via `just bench-client-region`"]
 fn client_region_load_cost() {
@@ -30,7 +16,8 @@ fn client_region_load_cost() {
         let rc = game::RegionCoords::new(x, z);
         // Server side (not timed): genesis + one tick, then the snapshot the
         // region thread sends, through the real wire framing.
-        let mut server = game::Region::from_columns(rc, worldgen::generate_region(rc, worldgen::WORLD_SEED, mats()));
+        let mut server = game::Region::new(game::Rollback::new(None), None, rc, None);
+        server.seed_stud_world(worldgen::stud_gen::generate_stud_region(rc, worldgen::WORLD_SEED));
         let _ = server.handle_event(game::GameEventKind::Tick);
         let wire = game::encode_packet(&game::ServerPacket::Region(rc, server.data().clone())).unwrap();
 

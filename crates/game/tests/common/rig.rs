@@ -5,17 +5,16 @@
 //! ([`super::seam_translate`]) drives the same rig.
 use crossbeam::channel::{unbounded, Receiver};
 use game::{
-    Block, BlockId, Chunk, SubChunk, REGION_SIZE,
-    ClientId, ClientPacket, Column, ColumnCoords, EntityId, GameEvent, GameEventKind, InlineLodBuilder,
-    InlineSchedule, InlineSpawner, InputEvent, Key, LodBuilder, Order, RegionCoords, RegionOutput, ServerEvent,
-    ServerPacket, TilePos, Walker, WorldManager, SPAWN_REGION, TICK_RATE,
+    ClientId, ClientPacket, EntityId, GameEvent, GameEventKind, InlineSchedule, InlineSpawner, InputEvent, Key, Order,
+    RegionCoords, RegionOutput, ServerEvent, ServerPacket, StudRegionSeed, TilePos, Walker, WorldManager, REGION_SIZE,
+    SPAWN_REGION, TICK_RATE,
 };
 use std::collections::BTreeMap;
 
 /// The conservation invariant of a crossing: every `EntityId` is owned by
 /// exactly one running region or sits exactly once in the manager's
 /// in-flight table or arrival mailbox — never both, never twice, and (people aside, whom the
-/// history may absorb or end, arrivals a full mailbox despawned, and voxel
+/// history may absorb or end, arrivals a full mailbox despawned, and stud
 /// bodies that settled in the region owning them) never lost. Called every
 /// round.
 pub fn assert_conserved(rig: &mut Rig) {
@@ -30,7 +29,7 @@ pub fn assert_conserved(rig: &mut Rig) {
                 if matches!(data.ecs.kind.try_get(key), Some(game::EntityKind::Person { .. })) {
                     people.insert(*id);
                 }
-                if data.ecs.voxel_body.try_get(key).is_some() || data.ecs.stud_body.try_get(key).is_some() {
+                if data.ecs.stud_body.try_get(key).is_some() {
                     settling.insert(*id);
                 }
             }
@@ -52,7 +51,7 @@ pub fn assert_conserved(rig: &mut Rig) {
     for id in rig.manager.recently_despawned_arrivals() {
         rig.tracked.remove(&id);
     }
-    // A voxel or stud body settles (its policy) where it is owned: an allowed exit
+    // A stud body settles (its policy) where it is owned: an allowed exit
     // from a region, never from flight.
     let settled: Vec<EntityId> = rig
         .tracked
@@ -85,16 +84,10 @@ pub fn north_west() -> RegionCoords {
     RegionCoords::new(-1, -1)
 }
 
-fn floor_column(x: usize, z: usize) -> (ColumnCoords, Column) {
-    let air = Block::new(BlockId::AIR);
-    let sub = SubChunk::Dense(Box::new(Chunk::flat_floor(8)));
-    (ColumnCoords::new(x, z), Column::new(0, air, air, vec![sub]))
-}
-
-/// Floor columns over the world-unit rectangle `xs` x `zs`: every chunk
-/// column the rectangle overlaps.
-pub fn floor_columns(xs: std::ops::Range<f32>, zs: std::ops::Range<f32>) -> Vec<(ColumnCoords, Column)> {
-    super::chunks_over(xs, zs).into_iter().map(|(x, z)| floor_column(x, z)).collect()
+/// Flat stud ground (`common::FLOOR_PLATES`) over the world-unit rectangle
+/// `xs` x `zs`: every chunk column the rectangle overlaps.
+pub fn floor_columns(xs: std::ops::Range<f32>, zs: std::ops::Range<f32>) -> StudRegionSeed {
+    super::floor_seed(xs, zs, super::FLOOR_PLATES)
 }
 
 /// Floor under the whole square between the spawn point (x=128,z=128) and the
@@ -102,7 +95,7 @@ pub fn floor_columns(xs: std::ops::Range<f32>, zs: std::ops::Range<f32>) -> Vec<
 /// the three neighbours around that corner — so every route is walked
 /// grounded, with colliders on both sides of each handoff. Stated in world
 /// units, so it holds at any chunk size.
-pub fn seam_floor_columns(rc: RegionCoords) -> Vec<(ColumnCoords, Column)> {
+pub fn seam_floor_columns(rc: RegionCoords) -> StudRegionSeed {
     let near = 0.0..5.0 * 64.0;
     let far = REGION_SIZE - 128.0..REGION_SIZE;
     let (xs, zs) = if rc == SPAWN_REGION {
@@ -138,7 +131,7 @@ pub struct Rig {
     /// Every non-person entity [`assert_conserved`] has seen, and where it
     /// was last (`None` = in flight): it must never vanish.
     pub tracked: std::collections::BTreeMap<EntityId, Option<RegionCoords>>,
-    /// The voxel bodies [`assert_conserved`] has seen: they may end by
+    /// The stud bodies [`assert_conserved`] has seen: they may end by
     /// settling in the region that owns them.
     pub settling: std::collections::BTreeSet<EntityId>,
     /// Latest region snapshot sent to the client, per region: whether it
@@ -157,9 +150,10 @@ pub struct Rig {
 }
 
 impl Rig {
+    /// A stud world whose never-run regions start from `floor(rc)`.
     pub fn with_floor(
         schedule: Option<InlineSchedule>,
-        floor: impl FnMut(RegionCoords) -> Vec<(ColumnCoords, Column)> + Send + 'static,
+        floor: impl Fn(RegionCoords) -> StudRegionSeed + Send + Sync + 'static,
     ) -> Self {
         let spawner = schedule.map_or_else(InlineSpawner::default, InlineSpawner::with_schedule);
         Self::with_spawner(spawner, floor)
@@ -168,29 +162,21 @@ impl Rig {
     /// [`Rig::with_floor`] over a given spawner (a restarted world's).
     pub fn with_spawner(
         spawner: InlineSpawner,
-        floor: impl FnMut(RegionCoords) -> Vec<(ColumnCoords, Column)> + Send + 'static,
+        floor: impl Fn(RegionCoords) -> StudRegionSeed + Send + Sync + 'static,
     ) -> Self {
+        Self::with_genesis(spawner, std::sync::Arc::new(floor))
+    }
+
+    /// [`Rig::with_spawner`] for a genesis that is already shared.
+    pub fn with_genesis(spawner: InlineSpawner, floor: game::InlineStudGenesis) -> Self {
         // Before any region exists: the seam tests compare runs (placements,
         // seeds) against each other, and a player's starting kit and a broken
-        // block's drops read the process-global block props.
+        // tile's drops read the process-global block props.
         super::install_real_block_props();
         let (out_send, packets) = unbounded();
         let (region_out_send, region_out) = unbounded();
-        let (lod_result_send, lod_result_recv) = unbounded();
-        let lod_builder: Box<dyn LodBuilder> = Box::new(InlineLodBuilder {
-            coarse: Box::new(|_key: &game::lod::LodKey| Vec::new()),
-            water: Box::new(game::lod::LodWater::dry),
-            out: lod_result_send,
-        });
         Rig {
-            manager: WorldManager::new(
-                spawner,
-                Box::new(floor),
-                out_send,
-                region_out_send,
-                lod_builder,
-                lod_result_recv,
-            ),
+            manager: super::stud_manager(spawner.with_stud_genesis(floor), out_send, region_out_send),
             region_out,
             packets,
             now_ms: 0,
@@ -294,25 +280,25 @@ impl Rig {
             let e = *data.player_entites.get(&CLIENT).expect("player owned here");
             let handle = *data.ecs.rigidbody.get(e);
             let t = data.physics.bodies.get(handle).unwrap().translation();
-            out = Some((data.ecs.walker.try_get(e).clone(), game::feet_tile(game::feet_of(t))));
+            out = Some((data.ecs.walker.try_get(e).clone(), data.terrain_kind().feet_tile(data.feet_of(t))));
         });
         out.expect("region is running")
     }
 
-    /// Points the player's look at `p` (world blocks, fractional) from its
-    /// eye, in the region owning it (a forgotten state write, as a test
-    /// teleport is).
+    /// Points the player's look at `p` (world tiles, fractional: `y` counts
+    /// tile heights) from its eye, in the region owning it (a forgotten state
+    /// write, as a test teleport is).
     pub fn aim_at(&mut self, p: [f64; 3]) {
         let rc = self.owners()[0];
         self.manager.spawner_mut().with_region(rc, |region| {
             region.with_data(|d| {
                 let e = *d.data.player_entites.get(&CLIENT).expect("player owned here");
                 let (eye, _) = d.eye_ray(CLIENT).expect("a body and camera");
-                let (bv, n) = (game::BLOCK_VOXELS as f64, game::REGION_BLOCKS as f64);
+                let (w, h, n) = (super::TILE_W as f64, super::tile_h() as f64, game::REGION_BLOCKS as f64);
                 let to = [
-                    (p[0] - rc.x as f64 * n) * bv - eye.x as f64,
-                    p[1] * bv - eye.y as f64,
-                    (p[2] - rc.z as f64 * n) * bv - eye.z as f64,
+                    (p[0] - rc.x as f64 * n) * w - eye.x as f64,
+                    p[1] * h - eye.y as f64,
+                    (p[2] - rc.z as f64 * n) * w - eye.z as f64,
                 ];
                 let len = (to[0] * to[0] + to[1] * to[1] + to[2] * to[2]).sqrt();
                 let d3 = [to[0] / len, to[1] / len, to[2] / len];
@@ -325,15 +311,15 @@ impl Rig {
         });
     }
 
-    /// The block under the player's crosshair (world blocks), and the face
-    /// normal, as its owning region's sim sees it.
-    pub fn eye_hit(&mut self) -> Option<(game::WorldBlockPos, [i32; 3])> {
+    /// The tile under the player's crosshair and the tile just outside the
+    /// face it hit (world tiles), as its owning region's sim sees them.
+    pub fn eye_hit(&mut self) -> Option<(game::WorldBlockPos, game::WorldBlockPos)> {
         let rc = self.owners()[0];
         let mut out = None;
         self.manager.spawner_mut().with_region(rc, |region| {
-            out = region.data().eye_hit(CLIENT).map(|h| {
-                let w = game::WorldBlockPos::from_local(rc, game::BlockPos::new(h.block[0], h.block[1], h.block[2]));
-                (w, h.normal)
+            out = region.data().eye_stud_hit(CLIENT).map(|h| {
+                let w = |t: [i32; 3]| game::WorldBlockPos::from_local(rc, game::BlockPos::new(t[0], t[1], t[2]));
+                (w(h.tile), w(h.outside))
             });
         });
         out

@@ -8,9 +8,8 @@ use std::time::{Duration, Instant};
 use crossbeam::channel::{unbounded, Receiver};
 use game::movement;
 use game::{
-    Block, BlockId, Chunk, ClientId, ClientPacket, Column, ColumnCoords, EntityBundle, GameEvent,
-    GameEventKind, InlineLodBuilder, InputEvent, Key, LodBuilder, RegionCoords, RegionOutput,
-    ServerEvent, ServerPacket, SubChunk, WorldManager, FLIP_HYSTERESIS, REGION_SIZE, SPAWN_REGION,
+    ClientId, ClientPacket, ColumnCoords, EntityBundle, GameEvent, GameEventKind, InputEvent, Key, RegionCoords,
+    RegionOutput, ServerEvent, ServerPacket, WorldManager, FLIP_HYSTERESIS, REGION_SIZE, SPAWN_REGION,
     UNLOAD_GRACE_MS,
 };
 use server::claims::HostClaims;
@@ -18,55 +17,25 @@ use server::region_threads::ThreadRegionSpawner;
 
 const REGION_STARTUP_BUDGET: Duration = Duration::from_secs(10);
 
-/// Voxel height of every fixture floor.
-const FLOOR_DEPTH: u32 = 8;
+/// Surface plate of the fixture's flat stud ground (layer 0).
+const STUD_TOP: i32 = 30;
 
-fn floor_column(x: usize, z: usize) -> (ColumnCoords, Column) {
-    (
-        ColumnCoords::new(x, z),
-        Column::new(
-            0,
-            Block::new(BlockId::AIR),
-            Block::new(BlockId::AIR),
-            vec![SubChunk::Dense(Box::new(Chunk::flat_floor(FLOOR_DEPTH)))],
-        ),
-    )
+/// Flat stud ground (surface at plate [`STUD_TOP`]) under every chunk column of every
+/// region: every walk in this file crosses GROUNDED, with stud colliders on both sides
+/// of the seam, and a walk can be planned over it anywhere.
+fn stud_flat_seed(_rc: RegionCoords) -> game::StudRegionSeed {
+    let soil = game::StudProfile { cover: game::MAT_GRASS, cover_plates: 1, soil: game::MAT_DIRT, soil_plates: 5 };
+    let n = game::REGION_CHUNKS;
+    let ground = (0..n)
+        .flat_map(|x| (0..n).map(move |z| (ColumnCoords::new(x, z), game::StudColumnGround::flat(STUD_TOP, soil, game::MAT_STONE, -2000))))
+        .collect();
+    game::StudRegionSeed { ground, features: Vec::new() }
 }
 
-/// Floor columns over the world-unit rectangle `xs` x `zs`: every chunk
-/// column it overlaps (the chunk edge is `CHUNK_UNITS`; negative edges clamp).
-fn floor_columns(xs: std::ops::Range<f32>, zs: std::ops::Range<f32>) -> Vec<(ColumnCoords, Column)> {
-    let edge = game::CHUNK_UNITS as f32;
-    let span = |r: std::ops::Range<f32>| (r.start.max(0.0) / edge).floor() as usize..(r.end / edge).ceil() as usize;
-    let zs = span(zs);
-    span(xs).flat_map(|x| zs.clone().map(move |z| floor_column(x, z))).collect()
-}
-
-fn lightweight_columns() -> Vec<(ColumnCoords, Column)> {
-    // Just the chunk under the spawn column.
-    floor_columns(128.0..160.0, 128.0..160.0)
-}
-
-/// Floor under the whole square between the spawn point (x=128,z=128) and the
-/// region's -x/-z corner, continuing 128 units deep into the three
-/// neighbours around that corner. Every walk in this file therefore crosses
-/// GROUNDED, with voxel colliders on both sides. Stated in world units, so it
-/// holds at any chunk size.
-fn seam_floor_columns(rc: RegionCoords) -> Vec<(ColumnCoords, Column)> {
-    let near = 0.0..5.0 * 64.0;
-    let far = REGION_SIZE - 128.0..REGION_SIZE;
-    let (xs, zs) = if rc == SPAWN_REGION {
-        (near.clone(), near)
-    } else if rc == RegionCoords::new(0, -1) {
-        (near, far)
-    } else if rc == RegionCoords::new(-1, 0) {
-        (far, near)
-    } else if rc == RegionCoords::new(-1, -1) {
-        (far.clone(), far)
-    } else {
-        return lightweight_columns();
-    };
-    floor_columns(xs, zs)
+/// The server's spawn path, as `server::run` builds it: every region thread seeds its
+/// own stud genesis (`RegionSeed::Fresh`) and the stud halo of never-run neighbours.
+fn stud_spawner() -> ThreadRegionSpawner {
+    ThreadRegionSpawner::default().with_genesis(std::sync::Arc::new(stud_flat_seed))
 }
 
 /// A key-down `PlayerInput` from client 0. Stamped with the spawn region on
@@ -98,43 +67,17 @@ struct Rig {
 
 impl Rig {
     fn new() -> Self {
-        Self::with_columns(|_| lightweight_columns())
+        Self::with_spawner(stud_spawner())
     }
 
-    fn with_columns(
-        columns: impl FnMut(RegionCoords) -> Vec<(ColumnCoords, Column)> + Send + 'static,
-    ) -> Self {
-        Self::with_spawner(ThreadRegionSpawner::default(), columns)
-    }
-
-    /// The server's own spawn path: region threads run worldgen themselves
-    /// (`RegionSeed::Deferred`) instead of being handed ready-made columns.
-    fn with_on_thread_worldgen(
-        columns: impl Fn(RegionCoords) -> Vec<(ColumnCoords, Column)> + Send + Sync + Clone + 'static,
-    ) -> Self {
-        let spawner = ThreadRegionSpawner::with_region_generator(std::sync::Arc::new(columns.clone()));
-        Self::with_spawner(spawner, columns)
-    }
-
-    fn with_spawner(
-        spawner: ThreadRegionSpawner,
-        columns: impl FnMut(RegionCoords) -> Vec<(ColumnCoords, Column)> + Send + 'static,
-    ) -> Self {
+    fn with_spawner(spawner: ThreadRegionSpawner) -> Self {
         let (out_send, packets) = unbounded();
         let (region_out_send, region_out) = unbounded();
-        let (lod_result_send, lod_result_recv) = unbounded();
-        let lod_builder: Box<dyn LodBuilder> = Box::new(InlineLodBuilder {
-            coarse: Box::new(|_| Vec::new()),
-            water: Box::new(game::lod::LodWater::dry),
-            out: lod_result_send,
-        });
         let manager = WorldManager::new(
             spawner,
-            Box::new(columns),
             out_send,
             region_out_send,
-            lod_builder,
-            lod_result_recv,
+            Box::new(game::NullLodBuilder::default()),
         );
         Rig {
             manager,
@@ -199,7 +142,7 @@ impl Rig {
     /// Block (bounded by `timeout`) until every region in `want` has
     /// produced a snapshot, draining `region_out` into the manager as
     /// outputs arrive. Panics with the still-missing set if the deadline
-    /// passes first — brand-new regions build (worldgen + physics colliders)
+    /// passes first — brand-new regions build (stud genesis + physics colliders)
     /// on their own thread before they can answer anything.
     fn wait_for_snapshots(&mut self, want: &[RegionCoords], timeout: Duration) {
         let want: BTreeSet<RegionCoords> = want.iter().copied().collect();
@@ -221,8 +164,8 @@ impl Rig {
     }
 }
 
-// These tests exercise real OS-thread routing and lifecycle behavior with a
-// one-column terrain fixture; production worldgen has its own focused suite.
+// These tests exercise real OS-thread routing and lifecycle behavior on a flat
+// stud-ground fixture; production worldgen has its own focused suite.
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn roaming_client_cycles_regions_across_threads() {
@@ -360,7 +303,7 @@ fn regions_share_tick_numbers_on_real_threads() {
 /// real input, and we observe the authoritative handoff — the `PlayerRegion`
 /// home flip AND the `EntityArrived` fan-out — arrive over the packet channel.
 /// The arriving bundle is checked for STATE, not just existence: the floor
-/// spans the seam (`seam_floor_columns`), so the player must cross grounded,
+/// spans the seam (`stud_flat_seed`), so the player must cross grounded,
 /// land just past the boundary in the arrival region's frame, and still carry
 /// its client, camera and movement state.
 ///
@@ -374,7 +317,7 @@ fn regions_share_tick_numbers_on_real_threads() {
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn walking_input_crosses_a_boundary_on_real_threads() {
-    let mut rig = Rig::with_columns(seam_floor_columns);
+    let mut rig = Rig::new();
     rig.event(ServerEvent::connected(0));
 
     // Subscribe the 3x3 window so both the departing (0,0) and arriving
@@ -477,7 +420,7 @@ fn arrival_in(p: &ServerPacket, region: RegionCoords) -> Option<&EntityBundle> {
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn diagonal_walk_crosses_a_corner_on_real_threads() {
-    let mut rig = Rig::with_columns(seam_floor_columns);
+    let mut rig = Rig::new();
     rig.event(ServerEvent::connected(0));
     let window = SPAWN_REGION.window_3x3();
     for rc in &window {
@@ -517,8 +460,8 @@ fn diagonal_walk_crosses_a_corner_on_real_threads() {
 }
 
 /// Walking into a region nobody is subscribed to, on the server's production
-/// spawn path (`ThreadRegionSpawner::with_region_generator`): the departure has to
-/// WAKE the target, whose brand-new thread runs worldgen + collider genesis
+/// spawn path (`ThreadRegionSpawner::with_genesis`): the departure has to
+/// WAKE the target, whose brand-new thread runs its stud genesis + collider genesis
 /// before it can look at the `EntityArrived` already queued for it. Then the
 /// player walks back, so the return `EntityArrived` — sourced from the woken
 /// region — proves the entity really lived there, and covers the round trip
@@ -526,7 +469,7 @@ fn diagonal_walk_crosses_a_corner_on_real_threads() {
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn walking_into_a_cold_region_wakes_its_thread_and_returns() {
-    let mut rig = Rig::with_on_thread_worldgen(seam_floor_columns);
+    let mut rig = Rig::new();
     rig.event(ServerEvent::connected(0));
     // Home only: the region to the north is cold.
     rig.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(SPAWN_REGION), 0));
@@ -580,8 +523,11 @@ fn temp_store(name: &str) -> (std::path::PathBuf, world_store::StoreUrl) {
     (dir, url)
 }
 
+/// The store, tied to stud terrain as `server::run` ties it before any region loads.
 fn open_store(url: &world_store::StoreUrl) -> world_store::StoreHandle {
-    world_store::StoreHandle::open(url, world_store::Dials::BUILT, world_store::OpenMode::Writer).expect("the store opens")
+    let store = world_store::StoreHandle::open(url, world_store::Dials::BUILT, world_store::OpenMode::Writer).expect("the store opens");
+    server::world_file::bind_world_terrain(&store).expect("a stud world");
+    store
 }
 
 /// The server's spawn path on `store`, as `server::run` builds it: regions
@@ -592,10 +538,10 @@ fn open_store(url: &world_store::StoreUrl) -> world_store::StoreHandle {
 fn stored_rig(store: &world_store::StoreHandle) -> (Rig, HostClaims) {
     let info = store.world_info().unwrap();
     let claims = HostClaims::claim_around(store.clone(), SPAWN_REGION, 3).unwrap();
-    let spawner = ThreadRegionSpawner::with_region_generator(std::sync::Arc::new(|_| lightweight_columns()))
+    let spawner = stud_spawner()
         .with_store(claims.clone())
         .with_clock(game::WorldClock::starting_at(0, info.world_tick), Instant::now());
-    let mut rig = Rig::with_spawner(spawner, |_| lightweight_columns());
+    let mut rig = Rig::with_spawner(spawner);
     rig.manager.set_stored_regions(store.stored_regions().unwrap());
     rig.manager.restore_in_flight(store.load_in_flight(claims.fence().in_flight_scope()).unwrap());
     (rig, claims)
@@ -747,20 +693,6 @@ fn player_is_restored_by_a_restarted_server() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// One block-thick floor under every chunk column of a region: ground a
-/// walk can be planned over anywhere.
-fn whole_floor_columns(_rc: RegionCoords) -> Vec<(ColumnCoords, Column)> {
-    let n = game::REGION_CHUNKS;
-    let air = Block::new(BlockId::AIR);
-    (0..n)
-        .flat_map(|x| (0..n).map(move |z| (x, z)))
-        .map(|(x, z)| {
-            let floor = SubChunk::Dense(Box::new(Chunk::flat_floor(game::BLOCK_VOXELS as u32)));
-            (ColumnCoords::new(x, z), Column::new(0, air, air, vec![floor]))
-        })
-        .collect()
-}
-
 /// An `Order` from client 0 (stamped with the spawn region; routed by home).
 fn order_event(order: game::Order) -> ServerEvent {
     ServerEvent::ClientPacket(ClientPacket::GameEvent(GameEvent::new(GameEventKind::Order(0, order), 0, SPAWN_REGION)), 0)
@@ -768,7 +700,7 @@ fn order_event(order: game::Order) -> ServerEvent {
 
 /// A `MoveTo` two regions east with only the spawn region subscribed: the
 /// walk wakes the region between and the goal's region on the production
-/// spawn path (worldgen on the region thread). Each woken region is seeded
+/// spawn path (stud genesis on the region thread). Each woken region is seeded
 /// before its first tick, ahead of the arrival (`WorldManager::ensure_running`
 /// sends `StartAt`, `SetRouteMap` and its halo seeds — cached / worldgen
 /// seeds as `Event`s, a running neighbour's by `HaloRequest` — before the
@@ -779,13 +711,16 @@ fn order_event(order: game::Order) -> ServerEvent {
 #[ignore = "slow: >100ms — run via just test-full"]
 fn walk_through_cold_regions_reaches_its_goal_on_real_threads() {
     let n = game::REGION_BLOCKS as i32;
-    let mut rig = Rig::with_on_thread_worldgen(whole_floor_columns);
+    let mut rig = Rig::new();
+    // Tiles are a metre square and `TILE_PLATES` plates high: the level standing on
+    // the flat ground.
+    let stand = STUD_TOP / game::TILE_PLATES as i32;
     rig.event(ServerEvent::connected(0));
     rig.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(SPAWN_REGION), 0));
     rig.wait_for_snapshots(&[SPAWN_REGION], REGION_STARTUP_BUDGET);
     let (between, far) = (RegionCoords::new(1, 0), RegionCoords::new(2, 0));
     assert!(!rig.manager.running_regions().contains(&between), "the region between starts cold");
-    rig.event(order_event(game::Order::SetMode { mode: game::PlayMode::Adventure, at: Some([n - 3, 1, 12]) }));
+    rig.event(order_event(game::Order::SetMode { mode: game::PlayMode::Adventure, at: Some([n - 3, stand, 12]) }));
     let mut log = Vec::new();
     rig.pump_until(Duration::from_secs(1), &mut log, |_| false);
     rig.event(order_event(game::Order::MoveTo(game::Goal::local(far, [3, 12], None))));
@@ -809,8 +744,8 @@ fn walk_through_cold_regions_reaches_its_goal_on_real_threads() {
     assert!(state.ecs.walker.try_get(e).is_none(), "the walk is over: {:?}", state.ecs.walker.try_get(e));
     let handle = (*state.ecs.rigidbody.try_get(e)).expect("a body");
     let t = state.physics.bodies.get(handle).unwrap().translation();
-    let tile = game::feet_tile(game::feet_of(t));
-    assert_eq!([tile[0], tile[2]], [3, 12], "the walk ends on its goal");
+    let tile = game::TerrainKind::Stud.feet_tile(state.feet_of(t));
+    assert_eq!(tile, [3, stand, 12], "the walk ends on its goal");
 }
 
 /// A tumbling body crosses a seam on real region threads. Tossed (spinning
@@ -833,10 +768,11 @@ fn body_crosses_seam_on_real_threads() {
     // The spawn region with the body in it, as the world store holds it.
     let b = game::BLOCK_VOXELS as f32;
     let units = movement::UNITS_PER_METER;
-    let mut region = game::RegionSeed::Fresh(seam_floor_columns(SPAWN_REGION)).into_region(SPAWN_REGION);
-    // A block in from the seam, 1.5 blocks above the floor (FLOOR_DEPTH
-    // voxels deep), 8 m/s toward −z and 4 m/s up, spinning at 6 rad/s.
-    let pose = game::Pose::from_translation(Vector::new(128.0, FLOOR_DEPTH as f32 + b / 2.0 + 1.5 * b, b));
+    let mut region = game::RegionSeed::Fresh.into_region(SPAWN_REGION, || Some(stud_flat_seed(SPAWN_REGION))).unwrap();
+    let floor = region.data().stud_surface_y(128.0, b).expect("stud ground under the body");
+    // A metre in from the seam, 1.5 m above the ground, 8 m/s toward −z and
+    // 4 m/s up, spinning at 6 rad/s.
+    let pose = game::Pose::from_translation(Vector::new(128.0, floor + b / 2.0 + 1.5 * b, b));
     let cube = game::ColliderSpec::Cuboid { half_extents: Vector::splat(b / 2.0) };
     let (linvel, angvel) = (Vector::new(0.0, 4.0 * units, -8.0 * units), Vector::new(0.0, 6.0, 0.0));
     let mut key = None;
@@ -856,9 +792,7 @@ fn body_crosses_seam_on_real_threads() {
     claims.commit_cut(cut).recv().unwrap().expect("the region is stored");
     drop(region);
 
-    let generate: server::region_threads::SharedRegionGenerator = std::sync::Arc::new(seam_floor_columns);
-    let spawner = ThreadRegionSpawner::with_region_generator(generate).with_store(claims);
-    let mut rig = Rig::with_spawner(spawner, seam_floor_columns);
+    let mut rig = Rig::with_spawner(stud_spawner().with_store(claims));
     rig.manager.set_stored_regions(store.stored_regions().unwrap());
     rig.event(ServerEvent::connected(0));
     for rc in SPAWN_REGION.window_3x3() {
@@ -927,7 +861,7 @@ fn body_crosses_seam_on_real_threads() {
     let body = state.physics.bodies.get(state.ecs.rigidbody.try_get(e).expect("a body")).unwrap();
     assert!(body.is_dynamic() && body.is_sleeping(), "asleep: {body:?}");
     let z = body.translation().z;
-    assert!(z < REGION_SIZE - b && z > REGION_SIZE - 4.0 * b, "landed a block or more past the seam: z {z}");
+    assert!(z < REGION_SIZE - b && z > REGION_SIZE - 4.0 * b, "landed a metre or more past the seam: z {z}");
     rig.manager.shutdown_all();
     drop(rig);
     store.shutdown();
@@ -948,12 +882,13 @@ fn store_read_failure_stops_the_region_on_real_threads() {
     store.shutdown();
     let generated = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let counter = generated.clone();
-    let spawner = ThreadRegionSpawner::with_region_generator(std::sync::Arc::new(move |_| {
-        counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        lightweight_columns()
-    }))
-    .with_store(dead);
-    let mut rig = Rig::with_spawner(spawner, |_| lightweight_columns());
+    let spawner = ThreadRegionSpawner::default()
+        .with_genesis(std::sync::Arc::new(move |rc| {
+            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            stud_flat_seed(rc)
+        }))
+        .with_store(dead);
+    let mut rig = Rig::with_spawner(spawner);
     rig.event(ServerEvent::connected(0));
     let mut log = Vec::new();
     let refused = rig.pump_until(REGION_STARTUP_BUDGET, &mut log, |p| {
@@ -970,16 +905,6 @@ fn store_read_failure_stops_the_region_on_real_threads() {
 
 // --- Stud terrain across a seam (stud world plan P4) -------------------------
 
-/// Flat stud ground (surface at plate 30) under every region.
-fn stud_flat_seed(_rc: RegionCoords) -> game::StudRegionSeed {
-    let soil = game::StudProfile { cover: game::MAT_GRASS, cover_plates: 1, soil: game::MAT_DIRT, soil_plates: 5 };
-    let n = game::REGION_CHUNKS;
-    let ground = (0..n)
-        .flat_map(|x| (0..n).map(move |z| (ColumnCoords::new(x, z), game::StudColumnGround::flat(30, soil, game::MAT_STONE, -2000))))
-        .collect();
-    game::StudRegionSeed { ground, features: Vec::new() }
-}
-
 /// One cross-seam carve end to end on real threads, on the server's stud spawn path
 /// (regions seed their own stud genesis and the stud halo of never-run neighbours on
 /// their own threads): a box ordered in the spawn region that straddles its -z seam is
@@ -988,9 +913,7 @@ fn stud_flat_seed(_rc: RegionCoords) -> game::StudRegionSeed {
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn stud_carve_crosses_a_seam_on_real_threads() {
-    let spawner = ThreadRegionSpawner::with_region_generator(std::sync::Arc::new(|_| Vec::new()))
-        .with_genesis(std::sync::Arc::new(stud_flat_seed));
-    let mut rig = Rig::with_spawner(spawner, |_| Vec::new());
+    let mut rig = Rig::new();
     rig.event(ServerEvent::connected(0));
     let window = SPAWN_REGION.window_3x3();
     for rc in &window {

@@ -3,7 +3,7 @@ use std::time::Duration;
 use crate::input::InputEvent;
 use crate::lod::LodKey;
 use crate::{
-    BLOCK_VOXELS, BRICK_BLOCKS, CHUNK_BLOCKS, Chunk, ChunkCoords, Client, ClientId, Column, ColumnCoords, EntityKey, EntityKind,
+    BLOCK_VOXELS, BRICK_BLOCKS, CHUNK_BLOCKS, Chunk, ChunkCoords, Client, ClientId, ColumnCoords, EntityKey, EntityKind,
     Pose, Rollback,
 };
 use derive_more::Debug;
@@ -726,26 +726,10 @@ pub struct TerrainSnapshot {
 }
 
 impl TerrainSnapshot {
-    /// Materialize worldgen columns into the same `(ChunkCoords, Chunk)` form
-    /// `Region::from_columns` uses — how never-run regions are served.
-    pub fn from_columns(columns: Vec<(ColumnCoords, Column)>) -> Self {
-        let mut ground: Vec<_> = columns.iter().filter_map(|(c, col)| Some((*c, col.ground()?.clone()))).collect();
-        ground.sort_by_key(|(c, _)| (c.x, c.z));
-        let mut chunks: Vec<_> = columns
-            .into_iter()
-            .flat_map(|(col, column)| {
-                column
-                    .materialized_sub_chunks()
-                    .into_iter()
-                    .map(move |(sub_y, chunk)| (ChunkCoords::new(col.x, sub_y, col.z), chunk))
-            })
-            .collect();
-        // Sort by coordinate: keeps `terrain_hash` order-insensitive and
-        // stable relative to `Rollback::terrain_snapshot`'s
-        // ECS-insertion-order output, since both are hashed positionally via
-        // bincode.
-        chunks.sort_by_key(|(c, _)| (c.x, c.y, c.z));
-        Self { chunks, ground, stud: Default::default() }
+    /// A never-run stud region's terrain as its neighbours see it: no chunks,
+    /// just the edge its halo seeds are cut from.
+    pub fn of_stud_edge(stud: crate::StudEdge) -> Self {
+        Self { chunks: Vec::new(), ground: Vec::new(), stud }
     }
 
     /// crc32 of the terrain (the chunks), for cheap change detection on the
@@ -775,8 +759,8 @@ pub enum ClientPacket {
     RequestRegionConnection(RegionId),
     /// Client no longer wants this region's events (window moved on).
     ReleaseRegionConnection(RegionId),
-    /// Subscribe to one LOD key: the server replies with `LodData` (from
-    /// cache or after building) and re-pushes on terrain change.
+    /// Subscribe to one LOD key: the server replies with `StudLodData` (from
+    /// cache or after building).
     RequestLod(LodKey),
     /// Unsubscribe; removal is client-driven, there is no "gone" packet.
     ReleaseLod(LodKey),
@@ -888,9 +872,6 @@ pub struct PersonInfo {
     pub children: Vec<String>,
 }
 
-/// One LOD response: (key-local cell group, RLE grid) pairs.
-pub type LodPayload = Vec<([i32; 3], crate::lod::PackedLodGrid)>;
-
 type CurrentTickRate = u64;
 
 #[derive(serde::Serialize, serde::Deserialize, Debug)]
@@ -911,10 +892,6 @@ pub enum ServerPacket {
     // who he is.
     Region(RegionId, Rollback),
     PlayerRegion(Option<RegionId>, ClientId),
-    /// Streamed LOD cells for one key (initial send AND refresh —
-    /// replace-on-re-receipt), with the key's water surface layer (from the
-    /// recipe; the grids hold no liquid).
-    LodData(LodKey, LodPayload, crate::lod::LodWater),
     /// The world map: per-region tile summaries of the forged world.
     WorldMap(crate::world_map::WorldMap),
     /// A `ClientPacket::PlayRegion` for this region was refused.
@@ -938,14 +915,9 @@ pub enum ServerPacket {
     Legends(crate::history::LegendsPage),
     /// The answer to `ClientPacket::StartAdventure`: the site the adventure starts at.
     AdventureResult(Result<crate::history::SiteId, crate::history::AdventureRefusal>),
-    /// A stud world's answer to `RequestLod`, in place of `LodData`: the key's far
-    /// terrain as a coarse height field (`stud_lod.rs`; initial send AND refresh).
-    /// Appended: every other packet keeps its bytes.
+    /// The answer to `RequestLod`: the key's far terrain as a coarse height
+    /// field (`stud_lod.rs`; initial send AND refresh — replace-on-re-receipt).
     StudLodData(LodKey, crate::stud_lod::StudLodTile),
-    /// On connect, before the first `PlayerRegion`, from a world that streams stud far
-    /// terrain: the client subscribes its LOD rings on the stud ring table
-    /// (`stud_lod::stud_ring_table`) from its first request. Appended.
-    StudTerrain,
 }
 
 /// A Game event
@@ -1179,7 +1151,7 @@ mod tests {
 
     #[test]
     fn lod_packets_round_trip_bincode() {
-        use crate::lod::{LodKey, PackedLodGrid};
+        use crate::lod::LodKey;
         let key = LodKey { factor: 64, coords: [-1, 2] };
         let req = ClientPacket::RequestLod(key);
         let bytes = bincode::serialize(&req).unwrap();
@@ -1187,15 +1159,13 @@ mod tests {
             bincode::deserialize::<ClientPacket>(&bytes).unwrap(),
             ClientPacket::RequestLod(k) if k == key
         ));
-        let payload: LodPayload = vec![([0, -1, 0], PackedLodGrid(vec![(100, crate::BlockId(2))]))];
-        let water = crate::lod::LodWater::encode(&[(crate::NO_WATER, 0), (63, 3), (63, 3), (63, 4)], 2);
-        let data = ServerPacket::LodData(key, payload.clone(), water.clone());
+        let tile = crate::StudLodTile::encode(1, &[crate::StudLodSample::of_column(3, 2, Some(5)); 4]);
+        let data = ServerPacket::StudLodData(key, tile.clone());
         let bytes = bincode::serialize(&data).unwrap();
         match bincode::deserialize::<ServerPacket>(&bytes).unwrap() {
-            ServerPacket::LodData(k, p, w) => {
+            ServerPacket::StudLodData(k, t) => {
                 assert_eq!(k, key);
-                assert_eq!(p, payload);
-                assert_eq!(w, water);
+                assert_eq!(t, tile);
             }
             other => panic!("wrong variant {other:?}"),
         }

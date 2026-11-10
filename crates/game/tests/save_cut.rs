@@ -6,9 +6,9 @@ use crate::common::cut_store::CutStore;
 use crate::common::rig::{Rig, CLIENT};
 use crate::common::seam_translate::{offset, spawn_tile, uniform_floor, Axis, Placement};
 use game::{
-    Block, BlockId, ClickButton, ClientPacket, Container, EntityId, GameEvent, GameEventKind, InFlightRow,
-    InlineSchedule, InlineSpawner, InputEvent, IntentMsg, Inventory, ItemId, ItemStack, MouseButton, Order, PlayMode,
-    PlayerId, RegionCoords, RegionSpawner, ServerEvent, SlotRef, UiAction, WorldBlockPos, WorldCut, CHEST_SLOTS,
+    ClickButton, ClientPacket, Container, EntityId, GameEvent, GameEventKind, InFlightRow, InlineSchedule,
+    InlineSpawner, InputEvent, IntentMsg, Inventory, ItemId, ItemStack, MouseButton, Order, PlayMode, PlayerId,
+    RegionCoords, RegionSpawner, ServerEvent, SlotRef, UiAction, WorldBlockPos, WorldCut, CHEST_SLOTS,
     SAVE_CUT_LEAD_TICKS, SPAWN_REGION,
 };
 use std::collections::BTreeSet;
@@ -122,7 +122,7 @@ fn cut_snapshots_every_region_at_tick_t() {
         assert_eq!(regions, SPAWN_REGION.window_3x3().into_iter().collect(), "every running region");
         for (rc, p) in &cut.regions {
             assert_eq!(p.meta.tick, t, "{rc:?}'s snapshot is at the cut tick");
-            assert!(p.ground.is_some() && !p.chunks.is_empty(), "{rc:?}: a first snapshot is whole");
+            assert!(p.stud_ground.is_some(), "{rc:?}: a first snapshot carries the recipes");
         }
         let answers: Vec<_> = rig.cut_snapshots.iter().filter(|a| a.1 == id).collect();
         assert_eq!(answers.len(), 9, "one answer per region: {answers:?}");
@@ -136,11 +136,11 @@ fn cut_snapshots_every_region_at_tick_t() {
 
 /// Spawns a slime two blocks inside the spawn region's north seam.
 fn slime_by_north_seam(rig: &mut Rig) -> EntityId {
-    let b = game::BLOCK_VOXELS as f32;
+    let b = crate::common::TILE_W;
     let mut id = None;
     rig.manager.spawner_mut().with_region(SPAWN_REGION, |r| {
         let tick = r.current_tick();
-        let e = crate::common::spawn_slime(r, [128.0, 2.0 * b, 2.0 * b], 1, 0.0, tick);
+        let e = crate::common::spawn_slime(r, [128.0, crate::common::above_floor_y(), 2.0 * b], 1, 0.0, tick);
         id = *r.data().ecs.id.try_get(e);
     });
     id.expect("the slime has an EntityId")
@@ -304,11 +304,10 @@ fn player_at_chest_across_seam(rig: &mut Rig) -> WorldBlockPos {
     });
     let cell = offset(origin, -1, 0, -1);
     let (owner, l) = cell.to_local();
-    let chest = game::chest_block().expect("the chest block");
     rig.manager.spawner_mut().with_region(owner, |r| {
         r.with_data(|d| {
-            assert!(d.set_block_safe([l.x, l.y, l.z], Block::new(chest)), "chest at {cell:?}");
-            d.write_container_safe(cell, Some(Container { slots: vec![None; CHEST_SLOTS] }));
+            assert!(d.place_stud_chest_safe([l.x, l.y, l.z]), "chest at {cell:?}");
+            assert_eq!(d.containers().get(&cell), Some(&Container { slots: vec![None; CHEST_SLOTS] }));
         })
     });
     for _ in 0..3 {
@@ -394,9 +393,10 @@ fn straddling_intent_is_saved_exactly_once() {
     assert!(puts * 10 >= runs * 9, "the put went in in only {puts} of {runs} runs");
 }
 
-/// Every chunk a cut carries for `rc`.
-fn chunks_of(cut: &WorldCut, rc: RegionCoords) -> BTreeSet<game::ChunkCoords> {
-    cut.regions.iter().filter(|(r, _)| *r == rc).flat_map(|(_, p)| p.chunks.keys().copied()).collect()
+/// Every stud chunk row a cut carries for `rc` (the chunks that differ from
+/// their recipe's pristine chunk: an unedited region has none).
+fn chunks_of(cut: &WorldCut, rc: RegionCoords) -> BTreeSet<game::StudChunkCoords> {
+    cut.regions.iter().filter(|(r, _)| *r == rc).flat_map(|(_, p)| p.stud_chunks.keys().copied()).collect()
 }
 
 #[test]
@@ -404,6 +404,10 @@ fn chunks_of(cut: &WorldCut, rc: RegionCoords) -> BTreeSet<game::ChunkCoords> {
 fn park_during_pending_cut() {
     for_seeds("a park during a pending cut", |seed| {
         let mut rig = jittery_rig(seed);
+        // North holds an edit: one chunk that has a row to save.
+        rig.manager.spawner_mut().with_region(north(), |r| {
+            r.with_data(|d| assert!(crate::common::carve_tile(d, [20, crate::common::STAND - 1, 20])));
+        });
         rig.round();
         let now = world_tick(&mut rig);
         let id = rig.manager.begin_cut(now).expect("no cut pending");
@@ -426,17 +430,20 @@ fn park_during_pending_cut() {
         rig.manager.begin_cut(now).expect("no cut pending");
         let again = until_cut(&mut rig);
         let mut all = BTreeSet::new();
-        rig.manager.spawner_mut().with_region(north(), |r| all = r.data().chunk_terms().into_keys().collect());
+        rig.manager.spawner_mut().with_region(north(), |r| {
+            // Every row a save of north from nothing writes.
+            all = r.data().portable_snapshot(&Default::default()).0.stud_chunks.into_keys().collect()
+        });
         let union: BTreeSet<_> = chunks_of(&cut, north()).union(&chunks_of(&again, north())).copied().collect();
         assert!(!all.is_empty());
         assert_eq!(union, all, "the two cuts hold every chunk of north");
     });
 }
 
-/// Places a block on the floor at local `(x, z)` of the spawn region.
+/// Builds a tile of stone on the floor at local `(x, z)` of the spawn region.
 fn edit_spawn(rig: &mut Rig, x: i32, z: i32) {
     rig.manager.spawner_mut().with_region(SPAWN_REGION, |r| {
-        r.with_data(|d| assert!(d.set_block_safe([x, 1, z], Block::new(BlockId(1))), "placed at {x},{z}"));
+        r.with_data(|d| assert!(crate::common::fill_tile(d, [x, crate::common::STAND, z]) > 0, "placed at {x},{z}"));
     });
 }
 
@@ -445,9 +452,14 @@ fn edit_spawn(rig: &mut Rig, x: i32, z: i32) {
 fn failed_cut_keeps_uncommitted() {
     for_seeds("a failed cut", |seed| {
         let mut rig = jittery_rig(seed);
+        // An edit before the first cut: the chunk it carries (an unedited
+        // stud region has no rows).
+        let mid = game::REGION_BLOCKS as i32 / 2 + 2;
+        edit_spawn(&mut rig, mid, mid);
         let now = world_tick(&mut rig);
         rig.manager.begin_cut(now).expect("no cut pending");
         let first = until_cut(&mut rig);
+        assert!(!chunks_of(&first, SPAWN_REGION).is_empty(), "the first cut carries the edited chunk");
         assert!(!chunks_of(&first, SPAWN_REGION).is_empty());
         rig.manager.cut_failed(first.id);
         // One other chunk changes (the far corner of the region).
@@ -561,6 +573,7 @@ fn target_parks_during_cut_with_a_crossing_past_t() {
 /// forever: past [`game::CUT_DEADLINE_LEADS`] leads the cut is aborted, and
 /// the next one leaves the silent region out and completes.
 #[test]
+#[ignore = "slow: >100ms — run via just test-full"]
 fn cut_past_its_deadline_is_aborted() {
     let mut rig = jittery_rig(0);
     rig.event(ServerEvent::ClientPacket(ClientPacket::ReleaseRegionConnection(north()), CLIENT));

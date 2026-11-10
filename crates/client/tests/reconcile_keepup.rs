@@ -70,12 +70,8 @@ impl Diag {
         manager.set_lod_table(&[]);
         manager.set_near_radius(0);
         let (tap_to_server, server_side_recv) = crossbeam::channel::unbounded::<ClientPacket>();
-        let server = LocalServer::new_with_generator(
-            server_side_recv,
-            server_send,
-            client::local_server::lightweight_test_generator(),
-        )
-        .unwrap();
+        let server =
+            LocalServer::new_with_genesis(server_side_recv, server_send, client::local_server::lightweight_test_genesis()).unwrap();
         Self {
             tap_from_manager: manager.client_packet_recv(),
             manager,

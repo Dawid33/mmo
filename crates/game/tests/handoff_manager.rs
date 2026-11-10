@@ -1,9 +1,13 @@
 use crossbeam::channel::{unbounded, Receiver};
 use game::{
-    Block, BlockId, Chunk, ClientId, ClientPacket, Column, ColumnCoords, GameEvent, GameEventKind,
-    InlineLodBuilder, InlineSpawner, InputEvent, LodBuilder, RegionCoords, RegionOutput,
-    ServerEvent, ServerPacket, SubChunk, Tick, WorldManager, FLIP_HYSTERESIS, REGION_SIZE, SPAWN_REGION,
+    ClientId, ClientPacket, GameEvent, GameEventKind, InlineSpawner, InputEvent, RegionCoords, RegionOutput,
+    ServerEvent, ServerPacket, Tick, WorldManager, FLIP_HYSTERESIS, REGION_SIZE, SPAWN_REGION,
 };
+
+/// A body-centre height just above the floor (`common::above_floor_y`).
+fn above_floor() -> f32 {
+    crate::common::above_floor_y()
+}
 
 struct Harness {
     manager: WorldManager<InlineSpawner>,
@@ -26,27 +30,12 @@ enum Traced {
 fn harness() -> Harness {
     let (out_send, packets) = unbounded();
     let (region_out_send, region_out) = unbounded();
-    let generator = Box::new(|_rc: RegionCoords| -> Vec<(ColumnCoords, Column)> {
-        let below = Block::new(BlockId::AIR);
-        let above = Block::new(BlockId::AIR);
-        let sub = SubChunk::Dense(Box::new(Chunk::flat_floor(8)));
-        vec![(ColumnCoords::new(0, 0), Column::new(0, below, above, vec![sub]))]
-    });
-    let (lod_result_send, lod_result_recv) = unbounded();
-    let lod_builder: Box<dyn LodBuilder> = Box::new(InlineLodBuilder {
-        coarse: Box::new(|_key: &game::lod::LodKey| Vec::new()),
-        water: Box::new(game::lod::LodWater::dry),
-        out: lod_result_send,
+    // Flat stud ground under chunk column (0, 0) of every region.
+    let spawner = crate::common::stud_spawner(|_rc| {
+        crate::common::floor_seed(0.0..1.0, 0.0..1.0, crate::common::FLOOR_PLATES)
     });
     Harness {
-        manager: WorldManager::new(
-            InlineSpawner::default(),
-            generator,
-            out_send,
-            region_out_send,
-            lod_builder,
-            lod_result_recv,
-        ),
+        manager: crate::common::stud_manager(spawner, out_send, region_out_send),
         region_out,
         packets,
         trace: Vec::new(),
@@ -96,7 +85,7 @@ impl Harness {
             region.with_data(|d| {
                 d.set_body_pose_safe(
                     key,
-                    game::Pose::from_translation(game::rapier3d::math::Vector::new(x, 26.0, z)),
+                    game::Pose::from_translation(game::rapier3d::math::Vector::new(x, above_floor(), z)),
                 )
             });
         });
@@ -387,7 +376,7 @@ fn slime_arrival_does_not_wake_unloaded_region() {
 
     let mut id = None;
     h.manager.spawner_mut().with_region(SPAWN_REGION, |region| {
-        let e = crate::common::spawn_slime(region, [128.0, 26.0, -(FLIP_HYSTERESIS + 2.0)], 1, 0.0, 0);
+        let e = crate::common::spawn_slime(region, [128.0, above_floor(), -(FLIP_HYSTERESIS + 2.0)], 1, 0.0, 0);
         id = *region.data().ecs.id.try_get(e);
     });
     let id = id.expect("the slime has an EntityId");
@@ -462,7 +451,7 @@ fn mailbox_is_capped_and_despawns_the_oldest() {
     for i in 0..walked {
         h.manager.spawner_mut().with_region(SPAWN_REGION, |region| {
             let tick = region.current_tick();
-            let e = crate::common::spawn_slime(region, [128.0 + i as f32, 26.0, -(FLIP_HYSTERESIS + 2.0)], 1, 0.0, tick);
+            let e = crate::common::spawn_slime(region, [128.0 + i as f32, above_floor(), -(FLIP_HYSTERESIS + 2.0)], 1, 0.0, tick);
             ids.push(region.data().ecs.id.try_get(e).expect("an EntityId"));
         });
         now += 50;
@@ -499,7 +488,7 @@ fn mailbox_is_capped_and_despawns_the_oldest() {
 
 /// A 1 m cube body.
 fn cube_collider() -> game::ColliderSpec {
-    let b = game::BLOCK_VOXELS as f32;
+    let b = crate::common::TILE_W;
     game::ColliderSpec::Cuboid { half_extents: game::rapier3d::math::Vector::splat(b / 2.0) }
 }
 
@@ -509,7 +498,7 @@ fn spawn_body_past_north_seam(h: &mut Harness) -> game::EntityId {
     use game::rapier3d::math::Vector;
     let mut id = None;
     h.manager.spawner_mut().with_region(SPAWN_REGION, |region| {
-        let pose = game::Pose::from_translation(Vector::new(128.0, 26.0, -(FLIP_HYSTERESIS + 2.0)));
+        let pose = game::Pose::from_translation(Vector::new(128.0, above_floor(), -(FLIP_HYSTERESIS + 2.0)));
         region.with_data(|d| {
             let e = d.spawn_body_safe(pose, cube_collider(), Vector::ZERO, Vector::ZERO);
             id = *d.ecs.id.try_get(e);
@@ -636,7 +625,7 @@ fn piled_items(h: &mut Harness, rc: RegionCoords) -> std::collections::BTreeMap<
 /// with drops yet; voxel bodies will).
 fn departing_body(serial: u64, x: f32, drops: Vec<game::ItemStack>) -> game::EntityBundle {
     use game::rapier3d::math::Vector;
-    let pose = game::Pose::from_translation(Vector::new(x, 26.0, -(FLIP_HYSTERESIS + 2.0)));
+    let pose = game::Pose::from_translation(Vector::new(x, above_floor(), -(FLIP_HYSTERESIS + 2.0)));
     game::EntityBundle {
         id: game::EntityId { birth_region: SPAWN_REGION, serial: 1_000_000 + serial },
         kind: game::EntityKind::Body,
@@ -691,19 +680,19 @@ fn mailbox_overflow_puts_a_bodys_drops_down() {
     h.manager.spawner_mut().with_region(SPAWN_REGION, |region| {
         cells = region.data().item_piles.keys().map(|c| c.to_local().1).collect();
     });
-    let b = game::BLOCK_VOXELS as f32;
+    let b = crate::common::TILE_W;
     let col = (x / b).floor() as i32;
     for c in &cells {
         assert!(c.z <= 1 && (c.x - col).abs() <= 1, "pile at {c:?}, not at the seam cell (x {col}, z 0)");
     }
 }
 
-/// A falling voxel body (a felled tree, `DropItems`) that tips into a region
+/// A falling stud body (a felled tree, `DropItems`) that tips into a region
 /// that is not running does not wait out the park in the mailbox, logs and
 /// all: it settles at once, its drops put down at the seam cell on the side
 /// of the region it left. North is not woken.
 #[test]
-fn voxel_body_into_a_region_not_running_settles_at_the_seam() {
+fn stud_body_into_a_region_not_running_settles_at_the_seam() {
     crate::common::install_real_block_props();
     let mut h = harness();
     h.event(ServerEvent::connected(0), 0);
@@ -716,8 +705,7 @@ fn voxel_body_into_a_region_not_running_settles_at_the_seam() {
     let mut stamp = 0;
     h.manager.spawner_mut().with_region(SPAWN_REGION, |r| stamp = r.current_tick());
     let mut body = departing_body(0, 128.0, vec![game::ItemStack { item, count: 4 }]);
-    body.carried.voxel_body =
-        Some(game::voxel_body::VoxelBody { policy: game::voxel_body::SettlePolicy::DropItems, ..Default::default() });
+    body.carried.stud_body = Some(game::StudBody { policy: game::SettlePolicy::DropItems, ..Default::default() });
     let id = body.id;
     h.manager.handle_region_output(SPAWN_REGION, RegionOutput::Departures(vec![(body, north)], stamp), now);
     assert!(!h.manager.running_regions().contains(&north), "a body never wakes north");

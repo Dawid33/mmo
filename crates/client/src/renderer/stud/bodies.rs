@@ -1,10 +1,9 @@
 //! Stud bodies (`game::stud_body`: bricks detached from stud terrain into one
 //! falling, tumbling rigid body — a felled tree) drawn with the chunk mesher.
 //!
-//! As a voxel body (`voxel_bodies.rs`): the body is an ordinary sim entity
-//! (`SimEntity`, `Transform`, `SimTarget::body`), so `interpolate_transforms`
-//! glides it between sim poses, rotation included, and `RemoveEntity` despawns
-//! it with its children. The bridge tags it [`PendingStudBody`] (`AddStudBody`,
+//! The body is an ordinary sim entity (`SimEntity`, `Transform`,
+//! `SimTarget::body`), so `interpolate_transforms` glides it between sim poses,
+//! rotation included, and `RemoveEntity` despawns it with its children. The bridge tags it [`PendingStudBody`] (`AddStudBody`,
 //! or a snapshot holding one); its model is meshed off the main thread
 //! ([`StudMeshJob::Model`]: every brick whole, nothing culled) into two mesh
 //! children — body and stud tops (and glass, if it holds any) — offset by minus the model's centre of mass,
@@ -23,6 +22,12 @@ use super::systems::{to_meshes, StudMeshes};
 /// A body entity whose model still has to be meshed. A newer one replaces it.
 #[derive(Component, Clone)]
 pub struct PendingStudBody(pub Arc<StudModel>);
+
+/// Marks a body entity drawn by its stud model (set with every
+/// [`PendingStudBody`], never removed): `avatar` draws such an
+/// `EntityKind::Body` no placeholder box.
+#[derive(Component, Clone, Copy, Debug, Default)]
+pub struct StudBodyModel;
 
 /// The body's in-flight mesh build. Replacing it cancels the older build.
 #[derive(Component)]

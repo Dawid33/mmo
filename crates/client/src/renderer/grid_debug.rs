@@ -17,8 +17,7 @@ pub struct GridDebug {
 }
 
 /// F5 toggles the wireframe view. Reads Bevy input directly (client-only
-/// concern — F5 is never forwarded to the sim input path). F3 = dev panel,
-/// F4 = cave culling; F5 is the next free debug key.
+/// concern — F5 is never forwarded to the sim input path). F3 = dev panel.
 pub fn toggle_grid_debug(keys: Res<ButtonInput<KeyCode>>, mut state: ResMut<GridDebug>) {
     if keys.just_pressed(KeyCode::F5) {
         state.enabled = !state.enabled;
@@ -72,15 +71,15 @@ pub fn apply_terrain_debug(
     }
 }
 
-/// Render-brick edge in world units (`BRICK_VOXELS`, 1 unit per voxel). Matches
-/// the `meshing::queue::ChunkGrid` keying (world position / `BRICK_VOXELS`).
-pub const CHUNK_SIZE: f32 = game::BRICK_VOXELS as f32;
+/// A stud chunk's box in world units: 16 m across, one chunk layer tall — the
+/// cells of the stud index (`stud::world`, `WorldChunkPos`).
+pub const CHUNK_SIZE: Vec3 = Vec3::new(game::CHUNK_UNITS as f32, game::STUD_CHUNK_HEIGHT_UNITS as f32, game::CHUNK_UNITS as f32);
 
 // Tunables (no UI; edit and rebuild).
 /// Chunk cells drawn each side of the camera, horizontally.
 pub const CHUNK_GRID_RADIUS_XZ: i32 = 2;
-/// Chunk cells drawn above/below the camera.
-pub const CHUNK_GRID_RADIUS_Y: i32 = 2;
+/// Chunk layers drawn above/below the camera's.
+pub const CHUNK_GRID_RADIUS_Y: i32 = 1;
 /// Region walls span camera_y ± this.
 pub const REGION_WALL_HALF_HEIGHT: f32 = 64.0;
 /// Spacing of vertical lines along region boundary edges.
@@ -96,19 +95,15 @@ pub const REGION_LOD_COLOR: Srgba = PURPLE;
 
 /// Integer chunk-grid cell containing a world-space point. Floor division,
 /// not truncation: -0.1 is cell -1, matching `RegionCoords::from_world` and
-/// the `ChunkGrid` keying.
+/// the stud index's keying.
 pub fn chunk_cell_of(pos: Vec3) -> IVec3 {
-    IVec3::new(
-        (pos.x / CHUNK_SIZE).floor() as i32,
-        (pos.y / CHUNK_SIZE).floor() as i32,
-        (pos.z / CHUNK_SIZE).floor() as i32,
-    )
+    (pos / CHUNK_SIZE).floor().as_ivec3()
 }
 
-/// The 12 edges of the 32-unit cube for one chunk-grid cell, world space.
+/// The 12 edges of one chunk-grid cell's box, world space.
 pub fn chunk_cube_lines(cell: IVec3) -> Vec<(Vec3, Vec3)> {
     let min = cell.as_vec3() * CHUNK_SIZE;
-    let max = min + Vec3::splat(CHUNK_SIZE);
+    let max = min + CHUNK_SIZE;
     let corners = [
         Vec3::new(min.x, min.y, min.z),
         Vec3::new(max.x, min.y, min.z),
@@ -221,26 +216,28 @@ mod tests {
 
     #[test]
     fn chunk_cell_uses_floor_division() {
+        let s = CHUNK_SIZE;
         assert_eq!(chunk_cell_of(Vec3::new(0.5, 0.5, 0.5)), IVec3::new(0, 0, 0));
-        assert_eq!(chunk_cell_of(Vec3::new(63.9, 32.0, 95.9)), IVec3::new(1, 1, 2));
+        assert_eq!(chunk_cell_of(Vec3::new(2.0 * s.x - 0.1, s.y, 3.0 * s.z - 0.1)), IVec3::new(1, 1, 2));
         // The classic bug: truncation would give 0 / 0 / -2 here.
-        assert_eq!(chunk_cell_of(Vec3::new(-0.1, -32.0, -64.1)), IVec3::new(-1, -1, -3));
+        assert_eq!(chunk_cell_of(Vec3::new(-0.1, -s.y, -2.0 * s.z - 0.1)), IVec3::new(-1, -1, -3));
     }
 
     #[test]
     fn chunk_cube_has_12_edges_spanning_cell() {
+        let s = CHUNK_SIZE;
         let lines = chunk_cube_lines(IVec3::new(1, -1, 2));
         assert_eq!(lines.len(), 12);
         for (a, b) in &lines {
             for p in [a, b] {
-                assert!((32.0..=64.0).contains(&p.x), "x out of cell: {p:?}");
-                assert!((-32.0..=0.0).contains(&p.y), "y out of cell: {p:?}");
-                assert!((64.0..=96.0).contains(&p.z), "z out of cell: {p:?}");
+                assert!((s.x..=2.0 * s.x).contains(&p.x), "x out of cell: {p:?}");
+                assert!((-s.y..=0.0).contains(&p.y), "y out of cell: {p:?}");
+                assert!((2.0 * s.z..=3.0 * s.z).contains(&p.z), "z out of cell: {p:?}");
             }
         }
-        // Every edge of a cube has length CHUNK_SIZE; no zero-length lines.
+        // Four edges along each axis; no zero-length lines.
         let total: f32 = lines.iter().map(|(a, b)| a.distance(*b)).sum();
-        assert_eq!(total, 12.0 * CHUNK_SIZE);
+        assert_eq!(total, 4.0 * (s.x + s.y + s.z));
     }
 
     #[test]

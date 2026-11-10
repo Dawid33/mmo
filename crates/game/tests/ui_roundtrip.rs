@@ -1,10 +1,10 @@
 //! Full logical round-trip with no renderer: a UiAction mutates authoritative
 //! inventory, and the re-projected hotbar reflects the change.
-use game::{build_hotbar, GameEventKind, HotbarView, Region, RegionCoords, UiAction};
+use game::{build_hotbar, GameEventKind, HotbarView, RegionCoords, UiAction};
 
 #[test]
 fn click_moves_hotbar_stack_to_main() {
-    let mut region = Region::from_chunks(RegionCoords::new(0, 0), Vec::new());
+    let mut region = crate::common::empty_region(RegionCoords::new(0, 0));
     region.handle_event(GameEventKind::CreateClient(0)).unwrap();
     region.with_data(|d| {
         let c = d.clients.get_mut(&0).unwrap();
@@ -24,6 +24,6 @@ fn click_moves_hotbar_stack_to_main() {
 
 #[test]
 fn unknown_client_has_empty_hotbar() {
-    let region = Region::from_chunks(RegionCoords::new(0, 0), Vec::new());
+    let region = crate::common::empty_region(RegionCoords::new(0, 0));
     assert_eq!(build_hotbar(region.data(), 7), HotbarView::default());
 }

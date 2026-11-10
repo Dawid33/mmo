@@ -14,13 +14,11 @@
 //! Separate binaries:
 //! - `wasm_determinism`: also built for wasm32 (just determinism-wasm).
 //! - `hash_mode`: flips the process-global HASH_MODE to Off/Delta.
-//! - `voxel_body`: flips the process-global HASH_MODE to Delta.
 //! - `state_hash_check`: sets the process-global state hash interval.
 
 mod common;
 mod adventure;
 mod anim;
-mod block_edit;
 mod body;
 mod body_scale;
 mod block_props;
@@ -28,16 +26,13 @@ mod camera_controller;
 mod camera_look;
 mod chests;
 mod chop;
-mod chunk_blocks;
 mod chunk_units;
 mod credential;
-mod collider_genesis;
 mod coordinator;
 mod coordinator_lifecycle;
 mod coordinator_requests;
 mod creature_shapes;
 mod gjk_upstream;
-mod ground;
 mod halo;
 mod handoff_manager;
 mod world_clock;
@@ -56,7 +51,6 @@ mod hash_restore;
 mod intents;
 mod jump_arc;
 mod kinematic;
-mod lod_streaming;
 mod log_model;
 mod mass_props;
 mod multi_client;
@@ -71,16 +65,12 @@ mod physics_goldens;
 mod play_region;
 mod random_ops;
 mod region_coords;
-mod region_from_chunks;
-mod region_from_columns;
 mod region_runner;
 mod rollback_restore;
 mod save_cut;
 mod shape_cast_grazing;
 mod simple;
 mod slime;
-mod slope_walk;
-mod spawn_surface;
 mod state_hash;
 mod stud;
 mod stud_carve;
@@ -95,9 +85,7 @@ mod stud_portable;
 mod stud_tiles;
 mod sunk_body;
 mod swimming;
-mod terrain_snapshot;
 mod ui_roundtrip;
-mod underground_edit;
 mod walking_smoothness;
 mod water;
 mod world_manager;

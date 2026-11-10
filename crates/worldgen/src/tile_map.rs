@@ -10,7 +10,7 @@
 //! world block Y metres (`SEA_LEVEL + height`).
 
 use game::movement::UNITS_PER_METER;
-use game::{Biome, RegionCoords, RegionType, TileSummary, WorldMap, BLOCK_VOXELS, REGION_BLOCKS, REGION_SIZE};
+use game::{Biome, RegionCoords, RegionType, TileSummary, WorldMap, REGION_BLOCKS, REGION_SIZE};
 
 use crate::forged::{ForgedWorld, PointSample};
 use crate::pipeline::{SEA_LEVEL, SEA_TOP_BLOCK};
@@ -19,8 +19,8 @@ use crate::pipeline::{SEA_LEVEL, SEA_TOP_BLOCK};
 pub const RELIEF_PERCENTILES: (f64, f64) = (0.1, 0.9);
 
 /// Topmost solid block for a continuous surface height (world metres) —
-/// `generate_region`'s rule: a block is solid when its CENTER (`by + 0.5`) is
-/// below the surface.
+/// the generator's block-column rule (`surface_from_profile`): a block is
+/// solid when its CENTER (`by + 0.5`) is below the surface.
 pub fn surface_block(ground_y: f64) -> i32 {
     (ground_y - 0.5).ceil() as i32 - 1
 }
@@ -50,9 +50,10 @@ fn tile_m() -> f64 {
     f64::from(REGION_SIZE / UNITS_PER_METER)
 }
 
-/// Engine metres per block column.
+/// Engine metres per block column: the map samples the 1 m columns the
+/// generator's covers and trees are decided on.
 fn block_m() -> f64 {
-    BLOCK_VOXELS as f64 / f64::from(UNITS_PER_METER)
+    1.0
 }
 
 /// Version of what [`build_world_map`] produces. The world store keeps the

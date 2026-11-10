@@ -1,4 +1,4 @@
-//! Trees on stud terrain (`stud_trees.rs`): the voxel generator's trees as feature
+//! Trees on stud terrain (`stud_trees.rs`): placed trees as feature
 //! bricks of `generate_stud_region`.
 use std::collections::{BTreeMap, BTreeSet};
 

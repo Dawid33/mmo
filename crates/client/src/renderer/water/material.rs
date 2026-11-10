@@ -24,7 +24,7 @@ pub const WATER_ROUGHNESS: f32 = 0.15;
 pub const WATER_REFLECTANCE: f32 = 0.5;
 
 /// `assets/shaders/water.wgsl`, compiled in (no hot reload; see
-/// `voxel_material::VOXEL_TEXTURE_SHADER` for why shaders are embedded).
+/// `stud::material::STUD_TERRAIN_SHADER` for why shaders are embedded).
 pub const WATER_SHADER: Handle<Shader> =
     bevy::asset::uuid_handle!("a3c1e9d2-4b7f-4e60-8d15-6f2b0c9e7a41");
 
@@ -110,8 +110,7 @@ impl WaterMaterialHandle {
     }
 }
 
-/// Copy the fortress view into the water material when it changes (as
-/// `voxel_material::sync_chunk_material_cut` does for the per-chunk terrain).
+/// Copy the fortress view into the water material when it changes.
 pub fn sync_water_material_cut(
     uniform: Option<Res<FortressViewUniform>>,
     handle: Res<WaterMaterialHandle>,

@@ -72,7 +72,7 @@ pub struct WorkingLevel {
 
 impl Default for WorkingLevel {
     fn default() -> Self {
-        Self { level: None, cut: true, terrain: TerrainKind::Voxel }
+        Self { level: None, cut: true, terrain: TerrainKind::Stud }
     }
 }
 
@@ -365,10 +365,11 @@ mod tests {
 
     #[test]
     fn the_free_cameras_level_is_its_focus_and_round_trips_the_cut() {
-        let b = BLOCK_VOXELS as f32;
-        let derive_level = |y| derive_level(TerrainKind::Voxel, y);
-        assert_eq!(derive_level(40.5 * b), 40, "underground");
-        assert_eq!(derive_level(300.0 * b), 300, "high in the air");
+        let kind = WorkingLevel::default().terrain;
+        let h = kind.tile_height_units();
+        let derive_level = |y| derive_level(kind, y);
+        assert_eq!(derive_level(40.5 * h), 40, "underground");
+        assert_eq!(derive_level(kind.level_bottom_units(300)), 300, "high in the air");
         // Cut off puts the focus on the level's floor: its level is the same.
         for at in [-5, 40, 64, 70] {
             let floor = level_floor_y(&WorkingLevel { level: Some(at), cut: true, ..Default::default() }, Some(home0())).unwrap();
@@ -432,7 +433,7 @@ mod tests {
         let off = WorkingLevel { level: Some(10), cut: false, ..Default::default() };
         assert_eq!(cut_y(&off, Some(home0())), None);
         let on = WorkingLevel { level: Some(10), cut: true, ..Default::default() };
-        assert_eq!(cut_y(&on, Some(home0())), Some(11.0 * BLOCK_VOXELS as f32));
-        assert_eq!(level_floor_y(&on, Some(home0())), Some(10.0 * BLOCK_VOXELS as f32));
+        assert_eq!(cut_y(&on, Some(home0())), Some(on.terrain.level_bottom_units(11)));
+        assert_eq!(level_floor_y(&on, Some(home0())), Some(on.terrain.level_bottom_units(10)));
     }
 }

@@ -11,7 +11,7 @@ use crate::history_handover::{
 use crossbeam::channel::{unbounded, Receiver};
 use game::history::*;
 use game::{
-    ClientId, ClientPacket, InlineLodBuilder, InlineSchedule, InlineSpawner, LodBuilder, RegionCoords, RegionOutput,
+    ClientId, ClientPacket, InlineSchedule, InlineSpawner, RegionCoords, RegionOutput,
     ServerEvent, ServerPacket, WorldManager, WorldMap, REGION_BLOCKS, TICK_RATE, UNLOAD_GRACE_MS,
 };
 
@@ -89,19 +89,10 @@ impl World {
     fn new(seed: u64, history: History) -> Self {
         let (out_send, packets) = unbounded();
         let (region_out_send, region_out) = unbounded();
-        let (lod_result_send, lod_result_recv) = unbounded();
-        let lod_builder: Box<dyn LodBuilder> = Box::new(InlineLodBuilder {
-            coarse: Box::new(|_key: &game::lod::LodKey| Vec::new()),
-            water: Box::new(game::lod::LodWater::dry),
-            out: lod_result_send,
-        });
-        let mut manager = WorldManager::new(
-            InlineSpawner::default(),
-            Box::new(floored_region),
+        let mut manager = crate::common::stud_manager(
+            InlineSpawner::default().with_stud_genesis(std::sync::Arc::new(floored_region)),
             out_send,
             region_out_send,
-            lod_builder,
-            lod_result_recv,
         );
         manager.set_world_map(strip());
         let schedule = InlineSchedule::shuffled(seed).coordinator_delay(LINK_DELAY);

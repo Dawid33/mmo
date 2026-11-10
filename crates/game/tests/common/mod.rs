@@ -1,5 +1,5 @@
 //! Movement rig shared by the integration tests that drive a player through
-//! the real region tick: a hand-built floor, one settled player, key presses
+//! the real region tick: a hand-built stud floor, one settled player, key presses
 //! and per-tick body reads. Every read of the physics engine's types lives
 //! here, so an engine switch migrates one file.
 #![allow(dead_code)]
@@ -8,19 +8,158 @@ use std::collections::BTreeMap;
 use std::ops::Range;
 
 use game::{
-    chunk_coords_from_translation, Chunk, ChunkCoords, EntityKey, GameEventKind, InputEvent, Pose,
-    Key, Region, RegionCoords, Rollback, World, CHUNK_UNITS, PLAYER_SPAWN_X, PLAYER_SPAWN_Z,
+    ColumnCoords, EntityKey, GameEventKind, InputEvent, Key, Pose, Region,
+    RegionCoords, Rollback, StudColumnGround, StudProfile, StudRegionSeed, World, CHUNK_UNITS, PLAYER_SPAWN_X,
+    PLAYER_SPAWN_Z, REGION_CHUNKS, STUD_CHUNK_STUDS, STUD_UNITS, TILE_PLATES, TILE_STUDS,
 };
 
 /// A chunk's edge in world units, as `f32`.
 pub const CHUNK_EDGE: f32 = CHUNK_UNITS as f32;
+
+/// A tile's width (x and z) in sim units: `TerrainKind::Stud.tile_width_units()`.
+pub const TILE_W: f32 = (TILE_STUDS * STUD_UNITS) as f32;
+/// A tile's height in sim units: `TerrainKind::Stud.tile_height_units()`.
+pub fn tile_h() -> f32 {
+    game::plate_units(TILE_PLATES as i32)
+}
+
+/// Surface plate of the shared flat test ground: the top of tile level
+/// `STAND - 1`, so a body stands (and a pile rests) in level [`STAND`].
+pub const FLOOR_PLATES: i32 = 30;
+/// The tile level a body stands in on the flat test ground.
+pub const STAND: i32 = FLOOR_PLATES / TILE_PLATES as i32;
+/// Bedrock of the shared test ground: far below anything a test digs.
+pub const FLOOR_BEDROCK: i32 = -2000;
+/// Grass over dirt: the soil of the shared test ground.
+pub const SOIL: StudProfile =
+    StudProfile { cover: game::MAT_GRASS, cover_plates: 1, soil: game::MAT_DIRT, soil_plates: 5 };
+
+/// Height (sim units) of the top of a floor whose surface plate is `plates`.
+pub fn floor_y(plates: i32) -> f32 {
+    game::plate_units(plates)
+}
+
+/// The y (sim units) of a `BodyScale::STUD` body's centre when it stands on a
+/// smooth floor at `plates` (studded ground adds up to `game::stud_cap_units()`).
+pub fn standing_y(plates: i32) -> f32 {
+    {
+        let s = game::movement::BodyScale::STUD;
+        floor_y(plates) + s.capsule_half_height() + s.capsule_radius()
+    }
+}
+
+/// A body-centre height a little above the shared flat floor (the spawn
+/// clearance's 3.6 units over a standing `BodyScale::STUD` body): where the
+/// tests teleport players and put slimes and bodies down "on the floor".
+pub fn above_floor_y() -> f32 {
+    standing_y(FLOOR_PLATES) + 3.6
+}
+
+/// A flat, dry stud column recipe with its surface at `plates` ([`SOIL`] over stone).
+pub fn stud_flat(plates: i32) -> StudColumnGround {
+    StudColumnGround::flat(plates, SOIL, game::MAT_STONE, FLOOR_BEDROCK)
+}
+
+/// A dry stud column recipe whose surface at stud column `(x, z)` of the chunk
+/// column is `surface(x, z)` plates ([`SOIL`] over stone).
+pub fn stud_ground(surface: impl Fn(usize, usize) -> i32) -> StudColumnGround {
+    let n = STUD_CHUNK_STUDS;
+    let tops: Vec<i32> = (0..n * n).map(|i| surface(i % n, i / n)).collect();
+    StudColumnGround::new(
+        tops.into(),
+        vec![game::STUD_NO_WATER; n * n].into(),
+        vec![0; n * n].into(),
+        vec![SOIL],
+        vec![0; n * n].into(),
+        vec![(i32::MAX, game::MAT_STONE)],
+        FLOOR_BEDROCK,
+    )
+    .expect("a recipe of known materials")
+}
+
+/// A stud region seed: `ground(x, z)` for every chunk column overlapping the
+/// world-unit rectangle, no features.
+pub fn stud_seed_over(
+    x_units: Range<f32>,
+    z_units: Range<f32>,
+    ground: impl Fn(usize, usize) -> StudColumnGround,
+) -> StudRegionSeed {
+    let ground = chunks_over(x_units, z_units).into_iter().map(|(x, z)| (ColumnCoords::new(x, z), ground(x, z))).collect();
+    StudRegionSeed { ground, features: Vec::new() }
+}
+
+/// Flat ground at `plates` under every chunk column overlapping the rectangle.
+pub fn floor_seed(x_units: Range<f32>, z_units: Range<f32>, plates: i32) -> StudRegionSeed {
+    stud_seed_over(x_units, z_units, |_, _| stud_flat(plates))
+}
+
+/// Flat ground at [`FLOOR_PLATES`] under every chunk column of a region: the
+/// same ground in the world frame in every region.
+pub fn uniform_seed() -> StudRegionSeed {
+    let n = REGION_CHUNKS;
+    let ground = (0..n).flat_map(|x| (0..n).map(move |z| (ColumnCoords::new(x, z), stud_flat(FLOOR_PLATES)))).collect();
+    StudRegionSeed { ground, features: Vec::new() }
+}
+
+/// Stud chunk coordinates (`y` = stud layer).
+pub fn sc(x: usize, y: i32, z: usize) -> game::StudChunkCoords {
+    game::StudChunkCoords { x, y, z }
+}
+
+/// A stud chunk holding one stone filler slab `plates` thick over its whole
+/// footprint: the hand-made chunk of the tests that only need "a terrain
+/// chunk entity" (`Rollback::create_stud_chunk_safe`, `seed_stud_genesis`).
+pub fn slab_chunk(plates: u8) -> game::StudChunk {
+    let n = STUD_CHUNK_STUDS as u8;
+    let slab = game::StudBrick::filler([0, 0, 0], [n, plates, n], game::MAT_STONE);
+    game::StudChunk::new([slab]).expect("a filler slab is a valid chunk")
+}
+
+/// A server-side stud region (no render sink) started from `seed`; its bodies
+/// are `BodyScale::STUD`. An empty seed gives a region without terrain.
+pub fn region_of(rc: RegionCoords, seed: StudRegionSeed) -> Region {
+    let mut region = Region::new(Rollback::new(None), None, rc, None);
+    region.seed_stud_world(seed);
+    region
+}
+
+/// A stud region without any terrain.
+pub fn empty_region(rc: RegionCoords) -> Region {
+    region_of(rc, StudRegionSeed::default())
+}
+
+/// A stud region floored flat at `plates` over the unit rectangle.
+pub fn floor_region(rc: RegionCoords, x_units: Range<f32>, z_units: Range<f32>, plates: i32) -> Region {
+    region_of(rc, floor_seed(x_units, z_units, plates))
+}
+
+/// Seeds terrain into a bare sim (`Rollback`) as `Region::seed_stud_world` does.
+pub fn seed_studs(r: &mut Rollback, seed: StudRegionSeed) {
+    let extra = seed.feature_chunks();
+    r.seed_stud_ground_genesis(seed.ground, extra);
+    r.set_body_scale_raw(game::movement::BodyScale::STUD);
+}
+
+/// A terrain snapshot holding the stud edge `edge` (what the world store's
+/// `load_terrain` or a parked region hands a neighbour's halo).
+pub fn stud_terrain_snapshot(edge: game::StudEdge) -> game::TerrainSnapshot {
+    // P10b: `chunks` / `ground` are the voxel halves of the snapshot; they go
+    // with the voxel code and this is the one place the tests name them.
+    game::TerrainSnapshot { chunks: Vec::new(), ground: Vec::new(), stud: edge }
+}
+
+/// The halo seed a region at `to` gets from a never-run neighbour at `from`
+/// whose genesis is `seed` (what the manager sends a starting region).
+pub fn stud_halo_seed(from: RegionCoords, to: RegionCoords, seed: &StudRegionSeed) -> Option<game::halo::HaloUpdate> {
+    game::halo::halo_seed_from_snapshot(from, to, &stud_terrain_snapshot(game::StudEdge::from_seed(seed)))
+}
 
 /// Installs the real block properties (`assets/blocks/blocks.ron`) — the
 /// one process-global every test in this binary shares. It starts out as the
 /// all-solid default with no drops, no hardness and no chest block, and the
 /// first test that installs it changes it for every test still running, so a
 /// test whose outcome depends on block props (the starting kit, mining drops
-/// and hardness, leaves being non-solid) must call this BEFORE it builds any
+/// and hardness, material names) must call this BEFORE it builds any
 /// state — else it sees the default in one run and the real props in the
 /// next. Idempotent: every installer in this binary installs the same props.
 pub fn install_real_block_props() {
@@ -32,9 +171,80 @@ pub fn install_real_block_props() {
     });
 }
 
-/// The chunk holding the world-unit position `units` (floor by `CHUNK_UNITS`).
-pub fn chunk_of(units: game::rapier3d::math::Vector) -> ChunkCoords {
-    chunk_coords_from_translation(units)
+/// The far-terrain builder of the test worlds: the inline stud one, every
+/// tile flat at [`FLOOR_PLATES`].
+pub fn stud_lod_builder() -> Box<dyn game::LodBuilder> {
+    Box::new(game::InlineStudLodBuilder::new(Box::new(|key| {
+        let side = game::StudLodTile::side_for(key);
+        let n = usize::from(side) + 1;
+        let sample = game::StudLodSample::of_column(FLOOR_PLATES, game::MAT_GRASS, None);
+        game::StudLodTile::encode(side, &vec![sample; n * n])
+    })))
+}
+
+/// A manager of a stud world over `spawner` (give it its genesis with
+/// `InlineSpawner::with_stud_genesis`): far terrain comes from [`stud_lod_builder`].
+pub fn stud_manager<S: game::RegionSpawner>(
+    spawner: S,
+    out: crossbeam::channel::Sender<(Option<game::ClientId>, game::ServerPacket)>,
+    region_out: crossbeam::channel::Sender<(RegionCoords, game::RegionOutput)>,
+) -> game::WorldManager<S> {
+    game::WorldManager::new(spawner, out, region_out, stud_lod_builder())
+}
+
+/// A far-terrain key the stud path serves for region `rc` at this region size.
+pub fn stud_lod_key(rc: RegionCoords) -> game::lod::LodKey {
+    game::lod::LodKey::for_region(game::stud_ring_table(game::lod::LOD_RING_TABLE)[0].1, rc)
+}
+
+/// Body-centre position (region-local sim units) of a `BodyScale::STUD` body
+/// standing in tile `at` on a studded floor at the tile's bottom: the column's
+/// centre, its feet on the stud caps.
+pub fn body_on_tile(at: game::TilePos) -> game::rapier3d::math::Vector {
+    let kind = game::TerrainKind::Stud;
+    let (x, z) = kind.column_centre([at[0], at[2]]);
+    let s = game::movement::BodyScale::STUD;
+    let feet = kind.level_bottom_units(at[1]) + game::stud_cap_units();
+    game::rapier3d::math::Vector::new(x, feet + s.capsule_half_height() + s.capsule_radius(), z)
+}
+
+/// The feet of a `BodyScale::STUD` body whose centre is at `t`.
+pub fn feet_of(t: game::rapier3d::math::Vector) -> game::rapier3d::math::Vector {
+    let s = game::movement::BodyScale::STUD;
+    t - game::rapier3d::math::Vector::Y * (s.capsule_half_height() + s.capsule_radius())
+}
+
+/// The tile a `BodyScale::STUD` body whose centre is at `t` stands in.
+pub fn feet_tile(t: game::rapier3d::math::Vector) -> game::TilePos {
+    game::TerrainKind::Stud.feet_tile(feet_of(t))
+}
+
+/// Whether tile `p` (region-local; own ∪ stud halo) holds nothing.
+pub fn tile_open(d: &Rollback, p: game::TilePos) -> bool {
+    game::TileSource::tile_fill(d, p) == game::TileFill::Open
+}
+
+/// Whether world tile `p` holds anything, as `d`'s region sees it (own ∪ stud halo).
+pub fn world_tile_filled(d: &Rollback, p: game::WorldBlockPos) -> bool {
+    !tile_open(d, game::local_cell(*d.region, p))
+}
+
+/// Fills tile `at` of a region with stone bricks, undo-safely (a built block).
+pub fn fill_tile(d: &mut Rollback, at: game::TilePos) -> u32 {
+    let (lo, hi) = game::stud_tile_box(at).expect("a tile of the region");
+    d.fill_stud_box_safe(lo, hi, game::MAT_STONE)
+}
+
+/// Carves tile `at` out of a region, undo-safely (a dug block). Returns
+/// whether anything was removed.
+pub fn carve_tile(d: &mut Rollback, at: game::TilePos) -> bool {
+    let (lo, hi) = game::stud_tile_box(at).expect("a tile of the region");
+    !d.carve_stud_safe(lo, hi).is_empty()
+}
+
+/// An inline spawner whose never-run regions start from `floor(rc)`.
+pub fn stud_spawner(floor: impl Fn(RegionCoords) -> StudRegionSeed + Send + Sync + 'static) -> game::InlineSpawner {
+    game::InlineSpawner::default().with_stud_genesis(std::sync::Arc::new(floor))
 }
 
 /// Chunk index along one horizontal axis of the world-unit coordinate `u`.
@@ -56,23 +266,13 @@ pub fn chunks_over(x_units: Range<f32>, z_units: Range<f32>) -> Vec<(usize, usiz
     span(x_units).flat_map(|x| zs.clone().map(move |z| (x, z))).collect()
 }
 
-/// Every chunk overlapping the unit rectangle, each a `Chunk::flat_floor(depth)`.
-pub fn floor_chunks(x_units: Range<f32>, z_units: Range<f32>, depth: u32) -> Vec<(ChunkCoords, Chunk)> {
-    chunks_over(x_units, z_units)
-        .into_iter()
-        .map(|(x, z)| (ChunkCoords::new(x, 0, z), Chunk::flat_floor(depth)))
-        .collect()
-}
-
-/// Seeds `region`'s terrain halo (it stands at `here`) as if each of its 8
-/// neighbours were floored like [`floor_chunks`] edge to edge: the seeds the
+/// Seeds `region`'s stud halo (it stands at `here`) as if each of its 8
+/// neighbours were floored like [`uniform_seed`] edge to edge: the seeds the
 /// manager sends a starting region.
 pub fn seed_floor_halo(region: &mut game::Region, here: game::RegionCoords) {
-    let size = game::REGION_SIZE;
-    let chunks = floor_chunks(0.0..size, 0.0..size, 16);
+    let neighbour = uniform_seed();
     for from in here.window_3x3().into_iter().filter(|&rc| rc != here) {
-        let seed = game::halo::halo_seed_from_chunks(from, here, chunks.iter().map(|(c, ch)| (*c, ch)))
-            .expect("neighbours");
+        let seed = stud_halo_seed(from, here, &neighbour).expect("neighbours");
         region.handle_event(game::GameEventKind::HaloUpdate(seed)).unwrap();
         region.forget_last_event();
     }
@@ -109,21 +309,17 @@ pub fn r0() -> RegionCoords {
     RegionCoords::new(0, 0)
 }
 
-/// A world of chunks (y 0) over the world-unit rectangle `x_units` x `z_units`
-/// (`chunk(x, z)` gets each overlapping chunk's coordinates), with one player
-/// whose controls are on, settled on the ground at the spawn column
+/// A stud world over the world-unit rectangle `x_units` x `z_units`
+/// (`ground(x, z)` gives each overlapping chunk column's recipe), with one
+/// player whose controls are on, settled on the ground at the spawn column
 /// (128, 128). The rectangle must cover the spawn.
 pub fn world_of(
     x_units: Range<f32>,
     z_units: Range<f32>,
-    chunk: impl Fn(usize, usize) -> Chunk,
+    ground: impl Fn(usize, usize) -> StudColumnGround,
 ) -> World {
-    let chunks = chunks_over(x_units, z_units)
-        .into_iter()
-        .map(|(x, z)| (ChunkCoords::new(x, 0, z), chunk(x, z)))
-        .collect();
     let mut world = World::new();
-    world.load(&r0(), Region::from_chunks(r0(), chunks));
+    world.load(&r0(), region_of(r0(), stud_seed_over(x_units, z_units, ground)));
     world.handle_region_event(GameEventKind::CreateClient(0), r0()).unwrap();
     world.forget_last_event(&r0());
     key(&mut world, Key::KeyE, true);
@@ -134,10 +330,10 @@ pub fn world_of(
     world
 }
 
-/// One-voxel terraces, a step down per chunk along +z: the gentle slopes of
+/// One-plate terraces, a step down per chunk along +z: the gentle slopes of
 /// generated terrain.
 pub fn terraces(z_units: Range<f32>) -> World {
-    world_of(spawn_x_band(), z_units, |_, z| Chunk::flat_floor(28 - z as u32))
+    world_of(spawn_x_band(), z_units, |_, z| stud_flat(FLOOR_PLATES + 12 - z as i32))
 }
 
 pub fn key(world: &mut World, key: Key, pressed: bool) {

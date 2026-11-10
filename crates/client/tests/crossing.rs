@@ -244,21 +244,13 @@ const HALO_WATCH_STEPS: usize = (6000 / game::TICK_RATE) as usize;
 /// predict.
 const HALO_JOIN_SETTLE_STEPS: usize = (game::UNLOAD_GRACE_MS / game::TICK_RATE) as usize + 10;
 
-/// A one-block floor under every chunk column of the regions at x <= 0; the
-/// rest is void, so no slime spawns there.
-fn floored_west(rc: game::RegionCoords) -> Vec<(game::ColumnCoords, game::Column)> {
-    let air = game::Block::new(game::BlockId::AIR);
-    let mut out = Vec::new();
+/// Flat ground under every chunk column of the regions at x <= 0; the rest is
+/// void, so no slime spawns there.
+fn floored_west(rc: game::RegionCoords) -> game::StudRegionSeed {
     if rc.x > 0 {
-        return out;
+        return game::StudRegionSeed { ground: Vec::new(), features: Vec::new() };
     }
-    for x in 0..game::REGION_CHUNKS {
-        for z in 0..game::REGION_CHUNKS {
-            let sub = game::SubChunk::Dense(Box::new(game::Chunk::flat_floor(game::BLOCK_VOXELS as u32)));
-            out.push((game::ColumnCoords::new(x, z), game::Column::new(0, air, air, vec![sub])));
-        }
-    }
-    out
+    client::local_server::lightweight_test_genesis()(rc)
 }
 
 /// A slime hopping in and out of the HOME region's band along its east seam,
@@ -271,7 +263,7 @@ fn floored_west(rc: game::RegionCoords) -> Vec<(game::ColumnCoords, game::Column
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn predicted_halo_updates_do_not_mispredict() {
-    let mut h = SimHarness::with_generator(1, Box::new(floored_west));
+    let mut h = SimHarness::with_genesis(1, std::sync::Arc::new(floored_west));
     let bv = game::BLOCK_VOXELS as f32;
     let size = game::REGION_SIZE;
     let east = game::RegionCoords::new(game::SPAWN_REGION.x + 1, game::SPAWN_REGION.z);
@@ -281,7 +273,9 @@ fn predicted_halo_updates_do_not_mispredict() {
         let mut key = None;
         let tick = r.current_tick();
         r.with_data(|d| {
-            let pos = game::rapier3d::math::Vector::new(size - 7.0 * bv, 2.5 * bv, size * 3.0 / 4.0);
+            // A block and a half over the ground.
+            let ground = game::plate_units(client::local_server::TEST_GROUND_TOP_PLATES);
+            let pos = game::rapier3d::math::Vector::new(size - 7.0 * bv, ground + 1.5 * bv, size * 3.0 / 4.0);
             key = Some(d.spawn_slime_safe(pos, 1, 0.0, tick));
         });
         id = r.data().entity_id(key.unwrap());
@@ -318,7 +312,7 @@ fn predicted_halo_updates_do_not_mispredict() {
     h.assert_converged();
 }
 
-/// A `BreakBlock` intent the home region's player sends at a block of the
+/// A `BreakBlock` intent the home region's player sends at a tile of the
 /// WEST region (`game::intents`): the client relays it between its predicted
 /// regions like the server's manager, held to the same due tick — the break
 /// in the west region, its reply back in the home — so nothing mispredicts,
@@ -326,10 +320,12 @@ fn predicted_halo_updates_do_not_mispredict() {
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn predicted_intent_across_regions_does_not_mispredict() {
-    let mut h = SimHarness::with_generator(1, Box::new(floored_west));
+    let mut h = SimHarness::with_genesis(1, std::sync::Arc::new(floored_west));
     let west = game::RegionCoords::new(game::SPAWN_REGION.x - 1, game::SPAWN_REGION.z);
     let mid = game::REGION_BLOCKS as i32 / 2;
-    let target = game::WorldBlockPos::from_local(west, game::BlockPos::new(mid, 0, mid));
+    // The ground's top tile.
+    let top = client::local_server::TEST_GROUND_TOP_PLATES / game::TILE_PLATES as i32 - 1;
+    let target = game::WorldBlockPos::from_local(west, game::BlockPos::new(mid, top, mid));
     h.connect();
     h.step_n(HALO_JOIN_SETTLE_STEPS);
     assert_eq!(h.player_region(), game::SPAWN_REGION);
@@ -340,9 +336,7 @@ fn predicted_intent_across_regions_does_not_mispredict() {
     h.set_latency(RUBBER_BAND_LATENCY_STEPS);
     h.step_n(CLOCK_SETTLE_STEPS);
     let solid = |h: &SimHarness| {
-        h.client_region_data(west)
-            .and_then(|d| d.block_at([mid, 0, mid]))
-            .is_some_and(|b| b.id != game::BlockId::AIR)
+        h.client_region_data(west).is_some_and(|d| d.stud_tile([mid, top, mid]).fill() != game::TileFill::Open)
     };
     assert!(solid(&h), "the west region's floor is there to break");
     let before = h.total_mispredictions();
@@ -358,7 +352,7 @@ fn predicted_intent_across_regions_does_not_mispredict() {
             .filter(|r| matches!(r, game::IntentReply::Granted(game::Intent::BreakBlock { .. })))
             .count();
     }
-    assert!(!solid(&h), "the client's west region broke the block");
+    assert!(!solid(&h), "the client's west region broke the tile");
     assert_eq!(granted, 1, "the grant reached the sender once");
     assert_eq!(h.total_mispredictions() - before, 0, "the cross-region intent mispredicted");
     h.set_latency(0);

@@ -75,6 +75,17 @@ struct InFlight {
 #[derive(Resource, Default)]
 pub struct StudMeshTasks(BTreeMap<WorldChunkPos, InFlight>);
 
+impl StudMeshTasks {
+    /// Chunk mesh jobs in flight.
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
 pub(super) fn to_mesh(d: StudMeshData) -> Mesh {
     Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::RENDER_WORLD)
         .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, d.positions)

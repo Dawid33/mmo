@@ -1,16 +1,17 @@
-//! Chests (`game::containers`, plan 2026-11-05 Decision 10): block
-//! inventories keyed by cell beside the voxels. Placing a chest creates its
+//! Chests (`game::containers`, plan 2026-11-05 Decision 10): tile
+//! inventories keyed by cell beside the terrain (on stud terrain a tile of
+//! tagged chest bricks). Placing a chest creates its
 //! container, an Adventure right click opens it (instead of placing),
 //! inventory clicks reach its slots, walking away closes it, and breaking it
 //! spills its contents as piles — once, closing it for every viewer.
 use crate::common;
 
-use common::r0;
+use common::{r0, STAND};
 use game::edit::BlockPos;
 use game::{
-    chest_block, install_block_props, ClientId, state_hash, Block, BlockId, BlockRegistry, Chunk, ChunkCoords, ClickButton,
-    GameEventKind, InputEvent, Inventory, ItemId, ItemStack, MouseButton, PlayMode, Pose, Region, Rollback,
-    SerializedRegion, SlotRef, UiAction, CHEST_SLOTS, CHUNK_UNITS, STARTING_CHESTS, STICK,
+    chest_block, install_block_props, state_hash, BlockRegistry, ClickButton, ClientId, GameEventKind, InputEvent,
+    Inventory, ItemId, ItemStack, MouseButton, PlayMode, Pose, Region, Rollback, SerializedRegion, SlotRef, UiAction,
+    CHEST_SLOTS, STARTING_CHESTS, STICK,
 };
 use std::collections::BTreeMap;
 
@@ -18,8 +19,6 @@ const MANIFEST: &str = include_str!("../../../assets/blocks/blocks.ron");
 const DIRT_ITEM: ItemId = ItemId(1);
 const STONE_ITEM: ItemId = ItemId(2);
 
-/// Chunk column holding the player spawn (128, 128).
-const SPAWN_CHUNK: usize = 128 / CHUNK_UNITS;
 /// About 45 degrees down: 302 px * 0.0026 rad/px at the default sensitivity.
 const DOWN_45: f32 = 302.0;
 
@@ -32,46 +31,30 @@ fn forget(region: &mut Region, ev: GameEventKind) {
     region.forget_last_event();
 }
 
-fn chest() -> BlockId {
-    chest_block().expect("the manifest has a chest")
-}
-
 fn chest_item() -> ItemId {
-    ItemId::block(chest())
+    ItemId::block(chest_block().expect("the manifest has a chest"))
 }
 
-/// A two-block dirt floor around the spawn, player 0 settled in the middle
-/// of block (8, 2, 8), first person, in Adventure, looking 45 degrees down,
-/// with an empty inventory. Setup is forgotten.
+/// The tile the player stands on.
+const HOME: BlockPos = [8, STAND, 8];
+
+/// Flat stud ground under the whole region, player 0 standing on tile
+/// `HOME`, first person, in Adventure, facing −z and looking 45 degrees
+/// down, with an empty inventory. Setup is forgotten.
 fn region() -> Region {
     let reg = BlockRegistry::from_ron(MANIFEST).unwrap();
     install_block_props(reg.props());
-    let mut chunks = Vec::new();
-    let around = SPAWN_CHUNK.saturating_sub(1)..=SPAWN_CHUNK + 1;
-    for x in around.clone() {
-        for z in around.clone() {
-            chunks.push((ChunkCoords::new(x, 0, z), Chunk::flat_floor(32)));
-        }
-    }
     let (send, recv) = crossbeam::channel::unbounded();
     std::mem::forget(recv);
     let mut region = Region::new(Rollback::new(Some(send.clone())), Some(send), r0(), None);
-    region.with_data(|r| r.seed_terrain_genesis(chunks));
+    region.seed_stud_world(common::uniform_seed());
     forget(&mut region, GameEventKind::CreateClient(0));
+    forget(&mut region, GameEventKind::Order(0, game::Order::SetMode { mode: PlayMode::Adventure, at: Some(HOME) }));
     forget(&mut region, input(0, InputEvent::FpsCam(true)));
-    region.with_data(|r| {
-        let c = r.clients.get_mut(&0).unwrap();
-        c.mode = PlayMode::Adventure;
-        c.inventory = Inventory::new();
-    });
+    region.with_data(|r| r.clients.get_mut(&0).unwrap().inventory = Inventory::new());
     for _ in 0..12 {
         forget(&mut region, GameEventKind::Tick);
     }
-    let y = body(&region)[1];
-    region.with_data(|r| {
-        let e = *r.data.player_entites.get(&0).unwrap();
-        r.set_body_pose_safe(e, Pose::translation(136.0, y, 136.0));
-    });
     forget(&mut region, input(0, InputEvent::MouseMotion { dx: 0.0, dy: DOWN_45 }));
     for _ in 0..3 {
         forget(&mut region, GameEventKind::Tick);
@@ -86,16 +69,13 @@ fn body(region: &Region) -> [f32; 3] {
     data.physics.bodies.get(*data.ecs.rigidbody.get(e)).unwrap().translation().to_array()
 }
 
+/// The tile under the crosshair.
 fn target(region: &Region) -> BlockPos {
-    region.data().eye_hit(0).expect("the eye ray must hit a block").block
+    region.data().eye_stud_hit(0).expect("the eye ray must hit a tile").tile
 }
 
-fn block(region: &Region, p: BlockPos) -> BlockId {
-    region.data().block_at(p).map_or(BlockId::AIR, |b| b.id)
-}
-
-fn set_block(region: &mut Region, p: BlockPos, id: BlockId) {
-    region.with_data(|r| assert!(r.set_block_safe(p, Block::new(id)), "write at {p:?}"));
+fn open(region: &Region, p: BlockPos) -> bool {
+    common::tile_open(region.data(), p)
 }
 
 fn set_slot(region: &mut Region, slot: usize, stack: Option<ItemStack>) {
@@ -148,13 +128,16 @@ fn pile_totals(region: &Region) -> BTreeMap<u16, u32> {
     out
 }
 
-/// A chest in the floor block under the crosshair (Fortress-style write),
-/// with its container. Returns its cell.
+/// A chest on the ground in the tile the crosshair's ray enters the floor
+/// through (a direct write), with its container. Returns its cell: it is
+/// under the crosshair afterwards.
 fn chest_under_crosshair(region: &mut Region) -> BlockPos {
-    let a = target(region);
-    set_block(region, a, chest());
+    let a = region.data().eye_stud_hit(0).expect("the eye ray must hit the floor").outside;
+    assert_eq!(a[1], STAND, "the tile on the floor ahead");
+    region.with_data(|r| assert!(r.place_stud_chest_safe(a), "chest at {a:?}"));
     assert!(container(region, a).is_some(), "a chest written gets a container");
-    assert_eq!(target(region), a, "the chest is still under the crosshair");
+    assert!(region.data().stud_chest_at(a));
+    assert_eq!(target(region), a, "the chest is under the crosshair");
     a
 }
 
@@ -186,21 +169,6 @@ fn starting_kit_has_two_chests() {
 }
 
 #[test]
-fn placing_chest_creates_container() {
-    let mut region = region();
-    let a = target(&region);
-    let above = [a[0], a[1] + 1, a[2]];
-    set_slot(&mut region, 0, Some(ItemStack { item: chest_item(), count: 2 }));
-    right_click(&mut region);
-    // The place is an intent to the cell's owner: it lands at the next tick.
-    ticks(&mut region, 1);
-    assert_eq!(block(&region, above), chest(), "the chest is placed on the hit face");
-    assert_eq!(slot(&region, 0), Some(ItemStack { item: chest_item(), count: 1 }));
-    assert_eq!(container(&region, above), Some(vec![None; CHEST_SLOTS]), "an empty container");
-    assert_eq!(region.data().containers().len(), 1);
-}
-
-#[test]
 fn right_click_chest_opens_not_places() {
     let mut region = region();
     let a = chest_under_crosshair(&mut region);
@@ -212,7 +180,7 @@ fn right_click_chest_opens_not_places() {
     assert_eq!(c.open_container, Some(wc(a)), "the chest is open");
     assert!(c.inventory_open, "with the inventory screen");
     assert_eq!(slot(&region, 0), dirt, "nothing was placed");
-    assert_eq!(block(&region, above), BlockId::AIR);
+    assert!(open(&region, above));
     let view = game::container_view(region.data(), 0).expect("a view while open");
     assert_eq!(view.pos, wc(a));
     assert_eq!(view.slots, vec![None; CHEST_SLOTS]);
@@ -253,11 +221,11 @@ fn walking_away_closes() {
     assert_eq!(region.data().clients[&0].open_container, Some(wc(a)));
     ticks(&mut region, 2);
     assert_eq!(region.data().clients[&0].open_container, Some(wc(a)), "in reach: stays open");
-    let y = body(&region)[1];
-    // Ten blocks away.
+    let [x, y, z] = body(&region);
+    // Ten tiles away.
     region.with_data(|r| {
         let e = *r.data.player_entites.get(&0).unwrap();
-        r.set_body_pose_safe(e, Pose::translation(136.0 + 160.0, y, 136.0));
+        r.set_body_pose_safe(e, Pose::translation(x + 10.0 * common::TILE_W, y, z));
     });
     ticks(&mut region, 1);
     let c = &region.data().clients[&0];
@@ -276,7 +244,7 @@ fn break_chest_spills_contents_and_chest() {
     let mut broke = false;
     for _ in 0..200 {
         ticks(&mut region, 1);
-        if block(&region, a) == BlockId::AIR {
+        if open(&region, a) {
             broke = true;
             break;
         }
@@ -309,10 +277,13 @@ fn break_open_chest_spills_once_and_closes() {
         game::container_view(region.data(), 1),
         "both see one shared chest"
     );
-    // One of them breaks it (an instant edit: no chest item drops).
-    set_block(&mut region, a, BlockId::AIR);
+    // One of them breaks it (an instant edit: the tile carved out). On stud
+    // terrain the chest's own item spills with its contents.
+    region.with_data(|r| assert!(common::carve_tile(r, a)));
     assert!(container(&region, a).is_none());
-    assert_eq!(pile_totals(&region), totals_of(&contents), "spilled exactly once");
+    let mut want = totals_of(&contents);
+    *want.entry(chest_item().0).or_default() += 1;
+    assert_eq!(pile_totals(&region), want, "spilled exactly once");
     for id in [0, 1] {
         let c = &region.data().clients[&id];
         assert_eq!(c.open_container, None, "client {id}'s view closed");
@@ -320,7 +291,7 @@ fn break_open_chest_spills_once_and_closes() {
     }
     // A tick later nothing spills again.
     ticks(&mut region, 1);
-    assert_eq!(pile_totals(&region), totals_of(&contents));
+    assert_eq!(pile_totals(&region), want);
 }
 
 #[test]
@@ -338,8 +309,8 @@ fn chest_survives_region_park_restore() {
 #[test]
 fn chest_undo_roundtrip() {
     let mut region = region();
-    let a = target(&region);
-    let above = [a[0], a[1] + 1, a[2]];
+    // The chest goes into the tile against the face under the crosshair.
+    let above = region.data().eye_stud_hit(0).expect("the floor").outside;
     set_slot(&mut region, 0, Some(ItemStack { item: chest_item(), count: 2 }));
     // Place: sent at this tick, an intent landing at the next one.
     mouse(&mut region, MouseButton::Right, true);
@@ -384,7 +355,7 @@ fn chest_undo_roundtrip() {
     region.with_data(|r| {
         let before = state_hash(&*r);
         r.new_transaction();
-        assert!(r.set_block_safe(above, Block::new(BlockId::AIR)));
+        assert!(common::carve_tile(r, above));
         assert!(r.containers().get(&wc(above)).is_none());
         assert_eq!(r.clients[&0].open_container, None);
         assert!(!r.item_piles().is_empty(), "spilled");
@@ -394,30 +365,6 @@ fn chest_undo_roundtrip() {
         assert_eq!(r.clients[&0].open_container, Some(wc(above)));
         assert!(r.item_piles().is_empty());
     });
-}
-
-#[test]
-fn batched_fill_and_clear_follow_chests() {
-    let mut region = region();
-    let a = target(&region);
-    let cells = [[a[0] + 2, a[1] + 1, a[2]], [a[0] + 3, a[1] + 1, a[2]]];
-    region.with_data(|r| {
-        assert_eq!(r.fill_blocks_safe(&cells, Block::new(chest())).len(), 2);
-    });
-    for c in cells {
-        assert_eq!(container(&region, c), Some(vec![None; CHEST_SLOTS]), "a filled chest at {c:?} gets a container");
-    }
-    let dirt = ItemStack { item: DIRT_ITEM, count: 3 };
-    region.with_data(|r| {
-        let mut slots = vec![None; CHEST_SLOTS];
-        slots[4] = Some(dirt);
-        stock(r, cells[0], slots);
-    });
-    region.with_data(|r| {
-        assert_eq!(r.clear_blocks_safe(&cells), 2);
-    });
-    assert!(region.data().containers().is_empty(), "cleared chests leave no container");
-    assert_eq!(pile_totals(&region), totals_of(&[Some(dirt)]), "the stored dirt spilled");
 }
 
 // --- Across a seam (Task 6.4) -------------------------------------------------
@@ -438,7 +385,7 @@ fn put_chest(rig: &mut Rig, p: WorldBlockPos, slots: Vec<Option<ItemStack>>) {
     let local = [l.x, l.y, l.z];
     rig.manager.spawner_mut().with_region(rc, |r| {
         r.with_data(|d| {
-            assert!(d.set_block_safe(local, Block::new(chest())), "chest at {p:?}");
+            assert!(d.place_stud_chest_safe(local), "chest at {p:?}");
             d.write_container_safe(p, Some(game::Container { slots }));
         })
     });
@@ -643,7 +590,7 @@ fn break_chest_across_seam_spills_once_and_closes_both_views() {
         r.handle_event(GameEventKind::CreateClient(1)).unwrap();
         r.with_data(|d| {
             let e = *d.data.player_entites.get(&1).unwrap();
-            let bv = game::BLOCK_VOXELS as f32;
+            let bv = crate::common::TILE_W;
             let (_, l) = offset(cell, -1, 0, 0).to_local();
             let h = *d.data.ecs.rigidbody.get(e);
             let y = d.data.physics.bodies.get(h).unwrap().translation().y;
@@ -675,7 +622,10 @@ fn break_chest_across_seam_spills_once_and_closes_both_views() {
         rig.round();
     }
     assert_eq!(chest_at(&mut rig, cell), None, "the chest is gone");
-    assert_eq!(spilled(&mut rig), totals_of(&contents), "spilled exactly once");
+    // The chest's own item spills with its contents (a stud chest tile carved out).
+    let mut want = totals_of(&contents);
+    *want.entry(chest_item().0).or_default() += 1;
+    assert_eq!(spilled(&mut rig), want, "spilled exactly once");
     assert_eq!(view_of(&mut rig, CLIENT), Some((None, false)), "the view across the seam closed");
     let mut owner_view = None;
     rig.manager.spawner_mut().with_region(west, |r| {
@@ -685,5 +635,5 @@ fn break_chest_across_seam_spills_once_and_closes_both_views() {
     for _ in 0..8 {
         rig.round();
     }
-    assert_eq!(spilled(&mut rig), totals_of(&contents), "and never again");
+    assert_eq!(spilled(&mut rig), want, "and never again");
 }

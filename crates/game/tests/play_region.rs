@@ -1,23 +1,18 @@
 //! Server-authored session moves for Play: `CreateClientAt` lands a player
 //! over a chosen block column, `ClientLeft` takes the player out again —
 //! both ordinary undoable sim events.
-use game::{Chunk, ChunkCoords, GameEvent, GameEventKind, Region, RegionId, Rollback, BLOCK_VOXELS};
+use game::{GameEvent, GameEventKind, Region, RegionId, Rollback};
 
 /// The block column `CreateClientAt` targets in these tests.
 const COLUMN: [u32; 2] = [5, 7];
 
-// A floor whose top face is at Y = 128 under the spawn column (region-local
-// voxel (128,128), as in spawn_surface.rs) and under `COLUMN`.
+// Flat stud ground under the spawn column (region-local units (128, 128))
+// and under `COLUMN`.
 fn region_with_floor() -> Region {
-    let cu = game::CHUNK_UNITS;
-    let (cy, depth) = ((128 - 1) / cu, 128 - (128 - 1) / cu * cu);
-    let floor = |x: usize, z: usize| (ChunkCoords::new(x / cu, cy as i32, z / cu), Chunk::flat_floor(depth as u32));
-    let mut chunks = vec![floor(128, 128)];
-    let col = floor(COLUMN[0] as usize * BLOCK_VOXELS, COLUMN[1] as usize * BLOCK_VOXELS);
-    if col.0 != chunks[0].0 {
-        chunks.push(col);
-    }
-    Region::from_chunks(RegionId::new(0, 0), chunks)
+    use crate::common::{floor_seed, region_of, FLOOR_PLATES, TILE_W};
+    let lo = (COLUMN[0].min(COLUMN[1]) as f32 * TILE_W).min(128.0);
+    let hi = (COLUMN[0].max(COLUMN[1]) as f32 * TILE_W).max(128.0) + 1.0;
+    region_of(RegionId::new(0, 0), floor_seed(lo..hi, lo..hi, FLOOR_PLATES))
 }
 
 fn player_translation(region: &Region, client: game::ClientId) -> (f32, f32, f32) {
@@ -35,12 +30,13 @@ fn create_client_at_lands_over_the_column() {
     let mut region = region_with_floor();
     region.handle_event(GameEventKind::CreateClientAt(0, COLUMN, None)).unwrap();
     let (x, y, z) = player_translation(&region, 0);
-    let bv = BLOCK_VOXELS as f32;
+    let bv = crate::common::TILE_W;
     let (cx, cz) = ((COLUMN[0] as f32 + 0.5) * bv, (COLUMN[1] as f32 + 0.5) * bv);
     assert!((x - cx).abs() <= 0.5 * bv, "x={x} not over column centre {cx}");
     assert!((z - cz).abs() <= 0.5 * bv, "z={z} not over column centre {cz}");
-    let surface = region.data().surface_voxel_y(cx as i32, cz as i32).expect("floor under the column");
-    assert!(y > surface as f32, "body y={y} must be above surface {surface}");
+    let surface = crate::common::floor_y(crate::common::FLOOR_PLATES);
+    assert_eq!(region.data().player_spawn_y((cx, cz)), y, "at the spawn height over the column");
+    assert!(y > surface, "body y={y} must be above the ground's top {surface}");
     let client = region.data().clients.get(&0).expect("client 0 created");
     assert_eq!(client.inventory, game::Inventory::starting_kit());
 }
@@ -61,7 +57,7 @@ fn client_left_removes_body_and_client() {
 #[test]
 fn client_left_undoes_bit_exact() {
     game::set_hash_mode(game::HashMode::Full);
-    // Undo replays render events through a live sender (`from_chunks`
+    // Undo replays render events through a live sender (a server region
     // wires `None`, which the undo closures unwrap).
     let (send, _recv) = crossbeam::channel::unbounded();
     let built = region_with_floor();
@@ -118,10 +114,9 @@ fn client_left_reconciles_on_a_client_replica() {
 mod manager {
     use crossbeam::channel::{unbounded, Receiver};
     use game::{
-        Block, BlockId, Chunk, ClientId, ClientPacket, Column, ColumnCoords, InlineLodBuilder,
-        InlineSpawner, LodBuilder, PlayRefusal, RegionCoords, RegionOutput, ServerEvent,
-        ServerPacket, SubChunk, TileSummary, WorldManager, WorldMap, SPAWN_REGION, UNLOAD_GRACE_MS,
-    };
+    ClientId, ClientPacket, InlineSpawner, PlayRefusal, RegionCoords, RegionOutput, ServerEvent, ServerPacket,
+    TileSummary, WorldManager, WorldMap, SPAWN_REGION, UNLOAD_GRACE_MS,
+};
 
     struct Harness {
         manager: WorldManager<InlineSpawner>,
@@ -132,27 +127,12 @@ mod manager {
     fn harness() -> Harness {
         let (out_send, packets) = unbounded();
         let (region_out_send, region_out) = unbounded();
-        let generator = Box::new(|_rc: RegionCoords| -> Vec<(ColumnCoords, Column)> {
-            let below = Block::new(BlockId::AIR);
-            let above = Block::new(BlockId::AIR);
-            let sub = SubChunk::Dense(Box::new(Chunk::flat_floor(8)));
-            vec![(ColumnCoords::new(0, 0), Column::new(0, below, above, vec![sub]))]
-        });
-        let (lod_result_send, lod_result_recv) = unbounded();
-        let lod_builder: Box<dyn LodBuilder> = Box::new(InlineLodBuilder {
-            coarse: Box::new(|_key: &game::lod::LodKey| Vec::new()),
-            water: Box::new(game::lod::LodWater::dry),
-            out: lod_result_send,
+        // Flat stud ground under chunk column (0, 0) of every region.
+        let spawner = crate::common::stud_spawner(|_rc| {
+            crate::common::floor_seed(0.0..1.0, 0.0..1.0, crate::common::FLOOR_PLATES)
         });
         Harness {
-            manager: WorldManager::new(
-                InlineSpawner::default(),
-                generator,
-                out_send,
-                region_out_send,
-                lod_builder,
-                lod_result_recv,
-            ),
+            manager: crate::common::stud_manager(spawner, out_send, region_out_send),
             region_out,
             packets,
         }
@@ -263,7 +243,7 @@ mod manager {
             found = Some(data.physics.bodies.get(handle).unwrap().translation());
         });
         let t = found.expect("target region live");
-        let bv = game::BLOCK_VOXELS as f32;
+        let bv = crate::common::TILE_W;
         assert!((t.x - 2.5 * bv).abs() <= 0.5 * bv && (t.z - 2.5 * bv).abs() <= 0.5 * bv, "{t:?}");
         assert_eq!(players_in(&mut h, SPAWN_REGION), 0);
     }

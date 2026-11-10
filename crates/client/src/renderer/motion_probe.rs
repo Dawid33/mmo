@@ -26,8 +26,8 @@ const REPORT_INTERVAL: Duration = Duration::from_secs(5);
 const CROSSING_FRAMES: u32 = 3;
 /// A step shorter than this (world units) carries no direction.
 const MIN_STEP: f32 = 0.05;
-/// Chunk edge, world units.
-const CHUNK: f32 = 32.0;
+/// A stud chunk's box, world units (16 m across, one chunk layer tall).
+const CHUNK: Vec3 = Vec3::new(game::CHUNK_UNITS as f32, game::STUD_CHUNK_HEIGHT_UNITS as f32, game::CHUNK_UNITS as f32);
 
 #[derive(Default)]
 struct Series {
@@ -169,16 +169,11 @@ pub struct StillProbe {
     lod_cells: u32,
 }
 
-type LodRenderChanged = Or<(
-    Changed<super::voxel_pull::ChunkQuads>,
-    Changed<Mesh3d>,
-    Changed<super::meshing::lod::LodVoxelData>,
-    Changed<Visibility>,
-)>;
+type LodRenderChanged = Or<(Changed<Mesh3d>, Changed<Visibility>)>;
 
 pub fn probe_still_frames(
     cameras: Query<&GlobalTransform, (With<Camera3d>, With<SimTarget>)>,
-    lod_changed: Query<(), (With<super::meshing::lod::LodChunk>, LodRenderChanged)>,
+    lod_changed: Query<(), (With<super::stud::far::StudLodTerrain>, LodRenderChanged)>,
     mut state: crate::session::SessionLocal<StillProbe>,
 ) {
     let Some(cam) = cameras.iter().next() else {

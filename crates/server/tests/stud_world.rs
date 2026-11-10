@@ -15,7 +15,7 @@ use server::region_threads::{StudGenesis, ThreadRegionSpawner};
 const WAIT: Duration = Duration::from_secs(60);
 
 fn spawner(genesis: StudGenesis) -> ThreadRegionSpawner {
-    ThreadRegionSpawner::with_region_generator(Arc::new(|_| Vec::new())).with_genesis(genesis)
+    ThreadRegionSpawner::default().with_genesis(genesis)
 }
 
 fn studs() -> StudGenesis {
@@ -55,7 +55,7 @@ fn stud_count(r: &Rollback) -> usize {
 #[test]
 fn fresh_stud_region_starts_with_its_chunks() {
     let mut s = spawner(studs());
-    let (send, recv) = spawn(&mut s, RegionCoords { x: 0, z: 0 }, RegionSeed::Deferred(None));
+    let (send, recv) = spawn(&mut s, RegionCoords { x: 0, z: 0 }, RegionSeed::Fresh);
     let r = snapshot(&send, &recv);
     assert_eq!(stud_count(&r), REGION_CHUNKS * REGION_CHUNKS);
     assert_eq!(r.body_scale(), BodyScale::STUD);
@@ -64,7 +64,7 @@ fn fresh_stud_region_starts_with_its_chunks() {
 #[test]
 fn far_region_is_empty_air() {
     let mut s = spawner(studs());
-    let (send, recv) = spawn(&mut s, RegionCoords { x: 5, z: 5 }, RegionSeed::Deferred(None));
+    let (send, recv) = spawn(&mut s, RegionCoords { x: 5, z: 5 }, RegionSeed::Fresh);
     let r = snapshot(&send, &recv);
     assert_eq!(stud_count(&r), 0);
     assert_eq!(r.body_scale(), BodyScale::STUD);
@@ -81,7 +81,7 @@ fn parked_stud_region_is_not_reseeded() {
     });
     let mut s = spawner(genesis);
     let id = RegionCoords { x: 0, z: 0 };
-    let (send, recv) = spawn(&mut s, id, RegionSeed::Deferred(None));
+    let (send, recv) = spawn(&mut s, id, RegionSeed::Fresh);
     let before = snapshot(&send, &recv);
     send.send(RegionInput::Shutdown).unwrap();
     let parked = loop {
@@ -90,11 +90,38 @@ fn parked_stud_region_is_not_reseeded() {
         }
     };
     assert_eq!(calls.load(Ordering::SeqCst), 1);
-    let (send, recv) = spawn(&mut s, id, RegionSeed::Deferred(Some(parked)));
+    let (send, recv) = spawn(&mut s, id, RegionSeed::Parked(parked));
     let after = snapshot(&send, &recv);
     assert_eq!(calls.load(Ordering::SeqCst), 1, "genesis re-ran on a parked region");
     assert_eq!(stud_count(&after), stud_count(&before));
     assert_eq!(after.body_scale(), BodyScale::STUD);
+}
+
+/// A parked blob is a region's whole state. One that does not decode is a read
+/// error: the region does not run (`LoadFailed`, so the manager retries and reads
+/// the store's last cut) and genesis never runs over it — a regenerated region
+/// would be saved over the stored one by the next cut.
+#[test]
+fn corrupt_parked_region_fails_its_load_and_is_never_regenerated() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counted = calls.clone();
+    let genesis: StudGenesis = Arc::new(move |rc| {
+        counted.fetch_add(1, Ordering::SeqCst);
+        worldgen::stud_world::region_seed(rc)
+    });
+    let id = RegionCoords { x: 0, z: 0 };
+    let corrupt = || game::SerializedRegion(vec![0xFF; 7]);
+    assert!(corrupt().to_rollback().is_err());
+    let mut s = spawner(genesis.clone());
+    let (_send, recv) = spawn(&mut s, id, RegionSeed::Parked(corrupt()));
+    match recv.recv_timeout(WAIT).expect("the region reports") {
+        (rc, RegionOutput::LoadFailed(why)) => {
+            assert_eq!(rc, id);
+            assert!(why.contains("parked state corrupt"), "{why}");
+        }
+        (_, other) => panic!("a corrupt parked region must fail its load, got {}", other.name()),
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 0, "genesis must not run over a parked region");
 }
 
 /// An edit made through the running region survives parking, and genesis
@@ -109,7 +136,7 @@ fn parked_stud_region_keeps_its_edit() {
     });
     let mut s = spawner(genesis);
     let id = RegionCoords { x: 0, z: 0 };
-    let (send, recv) = spawn(&mut s, id, RegionSeed::Deferred(None));
+    let (send, recv) = spawn(&mut s, id, RegionSeed::Fresh);
     // A cell high above the generated ground: free of any seeded brick.
     let chunk = StudChunkCoords { x: 0, y: 4, z: 0 };
     let part = game::stud_catalog::STUD_PARTS.iter().position(|p| p.number == "3001").unwrap() as u16;
@@ -126,7 +153,7 @@ fn parked_stud_region_keeps_its_edit() {
             break serialized;
         }
     };
-    let (send, recv) = spawn(&mut s, id, RegionSeed::Deferred(Some(parked)));
+    let (send, recv) = spawn(&mut s, id, RegionSeed::Parked(parked));
     let after = snapshot(&send, &recv);
     assert_eq!(calls.load(Ordering::SeqCst), 1, "genesis re-ran on a parked region");
     assert_eq!(after.stud_chunk_at(chunk).expect("edit survived").brick_at([3, 0, 3]), Some(&brick));
@@ -138,7 +165,7 @@ fn parked_stud_region_keeps_its_edit() {
 fn procedural_stud_region_starts_from_recipes() {
     let genesis: StudGenesis = Arc::new(|rc| worldgen::stud_gen::generate_stud_region(rc, 7));
     let mut s = spawner(genesis);
-    let (send, recv) = spawn(&mut s, RegionCoords { x: 0, z: 0 }, RegionSeed::Deferred(None));
+    let (send, recv) = spawn(&mut s, RegionCoords { x: 0, z: 0 }, RegionSeed::Fresh);
     let r = snapshot(&send, &recv);
     assert_eq!(r.body_scale(), BodyScale::STUD);
     let seed = worldgen::stud_gen::generate_stud_region(RegionCoords { x: 0, z: 0 }, 7);
@@ -166,7 +193,7 @@ fn scratch(name: &str) -> std::path::PathBuf {
 fn open_store(dir: &std::path::Path) -> world_store::StoreHandle {
     let url = world_store::StoreUrl::Sqlite(dir.join("w.sqlite"));
     let store = world_store::StoreHandle::open(&url, world_store::Dials::BUILT, world_store::OpenMode::Writer).unwrap();
-    store.bind_terrain(world_store::TerrainKind::Studs).unwrap();
+    server::world_file::bind_world_terrain(&store).unwrap();
     store
 }
 
@@ -225,7 +252,7 @@ fn stored_stud_region_restores_its_edits() {
     let id = RegionCoords { x: 0, z: 0 };
     let (genesis, calls) = counted_genesis();
     let mut s = stored_spawner(&store, id, genesis.clone());
-    let (send, recv) = spawn(&mut s, id, RegionSeed::Deferred(None));
+    let (send, recv) = spawn(&mut s, id, RegionSeed::Fresh);
 
     // A shaft from the surface of chunk column (0, 0) down past its surface layers,
     // and a brick in the air over it.
@@ -268,7 +295,7 @@ fn stored_stud_region_restores_its_edits() {
 
     // "Restart": a new spawner on the same store.
     let mut s = stored_spawner(&store, id, genesis.clone());
-    let (send, recv) = spawn(&mut s, id, RegionSeed::Deferred(None));
+    let (send, recv) = spawn(&mut s, id, RegionSeed::Fresh);
     let after = snapshot(&send, &recv);
     assert_eq!(calls.load(Ordering::SeqCst), 1, "genesis re-ran on a stored region");
     assert_eq!(after.body_scale(), BodyScale::STUD);
@@ -291,7 +318,7 @@ fn stored_stud_region_restores_its_edits() {
     save(&store, id, 2, tick, portable);
     drop(s);
     let mut s = stored_spawner(&store, id, genesis);
-    let (send, recv) = spawn(&mut s, id, RegionSeed::Deferred(None));
+    let (send, recv) = spawn(&mut s, id, RegionSeed::Fresh);
     assert_eq!(stud_chunks(&snapshot(&send, &recv)), stud_chunks(&before), "still there after a save with no rows");
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     let _ = stop(&send, &recv);
@@ -310,7 +337,7 @@ fn damaged_stud_rows_stop_the_region() {
     let id = RegionCoords { x: 0, z: 0 };
     let (genesis, calls) = counted_genesis();
     let mut s = stored_spawner(&store, id, genesis.clone());
-    let (send, recv) = spawn(&mut s, id, RegionSeed::Deferred(None));
+    let (send, recv) = spawn(&mut s, id, RegionSeed::Fresh);
     let part = game::stud_catalog::STUD_PARTS.iter().position(|p| p.number == "3001").unwrap() as u16;
     let chunk = StudChunkCoords { x: 0, y: 40, z: 0 };
     let order = game::Order::PlaceStud { chunk, brick: game::StudBrick::part_at([3, 0, 3], part, 0, 4) };
@@ -334,7 +361,7 @@ fn damaged_stud_rows_stop_the_region() {
 
     let store = open_store(&dir);
     let mut s = stored_spawner(&store, id, genesis);
-    let (_send, recv) = spawn(&mut s, id, RegionSeed::Deferred(None));
+    let (_send, recv) = spawn(&mut s, id, RegionSeed::Fresh);
     let why = loop {
         match recv.recv_timeout(WAIT).expect("the region answers") {
             (_, RegionOutput::LoadFailed(why)) => break why,
@@ -385,7 +412,7 @@ fn stored_stud_region_keeps_its_trees_and_a_falling_one() {
     assert!(want.len() >= 2 && !want.contains_key(&0), "the region has trees: {}", want.len());
     let (genesis, calls) = counted_genesis();
     let mut s = stored_spawner(&store, id, genesis.clone());
-    let (send, recv) = spawn(&mut s, id, RegionSeed::Deferred(None));
+    let (send, recv) = spawn(&mut s, id, RegionSeed::Fresh);
     let fresh = snapshot(&send, &recv);
     assert_eq!(tree_bricks(&fresh), want, "every generated tree brick is in the seeded region");
 
@@ -435,7 +462,7 @@ fn stored_stud_region_keeps_its_trees_and_a_falling_one() {
     drop(s);
 
     let mut s = stored_spawner(&store, id, genesis);
-    let (send, recv) = spawn(&mut s, id, RegionSeed::Deferred(None));
+    let (send, recv) = spawn(&mut s, id, RegionSeed::Fresh);
     let after = snapshot(&send, &recv);
     assert_eq!(calls.load(Ordering::SeqCst), 1, "genesis re-ran on a stored region");
     assert_eq!(stud_chunks(&after), stud_chunks(&before), "the same chunks, trees and stump included");
@@ -451,41 +478,40 @@ fn stored_stud_region_keeps_its_trees_and_a_falling_one() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// The cutover's default against old worlds (P10a, D5: no conversion): a store last
-/// served as a voxel world is refused by a server started without `VOXEL_TERRAIN`
-/// (studs), with a message naming the re-forge and the escape hatch; nothing is
-/// written, so the escape hatch still opens it. A world nobody served yet takes studs.
+/// Old worlds (D5: no conversion): a store last served as a voxel world is refused
+/// by the server, which serves stud terrain only, with a message naming the stored
+/// kind and the re-forge — and no terrain switch, there is none any more; nothing is
+/// written to it, however often it is tried. A world nobody served yet takes studs.
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
-fn a_voxel_world_is_refused_by_the_stud_default() {
+fn a_voxel_world_is_refused() {
     use world_store::TerrainKind;
-    let default = server::world_file::terrain_from(None).unwrap();
-    assert_eq!(default, TerrainKind::Studs, "an unset VOXEL_TERRAIN is studs since the cutover");
     let dir = scratch("voxel-world");
     let url = world_store::StoreUrl::Sqlite(dir.join("w.sqlite"));
     let open = || world_store::StoreHandle::open(&url, world_store::Dials::BUILT, world_store::OpenMode::Writer).unwrap();
     // A world from before the cutover: tied to voxels by the server that served it.
     let store = open();
-    server::world_file::bind_world_terrain(&store, TerrainKind::Voxels).unwrap();
+    store.bind_terrain(TerrainKind::Voxels).unwrap();
     store.shutdown();
 
     let store = open();
-    let why = server::world_file::bind_world_terrain(&store, default).unwrap_err();
-    assert!(why.contains("voxels terrain") && why.contains("VOXEL_TERRAIN=voxels"), "names the stored kind and the hatch: {why}");
-    assert!(why.contains("re-forge") && why.contains("just run --reset"), "says how to get a stud world: {why}");
-    assert_eq!(store.terrain_kind().unwrap(), Some(TerrainKind::Voxels), "nothing was changed");
-    // The escape hatch (`VOXEL_TERRAIN=voxels`) still serves it.
-    let hatch = server::world_file::terrain_from(Some("voxels")).unwrap();
-    server::world_file::bind_world_terrain(&store, hatch).expect("the voxel world on the escape hatch");
+    for _ in 0..2 {
+        let why = server::world_file::bind_world_terrain(&store).unwrap_err();
+        assert!(why.contains("voxels terrain") && why.contains("no longer serves"), "names the stored kind: {why}");
+        assert!(why.contains("re-forge") && why.contains("just run --reset"), "says how to get a stud world: {why}");
+        assert!(!why.contains("VOXEL_TERRAIN"), "names no terrain switch: {why}");
+        assert_eq!(store.terrain_kind().unwrap(), Some(TerrainKind::Voxels), "nothing was changed");
+    }
     store.shutdown();
 
-    // A world no server has served yet becomes a stud world by default.
+    // A world no server has served yet becomes a stud world.
     let fresh = scratch("fresh-world");
     let url = world_store::StoreUrl::Sqlite(fresh.join("w.sqlite"));
     let store = world_store::StoreHandle::open(&url, world_store::Dials::BUILT, world_store::OpenMode::Writer).unwrap();
     assert_eq!(store.terrain_kind().unwrap(), None);
-    server::world_file::bind_world_terrain(&store, default).unwrap();
+    server::world_file::bind_world_terrain(&store).unwrap();
     assert_eq!(store.terrain_kind().unwrap(), Some(TerrainKind::Studs));
+    server::world_file::bind_world_terrain(&store).expect("a stud world starts again");
     store.shutdown();
     for d in [dir, fresh] {
         let _ = std::fs::remove_dir_all(&d);

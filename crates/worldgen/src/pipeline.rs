@@ -24,11 +24,7 @@ pub const SEA_LEVEL: f64 = 64.0;
 
 /// Topmost block of the water column: water fills `by <= SEA_TOP_BLOCK`, so
 /// the water SURFACE is the plane `y = SEA_LEVEL` — the density field's own
-/// zero-height reference, and a multiple of every LOD cell size (64 blocks =
-/// 1024 voxels; `sea_surface_sits_on_every_lod_lattice`). Any-solid LOD
-/// downsampling rounds a surface up to its cell's top, so a sea one block
-/// higher (water through block 64, surface at 65) stood 3 and 15 blocks proud
-/// in the factor-64/256 rings: a dark wall along every ring boundary at sea.
+/// zero-height reference (stud recipes: plate `SEA_LEVEL * PLATES_PER_M`).
 pub const SEA_TOP_BLOCK: i32 = SEA_LEVEL as i32 - 1;
 
 // Noise indices into NoiseSet.
@@ -716,7 +712,7 @@ mod tests {
         // Legacy (non-cell) regions spawn at the constant column; the default
         // spawn island must cover it.
         let p = TerrainPipeline::new(crate::WORLD_SEED);
-        let blocks = |units: f32| units as f64 / game::BLOCK_VOXELS as f64;
+        let blocks = |units: f32| f64::from(units / game::movement::UNITS_PER_METER);
         let (x, z) = (blocks(game::PLAYER_SPAWN_X), blocks(game::PLAYER_SPAWN_Z));
         assert!(p.column(x, z).density_at(SEA_LEVEL + 0.5) > 0.0);
     }

@@ -52,7 +52,6 @@ pub mod tiles;
 pub mod top_down;
 pub mod visible;
 
-use crate::renderer::voxel_pull::xray::xray_on;
 use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll, MouseScrollUnit};
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
@@ -79,13 +78,9 @@ pub enum CameraMode {
 impl CameraMode {
     /// `VOXEL_CAMERA=first-person` brings back the walking body's view (a dev
     /// tool until the body leaves the sim); anything else is the commander.
-    /// The render benchmark and the autopilot probes (`just fly-probe` /
-    /// `shuttle-probe`) fly the body's camera, so they keep first person.
+    /// The autopilot probes (`just fly-probe` / `shuttle-probe`) fly the
+    /// body's camera, so they keep first person.
     pub fn from_env() -> Self {
-        #[cfg(not(target_arch = "wasm32"))]
-        if super::render_bench::enabled() {
-            return Self::FirstPerson;
-        }
         if std::env::var("VOXEL_AUTOPILOT").is_ok_and(|v| !v.is_empty() && v != "0") {
             return Self::FirstPerson;
         }
@@ -596,10 +591,7 @@ impl Plugin for CommanderPlugin {
             )
             .add_systems(
                 Update,
-                (
-                    super::fortress_view::update_overlay_grid,
-                    (super::fortress_view::update_fortress_view, super::voxel_material::sync_chunk_material_cut).chain(),
-                )
+                super::fortress_view::update_fortress_view
                     .after(level::track_camera_level)
                     .after(tiles::update_tile_mirror)
                     .after(designate::update_drag_preview)
@@ -844,7 +836,6 @@ fn grab_orbit_pivot(
     grid: Res<HeightGrid>,
     working: Res<level::WorkingLevel>,
     tiles: Res<tiles::TileMirror>,
-    xray: Option<Res<crate::renderer::voxel_pull::xray::XraySettings>>,
     mut cam: ResMut<CommanderCamera>,
 ) {
     if !policy.orbit {
@@ -858,7 +849,7 @@ fn grab_orbit_pivot(
     let tf = camera_transform(focus, cam.distance, cam.yaw, cam.pitch);
     // The ground the player sees: with the cut on, never the cut-away rock.
     let ground =
-        visible::visible_ground(tf.translation, *tf.forward(), selection::PICK_REACH_M * UNITS_PER_METER, &grid, &working, &tiles, xray_on(xray.as_deref(), working.cut));
+        visible::visible_ground(tf.translation, *tf.forward(), selection::PICK_REACH_M * UNITS_PER_METER, &grid, &working, &tiles);
     cam.pivot = Some(if working.cut { orbit_pivot(ground, focus) } else { free_orbit_pivot(ground, tf.translation, focus) });
 }
 
@@ -878,7 +869,6 @@ fn pan_and_zoom(
     grid: Res<HeightGrid>,
     working: Res<level::WorkingLevel>,
     tiles: Res<tiles::TileMirror>,
-    xray: Option<Res<crate::renderer::voxel_pull::xray::XraySettings>>,
     mut cam: ResMut<CommanderCamera>,
     mut sprint: crate::session::SessionLocal<Sprint>,
 ) {
@@ -921,7 +911,7 @@ fn pan_and_zoom(
         }
     }
     let middle = buttons.pressed(MouseButton::Middle) && window.focused;
-    let depth = (working.cut || middle).then(|| pan_depth(centre_ray_hit(&cam, &grid, &working, &tiles, xray_on(xray.as_deref(), working.cut)), cam.distance));
+    let depth = (working.cut || middle).then(|| pan_depth(centre_ray_hit(&cam, &grid, &working, &tiles), cam.distance));
     let mut step = match depth {
         Some(depth) if working.cut => zoom_pan_step(dir, depth, dt) * speed,
         _ => pan_step(dir, dt) * speed,
@@ -1004,7 +994,6 @@ fn centre_ray_hit(
     grid: &HeightGrid,
     working: &level::WorkingLevel,
     tiles: &tiles::TileMirror,
-    xray: bool,
 ) -> Option<f32> {
     let tf = camera_transform(focus_point(cam), cam.distance, cam.yaw, cam.pitch);
     let hit = visible::visible_ground(
@@ -1014,7 +1003,6 @@ fn centre_ray_hit(
         grid,
         working,
         tiles,
-        xray,
     )?;
     Some(hit.distance(tf.translation))
 }
@@ -1469,12 +1457,15 @@ mod tests {
         let home = game::RegionCoords::new(0, 0);
         assert_eq!(home_block_solid(&mirror, Vec3::splat(8.0)), None, "no home");
         mirror.set_home(Some(home));
-        mirror.set_chunk([0, 0, 0], tiles::chunk_blocks(&game::Chunk::uniform(game::Block::new(game::BlockId(2)))));
-        let s = game::BLOCK_VOXELS as f32;
-        assert_eq!(home_block_solid(&mirror, Vec3::new(1.5 * s, 3.5 * s, 2.5 * s)), Some(true));
-        let above = game::CHUNK_BLOCKS as f32 + 0.5;
-        assert_eq!(home_block_solid(&mirror, Vec3::new(1.5 * s, above * s, 2.5 * s)), Some(false), "air above");
-        assert_eq!(home_block_solid(&mirror, Vec3::new(-0.5 * s, 3.5 * s, 2.5 * s)), None, "outside home");
+        mirror.apply(tiles::TileMirrorMsg::Reset { region: home, designations: Vec::new(), constructed: Vec::new() });
+        // A chunk solid for its first four tile levels (24 plates).
+        let chunk = game::StudChunk::new([game::StudBrick::filler([0, 0, 0], [32, 24, 32], game::MAT_STONE)]).unwrap();
+        mirror.set_stud_chunk(Entity::from_raw_u32(1).unwrap(), [0, 0, 0], &chunk);
+        let kind = mirror.terrain();
+        let (w, h) = (kind.tile_width_units(), kind.tile_height_units());
+        assert_eq!(home_block_solid(&mirror, Vec3::new(1.5 * w, 3.5 * h, 2.5 * w)), Some(true));
+        assert_eq!(home_block_solid(&mirror, Vec3::new(1.5 * w, 4.5 * h, 2.5 * w)), Some(false), "air above");
+        assert_eq!(home_block_solid(&mirror, Vec3::new(-0.5 * w, 3.5 * h, 2.5 * w)), None, "outside home");
     }
 
     #[test]

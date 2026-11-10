@@ -5,13 +5,12 @@
 // cut-away bricks cast no shadow. Compiled into the binary
 // (load_internal_asset!): edit and rebuild, no hot reload.
 //
-// Unlike the voxel shaders nothing is done per vertex: a stud mesh is baked
-// part triangles (studs, slopes), so the cut is a per-fragment discard at the
-// plane. While the cut is on, the opaque material stops culling
-// (StudFortressKey) and a back face seen inside the home region is drawn as
-// the cut's cap — shaded where the eye ray crosses the plane, facing up, in
-// its brick's colour, darkened by fortress.cut.y — exactly the rule of
-// voxel_texture.wgsl.
+// Nothing is done per vertex: a stud mesh is baked part triangles (studs,
+// slopes), so the cut is a per-fragment discard at the plane. While the cut
+// is on, the opaque material stops culling (StudFortressKey) and a back face
+// seen inside the home region is drawn as the cut's cap — shaded where the
+// eye ray crosses the plane, facing up, in its brick's colour, darkened by
+// fortress.cut.y.
 
 #ifdef PREPASS_PIPELINE
 #import bevy_pbr::prepass_io
@@ -33,13 +32,12 @@
 struct FortressView {
     cut: vec4<f32>,
     origin: vec4<f32>,
-    overlay_dims: vec4<u32>,
 }
 @group(#{MATERIAL_BIND_GROUP}) @binding(100) var<uniform> fortress: FortressView;
 
 // Mirrored from StudFortressParams in stud/material.rs. The numbers come from
-// the Rust consts the voxel shaders mirror (fortress_view.rs) and from
-// TerrainKind, so nothing is restated here.
+// the Rust consts (fortress_view.rs) and from TerrainKind, so nothing is
+// restated here.
 struct StudFortressParams {
     // x: a level's height (one tile), world units; y: brightness lost per
     // level below the cut; z: the darkest a level gets; w: unused.
@@ -62,7 +60,7 @@ struct TerrainBoundaries {
 }
 @group(#{MATERIAL_BIND_GROUP}) @binding(102) var<uniform> boundaries: TerrainBoundaries;
 
-// Mirrored from voxel_texture.wgsl / fortress_view.rs.
+// The "cut off" value of fortress_view.rs (f32::MAX) and the slack at the plane.
 const CUT_OFF: f32 = 3.0e38;
 const CUT_EPSILON: f32 = 0.01;
 
@@ -124,8 +122,8 @@ fn view_forward() -> vec3<f32> {
     return -vec3<f32>(view.view_from_world[0].z, view.view_from_world[1].z, view.view_from_world[2].z);
 }
 
-// Copy of voxel_texture.wgsl's cut_crossing: where the eye ray to `p` crosses
-// the cut plane, when the eye is above it and `p` below; else `p`.
+// Where the eye ray to `p` crosses the cut plane, when the eye is above it and
+// `p` below; else `p`.
 fn cut_crossing(p: vec3<f32>, cut: f32) -> vec3<f32> {
     if (view_is_orthographic()) {
         let fwd = view_forward();
@@ -142,8 +140,7 @@ fn cut_crossing(p: vec3<f32>, cut: f32) -> vec3<f32> {
     return p;
 }
 
-// Copy of voxel_pull.wgsl's apply_boundaries: the home region's perimeter drawn
-// onto `color` at ground point `p` (world xz) as a line `shape.x` world units
+// The home region's perimeter drawn onto `color` at ground point `p` (world xz) as a line `shape.x` world units
 // wide (at least `shape.y` pixels) starting on the edge and growing outward,
 // and what lies outside it dimmed. Uniform control flow only (fwidth).
 fn apply_boundaries(color: vec3<f32>, p: vec2<f32>) -> vec3<f32> {
@@ -162,8 +159,8 @@ fn apply_boundaries(color: vec3<f32>, p: vec2<f32>) -> vec3<f32> {
     return select(color, mix(c, b.home_color.rgb, line * b.home_color.a), on);
 }
 
-// voxel_texture.wgsl's depth_darkening with the level height and the two
-// constants from `params` (stud/material.rs depth_darkening is its Rust twin).
+// Brightness of a front face below the cut, from the level height and the two
+// constants in `params` (stud/material.rs depth_darkening is its Rust twin).
 fn depth_darkening(y: f32, cut: f32) -> f32 {
     let levels_below = max(0.0, ceil((cut - y) / params.levels.x - 1.0 - 1e-3));
     return max(params.levels.z, 1.0 - params.levels.y * levels_below);
@@ -198,7 +195,7 @@ fn fragment(
 
     var out: FragmentOutput;
     out.color = apply_pbr_lighting(pbr_input);
-    // The boundary line hugs the terrain, under the fog (as voxel_pull.wgsl).
+    // The boundary line hugs the terrain, under the fog.
     out.color = vec4<f32>(apply_boundaries(out.color.rgb, in.world_position.xz), out.color.a);
     out.color = main_pass_post_lighting_processing(pbr_input, out.color);
 

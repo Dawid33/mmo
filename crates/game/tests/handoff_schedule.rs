@@ -8,9 +8,8 @@
 //! (`crates/server/tests/threaded_world.rs` keeps the real-thread plumbing
 //! check). Run via `just test-threads`.
 use game::{
-    Block, BlockId, Chunk, ClientPacket, Column, ColumnCoords, GameEvent, GameEventKind, Goal, InlineSchedule,
-    InputEvent, Key, Order, PlayMode, RegionCoords, ServerEvent, SubChunk, REGION_BLOCKS, REGION_SIZE,
-    SPAWN_REGION, TICK_RATE,
+    ClientPacket, ColumnCoords, GameEvent, GameEventKind, Goal, InlineSchedule, InputEvent, Key, Order, PlayMode,
+    RegionCoords, ServerEvent, REGION_BLOCKS, REGION_SIZE, SPAWN_REGION, TICK_RATE,
 };
 
 use crate::common;
@@ -209,15 +208,10 @@ const WALK_Z_BLOCK: i32 = 8;
 /// rounds; missed ticks and late inputs stretch it).
 const ADVENTURE_ROUNDS: usize = 400;
 
-/// A one-block floor over the spawn region's strip `z < 320` units, and the
+/// Flat stud ground over the spawn region's strip `z < 320` units, and the
 /// first chunk column of the east neighbour beside it; far regions get the
 /// chunk under the spawn column.
-fn adventure_floor_columns(rc: RegionCoords) -> Vec<(ColumnCoords, Column)> {
-    let floor = |(x, z): (usize, usize)| {
-        let air = Block::new(BlockId::AIR);
-        let sub = SubChunk::Dense(Box::new(Chunk::flat_floor(game::BLOCK_VOXELS as u32)));
-        (ColumnCoords::new(x, z), Column::new(0, air, air, vec![sub]))
-    };
+fn adventure_floor_columns(rc: RegionCoords) -> game::StudRegionSeed {
     let zs = 0.0..320.0;
     let xs = if rc == SPAWN_REGION {
         0.0..REGION_SIZE
@@ -227,7 +221,7 @@ fn adventure_floor_columns(rc: RegionCoords) -> Vec<(ColumnCoords, Column)> {
         128.0..160.0
     };
     let zs = if rc == SPAWN_REGION || rc == EAST { zs } else { 128.0..160.0 };
-    common::chunks_over(xs, zs).into_iter().map(floor).collect()
+    common::floor_seed(xs, zs, common::FLOOR_PLATES)
 }
 
 /// An adventurer `SEAM_GAP_BLOCKS` short of the +x seam is sent to a column
@@ -241,7 +235,7 @@ fn walk_into_east(seed: u64, schedule: InlineSchedule) {
     }
     rig.walk_until_owned_by(SPAWN_REGION, "spawn");
     let n = REGION_BLOCKS as i32;
-    rig.order(Order::SetMode { mode: PlayMode::Adventure, at: Some([n - SEAM_GAP_BLOCKS, 1, WALK_Z_BLOCK]) });
+    rig.order(Order::SetMode { mode: PlayMode::Adventure, at: Some([n - SEAM_GAP_BLOCKS, common::STAND, WALK_Z_BLOCK]) });
     for _ in 0..PAST_SEAM_ROUNDS {
         rig.round();
     }
@@ -743,6 +737,15 @@ use crate::common::seam_translate::{
 use crate::common::water::{floor_with_water, WaterBox};
 use game::WorldBlockPos;
 
+/// One metre (a tile's width), sim units: the snapshots' "block".
+const B: f32 = common::TILE_W;
+
+/// The bottom of tile level `level`, sim units: where the floor's top is for
+/// a placement's origin (`origin.y` is the level a body stands in).
+fn level_y(level: i32) -> f32 {
+    game::TerrainKind::Stud.level_bottom_units(level)
+}
+
 /// Rounds a freshly placed body is left to land before a scenario starts.
 const PLACE_ROUNDS: usize = 6;
 
@@ -900,22 +903,24 @@ struct BodyLaunch {
     start: f32,
     lift: f32,
     up: f32,
+    /// Horizontal launch speed, m/s.
+    speed: f32,
 }
 
 /// Tossed: crosses the seam in flight, lands about a block past it.
-const TOSS: BodyLaunch = BodyLaunch { start: 1.0, lift: 1.5, up: 4.0 };
+const TOSS: BodyLaunch = BodyLaunch { start: 1.0, lift: 1.5, up: 4.0, speed: BODY_LAUNCH_SPEED_M_PER_S };
 /// Slid along the floor from half a block short of the seam.
-const SLIDE: BodyLaunch = BodyLaunch { start: 0.5, lift: 0.0, up: 0.0 };
+const SLIDE: BodyLaunch = BodyLaunch { start: 0.5, lift: 0.0, up: 0.0, speed: BODY_LAUNCH_SPEED_M_PER_S };
 
 impl Scenario for BodyLaunch {
     fn setup(&self, rig: &mut Rig, origin: WorldBlockPos) {
-        let b = game::BLOCK_VOXELS as f32;
+        let b = B;
         // The player first: its placement runs rounds.
         let p = BODY_PLAYER_BLOCKS;
         place_player(rig, offset(origin, p, 0, p), false);
-        // Resting on the floor (its bottom at the stand level), a hair above
-        // it, then lifted.
-        let y = origin.y as f32 * b + b / 2.0 + 0.01 + self.lift * b;
+        // Resting on the floor's stud caps (its bottom at the stand level's
+        // bottom plus the caps), a hair above them, then lifted.
+        let y = level_y(origin.y) + game::stud_cap_units() + b / 2.0 + 0.01 + self.lift * b;
         let d = self.start * b;
         let local = Vector::new(
             origin.x as f32 * b + d - SPAWN_REGION.x as f32 * REGION_SIZE,
@@ -923,7 +928,7 @@ impl Scenario for BodyLaunch {
             origin.z as f32 * b + d - SPAWN_REGION.z as f32 * REGION_SIZE,
         );
         let units = game::movement::UNITS_PER_METER;
-        let v = BODY_LAUNCH_SPEED_M_PER_S * units / std::f32::consts::SQRT_2;
+        let v = self.speed * units / std::f32::consts::SQRT_2;
         let linvel = Vector::new(-v, self.up * units, -v);
         let angvel = Vector::new(0.0, BODY_SPIN_RAD_PER_S, 0.0);
         let cube = game::ColliderSpec::Cuboid { half_extents: Vector::splat(b / 2.0) };
@@ -1072,7 +1077,7 @@ impl Scenario for SlideReArrived {
             return;
         }
         let origin = self.origin.get().expect("set up");
-        let b = game::BLOCK_VOXELS as f32;
+        let b = B;
         let rc = rig.owners_of(game::EntityKind::Body)[0];
         rig.manager.spawner_mut().with_region(rc, |region| {
             region.with_data(|d| {
@@ -1105,21 +1110,25 @@ impl Scenario for SlideReArrived {
 }
 
 /// Rest position tolerance of the floor SLIDE against the centred lockstep
-/// run, per axis, blocks — loose on purpose, and measured ×2 (2026-11-06,
-/// REGION_BLOCKS 64, CHUNK_BLOCKS 16): lockstep Seam(X) 0.0388, Seam(Z)
-/// 0.0158, Corner 0.0124; the jittery seeds 0–3 the same in every
-/// placement (the slide is over before jitter shifts anything); the
-/// [`SlideReArrived`] control (the handoff's contact-state reset with no
-/// seam) 0.0024. The seam spreads exceed the control: before any handoff, a
-/// cube touching the seam already starts differently, because its floor
-/// there is the neighbour's halo chunk, a collider inserted after the
-/// region's own, so the contact pairs are solved in another order (first
-/// tick spin 2.68 vs 1.41 rad/s centred) — and the chunk-edge ghost contacts
-/// amplify any such difference (seam-free: 0.14 blocks, see the test).
-const SLIDE_POSE_TOL_BLOCKS: f32 = 0.078;
-/// … and rest rotation, degrees. Measured ×2: lockstep Seam(X) 6.96°,
-/// Corner 2.31°, Seam(Z) 0.26°; jittery seeds the same; the control 0°.
+/// run, per axis, blocks — loose on purpose, and measured ×2 on stud ground
+/// (2026-11-10, P10b; REGION_BLOCKS 64): lockstep Seam(X) 0.0515, Seam(Z)
+/// 0.0139, Corner 0.0176; the jittery seeds 0–3 the same in every placement
+/// (the slide is over before jitter shifts anything); the [`SlideReArrived`]
+/// control (the handoff's contact-state reset with no seam) 0.0004. Loosened
+/// from the voxel floor's 0.078 (its Seam(X) spread was 0.0388): the cube
+/// slides over stud caps, a rougher contact, and stops after ~0.75 m.
+/// The seam spreads exceed the control: before any handoff, a cube touching
+/// the seam already starts differently, because its floor there is the
+/// neighbour's halo chunk, a collider inserted after the region's own, so the
+/// contact pairs are solved in another order — and the chunk-edge ghost
+/// contacts amplify any such difference.
+const SLIDE_POSE_TOL_BLOCKS: f32 = 0.103;
+/// … and rest rotation, degrees. Measured ×2 on stud ground: lockstep Seam(X)
+/// 5.58°, Corner 1.84°, Seam(Z) 0.25°; jittery seeds the same; the control 0°.
 const SLIDE_ANGLE_TOL_DEG: f32 = 14.0;
+/// A slide "rests past the origin" when its centre lies beyond the flip
+/// hysteresis on both axes, blocks (it rests 0.21–0.26 past, measured).
+const SLIDE_PAST: f32 = -game::FLIP_HYSTERESIS / B;
 
 /// The slide along the floor through the seam — the ground-contact
 /// crossing (a rolling log, a pushed crate). It crosses, is owned by one
@@ -1130,19 +1139,19 @@ const SLIDE_ANGLE_TOL_DEG: f32 = 14.0;
 /// body's contact state (the [`SlideReArrived`] control, run here, measures
 /// it with no seam), and a body sliding over the boundary between two
 /// terrain colliders (every chunk edge, so every region seam) catches on the
-/// far collider's edge — "ghost" contacts, each chunk's `Voxels` shape knows
+/// far collider's edge — "ghost" contacts, each chunk's collider knows
 /// nothing of its neighbour — which makes the slide chaotic with no region
-/// seam at all: the same slide centred at block 16 and at block 32 (identical
-/// geometry, only the coordinates' float rounding differs) rests 0.14 blocks
-/// apart, and other launch speeds tip the cube onto another face at a seam
-/// or stop it dead at a chunk edge. A handoff regression beyond that cost
+/// seam at all (on the voxel floor the same slide centred at block 16 and at
+/// block 32 rested 0.14 blocks apart; on stud caps a slide started a quarter
+/// block from the seam or launched at 12 m/s rests 0.28–0.29 blocks from the
+/// centred run's). A handoff regression beyond that cost
 /// (a lost velocity, weight or spin) still fails.
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn body_slide_is_seam_invariant_within_its_handoff_cost() {
     let reference = run(&SLIDE, Placement::Centre, None);
     let body_ref = the_body(&reference).clone();
-    assert!(body_ref.pos[0] < -0.25 && body_ref.pos[2] < -0.25, "rests past the origin: {:?}", body_ref.pos);
+    assert!(body_ref.pos[0] < SLIDE_PAST && body_ref.pos[2] < SLIDE_PAST, "rests past the origin: {:?}", body_ref.pos);
     let tol = Tolerances { pose_blocks: SLIDE_POSE_TOL_BLOCKS, angle_deg: SLIDE_ANGLE_TOL_DEG, ..LOCKSTEP_TOLERANCES };
     let control = SlideReArrived { origin: Default::default(), done: Default::default() };
     let snap = run(&control, Placement::Centre, None);
@@ -1151,7 +1160,7 @@ fn body_slide_is_seam_invariant_within_its_handoff_cost() {
     let mut check = |snap: &WorldSnapshot, what: &str| {
         let (pose, turn) = assert_body_matches(&body_ref, snap, &tol, what);
         let body = the_body(snap);
-        assert!(body.pos[0] < -0.25 && body.pos[2] < -0.25, "{what}: rests past the origin: {:?}", body.pos);
+        assert!(body.pos[0] < SLIDE_PAST && body.pos[2] < SLIDE_PAST, "{what}: rests past the origin: {:?}", body.pos);
         worst = (worst.0.max(pose), worst.1.max(turn));
     };
     for placement in &PLACEMENTS[1..] {
@@ -1173,150 +1182,10 @@ fn body_slide_is_seam_invariant_within_its_handoff_cost() {
     eprintln!("[body] slide worst: pose {} blocks, rotation {}°", worst.0, worst.1);
 }
 
-// --- A tree felled across a seam ------------------------------------------------
-
-/// The felled tree's id (any non-zero id; the floor holds no other tree).
-const FELLED_TREE_ID: u32 = 7;
-/// Its trunk, in logs above the floor: tall enough (`TALL_PART_BLOCKS`) to
-/// topple over its butt, and to lay its centre of mass down past the seam.
-const FELLED_TRUNK_BLOCKS: i32 = 12;
-/// Blocks from the origin, along +x and +z, of the trunk: 2 from the seam.
-const FELLED_TRUNK_OFFSET: i64 = 2;
-/// Rounds for the fall and the rest that settles it (`REST_TICKS` still
-/// ticks), well under its `SETTLE_TIMEOUT_TICKS`, with room for jitter.
-const FELLED_ROUNDS: u32 = 120;
-
-/// A tree 2 blocks short of the seam (the corner, at `Corner`) leaning
-/// toward −x/−z across it: an oak trunk with a limb of logs and a few
-/// leaves reaching over the origin. Setup chops it at the floor as an
-/// Adventure player does (`player_chop_safe`: the cut drops at the stump,
-/// the rest falls as a `DropItems` voxel body). It tips along its lean,
-/// crosses the seam as an `EntityKind::Body` while it falls, and its logs
-/// are put down where it rests, by the region that then owns it.
-struct FelledTree;
-
-impl FelledTree {
-    /// The tree's blocks, (offset from the origin — on the stand level —,
-    /// block, limb).
-    fn blocks(log: BlockId, leaves: BlockId) -> Vec<([i64; 3], BlockId, u8)> {
-        let t = FELLED_TRUNK_OFFSET;
-        let mut out: Vec<([i64; 3], BlockId, u8)> =
-            (0..FELLED_TRUNK_BLOCKS).map(|y| ([t, y as i64, t], log, 0)).collect();
-        let top = FELLED_TRUNK_BLOCKS as i64 - 1;
-        for (d, dy) in [(1, -3), (1, -2), (2, -2), (2, -1), (1, -1)] {
-            out.push(([t - d, top + dy, t - d], log, 1));
-        }
-        for (d, dy) in [(2, 0), (1, 0)] {
-            out.push(([t - d, top + dy, t - d], leaves, 1));
-        }
-        out
-    }
-
-    fn ids() -> (BlockId, BlockId) {
-        let reg = game::BlockRegistry::from_ron(include_str!("../../../assets/blocks/blocks.ron")).unwrap();
-        (reg.id_of("oak_log").unwrap(), reg.id_of("oak_leaves").unwrap())
-    }
-
-    /// Every item the tree is worth: the drops of its blocks.
-    fn worth() -> BTreeMap<game::ItemId, u32> {
-        common::install_real_block_props();
-        let (log, leaves) = Self::ids();
-        let mut out = BTreeMap::new();
-        for (_, id, limb) in Self::blocks(log, leaves) {
-            if let Some(s) = game::drop_of(Block::with_tree(id, FELLED_TREE_ID, limb)) {
-                *out.entry(s.item).or_default() += s.count;
-            }
-        }
-        out
-    }
-}
-
-impl Scenario for FelledTree {
-    fn setup(&self, rig: &mut Rig, origin: WorldBlockPos) {
-        common::install_real_block_props();
-        let p = BODY_PLAYER_BLOCKS;
-        place_player(rig, offset(origin, p, 0, p), false);
-        let (log, leaves) = Self::ids();
-        let blocks = Self::blocks(log, leaves);
-        let cut = spawn_tile(offset(origin, FELLED_TRUNK_OFFSET, 0, FELLED_TRUNK_OFFSET));
-        rig.manager.spawner_mut().with_region(SPAWN_REGION, |region| {
-            region.with_data(|d| {
-                for (o, id, limb) in &blocks {
-                    let at = spawn_tile(offset(origin, o[0], o[1] as i32, o[2]));
-                    assert!(d.set_block_safe(at, Block::with_tree(*id, FELLED_TREE_ID, *limb)), "tree block at {at:?}");
-                }
-                let tick = *d.data.tick;
-                assert!(d.player_chop_safe(cut, tick), "the chop fells the tree");
-            });
-        });
-    }
-
-    fn drive(&self, _rig: &mut Rig, _round: u32) {}
-
-    fn rounds(&self) -> u32 {
-        FELLED_ROUNDS
-    }
-
-    fn crosser(&self) -> Option<game::EntityKind> {
-        Some(game::EntityKind::Body)
-    }
-}
-
-/// Every pile's items summed per item.
-fn pile_totals(s: &WorldSnapshot) -> BTreeMap<game::ItemId, u32> {
-    let mut out = BTreeMap::new();
-    for stack in s.piles.values().flatten() {
-        *out.entry(stack.item).or_default() += stack.count;
-    }
-    out
-}
-
-/// A tree felled 2 blocks from a seam, leaning across it, falls across it
-/// in every placement: the body crosses (`run` asserts it was owned past the
-/// seam / corner, and by one region at a time), settles there, and its logs
-/// lie in piles owned by the regions they lie in (`snapshot` asserts it),
-/// past the origin — every item the tree was worth, once (the stump's pile
-/// included), lockstep and under jittery seeds. The piles' cells are the
-/// discrete outcome compared against the centred run; see the body below.
-#[test]
-#[ignore = "slow: >100ms — run via just test-full"]
-fn tree_felled_across_seam() {
-    let worth = FelledTree::worth();
-    assert!(!worth.is_empty(), "the tree is worth something");
-    let reference = run(&FelledTree, Placement::Centre, None);
-    let check = |snap: &WorldSnapshot, what: &str| {
-        assert!(
-            !snap.entities.values().any(|e| e.kind == game::EntityKind::Body),
-            "{what}: the felled part settled"
-        );
-        assert_eq!(pile_totals(snap), worth, "{what}: every item, once: {:?}", snap.piles);
-        let past = snap.piles.keys().filter(|c| c[0] < 0 && c[2] < 0).count();
-        assert!(past > 0, "{what}: logs lie past the origin: {:?}", snap.piles);
-    };
-    check(&reference, "lockstep Centre");
-    for placement in &PLACEMENTS[1..] {
-        let snap = run(&FelledTree, *placement, None);
-        check(&snap, &format!("lockstep {placement:?}"));
-        if let Err(e) = compare(&reference, &snap, &LOCKSTEP_TOLERANCES) {
-            panic!("lockstep {placement:?} differs from Centre: {e}");
-        }
-    }
-    for seed in 0..JITTER_SEEDS {
-        for placement in PLACEMENTS {
-            let what = format!("jittery seed {seed} {placement:?}");
-            let snap = run(&FelledTree, placement, Some(InlineSchedule::jittery(seed)));
-            check(&snap, &what);
-            if let Err(e) = compare(&reference, &snap, &Tolerances { tiles: true, ..JITTER_TOLERANCES }) {
-                panic!("{what} differs from lockstep Centre: {e}");
-            }
-        }
-    }
-}
-
 // --- Pathing around water ----------------------------------------------------------
 
-/// Recipe water on the one-block floor over the block columns `span × span`
-/// around `origin` (x and z), up to block level `water_top`.
+/// Recipe water on the flat floor over the tile columns `span × span`
+/// around `origin` (x and z), up to tile level `water_top`.
 fn square_pond(origin: WorldBlockPos, span: std::ops::Range<i64>, water_top: i32) -> WaterBox {
     WaterBox {
         xs: origin.x + span.start..origin.x + span.end,
@@ -1357,7 +1226,7 @@ impl Scenario for PondDetour {
                 let Some(&e) = data.player_entites.get(&CLIENT) else { return };
                 let handle = (*data.ecs.rigidbody.try_get(e)).expect("player body");
                 let t = data.physics.bodies.get(handle).expect("body").translation();
-                let f = game::feet_tile(game::feet_of(t));
+                let f = data.terrain_kind().feet_tile(data.feet_of(t));
                 let w = WorldBlockPos::from_local(rc, game::BlockPos::new(f[0], f[1], f[2]));
                 let (dx, dz) = (w.x - origin.x, w.z - origin.z);
                 assert!(
@@ -1373,10 +1242,11 @@ impl Scenario for PondDetour {
         POND_WALK_ROUNDS
     }
 
-    /// One block of recipe water on the floor over the pond.
+    /// One tile of recipe water on the floor over the pond: too deep to wade
+    /// (`stud_stand` takes at most 2 plates), so its tiles are not standable.
     fn floor(&self, origin: WorldBlockPos) -> Floor {
         let pond = square_pond(origin, -POND_HALF..POND_HALF, origin.y);
-        Box::new(move |rc| floor_with_water(rc, std::slice::from_ref(&pond)))
+        std::sync::Arc::new(move |rc| floor_with_water(rc, std::slice::from_ref(&pond)))
     }
 
     fn jitter_tolerances(&self) -> Tolerances {
@@ -1408,7 +1278,7 @@ struct SwimAcross {
     dove: std::cell::Cell<bool>,
 }
 
-/// Depth of the pool, blocks: water from the floor's top (`STAND_LEVEL`) up.
+/// Depth of the pool, tiles: water from the floor's top (`STAND_LEVEL`) up.
 const SWIM_POOL_DEPTH: i32 = 6;
 /// The pool spans `-SWIM_POOL_BEHIND..SWIM_POOL_AHEAD` blocks around the
 /// origin on x and z (the swim runs from +3 to about −1.2).
@@ -1416,8 +1286,9 @@ const SWIM_POOL_BEHIND: i64 = 4;
 const SWIM_POOL_AHEAD: i64 = 6;
 /// Blocks from the origin, along +x and +z, the swim starts at.
 const SWIM_START_BLOCKS: i64 = 3;
-/// Feet below the surface at the start, blocks: inside the `Waist` band.
-const SWIM_START_DEPTH_BLOCKS: f32 = 1.3;
+/// Feet below the surface at the start, as a part of the body's height: inside
+/// the `Waist` band (waist wet from 0.5, eye from 0.9 of the height).
+const SWIM_START_DEPTH_OF_HEIGHT: f32 = 0.72;
 /// Rounds after the move into the pool before the swim (and its checks)
 /// starts.
 const SWIM_SETTLE_ROUNDS: usize = 2;
@@ -1450,10 +1321,12 @@ impl Scenario for SwimAcross {
         let start = offset(origin, SWIM_START_BLOCKS, 0, SWIM_START_BLOCKS);
         let (rc, local) = start.to_local();
         assert_eq!(rig.owners(), [rc], "the player starts in the start's region");
-        let bv = game::BLOCK_VOXELS as f32;
-        let surface = (origin.y + SWIM_POOL_DEPTH) as f32;
-        let feet = (surface - SWIM_START_DEPTH_BLOCKS) * bv;
-        let centre = feet + game::movement::PLAYER_HEIGHT * game::movement::UNITS_PER_METER / 2.0;
+        let bv = B;
+        let scale = game::movement::BodyScale::STUD;
+        let half = scale.capsule_half_height() + scale.capsule_radius();
+        let surface = level_y(origin.y + SWIM_POOL_DEPTH);
+        let feet = surface - SWIM_START_DEPTH_OF_HEIGHT * 2.0 * half;
+        let centre = feet + half;
         let pose = game::Pose::translation((local.x as f32 + 0.5) * bv, centre, (local.z as f32 + 0.5) * bv);
         rig.manager.spawner_mut().with_region(rc, |r| {
             r.with_data(|d| {
@@ -1497,8 +1370,8 @@ impl Scenario for SwimAcross {
                 let Some(&e) = data.player_entites.get(&CLIENT) else { return };
                 let handle = (*data.ecs.rigidbody.try_get(e)).expect("player body");
                 let t = data.physics.bodies.get(handle).expect("body").translation();
-                let feet = game::feet_of(t);
-                let bv = game::BLOCK_VOXELS as f32;
+                let feet = data.feet_of(t);
+                let bv = B;
                 let column = game::BlockPos::new((feet.x / bv).floor() as i32, 0, (feet.z / bv).floor() as i32);
                 if !SwimAcross::over_pool(origin, WorldBlockPos::from_local(rc, column)) {
                     return;
@@ -1508,13 +1381,13 @@ impl Scenario for SwimAcross {
                 if m.immersion == game::Immersion::Head {
                     self.dove.set(true);
                 }
-                let bed = origin.y as f32 * bv;
+                let bed = level_y(origin.y);
                 if !descending {
                     assert!(
                         feet.y > bed + 0.25 * bv,
-                        "round {round}: feet {} blocks reached the bed ({}) with descend up: {m:?}",
+                        "round {round}: feet at {} m reached the bed ({} m) with descend up: {m:?}",
                         feet.y / bv,
-                        origin.y
+                        bed / bv
                     );
                 }
             });
@@ -1528,7 +1401,7 @@ impl Scenario for SwimAcross {
     /// The pool: recipe water `SWIM_POOL_DEPTH` deep on the floor.
     fn floor(&self, origin: WorldBlockPos) -> Floor {
         let pool = square_pond(origin, -SWIM_POOL_BEHIND..SWIM_POOL_AHEAD, origin.y + SWIM_POOL_DEPTH - 1);
-        Box::new(move |rc| floor_with_water(rc, std::slice::from_ref(&pool)))
+        std::sync::Arc::new(move |rc| floor_with_water(rc, std::slice::from_ref(&pool)))
     }
 }
 
@@ -1553,7 +1426,7 @@ fn swim_is_seam_invariant_under_jitter() {
 /// placement, never on the bed, never lost or duplicated.
 struct FloatingLog;
 
-/// Depth of the pool, blocks: water from the floor's top (`origin.y`) up.
+/// Depth of the pool, tiles: water from the floor's top (`origin.y`) up.
 const FLOAT_POOL_DEPTH: i32 = 6;
 /// The pool spans `-FLOAT_POOL_HALF..FLOAT_POOL_HALF` blocks around the
 /// origin on x and z.
@@ -1579,8 +1452,8 @@ impl Scenario for FloatingLog {
         common::install_real_block_props();
         let p = FLOAT_PLAYER_BLOCKS;
         place_player(rig, offset(origin, p, 0, p), false);
-        let b = game::BLOCK_VOXELS as f32;
-        let surface = (origin.y + FLOAT_POOL_DEPTH) as f32 * b;
+        let b = B;
+        let surface = level_y(origin.y + FLOAT_POOL_DEPTH);
         let half = Vector::new(FLOAT_LOG_HALF[0] * b, FLOAT_LOG_HALF[1] * b, FLOAT_LOG_HALF[2] * b);
         let d = FLOAT_START_BLOCKS * b;
         let local = Vector::new(
@@ -1606,7 +1479,7 @@ impl Scenario for FloatingLog {
     /// The pool: recipe water `FLOAT_POOL_DEPTH` deep on the floor.
     fn floor(&self, origin: WorldBlockPos) -> Floor {
         let pool = square_pond(origin, -FLOAT_POOL_HALF..FLOAT_POOL_HALF, origin.y + FLOAT_POOL_DEPTH - 1);
-        Box::new(move |rc| floor_with_water(rc, std::slice::from_ref(&pool)))
+        std::sync::Arc::new(move |rc| floor_with_water(rc, std::slice::from_ref(&pool)))
     }
 
     fn crosser(&self) -> Option<game::EntityKind> {
@@ -1624,9 +1497,10 @@ fn floating_body_is_seam_invariant() {
     let end = assert_seam_invariant(&FloatingLog, None);
     let check = |s: &WorldSnapshot, what: &str| {
         let body = the_body(s);
-        // Blocks from the origin; the pool's surface is FLOAT_POOL_DEPTH up.
+        // Metres from the origin (the floor's top); the pool's surface is
+        // FLOAT_POOL_DEPTH tiles up.
         let (lo, hi) = (body.pos[1] - FLOAT_LOG_HALF[1], body.pos[1] + FLOAT_LOG_HALF[1]);
-        let surface = FLOAT_POOL_DEPTH as f32;
+        let surface = FLOAT_POOL_DEPTH as f32 * common::tile_h() / B;
         eprintln!("[float] {what}: body at {:?} blocks, AABB y {lo} .. {hi}", body.pos);
         assert!(lo < surface && hi > surface, "{what}: floating, straddling the surface: {lo} .. {hi}");
         assert!(lo > 1.0, "{what}: clear of the bed: bottom {lo} blocks");
@@ -1640,7 +1514,7 @@ fn floating_body_is_seam_invariant() {
 // --- Stud terrain across a seam (stud world plan P4) -------------------------
 
 /// Surface plate of the flat stud ground (layer 0).
-const STUD_TOP: i32 = 30;
+const STUD_TOP: i32 = common::FLOOR_PLATES;
 /// Seeds swept per schedule mode over the stud scenario (it runs nine stud regions).
 const STUD_SEEDS: u64 = 3;
 /// How far (sim units) the walker's body may rise or sink on level stud ground: under
@@ -1648,8 +1522,7 @@ const STUD_SEEDS: u64 = 3;
 const STUD_LEVEL_TOLERANCE: f32 = 2.0;
 
 fn stud_flat() -> game::StudColumnGround {
-    let soil = game::StudProfile { cover: game::MAT_GRASS, cover_plates: 1, soil: game::MAT_DIRT, soil_plates: 5 };
-    game::StudColumnGround::flat(STUD_TOP, soil, game::MAT_STONE, -2000)
+    common::stud_flat(STUD_TOP)
 }
 
 /// Flat stud ground under every region.
@@ -1660,8 +1533,7 @@ fn stud_flat_seed(_rc: RegionCoords) -> game::StudRegionSeed {
 }
 
 fn stud_rig(schedule: Option<InlineSchedule>) -> Rig {
-    let spawner = schedule.map_or_else(game::InlineSpawner::default, game::InlineSpawner::with_schedule);
-    Rig::with_spawner(spawner.with_stud_genesis(std::sync::Arc::new(stud_flat_seed)), |_| Vec::new())
+    Rig::with_floor(schedule, stud_flat_seed)
 }
 
 /// The player's body height and whether it stands, in the region owning it (`None`
@@ -2071,8 +1943,7 @@ fn stud_logs_and_bodies(rig: &mut Rig, rc: RegionCoords) -> (u32, usize) {
 /// part removed into that side's piles. Nothing is lost or doubled, and a replica fed
 /// each region's event stream ends in the server's state hash. Returns the fingerprint.
 fn stud_tree_across_seam_scenario(schedule: Option<InlineSchedule>) -> Vec<(RegionCoords, u64, u32)> {
-    let spawner = schedule.map_or_else(game::InlineSpawner::default, game::InlineSpawner::with_schedule);
-    let mut rig = Rig::with_spawner(spawner.with_stud_genesis(std::sync::Arc::new(stud_tree_seed)), |_| Vec::new());
+    let mut rig = Rig::with_floor(schedule, stud_tree_seed);
     rig.join_spawn();
     for _ in 0..PAST_SEAM_ROUNDS {
         rig.round();

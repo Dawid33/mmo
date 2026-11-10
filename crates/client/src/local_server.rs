@@ -6,9 +6,8 @@
 //! GameInstanceManager.
 use crossbeam::channel::{unbounded, Receiver, Sender};
 use game::{
-    Block, BlockId, Chunk, ClientId, ClientPacket, Column, ColumnCoords, GameError, InlineSpawner,
-    RegionCoords, RegionGenerator, RegionOutput, ServerEvent, ServerPacket, SubChunk, WorldManager,
-    TICK_RATE,
+    ClientId, ClientPacket, ColumnCoords, GameError, InlineSpawner, InlineStudGenesis, RegionCoords, RegionOutput,
+    ServerEvent, ServerPacket, StudColumnGround, StudProfile, StudRegionSeed, WorldManager, TICK_RATE,
 };
 
 /// The only client in an offline world.
@@ -29,56 +28,36 @@ pub struct LocalServer {
 }
 
 impl LocalServer {
+    /// The procedural world (`worldgen::stud_gen`), generated region by region.
     pub fn new(
         recv: Receiver<ClientPacket>,
         send: Sender<ServerPacket>,
     ) -> Result<Self, GameError> {
-        let (materials, manifest) = terrain_materials();
-        let gen_cache = worldgen::cache::WorldgenCache::from_env(worldgen::WORLD_SEED, &manifest);
-        let generator: RegionGenerator =
-            Box::new(move |rc| gen_cache.generate_cached(rc, worldgen::WORLD_SEED, materials));
-        Self::with_generator_and_materials(recv, send, generator, materials)
+        let genesis: InlineStudGenesis =
+            std::sync::Arc::new(|rc| worldgen::stud_gen::generate_stud_region(rc, worldgen::WORLD_SEED));
+        Self::new_with_genesis(recv, send, genesis)
     }
 
-    /// Construct the offline server with an injected region generator.
+    /// Construct the offline server with an injected region genesis: what
+    /// every fresh region is seeded with (`Region::seed_stud_world`).
     /// Intended for integration harnesses whose subject is networking,
     /// reconciliation, or window management rather than production worldgen.
     #[doc(hidden)]
-    pub fn new_with_generator(
+    pub fn new_with_genesis(
         recv: Receiver<ClientPacket>,
         send: Sender<ServerPacket>,
-        generator: RegionGenerator,
+        genesis: InlineStudGenesis,
     ) -> Result<Self, GameError> {
-        let (materials, _) = terrain_materials();
-        Self::with_generator_and_materials(recv, send, generator, materials)
-    }
-
-    fn with_generator_and_materials(
-        recv: Receiver<ClientPacket>,
-        send: Sender<ServerPacket>,
-        generator: RegionGenerator,
-        materials: worldgen::material::Materials,
-    ) -> Result<Self, GameError> {
+        // The sim reads the block properties (items, drops); the stud world
+        // itself comes from `genesis`.
+        crate::blocks::load_registry();
         let (out_send, out_recv) = unbounded();
         let (region_out_send, region_out_recv) = unbounded();
-        let (lod_result_send, lod_result_recv) = unbounded();
-        let lod_builder: Box<dyn game::LodBuilder> = Box::new(game::InlineLodBuilder {
-            coarse: Box::new(move |key| {
-                worldgen::coarse_tile(key, worldgen::WORLD_SEED, materials)
-            }),
-            water: Box::new(move |key| {
-                worldgen::coarse_water(key, worldgen::WORLD_SEED, materials)
-            }),
-            out: lod_result_send,
-        });
-        let mut manager = WorldManager::new(
-            InlineSpawner::default(),
-            generator,
-            out_send,
-            region_out_send,
-            lod_builder,
-            lod_result_recv,
-        );
+        let lod_builder: Box<dyn game::LodBuilder> = Box::new(game::InlineStudLodBuilder::new(Box::new(|key| {
+            worldgen::stud_gen::stud_lod_tile(key, worldgen::WORLD_SEED)
+        })));
+        let mut manager =
+            WorldManager::new(InlineSpawner::default().with_stud_genesis(genesis), out_send, region_out_send, lod_builder);
         // Server-authoritative player creation, as on ClientConnected. The
         // handshake is bypassed: the session starts as the local player.
         manager.handle_server_event(
@@ -209,33 +188,22 @@ impl LocalServer {
     }
 }
 
-fn terrain_materials() -> (worldgen::material::Materials, String) {
-    let registry = crate::blocks::load_registry();
-    let resolve = |name: &str| {
-        registry
-            .id_of(name)
-            .unwrap_or_else(|| panic!("block manifest must define \"{name}\""))
-    };
-    (
-        worldgen::material::Materials::from_names(resolve),
-        crate::blocks::manifest_src(),
-    )
-}
+/// Surface plate of [`lightweight_test_genesis`]' ground: the top of tile
+/// level 4, so bodies stand in level 5.
+pub const TEST_GROUND_TOP_PLATES: i32 = 30;
 
-/// A one-column flat region used by integration harnesses. It retains real
-/// terrain/collider/LOD plumbing while avoiding 1,024-column production
+/// A flat world used by integration harnesses: every region is the same flat
+/// ground recipe (grass over dirt over stone) with no trees and no water. It
+/// keeps real terrain / collider / halo plumbing while avoiding production
 /// worldgen for tests whose assertions do not depend on terrain shape.
 #[doc(hidden)]
-pub fn lightweight_test_generator() -> RegionGenerator {
-    Box::new(|_| {
-        let chunk = Chunk::flat_floor(8);
-        let column = Column::new(
-            0,
-            Block::new(BlockId::AIR),
-            Block::new(BlockId::AIR),
-            vec![SubChunk::Dense(Box::new(chunk))],
-        );
-        vec![(ColumnCoords::new(4, 4), column)]
+pub fn lightweight_test_genesis() -> InlineStudGenesis {
+    std::sync::Arc::new(|_| {
+        let soil = StudProfile { cover: game::MAT_GRASS, cover_plates: 1, soil: game::MAT_DIRT, soil_plates: 5 };
+        let n = game::REGION_CHUNKS;
+        let flat = StudColumnGround::flat(TEST_GROUND_TOP_PLATES, soil, game::MAT_STONE, -2000);
+        let ground = (0..n).flat_map(|x| (0..n).map(move |z| ColumnCoords::new(x, z))).map(|c| (c, flat.clone())).collect();
+        StudRegionSeed { ground, features: Vec::new() }
     })
 }
 
@@ -267,12 +235,8 @@ mod tests {
         manager.set_lod_table(&[]);
         manager.set_near_radius(0);
 
-        let mut server = LocalServer::new_with_generator(
-            manager.client_packet_recv(),
-            server_send,
-            lightweight_test_generator(),
-        )
-        .unwrap();
+        let mut server =
+            LocalServer::new_with_genesis(manager.client_packet_recv(), server_send, lightweight_test_genesis()).unwrap();
         manager.start();
 
         // A few frames of the wasm drive loop: server pump -> client pump.
@@ -331,12 +295,8 @@ mod tests {
         // LOD off: every ring key is a synchronous LocalServer build (see
         // SimHarness::new). This test is about the 3x3 window, not LOD.
         manager.set_lod_table(&[]);
-        let mut server = LocalServer::new_with_generator(
-            manager.client_packet_recv(),
-            server_send,
-            lightweight_test_generator(),
-        )
-        .unwrap();
+        let mut server =
+            LocalServer::new_with_genesis(manager.client_packet_recv(), server_send, lightweight_test_genesis()).unwrap();
         manager.start();
 
         // Handshake + window subscription needs a few pump rounds:
@@ -370,9 +330,7 @@ mod tests {
 
         let (packet_send, packet_recv) = crossbeam::channel::unbounded::<ClientPacket>();
         let (out_send, out_recv) = crossbeam::channel::unbounded::<ServerPacket>();
-        let mut server =
-            LocalServer::new_with_generator(packet_recv, out_send, lightweight_test_generator())
-                .unwrap();
+        let mut server = LocalServer::new_with_genesis(packet_recv, out_send, lightweight_test_genesis()).unwrap();
 
         let corner = RegionCoords::new(-1, -1);
         packet_send

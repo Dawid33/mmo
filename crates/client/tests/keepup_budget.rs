@@ -35,16 +35,10 @@ const KEEPUP_SAFETY_FACTOR: f64 = 0.55;
 #[ignore = "wall-clock perf gate; run in release via `just keepup-budget`"]
 fn region_tick_cost_fits_keepup_budget() {
     // Real worldgen terrain + a player, same construction as the server.
-    let registry = client::blocks::load_registry();
-    let resolve = |name: &str| {
-        registry
-            .id_of(name)
-            .unwrap_or_else(|| panic!("block manifest must define \"{name}\""))
-    };
-    let materials = worldgen::material::Materials::from_names(resolve);
+    client::blocks::load_registry();
     let rc = RegionCoords::new(0, 0);
-    let columns = worldgen::generate_region(rc, worldgen::WORLD_SEED, materials);
-    let mut region = Region::from_columns(rc, columns);
+    let mut region = Region::new(game::Rollback::new(None), None, rc, None);
+    region.seed_stud_world(worldgen::stud_gen::generate_stud_region(rc, worldgen::WORLD_SEED));
     region.handle_event(GameEventKind::CreateClient(0)).unwrap();
     region.forget_last_event();
 
