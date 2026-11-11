@@ -10,9 +10,11 @@
 //!   from outside (a register command) is untrusted until [`ResolvedPrefab::validate`]
 //!   passes.
 
+mod codec;
 mod file;
 mod resolve;
 
+pub use codec::*;
 pub use file::*;
 pub use resolve::*;
 

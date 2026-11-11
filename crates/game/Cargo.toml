@@ -15,6 +15,8 @@ lz4_flex = { workspace = true }
 crossbeam = { workspace = true }
 serde = { workspace = true }
 ron = "0.12"
+# Prefab export strings (`prefab/codec.rs`).
+base64 = { workspace = true }
 borrow = { workspace = true }
 derive_more = { workspace = true }
 crc32fast = { workspace = true }
@@ -37,6 +39,8 @@ rapier3d = { workspace = true }
 
 [dev-dependencies]
 crc32fast = { workspace = true }
+base64 = { workspace = true }
+lz4_flex = { workspace = true }
 
 # `tests/wasm_determinism.rs` on wasm32 (`just determinism-wasm`). Its
 # wasm-bindgen must stay the version Cargo.lock already has for the client.

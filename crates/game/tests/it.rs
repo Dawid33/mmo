@@ -17,6 +17,7 @@
 //! - `state_hash_check`: sets the process-global state hash interval.
 
 mod common;
+mod prefab_codec;
 mod prefab_resolve;
 mod adventure;
 mod anim;
