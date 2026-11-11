@@ -81,6 +81,11 @@ impl StudBuild {
     }
 }
 
+/// How many place / remove orders build mode has sent this session (the prefab editor's
+/// "unsaved changes" reads it).
+#[derive(Resource, Default, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StudEdits(pub u64);
+
 /// Run condition for the designation / selection / move tools: build mode owns the clicks while on.
 pub fn build_off(build: Res<StudBuild>) -> bool {
     !build.on
@@ -255,6 +260,7 @@ pub fn build_apply(
     target: Res<StudTarget>,
     events: Res<GameEvents>,
     local: Res<LocalPlayer>,
+    mut edits: ResMut<StudEdits>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut ghost: GhostQuery,
@@ -281,6 +287,7 @@ pub fn build_apply(
         };
         if let Some(order) = order {
             let _ = events.0.send(game::GameEventKind::Order(client, order));
+            edits.0 += 1;
         }
     }
 

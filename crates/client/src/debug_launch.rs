@@ -79,7 +79,8 @@ fn debug_world_override() -> Option<String> {
 
 pub const USAGE: &str = "usage: client [debug embarked [--reset | --port N | --join HOST:PORT] [--adventure-at SITE]]\n       \
     client [debug online [--world ID]]\n       \
-    client [debug studs]\n\
+    client [debug studs]\n       \
+    client [debug prefab [--game] [NAME]]\n\
     \n\
     With no arguments the client opens on the main menu.\n\
     \n\
@@ -97,7 +98,10 @@ pub const USAGE: &str = "usage: client [debug embarked [--reset | --port N | --j
                  (`embarked` and the menu play real worlds on stud terrain);\n             \
                  --procedural plays the procedural noise world on stud terrain instead.\n             \
                  Run it via `just run-studs`, which sets near radius 1 and, for the toy\n             \
-                 world, disables the LOD rings (a bare `client debug studs` keeps the defaults)";
+                 world, disables the LOD rings (a bare `client debug studs` keeps the defaults)\n  \
+      prefab     the prefab editor on its empty world, on prefab NAME of your library (a new\n             \
+                 one if there is none; `untitled` when no name is given); --game edits the\n             \
+                 game's own assets/prefabs/ instead (dev builds). Run it via `just prefab-editor`";
 
 /// The `online` preset's world when `--world` is not given (`just dev-login`'s).
 pub const DEFAULT_ONLINE_WORLD: &str = "dev";
@@ -117,13 +121,21 @@ pub enum DebugScenario {
     /// The toy-brick stud world on a single-player server (no store, no history).
     /// `procedural`: the procedural noise world on stud terrain, instead of the toy world.
     Studs { procedural: bool },
+    /// The prefab editor on its empty world (`crate::prefab_editor`). `game`: edit the
+    /// game's own `assets/prefabs/` on disk instead of the player's library (dev
+    /// builds). `name`: the prefab to open (a new one if there is no such file);
+    /// none = a new Build prefab called [`NEW_PREFAB_NAME`].
+    Prefab { game: bool, name: Option<String> },
 }
+
+/// What `client debug prefab` calls the prefab it starts when none is named.
+pub const NEW_PREFAB_NAME: &str = "untitled";
 
 impl DebugScenario {
     fn adventure_at(&self) -> Option<SiteId> {
         match self {
             DebugScenario::Embarked { adventure_at, .. } => *adventure_at,
-            DebugScenario::Online { .. } | DebugScenario::Studs { .. } => None,
+            DebugScenario::Online { .. } | DebugScenario::Studs { .. } | DebugScenario::Prefab { .. } => None,
         }
     }
 }
@@ -161,6 +173,24 @@ pub fn parse_args<S: AsRef<str>>(args: &[S]) -> Result<Option<DebugScenario>, St
         [] => Ok(None),
         ["-h" | "--help" | "help", ..] => Err(USAGE.into()),
         ["debug"] => Err(format!("`debug` needs a preset\n\n{USAGE}")),
+        ["debug", "prefab", rest @ ..] => {
+            let (mut game, mut name) = (false, None);
+            for arg in rest {
+                match *arg {
+                    "--game" if cfg!(feature = "dev_ui") => game = true,
+                    "--game" => return Err(format!("--game edits the game's own prefabs: a dev build only\n\n{USAGE}")),
+                    flag if flag.starts_with('-') => {
+                        return Err(format!("unknown flag `{flag}` for `debug prefab`\n\n{USAGE}"));
+                    }
+                    n if name.is_some() => return Err(format!("`debug prefab` takes one name, got `{n}` too\n\n{USAGE}")),
+                    n if !game::prefab_name_ok(n) => {
+                        return Err(format!("bad prefab name `{n}`: a-z, 0-9 and '-', at most 48\n\n{USAGE}"));
+                    }
+                    n => name = Some(n.to_string()),
+                }
+            }
+            Ok(Some(DebugScenario::Prefab { game, name }))
+        }
         ["debug", preset, flags @ ..] => {
             let mut reset = false;
             let mut port = None;
@@ -371,7 +401,7 @@ impl DebugLaunchPlugin {
                 |key| std::env::var(key).ok(),
                 crate::login::login_url().as_deref(),
             )?),
-            DebugScenario::Embarked { .. } | DebugScenario::Studs { .. } => None,
+            DebugScenario::Embarked { .. } | DebugScenario::Studs { .. } | DebugScenario::Prefab { .. } => None,
         };
         Ok(Self { scenario, online })
     }
@@ -423,6 +453,22 @@ fn boot(
             info!("[debug] logging in to join the login service's world {world}");
             launch.phase = Phase::Online(OnlineStep::Login);
             next.set(AppState::Login);
+            return;
+        }
+        DebugScenario::Prefab { game, name } => {
+            use crate::prefab_editor::{start_editor, EditorRequest, PrefabSource};
+            let request = EditorRequest {
+                source: if *game { PrefabSource::Game } else { PrefabSource::Library },
+                name: name.clone().unwrap_or_else(|| NEW_PREFAB_NAME.into()),
+                new_kind: Some(game::PrefabKindTag::Build),
+            };
+            info!("[debug] prefab editor: {request:?}");
+            if let Err(e) = start_editor(&mut commands, &mut next, request) {
+                error!("[debug] {e}");
+                error.0 = Some(e);
+            }
+            // The editor session takes it from here (connected is embarked: `enter_editor`).
+            launch.phase = Phase::Done;
             return;
         }
         DebugScenario::Studs { procedural } => {
@@ -776,6 +822,25 @@ mod tests {
         assert_eq!(parse_args(&["debug", "studs", "--procedural"]), Ok(Some(DebugScenario::Studs { procedural: true })));
         assert!(parse_args(&["debug", "embarked", "--procedural"]).is_err());
         assert!(parse_args(&["debug", "studs", "--reset"]).is_err());
+    }
+
+    #[test]
+    fn debug_prefab_parses() {
+        assert_eq!(parse_args(&["debug", "prefab"]), Ok(Some(DebugScenario::Prefab { game: false, name: None })));
+        assert_eq!(
+            parse_args(&["debug", "prefab", "my-house"]),
+            Ok(Some(DebugScenario::Prefab { game: false, name: Some("my-house".into()) }))
+        );
+        let game_arch = parse_args(&["debug", "prefab", "--game", "dev-arch"]);
+        if cfg!(feature = "dev_ui") {
+            assert_eq!(game_arch, Ok(Some(DebugScenario::Prefab { game: true, name: Some("dev-arch".into()) })));
+            assert_eq!(parse_args(&["debug", "prefab", "dev-arch", "--game"]), game_arch);
+        } else {
+            assert!(game_arch.unwrap_err().contains("--game"));
+        }
+        assert!(parse_args(&["debug", "prefab", "Bad Name"]).is_err());
+        assert!(parse_args(&["debug", "prefab", "--reset"]).is_err());
+        assert!(parse_args(&["debug", "prefab", "a", "b"]).is_err());
     }
 
     #[test]

@@ -312,6 +312,8 @@ fn main() {
     #[cfg(not(target_arch = "wasm32"))]
     app.insert_resource(client::session::GameThread(command_send.clone()))
         .add_plugins(client::session::SessionFlowPlugin);
+    #[cfg(not(target_arch = "wasm32"))]
+    app.add_plugins(client::prefab_editor::PrefabEditorPlugin);
     #[cfg(feature = "dev_ui")]
     app.add_plugins(renderer::dev_ui::DevUiPlugin);
     #[cfg(not(target_arch = "wasm32"))]

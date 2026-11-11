@@ -64,6 +64,7 @@ impl Plugin for StudPlugin {
             )
             .add_session_reset::<build::StudBuild>()
             .add_session_reset::<build::StudTarget>()
+            .add_session_reset::<build::StudEdits>()
             .add_session_reset::<world::StudWorld>()
             .add_session_reset::<systems::StudMeshTasks>()
             .add_message::<world::StudWorldMsg>()

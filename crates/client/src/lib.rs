@@ -25,6 +25,8 @@ pub mod frontend; // FrontendUi layer: main menu + placeholder screens
 #[cfg(not(target_arch = "wasm32"))]
 pub mod debug_launch; // `client debug <preset>`: skip the manual setup (e.g. `embarked`)
 #[cfg(not(target_arch = "wasm32"))]
+pub mod prefab_editor; // the prefab editor: an empty world, a prefab opened into it, saved from it
+#[cfg(not(target_arch = "wasm32"))]
 pub mod local_host; // the child server a menu-started session plays on
 pub mod session; // AppState, SessionScoped, session reset registry, FrontendCamera
 pub mod web_endpoint; // which WebTransport server the browser build dials

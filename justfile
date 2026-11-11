@@ -221,6 +221,21 @@ run-studs *args:
     {{cap}} {{cargo}} build --bin client --bin server
     RUST_BACKTRACE=1 ./target/debug/client debug studs {{args}}
 
+# The prefab editor, straight in: an empty baseplate world with prefab NAME of your
+# library opened (a new one when there is none; `untitled` without a name).
+# `just prefab-editor --game dev-arch` edits the game's own assets/prefabs/dev-arch.prefab.ron
+# (dev builds). Build mode is on: left click places, right click removes, Ctrl+S saves.
+# The world has nothing beyond its 3x3 regions, so it runs like `run-studs`.
+prefab-editor *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export VOXEL_REGION_BLOCKS={{play_blocks}}
+    export VOXEL_LOD_RINGS=off
+    export VOXEL_NEAR_RADIUS=1
+    if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
+    {{cap}} {{cargo}} build --bin client --bin server
+    RUST_BACKTRACE=1 ./target/debug/client debug prefab {{args}}
+
 run_two_port := "6476"
 
 # `run` with TWO clients on one server, both in ONE fortress: client 1 is the
