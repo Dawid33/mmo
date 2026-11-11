@@ -350,6 +350,8 @@ fn a_designated_brick_survives_a_neighbouring_carve() {
     for b in &boxes {
         want.carve(b.lo, b.hi);
     }
+    // (and what the hole exposes is real bricks)
+    common::rebrick_reference(&mut want, c.y, |_| false);
     let h = state_hash(r.data());
     order(&mut r, Order::DevCompleteAll);
     assert!(r.data().stud_chunk_at(c) == Some(&want), "exactly the designated cells are gone");
@@ -884,6 +886,8 @@ fn a_held_button_mines_the_brick_under_the_crosshair() {
     // Exactly that brick is gone: every other brick of the chunk is as it was.
     let mut want = before.clone();
     assert_eq!(want.remove_at(hit.ray.cell), Some(brick));
+    // (what it uncovers is real bricks)
+    common::rebrick_reference(&mut want, c.y, |_| false);
     assert!(r.data().stud_chunk_at(c) == Some(&want), "the neighbours are intact");
     // Its yield: a tile's worth of cells per item, what is left of one rolled.
     let dirt = piled(r.data(), item("dirt"));

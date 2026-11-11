@@ -403,6 +403,18 @@ impl Rollback {
             self.apply_stud_halo_delta_safe(&StudHaloDelta { chunk: k, data });
         }
         self.materialize_behind_stud_halo_safe(&edited);
+        // ...and the ground of this region their open cells expose becomes real
+        // bricks, as if the hole had been dug on this side of the seam.
+        let (cw, ch) = (STUD_CHUNK_STUDS as i64, STUD_CHUNK_PLATES as i64);
+        let boxes: Vec<([i64; 3], [i64; 3])> = edited
+            .iter()
+            .map(|k| {
+                let lo = k.local_in(region).map(i64::from);
+                let lo = [lo[0] * cw, lo[1] * ch, lo[2] * cw];
+                (lo, [lo[0] + cw, lo[1] + ch, lo[2] + cw])
+            })
+            .collect();
+        self.rebrick_stud_exposed_safe(&boxes);
     }
 
     /// This region's chunk column across a face from halo column `k` (a world chunk

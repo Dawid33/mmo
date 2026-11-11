@@ -414,3 +414,36 @@ pub mod cut_store;
 pub mod rig;
 pub mod seam_translate;
 pub mod water;
+
+/// Brute-force reference of re-bricking on exposure (`game::stud_rebrick`) for one
+/// chunk of `layer`: every diggable filler cell with an open face neighbour — inside
+/// the chunk by its occupancy, outside it by `outside_open` (chunk cell coordinates
+/// past the chunk's box) — has its slot turned into bricks.
+#[allow(dead_code)]
+pub fn rebrick_reference(chunk: &mut game::StudChunk, layer: i32, outside_open: impl Fn([i32; 3]) -> bool) {
+    let (n, h) = (STUD_CHUNK_STUDS as i32, game::STUD_CHUNK_PLATES as i32);
+    let occ = chunk.occupancy();
+    let mut slots = std::collections::BTreeSet::new();
+    let fillers: Vec<game::StudBrick> = chunk
+        .bricks()
+        .filter(|b| matches!(b.shape, game::StudShape::Filler { .. }))
+        .filter(|b| game::stud_material(b.material).is_some_and(|m| m.hardness != u16::MAX))
+        .copied()
+        .collect();
+    for b in fillers {
+        for cell in b.cells() {
+            let c = cell.map(i32::from);
+            let open = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]].iter().any(|d| {
+                let q = [c[0] + d[0], c[1] + d[1], c[2] + d[2]];
+                let inside = (0..n).contains(&q[0]) && (0..h).contains(&q[1]) && (0..n).contains(&q[2]);
+                if inside { !occ.get(q) } else { outside_open(q) }
+            });
+            if open {
+                slots.insert(game::rebrick_slot(layer, cell));
+            }
+        }
+    }
+    for (lo, hi) in slots {
+        chunk.rebrick_box(lo, hi);
+    }
+}

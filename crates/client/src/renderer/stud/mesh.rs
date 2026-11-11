@@ -1402,6 +1402,42 @@ mod tests {
         assert_eq!((tris(&m.body), tris(&m.glass)), (12, 12));
     }
 
+    /// A hole dug into filler ground and re-bricked (`game::stud_rebrick`): its floor
+    /// shows stud tops, its walls and floor seam lines; the bare filler hole had neither.
+    #[test]
+    fn a_re_bricked_hole_shows_studs_and_seams() {
+        let mut chunk = StudChunk::new([StudBrick::filler([0, 0, 0], [32, 30, 32], game::MAT_STONE)]).unwrap();
+        // One tile dug from the top of the ground: studs 8..10 x 4..6, plates 24..30.
+        chunk.carve([8, 24, 4], [10, 30, 6]);
+        let slabs = FaceSlabs(std::array::from_fn(|_| Slab::Solid));
+        let bare = mesh_chunk(&chunk, &slabs, true);
+        assert!(!bare.body.is_empty(), "the hole's faces");
+        assert!(bare.top.is_empty(), "fillers have no studs and no seams");
+        // The slots behind the floor and the four walls.
+        for cell in [[8, 23, 4], [7, 24, 4], [10, 24, 4], [8, 24, 3], [8, 24, 6], [7, 27, 4], [10, 27, 4], [8, 27, 3], [8, 27, 6]] {
+            let (lo, hi) = game::rebrick_slot(0, cell);
+            chunk.rebrick_box(lo, hi);
+        }
+        let out = mesh_chunk(&chunk, &slabs, true);
+        assert_eq!(tris(&out.body), tris(&bare.body), "the same faces show");
+        // Stud tops only on up-facing free cells: the floor's four cells, and the top
+        // of the wall bricks where they are the ground's surface (plate 30).
+        let (floor_y, surface_y) = (plate_units(24), plate_units(30));
+        let studs: Vec<[f32; 3]> = out.top.positions.iter().zip(&out.top.colors).filter(|(_, c)| c[3] == 1.0).map(|(p, _)| *p).collect();
+        let s = STUD_UNITS as f32;
+        let on_floor = |p: &[f32; 3]| p[1] < plate_units(25);
+        assert!(studs.iter().any(on_floor), "stud tops on the floor");
+        for p in &studs {
+            if on_floor(p) {
+                assert!(p[1] >= floor_y - 0.01, "a stud under the floor: {p:?}");
+                assert!((8.0 * s..=10.0 * s).contains(&p[0]) && (4.0 * s..=6.0 * s).contains(&p[2]), "a stud under a wall: {p:?}");
+            } else {
+                assert!(p[1] >= surface_y - 0.01, "a stud inside a wall: {p:?}");
+            }
+        }
+        assert!(seam_tris(&out.top) > 0, "seam lines between the bricks");
+    }
+
     /// The face area of a box of `studs` x `plates` x `studs` cells, sim units squared.
     fn box_area([x, y, z]: [f32; 3]) -> f32 {
         let (x, y, z) = (x * STUD_UNITS as f32, plate_units(1) * y, z * STUD_UNITS as f32);

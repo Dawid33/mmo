@@ -421,6 +421,8 @@ fn dig_order_opens_the_tile_and_rolls_back() {
     let mut want = pristine.clone();
     let removed: u32 = boxes.iter().flat_map(|b| want.carve(b.lo, b.hi)).map(|(_, n)| n).sum();
     assert_eq!(removed, boxes.iter().map(|b| b.cell_count()).sum::<u32>());
+    // (what the hole exposes is real bricks)
+    common::rebrick_reference(&mut want, 0, |_| false);
     assert!(r.data().stud_chunk_at(StudChunkCoords { x: 0, y: 0, z: 0 }) == Some(&want));
     r.rollback_last_event();
     assert_eq!(hash(&r), h1, "the completed dig undone");

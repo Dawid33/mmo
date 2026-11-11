@@ -301,7 +301,13 @@ fn a_carve_at_a_chunk_face_materialises_the_neighbour() {
     assert_eq!(removed, vec![(MAT_STONE, 2 * 6 * 2)]);
     let side = StudChunkCoords { x: 1, y: -1, z: 0 };
     assert!(r.stud_chunk_at(StudChunkCoords { x: 0, y: -1, z: 0 }).is_some());
-    assert_eq!(r.stud_chunk_at(side).map(|c| c.len()), Some(1), "the exposed neighbour has its filler and collider");
+    // The exposed neighbour has its ground and collider: the pristine cells, the wall
+    // behind the hole as real bricks (`stud_rebrick`).
+    let pristine = r.stud_ground.get(&ColumnCoords::new(1, 0)).unwrap().pristine_chunk(-1).unwrap();
+    let wall = r.stud_chunk_at(side).expect("materialised");
+    assert!(wall.occupancy() == pristine.occupancy());
+    assert!(matches!(wall.brick_at([0, 52, 4]).map(|b| b.shape), Some(StudShape::Part { .. })));
+    assert!(matches!(wall.brick_at([0, 46, 4]).map(|b| b.shape), Some(StudShape::Filler { .. })));
     // Not the ones the hole does not touch.
     assert!(r.stud_chunk_at(StudChunkCoords { x: 0, y: -2, z: 0 }).is_none());
 }

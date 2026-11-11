@@ -80,6 +80,7 @@ mod stud_ground;
 mod stud_halo;
 mod stud_lod;
 mod stud_ops;
+mod stud_rebrick;
 mod stud_orders;
 mod stud_portable;
 mod stud_tiles;

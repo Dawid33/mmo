@@ -32,14 +32,15 @@ fn fresh() -> Region {
 }
 
 /// The fixture: a shaft through the layer boundary at plate 0, a trench through the
-/// chunk face between columns 0 and 1, a pocket deep against that face (it opens the
-/// pristine neighbour) and a brick in the air.
+/// chunk face between columns 0 and 1, a pocket deep against that face at the bottom of
+/// layer -1 (it re-bricks the ground across the face and under it, and opens the
+/// pristine chunk diagonally under the face) and a brick in the air.
 fn edited() -> Region {
     let mut region = fresh();
     region.with_data(|r| {
         assert!(!r.carve_stud_safe([4, -6, 4], [6, 30, 6]).is_empty(), "the shaft");
         assert!(!r.carve_stud_safe([30, 24, 10], [34, 30, 12]).is_empty(), "the trench");
-        assert!(!r.carve_stud_safe([30, -40, 4], [32, -34, 6]).is_empty(), "the pocket");
+        assert!(!r.carve_stud_safe([30, -90, 4], [32, -84, 6]).is_empty(), "the pocket");
         assert!(r.place_stud_safe(at(0, 4, 0), brick([3, 0, 3])), "the brick in the air");
     });
     region
@@ -107,13 +108,15 @@ fn stud_region_round_trips() {
             (at(0, 0, 0), true),
             (at(0, 4, 0), true),
             (at(1, 0, 0), true),
-            (at(1, -1, 0), false),
+            (at(1, -1, 0), true),
+            (at(0, -2, 0), true),
+            (at(1, -2, 0), false),
         ]),
         "true = bricks, false = a pristine marker"
     );
-    assert_eq!(original.stud_chunks[&at(1, -1, 0)], Some(StudChunkRecord::Pristine));
+    assert_eq!(original.stud_chunks[&at(1, -2, 0)], Some(StudChunkRecord::Pristine));
     assert_eq!(original.stud_ground.as_ref().map(Vec::len), Some(3), "a first snapshot carries the recipes");
-    assert_eq!(terms.studs.len(), 6, "every materialised chunk has a term");
+    assert_eq!(terms.studs.len(), 8, "every materialised chunk has a term");
     assert_eq!(terms.studs[&at(0, 0, 1)].kept, StudKept::Derived);
 
     let (restored_region, restored_terms) = restore_portable(RegionCoords::new(0, 0), StoredRegion::from(original.clone()));
@@ -180,8 +183,9 @@ fn unedited_chunk_leaves_the_stored_set() {
     assert!(StoredRegion::from(merged).stud_chunks.is_empty());
 
     // Under the surface layers: materialised by a carve next door, then edited and restored.
-    let deep = at(1, -1, 0);
-    region.with_data(|r| assert!(!r.carve_stud_safe([30, -40, 4], [32, -34, 6]).is_empty()));
+    // (The chunk diagonally under the hole: no face of it shows, so it stays pristine.)
+    let deep = at(1, -2, 0);
+    region.with_data(|r| assert!(!r.carve_stud_safe([30, -90, 4], [32, -84, 6]).is_empty()));
     let (opened, terms) = snapshot(&region, &terms);
     assert_eq!(opened.stud_chunks.get(&deep), Some(&Some(StudChunkRecord::Pristine)));
     let pristine = region.data().stud_chunk_at(deep).unwrap().clone();

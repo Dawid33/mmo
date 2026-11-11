@@ -324,6 +324,72 @@ fn a_carve_past_the_edge_is_an_intent_to_the_owner() {
     assert!(west_region.data().queued_replies().is_empty());
 }
 
+/// The re-brick rule (`game::stud_rebrick`) by brute force over one chunk of `layer`:
+/// every filler cell with an open face neighbour — inside by occupancy, outside the
+/// chunk by `outside_open` — has its slot turned into bricks.
+fn rebrick_from_outside(chunk: &mut StudChunk, layer: i32, outside_open: impl Fn([i32; 3]) -> bool) {
+    let (n, h) = (CW, STUD_CHUNK_PLATES as i32);
+    let occ = chunk.occupancy();
+    let mut slots = std::collections::BTreeSet::new();
+    for b in chunk.bricks().filter(|b| matches!(b.shape, StudShape::Filler { .. })).copied().collect::<Vec<_>>() {
+        for cell in b.cells() {
+            let c = cell.map(i32::from);
+            let open = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]].iter().any(|d| {
+                let q = [c[0] + d[0], c[1] + d[1], c[2] + d[2]];
+                if (0..n).contains(&q[0]) && (0..h).contains(&q[1]) && (0..n).contains(&q[2]) { !occ.get(q) } else { outside_open(q) }
+            });
+            if open {
+                slots.insert(rebrick_slot(layer, cell));
+            }
+        }
+    }
+    for (lo, hi) in slots {
+        chunk.rebrick_box(lo, hi);
+    }
+}
+
+/// A hole dug against the seam exposes the neighbour's ground: the neighbour turns
+/// the slots behind the open cells into real bricks when the hole reaches its halo —
+/// the bricks one region would have laid — and the bricks come back as a halo delta.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn a_hole_against_the_seam_re_bricks_the_neighbours_ground() {
+    let mut east_region = region(east());
+    let mut west_region = region(west());
+    seed(&east_region, &mut west_region, west());
+    seed(&west_region, &mut east_region, east());
+    let edge = N * CW;
+    // Deep in the filler: two studs against the seam, plates 6..12, z 40..42.
+    let (lo, hi) = ([edge - 2, 6, 40], [edge, 12, 42]);
+    apply_checked(&mut west_region, GameEventKind::Order(0, Order::CarveStud { lo, hi }), "the dig");
+    let is_part = |r: &Region, cell: [i32; 3]| {
+        let c = at(cell[0] / CW, 0, cell[2] / CW);
+        let local = [(cell[0] % CW) as u8, cell[1] as u8, (cell[2] % CW) as u8];
+        r.data().stud_chunk_or_pristine(c).and_then(|ch| ch.brick_at(local).map(|b| matches!(b.shape, StudShape::Part { .. })))
+    };
+    assert_eq!(is_part(&west_region, [edge - 3, 8, 40]), Some(true), "the digger's own wall");
+    assert_eq!(is_part(&east_region, [0, 8, 40]), Some(false), "the neighbour's ground is filler until it hears");
+    let (updates, _) = deliver(&mut west_region, &mut east_region, east());
+    assert_eq!(updates, 1);
+    for y in 6..12 {
+        for z in 40..42 {
+            assert_eq!(is_part(&east_region, [0, y, z]), Some(true), "east wall cell {y},{z}");
+        }
+    }
+    // Exactly the bricks of one region: the pristine chunk under the rule, the hole
+    // past its west face open.
+    let mut want = flat().pristine_chunk(0).unwrap();
+    rebrick_from_outside(&mut want, 0, |q| q[0] == -1 && (6..12).contains(&q[1]) && (8..10).contains(&q[2]));
+    assert!(want != flat().pristine_chunk(0).unwrap());
+    assert!(east_region.data().stud_chunk_at(at(0, 0, 1)) == Some(&want), "the neighbour's bricks are one region's");
+    // The re-bricked chunk travels back; both halos agree with their owners.
+    let (updates, _) = deliver(&mut east_region, &mut west_region, west());
+    assert_eq!(updates, 1);
+    deliver(&mut west_region, &mut east_region, east());
+    assert_halo_agrees(&west_region, west(), &east_region, east());
+    assert_halo_agrees(&east_region, east(), &west_region, west());
+}
+
 #[test]
 fn a_carve_wholly_in_the_neighbour_and_one_that_removes_nothing() {
     let mut east_region = region(east());
@@ -365,7 +431,11 @@ fn a_dig_at_the_seam_materialises_the_ground_behind_it() {
     let (updates, _) = deliver(&mut east_region, &mut west_region, west());
     assert_eq!(updates, 1);
     let opened = west_region.data().stud_chunk_at(at(N - 1, -1, 0)).expect("materialised behind the neighbour's hole");
-    assert_eq!(Some(opened), flat().pristine_chunk(-1).as_ref());
+    // Its wall behind the hole is real bricks, as one region would have laid them.
+    let mut want = flat().pristine_chunk(-1).unwrap();
+    let h = STUD_CHUNK_PLATES as i32;
+    rebrick_from_outside(&mut want, -1, |q| q[0] == CW && (h - 40..h - 34).contains(&q[1]) && (4..6).contains(&q[2]));
+    assert!(opened == &want);
     // And that chunk goes back as the west's own delta, so both halos are whole.
     deliver(&mut west_region, &mut east_region, east());
     assert_halo_agrees(&west_region, west(), &east_region, east());

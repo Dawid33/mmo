@@ -50,6 +50,10 @@ use slotmapd::Key as _;
 // Before: scene 0x3F2D_FC5B / 0x8704_493E, underground 0x1CAA_BA0A /
 // 0x3C72_DB95, stud body 0x6502_0AE7 / 0xC78F_A508. They move again
 // whenever that layout does.
+// Re-recorded 2026-11-11 (re-brick on exposure, `game::stud_rebrick`): the
+// UNDERGROUND pair only — its scene digs, and the ground a dig exposes is
+// now real bricks (other bricks, stud caps in the colliders). Before:
+// 0x3A4E_50AC / 0x2241_D662. The other scenes dig nothing and did not move.
 /// crc32 of the scene region's bincode bytes after [`SCENE_TICKS`] ticks,
 /// on every target.
 const WASM_SCENE_DIGEST: u32 = 0x5BCB_AA41;
@@ -57,9 +61,9 @@ const WASM_SCENE_DIGEST: u32 = 0x5BCB_AA41;
 const SCENE_STATE_HASH: u32 = 0xE5F7_54F5;
 const SCENE_TICKS: usize = 120;
 /// crc32 of [`underground_scene`]'s region bytes, on every target.
-const UNDERGROUND_DIGEST: u32 = 0x3A4E_50AC;
+const UNDERGROUND_DIGEST: u32 = 0xF908_B67A;
 /// `game::state_hash` of the same state, on every target.
-const UNDERGROUND_STATE_HASH: u32 = 0x2241_D662;
+const UNDERGROUND_STATE_HASH: u32 = 0x802D_8C79;
 
 /// crc32 of [`stud_body_scene`]'s region bytes, on every target.
 const STUD_BODY_DIGEST: u32 = 0x9F93_B77D;

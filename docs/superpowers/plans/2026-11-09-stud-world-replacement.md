@@ -980,6 +980,43 @@ D1–D5 accepted as recommended ("make it so", 2026-11-09).
     `block_target` green except `block_target::stages_grow_the_same_cracks` (crack texture, untouched
     code, failing before this change).
 
+- **Re-brick on exposure (2026-11-11; nothing launched).** A dug hole no longer shows smooth filler:
+  `game/src/stud_rebrick.rs`.
+  - **Rule**: after a stud write, every own diggable filler cell that touches an open cell of the
+    written box across a face has its *slot* turned into catalog bricks. A slot is one brick of the
+    surface's running bond over a full layer (`rebrick_slot`: 2 studs wide, up to 8 long, one course
+    tall, along x on even world courses and z on odd ones, odd strips shifted by 4, cut at chunk
+    edges — pinned against `pristine_chunk`'s top course), so the shell is always one whole brick
+    deep and no deeper. Inside a slot the bricks are a function of its filler cells and their
+    material / `data` only (`StudChunk::rebrick_box`: sweep, grow a box, `fill_box`). Bedrock stays
+    filler. Occupancy, materials and tags do not change; up-facing free cells gain stud caps in the
+    collider, as on the surface (patched in place, equal to a fresh build).
+  - **Where**: `carve_stud_boxes_safe` (dig orders, `BreakStud`, `CarveStud`, `BreakBlock`) and
+    `remove_stud_safe` plan it into the same per-chunk write (`plan_stud_rebrick` over the working
+    copies; implied chunks are materialised); open cells past the edge are read from the halo, and
+    unknown is not open. Across a seam the owner re-bricks when the hole arrives as the neighbour's
+    edited halo chunk (`apply_stud_halo_update_safe`, after `materialize_behind_stud_halo_safe`) —
+    the bricks one region would have laid, one halo round later; the re-bricked chunk goes back as
+    an ordinary delta.
+  - **Purity**: real bricks do not depend on the order of digging or on how fillers were cut up
+    before, as long as every carve takes whole bricks of an already re-bricked slot (what targeting
+    and orders give) or cuts a slot while it is still filler. A box that cuts THROUGH a real brick
+    re-splits the rest by `carve`'s `fill_box`, as for surface bricks. Hidden filler fragments stay
+    history-dependent (never visible).
+  - **Cost** (64 m region, flat test ground, dug tile by tile): one tile +10 bricks / +26 filler
+    fragments / +1.8 kB join snapshot; a 10 x 10 x 3-tile room +216 / +129 / +6.2 kB (2 chunks); a
+    32-tile corridor +126 / +171 / +3.4 kB (3 chunks).
+  - **Not done**: natural cliffs / overhang walls at genesis stay filler (the pristine chunk is
+    assumed to be a function of the recipe by the halo seeds, the store's pristine markers and the
+    client's `ClientBricks`; a neighbour-aware genesis re-brick would turn every cliff chunk into an
+    edited one) — a filler face there still targets as the 2 x 2 lattice; a tree felled or a stud
+    body detached does not re-brick (they stand on surface bricks); a non-box part that a carve
+    removes whole exposes only what lies against the carve box.
+  - Golden: `wasm_determinism` UNDERGROUND pair re-recorded (its scene digs); the others and
+    `physics_goldens` did not move. Gates: game `it` 848 with the slow ones, `test-threads`,
+    `determinism-wasm`, server / world-store `it`, `smoke`, `web-check`, client
+    `a_re_bricked_hole_shows_studs_and_seams`.
+
 ## Decisions (confirmed 2026-11-09)
 
 | # | Decision | Recommendation | Alternative |

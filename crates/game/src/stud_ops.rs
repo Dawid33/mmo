@@ -370,8 +370,12 @@ impl Rollback {
         let Some(removed) = chunk.remove_at(cell) else {
             return false;
         };
-        self.set_stud_chunk_safe(key, chunk);
         let (lo, hi) = stud_brick_box(c, &removed);
+        // One write per chunk: the removal and the re-brick of what it exposes.
+        let mut work = crate::stud_rebrick::StudWork::new();
+        work.insert(c, Some((chunk, true)));
+        self.plan_stud_rebrick(&mut work, &[(lo.map(i64::from), hi.map(i64::from))]);
+        self.write_stud_work_safe(work);
         let _destroyed = self.stud_containers_after_write_safe(lo, hi);
         let _destroyed = self.stud_piles_after_write_safe(lo, hi);
         true
@@ -417,7 +421,7 @@ impl Rollback {
         };
         // Plan first (materialised chunks, or the pristine ones the recipe implies), so
         // a carve that removes nothing touches no state. `None`: nothing at that chunk.
-        let mut work: BTreeMap<StudChunkCoords, Option<(StudChunk, bool)>> = BTreeMap::new();
+        let mut work: crate::stud_rebrick::StudWork = BTreeMap::new();
         let mut totals = Vec::with_capacity(boxes.len());
         // Chunks within one cell of a box that removed something.
         let mut opened: BTreeSet<StudChunkCoords> = BTreeSet::new();
@@ -456,15 +460,11 @@ impl Rollback {
             }
             totals.push(total.into_iter().collect());
         }
-        for (c, slot) in work {
-            let Some((chunk, true)) = slot else { continue };
-            match self.stud_key_at(c) {
-                Some(key) => self.set_stud_chunk_safe(key, chunk),
-                None => {
-                    self.create_stud_chunk_safe(c, chunk);
-                }
-            }
-        }
+        // The ground the holes expose becomes real bricks (`stud_rebrick`), in the
+        // same chunk writes.
+        let holes: Vec<([i64; 3], [i64; 3])> = written.iter().map(|(lo, hi)| (lo.map(i64::from), hi.map(i64::from))).collect();
+        self.plan_stud_rebrick(&mut work, &holes);
+        self.write_stud_work_safe(work);
         // Give the opened chunks their bricks and colliders.
         for c in opened {
             if self.stud_key_at(c).is_some() {

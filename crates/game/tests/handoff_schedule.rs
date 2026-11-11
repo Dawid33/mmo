@@ -1712,6 +1712,10 @@ fn stud_seam_scenario(schedule: Option<InlineSchedule>) -> Vec<(RegionCoords, u6
         let mut chunk = stud_flat().pristine_chunk(0).unwrap();
         let removed: u32 = chunk.carve(lo, hi).iter().map(|&(_, cells)| cells).sum();
         assert_eq!(removed, 4 * 6 * 4);
+        // The ground the hole exposes is real bricks (`stud_rebrick`), the other
+        // region's half of the hole counting as open: as if it were one region.
+        let other = |q: [i32; 3]| (q[2] == -1 || q[2] == cw) && (lo[0] as i32..hi[0] as i32).contains(&q[0]) && (lo[1] as i32..hi[1] as i32).contains(&q[1]);
+        common::rebrick_reference(&mut chunk, 0, other);
         chunk
     };
     let (lx, top) = (8u8, STUD_TOP as u8);
