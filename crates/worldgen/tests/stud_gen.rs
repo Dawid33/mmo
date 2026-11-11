@@ -53,6 +53,75 @@ fn surfaces_are_continuous_across_chunk_and_region_edges() {
     assert!(worst <= 2 * PLATES_PER_M, "worst step across an edge: {worst} plates");
 }
 
+/// A recipe's apron is the edge of the chunk column across each side face — inside the
+/// region and across a region seam, whichever region generates it — so both sides of
+/// a face derive the same exposure with no neighbour at hand.
+#[test]
+fn aprons_are_the_neighbours_edges() {
+    use game::StudSide;
+    let (a, east, south) = (region(0, 0), region(1, 0), region(0, 1));
+    let last = REGION_CHUNKS - 1;
+    let check = |g: &StudColumnGround, side: StudSide, n: &StudColumnGround, what: &str| {
+        let edge = n.edge_surfaces(side.opposite());
+        for i in 0..N {
+            assert_eq!(g.apron(side, i), edge[i], "{what}: {side:?} apron at {i}");
+        }
+    };
+    for cx in 0..REGION_CHUNKS {
+        for cz in 0..REGION_CHUNKS {
+            let g = column(&a, cx, cz);
+            if cx > 0 {
+                check(g, StudSide::West, column(&a, cx - 1, cz), "inside");
+            }
+            if cz > 0 {
+                check(g, StudSide::North, column(&a, cx, cz - 1), "inside");
+            }
+            if cx < last {
+                check(g, StudSide::East, column(&a, cx + 1, cz), "inside");
+            } else {
+                check(g, StudSide::East, column(&east, 0, cz), "east seam");
+                check(column(&east, 0, cz), StudSide::West, g, "east seam, from the far side");
+            }
+            if cz < last {
+                check(g, StudSide::South, column(&a, cx, cz + 1), "inside");
+            } else {
+                check(g, StudSide::South, column(&south, cx, 0), "south seam");
+                check(column(&south, cx, 0), StudSide::North, g, "south seam, from the far side");
+            }
+        }
+    }
+}
+
+/// What the exposure-aware pristine chunks cost on rolling procedural ground: bricks
+/// of a region's genesis chunks and the time to derive them, with the apron and
+/// with it closed (the bricks before cliffs were laid).
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn census_of_cliff_bricks_on_procedural_ground() {
+    let ground = region(0, 0);
+    let closed: Vec<_> = ground
+        .iter()
+        .map(|(c, g)| (*c, g.clone().with_apron(vec![game::STUD_APRON_CLOSED; game::STUD_APRON_LEN].into()).unwrap()))
+        .collect();
+    let ground_layers = ground.clone();
+    let count = |ground: &[(game::ColumnCoords, StudColumnGround)]| {
+        let t = std::time::Instant::now();
+        let (mut bricks, mut chunks) = (0usize, 0usize);
+        for ((_, g), (_, orig)) in ground.iter().zip(&ground_layers) {
+            for y in orig.genesis_layers() {
+                if let Some(chunk) = g.pristine_chunk(y) {
+                    bricks += chunk.len();
+                    chunks += 1;
+                }
+            }
+        }
+        (bricks, chunks, t.elapsed().as_millis())
+    };
+    let (before, after) = (count(&closed), count(&ground));
+    println!("procedural region (0, 0): closed apron {before:?}, with apron {after:?} (bricks, chunks, ms)");
+    assert!(after.0 >= before.0 && after.0 < before.0 * 2);
+}
+
 #[test]
 fn ground_has_cover_soil_rock_and_sea() {
     let sea = (64 * PLATES_PER_M, "sea surface plate (SEA_LEVEL 64 m)");

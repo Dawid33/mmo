@@ -1006,16 +1006,53 @@ D1–D5 accepted as recommended ("make it so", 2026-11-09).
   - **Cost** (64 m region, flat test ground, dug tile by tile): one tile +10 bricks / +26 filler
     fragments / +1.8 kB join snapshot; a 10 x 10 x 3-tile room +216 / +129 / +6.2 kB (2 chunks); a
     32-tile corridor +126 / +171 / +3.4 kB (3 chunks).
-  - **Not done**: natural cliffs / overhang walls at genesis stay filler (the pristine chunk is
-    assumed to be a function of the recipe by the halo seeds, the store's pristine markers and the
-    client's `ClientBricks`; a neighbour-aware genesis re-brick would turn every cliff chunk into an
-    edited one) — a filler face there still targets as the 2 x 2 lattice; a tree felled or a stud
-    body detached does not re-brick (they stand on surface bricks); a non-box part that a carve
-    removes whole exposes only what lies against the carve box.
+  - **Not done**: a tree felled or a stud body detached does not re-brick (they stand on surface
+    bricks); a non-box part that a carve removes whole exposes only what lies against the carve
+    box; filler fragments of a much-dug chunk are never merged back.
   - Golden: `wasm_determinism` UNDERGROUND pair re-recorded (its scene digs); the others and
     `physics_goldens` did not move. Gates: game `it` 848 with the slow ones, `test-threads`,
     `determinism-wasm`, server / world-store `it`, `smoke`, `web-check`, client
     `a_re_bricked_hole_shows_studs_and_seams`.
+
+- **Natural cliffs are pristine bricks (2026-11-11; nothing launched).** The pristine chunk is
+  exposure-aware, so a cliff chunk is still pristine (never stored, never sent).
+  - **Apron**: `StudColumnGround::apron` — the `surface` of the 4 x 32 stud columns just outside
+    the chunk column's side faces (`StudSide::ALL` order), sampled by worldgen with the recipe
+    (`stud_gen::recipes_and_ice`, `stud_world::region_seed`): a pure function of world coordinates,
+    the same numbers on both sides of a face inside a region and across a seam, in a whole region
+    and in a halo window (`stud_gen::aprons_are_the_neighbours_edges`). It travels with the recipe
+    everywhere (genesis seed, store row, join snapshot, halo recipes, client mirror), so nothing
+    about a pristine chunk depends on a neighbour being loaded or on arrival order.
+    `STUD_APRON_CLOSED` = nothing open (hand-made recipes; `link_stud_aprons` fills a set of
+    columns from each other).
+  - **`pristine_chunk`** lays its chunk as before, then turns the slot (`rebrick_slot`) behind every
+    filler cell of an edge column that stands over its apron into bricks (`rebrick_box`) — exactly
+    the dig rule (pinned: `stud_rebrick::a_cliff_at_a_chunk_face_is_the_dug_wall`), so digging
+    beside a cliff converts nothing that is real already. Inside a chunk a face was always bricks
+    (the hidden fill stops a shell under the lowest neighbour). No exposure, no extra work (one
+    128-entry scan).
+  - **`genesis_layers`** (surface layers + the layers a lower apron opens onto) replaces
+    `stud_wall_layers` / `wall_layers` / `edge_low` and the wall materialisation on a halo seed's
+    arrival (`apply_stud_halo_update_safe`): a region starts with its seam walls, a halo derives its
+    neighbour's walls from the recipes alone (`StudEdge::from_seed` lists none), and the store keeps
+    them as `Derived` (no row at all, where a wall layer was a `Pristine` marker).
+  - **Formats**: world-store `FORMAT_STUD_GROUND` 2 (fixture re-recorded; `stud_ground_v1.bin`
+    kept). A format 1 row reads through `decode_stud_ground`: aprons from the neighbouring columns
+    of the same region, closed along the region's edge — an existing world gets brick cliffs inside
+    its regions (on chunks that are derived or `Pristine` markers; `Edited` rows keep their bricks),
+    its seam cliffs stay smooth filler, and the wall layers it materialised earlier come back from
+    their `Pristine` markers. The row is written once per region, so it is read this way every
+    time; re-forge for seam cliffs. Wire and state hash moved with the recipe layout (no handshake,
+    as before).
+  - **Cost**: procedural 64 m region (34 genesis chunks) 46,424 bricks, forged 100 m-step cliff
+    region (49 chunks) 28,894 bricks — both unchanged and no slower (no stud-to-stud step there
+    reaches under a filler: the "cliff" is a steep ramp at stud scale); flat unchanged. A SHEER
+    two-layer plateau column (both faces open): 1 -> 591 / 885 bricks per wall layer (181 / 270 of
+    them filler fragments), 151 -> 386 in the top layer, 2–6 ms per derivation (test profile);
+    its region's join snapshot 5.4 kB against 3.8 kB flat (the walls ride as pristine).
+  - Goldens (layout: the recipe is hashed and serialized): `wasm_determinism` scene, underground
+    and stud-body pairs, worldgen `scene_hash_golden`, `STUD_TERRAIN_GUARD_CRC`, world-store
+    `stud_ground.bin`. `physics_goldens` did not move.
 
 ## Decisions (confirmed 2026-11-09)
 

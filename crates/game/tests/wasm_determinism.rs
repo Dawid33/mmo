@@ -54,21 +54,27 @@ use slotmapd::Key as _;
 // UNDERGROUND pair only — its scene digs, and the ground a dig exposes is
 // now real bricks (other bricks, stud caps in the colliders). Before:
 // 0x3A4E_50AC / 0x2241_D662. The other scenes dig nothing and did not move.
+// Re-recorded 2026-11-11 (natural cliffs as pristine bricks): the recipe
+// (`StudColumnGround`, hashed and serialized in `GameData.stud_ground`) gained
+// its `apron` field — a layout move for all three scene pairs (these scenes'
+// hand-made recipes have a closed apron, so no brick changed; `physics_goldens`
+// did not move). Before: scene 0x5BCB_AA41 / 0xE5F7_54F5, underground
+// 0xF908_B67A / 0x802D_8C79, stud body 0x9F93_B77D / 0xD498_D06F.
 /// crc32 of the scene region's bincode bytes after [`SCENE_TICKS`] ticks,
 /// on every target.
-const WASM_SCENE_DIGEST: u32 = 0x5BCB_AA41;
+const WASM_SCENE_DIGEST: u32 = 0x55DE_C516;
 /// `game::state_hash` of the same state, on every target.
-const SCENE_STATE_HASH: u32 = 0xE5F7_54F5;
+const SCENE_STATE_HASH: u32 = 0xEA4C_C8F9;
 const SCENE_TICKS: usize = 120;
 /// crc32 of [`underground_scene`]'s region bytes, on every target.
-const UNDERGROUND_DIGEST: u32 = 0xF908_B67A;
+const UNDERGROUND_DIGEST: u32 = 0xBFCD_2C74;
 /// `game::state_hash` of the same state, on every target.
-const UNDERGROUND_STATE_HASH: u32 = 0x802D_8C79;
+const UNDERGROUND_STATE_HASH: u32 = 0x360F_E7CE;
 
 /// crc32 of [`stud_body_scene`]'s region bytes, on every target.
-const STUD_BODY_DIGEST: u32 = 0x9F93_B77D;
+const STUD_BODY_DIGEST: u32 = 0x2E60_B044;
 /// `game::state_hash` of the same state, on every target.
-const STUD_BODY_STATE_HASH: u32 = 0xD498_D06F;
+const STUD_BODY_STATE_HASH: u32 = 0xF132_A0D3;
 /// Ticks of [`stud_body_scene`] after the detach: it has landed and tumbles.
 const STUD_BODY_TICKS: usize = 30;
 

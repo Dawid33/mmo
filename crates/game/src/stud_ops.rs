@@ -165,10 +165,9 @@ impl Rollback {
     }
 
     /// Genesis from stud ground recipes: stores them raw and seeds the pristine chunk
-    /// of every surface layer of every chunk column, and of every layer under those
-    /// that a lower column beside it opens onto (`stud_wall_layers`: a cliff between
-    /// two chunk columns has bricks and a collider all the way down). Chunks below
-    /// stay implied by the recipe until a carve reaches them.
+    /// of every genesis layer of every chunk column (`StudColumnGround::genesis_layers`:
+    /// the surface layers and the cliff walls under them). Chunks below stay implied
+    /// by the recipe until a carve reaches them.
     ///
     /// `overrides` replace (or add to) those chunks: content that is not a function of
     /// the recipe, such as a pristine chunk with feature bricks merged in.
@@ -178,12 +177,8 @@ impl Rollback {
         mut overrides: std::collections::BTreeMap<StudChunkCoords, StudChunk>,
     ) {
         let mut chunks = Vec::new();
-        let walls: Vec<std::collections::BTreeSet<i32>> = {
-            let recipes: std::collections::BTreeMap<crate::ColumnCoords, &StudColumnGround> = ground.iter().map(|(c, g)| (*c, g)).collect();
-            ground.iter().map(|(c, _)| crate::stud_ground::stud_wall_layers(&recipes, *c)).collect()
-        };
-        for ((col, g), walls) in ground.into_iter().zip(walls) {
-            for y in walls.into_iter().chain(g.surface_layers()) {
+        for (col, g) in ground {
+            for y in g.genesis_layers() {
                 let c = StudChunkCoords { x: col.x, y, z: col.z };
                 if let Some(chunk) = overrides.remove(&c).or_else(|| g.pristine_chunk(y)) {
                     chunks.push((c, chunk));

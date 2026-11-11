@@ -296,3 +296,53 @@ fn census_of_bricks_added() {
     assert!(real < 600 && filler < 2000, "{real} {filler}");
     run("32-tile corridor", [0, 6, 40], [64, 12, 42]);
 }
+
+// --- Natural cliffs: the pristine chunk is exposure-aware -------------------------
+
+/// A step between two stud columns INSIDE a chunk column: the face is real bricks
+/// (the surface's own courses reach down every face inside a chunk).
+#[test]
+fn a_cliff_inside_a_chunk_is_bricks() {
+    let g = common::stud_ground(|x, _| if x < 16 { 12 } else { 80 });
+    let chunk = g.pristine_chunk(0).unwrap();
+    for z in 0..CW as u8 {
+        for y in 12..80 {
+            let b = chunk.brick_at([16, y, z]).expect("solid");
+            assert!(is_part(b), "the face at plate {y}, z {z} is {b:?}");
+        }
+    }
+}
+
+/// A cliff at a chunk column's side face, known from the recipe's apron: the pristine
+/// chunk is exactly the closed one with the dig rule applied to the open face — a
+/// natural wall and a dug one are the same bricks — and it stays a function of the
+/// recipe (the same chunk however often and wherever it is derived).
+#[test]
+fn a_cliff_at_a_chunk_face_is_the_dug_wall() {
+    let closed = common::stud_flat(2 * CH + 30);
+    let mut open = closed.clone();
+    // West: a plain at plate 30. North: a ragged slope from plate 100 down to 40.
+    open.set_apron_side(StudSide::West, &[30; STUD_CHUNK_STUDS]);
+    let north: Vec<i32> = (0..CW).map(|x| 100 - 2 * x + (x % 3)).collect();
+    open.set_apron_side(StudSide::North, &north);
+    assert_eq!(closed.genesis_layers(), 2..=2);
+    assert_eq!(open.genesis_layers(), 0..=2, "the wall's layers are genesis layers");
+    for layer in 0..=2 {
+        let base = layer * CH;
+        let mut want = closed.pristine_chunk(layer).unwrap();
+        common::rebrick_reference(&mut want, layer, |q| {
+            let plate = base + q[1];
+            (q[0] == -1 && (0..CW).contains(&q[2]) && plate >= 30) || (q[2] == -1 && (0..CW).contains(&q[0]) && plate >= north[q[0] as usize])
+        });
+        let have = open.pristine_chunk(layer).unwrap();
+        assert!(have == want, "layer {layer}: the cliff is the dug wall");
+        assert!(have == open.clone().pristine_chunk(layer).unwrap());
+        assert!(have.occupancy() == closed.pristine_chunk(layer).unwrap().occupancy());
+        if layer < 2 {
+            assert!(have != closed.pristine_chunk(layer).unwrap());
+            for (cell, part) in [([0u8, 45, 9], base + 45 >= 30), ([16, 45, 16], false)] {
+                assert_eq!(is_part(have.brick_at(cell).unwrap()), part, "layer {layer} cell {cell:?}");
+            }
+        }
+    }
+}

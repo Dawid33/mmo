@@ -58,7 +58,7 @@ pub fn rebrick_slot(layer: i32, cell: [u8; 3]) -> ([u8; 3], [u8; 3]) {
     if along_x { ([l0, y0, r0], [l1, y1, r1]) } else { ([r0, y0, l0], [r1, y1, l1]) }
 }
 
-fn diggable(material: u16) -> bool {
+pub(crate) fn diggable(material: u16) -> bool {
     stud_material(material).is_some_and(|m| m.hardness != u16::MAX)
 }
 

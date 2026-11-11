@@ -981,11 +981,38 @@ fn cliffs_are_closed_at_genesis_on_a_forged_cliff_region() {
                             .is_some(),
                         "a hole in the cliff: stud column ({hx}, {hz}) at plate {plate} has no brick (face {low}..{high})"
                     );
+                    // …and a real brick: a natural face is laid like a dug one.
+                    let layer = game::stud_layer_of(plate);
+                    let chunk = d.stud_chunk_at(game::StudChunkCoords { x: hx as usize / CS, y: layer, z: hz as usize / CS }).unwrap();
+                    let local = [(hx as usize % CS) as u8, (plate - layer * game::STUD_CHUNK_PLATES as i32) as u8, (hz as usize % CS) as u8];
+                    let brick = chunk.brick_at(local).unwrap();
+                    assert!(
+                        matches!(brick.shape, game::StudShape::Part { .. }),
+                        "smooth filler in the cliff: stud column ({hx}, {hz}) at plate {plate} is {brick:?}"
+                    );
                 }
             }
         }
     }
     println!("cliff region: {steps} steps between stud columns, {faces} exposed face cells, {} chunks", d.stud_index.len());
+    // The cost: bricks and derivation time with the apron and with it closed.
+    let count = |closed: bool| {
+        let t = std::time::Instant::now();
+        let (mut bricks, mut fillers) = (0usize, 0usize);
+        for (_, orig) in &seed.ground {
+            let g = if closed { orig.clone().with_apron(vec![game::STUD_APRON_CLOSED; game::STUD_APRON_LEN].into()).unwrap() } else { orig.clone() };
+            for y in orig.genesis_layers() {
+                if let Some(chunk) = g.pristine_chunk(y) {
+                    bricks += chunk.len();
+                    fillers += chunk.bricks().filter(|b| matches!(b.shape, game::StudShape::Filler { .. })).count();
+                }
+            }
+        }
+        (bricks, fillers, t.elapsed().as_millis())
+    };
+    println!("cliff region bricks (all, fillers, ms): closed apron {:?}, with apron {:?}", count(true), count(false));
+    let wire = game::encode_packet(&game::ServerPacket::Region(rc, d.clone())).unwrap().len();
+    println!("cliff region join snapshot: {wire} bytes");
     assert!(faces > 10_000);
 }
 
@@ -1004,7 +1031,11 @@ const SAMPLERS_GUARD_CRC: u32 = 0xDC18_3DE2;
 /// items pass): covers, snow, glaciers and trees are decided on the plate-level water
 /// test (a column under 1–2 plates of water is under water), and cold lakes and seas
 /// carry ice bricks (far terrain: ice). Before: `0x8FAA_FF6B` (2026-11-10, P10b).
-const STUD_TERRAIN_GUARD_CRC: u32 = 0x1023_FE6C;
+/// Re-recorded 2026-11-11 (natural cliffs as pristine bricks): the recipes carry
+/// their apron (the surfaces one stud past each chunk column's side faces), which
+/// is in the bytes hashed here; surfaces, features and far terrain are as they
+/// were. Before: `0x1023_FE6C`.
+const STUD_TERRAIN_GUARD_CRC: u32 = 0x5342_250D;
 
 /// Every public sampler of a real forged world (4,096 m / 16 m, seed 4) on a
 /// 7 m grid over the map and 200 m past it, then five whole regions and one

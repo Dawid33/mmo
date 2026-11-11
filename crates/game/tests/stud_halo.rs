@@ -828,7 +828,40 @@ fn seed_of(top: impl Fn(usize, usize) -> i32) -> StudRegionSeed {
         .flat_map(|x| (0..REGION_CHUNKS).map(move |z| (x, z)))
         .map(|(x, z)| (ColumnCoords::new(x, z), StudColumnGround::flat(top(x, z), SOIL, MAT_STONE, -2000)))
         .collect();
-    StudRegionSeed { ground, features: Vec::new() }
+    let mut seed = StudRegionSeed { ground, features: Vec::new() };
+    // Hand-made ground: the aprons a generator samples are the neighbours' edges.
+    link_stud_aprons(&mut seed.ground);
+    seed
+}
+
+/// `seed` with the apron of its edge columns on `side` set to a neighbour region whose
+/// ground stands at `top` there.
+fn facing(mut seed: StudRegionSeed, side: StudSide, top: i32) -> StudRegionSeed {
+    let last = REGION_CHUNKS - 1;
+    for (c, g) in seed.ground.iter_mut() {
+        let on_edge = match side {
+            StudSide::West => c.x == 0,
+            StudSide::East => c.x == last,
+            StudSide::North => c.z == 0,
+            StudSide::South => c.z == last,
+        };
+        if on_edge {
+            g.set_apron_side(side, &[top; STUD_CHUNK_STUDS]);
+        }
+    }
+    seed
+}
+
+/// Every cell of the face `x` (region studs) of plates `plates` is a real brick.
+fn assert_brick_face(d: &Rollback, x: i32, plates: std::ops::Range<i32>) {
+    for z in (0..N * CW).step_by(5) {
+        for plate in plates.clone() {
+            let c = at(x / CW, plate.div_euclid(STUD_CHUNK_PLATES as i32), z / CW);
+            let local = [(x % CW) as u8, plate.rem_euclid(STUD_CHUNK_PLATES as i32) as u8, (z % CW) as u8];
+            let brick = d.stud_chunk_at(c).and_then(|ch| ch.brick_at(local)).unwrap_or_else(|| panic!("no brick at {x},{plate},{z}"));
+            assert!(matches!(brick.shape, StudShape::Part { .. }), "the cliff face at {x},{plate},{z} is {brick:?}");
+        }
+    }
 }
 
 fn region_with(rc: RegionCoords, seed: StudRegionSeed) -> Region {
@@ -860,34 +893,105 @@ fn a_cliff_inside_a_region_is_closed_at_genesis() {
         }
         assert!(d.stud_chunk_at(at(1, -1, z)).is_none(), "nothing under the plain's level");
     }
+    // Both faces of the plateau are real bricks from the plain's top up, and what is
+    // behind them is still filler.
+    assert_brick_face(d, CW, TOP..HIGH);
+    assert_brick_face(d, 2 * CW - 1, TOP..HIGH);
+    let core = d.stud_chunk_at(at(1, 1, 0)).unwrap().brick_at([16, 40, 16]).unwrap();
+    assert!(matches!(core.shape, StudShape::Filler { .. }));
+    // A dig beside the cliff leaves its bricks as they are.
+    let wall: Vec<StudBrick> = d.stud_chunk_at(at(1, 0, 0)).unwrap().bricks().filter(|b| matches!(b.shape, StudShape::Part { .. })).copied().collect();
+    let mut dug = region_with(west(), seed_of(|x, _| if x == 1 { HIGH } else { TOP }));
+    dug.with_data(|r| assert!(!r.carve_stud_safe([CW - 2, TOP - 6, 8], [CW, TOP, 10]).is_empty()));
+    let after = dug.data().stud_chunk_at(at(1, 0, 0)).unwrap();
+    for b in &wall {
+        assert_eq!(after.brick_at(b.min), Some(b), "a cliff brick moved");
+    }
+    // The cost of a sheer two-layer cliff on both faces of a chunk column, per layer.
+    let g = &d.stud_ground_recipes()[&ColumnCoords::new(1, 0)];
+    let closed = g.clone().with_apron(vec![STUD_APRON_CLOSED; STUD_APRON_LEN].into()).unwrap();
+    for y in 0..=2 {
+        let count = |c: &StudChunk| (c.len(), c.bricks().filter(|b| matches!(b.shape, StudShape::Filler { .. })).count());
+        let t = std::time::Instant::now();
+        let open = g.pristine_chunk(y).unwrap();
+        let ms = t.elapsed().as_secs_f32() * 1000.0;
+        println!("plateau chunk layer {y}: (bricks, fillers) closed {:?} -> cliff {:?}, {ms:.2} ms", count(&closed.pristine_chunk(y).unwrap()), count(&open));
+        assert!(open.occupancy() == closed.pristine_chunk(y).unwrap().occupancy(), "the cliff's bricks move no cell");
+    }
+    // Cliff chunks are pristine: nothing of them is stored (derived on load), and
+    // they travel in a join snapshot as their recipe's diff — nothing.
+    let (saved, _) = d.portable_snapshot(&SaveTerms::default());
+    assert!(saved.stud_chunks.is_empty(), "no stud row for a cliff: {:?}", saved.stud_chunks.keys().collect::<Vec<_>>());
+    let (restored, _) = restore_portable(west(), saved.into());
+    assert_eq!(restored.data().stud_index.len(), d.stud_index.len());
+    for (c, _) in d.stud_index.iter() {
+        assert!(restored.data().stud_chunk_at(*c) == d.stud_chunk_at(*c), "restored {c:?}");
+    }
+    let wire = encode_packet(&ServerPacket::Region(west(), d.clone())).unwrap();
+    let flat_wire = encode_packet(&ServerPacket::Region(west(), region(west()).data().clone())).unwrap();
+    let ServerPacket::Region(_, back) = decode_packet(&wire).unwrap() else { panic!("a region packet") };
+    assert_eq!(state_hash(&back), state_hash(d));
+    println!("cliff region join snapshot: {} bytes (flat region: {})", wire.len(), flat_wire.len());
+    assert!(wire.len() < flat_wire.len() * 3, "cliff chunks ride as pristine: {} vs {}", wire.len(), flat_wire.len());
+    // The natural face is targeted as its brick.
+    let hit = d.raycast_studs_seen(
+        game::rapier3d::math::Vector::new((CW - 4) as f32 * STUD_UNITS as f32, plate_units(TOP + 20), 20.5 * STUD_UNITS as f32),
+        game::rapier3d::math::Vector::new(1.0, 0.0, 0.0),
+        100.0,
+    )
+    .expect("the ray meets the cliff");
+    let brick = d.stud_chunk_seen(hit.chunk).and_then(|c| c.brick_at(hit.cell)).copied().unwrap();
+    assert!(matches!(brick.shape, StudShape::Part { .. }), "the cliff is targeted as {brick:?}");
+    let size = brick.size();
+    assert_eq!(mining::stud_target_box(&brick, hit.cell), (brick.min, [0, 1, 2].map(|i| brick.min[i] + size[i])));
     // The plain's columns hold their one surface layer.
     assert_eq!(d.stud_index.len(), REGION_CHUNKS * (REGION_CHUNKS - 1) + REGION_CHUNKS * 3);
     assert_eq!(region(west()).data().stud_index.len(), REGION_CHUNKS * REGION_CHUNKS, "flat ground: surface layers only");
 }
 
 /// A cliff AT a seam is closed on both sides whatever the neighbour's seed comes
-/// from: the high region materialises its wall when the low neighbour's recipes
-/// arrive (undo-safely), the low region's halo holds the wall's chunks, and a
-/// never-run high neighbour's worldgen seed gives the low region the same halo.
+/// from: the high region's recipes know the low ground past the seam (their apron),
+/// so it starts with its wall — real bricks, as one region lays them — with no
+/// neighbour heard from; the low region's halo derives the wall's chunks from the
+/// recipes alone, and a never-run high neighbour's seed gives it the same halo.
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn a_cliff_at_a_seam_is_closed_on_both_sides() {
-    let plateau = seed_of(|_, _| HIGH);
+    let plateau = facing(seed_of(|_, _| HIGH), StudSide::East, TOP);
+    let plain = || facing(flat_seed(), StudSide::West, HIGH);
     let mut high = region_with(west(), plateau.clone());
-    let low_region = region(east());
-    assert!(high.data().stud_chunk_at(at(N - 1, 0, 0)).is_none(), "implied until the neighbour is known");
-    let before = high.data().stud_index.len();
-    let update = low_region.data().halo_seed_for(west()).expect("neighbours");
-    apply_checked(&mut high, GameEventKind::HaloUpdate(update), "the low neighbour's seed");
+    let low_region = region_with(east(), plain());
     for z in 0..N {
-        for y in 0..2 {
+        for y in 0..=2 {
             assert!(high.data().stud_chunk_at(at(N - 1, y, z)).is_some(), "own wall layer {y} at z {z}");
         }
+        assert!(high.data().stud_chunk_at(at(N - 2, 0, z)).is_none(), "nothing behind the edge column");
     }
-    assert_eq!(high.data().stud_index.len(), before + 2 * REGION_CHUNKS, "the edge columns' two wall layers, nothing else");
+    assert_brick_face(high.data(), N * CW - 1, TOP..HIGH);
+    // One region holding both grounds lays the same bricks in the wall: the plateau's
+    // edge column next to a plain column.
+    let mut one = vec![
+        (ColumnCoords::new(0, 0), StudColumnGround::flat(HIGH, SOIL, MAT_STONE, -2000)),
+        (ColumnCoords::new(1, 0), flat()),
+    ];
+    link_stud_aprons(&mut one);
+    for y in 0..=2 {
+        let mut reference = one[0].1.clone();
+        // (its other sides as the edge column's: plateau all round)
+        for side in [StudSide::West, StudSide::North, StudSide::South] {
+            reference.set_apron_side(side, &[HIGH; STUD_CHUNK_STUDS]);
+        }
+        assert!(high.data().stud_chunk_at(at(N - 1, y, 1)) == reference.pristine_chunk(y).as_ref(), "layer {y}: one region's bricks");
+    }
+    // Hearing from the neighbour changes no ground: the wall was there already.
+    let chunks = high.data().stud_index.len();
+    let update = low_region.data().halo_seed_for(west()).expect("neighbours");
+    assert!(update.studs.is_empty(), "the low region's edge is all derived");
+    apply_checked(&mut high, GameEventKind::HaloUpdate(update), "the low neighbour's seed");
+    assert_eq!(high.data().stud_index.len(), chunks);
 
     // The low side: its halo of the running high region, and of a never-run one.
-    let (mut a, mut b) = (region(east()), region(east()));
+    let (mut a, mut b) = (region_with(east(), plain()), region_with(east(), plain()));
     seed(&high, &mut a, east());
     let (xs, zs) = game::halo::facing_columns(west(), east());
     let window = StudRegionSeed {

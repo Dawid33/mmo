@@ -32,9 +32,11 @@ use game::{state_hash, GameEventKind, InputEvent, Key, Region, RegionCoords};
 /// `6251fa09`. Re-recorded 2026-11-11 (P10b, the voxel code deleted from
 /// `game`): `GameData` / `Ecs` lost their voxel fields, so the hash moved
 /// from 0x6D9E_67C7 with the layout (`physics_goldens` did not move).
-/// `physics_goldens` judges trajectories.
+/// `physics_goldens` judges trajectories. Re-recorded 2026-11-11 (natural
+/// cliffs as pristine bricks): the hashed recipes carry their apron; from
+/// 0x9F1B_CA2C.
 const SCENE_HASH: u32 = match game::CHUNK_BLOCKS {
-    16 => 0x9F1B_CA2C,
+    16 => 0xAC92_3B78,
     _ => 0,
 };
 /// Ticks of scripted input.

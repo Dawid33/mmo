@@ -298,7 +298,7 @@ impl Rollback {
         let Some(g) = self.data.stud_ground.get(&ColumnCoords::new(c.x, c.z)) else { return StudKept::Edited };
         if g.pristine_chunk(c.y).as_ref() != Some(chunk) {
             StudKept::Edited
-        } else if g.surface_layers().contains(&c.y) {
+        } else if g.genesis_layers().contains(&c.y) {
             StudKept::Derived
         } else {
             StudKept::Pristine

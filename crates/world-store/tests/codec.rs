@@ -206,22 +206,35 @@ pub(crate) fn stud_chunk() -> game::StudChunkRecord {
 /// Stud ground recipes of two chunk columns: flat ground at plates 30 and 95.
 pub(crate) fn stud_ground() -> Vec<(game::ColumnCoords, game::StudColumnGround)> {
     let soil = game::StudProfile { cover: game::MAT_GRASS, cover_plates: 1, soil: game::MAT_DIRT, soil_plates: 5 };
-    vec![
+    let mut ground = vec![
         (game::ColumnCoords::new(0, 0), game::StudColumnGround::flat(30, soil, game::MAT_STONE, -2000)),
         (game::ColumnCoords::new(1, 0), game::StudColumnGround::flat(95, soil, game::MAT_STONE, -2000)),
-    ]
+    ];
+    // Each one's apron on the side of the other: the cliff between them.
+    game::link_stud_aprons(&mut ground);
+    ground
 }
 
 #[test]
 fn golden_blobs_decode() {
     check("stud_chunk", FORMAT_STUD_CHUNK, &stud_chunk());
     check("stud_chunk_pristine", FORMAT_STUD_CHUNK, &game::StudChunkRecord::Pristine);
+    let fixture = |name: &str| std::fs::read(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(name)).unwrap();
     check("stud_ground", FORMAT_STUD_GROUND, &stud_ground());
+    // Format 1 (no apron) is still read: the aprons come from the neighbouring
+    // columns of the row, the region's edge stays closed. Recorded 2026-11-11 from
+    // the format 1 `stud_ground.bin` of the same two columns.
+    let v1 = fixture("stud_ground_v1.bin");
+    assert_eq!(v1[0], FORMAT_STUD_GROUND_V1);
+    let read = decode_stud_ground(&v1).unwrap();
+    assert_eq!(read, stud_ground(), "a format 1 row reads as the linked recipes");
+    assert_eq!(read[1].1.apron(game::StudSide::West, 3), 30);
+    assert_eq!(read[1].1.apron(game::StudSide::East, 3), game::STUD_APRON_CLOSED);
+    assert_eq!(decode_stud_ground(&encode(FORMAT_STUD_GROUND, &stud_ground())).unwrap(), stud_ground());
     check("region_meta", FORMAT_REGION_META, &meta());
     // Format 1 (with the voxel world's water bodies) is still read while they are
     // empty — every stud region's row; the golden recorded then held two voxel water
     // bodies, which no longer decode.
-    let fixture = |name: &str| std::fs::read(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(name)).unwrap();
     let m = meta();
     let v1 = game::RegionMetaV1 {
         tick: m.tick,

@@ -1775,6 +1775,83 @@ fn stud_seam_survives_scheduling_jitter() {
     }
 }
 
+// --- A natural cliff at a seam (pristine cliff bricks) ---------------------------
+
+/// The plateau east of the spawn region's column of regions: two stud layers up.
+const CLIFF_TOP: i32 = STUD_TOP + 2 * game::STUD_CHUNK_PLATES as i32;
+
+fn cliff_top(rc: RegionCoords) -> i32 {
+    if rc.x > SPAWN_REGION.x { CLIFF_TOP } else { STUD_TOP }
+}
+
+/// Flat ground per region at [`cliff_top`], each recipe with the apron a generator
+/// gives it: the neighbouring column's edge, across region seams too.
+fn stud_cliff_seed(rc: RegionCoords) -> game::StudRegionSeed {
+    use game::StudSide::*;
+    let n = game::REGION_CHUNKS;
+    let mut ground: Vec<_> =
+        (0..n).flat_map(|x| (0..n).map(move |z| (ColumnCoords::new(x, z), common::stud_flat(cliff_top(rc))))).collect();
+    game::link_stud_aprons(&mut ground);
+    for (c, g) in ground.iter_mut() {
+        for (side, on_edge, (dx, dz)) in [(West, c.x == 0, (-1, 0)), (East, c.x == n - 1, (1, 0)), (North, c.z == 0, (0, -1)), (South, c.z == n - 1, (0, 1))] {
+            if on_edge {
+                g.set_apron_side(side, &[cliff_top(RegionCoords::new(rc.x + dx, rc.z + dz)); game::STUD_CHUNK_STUDS]);
+            }
+        }
+    }
+    game::StudRegionSeed { ground, features: Vec::new() }
+}
+
+/// A sheer cliff along the spawn region's east seam, under the scheduler: the plateau
+/// region starts with its wall as real bricks — the bricks ONE region holding both
+/// grounds lays — whenever its neighbours are heard from, every halo holds its
+/// owner's chunks brick for brick, and nothing depends on arrival order (the
+/// fingerprint is the lockstep one under every schedule).
+fn stud_cliff_scenario(schedule: Option<InlineSchedule>) -> Vec<(RegionCoords, u64, u32)> {
+    let n = game::REGION_CHUNKS;
+    let mut rig = Rig::with_floor(schedule, stud_cliff_seed);
+    rig.join_spawn();
+    for _ in 0..3 * PAST_SEAM_ROUNDS {
+        rig.round();
+    }
+    rig.manager.spawner_mut().set_schedule(None);
+    for _ in 0..PAST_SEAM_ROUNDS {
+        rig.round();
+    }
+    let east = RegionCoords::new(SPAWN_REGION.x + 1, SPAWN_REGION.z);
+    // One region: a plain column and a plateau column side by side.
+    let mut one = vec![(ColumnCoords::new(0, 0), common::stud_flat(STUD_TOP)), (ColumnCoords::new(1, 0), common::stud_flat(CLIFF_TOP))];
+    game::link_stud_aprons(&mut one);
+    let at = |x: usize, y: i32| game::StudChunkCoords { x, y, z: 1 };
+    for y in 0..=2 {
+        let wall = stud_chunk(&mut rig, east, at(0, y)).unwrap_or_else(|| panic!("the plateau's wall layer {y}"));
+        assert!(Some(&wall) == one[1].1.pristine_chunk(y).as_ref(), "layer {y}: the bricks of one region");
+        let face = wall.brick_at([0, if y == 2 { 10 } else { 45 }, 16]).expect("the face is solid");
+        assert!(matches!(face.shape, game::StudShape::Part { .. }), "layer {y}: the face is {face:?}");
+    }
+    assert!(stud_chunk(&mut rig, east, at(1, 0)).is_none(), "behind the edge column the ground stays implied");
+    assert!(stud_chunk(&mut rig, SPAWN_REGION, at(n - 1, 0)) == one[0].1.pristine_chunk(0), "the plain's edge");
+    assert_stud_halos_agree(&mut rig);
+    rig.manager.spawner_mut().with_region(SPAWN_REGION, |region| {
+        for y in 0..=2 {
+            assert!(region.data().stud_halo_chunk_at([n as i32, y, 1]).is_some(), "the wall in the plain's halo: layer {y}");
+        }
+    });
+    rig.fingerprint()
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn stud_cliff_at_a_seam_is_bricks_whatever_the_schedule() {
+    let lockstep = stud_cliff_scenario(None);
+    for seed in 0..STUD_SEEDS {
+        for schedule in [InlineSchedule::shuffled, InlineSchedule::late, InlineSchedule::jittery] {
+            let run = std::panic::catch_unwind(|| stud_cliff_scenario(Some(schedule(seed)))).unwrap_or_else(|_| panic!("the cliff broke under seed {seed}"));
+            assert_eq!(run.iter().map(|f| (f.0, f.2)).collect::<Vec<_>>(), lockstep.iter().map(|f| (f.0, f.2)).collect::<Vec<_>>(), "seed {seed}: the state depends on the schedule");
+        }
+    }
+}
+
 // --- Stud tiles at a seam (stud world plan P6a) --------------------------------
 
 /// On flat stud ground: a dig order whose box straddles the north seam, completed.

@@ -155,6 +155,18 @@ pub fn region_seed(rc: RegionCoords) -> StudRegionSeed {
                 vec![(i32::MAX, STONE)],
                 BEDROCK_PLATE,
             )
+            .and_then(|g| {
+                // The apron: the surface one stud past each side face (west, east, north, south).
+                let n = N as i64;
+                let at = |x: i64, z: i64| surface_plates(ox + x, oz + z) as i32;
+                let apron: Vec<i32> = (0..n)
+                    .map(|a| at(-1, a))
+                    .chain((0..n).map(|a| at(n, a)))
+                    .chain((0..n).map(|a| at(a, -1)))
+                    .chain((0..n).map(|a| at(a, n)))
+                    .collect();
+                g.with_apron(apron.into())
+            })
             .expect("stud_world recipes are valid by construction");
             seed.ground.push((ColumnCoords::new(cx, cz), ground));
             if (rc.x, rc.z, cx, cz) == (0, 0, 0, 0) {

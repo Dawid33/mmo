@@ -241,6 +241,20 @@ fn recipes_and_ice(
                     };
                 }
             }
+            // The apron: the surface of the stud columns one past each side face
+            // (`game::StudSide::ALL` order) — the neighbour's edge, sampled here, so a
+            // recipe knows its cliffs whichever window or region it is generated in.
+            let column = |sx: i64, sz: i64| {
+                let stud = |region: i32, c: usize, s: i64| region as i64 * region_studs + (c * N) as i64 + s;
+                stud_column(patch, mats, stud_centre_m(stud(coords.x, cx, sx)), stud_centre_m(stud(coords.z, cz, sz))).surface
+            };
+            let n = N as i64;
+            let apron: Vec<i32> = (0..n)
+                .map(|a| column(-1, a))
+                .chain((0..n).map(|a| column(n, a)))
+                .chain((0..n).map(|a| column(a, -1)))
+                .chain((0..n).map(|a| column(a, n)))
+                .collect();
             let ground = StudColumnGround::new(
                 surface.into(),
                 water.into(),
@@ -250,6 +264,7 @@ fn recipes_and_ice(
                 strata.clone(),
                 STUD_BEDROCK_PLATE,
             )
+            .and_then(|g| g.with_apron(apron.into()))
             .expect("generated stud recipes are valid by construction");
             out.push((ColumnCoords::new(cx, cz), ground, ice));
         }

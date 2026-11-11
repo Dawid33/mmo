@@ -27,8 +27,12 @@ pub const FORMAT_PLAYER_RECORD: u8 = 1;
 pub const FORMAT_INTENT_MSG: u8 = 1;
 /// `stud_chunks.data`: a `game::StudChunkRecord`.
 pub const FORMAT_STUD_CHUNK: u8 = 1;
-/// `regions.stud_ground`: a region's `Vec<(ColumnCoords, StudColumnGround)>`.
-pub const FORMAT_STUD_GROUND: u8 = 1;
+/// `regions.stud_ground`: a region's `Vec<(ColumnCoords, StudColumnGround)>`. Format 2
+/// added the recipes' apron (the surfaces just outside each chunk column's side
+/// faces); format 1 rows are still read ([`decode_stud_ground`]).
+pub const FORMAT_STUD_GROUND: u8 = 2;
+/// The recipe layout before the apron (`game::StudColumnGroundV1`).
+pub const FORMAT_STUD_GROUND_V1: u8 = 1;
 
 /// `forged_world_map.bytes`: the forged world's `game::WorldMap`, framed by
 /// [`encode_world_map`] (not [`encode`]): format 1 was the plain
@@ -75,6 +79,23 @@ pub fn decode_entity_bundle(bytes: &[u8]) -> Result<game::EntityBundle, StoreErr
             decode::<game::EntityBundleV2>(FORMAT_ENTITY_BUNDLE_V2, bytes).map(game::EntityBundle::from)
         }
         _ => decode(FORMAT_ENTITY_BUNDLE, bytes),
+    }
+}
+
+/// A region's stored recipes of any format: the current one, or format 1
+/// (`game::StudColumnGroundV1`, no apron) converted — each recipe's apron is taken from
+/// the neighbouring chunk columns of the same row (`game::link_stud_aprons`) and stays
+/// closed along the region's edge (no cliff bricks, no wall layers derived there). The
+/// row is written once per region, so a format 1 row is read this way every time.
+pub fn decode_stud_ground(bytes: &[u8]) -> Result<Vec<(game::ColumnCoords, game::StudColumnGround)>, StoreError> {
+    match bytes.first() {
+        Some(&FORMAT_STUD_GROUND_V1) => {
+            let old: Vec<(game::ColumnCoords, game::StudColumnGroundV1)> = decode(FORMAT_STUD_GROUND_V1, bytes)?;
+            let mut ground: Vec<_> = old.into_iter().map(|(c, g)| (c, game::StudColumnGround::from(g))).collect();
+            game::link_stud_aprons(&mut ground);
+            Ok(ground)
+        }
+        _ => decode(FORMAT_STUD_GROUND, bytes),
     }
 }
 

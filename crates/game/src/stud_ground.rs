@@ -79,10 +79,64 @@ pub struct StudColumnGround {
     strata: Vec<(i32, u16)>,
     /// Plates below this are bedrock.
     bedrock: i32,
+    /// The `surface` of the stud columns just outside each side face, [`StudSide::ALL`]
+    /// order, 32 per side (along z for west / east, along x for north / south):
+    /// what tells which side faces of this column's ground stand in the open (a
+    /// cliff over a lower neighbour), so their bricks are laid as real bricks
+    /// ([`Self::pristine_chunk`]) and their layers materialised
+    /// ([`Self::genesis_layers`]). [`STUD_APRON_CLOSED`] where nothing is known:
+    /// no exposure. A pure function of world coordinates in generated worlds, so both
+    /// sides of a seam hold the same numbers whoever generates them.
+    apron: Box<[i32]>,
+}
+
+/// An apron value for "nothing open on this side" (a neighbour at least as high).
+pub const STUD_APRON_CLOSED: i32 = i32::MAX;
+/// Length of a recipe's apron: one row of stud columns per side.
+pub const STUD_APRON_LEN: usize = 4 * N;
+
+/// The recipe layout before the apron (world-store `FORMAT_STUD_GROUND` 1): read
+/// only, converted with a closed apron ([`link_stud_aprons`] then fills the sides
+/// whose neighbour column is in the same region).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StudColumnGroundV1 {
+    pub surface: Box<[i32]>,
+    pub water_top: Box<[i32]>,
+    pub profile: Box<[u8]>,
+    pub profiles: Vec<StudProfile>,
+    pub geo: Box<[i32]>,
+    pub strata: Vec<(i32, u16)>,
+    pub bedrock: i32,
+}
+
+impl From<StudColumnGroundV1> for StudColumnGround {
+    fn from(v: StudColumnGroundV1) -> Self {
+        let StudColumnGroundV1 { surface, water_top, profile, profiles, geo, strata, bedrock } = v;
+        Self { surface, water_top, profile, profiles, geo, strata, bedrock, apron: vec![STUD_APRON_CLOSED; STUD_APRON_LEN].into() }
+    }
+}
+
+/// Fills the apron of every recipe of `ground` on the sides whose neighbouring chunk
+/// column is in `ground` too, from that neighbour's edge surfaces; other sides are
+/// left as they are. For recipes that are not generated with their apron (old stored
+/// rows, hand-made test ground).
+pub fn link_stud_aprons(ground: &mut [(crate::ColumnCoords, StudColumnGround)]) {
+    let edges: std::collections::BTreeMap<(usize, usize), [Vec<i32>; 4]> =
+        ground.iter().map(|(c, g)| ((c.x, c.z), StudSide::ALL.map(|s| g.edge_surfaces(s)))).collect();
+    for (c, g) in ground.iter_mut() {
+        for side in StudSide::ALL {
+            let (dx, dz) = side.offset();
+            let (Some(x), Some(z)) = (c.x.checked_add_signed(dx as isize), c.z.checked_add_signed(dz as isize)) else { continue };
+            if let Some(n) = edges.get(&(x, z)) {
+                g.set_apron_side(side, &n[side.opposite() as usize]);
+            }
+        }
+    }
 }
 
 /// A side of a chunk column: −x, +x, −z, +z.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
 pub enum StudSide {
     West,
     East,
@@ -111,26 +165,6 @@ impl StudSide {
             StudSide::South => StudSide::North,
         }
     }
-}
-
-/// The cliff-wall layers of chunk column `c` against the columns of `recipes` beside
-/// it ([`StudColumnGround::wall_layers`] over its four sides): what a fresh region
-/// materialises under `c`'s surface layers. Columns `recipes` does not hold (past the
-/// region's edge, or outside a window) open nothing.
-pub fn stud_wall_layers(
-    recipes: &std::collections::BTreeMap<crate::ColumnCoords, &StudColumnGround>,
-    c: crate::ColumnCoords,
-) -> std::collections::BTreeSet<i32> {
-    let mut out = std::collections::BTreeSet::new();
-    let Some(g) = recipes.get(&c) else { return out };
-    for side in StudSide::ALL {
-        let (dx, dz) = side.offset();
-        let (Some(x), Some(z)) = (c.x.checked_add_signed(dx as isize), c.z.checked_add_signed(dz as isize)) else { continue };
-        if let Some(n) = recipes.get(&crate::ColumnCoords::new(x, z)) {
-            out.extend(g.wall_layers(n.edge_low(side.opposite())));
-        }
-    }
-    out
 }
 
 /// What a fresh stud region starts from (`Region::seed_stud_world`): a ground recipe per
@@ -210,7 +244,50 @@ impl StudColumnGround {
         if profiles.iter().any(|p| !known(p.cover) || !known(p.soil)) || strata.iter().any(|&(_, m)| !known(m)) {
             return Err(StudGroundError::UnknownMaterial);
         }
-        Ok(Self { surface, water_top, profile, profiles, geo, strata, bedrock })
+        Ok(Self { surface, water_top, profile, profiles, geo, strata, bedrock, apron: vec![STUD_APRON_CLOSED; STUD_APRON_LEN].into() })
+    }
+
+    /// This recipe with `apron` (see the field): [`STUD_APRON_LEN`] surfaces.
+    pub fn with_apron(mut self, apron: Box<[i32]>) -> Result<Self, StudGroundError> {
+        if apron.len() != STUD_APRON_LEN {
+            return Err(StudGroundError::WrongFootprint);
+        }
+        self.apron = apron;
+        Ok(self)
+    }
+
+    /// Sets the apron of one side: the `surface` of the 32 stud columns just outside
+    /// it, along the face. Ignored unless `surfaces` holds exactly 32.
+    pub fn set_apron_side(&mut self, side: StudSide, surfaces: &[i32]) {
+        if surfaces.len() != N {
+            return;
+        }
+        if self.apron.len() != STUD_APRON_LEN {
+            self.apron = vec![STUD_APRON_CLOSED; STUD_APRON_LEN].into();
+        }
+        self.apron[side as usize * N..][..N].copy_from_slice(surfaces);
+    }
+
+    /// The `surface` of the stud column just outside `side`, `a` along the face.
+    pub fn apron(&self, side: StudSide, a: usize) -> i32 {
+        self.apron.get(side as usize * N + a).copied().unwrap_or(STUD_APRON_CLOSED)
+    }
+
+    /// This column's own `surface` along its edge on `side`: what the neighbour
+    /// across that face holds as its apron.
+    pub fn edge_surfaces(&self, side: StudSide) -> Vec<i32> {
+        (0..N).map(|a| self.surface[Self::edge_index(side, a)]).collect()
+    }
+
+    /// Index of the stud column `a` along the edge on `side`.
+    fn edge_index(side: StudSide, a: usize) -> usize {
+        let last = N - 1;
+        match side {
+            StudSide::West => a * N,
+            StudSide::East => a * N + last,
+            StudSide::North => a,
+            StudSide::South => last * N + a,
+        }
     }
 
     /// A flat column: every stud column at `surface` with one profile over one `rock`, dry.
@@ -278,29 +355,22 @@ impl StudColumnGround {
         stud_layer_of(lo.saturating_sub(1))..=stud_layer_of(hi.saturating_sub(1))
     }
 
-    /// The lowest `surface` along this chunk column's edge on `side`: where a
-    /// neighbour across that face first meets this column's open cells.
-    pub fn edge_low(&self, side: StudSide) -> i32 {
-        let last = N - 1;
-        (0..N)
-            .map(|a| match side {
-                StudSide::West => self.surface(0, a),
-                StudSide::East => self.surface(last, a),
-                StudSide::North => self.surface(a, 0),
-                StudSide::South => self.surface(a, last),
-            })
-            .min()
-            .unwrap_or(0)
-    }
-
-    /// The layers under this column's [`Self::surface_layers`] whose face a neighbour
-    /// opens onto: the neighbour's facing edge lies as low as `facing_low` (its
-    /// [`Self::edge_low`]), so from that plate's layer up this column's ground is a
-    /// cliff wall in the open. A fresh region materialises them — implied ground has
-    /// no bricks and no collider, and a wall of it would be a hole.
-    pub fn wall_layers(&self, facing_low: i32) -> std::ops::Range<i32> {
-        let top = *self.surface_layers().start();
-        stud_layer_of(facing_low).max(-crate::stud::STUD_LAYER_LIMIT).min(top)..top
+    /// The layers a fresh region materialises: [`Self::surface_layers`], and under
+    /// them every layer a lower stud column across a side face opens onto (the apron)
+    /// — a cliff wall has bricks and a collider all the way down; implied ground
+    /// there would be a hole. Everything under them stays implied until dug into. A
+    /// function of the recipe alone, so every holder of it derives the same chunks.
+    pub fn genesis_layers(&self) -> std::ops::RangeInclusive<i32> {
+        let surface = self.surface_layers();
+        let top = *surface.start();
+        let low = StudSide::ALL
+            .iter()
+            .flat_map(|&side| (0..N).map(move |a| (side, a)))
+            .filter(|&(side, a)| self.apron(side, a) < self.surface[Self::edge_index(side, a)])
+            .map(|(side, a)| self.apron(side, a))
+            .min();
+        let from = low.map_or(top, |low| stud_layer_of(low).max(-crate::stud::STUD_LAYER_LIMIT).min(top));
+        from..=*surface.end()
     }
 
     /// The unedited chunk of layer `y`, or `None` when the layer is all air here.
@@ -334,6 +404,8 @@ impl StudColumnGround {
             solid_to = bed - bed % PLATES_PER_BRICK as i32;
         }
         let bed = bed.min(solid_to);
+        // One past the top plate of the plain fillers over each stud column.
+        let mut filler_top = vec![solid_to.max(0); STUD_COLUMN_FOOTPRINT];
         let mut slab = |lo: i32, hi: i32, material: u16| {
             if hi > lo {
                 out.push(StudBrick::filler([0, lo as u8, 0], [N as u8, (hi - lo) as u8, N as u8], material));
@@ -396,6 +468,9 @@ impl StudColumnGround {
                     for k in c..end {
                         filled[(tz * tiles + tx) * COURSES as usize + k as usize] = true;
                     }
+                    for &i in &cols {
+                        filler_top[i] = filler_top[i].max(end * PLATES_PER_BRICK as i32);
+                    }
                     let (lo, height) = (c * PLATES_PER_BRICK as i32, (end - c) * PLATES_PER_BRICK as i32);
                     out.push(StudBrick::filler(
                         [(tx * FILL_TILE) as u8, lo as u8, (tz * FILL_TILE) as u8],
@@ -433,7 +508,42 @@ impl StudColumnGround {
                 }
             }
         }
-        Some(StudChunk::from_disjoint(out))
+        let mut chunk = StudChunk::from_disjoint(out);
+
+        // Side faces in the open: where the stud column across a face (the apron) is
+        // lower than the fillers here, the slots behind the open cells are real bricks
+        // — the lattice and bricks of a dug wall (`stud_rebrick`), so a natural cliff
+        // and a dug one are the same thing.
+        let mut slots = std::collections::BTreeSet::new();
+        let mut fillers: Option<crate::stud::StudOccupancy> = None;
+        for side in StudSide::ALL {
+            for a in 0..N {
+                let i = Self::edge_index(side, a);
+                let (open_from, top) = (local(self.apron(side, a)), filler_top[i].min(h[i]));
+                if open_from >= top {
+                    continue;
+                }
+                let occ = fillers.get_or_insert_with(|| {
+                    let mut occ = crate::stud::StudOccupancy::default();
+                    for b in chunk.bricks().filter(|b| matches!(b.shape, StudShape::Filler { .. }) && crate::stud_rebrick::diggable(b.material)) {
+                        for cell in b.cells() {
+                            occ.set(cell.map(i32::from), true);
+                        }
+                    }
+                    occ
+                });
+                let (x, z) = (i % N, i / N);
+                for plate in open_from..top {
+                    if occ.get([x as i32, plate, z as i32]) {
+                        slots.insert(crate::stud_rebrick::rebrick_slot(y, [x as u8, plate as u8, z as u8]));
+                    }
+                }
+            }
+        }
+        for (lo, hi) in slots {
+            chunk.rebrick_box(lo, hi);
+        }
+        Some(chunk)
     }
 }
 

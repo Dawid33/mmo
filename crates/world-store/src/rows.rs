@@ -378,7 +378,7 @@ macro_rules! engine_rows {
                 ground: Option<Vec<u8>>,
             ) -> Result<(Vec<(StudChunkCoords, StudChunkRecord)>, Vec<(ColumnCoords, StudColumnGround)>), StoreError> {
                 let ground: Vec<(ColumnCoords, StudColumnGround)> = match ground {
-                    Some(blob) => decode(FORMAT_STUD_GROUND, &blob)
+                    Some(blob) => decode_stud_ground(&blob)
                         .map_err(|e| StoreError::Corrupt(format!("region {rc:?} stud ground: {e}")))?,
                     None => Vec::new(),
                 };
