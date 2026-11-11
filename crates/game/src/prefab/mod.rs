@@ -12,6 +12,7 @@
 
 mod builtin;
 mod codec;
+mod command;
 mod file;
 mod layout;
 mod resolve;
@@ -19,6 +20,7 @@ mod seed;
 
 pub use builtin::*;
 pub use codec::*;
+pub use command::*;
 pub use file::*;
 pub use layout::*;
 pub use resolve::*;

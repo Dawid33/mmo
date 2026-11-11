@@ -600,14 +600,14 @@ pub struct EntityBundleV1 {
     pub body: BodyState,
     pub collider: ColliderSpec,
     pub carried: crate::CarriedV1,
-    pub client: Option<(ClientId, Client)>,
+    pub client: Option<(ClientId, crate::ClientV1)>,
     pub pending_inputs: Vec<(crate::GameEventKind, Tick)>,
 }
 
 impl From<EntityBundleV1> for EntityBundle {
     fn from(b: EntityBundleV1) -> Self {
         let EntityBundleV1 { id, kind, body, collider, carried, client, pending_inputs } = b;
-        EntityBundle { id, kind, body, collider, carried: carried.into(), client, pending_inputs }
+        EntityBundle { id, kind, body, collider, carried: carried.into(), client: client.map(|(id, c)| (id, c.into())), pending_inputs }
     }
 }
 
@@ -620,14 +620,34 @@ pub struct EntityBundleV2 {
     pub body: BodyState,
     pub collider: ColliderSpec,
     pub carried: crate::CarriedV2,
-    pub client: Option<(ClientId, Client)>,
+    pub client: Option<(ClientId, crate::ClientV1)>,
     pub pending_inputs: Vec<(crate::GameEventKind, Tick)>,
 }
 
 impl From<EntityBundleV2> for EntityBundle {
     fn from(b: EntityBundleV2) -> Self {
         let EntityBundleV2 { id, kind, body, collider, carried, client, pending_inputs } = b;
-        EntityBundle { id, kind, body, collider, carried: carried.into(), client, pending_inputs }
+        EntityBundle { id, kind, body, collider, carried: carried.into(), client: client.map(|(id, c)| (id, c.into())), pending_inputs }
+    }
+}
+
+/// [`EntityBundle`] as stored before registered prefabs (world-store entity bundle
+/// format 3): the same fields around a [`crate::ClientV1`]. Decode-only.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+pub struct EntityBundleV3 {
+    pub id: EntityId,
+    pub kind: EntityKind,
+    pub body: BodyState,
+    pub collider: ColliderSpec,
+    pub carried: crate::Carried,
+    pub client: Option<(ClientId, crate::ClientV1)>,
+    pub pending_inputs: Vec<(crate::GameEventKind, Tick)>,
+}
+
+impl From<EntityBundleV3> for EntityBundle {
+    fn from(b: EntityBundleV3) -> Self {
+        let EntityBundleV3 { id, kind, body, collider, carried, client, pending_inputs } = b;
+        EntityBundle { id, kind, body, collider, carried, client: client.map(|(id, c)| (id, c.into())), pending_inputs }
     }
 }
 
@@ -998,6 +1018,9 @@ pub enum GameEventKind {
     /// as a stamped transfer: joins this region's queue, applied / delivered
     /// at the opening of its due tick. Never accepted from a client.
     Intent(crate::IntentMsg),
+    /// A prefab command from a client (register, deregister, stamp;
+    /// `prefab/command.rs`). Routed like an `Order`.
+    Prefab(ClientId, crate::PrefabCommand),
 }
 
 /// Where a spawned person appears in a region.
@@ -1023,13 +1046,14 @@ pub struct PersonSpawn {
 
 impl GameEventKind {
     /// The client whose input this is: the kinds a client sends and the
-    /// manager routes to its home (`PlayerInput`, `UiAction`, `Order`). They
+    /// manager routes to its home (`PlayerInput`, `UiAction`, `Order`, `Prefab`). They
     /// follow the client's body across a seam.
     pub fn input_client(&self) -> Option<ClientId> {
         match self {
-            GameEventKind::PlayerInput(id, _) | GameEventKind::UiAction(id, _) | GameEventKind::Order(id, _) => {
-                Some(*id)
-            }
+            GameEventKind::PlayerInput(id, _)
+            | GameEventKind::UiAction(id, _)
+            | GameEventKind::Order(id, _)
+            | GameEventKind::Prefab(id, _) => Some(*id),
             _ => None,
         }
     }
@@ -1043,7 +1067,8 @@ impl GameEventKind {
             | GameEventKind::CreateClientAt(id, ..)
             | GameEventKind::RestorePlayer(id, _)
             | GameEventKind::UiAction(id, _)
-            | GameEventKind::Order(id, _) => Some(*id),
+            | GameEventKind::Order(id, _)
+            | GameEventKind::Prefab(id, _) => Some(*id),
             GameEventKind::Tick
             | GameEventKind::Quit
             | GameEventKind::EntityArrived(_)

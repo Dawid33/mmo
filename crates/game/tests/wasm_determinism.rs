@@ -60,11 +60,15 @@ use slotmapd::Key as _;
 // hand-made recipes have a closed apron, so no brick changed; `physics_goldens`
 // did not move). Before: scene 0x5BCB_AA41 / 0xE5F7_54F5, underground
 // 0xF908_B67A / 0x802D_8C79, stud body 0x9F93_B77D / 0xD498_D06F.
+// Re-recorded 2026-11-11 (per-player prefab registration): `Client` gained its
+// `prefabs` map (hashed and serialized, empty here) — a layout move for the SCENE
+// pair only, the one scene with a client (`physics_goldens` did not move). Before:
+// scene 0x55DE_C516 / 0xEA4C_C8F9.
 /// crc32 of the scene region's bincode bytes after [`SCENE_TICKS`] ticks,
 /// on every target.
-const WASM_SCENE_DIGEST: u32 = 0x55DE_C516;
+const WASM_SCENE_DIGEST: u32 = 0x1213_C570;
 /// `game::state_hash` of the same state, on every target.
-const SCENE_STATE_HASH: u32 = 0xEA4C_C8F9;
+const SCENE_STATE_HASH: u32 = 0xEB0D_BBF0;
 const SCENE_TICKS: usize = 120;
 /// crc32 of [`underground_scene`]'s region bytes, on every target.
 const UNDERGROUND_DIGEST: u32 = 0xBFCD_2C74;

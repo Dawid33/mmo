@@ -151,6 +151,55 @@ pub struct Client {
     /// The chest (its world cell — this region's, or a neighbour's seen
     /// through the halo) whose screen is open (`containers.rs`).
     pub open_container: Option<crate::WorldBlockPos>,
+    /// The prefabs this player has registered for the session, by key
+    /// (`prefab/command.rs`). Travels across seams; a parked record keeps none.
+    pub prefabs: std::collections::BTreeMap<crate::PrefabKey, crate::RegisteredPrefab>,
+}
+
+/// [`Client`] as stored before registered prefabs (world-store player record format
+/// 1, entity bundle formats 1-3): the same fields without `prefabs`. Decode-only.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ClientV1 {
+    pub input: InputState,
+    pub fps_cam_mode: bool,
+    pub mode: crate::PlayMode,
+    pub inventory: crate::Inventory,
+    pub inventory_open: bool,
+    pub selected: u8,
+    pub cursor: Option<ItemStack>,
+    pub mining: Option<crate::Mining>,
+    pub break_cooldown_until: u64,
+    pub open_container: Option<crate::WorldBlockPos>,
+}
+
+impl From<ClientV1> for Client {
+    fn from(c: ClientV1) -> Self {
+        let ClientV1 {
+            input,
+            fps_cam_mode,
+            mode,
+            inventory,
+            inventory_open,
+            selected,
+            cursor,
+            mining,
+            break_cooldown_until,
+            open_container,
+        } = c;
+        Client {
+            input,
+            fps_cam_mode,
+            mode,
+            inventory,
+            inventory_open,
+            selected,
+            cursor,
+            mining,
+            break_cooldown_until,
+            open_container,
+            prefabs: Default::default(),
+        }
+    }
 }
 
 impl Client {

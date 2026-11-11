@@ -18,12 +18,19 @@ pub const FORMAT_REGION_META_V1: u8 = 1;
 /// `entities.bundle` and in-flight transfers: a `game::EntityBundle`. Format 2 added
 /// `Carried::stud_body`, format 3 dropped the voxel body slot; formats 1 and 2 are
 /// still read ([`decode_entity_bundle`]).
-pub const FORMAT_ENTITY_BUNDLE: u8 = 3;
+pub const FORMAT_ENTITY_BUNDLE: u8 = 4;
+/// The entity bundle layout before a `Client` held registered prefabs (`game::EntityBundleV3`).
+pub const FORMAT_ENTITY_BUNDLE_V3: u8 = 3;
 /// The entity bundle layout with the (empty) voxel body slot (`game::EntityBundleV2`).
 pub const FORMAT_ENTITY_BUNDLE_V2: u8 = 2;
 /// The entity bundle layout before stud bodies (`game::EntityBundleV1`).
 pub const FORMAT_ENTITY_BUNDLE_V1: u8 = 1;
-pub const FORMAT_PLAYER_RECORD: u8 = 1;
+/// `players.record`: a `game::PlayerRecord`. Format 2 added the `Client`'s registered
+/// prefabs (always empty in a record); format 1 rows are still read
+/// ([`decode_player_record`]).
+pub const FORMAT_PLAYER_RECORD: u8 = 2;
+/// The player record layout before registered prefabs (`game::PlayerRecordV1`).
+pub const FORMAT_PLAYER_RECORD_V1: u8 = 1;
 pub const FORMAT_INTENT_MSG: u8 = 1;
 /// `stud_chunks.data`: a `game::StudChunkRecord`.
 pub const FORMAT_STUD_CHUNK: u8 = 1;
@@ -78,7 +85,21 @@ pub fn decode_entity_bundle(bytes: &[u8]) -> Result<game::EntityBundle, StoreErr
         Some(&FORMAT_ENTITY_BUNDLE_V2) => {
             decode::<game::EntityBundleV2>(FORMAT_ENTITY_BUNDLE_V2, bytes).map(game::EntityBundle::from)
         }
+        Some(&FORMAT_ENTITY_BUNDLE_V3) => {
+            decode::<game::EntityBundleV3>(FORMAT_ENTITY_BUNDLE_V3, bytes).map(game::EntityBundle::from)
+        }
         _ => decode(FORMAT_ENTITY_BUNDLE, bytes),
+    }
+}
+
+/// A stored player record of any format: the current one, or format 1
+/// (`game::PlayerRecordV1`, a `Client` without registered prefabs) converted.
+pub fn decode_player_record(bytes: &[u8]) -> Result<game::PlayerRecord, StoreError> {
+    match bytes.first() {
+        Some(&FORMAT_PLAYER_RECORD_V1) => {
+            decode::<game::PlayerRecordV1>(FORMAT_PLAYER_RECORD_V1, bytes).map(game::PlayerRecord::from)
+        }
+        _ => decode(FORMAT_PLAYER_RECORD, bytes),
     }
 }
 

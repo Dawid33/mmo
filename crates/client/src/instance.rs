@@ -954,11 +954,12 @@ impl GameInstanceManager {
             | GameEventKind::HaloSourceGone(_)
             | GameEventKind::HaloUpdate(_)
             | GameEventKind::Intent(_) => {}
-            GameEventKind::UiAction(_, _) | GameEventKind::Order(_, _) if !self.is_caught_up => {
+            GameEventKind::UiAction(_, _) | GameEventKind::Order(_, _) | GameEventKind::Prefab(_, _)
+                if !self.is_caught_up => {
                 // Same admission rule as PlayerInput: drop until the sim has
                 // caught up with the server (join/replay window).
             }
-            e @ (GameEventKind::UiAction(_, _) | GameEventKind::Order(_, _)) => {
+            e @ (GameEventKind::UiAction(_, _) | GameEventKind::Order(_, _) | GameEventKind::Prefab(_, _)) => {
                 if let Some(home) = self.home_region {
                     if !self.host.contains(&home) {
                         self.send_unpredicted(home, e);

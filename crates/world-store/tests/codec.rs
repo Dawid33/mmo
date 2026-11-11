@@ -165,6 +165,23 @@ pub(crate) fn bundle() -> EntityBundle {
     }
 }
 
+/// A default client in the layout stored before registered prefabs.
+fn client_v1() -> game::ClientV1 {
+    let c = Client::default();
+    game::ClientV1 {
+        input: c.input,
+        fps_cam_mode: c.fps_cam_mode,
+        mode: c.mode,
+        inventory: c.inventory,
+        inventory_open: c.inventory_open,
+        selected: c.selected,
+        cursor: c.cursor,
+        mining: c.mining,
+        break_cooldown_until: c.break_cooldown_until,
+        open_container: c.open_container,
+    }
+}
+
 pub(crate) fn player() -> PlayerRecord {
     let mut client = Client::default();
     client.inventory.slots[0] = Some(ItemStack { item: ItemId::block(BlockId(1)), count: 12 });
@@ -270,9 +287,33 @@ fn golden_blobs_decode() {
     let v1 = std::fs::read(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/entity_bundle_v1.bin")).unwrap();
     assert_eq!(v1[0], FORMAT_ENTITY_BUNDLE_V1);
     assert_eq!(decode_entity_bundle(&v1).unwrap(), bundle(), "a format 1 bundle decodes to the same bundle, no stud body");
+    // Format 3 (a `Client` without registered prefabs) is still read: the golden
+    // recorded then.
+    let v3 = fixture("entity_bundle_v3.bin");
+    assert_eq!(v3[0], FORMAT_ENTITY_BUNDLE_V3);
+    assert_eq!(decode_entity_bundle(&v3).unwrap(), bundle(), "a format 3 bundle decodes to the same bundle");
+    let crossing = game::EntityBundleV3 {
+        id: bundle().id,
+        kind: bundle().kind,
+        body: bundle().body,
+        collider: bundle().collider,
+        carried: bundle().carried,
+        client: Some((7, game::ClientV1 { selected: 3, ..client_v1() })),
+        pending_inputs: Vec::new(),
+    };
+    let read = decode_entity_bundle(&encode(FORMAT_ENTITY_BUNDLE_V3, &crossing)).unwrap();
+    let (id, client) = read.client.expect("the crossing player's client");
+    assert_eq!((id, client.selected, client.prefabs.len()), (7, 3, 0), "a format 3 client reads with no registered prefabs");
     assert_eq!(decode_entity_bundle(&encode(FORMAT_ENTITY_BUNDLE, &bundle())).unwrap(), bundle());
     assert!(decode_entity_bundle(&[9, 1, 2]).is_err() && decode_entity_bundle(&[]).is_err());
     check("player_record", FORMAT_PLAYER_RECORD, &player());
+    // Format 1 (a `Client` without registered prefabs) is still read: the golden
+    // recorded then, of the same record.
+    let v1 = fixture("player_record_v1.bin");
+    assert_eq!(v1[0], FORMAT_PLAYER_RECORD_V1);
+    assert_eq!(decode_player_record(&v1).unwrap(), player(), "a format 1 record decodes to the same record");
+    assert_eq!(decode_player_record(&encode(FORMAT_PLAYER_RECORD, &player())).unwrap(), player());
+    assert!(decode_player_record(&[9, 1, 2]).is_err() && decode_player_record(&[]).is_err());
     check("intent_msg", FORMAT_INTENT_MSG, &intent());
     check("intent_msg_reply", FORMAT_INTENT_MSG, &IntentMsg::Reply(reply()));
     check_world_map();

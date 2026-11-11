@@ -563,7 +563,7 @@ macro_rules! engine_rows {
                 let record: Option<Vec<u8>> = r.try_get(1)?;
                 let record = match record {
                     Some(blob) => Some(
-                        decode::<PlayerRecord>(FORMAT_PLAYER_RECORD, &blob)
+                        decode_player_record(&blob)
                             .map_err(|e| StoreError::Corrupt(format!("player {}: {e}", id.0)))?,
                     ),
                     None => None,

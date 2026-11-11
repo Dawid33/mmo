@@ -131,8 +131,26 @@ pub struct PlayerRecord {
     pub adventure: Option<SiteId>,
 }
 
+/// [`PlayerRecord`] as stored before registered prefabs (world-store player record
+/// format 1): the same fields around a [`crate::ClientV1`]. Decode-only.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PlayerRecordV1 {
+    pub client: crate::ClientV1,
+    pub pose: Pose,
+    pub region: RegionCoords,
+    pub fortress: Option<SiteId>,
+    pub adventure: Option<SiteId>,
+}
+
+impl From<PlayerRecordV1> for PlayerRecord {
+    fn from(r: PlayerRecordV1) -> Self {
+        let PlayerRecordV1 { client, pose, region, fortress, adventure } = r;
+        PlayerRecord { client: client.into(), pose, region, fortress, adventure }
+    }
+}
+
 /// `client` as a parked record keeps it: what belongs to the connection —
-/// held input, the first-person flag, an open inventory — is reset, the
+/// held input, the first-person flag, an open inventory, registered prefabs — is reset, the
 /// cursor stack goes back into the inventory (what does not fit stays on the
 /// cursor), an open chest closes, and what belongs to the region it stood
 /// in (mining, the break cooldown: [`Client::arrive`]) is cleared, so a
@@ -143,6 +161,8 @@ pub fn parked_client(client: &Client) -> Client {
     c.fps_cam_mode = false;
     c.inventory_open = false;
     c.open_container = None;
+    // Registered prefabs last for the session; the client registers again.
+    c.prefabs.clear();
     if let Some(rest) = c.stow_cursor() {
         c.cursor = Some(rest);
     }

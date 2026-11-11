@@ -158,7 +158,10 @@ impl ReconcileStats {
     pub fn kind_slot(kind: &GameEventKind) -> usize {
         match kind {
             GameEventKind::Tick => 0,
-            GameEventKind::PlayerInput(..) | GameEventKind::UiAction(..) | GameEventKind::Order(..) => 1,
+            GameEventKind::PlayerInput(..)
+            | GameEventKind::UiAction(..)
+            | GameEventKind::Order(..)
+            | GameEventKind::Prefab(..) => 1,
             _ => 2,
         }
     }
@@ -254,6 +257,7 @@ fn ev_desc(e: &GameEvent) -> String {
         GameEventKind::PlayerInput(c, ie) => format!("PlayerInput(c={c:?}, {ie:?})"),
         GameEventKind::UiAction(c, a) => format!("UiAction(c={c:?}, {a:?})"),
         GameEventKind::Order(c, o) => format!("Order(c={c:?}, {o:?})"),
+        GameEventKind::Prefab(c, p) => format!("Prefab(c={c:?}, {p:?})"),
         GameEventKind::CreateClient(c) => format!("CreateClient(c={c:?})"),
         GameEventKind::CreateClientAt(c, col, carried) => {
             format!("CreateClientAt(c={c:?}, col={col:?}, carried={})", carried.is_some())
@@ -1055,6 +1059,14 @@ impl Region {
             GameEventKind::Order(client_id, order) => {
                 self.data.apply_order_safe(client_id, order);
             }
+            GameEventKind::Prefab(client_id, crate::PrefabCommand::Register(prefab)) => {
+                self.data.register_prefab_safe(client_id, *prefab);
+            }
+            GameEventKind::Prefab(client_id, crate::PrefabCommand::Deregister(key)) => {
+                self.data.deregister_prefab_safe(client_id, key);
+            }
+            // The runtime stamp: not built yet.
+            GameEventKind::Prefab(_, crate::PrefabCommand::Stamp { .. }) => {}
         }
         self.items_destroyed += crate::item_piles::items_destroyed_on_thread() - destroyed_before;
         self.note_halo_writes();

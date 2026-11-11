@@ -110,6 +110,8 @@ impl Client {
             // region closes it if it is out of reach or unseen
             // (`Rollback::close_far_containers_safe`).
             open_container,
+            // Registered for the session, not for a region: they travel.
+            prefabs,
         } = self;
         Client {
             input,
@@ -122,6 +124,7 @@ impl Client {
             mining: None,
             break_cooldown_until: 0,
             open_container,
+            prefabs,
         }
     }
 }
