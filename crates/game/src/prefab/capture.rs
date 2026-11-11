@@ -88,8 +88,9 @@ fn cell_grid(chunk: &StudChunk) -> Vec<Option<(u16, u16)>> {
 /// `chunk` is the world as it is, `pristine` the untouched ground, both by world chunk.
 /// A chunk with pristine ground that `chunk` does not have is
 /// [`CaptureError::ChunkNotLoaded`]; neither is air. Every chunk the prefab bounds
-/// touch is read, and one chunk around them on x and z, so a brick laid outside the
-/// bounds is [`CaptureError::OutOfBounds`] rather than left out silently.
+/// touch is read, and one chunk around them on x and z and above, so a brick laid just
+/// outside the bounds is [`CaptureError::OutOfBounds`] rather than left out silently
+/// (bricks farther out are not seen).
 ///
 /// Catalog parts of a plastic colour become parts exactly as they lie (cells relative
 /// to the anchor, part by LDraw number, `data` kept). Bricks of natural materials (and
@@ -115,7 +116,9 @@ pub fn capture_build(
     let mut parts: Vec<BuildPartFile> = Vec::new();
     let mut fills: BTreeMap<(u16, u16), BTreeSet<[i32; 3]>> = BTreeMap::new();
     for cx in first[0] - 1..=last[0] + 1 {
-        for cy in first[1]..=last[1] {
+        // One layer above the bounds too (air unless built in). Not below: ground there
+        // may be only implied, with no chunk to read.
+        for cy in first[1]..=last[1] + 1 {
             for cz in first[2] - 1..=last[2] + 1 {
                 let Ok(layer) = i32::try_from(cy) else { continue };
                 let pos = WorldChunkPos::new(cx, layer, cz);

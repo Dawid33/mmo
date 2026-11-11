@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use super::ResolvedBuild;
 use crate::stud_catalog::STUD_PARTS;
 use crate::stud_rebrick::{diggable, rebrick_slot};
+use crate::stud::StudOccupancy;
 use crate::{fill_box, StudBrick, StudChunk, StudShape, WorldChunkPos, STUD_CHUNK_PLATES, STUD_CHUNK_STUDS};
 
 /// A stud chunk's size in cells: studs x, plates y, studs z.
@@ -46,6 +47,13 @@ pub struct BuildLayout {
     pub chunks: BTreeMap<WorldChunkPos, ChunkStamp>,
     /// Non-box parts (slopes) left out because they would straddle a chunk edge.
     pub skipped_split: u32,
+}
+
+impl BuildLayout {
+    /// Bricks the layout lays, over all chunks.
+    pub fn brick_count(&self) -> usize {
+        self.chunks.values().map(|s| s.bricks.len()).sum()
+    }
 }
 
 /// Turns a cell by `turn` quarter turns about the anchor column (the anchor cell stays
@@ -161,18 +169,29 @@ impl ChunkStamp {
         for &(min, size) in &self.carve {
             out.carved += chunk.carve(min, end(min, size)).iter().map(|&(_, cells)| cells).sum::<u32>();
         }
-        // The slots (`rebrick_slot`) holding a diggable filler cell of the shell.
+        // The slots (`rebrick_slot`) holding a diggable filler cell of the shell. The
+        // filler cells are gathered once, so the cost is the shell's cells, not shell
+        // boxes times bricks.
         let mut slots = BTreeSet::new();
-        for &(min, size) in &self.shell {
-            let hi = end(min, size);
+        if !self.shell.is_empty() {
+            let mut fillers = StudOccupancy::default();
+            let mut any = false;
             for b in chunk.bricks().filter(|b| matches!(b.shape, StudShape::Filler { .. }) && diggable(b.material)) {
-                let b_size = b.size();
-                let lo = [0, 1, 2].map(|i| min[i].max(b.min[i]));
-                let hi = [0, 1, 2].map(|i| hi[i].min(b.min[i].saturating_add(b_size[i])));
-                for x in lo[0]..hi[0] {
-                    for y in lo[1]..hi[1] {
-                        for z in lo[2]..hi[2] {
-                            slots.insert(rebrick_slot(layer, [x, y, z]));
+                any = true;
+                for cell in b.cells() {
+                    fillers.set(cell.map(i32::from), true);
+                }
+            }
+            let limit = [STUD_CHUNK_STUDS as u8, STUD_CHUNK_PLATES as u8, STUD_CHUNK_STUDS as u8];
+            for &(min, size) in self.shell.iter().filter(|_| any) {
+                let hi = end(min, size);
+                let hi = [0, 1, 2].map(|i| hi[i].min(limit[i]));
+                for x in min[0]..hi[0] {
+                    for y in min[1]..hi[1] {
+                        for z in min[2]..hi[2] {
+                            if fillers.get([x, y, z].map(i32::from)) {
+                                slots.insert(rebrick_slot(layer, [x, y, z]));
+                            }
                         }
                     }
                 }
@@ -182,10 +201,13 @@ impl ChunkStamp {
         for (lo, hi) in slots {
             rebricked |= chunk.rebrick_box(lo, hi);
         }
-        for &b in &self.bricks {
-            match chunk.place(b) {
-                Ok(()) => out.placed += 1,
-                Err(_) => out.skipped += 1,
+        if !self.bricks.is_empty() {
+            let mut occ = chunk.occupancy();
+            for &b in &self.bricks {
+                match chunk.place_into(b, &mut occ) {
+                    Ok(()) => out.placed += 1,
+                    Err(_) => out.skipped += 1,
+                }
             }
         }
         out.changed = out.carved > 0 || rebricked || out.placed > 0;

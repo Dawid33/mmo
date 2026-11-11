@@ -24,6 +24,15 @@ pub const MAX_REGISTERED_PREFABS: usize = 8;
 /// hold in total: about 100 KB of state at worst.
 pub const MAX_REGISTERED_ELEMENTS: usize = 8192;
 
+/// Most bricks one stamp may lay (tiled boxes included). A stamp over it is refused
+/// whole: a prefab within every cap can still tile into far more bricks than a region
+/// should lay in one event (plate-thin boxes).
+pub const STAMP_MAX_BRICKS: usize = 16384;
+/// Most intents (carve boxes and bricks) one stamp sends into neighbouring regions;
+/// the rest of the neighbours' share is left out and counted. Each is a whole-chunk
+/// write there, until a stamp can cross a seam as one batch.
+pub const STAMP_MAX_NEIGHBOUR_INTENTS: usize = 256;
+
 /// One registered prefab. The definition sits behind a shared pointer with its key
 /// computed once, so hashing, undo copies and seam crossings do not walk it: the state
 /// hash covers the key alone (the key IS the hash of the definition). On the wire it is
@@ -100,6 +109,8 @@ pub struct StampOutcome {
     pub skipped_split: u32,
     /// Carve boxes and bricks sent to neighbouring regions as intents (no reply is awaited).
     pub sent_to_neighbours: u32,
+    /// The rest of the neighbours' share, left out: over [`STAMP_MAX_NEIGHBOUR_INTENTS`].
+    pub dropped_at_seam: u32,
 }
 
 impl Rollback {
@@ -141,12 +152,13 @@ impl Rollback {
     /// `PrefabCommand::Stamp`: lays a Build prefab with its anchor on world cell
     /// `anchor`. `None`, nothing changed: `turn > 3`, a reference that does not resolve
     /// (a key this client has not registered, a built-in name key nobody installed),
-    /// or an anchor outside this region or the legal layers (the region that owns the
-    /// anchor runs the layout).
+    /// an anchor outside this region or the legal layers (the region that owns the
+    /// anchor runs the layout), or a layout of more than [`STAMP_MAX_BRICKS`] bricks.
     ///
     /// This region's chunks are written at once, one write per chunk; a brick that
     /// would overlap a body is left out. The part in a neighbouring region goes there
-    /// as `Intent::CarveStud` per carve box and `Intent::PlaceStud` per brick, applied
+    /// as `Intent::CarveStud` per carve box and `Intent::PlaceStud` per brick (at most
+    /// [`STAMP_MAX_NEIGHBOUR_INTENTS`] in all; the rest is left out and counted), applied
     /// at the next tick like every intent; a neighbour that is not running does not
     /// get its part (intents never wake a region). Developer-grade, like
     /// `Order::CarveStud` / `FillStud`: no cost, no survival rules.
@@ -167,15 +179,20 @@ impl Rollback {
         };
         let ResolvedKind::Build(build) = &def.kind;
         let region = *self.data.region;
-        let local = crate::local_stud_cell(region, anchor);
+        // The anchor is untrusted: compared against this region's own world range, never
+        // brought into its frame first (that subtraction overflows for a far-off value).
+        let own = |v: i64, r: i32| {
+            let lo = i64::from(r) * REGION_STUDS;
+            (lo..lo + REGION_STUDS).contains(&v)
+        };
         let plate_limit = STUD_LAYER_LIMIT as i64 * STUD_CHUNK_PLATES as i64;
-        if !(0..REGION_STUDS).contains(&local[0])
-            || !(0..REGION_STUDS).contains(&local[2])
-            || !(-plate_limit..=plate_limit).contains(&anchor[1])
-        {
+        if !own(anchor[0], region.x) || !own(anchor[2], region.z) || !(-plate_limit..=plate_limit).contains(&anchor[1]) {
             return None;
         }
         let layout = layout_build(build, anchor, turn);
+        if layout.brick_count() > STAMP_MAX_BRICKS {
+            return None;
+        }
         let by = self.stud_edit_source(client);
         let mut outcome = StampOutcome { skipped_split: layout.skipped_split, ..Default::default() };
         for (chunk, mut stamp) in layout.chunks {
@@ -196,17 +213,23 @@ impl Rollback {
             // A neighbour's chunk: its carve boxes, then its bricks, as intents. The
             // ground its pit exposes is re-bricked there by the carve itself.
             let base = [chunk.x * STUD_CHUNK_STUDS as i64, chunk.y as i64 * STUD_CHUNK_PLATES as i64, chunk.z * STUD_CHUNK_STUDS as i64];
-            for (min, size) in stamp.carve {
+            let carves = stamp.carve.into_iter().map(|(min, size)| {
                 let lo = [0, 1, 2].map(|i| base[i] + i64::from(min[i]));
                 let hi = [0, 1, 2].map(|i| lo[i] + i64::from(size[i]));
-                self.send_intent_safe(Target::Stud(chunk), Intent::CarveStud { lo, hi, by }, out);
-                outcome.sent_to_neighbours += 1;
-            }
-            for brick in stamp.bricks {
-                if matches!(brick.shape, StudShape::Part { .. }) {
-                    self.send_intent_safe(Target::Stud(chunk), Intent::PlaceStud { chunk, brick, by }, out);
-                    outcome.sent_to_neighbours += 1;
+                Intent::CarveStud { lo, hi, by }
+            });
+            let bricks = stamp
+                .bricks
+                .into_iter()
+                .filter(|b| matches!(b.shape, StudShape::Part { .. }))
+                .map(|brick| Intent::PlaceStud { chunk, brick, by });
+            for intent in carves.chain(bricks) {
+                if outcome.sent_to_neighbours as usize >= STAMP_MAX_NEIGHBOUR_INTENTS {
+                    outcome.dropped_at_seam += 1;
+                    continue;
                 }
+                self.send_intent_safe(Target::Stud(chunk), intent, out);
+                outcome.sent_to_neighbours += 1;
             }
         }
         Some(outcome)

@@ -173,6 +173,12 @@ fn main() {
     // `client debug <preset> [--reset]` (e.g. `just run` = `debug embarked`)
     // skips the manual setup; a plain `client` opens on the main menu. Parsed
     // first, so a bad command line exits before any window opens.
+    // The game's own prefabs, before any sim thread exists: predicted regions must
+    // resolve a built-in prefab exactly as the server does (the browser's sim worker
+    // installs them with its block registry).
+    #[cfg(not(target_arch = "wasm32"))]
+    client::blocks::install_builtin_prefabs();
+
     #[cfg(not(target_arch = "wasm32"))]
     let debug_scenario = {
         let args: Vec<String> = std::env::args().skip(1).collect();

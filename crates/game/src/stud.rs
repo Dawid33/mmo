@@ -356,6 +356,21 @@ impl StudChunk {
         Ok(())
     }
 
+    /// [`Self::place`] with the room check done against `occ`, this chunk's occupancy
+    /// kept by the caller (updated here): the cost is the brick's cells, not the
+    /// chunk's bricks. For laying many bricks into one chunk.
+    pub fn place_into(&mut self, b: StudBrick, occ: &mut StudOccupancy) -> Result<(), StudError> {
+        validate(&b)?;
+        if b.cells().any(|c| occ.get(c.map(i32::from))) {
+            return Err(StudError::Overlap);
+        }
+        for c in b.cells() {
+            occ.set(c.map(i32::from), true);
+        }
+        self.bricks.insert(b.min, b);
+        Ok(())
+    }
+
     /// Removes the whole brick covering `cell`.
     pub fn remove_at(&mut self, cell: [u8; 3]) -> Option<StudBrick> {
         let min = self.brick_at(cell)?.min;

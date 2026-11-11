@@ -116,7 +116,7 @@ pub fn panel_view(session: Option<&EditorSession>, guard: LeaveGuard) -> PanelVi
         },
         dirty: s.dirty,
         message: s.message.clone().unwrap_or_default(),
-        can_save: s.kind == PrefabKindTag::Build && s.loaded,
+        can_save: s.kind == PrefabKindTag::Build && s.loaded && !s.read_only,
         confirm_exit: guard.asked,
     }
 }

@@ -34,8 +34,9 @@ pub fn load_registry() -> BlockRegistry {
 
 /// Install the game's own prefabs (`assets/prefabs/`): the directory on disk on native
 /// (edit + restart), else the copy embedded in `game` — the manifest's pattern. Server
-/// and client must agree on the set, as on the manifest.
-fn install_builtin_prefabs() {
+/// and client must agree on the set, as on the manifest. The native client calls this at
+/// startup (`main`): its predicted regions resolve `PrefabRef::Builtin` like the server's.
+pub fn install_builtin_prefabs() {
     #[cfg(not(target_arch = "wasm32"))]
     let dir = Some(crate::renderer::resolve_blocks_dir().join("../prefabs"));
     #[cfg(target_arch = "wasm32")]

@@ -19,11 +19,20 @@ pub struct SaveRequested;
 /// How often the panel's part and box counts are refreshed while there are unsaved edits.
 const COUNT_SECONDS: f32 = 1.0;
 
-/// The prefab as it stands in the world: `Err` says why it cannot be read yet.
+/// The prefab as a save may write it: [`capture_world`], refused for a session that
+/// must not be saved.
 fn capture(session: &EditorSession, world: &StudWorld, chunks: &Query<&SimStudChunk>) -> Result<BuildFile, String> {
     if session.kind != PrefabKindTag::Build {
         return Err("prop prefabs cannot be saved yet".into());
     }
+    if session.read_only {
+        return Err("this prefab did not open; saving would replace its file with what stands here".into());
+    }
+    capture_world(session, world, chunks)
+}
+
+/// The prefab as it stands in the world: `Err` says why it cannot be read yet.
+fn capture_world(session: &EditorSession, world: &StudWorld, chunks: &Query<&SimStudChunk>) -> Result<BuildFile, String> {
     if !session.loaded || !ground_arrived(world) {
         return Err("the world is still loading".into());
     }
@@ -45,10 +54,16 @@ fn file_of(session: &EditorSession, build: BuildFile) -> Result<PrefabFile, Stri
         kind: PrefabKindFile::Build(build),
     };
     let trust = if session.source == PrefabSource::Game { Trust::Builtin } else { Trust::Player };
-    resolve(&file, trust).map_err(|problems| {
-        let list: Vec<String> = problems.iter().map(ToString::to_string).collect();
+    let resolved = resolve(&file, trust).map_err(|problems| {
+        let list: Vec<String> = problems.iter().take(4).map(ToString::to_string).collect();
         list.join("; ")
     })?;
+    // A prefab nobody could stamp is not worth a file.
+    let game::ResolvedKind::Build(build) = &resolved.kind;
+    let bricks = game::layout_build(build, editor_anchor(), 0).brick_count();
+    if bricks > game::STAMP_MAX_BRICKS {
+        return Err(format!("{bricks} bricks (a stamp lays at most {})", game::STAMP_MAX_BRICKS));
+    }
     Ok(file)
 }
 
@@ -113,8 +128,25 @@ pub fn count_elements(
         return;
     }
     *wait = COUNT_SECONDS;
-    if let Ok(build) = capture(&session, &world, &chunks) {
+    if let Ok(build) = capture_world(&session, &world, &chunks) {
         (session.parts, session.boxes) = (build.parts.len(), build.boxes.len());
+        // Untouched since it was opened, and settled: the world should hold the file's
+        // build. If it does not (bricks with no room were left out), say so before a
+        // save writes the difference back.
+        let settled = session.counted_at == Some(session.edits_seen);
+        if let (true, 0, Some(opened)) = (settled, session.edits_seen, session.opened.take()) {
+            if (&opened.parts, &opened.boxes) != (&build.parts, &build.boxes) {
+                session.message = Some(format!(
+                    "Opened with differences: the file has {} parts and {} boxes, the world {} and {}. Save writes what is shown",
+                    opened.parts.len(),
+                    opened.boxes.len(),
+                    build.parts.len(),
+                    build.boxes.len()
+                ));
+            }
+        } else if session.edits_seen != 0 {
+            session.opened = None;
+        }
         // An edit's bricks arrive a moment after its order: count once more after
         // the edits stop.
         session.counted = (session.counted_at == Some(session.edits_seen)).then_some(session.edits_seen);

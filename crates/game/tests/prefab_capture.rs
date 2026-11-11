@@ -182,3 +182,15 @@ fn merge_boxes_is_a_fixed_point() {
     assert_eq!(again, cells);
     assert_eq!(merge_boxes(again), b);
 }
+
+#[test]
+fn a_brick_above_the_bounds_refuses_the_save() {
+    // The bounds end 180 plates over the anchor (plate 210 here, in layer 2); a brick
+    // in the layer above them is seen and refused, not left out of the file.
+    let r = region();
+    let p = STUD_PARTS.iter().position(|p| p.number == "3005").unwrap() as u16;
+    let high = WorldChunkPos::new(1, 3, 1);
+    let stray = StudChunk::new([StudBrick::part_at([16, 0, 16], p, 0, 4)]).unwrap();
+    let chunk = |c: WorldChunkPos| if c == high { Some(stray.clone()) } else { chunk_of(&r)(c) };
+    assert_eq!(capture_build(chunk, pristine, ANCHOR, Vec::new(), Vec::new()), Err(CaptureError::OutOfBounds));
+}

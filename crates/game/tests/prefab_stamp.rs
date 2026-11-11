@@ -275,3 +275,69 @@ fn a_big_box_is_laid_whole() {
     assert_eq!(cells, 40 * 6 * 8);
     assert_eq!(chunk_writes(&rx), 2);
 }
+
+/// Plate-thin boxes: each tiles into 576 bricks, so `n` of them lay `576 * n`.
+fn plates(n: usize) -> ResolvedPrefab {
+    let boxes = (0..n as i32)
+        .map(|y| BuildBoxFile { min: [-48, y, -48], size: [96, 1, 96], material: MaterialName::Natural("basalt".into()), data: 0 })
+        .collect();
+    resolved(&build_file("plates", BuildFile { boxes, ..empty_build() }))
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn a_stamp_over_the_brick_cap_is_refused_whole() {
+    // Valid as a prefab (30 boxes, well under the volume cap), far too many bricks to lay.
+    let p = plates(30);
+    assert!(p.validate(game::Trust::Player).is_ok());
+    let game::ResolvedKind::Build(build) = &p.kind;
+    assert!(game::layout_build(build, [48, FLOOR, 48], 0).brick_count() > game::STAMP_MAX_BRICKS);
+    let (mut r, rx) = region();
+    let key = register(&mut r, &p);
+    let (ground, _) = (terrain(&r), chunk_writes(&rx));
+    stamp(&mut r, key, [48, FLOOR, 48], 0);
+    assert_eq!(ground, terrain(&r));
+    assert_eq!(chunk_writes(&rx), 0);
+    // Under the cap it is laid.
+    let small = plates(2);
+    let key = register(&mut r, &small);
+    stamp(&mut r, key, [48, FLOOR, 48], 0);
+    assert!(chunk_writes(&rx) > 0);
+}
+
+#[test]
+fn a_neighbours_share_is_capped() {
+    // A slab reaching 40 studs into the west neighbour: its bricks there would each be
+    // an intent. Only the first few are sent; the rest are left out.
+    let p = resolved(&build_file(
+        "slab",
+        BuildFile {
+            boxes: vec![BuildBoxFile { min: [-48, 0, -48], size: [96, 9, 96], material: MaterialName::Natural("basalt".into()), data: 0 }],
+            ..empty_build()
+        },
+    ));
+    let (mut r, _rx) = region();
+    let key = register(&mut r, &p);
+    let _ = r.take_intents();
+    stamp(&mut r, key, [8, FLOOR, 64], 0);
+    let sent = r.take_intents().len();
+    // 40 x 96 studs of three courses: 720 bricks on the neighbour's side.
+    assert_eq!(sent, game::STAMP_MAX_NEIGHBOUR_INTENTS);
+}
+
+#[test]
+fn a_hostile_anchor_does_not_overflow() {
+    // In a region away from the origin the anchor is brought into its frame: with
+    // overflow checks on, a wrapped subtraction would panic the region thread.
+    for rc in [game::RegionCoords::new(3, -2), game::RegionCoords::new(-3, 2)] {
+        crate::common::install_real_block_props();
+        let mut r = Region::new(Rollback::new(None), None, rc, None);
+        r.seed_stud_world(uniform_seed());
+        r.handle_event(GameEventKind::CreateClient(0)).unwrap();
+        let key = register(&mut r, &resolved(&arch()));
+        for anchor in [[i64::MIN, FLOOR, 0], [i64::MAX, FLOOR, 0], [0, FLOOR, i64::MIN], [0, FLOOR, i64::MAX], [i64::MIN, i64::MIN, i64::MIN]] {
+            stamp(&mut r, key, anchor, 0);
+        }
+        assert_eq!(red_cells(&r), 0);
+    }
+}

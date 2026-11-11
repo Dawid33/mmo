@@ -28,6 +28,9 @@ pub const EDITOR_WORLD_SCALE: WorldScale = WorldScale { near_radius: 1, fortress
 /// How often the opening stamp is sent again until its bricks show up (the sim
 /// drops commands sent before it has caught up with the server).
 const STAMP_RETRY_SECONDS: f32 = 0.75;
+/// How many times the opening stamp is sent before the editor gives up on it (the
+/// prefab is then open read-only: nothing of it is in the world to save).
+const STAMP_ATTEMPTS: u32 = 12;
 
 const ANCHOR_COLOR: Color = Color::srgb(1.0, 0.85, 0.1);
 const EXTENT_COLOR: Color = Color::srgba(1.0, 1.0, 1.0, 0.35);
@@ -69,13 +72,20 @@ pub struct EditorSession {
     pub dirty: bool,
     /// The last thing worth telling the author (a load or save result).
     pub message: Option<String>,
+    /// The file could not be opened into the world (unreadable, invalid, not laid):
+    /// saving would replace it with whatever stands in the world, so Save is refused.
+    pub read_only: bool,
+    /// The opened file's build, to tell the author when the world does not hold
+    /// exactly that (`save::count_elements`).
+    pub(super) opened: Option<game::BuildFile>,
     /// Parts and boxes a save would write now (refreshed while editing: `save::count_elements`).
     pub parts: usize,
     pub boxes: usize,
     /// The prefab still to be laid into the world.
     to_stamp: Option<ResolvedPrefab>,
-    /// Seconds until the opening stamp is sent (again).
+    /// Seconds until the opening stamp is sent (again), and how often it has been.
     stamp_in: f32,
+    stamp_attempts: u32,
     /// The camera has been moved over the anchor.
     camera_set: bool,
     /// `StudEdits` as last seen.
@@ -151,6 +161,11 @@ fn reset_editor(world: &mut World) {
 
 /// What opening `request` gives: the session, with the prefab to lay (if any).
 fn open(request: &EditorRequest) -> EditorSession {
+    open_in(request, prefab_dir(request.source))
+}
+
+/// [`open`] from a given folder.
+fn open_in(request: &EditorRequest, dir: Option<PrefabDir>) -> EditorSession {
     let mut session = EditorSession {
         source: request.source,
         name: request.name.clone(),
@@ -161,16 +176,19 @@ fn open(request: &EditorRequest) -> EditorSession {
         loaded: true,
         dirty: false,
         message: None,
+        read_only: false,
+        opened: None,
         parts: 0,
         boxes: 0,
         to_stamp: None,
         stamp_in: 0.0,
+        stamp_attempts: 0,
         camera_set: false,
         edits_seen: 0,
         counted_at: None,
         counted: None,
     };
-    let Some(dir) = prefab_dir(request.source) else { return session };
+    let Some(dir) = dir else { return session };
     if !dir.exists(&request.name) {
         session.message = Some(format!("New prefab {:?}", request.name));
         return session;
@@ -178,7 +196,8 @@ fn open(request: &EditorRequest) -> EditorSession {
     let file = match dir.load(&request.name) {
         Ok(file) => file,
         Err(e) => {
-            session.message = Some(format!("Could not open {:?}: {e}", request.name));
+            session.message = Some(format!("Could not open {:?} (read-only): {e}", request.name));
+            session.read_only = true;
             return session;
         }
     };
@@ -186,6 +205,7 @@ fn open(request: &EditorRequest) -> EditorSession {
     session.meta = file.meta.clone();
     let PrefabKindFile::Build(build) = &file.kind else {
         session.message = Some("Prop prefabs cannot be edited yet".into());
+        session.read_only = true;
         return session;
     };
     session.kept_carve = build.carve.clone();
@@ -196,15 +216,19 @@ fn open(request: &EditorRequest) -> EditorSession {
     let trust = if request.source == PrefabSource::Game { Trust::Builtin } else { Trust::Player };
     match resolve(&file, trust) {
         Ok(prefab) if prefab.validate(Trust::Player).is_err() => {
-            session.message = Some("This prefab tags bricks with data, which the editor cannot keep yet".into());
+            session.message =
+                Some("This prefab tags bricks with data, which the editor cannot keep yet (read-only)".into());
+            session.read_only = true;
         }
         Ok(prefab) => {
             session.loaded = false;
+            session.opened = Some(build.clone());
             session.to_stamp = Some(prefab);
         }
         Err(problems) => {
-            let list: Vec<String> = problems.iter().map(ToString::to_string).collect();
-            session.message = Some(format!("Could not open {:?}: {}", request.name, list.join("; ")));
+            let list: Vec<String> = problems.iter().take(4).map(ToString::to_string).collect();
+            session.message = Some(format!("Could not open {:?} (read-only): {}", request.name, list.join("; ")));
+            session.read_only = true;
         }
     }
     session
@@ -241,12 +265,14 @@ fn enter_editor(
     }
 }
 
-/// The world cell whose brick shows the opening stamp has landed: the first brick the
-/// layout lays (`None`: the prefab lays no brick).
-fn witness_cell(prefab: &ResolvedPrefab) -> Option<(WorldChunkPos, [u8; 3])> {
+/// The brick that shows the opening stamp has landed: one the layout lays, looked for
+/// in its chunk as that exact brick — a plastic one when there is any, since ground
+/// may stand in a natural brick's place before the stamp (`None`: no brick is laid).
+fn witness_brick(prefab: &ResolvedPrefab) -> Option<(WorldChunkPos, game::StudBrick)> {
     let ResolvedKind::Build(build) = &prefab.kind;
     let layout = layout_build(build, editor_anchor(), 0);
-    layout.chunks.iter().find_map(|(c, s)| s.bricks.first().map(|b| (*c, b.min)))
+    let bricks = || layout.chunks.iter().flat_map(|(c, s)| s.bricks.iter().map(move |b| (*c, *b)));
+    bricks().find(|(_, b)| b.material < game::NATURAL_BASE).or_else(|| bricks().next())
 }
 
 /// Whether the ground around the anchor has arrived: the recipes of the chunk columns
@@ -260,7 +286,8 @@ pub(super) fn ground_arrived(world: &StudWorld) -> bool {
 
 /// Lays the opened prefab: once the ground is there, registers it, stamps it at the
 /// anchor with no turn and deregisters it — again every [`STAMP_RETRY_SECONDS`] until
-/// its first brick is in the world (all three commands are idempotent).
+/// a brick of it is in the world (all three commands are idempotent), at most
+/// [`STAMP_ATTEMPTS`] times.
 fn load_into_world(
     time: Res<Time>,
     session: Option<ResMut<EditorSession>>,
@@ -277,9 +304,9 @@ fn load_into_world(
         session.loaded = true;
         return;
     };
-    let witness = witness_cell(&prefab);
-    let landed = witness.is_some_and(|(chunk, cell)| {
-        world.entity_at(chunk).and_then(|e| chunks.get(e).ok()).is_some_and(|c| c.chunk.brick_at(cell).is_some())
+    let witness = witness_brick(&prefab);
+    let landed = witness.is_some_and(|(chunk, brick)| {
+        world.entity_at(chunk).and_then(|e| chunks.get(e).ok()).is_some_and(|c| c.chunk.bricks().any(|b| *b == brick))
     });
     if landed {
         session.loaded = true;
@@ -294,6 +321,17 @@ fn load_into_world(
     if session.stamp_in > 0.0 {
         return;
     }
+    if session.stamp_attempts >= STAMP_ATTEMPTS {
+        // Never seen to land (its first brick has no room, or the stamp was refused):
+        // what stands in the world is not this prefab, so it must not be saved over it.
+        warn!("[prefab-editor] {:?} was not laid into the editor world", session.name);
+        session.message = Some("The prefab could not be laid into the editor world (read-only)".into());
+        session.read_only = true;
+        session.loaded = true;
+        session.to_stamp = None;
+        return;
+    }
+    session.stamp_attempts += 1;
     session.stamp_in = STAMP_RETRY_SECONDS;
     let key = prefab.key();
     let send = |command| {
@@ -403,21 +441,53 @@ impl Plugin for PrefabEditorPlugin {
 mod tests {
     use super::*;
 
-    #[test]
-    fn the_witness_is_the_first_brick_the_stamp_lays() {
+    fn arch() -> ResolvedPrefab {
         let file = game::prefab_from_ron(include_str!("../../../../assets/prefabs/dev-arch.prefab.ron")).unwrap();
-        let prefab = resolve(&file, Trust::Player).unwrap();
-        let (chunk, cell) = witness_cell(&prefab).expect("the arch lays bricks");
+        resolve(&file, Trust::Player).unwrap()
+    }
+
+    #[test]
+    fn the_witness_is_a_brick_the_stamp_lays() {
+        let prefab = arch();
+        let (chunk, brick) = witness_brick(&prefab).expect("the arch lays bricks");
         let a = editor_anchor();
         let n = STUD_CHUNK_STUDS as i64;
         // The first post stands on the anchor cell.
         assert_eq!((chunk.x, chunk.z), (a[0].div_euclid(n), a[2].div_euclid(n)));
-        assert_eq!(cell, [a[0].rem_euclid(n) as u8, a[1].rem_euclid(STUD_CHUNK_PLATES as i64) as u8, a[2].rem_euclid(n) as u8]);
+        assert_eq!(brick.min, [a[0].rem_euclid(n) as u8, a[1].rem_euclid(STUD_CHUNK_PLATES as i64) as u8, a[2].rem_euclid(n) as u8]);
+        assert_eq!(brick.material, 4);
         // A prefab without bricks has none.
         let mut empty = prefab.clone();
         let ResolvedKind::Build(b) = &mut empty.kind;
         b.parts.clear();
-        assert_eq!(witness_cell(&empty), None);
+        assert_eq!(witness_brick(&empty), None);
+    }
+
+    #[test]
+    fn ground_is_never_taken_for_the_prefab() {
+        // A stone box sunk under the anchor sorts before the plastic above it, and
+        // ground stands in its cells before the stamp: the witness is the plastic brick.
+        let mut prefab = arch();
+        let ResolvedKind::Build(b) = &mut prefab.kind;
+        b.boxes.push(game::BuildBox { min: [-8, -6, 0], size: [4, 3, 2], material: game::MAT_GRASS, data: 0 });
+        let (_, brick) = witness_brick(&prefab).unwrap();
+        assert!(brick.material < game::NATURAL_BASE);
+    }
+
+    #[test]
+    fn a_file_that_does_not_open_is_read_only() {
+        let dir = std::env::temp_dir().join(format!("mmo-prefab-editor-open-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("broken.prefab.ron"), "(format: 1, nam").unwrap();
+        let folder = PrefabDir::new(&dir);
+        let request = |name: &str| EditorRequest { source: PrefabSource::Library, name: name.into(), new_kind: None };
+        let broken = open_in(&request("broken"), Some(folder));
+        assert!(broken.read_only && broken.loaded && broken.to_stamp.is_none(), "{:?}", broken.message);
+        // A name with no file is a new prefab: saveable.
+        let new = open_in(&request("fresh"), Some(PrefabDir::new(&dir)));
+        assert!(!new.read_only && new.loaded);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

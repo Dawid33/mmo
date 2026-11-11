@@ -249,3 +249,22 @@ fn apply_rebricks_the_fillers_a_carve_exposes() {
     // Deep ground the pit does not touch stays a filler.
     assert!(matches!(c.brick_at([20, 5, 20]).unwrap().shape, game::StudShape::Filler { .. }));
 }
+
+#[test]
+fn apply_on_a_crowded_chunk_gives_what_placing_one_by_one_gives() {
+    // The applier checks room through an occupancy grid: same result as `StudChunk::place`.
+    let mut by_apply = StudChunk::new([brick("3001", [0, 0, 0]), brick("3007", [8, 3, 8])]).unwrap();
+    let mut by_place = by_apply.clone();
+    let bricks = vec![
+        brick("3001", [2, 0, 0]),  // overlaps the first
+        brick("3001", [4, 0, 0]),
+        brick("3005", [15, 3, 9]), // inside the 2 x 8
+        brick("3005", [16, 3, 8]),
+        brick("3001", [29, 0, 0]), // out of the chunk
+        brick("3005", [4, 0, 1]),  // overlaps a brick this same stamp laid
+    ];
+    let applied = ChunkStamp { bricks: bricks.clone(), ..Default::default() }.apply(0, &mut by_apply);
+    let placed = bricks.iter().filter(|b| by_place.place(**b).is_ok()).count() as u32;
+    assert_eq!(by_apply, by_place);
+    assert_eq!((applied.placed, applied.skipped), (placed, bricks.len() as u32 - placed));
+}

@@ -16,8 +16,13 @@ prefab-editor --game dev-arch` (arch at the anchor, place / remove, Ctrl+S, open
 no diff), the `just play` library walk-through (new, save, exit, export, delete, import, duplicate,
 a junk file in the status line, the unsaved-changes prompt) and the session-leak check (a normal
 world after the editor: build mode off, no panel). Client unit tests for it are written but not run.
-Known gaps: a stamp's carve across a seam drops item piles on the neighbour's side only (it goes
-there as `Intent::CarveStud`, the dig path; a batched stamp intent would fix it); game Build prefabs
+Known gaps: a stamp's share in a neighbouring region goes there as `Intent::CarveStud` /
+`PlaceStud` (the dig path: it drops item piles and re-bricks only behind cells that really opened,
+so a carving prefab across a region edge can differ from the seed path there) and is cut at
+`STAMP_MAX_NEIGHBOUR_INTENTS` (256) — a batched stamp intent would fix all three; a stamp of more
+than `STAMP_MAX_BRICKS` (16384) is refused whole; the editor's baseplate is grass all the way down,
+so a prefab's own grass below the surface is taken for ground on save; a save only notices stray
+bricks within one chunk of the bounds; game Build prefabs
 whose bricks carry `data` cannot be opened in the editor; carve boxes and markers are kept and
 shown, not authored; nothing in worldgen calls `stamp_build_into_seed` yet. Next: plan
 2026-11-11-prefabs-2-props.md.
