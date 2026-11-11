@@ -8,6 +8,20 @@ tools, cutaway, overlay, Slint tool bar; live check pending). Next step: workers
 designations (dwarves pathing to and digging/building them, replacing the F3 "Complete all
 orders" stand-in, incl. top-down deconstruction scheduling); then stockpiles and zones.
 
+Prefabs 1 landed 2026-11-11 (plans/2026-11-11-prefabs-1-build-library-editor.md; spec
+specs/2026-11-11-prefab-system-design.md): Build prefabs as files and export strings, one layout for
+the runtime stamp and the worldgen seed, per-player registration, the prefab-editor world, the library
+screen and the editor (`just prefab-editor`). Live check pending (nothing windowed was run): `just
+prefab-editor --game dev-arch` (arch at the anchor, place / remove, Ctrl+S, open + save unchanged =
+no diff), the `just play` library walk-through (new, save, exit, export, delete, import, duplicate,
+a junk file in the status line, the unsaved-changes prompt) and the session-leak check (a normal
+world after the editor: build mode off, no panel). Client unit tests for it are written but not run.
+Known gaps: a stamp's carve across a seam drops item piles on the neighbour's side only (it goes
+there as `Intent::CarveStud`, the dig path; a batched stamp intent would fix it); game Build prefabs
+whose bricks carry `data` cannot be opened in the editor; carve boxes and markers are kept and
+shown, not authored; nothing in worldgen calls `stamp_build_into_seed` yet. Next: plan
+2026-11-11-prefabs-2-props.md.
+
 Multi-region world follow-ups (milestone landed; spec 2026-07-05-multi-region-world):
 - Cell mode removed 2026-10-30 (plans/2026-10-30-remove-cell-mode.md): whole regions + seams; a client never simulates more than its own window. Play regions are 512 m since 2026-10-30 (one-region window, single factor-16 LOD ring); live run at 512 pending.
 

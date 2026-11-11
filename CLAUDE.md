@@ -176,6 +176,24 @@ Forge tunables all live in `forge/knobs.rs` (`just forge-ui` to tune; check at 1
 value; the `forge_quality` gate must pass). Water is recipe data (`StudColumnGround::water_top`), never
 bricks. Look at the world with `just world-map` after tuning changes.
 
+**Prefabs** (`game::prefab`; spec `docs/superpowers/specs/2026-11-11-prefab-system-design.md`) — a saved,
+named group of bricks. Files are `<name>.prefab.ron` (parts by LDraw number, materials by name): the game's own
+in `assets/prefabs/` (embedded by `game/build.rs`, installed like the block props: `install_prefabs`), the
+player's in `<data dir>/prefabs/` (`PrefabDir`); shared as `MMOPF1:` export strings. Only **Build** prefabs
+resolve so far (Prop files are stored and listed; plan `2026-11-11-prefabs-2-props.md`).
+- `resolve(file, Trust)` / `ResolvedPrefab::validate` guard every cap; a prefab from a player is untrusted
+  input (`Trust::Player`: brick `data` forced to 0). A new field or list needs its cap there.
+- ONE layout (`layout_build`) and ONE applier (`ChunkStamp::apply`: carve, re-brick the shell a carve
+  exposes, lay bricks) behind both `stamp_build_into_seed` (worldgen; nothing calls it yet) and the runtime
+  stamp — never give one path its own brick logic.
+- Runtime: `GameEventKind::Prefab(client, PrefabCommand)` — register / deregister (per player, in
+  `Client::prefabs`, travels across seams, cleared when parked) and stamp. The stamp is **developer-grade**
+  (as `Order::CarveStud`): no cost, no gate, anchor must lie in the handling region; a neighbour's part goes as
+  `CarveStud` / `PlaceStud` intents.
+- Editor: `just prefab-editor [--game] [name]` or main menu → Prefab editor (`client/src/prefab_editor/`,
+  native only) on the server's `prefab-editor` keyword world; a save is `capture_build` (everything that is
+  not the baseplate, read back at the anchor).
+
 **Assets**
 - Blockbench `.bbmodel` loads natively (`crates/bbmodel`, `renderer/model.rs`); `just model-view`,
   `just asset-viewer`.
