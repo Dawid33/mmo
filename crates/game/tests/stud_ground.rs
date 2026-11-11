@@ -332,6 +332,7 @@ fn features_merge_into_the_seeded_chunk() {
     region.seed_stud_world(StudRegionSeed {
         ground: vec![(col(0, 0), StudColumnGround::flat(30, SOIL, MAT_STONE, -2000))],
         features: vec![(c, vec![post, buried])],
+        ..Default::default()
     });
     let chunk = region.data().stud_chunk_at(c).unwrap();
     assert_eq!(chunk.brick_at([10, 31, 10]).map(|b| b.material), Some(4));

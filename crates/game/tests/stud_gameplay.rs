@@ -39,7 +39,7 @@ fn world_of(seed: StudRegionSeed) -> Rollback {
 }
 
 fn world(cols: usize) -> Rollback {
-    world_of(StudRegionSeed { ground: flat_ground(cols), features: Vec::new() })
+    world_of(StudRegionSeed { ground: flat_ground(cols), features: Vec::new(), ..Default::default() })
 }
 
 fn region_of(seed: StudRegionSeed) -> Region {
@@ -155,7 +155,7 @@ fn tick(r: &mut Region) {
 
 /// A flat stud region with one Adventure player standing on tile `at`.
 fn region_with_adventurer(at: TilePos) -> (Region, EntityKey) {
-    let mut r = region_of(StudRegionSeed { ground: flat_ground(REGION_CHUNKS), features: Vec::new() });
+    let mut r = region_of(StudRegionSeed { ground: flat_ground(REGION_CHUNKS), features: Vec::new(), ..Default::default() });
     r.handle_event(GameEventKind::CreateClient(CLIENT)).unwrap();
     r.forget_last_event();
     r.handle_event(GameEventKind::Order(CLIENT, Order::SetMode { mode: PlayMode::Adventure, at: Some(at) })).unwrap();
@@ -215,7 +215,7 @@ fn designate(seq: u32, kind: DesignationKind, a: TilePos, b: TilePos) -> Order {
 
 #[test]
 fn digging_and_deconstructing_drop_into_piles() {
-    let mut r = region_of(StudRegionSeed { ground: flat_ground(2), features: Vec::new() });
+    let mut r = region_of(StudRegionSeed { ground: flat_ground(2), features: Vec::new(), ..Default::default() });
     let (a, b) = ([4, STAND - 1, 4], [5, STAND - 1, 4]);
     order(&mut r, designate(1, DesignationKind::Dig, a, b));
     r.forget_last_event();
@@ -298,7 +298,7 @@ fn a_placed_brick_goes_against_each_face() {
     // From inside a brick there is no face.
     assert_eq!(brick_placement(&StudRayHit { normal: [0; 3], ..hit }, MAT_STONE), None);
     // In the sim: placed once, refused over itself, undone exactly.
-    let mut r = region_of(StudRegionSeed { ground: flat_ground(1), features: Vec::new() });
+    let mut r = region_of(StudRegionSeed { ground: flat_ground(1), features: Vec::new(), ..Default::default() });
     let top = StudRayHit { chunk: [0, 0, 0], cell: [10, (TOP - 1) as u8, 10], normal: [0, 1, 0], t: 1.0 };
     let (chunk, brick) = brick_placement(&top, MAT_STONE).unwrap();
     let c = StudChunkCoords { x: chunk[0] as usize, y: chunk[1] as i32, z: chunk[2] as usize };
@@ -319,7 +319,7 @@ fn a_placed_brick_goes_against_each_face() {
 /// leaves it designated, and the dig then carves exactly the designated cells.
 #[test]
 fn a_designated_brick_survives_a_neighbouring_carve() {
-    let mut r = region_of(StudRegionSeed { ground: flat_ground(1), features: Vec::new() });
+    let mut r = region_of(StudRegionSeed { ground: flat_ground(1), features: Vec::new(), ..Default::default() });
     let c = StudChunkCoords { x: 0, y: 0, z: 0 };
     // The surface brick over tile (4, 4), and a tile's worth of cells inside it that
     // the designation's volume does not reach.
@@ -473,7 +473,7 @@ fn tree_seed() -> StudRegionSeed {
     boxed([18, 30, 16], [2, 3, 2], MAT_LEAVES, TREE, &mut bricks);
     boxed([22, 42, 16], [2, 3, 2], MAT_LEAVES, TREE, &mut bricks);
     boxed([28, 30, 16], [2, 12, 2], MAT_WOOD, 9, &mut bricks);
-    StudRegionSeed { ground: flat_ground(2), features: vec![(StudChunkCoords { x: 0, y: 0, z: 0 }, bricks)] }
+    StudRegionSeed { ground: flat_ground(2), features: vec![(StudChunkCoords { x: 0, y: 0, z: 0 }, bricks)], ..Default::default() }
 }
 
 /// Cells of tree `id` left in the terrain, per material.
@@ -699,7 +699,7 @@ fn lake() -> StudColumnGround {
 }
 
 fn lake_world() -> Rollback {
-    world_of(StudRegionSeed { ground: vec![(ColumnCoords::new(0, 0), lake())], features: Vec::new() })
+    world_of(StudRegionSeed { ground: vec![(ColumnCoords::new(0, 0), lake())], features: Vec::new(), ..Default::default() })
 }
 
 #[test]
@@ -817,7 +817,7 @@ fn survivor_in(seed: StudRegionSeed, at: TilePos, pitch_px: f32) -> Region {
 }
 
 fn survivor(pitch_px: f32) -> Region {
-    survivor_in(StudRegionSeed { ground: flat_ground(REGION_CHUNKS), features: Vec::new() }, [20, STAND, 20], pitch_px)
+    survivor_in(StudRegionSeed { ground: flat_ground(REGION_CHUNKS), features: Vec::new(), ..Default::default() }, [20, STAND, 20], pitch_px)
 }
 
 fn set_slot(r: &mut Region, slot: usize, stack: Option<ItemStack>) {
@@ -1081,6 +1081,7 @@ fn slimes_spawn_on_stud_ground_but_not_under_its_water() {
     let everywhere = |g: fn() -> StudColumnGround| StudRegionSeed {
         ground: (0..REGION_CHUNKS).flat_map(|x| (0..REGION_CHUNKS).map(move |z| (ColumnCoords::new(x, z), g()))).collect(),
         features: Vec::new(),
+        ..Default::default()
     };
     let slimes = |r: &Region| -> Vec<EntityKey> { r.data().ecs.slime.iter().filter_map(|(k, s)| s.as_ref().map(|_| k)).collect() };
     // Dry ground: the attempt spawns one, over the surface of its stud column.

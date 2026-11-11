@@ -1556,7 +1556,7 @@ fn stud_flat() -> game::StudColumnGround {
 fn stud_flat_seed(_rc: RegionCoords) -> game::StudRegionSeed {
     let n = game::REGION_CHUNKS;
     let ground = (0..n).flat_map(|x| (0..n).map(move |z| (ColumnCoords::new(x, z), stud_flat()))).collect();
-    game::StudRegionSeed { ground, features: Vec::new() }
+    game::StudRegionSeed { ground, features: Vec::new(), ..Default::default() }
 }
 
 fn stud_rig(schedule: Option<InlineSchedule>) -> Rig {
@@ -1799,7 +1799,7 @@ fn stud_cliff_seed(rc: RegionCoords) -> game::StudRegionSeed {
             }
         }
     }
-    game::StudRegionSeed { ground, features: Vec::new() }
+    game::StudRegionSeed { ground, features: Vec::new(), ..Default::default() }
 }
 
 /// A sheer cliff along the spawn region's east seam, under the scheduler: the plateau

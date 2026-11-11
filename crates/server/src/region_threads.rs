@@ -96,6 +96,7 @@ impl ThreadRegionSpawner {
                 game::StudRegionSeed {
                     ground: seed.ground.into_iter().filter(|(c, _)| xs.contains(&c.x) && zs.contains(&c.z)).collect(),
                     features: seed.features.into_iter().filter(|(c, _)| xs.contains(&c.x) && zs.contains(&c.z)).collect(),
+                    stamps: seed.stamps.into_iter().filter(|(c, _)| xs.contains(&c.x) && zs.contains(&c.z)).collect(),
                 }
             })
         });

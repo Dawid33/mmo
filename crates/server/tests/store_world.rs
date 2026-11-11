@@ -129,7 +129,7 @@ fn stud_flat_seed(_rc: RegionCoords) -> game::StudRegionSeed {
             })
         })
         .collect();
-    game::StudRegionSeed { ground, features: Vec::new() }
+    game::StudRegionSeed { ground, features: Vec::new(), ..Default::default() }
 }
 
 /// The world restarts from its store: a dug hole stays dug, a slime is

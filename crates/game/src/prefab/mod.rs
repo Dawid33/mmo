@@ -15,12 +15,14 @@ mod codec;
 mod file;
 mod layout;
 mod resolve;
+mod seed;
 
 pub use builtin::*;
 pub use codec::*;
 pub use file::*;
 pub use layout::*;
 pub use resolve::*;
+pub use seed::*;
 
 use serde::{Deserialize, Serialize};
 

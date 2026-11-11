@@ -354,7 +354,7 @@ fn window_from_patch(
     let mut features = crate::stud_trees::stud_tree_features(patch, coords, &mats, trees_from, &around, xs.clone(), zs.clone());
     features.extend(ice);
     debug_assert!(around.iter().all(|(c, _)| inside(c)));
-    StudRegionSeed { ground: around, features }
+    StudRegionSeed { ground: around, features, ..Default::default() }
 }
 
 /// The patch window of chunk columns `xs × zs` with their trees.

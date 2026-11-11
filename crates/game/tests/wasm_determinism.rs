@@ -226,7 +226,7 @@ fn underground_scene() -> (u32, u32) {
         .expect("a recipe of known materials")
     };
     let ground = (0..2).flat_map(|x| (0..2).map(move |z| (ColumnCoords::new(x, z), column()))).collect();
-    let mut region = common::region_of(r0(), StudRegionSeed { ground, features: Vec::new() });
+    let mut region = common::region_of(r0(), StudRegionSeed { ground, features: Vec::new(), ..Default::default() });
     // The top plate of each dig; the last box lies wholly in bedrock.
     let ys = [30, 6, -24, -60, -96, -132, -168, -204, -240, -276, -294, UNDERGROUND_BEDROCK];
     let cw = n as i32;

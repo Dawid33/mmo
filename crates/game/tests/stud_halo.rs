@@ -30,7 +30,7 @@ fn flat_seed() -> StudRegionSeed {
     let ground = (0..REGION_CHUNKS)
         .flat_map(|x| (0..REGION_CHUNKS).map(move |z| (ColumnCoords::new(x, z), flat())))
         .collect();
-    StudRegionSeed { ground, features: Vec::new() }
+    StudRegionSeed { ground, features: Vec::new(), ..Default::default() }
 }
 
 /// A fresh stud region of flat ground.
@@ -577,6 +577,7 @@ fn every_seed_source_gives_the_same_halo() {
     let windowed = game::StudRegionSeed {
         ground: treed.ground.iter().filter(|(c, _)| inside(c.x, c.z)).cloned().collect(),
         features: treed.features.iter().filter(|(c, _)| inside(c.x, c.z)).cloned().collect(),
+        ..Default::default()
     };
     let (mut c, mut d) = (region(west()), region(west()));
     seed(&east_trees, &mut c, west());
@@ -828,7 +829,7 @@ fn seed_of(top: impl Fn(usize, usize) -> i32) -> StudRegionSeed {
         .flat_map(|x| (0..REGION_CHUNKS).map(move |z| (x, z)))
         .map(|(x, z)| (ColumnCoords::new(x, z), StudColumnGround::flat(top(x, z), SOIL, MAT_STONE, -2000)))
         .collect();
-    let mut seed = StudRegionSeed { ground, features: Vec::new() };
+    let mut seed = StudRegionSeed { ground, features: Vec::new(), ..Default::default() };
     // Hand-made ground: the aprons a generator samples are the neighbours' edges.
     link_stud_aprons(&mut seed.ground);
     seed
@@ -997,6 +998,7 @@ fn a_cliff_at_a_seam_is_closed_on_both_sides() {
     let window = StudRegionSeed {
         ground: plateau.ground.iter().filter(|(c, _)| xs.contains(&c.x) && zs.contains(&c.z)).cloned().collect(),
         features: Vec::new(),
+        ..Default::default()
     };
     let snap = crate::common::stud_terrain_snapshot(StudEdge::from_seed(&window));
     apply_checked(&mut b, GameEventKind::HaloUpdate(game::halo::halo_seed_from_snapshot(west(), east(), &snap).unwrap()), "a never-run seed");

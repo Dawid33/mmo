@@ -590,7 +590,7 @@ mod tests {
             let ground = (0..n)
                 .flat_map(|x| (0..n).map(move |z| (ColumnCoords::new(x, z), StudColumnGround::flat(TOP, soil, game::MAT_STONE, -2000))))
                 .collect();
-            StudRegionSeed { ground, features: Vec::new() }
+            StudRegionSeed { ground, features: Vec::new(), ..Default::default() }
         };
         let stud_region = |rc| {
             let (send, updates) = crossbeam::channel::unbounded();

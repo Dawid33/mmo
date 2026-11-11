@@ -168,28 +168,35 @@ impl StudSide {
 }
 
 /// What a fresh stud region starts from (`Region::seed_stud_world`): a ground recipe per
-/// chunk column, plus feature bricks (trees, structures) that are not a function of the
-/// recipe, by the chunk they go into.
+/// chunk column, plus what is not a function of the recipe, by the chunk it goes into:
+/// prefab stamps (carve boxes and bricks) and feature bricks (trees, structures).
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct StudRegionSeed {
     pub ground: Vec<(crate::ColumnCoords, StudColumnGround)>,
     pub features: Vec<(crate::StudChunkCoords, Vec<StudBrick>)>,
+    /// Build prefab stamps (`prefab::stamp_build_into_seed`), applied in order before
+    /// the features.
+    pub stamps: Vec<(crate::StudChunkCoords, crate::ChunkStamp)>,
 }
 
 impl StudRegionSeed {
-    /// The chunks holding feature bricks: each one's pristine chunk (empty where the
-    /// recipe has none) with its features placed in; an overlapping or invalid feature
-    /// brick is dropped.
+    /// The chunks holding stamps or feature bricks: each one's pristine chunk (empty
+    /// where the recipe has none) with its stamps applied in order (carve, then bricks),
+    /// then its features placed in; an overlapping or invalid brick is dropped.
     pub fn feature_chunks(&self) -> std::collections::BTreeMap<crate::StudChunkCoords, StudChunk> {
         let mut out: std::collections::BTreeMap<crate::StudChunkCoords, StudChunk> = Default::default();
+        let pristine = |c: &crate::StudChunkCoords| {
+            self.ground
+                .iter()
+                .find(|(col, _)| (col.x, col.z) == (c.x, c.z))
+                .and_then(|(_, g)| g.pristine_chunk(c.y))
+                .unwrap_or_default()
+        };
+        for (c, stamp) in &self.stamps {
+            stamp.apply(out.entry(*c).or_insert_with(|| pristine(c)));
+        }
         for (c, bricks) in &self.features {
-            let chunk = out.entry(*c).or_insert_with(|| {
-                self.ground
-                    .iter()
-                    .find(|(col, _)| (col.x, col.z) == (c.x, c.z))
-                    .and_then(|(_, g)| g.pristine_chunk(c.y))
-                    .unwrap_or_default()
-            });
+            let chunk = out.entry(*c).or_insert_with(|| pristine(c));
             for b in bricks {
                 let _ = chunk.place(*b);
             }

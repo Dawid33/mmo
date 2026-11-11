@@ -80,5 +80,5 @@ pub fn floor_with_water(rc: RegionCoords, boxes: &[WaterBox]) -> StudRegionSeed 
         .flat_map(|cx| (0..REGION_CHUNKS).map(move |cz| (cx, cz)))
         .map(|(cx, cz)| (ColumnCoords::new(cx, cz), column_with_water(rc, cx, cz, super::FLOOR_PLATES, boxes)))
         .collect();
-    StudRegionSeed { ground, features: Vec::new() }
+    StudRegionSeed { ground, features: Vec::new(), ..Default::default() }
 }

@@ -203,7 +203,7 @@ pub fn lightweight_test_genesis() -> InlineStudGenesis {
         let n = game::REGION_CHUNKS;
         let flat = StudColumnGround::flat(TEST_GROUND_TOP_PLATES, soil, game::MAT_STONE, -2000);
         let ground = (0..n).flat_map(|x| (0..n).map(move |z| ColumnCoords::new(x, z))).map(|c| (c, flat.clone())).collect();
-        StudRegionSeed { ground, features: Vec::new() }
+        StudRegionSeed { ground, features: Vec::new(), ..Default::default() }
     })
 }
 

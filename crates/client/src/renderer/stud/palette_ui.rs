@@ -213,7 +213,7 @@ mod tests {
         )
         .unwrap();
         let mut r = Region::new(Rollback::new(None), None, RegionCoords::new(0, 0), None);
-        r.seed_stud_world(StudRegionSeed { ground: [(ColumnCoords::new(0, 0), recipe)].into_iter().collect(), features: Vec::new() });
+        r.seed_stud_world(StudRegionSeed { ground: [(ColumnCoords::new(0, 0), recipe)].into_iter().collect(), features: Vec::new(), ..Default::default() });
         r
     }
 

@@ -21,6 +21,7 @@ mod prefab_builtin;
 mod prefab_codec;
 mod prefab_layout;
 mod prefab_resolve;
+mod prefab_seed;
 mod adventure;
 mod anim;
 mod body;

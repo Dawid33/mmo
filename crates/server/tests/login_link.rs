@@ -237,7 +237,7 @@ fn stud_flat_seed(_rc: RegionCoords) -> game::StudRegionSeed {
             (0..n).map(move |z| (game::ColumnCoords::new(x, z), game::StudColumnGround::flat(30, soil, game::MAT_STONE, -2000)))
         })
         .collect();
-    game::StudRegionSeed { ground, features: Vec::new() }
+    game::StudRegionSeed { ground, features: Vec::new(), ..Default::default() }
 }
 
 /// A manager over real region threads, fed by the host's link events.

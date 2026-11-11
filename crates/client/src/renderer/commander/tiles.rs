@@ -604,7 +604,7 @@ mod tests {
         fn region() -> Region {
             let mut r = Region::new(Rollback::new(None), None, home(), None);
             let ground = (0..2).flat_map(|x| (0..2).map(move |z| (ColumnCoords::new(x, z), recipe(x, z)))).collect();
-            r.seed_stud_world(StudRegionSeed { ground, features: Vec::new() });
+            r.seed_stud_world(StudRegionSeed { ground, features: Vec::new(), ..Default::default() });
             let mut order = |o: Order| r.handle_event(GameEventKind::Order(CLIENT, o)).unwrap();
             // A pit two tiles wide, three deep, down from the surface.
             order(Order::CarveStud { lo: [8, 12, 8], hi: [12, 30, 12] });

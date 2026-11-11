@@ -44,7 +44,7 @@ fn stone_region(chunks: usize) -> (Region, crossbeam::channel::Receiver<GameData
     let ground = (0..chunks).flat_map(|x| (0..chunks).map(move |z| (ColumnCoords::new(x, z), stone_column()))).collect();
     let (send, recv) = crossbeam::channel::unbounded();
     let mut region = Region::new(Rollback::new(Some(send.clone())), Some(send), r0, None);
-    region.seed_stud_world(StudRegionSeed { ground, features: Vec::new() });
+    region.seed_stud_world(StudRegionSeed { ground, features: Vec::new(), ..Default::default() });
     region.handle_event(GameEventKind::CreateClient(0)).unwrap();
     region.forget_last_event();
     (region, recv)

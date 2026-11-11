@@ -29,7 +29,7 @@ fn stud_flat_seed(_rc: RegionCoords) -> game::StudRegionSeed {
     let ground = (0..n)
         .flat_map(|x| (0..n).map(move |z| (ColumnCoords::new(x, z), game::StudColumnGround::flat(STUD_TOP, soil, game::MAT_STONE, -2000))))
         .collect();
-    game::StudRegionSeed { ground, features: Vec::new() }
+    game::StudRegionSeed { ground, features: Vec::new(), ..Default::default() }
 }
 
 /// The server's spawn path, as `server::run` builds it: every region thread seeds its

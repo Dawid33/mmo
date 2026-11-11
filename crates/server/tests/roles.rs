@@ -138,7 +138,7 @@ fn stud_flat_seed(_rc: RegionCoords) -> game::StudRegionSeed {
             (0..n).map(move |z| (game::ColumnCoords::new(x, z), game::StudColumnGround::flat(30, soil, game::MAT_STONE, -2000)))
         })
         .collect();
-    game::StudRegionSeed { ground, features: Vec::new() }
+    game::StudRegionSeed { ground, features: Vec::new(), ..Default::default() }
 }
 
 /// Two members of the first site, into the first region (in a row from (2, 2)) where a

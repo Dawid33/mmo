@@ -37,7 +37,7 @@ fn region_of(chunks: Vec<(StudChunkCoords, StudChunk)>) -> Region {
 fn flat_region(cols: usize) -> Region {
     let mut r = new_region();
     let ground = (0..cols).flat_map(|x| (0..cols).map(move |z| (ColumnCoords::new(x, z), flat()))).collect();
-    r.seed_stud_world(StudRegionSeed { ground, features: Vec::new() });
+    r.seed_stud_world(StudRegionSeed { ground, features: Vec::new(), ..Default::default() });
     r
 }
 
@@ -183,7 +183,7 @@ fn a_recipe_surface_inside_a_tile_is_a_floor() {
         BEDROCK,
     )
     .unwrap();
-    r.seed_stud_world(StudRegionSeed { ground: vec![(ColumnCoords::new(0, 0), g.clone())], features: Vec::new() });
+    r.seed_stud_world(StudRegionSeed { ground: vec![(ColumnCoords::new(0, 0), g.clone())], features: Vec::new(), ..Default::default() });
     // The materialised chunk and the bare recipe agree on every tile.
     let chunk = r.data().stud_chunk_at(StudChunkCoords { x: 0, y: 0, z: 0 }).unwrap().clone();
     for ty in 0..STUD_LAYER_TILES {

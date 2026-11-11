@@ -248,7 +248,7 @@ const HALO_JOIN_SETTLE_STEPS: usize = (game::UNLOAD_GRACE_MS / game::TICK_RATE) 
 /// void, so no slime spawns there.
 fn floored_west(rc: game::RegionCoords) -> game::StudRegionSeed {
     if rc.x > 0 {
-        return game::StudRegionSeed { ground: Vec::new(), features: Vec::new() };
+        return game::StudRegionSeed { ground: Vec::new(), features: Vec::new(), ..Default::default() };
     }
     client::local_server::lightweight_test_genesis()(rc)
 }

@@ -26,7 +26,7 @@ fn server() -> (RegionRunner, Receiver<(RegionCoords, RegionOutput)>) {
         .flat_map(|x| (0..2).map(move |z| (ColumnCoords::new(x, z), StudColumnGround::flat(TOP, soil, game::MAT_STONE, -2000))))
         .collect();
     let mut region = Region::new(game::Rollback::new(None), None, id, None);
-    region.seed_stud_world(StudRegionSeed { ground, features: Vec::new() });
+    region.seed_stud_world(StudRegionSeed { ground, features: Vec::new(), ..Default::default() });
     let (out_send, out) = unbounded();
     let mut r = RegionRunner::new(id, region, out_send);
     r.handle_input(RegionInput::Event(GameEventKind::CreateClient(CLIENT)));

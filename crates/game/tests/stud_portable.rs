@@ -27,6 +27,7 @@ fn fresh() -> Region {
     region.seed_stud_world(StudRegionSeed {
         ground: [(0, 0), (1, 0), (0, 1)].into_iter().map(|(x, z)| (ColumnCoords::new(x, z), flat())).collect(),
         features: Vec::new(),
+        ..Default::default()
     });
     region
 }

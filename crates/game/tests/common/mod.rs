@@ -85,7 +85,7 @@ pub fn stud_seed_over(
     ground: impl Fn(usize, usize) -> StudColumnGround,
 ) -> StudRegionSeed {
     let ground = chunks_over(x_units, z_units).into_iter().map(|(x, z)| (ColumnCoords::new(x, z), ground(x, z))).collect();
-    StudRegionSeed { ground, features: Vec::new() }
+    StudRegionSeed { ground, features: Vec::new(), ..Default::default() }
 }
 
 /// Flat ground at `plates` under every chunk column overlapping the rectangle.
@@ -98,7 +98,7 @@ pub fn floor_seed(x_units: Range<f32>, z_units: Range<f32>, plates: i32) -> Stud
 pub fn uniform_seed() -> StudRegionSeed {
     let n = REGION_CHUNKS;
     let ground = (0..n).flat_map(|x| (0..n).map(move |z| (ColumnCoords::new(x, z), stud_flat(FLOOR_PLATES)))).collect();
-    StudRegionSeed { ground, features: Vec::new() }
+    StudRegionSeed { ground, features: Vec::new(), ..Default::default() }
 }
 
 /// Stud chunk coordinates (`y` = stud layer).

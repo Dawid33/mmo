@@ -25,6 +25,10 @@ pub mod stud_gen;
 pub mod stud_trees;
 pub mod stud_world;
 pub mod trees;
+
+/// Worldgen's way to place a Build prefab: the same layout the runtime stamp uses,
+/// written into a region seed (`game::prefab`). Nothing calls it yet.
+pub use game::{stamp_build_into_seed, SeedStampReport};
 mod slopes;
 
 /// The world seed shared by every generator caller (server + offline
