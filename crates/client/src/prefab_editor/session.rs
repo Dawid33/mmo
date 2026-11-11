@@ -69,6 +69,9 @@ pub struct EditorSession {
     pub dirty: bool,
     /// The last thing worth telling the author (a load or save result).
     pub message: Option<String>,
+    /// Parts and boxes a save would write now (refreshed while editing: `save::count_elements`).
+    pub parts: usize,
+    pub boxes: usize,
     /// The prefab still to be laid into the world.
     to_stamp: Option<ResolvedPrefab>,
     /// Seconds until the opening stamp is sent (again).
@@ -76,7 +79,11 @@ pub struct EditorSession {
     /// The camera has been moved over the anchor.
     camera_set: bool,
     /// `StudEdits` as last seen.
-    edits_seen: u64,
+    pub(super) edits_seen: u64,
+    /// The edit count the element counts were last taken at, and the one they are
+    /// settled for.
+    pub(super) counted_at: Option<u64>,
+    pub(super) counted: Option<u64>,
 }
 
 /// The app's own world scale while an editor session overrides it.
@@ -154,10 +161,14 @@ fn open(request: &EditorRequest) -> EditorSession {
         loaded: true,
         dirty: false,
         message: None,
+        parts: 0,
+        boxes: 0,
         to_stamp: None,
         stamp_in: 0.0,
         camera_set: false,
         edits_seen: 0,
+        counted_at: None,
+        counted: None,
     };
     let Some(dir) = prefab_dir(request.source) else { return session };
     if !dir.exists(&request.name) {
@@ -240,7 +251,7 @@ fn witness_cell(prefab: &ResolvedPrefab) -> Option<(WorldChunkPos, [u8; 3])> {
 
 /// Whether the ground around the anchor has arrived: the recipes of the chunk columns
 /// under the prefab bounds.
-fn ground_arrived(world: &StudWorld) -> bool {
+pub(super) fn ground_arrived(world: &StudWorld) -> bool {
     let (a, n, half) = (editor_anchor(), STUD_CHUNK_STUDS as i64, i64::from(PREFAB_HALF_STUDS));
     let (x0, x1) = ((a[0] - half).div_euclid(n), (a[0] + half - 1).div_euclid(n));
     let (z0, z1) = ((a[2] - half).div_euclid(n), (a[2] + half - 1).div_euclid(n));
@@ -359,12 +370,24 @@ pub struct PrefabEditorPlugin;
 
 impl Plugin for PrefabEditorPlugin {
     fn build(&self, app: &mut App) {
-        app.add_session_reset_with(reset_editor).add_systems(
-            Update,
-            (enter_editor, load_into_world, focus_camera_on_anchor, mark_dirty, draw_editor_guides)
-                .chain()
-                .run_if(world_systems_enabled()),
-        );
+        app.add_session_reset_with(reset_editor)
+            .add_message::<super::save::SaveRequested>()
+            .add_session_message_clear::<super::save::SaveRequested>()
+            .add_systems(
+                Update,
+                (
+                    enter_editor,
+                    load_into_world,
+                    focus_camera_on_anchor,
+                    mark_dirty,
+                    super::save::request_save_on_ctrl_s,
+                    super::save::save_editor,
+                    super::save::count_elements,
+                    draw_editor_guides,
+                )
+                    .chain()
+                    .run_if(world_systems_enabled()),
+            );
     }
 }
 

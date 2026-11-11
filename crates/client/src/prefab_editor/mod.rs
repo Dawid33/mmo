@@ -6,10 +6,14 @@
 //! with the runtime stamp command, no turn, so the bricks read back on save sit
 //! exactly where the file put them. Native only (the library is files on disk).
 //!
+//! Saving (Ctrl+S, `save.rs`) reads the world's bricks around the anchor back into the
+//! file: everything that is not the baseplate.
+//!
 //! Everything here is per session: [`session::EditorRequest`] and
 //! [`session::EditorSession`] are removed when the session ends, and build mode
 //! (`StudBuild`) is session state already.
 
+pub mod save;
 pub mod session;
 
 pub use session::{prefab_dir, start_editor, EditorRequest, EditorSession, PrefabEditorPlugin, PrefabSource};

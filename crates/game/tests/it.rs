@@ -18,6 +18,7 @@
 
 mod common;
 mod prefab_builtin;
+mod prefab_capture;
 mod prefab_codec;
 mod prefab_layout;
 mod prefab_library;

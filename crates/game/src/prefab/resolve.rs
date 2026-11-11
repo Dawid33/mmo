@@ -162,7 +162,7 @@ fn material_id(m: &MaterialName) -> Result<u16, Problem> {
     }
 }
 
-fn material_name(id: u16) -> MaterialName {
+pub(super) fn material_name(id: u16) -> MaterialName {
     if id >= NATURAL_BASE {
         MaterialName::Natural(stud_material(id).map_or_else(|| format!("#{id}"), |m| m.name.to_string()))
     } else {

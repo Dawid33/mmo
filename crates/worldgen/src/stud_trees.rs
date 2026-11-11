@@ -161,35 +161,6 @@ pub fn stud_tree_cells(sk: &trees::TreeSkeleton, wood_level: u8) -> StudTreeCell
     StudTreeCells { wood, leaves }
 }
 
-/// Greedy boxes `(min, size)` covering `cells` exactly, disjoint: from the lowest
-/// remaining cell (in `[x, y, z]` order) along x, then whole rows along z, then whole
-/// slabs along y.
-fn merge_boxes(mut cells: BTreeSet<[i32; 3]>) -> Vec<([i32; 3], [i32; 3])> {
-    let mut out = Vec::new();
-    while let Some(&s) = cells.iter().next() {
-        let mut e = [1, 1, 1];
-        while cells.contains(&[s[0] + e[0], s[1], s[2]]) {
-            e[0] += 1;
-        }
-        let row = |y: i32, z: i32, e0: i32, set: &BTreeSet<[i32; 3]>| (0..e0).all(|x| set.contains(&[s[0] + x, y, z]));
-        while row(s[1], s[2] + e[2], e[0], &cells) {
-            e[2] += 1;
-        }
-        while (0..e[2]).all(|z| row(s[1] + e[1], s[2] + z, e[0], &cells)) {
-            e[1] += 1;
-        }
-        for x in 0..e[0] {
-            for y in 0..e[1] {
-                for z in 0..e[2] {
-                    cells.remove(&[s[0] + x, s[1] + y, s[2] + z]);
-                }
-            }
-        }
-        out.push((s, e));
-    }
-    out
-}
-
 /// Lays the region stud cells `cells` (`[stud x, plate y, stud z]`, plate 0 = the
 /// bottom of layer 0) as bricks of `material` tagged `data` into `out`, by chunk.
 fn lay_cells(
@@ -199,7 +170,7 @@ fn lay_cells(
     out: &mut BTreeMap<StudChunkCoords, Vec<StudBrick>>,
 ) {
     let chunk = [STUD_CHUNK_STUDS as i32, STUD_CHUNK_PLATES as i32, STUD_CHUNK_STUDS as i32];
-    for (min, size) in merge_boxes(cells) {
+    for (min, size) in game::merge_boxes(cells) {
         let first = [0, 1, 2].map(|a| min[a].div_euclid(chunk[a]));
         let last = [0, 1, 2].map(|a| (min[a] + size[a] - 1).div_euclid(chunk[a]));
         for cx in first[0]..=last[0] {

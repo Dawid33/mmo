@@ -11,6 +11,7 @@
 //!   passes.
 
 mod builtin;
+mod capture;
 mod codec;
 mod command;
 mod file;
@@ -21,6 +22,7 @@ mod resolve;
 mod seed;
 
 pub use builtin::*;
+pub use capture::*;
 pub use codec::*;
 pub use command::*;
 pub use file::*;
