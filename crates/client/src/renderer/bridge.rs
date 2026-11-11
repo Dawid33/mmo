@@ -645,7 +645,7 @@ pub fn drain_region_updates(
                         }
                     }
                 }
-                // Plain per-tile writes, undo included: forwarded to the
+                // Plain per-box / per-tile writes, undo included: forwarded to the
                 // fortress tools' tile mirror.
                 GameDataUpdateKind::SetDesignations(changes) => {
                     if let Some(msgs) = tile_msgs.as_mut() {

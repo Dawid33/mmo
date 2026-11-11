@@ -23,6 +23,11 @@ use quinn::{
 /// don't start one with stdin at `/dev/null`.
 pub const SINGLE_PLAYER_ENV: &str = "VOXEL_SINGLE_PLAYER";
 
+/// `send` / `rebuild`: whether join snapshots carry stud collider grids or leave them
+/// to the receiver (`game::region_wire`). Unset: `send` for a single-player server,
+/// `rebuild` otherwise.
+pub const SNAPSHOT_COLLIDERS_ENV: &str = "VOXEL_SNAPSHOT_COLLIDERS";
+
 /// The QUIC port to bind on 127.0.0.1 (unset or empty = [`DEFAULT_SERVER_PORT`]).
 /// A client starting a menu world picks a free port and passes it here, so a
 /// menu world never collides with a dev server on 6466.
@@ -518,6 +523,15 @@ pub fn run() -> claims::ServerExit {
     let (server_send, server_recv) = crossbeam::channel::unbounded();
 
     let single_player = std::env::var(SINGLE_PLAYER_ENV).is_ok_and(|v| v == "1");
+    // Join snapshots: a remote client rebuilds stud collider grids from the bricks
+    // (20x fewer bytes, a genesis-sized rebuild per region); on loopback the bytes
+    // are free and the rebuild is not, so a single-player server sends them.
+    let send_colliders = match std::env::var(SNAPSHOT_COLLIDERS_ENV).as_deref() {
+        Ok("send") => true,
+        Ok("rebuild") => false,
+        _ => single_player,
+    };
+    game::set_snapshot_sends_colliders(send_colliders);
     let configured_port = std::env::var(SERVER_PORT_ENV).ok();
     let port = server_port_from(configured_port.as_deref()).unwrap_or_else(|message| panic!("{message}"));
     let configured_bind = std::env::var(BIND_ADDR_ENV).ok();
@@ -671,16 +685,14 @@ pub fn run() -> claims::ServerExit {
     let world_clock = game::WorldClock::starting_at(0, opened.world_tick);
     // Region starts generate on their own thread: a fresh region's stud terrain
     // (`worldgen::stud_gen`), and the halo seeds of never-run neighbours — only their
-    // band columns (`generate_stud_columns` is window-independent).
+    // band columns, trees and ice included (`generate_stud_window` gives the bricks
+    // the whole region's genesis gives those columns).
     let mut spawner = region_threads::ThreadRegionSpawner::default().with_clock(world_clock, start);
     spawner = if toy_studs {
         spawner.with_genesis(std::sync::Arc::new(worldgen::stud_world::region_seed))
     } else {
         spawner
-            .with_stud_halo(std::sync::Arc::new(move |rc, xs, zs| game::StudRegionSeed {
-                ground: worldgen::stud_gen::generate_stud_columns(rc, xs, zs, world_seed),
-                features: Vec::new(),
-            }))
+            .with_stud_halo(std::sync::Arc::new(move |rc, xs, zs| worldgen::stud_gen::generate_stud_window(rc, xs, zs, world_seed)))
             .with_genesis(std::sync::Arc::new(move |rc| worldgen::stud_gen::generate_stud_region(rc, world_seed)))
     };
     // A stored world's genesis and halo seeds sample the forged tiles: each region

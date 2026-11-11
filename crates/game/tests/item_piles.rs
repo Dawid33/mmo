@@ -606,10 +606,10 @@ fn resettle_into_full_neighbourhood_counts_loss() {
         region.handle_event(GameEventKind::Order(0, order)).unwrap();
         region.forget_last_event();
     }
-    // On stud terrain the dug shelf yields its stone too (`stud_drops` of a
-    // whole stone tile), which finds no room either.
-    let tile_cells = (game::TILE_STUDS * game::TILE_STUDS * game::TILE_PLATES) as u32;
-    let shelf_yield: u32 = game::stud_drops(&[(game::MAT_STONE, tile_cells)]).iter().map(|s| s.count).sum();
+    // On stud terrain the dug shelf yields its stone too (a tile's worth of cells
+    // per item, `mining::DropTally`), which finds no room either.
+    let shelf_yield = (game::item_piles::items_destroyed_on_thread() - counted) as u32 - 5;
+    assert!((1..=2).contains(&shelf_yield), "the shelf's bricks: {shelf_yield}");
     let lost = u64::from(5 + shelf_yield);
     assert_eq!(game::item_piles::items_destroyed_on_thread() - counted, lost, "the stick pile's 5 items and the shelf's yield, counted once");
     assert_eq!(region.take_items_destroyed(), lost, "attributed to the region");

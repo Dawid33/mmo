@@ -152,7 +152,7 @@ impl Rollback {
 
     /// Every brick of tree `tree` in this region's chunks within the scan reach of
     /// tile `p`, sorted; `None` over [`MAX_STUD_TREE_BRICKS`].
-    fn stud_tree_bricks(&self, tree: u16, p: TilePos) -> Option<Vec<TreeBrick>> {
+    pub(crate) fn stud_tree_bricks(&self, tree: u16, p: TilePos) -> Option<Vec<TreeBrick>> {
         let (n, l) = (STUD_CHUNK_TILES as i32, STUD_LAYER_TILES as i32);
         let (h, v) = (STUD_TREE_SCAN_TILES_H, STUD_TREE_SCAN_TILES_V);
         let last = REGION_CHUNKS as i32 - 1;

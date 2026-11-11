@@ -1,13 +1,20 @@
-//! Fortress orders: what a player may designate on a region's tiles and the
-//! pure rules for which tiles accept which designation. An order covers
-//! exactly the box between the two corners the player picked
-//! ([`TileBox::new`]). Engine-free and state-free; the sim state and the
-//! client tools build on these names.
+//! Fortress orders: what a player may designate in a region and the pure rules
+//! for what accepts which designation. The player picks a box of TILES between
+//! two corners ([`TileBox::new`]); what the order designates is BRICKS
+//! ([`designation_targets`]): every brick meeting that volume, each as its own
+//! box of stud cells ([`StudBox`], snapped outward to the whole brick — a terrain
+//! filler slab, which has no bricks of its own and can span a chunk, is taken as
+//! the one box of its cells inside the volume). A designation is stored by
+//! its cells, so a brick re-split by a neighbouring carve stays designated.
+//! Builds have no brick yet: they stay volumes, one tile box per tile.
+//! Engine-free and state-free; the sim state and the client tools build on these
+//! names.
 //!
-//! A tile is one 1 m block; `TilePos` is region-local block coordinates and a
-//! level is a block `y`.
+//! A tile is 2 x 2 studs x 6 plates; `TilePos` is region-local tile coordinates
+//! and a level is a tile `y`. Paths, levels and move orders stay in tiles.
 
-use std::collections::BTreeMap;
+use std::borrow::Cow;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::edit::{raycast_blocks, BlockPos};
 use crate::{
@@ -125,6 +132,214 @@ impl TileBox {
             max: [max_x, self.max[1], max_z],
         })
     }
+}
+
+/// Stud chunk edge lengths in cells: `[studs, plates, studs]`.
+const CHUNK_CELLS: [i32; 3] =
+    [crate::STUD_CHUNK_STUDS as i32, crate::STUD_CHUNK_PLATES as i32, crate::STUD_CHUNK_STUDS as i32];
+const TILE_CELLS: [i32; 3] = [crate::TILE_STUDS as i32, crate::TILE_PLATES as i32, crate::TILE_STUDS as i32];
+
+/// A box of stud cells inside ONE stud chunk: what a designation is stored on.
+/// `chunk` is `[x, layer, z]` in the region's chunk frame; `lo .. hi` (`hi`
+/// exclusive) are chunk cells `[stud x, plate y, stud z]`. Ordered by chunk first,
+/// so a chunk's designations are one range of the map.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize, StateHash,
+)]
+pub struct StudBox {
+    pub chunk: [i32; 3],
+    pub lo: [u8; 3],
+    pub hi: [u8; 3],
+}
+
+impl StudBox {
+    /// The box of region-local stud cells `lo .. hi` (`hi` exclusive). `None` when
+    /// it is empty or does not lie inside one chunk.
+    pub fn of_cells(lo: [i32; 3], hi: [i32; 3]) -> Option<Self> {
+        if (0..3).any(|a| hi[a] <= lo[a]) {
+            return None;
+        }
+        let chunk = [0, 1, 2].map(|a| lo[a].div_euclid(CHUNK_CELLS[a]));
+        if (0..3).any(|a| (hi[a] - 1).div_euclid(CHUNK_CELLS[a]) != chunk[a]) {
+            return None;
+        }
+        Some(Self {
+            chunk,
+            lo: [0, 1, 2].map(|a| lo[a].rem_euclid(CHUNK_CELLS[a]) as u8),
+            hi: [0, 1, 2].map(|a| (hi[a] - chunk[a] * CHUNK_CELLS[a]) as u8),
+        })
+    }
+
+    /// The cells of tile `p` (a tile never straddles a chunk): what a build
+    /// designation sits on, and what a tile designation of an old save becomes.
+    pub fn of_tile(p: TilePos) -> Option<Self> {
+        let (lo, hi) = crate::stud_tile_box(p)?;
+        Self::of_cells(lo, hi)
+    }
+
+    /// `(lo, hi)` in region-local stud cells, `hi` exclusive.
+    pub fn cells(&self) -> ([i32; 3], [i32; 3]) {
+        let at = |c: [u8; 3]| [0, 1, 2].map(|a| self.chunk[a].saturating_mul(CHUNK_CELLS[a]).saturating_add(i32::from(c[a])));
+        (at(self.lo), at(self.hi))
+    }
+
+    /// `[studs, plates, studs]`.
+    pub fn size(&self) -> [u8; 3] {
+        [0, 1, 2].map(|a| self.hi[a].saturating_sub(self.lo[a]))
+    }
+
+    pub fn cell_count(&self) -> u32 {
+        self.size().iter().map(|&v| u32::from(v)).product()
+    }
+
+    /// Whether it shares a cell with the region-local cell box `lo .. hi`.
+    pub fn meets(&self, lo: [i32; 3], hi: [i32; 3]) -> bool {
+        let (l, h) = self.cells();
+        (0..3).all(|a| l[a] < hi[a] && lo[a] < h[a])
+    }
+
+    /// The tiles it shares a cell with.
+    pub fn tiles(&self) -> TileBox {
+        let (l, h) = self.cells();
+        TileBox {
+            min: [0, 1, 2].map(|a| l[a].div_euclid(TILE_CELLS[a])),
+            max: [0, 1, 2].map(|a| (h[a] - 1).div_euclid(TILE_CELLS[a])),
+        }
+    }
+}
+
+impl TileBox {
+    /// Its stud cells, region-local: `(lo, hi)`, `hi` exclusive (saturating).
+    pub fn stud_cells(&self) -> ([i32; 3], [i32; 3]) {
+        (
+            [0, 1, 2].map(|a| self.min[a].saturating_mul(TILE_CELLS[a])),
+            [0, 1, 2].map(|a| self.max[a].saturating_add(1).saturating_mul(TILE_CELLS[a])),
+        )
+    }
+}
+
+/// One brick a cell box meets ([`bricks_meeting`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BrickPick {
+    /// A part: its whole cell box. A filler (a terrain slab, which can span a
+    /// chunk): its cells inside the query box.
+    pub at: StudBox,
+    pub material: u16,
+    /// The brick's `data` tag (a tree id on wood and leaves, the chest tag).
+    pub data: u16,
+    /// The tree id when this is tree WOOD, else 0.
+    pub tree: u16,
+    /// Its material cannot be dug.
+    pub bedrock: bool,
+}
+
+/// The bricks of `chunk` (at `c`, `[x, layer, z]`) sharing a cell with the chunk
+/// cell box `lo .. hi`, in min-cell order.
+pub fn bricks_meeting(chunk: &crate::StudChunk, c: [i32; 3], lo: [u8; 3], hi: [u8; 3]) -> Vec<BrickPick> {
+    chunk
+        .bricks()
+        .filter_map(|b| {
+            let size = b.size();
+            let b_hi = [0, 1, 2].map(|a| b.min[a] + size[a]);
+            if !(0..3).all(|a| b.min[a] < hi[a] && lo[a] < b_hi[a]) {
+                return None;
+            }
+            let (l, h) = match b.shape {
+                crate::StudShape::Part { .. } => (b.min, b_hi),
+                // Exactly the cells asked for: orders are tile-aligned, so two never
+                // overlap inside a slab.
+                crate::StudShape::Filler { .. } => ([0, 1, 2].map(|a| lo[a].max(b.min[a])), [0, 1, 2].map(|a| hi[a].min(b_hi[a]))),
+            };
+            let bedrock = crate::stud_material(b.material).is_none_or(|m| m.hardness == u16::MAX);
+            let tree = if b.data != 0 && b.material == crate::MAT_WOOD { b.data } else { 0 };
+            Some(BrickPick { at: StudBox { chunk: c, lo: l, hi: h }, material: b.material, data: b.data, tree, bedrock })
+        })
+        .collect()
+}
+
+/// Where [`designation_targets`] reads bricks.
+pub trait BrickSource {
+    /// The stud chunk at `c` (`[x, layer, z]`, the region's frame): the materialised
+    /// one, else the pristine chunk its recipe implies. `None`: air, or unknown.
+    fn stud_chunk(&self, c: [i32; 3]) -> Option<Cow<'_, crate::StudChunk>>;
+}
+
+/// Whether every tile `at` touches is a construction (a built brick lies inside
+/// built tiles; a natural brick reaching out of them is not built).
+pub fn box_is_constructed(tiles: &impl TileSource, at: StudBox) -> bool {
+    at.tiles().tiles().all(|p| tiles.is_constructed(p))
+}
+
+/// What a `Designate` of `kind` over `area` (tiles, already clipped to the region)
+/// would sit on, each with whether it is accepted — the sim's rule and the client's
+/// preview alike:
+/// - **Dig**: every brick meeting the volume ([`bricks_meeting`]); bedrock and built
+///   bricks refuse. Nothing there is nothing to dig (no entry).
+/// - **Deconstruct**: the same bricks; only built ones accept.
+/// - **Chop**: the same bricks; only a tree's (wood or leaves, `data` = its id)
+///   accept. The sim then designates the whole tree.
+/// - **Build**: one tile box per tile ([`validate`]'s rule: anything but a solid tile).
+pub fn designation_targets(
+    tiles: &impl TileSource,
+    bricks: &impl BrickSource,
+    kind: DesignationKind,
+    area: TileBox,
+) -> Vec<(StudBox, Result<(), Invalid>)> {
+    if let DesignationKind::Build(_) = kind {
+        return area.tiles().filter_map(|p| Some((StudBox::of_tile(p)?, validate(tiles, kind, p)))).collect();
+    }
+    let (lo, hi) = area.stud_cells();
+    let first = [0, 1, 2].map(|a| lo[a].div_euclid(CHUNK_CELLS[a]));
+    let last = [0, 1, 2].map(|a| (hi[a] - 1).div_euclid(CHUNK_CELLS[a]));
+    let mut out = Vec::new();
+    for cy in first[1]..=last[1] {
+        for cz in first[2]..=last[2] {
+            for cx in first[0]..=last[0] {
+                let c = [cx, cy, cz];
+                let Some(chunk) = bricks.stud_chunk(c) else { continue };
+                let l = [0, 1, 2].map(|a| (lo[a] - c[a] * CHUNK_CELLS[a]).clamp(0, CHUNK_CELLS[a]) as u8);
+                let h = [0, 1, 2].map(|a| (hi[a] - c[a] * CHUNK_CELLS[a]).clamp(0, CHUNK_CELLS[a]) as u8);
+                for b in bricks_meeting(&chunk, c, l, h) {
+                    let ok = match kind {
+                        DesignationKind::Dig if b.bedrock => Err(Invalid::Bedrock),
+                        DesignationKind::Dig if box_is_constructed(tiles, b.at) => Err(Invalid::Built),
+                        DesignationKind::Dig => Ok(()),
+                        DesignationKind::Deconstruct if box_is_constructed(tiles, b.at) => Ok(()),
+                        DesignationKind::Deconstruct => Err(Invalid::NotBuilt),
+                        DesignationKind::Chop if b.data != 0 && b.material != crate::containers::STUD_CHEST_MATERIAL => Ok(()),
+                        _ => Err(Invalid::NotTree),
+                    };
+                    out.push((b.at, ok));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// [`designation_targets`] as counts: bricks (tiles for a build) that accept, and
+/// why the rest do not. A dig or deconstruct that meets no brick at all reports the
+/// volume's tiles as `NothingToDig` / `NotBuilt`, a chop as `NotTree`.
+pub fn summarize_targets(kind: DesignationKind, area: TileBox, targets: &[(StudBox, Result<(), Invalid>)]) -> OrderSummary {
+    let mut out = OrderSummary::default();
+    for (_, r) in targets {
+        match r {
+            Ok(()) => out.valid += 1,
+            Err(why) => *out.invalid.entry(*why).or_default() += 1,
+        }
+    }
+    if targets.is_empty() {
+        let why = match kind {
+            DesignationKind::Dig => Invalid::NothingToDig,
+            DesignationKind::Deconstruct => Invalid::NotBuilt,
+            DesignationKind::Chop => Invalid::NotTree,
+            DesignationKind::Build(_) => Invalid::Occupied,
+        };
+        if area.tile_count() > 0 {
+            out.invalid.insert(why, area.tile_count());
+        }
+    }
+    out
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, StateHash)]
@@ -305,13 +520,27 @@ impl TileSource for Rollback {
     }
 }
 
+/// This region's own chunks: the materialised one, else the pristine chunk the
+/// recipe implies (`stud_chunk_or_pristine`). Nothing past the edge — a
+/// designation is the ordering region's.
+impl BrickSource for Rollback {
+    fn stud_chunk(&self, c: [i32; 3]) -> Option<Cow<'_, crate::StudChunk>> {
+        let n = crate::REGION_CHUNKS as i32;
+        if !(0..n).contains(&c[0]) || !(0..n).contains(&c[2]) || !crate::stud::stud_layer_ok(c[1]) {
+            return None;
+        }
+        self.stud_chunk_or_pristine(crate::StudChunkCoords { x: c[0] as usize, y: c[1], z: c[2] as usize })
+    }
+}
+
 impl Rollback {
     /// Applies one client's order, undo-safely. `false` = rejected, nothing
     /// changed: an op not issued by `client`, a priority outside
     /// `1..=MAX_PRIORITY`, a build of air, or an area that is inverted, leaves the
     /// order level range, misses the region or clips to more than
     /// [`MAX_ORDER_TILES`]. A designation goes only on
-    /// tiles that [`validate`], replacing what was there.
+    /// what [`designation_targets`] accepts (a chop: those bricks' whole trees),
+    /// taking over the cells it shares with other designations.
     pub fn apply_order_safe(&mut self, client: ClientId, order: Order) -> bool {
         match order {
             Order::Designate { op, kind, priority, area } => {
@@ -326,23 +555,58 @@ impl Rollback {
                 let Some(area) = order_area(area) else { return false };
                 let d = Designation { kind, op, priority };
                 // Through the memoising view: a large area reads each stud chunk once.
-                let changes: Vec<_> = {
+                let mut boxes: BTreeSet<StudBox> = {
                     let src = self.tiles();
-                    area.tiles()
-                        .filter(|&p| validate(&src, kind, p).is_ok())
-                        .filter(|p| self.data.designations.get(p) != Some(&d))
-                        .map(|p| (p, Some(d)))
-                        .collect()
+                    designation_targets(&src, &*self, kind, area).into_iter().filter(|(_, ok)| ok.is_ok()).map(|(b, _)| b).collect()
                 };
+                if kind == DesignationKind::Chop {
+                    boxes = self.whole_trees(&boxes);
+                }
+                // What the new boxes take over: the cells they share with other
+                // designations. Those keep the cells outside the new boxes, as smaller
+                // boxes (a designation is its cells).
+                let mut changes: Vec<(StudBox, Option<Designation>)> = Vec::new();
+                let mut in_chunk: BTreeMap<[i32; 3], Vec<StudBox>> = BTreeMap::new();
+                let mut cut: BTreeMap<StudBox, Vec<StudBox>> = BTreeMap::new();
+                for b in &boxes {
+                    let (lo, hi) = b.cells();
+                    let existing = in_chunk.entry(b.chunk).or_insert_with(|| self.designations_in_chunk(b.chunk));
+                    for k in existing.iter().filter(|k| *k != b && k.meets(lo, hi) && !boxes.contains(k)) {
+                        cut.entry(*k).or_default().push(*b);
+                    }
+                }
+                for (old, cutters) in cut {
+                    let Some(was) = self.data.designations.get(&old).copied() else { continue };
+                    changes.push((old, None));
+                    let mut rest = vec![(old.lo, old.hi)];
+                    for c in cutters {
+                        rest = rest
+                            .into_iter()
+                            .flat_map(|(lo, hi)| {
+                                let (l, h) = ([0, 1, 2].map(|a| lo[a].max(c.lo[a])), [0, 1, 2].map(|a| hi[a].min(c.hi[a])));
+                                if (0..3).any(|a| l[a] >= h[a]) {
+                                    return vec![(lo, hi)];
+                                }
+                                crate::stud_carve::box_minus(lo, hi, l, h)
+                                    .into_iter()
+                                    .map(|(min, size)| (min, [0, 1, 2].map(|a| min[a] + size[a])))
+                                    .collect()
+                            })
+                            .collect();
+                    }
+                    changes.extend(rest.into_iter().map(|(lo, hi)| (StudBox { chunk: old.chunk, lo, hi }, Some(was))));
+                }
+                changes.extend(boxes.into_iter().filter(|b| self.data.designations.get(b) != Some(&d)).map(|b| (b, Some(d))));
                 self.set_designations_safe(changes);
             }
             Order::Erase { area, only } => {
                 let Some(area) = order_area(area) else { return false };
+                let (lo, hi) = area.stud_cells();
                 let changes: Vec<_> = self
                     .data
                     .designations
                     .iter()
-                    .filter(|(p, d)| area.contains(**p) && only.is_none_or(|k| k.same_tool(d.kind)))
+                    .filter(|(b, d)| b.meets(lo, hi) && only.is_none_or(|k| k.same_tool(d.kind)))
                     .map(|(p, _)| (*p, None))
                     .collect();
                 self.set_designations_safe(changes);
@@ -392,35 +656,77 @@ impl Rollback {
         true
     }
 
+    /// The designations of chunk `c` (one range of the map).
+    fn designations_in_chunk(&self, c: [i32; 3]) -> Vec<StudBox> {
+        let range = StudBox { chunk: c, lo: [0; 3], hi: [0; 3] }..=StudBox { chunk: c, lo: [u8::MAX; 3], hi: [u8::MAX; 3] };
+        self.data.designations.range(range).map(|(k, _)| *k).collect()
+    }
+
+    /// A chop's bricks grown to their whole trees: every brick of this region
+    /// carrying the tree id of one of `picked` (`stud_tree_bricks`: wood and leaves
+    /// within the tree scan reach), for trees that have wood. A tree too big to scan
+    /// keeps just its picked bricks.
+    fn whole_trees(&self, picked: &BTreeSet<StudBox>) -> BTreeSet<StudBox> {
+        let mut out = BTreeSet::new();
+        let mut seen: BTreeSet<u16> = BTreeSet::new();
+        for b in picked {
+            let Some(tree) = self.stud_bricks_meeting(*b).first().map(|p| p.data) else { continue };
+            if !seen.insert(tree) {
+                continue;
+            }
+            match self.stud_tree_bricks(tree, b.tiles().min) {
+                Some(bricks) if bricks.iter().any(|t| t.wood) => {
+                    out.extend(bricks.iter().filter_map(|t| StudBox::of_cells(t.lo, t.hi)));
+                }
+                Some(_) => {}
+                None => {
+                    out.insert(*b);
+                }
+            }
+        }
+        out
+    }
+
+    /// The bricks of this region sharing a cell with `at` ([`bricks_meeting`] over
+    /// the materialised chunk, else the pristine one).
+    pub fn stud_bricks_meeting(&self, at: StudBox) -> Vec<BrickPick> {
+        match BrickSource::stud_chunk(self, at.chunk) {
+            Some(chunk) => bricks_meeting(&chunk, at.chunk, at.lo, at.hi),
+            None => Vec::new(),
+        }
+    }
+
     /// Dev shortcut: carries out every designation at once. Builds bottom up (each fills
-    /// the empty cells of its tile box with bricks of its block's material,
-    /// `stud_material_of_block`, and marks the tile constructed), then digs and
-    /// deconstructions top down (each carves its tile box; a deconstructed tile loses
-    /// its constructed mark), skipping tiles that no longer validate, and clears
-    /// every designation. Each chunk is written once per batch. Chops come last, top
-    /// down, each felling its tree (`fell_stud_safe`) if its tile still holds tree
-    /// wood. Everything removed yields its items: a carve's
-    /// as piles at its tile (`carve_stud_boxes_dropping_safe`), a felled part's where
-    /// it comes to rest (`SettlePolicy::DropItems`).
+    /// the empty cells of its box with bricks of its block's material,
+    /// `stud_material_of_block`, and marks its tile constructed), then digs and
+    /// deconstructions top down (each carves exactly its designated cells; the tiles
+    /// a deconstruction touched lose their constructed mark), skipping what no longer
+    /// validates (a dig on built cells, a deconstruct on unbuilt ones), and clears
+    /// every designation. Each chunk is written once per batch. Chops come last,
+    /// lowest first, each felling its tree (`fell_stud_safe`) if its cells still hold
+    /// tree wood — a whole designated tree goes at its lowest wood brick. Everything
+    /// removed yields its items: a carve's as piles under its box
+    /// (`carve_stud_boxes_dropping_safe`), a felled part's where it comes to rest
+    /// (`SettlePolicy::DropItems`).
     fn dev_complete_all_safe(&mut self) {
-        let all: Vec<(TilePos, Designation)> =
+        let all: Vec<(StudBox, Designation)> =
             self.data.designations.iter().map(|(p, d)| (*p, *d)).collect();
-        let mut builds: Vec<(TilePos, BlockId)> = all
+        let mut builds: Vec<(StudBox, BlockId)> = all
             .iter()
             .filter_map(|(p, d)| match d.kind {
                 DesignationKind::Build(id) => Some((*p, id)),
                 _ => None,
             })
             .collect();
-        builds.sort_by_key(|(p, _)| p[1]);
-        let mut removals: Vec<TilePos> = all
+        builds.sort_by_key(|(b, _)| b.cells().0[1]);
+        let mut removals: Vec<(StudBox, DesignationKind)> = all
             .iter()
             .filter(|(_, d)| matches!(d.kind, DesignationKind::Dig | DesignationKind::Deconstruct))
-            .map(|(p, _)| *p)
+            .map(|(p, d)| (*p, d.kind))
             .collect();
-        removals.sort_by_key(|p| std::cmp::Reverse(p[1]));
+        removals.sort_by_key(|(b, _)| std::cmp::Reverse(b.cells().0[1]));
         let mut constructed = Vec::new();
-        // A tile's validity never depends on another tile's dig or build, so each
+        // A box's validity never depends on another's dig or build, so each
         // batch is validated against the state before it.
         let (mut tiles, mut boxes) = (Vec::new(), Vec::new());
         // A build of the chest block puts a chest in the tile (`place_stud_chest_safe`:
@@ -429,11 +735,13 @@ impl Rollback {
         let mut chests = Vec::new();
         {
             let src = self.tiles();
-            for (p, id) in builds {
+            for (b, id) in builds {
+                let p = b.tiles().min;
                 if validate(&src, DesignationKind::Build(id), p).is_ok() {
                     if chest == Some(id) {
                         chests.push(p);
-                    } else if let Some((lo, hi)) = crate::stud_tile_box(p) {
+                    } else {
+                        let (lo, hi) = b.cells();
                         tiles.push(p);
                         boxes.push((lo, hi, crate::stud_material_of_block(id)));
                     }
@@ -447,40 +755,37 @@ impl Rollback {
                 constructed.push((p, true));
             }
         }
-        let (mut tiles, mut boxes) = (Vec::new(), Vec::new());
-        {
-            let src = self.tiles();
-            for p in removals {
-                let kind = self.data.designations.get(&p).map_or(DesignationKind::Dig, |d| d.kind);
-                if validate(&src, kind, p).is_ok() {
-                    if let Some((lo, hi)) = crate::stud_tile_box(p) {
-                        tiles.push(p);
-                        boxes.push((lo, hi));
-                    }
-                }
+        let (mut taken, mut boxes) = (Vec::new(), Vec::new());
+        for (b, kind) in removals {
+            if box_is_constructed(&*self, b) == (kind == DesignationKind::Deconstruct) {
+                taken.push((b, kind));
+                boxes.push(b.cells());
             }
         }
         let removed = self.carve_stud_boxes_dropping_safe(&boxes);
-        constructed.extend(
-            tiles
-                .iter()
-                .zip(removed)
-                .filter(|(p, cells)| !cells.is_empty() && self.data.constructed.contains_key(*p))
-                .map(|(p, _)| (*p, false)),
-        );
-        let mut chops: Vec<TilePos> =
+        let mut unbuilt: BTreeSet<TilePos> = BTreeSet::new();
+        for ((b, kind), cells) in taken.iter().zip(removed) {
+            if *kind == DesignationKind::Deconstruct && !cells.is_empty() {
+                unbuilt.extend(b.tiles().tiles().filter(|p| self.data.constructed.contains_key(p)));
+            }
+        }
+        constructed.extend(unbuilt.into_iter().map(|p| (p, false)));
+        let mut chops: Vec<StudBox> =
             all.iter().filter(|(_, d)| d.kind == DesignationKind::Chop).map(|(p, _)| *p).collect();
-        chops.sort_by_key(|p| std::cmp::Reverse(p[1]));
-        for p in chops {
+        chops.sort_by_key(|b| b.cells().0);
+        chops.sort_by_key(|b| b.cells().0[1]);
+        for b in chops {
             // Validated against the state now: an earlier chop may have felled it.
-            let _ = self.fell_stud_safe(p, crate::SettlePolicy::DropItems);
+            if self.stud_bricks_meeting(b).iter().any(|p| p.tree != 0) {
+                let _ = self.fell_stud_safe(b.tiles().min, crate::SettlePolicy::DropItems);
+            }
         }
         self.set_constructed_safe(constructed);
         self.set_designations_safe(all.into_iter().map(|(p, _)| (p, None)).collect());
     }
 
     /// Writes designation changes and tells the renderer, both ways.
-    fn set_designations_safe(&mut self, changes: Vec<(TilePos, Option<Designation>)>) {
+    fn set_designations_safe(&mut self, changes: Vec<(StudBox, Option<Designation>)>) {
         if changes.is_empty() {
             return;
         }

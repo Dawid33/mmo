@@ -80,7 +80,7 @@ pub fn fill_box(min: [u8; 3], size: [u8; 3], material: u16, data: u16, out: &mut
 
 /// `a \ b` for two boxes (`lo` inclusive, `hi` exclusive) as up to six boxes
 /// `(min, size)`: the slabs under and over `b` first, then the x sides, then the z sides.
-fn box_minus(a_lo: [u8; 3], a_hi: [u8; 3], b_lo: [u8; 3], b_hi: [u8; 3]) -> Vec<([u8; 3], [u8; 3])> {
+pub(crate) fn box_minus(a_lo: [u8; 3], a_hi: [u8; 3], b_lo: [u8; 3], b_hi: [u8; 3]) -> Vec<([u8; 3], [u8; 3])> {
     let mut out = Vec::new();
     let (mut lo, mut hi) = (a_lo, a_hi);
     for axis in [1, 0, 2] {

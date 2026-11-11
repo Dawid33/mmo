@@ -445,12 +445,15 @@ fn stored_stud_region_keeps_its_trees_and_a_falling_one() {
     }
     let before = snapshot(&send, &recv);
     let standing = tree_bricks(&before);
-    assert!(standing.get(&tree).is_some_and(|left| *left < want[&tree]), "a stump is left of the chopped tree");
+    // A chop designates the whole tree (every brick of its id), so it goes at its
+    // lowest wood: no stump is left.
+    let left = standing.get(&tree).copied().unwrap_or(0);
+    assert_eq!(left, 0, "nothing is left of the chopped tree: {left} of {} bricks stand, {} bodies", want[&tree], stud_bodies(&before).len());
     assert!(standing.iter().all(|(t, left)| *t == tree || *left == want[t]), "the other trees stand");
     let bodies = stud_bodies(&before);
     assert_eq!(bodies.len(), 1, "the chopped top is a stud body");
     assert!(bodies[0].model.bricks.iter().all(|b| b.data == tree));
-    assert!(bodies[0].model.bricks.len() + standing[&tree] < want[&tree], "body + stump: the cut bricks are gone");
+    assert!(bodies[0].model.bricks.len() + left < want[&tree], "the cut bricks are gone");
 
     let (tick, portable) = stop(&send, &recv);
     s.reap(id);

@@ -55,8 +55,8 @@ pub enum GameDataUpdateKind {
     /// The entity's animation state (`anim.rs`), set (`Some`) or gone. The
     /// renderer poses the entity's model from it with `anim::sample`.
     SetAnimator(EntityKey, Option<crate::anim::Animator>),
-    /// Designations set (`Some`) or cleared (`None`) per tile.
-    SetDesignations(Vec<(crate::TilePos, Option<crate::Designation>)>),
+    /// Designations set (`Some`) or cleared (`None`) per box of stud cells.
+    SetDesignations(Vec<(crate::StudBox, Option<crate::Designation>)>),
     /// Tiles that became (`true`) or stopped being (`false`) constructions.
     SetConstructed(Vec<(crate::TilePos, bool)>),
     /// Item piles (`item_piles.rs`) set (`Some`, the whole new pile) or gone
@@ -285,9 +285,10 @@ mod game_data {
         /// logged mutators must not be used.
         #[undo(map)]
         stud_ground: BTreeMap<crate::ColumnCoords, crate::StudColumnGround>,
-        /// Fortress orders waiting on tiles (`orders.rs`).
+        /// Fortress orders waiting, by the box of stud cells each sits on
+        /// (`orders.rs`; chunk-major, so a chunk's are one range).
         #[undo(map)]
-        designations: BTreeMap<crate::TilePos, crate::Designation>,
+        designations: BTreeMap<crate::StudBox, crate::Designation>,
         /// Tiles whose block was built by an order (what `Deconstruct` may
         /// take down).
         #[undo(map)]
@@ -427,7 +428,7 @@ impl std::ops::DerefMut for PhysicsParams {
 impl GameData {
     pub fn into_game_update_iter(self) {}
 
-    pub fn designations(&self) -> &std::collections::BTreeMap<crate::TilePos, crate::Designation> {
+    pub fn designations(&self) -> &std::collections::BTreeMap<crate::StudBox, crate::Designation> {
         &self.designations
     }
 

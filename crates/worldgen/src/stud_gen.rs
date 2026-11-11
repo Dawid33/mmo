@@ -24,6 +24,9 @@ pub const PLATES_PER_M: i32 = 5;
 pub const STUDS_PER_M: i32 = 2;
 /// Thickness of a column's cover material: one brick course.
 pub const COVER_PLATES: u8 = 3;
+/// Plates the ice on frozen water stands over the waterline (ice floats; and its top
+/// never lies in the plane of the water sheet drawn at the recipe's water top).
+pub const ICE_FREEBOARD_PLATES: i32 = 1;
 /// Plates below this are bedrock: under the deepest forged sea floor.
 pub const STUD_BEDROCK_PLATE: i32 = (FORGED_SCAN_BOTTOM - 256) * PLATES_PER_M;
 /// Plates the surface scan starts above the analytic surface.
@@ -39,7 +42,7 @@ pub fn stud_materials() -> Materials {
 
 /// One past the top solid plate of a profile: the highest plate that is at least half
 /// full, plus one. The scan-band bottom when the column has no ground.
-fn surface_plate(prof: &crate::pipeline::ColumnProfile) -> i32 {
+pub(crate) fn surface_plate(prof: &crate::pipeline::ColumnProfile) -> i32 {
     let (top, bottom) = scan_band(prof);
     let (top, bottom) = (top * PLATES_PER_M, bottom * PLATES_PER_M);
     let solid = |p: i32| prof.density_at((p as f64 + 0.5) / PLATES_PER_M as f64) > 0.0;
@@ -112,27 +115,43 @@ struct StudCol {
     profile: StudProfile,
     /// Stratigraphic offset, plates.
     geo: i32,
+    /// The ice on frozen water here, plates `lo..hi`: feature bricks standing in the
+    /// top of the recipe's water (`ColumnClimate::ice_blocks` thick, never into the
+    /// bed), [`ICE_FREEBOARD_PLATES`] over the waterline. The water under it stays
+    /// recipe water.
+    ice: Option<(i32, i32)>,
 }
 
 /// The recipe values of the stud column centred on world metres `(x, z)`: what both the
 /// ground recipes and the far-terrain samples ([`stud_lod_tile`]) are made of.
 fn stud_column(patch: &dyn Patch, mats: &Materials, x: f64, z: f64) -> StudCol {
-    let (c, prof) = profile_sample(patch, mats, x, z);
+    let (c, _prof) = profile_sample(patch, mats, x, z);
     let (profile, glacier) = profile_of(mats, &c);
-    let surface = surface_plate(&prof) + glacier;
+    let surface = c.surface_plate + glacier;
     let water_top = (c.water_top + 1) * PLATES_PER_M;
-    StudCol {
-        surface,
-        water: (surface < water_top).then_some(water_top),
-        profile,
-        geo: i32::from(patch.geo(x, z)) * PLATES_PER_M,
-    }
+    let water = (surface < water_top).then_some(water_top);
+    let ice = water.filter(|_| c.ice > 0 && mat(mats.biome.ice).is_some()).map(|top| {
+        let hi = top + ICE_FREEBOARD_PLATES;
+        ((hi - c.ice * PLATES_PER_M).max(surface), hi)
+    });
+    StudCol { surface, water, profile, geo: i32::from(patch.geo(x, z)) * PLATES_PER_M, ice }
+}
+
+/// The recipe's `surface` (one past the top solid plate) of region stud column
+/// `(sx, sz)` of region `coords`, sampled alone.
+pub(crate) fn stud_surface(patch: &dyn Patch, mats: &Materials, coords: RegionCoords, sx: i32, sz: i32) -> i32 {
+    let region_studs = REGION_BLOCKS as i64 * STUDS_PER_M as i64;
+    let at = |region: i32, s: i32| stud_centre_m(region as i64 * region_studs + s as i64);
+    stud_column(patch, mats, at(coords.x, sx), at(coords.z, sz)).surface
 }
 
 /// Centre (world metres) of world stud column `stud` along one axis.
 fn stud_centre_m(stud: i64) -> f64 {
     (stud as f64 + 0.5) / STUDS_PER_M as f64
 }
+
+/// The ice of one chunk column, per stud column (`sz * N + sx`): plates `lo..hi`.
+type ColumnIce = Vec<Option<(i32, i32)>>;
 
 fn recipes_from_patch(
     patch: &dyn Patch,
@@ -141,6 +160,52 @@ fn recipes_from_patch(
     zs: std::ops::Range<usize>,
     mats: &Materials,
 ) -> Vec<(ColumnCoords, StudColumnGround)> {
+    recipes_and_ice(patch, coords, xs, zs, mats).into_iter().map(|(c, g, _)| (c, g)).collect()
+}
+
+/// The ice bricks of chunk column `c`: each run of stud columns with the same ice
+/// plates becomes one filler per stud layer it crosses (rows first, then grown along
+/// z) — a whole frozen chunk is one brick. Deterministic: a pure function of `ice`.
+fn ice_bricks(c: ColumnCoords, ice: &ColumnIce, material: u16, out: &mut Vec<(game::StudChunkCoords, Vec<game::StudBrick>)>) {
+    let mut used = vec![false; N * N];
+    let layer_plates = game::STUD_CHUNK_PLATES as i32;
+    for sz in 0..N {
+        for sx in 0..N {
+            let Some((lo, hi)) = ice[sz * N + sx].filter(|_| !used[sz * N + sx]) else { continue };
+            let same = |x: usize, z: usize, used: &[bool]| !used[z * N + x] && ice[z * N + x] == Some((lo, hi));
+            let w = (sx..N).take_while(|&x| same(x, sz, &used)).count();
+            let d = (sz..N).take_while(|&z| (sx..sx + w).all(|x| same(x, z, &used))).count();
+            for z in sz..sz + d {
+                used[z * N..][sx..sx + w].fill(true);
+            }
+            let mut plate = lo;
+            while plate < hi {
+                let layer = plate.div_euclid(layer_plates);
+                let top = hi.min((layer + 1) * layer_plates);
+                let brick = game::StudBrick {
+                    min: [sx as u8, (plate - layer * layer_plates) as u8, sz as u8],
+                    shape: game::StudShape::Filler { size: [w as u8, (top - plate) as u8, d as u8] },
+                    material,
+                    data: 0,
+                };
+                let chunk = game::StudChunkCoords { x: c.x, y: layer, z: c.z };
+                match out.last_mut() {
+                    Some((last, bricks)) if *last == chunk => bricks.push(brick),
+                    _ => out.push((chunk, vec![brick])),
+                }
+                plate = top;
+            }
+        }
+    }
+}
+
+fn recipes_and_ice(
+    patch: &dyn Patch,
+    coords: RegionCoords,
+    xs: std::ops::Range<usize>,
+    zs: std::ops::Range<usize>,
+    mats: &Materials,
+) -> Vec<(ColumnCoords, StudColumnGround, ColumnIce)> {
     let strata = stud_strata(patch, mats);
     let region_studs = REGION_BLOCKS as i64 * STUDS_PER_M as i64;
     let mut out = Vec::with_capacity(xs.len() * zs.len());
@@ -151,6 +216,7 @@ fn recipes_from_patch(
             let mut profile = vec![0u8; N * N];
             let mut geo = vec![0i32; N * N];
             let mut profiles: Vec<StudProfile> = Vec::new();
+            let mut ice: ColumnIce = vec![None; N * N];
             for sz in 0..N {
                 for sx in 0..N {
                     let i = sz * N + sx;
@@ -163,6 +229,7 @@ fn recipes_from_patch(
                         water[i] = water_top;
                     }
                     geo[i] = col.geo;
+                    ice[i] = col.ice;
                     profile[i] = match profiles.iter().position(|q| *q == p) {
                         Some(k) => k as u8,
                         // A palette of 256 stacks per chunk column; more reuse the last.
@@ -184,7 +251,7 @@ fn recipes_from_patch(
                 STUD_BEDROCK_PLATE,
             )
             .expect("generated stud recipes are valid by construction");
-            out.push((ColumnCoords::new(cx, cz), ground));
+            out.push((ColumnCoords::new(cx, cz), ground, ice));
         }
     }
     out
@@ -239,11 +306,78 @@ fn region_patch_window(coords: RegionCoords) -> (f64, f64, f64) {
 }
 
 fn region_from_patch(patch: &dyn Patch, coords: RegionCoords, trees_from: TreeSource) -> StudRegionSeed {
+    window_from_patch(patch, coords, 0..REGION_CHUNKS, 0..REGION_CHUNKS, trees_from)
+}
+
+/// The chunk columns whose ground the trees of window `w` (one axis) read.
+fn tree_ground_range(w: &std::ops::Range<usize>) -> std::ops::Range<usize> {
+    let m = crate::stud_trees::tree_ground_margin_chunks();
+    w.start.saturating_sub(m)..(w.end + m).min(REGION_CHUNKS)
+}
+
+/// Recipes and feature bricks (trees, ice) of chunk columns `xs × zs` of a region.
+/// `patch` covers the columns of [`tree_ground_range`] plus `TREE_PATCH_MARGIN`: the
+/// trees read the ground past the window from it.
+fn window_from_patch(
+    patch: &dyn Patch,
+    coords: RegionCoords,
+    xs: std::ops::Range<usize>,
+    zs: std::ops::Range<usize>,
+    trees_from: TreeSource,
+) -> StudRegionSeed {
     let mats = stud_materials();
-    let all = 0..REGION_CHUNKS;
-    let ground = recipes_from_patch(patch, coords, all.clone(), all, &mats);
-    let features = crate::stud_trees::stud_tree_features(patch, coords, &mats, trees_from, &ground);
-    StudRegionSeed { ground, features }
+    let inside = |c: &ColumnCoords| xs.contains(&c.x) && zs.contains(&c.z);
+    let mut around = Vec::new();
+    let mut ice = Vec::new();
+    let ice_material = mat(mats.biome.ice);
+    for (c, g, column_ice) in recipes_and_ice(patch, coords, xs.clone(), zs.clone(), &mats) {
+        if let Some(material) = ice_material {
+            ice_bricks(c, &column_ice, material, &mut ice);
+        }
+        around.push((c, g));
+    }
+    let mut features = crate::stud_trees::stud_tree_features(patch, coords, &mats, trees_from, &around, xs.clone(), zs.clone());
+    features.extend(ice);
+    debug_assert!(around.iter().all(|(c, _)| inside(c)));
+    StudRegionSeed { ground: around, features }
+}
+
+/// The patch window of chunk columns `xs × zs` with their trees.
+fn tree_window(coords: RegionCoords, xs: &std::ops::Range<usize>, zs: &std::ops::Range<usize>) -> (f64, f64, f64) {
+    let cb = CHUNK_BLOCKS as i32;
+    let (gx, gz) = (tree_ground_range(xs), tree_ground_range(zs));
+    patch_window(
+        coords.x * REGION_BLOCKS + gx.start as i32 * cb,
+        coords.z * REGION_BLOCKS + gz.start as i32 * cb,
+        gx.len().max(gz.len()) as i32 * cb,
+        TREE_PATCH_MARGIN,
+    )
+}
+
+/// What a fresh region holds in chunk columns `xs × zs`: the recipes of
+/// [`generate_stud_columns`] and the feature bricks (trees, ice) that
+/// [`generate_stud_region`] gives those columns — the same bricks, without generating
+/// the region (the stud halo seed of a never-run neighbour: both sides of a seam see
+/// the same trees). With a forged world installed it comes from it and `seed` is ignored.
+pub fn generate_stud_window(coords: RegionCoords, xs: std::ops::Range<usize>, zs: std::ops::Range<usize>, seed: u64) -> StudRegionSeed {
+    if let Some(world) = forged::active() {
+        return generate_stud_window_forged(world, coords, xs, zs);
+    }
+    let (ox, oz, span) = tree_window(coords, &xs, &zs);
+    let patch = ProceduralPatch(TerrainPipeline::new(seed).profile_grid(ox, oz, span));
+    let habitat = habitat::ProceduralHabitat::new(seed);
+    window_from_patch(&patch, coords, xs, zs, TreeSource { habitat: &habitat, seed })
+}
+
+/// [`generate_stud_window`] for an explicit forged world (tests, tools).
+pub fn generate_stud_window_forged(
+    world: &ForgedWorld,
+    coords: RegionCoords,
+    xs: std::ops::Range<usize>,
+    zs: std::ops::Range<usize>,
+) -> StudRegionSeed {
+    let (ox, oz, span) = tree_window(coords, &xs, &zs);
+    window_from_patch(&world.patch(ox, oz, span), coords, xs, zs, TreeSource { habitat: world, seed: world.seed() })
 }
 
 /// Far terrain of LOD key `key` in a stud world (`game::stud_lod`): the recipe's own
@@ -287,8 +421,15 @@ fn lod_tile_from_patch(patch: &dyn Patch, key: &game::lod::LodKey, mats: &Materi
         for cx in 0..n {
             let stud = |origin_blocks: i32, c: i64| i64::from(origin_blocks) * i64::from(STUDS_PER_M) + c * cell_studs;
             let col = stud_column(patch, mats, stud_centre_m(stud(ox, cx)), stud_centre_m(stud(oz, cz)));
-            let material = game::stud_top_material(col.surface, &col.profile, col.geo, &strata, STUD_BEDROCK_PLATE);
-            samples.push(game::StudLodSample::of_column(col.surface, material, col.water));
+            // Frozen water is far terrain as ice: its top, no water sheet.
+            let sample = match (col.ice, mat(mats.biome.ice)) {
+                (Some((_, top)), Some(ice)) => game::StudLodSample::of_column(top, ice, None),
+                _ => {
+                    let material = game::stud_top_material(col.surface, &col.profile, col.geo, &strata, STUD_BEDROCK_PLATE);
+                    game::StudLodSample::of_column(col.surface, material, col.water)
+                }
+            };
+            samples.push(sample);
         }
     }
     game::StudLodTile::encode(side, &samples)

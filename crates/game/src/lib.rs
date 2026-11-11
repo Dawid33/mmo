@@ -51,6 +51,8 @@ mod physics;
 pub mod protocol;
 mod region;
 pub mod region_runner;
+mod region_wire;
+pub use region_wire::set_snapshot_sends_colliders;
 pub mod save_cut;
 pub mod registry;
 pub mod people;
@@ -121,7 +123,7 @@ pub use path_plan::{
 };
 pub use player::*;
 pub use portable::{
-    restore_portable, PortableRegion, RegionMeta, RegionMetaV1, SaveTerms, StoredRegion, StudChunkRecord, StudKept, StudTerm,
+    restore_portable, PortableRegion, RegionMeta, RegionMetaV1, RegionMetaV2, SaveTerms, StoredRegion, StudChunkRecord, StudKept, StudTerm,
     StudTerms,
 };
 pub use protocol::*;

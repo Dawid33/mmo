@@ -894,12 +894,91 @@ D1–D5 accepted as recommended ("make it so", 2026-11-09).
     dev-complete digs drop on studs; `Order::DevDropBody` reads its level in metres; halo seeds of
     never-run neighbours lack trees; tiles placed by a player are not marked constructed; snapshot
     size and `StudDelta` (P5 / P8 notes above).
+- **Open items pass (2026-11-11).**
+  - *Join snapshot* (`game/src/region_wire.rs`, `serde(with)` on `ServerPacket::Region`): each stud
+    chunk (own and halo) travels as a diff against its recipe's `pristine_chunk` when that has fewer
+    bricks; a chunk's `Voxels` collider shape is left off the wire when the sender has checked that
+    a fresh `stud_collider_shapes` build serializes to the very bytes of the shape it holds
+    (memoised per shape allocation; shapes built by `stud_colliders_tagged` are fresh by
+    construction) and is rebuilt by the receiver — only the shape is swapped
+    (`Collider::swap_shape_raw`, fork), arenas, handles, change flags and broad phase travel as
+    they are. An incrementally patched shape has the same content hash but another chunk / BVH
+    layout (which orders contacts) and is sent whole. Fork: `Voxels::new` builds its BVH in
+    chunk-id order (it followed hash-map order, which differs between native and wasm32 for 1–2
+    chunk grids). Census (`stud_trees::stud_snapshot_census`, 64 m regions): wire 0.80 / 0.32 /
+    0.22 MiB -> 0.032 / 0.037 / 0.031 MiB, restored state byte-equal; encode 9–27 ms, decode
+    29–40 ms per 64 m region on 16 threads (the rebuild is genesis-sized: decode was ~10 ms).
+    `VOXEL_SNAPSHOT_COLLIDERS=send|rebuild`: a single-player server sends the grids (loopback).
+    Not done: per-edit deltas; store rows.
+  - *Swimming*: the exit speed and the water's vertical braking scale with the body's gravity
+    (`MoveParams::gravity_scale`) like the jump — a stud swimmer climbs out onto ledges up to 8
+    plates (pinned at one tile, 6; 9 is out of reach); `settle` gives a fall that something
+    stopped without grounding the body the speed it made (the "hang" on an edge ran `vel_y` to
+    terminal). The plunge off a bank is 4.6 m (was 5.5 m): the model, recorded in
+    `swimming::people_swim_too`. `physics_goldens` did not move.
+  - `Order::DevDropBody` is tile-addressed (`tiles::column_centre` / `level_bottom_units`).
+  - *Worldgen*: covers, snow, glaciers and trees are decided on the plate-level water test
+    (`ColSample::wet`); cold lakes and seas carry ice (feature bricks in the top of the recipe's
+    water, `ICE_FREEBOARD_PLATES` over the waterline; far terrain samples are ice). Stud terrain
+    guard CRC re-recorded; `build_world_map` unchanged (no `WORLD_MAP_VERSION` bump).
+  - *Halo seeds of never-run neighbours* carry the band's feature bricks:
+    `stud_gen::generate_stud_window` gives a window the very bricks the whole region's genesis
+    gives it (trees up to three reaches past the window decide them); one call per facing strip
+    (14–32 ms where per-window calls cost 55–125 ms at 128 m regions).
+  - *Slides over stud caps near seams*: not a seam defect. `handoff_schedule::
+    slide_sensitivity_probe` — with no seam, a launch speed off by 1e-4 moves the rest pose of the
+    quarter-block and 12 m/s slides by 0.20–0.22 blocks (the seam placements: 0.27–0.35); the
+    standard slide moves 0.002 (seams 0.014–0.05); the handoff alone (re-arrival control) 0.0004.
+  - *Cliffs* (the P2 open item): genesis materialises the layers under a column's surface layers
+    that a lower column beside it opens onto (`stud_wall_layers`); across a seam the high region
+    does so when the neighbour's recipes arrive and the low region's halo derives the wall.
+  - Tests restored: stud-body buoyancy, replayed stud-body arrival's drops, tree across the west
+    seam / the corner / at home, cliffs (synthetic and a forged cliff region), tree
+    window-independence, frozen lake and sea.
+  - Client: `SHADOW_MAX_DISTANCE_M` is `2 x ZOOM_FAR_M` plus a metre (the cascade bound rounded
+    under the pin); `desired_window_adventurer_neighbourhood_follows_home` put its "elsewhere"
+    viewer inside the 3x3 (test fixed).
 - Goldens re-recorded on purpose (16-block values): once for P6b (above); `wasm_determinism` and `scene_hash_golden` once
   more for P4 (`GameData.stud_halo`, `stud_halo_ground`; `physics_goldens` did not move); before
   that `wasm_determinism` twice (`BodyScale` fields,
   `GameData.stud_ground`), `scene_hash_golden` (it was already stale from the experiment's layout
   change, so that step was not separately proven layout-only). `physics_goldens` did not move.
 - Not run: client unit tests (opt-in), `just run-studs` (needs a look), any benchmark.
+
+- **Brick-based selection and orders (2026-11-11; nothing launched — sim and pure client code are
+  tested, the picture is unseen).** Selection, mining, placing and the order tool work on BRICKS.
+  - **First person** (`mining.rs`, `edit.rs`): the target is the brick under the crosshair
+    (`stud_target_box`: a part's cell box; a terrain filler slab — which can span a chunk — counts as a
+    lattice of 2 x 2 bricks; a chest is its whole tile). `Mining::target` is that box's min in region
+    stud cells (layout unchanged; the box is read back from the terrain). The break is
+    `Intent::BreakStud { lo, hi, survival }` to the owner's `Target::Stud` (bedrock refuses, tree wood
+    fells, a chest spills); break time = hardness x the box's cells. A hotbar block places ONE 2 x 2
+    brick (`brick_placement`: flush on the hit face's axis, on the 2 x 3 x 2 lattice on the others,
+    thinner at a chunk edge) by `Intent::PlaceBrick` (refunds on refusal); the chest block is still a
+    tile's `PlaceBlock`. **Not done:** the build palette's selected part does not drive first-person
+    placing (it is client state; the sim would need a hashed per-client field).
+  - **Drops** (`DropTally`): cells are counted per dropped item across one carve batch, an item paid
+    per tile's worth, the remainder rolled statelessly on (world tick, plate height, item) — no state,
+    seam-invariant; a built tile deconstructed gives exactly its item back.
+  - **Orders** (`orders.rs`): designations are `BTreeMap<StudBox, Designation>` (`StudBox` = chunk +
+    cell box, chunk-major). `Order::Designate`/`Erase` still carry the dragged `TileBox`;
+    `designation_targets` (shared with the client preview) turns it into every brick meeting the
+    volume (parts whole — snapped outward; fillers as their cells inside the volume), builds into one
+    tile box per tile. A new designation takes over the cells it shares with older ones (those keep the
+    rest as smaller boxes). A chop grows to every brick of the tree's id; completion fells it at its
+    lowest wood. Dig/deconstruct completion carves exactly the designated cells. Constructed stays per
+    tile; a brick is "built" when every tile it touches is. Store: region meta format 3
+    (`RegionMetaV2` + format 1 still read, a tile becoming its cell box; golden `region_meta_v2.bin`).
+  - **Client**: `block_target.rs` outlines the brick's box and stretches the cracks to it;
+    `designate.rs` hovers the brick under the cursor (`pick_brick`, under the cut) and previews the
+    drag's bricks through `ClientBricks` (loaded chunk, else the recipe's pristine chunk);
+    `stud/overlay.rs` draws one tinted + line-outlined box per designated/previewed brick (builds
+    tinted only), cut at the working level, rebuilt only on change. Readout:
+    "8 × 6 studs × 12 plates (4 × 3 × 2.4 m) — 17 bricks to dig".
+  - Gates: game `it` 701, `test-threads`, `determinism-wasm` (goldens unmoved), `web-check`, `smoke`
+    green; client lib `stud::overlay`, `commander::designate`, `commander::tiles`, `fortress_panel`,
+    `block_target` green except `block_target::stages_grow_the_same_cracks` (crack texture, untouched
+    code, failing before this change).
 
 ## Decisions (confirmed 2026-11-09)
 

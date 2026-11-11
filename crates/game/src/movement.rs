@@ -348,11 +348,16 @@ pub fn plan_with(
             // ledge, at full speed for as long as the wall blocks and the
             // waist is wet. Head under, jump only swims up (a wall under
             // water is no ledge).
-            let exit = SWIM_EXIT_SPEED * UNITS_PER_METER;
+            // Scaled like the jump (`BodyScale::move_params`): gravity is, so an
+            // unscaled exit carried a stud body 0.94 m where the voxel body rose 1.25 m.
+            let exit = SWIM_EXIT_SPEED * params.gravity_scale * UNITS_PER_METER;
             (exit, exit)
         } else {
             let v0 = motion.vel_y;
-            let max_dv = SWIM_VERTICAL_ACCEL * UNITS_PER_METER * TICK_DT;
+            // Scaled with gravity: water brakes a body as hard as gravity speeds it
+            // up, whatever the body's scale (unscaled, a stud body stepping off a
+            // bank sank 5.4 m where the voxel body's 3.4 m scales to 4.5 m).
+            let max_dv = SWIM_VERTICAL_ACCEL * params.gravity_scale * UNITS_PER_METER * TICK_DT;
             (v0, v0 + (target - v0).clamp(-max_dv, max_dv))
         };
         motion.vel_y = v1;
@@ -450,6 +455,13 @@ pub fn settle(motion: &mut Motion, desired: &Vector, moved: &Vector, grounded: b
     let bumped_head = motion.vel_y > 0.0 && moved.y < desired.y * 0.5;
     if (grounded && motion.vel_y < 0.0) || bumped_head {
         motion.vel_y = 0.0;
+    } else if motion.vel_y < 0.0 && desired.y < 0.0 && moved.y > desired.y * 0.5 {
+        // A fall that something stopped without grounding the body (a capsule
+        // hanging on a brick's edge, wedged against a wall): the body keeps the
+        // speed it made, not the speed it wanted. Without this `vel_y` ran on to
+        // terminal speed while the body stood still, and the body shot down the
+        // moment it came free.
+        motion.vel_y = motion.vel_y.max((moved.y / TICK_DT).min(0.0));
     }
 }
 
@@ -717,6 +729,28 @@ mod tests {
         assert!(m.vel_y > 0.0);
         settle(&mut m, &d, &Vector::ZERO, false);
         assert_eq!(m.vel_y, 0.0);
+    }
+
+    /// A fall stopped without grounding (a capsule held on an edge) keeps the
+    /// speed it made, not the speed it wanted; a free fall keeps its own.
+    #[test]
+    fn a_blocked_fall_does_not_gather_speed() {
+        let mut m = Motion::default();
+        for t in 0..40 {
+            let desired = plan(&mut m, &keys(), YAW0, t);
+            assert!(desired.y < 0.0);
+            settle(&mut m, &desired, &Vector::ZERO, false);
+            assert_eq!(m.vel_y, 0.0, "tick {t}");
+        }
+        let desired = plan(&mut m, &keys(), YAW0, 40);
+        let wanted = m.vel_y;
+        settle(&mut m, &desired, &desired, false);
+        assert_eq!(m.vel_y, wanted, "an unobstructed fall is untouched");
+        // Sliding at a third of the wanted fall: that speed, no more.
+        let desired = plan(&mut m, &keys(), YAW0, 41);
+        let moved = Vector::new(0.0, desired.y / 3.0, 0.0);
+        settle(&mut m, &desired, &moved, false);
+        assert_eq!(m.vel_y, moved.y / TICK_DT);
     }
 
     #[test]

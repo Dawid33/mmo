@@ -122,6 +122,9 @@ print secrets.
   tiles, regions, players, history; saved by periodic save cuts at one world tick. A store read ERROR never
   regenerates a region (`LoadFailed`, retried later); only a missing row generates.
 - Bump `worldgen::tile_map::WORLD_MAP_VERSION` on ANY change to what `build_world_map` returns.
+- Join snapshots go out slim (`game/src/region_wire.rs`): stud chunks as diffs against their pristine chunk,
+  derivable voxel collider grids rebuilt by the receiver — only shapes the sender has checked byte-equal to a
+  fresh build are omitted. `VOXEL_SNAPSHOT_COLLIDERS=send|rebuild` (default: `send` for a single-player server).
 - Auth: `VOXEL_AUTH=token` (default, offline) or `jwt` (login service, `crates/login`). The workspace's
   only rustls crypto provider is **ring** — keep `aws-lc-rs` out of the tree.
 - **Role split (R2, `VOXEL_ROLE=all|host|coordinator`, default `all` = one process as before; plan

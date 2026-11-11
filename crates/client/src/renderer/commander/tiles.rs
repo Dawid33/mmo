@@ -22,7 +22,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use bevy::prelude::*;
 use game::rapier3d::math::Vector;
 use game::{
-    ColumnCoords, Designation, RegionId, StudChunk, StudColumnGround, StudTile, TileFill, TilePos,
+    ColumnCoords, Designation, RegionId, StudBox, StudChunk, StudColumnGround, StudTile, TileFill, TilePos,
     TileSource, WorldChunkPos, REGION_BLOCKS, REGION_CHUNKS, STUD_CHUNK_STUDS, STUD_CHUNK_TILES, STUD_LAYER_TILES,
     TILE_PLATES, TILE_STUDS,
 };
@@ -37,9 +37,9 @@ use crate::renderer::stud::SimStudChunk;
 pub enum TileMirrorMsg {
     /// A region snapshot arrived: its designations and constructed tiles (its
     /// `StudWorldMsg` brings the recipes and the stud halo).
-    Reset { region: RegionId, designations: Vec<(TilePos, Designation)>, constructed: Vec<TilePos> },
-    /// Per tile: the new designation (`None` = cleared), applied in order.
-    Designations { region: RegionId, changes: Vec<(TilePos, Option<Designation>)> },
+    Reset { region: RegionId, designations: Vec<(StudBox, Designation)>, constructed: Vec<TilePos> },
+    /// Per box of stud cells: the new designation (`None` = cleared), applied in order.
+    Designations { region: RegionId, changes: Vec<(StudBox, Option<Designation>)> },
     /// Per tile: whether it is now a construction, applied in order.
     Constructed { region: RegionId, changes: Vec<(TilePos, bool)> },
 }
@@ -87,11 +87,12 @@ struct RegionTiles {
     stud_halo: BTreeMap<WorldChunkPos, StudChunkTiles>,
     /// The stud halo's recipes, by world chunk column (`y` 0).
     stud_halo_ground: BTreeMap<WorldChunkPos, StudColumnGround>,
-    designations: BTreeMap<TilePos, Designation>,
+    /// By box of stud cells (`game::orders`).
+    designations: BTreeMap<StudBox, Designation>,
     constructed: BTreeSet<TilePos>,
 }
 
-static NO_DESIGNATIONS: BTreeMap<TilePos, Designation> = BTreeMap::new();
+static NO_DESIGNATIONS: BTreeMap<StudBox, Designation> = BTreeMap::new();
 
 #[derive(Resource, Default)]
 pub struct TileMirror {
@@ -111,7 +112,7 @@ impl TileMirror {
         self.home
     }
 
-    pub fn designations(&self) -> &BTreeMap<TilePos, Designation> {
+    pub fn designations(&self) -> &BTreeMap<StudBox, Designation> {
         self.home_tiles().map_or(&NO_DESIGNATIONS, |t| &t.designations)
     }
 
@@ -519,19 +520,20 @@ mod tests {
     fn designation_messages_apply_and_bump_version() {
         let mut m = mirror();
         let d = Designation { kind: DesignationKind::Dig, op: OpId::default(), priority: 4 };
-        let (a, b) = ([3, 10, 4], [5, 10, 4]);
+        let (ta, b) = ([3, 10, 4], [5, 10, 4]);
+        let (a, bb) = (StudBox::of_tile(ta).unwrap(), StudBox::of_tile(b).unwrap());
         let v = m.version();
-        m.apply(TileMirrorMsg::Designations { region: home(), changes: vec![(a, Some(d)), (b, Some(d))] });
+        m.apply(TileMirrorMsg::Designations { region: home(), changes: vec![(a, Some(d)), (bb, Some(d))] });
         assert_eq!(m.designations().len(), 2);
         assert!(m.version() > v);
         // Undo sends the prior values the same way.
-        m.apply(TileMirrorMsg::Designations { region: home(), changes: vec![(b, None)] });
+        m.apply(TileMirrorMsg::Designations { region: home(), changes: vec![(bb, None)] });
         assert_eq!(m.designations().keys().copied().collect::<Vec<_>>(), vec![a]);
         m.apply(TileMirrorMsg::Constructed { region: home(), changes: vec![(b, true)] });
         assert!(m.is_constructed(b));
         // Another region's updates never touch the mirrored one.
         let v = m.version();
-        m.apply(TileMirrorMsg::Designations { region: RegionCoords::new(9, 9), changes: vec![(b, Some(d))] });
+        m.apply(TileMirrorMsg::Designations { region: RegionCoords::new(9, 9), changes: vec![(bb, Some(d))] });
         m.apply(TileMirrorMsg::Constructed { region: home(), changes: vec![(b, false)] });
         assert!(!m.is_constructed(b));
         assert_eq!(m.designations().len(), 1);
@@ -543,7 +545,7 @@ mod tests {
         let mut m = mirror();
         let other = RegionCoords::new(0, 0);
         let d = Designation { kind: DesignationKind::Dig, op: OpId::default(), priority: 4 };
-        m.apply(TileMirrorMsg::Reset { region: other, designations: vec![([1, 1, 1], d)], constructed: Vec::new() });
+        m.apply(TileMirrorMsg::Reset { region: other, designations: vec![(StudBox::of_tile([1, 1, 1]).unwrap(), d)], constructed: Vec::new() });
         let chunk = StudChunk::new([game::StudBrick::filler([0, 0, 0], [2, 6, 2], game::MAT_STONE)]).unwrap();
         m.set_stud_chunk(Entity::from_raw_u32(1).unwrap(), [0, 0, 0], &chunk);
         assert_eq!(m.tile_fill([0, 0, 0]), TileFill::Solid);

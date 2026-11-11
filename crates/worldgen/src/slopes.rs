@@ -42,7 +42,7 @@ mod tests {
     const SEA: i32 = 63;
 
     fn col(top: i32) -> ColSample {
-        ColSample { s: top, water_top: SEA, top, cover: None, trees: true, unbounded: false }
+        ColSample { s: top, water_top: SEA, top, cover: None, trees: true, unbounded: false, surface_plate: (top + 1) * 5, wet: top < SEA, ice: 0 }
     }
 
     /// `step_edge` of column `c` whose neighbours are at `T` except those

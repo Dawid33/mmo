@@ -8,7 +8,7 @@
 use std::collections::BTreeMap;
 
 use game::history::{CalendarTick, PersonId};
-use game::{Designation, DesignationKind, OpId, PersonInfo, SiteMarker, TilePos};
+use game::{Designation, DesignationKind, OpId, PersonInfo, SiteMarker, StudBox};
 
 /// At most this many `RequestPersonInfo`s per second for People rows with
 /// no name yet (only while the People tab is open).
@@ -29,17 +29,23 @@ pub fn governance_lines(calendar: Option<CalendarTick>, fortress: Option<&SiteMa
 }
 
 /// The Designations tab: one line per order (`OpId` order), counting the
-/// tiles it still holds — "Dig · priority 4 · 3 tiles".
-pub fn designation_lines(designations: &BTreeMap<TilePos, Designation>) -> Vec<String> {
+/// bricks it still holds — "Dig · priority 4 · 3 bricks" (a build, which has no
+/// bricks yet, counts the spaces it will fill).
+pub fn designation_lines(designations: &BTreeMap<StudBox, Designation>) -> Vec<String> {
     let mut orders: BTreeMap<OpId, (DesignationKind, u8, usize)> = BTreeMap::new();
     for d in designations.values() {
         orders.entry(d.op).or_insert((d.kind, d.priority, 0)).2 += 1;
     }
     orders
         .into_values()
-        .map(|(kind, priority, tiles)| {
-            let unit = if tiles == 1 { "tile" } else { "tiles" };
-            format!("{} · priority {priority} · {tiles} {unit}", kind_name(kind))
+        .map(|(kind, priority, n)| {
+            let unit = match (kind, n == 1) {
+                (DesignationKind::Build(_), true) => "space",
+                (DesignationKind::Build(_), false) => "spaces",
+                (_, true) => "brick",
+                (_, false) => "bricks",
+            };
+            format!("{} · priority {priority} · {n} {unit}", kind_name(kind))
         })
         .collect()
 }
@@ -70,10 +76,14 @@ mod tests {
     fn designation_lines_group_by_order() {
         let mut map = BTreeMap::new();
         for x in 0..3 {
-            map.insert([x, 0, 0], d(DesignationKind::Dig, 1, 4));
+            map.insert(StudBox::of_tile([x, 0, 0]).unwrap(), d(DesignationKind::Dig, 1, 4));
         }
-        map.insert([9, 0, 0], d(DesignationKind::Chop, 2, 2));
-        assert_eq!(designation_lines(&map), ["Dig · priority 4 · 3 tiles", "Chop · priority 2 · 1 tile"]);
+        map.insert(StudBox::of_tile([9, 0, 0]).unwrap(), d(DesignationKind::Chop, 2, 2));
+        map.insert(StudBox::of_tile([9, 1, 0]).unwrap(), d(DesignationKind::Build(game::edit::PLACE_BLOCK), 3, 2));
+        assert_eq!(
+            designation_lines(&map),
+            ["Dig · priority 4 · 3 bricks", "Chop · priority 2 · 1 brick", "Build · priority 2 · 1 space"]
+        );
         assert!(designation_lines(&BTreeMap::new()).is_empty());
     }
 

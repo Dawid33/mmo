@@ -592,12 +592,12 @@ impl RegionRunner {
             return;
         };
         for n in neighbours {
-            let mut seed = crate::StudRegionSeed::default();
-            for (xs, zs) in crate::halo::facing_windows(n, self.id) {
-                let part = studs(n, xs, zs);
-                seed.ground.extend(part.ground);
-                seed.features.extend(part.features);
-            }
+            // The whole facing strip in one call: the trees past the strip that decide
+            // its bricks are worked out once (cut into windows they cost 4x; measured
+            // 2026-11-11, `worldgen` `stud_trees::halo_window_cost` — the strip's
+            // region-wide patch costs nothing next to them).
+            let (xs, zs) = crate::halo::facing_columns(n, self.id);
+            let seed = studs(n, xs, zs);
             let snap = TerrainSnapshot::of_stud_edge(crate::StudEdge::from_seed(&seed));
             if let Some(seed) = crate::halo::halo_seed_from_snapshot(n, self.id, &snap) {
                 self.apply(GameEventKind::HaloUpdate(seed));

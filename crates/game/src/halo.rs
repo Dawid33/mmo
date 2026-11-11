@@ -203,8 +203,9 @@ pub fn facing_columns(from: RegionCoords, to: RegionCoords) -> (std::ops::Range<
 }
 
 /// [`facing_columns`] cut into square windows at most `HALO_CHUNKS` on a
-/// side, in a fixed order: worldgen's patch is square on the longer side, so
-/// a whole edge strip in one window would cost a whole region's patch.
+/// side, in a fixed order. No longer how halo seeds are generated (one call per
+/// strip since 2026-11-11: trees made per window cost 4x); kept for the cost probe
+/// `worldgen` `stud_trees::halo_window_cost`.
 pub fn facing_windows(from: RegionCoords, to: RegionCoords) -> Vec<(std::ops::Range<usize>, std::ops::Range<usize>)> {
     let (xs, zs) = facing_columns(from, to);
     let h = (HALO_CHUNKS as usize).max(1);

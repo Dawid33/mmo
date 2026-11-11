@@ -416,7 +416,7 @@ fn home_view(region: &Region, client: ClientId) -> Option<HomeView> {
         translation: body_translation(region, client),
         fps_cam_mode: c.fps_cam_mode,
         hotbar: game::build_hotbar(data, client),
-        mining: game::mining_view(c, region.current_tick() as u64),
+        mining: data.mining_view(client, region.current_tick() as u64),
         mode: c.mode,
         inventory_open: c.inventory_open,
         inventory: c.inventory.clone(),

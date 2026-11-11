@@ -96,6 +96,30 @@ pub struct RegionMeta {
     pub tick: Tick,
     pub next_game_event_id: usize,
     pub next_entity_serial: u64,
+    /// By box of stud cells (`orders.rs`).
+    pub designations: BTreeMap<crate::StudBox, crate::Designation>,
+    pub constructed: BTreeMap<crate::TilePos, ()>,
+    pub item_piles: BTreeMap<crate::WorldBlockPos, crate::ItemPile>,
+    pub containers: BTreeMap<crate::WorldBlockPos, crate::Container>,
+    pub pile_takes: BTreeMap<(crate::EntityId, crate::WorldBlockPos), Tick>,
+    pub intents: BTreeMap<(Tick, crate::EntityId, u32), crate::SentIntent>,
+    pub intent_replies: BTreeMap<(Tick, crate::EntityId, u32), crate::SentReply>,
+    pub intent_inbox: BTreeMap<(crate::EntityId, u32), crate::IntentReply>,
+}
+
+/// Tile designations of an older save as the boxes they are stored on now: each
+/// tile becomes its cell box (`StudBox::of_tile`).
+fn tile_designations(old: BTreeMap<crate::TilePos, crate::Designation>) -> BTreeMap<crate::StudBox, crate::Designation> {
+    old.into_iter().filter_map(|(p, d)| Some((crate::StudBox::of_tile(p)?, d))).collect()
+}
+
+/// [`RegionMeta`] as stored while designations sat on tiles (world-store region
+/// meta format 2): the same fields, `designations` by tile. Decode-only.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct RegionMetaV2 {
+    pub tick: Tick,
+    pub next_game_event_id: usize,
+    pub next_entity_serial: u64,
     pub designations: BTreeMap<crate::TilePos, crate::Designation>,
     pub constructed: BTreeMap<crate::TilePos, ()>,
     pub item_piles: BTreeMap<crate::WorldBlockPos, crate::ItemPile>,
@@ -104,6 +128,37 @@ pub struct RegionMeta {
     pub intents: BTreeMap<(Tick, crate::EntityId, u32), crate::SentIntent>,
     pub intent_replies: BTreeMap<(Tick, crate::EntityId, u32), crate::SentReply>,
     pub intent_inbox: BTreeMap<(crate::EntityId, u32), crate::IntentReply>,
+}
+
+impl From<RegionMetaV2> for RegionMeta {
+    fn from(m: RegionMetaV2) -> Self {
+        let RegionMetaV2 {
+            tick,
+            next_game_event_id,
+            next_entity_serial,
+            designations,
+            constructed,
+            item_piles,
+            containers,
+            pile_takes,
+            intents,
+            intent_replies,
+            intent_inbox,
+        } = m;
+        RegionMeta {
+            tick,
+            next_game_event_id,
+            next_entity_serial,
+            designations: tile_designations(designations),
+            constructed,
+            item_piles,
+            containers,
+            pile_takes,
+            intents,
+            intent_replies,
+            intent_inbox,
+        }
+    }
 }
 
 /// A map that only ever decodes empty: the slot voxel water bodies had in
@@ -156,7 +211,7 @@ impl From<RegionMetaV1> for RegionMeta {
             tick,
             next_game_event_id,
             next_entity_serial,
-            designations,
+            designations: tile_designations(designations),
             constructed,
             item_piles,
             containers,

@@ -62,7 +62,11 @@ fn stud_colliders(chunk: &StudChunk, e: EntityKey) -> Vec<Collider> {
 pub(crate) fn stud_colliders_tagged(chunk: &StudChunk, user_data: u128) -> Vec<Collider> {
     stud_collider_shapes(chunk)
         .into_iter()
-        .map(|shape| ColliderBuilder::new(shape).user_data(user_data).build())
+        .map(|shape| {
+            // A fresh build: the join snapshot may leave it off the wire (`region_wire.rs`).
+            crate::region_wire::note_fresh_shape(&shape);
+            ColliderBuilder::new(shape).user_data(user_data).build()
+        })
         .collect()
 }
 
@@ -161,8 +165,10 @@ impl Rollback {
     }
 
     /// Genesis from stud ground recipes: stores them raw and seeds the pristine chunk
-    /// of every surface layer of every chunk column. Chunks below stay implied by the
-    /// recipe until a carve reaches them.
+    /// of every surface layer of every chunk column, and of every layer under those
+    /// that a lower column beside it opens onto (`stud_wall_layers`: a cliff between
+    /// two chunk columns has bricks and a collider all the way down). Chunks below
+    /// stay implied by the recipe until a carve reaches them.
     ///
     /// `overrides` replace (or add to) those chunks: content that is not a function of
     /// the recipe, such as a pristine chunk with feature bricks merged in.
@@ -172,8 +178,12 @@ impl Rollback {
         mut overrides: std::collections::BTreeMap<StudChunkCoords, StudChunk>,
     ) {
         let mut chunks = Vec::new();
-        for (col, g) in ground {
-            for y in g.surface_layers() {
+        let walls: Vec<std::collections::BTreeSet<i32>> = {
+            let recipes: std::collections::BTreeMap<crate::ColumnCoords, &StudColumnGround> = ground.iter().map(|(c, g)| (*c, g)).collect();
+            ground.iter().map(|(c, _)| crate::stud_ground::stud_wall_layers(&recipes, *c)).collect()
+        };
+        for ((col, g), walls) in ground.into_iter().zip(walls) {
+            for y in walls.into_iter().chain(g.surface_layers()) {
                 let c = StudChunkCoords { x: col.x, y, z: col.z };
                 if let Some(chunk) = overrides.remove(&c).or_else(|| g.pristine_chunk(y)) {
                     chunks.push((c, chunk));
@@ -478,7 +488,8 @@ impl Rollback {
     }
 
     /// [`Self::carve_stud_boxes_safe`], with what each box removed put down as item
-    /// piles (`mining::stud_drops`: a material's drop per tile's worth of cells) in
+    /// piles (`mining::DropTally`: an item per tile's worth of cells across the batch,
+    /// the rest rolled) in
     /// this region, at the tile under the middle of the box's lowest plates (settled
     /// from there like any deposit, spilling to the cells around a full pile). What a
     /// dig, a deconstruction and a neighbour's carve all go through, so a carve
@@ -487,23 +498,36 @@ impl Rollback {
         let removed = self.carve_stud_boxes_safe(boxes);
         let tick = *self.data.tick;
         let n = (crate::REGION_CHUNKS * STUD_CHUNK_STUDS) as i32;
+        // The tile under the middle of the lowest plates of the box as carved
+        // (clipped to the region).
+        let tile_of = |lo: [i32; 3], hi: [i32; 3]| {
+            let (x0, x1) = (lo[0].max(0), hi[0].min(n));
+            let (z0, z1) = (lo[2].max(0), hi[2].min(n));
+            [
+                (x0 + (x1 - x0 - 1) / 2).div_euclid(crate::TILE_STUDS as i32),
+                lo[1].div_euclid(crate::TILE_PLATES as i32),
+                (z0 + (z1 - z0 - 1) / 2).div_euclid(crate::TILE_STUDS as i32),
+            ]
+        };
+        let mut tally = crate::mining::DropTally::default();
+        let mut last = None;
         for (&(lo, hi), cells) in boxes.iter().zip(&removed) {
             if cells.is_empty() {
                 continue;
             }
-            let drops = crate::mining::stud_drops(cells);
-            if drops.is_empty() {
-                continue;
+            last = Some((lo, hi));
+            let drops = tally.add(cells);
+            if !drops.is_empty() {
+                self.deposit_drops_safe(tile_of(lo, hi), &drops, tick);
             }
-            // The box as carved: clipped to the region.
-            let (x0, x1) = (lo[0].max(0), hi[0].min(n));
-            let (z0, z1) = (lo[2].max(0), hi[2].min(n));
-            let at = [
-                (x0 + (x1 - x0 - 1) / 2).div_euclid(crate::TILE_STUDS as i32),
-                lo[1].div_euclid(crate::TILE_PLATES as i32),
-                (z0 + (z1 - z0 - 1) / 2).div_euclid(crate::TILE_STUDS as i32),
-            ];
-            self.deposit_drops_safe(at, &drops, tick);
+        }
+        // What is left of a tile's worth is rolled, at the last box carved.
+        if let Some((lo, hi)) = last {
+            let subject = crate::mining::drop_subject(crate::world_stud_cell(*self.data.region, lo.map(i64::from)));
+            let drops = tally.finish(tick, subject);
+            if !drops.is_empty() {
+                self.deposit_drops_safe(tile_of(lo, hi), &drops, tick);
+            }
         }
         removed
     }

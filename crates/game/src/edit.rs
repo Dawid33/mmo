@@ -1,15 +1,16 @@
-//! Player tile editing: a left click breaks the tile under the crosshair, a
-//! right click fills the one against the face it was hit on.
+//! Player brick editing: a left click breaks the brick under the crosshair
+//! (`mining::stud_target_box`), a right click puts one brick against the face it
+//! was hit on (`mining::brick_placement`).
 //!
 //! Clicks arrive as ordinary tick-stamped `PlayerInput` mouse-button events,
 //! so an edit runs inside the tick on both the predicting client and the
 //! server, from the same authoritative eye position and look. Nothing new
 //! crosses the wire.
 //!
-//! A player's edit is an intent to the tile's owner (`intents.rs`), applied at
+//! A player's edit is an intent to the brick's owner (`intents.rs`), applied at
 //! the opening of the next tick: the eye ray reads the stud halo
-//! (`stud_halo.rs`), so the tile may be a neighbour's, and the owner applies
-//! it with its own refusals (bedrock, an occupied tile). The names
+//! (`stud_halo.rs`), so the brick may be a neighbour's, and the owner applies
+//! it with its own refusals (bedrock, an occupied cell). The names
 //! (`BlockPos`, `PLACE_BLOCK`, `BlockHit`) are kept from the voxel world: a
 //! "block" here is a tile address.
 
@@ -52,6 +53,28 @@ impl Rollback {
         let (w, h) = (crate::tile_width_units(), crate::tile_height_units());
         let lo = [p[0] as f32 * w, crate::level_bottom_units(p[1]), p[2] as f32 * w];
         self.box_overlaps_body(lo, [lo[0] + w, lo[1] + h, lo[2] + w])
+    }
+
+    /// True if any non-fixed body's collider overlaps the cell box of `brick` in
+    /// stud chunk `chunk` (`[x, layer, z]`, this region's frame).
+    pub(crate) fn stud_brick_overlaps_body(&self, chunk: [i32; 3], brick: &crate::StudBrick) -> bool {
+        let origin = [
+            (chunk[0] * crate::CHUNK_UNITS as i32) as f32,
+            crate::plate_units(chunk[1].saturating_mul(crate::STUD_CHUNK_PLATES as i32)),
+            (chunk[2] * crate::CHUNK_UNITS as i32) as f32,
+        ];
+        let (s, size) = (crate::STUD_UNITS as f32, brick.size());
+        let lo = [
+            origin[0] + f32::from(brick.min[0]) * s,
+            origin[1] + crate::plate_units(i32::from(brick.min[1])),
+            origin[2] + f32::from(brick.min[2]) * s,
+        ];
+        let hi = [
+            lo[0] + f32::from(size[0]) * s,
+            lo[1] + crate::plate_units(i32::from(size[1])),
+            lo[2] + f32::from(size[2]) * s,
+        ];
+        self.box_overlaps_body(lo, hi)
     }
 
     /// True if any non-fixed body's collider AABB overlaps the box `lo .. hi`
@@ -97,24 +120,23 @@ impl Rollback {
     /// checks again.
     pub fn player_edit_safe(&mut self, client: ClientId, action: EditAction, out: &mut Vec<crate::IntentMsg>) -> bool {
         use crate::intents::Effects as _;
-        // The tile under the crosshair breaks whole, the tile against the hit face is
-        // filled (`Rollback::apply_stud_tile_intent_safe`).
+        // The brick under the crosshair breaks, one brick goes against the hit face.
         let Some(hit) = self.eye_stud_hit(client) else { return false };
         let Some(by) = self.client_body_id(client) else { return false };
-        let (tile, intent) = match action {
-            EditAction::Break => (hit.tile, crate::Intent::BreakBlock { by, survival: false }),
+        let region = *self.data.region;
+        let (target, intent) = match action {
+            EditAction::Break => {
+                let lo = crate::world_stud_cell(region, hit.lo.map(i64::from));
+                let hi = crate::world_stud_cell(region, hit.hi.map(i64::from));
+                (crate::Target::Stud(crate::stud_chunk_of_cell(lo)), crate::Intent::BreakStud { lo, hi, by, survival: false })
+            }
             EditAction::Place => {
-                if hit.inside
-                    || self.stud_tile(hit.outside).fill() == crate::TileFill::Solid
-                    || self.stud_tile_overlaps_body(hit.outside)
-                {
-                    return false;
-                }
-                (hit.outside, crate::Intent::PlaceBlock { block: PLACE_BLOCK, by, survival: false })
+                let material = crate::stud_material_of_block(PLACE_BLOCK);
+                let Some((chunk, brick)) = self.seen_brick_placement(&hit, material) else { return false };
+                (crate::Target::Stud(chunk), crate::Intent::PlaceStud { chunk, brick, by })
             }
         };
-        let p = crate::WorldBlockPos::from_local(*self.data.region, crate::BlockPos::new(tile[0], tile[1], tile[2]));
-        crate::intents::RegionEffects { data: self, out }.send(crate::Target::Block(p), intent);
+        crate::intents::RegionEffects { data: self, out }.send(target, intent);
         true
     }
 }

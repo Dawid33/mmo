@@ -149,6 +149,15 @@ struct ColSample {
     trees: bool,
     /// Whether the profile is a forged (unbounded) one.
     unbounded: bool,
+    /// One past the top solid plate of the ground (`stud_gen::surface_plate`).
+    surface_plate: i32,
+    /// Water stands over the ground at the PLATE level (the recipe's own test:
+    /// `surface_plate` under the water's top plate). Covers, snow, glaciers, ice and
+    /// trees are decided on this, not on the 1 m block surface `s` — a column under
+    /// one or two plates of water is under water.
+    wet: bool,
+    /// Blocks of ice on the water here (0 = liquid): cold lakes and the sea.
+    ice: i32,
 }
 
 /// World block column `(bx, bz)` of `patch`.
@@ -163,19 +172,19 @@ fn point_sample(patch: &dyn Patch, mats: &Materials, x: f64, z: f64) -> ColSampl
 
 /// [`point_sample`] plus the profile it was read from.
 fn profile_sample(patch: &dyn Patch, mats: &Materials, x: f64, z: f64) -> (ColSample, crate::pipeline::ColumnProfile) {
-    // The lake flag is what frozen water tops were decided on (ice on cold lakes
-    // and seas, `ColumnClimate::ice_blocks`); stud recipes hold liquid water only.
-    let (prof, water_top, _lake) = patch.sample(x, z);
+    let (prof, water_top, lake) = patch.sample(x, z);
     let s = surface_from_profile(&prof);
     debug_assert!(s >= scan_band(&prof).1, "surface below the scan at ({x}, {z})");
     let unbounded = prof.is_unbounded();
-    let plain = ColSample { s, water_top, top: s, cover: None, trees: true, unbounded };
+    let surface_plate = stud_gen::surface_plate(&prof);
+    let wet = surface_plate < (water_top + 1) * stud_gen::PLATES_PER_M;
+    let plain = ColSample { s, water_top, top: s, cover: None, trees: true, unbounded, surface_plate, wet, ice: 0 };
     if !mats.biome.enabled() {
         return (plain, prof);
     }
     let sample = match patch.climate(x, z) {
         None => plain,
-        Some(c) => biome_column(mats, &c, plain),
+        Some(c) => biome_column(mats, &c, plain, lake),
     };
     (sample, prof)
 }
@@ -205,10 +214,11 @@ fn forest(b: Biome) -> bool {
 
 /// `plain` (a forged column's ground and water) dressed by its climate:
 /// ground cover per biome, snow above the snow line (patches in tundra),
-/// salt flats, glacier ice over dry glacier ground.
-fn biome_column(mats: &Materials, c: &ColumnClimate, plain: ColSample) -> ColSample {
+/// salt flats, glacier ice over dry glacier ground, ice on cold lake (`lake`) and
+/// sea water — not on rivers.
+fn biome_column(mats: &Materials, c: &ColumnClimate, plain: ColSample, lake: bool) -> ColSample {
     let ColSample { s, water_top, .. } = plain;
-    let dry = s >= water_top;
+    let dry = !plain.wet;
     let ground_m = (s - SEA_TOP_BLOCK) as f32; // top of block `s`, m above sea
     // Snow lies on dry ground only (a cold sea's snow line is far below
     // its floor).
@@ -229,8 +239,10 @@ fn biome_column(mats: &Materials, c: &ColumnClimate, plain: ColSample) -> ColSam
         mats.ground_cover(c.biome, snowy, s)
     };
     let glacier = if dry { c.glacier_blocks() } else { 0 };
+    let frozen = lake || water_top == SEA_TOP_BLOCK;
     ColSample {
         top: s + glacier,
+        ice: if !dry && frozen { c.ice_blocks() } else { 0 },
         cover: Some(cover),
         trees: glacier == 0 && !salt_flat && !treeless(c.biome) && (!snowy || forest(c.biome)),
         ..plain
@@ -246,9 +258,9 @@ fn column_material(mats: &Materials, c: &ColSample, by: i32) -> BlockId {
     }
     let depth = c.s - by;
     let Some(cover) = c.cover else {
-        return solid_material(mats, depth, by, c.s, c.water_top);
+        return solid_material(mats, depth, by, c.wet, c.water_top);
     };
-    if depth <= MAX_SOIL_DEPTH && c.s < c.water_top && c.water_top > SEA_TOP_BLOCK {
+    if depth <= MAX_SOIL_DEPTH && c.wet && c.water_top > SEA_TOP_BLOCK {
         mats.sand // lake and river beds
     } else if depth == 0 {
         cover.surface
@@ -269,7 +281,7 @@ fn soil_depth(c: &ColSample) -> i32 {
 /// terrain carved a slope — tree placement is unchanged from those worlds)
 /// front) and a cover that grows trees. `None` = no tree.
 fn tree_ground(c: ColSample, step_edge: bool) -> Option<i32> {
-    (!step_edge && c.s >= c.water_top && c.trees).then_some(c.s)
+    (!step_edge && !c.wet && c.trees).then_some(c.s)
 }
 
 /// Where trees come from: the habitat and the placement seed.
@@ -374,7 +386,7 @@ fn read_rect(x: f64, z: f64, span: f64, margin: i32) -> ([f64; 2], [f64; 2]) {
 
 /// Loads and pins the tiles of the installed forged world
 /// ([`forged::active`]) that generating region `rc` reads — any window of it
-/// through [`stud_gen::generate_stud_columns`] /
+/// through [`stud_gen::generate_stud_columns`] / [`stud_gen::generate_stud_window`] /
 /// [`stud_gen::generate_stud_region`]. Hold the pins while
 /// generating: the reads then never load, and a tile that cannot be loaded
 /// is this `Err` (naming the tile), never terrain. Empty without a world or
@@ -408,8 +420,8 @@ pub fn prefetch_lod_forged(world: &forged::ForgedWorld, key: &game::lod::LodKey)
 
 /// Material of a solid block: sand under standing water (lake and river
 /// beds, like the sea floor), else the depth/height rule.
-fn solid_material(mats: &Materials, depth: i32, by: i32, surface: i32, water_top: i32) -> BlockId {
-    if depth <= MAX_SOIL_DEPTH && surface < water_top && water_top > SEA_TOP_BLOCK {
+fn solid_material(mats: &Materials, depth: i32, by: i32, wet: bool, water_top: i32) -> BlockId {
+    if depth <= MAX_SOIL_DEPTH && wet && water_top > SEA_TOP_BLOCK {
         mats.sand
     } else {
         mats.material_at(depth, by)

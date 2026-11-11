@@ -879,7 +879,8 @@ pub enum ServerPacket {
     HashedGameEvent(GameEvent, Tick, u32),
     // TODO: Create player serverside and add player id here to let client know
     // who he is.
-    Region(RegionId, Rollback),
+    /// A region's join snapshot; on the wire in its slim form (`region_wire.rs`).
+    Region(RegionId, #[serde(with = "crate::region_wire")] Rollback),
     PlayerRegion(Option<RegionId>, ClientId),
     /// The world map: per-region tile summaries of the forged world.
     WorldMap(crate::world_map::WorldMap),

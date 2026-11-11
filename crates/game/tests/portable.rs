@@ -177,7 +177,7 @@ fn snapshot_roundtrip_is_equivalent() {
     assert!(original.stud_ground.as_ref().is_some_and(|g| !g.is_empty()), "a first snapshot carries the recipes");
     assert_eq!(original.meta.containers.len(), 1);
     assert_eq!(original.meta.item_piles.len(), 1);
-    assert_eq!(original.meta.designations.len(), 2);
+    assert!(original.meta.designations.len() >= 2, "the bricks meeting two tiles");
     assert_eq!(original.meta.intents.len(), 1);
     assert_eq!(original.entities.len(), 4, "two slimes, a body and a stud body");
     assert!(original.entities.iter().any(|b| b.carried.stud_body.is_some()));

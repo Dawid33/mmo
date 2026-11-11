@@ -12,7 +12,7 @@ use crate::common::{self, r0, STAND};
 use game::edit::BlockPos;
 use game::{
     state_hash, GameEventKind, InputEvent, ItemId, ItemStack, Key, MouseButton, Order, PlayMode, Region, Rollback,
-    TileFill, TileSource, BREAK_COOLDOWN_TICKS,
+    TileFill, BREAK_COOLDOWN_TICKS,
 };
 
 /// About 45 degrees down: 302 px * 0.0026 rad/px at the default sensitivity.
@@ -56,13 +56,23 @@ fn region(pitch_px: f32) -> Region {
     region
 }
 
-/// The tile under the crosshair.
+/// The brick under the crosshair: the min of its target box, in region stud cells.
 fn target(region: &Region) -> BlockPos {
-    region.data().eye_stud_hit(0).expect("the eye ray must hit a tile").tile
+    region.data().eye_stud_hit(0).expect("the eye ray must hit a brick").lo
 }
 
+/// The min stud cell of the brick a right click would place now
+/// (`game::brick_placement`).
+fn place_at(region: &Region) -> BlockPos {
+    let hit = region.data().eye_stud_hit(0).expect("a face under the crosshair");
+    let (chunk, brick) = game::brick_placement(&hit.ray, game::MAT_DIRT).expect("a placement");
+    let dims = [game::STUD_CHUNK_STUDS as i64, game::STUD_CHUNK_PLATES as i64, game::STUD_CHUNK_STUDS as i64];
+    [0, 1, 2].map(|a| (chunk[a] * dims[a]) as i32 + i32::from(brick.min[a]))
+}
+
+/// Whether the brick whose box starts at stud cell `p` is gone.
 fn open(region: &Region, p: BlockPos) -> bool {
-    common::tile_open(region.data(), p)
+    region.data().stud_material_at(p).is_none()
 }
 
 /// Ticks the hand needs for tile `p`.
@@ -132,14 +142,14 @@ fn retarget_restarts() {
     ticks(&mut region, 1);
     let b = target(&region);
     assert_ne!(a, b);
-    assert_eq!(region.data().tile_fill(b), TileFill::Solid);
+    assert!(!open(&region, b));
     let nb = need(&region, b);
     let m = region.data().clients[&0].mining.clone().unwrap();
     assert_eq!(m.target, b);
     assert_eq!(m.needed_ticks as usize, nb);
     // That tick counted for b: one less.
     assert_eq!(ticks_to_break(&mut region, b, 3 * nb), Some(nb - 1));
-    assert_eq!(region.data().tile_fill(a), TileFill::Solid, "the first target was left alone");
+    assert!(!open(&region, a), "the first target was left alone");
 }
 
 #[test]
@@ -166,7 +176,7 @@ fn right_click(region: &mut Region) {
 #[test]
 fn place_with_empty_slot_does_nothing() {
     let mut region = region(DOWN_45);
-    let at = region.data().eye_stud_hit(0).unwrap().outside;
+    let at = place_at(&region);
     assert!(open(&region, at));
     // The selected slot (0) is empty; another slot holds dirt.
     set_slot(&mut region, 3, Some(ItemStack { item: dirt(), count: 5 }));
@@ -195,7 +205,7 @@ fn mining_undo_roundtrip() {
     assert!(!piles(&region).is_empty());
     run(&mut region, input(InputEvent::MouseButton { button: MouseButton::Left, pressed: false }));
     // Places dirt against the face now under the crosshair, then throws.
-    let at = region.data().eye_stud_hit(0).expect("the hole's wall").outside;
+    let at = place_at(&region);
     run(&mut region, input(InputEvent::MouseButton { button: MouseButton::Right, pressed: true }));
     run(&mut region, GameEventKind::Tick);
     // The place is an intent to the tile's owner: it lands at the next tick.
@@ -275,30 +285,17 @@ use crate::common::rig::Rig;
 use crate::common::seam_translate::{assert_seam_invariant, offset, spawn_tile, Scenario};
 use game::{InlineSchedule, WorldBlockPos};
 
-/// The dirt a dug tile of the flat ground's top level yields (`stud_drops` of
-/// its carve: grass and dirt both drop dirt).
-fn floor_tile_yield() -> u32 {
-    let mut region = common::region_of(r0(), common::uniform_seed());
-    let mut removed = Vec::new();
-    region.with_data(|d| {
-        let (lo, hi) = game::stud_tile_box([8, STAND - 1, 8]).expect("a tile");
-        removed = d.carve_stud_safe(lo, hi);
-    });
-    let drops = game::stud_drops(&removed);
-    assert!(drops.iter().all(|s| s.item == dirt()) && !drops.is_empty(), "{drops:?}");
-    drops.iter().map(|s| s.count).sum()
-}
-
 /// Rounds the button is held at most (a tile of grass over dirt breaks in
 /// well under a second).
 const MINE_ROUNDS: u32 = 30;
 
-/// Whether world tile `p` is open at its owner, and that owner's tick.
+/// Whether world tile `p` lost a brick at its owner, and that owner's tick.
 fn owner_open(rig: &mut Rig, p: WorldBlockPos) -> (bool, u64) {
     let (rc, local) = p.to_local();
     let mut out = None;
     rig.manager.spawner_mut().with_region(rc, |r| {
-        out = Some((common::tile_open(r.data(), [local.x, local.y, local.z]), r.current_tick()));
+        // A brick of it is gone: the tile is no longer whole.
+        out = Some((game::TileSource::tile_fill(r.data(), [local.x, local.y, local.z]) != TileFill::Solid, r.current_tick()));
     });
     out.expect("the owner runs")
 }
@@ -368,16 +365,15 @@ fn break_block_across_seam() {
     let s = MineAcross::default();
     let end = assert_seam_invariant(&s, None);
     assert!(end.terrain.values().any(|d| d.is_some()), "the block broke: {:?}", end.terrain);
-    assert_eq!(
-        end.piles.values().cloned().collect::<Vec<_>>(),
-        vec![vec![ItemStack { item: dirt(), count: floor_tile_yield() }]],
-        "what a dug tile of this ground yields, in one pile"
-    );
+    // One brick's yield: its share of a tile's worth, rolled — dirt or nothing, and
+    // the same in every placement (`assert_seam_invariant`).
+    let piled: Vec<ItemStack> = end.piles.values().flatten().cloned().collect();
+    assert!(piled.len() <= 1 && piled.iter().all(|s| s.item == dirt() && s.count == 1), "{piled:?}");
     let seen = s.seen.borrow().clone();
     assert_eq!(seen.len(), 4, "one entry per placement");
     let first = seen[0].0.expect("Centre broke it");
     for (i, s) in seen.iter().enumerate() {
-        assert_eq!(*s, (Some(first), true), "placement #{i}: (ticks from the press to the break, pile at the owner)");
+        assert_eq!(*s, (Some(first), !piled.is_empty()), "placement #{i}: (ticks from the press to the break, pile at the owner)");
     }
     // Under jitter the outcome still matches.
     assert_seam_invariant(&MineAcross::default(), Some(InlineSchedule::jittery));

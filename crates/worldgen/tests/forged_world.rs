@@ -664,23 +664,84 @@ fn glacier_region_has_ice_over_rock() {
     }
 }
 
-/// A lake in the glacier is the recipe's water at the lake's one level. (Frozen water
-/// tops — ice on cold lakes and seas — were blocks of the voxel generator; stud recipes
-/// hold the water only.)
+/// The ice (`"ice"` feature bricks) of a region's stud columns, by region-local stud
+/// `(x, z)`: the plates `lo..hi` it fills, checked to be one unbroken run.
+fn ice_runs(seed: &StudRegionSeed) -> BTreeMap<(usize, usize), (i32, i32)> {
+    let layer = game::STUD_CHUNK_PLATES as i32;
+    let mut cells: BTreeMap<(usize, usize), Vec<i32>> = BTreeMap::new();
+    for (c, bricks) in &seed.features {
+        for b in bricks.iter().filter(|b| stud_material(b.material).is_some_and(|m| m.name == "ice")) {
+            for cell in b.cells() {
+                cells.entry((c.x * CS + cell[0] as usize, c.z * CS + cell[2] as usize)).or_default().push(c.y * layer + cell[1] as i32);
+            }
+        }
+    }
+    cells
+        .into_iter()
+        .map(|(k, mut plates)| {
+            plates.sort_unstable();
+            let (lo, hi) = (plates[0], plates[plates.len() - 1] + 1);
+            assert_eq!(plates.len() as i32, hi - lo, "ice at {k:?} is one run without gaps or overlaps");
+            (k, (lo, hi))
+        })
+        .collect()
+}
+
+/// Ice thickness at the fixtures' -20 C: `clamp(round(20 / 4), 1, 4)` blocks.
+const COLD_ICE_PLATES: i32 = 4 * PLATES_PER_M;
+
+/// A lake in the glacier is frozen over (the voxel generator's
+/// `frozen_lake_has_ice_on_top`, on studs since 2026-11-11): every column carries ice
+/// bricks in the top of its water — `ICE_FREEBOARD_PLATES` over the waterline, 4 m
+/// thick, never into the bed — placed whole into the region's chunks, and the recipe
+/// keeps the lake's water at its one level under it.
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
-fn cold_lake_is_recipe_water_at_its_level() {
+fn frozen_lake_has_ice_on_top() {
     let world = two_biome_world();
     let seed = region(&world, region_at(752.0, 224.0));
     let level = (SEA_TOP_BLOCK + 1 + FROZEN_LAKE_LEVEL as i32) * PLATES_PER_M;
+    let top = level + worldgen::stud_gen::ICE_FREEBOARD_PLATES;
+    let ice = ice_runs(&seed);
     let mut wet = 0;
-    for (g, sx, sz) in stud_columns(&seed.ground) {
-        assert_eq!(g.water_top(sx, sz), Some(level), "the whole region is lake");
-        assert!(g.surface(sx, sz) < level);
-        assert_eq!(name(g, sx, g.surface(sx, sz) - 1, sz), "sand", "the lake bed");
-        wet += 1;
+    for (c, g) in &seed.ground {
+        for (sx, sz) in (0..CS).flat_map(|sz| (0..CS).map(move |sx| (sx, sz))) {
+            assert_eq!(g.water_top(sx, sz), Some(level), "the whole region is lake, its water under the ice");
+            let bed = g.surface(sx, sz);
+            assert!(bed < level);
+            assert_eq!(name(g, sx, bed - 1, sz), "sand", "the lake bed");
+            assert_eq!(ice.get(&(c.x * CS + sx, c.z * CS + sz)), Some(&((top - COLD_ICE_PLATES).max(bed), top)), "ice on the lake");
+            wet += 1;
+        }
     }
     assert_eq!(wet, (game::REGION_BLOCKS * game::REGION_BLOCKS) as usize * (STUDS_PER_M * STUDS_PER_M) as usize);
+    // Every ice brick lands in its chunk (none overlaps the bed or another brick).
+    let placed: usize = seed.feature_chunks().values().map(|c| c.bricks().filter(|b| b.material == game::MAT_ICE).count()).sum();
+    let made: usize = seed.features.iter().flat_map(|(_, b)| b).filter(|b| b.material == game::MAT_ICE).count();
+    assert_eq!(placed, made);
+    assert!(made <= 2 * seed.ground.len() * 4, "merged into slabs: {made} bricks over {} chunk columns", seed.ground.len());
+}
+
+/// The frozen sea (the voxel generator's `frozen_sea_continues_past_the_sea_edge_
+/// without_a_step`): a region straddling the map's east edge is one flat sheet of ice
+/// at the sea's top, near (bricks) and far (LOD samples: ice, no water sheet).
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn frozen_sea_is_flat_ice_near_and_far() {
+    let world = two_biome_world();
+    let rc = region_at(N as f64 * CELL_M, 600.0); // straddles the east (sea) edge
+    let seed = region(&world, rc);
+    let top = SEA_PLATE + worldgen::stud_gen::ICE_FREEBOARD_PLATES;
+    let ice = ice_runs(&seed);
+    let studs = (game::REGION_BLOCKS * game::REGION_BLOCKS) as usize * (STUDS_PER_M * STUDS_PER_M) as usize;
+    assert_eq!(ice.len(), studs, "every column is frozen sea");
+    assert!(ice.values().all(|&(lo, hi)| hi == top && hi - lo <= COLD_ICE_PLATES && lo < hi), "flat ice at the sea top");
+    let key = game::lod::LodKey::for_region(16, rc);
+    let samples = stud_lod_tile_forged(&world, &key).decode().expect("a valid tile");
+    assert!(!samples.is_empty());
+    for s in &samples {
+        assert_eq!((i32::from(s.top), s.material, s.has_water()), (top, game::MAT_ICE, false), "far terrain shows the ice");
+    }
 }
 
 #[test]
@@ -737,7 +798,7 @@ fn snow_line_follows_temperature() {
 }
 
 /// A sea reaching the map's sea edge runs on past it: the same flat water
-/// surface on both sides, in regions and in far terrain.
+/// surface on both sides in the regions' recipes.
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn sea_continues_past_the_sea_edge_without_a_step() {
@@ -745,9 +806,8 @@ fn sea_continues_past_the_sea_edge_without_a_step() {
     let rc = region_at(N as f64 * CELL_M, 600.0); // straddles the east (sea) edge
     let tops = tops(&region(&world, rc).ground);
     assert!(tops.values().all(|&(top, water)| top == SEA_PLATE && water), "flat sea at the sea surface");
-    let key = game::lod::LodKey::for_region(16, rc);
-    let samples = stud_lod_tile_forged(&world, &key).decode().expect("a generated tile decodes");
-    assert!(samples.iter().all(|s| s.has_water() && i32::from(s.water) == SEA_PLATE), "far terrain: flat sea across the edge");
+    // This sea is frozen (-20 C): its far terrain is the ice on it, pinned with the
+    // ice bricks in `frozen_sea_is_flat_ice_near_and_far`.
 }
 
 /// A flat 20 m world of one climate, no water but the sea past its edges.
@@ -825,10 +885,10 @@ fn glacier_edge_is_grounded() {
 }
 
 /// Water (plates) over a floor from which the cover rule calls the column
-/// submerged: covers are decided on the 1 m block surface (a block at least
-/// half full under the water's top block is dry ground), so a floor under one
-/// or two plates of water still carries its land cover.
-const SUBMERGED_PLATES: i32 = 3;
+/// submerged: any — covers are decided on the plate surface, like the water itself
+/// (2026-11-11; on the 1 m block surface a floor under one or two plates kept its
+/// land cover: 39 "snow" sea floors in the glacier-coast region).
+const SUBMERGED_PLATES: i32 = 1;
 
 /// Top ground material of every submerged stud column (`SUBMERGED_PLATES` of
 /// water or more) of the coast region at artifact x `ax`.
@@ -868,6 +928,67 @@ fn cold_sea_floors_are_sand() {
     }
 }
 
+/// Cliffs are closed at genesis on a forged cliff region (coverage lost with the voxel
+/// world; the hole it would have found was the P2 open item, closed 2026-11-11): a
+/// 100 m step in the height map, and wherever two neighbouring stud columns of the
+/// seeded region differ, every plate of the higher one's exposed face is a brick of a
+/// materialised chunk — never implied ground, which has no collider.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn cliffs_are_closed_at_genesis_on_a_forged_cliff_region() {
+    let mut a = one_climate_world(12.0, 800.0, 50).artifact().expect("whole world").clone();
+    let mut height = a.height.to_f32();
+    for (i, h) in height.iter_mut().enumerate() {
+        if i % N >= N / 2 {
+            *h = 120.0;
+        }
+    }
+    a.height = QRaster::fit(&height, HEIGHT_STEP_M);
+    let world = ForgedWorld::new(a.with_regions());
+    let rc = region_at((N / 2) as f64 * CELL_M, 600.0);
+    let seed = region(&world, rc);
+    let (lo, hi) = stud_columns(&seed.ground).fold((i32::MAX, i32::MIN), |(lo, hi), (g, sx, sz)| (lo.min(g.surface(sx, sz)), hi.max(g.surface(sx, sz))));
+    assert!(hi - lo > 3 * game::STUD_CHUNK_PLATES as i32, "the region holds the cliff: surfaces {lo} ..= {hi} plates");
+    let (send, _recv) = crossbeam::channel::unbounded();
+    let mut sim = game::Region::new(game::Rollback::new(Some(send.clone())), Some(send), rc, None);
+    sim.seed_stud_world(seed.clone());
+    let d = sim.data();
+    let studs = (game::REGION_CHUNKS * CS) as i32;
+    let top = |x: i32, z: i32| {
+        let g = &d.stud_ground_recipes()[&ColumnCoords::new(x as usize / CS, z as usize / CS)];
+        g.surface(x as usize % CS, z as usize % CS)
+    };
+    let (mut faces, mut steps) = (0u64, 0u64);
+    for z in 0..studs {
+        for x in 0..studs {
+            for (nx, nz) in [(x + 1, z), (x, z + 1)] {
+                if nx >= studs || nz >= studs {
+                    continue;
+                }
+                let (here, there) = (top(x, z), top(nx, nz));
+                // The higher column's face over the lower one's top.
+                let ((hx, hz), low, high) = if here > there { ((x, z), there, here) } else { ((nx, nz), here, there) };
+                steps += (high > low) as u64;
+                for plate in low..high {
+                    faces += 1;
+                    assert!(
+                        d.stud_material_at([hx, plate, hz]).is_some()
+                            && d.stud_chunk_at(game::StudChunkCoords {
+                                x: hx as usize / CS,
+                                y: game::stud_layer_of(plate),
+                                z: hz as usize / CS
+                            })
+                            .is_some(),
+                        "a hole in the cliff: stud column ({hx}, {hz}) at plate {plate} has no brick (face {low}..{high})"
+                    );
+                }
+            }
+        }
+    }
+    println!("cliff region: {steps} steps between stud columns, {faces} exposed face cells, {} chunks", d.stud_index.len());
+    assert!(faces > 10_000);
+}
+
 // ---- Sampling guard (forged-world-in-db plan, Task 1) ----
 
 /// crc32 of every point sampler output [`forged_sampling_is_bit_exact`] hashes. Any
@@ -879,8 +1000,11 @@ fn cold_sea_floors_are_sand() {
 /// part hashes was not touched by that deletion.
 const SAMPLERS_GUARD_CRC: u32 = 0xDC18_3DE2;
 /// crc32 of what the stud generator builds from the guard world: five whole regions
-/// (recipes and tree bricks) and one region's far terrain. Recorded 2026-11-10 (P10b).
-const STUD_TERRAIN_GUARD_CRC: u32 = 0x8FAA_FF6B;
+/// (recipes and tree bricks) and one region's far terrain. Recorded 2026-11-11 (open
+/// items pass): covers, snow, glaciers and trees are decided on the plate-level water
+/// test (a column under 1–2 plates of water is under water), and cold lakes and seas
+/// carry ice bricks (far terrain: ice). Before: `0x8FAA_FF6B` (2026-11-10, P10b).
+const STUD_TERRAIN_GUARD_CRC: u32 = 0x1023_FE6C;
 
 /// Every public sampler of a real forged world (4,096 m / 16 m, seed 4) on a
 /// 7 m grid over the map and 200 m past it, then five whole regions and one

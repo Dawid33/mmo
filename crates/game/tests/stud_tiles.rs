@@ -389,23 +389,38 @@ fn dig_order_opens_the_tile_and_rolls_back() {
     let (a, b) = ([4, STAND - 1, 4], [5, STAND - 1, 4]);
     let h0 = hash(&r);
     order(&mut r, designate(1, DesignationKind::Dig, a, b));
-    assert_eq!(r.data().designations().len(), 2);
+    // The designation is the BRICKS meeting the two tiles, each its own box, snapped
+    // outward to the whole brick.
+    let pristine = flat().pristine_chunk(0).unwrap();
+    let (lo, hi) = (stud_tile_box(a).unwrap().0, stud_tile_box(b).unwrap().1);
+    let meeting: Vec<StudBox> = bricks_meeting(&pristine, [0, 0, 0], lo.map(|v| v as u8), hi.map(|v| v as u8)).iter().map(|p| p.at).collect();
+    let boxes: Vec<StudBox> = r.data().designations().keys().copied().collect();
+    assert_eq!(boxes, meeting);
+    assert!(boxes.len() >= 2, "a tile is two courses of bricks");
+    for b in &boxes {
+        let brick = pristine.brick_at(b.lo).expect("a brick at the box's min");
+        match brick.shape {
+            StudShape::Part { .. } => assert_eq!((b.lo, b.size()), (brick.min, brick.size()), "the box is the whole brick"),
+            // Hidden fill has no bricks of its own: its cells inside the volume.
+            StudShape::Filler { .. } => assert!((0..3).all(|a| lo[a] <= i32::from(b.lo[a]) && i32::from(b.hi[a]) <= hi[a])),
+        }
+        assert!(b.meets(lo, hi));
+    }
     let h1 = hash(&r);
     order(&mut r, Order::DevCompleteAll);
     for p in [a, b] {
         assert_eq!(fill(&r, p), TileFill::Open, "{p:?} dug");
     }
-    // Neighbours on every side, and the tile under each, are intact.
-    for p in [[3, STAND - 1, 4], [6, STAND - 1, 4], [4, STAND - 1, 3], [4, STAND - 1, 5], [4, STAND - 2, 4], [5, STAND - 2, 4]] {
+    // The tiles under them are intact (the bricks of the courses below).
+    for p in [[4, STAND - 2, 4], [5, STAND - 2, 4]] {
         assert_eq!(fill(&r, p), TileFill::Solid, "{p:?} intact");
     }
     assert!(r.data().designations().is_empty() && r.data().constructed().is_empty());
     assert!(standable(r.data(), [4, STAND - 1, 4]), "the dug tile is walked into");
-    // Exactly the two tiles' cells are gone from the chunk.
-    let mut want = flat().pristine_chunk(0).unwrap();
-    let removed: u32 =
-        [8, 10].iter().flat_map(|&x| want.carve([x, 24, 8], [x + 2, 30, 10])).map(|(_, n)| n).sum();
-    assert_eq!(removed, 2 * STUD_TILE_CELLS);
+    // Exactly the designated cells are gone from the chunk: those bricks, whole.
+    let mut want = pristine.clone();
+    let removed: u32 = boxes.iter().flat_map(|b| want.carve(b.lo, b.hi)).map(|(_, n)| n).sum();
+    assert_eq!(removed, boxes.iter().map(|b| b.cell_count()).sum::<u32>());
     assert!(r.data().stud_chunk_at(StudChunkCoords { x: 0, y: 0, z: 0 }) == Some(&want));
     r.rollback_last_event();
     assert_eq!(hash(&r), h1, "the completed dig undone");
@@ -421,8 +436,10 @@ fn digging_down_materialises_implied_ground_and_stops_at_bedrock() {
     assert!(r.data().stud_chunk_at(below).is_none());
     // A shaft from the surface through layer 0 into layer -1, down into the bedrock.
     order(&mut r, designate(1, DesignationKind::Dig, [4, STAND - 1, 4], [4, -4, 4]));
-    let designated: Vec<i32> = r.data().designations().keys().map(|p| p[1]).collect();
-    assert_eq!(designated, (-2..STAND).collect::<Vec<_>>(), "bedrock (levels -3, -4) refuses the designation");
+    // Bedrock (levels -3, -4) refuses the designation: everything designated lies above it.
+    let t = TILE_PLATES as i32;
+    let d = r.data().designations();
+    assert!(!d.is_empty() && d.keys().all(|b| b.cells().0[1] >= -2 * t && b.cells().1[1] <= STAND * t), "{d:?}");
     let summary = summarize(r.data(), DesignationKind::Dig, TileBox::new([4, STAND + 1, 4], [4, -4, 4]));
     assert_eq!(summary.valid, (STAND + 2) as u64);
     assert_eq!(summary.invalid.get(&Invalid::Bedrock), Some(&2));
@@ -461,7 +478,7 @@ fn build_fills_the_tile_and_deconstruct_opens_it() {
     // Air builds nothing; a solid tile takes no build.
     order(&mut r, designate(3, DesignationKind::Build(BlockId::AIR), [14, STAND, 8], [14, STAND, 8]));
     order(&mut r, designate(4, DesignationKind::Build(stone), [14, STAND - 1, 8], [14, STAND - 1, 8]));
-    let tiles: Vec<TilePos> = r.data().designations().keys().copied().collect();
+    let tiles: Vec<TilePos> = r.data().designations().keys().map(|b| b.tiles().min).collect();
     assert_eq!(tiles.len(), 5, "the box from `air` to `half` minus its solid ground tiles, plus `plastic`: {tiles:?}");
     let h1 = hash(&r);
     order(&mut r, Order::DevCompleteAll);

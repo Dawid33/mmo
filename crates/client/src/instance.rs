@@ -2306,8 +2306,10 @@ mod manager_tests {
         let expected: std::collections::BTreeSet<_> =
             home.window_radius(1).into_iter().collect();
         assert_eq!(desired_window(home, Some(home), 0, 1, None, 0), expected);
-        // The viewer (window centre) elsewhere: the body's 3x3 stays.
-        let viewer = RegionCoords::new(5, -2);
+        // The viewer (window centre) elsewhere — outside the body's 3x3 (it was
+        // written one region east, which is inside it: 9 regions, not the 10
+        // asserted; the function is a plain union) — the body's 3x3 stays.
+        let viewer = RegionCoords::new(6, -2);
         let roaming = desired_window(viewer, Some(home), 0, 1, None, 0);
         assert!(expected.is_subset(&roaming));
         assert_eq!(roaming.len(), 10);

@@ -17,6 +17,7 @@ mod journal_parallel;
 mod kinematic_sleep;
 mod pair_filter;
 mod pipeline_memo;
+mod snapshot_wire;
 mod state_hash_parity;
 mod step_journal;
 mod stud_voxels;

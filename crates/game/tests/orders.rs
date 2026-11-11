@@ -135,8 +135,11 @@ fn designate_dig_marks_only_valid_tiles_and_rolls_back() {
     let area = TileBox::new([2, SURFACE, 2], [5, SURFACE + 1, 5]);
     apply_checked(&mut region, designate(op(1), DesignationKind::Dig, area));
     let d = region.data().designations();
-    assert_eq!(d.len(), 16, "the air layer above adds nothing");
-    assert!(d.keys().all(|p| p[1] == SURFACE));
+    // The ground is one filler slab: the dig is its cells inside the volume, one box
+    // (the air layer above adds nothing).
+    let cells: Vec<_> = d.keys().map(|b| b.cells()).collect();
+    let (s, t) = (TILE_STUDS as i32, TILE_PLATES as i32);
+    assert_eq!(cells, vec![([2 * s, SURFACE * t, 2 * s], [6 * s, (SURFACE + 1) * t, 6 * s])]);
     assert!(d.values().all(|d| d.op == op(1) && d.priority == DEFAULT_PRIORITY));
 }
 
@@ -161,8 +164,9 @@ fn area_is_clipped_to_region() {
     let area = TileBox::new([-4, SURFACE, -4], [3, SURFACE, 3]);
     apply_checked(&mut region, designate(op(1), DesignationKind::Dig, area));
     let d = region.data().designations();
-    assert_eq!(d.len(), 16);
-    assert!(d.keys().all(|p| (0..4).contains(&p[0]) && (0..4).contains(&p[2])));
+    assert_eq!(d.len(), 1);
+    let s = TILE_STUDS as i32;
+    assert!(d.keys().all(|b| b.cells().0[0] == 0 && b.cells().0[2] == 0 && b.cells().1[0] == 4 * s && b.cells().1[2] == 4 * s));
 }
 
 #[test]
@@ -237,7 +241,7 @@ fn order_payloads(
 fn render_payloads_carry_new_values_and_undo_restores_prior() {
     let (mut region, recv) = order_region_with_updates();
     let tile = TileBox::new([2, SURFACE, 2], [2, SURFACE, 2]);
-    let p = tile.min;
+    let p = StudBox::of_tile(tile.min).unwrap();
     apply_checked(&mut region, designate(op(1), DesignationKind::Dig, tile));
     let old = region.data().designations()[&p];
     recv.try_iter().count();
@@ -315,9 +319,17 @@ fn cancel_op_spares_tiles_overwritten_by_a_later_op() {
     let dig = DesignationKind::Dig;
     apply_checked(&mut region, designate(op(1), dig, TileBox::new([2, SURFACE, 2], [5, SURFACE, 5])));
     apply_checked(&mut region, designate(op(2), dig, TileBox::new([3, SURFACE, 3], [4, SURFACE, 4])));
+    // The first box keeps its cells around the second: no cell is designated twice.
+    let total: u32 = region.data().designations().keys().map(|b| b.cell_count()).sum();
+    assert_eq!(total, 16 * STUD_TILE_CELLS);
+    assert_eq!(region.data().designations().values().filter(|d| d.op == op(2)).count(), 1);
     apply_checked(&mut region, Order::CancelOp(op(1)));
+    // The later op took its cells out of the first one's box; the rest of that box
+    // went with the cancel.
     let d = region.data().designations();
-    assert_eq!(d.len(), 4);
+    let (s, t) = (TILE_STUDS as i32, TILE_PLATES as i32);
+    let cells: Vec<_> = d.keys().map(|b| b.cells()).collect();
+    assert_eq!(cells, vec![([3 * s, SURFACE * t, 3 * s], [5 * s, (SURFACE + 1) * t, 5 * s])]);
     assert!(d.values().all(|d| d.op == op(2)));
 }
 
@@ -329,7 +341,7 @@ fn erase_filters_by_kind() {
     let area = TileBox::new([2, SURFACE, 2], [5, SURFACE + 1, 5]);
     apply_checked(&mut region, designate(op(1), DesignationKind::Dig, area));
     apply_checked(&mut region, designate(op(2), build, area));
-    assert_eq!(region.data().designations().len(), 32);
+    assert_eq!(region.data().designations().len(), 1 + 16, "one box of the slab, a tile box per build");
     apply_checked(&mut region, Order::Erase { area, only: Some(DesignationKind::Dig) });
     let d = region.data().designations();
     assert_eq!(d.len(), 16);
@@ -351,7 +363,7 @@ fn dev_complete_builds_a_two_level_wall_then_deconstructs_it() {
     assert!(region.data().designations().is_empty());
 
     apply_checked(&mut region, designate(op(2), DesignationKind::Deconstruct, wall));
-    assert_eq!(region.data().designations().len(), 8);
+    assert_eq!(region.data().designations().len(), 16, "a built tile is two 2 x 2 bricks, each designated");
     apply_checked(&mut region, Order::DevCompleteAll);
     for p in wall.tiles() {
         assert_eq!(tile_at(&region, p), OPEN, "{p:?} taken down");
@@ -387,8 +399,8 @@ fn dig_box_down_to_bedrock_skips_bedrock() {
     let area = TileBox::new([2, BEDROCK_Y - 1, 2], [3, SURFACE, 3]);
     apply_checked(&mut region, designate(op(1), DesignationKind::Dig, area));
     let d = region.data().designations();
-    assert_eq!(d.len() as u64, area.tile_count() - 2 * 4, "two bedrock levels refused");
-    assert!(d.keys().all(|p| p[1] > BEDROCK_Y));
+    assert_eq!(d.len(), 2, "the stone slab's cells in each layer; bedrock refused");
+    assert!(d.keys().all(|b| b.cells().0[1] >= (BEDROCK_Y + 1) * TILE_PLATES as i32));
     apply_checked(&mut region, Order::DevCompleteAll);
     for p in area.tiles() {
         let expect = if p[1] > BEDROCK_Y { OPEN } else { (TileFill::Solid, Some(MAT_BEDROCK)) };

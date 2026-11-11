@@ -19,8 +19,10 @@ use game::{GameEventKind, Goal, Key, Motion, World, WorldBlockPos, TILE_PLATES};
 const BANK: i32 = STAND;
 /// One metre (a tile's width), sim units.
 const BV: f32 = common::TILE_W;
-/// Plates the ledge a swimmer climbs out onto lies above the water (0.4 m).
-const LEDGE_PLATES: i32 = 2;
+/// Plates the ledge a swimmer climbs out onto lies above the water: one tile (1.2 m).
+const LEDGE_PLATES: i32 = TILE_PLATES as i32;
+/// Plates of a bank the swimmer cannot leave by (1.8 m).
+const TOO_HIGH_PLATES: i32 = 9;
 /// Tiles a pool is dug into the bank.
 const POOL_DEPTH: i32 = 4;
 
@@ -184,38 +186,60 @@ fn swim_speed_is_capped() {
     assert!(speed >= 0.9 * SWIM_SPEED, "the body does swim: {speed} m/s");
 }
 
-#[test]
-#[ignore = "slow: >100ms — run via just test-full"]
-fn swimmer_climbs_out_onto_a_low_ledge() {
+/// A swimmer two tiles from a bank raised `plates` over the water (north of the
+/// pool, z < 3) swims at it holding forward and jump for 40 ticks. Returns the tick
+/// it stood on the ledge, and the lowest `vel_y` (units/s) it had on the way.
+fn climb_out(plates: i32) -> (Option<usize>, f32) {
     let mut w = bank_world(&[pool(3..14, 3..14)]);
-    // North of the pool (z < 3) the bank is raised `LEDGE_PLATES` (0.4 m):
-    // its top is that far above the water's surface.
-    // P10b, found and not fixed (movement is `game/src`): the voxel body
-    // climbed a 1 m ledge; the stud body climbs 0, 1 and 2 plates but not a
-    // brick course (3 plates) — its exit jump tops out 0.04 m over the
-    // surface and it then hangs against the brick edge, not grounded, its
-    // `vel_y` falling without bound (−814 units/s after 16 ticks). So the
-    // ledge here is the highest it does climb.
-    raise_bank(&mut w, 0..32, 0..3, LEDGE_PLATES);
+    raise_bank(&mut w, 0..32, 0..3, plates);
     float_for_40_ticks(&mut w, 300);
     // Two blocks from the wall, floating where it was.
     let b = body(&w);
     teleport(&mut w, b.x, b.y, 5.5 * BV);
     key(&mut w, Key::KeyW, true);
     key(&mut w, Key::Space, true);
-    let mut out = None;
+    let mut lowest = 0.0f32;
     for t in 0..40 {
         ticks(&mut w, 1);
         let b = body(&w);
+        lowest = lowest.min(player_motion(&w).vel_y);
         if t % 4 == 0 {
             eprintln!("tick {t}: feet {:.3} z {:.3} blocks {:?}", feet_y(&w) / BV, b.z / BV, player_motion(&w));
         }
-        if b.grounded && b.z < 3.0 * BV && feet_y(&w) > common::floor_y(FLOOR_PLATES + LEDGE_PLATES) - 1.0 {
-            out = Some(t);
-            break;
+        if b.grounded && b.z < 3.0 * BV && feet_y(&w) > common::floor_y(FLOOR_PLATES + plates) - 1.0 {
+            return (Some(t), lowest);
         }
     }
-    assert!(out.is_some(), "on the ledge within 40 ticks: feet {} z {} blocks", feet_y(&w) / BV, body(&w).z / BV);
+    eprintln!("not out: feet {} z {} blocks", feet_y(&w) / BV, body(&w).z / BV);
+    (None, lowest)
+}
+
+/// The exit is the body's jump (`SWIM_EXIT_SPEED` scaled like it, 2026-11-11): it
+/// leaves the water at the waist and rises a jump's height from there, then steps
+/// (`STUD_STEP_HEIGHT_M`) onto what its feet have reached. Target: one tile (6
+/// plates, 1.2 m) — the voxel swimmer's 1 m ledge at the stud body's 4/3. It was 2
+/// plates: the exit speed was not scaled while gravity was.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn swimmer_climbs_out_onto_a_tile_high_ledge() {
+    for plates in [1, 3, LEDGE_PLATES] {
+        assert!(climb_out(plates).0.is_some(), "on a {plates}-plate ledge within 40 ticks");
+    }
+}
+
+/// A bank too high to leave by (measured: 8 plates are climbed, 9 are not) throws
+/// the swimmer back; pressed against it the body never gathers fall speed it does
+/// not make (it hung on a 3-plate edge with `vel_y` at −814 units/s after 16 ticks).
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn a_bank_too_high_is_not_climbed_and_nothing_runs_away() {
+    let (out, lowest) = climb_out(TOO_HIGH_PLATES);
+    assert!(out.is_none(), "{TOO_HIGH_PLATES} plates are out of reach");
+    // No faster down than a fall from the top of the exit jump.
+    let s = BodyScale::STUD.factor;
+    let jump = game::movement::SWIM_EXIT_SPEED * s;
+    let fall = (jump * jump * 1.5f32).sqrt() * UNITS_PER_METER;
+    assert!(lowest > -fall, "vel_y fell to {lowest} units/s (bound {fall})");
 }
 
 /// The climb-out is a surface move: head under, jump against a wall only
@@ -316,9 +340,12 @@ fn rollback_across_water_surface_restores_hash() {
 #[ignore = "slow: >100ms — run via just test-full"]
 fn people_swim_too() {
     // A channel 3 tiles wide (z 10..13) across the whole fixture, two tiles
-    // deeper than the pools: the person steps off the bank and plunges under
-    // the stud body's gravity (4/3 of the base) before it floats up — in a
-    // `POOL_DEPTH` channel it came within 0.11 m of the bed.
+    // deeper than the pools. The person steps off the bank and plunges: at the
+    // 50 ms tick it falls four ticks under the stud body's fall gravity
+    // (90 m/s²) before its waist is seen wet — 1.8 m down at 18 m/s — and the
+    // water brakes it as hard as gravity (`SWIM_VERTICAL_ACCEL` × the body's
+    // gravity scale since 2026-11-11: 4.6 m deep in all, the voxel body's 3.4 m
+    // at 4/3; unscaled it was 5.5 m). That is the model, not a mis-scale.
     let channel_bed = FLOOR_PLATES - (POOL_DEPTH + 2) * TILE_PLATES as i32;
     let channel = PlateWater { bed: channel_bed, ..pool(0..32, 10..13) };
     let mut w = bank_world(&[channel]);
@@ -365,4 +392,6 @@ fn people_swim_too() {
     // (`handoff_schedule::swim_is_seam_invariant`).
     let bed = common::floor_y(channel_bed);
     assert!(lowest > bed + 0.25 * BV, "it never sank to the bed: lowest feet {} m (bed {})", lowest / BV, bed / BV);
+    // The plunge stays above where a `POOL_DEPTH` channel's bed would be.
+    assert!(lowest > bed_y(), "plunged {} m under the surface", (surface_y() - lowest) / BV);
 }

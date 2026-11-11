@@ -39,9 +39,9 @@ pub const BODY_ANGULAR_DAMPING: f32 = 0.5;
 /// (see `stud_body::STUD_BODY_SOFT_CCD`).
 pub const BODY_SOFT_CCD: f32 = crate::BLOCK_UNITS as f32;
 
-/// Height above the tile, in blocks, of the bottom of a dev-dropped body
-/// (`Order::DevDropBody`).
-pub const DEV_DROP_HEIGHT_BLOCKS: i32 = 4;
+/// Tile levels above the ordered tile's bottom at which a dev-dropped body's
+/// bottom starts (`Order::DevDropBody`).
+pub const DEV_DROP_HEIGHT_TILES: i32 = 4;
 /// Most spin about each axis (rad/s) a dev-dropped body starts with, rolled
 /// per axis from the tick and the tile (`slime::roll`, so a replay spins the
 /// same way).
@@ -97,8 +97,9 @@ impl Rollback {
         self.data.ecs.kind.set_safe(e, Some(kind));
     }
 
-    /// `Order::DevDropBody`: a 1 m cube whose bottom is
-    /// [`DEV_DROP_HEIGHT_BLOCKS`] above region-local tile `at`, spinning at
+    /// `Order::DevDropBody`: a 1 m cube over the centre of region-local tile
+    /// `at`, its bottom [`DEV_DROP_HEIGHT_TILES`] tile levels above the tile's
+    /// (a tile address like every other dev order's, through `tiles`), spinning at
     /// up to [`DEV_DROP_SPIN_RAD_PER_S`] about each axis. Refused (`false`,
     /// nothing changed) off the region's block columns.
     pub fn dev_drop_body_safe(&mut self, at: crate::TilePos) -> bool {
@@ -107,8 +108,8 @@ impl Rollback {
             return false;
         }
         let b = crate::BLOCK_UNITS as f32;
-        let centre =
-            Vector::new((at[0] as f32 + 0.5) * b, (at[1] + DEV_DROP_HEIGHT_BLOCKS) as f32 * b + b / 2.0, (at[2] as f32 + 0.5) * b);
+        let (x, z) = crate::tiles::column_centre([at[0], at[2]]);
+        let centre = Vector::new(x, crate::tiles::level_bottom_units(at[1] + DEV_DROP_HEIGHT_TILES) + b / 2.0, z);
         let tick = *self.data.tick;
         // Per axis a roll in [-1, 1] (a 2001-step lattice) of the tile.
         let subject = |axis: u64| ((at[0] as u32 as u64) << 32 | at[2] as u32 as u64) ^ (axis << 62);

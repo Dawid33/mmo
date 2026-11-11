@@ -124,11 +124,21 @@ impl StudEdge {
     /// only some chunk columns: a halo window).
     pub fn from_seed(seed: &StudRegionSeed) -> Self {
         let recipes: BTreeMap<ColumnCoords, &StudColumnGround> = seed.ground.iter().map(|(c, g)| (*c, g)).collect();
-        let chunks = seed
+        let mut chunks: BTreeMap<StudChunkCoords, StudChunk> = seed
             .feature_chunks()
             .into_iter()
             .filter(|(c, chunk)| edge_column(c.x, c.z) && !derived(recipes.get(&ColumnCoords::new(c.x, c.z)).copied(), *c, chunk))
             .collect();
+        // The cliff walls genesis materialises (`stud_wall_layers`) against the columns
+        // the seed holds: the whole region's for a whole seed, the band's for a window.
+        for (c, g) in seed.ground.iter().filter(|(c, _)| edge_column(c.x, c.z)) {
+            for y in crate::stud_ground::stud_wall_layers(&recipes, *c) {
+                if let Some(chunk) = g.pristine_chunk(y) {
+                    chunks.entry(StudChunkCoords { x: c.x, y, z: c.z }).or_insert(chunk);
+                }
+            }
+        }
+        let chunks = chunks.into_iter().collect();
         let ground = seed.ground.iter().filter(|(c, _)| edge_column(c.x, c.z)).cloned().collect();
         Self { ground, chunks }
     }
@@ -356,8 +366,27 @@ impl Rollback {
                 if k.to_local().0 != u.from {
                     continue;
                 }
-                for y in g.surface_layers() {
+                // Its surface layers, and under them the wall it shows this region's
+                // lower edge column across the seam.
+                let wall = self.own_column_facing(*k).map_or(0..0, |(_, own, side)| g.wall_layers(own.edge_low(side)));
+                for y in wall.chain(g.surface_layers()) {
                     wanted.insert(WorldChunkPos::new(k.x, y, k.z), g.pristine_chunk(y));
+                }
+            }
+        }
+        // This region's own walls: an edge column standing over the neighbour's lower
+        // ground materialises the layers that ground opens onto (undo-safe, like any
+        // runtime chunk; the neighbour's halo takes them from this region's deltas).
+        for (k, g) in &u.stud_ground {
+            let Some((c, own, side)) = self.own_column_facing(*k) else { continue };
+            let layers = own.wall_layers(g.edge_low(side.opposite()));
+            let own = own.clone();
+            for y in layers {
+                let coords = StudChunkCoords { x: c.x, y, z: c.z };
+                if self.stud_key_at(coords).is_none() {
+                    if let Some(chunk) = own.pristine_chunk(y) {
+                        self.create_stud_chunk_safe(coords, chunk);
+                    }
                 }
             }
         }
@@ -374,6 +403,25 @@ impl Rollback {
             self.apply_stud_halo_delta_safe(&StudHaloDelta { chunk: k, data });
         }
         self.materialize_behind_stud_halo_safe(&edited);
+    }
+
+    /// This region's chunk column across a face from halo column `k` (a world chunk
+    /// column of the band), its recipe, and the side of it that faces `k`. `None` for a
+    /// corner column (no shared face) or one outside the band.
+    fn own_column_facing(&self, k: WorldChunkPos) -> Option<(ColumnCoords, &StudColumnGround, crate::stud_ground::StudSide)> {
+        use crate::stud_ground::StudSide;
+        let n = REGION_CHUNKS as i32;
+        let inside = |c: i32| (0..n).contains(&c);
+        let [lx, _, lz] = k.local_in(*self.data.region);
+        let (own, side) = match (lx, lz) {
+            (-1, z) if inside(z) => ([0, z], StudSide::West),
+            (x, z) if x == n && inside(z) => ([n - 1, z], StudSide::East),
+            (x, -1) if inside(x) => ([x, 0], StudSide::North),
+            (x, z) if z == n && inside(x) => ([x, n - 1], StudSide::South),
+            _ => return None,
+        };
+        let c = ColumnCoords::new(own[0] as usize, own[1] as usize);
+        self.data.stud_ground.get(&c).map(|g| (c, g, side))
     }
 
     /// One halo stud chunk takes its new content, undo-safely: the stored chunk and

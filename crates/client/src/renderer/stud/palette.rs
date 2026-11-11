@@ -216,6 +216,24 @@ pub fn size_text(area: TileBox) -> String {
     format!("{tiles} ({} × {} × {} m)", m(len(0), w), m(len(2), w), m(len(1), h))
 }
 
+/// The drag readout's size in what the terrain is made of: studs and plates,
+/// followed by the box in metres — "8 × 6 studs × 12 plates (4 × 3 × 2.4 m)".
+pub fn stud_size_text(area: TileBox) -> String {
+    let len = |i: usize| i64::from(area.max[i]) - i64::from(area.min[i]) + 1;
+    let (ts, tp) = (game::TILE_STUDS as i64, game::TILE_PLATES as i64);
+    let (w, h) = (game::tile_width_units(), game::tile_height_units());
+    let m = |n: i64, unit: f32| metres_text(n as f32 * unit / game::movement::UNITS_PER_METER);
+    format!(
+        "{} × {} studs × {} plates ({} × {} × {} m)",
+        len(0) * ts,
+        len(2) * ts,
+        len(1) * tp,
+        m(len(0), w),
+        m(len(2), w),
+        m(len(1), h)
+    )
+}
+
 /// A part's footprint in metres, for tooltips and tests: studs are half a metre.
 pub fn footprint_metres(size: [u8; 3]) -> [f32; 2] {
     [f32::from(size[0]) * STUD_M, f32::from(size[2]) * STUD_M]

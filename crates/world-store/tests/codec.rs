@@ -86,11 +86,11 @@ pub(crate) fn meta() -> RegionMeta {
     let mut m = RegionMeta { tick: 123_456, next_game_event_id: 99, next_entity_serial: 12, ..Default::default() };
     let cell = pos(10, 20, 30);
     m.designations.insert(
-        [3, 4, 5],
+        game::StudBox::of_tile([3, 4, 5]).unwrap(),
         game::Designation { kind: game::DesignationKind::Chop, op: game::OpId { client: 2, seq: 7 }, priority: 6 },
     );
     m.designations.insert(
-        [-1, 9, 2],
+        game::StudBox::of_tile([-1, 9, 2]).unwrap(),
         game::Designation { kind: game::DesignationKind::Build(BlockId(3)), op: game::OpId { client: 1, seq: 8 }, priority: 2 },
     );
     m.constructed.insert([6, 7, 8], ());
@@ -227,7 +227,7 @@ fn golden_blobs_decode() {
         tick: m.tick,
         next_game_event_id: m.next_game_event_id,
         next_entity_serial: m.next_entity_serial,
-        designations: m.designations.clone(),
+        designations: m.designations.iter().map(|(b, d)| (b.tiles().min, *d)).collect(),
         constructed: m.constructed.clone(),
         item_piles: m.item_piles.clone(),
         containers: m.containers.clone(),
@@ -239,6 +239,11 @@ fn golden_blobs_decode() {
     };
     assert_eq!(decode_region_meta(&encode(FORMAT_REGION_META_V1, &v1)).unwrap(), m, "a format 1 stud meta decodes to the same meta");
     assert_eq!(decode_region_meta(&encode(FORMAT_REGION_META, &m)).unwrap(), m);
+    // Format 2 (designations by tile) is still read, each tile as its cell box: the
+    // golden recorded then (the fixture value's two designations sat on tiles).
+    let v2 = fixture("region_meta_v2.bin");
+    assert_eq!(v2[0], FORMAT_REGION_META_V2);
+    assert_eq!(decode_region_meta(&v2).unwrap(), m, "a format 2 meta decodes to the same meta, its tiles as boxes");
     let voxel = fixture("region_meta_v1_water.bin");
     assert_eq!(voxel[0], FORMAT_REGION_META_V1);
     assert!(matches!(decode_region_meta(&voxel), Err(StoreError::Corrupt(_))), "voxel water bodies are refused, not dropped");

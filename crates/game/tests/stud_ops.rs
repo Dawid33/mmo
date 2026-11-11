@@ -203,6 +203,34 @@ fn runtime_and_genesis_colliders_agree() {
     assert_eq!(a, b);
 }
 
+/// The join snapshot's wire form (`region_wire.rs`) leaves derivable stud collider
+/// shapes off the wire; what the receiver rebuilds is the sender's state byte for
+/// byte — after genesis, and after an incremental (patched in place) edit, whose
+/// shape has another layout than a fresh build and so must travel whole.
+#[test]
+fn region_snapshot_wire_restores_the_state_exactly() {
+    let content = chunk([
+        filler([32, 15, 32], [0, 0, 0]),
+        brick("3001", [0, 15, 0]),
+        brick("3001", [8, 15, 8]),
+        brick("3040", [10, 15, 10]),
+    ]);
+    let (mut g, _rx) = genesis(content);
+    let round_trip = |g: &Rollback| -> usize {
+        let wire = encode_packet(&ServerPacket::Region(RegionCoords::new(0, 0), g.clone())).unwrap();
+        let ServerPacket::Region(_, back) = decode_packet(&wire).unwrap() else { panic!("a region packet") };
+        assert_eq!(state_hash(&back), state_hash(g));
+        assert!(bincode::serialize(&back).unwrap() == bincode::serialize(g).unwrap(), "the restored state differs");
+        bincode::serialize(&ServerPacket::Region(RegionCoords::new(0, 0), g.clone())).unwrap().len()
+    };
+    let plain = bincode::serialize(&g).unwrap().len();
+    let slim = round_trip(&g);
+    assert!(slim * 4 < plain * 3, "genesis voxel shapes stay off the wire: {slim} of {plain} bytes");
+    g.new_transaction();
+    assert!(g.remove_stud_safe(C, [8, 15, 8]));
+    round_trip(&g);
+}
+
 #[test]
 fn player_spawns_above_stud_surface() {
     let mut region = Region::new(Rollback::new(None), None, RegionCoords::new(0, 0), None);

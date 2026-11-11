@@ -8,8 +8,11 @@ use serde::{Serialize, de::DeserializeOwned};
 use crate::StoreError;
 
 /// `regions.meta`: a `game::RegionMeta`. Format 2 dropped the voxel world's water
-/// bodies; format 1 rows are still read ([`decode_region_meta`]).
-pub const FORMAT_REGION_META: u8 = 2;
+/// bodies, format 3 stores designations by box of stud cells instead of by tile;
+/// format 1 and 2 rows are still read ([`decode_region_meta`]).
+pub const FORMAT_REGION_META: u8 = 3;
+/// The region meta layout with designations by tile (`game::RegionMetaV2`).
+pub const FORMAT_REGION_META_V2: u8 = 2;
 /// The region meta layout with (empty) voxel water bodies (`game::RegionMetaV1`).
 pub const FORMAT_REGION_META_V1: u8 = 1;
 /// `entities.bundle` and in-flight transfers: a `game::EntityBundle`. Format 2 added
@@ -75,12 +78,16 @@ pub fn decode_entity_bundle(bytes: &[u8]) -> Result<game::EntityBundle, StoreErr
     }
 }
 
-/// A stored region meta of either format: the current one, or format 1
+/// A stored region meta of any format: the current one, format 2
+/// (`game::RegionMetaV2`: each tile designation becomes its cell box) or format 1
 /// (`game::RegionMetaV1`, whose voxel water bodies must be empty) converted.
 pub fn decode_region_meta(bytes: &[u8]) -> Result<game::RegionMeta, StoreError> {
     match bytes.first() {
         Some(&FORMAT_REGION_META_V1) => {
             decode::<game::RegionMetaV1>(FORMAT_REGION_META_V1, bytes).map(game::RegionMeta::from)
+        }
+        Some(&FORMAT_REGION_META_V2) => {
+            decode::<game::RegionMetaV2>(FORMAT_REGION_META_V2, bytes).map(game::RegionMeta::from)
         }
         _ => decode(FORMAT_REGION_META, bytes),
     }

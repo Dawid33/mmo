@@ -219,17 +219,21 @@ fn digging_and_deconstructing_drop_into_piles() {
     let (a, b) = ([4, STAND - 1, 4], [5, STAND - 1, 4]);
     order(&mut r, designate(1, DesignationKind::Dig, a, b));
     r.forget_last_event();
+    let dug: Vec<StudBox> = r.data().designations().keys().copied().collect();
     let h = state_hash(r.data());
     order(&mut r, Order::DevCompleteAll);
-    // What a tile of the flat ground yields: its grass and its dirt each drop dirt,
-    // one per tile's worth of cells, rounded per material.
+    // The dig took whole bricks (those meeting the two tiles): a tile's worth of cells
+    // per dirt across the batch, what is left of one rolled.
     let (lo, hi) = tile_box(a);
     let per_tile: u32 = stud_drops(&world(1).carve_stud_safe(lo, hi)).iter().map(|s| s.count).sum();
+    assert!((1..=2).contains(&per_tile), "plain per-material rounding");
     assert_eq!(stud_drops(&[(MAT_GRASS, 4), (MAT_DIRT, 20)]), vec![stack("dirt", 1)], "4 cells are too few for an item");
-    assert!((1..=2).contains(&per_tile));
-    assert_eq!(piled(r.data(), item("dirt")), 2 * per_tile, "{:?}", piles(r.data()));
-    assert_eq!(r.data().item_piles().values().map(|p| p.count()).sum::<u32>(), 2 * per_tile, "nothing but dirt");
-    assert!(piles(r.data()).iter().all(|(p, _)| p[1] == STAND - 1 && (4..=5).contains(&p[0])), "{:?}", piles(r.data()));
+    let dug: u32 = dug.iter().map(|b| b.cell_count()).sum();
+    assert!(dug >= 2 * STUD_TILE_CELLS);
+    let dirt = piled(r.data(), item("dirt"));
+    assert!((dug / STUD_TILE_CELLS..=dug.div_ceil(STUD_TILE_CELLS)).contains(&dirt), "{dug} cells gave {dirt}");
+    assert_eq!(r.data().item_piles().values().map(|p| p.count()).sum::<u32>(), dirt, "nothing but dirt");
+    assert!(piles(r.data()).iter().all(|(p, _)| p[1] == STAND - 1), "{:?}", piles(r.data()));
     r.rollback_last_event();
     assert_eq!(state_hash(r.data()), h, "the dig and its drops undone");
     assert!(r.data().item_piles().is_empty());
@@ -254,7 +258,128 @@ fn digging_and_deconstructing_drop_into_piles() {
     let (lo, hi) = tile_box([12, STAND - 1, 12]);
     let dirt = piled(r.data(), item("dirt"));
     order(&mut r, Order::CarveStud { lo, hi });
-    assert_eq!(piled(r.data(), item("dirt")), dirt + per_tile);
+    assert_eq!(piled(r.data(), item("dirt")), dirt + 1, "a whole tile's cells: exactly its one item");
+}
+
+// --- Bricks: placing and designating -----------------------------------------------
+
+/// One brick goes flush against whichever face was hit, on the brick lattice on the
+/// other two axes, never over the hit cell — in the neighbouring chunk when the face
+/// is a chunk's edge.
+#[test]
+fn a_placed_brick_goes_against_each_face() {
+    let dims = [STUD_CHUNK_STUDS as i64, STUD_CHUNK_PLATES as i64, STUD_CHUNK_STUDS as i64];
+    let global = |chunk: [i64; 3], c: [u8; 3]| [0, 1, 2].map(|a| chunk[a] * dims[a] + i64::from(c[a]));
+    for cell in [[10u8, 30, 10], [11, 31, 11], [0, 0, 0], [31, 89, 31], [30, 88, 1]] {
+        for normal in [[1i8, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]] {
+            let hit = StudRayHit { chunk: [2, 0, 3], cell, normal, t: 1.0 };
+            let (chunk, brick) = brick_placement(&hit, MAT_STONE).unwrap_or_else(|| panic!("{cell:?} {normal:?}"));
+            assert!(StudChunk::new([brick]).is_ok(), "{cell:?} {normal:?}: a valid brick inside its chunk");
+            let (lo, size) = (global(chunk, brick.min), brick.size());
+            let hi = [0, 1, 2].map(|a| lo[a] + i64::from(size[a]));
+            let at = global(hit.chunk, cell);
+            let axis = (0..3).find(|&a| normal[a] != 0).unwrap();
+            for a in 0..3 {
+                if a == axis {
+                    // Flush: it starts (or ends) at the face, away from the hit cell.
+                    let face = if normal[a] > 0 { lo[a] == at[a] + 1 } else { hi[a] == at[a] };
+                    assert!(face, "{cell:?} {normal:?}: flush on axis {a} ({lo:?}..{hi:?})");
+                    assert!(size[a] <= PLACE_BRICK_SIZE[a]);
+                } else {
+                    assert!((lo[a]..hi[a]).contains(&at[a]), "{cell:?} {normal:?}: over the hit cell's column on axis {a}");
+                    assert_eq!((size[a], lo[a].rem_euclid(i64::from(PLACE_BRICK_SIZE[a]))), (PLACE_BRICK_SIZE[a], 0), "on the lattice");
+                }
+            }
+        }
+    }
+    // Away from a chunk edge it is the whole 2 x 2 brick.
+    let hit = StudRayHit { chunk: [0, 0, 0], cell: [10, 30, 10], normal: [-1, 0, 0], t: 1.0 };
+    assert_eq!(brick_placement(&hit, MAT_STONE).map(|(_, b)| (b.min, b.size())), Some(([8, 30, 10], PLACE_BRICK_SIZE)));
+    // From inside a brick there is no face.
+    assert_eq!(brick_placement(&StudRayHit { normal: [0; 3], ..hit }, MAT_STONE), None);
+    // In the sim: placed once, refused over itself, undone exactly.
+    let mut r = region_of(StudRegionSeed { ground: flat_ground(1), features: Vec::new() });
+    let top = StudRayHit { chunk: [0, 0, 0], cell: [10, (TOP - 1) as u8, 10], normal: [0, 1, 0], t: 1.0 };
+    let (chunk, brick) = brick_placement(&top, MAT_STONE).unwrap();
+    let c = StudChunkCoords { x: chunk[0] as usize, y: chunk[1] as i32, z: chunk[2] as usize };
+    let h = state_hash(r.data());
+    order(&mut r, Order::PlaceStud { chunk: c, brick });
+    assert_eq!(r.data().stud_chunk_at(c).unwrap().brick_at(brick.min), Some(&brick));
+    let placed = state_hash(r.data());
+    let bricks = r.data().stud_chunk_at(c).unwrap().clone();
+    order(&mut r, Order::PlaceStud { chunk: c, brick });
+    assert!(r.data().stud_chunk_at(c) == Some(&bricks), "an overlapping place is refused");
+    r.rollback_last_event();
+    assert_eq!(state_hash(r.data()), placed);
+    r.rollback_last_event();
+    assert_eq!(state_hash(r.data()), h, "the place undone");
+}
+
+/// A designation is its CELLS: a neighbouring carve that re-splits a designated brick
+/// leaves it designated, and the dig then carves exactly the designated cells.
+#[test]
+fn a_designated_brick_survives_a_neighbouring_carve() {
+    let mut r = region_of(StudRegionSeed { ground: flat_ground(1), features: Vec::new() });
+    let c = StudChunkCoords { x: 0, y: 0, z: 0 };
+    // The surface brick over tile (4, 4), and a tile's worth of cells inside it that
+    // the designation's volume does not reach.
+    let a = [4, STAND - 1, 4];
+    let (lo, hi) = tile_box(a);
+    let top = *r.data().stud_chunk_at(c).unwrap().brick_at([lo[0] as u8, (TOP - 1) as u8, lo[2] as u8]).unwrap();
+    assert!(matches!(top.shape, StudShape::Part { .. }) && top.size().iter().map(|&v| u32::from(v)).product::<u32>() > 12, "{top:?}");
+    order(&mut r, designate(1, DesignationKind::Dig, a, a));
+    r.forget_last_event();
+    let boxes: Vec<StudBox> = r.data().designations().keys().copied().collect();
+    let whole = StudBox { chunk: [0, 0, 0], lo: top.min, hi: [0, 1, 2].map(|i| top.min[i] + top.size()[i]) };
+    assert!(boxes.contains(&whole), "the whole brick, snapped outward past the tile: {boxes:?}");
+    let outside = (0..3).any(|i| i32::from(whole.lo[i]) < lo[i] || i32::from(whole.hi[i]) > hi[i]);
+    assert!(outside, "it reaches out of the dragged tile");
+    // Carve one stud column of that brick away, outside the tile: the brick is re-split.
+    let far = [0, 2].map(|i| if i32::from(whole.lo[i]) < lo[i] { i32::from(whole.lo[i]) } else { i32::from(whole.hi[i]) - 1 });
+    let cut = if far[0] < lo[0] || far[0] >= hi[0] { ([far[0], TOP - 3, lo[2]], [far[0] + 1, TOP, lo[2] + 1]) } else { ([lo[0], TOP - 3, far[1]], [lo[0] + 1, TOP, far[1] + 1]) };
+    let h = state_hash(r.data());
+    order(&mut r, Order::CarveStud { lo: cut.0, hi: cut.1 });
+    assert!(r.data().stud_chunk_at(c).unwrap().bricks().all(|b| *b != top), "the brick was split");
+    assert_eq!(r.data().designations().keys().copied().collect::<Vec<_>>(), boxes, "still designated, by its cells");
+    r.rollback_last_event();
+    assert_eq!(state_hash(r.data()), h);
+    order(&mut r, Order::CarveStud { lo: cut.0, hi: cut.1 });
+    r.forget_last_event();
+    // The dig carves exactly the designated cells.
+    let mut want = r.data().stud_chunk_at(c).unwrap().clone();
+    for b in &boxes {
+        want.carve(b.lo, b.hi);
+    }
+    let h = state_hash(r.data());
+    order(&mut r, Order::DevCompleteAll);
+    assert!(r.data().stud_chunk_at(c) == Some(&want), "exactly the designated cells are gone");
+    for b in &boxes {
+        assert!(r.data().stud_bricks_meeting(*b).is_empty(), "{b:?} is empty");
+    }
+    assert!(r.data().designations().is_empty());
+    r.rollback_last_event();
+    assert_eq!(state_hash(r.data()), h, "the completed dig undone");
+    // Erasing by a tile volume takes every box sharing a cell with it.
+    order(&mut r, Order::Erase { area: TileBox::new(a, a), only: Some(DesignationKind::Dig) });
+    assert!(r.data().designations().is_empty());
+    r.rollback_last_event();
+    assert_eq!(state_hash(r.data()), h, "the erase undone");
+}
+
+/// A save from before designations sat on bricks: each tile becomes its cell box.
+#[test]
+fn old_tile_designations_load_as_their_cell_boxes() {
+    let d = Designation { kind: DesignationKind::Dig, op: OpId { client: 1, seq: 2 }, priority: 3 };
+    let old = RegionMetaV2 { tick: 9, designations: BTreeMap::from([([3, -2, 5], d), ([40, 17, 0], d)]), ..Default::default() };
+    let now = RegionMeta::from(old);
+    assert_eq!(now.tick, 9);
+    let boxes: Vec<_> = now.designations.keys().map(|b| b.cells()).collect();
+    let mut want = vec![stud_tile_box([3, -2, 5]).unwrap(), stud_tile_box([40, 17, 0]).unwrap()];
+    want.sort_by_key(|(lo, hi)| StudBox::of_cells(*lo, *hi));
+    assert_eq!(boxes, want);
+    assert!(now.designations.values().all(|x| *x == d));
+    assert_eq!(StudBox::of_tile([3, -2, 5]).map(|b| b.tiles()), Some(TileBox::new([3, -2, 5], [3, -2, 5])));
+    assert_eq!(StudBox::of_cells([0, 0, 30], [2, 6, 34]), None, "a box never straddles a chunk");
 }
 
 // --- Chests -----------------------------------------------------------------------
@@ -433,7 +558,12 @@ fn a_chopped_tree_falls_and_leaves_its_logs() {
     let mut r = region_of(tree_seed());
     let cut = [8, STAND + 1, 8];
     order(&mut r, designate(1, DesignationKind::Chop, [8, STAND + 1, 8], [9, STAND + 1, 8]));
-    assert_eq!(r.data().designations().len(), 1, "only the trunk tile takes the chop");
+    // A click on any of its bricks designates the whole tree: every brick carrying
+    // its id, wood and leaves.
+    let whole: usize = (0..2).map(|y| r.data().stud_chunk_at(StudChunkCoords { x: 0, y, z: 0 }).map_or(0, |c| c.bricks().filter(|b| b.data == TREE).count())).sum();
+    assert!(whole > 1);
+    assert_eq!(r.data().designations().len(), whole, "every brick of the tree");
+    assert!(r.data().designations().values().all(|d| d.kind == DesignationKind::Chop));
     r.forget_last_event();
     let h = state_hash(r.data());
     order(&mut r, Order::DevCompleteAll);
@@ -470,8 +600,9 @@ fn a_chopped_tree_falls_and_leaves_its_logs() {
     assert!(lowest < start.y - 16.0, "it fell: {} -> {lowest}", start.y);
     assert!(lowest > plate_units(TOP) - 16.0, "it did not fall through the ground: {lowest}");
     assert!((ticks as u64) < SETTLE_TIMEOUT_TICKS, "it came to rest ({ticks} ticks), not timed out");
-    assert_eq!(piled(r.data(), item(STUD_WOOD_DROP_BLOCK)), 4, "one log from the cut, three from the fallen top");
-    assert_eq!(tree_cells(r.data(), TREE), BTreeMap::from([(MAT_WOOD, 24), (MAT_LEAVES, 12)]));
+    // The whole tree was designated, so it went at its lowest wood: no stump.
+    assert_eq!(piled(r.data(), item(STUD_WOOD_DROP_BLOCK)), 5, "one log from the cut at the base, four from the fallen trunk");
+    assert_eq!(tree_cells(r.data(), TREE), BTreeMap::new());
 }
 
 // --- Stud bodies ------------------------------------------------------------------
@@ -704,70 +835,125 @@ fn right_click(r: &mut Region) {
     barred_tick(r, "the tick after a right click");
 }
 
+/// The stud chunk a ray hit lies in (this region's own).
+fn hit_chunk(hit: &StudEyeHit) -> StudChunkCoords {
+    StudChunkCoords { x: hit.ray.chunk[0] as usize, y: hit.ray.chunk[1] as i32, z: hit.ray.chunk[2] as usize }
+}
+
+/// Region stud cell of chunk cell `cell` of chunk `c`.
+fn region_cell(c: StudChunkCoords, cell: [u8; 3]) -> [i32; 3] {
+    [
+        (c.x * STUD_CHUNK_STUDS) as i32 + i32::from(cell[0]),
+        c.y * STUD_CHUNK_PLATES as i32 + i32::from(cell[1]),
+        (c.z * STUD_CHUNK_STUDS) as i32 + i32::from(cell[2]),
+    ]
+}
+
 #[test]
-fn a_held_button_mines_the_stud_tile_under_the_crosshair() {
+fn a_held_button_mines_the_brick_under_the_crosshair() {
     let mut r = survivor(DOWN_45);
     let hit = r.data().eye_stud_hit(CLIENT).expect("the eye ray meets the ground");
-    let p = hit.tile;
-    assert_eq!((p[1], hit.outside, hit.inside), (STAND - 1, [p[0], STAND, p[2]], false), "the ground tile ahead, from above");
-    assert_eq!(r.data().tile_fill(p), TileFill::Solid);
-    let need = r.data().stud_mine_ticks(p).expect("grass over dirt can be mined");
-    assert_eq!(Some(need), r.data().stud_tile_break_ticks(p), "no tree: the tile's own break time");
-    assert!(need > 2, "a tile of soil takes a while: {need}");
+    assert_eq!((hit.tile[1], hit.outside, hit.inside), (STAND - 1, [hit.tile[0], STAND, hit.tile[2]], false), "the ground ahead, from above");
+    // The target is the brick the ray's cell lies in: its own box.
+    let c = hit_chunk(&hit);
+    let before = r.data().stud_chunk_at(c).unwrap().clone();
+    let brick = *before.brick_at(hit.ray.cell).expect("the hit cell is a brick's");
+    assert!(matches!(brick.shape, StudShape::Part { .. }), "the surface is real parts");
+    let size = brick.size();
+    let p = hit.lo;
+    assert_eq!(p, region_cell(c, brick.min));
+    assert_eq!(hit.hi, [0, 1, 2].map(|a| p[a] + i32::from(size[a])));
+    let cells: u32 = size.iter().map(|&v| u32::from(v)).product();
+    let need = r.data().stud_mine_ticks(p).expect("soil can be mined");
+    assert_eq!(Some(need), stud_break_ticks(brick.material, cells), "its material's hardness over its cells");
+    assert!(need > 2, "a brick of soil takes a while: {need}");
+    assert_eq!(r.data().mining_view(CLIENT, 0), None, "nothing mined yet");
     mouse(&mut r, MouseButton::Left, true);
     let mut held = 0;
-    while r.data().tile_fill(p) != TileFill::Open {
+    while r.data().stud_material_at(p).is_some() {
         barred_tick(&mut r, "mining");
         held += 1;
         if held < need {
             assert_eq!(r.data().clients[&CLIENT].mining.map(|m| (m.target, m.needed_ticks)), Some((p, need)));
-            assert_eq!(r.data().tile_fill(p), TileFill::Solid, "not before its {need} ticks ({held})");
+            assert_eq!(r.data().mining_view(CLIENT, 0).map(|v| (v.target, v.size)), Some((p, size)), "the HUD's box is the brick's");
+            assert!(r.data().stud_chunk_at(c) == Some(&before), "not before its {need} ticks ({held})");
         }
         assert!(held <= need + 2, "never broke");
     }
     assert_eq!(held, need, "it breaks on the tick its break time ends");
-    // 20 cells of dirt and 4 of grass: one dirt, lying where the tile was (it settles
-    // onto the tile under it).
-    let (lo, hi) = tile_box(p);
-    let per_tile: u32 = stud_drops(&world(2).carve_stud_safe(lo, hi)).iter().map(|s| s.count).sum();
-    assert!(per_tile >= 1);
-    assert_eq!(piled(r.data(), item("dirt")), per_tile, "what a dug tile of this ground yields");
-    assert_eq!(piles(r.data()).iter().map(|(at, _)| *at).collect::<Vec<_>>(), vec![p]);
-    // The cooldown: the next tile is not started at once.
+    // Exactly that brick is gone: every other brick of the chunk is as it was.
+    let mut want = before.clone();
+    assert_eq!(want.remove_at(hit.ray.cell), Some(brick));
+    assert!(r.data().stud_chunk_at(c) == Some(&want), "the neighbours are intact");
+    // Its yield: a tile's worth of cells per item, what is left of one rolled.
+    let dirt = piled(r.data(), item("dirt"));
+    assert!((cells / STUD_TILE_CELLS..=cells.div_ceil(STUD_TILE_CELLS)).contains(&dirt), "{cells} cells gave {dirt}");
     // The cooldown: nothing is mined for a few ticks, though the button stays down.
     barred_tick(&mut r, "the cooldown");
     assert_eq!(r.data().clients[&CLIENT].mining, None);
     for _ in 0..BREAK_COOLDOWN_TICKS + 2 {
         tick(&mut r);
     }
-    let next = r.data().eye_stud_hit(CLIENT).expect("something behind the hole").tile;
+    let next = r.data().eye_stud_hit(CLIENT).expect("something behind the hole").lo;
     assert_ne!(next, p);
-    assert_eq!(r.data().clients[&CLIENT].mining.map(|m| m.target), Some(next), "then the tile behind it is mined");
+    assert_eq!(r.data().clients[&CLIENT].mining.map(|m| m.target), Some(next), "then the brick behind it is mined");
     // Released: progress is dropped.
     mouse(&mut r, MouseButton::Left, false);
     barred_tick(&mut r, "the release");
     assert_eq!(r.data().clients[&CLIENT].mining, None);
-    // Bedrock and air are not mined.
-    assert_eq!(r.data().stud_mine_ticks([p[0], BEDROCK / TILE_PLATES as i32 - 1, p[2]]), None, "bedrock");
-    assert_eq!(r.data().stud_mine_ticks([p[0], STAND + 3, p[2]]), None, "air");
+    // Air is not mined.
+    assert_eq!(r.data().stud_mine_ticks([p[0], (STAND + 3) * TILE_PLATES as i32, p[2]]), None, "air");
+}
+
+/// Small bricks are not always nothing: over many carves of one 2 x 2 brick's worth
+/// of cells (half a tile) about half yield an item, and two together exactly one.
+#[test]
+fn small_bricks_yield_their_share_over_time() {
+    let half = STUD_TILE_CELLS / 2;
+    assert_eq!(stud_drops(&[(MAT_STONE, half - 1)]), vec![], "plain rounding gave a small brick nothing");
+    let mut got = 0;
+    for i in 0..400u64 {
+        let drops = stud_drops_rolled(&[(MAT_STONE, half)], 1000 + i, drop_subject([i as i64, 3, 7]));
+        assert!(drops.iter().map(|s| s.count).sum::<u32>() <= 1);
+        got += drops.iter().map(|s| s.count).sum::<u32>();
+    }
+    assert!((150..=250).contains(&got), "about half of 400: {got}");
+    // One plate cell in 24: rare, never impossible.
+    let plates: u32 =
+        (0..2400u64).map(|i| stud_drops_rolled(&[(MAT_STONE, 1)], i, 5).iter().map(|s| s.count).sum::<u32>()).sum();
+    assert!((50..=150).contains(&plates), "about 100 of 2400: {plates}");
+    // The same roll every time (stateless).
+    assert_eq!(stud_drops_rolled(&[(MAT_STONE, half)], 77, 9), stud_drops_rolled(&[(MAT_STONE, half)], 77, 9));
+    // A batch pays whole tiles' worth exactly: two halves are one item, nothing rolled.
+    let mut tally = DropTally::default();
+    assert!(tally.add(&[(MAT_STONE, half)]).is_empty());
+    assert_eq!(tally.add(&[(MAT_STONE, half)]).iter().map(|s| s.count).sum::<u32>(), 1);
+    assert!(tally.finish(1, 1).is_empty());
+    // Grass and dirt both drop dirt: counted together.
+    assert_eq!(stud_drops_rolled(&[(MAT_GRASS, 4), (MAT_DIRT, 20)], 1, 1), vec![stack("dirt", 1)]);
 }
 
 #[test]
-fn a_right_click_fills_the_tile_against_the_face_from_the_hotbar() {
+fn a_right_click_places_one_brick_against_the_face_from_the_hotbar() {
     let mut r = survivor(DOWN_45);
-    let at = r.data().eye_stud_hit(CLIENT).unwrap().outside;
-    assert_eq!(r.data().tile_fill(at), TileFill::Open);
+    let hit = r.data().eye_stud_hit(CLIENT).unwrap();
+    let (chunk, brick) = brick_placement(&hit.ray, MAT_STONE).expect("a brick on the ground ahead");
+    let c = StudChunkCoords { x: chunk[0] as usize, y: chunk[1] as i32, z: chunk[2] as usize };
+    assert_eq!(brick.size(), PLACE_BRICK_SIZE, "a 2 x 2 brick");
+    assert_eq!(region_cell(c, brick.min)[1], hit.hi[1], "standing on the face it was placed against");
+    let bricks = r.data().stud_chunk_at(c).unwrap().len();
     set_slot(&mut r, 0, Some(stack("stone", 3)));
     right_click(&mut r);
-    assert_eq!(r.data().tile_fill(at), TileFill::Solid, "a tile of stone on the hit face");
-    assert_eq!(r.data().stud_tile(at).material(), Some(MAT_STONE));
+    let now = r.data().stud_chunk_at(c).unwrap();
+    assert_eq!(now.brick_at(brick.min), Some(&brick), "one brick of stone on the hit face");
+    assert_eq!(now.len(), bricks + 1, "and nothing else");
     assert_eq!(slot(&r, 0), Some(stack("stone", 2)));
     // A stick is not a block: nothing placed, nothing taken.
     let next = r.data().eye_stud_hit(CLIENT).unwrap();
-    assert_eq!(next.tile, at, "the new tile is under the crosshair now");
+    assert_eq!(next.lo, region_cell(c, brick.min), "the new brick is under the crosshair now");
     set_slot(&mut r, 0, Some(ItemStack { item: STICK, count: 1 }));
     right_click(&mut r);
-    assert_eq!(r.data().tile_fill(next.outside), TileFill::Open);
+    assert_eq!(r.data().stud_chunk_at(c).unwrap().len(), bricks + 1);
     assert_eq!(slot(&r, 0), Some(ItemStack { item: STICK, count: 1 }));
 }
 
@@ -790,7 +976,10 @@ fn the_chest_item_places_a_chest_and_a_click_opens_it() {
     // Closed and mined, it spills: the chest lies there as an item.
     r.handle_event(GameEventKind::UiAction(CLIENT, UiAction::CloseInventory)).unwrap();
     r.forget_last_event();
-    let need = r.data().stud_mine_ticks(at).expect("a chest can be mined");
+    // The chest is one target: its whole tile, whichever of its bricks is hit.
+    let hit = r.data().eye_stud_hit(CLIENT).unwrap();
+    assert_eq!((hit.lo, hit.hi), stud_tile_box(at).unwrap());
+    let need = r.data().stud_mine_ticks(hit.lo).expect("a chest can be mined");
     mouse(&mut r, MouseButton::Left, true);
     for _ in 0..need {
         barred_tick(&mut r, "mining the chest");
@@ -851,12 +1040,14 @@ fn a_thrown_item_lands_in_the_tile_ahead() {
 fn mining_a_trunk_fells_the_stud_tree() {
     // Three tiles south of the trunk at tile column (8, 8), looking level at it.
     let mut r = survivor_in(tree_seed(), [8, STAND, 11], 0.0);
-    let p = r.data().eye_stud_hit(CLIENT).expect("the trunk is in reach").tile;
+    let hit = r.data().eye_stud_hit(CLIENT).expect("the trunk is in reach");
+    let p = hit.tile;
     assert_eq!([p[0], p[2]], [8, 8], "the trunk");
     assert!(p[1] > STAND, "at eye height: {p:?}");
     assert_eq!(r.data().stud_tree_at(p), Some(TREE));
-    let plain = r.data().stud_tile_break_ticks(p).unwrap();
-    let need = r.data().stud_mine_ticks(p).unwrap();
+    let cells: u32 = (0..3).map(|a| (hit.hi[a] - hit.lo[a]) as u32).product();
+    let plain = stud_break_ticks(MAT_WOOD, cells).unwrap();
+    let need = r.data().stud_mine_ticks(hit.lo).unwrap();
     assert_eq!(need, plain * FELL_TICKS_FACTOR, "wood of a tree takes the felling factor");
     let wood = tree_cells(r.data(), TREE)[&MAT_WOOD];
     mouse(&mut r, MouseButton::Left, true);
@@ -864,7 +1055,7 @@ fn mining_a_trunk_fells_the_stud_tree() {
         barred_tick(&mut r, "chopping");
     }
     mouse(&mut r, MouseButton::Left, false);
-    assert_eq!(r.data().tile_fill(p), TileFill::Open, "the cut");
+    assert_eq!(r.data().stud_material_at(hit.lo), None, "the cut");
     assert_eq!(stud_bodies(r.data()).len(), 1, "the top falls as one body");
     assert!(tree_cells(r.data(), TREE)[&MAT_WOOD] < wood, "only the stump stands");
     assert!(piled(r.data(), item(STUD_WOOD_DROP_BLOCK)) >= 1, "the cut's log lies at the stump");

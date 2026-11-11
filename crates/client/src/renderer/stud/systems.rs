@@ -29,10 +29,12 @@ pub const STUD_MESH_MAX_IN_FLIGHT: usize = 16;
 pub const STUD_MESH_UPLOADS_PER_FRAME: usize = 8;
 /// Studs and seam lines are meshed and drawn for chunks whose centre is within
 /// this of the commander camera's focus, metres (and kept a little farther:
-/// `world::STUD_DETAIL_KEEP_MARGIN_UNITS`).
-pub const STUD_TOPS_RADIUS_M: f32 = 40.0;
+/// `world::STUD_DETAIL_KEEP_MARGIN_UNITS`). Five chunks: at the first 40 m (2.5
+/// chunks) the bare ground began in plain sight of the viewer. The cost grows
+/// with the area — `measure::MAX_DETAIL_TRIS` gates it.
+pub const STUD_TOPS_RADIUS_M: f32 = 80.0;
 /// ... and within this of the eye in first person, metres. The same reach: a
-/// stud is as small on screen at 40 m from the eye as from the focus.
+/// stud is as small on screen at that distance from the eye as from the focus.
 pub const STUD_TOPS_FIRST_PERSON_RADIUS_M: f32 = STUD_TOPS_RADIUS_M;
 
 /// The body mesh child of a stud chunk.

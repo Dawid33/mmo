@@ -223,9 +223,27 @@ fn lay_cells(
     }
 }
 
-/// The feature bricks of region `coords`' trees, by chunk (ascending), for the ground
-/// recipes `ground` (the whole region's, `recipes_from_patch`'s). `patch` must cover
-/// the region plus `TREE_PATCH_MARGIN`.
+/// Chunk columns the recipes of a tree window must cover past the window on every
+/// side: [`TREE_CLAIM_REACH_BLOCKS`] for the bases of every tree that matters, plus
+/// one more reach for those trees' own cells.
+pub(crate) fn tree_ground_margin_chunks() -> usize {
+    let cb = game::CHUNK_BLOCKS as i32;
+    ((TREE_CLAIM_REACH_BLOCKS + crate::TREE_REACH_BLOCKS + cb - 1) / cb) as usize
+}
+
+/// How far (blocks) past a window of chunk columns the base of a tree can stand and
+/// still decide a brick inside it: one reach for a tree whose cells reach in, two
+/// more for the trees whose cells it loses shared cells to (overlaps go to wood, then
+/// to the lower id — and a tree's bricks are boxes merged over ALL its cells, so a
+/// cell lost outside the window can change a brick inside it).
+const TREE_CLAIM_REACH_BLOCKS: i32 = 3 * crate::TREE_REACH_BLOCKS;
+
+/// The feature bricks of region `coords`' trees in chunk columns `xs × zs`, by chunk
+/// (ascending): the very bricks the whole region's call gives those columns
+/// (`stud_trees::a_window_of_trees_is_the_regions`). `ground` holds the recipes of the
+/// window; the ground under trees standing past it is sampled from `patch` (the same
+/// value a recipe holds), which must cover the window, [`tree_ground_margin_chunks`]
+/// around it (inside the region) and `TREE_PATCH_MARGIN` past that.
 ///
 /// A tree stands on the highest of the four stud columns of its base block (its trunk
 /// reaches down to the others'), keeps only cells inside the region and above the
@@ -236,8 +254,18 @@ pub(crate) fn stud_tree_features(
     mats: &Materials,
     trees_from: TreeSource,
     ground: &[(game::ColumnCoords, StudColumnGround)],
+    xs: std::ops::Range<usize>,
+    zs: std::ops::Range<usize>,
 ) -> Vec<(StudChunkCoords, Vec<StudBrick>)> {
     let (rx, rz) = (coords.x * REGION_BLOCKS, coords.z * REGION_BLOCKS);
+    let cb = game::CHUNK_BLOCKS as i32;
+    let reach = TREE_CLAIM_REACH_BLOCKS - crate::TREE_REACH_BLOCKS; // `trees_for_window` adds one
+    let window = [
+        rx + xs.start as i32 * cb - reach,
+        rz + zs.start as i32 * cb - reach,
+        rx + xs.end as i32 * cb + reach,
+        rz + zs.end as i32 * cb + reach,
+    ];
     // Placement reads surfaces up to `m` past the region; each surface's step-edge
     // test reads one block further (still inside the patch's margin).
     let m = TREE_PATCH_MARGIN - PATCH_MARGIN;
@@ -264,19 +292,27 @@ pub(crate) fn stud_tree_features(
             g
         })
     };
-    let placed = trees_for_window(coords, [rx, rz, rx + REGION_BLOCKS, rz + REGION_BLOCKS], trees_from, &surface);
+    let placed = trees_for_window(coords, window, trees_from, &surface);
 
     let n = STUD_CHUNK_STUDS as i32;
     let region_studs = REGION_BLOCKS * STUDS_PER_M;
     let recipes: BTreeMap<(usize, usize), &StudColumnGround> = ground.iter().map(|(c, g)| ((c.x, c.z), g)).collect();
+    let top_memo = std::cell::RefCell::new(std::collections::HashMap::new());
     // The ground's top plate (one past) at region stud column `(sx, sz)`; `None`
     // outside the region.
     let ground_top = |sx: i32, sz: i32| -> Option<i32> {
         if !(0..region_studs).contains(&sx) || !(0..region_studs).contains(&sz) {
             return None;
         }
-        let g = recipes.get(&((sx / n) as usize, (sz / n) as usize))?;
-        Some(g.surface((sx % n) as usize, (sz % n) as usize))
+        if let Some(g) = recipes.get(&((sx / n) as usize, (sz / n) as usize)) {
+            return Some(g.surface((sx % n) as usize, (sz % n) as usize));
+        }
+        let cached = top_memo.borrow().get(&(sx, sz)).copied();
+        Some(cached.unwrap_or_else(|| {
+            let top = crate::stud_gen::stud_surface(patch, mats, coords, sx, sz);
+            top_memo.borrow_mut().insert((sx, sz), top);
+            top
+        }))
     };
 
     // Each tree's cells in region stud cells, in placement id order.
@@ -319,5 +355,5 @@ pub(crate) fn stud_tree_features(
         lay_cells(wood, MAT_WOOD, id, &mut out);
         lay_cells(leaves, MAT_LEAVES, id, &mut out);
     }
-    out.into_iter().collect()
+    out.into_iter().filter(|(c, _)| xs.contains(&c.x) && zs.contains(&c.z)).collect()
 }

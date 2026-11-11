@@ -490,6 +490,35 @@ fn every_seed_source_gives_the_same_halo() {
     assert!(a.data().stud_halo() == b.data().stud_halo());
     assert_eq!(hash(&a), hash(&b));
     assert_halo_agrees(&a, west(), &east_region, east());
+
+    // With trees (feature bricks: not a function of the recipes). A never-run
+    // neighbour's seed is generated for the facing columns only (`RegionRunner::
+    // seed_halo_from_worldgen`); with the windows' feature bricks in it, it gives the
+    // halo the running neighbour gives — both sides of the seam hold the same trees.
+    let tree = |min: [u8; 3], material: u16| StudBrick { material, data: 7, ..brick(min) };
+    let mut treed = flat_seed();
+    treed.features.push((at(0, 0, 1), vec![tree([4, TOP as u8, 4], game::MAT_WOOD), tree([4, TOP as u8 + 3, 4], game::MAT_LEAVES)]));
+    treed.features.push((at(0, 0, 3), vec![tree([0, TOP as u8, 30], game::MAT_WOOD)]));
+    treed.features.push((at(1, 0, 1), vec![tree([4, TOP as u8, 4], game::MAT_WOOD)]));
+    let mut east_trees = Region::new(Rollback::new(None), Some(sink()), east(), None);
+    east_trees.seed_stud_world(treed.clone());
+    let (xs, zs) = game::halo::facing_columns(east(), west());
+    let inside = |x: usize, z: usize| xs.contains(&x) && zs.contains(&z);
+    let windowed = game::StudRegionSeed {
+        ground: treed.ground.iter().filter(|(c, _)| inside(c.x, c.z)).cloned().collect(),
+        features: treed.features.iter().filter(|(c, _)| inside(c.x, c.z)).cloned().collect(),
+    };
+    let (mut c, mut d) = (region(west()), region(west()));
+    seed(&east_trees, &mut c, west());
+    let snap = crate::common::stud_terrain_snapshot(StudEdge::from_seed(&windowed));
+    apply(&mut d, GameEventKind::HaloUpdate(game::halo::halo_seed_from_snapshot(east(), west(), &snap).unwrap()));
+    assert!(c.data().stud_halo() == d.data().stud_halo());
+    assert_eq!(hash(&c), hash(&d));
+    assert_halo_agrees(&d, west(), &east_trees, east());
+    let trees = |r: &Region| -> usize {
+        r.data().stud_halo().values().filter_map(|h| h.chunk.as_ref()).flat_map(|c| c.bricks()).filter(|b| b.data == 7).count()
+    };
+    assert_eq!(trees(&d), 3, "the edge columns' tree bricks are in the halo, the interior one is not");
 }
 
 #[test]
@@ -622,9 +651,9 @@ fn a_removal_in_the_neighbour_is_an_intent_too() {
 }
 
 /// Survival on stud terrain across a seam (P10a): an Adventure player at the west's
-/// east edge mines a tile of the EAST region seen through the stud halo, then places
-/// a block into it — both the ordinary `BreakBlock` / `PlaceBlock` intents addressed
-/// to the tile, applied by the owner, whose piles take the drop.
+/// east edge mines a brick of the EAST region seen through the stud halo, then places
+/// a brick against it — the `BreakStud` / `PlaceBrick` intents addressed to the
+/// owner's stud chunk, applied by the owner, whose piles take the drop.
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn survival_mining_and_placing_reach_across_the_seam() {
@@ -654,12 +683,13 @@ fn survival_mining_and_placing_reach_across_the_seam() {
         tick(&mut east_region);
     }
     let hit = west_region.data().eye_stud_hit(CLIENT).expect("the ground ahead");
-    assert!(hit.tile[0] >= tiles, "the tile under the crosshair is the east's: {hit:?}");
-    let p = hit.tile;
-    let east_tile = [p[0] - tiles, p[1], p[2]];
-    assert_eq!(east_region.data().tile_fill(east_tile), TileFill::Solid);
-    let need = west_region.data().stud_mine_ticks(p).expect("a halo tile is mined like an own one");
-    assert_eq!(Some(need), east_region.data().stud_mine_ticks(east_tile), "the same break time on both sides");
+    let studs = tiles * TILE_STUDS as i32;
+    assert!(hit.lo[0] >= studs, "the brick under the crosshair is the east's: {hit:?}");
+    let p = hit.lo;
+    let east_cell = [p[0] - studs, p[1], p[2]];
+    assert!(east_region.data().stud_material_at(east_cell).is_some());
+    let need = west_region.data().stud_mine_ticks(p).expect("a halo brick is mined like an own one");
+    assert_eq!(Some(need), east_region.data().stud_mine_ticks(east_cell), "the same break time on both sides");
 
     // --- Mine it: the break is sent on the tick before the last one held.
     apply(&mut west_region, GameEventKind::PlayerInput(CLIENT, InputEvent::MouseButton { button: MouseButton::Left, pressed: true }));
@@ -672,10 +702,11 @@ fn survival_mining_and_placing_reach_across_the_seam() {
         deliver(&mut east_region, &mut west_region, west());
     }
     apply(&mut west_region, GameEventKind::PlayerInput(CLIENT, InputEvent::MouseButton { button: MouseButton::Left, pressed: false }));
-    let world_tile = WorldBlockPos::from_local(east(), BlockPos::new(east_tile[0], east_tile[1], east_tile[2]));
+    let (lo, hi) = (world_stud_cell(west(), hit.lo.map(i64::from)), world_stud_cell(west(), hit.hi.map(i64::from)));
     assert!(
-        matches!(sent[..], [IntentMsg::Intent(SentIntent { target: Target::Block(t), intent: Intent::BreakBlock { survival: true, .. }, .. })] if t == world_tile),
-        "one survival break, addressed to the east's tile: {sent:?}"
+        matches!(sent[..], [IntentMsg::Intent(SentIntent { target: Target::Stud(c), intent: Intent::BreakStud { lo: l, hi: h, survival: true, .. }, .. })]
+            if c == stud_chunk_of_cell(lo) && (l, h) == (lo, hi)),
+        "one survival break, addressed to the east's brick: {sent:?}"
     );
     for _ in 0..3 {
         tick(&mut east_region);
@@ -683,18 +714,18 @@ fn survival_mining_and_placing_reach_across_the_seam() {
         deliver(&mut east_region, &mut west_region, west());
         deliver(&mut west_region, &mut east_region, east());
     }
-    assert_eq!(east_region.data().tile_fill(east_tile), TileFill::Open, "the owner dug the tile");
-    assert_eq!(west_region.data().tile_fill(p), TileFill::Open, "and the hole came back through the halo");
+    assert_eq!(east_region.data().stud_material_at(east_cell), None, "the owner broke the brick");
+    assert_eq!(west_region.data().stud_material_seen(p.map(i64::from)), None, "and the hole came back through the halo");
     let dirt = ItemId::block(block_props().id_named("dirt").expect("real block props"));
     let piled = |r: &Region| r.data().item_piles().values().flat_map(|p| &p.stacks).filter(|s| s.item == dirt).map(|s| s.count).sum::<u32>();
-    assert!(piled(&east_region) >= 1, "the drop lies in the OWNER's piles");
-    assert_eq!(piled(&west_region), 0, "never on the sender's side");
+    assert_eq!(piled(&west_region), 0, "a drop lies in the OWNER's piles, never on the sender's side");
 
-    // --- Place stone into the hole: taken from the hotbar when sent, built by the owner.
+    // --- Place stone into the hole: taken from the hotbar when sent, placed by the owner.
     let stone = block_props().id_named("stone").unwrap();
     west_region.with_data(|d| d.clients.get_mut(&CLIENT).unwrap().inventory.slots[0] = Some(ItemStack { item: ItemId::block(stone), count: 2 }));
-    let target = west_region.data().eye_stud_hit(CLIENT).expect("the hole's floor or wall").outside;
-    assert!(target[0] >= tiles, "the tile against the hit face is the east's too: {target:?}");
+    let hit = west_region.data().eye_stud_hit(CLIENT).expect("the hole's floor or wall");
+    let (chunk, brick) = brick_placement(&hit.ray, MAT_STONE).expect("a brick against the hit face");
+    assert!(chunk[0] >= REGION_CHUNKS as i64, "the chunk it goes into is the east's too: {chunk:?}");
     apply(&mut west_region, GameEventKind::PlayerInput(CLIENT, InputEvent::MouseButton { button: MouseButton::Right, pressed: true }));
     tick(&mut west_region);
     tick(&mut east_region);
@@ -702,7 +733,7 @@ fn survival_mining_and_placing_reach_across_the_seam() {
     assert_eq!(west_region.data().clients[&CLIENT].inventory.slots[0].map(|s| s.count), Some(1), "one stone taken");
     let (_, intents) = deliver(&mut west_region, &mut east_region, east());
     assert!(
-        matches!(intents[..], [IntentMsg::Intent(SentIntent { intent: Intent::PlaceBlock { survival: true, .. }, .. })]),
+        matches!(intents[..], [IntentMsg::Intent(SentIntent { intent: Intent::PlaceBrick { brick: b, .. }, .. })] if b == brick),
         "{intents:?}"
     );
     for _ in 0..3 {
@@ -711,9 +742,98 @@ fn survival_mining_and_placing_reach_across_the_seam() {
         deliver(&mut east_region, &mut west_region, west());
         deliver(&mut west_region, &mut east_region, east());
     }
-    let east_target = [target[0] - tiles, target[1], target[2]];
-    assert_eq!(east_region.data().stud_tile(east_target).material(), Some(MAT_STONE), "the owner built it");
-    assert_ne!(east_region.data().tile_fill(east_target), TileFill::Open);
+    let east_chunk = StudChunkCoords { x: (chunk[0] - REGION_CHUNKS as i64) as usize, y: chunk[1] as i32, z: chunk[2] as usize };
+    assert_eq!(east_region.data().stud_chunk_at(east_chunk).and_then(|c| c.brick_at(brick.min)), Some(&brick), "the owner placed it");
     assert_eq!(west_region.data().clients[&CLIENT].inventory.slots[0].map(|s| s.count), Some(1), "granted: nothing refunded");
     assert_halo_agrees(&west_region, west(), &east_region, east());
+}
+
+// --- Cliffs (the P2 open item, closed 2026-11-11) -----------------------------------
+
+/// A plateau two stud layers over [`TOP`].
+const HIGH: i32 = TOP + 2 * STUD_CHUNK_PLATES as i32;
+
+fn seed_of(top: impl Fn(usize, usize) -> i32) -> StudRegionSeed {
+    let ground = (0..REGION_CHUNKS)
+        .flat_map(|x| (0..REGION_CHUNKS).map(move |z| (x, z)))
+        .map(|(x, z)| (ColumnCoords::new(x, z), StudColumnGround::flat(top(x, z), SOIL, MAT_STONE, -2000)))
+        .collect();
+    StudRegionSeed { ground, features: Vec::new() }
+}
+
+fn region_with(rc: RegionCoords, seed: StudRegionSeed) -> Region {
+    let mut region = Region::new(Rollback::new(None), Some(sink()), rc, None);
+    region.seed_stud_world(seed);
+    region
+}
+
+/// A cliff between two chunk columns INSIDE a region is closed at genesis: the high
+/// column's ground has bricks and colliders all the way down the face the low column
+/// opens onto (implied ground has neither: the face was a hole a body walked into),
+/// and nothing more — columns that do not stand over a neighbour stay implied.
+#[test]
+fn a_cliff_inside_a_region_is_closed_at_genesis() {
+    // Chunk column x = 1 is a plateau; the rest of the region is the plain.
+    let r = region_with(west(), seed_of(|x, _| if x == 1 { HIGH } else { TOP }));
+    let d = r.data();
+    for z in 0..N {
+        for y in 0..=2 {
+            let chunk = d.stud_chunk_at(at(1, y, z)).unwrap_or_else(|| panic!("the plateau's layer {y} at z {z} has bricks"));
+            assert_eq!(Some(chunk), d.stud_ground_recipes()[&ColumnCoords::new(1, z as usize)].pristine_chunk(y).as_ref());
+            let key = d.stud_key_at(at(1, y, z)).unwrap();
+            let body = d.ecs.rigidbody.try_get(key).and_then(|h| d.physics.bodies.get(h)).expect("its body");
+            assert!(!body.colliders().is_empty(), "…and a collider");
+        }
+        // The wall, seen from the plain: solid cells at every plate from the plain's top to the plateau's.
+        for plate in [TOP, TOP + 40, HIGH - 1] {
+            assert!(d.stud_material_at([CW, plate, z * CW + 3]).is_some(), "the face at plate {plate}");
+        }
+        assert!(d.stud_chunk_at(at(1, -1, z)).is_none(), "nothing under the plain's level");
+    }
+    // The plain's columns hold their one surface layer.
+    assert_eq!(d.stud_index.len(), REGION_CHUNKS * (REGION_CHUNKS - 1) + REGION_CHUNKS * 3);
+    assert_eq!(region(west()).data().stud_index.len(), REGION_CHUNKS * REGION_CHUNKS, "flat ground: surface layers only");
+}
+
+/// A cliff AT a seam is closed on both sides whatever the neighbour's seed comes
+/// from: the high region materialises its wall when the low neighbour's recipes
+/// arrive (undo-safely), the low region's halo holds the wall's chunks, and a
+/// never-run high neighbour's worldgen seed gives the low region the same halo.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn a_cliff_at_a_seam_is_closed_on_both_sides() {
+    let plateau = seed_of(|_, _| HIGH);
+    let mut high = region_with(west(), plateau.clone());
+    let low_region = region(east());
+    assert!(high.data().stud_chunk_at(at(N - 1, 0, 0)).is_none(), "implied until the neighbour is known");
+    let before = high.data().stud_index.len();
+    let update = low_region.data().halo_seed_for(west()).expect("neighbours");
+    apply_checked(&mut high, GameEventKind::HaloUpdate(update), "the low neighbour's seed");
+    for z in 0..N {
+        for y in 0..2 {
+            assert!(high.data().stud_chunk_at(at(N - 1, y, z)).is_some(), "own wall layer {y} at z {z}");
+        }
+    }
+    assert_eq!(high.data().stud_index.len(), before + 2 * REGION_CHUNKS, "the edge columns' two wall layers, nothing else");
+
+    // The low side: its halo of the running high region, and of a never-run one.
+    let (mut a, mut b) = (region(east()), region(east()));
+    seed(&high, &mut a, east());
+    let (xs, zs) = game::halo::facing_columns(west(), east());
+    let window = StudRegionSeed {
+        ground: plateau.ground.iter().filter(|(c, _)| xs.contains(&c.x) && zs.contains(&c.z)).cloned().collect(),
+        features: Vec::new(),
+    };
+    let snap = crate::common::stud_terrain_snapshot(StudEdge::from_seed(&window));
+    apply_checked(&mut b, GameEventKind::HaloUpdate(game::halo::halo_seed_from_snapshot(west(), east(), &snap).unwrap()), "a never-run seed");
+    for r in [&a, &b] {
+        for z in 0..N {
+            for y in 0..=2 {
+                assert!(r.data().stud_halo_chunk_at([-1, y, z]).is_some(), "the wall in the halo: layer {y} at z {z}");
+            }
+        }
+    }
+    assert!(a.data().stud_halo() == b.data().stud_halo(), "the same halo from the running region and from its seed");
+    assert_eq!(hash(&a), hash(&b));
+    assert_halo_agrees(&a, east(), &high, west());
 }

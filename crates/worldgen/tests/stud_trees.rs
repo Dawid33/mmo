@@ -101,6 +101,74 @@ fn a_region_is_its_columns_plus_trees() {
     assert!(trees_total > 0, "no tree in {REGIONS:?}: pick regions with trees");
 }
 
+/// Tree window-independence: a window of chunk columns generated alone
+/// (`generate_stud_window`, what the halo seed of a never-run neighbour is cut from)
+/// holds the very recipes and feature bricks the whole region's genesis gives those
+/// columns — every edge band, every corner, single interior columns — so both sides
+/// of a seam see the same trees whether or not the neighbour has ever run.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn a_window_of_trees_is_the_regions() {
+    let n = REGION_CHUNKS;
+    let mut windows = vec![(0..1, 0..n), (n - 1..n, 0..n), (0..n, 0..1), (0..n, n - 1..n)];
+    windows.extend([(0..1, 0..1), (n - 1..n, 0..1), (0..1, n - 1..n), (n - 1..n, n - 1..n), (1..2, 2..3), (0..n, 0..n)]);
+    let mut bricks_seen = 0;
+    for (rc, seed) in seeds() {
+        for (xs, zs) in &windows {
+            let inside = |x: usize, z: usize| xs.contains(&x) && zs.contains(&z);
+            let part = worldgen::stud_gen::generate_stud_window(rc, xs.clone(), zs.clone(), SEED);
+            let ground: Vec<_> = seed.ground.iter().filter(|(c, _)| inside(c.x, c.z)).cloned().collect();
+            let features: Vec<_> = seed.features.iter().filter(|(c, _)| inside(c.x, c.z)).cloned().collect();
+            assert!(part.ground == ground, "{rc:?} {xs:?} x {zs:?}: recipes differ");
+            assert!(part.features == features, "{rc:?} {xs:?} x {zs:?}: feature bricks differ");
+            bricks_seen += features.iter().map(|(_, b)| b.len()).sum::<usize>();
+        }
+    }
+    assert!(bricks_seen > 1000, "the windows hold trees ({bricks_seen} bricks)");
+}
+
+/// What the halo seed of a never-run side neighbour costs: its facing windows with
+/// recipes only (before 2026-11-11) and with their trees, next to the whole region.
+#[test]
+#[ignore = "diagnostic: prints halo window generation times"]
+fn halo_window_cost() {
+    for (x, z) in REGIONS {
+        let rc = RegionCoords::new(x, z);
+        let t = std::time::Instant::now();
+        let whole = generate_stud_region(rc, SEED);
+        let region = t.elapsed();
+        let windows = game::halo::facing_windows(rc, RegionCoords::new(rc.x - 1, rc.z));
+        let t = std::time::Instant::now();
+        for (xs, zs) in &windows {
+            let _ = generate_stud_columns(rc, xs.clone(), zs.clone(), SEED);
+        }
+        let columns = t.elapsed();
+        let t = std::time::Instant::now();
+        let bricks: usize = windows
+            .iter()
+            .map(|(xs, zs)| worldgen::stud_gen::generate_stud_window(rc, xs.clone(), zs.clone(), SEED).features.iter().map(|(_, b)| b.len()).sum::<usize>())
+            .sum();
+        let cut = t.elapsed();
+        let span = |f: fn(&(std::ops::Range<usize>, std::ops::Range<usize>)) -> &std::ops::Range<usize>| {
+            windows.iter().map(|w| f(w).start).min().unwrap()..windows.iter().map(|w| f(w).end).max().unwrap()
+        };
+        let (xs, zs) = (span(|w| &w.0), span(|w| &w.1));
+        let t = std::time::Instant::now();
+        let strip_columns = generate_stud_columns(rc, xs.clone(), zs.clone(), SEED).len();
+        let strip_recipes = t.elapsed();
+        let t = std::time::Instant::now();
+        let strip = worldgen::stud_gen::generate_stud_window(rc, xs, zs, SEED);
+        eprintln!(
+            "{rc:?}: region {region:?} ({} feature chunks); {} windows: recipes only {columns:?}, with trees {cut:?} ({bricks} bricks); \
+             one strip of {strip_columns} columns: recipes only {strip_recipes:?}, with trees {:?} ({} bricks)",
+            whole.features.len(),
+            windows.len(),
+            t.elapsed(),
+            strip.features.iter().map(|(_, b)| b.len()).sum::<usize>()
+        );
+    }
+}
+
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn tree_bricks_are_valid_tagged_and_clear_of_the_ground() {
@@ -309,5 +377,29 @@ fn stud_snapshot_census() {
         part("ecs.stud without pristine chunks", bincode::serialize(&kept).unwrap());
         let wire = game::encode_packet(&game::ServerPacket::Region(rc, rollback.clone())).expect("the packet encodes");
         eprintln!("    {:>8.3} MiB on the wire (ServerPacket::Region)", mib(wire.len() as u64));
+        // The slim wire form (`game::region_wire`): diffs against pristine chunks, voxel
+        // collider shapes rebuilt by the receiver — and the same state, byte for byte.
+        let t = std::time::Instant::now();
+        let _ = game::encode_packet(&game::ServerPacket::Region(rc, rollback.clone()));
+        let encode = t.elapsed();
+        let t = std::time::Instant::now();
+        let game::ServerPacket::Region(_, back) = game::decode_packet(&wire).expect("the packet decodes") else { unreachable!() };
+        eprintln!("    encode {encode:?}, decode {:?}", t.elapsed());
+        let t = std::time::Instant::now();
+        for (c, _) in rollback.stud_index.iter() {
+            let _ = data.stud_ground.get(&game::ColumnCoords::new(c.x, c.z)).and_then(|g| g.pristine_chunk(c.y));
+        }
+        let pristine_t = t.elapsed();
+        let t = std::time::Instant::now();
+        let cells: Vec<_> = chunks.iter().map(|c| game::stud_collider::stud_collider_cells(c)).collect();
+        let cells_t = t.elapsed();
+        let t = std::time::Instant::now();
+        let shapes: Vec<_> = chunks.iter().map(|c| game::stud_collider::stud_collider_shapes(c)).collect();
+        let shapes_t = t.elapsed();
+        let t = std::time::Instant::now();
+        let n: usize = shapes.iter().flatten().map(|s| bincode::serialize(s).unwrap().len()).sum();
+        eprintln!("    own chunks: pristine {pristine_t:?}, cells {cells_t:?} ({} fine), shapes {shapes_t:?}, serialize shapes {:?} ({n} B); clone {:?}",
+            cells.iter().map(|c| c.fine.len()).sum::<usize>(), t.elapsed(), { let t = std::time::Instant::now(); let _c = rollback.clone(); t.elapsed() });
+        assert!(bincode::serialize(&back).unwrap() == bincode::serialize(&*rollback).unwrap(), "the restored state differs");
     }
 }

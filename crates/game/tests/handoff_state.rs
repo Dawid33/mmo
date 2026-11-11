@@ -1020,3 +1020,62 @@ fn ghost_jump_snaps_without_flinging() {
 }
 
 
+
+/// A replayed stud-body arrival keeps ONE copy of its drops (coverage lost with the
+/// voxel world, restored 2026-11-11). A felled trunk's logs ride the bundle
+/// (`Carried::drops`); the same bundle applied twice — a resent transfer — must leave
+/// one body whose drops are the bundle's, and once it settles exactly those items in
+/// the piles: never doubled, never lost.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn replayed_stud_body_arrival_keeps_one_copy_of_its_drops() {
+    use crate::common::{floor_seed, r0, FLOOR_PLATES};
+    use game::REGION_SIZE;
+    use game::stud_body::{SettlePolicy, SETTLE_TIMEOUT_TICKS};
+    use game::{StudBrick, StudChunkCoords, MAT_WOOD, STUD_CHUNK_PLATES};
+    use std::collections::{BTreeMap, BTreeSet};
+    crate::common::install_real_block_props();
+    // Four courses of wood (a trunk) standing on the floor, detached whole.
+    let c = StudChunkCoords { x: 1, y: FLOOR_PLATES.div_euclid(STUD_CHUNK_PLATES as i32), z: 1 };
+    let base = FLOOR_PLATES.rem_euclid(STUD_CHUNK_PLATES as i32) as u8;
+    let mins: Vec<[u8; 3]> = (0..4).map(|k| [8, base + 3 * k, 8]).collect();
+    let floored = |features: Vec<(StudChunkCoords, Vec<StudBrick>)>| {
+        let mut seed = floor_seed(0.0..REGION_SIZE, 0.0..REGION_SIZE, FLOOR_PLATES);
+        seed.features = features;
+        let (send, _recv) = crossbeam::channel::unbounded();
+        let mut region = Region::new(Rollback::new(Some(send.clone())), Some(send), r0(), None);
+        region.seed_stud_world(seed);
+        region
+    };
+    let mut source = floored(vec![(c, mins.iter().map(|m| StudBrick::filler(*m, [2, 3, 2], MAT_WOOD)).collect())]);
+    let mut bundle = None;
+    source.with_data(|r| {
+        r.new_transaction();
+        let picks = BTreeMap::from([(c, mins.iter().copied().collect::<BTreeSet<_>>())]);
+        let e = r.detach_studs_safe(&picks, SettlePolicy::DropItems, Vector::ZERO, None).expect("the trunk became a body");
+        bundle = Some(r.extract_entity_safe(e));
+    });
+    let bundle = bundle.unwrap();
+    let carried: u32 = bundle.carried.drops.iter().map(|s| s.count).sum();
+    assert!(carried > 0, "the trunk carries its logs: {:?}", bundle.carried.drops);
+
+    let mut there = floored(Vec::new());
+    let e = arrive(&mut there, bundle.clone()).expect("arrived");
+    assert_eq!(arrive(&mut there, bundle.clone()), None, "a replay creates nothing");
+    let bodies = there.data().ecs.stud_body.iter().filter(|(_, v)| v.is_some()).count();
+    assert_eq!(bodies, 1, "one stud body");
+    assert_eq!(there.data().ecs.stud_body.try_get(e).as_ref().map(|sb| sb.drops.clone()), Some(bundle.carried.drops.clone()), "its drops, once");
+    for _ in 0..SETTLE_TIMEOUT_TICKS + 5 {
+        tick(&mut there);
+        if there.data().ecs.stud_body.try_get(e).is_none() {
+            break;
+        }
+    }
+    assert!(there.data().ecs.stud_body.try_get(e).is_none(), "it settled");
+    let mut piled: BTreeMap<game::ItemId, u32> = BTreeMap::new();
+    for s in there.data().item_piles().values().flat_map(|p| &p.stacks) {
+        *piled.entry(s.item).or_default() += s.count;
+    }
+    let want: BTreeMap<game::ItemId, u32> = bundle.carried.drops.iter().map(|s| (s.item, s.count)).collect();
+    assert_eq!(piled, want, "exactly the bundle's items lie in the piles");
+}

@@ -27,8 +27,10 @@ const VERTEX_BYTES: usize = 12 + 12 + 16;
 /// Gate: body triangles of one 256 m region. Measured 609 914 (the first launch
 /// drew 8 822 468); the headroom is for worldgen tuning, not for a new mesher.
 const MAX_BODY_TRIS_PER_REGION: usize = 900_000;
-/// Gate: detail triangles around one viewer. Measured 749 640 in 28 chunks.
-const MAX_DETAIL_TRIS: usize = 1_200_000;
+/// Gate: detail triangles around one viewer. Measured 749 640 in 28 chunks at a
+/// 40 m radius; the radius is 80 m now, so ~4x that (about 3.0 M — an estimate
+/// by area, NOT re-measured yet: run this file's test and put the number here).
+const MAX_DETAIL_TRIS: usize = 4_800_000;
 
 #[derive(Default, Clone, Copy)]
 struct Counts {

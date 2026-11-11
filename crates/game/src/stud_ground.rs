@@ -81,6 +81,58 @@ pub struct StudColumnGround {
     bedrock: i32,
 }
 
+/// A side of a chunk column: −x, +x, −z, +z.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StudSide {
+    West,
+    East,
+    North,
+    South,
+}
+
+impl StudSide {
+    pub const ALL: [StudSide; 4] = [StudSide::West, StudSide::East, StudSide::North, StudSide::South];
+
+    /// The chunk column offset `(dx, dz)` to the neighbour on this side.
+    pub fn offset(self) -> (i32, i32) {
+        match self {
+            StudSide::West => (-1, 0),
+            StudSide::East => (1, 0),
+            StudSide::North => (0, -1),
+            StudSide::South => (0, 1),
+        }
+    }
+
+    pub fn opposite(self) -> StudSide {
+        match self {
+            StudSide::West => StudSide::East,
+            StudSide::East => StudSide::West,
+            StudSide::North => StudSide::South,
+            StudSide::South => StudSide::North,
+        }
+    }
+}
+
+/// The cliff-wall layers of chunk column `c` against the columns of `recipes` beside
+/// it ([`StudColumnGround::wall_layers`] over its four sides): what a fresh region
+/// materialises under `c`'s surface layers. Columns `recipes` does not hold (past the
+/// region's edge, or outside a window) open nothing.
+pub fn stud_wall_layers(
+    recipes: &std::collections::BTreeMap<crate::ColumnCoords, &StudColumnGround>,
+    c: crate::ColumnCoords,
+) -> std::collections::BTreeSet<i32> {
+    let mut out = std::collections::BTreeSet::new();
+    let Some(g) = recipes.get(&c) else { return out };
+    for side in StudSide::ALL {
+        let (dx, dz) = side.offset();
+        let (Some(x), Some(z)) = (c.x.checked_add_signed(dx as isize), c.z.checked_add_signed(dz as isize)) else { continue };
+        if let Some(n) = recipes.get(&crate::ColumnCoords::new(x, z)) {
+            out.extend(g.wall_layers(n.edge_low(side.opposite())));
+        }
+    }
+    out
+}
+
 /// What a fresh stud region starts from (`Region::seed_stud_world`): a ground recipe per
 /// chunk column, plus feature bricks (trees, structures) that are not a function of the
 /// recipe, by the chunk they go into.
@@ -224,6 +276,31 @@ impl StudColumnGround {
         let lo = self.surface.iter().copied().min().unwrap_or(0);
         let hi = self.surface.iter().copied().max().unwrap_or(0);
         stud_layer_of(lo.saturating_sub(1))..=stud_layer_of(hi.saturating_sub(1))
+    }
+
+    /// The lowest `surface` along this chunk column's edge on `side`: where a
+    /// neighbour across that face first meets this column's open cells.
+    pub fn edge_low(&self, side: StudSide) -> i32 {
+        let last = N - 1;
+        (0..N)
+            .map(|a| match side {
+                StudSide::West => self.surface(0, a),
+                StudSide::East => self.surface(last, a),
+                StudSide::North => self.surface(a, 0),
+                StudSide::South => self.surface(a, last),
+            })
+            .min()
+            .unwrap_or(0)
+    }
+
+    /// The layers under this column's [`Self::surface_layers`] whose face a neighbour
+    /// opens onto: the neighbour's facing edge lies as low as `facing_low` (its
+    /// [`Self::edge_low`]), so from that plate's layer up this column's ground is a
+    /// cliff wall in the open. A fresh region materialises them — implied ground has
+    /// no bricks and no collider, and a wall of it would be a hole.
+    pub fn wall_layers(&self, facing_low: i32) -> std::ops::Range<i32> {
+        let top = *self.surface_layers().start();
+        stud_layer_of(facing_low).max(-crate::stud::STUD_LAYER_LIMIT).min(top)..top
     }
 
     /// The unedited chunk of layer `y`, or `None` when the layer is all air here.

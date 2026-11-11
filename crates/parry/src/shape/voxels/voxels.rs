@@ -687,8 +687,11 @@ impl Voxels {
 
         result.chunk_bvh = Bvh::from_iter(
             BvhBuildStrategy::Ploc,
-            result.chunk_headers.iter().map(|(chunk_key, chunk_id)| {
-                (chunk_id.id, VoxelsChunk::aabb(chunk_key, result.voxel_size))
+            // mmo-fork: leaves in chunk-id order, not hash-map order — the map's
+            // order depends on the pointer width (foldhash), and a 1–2 leaf tree
+            // keeps its input order, so native and wasm32 built different layouts.
+            result.chunk_keys.iter().enumerate().map(|(id, chunk_key)| {
+                (id, VoxelsChunk::aabb(chunk_key, result.voxel_size))
             }),
         );
 

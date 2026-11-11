@@ -16,7 +16,7 @@
 
 use bevy::prelude::*;
 use bevy::render::render_resource::ShaderType;
-use game::{DesignationKind, Invalid, RegionId, TileBox, TilePos, REGION_SIZE};
+use game::{DesignationKind, Invalid, RegionId, TileBox, REGION_SIZE};
 
 use super::commander::level::{self, WorkingLevel};
 use super::commander::tiles::TileMirror;
@@ -28,14 +28,17 @@ pub const DEPTH_DARKEN_PER_LEVEL: f32 = 0.12;
 /// The darkest a level below the cut gets.
 pub const DEPTH_DARKEN_FLOOR: f32 = 0.35;
 
-/// The designation tool's drag in progress: the tiles it would cover and
-/// whether the order is valid on each. Empty when no drag is on. Filled by
-/// the designation tools (`commander::designate`).
+/// The designation tool's drag in progress: the tile volume it covers and every
+/// brick the order would take (`game::designation_targets`: a box of stud cells
+/// each, with whether the order is valid on it). Empty when no drag is on. Filled
+/// by the designation tools (`commander::designate`); drawn by `stud::overlay`.
 #[derive(Resource, Default)]
 pub struct DragPreview {
     pub area: Option<TileBox>,
     pub kind: Option<DesignationKind>,
-    pub cells: Vec<(TilePos, Result<(), Invalid>)>,
+    pub cells: Vec<(game::StudBox, Result<(), Invalid>)>,
+    /// Bumped on every change (the overlay rebuilds on it).
+    pub stamp: u64,
 }
 
 /// The fortress view's per-session resources.
