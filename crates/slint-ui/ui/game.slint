@@ -9,6 +9,7 @@ import { MenuColumn, MenuLayout } from "menu-column.slint";
 import { StubWindow } from "stub-window.slint";
 import { InventoryScreen, ItemSlot } from "inventory.slint";
 import { StudBuildLayout, StudBuildPalette, StudSwatch } from "stud-build.slint";
+import { PrefabEditorPanel } from "prefab-editor.slint";
 
 export { ItemSlot, EmbarkRow, LegendsFilterRow, RadialItem, SiteMark, StudSwatch, WorldMapConfig }
 
@@ -162,6 +163,20 @@ export component GameUi inherits Window {
     callback stud-pick-color(int);
     callback stud-close();
     // Hit-test positions of the palette for headless tests (window logical pixels).
+    // The prefab editor's panel (prefab-editor.slint), bottom centre while a prefab
+    // is being edited (crates/client/src/prefab_editor/panel.rs).
+    in property <bool> prefab-panel-open;
+    in property <string> prefab-title;
+    in property <string> prefab-counts;
+    in property <bool> prefab-dirty;
+    in property <string> prefab-message;
+    in property <bool> prefab-can-save;
+    in property <bool> prefab-confirm-exit;
+    callback prefab-save();
+    callback prefab-exit();
+    callback prefab-discard();
+    callback prefab-keep-editing();
+
     out property <length> stud-rotate-x: palette.rotate-x;
     out property <length> stud-rotate-y: palette.rotate-y;
     out property <length> stud-close-x: palette.close-x;
@@ -399,6 +414,25 @@ export component GameUi inherits Window {
             pick-natural(i) => { root.stud-pick-natural(i); }
             pick-color(i) => { root.stud-pick-color(i); }
             close => { root.stud-close(); }
+        }
+    }
+
+    // Bottom centre; not over the arrival map.
+    Rectangle {
+        visible: root.prefab-panel-open && !root.map-modal;
+        prefab-panel := PrefabEditorPanel {
+            x: (root.width - self.width) / 2;
+            y: root.height - self.height;
+            title-text: root.prefab-title;
+            counts-text: root.prefab-counts;
+            dirty: root.prefab-dirty;
+            message: root.prefab-message;
+            can-save: root.prefab-can-save;
+            confirm-exit: root.prefab-confirm-exit;
+            save => { root.prefab-save(); }
+            exit => { root.prefab-exit(); }
+            discard => { root.prefab-discard(); }
+            keep-editing => { root.prefab-keep-editing(); }
         }
     }
 

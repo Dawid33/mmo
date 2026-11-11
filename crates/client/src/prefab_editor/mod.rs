@@ -9,10 +9,17 @@
 //! Saving (Ctrl+S, `save.rs`) reads the world's bricks around the anchor back into the
 //! file: everything that is not the baseplate.
 //!
+//! Around it: the library screen of the frontend (`library_ui.rs`: the player's
+//! prefabs and, in dev builds, the game's; new, open, duplicate, delete, import and
+//! export by clipboard) and the in-world panel (`panel.rs`: what is open, Save, Exit,
+//! and the question before leaving with unsaved edits).
+//!
 //! Everything here is per session: [`session::EditorRequest`] and
 //! [`session::EditorSession`] are removed when the session ends, and build mode
 //! (`StudBuild`) is session state already.
 
+pub mod library_ui;
+pub mod panel;
 pub mod save;
 pub mod session;
 

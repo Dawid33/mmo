@@ -131,6 +131,11 @@ impl PrefabDir {
         }
     }
 
+    /// `base` if no prefab here has that name, else `<base>-2`, `<base>-3`, …
+    pub fn unused_name(&self, base: &str) -> String {
+        self.free_name(base, "")
+    }
+
     /// Saves a copy of `name` as `<name>-copy` (then `-copy-2`, …); returns the new name.
     pub fn duplicate(&self, name: &str) -> Result<String, PrefabError> {
         let mut file = self.load(name)?;

@@ -370,7 +370,15 @@ pub struct PrefabEditorPlugin;
 
 impl Plugin for PrefabEditorPlugin {
     fn build(&self, app: &mut App) {
-        app.add_session_reset_with(reset_editor)
+        app.add_plugins(super::library_ui::PrefabLibraryPlugin)
+            .add_systems(
+                Update,
+                (super::panel::apply_editor_ui_actions, super::panel::sync_leave_guard, super::panel::sync_editor_panel)
+                    .chain()
+                    .after(super::save::save_editor)
+                    .run_if(world_systems_enabled()),
+            )
+            .add_session_reset_with(reset_editor)
             .add_message::<super::save::SaveRequested>()
             .add_session_message_clear::<super::save::SaveRequested>()
             .add_systems(

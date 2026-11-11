@@ -1,0 +1,256 @@
+// The prefab library (main menu → Prefab editor): the player's prefabs and, in dev
+// builds, the game's own. The client (crates/client/src/prefab_editor/library_ui.rs)
+// reads the folders and owns every piece of state; this screen reports what the
+// player did. One prefab is selected at a time, in either list.
+
+import { Button, FrameFace, GraphicalSets, LabelFace, Styles, TextField } from "@widgets";
+import { PickList } from "controls.slint";
+
+export component PrefabLibrary {
+    // "name — Build · 3 elements · 8 x 6 x 4", by name.
+    in property <[string]> mine;
+    in property <[string]> game;
+    // Dev builds: the second list, the game's own assets/prefabs/.
+    in property <bool> show-game;
+    in property <int> selected-mine: -1;
+    in property <int> selected-game: -1;
+    // The name a new prefab gets ("" = untitled).
+    in-out property <string> new-name;
+    // The last result, then one line per file that is not a prefab.
+    in property <[string]> status-lines;
+    in property <bool> confirm-delete;
+    in property <string> delete-name;
+
+    callback pick-mine(int);
+    callback pick-game(int);
+    callback open();
+    callback new-build();
+    callback duplicate();
+    callback delete();
+    callback confirm-delete-yes();
+    callback confirm-delete-no();
+    callback import();
+    callback export();
+    callback back();
+
+    property <bool> has-mine: root.selected-mine >= 0 && root.selected-mine < root.mine.length;
+    property <bool> has-game: root.show-game && root.selected-game >= 0 && root.selected-game < root.game.length;
+
+    property <length> margin: 24px;
+    property <length> gap: 12px;
+    property <length> bar-height: 32px;
+    property <length> label-height: 24px;
+    property <length> button-width: 220px;
+
+    out property <length> back-x: back-btn.absolute-position.x + back-btn.width / 2;
+    out property <length> back-y: back-btn.absolute-position.y + back-btn.height / 2;
+
+    frame := FrameFace {
+        title: "Prefab editor";
+        x: root.margin;
+        y: root.margin;
+        width: root.width - 2 * root.margin;
+        height: root.height - 2 * root.margin;
+
+        property <length> left: self.content-x;
+        property <length> right: self.content-right;
+        property <length> top: self.content-y;
+        property <length> bottom: self.height - Styles.frame.box.padding.bottom - GraphicalSets.inset(Styles.frame.graphics).bottom;
+        property <length> body-bottom: bottom - root.bar-height - root.gap;
+        property <length> list-width: (right - left) * 0.55;
+        property <length> pane-x: left + list-width + root.gap;
+        property <length> pane-width: right - pane-x;
+        // The lists share the height: both, or the player's alone.
+        property <length> lists-height: body-bottom - top;
+        property <length> mine-height: root.show-game ? (lists-height - root.gap) / 2 : lists-height;
+
+        LabelFace {
+            x: frame.left;
+            y: frame.top;
+            width: frame.list-width;
+            height: root.label-height;
+            text: "My prefabs";
+        }
+        PickList {
+            x: frame.left;
+            y: frame.top + root.label-height;
+            width: frame.list-width;
+            height: frame.mine-height - root.label-height;
+            items: root.mine;
+            selected: root.selected-mine;
+            picked(i) => { root.pick-mine(i); }
+            activated(i) => {
+                root.pick-mine(i);
+                root.open();
+            }
+        }
+        if root.show-game: LabelFace {
+            x: frame.left;
+            y: frame.top + frame.mine-height + root.gap;
+            width: frame.list-width;
+            height: root.label-height;
+            text: "Game prefabs (assets/prefabs, edited in place)";
+        }
+        if root.show-game: PickList {
+            x: frame.left;
+            y: frame.top + frame.mine-height + root.gap + root.label-height;
+            width: frame.list-width;
+            height: frame.lists-height - frame.mine-height - root.gap - root.label-height;
+            items: root.game;
+            selected: root.selected-game;
+            picked(i) => { root.pick-game(i); }
+            activated(i) => {
+                root.pick-game(i);
+                root.open();
+            }
+        }
+
+        // The right pane: what can be done, top to bottom.
+        Button {
+            x: frame.pane-x;
+            y: frame.top;
+            width: root.button-width;
+            height: root.bar-height;
+            style: Styles.confirm-button;
+            text: "Open";
+            enabled: root.has-mine || root.has-game;
+            clicked => { root.open(); }
+        }
+        LabelFace {
+            x: frame.pane-x;
+            y: frame.top + 1 * (root.bar-height + root.gap);
+            width: frame.pane-width;
+            height: root.label-height;
+            style: Styles.caption-label;
+            text: "Name of a new prefab (a-z, 0-9, -)";
+        }
+        TextField {
+            x: frame.pane-x;
+            y: frame.top + 1 * (root.bar-height + root.gap) + root.label-height;
+            width: root.button-width;
+            height: root.bar-height;
+            text <=> root.new-name;
+            accepted => { root.new-build(); }
+        }
+        Button {
+            x: frame.pane-x;
+            y: frame.top + 2 * (root.bar-height + root.gap) + root.label-height;
+            width: root.button-width;
+            height: root.bar-height;
+            text: "New build";
+            clicked => { root.new-build(); }
+        }
+        Button {
+            x: frame.pane-x;
+            y: frame.top + 3 * (root.bar-height + root.gap) + root.label-height;
+            width: root.button-width;
+            height: root.bar-height;
+            text: "New prop";
+            enabled: false;
+        }
+        LabelFace {
+            x: frame.pane-x + root.button-width + root.gap;
+            y: frame.top + 3 * (root.bar-height + root.gap) + root.label-height;
+            width: frame.pane-width - root.button-width - root.gap;
+            height: root.bar-height;
+            style: Styles.caption-label;
+            text: "comes with prop prefabs";
+        }
+        Button {
+            x: frame.pane-x;
+            y: frame.top + 4 * (root.bar-height + root.gap) + root.label-height;
+            width: root.button-width;
+            height: root.bar-height;
+            text: "Duplicate";
+            enabled: root.has-mine;
+            clicked => { root.duplicate(); }
+        }
+        Button {
+            x: frame.pane-x;
+            y: frame.top + 5 * (root.bar-height + root.gap) + root.label-height;
+            width: root.button-width;
+            height: root.bar-height;
+            text: "Delete";
+            enabled: root.has-mine;
+            clicked => { root.delete(); }
+        }
+        Button {
+            x: frame.pane-x;
+            y: frame.top + 6 * (root.bar-height + root.gap) + root.label-height;
+            width: root.button-width;
+            height: root.bar-height;
+            text: "Import from clipboard";
+            clicked => { root.import(); }
+        }
+        Button {
+            x: frame.pane-x;
+            y: frame.top + 7 * (root.bar-height + root.gap) + root.label-height;
+            width: root.button-width;
+            height: root.bar-height;
+            text: "Export to clipboard";
+            enabled: root.has-mine || root.has-game;
+            clicked => { root.export(); }
+        }
+        for line[i] in root.status-lines: LabelFace {
+            x: frame.pane-x;
+            y: frame.top + 8 * (root.bar-height + root.gap) + root.label-height + i * 20px;
+            width: frame.pane-width;
+            height: 20px;
+            style: i == 0 ? Styles.label : Styles.caption-label;
+            text: line;
+        }
+
+        back-btn := Button {
+            x: frame.left;
+            y: frame.bottom - root.bar-height;
+            width: 140px;
+            height: root.bar-height;
+            style: Styles.back-button;
+            text: "Back";
+            clicked => { root.back(); }
+        }
+    }
+
+    // Delete asks first: everything else is under a modal.
+    Rectangle {
+        visible: root.confirm-delete;
+        width: root.width;
+        height: root.height;
+        background: #00000080;
+        TouchArea {
+            width: 100%;
+            height: 100%;
+        }
+        modal := FrameFace {
+            title: "Delete prefab";
+            width: 440px;
+            height: self.content-y + 28px + 16px + 28px + Styles.frame.box.padding.bottom
+                + GraphicalSets.inset(Styles.frame.graphics).bottom;
+            x: (root.width - self.width) / 2;
+            y: (root.height - self.height) / 2;
+            LabelFace {
+                x: modal.content-x;
+                y: modal.content-y;
+                width: modal.content-right - modal.content-x;
+                height: 28px;
+                text: "Delete \"" + root.delete-name + "\" for good?";
+            }
+            Button {
+                x: modal.content-right - 120px;
+                y: modal.content-y + 44px;
+                width: 120px;
+                height: 28px;
+                text: "Delete";
+                clicked => { root.confirm-delete-yes(); }
+            }
+            Button {
+                x: modal.content-right - 250px;
+                y: modal.content-y + 44px;
+                width: 120px;
+                height: 28px;
+                text: "Cancel";
+                clicked => { root.confirm-delete-no(); }
+            }
+        }
+    }
+}

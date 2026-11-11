@@ -42,6 +42,9 @@ bincode = { workspace = true }
 # UI is bevy_ui. The clipboard/open_url defaults are left out (extra deps).
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# The prefab library's Import from / Export to clipboard (`prefab_editor/library_ui.rs`).
+# Already in the tree (Bevy's and Slint's clipboard), so it adds no build.
+arboard = { version = "3.6", default-features = false }
 quinn = { workspace = true }
 tokio = { workspace = true, features = ["time", "rt"] } # connect retry: timeout + sleep; `rt`: the login-http thread's current-thread runtime
 pyroscope = { workspace = true, optional = true }

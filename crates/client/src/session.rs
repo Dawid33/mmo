@@ -49,6 +49,8 @@ pub enum AppState {
     Login,
     /// Play online: the login service's world list.
     Worlds,
+    /// The prefab editor's library screen (native builds; `prefab_editor`).
+    PrefabLibrary,
 }
 
 /// Root of an entity tree that belongs to the current world session.
@@ -75,6 +77,25 @@ pub struct SkipMenu(pub bool);
 /// the session.
 #[derive(Resource, Clone, Copy, Default, Debug, PartialEq, Eq)]
 pub struct Embarked(pub bool);
+
+/// Something of this session would be lost by leaving it (the prefab editor's unsaved
+/// edits): the player's own ways out ask first. Reset with the session.
+#[derive(Resource, Clone, Copy, Default, Debug, PartialEq, Eq)]
+pub struct LeaveGuard {
+    /// Leaving now loses something.
+    pub unsaved: bool,
+    /// The player asked to leave and has not answered the question yet.
+    pub asked: bool,
+}
+
+impl LeaveGuard {
+    /// The player asks to leave: `true` = go ahead; `false` = held back, and
+    /// [`Self::asked`] is set for whoever owns the question to put it.
+    pub fn request_leave(&mut self) -> bool {
+        self.asked = self.unsaved;
+        !self.unsaved
+    }
+}
 
 /// Why the last session ended without the player's say (server died, connect
 /// failed, …), shown on the main menu. Set by the session flow when a start
@@ -372,6 +393,7 @@ impl Plugin for SessionPlugin {
             .init_resource::<SessionGeneration>()
             .insert_resource(Embarked(self.skip_menu))
             .add_session_reset::<Embarked>()
+            .add_session_reset::<LeaveGuard>()
             .init_resource::<LastSessionError>()
             .add_session_reset::<StartingStatus>()
             .init_resource::<StartingLog>()

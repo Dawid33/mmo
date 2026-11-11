@@ -1,0 +1,90 @@
+// The prefab editor's panel, bottom centre while a prefab is being edited
+// (crates/client/src/prefab_editor/): what is open, how big it is, whether it has
+// unsaved edits, the last load or save result, Save and Exit. Leaving with unsaved
+// edits asks first. Embedded in `GameUi`; the client fills it and takes the clicks
+// (prefab_editor/panel.rs).
+
+import { Button, FrameFace, GraphicalSets, LabelFace, Styles, VerticalFlow } from "@widgets";
+
+export global PrefabPanelLayout {
+    out property <length> width: 360px;
+}
+
+export component PrefabEditorPanel {
+    // "dev-arch — Build".
+    in property <string> title-text;
+    // "3 parts, 0 boxes".
+    in property <string> counts-text;
+    in property <bool> dirty;
+    in property <string> message;
+    in property <bool> can-save: true;
+    // Leaving with unsaved edits: the prompt replaces the buttons.
+    in property <bool> confirm-exit;
+    callback save();
+    callback exit();
+    callback discard();
+    callback keep-editing();
+
+    width: PrefabPanelLayout.width;
+    height: frame.height;
+
+    // Swallows presses on the panel's own background, so a click between two
+    // widgets never places a brick behind it.
+    TouchArea { }
+
+    frame := FrameFace {
+        title: "Prefab";
+        width: 100%;
+        height: self.content-y + body.preferred-height + Styles.frame.box.padding.bottom
+            + GraphicalSets.inset(Styles.frame.graphics).bottom;
+
+        body := VerticalFlow {
+            x: frame.content-x;
+            y: frame.content-y;
+            width: frame.content-right - frame.content-x;
+
+            LabelFace {
+                text: root.title-text + (root.dirty ? "  *" : "");
+            }
+            LabelFace {
+                style: Styles.caption-label;
+                text: root.counts-text + (root.dirty ? " · unsaved changes" : "");
+            }
+            if root.message != "": LabelFace {
+                style: Styles.caption-label;
+                text: root.message;
+            }
+            if !root.confirm-exit: HorizontalLayout {
+                alignment: start;
+                spacing: 8px;
+                Button {
+                    style: Styles.confirm-button;
+                    text: "Save  [Ctrl+S]";
+                    enabled: root.can-save;
+                    clicked => { root.save(); }
+                }
+                Button {
+                    text: "Exit";
+                    clicked => { root.exit(); }
+                }
+            }
+            if root.confirm-exit: LabelFace {
+                style: Styles.bold-red-label;
+                text: "Leave without saving?";
+            }
+            if root.confirm-exit: HorizontalLayout {
+                alignment: start;
+                spacing: 8px;
+                Button {
+                    text: "Discard changes";
+                    clicked => { root.discard(); }
+                }
+                Button {
+                    style: Styles.confirm-button;
+                    text: "Keep editing";
+                    clicked => { root.keep-editing(); }
+                }
+            }
+        }
+    }
+}

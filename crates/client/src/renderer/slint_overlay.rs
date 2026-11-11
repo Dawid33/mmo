@@ -832,6 +832,8 @@ fn connect_game_ui(ui: &GameUi, world: &mut World) {
     world.insert_non_send(InventoryClicks(clicks));
     world.insert_non_send(GameUiActions(actions));
     super::stud::palette_ui::connect(ui, world);
+    #[cfg(not(target_arch = "wasm32"))]
+    crate::prefab_editor::panel::connect(ui, world);
     #[cfg(feature = "dev_ui")]
     super::dev_ui::connect_debug_tab(ui, world);
 }
@@ -1269,7 +1271,10 @@ fn apply_ui_actions(
         Option<ResMut<Messages<super::commander::top_down::ToggleTopDownRequest>>>,
     ),
     local_body: Query<&SimEntity, With<LocalBody>>,
-    mut session_ended: Option<ResMut<Messages<crate::session::SessionEnded>>>,
+    (mut session_ended, mut leave_guard): (
+        Option<ResMut<Messages<crate::session::SessionEnded>>>,
+        Option<ResMut<crate::session::LeaveGuard>>,
+    ),
     mut embarked: Option<ResMut<Embarked>>,
     mut cam: Option<ResMut<CommanderCamera>>,
     mut history: ResMut<HistoryView>,
@@ -1480,7 +1485,9 @@ fn apply_ui_actions(
             UiAction::CloseMenu => to.menu = false,
             UiAction::MainMenu => {
                 to.menu = false;
-                if let Some(ended) = session_ended.as_mut() {
+                // Unsaved work (the prefab editor's): its owner asks first.
+                let go = leave_guard.as_mut().is_none_or(|guard| guard.request_leave());
+                if let (true, Some(ended)) = (go, session_ended.as_mut()) {
                     ended.write(crate::session::SessionEnded { reason: None });
                 }
             }
