@@ -46,6 +46,7 @@ pub mod path_plan;
 pub mod perf;
 pub mod player;
 pub mod portable;
+pub mod prefab;
 mod clock_jump;
 mod physics;
 pub mod protocol;
@@ -123,6 +124,7 @@ pub use path_plan::{
     PORTAL_DEPTH_BLOCKS, ROUTE_MAX_RELIEF_PER_REGION_M, ROUTE_MAX_WATER_SHARE,
 };
 pub use player::*;
+pub use prefab::*;
 pub use portable::{
     restore_portable, PortableRegion, RegionMeta, RegionMetaV1, RegionMetaV2, SaveTerms, StoredRegion, StudChunkRecord, StudKept, StudTerm,
     StudTerms,
