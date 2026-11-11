@@ -307,7 +307,7 @@ pub fn snapshot(rig: &mut Rig, origin: WorldBlockPos, baseline: &BTreeMap<[i64; 
                     (world[2] / REGION_SIZE as f64).floor() as i32,
                 );
                 assert_eq!(owner, rc, "{id:?} is owned by {rc:?} but stands in {owner:?} (world {world:?})");
-                let tile = data.terrain_kind().feet_tile(data.feet_of(t));
+                let tile = game::feet_tile(data.feet_of(t));
                 let tile = WorldBlockPos::from_local(rc, game::BlockPos::new(tile[0], tile[1], tile[2]));
                 let walk_goal = data.ecs.walker.try_get(key).as_ref().map(|w| {
                     let g = w.goal;

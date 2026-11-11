@@ -43,7 +43,7 @@ pub fn feet_offset(kind: EntityKind, scale: BodyScale) -> f32 {
         EntityKind::Player | EntityKind::Person { .. } => scale.capsule_half_height() + scale.capsule_radius(),
         EntityKind::Slime { size } => game::slime::slime_edge_units(size) / 2.0,
         // Placeholder: the 1 m dev cube (bodies of other shapes come later).
-        EntityKind::Body => game::BLOCK_VOXELS as f32 / 2.0,
+        EntityKind::Body => game::BLOCK_UNITS as f32 / 2.0,
     }
 }
 
@@ -150,8 +150,8 @@ mod tests {
     #[test]
     fn feet_are_below_the_body_centre() {
         let h = game::movement::PLAYER_HEIGHT * game::movement::UNITS_PER_METER;
-        assert!((feet_offset(EntityKind::Player, BodyScale::VOXEL) - h / 2.0).abs() < 1e-4);
-        assert_eq!(feet_offset(EntityKind::Slime { size: 2 }, BodyScale::VOXEL), game::slime::slime_edge_units(2) / 2.0);
+        assert!((feet_offset(EntityKind::Player, BodyScale::UNIT) - h / 2.0).abs() < 1e-4);
+        assert_eq!(feet_offset(EntityKind::Slime { size: 2 }, BodyScale::UNIT), game::slime::slime_edge_units(2) / 2.0);
     }
 
     /// On stud terrain people are the 2.2 m stud capsule: their feet are that
@@ -161,30 +161,29 @@ mod tests {
         let h = game::movement::STUD_PLAYER_HEIGHT_M * game::movement::UNITS_PER_METER;
         for kind in [EntityKind::Player, EntityKind::Person { person: game::history::PersonId(1) }] {
             assert!((feet_offset(kind, BodyScale::STUD) - h / 2.0).abs() < 1e-4, "{kind:?}");
-            assert!(feet_offset(kind, BodyScale::STUD) > feet_offset(kind, BodyScale::VOXEL));
+            assert!(feet_offset(kind, BodyScale::STUD) > feet_offset(kind, BodyScale::UNIT));
         }
         let slime = EntityKind::Slime { size: 2 };
-        assert_eq!(feet_offset(slime, BodyScale::STUD), feet_offset(slime, BodyScale::VOXEL));
+        assert_eq!(feet_offset(slime, BodyScale::STUD), feet_offset(slime, BodyScale::UNIT));
     }
 
     /// A stud-sized person standing ON the working level of a stud region is
     /// drawn; with the voxel offset its feet would read 0.2 m high.
     #[test]
     fn a_stud_person_on_the_working_level_is_not_cut() {
-        let kind = game::TerrainKind::Stud;
-        let cut = super::super::level::cut_plane_world_y(kind, 10, home());
-        let floor = kind.level_bottom_units(10) + home().world_offset()[1];
+        let cut = super::super::level::cut_plane_world_y(10, home());
+        let floor = game::level_bottom_units(10) + home().world_offset()[1];
         let pose_y = floor + feet_offset(EntityKind::Player, BodyScale::STUD);
         let o = home().world_offset();
         let at = |offset: f32| Vec3::new(o[0] + 100.0, pose_y - offset, o[2] + 100.0);
         assert!(!hidden_by_cut(at(feet_offset(EntityKind::Player, BodyScale::STUD)), Some(cut), Some(home_rect(home()))));
         // One level up: hidden, with the stud offset.
-        let up = Vec3::Y * kind.tile_height_units();
+        let up = Vec3::Y * game::tile_height_units();
         assert!(hidden_by_cut(at(feet_offset(EntityKind::Player, BodyScale::STUD)) + up, Some(cut), Some(home_rect(home()))));
         // The voxel offset on a stud body puts the feet 0.2 m too high: a body
         // standing a level BELOW a 1-tile-high... it still reads on-level here, but
         // the two offsets differ by exactly the height difference.
-        let d = feet_offset(EntityKind::Player, BodyScale::STUD) - feet_offset(EntityKind::Player, BodyScale::VOXEL);
+        let d = feet_offset(EntityKind::Player, BodyScale::STUD) - feet_offset(EntityKind::Player, BodyScale::UNIT);
         assert!((d - 0.2 * game::movement::UNITS_PER_METER).abs() < 1e-3, "{d}");
     }
 
@@ -225,7 +224,7 @@ mod tests {
     #[test]
     fn visibility_follows_the_cut_and_restores() {
         let mut app = app(10);
-        let cut = super::super::level::cut_plane_world_y(WorkingLevel::default().terrain, 10, home());
+        let cut = super::super::level::cut_plane_world_y(10, home());
         let e = spawn(&mut app, cut, Visibility::Inherited);
         app.update();
         assert_eq!(vis(&app, e), Visibility::Hidden);
@@ -249,7 +248,7 @@ mod tests {
     #[test]
     fn hidden_by_another_system_stays_hidden() {
         let mut app = app(10);
-        let cut = super::super::level::cut_plane_world_y(WorkingLevel::default().terrain, 10, home());
+        let cut = super::super::level::cut_plane_world_y(10, home());
         // Hidden before the cut touched it.
         let before = spawn(&mut app, cut, Visibility::Hidden);
         // Hidden by another system while the cut held it.

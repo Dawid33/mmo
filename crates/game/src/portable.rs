@@ -1,11 +1,11 @@
 //! The portable region format (world store R0+R1, Task 3): what the world
 //! store keeps of a region, independent of its in-memory layout (rapier
 //! handles, slotmap keys, undo wrappers). A region is its meta maps, its
-//! terrain chunks, its ground recipes and its owned entities as
-//! [`EntityBundle`]s — the same bundles a seam crossing sends. Players go to
-//! the store's players table, people are respawned by the history, and
-//! everything else is derived on load or dropped; [`classify`] pins that
-//! decision for every `GameData` and `Ecs` field.
+//! stud terrain and its owned entities as [`EntityBundle`]s — the same
+//! bundles a seam crossing sends. Players go to the store's players table,
+//! people are respawned by the history, and everything else is derived on
+//! load or dropped; [`classify`] pins that decision for every `GameData` and
+//! `Ecs` field.
 //!
 //! Saves are incremental: [`Rollback::portable_snapshot`] takes the terms
 //! ([`SaveTerms`]) of the last save and returns only the chunks
@@ -28,14 +28,9 @@
 use std::collections::BTreeMap;
 
 use crate::{
-    Chunk, ChunkCoords, ClientId, ColumnCoords, ColumnGround, Ecs, EntityBundle, EntityKind, GameData, PlayerRecord,
-    Region, RegionId, Rollback, StateHash as _, StudChunk, StudChunkCoords, StudColumnGround, Tick,
+    ClientId, ColumnCoords, Ecs, EntityBundle, EntityKind, GameData, PlayerRecord, Region, RegionId, Rollback,
+    StateHash as _, StudChunk, StudChunkCoords, StudColumnGround, Tick,
 };
-
-/// Every terrain chunk's `chunk_terrain_term` (its coordinates + content
-/// digest), by chunk: what a save compares against to send only the
-/// chunks that changed.
-pub type ChunkTerms = BTreeMap<ChunkCoords, u32>;
 
 /// How the store keeps one materialised stud chunk (module docs).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -75,13 +70,12 @@ pub type StudTerms = BTreeMap<StudChunkCoords, StudTerm>;
 /// yet in this incarnation, so the next snapshot is whole).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SaveTerms {
-    pub chunks: ChunkTerms,
     pub studs: StudTerms,
 }
 
 impl SaveTerms {
     pub fn is_empty(&self) -> bool {
-        self.chunks.is_empty() && self.studs.is_empty()
+        self.studs.is_empty()
     }
 }
 
@@ -110,22 +104,74 @@ pub struct RegionMeta {
     pub intents: BTreeMap<(Tick, crate::EntityId, u32), crate::SentIntent>,
     pub intent_replies: BTreeMap<(Tick, crate::EntityId, u32), crate::SentReply>,
     pub intent_inbox: BTreeMap<(crate::EntityId, u32), crate::IntentReply>,
-    /// The region's labelled water bodies. Labelled once at genesis from
-    /// the genesis chunks (ice splits bodies), so a restore inserts them
-    /// as stored and never relabels.
-    pub water_bodies: BTreeMap<crate::WaterBodyId, crate::WaterBody>,
+}
+
+/// A map that only ever decodes empty: the slot voxel water bodies had in
+/// [`RegionMetaV1`]. An entry (a voxel world's row — the store refuses those
+/// worlds at open) fails to decode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
+pub enum NoEntry {}
+
+impl<'de> serde::Deserialize<'de> for NoEntry {
+    fn deserialize<D: serde::Deserializer<'de>>(_: D) -> Result<Self, D::Error> {
+        Err(serde::de::Error::custom("voxel water bodies: voxel terrain is no longer supported"))
+    }
+}
+
+/// [`RegionMeta`] as stored with the voxel water bodies (world-store region
+/// meta format 1): the same fields, then `water_bodies`. Decode-only.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct RegionMetaV1 {
+    pub tick: Tick,
+    pub next_game_event_id: usize,
+    pub next_entity_serial: u64,
+    pub designations: BTreeMap<crate::TilePos, crate::Designation>,
+    pub constructed: BTreeMap<crate::TilePos, ()>,
+    pub item_piles: BTreeMap<crate::WorldBlockPos, crate::ItemPile>,
+    pub containers: BTreeMap<crate::WorldBlockPos, crate::Container>,
+    pub pile_takes: BTreeMap<(crate::EntityId, crate::WorldBlockPos), Tick>,
+    pub intents: BTreeMap<(Tick, crate::EntityId, u32), crate::SentIntent>,
+    pub intent_replies: BTreeMap<(Tick, crate::EntityId, u32), crate::SentReply>,
+    pub intent_inbox: BTreeMap<(crate::EntityId, u32), crate::IntentReply>,
+    pub water_bodies: BTreeMap<NoEntry, NoEntry>,
+}
+
+impl From<RegionMetaV1> for RegionMeta {
+    fn from(m: RegionMetaV1) -> Self {
+        let RegionMetaV1 {
+            tick,
+            next_game_event_id,
+            next_entity_serial,
+            designations,
+            constructed,
+            item_piles,
+            containers,
+            pile_takes,
+            intents,
+            intent_replies,
+            intent_inbox,
+            water_bodies: _,
+        } = m;
+        RegionMeta {
+            tick,
+            next_game_event_id,
+            next_entity_serial,
+            designations,
+            constructed,
+            item_piles,
+            containers,
+            pile_takes,
+            intents,
+            intent_replies,
+            intent_inbox,
+        }
+    }
 }
 
 /// One snapshot of a running region, in the portable format.
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PortableRegion {
     pub meta: RegionMeta,
-    /// Only the chunks whose term differs from the saved terms (all of them
-    /// against empty terms).
-    pub chunks: BTreeMap<ChunkCoords, Chunk>,
-    /// The ground recipes: `Some` only in a region's first snapshot of this
-    /// incarnation (when the saved terms are empty) — they never change.
-    pub ground: Option<Vec<(ColumnCoords, ColumnGround)>>,
     /// Every owned entity that is neither a player nor a person, sorted by
     /// `EntityId`.
     pub entities: Vec<EntityBundle>,
@@ -133,25 +179,21 @@ pub struct PortableRegion {
     pub players: Vec<(ClientId, PlayerRecord)>,
     /// The stud chunks whose stored row changes: `Some` = write this record,
     /// `None` = delete the row (the chunk is pristine in a surface layer
-    /// again, or gone). Empty for a voxel region.
+    /// again, or gone). Against empty terms: every row.
     pub stud_chunks: BTreeMap<StudChunkCoords, Option<StudChunkRecord>>,
-    /// The stud ground recipes, `Some` when `ground` is (a first snapshot);
-    /// empty for a voxel region.
+    /// The stud ground recipes: `Some` only in a region's first snapshot of
+    /// this incarnation (when the saved terms are empty) — they never change.
     pub stud_ground: Option<Vec<(ColumnCoords, StudColumnGround)>>,
 }
 
 impl PortableRegion {
     /// Folds a newer snapshot of the same region into this one (a save that
-    /// has not been committed yet): chunks and stud rows union with the
-    /// newer winning (a newer delete replaces an older write), meta, entities
-    /// and players replaced, the grounds the first `Some`.
+    /// has not been committed yet): stud rows union with the newer winning
+    /// (a newer delete replaces an older write), meta, entities and players
+    /// replaced, the recipes the first `Some`.
     pub fn merge(&mut self, newer: PortableRegion) {
-        let PortableRegion { meta, chunks, ground, entities, players, stud_chunks, stud_ground } = newer;
+        let PortableRegion { meta, entities, players, stud_chunks, stud_ground } = newer;
         self.meta = meta;
-        self.chunks.extend(chunks);
-        if self.ground.is_none() {
-            self.ground = ground;
-        }
         self.entities = entities;
         self.players = players;
         self.stud_chunks.extend(stud_chunks);
@@ -161,18 +203,16 @@ impl PortableRegion {
     }
 }
 
-/// A region as the store holds it: every chunk ever saved (the latest
-/// version of each), the ground recipes and the entities. What
+/// A region as the store holds it: every stud chunk row, the ground recipes
+/// and the entities. What
 /// [`restore_portable`] rebuilds a region from.
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct StoredRegion {
     pub meta: RegionMeta,
-    pub chunks: Vec<(ChunkCoords, Chunk)>,
-    pub ground: Vec<(ColumnCoords, ColumnGround)>,
     pub entities: Vec<EntityBundle>,
     /// Every stored stud chunk row, by coordinates (module docs).
     pub stud_chunks: Vec<(StudChunkCoords, StudChunkRecord)>,
-    /// The stud ground recipes (empty: a voxel region).
+    /// The stud ground recipes.
     pub stud_ground: Vec<(ColumnCoords, StudColumnGround)>,
 }
 
@@ -182,8 +222,6 @@ impl From<PortableRegion> for StoredRegion {
     fn from(p: PortableRegion) -> Self {
         StoredRegion {
             meta: p.meta,
-            chunks: p.chunks.into_iter().collect(),
-            ground: p.ground.unwrap_or_default(),
             entities: p.entities,
             stud_chunks: p.stud_chunks.into_iter().filter_map(|(c, r)| Some((c, r?))).collect(),
             stud_ground: p.stud_ground.unwrap_or_default(),
@@ -192,23 +230,6 @@ impl From<PortableRegion> for StoredRegion {
 }
 
 impl Rollback {
-    /// The current [`ChunkTerms`] of every terrain chunk.
-    pub fn chunk_terms(&self) -> ChunkTerms {
-        let mut terms = ChunkTerms::new();
-        for (key, chunk) in self.data.ecs.chunk.iter() {
-            if chunk.is_none() {
-                continue;
-            }
-            let Some(handle) = *self.data.ecs.rigidbody.try_get(key) else { continue };
-            let Some(body) = self.data.physics.bodies.get(handle) else { continue };
-            let coords = crate::chunk_coords_from_translation(body.translation());
-            if let Some(term) = self.chunk_terrain_term(key) {
-                terms.insert(coords, term);
-            }
-        }
-        terms
-    }
-
     /// A materialised stud chunk's content digest (coordinates + bricks).
     fn stud_digest(c: StudChunkCoords, chunk: &StudChunk) -> u32 {
         let mut h = crate::StateHasher::new();
@@ -269,28 +290,15 @@ impl Rollback {
         rows
     }
 
-    /// This region in the portable format, read-only, with the chunks whose
-    /// term differs from `saved` (every chunk when `saved` is empty, which
-    /// also adds the ground recipes), and the full current terms.
+    /// This region in the portable format, read-only, with the stud rows that
+    /// change against `saved` (every row when `saved` is empty, which also
+    /// adds the ground recipes), and the full current terms.
     pub fn portable_snapshot(&self, saved: &SaveTerms) -> (PortableRegion, SaveTerms) {
         let d = &self.data;
         let first = saved.is_empty();
         let stud_terms = self.stud_terms(&saved.studs);
         let stud_chunks = self.stud_rows(&saved.studs, &stud_terms);
         let stud_ground = first.then(|| d.stud_ground.iter().map(|(c, g)| (*c, g.clone())).collect());
-        let saved = &saved.chunks;
-        let terms = self.chunk_terms();
-        let mut chunks = BTreeMap::new();
-        for (key, chunk) in d.ecs.chunk.iter() {
-            let Some(chunk) = chunk else { continue };
-            let Some(handle) = *d.ecs.rigidbody.try_get(key) else { continue };
-            let Some(body) = d.physics.bodies.get(handle) else { continue };
-            let coords = crate::chunk_coords_from_translation(body.translation());
-            if saved.get(&coords) != terms.get(&coords) {
-                chunks.insert(coords, chunk.clone());
-            }
-        }
-        let ground = first.then(|| d.ground.iter().map(|(c, g)| (*c, g.clone())).collect());
         // `id_index` is ordered by `EntityId` and holds owned entities only
         // (never halo mirrors).
         let entities = d
@@ -314,24 +322,21 @@ impl Rollback {
             intents: (*d.intents).clone(),
             intent_replies: (*d.intent_replies).clone(),
             intent_inbox: (*d.intent_inbox).clone(),
-            water_bodies: (*d.water_bodies).clone(),
         };
         let players = crate::players_in(self, *d.region);
         (
-            PortableRegion { meta, chunks, ground, entities, players, stud_chunks, stud_ground },
-            SaveTerms { chunks: terms, studs: stud_terms },
+            PortableRegion { meta, entities, players, stud_chunks, stud_ground },
+            SaveTerms { studs: stud_terms },
         )
     }
 }
 
 /// Rebuilds region `id` from its stored form, and returns its terms
 /// (what the next save compares against):
-/// 1. the terrain, ground recipes and water bodies, raw and unlogged like
-///    genesis (the water bodies as stored — never relabelled); the stud
-///    terrain the same way: the recipes, the pristine chunk of every surface
-///    layer, then the stored rows — an edited chunk replacing or adding to
-///    them, a `Pristine` marker derived from its recipe — and
-///    `BodyScale::STUD` for a region with stud terrain;
+/// 1. the stud terrain, raw and unlogged like genesis: the recipes, the
+///    pristine chunk of every surface layer, then the stored rows — an edited
+///    chunk replacing or adding to them, a `Pristine` marker derived from its
+///    recipe — and `BodyScale::STUD`;
 /// 2. the meta maps, raw; `pile_expiry` rebuilt from `item_piles`; the
 ///    clock and counters in one forgotten transaction;
 /// 3. the region around it, then the entities through `apply_arrival`;
@@ -340,7 +345,7 @@ impl Rollback {
 /// The rollback is built before the `Region`, so the region's
 /// `base_event_id` is the stored `next_game_event_id`.
 pub fn restore_portable(id: RegionId, stored: StoredRegion) -> (Region, SaveTerms) {
-    let StoredRegion { meta, chunks, ground, entities, stud_chunks, stud_ground } = stored;
+    let StoredRegion { meta, entities, stud_chunks, stud_ground } = stored;
     let RegionMeta {
         tick,
         next_game_event_id,
@@ -353,12 +358,8 @@ pub fn restore_portable(id: RegionId, stored: StoredRegion) -> (Region, SaveTerm
         intents,
         intent_replies,
         intent_inbox,
-        water_bodies,
     } = meta;
     let mut rb = Rollback::new(None);
-    rb.seed_terrain_genesis(chunks);
-    rb.seed_ground_genesis(ground);
-    rb.seed_water_genesis(water_bodies);
     // How each stored stud row was kept; every other materialised chunk is a
     // derived surface chunk.
     let mut stud_kept: BTreeMap<StudChunkCoords, StudKept> = BTreeMap::new();
@@ -440,7 +441,7 @@ pub fn restore_portable(id: RegionId, stored: StoredRegion) -> (Region, SaveTerm
         let kept = stud_kept.get(&c).copied().unwrap_or(StudKept::Derived);
         studs.insert(c, StudTerm { digest: Rollback::stud_digest(c, chunk), kept });
     }
-    let terms = SaveTerms { chunks: data.chunk_terms(), studs };
+    let terms = SaveTerms { studs };
     (region, terms)
 }
 
@@ -451,8 +452,8 @@ pub fn restore_portable(id: RegionId, stored: StoredRegion) -> (Region, SaveTerm
 pub fn classify(d: &GameData) {
     let GameData {
         ecs,
-        // Derive on load: every rapier set is rebuilt from the chunks
-        // (`seed_terrain_genesis`) and the bundles (`apply_arrival`).
+        // Derive on load: every rapier set is rebuilt from the stud chunks
+        // (`seed_stud_ground_genesis`) and the bundles (`apply_arrival`).
         physics: _,
         // Persist: `RegionMeta`.
         tick: _,
@@ -462,8 +463,7 @@ pub fn classify(d: &GameData) {
         // (`Region::new`).
         region: _,
         // Derive on load: genesis-only (`set_body_scale_raw`); a restored
-        // region with stud terrain gets `BodyScale::STUD`, any other the
-        // default `BodyScale::VOXEL`.
+        // region with terrain gets `BodyScale::STUD`, as every genesis sets.
         body_scale: _,
         // Players: `PortableRegion::players` → the players table.
         player_entites: _,
@@ -474,14 +474,8 @@ pub fn classify(d: &GameData) {
         // Derive on load: refilled by `apply_arrival`.
         arrivals: _,
         id_index: _,
-        // Derive on load: refilled by `seed_terrain_genesis`.
-        chunk_index: _,
         // Derive on load: refilled by `seed_stud_ground_genesis`.
         stud_index: _,
-        // Persist: `PortableRegion::ground`, first snapshot only.
-        ground: _,
-        // Persist: `RegionMeta::water_bodies` (labelled at genesis only).
-        water_bodies: _,
         // Persist: `RegionMeta`.
         designations: _,
         constructed: _,
@@ -498,8 +492,6 @@ pub fn classify(d: &GameData) {
         containers: _,
         // Drop: halo.
         halo_containers: _,
-        halo: _,
-        halo_ground: _,
         // Drop: the stud halo (`stud_halo.rs`) — mirrors of the neighbours'
         // chunks, reseeded at every start, never in `stud_index`.
         stud_halo: _,
@@ -520,8 +512,6 @@ pub fn classify(d: &GameData) {
         // Derive on load: from the body state.
         isometry: _,
         rigidbody: _,
-        // Persist: `PortableRegion::chunks`.
-        chunk: _,
         // Persist (bundle): `EntityBundle::kind` / `id`.
         kind: _,
         id: _,
@@ -533,7 +523,6 @@ pub fn classify(d: &GameData) {
         // Derive on load: rebuilt from the animator (`attach_rig_safe`).
         bones: _,
         // Persist (bundle, `Carried`).
-        voxel_body: _,
         walker: _,
         wander: _,
         // Persist: `PortableRegion::stud_chunks` — only what the ground

@@ -1,15 +1,13 @@
-//! Sim tiles on either kind of terrain (stud world plan P6a).
+//! Sim tiles (stud world plan P6a).
 //!
-//! A `TilePos` is one nav / designation cell. On voxel terrain it is a 1 m block; on
-//! stud terrain it is [`TILE_STUDS`] x [`TILE_STUDS`] studs wide and [`TILE_PLATES`]
-//! plates tall (1 m x 1.2 m x 1 m): tile `(tx, ty, tz)` covers studs
-//! `[2tx, 2tx + 2)`, plates `[6ty, 6ty + 6)`, studs `[2tz, 2tz + 2)` of the region's
-//! stud-cell frame (plate 0 is the bottom of layer 0).
+//! A `TilePos` is one nav / designation cell: [`TILE_STUDS`] x [`TILE_STUDS`] studs
+//! wide and [`TILE_PLATES`] plates tall (1 m x 1.2 m x 1 m). Tile `(tx, ty, tz)` covers
+//! studs `[2tx, 2tx + 2)`, plates `[6ty, 6ty + 6)`, studs `[2tz, 2tz + 2)` of the
+//! region's stud-cell frame (plate 0 is the bottom of layer 0).
 //!
 //! This file is the ONE place that
-//! - says which kind a region is ([`Rollback::terrain_kind`]),
-//! - converts tiles to sim units and back ([`TerrainKind`]'s methods), and
-//! - derives a stud tile's [`TileFill`] and material from stud cells ([`StudTile`]),
+//! - converts tiles to sim units and back ([`tile_width_units`], [`feet_tile`], …), and
+//! - derives a tile's [`TileFill`] and material from stud cells ([`StudTile`]),
 //!   over materialised chunks or the recipe's implied ground, own region ∪ stud halo.
 //!
 //! Nothing here is state: a [`StudTile`] is a pure function of hashed state, computed
@@ -22,26 +20,14 @@ use std::collections::BTreeMap;
 use rapier3d::math::Vector;
 
 use crate::halo::in_halo_band;
-use crate::movement::{BodyScale, STUD_PLAYER_HEIGHT_M, STUD_STEP_HEIGHT_M, UNITS_PER_METER};
+use crate::movement::{STUD_PLAYER_HEIGHT_M, STUD_STEP_HEIGHT_M, UNITS_PER_METER};
 use crate::stud::{
     plate_units, stud_layer_ok, StudBrick, StudChunk, StudChunkCoords, STUD_CHUNK_PLATES, STUD_CHUNK_STUDS,
     STUD_UNITS, TILE_PLATES, TILE_STUDS,
 };
 use crate::stud_ground::StudColumnGround;
 use crate::stud_material::stud_material;
-use crate::{
-    BlockId, ColumnCoords, Rollback, SlopeShape, TilePos, TileSource, WorldChunkPos, BLOCK_VOXELS, REGION_CHUNKS,
-};
-
-/// What a region's terrain is made of. Decided in one place: [`Rollback::terrain_kind`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum TerrainKind {
-    /// 1 m blocks: a tile is a block.
-    #[default]
-    Voxel,
-    /// Toy bricks: a tile is 2 x 2 studs x 6 plates.
-    Stud,
-}
+use crate::{ColumnCoords, Rollback, TilePos, TileSource, WorldChunkPos, BLOCK_UNITS, REGION_CHUNKS};
 
 /// Metres per plate.
 pub const PLATE_M: f32 = 0.2;
@@ -50,9 +36,9 @@ const _: () = assert!(16.0 / 5.0 / UNITS_PER_METER == PLATE_M);
 pub const STUD_CHUNK_TILES: usize = STUD_CHUNK_STUDS / TILE_STUDS;
 /// Stud tiles per chunk layer.
 pub const STUD_LAYER_TILES: usize = STUD_CHUNK_PLATES / TILE_PLATES;
-// A stud tile is as wide as a block, so tile columns, goals and region edges mean the
-// same place on both terrains.
-const _: () = assert!(TILE_STUDS * STUD_UNITS == BLOCK_VOXELS);
+// A tile is 1 m wide: tile columns, goals, world cells (`WorldBlockPos`) and region
+// edges (`REGION_BLOCKS`) all count the same columns.
+const _: () = assert!(TILE_STUDS * STUD_UNITS == BLOCK_UNITS);
 
 /// Plates a stud-world body walks up without jumping: the whole plates within
 /// `STUD_STEP_HEIGHT_M` (one brick course).
@@ -66,8 +52,7 @@ const _: () = assert!(
     (STUD_BODY_PLATES - 1) as f32 * PLATE_M < STUD_PLAYER_HEIGHT_M
         && STUD_PLAYER_HEIGHT_M < STUD_BODY_PLATES as f32 * PLATE_M + 0.001
 );
-/// Farthest (plates) a path steps DOWN between neighbouring tiles: one tile, as a
-/// voxel path drops one block.
+/// Farthest (plates) a path steps DOWN between neighbouring tiles: one tile.
 pub const STUD_DROP_PLATES: i32 = TILE_PLATES as i32;
 /// Lowest floor (plates above a tile's bottom, so negative: in the tile below) a body
 /// standing in the tile may rest on. With [`STUD_STEP_PLATES`] as the highest, every
@@ -84,75 +69,57 @@ pub fn stud_cap_units() -> f32 {
     crate::stud_collider::STUD_FINE_CELL.y
 }
 
-impl TerrainKind {
-    /// The terrain of a region whose bodies have `scale` (`GameData::body_scale`): the
-    /// decision behind [`Rollback::terrain_kind`], for code that holds only the scale.
-    pub fn of(scale: BodyScale) -> Self {
-        if scale == BodyScale::STUD { TerrainKind::Stud } else { TerrainKind::Voxel }
-    }
+/// A tile's width (x and z), sim units.
+pub fn tile_width_units() -> f32 {
+    (TILE_STUDS * STUD_UNITS) as f32
+}
 
-    /// A tile's width (x and z), sim units.
-    pub fn tile_width_units(self) -> f32 {
-        match self {
-            TerrainKind::Voxel => BLOCK_VOXELS as f32,
-            TerrainKind::Stud => (TILE_STUDS * STUD_UNITS) as f32,
-        }
-    }
+/// A tile's height, sim units.
+pub fn tile_height_units() -> f32 {
+    plate_units(TILE_PLATES as i32)
+}
 
-    /// A tile's height, sim units.
-    pub fn tile_height_units(self) -> f32 {
-        match self {
-            TerrainKind::Voxel => BLOCK_VOXELS as f32,
-            TerrainKind::Stud => plate_units(TILE_PLATES as i32),
-        }
-    }
+/// How far below and above a tile's bottom (in tiles) the feet of a body standing
+/// in it may be: the floors [`STUD_FLOOR_MIN_PLATES`]`..=`[`STUD_STEP_PLATES`], each
+/// taking feet from [`STUD_FEET_SLACK_PLATES`] below it to a plate less that above
+/// (feet rest on the stud caps, half a plate over the floor, or on a smooth top).
+fn level_window() -> (f32, f32) {
+    (
+        (STUD_FLOOR_MIN_PLATES as f32 - STUD_FEET_SLACK_PLATES) / TILE_PLATES as f32,
+        (STUD_STEP_PLATES as f32 + 1.0 - STUD_FEET_SLACK_PLATES) / TILE_PLATES as f32,
+    )
+}
 
-    /// How far below and above a tile's bottom (in tiles) the feet of a body standing
-    /// in it may be: half a block either way on voxels (the level nearest the feet);
-    /// on studs the floors [`STUD_FLOOR_MIN_PLATES`]`..=`[`STUD_STEP_PLATES`], each
-    /// taking feet from [`STUD_FEET_SLACK_PLATES`] below it to a plate less that above
-    /// (feet rest on the stud caps, half a plate over the floor, or on a smooth top).
-    fn level_window(self) -> (f32, f32) {
-        match self {
-            TerrainKind::Voxel => (-0.5, 0.5),
-            TerrainKind::Stud => (
-                (STUD_FLOOR_MIN_PLATES as f32 - STUD_FEET_SLACK_PLATES) / TILE_PLATES as f32,
-                (STUD_STEP_PLATES as f32 + 1.0 - STUD_FEET_SLACK_PLATES) / TILE_PLATES as f32,
-            ),
-        }
-    }
+/// The whole plate feet at height `feet_y` (sim units) stand on: the plate at or
+/// just under them, [`STUD_FEET_SLACK_PLATES`] of slack below.
+pub fn feet_plate(feet_y: f32) -> i64 {
+    (feet_y / plate_units(1) + STUD_FEET_SLACK_PLATES).floor() as i64
+}
 
-    /// The whole plate feet at height `feet_y` (sim units) stand on: the plate at or
-    /// just under them, [`STUD_FEET_SLACK_PLATES`] of slack below.
-    pub fn feet_plate(feet_y: f32) -> i64 {
-        (feet_y / plate_units(1) + STUD_FEET_SLACK_PLATES).floor() as i64
-    }
+/// The tile feet at `feet` (region-local sim units) occupy: the column under them,
+/// at the level whose [window](level_window) holds them.
+pub fn feet_tile(feet: Vector) -> TilePos {
+    let (w, h) = (tile_width_units(), tile_height_units());
+    let (lo, _) = level_window();
+    [(feet.x / w).floor() as i32, (feet.y / h - lo).floor() as i32, (feet.z / w).floor() as i32]
+}
 
-    /// The tile feet at `feet` (region-local sim units) occupy: the column under them,
-    /// at the level whose [window](Self::level_window) holds them.
-    pub fn feet_tile(self, feet: Vector) -> TilePos {
-        let (w, h) = (self.tile_width_units(), self.tile_height_units());
-        let (lo, _) = self.level_window();
-        [(feet.x / w).floor() as i32, (feet.y / h - lo).floor() as i32, (feet.z / w).floor() as i32]
-    }
+/// Whether feet at height `feet_y` (sim units) are on `level`.
+pub fn on_level(level: i32, feet_y: f32) -> bool {
+    let (lo, hi) = level_window();
+    let d = feet_y / tile_height_units() - level as f32;
+    lo < d && d < hi
+}
 
-    /// Whether feet at height `feet_y` (sim units) are on `level`.
-    pub fn on_level(self, level: i32, feet_y: f32) -> bool {
-        let (lo, hi) = self.level_window();
-        let d = feet_y / self.tile_height_units() - level as f32;
-        lo < d && d < hi
-    }
+/// The centre of tile column `[x, z]`, region-local sim units.
+pub fn column_centre(column: [i32; 2]) -> (f32, f32) {
+    let w = tile_width_units();
+    ((column[0] as f32 + 0.5) * w, (column[1] as f32 + 0.5) * w)
+}
 
-    /// The centre of tile column `[x, z]`, region-local sim units.
-    pub fn column_centre(self, column: [i32; 2]) -> (f32, f32) {
-        let w = self.tile_width_units();
-        ((column[0] as f32 + 0.5) * w, (column[1] as f32 + 0.5) * w)
-    }
-
-    /// The bottom of `level`, sim units.
-    pub fn level_bottom_units(self, level: i32) -> f32 {
-        level as f32 * self.tile_height_units()
-    }
+/// The bottom of `level`, sim units.
+pub fn level_bottom_units(level: i32) -> f32 {
+    level as f32 * tile_height_units()
 }
 
 /// How much of a tile is filled.
@@ -164,13 +131,8 @@ pub enum TileFill {
     /// this many plates above its bottom (`1..=TILE_PLATES`; `TILE_PLATES` only when
     /// part of the footprint stays lower, or a non-box part is in it).
     Floor(u8),
-    /// The whole footprint is filled to the tile's top. (A voxel block that collides.)
+    /// The whole footprint is filled to the tile's top.
     Solid,
-}
-
-/// The fill a voxel block gives its tile: `Solid` when it collides, else `Open`.
-pub fn voxel_tile_fill(block: BlockId) -> TileFill {
-    if block != BlockId::AIR && crate::block_props().is_solid(block) { TileFill::Solid } else { TileFill::Open }
 }
 
 /// One stud tile, derived from its 2 x 2 x 6 stud cells.
@@ -358,13 +320,6 @@ enum SeenChunk<'a> {
 }
 
 impl Rollback {
-    /// What this region's terrain is made of — THE region kind switch: a stud region
-    /// is one whose bodies are stud bodies (`BodyScale::STUD`, set by every stud
-    /// genesis and by `restore_portable` for a region with stud terrain).
-    pub fn terrain_kind(&self) -> TerrainKind {
-        TerrainKind::of(*self.data.body_scale)
-    }
-
     /// The stud chunk at region-local chunk `[x, layer, z]` as this region sees it, by
     /// the rules of `stud_material_seen`: its own materialised chunk, else its recipe;
     /// past the edge the halo's chunk, else the neighbour's recipe.
@@ -449,7 +404,7 @@ impl Rollback {
     /// This region's tiles for a search that reads many of them: the same answers as
     /// `impl TileSource for Rollback`, with each stud chunk's tiles derived once.
     pub fn tiles(&self) -> TileView<'_> {
-        TileView { data: self, kind: self.terrain_kind(), tables: RefCell::new(BTreeMap::new()) }
+        TileView { data: self, tables: RefCell::new(BTreeMap::new()) }
     }
 }
 
@@ -458,7 +413,6 @@ impl Rollback {
 /// it; it is never stored, hashed or serialized.
 pub struct TileView<'a> {
     data: &'a Rollback,
-    kind: TerrainKind,
     tables: RefCell<BTreeMap<[i32; 3], Box<[StudTile]>>>,
 }
 
@@ -477,14 +431,8 @@ impl TileView<'_> {
 }
 
 impl TileSource for TileView<'_> {
-    fn block(&self, p: TilePos) -> BlockId {
-        TileSource::block(self.data, p)
-    }
     fn is_bedrock(&self, p: TilePos) -> bool {
-        match self.kind {
-            TerrainKind::Voxel => TileSource::is_bedrock(self.data, p),
-            TerrainKind::Stud => self.stud_tile(p).is_bedrock(),
-        }
+        self.stud_tile(p).is_bedrock()
     }
     fn is_constructed(&self, p: TilePos) -> bool {
         TileSource::is_constructed(self.data, p)
@@ -492,31 +440,16 @@ impl TileSource for TileView<'_> {
     fn tree_id(&self, p: TilePos) -> u32 {
         TileSource::tree_id(self.data, p)
     }
-    fn tree_limb(&self, p: TilePos) -> u8 {
-        TileSource::tree_limb(self.data, p)
-    }
     fn column_band(&self, column: [i32; 2]) -> Option<(i32, i32)> {
         TileSource::column_band(self.data, column)
-    }
-    fn slope(&self, p: TilePos) -> Option<SlopeShape> {
-        TileSource::slope(self.data, p)
     }
     fn water_units(&self, p: TilePos) -> u16 {
         TileSource::water_units(self.data, p)
     }
-    fn terrain(&self) -> TerrainKind {
-        self.kind
-    }
     fn tile_fill(&self, p: TilePos) -> TileFill {
-        match self.kind {
-            TerrainKind::Voxel => voxel_tile_fill(TileSource::block(self.data, p)),
-            TerrainKind::Stud => self.stud_tile(p).fill(),
-        }
+        self.stud_tile(p).fill()
     }
     fn tile_material(&self, p: TilePos) -> Option<u16> {
-        match self.kind {
-            TerrainKind::Voxel => None,
-            TerrainKind::Stud => self.stud_tile(p).material(),
-        }
+        self.stud_tile(p).material()
     }
 }

@@ -743,7 +743,7 @@ const B: f32 = common::TILE_W;
 /// The bottom of tile level `level`, sim units: where the floor's top is for
 /// a placement's origin (`origin.y` is the level a body stands in).
 fn level_y(level: i32) -> f32 {
-    game::TerrainKind::Stud.level_bottom_units(level)
+    game::level_bottom_units(level)
 }
 
 /// Rounds a freshly placed body is left to land before a scenario starts.
@@ -1226,7 +1226,7 @@ impl Scenario for PondDetour {
                 let Some(&e) = data.player_entites.get(&CLIENT) else { return };
                 let handle = (*data.ecs.rigidbody.try_get(e)).expect("player body");
                 let t = data.physics.bodies.get(handle).expect("body").translation();
-                let f = data.terrain_kind().feet_tile(data.feet_of(t));
+                let f = game::feet_tile(data.feet_of(t));
                 let w = WorldBlockPos::from_local(rc, game::BlockPos::new(f[0], f[1], f[2]));
                 let (dx, dz) = (w.x - origin.x, w.z - origin.z);
                 assert!(
@@ -1766,7 +1766,6 @@ fn stud_dig_at_seam_scenario(schedule: Option<InlineSchedule>) -> Vec<(RegionCoo
     let mut replicas: BTreeMap<RegionCoords, game::Region> = BTreeMap::new();
     for rc in [SPAWN_REGION, north()] {
         rig.manager.spawner_mut().with_region(rc, |region| {
-            assert_eq!(region.data().terrain_kind(), game::TerrainKind::Stud);
             replicas.insert(rc, game::Region::new(region.data().clone(), None, rc, None));
         });
     }

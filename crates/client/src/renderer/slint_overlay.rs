@@ -1856,17 +1856,15 @@ fn sync_toolbar(ui: &slint_ui::GameUi, ui_scale: f32, p: &mut ToolbarParams) {
     if ui.get_priority() != state.priority as i32 {
         ui.set_priority(state.priority as i32);
     }
-
-    let kind = p.level.as_ref().map_or(game::TerrainKind::Stud, |l| l.terrain);
     let surface = match (&p.grid, &p.cam) {
-        (Some(grid), Some(cam)) => focus_surface(grid, cam.focus).map(|y| surface_level(kind, y)),
+        (Some(grid), Some(cam)) => focus_surface(grid, cam.focus).map(|y| surface_level(y)),
         _ => None,
     };
     let level: SharedString = p
         .level
         .as_ref()
         .and_then(|l| l.level)
-        .map_or(String::new(), |l| super::stud::palette::level_text(kind, l, surface))
+        .map_or(String::new(), |l| super::stud::palette::level_text(l, surface))
         .into();
     if ui.get_level_text() != level {
         ui.set_level_text(level);

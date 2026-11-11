@@ -31,7 +31,6 @@ use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use game::rapier3d::math::Vector;
-use game::TerrainKind;
 use game::{
     pick_level_cell, pick_visible_cell, validate, Designation, DesignationKind, Invalid, OpId, Order, OrderSummary,
     RegionId, TileBox, TilePos, DEFAULT_PRIORITY, MAX_ORDER_TILES, MAX_PRIORITY,
@@ -376,8 +375,8 @@ fn reason(why: Invalid) -> &'static str {
 /// The drag readout on terrain `terrain`: size (x × z × levels, followed by
 /// the box in metres — `stud::palette::size_text`), the tiles the order
 /// takes, then each refusal reason with its count, in [`Invalid`] order.
-pub fn drag_text_on(terrain: TerrainKind, area: TileBox, kind: Option<DesignationKind>, summary: &OrderSummary) -> String {
-    let size = crate::renderer::stud::palette::size_text(terrain, area);
+pub fn drag_text_on(area: TileBox, kind: Option<DesignationKind>, summary: &OrderSummary) -> String {
+    let size = crate::renderer::stud::palette::size_text(area);
     let mut text = format!("{size} — {} {}", summary.valid, verb(kind));
     for (why, n) in &summary.invalid {
         text.push_str(&format!(" · {n} {}", reason(*why)));
@@ -397,8 +396,8 @@ fn summary_of(cells: &[(TilePos, Result<(), Invalid>)]) -> OrderSummary {
     out
 }
 
-fn too_large_text(terrain: TerrainKind, area: TileBox) -> String {
-    format!("{} — too large", crate::renderer::stud::palette::size_text(terrain, area))
+fn too_large_text(area: TileBox) -> String {
+    format!("{} — too large", crate::renderer::stud::palette::size_text(area))
 }
 
 /// Erase previews: how many designations the erase would remove.
@@ -658,7 +657,6 @@ pub fn update_drag_preview(
     let erasing = erase || tool == Tool::Erase;
     // An erase previews the box only (the overlay keeps each tile's kind).
     let kind = if erasing { None } else { tool.kind_with(state.build) };
-    let terrain = mirror.terrain();
     let key = Some((area, kind, erasing, mirror.version()));
     if built.key == key {
         return;
@@ -670,24 +668,24 @@ pub fn update_drag_preview(
         Some(a) if count <= MAX_ORDER_TILES => match kind {
             Some(k) => {
                 let cells: Vec<_> = a.tiles().map(|p| (p, validate(&*mirror, k, p))).collect();
-                (drag_text_on(terrain, area, kind, &summary_of(&cells)), cells)
+                (drag_text_on(area, kind, &summary_of(&cells)), cells)
             }
             None => {
                 let only = if tool == Tool::Erase { None } else { tool.kind_with(state.build) };
                 let summary = erase_summary(mirror.designations(), a, only);
-                (drag_text_on(terrain, area, None, &summary), a.tiles().map(|p| (p, Ok(()))).collect())
+                (drag_text_on(area, None, &summary), a.tiles().map(|p| (p, Ok(()))).collect())
             }
         },
-        Some(_) => (too_large_text(terrain, area), Vec::new()),
-        None => (drag_text_on(terrain, area, kind, &OrderSummary::default()), Vec::new()),
+        Some(_) => (too_large_text(area), Vec::new()),
+        None => (drag_text_on(area, kind, &OrderSummary::default()), Vec::new()),
     };
     *preview = DragPreview { area: Some(area), kind, cells };
     readout.0 = text;
 }
 
 /// A world-space gizmo cuboid over the tiles of `b` (region-local) in `region`.
-pub fn tile_box_transform(kind: game::TerrainKind, b: TileBox, region: RegionId, inflate: f32) -> Transform {
-    let size = Vec3::new(kind.tile_width_units(), kind.tile_height_units(), kind.tile_width_units());
+pub fn tile_box_transform(b: TileBox, region: RegionId, inflate: f32) -> Transform {
+    let size = Vec3::new(game::tile_width_units(), game::tile_height_units(), game::tile_width_units());
     let min = Vec3::new(b.min[0] as f32, b.min[1] as f32, b.min[2] as f32) * size;
     let max = Vec3::new(b.max[0] as f32 + 1.0, b.max[1] as f32 + 1.0, b.max[2] as f32 + 1.0) * size;
     let offset = Vec3::from_array(region.world_offset());
@@ -723,7 +721,6 @@ pub fn draw_designate_gizmos(
 ) {
     let ghosts = ghosts.get();
     let Some(region) = mirror.region() else { return };
-    let kind = mirror.terrain();
     if let Some(level) = working.level {
         let key = Some((mirror.version(), level));
         if ghosts.key != key {
@@ -740,18 +737,18 @@ pub fn draw_designate_gizmos(
             ghosts.boxes.truncate(MAX_GHOST_BOXES);
         }
         for b in &ghosts.boxes {
-            gizmos.cube(tile_box_transform(kind, *b, region, 0.0), BUILD_COLOR);
+            gizmos.cube(tile_box_transform(*b, region, 0.0), BUILD_COLOR);
         }
     }
     if let Some((_, area, _)) = state.drag_area() {
         let too_large = area.clip_to_region().is_some_and(|a| a.tile_count() > MAX_ORDER_TILES);
         let color = if too_large { TOO_LARGE_COLOR } else { kind_color(preview.kind) };
-        let tf = tile_box_transform(kind, area, region, HOVER_INFLATE);
+        let tf = tile_box_transform(area, region, HOVER_INFLATE);
         gizmos.cube(tf, color);
         hidden.cube(tf, color.with_alpha(HIDDEN_EDGE_ALPHA));
     }
     if let (Some(_), Some(p)) = (state.tool, state.hover) {
-        gizmos.cube(tile_box_transform(kind, TileBox { min: p, max: p }, region, HOVER_INFLATE), HOVER_COLOR);
+        gizmos.cube(tile_box_transform(TileBox { min: p, max: p }, region, HOVER_INFLATE), HOVER_COLOR);
     }
 }
 
@@ -920,7 +917,7 @@ mod tests {
             invalid: [(Invalid::Built, 1), (Invalid::Bedrock, 3)].into_iter().collect(),
         };
         assert_eq!(
-            drag_text_on(TerrainKind::Stud, area, Some(DesignationKind::Dig), &summary),
+            drag_text_on(area, Some(DesignationKind::Dig), &summary),
             "4 × 3 × 2 (4 × 3 × 2.4 m) — 20 to dig · 3 bedrock · 1 built"
         );
     }
@@ -978,6 +975,6 @@ mod tests {
         let area = TileBox::new([0, 0, 0], [2, 0, 0]);
         assert_eq!(erase_summary(&marks, area, None).valid, 2);
         assert_eq!(erase_summary(&marks, area, Some(DesignationKind::Dig)).valid, 1);
-        assert_eq!(drag_text_on(TerrainKind::Stud, area, None, &erase_summary(&marks, area, None)), "3 × 1 × 1 (3 × 1 × 1.2 m) — 2 to erase");
+        assert_eq!(drag_text_on(area, None, &erase_summary(&marks, area, None)), "3 × 1 × 1 (3 × 1 × 1.2 m) — 2 to erase");
     }
 }

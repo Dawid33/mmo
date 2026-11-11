@@ -35,18 +35,11 @@ impl Src {
 }
 
 impl TileSource for Src {
-    fn terrain(&self) -> TerrainKind {
-        TerrainKind::Stud
-    }
     fn tile_fill(&self, p: TilePos) -> TileFill {
         self.blocks.get(&p).copied().unwrap_or(TileFill::Open)
     }
     fn water_units(&self, p: TilePos) -> u16 {
         self.water.get(&p).copied().unwrap_or(0)
-    }
-    // P10b: the trait's voxel half — a stud source has no blocks or trees.
-    fn block(&self, _: TilePos) -> BlockId {
-        BlockId::AIR
     }
     fn is_bedrock(&self, _: TilePos) -> bool {
         false
@@ -55,9 +48,6 @@ impl TileSource for Src {
         false
     }
     fn tree_id(&self, _: TilePos) -> u32 {
-        0
-    }
-    fn tree_limb(&self, _: TilePos) -> u8 {
         0
     }
 }

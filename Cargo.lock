@@ -2378,16 +2378,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "block-mesh"
-version = "0.2.0"
-dependencies = [
- "glam 0.33.10",
- "ndcopy",
- "ndshape",
- "serde",
-]
-
-[[package]]
 name = "block2"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3884,7 +3874,6 @@ dependencies = [
  "assert-json-diff",
  "bbmodel",
  "bincode 1.3.3",
- "block-mesh",
  "borrow",
  "crc32fast",
  "crossbeam",
@@ -5992,15 +5981,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "308d96db8debc727c3fd9744aac51751243420e46edf401010908da7f8d5e57c"
 
 [[package]]
-name = "ndcopy"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "24f4e41b81e3f7a4b742755be1bb368a6faafc43af555fe135c36b0efe095c59"
-dependencies = [
- "ndshape",
-]
-
-[[package]]
 name = "ndk"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6028,15 +6008,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ee6cda3051665f1fb8d9e08fc35c96d5a244fb1be711a03b71118828afc9a873"
 dependencies = [
  "jni-sys 0.3.0",
-]
-
-[[package]]
-name = "ndshape"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "975bce586ad637e27f6dc26ee907c07050686a588695bfd64b7873a9d48a700c"
-dependencies = [
- "static_assertions",
 ]
 
 [[package]]

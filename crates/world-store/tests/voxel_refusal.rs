@@ -284,8 +284,6 @@ fn stud_world_migrates_and_keeps_its_rows() {
         let f = h.claim_super_regions(0, vec![(0, 0)]).unwrap();
         let want = StoredRegion {
             meta: meta(),
-            chunks: Vec::new(),
-            ground: Vec::new(),
             entities: vec![bundle()],
             stud_chunks: stud_chunks(),
             stud_ground: stud_ground(),

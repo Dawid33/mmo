@@ -9,7 +9,7 @@
 use std::collections::BTreeMap;
 
 use game::{
-    ColumnCoords, EntityBundle, EntityId, EntityKind, InFlightRow, IntentMsg, PlayerId, PlayerRecord, PortableRegion,
+    ColumnCoords, EntityBundle, EntityId, EntityKind, InFlightRow, IntentMsg, PlayerId, PlayerRecord,
     RegionCoords, RegionMeta, StoredRegion, StudChunkCoords, StudChunkRecord, StudColumnGround, TerrainSnapshot, Tick,
     WorldCut,
 };
@@ -103,20 +103,6 @@ fn entity_insert_error(e: sqlx::Error, id: EntityId, rc: RegionCoords, tick: Tic
         )),
         _ => e.into(),
     }
-}
-
-/// A save must carry no voxel terrain: the store has nowhere to keep it (the
-/// fields go with `game`'s voxel types). Refused whole, never dropped silently.
-fn refuse_voxel_terrain(rc: RegionCoords, region: &PortableRegion) -> Result<(), StoreError> {
-    let recipes = region.ground.as_ref().map_or(0, Vec::len);
-    if region.chunks.is_empty() && recipes == 0 {
-        return Ok(());
-    }
-    Err(StoreError::Unsupported(format!(
-        "region {rc:?}'s save carries voxel terrain ({} chunks, {recipes} ground recipes), which the world store \
-         no longer holds; the cut was not committed",
-        region.chunks.len()
-    )))
 }
 
 macro_rules! engine_rows {
@@ -471,7 +457,7 @@ macro_rules! engine_rows {
                     tx.commit().await?;
                     return Ok(None);
                 };
-                let meta: RegionMeta = decode(FORMAT_REGION_META, &meta)
+                let meta: RegionMeta = decode_region_meta(&meta)
                     .map_err(|e| StoreError::Corrupt(format!("region {rc:?} meta: {e}")))?;
                 let (stud_chunks, stud_ground) = load_studs(&mut tx, rc, stud_ground).await?;
                 let rows = sqlx::query("SELECT bundle FROM entities WHERE rx = $1 AND rz = $2")
@@ -488,8 +474,7 @@ macro_rules! engine_rows {
                     entities.push(bundle);
                 }
                 entities.sort_by_key(|b| b.id);
-                // The voxel fields are never stored (they go with `game`'s voxel types).
-                Ok(Some(StoredRegion { meta, chunks: Vec::new(), ground: Vec::new(), entities, stud_chunks, stud_ground }))
+                Ok(Some(StoredRegion { meta, entities, stud_chunks, stud_ground }))
             }
 
             pub(crate) async fn load_terrain(pool: &Pool, rc: RegionCoords) -> Result<Option<TerrainSnapshot>, StoreError> {
@@ -509,8 +494,7 @@ macro_rules! engine_rows {
                         StudChunkRecord::Edited(chunk) => (c, Some(chunk)),
                     }),
                 );
-                // The voxel fields are never stored (they go with `game`'s voxel types).
-                Ok(Some(TerrainSnapshot { chunks: Vec::new(), ground: Vec::new(), stud }))
+                Ok(Some(TerrainSnapshot { stud }))
             }
 
             pub(crate) async fn stored_regions(pool: &Pool) -> Result<BTreeMap<RegionCoords, u64>, StoreError> {
@@ -616,9 +600,6 @@ macro_rules! engine_rows {
                 let t = i(cut.tick);
                 let mut tx = pool.begin().await?;
                 check_fence(&mut tx, fence, &commit_check_set(cut, fence, s)).await?;
-                for (rc, region) in &cut.regions {
-                    refuse_voxel_terrain(*rc, region)?;
-                }
                 // Every region's entities go first, so an entity that moved between two
                 // regions of the cut is not seen twice.
                 for (rc, _) in &cut.regions {

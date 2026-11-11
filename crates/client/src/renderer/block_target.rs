@@ -24,7 +24,7 @@ use bevy::light::{NotShadowCaster, NotShadowReceiver};
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use game::rapier3d::math::Vector;
-use game::BLOCK_VOXELS;
+use game::BLOCK_UNITS;
 
 use super::bridge::LocalBody;
 use super::commander::tiles::TileMirror;
@@ -66,7 +66,7 @@ pub struct CrackOverlay(Option<Entity>);
 
 impl FromWorld for CrackAssets {
     fn from_world(world: &mut World) -> Self {
-        let edge = BLOCK_VOXELS as f32 * CRACK_INFLATE;
+        let edge = BLOCK_UNITS as f32 * CRACK_INFLATE;
         let mesh = world.resource_mut::<Assets<Mesh>>().add(Cuboid::new(edge, edge, edge));
         let images: Vec<Handle<Image>> = (0..CRACK_STAGES)
             .map(|stage| {
@@ -219,7 +219,7 @@ pub fn update_looked_at_stud(
         let origin = eye.translation() - Vec3::from_array(region.world_offset());
         let dir = eye.forward();
         let chunk_of = |e: Entity| chunks.get(e).ok().map(|c| &c.chunk);
-        let reach = game::edit::REACH * mirror.terrain().tile_width_units();
+        let reach = game::edit::REACH * game::tile_width_units();
         let hit = super::stud::world::stud_world_raycast(
             world,
             chunk_of,
@@ -248,11 +248,10 @@ pub fn crack_target(mining: Option<game::MiningView>, region: Option<game::Regio
     if m.progress_per_mille == 0 {
         return None;
     }
-    let terrain = game::TerrainKind::Stud;
-    let (w, h) = (terrain.tile_width_units(), terrain.tile_height_units());
+    let (w, h) = (game::tile_width_units(), game::tile_height_units());
     let [x, y, z] = m.target;
-    let local = Vec3::new((x as f32 + 0.5) * w, terrain.level_bottom_units(y) + h / 2.0, (z as f32 + 0.5) * w);
-    let scale = Vec3::new(w, h, w) / BLOCK_VOXELS as f32;
+    let local = Vec3::new((x as f32 + 0.5) * w, game::level_bottom_units(y) + h / 2.0, (z as f32 + 0.5) * w);
+    let scale = Vec3::new(w, h, w) / BLOCK_UNITS as f32;
     Some((local + Vec3::from_array(region.world_offset()), scale, crack_stage(m.progress_per_mille)))
 }
 
@@ -351,10 +350,9 @@ mod tests {
         let region = Some(game::RegionCoords::new(0, 0));
         let mining = Some(game::MiningView { target: [3, 4, 5], progress_per_mille: 500 });
         // A tile: as wide as a block, 1.2 m tall, its bottom at level 4's.
-        let stud = game::TerrainKind::Stud;
         let (at, scale, stage) = crack_target(mining, region).expect("a damaged tile");
-        let bv = BLOCK_VOXELS as f32;
-        assert!(at.abs_diff_eq(Vec3::new(3.5 * bv, stud.level_bottom_units(4) + 0.6 * bv, 5.5 * bv), 1e-3), "{at}");
+        let bv = BLOCK_UNITS as f32;
+        assert!(at.abs_diff_eq(Vec3::new(3.5 * bv, game::level_bottom_units(4) + 0.6 * bv, 5.5 * bv), 1e-3), "{at}");
         assert!(scale.abs_diff_eq(Vec3::new(1.0, 1.2, 1.0), 1e-5), "{scale}");
         assert_eq!(stage, crack_stage(500));
         let untouched = Some(game::MiningView { target: [3, 4, 5], progress_per_mille: 0 });

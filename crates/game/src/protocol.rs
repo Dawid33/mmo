@@ -2,10 +2,7 @@ use std::time::Duration;
 
 use crate::input::InputEvent;
 use crate::lod::LodKey;
-use crate::{
-    BLOCK_VOXELS, BRICK_BLOCKS, CHUNK_BLOCKS, Chunk, ChunkCoords, Client, ClientId, ColumnCoords, EntityKey, EntityKind,
-    Pose, Rollback,
-};
+use crate::{BLOCK_UNITS, CHUNK_BLOCKS, ChunkCoords, Client, ClientId, EntityKey, EntityKind, Pose, Rollback};
 use derive_more::Debug;
 use rapier3d::math::Vector;
 
@@ -49,10 +46,8 @@ pub const REGION_BLOCKS: usize = parse_region_blocks(option_env!("VOXEL_REGION_B
 /// Region edge in sim chunks (derived: the sim-chunk columns of a region).
 pub const REGION_CHUNKS: usize = REGION_BLOCKS / CHUNK_BLOCKS;
 const _: () = assert!(REGION_BLOCKS % CHUNK_BLOCKS == 0, "a region must be a whole number of sim chunks");
-/// Region edge in 32-voxel bricks (the LOD / render-brick grid unit).
-pub const REGION_BRICKS: usize = REGION_BLOCKS / BRICK_BLOCKS;
 /// Region edge in world units; a power of two, so exact in f32.
-pub const REGION_SIZE: f32 = (REGION_BLOCKS * BLOCK_VOXELS) as f32;
+pub const REGION_SIZE: f32 = (REGION_BLOCKS * BLOCK_UNITS) as f32;
 
 /// Region edges this build has been made to work at. The LOD tiling contract
 /// (`lod.rs`) only needs a power of two, but each size also needs its own
@@ -103,10 +98,6 @@ const fn parse_region_blocks(var: Option<&str>) -> usize {
     panic!("VOXEL_REGION_BLOCKS must be one of REGION_BLOCKS_CHOICES (64, 128, 256, 512)")
 }
 
-/// A running region checks its terrain hash this often and pushes a
-/// `TerrainChanged` only when it changed — the check cadence IS the
-/// refresh throttle.
-pub const TERRAIN_HASH_INTERVAL_TICKS: usize = 25;
 
 #[derive(
     Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq, PartialOrd,
@@ -194,7 +185,7 @@ impl WorldBlockPos {
 
     /// The world block of `pos` in `rc`'s block frame. `pos` need not lie
     /// inside the region: a block past its edge maps to the neighbour's.
-    pub fn from_local(rc: RegionCoords, pos: crate::volume::BlockPos) -> Self {
+    pub fn from_local(rc: RegionCoords, pos: crate::BlockPos) -> Self {
         let n = REGION_BLOCKS as i64;
         Self { x: rc.x as i64 * n + pos.x as i64, y: pos.y, z: rc.z as i64 * n + pos.z as i64 }
     }
@@ -202,10 +193,10 @@ impl WorldBlockPos {
     /// The region owning this block and the block in its frame
     /// (`0..REGION_BLOCKS` in x and z; floor division, so world block -1 is
     /// region -1's last block).
-    pub fn to_local(self) -> (RegionCoords, crate::volume::BlockPos) {
+    pub fn to_local(self) -> (RegionCoords, crate::BlockPos) {
         let n = REGION_BLOCKS as i64;
         let rc = RegionCoords::new(self.x.div_euclid(n) as i32, self.z.div_euclid(n) as i32);
-        (rc, crate::volume::BlockPos::new(self.x.rem_euclid(n) as i32, self.y, self.z.rem_euclid(n) as i32))
+        (rc, crate::BlockPos::new(self.x.rem_euclid(n) as i32, self.y, self.z.rem_euclid(n) as i32))
     }
 }
 
@@ -315,7 +306,7 @@ pub struct EntityId {
 
 impl EntityId {
     /// A region itself as an intent's source: a write no entity sends (a
-    /// settling voxel body's drops, a chest's spill). Never allocated (serials
+    /// settling stud body's drops, a chest's spill). Never allocated (serials
     /// count up from 0), never replied to (`intents.rs`).
     pub const fn of_region(rc: RegionCoords) -> Self {
         EntityId { birth_region: rc, serial: u64::MAX }
@@ -448,7 +439,7 @@ pub struct BodyState {
     pub mass: Option<parry3d::mass_properties::MassProperties>,
     /// The constant user force and torque rapier keeps applying to a
     /// dynamic body (zero for kinematic): the world's gravity is zero, so a
-    /// dynamic body's weight is a user force (`body.rs`, `voxel_body.rs`),
+    /// dynamic body's weight is a user force (`body.rs`, `stud_body.rs`),
     /// and it must cross with the body.
     pub user_force: Vector,
     pub user_torque: Vector,
@@ -620,17 +611,31 @@ impl From<EntityBundleV1> for EntityBundle {
     }
 }
 
+/// [`EntityBundle`] as stored with the stud body slot (world-store entity
+/// bundle format 2): the same fields around a [`crate::CarriedV2`]. Decode-only.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+pub struct EntityBundleV2 {
+    pub id: EntityId,
+    pub kind: EntityKind,
+    pub body: BodyState,
+    pub collider: ColliderSpec,
+    pub carried: crate::CarriedV2,
+    pub client: Option<(ClientId, Client)>,
+    pub pending_inputs: Vec<(crate::GameEventKind, Tick)>,
+}
+
+impl From<EntityBundleV2> for EntityBundle {
+    fn from(b: EntityBundleV2) -> Self {
+        let EntityBundleV2 { id, kind, body, collider, carried, client, pending_inputs } = b;
+        EntityBundle { id, kind, body, collider, carried: carried.into(), client, pending_inputs }
+    }
+}
+
 impl EntityBundle {
     /// Move the bundle from region `from`'s local frame into `to`'s: the
-    /// body pose and a voxel body's region-local block `origin` (everything
-    /// else carried is in world coordinates).
+    /// body pose (everything carried is in world coordinates).
     pub fn rebase(&mut self, from: RegionCoords, to: RegionCoords) {
         self.body.pose = rebase_isometry(&self.body.pose, from, to);
-        if let Some(vb) = &mut self.carried.voxel_body {
-            let n = crate::REGION_BLOCKS as i32;
-            vb.origin[0] += (from.x - to.x) * n;
-            vb.origin[2] += (from.z - to.z) * n;
-        }
     }
 }
 
@@ -708,36 +713,20 @@ pub enum WorldId {
     Default = 0,
 }
 
-/// The visual-only subset of a region's data: terrain chunks, nothing else.
-/// Much smaller than a `Rollback` (a `Chunk` is 8 blocks + a sparse chisel
-/// map). The source for server-side LOD builds; never carries
+/// A region's terrain as the manager keeps it for stopped regions: what the
+/// halo seeds of its starting neighbours are cut from. Never carries
 /// entities/physics/undo state.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TerrainSnapshot {
-    pub chunks: Vec<(ChunkCoords, Chunk)>,
-    /// The per-column ground recipes (implied ground below the band), by
-    /// column: what a neighbour's halo reads below these chunks. Not part of
-    /// [`TerrainSnapshot::terrain_hash`] (it never changes).
-    pub ground: Vec<(ColumnCoords, crate::ColumnGround)>,
-    /// The stud terrain of the region's edge chunk columns (`stud_halo.rs`):
-    /// what a neighbour's stud halo is seeded from. Empty for a voxel region;
-    /// not part of [`TerrainSnapshot::terrain_hash`].
+    /// The stud terrain of the region's edge chunk columns (`stud_halo.rs`).
     pub stud: crate::StudEdge,
 }
 
 impl TerrainSnapshot {
-    /// A never-run stud region's terrain as its neighbours see it: no chunks,
-    /// just the edge its halo seeds are cut from.
+    /// A never-run region's terrain as its neighbours see it: the edge its
+    /// halo seeds are cut from.
     pub fn of_stud_edge(stud: crate::StudEdge) -> Self {
-        Self { chunks: Vec::new(), ground: Vec::new(), stud }
-    }
-
-    /// crc32 of the terrain (the chunks), for cheap change detection on the
-    /// region thread.
-    pub fn terrain_hash(&self) -> u32 {
-        let mut h = crc32fast::Hasher::new();
-        h.update(&bincode::serialize(&self.chunks).expect("terrain snapshot serializes"));
-        h.finalize()
+        Self { stud }
     }
 }
 
@@ -1089,7 +1078,7 @@ impl GameEventKind {
 
 #[cfg(test)]
 mod tests {
-    use crate::volume::BlockPos;
+    use crate::BlockPos;
 
     #[test]
     fn world_block_pos_round_trips_across_negative_regions() {
@@ -1232,7 +1221,7 @@ impl std::error::Error for PacketError {}
 ///
 /// Every transport edge uses this pair — server, native client, wasm client —
 /// so they must change together. Why it exists: a region snapshot is ~40 MiB
-/// of highly redundant state (voxel collider shapes, per-voxel chisel material
+/// of highly redundant state (collider shapes, brick lists
 /// arrays) and a production join ships nine; lz4 packs one 43x in ~7 ms, which
 /// is a net win even on loopback (2026-09-20 measurement,
 /// `worldgen` example `snapshot_size`).

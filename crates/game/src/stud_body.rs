@@ -1,13 +1,13 @@
 //! Stud bodies: bricks detached from stud terrain into ONE dynamic rigid body that
-//! falls under gravity and is settled once at rest — `voxel_body.rs`' twin on stud
-//! terrain. A felled tree's part is the first user.
+//! falls under gravity and is settled once at rest. A felled tree's part is the
+//! first user.
 //!
-//! The rules are the voxel body's, and its constants (`VOXEL_BODY_*`, `REST_*`,
-//! `SETTLE_TIMEOUT_TICKS`, the densities) are shared:
 //! - **Mass** without an eigen solve: [`stud_model_mass_properties`] sums one box per
-//!   brick (`voxel_body::mass_properties_of_boxes`), the colliders add zero mass.
+//!   brick ([`mass_properties_of_boxes`]), the colliders add zero mass.
 //! - **Collider**: one compound, a cuboid per brick's cell box (a slope part collides
-//!   as its box while it falls), so it reads back exactly as a `ColliderSpec`.
+//!   as its box while it falls), so it reads back exactly as a `ColliderSpec`. Its
+//!   material (friction, restitution) is not in the spec: a receiver sets it again
+//!   (`set_stud_body_material_safe`).
 //! - **Gravity**: a constant user force, as the physics world has none of its own.
 //! - **Settling** ([`Rollback::tick_stud_bodies_safe`]): at `REST_TICKS` still ticks or
 //!   `SETTLE_TIMEOUT_TICKS` of age the body is removed and its policy applied —
@@ -17,9 +17,9 @@
 //!   travels in `Carried::stud_body` with its drops moved to `Carried::drops`, so a
 //!   body lost on the way puts them down (`migrate.rs`).
 //!
-//! Simpler than the voxel body, on purpose (decide at a first look at falling trees):
-//! no landed state (one angular damping), no skirt snapping, and a toppling part
-//! starts with exactly the spin it is given (no `topple_angvel` raise).
+//! Simple on purpose (decide at a first look at falling trees): no landed state (one
+//! angular damping), no skirt snapping, and a toppling part starts with exactly the
+//! spin it is given.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -31,12 +31,96 @@ use state_hash::StateHash;
 use crate::movement::UNITS_PER_METER;
 use crate::stud::{StudChunkCoords, StudShape, STUD_CHUNK_PLATES, STUD_CHUNK_STUDS, STUD_UNITS};
 use crate::stud_material::{stud_material, MAT_LEAVES, MAT_WOOD};
-use crate::voxel_body::{
-    mass_properties_of_boxes, SettlePolicy, LEAF_DENSITY, REST_ANGVEL, REST_LINVEL, REST_TICKS, SETTLE_TIMEOUT_TICKS,
-    STONE_DENSITY, VOXEL_BODY_ANGULAR_DAMPING, VOXEL_BODY_FRICTION, VOXEL_BODY_GRAVITY, VOXEL_BODY_RESTITUTION,
-    VOXEL_BODY_SOFT_CCD, WOOD_DENSITY,
+use crate::edit::BlockPos;
+use crate::{
+    EntityKey, GameDataTransactionKind, GameDataUpdate, GameDataUpdateKind, Rollback, BLOCK_UNITS, TICK_RATE,
 };
-use crate::{EntityKey, GameDataTransactionKind, GameDataUpdate, GameDataUpdateKind, Rollback};
+
+/// Density of tree wood, kg/m³.
+pub const WOOD_DENSITY: f32 = 700.0;
+/// Density of leaves, kg/m³.
+pub const LEAF_DENSITY: f32 = 60.0;
+/// Density of every other natural material (stone, soil), kg/m³.
+pub const STONE_DENSITY: f32 = 2600.0;
+/// Downward acceleration of a stud body, m/s²: the world's gravity
+/// (`movement::GRAVITY`, what players and slimes fall with), so a felled
+/// tree falls like everything else rather than floating down at a real-world
+/// 9.81 in a world whose bodies fall at 45.
+pub const STUD_BODY_GRAVITY: f32 = crate::movement::GRAVITY;
+/// Friction coefficient of a stud body's colliders: high, so a toppling
+/// tree's butt grips the ground and the body pivots about it rather than
+/// skating out from under its crown.
+pub const STUD_BODY_FRICTION: f32 = 0.9;
+/// Restitution of a stud body's colliders: none — a felled trunk lands, it
+/// does not bounce.
+pub const STUD_BODY_RESTITUTION: f32 = 0.0;
+/// Angular damping of a stud body (1/s): a little, so a landed crown
+/// settles instead of rocking on its leaves.
+pub const STUD_BODY_ANGULAR_DAMPING: f32 = 0.5;
+/// Soft-CCD prediction distance of a stud body (units): one metre. At the
+/// world's gravity a body is moving a block per tick after about half a
+/// second of fall, and a contact rapier only finds once the shapes overlap
+/// lets it sink that far into the ground on impact before it is pushed back
+/// out (or, for a thin collider, through). Soft CCD finds the contact up to
+/// this far ahead, so the landing is stopped at the surface.
+pub const STUD_BODY_SOFT_CCD: f32 = BLOCK_UNITS as f32;
+/// A body moving slower than this (units/s; 0.5 m/s) counts as still.
+pub const REST_LINVEL: f32 = 8.0;
+/// A body turning slower than this (rad/s) counts as still.
+pub const REST_ANGVEL: f32 = 0.2;
+/// Consecutive still ticks after which a body is settled.
+pub const REST_TICKS: u16 = 10;
+/// Milliseconds after which a body is settled whether or not it rests.
+pub const SETTLE_TIMEOUT_MS: u64 = 10_000;
+/// [`SETTLE_TIMEOUT_MS`] in ticks (`TICK_RATE` is the tick period in ms;
+/// integer division, so no `f32` rounding drops a tick).
+pub const SETTLE_TIMEOUT_TICKS: u64 = SETTLE_TIMEOUT_MS / TICK_RATE;
+
+/// What happens to a body once it is settled.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, StateHash)]
+pub enum SettlePolicy {
+    /// Removed, leaving nothing behind (a fortress chop order: no items).
+    #[default]
+    Despawn,
+    /// Removed, its bricks turned into their drops (summed per item at the
+    /// detach: [`StudBody::drops`]) and deposited as piles at the tile its
+    /// centre of mass rests in — in whichever region
+    /// then owns it (it crosses seams while it falls); a full pile spills to
+    /// the cells around it — a tree a player felled: the logs lie where it
+    /// landed.
+    DropItems,
+}
+
+/// Mass properties of a set of solid boxes `(mass kg, min, max)` in model units (a
+/// stud body's bricks): centre of mass, mass and principal inertia, summed in order.
+pub(crate) fn mass_properties_of_boxes(boxes: &[(f64, [f64; 3], [f64; 3])]) -> MassProperties {
+    let mass: f64 = boxes.iter().map(|b| b.0).sum();
+    if mass <= 0.0 {
+        return MassProperties::default();
+    }
+    let mut com = [0.0f64; 3];
+    for (m, lo, hi) in boxes {
+        for a in 0..3 {
+            com[a] += m * (lo[a] + hi[a]) * 0.5;
+        }
+    }
+    let com = com.map(|c| c / mass);
+    let mut inertia = [0.0f64; 3];
+    for (m, lo, hi) in boxes {
+        let e = [0, 1, 2].map(|a| hi[a] - lo[a]);
+        let d = [0, 1, 2].map(|a| (lo[a] + hi[a]) * 0.5 - com[a]);
+        for a in 0..3 {
+            let (b, c) = ((a + 1) % 3, (a + 2) % 3);
+            // Box about its own centre, then the parallel-axis shift.
+            inertia[a] += m * (e[b] * e[b] + e[c] * e[c]) / 12.0 + m * (d[b] * d[b] + d[c] * d[c]);
+        }
+    }
+    MassProperties::new(
+        Vector::new(com[0] as f32, com[1] as f32, com[2] as f32),
+        mass as f32,
+        Vector::new(inertia[0] as f32, inertia[1] as f32, inertia[2] as f32),
+    )
+}
 
 /// Density of plastic bricks (a material under `NATURAL_BASE`), kg/m³ (ABS).
 pub const PLASTIC_DENSITY: f32 = 1050.0;
@@ -113,8 +197,7 @@ fn brick_box(b: &StudModelBrick) -> ([f64; 3], [f64; 3]) {
     (lo, [0, 1, 2].map(|a| lo[a] + f64::from(size[a]) * CELL[a]))
 }
 
-/// The model's mass properties in MODEL frame (`voxel_body::model_mass_properties`'
-/// rule over one box per brick): mass in kg (density x the cell box's volume in m³),
+/// The model's mass properties in MODEL frame (one box per brick): mass in kg (density x the cell box's volume in m³),
 /// centre of mass in model units, diagonal inertia about it. Pure, `+ - * /` only.
 pub fn stud_model_mass_properties(model: &StudModel) -> MassProperties {
     let unit_m3 = f64::from(UNITS_PER_METER) * f64::from(UNITS_PER_METER) * f64::from(UNITS_PER_METER);
@@ -140,6 +223,29 @@ pub fn stud_model_drops(model: &StudModel) -> Vec<crate::ItemStack> {
 }
 
 impl Rollback {
+    /// Deposits `drops` at `cell` — one deposit per stack, whose merge /
+    /// free-cell rule spills what one pile cannot hold to the cells around
+    /// it. Pickable after `PICKUP_DELAY_TICKS`. Losses to the pile caps are
+    /// counted by the deposit.
+    pub(crate) fn deposit_drops_safe(&mut self, cell: BlockPos, drops: &[crate::ItemStack], tick: u64) {
+        for stack in drops {
+            let _destroyed = self.deposit_items_safe(cell, *stack, tick, crate::PICKUP_DELAY_TICKS);
+        }
+    }
+
+    /// A stud body's collider material (not part of its `ColliderSpec`):
+    /// set on every collider of `handle`'s body, undo-safely — on a body
+    /// rebuilt from a crossing's bundle.
+    pub(crate) fn set_stud_body_material_safe(&mut self, handle: rapier3d::prelude::RigidBodyHandle) {
+        let Some(body) = self.data.physics.bodies.get(handle) else { return };
+        for ch in body.colliders().to_vec() {
+            self.data.physics.colliders.mutate_collider_safe(ch, |c| {
+                c.set_friction(STUD_BODY_FRICTION);
+                c.set_restitution(STUD_BODY_RESTITUTION);
+            });
+        }
+    }
+
     /// Detaches bricks of this region's stud terrain into one dynamic stud body,
     /// undo-safely. `picks` names them by chunk and min cell; a pick that names no
     /// brick, or one of an undiggable material, is skipped. The bricks leave their
@@ -236,13 +342,13 @@ impl Rollback {
             .pose(pose)
             .angvel(angvel)
             .linvel(linvel)
-            .angular_damping(VOXEL_BODY_ANGULAR_DAMPING)
-            .soft_ccd_prediction(VOXEL_BODY_SOFT_CCD)
+            .angular_damping(STUD_BODY_ANGULAR_DAMPING)
+            .soft_ccd_prediction(STUD_BODY_SOFT_CCD)
             .can_sleep(true)
             .additional_mass_properties(body_mprops)
             .user_data(user_data)
             .build();
-        let weight = mprops.mass() * VOXEL_BODY_GRAVITY * UNITS_PER_METER;
+        let weight = mprops.mass() * STUD_BODY_GRAVITY * UNITS_PER_METER;
         body.add_force(Vector::new(0.0, -weight, 0.0), false);
         let handle = self.insert_body_safe(body);
         self.data.ecs.rigidbody.set_safe(e, Some(handle));
@@ -259,11 +365,11 @@ impl Rollback {
             .collect();
         let collider = ColliderBuilder::new(SharedShape::compound(parts))
             .mass_properties(MassProperties::default())
-            .friction(VOXEL_BODY_FRICTION)
-            .restitution(VOXEL_BODY_RESTITUTION)
+            .friction(STUD_BODY_FRICTION)
+            .restitution(STUD_BODY_RESTITUTION)
             .user_data(user_data)
             .build();
-        // As for a voxel body: the mass comes only from `body_mprops` (no eigen solve).
+        // The mass comes only from `body_mprops` (no eigen solve).
         debug_assert_eq!(collider.mass_properties(), MassProperties::default(), "a stud body collider adds no mass");
         self.attach_collider_safe(handle, collider);
 
@@ -283,11 +389,10 @@ impl Rollback {
         Some(e)
     }
 
-    /// The tile holding region-local point `t` (sim units) on stud terrain: where a
+    /// The tile holding region-local point `t` (sim units): where a
     /// settled stud body's drops go.
     pub(crate) fn stud_tile_of_point(t: Vector) -> crate::TilePos {
-        let kind = crate::TerrainKind::Stud;
-        let (w, h) = (kind.tile_width_units(), kind.tile_height_units());
+        let (w, h) = (crate::tile_width_units(), crate::tile_height_units());
         [(t.x / w).floor() as i32, (t.y / h).floor() as i32, (t.z / w).floor() as i32]
     }
 

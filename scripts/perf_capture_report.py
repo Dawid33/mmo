@@ -363,9 +363,9 @@ def main() -> int:
     s += ["  " + l[l.index("KEEP-UP WARNING"):][:150] for l in client if "KEEP-UP WARNING" in l][:5]
 
     s += ["", "SERVER", ""]
-    # Busy = manager-thread worldgen + LOD traffic + backlog: the windows where the hub stalls.
+    # Busy = LOD traffic + backlog: the windows where the hub stalls.
     s += busiest(server, "[server] window=",
-                 lambda l: field_sum(l, r"gen n=\d+ sum=([\d.]+)ms", r" sub=(\d+)", r" built=(\d+)",
+                 lambda l: field_sum(l, r" sub=(\d+)", r" built=(\d+)",
                                      r"backlog in=(\d+)", r" region=(\d+) tx="))
     s += [""] + tail(server, "[region ", n=9)
     drops = sum("send to client timed out" in l for l in server)

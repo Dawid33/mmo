@@ -164,7 +164,7 @@ fn restart_restores_world() {
         assert_eq!(region.data().stud_material_at(dug), None);
         let units = game::REGION_SIZE / 4.0;
         let top = region.data().stud_surface_y(units, units).expect("ground under the slime");
-        let at = game::parry::math::Vector::new(units, top + 3.0 * game::BLOCK_VOXELS as f32, units);
+        let at = game::parry::math::Vector::new(units, top + 3.0 * game::BLOCK_UNITS as f32, units);
         let mut key = None;
         region.with_data(|d| key = Some(d.spawn_slime_safe(at, 1, 0.0f32.into(), 0)));
         slime = *region.data().ecs.id.try_get(key.unwrap());

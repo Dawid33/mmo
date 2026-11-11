@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use crate::history::SiteId;
 use rapier3d::math::Vector;
 
-use crate::{Client, ClientId, Pose, RegionCoords, Rollback, StateHash, TileSource};
+use crate::{Client, ClientId, Pose, RegionCoords, Rollback, StateHash};
 
 /// The stable identity of a player (never reused for another name or token).
 #[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize, StateHash)]
@@ -197,7 +197,7 @@ impl Rollback {
 pub fn restore_translation(rollback: &Rollback, t: Vector) -> Vector {
     let src = rollback.tiles();
     let feet_at = rollback.feet_of(t);
-    let feet = src.terrain().feet_tile(feet_at);
+    let feet = crate::feet_tile(feet_at);
     let n = crate::REGION_BLOCKS as i32;
     let inside = (0..n).contains(&feet[0]) && (0..n).contains(&feet[2]);
     if inside && crate::body_fits(&src, feet_at) {

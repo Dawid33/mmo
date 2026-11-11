@@ -1,8 +1,8 @@
 //! The generic dynamic body, [`EntityKind::Body`]: a rigid body with no
 //! behaviour of its own that falls, tumbles, comes to rest and crosses region
 //! seams with its full [`BodyState`] (velocities, sleep state, explicit mass,
-//! its weight). Voxel bodies (`voxel_body.rs`) are bodies of this kind with
-//! a compound collider and a `VoxelBody` component. `Order::DevDropBody`
+//! its weight). Stud bodies (`stud_body.rs`) are bodies of this kind with
+//! a compound collider and a `StudBody` component. `Order::DevDropBody`
 //! drops a cube from the dev panel ([`Rollback::dev_drop_body_safe`]).
 //!
 //! **Mass.** Explicit, from [`crate::mass_props::mass_properties`] of its
@@ -12,7 +12,7 @@
 //!
 //! **Gravity.** The physics world's gravity is zero (players and slimes
 //! integrate their own), so a body carries its weight as a constant user
-//! force of `mass × BODY_GRAVITY` downward — as voxel bodies do — which
+//! force of `mass × BODY_GRAVITY` downward — as stud bodies do — which
 //! [`BodyState`] carries across a seam. `gravity_scale` is left at 0, so a
 //! world gravity turned on later would not count twice.
 
@@ -29,15 +29,15 @@ pub const BODY_SETTLE_MS: u64 = 3_000;
 /// [`BODY_SETTLE_MS`] in ticks (`TICK_RATE` is the tick period in ms).
 pub const BODY_SETTLE_TICKS: usize = (BODY_SETTLE_MS / TICK_RATE) as usize;
 /// Downward acceleration of a body, m/s²: the world's gravity (what players,
-/// slimes and voxel bodies fall with).
+/// slimes and stud bodies fall with).
 pub const BODY_GRAVITY: f32 = crate::movement::GRAVITY;
 /// Angular damping of a body (1/s): a little, so a body rolling on the
 /// ground settles instead of rocking.
 pub const BODY_ANGULAR_DAMPING: f32 = 0.5;
 /// Soft-CCD prediction distance of a body (units): one block, so a landing
 /// at a block per tick stops at the surface instead of sinking in first
-/// (see `voxel_body::VOXEL_BODY_SOFT_CCD`).
-pub const BODY_SOFT_CCD: f32 = crate::BLOCK_VOXELS as f32;
+/// (see `stud_body::STUD_BODY_SOFT_CCD`).
+pub const BODY_SOFT_CCD: f32 = crate::BLOCK_UNITS as f32;
 
 /// Height above the tile, in blocks, of the bottom of a dev-dropped body
 /// (`Order::DevDropBody`).
@@ -106,7 +106,7 @@ impl Rollback {
         if !(0..n).contains(&at[0]) || !(0..n).contains(&at[2]) {
             return false;
         }
-        let b = crate::BLOCK_VOXELS as f32;
+        let b = crate::BLOCK_UNITS as f32;
         let centre =
             Vector::new((at[0] as f32 + 0.5) * b, (at[1] + DEV_DROP_HEIGHT_BLOCKS) as f32 * b + b / 2.0, (at[2] as f32 + 0.5) * b);
         let tick = *self.data.tick;

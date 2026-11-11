@@ -8,8 +8,8 @@ use crate::common;
 use common::STAND;
 use game::rapier3d::math::Vector;
 use game::{
-    line_step, next_region, play_mode_update, state_hash, steer_on, BlockId, EntityKey, GameEventKind, Goal, InputEvent,
-    Key, Motion, Order, PathPlan, PlayMode, Region, RegionCoords, Rollback, RouteMap, TerrainKind, TileFill, TilePos,
+    line_step, next_region, play_mode_update, state_hash, BlockId, EntityKey, GameEventKind, Goal, InputEvent,
+    Key, Motion, Order, PathPlan, PlayMode, Region, RegionCoords, Rollback, RouteMap, TileFill, TilePos,
     TileSource, UiUpdate, Walker, WorldBlockPos, PORTAL_DEPTH_BLOCKS, REGION_BLOCKS, STUCK_TICKS, TICK_RATE,
     WALK_UP_JUMP_AFTER_STALL_TICKS,
 };
@@ -230,7 +230,7 @@ fn walker(region: &Region, e: EntityKey) -> Option<Walker> {
 fn body_tile(region: &Region, e: EntityKey) -> TilePos {
     let data = region.data();
     let handle = data.ecs.rigidbody.try_get(e).unwrap();
-    data.terrain_kind().feet_tile(data.feet_of(data.physics.bodies.get(handle).unwrap().translation()))
+    game::feet_tile(data.feet_of(data.physics.bodies.get(handle).unwrap().translation()))
 }
 
 fn place(region: &mut Region, tiles: impl IntoIterator<Item = TilePos>) {
@@ -455,16 +455,15 @@ fn walker_replans_once_then_gives_up() {
     assert!(replanned, "it must re-plan once before giving up");
 }
 
-/// `steer_on` as the sim calls it for a stud body.
+/// `game::steer` in region (0, 0).
 fn steer(w: &Walker, feet: Vector, grounded: bool) -> (game::movement::MoveKeys, f32) {
-    let step = game::movement::BodyScale::STUD.step_height_m;
-    steer_on(TerrainKind::Stud, step, w, feet, grounded, RegionCoords::new(0, 0))
+    game::steer(w, feet, grounded, RegionCoords::new(0, 0))
 }
 
 /// Feet on the floor in the middle of tile (4, L, 4).
 fn feet_on_start() -> Vector {
     let bv = common::TILE_W;
-    Vector::new(4.5 * bv, TerrainKind::Stud.level_bottom_units(L), 4.5 * bv)
+    Vector::new(4.5 * bv, game::level_bottom_units(L), 4.5 * bv)
 }
 
 #[test]
@@ -524,15 +523,8 @@ struct Flat {
 }
 
 impl TileSource for Flat {
-    fn terrain(&self) -> TerrainKind {
-        TerrainKind::Stud
-    }
     fn tile_fill(&self, p: TilePos) -> TileFill {
         if p[1] == L - 1 && !self.holes.contains(&[p[0], p[2]]) { TileFill::Solid } else { TileFill::Open }
-    }
-    // P10b: the trait's voxel half — a stud source has no blocks or trees.
-    fn block(&self, _: TilePos) -> BlockId {
-        BlockId::AIR
     }
     fn is_bedrock(&self, _: TilePos) -> bool {
         false
@@ -541,9 +533,6 @@ impl TileSource for Flat {
         false
     }
     fn tree_id(&self, _: TilePos) -> u32 {
-        0
-    }
-    fn tree_limb(&self, _: TilePos) -> u8 {
         0
     }
 }
@@ -717,15 +706,8 @@ fn path_plan_reaches_a_goal_past_the_seam_and_heads_for_one_beyond() {
 struct CornerGone;
 
 impl TileSource for CornerGone {
-    fn terrain(&self) -> TerrainKind {
-        TerrainKind::Stud
-    }
     fn tile_fill(&self, p: TilePos) -> TileFill {
         if p[1] == L - 1 && !(p[0] < 0 && p[2] < 0) { TileFill::Solid } else { TileFill::Open }
-    }
-    // P10b: the trait's voxel half.
-    fn block(&self, _: TilePos) -> BlockId {
-        BlockId::AIR
     }
     fn is_bedrock(&self, _: TilePos) -> bool {
         false
@@ -734,9 +716,6 @@ impl TileSource for CornerGone {
         false
     }
     fn tree_id(&self, _: TilePos) -> u32 {
-        0
-    }
-    fn tree_limb(&self, _: TilePos) -> u8 {
         0
     }
 }

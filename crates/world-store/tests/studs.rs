@@ -29,7 +29,6 @@ fn region(tick: u64, first: bool, rows: &[(StudChunkCoords, Option<StudChunkReco
     m.tick = tick;
     PortableRegion {
         meta: m,
-        ground: first.then(Vec::new),
         stud_ground: first.then(stud_ground),
         stud_chunks: rows.iter().cloned().collect(),
         ..Default::default()
@@ -70,7 +69,6 @@ fn stud_rows_round_trip() {
         assert_eq!(got, StoredRegion::from(first.clone()));
         assert_eq!(got.stud_ground, stud_ground());
         assert_eq!(got.stud_chunks.len(), 3);
-        assert!(got.chunks.is_empty() && got.ground.is_empty());
 
         // A later save: one row deleted, one replaced, one added; the recipes stay.
         let second = region(200, false, &[(at(0, 0, 0), None), (at(0, 7, 3), Some(stud_chunk())), (at(3, -1, 2), Some(other_chunk()))]);
@@ -123,7 +121,6 @@ fn stored_terrain_carries_the_stud_edge() {
         assert_eq!(snap.stud, want);
         assert!(!snap.stud.ground.is_empty(), "the fixture's recipes lie in edge columns");
         assert!(snap.stud.chunks.iter().any(|(c, _)| *c == at(0, 0, 0)), "the edited edge chunk");
-        assert!(snap.chunks.is_empty() && snap.ground.is_empty());
         h.shutdown();
     });
 }

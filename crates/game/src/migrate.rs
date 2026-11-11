@@ -20,23 +20,53 @@ pub struct Carried {
     /// on along it (`Rollback::continue_walk_safe`).
     pub walker: Option<crate::Walker>,
     pub wander: Option<crate::people::Wander>,
-    /// A voxel body (`voxel_body.rs`): its model, settle state and policy,
-    /// with its `drops` moved out into [`Carried::drops`] (empty here). Its
-    /// region-local `origin` is rebased with the body (`EntityBundle::rebase`).
-    pub voxel_body: Option<crate::voxel_body::VoxelBody>,
     /// What the entity leaves behind as item piles if it is destroyed on
     /// its way (the manager's mailbox overflow, `WorldManager::hold_arrival`):
-    /// it must never vanish with them. A `DropItems` voxel body's
-    /// `VoxelBody::drops` (or a stud body's), put back into it on arrival.
+    /// it must never vanish with them. A `DropItems` stud body's
+    /// `StudBody::drops`, put back into it on arrival.
     pub drops: Vec<crate::ItemStack>,
     /// A stud body (`stud_body.rs`): its bricks, settle state and policy, with
     /// its `drops` moved out into [`Carried::drops`] (empty here). Nothing in
-    /// it is region-local. Appended: [`CarriedV1`] is the layout before it.
+    /// it is region-local.
     pub stud_body: Option<crate::stud_body::StudBody>,
 }
 
+/// The slot a stud body had in the stored layouts ([`CarriedV1`],
+/// [`CarriedV2`]): always `None` in a stud world. A stored `Some` (a voxel
+/// world's bundle — the store refuses those worlds at open) fails to decode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+pub enum NoVoxelBody {}
+
+impl<'de> serde::Deserialize<'de> for NoVoxelBody {
+    fn deserialize<D: serde::Deserializer<'de>>(_: D) -> Result<Self, D::Error> {
+        Err(serde::de::Error::custom("a stud body: voxel terrain is no longer supported"))
+    }
+}
+
+/// [`Carried`] as stored with the stud body slot (world-store entity bundle
+/// format 2): `voxel_body` before `drops`. Decode-only.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct CarriedV2 {
+    pub camera: Option<(f32, f32)>,
+    pub motion: Option<crate::Motion>,
+    pub slime: Option<crate::slime::Slime>,
+    pub animator: Option<crate::anim::Animator>,
+    pub walker: Option<crate::Walker>,
+    pub wander: Option<crate::people::Wander>,
+    pub voxel_body: Option<NoVoxelBody>,
+    pub drops: Vec<crate::ItemStack>,
+    pub stud_body: Option<crate::stud_body::StudBody>,
+}
+
+impl From<CarriedV2> for Carried {
+    fn from(c: CarriedV2) -> Self {
+        let CarriedV2 { camera, motion, slime, animator, walker, wander, voxel_body: _, drops, stud_body } = c;
+        Carried { camera, motion, slime, animator, walker, wander, drops, stud_body }
+    }
+}
+
 /// [`Carried`] as stored before stud bodies (world-store entity bundle
-/// format 1): every field but `stud_body`, in the same order. Decode-only.
+/// format 1): [`CarriedV2`] without `stud_body`. Decode-only.
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CarriedV1 {
     pub camera: Option<(f32, f32)>,
@@ -45,14 +75,14 @@ pub struct CarriedV1 {
     pub animator: Option<crate::anim::Animator>,
     pub walker: Option<crate::Walker>,
     pub wander: Option<crate::people::Wander>,
-    pub voxel_body: Option<crate::voxel_body::VoxelBody>,
+    pub voxel_body: Option<NoVoxelBody>,
     pub drops: Vec<crate::ItemStack>,
 }
 
 impl From<CarriedV1> for Carried {
     fn from(c: CarriedV1) -> Self {
-        let CarriedV1 { camera, motion, slime, animator, walker, wander, voxel_body, drops } = c;
-        Carried { camera, motion, slime, animator, walker, wander, voxel_body, drops, stud_body: None }
+        let CarriedV1 { camera, motion, slime, animator, walker, wander, voxel_body: _, drops } = c;
+        Carried { camera, motion, slime, animator, walker, wander, drops, stud_body: None }
     }
 }
 
@@ -107,8 +137,6 @@ impl Rollback {
             isometry: _,
             // Rebuilt from `BodyState` + `ColliderSpec` on arrival.
             rigidbody: _,
-            // Terrain only; crossing entities are never chunks.
-            chunk: _,
             // Travels as `EntityBundle::kind`.
             kind: _,
             motion,
@@ -116,7 +144,6 @@ impl Rollback {
             animator,
             // Rebuilt from the animator (`attach_rig_safe`).
             bones: _,
-            voxel_body,
             walker,
             wander,
             // Travels as `EntityBundle::id`.
@@ -125,13 +152,8 @@ impl Rollback {
             stud: _,
             stud_body,
         } = &*self.data.ecs;
-        let mut voxel_body = voxel_body.try_get(key).clone();
-        let mut drops = voxel_body.as_mut().map(|vb| std::mem::take(&mut vb.drops)).unwrap_or_default();
-        // An entity is one or the other, so the drops are one body's.
         let mut stud_body = stud_body.try_get(key).clone();
-        if let Some(sb) = stud_body.as_mut() {
-            drops.append(&mut sb.drops);
-        }
+        let drops = stud_body.as_mut().map(|sb| std::mem::take(&mut sb.drops)).unwrap_or_default();
         Carried {
             camera: camera.try_get(key).as_ref().map(|c| (c.yaw, c.pitch)),
             motion: *motion.try_get(key),
@@ -139,7 +161,6 @@ impl Rollback {
             animator: *animator.try_get(key),
             walker: walker.try_get(key).clone(),
             wander: *wander.try_get(key),
-            voxel_body,
             drops,
             stud_body,
         }
@@ -149,7 +170,7 @@ impl Rollback {
     /// re-applies the whole bundle). `client` is the player attached to `e`;
     /// only a player gets a camera.
     pub(crate) fn restore_components_safe(&mut self, e: EntityKey, c: &Carried, client: Option<ClientId>) {
-        self.restore_voxel_body_safe(e, c);
+        self.restore_stud_body_safe(e, c);
         self.data.ecs.motion.set_safe(e, c.motion);
         self.data.ecs.slime.set_safe(e, c.slime);
         if let Some(animator) = c.animator {
@@ -185,37 +206,20 @@ impl Rollback {
         }
     }
 
-    /// The carried voxel body back on `e`, with its drops: its collider's
+    /// The carried stud body back on `e`, with its drops: its collider's
     /// material set again (not in the `ColliderSpec`), and the renderer told
     /// its model the first time (a replay re-applies the state silently).
-    /// Drops that arrive with no voxel body to hold them (no such entity
+    /// Drops that arrive with no stud body to hold them (no such entity
     /// today) are put down where `e` is rather than lost.
-    fn restore_voxel_body_safe(&mut self, e: EntityKey, c: &Carried) {
+    fn restore_stud_body_safe(&mut self, e: EntityKey, c: &Carried) {
         let handle = *self.data.ecs.rigidbody.try_get(e);
         let pose = handle.and_then(|h| self.data.physics.bodies.get(h)).map(|b| *b.position());
-        if let Some(sb) = &c.stud_body {
-            // A stud body: the same steps (its collider's material is the voxel
-            // body's, and not in the `ColliderSpec` either).
-            if let Some(handle) = handle {
-                self.set_voxel_body_material_safe(handle);
-            }
-            if self.data.ecs.stud_body.try_get(e).is_none() {
-                self.data.send(GameDataUpdate::new(
-                    GameDataTransactionKind::Do,
-                    GameDataUpdateKind::AddStudBody(e, pose.unwrap_or_else(rapier3d::math::Pose::identity), Box::new(sb.model.clone())),
-                ));
-            }
-            let sb = crate::stud_body::StudBody { drops: c.drops.clone(), ..sb.clone() };
-            self.data.ecs.stud_body.set_safe(e, Some(sb));
-            return;
-        }
-        let Some(vb) = &c.voxel_body else {
+        let Some(sb) = &c.stud_body else {
             if !c.drops.is_empty() {
-                log::error!("drops {:?} arrived on {e:?} with no voxel body to hold them: put down", c.drops);
+                log::error!("drops {:?} arrived on {e:?} with no stud body to hold them: put down", c.drops);
                 if let Some(pose) = pose {
                     let t = pose.translation;
-                    let kind = self.terrain_kind();
-                    let (bw, bh) = (kind.tile_width_units(), kind.tile_height_units());
+                    let (bw, bh) = (crate::tile_width_units(), crate::tile_height_units());
                     let cell = [(t.x / bw).floor() as i32, (t.y / bh).floor() as i32, (t.z / bw).floor() as i32];
                     let tick = *self.data.tick;
                     self.deposit_drops_safe(cell, &c.drops, tick);
@@ -224,15 +228,15 @@ impl Rollback {
             return;
         };
         if let Some(handle) = handle {
-            self.set_voxel_body_material_safe(handle);
+            self.set_stud_body_material_safe(handle);
         }
-        if self.data.ecs.voxel_body.try_get(e).is_none() {
+        if self.data.ecs.stud_body.try_get(e).is_none() {
             self.data.send(GameDataUpdate::new(
                 GameDataTransactionKind::Do,
-                GameDataUpdateKind::AddVoxelBody(e, pose.unwrap_or_else(rapier3d::math::Pose::identity), Box::new(vb.model.clone())),
+                GameDataUpdateKind::AddStudBody(e, pose.unwrap_or_else(rapier3d::math::Pose::identity), Box::new(sb.model.clone())),
             ));
         }
-        let vb = crate::voxel_body::VoxelBody { drops: c.drops.clone(), ..vb.clone() };
-        self.data.ecs.voxel_body.set_safe(e, Some(vb));
+        let sb = crate::stud_body::StudBody { drops: c.drops.clone(), ..sb.clone() };
+        self.data.ecs.stud_body.set_safe(e, Some(sb));
     }
 }

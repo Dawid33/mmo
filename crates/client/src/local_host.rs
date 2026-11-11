@@ -83,7 +83,7 @@ pub fn server_binary_from(override_bin: Option<OsString>, exe: &Path) -> PathBuf
 /// `worlds/default.server.log` beside it.
 pub fn server_log_path(entry_dir: &Path, terrain: &Path) -> PathBuf {
     // The stud world's `terrain` is the keyword, not a file: its log lives in the entry dir too.
-    if terrain.file_name().is_some_and(|n| n == worldgen::world_store::TERRAIN_FILE) || terrain == Path::new("studs") || terrain == Path::new("studs-procedural") {
+    if terrain.file_name().is_some_and(|n| n == worldgen::world_store::TERRAIN_FILE) || terrain == Path::new("studs") || terrain == Path::new("procedural") {
         entry_dir.join("server.log")
     } else {
         terrain.with_extension("server.log")

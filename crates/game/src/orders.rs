@@ -9,10 +9,10 @@
 
 use std::collections::BTreeMap;
 
-use crate::edit::{raycast_blocks, BlockHit, BlockPos};
+use crate::edit::{raycast_blocks, BlockPos};
 use crate::{
-    Block, BlockId, ClientId, GameDataTransactionKind, GameDataUpdate, GameDataUpdateKind, Rollback,
-    BLOCK_VOXELS, REGION_BLOCKS, UNDERGROUND_DEPTH,
+    BlockId, ClientId, GameDataTransactionKind, GameDataUpdate, GameDataUpdateKind, Rollback,
+    BLOCK_UNITS, REGION_BLOCKS, UNDERGROUND_DEPTH,
 };
 use rapier3d::math::Vector;
 use state_hash::StateHash;
@@ -185,29 +185,19 @@ pub enum Invalid {
     NotTree,
 }
 
-/// What `validate` needs to know about the world.
+/// What `validate` and the path search need to know about the world's tiles.
 pub trait TileSource {
-    /// The block at `p`; `AIR` when unknown.
-    fn block(&self, p: TilePos) -> BlockId;
+    /// Whether nothing in tile `p` can be dug (`StudTile::is_bedrock`).
     fn is_bedrock(&self, p: TilePos) -> bool;
     fn is_constructed(&self, p: TilePos) -> bool;
-    /// The tree id of the block at `p` (`Block::tree_id`); 0 when none or
-    /// unknown.
+    /// The tree whose wood is in tile `p`; 0 when none or unknown.
     fn tree_id(&self, p: TilePos) -> u32;
-    /// The tree limb of the block at `p` (`Block::limb`; 0 = the trunk, or
-    /// none).
-    fn tree_limb(&self, p: TilePos) -> u8;
-    /// The lowest and highest materialised (or implied-surface) block `y` of
-    /// block column `[x, z]`; `None` when unknown. Pathfinding scans this
-    /// band instead of the fixed `COLUMN_SCAN_Y_MIN..=MAX` constants, which
-    /// is what lets ground at any height be stood on.
+    /// The lowest and highest tile level worth scanning in tile column `[x, z]`
+    /// (materialised chunks and the recipe's surface); `None` when unknown.
+    /// Pathfinding scans this band instead of the fixed
+    /// `COLUMN_SCAN_Y_MIN..=MAX` constants, which is what lets ground at any
+    /// height be stood on.
     fn column_band(&self, _column: [i32; 2]) -> Option<(i32, i32)> {
-        None
-    }
-    /// The slope shape of the block at `p` (a floor walked up from its low
-    /// side, see [`crate::step_is_walk_up`]); `None` when it is not a slope or
-    /// unknown.
-    fn slope(&self, _p: TilePos) -> Option<crate::SlopeShape> {
         None
     }
     /// Water units in the cell at `p` ([`crate::WATER_FULL`] = full); 0 when
@@ -215,61 +205,21 @@ pub trait TileSource {
     fn water_units(&self, _p: TilePos) -> u16 {
         0
     }
-    /// Which terrain the tiles lie on (`tiles.rs`): it decides a tile's size and the
-    /// rules for standing on, walking between and designating tiles. Voxel unless a
-    /// source says otherwise.
-    fn terrain(&self) -> crate::TerrainKind {
-        crate::TerrainKind::Voxel
-    }
-    /// How much of tile `p` is filled; `Open` when unknown. A voxel source answers
-    /// from [`Self::block`]; a stud source from its stud cells (`tiles.rs`).
-    fn tile_fill(&self, p: TilePos) -> crate::TileFill {
-        crate::voxel_tile_fill(self.block(p))
-    }
-    /// Stud terrain: the dominant stud material of tile `p` (`StudTile::material`);
-    /// `None` for an open or unknown tile, and on voxel terrain.
+    /// How much of tile `p` is filled (`tiles.rs`); `Open` when unknown.
+    fn tile_fill(&self, p: TilePos) -> crate::TileFill;
+    /// The dominant stud material of tile `p` (`StudTile::material`); `None`
+    /// for an open or unknown tile.
     fn tile_material(&self, _p: TilePos) -> Option<u16> {
         None
     }
 }
 
-/// Whether `kind` may be designated on tile `p`.
+/// Whether `kind` may be designated on tile `p`: a dig needs something in the tile
+/// (any fill), not built and not bedrock (its dominant material cannot be dug); a
+/// build needs room (anything but a solid tile — it fills the tile's empty cells); a
+/// deconstruct a built tile; a chop a tile holding tree wood
+/// (`Rollback::stud_tree_at`).
 pub fn validate(src: &impl TileSource, kind: DesignationKind, p: TilePos) -> Result<(), Invalid> {
-    if src.terrain() == crate::TerrainKind::Stud {
-        return validate_stud(src, kind, p);
-    }
-    match kind {
-        DesignationKind::Dig => {
-            if !crate::block_props().blocks_ray(src.block(p)) {
-                Err(Invalid::NothingToDig)
-            } else if src.is_constructed(p) {
-                Err(Invalid::Built)
-            } else if src.is_bedrock(p) {
-                Err(Invalid::Bedrock)
-            } else {
-                Ok(())
-            }
-        }
-        DesignationKind::Deconstruct => src.is_constructed(p).then_some(()).ok_or(Invalid::NotBuilt),
-        DesignationKind::Build(_) => {
-            if !crate::block_props().blocks_ray(src.block(p)) {
-                Ok(())
-            } else {
-                Err(Invalid::Occupied)
-            }
-        }
-        DesignationKind::Chop => {
-            let is_wood = crate::block_props().is_solid(src.block(p)) && src.tree_id(p) != 0;
-            is_wood.then_some(()).ok_or(Invalid::NotTree)
-        }
-    }
-}
-
-/// [`validate`] on stud terrain: a dig needs something in the tile (any fill), not
-/// built and not bedrock (its dominant material cannot be dug); a build needs room
-/// (anything but a solid tile — it fills the tile's empty cells); a deconstruct a
-/// built tile; a chop a tile holding tree wood (`Rollback::stud_tree_at`).
-fn validate_stud(src: &impl TileSource, kind: DesignationKind, p: TilePos) -> Result<(), Invalid> {
     use crate::TileFill;
     match kind {
         DesignationKind::Dig => {
@@ -320,75 +270,12 @@ fn order_area(area: TileBox) -> Option<TileBox> {
     area.clip_to_region().filter(|a| a.tile_count() <= MAX_ORDER_TILES)
 }
 
-/// The shared `column_band` probe (sim and client mirror): walks the chunk
-/// stack with plain `has_chunk(cy)` lookups (no iteration order) from the
-/// lower of the band base and the bedrock chunk (`UNDERGROUND_DEPTH` below the
-/// surface: dug space can be materialised anywhere above it) up to
-/// [`BAND_HEADROOM_CHUNKS`] past the surface chunk, or over the fallback scan
-/// range without a recipe. The band spans the implied base, the surface and
-/// every chunk found; `None` with no recipe and no chunk.
-pub fn probe_column_band(
-    column: [i32; 2],
-    ground: Option<&crate::ColumnGround>,
-    has_chunk: impl Fn(i32) -> bool,
-) -> Option<(i32, i32)> {
-    let cb = crate::CHUNK_BLOCKS as i32;
-    let (probe_lo, probe_hi, base) = match ground {
-        Some(g) => {
-            let i = column[0].rem_euclid(cb) as usize * crate::CHUNK_BLOCKS + column[1].rem_euclid(cb) as usize;
-            let surface = i32::from(g.surface[i]);
-            let bedrock_sub = (surface - UNDERGROUND_DEPTH).div_euclid(cb);
-            (
-                g.band_base_sub_y.min(bedrock_sub),
-                surface.div_euclid(cb) + BAND_HEADROOM_CHUNKS,
-                Some((g.band_base_sub_y * cb, surface)),
-            )
-        }
-        None => (crate::COLUMN_SCAN_Y_MIN.div_euclid(cb), crate::COLUMN_SCAN_Y_MAX.div_euclid(cb), None),
-    };
-    let mut band = base;
-    for cy in probe_lo..=probe_hi {
-        if has_chunk(cy) {
-            let (lo, hi) = (cy * cb, cy * cb + cb - 1);
-            band = Some(band.map_or((lo, hi), |(a, b)| (a.min(lo), b.max(hi))));
-        }
-    }
-    band
-}
-
-/// Chunks above a column's surface chunk that `column_band` probes (trees,
-/// buildings).
-pub const BAND_HEADROOM_CHUNKS: i32 = 4;
-
-/// Region ∪ halo: tiles outside the region read the terrain halo
-/// (`halo.rs`) — its blocks, slopes and chunk bands; never bedrock, edge
-/// locks or constructions there. Walks plan over all of it (`path_plan.rs`).
+/// Region ∪ stud halo: tiles outside the region read the stud halo
+/// (`stud_halo.rs`); never constructions there. Walks plan over all of it
+/// (`path_plan.rs`).
 impl TileSource for Rollback {
-    /// See [`probe_column_band`]; a halo column probes its mirrored chunks
-    /// (no ground recipe is mirrored).
     fn column_band(&self, column: [i32; 2]) -> Option<(i32, i32)> {
-        if self.terrain_kind() == crate::TerrainKind::Stud {
-            return self.stud_column_band(column);
-        }
-        let cb = crate::CHUNK_BLOCKS as i32;
-        let (cx, cz) = (column[0].div_euclid(cb), column[1].div_euclid(cb));
-        let n = crate::REGION_CHUNKS as i32;
-        if !(0..n).contains(&cx) || !(0..n).contains(&cz) {
-            if !crate::halo::in_halo_band(cx, cz) {
-                return None;
-            }
-            return probe_column_band(column, None, |cy| {
-                self.halo_chunk_at([cx, cy, cz]).is_some_and(|h| h.chunk.is_some())
-            });
-        }
-        let ground = self.data.ground.get(&crate::ColumnCoords::new(cx as usize, cz as usize));
-        probe_column_band(column, ground, |cy| {
-            self.chunk_key_at(crate::ChunkCoords::new(cx as usize, cy, cz as usize)).is_some()
-        })
-    }
-
-    fn block(&self, p: TilePos) -> BlockId {
-        self.tile_block(p).map_or(BlockId::AIR, |b| b.id)
+        self.stud_column_band(column)
     }
 
     /// Own ∪ halo, through [`Rollback::water_units_at`].
@@ -396,66 +283,32 @@ impl TileSource for Rollback {
         self.water_units_at(crate::WorldBlockPos::from_local(*self.data.region, crate::BlockPos::new(p[0], p[1], p[2])))
     }
 
-    fn terrain(&self) -> crate::TerrainKind {
-        self.terrain_kind()
-    }
-
     fn tile_fill(&self, p: TilePos) -> crate::TileFill {
-        match self.terrain_kind() {
-            crate::TerrainKind::Voxel => crate::voxel_tile_fill(TileSource::block(self, p)),
-            crate::TerrainKind::Stud => self.stud_tile(p).fill(),
-        }
+        self.stud_tile(p).fill()
     }
 
     fn tile_material(&self, p: TilePos) -> Option<u16> {
-        match self.terrain_kind() {
-            crate::TerrainKind::Voxel => None,
-            crate::TerrainKind::Stud => self.stud_tile(p).material(),
-        }
+        self.stud_tile(p).material()
     }
 
     fn is_bedrock(&self, p: TilePos) -> bool {
-        if self.terrain_kind() == crate::TerrainKind::Stud {
-            return self.stud_tile(p).is_bedrock();
-        }
-        let Some((coords, local)) = crate::edit::locate(p) else { return false };
-        self.current_block(coords, local).is_some_and(|b| {
-            crate::edit::is_bedrock_at(self.data.ground.get(&crate::ColumnCoords::new(coords.x, coords.z)), b)
-        })
+        self.stud_tile(p).is_bedrock()
     }
 
     fn is_constructed(&self, p: TilePos) -> bool {
         self.data.constructed.contains_key(&p)
     }
 
-    /// On stud terrain: the tree whose wood is in the tile (`stud_tree_at`).
+    /// The tree whose wood is in the tile (`stud_tree_at`).
     fn tree_id(&self, p: TilePos) -> u32 {
-        if self.terrain_kind() == crate::TerrainKind::Stud {
-            return self.stud_tree_at(p).map_or(0, u32::from);
-        }
-        self.tile_block(p).map_or(0, |b| b.tree_id())
-    }
-
-    fn tree_limb(&self, p: TilePos) -> u8 {
-        self.tile_block(p).map_or(0, |b| b.limb())
-    }
-
-    /// Classifies the chisel of the block at `p`; implied ground has none.
-    fn slope(&self, p: TilePos) -> Option<crate::SlopeShape> {
-        let Some((coords, (bx, by, bz))) = crate::edit::locate(p) else {
-            return self.halo_chisel(p).and_then(crate::slope::classify);
-        };
-        let e = self.chunk_key_at(coords)?;
-        let chunk = self.data.ecs.chunk.try_get(e).as_ref()?;
-        chunk.chisel.get(&crate::BlockIndex::from_xyz(bx, by, bz)).and_then(crate::slope::classify)
+        self.stud_tree_at(p).map_or(0, u32::from)
     }
 }
 
 impl Rollback {
     /// Applies one client's order, undo-safely. `false` = rejected, nothing
     /// changed: an op not issued by `client`, a priority outside
-    /// `1..=MAX_PRIORITY`, a build of anything but
-    /// [`crate::edit::PLACE_BLOCK`], or an area that is inverted, leaves the
+    /// `1..=MAX_PRIORITY`, a build of air, or an area that is inverted, leaves the
     /// order level range, misses the region or clips to more than
     /// [`MAX_ORDER_TILES`]. A designation goes only on
     /// tiles that [`validate`], replacing what was there.
@@ -465,13 +318,9 @@ impl Rollback {
                 if op.client != client || !(1..=MAX_PRIORITY).contains(&priority) {
                     return false;
                 }
-                // Voxel builds place the one creative block. A stud build names its
-                // material by block (`stud_material_of_block`): any block but air.
-                let buildable = |id: BlockId| match self.terrain_kind() {
-                    crate::TerrainKind::Voxel => id == crate::edit::PLACE_BLOCK,
-                    crate::TerrainKind::Stud => id != BlockId::AIR,
-                };
-                if matches!(kind, DesignationKind::Build(id) if !buildable(id)) {
+                // A build names its material by block (`stud_material_of_block`):
+                // any block but air.
+                if matches!(kind, DesignationKind::Build(id) if id == BlockId::AIR) {
                     return false;
                 }
                 let Some(area) = order_area(area) else { return false };
@@ -543,73 +392,17 @@ impl Rollback {
         true
     }
 
-    /// Dev shortcut: carries out every designation at once — builds bottom
-    /// up, then digs, deconstructions and chops top down — skipping tiles
-    /// that no longer validate, and clears them all. A chop clears its block
-    /// and detaches each falling part of the tree into a voxel body that
-    /// despawns at rest.
-    fn dev_complete_all_safe(&mut self) {
-        if self.terrain_kind() == crate::TerrainKind::Stud {
-            return self.dev_complete_all_stud_safe();
-        }
-        let all: Vec<(TilePos, Designation)> =
-            self.data.designations.iter().map(|(p, d)| (*p, *d)).collect();
-        let is_build = |d: &Designation| matches!(d.kind, DesignationKind::Build(_));
-        let mut builds: Vec<_> = all.iter().copied().filter(|(_, d)| is_build(d)).collect();
-        builds.sort_by_key(|(p, _)| p[1]);
-        let mut removals: Vec<_> = all.iter().copied().filter(|(_, d)| !is_build(d)).collect();
-        removals.sort_by_key(|(p, _)| std::cmp::Reverse(p[1]));
-        // Writes go through `fill_blocks_safe` in batches (one undo entry per
-        // chunk, not per tile): under `HashMode::Full` every entry re-hashes
-        // its whole field, and a per-tile loop over a few hundred tiles took
-        // seconds on a play-size region — on the server, in the client's
-        // prediction and again on every rollback and replay of it.
-        // Validity is checked tile by tile in the old order: a tile's
-        // validity never depends on another dig or build, only on a chop
-        // (which can fell blocks below it), so pending digs are flushed
-        // before each chop.
-        let mut constructed = Vec::new();
-        let mut placing: BTreeMap<BlockId, Vec<TilePos>> = BTreeMap::new();
-        for (p, d) in builds {
-            if let DesignationKind::Build(id) = d.kind {
-                if validate(self, d.kind, p).is_ok() {
-                    placing.entry(id).or_default().push(p);
-                }
-            }
-        }
-        for (id, tiles) in placing {
-            constructed.extend(self.fill_blocks_safe(&tiles, Block::new(id)).into_iter().map(|p| (p, true)));
-        }
-        let mut clearing = Vec::new();
-        for (p, d) in removals {
-            if d.kind == DesignationKind::Chop {
-                self.clear_tiles_safe(&mut clearing, &mut constructed);
-            }
-            if validate(self, d.kind, p).is_err() {
-                continue;
-            }
-            match d.kind {
-                DesignationKind::Build(_) => unreachable!("builds were done first"),
-                DesignationKind::Dig | DesignationKind::Deconstruct => clearing.push(p),
-                DesignationKind::Chop => self.chop_safe(p),
-            }
-        }
-        self.clear_tiles_safe(&mut clearing, &mut constructed);
-        self.set_constructed_safe(constructed);
-        self.set_designations_safe(all.into_iter().map(|(p, _)| (p, None)).collect());
-    }
-
-    /// [`Self::dev_complete_all_safe`] on stud terrain: builds bottom up (each fills
+    /// Dev shortcut: carries out every designation at once. Builds bottom up (each fills
     /// the empty cells of its tile box with bricks of its block's material,
     /// `stud_material_of_block`, and marks the tile constructed), then digs and
     /// deconstructions top down (each carves its tile box; a deconstructed tile loses
     /// its constructed mark), skipping tiles that no longer validate, and clears
     /// every designation. Each chunk is written once per batch. Chops come last, top
     /// down, each felling its tree (`fell_stud_safe`) if its tile still holds tree
-    /// wood. Unlike the voxel shortcut, everything removed yields its items: a carve's
+    /// wood. Everything removed yields its items: a carve's
     /// as piles at its tile (`carve_stud_boxes_dropping_safe`), a felled part's where
     /// it comes to rest (`SettlePolicy::DropItems`).
-    fn dev_complete_all_stud_safe(&mut self) {
+    fn dev_complete_all_safe(&mut self) {
         let all: Vec<(TilePos, Designation)> =
             self.data.designations.iter().map(|(p, d)| (*p, *d)).collect();
         let mut builds: Vec<(TilePos, BlockId)> = all
@@ -686,56 +479,6 @@ impl Rollback {
         self.set_designations_safe(all.into_iter().map(|(p, _)| (p, None)).collect());
     }
 
-    /// Clears the pending dig / deconstruct tiles in one batch and drops
-    /// their constructed flags. A refused write (e.g. the tile became
-    /// bedrock) leaves the construction standing, flag included.
-    fn clear_tiles_safe(&mut self, tiles: &mut Vec<TilePos>, constructed: &mut Vec<(TilePos, bool)>) {
-        if tiles.is_empty() {
-            return;
-        }
-        let cleared = self.fill_blocks_safe(tiles, Block::new(BlockId::AIR));
-        constructed.extend(cleared.into_iter().filter(|p| self.data.constructed.contains_key(p)).map(|p| (p, false)));
-        tiles.clear();
-    }
-
-    /// Carries out a chop order at `p`: [`Self::fell_safe`] with felled parts
-    /// that despawn at rest, leaving nothing (no items).
-    fn chop_safe(&mut self, p: TilePos) {
-        let _ = self.fell_safe(p, crate::SettlePolicy::Despawn);
-    }
-
-    /// Fells the tree at `p` (`trees::fell`, computed first): clears the cut
-    /// blocks and detaches every falling piece with its tip spin, turning
-    /// about the cut (`trees::tip_pivot`), each settling by `policy`.
-    /// Returns the cut blocks as they were before clearing, and the
-    /// falling part's body (the last one, when a cut splits the tree into
-    /// several; `None` when nothing that collides fell). `None`, with
-    /// nothing changed, for a tree `fell` refuses (not wood, or over
-    /// `MAX_TREE_BLOCKS`) — left whole.
-    pub fn fell_safe(
-        &mut self,
-        p: TilePos,
-        policy: crate::SettlePolicy,
-    ) -> Option<(Vec<(TilePos, crate::Block)>, Option<crate::EntityKey>)> {
-        let tree = TileSource::tree_id(self, p);
-        let felling = crate::trees::fell(self, p)?;
-        let mut cut: Vec<(TilePos, crate::Block)> =
-            felling.cut.iter().filter_map(|&c| self.block_at(c).map(|b| (c, b))).collect();
-        if self.clear_blocks_safe(&felling.cut) == 0 {
-            return None;
-        }
-        // Only what was actually cleared (a refused write keeps its block).
-        cut.retain(|&(c, _)| self.block_at(c).is_some_and(|b| b.id == BlockId::AIR));
-        let tick = *self.data.tick;
-        let mut body = None;
-        for set in felling.falling {
-            let spin = crate::trees::tip_angvel(tree, p, &set, tick);
-            let pivot = crate::trees::tip_pivot(p);
-            body = self.detach_blocks_pivoting_safe(&set, policy, spin, Some(pivot)).or(body);
-        }
-        Some((cut, body))
-    }
-
     /// Writes designation changes and tells the renderer, both ways.
     fn set_designations_safe(&mut self, changes: Vec<(TilePos, Option<Designation>)>) {
         if changes.is_empty() {
@@ -786,10 +529,10 @@ impl Rollback {
 
 /// DF's "tile under the cursor at the working level": the ray (region-local
 /// sim units, `dir` normalised) is cut at the top of `level`
-/// (`y = (level + 1) * BLOCK_VOXELS`) and walked down. A hit on `level` is
+/// (`y = (level + 1) * BLOCK_UNITS`) and walked down. A hit on `level` is
 /// that cell, a hit on `level - 1` is the floor shown at `level`, anything
 /// deeper or nothing is open space, clamped to the level where the ray
-/// crosses `y = level * BLOCK_VOXELS`. `None` for a ray that points up or
+/// crosses `y = level * BLOCK_UNITS`. `None` for a ray that points up or
 /// runs parallel to the cut.
 pub fn pick_level_cell(
     origin: Vector,
@@ -797,7 +540,7 @@ pub fn pick_level_cell(
     level: i32,
     solid: impl Fn(TilePos) -> bool,
 ) -> Option<TilePos> {
-    let size = BLOCK_VOXELS as f32;
+    let size = BLOCK_UNITS as f32;
     let cut_y = (level + 1) as f32 * size;
     if dir.y >= 0.0 {
         return None;
@@ -830,78 +573,13 @@ pub fn pick_visible_cell(
     Some([x + n[0], y + n[1], z + n[2]])
 }
 
-/// Whether air at block y `y` is part of a DUG space: strictly below its
-/// column's original worldgen surface block `surface` (`ColumnGround`'s, which
-/// digging never changes). Strictly: a half block's empty upper half is air
-/// inside the surface block, not a dug space. The cut-off x-ray view opens
-/// exactly these spaces (client `meshing/interior.rs` marks the faces that
-/// border them; [`xray_hit`] is the picking side of the same rule).
-pub fn is_dug_air(y: i32, surface: i32) -> bool {
-    y < surface
-}
-
-/// What a ray SEES with nothing cut away and the dug-space x-ray on: terrain
-/// in front of a dug space is not drawn, so once the ray (region-local sim
-/// units, `dir` normalised) enters a cell `dug` accepts within `reach` blocks
-/// (only asked of cells `solid` refuses), the hit is the first solid block
-/// AFTER it — the floor or far wall seen through the opening. With no dug
-/// air on the ray, the first solid block, as [`pick_visible_cell`].
-pub fn xray_hit(
-    origin: Vector,
-    dir: Vector,
-    reach: f32,
-    solid: impl Fn(TilePos) -> bool,
-    dug: impl Fn(TilePos) -> bool,
-) -> Option<BlockHit> {
-    match xray_through(origin, dir, reach, &solid, dug) {
-        Some(hit) => Some(hit),
-        None => raycast_blocks(origin, dir, reach, solid),
-    }
-}
-
-/// The half of [`xray_hit`] that differs from a plain pick: the first solid
-/// block past the first dug cell on the ray, `None` when the ray meets no
-/// dug cell (or nothing solid after it) within `reach`.
-pub fn xray_through(
-    origin: Vector,
-    dir: Vector,
-    reach: f32,
-    solid: impl Fn(TilePos) -> bool,
-    dug: impl Fn(TilePos) -> bool,
-) -> Option<BlockHit> {
-    let opening = raycast_blocks(origin, dir, reach, |p| !solid(p) && dug(p))?;
-    // The same walk again, accepting solids only once past the opening.
-    let past = std::cell::Cell::new(false);
-    raycast_blocks(origin, dir, reach, |p| {
-        if p == opening.block {
-            past.set(true);
-        }
-        past.get() && solid(p)
-    })
-}
-
-/// [`pick_visible_cell`] under the dug-space x-ray ([`xray_hit`]).
-pub fn pick_xray_cell(
-    origin: Vector,
-    dir: Vector,
-    reach: f32,
-    face: bool,
-    solid: impl Fn(TilePos) -> bool,
-    dug: impl Fn(TilePos) -> bool,
-) -> Option<TilePos> {
-    let hit = xray_hit(origin, dir, reach, solid, dug)?;
-    let [x, y, z] = hit.block;
-    let n = if face { hit.normal } else { [0; 3] };
-    Some([x + n[0], y + n[1], z + n[2]])
-}
-
 fn pick_from(
     start: Vector,
     dir: Vector,
     level: i32,
     solid: impl Fn(TilePos) -> bool,
 ) -> Option<TilePos> {
-    let size = BLOCK_VOXELS as f32;
+    let size = BLOCK_UNITS as f32;
     // Blocks above the cut are not visible at this level (the walk starts in
     // the cell above the cut plane, so they must not stop it).
     // Reach is in blocks (the walk's parameter is in block units).

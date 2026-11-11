@@ -29,9 +29,12 @@ use game::{state_hash, GameEventKind, InputEvent, Key, Region, RegionCoords};
 /// (`generate_stud_region` -> `Region::seed_stud_world`) when worldgen's voxel
 /// generator was deleted, so this value has no predecessor to compare with —
 /// the voxel scene's history (last value 0xD0F2_E7D3) is in git up to
-/// `6251fa09`. `physics_goldens` judges trajectories.
+/// `6251fa09`. Re-recorded 2026-11-11 (P10b, the voxel code deleted from
+/// `game`): `GameData` / `Ecs` lost their voxel fields, so the hash moved
+/// from 0x6D9E_67C7 with the layout (`physics_goldens` did not move).
+/// `physics_goldens` judges trajectories.
 const SCENE_HASH: u32 = match game::CHUNK_BLOCKS {
-    16 => 0x6D9E_67C7,
+    16 => 0x9F1B_CA2C,
     _ => 0,
 };
 /// Ticks of scripted input.

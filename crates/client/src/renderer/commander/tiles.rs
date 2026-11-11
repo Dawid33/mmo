@@ -22,7 +22,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use bevy::prelude::*;
 use game::rapier3d::math::Vector;
 use game::{
-    BlockId, ColumnCoords, Designation, RegionId, StudChunk, StudColumnGround, StudTile, TerrainKind, TileFill, TilePos,
+    ColumnCoords, Designation, RegionId, StudChunk, StudColumnGround, StudTile, TileFill, TilePos,
     TileSource, WorldChunkPos, REGION_BLOCKS, REGION_CHUNKS, STUD_CHUNK_STUDS, STUD_CHUNK_TILES, STUD_LAYER_TILES,
     TILE_PLATES, TILE_STUDS,
 };
@@ -115,22 +115,17 @@ impl TileMirror {
         self.home_tiles().map_or(&NO_DESIGNATIONS, |t| &t.designations)
     }
 
-    /// What the terrain is made of: the tile sizes every unit conversion reads.
-    pub fn terrain(&self) -> TerrainKind {
-        TerrainKind::Stud
-    }
-
     /// Whether tile `p` stops a pick ray: any tile with something in it.
     pub fn pick_solid(&self, p: TilePos) -> bool {
         self.stud_tile(p).fill() != TileFill::Open
     }
 
     /// `ray` (region-local sim units, direction normalised) in TILE space: the
-    /// frame in which every tile is a `BLOCK_VOXELS` cube, which is what
+    /// frame in which every tile is a `BLOCK_UNITS` cube, which is what
     /// `game::pick_level_cell` / `pick_visible_cell` / `raycast_blocks` walk:
     /// `y` is scaled by block height over tile height (tiles are as wide as blocks).
     pub fn tile_ray(&self, ray: (Vector, Vector)) -> (Vector, Vector) {
-        tile_ray(self.terrain(), ray)
+        tile_ray(ray)
     }
 
     /// The home stud tile at `p` (region-local; it may lie past the region's
@@ -401,13 +396,7 @@ impl TileMirror {
 /// mirrored data.
 impl TileSource for TileMirror {
     /// Stud terrain has no blocks: tools read [`TileSource::tile_fill`].
-    fn block(&self, _: TilePos) -> BlockId {
-        BlockId::AIR
-    }
 
-    fn terrain(&self) -> TerrainKind {
-        TileMirror::terrain(self)
-    }
 
     fn tile_fill(&self, p: TilePos) -> TileFill {
         self.stud_tile(p).fill()
@@ -430,9 +419,6 @@ impl TileSource for TileMirror {
         self.stud_tree_at(p).map_or(0, u32::from)
     }
 
-    fn tree_limb(&self, _: TilePos) -> u8 {
-        0
-    }
 
     fn water_units(&self, p: TilePos) -> u16 {
         self.stud_water_units(p)
@@ -444,8 +430,8 @@ impl TileSource for TileMirror {
 }
 
 /// [`TileMirror::tile_ray`] for terrain `kind`.
-pub fn tile_ray(kind: TerrainKind, (origin, dir): (Vector, Vector)) -> (Vector, Vector) {
-    let s = game::BLOCK_VOXELS as f32 / kind.tile_height_units();
+pub fn tile_ray((origin, dir): (Vector, Vector)) -> (Vector, Vector) {
+    let s = game::BLOCK_UNITS as f32 / game::tile_height_units();
     if s == 1.0 {
         return (origin, dir);
     }
@@ -657,7 +643,6 @@ mod tests {
         fn the_stud_mirror_agrees_with_the_sim_tile_for_tile() {
             let r = region();
             let m = mirror_of(&r);
-            assert_eq!(TileSource::terrain(&m), TerrainKind::Stud);
             let sim = r.data().tiles();
             let mut seen = [0u32; 3];
             for x in -1..33 {
@@ -712,7 +697,6 @@ mod tests {
             let halo_chunk = StudChunk::new([StudBrick::filler([30, 0, 0], [2, 3, 2], MAT_DIRT)]).unwrap();
             m.apply_stud(&StudWorldMsg::Region {
                 region: home(),
-                terrain: TerrainKind::Stud,
                 ground: std::sync::Arc::new([(ColumnCoords::new(0, 0), flat.clone())].into_iter().collect()),
                 halo: vec![(west, Some(halo_chunk))],
                 halo_ground: vec![(WorldChunkPos::new(west.x, 0, west.z), Some(flat.clone()))],
@@ -764,8 +748,7 @@ mod tests {
         fn picking_returns_stud_tiles() {
             let r = region();
             let m = mirror_of(&r);
-            let kind = TerrainKind::Stud;
-            let (w, h) = (kind.tile_width_units(), kind.tile_height_units());
+            let (w, h) = (game::tile_width_units(), game::tile_height_units());
             let down = Vector::new(0.0, -1.0, 0.0);
             // Straight down onto the dry ground (its top tile is level 4; in voxel
             // blocks the same height would be level 5).
@@ -795,12 +778,12 @@ mod tests {
         #[test]
         fn tile_space_squashes_stud_levels() {
             let ray = (Vector::new(3.0, 96.0, 5.0), Vector::new(0.0, -1.0, 0.0));
-            let (o, d) = tile_ray(TerrainKind::Stud, ray);
+            let (o, d) = tile_ray(ray);
             // 96 units is the top of stud level 4: 5 tiles up, i.e. 5 blocks in tile space.
-            assert!((o.y - 5.0 * game::BLOCK_VOXELS as f32).abs() < 1e-3, "{o:?}");
+            assert!((o.y - 5.0 * game::BLOCK_UNITS as f32).abs() < 1e-3, "{o:?}");
             assert_eq!((o.x, o.z), (3.0, 5.0));
             assert!((d.y + 1.0).abs() < 1e-6);
-            let (_, d) = tile_ray(TerrainKind::Stud, (ray.0, Vector::new(1.0, -1.0, 0.0).normalize()));
+            let (_, d) = tile_ray((ray.0, Vector::new(1.0, -1.0, 0.0).normalize()));
             assert!((d.length() - 1.0).abs() < 1e-5 && d.x > -d.y, "flatter in tile space, still unit length");
         }
     }

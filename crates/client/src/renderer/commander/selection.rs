@@ -242,7 +242,7 @@ fn body_extent(kind: EntityKind, scale: BodyScale) -> (f32, f32) {
         EntityKind::Player | EntityKind::Person { .. } => scale.capsule_radius(),
         EntityKind::Slime { size } => game::slime::slime_edge_units(size) / 2.0,
         // Placeholder: the 1 m dev cube.
-        EntityKind::Body => game::BLOCK_VOXELS as f32 / 2.0,
+        EntityKind::Body => game::BLOCK_UNITS as f32 / 2.0,
     };
     (half_height, half_width)
 }
@@ -405,7 +405,7 @@ mod tests {
     fn body_sizes_follow_the_regions_body_scale() {
         use game::movement::{PLAYER_CAPSULE_RADIUS, PLAYER_HEIGHT, STUD_PLAYER_HEIGHT_M, STUD_PLAYER_RADIUS_M, UNITS_PER_METER};
         for kind in [EntityKind::Player, EntityKind::Person { person: game::history::PersonId(1) }] {
-            let (hh, hw) = body_extent(kind, BodyScale::VOXEL);
+            let (hh, hw) = body_extent(kind, BodyScale::UNIT);
             assert!((hh - PLAYER_HEIGHT * UNITS_PER_METER / 2.0).abs() < 1e-4);
             assert_eq!(hw, PLAYER_CAPSULE_RADIUS, "voxel regions: the old constants");
             let (hh, hw) = body_extent(kind, BodyScale::STUD);
@@ -415,10 +415,10 @@ mod tests {
             assert_eq!((edge, feet), (2.0 * hw, hh), "the ring is the body's width, at its feet");
         }
         let slime = EntityKind::Slime { size: 3 };
-        assert_eq!(body_extent(slime, BodyScale::STUD), body_extent(slime, BodyScale::VOXEL));
+        assert_eq!(body_extent(slime, BodyScale::STUD), body_extent(slime, BodyScale::UNIT));
         let edge = game::slime::slime_edge_units(3);
-        assert_eq!(ring_size(slime, BodyScale::VOXEL), (edge, edge / 2.0));
-        assert_eq!(ring_size(EntityKind::Body, BodyScale::STUD), (game::BLOCK_VOXELS as f32, game::BLOCK_VOXELS as f32 / 2.0));
+        assert_eq!(ring_size(slime, BodyScale::UNIT), (edge, edge / 2.0));
+        assert_eq!(ring_size(EntityKind::Body, BodyScale::STUD), (game::BLOCK_UNITS as f32, game::BLOCK_UNITS as f32 / 2.0));
     }
 
     #[test]

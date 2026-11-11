@@ -8,7 +8,7 @@
 use crate::{
     ClientId, EntityBundle, TerrainSnapshot, GameEvent, GameEventKind, HaloEntityMsg, Region,
     RegionCoords, RegionId, Rollback, Tick,
-    TERRAIN_HASH_INTERVAL_TICKS, TICK_RATE,
+    TICK_RATE,
 };
 use crossbeam::channel::Sender;
 
@@ -101,8 +101,6 @@ pub enum RegionOutput {
     /// Fields: the event, the tick it ran, the hash.
     EventProcessedHashed(GameEvent, Tick, u32),
     Snapshot(ClientId, Rollback),
-    /// Throttled push when this region's terrain changed; manager fans out.
-    TerrainChanged(TerrainSnapshot),
     SyncClock { tick_rate: u64, tick: Tick },
     /// The parked state, its final terrain, and its final stamp (its
     /// `current_tick()` at `Shutdown`: what the manager stamps the final
@@ -193,7 +191,6 @@ impl RegionOutput {
             RegionOutput::EventProcessed(_) => "EventProcessed",
             RegionOutput::EventProcessedHashed(..) => "EventProcessedHashed",
             RegionOutput::Snapshot(..) => "Snapshot",
-            RegionOutput::TerrainChanged(_) => "TerrainChanged",
             RegionOutput::SyncClock { .. } => "SyncClock",
             RegionOutput::Stopped(..) => "Stopped",
             RegionOutput::Departures(..) => "Departures",
@@ -272,13 +269,6 @@ pub struct RegionRunner {
     stored_terrain: Option<std::sync::Arc<dyn crate::StoredTerrain>>,
     region: Region,
     out: Sender<(RegionCoords, RegionOutput)>,
-    /// Last-pushed terrain hash; a change past the throttle window pushes a
-    /// `TerrainChanged`. Seeded at construction so the initial state is a
-    /// baseline, not a spurious push.
-    last_terrain_hash: u32,
-    /// Cost of the cadence terrain-hash checks since the last
-    /// `take_terrain_hash_cost` (metrics only): count, total, slowest.
-    terrain_hash_cost: (u32, std::time::Duration, std::time::Duration),
     /// Client events waiting for the tick they were predicted after, in
     /// arrival order.
     held: std::collections::VecDeque<(GameEventKind, u64)>,
@@ -294,8 +284,6 @@ pub struct RegionRunner {
     /// Their late inputs come back as [`RegionOutput::Forward`]. Transient,
     /// not region state.
     departed: std::collections::BTreeMap<ClientId, (RegionCoords, Tick)>,
-    /// See [`RegionRunner::baseline_hash_time`].
-    baseline_hash_time: std::time::Duration,
     /// Cost of the every-`state_hash_interval()` state hashes since the last
     /// `take_state_hash_cost` (metrics only): count, total, slowest.
     state_hash_cost: (u32, std::time::Duration, std::time::Duration),
@@ -330,22 +318,16 @@ impl RegionRunner {
         region: Region,
         out: Sender<(RegionCoords, RegionOutput)>,
     ) -> Self {
-        let hash_started = crate::perf::Stopwatch::start();
-        let last_terrain_hash = region.terrain_fingerprint();
-        let baseline_hash_time = hash_started.elapsed();
         Self {
             id,
             stud_halo_generator: None,
             stored_terrain: None,
             region,
             out,
-            last_terrain_hash,
-            terrain_hash_cost: Default::default(),
             held: Default::default(),
             held_transfers: Default::default(),
             people_list_due: None,
             departed: Default::default(),
-            baseline_hash_time,
             state_hash_cost: Default::default(),
             slot_start_hashes: None,
             known_ids: Default::default(),
@@ -422,23 +404,10 @@ impl RegionRunner {
         self.region.take_items_destroyed()
     }
 
-    /// Wall time of the baseline `terrain_fingerprint` taken in `new`
-    /// (the `terrain_hash_ms` of the server's `region_genesis` line).
-    pub fn baseline_hash_time(&self) -> std::time::Duration {
-        self.baseline_hash_time
-    }
-
     /// The region's terrain as the manager keeps it (halo seeds of starting
     /// neighbours are cut from it).
     fn terrain(&self) -> TerrainSnapshot {
         self.region.terrain_snapshot()
-    }
-
-    /// `(checks, total, slowest)` of the every-`TERRAIN_HASH_INTERVAL_TICKS`
-    /// terrain snapshot + hash since the previous call; resets it. Each check
-    /// runs inside a tick, so `slowest` is a floor on that tick's duration.
-    pub fn take_terrain_hash_cost(&mut self) -> (u32, std::time::Duration, std::time::Duration) {
-        std::mem::take(&mut self.terrain_hash_cost)
     }
 
     /// Returns false when the runner should stop (after Shutdown).
@@ -851,23 +820,6 @@ impl RegionRunner {
                     tick: self.region.current_tick(),
                 },
             ));
-        }
-        // Push-on-change, throttled: the check cadence is the throttle. The
-        // manager keeps it for the halo seeds of starting neighbours.
-        if self.region.current_tick() % TERRAIN_HASH_INTERVAL_TICKS as crate::Tick == 0 {
-            let watch = crate::perf::Stopwatch::start();
-            // In-place fingerprint: the (large) snapshot is only built below,
-            // once something actually changed.
-            let hash = self.region.terrain_fingerprint();
-            let took = watch.elapsed();
-            self.terrain_hash_cost.0 += 1;
-            self.terrain_hash_cost.1 += took;
-            self.terrain_hash_cost.2 = self.terrain_hash_cost.2.max(took);
-            if hash != self.last_terrain_hash {
-                self.last_terrain_hash = hash;
-                let snap = self.terrain();
-                let _ = self.out.send((self.id, RegionOutput::TerrainChanged(snap)));
-            }
         }
     }
 

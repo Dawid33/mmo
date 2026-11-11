@@ -161,13 +161,14 @@ impl fmt::Display for StoreError {
             ),
             StoreError::OtherDials { stored, built } => write!(
                 f,
-                "this world was made with {stored} but this build has {built}; rebuild with the stored dials (just region_blocks=N chunk_blocks=N …) or use another world"
+                "this world was made with {stored} but this build has {built}; rebuild with the stored region size (just region_blocks=N …) or use another world"
             ),
             StoreError::OtherTerrain { stored: TerrainKind::Voxels, .. } => write!(
                 f,
                 "this world was saved on voxel terrain, which this build no longer serves — re-forge it \
-                 (terrain is never converted; nothing in the world was changed, so a build from before \
-                 the stud cutover still opens it)"
+                 (the debug world: `just run --reset`; a menu world: make a new one). Terrain is never \
+                 converted; nothing in the world was changed, so a build from before the stud cutover \
+                 still opens it"
             ),
             StoreError::OtherTerrain { stored, wanted } => write!(
                 f,

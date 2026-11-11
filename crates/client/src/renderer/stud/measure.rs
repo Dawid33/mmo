@@ -95,7 +95,6 @@ fn load_area() -> (StudWorld, Vec<(WorldChunkPos, StudChunk)>) {
             let ground: BTreeMap<_, _> = seed.ground.iter().cloned().collect();
             world.apply(&StudWorldMsg::Region {
                 region: rc,
-                terrain: game::TerrainKind::Stud,
                 ground: Arc::new(ground),
                 halo: Vec::new(),
                 halo_ground: Vec::new(),

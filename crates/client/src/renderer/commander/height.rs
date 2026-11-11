@@ -13,7 +13,7 @@
 use std::collections::{BTreeMap, HashMap};
 
 use bevy::prelude::*;
-use game::{StudChunk, BLOCK_VOXELS, CHUNK_BLOCKS, CHUNK_UNITS, STUD_CHUNK_HEIGHT_UNITS};
+use game::{StudChunk, BLOCK_UNITS, CHUNK_BLOCKS, CHUNK_UNITS, STUD_CHUNK_HEIGHT_UNITS};
 
 use crate::renderer::bridge::SimEntity;
 use crate::renderer::stud::SimStudChunk;
@@ -76,7 +76,7 @@ pub struct HeightGrid {
 
 /// The block column containing world (x, z).
 fn block_of(x: f32, z: f32) -> (i32, i32) {
-    let b = BLOCK_VOXELS as f32;
+    let b = BLOCK_UNITS as f32;
     ((x / b).floor() as i32, (z / b).floor() as i32)
 }
 

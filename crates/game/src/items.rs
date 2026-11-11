@@ -2,7 +2,7 @@
 //! that `BlockId` (a block item); ids from there up are the non-block items
 //! of [`EXTRA_ITEMS`]. Block drops come from the manifest (`block_props()`).
 
-use crate::{block_props, Block, BlockId, ItemStack};
+use crate::{block_props, BlockId, ItemStack};
 
 /// Item ids below this are block items (the item's id is the `BlockId`).
 pub const ITEM_BLOCK_LIMIT: u16 = 1024;
@@ -56,14 +56,13 @@ pub fn item_name(item: ItemId) -> &'static str {
     }
 }
 
-/// What breaking `block` yields (one item), by the manifest. Tree data in
-/// `Block::data` never leaks into the item.
-pub fn drop_of(block: Block) -> Option<ItemStack> {
-    if block.id == BlockId::AIR {
+/// What breaking `block` yields (one item), by the manifest.
+pub fn drop_of(block: BlockId) -> Option<ItemStack> {
+    if block == BlockId::AIR {
         return None;
     }
-    let item = match block_props().drop(block.id) {
-        BlockDrop::Same => ItemId::block(block.id),
+    let item = match block_props().drop(block) {
+        BlockDrop::Same => ItemId::block(block),
         BlockDrop::Nothing => return None,
         BlockDrop::Item(i) => i,
     };

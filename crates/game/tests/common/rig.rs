@@ -280,7 +280,7 @@ impl Rig {
             let e = *data.player_entites.get(&CLIENT).expect("player owned here");
             let handle = *data.ecs.rigidbody.get(e);
             let t = data.physics.bodies.get(handle).unwrap().translation();
-            out = Some((data.ecs.walker.try_get(e).clone(), data.terrain_kind().feet_tile(data.feet_of(t))));
+            out = Some((data.ecs.walker.try_get(e).clone(), game::feet_tile(data.feet_of(t))));
         });
         out.expect("region is running")
     }

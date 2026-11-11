@@ -220,7 +220,7 @@ fn update_slice_plane(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use game::{BlockId, TerrainKind, TilePos, WATER_FULL};
+    use game::{TilePos, WATER_FULL};
 
     const L: i32 = 40;
 
@@ -239,12 +239,6 @@ mod tests {
     struct StudStub(fn(i32, i32, i32) -> (TileFill, u16), i32);
 
     impl TileSource for StudStub {
-        fn block(&self, _: TilePos) -> BlockId {
-            BlockId::AIR
-        }
-        fn terrain(&self) -> TerrainKind {
-            TerrainKind::Stud
-        }
         fn tile_fill(&self, p: TilePos) -> TileFill {
             (self.0)(p[0], p[1], p[2]).0
         }
@@ -259,9 +253,6 @@ mod tests {
             false
         }
         fn tree_id(&self, _: TilePos) -> u32 {
-            0
-        }
-        fn tree_limb(&self, _: TilePos) -> u8 {
             0
         }
         /// Water in every open tile at or under level `self.1`.

@@ -12,7 +12,7 @@
 
 use bevy::prelude::*;
 use game::rapier3d::math::Vector;
-use game::{RegionId, TerrainKind, TilePos, BLOCK_VOXELS};
+use game::{RegionId, TilePos, BLOCK_UNITS};
 
 use super::height::HeightGrid;
 use super::level::{cut_plane_world_y, WorkingLevel};
@@ -27,14 +27,12 @@ pub struct Cut {
     pub level: i32,
     pub region: RegionId,
     pub plane_y: f32,
-    /// The home region's terrain: its tiles' height is what the walk steps in.
-    pub terrain: TerrainKind,
 }
 
 impl Cut {
     pub fn of(level: &WorkingLevel, home: Option<RegionId>) -> Option<Self> {
         let (at, region) = (level.level?, home?);
-        level.cut.then(|| Cut { level: at, region, plane_y: cut_plane_world_y(level.terrain, at, region), terrain: level.terrain })
+        level.cut.then(|| Cut { level: at, region, plane_y: cut_plane_world_y(at, region) })
     }
 }
 
@@ -80,15 +78,13 @@ pub fn visible_ground_with(
     };
     // Tiles are `size` wide and `cut.terrain`'s tile height tall: the walk runs
     // in tile space (every tile a `size` cube), the hit box is back in units.
-    let size = BLOCK_VOXELS as f32;
-    let tile = Vec3::new(size, cut.terrain.tile_height_units(), size);
+    let size = BLOCK_UNITS as f32;
+    let tile = Vec3::new(size, game::tile_height_units(), size);
     let offset = Vec3::from_array(cut.region.world_offset());
     let start = origin + dir * t0 - offset;
     let reach = ((max - t0) / size).max(0.0);
     let level = cut.level;
-    let (ray_o, ray_d) = super::tiles::tile_ray(
-        cut.terrain,
-        (Vector::new(start.x, start.y, start.z), Vector::new(dir.x, dir.y, dir.z)),
+    let (ray_o, ray_d) = super::tiles::tile_ray((Vector::new(start.x, start.y, start.z), Vector::new(dir.x, dir.y, dir.z)),
     );
     let inside = game::edit::raycast_blocks(ray_o, ray_d, reach, |p| p[1] <= level && solid(p)).map(|hit| {
         let min = Vec3::new(hit.block[0] as f32, hit.block[1] as f32, hit.block[2] as f32) * tile;
@@ -128,14 +124,18 @@ pub fn visible_ground(
 mod tests {
     use super::*;
 
-    const S: f32 = BLOCK_VOXELS as f32;
+    const S: f32 = BLOCK_UNITS as f32;
+    /// A level's height.
+    fn h() -> f32 {
+        game::tile_height_units()
+    }
 
     fn home() -> RegionId {
         game::RegionCoords::new(0, 0).into()
     }
 
     fn cut_at(level: i32) -> Cut {
-        Cut { level, region: home(), plane_y: cut_plane_world_y(TerrainKind::Voxel, level, home()), terrain: TerrainKind::Voxel }
+        Cut { level, region: home(), plane_y: cut_plane_world_y(level, home()) }
     }
 
     /// A column of terrain 30 blocks high with a pit at block column (3, 3)
@@ -147,7 +147,7 @@ mod tests {
 
     fn surface(x: f32, z: f32) -> Option<f32> {
         let pit = ((x / S).floor() as i32, (z / S).floor() as i32) == (3, 3);
-        Some(if pit { 6.0 * S } else { 30.0 * S })
+        Some(if pit { 6.0 * h() } else { 30.0 * h() })
     }
 
     fn everywhere(_: f32, _: f32) -> bool {
@@ -166,32 +166,32 @@ mod tests {
         // cut-away rock above it.
         let hit = visible_ground_with(Vec3::new(1.5 * S, eye_y, 1.5 * S), Vec3::NEG_Y, reach, Some(cut), surface, solid, everywhere)
             .unwrap();
-        assert!((hit.y - (level + 1) as f32 * S).abs() < 1e-3, "the cut level's top: {hit:?}");
+        assert!((hit.y - (level + 1) as f32 * h()).abs() < 1e-3, "the cut level's top: {hit:?}");
         // Over the pit (floor block 5): the pit's floor, below the level.
         let hit = visible_ground_with(Vec3::new(3.5 * S, eye_y, 3.5 * S), Vec3::NEG_Y, reach, Some(cut), surface, solid, everywhere)
             .unwrap();
-        assert!((hit.y - 6.0 * S).abs() < 1e-3, "the pit's floor: {hit:?}");
+        assert!((hit.y - 6.0 * h()).abs() < 1e-3, "the pit's floor: {hit:?}");
     }
 
     #[test]
     fn cut_off_sees_the_top_surface() {
         let eye = Vec3::new(3.5 * S, 60.0 * S, 3.5 * S);
         let hit = visible_ground_with(eye, Vec3::NEG_Y, 1e5, None, surface, solid, everywhere).unwrap();
-        assert!((hit.y - 6.0 * S).abs() < 1.0, "{hit:?}");
+        assert!((hit.y - 6.0 * h()).abs() < 1.0, "{hit:?}");
     }
 
     #[test]
     fn cut_on_sees_the_level_floor_not_the_cut_away_top() {
         let eye = Vec3::new(1.5 * S, 60.0 * S, 1.5 * S);
         let hit = visible_ground_with(eye, Vec3::NEG_Y, 1e5, Some(cut_at(12)), surface, solid, everywhere).unwrap();
-        assert!((hit.y - 13.0 * S).abs() < 1e-3, "the top of level 12's blocks: {hit:?}");
+        assert!((hit.y - 13.0 * h()).abs() < 1e-3, "the top of level 12's blocks: {hit:?}");
     }
 
     #[test]
     fn cut_on_sees_down_a_pit() {
         let eye = Vec3::new(3.5 * S, 60.0 * S, 3.5 * S);
         let hit = visible_ground_with(eye, Vec3::NEG_Y, 1e5, Some(cut_at(12)), surface, solid, everywhere).unwrap();
-        assert!((hit.y - 6.0 * S).abs() < 1e-3, "the pit floor: {hit:?}");
+        assert!((hit.y - 6.0 * h()).abs() < 1e-3, "the pit floor: {hit:?}");
     }
 
     #[test]
@@ -200,7 +200,7 @@ mod tests {
         let eye = Vec3::new(1.5 * S, 20.0 * S, 1.5 * S);
         let dir = Vec3::new(0.0, -1.0, -1.0).normalize();
         let hit = visible_ground_with(eye, dir, 1e5, Some(cut_at(12)), surface, solid, everywhere).unwrap();
-        assert!((hit.y - 13.0 * S).abs() < 1e-3, "{hit:?}");
+        assert!((hit.y - 13.0 * h()).abs() < 1e-3, "{hit:?}");
         assert!(hit.distance(eye) > S, "not the camera itself");
     }
 
@@ -209,6 +209,6 @@ mod tests {
         let eye = Vec3::new(1.5 * S, 60.0 * S, 1.5 * S);
         let nowhere = |_: f32, _: f32| false;
         let hit = visible_ground_with(eye, Vec3::NEG_Y, 1e5, Some(cut_at(12)), surface, |_| false, nowhere).unwrap();
-        assert!((hit.y - 30.0 * S).abs() < 1.0, "{hit:?}");
+        assert!((hit.y - 30.0 * h()).abs() < 1.0, "{hit:?}");
     }
 }

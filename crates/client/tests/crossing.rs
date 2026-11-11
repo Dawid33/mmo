@@ -264,7 +264,7 @@ fn floored_west(rc: game::RegionCoords) -> game::StudRegionSeed {
 #[ignore = "slow: >100ms — run via just test-full"]
 fn predicted_halo_updates_do_not_mispredict() {
     let mut h = SimHarness::with_genesis(1, std::sync::Arc::new(floored_west));
-    let bv = game::BLOCK_VOXELS as f32;
+    let bv = game::BLOCK_UNITS as f32;
     let size = game::REGION_SIZE;
     let east = game::RegionCoords::new(game::SPAWN_REGION.x + 1, game::SPAWN_REGION.z);
     let mut id = None;

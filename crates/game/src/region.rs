@@ -9,10 +9,10 @@ use std::time::{Duration, Instant};
 use crossbeam::channel::Sender;
 use log::{debug, info};
 use crate::input::Key;
-use crate::{Chunk, Client, ClientId, GameData, Rollback, Tick};
+use crate::{Client, ClientId, GameData, Rollback, Tick};
 
 use crate::{
-    camera::CameraController, physics::PhysicsController, ChunkCoords,
+    camera::CameraController, physics::PhysicsController,
     Controller, EntityBundle, GameDataUpdate, GameError, GameEvent, GameEventKind, HaloEntityMsg,
     RegionCoords, RegionId, ServerPacket,
 };
@@ -55,7 +55,7 @@ impl Rollback {
         match feet {
             Some(feet) => {
                 let tick = *self.data.tick;
-                let at = self.terrain_kind().feet_tile(feet);
+                let at = crate::feet_tile(feet);
                 // From the body: a part a neighbour's piles cannot hold
                 // comes back to it. A loss to the caps is counted where it
                 // happens.
@@ -208,17 +208,13 @@ pub struct Region {
     /// never read (see the plan's read-after-progress invariant).
     pending_departures: Vec<(EntityBundle, RegionCoords)>,
     pending_halo_entities: Vec<(HaloEntityMsg, RegionCoords)>,
-    /// Terrain chunks within the halo band written since the last
-    /// [`Region::take_halo_updates`] (`halo.rs`). Not state: a client's
-    /// reconcile clears it (its replays re-write chunks whose updates the
-    /// forward ticks already sent).
-    halo_dirty: std::collections::BTreeSet<crate::ChunkIndexKey>,
     /// Own pile and chest cells in the pile halo band written since the last
-    /// [`Region::take_halo_updates`] (`item_piles.rs`); cleared like
-    /// `halo_dirty`.
+    /// [`Region::take_halo_updates`] (`item_piles.rs`). Not state: a client's
+    /// reconcile clears it (its replays re-write cells whose updates the
+    /// forward ticks already sent).
     halo_pile_dirty: std::collections::BTreeSet<crate::WorldBlockPos>,
     /// Own stud chunks in the halo band written since the last
-    /// [`Region::take_halo_updates`] (`stud_halo.rs`); cleared like `halo_dirty`.
+    /// [`Region::take_halo_updates`] (`stud_halo.rs`); cleared like `halo_pile_dirty`.
     halo_stud_dirty: std::collections::BTreeSet<crate::StudChunkCoords>,
     /// Intents and replies this region's events sent to other regions
     /// (`intents.rs`), each with its own due tick; taken after each tick
@@ -273,7 +269,7 @@ fn ev_desc(e: &GameEvent) -> String {
         GameEventKind::HaloEntityGone(g) => format!("HaloEntityGone({:?})", g.id),
         GameEventKind::HaloSourceGone(rc) => format!("HaloSourceGone({rc:?})"),
         GameEventKind::HaloUpdate(u) => {
-            format!("HaloUpdate(from={:?}, chunks={}, studs={})", u.from, u.deltas.len(), u.studs.len())
+            format!("HaloUpdate(from={:?}, studs={})", u.from, u.studs.len())
         }
         GameEventKind::SpawnPerson(s) => format!("SpawnPerson({s:?})"),
         GameEventKind::DespawnPerson(p) => format!("DespawnPerson({p:?})"),
@@ -311,7 +307,6 @@ impl Region {
             base_event_id,
             pending_departures: Vec::new(),
             pending_halo_entities: Vec::new(),
-            halo_dirty: Default::default(),
             halo_pile_dirty: Default::default(),
             halo_stud_dirty: Default::default(),
             pending_intents: Vec::new(),
@@ -650,7 +645,6 @@ impl Region {
         }
         // Replays re-wrote chunks whose halo updates their forward ticks
         // already sent.
-        self.halo_dirty.clear();
         self.halo_pile_dirty.clear();
         self.halo_stud_dirty.clear();
 
@@ -764,7 +758,6 @@ impl Region {
         let stamp = *self.data.tick;
         let destroyed_before = crate::item_piles::items_destroyed_on_thread();
         // Writes left over from outside an event are no region's.
-        crate::halo::take_touched_chunks();
         crate::stud_halo::take_touched_stud_chunks();
         crate::item_piles::take_touched_piles();
         crate::item_piles::take_pile_intents();
@@ -800,9 +793,8 @@ impl Region {
                 // After the step: clips follow how bodies moved, and bone
                 // colliders take the new pose for the next step.
                 self.data.tick_animators_safe();
-                // Voxel bodies that came to rest (or left) are settled.
+                // Stud bodies that came to rest (or left) are settled.
                 let tick = *self.data.tick;
-                self.data.tick_voxel_bodies_safe(tick);
                 self.data.tick_stud_bodies_safe(tick);
                 #[cfg(not(target_arch = "wasm32"))]
                 let controllers_done = Instant::now();
@@ -1152,23 +1144,9 @@ impl Region {
         self.data.terrain_snapshot()
     }
 
-    /// See [`Rollback::terrain_fingerprint`].
-    pub fn terrain_fingerprint(&self) -> u32 {
-        self.data.terrain_fingerprint()
-    }
-
-    pub fn create_basic(&mut self, coords: ChunkCoords) {
-        self.data.create_mesh(coords, Chunk::flat_floor(8));
-    }
-
-    /// Build a server-side region from generated chunk contents. Mirrors
-    /// what `World::basic` does for the origin region, for any region.
-    pub fn from_chunks(id: RegionId, chunks: Vec<(ChunkCoords, Chunk)>) -> Self {
-        let mut region = Region::new(Rollback::new(None), None, id, None);
-        // Genesis bulk build: unlogged, O(N) inserts with full-chunk cuboid
-        // collapse. See Rollback::seed_terrain_genesis.
-        region.data.seed_terrain_genesis(chunks);
-        region
+    /// A region with no terrain (tests; a region about to be seeded).
+    pub fn empty(id: RegionId) -> Self {
+        Region::new(Rollback::new(None), None, id, None)
     }
 
     /// Genesis for the stud world: seeds the stud chunks raw
@@ -1237,7 +1215,6 @@ impl Region {
     /// transaction (teleports, state surgery in integration tests). Pile
     /// intents it sends join the outbox.
     pub fn with_data(&mut self, f: impl FnOnce(&mut Rollback)) {
-        crate::halo::take_touched_chunks();
         crate::stud_halo::take_touched_stud_chunks();
         crate::item_piles::take_touched_piles();
         crate::item_piles::take_pile_intents();
@@ -1249,14 +1226,8 @@ impl Region {
     }
 
     /// The chunk and pile writes of the event just handled that a neighbour
-    /// mirrors join `halo_dirty` / `halo_pile_dirty`.
+    /// mirrors join `halo_stud_dirty` / `halo_pile_dirty`.
     fn note_halo_writes(&mut self) {
-        for e in crate::halo::take_touched_chunks() {
-            let Some(c) = self.data.chunk_coords_of(e) else { continue };
-            if !crate::halo::halo_targets(c.x as i32, c.z as i32).is_empty() {
-                self.halo_dirty.insert(crate::chunk_index_key(c));
-            }
-        }
         for c in crate::stud_halo::take_touched_stud_chunks() {
             if !crate::halo::halo_targets(c.x as i32, c.z as i32).is_empty() {
                 self.halo_stud_dirty.insert(c);
@@ -1275,13 +1246,12 @@ impl Region {
     /// target. Taken right after a tick and its slot's events, like
     /// [`Region::take_transfers`].
     pub fn take_halo_updates(&mut self) -> Vec<(crate::HaloUpdate, RegionCoords)> {
-        if self.halo_dirty.is_empty() && self.halo_pile_dirty.is_empty() && self.halo_stud_dirty.is_empty() {
+        if self.halo_pile_dirty.is_empty() && self.halo_stud_dirty.is_empty() {
             return Vec::new();
         }
-        let dirty = std::mem::take(&mut self.halo_dirty);
         let piles = std::mem::take(&mut self.halo_pile_dirty);
         let studs = std::mem::take(&mut self.halo_stud_dirty);
-        self.data.halo_updates_for(&dirty, &piles, &studs)
+        self.data.halo_updates_for(&piles, &studs)
     }
 
     /// Test hook: roll back the most recent (unforgotten) event.
@@ -1298,7 +1268,7 @@ mod ui_action_tests {
 
     #[test]
     fn click_picks_up_and_rolls_back() {
-        let mut region = Region::from_chunks(RegionCoords::new(0, 0), Vec::new());
+        let mut region = Region::empty(RegionCoords::new(0, 0));
         region.handle_event(GameEventKind::CreateClient(0)).unwrap();
         region.forget_last_event();
         region.with_data(|d| {

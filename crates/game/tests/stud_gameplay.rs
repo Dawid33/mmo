@@ -326,7 +326,6 @@ fn chests_are_built_deconstructed_and_opened_by_tile() {
     let (back, _) = restore_portable(RegionCoords::new(0, 0), StoredRegion::from(portable));
     assert!(back.data().stud_chest_at([40, STAND, 40]));
     assert_eq!(back.data().containers().get(&w([40, STAND, 40])), Some(&Container::chest()));
-    assert_eq!(back.data().terrain_kind(), TerrainKind::Stud);
     assert_eq!(piled(back.data(), item("chest")), 1, "the pile on a stud tile is kept too");
 }
 
@@ -419,7 +418,7 @@ fn felling_takes_the_tree_from_the_cut_up_and_what_it_held() {
     assert!(b.is_dynamic() && b.angvel().length() > 0.0 && b.linvel().length() > 0.0);
     let mp = stud_model_mass_properties(&sb.model);
     assert!(mp.mass() > 0.6 * WOOD_DENSITY * 6.0, "six trunk bricks and a crown: {} kg", mp.mass());
-    assert_eq!(b.user_force().y, -mp.mass() * VOXEL_BODY_GRAVITY * movement::UNITS_PER_METER, "its weight");
+    assert_eq!(b.user_force().y, -mp.mass() * STUD_BODY_GRAVITY * movement::UNITS_PER_METER, "its weight");
 
     // A chop at the foot fells everything that is left.
     let (removed, rest) = bar(&mut rb, "fell the stump", |rb| rb.fell_stud_safe([8, STAND, 8], SettlePolicy::Despawn)).unwrap();

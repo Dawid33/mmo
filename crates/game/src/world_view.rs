@@ -5,11 +5,11 @@
 //! `intents::Effects`. No region key, region-local coordinate or mirror
 //! bookkeeping leaks through it.
 //!
-//! Units: positions are world sim units (`BLOCK_VOXELS` per block, the
+//! Units: positions are world sim units (`BLOCK_UNITS` per block, the
 //! region's origin at `RegionCoords * REGION_SIZE`), as `f64` so any region
 //! of the `i32` grid keeps sub-voxel precision; blocks are
 //! [`WorldBlockPos`].
-use crate::{Block, Container, EntityId, EntityKey, EntityKind, ItemPile, Rollback, Tick, WorldBlockPos, HALO_BLOCKS, REGION_SIZE};
+use crate::{Container, EntityId, EntityKey, EntityKind, ItemPile, Rollback, Tick, WorldBlockPos, REGION_SIZE};
 
 /// An axis-aligned box in world sim units, `min` inclusive, `max` exclusive.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -34,14 +34,6 @@ impl WorldAabb {
 pub struct WorldRay {
     pub origin: [f64; 3],
     pub dir: [f32; 3],
-}
-
-/// The first solid block a ray enters and the face it entered through
-/// (outward unit normal; zero when the ray starts inside it).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Hit {
-    pub block: WorldBlockPos,
-    pub normal: [i32; 3],
 }
 
 /// A read-only entity: owned by the viewing region, or a halo mirror of a
@@ -87,18 +79,11 @@ impl std::fmt::Debug for EntityRef<'_> {
 pub trait WorldView {
     /// The world tick being simulated.
     fn tick(&self) -> Tick;
-    /// The block at `p`, own region ∪ halo (implied ground included); `None`
-    /// outside them.
-    fn block(&self, p: WorldBlockPos) -> Option<Block>;
     /// An owned entity, or a halo mirror.
     fn entity(&self, id: EntityId) -> Option<EntityRef<'_>>;
     /// Owned entities and mirrors whose body centre lies in `aabb`, sorted by
     /// `EntityId`.
     fn entities_in(&self, aabb: WorldAabb) -> Vec<EntityRef<'_>>;
-    /// The first solid block along `ray` within `max_blocks` (own ∪ halo).
-    /// A ray longer than the halo panics in debug: a long reach must be an
-    /// intent, not a read.
-    fn raycast(&self, ray: WorldRay, max_blocks: f32) -> Option<Hit>;
     /// The item pile resting in cell `p`: own, or the halo's read-only
     /// mirror of a neighbour's (`item_piles.rs`); `None` elsewhere. Taking
     /// from or adding to a neighbour's is an intent.
@@ -116,7 +101,7 @@ pub trait WorldView {
     fn stud_material_at(&self, cell: crate::WorldStudCell) -> Option<u16>;
     /// Stud terrain: the first occupied stud cell along `ray` within `max_units` sim
     /// units, over the materialised chunks of own ∪ stud halo. A ray longer than the
-    /// halo panics in debug, as [`Self::raycast`].
+    /// halo panics in debug: a long reach must be an intent, not a read.
     fn stud_raycast(&self, ray: WorldRay, max_units: f32) -> Option<StudWorldHit>;
 }
 
@@ -189,10 +174,6 @@ impl WorldView for RegionView<'_> {
         *self.data.tick
     }
 
-    fn block(&self, p: WorldBlockPos) -> Option<Block> {
-        self.data.halo_block(p)
-    }
-
     fn entity(&self, id: EntityId) -> Option<EntityRef<'_>> {
         self.get(id)
     }
@@ -235,22 +216,5 @@ impl WorldView for RegionView<'_> {
         let [x, y, z] = hit.chunk;
         let chunk = crate::WorldChunkPos::from_local(*self.data.region, [x as i32, y as i32, z as i32]);
         Some(StudWorldHit { chunk, cell: hit.cell, normal: hit.normal, t: hit.t })
-    }
-
-    fn raycast(&self, ray: WorldRay, max_blocks: f32) -> Option<Hit> {
-        debug_assert!(max_blocks <= HALO_BLOCKS as f32, "a {max_blocks}-block ray reads past the halo: send an intent");
-        let o = origin(self.data);
-        let local = rapier3d::math::Vector::new(
-            (ray.origin[0] - o[0]) as f32,
-            ray.origin[1] as f32,
-            (ray.origin[2] - o[2]) as f32,
-        );
-        let dir = rapier3d::math::Vector::new(ray.dir[0], ray.dir[1], ray.dir[2]);
-        let hit = self.data.raycast_block_in(local, dir, max_blocks)?;
-        let [x, y, z] = hit.block;
-        Some(Hit {
-            block: WorldBlockPos::from_local(*self.data.region, crate::BlockPos::new(x, y, z)),
-            normal: hit.normal,
-        })
     }
 }

@@ -5,7 +5,7 @@
 //! every slot at runtime) with one fixed body at `StudChunkCoords::origin`
 //! and exactly the colliders [`stud_collider_shapes`] lists, in that order,
 //! each carrying the entity key as `user_data`. It lives in
-//! `GameData::stud_index`, never in `chunk_index`.
+//! `GameData::stud_index`.
 
 use rapier3d::math::IVector;
 use rapier3d::prelude::{Collider, ColliderBuilder, ColliderHandle, RigidBodyBuilder};
@@ -135,9 +135,8 @@ fn stud_brick_box(c: StudChunkCoords, b: &StudBrick) -> ([i32; 3], [i32; 3]) {
 }
 
 impl Rollback {
-    /// Bulk stud-chunk build for region genesis: raw and unlogged, like
-    /// `seed_terrain_genesis` (genesis is the base state, never rolled back
-    /// below). An empty chunk still gets its entity and body.
+    /// Bulk stud-chunk build for region genesis: raw and unlogged
+    /// (genesis is the base state, never rolled back below). An empty chunk still gets its entity and body.
     pub fn seed_stud_genesis(&mut self, chunks: Vec<(StudChunkCoords, StudChunk)>) {
         for (coords, chunk) in chunks {
             let e = self.ecs.create_stud_entity_raw();
@@ -233,7 +232,7 @@ impl Rollback {
         Some(StudChunkCoords::from_origin(t))
     }
 
-    /// Runtime stud-chunk insertion, undo-safe — `create_mesh`'s stud twin.
+    /// Runtime stud-chunk insertion, undo-safe.
     /// Emits `AddStudChunk` on Do; on undo the entity insert's own emit
     /// sends `RemoveEntity`.
     pub fn create_stud_chunk_safe(&mut self, c: StudChunkCoords, chunk: StudChunk) -> EntityKey {
@@ -246,7 +245,8 @@ impl Rollback {
             .pose(Pose::from_translation(c.origin()))
             .user_data(e.data().as_ffi() as u128)
             .build();
-        // Same fork-inverse body insert as `create_mesh`.
+        // Tier-2 with a true fork inverse + delta digest: reverts the arena
+        // allocator exactly; verification hashes just this slot + alloc state.
         let (prev_head, prev_len) = self.data.physics.bodies.alloc_state();
         let mut scope = self.data.physics.bodies.undo_scope_digest();
         let handle = scope.insert(body);

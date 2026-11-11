@@ -15,6 +15,10 @@ use crate::stud::{StudBrick, StudChunk, StudShape, PLATES_PER_BRICK, STUD_CHUNK_
 use crate::stud_carve::box_part;
 use crate::stud_material::{stud_material, MAT_BEDROCK};
 
+/// Levels below a column's surface that the fortress view's level range and its
+/// picks reach down to.
+pub const UNDERGROUND_DEPTH: i32 = 60;
+
 const N: usize = STUD_CHUNK_STUDS;
 /// Stud columns of one chunk column.
 pub const STUD_COLUMN_FOOTPRINT: usize = N * N;

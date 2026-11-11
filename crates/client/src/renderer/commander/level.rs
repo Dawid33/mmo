@@ -24,7 +24,7 @@
 
 use bevy::prelude::*;
 
-use game::{RegionId, TerrainKind, BLOCK_VOXELS, UNDERGROUND_DEPTH};
+use game::{RegionId, BLOCK_UNITS, UNDERGROUND_DEPTH};
 
 use super::height::HeightGrid;
 use super::tiles::TileMirror;
@@ -58,21 +58,17 @@ pub const LEVELS_BELOW_BEDROCK: i32 = 8;
 /// The block `y` being worked on (`None` until the focus column is loaded)
 /// and whether the world above it is cut away (on by default).
 ///
-/// A level is a TILE level of the home region's terrain (`terrain`): 1 m on
-/// voxels, 1.2 m on studs. Every level ↔ height conversion below goes through
-/// `TerrainKind`.
+/// A level is a TILE level (1.2 m). Every level ↔ height conversion below goes
+/// through `game::tiles`.
 #[derive(Resource)]
 pub struct WorkingLevel {
     pub level: Option<i32>,
     pub cut: bool,
-    /// The home region's terrain kind ([`init_level`] keeps it in step with
-    /// the tile mirror).
-    pub terrain: TerrainKind,
 }
 
 impl Default for WorkingLevel {
     fn default() -> Self {
-        Self { level: None, cut: true, terrain: TerrainKind::Stud }
+        Self { level: None, cut: true }
     }
 }
 
@@ -112,8 +108,8 @@ pub fn wheel_step_level(level: i32, notches: f32, carry: &mut f32, fast: bool, r
 }
 
 /// The reachable levels for loaded surfaces spanning `surface` (sim units).
-pub fn level_range(kind: TerrainKind, surface: (f32, f32)) -> (i32, i32) {
-    let b = kind.tile_height_units();
+pub fn level_range(surface: (f32, f32)) -> (i32, i32) {
+    let b = game::tile_height_units();
     (
         (surface.0 / b).floor() as i32 - UNDERGROUND_DEPTH as i32,
         (surface.1 / b).floor() as i32 + LEVELS_ABOVE_SURFACE,
@@ -122,8 +118,8 @@ pub fn level_range(kind: TerrainKind, surface: (f32, f32)) -> (i32, i32) {
 
 /// The free camera's working level: the one its focus (`ground_y`, world sim
 /// units) is in, above ground or below.
-pub fn derive_level(kind: TerrainKind, ground_y: f32) -> i32 {
-    surface_level(kind, ground_y)
+pub fn derive_level(ground_y: f32) -> i32 {
+    surface_level(ground_y)
 }
 
 /// How many steps a level key has fired once it has been held `t` seconds
@@ -149,7 +145,7 @@ pub fn repeat_step(held_for: f32, pressed: bool, dt: f32) -> (f32, u32) {
 /// The lowest the camera's focus may sink (world sim units) for loaded
 /// surfaces spanning `surface`: a little below bedrock under the lowest.
 pub fn sink_floor(surface: (f32, f32)) -> f32 {
-    surface.0 - ((UNDERGROUND_DEPTH as i32 + LEVELS_BELOW_BEDROCK) * BLOCK_VOXELS as i32) as f32
+    surface.0 - ((UNDERGROUND_DEPTH as i32 + LEVELS_BELOW_BEDROCK) * BLOCK_UNITS as i32) as f32
 }
 
 /// The air level above a column whose ground tops out at `surface_y`.
@@ -157,11 +153,11 @@ pub fn sink_floor(surface: (f32, f32)) -> f32 {
 /// Consistent with `TerrainKind::level_bottom_units`: a height that IS a
 /// level's bottom is in that level (a stud tile's 19.2 units do not divide
 /// exactly in `f32`, so the quotient alone can land one level low).
-pub fn surface_level(kind: TerrainKind, surface_y: f32) -> i32 {
-    let level = (surface_y / kind.tile_height_units()).floor() as i32;
-    if kind.level_bottom_units(level + 1) <= surface_y {
+pub fn surface_level(surface_y: f32) -> i32 {
+    let level = (surface_y / game::tile_height_units()).floor() as i32;
+    if game::level_bottom_units(level + 1) <= surface_y {
         level + 1
-    } else if kind.level_bottom_units(level) > surface_y {
+    } else if game::level_bottom_units(level) > surface_y {
         level - 1
     } else {
         level
@@ -170,14 +166,14 @@ pub fn surface_level(kind: TerrainKind, surface_y: f32) -> i32 {
 
 /// World y (sim units) of the top of `level`'s tiles in `region`: the plane
 /// the cutaway clips at.
-pub fn cut_plane_world_y(kind: TerrainKind, level: i32, region: RegionId) -> f32 {
-    kind.level_bottom_units(level + 1) + region.world_offset()[1]
+pub fn cut_plane_world_y(level: i32, region: RegionId) -> f32 {
+    game::level_bottom_units(level + 1) + region.world_offset()[1]
 }
 
 /// World y of the floor of the working level in `home`, independent of the cut.
 pub fn level_floor_y(level: &WorkingLevel, home: Option<RegionId>) -> Option<f32> {
     let (at, region) = (level.level?, home?);
-    Some(level.terrain.level_bottom_units(at) + region.world_offset()[1])
+    Some(game::level_bottom_units(at) + region.world_offset()[1])
 }
 
 /// The solid ground height under the camera focus, if loaded.
@@ -194,17 +190,11 @@ pub fn focus_surface(grid: &HeightGrid, focus: Vec2) -> Option<f32> {
 pub fn init_level(
     grid: Res<HeightGrid>,
     cam: Res<CommanderCamera>,
-    tiles: Res<TileMirror>,
     mut level: ResMut<WorkingLevel>,
 ) {
-    let terrain = tiles.terrain();
-    if level.terrain != terrain {
-        level.terrain = terrain;
-        level.level = None;
-    }
     if level.level.is_none() {
         if let Some(y) = focus_surface(&grid, cam.focus) {
-            level.level = Some(surface_level(terrain, y));
+            level.level = Some(surface_level(y));
         }
     }
 }
@@ -238,7 +228,7 @@ pub fn track_camera_level(
     if level.level.is_none() {
         return;
     }
-    let derived = derive_level(level.terrain, cam.ground_y);
+    let derived = derive_level(cam.ground_y);
     if level.level != Some(derived) {
         level.level = Some(derived);
     }
@@ -276,13 +266,12 @@ pub fn level_input(
     let fast = keys.any_pressed(LEVEL_FAST_KEYS);
     if level.cut {
         let Some(current) = level.level else { return };
-        let kind = level.terrain;
-        let range = grid.surface_range().map_or((current, current), |s| level_range(kind, s));
+        let range = grid.surface_range().map_or((current, current), |s| level_range(s));
         let steps = up as i32 - down as i32;
         let mut next = if steps != 0 { step_level(current, steps, fast, range) } else { current };
         if keys.just_pressed(SURFACE_KEY) {
             if let Some(y) = focus_surface(&grid, cam.focus) {
-                next = surface_level(kind, y);
+                next = surface_level(y);
             }
         }
         if next != current {
@@ -293,7 +282,7 @@ pub fn level_input(
     let steps = up as i32 - down as i32;
     if steps != 0 {
         let per = if fast { LEVEL_STEP_FAST } else { 1 };
-        let dy = (steps * per) as f32 * level.terrain.tile_height_units();
+        let dy = (steps * per) as f32 * game::tile_height_units();
         super::move_vertically(&mut cam, dy, grid.surface_range().map(sink_floor));
     }
     if keys.just_pressed(SURFACE_KEY) {
@@ -310,7 +299,7 @@ pub fn camera_cut(level: &WorkingLevel, tiles: &TileMirror) -> Option<f32> {
 /// The cut plane in `home`, when the cut is on and the level known.
 pub fn cut_y(level: &WorkingLevel, home: Option<RegionId>) -> Option<f32> {
     let (at, region) = (level.level?, home?);
-    level.cut.then(|| cut_plane_world_y(level.terrain, at, region))
+    level.cut.then(|| cut_plane_world_y(at, region))
 }
 
 #[cfg(test)]
@@ -353,7 +342,8 @@ mod tests {
         assert_eq!(step_level(50, 1, false, (0, 100)), 51);
         assert_eq!(step_level(50, -2, true, (0, 100)), 30);
         assert_eq!(step_level(5, -10, true, (0, 100)), 0);
-        assert_eq!(level_range(TerrainKind::Voxel, (1024.0, 1600.0)), (64 - 60, 100 + 8));
+        // Surfaces at 64 m and 100 m are in tiles 53 and 83 (1.2 m tiles).
+        assert_eq!(level_range((1024.0, 1600.0)), (53 - 60, 83 + 8));
     }
 
     #[test]
@@ -365,11 +355,10 @@ mod tests {
 
     #[test]
     fn the_free_cameras_level_is_its_focus_and_round_trips_the_cut() {
-        let kind = WorkingLevel::default().terrain;
-        let h = kind.tile_height_units();
-        let derive_level = |y| derive_level(kind, y);
+        let h = game::tile_height_units();
+        let derive_level = |y| derive_level(y);
         assert_eq!(derive_level(40.5 * h), 40, "underground");
-        assert_eq!(derive_level(kind.level_bottom_units(300)), 300, "high in the air");
+        assert_eq!(derive_level(game::level_bottom_units(300)), 300, "high in the air");
         // Cut off puts the focus on the level's floor: its level is the same.
         for at in [-5, 40, 64, 70] {
             let floor = level_floor_y(&WorkingLevel { level: Some(at), cut: true, ..Default::default() }, Some(home0())).unwrap();
@@ -379,7 +368,7 @@ mod tests {
 
     #[test]
     fn the_camera_may_sink_to_just_below_bedrock() {
-        let b = BLOCK_VOXELS as f32;
+        let b = BLOCK_UNITS as f32;
         let floor = sink_floor((100.0 * b, 300.0 * b));
         assert_eq!(floor, (100 - UNDERGROUND_DEPTH as i32 - LEVELS_BELOW_BEDROCK) as f32 * b);
     }
@@ -406,21 +395,20 @@ mod tests {
     /// Levels are tiles: 1.2 m on stud terrain, through `TerrainKind` alone.
     #[test]
     fn stud_levels_are_tiles_of_six_plates() {
-        let kind = TerrainKind::Stud;
-        let h = kind.tile_height_units();
+        let h = game::tile_height_units();
         assert_eq!(h, game::plate_units(game::TILE_PLATES as i32));
-        let on = WorkingLevel { level: Some(10), cut: true, terrain: kind };
+        let on = WorkingLevel { level: Some(10), cut: true };
         assert_eq!(cut_y(&on, Some(home0())), Some(11.0 * h));
         assert_eq!(level_floor_y(&on, Some(home0())), Some(10.0 * h));
         // A level's floor is in that level, exactly (the cut toggle relies on it:
         // 1.2 m is not a power of two, so this is checked, not assumed).
         for at in -300..600 {
-            let floor = level_floor_y(&WorkingLevel { level: Some(at), cut: true, terrain: kind }, Some(home0())).unwrap();
-            assert_eq!(derive_level(kind, floor), at);
-            assert_eq!(surface_level(kind, floor + h - 0.01), at);
+            let floor = level_floor_y(&WorkingLevel { level: Some(at), cut: true }, Some(home0())).unwrap();
+            assert_eq!(derive_level(floor), at);
+            assert_eq!(surface_level(floor + h - 0.01), at);
         }
-        // The same height is another level number on the two terrains.
-        assert_ne!(surface_level(kind, 30.0 * BLOCK_VOXELS as f32), surface_level(TerrainKind::Voxel, 30.0 * BLOCK_VOXELS as f32));
+        // 30 m up is level 24, not 30: levels are not metres.
+        assert_eq!(surface_level(30.0 * BLOCK_UNITS as f32), 24);
     }
 
     fn home0() -> RegionId {
@@ -433,7 +421,7 @@ mod tests {
         let off = WorkingLevel { level: Some(10), cut: false, ..Default::default() };
         assert_eq!(cut_y(&off, Some(home0())), None);
         let on = WorkingLevel { level: Some(10), cut: true, ..Default::default() };
-        assert_eq!(cut_y(&on, Some(home0())), Some(on.terrain.level_bottom_units(11)));
-        assert_eq!(level_floor_y(&on, Some(home0())), Some(on.terrain.level_bottom_units(10)));
+        assert_eq!(cut_y(&on, Some(home0())), Some(game::level_bottom_units(11)));
+        assert_eq!(level_floor_y(&on, Some(home0())), Some(game::level_bottom_units(10)));
     }
 }

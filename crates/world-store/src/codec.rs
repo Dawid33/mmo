@@ -7,10 +7,17 @@ use serde::{Serialize, de::DeserializeOwned};
 
 use crate::StoreError;
 
-pub const FORMAT_REGION_META: u8 = 1;
+/// `regions.meta`: a `game::RegionMeta`. Format 2 dropped the voxel world's water
+/// bodies; format 1 rows are still read ([`decode_region_meta`]).
+pub const FORMAT_REGION_META: u8 = 2;
+/// The region meta layout with (empty) voxel water bodies (`game::RegionMetaV1`).
+pub const FORMAT_REGION_META_V1: u8 = 1;
 /// `entities.bundle` and in-flight transfers: a `game::EntityBundle`. Format 2 added
-/// `Carried::stud_body`; format 1 rows are still read ([`decode_entity_bundle`]).
-pub const FORMAT_ENTITY_BUNDLE: u8 = 2;
+/// `Carried::stud_body`, format 3 dropped the voxel body slot; formats 1 and 2 are
+/// still read ([`decode_entity_bundle`]).
+pub const FORMAT_ENTITY_BUNDLE: u8 = 3;
+/// The entity bundle layout with the (empty) voxel body slot (`game::EntityBundleV2`).
+pub const FORMAT_ENTITY_BUNDLE_V2: u8 = 2;
 /// The entity bundle layout before stud bodies (`game::EntityBundleV1`).
 pub const FORMAT_ENTITY_BUNDLE_V1: u8 = 1;
 pub const FORMAT_PLAYER_RECORD: u8 = 1;
@@ -51,15 +58,31 @@ pub fn decode<T: DeserializeOwned>(expected: u8, bytes: &[u8]) -> Result<T, Stor
     bincode::deserialize(&raw).map_err(|e| StoreError::Corrupt(format!("{name}: bincode: {e}")))
 }
 
-/// A stored entity bundle of either format: the current one, or format 1 (no stud
-/// body, `game::EntityBundleV1`) converted. Rows are rewritten in the current format
-/// by the next save that writes them.
+/// A stored entity bundle of any format: the current one, or format 2 (the voxel
+/// body slot, `game::EntityBundleV2`) or 1 (no stud body, `game::EntityBundleV1`)
+/// converted. Rows are rewritten in the current format by the next save that writes
+/// them. An old row that holds a voxel body does not decode (`Corrupt`): voxel
+/// worlds are refused at open.
 pub fn decode_entity_bundle(bytes: &[u8]) -> Result<game::EntityBundle, StoreError> {
     match bytes.first() {
         Some(&FORMAT_ENTITY_BUNDLE_V1) => {
             decode::<game::EntityBundleV1>(FORMAT_ENTITY_BUNDLE_V1, bytes).map(game::EntityBundle::from)
         }
+        Some(&FORMAT_ENTITY_BUNDLE_V2) => {
+            decode::<game::EntityBundleV2>(FORMAT_ENTITY_BUNDLE_V2, bytes).map(game::EntityBundle::from)
+        }
         _ => decode(FORMAT_ENTITY_BUNDLE, bytes),
+    }
+}
+
+/// A stored region meta of either format: the current one, or format 1
+/// (`game::RegionMetaV1`, whose voxel water bodies must be empty) converted.
+pub fn decode_region_meta(bytes: &[u8]) -> Result<game::RegionMeta, StoreError> {
+    match bytes.first() {
+        Some(&FORMAT_REGION_META_V1) => {
+            decode::<game::RegionMetaV1>(FORMAT_REGION_META_V1, bytes).map(game::RegionMeta::from)
+        }
+        _ => decode(FORMAT_REGION_META, bytes),
     }
 }
 

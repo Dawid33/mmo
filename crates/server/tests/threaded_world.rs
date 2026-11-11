@@ -744,7 +744,7 @@ fn walk_through_cold_regions_reaches_its_goal_on_real_threads() {
     assert!(state.ecs.walker.try_get(e).is_none(), "the walk is over: {:?}", state.ecs.walker.try_get(e));
     let handle = (*state.ecs.rigidbody.try_get(e)).expect("a body");
     let t = state.physics.bodies.get(handle).unwrap().translation();
-    let tile = game::TerrainKind::Stud.feet_tile(state.feet_of(t));
+    let tile = game::feet_tile(state.feet_of(t));
     assert_eq!(tile, [3, stand, 12], "the walk ends on its goal");
 }
 
@@ -766,7 +766,7 @@ fn body_crosses_seam_on_real_threads() {
     let store = open_store(&url);
 
     // The spawn region with the body in it, as the world store holds it.
-    let b = game::BLOCK_VOXELS as f32;
+    let b = game::BLOCK_UNITS as f32;
     let units = movement::UNITS_PER_METER;
     let mut region = game::RegionSeed::Fresh.into_region(SPAWN_REGION, || Some(stud_flat_seed(SPAWN_REGION))).unwrap();
     let floor = region.data().stud_surface_y(128.0, b).expect("stud ground under the body");

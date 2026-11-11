@@ -222,22 +222,18 @@ impl RegionSpawner for ThreadRegionSpawner {
                 if let Some(store) = &store {
                     runner.set_stored_terrain(std::sync::Arc::new(world_store::TerrainFromStore(store.store().clone())));
                 }
-                let hash_time = runner.baseline_hash_time();
-                let build = genesis_started.elapsed() - generate_time - hash_time;
+                let build = genesis_started.elapsed() - generate_time;
                 // `generate_ms` = worldgen on this thread (fresh regions);
                 // `build_ms` = deserialize (parked), restore (`stored` = read
-                // from the world store) or stud chunk + collider genesis (fresh);
-                // `terrain_hash_ms` = the runner's baseline
-                // terrain hash (timed inside `RegionRunner::new`).
+                // from the world store) or stud chunk + collider genesis (fresh).
                 game::perf_event!(
                     "region_genesis",
-                    "region={},{} ms={} generate_ms={} build_ms={} terrain_hash_ms={} parked={parked} stored={from_store}",
+                    "region={},{} ms={} generate_ms={} build_ms={} parked={parked} stored={from_store}",
                     id.x,
                     id.z,
                     game::perf::ms(genesis_started.elapsed()),
                     game::perf::ms(generate_time),
-                    game::perf::ms(build),
-                    game::perf::ms(hash_time)
+                    game::perf::ms(build)
                 );
                 region_thread_loop(id, runner, recv, clock, started);
             })
@@ -359,15 +355,12 @@ impl TickMetrics {
             let avg_ms = avg.as_secs_f32() * 1000.0;
             // Share of the tick period the sim actually spent computing.
             let budget = avg_ms / game::TICK_RATE as f32 * 100.0;
-            // The cadence terrain snapshot + hash runs inside a tick; reported
-            // beside `max` because it is the prime suspect when they match.
-            let (hash_checks, hash_total, hash_max) = runner.take_terrain_hash_cost();
             // The VOXEL_STATE_HASH_INTERVAL whole-state hash, also in-tick.
             let (state_checks, state_total, state_max) = runner.take_state_hash_cost();
             // Dropped items the pile caps destroyed (`game::item_piles`).
             let items_destroyed = runner.take_items_destroyed();
             log::info!(
-                "[region ({},{})] ticks={} avg={:.2}ms max={:.2}ms budget={:.1}% lag_ticks={} | terrain_hash n={} sum={:.1}ms max={:.1}ms | state_hash n={} sum={:.1}ms max={:.1}ms | items_destroyed={}",
+                "[region ({},{})] ticks={} avg={:.2}ms max={:.2}ms budget={:.1}% lag_ticks={} | state_hash n={} sum={:.1}ms max={:.1}ms | items_destroyed={}",
                 id.x,
                 id.z,
                 self.ticks,
@@ -375,16 +368,12 @@ impl TickMetrics {
                 self.compute_max.as_secs_f32() * 1000.0,
                 budget,
                 self.lag_ticks,
-                hash_checks,
-                game::perf::ms(hash_total),
-                game::perf::ms(hash_max),
                 state_checks,
                 game::perf::ms(state_total),
                 game::perf::ms(state_max),
                 items_destroyed,
             );
         } else {
-            let _ = runner.take_terrain_hash_cost();
             let _ = runner.take_state_hash_cost();
             let _ = runner.take_items_destroyed();
         }

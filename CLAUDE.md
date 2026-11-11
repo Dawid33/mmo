@@ -10,7 +10,7 @@ bisection and subagent dispatches (shared build caches + the user's concurrent e
 
 ## Project
 
-A voxel game in Rust: client/server over QUIC (WebTransport in the browser), deterministic simulation,
+A toy-brick (stud terrain) game in Rust: client/server over QUIC (WebTransport in the browser), deterministic simulation,
 rollback netcode, a multi-region world. The client is a Bevy app; `game`, `server` and `worldgen` stay
 engine-agnostic — **no Bevy, no windowing library** there.
 
@@ -52,16 +52,19 @@ changed build/run/test command updates its recipe in the same change.
   recipes default to 256, tests/check/clippy/raw cargo to 64. Server and client must match (no handshake).
   Never write a region edge as a literal — derive from `REGION_BLOCKS` / `REGION_SIZE`. Costs scale with
   area; compare numbers within one size.
-- **Chunk size** (BUILD time): `chunk_blocks=16` (default) or `2` (its hash goldens are stale — re-record
-  before relying on it). The **sim chunk** (`CHUNK_BLOCKS`³, 16 m = `CHUNK_UNITS`) owns one entity/body/
-  collider set; the 32³-voxel **brick** (`BRICK_VOXELS`) is the render/LOD unit and is baked into shaders —
-  never change it. Every literal 32 must say which it is.
+- **Chunk size**: a constant, not a dial. The **sim chunk** (`CHUNK_BLOCKS` = 16 m = `CHUNK_UNITS` wide,
+  32 x 32 studs of 90-plate layers: `STUD_CHUNK_STUDS` / `STUD_CHUNK_PLATES`) owns one entity/body/
+  collider set and is the render unit. A sim **tile** is 2 x 2 studs x 6 plates (1 m x 1.2 m x 1 m);
+  every tile ↔ unit conversion goes through `game::tiles`. "Block" in a name (`BLOCK_UNITS`,
+  `WorldBlockPos`, `BlockId`, `Intent::BreakBlock`) means a 1 m tile column / an item id, kept from the
+  voxel world on purpose.
 
 ### Deployment
 
 OpenTofu (not Terraform) in `deploy/`: local single-node k0s (`just deploy-local`, never the inner loop);
 the `orion` k3s box (`deploy/envs/orion/`, S3 remote state, `just orion-plan|apply <root>` — always plan
-first; monitoring stack handoff `docs/superpowers/plans/2026-11-06-k3s-observability-stack-handoff.md`);
+first; roots `platform` → `monitoring`, `picoshare` = https://share.factoriosurvivalworld.com; monitoring stack
+handoff `docs/superpowers/plans/2026-11-06-k3s-observability-stack-handoff.md`);
 the public web build `just deploy` (`scripts/web_release.sh` — use the pinned binaryen under
 `target/tools`, never the distro's). `deploy/**/*.tfvars` and `.env` are git-ignored — never commit or
 print secrets.
@@ -143,16 +146,18 @@ print secrets.
 
 **Client** (`crates/client`)
 - `renderer/` bridges sim state to Bevy; predicted regions run like the server's (`regions/`, threaded on
-  native). The render unit is the sim chunk on every backend; voxel shaders are compiled in (rebuild, no
-  hot reload); `records.rs` layout is locked to `assets/shaders/voxel_pull.wgsl`.
+  native). The render unit is the sim chunk on every backend (`renderer/stud/`); the terrain shader
+  `assets/shaders/stud_terrain.wgsl` is compiled in (rebuild, no hot reload) and its params struct is
+  mirrored by `StudFortressParams` in `renderer/stud/material.rs`.
 - **Session lifecycle** (`session.rs`): any new per-world resource, system `Local` or entity root must be
   registered (`add_session_reset`, `SessionLocal`) or tagged `SessionScoped`, or it leaks into the next world.
 - UI is **Slint only** (no `bevy_ui`, no egui). `CursorPolicy` is the only cursor-grab writer. `dev_ui`
   (F3 Debug tab) is dev tooling only, never player-facing.
 - wasm: no shared-memory threads; work runs in Web Workers by bincode messages. New compute work goes in
   `renderer::compute::JobKind` and must carry everything it reads (workers have no ECS).
-- Bevy pinned at `0.19.1`; upgrades are deliberate migrations. After a bump run `just pull-smoke` on a real
-  adapter (shader tests compose against stubs and miss upstream WGSL signature changes).
+- Bevy pinned at `0.19.1`; upgrades are deliberate migrations. After a bump look at stud terrain on a real
+  adapter (`just run`): shader tests compose against stubs and miss upstream WGSL signature changes, and
+  no automated real-adapter run of stud terrain exists.
 
 **Slint UI** (`crates/slint-ui`) — built on the sibling checkout `../ui` (`~/Projects/ui`, needs a local
 Factorio install or `FACTORIO_DATA`; Wube's sprites are not shippable). Sources in `crates/slint-ui/ui/`,
@@ -161,12 +166,12 @@ only (`build_common.rs` `single_theme_overlay`). In widgets never bind `visible`
 component's ROOT (forces inlining, bloats codegen). Every root component calls `GameTheme.apply()` in `init`.
 After a Slint bump run `just slint-wasm`.
 
-**Worldgen** (`crates/worldgen`) — `generate_region` is a pure function of coordinates (+ the installed
-forged world). The fused `column()` must mirror the `#[cfg(test)]` `DensityFn` graph bit-for-bit. Forge
-tunables all live in `forge/knobs.rs` (`just forge-ui` to tune; check at 16 m cells before keeping a
-value; the `forge_quality` gate must pass). Water is recipe data (`ColumnGround.water_top`), never chunk
-blocks. Generated terrain is whole + half blocks (a half block is a one-cuboid `ChiselData`). Look at the
-world with `just world-map` after tuning changes.
+**Worldgen** (`crates/worldgen`) — `stud_gen` is the only generator: `generate_stud_region` is a pure
+function of coordinates (+ the installed forged world) and yields ground recipes (`StudColumnGround`) plus
+feature bricks (trees). The fused `column()` must mirror the `#[cfg(test)]` `DensityFn` graph bit-for-bit.
+Forge tunables all live in `forge/knobs.rs` (`just forge-ui` to tune; check at 16 m cells before keeping a
+value; the `forge_quality` gate must pass). Water is recipe data (`StudColumnGround::water_top`), never
+bricks. Look at the world with `just world-map` after tuning changes.
 
 **Assets**
 - Blockbench `.bbmodel` loads natively (`crates/bbmodel`, `renderer/model.rs`); `just model-view`,
@@ -192,7 +197,7 @@ benchmarks (the user runs their own on this box).
 
 ## Vendored forks
 
-`crates/rapier` (0.36), `crates/parry` (0.31), `crates/slotmapd`, `crates/block-mesh`. Every rapier/parry
+`crates/rapier` (0.36), `crates/parry` (0.31), `crates/slotmapd`. Every rapier/parry
 hunk differing from upstream carries a `// mmo-fork:` marker and is pinned by a test in
 `crates/physics-next`; updating upstream = re-import + re-apply marked hunks. Determinism comes from
 `enhanced-determinism` (libm), no `parallel`/`simd8`. After touching sim math in the forks run

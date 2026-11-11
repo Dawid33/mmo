@@ -437,7 +437,7 @@ mod tests {
     /// A client-side region (holding `CLIENT`) and a runner context for it.
     fn setup() -> (Region, RunnerState, RunnerCtx, Receiver<ClientPacket>) {
         let rc = RegionCoords::new(0, 0);
-        let mut server = Region::from_chunks(rc, Vec::new());
+        let mut server = Region::empty(rc);
         server.handle_event(GameEventKind::CreateClient(CLIENT)).unwrap();
         server.commit_server_event();
         let region = Region::new(server.data().clone(), None, rc, Some(CLIENT));

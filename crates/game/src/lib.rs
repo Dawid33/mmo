@@ -26,7 +26,6 @@ pub mod coordinator;
 pub mod creature_shapes;
 pub mod debug_render;
 pub mod edit;
-pub mod ground;
 pub mod halo;
 pub mod history;
 pub mod input;
@@ -56,7 +55,6 @@ pub mod save_cut;
 pub mod registry;
 pub mod people;
 pub mod slime;
-pub mod slope;
 pub mod state;
 pub mod stored_terrain;
 pub mod stud;
@@ -72,11 +70,7 @@ pub mod stud_lod;
 pub mod stud_material;
 mod stud_ops;
 pub mod tiles;
-pub mod trees;
 pub mod ui;
-pub mod volume;
-pub mod voxel;
-pub mod voxel_body;
 pub mod water;
 pub mod world_clock;
 pub mod world_manager;
@@ -106,8 +100,7 @@ pub use coordinator::{
     Claim, CoordMsg, Coordinator, CoordinatorState, HostMsg, InlineWorldLink, OnlinePlayer, RequestId, RunningRegion,
     WorldLink, WorldReply, WorldRequest,
 };
-pub use ground::*;
-pub use halo::{HaloChunk, HaloDelta, HaloUpdate, HALO_BLOCKS, HALO_CHUNKS};
+pub use halo::{HaloUpdate, HALO_BLOCKS, HALO_CHUNKS};
 pub use debug_render::{ColliderDebug, DebugFlags, DebugLine, DEBUG_COLLIDER_RADIUS};
 pub use input::*;
 pub use intents::{Effects, Intent, IntentMsg, IntentRefusal, IntentReply, SentIntent, SentReply, Target};
@@ -117,7 +110,7 @@ pub use item_piles::*;
 pub use lod::*;
 pub use lod_builder::*;
 pub use mining::*;
-pub use migrate::{Carried, CarriedV1};
+pub use migrate::{Carried, CarriedV1, CarriedV2, NoVoxelBody};
 pub use movement::{Immersion, Motion};
 pub use orders::*;
 pub use ownership::{rendezvous_owner, super_region_of, Ownership, DEFAULT_SUPER_REGION_REGIONS};
@@ -128,7 +121,7 @@ pub use path_plan::{
 };
 pub use player::*;
 pub use portable::{
-    restore_portable, ChunkTerms, PortableRegion, RegionMeta, SaveTerms, StoredRegion, StudChunkRecord, StudKept, StudTerm,
+    restore_portable, PortableRegion, RegionMeta, RegionMetaV1, SaveTerms, StoredRegion, StudChunkRecord, StudKept, StudTerm,
     StudTerms,
 };
 pub use protocol::*;
@@ -136,16 +129,11 @@ pub use region_runner::*;
 pub use save_cut::{CutId, InFlightRow, WorldCut, CUT_DEADLINE_LEADS, SAVE_CUT_LEAD_MAX_TICKS, SAVE_CUT_LEAD_TICKS};
 pub use registry::*;
 // Not a glob: `slope::classify` would collide with `biome::classify`; call it as `slope::classify`.
-pub use slope::{display_name, slope_chisel, walk_up, Side, SlopeShape};
 pub use state::*;
 pub use stored_terrain::{load_stored_or_warn, StoredTerrain};
 pub use ui::*;
-pub use volume::*;
-pub use voxel::*;
-pub use trees::*;
-pub use voxel_body::*;
 pub use water::*;
-pub use world_view::{EntityRef, Hit, RegionView, StudWorldHit, WorldAabb, WorldRay, WorldView};
+pub use world_view::{EntityRef, RegionView, StudWorldHit, WorldAabb, WorldRay, WorldView};
 pub use world_clock::{ticks_due, WorldClock, MAX_CATCH_UP_BURST};
 pub use stud::*;
 pub use stud_body::*;
@@ -422,20 +410,6 @@ impl World {
     pub fn new() -> Self {
         return Self {
             regions: BTreeMap::new(),
-        };
-    }
-
-    pub fn basic() -> Self {
-        let one = RegionCoords::new(0, 0);
-        let chunks = (0..REGION_CHUNKS)
-            .flat_map(|x| {
-                (0..REGION_CHUNKS).map(move |z| (ChunkCoords::new(x, 0, z), Chunk::flat_floor(8)))
-            })
-            .collect();
-        let data = Region::from_chunks(one, chunks);
-
-        return Self {
-            regions: BTreeMap::from([(one, data)]),
         };
     }
 

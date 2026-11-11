@@ -13,12 +13,12 @@ use rapier3d::parry::query::ShapeCastOptions;
 use rapier3d::parry::shape::Shape;
 use rapier3d::pipeline::QueryPipeline;
 
-use crate::{BLOCK_VOXELS, TICK_RATE};
+use crate::{BLOCK_UNITS, TICK_RATE};
 
-// Tunables, in metres and seconds (1 m = 1 block = `BLOCK_VOXELS` units), so
+// Tunables, in metres and seconds (1 m = 1 block = `BLOCK_UNITS` units), so
 // they keep their meaning when TICK_RATE is retuned.
 /// World units per metre.
-pub const UNITS_PER_METER: f32 = BLOCK_VOXELS as f32;
+pub const UNITS_PER_METER: f32 = BLOCK_UNITS as f32;
 /// Seconds per simulation tick.
 pub const TICK_DT: f32 = TICK_RATE as f32 / 1000.0;
 /// Ground speed (Minecraft walk: 4.317 m/s).
@@ -57,7 +57,7 @@ pub const AUTOSTEP_MIN_WIDTH_M: f32 = 0.3;
 /// what a body walks up it also walks down — at 0.25 m a terrain slope's
 /// 0.5 m half-steps went airborne for 3-4 ticks.
 pub const GROUND_SNAP: f32 = 0.6;
-// `BodyScale` snaps `step_height_m`: VOXEL keeps today's snap only while they match.
+// `BodyScale` snaps `step_height_m`: UNIT keeps this snap only while they match.
 const _: () = assert!(GROUND_SNAP == STEP_HEIGHT);
 
 /// Horizontal swimming speed (at [`Immersion::Waist`] or deeper).
@@ -149,14 +149,15 @@ pub struct BodyScale {
 
 impl Default for BodyScale {
     fn default() -> Self {
-        Self::VOXEL
+        Self::UNIT
     }
 }
 
 impl BodyScale {
-    /// Today's constants: every product with `factor` is exact, so VOXEL
-    /// bodies move bit-identically to the unscaled path.
-    pub const VOXEL: BodyScale =
+    /// The shared movement constants, unscaled (every product with `factor`
+    /// is exact): what every walking body but a region's player-sized ones
+    /// uses (slimes).
+    pub const UNIT: BodyScale =
         BodyScale { factor: 1.0, step_height_m: STEP_HEIGHT, height_m: PLAYER_HEIGHT, radius_m: PLAYER_RADIUS };
     pub const STUD: BodyScale = BodyScale {
         factor: STUD_BODY_FACTOR,
@@ -406,7 +407,7 @@ pub fn walk_body_with(
     handle: rapier3d::prelude::RigidBodyHandle,
     params: &MoveParams,
 ) -> Vector {
-    walk_body_scaled(motion, keys, yaw, tick, broad_phase, narrow_phase, bodies, colliders, handle, params, BodyScale::VOXEL)
+    walk_body_scaled(motion, keys, yaw, tick, broad_phase, narrow_phase, bodies, colliders, handle, params, BodyScale::UNIT)
 }
 
 /// [`walk_body_with`] for a body of `scale` (the player path); `params`
@@ -466,7 +467,7 @@ pub fn settle(motion: &mut Motion, desired: &Vector, moved: &Vector, grounded: b
 /// would not clear it: a buried body stays put rather than being teleported
 /// up through whatever buried it.
 pub fn depenetration_lift(queries: &QueryPipeline, shape: &dyn Shape, pos: &Pose) -> f32 {
-    depenetration_lift_scaled(queries, shape, pos, BodyScale::VOXEL)
+    depenetration_lift_scaled(queries, shape, pos, BodyScale::UNIT)
 }
 
 /// [`depenetration_lift`] reaching `scale.step_height_m`.
@@ -516,7 +517,7 @@ pub fn sweep_character(
     motion: &Motion,
     desired: Vector,
 ) -> (Vector, bool) {
-    sweep_character_scaled(broad_phase, narrow_phase, bodies, colliders, handle, motion, desired, BodyScale::VOXEL)
+    sweep_character_scaled(broad_phase, narrow_phase, bodies, colliders, handle, motion, desired, BodyScale::UNIT)
 }
 
 /// [`sweep_character`] for a body of `scale`: its step height, ground snap,
@@ -565,7 +566,7 @@ pub fn sweep_character_scaled(
 /// ledges and stick to the ground; flying and swimming (waist deep or more)
 /// bodies do neither.
 pub fn character_controller(motion: &Motion) -> KinematicCharacterController {
-    character_controller_scaled(motion, BodyScale::VOXEL)
+    character_controller_scaled(motion, BodyScale::UNIT)
 }
 
 /// [`character_controller`] for a body of `scale`: steps and snaps

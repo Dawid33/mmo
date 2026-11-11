@@ -6,7 +6,7 @@
 //! The extension reads the [`FortressViewUniform`] (also bound by the water
 //! material), copied in by [`sync_stud_materials`]; its cut plane is a TILE
 //! boundary of the home terrain (`commander::level::cut_y` goes through
-//! `TerrainKind`). The level height and the depth-darkening curve travel in
+//! `game::tiles`). The level height and the depth-darkening curve travel in
 //! [`StudFortressParams`], built from the Rust consts ([`fortress_params`]), so
 //! `assets/shaders/stud_terrain.wgsl` restates no number.
 //!
@@ -41,11 +41,10 @@ use bevy::{
     render::render_resource::{AsBindGroup, RenderPipelineDescriptor, ShaderType, SpecializedMeshPipelineError},
     shader::ShaderRef,
 };
-use game::{RegionId, TerrainKind};
+use game::{RegionId};
 
 use super::mesh::STUD_EDGE_ALPHA;
 use crate::renderer::boundaries::BoundaryUniform;
-use crate::renderer::commander::level::WorkingLevel;
 use crate::renderer::fortress_view::{cutaway_active, FortressViewUniform, DEPTH_DARKEN_FLOOR, DEPTH_DARKEN_PER_LEVEL};
 
 /// The material stud meshes draw with.
@@ -91,9 +90,9 @@ pub struct StudFortressParams {
 
 /// The params for home terrain `kind`: its level height and the voxel
 /// shaders' depth-darkening constants. `caps`: the opaque material's.
-pub fn fortress_params(kind: TerrainKind, caps: bool) -> StudFortressParams {
+pub fn fortress_params(caps: bool) -> StudFortressParams {
     StudFortressParams {
-        levels: Vec4::new(kind.tile_height_units(), DEPTH_DARKEN_PER_LEVEL, DEPTH_DARKEN_FLOOR, 0.0),
+        levels: Vec4::new(game::tile_height_units(), DEPTH_DARKEN_PER_LEVEL, DEPTH_DARKEN_FLOOR, 0.0),
         flags: Vec4::new(if caps { 1.0 } else { 0.0 }, STUD_SEAM_ALPHA_BELOW, 0.0, 0.0),
     }
 }
@@ -173,7 +172,7 @@ pub fn opaque_alpha_mode(u: &FortressViewUniform) -> AlphaMode {
 }
 
 /// A fresh opaque stud material for fortress view `u` on home terrain `kind`.
-pub fn opaque_material(u: FortressViewUniform, kind: TerrainKind) -> StudTerrainMaterial {
+pub fn opaque_material(u: FortressViewUniform) -> StudTerrainMaterial {
     ExtendedMaterial {
         base: StandardMaterial {
             base_color: Color::WHITE,
@@ -181,20 +180,20 @@ pub fn opaque_material(u: FortressViewUniform, kind: TerrainKind) -> StudTerrain
             alpha_mode: opaque_alpha_mode(&u),
             ..default()
         },
-        extension: StudFortressExt { fortress: u, params: fortress_params(kind, true), boundaries: default() },
+        extension: StudFortressExt { fortress: u, params: fortress_params(true), boundaries: default() },
     }
 }
 
 /// A fresh material for stud meshes that never lie in the home region's rect: the
 /// opaque one with the cut off, for good (see the module docs).
-pub fn outside_material(kind: TerrainKind) -> StudTerrainMaterial {
-    let mut m = opaque_material(FortressViewUniform::default(), kind);
-    m.extension.params = fortress_params(kind, false);
+pub fn outside_material() -> StudTerrainMaterial {
+    let mut m = opaque_material(FortressViewUniform::default());
+    m.extension.params = fortress_params(false);
     m
 }
 
 /// A fresh glass material: blended, its alpha from the vertex colours.
-pub fn glass_material(u: FortressViewUniform, kind: TerrainKind) -> StudTerrainMaterial {
+pub fn glass_material(u: FortressViewUniform) -> StudTerrainMaterial {
     ExtendedMaterial {
         base: StandardMaterial {
             base_color: Color::WHITE,
@@ -202,7 +201,7 @@ pub fn glass_material(u: FortressViewUniform, kind: TerrainKind) -> StudTerrainM
             alpha_mode: AlphaMode::Blend,
             ..default()
         },
-        extension: StudFortressExt { fortress: u, params: fortress_params(kind, false), boundaries: default() },
+        extension: StudFortressExt { fortress: u, params: fortress_params(false), boundaries: default() },
     }
 }
 
@@ -221,7 +220,7 @@ impl StudMaterials {
     /// The opaque material of a mesh that never lies in the home region's rect
     /// (another region's chunks, far tiles): never cut.
     pub fn outside(&mut self, materials: &mut Assets<StudTerrainMaterial>) -> Handle<StudTerrainMaterial> {
-        self.outside.get_or_insert_with(|| materials.add(outside_material(TerrainKind::Stud))).clone()
+        self.outside.get_or_insert_with(|| materials.add(outside_material())).clone()
     }
 
     /// The opaque material for a chunk of `region`: the cut one in the home
@@ -233,14 +232,14 @@ impl StudMaterials {
     /// The opaque material that takes the cut (the home region's chunks, falling bodies).
     pub fn opaque(&mut self, materials: &mut Assets<StudTerrainMaterial>) -> Handle<StudTerrainMaterial> {
         self.opaque
-            .get_or_insert_with(|| materials.add(opaque_material(FortressViewUniform::default(), TerrainKind::Stud)))
+            .get_or_insert_with(|| materials.add(opaque_material(FortressViewUniform::default())))
             .clone()
     }
 
     /// The glass material (bricks of a transparent colour).
     pub fn glass(&mut self, materials: &mut Assets<StudTerrainMaterial>) -> Handle<StudTerrainMaterial> {
         self.glass
-            .get_or_insert_with(|| materials.add(glass_material(FortressViewUniform::default(), TerrainKind::Stud)))
+            .get_or_insert_with(|| materials.add(glass_material(FortressViewUniform::default())))
             .clone()
     }
 }
@@ -252,12 +251,10 @@ impl StudMaterials {
 pub fn sync_stud_materials(
     uniform: Option<Res<FortressViewUniform>>,
     boundaries: Option<Res<BoundaryUniform>>,
-    working: Option<Res<WorkingLevel>>,
     handles: Res<StudMaterials>,
     materials: Option<ResMut<Assets<StudTerrainMaterial>>>,
 ) {
     let (Some(uniform), Some(mut materials)) = (uniform, materials) else { return };
-    let kind = working.map_or(TerrainKind::Stud, |w| w.terrain);
     let boundaries = boundaries.map(|b| *b).unwrap_or_default();
     let off = FortressViewUniform::default();
     let entries = [
@@ -268,7 +265,7 @@ pub fn sync_stud_materials(
     ];
     for (handle, caps, view, alpha) in entries {
         let Some(handle) = handle else { continue };
-        let params = fortress_params(kind, caps);
+        let params = fortress_params(caps);
         let stale = materials.get(handle).is_some_and(|m| {
             m.extension.fortress != view
                 || m.extension.params != params
@@ -319,6 +316,7 @@ pub fn retarget_stud_materials(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::renderer::commander::level::WorkingLevel;
     use crate::renderer::fortress_view::{build_uniform, CAP_DARKEN};
     use game::{RegionId, REGION_SIZE};
 
@@ -327,48 +325,44 @@ mod tests {
     }
 
     /// The cut the stud material reads sits on a tile boundary of stud terrain:
-    /// the top of the working level's 1.2 m tiles, through `TerrainKind` alone.
+    /// the top of the working level's 1.2 m tiles, through `game::tiles` alone.
     #[test]
     fn the_cut_sits_on_a_stud_tile_boundary() {
-        let kind = TerrainKind::Stud;
-        let h = kind.tile_height_units();
+        let h = game::tile_height_units();
         assert_eq!(h, game::plate_units(game::TILE_PLATES as i32), "a level is one tile: six plates");
         for level in [-40, -1, 0, 7, 133] {
-            let working = WorkingLevel { level: Some(level), cut: true, terrain: kind };
+            let working = WorkingLevel { level: Some(level), cut: true };
             let u = build_uniform(&working, Some(home()));
             assert!(cutaway_active(&u));
-            assert_eq!(u.cut.x, kind.level_bottom_units(level + 1) + home().world_offset()[1]);
+            assert_eq!(u.cut.x, game::level_bottom_units(level + 1) + home().world_offset()[1]);
             assert_eq!(u.cut.y, CAP_DARKEN);
             // Whole plates: a tile boundary is a brick-grid plane.
             let plates = u.cut.x / game::plate_units(1);
             assert!((plates - plates.round()).abs() < 1e-3, "level {level}: {plates} plates");
             assert_eq!(plates.round() as i32 % game::TILE_PLATES as i32, 0);
         }
-        // Another height than the voxel cut of the same level number.
-        let stud = build_uniform(&WorkingLevel { level: Some(10), cut: true, terrain: kind }, Some(home()));
-        let voxel = build_uniform(&WorkingLevel { level: Some(10), cut: true, terrain: TerrainKind::Voxel }, Some(home()));
-        assert_ne!(stud.cut.x, voxel.cut.x);
+        // Level 10's cut is 11 tiles of 1.2 m up, not 11 m.
+        let u = build_uniform(&WorkingLevel { level: Some(10), cut: true }, Some(home()));
+        assert_eq!(u.cut.x - home().world_offset()[1], 11.0 * h);
     }
 
     #[test]
     fn params_carry_the_tile_height_and_the_shared_darkening_consts() {
-        let p = fortress_params(TerrainKind::Stud, true);
-        assert_eq!(p.levels, Vec4::new(TerrainKind::Stud.tile_height_units(), DEPTH_DARKEN_PER_LEVEL, DEPTH_DARKEN_FLOOR, 0.0));
+        let p = fortress_params(true);
+        assert_eq!(p.levels, Vec4::new(game::tile_height_units(), DEPTH_DARKEN_PER_LEVEL, DEPTH_DARKEN_FLOOR, 0.0));
         assert_eq!(p.flags.x, 1.0);
-        assert_eq!(fortress_params(TerrainKind::Stud, false).flags.x, 0.0, "glass has no cap");
-        assert_eq!(fortress_params(TerrainKind::Voxel, true).levels.x, game::BLOCK_VOXELS as f32);
+        assert_eq!(fortress_params(false).flags.x, 0.0, "glass has no cap");
         // The seam threshold separates seam lines from faces.
         assert!(STUD_EDGE_ALPHA < p.flags.y && p.flags.y < 1.0);
         assert!(STUD_EDGE_ALPHA > STUD_MASK_CUTOFF, "a seam line survives the mask");
     }
 
-    /// The darkening curve is the voxel one, counted in stud levels.
+    /// The darkening curve, counted in tile levels.
     #[test]
-    fn levels_below_the_working_level_darken_by_the_voxel_curve() {
-        let kind = TerrainKind::Stud;
-        let p = fortress_params(kind, true);
-        let h = kind.tile_height_units();
-        let cut = kind.level_bottom_units(11);
+    fn levels_below_the_working_level_darken_by_level() {
+        let p = fortress_params(true);
+        let h = game::tile_height_units();
+        let cut = game::level_bottom_units(11);
         // The working level (the tile under the cut), top to bottom: full brightness.
         for y in [cut, cut - 0.5 * h, cut - h + 0.1] {
             assert_eq!(depth_darkening(&p, y, cut), 1.0, "y = {y}");
@@ -380,16 +374,14 @@ mod tests {
         assert!((depth_darkening(&p, cut - 2.5 * h, cut) - (1.0 - 2.0 * DEPTH_DARKEN_PER_LEVEL)).abs() < 1e-6);
         // Never under the floor.
         assert_eq!(depth_darkening(&p, cut - 500.0 * h, cut), DEPTH_DARKEN_FLOOR);
-        // The same depth in metres is fewer levels on studs than on voxels.
-        let v = fortress_params(TerrainKind::Voxel, true);
-        let depth = 4.0 * game::BLOCK_VOXELS as f32 + 1.0;
-        assert!(depth_darkening(&p, cut - depth, cut) > depth_darkening(&v, cut - depth, cut));
+        // A depth in metres counts in 1.2 m levels: just over 4 m down is the third level below.
+        let depth = 4.0 * game::BLOCK_UNITS as f32 + 1.0;
+        assert!((depth_darkening(&p, cut - depth, cut) - (1.0 - 3.0 * DEPTH_DARKEN_PER_LEVEL)).abs() < 1e-6);
     }
 
     #[test]
     fn the_cut_removes_only_what_is_above_it_inside_the_home_region() {
-        let kind = TerrainKind::Stud;
-        let working = WorkingLevel { level: Some(10), cut: true, terrain: kind };
+        let working = WorkingLevel { level: Some(10), cut: true };
         let u = build_uniform(&working, Some(home()));
         let o = Vec3::from_array(home().world_offset());
         let cut = u.cut.x;
@@ -402,22 +394,21 @@ mod tests {
         assert!(!cut_away(&u, (o + Vec3::new(REGION_SIZE, 0.0, 10.0)).with_y(cut + 50.0)));
         assert!(cut_away(&u, (o + Vec3::new(REGION_SIZE - 0.5, 0.0, 0.0)).with_y(cut + 50.0)));
         // Cut off: nothing.
-        let off = build_uniform(&WorkingLevel { level: Some(10), cut: false, terrain: kind }, Some(home()));
+        let off = build_uniform(&WorkingLevel { level: Some(10), cut: false }, Some(home()));
         assert!(!cut_away(&off, inside.with_y(cut + 50.0)));
     }
 
     #[test]
     fn the_opaque_material_is_masked_and_unculled_only_while_the_cut_is_on() {
-        let kind = TerrainKind::Stud;
-        let on = build_uniform(&WorkingLevel { level: Some(3), cut: true, terrain: kind }, Some(home()));
+        let on = build_uniform(&WorkingLevel { level: Some(3), cut: true }, Some(home()));
         let off = FortressViewUniform::default();
-        let m = opaque_material(off, kind);
+        let m = opaque_material(off);
         assert_eq!(m.base.alpha_mode, AlphaMode::Opaque);
         assert!(!StudFortressKey::from(&m.extension).uncull);
-        let m = opaque_material(on, kind);
+        let m = opaque_material(on);
         assert_eq!(m.base.alpha_mode, AlphaMode::Mask(STUD_MASK_CUTOFF));
         assert!(StudFortressKey::from(&m.extension).uncull, "back faces are the cap");
-        let g = glass_material(on, kind);
+        let g = glass_material(on);
         assert_eq!(g.base.alpha_mode, AlphaMode::Blend);
         assert!(!StudFortressKey::from(&g.extension).uncull, "glass never caps");
     }
@@ -430,7 +421,7 @@ mod tests {
         app.init_resource::<Assets<StudTerrainMaterial>>()
             .init_resource::<StudMaterials>()
             .init_resource::<FortressViewUniform>()
-            .insert_resource(WorkingLevel { level: Some(4), cut: true, terrain: TerrainKind::Stud })
+            .insert_resource(WorkingLevel { level: Some(4), cut: true })
             .add_systems(Update, sync_stud_materials);
         let (opaque, glass, outside) = {
             let world = app.world_mut();
@@ -451,8 +442,8 @@ mod tests {
         assert!(o.extension.boundaries == line && g.extension.boundaries == line, "the home boundary line too");
         assert_eq!(o.base.alpha_mode, AlphaMode::Mask(STUD_MASK_CUTOFF));
         assert_eq!(g.base.alpha_mode, AlphaMode::Blend);
-        assert_eq!(o.extension.params, fortress_params(TerrainKind::Stud, true));
-        assert_eq!(g.extension.params, fortress_params(TerrainKind::Stud, false));
+        assert_eq!(o.extension.params, fortress_params(true));
+        assert_eq!(g.extension.params, fortress_params(false));
         // The material of everything outside the home rect never takes the cut:
         // plain opaque, culled — but it does carry the boundary line.
         let out = assets.get(&outside).unwrap();
@@ -460,7 +451,7 @@ mod tests {
         assert_eq!(out.base.alpha_mode, AlphaMode::Opaque);
         assert!(!StudFortressKey::from(&out.extension).uncull);
         assert!(out.extension.boundaries == line);
-        assert_eq!(out.extension.params, fortress_params(TerrainKind::Stud, false));
+        assert_eq!(out.extension.params, fortress_params(false));
         // Cut off again: plain opaque.
         *app.world_mut().resource_mut::<FortressViewUniform>() = FortressViewUniform::default();
         app.update();
@@ -655,7 +646,7 @@ fn calculate_motion_vector(world_position: vec4<f32>, previous_world_position: v
             validate_shader(source.clone(), &defs, &imports).unwrap_or_else(|e| panic!("stud_terrain.wgsl with {names:?}: {e:?}"));
         }
         // The shader restates none of the shared numbers: they come in `params`.
-        for name in ["DEPTH_DARKEN_PER_LEVEL", "DEPTH_DARKEN_FLOOR", "BLOCK_VOXELS"] {
+        for name in ["DEPTH_DARKEN_PER_LEVEL", "DEPTH_DARKEN_FLOOR", "BLOCK_UNITS"] {
             assert!(!source.contains(&format!("const {name}")), "stud_terrain.wgsl must not restate {name}");
         }
         assert!(source.contains("@binding(100) var<uniform> fortress: FortressView;"));

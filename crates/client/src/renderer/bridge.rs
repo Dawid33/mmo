@@ -767,14 +767,6 @@ pub fn drain_region_updates(
                         None => { commands.entity(e).remove::<super::rigs::SimAnimator>(); }
                     }
                 }
-                // Voxel terrain: no server runs it any more, and the game's
-                // voxel update kinds go with it.
-                GameDataUpdateKind::AddTerrainChunk(..)
-                | GameDataUpdateKind::SetVoxelComponent(..)
-                | GameDataUpdateKind::SetBlocks(..)
-                | GameDataUpdateKind::SetHaloTerrain(_)
-                | GameDataUpdateKind::SetHaloGround(_)
-                | GameDataUpdateKind::AddVoxelBody(..) => {}
             }
         }
     }
@@ -971,7 +963,6 @@ mod tests {
         // region has none, so announce it the way a snapshot does.
         app.world_mut().resource_mut::<Messages<StudWorldMsg>>().write(StudWorldMsg::Region {
             region,
-            terrain: game::TerrainKind::Stud,
             ground: Default::default(),
             halo: Vec::new(),
             halo_ground: Vec::new(),

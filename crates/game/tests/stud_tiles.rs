@@ -211,7 +211,6 @@ fn the_memoising_view_reads_what_the_region_reads() {
     });
     let d = r.data();
     let view = d.tiles();
-    assert_eq!(view.terrain(), TerrainKind::Stud);
     for y in -4..8 {
         for z in -1..9 {
             for x in -1..9 {
@@ -231,9 +230,6 @@ fn the_memoising_view_reads_what_the_region_reads() {
 struct Src<F: Fn(TilePos) -> TileFill>(F);
 
 impl<F: Fn(TilePos) -> TileFill> TileSource for Src<F> {
-    fn block(&self, _p: TilePos) -> BlockId {
-        BlockId::AIR
-    }
     fn is_bedrock(&self, _p: TilePos) -> bool {
         false
     }
@@ -242,12 +238,6 @@ impl<F: Fn(TilePos) -> TileFill> TileSource for Src<F> {
     }
     fn tree_id(&self, _p: TilePos) -> u32 {
         0
-    }
-    fn tree_limb(&self, _p: TilePos) -> u8 {
-        0
-    }
-    fn terrain(&self) -> TerrainKind {
-        TerrainKind::Stud
     }
     fn tile_fill(&self, p: TilePos) -> TileFill {
         (self.0)(p)
@@ -302,10 +292,10 @@ fn standable_follows_floor_height_and_headroom() {
         let level = if k <= 3 { tile } else { tile + 1 };
         for lift in [0.0, stud_cap_units(), stud_cap_units() + 0.3] {
             let feet = rapier3d::math::Vector::new(4.0, plate_units(surface) + lift, 4.0);
-            assert_eq!(TerrainKind::Stud.feet_tile(feet), [0, level, 0], "surface plate {surface}, lift {lift}");
-            assert!(TerrainKind::Stud.on_level(level, feet.y));
-            assert!(!TerrainKind::Stud.on_level(level + 1, feet.y) && !TerrainKind::Stud.on_level(level - 1, feet.y));
-            assert_eq!(TerrainKind::feet_plate(feet.y), surface as i64);
+            assert_eq!(game::feet_tile(feet), [0, level, 0], "surface plate {surface}, lift {lift}");
+            assert!(game::on_level(level, feet.y));
+            assert!(!game::on_level(level + 1, feet.y) && !game::on_level(level - 1, feet.y));
+            assert_eq!(game::feet_plate(feet.y), surface as i64);
         }
     }
 }
@@ -316,7 +306,7 @@ fn paths_run_straight_and_around_a_wall() {
     let path = find_path(&open, [0, 1, 0], [5, 1, 0], BUDGET).unwrap();
     assert_eq!(path, (0..=5).map(|x| [x, 1, 0]).collect::<Vec<_>>());
     assert_eq!(path_cost(&open, &path), Some(5 * STEP_COST));
-    assert!(walk_ups(&open, &path).iter().skip(1).all(|&w| w), "stud steps are walked, never jumped");
+    assert!(walk_ups(&path).iter().skip(1).all(|&w| w), "stud steps are walked, never jumped");
 
     // A wall two tiles high across x = 3 for |z| <= 2.
     let wall = |p: TilePos| p[0] == 3 && p[2].abs() <= 2 && p[1] <= 2;
@@ -629,10 +619,9 @@ fn fill_order_fills_and_rolls_back() {
 fn break_time_and_yield_follow_the_material() {
     common::install_real_block_props();
     let props = block_props();
-    let voxel = |name: &str| break_ticks(props, Block::new(props.id_named(name).unwrap()));
-    // A whole tile: stone as long as a stone block, dirt close to a dirt block.
-    assert_eq!(stud_break_ticks(MAT_STONE, STUD_TILE_CELLS), Some(voxel("stone")));
-    assert_eq!((stud_break_ticks(MAT_DIRT, STUD_TILE_CELLS), voxel("dirt")), (Some(12), 15));
+    // A whole tile: 45 ticks of stone, 12 of dirt.
+    assert_eq!(stud_break_ticks(MAT_STONE, STUD_TILE_CELLS), Some(45));
+    assert_eq!(stud_break_ticks(MAT_DIRT, STUD_TILE_CELLS), Some(12));
     assert_eq!(stud_break_ticks(MAT_STONE, STUD_TILE_CELLS / 2), Some(23), "half a tile, rounded up");
     assert_eq!(stud_break_ticks(MAT_SAND, 1), Some(1));
     assert_eq!(stud_break_ticks(MAT_BEDROCK, STUD_TILE_CELLS), None);
@@ -677,7 +666,7 @@ fn body_feet(r: &Region, e: EntityKey) -> rapier3d::math::Vector {
 }
 
 fn body_tile(r: &Region, e: EntityKey) -> TilePos {
-    TerrainKind::Stud.feet_tile(body_feet(r, e))
+    game::feet_tile(body_feet(r, e))
 }
 
 /// Ticks until `e`'s walk is over (at most `max`).
@@ -699,7 +688,6 @@ fn walk_budget(metres: f32) -> u32 {
 #[ignore = "slow: >100ms — run via just test-full"]
 fn bodies_walk_a_move_order_over_stud_ground() {
     let mut r = flat_region(REGION_CHUNKS);
-    assert_eq!(r.data().terrain_kind(), TerrainKind::Stud);
     // A brick-high terrace over x >= 12 (tiles), and a wall with one doorway on the way.
     r.with_data(|d| {
         assert!(d.fill_stud_box_safe([24, TOP, 0], [48, TOP + 3, 32], MAT_STONE) > 0);
@@ -732,7 +720,7 @@ fn bodies_walk_a_move_order_over_stud_ground() {
 
     // A person takes the same walk on the same body.
     let person = history::PersonId(3);
-    let xz = TerrainKind::Stud.column_centre([4, 6]);
+    let xz = game::column_centre([4, 6]);
     let mut p = None;
     r.with_data(|d| {
         p = d.spawn_person_safe(person, xz);
@@ -770,7 +758,7 @@ fn bodies_walk_up_a_brick_stair_without_jumping() {
         let person = history::PersonId(10 + n as u32);
         let mut p = None;
         r.with_data(|d| {
-            p = d.spawn_person_safe(person, TerrainKind::Stud.column_centre(start));
+            p = d.spawn_person_safe(person, game::column_centre(start));
             assert!(d.walk_entity_safe(p.unwrap(), goal, here, None), "a path up the stair from {start:?}");
         });
         let p = p.unwrap();

@@ -123,7 +123,7 @@ impl History {
         if let Some(&(r, [x, _, z])) = self.positions.get(&person) {
             if r == rc {
                 let n = REGION_BLOCKS as i32 - 1;
-                let b = crate::BLOCK_VOXELS as f32;
+                let b = crate::BLOCK_UNITS as f32;
                 return [((x / b).floor() as i32).clamp(0, n) as u32, ((z / b).floor() as i32).clamp(0, n) as u32];
             }
         }

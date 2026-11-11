@@ -314,7 +314,7 @@ fn stored_stud_region_restores_its_edits() {
     // Nothing changed since the restore: the next save writes no terrain.
     let (tick, portable) = stop(&send, &recv);
     s.reap(id);
-    assert!(portable.stud_chunks.is_empty() && portable.stud_ground.is_none() && portable.ground.is_none());
+    assert!(portable.stud_chunks.is_empty() && portable.stud_ground.is_none());
     save(&store, id, 2, tick, portable);
     drop(s);
     let mut s = stored_spawner(&store, id, genesis);

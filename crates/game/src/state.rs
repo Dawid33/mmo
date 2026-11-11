@@ -6,7 +6,7 @@
 //! `lib.rs` re-exports this module to satisfy that.
 
 use macros::rollback;
-use rapier3d::math::{IVector, Pose, Vector};
+use rapier3d::math::{Pose, Vector};
 use rapier3d::prelude::{ColliderBuilder, RigidBodyBuilder, RigidBodyHandle};
 use state_hash::StateHash;
 use slotmapd::Key as _;
@@ -16,10 +16,6 @@ use std::sync::{Arc, atomic::AtomicUsize};
 use crate::camera::{Camera, Perspective3};
 use crate::input::InputState;
 use crate::protocol::{BodyState, ColliderSpec, EntityBundle, HaloEntityDelta, HaloEntityGone, HaloEntityMsg};
-use crate::registry::BlockId;
-use crate::block::CHUNK_UNITS;
-use crate::block::{Block, BlockIndex, ChiselData};
-use crate::voxel::{Chunk, ChunkCoords, Voxel};
 
 pub type ClientId = usize;
 
@@ -41,26 +37,8 @@ impl RollbackInfo {
     }
 }
 
-/// One block's full new state in a terrain edit: what `SetBlocks` carries.
-/// The renderer writes the block's 16³ voxels from it (its chisel materials,
-/// else `block.id` throughout).
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct BlockDelta {
-    pub index: BlockIndex,
-    pub block: Block,
-    pub chisel: Option<ChiselData>,
-}
-
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum GameDataUpdateKind {
-    SetVoxelComponent(EntityKey, Option<Vec<Voxel>>),
-    /// Blocks of a terrain chunk that changed, each as its full new state.
-    /// An edit sends the new states on Do and the old ones on Undo.
-    SetBlocks(EntityKey, Vec<BlockDelta>),
-    /// A terrain chunk added after the snapshot (implied ground an edit
-    /// materialised): the renderer spawns it at its pose and derives its
-    /// voxels off-thread, budgeted.
-    AddTerrainChunk(EntityKey, Pose, Box<Chunk>),
     SetEntityPosition(EntityKey, Pose),
     AddCameraComponent(EntityKey, ClientId, Perspective3, Pose),
     RemoveCameraComponent(EntityKey),
@@ -77,13 +55,6 @@ pub enum GameDataUpdateKind {
     /// The entity's animation state (`anim.rs`), set (`Some`) or gone. The
     /// renderer poses the entity's model from it with `anim::sample`.
     SetAnimator(EntityKey, Option<crate::anim::Animator>),
-    /// A voxel body (`voxel_body.rs`) spawned: terrain blocks detached into
-    /// one dynamic body. `Pose` is the body's, at the model's centre of
-    /// mass: model block `o` occupies body-local units
-    /// `o * BLOCK_VOXELS - com .. + BLOCK_VOXELS`, `com` being
-    /// `voxel_body::model_mass_properties(model).local_com`. Sent on Do
-    /// only; the entity's `RemoveEntity` covers undo and the despawn.
-    AddVoxelBody(EntityKey, Pose, Box<crate::voxel_body::VoxelModel>),
     /// Designations set (`Some`) or cleared (`None`) per tile.
     SetDesignations(Vec<(crate::TilePos, Option<crate::Designation>)>),
     /// Tiles that became (`true`) or stopped being (`false`) constructions.
@@ -98,14 +69,6 @@ pub enum GameDataUpdateKind {
     /// edges). Do carries the new views, Undo the prior ones. The renderer
     /// draws one copy per world cell (the owner's, when it has it).
     SetHaloPiles(Vec<(crate::edit::BlockPos, Option<crate::PileView>)>),
-    /// The terrain halo's chunks (`halo.rs`) set (`Some`) or gone (`None`),
-    /// by world chunk. Do carries the new content, Undo the prior. For the
-    /// client's walk planning past the region's edge (its tile mirror).
-    SetHaloTerrain(Vec<(crate::WorldChunkPos, Option<crate::Chunk>)>),
-    /// The halo's ground recipes set (`Some`) or gone (`None`), by world
-    /// chunk column (`y` 0): implied ground under the halo chunks. Do carries
-    /// the new recipe, Undo the prior.
-    SetHaloGround(Vec<(crate::WorldChunkPos, Option<crate::ColumnGround>)>),
     /// Render-only, Do only: pickups this tick (`item_piles::tick_pickups_safe`)
     /// — who took what from which cell — so the client can fly the items into
     /// the picker. A replay re-sends it with the same tick (dedupe on that).
@@ -267,7 +230,7 @@ mod game_data {
     };
 
     use super::{
-        Camera, Chunk, ChunkIndexKey, Client, ClientId, Component, EntityKey,
+        Camera, Client, ClientId, Component, EntityKey,
         PhysicsParams,
         EntityKind, HaloEntity, Pose, RigidBodyHandle, RollbackInfo, SlotMap,
     };
@@ -287,10 +250,10 @@ mod game_data {
         /// Next `EntityId` serial of this region (`alloc_entity_id_safe`).
         #[undo(cell)]
         next_entity_serial: u64,
-        /// The player body's size in this region (`movement::BodyScale`):
-        /// voxel worlds 1.8 m, the stud world 2.4 m. Written only raw at
-        /// genesis (`Rollback::set_body_scale_raw`), never mutated after;
-        /// travels with the serialized `Rollback` (parking, snapshots).
+        /// The player body's size in this region (`movement::BodyScale`).
+        /// Written only raw at genesis (`Rollback::set_body_scale_raw`),
+        /// never mutated after; travels with the serialized `Rollback`
+        /// (parking, snapshots).
         #[undo(cell)]
         body_scale: crate::movement::BodyScale,
         #[undo(map)]
@@ -312,35 +275,16 @@ mod game_data {
         /// Entity by [`crate::EntityId`], in step with `Ecs.id`.
         #[undo(map)]
         id_index: BTreeMap<crate::EntityId, EntityKey>,
-        /// Terrain chunk entity by [`ChunkIndexKey`]. Replaces the scans
-        /// that recovered chunk coordinates from body translations.
-        #[undo(map)]
-        chunk_index: BTreeMap<ChunkIndexKey, EntityKey>,
-        /// Stud chunk entity by coordinates (`stud_ops.rs`). Separate from
-        /// `chunk_index`: no voxel chunk site ever sees a stud chunk.
+        /// Stud chunk entity by coordinates (`stud_ops.rs`).
         #[undo(map)]
         stud_index: BTreeMap<crate::StudChunkCoords, EntityKey>,
         /// Stud ground recipes by chunk column (`stud_ground.rs`): the terrain
         /// before any edit, from which unmaterialised chunks are derived.
-        /// Like `ground`: written only at genesis
-        /// (`seed_stud_ground_genesis`), never mutated; the `#[undo(map)]`
-        /// wrapper is only map plumbing, its logged mutators must not be used.
+        /// Written only at genesis (`seed_stud_ground_genesis`), never
+        /// mutated; the `#[undo(map)]` wrapper is only map plumbing, its
+        /// logged mutators must not be used.
         #[undo(map)]
         stud_ground: BTreeMap<crate::ColumnCoords, crate::StudColumnGround>,
-        /// Per-column ground recipes from worldgen: what lies below each
-        /// column's materialised band. Written only at genesis
-        /// (`seed_ground_genesis`), never mutated, so it never needs undo; the
-        /// `#[undo(map)]` wrapper is only map plumbing, its logged mutators
-        /// must not be used.
-        #[undo(map)]
-        ground: BTreeMap<crate::ColumnCoords, crate::ColumnGround>,
-        /// The region's static water bodies (`water.rs`), labelled from the
-        /// ground recipes' water at genesis (`seed_water_genesis`). Like
-        /// `ground`: never mutated, so it never needs undo; the
-        /// `#[undo(map)]` wrapper is only map plumbing, its logged mutators
-        /// must not be used.
-        #[undo(map)]
-        water_bodies: BTreeMap<crate::WaterBodyId, crate::WaterBody>,
         /// Fortress orders waiting on tiles (`orders.rs`).
         #[undo(map)]
         designations: BTreeMap<crate::TilePos, crate::Designation>,
@@ -379,16 +323,6 @@ mod game_data {
         /// pile mirrors), by world cell: what a chest across a seam shows.
         #[undo(map)]
         halo_containers: BTreeMap<crate::WorldBlockPos, crate::Container>,
-        /// Read-only mirror of the neighbours' terrain within
-        /// `HALO_BLOCKS` of each edge (`halo.rs`), by world chunk.
-        #[undo(map)]
-        halo: BTreeMap<crate::WorldChunkPos, crate::HaloChunk>,
-        /// The neighbours' ground recipes for the halo's chunk columns
-        /// (`halo.rs`), by world chunk column (`y` 0): below a neighbour's
-        /// materialised band the halo reads its implied ground, as
-        /// `implied_block` does here. Arrive with halo seeds; never change.
-        #[undo(map)]
-        halo_ground: BTreeMap<crate::WorldChunkPos, crate::ColumnGround>,
         /// Read-only mirror of the neighbours' stud chunks in the halo band
         /// (`stud_halo.rs`), by world chunk (`y` = stud layer): fixed
         /// colliders, never entities (not in `stud_index` / `Ecs::stud`).
@@ -420,7 +354,6 @@ mod game_data {
         camera: Component<Camera>,
         isometry: Component<Pose>,
         rigidbody: Component<RigidBodyHandle>,
-        chunk: Component<Chunk>,
         kind: Component<EntityKind>,
         /// Stable world-unique identity of a crossing-capable entity.
         id: Component<crate::EntityId>,
@@ -430,8 +363,6 @@ mod game_data {
         animator: Component<crate::anim::Animator>,
         /// Collider per rig bone, re-posed from the animator every tick.
         bones: Component<crate::anim::BoneColliders>,
-        /// Terrain detached into a falling body (`voxel_body.rs`).
-        voxel_body: Component<crate::voxel_body::VoxelBody>,
         /// An adventurer's walk toward a `MoveTo` goal (`adventure.rs`).
         walker: Component<crate::Walker>,
         /// When an idle person next wanders (`people.rs`).
@@ -493,24 +424,6 @@ impl std::ops::DerefMut for PhysicsParams {
     }
 }
 
-/// `(x, z, y)` of a chunk — the key of `GameData::chunk_index`.
-pub type ChunkIndexKey = (usize, usize, i32);
-
-/// Chunk coords recovered from a chunk body's translation (bodies sit at exact
-/// multiples of `CHUNK_UNITS`). The only place coords are derived from a body.
-pub fn chunk_coords_from_translation(t: Vector) -> ChunkCoords {
-    let u = CHUNK_UNITS as f32;
-    ChunkCoords::new((t.x / u) as usize, (t.y / u).floor() as i32, (t.z / u) as usize)
-}
-
-pub fn chunk_index_key(c: ChunkCoords) -> ChunkIndexKey {
-    (c.x, c.z, c.y)
-}
-
-pub fn chunk_coords_of_index_key((x, z, y): ChunkIndexKey) -> ChunkCoords {
-    ChunkCoords::new(x, y, z)
-}
-
 impl GameData {
     pub fn into_game_update_iter(self) {}
 
@@ -547,22 +460,6 @@ impl GameData {
         &self.pile_expiry
     }
 
-    /// The terrain halo's mirrored chunks, by world chunk (for the client's
-    /// tile mirror).
-    pub fn halo_terrain(&self) -> &std::collections::BTreeMap<crate::WorldChunkPos, crate::HaloChunk> {
-        &self.halo
-    }
-
-    /// The terrain halo's ground recipes, by world chunk column.
-    pub fn halo_grounds(&self) -> &std::collections::BTreeMap<crate::WorldChunkPos, crate::ColumnGround> {
-        &self.halo_ground
-    }
-
-    /// The region's static water bodies, labelled at genesis.
-    pub fn water_bodies(&self) -> &std::collections::BTreeMap<crate::WaterBodyId, crate::WaterBody> {
-        &self.water_bodies
-    }
-
     /// The stud ground recipes, by chunk column (for the client's stud mirror).
     pub fn stud_ground_recipes(&self) -> &std::collections::BTreeMap<crate::ColumnCoords, crate::StudColumnGround> {
         &self.stud_ground
@@ -577,11 +474,6 @@ impl GameData {
     pub fn stud_halo_recipes(&self) -> &std::collections::BTreeMap<crate::WorldChunkPos, crate::StudColumnGround> {
         &self.stud_halo_ground
     }
-
-    /// The per-column ground recipes (for the client's tile mirror).
-    pub fn ground_recipes(&self) -> &std::collections::BTreeMap<crate::ColumnCoords, crate::ColumnGround> {
-        &self.ground
-    }
 }
 
 impl Undo<Ecs> {
@@ -592,14 +484,12 @@ impl Undo<Ecs> {
         self.camera.insert_safe(key);
         self.isometry.insert_safe(key);
         self.rigidbody.insert_safe(key);
-        self.chunk.insert_safe(key);
         self.kind.insert_safe(key);
         self.id.insert_safe(key);
         self.motion.insert_safe(key);
         self.slime.insert_safe(key);
         self.animator.insert_safe(key);
         self.bones.insert_safe(key);
-        self.voxel_body.insert_safe(key);
         self.walker.insert_safe(key);
         self.wander.insert_safe(key);
         self.stud.insert_safe(key);
@@ -607,21 +497,10 @@ impl Undo<Ecs> {
         key
     }
 
-    /// A genesis terrain chunk: only the `rigidbody` and `chunk` slots. The
+    /// A genesis stud chunk: only the `rigidbody` and `stud` slots. The
     /// other components have no slot at all (`try_get` reads `None`), so the
     /// per-tick scans over `kind`/`slime`/`motion` walk the handful of mobile
-    /// entities instead of every chunk (~300k over open sea: `scan_boundaries`
-    /// + `freeze_strays_safe` + the slime cap were ~20% of a region tick).
-    /// Chunks leave through `remove_chunk_raw`, never `remove_entity_safe`.
-    pub(crate) fn create_chunk_entity_raw(&mut self) -> EntityKey {
-        let key = self.entities.insert_raw(());
-        self.rigidbody.raw_mut().insert(key, None);
-        self.chunk.raw_mut().insert(key, None);
-        key
-    }
-
-    /// A genesis stud chunk: only the `rigidbody` and `stud` slots (as
-    /// [`Self::create_chunk_entity_raw`] for terrain chunks).
+    /// entities instead of every chunk.
     pub(crate) fn create_stud_entity_raw(&mut self) -> EntityKey {
         let key = self.entities.insert_raw(());
         self.rigidbody.raw_mut().insert(key, None);
@@ -835,102 +714,6 @@ where
     }
 }
 
-/// Writes one block's full state (block + chisel entry) into a chunk. Going
-/// through `ChunkBlocks::set` keeps the grid canonical in both directions.
-fn write_chunk_block(chunk: &mut Chunk, index: BlockIndex, block: Block, chisel: Option<ChiselData>) {
-    chunk.blocks.set(index, block);
-    match chisel {
-        Some(c) => {
-            chunk.chisel.insert(index, c);
-        }
-        None => {
-            chunk.chisel.remove(&index);
-        }
-    }
-}
-
-impl Undo<Component<Chunk>> {
-    /// Sets one block of chunk entity `key` (its block and chisel entry),
-    /// undo-safely, without copying the chunk. The inverse writes back only
-    /// the old block and old chisel entry for `index`. That is exact because
-    /// `ChunkBlocks` is canonical — a function of its block contents — and
-    /// `ChunkBlocks::set` normalises in both directions (a differing write
-    /// densifies a `Uniform` grid, a `Dense` grid whose blocks all become
-    /// equal collapses), so restoring the old contents restores the old
-    /// value; the chisel `BTreeMap` is restored entry-for-entry. Delta mode
-    /// digests the chunk's slot, as `set_safe` does; Off and Full never read
-    /// the digest, so neither side computes it there.
-    ///
-    /// Panics if `key` has no chunk: callers write only into an existing
-    /// chunk entity (`write_block_safe` spawns one first for a new slot).
-    pub fn set_chunk_block_safe(
-        &mut self,
-        key: EntityKey,
-        index: BlockIndex,
-        block: Block,
-        chisel: Option<ChiselData>,
-    ) {
-        crate::halo::touch_chunk(key);
-        let chunk = self
-            .list
-            .get(key)
-            .and_then(Option::as_ref)
-            .expect("set_chunk_block_safe: no chunk at key");
-        let old_block = chunk.blocks.get(index);
-        let old_chisel = chunk.chisel.get(&index).cloned();
-        let delta = crate::hash_mode() == crate::HashMode::Delta;
-        let pre = if delta { component_slot_digest(key, self.list.get(key)) } else { 0 };
-        self.undo_digest(pre, move |d, _| {
-            let chunk = d.list.get_mut(key).and_then(Option::as_mut).expect("set_chunk_block_safe undo: chunk gone");
-            write_chunk_block(chunk, index, old_block, old_chisel);
-            // Full/Off never read the returned digest.
-            if delta { component_slot_digest(key, d.list.get(key)) } else { 0 }
-        });
-        let chunk = self
-            .raw_mut()
-            .list
-            .get_mut(key)
-            .and_then(Option::as_mut)
-            .expect("set_chunk_block_safe: no chunk at key");
-        write_chunk_block(chunk, index, block, chisel);
-    }
-
-    /// [`Self::set_chunk_block_safe`] for many blocks of one chunk in one
-    /// undo entry: the inverse writes back each old block and chisel entry
-    /// (exact for the same reason — canonical grid, entry-for-entry chisel).
-    /// `writes` must not repeat an index.
-    pub fn set_chunk_blocks_safe(&mut self, key: EntityKey, writes: Vec<(BlockIndex, Block, Option<ChiselData>)>) {
-        crate::halo::touch_chunk(key);
-        let chunk = self
-            .list
-            .get(key)
-            .and_then(Option::as_ref)
-            .expect("set_chunk_blocks_safe: no chunk at key");
-        let olds: Vec<(BlockIndex, Block, Option<ChiselData>)> = writes
-            .iter()
-            .map(|&(index, _, _)| (index, chunk.blocks.get(index), chunk.chisel.get(&index).cloned()))
-            .collect();
-        let delta = crate::hash_mode() == crate::HashMode::Delta;
-        let pre = if delta { component_slot_digest(key, self.list.get(key)) } else { 0 };
-        self.undo_digest(pre, move |d, _| {
-            let chunk = d.list.get_mut(key).and_then(Option::as_mut).expect("set_chunk_blocks_safe undo: chunk gone");
-            for (index, block, chisel) in olds.iter().rev() {
-                write_chunk_block(chunk, *index, *block, chisel.clone());
-            }
-            if delta { component_slot_digest(key, d.list.get(key)) } else { 0 }
-        });
-        let chunk = self
-            .raw_mut()
-            .list
-            .get_mut(key)
-            .and_then(Option::as_mut)
-            .expect("set_chunk_blocks_safe: no chunk at key");
-        for (index, block, chisel) in writes {
-            write_chunk_block(chunk, index, block, chisel);
-        }
-    }
-}
-
 impl<T> Component<T>
 where
     T: 'static + Default + Clone + Send,
@@ -967,7 +750,7 @@ where
     }
 }
 
-// Player spawn / capsule tunables (voxel units; 1 unit = 1/16 m). Exposed as
+// Player spawn / capsule tunables (sim units; 1 unit = 1/16 m). Exposed as
 // named constants so they can be tuned without hunting through the spawn math.
 // The capsule dimensions derive from the metre tunables in `movement.rs`.
 use crate::movement::{PLAYER_CAPSULE_HALF_HEIGHT, PLAYER_CAPSULE_RADIUS};
@@ -975,7 +758,7 @@ use crate::movement::{PLAYER_CAPSULE_HALF_HEIGHT, PLAYER_CAPSULE_RADIUS};
 const PLAYER_SPAWN_CLEARANCE: f32 = 3.6;
 /// Region-local voxel (x, z) of the centre of block column `[bx, bz]`.
 pub fn block_column_xz([bx, bz]: [u32; 2]) -> (f32, f32) {
-    let bv = crate::BLOCK_VOXELS as f32;
+    let bv = crate::BLOCK_UNITS as f32;
     ((bx as f32 + 0.5) * bv, (bz as f32 + 0.5) * bv)
 }
 
@@ -1002,166 +785,6 @@ impl Rollback {
     /// state the region is never rolled back below (stud genesis).
     pub fn set_body_scale_raw(&mut self, s: crate::movement::BodyScale) {
         self.data.body_scale.set_raw(s);
-    }
-
-    pub(crate) fn chunk_coords_of(&self, key: EntityKey) -> Option<ChunkCoords> {
-        let handle = (*self.data.ecs.rigidbody.try_get(key))?;
-        let t = self.data.physics.bodies.get(handle)?.translation();
-        // Chunk bodies sit at exact multiples of CHUNK_UNITS (seed_terrain_genesis / create_mesh).
-        Some(crate::chunk_coords_from_translation(t))
-    }
-
-    /// The terrain chunk entity at `coords`, if any.
-    pub fn chunk_key_at(&self, coords: ChunkCoords) -> Option<EntityKey> {
-        self.data.chunk_index.get(&chunk_index_key(coords)).copied()
-    }
-
-    /// Runtime chunk insertion (undo-safe): multi-scale decomposition only,
-    /// unlike `seed_terrain_genesis`. Deliberately never collapses a
-    /// fully-solid chunk to a single cuboid, so the same chunk content can
-    /// yield a different collider shape depending on which path built it.
-    /// That's safe because client and server always run the same path
-    /// (create_mesh at runtime, seed_terrain_genesis at genesis) for the
-    /// same chunk, so both sides still agree — but it's hash-relevant:
-    /// unifying the two paths would shift state hashes.
-    pub fn create_mesh(&mut self, coords: ChunkCoords, chunk: Chunk) -> EntityKey {
-        let e = self.ecs.create_entity_safe();
-        // Multi-scale decomposition: whole solid blocks at block scale, solid
-        // 8³ chisel octants at half-block scale, other chisel detail at voxel scale. Covers exactly
-        // derive_voxels' solid cells.
-        let cells = crate::collider_cells(&chunk);
-        self.ecs.chunk.set_safe(e, Some(chunk));
-        self.chunk_index.insert(chunk_index_key(coords), e);
-        crate::halo::touch_chunk(e);
-        let position = Pose::from_translation(Vector::new((coords.x * CHUNK_UNITS) as f32, (coords.y * CHUNK_UNITS as i32) as f32, (coords.z * CHUNK_UNITS) as f32));
-        let body = RigidBodyBuilder::fixed()
-            .pose(position)
-            .user_data(e.data().as_ffi() as u128)
-            .build();
-        // Tier-2 with a true fork inverse + delta digest: reverts the arena
-        // allocator exactly; verification hashes just this slot + alloc state.
-        let (prev_head, prev_len) = self.data.physics.bodies.alloc_state();
-        let mut scope = self.data.physics.bodies.undo_scope_digest();
-        let handle = scope.insert(body);
-        scope.register(
-            body_slot_digest((prev_head, prev_len), None),
-            move |bodies, _| {
-                bodies.revert_insert(handle, prev_head, prev_len);
-                body_slot_digest(bodies.alloc_state(), bodies.get(handle))
-            },
-        );
-        self.ecs.rigidbody.set_safe(e, Some(handle));
-        for (size, keys) in cells.grids() {
-            self.attach_voxels_collider_safe(e, handle, keys, size as f32);
-        }
-        e
-    }
-
-    /// Bulk terrain build for region genesis. Inserts every chunk's fixed body
-    /// and collider WITHOUT the per-chunk whole-`PhysicsState` snapshot that
-    /// `create_mesh` takes for undo-safe runtime edits. Genesis is the base
-    /// state and is never rolled back below itself, so raw (unlogged) inserts
-    /// are correct and turn the build from O(N^2) (a growing clone per chunk)
-    /// into O(N). Fully-solid chunks get a single cuboid; partial chunks get
-    /// up to three parry `Voxels` shapes — whole solid blocks at block scale
-    /// (voxel_size = BLOCK_VOXELS), solid 8³ chisel octants at half-block scale
-    /// (HALF_BLOCK_VOXELS) and chisel detail at voxel scale (1.0).
-    /// A chunk solid purely via fully-occupied chisel no longer collapses to
-    /// a cuboid (collision-identical, just uncollapsed).
-    /// The ECS writes (entity + component slots) are raw for the same reason
-    /// the physics inserts are — no undo entries, no digests, no renderer
-    /// emits.
-    pub fn seed_terrain_genesis(&mut self, chunks: Vec<(ChunkCoords, Chunk)>) {
-        for (coords, chunk) in chunks {
-            let e = self.ecs.create_chunk_entity_raw();
-            let cells = crate::collider_cells(&chunk);
-            self.ecs.chunk.raw_mut().insert(e, Some(chunk));
-            self.chunk_index.insert_raw(chunk_index_key(coords), e);
-            let position = Pose::from_translation(Vector::new((coords.x * CHUNK_UNITS) as f32, (coords.y * CHUNK_UNITS as i32) as f32, (coords.z * CHUNK_UNITS) as f32));
-            let body = RigidBodyBuilder::fixed()
-                .pose(position)
-                .user_data(e.data().as_ffi() as u128)
-                .build();
-            // Raw, unlogged insert: covered by the genesis base state.
-            let handle = self.data.physics.raw_mut().bodies.raw_mut().insert(body);
-            self.ecs.rigidbody.raw_mut().insert(e, Some(handle));
-            if cells.is_empty() {
-                continue;
-            }
-            let user_data = e.data().as_ffi() as u128;
-            let mut colliders = Vec::with_capacity(3);
-            if cells.is_full_cube() {
-                // A fully-solid chunk's collision surface is exactly one
-                // CHUNK_UNITS-edge cuboid, centred body-local at its half edge.
-                let h = CHUNK_UNITS as f32 / 2.0;
-                colliders.push(
-                    ColliderBuilder::cuboid(h, h, h)
-                        .translation(Vector::new(h, h, h))
-                        .user_data(user_data)
-                        .build(),
-                );
-            } else {
-                // Multi-scale decomposition: whole solid blocks at block
-                // scale, solid 8³ chisel octants at half-block scale, other
-                // chisel detail at voxel scale.
-                for (size, keys) in cells.grids() {
-                    colliders.push(
-                        ColliderBuilder::voxels(Vector::splat(size as f32), keys)
-                            .user_data(user_data)
-                            .build(),
-                    );
-                }
-            }
-            let phys = self.data.physics.raw_mut();
-            for collider in colliders {
-                phys.colliders
-                    .raw_mut()
-                    .insert_with_parent(collider, handle, phys.bodies.raw_mut());
-            }
-        }
-    }
-
-    /// Genesis-only: raw, unlogged insert of the per-column ground recipes.
-    pub fn seed_ground_genesis(&mut self, ground: Vec<(crate::ColumnCoords, crate::ColumnGround)>) {
-        for (coords, g) in ground {
-            self.ground.insert_raw(coords, g);
-        }
-    }
-
-    /// Genesis-only: raw, unlogged insert of the water bodies labelled from
-    /// the ground recipes (`label_water_bodies`).
-    pub fn seed_water_genesis(&mut self, bodies: std::collections::BTreeMap<crate::WaterBodyId, crate::WaterBody>) {
-        for (id, body) in bodies {
-            self.water_bodies.insert_raw(id, body);
-        }
-    }
-
-    /// The block the ground recipe implies at `local` of chunk `coords`,
-    /// when that chunk is not materialised. `None` for a chunk entity, a
-    /// column without ground, or a sub-chunk inside the band.
-    pub fn implied_block(&self, coords: ChunkCoords, local: (usize, usize, usize)) -> Option<crate::Block> {
-        if self.chunk_index.contains_key(&chunk_index_key(coords)) {
-            return None;
-        }
-        crate::ground::implied_block(self.ground.get(&crate::ColumnCoords::new(coords.x, coords.z)), coords, local)
-    }
-
-    /// Attach a voxel-grid collider to an entity's body. One cell per key;
-    /// for voxel size `s`, cell g spans [g*s, (g+1)*s) in body-local space —
-    /// scale 1.0 is the render mesh's voxel grid, scale `BLOCK_VOXELS` is
-    /// the block grid. Entity-generic. Undo is the exact footprint inverse
-    /// (see attach_collider_safe) — no whole-PhysicsState snapshot.
-    pub fn attach_voxels_collider_safe(
-        &mut self,
-        e: EntityKey,
-        body: RigidBodyHandle,
-        coords: &[IVector],
-        voxel_size: f32,
-    ) {
-        let collider = ColliderBuilder::voxels(Vector::splat(voxel_size), coords)
-            .user_data(e.data().as_ffi() as u128)
-            .build();
-        self.attach_collider_safe(body, collider);
     }
 
     /// Attach a capsule collider to an entity's body. Entity-generic: player
@@ -1238,63 +861,19 @@ impl Rollback {
         });        handle
     }
 
-    /// Highest solid voxel Y at region-local voxel column `(vx, vz)`, scanning
-    /// the terrain chunks already built in this region. `None` if that column
-    /// is all air or no chunk covers it. Voxel units — the same space as body
-    /// and collider coordinates. Chunk entities don't store `ChunkCoords`, so
-    /// the owning chunk column is recovered from each chunk body's translation
-    /// (`coords * CHUNK_UNITS`). Pure read of built terrain, hence deterministic: client
-    /// and server derive the same surface height.
-    pub fn surface_voxel_y(&self, vx: i32, vz: i32) -> Option<i32> {
-        self.surface_voxel(vx, vz).map(|(y, _)| y)
-    }
-
-    /// [`Self::surface_voxel_y`] plus the material of that topmost voxel.
-    pub fn surface_voxel(&self, vx: i32, vz: i32) -> Option<(i32, BlockId)> {
-        let (cx, cz) = (vx.div_euclid(CHUNK_UNITS as i32), vz.div_euclid(CHUNK_UNITS as i32));
-        let (lx, lz) = (vx.rem_euclid(CHUNK_UNITS as i32) as u32, vz.rem_euclid(CHUNK_UNITS as i32) as u32);
-        if cx < 0 || cz < 0 {
-            return None;
-        }
-        let (cx, cz) = (cx as usize, cz as usize);
-        // Chunks of this column, highest first: the first with any solid voxel
-        // in the column holds the surface. Chunk Y comes from the index key.
-        for (&(_, _, cy), &e) in self.data.chunk_index.range((cx, cz, i32::MIN)..=(cx, cz, i32::MAX)).rev() {
-            let Some(chunk) = self.data.ecs.chunk.try_get(e).as_ref() else { continue };
-            if let Some((ly, block)) = chunk.column_top(lx, lz) {
-                return Some((cy * CHUNK_UNITS as i32 + ly as i32, block));
-            }
-        }
-        None
-    }
-
     pub fn create_player_safe(&mut self, client_id: ClientId) {
         self.create_player_at_safe(client_id, self.spawn_xz());
     }
 
-    /// Body-centre height a player spawns at over region-local `xz` (voxel
-    /// units): on the terrain surface, clear of the capsule — real terrain
-    /// has real elevation, so a hardcoded flat-floor height would bury the
-    /// player. `surface + 1` is the surface voxel's top face; capsule
-    /// half-extent + clearance sits the body above it. Over recipe water
-    /// (`ColumnGround::recipe_water`) the surface is the water's top, not
-    /// the bed: the body starts on the water, as it would land there. Falls
-    /// back only if the column is all air and dry.
+    /// Body-centre height a player spawns at over region-local `xz` (sim
+    /// units): on the terrain surface, clear of the capsule. The surface is
+    /// the bricks' top, or the recipe water standing over it (the body starts
+    /// on the water, as it would land there). Falls back only if the column
+    /// is all air and dry.
     pub fn player_spawn_y(&self, (x, z): (f32, f32)) -> f32 {
-        let (vx, vz) = (x as i32, z as i32);
-        let ground = self.surface_voxel_y(vx, vz);
-        let bv = crate::BLOCK_VOXELS as i32;
-        let water = self.recipe_water_top_at(vx.div_euclid(bv), vz.div_euclid(bv)).map(|top| (top + 1) * bv - 1);
-        // The voxel surface's top face, or a stud surface above it.
-        let voxel_top = ground.max(water).map(|surface| (surface + 1) as f32);
-        // Stud terrain: the bricks' top, or the recipe water standing over it.
-        let stud_top = match (self.stud_surface_y(x, z), self.stud_water_surface_units(x, z)) {
+        let top = match (self.stud_surface_y(x, z), self.stud_water_surface_units(x, z)) {
             (Some(s), Some(w)) => Some(s.max(w)),
             (s, w) => s.or(w),
-        };
-        let top = match (voxel_top, stud_top) {
-            (Some(v), Some(s)) => Some(v.max(s)),
-            (v, s) => v.or(s),
         };
         match top {
             Some(top) => {
@@ -1308,18 +887,7 @@ impl Rollback {
         }
     }
 
-    /// The top block Y of the recipe water over region-local block column
-    /// `(bx, bz)`, if it has any (own `ground` only).
-    fn recipe_water_top_at(&self, bx: i32, bz: i32) -> Option<i32> {
-        let (n, cb) = (crate::REGION_BLOCKS as i32, crate::CHUNK_BLOCKS as i32);
-        if !(0..n).contains(&bx) || !(0..n).contains(&bz) {
-            return None;
-        }
-        let g = self.data.ground.get(&crate::ColumnCoords::new((bx / cb) as usize, (bz / cb) as usize))?;
-        g.recipe_water((bx % cb) as usize, (bz % cb) as usize).map(|(_, top)| top)
-    }
-
-    /// [`Self::create_player_safe`] over region-local `xz` (voxel units).
+    /// [`Self::create_player_safe`] over region-local `xz` (sim units).
     pub fn create_player_at_safe(&mut self, client_id: ClientId, xz: (f32, f32)) {
         let (spawn_x, spawn_z) = xz;
         let spawn_y = self.player_spawn_y(xz);
@@ -1349,7 +917,7 @@ impl Rollback {
     }
 
     /// `client_id`'s player body (camera, capsule, rig), its centre at
-    /// region-local `translation` (voxel units). The `clients` entry is the
+    /// region-local `translation` (sim units). The `clients` entry is the
     /// caller's.
     pub fn create_player_body_safe(&mut self, client_id: ClientId, translation: Vector) {
         let e = self.ecs.create_entity_safe();
@@ -1364,7 +932,7 @@ impl Rollback {
             .can_sleep(false)
             .user_data(e.data().as_ffi() as u128)
             .build();
-        // True fork inverse + delta digest, same shape as in create_mesh.
+        // True fork inverse + delta digest, same shape as in `create_stud_chunk_safe`.
         let (prev_head, prev_len) = self.data.physics.bodies.alloc_state();
         let mut scope = self.data.physics.bodies.undo_scope_digest();
         let handle = scope.insert(body);
@@ -1461,22 +1029,8 @@ impl Rollback {
                 GameDataUpdateKind::SetAnimator(key, Some(animator)),
             ));
         }
-        // Voxel body: on undo, re-advertise its model (the entity's
+        // Stud body: on undo, re-advertise its model (the entity's
         // CreateEntity alone would come back empty).
-        if let Some(vb) = self.data.ecs.voxel_body.try_get(key).clone() {
-            let pose = self
-                .data
-                .ecs
-                .rigidbody
-                .try_get(key)
-                .and_then(|h| self.data.physics.bodies.get(h).map(|b| *b.position()))
-                .unwrap_or_else(Pose::identity);
-            self.data.ecs.voxel_body.emit_on_undo(GameDataUpdate::new(
-                GameDataTransactionKind::Undo,
-                GameDataUpdateKind::AddVoxelBody(key, pose, Box::new(vb.model)),
-            ));
-        }
-        // Stud body: likewise.
         if let Some(sb) = self.data.ecs.stud_body.try_get(key).clone() {
             let pose = self
                 .data
@@ -1490,14 +1044,8 @@ impl Rollback {
                 GameDataUpdateKind::AddStudBody(key, pose, Box::new(sb.model)),
             ));
         }
-        // A terrain chunk leaves the index (before its body goes: the body
-        // is where its coordinates come from).
-        if self.data.ecs.chunk.try_get(key).is_some() {
-            if let Some(coords) = self.chunk_coords_of(key) {
-                self.data.chunk_index.remove(&chunk_index_key(coords));
-            }
-        }
-        // A stud chunk leaves its index the same way.
+        // A stud chunk leaves its index (before its body goes: the body is
+        // where its coordinates come from).
         if self.data.ecs.stud.try_get(key).is_some() {
             if let Some(coords) = self.stud_coords_of(key) {
                 self.data.stud_index.remove(&coords);
@@ -1529,7 +1077,6 @@ impl Rollback {
         self.data.ecs.camera.remove_safe(key);
         self.data.ecs.rigidbody.remove_safe(key);
         self.data.ecs.isometry.remove_safe(key);
-        self.data.ecs.chunk.remove_safe(key);
         if let Some(id) = *self.data.ecs.id.try_get(key) {
             self.data.id_index.remove(&id);
         }
@@ -1539,7 +1086,6 @@ impl Rollback {
         self.data.ecs.slime.remove_safe(key);
         self.data.ecs.animator.remove_safe(key);
         self.data.ecs.bones.remove_safe(key);
-        self.data.ecs.voxel_body.remove_safe(key);
         self.data.ecs.walker.remove_safe(key);
         self.data.ecs.wander.remove_safe(key);
         self.data.ecs.stud.remove_safe(key);
@@ -1617,7 +1163,7 @@ impl Rollback {
     ) {
         let body = state.build(e);
         // Tier-2 with a true fork inverse + delta digest, same shape as in
-        // create_mesh.
+        // `create_stud_chunk_safe`.
         let (prev_head, prev_len) = self.data.physics.bodies.alloc_state();
         let mut scope = self.data.physics.bodies.undo_scope_digest();
         let handle = scope.insert(body);
@@ -1888,7 +1434,7 @@ impl Rollback {
     }
 
     /// The transferable shape spec of a body's first collider (capsule,
-    /// cuboid, ball or a compound of those — a voxel body's compound reads
+    /// cuboid, ball or a compound of those — a stud body's compound reads
     /// back exactly). Any other shape cannot cross: a bug, which fails a
     /// debug build and is logged in release, where the player capsule stands
     /// in.
@@ -2098,62 +1644,11 @@ impl Rollback {
         (departures, halo)
     }
 
-    /// Change detector for the terrain `terrain_snapshot` would return, without
-    /// building it: no chunk is cloned and nothing is serialized. The region
-    /// thread polls this every `TERRAIN_HASH_INTERVAL_TICKS`, so its cost is
-    /// paid forever on every running region — the clone + bincode of a full
-    /// snapshot measured 45–110 ms per check against a 50 ms tick (2026-09-19
-    /// capture), which is why the snapshot is now built only on a change.
-    ///
-    /// Each chunk contributes `crc32(coords, content)`; contributions are
-    /// summed, so ECS iteration order does not matter (the snapshot sorts for
-    /// the same reason). Coordinates are unique per chunk, so equal content in
-    /// two places cannot cancel out. Only ever compared with an earlier value
-    /// from the same process — not a wire or cross-machine hash.
-    pub fn terrain_fingerprint(&self) -> u32 {
-        let mut sum = 0u32;
-        for (key, _) in self.data.ecs.chunk.iter() {
-            sum = sum.wrapping_add(self.chunk_terrain_term(key).unwrap_or(0));
-        }
-        sum
-    }
-
-    /// One chunk's `terrain_fingerprint` contribution; `None` for a key
-    /// without a terrain chunk body.
-    pub fn chunk_terrain_term(&self, key: EntityKey) -> Option<u32> {
-        let chunk = self.data.ecs.chunk.try_get(key).as_ref()?;
-        let handle = (*self.data.ecs.rigidbody.try_get(key))?;
-        let body = self.data.physics.bodies.get(handle)?;
-        let t = body.translation();
-        let mut h = crate::StateHasher::new();
-        // Same coordinate derivation as `terrain_snapshot`.
-        let c = chunk_coords_from_translation(t);
-        (c.x as i64, c.y as i64, c.z as i64).state_hash(&mut h);
-        chunk.state_hash(&mut h);
-        Some(h.finalize())
-    }
-
-    /// Terrain-only extraction for far-region views. Iterates chunk
-    /// components; recovers each chunk's `ChunkCoords` from its fixed body
-    /// translation (`create_mesh` places bodies at `(cx*CHUNK_UNITS, cy*CHUNK_UNITS, cz*CHUNK_UNITS)`,
-    /// exact). No entities/physics/undo state leaks out.
+    /// The region's terrain as its neighbours need it (halo seeds of starting
+    /// neighbours are cut from it): the stud edge. No entities/physics/undo
+    /// state leaks out.
     pub fn terrain_snapshot(&self) -> crate::TerrainSnapshot {
-        let mut chunks = Vec::new();
-        for (key, maybe_chunk) in self.data.ecs.chunk.iter() {
-            let Some(chunk) = maybe_chunk else { continue };
-            let Some(handle) = *self.data.ecs.rigidbody.try_get(key) else { continue };
-            let Some(body) = self.data.physics.bodies.get(handle) else { continue };
-            let t = body.translation();
-            let coords = chunk_coords_from_translation(t);
-            chunks.push((coords, chunk.clone()));
-        }
-        // Sort by coordinate: `terrain_hash` bincode-serializes this Vec
-        // positionally, so a deterministic order keeps the hash
-        // order-insensitive and stable across sources (ECS insertion order
-        // here vs. column-iteration order in `TerrainSnapshot::from_columns`).
-        chunks.sort_by_key(|(c, _)| (c.x, c.y, c.z));
-        let ground = self.data.ground.iter().map(|(c, g)| (*c, g.clone())).collect();
-        crate::TerrainSnapshot { chunks, ground, stud: self.stud_edge() }
+        crate::TerrainSnapshot { stud: self.stud_edge() }
     }
 }
 
@@ -2272,16 +1767,11 @@ pub(crate) mod delta_digest_tests {
         assert_eq!(before, crate::state_hash(&r), "Full-mode attach must invert bit-exact");
 
         // Delta leg (production mode): the footprint-digest path must verify
-        // and invert identically, for the voxels variant too.
+        // and invert identically.
         set_hash_mode(HashMode::Delta);
         let before = crate::state_hash(&r);
         r.new_transaction();
-        r.attach_voxels_collider_safe(
-            e,
-            body,
-            &[IVector::new(0, 0, 0)],
-            1.0,
-        );
+        r.attach_capsule_collider_safe(e, body, 0.5, 0.25);
         r.rollback();
         assert_eq!(before, crate::state_hash(&r), "Delta-mode attach must invert bit-exact");
     }

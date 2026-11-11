@@ -1,18 +1,21 @@
 //! A player walking through the fork the way the game drives one: the game's
 //! own movement code (`game::movement::{plan, sweep_character, settle}`, its
-//! constants, `game::collider_cells` for terrain) against a bare physics
-//! world, so the fork is pinned by exactly what the game runs. The ports of
-//! `crates/game/tests/{walking_smoothness,sunk_body}.rs` drive it.
+//! constants) against a bare physics world over hand-built multi-scale
+//! `Voxels` terrain (`terrain.rs`), so the fork is pinned by what the game
+//! runs.
 #![allow(dead_code)]
 
 use game::movement::{self, Motion, MoveKeys, PLAYER_CAPSULE_HALF_HEIGHT, PLAYER_CAPSULE_RADIUS};
-use game::{BLOCK_VOXELS, CHUNK_BLOCKS, Chunk};
+use game::{BLOCK_UNITS, CHUNK_BLOCKS};
 use physics_next::PhysicsWorld;
 use rapier3d::prelude::*;
 use std::ops::Range;
 
+pub mod terrain;
+pub use terrain::{collider_cells, Cell, Chunk};
+
 /// A chunk's edge in world units.
-pub const CHUNK: f32 = (CHUNK_BLOCKS * BLOCK_VOXELS) as f32;
+pub const CHUNK: f32 = (CHUNK_BLOCKS * BLOCK_UNITS) as f32;
 /// The game's spawn column (`PLAYER_SPAWN_X`/`_Z`). At 2-block chunks it is
 /// the corner where chunk columns 3 and 4 meet rows 3 and 4; at larger chunks
 /// it lies inside a chunk, so fixtures state their terrain in world units
@@ -27,7 +30,7 @@ pub fn chunk_index_of(u: f32) -> i32 {
 
 /// The chunk holding the world-unit position `units`.
 pub fn chunk_of(units: Vector) -> game::ChunkCoords {
-    game::chunk_coords_from_translation(game::rapier3d::math::Vector::new(units.x, units.y, units.z))
+    game::ChunkCoords::new((units.x / CHUNK) as usize, (units.y / CHUNK).floor() as i32, (units.z / CHUNK) as usize)
 }
 
 /// Chunk `(x, z)` pairs overlapping the half-open world-unit rectangle
@@ -62,13 +65,12 @@ pub fn spawn_z_walk(ahead: f32) -> Range<f32> {
     SPAWN[1] - CHUNK..end
 }
 
-/// Adds `chunk`'s terrain at chunk coordinates `(x, y, z)`, the way
-/// `seed_terrain_genesis` does: one fixed body at the chunk origin; a full
+/// Adds `chunk`'s terrain at chunk coordinates `(x, y, z)`: one fixed body at the chunk origin; a full
 /// chunk is one cuboid, anything else a `Voxels` per `collider_cells` grid.
 pub fn add_chunk(w: &mut PhysicsWorld, (x, y, z): (i32, i32, i32), chunk: &Chunk) {
     let origin = Vector::new(x as f32, y as f32, z as f32) * CHUNK;
     let body = w.bodies.insert(RigidBodyBuilder::fixed().translation(origin));
-    let cells = game::collider_cells(chunk);
+    let cells = collider_cells(chunk);
     if cells.is_full_cube() {
         let half = 0.5 * CHUNK;
         let cuboid = ColliderBuilder::cuboid(half, half, half).translation(Vector::splat(half));

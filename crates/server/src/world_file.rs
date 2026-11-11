@@ -21,10 +21,6 @@ pub const PROCEDURAL_KEYWORD: &str = worldgen::forged::PROCEDURAL_KEYWORD;
 /// `VOXEL_WORLD_FILE` value that selects the toy-brick stud test world.
 pub const STUDS_KEYWORD: &str = "studs";
 
-/// An accepted alias of [`PROCEDURAL_KEYWORD`], from when the procedural world had two
-/// terrains: the client's debug launch still passes it.
-pub const STUDS_PROCEDURAL_KEYWORD: &str = "studs-procedural";
-
 /// The world store: a `.sqlite` path or a `postgres://` URL. Unset or empty =
 /// [`store_url_for`] the world file.
 pub const WORLD_DB_ENV: &str = "VOXEL_WORLD_DB";
@@ -65,14 +61,14 @@ pub enum WorldSource {
 
 /// `VOXEL_WORLD_FILE` + `VOXEL_WORLD_DB` -> the world to serve. A world file
 /// unset or empty is the default world (unless a store is named, which then
-/// imports nothing), `procedural` (alias `studs-procedural`) the noise world, `studs`
+/// imports nothing), `procedural` the noise world, `studs`
 /// the toy-brick test world, anything else a world file
 /// (relative paths from the repo root). The store is `VOXEL_WORLD_DB`, else
 /// the world file's `.sqlite`.
 pub fn resolve(world_file: Option<&str>, world_db: Option<&str>) -> Result<WorldSource, String> {
     let world_db = world_db.map(str::trim).filter(|s| !s.is_empty());
     let world_file = match world_file.map(str::trim) {
-        Some(PROCEDURAL_KEYWORD | STUDS_PROCEDURAL_KEYWORD) => {
+        Some(PROCEDURAL_KEYWORD) => {
             if world_db.is_some() {
                 log::warn!("[server] {WORLD_DB_ENV} is ignored: the procedural world keeps nothing");
             }
@@ -530,7 +526,6 @@ mod tests {
         assert_eq!(resolve(Some("procedural"), None).unwrap(), WorldSource::Procedural);
         assert_eq!(resolve(Some("procedural"), Some("x.sqlite")).unwrap(), WorldSource::Procedural);
         // The alias the client's debug launch still passes.
-        assert_eq!(resolve(Some("studs-procedural"), None).unwrap(), WorldSource::Procedural);
     }
 
     #[test]

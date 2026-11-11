@@ -112,7 +112,7 @@ mod tests {
         let working = WorkingLevel { level: Some(10), cut: true, ..Default::default() };
         let u = build_uniform(&working, home);
         assert!(cutaway_active(&u));
-        assert_eq!(u.cut.x, level::cut_plane_world_y(working.terrain, 10, RegionId { x: 0, z: 0 }));
+        assert_eq!(u.cut.x, level::cut_plane_world_y(10, RegionId { x: 0, z: 0 }));
         assert_eq!(u.cut.y, CAP_DARKEN);
 
         let off = WorkingLevel { level: Some(10), cut: false, ..Default::default() };

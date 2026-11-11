@@ -23,7 +23,7 @@ pub struct BodyBox;
 
 /// Edge of a body's placeholder box, world units: one block, the dev
 /// drop's cube (`game::body::dev_drop_body_safe`).
-pub const BODY_BOX_EDGE: f32 = game::BLOCK_VOXELS as f32;
+pub const BODY_BOX_EDGE: f32 = game::BLOCK_UNITS as f32;
 
 /// A unit cube plus the slime's materials; every part is the cube scaled.
 #[derive(Clone)]

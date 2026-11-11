@@ -80,7 +80,6 @@ impl Controller for PhysicsController {
                     crate::GameDataUpdateKind::UpdateCameraViewMatrix(e_id, *b.position()),
                 ));
             } else if data.ecs.motion.try_get(e_id).is_some()
-                || data.ecs.voxel_body.try_get(e_id).is_some()
                 || data.ecs.stud_body.try_get(e_id).is_some()
             {
                 // Camera-less movers (mobs): their pose reaches the renderer

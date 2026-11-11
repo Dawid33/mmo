@@ -28,7 +28,7 @@ use bevy::image::ImageSampler;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::prelude::*;
 use game::edit::BlockPos;
-use game::{BlockRegistry, ItemId, PileView, RegionId, BLOCK_VOXELS};
+use game::{BlockRegistry, ItemId, PileView, RegionId, BLOCK_UNITS};
 
 use super::commander::cut_entities::{home_rect, hidden_by_cut};
 use super::commander::level::{camera_cut, WorkingLevel};
@@ -181,16 +181,10 @@ pub(crate) fn material_for(
 /// on stud terrain a tile (as wide, 1.2 m tall — `kind.level_bottom_units`). A pile
 /// resting on a low floor INSIDE its stud tile is drawn at the tile's bottom (the
 /// floor's height is not looked up here).
-pub fn pile_world_position(region: RegionId, cell: BlockPos, kind: game::TerrainKind) -> Vec3 {
+pub fn pile_world_position(region: RegionId, cell: BlockPos) -> Vec3 {
     let o = region.world_offset();
-    let b = BLOCK_VOXELS as f32;
-    Vec3::new(o[0] + (cell[0] as f32 + 0.5) * b, o[1] + kind.level_bottom_units(cell[1]), o[2] + (cell[2] as f32 + 0.5) * b)
-}
-
-/// The terrain the session's regions run on (all regions of a world share it), from
-/// the body scale the region snapshots set (stud terrain before any arrived).
-pub(crate) fn session_terrain(scale: Option<&super::stud::ClientBodyScale>) -> game::TerrainKind {
-    scale.map_or(game::TerrainKind::Stud, |s| game::TerrainKind::of(s.0))
+    let b = BLOCK_UNITS as f32;
+    Vec3::new(o[0] + (cell[0] as f32 + 0.5) * b, o[1] + game::level_bottom_units(cell[1]), o[2] + (cell[2] as f32 + 0.5) * b)
 }
 
 /// The cubes `stacks` are drawn with: running number, offset from the cell's
@@ -227,7 +221,6 @@ fn spawn_pile(
     cell: BlockPos,
     mirror: bool,
     view: &PileView,
-    kind: game::TerrainKind,
 ) -> Entity {
     let mut children = Vec::new();
     for (n, base, mesh, material) in cube_layout(assets, images, mats, &view.stacks) {
@@ -246,7 +239,7 @@ fn spawn_pile(
         .spawn((
             ItemPileRoot { region, cell, mirror },
             SessionScoped,
-            Transform::from_translation(pile_world_position(region, cell, kind)),
+            Transform::from_translation(pile_world_position(region, cell)),
             Visibility::default(),
         ))
         .add_children(&children)
@@ -260,9 +253,7 @@ fn apply_pile_msgs(
     mut assets: ResMut<ItemPileAssets>,
     mut images: ResMut<Assets<Image>>,
     mut mats: ResMut<Assets<StandardMaterial>>,
-    scale: Option<Res<super::stud::ClientBodyScale>>,
 ) {
-    let kind = session_terrain(scale.as_deref());
     for msg in msgs.read() {
         let (region, changes, mirror) = match msg {
             ItemPileMsg::Set { region, changes } => (region, changes, false),
@@ -289,7 +280,7 @@ fn apply_pile_msgs(
                 commands.entity(old).despawn();
             }
             if let Some(view) = view.as_ref().filter(|v| !v.stacks.is_empty()) {
-                let e = spawn_pile(&mut commands, &mut assets, &mut images, &mut mats, *region, *cell, mirror, view, kind);
+                let e = spawn_pile(&mut commands, &mut assets, &mut images, &mut mats, *region, *cell, mirror, view);
                 map.insert((*region, *cell), e);
             }
         }
@@ -331,16 +322,14 @@ fn hide_cut_piles(
     level: Res<WorkingLevel>,
     tiles: Res<TileMirror>,
     pile_roots: Res<ItemPileRoots>,
-    scale: Option<Res<super::stud::ClientBodyScale>>,
     mut roots: Query<(&ItemPileRoot, &mut Visibility, &mut Transform, Option<&super::item_flights::LandingHold>)>,
 ) {
     let cut = camera_cut(&level, &tiles);
     let home = tiles.region().map(home_rect);
     let shown = shown_mirrors(&pile_roots);
-    let kind = session_terrain(scale.as_deref());
     for (root, mut vis, mut tf, hold) in &mut roots {
         // A pile spawned before the session's terrain was known moves to its place.
-        let at = pile_world_position(root.region, root.cell, kind);
+        let at = pile_world_position(root.region, root.cell);
         if tf.translation != at {
             tf.translation = at;
         }
@@ -443,10 +432,10 @@ mod tests {
         let r = roots(&mut app);
         assert_eq!(r.len(), 1);
         assert_eq!(r[0].1, 3, "40 items = 3 cubes");
-        assert_eq!(r[0].2, pile_world_position(region, cell, game::TerrainKind::Stud));
+        assert_eq!(r[0].2, pile_world_position(region, cell));
         // The cell is a tile: a metre wide, 1.2 m levels.
         let o = region.world_offset();
-        let b = BLOCK_VOXELS as f32;
+        let b = BLOCK_UNITS as f32;
         assert_eq!((r[0].2.x, r[0].2.z), (o[0] + 3.5 * b, o[2] + 7.5 * b));
         assert!((r[0].2.y - 5.0 * 1.2 * b).abs() < 1e-3, "{}", r[0].2);
 

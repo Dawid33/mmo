@@ -193,10 +193,8 @@ fn snapshot_roundtrip_is_equivalent() {
     let (restored, _) = snapshot(&restored_region, &SaveTerms::default());
 
     // Exhaustive on purpose: a new field must be compared (or named as not
-    // stored). P10b: `chunks`, `ground` and `water_bodies` are the voxel
-    // world's and hold nothing for a stud region.
-    let PortableRegion { meta, chunks, ground, entities, players, stud_chunks, stud_ground } = restored;
-    assert!(chunks.is_empty() && ground == Some(Vec::new()), "a stud region has no voxel terrain");
+    // stored).
+    let PortableRegion { meta, entities, players, stud_chunks, stud_ground } = restored;
     let RegionMeta {
         tick: _,
         next_game_event_id,
@@ -209,7 +207,6 @@ fn snapshot_roundtrip_is_equivalent() {
         intents,
         intent_replies,
         intent_inbox,
-        water_bodies,
     } = meta;
     let o = &original.meta;
     assert_eq!(next_game_event_id, o.next_game_event_id);
@@ -222,7 +219,6 @@ fn snapshot_roundtrip_is_equivalent() {
     assert_eq!(intents, o.intents);
     assert_eq!(intent_replies, o.intent_replies);
     assert_eq!(intent_inbox, o.intent_inbox);
-    assert_eq!(water_bodies, o.water_bodies);
     assert_eq!(stud_chunks, original.stud_chunks);
     assert_eq!(stud_ground, original.stud_ground);
     assert_eq!(derived_velocities_zeroed(entities), derived_velocities_zeroed(original.entities.clone()));

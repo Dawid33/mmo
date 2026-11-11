@@ -5,44 +5,6 @@
 //! `game`/`client`/`server` depends on this crate.
 
 use rapier3d::prelude::*;
-use serde::Deserialize;
-
-/// Mirror of `crates/worldgen/examples/export_region_colliders.rs`'s output
-/// (bincode is structural: keep the field order and types in sync).
-#[derive(Deserialize)]
-pub struct RegionExport {
-    pub region: [i32; 2],
-    pub region_chunks: u32,
-    pub region_size: f32,
-    pub units_per_meter: f32,
-    /// `(half_height, radius)` of the player capsule.
-    pub player_capsule: [f32; 2],
-    /// World units per second.
-    pub walk_speed: f32,
-    pub chunks: Vec<ExportedChunk>,
-}
-
-#[derive(Deserialize)]
-pub struct ExportedChunk {
-    pub origin: [f32; 3],
-    pub colliders: Vec<ExportedCollider>,
-}
-
-#[derive(Deserialize)]
-pub enum ExportedCollider {
-    Voxels { voxel_size: [f32; 3], keys: Vec<[i32; 3]> },
-    Cuboid { half_extents: [f32; 3], translation: [f32; 3] },
-}
-
-pub fn load_region(path: &std::path::Path) -> RegionExport {
-    let bytes = std::fs::read(path).unwrap_or_else(|e| {
-        panic!(
-            "{}: {e}\nexport it first: cargo run --release -p worldgen --example export_region_colliders",
-            path.display()
-        )
-    });
-    bincode::deserialize(&bytes).expect("region export format")
-}
 
 /// Every structure `PhysicsPipeline::step` takes by `&mut`.
 #[derive(Default, Clone)]
@@ -196,28 +158,6 @@ mod erased {
 }
 
 impl PhysicsWorld {
-
-    /// The game's terrain: one fixed body per chunk (with or without
-    /// colliders), colliders attached in export order.
-    pub fn add_region(&mut self, export: &RegionExport) {
-        for chunk in &export.chunks {
-            let [x, y, z] = chunk.origin;
-            let body = self.bodies.insert(RigidBodyBuilder::fixed().translation(Vector::new(x, y, z)));
-            for c in &chunk.colliders {
-                let collider = match c {
-                    ExportedCollider::Voxels { voxel_size, keys } => {
-                        let keys: Vec<IVector> = keys.iter().map(|&k| IVector::from_array(k)).collect();
-                        ColliderBuilder::voxels(Vector::from_array(*voxel_size), &keys)
-                    }
-                    ExportedCollider::Cuboid { half_extents: [hx, hy, hz], translation } => {
-                        ColliderBuilder::cuboid(*hx, *hy, *hz).translation(Vector::from_array(*translation))
-                    }
-                };
-                self.colliders.insert_with_parent(collider, body, &mut self.bodies);
-            }
-        }
-    }
-
     /// Top surface below `(x, z)`, by a ray cast from far above.
     pub fn surface_y(&self, x: f32, z: f32) -> Option<f32> {
         let qp = self.broad_phase.as_query_pipeline(

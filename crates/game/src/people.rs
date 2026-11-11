@@ -8,7 +8,7 @@ use crate::history::PersonId;
 use crate::movement::{self, MoveKeys};
 use crate::{
     PersonSpawn, SpawnAt,
-    current_tile, nearest_standable, steer_on, ColliderSpec, EntityKey, EntityKind, GameDataTransactionKind,
+    current_tile, nearest_standable, steer, ColliderSpec, EntityKey, EntityKind, GameDataTransactionKind,
     GameDataUpdate, GameDataUpdateKind, Goal, Pose, RouteMap, RegionCoords, Rollback, REGION_BLOCKS,
 };
 use rapier3d::math::Vector;
@@ -39,7 +39,7 @@ pub struct Wander {
 }
 
 impl Rollback {
-    /// Give `person` a body at region-local `xz` (voxel units), standing on
+    /// Give `person` a body at region-local `xz` (sim units), standing on
     /// the terrain. `None`, with no change, if they already have one here.
     pub fn spawn_person_safe(&mut self, person: PersonId, xz: (f32, f32)) -> Option<EntityKey> {
         if self.data.person_entities.contains_key(&person) {
@@ -88,8 +88,8 @@ impl Rollback {
     pub fn apply_person_spawn_safe(&mut self, spawn: PersonSpawn, here: RegionCoords, map: Option<&RouteMap>) {
         let n = REGION_BLOCKS as i32;
         let landing = [
-            (crate::PLAYER_SPAWN_X as i32 / crate::BLOCK_VOXELS as i32).clamp(0, n - 1),
-            (crate::PLAYER_SPAWN_Z as i32 / crate::BLOCK_VOXELS as i32).clamp(0, n - 1),
+            (crate::PLAYER_SPAWN_X as i32 / crate::BLOCK_UNITS as i32).clamp(0, n - 1),
+            (crate::PLAYER_SPAWN_Z as i32 / crate::BLOCK_UNITS as i32).clamp(0, n - 1),
         ];
         let column = match spawn.at {
             SpawnAt::Column([x, z]) => [(x as i32).clamp(0, n - 1), (z as i32).clamp(0, n - 1)],
@@ -228,9 +228,7 @@ impl Rollback {
         let motion0 = (*self.data.ecs.motion.try_get(e)).unwrap_or_default();
         let scale = self.body_scale();
         let (keys, yaw) = match self.data.ecs.walker.try_get(e) {
-            Some(w) => {
-                steer_on(self.terrain_kind(), scale.step_height_m, w, self.feet_of(t), motion0.grounded, *self.data.region)
-            }
+            Some(w) => steer(w, self.feet_of(t), motion0.grounded, *self.data.region),
             None => (MoveKeys::default(), 0.0),
         };
         let walking = self.data.ecs.walker.try_get(e).is_some();
@@ -242,7 +240,7 @@ impl Rollback {
         }
         let mut motion = motion0;
         // Fitted to the region's body size, as a player's walk (`camera.rs`); with
-        // `BodyScale::VOXEL` this is `walk_body`, bit for bit.
+        // `BodyScale::UNIT` this is `walk_body`, bit for bit.
         let corrected = movement::walk_body_scaled(
             &mut motion,
             &keys,

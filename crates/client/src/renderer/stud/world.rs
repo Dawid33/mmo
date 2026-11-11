@@ -25,7 +25,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 use bevy::prelude::*;
-use game::{ColumnCoords, RegionId, StudChunk, StudColumnGround, TerrainKind, WorldChunkPos};
+use game::{ColumnCoords, RegionId, StudChunk, StudColumnGround, WorldChunkPos};
 
 use super::mesh::{dir_step, opposite_dir, FaceSlabs, RemeshQueue, Slab, StudMeshJob};
 
@@ -35,11 +35,10 @@ pub type StudGround = Arc<BTreeMap<ColumnCoords, StudColumnGround>>;
 /// What the bridge tells the stud mirror (and, through it, the tile mirror).
 #[derive(Message, Debug, Clone)]
 pub enum StudWorldMsg {
-    /// A region snapshot arrived (or was replaced): its terrain kind, ground
-    /// recipes and whole stud halo.
+    /// A region snapshot arrived (or was replaced): its ground recipes and
+    /// whole stud halo.
     Region {
         region: RegionId,
-        terrain: TerrainKind,
         ground: StudGround,
         halo: Vec<(WorldChunkPos, Option<StudChunk>)>,
         halo_ground: Vec<(WorldChunkPos, Option<StudColumnGround>)>,
@@ -58,7 +57,6 @@ impl StudWorldMsg {
     pub fn of_snapshot(region: RegionId, data: &game::GameData) -> Self {
         StudWorldMsg::Region {
             region,
-            terrain: TerrainKind::of(*data.body_scale),
             ground: Arc::new(data.stud_ground_recipes().clone()),
             halo: data.stud_halo_chunks().iter().map(|(k, h)| (*k, h.chunk.clone())).collect(),
             halo_ground: data.stud_halo_recipes().iter().map(|(k, g)| (*k, Some(g.clone()))).collect(),
@@ -147,7 +145,8 @@ pub struct StudWorld {
     /// Halo recipes by world chunk column (`y` 0), per host region.
     halo_ground: BTreeMap<WorldChunkPos, BTreeMap<RegionId, StudColumnGround>>,
     ground: BTreeMap<RegionId, StudGround>,
-    terrain: BTreeMap<RegionId, TerrainKind>,
+    /// The regions whose snapshot arrived.
+    loaded: BTreeSet<RegionId>,
     queue: RemeshQueue<WorldChunkPos>,
     in_flight: BTreeSet<WorldChunkPos>,
     /// Bumped when a recipe set arrives or leaves (the water pass rebuilds on it).
@@ -188,11 +187,6 @@ impl StudWorld {
     /// Chunks waiting for a mesh job.
     pub fn queued(&self) -> usize {
         self.queue.len()
-    }
-
-    /// The terrain kind of a loaded region (voxel until its snapshot says otherwise).
-    pub fn terrain(&self, region: RegionId) -> TerrainKind {
-        self.terrain.get(&region).copied().unwrap_or_default()
     }
 
     /// A loaded region's stud ground recipes.
@@ -301,9 +295,9 @@ impl StudWorld {
     /// Apply one bridge message.
     pub fn apply(&mut self, msg: &StudWorldMsg) {
         match msg {
-            StudWorldMsg::Region { region, terrain, ground, halo, halo_ground } => {
+            StudWorldMsg::Region { region, ground, halo, halo_ground } => {
                 self.drop_host(*region);
-                self.terrain.insert(*region, *terrain);
+                self.loaded.insert(*region);
                 if ground.is_empty() {
                     self.ground.remove(region);
                 } else {
@@ -314,7 +308,7 @@ impl StudWorld {
             }
             StudWorldMsg::Halo { region, chunks, ground } => {
                 // Before the region's snapshot: that will carry it.
-                if self.terrain.contains_key(region) {
+                if self.loaded.contains(region) {
                     self.apply_halo(*region, chunks, ground);
                 }
             }
@@ -390,13 +384,13 @@ impl StudWorld {
         if self.ground.remove(&host).is_some() {
             self.ground_epoch += 1;
         }
-        self.terrain.remove(&host);
+        self.loaded.remove(&host);
         self.reported.remove(&host);
     }
 
     /// Drop the state of regions no longer loaded.
     pub fn prune_regions(&mut self, loaded: impl Fn(&RegionId) -> bool) {
-        let gone: Vec<RegionId> = self.terrain.keys().filter(|r| !loaded(r)).copied().collect();
+        let gone: Vec<RegionId> = self.loaded.iter().filter(|r| !loaded(r)).copied().collect();
         for r in gone {
             self.drop_host(r);
         }
@@ -524,7 +518,7 @@ impl StudWorld {
 
     /// Whether some loaded region has not been reported by [`Self::region_meshed`] yet.
     pub fn regions_unreported(&self) -> bool {
-        self.reported.len() < self.terrain.len()
+        self.reported.len() < self.loaded.len()
     }
 
     /// The loaded regions whose every chunk has had its first mesh land, each
@@ -728,7 +722,6 @@ mod tests {
         // The halo of home mirrors east's edge chunk.
         let region = |region, halo: Vec<(WorldChunkPos, Option<StudChunk>)>| StudWorldMsg::Region {
             region,
-            terrain: TerrainKind::Stud,
             ground: Arc::new(BTreeMap::new()),
             halo,
             halo_ground: Vec::new(),
@@ -759,15 +752,14 @@ mod tests {
         assert_eq!(w.neighbour_slab(a, 0), Slab::Solid, "layer 0 of a column whose surface is in layer 2");
         assert_eq!(w.neighbour_slab(key(n - 1, 2, 0), 0), Slab::Free, "a surface layer is never implied");
         let ground: StudGround = Arc::new([(ColumnCoords::new(0, 0), g)].into_iter().collect());
-        w.apply(&StudWorldMsg::Region { region: east, terrain: TerrainKind::Stud, ground, halo: vec![], halo_ground: vec![] });
+        w.apply(&StudWorldMsg::Region { region: east, ground, halo: vec![], halo_ground: vec![] });
         assert_eq!(w.neighbour_slab(key(n, 1, 0), 3), Slab::Solid, "own recipe: the layer below is buried");
         assert_eq!(w.neighbour_slab(key(n, 2, 0), 2), Slab::Free);
 
         // Unloading home drops what it mirrored.
         w.prune_regions(|r| *r == east);
         assert!(w.halo_chunk(b).is_none());
-        assert_eq!(w.terrain(home), TerrainKind::Voxel);
-        assert_eq!(w.terrain(east), TerrainKind::Stud);
+        assert!(w.regions_unreported(), "east is still loaded (and unreported)");
     }
     fn chunk_centre(k: WorldChunkPos) -> Vec3 {
         world_chunk_origin(k)
@@ -837,7 +829,7 @@ mod tests {
         let mut w = StudWorld::default();
         let home = RegionId { x: 0, z: 0 };
         let ground: StudGround = Arc::new(BTreeMap::new());
-        w.apply(&StudWorldMsg::Region { region: home, terrain: TerrainKind::Stud, ground, halo: vec![], halo_ground: vec![] });
+        w.apply(&StudWorldMsg::Region { region: home, ground, halo: vec![], halo_ground: vec![] });
         let (a, b) = (key(0, 0, 0), key(1, 0, 0));
         w.set_chunk(e(1), a, &one([1, 1, 1]));
         w.set_chunk(e(2), b, &one([1, 1, 1]));

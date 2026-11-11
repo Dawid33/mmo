@@ -14,7 +14,7 @@
 
 use bevy::prelude::*;
 use game::rapier3d::math::Vector;
-use game::{Order, PlayMode, RegionId, TerrainKind, TilePos, REGION_BLOCKS};
+use game::{Order, PlayMode, RegionId, TilePos, REGION_BLOCKS};
 
 use super::designate::DesignateState;
 use super::follow::{Follow, FollowTarget};
@@ -53,20 +53,20 @@ pub fn toggled(mode: PlayMode) -> PlayMode {
 /// standing on that ground occupy (`TerrainKind::feet_tile` — a 1 m level on
 /// voxels, a 1.2 m tile on studs, where the floor may lie up to three plates
 /// into the tile or two under it).
-pub fn focus_tile(kind: TerrainKind, focus: Vec2, ground_y: f32, home: RegionId) -> TilePos {
+pub fn focus_tile(focus: Vec2, ground_y: f32, home: RegionId) -> TilePos {
     let o = home.world_offset();
-    kind.feet_tile(Vector::new(focus.x - o[0], ground_y - o[1], focus.y - o[2]))
+    game::feet_tile(Vector::new(focus.x - o[0], ground_y - o[1], focus.y - o[2]))
 }
 
 /// The order the mode button sends from `mode`: the other mode, entering
 /// Adventure at the focus tile (when there is a home region).
-pub fn toggle_order(mode: PlayMode, cam: &CommanderCamera, home: Option<RegionId>, kind: TerrainKind) -> Order {
+pub fn toggle_order(mode: PlayMode, cam: &CommanderCamera, home: Option<RegionId>) -> Order {
     let next = toggled(mode);
     let at = match next {
         PlayMode::Adventure => home.map(|home| {
             // A focus outside the home region (panned away) puts the body at
             // the nearest home tile, not at an out-of-region one.
-            let mut t = focus_tile(kind, cam.focus, cam.ground_y, home);
+            let mut t = focus_tile(cam.focus, cam.ground_y, home);
             let last = REGION_BLOCKS as i32 - 1;
             t[0] = t[0].clamp(0, last);
             t[2] = t[2].clamp(0, last);
@@ -91,7 +91,7 @@ pub fn send_mode_toggle(
         return;
     }
     let Some(client) = local.0 else { return };
-    let order = toggle_order(mode.0, &cam, mirror.region(), mirror.terrain());
+    let order = toggle_order(mode.0, &cam, mirror.region());
     let _ = events.0.send(game::GameEventKind::Order(client, order));
 }
 
@@ -171,37 +171,34 @@ mod tests {
         let o = home.world_offset();
         let ground_y = 70.0 * UNITS_PER_METER;
         let focus = Vec2::new(o[0] + 10.5 * UNITS_PER_METER, o[2] + 3.2 * UNITS_PER_METER);
-        let t = focus_tile(TerrainKind::Voxel, focus, ground_y, home);
+        let t = focus_tile(focus, ground_y, home);
         assert_eq!((t[0], t[2]), (10, 3));
-        assert_eq!(t[1], 70, "the air tile on top of the ground");
-        // The voxel answer is the old free function's, at any height.
+        assert_eq!(t[1], 58, "the tile standing on the ground: 70 m / 1.2 m");
+        // It is the sim's own feet tile, at any height.
         for y in [-33.0, 0.0, 7.9, 8.0, 1119.9, 1120.0, 1127.99] {
             let p = Vector::new(10.5 * UNITS_PER_METER, y, 3.2 * UNITS_PER_METER);
-            assert_eq!(focus_tile(TerrainKind::Voxel, Vec2::new(o[0] + p.x, o[2] + p.z), y + o[1], home), game::feet_tile(p));
+            assert_eq!(focus_tile(Vec2::new(o[0] + p.x, o[2] + p.z), y + o[1], home), game::feet_tile(p));
         }
     }
 
-    /// On stud terrain the hint is a 1.2 m TILE: the same ground height is
-    /// another level than on voxels, and it is the sim's own feet tile.
+    /// The hint is a 1.2 m TILE, the sim's own feet tile.
     #[test]
-    fn focus_tile_counts_stud_tiles_on_stud_terrain() {
-        let kind = TerrainKind::Stud;
+    fn focus_tile_counts_tiles() {
         let home = RegionCoords { x: 0, z: 0 };
-        let h = kind.tile_height_units();
+        let h = game::tile_height_units();
         let focus = Vec2::new(10.5 * UNITS_PER_METER, 3.2 * UNITS_PER_METER);
         // Ground exactly on a tile boundary: feet on it stand in the tile above.
         for level in [0, 1, 58, 70] {
-            let ground = kind.level_bottom_units(level);
-            let t = focus_tile(kind, focus, ground, home);
+            let ground = game::level_bottom_units(level);
+            let t = focus_tile(focus, ground, home);
             assert_eq!(t, [10, level, 3], "ground at the bottom of level {level}");
-            assert!(kind.on_level(t[1], ground));
+            assert!(game::on_level(t[1], ground));
             // A floor two plates into the tile (plates, half a brick) is the same tile.
-            assert_eq!(focus_tile(kind, focus, ground + game::plate_units(2), home)[1], level);
+            assert_eq!(focus_tile(focus, ground + game::plate_units(2), home)[1], level);
         }
-        // 70 m up is level 70 on voxels and 58 on studs (70 / 1.2).
+        // 70 m up is level 58 (70 / 1.2).
         let y = 70.0 * UNITS_PER_METER;
-        assert_eq!(focus_tile(TerrainKind::Voxel, focus, y, home)[1], 70);
-        assert_eq!(focus_tile(kind, focus, y, home)[1], (y / h).floor() as i32);
+        assert_eq!(focus_tile(focus, y, home)[1], (y / h).floor() as i32);
         assert_eq!((y / h).floor() as i32, 58);
     }
 
@@ -210,22 +207,18 @@ mod tests {
         let home = RegionCoords { x: 0, z: 0 };
         let cam = CommanderCamera { focus: Vec2::new(40.0, 56.0), ground_y: 32.0, ..Default::default() };
         assert_eq!(
-            toggle_order(PlayMode::Fortress, &cam, Some(home), TerrainKind::Voxel),
+            toggle_order(PlayMode::Fortress, &cam, Some(home)),
             Order::SetMode { mode: PlayMode::Adventure, at: Some([2, 2, 3]) }
         );
         assert_eq!(
-            toggle_order(PlayMode::Adventure, &cam, Some(home), TerrainKind::Voxel),
+            toggle_order(PlayMode::Adventure, &cam, Some(home)),
             Order::SetMode { mode: PlayMode::Fortress, at: None }
         );
-        // 20 m up: level 20 on voxels, tile 17 on studs (a floor two thirds into
-        // tile 16 belongs to the tile above — the sim's feet rule).
+        // 20 m up: tile 17 (a floor two thirds into tile 16 belongs to the tile
+        // above — the sim's feet rule).
         let cam = CommanderCamera { ground_y: 320.0, ..cam };
         assert_eq!(
-            toggle_order(PlayMode::Fortress, &cam, Some(home), TerrainKind::Voxel),
-            Order::SetMode { mode: PlayMode::Adventure, at: Some([2, 20, 3]) }
-        );
-        assert_eq!(
-            toggle_order(PlayMode::Fortress, &cam, Some(home), TerrainKind::Stud),
+            toggle_order(PlayMode::Fortress, &cam, Some(home)),
             Order::SetMode { mode: PlayMode::Adventure, at: Some([2, 17, 3]) }
         );
     }

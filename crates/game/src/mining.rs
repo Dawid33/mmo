@@ -1,60 +1,51 @@
 //! Survival mining, placing and throwing (plan 2026-11-05, Decisions 7, 8
-//! and 11): what an Adventure player's mouse buttons and Q do.
+//! and 11): what an Adventure player's mouse buttons and Q do. All three work
+//! on TILES (1 m x 1.2 m x 1 m, `tiles.rs`), the unit digging and building have;
+//! the eye ray is a stud ray over own ∪ stud halo ([`Rollback::eye_stud_hit`]).
 //!
 //! - **Mining** is sim state on `Client` ([`Mining`]): while the left button
-//!   is held and the eye ray hits the same block, progress builds; a new
+//!   is held and the eye ray hits the same tile, progress builds; a new
 //!   target restarts it, a release (or leaving first person, or opening the
 //!   inventory) cancels it. Progress is never accumulated: it is
-//!   `tick - started_tick`, all integer ticks. The block breaks on the
-//!   [`break_ticks`]-th tick held (the start tick counts), drops its item as
-//!   a pile in its own cell, and no mining progresses for
-//!   [`BREAK_COOLDOWN_TICKS`] ticks after.
+//!   `tick - started_tick`, all integer ticks. The tile breaks on the
+//!   [`Rollback::stud_mine_ticks`]-th tick held (the start tick counts;
+//!   [`Rollback::stud_tile_break_ticks`], twice that for a tile of tree wood),
+//!   and no mining progresses for [`BREAK_COOLDOWN_TICKS`] ticks after.
 //!
-//!   The block may be the neighbour's, seen through the halo: the break is
-//!   always an [`crate::Intent::BreakBlock`] (`survival`) to the block's
-//!   owner, here or across a seam alike, which applies it at the opening of
-//!   the next tick — so it is sent on the tick before the last one held and
-//!   lands on the `break_ticks`-th (a one-tick block breaks one tick late).
-//!   The owner's refusals decide, and the drop lands in the owner's piles.
-//! - **Placing** (right press) puts the selected hotbar block against the
-//!   hit face and takes one from the slot at once; the block itself is an
-//!   [`crate::Intent::PlaceBlock`] to the cell's owner (next tick), and a
+//!   The tile may be the neighbour's, seen through the halo: the break is
+//!   always an [`crate::Intent::BreakBlock`] (`survival`) to the tile's
+//!   owner (a `Target::Block` whose cell is a world tile, as piles and chests
+//!   are addressed), here or across a seam alike, which applies it at the
+//!   opening of the next tick (`Rollback::apply_stud_tile_intent_safe`) — so it
+//!   is sent on the tick before the last one held. The owner's refusals decide;
+//!   the break carves the tile and drops [`stud_drops`] into the owner's piles
+//!   (a tree tile fells the tree).
+//! - **Placing** (right press) fills the tile against the hit face with the
+//!   selected hotbar block's stud material (the chest block: a chest) and takes
+//!   one from the slot at once; the fill itself is an
+//!   [`crate::Intent::PlaceBlock`] to the tile's owner (next tick), and a
 //!   place the owner refuses gives the item back
 //!   ([`Rollback::refund_refused_places_safe`]). A non-block item or an
 //!   empty slot places nothing.
 //! - **Throwing** (Q one, Ctrl+Q the whole stack) drops the selected item as
-//!   a pile [`THROW_DISTANCE_BLOCKS`] ahead along the look, clamped by the
-//!   first block in the way (halo blocks included), settled onto the ground
+//!   a pile [`THROW_DISTANCE_BLOCKS`] ahead along the look, in the tile the
+//!   stud ray stops before (halo bricks included), settled onto the ground
 //!   at once — or, landing in a neighbour's cell, deposited there by an
 //!   intent to its owner (`item_piles.rs`).
 //!
 //! Fortress clients keep `edit.rs`'s creative edit (also intents).
-//!
-//! **On stud terrain** (`TerrainKind::Stud`) the same three actions work on TILES
-//! (1 m x 1.2 m x 1 m, `tiles.rs`) — the unit digging and building have there:
-//! the eye ray is a stud ray over own ∪ stud halo ([`Rollback::eye_stud_hit`]),
-//! `Mining::target` is the tile holding the hit cell and takes
-//! [`Rollback::stud_tile_break_ticks`] (twice that for a tile of tree wood), the
-//! break and the place are the SAME two intents addressed to the tile (a
-//! `Target::Block` whose cell is a world tile, as piles and chests are addressed
-//! there; the owner's half is `Rollback::apply_stud_tile_intent_safe` in
-//! `intents.rs`): a break carves the tile and drops `stud_drops` into the owner's
-//! piles (a tree tile fells the tree), a place fills the tile against the hit face
-//! with the block's stud material (the chest block: a chest), refused places
-//! refund as on voxels, and a throw lands in the tile the stud ray stops before.
 
 use crate::edit::{BlockPos, BREAK_BUTTON};
 use crate::intents::{Effects as _, RegionEffects};
 use crate::{
-    block_props, drop_of, Block, BlockId, BlockProps, Client, ClientId, EntityId, Intent, IntentMsg, IntentReply,
-    ItemId, ItemStack, PlayMode, Rollback, Target, WorldBlockPos, BLOCK_VOXELS, MAX_STACK,
-    PICKUP_DELAY_TICKS, THROWN_PICKUP_DELAY_TICKS,
+    drop_of, BlockId, Client, ClientId, EntityId, Intent, IntentMsg, IntentReply, ItemId, ItemStack, PlayMode,
+    Rollback, Target, WorldBlockPos, BLOCK_UNITS, MAX_STACK, THROWN_PICKUP_DELAY_TICKS,
 };
 
 /// Ticks per whole unit of hardness with the bare hand (Minecraft's
 /// correct-tool hand rule: `ceil(hardness * 30)` ticks at 20 ticks/s).
 pub const HAND_TICKS_PER_HARDNESS: u32 = 30;
-/// A trunk block (`BlockProps::is_trunk`) takes this many times as long.
+/// A tile of tree wood takes this many times as long (its break fells the tree).
 pub const FELL_TICKS_FACTOR: u32 = 2;
 /// Ticks after a break in which no mining progresses.
 pub const BREAK_COOLDOWN_TICKS: u64 = 6;
@@ -69,7 +60,7 @@ pub struct Mining {
     pub target: BlockPos,
     /// The first tick of progress (it counts as one).
     pub started_tick: u64,
-    /// Ticks held until the block breaks ([`break_ticks`]).
+    /// Ticks held until the tile breaks ([`Rollback::stud_mine_ticks`]).
     pub needed_ticks: u32,
 }
 
@@ -79,15 +70,6 @@ pub struct MiningView {
     pub target: BlockPos,
     /// 0..=1000.
     pub progress_per_mille: u32,
-}
-
-/// Ticks of holding the button to break `block` by hand: `ceil(hardness_centi
-/// * HAND_TICKS_PER_HARDNESS / 100)` (at least 1), times
-/// [`FELL_TICKS_FACTOR`] for trunk wood.
-pub fn break_ticks(props: &BlockProps, block: Block) -> u32 {
-    let hardness = u32::from(props.hardness_centi(block.id));
-    let hand = (hardness * HAND_TICKS_PER_HARDNESS).div_ceil(100).max(1);
-    if props.is_trunk(block.id) { hand * FELL_TICKS_FACTOR } else { hand }
 }
 
 /// Stud cells in one tile (`TILE_STUDS`² x `TILE_PLATES`).
@@ -109,7 +91,7 @@ pub fn stud_break_ticks(material: u16, cells: u32) -> Option<u32> {
 }
 
 /// What digging stud cells yields, until items are ported to stud materials: per
-/// material of `removed` (a carve's cell counts), what breaking the voxel block of
+/// material of `removed` (a carve's cell counts), what the block of
 /// the same name drops ([`drop_of`]), one per whole tile's worth of cells
 /// ([`STUD_TILE_CELLS`], rounded to the nearest, half up). A material with no such
 /// block (a plastic) or whose block drops nothing yields nothing.
@@ -118,7 +100,7 @@ pub fn stud_drops(removed: &[(u16, u32)]) -> Vec<ItemStack> {
         .iter()
         .filter_map(|&(material, cells)| {
             let count = (2 * u64::from(cells) + u64::from(STUD_TILE_CELLS)) / (2 * u64::from(STUD_TILE_CELLS));
-            let stack = drop_of(Block::new(crate::block_of_stud_material(material)?))?;
+            let stack = drop_of(crate::block_of_stud_material(material)?)?;
             (count > 0).then(|| ItemStack { count: (u64::from(stack.count) * count).min(u64::from(u32::MAX)) as u32, ..stack })
         })
         .collect()
@@ -147,10 +129,10 @@ pub struct StudEyeHit {
     pub inside: bool,
 }
 
-/// The tile holding region-local point `p` (sim units) on `kind` terrain — plain
-/// floors, with none of `TerrainKind::feet_tile`'s slack for a standing body.
-fn tile_of_point(kind: crate::TerrainKind, p: rapier3d::math::Vector) -> BlockPos {
-    let (w, h) = (kind.tile_width_units(), kind.tile_height_units());
+/// The tile holding region-local point `p` (sim units) — plain floors, with none of
+/// [`crate::feet_tile`]'s slack for a standing body.
+fn tile_of_point(p: rapier3d::math::Vector) -> BlockPos {
+    let (w, h) = (crate::tile_width_units(), crate::tile_height_units());
     [libm::floorf(p.x / w) as i32, libm::floorf(p.y / h) as i32, libm::floorf(p.z / w) as i32]
 }
 
@@ -171,8 +153,7 @@ impl Rollback {
         Some(StudEyeHit { tile: tile_of(cell), outside: tile_of(out), inside: hit.normal == [0; 3] })
     }
 
-    /// The stud tile under `client`'s crosshair within [`crate::edit::REACH`] metres:
-    /// the stud-terrain form of [`Self::eye_hit`].
+    /// The stud tile under `client`'s crosshair within [`crate::edit::REACH`] metres.
     pub fn eye_stud_hit(&self, client: ClientId) -> Option<StudEyeHit> {
         let (eye, dir) = self.eye_ray(client)?;
         self.stud_ray_tiles(eye, dir, crate::edit::REACH * crate::movement::UNITS_PER_METER)
@@ -188,29 +169,10 @@ impl Rollback {
 
     /// Ticks to dig stud tile `p` by hand ([`stud_break_ticks`] of its dominant
     /// material over the cells under its columns' tops); `None` for an open tile or
-    /// bedrock. Stud terrain only.
+    /// bedrock.
     pub fn stud_tile_break_ticks(&self, p: crate::TilePos) -> Option<u32> {
         let tile = self.stud_tile(p);
         stud_break_ticks(tile.material()?, tile.cells_under_tops())
-    }
-
-    /// Whether an Adventure player may mine the block at `pos` (this
-    /// region's): what a break may clear (`clearable_block`: not air, not
-    /// bedrock), and not water. Returns the block. The owner's check.
-    pub(crate) fn mineable(&self, pos: BlockPos) -> Option<Block> {
-        let (block, _) = self.clearable_block(pos)?;
-        (!crate::block_props().is_liquid(block.id)).then_some(block)
-    }
-
-    /// [`Self::mineable`] as this region sees `pos`, which may lie in the
-    /// halo (a neighbour's block: not air, not its bedrock, not water). The
-    /// sender's check; the owner checks again when the break reaches it.
-    fn mineable_seen(&self, pos: BlockPos) -> Option<Block> {
-        if crate::edit::locate(pos).is_some() {
-            return self.mineable(pos);
-        }
-        let block = self.halo_mineable(pos)?;
-        (!crate::block_props().is_liquid(block.id)).then_some(block)
     }
 
     /// The id of `client`'s body, if it has one here.
@@ -244,15 +206,11 @@ impl Rollback {
             && c.input.mouse_held(&BREAK_BUTTON)
             && tick >= c.break_cooldown_until;
         let current = c.mining;
-        // The cell under the crosshair and the ticks it takes: a block, or on stud
-        // terrain a tile (`stud_mine_ticks`).
+        // The tile under the crosshair and the ticks it takes (`stud_mine_ticks`).
         let target = if !active {
             None
-        } else if self.terrain_kind() == crate::TerrainKind::Stud {
-            self.eye_stud_hit(client).and_then(|hit| self.stud_mine_ticks(hit.tile).map(|t| (hit.tile, t)))
         } else {
-            self.eye_hit(client)
-                .and_then(|hit| self.mineable_seen(hit.block).map(|b| (hit.block, break_ticks(block_props(), b))))
+            self.eye_stud_hit(client).and_then(|hit| self.stud_mine_ticks(hit.tile).map(|t| (hit.tile, t)))
         };
         let Some((target, needed_ticks)) = target else {
             self.set_mining_safe(client, None, None);
@@ -276,40 +234,6 @@ impl Rollback {
         self.set_mining_safe(client, Some(mining), Some(tick + 2 + BREAK_COOLDOWN_TICKS));
     }
 
-    /// An Adventure player's break of tree block `p` reached its owner
-    /// (Decision 9): the tree is felled as a chop order fells it
-    /// (`fell_safe`), the cut blocks drop their items at the stump right
-    /// away, and the falling part turns into piles where it comes to rest
-    /// (`SettlePolicy::DropItems`). A block `fell` refuses (leaves, or a
-    /// tree over `MAX_TREE_BLOCKS`) is broken alone, like any block.
-    /// Returns whether anything was cleared.
-    pub fn player_chop_safe(&mut self, p: BlockPos, tick: u64) -> bool {
-        let Some((cut, _body)) = self.fell_safe(p, crate::SettlePolicy::DropItems) else {
-            return match self.mineable(p) {
-                Some(block) => self.mine_block_safe(p, block, tick),
-                None => false,
-            };
-        };
-        // At the stump: the cut's lowest cell, summed per item.
-        if let Some(&(at, _)) = cut.iter().min_by_key(|(pos, _)| (pos[1], *pos)) {
-            self.drop_blocks_at_safe(at, cut.iter().map(|(_, b)| *b), tick);
-        }
-        true
-    }
-
-    /// Breaks one mined block and drops its item as a pile in its cell.
-    /// Returns whether the block was cleared.
-    pub(crate) fn mine_block_safe(&mut self, pos: BlockPos, block: Block, tick: u64) -> bool {
-        if !self.set_block_in(pos, Block::new(BlockId::AIR)) {
-            return false;
-        }
-        if let Some(stack) = drop_of(block) {
-            // A loss to the pile caps is counted where it happens.
-            let _destroyed = self.deposit_items_safe(pos, stack, tick, PICKUP_DELAY_TICKS);
-        }
-        true
-    }
-
     /// `client`'s right click in survival (Decision 8): takes one of the
     /// selected hotbar block and sends it to the cell against the hit face
     /// (an intent to that cell's owner, into `out` when that is a
@@ -317,17 +241,9 @@ impl Rollback {
     /// empty slot, a hit from inside a block, a cell seen occupied or a body
     /// in the way place nothing.
     pub(crate) fn survival_place_safe(&mut self, client: ClientId, out: &mut Vec<IntentMsg>) -> bool {
-        // The cell hit and the cell against the hit face (`None` from inside
-        // one): blocks, or on stud terrain tiles.
-        let stud = self.terrain_kind() == crate::TerrainKind::Stud;
-        let (hit_cell, against) = if stud {
-            let Some(hit) = self.eye_stud_hit(client) else { return false };
-            (hit.tile, (!hit.inside).then_some(hit.outside))
-        } else {
-            let Some(hit) = self.eye_hit(client) else { return false };
-            let against = [hit.block[0] + hit.normal[0], hit.block[1] + hit.normal[1], hit.block[2] + hit.normal[2]];
-            (hit.block, (hit.normal != [0; 3]).then_some(against))
-        };
+        // The tile hit and the tile against the hit face (`None` from inside one).
+        let Some(hit) = self.eye_stud_hit(client) else { return false };
+        let (hit_cell, against) = (hit.tile, (!hit.inside).then_some(hit.outside));
         // A chest under the crosshair — here, or a neighbour's seen through
         // the halo — opens instead (Decision 10).
         let [x, y, z] = hit_cell;
@@ -344,12 +260,7 @@ impl Rollback {
         }
         let Some(id) = stack.item.as_block().filter(|id| *id != BlockId::AIR) else { return false };
         let Some(target) = against else { return false };
-        let blocked = if stud {
-            self.stud_tile(target).fill() == crate::TileFill::Solid || self.stud_tile_overlaps_body(target)
-        } else {
-            self.block_solid(target) || self.block_overlaps_body(target)
-        };
-        if blocked {
+        if self.stud_tile(target).fill() == crate::TileFill::Solid || self.stud_tile_overlaps_body(target) {
             return false;
         }
         let Some(by) = self.client_body_id(client) else { return false };
@@ -398,26 +309,12 @@ impl Rollback {
         if selected as usize >= crate::HOTBAR_SLOTS || c.inventory.slots.get(selected as usize).is_none_or(|s| s.is_none()) {
             return false;
         }
-        let bv = BLOCK_VOXELS as f32;
-        let kind = self.terrain_kind();
-        // Pile cells: blocks, or on stud terrain tiles.
-        let cell_of = |p: rapier3d::math::Vector| match kind {
-            crate::TerrainKind::Voxel => [(p.x / bv).floor() as i32, (p.y / bv).floor() as i32, (p.z / bv).floor() as i32],
-            crate::TerrainKind::Stud => tile_of_point(kind, p),
-        };
-        let landing = match kind {
-            crate::TerrainKind::Voxel => match self.raycast_block_in(eye, dir, THROW_DISTANCE_BLOCKS) {
-                // Inside a block already: from the eye's own cell.
-                Some(hit) if hit.normal == [0; 3] => cell_of(eye),
-                Some(hit) => [hit.block[0] + hit.normal[0], hit.block[1] + hit.normal[1], hit.block[2] + hit.normal[2]],
-                None => cell_of(eye + dir * (THROW_DISTANCE_BLOCKS * bv)),
-            },
-            // The tile the stud ray stops before (the same distance, in metres).
-            crate::TerrainKind::Stud => match self.stud_ray_tiles(eye, dir, THROW_DISTANCE_BLOCKS * bv) {
-                Some(hit) if hit.inside => cell_of(eye),
-                Some(hit) => hit.outside,
-                None => cell_of(eye + dir * (THROW_DISTANCE_BLOCKS * bv)),
-            },
+        let bv = BLOCK_UNITS as f32;
+        // The tile the stud ray stops before (the distance is in metres).
+        let landing = match self.stud_ray_tiles(eye, dir, THROW_DISTANCE_BLOCKS * bv) {
+            Some(hit) if hit.inside => tile_of_point(eye),
+            Some(hit) => hit.outside,
+            None => tile_of_point(eye + dir * (THROW_DISTANCE_BLOCKS * bv)),
         };
         let n = if whole_stack { MAX_STACK } else { 1 };
         let Some(stack) = self.data.clients.get_mut(&client).and_then(|c| c.inventory.take_selected(selected, n)) else {
@@ -429,7 +326,7 @@ impl Rollback {
         // piles cannot hold comes back to the thrower.
         let by = self.client_body_id(client).unwrap_or(crate::EntityId::of_region(*self.data.region));
         let _destroyed =
-            self.deposit_items_by_safe(by, cell_of(eye), landing, stack, tick, THROWN_PICKUP_DELAY_TICKS);
+            self.deposit_items_by_safe(by, tile_of_point(eye), landing, stack, tick, THROWN_PICKUP_DELAY_TICKS);
         true
     }
 }

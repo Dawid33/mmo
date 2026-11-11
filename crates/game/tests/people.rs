@@ -710,7 +710,7 @@ fn cut_carries_running_then_parked_regions_until_committed() {
     let mut parked: Vec<_> = cut.regions.iter().map(|(rc, _)| *rc).collect();
     parked.sort();
     assert_eq!(parked, running, "each parked region once");
-    assert!(cut.regions.iter().all(|(_, p)| p.chunks.is_empty()), "nothing changed since the committed cut");
+    assert!(cut.regions.iter().all(|(_, p)| p.stud_chunks.is_empty()), "nothing changed since the committed cut");
     h.manager.cut_failed(cut.id);
     h.manager.begin_cut(0).expect("no cut pending");
     let again = h.manager.take_cut().expect("complete at once");

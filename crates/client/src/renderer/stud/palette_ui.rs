@@ -11,7 +11,6 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use bevy::prelude::*;
-use game::TerrainKind;
 use slint_ui::slint::{Color as SlintColor, Model, ModelRc, SharedString, VecModel};
 use slint_ui::{GameUi, StudSwatch};
 
@@ -19,7 +18,6 @@ use super::build::StudBuild;
 use super::mesh::stud_assets;
 use super::palette::{build_blocks, natural_materials, palette_view, part_rows, plastic_colors, PaletteAction, PaletteView};
 use crate::renderer::commander::designate::{DesignateState, Tool};
-use crate::renderer::commander::tiles::TileMirror;
 use crate::renderer::slint_overlay::SlintLayer;
 
 /// What a stud UI callback asked for.
@@ -95,10 +93,9 @@ pub fn apply_stud_ui_actions(
 }
 
 /// The Build tool's material list for the context box: the choices' labels and
-/// the picked row — only with the Build tool up on stud terrain (on voxel
-/// terrain the tool builds its one construction block, as before).
-pub fn build_material_view(tool: Option<Tool>, terrain: TerrainKind, build: game::BlockId) -> (Vec<String>, i32) {
-    if tool != Some(Tool::Build) || terrain != TerrainKind::Stud {
+/// the picked row — only with the Build tool up.
+pub fn build_material_view(tool: Option<Tool>, build: game::BlockId) -> (Vec<String>, i32) {
+    if tool != Some(Tool::Build) {
         return (Vec::new(), -1);
     }
     let blocks = build_blocks();
@@ -110,7 +107,7 @@ pub fn build_material_view(tool: Option<Tool>, terrain: TerrainKind, build: game
 #[derive(Default)]
 pub struct StudUiShown {
     palette: Option<PaletteView>,
-    materials: Option<(Option<Tool>, TerrainKind, game::BlockId)>,
+    materials: Option<(Option<Tool>, game::BlockId)>,
 }
 
 /// The build mode and the Build tool's material → the UI, each only when it
@@ -119,7 +116,6 @@ pub fn sync_stud_ui(
     slint: Option<NonSend<SlintLayer<GameUi>>>,
     build: Res<StudBuild>,
     designate: Option<Res<DesignateState>>,
-    mirror: Option<Res<TileMirror>>,
     mut shown: crate::session::SessionLocal<StudUiShown>,
 ) {
     let Some(slint) = slint else { return };
@@ -142,13 +138,12 @@ pub fn sync_stud_ui(
     }
 
     let tool = designate.as_ref().and_then(|d| d.tool);
-    let terrain = mirror.as_ref().map_or(TerrainKind::Stud, |m| m.terrain());
     let block = designate.as_ref().map_or(game::edit::PLACE_BLOCK, |d| d.build);
-    let key = (tool, terrain, block);
-    let wanted = tool == Some(Tool::Build) && terrain == TerrainKind::Stud;
+    let key = (tool, block);
+    let wanted = tool == Some(Tool::Build);
     // Also when a rebuilt UI lost the list.
     if shown.materials != Some(key) || (wanted && ui.get_build_materials().row_count() == 0) {
-        let (labels, picked) = build_material_view(tool, terrain, block);
+        let (labels, picked) = build_material_view(tool, block);
         // Still empty before the block props are installed: try again then.
         let ready = !wanted || !labels.is_empty();
         ui.set_build_materials(strings(labels));
@@ -172,15 +167,14 @@ mod tests {
     }
 
     #[test]
-    fn the_material_list_shows_only_for_the_build_tool_on_stud_terrain() {
+    fn the_material_list_shows_only_for_the_build_tool() {
         install_block_props();
         let dirt = game::edit::PLACE_BLOCK;
-        let (labels, picked) = build_material_view(Some(Tool::Build), TerrainKind::Stud, dirt);
+        let (labels, picked) = build_material_view(Some(Tool::Build), dirt);
         assert!(labels.len() >= 8 && labels.contains(&"Stone".to_string()));
         assert_eq!(labels[picked as usize], "Dirt", "the default build block is dirt, shown picked");
-        assert_eq!(build_material_view(Some(Tool::Build), TerrainKind::Voxel, dirt), (Vec::new(), -1));
-        assert_eq!(build_material_view(Some(Tool::Dig), TerrainKind::Stud, dirt), (Vec::new(), -1));
-        assert_eq!(build_material_view(None, TerrainKind::Stud, dirt), (Vec::new(), -1));
+        assert_eq!(build_material_view(Some(Tool::Dig), dirt), (Vec::new(), -1));
+        assert_eq!(build_material_view(None, dirt), (Vec::new(), -1));
     }
 
     #[test]
@@ -190,11 +184,11 @@ mod tests {
         let mut state = DesignateState { tool: Some(Tool::Build), ..Default::default() };
         apply_action(StudUiAction::Palette(PaletteAction::Rotate), &mut build, Some(&mut state));
         assert_eq!(build.rot, 1);
-        let (labels, _) = build_material_view(state.tool, TerrainKind::Stud, state.build);
+        let (labels, _) = build_material_view(state.tool, state.build);
         let stone = labels.iter().position(|l| l == "Stone").unwrap() as i32;
         apply_action(StudUiAction::BuildMaterial(stone), &mut build, Some(&mut state));
         assert_eq!(game::stud_material_of_block(state.build), MAT_STONE);
-        assert_eq!(build_material_view(state.tool, TerrainKind::Stud, state.build).1, stone, "and the list shows it picked");
+        assert_eq!(build_material_view(state.tool, state.build).1, stone, "and the list shows it picked");
         // Out of range, or no commander state: nothing happens.
         let before = state.build;
         apply_action(StudUiAction::BuildMaterial(9999), &mut build, Some(&mut state));
@@ -230,10 +224,9 @@ mod tests {
     fn the_build_tool_builds_the_picked_material_in_the_sim() {
         install_block_props();
         let mut r = stud_region();
-        assert_eq!(r.data().terrain_kind(), TerrainKind::Stud);
         // The air tile on the ground (plate 30 = the bottom of tile level 5).
         let level = TOP / game::TILE_PLATES as i32;
-        let (labels, _) = build_material_view(Some(Tool::Build), TerrainKind::Stud, game::edit::PLACE_BLOCK);
+        let (labels, _) = build_material_view(Some(Tool::Build), game::edit::PLACE_BLOCK);
         for (n, name) in ["Sandstone", "Stone", "Dirt", "Wood"].into_iter().enumerate() {
             let Some(row) = labels.iter().position(|l| l == name) else { panic!("{name} is offered: {labels:?}") };
             let mut build = StudBuild::default();

@@ -787,7 +787,7 @@ pub struct WorldManager<S: RegionSpawner> {
     spawner: S,
     regions: BTreeMap<RegionCoords, RegionLink>,
     parked: BTreeMap<RegionCoords, SerializedRegion>,
-    /// The last terrain each region pushed (`TerrainChanged`) or parked with
+    /// The terrain each region parked with
     /// (`Stopped`): what a starting neighbour's halo is seeded from without
     /// waking it.
     terrain_cache: BTreeMap<RegionCoords, TerrainSnapshot>,
@@ -2249,9 +2249,6 @@ impl<S: RegionSpawner> WorldManager<S> {
                 }
             }
             RegionOutput::PeopleParked(people) => self.world_region_parked(rc, people),
-            RegionOutput::TerrainChanged(snap) => {
-                self.terrain_cache.insert(rc, snap);
-            }
             RegionOutput::Stopped(serialized, far, stamp, portable) => {
                 self.silent_stopping.remove(&rc);
                 // Its final snapshot: uncommitted until a cut commits it, and
@@ -2365,12 +2362,12 @@ impl<S: RegionSpawner> WorldManager<S> {
                     // gen), as does a person's with no history to absorb
                     // them; anything else into a region that is not running
                     // — absent, parked or stopping — waits for it to run
-                    // (a voxel body settles at the seam instead).
+                    // (a stud body settles at the seam instead).
                     let wakes = client.is_some() || matches!(bundle.kind, EntityKind::Person { .. });
                     let running = self.regions.get(&target).is_some_and(|l| !l.stopping);
                     if !wakes && !running {
-                        if bundle.carried.voxel_body.is_some() || bundle.carried.stud_body.is_some() {
-                            // A falling voxel body does not wait out a park
+                        if bundle.carried.stud_body.is_some() {
+                            // A falling stud body does not wait out a park
                             // (with its logs) in the mailbox: it settles now,
                             // on the seam on its source's side — its policy's
                             // drops put down there, or nothing.
@@ -3092,19 +3089,19 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.put_down_drops(gone.source, target, gone.bundle, gone.in_source_view);
     }
 
-    /// A voxel body departing `source` into `target`, which is not running:
+    /// A stud body departing `source` into `target`, which is not running:
     /// settled at once instead of waiting in the mailbox — its drops (a
     /// `DropItems` body's, in `Carried::drops`) put down at the seam cell on
     /// the source's side, like a mailbox overflow's ([`Self::put_down_drops`]);
     /// a `Despawn` body leaves nothing.
     fn settle_at_seam(&mut self, source: RegionCoords, target: RegionCoords, bundle: crate::EntityBundle, view: bool) {
-        log::debug!("[server] voxel body {:?} into {target:?}, not running: settled at the seam", bundle.id);
+        log::debug!("[server] stud body {:?} into {target:?}, not running: settled at the seam", bundle.id);
         self.locations.remove(&bundle.id);
         self.put_down_drops(source, target, bundle, view);
     }
 
     /// `bundle`, a body from `source` gone on its way to `target` (a waiting
-    /// arrival despawned past the cap, or a voxel body settled at the seam),
+    /// arrival despawned past the cap, or a stud body settled at the seam),
     /// leaves its drops (if any) as piles at the seam cell on its source's side:
     /// the cell under its body, clamped into the source (see
     /// `pending_arrivals`). Region-sourced deposits, so a refusal (the
@@ -3117,12 +3114,12 @@ impl<S: RegionSpawner> WorldManager<S> {
         }
         bundle.rebase(target, source);
         let t = bundle.body.pose.translation;
-        let b = crate::BLOCK_VOXELS as f32;
+        let b = crate::BLOCK_UNITS as f32;
         let n = crate::REGION_BLOCKS as i32;
         // Pile cells are blocks, or on stud terrain tiles (as wide, 1.2 m tall): a
         // stud body's drops go to the tile under it.
         let cell_height = match bundle.carried.stud_body {
-            Some(_) => crate::TerrainKind::Stud.tile_height_units(),
+            Some(_) => crate::tile_height_units(),
             None => b,
         };
         let local = [(t.x / b).floor() as i32, (t.y / cell_height).floor() as i32, (t.z / b).floor() as i32];

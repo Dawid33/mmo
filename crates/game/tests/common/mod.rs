@@ -16,9 +16,9 @@ use game::{
 /// A chunk's edge in world units, as `f32`.
 pub const CHUNK_EDGE: f32 = CHUNK_UNITS as f32;
 
-/// A tile's width (x and z) in sim units: `TerrainKind::Stud.tile_width_units()`.
+/// A tile's width (x and z) in sim units: `game::tile_width_units()`.
 pub const TILE_W: f32 = (TILE_STUDS * STUD_UNITS) as f32;
-/// A tile's height in sim units: `TerrainKind::Stud.tile_height_units()`.
+/// A tile's height in sim units: `game::tile_height_units()`.
 pub fn tile_h() -> f32 {
     game::plate_units(TILE_PLATES as i32)
 }
@@ -143,9 +143,7 @@ pub fn seed_studs(r: &mut Rollback, seed: StudRegionSeed) {
 /// A terrain snapshot holding the stud edge `edge` (what the world store's
 /// `load_terrain` or a parked region hands a neighbour's halo).
 pub fn stud_terrain_snapshot(edge: game::StudEdge) -> game::TerrainSnapshot {
-    // P10b: `chunks` / `ground` are the voxel halves of the snapshot; they go
-    // with the voxel code and this is the one place the tests name them.
-    game::TerrainSnapshot { chunks: Vec::new(), ground: Vec::new(), stud: edge }
+    game::TerrainSnapshot { stud: edge }
 }
 
 /// The halo seed a region at `to` gets from a never-run neighbour at `from`
@@ -201,10 +199,9 @@ pub fn stud_lod_key(rc: RegionCoords) -> game::lod::LodKey {
 /// standing in tile `at` on a studded floor at the tile's bottom: the column's
 /// centre, its feet on the stud caps.
 pub fn body_on_tile(at: game::TilePos) -> game::rapier3d::math::Vector {
-    let kind = game::TerrainKind::Stud;
-    let (x, z) = kind.column_centre([at[0], at[2]]);
+    let (x, z) = game::column_centre([at[0], at[2]]);
     let s = game::movement::BodyScale::STUD;
-    let feet = kind.level_bottom_units(at[1]) + game::stud_cap_units();
+    let feet = game::level_bottom_units(at[1]) + game::stud_cap_units();
     game::rapier3d::math::Vector::new(x, feet + s.capsule_half_height() + s.capsule_radius(), z)
 }
 
@@ -216,7 +213,7 @@ pub fn feet_of(t: game::rapier3d::math::Vector) -> game::rapier3d::math::Vector 
 
 /// The tile a `BodyScale::STUD` body whose centre is at `t` stands in.
 pub fn feet_tile(t: game::rapier3d::math::Vector) -> game::TilePos {
-    game::TerrainKind::Stud.feet_tile(feet_of(t))
+    game::feet_tile(feet_of(t))
 }
 
 /// Whether tile `p` (region-local; own ∪ stud halo) holds nothing.

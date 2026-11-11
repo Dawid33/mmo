@@ -16,7 +16,7 @@ use game::movement::{character_controller, depenetration_lift};
 use game::movement::{
     CHARACTER_SKIN, PLAYER_CAPSULE_HALF_HEIGHT, PLAYER_CAPSULE_RADIUS, STEP_HEIGHT, TICK_DT, UNITS_PER_METER,
 };
-use game::{Block, BlockId, Chunk};
+use common::Chunk;
 use rapier3d::control::KinematicCharacterController;
 use rapier3d::prelude::*;
 
@@ -28,7 +28,7 @@ fn floor() -> Walker {
 /// Full chunks, top at y = `CHUNK`: each collapses to one cuboid collider —
 /// the only terrain upstream's #485 depenetration acts on.
 fn cuboid_floor() -> Walker {
-    Walker::on(96.0..192.0, 96.0..192.0, |_, _| Chunk::uniform(Block::new(BlockId(1))))
+    Walker::on(96.0..192.0, 96.0..192.0, |_, _| Chunk::solid())
 }
 
 /// Resting height of the body's centre on a floor whose top is `top`.

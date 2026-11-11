@@ -2088,7 +2088,7 @@ mod manager_tests {
     fn minimal_world() -> game::World {
         let home = RegionCoords::new(0, 0);
         let mut world = game::World::new();
-        world.load(&home, Region::from_chunks(home, Vec::new()));
+        world.load(&home, Region::empty(home));
         world
     }
 
@@ -2368,7 +2368,7 @@ mod manager_tests {
         // replayed through reconcile — Tick id 0 lands in the region's
         // server-input buffer, waiting for the matching local prediction.
         let mut neighbour_world = game::World::new();
-        neighbour_world.load(&neighbour, Region::from_chunks(neighbour, Vec::new()));
+        neighbour_world.load(&neighbour, Region::empty(neighbour));
         server_send
             .send(neighbour_world.build_region_server_packet(&neighbour))
             .unwrap();
@@ -2452,7 +2452,7 @@ mod manager_tests {
 
         let far = RegionCoords::new(50, 50);
         let mut far_world = game::World::new();
-        far_world.load(&far, Region::from_chunks(far, Vec::new()));
+        far_world.load(&far, Region::empty(far));
         server_send
             .send(far_world.build_region_server_packet(&far))
             .unwrap();
@@ -2479,7 +2479,7 @@ mod manager_tests {
 
         // Load home (with the player) and the empty target region.
         let mut world = game::World::new();
-        let mut home_region = Region::from_chunks(home, Vec::new());
+        let mut home_region = Region::empty(home);
         home_region
             .handle_event(GameEventKind::CreateClient(0))
             .unwrap();
@@ -2489,7 +2489,7 @@ mod manager_tests {
             .send(world.build_region_server_packet(&home))
             .unwrap();
         let mut target_world = game::World::new();
-        target_world.load(&target, Region::from_chunks(target, Vec::new()));
+        target_world.load(&target, Region::empty(target));
         server_send
             .send(target_world.build_region_server_packet(&target))
             .unwrap();
@@ -2547,13 +2547,13 @@ mod manager_tests {
         server_send.send(ServerPacket::PlayerRegion(Some(home), 0)).unwrap();
         manager.pump(&server_recv).unwrap();
         let mut world = game::World::new();
-        let mut home_region = Region::from_chunks(home, Vec::new());
+        let mut home_region = Region::empty(home);
         home_region.handle_event(GameEventKind::CreateClient(0)).unwrap();
         home_region.forget_last_event();
         world.load(&home, home_region);
         server_send.send(world.build_region_server_packet(&home)).unwrap();
         let mut target_world = game::World::new();
-        target_world.load(&target, Region::from_chunks(target, Vec::new()));
+        target_world.load(&target, Region::empty(target));
         server_send.send(target_world.build_region_server_packet(&target)).unwrap();
         manager.pump(&server_recv).unwrap();
         manager.is_caught_up = true;
@@ -2628,7 +2628,7 @@ mod manager_tests {
         server_send.send(ServerPacket::PlayerRegion(Some(home), 0)).unwrap();
         manager.pump(&server_recv).unwrap();
         let mut world = game::World::new();
-        let mut home_region = Region::from_chunks(home, Vec::new());
+        let mut home_region = Region::empty(home);
         home_region.handle_event(GameEventKind::CreateClient(0)).unwrap();
         home_region.forget_last_event();
         world.load(&home, home_region);
@@ -2738,13 +2738,13 @@ mod manager_tests {
 
         // Load A (with the player) and the empty target B.
         let mut world = game::World::new();
-        let mut home_region = Region::from_chunks(home, Vec::new());
+        let mut home_region = Region::empty(home);
         home_region.handle_event(GameEventKind::CreateClient(0)).unwrap();
         home_region.forget_last_event();
         world.load(&home, home_region);
         server_send.send(world.build_region_server_packet(&home)).unwrap();
         let mut target_world = game::World::new();
-        target_world.load(&target, Region::from_chunks(target, Vec::new()));
+        target_world.load(&target, Region::empty(target));
         server_send.send(target_world.build_region_server_packet(&target)).unwrap();
         manager.pump(&server_recv).unwrap();
         manager.is_caught_up = true;
@@ -2787,7 +2787,7 @@ mod manager_tests {
 
         // The server's B: the same events, the arrival carrying the server's
         // own extraction from A (a real server-side region, faithful ids).
-        let mut server_a = Region::from_chunks(home, Vec::new());
+        let mut server_a = Region::empty(home);
         server_a.handle_event(GameEventKind::CreateClient(0)).unwrap();
         server_a.forget_last_event();
         let sa_key = *server_a.data().player_entites.get(&0).unwrap();
@@ -2797,7 +2797,7 @@ mod manager_tests {
         let (mut bundle, to) = departures.into_iter().next().expect("server-side player departed A");
         assert_eq!(to, target);
         bundle.rebase(home, target);
-        let mut server_b = Region::from_chunks(target, Vec::new());
+        let mut server_b = Region::empty(target);
         let auth: Vec<GameEvent> = predicted
             .into_iter()
             .map(|k| match k {
@@ -3031,7 +3031,7 @@ mod manager_tests {
         // Load a region whose snapshot already contains player 0 (seeded inv).
         let region_id = RegionCoords::new(0, 0);
         let mut world = game::World::new();
-        let mut home = Region::from_chunks(region_id, Vec::new());
+        let mut home = Region::empty(region_id);
         home.handle_event(GameEventKind::CreateClient(0)).unwrap();
         home.forget_last_event();
         world.load(&region_id, home);
@@ -3099,7 +3099,7 @@ mod manager_tests {
 
         let region_id = RegionCoords::new(0, 0);
         let mut world = game::World::new();
-        let mut home = Region::from_chunks(region_id, Vec::new());
+        let mut home = Region::empty(region_id);
         home.handle_event(GameEventKind::CreateClient(0)).unwrap();
         home.forget_last_event();
         world.load(&region_id, home);

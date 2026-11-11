@@ -17,7 +17,7 @@ use bevy::asset::RenderAssetUsages;
 use bevy::light::{NotShadowCaster, NotShadowReceiver};
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
-use game::{Designation, DesignationKind, RegionId, TerrainKind, TileBox, TilePos};
+use game::{Designation, DesignationKind, RegionId, TileBox, TilePos};
 
 use crate::renderer::commander::designate::merge_runs;
 use crate::renderer::commander::level::WorkingLevel;
@@ -82,8 +82,8 @@ pub fn designation_boxes(
 
 /// Positions, colours and indices of the boxes, in region-local sim units on
 /// terrain `kind` (tile sizes through `TerrainKind`).
-pub fn overlay_mesh_data(kind: TerrainKind, boxes: &[(TileBox, DesignationKind)]) -> (Vec<[f32; 3]>, Vec<[f32; 4]>, Vec<u32>) {
-    let size = Vec3::new(kind.tile_width_units(), kind.tile_height_units(), kind.tile_width_units());
+pub fn overlay_mesh_data(boxes: &[(TileBox, DesignationKind)]) -> (Vec<[f32; 3]>, Vec<[f32; 4]>, Vec<u32>) {
+    let size = Vec3::new(game::tile_width_units(), game::tile_height_units(), game::tile_width_units());
     let (mut positions, mut colors, mut indices) = (Vec::new(), Vec::new(), Vec::new());
     for (b, k) in boxes {
         let lo = Vec3::new(b.min[0] as f32, b.min[1] as f32, b.min[2] as f32) * size - Vec3::splat(OVERLAY_INFLATE);
@@ -124,7 +124,7 @@ pub fn update_stud_overlay(
 ) {
     let built = built.get();
     let top_level = overlay_top_level(&working);
-    let key = mirror.region().filter(|_| mirror.terrain() == TerrainKind::Stud).map(|r| (r, mirror.version(), top_level));
+    let key = mirror.region().map(|r| (r, mirror.version(), top_level));
     if built.key == key {
         return;
     }
@@ -137,7 +137,7 @@ pub fn update_stud_overlay(
     if boxes.is_empty() {
         return;
     }
-    let (positions, colors, indices) = overlay_mesh_data(TerrainKind::Stud, &boxes);
+    let (positions, colors, indices) = overlay_mesh_data(&boxes);
     let mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::RENDER_WORLD)
         .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
         .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, colors)
@@ -189,10 +189,9 @@ mod tests {
         let boxes = designation_boxes(&m, None);
         assert_eq!(boxes.len(), 3, "a run of four digs, a dig one level up, a chop");
         assert_eq!(boxes[0].0, TileBox { min: [0, 5, 2], max: [3, 5, 2] });
-        let kind = TerrainKind::Stud;
-        let (positions, colors, indices) = overlay_mesh_data(kind, &boxes[..1]);
+        let (positions, colors, indices) = overlay_mesh_data(&boxes[..1]);
         assert_eq!((positions.len(), colors.len(), indices.len()), (8, 8, 36));
-        let (w, h) = (kind.tile_width_units(), kind.tile_height_units());
+        let (w, h) = (game::tile_width_units(), game::tile_height_units());
         let lo = positions.iter().fold([f32::MAX; 3], |a, p| [a[0].min(p[0]), a[1].min(p[1]), a[2].min(p[2])]);
         let hi = positions.iter().fold([f32::MIN; 3], |a, p| [a[0].max(p[0]), a[1].max(p[1]), a[2].max(p[2])]);
         assert_eq!(lo, [-OVERLAY_INFLATE, 5.0 * h - OVERLAY_INFLATE, 2.0 * w - OVERLAY_INFLATE]);
@@ -208,21 +207,20 @@ mod tests {
         for y in 4..=7 {
             m.insert([0, y, 0], d(DesignationKind::Dig));
         }
-        let kind = TerrainKind::Stud;
-        let on = WorkingLevel { level: Some(5), cut: true, terrain: kind };
+        let on = WorkingLevel { level: Some(5), cut: true };
         assert_eq!(overlay_top_level(&on), Some(5));
         let boxes = designation_boxes(&m, overlay_top_level(&on));
         let levels: Vec<i32> = boxes.iter().map(|(b, _)| b.min[1]).collect();
         assert_eq!(levels, vec![4, 5], "levels 6 and 7 are cut away");
         // The working level's box is whole: its top stands over the cut plane.
         let cut = crate::renderer::commander::level::cut_y(&on, Some(game::RegionCoords::new(0, 0).into())).unwrap();
-        let (positions, _, _) = overlay_mesh_data(kind, &boxes[1..]);
+        let (positions, _, _) = overlay_mesh_data(&boxes[1..]);
         let top = positions.iter().map(|p| p[1]).fold(f32::MIN, f32::max);
         assert_eq!(top, cut + OVERLAY_INFLATE);
         // Cut off, or no level yet: everything.
-        let off = WorkingLevel { level: Some(5), cut: false, terrain: kind };
+        let off = WorkingLevel { level: Some(5), cut: false };
         assert_eq!(overlay_top_level(&off), None);
         assert_eq!(designation_boxes(&m, overlay_top_level(&off)).len(), 4);
-        assert_eq!(overlay_top_level(&WorkingLevel { level: None, cut: true, terrain: kind }), None);
+        assert_eq!(overlay_top_level(&WorkingLevel { level: None, cut: true }), None);
     }
 }

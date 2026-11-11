@@ -13,7 +13,7 @@ use game::rapier3d::math::Vector;
 use game::{
     BlockId, Carried, Client, ColliderSpec, EntityBundle, EntityId,
     EntityKind, IntentMsg, ItemId, ItemPile, ItemStack, PlayerRecord, Pose, RegionCoords, RegionMeta, SentIntent, SentReply,
-    Target, WaterBody, WaterBodyId, WorldBlockPos, BodyState,
+    Target, WorldBlockPos, BodyState,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use world_store::*;
@@ -129,8 +129,6 @@ pub(crate) fn meta() -> RegionMeta {
         (eid(2), 5),
         game::IntentReply::Refused(sent.intent, game::IntentRefusal::ContainerFull),
     );
-    m.water_bodies.insert(WaterBodyId(7), WaterBody { level: 4096 * 44, volume: 4096 * 4 });
-    m.water_bodies.insert(WaterBodyId(8), WaterBody { level: 4096 * 12, volume: 4096 });
     m
 }
 
@@ -220,7 +218,36 @@ fn golden_blobs_decode() {
     check("stud_chunk_pristine", FORMAT_STUD_CHUNK, &game::StudChunkRecord::Pristine);
     check("stud_ground", FORMAT_STUD_GROUND, &stud_ground());
     check("region_meta", FORMAT_REGION_META, &meta());
+    // Format 1 (with the voxel world's water bodies) is still read while they are
+    // empty — every stud region's row; the golden recorded then held two voxel water
+    // bodies, which no longer decode.
+    let fixture = |name: &str| std::fs::read(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(name)).unwrap();
+    let m = meta();
+    let v1 = game::RegionMetaV1 {
+        tick: m.tick,
+        next_game_event_id: m.next_game_event_id,
+        next_entity_serial: m.next_entity_serial,
+        designations: m.designations.clone(),
+        constructed: m.constructed.clone(),
+        item_piles: m.item_piles.clone(),
+        containers: m.containers.clone(),
+        pile_takes: m.pile_takes.clone(),
+        intents: m.intents.clone(),
+        intent_replies: m.intent_replies.clone(),
+        intent_inbox: m.intent_inbox.clone(),
+        water_bodies: Default::default(),
+    };
+    assert_eq!(decode_region_meta(&encode(FORMAT_REGION_META_V1, &v1)).unwrap(), m, "a format 1 stud meta decodes to the same meta");
+    assert_eq!(decode_region_meta(&encode(FORMAT_REGION_META, &m)).unwrap(), m);
+    let voxel = fixture("region_meta_v1_water.bin");
+    assert_eq!(voxel[0], FORMAT_REGION_META_V1);
+    assert!(matches!(decode_region_meta(&voxel), Err(StoreError::Corrupt(_))), "voxel water bodies are refused, not dropped");
     check("entity_bundle", FORMAT_ENTITY_BUNDLE, &bundle());
+    // Format 2 (with the voxel body slot, empty in a stud world) is still read: the
+    // golden recorded then.
+    let v2 = fixture("entity_bundle_v2.bin");
+    assert_eq!(v2[0], FORMAT_ENTITY_BUNDLE_V2);
+    assert_eq!(decode_entity_bundle(&v2).unwrap(), bundle(), "a format 2 bundle decodes to the same bundle");
     // Format 1 (before `Carried::stud_body`) is still read: the golden recorded then.
     let v1 = std::fs::read(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/entity_bundle_v1.bin")).unwrap();
     assert_eq!(v1[0], FORMAT_ENTITY_BUNDLE_V1);

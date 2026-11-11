@@ -224,7 +224,6 @@ impl Controller for CameraController {
         // Walk waypoints are world tiles, read in this region's frame.
         let region = **data.region;
         let scale = **data.body_scale;
-        let kind = crate::TerrainKind::of(scale);
         for (client_id, e_id) in data.player_entites.iter() {
             let e_id = *e_id;
             let ecs = data.ecs.as_refs_mut();
@@ -267,7 +266,7 @@ impl Controller for CameraController {
             let walk = match ecs.walker.try_get(e_id) {
                 Some(w) if client.mode == crate::PlayMode::Adventure && !active => {
                     let feet = b.translation() - Vector::Y * (scale.capsule_half_height() + scale.capsule_radius());
-                    Some(crate::steer_on(kind, scale.step_height_m, w, feet, motion0.grounded, region))
+                    Some(crate::steer(w, feet, motion0.grounded, region))
                 }
                 _ => None,
             };

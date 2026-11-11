@@ -139,7 +139,7 @@ fn stud_region_round_trips() {
     assert_eq!(again.stud_ground, original.stud_ground);
     // And against its terms nothing is written.
     let (idle, idle_terms) = snapshot(&restored_region, &restored_terms);
-    assert!(idle.stud_chunks.is_empty() && idle.stud_ground.is_none() && idle.ground.is_none());
+    assert!(idle.stud_chunks.is_empty() && idle.stud_ground.is_none());
     assert_eq!(idle_terms, restored_terms);
 }
 

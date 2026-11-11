@@ -2,16 +2,17 @@
 //! seams: plan 2026-11-06 Task 6.4.
 //!
 //! Like Minecraft's block entities and Luanti's node inventories, a chest's
-//! contents are not in the voxel array: they live in
+//! contents are not in the terrain: they live in
 //! `GameData::containers`, a `BTreeMap<WorldBlockPos, Container>` keyed by
-//! the block's WORLD cell and held by the region that owns the cell.
+//! the chest tile's WORLD cell and held by the region that owns the cell.
 //!
-//! - Every block write runs [`Rollback::containers_after_write_safe`]
-//!   (`edit.rs` hooks both the single write and the batched fill): a chest
-//!   written where there is no container creates an empty one; a container
-//!   whose block is no longer a chest spills ([`Rollback::spill_container_safe`])
-//!   into the owner's piles. A break across a seam is an intent to the
-//!   owner, so the spill always happens there, once.
+//! - Placing the chest block puts chest bricks into an open tile and creates
+//!   an empty container (`Rollback::place_stud_chest_safe`). Every stud write
+//!   that removes cells runs [`Rollback::stud_containers_after_write_safe`]:
+//!   a container whose chest bricks are gone spills
+//!   ([`Rollback::spill_container_safe`]) into the owner's piles. A break
+//!   across a seam is an intent to the owner, so the spill always happens
+//!   there, once.
 //! - An Adventure player's right click on a chest (its own region's, or a
 //!   neighbour's seen through the halo) within `edit::REACH` opens it
 //!   ([`Rollback::open_container_safe`]: `Client::open_container` plus the
@@ -183,15 +184,6 @@ fn put_into(slots: &mut [Option<ItemStack>], slot: Option<u8>, stack: ItemStack)
 }
 
 impl Rollback {
-    /// Whether local `pos` holds a chest block (on stud terrain: chest bricks,
-    /// [`Self::stud_chest_at`]).
-    fn is_chest_at(&self, pos: BlockPos) -> bool {
-        if self.terrain_kind() == crate::TerrainKind::Stud {
-            return self.stud_chest_at(pos);
-        }
-        chest_block().is_some_and(|chest| self.block_at(pos).is_some_and(|b| b.id == chest))
-    }
-
     /// Whether stud tile `p` of this region holds chest bricks: a brick of
     /// [`STUD_CHEST_MATERIAL`] tagged [`STUD_CHEST_TAG`] meets it.
     pub fn stud_chest_at(&self, p: BlockPos) -> bool {
@@ -278,7 +270,7 @@ impl Rollback {
     fn in_container_reach(&self, client: ClientId, p: WorldBlockPos) -> bool {
         let Some(&e) = self.data.player_entites.get(&client) else { return false };
         let Some(feet) = self.body_feet(e) else { return false };
-        let t = self.terrain_kind().feet_tile(feet);
+        let t = crate::feet_tile(feet);
         let t = WorldBlockPos::from_local(*self.data.region, crate::BlockPos::new(t[0], t[1], t[2]));
         let d2 = (t.x - p.x).pow(2) + i64::from(t.y - p.y).pow(2) + (t.z - p.z).pow(2);
         d2 <= i64::from(CONTAINER_REACH_BLOCKS).pow(2)
@@ -574,22 +566,5 @@ impl Rollback {
             destroyed += self.deposit_items_safe(local, stack, tick, PICKUP_DELAY_TICKS);
         }
         destroyed
-    }
-
-    /// After local block `pos` was written: a new chest gets an empty
-    /// container, a container whose chest went spills. Called by every
-    /// terrain write in `edit.rs`. Returns the items destroyed (already
-    /// counted).
-    pub(crate) fn containers_after_write_safe(&mut self, pos: BlockPos) -> u32 {
-        let w = WorldBlockPos::from_local(*self.data.region, crate::BlockPos::new(pos[0], pos[1], pos[2]));
-        let has = self.data.containers.contains_key(&w);
-        let chest = self.is_chest_at(pos);
-        if chest && !has {
-            self.write_container_safe(w, Some(Container::chest()));
-        } else if !chest && has {
-            let tick = *self.data.tick;
-            return self.spill_container_safe(w, tick);
-        }
-        0
     }
 }

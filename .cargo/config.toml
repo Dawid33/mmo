@@ -37,10 +37,6 @@ feature-unification = "workspace"
 # VOXEL_CELL_BLOCKS fail the build on purpose.)
 [env]
 VOXEL_REGION_BLOCKS = "64"
-# Sim-chunk edge in BLOCKS (`game::CHUNK_BLOCKS`, crates/game/src/block.rs;
-# powers of two 2..=32): the unit owning one entity / body / collider set.
-# `just chunk_blocks=2 …` overrides it, like the region dial above.
-VOXEL_CHUNK_BLOCKS = "16"
 # Spawn island diameter in 64 m cells (`worldgen::islands::SPAWN_ISLAND_CELLS`,
 # 0 = its default); `just island=64 …`.
 VOXEL_ISLAND_CELLS = "0"

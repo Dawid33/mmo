@@ -1,6 +1,6 @@
 //! Buoyancy and drag of dynamic bodies in water (water plan Task 4).
 //!
-//! Every owned [`EntityKind::Body`] (generic bodies and voxel bodies alike;
+//! Every owned [`EntityKind::Body`] (generic bodies and stud bodies alike;
 //! halo mirrors are kinematic and skipped) has, at the opening of each tick,
 //! its constant user force and damping set from the share `f` of its AABB
 //! height under the water surface ([`submerged_fraction`]):
@@ -24,10 +24,8 @@ use rapier3d::math::Vector;
 use crate::body::{BODY_ANGULAR_DAMPING, BODY_GRAVITY};
 use crate::mass_props::{mass_properties, BODY_DEFAULT_DENSITY};
 use crate::movement::UNITS_PER_METER;
-use crate::voxel_body::{
-    model_mass_properties, VOXEL_BODY_ANGULAR_DAMPING, VOXEL_BODY_GRAVITY, VOXEL_BODY_LANDED_ANGULAR_DAMPING,
-};
-use crate::{BlockPos, ColliderSpec, EntityKey, EntityKind, Rollback, WorldBlockPos, BLOCK_VOXELS};
+use crate::stud_body::{STUD_BODY_ANGULAR_DAMPING, STUD_BODY_GRAVITY};
+use crate::{ColliderSpec, EntityKey, EntityKind, Rollback};
 
 /// Density of water, kg/m³.
 pub const WATER_DENSITY: f32 = 1000.0;
@@ -41,36 +39,18 @@ pub const WATER_LINEAR_DAMPING: f32 = 6.0;
 pub const WATER_ANGULAR_DAMPING: f32 = 1.0;
 
 /// The share, in `[0, 1]`, of the AABB height `aabb_min.y..aabb_max.y`
-/// (region-local units) below the water surface in the block column under
-/// `com`. The surface is the top of the highest wet cell
-/// (`water_units_at > 0`) found scanning up from the cell of `aabb_min.y`
-/// to the cell of `aabb_max.y` (a wet top cell means wholly under). The
-/// column may lie in the halo; beyond it there is no water.
+/// (region-local units) below the water surface over the stud column under
+/// `com`: the recipe's surface there, exact. The column may lie in the halo;
+/// beyond it there is no water.
 pub fn submerged_fraction(rb: &Rollback, aabb_min: Vector, aabb_max: Vector, com: Vector) -> f32 {
-    let bv = BLOCK_VOXELS as f32;
     let height = aabb_max.y - aabb_min.y;
     if height <= 0.0 {
         return 0.0;
     }
-    if rb.terrain_kind() == crate::TerrainKind::Stud {
-        // Stud water: the recipe's surface over the stud column under `com`, exact.
-        return match rb.stud_water_surface_units(com.x, com.z) {
-            Some(surface) => ((surface - aabb_min.y) / height).clamp(0.0, 1.0),
-            None => 0.0,
-        };
+    match rb.stud_water_surface_units(com.x, com.z) {
+        Some(surface) => ((surface - aabb_min.y) / height).clamp(0.0, 1.0),
+        None => 0.0,
     }
-    let here = *rb.data.region;
-    let (x, z) = ((com.x / bv).floor() as i32, (com.z / bv).floor() as i32);
-    let (y0, y1) = ((aabb_min.y / bv).floor() as i32, (aabb_max.y / bv).floor() as i32);
-    let mut top = None;
-    for y in y0..=y1 {
-        if rb.water_units_at(WorldBlockPos::from_local(here, BlockPos::new(x, y, z))) > 0 {
-            top = Some(y);
-        }
-    }
-    let Some(top) = top else { return 0.0 };
-    let surface = (top + 1) as f32 * bv;
-    ((surface - aabb_min.y) / height).clamp(0.0, 1.0)
 }
 
 impl Rollback {
@@ -107,20 +87,13 @@ impl Rollback {
             let Some(spec) = ColliderSpec::of_shape(collider.shape()) else { continue };
             // The kind's own mass, gravity and angular damping (as its spawn
             // code computes them, so dry is bit-exact).
-            let (mass, gravity, base_angular) = match self.data.ecs.voxel_body.try_get(e) {
-                Some(vb) => (
-                    model_mass_properties(&vb.model).mass(),
-                    VOXEL_BODY_GRAVITY,
-                    if vb.landed { VOXEL_BODY_LANDED_ANGULAR_DAMPING } else { VOXEL_BODY_ANGULAR_DAMPING },
+            let (mass, gravity, base_angular) = match self.data.ecs.stud_body.try_get(e) {
+                Some(sb) => (
+                    crate::stud_body::stud_model_mass_properties(&sb.model).mass(),
+                    STUD_BODY_GRAVITY,
+                    STUD_BODY_ANGULAR_DAMPING,
                 ),
-                None => match self.data.ecs.stud_body.try_get(e) {
-                    Some(sb) => (
-                        crate::stud_body::stud_model_mass_properties(&sb.model).mass(),
-                        VOXEL_BODY_GRAVITY,
-                        VOXEL_BODY_ANGULAR_DAMPING,
-                    ),
-                    None => (mass_properties(&spec, BODY_DEFAULT_DENSITY).mass(), BODY_GRAVITY, BODY_ANGULAR_DAMPING),
-                },
+                None => (mass_properties(&spec, BODY_DEFAULT_DENSITY).mass(), BODY_GRAVITY, BODY_ANGULAR_DAMPING),
             };
             let (force, linear, angular) = if f == 0.0 {
                 (Vector::new(0.0, -mass * gravity * UNITS_PER_METER, 0.0), 0.0, base_angular)

@@ -1068,7 +1068,7 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                 /// Raw insert: no undo entry, no renderer emit. Only correct
                 /// for genesis writes — values that are part of the base state
                 /// a region is never rolled back below (see
-                /// `seed_terrain_genesis`). Anywhere else this desyncs the
+                /// `seed_stud_genesis`). Anywhere else this desyncs the
                 /// undo log from the data.
                 pub fn insert_raw(&mut self, v: V) -> K {
                     self.data.insert(v)

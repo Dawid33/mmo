@@ -92,7 +92,6 @@ fn region(tick: u64, chunks: &[(StudChunkCoords, StudChunkRecord)], ground: bool
     m.tick = tick;
     PortableRegion {
         meta: m,
-        ground: ground.then(Vec::new),
         stud_ground: ground.then(stud_ground),
         stud_chunks: chunks.iter().cloned().map(|(c, r)| (c, Some(r))).collect(),
         entities,
@@ -159,7 +158,6 @@ fn cut_roundtrip() {
             assert_eq!(h.load_region(*rc, &f).unwrap().as_ref(), Some(&stored(p)), "region {rc:?}");
             let terrain = h.load_terrain(*rc).unwrap().unwrap();
             assert!(!terrain.stud.ground.is_empty(), "the stored region's stud edge (studs::stored_terrain_carries_the_stud_edge)");
-            assert!(terrain.chunks.is_empty() && terrain.ground.is_empty());
         }
         assert_eq!(h.stored_regions().unwrap(), BTreeMap::from([(A, 1), (B, 1)]));
         assert_eq!(h.load_in_flight(None).unwrap(), cut.in_flight);
@@ -392,45 +390,3 @@ fn first_region_row_without_ground_is_refused() {
     });
 }
 
-/// The store holds no voxel terrain: a save that still carries some (voxel chunks, or
-/// voxel ground recipes — `game`'s `PortableRegion` has the fields until its voxel
-/// types go) is refused whole as `Unsupported`, never stored without it. A stale
-/// owner is told it is fenced first. Delete with those fields.
-#[test]
-fn voxel_terrain_in_a_save_is_refused() {
-    each_backend("voxelsave", false, |url| {
-        let h = open(url);
-        let f = fence(&h);
-        let cut = |id, a: PortableRegion| WorldCut {
-            host: 0,
-            id: CutId(id),
-            tick: 1000 + id,
-            regions: vec![(B, region(1000 + id, &[], true, vec![entity(B, 1)])), (A, a)],
-            in_flight: vec![InFlightRow::Intent { target: A, msg: intent() }],
-            players: vec![],
-            history: Some(vec![7]),
-        };
-        let mut chunks = region(1001, &[(at(0, 0, 0), stud_chunk())], true, vec![]);
-        chunks.chunks.insert(game::ChunkCoords::new(0, 0, 0), game::Chunk::default());
-        let mut recipes = region(1002, &[(at(0, 0, 0), stud_chunk())], true, vec![]);
-        let surface = vec![40_i16; game::COLUMN_FOOTPRINT].into();
-        let recipe = game::ColumnGround::plain(surface, -3, game::BlockId(1), game::BlockId(9));
-        recipes.ground = Some(vec![(game::ColumnCoords::new(0, 0), recipe)]);
-        for (id, a) in [(1, chunks.clone()), (2, recipes)] {
-            let err = h.commit_cut(cut(id, a), f.clone()).recv().unwrap().unwrap_err();
-            assert!(matches!(&err, StoreError::Unsupported(m) if m.contains("voxel terrain") && m.contains("not committed")), "{err}");
-            assert!(h.stored_regions().unwrap().is_empty(), "no region of the cut was committed");
-            assert!(h.load_in_flight(None).unwrap().is_empty() && h.load_history().unwrap().is_none());
-            assert_eq!(h.world_info().unwrap().world_tick, 0);
-        }
-        let stale = f.clone();
-        let f = h.claim_super_regions(1, TEST_SUPER_REGIONS.to_vec()).unwrap();
-        let err = h.commit_cut(cut(3, chunks), stale).recv().unwrap().unwrap_err();
-        assert!(matches!(err, StoreError::Fenced { .. }), "the fence is checked first: {err}");
-        // The same cut without the voxel fields commits.
-        h.commit_cut(cut(4, region(1004, &[(at(0, 0, 0), stud_chunk())], true, vec![])), f.clone()).recv().unwrap().unwrap();
-        let a = h.load_region(A, &f).unwrap().unwrap();
-        assert!(a.chunks.is_empty() && a.ground.is_empty(), "a loaded region's voxel fields are empty");
-        h.shutdown();
-    });
-}

@@ -22,7 +22,6 @@ fn region_a() -> PortableRegion {
     PortableRegion {
         meta: meta(),
         stud_chunks: [(StudChunkCoords { x: 0, y: 0, z: 0 }, Some(stud_chunk()))].into_iter().collect(),
-        ground: Some(Vec::new()),
         stud_ground: Some(stud_ground()),
         entities: vec![],
         players: vec![],

@@ -732,7 +732,7 @@ fn place_on_body(
     cam.ground_y = surface;
     cam.rise = 0.0;
     cam.pivot = None;
-    level.level = Some(level::surface_level(level.terrain, surface));
+    level.level = Some(level::surface_level(surface));
     cam.placed = true;
 }
 
@@ -1044,8 +1044,7 @@ pub fn eye_in_block(home_block: Option<bool>, eye: Vec3, terrain_under_eye: Opti
 /// Whether world point `eye` lies in a solid home-region block (`None`
 /// outside the home region).
 fn home_block_solid(mirror: &tiles::TileMirror, eye: Vec3) -> Option<bool> {
-    let kind = mirror.terrain();
-    let world = eye / Vec3::new(kind.tile_width_units(), kind.tile_height_units(), kind.tile_width_units());
+    let world = eye / Vec3::new(game::tile_width_units(), game::tile_height_units(), game::tile_width_units());
     let (bx, bz) = (world.x.floor() as i32, world.z.floor() as i32);
     if !mirror.in_home(bx, bz) {
         return None;
@@ -1059,8 +1058,7 @@ fn home_block_solid(mirror: &tiles::TileMirror, eye: Vec3) -> Option<bool> {
 /// Whether world point `eye` lies in a water cell of the home region
 /// (`TileSource::water_units` > 0: recipe water, `game::static_water_units`).
 pub fn eye_in_water(mirror: &tiles::TileMirror, eye: Vec3) -> bool {
-    let kind = mirror.terrain();
-    let world = eye / Vec3::new(kind.tile_width_units(), kind.tile_height_units(), kind.tile_width_units());
+    let world = eye / Vec3::new(game::tile_width_units(), game::tile_height_units(), game::tile_width_units());
     let (bx, bz) = (world.x.floor() as i32, world.z.floor() as i32);
     if !mirror.in_home(bx, bz) {
         return false;
@@ -1116,7 +1114,7 @@ fn underground_view(
     let top = td.is_some_and(|t| t.on);
     // Underground beats underwater beats open air.
     let (under, wet) = if top {
-        (top_down::top_down_underground(working.level, top_down::lowest_surface_level(working.terrain, grid.surface_range())), false)
+        (top_down::top_down_underground(working.level, top_down::lowest_surface_level(grid.surface_range())), false)
     } else {
         let eye = camera_transform(focus_point(&cam), cam.distance, cam.yaw, cam.pitch).translation;
         let under = eye_in_block(home_block_solid(&mirror, eye), eye, grid.surface_at(eye.x, eye.z));
@@ -1461,8 +1459,7 @@ mod tests {
         // A chunk solid for its first four tile levels (24 plates).
         let chunk = game::StudChunk::new([game::StudBrick::filler([0, 0, 0], [32, 24, 32], game::MAT_STONE)]).unwrap();
         mirror.set_stud_chunk(Entity::from_raw_u32(1).unwrap(), [0, 0, 0], &chunk);
-        let kind = mirror.terrain();
-        let (w, h) = (kind.tile_width_units(), kind.tile_height_units());
+        let (w, h) = (game::tile_width_units(), game::tile_height_units());
         assert_eq!(home_block_solid(&mirror, Vec3::new(1.5 * w, 3.5 * h, 2.5 * w)), Some(true));
         assert_eq!(home_block_solid(&mirror, Vec3::new(1.5 * w, 4.5 * h, 2.5 * w)), Some(false), "air above");
         assert_eq!(home_block_solid(&mirror, Vec3::new(-0.5 * w, 3.5 * h, 2.5 * w)), None, "outside home");

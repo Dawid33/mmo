@@ -427,7 +427,7 @@ fn boot(
         }
         DebugScenario::Studs { procedural } => {
             // `terrain` is passed verbatim as VOXEL_WORLD_FILE: `studs` is the server's toy stud
-            // world, `studs-procedural` the procedural world on stud terrain.
+            // world, `procedural` the procedural noise world.
             // Only `server.log` lives in the entry dir. The toy world has no far terrain:
             // `just run-studs` sets `VOXEL_LOD_RINGS=off` for it (not for `--procedural`, which
             // streams stud far terrain), because `WorldScale::from_env` runs in `main` before this system.
@@ -438,7 +438,7 @@ fn boot(
                 launch.phase = Phase::Done;
                 return;
             }
-            let terrain = if *procedural { "studs-procedural" } else { "studs" };
+            let terrain = if *procedural { "procedural" } else { "studs" };
             info!("[debug] studs: world `{terrain}`, log in {}", dir.display());
             commands.insert_resource(PendingWorld { entry_dir: dir, terrain: terrain.into(), name: "Studs".into() });
             launch.phase = Phase::Embarking(Sent::Nothing);

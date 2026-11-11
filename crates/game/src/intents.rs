@@ -492,51 +492,13 @@ impl Rollback {
             return refused(IntentRefusal::BadTarget);
         }
         let pos = [local.x, local.y, local.z];
-        if self.terrain_kind() == crate::TerrainKind::Stud {
-            // On stud terrain the cell is a TILE (`tiles.rs`).
-            return self.apply_stud_tile_intent_safe(pos, intent);
-        }
-        let Some((coords, l)) = crate::edit::locate(pos) else { return refused(IntentRefusal::NothingThere) };
-        let current = self.current_block(coords, l);
-        let ground = self.data.ground.get(&crate::ColumnCoords::new(coords.x, coords.z));
-        if current.is_some_and(|b| crate::edit::is_bedrock_at(ground, b)) {
-            return refused(IntentRefusal::Bedrock);
-        }
-        let done = match intent {
-            Intent::BreakBlock { survival: false, .. } => self.set_block_in(pos, crate::Block::new(crate::BlockId::AIR)),
-            Intent::BreakBlock { survival: true, .. } => {
-                let tick = *self.data.tick;
-                match self.mineable(pos) {
-                    Some(block) if block.tree_id() != 0 => self.player_chop_safe(pos, tick),
-                    Some(block) => self.mine_block_safe(pos, block, tick),
-                    None => false,
-                }
-            }
-            Intent::PlaceBlock { block, .. } => {
-                if self.block_solid(pos) || self.block_overlaps_body(pos) {
-                    return refused(IntentRefusal::Occupied);
-                }
-                self.set_block_in(pos, crate::Block::new(block))
-            }
-            Intent::DepositItems { .. }
-            | Intent::TakeFromPile { .. }
-            | Intent::PutInContainer { .. }
-            | Intent::TakeFromContainer { .. }
-            | Intent::CarveStud { .. }
-            | Intent::PlaceStud { .. }
-            | Intent::FillStud { .. }
-            | Intent::RemoveStud { .. } => unreachable!("pile, chest and stud intents returned above"),
-        };
-        if done {
-            IntentReply::Granted(intent)
-        } else {
-            refused(IntentRefusal::NothingThere)
-        }
+        // The cell is a TILE (`tiles.rs`).
+        self.apply_stud_tile_intent_safe(pos, intent)
     }
 
     /// `Intent::BreakBlock` / `Intent::PlaceBlock` at stud TILE `p` of this region, as
-    /// its owner — what a player's mining, placing and creative edit send on stud
-    /// terrain (`mining.rs`, `edit.rs`), with the voxel pair's refusals:
+    /// its owner — what a player's mining, placing and creative edit send
+    /// (`mining.rs`, `edit.rs`), with these refusals:
     /// - a break carves the tile's box (`carve_stud_safe`); `survival` puts what it
     ///   removed down as piles in the tile (`mining::stud_drops`) and, on a tile
     ///   holding tree wood, fells the tree instead (`fell_stud_safe`, its yield at

@@ -24,7 +24,7 @@ use crate::movement::{self, MoveKeys, MoveParams, UNITS_PER_METER};
 use crate::protocol::{ColliderSpec, RegionCoords, REGION_SIZE};
 use crate::{
     EntityKey, EntityKind, GameDataTransactionKind, GameDataUpdate, GameDataUpdateKind,
-    Pose, Rollback, BLOCK_VOXELS,
+    Pose, Rollback, BLOCK_UNITS,
 };
 
 // --- Spawning -----------------------------------------------------------
@@ -155,7 +155,7 @@ pub fn slime_spawn_plan(region: RegionCoords, tick: u64) -> Option<SlimeSpawnPla
         return None;
     }
     // Any block column of the region, centred in the block.
-    let block = BLOCK_VOXELS as u64;
+    let block = BLOCK_UNITS as u64;
     let span = REGION_SIZE as u64 / block;
     let r2 = mix(r);
     let bx = r2 % span;
@@ -206,28 +206,15 @@ impl Rollback {
         if count >= SLIME_CAP_PER_REGION {
             return;
         }
-        if self.terrain_kind() == crate::TerrainKind::Stud {
-            // Stud terrain: on the bricks' top of the plan's stud column, never where
-            // recipe water stands over it (a seabed).
-            let (x, z) = (plan.vx as f32, plan.vz as f32);
-            let Some(top) = self.stud_surface_y(x, z) else { return };
-            if self.stud_water_surface_units(x, z).is_some_and(|w| w > top) {
-                return;
-            }
-            let y = top + crate::stud_cap_units() + slime_edge_units(plan.size) / 2.0 + SLIME_SPAWN_CLEARANCE;
-            self.spawn_slime_safe(Vector::new(x, y, z), plan.size, plan.yaw, tick);
+        // On the bricks' top of the plan's stud column, never where recipe water
+        // stands over it (a seabed).
+        let (x, z) = (plan.vx as f32, plan.vz as f32);
+        let Some(top) = self.stud_surface_y(x, z) else { return };
+        if self.stud_water_surface_units(x, z).is_some_and(|w| w > top) {
             return;
         }
-        let Some((surface, _)) = self.surface_voxel(plan.vx, plan.vz) else { return };
-        // Never on a seabed: the cell over the top voxel holds no water.
-        let bv = crate::BLOCK_VOXELS as i32;
-        let above = crate::BlockPos::new(plan.vx.div_euclid(bv), (surface + 1).div_euclid(bv), plan.vz.div_euclid(bv));
-        if self.water_units_at(crate::WorldBlockPos::from_local(region, above)) > 0 {
-            return;
-        }
-        let y = (surface + 1) as f32 + slime_edge_units(plan.size) / 2.0 + SLIME_SPAWN_CLEARANCE;
-        let pos = Vector::new(plan.vx as f32, y, plan.vz as f32);
-        self.spawn_slime_safe(pos, plan.size, plan.yaw, tick);
+        let y = top + crate::stud_cap_units() + slime_edge_units(plan.size) / 2.0 + SLIME_SPAWN_CLEARANCE;
+        self.spawn_slime_safe(Vector::new(x, y, z), plan.size, plan.yaw, tick);
     }
 
     /// Spawn a slime of `size` at region-local `pos` (the body centre),

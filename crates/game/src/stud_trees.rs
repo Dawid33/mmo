@@ -23,7 +23,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use rapier3d::math::Vector;
+
 use crate::orders::TilePos;
+use crate::slime::roll;
 use crate::stud::{StudBrick, StudChunkCoords, STUD_CHUNK_PLATES, STUD_CHUNK_STUDS, TILE_PLATES, TILE_STUDS};
 use crate::stud_material::MAT_WOOD;
 use crate::tiles::{STUD_CHUNK_TILES, STUD_LAYER_TILES};
@@ -37,10 +40,55 @@ pub const STUD_TREE_SCAN_TILES_H: i32 = 20;
 /// The same reach up and down (tiles of 1.2 m): the tallest tree (32 m) with its foot.
 pub const STUD_TREE_SCAN_TILES_V: i32 = 29;
 /// A trunk cut takes the tree's wood of the chopped level out to this many tiles (on
-/// x and on z) from the chopped tile (`trees::TRUNK_CUT_RADIUS_BLOCKS`).
-pub const STUD_TRUNK_CUT_RADIUS_TILES: i32 = crate::trees::TRUNK_CUT_RADIUS_BLOCKS;
+/// x and on z) from the chopped tile .
+pub const STUD_TRUNK_CUT_RADIUS_TILES: i32 = 4;
 /// Most bricks of one tree a felling handles; a bigger one cannot be chopped.
 pub const MAX_STUD_TREE_BRICKS: usize = crate::stud_body::MAX_STUD_BODY_BRICKS;
+/// Spin a felled part starts with, rad/s, about a horizontal axis through
+/// its pivot (the top of the chopped tile). Only enough to start the topple: gravity does
+/// the rest.
+pub const TIP_ANGVEL: f32 = 0.6;
+/// `roll` salt of the tip direction when the part has no lean.
+pub const TIP_SALT: u64 = 0x7119_FE11;
+/// A lean under this many blocks (horizontal centroid offset from the cut)
+/// counts as none: the direction is rolled.
+pub const TIP_MIN_LEAN_BLOCKS: f32 = 0.5;
+
+/// The eight horizontal tip directions `[x, z]`, in order of angle.
+const DIRECTIONS: [[i32; 2]; 8] = [[1, 0], [1, 1], [0, 1], [-1, 1], [-1, 0], [-1, -1], [0, -1], [1, -1]];
+
+/// Spin for the part `set` felled at `cut` of tree `tree` on region tick
+/// `tick` (rad/s, world axes): [`TIP_ANGVEL`] about the horizontal axis that
+/// tips the part's top toward a direction. That direction is the nearest of
+/// eight to the horizontal offset of the part's centroid from the cut, or
+/// `roll(tick, tree, TIP_SALT)`'s pick under [`TIP_MIN_LEAN_BLOCKS`] of lean.
+/// A region edge does not matter: the felled part crosses the seam as any
+/// body does. Zero for an empty set.
+pub fn tip_angvel(tree: u32, cut: TilePos, set: &[TilePos], tick: u64) -> Vector {
+    if set.is_empty() {
+        return Vector::ZERO;
+    }
+    let n = set.len() as f32;
+    let centre = |a: usize| set.iter().map(|p| p[a] as f32).sum::<f32>() / n - cut[a] as f32;
+    let (lean_x, lean_z) = (centre(0), centre(2));
+    let unit = |d: [i32; 2]| {
+        let len = ((d[0] * d[0] + d[1] * d[1]) as f32).sqrt();
+        (d[0] as f32 / len, d[1] as f32 / len)
+    };
+    let pick = if (lean_x * lean_x + lean_z * lean_z).sqrt() < TIP_MIN_LEAN_BLOCKS {
+        (roll(tick, u64::from(tree), TIP_SALT) % 8) as usize
+    } else {
+        let dot = |i: usize| {
+            let (x, z) = unit(DIRECTIONS[i]);
+            x * lean_x + z * lean_z
+        };
+        // Highest dot product, ties to the lowest index.
+        (0..8).fold(0, |best, i| if dot(i) > dot(best) { i } else { best })
+    };
+    let (x, z) = unit(DIRECTIONS[pick]);
+    // Spinning about up × d moves the top along d.
+    Vector::new(z, 0.0, -x) * TIP_ANGVEL
+}
 
 /// One brick of a tree: its chunk, and its cell box in region stud cells.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -168,7 +216,7 @@ impl Rollback {
     /// undo-safely: the cut bricks are removed and their yield (`mining::stud_drops`)
     /// put down at the chopped tile at once; the falling bricks are detached into one
     /// stud body turning about the middle of the chopped tile's top (the tip spin of
-    /// `trees::tip_angvel`, toward its lean), settling by `policy`.
+    /// [`tip_angvel`], toward its lean), settling by `policy`.
     /// Returns the cells cut per material and the falling body (`None` when nothing
     /// fell). `None`, with nothing changed, where `stud_fell` refuses.
     pub fn fell_stud_safe(&mut self, p: TilePos, policy: SettlePolicy) -> Option<(Vec<(u16, u32)>, Option<EntityKey>)> {
@@ -199,9 +247,8 @@ impl Rollback {
         let hi = felling.cut.iter().fold([i32::MIN; 3], |h, b| [0, 1, 2].map(|a| h[a].max(b.hi[a])));
         let _destroyed = self.stud_piles_after_write_safe(lo, hi);
         // The fall, turning about the butt: the top of the chopped tile.
-        let kind = crate::TerrainKind::Stud;
-        let (cx, cz) = kind.column_centre([p[0], p[2]]);
-        let pivot = rapier3d::math::Vector::new(cx, kind.level_bottom_units(p[1] + 1), cz);
+        let (cx, cz) = crate::column_centre([p[0], p[2]]);
+        let pivot = rapier3d::math::Vector::new(cx, crate::level_bottom_units(p[1] + 1), cz);
         let centres: Vec<TilePos> = felling
             .falling
             .iter()
@@ -213,7 +260,7 @@ impl Rollback {
                 ]
             })
             .collect();
-        let spin = crate::trees::tip_angvel(u32::from(felling.tree), p, &centres, tick);
+        let spin = tip_angvel(u32::from(felling.tree), p, &centres, tick);
         let body = self.detach_studs_safe(&picks(&felling.falling), policy, spin, Some(pivot));
         // The cut's yield, at the stump.
         self.deposit_drops_safe(p, &crate::mining::stud_drops(&removed), tick);

@@ -42,25 +42,29 @@ use slotmapd::Key as _;
 // voxel chunks and the 1.8 m body), so the old values (scene 0x60B6_386A /
 // 0xFC53_45B5, underground 0x6E9C_D4DF / 0x4F26_0F66, voxel body
 // 0x52FC_9318 / 0xFD58_5519 at 16-block chunks) describe nothing any more.
-// `physics_goldens` was rebuilt on stud ground in the same change. The values
-// are pinned at 16-block sim chunks only (stud chunks exist at no other size).
-// They move again whenever the hashed / serialized layout of `GameData` /
-// `Ecs` does — P10b's next step removes the voxel fields.
+// `physics_goldens` was rebuilt on stud ground in the same change.
+// Re-recorded 2026-11-11 (P10b, the voxel code deleted from `game`): the
+// hashed / serialized layout of `GameData` / `Ecs` lost its voxel fields
+// (`chunk`, `voxel_body`, `chunk_index`, `ground`, `water_bodies`, `halo`,
+// `halo_ground`) — a layout-only move: `physics_goldens` did not move.
+// Before: scene 0x3F2D_FC5B / 0x8704_493E, underground 0x1CAA_BA0A /
+// 0x3C72_DB95, stud body 0x6502_0AE7 / 0xC78F_A508. They move again
+// whenever that layout does.
 /// crc32 of the scene region's bincode bytes after [`SCENE_TICKS`] ticks,
 /// on every target.
-const WASM_SCENE_DIGEST: u32 = 0x3F2D_FC5B;
+const WASM_SCENE_DIGEST: u32 = 0x5BCB_AA41;
 /// `game::state_hash` of the same state, on every target.
-const SCENE_STATE_HASH: u32 = 0x8704_493E;
+const SCENE_STATE_HASH: u32 = 0xE5F7_54F5;
 const SCENE_TICKS: usize = 120;
 /// crc32 of [`underground_scene`]'s region bytes, on every target.
-const UNDERGROUND_DIGEST: u32 = 0x1CAA_BA0A;
+const UNDERGROUND_DIGEST: u32 = 0x3A4E_50AC;
 /// `game::state_hash` of the same state, on every target.
-const UNDERGROUND_STATE_HASH: u32 = 0x3C72_DB95;
+const UNDERGROUND_STATE_HASH: u32 = 0x2241_D662;
 
 /// crc32 of [`stud_body_scene`]'s region bytes, on every target.
-const STUD_BODY_DIGEST: u32 = 0x6502_0AE7;
+const STUD_BODY_DIGEST: u32 = 0x9F93_B77D;
 /// `game::state_hash` of the same state, on every target.
-const STUD_BODY_STATE_HASH: u32 = 0xC78F_A508;
+const STUD_BODY_STATE_HASH: u32 = 0xD498_D06F;
 /// Ticks of [`stud_body_scene`] after the detach: it has landed and tumbles.
 const STUD_BODY_TICKS: usize = 30;
 

@@ -15,7 +15,7 @@
 //!   that have a same-named block ([`build_blocks`]).
 
 use game::stud_catalog::{STUD_COLORS, STUD_PARTS};
-use game::{BlockId, TerrainKind, TileBox, MAT_BEDROCK, NATURAL_BASE, STUD_NATURALS};
+use game::{BlockId, TileBox, MAT_BEDROCK, NATURAL_BASE, STUD_NATURALS};
 
 use super::build::StudBuild;
 use super::mesh::StudAssets;
@@ -185,13 +185,12 @@ pub fn build_blocks() -> Vec<(BlockId, String)> {
         .collect()
 }
 
-/// The level readout (`slint_overlay::level_text`) for terrain `kind`: levels
-/// are TILES — 1 m on voxels, 1.2 m on studs — so on studs the distance to the
-/// surface is also given in metres ("Level 53 · 6 below surface (7.2 m)").
-pub fn level_text(kind: TerrainKind, level: i32, surface_level: Option<i32>) -> String {
-    let metres = |levels: i32| match kind {
-        TerrainKind::Voxel => String::new(),
-        TerrainKind::Stud => format!(" ({} m)", metres_text(levels as f32 * kind.tile_height_units() / game::movement::UNITS_PER_METER)),
+/// The level readout (`slint_overlay::level_text`): levels are TILES of 1.2 m,
+/// so the distance to the surface is also given in metres
+/// ("Level 53 · 6 below surface (7.2 m)").
+pub fn level_text(level: i32, surface_level: Option<i32>) -> String {
+    let metres = |levels: i32| {
+        format!(" ({} m)", metres_text(levels as f32 * game::tile_height_units() / game::movement::UNITS_PER_METER))
     };
     match surface_level.map(|surface| level - surface) {
         None => format!("Level {level}"),
@@ -207,20 +206,14 @@ fn metres_text(m: f32) -> String {
     if rounded.fract() == 0.0 { format!("{rounded:.0}") } else { format!("{rounded:.1}") }
 }
 
-/// The drag readout's size: "x × z × levels" in tiles; on stud terrain, where
-/// a level is 1.2 m, followed by the box in metres ("4 × 3 × 2 (4 × 3 × 2.4 m)").
-/// A voxel tile is a metre cube, so there the counts are the metres.
-pub fn size_text(kind: TerrainKind, area: TileBox) -> String {
+/// The drag readout's size: "x × z × levels" in tiles, followed by the box in
+/// metres — a level is 1.2 m ("4 × 3 × 2 (4 × 3 × 2.4 m)").
+pub fn size_text(area: TileBox) -> String {
     let len = |i: usize| i64::from(area.max[i]) - i64::from(area.min[i]) + 1;
     let tiles = format!("{} × {} × {}", len(0), len(2), len(1));
-    match kind {
-        TerrainKind::Voxel => tiles,
-        TerrainKind::Stud => {
-            let (w, h) = (kind.tile_width_units(), kind.tile_height_units());
-            let m = |n: i64, unit: f32| metres_text(n as f32 * unit / game::movement::UNITS_PER_METER);
-            format!("{tiles} ({} × {} × {} m)", m(len(0), w), m(len(2), w), m(len(1), h))
-        }
-    }
+    let (w, h) = (game::tile_width_units(), game::tile_height_units());
+    let m = |n: i64, unit: f32| metres_text(n as f32 * unit / game::movement::UNITS_PER_METER);
+    format!("{tiles} ({} × {} × {} m)", m(len(0), w), m(len(2), w), m(len(1), h))
 }
 
 /// A part's footprint in metres, for tooltips and tests: studs are half a metre.
@@ -388,33 +381,25 @@ mod tests {
     }
 
     #[test]
-    fn level_text_counts_tiles_and_gives_metres_on_studs() {
-        let v = TerrainKind::Voxel;
-        assert_eq!(level_text(v, 64, Some(70)), "Level 64 · 6 below surface");
-        assert_eq!(level_text(v, 72, Some(70)), "Level 72 · 2 above surface");
-        assert_eq!(level_text(v, 70, Some(70)), "Level 70 · surface");
-        assert_eq!(level_text(v, 70, None), "Level 70");
-        let s = TerrainKind::Stud;
-        assert_eq!(level_text(s, 52, Some(58)), "Level 52 · 6 below surface (7.2 m)");
-        assert_eq!(level_text(s, 63, Some(58)), "Level 63 · 5 above surface (6 m)");
-        assert_eq!(level_text(s, 58, Some(58)), "Level 58 · surface");
-        assert_eq!(level_text(s, 58, None), "Level 58");
-        // The surface level itself comes through `TerrainKind`: the same ground is
-        // level 70 on voxels and 58 on studs.
+    fn level_text_counts_tiles_and_gives_metres() {
+        assert_eq!(level_text(52, Some(58)), "Level 52 · 6 below surface (7.2 m)");
+        assert_eq!(level_text(63, Some(58)), "Level 63 · 5 above surface (6 m)");
+        assert_eq!(level_text(58, Some(58)), "Level 58 · surface");
+        assert_eq!(level_text(58, None), "Level 58");
+        // The surface level itself is in tiles: ground 70 m up is level 58.
         use crate::renderer::commander::level::surface_level;
         let y = 70.0 * game::movement::UNITS_PER_METER;
-        assert_eq!((surface_level(v, y), surface_level(s, y)), (70, 58));
-        assert_eq!(level_text(s, surface_level(s, y) - 1, Some(surface_level(s, y))), "Level 57 · 1 below surface (1.2 m)");
+        assert_eq!(surface_level(y), 58);
+        assert_eq!(level_text(surface_level(y) - 1, Some(surface_level(y))), "Level 57 · 1 below surface (1.2 m)");
     }
 
     #[test]
-    fn the_drag_size_is_tiles_and_on_studs_also_metres() {
+    fn the_drag_size_is_tiles_and_metres() {
         let area = TileBox::new([2, 10, 5], [5, 11, 7]);
-        assert_eq!(size_text(TerrainKind::Voxel, area), "4 × 3 × 2");
-        assert_eq!(size_text(TerrainKind::Stud, area), "4 × 3 × 2 (4 × 3 × 2.4 m)");
+        assert_eq!(size_text(area), "4 × 3 × 2 (4 × 3 × 2.4 m)");
         let one = TileBox::new([0, 0, 0], [0, 0, 0]);
-        assert_eq!(size_text(TerrainKind::Stud, one), "1 × 1 × 1 (1 × 1 × 1.2 m)");
+        assert_eq!(size_text(one), "1 × 1 × 1 (1 × 1 × 1.2 m)");
         let tall = TileBox::new([0, 0, 0], [0, 4, 0]);
-        assert_eq!(size_text(TerrainKind::Stud, tall), "1 × 1 × 5 (1 × 1 × 6 m)");
+        assert_eq!(size_text(tall), "1 × 1 × 5 (1 × 1 × 6 m)");
     }
 }
