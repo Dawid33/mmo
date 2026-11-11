@@ -23,6 +23,7 @@ pub mod tile_map;
 pub mod world_store;
 pub mod stud_gen;
 pub mod stud_trees;
+pub mod prefab_world;
 pub mod stud_world;
 pub mod trees;
 

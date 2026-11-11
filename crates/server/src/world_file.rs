@@ -21,6 +21,9 @@ pub const PROCEDURAL_KEYWORD: &str = worldgen::forged::PROCEDURAL_KEYWORD;
 /// `VOXEL_WORLD_FILE` value that selects the toy-brick stud test world.
 pub const STUDS_KEYWORD: &str = "studs";
 
+/// `VOXEL_WORLD_FILE` value that selects the prefab editor's empty world.
+pub const PREFAB_EDITOR_KEYWORD: &str = "prefab-editor";
+
 /// The world store: a `.sqlite` path or a `postgres://` URL. Unset or empty =
 /// [`store_url_for`] the world file.
 pub const WORLD_DB_ENV: &str = "VOXEL_WORLD_DB";
@@ -53,6 +56,9 @@ pub enum WorldSource {
     /// The toy-brick stud test world (a debug preset): no store, no map, no history,
     /// nothing persisted.
     Studs,
+    /// The prefab editor's world (`worldgen::prefab_world`): a flat baseplate; like
+    /// [`WorldSource::Studs`] no store, no map, no history, nothing persisted.
+    PrefabEditor,
     /// A forged world in the store at `url`. `import`: the world file (forge
     /// file) the store takes its world from when it has none yet — it may not
     /// exist — and next to which old file saves would sit.
@@ -62,7 +68,7 @@ pub enum WorldSource {
 /// `VOXEL_WORLD_FILE` + `VOXEL_WORLD_DB` -> the world to serve. A world file
 /// unset or empty is the default world (unless a store is named, which then
 /// imports nothing), `procedural` the noise world, `studs`
-/// the toy-brick test world, anything else a world file
+/// the toy-brick test world, `prefab-editor` the prefab editor's baseplate, anything else a world file
 /// (relative paths from the repo root). The store is `VOXEL_WORLD_DB`, else
 /// the world file's `.sqlite`.
 pub fn resolve(world_file: Option<&str>, world_db: Option<&str>) -> Result<WorldSource, String> {
@@ -79,6 +85,12 @@ pub fn resolve(world_file: Option<&str>, world_db: Option<&str>) -> Result<World
                 log::warn!("[server] {WORLD_DB_ENV} is ignored: the studs world keeps nothing");
             }
             return Ok(WorldSource::Studs);
+        }
+        Some(PREFAB_EDITOR_KEYWORD) => {
+            if world_db.is_some() {
+                log::warn!("[server] {WORLD_DB_ENV} is ignored: the prefab editor world keeps nothing");
+            }
+            return Ok(WorldSource::PrefabEditor);
         }
         None | Some("") if world_db.is_some() => None,
         None | Some("") => Some(from_repo_root(Path::new(DEFAULT_WORLD_PATH))),
@@ -456,7 +468,7 @@ pub struct OpenedWorld {
 /// forged ([`ensure_world`]). The store is shut down again on an error.
 pub fn open_world(source: &WorldSource, params: &ForgeParams) -> Result<OpenedWorld, String> {
     let (url, import) = match source {
-        WorldSource::Procedural | WorldSource::Studs => {
+        WorldSource::Procedural | WorldSource::Studs | WorldSource::PrefabEditor => {
             return Ok(OpenedWorld { store: None, world: None, map: None, world_tick: 0 })
         }
         WorldSource::Store { url, import } => (url, import.as_deref()),
@@ -519,6 +531,12 @@ mod tests {
     fn resolve_studs_keyword() {
         assert_eq!(resolve(Some("studs"), None).unwrap(), WorldSource::Studs);
         assert_eq!(resolve(Some("studs"), Some("x.sqlite")).unwrap(), WorldSource::Studs);
+    }
+
+    #[test]
+    fn prefab_editor_keyword_resolves() {
+        assert_eq!(resolve(Some("prefab-editor"), None), Ok(WorldSource::PrefabEditor));
+        assert_eq!(resolve(Some(PREFAB_EDITOR_KEYWORD), Some("x.sqlite")), Ok(WorldSource::PrefabEditor));
     }
 
     #[test]

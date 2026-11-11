@@ -24,5 +24,6 @@ mod scene_hash_golden;
 mod stud_gen;
 mod stud_lod;
 mod stud_trees;
+mod prefab_world;
 mod stud_world;
 mod tile_map;

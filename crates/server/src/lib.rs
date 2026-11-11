@@ -662,6 +662,9 @@ pub fn run() -> claims::ServerExit {
         }
         world_file::WorldSource::Procedural => info!("[server] world: procedural (nothing is saved)"),
         world_file::WorldSource::Studs => info!("[server] world: studs (toy bricks, nothing is saved)"),
+        world_file::WorldSource::PrefabEditor => {
+            info!("[server] world: prefab editor (an empty baseplate, nothing is saved)")
+        }
     }
     // The world map was built when the world was written and is read from
     // the store with it (procedural worlds: none).
@@ -674,7 +677,10 @@ pub fn run() -> claims::ServerExit {
         "[server] lod workers: {lod_threads} ({})",
         if configured_lod_threads.is_some() { "LOD_BUILD_THREADS" } else { "default: cores / 4, clamped 2..=6" }
     );
-    let toy_studs = matches!(world_source, world_file::WorldSource::Studs);
+    // The two keyword worlds of 3x3 hand-made regions: the toy-brick test world and the
+    // prefab editor's baseplate.
+    let editor_world = matches!(world_source, world_file::WorldSource::PrefabEditor);
+    let toy_studs = editor_world || matches!(world_source, world_file::WorldSource::Studs);
     let lod_builder: Box<dyn game::LodBuilder> = if toy_studs {
         // The 3x3 toy world has nothing beyond its regions.
         Box::new(game::NullLodBuilder::default())
@@ -695,7 +701,9 @@ pub fn run() -> claims::ServerExit {
     // band columns, trees and ice included (`generate_stud_window` gives the bricks
     // the whole region's genesis gives those columns).
     let mut spawner = region_threads::ThreadRegionSpawner::default().with_clock(world_clock, start);
-    spawner = if toy_studs {
+    spawner = if editor_world {
+        spawner.with_genesis(std::sync::Arc::new(worldgen::prefab_world::region_seed))
+    } else if toy_studs {
         spawner.with_genesis(std::sync::Arc::new(worldgen::stud_world::region_seed))
     } else {
         spawner
