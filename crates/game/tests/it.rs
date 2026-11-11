@@ -19,6 +19,7 @@
 mod common;
 mod prefab_builtin;
 mod prefab_codec;
+mod prefab_layout;
 mod prefab_resolve;
 mod adventure;
 mod anim;

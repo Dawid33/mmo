@@ -139,3 +139,18 @@ fn name_rule() {
     }
     assert_eq!(game::prefab_name_key("dev-arch"), crc32fast::hash(b"dev-arch"));
 }
+
+#[test]
+fn total_box_volume_is_capped() {
+    // Two boxes that each fill the whole extent: individually in bounds, together a
+    // layout nobody should be made to tile.
+    let full = game::BuildBoxFile { min: [-48, -90, -48], size: [96, 270, 96], material: MaterialName::Natural("stone".into()), data: 0 };
+    let one = build_file("v", BuildFile { boxes: vec![full.clone()], ..empty_build() });
+    assert!(resolve(&one, Trust::Player).is_ok());
+    let two = build_file("v", BuildFile { boxes: vec![full.clone(), full], ..empty_build() });
+    assert!(matches!(resolve(&two, Trust::Player).unwrap_err()[..], [Problem::BoxesTooLarge(_)]));
+    let carve = game::CellBox { min: [-48, -90, -48], size: [96, 270, 96] };
+    let mut r = resolved(&build_file("v", BuildFile { carve: vec![carve.clone()], ..empty_build() }));
+    build_of_mut(&mut r).carve.push(carve);
+    assert!(matches!(r.validate(Trust::Player).unwrap_err()[..], [Problem::BoxesTooLarge(_)]));
+}

@@ -13,11 +13,13 @@
 mod builtin;
 mod codec;
 mod file;
+mod layout;
 mod resolve;
 
 pub use builtin::*;
 pub use codec::*;
 pub use file::*;
+pub use layout::*;
 pub use resolve::*;
 
 use serde::{Deserialize, Serialize};
@@ -26,6 +28,10 @@ use serde::{Deserialize, Serialize};
 pub const PREFAB_MAX_PARTS: usize = 4096;
 /// Most boxes (solid fills plus carve boxes) one prefab may hold.
 pub const PREFAB_MAX_BOXES: usize = 4096;
+/// Most cells a prefab's solid boxes may fill in total, and most its carve boxes may
+/// clear in total: the volume of the bounds. Bounds what one stamp can be made to tile.
+pub const PREFAB_MAX_BOX_CELLS: u64 =
+    (2 * PREFAB_HALF_STUDS as u64) * (2 * PREFAB_HALF_STUDS as u64) * (PREFAB_MAX_PLATE - PREFAB_MIN_PLATE) as u64;
 /// Most markers one prefab may hold.
 pub const PREFAB_MAX_MARKERS: usize = 256;
 /// Longest marker kind, in bytes.

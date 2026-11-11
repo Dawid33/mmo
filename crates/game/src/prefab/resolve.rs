@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     prefab_name_ok, BuildBoxFile, BuildFile, BuildPartFile, CellBox, Marker, MaterialName, PrefabFile, PrefabKey,
-    PrefabKindFile, PrefabMeta, PREFAB_FORMAT, PREFAB_HALF_STUDS, PREFAB_MARKER_KIND_MAX, PREFAB_MAX_BOXES,
+    PrefabKindFile, PrefabMeta, PREFAB_FORMAT, PREFAB_HALF_STUDS, PREFAB_MAX_BOX_CELLS, PREFAB_MARKER_KIND_MAX, PREFAB_MAX_BOXES,
     PREFAB_MAX_MARKERS, PREFAB_MAX_PARTS, PREFAB_MAX_PLATE, PREFAB_MIN_PLATE,
 };
 use crate::stud_catalog::{STUD_COLORS, STUD_PARTS};
@@ -61,6 +61,8 @@ pub enum Problem {
     /// Solid boxes plus carve boxes.
     TooManyBoxes(usize),
     EmptyBox(usize),
+    /// The solid boxes, or the carve boxes, cover more cells in total than the bounds hold.
+    BoxesTooLarge(u64),
     TooManyMarkers(usize),
     BadMarker(usize),
     /// A player's prefab carries a non-zero brick `data`.
@@ -80,6 +82,7 @@ impl std::fmt::Display for Problem {
             Problem::TooManyParts(n) => write!(f, "{n} parts (the limit is {PREFAB_MAX_PARTS})"),
             Problem::TooManyBoxes(n) => write!(f, "{n} boxes (the limit is {PREFAB_MAX_BOXES})"),
             Problem::EmptyBox(i) => write!(f, "box {i} has a zero size"),
+            Problem::BoxesTooLarge(n) => write!(f, "the boxes cover {n} cells (the limit is {PREFAB_MAX_BOX_CELLS})"),
             Problem::TooManyMarkers(n) => write!(f, "{n} markers (the limit is {PREFAB_MAX_MARKERS})"),
             Problem::BadMarker(i) => write!(f, "marker {i} is invalid"),
             Problem::DataNotAllowed => write!(f, "only the game's own prefabs may tag bricks with data"),
@@ -124,7 +127,19 @@ fn count_problems(parts: usize, boxes: usize, carve: usize, markers: usize) -> V
     out
 }
 
+/// The total-volume cap over the in-bounds boxes `(min, size)` of one list.
+fn check_volume(boxes: impl Iterator<Item = ([i32; 3], [u32; 3])>, out: &mut Vec<Problem>) {
+    let cells: u64 = boxes
+        .filter(|&(min, size)| in_bounds(min, size))
+        .map(|(_, size)| size.iter().map(|&s| u64::from(s)).product::<u64>())
+        .sum();
+    if cells > PREFAB_MAX_BOX_CELLS {
+        out.push(Problem::BoxesTooLarge(cells));
+    }
+}
+
 fn check_carve_and_markers(carve: &[CellBox], markers: &[Marker], out: &mut Vec<Problem>) {
+    check_volume(carve.iter().map(|c| (c.min, c.size)), out);
     for (i, c) in carve.iter().enumerate() {
         if c.size.contains(&0) {
             out.push(Problem::EmptyBox(i));
@@ -205,6 +220,7 @@ pub fn resolve(file: &PrefabFile, trust: Trust) -> Result<ResolvedPrefab, Vec<Pr
             out.boxes.push(BuildBox { min: b.min, size: b.size, material, data: data(b.data) });
         }
     }
+    check_volume(build.boxes.iter().map(|b| (b.min, b.size)), &mut problems);
     check_carve_and_markers(&build.carve, &build.markers, &mut problems);
     if problems.is_empty() {
         Ok(ResolvedPrefab { name: file.name.clone(), kind: ResolvedKind::Build(out) })
@@ -284,6 +300,7 @@ impl ResolvedPrefab {
                 problems.push(Problem::OutOfBounds(i));
             }
         }
+        check_volume(b.boxes.iter().map(|x| (x.min, x.size)), &mut problems);
         check_carve_and_markers(&b.carve, &b.markers, &mut problems);
         if problems.is_empty() { Ok(()) } else { Err(problems) }
     }
