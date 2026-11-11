@@ -448,3 +448,10 @@ pub fn rebrick_reference(chunk: &mut game::StudChunk, layer: i32, outside_open: 
         chunk.rebrick_box(lo, hi);
     }
 }
+
+/// Installs the game's own prefabs (the embedded `assets/prefabs/` set) for tests that
+/// stamp one by name. Always the same set, so — like the block props — every test of
+/// the binary may call it.
+pub fn install_test_prefabs() {
+    game::install_prefabs(game::load_builtin_prefabs(None).expect("the embedded prefabs are valid"));
+}

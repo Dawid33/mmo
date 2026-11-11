@@ -14,7 +14,7 @@ use game::{
 
 use crate::common;
 use crate::common::rig::{north, north_west, seam_floor_columns, Rig, Seen, CLIENT, LEG_ROUNDS};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Seeds swept per schedule mode.
 const SEEDS: u64 = 12;
@@ -2268,4 +2268,147 @@ fn stud_tree_across_a_seam_survives_scheduling_jitter() {
             assert_eq!(run(), run(), "stud tree across a seam under schedule `{mode}` seed {seed} is not reproducible");
         }
     }
+}
+
+// --- Prefab stamps across a seam ---------------------------------------------------
+
+/// The sample arch, resolved as a player's prefab.
+fn prefab_arch() -> game::ResolvedPrefab {
+    game::resolve(&common::prefabs::arch(), game::Trust::Player).expect("the fixture resolves")
+}
+
+/// Two studs inside the spawn region's north seam (z = 0), turned so the lintel runs
+/// north across it: z -5..3.
+const PREFAB_SEAM_ANCHOR: [i64; 3] = [40, STUD_TOP as i64, 2];
+const PREFAB_SEAM_TURN: u8 = 3;
+
+fn prefab_command(rig: &mut Rig, cmd: game::PrefabCommand) {
+    let ev = GameEvent::new(GameEventKind::Prefab(CLIENT, cmd), 0, SPAWN_REGION);
+    rig.event(ServerEvent::ClientPacket(ClientPacket::GameEvent(ev), CLIENT));
+}
+
+/// Every brick of plastic colour 4 that `rc` owns, by world chunk.
+fn red_bricks(rig: &mut Rig, rc: RegionCoords) -> BTreeSet<(game::WorldChunkPos, game::StudBrick)> {
+    let mut out = BTreeSet::new();
+    rig.manager.spawner_mut().with_region(rc, |region| {
+        let d = region.data();
+        for c in d.stud_index.keys() {
+            let world = game::WorldChunkPos::from_local(rc, [c.x as i32, c.y, c.z as i32]);
+            out.extend(d.stud_chunk_at(*c).unwrap().bricks().filter(|b| b.material == 4).map(|b| (world, *b)));
+        }
+    });
+    out
+}
+
+/// What one region holding the whole world would lay for the seam stamp.
+fn prefab_seam_reference() -> BTreeSet<(game::WorldChunkPos, game::StudBrick)> {
+    let p = prefab_arch();
+    let game::ResolvedKind::Build(build) = &p.kind;
+    let layout = game::layout_build(build, PREFAB_SEAM_ANCHOR, PREFAB_SEAM_TURN);
+    assert_eq!(layout.skipped_split, 0);
+    layout.chunks.iter().flat_map(|(c, s)| s.bricks.iter().map(move |b| (*c, *b))).collect()
+}
+
+/// Registers the arch and stamps it across the spawn region's north seam: both owners
+/// end up holding exactly their part of what one region would lay, every halo agrees,
+/// and a replica fed each region's event stream ends in the same state hash.
+fn prefab_seam_scenario(schedule: Option<InlineSchedule>) -> Vec<(RegionCoords, u64, u32)> {
+    let mut rig = stud_rig(schedule);
+    rig.join_spawn();
+    for _ in 0..PAST_SEAM_ROUNDS {
+        rig.round();
+    }
+    let mut replicas: BTreeMap<RegionCoords, game::Region> = BTreeMap::new();
+    for rc in [SPAWN_REGION, north()] {
+        rig.manager.spawner_mut().with_region(rc, |region| {
+            replicas.insert(rc, game::Region::new(region.data().clone(), None, rc, None));
+        });
+    }
+    rig.events_seen = Some(Vec::new());
+
+    let p = prefab_arch();
+    prefab_command(&mut rig, game::PrefabCommand::Register(Box::new(p.clone())));
+    prefab_command(
+        &mut rig,
+        game::PrefabCommand::Stamp {
+            prefab: game::PrefabRef::Registered(p.key()),
+            anchor: PREFAB_SEAM_ANCHOR,
+            turn: PREFAB_SEAM_TURN,
+        },
+    );
+    for _ in 0..PAST_SEAM_ROUNDS {
+        rig.round();
+    }
+    // Drain in lockstep: nothing is left in flight.
+    rig.manager.spawner_mut().set_schedule(None);
+    for _ in 0..PAST_SEAM_ROUNDS {
+        rig.round();
+    }
+
+    let want = prefab_seam_reference();
+    let (here, there) = (red_bricks(&mut rig, SPAWN_REGION), red_bricks(&mut rig, north()));
+    assert!(!here.is_empty() && !there.is_empty(), "the stamp reaches both regions");
+    assert!(here.iter().all(|(c, _)| c.to_local().0 == SPAWN_REGION) && there.iter().all(|(c, _)| c.to_local().0 == north()));
+    let both: BTreeSet<_> = here.union(&there).copied().collect();
+    assert!(both == want, "the two regions together hold what one region would lay");
+    assert_stud_halos_agree(&mut rig);
+
+    for (rc, kind) in rig.events_seen.take().unwrap() {
+        if let Some(replica) = replicas.get_mut(&rc) {
+            replica.handle_event(kind).expect("the replica replays the stream");
+            replica.commit_server_event();
+        }
+    }
+    for (rc, replica) in &replicas {
+        let mut server = 0;
+        rig.manager.spawner_mut().with_region(*rc, |region| server = game::state_hash(region.data()));
+        assert_eq!(game::state_hash(replica.data()), server, "{rc:?}: the replayed stream ends in the server's state");
+    }
+    rig.fingerprint()
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn prefab_stamp_across_a_seam_lays_both_sides() {
+    prefab_seam_scenario(None);
+    let modes: [(&str, fn(u64) -> InlineSchedule); 3] =
+        [("shuffled", InlineSchedule::shuffled), ("late", InlineSchedule::late), ("jittery", InlineSchedule::jittery)];
+    for (mode, schedule) in modes {
+        for seed in 0..STUD_SEEDS {
+            let run = || {
+                std::panic::catch_unwind(|| prefab_seam_scenario(Some(schedule(seed))))
+                    .unwrap_or_else(|_| panic!("the prefab stamp broke under schedule `{mode}`, seed {seed}"))
+            };
+            assert_eq!(run(), run(), "prefab stamp under schedule `{mode}` seed {seed} is not reproducible");
+        }
+    }
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn prefab_stamp_into_a_sleeping_neighbour_is_partial_and_does_not_wake_it() {
+    // Only the spawn region runs: nobody asked for its neighbours.
+    let mut rig = stud_rig(None);
+    rig.event(ServerEvent::connected(CLIENT));
+    rig.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(SPAWN_REGION), CLIENT));
+    rig.walk_until_owned_by(SPAWN_REGION, "spawn");
+    assert_eq!(rig.manager.running_regions(), [SPAWN_REGION]);
+
+    let p = prefab_arch();
+    prefab_command(&mut rig, game::PrefabCommand::Register(Box::new(p.clone())));
+    prefab_command(
+        &mut rig,
+        game::PrefabCommand::Stamp {
+            prefab: game::PrefabRef::Registered(p.key()),
+            anchor: PREFAB_SEAM_ANCHOR,
+            turn: PREFAB_SEAM_TURN,
+        },
+    );
+    for _ in 0..2 * PAST_SEAM_ROUNDS {
+        rig.round();
+    }
+    assert_eq!(rig.manager.running_regions(), [SPAWN_REGION], "an intent never wakes a region");
+    let want: BTreeSet<_> = prefab_seam_reference().into_iter().filter(|(c, _)| c.to_local().0 == SPAWN_REGION).collect();
+    assert!(!want.is_empty());
+    assert!(red_bricks(&mut rig, SPAWN_REGION) == want, "this region's part is laid, the rest is not");
 }

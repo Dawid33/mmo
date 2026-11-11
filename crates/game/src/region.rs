@@ -1065,8 +1065,11 @@ impl Region {
             GameEventKind::Prefab(client_id, crate::PrefabCommand::Deregister(key)) => {
                 self.data.deregister_prefab_safe(client_id, key);
             }
-            // The runtime stamp: not built yet.
-            GameEventKind::Prefab(_, crate::PrefabCommand::Stamp { .. }) => {}
+            // A stamp may reach a neighbour: its part goes as intents.
+            GameEventKind::Prefab(client_id, crate::PrefabCommand::Stamp { prefab, anchor, turn }) => {
+                let outcome = self.data.stamp_prefab_order_safe(client_id, prefab, anchor, turn, &mut intents_out);
+                log::debug!("[prefab] stamp {prefab:?} at {anchor:?} turn {turn} by client {client_id}: {outcome:?}");
+            }
         }
         self.items_destroyed += crate::item_piles::items_destroyed_on_thread() - destroyed_before;
         self.note_halo_writes();

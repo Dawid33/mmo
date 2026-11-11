@@ -181,7 +181,7 @@ pub struct StudRegionSeed {
 
 impl StudRegionSeed {
     /// The chunks holding stamps or feature bricks: each one's pristine chunk (empty
-    /// where the recipe has none) with its stamps applied in order (carve, then bricks),
+    /// where the recipe has none) with its stamps applied in order (`ChunkStamp::apply`),
     /// then its features placed in; an overlapping or invalid brick is dropped.
     pub fn feature_chunks(&self) -> std::collections::BTreeMap<crate::StudChunkCoords, StudChunk> {
         let mut out: std::collections::BTreeMap<crate::StudChunkCoords, StudChunk> = Default::default();
@@ -193,7 +193,7 @@ impl StudRegionSeed {
                 .unwrap_or_default()
         };
         for (c, stamp) in &self.stamps {
-            stamp.apply(out.entry(*c).or_insert_with(|| pristine(c)));
+            stamp.apply(c.y, out.entry(*c).or_insert_with(|| pristine(c)));
         }
         for (c, bricks) in &self.features {
             let chunk = out.entry(*c).or_insert_with(|| pristine(c));

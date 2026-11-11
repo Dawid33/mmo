@@ -149,8 +149,10 @@ fn boxes_are_tiled_per_chunk() {
 fn carve_boxes_are_cut_per_chunk() {
     let b = build(BuildFile { carve: vec![CellBox { min: [-2, -1, 0], size: [4, 2, 1] }], ..empty_build() });
     let l = layout_build(&b, [32, 90, 0], 0);
-    // x 30..34 and y 89..91: four chunks, each with its own slice.
-    assert_eq!(l.chunks.len(), 4);
+    // x 30..34 and y 89..91: four chunks, each with its own slice (the chunks beside
+    // them hold only the shell).
+    assert_eq!(l.chunks.values().filter(|s| !s.carve.is_empty()).count(), 4);
+    assert!(l.chunks[&WorldChunkPos::new(0, 0, -1)].carve.is_empty());
     assert_eq!(l.chunks[&WorldChunkPos::new(0, 0, 0)].carve, vec![([30, 89, 0], [2, 1, 1])]);
     assert_eq!(l.chunks[&WorldChunkPos::new(1, 1, 0)].carve, vec![([0, 0, 0], [2, 1, 1])]);
 }
@@ -169,8 +171,10 @@ fn apply_carves_then_places_and_counts_overlaps() {
     let s = ChunkStamp {
         carve: vec![([0, 0, 0], [4, 3, 2])],
         bricks: vec![brick("3001", [0, 0, 0]), brick("3001", [10, 0, 0]), brick("3001", [10, 0, 0])],
+        ..Default::default()
     };
-    assert_eq!(s.apply(&mut c), 1);
+    let applied = s.apply(0, &mut c);
+    assert_eq!((applied.skipped, applied.placed, applied.changed), (1, 2, true));
     assert_eq!(c.len(), 2);
 }
 
@@ -180,7 +184,68 @@ fn apply_skips_invalid_bricks_instead_of_panicking() {
     let s = ChunkStamp {
         carve: vec![([30, 80, 30], [200, 200, 200])],
         bricks: vec![StudBrick::part_at([31, 0, 0], u16::MAX, 0, 4), brick("3001", [30, 0, 0]), brick("3005", [0, 0, 0])],
+        shell: vec![([0, 0, 0], [255, 255, 255])],
     };
-    assert_eq!(s.apply(&mut c), 2);
+    assert_eq!(s.apply(0, &mut c).skipped, 2);
     assert_eq!(c.len(), 1);
+}
+
+#[test]
+fn a_carve_box_gets_a_shell_one_cell_thick() {
+    // A 4 x 3 x 2 box well inside one chunk: six face slabs, no edges or corners.
+    let b = build(BuildFile { carve: vec![CellBox { min: [0, 0, 0], size: [4, 3, 2] }], ..empty_build() });
+    let l = layout_build(&b, [8, 30, 8], 0);
+    let s = &l.chunks[&WorldChunkPos::new(0, 0, 0)];
+    assert_eq!(s.carve, vec![([8, 30, 8], [4, 3, 2])]);
+    let mut shell = s.shell.clone();
+    shell.sort();
+    assert_eq!(
+        shell,
+        vec![
+            ([7, 30, 8], [1, 3, 2]),
+            ([8, 29, 8], [4, 1, 2]),
+            ([8, 30, 7], [4, 3, 1]),
+            ([8, 30, 10], [4, 3, 1]),
+            ([8, 33, 8], [4, 1, 2]),
+            ([12, 30, 8], [1, 3, 2]),
+        ]
+    );
+    // A box that ends on a chunk edge puts its shell into the chunk across it.
+    let l = layout_build(&b, [28, 30, 8], 0);
+    let across = &l.chunks[&WorldChunkPos::new(1, 0, 0)];
+    assert!(across.carve.is_empty() && across.bricks.is_empty());
+    assert_eq!(across.shell, vec![([0, 30, 8], [1, 3, 2])]);
+}
+
+#[test]
+fn apply_rebricks_the_fillers_a_carve_exposes() {
+    // A chunk of one stone slab 30 plates thick; a pit 4 x 3 x 2 dug into its top.
+    let slab = StudBrick::filler([0, 0, 0], [32, 30, 32], game::MAT_STONE);
+    let b = build(BuildFile { carve: vec![CellBox { min: [0, -3, 0], size: [4, 3, 2] }], ..empty_build() });
+    let l = layout_build(&b, [8, 30, 8], 0);
+    let mut c = StudChunk::new([slab]).unwrap();
+    let before = c.occupancy();
+    let applied = l.chunks[&WorldChunkPos::new(0, 0, 0)].apply(0, &mut c);
+    assert!(applied.changed && applied.carved == 4 * 3 * 2);
+    // The pit is open, everything else is as solid as before.
+    for cell in [[8u8, 27, 8], [11, 29, 9]] {
+        assert!(c.brick_at(cell).is_none());
+    }
+    let mut after = c.occupancy();
+    for x in 8..12 {
+        for y in 27..30 {
+            for z in 8..10 {
+                assert!(!after.get([x, y, z]));
+                after.set([x, y, z], true);
+            }
+        }
+    }
+    assert_eq!(after, before);
+    // The cells behind every face of the pit are real bricks now, as a dug wall's are.
+    for wall in [[7u8, 28, 8], [12, 28, 9], [9, 28, 7], [9, 28, 10], [9, 26, 8]] {
+        let b = c.brick_at(wall).expect("ground behind the pit");
+        assert!(matches!(b.shape, game::StudShape::Part { .. }), "{wall:?} is still a filler");
+    }
+    // Deep ground the pit does not touch stays a filler.
+    assert!(matches!(c.brick_at([20, 5, 20]).unwrap().shape, game::StudShape::Filler { .. }));
 }

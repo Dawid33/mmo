@@ -23,6 +23,7 @@ mod prefab_layout;
 mod prefab_register;
 mod prefab_resolve;
 mod prefab_seed;
+mod prefab_stamp;
 mod adventure;
 mod anim;
 mod body;

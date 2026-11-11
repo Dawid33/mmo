@@ -28,7 +28,7 @@ pub fn stamp_build_into_seed(
     let mut report = SeedStampReport { skipped_split: layout.skipped_split, chunks_in_region: 0 };
     for (chunk, stamp) in layout.chunks {
         let (rc, c) = chunk.to_local();
-        if rc == region {
+        if rc == region && crate::stud::stud_layer_ok(c.y) {
             seed.stamps.push((StudChunkCoords { x: c.x, y: c.y, z: c.z }, stamp));
             report.chunks_in_region += 1;
         }

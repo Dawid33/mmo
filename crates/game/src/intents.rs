@@ -659,7 +659,7 @@ impl Rollback {
 
     /// Who a client's stud edit is sent `by`: its body here, else this region (a
     /// commander has no body; the reply then comes back to the region, which drops it).
-    fn stud_edit_source(&self, client: ClientId) -> EntityId {
+    pub(crate) fn stud_edit_source(&self, client: ClientId) -> EntityId {
         let body = self.data.player_entites.get(&client).and_then(|&k| self.entity_id(k));
         body.unwrap_or_else(|| EntityId::of_region(*self.data.region))
     }

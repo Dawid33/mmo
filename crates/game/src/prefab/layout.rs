@@ -1,12 +1,13 @@
 //! The one Build layout routine, shared by runtime stamping and worldgen so the two
 //! cannot drift: a prefab turned, moved to an anchor, and cut at chunk edges.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
 use super::ResolvedBuild;
 use crate::stud_catalog::STUD_PARTS;
+use crate::stud_rebrick::{diggable, rebrick_slot};
 use crate::{fill_box, StudBrick, StudChunk, StudShape, WorldChunkPos, STUD_CHUNK_PLATES, STUD_CHUNK_STUDS};
 
 /// A stud chunk's size in cells: studs x, plates y, studs z.
@@ -19,6 +20,24 @@ pub struct ChunkStamp {
     pub carve: Vec<([u8; 3], [u8; 3])>,
     /// Bricks to lay, in canonical (ascending) order.
     pub bricks: Vec<StudBrick>,
+    /// The cells just outside each face of the stamp's carve boxes, as boxes
+    /// `(min, size)` one cell thick: ground left standing there is what the pit
+    /// exposes, and becomes real bricks as a dug wall does (`stud_rebrick`). A carve
+    /// box that ends at a chunk edge has its shell in the chunk across it.
+    pub shell: Vec<([u8; 3], [u8; 3])>,
+}
+
+/// What [`ChunkStamp::apply`] did to a chunk.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StampApplied {
+    /// Bricks laid.
+    pub placed: u32,
+    /// Bricks left out: overlapping something already there, or not valid bricks of the chunk.
+    pub skipped: u32,
+    /// Cells the carve boxes removed.
+    pub carved: u32,
+    /// Whether the chunk differs from what it was.
+    pub changed: bool,
 }
 
 /// A whole stamp, per world chunk.
@@ -110,32 +129,70 @@ pub fn layout_build(p: &ResolvedBuild, anchor: [i64; 3], turn: u8) -> BuildLayou
         for (chunk, local, size) in chunk_slices(min, size) {
             layout.chunks.entry(chunk).or_default().carve.push((local, size));
         }
+        // The slab just outside each of the six faces.
+        for axis in 0..3 {
+            for at in [min[axis] - 1, min[axis] + size[axis]] {
+                let (mut slab_min, mut slab_size) = (min, size);
+                slab_min[axis] = at;
+                slab_size[axis] = 1;
+                for (chunk, local, size) in chunk_slices(slab_min, slab_size) {
+                    layout.chunks.entry(chunk).or_default().shell.push((local, size));
+                }
+            }
+        }
     }
     for stamp in layout.chunks.values_mut() {
         stamp.bricks.sort();
         stamp.carve.sort();
+        stamp.shell.sort();
+        stamp.shell.dedup();
     }
     layout
 }
 
 impl ChunkStamp {
-    /// Carves, then lays the bricks. A brick that overlaps something already there (or
-    /// is not a valid brick of this chunk) is skipped; returns how many were.
-    pub fn apply(&self, chunk: &mut StudChunk) -> u32 {
+    /// Applies the stamp to the chunk of stud layer `layer`: carves, turns the ground
+    /// the carve exposes into real bricks, then lays the bricks. A brick that overlaps
+    /// something already there (or is not a valid brick of this chunk) is skipped and
+    /// counted. The one implementation behind the runtime stamp and the worldgen seed.
+    pub fn apply(&self, layer: i32, chunk: &mut StudChunk) -> StampApplied {
+        let end = |min: [u8; 3], size: [u8; 3]| [0, 1, 2].map(|i| min[i].saturating_add(size[i]));
+        let mut out = StampApplied::default();
         for &(min, size) in &self.carve {
-            let hi = [0, 1, 2].map(|i| min[i].saturating_add(size[i]));
-            chunk.carve(min, hi);
+            out.carved += chunk.carve(min, end(min, size)).iter().map(|&(_, cells)| cells).sum::<u32>();
         }
-        let mut skipped = 0;
-        for &b in &self.bricks {
-            if chunk.place(b).is_err() {
-                skipped += 1;
+        // The slots (`rebrick_slot`) holding a diggable filler cell of the shell.
+        let mut slots = BTreeSet::new();
+        for &(min, size) in &self.shell {
+            let hi = end(min, size);
+            for b in chunk.bricks().filter(|b| matches!(b.shape, StudShape::Filler { .. }) && diggable(b.material)) {
+                let b_size = b.size();
+                let lo = [0, 1, 2].map(|i| min[i].max(b.min[i]));
+                let hi = [0, 1, 2].map(|i| hi[i].min(b.min[i].saturating_add(b_size[i])));
+                for x in lo[0]..hi[0] {
+                    for y in lo[1]..hi[1] {
+                        for z in lo[2]..hi[2] {
+                            slots.insert(rebrick_slot(layer, [x, y, z]));
+                        }
+                    }
+                }
             }
         }
-        skipped
+        let mut rebricked = false;
+        for (lo, hi) in slots {
+            rebricked |= chunk.rebrick_box(lo, hi);
+        }
+        for &b in &self.bricks {
+            match chunk.place(b) {
+                Ok(()) => out.placed += 1,
+                Err(_) => out.skipped += 1,
+            }
+        }
+        out.changed = out.carved > 0 || rebricked || out.placed > 0;
+        out
     }
 
     pub fn is_empty(&self) -> bool {
-        self.carve.is_empty() && self.bricks.is_empty()
+        self.carve.is_empty() && self.bricks.is_empty() && self.shell.is_empty()
     }
 }
