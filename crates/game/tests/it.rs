@@ -20,6 +20,7 @@ mod common;
 mod prefab_builtin;
 mod prefab_codec;
 mod prefab_layout;
+mod prefab_library;
 mod prefab_register;
 mod prefab_resolve;
 mod prefab_seed;

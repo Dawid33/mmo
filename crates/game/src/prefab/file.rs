@@ -117,6 +117,56 @@ pub struct SlotDef {
     pub default: u16,
 }
 
+/// Which kind a prefab is, without its content.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PrefabKindTag {
+    Build,
+    Prop,
+}
+
+impl PrefabFile {
+    pub fn kind_tag(&self) -> PrefabKindTag {
+        match self.kind {
+            PrefabKindFile::Build(_) => PrefabKindTag::Build,
+            PrefabKindFile::Prop(_) => PrefabKindTag::Prop,
+        }
+    }
+
+    /// Parts, boxes and carve boxes of a Build; parts of a Prop.
+    pub fn element_count(&self) -> usize {
+        match &self.kind {
+            PrefabKindFile::Build(b) => b.parts.len() + b.boxes.len() + b.carve.len(),
+            PrefabKindFile::Prop(p) => p.parts.len(),
+        }
+    }
+
+    /// For showing in a list: the bounding box of a Build's parts and boxes (studs x,
+    /// plates y, studs z; a part the catalog does not know counts as one cell), or a
+    /// Prop's footprint as `[x, 0, z]`. Nothing is validated.
+    pub fn extent(&self) -> [u32; 3] {
+        let build = match &self.kind {
+            PrefabKindFile::Build(b) => b,
+            PrefabKindFile::Prop(p) => return [u32::from(p.foot[0]), 0, u32::from(p.foot[1])],
+        };
+        let part_size = |p: &BuildPartFile| {
+            let size = crate::stud_catalog::STUD_PARTS.iter().find(|d| d.number == p.part).map_or([1; 3], |d| d.size);
+            let [sx, sy, sz] = size.map(u32::from);
+            if p.rot & 1 == 1 { [sz, sy, sx] } else { [sx, sy, sz] }
+        };
+        let boxes = build.parts.iter().map(|p| (p.min, part_size(p))).chain(build.boxes.iter().map(|b| (b.min, b.size)));
+        let mut bounds: Option<([i64; 3], [i64; 3])> = None;
+        for (min, size) in boxes {
+            let lo = min.map(i64::from);
+            let hi = [0, 1, 2].map(|i| lo[i] + i64::from(size[i]));
+            bounds = Some(match bounds {
+                None => (lo, hi),
+                Some((l, h)) => ([0, 1, 2].map(|i| l[i].min(lo[i])), [0, 1, 2].map(|i| h[i].max(hi[i]))),
+            });
+        }
+        bounds.map_or([0; 3], |(lo, hi)| [0, 1, 2].map(|i| (hi[i] - lo[i]).clamp(0, i64::from(u32::MAX)) as u32))
+    }
+}
+
 /// A prefab name is a file stem: `^[a-z0-9][a-z0-9-]{0,47}$`.
 pub fn prefab_name_ok(name: &str) -> bool {
     let b = name.as_bytes();

@@ -15,6 +15,8 @@ mod codec;
 mod command;
 mod file;
 mod layout;
+#[cfg(not(target_arch = "wasm32"))]
+mod library;
 mod resolve;
 mod seed;
 
@@ -23,6 +25,8 @@ pub use codec::*;
 pub use command::*;
 pub use file::*;
 pub use layout::*;
+#[cfg(not(target_arch = "wasm32"))]
+pub use library::*;
 pub use resolve::*;
 pub use seed::*;
 
