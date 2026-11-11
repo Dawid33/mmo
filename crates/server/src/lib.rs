@@ -649,6 +649,13 @@ pub fn run() -> claims::ServerExit {
     .unwrap_or_else(|_| include_str!("../../../assets/blocks/blocks.ron").to_string());
     let registry = game::BlockRegistry::from_ron(&manifest).expect("invalid block manifest");
     game::install_block_props(registry.props());
+    // The game's own prefabs, the same way: the repo directory, else the embedded copy.
+    game::install_prefabs(
+        game::load_builtin_prefabs(Some(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").join(game::BUILTIN_PREFAB_DIR),
+        ))
+        .expect("invalid built-in prefab"),
+    );
     match &world_source {
         world_file::WorldSource::Store { url, .. } => {
             info!("[server] world: forged, in the world store {url:?} (sampled from its tiles)")

@@ -28,5 +28,17 @@ pub fn load_registry() -> BlockRegistry {
     let registry = BlockRegistry::from_ron(&manifest_src()).expect("invalid block manifest");
     // The sim's colliders read the same properties as the renderer.
     game::install_block_props(registry.props());
+    install_builtin_prefabs();
     registry
+}
+
+/// Install the game's own prefabs (`assets/prefabs/`): the directory on disk on native
+/// (edit + restart), else the copy embedded in `game` — the manifest's pattern. Server
+/// and client must agree on the set, as on the manifest.
+fn install_builtin_prefabs() {
+    #[cfg(not(target_arch = "wasm32"))]
+    let dir = Some(crate::renderer::resolve_blocks_dir().join("../prefabs"));
+    #[cfg(target_arch = "wasm32")]
+    let dir: Option<std::path::PathBuf> = None;
+    game::install_prefabs(game::load_builtin_prefabs(dir.as_deref()).expect("invalid built-in prefab"));
 }

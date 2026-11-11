@@ -55,3 +55,27 @@ pub fn build_of_mut(p: &mut ResolvedPrefab) -> &mut ResolvedBuild {
     let ResolvedKind::Build(b) = &mut p.kind;
     b
 }
+
+/// A fresh directory under the system temp dir, removed on drop.
+pub struct TempDir(pub std::path::PathBuf);
+
+impl TempDir {
+    pub fn new(tag: &str) -> Self {
+        static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("mmo-prefab-test-{}-{tag}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        Self(dir)
+    }
+
+    pub fn path(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
