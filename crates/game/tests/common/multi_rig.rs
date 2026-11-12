@@ -6,7 +6,7 @@
 //! they agree. Every host-seam test builds on it.
 use super::rig::{Rig, CLIENT};
 use game::{
-    ClientPacket, EntityId, HostEndpoint, Intent, IntentMsg, InlinePeerLink, InlineSchedule, InlineSpawner, Ownership, PeerHello,
+    ClientId, ClientPacket, EntityId, HostEndpoint, Intent, IntentMsg, InlinePeerLink, InlineSchedule, InlineSpawner, Ownership, PeerHello,
     PeerLink, PeerMsg, PeerSession, PlayerId, PlayerRecord, RegionCoords, RegionSpawner, Reliable, ServerEvent,
     REGION_SIZE, TICK_RATE,
 };
@@ -60,7 +60,7 @@ pub fn rig_hello(ordinal: u32) -> PeerHello {
         ordinal,
         boot: 1000 + u64::from(ordinal),
         generation: RIG_GENERATION,
-        endpoint: HostEndpoint { ordinal, quic: None, webtransport: None, cert_hash: None },
+        endpoint: rig_endpoint(ordinal),
         received_through: 0,
         received_from_boot: None,
     }
@@ -138,6 +138,16 @@ pub struct MultiRig {
     /// Items the world holds, once a test put some in ([`Self::assert_items`]): checked
     /// every round.
     pub items: Option<u64>,
+    /// The players a test connected ([`Self::connect_home`]), by session id: each is
+    /// conserved across hosts every round (see [`Self::assert_conserved_world`]).
+    pub players: BTreeMap<ClientId, PlayerId>,
+    /// The bodies those players were seen in: one may end by parking.
+    pub player_bodies: BTreeMap<EntityId, PlayerId>,
+}
+
+/// Host `h`'s endpoint in the rig (what its sessions' first packet names).
+pub fn rig_endpoint(h: u32) -> HostEndpoint {
+    HostEndpoint { ordinal: h, quic: None, webtransport: None, cert_hash: None }
 }
 
 impl MultiRig {
@@ -159,7 +169,9 @@ impl MultiRig {
         for h in 0..hosts {
             let ownership = Ownership::Static { ordinal: h, hosts };
             let spawner = schedule.map_or_else(InlineSpawner::default, |f| InlineSpawner::with_schedule(f(mix(seed, u64::from(h)))));
-            rigs.push(Rig::with_ownership(spawner, floor.clone(), ownership, s));
+            let mut rig = Rig::with_ownership(spawner, floor.clone(), ownership, s);
+            rig.manager.set_endpoints(rig_endpoint(h), mix(seed, 2000 + u64::from(h)));
+            rigs.push(rig);
             let home = nearest_first(64)
                 .into_iter()
                 .map(|rc| RegionCoords::new(rc.x + 32, rc.z + 32))
@@ -178,7 +190,17 @@ impl MultiRig {
             }
         }
         let mut rig =
-            MultiRig { hosts: rigs, s, homes, links, tracked: BTreeMap::new(), settling: BTreeSet::new(), items: None };
+            MultiRig {
+                hosts: rigs,
+                s,
+                homes,
+                links,
+                tracked: BTreeMap::new(),
+                settling: BTreeSet::new(),
+                items: None,
+                players: BTreeMap::new(),
+                player_bodies: BTreeMap::new(),
+            };
         for h in 0..hosts {
             rig.keep(h);
         }
@@ -199,6 +221,87 @@ impl MultiRig {
         };
         let rig = &mut self.hosts[h as usize];
         rig.event(ServerEvent::ClientConnected { client: CLIENT, player: PlayerId(u64::from(h)), record: Some(record) });
+    }
+
+    /// `client` (session id) of `player` connects to host `home` as its home session,
+    /// restored from `record`; tracked from now on.
+    pub fn connect_home(&mut self, home: u32, client: ClientId, player: PlayerId, record: PlayerRecord) {
+        self.players.insert(client, player);
+        let rig = &mut self.hosts[home as usize];
+        rig.event(ServerEvent::ClientConnected { client, player, record: Some(record) });
+        // Its body, if the restore already gave it one, is tracked from now on.
+        self.assert_conserved_world();
+    }
+
+    /// [`Self::connect_home`], and an observer session of the same client on every other
+    /// host (what a client holds once its home host redirected it there).
+    pub fn connect_everywhere(&mut self, home: u32, client: ClientId, player: PlayerId, record: PlayerRecord) {
+        self.connect_home(home, client, player, record);
+        for h in 0..self.hosts.len() as u32 {
+            if h != home {
+                self.hosts[h as usize].event(ServerEvent::ObserverConnected { client, player });
+            }
+        }
+    }
+
+    /// `client`'s connection to host `h` ends.
+    pub fn disconnect(&mut self, h: u32, client: ClientId) {
+        self.hosts[h as usize].event(ServerEvent::ClientDisconnected(client));
+    }
+
+    /// Every host records the packets its manager sends ([`Rig::packets_seen`]).
+    pub fn record_packets(&mut self) {
+        for rig in &mut self.hosts {
+            rig.packets_seen = Some(Vec::new());
+        }
+    }
+
+    /// Every host's clock jumps `ms` ahead and its upkeep runs ([`game::WorldManager::maintain`]).
+    pub fn maintain_all(&mut self, ms: u64) {
+        for rig in &mut self.hosts {
+            rig.now_ms += ms;
+            let now = rig.now_ms;
+            rig.manager.maintain(now);
+            rig.settle();
+        }
+    }
+
+    /// Where `client`'s body is: `(host, region)` of every running region holding it.
+    pub fn player_owners(&mut self, client: ClientId) -> Vec<(u32, RegionCoords)> {
+        let mut out = Vec::new();
+        for (h, rig) in self.hosts.iter_mut().enumerate() {
+            for rc in rig.manager.running_regions() {
+                rig.manager.spawner_mut().with_region(rc, |region| {
+                    if region.data().player_entites.contains_key(&client) {
+                        out.push((h as u32, rc));
+                    }
+                });
+            }
+        }
+        out
+    }
+
+    /// The `EntityId` of `client`'s body, if a running region holds it.
+    pub fn player_body(&mut self, client: ClientId) -> Option<(u32, RegionCoords, EntityId)> {
+        let mut out = None;
+        for (h, rig) in self.hosts.iter_mut().enumerate() {
+            for rc in rig.manager.running_regions() {
+                rig.manager.spawner_mut().with_region(rc, |region| {
+                    let data = region.data();
+                    if let Some(&e) = data.player_entites.get(&client) {
+                        if let Some(id) = *data.ecs.id.try_get(e) {
+                            out = Some((h as u32, rc, id));
+                        }
+                    }
+                });
+            }
+        }
+        out
+    }
+
+    /// The hosts holding `player`'s parked record.
+    pub fn parked_on(&self, player: PlayerId) -> Vec<u32> {
+        (0..self.hosts.len() as u32).filter(|h| self.hosts[*h as usize].manager.parked_record(player).is_some()).collect()
     }
 
     /// Rounds until every host reaches every other host's home region.
@@ -364,11 +467,18 @@ impl MultiRig {
         let mut shadows: BTreeSet<EntityId> = BTreeSet::new();
         let mut people = BTreeSet::new();
         let mut settling = BTreeSet::new();
+        let tracked_players = &self.players;
+        let player_bodies = &mut self.player_bodies;
         for (h, rig) in self.hosts.iter_mut().enumerate() {
             let host = h as u32;
             for rc in rig.manager.running_regions() {
                 rig.manager.spawner_mut().with_region(rc, |region| {
                     let data = region.data();
+                    for (client, &key) in data.player_entites.iter() {
+                        if let (Some(player), Some(id)) = (tracked_players.get(client), *data.ecs.id.try_get(key)) {
+                            player_bodies.insert(id, *player);
+                        }
+                    }
                     for (id, &key) in data.id_index.iter() {
                         places.entry(*id).or_default().push(Place::Region { host, rc });
                         if matches!(data.ecs.kind.try_get(key), Some(game::EntityKind::Person { .. })) {
@@ -424,6 +534,17 @@ impl MultiRig {
             self.tracked.remove(&id);
             self.settling.remove(&id);
         }
+        // A tracked player's body ends by parking: its record is on a host now.
+        let parked: Vec<EntityId> = self
+            .tracked
+            .keys()
+            .filter(|id| !places.contains_key(id) && !shadows.contains(id))
+            .filter(|id| self.player_bodies.get(id).is_some_and(|p| !self.parked_on(*p).is_empty()))
+            .copied()
+            .collect();
+        for id in parked {
+            self.tracked.remove(&id);
+        }
         for (id, last) in &self.tracked {
             assert!(
                 places.contains_key(id) || shadows.contains(id),
@@ -443,6 +564,30 @@ impl MultiRig {
         }
         if let Some(expected) = self.items {
             self.assert_items(expected);
+        }
+        self.assert_players();
+    }
+
+    /// Player conservation across hosts, for every player a test connected: its body is
+    /// in at most one region of one host, its parked record on at most one host, never
+    /// both (a body in flight or in a peer queue is an entity above, conserved as such),
+    /// and at most one host has a home for it.
+    fn assert_players(&mut self) {
+        let players: Vec<(ClientId, PlayerId)> = self.players.iter().map(|(c, p)| (*c, *p)).collect();
+        for (client, player) in players {
+            let bodies = self.player_owners(client);
+            let parked = self.parked_on(player);
+            assert!(bodies.len() <= 1, "player {}'s body is in several regions: {bodies:?}", player.0);
+            assert!(parked.len() <= 1, "player {} is parked on several hosts: {parked:?}", player.0);
+            assert!(
+                bodies.is_empty() || parked.is_empty(),
+                "player {} has a body ({bodies:?}) and a parked record (hosts {parked:?})",
+                player.0
+            );
+            let homes: Vec<(u32, RegionCoords)> = (0..self.hosts.len() as u32)
+                .filter_map(|h| self.hosts[h as usize].manager.home_of(client).map(|rc| (h, rc)))
+                .collect();
+            assert!(homes.len() <= 1, "client {client} has a home on several hosts: {homes:?}");
         }
     }
 

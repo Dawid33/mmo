@@ -114,14 +114,20 @@ pub const MAX_JWT_BYTES: usize = 2048;
 pub enum Credential {
     Local(PlayerName),
     Jwt(String),
+    /// A session to a host that does not hold the client's body (an observer): the
+    /// [`crate::ObserverTicket`] its home host handed out (`ServerPacket::RegionElsewhere`).
+    /// `client` is the session id the home host knows the client by.
+    Observer { client: crate::ClientId, nonce: u64 },
 }
 
 impl std::fmt::Debug for Credential {
-    /// Never prints a secret: a JWT shows only its size (a name is public).
+    /// Never prints a secret: a JWT shows only its size (a name is public), an observer
+    /// ticket only its client.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Credential::Local(name) => write!(f, "Local({:?})", name.0),
             Credential::Jwt(j) => write!(f, "Jwt(<{} bytes>)", j.len()),
+            Credential::Observer { client, .. } => write!(f, "Observer {{ client: {client}, nonce: <secret> }}"),
         }
     }
 }

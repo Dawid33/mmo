@@ -928,6 +928,27 @@ pub enum ServerPacket {
     /// The answer to `RequestLod`: the key's far terrain as a coarse height
     /// field (`stud_lod.rs`; initial send AND refresh — replace-on-re-receipt).
     StudLodData(LodKey, crate::stud_lod::StudLodTile),
+    /// The host this connection is to: the first packet of every session (a single host
+    /// sends ordinal 0 and no addresses).
+    Host(crate::HostEndpoint),
+    /// The answer to `RequestRegionConnection` for a region another host owns: connect to
+    /// `endpoint` with `ticket` (`Credential::Observer`) and subscribe there.
+    RegionElsewhere { region: RegionId, endpoint: crate::HostEndpoint, ticket: ObserverTicket },
+}
+
+/// What a client presents to another host (`Credential::Observer`) to subscribe to its
+/// regions: minted by the client's home host, which told the owner to expect it
+/// (`Reliable::ObserverOrder`). The nonce is a secret: never logged.
+#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ObserverTicket {
+    pub client: ClientId,
+    pub nonce: u64,
+}
+
+impl std::fmt::Debug for ObserverTicket {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ObserverTicket {{ client: {}, nonce: <secret> }}", self.client)
+    }
 }
 
 /// A Game event

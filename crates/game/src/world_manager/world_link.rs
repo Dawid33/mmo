@@ -911,9 +911,10 @@ impl<S: RegionSpawner> WorldManager<S> {
     }
 
     /// `id`'s player is online with what it plays (its claims are settled: restored, or
-    /// none): the coordinator counts its fortress as in use.
+    /// none): the coordinator counts its fortress as in use. A player handed here whose
+    /// session has not come yet counts as online (its body is here).
     pub(super) fn world_player_online(&mut self, id: ClientId) {
-        if self.world.is_none() || !self.sessions.contains_key(&id) {
+        if self.world.is_none() || !(self.sessions.contains_key(&id) || self.awaiting_session.contains_key(&id)) {
             return;
         }
         let Some(&player) = self.player_of.get(&id) else { return };

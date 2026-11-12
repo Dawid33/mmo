@@ -7,7 +7,7 @@
 use game::{InlineSchedule, RegionCoords, RegionSpawner, FLIP_HYSTERESIS, REGION_SIZE};
 
 use crate::common::cut_store::CutStore;
-use crate::common::multi_rig::{four_host_corner, host_seam, MultiRig};
+use crate::common::multi_rig::{four_host_corner, host_seam, rig_endpoint, MultiRig};
 
 /// Seeds swept per schedule mode.
 const SEEDS: u64 = 12;
@@ -1007,3 +1007,414 @@ fn identical_in_and_out_of_view(rig: &mut MultiRig) {
 fn identical_intents_in_and_out_of_the_cut_view_make_one_row() {
     sweep("identical_intents_in_and_out_of_the_cut_view_make_one_row", 2, 1, SEEDS / 2, identical_in_and_out_of_view);
 }
+
+// --- Players crossing between hosts (Task 7) ---------------------------------------
+
+/// The test player's session id (the same on every host) and player.
+const P_CLIENT: game::ClientId = 7;
+const P_PLAYER: game::PlayerId = game::PlayerId(100);
+/// Round budget for the test player's restore to give it a body.
+const BODY_ROUNDS: usize = 20;
+/// Round budget for the held-key walk to reach the other host.
+const WALK_ROUNDS: usize = 240;
+/// Rounds the held key stays down after the crossing (3 s).
+const HELD_AFTER_ROUNDS: usize = (3000 / game::TICK_RATE) as usize;
+/// How far ahead of the world tick a stamped input is predicted (as a client does).
+const INPUT_LEAD: u64 = 2;
+/// Where the held-key walk starts: this far (units) from the seam it walks to.
+const WALK_START: f32 = 24.0;
+
+/// The test player's record: standing at `xz` (`rc`'s frame) in `rc`.
+fn record_at(rc: RegionCoords, xz: [f32; 2]) -> game::PlayerRecord {
+    let y = crate::common::standing_y(crate::common::FLOOR_PLATES);
+    game::PlayerRecord {
+        client: game::Client::default(),
+        pose: game::Pose::from_translation(game::rapier3d::math::Vector::new(xz[0], y, xz[1])),
+        region: rc,
+        fortress: None,
+        adventure: None,
+    }
+}
+
+/// Rounds until the test player has a body; its host, region and id.
+fn until_body(rig: &mut MultiRig) -> (u32, RegionCoords, game::EntityId) {
+    for _ in 0..BODY_ROUNDS {
+        if let Some(body) = rig.player_body(P_CLIENT) {
+            return body;
+        }
+        rig.round();
+    }
+    panic!("the test player never got a body");
+}
+
+/// Rounds until the test player's body is in `rc` on its owner and nothing is left
+/// unacknowledged between hosts.
+fn until_player_settled_in(rig: &mut MultiRig, rc: RegionCoords) {
+    for _ in 0..CROSS_ROUNDS {
+        rig.round();
+        if rig.player_owners(P_CLIENT) == [(rig.owner(rc), rc)] && rig.peer_unreceived() == 0 {
+            return;
+        }
+    }
+    panic!("the player never settled in {rc:?}: owned by {:?}, {} unacknowledged", rig.player_owners(P_CLIENT), rig.peer_unreceived());
+}
+
+/// The packets host `h` sent the test player since recording began.
+fn packets_to(rig: &MultiRig, h: u32) -> Vec<&game::ServerPacket> {
+    let seen = rig.hosts[h as usize].packets_seen.as_ref().expect("recording packets");
+    seen.iter().filter(|(to, _)| *to == Some(P_CLIENT)).map(|(_, p)| p).collect()
+}
+
+/// The pair of regions nearest the origin whose owners differ, `b` one step -z of `a`
+/// (W walks a body toward -z).
+fn north_host_seam(hosts: u32, s: u32) -> (RegionCoords, RegionCoords) {
+    let owner = |rc: RegionCoords| game::Ownership::Static { ordinal: 0, hosts }.owner_of(rc, s);
+    for r in 0..64 {
+        for x in -r..=r {
+            for z in -r..=r {
+                let a = RegionCoords::new(x, z);
+                let b = RegionCoords::new(x, z - 1);
+                if owner(a) != owner(b) {
+                    return (a, b);
+                }
+            }
+        }
+    }
+    panic!("no north host seam near the origin");
+}
+
+/// A body past the seam lands on the other host once; the session there becomes the home
+/// (`PlayerRegion`), the one it left an observer; the first packet of each session was
+/// `Host`.
+fn player_crosses(rig: &mut MultiRig) {
+    let (a, b) = host_seam(2, 1);
+    let (ha, hb) = (rig.owner(a), rig.owner(b));
+    rig.run(a);
+    rig.run(b);
+    rig.record_packets();
+    rig.connect_everywhere(ha, P_CLIENT, P_PLAYER, record_at(a, [REGION_SIZE / 2.0, REGION_SIZE / 2.0]));
+    for h in [ha, hb] {
+        let first = packets_to(rig, h).first().map(|p| matches!(p, game::ServerPacket::Host(e) if *e == rig_endpoint(h)));
+        assert_eq!(first, Some(true), "host {h}'s first packet is its Host");
+    }
+    let (h, rc, id) = until_body(rig);
+    assert_eq!((h, rc), (ha, a));
+    assert!(rig.teleport(a, id, past_seam(a, b, REGION_SIZE / 2.0)), "{a:?} holds the body");
+    until_player_settled_in(rig, b);
+    for _ in 0..WAIT_ROUNDS {
+        rig.round();
+        assert_eq!(rig.player_owners(P_CLIENT), [(hb, b)], "one body, in {b:?}, staying");
+    }
+    let (ma, mb) = (&rig.hosts[ha as usize].manager, &rig.hosts[hb as usize].manager);
+    assert_eq!((ma.home_of(P_CLIENT), mb.home_of(P_CLIENT)), (None, Some(b)), "the home followed the body");
+    assert_eq!(ma.session_kind(P_CLIENT), Some(game::SessionKind::Observer), "the session it left observes");
+    assert_eq!(mb.session_kind(P_CLIENT), Some(game::SessionKind::Home), "the session it reached is the home");
+    assert_eq!((ma.player_of(P_CLIENT), mb.player_of(P_CLIENT)), (None, Some(P_PLAYER)));
+    assert_eq!(ma.departed().get(&P_PLAYER), Some(&hb), "host {ha} handed the player to host {hb}");
+    assert!(mb.departed().is_empty());
+    let told = packets_to(rig, hb).iter().any(|p| matches!(p, game::ServerPacket::PlayerRegion(Some(r), P_CLIENT) if *r == b));
+    assert!(told, "host {hb} told the client its new home");
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn player_crosses_host_seam_once_and_home_follows() {
+    sweep("player_crosses_host_seam_once_and_home_follows", 2, 1, SEEDS / 2, player_crosses);
+}
+
+/// A stamped input from the test player to host `h` (where the client believes its body
+/// is), predicted `INPUT_LEAD` ticks ahead.
+fn stamped_to(rig: &mut MultiRig, h: u32, input: game::InputEvent) {
+    let rig = &mut rig.hosts[h as usize];
+    let tick = rig.manager.spawner_mut().world_tick();
+    let ev = game::GameEvent::new(game::GameEventKind::PlayerInput(P_CLIENT, input), 0, RegionCoords::new(0, 0));
+    rig.event(game::ServerEvent::ClientPacket(game::ClientPacket::GameEventAfterTick(ev, tick + INPUT_LEAD), P_CLIENT));
+}
+
+/// W held across a host seam with a marker input every round, every input sent to the
+/// host the walk began on: the body crosses once and stays; every marker is applied
+/// exactly once — on the old host only in the region it left, on the new one only in the
+/// region it reached (forwarded there).
+fn held_key(rig: &mut MultiRig) {
+    use game::{InputEvent, Key};
+    let (a, b) = north_host_seam(2, 1);
+    let (ha, hb) = (rig.owner(a), rig.owner(b));
+    rig.run(a);
+    rig.run(b);
+    rig.connect_everywhere(ha, P_CLIENT, P_PLAYER, record_at(a, [REGION_SIZE / 2.0, WALK_START]));
+    until_body(rig);
+    for h in [ha, hb] {
+        rig.hosts[h as usize].events_seen = Some(Vec::new());
+    }
+    stamped_to(rig, ha, InputEvent::Key { key: Key::KeyE, pressed: true });
+    stamped_to(rig, ha, InputEvent::Key { key: Key::KeyE, pressed: false });
+    stamped_to(rig, ha, InputEvent::Key { key: Key::KeyW, pressed: true });
+    let mut seq = 0u32;
+    let mut crossed = false;
+    for _ in 0..WALK_ROUNDS {
+        seq += 1;
+        stamped_to(rig, ha, InputEvent::Resized { width: seq, height: 1 });
+        rig.round();
+        if rig.player_owners(P_CLIENT) == [(hb, b)] {
+            crossed = true;
+            break;
+        }
+    }
+    assert!(crossed, "the player never reached {b:?}: owned by {:?}", rig.player_owners(P_CLIENT));
+    for round in 0..HELD_AFTER_ROUNDS {
+        seq += 1;
+        stamped_to(rig, ha, InputEvent::Resized { width: seq, height: 1 });
+        rig.round();
+        let owners = rig.player_owners(P_CLIENT);
+        assert!(owners.is_empty() || owners == [(hb, b)], "{round} rounds after the crossing the body is in {owners:?}");
+    }
+    until_player_settled_in(rig, b);
+    let mut count = vec![0u32; seq as usize + 1];
+    for (h, rc) in [(ha, a), (hb, b)] {
+        for (at, kind) in rig.hosts[h as usize].events_seen.take().expect("recording") {
+            if let game::GameEventKind::PlayerInput(P_CLIENT, InputEvent::Resized { width, .. }) = kind {
+                assert_eq!(at, rc, "marker {width} applied on host {h} in {at:?}");
+                count[width as usize] += 1;
+            }
+        }
+    }
+    for s in 1..=seq {
+        assert_eq!(count[s as usize], 1, "marker {s} of {seq} applied {} times", count[s as usize]);
+    }
+    assert_eq!(rig.hosts[ha as usize].manager.departed().get(&P_PLAYER), Some(&hb), "one crossing, no way back");
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn held_key_across_host_seam_settles() {
+    sweep("held_key_across_host_seam_settles", 2, 1, SEEDS / 4, held_key);
+}
+
+/// A->B->A: the body is sent back the round it lands (the first hand-off may not be
+/// acknowledged yet). One body, home on A; A (the host holding it) has no `departed`
+/// entry, and B's names A — where the player is.
+fn ping_pong(rig: &mut MultiRig) {
+    let (a, b) = host_seam(2, 1);
+    let (ha, hb) = (rig.owner(a), rig.owner(b));
+    rig.run(a);
+    rig.run(b);
+    rig.connect_everywhere(ha, P_CLIENT, P_PLAYER, record_at(a, [REGION_SIZE / 2.0, REGION_SIZE / 2.0]));
+    let (_, _, id) = until_body(rig);
+    assert!(rig.teleport(a, id, past_seam(a, b, REGION_SIZE / 2.0)));
+    let mut back = false;
+    for _ in 0..CROSS_ROUNDS {
+        rig.round();
+        if let Some((h, rc, id)) = rig.player_body(P_CLIENT) {
+            if (h, rc) == (hb, b) {
+                assert!(rig.teleport(b, id, past_seam(b, a, REGION_SIZE / 2.0)));
+                back = true;
+                break;
+            }
+        }
+    }
+    assert!(back, "the body never reached {b:?}");
+    until_player_settled_in(rig, a);
+    for _ in 0..WAIT_ROUNDS {
+        rig.round();
+        assert_eq!(rig.player_owners(P_CLIENT), [(ha, a)], "one body, back in {a:?}");
+    }
+    let (ma, mb) = (&rig.hosts[ha as usize].manager, &rig.hosts[hb as usize].manager);
+    assert_eq!((ma.home_of(P_CLIENT), mb.home_of(P_CLIENT)), (Some(a), None));
+    assert_eq!(ma.session_kind(P_CLIENT), Some(game::SessionKind::Home));
+    assert_eq!(mb.session_kind(P_CLIENT), Some(game::SessionKind::Observer));
+    assert!(ma.departed().is_empty(), "the player is back on host {ha}: {:?}", ma.departed());
+    assert_eq!(mb.departed().get(&P_PLAYER), Some(&ha), "host {hb} handed it back to host {ha}");
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn ping_pong_across_host_seam() {
+    sweep("ping_pong_across_host_seam", 2, 1, SEEDS / 2, ping_pong);
+}
+
+/// The client has no session on the host its body is handed to (it cannot reach it): the
+/// body waits there with no session, kept alive, and after `HANDOFF_SESSION_GRACE_MS` it
+/// is parked there — its record on that host only, exactly once in the world.
+fn no_session_there(rig: &mut MultiRig) {
+    let (a, b) = host_seam(2, 1);
+    let (ha, hb) = (rig.owner(a), rig.owner(b));
+    rig.run(a);
+    rig.run(b);
+    rig.connect_home(ha, P_CLIENT, P_PLAYER, record_at(a, [REGION_SIZE / 2.0, REGION_SIZE / 2.0]));
+    let (_, _, id) = until_body(rig);
+    assert!(rig.teleport(a, id, past_seam(a, b, REGION_SIZE / 2.0)));
+    until_player_settled_in(rig, b);
+    assert_eq!(rig.hosts[hb as usize].manager.home_of(P_CLIENT), Some(b));
+    assert_eq!(rig.hosts[hb as usize].manager.session_kind(P_CLIENT), None);
+    // Not before the grace.
+    rig.maintain_all(game::HANDOFF_SESSION_GRACE_MS / 2);
+    rig.round();
+    assert_eq!(rig.player_owners(P_CLIENT), [(hb, b)], "still there within the grace");
+    let mut parked = false;
+    for _ in 0..CROSS_ROUNDS {
+        rig.maintain_all(game::HANDOFF_SESSION_GRACE_MS / 2);
+        rig.round();
+        if !rig.parked_on(P_PLAYER).is_empty() {
+            parked = true;
+            break;
+        }
+    }
+    assert!(parked, "the player was never parked: body {:?}", rig.player_owners(P_CLIENT));
+    for _ in 0..WAIT_ROUNDS {
+        rig.round();
+    }
+    assert_eq!(rig.parked_on(P_PLAYER), [hb], "parked on host {hb}, once");
+    assert!(rig.player_owners(P_CLIENT).is_empty(), "no body left");
+    for h in [ha, hb] {
+        assert_eq!(rig.hosts[h as usize].manager.home_of(P_CLIENT), None);
+    }
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn handoff_without_session_parks_after_grace() {
+    sweep("handoff_without_session_parks_after_grace", 2, 1, SEEDS / 2, no_session_there);
+}
+
+/// The client disconnects from both hosts while its body crosses (`early`: in the round
+/// it is pushed past the seam, else the round host A hands it off; `lag`: the target
+/// region sits out rounds meanwhile, so the body's arrival waits there behind its slot):
+/// the player ends parked exactly once, on one host, with no body and no home or session
+/// anywhere.
+fn disconnect_crossing(rig: &mut MultiRig, early: bool, lag: bool) {
+    let (a, b) = host_seam(2, 1);
+    let (ha, hb) = (rig.owner(a), rig.owner(b));
+    rig.run(a);
+    rig.run(b);
+    rig.connect_everywhere(ha, P_CLIENT, P_PLAYER, record_at(a, [REGION_SIZE / 2.0, REGION_SIZE / 2.0]));
+    let (_, _, id) = until_body(rig);
+    assert!(rig.teleport(a, id, past_seam(a, b, REGION_SIZE / 2.0)));
+    if lag {
+        rig.host_of(b).manager.spawner_mut().hold(b, LAG_ROUNDS);
+    }
+    if !early {
+        let mut handed = false;
+        for _ in 0..CROSS_ROUNDS {
+            rig.round();
+            if rig.hosts[ha as usize].manager.home_of(P_CLIENT).is_none() {
+                handed = true;
+                break;
+            }
+        }
+        assert!(handed, "host {ha} never handed the body off");
+    }
+    rig.disconnect(ha, P_CLIENT);
+    rig.disconnect(hb, P_CLIENT);
+    let mut parked = false;
+    for _ in 0..CROSS_ROUNDS {
+        rig.round();
+        rig.maintain_all(game::HANDOFF_SESSION_GRACE_MS);
+        if rig.parked_on(P_PLAYER).len() == 1 && rig.player_owners(P_CLIENT).is_empty() && rig.peer_unreceived() == 0 {
+            parked = true;
+            break;
+        }
+    }
+    assert!(parked, "never parked: body {:?}, parked on {:?}", rig.player_owners(P_CLIENT), rig.parked_on(P_PLAYER));
+    for _ in 0..WAIT_ROUNDS {
+        rig.round();
+    }
+    assert_eq!(rig.parked_on(P_PLAYER).len(), 1, "parked once");
+    assert!(rig.player_owners(P_CLIENT).is_empty());
+    for h in [ha, hb] {
+        let m = &rig.hosts[h as usize].manager;
+        assert_eq!((m.home_of(P_CLIENT), m.session_kind(P_CLIENT)), (None, None), "host {h} holds nothing of it");
+    }
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn disconnect_mid_handoff_parks_once() {
+    sweep("disconnect_mid_handoff_parks_once (early)", 2, 1, SEEDS / 2, |rig| disconnect_crossing(rig, true, false));
+    sweep("disconnect_mid_handoff_parks_once (handed)", 2, 1, SEEDS / 2, |rig| disconnect_crossing(rig, false, false));
+    sweep("disconnect_mid_handoff_parks_once (lagging target)", 2, 1, SEEDS / 2, |rig| disconnect_crossing(rig, false, true));
+}
+
+/// A subscribe to a region another host owns is answered with that host's endpoint and a
+/// ticket; that host is told to expect it (`ObserverOrder`), once per ticket.
+fn subscribe_elsewhere(rig: &mut MultiRig) {
+    let (a, b) = host_seam(2, 1);
+    let (ha, hb) = (rig.owner(a), rig.owner(b));
+    rig.run(a);
+    rig.connect_home(ha, P_CLIENT, P_PLAYER, record_at(a, [REGION_SIZE / 2.0, REGION_SIZE / 2.0]));
+    until_body(rig);
+    rig.record_packets();
+    let subscribe = game::ServerEvent::ClientPacket(game::ClientPacket::RequestRegionConnection(b), P_CLIENT);
+    rig.hosts[ha as usize].event(subscribe);
+    let tickets: Vec<game::ObserverTicket> = packets_to(rig, ha)
+        .into_iter()
+        .filter_map(|p| match p {
+            game::ServerPacket::RegionElsewhere { region, endpoint, ticket } if *region == b && *endpoint == rig_endpoint(hb) => {
+                Some(ticket.clone())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(tickets.len(), 1, "one RegionElsewhere for {b:?}, naming host {hb}");
+    let ticket = tickets[0].clone();
+    assert_eq!(ticket.client, P_CLIENT);
+    let mut orders = Vec::new();
+    for _ in 0..CROSS_ROUNDS {
+        rig.round();
+        orders.extend(rig.hosts[hb as usize].manager.take_observer_orders());
+        if !orders.is_empty() && rig.peer_unreceived() == 0 {
+            break;
+        }
+    }
+    assert_eq!(orders.len(), 1, "one order: {orders:?}");
+    let (client, player, nonce, expires) = orders[0];
+    assert_eq!((client, player, nonce), (P_CLIENT, P_PLAYER, ticket.nonce));
+    assert!(expires >= game::OBSERVER_ORDER_TTL_SECS, "expires at a unix time");
+    // Asked again: the same ticket, no second order.
+    let subscribe = game::ServerEvent::ClientPacket(game::ClientPacket::RequestRegionConnection(b), P_CLIENT);
+    rig.hosts[ha as usize].event(subscribe);
+    let again = packets_to(rig, ha)
+        .into_iter()
+        .filter(|p| matches!(p, game::ServerPacket::RegionElsewhere { ticket: t, .. } if *t == ticket))
+        .count();
+    assert_eq!(again, 2, "the same ticket again");
+    for _ in 0..WAIT_ROUNDS {
+        rig.round();
+        assert!(rig.hosts[hb as usize].manager.take_observer_orders().is_empty(), "no second order");
+    }
+    assert!(!rig.hosts[ha as usize].manager.running_regions().contains(&b), "never run here");
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn subscribe_to_foreign_region_answers_region_elsewhere_and_orders_the_owner() {
+    sweep("subscribe_to_foreign_region_answers_region_elsewhere_and_orders_the_owner", 2, 1, SEEDS / 4, subscribe_elsewhere);
+}
+
+/// The link to the other host is down: a body past the seam is handed back to the region
+/// it left, as before — nothing queued, the home unchanged.
+fn unreachable(rig: &mut MultiRig) {
+    let (a, b) = host_seam(2, 1);
+    let (ha, hb) = (rig.owner(a), rig.owner(b));
+    rig.run(a);
+    rig.connect_everywhere(ha, P_CLIENT, P_PLAYER, record_at(a, [REGION_SIZE / 2.0, REGION_SIZE / 2.0]));
+    let (_, _, id) = until_body(rig);
+    rig.link_down(ha, hb);
+    rig.round();
+    assert!(rig.teleport(a, id, past_seam(a, b, REGION_SIZE / 2.0)));
+    for _ in 0..WAIT_ROUNDS {
+        rig.round();
+    }
+    assert_eq!(rig.player_owners(P_CLIENT), [(ha, a)], "handed back to {a:?}");
+    let m = &rig.hosts[ha as usize].manager;
+    assert_eq!(m.home_of(P_CLIENT), Some(a));
+    assert_eq!(m.session_kind(P_CLIENT), Some(game::SessionKind::Home));
+    assert!(m.departed().is_empty());
+    assert_eq!(m.peer_unreceived(), 0, "nothing queued to host {hb}");
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn player_cannot_enter_an_unreachable_host() {
+    sweep("player_cannot_enter_an_unreachable_host", 2, 1, SEEDS / 4, unreachable);
+}
+

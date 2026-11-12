@@ -155,3 +155,48 @@ fn client_id_above_u32_round_trips() {
     let back: ServerPacket = decode_packet(&encode_packet(&packet).unwrap()).unwrap();
     assert!(matches!(back, ServerPacket::PlayerRegion(None, got) if got == id), "{back:?}");
 }
+
+/// The variants R3 appended (`ServerPacket::Host`, `RegionElsewhere`,
+/// `Credential::Observer`) cross the codec, and every older variant keeps its encoded tag
+/// (bincode's little-endian `u32` variant index), so an older peer still reads them: the
+/// tags of `StudLodData` and `Jwt` as they were before the append.
+#[test]
+fn new_variants_round_trip_and_old_indices_are_unchanged() {
+    use game::{Credential, HostEndpoint, ObserverTicket};
+    let tag = |bytes: &[u8]| u32::from_le_bytes(bytes[..4].try_into().unwrap());
+    let lod = ServerPacket::StudLodData(game::LodKey { factor: 64, coords: [0, 0] }, Default::default());
+    assert_eq!(tag(&bincode::serialize(&lod).unwrap()), 18, "StudLodData's tag");
+    assert_eq!(tag(&bincode::serialize(&Credential::Jwt("x".into())).unwrap()), 1, "Jwt's tag");
+
+    let endpoint = HostEndpoint {
+        ordinal: 3,
+        quic: Some("10.0.0.3:6470".into()),
+        webtransport: Some("https://h3.example:6466".into()),
+        cert_hash: Some("ab12".into()),
+    };
+    let host = ServerPacket::Host(endpoint.clone());
+    assert_eq!(tag(&bincode::serialize(&host).unwrap()), 19, "Host is appended last");
+    match decode_packet::<ServerPacket>(&encode_packet(&host).unwrap()).unwrap() {
+        ServerPacket::Host(e) => assert_eq!(e, endpoint),
+        other => panic!("wrong variant {other:?}"),
+    }
+    let ticket = ObserverTicket { client: 9, nonce: 0xDEAD_BEEF_0123_4567 };
+    let elsewhere =
+        ServerPacket::RegionElsewhere { region: RegionCoords::new(-4, 2), endpoint: endpoint.clone(), ticket: ticket.clone() };
+    assert_eq!(tag(&bincode::serialize(&elsewhere).unwrap()), 20, "RegionElsewhere after it");
+    match decode_packet::<ServerPacket>(&encode_packet(&elsewhere).unwrap()).unwrap() {
+        ServerPacket::RegionElsewhere { region, endpoint: e, ticket: t } => {
+            assert_eq!((region, e, t), (RegionCoords::new(-4, 2), endpoint, ticket.clone()));
+        }
+        other => panic!("wrong variant {other:?}"),
+    }
+    let observer = Credential::Observer { client: 9, nonce: 42 };
+    assert_eq!(tag(&bincode::serialize(&observer).unwrap()), 2, "Observer is appended last");
+    let hello = ClientPacket::Hello { credential: observer.clone() };
+    match decode_packet::<ClientPacket>(&encode_packet(&hello).unwrap()).unwrap() {
+        ClientPacket::Hello { credential } => assert_eq!(credential, observer),
+        other => panic!("wrong variant {other:?}"),
+    }
+    assert!(!format!("{observer:?}").contains("42"), "the nonce is never printed");
+    assert!(!format!("{ticket:?}").contains(&ticket.nonce.to_string()), "nor a ticket's");
+}

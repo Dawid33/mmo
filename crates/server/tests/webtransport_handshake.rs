@@ -148,7 +148,7 @@ async fn webtransport_client_full_handshake() {
                             .unwrap();
                     }
                 }
-                ServerEvent::ClientDisconnected(_) | ServerEvent::Supersede { .. } => {}
+                ServerEvent::ClientDisconnected(_) | ServerEvent::Supersede { .. } | ServerEvent::ObserverConnected { .. } => {}
             }
         }
     });

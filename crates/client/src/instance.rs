@@ -1795,6 +1795,11 @@ impl GameInstanceManager {
             game::ServerPacket::PersonInfo(p) => {
                 let _ = self.client_event_send.send(ClientUpdateEvent::PersonInfo(p));
             }
+            // Several hosts per world: the client follows them from R3's Task 17 on.
+            game::ServerPacket::Host(endpoint) => log::debug!("connected to host {}", endpoint.ordinal),
+            game::ServerPacket::RegionElsewhere { region, endpoint, .. } => {
+                log::warn!("region {region:?} is served by host {}, which this client cannot reach yet", endpoint.ordinal);
+            }
         }
         Ok(())
     }

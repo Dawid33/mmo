@@ -34,6 +34,13 @@ const ADVENTURE_LANDING_HINT_Y: i32 = 1 << 20;
 pub const SPAWN_REGION: RegionCoords = RegionCoords { x: 0, z: 0 };
 
 pub const UNLOAD_GRACE_MS: u64 = 5000;
+/// How long a player handed to this host by another ([`crate::PlayerHandoff`]) may have no
+/// session here before it is treated as disconnected (parked): the client could not reach
+/// this host.
+pub const HANDOFF_SESSION_GRACE_MS: u64 = 5_000;
+/// How long an observer ticket ([`crate::ObserverTicket`]) is valid at the host that admits
+/// it (`Reliable::ObserverOrder::expires_unix_secs`).
+pub const OBSERVER_ORDER_TTL_SECS: u64 = 120;
 /// Most arrivals that wait in the manager's mailbox for one region that is
 /// not running ([`WorldManager::pending_arrival_count`]); past it the oldest
 /// is despawned — one carrying drops leaves them as item piles at the seam
@@ -71,6 +78,11 @@ pub enum ServerEvent {
     /// takeover does. The new login's session, when it connects, is restored
     /// from that park. No session: nothing happens.
     Supersede { player: crate::PlayerId, reason: String },
+    /// A session to this host that does not hold the client's body (an observer: its
+    /// subscriptions only), admitted with the ticket the client's home host handed out.
+    /// `client` is the id the home host knows the session by; `player` its player. When
+    /// the body arrives here ([`crate::PlayerHandoff`]) the session becomes the home.
+    ObserverConnected { client: ClientId, player: crate::PlayerId },
 }
 
 impl ServerEvent {
@@ -459,8 +471,21 @@ impl RegionSpawner for InlineSpawner {
     }
 }
 
+/// What a session to this host is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SessionKind {
+    /// This host holds (or is placing, or parking) the client's body.
+    #[default]
+    Home,
+    /// Another host holds the body: subscriptions only. Its end parks nothing.
+    Observer,
+}
+
 #[derive(Default)]
 struct Session {
+    kind: SessionKind,
+    /// The session's player (from `ClientConnected` / `ObserverConnected`).
+    player: Option<PlayerId>,
     subscribed: BTreeSet<RegionCoords>,
     lod_subscribed: BTreeSet<LodKey>,
 }
@@ -895,6 +920,26 @@ pub struct WorldManager<S: RegionSpawner> {
     foreign_running: BTreeMap<RegionCoords, u32>,
     /// A peer runs a newer world generation ([`Self::take_higher_generation`]).
     higher_generation: Option<u64>,
+    /// Where clients reach this host ([`Self::set_endpoints`]): the first packet of every
+    /// session ([`ServerPacket::Host`]). Ordinal 0, no addresses until set.
+    endpoint: crate::HostEndpoint,
+    /// Where clients reach each other host, from its latest [`crate::PeerHello`].
+    peer_endpoints: BTreeMap<u32, crate::HostEndpoint>,
+    /// "I handed this player to host N" (`peers.rs`): set when a player's body leaves for
+    /// another host, cleared when it comes back. Kept for the manager's lifetime: input
+    /// a client still sends here follows it, and a login placement asks it.
+    departed: BTreeMap<PlayerId, u32>,
+    /// Players handed to this host with no session here yet, by client, with the `now_ms`
+    /// they arrived at: treated as disconnected after [`HANDOFF_SESSION_GRACE_MS`].
+    awaiting_session: BTreeMap<ClientId, u64>,
+    /// Observer tickets handed out, per `(client, owner host)`: the nonce and the `now_ms`
+    /// it was minted at (`peers.rs`, `observer_ticket`).
+    observer_tickets: BTreeMap<(ClientId, u32), (u64, u64)>,
+    /// Observer orders other hosts sent, for the server edge
+    /// ([`Self::take_observer_orders`]): `(client, player, nonce, expires_unix_secs)`.
+    observer_orders: Vec<(ClientId, PlayerId, u64, u64)>,
+    /// The splitmix state observer nonces are drawn from (seeded by [`Self::set_endpoints`]).
+    nonce_state: u64,
 }
 
 impl<S: RegionSpawner> WorldManager<S> {
@@ -986,6 +1031,13 @@ impl<S: RegionSpawner> WorldManager<S> {
             peer_in_source_view: BTreeSet::new(),
             foreign_running: BTreeMap::new(),
             higher_generation: None,
+            endpoint: crate::HostEndpoint { ordinal: 0, quic: None, webtransport: None, cert_hash: None },
+            peer_endpoints: BTreeMap::new(),
+            departed: BTreeMap::new(),
+            awaiting_session: BTreeMap::new(),
+            observer_tickets: BTreeMap::new(),
+            observer_orders: Vec::new(),
+            nonce_state: 0,
         }
     }
 
@@ -1180,6 +1232,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             }
             ServerEvent::ClientDisconnected(id) => self.client_disconnected(id, now_ms),
             ServerEvent::Supersede { player, reason } => self.supersede(player, &reason, now_ms),
+            ServerEvent::ObserverConnected { client, player } => self.observer_connected(client, player, now_ms),
             ServerEvent::ClientPacket(packet, id) if self.restore_pending(id) && defers_until_restored(&packet) => {
                 self.deferred_packets.entry(id).or_default().push(packet);
             }
@@ -1254,6 +1307,11 @@ impl<S: RegionSpawner> WorldManager<S> {
                                     None => RegionInput::Event(kind),
                                 };
                                 self.send_to_region(home, input);
+                            }
+                            // Its body went to another host: the input follows it there.
+                            None if self.departed_host(cid).is_some() => {
+                                let stamp = after_tick.unwrap_or_else(|| self.spawner.world_tick());
+                                self.forward_input(cid, kind, stamp);
                             }
                             _ => log::info!(
                                 "[server] DROP {kind:?} from cid={cid:?}: home={home:?} not running (loaded regions: {:?})",
@@ -1465,10 +1523,12 @@ impl<S: RegionSpawner> WorldManager<S> {
                     let client = bundle.client.as_ref().map(|(c, _)| *c);
                     let off_map = crate::off_map(self.map_extent(), target);
                     // Bodies that would wake their target: a player, a person no
-                    // history absorbs. Neither crosses to another host yet (Task 7).
+                    // history absorbs. A player crosses to another host when its owner is
+                    // reachable (`peers.rs`, `can_hand_off`); a person does not yet.
                     let waking = client.is_some()
                         || (matches!(bundle.kind, EntityKind::Person { .. }) && self.world.is_none());
-                    if off_map || (waking && (self.is_unavailable(target) || self.is_foreign(target))) {
+                    let hand_off = client.is_some_and(|c| self.is_foreign(target) && self.can_hand_off(c, target));
+                    if off_map || (waking && (self.is_unavailable(target) || (self.is_foreign(target) && !hand_off))) {
                         // Off the map: regions hold bodies at the outer seam, so
                         // this is a region that was not bounded. Unavailable: its
                         // stored state could not be read, so it cannot take the
@@ -1492,6 +1552,11 @@ impl<S: RegionSpawner> WorldManager<S> {
                     // listed there, bit-exact: a rebase there and back is not).
                     let left = bundle_at(&bundle);
                     bundle.rebase(rc, target);
+                    if hand_off {
+                        // A player: it and its session's home go to that host.
+                        self.hand_off_to_peer(rc, target, stamp, bundle, view, now_ms);
+                        continue;
+                    }
                     if self.is_foreign(target) {
                         // Another host's region: to its owner, reachable or not (it
                         // waits in the session); that host decides the arrival.
@@ -1509,6 +1574,10 @@ impl<S: RegionSpawner> WorldManager<S> {
                 match client.and_then(|c| self.homes.get(&c).copied()) {
                     Some(home) if home != rc && self.regions.contains_key(&home) => {
                         self.send_to_region(home, RegionInput::EventAfterTick(kind, stamp));
+                    }
+                    // The body went to another host: on to it (`peers.rs`).
+                    None if client.is_some_and(|c| self.departed_host(c).is_some()) => {
+                        self.forward_input(client.expect("checked"), kind, stamp);
                     }
                     home => log::info!("[server] forward of {kind:?} from {rc:?} dropped: home {home:?}"),
                 }
@@ -1591,9 +1660,22 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.try_finish_attach();
         self.pump_world(self.world_ms);
         self.route_notices();
+        // A player handed here whose session has not come is parked once its grace is
+        // over (the client could not reach this host); until then it keeps its region.
+        let lapsed: Vec<ClientId> = self
+            .awaiting_session
+            .iter()
+            .filter(|(_, &since)| now_ms.saturating_sub(since) >= HANDOFF_SESSION_GRACE_MS)
+            .map(|(c, _)| *c)
+            .collect();
+        for c in lapsed {
+            log::warn!("[server] client {c} never connected to this host after its hand-off: parked");
+            self.client_disconnected(c, now_ms);
+        }
         let connected_homes: BTreeSet<RegionCoords> = self
             .sessions
             .keys()
+            .chain(self.awaiting_session.keys())
             .filter_map(|c| self.homes.get(c).copied())
             .collect();
         // No keep-alive expiry while an `Attach` is gathered: it waits for every stopping
@@ -2465,6 +2547,14 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// Drop a client's session and subscriptions. Idempotent: a second call
     /// (e.g. `Leave` then the transport closing) finds no session.
     fn client_disconnected(&mut self, id: ClientId, now_ms: u64) {
+        self.observer_tickets.retain(|(c, _), _| *c != id);
+        if self.sessions.get(&id).is_some_and(|s| s.kind == SessionKind::Observer) {
+            // Another host holds the body: only the session's subscriptions end.
+            self.end_session(id, now_ms);
+            self.deferred_packets.remove(&id);
+            return;
+        }
+        self.awaiting_session.remove(&id);
         let player = self.player_of.remove(&id);
         let fortress = self.fortress_of.remove(&id);
         let adventure = self.adventurer_of.remove(&id);
@@ -2475,19 +2565,7 @@ impl<S: RegionSpawner> WorldManager<S> {
         }
         self.deferred_packets.remove(&id);
         self.awaiting_park.retain(|_, (c, _)| *c != id);
-        if let Some(session) = self.sessions.remove(&id) {
-            for rc in session.subscribed {
-                self.unsubscribe_link(id, rc, now_ms);
-            }
-            for key in session.lod_subscribed {
-                if let Some(set) = self.lod_subscribers.get_mut(&key) {
-                    set.remove(&id);
-                    if set.is_empty() {
-                        self.lod_subscribers.remove(&key);
-                    }
-                }
-            }
-        }
+        self.end_session(id, now_ms);
         // Park the player: its body leaves the region and comes back as its
         // record (`PlayerParked`), so no orphan body stays behind.
         if let Some(m) = self.moving.remove(&id) {
@@ -2513,7 +2591,20 @@ impl<S: RegionSpawner> WorldManager<S> {
             match player {
                 Some(player) => {
                     self.parking.insert(id, Parking { player, region: home, fortress, adventure });
-                    self.send_play_event(home, GameEventKind::ParkPlayer(id));
+                    // A body still on its way into its home (a crossing, a hand-off from
+                    // another host) is parked behind its arrival, in its slot — as one
+                    // whose park was on the way when it crossed (`accept_arrival`).
+                    let arriving = self
+                        .in_flight
+                        .values()
+                        .find(|f| f.target == home && f.bundle.client.as_ref().is_some_and(|(c, _)| *c == id))
+                        .map(|f| f.stamp);
+                    match arriving {
+                        Some(stamp) => {
+                            self.send_to_region(home, RegionInput::Transfer(GameEventKind::ParkPlayer(id), stamp));
+                        }
+                        None => self.send_play_event(home, GameEventKind::ParkPlayer(id)),
+                    }
                 }
                 None => self.send_play_event(home, GameEventKind::ClientLeft(id)),
             }
@@ -2522,11 +2613,28 @@ impl<S: RegionSpawner> WorldManager<S> {
         }
     }
 
+    /// `id`'s session (if any) ends: its region and LOD subscriptions go.
+    fn end_session(&mut self, id: ClientId, now_ms: u64) {
+        let Some(session) = self.sessions.remove(&id) else { return };
+        for rc in session.subscribed {
+            self.unsubscribe_link(id, rc, now_ms);
+        }
+        for key in session.lod_subscribed {
+            if let Some(set) = self.lod_subscribers.get_mut(&key) {
+                set.remove(&id);
+                if set.is_empty() {
+                    self.lod_subscribers.remove(&key);
+                }
+            }
+        }
+    }
+
     /// The orderly exit's first step: every connected player is parked (as on a
     /// disconnect), so its record is in the exit's save cut before the
     /// process ends. Then [`Self::shutdown_all`]; regions answer `ParkPlayer` first.
     pub fn park_all_players(&mut self, now_ms: u64) {
-        let online: Vec<ClientId> = self.sessions.keys().copied().collect();
+        // And the players handed here whose session has not come yet.
+        let online: BTreeSet<ClientId> = self.sessions.keys().chain(self.awaiting_session.keys()).copied().collect();
         for id in online {
             self.client_disconnected(id, now_ms);
         }
@@ -2535,8 +2643,10 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// Every session of `player` is told `reason` and ended (the server edge
     /// closes it); its player parks.
     fn supersede(&mut self, player: PlayerId, reason: &str, now_ms: u64) {
-        let sessions: Vec<ClientId> =
+        // Observer sessions of it too (they are not in `player_of`).
+        let mut sessions: BTreeSet<ClientId> =
             self.player_of.iter().filter(|(_, p)| **p == player).map(|(c, _)| *c).collect();
+        sessions.extend(self.sessions.iter().filter(|(_, s)| s.player == Some(player)).map(|(c, _)| *c));
         for id in sessions {
             log::info!("client {id}: player {} superseded by the login service ({reason})", player.0);
             let _ = self.out.send((Some(id), ServerPacket::Refused(reason.to_string())));
@@ -2562,6 +2672,8 @@ impl<S: RegionSpawner> WorldManager<S> {
             log::warn!("client {id}: {DUPLICATE_SESSION_REFUSAL} (a duplicate ClientConnected is ignored)");
             return false;
         }
+        // The first packet of every session: which host this is.
+        let _ = self.out.send((Some(id), ServerPacket::Host(self.endpoint.clone())));
         let elsewhere: Vec<ClientId> =
             self.player_of.iter().filter(|(c, p)| **p == player && **c != id).map(|(c, _)| *c).collect();
         for old in elsewhere {
@@ -2573,7 +2685,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             let _ = self.out.send((Some(old), ServerPacket::Refused(LOGGED_IN_ELSEWHERE.to_string())));
             self.client_disconnected(old, now_ms);
         }
-        self.sessions.entry(id).or_default();
+        self.sessions.entry(id).or_default().player = Some(player);
         self.player_of.insert(id, player);
         let in_flight = self.parking.values().any(|p| p.player == player);
         if in_flight {
@@ -3067,14 +3179,19 @@ impl<S: RegionSpawner> WorldManager<S> {
         // packets, or a Stopped-replay for a client that disconnected during
         // the stopping window — are dropped here; otherwise they'd pin the
         // region forever with a subscriber no disconnect can remove.
-        let Some(session) = self.sessions.get_mut(&client) else {
+        if !self.sessions.contains_key(&client) {
             log::debug!(
                 "dropping subscribe from sessionless client {client} for {:?}",
                 rc
             );
             return;
-        };
-        session.subscribed.insert(rc);
+        }
+        if self.is_foreign(rc) {
+            // Another host runs it: the client is sent there (`peers.rs`).
+            self.subscribe_elsewhere(client, rc);
+            return;
+        }
+        self.sessions.get_mut(&client).expect("checked").subscribed.insert(rc);
         self.ensure_running(rc);
         // Unavailable (its store read failed): subscribed again at its retry.
         let Some(link) = self.regions.get_mut(&rc) else { return };
@@ -3113,6 +3230,7 @@ impl<S: RegionSpawner> WorldManager<S> {
         let is_home = self
             .sessions
             .keys()
+            .chain(self.awaiting_session.keys())
             .any(|c| self.homes.get(c) == Some(&rc))
             || self.moving.values().any(|m| m.from == rc);
         let Some(link) = self.regions.get_mut(&rc) else { return };

@@ -16,8 +16,17 @@
 //! is reachable, and every reply (a reply carrying items is never dropped); an intent
 //! whose owner is not reachable is refused (`OwnerNotRunning`) as for a parked region.
 //!
-//! Players do not cross hosts yet (Task 7): a player body departing into a foreign region
-//! is handed back to its source, and the play paths refuse foreign regions (Task 8).
+//! **Players** cross too, when the owner is reachable: the body goes as a
+//! [`Reliable::Transfer`] carrying a [`crate::PlayerHandoff`] (claims, a park in flight),
+//! and the client's session follows it — its connection to the new host (an
+//! [`SessionKind::Observer`] session until then) becomes the home, the one it left an
+//! observer. The leaving host remembers where it sent the player (`departed`): input the
+//! client still sends there follows the body ([`Volatile::Input`]). A client that never
+//! connects to the new host is parked there after [`HANDOFF_SESSION_GRACE_MS`]. A body
+//! heading for an unreachable host is handed back to its source; the play paths still
+//! refuse foreign regions (Task 8). A subscribe to a region another host owns is answered
+//! with that host's endpoint and an observer ticket ([`crate::ServerPacket::RegionElsewhere`]),
+//! the owner told to expect it ([`Reliable::ObserverOrder`]).
 
 use super::*;
 use crate::{PeerEvent, PeerLink, PeerSession, Reliable, Volatile};
@@ -155,6 +164,234 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.higher_generation.take()
     }
 
+    /// Where clients reach this host (the first packet of every session,
+    /// [`crate::ServerPacket::Host`]), and the seed observer nonces are drawn from (random
+    /// per host process start: a nonce must not be guessable).
+    pub fn set_endpoints(&mut self, mine: crate::HostEndpoint, nonce_seed: u64) {
+        self.endpoint = mine;
+        self.nonce_state = nonce_seed;
+    }
+
+    /// The observer orders other hosts sent since the last call:
+    /// `(client, player, nonce, expires_unix_secs)` — the server edge admits a
+    /// `Credential::Observer` that matches one.
+    pub fn take_observer_orders(&mut self) -> Vec<(ClientId, PlayerId, u64, u64)> {
+        std::mem::take(&mut self.observer_orders)
+    }
+
+    /// What `client`'s session here is, if it has one.
+    pub fn session_kind(&self, client: ClientId) -> Option<SessionKind> {
+        self.sessions.get(&client).map(|s| s.kind)
+    }
+
+    /// The region holding (or getting) `client`'s body on this host, if any.
+    pub fn home_of(&self, client: ClientId) -> Option<RegionCoords> {
+        self.homes.get(&client).copied()
+    }
+
+    /// The players this host handed to another, with that host.
+    pub fn departed(&self) -> &BTreeMap<PlayerId, u32> {
+        &self.departed
+    }
+
+    /// An observer session of `client` (its body is on another host, or on its way here):
+    /// subscriptions only. A body handed here before the session came makes it the home.
+    pub(super) fn observer_connected(&mut self, client: ClientId, player: PlayerId, now_ms: u64) {
+        if self.sessions.contains_key(&client) {
+            log::warn!("client {client}: a second session on this host; the observer connection is ignored");
+            return;
+        }
+        let _ = self.out.send((Some(client), ServerPacket::Host(self.endpoint.clone())));
+        let home = self.awaiting_session.remove(&client).is_some();
+        if home && self.player_of.get(&client) != Some(&player) {
+            log::error!("client {client}: an observer session for player {} holds another player's body", player.0);
+        }
+        let kind = if home { SessionKind::Home } else { SessionKind::Observer };
+        self.sessions.insert(client, Session { kind, player: Some(player), ..Session::default() });
+        if home {
+            log::info!("client {client}: connected after its body was handed here; the session is its home");
+            let region = self.homes.get(&client).copied();
+            let _ = self.out.send((Some(client), ServerPacket::PlayerRegion(region, client)));
+            if let Some(rc) = region {
+                self.refresh_keepalive(rc, now_ms);
+            }
+            self.world_player_online(client);
+        }
+    }
+
+    /// The host `client`'s player was handed to, if this host handed it away.
+    pub(super) fn departed_host(&self, client: ClientId) -> Option<u32> {
+        let player = self.player_of.get(&client).copied().or_else(|| self.sessions.get(&client)?.player)?;
+        self.departed.get(&player).copied()
+    }
+
+    /// An input of `client`, whose body is on another host now (`departed`), to that host
+    /// (volatile: lost with a link that is down, as an input to a dead region is).
+    pub(super) fn forward_input(&mut self, client: ClientId, kind: GameEventKind, stamp: crate::Tick) {
+        let Some(host) = self.departed_host(client) else { return };
+        log::debug!("[server] {kind:?} of client {client}: its body is on host {host}, forwarded");
+        if let Some(peer) = self.peers.get_mut(&host).filter(|p| !p.stale) {
+            peer.session.send_volatile(Volatile::Input { client, kind, stamp });
+        }
+    }
+
+    /// Whether `client`'s body departing into `target` (another host's) goes to that host:
+    /// it is reachable, the player is known (online, or parking) and no move or restore
+    /// here waits on the body. Otherwise it is handed back to where it left.
+    pub(super) fn can_hand_off(&self, client: ClientId, target: RegionCoords) -> bool {
+        let player = self.player_of.get(&client).copied().or_else(|| self.parking.get(&client).map(|p| p.player));
+        let Some(player) = player else { return false };
+        self.reaches(target)
+            && !self.moving.contains_key(&client)
+            && !self.creating.contains_key(&client)
+            // A new session of the player waits here for this park.
+            && !self.awaiting_park.contains_key(&player)
+    }
+
+    /// `bundle` (in `target`'s frame), `client`'s body, departed from `rc` at `stamp` into
+    /// `target`, which another (reachable) host owns: the player goes with it — its claims,
+    /// a park in flight — and this host keeps only where it went (`departed`); the
+    /// client's session here, if any, becomes an observer. `view`: as [`Self::depart_to_peer`].
+    pub(super) fn hand_off_to_peer(
+        &mut self,
+        rc: RegionCoords,
+        target: RegionCoords,
+        stamp: crate::Tick,
+        bundle: crate::EntityBundle,
+        view: bool,
+        now_ms: u64,
+    ) {
+        let client = bundle.client.as_ref().map(|(c, _)| *c).expect("a player's body");
+        let owner = self.owner_of(target);
+        let (player, claim, park) = match self.parking.remove(&client) {
+            // Disconnected, its park on the way to `rc`: parked where it lands.
+            Some(p) => (p.player, claim_of(p.fortress, p.adventure), true),
+            None => {
+                let player = self.player_of.remove(&client).expect("can_hand_off: online or parking");
+                let claim = claim_of(self.fortress_of.remove(&client), self.adventurer_of.remove(&client));
+                self.world_send(HostMsg::PlayerOffline { player });
+                (player, claim, false)
+            }
+        };
+        log::info!("[server] player {} (client {client}) from {rc:?} into {target:?}: handed to host {owner}", player.0);
+        self.homes.remove(&client);
+        if let Some(session) = self.sessions.get_mut(&client) {
+            session.kind = SessionKind::Observer;
+        }
+        self.departed.insert(player, owner);
+        self.locations.remove(&bundle.id);
+        let handoff = crate::PlayerHandoff { client, player, claim, login: None, park };
+        let id = self.queue_to_peer(owner, Reliable::Transfer { target, stamp, bundle: Box::new(bundle), player: Some(handoff) });
+        if view {
+            self.peer_in_source_view.insert((owner, id));
+        }
+        // Its home may have just lost its keep-alive reason.
+        self.refresh_keepalive(rc, now_ms);
+    }
+
+    /// A player handed here by host `from` ([`Self::hand_off_to_peer`]): its body arrives at
+    /// `target` like any crossing, and the player is this host's now — its home session if
+    /// the client is connected here, else awaited ([`HANDOFF_SESSION_GRACE_MS`]); parked
+    /// where it lands if its park was on the way.
+    fn accept_handoff(
+        &mut self,
+        from: u32,
+        target: RegionCoords,
+        stamp: crate::Tick,
+        bundle: crate::EntityBundle,
+        h: crate::PlayerHandoff,
+    ) {
+        let now_ms = self.clock_ms;
+        if bundle.client.as_ref().map(|(c, _)| *c) != Some(h.client) {
+            log::error!("[server] host {from} handed player {} over with another client's body: dropped", h.player.0);
+            debug_assert!(false, "a hand-off whose body is not its client's");
+            return;
+        }
+        let c = h.client;
+        log::info!("[server] player {} (client {c}) handed over by host {from} into {target:?}", h.player.0);
+        self.departed.remove(&h.player);
+        let (fortress, adventure) = match h.claim {
+            Some(Claim::Fortress(s)) => (Some(s), None),
+            Some(Claim::Adventure(s)) => (None, Some(s)),
+            None => (None, None),
+        };
+        if h.park {
+            // `accept_arrival` parks it where it lands (`ParkPlayer` behind the arrival).
+            self.parking.insert(c, Parking { player: h.player, region: target, fortress, adventure });
+            self.accept_arrival(None, target, stamp, bundle, now_ms);
+            return;
+        }
+        self.player_of.insert(c, h.player);
+        if let Some(site) = fortress {
+            self.fortress_of.insert(c, site);
+        }
+        if let Some(site) = adventure {
+            self.adventurer_of.insert(c, site);
+        }
+        match self.sessions.get_mut(&c) {
+            Some(session) => session.kind = SessionKind::Home,
+            None => {
+                self.awaiting_session.insert(c, now_ms);
+            }
+        }
+        // Its home here, `PlayerRegion` to the client.
+        self.accept_arrival(None, target, stamp, bundle, now_ms);
+        self.world_player_online(c);
+    }
+
+    /// `client` subscribes to `rc`, which another host owns: told where to go, with a
+    /// ticket that host expects ([`Self::observer_ticket`]). Nothing while that host is
+    /// unreachable.
+    pub(super) fn subscribe_elsewhere(&mut self, client: ClientId, rc: RegionCoords) {
+        let owner = self.owner_of(rc);
+        if !self.reaches(rc) {
+            log::debug!("client {client}: {rc:?} is host {owner}'s, which is not reachable; subscribe dropped");
+            return;
+        }
+        let Some(endpoint) = self.peer_endpoints.get(&owner).cloned() else {
+            log::warn!("client {client}: {rc:?} is host {owner}'s, whose endpoint is not known; subscribe dropped");
+            return;
+        };
+        if self.sessions.get(&client).and_then(|s| s.player).is_none() {
+            log::warn!("client {client}: no player for its session; subscribe to {rc:?} dropped");
+            return;
+        }
+        let ticket = self.observer_ticket(client, owner, self.clock_ms);
+        let _ = self.out.send((Some(client), ServerPacket::RegionElsewhere { region: rc, endpoint, ticket }));
+    }
+
+    /// The ticket `client` presents to host `owner`: minted once (a fresh random nonce,
+    /// the owner told to expect it — [`Reliable::ObserverOrder`], valid for
+    /// [`OBSERVER_ORDER_TTL_SECS`]), handed out again while at least half its life is
+    /// left, then minted anew.
+    fn observer_ticket(&mut self, client: ClientId, owner: u32, now_ms: u64) -> crate::ObserverTicket {
+        let reuse_ms = OBSERVER_ORDER_TTL_SECS * 1000 / 2;
+        if let Some(&(nonce, minted)) = self.observer_tickets.get(&(client, owner)) {
+            if now_ms.saturating_sub(minted) < reuse_ms {
+                return crate::ObserverTicket { client, nonce };
+            }
+        }
+        let nonce = self.next_nonce();
+        self.observer_tickets.insert((client, owner), (nonce, now_ms));
+        match self.sessions.get(&client).and_then(|s| s.player) {
+            Some(player) => {
+                let expires_unix_secs = unix_now_secs() + OBSERVER_ORDER_TTL_SECS;
+                self.queue_to_peer(owner, Reliable::ObserverOrder { client, player, nonce, expires_unix_secs });
+            }
+            None => log::error!("client {client}: an observer ticket with no player; host {owner} is not told"),
+        }
+        crate::ObserverTicket { client, nonce }
+    }
+
+    /// splitmix64 over the seed [`Self::set_endpoints`] gave.
+    fn next_nonce(&mut self) -> u64 {
+        self.nonce_state = self.nonce_state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.nonce_state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+
     /// `msg` to host `ordinal`: on its session, or kept until it has one. Its id among
     /// everything queued to that host (`peer_entries`).
     pub(super) fn queue_to_peer(&mut self, ordinal: u32, msg: Reliable) -> u64 {
@@ -204,10 +441,9 @@ impl<S: RegionSpawner> WorldManager<S> {
         bundle: crate::EntityBundle,
         view: bool,
     ) {
-        // Unreachable for a player: the `Departures` arm hands every body that wakes its
-        // target (a player, a person without a history) back to its source when the target
-        // is foreign, before this is called — a player hand-off is Task 7.
-        debug_assert!(bundle.client.is_none(), "players do not cross hosts yet");
+        // Never a player: the `Departures` arm hands a player off (`hand_off_to_peer`) or
+        // back to its source, and a person without a history back to its source.
+        debug_assert!(bundle.client.is_none(), "a player crosses hosts by hand_off_to_peer");
         // Task 10: a person with a history crossing hosts (the receiving host's
         // `PersonCrossed`) has no seeded test yet — the rig gets a coordinator there.
         let owner = self.owner_of(target);
@@ -390,7 +626,19 @@ impl<S: RegionSpawner> WorldManager<S> {
                     self.send_to_region(to, RegionInput::Transfer(msg.into_event(), stamp));
                 }
             }
-            v @ Volatile::Input { .. } => log::trace!("[server] peer host {from}: {v:?} ignored"),
+            // An input the client sent to that host after its body left for this one.
+            Volatile::Input { client, kind, stamp } => {
+                if kind.input_client() != Some(client) {
+                    log::warn!("[server] peer host {from}: an input of another client as client {client}'s; dropped");
+                    return;
+                }
+                match self.homes.get(&client).copied().filter(|h| self.regions.contains_key(h)) {
+                    Some(home) => {
+                        self.send_to_region(home, RegionInput::EventAfterTick(kind, stamp));
+                    }
+                    None => log::debug!("[server] peer host {from}: input of client {client}, whose body is not here; dropped"),
+                }
+            }
         }
     }
 
@@ -398,6 +646,8 @@ impl<S: RegionSpawner> WorldManager<S> {
         match ev {
             PeerEvent::Up(hello) => {
                 log::info!("[server] peer host {from} up (boot {})", hello.boot);
+                // Where its clients connect (`RegionElsewhere`).
+                self.peer_endpoints.insert(from, hello.endpoint.clone());
                 // Every region (stopping ones too: their `RegionDown` follows) bordering
                 // that host; it asks each for the seeds of its own neighbours of them.
                 let running: Vec<RegionCoords> =
@@ -436,6 +686,18 @@ impl<S: RegionSpawner> WorldManager<S> {
                 let now_ms = self.clock_ms;
                 self.accept_arrival(None, target, stamp, *bundle, now_ms);
             }
+            Reliable::Transfer { target, stamp, bundle, player: Some(handoff) } => {
+                if !self.owns(target) {
+                    // Held here all the same (as a transfer without a player).
+                    log::error!("[server] host {from} handed a player into {target:?}, which this host does not own");
+                    debug_assert!(false, "an inbound hand-off into {target:?}, which this host does not own");
+                }
+                self.accept_handoff(from, target, stamp, *bundle, handoff);
+            }
+            // For the server edge, which admits the ticket (`take_observer_orders`).
+            Reliable::ObserverOrder { client, player, nonce, expires_unix_secs } => {
+                self.observer_orders.push((client, player, nonce, expires_unix_secs));
+            }
             // As if one of this host's regions had sent it (no cut has seen it here).
             Reliable::Intent(msg) => {
                 let target = peer_intent_target(&msg);
@@ -465,6 +727,24 @@ impl<S: RegionSpawner> WorldManager<S> {
                 log::error!("[server] peer host {from}: {} is not handled by this host yet: dropped", reliable_name(&other))
             }
         }
+    }
+}
+
+/// The claim a player's fortress / adventure is (it holds one at most).
+fn claim_of(fortress: Option<SiteId>, adventure: Option<SiteId>) -> Option<Claim> {
+    fortress.map(Claim::Fortress).or(adventure.map(Claim::Adventure))
+}
+
+/// Seconds since the Unix epoch: when an observer order expires at the edge, which
+/// compares it with its own wall clock. No wall clock on wasm (no peers there either): 0.
+fn unix_now_secs() -> u64 {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        0
     }
 }
 

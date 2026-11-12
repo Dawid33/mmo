@@ -147,6 +147,9 @@ pub struct Rig {
     /// `Some`: every event the regions processed since it was set, in output
     /// order — each region's authoritative stream, as a client replays it.
     pub events_seen: Option<Vec<(RegionCoords, GameEventKind)>>,
+    /// `Some`: every packet the manager sent since it was set, in order (region
+    /// snapshots aside).
+    pub packets_seen: Option<Vec<(Option<ClientId>, ServerPacket)>>,
 }
 
 impl Rig {
@@ -189,6 +192,7 @@ impl Rig {
             cut_missed: Vec::new(),
             intents_seen: Vec::new(),
             events_seen: None,
+            packets_seen: None,
         }
     }
 
@@ -231,13 +235,22 @@ impl Rig {
                 self.manager.handle_region_output(rc, out, self.now_ms);
             }
         }
-        for (_, packet) in self.packets.try_iter() {
-            match packet {
-                ServerPacket::PlayerRegion(home, CLIENT) => self.pushed_home = home,
+        for (to, packet) in self.packets.try_iter() {
+            let packet = match packet {
+                ServerPacket::PlayerRegion(home, client) => {
+                    if client == CLIENT {
+                        self.pushed_home = home;
+                    }
+                    ServerPacket::PlayerRegion(home, client)
+                }
                 ServerPacket::Region(rc, state) => {
                     self.snapshot_has_player.insert(rc, state.player_entites.contains_key(&CLIENT));
+                    continue;
                 }
-                _ => {}
+                other => other,
+            };
+            if let Some(seen) = self.packets_seen.as_mut() {
+                seen.push((to, packet));
             }
         }
     }

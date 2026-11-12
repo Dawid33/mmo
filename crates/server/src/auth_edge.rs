@@ -50,6 +50,8 @@ pub const REFUSE_JWT_ON_LOCAL_HOST: &str =
     "this server does not use login (single-player / dev)";
 /// The refusal a `jwt` host gives a player name.
 pub const REFUSE_LOCAL_ON_JWT_HOST: &str = "this server requires login";
+/// An observer ticket ([`Credential::Observer`]): not admitted by this edge yet.
+pub const REFUSE_OBSERVER: &str = "observer sessions are not served by this host";
 /// The refusal of a ticket older than one this host already admitted.
 pub const REFUSE_SUPERSEDED: &str = "superseded by a newer login";
 /// The refusal of a ticket over [`game::MAX_JWT_BYTES`].
@@ -384,6 +386,8 @@ impl Authenticator {
             (AuthMode::Local, Credential::Jwt(_)) => Err(REFUSE_JWT_ON_LOCAL_HOST.into()),
             (AuthMode::Jwt { .. }, Credential::Local(_)) => Err(REFUSE_LOCAL_ON_JWT_HOST.into()),
             (AuthMode::Jwt { world, .. }, Credential::Jwt(jwt)) => self.check_jwt(world, &jwt).await,
+            // Observer sessions (another host's redirect) are admitted from Task 16 on.
+            (_, Credential::Observer { .. }) => Err(REFUSE_OBSERVER.into()),
         }
     }
 
