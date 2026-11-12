@@ -854,7 +854,7 @@ smoke:
     }
     step {{cargo}} test -q -p game --test it -- simple:: region_runner::
     step {{cargo}} test -q -p server --lib
-    step {{cargo}} check -q -p server --tests
+    step {{cargo}} check -q -p server --tests --features test-hooks
     step {{cargo}} check -q -p client --lib --bins --tests
     echo ">> smoke ok in $(( $(date +%s) - deadline + {{smoke_timeout}} ))s"
 
@@ -1103,7 +1103,7 @@ test-login-pg *args:
 # The split-roles end-to-end tests (crates/server/tests/roles.rs, all slow): a coordinator
 # and a host over a real service link on localhost, against the dev Postgres (`pg-up`).
 test-r2:
-    MMO_TEST_DATABASE_URL=postgres://mmo:mmo@127.0.0.1:55432/postgres just test-one server "--test roles -- --include-ignored"
+    MMO_TEST_DATABASE_URL=postgres://mmo:mmo@127.0.0.1:55432/postgres just test-one server "--features test-hooks --test roles -- --include-ignored"
 
 # Region threading: a player walking across the seam between two regions that
 # run on different threads. Two layers, both tagged slow (so smoke / test-one /
@@ -1305,7 +1305,7 @@ test-client:
 # Server suite compile-check: every server test is currently tagged slow
 # (multi-second region-thread rigs), so the quick run builds them and runs 0.
 test-server:
-    {{cap}} {{cargo}} test -p server
+    {{cap}} {{cargo}} test -p server --features test-hooks
 
 # Worldgen suite: pure-function generation, the forge, forged worlds, the tile map.
 test-worldgen:
@@ -1317,7 +1317,7 @@ test-worldgen:
 test-full:
     {{cap}} {{cargo}} test -p game -- --include-ignored --test-threads={{test_threads}} --skip perf_evidence_journal_scales_with_activity --skip perf_evidence_hash_modes
     {{cap}} {{cargo}} test -p client -- --include-ignored --test-threads={{test_threads}} --skip region_tick_cost_fits_keepup_budget --skip soak_realtime_keepup
-    {{cap}} {{cargo}} test -p server -- --include-ignored --test-threads={{test_threads}}
+    {{cap}} {{cargo}} test -p server --features test-hooks -- --include-ignored --test-threads={{test_threads}}
     {{cap}} {{cargo}} test -p worldgen -- --include-ignored --test-threads={{test_threads}} --skip region_load_cost
 
 # Keep-up budget benchmark (release): measures the region-tick cost and

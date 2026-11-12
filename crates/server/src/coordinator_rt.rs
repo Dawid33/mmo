@@ -418,14 +418,17 @@ enum Stop {
 }
 
 /// A look at the running core ([`CoordinatorThread::inspect`]).
+#[cfg(feature = "test-hooks")]
 type Inspect = Box<dyn FnOnce(&mut Coordinator) + Send>;
 
 /// The running coordinator thread.
 pub struct CoordinatorThread {
     join: std::thread::JoinHandle<ServerExit>,
     stop: Sender<Stop>,
+    #[cfg(feature = "test-hooks")]
     inspect: Sender<Inspect>,
     /// [`CoordinatorThread::crash_before_claim_reply`] is armed.
+    #[cfg(feature = "test-hooks")]
     crash_before_claim_reply: Arc<AtomicBool>,
 }
 
@@ -457,6 +460,7 @@ impl CoordinatorThread {
     /// claim-granting reply commits, before that reply (or anything released with it)
     /// leaves; the thread ends [`ServerExit::CoordinatorFailed`]. Wait for it with [`Self::is_finished`].
     #[doc(hidden)]
+    #[cfg(feature = "test-hooks")]
     pub fn crash_before_claim_reply(&self) {
         self.crash_before_claim_reply.store(true, Ordering::SeqCst);
     }
@@ -464,6 +468,7 @@ impl CoordinatorThread {
     /// Test hook: `f` of the core as it stands after the host messages handled so far;
     /// `None` if the thread does not answer within `timeout` (stopped).
     #[doc(hidden)]
+    #[cfg(feature = "test-hooks")]
     pub fn inspect<R: Send + 'static>(
         &self,
         f: impl FnOnce(&Coordinator) -> R + Send + 'static,
@@ -476,6 +481,7 @@ impl CoordinatorThread {
     /// `history_mut`); what it decides goes out as the core's own decisions do (gated
     /// directives after their save). `None` if the thread does not answer within `timeout`.
     #[doc(hidden)]
+    #[cfg(feature = "test-hooks")]
     pub fn with_core<R: Send + 'static>(
         &self,
         f: impl FnOnce(&mut Coordinator) -> R + Send + 'static,
@@ -561,6 +567,7 @@ pub struct CoordinatorRuntime {
     links: LinkSet,
     fenced: Fenced,
     /// Test hook ([`CoordinatorThread::crash_before_claim_reply`]).
+    #[cfg(feature = "test-hooks")]
     crash_before_claim_reply: Arc<AtomicBool>,
     /// The core's `now_ms` 0 (its calendar was anchored there).
     started: Instant,
@@ -579,7 +586,9 @@ impl CoordinatorRuntime {
         fenced: Fenced,
     ) -> CoordinatorThread {
         let (stop_tx, stop_rx) = crossbeam::channel::bounded(1);
+        #[cfg(feature = "test-hooks")]
         let (inspect_tx, inspect_rx) = crossbeam::channel::unbounded();
+        #[cfg(feature = "test-hooks")]
         let crash_before_claim_reply = Arc::new(AtomicBool::new(false));
         let fence = start.fence;
         let mut core = start.coordinator;
@@ -593,6 +602,7 @@ impl CoordinatorRuntime {
             pending_save: None,
             links,
             fenced,
+            #[cfg(feature = "test-hooks")]
             crash_before_claim_reply: crash_before_claim_reply.clone(),
             started: Instant::now(),
             retry_at_ms: 0,
@@ -600,18 +610,35 @@ impl CoordinatorRuntime {
         };
         let join = std::thread::Builder::new()
             .name("coordinator".into())
-            .spawn(move || runtime.run(stop_rx, inspect_rx))
+            .spawn(move || {
+                runtime.run(
+                    stop_rx,
+                    #[cfg(feature = "test-hooks")]
+                    inspect_rx,
+                )
+            })
             .expect("spawn the coordinator thread");
-        CoordinatorThread { join, stop: stop_tx, inspect: inspect_tx, crash_before_claim_reply }
+        CoordinatorThread {
+            join,
+            stop: stop_tx,
+            #[cfg(feature = "test-hooks")]
+            inspect: inspect_tx,
+            #[cfg(feature = "test-hooks")]
+            crash_before_claim_reply,
+        }
     }
 
     fn now_ms(&self) -> u64 {
         self.started.elapsed().as_millis() as u64
     }
 
-    fn run(mut self, stop: Receiver<Stop>, inspect: Receiver<Inspect>) -> ServerExit {
+    fn run(mut self, stop: Receiver<Stop>, #[cfg(feature = "test-hooks")] inspect: Receiver<Inspect>) -> ServerExit {
         loop {
-            self.wait(&stop, &inspect);
+            self.wait(
+                &stop,
+                #[cfg(feature = "test-hooks")]
+                &inspect,
+            );
             // The stop is read before the hosts are drained: whatever a host sent
             // before asking to stop is already queued and is handled below.
             let stopping = match stop.try_recv() {
@@ -628,6 +655,7 @@ impl CoordinatorRuntime {
             };
             let now = self.now_ms();
             self.drain_hosts(now);
+            #[cfg(feature = "test-hooks")]
             for f in inspect.try_iter() {
                 f(&mut self.core);
             }
@@ -636,6 +664,7 @@ impl CoordinatorRuntime {
                 return self.fence_out();
             }
             let out = self.core.take_out();
+            #[cfg(feature = "test-hooks")]
             if self.crash_before_claim_reply.load(Ordering::SeqCst)
                 && out.iter().any(|m| matches!(m, CoordMsg::Reply { reply, .. } if reply.grants_claim()))
             {
@@ -653,9 +682,10 @@ impl CoordinatorRuntime {
 
     /// Block until a host message, the save's answer or a stop arrives, at most
     /// [`COORDINATOR_TICK_MS`]. Nothing is taken off the channels here.
-    fn wait(&self, stop: &Receiver<Stop>, inspect: &Receiver<Inspect>) {
+    fn wait(&self, stop: &Receiver<Stop>, #[cfg(feature = "test-hooks")] inspect: &Receiver<Inspect>) {
         let mut sel = Select::new();
         sel.recv(stop);
+        #[cfg(feature = "test-hooks")]
         sel.recv(inspect);
         match &self.links.links {
             Links::Channels(hosts) => {
