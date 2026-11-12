@@ -105,7 +105,7 @@ pub struct OnlinePlayer {
 /// placement count on hosts within the world generation: a hand-off or move to another
 /// host places it at the sender's hop + 1 ([`crate::PlayerHandoff::hop`]), a login at
 /// one more than the host knows of it (raised by [`CoordMsg::HopIs`] when the
-/// coordinator knows a higher one). Messages of different hosts may arrive in any order;
+/// coordinator knows a higher one, or another host's message displaced it). Messages of different hosts may arrive in any order;
 /// the coordinator orders them by hop and ignores one lower than the player's latest.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub enum HostMsg {
@@ -221,11 +221,15 @@ pub enum CoordMsg {
     /// `SpawnPeople` / `Directive` after this was decided from it; the host drops those
     /// that came before (the attach re-decided their regions from the bodies listed).
     Attached { epoch: u64 },
-    /// The host reported `player` (`PlayerOnline`, an `Attach`'s online entry) at hop
-    /// `reported`, lower than `hop`, the highest the coordinator knows: ignored as stale.
-    /// If the player's current placement on the host is that very one (a login that
-    /// could not know the player's hops elsewhere), the host numbers it `hop + 1` and
-    /// reports it again.
+    /// The host's report of `player` at hop `reported` (`PlayerOnline`, an `Attach`'s
+    /// online entry) was ignored as stale — below `hop`, the highest the coordinator
+    /// knows, or at it from another host — or another host's message at `hop` moved the
+    /// player off this host (sent once per reported hop). If the player's current
+    /// placement on the host is that very one (a login that could not know the player's
+    /// hops elsewhere, or one that lost the race against an older placement's messages in
+    /// flight), the host numbers it `hop + 1` and reports it again: the newest reporter
+    /// wins, as the newest session does, and a real holder re-asserts itself once. A host
+    /// renumbers one player at most `HOP_RENUMBER_MAX_PER_PLAYER` times.
     HopIs { player: PlayerId, reported: u64, hop: u64 },
 }
 

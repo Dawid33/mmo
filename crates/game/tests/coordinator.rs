@@ -214,7 +214,7 @@ fn return_in_use_only_while_online() {
     assert_eq!(c.claim_of(B), Some(Claim::Fortress(site)));
     assert_eq!(c.claim_of(A), None, "the offline claimant lost it");
     // A comes back holding the old claim in its record: it is B's now.
-    c.handle(0, online(A, Some(Claim::Fortress(site)), false), 0);
+    c.handle(0, online_at(A, Some(Claim::Fortress(site)), false, 2), 0);
     assert_eq!(c.claim_of(A), None);
     assert!(
         c.take_msgs().iter().any(|m| matches!(m, CoordMsg::ClaimIs { player: A, claim: None, .. })),
@@ -973,7 +973,8 @@ fn handed_player_stays_online_until_the_new_host_reports() {
 
 /// A `PlayerHandedTo` at the player's latest hop from a host the player is not online
 /// on (a stale or a stray message) changes nothing; nor does one for a player online
-/// nowhere.
+/// nowhere. Only the equal-hop stray: one at a higher hop is taken as the end of a
+/// placement on its sender not heard yet (only a holder hands a player off).
 #[test]
 fn handed_to_from_a_host_that_does_not_have_the_player_is_ignored() {
     let (mut c, civ, people) = coordinator();
@@ -1224,12 +1225,18 @@ fn every_arrival_order_of_a_round_trip_converges() {
             let (mut c, site, _) = a_embarked_on_host_a();
             let (a, b) = round_trip(site, disconnect);
             let (mut a, mut b) = (a.into_iter(), b.into_iter());
+            let mut hop_is = 0;
             for slot in 0..n {
                 if mask & (1 << slot) != 0 {
                     c.handle(HOST_B, b.next().unwrap(), 0);
                 } else {
                     c.handle(HOST_A, a.next().unwrap(), 0);
                 }
+                hop_is += c.take_out().iter().filter(|(_, m)| matches!(m, CoordMsg::HopIs { .. })).count();
+            }
+            // In order: A online, hands to B; B online, hands back; A online (… offline).
+            if mask == 0b1100 {
+                assert_eq!(hop_is, 0, "disconnect {disconnect}: the in-order run tells nobody anything");
             }
             let want_on = if disconnect { None } else { Some(HOST_A) };
             assert_eq!(c.online_on(A), want_on, "disconnect {disconnect}, order {mask:b}");
@@ -1351,4 +1358,149 @@ fn higher_generation_attach_resets_hops() {
     assert_eq!((c.online_on(A), c.hop_of(A)), (Some(HOST_B), 1), "a newer generation: hops start over");
     c.handle(HOST_A, attach_gen(HOST_A, 1, 1, Vec::new()), 0);
     assert_eq!((c.online_on(A), c.hop_of(A)), (Some(HOST_B), 1), "a second attach of it keeps them");
+}
+
+// ---- Fix round 1: a displaced host is told (R3 Task 11) ------------------------------
+
+const HOST_G: u32 = 2;
+const HOST_H: u32 = 3;
+
+/// One run of the login race, driven by `choices` (0: deliver G's next in-flight
+/// message, 1: deliver H's next message, 2: deliver the coordinator's next message to
+/// H). Returns the choices enabled at the end of the prefix (empty: the run is over),
+/// and the coordinator.
+///
+/// P's last placement the coordinator knows is on G at hop 3, ended. G's later
+/// placements (`g_flight`, hops above 3) are still on G's link. P logs in on H, which
+/// knows nothing of it (hop 1) and answers every `HopIs` of its current placement by
+/// renumbering above it and reporting again.
+fn login_race(choices: &[u8], g_flight: &[HostMsg]) -> (Vec<u8>, Coordinator, SiteId) {
+    let (mut c, civ, people) = coordinator();
+    c.handle(HOST_G, embark(1, A, civ, &people[0..2], rc(8, 0)), 0);
+    let WorldReply::Embarked { site, .. } = reply_to(&commit(&mut c), 1) else { panic!("embarks") };
+    let fortress = Some(Claim::Fortress(site));
+    c.handle(HOST_G, online_at(A, fortress, false, 3), 0);
+    c.handle(HOST_G, HostMsg::PlayerOffline { player: A, hop: 3 }, 0);
+    commit_routed(&mut c);
+    let mut g: std::collections::VecDeque<HostMsg> = g_flight.iter().cloned().collect();
+    let mut h_hop = 1;
+    let mut h_out = std::collections::VecDeque::from([online_at(A, fortress, false, h_hop)]);
+    let mut h_in: std::collections::VecDeque<CoordMsg> = Default::default();
+    let mut route = |c: &mut Coordinator, h_in: &mut std::collections::VecDeque<CoordMsg>| {
+        for (to, m) in commit_routed(c) {
+            if to == Target::Host(HOST_H) && matches!(m, CoordMsg::HopIs { player: A, .. }) {
+                h_in.push_back(m);
+            }
+        }
+    };
+    for &choice in choices {
+        match choice {
+            0 => c.handle(HOST_G, g.pop_front().unwrap(), 0),
+            1 => c.handle(HOST_H, h_out.pop_front().unwrap(), 0),
+            _ => {
+                if let Some(CoordMsg::HopIs { reported, hop, .. }) = h_in.pop_front() {
+                    if reported == h_hop {
+                        h_hop = hop + 1;
+                        h_out.push_back(online_at(A, fortress, false, h_hop));
+                    }
+                }
+            }
+        }
+        route(&mut c, &mut h_in);
+    }
+    let enabled = [(0, !g.is_empty()), (1, !h_out.is_empty()), (2, !h_in.is_empty())]
+        .into_iter()
+        .filter(|(_, on)| *on)
+        .map(|(ch, _)| ch)
+        .collect();
+    (enabled, c, site)
+}
+
+/// Every arrival order (each host's own order kept, `HopIs` round trips causal) of G's
+/// in-flight placements and H's login ends with P online on H — the host that holds it —
+/// and another player's return to P's fortress refused. With G's in-flight placements at
+/// hop 4, and at hops 5 and 6 (several in flight: H's first renumbering lands below them).
+#[test]
+fn login_racing_an_older_placements_messages_ends_online_on_the_login_host() {
+    let placements = |hops: &[u64]| -> Vec<HostMsg> {
+        hops.iter()
+            .flat_map(|&hop| {
+                // The fortress claim does not matter to the order: report none.
+                [online_at(A, None, false, hop), HostMsg::PlayerOffline { player: A, hop }]
+            })
+            .collect()
+    };
+    for g_flight in [placements(&[4]), placements(&[5, 6])] {
+        let mut stack: Vec<Vec<u8>> = vec![Vec::new()];
+        let mut runs = 0;
+        while let Some(prefix) = stack.pop() {
+            let (enabled, mut c, site) = login_race(&prefix, &g_flight);
+            if enabled.is_empty() {
+                runs += 1;
+                assert_eq!(c.online_on(A), Some(HOST_H), "order {prefix:?}: online on H");
+                assert!(!returnable(&mut c, site, 10), "order {prefix:?}: the fortress stays in use");
+                continue;
+            }
+            for ch in enabled {
+                let mut next = prefix.clone();
+                next.push(ch);
+                stack.push(next);
+            }
+        }
+        assert!(runs > 1, "{runs} orders");
+    }
+}
+
+/// An `Online` at the known hop from a host other than the one the player is online on
+/// is stale (two hosts are never online at one hop): ignored, answered `HopIs`. The same
+/// report from the host it is online on (a re-report) is applied.
+#[test]
+fn equal_hop_online_from_another_host_is_stale() {
+    let (mut c, site, _) = a_online_on_host_a();
+    commit_routed(&mut c);
+    let fortress = Some(Claim::Fortress(site));
+    c.handle(HOST_B, online_at(A, fortress, false, 1), 0);
+    assert_eq!(c.online_on(A), Some(HOST_A));
+    let out = commit_routed(&mut c);
+    assert!(
+        out.iter().any(|(t, m)| *t == Target::Host(HOST_B) && matches!(m, CoordMsg::HopIs { player: A, reported: 1, hop: 1 })),
+        "{out:?}"
+    );
+    c.handle(HOST_A, online_at(A, fortress, false, 1), 0);
+    assert_eq!(c.online_on(A), Some(HOST_A));
+    assert!(!commit_routed(&mut c).iter().any(|(_, m)| matches!(m, CoordMsg::HopIs { .. })), "a re-report is fine");
+}
+
+/// Two hosts that both hold P (a duplicate body) and answer every `HopIs` of their
+/// placement by renumbering and reporting again: each displaces the other, but a host
+/// renumbers one player at most `HOP_RENUMBER_MAX_PER_PLAYER` times — the exchange
+/// stops, with one error logged, and P ends online on one of them.
+#[test]
+fn two_holders_do_not_ping_pong_for_ever() {
+    let (mut c, site, _) = a_embarked_on_host_a();
+    commit_routed(&mut c);
+    let fortress = Some(Claim::Fortress(site));
+    let hosts = [HOST_G, HOST_H];
+    let mut hop = [1u64, 1];
+    let mut budget = [RenumberBudget::default(), RenumberBudget::default()];
+    let mut inbox: std::collections::VecDeque<(usize, HostMsg)> =
+        hosts.iter().enumerate().map(|(i, _)| (i, online_at(A, fortress, false, 1))).collect();
+    let mut steps = 0;
+    while let Some((i, m)) = inbox.pop_front() {
+        steps += 1;
+        assert!(steps < 100, "the exchange does not stop");
+        c.handle(hosts[i], m, 0);
+        for (to, m) in commit_routed(&mut c) {
+            let CoordMsg::HopIs { player: A, reported, hop: known } = m else { continue };
+            let j = hosts.iter().position(|h| Target::Host(*h) == to).expect("one of the two");
+            if reported == hop[j] && budget[j].take(A) {
+                hop[j] = known + 1;
+                inbox.push_back((j, online_at(A, fortress, false, hop[j])));
+            }
+        }
+    }
+    let errors: u32 = budget.iter().map(|b| b.errors_logged()).sum();
+    assert_eq!(errors, 1, "one host ran out, once");
+    assert!(hosts.iter().any(|h| c.online_on(A) == Some(*h)), "online on one of them");
+    assert_eq!(c.hop_of(A), hop.iter().copied().max().unwrap());
 }

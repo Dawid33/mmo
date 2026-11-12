@@ -767,7 +767,16 @@ pub struct WorldManager<S: RegionSpawner> {
     /// every `Attach` (their `PlayerHandedTo` may have been lost with the connection);
     /// dropped by the echo of an attach that carried them, or when the player is placed
     /// here again.
+    ///
+    /// Not pruned on the peer's acknowledgement: an `Attached` echo comes only with an
+    /// `Attach`, so "acknowledged, then echoed" prunes no sooner than this. The cost is
+    /// that an `Attach` to a restarted coordinator (its hops lost) can replay a hand-over
+    /// already confirmed: the player then counts in transit to `to` — denial only (another
+    /// player's return to its fortress is refused) — until `to` attaches without it or the
+    /// player's next report (higher hop) anywhere.
     handed: BTreeMap<PlayerId, (u32, u64, u64)>,
+    /// Renumberings on `CoordMsg::HopIs` per player (this process: one world generation).
+    hop_renumbers: crate::coordinator::RenumberBudget,
     /// Requests and claim messages made while the link is down (or the `Attach` is being
     /// gathered), in order: sent right after the `Attach`.
     outbox: VecDeque<HostMsg>,
@@ -1032,6 +1041,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             claim_reported: BTreeMap::new(),
             player_hop: BTreeMap::new(),
             handed: BTreeMap::new(),
+            hop_renumbers: Default::default(),
             outbox: VecDeque::new(),
             world_request_timeout_ms: WORLD_REQUEST_TIMEOUT_SECS * 1000,
             world_counters: WorldLinkCounters::default(),

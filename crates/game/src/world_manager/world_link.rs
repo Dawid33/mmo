@@ -661,11 +661,15 @@ impl<S: RegionSpawner> WorldManager<S> {
     }
 
     /// The coordinator ignored a report of `player` at hop `reported` because it knows
-    /// `hop`, a higher one. If that report is of the player's current placement here (a
-    /// login, which could not know the player's hops elsewhere), the placement is numbered
-    /// `hop + 1` and reported again: it is the newest (the player is here), so every
-    /// placement the coordinator knows of is older. Otherwise the report was of an older
-    /// placement here: nothing to do.
+    /// `hop` (higher, or the same from another host), or another host's message at `hop`
+    /// moved the player off this host. If `reported` is the player's current placement
+    /// here (a login, which could not know the player's hops elsewhere; or a placement
+    /// that lost the race against an older placement's messages still in flight), the
+    /// placement is numbered `hop + 1` and reported again: the newest reporter wins, as the
+    /// newest session does, and this lets a real holder re-assert itself. Otherwise the
+    /// report was of an older placement here: nothing to do. At most
+    /// [`crate::coordinator::HOP_RENUMBER_MAX_PER_PLAYER`] times per player
+    /// (`hop_renumbers`): two hosts that both hold it (a duplicate) stop outbidding.
     fn hop_is(&mut self, player: PlayerId, reported: u64, hop: u64) {
         let clients: Vec<ClientId> = self
             .player_of
@@ -675,6 +679,9 @@ impl<S: RegionSpawner> WorldManager<S> {
             .collect();
         if self.hop_here(player) != reported || clients.is_empty() {
             log::debug!("{player:?}: hop {hop} known to the coordinator; the report at {reported} was of an older placement");
+            return;
+        }
+        if !self.hop_renumbers.take(player) {
             return;
         }
         log::info!("{player:?}: placed here at hop {reported}, the coordinator knows {hop}: numbered {} and reported again", hop + 1);

@@ -40,6 +40,44 @@ use crate::{EmbarkRequest, PlayerId, RegionCoords};
 pub const ANSWERED_MEMO_MAX: usize = 4096;
 /// Seconds between two errors about a memo over [`ANSWERED_MEMO_MAX`].
 pub const MEMO_WARN_SECS: u64 = 60;
+/// Most times one host renumbers one player's placement on a [`CoordMsg::HopIs`] within a
+/// world generation (its process): two hosts that both hold the player (a duplicate body)
+/// would otherwise outbid each other for ever. Past it the host logs an error once and
+/// stops renumbering that player.
+pub const HOP_RENUMBER_MAX_PER_PLAYER: u32 = 8;
+
+/// A host's count of [`CoordMsg::HopIs`] renumberings per player
+/// ([`HOP_RENUMBER_MAX_PER_PLAYER`]).
+#[derive(Debug, Default)]
+pub struct RenumberBudget {
+    used: BTreeMap<PlayerId, u32>,
+    errors: u32,
+}
+
+impl RenumberBudget {
+    /// Whether `player` may be renumbered once more (counted if so). The first refusal
+    /// logs an error.
+    pub fn take(&mut self, player: PlayerId) -> bool {
+        let n = self.used.entry(player).or_default();
+        if *n < HOP_RENUMBER_MAX_PER_PLAYER {
+            *n += 1;
+            return true;
+        }
+        if *n == HOP_RENUMBER_MAX_PER_PLAYER {
+            *n += 1;
+            self.errors += 1;
+            log::error!(
+                "{player:?}: renumbered {HOP_RENUMBER_MAX_PER_PLAYER} times; another host holds it too — no more renumbering"
+            );
+        }
+        false
+    }
+
+    /// Errors logged (players whose budget ran out).
+    pub fn errors_logged(&self) -> u32 {
+        self.errors
+    }
+}
 /// Seconds between periodic saves of a coordinator whose state changed.
 pub const COORDINATOR_SAVE_SECS: u64 = 60;
 
@@ -89,6 +127,14 @@ pub struct Coordinator {
     hop_of: BTreeMap<PlayerId, u64>,
     /// The highest world generation an `Attach` named.
     generation_seen: u64,
+    /// For a player online on a host by that host's own report (not in transit to it):
+    /// the host and the hop it reported. A message of another host that moves the player
+    /// away from it tells it ([`CoordMsg::HopIs`]): if it still holds the player it
+    /// re-asserts above the new hop. Never saved.
+    online_reported: BTreeMap<PlayerId, (u32, u64)>,
+    /// Displaced-host notifications sent, `(player, host, reported hop)`: at most one each.
+    /// A player's go when it goes offline on its host; all go at a newer generation.
+    displaced_told: BTreeSet<(PlayerId, u32, u64)>,
     /// `Some(n)`: a save was taken ([`Self::take_save`]) holding the state behind the
     /// first `n` messages of `gated`; [`Self::saved`] releases them.
     save_in_flight: Option<usize>,
@@ -130,6 +176,8 @@ impl Coordinator {
             online_on: BTreeMap::new(),
             hop_of: BTreeMap::new(),
             generation_seen: 0,
+            online_reported: BTreeMap::new(),
+            displaced_told: BTreeSet::new(),
             save_in_flight: None,
             dirty_since_save: false,
             force_save: false,
@@ -213,6 +261,8 @@ impl Coordinator {
                     }
                     self.generation_seen = generation;
                     self.hop_of.clear();
+                    self.online_reported.clear();
+                    self.displaced_told.clear();
                 }
                 self.forget_settled(host, boot, settled_below, true);
                 self.attach(host, epoch, running, online, handed)
@@ -545,6 +595,8 @@ impl Coordinator {
             .collect();
         for p in gone {
             self.online_on.remove(&p);
+            self.online_reported.remove(&p);
+            self.displaced_told.retain(|(q, _, _)| *q != p);
             self.set_online(p, false);
         }
         self.push_view(Target::Host(host));
@@ -566,13 +618,18 @@ impl Coordinator {
     fn player_online(&mut self, host: u32, report: OnlinePlayer) {
         let OnlinePlayer { player, claim, claim_pending, report, hop } = report;
         let known = self.hop_of(player);
-        if hop < known {
-            log::debug!("coordinator: {player:?} online on host {host} at hop {hop} ignored (hop {known} known)");
+        let on = self.online_on.get(&player).copied();
+        // Two hosts are never online at one hop: at the known hop only the host the
+        // player is online on (a re-report, or the grant's host) counts.
+        if hop < known || (hop == known && on != Some(host)) {
+            log::debug!("coordinator: {player:?} online on host {host} at hop {hop} ignored (hop {known}, online on {on:?})");
             self.push(Target::Host(host), CoordMsg::HopIs { player, reported: hop, hop: known });
             return;
         }
+        self.displace(player, host, hop);
         self.hop_of.insert(player, hop);
         self.online_on.insert(player, host);
+        self.online_reported.insert(player, (host, hop));
         let mine = self.player_claims.get(&player).copied();
         match (mine, claim) {
             (Some(mine), Some(theirs)) if mine == theirs => {}
@@ -609,9 +666,32 @@ impl Coordinator {
             log::debug!("coordinator: {player:?} offline on host {host} at hop {hop} ignored (hop {known}, online on {on:?})");
             return;
         }
+        if on == Some(host) {
+            self.displaced_told.retain(|(q, _, _)| *q != player);
+        } else {
+            self.displace(player, host, hop);
+        }
         self.hop_of.insert(player, hop);
         self.online_on.remove(&player);
+        self.online_reported.remove(&player);
         self.set_online(player, false);
+    }
+
+    /// A message of `by` at `hop` (above the known one) moves `player` away from the host
+    /// it was online on by that host's own report: that host is told
+    /// ([`CoordMsg::HopIs`]), once per reported hop. In a real hand-over it no longer holds
+    /// the player and ignores it; if it does hold it (its placement lost the race against
+    /// an older placement's messages in flight, or a duplicate) it renumbers above `hop`
+    /// and reports again — the newest reporter wins, as the newest session does.
+    fn displace(&mut self, player: PlayerId, by: u32, hop: u64) {
+        let Some(&(host, reported)) = self.online_reported.get(&player) else { return };
+        if host == by || self.online_on.get(&player) != Some(&host) {
+            return;
+        }
+        if self.displaced_told.insert((player, host, reported)) {
+            log::debug!("coordinator: {player:?} moved off host {host} (hop {reported}) by host {by} at hop {hop}: told");
+            self.push(Target::Host(host), CoordMsg::HopIs { player, reported, hop });
+        }
     }
 
     /// `host` handed `player`, placed there at `hop`, to host `to`: in transit — online on
@@ -625,8 +705,12 @@ impl Coordinator {
             log::debug!("coordinator: {player:?} handed by host {host} to {to} at hop {hop} ignored (hop {known}, online on {on:?})");
             return;
         }
+        if on != Some(host) {
+            self.displace(player, host, hop);
+        }
         self.hop_of.insert(player, hop);
         self.online_on.insert(player, to);
+        self.online_reported.remove(&player);
         self.set_online(player, true);
     }
 
@@ -721,6 +805,9 @@ impl Coordinator {
         if granted {
             // The player plays it on the host that asked.
             self.online_on.insert(player, host);
+            if self.online_reported.get(&player).is_some_and(|(h, _)| *h != host) {
+                self.online_reported.remove(&player);
+            }
         }
         self.push(Target::Host(host), CoordMsg::Reply { id, reply });
         if granted {

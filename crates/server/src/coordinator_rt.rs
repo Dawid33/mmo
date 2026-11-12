@@ -269,6 +269,9 @@ struct Routes {
     live: BTreeMap<u32, (PeerId, u64)>,
     /// `Attach`es handled whose echo has not been routed yet: (connection, epoch), in order.
     attaches: VecDeque<(PeerId, u64)>,
+    /// The process boot each host peer's hello named: its `Attach` names the same one
+    /// (a mismatch is only logged).
+    boots: BTreeMap<PeerId, u64>,
 }
 
 /// What [`Routes::admit`] decided.
@@ -344,6 +347,7 @@ impl Routes {
     /// `peer`'s connection ended.
     fn gone(&mut self, peer: PeerId) -> Option<u32> {
         self.refused.remove(&peer);
+        self.boots.remove(&peer);
         let ordinal = self.hosts.remove(&peer)?;
         if self.live.get(&ordinal).is_some_and(|(p, _)| *p == peer) {
             self.live.remove(&ordinal);
@@ -744,6 +748,7 @@ impl CoordinatorRuntime {
                                         "[coordinator] host {ordinal} connected (peer {}, boot {boot:#x}, claim epoch {epoch})",
                                         peer.0
                                     );
+                                    l.routes.boots.insert(peer, boot);
                                     if let Some(old) = replaced {
                                         l.senders.close(old);
                                     }
@@ -759,7 +764,14 @@ impl CoordinatorRuntime {
                         },
                         LinkEvent::Msg(msg) => match l.routes.hosts.get(&peer).copied() {
                             Some(ordinal) => {
-                                if let HostMsg::Attach { generation, .. } = &msg {
+                                if let HostMsg::Attach { generation, boot, .. } = &msg {
+                                    let hello = l.routes.boots.get(&peer).copied();
+                                    if hello.is_some_and(|b| b != *boot) {
+                                        log::warn!(
+                                            "[coordinator] host {ordinal}'s Attach names boot {boot:#x}, its hello {:#x}",
+                                            hello.unwrap_or_default()
+                                        );
+                                    }
                                     if !generation_current(&self.store, ordinal, *generation) {
                                         l.routes.refuse(peer);
                                         l.senders.close(peer);

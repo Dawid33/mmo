@@ -2736,6 +2736,9 @@ fn claim_kept_while_crossing(rig: &mut MultiRig) {
     assert_eq!(rig.core().online_on(P_PLAYER), Some(hb));
     assert_eq!(rig.hosts[hb as usize].manager.client_claim(P_CLIENT), Some(game::Claim::Fortress(site)));
     assert_eq!(rig.core().claim_of(P2_PLAYER), None);
+    if rig.lockstep && rig.link_delay == 0 {
+        assert_eq!(rig.hop_is_received(), 0, "in order, a real hand-over tells nobody anything");
+    }
 }
 
 #[test]

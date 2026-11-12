@@ -36,6 +36,8 @@ pub struct RigWorldLink {
     /// Test hook ([`MultiRig::hold_world`]): while set, nothing is read (the
     /// coordinator's messages wait on the link, in order); sending goes on.
     hold: Arc<std::sync::atomic::AtomicBool>,
+    /// `HopIs` messages the host read ([`MultiRig::hop_is_received`]).
+    hop_is: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl game::WorldLink for RigWorldLink {
@@ -49,7 +51,11 @@ impl game::WorldLink for RigWorldLink {
         if self.hold.load(std::sync::atomic::Ordering::SeqCst) {
             return None;
         }
-        self.inner.recv()
+        let msg = self.inner.recv();
+        if matches!(msg, Some(game::CoordMsg::HopIs { .. })) {
+            self.hop_is.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        msg
     }
     fn is_up(&self) -> bool {
         self.inner.is_up()
@@ -193,6 +199,10 @@ pub struct MultiRig {
     pub world_sent: Vec<Arc<Mutex<Vec<game::HostMsg>>>>,
     /// Each host's [`RigWorldLink`] hold flag.
     pub world_hold: Vec<Arc<std::sync::atomic::AtomicBool>>,
+    /// Each host's count of `HopIs` read ([`RigWorldLink`]).
+    pub world_hop_is: Vec<Arc<std::sync::atomic::AtomicUsize>>,
+    /// Made without a spawner schedule (every region ticks in lockstep).
+    pub lockstep: bool,
 }
 
 /// Host `h`'s endpoint in the rig (what its sessions' first packet names).
@@ -256,6 +266,8 @@ impl MultiRig {
                 coordinator: None,
                 world_sent: Vec::new(),
                 world_hold: Vec::new(),
+                world_hop_is: Vec::new(),
+                lockstep: schedule.is_none(),
             };
         for h in 0..hosts {
             rig.keep(h);
@@ -280,9 +292,11 @@ impl MultiRig {
             self.world_sent.push(sent.clone());
             let hold = Arc::new(std::sync::atomic::AtomicBool::new(false));
             self.world_hold.push(hold.clone());
+            let hop_is = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            self.world_hop_is.push(hop_is.clone());
             let rig = &mut self.hosts[h];
             let now = rig.now_ms;
-            rig.manager.set_world_link(Box::new(RigWorldLink { inner, sent, hold }), 4000 + h as u64, now);
+            rig.manager.set_world_link(Box::new(RigWorldLink { inner, sent, hold, hop_is }), 4000 + h as u64, now);
             rig.settle();
         }
         self.coordinator = Some(core);
@@ -306,6 +320,11 @@ impl MultiRig {
     }
 
     /// What host `h` sent its coordinator so far.
+    /// `HopIs` messages every host read from the coordinator.
+    pub fn hop_is_received(&self) -> usize {
+        self.world_hop_is.iter().map(|n| n.load(std::sync::atomic::Ordering::SeqCst)).sum()
+    }
+
     pub fn sent_to_coordinator(&self, h: u32) -> Vec<game::HostMsg> {
         self.world_sent[h as usize].lock().unwrap().clone()
     }
