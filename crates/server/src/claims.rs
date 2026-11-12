@@ -22,8 +22,16 @@ pub const EXIT_FENCED: i32 = 3;
 /// Non-zero and distinct from a start-up error (1) and a fence ([`EXIT_FENCED`]).
 pub const EXIT_COORDINATOR_FAILED: i32 = 4;
 
+/// The process exit status of a host that saw a higher world generation than its own: another
+/// host rebooted after a crash, so the whole world restarts from the same save. Nothing is saved
+/// on the way out. Distinct from a start-up error (1), a fence and a failed coordinator.
+pub const EXIT_WORLD_ROLLBACK: i32 = 5;
+
 /// What the client sees when its server was fenced.
 pub const FENCED_REFUSAL: &str = "this server was replaced; reconnect";
+
+/// What the client sees when the world restarts from an earlier save.
+pub const ROLLBACK_REFUSAL: &str = "the world is restarting; reconnect";
 
 /// How a server's life ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -34,6 +42,9 @@ pub enum ServerExit {
     Fenced,
     /// The world coordinator thread failed (panicked); nothing more was saved.
     CoordinatorFailed,
+    /// Another host rebooted dirty (a higher world generation): this one restarts too,
+    /// without a park or a save.
+    WorldRolledBack,
 }
 
 impl ServerExit {
@@ -43,6 +54,7 @@ impl ServerExit {
             ServerExit::Clean => 0,
             ServerExit::Fenced => EXIT_FENCED,
             ServerExit::CoordinatorFailed => EXIT_COORDINATOR_FAILED,
+            ServerExit::WorldRolledBack => EXIT_WORLD_ROLLBACK,
         }
     }
 }
@@ -69,6 +81,38 @@ impl Fenced {
             self.set();
         }
         fenced
+    }
+}
+
+/// The world generation this host boots at, and the process-wide "the world moved on" flag:
+/// [`WorldGeneration::note`] sets it when a peer reports a higher generation, the main loop
+/// polls it ([`ServerExit::WorldRolledBack`]). Clones share the flag. A process that never
+/// registered as a host (role `all`, no store) runs at generation 0 and is never noted.
+#[derive(Clone, Debug, Default)]
+pub struct WorldGeneration {
+    mine: u64,
+    flag: Arc<AtomicBool>,
+}
+
+impl WorldGeneration {
+    pub fn new(mine: u64) -> Self {
+        WorldGeneration { mine, flag: Arc::default() }
+    }
+
+    /// The generation this boot runs at.
+    pub fn mine(&self) -> u64 {
+        self.mine
+    }
+
+    /// A generation seen from a peer or the store: a higher one than ours sets the flag.
+    pub fn note(&self, seen: u64) {
+        if seen > self.mine {
+            self.flag.store(true, Ordering::SeqCst);
+        }
+    }
+
+    pub fn is_set(&self) -> bool {
+        self.flag.load(Ordering::SeqCst)
     }
 }
 
@@ -245,11 +289,24 @@ mod tests {
     }
 
     #[test]
+    fn higher_generation_sets_the_flag_lower_does_not() {
+        let g = WorldGeneration::new(4);
+        assert_eq!(g.mine(), 4);
+        g.note(3);
+        g.note(4);
+        assert!(!g.is_set(), "an equal or lower generation is no news");
+        g.note(5);
+        assert!(g.clone().is_set(), "clones share the flag");
+    }
+
+    #[test]
     fn exit_codes() {
         assert_eq!(ServerExit::Clean.code(), 0);
         assert_eq!(ServerExit::Fenced.code(), 3);
         assert_eq!(EXIT_FENCED, 3);
         assert_eq!(ServerExit::CoordinatorFailed.code(), 4);
         assert_eq!(EXIT_COORDINATOR_FAILED, 4);
+        assert_eq!(ServerExit::WorldRolledBack.code(), 5);
+        assert_eq!(EXIT_WORLD_ROLLBACK, 5);
     }
 }

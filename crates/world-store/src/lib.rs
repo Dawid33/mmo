@@ -20,7 +20,7 @@ use std::fmt;
 pub use codec::*;
 pub use fence::{CoordinatorFence, Fence, SuperRegion, touched_super_regions};
 pub use forged::{StoreTiles, load_forged, write_tiled};
-pub use handle::{CutCommitted, StoreHandle, WorldInfo};
+pub use handle::{CutCommitted, HostBoot, HostRow, StoreHandle, WorldInfo};
 pub use open::{LockGuard, OpenMode, Pool, newest_migration, open_pool};
 pub use terrain::TerrainFromStore;
 pub use url::StoreUrl;
@@ -147,6 +147,9 @@ pub enum StoreError {
     /// another process claimed the super-region (`sr`) — or, with `sr` `None`,
     /// the coordinator row — since. Nothing was written.
     Fenced { sr: Option<SuperRegion> },
+    /// A cut prepared by a host whose generation (`mine`) is behind the world's
+    /// (`stored`): the world restarted from another save since; nothing was written.
+    StaleGeneration { stored: u64, mine: u64 },
     /// A write asked of a handle opened [`OpenMode::ReadOnly`].
     ReadOnly,
 }
@@ -212,6 +215,11 @@ impl fmt::Display for StoreError {
             StoreError::Fenced { sr: None } => write!(
                 f,
                 "the world coordinator was claimed by another process since this one claimed it; nothing was written"
+            ),
+            StoreError::StaleGeneration { stored, mine } => write!(
+                f,
+                "this host is at world generation {mine} but the world is at generation {stored}: the world restarted \
+                 from another save; nothing was written"
             ),
             StoreError::ReadOnly => write!(f, "this world store was opened read-only; it writes nothing"),
             StoreError::Unsupported(e) => write!(f, "{e}"),

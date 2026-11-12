@@ -18,7 +18,7 @@ use crate::codec::*;
 use crate::fence::{CoordinatorFence, Fence, SuperRegion, commit_check_set, load_check};
 use crate::forged::{ForgedHead, TiledRows};
 use game::ClockAnchor;
-use crate::{CutCommitted, StoreError, TerrainKind, WorldInfo};
+use crate::{CutCommitted, HostBoot, HostRow, StoreError, TerrainKind, WorldInfo};
 
 /// Super-regions checked per fence query (two binds each).
 const FENCE_CHECK_BATCH: usize = 200;
@@ -107,7 +107,7 @@ fn entity_insert_error(e: sqlx::Error, id: EntityId, rc: RegionCoords, tick: Tic
 }
 
 macro_rules! engine_rows {
-    ($module:ident, $db:ty, $read_prelude:expr, $share_lock:expr) => {
+    ($module:ident, $db:ty, $read_prelude:expr, $share_lock:expr, $update_lock:expr) => {
         pub(crate) mod $module {
             use sqlx::Row;
 
@@ -222,6 +222,95 @@ macro_rules! engine_rows {
                     }
                 }
                 Ok(())
+            }
+
+            /// Registers a host boot (R3): in one transaction, with the world row locked
+            /// (Postgres: `FOR UPDATE`; SQLite has one writer) and the fence checked over
+            /// the fence's own super-regions. If the ordinal's row exists, is not clean and
+            /// still holds the world's generation, the previous boot died without a clean
+            /// save: `world.generation` goes up (`bumped`). The row is then upserted with
+            /// the new boot, the world's generation and `clean = 0`. `row.generation` and
+            /// `row.clean` are ignored. Callers hold the writer lock.
+            pub(crate) async fn register_host(pool: &Pool, row: HostRow, fence: &Fence) -> Result<HostBoot, StoreError> {
+                let mut tx = pool.begin().await?;
+                let world: i64 = sqlx::query(concat!("SELECT generation FROM world WHERE id = 1", $update_lock))
+                    .fetch_optional(&mut *tx)
+                    .await?
+                    .ok_or_else(|| StoreError::Corrupt("the world row is missing".into()))?
+                    .try_get(0)?;
+                let srs: std::collections::BTreeSet<SuperRegion> = fence.epochs.keys().copied().collect();
+                check_fence(&mut tx, fence, &srs).await?;
+                let prior = sqlx::query("SELECT generation, clean FROM hosts WHERE ordinal = $1")
+                    .bind(i64::from(row.ordinal))
+                    .fetch_optional(&mut *tx)
+                    .await?;
+                let mut generation = world;
+                let mut bumped = false;
+                if let Some(prior) = prior {
+                    let (prior_generation, prior_clean): (i64, i64) = (prior.try_get(0)?, prior.try_get(1)?);
+                    if prior_clean == 0 && prior_generation == world {
+                        generation = world + 1;
+                        bumped = true;
+                        sqlx::query("UPDATE world SET generation = $1 WHERE id = 1").bind(generation).execute(&mut *tx).await?;
+                    }
+                }
+                sqlx::query(
+                    "INSERT INTO hosts (ordinal, boot, generation, clean, peer_addr, peer_cert, quic, webtransport, wt_cert_hash, updated_utc) \
+                     VALUES ($1, $2, $3, 0, $4, $5, $6, $7, $8, $9) \
+                     ON CONFLICT (ordinal) DO UPDATE SET boot = excluded.boot, generation = excluded.generation, clean = 0, \
+                     peer_addr = excluded.peer_addr, peer_cert = excluded.peer_cert, quic = excluded.quic, \
+                     webtransport = excluded.webtransport, wt_cert_hash = excluded.wt_cert_hash, updated_utc = excluded.updated_utc",
+                )
+                .bind(i64::from(row.ordinal))
+                .bind(i(row.boot))
+                .bind(generation)
+                .bind(&row.peer_addr)
+                .bind(&row.peer_cert)
+                .bind(&row.quic)
+                .bind(&row.webtransport)
+                .bind(&row.wt_cert_hash)
+                .bind(crate::open::utc_now())
+                .execute(&mut *tx)
+                .await?;
+                tx.commit().await?;
+                Ok(HostBoot { generation: u(generation), bumped })
+            }
+
+            /// Every host row, by ordinal.
+            pub(crate) async fn hosts(pool: &Pool) -> Result<Vec<HostRow>, StoreError> {
+                let rows = sqlx::query(
+                    "SELECT ordinal, boot, generation, clean, peer_addr, peer_cert, quic, webtransport, wt_cert_hash \
+                     FROM hosts ORDER BY ordinal",
+                )
+                .fetch_all(pool)
+                .await?;
+                rows.into_iter()
+                    .map(|r| {
+                        let ordinal: i64 = r.try_get(0)?;
+                        Ok(HostRow {
+                            ordinal: u32::try_from(ordinal)
+                                .map_err(|_| StoreError::Corrupt(format!("hosts.ordinal {ordinal}")))?,
+                            boot: u(r.try_get(1)?),
+                            generation: u(r.try_get(2)?),
+                            clean: r.try_get::<i64, _>(3)? != 0,
+                            peer_addr: r.try_get(4)?,
+                            peer_cert: r.try_get(5)?,
+                            quic: r.try_get(6)?,
+                            webtransport: r.try_get(7)?,
+                            wt_cert_hash: r.try_get(8)?,
+                        })
+                    })
+                    .collect()
+            }
+
+            /// `world.generation`.
+            pub(crate) async fn world_generation(pool: &Pool) -> Result<u64, StoreError> {
+                let g: i64 = sqlx::query("SELECT generation FROM world WHERE id = 1")
+                    .fetch_optional(pool)
+                    .await?
+                    .ok_or_else(|| StoreError::Corrupt("the world row is missing".into()))?
+                    .try_get(0)?;
+                Ok(u(g))
             }
 
             /// Claims the coordinator row: epoch 1 on a new store, else epoch + 1
@@ -798,5 +887,5 @@ macro_rules! engine_rows {
 
 // SQLite needs no row lock: claims and commits all hold the store's writer
 // lock and one writer process holds the file lock.
-engine_rows!(sqlite, sqlx::Sqlite, None, "");
-engine_rows!(pg, sqlx::Postgres, Some("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ"), " FOR SHARE");
+engine_rows!(sqlite, sqlx::Sqlite, None, "", "");
+engine_rows!(pg, sqlx::Postgres, Some("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ"), " FOR SHARE", " FOR UPDATE");

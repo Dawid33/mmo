@@ -238,6 +238,7 @@ impl Life {
                 cuts: Some(writer),
                 coordinator: self.coordinator.take(),
                 fenced: &fenced,
+                world_generation: &server::claims::WorldGeneration::default(),
                 park_timeout: Duration::from_secs(10),
                 save_timeout: Duration::from_secs(10),
                 now_tick: || now,

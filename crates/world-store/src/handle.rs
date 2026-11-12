@@ -32,6 +32,32 @@ pub struct CutCommitted {
     pub versions: Vec<(RegionCoords, u64)>,
 }
 
+/// One host's row in `hosts` (R3). `boot` is a random per-process-start number, stored
+/// as BIGINT by a bit cast (`as i64` / `as u64`, like every u64 of the store).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HostRow {
+    pub ordinal: u32,
+    pub boot: u64,
+    /// The world generation this boot runs at (set by [`StoreHandle::register_host`]).
+    pub generation: u64,
+    /// The host's last save cut left it clean (cleared by every boot).
+    pub clean: bool,
+    pub peer_addr: Option<String>,
+    pub peer_cert: Option<String>,
+    pub quic: Option<String>,
+    pub webtransport: Option<String>,
+    pub wt_cert_hash: Option<String>,
+}
+
+/// What [`StoreHandle::register_host`] decided: the generation this boot runs at, and
+/// whether the boot raised the world's (its previous boot died without a clean save,
+/// so every other host must restart from the same save).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HostBoot {
+    pub generation: u64,
+    pub bumped: bool,
+}
+
 /// A handle on the open store (see the crate docs and `thread.rs`).
 #[derive(Clone)]
 pub struct StoreHandle {
@@ -258,6 +284,24 @@ impl StoreHandle {
     /// start): the next [`StoreHandle::ensure_clock_anchor`] stores a new one.
     pub fn clear_clock_anchor(&self) -> Result<(), StoreError> {
         self.ask(Request::ClearClockAnchor)
+    }
+
+    /// Registers this process's boot as host `row.ordinal` (once per boot, right after its
+    /// claim): one fence-checked transaction that bumps `world.generation` when the host's
+    /// previous boot never left clean (see [`HostBoot`]). `row.generation` and `row.clean`
+    /// are ignored; the row is stored with the world's generation and `clean = false`.
+    pub fn register_host(&self, row: HostRow, fence: &Fence) -> Result<HostBoot, StoreError> {
+        self.ask(|r| Request::RegisterHost(row, fence.clone(), r))
+    }
+
+    /// Every registered host, by ordinal.
+    pub fn hosts(&self) -> Result<Vec<HostRow>, StoreError> {
+        self.ask(Request::Hosts)
+    }
+
+    /// The world's generation: how many dirty host restarts the world has seen.
+    pub fn world_generation(&self) -> Result<u64, StoreError> {
+        self.ask(Request::WorldGeneration)
     }
 
     /// The terrain kind the world is tied to; `None` before the first

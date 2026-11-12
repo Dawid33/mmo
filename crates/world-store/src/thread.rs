@@ -70,6 +70,9 @@ pub(crate) enum Request {
     TerrainKind(Reply<Option<crate::TerrainKind>>),
     EnsureClockAnchor(game::ClockAnchor, Reply<game::ClockAnchor>),
     ClearClockAnchor(Reply<()>),
+    RegisterHost(crate::HostRow, Fence, Reply<crate::HostBoot>),
+    Hosts(Reply<Vec<crate::HostRow>>),
+    WorldGeneration(Reply<u64>),
     /// Finish the queued commits, then stop.
     Shutdown,
 }
@@ -233,6 +236,12 @@ async fn serve(pool: Pool, guard: LockGuard, s: u32, read_only: bool, mut rx: mp
                 let _w = writer.lock().await;
                 r.send(on_pool!(&pool, clear_clock_anchor()))
             }),
+            Request::RegisterHost(row, fence, r) => tokio::spawn(async move {
+                let _w = writer.lock().await;
+                r.send(on_pool!(&pool, register_host(row, &fence)))
+            }),
+            Request::Hosts(r) => tokio::spawn(async move { r.send(on_pool!(&pool, hosts())) }),
+            Request::WorldGeneration(r) => tokio::spawn(async move { r.send(on_pool!(&pool, world_generation())) }),
             Request::TerrainKind(r) => tokio::spawn(async move { r.send(on_pool!(&pool, terrain_kind())) }),
         };
         tasks.push(task);
@@ -266,6 +275,7 @@ fn refuse_if_read_only(req: Request, read_only: bool) -> Option<Request> {
         Request::BindTerrain(_, r) => r.send(Err(StoreError::ReadOnly)),
         Request::EnsureClockAnchor(_, r) => r.send(Err(StoreError::ReadOnly)),
         Request::ClearClockAnchor(r) => r.send(Err(StoreError::ReadOnly)),
+        Request::RegisterHost(_, _, r) => r.send(Err(StoreError::ReadOnly)),
         req => return Some(req),
     }
     None

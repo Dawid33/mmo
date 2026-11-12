@@ -738,6 +738,8 @@ pub fn run() -> claims::ServerExit {
     // Region loads and cut commits are fenced: the super-regions this process
     // owns are claimed now, once (procedural worlds keep nothing: no claims).
     // One claim is shared by the region threads and the cut writer.
+    let boot = host_boot();
+    let mut world_generation = claims::WorldGeneration::default();
     let claims = store.clone().map(|store| {
         let extent = world_map.as_ref().map(game::WorldMap::extent);
         let claimed = claims::HostClaims::claim(store, ownership, extent, super_region_regions).unwrap_or_else(|e| fatal(&e));
@@ -748,6 +750,29 @@ pub fn run() -> claims::ServerExit {
             claimed.fence().epochs.len(),
             claimed.fence().owner
         );
+        // A host registers once per boot, right after its claim: a boot after one that never
+        // left clean raises the world's generation, which every other host then adopts.
+        if role == roles::Role::Host {
+            let row = world_store::HostRow {
+                ordinal: ownership.ordinal(),
+                boot,
+                generation: 0,
+                clean: false,
+                peer_addr: None,
+                peer_cert: None,
+                quic: None,
+                webtransport: None,
+                wt_cert_hash: None,
+            };
+            let registered = claimed.store().register_host(row, claimed.fence()).unwrap_or_else(|e| fatal(&e.to_string()));
+            info!(
+                "[server] registered host {} at world generation {}{}",
+                ownership.ordinal(),
+                registered.generation,
+                if registered.bumped { " (raised: the previous boot did not exit clean)" } else { "" }
+            );
+            world_generation = claims::WorldGeneration::new(registered.generation);
+        }
         claimed
     });
     let fenced = claims.as_ref().map(|c| c.fenced().clone()).unwrap_or_default();
@@ -769,7 +794,6 @@ pub fn run() -> claims::ServerExit {
         // `coordinator` thread joined by a channel link (`all`), or is its own
         // process dialed over the service link (`host`).
         if role == roles::Role::Host {
-            let boot = host_boot();
             let epoch = claims.as_ref().map_or(0, |c| c.fence().claim_epoch());
             let link = host_world_link(ownership.ordinal(), boot, epoch).unwrap_or_else(|e| fatal(&e));
             world_wake = link.wake();
@@ -852,6 +876,10 @@ pub fn run() -> claims::ServerExit {
             log::error!("[server] fenced: another process claimed this server's super-regions or its coordinator; stopping");
             break 'main;
         }
+        if world_generation.is_set() {
+            log::error!("[server] a host restarted dirty (a higher world generation than {}); stopping to restart from the same save", world_generation.mine());
+            break 'main;
+        }
         if coordinator.as_ref().is_some_and(coordinator_rt::CoordinatorThread::is_finished) {
             log::error!("[server] the world coordinator thread stopped; stopping");
             break 'main;
@@ -897,13 +925,14 @@ pub fn run() -> claims::ServerExit {
             cuts,
             coordinator,
             fenced: &fenced,
+            world_generation: &world_generation,
             park_timeout: cuts::EXIT_PARK_TIMEOUT,
             save_timeout: EXIT_SAVE_TIMEOUT,
             now_tick: || world_clock.tick_at(start.elapsed().as_millis() as u64),
         },
         |_| {},
     );
-    if outcome == claims::ServerExit::Fenced && had_sessions {
+    if matches!(outcome, claims::ServerExit::Fenced | claims::ServerExit::WorldRolledBack) && had_sessions {
         // The refusals are on their way out through the writer task.
         std::thread::sleep(FENCED_EXIT_FLUSH);
     }

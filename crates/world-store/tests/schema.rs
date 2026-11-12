@@ -76,7 +76,7 @@ async fn introspect(pool: &Pool) -> BTreeSet<Col> {
 
 /// table: columns as `name:I|T|B` with `?` = nullable, `*` = primary key.
 const EXPECTED: &[(&str, &str)] = &[
-    ("world", "id:I*, format_version:I, region_blocks:I, chunk_blocks:I, content_crc:I, world_tick:I, super_region_regions:I, created_utc:T, terrain:I?, clock_anchor_unix_ms:I?, clock_anchor_tick:I?"),
+    ("world", "id:I*, format_version:I, region_blocks:I, chunk_blocks:I, content_crc:I, world_tick:I, super_region_regions:I, created_utc:T, terrain:I?, clock_anchor_unix_ms:I?, clock_anchor_tick:I?, generation:I"),
     ("forged_archive", "id:I*, bytes:B"),
     ("forged_meta", "id:I*, format_version:I, bytes:B"),
     ("forged_tiles", "tx:I*, tz:I*, bytes:B"),
@@ -89,6 +89,7 @@ const EXPECTED: &[(&str, &str)] = &[
     ("in_flight", "seq:I*, kind:I, target_rx:I, target_rz:I, stamp:I, payload:B, host:I"),
     ("super_regions", "sx:I*, sz:I*, owner:I, epoch:I"),
     ("coordinator", "id:I*, epoch:I, state:B?, saved_utc:T?"),
+    ("hosts", "ordinal:I*, boot:I, generation:I, clean:I, peer_addr:T?, peer_cert:T?, quic:T?, webtransport:T?, wt_cert_hash:T?, updated_utc:T"),
 ];
 
 fn expected() -> BTreeSet<Col> {

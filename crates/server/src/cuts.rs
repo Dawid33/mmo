@@ -11,7 +11,7 @@ use crossbeam::channel::{Receiver, TryRecvError};
 use game::{CutId, RegionCoords, RegionOutput, RegionSpawner, Tick, WorldManager};
 use world_store::{CutCommitted, StoreError, StoreHandle};
 
-use crate::claims::{Fenced, HostClaims, ServerExit, FENCED_REFUSAL};
+use crate::claims::{Fenced, HostClaims, ServerExit, WorldGeneration, FENCED_REFUSAL, ROLLBACK_REFUSAL};
 use crate::coordinator_rt::CoordinatorThread;
 
 struct Pending {
@@ -214,6 +214,8 @@ pub struct ExitParams<'a, NowMs, NowTick> {
     pub coordinator: Option<CoordinatorThread>,
     /// The process's fenced flag.
     pub fenced: &'a Fenced,
+    /// The process's world generation: a higher one seen than its own is a rollback exit.
+    pub world_generation: &'a WorldGeneration,
     /// How long the regions may take to park ([`EXIT_PARK_TIMEOUT`]).
     pub park_timeout: Duration,
     /// How long each last save may take.
@@ -235,13 +237,15 @@ pub struct ExitParams<'a, NowMs, NowTick> {
 /// shared store down; both come after every park, so neither holds anything
 /// the other lacks. A coordinator save refused as fenced makes the exit fenced; a
 /// coordinator thread that failed (panicked) makes it
-/// [`ServerExit::CoordinatorFailed`] with no exit cut.
+/// [`ServerExit::CoordinatorFailed`] with no exit cut. A process whose world rolled back to
+/// an earlier generation ([`WorldGeneration`]) is treated like a fenced one (clients refused with
+/// [`ROLLBACK_REFUSAL`]); fenced wins when both are set.
 pub fn exit_world<S: RegionSpawner>(
     manager: &mut WorldManager<S>,
     params: ExitParams<'_, impl Fn() -> u64, impl Fn() -> Tick>,
     idle: impl FnMut(&mut WorldManager<S>),
 ) -> ServerExit {
-    let ExitParams { region_out, now_ms, cuts, coordinator, fenced, park_timeout, save_timeout, now_tick } = params;
+    let ExitParams { region_out, now_ms, cuts, coordinator, fenced, world_generation, park_timeout, save_timeout, now_tick } = params;
     let fenced_now = fenced.is_set() || cuts.as_ref().is_some_and(|c| c.fenced().is_set());
     if fenced_now {
         manager.refuse_all_sessions(FENCED_REFUSAL);
@@ -254,6 +258,19 @@ pub fn exit_world<S: RegionSpawner>(
         }
         log::error!("[server] fenced: another process owns this server's super-regions; nothing more is saved");
         return ServerExit::Fenced;
+    }
+    if world_generation.is_set() {
+        // Another host rebooted from a crash: the world restarts from its last committed saves,
+        // so nothing of this process's is saved (a cut now would be ahead of that save).
+        manager.refuse_all_sessions(ROLLBACK_REFUSAL);
+        if let Some(coordinator) = coordinator {
+            coordinator.stop_without_save();
+        }
+        if let Some(cuts) = cuts {
+            cuts.finish_without_cut(manager);
+        }
+        log::error!("[server] world rolled back: another host restarted dirty; nothing more is saved");
+        return ServerExit::WorldRolledBack;
     }
     let given_up = park_for_exit(manager, region_out, now_ms, park_timeout, idle);
     let coordinator_exit = coordinator.map_or(ServerExit::Clean, |c| c.shutdown(save_timeout));

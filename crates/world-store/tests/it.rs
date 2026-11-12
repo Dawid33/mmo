@@ -6,6 +6,7 @@ mod codec;
 mod cut;
 mod fence;
 mod handle;
+mod hosts;
 mod common;
 mod forged;
 mod open;
