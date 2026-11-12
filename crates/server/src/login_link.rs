@@ -96,6 +96,10 @@ pub fn jwt_admission(token_configured: bool, env: Option<&str>) -> Result<JwtAdm
     let env = env.map(str::trim).filter(|v| !v.is_empty());
     match (token_configured, env) {
         (true, None) => Ok(JwtAdmission::SpawnOrders),
+        (true, Some(other)) if other != JWT_ADMISSION_NEWEST => Err(format!(
+            "auth: {JWT_ADMISSION_ENV}={other:?} is set together with a service token, so spawn orders are used: \
+             unset {JWT_ADMISSION_ENV}"
+        )),
         (true, Some(_)) => Err(format!(
             "auth: {JWT_ADMISSION_ENV} is set together with a service token ({} / {}): the login link is on, \
              so there is nothing to fall back from — unset one of them",

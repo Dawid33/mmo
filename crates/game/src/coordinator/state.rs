@@ -14,6 +14,10 @@ use crate::PlayerId;
 /// copy of the old layout (`CoordinatorStateV<n>`), a `migrate_v<n>`, a rung in
 /// [`CoordinatorState::decode`] and a committed fixture of the old blob.
 pub const COORDINATOR_STATE_VERSION: u8 = 1;
+const _: () = assert!(
+    COORDINATOR_STATE_VERSION == 1,
+    "add the current-format arm to CoordinatorState::decode and a migrate step"
+);
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct CoordinatorState {
@@ -40,7 +44,7 @@ impl CoordinatorState {
         match bytes.split_first() {
             None => Err(HistoryLoadError::Corrupt("empty coordinator state".into())),
             Some((&1, body)) => bincode::deserialize::<CoordinatorStateV1>(body).map(migrate_v1).map_err(corrupt),
-            Some((&COORDINATOR_STATE_VERSION, body)) => bincode::deserialize(body).map_err(corrupt),
+            // At the first bump: add `COORDINATOR_STATE_VERSION => decode_current(body)` and keep `1 => … migrate_v1`.
             Some((v, _)) => Err(HistoryLoadError::Corrupt(format!(
                 "coordinator state format {v}; this build reads 1..={COORDINATOR_STATE_VERSION}"
             ))),
@@ -49,7 +53,9 @@ impl CoordinatorState {
 }
 
 /// Format 1, frozen: a copy of the layout, not an alias of [`CoordinatorState`] (which may
-/// change). Pinned by `tests/fixtures/coordinator_state_v1.bin`.
+/// change). Pinned by `tests/fixtures/coordinator_state_v1.bin`. Only the top level is frozen:
+/// a layout change to `PlayerId`, `Claim`, `RequestId` or `WorldReply` is a format bump and
+/// needs frozen copies of those types here.
 #[derive(Deserialize)]
 struct CoordinatorStateV1 {
     history: Vec<u8>,

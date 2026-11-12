@@ -605,11 +605,10 @@ impl LoginStore {
     /// never acknowledges must not be retried forever. One statement, so two replicas never
     /// both report the same row.
     pub async fn expire_pending_kicks(&self, now_secs: u64, ttl_secs: u64) -> Result<Vec<PendingKick>, LoginError> {
-        const SQL: &str = "DELETE FROM pending_kicks WHERE created_at + $2 <= $1 \
+        const SQL: &str = "DELETE FROM pending_kicks WHERE created_at <= $1 \
              RETURNING world_id, player_token, session_epoch, reason";
-        let now = i64::try_from(now_secs).unwrap_or(i64::MAX);
-        let ttl = i64::try_from(ttl_secs).unwrap_or(i64::MAX);
-        let mut kicks: Vec<PendingKick> = on!(self, p => sqlx::query(SQL).bind(now).bind(ttl).fetch_all(p).await?
+        let cutoff = i64::try_from(now_secs.saturating_sub(ttl_secs)).unwrap_or(i64::MAX);
+        let mut kicks: Vec<PendingKick> = on!(self, p => sqlx::query(SQL).bind(cutoff).fetch_all(p).await?
             .into_iter()
             .map(|r| PendingKick {
                 world_id: r.get(0),

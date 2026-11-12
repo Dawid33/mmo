@@ -139,7 +139,7 @@ impl HostLinks {
             // Unacknowledged for at least the TTL (the sweep runs every `KICK_RESEND_MS`).
             Ok(expired) => for kick in expired {
                 log::warn!(
-                    "[login] kick for world {} player {} dropped after {} s unacknowledged",
+                    "[login] kick for world {} player {} dropped after at least {} s unacknowledged",
                     kick.world_id, kick.player_token, PENDING_KICK_TTL_SECS
                 );
             },

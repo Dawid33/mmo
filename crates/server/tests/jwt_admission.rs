@@ -24,3 +24,15 @@ fn token_with_newest_is_a_conflict() {
     let err = jwt_admission(true, Some("newest")).unwrap_err();
     assert!(err.contains("VOXEL_JWT_ADMISSION") && err.contains("VOXEL_SERVICE_TOKEN"), "{err}");
 }
+
+#[test]
+fn garbage_without_token_is_refused_naming_the_accepted_value() {
+    let err = jwt_admission(false, Some("other")).unwrap_err();
+    assert!(err.contains("newest"), "{err}");
+}
+
+#[test]
+fn garbage_with_token_is_refused() {
+    let err = jwt_admission(true, Some("other")).unwrap_err();
+    assert!(err.contains("unset VOXEL_JWT_ADMISSION"), "{err}");
+}
