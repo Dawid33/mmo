@@ -84,6 +84,35 @@ pub struct HelloSession {
     /// A session a login spawn order admitted: the edge reports its end
     /// ([`Authenticator::session_ended`](crate::auth_edge::Authenticator::session_ended)).
     pub ticket: Option<crate::auth_edge::SessionTicket>,
+    /// The login ticket's epoch (`None` for a local session).
+    pub session_epoch: Option<u64>,
+}
+
+/// The refusal of a login whose session id is already live (a replayed ticket).
+pub const REFUSE_ALREADY_CONNECTED: &str = game::DUPLICATE_SESSION_REFUSAL;
+
+impl HelloSession {
+    /// The session's id, allocated now that it is authenticated: a login session's is
+    /// [`game::session_client_id`] (the same on every host), a local session's the next of
+    /// the process counter. `Err` is the refusal when `is_live` says a session already
+    /// holds that id (the existing session is untouched).
+    pub fn client_id(
+        &self,
+        local_ids: &std::sync::atomic::AtomicU64,
+        is_live: impl Fn(game::ClientId) -> bool,
+    ) -> Result<game::ClientId, String> {
+        match self.session_epoch {
+            Some(epoch) => {
+                let id = game::session_client_id(self.player, epoch);
+                if is_live(id) {
+                    Err(REFUSE_ALREADY_CONNECTED.into())
+                } else {
+                    Ok(id)
+                }
+            }
+            None => Ok(local_ids.fetch_add(1, std::sync::atomic::Ordering::SeqCst)),
+        }
+    }
 }
 
 /// The handshake: `first` must be a `Hello` whose credential `auth` accepts
@@ -123,7 +152,9 @@ pub async fn resolve_session(
         })
     });
     match resolved {
-        Ok((player, record)) => Ok(HelloSession { player, record, ticket: admitted.ticket }),
+        Ok((player, record)) => {
+            Ok(HelloSession { player, record, ticket: admitted.ticket, session_epoch: admitted.session_epoch })
+        }
         Err(why) => {
             if let Some(ticket) = &admitted.ticket {
                 auth.session_ended(ticket);

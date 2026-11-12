@@ -1,5 +1,6 @@
-//! Player identity. A `ClientId` is one connection (a per-process counter the
-//! server restarts at 0); a [`PlayerId`] is the person behind it, stable across
+//! Player identity. A `ClientId` is one session, 64 bits on every target: for a
+//! login session [`session_client_id`] of its player and ticket epoch (the same on every
+//! host of a world), for a local session a per-process counter from 0; a [`PlayerId`] is the person behind it, stable across
 //! reconnects and server restarts. The client says who it is with a
 //! [`Credential`], sent as the first packet of every connection
 //! (`ClientPacket::Hello`):
@@ -22,6 +23,16 @@ use crate::{Client, ClientId, Pose, RegionCoords, Rollback, StateHash};
 /// The stable identity of a player (never reused for another name or token).
 #[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize, StateHash)]
 pub struct PlayerId(pub u64);
+
+/// Low bits of a [`ClientId`] that hold the login ticket's `session_epoch`.
+pub const SESSION_EPOCH_BITS: u32 = 24;
+
+/// The world-unique session id of `player`'s login session `session_epoch`: the player id
+/// above [`SESSION_EPOCH_BITS`] bits of the epoch (only its low bits: the epoch wraps after 16 million logins of one player). The same on every host of a world.
+pub fn session_client_id(player: PlayerId, session_epoch: u64) -> ClientId {
+    debug_assert!(player.0 < 1 << (64 - SESSION_EPOCH_BITS), "player id {} does not fit a session id", player.0);
+    (player.0 << SESSION_EPOCH_BITS) | (session_epoch & ((1 << SESSION_EPOCH_BITS) - 1))
+}
 
 /// Random bytes in a token: 128 bits.
 pub const PLAYER_TOKEN_BYTES: usize = 16;

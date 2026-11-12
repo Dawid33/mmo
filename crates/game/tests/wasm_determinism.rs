@@ -546,3 +546,13 @@ fn creature_mass_is_cross_target_wasm() {
     let digest = creature_mass_scene();
     assert_eq!(digest, CREATURE_MASS_DIGEST, "wasm32 creature mass digest 0x{digest:08X} != golden 0x{CREATURE_MASS_DIGEST:08X}");
 }
+
+/// A `ClientId` is 64 bits on every target (wasm32's `usize` is 32).
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn client_id_above_u32_round_trips() {
+    let id: game::ClientId = 1 << 40;
+    let packet = game::ServerPacket::PlayerRegion(None, id);
+    let back: game::ServerPacket = game::decode_packet(&game::encode_packet(&packet).unwrap()).unwrap();
+    assert!(matches!(back, game::ServerPacket::PlayerRegion(None, got) if got == id), "{back:?}");
+}

@@ -49,3 +49,20 @@ fn parked_client_folds_the_cursor_into_the_inventory() {
     assert_eq!(parked.cursor, Some(stack), "kept on the cursor, not lost");
     assert!(parked.inventory.slots.iter().all(|s| *s == Some(other)));
 }
+
+#[test]
+fn session_client_id_is_unique_per_join() {
+    use game::{session_client_id, SESSION_EPOCH_BITS};
+    let alice = PlayerId(1);
+    assert_ne!(session_client_id(alice, 1), session_client_id(alice, 2), "two sessions of one player differ");
+    assert_ne!(
+        session_client_id(PlayerId(1), 1),
+        session_client_id(PlayerId(2), 1),
+        "two players in the same epoch differ"
+    );
+    // The epoch keeps its low 24 bits: 1 << 24 wraps onto epoch 0 of the same player only.
+    assert_eq!(session_client_id(alice, 1 << SESSION_EPOCH_BITS), session_client_id(alice, 0));
+    assert_ne!(session_client_id(alice, 1 << SESSION_EPOCH_BITS), session_client_id(PlayerId(2), 0));
+    // A big player id stays above 32 bits (a ClientId is 64 bits on every target).
+    assert_eq!(session_client_id(PlayerId(1), 0), 1u64 << SESSION_EPOCH_BITS);
+}

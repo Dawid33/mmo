@@ -10,7 +10,7 @@
 //! `VOXEL_WT_KEY` and reloaded whenever the files change (renewals).
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
@@ -132,7 +132,7 @@ pub async fn serve(
     certs: CertSource,
     send: Sender<ServerEvent>,
     sinks: Arc<DashMap<ClientId, ClientSink>>,
-    next_client_id: Arc<AtomicUsize>,
+    next_client_id: Arc<AtomicU64>,
     players: crate::player_store::SharedPlayerStore,
     auth: Arc<crate::auth_edge::Authenticator>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -163,7 +163,7 @@ pub async fn serve(
         let sinks = sinks.clone();
         let players = players.clone();
         let auth = auth.clone();
-        let id = next_client_id.fetch_add(1, Ordering::SeqCst);
+        let next_client_id = next_client_id.clone();
         tokio::spawn(async move {
             let session = match incoming.await {
                 Ok(req) => match req.accept().await {
@@ -180,6 +180,12 @@ pub async fn serve(
                     Err(why) => return refuse(&session, &why).await,
                 };
             let (player, ticket) = (hello.player, hello.ticket.clone());
+            // The id exists only now that the session is authenticated.
+            let id = match hello.client_id(&next_client_id, |id| sinks.contains_key(&id)) {
+                Ok(id) => id,
+                // No `session_ended`: the ticket belongs to the live session.
+                Err(why) => return refuse(&session, &why).await,
+            };
             sinks.insert(id, ClientSink::Web(session.clone()));
             // Announce before reading any other packets, mirroring the quinn
             // path: guarantees the player exists before its first request is served.

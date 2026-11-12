@@ -29,7 +29,7 @@ fn minimal_world() -> World {
 fn server_with_players(n: usize) -> (World, Vec<game::GameEvent>) {
     let mut server = minimal_world();
     let mut events = Vec::new();
-    for client_id in 0..n {
+    for client_id in 0..n as game::ClientId {
         let ev = server
             .handle_region_event(GameEventKind::CreateClient(client_id), r0())
             .unwrap();
@@ -45,7 +45,7 @@ fn server_with_players(n: usize) -> (World, Vec<game::GameEvent>) {
 /// is returned and must be kept alive by the caller.
 fn join_client(
     server: &World,
-    client_id: usize,
+    client_id: game::ClientId,
 ) -> (World, crossbeam::channel::Receiver<game::GameDataUpdate>) {
     let (send, recv) = crossbeam::channel::unbounded();
     let snapshot = server.get_region_data(&r0());

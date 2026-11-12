@@ -148,7 +148,7 @@ fn a_corrupt_parked_blob_fails_the_load_and_is_never_regenerated() {
 // side of a tick boundary the client rolls back, and a key edge a tick early
 // or late is a whole tick of movement gained or lost — the rubber band.
 
-fn key_input(client: usize) -> GameEventKind {
+fn key_input(client: game::ClientId) -> GameEventKind {
     GameEventKind::PlayerInput(
         client,
         game::InputEvent::Key { key: game::Key::KeyW, pressed: true },

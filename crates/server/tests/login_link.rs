@@ -213,6 +213,51 @@ fn spawn_then_connect_accepted_once() {
 }
 
 #[test]
+fn jwt_session_gets_session_client_id() {
+    use std::sync::atomic::AtomicU64;
+    let host = Host::start();
+    let login = host.login(PeerRole::Login);
+    let alice = token(1);
+    assert!(login.spawn(&alice, 7));
+    let session = host.hello(&alice, 7).unwrap();
+    let local_ids = AtomicU64::new(0);
+    let id = session.client_id(&local_ids, |_| false).unwrap();
+    assert_eq!(id, game::session_client_id(session.player, 7));
+    assert_eq!(local_ids.load(std::sync::atomic::Ordering::SeqCst), 0, "a login session spends no local id");
+    // The announcement carries it.
+    let (edge, announced) = unbounded();
+    player_store::announce_session(&edge, id, &session, &host.auth).unwrap();
+    match announced.try_recv().unwrap() {
+        ServerEvent::ClientConnected { client, player, .. } => {
+            assert_eq!((client, player), (game::session_client_id(session.player, 7), session.player));
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn live_session_client_id_is_refused_without_touching_it() {
+    use std::sync::atomic::AtomicU64;
+    let host = Host::start();
+    let login = host.login(PeerRole::Login);
+    let alice = token(1);
+    assert!(login.spawn(&alice, 1));
+    let session = host.hello(&alice, 1).unwrap();
+    let local_ids = AtomicU64::new(0);
+    let live = game::session_client_id(session.player, 1);
+    // A replayed ticket would resolve to the id of a live session: refused.
+    let replay = HelloSession { player: session.player, record: None, ticket: None, session_epoch: session.session_epoch };
+    assert_eq!(replay.client_id(&local_ids, |id| id == live), Err(player_store::REFUSE_ALREADY_CONNECTED.to_string()));
+    // Another epoch of the same player is another session.
+    let next = HelloSession { player: session.player, record: None, ticket: None, session_epoch: Some(2) };
+    assert_ne!(next.client_id(&local_ids, |id| id == live).unwrap(), live);
+    // A local session takes the process counter, from 0.
+    let local = HelloSession { player: session.player, record: None, ticket: None, session_epoch: None };
+    assert_eq!(local.client_id(&local_ids, |_| true), Ok(0));
+    assert_eq!(local.client_id(&local_ids, |_| true), Ok(1));
+}
+
+#[test]
 fn only_the_login_service_may_order() {
     let host = Host::start();
     let impostor = host.login(PeerRole::Coordinator);

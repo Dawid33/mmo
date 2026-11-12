@@ -1,7 +1,7 @@
 //! End-to-end: a wtransport client (the same library the browser-facing
 //! endpoint uses) performs the full join handshake against the real router
 //! loop, proving Region snapshots and GameEvent echoes flow over WebTransport.
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -55,8 +55,8 @@ async fn send_packet(conn: &wtransport::Connection, packet: &ClientPacket) {
 async fn webtransport_client_full_handshake() {
     let (event_send, event_recv) = crossbeam::channel::unbounded();
     let (server_send, server_recv) = crossbeam::channel::unbounded();
-    let sinks: Arc<DashMap<usize, ClientSink>> = Arc::new(DashMap::new());
-    let next_id = Arc::new(AtomicUsize::new(0));
+    let sinks: Arc<DashMap<game::ClientId, ClientSink>> = Arc::new(DashMap::new());
+    let next_id = Arc::new(AtomicU64::new(0));
 
     // Writer task (Task 1's) — drains router output into sinks.
     let writer_sinks = sinks.clone();
@@ -203,7 +203,7 @@ async fn webtransport_client_full_handshake() {
 async fn first_packet_not_hello_closes() {
     const PORT: u16 = 16468;
     let (event_send, event_recv) = crossbeam::channel::unbounded();
-    let sinks: Arc<DashMap<usize, ClientSink>> = Arc::new(DashMap::new());
+    let sinks: Arc<DashMap<game::ClientId, ClientSink>> = Arc::new(DashMap::new());
     let ingress_sinks = sinks.clone();
     tokio::spawn(async move {
         let bind = format!("127.0.0.1:{PORT}").parse().unwrap();
@@ -212,7 +212,7 @@ async fn first_packet_not_hello_closes() {
             webtransport::CertSource::SelfSigned,
             event_send,
             ingress_sinks,
-            Arc::new(AtomicUsize::new(0)),
+            Arc::new(AtomicU64::new(0)),
             memory_store(),
             local_auth(),
         )

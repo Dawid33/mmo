@@ -27,11 +27,11 @@ fn random_op_sequences_roll_back_to_every_boundary() {
                     0 => r.tick.update(|t| *t += 1),
                     1 => r.next_game_event_id.update(|n| *n = n.wrapping_add(3)),
                     2 => {
-                        let k = rng.rand_range(0..3) as usize;
+                        let k = rng.rand_range(0..3) as game::ClientId;
                         r.player_entites.insert(k, EntityKey::default());
                     }
                     3 => {
-                        let k = rng.rand_range(0..3) as usize;
+                        let k = rng.rand_range(0..3) as game::ClientId;
                         r.player_entites.remove(&k);
                     }
                     4 => {

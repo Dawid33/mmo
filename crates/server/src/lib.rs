@@ -1,6 +1,6 @@
 //! Server
 // #![deny(missing_docs)]
-use std::sync::{atomic::AtomicUsize, atomic::Ordering, Arc};
+use std::sync::{atomic::AtomicU64, Arc};
 
 use crossbeam::channel::{Receiver, Sender};
 use dashmap::DashMap;
@@ -358,7 +358,7 @@ impl WorldIngress {
             }
         });
 
-        let next_client_id = Arc::new(AtomicUsize::new(0));
+        let next_client_id = Arc::new(AtomicU64::new(0));
 
         if self.webtransport {
             let wt_send = send.clone();
@@ -396,7 +396,7 @@ impl WorldIngress {
             let sinks = sinks.clone();
             let players = self.players.clone();
             let auth = self.auth.clone();
-            let id = next_client_id.fetch_add(1, Ordering::SeqCst);
+            let next_client_id = next_client_id.clone();
             tokio::spawn(async move {
                 info!("accepting connection");
                 let connection = match conn.await {
@@ -411,6 +411,12 @@ impl WorldIngress {
                         Err(why) => return refuse_quic(&connection, &why).await,
                     };
                 let (player, ticket) = (hello.player, hello.ticket.clone());
+                // The id exists only now that the session is authenticated.
+                let id = match hello.client_id(&next_client_id, |id| sinks.contains_key(&id)) {
+                    Ok(id) => id,
+                    // No `session_ended`: the ticket belongs to the live session.
+                    Err(why) => return refuse_quic(&connection, &why).await,
+                };
                 sinks.insert(id, ClientSink::Quinn(connection.clone()));
                 // Announce before any of this client's other packets can be
                 // read: guarantees the player exists before its first request

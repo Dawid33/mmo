@@ -1292,3 +1292,25 @@ fn non_owned_region_is_unavailable() {
     assert!(h.manager.is_unavailable(target));
     assert!(!h.manager.running_regions().contains(&target));
 }
+
+#[test]
+fn duplicate_client_id_is_refused() {
+    let mut h = harness();
+    h.event(session(5, 1, None), 0);
+    h.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(SPAWN_REGION), 5), 0);
+    h.drain_packets();
+    assert_eq!(h.manager.player_of(5), Some(game::PlayerId(1)));
+    // A second ClientConnected for the live id (a replayed ticket), even naming another
+    // player, changes nothing and tells the live session nothing.
+    h.event(session(5, 2, None), 10);
+    assert_eq!(h.manager.player_of(5), Some(game::PlayerId(1)), "the live session keeps its player");
+    assert_eq!(h.manager.depths().sessions, 1);
+    assert!(
+        h.drain_packets().iter().all(|(to, p)| *to != Some(5) || !matches!(p, ServerPacket::Refused(_))),
+        "the live session is not refused"
+    );
+    // A takeover of the same player under ANOTHER id still works.
+    h.event(session(6, 1, None), 20);
+    assert_eq!(h.manager.player_of(6), Some(game::PlayerId(1)));
+    assert_eq!(h.manager.player_of(5), None, "the older session was ended");
+}

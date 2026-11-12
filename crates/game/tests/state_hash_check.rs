@@ -17,7 +17,7 @@ use game::{
 /// Surface plate of the flat stud ground.
 const TOP: i32 = 30;
 
-const CLIENT: usize = 7;
+const CLIENT: game::ClientId = 7;
 
 fn server() -> (RegionRunner, Receiver<(RegionCoords, RegionOutput)>) {
     let id = RegionCoords::new(0, 0);

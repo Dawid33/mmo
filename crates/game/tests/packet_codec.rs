@@ -147,3 +147,11 @@ fn world_map_tile_lookup() {
     assert!(map.tile(RegionCoords::new(-2, 0)).is_none());
     assert_eq!(map.coords(4), RegionCoords::new(0, 0));
 }
+
+#[test]
+fn client_id_above_u32_round_trips() {
+    let id: game::ClientId = 1 << 40;
+    let packet = ServerPacket::PlayerRegion(None, id);
+    let back: ServerPacket = decode_packet(&encode_packet(&packet).unwrap()).unwrap();
+    assert!(matches!(back, ServerPacket::PlayerRegion(None, got) if got == id), "{back:?}");
+}

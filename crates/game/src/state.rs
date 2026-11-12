@@ -17,7 +17,7 @@ use crate::camera::{Camera, Perspective3};
 use crate::input::InputState;
 use crate::protocol::{BodyState, ColliderSpec, EntityBundle, HaloEntityDelta, HaloEntityGone, HaloEntityMsg};
 
-pub type ClientId = usize;
+pub type ClientId = u64;
 
 new_key_type! { pub struct EntityKey; }
 new_key_type! { pub struct PlayerKey; }

@@ -287,6 +287,9 @@ pub struct Admitted {
     pub key: PlayerKey,
     /// `Some` for a session admitted against a spawn order.
     pub ticket: Option<SessionTicket>,
+    /// The ticket's `session_epoch` (`Some` for every `jwt` session): with the player, the
+    /// session's world-unique [`game::ClientId`].
+    pub session_epoch: Option<u64>,
 }
 
 /// The connect edge's credential check. Shared by every connection task.
@@ -375,7 +378,7 @@ impl Authenticator {
     pub async fn admit(&self, credential: Credential) -> Result<Admitted, String> {
         match (&self.mode, credential) {
             (AuthMode::Local, Credential::Local(name)) => match PlayerName::parse(&name.0) {
-                Ok(name) => Ok(Admitted { key: PlayerKey::Local(name), ticket: None }),
+                Ok(name) => Ok(Admitted { key: PlayerKey::Local(name), ticket: None, session_epoch: None }),
                 Err(why) => Err(format!("invalid player name: {why}")),
             },
             (AuthMode::Local, Credential::Jwt(_)) => Err(REFUSE_JWT_ON_LOCAL_HOST.into()),
@@ -440,7 +443,7 @@ impl Authenticator {
                     Ok(()) => {
                         log::info!("[auth] account {} admitted by its spawn order (epoch {})", claims.sub, claims.session_epoch);
                         let ticket = SessionTicket { player_token: claims.player_token, session_epoch: claims.session_epoch };
-                        Ok(Admitted { key: PlayerKey::Online(token), ticket: Some(ticket) })
+                        Ok(Admitted { key: PlayerKey::Online(token), ticket: Some(ticket), session_epoch: Some(claims.session_epoch) })
                     }
                     Err(why) => {
                         log::info!("[auth] account {} ticket epoch {} refused: {why}", claims.sub, claims.session_epoch);
@@ -465,6 +468,6 @@ impl Authenticator {
         }
         *newest = claims.session_epoch;
         log::info!("[auth] account {} admitted (epoch {})", claims.sub, claims.session_epoch);
-        Ok(Admitted { key: PlayerKey::Online(token), ticket: None })
+        Ok(Admitted { key: PlayerKey::Online(token), ticket: None, session_epoch: Some(claims.session_epoch) })
     }
 }

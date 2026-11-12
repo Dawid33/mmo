@@ -520,6 +520,11 @@ pub struct ManagerDepths {
 /// (`ServerPacket::Refused`); the server edge then closes it.
 pub const LOGGED_IN_ELSEWHERE: &str = "logged in elsewhere";
 
+/// The refusal of a connection whose session id is already live (a replayed login ticket).
+/// The edge gives it before a sink exists; the manager's check behind it never writes to
+/// the id (the live session owns it) and only logs.
+pub const DUPLICATE_SESSION_REFUSAL: &str = "this login is already connected; log in again";
+
 /// How long a region whose stored state could not be read
 /// ([`RegionOutput::LoadFailed`]) stays stopped before a start is tried
 /// again, in seconds of world time.
@@ -2436,9 +2441,21 @@ impl<S: RegionSpawner> WorldManager<S> {
         }
     }
 
-    /// A session started. A session of the same player already online is
-    /// ended in its favour. Always `true` (kept for a future refusal).
+    /// A session started. A session of the same player already online (under another
+    /// id) is ended in its favour. `false` = refused ([`DUPLICATE_SESSION_REFUSAL`]): the
+    /// id still has state here (a session, a park, a move, a creation), which stays as it
+    /// was — nothing is sent to the id, the live session owns it.
     fn client_connected(&mut self, id: ClientId, player: PlayerId, record: Option<PlayerRecord>, now_ms: u64) -> bool {
+        if self.sessions.contains_key(&id)
+            || self.player_of.contains_key(&id)
+            || self.homes.contains_key(&id)
+            || self.parking.contains_key(&id)
+            || self.moving.contains_key(&id)
+            || self.creating.contains_key(&id)
+        {
+            log::warn!("client {id}: {DUPLICATE_SESSION_REFUSAL} (a duplicate ClientConnected is ignored)");
+            return false;
+        }
         let elsewhere: Vec<ClientId> =
             self.player_of.iter().filter(|(c, p)| **p == player && **c != id).map(|(c, _)| *c).collect();
         for old in elsewhere {
@@ -2453,10 +2470,7 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.sessions.entry(id).or_default();
         self.player_of.insert(id, player);
         let in_flight = self.parking.values().any(|p| p.player == player);
-        if self.homes.contains_key(&id) {
-            // The same session announced again: its body is already placed.
-            log::info!("client {id} re-announced");
-        } else if in_flight {
+        if in_flight {
             // Reconnected faster than the park: restore once it is back.
             log::info!("client {id}: player {} is still parking; restore deferred", player.0);
             self.awaiting_park.insert(player, (id, record));
