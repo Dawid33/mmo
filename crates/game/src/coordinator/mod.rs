@@ -82,10 +82,13 @@ pub struct Coordinator {
     /// A player in transit to a host (`PlayerHandedTo`) stays online on that host until it
     /// reports. Never saved.
     online_on: BTreeMap<PlayerId, u32>,
-    /// `PlayerOffline`s from a host the player was not online on yet: the host it is
-    /// being handed to parked it on arrival before the hand-over's `PlayerHandedTo` came
-    /// (they travel on different links). That `PlayerHandedTo` then ends the transit.
-    offline_early: BTreeMap<PlayerId, u32>,
+    /// The highest hop ([`HostMsg`]'s hop rule) of each player's presence messages
+    /// applied: a message with a lower one is stale. Unknown = 0 (a restart loses it and
+    /// the next reports set it again); cleared by an `Attach` of a newer world
+    /// generation (every host starts its hops over). Never saved.
+    hop_of: BTreeMap<PlayerId, u64>,
+    /// The highest world generation an `Attach` named.
+    generation_seen: u64,
     /// `Some(n)`: a save was taken ([`Self::take_save`]) holding the state behind the
     /// first `n` messages of `gated`; [`Self::saved`] releases them.
     save_in_flight: Option<usize>,
@@ -125,7 +128,8 @@ impl Coordinator {
             out: Vec::new(),
             region_host: BTreeMap::new(),
             online_on: BTreeMap::new(),
-            offline_early: BTreeMap::new(),
+            hop_of: BTreeMap::new(),
+            generation_seen: 0,
             save_in_flight: None,
             dirty_since_save: false,
             force_save: false,
@@ -177,6 +181,11 @@ impl Coordinator {
         self.online_on.get(&player).copied()
     }
 
+    /// The highest hop of `player`'s presence messages applied (0: none known).
+    pub fn hop_of(&self, player: PlayerId) -> u64 {
+        self.hop_of.get(&player).copied().unwrap_or(0)
+    }
+
     /// The host that runs `rc`, as announced to the coordinator.
     pub fn region_host(&self, rc: RegionCoords) -> Option<u32> {
         self.region_host.get(&rc).copied()
@@ -193,12 +202,20 @@ impl Coordinator {
         self.clock_ms = self.clock_ms.max(now_ms);
         self.dirty_since_save = true;
         match msg {
-            HostMsg::Attach { host: named, epoch, running, online, generation: _, boot, settled_below } => {
+            HostMsg::Attach { host: named, epoch, running, online, generation, boot, settled_below, handed } => {
                 if named != host {
                     log::warn!("coordinator: host {host}'s Attach names host {named}; taken as host {host}'s");
                 }
+                if generation > self.generation_seen {
+                    // A newer world generation: every host started its hops over.
+                    if !self.hop_of.is_empty() {
+                        log::info!("coordinator: world generation {generation}: player hops start over");
+                    }
+                    self.generation_seen = generation;
+                    self.hop_of.clear();
+                }
                 self.forget_settled(host, boot, settled_below, true);
-                self.attach(host, epoch, running, online)
+                self.attach(host, epoch, running, online, handed)
             }
             HostMsg::Settled { boot, below } => self.forget_settled(host, boot, below, false),
             HostMsg::RegionStarted { rc, incarnation } => {
@@ -256,34 +273,8 @@ impl Coordinator {
             HostMsg::Request { id, player, req } => self.request(host, id, player, req),
             HostMsg::Settle { id, req } => self.settle(host, id, req),
             HostMsg::PlayerOnline(p) => self.player_online(host, p),
-            HostMsg::PlayerOffline { player } => match self.online_on.get(&player).copied() {
-                Some(h) if h == host => {
-                    self.online_on.remove(&player);
-                    self.set_online(player, false);
-                }
-                // Parked on arrival here before the sending host's `PlayerHandedTo` came:
-                // that message ends the transit.
-                Some(h) => {
-                    log::debug!("coordinator: {player:?} offline on host {host} before host {h} handed it over");
-                    self.offline_early.insert(player, host);
-                }
-                None => log::debug!("coordinator: {player:?} offline on host {host} ignored (online nowhere)"),
-            },
-            HostMsg::PlayerHandedTo { player, to } => match self.online_on.get(&player).copied() {
-                Some(h) if h == host => {
-                    if self.offline_early.get(&player) == Some(&to) {
-                        // Host `to` parked it on arrival already.
-                        self.offline_early.remove(&player);
-                        self.online_on.remove(&player);
-                        self.set_online(player, false);
-                    } else {
-                        // In transit: online (its claim in use) until host `to` reports.
-                        self.online_on.insert(player, to);
-                    }
-                }
-                // The new host reported it first (online on it), or it is online nowhere.
-                on => log::debug!("coordinator: {player:?} handed by host {host} to {to} ignored (online on {on:?})"),
-            },
+            HostMsg::PlayerOffline { player, hop } => self.player_offline(host, player, hop),
+            HostMsg::PlayerHandedTo { player, to, hop } => self.player_handed(host, player, to, hop),
             HostMsg::ReleaseClaim { player } => self.release_claim(player),
         }
         self.push_directives();
@@ -444,22 +435,27 @@ impl Coordinator {
     /// Those already handed to the link reach the host ahead of [`CoordMsg::Attached`],
     /// and it drops them. Other hosts' directives stand.
     fn drop_unsent_directives(&mut self, host: u32) {
-        let is_directive =
-            |(to, m): &(Target, CoordMsg)| *to == Target::Host(host) && matches!(m, CoordMsg::Directive { .. });
+        self.drop_unsent(host, "directives", |m| matches!(m, CoordMsg::Directive { .. }));
+    }
+
+    /// Forget every message for `host` matching `drops` not yet handed out (waiting or
+    /// free to leave), superseded by its attach (`what` names them in the log).
+    fn drop_unsent(&mut self, host: u32, what: &str, drops: impl Fn(&CoordMsg) -> bool) {
+        let dropped_here = |(to, m): &(Target, CoordMsg)| *to == Target::Host(host) && drops(m);
         let before = self.gated.len() + self.out.len();
         if let Some(n) = self.save_in_flight.as_mut() {
-            let covered_dropped = self.gated.iter().take(*n).filter(|m| is_directive(m)).count();
+            let covered_dropped = self.gated.iter().take(*n).filter(|m| dropped_here(m)).count();
             *n -= covered_dropped;
         }
-        self.gated.retain(|m| !is_directive(m));
-        self.out.retain(|m| !is_directive(m));
+        self.gated.retain(|m| !dropped_here(m));
+        self.out.retain(|m| !dropped_here(m));
         if self.save_in_flight.is_none() {
-            // What waited only behind a dropped directive may leave.
+            // What waited only behind a dropped message may leave.
             self.release(0);
         }
         let dropped = before - self.gated.len() - self.out.len();
         if dropped > 0 {
-            log::info!("coordinator: {dropped} unsent directives for host {host} superseded by its attach");
+            log::info!("coordinator: {dropped} unsent {what} for host {host} superseded by its attach");
         }
     }
 
@@ -498,13 +494,18 @@ impl Coordinator {
         epoch: u64,
         running: Vec<RunningRegion>,
         online: Vec<OnlinePlayer>,
+        handed: Vec<(PlayerId, u32, u64)>,
     ) {
         log::info!(
-            "coordinator: host {host} attached (epoch {epoch}) with {} running regions, {} online",
+            "coordinator: host {host} attached (epoch {epoch}) with {} running regions, {} online, {} handed",
             running.len(),
-            online.len()
+            online.len(),
+            handed.len()
         );
         self.drop_unsent_directives(host);
+        // The attach reports everyone afresh: an answer to an earlier report (perhaps the
+        // old process's, whose numbers a restarted host reuses) is void.
+        self.drop_unsent(host, "claim answers", |m| matches!(m, CoordMsg::ClaimIs { .. } | CoordMsg::HopIs { .. }));
         self.push(Target::Host(host), CoordMsg::Attached { epoch });
         let listed: BTreeSet<RegionCoords> = running.iter().map(|r| r.rc).collect();
         for rc in self.history.live_regions() {
@@ -526,14 +527,25 @@ impl Coordinator {
         for d in self.history.reattach_regions(&regions) {
             self.push_directive(d);
         }
-        // The host's players were online on it: its list says who still is.
-        let gone: Vec<PlayerId> = self.online_on.iter().filter(|(_, h)| **h == host).map(|(p, _)| *p).collect();
+        // The host's players: its lists say who is online on it and who it handed away
+        // (each applied by its hop, as the message it stands for); any other player the
+        // coordinator still has online on it is not there any more.
+        let listed: BTreeSet<PlayerId> = online.iter().map(|p| p.player).collect();
+        for p in online {
+            self.player_online(host, p);
+        }
+        for (player, to, hop) in handed {
+            self.player_handed(host, player, to, hop);
+        }
+        let gone: Vec<PlayerId> = self
+            .online_on
+            .iter()
+            .filter(|(p, h)| **h == host && !listed.contains(p))
+            .map(|(p, _)| *p)
+            .collect();
         for p in gone {
             self.online_on.remove(&p);
             self.set_online(p, false);
-        }
-        for p in online {
-            self.player_online(host, p);
         }
         self.push_view(Target::Host(host));
     }
@@ -547,10 +559,20 @@ impl Coordinator {
     /// fortress (an offline claimant loses it, as to a return) — one fortress never has two
     /// players. Whenever the claim the coordinator ends with differs from the report, the
     /// host is told it ([`CoordMsg::ClaimIs`]): the coordinator's answer is final.
+    ///
+    /// A report whose hop is lower than the player's latest is stale and ignored; the
+    /// host is told the latest ([`CoordMsg::HopIs`]) in case the report is of its current
+    /// placement (a login that could not know the hops elsewhere).
     fn player_online(&mut self, host: u32, report: OnlinePlayer) {
-        let OnlinePlayer { player, claim, claim_pending, report } = report;
+        let OnlinePlayer { player, claim, claim_pending, report, hop } = report;
+        let known = self.hop_of(player);
+        if hop < known {
+            log::debug!("coordinator: {player:?} online on host {host} at hop {hop} ignored (hop {known} known)");
+            self.push(Target::Host(host), CoordMsg::HopIs { player, reported: hop, hop: known });
+            return;
+        }
+        self.hop_of.insert(player, hop);
         self.online_on.insert(player, host);
-        self.offline_early.remove(&player);
         let mine = self.player_claims.get(&player).copied();
         match (mine, claim) {
             (Some(mine), Some(theirs)) if mine == theirs => {}
@@ -573,6 +595,39 @@ impl Coordinator {
             log::info!("coordinator: host {host} reported {player:?} with {claim:?}; the claim is {now:?}");
             self.push(Target::Host(host), CoordMsg::ClaimIs { player, claim: now, report });
         }
+    }
+
+    /// `player`'s placement `hop` on `host` ended. Stale below the latest hop; at it, only
+    /// the host the player is online on ends it (a transit to another host stands); above
+    /// it, it is the end of a placement whose start has not arrived yet (it travels on
+    /// another link, or was lost): offline at that hop, and every message of that hop or
+    /// lower is stale from here on.
+    fn player_offline(&mut self, host: u32, player: PlayerId, hop: u64) {
+        let known = self.hop_of(player);
+        let on = self.online_on.get(&player).copied();
+        if hop < known || (hop == known && on != Some(host)) {
+            log::debug!("coordinator: {player:?} offline on host {host} at hop {hop} ignored (hop {known}, online on {on:?})");
+            return;
+        }
+        self.hop_of.insert(player, hop);
+        self.online_on.remove(&player);
+        self.set_online(player, false);
+    }
+
+    /// `host` handed `player`, placed there at `hop`, to host `to`: in transit — online on
+    /// `to` (its claim in use) until `to` reports it (at `hop + 1`). Stale below the latest
+    /// hop, and at it from a host the player is not online on; above it, the placement on
+    /// `host` whose start has not arrived yet, then the hand-over.
+    fn player_handed(&mut self, host: u32, player: PlayerId, to: u32, hop: u64) {
+        let known = self.hop_of(player);
+        let on = self.online_on.get(&player).copied();
+        if hop < known || (hop == known && on != Some(host)) {
+            log::debug!("coordinator: {player:?} handed by host {host} to {to} at hop {hop} ignored (hop {known}, online on {on:?})");
+            return;
+        }
+        self.hop_of.insert(player, hop);
+        self.online_on.insert(player, to);
+        self.set_online(player, true);
     }
 
     /// Take the claim the host reports for `player` (who holds none here).

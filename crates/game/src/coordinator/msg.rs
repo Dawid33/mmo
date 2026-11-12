@@ -95,9 +95,18 @@ pub struct OnlinePlayer {
     /// coordinator's [`CoordMsg::ClaimIs`] answer, so the host applies only an answer to
     /// its latest report of the player.
     pub report: u64,
+    /// The player's placement count on hosts ([`HostMsg`]'s hop rule): this placement's.
+    pub hop: u64,
 }
 
 /// Host → coordinator.
+///
+/// **Hops:** every message about a player's presence carries the player's `hop`, its
+/// placement count on hosts within the world generation: a hand-off or move to another
+/// host places it at the sender's hop + 1 ([`crate::PlayerHandoff::hop`]), a login at
+/// one more than the host knows of it (raised by [`CoordMsg::HopIs`] when the
+/// coordinator knows a higher one). Messages of different hosts may arrive in any order;
+/// the coordinator orders them by hop and ignores one lower than the player's latest.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub enum HostMsg {
     /// The host's first message on a (re)connected link: everything it runs and who is
@@ -118,6 +127,10 @@ pub enum HostMsg {
         generation: u64,
         boot: u64,
         settled_below: u64,
+        /// Players this host handed to another host (`to`, the hop they had here) since
+        /// the last [`CoordMsg::Attached`] it received: their `PlayerHandedTo` may have been
+        /// lost with the old connection.
+        handed: Vec<(PlayerId, u32, u64)>,
     },
     /// Region `rc` started (its `incarnation`-th start on the host): answered with
     /// [`CoordMsg::SpawnPeople`] for that incarnation.
@@ -144,15 +157,17 @@ pub enum HostMsg {
     /// was told failed must never complete later).
     Settle { id: RequestId, req: WorldRequest },
     PlayerOnline(OnlinePlayer),
-    PlayerOffline { player: PlayerId },
+    /// The player's placement here (`hop`) ended: it disconnected or parked.
+    PlayerOffline { player: PlayerId, hop: u64 },
     /// The player gave up its claim (retired, ended the adventure, or left before the
     /// claim's reply reached it). The site stays.
     ReleaseClaim { player: PlayerId },
     /// The player left this host for host `to` (a walking hand-off or a move), its claim
     /// going along: it stays online — in transit — until host `to` reports it
     /// (`PlayerOnline`, or `PlayerOffline` if it parks there on arrival). Sent instead of
-    /// `PlayerOffline`, so nobody takes the fortress of a player crossing hosts.
-    PlayerHandedTo { player: PlayerId, to: u32 },
+    /// `PlayerOffline`, so nobody takes the fortress of a player crossing hosts. `hop`: the
+    /// one it had here (host `to` places it at `hop + 1`).
+    PlayerHandedTo { player: PlayerId, to: u32, hop: u64 },
     /// Every request of this host's `boot` with `seq < below` has been answered and
     /// applied here, or was never sent: the coordinator forgets their memoised answers
     /// (no copy of them can come any more). Sent whenever the host's lowest outstanding
@@ -206,6 +221,12 @@ pub enum CoordMsg {
     /// `SpawnPeople` / `Directive` after this was decided from it; the host drops those
     /// that came before (the attach re-decided their regions from the bodies listed).
     Attached { epoch: u64 },
+    /// The host reported `player` (`PlayerOnline`, an `Attach`'s online entry) at hop
+    /// `reported`, lower than `hop`, the highest the coordinator knows: ignored as stale.
+    /// If the player's current placement on the host is that very one (a login that
+    /// could not know the player's hops elsewhere), the host numbers it `hop + 1` and
+    /// reports it again.
+    HopIs { player: PlayerId, reported: u64, hop: u64 },
 }
 
 impl CoordMsg {

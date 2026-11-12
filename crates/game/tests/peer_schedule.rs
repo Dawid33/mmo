@@ -2778,7 +2778,7 @@ fn old_claim_is_after_round_trip(rig: &mut MultiRig) {
     rig.run(b);
     rig.with_coordinator(history);
     // Another player, online on a host outside the rig, plays the site.
-    let held = game::OnlinePlayer { player: other, claim: Some(game::Claim::Fortress(site)), claim_pending: false, report: 1 };
+    let held = game::OnlinePlayer { player: other, claim: Some(game::Claim::Fortress(site)), claim_pending: false, report: 1, hop: 1 };
     rig.core().handle(9, game::HostMsg::PlayerOnline(held), 0);
     // A's answers are held back: the coordinator's answer to the report below waits.
     rig.hold_world(ha, true);
@@ -2788,7 +2788,7 @@ fn old_claim_is_after_round_trip(rig: &mut MultiRig) {
     assert_eq!(rig.hosts[ha as usize].manager.client_claim(P_CLIENT), Some(game::Claim::Fortress(site)), "the early guess");
     rounds_until(rig, "the report is answered", |rig| rig.coordinator_pending().is_empty());
     // The other player leaves: the fortress is the test player's to take up.
-    rig.core().handle(9, game::HostMsg::PlayerOffline { player: other }, 0);
+    rig.core().handle(9, game::HostMsg::PlayerOffline { player: other, hop: 1 }, 0);
     assert!(rig.teleport(a, id, past_seam(a, b, REGION_SIZE / 2.0)));
     until_player_settled_in(rig, b);
     rounds_until(rig, "host B's report is answered", |rig| rig.coordinator_pending().is_empty());

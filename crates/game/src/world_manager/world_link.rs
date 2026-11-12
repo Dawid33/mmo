@@ -406,17 +406,26 @@ impl<S: RegionSpawner> WorldManager<S> {
         let reports: Vec<(ClientId, PlayerId)> = self.player_of.iter().map(|(c, p)| (*c, *p)).collect();
         let online: Vec<OnlinePlayer> = reports.into_iter().map(|(c, p)| self.online_report(c, p)).collect();
 
-        // The `Attach` names who is online as things stand: a queued `PlayerOnline` /
-        // `PlayerOffline` would only repeat an older report after it.
+        // The `Attach` names who is online as things stand, and who was handed away since
+        // the last echo: a queued `PlayerOnline` / `PlayerOffline` / `PlayerHandedTo` would
+        // only repeat an older report after it.
         self.outbox.retain(|m| {
             !matches!(m, HostMsg::PlayerOnline(_) | HostMsg::PlayerOffline { .. } | HostMsg::PlayerHandedTo { .. })
         });
+        let handed: Vec<(PlayerId, u32, u64)> = self
+            .handed
+            .iter_mut()
+            .map(|(p, (to, hop, carried))| {
+                *carried = epoch;
+                (*p, *to, *hop)
+            })
+            .collect();
         log::info!("attach {epoch}: {} regions, {} online, {} queued", running.len(), online.len(), self.outbox.len());
         let host = self.world_host();
         let generation = self.host_generation;
         let (boot, settled_below) = (self.world_boot, self.lowest_outstanding());
         self.settled_below = settled_below;
-        self.link_send(HostMsg::Attach { host, epoch, running, online, generation, boot, settled_below });
+        self.link_send(HostMsg::Attach { host, epoch, running, online, generation, boot, settled_below, handed });
         let queued: BTreeSet<RequestId> = self
             .outbox
             .iter()
@@ -531,6 +540,8 @@ impl<S: RegionSpawner> WorldManager<S> {
                 WorldAttach::Sent { epoch: sent } if sent == epoch => {
                     log::info!("world link: attach {epoch} applied");
                     self.world_attach = WorldAttach::Attached;
+                    // The coordinator has those hand-overs; later ones wait for the next.
+                    self.handed.retain(|_, (_, _, carried)| *carried != epoch);
                 }
                 _ => log::debug!("world link: stale attach echo {epoch} ignored"),
             },
@@ -614,6 +625,62 @@ impl<S: RegionSpawner> WorldManager<S> {
                 self.acknowledge_settled();
             }
             CoordMsg::ClaimIs { player, claim, report } => self.claim_is(player, claim, report),
+            CoordMsg::HopIs { player, reported, hop } => self.hop_is(player, reported, hop),
+        }
+    }
+
+    /// `player`'s hop here ([`HostMsg`]'s hop rule; 0 = never placed here).
+    pub(super) fn hop_here(&self, player: PlayerId) -> u64 {
+        self.player_hop.get(&player).copied().unwrap_or(0)
+    }
+
+    /// `player` is placed here by a login (or a session taking over): one more than this
+    /// host knows of it. That may not be above its hops on other hosts (this host does not
+    /// see them); the coordinator then says so ([`CoordMsg::HopIs`], [`Self::hop_is`]).
+    pub(super) fn placed_by_login(&mut self, player: PlayerId) {
+        let hop = self.hop_here(player) + 1;
+        self.player_hop.insert(player, hop);
+        self.handed.remove(&player);
+    }
+
+    /// `player` arrives from another host at the hand-off's `hop` (the sender's + 1), or
+    /// one more than known here if that is higher: every later placement counts higher.
+    pub(super) fn placed_by_handoff(&mut self, player: PlayerId, hop: u64) {
+        let hop = hop.max(self.hop_here(player) + 1);
+        self.player_hop.insert(player, hop);
+        self.handed.remove(&player);
+    }
+
+    /// `player` leaves for host `to`, its claim going along: the coordinator is told
+    /// (`PlayerHandedTo`, at its hop here), and the next `Attach`es list it until one is
+    /// echoed.
+    pub(super) fn world_handed(&mut self, player: PlayerId, to: u32) {
+        let hop = self.hop_here(player);
+        self.handed.insert(player, (to, hop, 0));
+        self.world_send(HostMsg::PlayerHandedTo { player, to, hop });
+    }
+
+    /// The coordinator ignored a report of `player` at hop `reported` because it knows
+    /// `hop`, a higher one. If that report is of the player's current placement here (a
+    /// login, which could not know the player's hops elsewhere), the placement is numbered
+    /// `hop + 1` and reported again: it is the newest (the player is here), so every
+    /// placement the coordinator knows of is older. Otherwise the report was of an older
+    /// placement here: nothing to do.
+    fn hop_is(&mut self, player: PlayerId, reported: u64, hop: u64) {
+        let clients: Vec<ClientId> = self
+            .player_of
+            .iter()
+            .filter(|(c, p)| **p == player && !self.restore_pending(**c))
+            .map(|(c, _)| *c)
+            .collect();
+        if self.hop_here(player) != reported || clients.is_empty() {
+            log::debug!("{player:?}: hop {hop} known to the coordinator; the report at {reported} was of an older placement");
+            return;
+        }
+        log::info!("{player:?}: placed here at hop {reported}, the coordinator knows {hop}: numbered {} and reported again", hop + 1);
+        self.player_hop.insert(player, hop + 1);
+        for c in clients {
+            self.world_player_online(c);
         }
     }
 
@@ -634,6 +701,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             claim: self.claim_of_client(client),
             claim_pending: self.claim_pending(player),
             report: self.claim_seq,
+            hop: self.hop_here(player),
         }
     }
 

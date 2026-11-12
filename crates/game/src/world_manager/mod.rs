@@ -756,6 +756,18 @@ pub struct WorldManager<S: RegionSpawner> {
     /// (`world_link.rs`, `claim_is`). Forgotten when the player's last session here ends.
     claim_changes: BTreeMap<PlayerId, u64>,
     claim_reported: BTreeMap<PlayerId, u64>,
+    /// Each player's hop as this host last knew it ([`HostMsg`]'s hop rule): its
+    /// placement here (a login: one more than known; an arrival: the hand-off's), or the
+    /// one it had here when it left. Kept after it leaves (a later login here counts on
+    /// from it); this process's alone (a restart starts over, as the world generation's
+    /// rollback does).
+    player_hop: BTreeMap<PlayerId, u64>,
+    /// Players handed to another host since the last `Attached` echo: `(to, hop here,
+    /// the attach epoch that carried it — 0 before one)`, the latest per player. Listed in
+    /// every `Attach` (their `PlayerHandedTo` may have been lost with the connection);
+    /// dropped by the echo of an attach that carried them, or when the player is placed
+    /// here again.
+    handed: BTreeMap<PlayerId, (u32, u64, u64)>,
     /// Requests and claim messages made while the link is down (or the `Attach` is being
     /// gathered), in order: sent right after the `Attach`.
     outbox: VecDeque<HostMsg>,
@@ -1018,6 +1030,8 @@ impl<S: RegionSpawner> WorldManager<S> {
             claim_seq: 0,
             claim_changes: BTreeMap::new(),
             claim_reported: BTreeMap::new(),
+            player_hop: BTreeMap::new(),
+            handed: BTreeMap::new(),
             outbox: VecDeque::new(),
             world_request_timeout_ms: WORLD_REQUEST_TIMEOUT_SECS * 1000,
             world_counters: WorldLinkCounters::default(),
@@ -2657,7 +2671,8 @@ impl<S: RegionSpawner> WorldManager<S> {
         if let Some(player) = player {
             // Its claim stays (in its record too); another player may take an offline
             // claimant's fortress up.
-            self.world_send(HostMsg::PlayerOffline { player });
+            let hop = self.hop_here(player);
+            self.world_send(HostMsg::PlayerOffline { player, hop });
             self.forget_claim_reports(player);
         }
         self.deferred_packets.remove(&id);
@@ -2790,6 +2805,7 @@ impl<S: RegionSpawner> WorldManager<S> {
         }
         self.sessions.entry(id).or_default().player = Some(player);
         self.player_of.insert(id, player);
+        self.placed_by_login(player);
         let in_flight = self.parking.values().any(|p| p.player == player);
         if in_flight {
             // Reconnected faster than the park: restore once it is back.

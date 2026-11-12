@@ -213,17 +213,19 @@ fn describe(msg: &CoordMsg) -> String {
         CoordMsg::Notice { region, .. } => format!("Notice for {region:?}"),
         CoordMsg::Attached { epoch } => format!("Attached {{ epoch: {epoch} }}"),
         CoordMsg::ClaimIs { player, claim, report } => format!("ClaimIs {player:?} {claim:?} (report {report})"),
+        CoordMsg::HopIs { player, reported, hop } => format!("HopIs {player:?} {reported} -> {hop}"),
     }
 }
 
 /// A host message's kind and region, for logs (an `Attach` or `Positions` can be large).
 pub(crate) fn describe_host(msg: &HostMsg) -> String {
     match msg {
-        HostMsg::Attach { host, epoch, running, online, generation, boot, settled_below } => format!(
+        HostMsg::Attach { host, epoch, running, online, generation, boot, settled_below, handed } => format!(
             "Attach {{ host: {host}, epoch: {epoch}, generation: {generation}, boot: {boot}, settled_below: {settled_below} }} \
-             ({} regions, {} online)",
+             ({} regions, {} online, {} handed)",
             running.len(),
-            online.len()
+            online.len(),
+            handed.len()
         ),
         HostMsg::RegionStarted { rc, incarnation } => format!("RegionStarted {rc:?} incarnation {incarnation}"),
         HostMsg::RegionStopping { rc } => format!("RegionStopping {rc:?}"),
@@ -238,10 +240,10 @@ pub(crate) fn describe_host(msg: &HostMsg) -> String {
         HostMsg::Request { id, .. } => format!("Request {id:?}"),
         HostMsg::Settle { id, .. } => format!("Settle {id:?}"),
         HostMsg::Settled { boot, below } => format!("Settled {{ boot: {boot}, below: {below} }}"),
-        HostMsg::PlayerOnline(p) => format!("PlayerOnline {:?}", p.player),
-        HostMsg::PlayerOffline { player } => format!("PlayerOffline {player:?}"),
+        HostMsg::PlayerOnline(p) => format!("PlayerOnline {:?} hop {}", p.player, p.hop),
+        HostMsg::PlayerOffline { player, hop } => format!("PlayerOffline {player:?} hop {hop}"),
         HostMsg::ReleaseClaim { player } => format!("ReleaseClaim {player:?}"),
-        HostMsg::PlayerHandedTo { player, to } => format!("PlayerHandedTo {player:?} to host {to}"),
+        HostMsg::PlayerHandedTo { player, to, hop } => format!("PlayerHandedTo {player:?} to host {to} hop {hop}"),
     }
 }
 
@@ -932,7 +934,7 @@ mod tests {
     use game::RequestId;
 
     fn attach(host: u32, epoch: u64) -> HostMsg {
-        HostMsg::Attach { host, epoch, running: Vec::new(), online: Vec::new(), generation: 0, boot: 1, settled_below: 0 }
+        HostMsg::Attach { host, epoch, running: Vec::new(), online: Vec::new(), generation: 0, boot: 1, settled_below: 0, handed: Vec::new() }
     }
 
     /// Any ordinal is served, each with one live connection; a hello whose claim epoch is

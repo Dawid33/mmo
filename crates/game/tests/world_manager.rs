@@ -1431,7 +1431,7 @@ fn claim_is_sets_the_host_claim() {
         let mut core = Coordinator::new(hist, 0);
         if taken_by_other {
             // Player 50, online on host 9, plays site 0.
-            let other = OnlinePlayer { player: PlayerId(50), claim: Some(Claim::Fortress(SiteId(0))), claim_pending: false, report: 1 };
+            let other = OnlinePlayer { player: PlayerId(50), claim: Some(Claim::Fortress(SiteId(0))), claim_pending: false, report: 1, hop: 1 };
             core.handle(9, HostMsg::PlayerOnline(other), 0);
         }
         let mut h = floored_harness();
@@ -1490,4 +1490,40 @@ fn claim_is_sets_the_host_claim() {
         told.iter().any(|p| matches!(p, (Some(0), ServerPacket::EmbarkResult(Err(game::history::EmbarkRefusal::AlreadyHasFortress))))),
         "its own embark is refused: {told:?}"
     );
+}
+
+/// R3 Task 11: a login cannot know the player's hops on other hosts. The coordinator
+/// knows hop 5 (the player's last placement, on host 9); this host places it by a login
+/// at hop 1, which the coordinator ignores as stale and answers with `HopIs`: the host
+/// numbers the placement 6 and reports it again — online here — and its disconnect,
+/// at hop 6, takes the player offline.
+#[test]
+fn login_below_the_known_hop_is_numbered_above_it() {
+    use crate::history_handover::{land_map, start};
+    use game::coordinator::{Coordinator, HostMsg, InlineWorldLink, OnlinePlayer};
+    use game::history::{History, SocietyGrid};
+    crate::common::install_real_block_props();
+    let map = land_map(16, 3);
+    let a = PlayerId(1);
+    let mut core = Coordinator::new(History::new(5, start(), SocietyGrid::from_world_map(&map)), 0);
+    let elsewhere = OnlinePlayer { player: a, claim: None, claim_pending: false, report: 1, hop: 5 };
+    core.handle(9, HostMsg::PlayerOnline(elsewhere), 0);
+    core.handle(9, HostMsg::PlayerOffline { player: a, hop: 5 }, 0);
+    let mut h = floored_harness();
+    h.manager.set_world_map(map);
+    h.manager.set_world_link(Box::new(InlineWorldLink::new(core)), 1, 0);
+    h.event(session(0, 1, None), 0);
+    for t in 1..5 {
+        h.manager.maintain(t * 10);
+        h.settle(t * 10);
+    }
+    let core = h.manager.world_link().and_then(|l| l.as_inline()).unwrap().coordinator();
+    assert_eq!((core.online_on(a), core.hop_of(a)), (Some(0), 6), "online here, numbered above the known hop");
+    h.event(ServerEvent::ClientDisconnected(0), 50);
+    for t in 6..9 {
+        h.manager.maintain(t * 10);
+        h.settle(t * 10);
+    }
+    let core = h.manager.world_link().and_then(|l| l.as_inline()).unwrap().coordinator();
+    assert_eq!((core.online_on(a), core.hop_of(a)), (None, 6), "its disconnect ends it");
 }

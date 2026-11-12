@@ -457,7 +457,7 @@ mod tests {
         let (_wake_tx, wake) = crossbeam::channel::bounded(1);
         let mut link = QuicWorldLink::over(out, events, wake);
         assert!(!link.is_up());
-        link.send(HostMsg::PlayerOffline { player: game::PlayerId(1) });
+        link.send(HostMsg::PlayerOffline { player: game::PlayerId(1), hop: 1 });
         assert!(out_rx.try_recv().is_err(), "nothing is sent while down");
 
         for ev in [
@@ -477,7 +477,7 @@ mod tests {
         assert!(link.is_up(), "down and up again within one pump");
         assert_eq!(link.generation(), 2, "a new connection: the host re-attaches");
         assert_eq!(link.recv(), Some(calendar(2)));
-        link.send(HostMsg::PlayerOffline { player: game::PlayerId(1) });
+        link.send(HostMsg::PlayerOffline { player: game::PlayerId(1), hop: 1 });
         assert!(out_rx.try_recv().is_ok(), "sent while up");
 
         tx.send(LinkEvent::Down("gone".into())).unwrap();

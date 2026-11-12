@@ -208,7 +208,7 @@ fn return_in_use_only_while_online() {
         WorldReply::EmbarkRefused(EmbarkRefusal::NotPlayerFounded),
         "only player-founded sites"
     );
-    c.handle(0, HostMsg::PlayerOffline { player: A }, 0);
+    c.handle(0, HostMsg::PlayerOffline { player: A, hop: 1 }, 0);
     c.handle(0, request(4, B, WorldRequest::ReturnTo(site)), 0);
     assert_eq!(reply_to(&commit(&mut c), 4), WorldReply::Returned { site, region });
     assert_eq!(c.claim_of(B), Some(Claim::Fortress(site)));
@@ -306,7 +306,7 @@ fn reattach_keeps_bodies_and_despawns_the_dead() {
     let mut c = Coordinator::from_state(state, grid(), 60_000).expect("state loads");
     assert!(matches!(c.take_msgs().as_slice(), [CoordMsg::View { .. }]));
     let running = RunningRegion { rc: r, incarnation: 1, people: vec![(p, [1.0, 2.0, 3.0]), (q, [4.0, 5.0, 6.0])] };
-    c.handle(0, HostMsg::Attach { host: 0, epoch: 1, running: vec![running], online: Vec::new(), generation: 0, boot: 7, settled_below: 0 }, 60_000);
+    c.handle(0, HostMsg::Attach { host: 0, epoch: 1, running: vec![running], online: Vec::new(), generation: 0, boot: 7, settled_below: 0, handed: Vec::new() }, 60_000);
     let out = commit(&mut c);
     assert!(!out.iter().any(|m| matches!(m, CoordMsg::SpawnPeople { .. })), "a reattach spawns nothing: {out:?}");
     assert_eq!(events_about(&out, q), Vec::<GameEventKind>::new(), "Q's body stands");
@@ -507,7 +507,7 @@ fn attach_of_an_unannounced_region_spawns_its_residents_once() {
     let (mut c, _, people) = coordinator();
     let r = rc(0, 0);
     let running = |bodies: Vec<(PersonId, [f32; 3])>| RunningRegion { rc: r, incarnation: 1, people: bodies };
-    c.handle(0, HostMsg::Attach { host: 0, epoch: 1, running: vec![running(Vec::new())], online: Vec::new(), generation: 0, boot: 7, settled_below: 0 }, 0);
+    c.handle(0, HostMsg::Attach { host: 0, epoch: 1, running: vec![running(Vec::new())], online: Vec::new(), generation: 0, boot: 7, settled_below: 0, handed: Vec::new() }, 0);
     let out = commit(&mut c);
     let attached = out.iter().position(|m| matches!(m, CoordMsg::Attached { epoch: 1 })).expect("the echo");
     for p in &people {
@@ -516,7 +516,7 @@ fn attach_of_an_unannounced_region_spawns_its_residents_once() {
     }
     // Re-attached with every body there: nothing more.
     let bodies: Vec<(PersonId, [f32; 3])> = people.iter().map(|p| (*p, [0.0; 3])).collect();
-    c.handle(0, HostMsg::Attach { host: 0, epoch: 2, running: vec![running(bodies)], online: Vec::new(), generation: 0, boot: 7, settled_below: 0 }, 0);
+    c.handle(0, HostMsg::Attach { host: 0, epoch: 2, running: vec![running(bodies)], online: Vec::new(), generation: 0, boot: 7, settled_below: 0, handed: Vec::new() }, 0);
     let out = commit(&mut c);
     assert!(directives_for(&out, r).is_empty(), "{out:?}");
 }
@@ -549,7 +549,7 @@ fn crossing_held_behind_the_attach_keeps_one_body() {
         RunningRegion { rc: a, incarnation: 1, people: a_list },
         RunningRegion { rc: b, incarnation: 1, people: vec![(p, at)] },
     ];
-    c.handle(0, HostMsg::Attach { host: 0, epoch: 1, running, online: Vec::new(), generation: 0, boot: 7, settled_below: 0 }, 0);
+    c.handle(0, HostMsg::Attach { host: 0, epoch: 1, running, online: Vec::new(), generation: 0, boot: 7, settled_below: 0, handed: Vec::new() }, 0);
     let out = commit(&mut c);
     count(p, &out, &mut p_bodies);
     count(q, &out, &mut q_bodies);
@@ -583,8 +583,8 @@ fn attach_supersedes_unsent_directives() {
     assert!(c.take_msgs().is_empty());
     // The link dropped; the host re-attaches running `r` with no body of P.
     let running = RunningRegion { rc: r, incarnation: 1, people: Vec::new() };
-    let online = vec![OnlinePlayer { player: A, claim: None, claim_pending: true, report: 1 }];
-    c.handle(0, HostMsg::Attach { host: 0, epoch: 1, running: vec![running], online, generation: 0, boot: 7, settled_below: 0 }, 0);
+    let online = vec![OnlinePlayer { player: A, claim: None, claim_pending: true, report: 1, hop: 1 }];
+    c.handle(0, HostMsg::Attach { host: 0, epoch: 1, running: vec![running], online, generation: 0, boot: 7, settled_below: 0, handed: Vec::new() }, 0);
     let out = commit(&mut c);
     let attached = out.iter().position(|m| matches!(m, CoordMsg::Attached { epoch: 1 })).expect("the echo");
     assert!(directives_for(&out[..attached], r).is_empty(), "the stale spawn is dropped: {out:?}");
@@ -620,7 +620,7 @@ fn reattach_keeps_a_body_that_crossed_between_listed_regions() {
         if order {
             running.reverse();
         }
-        c.handle(0, HostMsg::Attach { host: 0, epoch: 1, running, online: Vec::new(), generation: 0, boot: 7, settled_below: 0 }, 0);
+        c.handle(0, HostMsg::Attach { host: 0, epoch: 1, running, online: Vec::new(), generation: 0, boot: 7, settled_below: 0, handed: Vec::new() }, 0);
         let out = commit(&mut c);
         assert_eq!(body_delta(&out, p), 0, "order {order}: no despawn of P's only body: {out:?}");
         assert_eq!(c.history().person(p).unwrap().location, Location::InRegion(r1), "order {order}");
@@ -669,7 +669,12 @@ fn duplicated_bounce_is_redelivered_once() {
 }
 
 fn online(player: PlayerId, claim: Option<Claim>, claim_pending: bool) -> HostMsg {
-    HostMsg::PlayerOnline(OnlinePlayer { player, claim, claim_pending, report: 1 })
+    online_at(player, claim, claim_pending, 1)
+}
+
+/// [`online`] at placement `hop`.
+fn online_at(player: PlayerId, claim: Option<Claim>, claim_pending: bool, hop: u64) -> HostMsg {
+    HostMsg::PlayerOnline(OnlinePlayer { player, claim, claim_pending, report: 1, hop })
 }
 
 /// The host's report is the truth for an online player without an unsettled request: a
@@ -783,11 +788,11 @@ fn commit_routed(c: &mut Coordinator) -> Vec<(Target, CoordMsg)> {
 }
 
 fn attach(host: u32, epoch: u64, running: Vec<RunningRegion>, online: Vec<OnlinePlayer>) -> HostMsg {
-    HostMsg::Attach { host, epoch, running, online, generation: 0, boot: 7, settled_below: 0 }
+    HostMsg::Attach { host, epoch, running, online, generation: 0, boot: 7, settled_below: 0, handed: Vec::new() }
 }
 
 fn report(player: PlayerId, claim: Option<Claim>, claim_pending: bool) -> OnlinePlayer {
-    OnlinePlayer { player, claim, claim_pending, report: 1 }
+    OnlinePlayer { player, claim, claim_pending, report: 1, hop: 1 }
 }
 
 /// Host 0 runs site 0's region with its people and has A online in A's fortress; host 1
@@ -845,13 +850,13 @@ fn player_offline_from_the_old_host_after_online_on_the_new_is_ignored() {
     let WorldReply::Embarked { site, region } = reply_to(&commit(&mut c), 1) else { panic!("embarks") };
     c.handle(0, online(A, Some(Claim::Fortress(site)), false), 0);
     assert_eq!(c.online_on(A), Some(0));
-    c.handle(1, online(A, Some(Claim::Fortress(site)), false), 0);
-    c.handle(0, HostMsg::PlayerOffline { player: A }, 0);
+    c.handle(1, online_at(A, Some(Claim::Fortress(site)), false, 2), 0);
+    c.handle(0, HostMsg::PlayerOffline { player: A, hop: 1 }, 0);
     assert_eq!(c.online_on(A), Some(1), "online on the new host");
     assert!(!commit(&mut c).iter().any(|m| matches!(m, CoordMsg::ClaimIs { .. })), "nothing to correct");
     c.handle(0, request(2, B, WorldRequest::ReturnTo(site)), 0);
     assert_eq!(reply_to(&commit(&mut c), 2), WorldReply::EmbarkRefused(EmbarkRefusal::InUse));
-    c.handle(1, HostMsg::PlayerOffline { player: A }, 0);
+    c.handle(1, HostMsg::PlayerOffline { player: A, hop: 2 }, 0);
     assert_eq!(c.online_on(A), None);
     c.handle(0, request(3, B, WorldRequest::ReturnTo(site)), 0);
     assert_eq!(reply_to(&commit(&mut c), 3), WorldReply::Returned { site, region });
@@ -952,46 +957,49 @@ fn handed_player_stays_online_until_the_new_host_reports() {
     let (mut c, civ, people) = coordinator();
     c.handle(0, embark(1, A, civ, &people[0..2], rc(8, 0)), 0);
     let WorldReply::Embarked { site, region } = reply_to(&commit(&mut c), 1) else { panic!("embarks") };
-    c.handle(0, HostMsg::PlayerHandedTo { player: A, to: 1 }, 0);
+    c.handle(0, HostMsg::PlayerHandedTo { player: A, to: 1, hop: 1 }, 0);
     assert_eq!(c.online_on(A), Some(1), "in transit to host 1");
     c.handle(0, request(2, B, WorldRequest::ReturnTo(site)), 0);
     assert_eq!(reply_to(&commit(&mut c), 2), WorldReply::EmbarkRefused(EmbarkRefusal::InUse), "in use while in transit");
-    c.handle(1, online(A, Some(Claim::Fortress(site)), false), 0);
+    c.handle(1, online_at(A, Some(Claim::Fortress(site)), false, 2), 0);
     assert!(claim_is(&commit_routed(&mut c), A).is_empty(), "nothing to correct");
     assert_eq!((c.online_on(A), c.claim_of(A)), (Some(1), Some(Claim::Fortress(site))));
     c.handle(0, request(3, B, WorldRequest::ReturnTo(site)), 0);
     assert_eq!(reply_to(&commit(&mut c), 3), WorldReply::EmbarkRefused(EmbarkRefusal::InUse));
-    c.handle(1, HostMsg::PlayerOffline { player: A }, 0);
+    c.handle(1, HostMsg::PlayerOffline { player: A, hop: 2 }, 0);
     c.handle(0, request(4, B, WorldRequest::ReturnTo(site)), 0);
     assert_eq!(reply_to(&commit(&mut c), 4), WorldReply::Returned { site, region });
 }
 
-/// A `PlayerHandedTo` from a host the player is not online on (a stale or a stray
-/// message) changes nothing; nor does one for a player online nowhere.
+/// A `PlayerHandedTo` at the player's latest hop from a host the player is not online
+/// on (a stale or a stray message) changes nothing; nor does one for a player online
+/// nowhere.
 #[test]
 fn handed_to_from_a_host_that_does_not_have_the_player_is_ignored() {
     let (mut c, civ, people) = coordinator();
     c.handle(0, embark(1, A, civ, &people[0..2], rc(8, 0)), 0);
     let WorldReply::Embarked { site, region } = reply_to(&commit(&mut c), 1) else { panic!("embarks") };
-    c.handle(2, HostMsg::PlayerHandedTo { player: A, to: 3 }, 0);
+    c.handle(0, online(A, Some(Claim::Fortress(site)), false), 0);
+    c.handle(2, HostMsg::PlayerHandedTo { player: A, to: 3, hop: 1 }, 0);
     assert_eq!(c.online_on(A), Some(0));
-    c.handle(0, HostMsg::PlayerOffline { player: A }, 0);
+    c.handle(0, HostMsg::PlayerOffline { player: A, hop: 1 }, 0);
     assert_eq!(c.online_on(A), None);
-    c.handle(0, HostMsg::PlayerHandedTo { player: A, to: 1 }, 0);
+    c.handle(0, HostMsg::PlayerHandedTo { player: A, to: 1, hop: 1 }, 0);
     assert_eq!(c.online_on(A), None, "online nowhere: nothing to hand");
     c.handle(0, request(2, B, WorldRequest::ReturnTo(site)), 0);
     assert_eq!(reply_to(&commit(&mut c), 2), WorldReply::Returned { site, region });
 }
 
 /// P in transit to host 1, which (re)attaches without it: the transit ends (offline). And
-/// host 1 parking P on arrival (its `PlayerOffline`) before host 0's `PlayerHandedTo`
-/// comes ends the transit as soon as that comes.
+/// host 1 parking P on arrival (its `PlayerOffline`, at the hop after host 0's) heard
+/// before host 0's `PlayerHandedTo` takes P offline at once; the hand-over, older, then
+/// changes nothing.
 #[test]
 fn attach_of_the_new_host_without_the_player_ends_the_transit() {
     let (mut c, civ, people) = coordinator();
     c.handle(0, embark(1, A, civ, &people[0..2], rc(8, 0)), 0);
     let WorldReply::Embarked { site, .. } = reply_to(&commit(&mut c), 1) else { panic!("embarks") };
-    c.handle(0, HostMsg::PlayerHandedTo { player: A, to: 1 }, 0);
+    c.handle(0, HostMsg::PlayerHandedTo { player: A, to: 1, hop: 1 }, 0);
     c.handle(1, attach(1, 1, Vec::new(), Vec::new()), 0);
     assert_eq!(c.online_on(A), None);
     c.handle(0, request(2, B, WorldRequest::ReturnTo(site)), 0);
@@ -999,12 +1007,12 @@ fn attach_of_the_new_host_without_the_player_ends_the_transit() {
     c.handle(0, HostMsg::ReleaseClaim { player: B }, 0);
     // A, online again on host 0 with the fortress, is handed to host 1 — whose park on
     // arrival is heard first.
-    c.handle(0, online(A, Some(Claim::Fortress(site)), false), 0);
+    c.handle(0, online_at(A, Some(Claim::Fortress(site)), false, 2), 0);
     assert_eq!(c.claim_of(A), Some(Claim::Fortress(site)));
-    c.handle(1, HostMsg::PlayerOffline { player: A }, 0);
-    assert_eq!(c.online_on(A), Some(0), "not yet handed");
-    c.handle(0, HostMsg::PlayerHandedTo { player: A, to: 1 }, 0);
+    c.handle(1, HostMsg::PlayerOffline { player: A, hop: 3 }, 0);
     assert_eq!(c.online_on(A), None, "parked on arrival: offline");
+    c.handle(0, HostMsg::PlayerHandedTo { player: A, to: 1, hop: 2 }, 0);
+    assert_eq!(c.online_on(A), None, "the older hand-over changes nothing");
     c.handle(0, request(3, B, WorldRequest::ReturnTo(site)), 0);
     assert!(matches!(reply_to(&commit(&mut c), 3), WorldReply::Returned { .. }));
 }
@@ -1086,7 +1094,7 @@ fn settled_watermark_prunes_exactly_below() {
     assert_eq!(memo_ids(&c), vec![rid(3), rid(4), other_host]);
     c.handle(0, attach(0, 1, Vec::new(), Vec::new()), 0);
     assert_eq!(memo_ids(&c), vec![rid(3), rid(4), other_host], "an attach watermark of 0 prunes nothing");
-    c.handle(0, HostMsg::Attach { host: 0, epoch: 2, running: Vec::new(), online: Vec::new(), generation: 0, boot: 7, settled_below: 4 }, 0);
+    c.handle(0, HostMsg::Attach { host: 0, epoch: 2, running: Vec::new(), online: Vec::new(), generation: 0, boot: 7, settled_below: 4, handed: Vec::new() }, 0);
     assert_eq!(memo_ids(&c), vec![rid(4), other_host], "the attach's watermark prunes below it");
     c.handle(1, HostMsg::Settled { boot: 7, below: 2 }, 0);
     assert_eq!(memo_ids(&c), vec![rid(4)]);
@@ -1114,6 +1122,7 @@ fn new_boot_attach_drops_the_old_boots_memo() {
         generation: 0,
         boot: 9,
         settled_below: 0,
+        handed: Vec::new(),
     };
     c.handle(0, attach_boot_9(2), 0);
     assert_eq!(memo_ids(&c), vec![other_host], "boot 7 of host 0 is gone");
@@ -1121,4 +1130,225 @@ fn new_boot_attach_drops_the_old_boots_memo() {
     commit(&mut c);
     c.handle(0, attach_boot_9(3), 0);
     assert_eq!(memo_ids(&c), vec![other_host, boot(0)], "a re-attach of the same boot keeps its answers");
+}
+
+// ---- Player hops order presence across hosts (R3 Task 11) ----------------------------
+
+const HOST_A: u32 = 0;
+const HOST_B: u32 = 1;
+
+/// A coordinator where player A has embarked (fortress `site`, its region) and is online
+/// on host A at hop 1.
+fn a_online_on_host_a() -> (Coordinator, SiteId, RegionCoords) {
+    let (mut c, site, region) = a_embarked_on_host_a();
+    c.handle(HOST_A, online_at(A, Some(Claim::Fortress(site)), false, 1), 0);
+    commit(&mut c);
+    (c, site, region)
+}
+
+/// Player A has embarked through host A (fortress `site`); no presence report yet.
+fn a_embarked_on_host_a() -> (Coordinator, SiteId, RegionCoords) {
+    let (mut c, civ, people) = coordinator();
+    c.handle(HOST_A, embark(1, A, civ, &people[0..2], rc(8, 0)), 0);
+    let WorldReply::Embarked { site, region } = reply_to(&commit(&mut c), 1) else { panic!("embarks") };
+    (c, site, region)
+}
+
+/// Whether another player (B) may return to `site` now: the claim is offline. A granted
+/// return is given back at once, so the probe changes nothing.
+fn returnable(c: &mut Coordinator, site: SiteId, id: u64) -> bool {
+    c.handle(HOST_A, request(id, B, WorldRequest::ReturnTo(site)), 0);
+    match reply_to(&commit(c), id) {
+        WorldReply::Returned { .. } => {
+            c.handle(HOST_A, HostMsg::ReleaseClaim { player: B }, 0);
+            commit(c);
+            true
+        }
+        WorldReply::EmbarkRefused(EmbarkRefusal::InUse) => false,
+        other => panic!("unexpected answer to the probe: {other:?}"),
+    }
+}
+
+/// A → B → A, then a disconnect on A, as hosts A and B send it (in send order per host):
+/// A's placement at hop 1 and its hand-over, its placement at hop 3 and its end; B's
+/// placement at hop 2 and its hand-over back.
+fn round_trip(site: SiteId, disconnect: bool) -> (Vec<HostMsg>, Vec<HostMsg>) {
+    let fortress = Some(Claim::Fortress(site));
+    let mut a = vec![
+        online_at(A, fortress, false, 1),
+        HostMsg::PlayerHandedTo { player: A, to: HOST_B, hop: 1 },
+        online_at(A, fortress, false, 3),
+    ];
+    if disconnect {
+        a.push(HostMsg::PlayerOffline { player: A, hop: 3 });
+    }
+    let b = vec![online_at(A, fortress, false, 2), HostMsg::PlayerHandedTo { player: A, to: HOST_A, hop: 2 }];
+    (a, b)
+}
+
+/// The reviewer's order: B's link lags behind all of A's messages. B's placement and
+/// hand-over back, older than A's last placement, change nothing: A ends offline and the
+/// fortress is free for another player.
+#[test]
+fn round_trip_then_disconnect_with_a_lagging_link_ends_offline() {
+    let (mut c, site, _) = a_embarked_on_host_a();
+    let (a, b) = round_trip(site, true);
+    for m in a {
+        c.handle(HOST_A, m, 0);
+    }
+    for m in b {
+        c.handle(HOST_B, m, 0);
+    }
+    assert_eq!(c.online_on(A), None, "offline after the disconnect");
+    assert_eq!(c.hop_of(A), 3);
+    assert!(returnable(&mut c, site, 10), "the fortress is free for another player");
+}
+
+/// Every interleaving of A's and B's messages for A → B → A (with and without the final
+/// disconnect) that keeps each host's own order ends as the in-order delivery does.
+#[test]
+fn every_arrival_order_of_a_round_trip_converges() {
+    for disconnect in [false, true] {
+        let (a_len, b_len) = {
+            let (a, b) = round_trip(SiteId(0), disconnect);
+            (a.len(), b.len())
+        };
+        let n = a_len + b_len;
+        let mut orders = 0;
+        // Each mask with `b_len` bits set picks the arrival slots of B's messages.
+        for mask in 0u32..(1 << n) {
+            if mask.count_ones() as usize != b_len {
+                continue;
+            }
+            orders += 1;
+            let (mut c, site, _) = a_embarked_on_host_a();
+            let (a, b) = round_trip(site, disconnect);
+            let (mut a, mut b) = (a.into_iter(), b.into_iter());
+            for slot in 0..n {
+                if mask & (1 << slot) != 0 {
+                    c.handle(HOST_B, b.next().unwrap(), 0);
+                } else {
+                    c.handle(HOST_A, a.next().unwrap(), 0);
+                }
+            }
+            let want_on = if disconnect { None } else { Some(HOST_A) };
+            assert_eq!(c.online_on(A), want_on, "disconnect {disconnect}, order {mask:b}");
+            assert_eq!(c.hop_of(A), 3, "disconnect {disconnect}, order {mask:b}");
+            assert_eq!(c.claim_of(A), Some(Claim::Fortress(site)), "disconnect {disconnect}, order {mask:b}");
+            assert_eq!(returnable(&mut c, site, 10), disconnect, "disconnect {disconnect}, order {mask:b}");
+        }
+        assert_eq!(orders, if disconnect { 15 } else { 10 });
+    }
+}
+
+/// A's `PlayerHandedTo` (A → B) is never delivered — lost with A's connection — and A
+/// re-attaches without the player but with it in `handed`: the claim stays online (in
+/// transit to B) until B reports. (a) B attaches without the player: offline. (b) B
+/// reports it online, then offline: in use until the offline.
+#[test]
+fn reattach_mid_crossing_keeps_the_claim_online() {
+    for b_attaches in [true, false] {
+        let (mut c, site, _) = a_online_on_host_a();
+        let reattach = HostMsg::Attach {
+            host: HOST_A,
+            epoch: 2,
+            running: Vec::new(),
+            online: Vec::new(),
+            generation: 0,
+            boot: 7,
+            settled_below: 0,
+            handed: vec![(A, HOST_B, 1)],
+        };
+        c.handle(HOST_A, reattach, 0);
+        assert_eq!(c.online_on(A), Some(HOST_B), "b_attaches {b_attaches}: in transit to B");
+        assert!(!returnable(&mut c, site, 10), "b_attaches {b_attaches}: in use while in transit");
+        if b_attaches {
+            c.handle(HOST_B, attach(HOST_B, 1, Vec::new(), Vec::new()), 0);
+        } else {
+            c.handle(HOST_B, online_at(A, Some(Claim::Fortress(site)), false, 2), 0);
+            assert!(!returnable(&mut c, site, 11), "online on B");
+            c.handle(HOST_B, HostMsg::PlayerOffline { player: A, hop: 2 }, 0);
+        }
+        assert_eq!(c.online_on(A), None, "b_attaches {b_attaches}");
+        assert!(returnable(&mut c, site, 12), "b_attaches {b_attaches}: free once B says so");
+    }
+}
+
+/// B's offline of an older placement (hop 2), delayed on B's link, arrives while the
+/// player is in transit to B again (A handed it at hop 3): it cannot end that transit.
+#[test]
+fn stale_offline_cannot_cancel_a_later_transit() {
+    let (mut c, site, _) = a_online_on_host_a();
+    let fortress = Some(Claim::Fortress(site));
+    c.handle(HOST_A, HostMsg::PlayerHandedTo { player: A, to: HOST_B, hop: 1 }, 0);
+    c.handle(HOST_B, online_at(A, fortress, false, 2), 0);
+    // B's placement ends (its offline delayed); the player logs in on A again (hop 3) and
+    // is handed to B once more.
+    c.handle(HOST_A, online_at(A, fortress, false, 3), 0);
+    c.handle(HOST_A, HostMsg::PlayerHandedTo { player: A, to: HOST_B, hop: 3 }, 0);
+    c.handle(HOST_B, HostMsg::PlayerOffline { player: A, hop: 2 }, 0);
+    assert_eq!(c.online_on(A), Some(HOST_B), "still in transit to B");
+    assert!(!returnable(&mut c, site, 10), "the claim stays in use");
+    c.handle(HOST_B, online_at(A, fortress, false, 4), 0);
+    assert_eq!((c.online_on(A), c.hop_of(A)), (Some(HOST_B), 4));
+}
+
+/// `ClaimIs` (and `HopIs`) answers for a host still waiting to leave — behind a gated
+/// message, or free to leave — are dropped at that host's `Attach`, which reports
+/// everyone afresh; answers for other hosts stay.
+#[test]
+fn claim_is_queued_for_a_host_is_dropped_at_its_attach() {
+    let c_player = PlayerId(3);
+    for gated in [true, false] {
+        let (mut c, civ, people) = coordinator();
+        c.handle(HOST_A, embark(1, A, civ, &people[0..2], rc(8, 0)), 0);
+        let WorldReply::Embarked { site, .. } = reply_to(&commit(&mut c), 1) else { panic!("embarks") };
+        if gated {
+            // A grant waits for its save: everything after it waits too.
+            c.handle(2, embark(2, c_player, civ, &people[2..4], rc(14, 0)), 0);
+        }
+        // Host B reports B with A's fortress, which A plays online: `ClaimIs(None)` for B,
+        // and a stale report of C on host 2: `HopIs` for host 2… after a higher hop.
+        c.handle(HOST_B, online(B, Some(Claim::Fortress(site)), false), 0);
+        c.handle(2, online_at(PlayerId(4), None, false, 5), 0);
+        c.handle(2, online_at(PlayerId(4), None, false, 4), 0);
+        c.handle(HOST_B, online_at(PlayerId(4), None, false, 3), 0);
+        c.handle(HOST_B, attach(HOST_B, 1, Vec::new(), Vec::new()), 0);
+        let out = commit_routed(&mut c);
+        let answers: Vec<(Target, &CoordMsg)> = out
+            .iter()
+            .filter(|(_, m)| matches!(m, CoordMsg::ClaimIs { .. } | CoordMsg::HopIs { .. }))
+            .map(|(t, m)| (*t, m))
+            .collect();
+        assert!(answers.iter().all(|(t, _)| *t != Target::Host(HOST_B)), "gated {gated}: none for B: {answers:?}");
+        assert_eq!(answers.len(), 1, "gated {gated}: host 2's answer stays: {answers:?}");
+        assert!(matches!(answers[0].1, CoordMsg::HopIs { reported: 4, hop: 5, .. }), "{answers:?}");
+    }
+}
+
+/// An `Attach` of a newer world generation (every host rolled back, its hops starting
+/// over) forgets the hops: a report at hop 1 counts again. An attach of the same
+/// generation does not.
+#[test]
+fn higher_generation_attach_resets_hops() {
+    let (mut c, site, _) = a_online_on_host_a();
+    let fortress = Some(Claim::Fortress(site));
+    c.handle(HOST_A, online_at(A, fortress, false, 5), 0);
+    c.handle(HOST_A, HostMsg::PlayerOffline { player: A, hop: 5 }, 0);
+    let attach_gen = |host, epoch, generation, online| HostMsg::Attach {
+        host,
+        epoch,
+        running: Vec::new(),
+        online,
+        generation,
+        boot: 7,
+        settled_below: 0,
+        handed: Vec::new(),
+    };
+    c.handle(HOST_B, attach_gen(HOST_B, 1, 0, vec![report(A, fortress, false)]), 0);
+    assert_eq!((c.online_on(A), c.hop_of(A)), (None, 5), "the same generation: hop 1 is stale");
+    c.handle(HOST_B, attach_gen(HOST_B, 2, 1, vec![report(A, fortress, false)]), 0);
+    assert_eq!((c.online_on(A), c.hop_of(A)), (Some(HOST_B), 1), "a newer generation: hops start over");
+    c.handle(HOST_A, attach_gen(HOST_A, 1, 1, Vec::new()), 0);
+    assert_eq!((c.online_on(A), c.hop_of(A)), (Some(HOST_B), 1), "a second attach of it keeps them");
 }

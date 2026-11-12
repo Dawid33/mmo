@@ -318,11 +318,12 @@ impl<S: RegionSpawner> WorldManager<S> {
                 let player = self.player_of.remove(&client).expect("can_hand_off: online or parking");
                 let claim = claim_of(self.fortress_of.remove(&client), self.adventurer_of.remove(&client));
                 // Not offline: in transit, its claim kept in use until `owner` reports it.
-                self.world_send(HostMsg::PlayerHandedTo { player, to: owner });
+                self.world_handed(player, owner);
                 self.forget_claim_reports(player);
                 (player, claim, false)
             }
         };
+        let hop = self.hop_here(player) + 1;
         log::info!("[server] player {} (client {client}) from {rc:?} into {target:?}: handed to host {owner}", player.0);
         self.homes.remove(&client);
         // Handed here without a session and on again before it came: not awaited here.
@@ -332,7 +333,7 @@ impl<S: RegionSpawner> WorldManager<S> {
         }
         self.departed.insert(player, owner);
         self.locations.remove(&bundle.id);
-        let handoff = crate::PlayerHandoff { client, player, claim, login: None, park };
+        let handoff = crate::PlayerHandoff { client, player, claim, login: None, park, hop };
         let id = self.queue_to_peer(owner, Reliable::Transfer { target, stamp, bundle: Box::new(bundle), player: Some(handoff) });
         if view {
             self.peer_in_source_view.insert((owner, id));
@@ -363,8 +364,9 @@ impl<S: RegionSpawner> WorldManager<S> {
         log::info!("[server] player {} (client {c}) handed over by host {from} into {target:?}", h.player.0);
         self.departed.remove(&h.player);
         if self.holds_player(h.player) {
-            return self.drop_arriving_copy(from, h.player);
+            return self.drop_arriving_copy(from, h.player, h.hop);
         }
+        self.placed_by_handoff(h.player, h.hop);
         let (fortress, adventure) = split_claim(h.claim);
         if self.is_unavailable(target) {
             // Its stored state could not be read (retry not come): the body cannot go
@@ -417,8 +419,9 @@ impl<S: RegionSpawner> WorldManager<S> {
         };
         let claim = claim_of(self.fortress_of.remove(&client), self.adventurer_of.remove(&client));
         // Not offline: in transit, its claim kept in use until `owner` reports it.
-        self.world_send(HostMsg::PlayerHandedTo { player, to: owner });
+        self.world_handed(player, owner);
         self.forget_claim_reports(player);
+        let hop = self.hop_here(player) + 1;
         let (mut carried, y) = match record {
             Some(record) => (record.client, record.pose.translation.y),
             None => {
@@ -447,7 +450,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             session.kind = SessionKind::Observer;
         }
         self.departed.insert(player, owner);
-        let handoff = crate::PlayerHandoff { client, player, claim, login: None, park: false };
+        let handoff = crate::PlayerHandoff { client, player, claim, login: None, park: false, hop };
         // Parked after `m.from` answered the pending cut: its snapshot holds the body.
         let view = self.in_cut_view(m.from);
         let id = self.queue_to_peer(owner, Reliable::PlayerMove { handoff, record: Box::new(record), target: m.target });
@@ -469,8 +472,9 @@ impl<S: RegionSpawner> WorldManager<S> {
         log::info!("[server] player {} (client {c}) moved here by host {from} into {target:?}", h.player.0);
         self.departed.remove(&h.player);
         if self.holds_player(h.player) {
-            return self.drop_arriving_copy(from, h.player);
+            return self.drop_arriving_copy(from, h.player, h.hop);
         }
+        self.placed_by_handoff(h.player, h.hop);
         if self.is_unavailable(target) || !self.owns(target) {
             log::error!("[server] player {} moved into {target:?}, unavailable or not this host's: parked", h.player.0);
             self.park_handed(from, c, h.player, record, now_ms);
@@ -521,10 +525,28 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// is acknowledged by its receipt. (`moving` and `awaiting_session` clients are in
     /// `player_of`.)
     ///
-    /// No `PlayerOffline` is reported for it: the copy already here has its own state
-    /// with the coordinator (online, or parked and reported so).
-    fn drop_arriving_copy(&mut self, from: u32, player: PlayerId) {
+    /// The copy here has its own state with the coordinator (online, or parked and
+    /// reported so), but `from` reported the player in transit to this host at the
+    /// arriving `hop - 1`: the copy here takes the arriving hop if it is higher, and is
+    /// reported again at it (online, or offline when it is not online here) — its older
+    /// reports would be stale against that transit and could never end it.
+    fn drop_arriving_copy(&mut self, from: u32, player: PlayerId, hop: u64) {
         log::warn!("[server] player {} from host {from} is already here; the arriving copy is dropped", player.0);
+        if hop <= self.hop_here(player) {
+            return;
+        }
+        self.player_hop.insert(player, hop);
+        self.handed.remove(&player);
+        let clients: Vec<ClientId> = self.player_of.iter().filter(|(_, p)| **p == player).map(|(c, _)| *c).collect();
+        if clients.is_empty() {
+            self.world_send(HostMsg::PlayerOffline { player, hop });
+        }
+        for c in clients {
+            // A session waiting for its park reports when it is restored.
+            if !self.restore_pending(c) {
+                self.world_player_online(c);
+            }
+        }
     }
 
     /// `player` (of `client`), handed here by host `from`, cannot go where it was headed:
@@ -533,7 +555,8 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// ([`Self::tell_parked`]). Never announced online here, it is reported offline: the
     /// sending host reported it in transit to this host (`PlayerHandedTo`), not offline.
     fn park_handed(&mut self, from: u32, client: ClientId, player: PlayerId, record: PlayerRecord, now_ms: u64) {
-        self.world_send(HostMsg::PlayerOffline { player });
+        let hop = self.hop_here(player);
+        self.world_send(HostMsg::PlayerOffline { player, hop });
         self.cut_transit(player, &record);
         self.parked_players.insert(player, record);
         if self.sessions.contains_key(&client) {

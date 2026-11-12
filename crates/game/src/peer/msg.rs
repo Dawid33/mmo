@@ -49,6 +49,9 @@ pub struct PlayerHandoff {
     /// The player's token and session epoch (login sessions).
     pub login: Option<(String, u64)>,
     pub park: bool,
+    /// The player's placement count on hosts at its arrival: the sender's + 1
+    /// ([`crate::HostMsg`]'s hop rule).
+    pub hop: u64,
 }
 
 /// What must arrive exactly once, in order: numbered per directed link, kept by the
