@@ -39,7 +39,7 @@ pub const UNLOAD_GRACE_MS: u64 = 5000;
 /// this host.
 pub const HANDOFF_SESSION_GRACE_MS: u64 = 5_000;
 /// How long an observer ticket ([`crate::ObserverTicket`]) is valid at the host that admits
-/// it (`Reliable::ObserverOrder::expires_unix_secs`).
+/// it, from receipt (`Reliable::ObserverOrder::ttl_secs`).
 pub const OBSERVER_ORDER_TTL_SECS: u64 = 120;
 /// Most arrivals that wait in the manager's mailbox for one region that is
 /// not running ([`WorldManager::pending_arrival_count`]); past it the oldest
@@ -251,6 +251,9 @@ pub struct InlineSpawner {
     /// not run keeps its own — so what was sent there is recovered by the
     /// manager, not mistaken for a crashed region.
     failed: BTreeMap<RegionCoords, Receiver<RegionInput>>,
+    /// Test support ([`InlineSpawner::fail_next_start`]): regions whose next start
+    /// answers `LoadFailed`, as a store read that failed.
+    fail_starts: BTreeSet<RegionCoords>,
 }
 
 impl InlineSpawner {
@@ -307,6 +310,12 @@ impl InlineSpawner {
 
     /// Swap the schedule on a live spawner (`None` = back to lockstep), for
     /// harnesses that construct their server before choosing one.
+    /// Test support: `rc`'s next start fails its load (`RegionOutput::LoadFailed`), as
+    /// one whose stored state could not be read.
+    pub fn fail_next_start(&mut self, rc: RegionCoords) {
+        self.fail_starts.insert(rc);
+    }
+
     pub fn set_schedule(&mut self, schedule: Option<InlineSchedule>) {
         self.schedule = schedule;
         self.late.clear();
@@ -431,6 +440,11 @@ impl RegionSpawner for InlineSpawner {
         out: Sender<(RegionCoords, RegionOutput)>,
     ) -> Sender<RegionInput> {
         let (send, recv) = unbounded();
+        if self.fail_starts.remove(&id) {
+            let _ = out.send((id, RegionOutput::LoadFailed("test: the load was made to fail".into())));
+            self.failed.insert(id, recv);
+            return send;
+        }
         let stored = if matches!(seed, RegionSeed::Fresh) { self.portable.remove(&id) } else { None };
         let runner = match stored {
             Some(stored) => {
@@ -553,6 +567,10 @@ pub const LOGGED_IN_ELSEWHERE: &str = "logged in elsewhere";
 /// The edge gives it before a sink exists; the manager's check behind it never writes to
 /// the id (the live session owns it) and only logs.
 pub const DUPLICATE_SESSION_REFUSAL: &str = "this login is already connected; log in again";
+
+/// The refusal of a login on a host that handed the player's body to another host
+/// (`departed`): it places nothing here (a later task routes the login there).
+pub const PLAYER_ELSEWHERE_REFUSAL: &str = "your character is on another server of this world; log in again";
 
 /// How long a region whose stored state could not be read
 /// ([`RegionOutput::LoadFailed`]) stays stopped before a start is tried
@@ -936,10 +954,13 @@ pub struct WorldManager<S: RegionSpawner> {
     /// it was minted at (`peers.rs`, `observer_ticket`).
     observer_tickets: BTreeMap<(ClientId, u32), (u64, u64)>,
     /// Observer orders other hosts sent, for the server edge
-    /// ([`Self::take_observer_orders`]): `(client, player, nonce, expires_unix_secs)`.
+    /// ([`Self::take_observer_orders`]): `(client, player, nonce, ttl_secs)`.
     observer_orders: Vec<(ClientId, PlayerId, u64, u64)>,
-    /// The splitmix state observer nonces are drawn from (seeded by [`Self::set_endpoints`]).
-    nonce_state: u64,
+    /// The splitmix state observer nonces are drawn from: `None` until
+    /// [`Self::set_endpoints`] seeds it (an unseeded host mints no ticket).
+    nonce_state: Option<u64>,
+    /// The unseeded-nonce error was logged (once).
+    unseeded_warned: bool,
 }
 
 impl<S: RegionSpawner> WorldManager<S> {
@@ -1037,7 +1058,8 @@ impl<S: RegionSpawner> WorldManager<S> {
             awaiting_session: BTreeMap::new(),
             observer_tickets: BTreeMap::new(),
             observer_orders: Vec::new(),
-            nonce_state: 0,
+            nonce_state: None,
+            unseeded_warned: false,
         }
     }
 
@@ -2672,6 +2694,12 @@ impl<S: RegionSpawner> WorldManager<S> {
             log::warn!("client {id}: {DUPLICATE_SESSION_REFUSAL} (a duplicate ClientConnected is ignored)");
             return false;
         }
+        if let Some(&host) = self.departed.get(&player) {
+            // Its body (or its parked record) is on that host: nothing is placed here.
+            log::warn!("client {id}: player {} is on host {host}; login refused here", player.0);
+            let _ = self.out.send((Some(id), ServerPacket::Refused(PLAYER_ELSEWHERE_REFUSAL.to_string())));
+            return false;
+        }
         // The first packet of every session: which host this is.
         let _ = self.out.send((Some(id), ServerPacket::Host(self.endpoint.clone())));
         let elsewhere: Vec<ClientId> =
@@ -3033,9 +3061,18 @@ impl<S: RegionSpawner> WorldManager<S> {
             log::warn!("player {}'s body was to be created in unavailable {rc:?}: its record is parked", player.0);
             self.parked_players.insert(player, record);
         }
-        let homed: Vec<ClientId> = self.sessions.keys().copied().filter(|c| self.homes.get(c) == Some(&rc)).collect();
+        // Players handed here whose session has not come too: they have no body either.
+        let homed: Vec<ClientId> = self
+            .sessions
+            .keys()
+            .chain(self.awaiting_session.keys())
+            .copied()
+            .filter(|c| self.homes.get(c) == Some(&rc))
+            .collect();
         for client in homed {
-            let _ = self.out.send((Some(client), ServerPacket::Refused(REGION_UNAVAILABLE_REFUSAL.to_string())));
+            if self.sessions.contains_key(&client) {
+                let _ = self.out.send((Some(client), ServerPacket::Refused(REGION_UNAVAILABLE_REFUSAL.to_string())));
+            }
             self.client_disconnected(client, now_ms);
         }
         self.settle_lost_parks(rc, &BTreeSet::new());

@@ -60,7 +60,9 @@ pub enum Reliable {
     Intent(IntentMsg),
     /// A player without a body (parked, observing) moving to a region of the other host.
     PlayerMove { handoff: PlayerHandoff, record: Box<PlayerRecord>, target: RegionCoords },
-    ObserverOrder { client: ClientId, player: PlayerId, nonce: u64, expires_unix_secs: u64 },
+    /// Admit `client` (of `player`) presenting `nonce` for `ttl_secs` from receipt (the
+    /// receiving edge dates it by its own clock).
+    ObserverOrder { client: ClientId, player: PlayerId, nonce: u64, ttl_secs: u64 },
     /// Spawn a login session's player; `origin` is the host the order entered at,
     /// `hops` how often it was forwarded.
     SpawnOrder { origin: u32, hops: u8, player_token: String, session_epoch: u64 },

@@ -169,12 +169,12 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// per host process start: a nonce must not be guessable).
     pub fn set_endpoints(&mut self, mine: crate::HostEndpoint, nonce_seed: u64) {
         self.endpoint = mine;
-        self.nonce_state = nonce_seed;
+        self.nonce_state = Some(nonce_seed);
     }
 
     /// The observer orders other hosts sent since the last call:
-    /// `(client, player, nonce, expires_unix_secs)` — the server edge admits a
-    /// `Credential::Observer` that matches one.
+    /// `(client, player, nonce, ttl_secs)` — the server edge admits a
+    /// `Credential::Observer` that matches one for `ttl_secs` from when it took it.
     pub fn take_observer_orders(&mut self) -> Vec<(ClientId, PlayerId, u64, u64)> {
         std::mem::take(&mut self.observer_orders)
     }
@@ -187,6 +187,11 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// The region holding (or getting) `client`'s body on this host, if any.
     pub fn home_of(&self, client: ClientId) -> Option<RegionCoords> {
         self.homes.get(&client).copied()
+    }
+
+    /// The fortress or adventure `client`'s player plays here, if any.
+    pub fn client_claim(&self, client: ClientId) -> Option<Claim> {
+        claim_of(self.fortress_of.get(&client).copied(), self.adventurer_of.get(&client).copied())
     }
 
     /// The players this host handed to another, with that host.
@@ -215,7 +220,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             if let Some(rc) = region {
                 self.refresh_keepalive(rc, now_ms);
             }
-            self.world_player_online(client);
+            // Its `PlayerOnline` went when the body arrived (`accept_handoff`).
         }
     }
 
@@ -246,6 +251,8 @@ impl<S: RegionSpawner> WorldManager<S> {
             && !self.creating.contains_key(&client)
             // A new session of the player waits here for this park.
             && !self.awaiting_park.contains_key(&player)
+            // Its claim may change with an answer that comes to this host.
+            && !self.claim_pending(player)
     }
 
     /// `bundle` (in `target`'s frame), `client`'s body, departed from `rc` at `stamp` into
@@ -275,6 +282,8 @@ impl<S: RegionSpawner> WorldManager<S> {
         };
         log::info!("[server] player {} (client {client}) from {rc:?} into {target:?}: handed to host {owner}", player.0);
         self.homes.remove(&client);
+        // Handed here without a session and on again before it came: not awaited here.
+        self.awaiting_session.remove(&client);
         if let Some(session) = self.sessions.get_mut(&client) {
             session.kind = SessionKind::Observer;
         }
@@ -315,6 +324,28 @@ impl<S: RegionSpawner> WorldManager<S> {
             Some(Claim::Adventure(s)) => (None, Some(s)),
             None => (None, None),
         };
+        if self.is_unavailable(target) {
+            // Its stored state could not be read (retry not come): the body cannot go
+            // there. Parked from the hand-off, as a player crossing into a region whose
+            // load fails is (`region_load_failed`); a session here is refused as one whose
+            // region cannot be loaded. The sender already reported it offline.
+            let (_, carried) = bundle.client.as_ref().expect("checked above");
+            let record = PlayerRecord {
+                client: crate::parked_client(carried),
+                pose: bundle.body.pose,
+                region: target,
+                fortress,
+                adventure,
+            };
+            log::error!("[server] player {} handed into unavailable {target:?}: parked", h.player.0);
+            self.cut_transit(h.player, &record);
+            self.parked_players.insert(h.player, record);
+            if self.sessions.contains_key(&c) {
+                let _ = self.out.send((Some(c), ServerPacket::Refused(REGION_UNAVAILABLE_REFUSAL.to_string())));
+                self.client_disconnected(c, now_ms);
+            }
+            return;
+        }
         if h.park {
             // `accept_arrival` parks it where it lands (`ParkPlayer` behind the arrival).
             self.parking.insert(c, Parking { player: h.player, region: target, fortress, adventure });
@@ -356,14 +387,22 @@ impl<S: RegionSpawner> WorldManager<S> {
             log::warn!("client {client}: no player for its session; subscribe to {rc:?} dropped");
             return;
         }
+        if self.nonce_state.is_none() {
+            // No seed (`set_endpoints` not called): a ticket would be guessable.
+            if !self.unseeded_warned {
+                self.unseeded_warned = true;
+                log::error!("[server] no nonce seed (set_endpoints): subscribes to other hosts' regions are dropped");
+            }
+            return;
+        }
         let ticket = self.observer_ticket(client, owner, self.clock_ms);
         let _ = self.out.send((Some(client), ServerPacket::RegionElsewhere { region: rc, endpoint, ticket }));
     }
 
     /// The ticket `client` presents to host `owner`: minted once (a fresh random nonce,
     /// the owner told to expect it — [`Reliable::ObserverOrder`], valid for
-    /// [`OBSERVER_ORDER_TTL_SECS`]), handed out again while at least half its life is
-    /// left, then minted anew.
+    /// [`OBSERVER_ORDER_TTL_SECS`] from its receipt there), handed out again while at
+    /// least half its life is left (by this host's `now_ms`), then minted anew.
     fn observer_ticket(&mut self, client: ClientId, owner: u32, now_ms: u64) -> crate::ObserverTicket {
         let reuse_ms = OBSERVER_ORDER_TTL_SECS * 1000 / 2;
         if let Some(&(nonce, minted)) = self.observer_tickets.get(&(client, owner)) {
@@ -375,18 +414,19 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.observer_tickets.insert((client, owner), (nonce, now_ms));
         match self.sessions.get(&client).and_then(|s| s.player) {
             Some(player) => {
-                let expires_unix_secs = unix_now_secs() + OBSERVER_ORDER_TTL_SECS;
-                self.queue_to_peer(owner, Reliable::ObserverOrder { client, player, nonce, expires_unix_secs });
+                let ttl_secs = OBSERVER_ORDER_TTL_SECS;
+                self.queue_to_peer(owner, Reliable::ObserverOrder { client, player, nonce, ttl_secs });
             }
             None => log::error!("client {client}: an observer ticket with no player; host {owner} is not told"),
         }
         crate::ObserverTicket { client, nonce }
     }
 
-    /// splitmix64 over the seed [`Self::set_endpoints`] gave.
+    /// splitmix64 over the seed [`Self::set_endpoints`] gave (callers check it is seeded).
     fn next_nonce(&mut self) -> u64 {
-        self.nonce_state = self.nonce_state.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        let mut z = self.nonce_state;
+        let state = self.nonce_state.unwrap_or_default().wrapping_add(0x9E37_79B9_7F4A_7C15);
+        self.nonce_state = Some(state);
+        let mut z = state;
         z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
         z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
         z ^ (z >> 31)
@@ -473,6 +513,8 @@ impl<S: RegionSpawner> WorldManager<S> {
             .into_iter()
             .filter(|(ordinal, id, _)| !self.peer_in_source_view.contains(&(*ordinal, *id)))
             .filter_map(|(_, _, r)| match r {
+                // Task 8: an unreceived `Transfer` with a player writes that player's
+                // record into `WorldCut.players` (a hand-off is in no cut today).
                 Reliable::Transfer { target, stamp, bundle, player: None } => {
                     Some(InFlightRow::Transfer { target: *target, bundle: (**bundle).clone(), stamp: *stamp })
                 }
@@ -695,8 +737,8 @@ impl<S: RegionSpawner> WorldManager<S> {
                 self.accept_handoff(from, target, stamp, *bundle, handoff);
             }
             // For the server edge, which admits the ticket (`take_observer_orders`).
-            Reliable::ObserverOrder { client, player, nonce, expires_unix_secs } => {
-                self.observer_orders.push((client, player, nonce, expires_unix_secs));
+            Reliable::ObserverOrder { client, player, nonce, ttl_secs } => {
+                self.observer_orders.push((client, player, nonce, ttl_secs));
             }
             // As if one of this host's regions had sent it (no cut has seen it here).
             Reliable::Intent(msg) => {
@@ -723,6 +765,8 @@ impl<S: RegionSpawner> WorldManager<S> {
                     }
                 }
             }
+            // Task 8: an inbound `PlayerMove` places the player here: it clears
+            // `departed[player]` as `accept_handoff` does.
             other => {
                 log::error!("[server] peer host {from}: {} is not handled by this host yet: dropped", reliable_name(&other))
             }
@@ -733,19 +777,6 @@ impl<S: RegionSpawner> WorldManager<S> {
 /// The claim a player's fortress / adventure is (it holds one at most).
 fn claim_of(fortress: Option<SiteId>, adventure: Option<SiteId>) -> Option<Claim> {
     fortress.map(Claim::Fortress).or(adventure.map(Claim::Adventure))
-}
-
-/// Seconds since the Unix epoch: when an observer order expires at the edge, which
-/// compares it with its own wall clock. No wall clock on wasm (no peers there either): 0.
-fn unix_now_secs() -> u64 {
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
-    }
-    #[cfg(target_arch = "wasm32")]
-    {
-        0
-    }
 }
 
 /// The region an intent or a reply to another host goes to (`route_intent` without a

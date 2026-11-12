@@ -926,7 +926,7 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// Whether a claim-changing request of `player` is unsettled here (pending toward its
     /// client, or timed out and waiting for its answer): until it settles the
     /// coordinator's claim for the player stands over the one reported.
-    fn claim_pending(&self, player: PlayerId) -> bool {
+    pub(super) fn claim_pending(&self, player: PlayerId) -> bool {
         self.pending_requests.values().any(|p| p.player == player && p.req.changes_state())
             || self.expired_requests.values().any(|(p, _)| *p == player)
     }

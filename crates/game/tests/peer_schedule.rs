@@ -1366,9 +1366,8 @@ fn subscribe_elsewhere(rig: &mut MultiRig) {
         }
     }
     assert_eq!(orders.len(), 1, "one order: {orders:?}");
-    let (client, player, nonce, expires) = orders[0];
-    assert_eq!((client, player, nonce), (P_CLIENT, P_PLAYER, ticket.nonce));
-    assert!(expires >= game::OBSERVER_ORDER_TTL_SECS, "expires at a unix time");
+    let (client, player, nonce, ttl_secs) = orders[0];
+    assert_eq!((client, player, nonce, ttl_secs), (P_CLIENT, P_PLAYER, ticket.nonce, game::OBSERVER_ORDER_TTL_SECS));
     // Asked again: the same ticket, no second order.
     let subscribe = game::ServerEvent::ClientPacket(game::ClientPacket::RequestRegionConnection(b), P_CLIENT);
     rig.hosts[ha as usize].event(subscribe);
@@ -1418,3 +1417,230 @@ fn player_cannot_enter_an_unreachable_host() {
     sweep("player_cannot_enter_an_unreachable_host", 2, 1, SEEDS / 4, unreachable);
 }
 
+
+// --- Fix round 1: a hand-off never loses or doubles a player ------------------------
+
+/// Host `h` fails to load `rc` now (its store read failed): `rc` is unavailable there
+/// for its retry window.
+fn fail_load(rig: &mut MultiRig, h: u32, rc: RegionCoords) {
+    let r = &mut rig.hosts[h as usize];
+    r.manager.spawner_mut().fail_next_start(rc);
+    r.event(game::ServerEvent::ClientPacket(game::ClientPacket::RequestRegionConnection(rc), crate::common::rig::CLIENT));
+    r.event(game::ServerEvent::ClientPacket(game::ClientPacket::ReleaseRegionConnection(rc), crate::common::rig::CLIENT));
+    assert!(r.manager.unavailable_regions().contains(&rc), "{rc:?} is unavailable on host {h}");
+}
+
+/// Rounds until the test player is parked on some host and nothing is unacknowledged.
+fn until_parked(rig: &mut MultiRig) {
+    for _ in 0..CROSS_ROUNDS {
+        rig.round();
+        if !rig.parked_on(P_PLAYER).is_empty() && rig.peer_unreceived() == 0 {
+            return;
+        }
+    }
+    panic!("the player was never parked: body {:?}", rig.player_owners(P_CLIENT));
+}
+
+/// Neither host holds the test client as online or homed.
+fn holds_nothing(rig: &MultiRig, h: u32) {
+    let m = &rig.hosts[h as usize].manager;
+    assert_eq!((m.home_of(P_CLIENT), m.player_of(P_CLIENT)), (None, None), "host {h} holds the player");
+}
+
+/// The region a body is handed into is unavailable on the receiving host (its load
+/// failed and its retry has not come): the player is parked there from the hand-off —
+/// one record, on that host, no body — and its session there is refused.
+fn into_unavailable(rig: &mut MultiRig) {
+    let (a, b) = host_seam(2, 1);
+    let (ha, hb) = (rig.owner(a), rig.owner(b));
+    rig.run(a);
+    rig.record_packets();
+    rig.connect_everywhere(ha, P_CLIENT, P_PLAYER, record_at(a, [REGION_SIZE / 2.0, REGION_SIZE / 2.0]));
+    let (_, _, id) = until_body(rig);
+    fail_load(rig, hb, b);
+    assert!(rig.teleport(a, id, past_seam(a, b, REGION_SIZE / 2.0)));
+    until_parked(rig);
+    for _ in 0..WAIT_ROUNDS {
+        rig.round();
+    }
+    assert_eq!(rig.parked_on(P_PLAYER), [hb], "parked once, on host {hb}");
+    assert!(rig.player_owners(P_CLIENT).is_empty(), "no body");
+    holds_nothing(rig, ha);
+    holds_nothing(rig, hb);
+    assert_eq!(rig.hosts[hb as usize].manager.session_kind(P_CLIENT), None, "its session there ended");
+    let refused = packets_to(rig, hb)
+        .iter()
+        .any(|p| matches!(p, game::ServerPacket::Refused(why) if why == game::REGION_UNAVAILABLE_REFUSAL));
+    assert!(refused, "the session on host {hb} was told why");
+    assert_eq!(rig.hosts[hb as usize].manager.parked_record(P_PLAYER).map(|r| r.region), Some(b));
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn handoff_into_an_unavailable_region_parks_the_record_once() {
+    sweep("handoff_into_an_unavailable_region_parks_the_record_once", 2, 1, SEEDS / 4, into_unavailable);
+}
+
+/// The client has no session on the receiving host, whose region fails to load only when
+/// the hand-off wakes it: the player is parked there once, and that host does not keep
+/// it online or homed (no body) until the grace.
+fn fails_after_arrival(rig: &mut MultiRig) {
+    let (a, b) = host_seam(2, 1);
+    let (ha, hb) = (rig.owner(a), rig.owner(b));
+    rig.run(a);
+    rig.connect_home(ha, P_CLIENT, P_PLAYER, record_at(a, [REGION_SIZE / 2.0, REGION_SIZE / 2.0]));
+    let (_, _, id) = until_body(rig);
+    rig.hosts[hb as usize].manager.spawner_mut().fail_next_start(b);
+    assert!(rig.teleport(a, id, past_seam(a, b, REGION_SIZE / 2.0)));
+    until_parked(rig);
+    assert_eq!(rig.parked_on(P_PLAYER), [hb], "parked once, on host {hb}");
+    assert!(rig.player_owners(P_CLIENT).is_empty(), "no body");
+    holds_nothing(rig, ha);
+    holds_nothing(rig, hb);
+    // Nothing more comes of it at the grace.
+    rig.maintain_all(game::HANDOFF_SESSION_GRACE_MS);
+    for _ in 0..WAIT_ROUNDS {
+        rig.round();
+    }
+    assert_eq!(rig.parked_on(P_PLAYER), [hb]);
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn handoff_target_fails_to_load_after_arrival_parks_once() {
+    sweep("handoff_target_fails_to_load_after_arrival_parks_once", 2, 1, SEEDS / 4, fails_after_arrival);
+}
+
+/// A login on the host the player's body left (the same session id once its observer
+/// session ended, or a new one) is refused and places nothing: one body in the world.
+fn login_where_it_left(rig: &mut MultiRig) {
+    let (a, b) = host_seam(2, 1);
+    let (ha, hb) = (rig.owner(a), rig.owner(b));
+    rig.run(a);
+    rig.run(b);
+    rig.connect_everywhere(ha, P_CLIENT, P_PLAYER, record_at(a, [REGION_SIZE / 2.0, REGION_SIZE / 2.0]));
+    let (_, _, id) = until_body(rig);
+    assert!(rig.teleport(a, id, past_seam(a, b, REGION_SIZE / 2.0)));
+    until_player_settled_in(rig, b);
+    rig.disconnect(ha, P_CLIENT);
+    rig.record_packets();
+    const NEW_CLIENT: game::ClientId = 8;
+    for client in [P_CLIENT, NEW_CLIENT] {
+        let record = record_at(a, [REGION_SIZE / 2.0, REGION_SIZE / 2.0]);
+        rig.hosts[ha as usize].event(game::ServerEvent::ClientConnected { client, player: P_PLAYER, record: Some(record) });
+        for _ in 0..WAIT_ROUNDS {
+            rig.round();
+        }
+        let m = &rig.hosts[ha as usize].manager;
+        assert_eq!((m.home_of(client), m.player_of(client), m.session_kind(client)), (None, None, None), "client {client}");
+        let seen = rig.hosts[ha as usize].packets_seen.as_ref().expect("recording");
+        let refused = seen.iter().any(|(to, p)| {
+            *to == Some(client) && matches!(p, game::ServerPacket::Refused(why) if why == game::PLAYER_ELSEWHERE_REFUSAL)
+        });
+        assert!(refused, "client {client} was refused");
+        assert_eq!(rig.player_owners(P_CLIENT), [(hb, b)], "the one body stays on host {hb}");
+        assert!(rig.player_owners(NEW_CLIENT).is_empty(), "no second body");
+        assert!(rig.parked_on(P_PLAYER).is_empty());
+    }
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn login_on_the_host_a_player_left_is_refused_and_places_nothing() {
+    sweep("login_on_the_host_a_player_left_is_refused_and_places_nothing", 2, 1, SEEDS / 4, login_where_it_left);
+}
+
+/// A->B->A with no session on B: B no longer awaits the client once the body is gone, so
+/// an observer connecting to B within the grace stays an observer.
+fn ping_pong_sessionless(rig: &mut MultiRig) {
+    let (a, b) = host_seam(2, 1);
+    let (ha, hb) = (rig.owner(a), rig.owner(b));
+    rig.run(a);
+    rig.run(b);
+    rig.connect_home(ha, P_CLIENT, P_PLAYER, record_at(a, [REGION_SIZE / 2.0, REGION_SIZE / 2.0]));
+    let (_, _, id) = until_body(rig);
+    assert!(rig.teleport(a, id, past_seam(a, b, REGION_SIZE / 2.0)));
+    let mut back = false;
+    for _ in 0..CROSS_ROUNDS {
+        rig.round();
+        if let Some((h, rc, id)) = rig.player_body(P_CLIENT) {
+            if (h, rc) == (hb, b) {
+                assert!(rig.teleport(b, id, past_seam(b, a, REGION_SIZE / 2.0)));
+                back = true;
+                break;
+            }
+        }
+    }
+    assert!(back, "the body never reached {b:?}");
+    until_player_settled_in(rig, a);
+    rig.hosts[hb as usize].event(game::ServerEvent::ObserverConnected { client: P_CLIENT, player: P_PLAYER });
+    let m = &rig.hosts[hb as usize].manager;
+    assert_eq!(m.session_kind(P_CLIENT), Some(game::SessionKind::Observer), "no body here: an observer");
+    assert_eq!(m.home_of(P_CLIENT), None);
+    rig.maintain_all(game::HANDOFF_SESSION_GRACE_MS);
+    for _ in 0..WAIT_ROUNDS {
+        rig.round();
+    }
+    assert_eq!(rig.player_owners(P_CLIENT), [(ha, a)], "still home on host {ha}");
+    assert!(rig.parked_on(P_PLAYER).is_empty(), "nothing parked");
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn ping_pong_without_a_session_on_the_far_host_leaves_no_awaiting_entry() {
+    sweep("ping_pong_without_a_session_on_the_far_host_leaves_no_awaiting_entry", 2, 1, SEEDS / 4, ping_pong_sessionless);
+}
+
+/// A coordinator link that is never up: a world request waits for it (a claim pending).
+struct NoCoordinator;
+
+impl game::WorldLink for NoCoordinator {
+    fn send(&mut self, _msg: game::HostMsg) {}
+    fn recv(&mut self) -> Option<game::CoordMsg> {
+        None
+    }
+    fn is_up(&self) -> bool {
+        false
+    }
+}
+
+/// While an embark of the player waits for the coordinator (its claim may change), the
+/// body is handed back at the host seam; once the request is answered (here: it times
+/// out) it crosses.
+fn pending_claim(rig: &mut MultiRig) {
+    let (a, b) = host_seam(2, 1);
+    let (ha, hb) = (rig.owner(a), rig.owner(b));
+    rig.run(a);
+    rig.run(b);
+    let now = rig.hosts[ha as usize].now_ms;
+    rig.hosts[ha as usize].manager.set_world_link(Box::new(NoCoordinator), 1, now);
+    rig.connect_everywhere(ha, P_CLIENT, P_PLAYER, record_at(a, [REGION_SIZE / 2.0, REGION_SIZE / 2.0]));
+    let (_, _, id) = until_body(rig);
+    let embark = game::EmbarkRequest { civ: game::history::CivId(0), people: Vec::new(), region: a };
+    rig.hosts[ha as usize].event(game::ServerEvent::ClientPacket(game::ClientPacket::Embark(embark), P_CLIENT));
+    assert!(rig.teleport(a, id, past_seam(a, b, REGION_SIZE / 2.0)));
+    for _ in 0..WAIT_ROUNDS {
+        rig.round();
+    }
+    assert_eq!(rig.player_owners(P_CLIENT), [(ha, a)], "handed back while the request is pending");
+    assert!(rig.hosts[ha as usize].manager.departed().is_empty());
+    // The request times out (never sent): nothing is pending any more.
+    rig.maintain_all(game::WORLD_REQUEST_TIMEOUT_SECS * 1000);
+    rig.round();
+    let (_, _, id) = rig.player_body(P_CLIENT).expect("a body");
+    assert!(rig.teleport(a, id, past_seam(a, b, REGION_SIZE / 2.0)));
+    until_player_settled_in(rig, b);
+    assert_eq!(rig.hosts[ha as usize].manager.departed().get(&P_PLAYER), Some(&hb));
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn player_with_a_pending_world_request_is_clamped_back_until_it_is_answered() {
+    sweep(
+        "player_with_a_pending_world_request_is_clamped_back_until_it_is_answered",
+        2,
+        1,
+        SEEDS / 4,
+        pending_claim,
+    );
+}

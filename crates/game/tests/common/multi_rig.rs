@@ -571,7 +571,7 @@ impl MultiRig {
     /// Player conservation across hosts, for every player a test connected: its body is
     /// in at most one region of one host, its parked record on at most one host, never
     /// both (a body in flight or in a peer queue is an entity above, conserved as such),
-    /// and at most one host has a home for it.
+    /// at most one host has a home for it, has it online (`player_of`) or holds its claim.
     fn assert_players(&mut self) {
         let players: Vec<(ClientId, PlayerId)> = self.players.iter().map(|(c, p)| (*c, *p)).collect();
         for (client, player) in players {
@@ -588,6 +588,14 @@ impl MultiRig {
                 .filter_map(|h| self.hosts[h as usize].manager.home_of(client).map(|rc| (h, rc)))
                 .collect();
             assert!(homes.len() <= 1, "client {client} has a home on several hosts: {homes:?}");
+            let online: Vec<u32> = (0..self.hosts.len() as u32)
+                .filter(|h| self.hosts[*h as usize].manager.player_of(client) == Some(player))
+                .collect();
+            assert!(online.len() <= 1, "player {} is online on several hosts: {online:?}", player.0);
+            let claims: Vec<(u32, game::Claim)> = (0..self.hosts.len() as u32)
+                .filter_map(|h| self.hosts[h as usize].manager.client_claim(client).map(|c| (h, c)))
+                .collect();
+            assert!(claims.len() <= 1, "player {}'s claim is held on several hosts: {claims:?}", player.0);
         }
     }
 
