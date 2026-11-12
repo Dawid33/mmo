@@ -11,8 +11,9 @@ use crate::CutId;
 pub enum PeerEvent {
     /// The peer's valid hello of a new connection (once per connection).
     Up(PeerHello),
-    /// A connection that was [`PeerEvent::Up`] went away (or broke: a gap in the
-    /// numbering). Once per connection.
+    /// A connection that was [`PeerEvent::Up`] went away, or the connection broke: a gap
+    /// in the peer's numbering, or the peer acknowledged (by `Ack` or by its hello's
+    /// [`PeerHello::received_through`]) more than was ever sent to it. Once per connection.
     Down,
     /// The next reliable message, exactly once, in the peer's order.
     Reliable(Reliable),
@@ -42,11 +43,17 @@ enum Conn {
 /// One host's session with one peer host.
 ///
 /// **Reliable** ([`PeerSession::queue`]): numbered per directed link from 1, kept until
-/// the peer acknowledges them (cumulatively, `Ack { through }`), resent after a
-/// reconnect from the peer's [`PeerHello::received_through`] + 1 with their original
-/// numbers. A peer hello with a new boot voids the numbering both ways: everything still
-/// unacknowledged is renumbered from 1 and sent again, and the count received from the
-/// peer restarts at 0. **Volatile** ([`PeerSession::send_volatile`]): sent only while
+/// the peer acknowledges them (cumulatively, `Ack { through }`). The outgoing numbering
+/// belongs to one boot pair (this boot → one peer boot); the incoming count belongs to
+/// one peer boot. On the peer's hello of a connection:
+/// - the incoming count restarts at 0 when the hello's boot is not the one it counted;
+/// - the outgoing side RESUMES — keeps its numbers, forgets what
+///   [`PeerHello::received_through`] covers, resends the rest — only when the numbering
+///   is addressed to the hello's boot AND the hello counted against this boot
+///   ([`PeerHello::received_from_boot`]); in every other case (a new peer boot, or a
+///   peer that never counted this boot's numbers) it RESTARTS: everything still owed is
+///   renumbered from 1 and sent again. A resumed count above anything sent breaks the
+///   connection. **Volatile** ([`PeerSession::send_volatile`]): sent only while
 /// [`PeerSession::is_reachable`], lost with the connection, never replayed. Within one
 /// [`PeerSession::pump`] reliable messages go out before volatile ones; there is no order
 /// between the two classes.
@@ -59,10 +66,14 @@ pub struct PeerSession {
     next_seq: u64,
     /// Every entry up to this number went out on the current connection.
     sent_through: u64,
-    /// The last reliable number received from the peer in this boot pair (0 = none).
+    /// The highest number ever put on the wire in the current outgoing numbering.
+    max_sent: u64,
+    /// The peer boot the outgoing numbering is addressed to (`None` = no peer hello yet).
+    send_boot: Option<u64>,
+    /// The last reliable number received from the peer boot `recv_boot` (0 = none).
     received_through: u64,
-    /// The peer boot of the current numbering (`None` = no peer hello yet).
-    peer_boot: Option<u64>,
+    /// The peer boot `received_through` counts (`None` = no peer hello yet).
+    recv_boot: Option<u64>,
     /// The link's connection last seen up (`None` = the link was down at the last look).
     connection: Option<u64>,
     state: Conn,
@@ -72,8 +83,8 @@ pub struct PeerSession {
 }
 
 impl PeerSession {
-    /// The session of host `me` with host `peer`. `me.received_through` is ignored: the
-    /// session fills it into every hello it sends.
+    /// The session of host `me` with host `peer`. `me.received_through` and
+    /// `me.received_from_boot` are ignored: the session fills them into every hello it sends.
     pub fn new(me: PeerHello, peer: u32) -> Self {
         PeerSession {
             me,
@@ -81,8 +92,10 @@ impl PeerSession {
             out: VecDeque::new(),
             next_seq: 1,
             sent_through: 0,
+            max_sent: 0,
+            send_boot: None,
             received_through: 0,
-            peer_boot: None,
+            recv_boot: None,
             connection: None,
             state: Conn::None,
             volatile_out: Vec::new(),
@@ -138,7 +151,12 @@ impl PeerSession {
 
     /// Forget this side's `CutMark { cut }` and every entry before it (those belong to the
     /// cut); later entries stay owed. Without such a mark in the buffer, nothing changes.
+    ///
+    /// Only for a HELD session whose peer will come back with a new boot (a leaving
+    /// host): the new boot's hello renumbers what is left from 1. With an unchanged peer
+    /// boot it would leave a hole in the numbering (the peer sees a gap).
     pub fn drop_through_mark(&mut self, cut: CutId) {
+        debug_assert!(self.held, "drop_through_mark on a session that is not held");
         let Some(at) = self.out.iter().position(|(_, r)| matches!(r, Reliable::CutMark { cut: c } if *c == cut)) else {
             return;
         };
@@ -164,7 +182,11 @@ impl PeerSession {
         if self.connection.is_none() {
             self.connection = Some(connection);
             self.state = Conn::AwaitHello;
-            link.send(PeerMsg::Hello(PeerHello { received_through: self.received_through, ..self.me.clone() }));
+            link.send(PeerMsg::Hello(PeerHello {
+                received_through: self.received_through,
+                received_from_boot: self.recv_boot,
+                ..self.me.clone()
+            }));
         }
         let mut ack_due = false;
         while let Some(msg) = link.recv() {
@@ -182,9 +204,7 @@ impl PeerSession {
                             self.peer,
                             self.received_through
                         );
-                        events.push(PeerEvent::Down);
-                        self.state = Conn::Broken;
-                        self.volatile_out.clear();
+                        self.break_connection(&mut events);
                         ack_due = false;
                         continue;
                     }
@@ -192,6 +212,16 @@ impl PeerSession {
                     events.push(PeerEvent::Reliable(body));
                 }
                 (Conn::Up, PeerMsg::Ack { through }) => {
+                    if through > self.max_sent {
+                        log::warn!(
+                            "peer {}: ack of {through}, but only {} was sent: the connection is broken",
+                            self.peer,
+                            self.max_sent
+                        );
+                        self.break_connection(&mut events);
+                        ack_due = false;
+                        continue;
+                    }
                     while self.out.front().is_some_and(|(seq, _)| *seq <= through) {
                         self.out.pop_front();
                     }
@@ -211,12 +241,20 @@ impl PeerSession {
             for (seq, body) in self.out.iter().filter(|(seq, _)| *seq > from) {
                 link.send(PeerMsg::Reliable { seq: *seq, body: body.clone() });
                 self.sent_through = *seq;
+                self.max_sent = self.max_sent.max(*seq);
             }
             for v in self.volatile_out.drain(..) {
                 link.send(PeerMsg::Volatile(v));
             }
         }
         events
+    }
+
+    /// A broken connection: `Down`, and nothing is processed until the link's next one.
+    fn break_connection(&mut self, events: &mut Vec<PeerEvent>) {
+        events.push(PeerEvent::Down);
+        self.state = Conn::Broken;
+        self.volatile_out.clear();
     }
 
     /// The connection is gone: everything per connection resets; what was sent and not
@@ -244,24 +282,42 @@ impl PeerSession {
             self.state = Conn::OtherGeneration;
             return;
         }
-        if self.peer_boot == Some(h.boot) {
-            // Same boot pair: resume after what the peer has.
+        let resume = self.send_boot == Some(h.boot) && h.received_from_boot == Some(self.me.boot);
+        if resume && h.received_through > self.max_sent {
+            log::warn!(
+                "peer {}: hello says {} received, but only {} was sent: the connection is broken",
+                self.peer,
+                h.received_through,
+                self.max_sent
+            );
+            self.break_connection(events);
+            return;
+        }
+        // Incoming: a count of another peer boot is void.
+        if self.recv_boot != Some(h.boot) {
+            if self.recv_boot.is_some() {
+                log::info!("peer {}: new boot {}, its numbering starts again", self.peer, h.boot);
+            }
+            self.recv_boot = Some(h.boot);
+            self.received_through = 0;
+        }
+        if resume {
+            // Same boot pair, counted against us: resume after what the peer has.
             while self.out.front().is_some_and(|(seq, _)| *seq <= h.received_through) {
                 self.out.pop_front();
             }
             self.sent_through = h.received_through;
         } else {
-            // A new peer boot: the old numbering is void both ways.
-            if self.peer_boot.is_some() {
-                log::info!("peer {}: new boot {}, renumbering {} unacknowledged", self.peer, h.boot, self.out.len());
-            }
-            self.peer_boot = Some(h.boot);
+            // The peer has none of our numbers (a new peer boot, or a peer that never
+            // counted this boot): restart the numbering of everything still owed.
+            log::debug!("peer {}: renumbering {} unacknowledged from 1", self.peer, self.out.len());
+            self.send_boot = Some(h.boot);
             for (i, (seq, _)) in self.out.iter_mut().enumerate() {
                 *seq = i as u64 + 1;
             }
             self.next_seq = self.out.len() as u64 + 1;
             self.sent_through = 0;
-            self.received_through = 0;
+            self.max_sent = 0;
         }
         self.state = Conn::Up;
         events.push(PeerEvent::Up(h));

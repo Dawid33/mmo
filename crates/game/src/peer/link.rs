@@ -5,19 +5,24 @@ use std::sync::{Arc, Mutex};
 
 use super::PeerMsg;
 
-/// One host's end of the link to a peer: messages out, messages in, in order (FIFO each
-/// way while the link is up); what was in transit when the link dropped is lost.
+/// One host's end of the link to a peer.
+///
+/// **Contract** — every implementation must keep it; [`super::PeerSession`]'s
+/// exactly-once delivery depends on it:
+/// - Within one connection, messages arrive in the order sent (FIFO each way), without
+///   loss except at the connection's end; what is in transit when a connection ends is lost.
+/// - [`PeerLink::connection`] changes on every (re)connect, and after it changes no
+///   message of an older connection is ever returned by [`PeerLink::recv`]. A link that
+///   cannot guarantee this by construction must tag its frames with their connection and
+///   filter out stale ones.
 pub trait PeerLink {
     fn send(&mut self, msg: PeerMsg);
     fn recv(&mut self) -> Option<PeerMsg>;
     fn is_up(&self) -> bool;
     /// The link's connection count: it changes on every (re)connect, like
     /// `WorldLink::generation`. A session that sees it change while [`PeerLink::is_up`]
-    /// stayed true treats it as a dropped and new connection. A link that never
-    /// reconnects keeps the default 0.
-    fn connection(&self) -> u64 {
-        0
-    }
+    /// stayed true treats it as a dropped and new connection. Required: see the contract.
+    fn connection(&self) -> u64;
     /// Drive an in-process link ([`InlinePeerLink`]); the session calls it before draining
     /// [`PeerLink::recv`]. A no-op for a real link.
     fn pump(&mut self, _now_ms: u64) {}

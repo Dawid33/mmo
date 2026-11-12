@@ -29,9 +29,15 @@ pub struct PeerHello {
     /// different generations exchange nothing.
     pub generation: u64,
     pub endpoint: HostEndpoint,
-    /// The last reliable seq this side received from the other in this boot pair (0 =
-    /// none): where the other side resumes.
+    /// The last reliable seq this side received from the other, counted against the
+    /// other's boot [`PeerHello::received_from_boot`] (0 = none).
     pub received_through: u64,
+    /// The other side's boot that `received_through` was counted against (`None` =
+    /// nothing ever counted). The receiver of the hello resumes after `received_through`
+    /// ONLY when this is its own boot and its numbering is addressed to the hello's boot;
+    /// otherwise the count is not about its numbers (it is treated as 0) and it restarts
+    /// its numbering from 1 for everything it still owes (`PeerSession`).
+    pub received_from_boot: Option<u64>,
 }
 
 /// A player handed from one host to another with an entity or a record.

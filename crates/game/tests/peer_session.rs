@@ -1,8 +1,11 @@
 //! `game::peer`: the host↔host session over a seeded, delaying in-process link. Every
 //! test runs 32 seeds; a failure names its seed.
 
+use std::collections::VecDeque;
+
 use game::{
-    CutId, HostEndpoint, InlinePeerLink, PeerEvent, PeerHello, PeerSession, RegionCoords, Reliable, Volatile,
+    CutId, HostEndpoint, InlinePeerLink, PeerEvent, PeerHello, PeerLink, PeerMsg, PeerSession, RegionCoords, Reliable,
+    Volatile,
 };
 
 const SEEDS: u64 = 32;
@@ -25,6 +28,7 @@ fn hello(ordinal: u32, boot: u64, generation: u64) -> PeerHello {
         generation,
         endpoint: HostEndpoint { ordinal, quic: None, webtransport: None, cert_hash: None },
         received_through: 0,
+        received_from_boot: None,
     }
 }
 
@@ -41,10 +45,103 @@ fn number(r: &Reliable) -> u64 {
     }
 }
 
+/// A wire tap around one end of an [`InlinePeerLink`]: records what the session sends and
+/// reads (with the connection it was read on), and can inject, re-deliver or drop frames.
+struct Tap {
+    inner: InlinePeerLink,
+    /// Frames the session sent through this end.
+    sent: Vec<PeerMsg>,
+    /// Frames the session read through this end, with the connection they arrived on.
+    read: Vec<(u64, PeerMsg)>,
+    /// Returned by `recv` before anything from the link.
+    inject: VecDeque<PeerMsg>,
+    /// After reading the reliable frame with this seq, return it once more (next pump).
+    dup_seq: Option<u64>,
+    /// Swallow the first reliable frame with this seq.
+    drop_seq: Option<u64>,
+    /// Frames to inject from the next pump on.
+    next_pump: Vec<PeerMsg>,
+}
+
+impl Tap {
+    fn new(inner: InlinePeerLink) -> Self {
+        Tap {
+            inner,
+            sent: Vec::new(),
+            read: Vec::new(),
+            inject: VecDeque::new(),
+            dup_seq: None,
+            drop_seq: None,
+            next_pump: Vec::new(),
+        }
+    }
+
+    fn set_up(&mut self, up: bool) {
+        self.inner.set_up(up);
+    }
+
+    /// Reliable seqs read on connection `c`.
+    fn seqs_on(&self, c: u64) -> Vec<u64> {
+        self.read
+            .iter()
+            .filter_map(|(conn, m)| match m {
+                PeerMsg::Reliable { seq, .. } if *conn == c => Some(*seq),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn reliable_sent(&self) -> usize {
+        self.sent.iter().filter(|m| matches!(m, PeerMsg::Reliable { .. })).count()
+    }
+}
+
+impl PeerLink for Tap {
+    fn send(&mut self, msg: PeerMsg) {
+        self.sent.push(msg.clone());
+        self.inner.send(msg);
+    }
+
+    fn recv(&mut self) -> Option<PeerMsg> {
+        let msg = match self.inject.pop_front() {
+            Some(m) => m,
+            None => loop {
+                let m = self.inner.recv()?;
+                if let PeerMsg::Reliable { seq, .. } = &m {
+                    if self.drop_seq == Some(*seq) {
+                        self.drop_seq = None;
+                        continue;
+                    }
+                    if self.dup_seq == Some(*seq) {
+                        self.dup_seq = None;
+                        self.next_pump.push(m.clone());
+                    }
+                }
+                break m;
+            },
+        };
+        self.read.push((self.inner.connection(), msg.clone()));
+        Some(msg)
+    }
+
+    fn is_up(&self) -> bool {
+        self.inner.is_up()
+    }
+
+    fn connection(&self) -> u64 {
+        self.inner.connection()
+    }
+
+    fn pump(&mut self, now_ms: u64) {
+        self.inject.extend(self.next_pump.drain(..));
+        self.inner.pump(now_ms);
+    }
+}
+
 /// One host's side: its session, its end of the link, and what it has seen.
 struct Side {
     s: PeerSession,
-    link: InlinePeerLink,
+    link: Tap,
     got: Vec<u64>,
     vol: Vec<Volatile>,
     events: Vec<PeerEvent>,
@@ -52,7 +149,7 @@ struct Side {
 
 impl Side {
     fn new(me: PeerHello, peer: u32, link: InlinePeerLink) -> Self {
-        Side { s: PeerSession::new(me, peer), link, got: Vec::new(), vol: Vec::new(), events: Vec::new() }
+        Side { s: PeerSession::new(me, peer), link: Tap::new(link), got: Vec::new(), vol: Vec::new(), events: Vec::new() }
     }
 
     fn pump(&mut self, now: u64) {
@@ -214,7 +311,7 @@ fn new_peer_boot_restarts_numbering_and_requeues() {
         let owed = a.unreceived();
         let b_old_got = b.got.clone();
         // The restarted b: a new boot, nothing remembered.
-        let mut b2 = Side::new(hello(1, 201, 1), 0, std::mem::replace(&mut b.link, InlinePeerLink::pair(0, 0).0));
+        let mut b2 = Side::new(hello(1, 201, 1), 0, std::mem::replace(&mut b.link, Tap::new(InlinePeerLink::pair(0, 0).0)).inner);
         for n in 101..=105 {
             b2.s.queue(payload(n));
         }
@@ -330,7 +427,7 @@ fn drop_through_mark_forgets_exactly_the_prefix() {
         assert_eq!(a.unreceived(), (50..=55).collect::<Vec<_>>(), "seed {seed}: exactly the prefix forgotten");
         // The peer comes back as a new boot: it gets exactly what is still owed.
         a.link.set_up(false);
-        let mut b2 = Side::new(hello(1, 201, 1), 0, std::mem::replace(&mut b.link, InlinePeerLink::pair(0, 0).0));
+        let mut b2 = Side::new(hello(1, 201, 1), 0, std::mem::replace(&mut b.link, Tap::new(InlinePeerLink::pair(0, 0).0)).inner);
         b2.link.set_up(true);
         run(seed, &mut a, &mut b2, &mut now, |_, b2| b2.s.is_reachable());
         a.s.release();
@@ -372,5 +469,298 @@ fn unreceived_lists_queued_and_unacked() {
         }
         assert!(a.unreceived().is_empty(), "seed {seed}: all acknowledged in the end");
         assert_eq!(b.got, (1..=30).collect::<Vec<_>>(), "seed {seed}");
+    }
+}
+
+/// A connected pair where b has sent a 1..=15 (all delivered and acknowledged) and a has
+/// sent b 1..=20 (a seeded part through); then b's process dies with the link.
+fn crash_b(seed: u64, now: &mut u64) -> (Side, Side, Vec<u64>) {
+    let (mut a, mut b) = pair(seed, 3);
+    for n in 1..=15 {
+        b.s.queue(payload(n));
+    }
+    run(seed, &mut a, &mut b, now, |a, b| a.got.len() == 15 && b.s.unreceived().count() == 0);
+    for n in 1..=20 {
+        a.s.queue(payload(n));
+    }
+    rounds(&mut a, &mut b, now, (roll(seed, 7) % 12) as usize);
+    a.link.set_up(false);
+    let link = std::mem::replace(&mut b.link, Tap::new(InlinePeerLink::pair(0, 0).0)).inner;
+    let owed = a.unreceived();
+    (a, Side::new(hello(1, 201, 1), 0, link), owed)
+}
+
+#[test]
+fn new_boot_hello_seen_by_one_side_then_link_drops() {
+    for seed in 0..SEEDS {
+        for restarted_reads_first in [true, false] {
+            let mut now = 0;
+            let (mut a, mut b2, owed) = crash_b(seed, &mut now);
+            for n in 101..=105 {
+                b2.s.queue(payload(n));
+            }
+            b2.link.set_up(true);
+            // Only one side reads the other's hello of this connection; then the link drops.
+            let (first, second) = if restarted_reads_first { (&mut a, &mut b2) } else { (&mut b2, &mut a) };
+            now += 1;
+            first.pump(now);
+            for _ in 0..MAX_ROUNDS {
+                if second.s.is_reachable() {
+                    break;
+                }
+                now += 1;
+                second.pump(now);
+            }
+            assert!(second.s.is_reachable(), "seed {seed} {restarted_reads_first}: one side up");
+            assert!(!first.s.is_reachable(), "seed {seed} {restarted_reads_first}: the other not yet");
+            a.link.set_up(false);
+            rounds(&mut a, &mut b2, &mut now, 2);
+            b2.link.set_up(true);
+            run(seed, &mut a, &mut b2, &mut now, |a, b2| {
+                a.s.unreceived().count() == 0 && b2.s.unreceived().count() == 0
+            });
+            rounds(&mut a, &mut b2, &mut now, 10);
+            let mut want_a: Vec<u64> = (1..=15).collect();
+            want_a.extend(101..=105);
+            assert_eq!(a.got, want_a, "seed {seed} {restarted_reads_first}: a gets the new boot's messages once, in order");
+            assert_eq!(b2.got, owed, "seed {seed} {restarted_reads_first}: the new boot gets what a owed, once, in order");
+        }
+    }
+}
+
+fn reliable_frame(seq: u64, n: u64) -> PeerMsg {
+    PeerMsg::Reliable { seq, body: payload(n) }
+}
+
+#[test]
+fn duplicate_frame_is_delivered_once_and_still_acked() {
+    const N: u64 = 20;
+    for seed in 0..SEEDS {
+        let (mut a, mut b) = pair(seed, 3);
+        let mut now = 0;
+        let k = 1 + roll(seed, 0) % N;
+        b.link.dup_seq = Some(k);
+        for n in 1..=N {
+            a.s.queue(payload(n));
+        }
+        run(seed, &mut a, &mut b, &mut now, |a, b| a.s.unreceived().count() == 0 && b.got.len() == N as usize);
+        rounds(&mut a, &mut b, &mut now, 10);
+        let c = b.link.connection();
+        assert_eq!(b.link.seqs_on(c).iter().filter(|s| **s == k).count(), 2, "seed {seed}: {k} re-delivered");
+        assert_eq!(b.got, (1..=N).collect::<Vec<_>>(), "seed {seed}: delivered once");
+        // A duplicate alone in a pump: dropped, and still acknowledged.
+        let before = b.link.sent.len();
+        b.link.inject.push_back(reliable_frame(N, N));
+        now += 1;
+        b.pump(now);
+        assert_eq!(b.got.len(), N as usize, "seed {seed}: the duplicate is not delivered");
+        assert!(
+            b.link.sent[before..].contains(&PeerMsg::Ack { through: N }),
+            "seed {seed}: a duplicate is still acknowledged: {:?}",
+            &b.link.sent[before..]
+        );
+    }
+}
+
+#[test]
+fn reconnect_resends_from_received_through_plus_one() {
+    const N: u64 = 100;
+    for seed in 0..SEEDS {
+        let (mut a, mut b) = pair(seed, 3);
+        let mut now = 0;
+        let mut queued = 0;
+        // (connection, what b had received when it came up)
+        let mut resumes = Vec::new();
+        let flaps: Vec<u64> = (0..4).map(|i| 10 + i * 25 + roll(seed, i) % 15).collect();
+        for round in 0..MAX_ROUNDS as u64 {
+            if queued == N && a.s.unreceived().count() == 0 {
+                break;
+            }
+            if queued < N {
+                queued += 1;
+                a.s.queue(payload(queued));
+            }
+            if flaps.contains(&round) {
+                a.link.set_up(false);
+            }
+            if flaps.contains(&round.wrapping_sub(3)) {
+                b.link.set_up(true);
+                resumes.push((b.link.connection(), b.got.len() as u64));
+            }
+            now += 1;
+            a.pump(now);
+            b.pump(now);
+        }
+        assert_eq!(b.got, (1..=N).collect::<Vec<_>>(), "seed {seed}");
+        assert_eq!(resumes.len(), 4, "seed {seed}");
+        for (c, rt) in resumes {
+            let seqs = b.link.seqs_on(c);
+            assert!(
+                seqs.iter().all(|s| *s > rt),
+                "seed {seed}: connection {c} resent at or below received_through {rt}: {seqs:?}"
+            );
+            let mut sorted = seqs.clone();
+            sorted.dedup();
+            assert_eq!(sorted, seqs, "seed {seed}: connection {c}: each seq on the wire once, in order");
+        }
+    }
+}
+
+#[test]
+fn gap_breaks_the_connection_until_the_next() {
+    const N: u64 = 20;
+    for seed in 0..SEEDS {
+        let (mut a, mut b) = pair(seed, 3);
+        let mut now = 0;
+        // Not the last: a lost tail has no later frame to show the gap.
+        let k = 2 + roll(seed, 0) % (N - 2);
+        b.link.drop_seq = Some(k);
+        for n in 1..=N {
+            a.s.queue(payload(n));
+        }
+        run(seed, &mut a, &mut b, &mut now, |_, b| b.count(|e| matches!(e, PeerEvent::Down)) == 1);
+        rounds(&mut a, &mut b, &mut now, 20);
+        assert_eq!(b.got, (1..k).collect::<Vec<_>>(), "seed {seed}: nothing after the gap at {k} on that connection");
+        assert!(!b.s.is_reachable(), "seed {seed}: broken");
+        assert_eq!(b.count(|e| matches!(e, PeerEvent::Down)), 1, "seed {seed}: one Down");
+        a.link.set_up(false);
+        rounds(&mut a, &mut b, &mut now, 2);
+        a.link.set_up(true);
+        run(seed, &mut a, &mut b, &mut now, |a, _| a.s.unreceived().count() == 0);
+        assert_eq!(b.got, (1..=N).collect::<Vec<_>>(), "seed {seed}: exactly once after the next connection");
+    }
+}
+
+#[test]
+fn nothing_is_processed_before_the_peers_hello() {
+    for seed in 0..SEEDS {
+        let (mut a, mut b) = pair(seed, 3);
+        let mut now = 0;
+        for n in 1..=3 {
+            a.s.queue(payload(n));
+        }
+        let stray = |b: &mut Side| {
+            b.link.inject.push_back(reliable_frame(1, 999));
+            b.link.inject.push_back(PeerMsg::Volatile(Volatile::RegionUp(rc(9))));
+        };
+        stray(&mut b);
+        now += 1;
+        b.pump(now);
+        run(seed, &mut a, &mut b, &mut now, |a, _| a.s.unreceived().count() == 0);
+        assert_eq!(b.got, vec![1, 2, 3], "seed {seed}: nothing before the hello is delivered");
+        // And on a later connection.
+        a.link.set_up(false);
+        rounds(&mut a, &mut b, &mut now, 2);
+        for n in 4..=5 {
+            a.s.queue(payload(n));
+        }
+        a.link.set_up(true);
+        stray(&mut b);
+        now += 1;
+        b.pump(now);
+        run(seed, &mut a, &mut b, &mut now, |a, _| a.s.unreceived().count() == 0);
+        assert_eq!(b.got, vec![1, 2, 3, 4, 5], "seed {seed}: nothing before the hello is delivered");
+        assert!(b.vol.is_empty(), "seed {seed}: {:?}", b.vol);
+    }
+}
+
+#[test]
+fn held_session_sends_nothing_across_flaps_then_all_in_order() {
+    const N: u64 = 15;
+    for seed in 0..SEEDS {
+        let (mut a, mut b) = pair(seed, 3);
+        let mut now = 0;
+        a.s.hold();
+        for n in 1..=N {
+            a.s.queue(payload(n));
+        }
+        for flap in 0..3 {
+            run(seed, &mut a, &mut b, &mut now, |_, b| b.s.is_reachable());
+            rounds(&mut a, &mut b, &mut now, (roll(seed, flap) % 10) as usize);
+            (if flap % 2 == 0 { &mut a } else { &mut b }).link.set_up(false);
+            rounds(&mut a, &mut b, &mut now, 2);
+            a.link.set_up(true);
+        }
+        run(seed, &mut a, &mut b, &mut now, |_, b| b.s.is_reachable());
+        rounds(&mut a, &mut b, &mut now, 10);
+        assert_eq!(a.link.reliable_sent(), 0, "seed {seed}: nothing reliable on the wire while held");
+        assert!(b.got.is_empty(), "seed {seed}");
+        a.s.release();
+        run(seed, &mut a, &mut b, &mut now, |a, _| a.s.unreceived().count() == 0);
+        assert_eq!(b.got, (1..=N).collect::<Vec<_>>(), "seed {seed}: in order after release");
+        assert_eq!(a.link.reliable_sent(), N as usize, "seed {seed}: each sent once");
+    }
+}
+
+#[test]
+fn ack_above_anything_sent_breaks_the_connection() {
+    for seed in 0..SEEDS {
+        let (mut a, mut b) = pair(seed, 3);
+        let mut now = 0;
+        for n in 1..=5 {
+            a.s.queue(payload(n));
+        }
+        run(seed, &mut a, &mut b, &mut now, |a, _| a.s.unreceived().count() == 0);
+        a.s.hold();
+        for n in 6..=8 {
+            a.s.queue(payload(n));
+        }
+        rounds(&mut a, &mut b, &mut now, 5);
+        // 6 was never sent (held): an ack of it is a lie.
+        a.link.inject.push_back(PeerMsg::Ack { through: 6 });
+        now += 1;
+        a.pump(now);
+        assert_eq!(a.count(|e| matches!(e, PeerEvent::Down)), 1, "seed {seed}: the ack broke the connection");
+        assert_eq!(a.unreceived(), vec![6, 7, 8], "seed {seed}: nothing forgotten");
+        rounds(&mut a, &mut b, &mut now, 5);
+        assert_eq!(a.unreceived(), vec![6, 7, 8], "seed {seed}");
+        // A hello that claims more than was sent, on a new connection.
+        a.link.set_up(false);
+        rounds(&mut a, &mut b, &mut now, 2);
+        a.link.set_up(true);
+        a.link.inject.push_back(PeerMsg::Hello(PeerHello {
+            received_through: 1000,
+            received_from_boot: Some(100),
+            ..hello(1, 200, 1)
+        }));
+        now += 1;
+        a.pump(now);
+        assert_eq!(a.count(|e| matches!(e, PeerEvent::Down)), 2, "seed {seed}: the hello broke the connection");
+        assert_eq!(a.count(|e| matches!(e, PeerEvent::Up(_))), 1, "seed {seed}: not up on it");
+        assert_eq!(a.unreceived(), vec![6, 7, 8], "seed {seed}: nothing forgotten");
+        // A clean connection, released: everything arrives once.
+        a.link.set_up(false);
+        rounds(&mut a, &mut b, &mut now, 2);
+        a.link.set_up(true);
+        a.s.release();
+        run(seed, &mut a, &mut b, &mut now, |a, _| a.s.unreceived().count() == 0);
+        assert_eq!(b.got, (1..=8).collect::<Vec<_>>(), "seed {seed}");
+    }
+}
+
+#[test]
+fn lower_generation_peer_returns_at_equal_generation() {
+    for seed in 0..SEEDS {
+        let (la, lb) = InlinePeerLink::pair(seed, 3);
+        let mut a = Side::new(hello(0, 100, 1), 1, la);
+        let mut b = Side::new(hello(1, 200, 0), 0, lb);
+        let mut now = 0;
+        for n in 1..=3 {
+            a.s.queue(payload(n));
+        }
+        rounds(&mut a, &mut b, &mut now, 30);
+        assert!(a.events.is_empty(), "seed {seed}: the lower generation is ignored: {:?}", a.events);
+        assert_eq!(b.events, vec![PeerEvent::HigherGeneration(1)], "seed {seed}");
+        a.link.set_up(false);
+        let link = std::mem::replace(&mut b.link, Tap::new(InlinePeerLink::pair(0, 0).0)).inner;
+        let mut b2 = Side::new(hello(1, 201, 1), 0, link);
+        b2.s.queue(payload(101));
+        b2.link.set_up(true);
+        run(seed, &mut a, &mut b2, &mut now, |a, b2| {
+            a.s.unreceived().count() == 0 && b2.s.unreceived().count() == 0
+        });
+        assert!(a.s.is_reachable(), "seed {seed}: reachable at an equal generation");
+        assert_eq!(b2.got, vec![1, 2, 3], "seed {seed}");
+        assert_eq!(a.got, vec![101], "seed {seed}");
     }
 }
