@@ -4167,3 +4167,187 @@ fn misrouted_transfer(rig: &mut MultiRig) {
 fn transfer_for_a_region_of_a_third_host_is_bounced_to_its_owner() {
     sweep("transfer_for_a_region_of_a_third_host_is_bounced_to_its_owner", 3, 1, SEEDS / 4, misrouted_transfer);
 }
+
+/// Host B's keeper body may end by parking (B leaves): registered as a player body.
+fn keeper_may_park(rig: &mut MultiRig, hb: u32) {
+    let home_b = rig.homes[hb as usize];
+    let mut keeper = None;
+    rig.hosts[hb as usize].manager.spawner_mut().with_region(home_b, |r| {
+        let d = r.data();
+        keeper = d.player_entites.get(&crate::common::rig::CLIENT).and_then(|k| *d.ecs.id.try_get(*k));
+    });
+    rig.player_bodies.insert(keeper.expect("B's keeper body"), game::PlayerId(u64::from(hb)));
+}
+
+/// Cut rounds until host `hb`'s leave cut has begun on it and on host `ha`: its id.
+fn until_leave_begun(rig: &mut MultiRig, ha: u32, hb: u32) -> game::CutId {
+    for _ in 0..WORLD_CUT_ROUNDS {
+        let leaving = rig.hosts[hb as usize].manager.leaving_cut();
+        if leaving.is_some() && rig.hosts[ha as usize].manager.world_cut() == leaving {
+            return leaving.unwrap();
+        }
+        rig.cut_round();
+    }
+    panic!("the leave cut never began on both hosts; decisions {:?}", rig.decided);
+}
+
+/// Host `h`'s coordinator link drops (the runtime tells the core it detached) and, after
+/// some rounds, comes back (a new connection: the host attaches again).
+fn flap_world_link(rig: &mut MultiRig, h: u32) {
+    rig.hosts[h as usize].manager.world_link_mut().unwrap().as_inline_mut().unwrap().set_up(false);
+    rig.core().host_detached(h);
+    for _ in 0..WAIT_ROUNDS {
+        rig.cut_round();
+    }
+    rig.hosts[h as usize].manager.world_link_mut().unwrap().as_inline_mut().unwrap().set_up(true);
+}
+
+/// Fix round 1 (I1): host B asks to leave while attached, and its coordinator link drops
+/// before the leave cut begins (the coordinator forgets the request): B asks again with its
+/// `Attach`, and the leave cut still begins and commits.
+fn leave_after_a_link_flap(rig: &mut MultiRig) {
+    let (a, b) = host_seam(2, 1);
+    let (ha, hb) = (rig.owner(a), rig.owner(b));
+    rig.run(a);
+    world_cuts(rig);
+    keeper_may_park(rig, hb);
+    rig.hosts[hb as usize].manager.request_leave();
+    rig.cut_round();
+    flap_world_link(rig, hb);
+    let cut = until_leave_begun(rig, ha, hb);
+    assert!(until_decided(rig, cut), "the leave cut commits");
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn leave_request_survives_a_coordinator_link_flap() {
+    sweep("leave_request_survives_a_coordinator_link_flap", 2, 1, SEEDS / 4, leave_after_a_link_flap);
+}
+
+/// Fix round 1 (I2): host B's leave cut is ABORTED (B's coordinator link drops while it
+/// runs). The two slimes host A held back for B go out once the abort is known, in order,
+/// each exactly once (B's mailbox; conservation every round). A following ordinary cut of
+/// both hosts commits, and B's retried leave commits with the slimes as B's rows.
+fn aborted_leave(rig: &mut MultiRig) {
+    let (a, b) = host_seam(2, 1);
+    let (ha, hb) = (rig.owner(a), rig.owner(b));
+    rig.run(a);
+    world_cuts(rig);
+    keeper_may_park(rig, hb);
+    rig.hosts[hb as usize].manager.request_leave();
+    let cut = until_leave_begun(rig, ha, hb);
+    let first = rig.spawn_slime(a, past_seam(a, b, REGION_SIZE / 3.0));
+    rig.cut_round();
+    let second = rig.spawn_slime(a, past_seam(a, b, 2.0 * REGION_SIZE / 3.0));
+    let held = |rig: &MultiRig, id| rig.hosts[ha as usize].manager.peer_unreceived_ids().contains(&(hb, id, false));
+    for _ in 0..WAIT_ROUNDS {
+        if held(rig, first) && held(rig, second) {
+            break;
+        }
+        rig.cut_round();
+    }
+    assert!(held(rig, first) && held(rig, second), "both slimes held back on host {ha}");
+    // B's link goes while the leave cut runs: it is aborted.
+    rig.hosts[hb as usize].manager.world_link_mut().unwrap().as_inline_mut().unwrap().set_up(false);
+    rig.core().host_detached(hb);
+    assert!(!until_decided(rig, cut), "the leave cut is aborted");
+    rig.hosts[hb as usize].manager.world_link_mut().unwrap().as_inline_mut().unwrap().set_up(true);
+    for _ in 0..CROSS_ROUNDS {
+        let waiting: Vec<game::EntityId> = rig.hosts[hb as usize].manager.pending_arrival_ids().into_iter().map(|(id, _)| id).collect();
+        if waiting.contains(&first) && waiting.contains(&second) && rig.peer_unreceived() == 0 {
+            break;
+        }
+        rig.cut_round();
+    }
+    let waiting: Vec<game::EntityId> = rig.hosts[hb as usize].manager.pending_arrival_ids().into_iter().map(|(id, _)| id).collect();
+    let at = |id| waiting.iter().position(|w| *w == id);
+    assert!(at(first).is_some() && at(second).is_some(), "both slimes released to host {hb}: {waiting:?}");
+    assert!(at(first) < at(second), "in the order they were sent");
+    assert_eq!(live_count(rig, first), 1);
+    assert_eq!(live_count(rig, second), 1);
+    assert!(!rig.hosts[ha as usize].manager.peer_left(hb), "an aborted leave holds nothing");
+    // An ordinary cut of both hosts, then the retried leave.
+    until_committed(rig, 1);
+    let (_, parts) = rig.last_committed();
+    assert!(parts.contains_key(&ha) && parts.contains_key(&hb), "both hosts in the next cut");
+    assert_eq!(rig.hosts[hb as usize].manager.leave_outcome(), Some(false));
+    assert!(rig.hosts[hb as usize].manager.retry_leave(), "the leave is asked for again");
+    let again = until_leave_begun(rig, ha, hb);
+    assert!(again > cut);
+    assert!(until_decided(rig, again), "the retried leave commits");
+    for id in [first, second] {
+        assert_eq!(rig.stored_places(id), [(hb, b, "row")], "{id:?} once, in B's mailbox row");
+    }
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn aborted_leave_releases_what_was_held_and_the_retry_commits() {
+    sweep("aborted_leave_releases_what_was_held_and_the_retry_commits", 2, 1, SEEDS / 4, aborted_leave);
+}
+
+/// Fix round 1 (I2): a player handed (walking) and one moved to host B after B parked for
+/// its leave cut (each sent before host A's mark: B's) are parked on B, never woken into a
+/// region, and each is in exactly one part — B's — of the committed leave.
+fn players_toward_a_leaver(rig: &mut MultiRig) {
+    let (a, b) = host_seam(2, 1);
+    let (ha, hb) = (rig.owner(a), rig.owner(b));
+    rig.run(a);
+    world_cuts(rig);
+    keeper_may_park(rig, hb);
+    // A body bundle to carry the handed player (a copy of a slime's, under a new id).
+    let slime = rig.spawn_slime(a, [REGION_SIZE / 2.0, crate::common::above_floor_y(), REGION_SIZE / 2.0]);
+    let mut bundle = None;
+    rig.hosts[ha as usize].manager.spawner_mut().with_region(a, |r| {
+        let key = r.data().id_index[&slime];
+        bundle = Some(r.data().bundle_of(key));
+    });
+    let mut bundle = bundle.unwrap();
+    bundle.id = game::EntityId { birth_region: a, serial: 999_999 };
+    bundle.rebase(a, b);
+    bundle.body.pose = game::Pose::from_translation(game::rapier3d::math::Vector::new(1.0, crate::common::above_floor_y(), REGION_SIZE / 2.0));
+    let (walker, mover) = ((60, game::PlayerId(600)), (61, game::PlayerId(610)));
+    bundle.client = Some((walker.0, game::Client::default()));
+    rig.hosts[hb as usize].manager.request_leave();
+    let mut cut = None;
+    for _ in 0..WORLD_CUT_ROUNDS {
+        // On B, right after its BeginCut (no mark of A's yet: A marks at the cut tick).
+        if let Some(c) = rig.hosts[hb as usize].manager.leaving_cut() {
+            cut = Some(c);
+            break;
+        }
+        rig.cut_round();
+    }
+    let cut = cut.expect("the leave cut began on B");
+    assert!(rig.hosts[hb as usize].manager.leave_parked());
+    let handoff = |(client, player): (game::ClientId, game::PlayerId)| game::PlayerHandoff {
+        client,
+        player,
+        claim: None,
+        login: None,
+        park: false,
+        hop: 1,
+    };
+    let stamp = world_tick(rig);
+    let walk = game::Reliable::Transfer { target: b, stamp, bundle: Box::new(bundle), player: Some(handoff(walker)) };
+    rig.hosts[hb as usize].manager.apply_peer_reliable(ha, walk);
+    let record = centre_of(b);
+    let mv = game::Reliable::PlayerMove { handoff: handoff(mover), record: Box::new(record), target: b };
+    rig.hosts[hb as usize].manager.apply_peer_reliable(ha, mv);
+    for (_, p) in [walker, mover] {
+        assert!(rig.hosts[hb as usize].manager.parked_record(p).is_some(), "player {} parked on B", p.0);
+    }
+    assert!(!rig.hosts[hb as usize].manager.running_regions().contains(&b), "nothing woke {b:?}");
+    assert!(until_decided(rig, cut), "the leave cut commits");
+    let (_, parts) = rig.last_committed();
+    for (_, p) in [walker, mover] {
+        assert!(parts[&hb].players.iter().any(|(q, _)| *q == p), "player {} in B's part", p.0);
+        assert!(!parts[&ha].players.iter().any(|(q, _)| *q == p), "player {} not in A's part", p.0);
+    }
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn players_handed_or_moved_to_a_leaver_park_there_in_one_part() {
+    sweep("players_handed_or_moved_to_a_leaver_park_there_in_one_part", 2, 1, SEEDS / 4, players_toward_a_leaver);
+}

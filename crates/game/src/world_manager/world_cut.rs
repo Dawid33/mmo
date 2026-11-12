@@ -136,12 +136,19 @@ impl<S: RegionSpawner> WorldManager<S> {
         hosts: &[u32],
         leaving: &[u32],
     ) -> Result<(), CutFailure> {
+        let me = self.ownership.0.ordinal();
+        if leaving.contains(&me) && self.leave_requested {
+            // This attempt's cut, whether this host manages to take part or not: its
+            // outcome (an abort, if it fails here) is what the exit waits for.
+            self.leaving_cut = Some(cut);
+            self.leave_outcome = None;
+            self.leave_decided = false;
+        }
         if self.world_cut.is_some() || self.pending_cut.is_some() || self.ready_cut.is_some() {
             log::warn!("world cut {}: another cut is still pending here; refused", cut.0);
             return Err(CutFailure::Aborted);
         }
         self.world_cut_seen = Some(self.world_cut_seen.map_or(cut, |s| s.max(cut)));
-        let me = self.ownership.0.ordinal();
         let now = self.spawner.world_tick();
         if tick < now + WORLD_CUT_MIN_LEAD_TICKS {
             log::warn!("world cut {} at tick {tick}: the world tick is {now} already; missed", cut.0);
@@ -188,12 +195,20 @@ impl<S: RegionSpawner> WorldManager<S> {
         // that peer from now until the cut is decided waits here, in this host's part.
         let peers: Vec<u32> = self.world_cut_peers(cut).into_iter().collect();
         for p in peers.into_iter().filter(|p| i_leave || leaving.contains(p)) {
-            self.leave_pairs.insert(p, LeavePair { cut, held: Vec::new() });
+            // A pair of an earlier cut is ended when that cut is decided, and no cut begins
+            // before that: one still here would be a lost `CutDone` — what it held goes
+            // out (as for an abort) rather than being overwritten.
+            if let Some(stale) = self.leave_pairs.insert(p, LeavePair { cut, held: Vec::new() }) {
+                log::error!("[server] a leave pair with host {p} of cut {} was never ended; what it held goes out", stale.cut.0);
+                for msg in stale.held {
+                    self.queue_now(p, msg);
+                }
+            }
         }
         if i_leave {
             // Everything here parks for it: the regions' `Stopped` answers are the cut's.
             log::info!("[server] world cut {} at tick {tick}: this host leaves in it; parking everything", cut.0);
-            self.leaving_cut = Some(cut);
+            self.leave_parked = true;
             let now_ms = self.clock_ms;
             self.park_all_players(now_ms);
             self.shutdown_all();
@@ -214,9 +229,38 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.world_send(HostMsg::LeaveRequest);
     }
 
-    /// The world cut this host leaves in, once begun (everything here parked for it).
+    /// The world cut of this host's current leave attempt (a `BeginCut` named it leaving),
+    /// whether its part could be taken or not.
     pub fn leaving_cut(&self) -> Option<CutId> {
         self.leaving_cut
+    }
+
+    /// This host parked everything for a leave cut (it stays parked: it is exiting).
+    pub fn leave_parked(&self) -> bool {
+        self.leave_parked
+    }
+
+    /// The leave cut was aborted and the coordinator's `CutDone` of it has come: ask for
+    /// another one (`true`). `false` while there is nothing to retry yet.
+    pub fn retry_leave(&mut self) -> bool {
+        if !self.leave_requested || self.leave_outcome != Some(false) || !self.leave_decided {
+            return false;
+        }
+        log::warn!(
+            "[server] the leave cut {} was aborted: asking for another",
+            self.leaving_cut.map_or(0, |c| c.0)
+        );
+        self.leaving_cut = None;
+        self.leave_outcome = None;
+        self.leave_decided = false;
+        self.world_send(HostMsg::LeaveRequest);
+        true
+    }
+
+    /// Whether the `Attach` must ask for a leave cut again: one is asked for and none has
+    /// named this host yet (the coordinator forgets a request when the link drops).
+    pub(super) fn leave_pending_request(&self) -> bool {
+        self.leave_requested && self.leaving_cut.is_none()
     }
 
     /// The leave cut's outcome once the server settled it ([`Self::cut_committed`] /
@@ -393,6 +437,9 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.world_cut_seen = Some(self.world_cut_seen.map_or(cut, |s| s.max(cut)));
         self.early_marks.retain(|_, c| *c > cut);
         self.end_leaves(cut, committed);
+        if self.leaving_cut == Some(cut) {
+            self.leave_decided = true;
+        }
         self.world_cut_done.push((cut, committed));
     }
 
@@ -494,12 +541,15 @@ impl<S: RegionSpawner> WorldManager<S> {
         }
     }
 
-    /// Case 3: `msg`, sent after this host's mark and in no snapshot of it, is this part's —
-    /// an in-flight row, or a player's record.
+    /// Case 3: `msg`, sent after this host's mark (or, between two hosts a leave joins, at
+    /// any time before the decision) and in no snapshot of it, is this part's — an in-flight
+    /// row, or a player's record.
     ///
-    /// Only a manager-made message gets here (marks wait for T, so a region-sourced one is
-    /// never case 3): the transfer and player branches are defensive. A person's bundle is
-    /// never a row (the history respawns people, as for `cut_crossing`).
+    /// Outside a leave only a manager-made message gets here (marks wait for T, so a
+    /// region-sourced one is never case 3), and the transfer and player branches are
+    /// defensive. Between leave pairs region-sourced transfers and moves that left before
+    /// their source answered come here too (`world_cut_wrap`), held back meanwhile. A
+    /// person's bundle is never a row (the history respawns people, as for `cut_crossing`).
     fn keep_in_part(&mut self, msg: &Reliable) {
         let row = match msg {
             Reliable::Transfer { bundle, .. } if matches!(bundle.kind, crate::EntityKind::Person { .. }) => None,

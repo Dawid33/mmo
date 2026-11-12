@@ -1085,13 +1085,28 @@ fn restart_host(w: &mut World, db: &PgDb, dir: &std::path::Path, h: u32, boot: u
 /// Host `h` exits (`cuts::exit_world`), the other hosts still running round by round
 /// meanwhile; its outcome. Its peer listener and coordinator link go with it.
 fn exit_host(w: &mut World, h: u32) -> server::claims::ServerExit {
+    exit_host_with(w, h, None, |_, _| {})
+}
+
+/// [`exit_host`] with a leave timeout (`None`: the default) and `each` run every round
+/// with the exiting manager and the other hosts' claims.
+fn exit_host_with(
+    w: &mut World,
+    h: u32,
+    leave_timeout: Option<Duration>,
+    mut each: impl FnMut(&WorldManager<InlineSpawner>, &[HostClaims]),
+) -> server::claims::ServerExit {
     let i = w.pair.sims.iter().position(|s| s.ordinal == h).expect("the host is up");
     let mut sim = w.pair.sims.remove(i);
     let fenced = w.claims[h as usize].fenced().clone();
     let generation = w.generations[h as usize].clone();
     let started = w.pair.started;
     let region_out = sim.region_out.clone();
-    let cuts = sim.cuts.take();
+    let mut cuts = sim.cuts.take();
+    if let (Some(c), Some(t)) = (cuts.as_mut(), leave_timeout) {
+        c.set_leave_timeout(t);
+    }
+    let claims = w.claims.clone();
     let pair = &mut w.pair;
     let exit = server::cuts::exit_world(
         &mut sim.manager,
@@ -1111,6 +1126,7 @@ fn exit_host(w: &mut World, h: u32) -> server::claims::ServerExit {
             m.spawner_mut().tick_all();
             m.spawner_mut().pump();
             pair.round();
+            each(m, &claims);
         },
     );
     w.switches[h as usize].drop_link();
@@ -1318,16 +1334,26 @@ fn coordinator_killed_between_commit_prepareds_cut_is_whole() {
     let dir = scratch("kccom");
     let mut w = world(&db, &dir);
     w.store.stop_after_commit_prepared(1);
-    // No host round between the decision and the kill: a host's settling would finish
-    // the rest itself.
+    // The failed decision is never retried (the coordinator is to die right after it).
+    w.coordinator.as_ref().unwrap().thread.hold_decision_retries();
+    // Both parts staged: no host round from here on (a host's settling would finish the
+    // rest itself); the coordinator decides on its own thread.
+    let c = until_part(&mut w, 0, &["prepared"]);
+    w.pair.until("host 1 staged its part too", |p| matches!(p.sims[1].manager.world_cut_state(), Some((k, "prepared")) if k == c));
     let deadline = Instant::now() + WAIT;
     let (cut, tick) = loop {
         assert!(Instant::now() < deadline, "no commit was recorded");
         if let Some((c, t, _)) = decisions(&db).into_iter().find(|(_, _, k)| *k) {
             break (c, t);
         }
-        w.pair.round();
+        std::thread::sleep(Duration::from_millis(10));
     };
+    assert_eq!(cut as u64, c.0, "the staged cut committed");
+    // The decision's write failed after one COMMIT PREPARED; nothing finishes the other.
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while prepared(&db) != 1 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
     kill_coordinator(&mut w);
     assert_eq!(prepared(&db), 1, "the coordinator died with one part still prepared");
     let store = db.open();
@@ -1514,4 +1540,61 @@ fn leave_without_a_coordinator_exits_dirty() {
         c.store().clone().shutdown();
     }
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Host 1 leaves; host 0's store fails to stage its part of the leave cut (one write):
+/// `exit_world` sees host 1's part settled aborted, asks again, and the second leave cut
+/// commits — host 1 exits clean with its row clean.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn aborted_leave_cut_is_asked_for_again_and_commits() {
+    install_props();
+    let Some(db) = PgDb::create("lretry") else { return };
+    let dir = scratch("lretry");
+    let mut w = world(&db, &dir);
+    w.until_committed_after(&db, 0);
+    let mut first = None;
+    let exit = exit_host_with(&mut w, 1, None, |m, claims| {
+        if first.is_none() {
+            if let Some(c) = m.leaving_cut() {
+                first = Some(c);
+                claims[0].store().fail_next_writes(1);
+            }
+        }
+    });
+    assert_eq!(exit, server::claims::ServerExit::Clean, "host 1 left");
+    let first = first.expect("a leave cut began");
+    assert_eq!(decision_of(&db, first), Some(false), "the first leave cut was aborted");
+    assert!(decisions(&db).iter().any(|(c, _, k)| *k && *c as u64 > first.0), "a later leave cut committed");
+    assert_eq!(query_i64s(&db, "SELECT clean FROM hosts WHERE ordinal = 1"), [1], "host 1's row is clean");
+    assert_eq!(prepared(&db), 0, "nothing stays prepared");
+    w.stop(&dir);
+}
+
+/// The same failed leave cut with a leave timeout already past when it is aborted: host 1
+/// exits without a cut, its row dirty.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn aborted_leave_cut_past_the_leave_timeout_exits_dirty() {
+    install_props();
+    let Some(db) = PgDb::create("lpast") else { return };
+    let dir = scratch("lpast");
+    let mut w = world(&db, &dir);
+    w.until_committed_after(&db, 0);
+    let mut first = None;
+    let exit = exit_host_with(&mut w, 1, Some(Duration::from_millis(1500)), |m, claims| {
+        if first.is_none() {
+            if let Some(c) = m.leaving_cut() {
+                first = Some(c);
+                claims[0].store().fail_next_writes(1);
+            }
+        }
+    });
+    assert_eq!(exit, server::claims::ServerExit::Clean, "exits 0");
+    let first = first.expect("a leave cut began within the timeout");
+    assert_eq!(decision_of(&db, first), Some(false), "the leave cut was aborted");
+    assert!(!decisions(&db).iter().any(|(c, _, k)| *k && *c as u64 > first.0), "no later cut");
+    assert_eq!(query_i64s(&db, "SELECT clean FROM hosts WHERE ordinal = 1"), [0], "its row stays dirty");
+    assert_eq!(prepared(&db), 0, "nothing stays prepared");
+    w.stop(&dir);
 }

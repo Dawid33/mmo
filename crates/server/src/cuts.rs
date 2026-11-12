@@ -26,8 +26,8 @@
 //! cut (`LeaveRequest`); on the `BeginCut` naming it leaving its manager parks everything
 //! (the regions' `Stopped` answers are the cut's) and the part is staged like any other.
 //! Committed: its `hosts` row is clean, it exits 0 and its return keeps the world
-//! generation. No `BeginCut` within [`game::LEAVE_CUT_TIMEOUT_SECS`], or the cut aborted:
-//! it exits 0 without a cut ([`LEFT_WITHOUT_A_CUT`]) — its row stays dirty, so its return
+//! generation. An aborted leave cut is asked for again; no committed one within
+//! [`game::LEAVE_CUT_TIMEOUT_SECS`] of the first request: it exits 0 without a cut ([`LEFT_WITHOUT_A_CUT`]) — its row stays dirty, so its return
 //! raises the generation and the world rolls back to the last cut.
 //!
 //! **Start-up** ([`resolve_staged_cuts`]): every split-role process finishes the parts a
@@ -536,11 +536,13 @@ pub fn park_for_exit<S: RegionSpawner>(
     stuck
 }
 
-/// The exit of a host of several (world cuts): it asks for a leave cut and waits — the
-/// regions' outputs, the upkeep (peers, coordinator) and the cut writer running, `idle`
-/// every round — until that cut is settled, it aborted, or no `BeginCut` came within
-/// the leave timeout (see the module docs). A fence or a newer world generation seen
+/// The exit of a host of several (world cuts): its players park, it asks for a leave cut
+/// and waits — the regions' outputs, the upkeep (peers, coordinator) and the cut writer
+/// running, `idle` every round — until that cut is settled committed; an aborted one is
+/// asked for again while the leave timeout (from the first request) lasts, and past it, or
+/// with no `BeginCut` within it, the host exits without a cut (see the module docs). A fence or a newer world generation seen
 /// meanwhile ends it as in [`exit_world`].
+#[allow(clippy::too_many_arguments)]
 fn leave_world<S: RegionSpawner>(
     manager: &mut WorldManager<S>,
     mut cuts: CutWriter,
@@ -551,6 +553,10 @@ fn leave_world<S: RegionSpawner>(
     save_timeout: Duration,
     mut idle: impl FnMut(&mut WorldManager<S>),
 ) -> ServerExit {
+    // The players park at once (as an exit that saves on its own parks them first): their
+    // clients' input is no longer read. Their records are in the leave cut (or, before it,
+    // in any cut, as every park's are).
+    manager.park_all_players(now_ms());
     manager.request_leave();
     let asked = Instant::now();
     let mut begun: Option<Instant> = None;
@@ -566,10 +572,15 @@ fn leave_world<S: RegionSpawner>(
         if let Some(generation) = manager.take_higher_generation() {
             world_generation.note(generation);
         }
-        if manager.leaving_cut().is_some() {
-            begun.get_or_insert_with(Instant::now);
+        if manager.leave_parked() {
             // A region an arrival woke parks again.
             manager.shutdown_all();
+        }
+        match manager.leaving_cut() {
+            Some(_) => {
+                begun.get_or_insert_with(Instant::now);
+            }
+            None => begun = None,
         }
         cuts.pump(manager);
         if fenced.is_set() || cuts.fenced().is_set() {
@@ -591,6 +602,13 @@ fn leave_world<S: RegionSpawner>(
                 cuts.finish_without_cut(manager);
                 return ServerExit::Clean;
             }
+            // Aborted (or this host could not take part): asked again while the leave
+            // timeout (from the first request) lasts, once the coordinator's `CutDone` came.
+            Some(false) if settled && asked.elapsed() < cuts.leave_timeout => {
+                if manager.retry_leave() {
+                    begun = None;
+                }
+            }
             Some(false) if settled => {
                 log::error!("[server] the leave cut was aborted: {LEFT_WITHOUT_A_CUT}");
                 cuts.finish_without_cut(manager);
@@ -600,7 +618,7 @@ fn leave_world<S: RegionSpawner>(
         }
         let late = match begun {
             None => asked.elapsed() >= cuts.leave_timeout,
-            // Begun, never decided (the coordinator gone): past the cut's deadline and a save.
+            // Named, never decided (the coordinator gone): past the cut's deadline and a save.
             Some(at) => at.elapsed() >= Duration::from_millis(game::WORLD_CUT_DEADLINE_MS) + save_timeout,
         };
         if late {

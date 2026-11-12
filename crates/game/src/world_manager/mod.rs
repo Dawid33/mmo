@@ -1034,10 +1034,14 @@ pub struct WorldManager<S: RegionSpawner> {
     marks_queued: Vec<(CutId, crate::Tick)>,
     /// This host asked to leave ([`Self::request_leave`]).
     leave_requested: bool,
-    /// The world cut this host leaves in (begun: everything here parked for it).
+    /// The world cut of this host's current leave attempt (named in a `BeginCut`).
     leaving_cut: Option<CutId>,
     /// The outcome of [`Self::leaving_cut`] once the server settled it.
     leave_outcome: Option<bool>,
+    /// The coordinator's `CutDone` of [`Self::leaving_cut`] came.
+    leave_decided: bool,
+    /// Everything here was parked for a leave cut (it stays so: the host is exiting).
+    leave_parked: bool,
     /// Per peer: a leave of the pending world cut joins this host and it (either leaves);
     /// what this host sends it meanwhile waits here (`world_cut.rs`, leave cuts).
     leave_pairs: BTreeMap<u32, world_cut::LeavePair>,
@@ -1167,6 +1171,8 @@ impl<S: RegionSpawner> WorldManager<S> {
             leave_requested: false,
             leaving_cut: None,
             leave_outcome: None,
+            leave_decided: false,
+            leave_parked: false,
             leave_pairs: BTreeMap::new(),
             left_peers: BTreeMap::new(),
             peer_boots: BTreeMap::new(),

@@ -446,7 +446,11 @@ impl<S: RegionSpawner> WorldManager<S> {
             self.expired_requests.iter().map(|(id, (_, req))| (*id, HostMsg::Settle { id: *id, req: req.clone() })),
         );
         let resend = resend.into_values();
-        for m in resend.chain(std::mem::take(&mut self.outbox)).chain(held) {
+        // A leave asked for and not begun: the coordinator forgot it if the link dropped
+        // (asking twice is harmless).
+        let leave_queued = self.outbox.iter().any(|m| matches!(m, HostMsg::LeaveRequest));
+        let leave = (self.leave_pending_request() && !leave_queued).then_some(HostMsg::LeaveRequest);
+        for m in resend.chain(std::mem::take(&mut self.outbox)).chain(held).chain(leave) {
             self.link_send(m);
         }
     }

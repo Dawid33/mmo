@@ -457,9 +457,20 @@ pub struct CoordinatorThread {
     /// [`CoordinatorThread::crash_before_claim_reply`] is armed.
     #[cfg(feature = "test-hooks")]
     crash_before_claim_reply: Arc<AtomicBool>,
+    /// [`CoordinatorThread::hold_decision_retries`] is armed.
+    #[cfg(feature = "test-hooks")]
+    hold_decision_retries: Arc<AtomicBool>,
 }
 
 impl CoordinatorThread {
+    /// Test hook: a world cut decision whose write failed is not tried again (no abort is
+    /// recorded for it) — a coordinator that dies right after the failure.
+    #[doc(hidden)]
+    #[cfg(feature = "test-hooks")]
+    pub fn hold_decision_retries(&self) {
+        self.hold_decision_retries.store(true, Ordering::SeqCst);
+    }
+
     /// The orderly stop: every host message sent before this call is handled, the state
     /// is saved once more (waiting at most `timeout` for it), and the link goes down.
     /// [`ServerExit::Fenced`] if a save was refused as fenced (now or earlier).
@@ -654,6 +665,9 @@ pub struct CoordinatorRuntime {
     /// Test hook ([`CoordinatorThread::crash_before_claim_reply`]).
     #[cfg(feature = "test-hooks")]
     crash_before_claim_reply: Arc<AtomicBool>,
+    /// Test hook ([`CoordinatorThread::hold_decision_retries`]).
+    #[cfg(feature = "test-hooks")]
+    hold_decision_retries: Arc<AtomicBool>,
     /// The core's `now_ms` 0 (its calendar was anchored there).
     started: Instant,
     /// No save is taken before this `now_ms` (after a failure).
@@ -688,6 +702,8 @@ impl CoordinatorRuntime {
         let (inspect_tx, inspect_rx) = crossbeam::channel::unbounded();
         #[cfg(feature = "test-hooks")]
         let crash_before_claim_reply = Arc::new(AtomicBool::new(false));
+        #[cfg(feature = "test-hooks")]
+        let hold_decision_retries = Arc::new(AtomicBool::new(false));
         let fence = start.fence;
         let mut core = start.coordinator;
         if start.source.needs_save() {
@@ -706,6 +722,8 @@ impl CoordinatorRuntime {
             fenced,
             #[cfg(feature = "test-hooks")]
             crash_before_claim_reply: crash_before_claim_reply.clone(),
+            #[cfg(feature = "test-hooks")]
+            hold_decision_retries: hold_decision_retries.clone(),
             started: Instant::now(),
             retry_at_ms: 0,
             failed_in_a_row: 0,
@@ -733,6 +751,8 @@ impl CoordinatorRuntime {
             inspect: inspect_tx,
             #[cfg(feature = "test-hooks")]
             crash_before_claim_reply,
+            #[cfg(feature = "test-hooks")]
+            hold_decision_retries,
         }
     }
 
@@ -983,7 +1003,11 @@ impl CoordinatorRuntime {
                 }
             }
         }
-        if let Some(r) = self.recording.as_mut().filter(|r| r.rx.is_none() && now >= r.retry_at) {
+        #[cfg(feature = "test-hooks")]
+        let held = self.hold_decision_retries.load(Ordering::SeqCst);
+        #[cfg(not(feature = "test-hooks"))]
+        let held = false;
+        if let Some(r) = self.recording.as_mut().filter(|r| !held && r.rx.is_none() && now >= r.retry_at) {
             r.rx = Some(self.store.abort_cut_later(r.d.cut, r.d.tick));
         }
         for (host, cut) in self.core.take_cut_lookups() {

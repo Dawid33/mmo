@@ -136,6 +136,13 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.leave_pairs.iter().flat_map(|(o, p)| p.held.iter().map(move |r| (*o, r)))
     }
 
+    /// Per host, what waits for it outside a session, never sent: waiting for a session
+    /// (`peer_waiting`), or held back by a leave.
+    fn never_sent(&self) -> impl Iterator<Item = (u32, Vec<&Reliable>)> {
+        let waiting = self.peer_waiting.iter().map(|(o, l)| (*o, l.iter().collect::<Vec<_>>()));
+        waiting.chain(self.leave_pairs.iter().map(|(o, p)| (*o, p.held.iter().collect::<Vec<_>>())))
+    }
+
     /// Test support: the entity of every [`Reliable::Transfer`] not acknowledged yet —
     /// `(peer, id, on the wire)`; `false` = never sent (queued, or waiting for a session),
     /// `true` = sent, so the peer may already hold it.
@@ -169,9 +176,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                 }
             }
         }
-        for (ordinal, list) in self.peer_waiting.iter().map(|(o, l)| (*o, l.iter().collect::<Vec<_>>())).chain(
-            self.leave_pairs.iter().map(|(o, p)| (*o, p.held.iter().collect::<Vec<_>>())),
-        ) {
+        for (ordinal, list) in self.never_sent() {
             out.extend(list.into_iter().filter_map(|r| match r.inner() {
                 Reliable::PlayerMove { handoff, .. } => Some((ordinal, handoff.client, handoff.player, false)),
                 _ => None,
@@ -194,9 +199,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                 }
             }
         }
-        for (ordinal, list) in self.peer_waiting.iter().map(|(o, l)| (*o, l.iter().collect::<Vec<_>>())).chain(
-            self.leave_pairs.iter().map(|(o, p)| (*o, p.held.iter().collect::<Vec<_>>())),
-        ) {
+        for (ordinal, list) in self.never_sent() {
             out.extend(list.into_iter().filter_map(|r| match r.inner() {
                 Reliable::Intent(msg) => Some((ordinal, *msg, false)),
                 _ => None,
@@ -381,7 +384,7 @@ impl<S: RegionSpawner> WorldManager<S> {
         }
         self.placed_by_handoff(h.player, h.hop);
         let (fortress, adventure) = split_claim(h.claim);
-        if self.is_unavailable(target) || !self.owns(target) || self.leaving_cut.is_some() {
+        if self.is_unavailable(target) || !self.owns(target) || self.leave_parked {
             // Its stored state could not be read (retry not come), the region is not this
             // host's, or this host parked everything to leave: the body cannot go there.
             // Parked from the hand-off, as a player crossing into a region whose load fails
@@ -486,7 +489,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             return self.drop_arriving_copy(from, h.player, h.hop);
         }
         self.placed_by_handoff(h.player, h.hop);
-        if self.is_unavailable(target) || !self.owns(target) || self.leaving_cut.is_some() {
+        if self.is_unavailable(target) || !self.owns(target) || self.leave_parked {
             log::error!("[server] player {} moved into {target:?}, unavailable, not this host's or leaving: parked", h.player.0);
             self.park_handed(from, c, h.player, record, now_ms);
             return;
