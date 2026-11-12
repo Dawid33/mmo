@@ -76,6 +76,41 @@ pub fn service_token_if_configured(lookup: impl Fn(&str) -> Option<String>) -> R
     svc_link::service_token_from_env().map(Some).map_err(|e| format!("the login link's service token: {e}"))
 }
 
+/// Names the dev-only admission fallback of a `jwt` host without a service token.
+pub const JWT_ADMISSION_ENV: &str = "VOXEL_JWT_ADMISSION";
+/// The one accepted value of [`JWT_ADMISSION_ENV`].
+pub const JWT_ADMISSION_NEWEST: &str = "newest";
+
+/// How a `jwt` host admits tickets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JwtAdmission {
+    /// Against the spawn orders the login service pushes over the login link.
+    SpawnOrders,
+    /// By newest epoch, no orders and no kicks (dev only).
+    Newest,
+}
+
+/// Fail closed: a `jwt` host runs without the login link only when told to. `env` is the
+/// [`JWT_ADMISSION_ENV`] value (the caller reads it); whitespace-only counts as unset.
+pub fn jwt_admission(token_configured: bool, env: Option<&str>) -> Result<JwtAdmission, String> {
+    let env = env.map(str::trim).filter(|v| !v.is_empty());
+    match (token_configured, env) {
+        (true, None) => Ok(JwtAdmission::SpawnOrders),
+        (true, Some(_)) => Err(format!(
+            "auth: {JWT_ADMISSION_ENV} is set together with a service token ({} / {}): the login link is on, \
+             so there is nothing to fall back from — unset one of them",
+            svc_link::SERVICE_TOKEN_ENV,
+            svc_link::SERVICE_TOKEN_FILE_ENV
+        )),
+        (false, Some(JWT_ADMISSION_NEWEST)) => Ok(JwtAdmission::Newest),
+        (false, Some(other)) => Err(format!("auth: {JWT_ADMISSION_ENV}={other:?} is not understood; the accepted value is {JWT_ADMISSION_NEWEST:?}")),
+        (false, None) => Err(format!(
+            "auth: jwt needs the login link — set VOXEL_SERVICE_TOKEN[_FILE] (a world registered with a host link), \
+             or {JWT_ADMISSION_ENV}={JWT_ADMISSION_NEWEST} to admit tickets by newest epoch without spawn orders or kicks (dev only)"
+        )),
+    }
+}
+
 /// The listen address from an env value; unset or empty is [`DEFAULT_HOST_LINK_BIND`].
 pub fn bind_from(value: Option<&str>) -> Result<SocketAddr, String> {
     let value = value.map(str::trim).filter(|v| !v.is_empty()).unwrap_or(DEFAULT_HOST_LINK_BIND);

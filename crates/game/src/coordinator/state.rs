@@ -7,11 +7,12 @@ use super::{Claim, RequestId, WorldReply};
 use crate::history::persist::HistoryLoadError;
 use crate::PlayerId;
 
-/// The format byte leading an encoded [`CoordinatorState`]. A stored state of another
-/// format is NOT migrated or replaced: the server refuses to start (`Corrupt`, fatal in
-/// `ensure_coordinator_state`) — the state holds the world's people, claims and replies.
-/// Bumping it therefore needs a migration of the old format (decode it, re-encode), or
-/// every world saved before stops loading.
+/// The format byte leading an encoded [`CoordinatorState`]. An older format is migrated on
+/// load and written back in the current one at the next save; a newer or unknown one
+/// refuses the start (`Corrupt`, fatal in `ensure_coordinator_state`) — the state holds the
+/// world's people, claims and replies, so it is never replaced. Bumping it needs a frozen
+/// copy of the old layout (`CoordinatorStateV<n>`), a `migrate_v<n>`, a rung in
+/// [`CoordinatorState::decode`] and a committed fixture of the old blob.
 pub const COORDINATOR_STATE_VERSION: u8 = 1;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -32,15 +33,31 @@ impl CoordinatorState {
         out
     }
 
+    /// Decodes through the version ladder: every format this build knows loads (older ones
+    /// migrated to the current shape); another one is `Corrupt`.
     pub fn decode(bytes: &[u8]) -> Result<Self, HistoryLoadError> {
+        let corrupt = |e: bincode::Error| HistoryLoadError::Corrupt(e.to_string());
         match bytes.split_first() {
             None => Err(HistoryLoadError::Corrupt("empty coordinator state".into())),
-            Some((&COORDINATOR_STATE_VERSION, body)) => {
-                bincode::deserialize(body).map_err(|e| HistoryLoadError::Corrupt(e.to_string()))
-            }
+            Some((&1, body)) => bincode::deserialize::<CoordinatorStateV1>(body).map(migrate_v1).map_err(corrupt),
+            Some((&COORDINATOR_STATE_VERSION, body)) => bincode::deserialize(body).map_err(corrupt),
             Some((v, _)) => Err(HistoryLoadError::Corrupt(format!(
-                "coordinator state format {v}, expected {COORDINATOR_STATE_VERSION}"
+                "coordinator state format {v}; this build reads 1..={COORDINATOR_STATE_VERSION}"
             ))),
         }
     }
+}
+
+/// Format 1, frozen: a copy of the layout, not an alias of [`CoordinatorState`] (which may
+/// change). Pinned by `tests/fixtures/coordinator_state_v1.bin`.
+#[derive(Deserialize)]
+struct CoordinatorStateV1 {
+    history: Vec<u8>,
+    claims: Vec<(PlayerId, Claim)>,
+    memo: Vec<(RequestId, WorldReply)>,
+}
+
+fn migrate_v1(v1: CoordinatorStateV1) -> CoordinatorState {
+    let CoordinatorStateV1 { history, claims, memo } = v1;
+    CoordinatorState { history, claims, memo }
 }

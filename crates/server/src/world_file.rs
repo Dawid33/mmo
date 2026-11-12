@@ -355,9 +355,9 @@ pub struct CoordinatorStart {
 /// [`coordinator_backup_path`] / [`history_backup_path`]; a copy that cannot be written
 /// stops the server — it is never discarded silently; with no path, a Postgres store, the
 /// log says it is discarded). Anything else that will not load stops the server: it holds
-/// the world's people — among it a coordinator state whose format byte is not this build's
-/// [`game::coordinator::COORDINATOR_STATE_VERSION`] (never replaced, never migrated
-/// silently). `None`: a world nobody can live in (playable, no history).
+/// the world's people — among it a coordinator state of a newer or unknown format (older
+/// ones load through [`game::CoordinatorState::decode`]'s ladder and are saved back in
+/// [`game::coordinator::COORDINATOR_STATE_VERSION`]; none is ever replaced). `None`: a world nobody can live in (playable, no history).
 pub fn ensure_coordinator_state(
     store: &StoreHandle,
     map: &game::WorldMap,

@@ -585,12 +585,19 @@ pub fn run() -> claims::ServerExit {
     }
     // A `jwt` host with a service token takes the login service's push (`SpawnPlayer` /
     // `Kick`) and admits tickets only against its spawn orders; without a token it keeps
-    // R2a's newest-epoch check (registry worlds without a `host_link`: `just dev-login`).
+    // R2a's newest-epoch check only when `VOXEL_JWT_ADMISSION=newest` says so (registry
+    // worlds without a `host_link`: `just dev-login`); otherwise it refuses to start.
     let spawn_orders = match &auth_mode {
         auth_edge::AuthMode::Jwt { .. } => {
-            match login_link::service_token_if_configured(|name| std::env::var(name).ok()).unwrap_or_else(|e| fatal(&e)) {
-                Some(token) => Some((Arc::new(login_link::SpawnOrders::new(auth_edge::system_clock())), token)),
-                None => {
+            let token =
+                login_link::service_token_if_configured(|name| std::env::var(name).ok()).unwrap_or_else(|e| fatal(&e));
+            let admission_env = std::env::var(login_link::JWT_ADMISSION_ENV).ok();
+            match login_link::jwt_admission(token.is_some(), admission_env.as_deref()).unwrap_or_else(|e| fatal(&e)) {
+                login_link::JwtAdmission::SpawnOrders => {
+                    let token = token.expect("spawn orders imply a configured token");
+                    Some((Arc::new(login_link::SpawnOrders::new(auth_edge::system_clock())), token))
+                }
+                login_link::JwtAdmission::Newest => {
                     log::warn!(
                         "auth: jwt without a service token ({} / {} unset): NO login link — tickets are admitted by \
                          newest epoch (R2a), the login service cannot order spawns, and its Kick (logout everywhere, \

@@ -728,3 +728,48 @@ fn settle_answers_without_executing() {
     assert_eq!(reply_to(&commit(&mut c), 2), first);
     assert_eq!(c.history().sites().count(), sites + 1);
 }
+
+/// The saved state's format ladder: a blob of every older format still loads.
+mod state {
+    use super::*;
+
+    const V1_FIXTURE_PATH: &str = "tests/fixtures/coordinator_state_v1.bin";
+
+    /// A small real state: one claim, one memo entry.
+    fn small_state() -> CoordinatorState {
+        let (mut c, civ, people) = coordinator();
+        c.handle(embark(1, A, civ, &people[0..2], rc(8, 0)), 0);
+        commit(&mut c);
+        c.request_save();
+        let state = c.take_save().expect("asked for");
+        c.saved();
+        state
+    }
+
+    /// Writes the v1 fixture with the v1 `encode`. Run once, explicitly, while the current
+    /// format is still 1: `just test-one game "--test it -- --ignored coordinator::state::write_v1_fixture"`.
+    #[test]
+    #[ignore = "generator: writes the committed v1 fixture; run by hand, never routinely"]
+    fn write_v1_fixture() {
+        let state = small_state();
+        assert_eq!((state.claims.len(), state.memo.len()), (1, 1));
+        let bytes = state.encode();
+        assert_eq!(bytes[0], 1, "the fixture is a v1 blob");
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(V1_FIXTURE_PATH);
+        std::fs::write(path, bytes).expect("fixture written");
+    }
+
+    #[test]
+    fn v1_blob_still_decodes() {
+        let state = CoordinatorState::decode(include_bytes!("fixtures/coordinator_state_v1.bin")).expect("a v1 blob decodes");
+        assert_eq!(state.claims.len(), 1);
+        assert_eq!(state.memo.len(), 1);
+        game::history::persist::decode(&state.history, grid()).expect("its history loads");
+    }
+
+    #[test]
+    fn unknown_version_is_refused() {
+        let err = CoordinatorState::decode(&[200, 0, 0]).expect_err("an unknown format is refused");
+        assert!(matches!(err, game::history::persist::HistoryLoadError::Corrupt(ref m) if m.contains("200")), "{err:?}");
+    }
+}

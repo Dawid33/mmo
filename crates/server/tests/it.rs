@@ -4,4 +4,5 @@
 
 mod auth_edge;
 mod hooks;
+mod jwt_admission;
 mod stud_world;

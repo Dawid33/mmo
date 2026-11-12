@@ -931,7 +931,7 @@ dev-login: _dev-login-setup
         wpid=$!
         trap 'echo "dev-login: stopping the login service and page"; kill -TERM $lpid $wpid 2>/dev/null; wait $lpid $wpid 2>/dev/null || true' EXIT
     fi
-    VOXEL_AUTH=jwt VOXEL_WORLD_ID=dev VOXEL_LOGIN_URL=http://127.0.0.1:8790 ./target/debug/server
+    VOXEL_AUTH=jwt VOXEL_JWT_ADMISSION=newest VOXEL_WORLD_ID=dev VOXEL_LOGIN_URL=http://127.0.0.1:8790 ./target/debug/server
 
 # The `dev-login` setup, then the login service and the jwt dev server in the
 # background (logs target/dev-login/{login,server}.log), and once both answer (at most
@@ -957,7 +957,7 @@ run-online: _dev-login-setup
     lpid=$!
     spid=""
     trap 'echo "run-online: stopping the server and the login service"; kill -TERM $spid $lpid 2>/dev/null; wait $spid $lpid 2>/dev/null || true' EXIT
-    VOXEL_AUTH=jwt VOXEL_WORLD_ID=dev VOXEL_LOGIN_URL=$login_url \
+    VOXEL_AUTH=jwt VOXEL_JWT_ADMISSION=newest VOXEL_WORLD_ID=dev VOXEL_LOGIN_URL=$login_url \
         ./target/debug/server >target/dev-login/server.log 2>&1 </dev/null &
     spid=$!
     echo "run-online: waiting for the login service ($login_url) and the server (UDP 6466)..."
