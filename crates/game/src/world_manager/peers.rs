@@ -1016,6 +1016,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                 if matches!(*body, Reliable::InCut { .. }) || !body.is_state() {
                     log::error!("[server] host {from}: a wrapped {} for cut {}; applied as is", reliable_name(&body), cut.0);
                 }
+                self.note_wrapper(cut);
                 self.note_player_accounted(&body, cut);
                 let after = self.accounted_now(cut);
                 let lineage = self.inbound_accounted.replace(cut);
@@ -1031,6 +1032,9 @@ impl<S: RegionSpawner> WorldManager<S> {
                     );
                     self.world_cut_fail(crate::CutFailure::Aborted);
                 }
+                // A player that left bare (the receiver's) and comes back bare is this
+                // host's again in the pending cut.
+                self.note_player_returned(&msg);
                 self.peer_reliable_in(from, msg, false);
             }
         }

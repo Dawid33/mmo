@@ -1024,9 +1024,10 @@ pub struct WorldManager<S: RegionSpawner> {
     world_cut_seen: Option<CutId>,
     /// Per peer: its mark of a world cut this host has not begun yet (counted when it does).
     early_marks: BTreeMap<u32, CutId>,
-    /// Players handed here wrapped in a world cut this host has not begun yet: another
-    /// part's in that cut.
-    accounted_players: BTreeMap<PlayerId, CutId>,
+    /// The highest world cut a wrapped message ([`crate::Reliable::InCut`]) of arrived for
+    /// while that cut was not pending here: this host is too late for it — a `BeginCut` of
+    /// it (or an earlier one) is answered `Missed` (`world_cut.rs`).
+    wrapper_seen: Option<CutId>,
     /// Decided world cuts for the server ([`Self::take_world_cut_done`]).
     world_cut_done: Vec<(CutId, bool)>,
     /// While a wrapped peer message ([`crate::Reliable::InCut`]) is applied: its cut. What
@@ -1143,7 +1144,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             world_cut: None,
             world_cut_seen: None,
             early_marks: BTreeMap::new(),
-            accounted_players: BTreeMap::new(),
+            wrapper_seen: None,
             world_cut_done: Vec::new(),
             inbound_accounted: None,
         }
@@ -2688,9 +2689,9 @@ impl<S: RegionSpawner> WorldManager<S> {
             self.ensure_running(rc);
             log::warn!("{} intent(s) were in flight to lost region {rc:?}: sent again", intents.len());
             for f in intents {
-                self.inbound_accounted = f.accounted_in;
+                let lineage = std::mem::replace(&mut self.inbound_accounted, f.accounted_in);
                 self.send_intent_to(rc, f.msg, f.in_source_view);
-                self.inbound_accounted = None;
+                self.inbound_accounted = lineage;
             }
         }
         let ids: Vec<crate::EntityId> =
@@ -3329,9 +3330,9 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.deliver_pending_arrivals(rc);
         // Replies that waited for it.
         for m in self.intent_mailbox.remove(&rc).unwrap_or_default() {
-            self.inbound_accounted = m.accounted_in;
+            let lineage = std::mem::replace(&mut self.inbound_accounted, m.accounted_in);
             self.send_intent_to(rc, m.msg, m.in_source_view);
-            self.inbound_accounted = None;
+            self.inbound_accounted = lineage;
         }
     }
 

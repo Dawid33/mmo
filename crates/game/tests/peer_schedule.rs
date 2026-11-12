@@ -54,6 +54,26 @@ fn sweep(name: &str, hosts: u32, s: u32, seeds: u64, scenario: fn(&mut MultiRig)
     }
 }
 
+/// [`sweep`] for a scenario that reports whether its case happened (a seed may miss its
+/// timing window): every mode (lockstep at every link delay counts as one) must hit it at
+/// least once.
+fn sweep_hits(name: &str, hosts: u32, s: u32, seeds: u64, scenario: fn(&mut MultiRig) -> bool) {
+    let run = |mode: &str, schedule: Option<fn(u64) -> InlineSchedule>, seed: u64, delay: u32| -> bool {
+        std::panic::catch_unwind(|| {
+            let mut rig = MultiRig::new(hosts, s, schedule, seed, delay);
+            scenario(&mut rig)
+        })
+        .unwrap_or_else(|_| panic!("{name} broke under `{mode}`, seed {seed}, link delay {delay}"))
+    };
+    let hits: usize = (0..=MAX_LINK_DELAY).map(|d| usize::from(run("lockstep", None, 0, d))).sum();
+    assert!(hits > 0, "{name}: its case never happened in lockstep");
+    for (mode, schedule) in MODES {
+        let hits: usize =
+            (0..seeds).map(|seed| usize::from(run(mode, Some(schedule), seed, (seed % u64::from(MAX_LINK_DELAY + 1)) as u32))).sum();
+        assert!(hits > 0, "{name}: its case never happened under `{mode}`");
+    }
+}
+
 /// A spot in `from`'s frame just past its seam with the adjacent `to`, `along` units
 /// along that seam.
 fn past_seam(from: RegionCoords, to: RegionCoords, along: f32) -> [f32; 3] {
@@ -3113,8 +3133,7 @@ fn intent_reply_on_the_wire_at_t_is_in_exactly_one_part() {
 }
 
 /// The link between the hosts drops while a world cut is pending on both: the cut is
-/// aborted (no part of it holds a row for the other participant's regions — the rig's
-/// store checks that of every part staged); a slime crossing while the link is down
+/// aborted; a slime crossing while the link is down
 /// waits in the sender's session; once it is back the next cut commits and holds the
 /// slime once.
 fn link_down_aborts(rig: &mut MultiRig) {
@@ -3127,14 +3146,10 @@ fn link_down_aborts(rig: &mut MultiRig) {
     rig.link_down(ha, hb);
     let id = rig.spawn_slime(a, past_seam(a, b, REGION_SIZE / 2.0));
     assert!(!until_decided(rig, cut), "the cut with a link down is aborted");
-    for (c, h, part) in &rig.aborted_parts {
-        for row in &part.in_flight {
-            let target = match row {
-                game::InFlightRow::Transfer { target, .. } | game::InFlightRow::Intent { target, .. } => *target,
-            };
-            assert_eq!(rig.owner(target), *h, "cut {}: host {h}'s part holds a row for another participant", c.0);
-        }
-    }
+    // The link drops before the marks, so no part of this cut is staged: criterion C (no
+    // row for another participant's in-transit message, unless wrapped after the mark with
+    // stamp / due ≥ T) is asserted on every part any test stages
+    // (`MultiRig::prepare_part`).
     assert!(rig.hosts[ha as usize].manager.peer_unreceived() > 0 || live_count(rig, id) == 1);
     rig.link_up(ha, hb);
     until_committed(rig, 1);
@@ -3225,12 +3240,22 @@ fn host_detaching_mid_cut_aborts_it() {
     sweep("host_detaching_mid_cut_aborts_it", 2, 1, SEEDS / 4, host_detaching);
 }
 
+/// The test player's inventory in its region on its host now.
+fn inventory_now(rig: &mut MultiRig, client: game::ClientId) -> Option<game::Inventory> {
+    let (h, rc, _) = rig.player_body(client)?;
+    let mut inv = None;
+    rig.hosts[h as usize].manager.spawner_mut().with_region(rc, |r| inv = r.data().clients.get(&client).map(|c| c.inventory.clone()));
+    inv
+}
+
 /// Criterion A: the test player is moved across hosts (an embark through the real
 /// coordinator into a region of the other host) right around a world cut's tick, while
-/// a second player walks over the host seam: the decided cut writes each player's
-/// record from exactly one part, with the inventory it had, and the restarted world has
-/// one of each.
-fn mid_move(rig: &mut MultiRig) {
+/// a second player walks over the host seam. Before the move the player picks up two more
+/// stones (a stale record would differ). When THAT cut commits: each player's record is
+/// written by exactly one part of it, the moved player's with the inventory it held at
+/// T, and the world restarted from it has each player once with that inventory. Whether
+/// the mid-move cut commits depends on the seed; every mode must commit it at least once.
+fn mid_move(rig: &mut MultiRig) -> bool {
     let (a, b) = host_seam(2, 1);
     let ha = rig.owner(a);
     let (history, civ, founders) = history_with_site(FAR_SITE, 4);
@@ -3242,6 +3267,16 @@ fn mid_move(rig: &mut MultiRig) {
     rig.connect_everywhere(ha, P2_CLIENT, P2_PLAYER, record_at(a, [REGION_SIZE / 2.0, 10.0]));
     until_body(rig);
     let (cut, t) = until_world_cut_on(rig, ha);
+    // Two more stones, before the cut tick: what the record at T must hold.
+    let (h, rc, _) = rig.player_body(P_CLIENT).expect("a body");
+    rig.hosts[h as usize].manager.spawner_mut().with_region(rc, |r| {
+        r.with_data(|d| {
+            d.clients.get_mut(&P_CLIENT).unwrap().inventory.add(game::ItemStack { item: game::ItemId(2), count: 2 });
+        })
+    });
+    rig.cut_round();
+    let at_t = inventory_now(rig, P_CLIENT).expect("the inventory");
+    assert_ne!(at_t, stocked_record(a, 5).client.inventory, "the inventory changed");
     let fire = t.saturating_sub(2 + rig.seed % 4);
     let (mut embarked, mut walked) = (false, false);
     while !rig.decided.contains_key(&cut) {
@@ -3261,12 +3296,16 @@ fn mid_move(rig: &mut MultiRig) {
         }
         rig.cut_round();
     }
-    until_committed(rig, 1);
-    for p in [P_PLAYER, P2_PLAYER] {
-        assert_eq!(rig.last_cut_writers(p).len(), 1, "player {} written by one part: {:?}", p.0, rig.last_cut_writers(p));
+    if !rig.decided[&cut] {
+        return false;
     }
-    let record = rig.committed_players[&P_PLAYER].clone();
-    assert_eq!(record.client.inventory, stocked_record(a, 5).client.inventory, "the inventory it had");
+    assert_eq!(rig.last_committed().0, cut, "the mid-move cut is the last committed");
+    for p in [P_PLAYER, P2_PLAYER] {
+        assert_eq!(rig.last_cut_writers(p).len(), 1, "player {} written by one part of the mid-move cut: {:?}", p.0, rig.last_cut_writers(p));
+    }
+    let (_, parts) = rig.last_committed();
+    let record = parts.values().flat_map(|p| &p.players).find(|(p, _)| *p == P_PLAYER).map(|(_, r)| r.clone()).unwrap();
+    assert_eq!(record.client.inventory, at_t, "the record holds the inventory at the cut tick");
     let mut again = rig.rebuild_from_last_cut();
     for (c, p) in [(P_CLIENT, P_PLAYER), (P2_CLIENT, P2_PLAYER)] {
         let r = rig.committed_players[&p].clone();
@@ -3276,12 +3315,14 @@ fn mid_move(rig: &mut MultiRig) {
     until_quiet(&mut again);
     assert_eq!(again.player_owners(P_CLIENT).len(), 1);
     assert_eq!(again.player_owners(P2_CLIENT).len(), 1);
+    assert_eq!(inventory_now(&mut again, P_CLIENT), Some(at_t), "restored with the inventory it had at T");
+    true
 }
 
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn cut_mid_move_holds_the_player_once() {
-    sweep("cut_mid_move_holds_the_player_once", 2, 1, SEEDS, mid_move);
+    sweep_hits("cut_mid_move_holds_the_player_once", 2, 1, SEEDS, mid_move);
 }
 
 /// Counter-example 1 of the ruling: region `a` has answered the cut while its host's
@@ -3358,7 +3399,7 @@ fn cut_with_a_lagging_source_region_holds_a_crossing_once() {
 /// it after its mark: the reply carrying the items back is its own part's row (due at
 /// least T) and goes wrapped. Every item is once in the world restarted from the cut —
 /// `a` answering before the reply (`short`) or after it.
-fn refusal_after_mark(rig: &mut MultiRig, short: bool) {
+fn refusal_after_mark(rig: &mut MultiRig, short: bool) -> bool {
     let (a, b) = host_seam(2, 1);
     let (ha, hb) = (rig.owner(a), rig.owner(b));
     rig.run(a);
@@ -3400,62 +3441,132 @@ fn refusal_after_mark(rig: &mut MultiRig, short: bool) {
     } else {
         until_committed(rig, 1);
     }
+    decided
 }
 
-fn refusal_after_mark_short(rig: &mut MultiRig) {
-    refusal_after_mark(rig, true);
+fn refusal_after_mark_short(rig: &mut MultiRig) -> bool {
+    refusal_after_mark(rig, true)
 }
 
-fn refusal_after_mark_long(rig: &mut MultiRig) {
-    refusal_after_mark(rig, false);
+fn refusal_after_mark_long(rig: &mut MultiRig) -> bool {
+    refusal_after_mark(rig, false)
 }
 
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn refusal_generated_after_the_mark_is_in_exactly_one_part() {
-    sweep("refusal_generated_after_the_mark_is_in_exactly_one_part (short)", 2, 1, SEEDS, refusal_after_mark_short);
-    sweep("refusal_generated_after_the_mark_is_in_exactly_one_part (long)", 2, 1, SEEDS, refusal_after_mark_long);
+    sweep_hits("refusal_generated_after_the_mark_is_in_exactly_one_part (short)", 2, 1, SEEDS, refusal_after_mark_short);
+    sweep_hits("refusal_generated_after_the_mark_is_in_exactly_one_part (long)", 2, 1, SEEDS, refusal_after_mark_long);
 }
 
-/// A wrapped message reaches host 1 before host 1 has read the cut's `BeginCut` (its
-/// coordinator link held): what it creates is noted as the sender's in that cut, so no
-/// part writes it twice — host 1 begins the cut too late (missed) and the cut is
-/// aborted; the next cut commits with the slime stored once.
+/// A second test player (no body anywhere) and its session.
+const P3_CLIENT: game::ClientId = 11;
+const P3_PLAYER: game::PlayerId = game::PlayerId(102);
+
+/// Important 1 (manager level): host A begins world cut K alone (its `BeginCut` is the
+/// only one sent); once `a` answered, a slime and the test player leave `a` for host B —
+/// wrapped in K (`a`'s snapshot holds them) — and reach B before B's `BeginCut { K }`.
+/// B then refuses K as `Missed` (a peer's region is past the tick; B never takes part in
+/// a cut it already saw wrappers of). The next cut, through the coordinator, holds the
+/// slime and the player once.
 fn wrapper_before_begin(rig: &mut MultiRig) {
     let (a, b) = host_seam(2, 1);
     let (ha, hb) = (rig.owner(a), rig.owner(b));
     rig.run(a);
     rig.run(b);
-    world_cuts(rig);
+    rig.with_coordinator(quiet_history());
+    for h in 0..2 {
+        rig.hosts[h].manager.set_world_map(rig_world_map());
+    }
+    rig.connect_everywhere(ha, P_CLIENT, P_PLAYER, stocked_record(a, 3));
+    until_body(rig);
     let y = crate::common::above_floor_y();
-    let id = rig.spawn_slime(a, [REGION_SIZE / 2.0, y, REGION_SIZE / 2.0]);
-    rig.hold_world(hb, true);
-    let (cut, _) = until_world_cut_on(rig, ha);
+    let slime = rig.spawn_slime(a, [REGION_SIZE / 2.0, y, REGION_SIZE / 3.0]);
+    let k = game::CutId(5);
+    let t = world_tick(rig) + 20;
+    rig.hosts[ha as usize].manager.begin_world_cut(k, t, &[0, 1], &[]).expect("host A begins K");
     for _ in 0..WORLD_CUT_ROUNDS {
-        let m = &rig.hosts[ha as usize].manager;
-        if !m.awaiting_cut().contains(&a) {
+        if !rig.hosts[ha as usize].manager.awaiting_cut().contains(&a) {
             break;
         }
-        rig.cut_round();
+        rig.round();
     }
-    assert!(rig.teleport(a, id, past_seam(a, b, REGION_SIZE / 2.0)));
-    for _ in 0..LANDS_WITHIN_ROUNDS {
-        rig.cut_round();
-        if rig.owners_of(id).iter().any(|(_, rc)| *rc == b) {
+    assert!(!rig.hosts[ha as usize].manager.awaiting_cut().contains(&a), "`a` answered K");
+    assert!(rig.teleport(a, slime, past_seam(a, b, REGION_SIZE / 3.0)));
+    rig.hosts[ha as usize].event(game::ServerEvent::ClientPacket(game::ClientPacket::PlayRegion(b), P_CLIENT));
+    for _ in 0..CROSS_ROUNDS {
+        rig.round();
+        let player_there = rig.hosts[hb as usize].manager.player_of(P_CLIENT) == Some(P_PLAYER);
+        if player_there && rig.owners_of(slime).iter().any(|(_, rc)| *rc == b) {
             break;
         }
     }
-    assert_eq!(rig.hosts[hb as usize].manager.world_cut(), None, "host {hb} has not begun the cut");
-    rig.hold_world(hb, false);
-    assert!(!until_decided(rig, cut), "host {hb} began it too late: aborted");
+    assert_eq!(rig.hosts[hb as usize].manager.player_of(P_CLIENT), Some(P_PLAYER), "the player reached host {hb}");
+    assert!(rig.owners_of(slime).iter().any(|(_, rc)| *rc == b), "the slime reached host {hb}");
+    let now = world_tick(rig);
+    assert_eq!(
+        rig.hosts[hb as usize].manager.begin_world_cut(k, now + game::WORLD_CUT_LEAD_TICKS, &[0, 1], &[]),
+        Err(game::CutFailure::Missed),
+        "a wrapper of K came first: K is missed"
+    );
+    // K is over for host A too.
+    rig.core().cut_outcome(ha, k, false);
+    rig.with_world_cuts(WORLD_CUT_EVERY_MS);
     until_committed(rig, 1);
-    assert_eq!(rig.stored_places(id).len(), 1, "stored once: {:?}", rig.stored_places(id));
+    assert_eq!(rig.stored_places(slime).len(), 1, "the slime stored once: {:?}", rig.stored_places(slime));
+    assert_eq!(rig.last_cut_writers(P_PLAYER).len(), 1, "the player written once");
 }
 
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn in_cut_message_arriving_before_begin_cut_is_not_a_row() {
     sweep("in_cut_message_arriving_before_begin_cut_is_not_a_row", 2, 1, SEEDS / 2, wrapper_before_begin);
+}
+
+/// Important 1 (d): a wrapped hand-off that wakes a parked region with mail waiting there
+/// keeps its `accounted_in` (the mail's delivery restores the lineage it found).
+fn wrapped_wake_keeps_accounted(rig: &mut MultiRig) {
+    let (a, b) = host_seam(2, 1);
+    let (ha, hb) = (rig.owner(a), rig.owner(b));
+    rig.run(a);
+    rig.run(b);
+    rig.park(b);
+    rig.with_coordinator(quiet_history());
+    rig.connect_everywhere(ha, P_CLIENT, P_PLAYER, stocked_record(a, 1));
+    let (_, _, body) = until_body(rig);
+    // Mail for `b` (a reply) waits on host B.
+    let due = world_tick(rig);
+    rig.hosts[hb as usize].manager.apply_peer_reliable(ha, game::Reliable::Intent(refusal_to(a, b, due)));
+    rig.items = None;
+    let k = game::CutId(6);
+    let t = world_tick(rig) + 20;
+    rig.hosts[ha as usize].manager.begin_world_cut(k, t, &[0, 1], &[]).expect("host A begins K");
+    for _ in 0..WORLD_CUT_ROUNDS {
+        if !rig.hosts[ha as usize].manager.awaiting_cut().contains(&a) {
+            break;
+        }
+        rig.round();
+    }
+    // `b`'s inputs wait once it runs, so the arrival stays in flight.
+    rig.hosts[hb as usize].manager.spawner_mut().hold_inputs(b, 40);
+    assert!(rig.teleport(a, body, past_seam(a, b, REGION_SIZE / 2.0)));
+    let mut seen = None;
+    for _ in 0..CROSS_ROUNDS {
+        rig.round();
+        seen = rig.hosts[hb as usize].manager.in_flight_accounted().into_iter().find(|(id, _)| *id == body);
+        if seen.is_some() {
+            break;
+        }
+    }
+    assert!(rig.hosts[hb as usize].manager.running_regions().contains(&b), "the hand-off woke `b`");
+    assert_eq!(seen, Some((body, Some(k))), "the arrival keeps the cut its sender accounts for it in");
+    rig.hosts[hb as usize].manager.spawner_mut().hold_inputs(b, 0);
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn wrapped_hand_off_waking_a_region_with_mail_keeps_its_accounted_cut() {
+    sweep("wrapped_hand_off_waking_a_region_with_mail_keeps_its_accounted_cut", 2, 1, 2, wrapped_wake_keeps_accounted);
 }
 
 /// The sending host breaks the rule once (a test link strips the wrapper of a crossing
@@ -3527,4 +3638,219 @@ fn second_begin(rig: &mut MultiRig) {
 #[ignore = "slow: >100ms — run via just test-full"]
 fn cut_begun_while_one_is_pending_is_refused_and_the_first_commits() {
     sweep("cut_begun_while_one_is_pending_is_refused_and_the_first_commits", 2, 1, SEEDS / 4, second_begin);
+}
+
+/// How the test player goes over and back in [`returned_before_t`], and how it ends.
+#[derive(Clone, Copy, PartialEq)]
+enum Return {
+    /// `PlayerMove` there and back (`PlayRegion`), then the client disconnects.
+    MovesThenDisconnect,
+    /// `PlayerMove` there and back, then a move to another region of host A.
+    MovesThenLocalMove,
+    /// Walking hand-offs there and back, then the client disconnects.
+    WalksThenDisconnect,
+}
+
+/// Rounds (cut rounds) until the test player's body stands in `rc` on its owner.
+fn until_player_in(rig: &mut MultiRig, rc: RegionCoords) -> bool {
+    for _ in 0..CROSS_ROUNDS {
+        if rig.player_owners(P_CLIENT) == [(rig.owner(rc), rc)] {
+            return true;
+        }
+        rig.cut_round();
+    }
+    false
+}
+
+/// Critical 1: with world cut K pending, the test player leaves host A BARE (its region
+/// had not answered: the receiver's) and comes back BARE (the same rule the other way)
+/// before the cut tick, then ends on host A (a disconnect parks it, or a local move).
+/// The cut must write its record from host A's part — the bare return makes it A's again.
+/// For the moves, host B reads K's `BeginCut` only once the player is back (so B creates
+/// its body at once, as with no cut pending). Returns whether everything happened before
+/// T and K committed (the case under test).
+fn returned_before_t(rig: &mut MultiRig, how: Return) -> bool {
+    let (a, b) = host_seam(2, 1);
+    let (ha, hb) = (rig.owner(a), rig.owner(b));
+    let a2 = region_of(rig, ha);
+    rig.run(a);
+    rig.run(b);
+    world_cuts(rig);
+    for h in 0..2 {
+        rig.hosts[h].manager.set_world_map(rig_world_map());
+    }
+    rig.connect_everywhere(ha, P_CLIENT, P_PLAYER, stocked_record(a, 4));
+    until_body(rig);
+    let walks = how == Return::WalksThenDisconnect;
+    if !walks {
+        rig.hold_world(hb, true);
+    }
+    let (cut, t) = until_world_cut_on(rig, ha);
+    if walks {
+        // Both hosts must have the cut pending (each notes the player it sends bare).
+        for _ in 0..CROSS_ROUNDS {
+            if rig.hosts[hb as usize].manager.world_cut() == Some(cut) {
+                break;
+            }
+            rig.cut_round();
+        }
+    }
+    let over = |rig: &mut MultiRig, from: u32, to: RegionCoords| {
+        if walks {
+            let (_, rc, id) = rig.player_body(P_CLIENT).expect("a body");
+            let other = if rc == a { b } else { a };
+            rig.teleport(rc, id, past_seam(rc, other, REGION_SIZE / 2.0));
+        } else {
+            rig.hosts[from as usize].event(game::ServerEvent::ClientPacket(game::ClientPacket::PlayRegion(to), P_CLIENT));
+        }
+    };
+    over(rig, ha, b);
+    let there = until_player_in(rig, b);
+    if there {
+        over(rig, hb, a);
+    }
+    // Walking, the body is back in `a`. Moved, host A holds the player again: its body's
+    // creation there is held to the slot after T while the cut is pending (`cut_hold_stamp`),
+    // so its record is A's transit record at T.
+    let back = there
+        && if walks {
+            until_player_in(rig, a)
+        } else {
+            (0..CROSS_ROUNDS).any(|_| {
+                let home = rig.hosts[ha as usize].manager.player_of(P_CLIENT) == Some(P_PLAYER);
+                if !home {
+                    rig.cut_round();
+                }
+                home
+            })
+        };
+    rig.hold_world(hb, false);
+    if back {
+        match how {
+            Return::MovesThenLocalMove => {
+                rig.hosts[ha as usize].event(game::ServerEvent::ClientPacket(game::ClientPacket::PlayRegion(a2), P_CLIENT));
+            }
+            _ => {
+                rig.disconnect(ha, P_CLIENT);
+                rig.disconnect(hb, P_CLIENT);
+            }
+        }
+    }
+    let in_time = back && world_tick(rig) + 2 < t;
+    let committed = until_decided(rig, cut);
+    if !(in_time && committed) {
+        return false;
+    }
+    assert_eq!(rig.last_committed().0, cut);
+    assert_eq!(rig.last_cut_writers(P_PLAYER), [ha], "the returned player is host {ha}'s, in exactly one part");
+    let (_, parts) = rig.last_committed();
+    let record = parts[&ha].players.iter().find(|(p, _)| *p == P_PLAYER).map(|(_, r)| r.clone()).unwrap();
+    assert_eq!(record.client.inventory, stocked_record(a, 4).client.inventory, "the inventory it held at T");
+    true
+}
+
+fn returned_moves_disconnect(rig: &mut MultiRig) -> bool {
+    returned_before_t(rig, Return::MovesThenDisconnect)
+}
+
+fn returned_moves_local_move(rig: &mut MultiRig) -> bool {
+    returned_before_t(rig, Return::MovesThenLocalMove)
+}
+
+fn returned_walks_disconnect(rig: &mut MultiRig) -> bool {
+    returned_before_t(rig, Return::WalksThenDisconnect)
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn player_sent_and_returned_before_t_is_in_exactly_one_part() {
+    sweep_hits("player_sent_and_returned_before_t (moves, disconnect)", 2, 1, SEEDS, returned_moves_disconnect);
+    sweep_hits("player_sent_and_returned_before_t (moves, local move)", 2, 1, SEEDS, returned_moves_local_move);
+    sweep_hits("player_sent_and_returned_before_t (walks, disconnect)", 2, 1, SEEDS, returned_walks_disconnect);
+}
+
+/// Important 5: case 3 — a transfer and a player move made by host A after its marks went
+/// out, in no snapshot of A (the slime is made after `a` answered, the player was on no
+/// host), while host B keeps the cut pending (its keeper region lags). Sent through the
+/// manager's state-message path with `view == false`: A writes them into its own part (a
+/// row with stamp ≥ T, the player's record), wrapped; B's part has nothing of them; the
+/// committed cut and the restarted world hold each once.
+fn case_three(rig: &mut MultiRig) -> bool {
+    let (a, b) = host_seam(2, 1);
+    let (ha, hb) = (rig.owner(a), rig.owner(b));
+    let home_b = rig.homes[hb as usize];
+    rig.run(a);
+    rig.run(b);
+    world_cuts(rig);
+    let (cut, t) = until_world_cut_on(rig, ha);
+    while world_tick(rig) + 2 < t {
+        rig.cut_round();
+    }
+    let lag = (t - world_tick(rig)) as u32 + LAG_AROUND_T;
+    rig.hosts[hb as usize].manager.spawner_mut().hold(home_b, lag);
+    for _ in 0..WORLD_CUT_ROUNDS {
+        if matches!(rig.hosts[ha as usize].manager.world_cut_state(), Some((c, "marked"))if c == cut) {
+            break;
+        }
+        rig.cut_round();
+    }
+    if !matches!(rig.hosts[ha as usize].manager.world_cut_state(), Some((c, "marked")) if c == cut) {
+        return false;
+    }
+    // A slime made after `a` answered (in no snapshot), taken out of `a` as a transfer.
+    let y = crate::common::above_floor_y();
+    let id = rig.spawn_slime(a, [REGION_SIZE / 2.0, y, REGION_SIZE / 2.0]);
+    let mut bundle = None;
+    rig.host_of(a).manager.spawner_mut().with_region(a, |r| {
+        let key = r.data().id_index[&id];
+        bundle = Some(r.data().bundle_of(key));
+        r.with_data(|d| d.remove_entity_safe(key, None));
+    });
+    let mut bundle = bundle.unwrap();
+    bundle.rebase(a, b);
+    let stamp = t - 2;
+    let transfer = game::Reliable::Transfer { target: b, stamp, bundle: Box::new(bundle), player: None };
+    rig.hosts[ha as usize].manager.send_reliable_for_test(hb, transfer, false);
+    // A player on no host, moved to `b`.
+    let handoff = game::PlayerHandoff { client: P3_CLIENT, player: P3_PLAYER, claim: None, login: None, park: false, hop: 1 };
+    let record = stocked_record(b, 6);
+    let mv = game::Reliable::PlayerMove { handoff, record: Box::new(record.clone()), target: b };
+    rig.hosts[ha as usize].manager.send_reliable_for_test(hb, mv, false);
+    rig.hosts[hb as usize].manager.spawner_mut().hold(home_b, 0);
+    if !until_decided(rig, cut) {
+        return false;
+    }
+    let (_, parts) = rig.last_committed();
+    let row = parts[&ha].in_flight.iter().find_map(|r| match r {
+        game::InFlightRow::Transfer { bundle, stamp, .. } if bundle.id == id => Some(*stamp),
+        _ => None,
+    });
+    assert!(row.is_some_and(|s| s >= t), "host {ha}'s part has the transfer as a row at T or later: {row:?}");
+    assert!(part_holds(&parts[&hb], id).is_none(), "host {hb}'s part has nothing of it");
+    assert_eq!(rig.last_cut_writers(P3_PLAYER), [ha], "the moved player's record is host {ha}'s");
+    assert_eq!(rig.stored_places(id).len(), 1, "stored once: {:?}", rig.stored_places(id));
+    let mut again = rig.rebuild_from_last_cut();
+    again.run(b);
+    until_quiet(&mut again);
+    assert_eq!(live_count(&mut again, id), 1, "the slime once in the restarted world");
+    true
+}
+
+/// Where `part` holds entity `id`: in a region snapshot or a row.
+fn part_holds(part: &game::WorldCut, id: game::EntityId) -> Option<RegionCoords> {
+    for (rc, p) in &part.regions {
+        if p.entities.iter().any(|e| e.id == id) {
+            return Some(*rc);
+        }
+    }
+    part.in_flight.iter().find_map(|r| match r {
+        game::InFlightRow::Transfer { bundle, target, .. } if bundle.id == id => Some(*target),
+        _ => None,
+    })
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn case_three_crossings_stay_in_the_senders_part() {
+    sweep_hits("case_three_crossings_stay_in_the_senders_part", 2, 1, SEEDS / 2, case_three);
 }

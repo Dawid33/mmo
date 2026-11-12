@@ -83,6 +83,9 @@ pub(super) struct WorldCuts {
     /// The hosts whose part every cut needs (the runtime: those whose `hosts` row is not
     /// clean).
     expected: BTreeSet<u32>,
+    /// `expected` is as last read ([`Coordinator::expected_hosts_unknown`] clears it: a
+    /// failed read, no cut until the next good one).
+    expected_known: bool,
     /// The hosts attached (an `Attach` handled, no detach since).
     attached: BTreeSet<u32>,
     /// The world tick as the runtime last set it.
@@ -104,6 +107,7 @@ impl Default for WorldCuts {
             epoch: 0,
             next: 0,
             expected: BTreeSet::new(),
+            expected_known: false,
             attached: BTreeSet::new(),
             world_tick: 0,
             lead: WORLD_CUT_LEAD_TICKS,
@@ -132,6 +136,13 @@ impl Coordinator {
     /// The hosts every world cut needs a part of (those whose `hosts` row is not clean).
     pub fn set_expected_hosts(&mut self, hosts: BTreeSet<u32>) {
         self.cuts.expected = hosts;
+        self.cuts.expected_known = true;
+    }
+
+    /// The hosts a cut needs could not be read: no cut begins until they are again
+    /// ([`Self::set_expected_hosts`]).
+    pub fn expected_hosts_unknown(&mut self) {
+        self.cuts.expected_known = false;
     }
 
     /// The world tick now (the coordinator's clock): a cut is placed a lead past it.
@@ -272,7 +283,12 @@ impl Coordinator {
         if now_ms < self.cuts.last_ms.saturating_add(every) {
             return;
         }
-        if self.cuts.expected.is_empty() || !self.cuts.expected.is_subset(&self.cuts.attached) {
+        // Every expected host attached, and no attached host outside the set (one that
+        // registered since the last read would run unsaved state beside the cut).
+        if !self.cuts.expected_known
+            || self.cuts.expected.is_empty()
+            || self.cuts.expected != self.cuts.attached
+        {
             return;
         }
         self.cuts.next += 1;

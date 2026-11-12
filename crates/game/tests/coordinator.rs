@@ -1705,3 +1705,21 @@ fn missed_world_cut_doubles_the_lead_and_the_deadline_aborts() {
     c.maintain(now + game::WORLD_CUT_DEADLINE_MS);
     assert_eq!(c.take_decision().map(|d| (d.cut, d.commit)), Some((cut, false)), "the deadline aborts");
 }
+
+/// Important 6: no world cut while an attached host is not among the expected ones (it
+/// registered since the hosts were last read), nor after a failed read until a good one.
+#[test]
+fn no_cut_while_an_attached_host_is_not_expected() {
+    let mut c = cutting();
+    c.handle(2, attach(2, 1, Vec::new(), Vec::new()), 0);
+    commit_routed(&mut c);
+    c.maintain(CUT_EVERY_MS);
+    assert!(begun(&commit_routed(&mut c)).is_empty(), "host 2 is attached and not expected");
+    c.set_expected_hosts([0, 1, 2].into_iter().collect());
+    c.expected_hosts_unknown();
+    c.maintain(2 * CUT_EVERY_MS);
+    assert!(begun(&commit_routed(&mut c)).is_empty(), "the hosts could not be read");
+    c.set_expected_hosts([0, 1, 2].into_iter().collect());
+    c.maintain(3 * CUT_EVERY_MS);
+    assert_eq!(begun(&commit_routed(&mut c)).len(), 3, "all three take part");
+}

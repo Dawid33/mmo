@@ -52,6 +52,10 @@ pub(super) enum PartState {
     Complete,
     /// Staged in the store ([`WorldManager::world_cut_prepared`]).
     Prepared,
+    /// Failed here (`CutFailed` sent): kept until its `CutDone`, so what this host sends a
+    /// participant still goes wrapped (never counted in the dead cut) and no other cut
+    /// begins meanwhile.
+    Failed,
 }
 
 /// The world cut this host takes part in.
@@ -66,6 +70,9 @@ pub(super) struct WorldCutRun {
     /// This host's marks are queued.
     pub mark_sent: bool,
     pub state: PartState,
+    /// Inside [`WorldManager::begin_world_cut`]: a failure there is answered by its caller
+    /// (one `CutFailed`).
+    pub beginning: bool,
 }
 
 /// The cut tick must be at least this many ticks past the world tick when the host begins
@@ -96,6 +103,13 @@ impl<S: RegionSpawner> WorldManager<S> {
             log::warn!("world cut {} at tick {tick}: the world tick is {now} already; missed", cut.0);
             return Err(CutFailure::Missed);
         }
+        // A wrapper of this cut (or a later one) already came: a peer's region is past the
+        // tick, this host is at the edge of missing it — it does not take part ("wait,
+        // never guess"); the coordinator doubles the lead.
+        if self.wrapper_seen.is_some_and(|w| w >= cut) {
+            log::warn!("world cut {}: a peer's wrapped message of it came before its BeginCut; missed", cut.0);
+            return Err(CutFailure::Missed);
+        }
         // Task 14: a leaving host takes part like any participant for now.
         let all: BTreeSet<u32> = hosts.iter().chain(leaving).copied().collect();
         if !all.contains(&me) {
@@ -112,18 +126,15 @@ impl<S: RegionSpawner> WorldManager<S> {
         // Marks of this cut that came before its `BeginCut`.
         let marks_in: BTreeSet<u32> = self.early_marks.iter().filter(|(p, c)| **c == cut && peers.contains(p)).map(|(p, _)| *p).collect();
         self.early_marks.retain(|_, c| *c > cut);
-        self.world_cut = Some(WorldCutRun { cut, tick, peers, marks_in, mark_sent: false, state: PartState::Pending });
+        self.world_cut =
+            Some(WorldCutRun { cut, tick, peers, marks_in, mark_sent: false, state: PartState::Pending, beginning: true });
         if self.begin_cut_at(cut, tick).is_none() {
-            // A dead region thread: `world_cut_dropped` already failed the part.
+            // A dead region thread: the part failed; the caller sends the one `CutFailed`.
             self.world_cut = None;
             return Err(CutFailure::Aborted);
         }
-        // Players handed here wrapped in this cut before it began are another part's.
-        let accounted: Vec<PlayerId> = self.accounted_players.iter().filter(|(_, c)| **c == cut).map(|(p, _)| *p).collect();
-        if let Some(pending) = self.pending_cut.as_mut() {
-            for p in accounted {
-                pending.not_ours.entry(p).or_insert(None);
-            }
+        if let Some(run) = self.world_cut.as_mut().filter(|r| r.cut == cut) {
+            run.beginning = false;
         }
         log::debug!("[server] world cut {} at tick {tick} begun", cut.0);
         self.try_complete_cut();
@@ -152,8 +163,8 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// coordinator is told.
     pub fn world_cut_failed(&mut self, cut: CutId, why: CutFailure) {
         self.cut_failed(cut);
-        if self.world_cut.as_ref().is_some_and(|r| r.cut == cut) {
-            self.world_cut = None;
+        if let Some(run) = self.world_cut.as_mut().filter(|r| r.cut == cut) {
+            run.state = PartState::Failed;
         }
         self.world_send(HostMsg::CutFailed { cut, why });
     }
@@ -200,7 +211,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                         self.ready_cut = None;
                     }
                 }
-                PartState::Prepared => {}
+                PartState::Prepared | PartState::Failed => {}
             }
             if committed && run.state != PartState::Prepared {
                 log::error!("world cut {}: committed, but this host's part was never prepared", cut.0);
@@ -208,7 +219,6 @@ impl<S: RegionSpawner> WorldManager<S> {
         }
         self.world_cut_seen = Some(self.world_cut_seen.map_or(cut, |s| s.max(cut)));
         self.early_marks.retain(|_, c| *c > cut);
-        self.accounted_players.retain(|_, c| *c > cut);
         self.world_cut_done.push((cut, committed));
     }
 
@@ -220,15 +230,19 @@ impl<S: RegionSpawner> WorldManager<S> {
         }
     }
 
-    /// The part of the world cut, not complete yet, fails: the cut is dropped here and the
-    /// coordinator is told.
+    /// The part of the world cut, not complete yet, fails: the cut is dropped here, the
+    /// coordinator is told, and the part stays `Failed` until its `CutDone`.
     pub(super) fn world_cut_fail(&mut self, why: CutFailure) {
-        let Some(run) = self.world_cut.take_if(|r| r.state == PartState::Pending) else { return };
-        log::warn!("world cut {}: this host's part failed ({why:?})", run.cut.0);
-        if self.pending_cut.as_ref().is_some_and(|c| c.id == run.cut) {
+        let Some(run) = self.world_cut.as_mut().filter(|r| r.state == PartState::Pending) else { return };
+        run.state = PartState::Failed;
+        let (cut, beginning) = (run.cut, run.beginning);
+        log::warn!("world cut {}: this host's part failed ({why:?})", cut.0);
+        if self.pending_cut.as_ref().is_some_and(|c| c.id == cut) {
             self.pending_cut = None;
         }
-        self.world_send(HostMsg::CutFailed { cut: run.cut, why });
+        if !beginning {
+            self.world_send(HostMsg::CutFailed { cut, why });
+        }
     }
 
     /// Every region answered pending cut `id`: for a world cut, this host's marks are
@@ -274,7 +288,7 @@ impl<S: RegionSpawner> WorldManager<S> {
         };
         let (cut, tick) = (run.cut, run.tick);
         match run.state {
-            PartState::Complete | PartState::Prepared => (msg, Some(cut)),
+            PartState::Complete | PartState::Prepared | PartState::Failed => (msg, Some(cut)),
             PartState::Pending if view => (msg, Some(cut)),
             PartState::Pending if !run.mark_sent => {
                 if let Some(player) = reliable_player(&msg) {
@@ -327,22 +341,31 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.pending_cut.as_ref().is_some_and(|c| c.id == cut)
     }
 
-    /// A wrapped player-bearing `msg` of cut `cut`: the player is its sender's in that cut.
-    /// If the cut is pending here, what this part already held of it at the cut tick (a
-    /// record it passed through with before it left) stays; if it has not begun here, it is
-    /// noted for it ([`Self::begin_world_cut`]).
+    /// A wrapper of cut `cut` came: if that cut is not this host's world cut, this host is
+    /// too late for it (and every earlier one) — [`Self::begin_world_cut`] answers `Missed`.
+    pub(super) fn note_wrapper(&mut self, cut: CutId) {
+        if self.world_cut.as_ref().is_none_or(|r| r.cut != cut) {
+            self.wrapper_seen = Some(self.wrapper_seen.map_or(cut, |w| w.max(cut)));
+        }
+    }
+
+    /// A wrapped player-bearing `msg` of cut `cut`, pending here: the player is its
+    /// sender's in that cut; what this part already held of it at the cut tick (a record it
+    /// passed through with before it left) stays.
     pub(super) fn note_player_accounted(&mut self, msg: &Reliable, cut: CutId) {
         let Some(player) = reliable_player(msg) else { return };
-        match self.pending_cut.as_mut().filter(|c| c.id == cut) {
-            Some(pending) => {
-                let had = pending.transit_players.get(&player).or(pending.parked_at_t.get(&player)).cloned();
-                pending.not_ours.entry(player).or_insert(had);
-            }
-            None => {
-                if self.world_cut_seen.is_none_or(|s| cut > s) {
-                    self.accounted_players.insert(player, cut);
-                }
-            }
+        if let Some(pending) = self.pending_cut.as_mut().filter(|c| c.id == cut) {
+            let had = pending.transit_players.get(&player).or(pending.parked_at_t.get(&player)).cloned();
+            pending.not_ours.entry(player).or_insert(had);
+        }
+    }
+
+    /// A BARE player-bearing `msg` arrived: the player is this host's in the pending cut
+    /// (it may have left bare before — case 2 noted it as the receiver's).
+    pub(super) fn note_player_returned(&mut self, msg: &Reliable) {
+        let Some(player) = reliable_player(msg) else { return };
+        if let Some(pending) = self.pending_cut.as_mut() {
+            pending.not_ours.remove(&player);
         }
     }
 
@@ -375,6 +398,29 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.world_cut.as_ref().map(|r| r.cut)
     }
 
+    /// Test support: apply `msg` as if host `from` had sent it on its peer session (the
+    /// inbound path a session's `Reliable` event takes).
+    #[doc(hidden)]
+    pub fn apply_peer_reliable(&mut self, from: u32, msg: Reliable) {
+        self.peer_reliable(from, msg);
+        self.flush_world();
+    }
+
+    /// Test support: send `msg` to host `ordinal` as the manager sends a state message
+    /// (`view`: departed after its source answered the pending cut) — through the world
+    /// cut's wrapper rule.
+    #[doc(hidden)]
+    pub fn send_reliable_for_test(&mut self, ordinal: u32, msg: Reliable, view: bool) {
+        self.send_reliable(ordinal, msg, view);
+    }
+
+    /// Test support: every crossing in flight with the world cut its sender accounts for it
+    /// in (`None`: this host's).
+    #[doc(hidden)]
+    pub fn in_flight_accounted(&self) -> Vec<(crate::EntityId, Option<CutId>)> {
+        self.in_flight.iter().map(|(id, f)| (*id, f.accounted_in)).collect()
+    }
+
     /// Test support: the pending world cut part's state, as text (`None`: none).
     pub fn world_cut_state(&self) -> Option<(CutId, &'static str)> {
         self.world_cut.as_ref().map(|r| {
@@ -383,6 +429,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                 PartState::Pending => "pending",
                 PartState::Complete => "complete",
                 PartState::Prepared => "prepared",
+                PartState::Failed => "failed",
             })
         })
     }
