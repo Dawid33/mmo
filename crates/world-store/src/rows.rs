@@ -224,22 +224,22 @@ macro_rules! engine_rows {
                 Ok(())
             }
 
-            /// Registers a host boot (R3): in one transaction, with the world row locked
-            /// (Postgres: `FOR UPDATE`; SQLite has one writer) and the fence checked over
-            /// the fence's own super-regions. If the ordinal's row exists, is not clean and
+            /// Registers a host boot (R3): in one transaction, with the fence checked over the fence's own
+            /// super-regions first and then the world row locked (Postgres: `FOR UPDATE`; SQLite
+            /// has one writer) — the lock order of `commit_cut`. If the ordinal's row exists, is not clean and
             /// still holds the world's generation, the previous boot died without a clean
             /// save: `world.generation` goes up (`bumped`). The row is then upserted with
             /// the new boot, the world's generation and `clean = 0`. `row.generation` and
             /// `row.clean` are ignored. Callers hold the writer lock.
             pub(crate) async fn register_host(pool: &Pool, row: HostRow, fence: &Fence) -> Result<HostBoot, StoreError> {
                 let mut tx = pool.begin().await?;
+                let srs: std::collections::BTreeSet<SuperRegion> = fence.epochs.keys().copied().collect();
+                check_fence(&mut tx, fence, &srs).await?;
                 let world: i64 = sqlx::query(concat!("SELECT generation FROM world WHERE id = 1", $update_lock))
                     .fetch_optional(&mut *tx)
                     .await?
                     .ok_or_else(|| StoreError::Corrupt("the world row is missing".into()))?
                     .try_get(0)?;
-                let srs: std::collections::BTreeSet<SuperRegion> = fence.epochs.keys().copied().collect();
-                check_fence(&mut tx, fence, &srs).await?;
                 let prior = sqlx::query("SELECT generation, clean FROM hosts WHERE ordinal = $1")
                     .bind(i64::from(row.ordinal))
                     .fetch_optional(&mut *tx)

@@ -764,7 +764,15 @@ pub fn run() -> claims::ServerExit {
                 webtransport: None,
                 wt_cert_hash: None,
             };
-            let registered = claimed.store().register_host(row, claimed.fence()).unwrap_or_else(|e| fatal(&e.to_string()));
+            let registered = match claimed.store().register_host(row, claimed.fence()) {
+                Ok(registered) => registered,
+                // Replaced between the claim and the registration: fenced, not a start-up error.
+                Err(e @ world_store::StoreError::Fenced { .. }) => {
+                    log::error!("[server] fenced while registering as host {}: {e}", ownership.ordinal());
+                    std::process::exit(claims::EXIT_FENCED)
+                }
+                Err(e) => fatal(&e.to_string()),
+            };
             info!(
                 "[server] registered host {} at world generation {}{}",
                 ownership.ordinal(),

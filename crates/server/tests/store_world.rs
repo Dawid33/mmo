@@ -893,6 +893,89 @@ fn fenced_host_stops_and_writes_nothing() {
     drop(db);
 }
 
+/// The world-rollback exit on the store at `url`: `world_generation` has seen a higher
+/// generation (and, with `also_fenced`, the fenced flag is set too). A rolled-back host parks
+/// nothing, takes no cut, refuses its clients with `ROLLBACK_REFUSAL` and maps to status 5;
+/// a fenced one wins and maps to 3.
+fn rollback_exit_run(url: &world_store::StoreUrl, also_fenced: bool) {
+    let store = world_store::StoreHandle::open(url, world_store::Dials::BUILT, world_store::OpenMode::Writer).unwrap();
+    install_props();
+    let token = server::player_store::PlayerKey::Online(game::PlayerToken::generate([9; game::PLAYER_TOKEN_BYTES]));
+    let (player, _) = StorePlayers(store.clone()).resolve(&token).unwrap();
+    let mut core = Core::open(&store);
+    core.manager.handle_server_event(ServerEvent::ClientConnected { client: 0, player, record: None }, 0);
+    core.tick(3);
+    let mut writer = server::cuts::CutWriter::new(core.claims.clone());
+    periodic_cut(&mut core, &mut writer);
+    let tick_before = store.world_info().unwrap().world_tick;
+    // The exit shuts the host's store down: a second handle reads what was left behind.
+    let observer =
+        world_store::StoreHandle::open(url, world_store::Dials::BUILT, world_store::OpenMode::ReadOnly).unwrap();
+
+    let generation = server::claims::WorldGeneration::new(0);
+    generation.note(1);
+    assert!(generation.is_set());
+    if also_fenced {
+        core.claims.fenced().set();
+    }
+    let Core { mut manager, claims, region_out, _packets } = core;
+    let exit = server::cuts::exit_world(
+        &mut manager,
+        server::cuts::ExitParams {
+            region_out: &region_out,
+            now_ms: || 0,
+            cuts: Some(writer),
+            coordinator: None,
+            fenced: claims.fenced(),
+            world_generation: &generation,
+            park_timeout: Duration::from_secs(5),
+            save_timeout: Duration::from_secs(5),
+            now_tick: || -> game::Tick { panic!("this exit takes no last cut") },
+        },
+        |_| {},
+    );
+    let (want, code, refusal) = if also_fenced {
+        (server::claims::ServerExit::Fenced, 3, server::claims::FENCED_REFUSAL)
+    } else {
+        (server::claims::ServerExit::WorldRolledBack, 5, server::claims::ROLLBACK_REFUSAL)
+    };
+    assert_eq!(exit, want);
+    assert_eq!(exit.code(), code);
+    assert_eq!(server::claims::EXIT_WORLD_ROLLBACK, 5);
+    assert!(!manager.running_regions().is_empty(), "nothing was parked");
+    assert_eq!(observer.world_info().unwrap().world_tick, tick_before, "no cut was written");
+    observer.shutdown();
+    let refused = _packets
+        .try_iter()
+        .any(|(to, p)| to == Some(0) && matches!(&p, ServerPacket::Refused(why) if why == refusal));
+    assert!(refused, "the client is told why: {refusal}");
+    manager.shutdown_all();
+}
+
+/// A host that saw a higher world generation exits 5 without parking or saving.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn rolled_back_host_exits_5_without_park_or_cut() {
+    let Some(db) = pg_test_support::PgTestDb::create("mmo_srv_test") else {
+        eprintln!("{}", pg_test_support::SKIP_MSG);
+        return;
+    };
+    rollback_exit_run(&world_store::StoreUrl::Postgres(db.url.clone()), false);
+    drop(db);
+}
+
+/// Both flags set: the fence wins (exit 3, `FENCED_REFUSAL`).
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn fenced_wins_over_rollback() {
+    let Some(db) = pg_test_support::PgTestDb::create("mmo_srv_test") else {
+        eprintln!("{}", pg_test_support::SKIP_MSG);
+        return;
+    };
+    rollback_exit_run(&world_store::StoreUrl::Postgres(db.url.clone()), true);
+    drop(db);
+}
+
 /// Static ordinal `mine` of 2: a player whose stored record lies in a region
 /// the other host owns connects here. The session is refused, the record is
 /// not carried into this host's cuts, so the periodic cut commits, the host
