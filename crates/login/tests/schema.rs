@@ -179,8 +179,8 @@ async fn schemas_match() {
     let lite_idx = indexes(&Pool::Sqlite(lite_pool)).await;
     assert_eq!(lite_idx, expected_indexes(), "SQLite indexes differ from the checked-in list");
 
-    let Some(admin) = common::pg_admin_url() else { return common::skip_msg() };
-    let db = common::PgTestDb::create(&admin).await;
+    if common::pg_admin_url().is_none() { return common::skip_msg() }
+    let db = common::PgTestDb::create_async("mmo_test").await.expect("pg env var set");
     {
         let _store = LoginStore::open(&db.url).await.unwrap(); // migrates
         let pg = sqlx::PgPool::connect(&db.url).await.unwrap();
@@ -188,5 +188,5 @@ async fn schemas_match() {
         assert_eq!(indexes(&Pool::Pg(pg.clone())).await, lite_idx, "Postgres indexes differ from SQLite");
         pg.close().await;
     }
-    db.drop_db().await;
+    drop(db);
 }

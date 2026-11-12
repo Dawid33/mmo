@@ -5554,6 +5554,7 @@ dependencies = [
  "crossbeam",
  "log",
  "login-api",
+ "pg-test-support",
  "rand_core 0.6.4",
  "serde",
  "serde_json",
@@ -6853,6 +6854,14 @@ dependencies = [
  "fixedbitset",
  "hashbrown 0.15.5",
  "indexmap",
+]
+
+[[package]]
+name = "pg-test-support"
+version = "0.1.0"
+dependencies = [
+ "sqlx",
+ "tokio",
 ]
 
 [[package]]
@@ -8250,6 +8259,7 @@ dependencies = [
  "login",
  "login-api",
  "lz4_flex",
+ "pg-test-support",
  "pyroscope",
  "pyroscope_pprofrs",
  "quinn",
@@ -11189,6 +11199,7 @@ dependencies = [
  "crossbeam",
  "game",
  "log",
+ "pg-test-support",
  "rayon",
  "serde",
  "simplelog",

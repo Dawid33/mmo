@@ -799,43 +799,6 @@ fn exit_with_given_up_region_skips_exit_cut() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A throwaway Postgres database from `MMO_TEST_DATABASE_URL` (`just test-pg`
-/// sets it); `None` (with a message) when it is unset.
-struct PgDb {
-    admin: String,
-    name: String,
-    url: String,
-}
-
-impl PgDb {
-    fn create() -> Option<PgDb> {
-        use sqlx::Connection;
-        let Some(admin) = std::env::var("MMO_TEST_DATABASE_URL").ok().filter(|s| !s.is_empty()) else {
-            eprintln!("skipped: MMO_TEST_DATABASE_URL unset");
-            return None;
-        };
-        let name = format!("mmo_srv_test_{:x}_{}", std::process::id(), std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());
-        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-        rt.block_on(async {
-            let mut c = sqlx::PgConnection::connect(&admin).await.expect("connect to MMO_TEST_DATABASE_URL");
-            sqlx::query(&format!("CREATE DATABASE {name}")).execute(&mut c).await.expect("create database");
-        });
-        let (base, _) = admin.rsplit_once('/').expect("a url with a database name");
-        let url = format!("{base}/{name}");
-        Some(PgDb { admin, name, url })
-    }
-
-    fn drop_db(self) {
-        use sqlx::Connection;
-        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-        rt.block_on(async {
-            let mut c = sqlx::PgConnection::connect(&self.admin).await.expect("connect");
-            let _ = sqlx::query(&format!("DROP DATABASE IF EXISTS {} WITH (FORCE)", self.name)).execute(&mut c).await;
-        });
-    }
-}
-
 /// The fenced-host run on the world store at `url` (`thief`: how a second
 /// process opens it): another claim of the host's super-regions fences it;
 /// its next cut and region load are refused and write nothing, the process
@@ -916,13 +879,16 @@ fn fenced_host_stops_and_writes_nothing_sqlite() {
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn fenced_host_stops_and_writes_nothing() {
-    let Some(db) = PgDb::create() else { return };
+    let Some(db) = pg_test_support::PgTestDb::create("mmo_srv_test") else {
+        eprintln!("{}", pg_test_support::SKIP_MSG);
+        return;
+    };
     let url = world_store::StoreUrl::Postgres(db.url.clone());
     let second = url.clone();
     fenced_host_run(&url, move |_| {
         world_store::StoreHandle::open(&second, world_store::Dials::BUILT, world_store::OpenMode::Writer).unwrap()
     });
-    db.drop_db();
+    drop(db);
 }
 
 /// Static ordinal `mine` of 2: a player whose stored record lies in a region

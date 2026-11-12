@@ -157,10 +157,10 @@ async fn concurrent_takes_sqlite_file() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_takes_postgres() {
-    let Some(admin) = crate::common::pg_admin_url() else { return crate::common::skip_msg() };
-    let db = crate::common::PgTestDb::create(&admin).await;
+    if crate::common::pg_admin_url().is_none() { return crate::common::skip_msg() }
+    let db = crate::common::PgTestDb::create_async("mmo_test").await.expect("pg env var set");
     race_takes(LoginStore::open(&db.url).await.unwrap()).await;
-    db.drop_db().await;
+    drop(db);
 }
 
 /// `RACERS` concurrent rotations of one token, each with its own successor: exactly one is
@@ -230,10 +230,10 @@ async fn concurrent_rotations_sqlite_file() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_rotations_postgres() {
-    let Some(admin) = crate::common::pg_admin_url() else { return crate::common::skip_msg() };
-    let db = crate::common::PgTestDb::create(&admin).await;
+    if crate::common::pg_admin_url().is_none() { return crate::common::skip_msg() }
+    let db = crate::common::PgTestDb::create_async("mmo_test").await.expect("pg env var set");
     race_rotations(LoginStore::open(&db.url).await.unwrap()).await;
-    db.drop_db().await;
+    drop(db);
 }
 
 /// Sessions end per epoch (a late end never closes a newer join), and a join re-opens one.
@@ -262,10 +262,10 @@ async fn session_ends_sqlite() {
 
 #[tokio::test]
 async fn session_ends_postgres() {
-    let Some(admin) = crate::common::pg_admin_url() else { return crate::common::skip_msg() };
-    let db = crate::common::PgTestDb::create(&admin).await;
+    if crate::common::pg_admin_url().is_none() { return crate::common::skip_msg() }
+    let db = crate::common::PgTestDb::create_async("mmo_test").await.expect("pg env var set");
     session_ends(LoginStore::open(&db.url).await.unwrap()).await;
-    db.drop_db().await;
+    drop(db);
 }
 
 /// A refresh token's account is read without spending it.
@@ -322,10 +322,10 @@ async fn kick_queue_sqlite() {
 
 #[tokio::test]
 async fn kick_queue_postgres() {
-    let Some(admin) = crate::common::pg_admin_url() else { return crate::common::skip_msg() };
-    let db = crate::common::PgTestDb::create(&admin).await;
+    if crate::common::pg_admin_url().is_none() { return crate::common::skip_msg() }
+    let db = crate::common::PgTestDb::create_async("mmo_test").await.expect("pg env var set");
     kick_queue(LoginStore::open(&db.url).await.unwrap()).await;
-    db.drop_db().await;
+    drop(db);
 }
 
 /// A password reset is one transaction: when a later step fails (here the kick queue is

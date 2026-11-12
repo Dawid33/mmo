@@ -53,6 +53,7 @@ dashmap = { workspace = true }
 bincode = { workspace = true }
 tokio = { workspace = true, features = ["macros", "time"] }
 wtransport = { workspace = true, features = ["dangerous-configuration"] }
+pg-test-support = { path = "../pg-test-support" }
 # Raw SQL on a closed store (damaging a tile row in `store_world`).
 sqlx = { workspace = true }
 # JWKS bodies in the auth edge tests.

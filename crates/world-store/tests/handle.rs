@@ -32,11 +32,11 @@ pub(crate) fn each_backend(tag: &str, reopen: bool, body: impl Fn(&StoreUrl)) {
     } else {
         body(&StoreUrl::Memory);
     }
-    let Some(admin) = common::pg_admin_url() else { return common::skip_msg() };
+    if common::pg_admin_url().is_none() { return common::skip_msg() }
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let db = rt.block_on(common::PgTestDb::create(&admin));
+    let db = rt.block_on(common::PgTestDb::create_async("mmo_test")).expect("pg env var set");
     body(&StoreUrl::Postgres(db.url.clone()));
-    rt.block_on(db.drop_db());
+    drop(db);
 }
 
 pub(crate) fn open(url: &StoreUrl) -> StoreHandle {

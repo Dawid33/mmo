@@ -39,8 +39,8 @@ async fn fresh_open_writes_world_row() {
 
 #[tokio::test]
 async fn fresh_open_on_postgres() {
-    let Some(admin) = common::pg_admin_url() else { return common::skip_msg() };
-    let db = common::PgTestDb::create(&admin).await;
+    if common::pg_admin_url().is_none() { return common::skip_msg() }
+    let db = common::PgTestDb::create_async("mmo_test").await.expect("pg env var set");
     {
         let (pool, _g) = open_pool(&StoreUrl::Postgres(db.url.clone()), Dials::BUILT, OpenMode::Writer).await.unwrap();
         let Pool::Pg(p) = &pool else { panic!() };
@@ -50,7 +50,7 @@ async fn fresh_open_on_postgres() {
         // fence the writes — `fence::two_pg_writers_open_without_lock`).
         p.close().await;
     }
-    db.drop_db().await;
+    drop(db);
 }
 
 #[tokio::test]

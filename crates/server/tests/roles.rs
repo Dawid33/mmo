@@ -40,47 +40,22 @@ const A: ClientId = 0;
 
 // ---- world and store ------------------------------------------------------------------
 
-/// A throwaway Postgres database from `MMO_TEST_DATABASE_URL`.
-struct PgDb {
-    admin: String,
-    name: String,
-    url: String,
-}
+/// A throwaway Postgres database from `MMO_TEST_DATABASE_URL` (`pg-test-support`).
+struct PgDb(pg_test_support::PgTestDb);
 
 impl PgDb {
     fn create(tag: &str) -> Option<PgDb> {
-        use sqlx::Connection;
-        let Some(admin) = std::env::var("MMO_TEST_DATABASE_URL").ok().filter(|s| !s.is_empty()) else {
-            eprintln!("skipped: MMO_TEST_DATABASE_URL unset (run `just test-r2`)");
-            return None;
-        };
-        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-        let name = format!("mmo_roles_{tag}_{:x}_{nanos}", std::process::id());
-        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-        rt.block_on(async {
-            let mut c = sqlx::PgConnection::connect(&admin).await.expect("connect to MMO_TEST_DATABASE_URL");
-            sqlx::query(&format!("CREATE DATABASE {name}")).execute(&mut c).await.expect("create database");
-        });
-        let (base, _) = admin.rsplit_once('/').expect("a url with a database name");
-        let url = format!("{base}/{name}");
-        Some(PgDb { admin, name, url })
+        let db = pg_test_support::PgTestDb::create(&format!("mmo_roles_{tag}"));
+        if db.is_none() {
+            eprintln!("{} (run `just test-r2`)", pg_test_support::SKIP_MSG);
+        }
+        db.map(PgDb)
     }
 
     /// A handle as one process opens it.
     fn open(&self) -> StoreHandle {
-        StoreHandle::open(&StoreUrl::Postgres(self.url.clone()), world_store::Dials::BUILT, world_store::OpenMode::Writer)
+        StoreHandle::open(&StoreUrl::Postgres(self.0.url.clone()), world_store::Dials::BUILT, world_store::OpenMode::Writer)
             .unwrap()
-    }
-}
-
-impl Drop for PgDb {
-    fn drop(&mut self) {
-        use sqlx::Connection;
-        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-        rt.block_on(async {
-            let mut c = sqlx::PgConnection::connect(&self.admin).await.expect("connect");
-            let _ = sqlx::query(&format!("DROP DATABASE IF EXISTS {} WITH (FORCE)", self.name)).execute(&mut c).await;
-        });
     }
 }
 

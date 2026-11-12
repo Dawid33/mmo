@@ -144,9 +144,9 @@ fn stale_coordinator_save_is_refused() {
 /// pools, as two processes), and the later claim fences the earlier.
 #[test]
 fn two_pg_writers_open_without_lock() {
-    let Some(admin) = common::pg_admin_url() else { return common::skip_msg() };
+    if common::pg_admin_url().is_none() { return common::skip_msg() }
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let db = rt.block_on(common::PgTestDb::create(&admin));
+    let db = rt.block_on(common::PgTestDb::create_async("mmo_test")).expect("pg env var set");
     let url = StoreUrl::Postgres(db.url.clone());
     let first = open(&url);
     let second = open(&url);
@@ -156,7 +156,7 @@ fn two_pg_writers_open_without_lock() {
     second.commit_cut(cut(&second, 2), fence_2).recv().unwrap().unwrap();
     second.shutdown();
     first.shutdown();
-    rt.block_on(db.drop_db());
+    drop(db);
 }
 
 /// Two writers opening a fresh Postgres database at the same moment (no
@@ -164,9 +164,9 @@ fn two_pg_writers_open_without_lock() {
 /// and the database holds one world row.
 #[test]
 fn two_pg_writers_open_a_fresh_database_at_once() {
-    let Some(admin) = common::pg_admin_url() else { return common::skip_msg() };
+    if common::pg_admin_url().is_none() { return common::skip_msg() }
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let db = rt.block_on(common::PgTestDb::create(&admin));
+    let db = rt.block_on(common::PgTestDb::create_async("mmo_test")).expect("pg env var set");
     let url = StoreUrl::Postgres(db.url.clone());
     let start = std::sync::Arc::new(std::sync::Barrier::new(2));
     let openers: Vec<_> = (0..2)
@@ -191,7 +191,7 @@ fn two_pg_writers_open_a_fresh_database_at_once() {
     for h in handles {
         h.shutdown();
     }
-    rt.block_on(db.drop_db());
+    drop(db);
 }
 
 #[test]
@@ -237,9 +237,9 @@ fn read_only_refuses_writes_and_unknown_schema() {
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn concurrent_claim_and_commit_serialise() {
-    let Some(admin) = common::pg_admin_url() else { return common::skip_msg() };
+    if common::pg_admin_url().is_none() { return common::skip_msg() }
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let db = rt.block_on(common::PgTestDb::create(&admin));
+    let db = rt.block_on(common::PgTestDb::create_async("mmo_test")).expect("pg env var set");
     let url = StoreUrl::Postgres(db.url.clone());
     let h = open(&url);
     let old = h.claim_super_regions(0, TEST_SUPER_REGIONS.to_vec()).unwrap();
@@ -270,5 +270,5 @@ fn concurrent_claim_and_commit_serialise() {
     h.commit_cut(cut(&h, 2), new).recv().unwrap().unwrap();
     h.shutdown();
     rt.block_on(conn.close()).unwrap();
-    rt.block_on(db.drop_db());
+    drop(db);
 }

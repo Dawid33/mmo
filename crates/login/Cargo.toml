@@ -30,6 +30,7 @@ base64 = { workspace = true }
 simplelog = { workspace = true }
 
 [dev-dependencies]
+pg-test-support = { path = "../pg-test-support" }
 tower = { workspace = true }
 serde_json = { workspace = true }
 

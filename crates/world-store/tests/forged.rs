@@ -248,10 +248,10 @@ impl TileLoader for PoolTiles {
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn two_handles_read_same_tiles() {
-    let Some(admin) = common::pg_admin_url() else { return common::skip_msg() };
+    if common::pg_admin_url().is_none() { return common::skip_msg() }
     let f = fixture();
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let db = rt.block_on(common::PgTestDb::create(&admin));
+    let db = rt.block_on(common::PgTestDb::create_async("mmo_test")).expect("pg env var set");
     let url = StoreUrl::Postgres(db.url.clone());
     let h = open(&url);
     write_tiled(&h, f.bytes.clone()).unwrap();
@@ -273,7 +273,7 @@ fn two_handles_read_same_tiles() {
     });
     drop(b);
     h.shutdown();
-    rt.block_on(db.drop_db());
+    drop(db);
 }
 
 /// `worldctl retile` rebuilds the tiles from the archive row after the tile

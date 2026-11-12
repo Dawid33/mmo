@@ -113,8 +113,8 @@ async fn schemas_match() {
     let lite = introspect(&sqlite).await;
     assert_eq!(lite, expected(), "SQLite schema differs from the checked-in list");
 
-    let Some(admin) = common::pg_admin_url() else { return common::skip_msg() };
-    let db = common::PgTestDb::create(&admin).await;
+    if common::pg_admin_url().is_none() { return common::skip_msg() }
+    let db = common::PgTestDb::create_async("mmo_test").await.expect("pg env var set");
     {
         let (pg, _g) = open_pool(&StoreUrl::Postgres(db.url.clone()), Dials::BUILT, OpenMode::Writer).await.unwrap();
         assert_eq!(introspect(&pg).await, lite, "Postgres schema differs from SQLite");
@@ -122,7 +122,7 @@ async fn schemas_match() {
             p.close().await;
         }
     }
-    db.drop_db().await;
+    drop(db);
 }
 
 /// Both engines carry the same migration versions, so `newest_migration()`
