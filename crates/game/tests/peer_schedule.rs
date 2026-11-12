@@ -702,3 +702,297 @@ fn intent_cut_and_restore(rig: &mut MultiRig) {
 fn one_phase_cut_holds_unreceived_intent_and_restore_requeues_it() {
     sweep("one_phase_cut_holds_unreceived_intent_and_restore_requeues_it", 2, 1, SEEDS / 2, intent_cut_and_restore);
 }
+
+// --- Fix round 1 -----------------------------------------------------------------
+
+/// The `+x` pair of regions nearest the origin whose owners are the same host
+/// (`same`) or differ, among `hosts` hosts (`s` regions per super-region side),
+/// avoiding `taken`.
+fn x_pair(hosts: u32, s: u32, same: bool, taken: &[RegionCoords]) -> (RegionCoords, RegionCoords) {
+    let owner = |rc: RegionCoords| game::Ownership::Static { ordinal: 0, hosts }.owner_of(rc, s);
+    let mut all: Vec<RegionCoords> = (-8..=8).flat_map(|x| (-8..=8).map(move |z| RegionCoords::new(x, z))).collect();
+    all.sort_by_key(|rc| (rc.x.abs() + rc.z.abs(), rc.x, rc.z));
+    for a in all {
+        let b = RegionCoords::new(a.x + 1, a.z);
+        if (owner(a) == owner(b)) == same && !taken.contains(&a) && !taken.contains(&b) {
+            return (a, b);
+        }
+    }
+    panic!("no such pair near the origin");
+}
+
+/// A stocked chest.
+fn stocked_chest() -> game::Container {
+    let mut c = game::Container::chest();
+    c.slots[2] = Some(game::ItemStack { item: DIRT, count: 7 });
+    c
+}
+
+/// A pile and a chest on `a`'s edge tiles facing `b = a + x`.
+fn pile_and_chest(rig: &mut MultiRig, a: RegionCoords) {
+    crate::common::install_real_block_props();
+    let n = game::REGION_BLOCKS as i32;
+    let stand = crate::common::STAND;
+    rig.host_of(a).manager.spawner_mut().with_region(a, |r| {
+        let now = r.current_tick();
+        let stack = game::ItemStack { item: DIRT, count: DEPOSIT };
+        r.with_data(|d| {
+            assert_eq!(d.deposit_items_safe([n - 1, stand, 5], stack, now, game::PICKUP_DELAY_TICKS), 0);
+            let chest = game::WorldBlockPos::from_local(a, game::BlockPos::new(n - 1, stand, 9));
+            d.write_container_safe(chest, Some(stocked_chest()));
+        });
+    });
+}
+
+/// The pile and chest mirrors running `b` holds of region `a`, in `a`'s frame.
+type Mirrors = (Vec<(game::BlockPos, Vec<game::ItemStack>)>, Vec<(game::BlockPos, game::Container)>);
+
+fn mirrors_of(rig: &mut MultiRig, b: RegionCoords, a: RegionCoords) -> Mirrors {
+    let mut out = (Vec::new(), Vec::new());
+    rig.host_of(b).manager.spawner_mut().with_region(b, |r| {
+        let d = r.data();
+        out.0 = d
+            .halo_piles()
+            .iter()
+            .filter(|(p, _)| p.to_local().0 == a)
+            .map(|(p, pile)| (p.to_local().1, pile.stacks.clone()))
+            .collect();
+        out.1 = d
+            .halo_containers()
+            .iter()
+            .filter(|(p, _)| p.to_local().0 == a)
+            .map(|(p, c)| (p.to_local().1, c.clone()))
+            .collect();
+    });
+    out
+}
+
+/// The same park across a region seam (one host) and across a host seam: a pile and a
+/// chest on the parking region's edge; the neighbour's mirrors of them after the park
+/// are the same either way (a park is not a loss). Locally a park re-seeds the running
+/// neighbours from the parked region's final terrain, a `replace` seed without piles or
+/// chests, so those mirrors end at the park on both sides of either seam.
+fn park_keeps_mirrors(rig: &mut MultiRig) {
+    let (ha, hb) = x_pair(2, 2, false, &[]);
+    let (la, lb) = x_pair(2, 2, true, &[ha, hb]);
+    for rc in [ha, hb, la, lb] {
+        rig.run(rc);
+    }
+    pile_and_chest(rig, ha);
+    pile_and_chest(rig, la);
+    let mirrored = |r: &mut MultiRig, a, b| {
+        let m = mirrors_of(r, b, a);
+        !m.0.is_empty() && !m.1.is_empty()
+    };
+    assert!(until(rig, CROSS_ROUNDS, |r| mirrored(r, ha, hb) && mirrored(r, la, lb)), "both neighbours mirror");
+    assert_eq!(mirrors_of(rig, hb, ha), mirrors_of(rig, lb, la), "the same mirrors either way before the park");
+    rig.park(la);
+    rig.park(ha);
+    // (Across the host seam the final seed may lag by the link's delay.)
+    for _ in 0..HALO_ROUNDS {
+        rig.round();
+    }
+    assert_eq!(mirrors_of(rig, hb, ha), mirrors_of(rig, lb, la), "a park across a host seam: as across a region seam");
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn park_across_a_host_seam_keeps_pile_and_chest_mirrors_like_a_region_seam() {
+    sweep("park_across_a_host_seam_keeps_pile_and_chest_mirrors_like_a_region_seam", 2, 2, SEEDS / 2, park_keeps_mirrors);
+}
+
+/// `a` (host A) is lost — its thread died — with a pile, a chest and a slime mirrored in
+/// `b` (host B): B drops every mirror of it (`RegionDown` → `HaloSourceGone`).
+fn lost_drops_mirrors(rig: &mut MultiRig) {
+    let (a, b) = x_pair(2, 1, false, &[]);
+    rig.run(a);
+    rig.run(b);
+    pile_and_chest(rig, a);
+    let id = rig.spawn_slime(a, in_band(a, b));
+    assert!(
+        until(rig, CROSS_ROUNDS, |r| mirror_in(r, b, id) && !mirrors_of(r, b, a).0.is_empty() && !mirrors_of(r, b, a).1.is_empty()),
+        "b mirrors a"
+    );
+    let host = rig.host_of(a);
+    host.event(game::ServerEvent::ClientPacket(game::ClientPacket::ReleaseRegionConnection(a), crate::common::rig::CLIENT));
+    host.manager.spawner_mut().kill(a);
+    host.now_ms += game::UNLOAD_GRACE_MS;
+    let now = host.now_ms;
+    host.manager.maintain(now);
+    host.settle();
+    // (A message for `a` may find it dead first and respawn it, empty: also a loss.)
+    let now = rig.hosts.iter().map(|r| r.now_ms).max().unwrap_or(0);
+    for r in &mut rig.hosts {
+        r.now_ms = now;
+    }
+    // The slime died with `a`: no longer tracked.
+    rig.tracked.remove(&id);
+    assert!(
+        until(rig, CROSS_ROUNDS, |r| !mirror_in(r, b, id) && mirrors_of(r, b, a) == (Vec::new(), Vec::new())),
+        "b still mirrors lost a: {:?}",
+        mirrors_of(rig, b, a)
+    );
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn lost_region_across_a_host_seam_drops_its_mirrors() {
+    sweep("lost_region_across_a_host_seam_drops_its_mirrors", 2, 1, SEEDS / 2, lost_drops_mirrors);
+}
+
+/// A halo request for a region its owner has parked (the requester did not know yet) is
+/// answered from the owner's terrain cache: a dig `a` made before parking reaches `b`,
+/// which started while the link was down (seeded from worldgen).
+fn request_answered_from_cache(rig: &mut MultiRig) {
+    let (a, b) = x_pair(2, 1, false, &[]);
+    let (ha, hb) = (rig.owner(a), rig.owner(b));
+    rig.link_down(ha, hb);
+    rig.run(b);
+    rig.run(a);
+    let plate = border_plate(a, b);
+    carve(rig, a, plate);
+    rig.round();
+    rig.park(a);
+    rig.link_up(ha, hb);
+    assert!(
+        until(rig, CROSS_ROUNDS, |r| r.hosts[ha as usize].manager.foreign_running().contains(&b)),
+        "host {ha} learns `b` runs"
+    );
+    assert!(seen_from(rig, b, a, plate.0).is_some(), "b's halo of a is worldgen's");
+    // The request `b`'s host would have sent had it still believed `a` ran.
+    let link = rig.links[&(ha.min(hb), ha.max(hb))].clone();
+    let end = if hb < ha { link.0 } else { link.1 };
+    game::PeerLink::send(&mut *end.lock().unwrap(), game::PeerMsg::Volatile(game::Volatile::HaloRequest { from: b, of: a }));
+    assert!(until(rig, HALO_ROUNDS, |r| seen_from(r, b, a, plate.0).is_none()), "never answered from the cache");
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn halo_request_for_a_parked_foreign_region_is_answered_from_its_terrain_cache() {
+    sweep(
+        "halo_request_for_a_parked_foreign_region_is_answered_from_its_terrain_cache",
+        2,
+        1,
+        SEEDS / 2,
+        request_answered_from_cache,
+    );
+}
+
+/// A region-sourced deposit reply from `a` to (foreign) `b`'s region, carrying `count` dirt.
+fn refusal_to(a: RegionCoords, b: RegionCoords, due: u64) -> game::IntentMsg {
+    let [x, y, z] = deposit_cell(b, a);
+    let cell = game::WorldBlockPos::from_local(b, game::BlockPos::new(x, y, z));
+    let stack = game::ItemStack { item: DIRT, count: DEPOSIT };
+    let by = game::EntityId::of_region(b);
+    let intent = game::Intent::DepositItems { cell, stack, expire: due + game::PILE_DESPAWN_TICKS, pickup: due, by };
+    game::IntentMsg::Reply(game::SentReply {
+        reply: game::IntentReply::Refused(intent, game::IntentRefusal::PileFull),
+        hint: b,
+        due,
+        hops: 0,
+    })
+}
+
+/// The session to host B is replaced while a reply to it is owed and the link is down:
+/// the new session owes it too (and delivers it), and host B's regions are no longer
+/// known to run.
+fn replace_session(rig: &mut MultiRig) {
+    crate::common::install_real_block_props();
+    let (a, b) = x_pair(2, 1, false, &[]);
+    let (ha, hb) = (rig.owner(a), rig.owner(b));
+    rig.run(a);
+    rig.run(b);
+    assert!(until(rig, CROSS_ROUNDS, |r| r.hosts[ha as usize].manager.foreign_running().contains(&b)), "known");
+    rig.link_down(ha, hb);
+    let due = rig.hosts[ha as usize].manager.spawner_mut().world_tick() + 1;
+    let msg = refusal_to(a, b, due);
+    let host = &mut rig.hosts[ha as usize];
+    let now = host.now_ms;
+    host.manager.handle_region_output(a, game::RegionOutput::Intents(vec![msg]), now);
+    rig.items = Some(u64::from(DEPOSIT));
+    assert_eq!(rig.hosts[ha as usize].manager.peer_unreceived_intents(), [(hb, msg, false)]);
+    // A new session (a new boot of this host's side) over the same link end.
+    let link = rig.links[&(ha.min(hb), ha.max(hb))].clone();
+    let end = if ha < hb { link.0 } else { link.1 };
+    let mut hello = crate::common::multi_rig::rig_hello(ha);
+    hello.boot += 500;
+    rig.hosts[ha as usize].manager.set_peer(
+        hb,
+        game::PeerSession::new(hello, hb),
+        Box::new(crate::common::multi_rig::SharedEnd(end)),
+    );
+    assert_eq!(rig.hosts[ha as usize].manager.peer_unreceived_intents(), [(hb, msg, false)], "still owed");
+    assert!(rig.hosts[ha as usize].manager.foreign_running().is_empty(), "nothing of host {hb} is known to run");
+    rig.link_up(ha, hb);
+    assert!(
+        until(rig, CROSS_ROUNDS, |r| pile_items(r, b) == DEPOSIT && r.peer_unreceived() == 0),
+        "the owed reply never arrived"
+    );
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn replacing_a_peer_session_keeps_what_was_owed() {
+    sweep("replacing_a_peer_session_keeps_what_was_owed", 2, 1, SEEDS / 2, replace_session);
+}
+
+/// Two identical replies to another host in one cut window: the first sent after its
+/// source answered the pending cut (in its snapshot: not a row) and acknowledged at once;
+/// the second sent by a region that has not answered, owed over a down link. The cut
+/// holds exactly that second one as a row.
+fn identical_in_and_out_of_view(rig: &mut MultiRig) {
+    crate::common::install_real_block_props();
+    let (a, b) = x_pair(2, 1, false, &[]);
+    let (ha, hb) = (rig.owner(a), rig.owner(b));
+    let home = rig.homes[ha as usize];
+    rig.run(a);
+    rig.run(b);
+    rig.hosts[ha as usize].manager.spawner_mut().hold(home, HOLD_HOME_ROUNDS);
+    let mut answered = false;
+    for _ in 0..CUT_ROUNDS {
+        let m = &mut rig.hosts[ha as usize].manager;
+        if m.pending_cut().is_none() {
+            let world = m.spawner_mut().world_tick();
+            let lead = m.cut_lead();
+            m.begin_cut((world + CUT_LEAD).saturating_sub(lead)).expect("no cut pending");
+        }
+        rig.round();
+        let m = &rig.hosts[ha as usize].manager;
+        if m.pending_cut().is_some() && !m.awaiting_cut().contains(&a) {
+            answered = true;
+            break;
+        }
+    }
+    assert!(answered, "`a` never answered a pending cut");
+    let due = rig.hosts[ha as usize].manager.spawner_mut().world_tick() + 1;
+    let msg = refusal_to(a, b, due);
+    let inject = |rig: &mut MultiRig, from: RegionCoords| {
+        let host = &mut rig.hosts[ha as usize];
+        let now = host.now_ms;
+        host.manager.handle_region_output(from, game::RegionOutput::Intents(vec![msg]), now);
+    };
+    // From `a`, which answered: in view.
+    inject(rig, a);
+    rig.items = Some(u64::from(DEPOSIT));
+    assert!(
+        until(rig, CROSS_ROUNDS, |r| r.hosts[ha as usize].manager.peer_unreceived_intents().is_empty()),
+        "the first reply is acknowledged"
+    );
+    rig.link_down(ha, hb);
+    assert!(until(rig, WAIT_ROUNDS, |r| !r.hosts[ha as usize].manager.reaches(b)), "the link never went down");
+    // From `home`, which has not answered (held): not in view.
+    inject(rig, home);
+    rig.items = Some(u64::from(2 * DEPOSIT));
+    assert_eq!(rig.hosts[ha as usize].manager.peer_unreceived_intents(), [(hb, msg, false)]);
+    assert!(rig.hosts[ha as usize].manager.pending_cut().is_some(), "still the same cut");
+    rig.hosts[ha as usize].manager.spawner_mut().hold(home, 0);
+    let cut = cut_on(rig, ha as usize);
+    let rows: Vec<_> = cut.in_flight.iter().filter(|r| matches!(r, game::InFlightRow::Intent { .. })).cloned().collect();
+    assert_eq!(rows, [game::InFlightRow::Intent { target: b, msg }], "one row: the one not in view");
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn identical_intents_in_and_out_of_the_cut_view_make_one_row() {
+    sweep("identical_intents_in_and_out_of_the_cut_view_make_one_row", 2, 1, SEEDS / 2, identical_in_and_out_of_view);
+}

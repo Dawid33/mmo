@@ -880,14 +880,14 @@ pub struct WorldManager<S: RegionSpawner> {
     /// Reliable messages for a host that has no session yet, in order: queued into its
     /// session by [`Self::set_peer`]. Carried by cuts like a session's unreceived ones.
     peer_waiting: BTreeMap<u32, Vec<crate::Reliable>>,
-    /// Transfers to other hosts that departed after their source answered the pending
-    /// cut (its snapshot still holds them): not rows of that cut. Cleared by every
-    /// `begin_cut`, like [`InFlight::in_source_view`].
-    peer_in_source_view: BTreeSet<crate::EntityId>,
-    /// Intents and replies to other hosts sent after their source answered the pending
-    /// cut (its snapshot predates them): not rows of that cut. One entry per message
-    /// (equal messages counted). Cleared by every `begin_cut`.
-    peer_intents_in_view: Vec<crate::IntentMsg>,
+    /// Reliable messages queued to each host so far (`queue_to_peer`): the ids of what a
+    /// session (or `peer_waiting`) still holds are the last of these, in order — entries
+    /// leave only from the front (`peers.rs`, `peer_entries`).
+    peer_queued: BTreeMap<u32, u64>,
+    /// Transfers, intents and replies to other hosts — `(host, id)` — sent after their
+    /// source answered the pending cut (its snapshot still holds them): not rows of that
+    /// cut. Cleared by every `begin_cut`, like [`InFlight::in_source_view`].
+    peer_in_source_view: BTreeSet<(u32, u64)>,
     /// The regions of other hosts that border one of this host's and run, by their host
     /// (`peers.rs`): what halo traffic to another host is sent to (halo never wakes a
     /// region). Replaced by each [`crate::Volatile::Running`] of that host, kept by its
@@ -982,8 +982,8 @@ impl<S: RegionSpawner> WorldManager<S> {
             next_incarnation: 0,
             peers: BTreeMap::new(),
             peer_waiting: BTreeMap::new(),
+            peer_queued: BTreeMap::new(),
             peer_in_source_view: BTreeSet::new(),
-            peer_intents_in_view: Vec::new(),
             foreign_running: BTreeMap::new(),
             higher_generation: None,
         }
@@ -1419,8 +1419,9 @@ impl<S: RegionSpawner> WorldManager<S> {
                         self.send_to_region(n, RegionInput::Transfer(GameEventKind::HaloUpdate(seed), stamp));
                     }
                 }
-                // After its final halo: the other hosts' mirrors of it end.
-                self.announce_region(rc, false);
+                // After its final halo: parked, not lost (the other hosts' mirrors of it
+                // end as a neighbour's on this host do).
+                self.announce_region(rc, crate::Volatile::RegionParked);
                 self.terrain_cache.insert(rc, far);
                 // What it held parks with it (its next run reports it again).
                 self.forget_locations(rc);
@@ -1624,7 +1625,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                 self.pending_events.remove(&rc);
                 self.spawner.reap(rc);
                 self.halo_source_lost(rc);
-                self.announce_region(rc, false);
+                self.announce_region(rc, crate::Volatile::RegionDown);
                 self.forget_locations(rc);
                 self.history_region_lost(rc);
                 let queued = self.restart_for_in_flight(rc);
@@ -1661,7 +1662,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             self.spawner.reap(rc);
             // Every other region is stopping: a no-op unless one is not.
             self.halo_source_lost(rc);
-            self.announce_region(rc, false);
+            self.announce_region(rc, crate::Volatile::RegionDown);
             self.forget_locations(rc);
             self.history_region_lost(rc);
             // Woken for what was in flight to it; the exit loop stops it again.
@@ -1700,7 +1701,6 @@ impl<S: RegionSpawner> WorldManager<S> {
         }
         // Transfers to other hosts, too.
         self.peer_in_source_view.clear();
-        self.peer_intents_in_view.clear();
         let mut dead = Vec::new();
         for (rc, link) in &self.regions {
             if link.stopping && self.silent_stopping.contains(rc) {
@@ -2878,7 +2878,7 @@ impl<S: RegionSpawner> WorldManager<S> {
         if self.regions.remove(&rc).is_none() {
             return;
         }
-        self.announce_region(rc, false);
+        self.announce_region(rc, crate::Volatile::RegionDown);
         self.unavailable.insert(rc, retry);
         self.spawner.reap(rc);
         // It never ran in this process, so it has nothing uncommitted: the
@@ -2970,7 +2970,7 @@ impl<S: RegionSpawner> WorldManager<S> {
         }
         // Hosts owning a neighbour learn it runs before its halo requests reach them
         // (their answers to it are sent only to a region they know runs).
-        self.announce_region(rc, true);
+        self.announce_region(rc, crate::Volatile::RegionUp);
         // Its terrain halo, before its first tick too.
         self.seed_halo(rc, &input);
         self.regions.insert(
@@ -3388,7 +3388,7 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.pending_events.remove(&rc);
         self.spawner.reap(rc);
         self.halo_source_lost(rc);
-        self.announce_region(rc, false);
+        self.announce_region(rc, crate::Volatile::RegionDown);
         self.forget_locations(rc);
         // Its people's bodies died with it: back to the history, then caught up again.
         self.history_region_lost(rc);

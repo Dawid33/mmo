@@ -79,11 +79,16 @@ pub enum Volatile {
     /// Every region the sender runs (after a reconnect).
     Running(Vec<RegionCoords>),
     RegionUp(RegionCoords),
+    /// The sender's region was lost (its thread died, its load failed): every mirror of
+    /// it ends (`HaloSourceGone`).
     RegionDown(RegionCoords),
     HaloRequest { from: RegionCoords, of: RegionCoords },
     HaloUpdate { to: RegionCoords, update: HaloUpdate, stamp: Tick },
     HaloEntity { to: RegionCoords, msg: HaloEntityMsg, stamp: Tick },
     Input { client: ClientId, kind: GameEventKind, stamp: Tick },
+    /// The sender's region parked (its final halo already sent): no longer running, but
+    /// not lost — unlike [`Volatile::RegionDown`] (a lost region: its mirrors end).
+    RegionParked(RegionCoords),
 }
 
 /// One message on a peer link.

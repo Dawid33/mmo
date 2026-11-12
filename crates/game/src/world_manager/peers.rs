@@ -33,13 +33,23 @@ pub(super) struct Peer {
 
 impl<S: RegionSpawner> WorldManager<S> {
     /// The session with host `ordinal` and its link. Messages queued for that host before
-    /// it had a session go into the session now, in order.
+    /// it had a session go into the session now, in order. A session replacing an earlier
+    /// one takes over everything the earlier one still owed, in order (sent again under
+    /// the new session's numbering), and that host's regions are no longer known to run
+    /// (as when its link goes down) until the new session comes up.
     pub fn set_peer(&mut self, ordinal: u32, mut session: PeerSession, link: Box<dyn PeerLink + Send>) {
         debug_assert_eq!(session.peer(), ordinal, "a session for another host");
-        for msg in self.peer_waiting.remove(&ordinal).unwrap_or_default() {
+        let old = self.peers.remove(&ordinal);
+        let owed = old.as_ref().map(|p| p.session.unreceived().cloned().collect::<Vec<_>>()).unwrap_or_default();
+        // (`peer_waiting` is empty while a session exists: no order to merge.)
+        for msg in owed.into_iter().chain(self.peer_waiting.remove(&ordinal).unwrap_or_default()) {
             session.queue(msg);
         }
         self.peers.insert(ordinal, Peer { session, link, stale: false });
+        if old.is_some() {
+            log::info!("[server] the session with host {ordinal} was replaced");
+            self.peer_lost(ordinal);
+        }
     }
 
     /// Drive every peer session: read what the other hosts sent and act on it, then send
@@ -136,8 +146,12 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.higher_generation.take()
     }
 
-    /// `msg` to host `ordinal`: on its session, or kept until it has one.
-    pub(super) fn queue_to_peer(&mut self, ordinal: u32, msg: Reliable) {
+    /// `msg` to host `ordinal`: on its session, or kept until it has one. Its id among
+    /// everything queued to that host (`peer_entries`).
+    pub(super) fn queue_to_peer(&mut self, ordinal: u32, msg: Reliable) -> u64 {
+        let count = self.peer_queued.entry(ordinal).or_default();
+        let id = *count;
+        *count += 1;
         match self.peers.get_mut(&ordinal) {
             Some(peer) => peer.session.queue(msg),
             None => {
@@ -149,6 +163,24 @@ impl<S: RegionSpawner> WorldManager<S> {
                 waiting.push(msg);
             }
         }
+        id
+    }
+
+    /// Every reliable message to another host not acknowledged yet (a session's, or
+    /// waiting for one), with its host and id. A session's entries (and a waiting list)
+    /// leave only from the front — acknowledged, or forgotten through a cut mark — and a
+    /// replacing session takes over the whole remainder in order, so they are always the
+    /// LAST ones queued to that host.
+    fn peer_entries(&self) -> Vec<(u32, u64, &Reliable)> {
+        let mut out = Vec::new();
+        let lists = self.peers.iter().map(|(o, p)| (*o, p.session.unreceived().collect::<Vec<_>>()));
+        let waiting = self.peer_waiting.iter().map(|(o, l)| (*o, l.iter().collect::<Vec<_>>()));
+        for (ordinal, list) in lists.chain(waiting) {
+            let queued = self.peer_queued.get(&ordinal).copied().unwrap_or(0);
+            let first = queued - list.len() as u64;
+            out.extend(list.into_iter().enumerate().map(|(i, r)| (ordinal, first + i as u64, r)));
+        }
+        out
     }
 
     /// `bundle` (in `target`'s frame), a body that is not a player, departed from `rc` at
@@ -173,12 +205,10 @@ impl<S: RegionSpawner> WorldManager<S> {
         log::debug!("[server] {:?} from {rc:?} into {target:?}: sent to host {owner}", bundle.id);
         // It is on another host now: nothing here routes to it.
         self.locations.remove(&bundle.id);
+        let id = self.queue_to_peer(owner, Reliable::Transfer { target, stamp, bundle: Box::new(bundle), player: None });
         if view {
-            self.peer_in_source_view.insert(bundle.id);
-        } else {
-            self.peer_in_source_view.remove(&bundle.id);
+            self.peer_in_source_view.insert((owner, id));
         }
-        self.queue_to_peer(owner, Reliable::Transfer { target, stamp, bundle: Box::new(bundle), player: None });
     }
 
     /// One-phase cuts (until Task 13): every transfer to another host not acknowledged
@@ -191,25 +221,17 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// Intents and replies alike: each not acknowledged yet is an
     /// [`InFlightRow::Intent`] to the foreign region it went to, unless its source sent it
     /// after answering the cut.
+    /// Entries are told apart by their per-host id (`peer_entries`), never by value: an
+    /// entity departing twice, or two equal replies, in one cut window each count once.
     pub(super) fn cut_peer_rows(&self) -> Vec<InFlightRow> {
-        let sessions = self.peers.values().flat_map(|p| p.session.unreceived());
-        let waiting = self.peer_waiting.values().flatten();
-        let mut in_view = self.peer_intents_in_view.clone();
-        sessions
-            .chain(waiting)
-            .filter_map(|r| match r {
-                Reliable::Transfer { target, stamp, bundle, player: None }
-                    if !self.peer_in_source_view.contains(&bundle.id) =>
-                {
+        self.peer_entries()
+            .into_iter()
+            .filter(|(ordinal, id, _)| !self.peer_in_source_view.contains(&(*ordinal, *id)))
+            .filter_map(|(_, _, r)| match r {
+                Reliable::Transfer { target, stamp, bundle, player: None } => {
                     Some(InFlightRow::Transfer { target: *target, bundle: (**bundle).clone(), stamp: *stamp })
                 }
-                Reliable::Intent(msg) => match in_view.iter().position(|m| m == msg) {
-                    Some(i) => {
-                        in_view.swap_remove(i);
-                        None
-                    }
-                    None => Some(InFlightRow::Intent { target: peer_intent_target(msg), msg: *msg }),
-                },
+                Reliable::Intent(msg) => Some(InFlightRow::Intent { target: peer_intent_target(msg), msg: *msg }),
                 _ => None,
             })
             .collect()
@@ -219,12 +241,12 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// `view`: sent after its source answered the pending cut (not a row of that cut).
     pub(super) fn intent_to_peer(&mut self, to: RegionCoords, msg: crate::IntentMsg, view: bool) {
         debug_assert_eq!(peer_intent_target(&msg), to, "an intent to a peer goes where its message says");
-        if view {
-            self.peer_intents_in_view.push(msg);
-        }
         let owner = self.owner_of(to);
         log::debug!("[server] {msg:?} for {to:?}: sent to host {owner}");
-        self.queue_to_peer(owner, Reliable::Intent(msg));
+        let id = self.queue_to_peer(owner, Reliable::Intent(msg));
+        if view {
+            self.peer_in_source_view.insert((owner, id));
+        }
     }
 
     /// `v` to the host that owns `rc`, if its session is up (else dropped: volatile).
@@ -259,13 +281,13 @@ impl<S: RegionSpawner> WorldManager<S> {
         crate::halo::neighbours(rc).any(|n| !self.owns(n) && self.owner_of(n) == peer)
     }
 
-    /// This host's region `rc` started (`up`) or stopped / was lost: told to every host
-    /// owning one of its neighbours.
-    pub(super) fn announce_region(&mut self, rc: RegionCoords, up: bool) {
+    /// This host's region `rc` started (`Volatile::RegionUp`), parked (`RegionParked`) or
+    /// was lost (`RegionDown`): `what(rc)` told to every host owning one of its neighbours.
+    pub(super) fn announce_region(&mut self, rc: RegionCoords, what: fn(RegionCoords) -> Volatile) {
         let ordinals: Vec<u32> = self.peers.keys().copied().filter(|&p| self.borders(rc, p)).collect();
         for ordinal in ordinals {
             let Some(peer) = self.peers.get_mut(&ordinal).filter(|p| !p.stale) else { continue };
-            peer.session.send_volatile(if up { Volatile::RegionUp(rc) } else { Volatile::RegionDown(rc) });
+            peer.session.send_volatile(what(rc));
         }
     }
 
@@ -327,11 +349,27 @@ impl<S: RegionSpawner> WorldManager<S> {
                 self.request_seeds_of(n);
             }
             Volatile::RegionDown(n) => self.foreign_region_gone(n),
+            // Parked: its final halo came before this, and its mirrors end as they do for a
+            // neighbour on its own host (that final seed); it is just not running now.
+            Volatile::RegionParked(n) => {
+                self.foreign_running.remove(&n);
+            }
             Volatile::HaloRequest { from: to, of } => {
-                // Not running (any more): its `Stopped` reseeds the requester instead.
-                if self.owns(of) && self.runs(of) {
+                if !self.owns(of) {
+                    log::warn!("[server] host {from} asked this host for the halo of {of:?}, which it does not own");
+                } else if self.runs(of) {
                     self.send_to_region(of, RegionInput::HaloRequest(to));
+                } else if !self.regions.contains_key(&of) {
+                    // Parked (or never run here): from its last terrain, as a starting
+                    // region of this host would be seeded; none cached: dropped (the
+                    // requester seeds from the store or worldgen).
+                    let seed = self.terrain_cache.get(&of).and_then(|snap| crate::halo::halo_seed_from_snapshot(of, to, &snap));
+                    if let Some(update) = seed {
+                        let stamp = self.spawner.world_tick();
+                        self.halo_to_peer(to, Volatile::HaloUpdate { to, update, stamp });
+                    }
                 }
+                // Stopping: its `Stopped` re-seeds the requester from its final terrain.
             }
             Volatile::HaloUpdate { to, update, stamp } => {
                 if self.owns(to) && self.runs(to) {
@@ -391,8 +429,28 @@ impl<S: RegionSpawner> WorldManager<S> {
             }
             // As if one of this host's regions had sent it (no cut has seen it here).
             Reliable::Intent(msg) => {
-                let emitter = peer_intent_target(&msg);
-                self.route_intent(msg, emitter, false);
+                let target = peer_intent_target(&msg);
+                if self.owns(target) {
+                    self.route_intent(msg, target, false);
+                    return;
+                }
+                // Ownership disagrees: never forwarded (it could bounce between hosts).
+                // Task 14: bounce it to the owner instead.
+                log::error!("[server] host {from} sent {msg:?} for {target:?}, which this host does not own");
+                debug_assert!(false, "an inbound intent for {target:?}, which this host does not own");
+                match msg {
+                    // Refused back to where it came from: its items return.
+                    crate::IntentMsg::Intent(s) => {
+                        let reply = crate::IntentReply::Refused(s.intent, crate::IntentRefusal::OwnerNotRunning);
+                        let back = crate::SentReply { reply, hint: s.from, due: s.due + 1, hops: 0 };
+                        self.route_intent(crate::IntentMsg::Reply(back), target, false);
+                    }
+                    // A reply is held here, in the mailbox of its region (a cut carries it,
+                    // and a restore queues it to the owner): never lost.
+                    reply @ crate::IntentMsg::Reply(_) => {
+                        self.intent_mailbox.entry(target).or_default().push(Mail { msg: reply, in_source_view: false });
+                    }
+                }
             }
             other => {
                 log::error!("[server] peer host {from}: {} is not handled by this host yet: dropped", reliable_name(&other))
