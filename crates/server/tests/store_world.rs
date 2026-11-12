@@ -954,7 +954,7 @@ fn foreign_record_does_not_fence_a_healthy_host() {
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn split_start_refuses_anchor_behind_world_tick() {
-    use server::roles::{start_clock, Role, CLOCK_BEHIND_WORLD_TICK};
+    use server::roles::{clear_anchor_after_claim, start_clock, Role, CLOCK_BEHIND_WORLD_TICK};
     let Some(db) = pg_test_support::PgTestDb::create("mmo_srv_clock") else {
         eprintln!("{}", pg_test_support::SKIP_MSG);
         return;
@@ -969,9 +969,16 @@ fn split_start_refuses_anchor_behind_world_tick() {
         let err = start_clock(role, Some(&store), true, 1_000_000).unwrap_err();
         assert_eq!(err, CLOCK_BEHIND_WORLD_TICK);
     }
-    // A role `all` start forgets the anchor and keeps its own clock from the saved tick...
+    // A role `all` start keeps its own clock from the saved tick and leaves the anchor alone...
     let (own, phase) = start_clock(Role::All, Some(&store), true, 1_000_000).unwrap();
     assert_eq!((own.tick_at(0), phase), (1_000_000, 0));
+    assert_eq!(start_clock(Role::Host, Some(&store), true, 1_000_000).unwrap_err(), CLOCK_BEHIND_WORLD_TICK);
+    // ...only the clear after its claim forgets it; the other roles and SQLite never do.
+    for (role, postgres) in [(Role::Host, true), (Role::Coordinator, true), (Role::All, false)] {
+        clear_anchor_after_claim(role, Some(&store), postgres).unwrap();
+        assert_eq!(start_clock(Role::Host, Some(&store), true, 1_000_000).unwrap_err(), CLOCK_BEHIND_WORLD_TICK);
+    }
+    clear_anchor_after_claim(Role::All, Some(&store), true).unwrap();
     // ...so the next split start writes a fresh anchor at that tick.
     let (clock, _) = start_clock(Role::Host, Some(&store), true, 1_000_000).expect("the anchor was cleared");
     assert!(clock.tick_at(0) >= 1_000_000);

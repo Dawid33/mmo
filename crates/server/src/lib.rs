@@ -736,6 +736,8 @@ pub fn run() -> claims::ServerExit {
     let claims = store.clone().map(|store| {
         let extent = world_map.as_ref().map(game::WorldMap::extent);
         let claimed = claims::HostClaims::claim(store, ownership, extent, super_region_regions).unwrap_or_else(|e| fatal(&e));
+        // Only now, with every epoch bumped (any split host is fenced), may `all` forget the anchor.
+        roles::clear_anchor_after_claim(role, Some(claimed.store()), postgres).unwrap_or_else(|e| fatal(&e));
         info!(
             "[server] claimed {} super-regions as host {}",
             claimed.fence().epochs.len(),

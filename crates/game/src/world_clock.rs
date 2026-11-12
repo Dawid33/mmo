@@ -34,7 +34,8 @@ impl WorldClock {
 
 /// One wall instant and the world tick due then, stored in the world row so
 /// every process of a world numbers ticks the same way (R3: hosts are separate
-/// processes). Unix ms, so it means the same thing in every process.
+/// processes). Unix ms, so it means the same thing in every process — which needs
+/// hosts on different machines to have synchronised wall clocks (NTP): skew becomes tick skew.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ClockAnchor {
     pub unix_ms: u64,

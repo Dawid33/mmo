@@ -109,8 +109,8 @@ pub fn unix_ms_now() -> u64 {
 
 /// The world clock of a process (R3): split roles agree on one wall-anchored clock
 /// stored in the world row (first writer wins), so every host and the coordinator
-/// number ticks alike; `all` keeps its own clock from the saved tick (and, on
-/// Postgres, forgets the anchor so a later split start writes a fresh one). Returns the
+/// number ticks alike; `all` keeps its own clock from the saved tick (it clears the
+/// anchor separately, after its claim: [`clear_anchor_after_claim`]). Returns the
 /// clock and the phase (ms) to back-date the base instant by.
 pub fn start_clock(
     role: Role,
@@ -119,12 +119,7 @@ pub fn start_clock(
     world_tick: game::Tick,
 ) -> Result<(game::WorldClock, u64), String> {
     match (role, store) {
-        (Role::All, store) => {
-            if let (Some(store), true) = (store, postgres) {
-                store.clear_clock_anchor().map_err(|e| format!("clearing the world clock anchor: {e}"))?;
-            }
-            Ok((game::WorldClock::starting_at(0, world_tick), 0))
-        }
+        (Role::All, _) => Ok((game::WorldClock::starting_at(0, world_tick), 0)),
         (_, Some(store)) => {
             let now = unix_ms_now();
             let anchor = store
@@ -134,6 +129,22 @@ pub fn start_clock(
         }
         (_, None) => Err(SPLIT_ROLES_NEED_POSTGRES.to_string()),
     }
+}
+
+/// Role `all` on Postgres forgets the world's clock anchor so a later split start writes a
+/// fresh one. Call it only AFTER the super-region claim succeeded: an all-in-one claim bumps
+/// every epoch, so any split host still running is fenced and exits; clearing earlier (or
+/// unfenced) would let the next host anchor a different phase under live hosts. Other
+/// roles and SQLite worlds: nothing.
+pub fn clear_anchor_after_claim(
+    role: Role,
+    store: Option<&world_store::StoreHandle>,
+    postgres: bool,
+) -> Result<(), String> {
+    if let (Role::All, Some(store), true) = (role, store, postgres) {
+        store.clear_clock_anchor().map_err(|e| format!("clearing the world clock anchor: {e}"))?;
+    }
+    Ok(())
 }
 
 /// The base instant of a clock started with `phase_ms` (see [`start_clock`]): now, moved
