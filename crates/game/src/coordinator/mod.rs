@@ -10,6 +10,12 @@
 //! committed. The outgoing stream keeps its order: once a gated message waits, everything
 //! after it waits too, so a host sees the coordinator's messages in the order they were
 //! decided (a later `SpawnPeople` never overtakes an earlier directive for that region).
+//!
+//! **Many hosts:** every outgoing message carries its [`Target`]: a region's messages go to
+//! the host that announced the region (`RegionStarted`, its `Attach`, a delivered
+//! `PersonCrossed`), a reply or claim answer to the host that asked, the world's view to
+//! every host. Which host runs which region (`region_host`) and where each player is
+//! online (`online_on`) are rebuilt by the hosts' `Attach`es, never saved.
 
 mod link;
 mod msg;
@@ -19,7 +25,7 @@ pub use link::*;
 pub use msg::*;
 pub use state::*;
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use crate::history::persist::HistoryLoadError;
 use crate::history::{
@@ -56,9 +62,18 @@ pub struct Coordinator {
     /// `memo`'s ids, oldest first (eviction order, and the saved order).
     memo_order: VecDeque<RequestId>,
     /// Waiting for a save: the first gated message and everything after it, in order.
-    gated: VecDeque<CoordMsg>,
+    gated: VecDeque<(Target, CoordMsg)>,
     /// Free to leave, in order.
-    out: Vec<CoordMsg>,
+    out: Vec<(Target, CoordMsg)>,
+    /// Which host runs each region, as announced (`RegionStarted`, `Attach`, a delivered
+    /// `PersonCrossed`); a park forgets it. Rebuilt by every `Attach`, never saved.
+    region_host: BTreeMap<RegionCoords, u32>,
+    /// The host each online player is online on (`PlayerOnline`, an `Attach`'s online
+    /// list, the host that was granted its claim). Rebuilt by every `Attach`, never saved.
+    online_on: BTreeMap<PlayerId, u32>,
+    /// The inline links sharing this core ([`InlineWorldLink::shared`]): each host's
+    /// messages not read by its link yet.
+    inline_boxes: BTreeMap<u32, VecDeque<CoordMsg>>,
     /// `Some(n)`: a save was taken ([`Self::take_save`]) holding the state behind the
     /// first `n` messages of `gated`; [`Self::saved`] releases them.
     save_in_flight: Option<usize>,
@@ -94,6 +109,9 @@ impl Coordinator {
             memo_order: VecDeque::new(),
             gated: VecDeque::new(),
             out: Vec::new(),
+            region_host: BTreeMap::new(),
+            online_on: BTreeMap::new(),
+            inline_boxes: BTreeMap::new(),
             save_in_flight: None,
             dirty_since_save: false,
             force_save: false,
@@ -101,7 +119,7 @@ impl Coordinator {
             clock_ms: now_ms,
             calendar_anchor,
         };
-        c.push_view();
+        c.push_view(Target::Every);
         c
     }
 
@@ -140,26 +158,57 @@ impl Coordinator {
         self.player_claims.get(&player).copied()
     }
 
+    /// The host `player` is online on, as the coordinator has it.
+    pub fn online_on(&self, player: PlayerId) -> Option<u32> {
+        self.online_on.get(&player).copied()
+    }
+
+    /// The host that runs `rc`, as announced to the coordinator.
+    pub fn region_host(&self, rc: RegionCoords) -> Option<u32> {
+        self.region_host.get(&rc).copied()
+    }
+
     /// The calendar at `now_ms`: the anchor's tick plus one per `TICK_RATE` ms since.
     pub fn calendar_now(&self, now_ms: u64) -> CalendarTick {
         let (ms, tick) = self.calendar_anchor;
         CalendarTick(tick.0 + now_ms.saturating_sub(ms) / crate::TICK_RATE)
     }
 
-    /// Apply one host message.
-    pub fn handle(&mut self, msg: HostMsg, now_ms: u64) {
+    /// Apply one message of host `host` (the ordinal its link is for).
+    pub fn handle(&mut self, host: u32, msg: HostMsg, now_ms: u64) {
         self.clock_ms = self.clock_ms.max(now_ms);
         self.dirty_since_save = true;
         match msg {
-            HostMsg::Attach { host, epoch, running, online } => self.attach(host, epoch, running, online),
+            HostMsg::Attach { host: named, epoch, running, online, generation: _ } => {
+                if named != host {
+                    log::warn!("coordinator: host {host}'s Attach names host {named}; taken as host {host}'s");
+                }
+                self.attach(host, epoch, running, online)
+            }
             HostMsg::RegionStarted { rc, incarnation } => {
+                if let Some(other) = self.region_host.insert(rc, host).filter(|h| *h != host) {
+                    log::warn!("coordinator: {rc:?} started on host {host}; host {other} had announced it");
+                }
                 self.incarnations.insert(rc, incarnation);
                 let events = self.history.region_started(rc);
-                self.push(CoordMsg::SpawnPeople { rc, incarnation, events });
+                self.push(Target::Host(host), CoordMsg::SpawnPeople { rc, incarnation, events });
             }
-            HostMsg::RegionStopping { rc } => self.history.region_stopping(rc),
-            HostMsg::RegionParked { rc, people } => self.history.region_parked(rc, people),
+            HostMsg::RegionStopping { rc } => {
+                if !self.runs_elsewhere(rc, host) {
+                    self.history.region_stopping(rc);
+                }
+            }
+            HostMsg::RegionParked { rc, people } => {
+                if !self.runs_elsewhere(rc, host) {
+                    self.region_host.remove(&rc);
+                    self.history.region_parked(rc, people);
+                }
+            }
             HostMsg::PersonCrossed { person, to, delivered } => {
+                if delivered {
+                    // The host put the body in `to`, which it runs.
+                    self.region_host.entry(to).or_insert(host);
+                }
                 let decided = self.history.person_crossed(person, to);
                 if decided != delivered {
                     log::error!(
@@ -188,13 +237,32 @@ impl Coordinator {
                     self.history.defer_directive(directive);
                 }
             }
-            HostMsg::Request { id, player, req } => self.request(id, player, req),
-            HostMsg::Settle { id, req } => self.settle(id, req),
-            HostMsg::PlayerOnline(p) => self.player_online(p),
-            HostMsg::PlayerOffline { player } => self.set_online(player, false),
+            HostMsg::Request { id, player, req } => self.request(host, id, player, req),
+            HostMsg::Settle { id, req } => self.settle(host, id, req),
+            HostMsg::PlayerOnline(p) => self.player_online(host, p),
+            HostMsg::PlayerOffline { player } => match self.online_on.get(&player).copied() {
+                Some(h) if h == host => {
+                    self.online_on.remove(&player);
+                    self.set_online(player, false);
+                }
+                // A hand-off's `PlayerOnline` from the new host may arrive first.
+                on => log::debug!("coordinator: {player:?} offline on host {host} ignored (online on {on:?})"),
+            },
             HostMsg::ReleaseClaim { player } => self.release_claim(player),
         }
         self.push_directives();
+    }
+
+    /// A lifecycle message of `host` about `rc`, which another host announced since: stale,
+    /// ignored (the other host's own messages run the region in the history).
+    fn runs_elsewhere(&self, rc: RegionCoords, host: u32) -> bool {
+        match self.region_host.get(&rc) {
+            Some(&other) if other != host => {
+                log::warn!("coordinator: host {host}'s message about {rc:?} ignored: host {other} runs it");
+                true
+            }
+            _ => false,
+        }
     }
 
     /// Move the calendar to `now_ms`: the history advances, its directives go to the
@@ -211,13 +279,37 @@ impl Coordinator {
         self.push_directives();
         self.broadcast_daily(to);
         for (region, line) in self.history.take_notices() {
-            self.push(CoordMsg::Notice { region, line });
+            let to = self.region_host.get(&region).map_or(Target::Every, |h| Target::Host(*h));
+            self.push(to, CoordMsg::Notice { region, line });
         }
     }
 
-    /// The messages free to leave now, in order.
-    pub fn take_out(&mut self) -> Vec<CoordMsg> {
+    /// The messages free to leave now, in order, each with the host(s) it is for.
+    pub fn take_out(&mut self) -> Vec<(Target, CoordMsg)> {
         std::mem::take(&mut self.out)
+    }
+
+    /// For the inline links sharing this core: start a mailbox for `host`.
+    fn register_inline(&mut self, host: u32) {
+        self.inline_boxes.entry(host).or_default();
+    }
+
+    /// For the inline links sharing this core: what may leave goes to the mailboxes of
+    /// the hosts it is for (a message for a host with no link is lost, as on a real link).
+    fn route_inline(&mut self) {
+        for (to, msg) in self.take_out() {
+            match to {
+                Target::Host(h) => match self.inline_boxes.get_mut(&h) {
+                    Some(b) => b.push_back(msg),
+                    None => log::debug!("coordinator: no inline link for host {h}; {msg:?} lost"),
+                },
+                Target::Every => {
+                    for b in self.inline_boxes.values_mut() {
+                        b.push_back(msg.clone());
+                    }
+                }
+            }
+        }
     }
 
     /// Ask for a save at the next [`Self::take_save`] (an orderly exit).
@@ -300,17 +392,17 @@ impl Coordinator {
         for _ in 0..n.min(self.gated.len()) {
             self.out.push(self.gated.pop_front().expect("counted"));
         }
-        while self.gated.front().is_some_and(|m| !m.is_gated()) {
+        while self.gated.front().is_some_and(|(_, m)| !m.is_gated()) {
             self.out.push(self.gated.pop_front().expect("checked"));
         }
     }
 
-    /// Queue an outgoing message: behind any waiting one, or gated itself.
-    fn push(&mut self, msg: CoordMsg) {
+    /// Queue an outgoing message for `to`: behind any waiting one, or gated itself.
+    fn push(&mut self, to: Target, msg: CoordMsg) {
         if !self.gated.is_empty() || msg.is_gated() {
-            self.gated.push_back(msg);
+            self.gated.push_back((to, msg));
         } else {
-            self.out.push(msg);
+            self.out.push((to, msg));
         }
     }
 
@@ -320,17 +412,26 @@ impl Coordinator {
         }
     }
 
-    /// Queue a directive stamped with its region's latest started incarnation.
+    /// Queue a directive for the host that runs its region, stamped with the region's
+    /// latest started incarnation. A region no host has announced cannot take it: it is
+    /// treated as bounced (held for the region's next start), never broadcast.
     fn push_directive(&mut self, directive: Directive) {
+        let Some(&host) = self.region_host.get(&directive.region) else {
+            log::debug!("coordinator: no host runs {:?}; directive deferred: {:?}", directive.region, directive.event);
+            self.history.defer_directive(directive);
+            return;
+        };
         let incarnation = self.incarnations.get(&directive.region).copied().unwrap_or(0);
-        self.push(CoordMsg::Directive { directive, incarnation });
+        self.push(Target::Host(host), CoordMsg::Directive { directive, incarnation });
     }
 
-    /// Forget every directive not yet handed out (waiting or free to leave): an `Attach`
-    /// re-decides every region from its bodies, so they are stale. Those already handed
-    /// to the link reach the host ahead of [`CoordMsg::Attached`], and it drops them.
-    fn drop_unsent_directives(&mut self) {
-        let is_directive = |m: &CoordMsg| matches!(m, CoordMsg::Directive { .. });
+    /// Forget every directive for `host` not yet handed out (waiting or free to leave):
+    /// its `Attach` re-decides every region it runs from its bodies, so they are stale.
+    /// Those already handed to the link reach the host ahead of [`CoordMsg::Attached`],
+    /// and it drops them. Other hosts' directives stand.
+    fn drop_unsent_directives(&mut self, host: u32) {
+        let is_directive =
+            |(to, m): &(Target, CoordMsg)| *to == Target::Host(host) && matches!(m, CoordMsg::Directive { .. });
         let before = self.gated.len() + self.out.len();
         if let Some(n) = self.save_in_flight.as_mut() {
             let covered_dropped = self.gated.iter().take(*n).filter(|m| is_directive(m)).count();
@@ -344,13 +445,13 @@ impl Coordinator {
         }
         let dropped = before - self.gated.len() - self.out.len();
         if dropped > 0 {
-            log::info!("coordinator: {dropped} unsent directives superseded by an attach");
+            log::info!("coordinator: {dropped} unsent directives for host {host} superseded by its attach");
         }
     }
 
-    fn push_view(&mut self) {
+    fn push_view(&mut self, to: Target) {
         let calendar = self.calendar_now(self.clock_ms);
-        self.push(CoordMsg::View {
+        self.push(to, CoordMsg::View {
             civs: self.history.civ_markers(),
             sites: self.history.site_markers(),
             calendar,
@@ -364,18 +465,19 @@ impl Coordinator {
             return;
         }
         self.calendar_day = day;
-        self.push(CoordMsg::Calendar(now));
+        self.push(Target::Every, CoordMsg::Calendar(now));
         let key = sites_key(&self.history);
         if key != self.sites_key {
             self.sites_key = key;
-            self.push(CoordMsg::Sites(self.history.site_markers()));
+            self.push(Target::Every, CoordMsg::Sites(self.history.site_markers()));
         }
     }
 
     /// A host (re)attached: it is told so first ([`CoordMsg::Attached`], ahead of every
-    /// directive decided from here on), its running regions are re-embodied as they stand
-    /// (regions the history had live but the host does not run park empty), its online
-    /// players are the online ones, and it gets the view.
+    /// directive for it decided from here on), its running regions are re-embodied as they
+    /// stand (regions the history had live on this host — or on no known host — that it
+    /// does not run park empty; another host's stand), its online players are the ones
+    /// online on it, and it gets the view.
     fn attach(
         &mut self,
         host: u32,
@@ -388,16 +490,21 @@ impl Coordinator {
             running.len(),
             online.len()
         );
-        self.drop_unsent_directives();
-        self.push(CoordMsg::Attached { epoch });
-        let listed: std::collections::BTreeSet<RegionCoords> = running.iter().map(|r| r.rc).collect();
+        self.drop_unsent_directives(host);
+        self.push(Target::Host(host), CoordMsg::Attached { epoch });
+        let listed: BTreeSet<RegionCoords> = running.iter().map(|r| r.rc).collect();
         for rc in self.history.live_regions() {
-            if !listed.contains(&rc) {
+            let runs_here = self.region_host.get(&rc).is_none_or(|h| *h == host);
+            if runs_here && !listed.contains(&rc) {
                 log::warn!("coordinator: {rc:?} was live but host {host} does not run it; parking it empty");
                 self.history.region_parked(rc, Vec::new());
             }
         }
+        self.region_host.retain(|_, h| *h != host);
         for r in &running {
+            if let Some(other) = self.region_host.insert(r.rc, host) {
+                log::warn!("coordinator: host {host} attached running {:?}, which host {other} had announced", r.rc);
+            }
             self.incarnations.insert(r.rc, r.incarnation);
         }
         let regions: Vec<(RegionCoords, Vec<(crate::history::PersonId, [f32; 3])>)> =
@@ -405,27 +512,30 @@ impl Coordinator {
         for d in self.history.reattach_regions(&regions) {
             self.push_directive(d);
         }
-        // TODO(R3): one host per world. With several hosts an `Attach` must mark offline
-        // only that host's players, not every claimant.
-        for (_, on) in self.claims.values_mut() {
-            *on = false;
+        // The host's players were online on it: its list says who still is.
+        let gone: Vec<PlayerId> = self.online_on.iter().filter(|(_, h)| **h == host).map(|(p, _)| *p).collect();
+        for p in gone {
+            self.online_on.remove(&p);
+            self.set_online(p, false);
         }
         for p in online {
-            self.player_online(p);
+            self.player_online(host, p);
         }
-        self.push_view();
+        self.push_view(Target::Host(host));
     }
 
-    /// `player` is online, as its host reports it. With a claim-changing request of the
-    /// player unsettled on the host (`claim_pending`) the coordinator's claim stands (that
-    /// request's answer, or the host's `ReleaseClaim` after it, settles it); without one
-    /// the host's claim is the truth: the coordinator's own may be a save behind (a crash
-    /// lost a grant) or ahead (a crash lost a release). A claim the host reports and the
-    /// coordinator lacks is taken unless another *online* player holds its fortress (an
-    /// offline claimant loses it, as to a return); then the host is told to drop it
-    /// ([`CoordMsg::FortressRefused`]) — one fortress never has two players.
-    fn player_online(&mut self, report: OnlinePlayer) {
+    /// `player` is online on `host`, as that host reports it. With a claim-changing
+    /// request of the player unsettled on the host (`claim_pending`) the coordinator's
+    /// claim stands (that request's answer, or the host's `ReleaseClaim` after it, settles
+    /// it); without one the host's claim is the truth: the coordinator's own may be a save
+    /// behind (a crash lost a grant) or ahead (a crash lost a release). A claim the host
+    /// reports and the coordinator lacks is taken unless another *online* player holds its
+    /// fortress (an offline claimant loses it, as to a return) — one fortress never has two
+    /// players. Whenever the claim the coordinator ends with differs from the report, the
+    /// host is told it ([`CoordMsg::ClaimIs`]): the coordinator's answer is final.
+    fn player_online(&mut self, host: u32, report: OnlinePlayer) {
         let OnlinePlayer { player, claim, claim_pending } = report;
+        self.online_on.insert(player, host);
         let mine = self.player_claims.get(&player).copied();
         match (mine, claim) {
             (Some(mine), Some(theirs)) if mine == theirs => {}
@@ -443,6 +553,11 @@ impl Coordinator {
             (None, None) => {}
         }
         self.set_online(player, true);
+        let now = self.player_claims.get(&player).copied();
+        if now != claim {
+            log::info!("coordinator: host {host} reported {player:?} with {claim:?}; the claim is {now:?}");
+            self.push(Target::Host(host), CoordMsg::ClaimIs { player, claim: now });
+        }
     }
 
     /// Take the claim the host reports for `player` (who holds none here).
@@ -451,7 +566,6 @@ impl Coordinator {
             Claim::Fortress(site) => match self.claims.get(&site).copied() {
                 Some((other, true)) if other != player => {
                     log::info!("coordinator: {player:?}'s fortress {site:?} is {other:?}'s now; the host drops it");
-                    self.push(CoordMsg::FortressRefused { player, site });
                 }
                 claimed => {
                     if let Some((other, _)) = claimed.filter(|(o, _)| *o != player) {
@@ -493,7 +607,7 @@ impl Coordinator {
     /// Settle a timed-out state-changing request ([`HostMsg::Settle`]): its memoised
     /// answer if it was applied, else a `WorldUnavailable` refusal, memoised without
     /// executing it (a later copy of the request gets that refusal too).
-    fn settle(&mut self, id: RequestId, req: WorldRequest) {
+    fn settle(&mut self, host: u32, id: RequestId, req: WorldRequest) {
         let reply = match self.memo.get(&id) {
             Some(reply) => reply.clone(),
             None => {
@@ -512,14 +626,14 @@ impl Coordinator {
                 refusal
             }
         };
-        self.push(CoordMsg::Reply { id, reply });
+        self.push(Target::Host(host), CoordMsg::Reply { id, reply });
     }
 
-    fn request(&mut self, id: RequestId, player: PlayerId, req: WorldRequest) {
+    fn request(&mut self, host: u32, id: RequestId, player: PlayerId, req: WorldRequest) {
         if let Some(reply) = self.memo.get(&id) {
             log::debug!("coordinator: {id:?} repeated; answering from the memo");
             let reply = reply.clone();
-            return self.push(CoordMsg::Reply { id, reply });
+            return self.push(Target::Host(host), CoordMsg::Reply { id, reply });
         }
         let memoise = req.changes_state();
         let reply = match req {
@@ -534,11 +648,16 @@ impl Coordinator {
             self.remember(id, reply.clone());
         }
         let granted = reply.grants_claim();
-        self.push(CoordMsg::Reply { id, reply });
         if granted {
-            // The host's view of the sites follows at once (a founded site, its claim);
-            // clients still get them at the day's turn.
-            self.push(CoordMsg::SiteMarkers(self.history.site_markers()));
+            // The player plays it on the host that asked.
+            self.online_on.insert(player, host);
+        }
+        self.push(Target::Host(host), CoordMsg::Reply { id, reply });
+        if granted {
+            // Every host's view of the sites follows at once (a founded site, its claim:
+            // the player may play it on another host); clients still get them at the
+            // day's turn.
+            self.push(Target::Every, CoordMsg::SiteMarkers(self.history.site_markers()));
         }
     }
 

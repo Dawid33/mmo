@@ -73,6 +73,7 @@ pub(crate) enum Request {
     RegisterHost(crate::HostRow, Fence, Reply<crate::HostBoot>),
     Hosts(Reply<Vec<crate::HostRow>>),
     WorldGeneration(Reply<u64>),
+    OwnerClaimEpoch(u32, Reply<Option<u64>>),
     /// Finish the queued commits, then stop.
     Shutdown,
 }
@@ -242,6 +243,9 @@ async fn serve(pool: Pool, guard: LockGuard, s: u32, read_only: bool, mut rx: mp
             }),
             Request::Hosts(r) => tokio::spawn(async move { r.send(on_pool!(&pool, hosts())) }),
             Request::WorldGeneration(r) => tokio::spawn(async move { r.send(on_pool!(&pool, world_generation())) }),
+            Request::OwnerClaimEpoch(owner, r) => {
+                tokio::spawn(async move { r.send(on_pool!(&pool, owner_claim_epoch(owner))) })
+            }
             Request::TerrainKind(r) => tokio::spawn(async move { r.send(on_pool!(&pool, terrain_kind())) }),
         };
         tasks.push(task);

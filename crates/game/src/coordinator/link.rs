@@ -2,6 +2,7 @@
 //! [`Coordinator`] in the host's own thread (single-player on wasm, tests).
 
 use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
 
 use super::{CoordMsg, Coordinator, HostMsg};
 
@@ -41,6 +42,16 @@ fn mix(seed: u64, i: u64) -> u64 {
     z ^ (z >> 31)
 }
 
+/// The coordinator behind an inline link: its own, or one core several hosts' links share
+/// ([`InlineWorldLink::shared`]).
+enum Core {
+    Owned(Coordinator),
+    Shared(Arc<Mutex<Coordinator>>),
+}
+
+/// Salt of the roll behind a shared link's input delay (the output delay rolls unsalted).
+const INPUT_DELAY_SALT: u64 = 0x5EED_1A7E;
+
 /// A [`Coordinator`] driven in the host's thread. [`WorldLink::pump`] hands it the host's
 /// messages, runs its `maintain`, commits its state at once (no store: nothing to be
 /// durable to, see [`Coordinator::commit_unstored`]) and releases its outputs. With no
@@ -48,9 +59,20 @@ fn mix(seed: u64, i: u64) -> u64 {
 /// synchronous ordering; with a delay ([`InlineWorldLink::with_delay`],
 /// `InlineSchedule::coordinator_delay`) each one becomes readable 0..=`max_steps` pumps
 /// later, chosen by a stateless roll of (seed, its index), order kept.
+///
+/// A link of its own ([`InlineWorldLink::new`]) serves one host: it reads every output,
+/// whatever host it names, and hands the core the host's messages as those of the host
+/// its `Attach` names (0 before one). A shared link ([`InlineWorldLink::shared`]) is one
+/// of several hosts' links to one core (the multi-host test rig): it hands the core its
+/// host's messages as that host's — each 0..=`max_steps` of its own pumps late under a
+/// delay, so different hosts' messages interleave differently per seed — and reads only
+/// the outputs for its host (and those for every host).
 pub struct InlineWorldLink {
-    coord: Coordinator,
-    in_q: VecDeque<HostMsg>,
+    core: Core,
+    /// The host the core is told the messages are from.
+    host: u32,
+    /// Messages for the core, with the pump step from which they may be handled.
+    in_q: VecDeque<(u64, HostMsg)>,
     /// Outputs with the pump step from which they may be read.
     out_q: VecDeque<(u64, CoordMsg)>,
     /// `(seed, max_steps)`.
@@ -59,16 +81,41 @@ pub struct InlineWorldLink {
     step: u64,
     /// Outputs released so far (the roll's index).
     released: u64,
+    /// Messages sent so far (a shared link's input roll index).
+    sent: u64,
     /// Test hook ([`InlineWorldLink::set_up`]): `false` simulates a link that dropped.
     up: bool,
 }
 
 impl InlineWorldLink {
     pub fn new(coord: Coordinator) -> Self {
-        InlineWorldLink { coord, in_q: VecDeque::new(), out_q: VecDeque::new(), delay: None, step: 0, released: 0, up: true }
+        Self::over(Core::Owned(coord), 0)
     }
 
-    /// Each output readable 0..=`max_steps` pumps after the one that made it.
+    /// Host `host`'s link to `core`, which other hosts' links share: each host reads only
+    /// what the core sends it (or every host). Make every host's link before any of them
+    /// is pumped: a host whose link does not exist yet misses what is sent to every host.
+    pub fn shared(core: Arc<Mutex<Coordinator>>, host: u32) -> Self {
+        lock(&core).register_inline(host);
+        Self::over(Core::Shared(core), host)
+    }
+
+    fn over(core: Core, host: u32) -> Self {
+        InlineWorldLink {
+            core,
+            host,
+            in_q: VecDeque::new(),
+            out_q: VecDeque::new(),
+            delay: None,
+            step: 0,
+            released: 0,
+            sent: 0,
+            up: true,
+        }
+    }
+
+    /// Each output readable 0..=`max_steps` pumps after the one that made it (and, on a
+    /// shared link, each message handled 0..=`max_steps` pumps after it was sent).
     pub fn with_delay(mut self, seed: u64, max_steps: u32) -> Self {
         self.delay = (max_steps > 0).then_some((seed, max_steps));
         self
@@ -82,12 +129,33 @@ impl InlineWorldLink {
         }
     }
 
+    /// The link's own coordinator. Panics for a shared link: lock [`Self::shared_core`].
     pub fn coordinator(&self) -> &Coordinator {
-        &self.coord
+        match &self.core {
+            Core::Owned(c) => c,
+            Core::Shared(_) => panic!("a shared inline link: lock its shared_core()"),
+        }
     }
 
+    /// [`Self::coordinator`], to change. Panics for a shared link.
     pub fn coordinator_mut(&mut self) -> &mut Coordinator {
-        &mut self.coord
+        match &mut self.core {
+            Core::Owned(c) => c,
+            Core::Shared(_) => panic!("a shared inline link: lock its shared_core()"),
+        }
+    }
+
+    /// The core a shared link shares; `None` for a link of its own.
+    pub fn shared_core(&self) -> Option<Arc<Mutex<Coordinator>>> {
+        match &self.core {
+            Core::Owned(_) => None,
+            Core::Shared(c) => Some(c.clone()),
+        }
+    }
+
+    /// Messages sent and not handed to the coordinator yet (a shared link's delay).
+    pub fn pending(&self) -> impl Iterator<Item = &HostMsg> {
+        self.in_q.iter().map(|(_, m)| m)
     }
 
     /// Outputs made but not read yet (delayed or not drained).
@@ -112,10 +180,21 @@ impl InlineWorldLink {
     }
 }
 
+fn lock(core: &Mutex<Coordinator>) -> std::sync::MutexGuard<'_, Coordinator> {
+    core.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 impl WorldLink for InlineWorldLink {
     fn send(&mut self, msg: HostMsg) {
         if self.up {
-            self.in_q.push_back(msg);
+            // A shared link's message waits 0..=max pumps (order kept); otherwise none.
+            let lag = match (&self.core, self.delay) {
+                (Core::Shared(_), Some((seed, max))) => mix(seed ^ INPUT_DELAY_SALT, self.sent) % (u64::from(max) + 1),
+                _ => 0,
+            };
+            self.sent += 1;
+            let floor = self.in_q.back().map_or(0, |(due, _)| *due);
+            self.in_q.push_back((floor.max(self.step + 1 + lag), msg));
         } else {
             log::debug!("inline world link down: {msg:?} lost");
         }
@@ -138,14 +217,34 @@ impl WorldLink for InlineWorldLink {
 
     fn pump(&mut self, now_ms: u64) {
         self.step += 1;
-        while let Some(msg) = self.in_q.pop_front() {
-            self.coord.handle(msg, now_ms);
-        }
-        self.coord.maintain(now_ms);
-        self.coord.commit_unstored();
+        let step = self.step;
+        let outs: Vec<CoordMsg> = match &mut self.core {
+            Core::Owned(coord) => {
+                while let Some((_, msg)) = self.in_q.pop_front() {
+                    if let HostMsg::Attach { host, .. } = &msg {
+                        self.host = *host;
+                    }
+                    coord.handle(self.host, msg, now_ms);
+                }
+                coord.maintain(now_ms);
+                coord.commit_unstored();
+                coord.take_out().into_iter().map(|(_, m)| m).collect()
+            }
+            Core::Shared(core) => {
+                let mut coord = lock(core);
+                while self.in_q.front().is_some_and(|(due, _)| *due <= step) {
+                    let (_, msg) = self.in_q.pop_front().expect("checked");
+                    coord.handle(self.host, msg, now_ms);
+                }
+                coord.maintain(now_ms);
+                coord.commit_unstored();
+                coord.route_inline();
+                coord.inline_boxes.get_mut(&self.host).map(|b| b.drain(..).collect()).unwrap_or_default()
+            }
+        };
         // Never before the output ahead of it: the order is kept.
         let mut floor = self.out_q.back().map_or(self.step, |(due, _)| (*due).max(self.step));
-        for msg in self.coord.take_out() {
+        for msg in outs {
             let lag = self.delay.map_or(0, |(seed, max)| mix(seed, self.released) % (u64::from(max) + 1));
             self.released += 1;
             floor = floor.max(self.step + lag);

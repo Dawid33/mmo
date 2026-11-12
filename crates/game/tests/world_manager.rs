@@ -1409,3 +1409,85 @@ fn observer_session_cannot_move_a_player() {
     assert_eq!(h.manager.session_kind(3), Some(game::SessionKind::Observer));
     assert!(!h.manager.running_regions().contains(&target), "nothing started for it");
 }
+
+/// The coordinator's `ClaimIs` is final on the host: (1) a fortress the host restored from
+/// a record (its early guess: no player HERE holds it) that another host's online player
+/// plays is dropped — the client told `Fortress(None)`; (2) a fortress the coordinator
+/// granted while the player's own embark was unsettled is set — the host ends with exactly
+/// the coordinator's claim, and the unsettled embark is refused.
+#[test]
+fn claim_is_sets_the_host_claim() {
+    use crate::history_handover::{land_map, start, years_before};
+    use game::coordinator::{Claim, Coordinator, HostMsg, InlineWorldLink, OnlinePlayer, RequestId, WorldRequest};
+    use game::history::{History, Race, Sex, SiteId, SocietyGrid};
+    crate::common::install_real_block_props();
+    let map = land_map(16, 3);
+    let world = |taken_by_other: bool| {
+        let s = start();
+        let mut hist = History::new(5, s, SocietyGrid::from_world_map(&map));
+        let civ = hist.add_civ(Race::Dwarf);
+        let people: Vec<_> = (0..4).map(|i| hist.add_founder(if i % 2 == 0 { Sex::Female } else { Sex::Male }, years_before(s, 20))).collect();
+        hist.found_site(civ, RegionCoords::new(8, 0), &people, None, false);
+        let mut core = Coordinator::new(hist, 0);
+        if taken_by_other {
+            // Player 50, online on host 9, plays site 0.
+            let other = OnlinePlayer { player: PlayerId(50), claim: Some(Claim::Fortress(SiteId(0))), claim_pending: false };
+            core.handle(9, HostMsg::PlayerOnline(other), 0);
+        }
+        let mut h = floored_harness();
+        h.manager.set_world_map(map.clone());
+        h.manager.set_world_link(Box::new(InlineWorldLink::new(core)), 1, 0);
+        (h, civ, people)
+    };
+    let a = PlayerId(1);
+    let fortress = |p: &(Option<ClientId>, ServerPacket)| matches!(p, (Some(0), ServerPacket::Fortress(_)));
+
+    // (1) Dropped.
+    let (mut h, _, _) = world(true);
+    let record = PlayerRecord {
+        client: game::Client::default(),
+        pose: game::Pose::from_translation(body_on_tile([3, STAND, 3])),
+        region: SPAWN_REGION,
+        fortress: Some(SiteId(0)),
+        adventure: None,
+    };
+    h.event(session(0, 1, Some(record)), 0);
+    for t in 1..5 {
+        h.manager.maintain(t * 10);
+        h.settle(t * 10);
+    }
+    assert_eq!(h.manager.client_claim(0), None, "the fortress another host's player plays is dropped");
+    let told = h.drain_packets();
+    assert!(told.iter().any(|p| matches!(p, (Some(0), ServerPacket::Fortress(None)))), "{told:?}");
+    let core = h.manager.world_link().and_then(|l| l.as_inline()).unwrap().coordinator();
+    assert_eq!(core.claim_of(a), None);
+
+    // (2) Set: the coordinator granted A a fortress (another request of A's, say from before
+    // a crash) while A's own embark waits on a down link.
+    let (mut h, civ, people) = world(false);
+    h.event(session(0, 1, None), 0);
+    h.manager.world_link_mut().and_then(|l| l.as_inline_mut()).unwrap().set_up(false);
+    h.manager.maintain(10);
+    let req = game::EmbarkRequest { civ, people: people[2..4].to_vec(), region: RegionCoords::new(14, 0) };
+    h.event(ServerEvent::ClientPacket(ClientPacket::Embark(req), 0), 10);
+    let link = h.manager.world_link_mut().and_then(|l| l.as_inline_mut()).unwrap();
+    let grant = game::EmbarkRequest { civ, people: people[0..2].to_vec(), region: RegionCoords::new(2, 0) };
+    let id = RequestId { host: 0, boot: 99, seq: 0 };
+    link.coordinator_mut().handle(0, HostMsg::Request { id, player: a, req: WorldRequest::Embark(grant) }, 10);
+    let Some(Claim::Fortress(site)) = link.coordinator().claim_of(a) else { panic!("the coordinator granted A a fortress") };
+    link.set_up(true);
+    h.drain_packets();
+    for t in 2..8 {
+        h.manager.maintain(t * 10);
+        h.settle(t * 10);
+    }
+    assert_eq!(h.manager.client_claim(0), Some(Claim::Fortress(site)), "the host plays the coordinator's claim");
+    let core = h.manager.world_link().and_then(|l| l.as_inline()).unwrap().coordinator();
+    assert_eq!(core.claim_of(a), Some(Claim::Fortress(site)));
+    let told = h.drain_packets();
+    assert!(told.iter().any(fortress), "the client is told its fortress: {told:?}");
+    assert!(
+        told.iter().any(|p| matches!(p, (Some(0), ServerPacket::EmbarkResult(Err(game::history::EmbarkRefusal::AlreadyHasFortress))))),
+        "its own embark is refused: {told:?}"
+    );
+}

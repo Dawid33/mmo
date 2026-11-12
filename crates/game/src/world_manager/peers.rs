@@ -230,6 +230,11 @@ impl<S: RegionSpawner> WorldManager<S> {
         claim_of(self.fortress_of.get(&client).copied(), self.adventurer_of.get(&client).copied())
     }
 
+    /// The region of `site` as this host knows it (the coordinator's view and answers).
+    pub fn site_region(&self, site: SiteId) -> Option<RegionCoords> {
+        self.site_regions.get(&site).copied()
+    }
+
     /// The players this host handed to another, with that host.
     pub fn departed(&self) -> &BTreeMap<PlayerId, u32> {
         &self.departed
@@ -678,8 +683,8 @@ impl<S: RegionSpawner> WorldManager<S> {
         // Never a player: the `Departures` arm hands a player off (`hand_off_to_peer`) or
         // back to its source, and a person without a history back to its source.
         debug_assert!(bundle.client.is_none(), "a player crosses hosts by hand_off_to_peer");
-        // Task 10: a person with a history crossing hosts (the receiving host's
-        // `PersonCrossed`) has no seeded test yet — the rig gets a coordinator there.
+        // A person with a history: the receiving host reports the crossing
+        // (`PersonCrossed`), never this one (`peer_schedule::person_crosses_host_seam_*`).
         let owner = self.owner_of(target);
         log::debug!("[server] {:?} from {rc:?} into {target:?}: sent to host {owner}", bundle.id);
         // It is on another host now: nothing here routes to it.

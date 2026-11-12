@@ -215,6 +215,12 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.world.as_deref_mut()
     }
 
+    /// The world generation this host process runs (the store's, at its registration):
+    /// sent in every `Attach` (a coordinator refuses a lower one than the store's).
+    pub fn set_host_generation(&mut self, generation: u64) {
+        self.host_generation = generation;
+    }
+
     /// What the host did with coordinator messages it could not apply.
     pub fn world_link_counters(&self) -> WorldLinkCounters {
         self.world_counters
@@ -402,12 +408,16 @@ impl<S: RegionSpawner> WorldManager<S> {
             .iter()
             .map(|(c, p)| OnlinePlayer { player: *p, claim: self.claim_of_client(*c), claim_pending: self.claim_pending(*p) })
             .collect();
+        for p in &online {
+            self.claim_reported.insert(p.player, self.claim_changes.get(&p.player).copied().unwrap_or(0));
+        }
         // The `Attach` names who is online as things stand: a queued `PlayerOnline` /
         // `PlayerOffline` would only repeat an older report after it.
         self.outbox.retain(|m| !matches!(m, HostMsg::PlayerOnline(_) | HostMsg::PlayerOffline { .. }));
         log::info!("attach {epoch}: {} regions, {} online, {} queued", running.len(), online.len(), self.outbox.len());
         let host = self.world_host();
-        self.link_send(HostMsg::Attach { host, epoch, running, online });
+        let generation = self.host_generation;
+        self.link_send(HostMsg::Attach { host, epoch, running, online, generation });
         let queued: BTreeSet<RequestId> = self
             .outbox
             .iter()
@@ -484,6 +494,9 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// `Attach` supersedes it); while the `Attach` is gathered both wait (lifecycle held
     /// behind it).
     pub(super) fn world_send(&mut self, msg: HostMsg) {
+        if let HostMsg::ReleaseClaim { player } = &msg {
+            self.claim_changed(*player);
+        }
         let Some(link) = self.world.as_ref() else { return };
         if !link.is_up() && !matches!(self.world_attach, WorldAttach::Down) {
             log::warn!("world link down: lifecycle messages dropped, requests queued until it is back");
@@ -596,19 +609,47 @@ impl<S: RegionSpawner> WorldManager<S> {
             // as they stand then (a player embarking moves home after its region starts).
             CoordMsg::Notice { region, line } => self.world_notices.push((region, line)),
             CoordMsg::Reply { id, reply } => self.world_reply(id, reply, now_ms),
-            CoordMsg::FortressRefused { player, site } => {
-                let holders: Vec<ClientId> = self
-                    .player_of
-                    .iter()
-                    .filter(|(c, p)| **p == player && self.fortress_of.get(c) == Some(&site))
-                    .map(|(c, _)| *c)
-                    .collect();
-                for c in holders {
-                    log::info!("client {c}: fortress {site:?} is another player's; dropped");
-                    self.fortress_of.remove(&c);
-                    self.send_fortress(c);
-                }
+            CoordMsg::ClaimIs { player, claim } => self.claim_is(player, claim),
+        }
+    }
+
+    /// `player`'s claim changed here (a release sent, a granting reply applied).
+    fn claim_changed(&mut self, player: PlayerId) {
+        *self.claim_changes.entry(player).or_default() += 1;
+    }
+
+    /// The coordinator's answer to a claim this host reported for `player`: final. The
+    /// player's client here plays exactly `claim` from now on, and is told so — unless the
+    /// player's claim changed here since that report (a release or a grant the
+    /// coordinator handles after it): the answer is stale, and the change agrees with
+    /// the coordinator once it is handled.
+    fn claim_is(&mut self, player: PlayerId, claim: Option<Claim>) {
+        let changes = self.claim_changes.get(&player).copied().unwrap_or(0);
+        if self.claim_reported.get(&player).is_some_and(|&r| r != changes) {
+            log::debug!("the claim of {player:?} is {claim:?}, as of a report older than its last change here: ignored");
+            return;
+        }
+        let clients: Vec<ClientId> = self.player_of.iter().filter(|(_, p)| **p == player).map(|(c, _)| *c).collect();
+        if clients.is_empty() {
+            log::debug!("the claim of {player:?} is {claim:?}; the player is no longer online here");
+        }
+        for c in clients {
+            if self.claim_of_client(c) == claim {
+                continue;
             }
+            log::info!("client {c}: plays {:?}; the coordinator says {claim:?}", self.claim_of_client(c));
+            self.fortress_of.remove(&c);
+            self.adventurer_of.remove(&c);
+            match claim {
+                Some(Claim::Fortress(site)) => {
+                    self.fortress_of.insert(c, site);
+                }
+                Some(Claim::Adventure(site)) => {
+                    self.adventurer_of.insert(c, site);
+                }
+                None => {}
+            }
+            self.send_fortress(c);
         }
     }
 
@@ -835,8 +876,27 @@ impl<S: RegionSpawner> WorldManager<S> {
             match self.expired_requests.remove(&id) {
                 Some((player, _)) => {
                     log::info!("world reply {id:?} came after its request timed out: {reply:?}");
-                    if reply.grants_claim() {
+                    let granted = match reply {
+                        WorldReply::Embarked { site, .. } | WorldReply::Returned { site, .. } => Some(Claim::Fortress(site)),
+                        WorldReply::AdventureStarted { site, .. } => Some(Claim::Adventure(site)),
+                        _ => None,
+                    };
+                    if granted.is_some() {
+                        // Its player was told it failed: it never completes. A `ClaimIs`
+                        // that handed the player this very claim meanwhile (the request
+                        // was unsettled then) is undone with it.
                         self.world_send(HostMsg::ReleaseClaim { player });
+                        let holders: Vec<ClientId> = self
+                            .player_of
+                            .iter()
+                            .filter(|(c, p)| **p == player && self.claim_of_client(**c) == granted)
+                            .map(|(c, _)| *c)
+                            .collect();
+                        for c in holders {
+                            self.fortress_of.remove(&c);
+                            self.adventurer_of.remove(&c);
+                            self.send_fortress(c);
+                        }
                     }
                 }
                 None => log::debug!("world reply {id:?} answered already: dropped"),
@@ -876,6 +936,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                 let landing = self.landing_in(region);
                 self.move_client(client, region, landing, now_ms);
                 self.fortress_of.insert(client, site);
+                self.claim_changed(p.player);
                 self.embark_result(client, Ok(site));
                 self.send_fortress(client);
                 if let WorldRequest::Embark(req) = &p.req {
@@ -909,6 +970,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                     GameEventKind::Order(client, Order::SetMode { mode: PlayMode::Adventure, at }),
                 );
                 self.adventurer_of.insert(client, site);
+                self.claim_changed(p.player);
                 self.adventure_result(client, Ok(site));
                 self.send_fortress(client);
                 crate::perf_event!("adventure_start", "client={client} site={} to={},{}", site.0, region.x, region.z);
@@ -926,6 +988,7 @@ impl<S: RegionSpawner> WorldManager<S> {
         let Some(&player) = self.player_of.get(&id) else { return };
         let claim = self.claim_of_client(id);
         let claim_pending = self.claim_pending(player);
+        self.claim_reported.insert(player, self.claim_changes.get(&player).copied().unwrap_or(0));
         self.world_send(HostMsg::PlayerOnline(OnlinePlayer { player, claim, claim_pending }));
     }
 

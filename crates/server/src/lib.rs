@@ -825,6 +825,8 @@ pub fn run() -> claims::ServerExit {
     let mut manager = game::WorldManager::new(spawner, server_send, region_out_send, lod_builder);
     manager.set_ownership(ownership, super_region_regions);
     manager.set_endpoints(endpoint.clone(), random_u64());
+    // The coordinator refuses an `Attach` of an older world generation than the store's.
+    manager.set_host_generation(world_generation.mine());
     // A session per other host, over its link; the links' wake-up (none with one host).
     let mut peer_wake = crossbeam::channel::never::<()>();
     if let Some(links) = peer_links.as_mut() {

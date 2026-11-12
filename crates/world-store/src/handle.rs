@@ -304,6 +304,12 @@ impl StoreHandle {
         self.ask(Request::WorldGeneration)
     }
 
+    /// Host `owner`'s claim epoch as stored: the highest epoch of the super-regions it
+    /// holds (`None`: it holds none). A process whose claim was taken over has a lower one.
+    pub fn owner_claim_epoch(&self, owner: u32) -> Result<Option<u64>, StoreError> {
+        self.ask(|r| Request::OwnerClaimEpoch(owner, r))
+    }
+
     /// The terrain kind the world is tied to; `None` before the first
     /// [`StoreHandle::bind_terrain`].
     pub fn terrain_kind(&self) -> Result<Option<crate::TerrainKind>, StoreError> {

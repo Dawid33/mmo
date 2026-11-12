@@ -3,7 +3,8 @@
 //! `Ownership::Static` gives it), every pair of hosts joined by a seeded, delaying
 //! [`InlinePeerLink`] under a [`PeerSession`] at each end. Each host's world tick is its
 //! spawner's round count, so [`MultiRig::round`] ticks every host every round and checks
-//! they agree. Every host-seam test builds on it.
+//! they agree. Every host-seam test builds on it. [`MultiRig::with_coordinator`] gives
+//! every host its own seeded, delaying inline link to ONE world coordinator.
 use super::rig::{Rig, CLIENT};
 use game::{
     ClientId, ClientPacket, EntityId, HostEndpoint, Intent, IntentMsg, InlinePeerLink, InlineSchedule, InlineSpawner, Ownership, PeerHello,
@@ -25,6 +26,37 @@ pub fn mix(seed: u64, i: u64) -> u64 {
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
     z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
     z ^ (z >> 31)
+}
+
+/// A host's link to the rig's shared coordinator, recording every message the host sent
+/// while the link was up.
+pub struct RigWorldLink {
+    inner: game::InlineWorldLink,
+    sent: Arc<Mutex<Vec<game::HostMsg>>>,
+}
+
+impl game::WorldLink for RigWorldLink {
+    fn send(&mut self, msg: game::HostMsg) {
+        if self.inner.is_up() {
+            self.sent.lock().unwrap().push(msg.clone());
+        }
+        self.inner.send(msg)
+    }
+    fn recv(&mut self) -> Option<game::CoordMsg> {
+        self.inner.recv()
+    }
+    fn is_up(&self) -> bool {
+        self.inner.is_up()
+    }
+    fn pump(&mut self, now_ms: u64) {
+        self.inner.pump(now_ms)
+    }
+    fn as_inline_mut(&mut self) -> Option<&mut game::InlineWorldLink> {
+        Some(&mut self.inner)
+    }
+    fn as_inline(&self) -> Option<&game::InlineWorldLink> {
+        Some(&self.inner)
+    }
 }
 
 /// One end of a link the rig keeps a handle on (to take it down, read its transit).
@@ -135,6 +167,9 @@ pub struct MultiRig {
     pub tracked: BTreeMap<EntityId, Option<Place>>,
     /// The stud bodies seen: they may end by settling in the region that owns them.
     pub settling: BTreeSet<EntityId>,
+    /// Every person body ever seen in a region: never tracked (a history may absorb one,
+    /// also while it is only in a sent, unacknowledged transfer).
+    pub person_ids: BTreeSet<EntityId>,
     /// Items the world holds, once a test put some in ([`Self::assert_items`]): checked
     /// every round.
     pub items: Option<u64>,
@@ -143,6 +178,13 @@ pub struct MultiRig {
     pub players: BTreeMap<ClientId, PlayerId>,
     /// The bodies those players were seen in: one may end by parking.
     pub player_bodies: BTreeMap<EntityId, PlayerId>,
+    /// The seed and link delay the rig was made with ([`Self::with_coordinator`]).
+    pub seed: u64,
+    pub link_delay: u32,
+    /// The world coordinator every host's world link reaches ([`Self::with_coordinator`]).
+    pub coordinator: Option<Arc<Mutex<game::Coordinator>>>,
+    /// What each host sent its coordinator (while its link was up), by host.
+    pub world_sent: Vec<Arc<Mutex<Vec<game::HostMsg>>>>,
 }
 
 /// Host `h`'s endpoint in the rig (what its sessions' first packet names).
@@ -197,15 +239,69 @@ impl MultiRig {
                 links,
                 tracked: BTreeMap::new(),
                 settling: BTreeSet::new(),
+                person_ids: BTreeSet::new(),
                 items: None,
                 players: BTreeMap::new(),
                 player_bodies: BTreeMap::new(),
+                seed,
+                link_delay: link_delay_steps,
+                coordinator: None,
+                world_sent: Vec::new(),
             };
         for h in 0..hosts {
             rig.keep(h);
         }
         rig.connect();
         rig
+    }
+
+    /// One world coordinator over `history` for every host: each host's world link is its
+    /// own [`game::InlineWorldLink::shared`] link to it, delaying both ways by
+    /// 0..=`link_delay` pumps with its own seed (so different hosts' messages interleave
+    /// differently per seed). Rounds until every host is attached.
+    pub fn with_coordinator(&mut self, history: game::history::History) {
+        let now = self.hosts.iter().map(|r| r.now_ms).max().unwrap_or(0);
+        let core = Arc::new(Mutex::new(game::Coordinator::new(history, now)));
+        // Every link before any is installed (an install pumps it): none misses the view.
+        let links: Vec<game::InlineWorldLink> = (0..self.hosts.len() as u32)
+            .map(|h| game::InlineWorldLink::shared(core.clone(), h).with_delay(mix(self.seed, 3000 + u64::from(h)), self.link_delay))
+            .collect();
+        for (h, inner) in links.into_iter().enumerate() {
+            let sent = Arc::new(Mutex::new(Vec::new()));
+            self.world_sent.push(sent.clone());
+            let rig = &mut self.hosts[h];
+            let now = rig.now_ms;
+            rig.manager.set_world_link(Box::new(RigWorldLink { inner, sent }), 4000 + h as u64, now);
+            rig.settle();
+        }
+        self.coordinator = Some(core);
+        for _ in 0..CONNECT_ROUNDS {
+            if self.hosts.iter().all(|r| r.manager.world_attached()) {
+                return;
+            }
+            self.round();
+        }
+        panic!("the hosts never all attached to the coordinator");
+    }
+
+    /// The rig's coordinator, locked ([`Self::with_coordinator`]).
+    pub fn core(&self) -> std::sync::MutexGuard<'_, game::Coordinator> {
+        self.coordinator.as_ref().expect("a rig coordinator").lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// What host `h` sent its coordinator so far.
+    pub fn sent_to_coordinator(&self, h: u32) -> Vec<game::HostMsg> {
+        self.world_sent[h as usize].lock().unwrap().clone()
+    }
+
+    /// Messages the hosts sent the coordinator that it has not handled yet (its links'
+    /// delay).
+    pub fn coordinator_pending(&self) -> Vec<game::HostMsg> {
+        self.hosts
+            .iter()
+            .filter_map(|r| r.manager.world_link().and_then(|l| l.as_inline()))
+            .flat_map(|l| l.pending().cloned().collect::<Vec<_>>())
+            .collect()
     }
 
     /// Host `h`'s keeper: a client whose body stands in the middle of its home region.
@@ -511,6 +607,8 @@ impl MultiRig {
             }
         }
         self.settling.extend(settling);
+        self.person_ids.extend(people.iter().copied());
+        let people = &self.person_ids;
         for (id, at) in &places {
             assert_eq!(at.len(), 1, "{id:?} is in several places at once: {at:?}");
         }
@@ -623,10 +721,32 @@ impl MultiRig {
     /// conserved as such; a creation in flight may stand beside the body it made until
     /// its host hears it applied), at most one host has a home for it, has it online
     /// (`player_of`) or holds its claim.
+    ///
+    /// The same per PLAYER, over every session id a test mapped to it (a login under a new
+    /// id beside an older one): at most one body in the world, never a body beside a
+    /// parked record, never two queued moves. A body (the login's) beside a queued move
+    /// of the older id is allowed: that move is dropped on arrival (the per-id rule above
+    /// keeps a body and a queued move of one id apart).
     fn assert_players(&mut self) {
         let players: Vec<(ClientId, PlayerId)> = self.players.iter().map(|(c, p)| (*c, *p)).collect();
         let in_move = self.players_in_move();
         let queued_moves = self.queued_moves();
+        let mut per_player: BTreeMap<PlayerId, (Vec<(ClientId, u32, RegionCoords)>, usize)> = BTreeMap::new();
+        for &(client, player) in &players {
+            let entry = per_player.entry(player).or_default();
+            entry.0.extend(self.player_owners(client).into_iter().map(|(h, rc)| (client, h, rc)));
+            entry.1 += queued_moves.get(&client).copied().unwrap_or(0);
+        }
+        for (player, (bodies, queued)) in &per_player {
+            let parked = self.parked_on(*player);
+            assert!(bodies.len() <= 1, "player {} has several bodies (session, host, region): {bodies:?}", player.0);
+            assert!(
+                bodies.is_empty() || parked.is_empty(),
+                "player {} has a body ({bodies:?}) and a parked record (hosts {parked:?})",
+                player.0
+            );
+            assert!(*queued <= 1, "player {} is in {queued} queued moves", player.0);
+        }
         for (client, player) in players {
             let bodies = self.player_owners(client);
             let parked = self.parked_on(player);

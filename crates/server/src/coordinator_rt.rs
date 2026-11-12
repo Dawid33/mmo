@@ -24,7 +24,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crossbeam::channel::{Receiver, RecvTimeoutError, Select, Sender, TryRecvError};
-use game::{CoordMsg, Coordinator, HostMsg, RegionCoords, WorldLink};
+use game::coordinator::Target;
+use game::{CoordMsg, Coordinator, HostMsg, WorldLink};
 use svc_link::{LinkEvent, LinkListener, PeerId, PeerRole, PeerSenders};
 use world_store::{CoordinatorFence, StoreError, StoreHandle};
 
@@ -96,6 +97,8 @@ pub struct HostEnd {
     wake: Sender<()>,
     /// The host dropped its end.
     gone: bool,
+    /// The host's ordinal, as its `Attach` names it (0 before one).
+    ordinal: u32,
 }
 
 /// A connected pair: the host's [`ChannelWorldLink`] (up) and the coordinator's [`HostEnd`].
@@ -106,7 +109,7 @@ pub fn channel_link() -> (ChannelWorldLink, HostEnd) {
     let up = Arc::new(AtomicBool::new(true));
     (
         ChannelWorldLink { tx: host_tx, rx: coord_rx, up: up.clone(), wake: wake_rx },
-        HostEnd { rx: host_rx, tx: coord_tx, up, wake: wake_tx, gone: false },
+        HostEnd { rx: host_rx, tx: coord_tx, up, wake: wake_tx, gone: false, ordinal: 0 },
     )
 }
 
@@ -146,9 +149,10 @@ impl LinkSet {
     }
 }
 
-/// Where a coordinator message goes.
+/// Which connection(s) a coordinator message goes to.
 #[derive(Debug, PartialEq, Eq)]
-enum Target {
+enum Route {
+    /// The live connection of a host ordinal.
     Host(u32),
     /// One connection (an attach echo goes to the connection whose `Attach` it answers).
     Peer(PeerId),
@@ -165,9 +169,9 @@ struct ListenerHosts {
 }
 
 impl ListenerHosts {
-    fn send(&mut self, msg: CoordMsg) {
-        match self.routes.route(&msg) {
-            Target::Host(ordinal) => match self.routes.peer_of(ordinal) {
+    fn send(&mut self, to: Target, msg: CoordMsg) {
+        match self.routes.route(to, &msg) {
+            Route::Host(ordinal) => match self.routes.peer_of(ordinal) {
                 Some(peer) => {
                     if !self.senders.send(peer, msg) {
                         log::debug!("[coordinator] host {ordinal} left; a message for it is lost");
@@ -175,18 +179,18 @@ impl ListenerHosts {
                 }
                 None => log::debug!("[coordinator] host {ordinal} is not connected; {} lost", describe(&msg)),
             },
-            Target::Peer(peer) => {
+            Route::Peer(peer) => {
                 if !self.senders.send(peer, msg) {
                     log::debug!("[coordinator] peer {} left; its attach echo is lost", peer.0);
                 }
             }
-            Target::Every => {
+            Route::Every => {
                 for peer in self.routes.hosts.keys() {
                     self.senders.send(*peer, msg.clone());
                 }
             }
             // `route` said why.
-            Target::Nobody => {}
+            Route::Nobody => {}
         }
     }
 }
@@ -208,16 +212,18 @@ fn describe(msg: &CoordMsg) -> String {
         CoordMsg::SiteMarkers(s) => format!("SiteMarkers ({})", s.len()),
         CoordMsg::Notice { region, .. } => format!("Notice for {region:?}"),
         CoordMsg::Attached { epoch } => format!("Attached {{ epoch: {epoch} }}"),
-        CoordMsg::FortressRefused { player, site } => format!("FortressRefused {player:?} {site:?}"),
+        CoordMsg::ClaimIs { player, claim } => format!("ClaimIs {player:?} {claim:?}"),
     }
 }
 
 /// A host message's kind and region, for logs (an `Attach` or `Positions` can be large).
 pub(crate) fn describe_host(msg: &HostMsg) -> String {
     match msg {
-        HostMsg::Attach { host, epoch, running, online } => {
-            format!("Attach {{ host: {host}, epoch: {epoch} }} ({} regions, {} online)", running.len(), online.len())
-        }
+        HostMsg::Attach { host, epoch, running, online, generation } => format!(
+            "Attach {{ host: {host}, epoch: {epoch}, generation: {generation} }} ({} regions, {} online)",
+            running.len(),
+            online.len()
+        ),
         HostMsg::RegionStarted { rc, incarnation } => format!("RegionStarted {rc:?} incarnation {incarnation}"),
         HostMsg::RegionStopping { rc } => format!("RegionStopping {rc:?}"),
         HostMsg::RegionParked { rc, people } => format!("RegionParked {rc:?} ({} people)", people.len()),
@@ -236,22 +242,18 @@ pub(crate) fn describe_host(msg: &HostMsg) -> String {
     }
 }
 
-/// The one host ordinal a coordinator serves until R3: the core is single-host — another
-/// host's `Attach` would park every region it does not list, host 0's running ones
-/// included — so any other ordinal is refused. Fixed, not "the first to connect": a stray
-/// host winning the race to a restarted coordinator must not take the world over.
-pub const SERVED_HOST_ORDINAL: u32 = 0;
-
-/// What routes a coordinator message to one of the connected hosts: a reply to the host
-/// its request id names, a region's messages to the host that announced the region (its
-/// `Attach` / `RegionStarted`), the attach echo to the connection whose `Attach` it
-/// answers, the world's view to every host. A message for a host that is not connected is
-/// lost (it re-attaches when it is back: its `Attach` and resent requests cover it).
+/// What routes a coordinator message to one of the connected hosts: the core names the
+/// host each message is for ([`Target`]: a reply to the host that asked, a region's
+/// messages to the host that runs it, the world's view to every host); the attach echo
+/// goes to the connection whose `Attach` it answers. A message for a host that is not
+/// connected is lost (it re-attaches when it is back: its `Attach` and resent requests
+/// cover it).
 ///
-/// One live connection per host ordinal ([`Routes::admit`]): a host process that is
-/// replaced (a restart, a second process of the ordinal) keeps running until its next cut
-/// is fenced, and its messages — a park, a crossing, positions — would otherwise be
-/// applied beside its replacement's (two bodies of one person).
+/// Any host ordinal is served. One live connection per ordinal ([`Routes::admit`]): a
+/// host process that is replaced (a restart, a second process of the ordinal) keeps
+/// running until its next cut is fenced, and its messages — a park, a crossing,
+/// positions — would otherwise be applied beside its replacement's (two bodies of one
+/// person).
 #[derive(Default)]
 struct Routes {
     /// Peers refused or replaced ([`Routes::admit`]); their messages are ignored.
@@ -260,11 +262,6 @@ struct Routes {
     hosts: BTreeMap<PeerId, u32>,
     /// The live connection of each ordinal, with the claim epoch its hello carried.
     live: BTreeMap<u32, (PeerId, u64)>,
-    /// The highest claim epoch each ordinal's hello has carried (kept after its connection
-    /// ends: a stale process must not take the ordinal while its replacement reconnects).
-    best_epoch: BTreeMap<u32, u64>,
-    /// Which host runs each region, as announced.
-    region_host: BTreeMap<RegionCoords, u32>,
     /// `Attach`es handled whose echo has not been routed yet: (connection, epoch), in order.
     attaches: VecDeque<(PeerId, u64)>,
 }
@@ -280,34 +277,23 @@ enum Admit {
 }
 
 impl Routes {
-    /// A host peer said hello as `ordinal` with claim `epoch`. Refused unless it is
-    /// [`SERVED_HOST_ORDINAL`] (logged with both ordinals). The ordinal's highest claim
-    /// epoch wins, ties to the newer connection: a process that claimed its super-regions
-    /// later replaces the live one; one with a lower epoch is a stale process (its claims
-    /// taken over, fenced at its next cut) and is refused, so it cannot take the ordinal
-    /// back.
-    fn admit(&mut self, peer: PeerId, ordinal: u32, epoch: u64) -> Admit {
-        if ordinal != SERVED_HOST_ORDINAL {
+    /// A host peer said hello as `ordinal` with claim `epoch`; `stored_epoch` is the
+    /// ordinal's claim epoch in the store (`StoreHandle::owner_claim_epoch`; `None`: it
+    /// claims nothing, epoch 0). A hello whose epoch is not the stored one is a stale host
+    /// process (its claims taken over, fenced at its next cut) and is refused — read from
+    /// the store, so this holds across a coordinator restart. Otherwise the newer
+    /// connection of an ordinal replaces the older.
+    fn admit(&mut self, peer: PeerId, ordinal: u32, epoch: u64, stored_epoch: Option<u64>) -> Admit {
+        let stored = stored_epoch.unwrap_or(0);
+        if epoch != stored {
             log::error!(
-                "[coordinator] refusing host {ordinal} (peer {}): this coordinator serves host {SERVED_HOST_ORDINAL} \
-                 only (one host per world until R3; another host's Attach would park host \
-                 {SERVED_HOST_ORDINAL}'s regions)",
+                "[coordinator] refusing host {ordinal} (peer {}) with claim epoch {epoch}: the store has epoch {stored} \
+                 (a stale host process, fenced at its next cut)",
                 peer.0
             );
             self.refused.insert(peer);
             return Admit::Refused;
         }
-        let best = self.best_epoch.get(&ordinal).copied().unwrap_or(0);
-        if epoch < best {
-            log::error!(
-                "[coordinator] refusing host {ordinal} (peer {}) with claim epoch {epoch}: epoch {best} has \
-                 connected (a stale host process, fenced at its next cut)",
-                peer.0
-            );
-            self.refused.insert(peer);
-            return Admit::Refused;
-        }
-        self.best_epoch.insert(ordinal, epoch);
         let replaced = match self.live.get(&ordinal).copied() {
             Some((live, live_epoch)) => {
                 log::warn!(
@@ -316,9 +302,7 @@ impl Routes {
                     peer.0,
                     live.0
                 );
-                self.hosts.remove(&live);
-                self.refused.insert(live);
-                self.attaches.retain(|(p, _)| *p != live);
+                self.refuse(live);
                 Some(live)
             }
             None => None,
@@ -326,6 +310,18 @@ impl Routes {
         self.live.insert(ordinal, (peer, epoch));
         self.hosts.insert(peer, ordinal);
         Admit::Admitted { replaced }
+    }
+
+    /// `peer` is refused from now on (replaced, or its `Attach` was refused): its messages
+    /// are ignored and its pending attach echo dropped. The ordinal it served, if any.
+    fn refuse(&mut self, peer: PeerId) -> Option<u32> {
+        self.refused.insert(peer);
+        self.attaches.retain(|(p, _)| *p != peer);
+        let ordinal = self.hosts.remove(&peer)?;
+        if self.live.get(&ordinal).is_some_and(|(p, _)| *p == peer) {
+            self.live.remove(&ordinal);
+        }
+        Some(ordinal)
     }
 
     /// `peer`'s connection ended.
@@ -340,70 +336,61 @@ impl Routes {
 
     /// Note what routes later messages from `msg`, sent by host `ordinal` on `peer`.
     fn note(&mut self, peer: PeerId, ordinal: u32, msg: &HostMsg) {
-        match msg {
-            HostMsg::Attach { host, epoch, running, .. } => {
-                if *host != ordinal {
-                    log::warn!("[coordinator] host {ordinal}'s Attach names host {host}; routed by its link");
-                }
-                self.region_host.retain(|_, h| *h != ordinal);
-                for r in running {
-                    self.region_host.insert(r.rc, ordinal);
-                }
-                self.attaches.push_back((peer, *epoch));
+        if let HostMsg::Attach { host, epoch, .. } = msg {
+            if *host != ordinal {
+                log::warn!("[coordinator] host {ordinal}'s Attach names host {host}; routed by its link");
             }
-            HostMsg::RegionStarted { rc, .. } => {
-                self.region_host.insert(*rc, ordinal);
-            }
-            HostMsg::RegionParked { rc, .. } => {
-                if self.region_host.get(rc) == Some(&ordinal) {
-                    self.region_host.remove(rc);
-                }
-            }
-            _ => {}
+            self.attaches.push_back((peer, *epoch));
         }
     }
 
-    fn route(&mut self, msg: &CoordMsg) -> Target {
-        match msg {
-            CoordMsg::Reply { id, .. } => Target::Host(id.host),
-            CoordMsg::Attached { epoch } => match self.attaches.iter().position(|(_, e)| e == epoch) {
-                Some(i) => Target::Peer(self.attaches.remove(i).expect("found").0),
+    /// The connection(s) `msg`, for `to`, goes to.
+    fn route(&mut self, to: Target, msg: &CoordMsg) -> Route {
+        match (msg, to) {
+            (CoordMsg::Attached { epoch }, _) => match self.attaches.iter().position(|(_, e)| e == epoch) {
+                Some(i) => Route::Peer(self.attaches.remove(i).expect("found").0),
                 None => {
                     log::warn!("[coordinator] attach echo {epoch} matches no Attach; dropped");
-                    Target::Nobody
+                    Route::Nobody
                 }
             },
-            CoordMsg::SpawnPeople { rc, .. } => self.region_target(*rc),
-            CoordMsg::Directive { directive, .. } => self.region_target(directive.region),
-            CoordMsg::Notice { region, .. } => self.region_target(*region),
-            CoordMsg::View { .. } | CoordMsg::Calendar(_) | CoordMsg::Sites(_) | CoordMsg::SiteMarkers(_) => {
-                Target::Every
-            }
-            // About a player online on the host that reported it: R2's one host ordinal
-            // (R3 routes it by the player's host).
-            CoordMsg::FortressRefused { .. } => Target::Host(SERVED_HOST_ORDINAL),
-        }
-    }
-
-    /// The host that announced `rc`; with none, the only connected host (R2's one host
-    /// per world), else nobody (several hosts and an unannounced region: R3 routes it).
-    fn region_target(&self, rc: RegionCoords) -> Target {
-        if let Some(h) = self.region_host.get(&rc) {
-            return Target::Host(*h);
-        }
-        let ordinals: BTreeSet<u32> = self.hosts.values().copied().collect();
-        match ordinals.len() {
-            1 => Target::Every,
-            _ => {
-                log::warn!("[coordinator] no host is known to run {rc:?}; its message is dropped (R3 routes it)");
-                Target::Nobody
-            }
+            (_, Target::Host(h)) => Route::Host(h),
+            (_, Target::Every) => Route::Every,
         }
     }
 
     /// The newest connection of host `ordinal`.
     fn peer_of(&self, ordinal: u32) -> Option<PeerId> {
         self.hosts.iter().rev().find(|(_, o)| **o == ordinal).map(|(p, _)| *p)
+    }
+}
+
+/// Host `ordinal`'s claim epoch in the store, for its hello's admission; `Some(u64::MAX)`
+/// (refused: "wait, never guess" — the host redials) when the store cannot be read.
+fn stored_claim_epoch(store: &StoreHandle, ordinal: u32) -> Option<u64> {
+    store.owner_claim_epoch(ordinal).unwrap_or_else(|e| {
+        log::error!("[coordinator] host {ordinal}'s claim epoch could not be read ({e}); its hello is refused");
+        Some(u64::MAX)
+    })
+}
+
+/// Whether host `ordinal`'s `Attach` of world `generation` may be applied: not lower than
+/// the store's (a lower one is a stale process, about to exit: its link is closed). A
+/// store that cannot be read refuses it too (the host redials and attaches again).
+fn generation_current(store: &StoreHandle, ordinal: u32, generation: u64) -> bool {
+    match store.world_generation() {
+        Ok(stored) if generation < stored => {
+            log::error!(
+                "[coordinator] host {ordinal}'s Attach runs world generation {generation}, older than the store's \
+                 {stored}: refused (a stale host process)"
+            );
+            false
+        }
+        Ok(_) => true,
+        Err(e) => {
+            log::error!("[coordinator] the world generation could not be read ({e}); host {ordinal}'s Attach is refused");
+            false
+        }
     }
 }
 
@@ -666,7 +653,7 @@ impl CoordinatorRuntime {
             let out = self.core.take_out();
             #[cfg(feature = "test-hooks")]
             if self.crash_before_claim_reply.load(Ordering::SeqCst)
-                && out.iter().any(|m| matches!(m, CoordMsg::Reply { reply, .. } if reply.grants_claim()))
+                && out.iter().any(|(_, m)| matches!(m, CoordMsg::Reply { reply, .. } if reply.grants_claim()))
             {
                 // Its save committed (the reply is gated); it never leaves.
                 log::warn!("[coordinator] test crash before a claim-granting reply left");
@@ -710,7 +697,12 @@ impl CoordinatorRuntime {
                 for host in hosts.iter_mut() {
                     while !host.gone {
                         match host.rx.try_recv() {
-                            Ok(msg) => self.core.handle(msg, now),
+                            Ok(msg) => {
+                                if let HostMsg::Attach { host: ordinal, .. } = &msg {
+                                    host.ordinal = *ordinal;
+                                }
+                                self.core.handle(host.ordinal, msg, now)
+                            }
                             Err(TryRecvError::Empty) => break,
                             Err(TryRecvError::Disconnected) => {
                                 log::info!("[coordinator] a host closed its link");
@@ -724,7 +716,12 @@ impl CoordinatorRuntime {
                 while let Ok((peer, event)) = l.events.try_recv() {
                     match event {
                         LinkEvent::Up(hello) => match hello.role {
-                            PeerRole::Host { ordinal, boot, epoch } => match l.routes.admit(peer, ordinal, epoch) {
+                            PeerRole::Host { ordinal, boot, epoch } => match l.routes.admit(
+                                peer,
+                                ordinal,
+                                epoch,
+                                stored_claim_epoch(&self.store, ordinal),
+                            ) {
                                 Admit::Admitted { replaced } => {
                                     log::info!(
                                         "[coordinator] host {ordinal} connected (peer {}, boot {boot:#x}, claim epoch {epoch})",
@@ -745,8 +742,15 @@ impl CoordinatorRuntime {
                         },
                         LinkEvent::Msg(msg) => match l.routes.hosts.get(&peer).copied() {
                             Some(ordinal) => {
+                                if let HostMsg::Attach { generation, .. } = &msg {
+                                    if !generation_current(&self.store, ordinal, *generation) {
+                                        l.routes.refuse(peer);
+                                        l.senders.close(peer);
+                                        continue;
+                                    }
+                                }
                                 l.routes.note(peer, ordinal, &msg);
-                                self.core.handle(msg, now);
+                                self.core.handle(ordinal, msg, now);
                             }
                             None if l.routes.refused.contains(&peer) => {
                                 log::debug!("[coordinator] a message from refused peer {} ignored", peer.0)
@@ -819,22 +823,23 @@ impl CoordinatorRuntime {
         self.send(out);
     }
 
-    fn send(&mut self, out: Vec<CoordMsg>) {
+    fn send(&mut self, out: Vec<(Target, CoordMsg)>) {
         if out.is_empty() {
             return;
         }
         match &mut self.links.links {
+            // One host per process (`AllInOne`): everything goes to it.
             Links::Channels(hosts) => {
                 for host in hosts.iter().filter(|h| !h.gone) {
-                    for msg in &out {
+                    for (_, msg) in &out {
                         let _ = host.tx.send(msg.clone());
                     }
                     let _ = host.wake.try_send(());
                 }
             }
             Links::Listener(l) => {
-                for msg in out {
-                    l.send(msg);
+                for (to, msg) in out {
+                    l.send(to, msg);
                 }
             }
         }
@@ -909,33 +914,30 @@ impl CoordinatorRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use game::history::{Directive, PersonId};
-    use game::{RequestId, RunningRegion};
+    use game::RequestId;
 
-    fn rc(x: i32, z: i32) -> RegionCoords {
-        RegionCoords::new(x, z)
+    fn attach(host: u32, epoch: u64) -> HostMsg {
+        HostMsg::Attach { host, epoch, running: Vec::new(), online: Vec::new(), generation: 0 }
     }
 
-    fn attach(host: u32, epoch: u64, regions: &[RegionCoords]) -> HostMsg {
-        let running = regions.iter().map(|r| RunningRegion { rc: *r, incarnation: 1, people: Vec::new() }).collect();
-        HostMsg::Attach { host, epoch, running, online: Vec::new() }
-    }
-
+    /// Any ordinal is served, each with one live connection; a hello whose claim epoch is
+    /// not the store's is refused (a stale process), first to connect or not.
     #[test]
-    fn only_host_ordinal_zero_is_served() {
+    fn two_ordinals_are_served() {
         let mut r = Routes::default();
-        // A stray ordinal first to connect (a restarted coordinator's race) is refused...
-        assert_eq!(r.admit(PeerId(2), 4, 1), Admit::Refused, "ordinal 4 is refused, first or not");
-        assert_eq!(r.admit(PeerId(3), 0, 1), Admit::Admitted { replaced: None }, "host 0 is served");
-        assert_eq!(r.admit(PeerId(4), 1, 1), Admit::Refused, "another ordinal is refused");
-        assert_eq!(r.admit(PeerId(5), 0, 1), Admit::Admitted { replaced: Some(PeerId(3)) }, "host 0 reconnecting");
+        assert_eq!(r.admit(PeerId(2), 4, 1, Some(2)), Admit::Refused, "a stale epoch is refused, first or not");
+        assert_eq!(r.admit(PeerId(3), 0, 1, Some(1)), Admit::Admitted { replaced: None }, "host 0 is served");
+        assert_eq!(r.admit(PeerId(4), 1, 3, Some(3)), Admit::Admitted { replaced: None }, "and host 1");
+        assert_eq!(r.admit(PeerId(5), 0, 1, Some(1)), Admit::Admitted { replaced: Some(PeerId(3)) }, "host 0 reconnecting");
+        assert_eq!(r.admit(PeerId(6), 7, 0, None), Admit::Admitted { replaced: None }, "a host claiming nothing: epoch 0");
         assert_eq!(r.peer_of(0), Some(PeerId(5)));
+        assert_eq!(r.peer_of(1), Some(PeerId(4)));
         assert_eq!(r.peer_of(4), None);
-        assert_eq!(r.peer_of(1), None);
-        assert!(r.refused.contains(&PeerId(2)) && r.refused.contains(&PeerId(4)));
-        assert_eq!(r.route(&CoordMsg::Attached { epoch: 9 }), Target::Nobody, "an unmatched echo goes nowhere");
+        assert!(r.refused.contains(&PeerId(2)) && r.refused.contains(&PeerId(3)));
+        assert_eq!(r.route(Target::Host(0), &CoordMsg::Attached { epoch: 9 }), Route::Nobody, "an unmatched echo goes nowhere");
     }
 
+    /// The core names the host; the attach echo goes to the connection that attached.
     #[test]
     fn messages_route_to_the_host_they_are_for() {
         let mut r = Routes::default();
@@ -943,74 +945,56 @@ mod tests {
         r.hosts.insert(PeerId(4), 3);
         r.hosts.insert(PeerId(7), 5);
         r.hosts.insert(PeerId(9), 3);
-        r.note(PeerId(9), 3, &attach(3, 1, &[rc(1, 1)]));
-        r.note(PeerId(7), 5, &attach(5, 1, &[rc(2, 2)]));
-        r.note(PeerId(7), 5, &HostMsg::RegionStarted { rc: rc(4, 4), incarnation: 2 });
+        r.note(PeerId(9), 3, &attach(3, 1));
+        r.note(PeerId(7), 5, &attach(5, 1));
         assert_eq!(r.peer_of(3), Some(PeerId(9)));
         assert_eq!(r.peer_of(5), Some(PeerId(7)));
         assert_eq!(r.peer_of(1), None);
         // Both attached with epoch 1: the echoes go back in the order handled.
-        assert_eq!(r.route(&CoordMsg::Attached { epoch: 1 }), Target::Peer(PeerId(9)));
-        assert_eq!(r.route(&CoordMsg::Attached { epoch: 1 }), Target::Peer(PeerId(7)));
-        let reply = |host| CoordMsg::Reply {
-            id: RequestId { host, boot: 1, seq: 1 },
-            reply: game::WorldReply::PersonInfo(None),
-        };
-        assert_eq!(r.route(&reply(5)), Target::Host(5));
-        assert_eq!(r.route(&reply(3)), Target::Host(3));
-        let spawn = |at| CoordMsg::SpawnPeople { rc: at, incarnation: 1, events: Vec::new() };
-        assert_eq!(r.route(&spawn(rc(1, 1))), Target::Host(3));
-        assert_eq!(r.route(&spawn(rc(4, 4))), Target::Host(5));
-        let directive = CoordMsg::Directive {
-            directive: Directive { region: rc(2, 2), event: game::GameEventKind::DespawnPerson(PersonId(1)) },
-            incarnation: 1,
-        };
-        assert_eq!(r.route(&directive), Target::Host(5));
-        assert_eq!(r.route(&CoordMsg::Notice { region: rc(1, 1), line: "x".into() }), Target::Host(3));
-        assert_eq!(r.route(&CoordMsg::Calendar(game::history::CalendarTick(1))), Target::Every);
-        // An unannounced region with two hosts: nobody (R3); a park forgets the region.
-        assert_eq!(r.route(&spawn(rc(9, 9))), Target::Nobody);
-        r.note(PeerId(7), 5, &HostMsg::RegionParked { rc: rc(4, 4), people: Vec::new() });
-        assert_eq!(r.route(&spawn(rc(4, 4))), Target::Nobody);
-        // One host left: everything unannounced goes to it.
-        r.hosts.retain(|_, o| *o == 3);
-        assert_eq!(r.route(&spawn(rc(9, 9))), Target::Every);
-        // A re-attach replaces the host's regions.
-        r.note(PeerId(9), 3, &attach(3, 2, &[rc(6, 6)]));
-        r.hosts.insert(PeerId(10), 5);
-        assert_eq!(r.route(&spawn(rc(1, 1))), Target::Nobody);
-        assert_eq!(r.route(&spawn(rc(6, 6))), Target::Host(3));
+        assert_eq!(r.route(Target::Host(3), &CoordMsg::Attached { epoch: 1 }), Route::Peer(PeerId(9)));
+        assert_eq!(r.route(Target::Host(5), &CoordMsg::Attached { epoch: 1 }), Route::Peer(PeerId(7)));
+        let reply = CoordMsg::Reply { id: RequestId { host: 5, boot: 1, seq: 1 }, reply: game::WorldReply::PersonInfo(None) };
+        assert_eq!(r.route(Target::Host(5), &reply), Route::Host(5));
+        let spawn = CoordMsg::SpawnPeople { rc: game::RegionCoords::new(1, 1), incarnation: 1, events: Vec::new() };
+        assert_eq!(r.route(Target::Host(3), &spawn), Route::Host(3));
+        assert_eq!(r.route(Target::Every, &CoordMsg::Calendar(game::history::CalendarTick(1))), Route::Every);
     }
 
-    /// One live connection per ordinal: the highest claim epoch wins (ties: the newer
-    /// connection); the replaced or stale connection is refused, its pending attach echo
+    /// One live connection per ordinal, admitted by the store's claim epoch: a stale
+    /// process is refused even with nobody live (a restarted coordinator has no memory of
+    /// who connected); the replaced connection is refused, its pending attach echo
     /// dropped, and only the live one is routed to.
     #[test]
     fn one_live_peer_per_ordinal_by_claim_epoch() {
         let mut r = Routes::default();
-        assert_eq!(r.admit(PeerId(1), 0, 5), Admit::Admitted { replaced: None });
-        r.note(PeerId(1), 0, &attach(0, 3, &[rc(1, 1)]));
-        // A stale process (lower epoch) cannot take the ordinal back.
-        assert_eq!(r.admit(PeerId(2), 0, 4), Admit::Refused);
+        assert_eq!(r.admit(PeerId(1), 0, 5, Some(5)), Admit::Admitted { replaced: None });
+        r.note(PeerId(1), 0, &attach(0, 3));
+        // The ordinal was claimed again (epoch 6): the old process is stale.
+        assert_eq!(r.admit(PeerId(2), 0, 5, Some(6)), Admit::Refused);
         assert!(r.refused.contains(&PeerId(2)));
         assert_eq!(r.peer_of(0), Some(PeerId(1)));
-        // Its replacement (higher epoch) takes over: the old connection is refused and its
-        // attach echo goes nowhere.
-        assert_eq!(r.admit(PeerId(3), 0, 6), Admit::Admitted { replaced: Some(PeerId(1)) });
+        // Its replacement takes over: the old connection is refused and its attach echo
+        // goes nowhere.
+        assert_eq!(r.admit(PeerId(3), 0, 6, Some(6)), Admit::Admitted { replaced: Some(PeerId(1)) });
         assert!(r.refused.contains(&PeerId(1)) && !r.hosts.contains_key(&PeerId(1)));
-        assert_eq!(r.route(&CoordMsg::Attached { epoch: 3 }), Target::Nobody);
-        r.note(PeerId(3), 0, &attach(0, 1, &[rc(2, 2)]));
-        assert_eq!(r.route(&CoordMsg::Attached { epoch: 1 }), Target::Peer(PeerId(3)));
+        assert_eq!(r.route(Target::Host(0), &CoordMsg::Attached { epoch: 3 }), Route::Nobody);
+        r.note(PeerId(3), 0, &attach(0, 1));
+        assert_eq!(r.route(Target::Host(0), &CoordMsg::Attached { epoch: 1 }), Route::Peer(PeerId(3)));
         assert_eq!(r.peer_of(0), Some(PeerId(3)));
         // The same epoch reconnecting (a dropped link of the live process): the newer wins.
-        assert_eq!(r.admit(PeerId(4), 0, 6), Admit::Admitted { replaced: Some(PeerId(3)) });
+        assert_eq!(r.admit(PeerId(4), 0, 6, Some(6)), Admit::Admitted { replaced: Some(PeerId(3)) });
         // The old connection's Down does not unseat the live one.
         assert_eq!(r.gone(PeerId(3)), None);
         assert_eq!(r.peer_of(0), Some(PeerId(4)));
         assert_eq!(r.gone(PeerId(4)), Some(0));
         assert_eq!(r.peer_of(0), None);
-        // With nobody live, a stale epoch is still refused; the live epoch is admitted.
-        assert_eq!(r.admit(PeerId(5), 0, 5), Admit::Refused);
-        assert_eq!(r.admit(PeerId(6), 0, 6), Admit::Admitted { replaced: None });
+        // With nobody live, a stale epoch is still refused; the stored epoch is admitted.
+        assert_eq!(r.admit(PeerId(5), 0, 5, Some(6)), Admit::Refused);
+        assert_eq!(r.admit(PeerId(6), 0, 6, Some(6)), Admit::Admitted { replaced: None });
+        // A refused Attach (an old world generation) closes the live connection.
+        r.note(PeerId(6), 0, &attach(0, 2));
+        assert_eq!(r.refuse(PeerId(6)), Some(0));
+        assert_eq!(r.peer_of(0), None);
+        assert_eq!(r.route(Target::Host(0), &CoordMsg::Attached { epoch: 2 }), Route::Nobody);
     }
 }

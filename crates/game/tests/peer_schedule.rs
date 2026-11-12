@@ -2332,3 +2332,343 @@ fn disconnect_while_queued(rig: &mut MultiRig) {
 fn disconnect_while_the_move_is_queued_parks_once_on_the_target() {
     sweep("disconnect_while_the_move_is_queued_parks_once_on_the_target", 2, 1, SEEDS / 4, disconnect_while_queued);
 }
+
+// --- The coordinator serves every host (Task 10) ------------------------------------
+
+/// The history's map: land from (-16, -16), 64 x 64 regions (the rig's regions near the
+/// origin and its keepers' homes near (32, 32) all on it).
+fn rig_world_map() -> game::WorldMap {
+    let mut m = crate::history_handover::land_map(64, 64);
+    m.origin = RegionCoords::new(-16, -16);
+    m
+}
+
+/// A history with one site of `n` grown founders in `at`: (history, its civ, the founders).
+fn history_with_site(at: RegionCoords, n: usize) -> (game::history::History, game::history::CivId, Vec<game::history::PersonId>) {
+    use crate::history_handover::{start, years_before};
+    use game::history::{History, Race, Sex, SocietyGrid};
+    let s = start();
+    let mut h = History::new(9, s, SocietyGrid::from_world_map(&rig_world_map()));
+    let civ = h.add_civ(Race::Dwarf);
+    let people: Vec<_> =
+        (0..n).map(|i| h.add_founder(if i % 2 == 0 { Sex::Female } else { Sex::Male }, years_before(s, 20))).collect();
+    h.found_site(civ, at, &people, None, false);
+    (h, civ, people)
+}
+
+/// A site far from the regions the tests play in (near the origin).
+const FAR_SITE: RegionCoords = RegionCoords { x: -14, z: 44 };
+
+/// Every body of `person` in a running region of a host: `(host, region, id)`.
+fn person_bodies(rig: &mut MultiRig, person: game::history::PersonId) -> Vec<(u32, RegionCoords, game::EntityId)> {
+    let mut out = Vec::new();
+    for (h, r) in rig.hosts.iter_mut().enumerate() {
+        for rc in r.manager.running_regions() {
+            r.manager.spawner_mut().with_region(rc, |region| {
+                let data = region.data();
+                for (id, &key) in data.id_index.iter() {
+                    if matches!(data.ecs.kind.try_get(key), Some(game::EntityKind::Person { person: p }) if *p == person) {
+                        out.push((h as u32, rc, *id));
+                    }
+                }
+            });
+        }
+    }
+    out
+}
+
+/// People conservation across hosts and the coordinator, for `people`: each living one is
+/// either a body (in a running region, in a host's flight or mailbox, unsent or in transit
+/// between hosts — or only sent and unacknowledged), or abstract in the history, or
+/// absorbed at a seam with that report not handled by the coordinator yet — exactly one.
+/// `seen` maps the bodies' ids to their people (learned in the regions).
+fn assert_population(
+    rig: &mut MultiRig,
+    people: &[game::history::PersonId],
+    seen: &mut std::collections::BTreeMap<game::EntityId, game::history::PersonId>,
+) {
+    use std::collections::{BTreeMap, BTreeSet};
+    let mut places: BTreeMap<game::history::PersonId, usize> = BTreeMap::new();
+    let mut shadows: BTreeSet<game::history::PersonId> = BTreeSet::new();
+    for p in people {
+        for (_, _, id) in person_bodies(rig, *p) {
+            seen.insert(id, *p);
+            *places.entry(*p).or_default() += 1;
+        }
+    }
+    for r in &rig.hosts {
+        let m = &r.manager;
+        for (id, _) in m.in_flight_ids().into_iter().chain(m.pending_arrival_ids()) {
+            if let Some(p) = seen.get(&id) {
+                *places.entry(*p).or_default() += 1;
+            }
+        }
+        for (_, id, sent) in m.peer_unreceived_ids() {
+            if let Some(p) = seen.get(&id) {
+                if sent {
+                    shadows.insert(*p);
+                } else {
+                    *places.entry(*p).or_default() += 1;
+                }
+            }
+        }
+    }
+    for (ea, eb) in rig.links.values() {
+        for end in [ea, eb] {
+            for msg in end.lock().unwrap().transit() {
+                if let game::PeerMsg::Reliable { body: game::Reliable::Transfer { bundle, .. }, .. } = msg {
+                    if let game::EntityKind::Person { person } = bundle.kind {
+                        *places.entry(person).or_default() += 1;
+                    }
+                }
+            }
+        }
+    }
+    let pending = rig.coordinator_pending();
+    let core = rig.core();
+    for p in people {
+        let Some(q) = core.history().person(*p).filter(|q| q.alive()) else { continue };
+        let bodies = places.get(p).copied().unwrap_or(0);
+        let abstract_ = usize::from(!matches!(q.location, game::history::Location::InRegion(_)));
+        let absorbed = pending
+            .iter()
+            .filter(|m| matches!(m, game::HostMsg::PersonCrossed { person, delivered: false, .. } if person == p))
+            .count();
+        let total = bodies + abstract_ + absorbed;
+        // Only in a sent, unacknowledged transfer: the peer took it already (and may have
+        // absorbed it), or it was lost with a connection and is sent again.
+        let ok = if bodies == 0 && shadows.contains(p) { total <= 1 } else { total == 1 };
+        assert!(
+            ok,
+            "{p:?}: {bodies} bodies (unacknowledged: {}), abstract {abstract_} ({:?}), {absorbed} absorbed reports pending",
+            shadows.contains(p),
+            q.location
+        );
+    }
+}
+
+/// Every `PersonCrossed` of `person` host `h` sent its coordinator.
+fn crossings_reported(rig: &MultiRig, h: u32, person: game::history::PersonId) -> Vec<(RegionCoords, bool)> {
+    rig.sent_to_coordinator(h)
+        .into_iter()
+        .filter_map(|m| match m {
+            game::HostMsg::PersonCrossed { person: p, to, delivered } if p == person => Some((to, delivered)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A resident of `a` (site there, on host A) is put past the seam into `b` on host B —
+/// running (`running`) or parked: the body goes to host B, which alone reports the
+/// crossing (`PersonCrossed`, delivered or absorbed); people are conserved every round;
+/// the coordinator ends with the person embodied in `b`, or abstract.
+fn person_crosses(rig: &mut MultiRig, running: bool) {
+    let (a, b) = host_seam(2, 1);
+    let (ha, hb) = (rig.owner(a), rig.owner(b));
+    let (history, _, people) = history_with_site(a, 2);
+    rig.run(a);
+    rig.run(b);
+    if !running {
+        rig.park(b);
+    }
+    rig.with_coordinator(history);
+    let mut seen = std::collections::BTreeMap::new();
+    let mut spawned = false;
+    for _ in 0..CROSS_ROUNDS {
+        rig.round();
+        if people.iter().all(|p| person_bodies(rig, *p).len() == 1) && rig.coordinator_pending().is_empty() {
+            spawned = true;
+            break;
+        }
+    }
+    assert!(spawned, "the site's people never got their bodies in {a:?}");
+    assert_population(rig, &people, &mut seen);
+    let p = people[0];
+    let (h, rc, id) = person_bodies(rig, p)[0];
+    assert_eq!((h, rc), (ha, a));
+    assert!(rig.teleport(a, id, past_seam(a, b, REGION_SIZE / 2.0)), "{a:?} holds the body");
+    let mut settled = false;
+    for _ in 0..CROSS_ROUNDS {
+        rig.round();
+        assert_population(rig, &people, &mut seen);
+        let bodies: Vec<(u32, RegionCoords)> = person_bodies(rig, p).into_iter().map(|(h, rc, _)| (h, rc)).collect();
+        let location = rig.core().history().person(p).unwrap().location;
+        let quiet = rig.coordinator_pending().is_empty() && rig.peer_unreceived() == 0;
+        let done = if running {
+            bodies == [(hb, b)] && location == game::history::Location::InRegion(b)
+        } else {
+            bodies.is_empty() && !matches!(location, game::history::Location::InRegion(_))
+        };
+        if quiet && done {
+            settled = true;
+            break;
+        }
+    }
+    assert!(settled, "the crossing never settled (running {running}): bodies {:?}", person_bodies(rig, p));
+    assert_eq!(crossings_reported(rig, hb, p), vec![(b, running)], "the receiving host reported the crossing once");
+    assert!(crossings_reported(rig, ha, p).is_empty(), "the sending host reported nothing");
+    for _ in 0..WAIT_ROUNDS {
+        rig.round();
+        assert_population(rig, &people, &mut seen);
+    }
+    assert_eq!(person_bodies(rig, people[1]).iter().map(|(h, rc, _)| (*h, *rc)).collect::<Vec<_>>(), [(ha, a)]);
+}
+
+fn person_into_running(rig: &mut MultiRig) {
+    person_crosses(rig, true);
+}
+
+fn person_into_parked(rig: &mut MultiRig) {
+    person_crosses(rig, false);
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn person_crosses_host_seam_into_a_running_region() {
+    sweep("person_crosses_host_seam_into_a_running_region", 2, 1, SEEDS / 2, person_into_running);
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn person_crosses_host_seam_into_a_parked_region() {
+    sweep("person_crosses_host_seam_into_a_parked_region", 2, 1, SEEDS / 2, person_into_parked);
+}
+
+/// A second player's session id, and the player.
+const P2_CLIENT: game::ClientId = 9;
+const P2_PLAYER: game::PlayerId = game::PlayerId(101);
+
+/// The `EmbarkResult`s host `h` sent `client` since recording began.
+fn embark_results_to(rig: &MultiRig, h: u32, client: game::ClientId) -> Vec<Result<game::history::SiteId, game::history::EmbarkRefusal>> {
+    let seen = rig.hosts[h as usize].packets_seen.as_ref().expect("recording packets");
+    seen.iter()
+        .filter_map(|(to, p)| match p {
+            game::ServerPacket::EmbarkResult(r) if *to == Some(client) => Some(*r),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Rounds until `done` (at most [`CROSS_ROUNDS`]); panics naming `what`.
+fn rounds_until(rig: &mut MultiRig, what: &str, mut done: impl FnMut(&mut MultiRig) -> bool) {
+    for _ in 0..CROSS_ROUNDS {
+        if done(rig) {
+            return;
+        }
+        rig.round();
+    }
+    assert!(done(rig), "never: {what}");
+}
+
+/// The coordinator has handled everything the hosts sent, and they everything it sent.
+fn coordinator_quiet(rig: &MultiRig) -> bool {
+    rig.coordinator_pending().is_empty()
+        && rig.hosts.iter().all(|r| r.manager.world_link().and_then(|l| l.as_inline()).is_none_or(|l| l.in_transit() == 0))
+}
+
+/// The test player embarks (through the real coordinator) into `a`, where it stands, then
+/// walks over the host seam into `b`: its claim goes along — the coordinator has it online
+/// on the NEW host (every seed: its `PlayerOnline` and the old host's `PlayerOffline`
+/// arrive in either order) and another player's return to its fortress is refused
+/// `InUse`; once it disconnects on the new host, that return succeeds.
+fn claim_travels(rig: &mut MultiRig) {
+    let (a, b) = host_seam(2, 1);
+    let (ha, hb) = (rig.owner(a), rig.owner(b));
+    let (history, civ, founders) = history_with_site(FAR_SITE, 4);
+    rig.run(a);
+    rig.run(b);
+    rig.with_coordinator(history);
+    rig.record_packets();
+    rig.connect_everywhere(ha, P_CLIENT, P_PLAYER, centre_of(a));
+    let (_, _, id) = until_body(rig);
+    let req = game::EmbarkRequest { civ, people: founders[0..2].to_vec(), region: a };
+    rig.hosts[ha as usize].event(game::ServerEvent::ClientPacket(game::ClientPacket::Embark(req), P_CLIENT));
+    rounds_until(rig, "the embark is answered", |rig| !embark_results_to(rig, ha, P_CLIENT).is_empty());
+    let site = embark_results_to(rig, ha, P_CLIENT)[0].expect("embarked");
+    assert_eq!(rig.hosts[ha as usize].manager.client_claim(P_CLIENT), Some(game::Claim::Fortress(site)));
+    assert!(rig.teleport(a, id, past_seam(a, b, REGION_SIZE / 2.0)), "{a:?} holds the body");
+    until_player_settled_in(rig, b);
+    rounds_until(rig, "the coordinator settles", |rig| coordinator_quiet(rig));
+    assert_eq!(rig.hosts[hb as usize].manager.client_claim(P_CLIENT), Some(game::Claim::Fortress(site)));
+    assert_eq!(rig.hosts[ha as usize].manager.client_claim(P_CLIENT), None);
+    {
+        let core = rig.core();
+        assert_eq!(core.online_on(P_PLAYER), Some(hb), "online on the new host");
+        assert_eq!(core.claim_of(P_PLAYER), Some(game::Claim::Fortress(site)));
+    }
+    // Another player, on the old host, asks for the fortress: in use.
+    rig.connect_home(ha, P2_CLIENT, P2_PLAYER, centre_of(a));
+    rounds_until(rig, "the second player is placed", |rig| !rig.player_owners(P2_CLIENT).is_empty());
+    let ask = |rig: &mut MultiRig| {
+        rig.hosts[ha as usize].event(game::ServerEvent::ClientPacket(game::ClientPacket::ReturnTo(site), P2_CLIENT))
+    };
+    ask(rig);
+    rounds_until(rig, "the return is answered", |rig| !embark_results_to(rig, ha, P2_CLIENT).is_empty());
+    assert_eq!(embark_results_to(rig, ha, P2_CLIENT), vec![Err(game::history::EmbarkRefusal::InUse)]);
+    // The player leaves the new host: the fortress is free.
+    rig.disconnect(hb, P_CLIENT);
+    rounds_until(rig, "the player is offline", |rig| rig.core().online_on(P_PLAYER).is_none() && coordinator_quiet(rig));
+    ask(rig);
+    rounds_until(rig, "the second return is answered", |rig| embark_results_to(rig, ha, P2_CLIENT).len() == 2);
+    assert_eq!(embark_results_to(rig, ha, P2_CLIENT)[1], Ok(site));
+    rounds_until(rig, "the coordinator settles", |rig| coordinator_quiet(rig));
+    assert_eq!(rig.core().claim_of(P2_PLAYER), Some(game::Claim::Fortress(site)));
+    assert_eq!(rig.core().claim_of(P_PLAYER), None, "the offline claimant lost it");
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn claim_travels_with_the_player_across_hosts() {
+    sweep("claim_travels_with_the_player_across_hosts", 2, 1, SEEDS / 2, claim_travels);
+}
+
+/// The test player on host A embarks (through the real coordinator) into `b`, a region of
+/// host B — running there already (`running`: the founding's spawn directives) or not
+/// (its start's catch-up): the founding party's bodies stand in `b` on host B only, host
+/// B knows the new site's region, and the claim is held on host B only.
+fn embark_foreign_founders(rig: &mut MultiRig, running: bool) {
+    let (a, b) = host_seam(2, 1);
+    let (ha, hb) = (rig.owner(a), rig.owner(b));
+    let (history, civ, founders) = history_with_site(FAR_SITE, 4);
+    rig.run(a);
+    if running {
+        rig.run(b);
+    }
+    rig.with_coordinator(history);
+    rig.record_packets();
+    rig.connect_everywhere(ha, P_CLIENT, P_PLAYER, centre_of(a));
+    until_body(rig);
+    let party = founders[0..2].to_vec();
+    let req = game::EmbarkRequest { civ, people: party.clone(), region: b };
+    rig.hosts[ha as usize].event(game::ServerEvent::ClientPacket(game::ClientPacket::Embark(req), P_CLIENT));
+    until_player_settled_in(rig, b);
+    let site = embark_results_to(rig, ha, P_CLIENT).first().copied().expect("answered").expect("embarked");
+    rounds_until(rig, "the founders stand in their fortress", |rig| {
+        party.iter().all(|p| person_bodies(rig, *p).iter().map(|(h, rc, _)| (*h, *rc)).collect::<Vec<_>>() == [(hb, b)])
+            && coordinator_quiet(rig)
+    });
+    assert_moved(rig, ha, hb, b, Some(game::Claim::Fortress(site)));
+    for p in &party {
+        let at: Vec<(u32, RegionCoords)> = person_bodies(rig, *p).iter().map(|(h, rc, _)| (*h, *rc)).collect();
+        assert_eq!(at, [(hb, b)], "{p:?} stands in {b:?} on host {hb}, once");
+        assert_eq!(rig.core().history().person(*p).unwrap().location, game::history::Location::InRegion(b));
+    }
+    assert_eq!(rig.hosts[hb as usize].manager.site_region(site), Some(b), "host {hb} knows the new site");
+    assert_eq!(rig.core().online_on(P_PLAYER), Some(hb));
+    assert_eq!(rig.core().claim_of(P_PLAYER), Some(game::Claim::Fortress(site)));
+}
+
+fn embark_foreign_running(rig: &mut MultiRig) {
+    embark_foreign_founders(rig, true);
+}
+
+fn embark_foreign_parked(rig: &mut MultiRig) {
+    embark_foreign_founders(rig, false);
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn embark_into_a_foreign_host_spawns_the_founders_there() {
+    sweep("embark_into_a_foreign_host_spawns_the_founders_there (running)", 2, 1, SEEDS / 4, embark_foreign_running);
+    sweep("embark_into_a_foreign_host_spawns_the_founders_there (parked)", 2, 1, SEEDS / 4, embark_foreign_parked);
+}

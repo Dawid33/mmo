@@ -303,6 +303,17 @@ macro_rules! engine_rows {
                     .collect()
             }
 
+            /// The highest epoch of the super-regions `owner` holds: its claim epoch
+            /// (`Fence::claim_epoch`) while its claim stands; `None` if it holds none.
+            pub(crate) async fn owner_claim_epoch(pool: &Pool, owner: u32) -> Result<Option<u64>, StoreError> {
+                let e: Option<i64> = sqlx::query("SELECT MAX(epoch) FROM super_regions WHERE owner = $1")
+                    .bind(i64::from(owner))
+                    .fetch_one(pool)
+                    .await?
+                    .try_get(0)?;
+                Ok(e.map(u))
+            }
+
             /// `world.generation`.
             pub(crate) async fn world_generation(pool: &Pool) -> Result<u64, StoreError> {
                 let g: i64 = sqlx::query("SELECT generation FROM world WHERE id = 1")

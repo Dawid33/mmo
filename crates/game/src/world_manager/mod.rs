@@ -728,6 +728,9 @@ pub struct WorldManager<S: RegionSpawner> {
     /// The link's [`WorldLink::generation`] when the host last looked: a change while up
     /// is a reconnect.
     world_generation: u64,
+    /// The world generation this host process runs ([`Self::set_host_generation`]), sent
+    /// in its `Attach`.
+    host_generation: u64,
     /// Random per host process start ([`Self::set_world_link`]): requests' ids stay unique
     /// across restarts.
     world_boot: u64,
@@ -741,6 +744,13 @@ pub struct WorldManager<S: RegionSpawner> {
     /// (`ReleaseClaim`; the site stays). They never age: a claim the player does not
     /// know it holds would refuse its every embark.
     expired_requests: BTreeMap<RequestId, (PlayerId, WorldRequest)>,
+    /// Per player, how often its claim changed here by the host's own doing (a release
+    /// sent, a granting reply applied), and that count as of its last report to the
+    /// coordinator (`PlayerOnline`, the `Attach`): a `ClaimIs` answering a report the
+    /// player's claim has changed since is stale (the change is on its way to the
+    /// coordinator, which decided or will apply it) and is ignored.
+    claim_changes: BTreeMap<PlayerId, u64>,
+    claim_reported: BTreeMap<PlayerId, u64>,
     /// Requests and claim messages made while the link is down (or the `Attach` is being
     /// gathered), in order: sent right after the `Attach`.
     outbox: VecDeque<HostMsg>,
@@ -994,10 +1004,13 @@ impl<S: RegionSpawner> WorldManager<S> {
             world_attach: WorldAttach::Down,
             attach_epoch: 0,
             world_generation: 0,
+            host_generation: 0,
             world_boot: 0,
             next_request_seq: 0,
             pending_requests: BTreeMap::new(),
             expired_requests: BTreeMap::new(),
+            claim_changes: BTreeMap::new(),
+            claim_reported: BTreeMap::new(),
             outbox: VecDeque::new(),
             world_request_timeout_ms: WORLD_REQUEST_TIMEOUT_SECS * 1000,
             world_counters: WorldLinkCounters::default(),
@@ -2863,7 +2876,9 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// history still knows it.
     fn restore_player(&mut self, id: ClientId, record: PlayerRecord, now_ms: u64) {
         let region = record.region;
-        // Before the coordinator's first view the host cannot tell: the claim stands.
+        // Before the coordinator's first view the host cannot tell: the claim stands. The
+        // filter is only this host's early guess (another host's player may hold the
+        // fortress): the coordinator's answer to `PlayerOnline` is final (`ClaimIs`).
         let known = |site: SiteId| self.world_view.is_none() || self.site_regions.contains_key(&site);
         let fortress = record
             .fortress

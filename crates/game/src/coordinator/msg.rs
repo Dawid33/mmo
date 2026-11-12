@@ -100,8 +100,10 @@ pub enum HostMsg {
     /// online, superseding whatever lifecycle messages were lost while the link was down.
     /// `epoch` counts the host's attaches; the coordinator echoes it first
     /// ([`CoordMsg::Attached`]), so the host knows which of its messages were decided
-    /// before the attach (stale) and which after.
-    Attach { host: u32, epoch: u64, running: Vec<RunningRegion>, online: Vec<OnlinePlayer> },
+    /// before the attach (stale) and which after. `generation`: the world generation the
+    /// host process runs (a coordinator runtime refuses an `Attach` of a lower one than the
+    /// store's: a stale host process about to exit).
+    Attach { host: u32, epoch: u64, running: Vec<RunningRegion>, online: Vec<OnlinePlayer>, generation: u64 },
     /// Region `rc` started (its `incarnation`-th start on the host): answered with
     /// [`CoordMsg::SpawnPeople`] for that incarnation.
     RegionStarted { rc: RegionCoords, incarnation: u64 },
@@ -133,6 +135,16 @@ pub enum HostMsg {
     ReleaseClaim { player: PlayerId },
 }
 
+/// Where a coordinator message goes ([`crate::coordinator::Coordinator::take_out`]).
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Target {
+    /// One host (by ordinal): a reply or claim answer to the host that asked, a region's
+    /// messages to the host that runs it, an attach's echo and view to the host attaching.
+    Host(u32),
+    /// Every host (the world's view, the calendar, the sites).
+    Every,
+}
+
 /// Coordinator → host.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub enum CoordMsg {
@@ -158,9 +170,10 @@ pub enum CoordMsg {
     /// get [`CoordMsg::Sites`] at the day's turn, but the host's view reaches a player who
     /// retires or ends an adventure and every new connection straight away.
     SiteMarkers(Vec<SiteMarker>),
-    /// The host reported `player` online holding fortress `site`, which another online
-    /// player holds: the host drops it from the player (the fortress is not theirs).
-    FortressRefused { player: PlayerId, site: SiteId },
+    /// The claim the host reported for `player` (`PlayerOnline`, or an `Attach`'s online
+    /// entry) differs from the coordinator's, which is final: the host sets the player's
+    /// claim to exactly `claim` and tells its client. Sent to the reporting host only.
+    ClaimIs { player: PlayerId, claim: Option<Claim> },
     /// A history log line for the clients whose home is `region`.
     Notice { region: RegionCoords, line: String },
     /// The coordinator has applied the host's [`HostMsg::Attach`] of this `epoch`: every
