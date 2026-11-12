@@ -768,7 +768,10 @@ impl<S: RegionSpawner> WorldManager<S> {
             .filter(|(ordinal, _, _)| !participants.contains(ordinal))
             .filter(|(ordinal, id, _)| !self.peer_in_source_view.contains(&(*ordinal, *id)))
             .filter_map(|(_, _, r)| match r.inner() {
-                // A player handed over or moved is a record (`cut_peer_players`), not a row.
+                // A person is never a row (the history respawns people, as `cut_crossing`
+                // drops them); a player handed over or moved is a record
+                // (`cut_peer_players`), not a row.
+                Reliable::Transfer { bundle, .. } if matches!(bundle.kind, EntityKind::Person { .. }) => None,
                 Reliable::Transfer { target, stamp, bundle, player: None } => {
                     Some(InFlightRow::Transfer { target: *target, bundle: (**bundle).clone(), stamp: *stamp })
                 }
@@ -1024,6 +1027,12 @@ impl<S: RegionSpawner> WorldManager<S> {
                 self.inbound_accounted = lineage;
             }
             msg => {
+                if msg.is_state() && self.after_mark_failed(from) {
+                    log::warn!(
+                        "[server] host {from} sent a bare {} after its mark of a world cut that failed here; applied",
+                        reliable_name(&msg)
+                    );
+                }
                 if msg.is_state() && self.after_mark(from) {
                     log::error!(
                         "[server] host {from} sent a bare {} after its mark of the pending world cut: \

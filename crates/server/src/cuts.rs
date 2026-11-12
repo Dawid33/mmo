@@ -114,11 +114,22 @@ pub struct CutWriter {
     part: Option<WorldPart>,
     /// When a failing read of a world part's decision was last warned about.
     warned: Option<Instant>,
+    /// How long after its prepare a part with no decision stored is aborted by this host
+    /// ([`game::WORLD_CUT_DEADLINE_MS`]; a test shortens it).
+    part_deadline: Duration,
 }
 
 impl CutWriter {
     pub fn new(claims: HostClaims) -> Self {
-        CutWriter { claims, pending: Vec::new(), failed_in_a_row: 0, world: None, part: None, warned: None }
+        CutWriter {
+            claims,
+            pending: Vec::new(),
+            failed_in_a_row: 0,
+            world: None,
+            part: None,
+            warned: None,
+            part_deadline: Duration::from_millis(game::WORLD_CUT_DEADLINE_MS),
+        }
     }
 
     /// A writer of a host of several (`VOXEL_HOSTS` > 1): its world cut parts are staged
@@ -130,6 +141,12 @@ impl CutWriter {
     /// Whether this writer stages world cut parts (several hosts).
     pub fn world_cuts(&self) -> bool {
         self.world.is_some()
+    }
+
+    /// Test hook: the deadline after which this host aborts a part with no decision stored.
+    #[doc(hidden)]
+    pub fn set_world_part_deadline(&mut self, deadline: Duration) {
+        self.part_deadline = deadline;
     }
 
     /// The world part not settled yet, if any.
@@ -340,16 +357,31 @@ impl CutWriter {
             return;
         }
         if let Some(rx) = &part.aborting {
-            match rx.try_recv() {
+            let failed = match rx.try_recv() {
                 Err(TryRecvError::Empty) => return,
                 Ok(Ok(committed)) => {
-                    log::info!("[server] world cut {}: decided {committed} (this host's abort, or an earlier decision)", part.id.0)
+                    log::info!("[server] world cut {}: decided {committed} (this host's abort, or an earlier decision)", part.id.0);
+                    None
                 }
-                Ok(Err(e)) => log::warn!("[server] world cut {}: this host's abort could not be recorded ({e})", part.id.0),
-                Err(TryRecvError::Disconnected) => {}
-            }
+                Ok(Err(e)) => Some(e.to_string()),
+                Err(TryRecvError::Disconnected) => Some("the world-store thread has stopped".into()),
+            };
             part.aborting = None;
-            part.polled = None;
+            match failed {
+                // Recorded: read the decision at once.
+                None => part.polled = None,
+                // Not recorded: asked again after a poll interval, warned at most once per
+                // `WORLD_PART_WARN`.
+                Some(e) => {
+                    part.polled = Some(Instant::now());
+                    let id = part.id;
+                    if self.warned.is_none_or(|at| at.elapsed() >= WORLD_PART_WARN) {
+                        self.warned = Some(Instant::now());
+                        log::warn!("[server] world cut {}: this host's abort could not be recorded ({e}); trying again", id.0);
+                    }
+                    return;
+                }
+            }
         }
         if let Some(rx) = &part.deciding {
             let answer = match rx.try_recv() {
@@ -377,7 +409,7 @@ impl CutWriter {
                 Ok(None) => {
                     // Undecided in the store. Told it is aborted, or nothing heard past the
                     // deadline: abort it here (the first decision written wins).
-                    let late = part.since.elapsed() >= Duration::from_millis(game::WORLD_CUT_DEADLINE_MS);
+                    let late = part.since.elapsed() >= self.part_deadline;
                     if part.done == Some(false) || late {
                         log::warn!("[server] world cut {}: no decision stored; this host aborts it", id.0);
                         part.aborting = Some(self.claims.store().abort_cut_later(id, part.tick));

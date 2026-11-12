@@ -924,3 +924,25 @@ fn lost_cut_done_is_settled_from_the_store() {
     w.until_committed_after(&db, cut.0 as i64);
     w.stop(&dir);
 }
+
+/// Fix round 2: a host that hears nothing about its staged part past the deadline (the
+/// coordinator cannot store a decision, so it announces none) records the abort itself
+/// and settles; once decisions work again the next cut commits.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn host_hearing_nothing_past_the_deadline_aborts_the_cut_itself() {
+    install_props();
+    let Some(db) = PgDb::create("wdead") else { return };
+    let dir = scratch("wdead");
+    let mut w = world(&db, &dir);
+    w.store.fail_next_decisions(u32::MAX);
+    w.pair.sims[0].cuts.as_mut().unwrap().set_world_part_deadline(Duration::from_secs(2));
+    let cut = until_part(&mut w, 0, &["prepared"]);
+    assert_eq!(decision_of(&db, cut), None, "undecided");
+    w.pair.until("host 0 settled its part on its own", |p| p.sims[0].cuts.as_ref().unwrap().world_part().is_none());
+    assert_eq!(decision_of(&db, cut), Some(false), "host 0 recorded the abort past its deadline");
+    w.store.fail_next_decisions(0);
+    w.until_committed_after(&db, cut.0 as i64);
+    assert_eq!(prepared(&db), 0, "nothing stays prepared");
+    w.stop(&dir);
+}

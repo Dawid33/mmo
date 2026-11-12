@@ -136,6 +136,9 @@ pub(crate) struct PendingCut {
     /// arrival). This part's fallbacks (parked, passing through, unreceived hand-offs)
     /// never write them; a region snapshot or a crossing still does.
     pub not_ours: BTreeMap<PlayerId, Option<PlayerRecord>>,
+    /// The players of `not_ours` this host sent bare before its mark (the receiver's): one
+    /// that comes back bare is this host's again; one noted for a wrapped arrival is not.
+    pub sent_bare: BTreeSet<PlayerId>,
 }
 
 impl PendingCut {
@@ -152,6 +155,7 @@ impl PendingCut {
             parked_at_t: BTreeMap::new(),
             rows: Vec::new(),
             not_ours: BTreeMap::new(),
+            sent_bare: BTreeSet::new(),
         }
     }
 }

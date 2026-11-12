@@ -2,8 +2,18 @@
 //! controller's ruling `task-13-ruling.md`). The coordinator picks one world tick T
 //! ([`crate::CoordMsg::BeginCut`]); every participant snapshots its regions at T exactly as
 //! a one-phase cut does (`save_cut.rs`, [`WorldManager::begin_cut_at`]) and, once every
-//! region has answered, queues a [`Reliable::CutMark`] to every other participant. A
-//! host's part is complete when it also holds every other participant's mark.
+//! region has answered AND its world tick has reached T, queues a [`Reliable::CutMark`] to
+//! every other participant (checked on every answer and every upkeep, so an idle host
+//! marks at T). A host's part is complete when it also holds every other participant's
+//! mark.
+//!
+//! **The mark is never sent before T.** A host with no running region would otherwise
+//! mark at once, up to a whole lead early; a region it starts in that window starts before
+//! T, is asked for the cut, and sends before it answers — with its source not answered
+//! (`view == false`) but after the mark. Marking no earlier than T, everything a region
+//! sends before its answer goes before the mark (bare, the receiver's), and everything
+//! after the mark left a region that had answered (`view`): no region-sourced message is
+//! ever case 3 below.
 //!
 //! **Who accounts for a state message on the wire at T: the message says.** A state
 //! message (transfer, with or without a player; player move; intent or reply) M from host
@@ -14,8 +24,9 @@
 //! 2. not `view`, A's mark not queued yet → sent bare: B's (its snapshot if applied by T,
 //!    else B's row / record). A's snapshot never held it (it left before its source's
 //!    state was captured).
-//! 3. not `view`, A's mark already queued (a manager-made message: a refusal of an intent
-//!    that came after the mark, a region started after the marks) → A keeps it in its own
+//! 3. not `view`, A's mark already queued — only a message the manager makes (a refusal of
+//!    an intent that came after the mark; transfers and moves are kept here defensively:
+//!    no path makes one after the mark today) → A keeps it in its own
 //!    part — a row (transfer, intent, reply) or a player record (hand-off, move) — raises
 //!    its stamp / due to at least T (no receiver region applies it before its snapshot) and
 //!    sends it wrapped.
@@ -23,10 +34,12 @@
 //! while a wrapped one is applied carries the same wrapper (its lineage is accounted).
 //!
 //! The receiver applies a wrapped M normally but notes what it creates as accounted for by
-//! the sender in K (`accounted_in` on the entry, `accounted_players`): never written by
-//! this host's part of K — also when the wrapper arrives before this host's `BeginCut`. A
-//! bare state message after a participant's mark of the pending cut is a protocol
-//! violation: applied, and the part fails.
+//! the sender in K (`in_source_view`, `accounted_in` on the entry, `not_ours` for a
+//! player): never written by this host's part of K. A wrapper of K that arrives before
+//! this host's `BeginCut { K }` makes this host miss K (`wrapper_seen`: a peer's region is
+//! already past T). A bare state message after a participant's mark of the pending cut is
+//! a protocol violation: applied, and the part fails. A player this host sent bare and
+//! that comes back bare is this host's again (`sent_bare`).
 //!
 //! For each state message exactly one of (bare, before the mark: B's), (wrapped case 1:
 //! A's snapshot), (wrapped case 3: A's row / record) holds, so restoring every host from K
@@ -248,11 +261,18 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// Every region answered pending cut `id`: for a world cut, this host's marks are
     /// queued now; whether every participant's mark is in (a one-phase cut: always).
     pub(super) fn world_cut_marks_in(&mut self, id: CutId) -> bool {
+        let world_tick = self.spawner.world_tick();
         let Some(run) = self.world_cut.as_mut().filter(|r| r.cut == id) else { return true };
+        if !run.mark_sent && world_tick < run.tick {
+            // Never before T (the module docs); the upkeep tries again.
+            return false;
+        }
         if !run.mark_sent {
             run.mark_sent = true;
             let peers: Vec<u32> = run.peers.iter().copied().collect();
             log::debug!("[server] world cut {}: every region answered; marks to {peers:?}", id.0);
+            let now = self.spawner.world_tick();
+            self.marks_queued.push((id, now));
             for p in peers {
                 self.queue_now(p, Reliable::CutMark { cut: id });
             }
@@ -294,6 +314,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                 if let Some(player) = reliable_player(&msg) {
                     if let Some(pending) = self.pending_cut.as_mut() {
                         pending.not_ours.insert(player, None);
+                        pending.sent_bare.insert(player);
                     }
                 }
                 (msg, None)
@@ -308,8 +329,13 @@ impl<S: RegionSpawner> WorldManager<S> {
 
     /// Case 3: `msg`, sent after this host's mark and in no snapshot of it, is this part's —
     /// an in-flight row, or a player's record.
+    ///
+    /// Only a manager-made message gets here (marks wait for T, so a region-sourced one is
+    /// never case 3): the transfer and player branches are defensive. A person's bundle is
+    /// never a row (the history respawns people, as for `cut_crossing`).
     fn keep_in_part(&mut self, msg: &Reliable) {
         let row = match msg {
+            Reliable::Transfer { bundle, .. } if matches!(bundle.kind, crate::EntityKind::Person { .. }) => None,
             Reliable::Transfer { target, stamp, bundle, player: None } => {
                 Some(InFlightRow::Transfer { target: *target, bundle: (**bundle).clone(), stamp: *stamp })
             }
@@ -357,16 +383,27 @@ impl<S: RegionSpawner> WorldManager<S> {
         if let Some(pending) = self.pending_cut.as_mut().filter(|c| c.id == cut) {
             let had = pending.transit_players.get(&player).or(pending.parked_at_t.get(&player)).cloned();
             pending.not_ours.entry(player).or_insert(had);
+            // Its sender accounts for it now, whatever this host sent before.
+            pending.sent_bare.remove(&player);
         }
     }
 
-    /// A BARE player-bearing `msg` arrived: the player is this host's in the pending cut
-    /// (it may have left bare before — case 2 noted it as the receiver's).
+    /// A BARE player-bearing `msg` arrived: a player this host sent bare (case 2 noted it
+    /// as the receiver's) is this host's again in the pending cut. A note made because a
+    /// wrapped message brought it stays.
     pub(super) fn note_player_returned(&mut self, msg: &Reliable) {
         let Some(player) = reliable_player(msg) else { return };
         if let Some(pending) = self.pending_cut.as_mut() {
-            pending.not_ours.remove(&player);
+            if pending.sent_bare.remove(&player) {
+                pending.not_ours.remove(&player);
+            }
         }
+    }
+
+    /// Whether `from`'s mark of this host's world cut came in while the part has failed
+    /// here (a bare message after it is expected then: the cut is dead).
+    pub(super) fn after_mark_failed(&self, from: u32) -> bool {
+        self.world_cut.as_ref().is_some_and(|r| r.state == PartState::Failed && r.marks_in.contains(&from))
     }
 
     /// Whether `from`'s mark of the pending world cut came in (and the part is not complete).
@@ -419,6 +456,13 @@ impl<S: RegionSpawner> WorldManager<S> {
     #[doc(hidden)]
     pub fn in_flight_accounted(&self) -> Vec<(crate::EntityId, Option<CutId>)> {
         self.in_flight.iter().map(|(id, f)| (*id, f.accounted_in)).collect()
+    }
+
+    /// Test support: every world cut this host queued its marks of, with the world tick it
+    /// did so at.
+    #[doc(hidden)]
+    pub fn marks_queued(&self) -> &[(CutId, crate::Tick)] {
+        &self.marks_queued
     }
 
     /// Test support: the pending world cut part's state, as text (`None`: none).

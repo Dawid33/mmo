@@ -1028,6 +1028,9 @@ pub struct WorldManager<S: RegionSpawner> {
     /// while that cut was not pending here: this host is too late for it — a `BeginCut` of
     /// it (or an earlier one) is answered `Missed` (`world_cut.rs`).
     wrapper_seen: Option<CutId>,
+    /// Every world cut this host queued its marks of, with the world tick it did so at
+    /// (test support: [`Self::marks_queued`]).
+    marks_queued: Vec<(CutId, crate::Tick)>,
     /// Decided world cuts for the server ([`Self::take_world_cut_done`]).
     world_cut_done: Vec<(CutId, bool)>,
     /// While a wrapped peer message ([`crate::Reliable::InCut`]) is applied: its cut. What
@@ -1145,6 +1148,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             world_cut_seen: None,
             early_marks: BTreeMap::new(),
             wrapper_seen: None,
+            marks_queued: Vec::new(),
             world_cut_done: Vec::new(),
             inbound_accounted: None,
         }
@@ -1804,6 +1808,8 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.clock_ms = self.clock_ms.max(now_ms);
         self.world_ms = self.world_ms.max(now_ms);
         self.expire_overdue_cut();
+        // A world cut whose regions all answered marks once the world tick reaches it.
+        self.try_complete_cut();
         self.retry_unavailable();
         self.expire_world_requests(now_ms);
         self.warn_attach_stragglers(now_ms);
