@@ -735,6 +735,9 @@ pub struct WorldManager<S: RegionSpawner> {
     /// across restarts.
     world_boot: u64,
     next_request_seq: u64,
+    /// The watermark last acknowledged to the coordinator (`Settled`, the `Attach`'s
+    /// `settled_below`): every request of this boot below it is answered and applied.
+    settled_below: u64,
     /// Player world requests not answered yet.
     pending_requests: BTreeMap<RequestId, PendingRequest>,
     /// State-changing requests (embark, return, adventure start) that had been sent when
@@ -1009,6 +1012,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             host_generation: 0,
             world_boot: 0,
             next_request_seq: 0,
+            settled_below: 0,
             pending_requests: BTreeMap::new(),
             expired_requests: BTreeMap::new(),
             claim_seq: 0,

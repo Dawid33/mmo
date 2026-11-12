@@ -219,8 +219,9 @@ fn describe(msg: &CoordMsg) -> String {
 /// A host message's kind and region, for logs (an `Attach` or `Positions` can be large).
 pub(crate) fn describe_host(msg: &HostMsg) -> String {
     match msg {
-        HostMsg::Attach { host, epoch, running, online, generation } => format!(
-            "Attach {{ host: {host}, epoch: {epoch}, generation: {generation} }} ({} regions, {} online)",
+        HostMsg::Attach { host, epoch, running, online, generation, boot, settled_below } => format!(
+            "Attach {{ host: {host}, epoch: {epoch}, generation: {generation}, boot: {boot}, settled_below: {settled_below} }} \
+             ({} regions, {} online)",
             running.len(),
             online.len()
         ),
@@ -236,6 +237,7 @@ pub(crate) fn describe_host(msg: &HostMsg) -> String {
         }
         HostMsg::Request { id, .. } => format!("Request {id:?}"),
         HostMsg::Settle { id, .. } => format!("Settle {id:?}"),
+        HostMsg::Settled { boot, below } => format!("Settled {{ boot: {boot}, below: {below} }}"),
         HostMsg::PlayerOnline(p) => format!("PlayerOnline {:?}", p.player),
         HostMsg::PlayerOffline { player } => format!("PlayerOffline {player:?}"),
         HostMsg::ReleaseClaim { player } => format!("ReleaseClaim {player:?}"),
@@ -930,7 +932,7 @@ mod tests {
     use game::RequestId;
 
     fn attach(host: u32, epoch: u64) -> HostMsg {
-        HostMsg::Attach { host, epoch, running: Vec::new(), online: Vec::new(), generation: 0 }
+        HostMsg::Attach { host, epoch, running: Vec::new(), online: Vec::new(), generation: 0, boot: 1, settled_below: 0 }
     }
 
     /// Any ordinal is served, each with one live connection; a hello whose claim epoch is

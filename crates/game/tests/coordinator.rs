@@ -306,7 +306,7 @@ fn reattach_keeps_bodies_and_despawns_the_dead() {
     let mut c = Coordinator::from_state(state, grid(), 60_000).expect("state loads");
     assert!(matches!(c.take_msgs().as_slice(), [CoordMsg::View { .. }]));
     let running = RunningRegion { rc: r, incarnation: 1, people: vec![(p, [1.0, 2.0, 3.0]), (q, [4.0, 5.0, 6.0])] };
-    c.handle(0, HostMsg::Attach { host: 0, epoch: 1, running: vec![running], online: Vec::new(), generation: 0 }, 60_000);
+    c.handle(0, HostMsg::Attach { host: 0, epoch: 1, running: vec![running], online: Vec::new(), generation: 0, boot: 7, settled_below: 0 }, 60_000);
     let out = commit(&mut c);
     assert!(!out.iter().any(|m| matches!(m, CoordMsg::SpawnPeople { .. })), "a reattach spawns nothing: {out:?}");
     assert_eq!(events_about(&out, q), Vec::<GameEventKind>::new(), "Q's body stands");
@@ -507,7 +507,7 @@ fn attach_of_an_unannounced_region_spawns_its_residents_once() {
     let (mut c, _, people) = coordinator();
     let r = rc(0, 0);
     let running = |bodies: Vec<(PersonId, [f32; 3])>| RunningRegion { rc: r, incarnation: 1, people: bodies };
-    c.handle(0, HostMsg::Attach { host: 0, epoch: 1, running: vec![running(Vec::new())], online: Vec::new(), generation: 0 }, 0);
+    c.handle(0, HostMsg::Attach { host: 0, epoch: 1, running: vec![running(Vec::new())], online: Vec::new(), generation: 0, boot: 7, settled_below: 0 }, 0);
     let out = commit(&mut c);
     let attached = out.iter().position(|m| matches!(m, CoordMsg::Attached { epoch: 1 })).expect("the echo");
     for p in &people {
@@ -516,7 +516,7 @@ fn attach_of_an_unannounced_region_spawns_its_residents_once() {
     }
     // Re-attached with every body there: nothing more.
     let bodies: Vec<(PersonId, [f32; 3])> = people.iter().map(|p| (*p, [0.0; 3])).collect();
-    c.handle(0, HostMsg::Attach { host: 0, epoch: 2, running: vec![running(bodies)], online: Vec::new(), generation: 0 }, 0);
+    c.handle(0, HostMsg::Attach { host: 0, epoch: 2, running: vec![running(bodies)], online: Vec::new(), generation: 0, boot: 7, settled_below: 0 }, 0);
     let out = commit(&mut c);
     assert!(directives_for(&out, r).is_empty(), "{out:?}");
 }
@@ -549,7 +549,7 @@ fn crossing_held_behind_the_attach_keeps_one_body() {
         RunningRegion { rc: a, incarnation: 1, people: a_list },
         RunningRegion { rc: b, incarnation: 1, people: vec![(p, at)] },
     ];
-    c.handle(0, HostMsg::Attach { host: 0, epoch: 1, running, online: Vec::new(), generation: 0 }, 0);
+    c.handle(0, HostMsg::Attach { host: 0, epoch: 1, running, online: Vec::new(), generation: 0, boot: 7, settled_below: 0 }, 0);
     let out = commit(&mut c);
     count(p, &out, &mut p_bodies);
     count(q, &out, &mut q_bodies);
@@ -584,7 +584,7 @@ fn attach_supersedes_unsent_directives() {
     // The link dropped; the host re-attaches running `r` with no body of P.
     let running = RunningRegion { rc: r, incarnation: 1, people: Vec::new() };
     let online = vec![OnlinePlayer { player: A, claim: None, claim_pending: true, report: 1 }];
-    c.handle(0, HostMsg::Attach { host: 0, epoch: 1, running: vec![running], online, generation: 0 }, 0);
+    c.handle(0, HostMsg::Attach { host: 0, epoch: 1, running: vec![running], online, generation: 0, boot: 7, settled_below: 0 }, 0);
     let out = commit(&mut c);
     let attached = out.iter().position(|m| matches!(m, CoordMsg::Attached { epoch: 1 })).expect("the echo");
     assert!(directives_for(&out[..attached], r).is_empty(), "the stale spawn is dropped: {out:?}");
@@ -620,7 +620,7 @@ fn reattach_keeps_a_body_that_crossed_between_listed_regions() {
         if order {
             running.reverse();
         }
-        c.handle(0, HostMsg::Attach { host: 0, epoch: 1, running, online: Vec::new(), generation: 0 }, 0);
+        c.handle(0, HostMsg::Attach { host: 0, epoch: 1, running, online: Vec::new(), generation: 0, boot: 7, settled_below: 0 }, 0);
         let out = commit(&mut c);
         assert_eq!(body_delta(&out, p), 0, "order {order}: no despawn of P's only body: {out:?}");
         assert_eq!(c.history().person(p).unwrap().location, Location::InRegion(r1), "order {order}");
@@ -783,7 +783,7 @@ fn commit_routed(c: &mut Coordinator) -> Vec<(Target, CoordMsg)> {
 }
 
 fn attach(host: u32, epoch: u64, running: Vec<RunningRegion>, online: Vec<OnlinePlayer>) -> HostMsg {
-    HostMsg::Attach { host, epoch, running, online, generation: 0 }
+    HostMsg::Attach { host, epoch, running, online, generation: 0, boot: 7, settled_below: 0 }
 }
 
 fn report(player: PlayerId, claim: Option<Claim>, claim_pending: bool) -> OnlinePlayer {
@@ -1034,4 +1034,91 @@ fn notice_and_directive_go_to_the_regions_host() {
     let notices: Vec<Target> =
         out.iter().filter(|(_, m)| matches!(m, CoordMsg::Notice { region, .. } if *region == rc(14, 0))).map(|(t, _)| *t).collect();
     assert_eq!(notices, vec![Target::Every], "{out:?}");
+}
+
+// ---- The answer memo, pruned by acknowledgement (R3 Task 11) -------------------------
+
+/// The memoised request ids, oldest first.
+fn memo_ids(c: &Coordinator) -> Vec<RequestId> {
+    c.state().memo.into_iter().map(|(id, _)| id).collect()
+}
+
+fn request_as(id: RequestId, player: PlayerId, req: WorldRequest) -> HostMsg {
+    HostMsg::Request { id, player, req }
+}
+
+/// More answers than the old count cap, none settled: every one is kept, so a replay of
+/// the first still finds its `Embarked` and founds nothing.
+#[test]
+fn memo_keeps_unsettled_answers_past_the_old_cap() {
+    let (mut c, civ, people) = coordinator();
+    c.handle(0, embark(1, A, civ, &people[0..2], rc(8, 0)), 0);
+    let first = reply_to(&commit(&mut c), 1);
+    assert!(matches!(first, WorldReply::Embarked { .. }), "{first:?}");
+    let sites = c.history().sites().count();
+    for seq in 2..=ANSWERED_MEMO_MAX as u64 + 1 {
+        c.handle(0, embark(seq, A, civ, &people[2..4], rc(14, 0)), 0);
+        c.take_out();
+    }
+    commit(&mut c);
+    assert_eq!(memo_ids(&c).len(), ANSWERED_MEMO_MAX + 1, "nothing unsettled is forgotten");
+    c.handle(0, embark(1, A, civ, &people[0..2], rc(8, 0)), 0);
+    assert_eq!(reply_to(&commit(&mut c), 1), first, "the first answer is replayed");
+    assert_eq!(c.history().sites().count(), sites, "and founds nothing");
+}
+
+/// `Settled { boot, below }` from a host removes exactly that host's entries of that boot
+/// below the watermark; an `Attach`'s `settled_below` does the same.
+#[test]
+fn settled_watermark_prunes_exactly_below() {
+    let (mut c, civ, people) = coordinator();
+    for seq in 1..=4 {
+        c.handle(0, embark(seq, A, civ, &people[0..2], rc(8, 0)), 0);
+    }
+    let other_host = RequestId { host: 1, boot: 7, seq: 1 };
+    c.handle(1, request_as(other_host, B, WorldRequest::StartAdventure(SiteId(0))), 0);
+    commit(&mut c);
+    assert_eq!(memo_ids(&c).len(), 5);
+    c.handle(0, HostMsg::Settled { boot: 7, below: 3 }, 0);
+    assert_eq!(memo_ids(&c), vec![rid(3), rid(4), other_host], "seq 1 and 2 of host 0 go");
+    // From host 1: its own entries only (none of boot 7 below 1 … then all of them).
+    c.handle(1, HostMsg::Settled { boot: 7, below: 1 }, 0);
+    assert_eq!(memo_ids(&c), vec![rid(3), rid(4), other_host]);
+    c.handle(0, attach(0, 1, Vec::new(), Vec::new()), 0);
+    assert_eq!(memo_ids(&c), vec![rid(3), rid(4), other_host], "an attach watermark of 0 prunes nothing");
+    c.handle(0, HostMsg::Attach { host: 0, epoch: 2, running: Vec::new(), online: Vec::new(), generation: 0, boot: 7, settled_below: 4 }, 0);
+    assert_eq!(memo_ids(&c), vec![rid(4), other_host], "the attach's watermark prunes below it");
+    c.handle(1, HostMsg::Settled { boot: 7, below: 2 }, 0);
+    assert_eq!(memo_ids(&c), vec![rid(4)]);
+}
+
+/// A host's `Attach` with a boot the coordinator has not seen: that host's old process
+/// is gone, so its entries of every other boot go; other hosts' entries and the new
+/// boot's stay (a re-attach of the same boot keeps them).
+#[test]
+fn new_boot_attach_drops_the_old_boots_memo() {
+    let (mut c, civ, people) = coordinator();
+    c.handle(0, attach(0, 1, Vec::new(), Vec::new()), 0);
+    for seq in 1..=2 {
+        c.handle(0, embark(seq, A, civ, &people[0..2], rc(8, 0)), 0);
+    }
+    let other_host = RequestId { host: 1, boot: 7, seq: 1 };
+    c.handle(1, request_as(other_host, B, WorldRequest::StartAdventure(SiteId(0))), 0);
+    commit(&mut c);
+    let boot = |seq| RequestId { host: 0, boot: 9, seq };
+    let attach_boot_9 = |epoch| HostMsg::Attach {
+        host: 0,
+        epoch,
+        running: Vec::new(),
+        online: Vec::new(),
+        generation: 0,
+        boot: 9,
+        settled_below: 0,
+    };
+    c.handle(0, attach_boot_9(2), 0);
+    assert_eq!(memo_ids(&c), vec![other_host], "boot 7 of host 0 is gone");
+    c.handle(0, request_as(boot(0), B, WorldRequest::ReturnTo(SiteId(0))), 0);
+    commit(&mut c);
+    c.handle(0, attach_boot_9(3), 0);
+    assert_eq!(memo_ids(&c), vec![other_host, boot(0)], "a re-attach of the same boot keeps its answers");
 }

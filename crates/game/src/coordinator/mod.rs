@@ -33,10 +33,13 @@ use crate::history::{
 };
 use crate::{EmbarkRequest, PlayerId, RegionCoords};
 
-/// Most answers of state-changing requests remembered for replay; past it the oldest is
-/// forgotten (a host replays a request within `WORLD_REQUEST_TIMEOUT_SECS`, so 4096
-/// answers is far more than one downtime can produce).
+/// Answers of state-changing requests remembered for replay past which the coordinator
+/// logs an error (at most once per [`MEMO_WARN_SECS`]): answers are forgotten only when
+/// their host acknowledges them ([`HostMsg::Settled`], an `Attach`'s watermark or new
+/// boot), never by count — a forgotten answer would re-execute a resent request.
 pub const ANSWERED_MEMO_MAX: usize = 4096;
+/// Seconds between two errors about a memo over [`ANSWERED_MEMO_MAX`].
+pub const MEMO_WARN_SECS: u64 = 60;
 /// Seconds between periodic saves of a coordinator whose state changed.
 pub const COORDINATOR_SAVE_SECS: u64 = 60;
 
@@ -59,8 +62,14 @@ pub struct Coordinator {
     incarnations: BTreeMap<RegionCoords, u64>,
     /// Answers of state-changing requests, replayed for a repeated id.
     memo: BTreeMap<RequestId, WorldReply>,
-    /// `memo`'s ids, oldest first (eviction order, and the saved order).
+    /// `memo`'s ids, oldest first (the saved order).
     memo_order: VecDeque<RequestId>,
+    /// Per host, the boots its `Attach`es named: a new one forgets the host's answers of
+    /// every other boot. Never saved (an unknown boot after a restart forgets nothing the
+    /// host could still ask about: its process is the one attaching).
+    boots_seen: BTreeMap<u32, BTreeSet<u64>>,
+    /// `clock_ms` of the last error about an oversized memo.
+    memo_warned_ms: Option<u64>,
     /// Waiting for a save: the first gated message and everything after it, in order.
     gated: VecDeque<(Target, CoordMsg)>,
     /// Free to leave, in order.
@@ -110,6 +119,8 @@ impl Coordinator {
             incarnations: BTreeMap::new(),
             memo: BTreeMap::new(),
             memo_order: VecDeque::new(),
+            boots_seen: BTreeMap::new(),
+            memo_warned_ms: None,
             gated: VecDeque::new(),
             out: Vec::new(),
             region_host: BTreeMap::new(),
@@ -182,12 +193,14 @@ impl Coordinator {
         self.clock_ms = self.clock_ms.max(now_ms);
         self.dirty_since_save = true;
         match msg {
-            HostMsg::Attach { host: named, epoch, running, online, generation: _ } => {
+            HostMsg::Attach { host: named, epoch, running, online, generation: _, boot, settled_below } => {
                 if named != host {
                     log::warn!("coordinator: host {host}'s Attach names host {named}; taken as host {host}'s");
                 }
+                self.forget_settled(host, boot, settled_below, true);
                 self.attach(host, epoch, running, online)
             }
+            HostMsg::Settled { boot, below } => self.forget_settled(host, boot, below, false),
             HostMsg::RegionStarted { rc, incarnation } => {
                 if let Some(other) = self.region_host.insert(rc, host).filter(|h| *h != host) {
                     log::warn!("coordinator: {rc:?} started on host {host}; host {other} had announced it");
@@ -663,13 +676,39 @@ impl Coordinator {
         }
     }
 
+    /// Memoise `reply` for `id` until its host acknowledges it ([`Self::forget_settled`]);
+    /// never evicted. Past [`ANSWERED_MEMO_MAX`] an error names the host holding most.
     fn remember(&mut self, id: RequestId, reply: WorldReply) {
         if self.memo.insert(id, reply).is_none() {
             self.memo_order.push_back(id);
         }
-        while self.memo_order.len() > ANSWERED_MEMO_MAX {
-            let old = self.memo_order.pop_front().expect("over the cap");
-            self.memo.remove(&old);
+        let quiet = self.memo_warned_ms.is_some_and(|ms| self.clock_ms.saturating_sub(ms) < MEMO_WARN_SECS * 1000);
+        if self.memo.len() > ANSWERED_MEMO_MAX && !quiet {
+            self.memo_warned_ms = Some(self.clock_ms);
+            let mut per_host: BTreeMap<u32, usize> = BTreeMap::new();
+            for id in self.memo.keys() {
+                *per_host.entry(id.host).or_default() += 1;
+            }
+            let (host, n) = per_host.into_iter().max_by_key(|(_, n)| *n).expect("not empty");
+            log::error!(
+                "coordinator: {} unacknowledged answers remembered (over {ANSWERED_MEMO_MAX}); host {host} holds {n}",
+                self.memo.len()
+            );
+        }
+    }
+
+    /// Host `host` acknowledged its answers of `boot` below `below` ([`HostMsg::Settled`],
+    /// an `Attach`'s watermark): forgotten. At an `Attach` (`attach`) naming a boot not
+    /// seen from the host before, the host's answers of every other boot go too (that
+    /// process is gone).
+    fn forget_settled(&mut self, host: u32, boot: u64, below: u64, attach: bool) {
+        let new_boot = attach && self.boots_seen.entry(host).or_default().insert(boot);
+        let forget = |id: &RequestId| id.host == host && ((id.boot == boot && id.seq < below) || (new_boot && id.boot != boot));
+        let before = self.memo.len();
+        self.memo.retain(|id, _| !forget(id));
+        if self.memo.len() != before {
+            self.memo_order.retain(|id| !forget(id));
+            log::debug!("coordinator: {} answers of host {host} acknowledged", before - self.memo.len());
         }
     }
 

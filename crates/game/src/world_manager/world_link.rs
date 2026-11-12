@@ -414,7 +414,9 @@ impl<S: RegionSpawner> WorldManager<S> {
         log::info!("attach {epoch}: {} regions, {} online, {} queued", running.len(), online.len(), self.outbox.len());
         let host = self.world_host();
         let generation = self.host_generation;
-        self.link_send(HostMsg::Attach { host, epoch, running, online, generation });
+        let (boot, settled_below) = (self.world_boot, self.lowest_outstanding());
+        self.settled_below = settled_below;
+        self.link_send(HostMsg::Attach { host, epoch, running, online, generation, boot, settled_below });
         let queued: BTreeSet<RequestId> = self
             .outbox
             .iter()
@@ -508,6 +510,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                 | HostMsg::ReleaseClaim { .. }
                 | HostMsg::PlayerHandedTo { .. }
         );
+        // `Settled` is not queued: the next `Attach` carries the watermark.
         match &mut self.world_attach {
             WorldAttach::Down | WorldAttach::Gathering { .. } if queued => self.outbox.push_back(msg),
             WorldAttach::Down => log::debug!("world link down: {msg:?} dropped"),
@@ -606,7 +609,10 @@ impl<S: RegionSpawner> WorldManager<S> {
             // Routed at the end of the client event or upkeep that made it, to the homes
             // as they stand then (a player embarking moves home after its region starts).
             CoordMsg::Notice { region, line } => self.world_notices.push((region, line)),
-            CoordMsg::Reply { id, reply } => self.world_reply(id, reply, now_ms),
+            CoordMsg::Reply { id, reply } => {
+                self.world_reply(id, reply, now_ms);
+                self.acknowledge_settled();
+            }
             CoordMsg::ClaimIs { player, claim, report } => self.claim_is(player, claim, report),
         }
     }
@@ -919,6 +925,24 @@ impl<S: RegionSpawner> WorldManager<S> {
             if self.sessions.contains_key(&p.client) {
                 self.answer_unavailable(p.client, &p.req);
             }
+        }
+        self.acknowledge_settled();
+    }
+
+    /// The lowest sequence of this boot whose request is still outstanding (pending, or
+    /// expired and waiting for its answer); the next one to be made if none is.
+    fn lowest_outstanding(&self) -> u64 {
+        let first = |id: Option<&RequestId>| id.map_or(self.next_request_seq, |id| id.seq);
+        first(self.pending_requests.keys().next()).min(first(self.expired_requests.keys().next()))
+    }
+
+    /// Tell the coordinator its answers below the lowest outstanding request are no
+    /// longer needed ([`HostMsg::Settled`]) when that watermark rose.
+    fn acknowledge_settled(&mut self) {
+        let below = self.lowest_outstanding();
+        if below > self.settled_below {
+            self.settled_below = below;
+            self.world_send(HostMsg::Settled { boot: self.world_boot, below });
         }
     }
 

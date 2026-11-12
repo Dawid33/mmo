@@ -1057,3 +1057,32 @@ fn ignored_stale_claim_is_triggers_a_re_report_and_converges() {
     assert_eq!(manager.client_claim(A), None);
     assert!(packets.try_iter().any(|(to, p)| to == Some(A) && matches!(p, ServerPacket::Fortress(None))));
 }
+
+/// R3 Task 11: the host acknowledges its answered requests (`Settled`), so after three
+/// state-changing round trips (embark, return, return — each retired after) the
+/// coordinator remembers none of this host's answers.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn host_sends_settled_as_requests_complete() {
+    each_seed("host_sends_settled_as_requests_complete", |seed| {
+        let mut w = World::with(seed, &[A]);
+        let mark = w.mark();
+        let site = w.ask(A, ClientPacket::Embark(w.embark_request())).expect("embarked");
+        for _ in 0..2 {
+            w.packet(A, ClientPacket::Retire);
+            w.drain();
+            assert_eq!(w.ask(A, ClientPacket::ReturnTo(site)), Ok(site), "seed {seed}: returned");
+        }
+        let settled: Vec<u64> = w
+            .sent_since(mark)
+            .iter()
+            .filter_map(|m| match m {
+                HostMsg::Settled { below, .. } => Some(*below),
+                _ => None,
+            })
+            .collect();
+        assert!(!settled.is_empty() && settled.windows(2).all(|p| p[0] < p[1]), "seed {seed}: rising: {settled:?}");
+        let memo = w.coordinator().state().memo;
+        assert!(memo.is_empty(), "seed {seed}: every answer acknowledged: {memo:?}");
+    });
+}

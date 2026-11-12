@@ -106,8 +106,19 @@ pub enum HostMsg {
     /// ([`CoordMsg::Attached`]), so the host knows which of its messages were decided
     /// before the attach (stale) and which after. `generation`: the world generation the
     /// host process runs (a coordinator runtime refuses an `Attach` of a lower one than the
-    /// store's: a stale host process about to exit).
-    Attach { host: u32, epoch: u64, running: Vec<RunningRegion>, online: Vec<OnlinePlayer>, generation: u64 },
+    /// store's: a stale host process about to exit). `boot`: the host process's
+    /// [`RequestId::boot`] — a boot the coordinator has not seen from this host means its
+    /// old process is gone, so the answers remembered for that host's other boots are
+    /// forgotten. `settled_below`: as [`HostMsg::Settled`]'s `below`, for `boot`.
+    Attach {
+        host: u32,
+        epoch: u64,
+        running: Vec<RunningRegion>,
+        online: Vec<OnlinePlayer>,
+        generation: u64,
+        boot: u64,
+        settled_below: u64,
+    },
     /// Region `rc` started (its `incarnation`-th start on the host): answered with
     /// [`CoordMsg::SpawnPeople`] for that incarnation.
     RegionStarted { rc: RegionCoords, incarnation: u64 },
@@ -142,6 +153,11 @@ pub enum HostMsg {
     /// (`PlayerOnline`, or `PlayerOffline` if it parks there on arrival). Sent instead of
     /// `PlayerOffline`, so nobody takes the fortress of a player crossing hosts.
     PlayerHandedTo { player: PlayerId, to: u32 },
+    /// Every request of this host's `boot` with `seq < below` has been answered and
+    /// applied here, or was never sent: the coordinator forgets their memoised answers
+    /// (no copy of them can come any more). Sent whenever the host's lowest outstanding
+    /// sequence rises.
+    Settled { boot: u64, below: u64 },
 }
 
 /// Where a coordinator message goes ([`crate::coordinator::Coordinator::take_out`]).
