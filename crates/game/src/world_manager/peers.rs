@@ -33,23 +33,32 @@ pub(super) struct Peer {
 
 impl<S: RegionSpawner> WorldManager<S> {
     /// The session with host `ordinal` and its link. Messages queued for that host before
-    /// it had a session go into the session now, in order. A session replacing an earlier
-    /// one takes over everything the earlier one still owed, in order (sent again under
-    /// the new session's numbering), and that host's regions are no longer known to run
-    /// (as when its link goes down) until the new session comes up.
+    /// it had a session go into the session now, in order.
+    ///
+    /// A session is never replaced: its numbering (both ways) is what makes delivery
+    /// exactly-once. For a host that already has one, `session` is dropped and only the
+    /// link is swapped; the session's connection is reset
+    /// ([`PeerSession::reset_connection`]), so its next pump reports `Down` (that host's
+    /// regions are no longer known to run) and resumes over the new link after a hello.
     pub fn set_peer(&mut self, ordinal: u32, mut session: PeerSession, link: Box<dyn PeerLink + Send>) {
         debug_assert_eq!(session.peer(), ordinal, "a session for another host");
-        let old = self.peers.remove(&ordinal);
-        let owed = old.as_ref().map(|p| p.session.unreceived().cloned().collect::<Vec<_>>()).unwrap_or_default();
-        // (`peer_waiting` is empty while a session exists: no order to merge.)
-        for msg in owed.into_iter().chain(self.peer_waiting.remove(&ordinal).unwrap_or_default()) {
+        let prefilled = session.unreceived().count();
+        if prefilled > 0 {
+            log::error!("[server] a session for host {ordinal} came with {prefilled} message(s) already queued");
+            debug_assert!(false, "set_peer: a session with messages queued for host {ordinal}");
+        }
+        if let Some(peer) = self.peers.get_mut(&ordinal) {
+            log::info!("[server] the link to host {ordinal} was replaced: its session continues on the new one");
+            peer.link = link;
+            peer.session.reset_connection();
+            return;
+        }
+        // Already in it: ids of their own (`peer_entries`), ahead of what waited.
+        *self.peer_queued.entry(ordinal).or_default() += prefilled as u64;
+        for msg in self.peer_waiting.remove(&ordinal).unwrap_or_default() {
             session.queue(msg);
         }
         self.peers.insert(ordinal, Peer { session, link, stale: false });
-        if old.is_some() {
-            log::info!("[server] the session with host {ordinal} was replaced");
-            self.peer_lost(ordinal);
-        }
     }
 
     /// Drive every peer session: read what the other hosts sent and act on it, then send
@@ -169,15 +178,15 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// Every reliable message to another host not acknowledged yet (a session's, or
     /// waiting for one), with its host and id. A session's entries (and a waiting list)
     /// leave only from the front — acknowledged, or forgotten through a cut mark — and a
-    /// replacing session takes over the whole remainder in order, so they are always the
-    /// LAST ones queued to that host.
+    /// session is never replaced, so they are always the LAST ones queued to that host.
     fn peer_entries(&self) -> Vec<(u32, u64, &Reliable)> {
         let mut out = Vec::new();
         let lists = self.peers.iter().map(|(o, p)| (*o, p.session.unreceived().collect::<Vec<_>>()));
         let waiting = self.peer_waiting.iter().map(|(o, l)| (*o, l.iter().collect::<Vec<_>>()));
         for (ordinal, list) in lists.chain(waiting) {
             let queued = self.peer_queued.get(&ordinal).copied().unwrap_or(0);
-            let first = queued - list.len() as u64;
+            // (Never short; saturating all the same, so a miscount cannot wrap.)
+            let first = queued.saturating_sub(list.len() as u64);
             out.extend(list.into_iter().enumerate().map(|(i, r)| (ordinal, first + i as u64, r)));
         }
         out

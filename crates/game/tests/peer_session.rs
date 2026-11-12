@@ -764,3 +764,42 @@ fn lower_generation_peer_returns_at_equal_generation() {
         assert_eq!(a.got, vec![101], "seed {seed}");
     }
 }
+
+/// The link object is replaced by a fresh one whose `connection()` equals the old one's
+/// (both on their first connection): without being told, a session would take it for
+/// the same connection. `reset_connection` makes each side drop it (`Down`), send a new
+/// hello and resume — everything owed both ways arrives exactly once, in order.
+#[test]
+fn reset_connection_forces_a_new_hello() {
+    const N: u64 = 8;
+    for seed in 0..SEEDS {
+        let (mut a, mut b) = pair(seed, 3);
+        let mut now = 0;
+        for n in 1..=N {
+            a.s.queue(payload(n));
+            b.s.queue(payload(n));
+        }
+        // Part of it on its way: some sent and unacknowledged, some received.
+        for _ in 0..3 {
+            now += 1;
+            a.pump(now);
+            b.pump(now);
+        }
+        let (la, lb) = InlinePeerLink::pair(seed ^ 0x5EED, 3);
+        assert_eq!(la.connection(), a.link.inner.connection(), "seed {seed}: the same connection value");
+        a.link = Tap::new(la);
+        b.link = Tap::new(lb);
+        a.s.reset_connection();
+        b.s.reset_connection();
+        let (ea, eb) = (a.events.len(), b.events.len());
+        let ups = |s: &Side, from: usize| s.events[from..].iter().filter(|e| matches!(e, PeerEvent::Up(_))).count();
+        run(seed, &mut a, &mut b, &mut now, |a, b| {
+            a.s.unreceived().count() == 0 && b.s.unreceived().count() == 0 && a.got.len() as u64 == N && b.got.len() as u64 == N
+        });
+        let all: Vec<u64> = (1..=N).collect();
+        assert_eq!(a.got, all, "seed {seed}: a got everything once, in order");
+        assert_eq!(b.got, all, "seed {seed}: b got everything once, in order");
+        assert_eq!((ups(&a, ea), ups(&b, eb)), (1, 1), "seed {seed}: one hello each way on the new link");
+        assert!(a.s.is_reachable() && b.s.is_reachable(), "seed {seed}");
+    }
+}

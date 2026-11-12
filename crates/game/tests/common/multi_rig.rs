@@ -265,6 +265,18 @@ impl MultiRig {
         self.link(a, b).lock().unwrap().set_up(true);
     }
 
+    /// Give hosts `a` and `b` a fresh link pair (its `connection()` the same as a fresh
+    /// pair's: 1): `set_peer` on both with a new session each — the managers keep their
+    /// sessions and swap only the link. What was in transit on the old link is lost.
+    pub fn replace_link(&mut self, a: u32, b: u32, seed: u64, link_delay_steps: u32) {
+        let (a, b) = (a.min(b), a.max(b));
+        let (ea, eb) = InlinePeerLink::pair(seed, link_delay_steps);
+        let (ea, eb) = (Arc::new(Mutex::new(ea)), Arc::new(Mutex::new(eb)));
+        self.hosts[a as usize].manager.set_peer(b, PeerSession::new(rig_hello(a), b), Box::new(SharedEnd(ea.clone())));
+        self.hosts[b as usize].manager.set_peer(a, PeerSession::new(rig_hello(b), a), Box::new(SharedEnd(eb.clone())));
+        self.links.insert((a, b), (ea, eb));
+    }
+
     fn link(&self, a: u32, b: u32) -> &Arc<Mutex<InlinePeerLink>> {
         &self.links[&(a.min(b), a.max(b))].0
     }

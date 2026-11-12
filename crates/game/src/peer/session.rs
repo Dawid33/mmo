@@ -80,6 +80,9 @@ pub struct PeerSession {
     /// Volatile messages sent while reachable, out on the next pump.
     volatile_out: Vec<Volatile>,
     held: bool,
+    /// [`PeerSession::reset_connection`]: the connection seen last is gone, whatever the
+    /// link's connection value says.
+    reset: bool,
 }
 
 impl PeerSession {
@@ -100,7 +103,17 @@ impl PeerSession {
             state: Conn::None,
             volatile_out: Vec::new(),
             held: false,
+            reset: false,
         }
+    }
+
+    /// The link object was replaced; whatever connection was up is gone. The next
+    /// [`PeerSession::pump`] treats the link's connection as a new one — even when its
+    /// [`PeerLink::connection`] value equals the old link's — exactly as a connection
+    /// lost and made again: [`PeerEvent::Down`] if it was up, then a new hello; what was
+    /// sent and not acknowledged stays owed and is resent after the peer's hello.
+    pub fn reset_connection(&mut self) {
+        self.reset = true;
     }
 
     /// The peer host's ordinal.
@@ -176,13 +189,15 @@ impl PeerSession {
         link.pump(now_ms);
         let up = link.is_up();
         let connection = link.connection();
-        // The connection we knew went away (down, or replaced between two looks).
-        if self.connection.is_some() && (!up || self.connection != Some(connection)) {
+        // The connection we knew went away (down, or replaced between two looks, or its
+        // link object replaced).
+        if self.connection.is_some() && (!up || self.connection != Some(connection) || self.reset) {
             if self.state == Conn::Up {
                 events.push(PeerEvent::Down);
             }
             self.lose_connection();
         }
+        self.reset = false;
         if !up {
             return events;
         }

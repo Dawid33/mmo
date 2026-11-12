@@ -769,9 +769,9 @@ fn mirrors_of(rig: &mut MultiRig, b: RegionCoords, a: RegionCoords) -> Mirrors {
 
 /// The same park across a region seam (one host) and across a host seam: a pile and a
 /// chest on the parking region's edge; the neighbour's mirrors of them after the park
-/// are the same either way (a park is not a loss). Locally a park re-seeds the running
-/// neighbours from the parked region's final terrain, a `replace` seed without piles or
-/// chests, so those mirrors end at the park on both sides of either seam.
+/// are equal either way (`RegionParked` is not a loss). Both seams end with those
+/// mirrors cleared: a park re-seeds the running neighbours from the parked region's final
+/// terrain, a `replace` seed without piles or chests.
 fn park_keeps_mirrors(rig: &mut MultiRig) {
     let (ha, hb) = x_pair(2, 2, false, &[]);
     let (la, lb) = x_pair(2, 2, true, &[ha, hb]);
@@ -797,8 +797,8 @@ fn park_keeps_mirrors(rig: &mut MultiRig) {
 
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
-fn park_across_a_host_seam_keeps_pile_and_chest_mirrors_like_a_region_seam() {
-    sweep("park_across_a_host_seam_keeps_pile_and_chest_mirrors_like_a_region_seam", 2, 2, SEEDS / 2, park_keeps_mirrors);
+fn park_across_a_host_seam_matches_a_region_seam() {
+    sweep("park_across_a_host_seam_matches_a_region_seam", 2, 2, SEEDS / 2, park_keeps_mirrors);
 }
 
 /// `a` (host A) is lost — its thread died — with a pile, a chest and a slime mirrored in
@@ -893,47 +893,58 @@ fn refusal_to(a: RegionCoords, b: RegionCoords, due: u64) -> game::IntentMsg {
     })
 }
 
-/// The session to host B is replaced while a reply to it is owed and the link is down:
-/// the new session owes it too (and delivers it), and host B's regions are no longer
-/// known to run.
-fn replace_session(rig: &mut MultiRig) {
+/// Replies carrying 1..=3 dirt.
+const OWED: [u32; 3] = [1, 2, 3];
+
+/// [`refusal_to`] carrying `count` dirt.
+fn refusal_of(a: RegionCoords, b: RegionCoords, due: u64, count: u32) -> game::IntentMsg {
+    let game::IntentMsg::Reply(mut r) = refusal_to(a, b, due) else { unreachable!() };
+    if let game::IntentReply::Refused(game::Intent::DepositItems { stack, .. }, _) = &mut r.reply {
+        stack.count = count;
+    }
+    game::IntentMsg::Reply(r)
+}
+
+/// Replies owed both ways — some sent and unacknowledged, some received and not
+/// acknowledged yet — when both hosts are handed a fresh link (`set_peer` again, its
+/// connection value the old one's): each keeps its session, and everything owed arrives
+/// exactly once (item conservation every round, the exact totals at the end), within a
+/// bounded number of rounds.
+fn replace_link(rig: &mut MultiRig) {
     crate::common::install_real_block_props();
     let (a, b) = x_pair(2, 1, false, &[]);
     let (ha, hb) = (rig.owner(a), rig.owner(b));
     rig.run(a);
     rig.run(b);
-    assert!(until(rig, CROSS_ROUNDS, |r| r.hosts[ha as usize].manager.foreign_running().contains(&b)), "known");
-    rig.link_down(ha, hb);
     let due = rig.hosts[ha as usize].manager.spawner_mut().world_tick() + 1;
-    let msg = refusal_to(a, b, due);
-    let host = &mut rig.hosts[ha as usize];
-    let now = host.now_ms;
-    host.manager.handle_region_output(a, game::RegionOutput::Intents(vec![msg]), now);
-    rig.items = Some(u64::from(DEPOSIT));
-    assert_eq!(rig.hosts[ha as usize].manager.peer_unreceived_intents(), [(hb, msg, false)]);
-    // A new session (a new boot of this host's side) over the same link end.
-    let link = rig.links[&(ha.min(hb), ha.max(hb))].clone();
-    let end = if ha < hb { link.0 } else { link.1 };
-    let mut hello = crate::common::multi_rig::rig_hello(ha);
-    hello.boot += 500;
-    rig.hosts[ha as usize].manager.set_peer(
-        hb,
-        game::PeerSession::new(hello, hb),
-        Box::new(crate::common::multi_rig::SharedEnd(end)),
-    );
-    assert_eq!(rig.hosts[ha as usize].manager.peer_unreceived_intents(), [(hb, msg, false)], "still owed");
-    assert!(rig.hosts[ha as usize].manager.foreign_running().is_empty(), "nothing of host {hb} is known to run");
-    rig.link_up(ha, hb);
+    for (from, to, h) in [(a, b, ha), (b, a, hb)] {
+        let msgs: Vec<_> = OWED.iter().map(|&n| refusal_of(from, to, due, n)).collect();
+        let host = &mut rig.hosts[h as usize];
+        let now = host.now_ms;
+        host.manager.handle_region_output(from, game::RegionOutput::Intents(msgs), now);
+    }
+    let total: u32 = OWED.iter().sum();
+    rig.items = Some(u64::from(2 * total));
+    rig.round();
+    rig.replace_link(ha, hb, 0x5EED, 2);
     assert!(
-        until(rig, CROSS_ROUNDS, |r| pile_items(r, b) == DEPOSIT && r.peer_unreceived() == 0),
-        "the owed reply never arrived"
+        until(rig, CROSS_ROUNDS, |r| pile_items(r, a) == total && pile_items(r, b) == total && r.peer_unreceived() == 0),
+        "not delivered exactly once: {} in a, {} in b, {} unacknowledged",
+        pile_items(rig, a),
+        pile_items(rig, b),
+        rig.peer_unreceived()
     );
+    for _ in 0..WAIT_ROUNDS {
+        rig.round();
+    }
+    assert_eq!((pile_items(rig, a), pile_items(rig, b)), (total, total), "nothing came twice");
+    assert!(rig.hosts[ha as usize].manager.reaches(b) && rig.hosts[hb as usize].manager.reaches(a), "the link is up");
 }
 
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
-fn replacing_a_peer_session_keeps_what_was_owed() {
-    sweep("replacing_a_peer_session_keeps_what_was_owed", 2, 1, SEEDS / 2, replace_session);
+fn replacing_a_peer_link_keeps_the_session_and_delivers_exactly_once() {
+    sweep("replacing_a_peer_link_keeps_the_session_and_delivers_exactly_once", 2, 1, SEEDS / 2, replace_link);
 }
 
 /// Two identical replies to another host in one cut window: the first sent after its
