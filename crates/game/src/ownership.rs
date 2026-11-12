@@ -74,6 +74,15 @@ impl Ownership {
         }
     }
 
+    /// The host that owns region `rc`, with `s` regions per super-region side
+    /// (`AllInOne`: host 0, the only one).
+    pub fn owner_of(&self, rc: RegionCoords, s: u32) -> u32 {
+        match *self {
+            Ownership::AllInOne => 0,
+            Ownership::Static { hosts, .. } => rendezvous_owner(super_region_of(rc, s), hosts),
+        }
+    }
+
     /// The host ordinal claims are made as (`AllInOne` is host 0).
     pub fn ordinal(&self) -> u32 {
         match *self {

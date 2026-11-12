@@ -137,6 +137,13 @@ impl PeerSession {
         self.out.iter().map(|(_, r)| r)
     }
 
+    /// The part of [`PeerSession::unreceived`] never put on the wire in the current
+    /// numbering (the rest was sent and is not acknowledged yet: the peer may hold it).
+    pub fn unsent(&self) -> impl Iterator<Item = &Reliable> {
+        let sent = self.max_sent;
+        self.out.iter().filter(move |(seq, _)| *seq > sent).map(|(_, r)| r)
+    }
+
     /// Stop sending reliable messages (they keep queuing) and volatile ones (dropped): a
     /// leaving peer. Acknowledgements still go out.
     pub fn hold(&mut self) {

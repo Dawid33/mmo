@@ -103,6 +103,11 @@ impl InlinePeerLink {
     pub fn in_transit(&self) -> usize {
         self.shared().q[self.end].len()
     }
+
+    /// Test support: the messages to this end not read yet, in order.
+    pub fn transit(&self) -> Vec<PeerMsg> {
+        self.shared().q[self.end].iter().map(|(_, m)| m.clone()).collect()
+    }
 }
 
 impl PeerLink for InlinePeerLink {

@@ -683,7 +683,7 @@ impl<S: RegionSpawner> WorldManager<S> {
         if self.fortress_of.contains_key(&id) || self.adventurer_of.contains_key(&id) {
             return self.embark_result(id, Err(EmbarkRefusal::AlreadyHasFortress));
         }
-        if self.is_unavailable(req.region) {
+        if self.refuses_play(req.region) {
             return self.embark_result(id, Err(EmbarkRefusal::RegionUnavailable));
         }
         self.world_request(id, WorldRequest::Embark(req), now_ms);
@@ -716,7 +716,7 @@ impl<S: RegionSpawner> WorldManager<S> {
         if self.fortress_of.contains_key(&id) || self.adventurer_of.contains_key(&id) {
             return self.embark_result(id, Err(EmbarkRefusal::AlreadyHasFortress));
         }
-        if self.site_regions.get(&site).is_some_and(|&rc| self.is_unavailable(rc)) {
+        if self.site_regions.get(&site).is_some_and(|&rc| self.refuses_play(rc)) {
             return self.embark_result(id, Err(EmbarkRefusal::RegionUnavailable));
         }
         self.world_request(id, WorldRequest::ReturnTo(site), now_ms);
@@ -735,7 +735,7 @@ impl<S: RegionSpawner> WorldManager<S> {
         if self.fortress_of.contains_key(&id) || self.adventurer_of.contains_key(&id) {
             return self.adventure_result(id, Err(AdventureRefusal::AlreadyPlaying));
         }
-        if self.site_regions.get(&site).is_some_and(|&rc| self.is_unavailable(rc)) {
+        if self.site_regions.get(&site).is_some_and(|&rc| self.refuses_play(rc)) {
             return self.adventure_result(id, Err(AdventureRefusal::RegionUnavailable));
         }
         self.world_request(id, WorldRequest::StartAdventure(site), now_ms);
@@ -861,7 +861,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             WorldReply::AdventureRefused(e) => self.adventure_result(client, Err(e)),
             WorldReply::Embarked { site, region } | WorldReply::Returned { site, region } => {
                 self.site_regions.insert(site, region);
-                if self.is_unavailable(region) {
+                if self.refuses_play(region) {
                     self.world_send(HostMsg::ReleaseClaim { player: p.player });
                     return self.embark_result(client, Err(EmbarkRefusal::RegionUnavailable));
                 }
@@ -885,7 +885,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             }
             WorldReply::AdventureStarted { site, region } => {
                 self.site_regions.insert(site, region);
-                if self.is_unavailable(region) {
+                if self.refuses_play(region) {
                     self.world_send(HostMsg::ReleaseClaim { player: p.player });
                     return self.adventure_result(client, Err(AdventureRefusal::RegionUnavailable));
                 }

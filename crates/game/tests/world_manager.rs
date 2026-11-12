@@ -1293,6 +1293,71 @@ fn non_owned_region_is_unavailable() {
     assert!(!h.manager.running_regions().contains(&target));
 }
 
+/// A region another host owns whose session is up is reachable (`reaches`, not
+/// unavailable), but players do not move between hosts yet: Play, a subscription and a
+/// session whose record lies there are still refused, and nothing is spawned for it.
+#[test]
+fn foreign_region_still_refuses_play() {
+    use game::{HostEndpoint, InlinePeerLink, PeerHello, PeerSession};
+    crate::common::install_real_block_props();
+    let s = 1; // every region its own super-region
+    let mine = game::rendezvous_owner(game::super_region_of(SPAWN_REGION, s), 2);
+    let other = 1 - mine;
+    let ownership = game::Ownership::Static { ordinal: mine, hosts: 2 };
+    let target = (-1..=1)
+        .flat_map(|x| (-1..=1).map(move |z| RegionCoords::new(x, z)))
+        .find(|rc| !ownership.owns(*rc, s))
+        .expect("a 3x3 block has a region the other of two hosts owns");
+    let hello = |ordinal| PeerHello {
+        ordinal,
+        boot: 7 + u64::from(ordinal),
+        generation: 1,
+        endpoint: HostEndpoint { ordinal, quic: None, webtransport: None, cert_hash: None },
+        received_through: 0,
+        received_from_boot: None,
+    };
+    let mut h = floored_harness();
+    h.manager.set_ownership(ownership, s);
+    h.manager.set_world_map(game::WorldMap {
+        origin: RegionCoords::new(-1, -1),
+        width: 3,
+        height: 3,
+        tiles: (0..9).map(|_| play_tile()).collect(),
+        rock_names: vec![],
+        region_types: vec![],
+    });
+    let (here, mut there) = InlinePeerLink::pair(1, 0);
+    h.manager.set_peer(other, PeerSession::new(hello(mine), other), Box::new(here));
+    let mut peer = PeerSession::new(hello(other), mine);
+    for t in 0..8 {
+        h.manager.pump_peers(t);
+        peer.pump(&mut there, t);
+    }
+    assert!(h.manager.is_foreign(target));
+    assert_eq!(h.manager.owner_of(target), other);
+    assert!(h.manager.reaches(target), "the owner's session is up");
+    assert!(!h.manager.is_unavailable(target), "a reachable foreign region is not unavailable");
+    h.event(session(0, 0, None), 0);
+    h.drain_packets();
+    h.event(ServerEvent::ClientPacket(ClientPacket::PlayRegion(target), 0), 10);
+    h.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(target), 0), 10);
+    let refused = h.drain_packets().into_iter().any(|(to, p)| {
+        to == Some(0) && matches!(p, ServerPacket::PlayRefused(rc, game::PlayRefusal::RegionUnavailable) if rc == target)
+    });
+    assert!(refused, "Play into a foreign region is refused RegionUnavailable");
+    let record = PlayerRecord {
+        client: game::Client::default(),
+        pose: game::Pose::from_translation(body_on_tile([3, STAND, 3])),
+        region: target,
+        fortress: None,
+        adventure: None,
+    };
+    h.event(session(1, 1, Some(record)), 20);
+    let ended = h.drain_packets().into_iter().any(|(to, p)| to == Some(1) && matches!(p, ServerPacket::Refused(_)));
+    assert!(ended, "a session whose body is on another host is refused");
+    assert!(!h.manager.running_regions().contains(&target), "nothing was spawned for it");
+}
+
 #[test]
 fn duplicate_client_id_is_refused() {
     let mut h = harness();

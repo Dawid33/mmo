@@ -23,6 +23,7 @@ use crate::save_cut::{
     CutId, InFlightRow, PendingCut, Uncommitted, WorldCut, CUT_DEADLINE_LEADS, SAVE_CUT_LEAD_MAX_TICKS, SAVE_CUT_LEAD_TICKS,
 };
 
+mod peers;
 mod world_link;
 pub use world_link::{WorldLinkCounters, ATTACH_WAIT_MS, WORLD_REQUEST_TIMEOUT_SECS};
 use world_link::{PendingRequest, Step, WorldAttach, WorldViewCache};
@@ -505,6 +506,9 @@ pub struct ManagerDepths {
     /// Non-player arrivals waiting for a region that is not running
     /// ([`WorldManager::pending_arrival_total`]).
     pub pending_arrivals: usize,
+    /// Reliable messages to other hosts not acknowledged yet
+    /// ([`WorldManager::peer_unreceived`]).
+    pub peer_unreceived: usize,
     /// Waiting arrivals despawned past [`PENDING_ARRIVALS_PER_REGION_MAX`]
     /// since the manager started ([`WorldManager::arrivals_despawned`]).
     pub arrivals_despawned: u64,
@@ -870,6 +874,18 @@ pub struct WorldManager<S: RegionSpawner> {
     /// late ones and are dropped.
     incarnation_seen: BTreeMap<RegionCoords, u64>,
     next_incarnation: u64,
+    /// The session with each other host of the world (`peers.rs`, [`Self::set_peer`]).
+    /// Empty for a single host.
+    peers: BTreeMap<u32, peers::Peer>,
+    /// Reliable messages for a host that has no session yet, in order: queued into its
+    /// session by [`Self::set_peer`]. Carried by cuts like a session's unreceived ones.
+    peer_waiting: BTreeMap<u32, Vec<crate::Reliable>>,
+    /// Transfers to other hosts that departed after their source answered the pending
+    /// cut (its snapshot still holds them): not rows of that cut. Cleared by every
+    /// `begin_cut`, like [`InFlight::in_source_view`].
+    peer_in_source_view: BTreeSet<crate::EntityId>,
+    /// A peer runs a newer world generation ([`Self::take_higher_generation`]).
+    higher_generation: Option<u64>,
 }
 
 impl<S: RegionSpawner> WorldManager<S> {
@@ -955,6 +971,10 @@ impl<S: RegionSpawner> WorldManager<S> {
             incarnation: BTreeMap::new(),
             incarnation_seen: BTreeMap::new(),
             next_incarnation: 0,
+            peers: BTreeMap::new(),
+            peer_waiting: BTreeMap::new(),
+            peer_in_source_view: BTreeSet::new(),
+            higher_generation: None,
         }
     }
 
@@ -989,7 +1009,7 @@ impl<S: RegionSpawner> WorldManager<S> {
         let Some(tile) = map.tile(target) else {
             return refuse(self, PlayRefusal::OffMap);
         };
-        if self.is_unavailable(target) {
+        if self.refuses_play(target) {
             return refuse(self, PlayRefusal::RegionUnavailable);
         }
         let home = self.homes.get(&id).copied();
@@ -1068,7 +1088,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             }
             _ => None,
         };
-        if self.is_unavailable(m.target) {
+        if self.refuses_play(m.target) {
             // Its target could not be loaded meanwhile: the record stays parked.
             if let Some((player, record)) = full {
                 log::warn!("move of client {client}: {:?} is unavailable; player {} parked", m.target, player.0);
@@ -1424,15 +1444,16 @@ impl<S: RegionSpawner> WorldManager<S> {
                     let client = bundle.client.as_ref().map(|(c, _)| *c);
                     let off_map = crate::off_map(self.map_extent(), target);
                     // Bodies that would wake their target: a player, a person no
-                    // history absorbs.
+                    // history absorbs. Neither crosses to another host yet (Task 7).
                     let waking = client.is_some()
                         || (matches!(bundle.kind, EntityKind::Person { .. }) && self.world.is_none());
-                    if off_map || (waking && self.is_unavailable(target)) {
+                    if off_map || (waking && (self.is_unavailable(target) || self.is_foreign(target))) {
                         // Off the map: regions hold bodies at the outer seam, so
                         // this is a region that was not bounded. Unavailable: its
                         // stored state could not be read, so it cannot take the
-                        // body. Either way the crossing is refused and the entity
-                        // handed back to where it left, on its seam.
+                        // body. Foreign: another host owns it. Either way the
+                        // crossing is refused and the entity handed back to where
+                        // it left, on its seam.
                         if off_map {
                             log::error!("departure from {rc:?} into off-map {target:?} refused: returned");
                         } else {
@@ -1446,81 +1467,14 @@ impl<S: RegionSpawner> WorldManager<S> {
                         self.send_to_region(rc, RegionInput::Transfer(GameEventKind::EntityArrived(bundle), stamp));
                         continue;
                     }
-                    if let (EntityKind::Person { person }, true) = (bundle.kind, self.world.is_some()) {
-                        // A person is delivered only into a running region; the history
-                        // absorbs anyone walking into one that is not (no wake).
-                        let delivered = self.regions.get(&target).is_some_and(|l| !l.stopping);
-                        let at = bundle_at(&bundle);
-                        if delivered {
-                            let mut there = bundle.clone();
-                            there.rebase(rc, target);
-                            let at = bundle_at(&there);
-                            self.note_moved(person, rc, Step::Into { to: target, at });
-                        } else {
-                            self.note_moved(person, rc, Step::Absorbed { at });
-                        }
-                        self.world_send(HostMsg::PersonCrossed { person, to: target, delivered });
-                        if !delivered {
-                            self.locations.remove(&bundle.id);
-                            continue;
-                        }
-                    }
                     bundle.rebase(rc, target);
-                    // A player's arrival wakes its target (parked blob or
-                    // gen), as does a person's with no history to absorb
-                    // them; anything else into a region that is not running
-                    // — absent, parked or stopping — waits for it to run
-                    // (a stud body settles at the seam instead).
-                    let wakes = client.is_some() || matches!(bundle.kind, EntityKind::Person { .. });
-                    let running = self.regions.get(&target).is_some_and(|l| !l.stopping);
-                    if !wakes && !running {
-                        if bundle.carried.stud_body.is_some() {
-                            // A falling stud body does not wait out a park
-                            // (with its logs) in the mailbox: it settles now,
-                            // on the seam on its source's side — its policy's
-                            // drops put down there, or nothing.
-                            self.settle_at_seam(rc, target, bundle, view);
-                        } else {
-                            self.hold_arrival(rc, target, stamp, bundle, view);
-                        }
+                    if self.is_foreign(target) {
+                        // Another host's region: to its owner, reachable or not (it
+                        // waits in the session); that host decides the arrival.
+                        self.depart_to_peer(rc, target, stamp, bundle, view);
                         continue;
                     }
-                    self.ensure_running(target);
-                    self.enter_in_flight(rc, target, stamp, &bundle, view);
-                    self.locations.insert(bundle.id, target);
-                    self.send_to_region(
-                        target,
-                        RegionInput::Transfer(GameEventKind::EntityArrived(bundle), stamp),
-                    );
-                    self.directive_stamps.insert(target, stamp);
-                    if let Some(m) = client.and_then(|c| self.moving.get_mut(&c)) {
-                        // The body crossed a seam while its move's park was on the
-                        // way: park it where it went (its home is the move target).
-                        m.from = target;
-                        let c = client.expect("moving is keyed by client");
-                        // Behind the arrival, in its slot.
-                        self.send_to_region(target, RegionInput::Transfer(GameEventKind::ParkPlayer(c), stamp));
-                        self.refresh_keepalive(rc, now_ms);
-                        self.refresh_keepalive(target, now_ms);
-                    } else if let Some(p) = client.and_then(|c| self.parking.get_mut(&c)) {
-                        // The body crossed a seam while its park was on the way:
-                        // the old region found nobody; park it where it went.
-                        p.region = target;
-                        let c = client.expect("parking is keyed by client");
-                        // Behind the arrival, in its slot.
-                        self.send_to_region(target, RegionInput::Transfer(GameEventKind::ParkPlayer(c), stamp));
-                        self.refresh_keepalive(rc, now_ms);
-                        self.refresh_keepalive(target, now_ms);
-                    } else if let Some(c) = client {
-                        self.homes.insert(c, target);
-                        let _ = self
-                            .out
-                            .send((Some(c), ServerPacket::PlayerRegion(Some(target), c)));
-                        // The old home may have just lost its keep-alive
-                        // reason; the new one just gained it.
-                        self.refresh_keepalive(rc, now_ms);
-                        self.refresh_keepalive(target, now_ms);
-                    }
+                    self.accept_arrival(Some(rc), target, stamp, bundle);
                 }
             }
             RegionOutput::Forward(kind, stamp) => {
@@ -1592,6 +1546,7 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// regions), then grace-period unloads: a region with no subscribers and no
     /// connected client's player entity parks after UNLOAD_GRACE_MS.
     pub fn maintain(&mut self, now_ms: u64) {
+        self.pump_peers(now_ms);
         self.clock_ms = self.clock_ms.max(now_ms);
         self.world_ms = self.world_ms.max(now_ms);
         self.expire_overdue_cut();
@@ -1708,6 +1663,8 @@ impl<S: RegionSpawner> WorldManager<S> {
         for m in self.intent_mailbox.values_mut().flatten() {
             m.in_source_view = false;
         }
+        // Transfers to other hosts, too.
+        self.peer_in_source_view.clear();
         let mut dead = Vec::new();
         for (rc, link) in &self.regions {
             if link.stopping && self.silent_stopping.contains(rc) {
@@ -1789,10 +1746,18 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// What a cut caught in flight, put back on its way (a restarted
     /// server, from the store): a crossing waits in its target's arrival
     /// mailbox and an intent or reply in its intent mailbox, both delivered
-    /// when the target runs — at once, if it already does.
+    /// when the target runs — at once, if it already does. A crossing into a
+    /// region another host owns is queued to that host again.
     pub fn restore_in_flight(&mut self, rows: Vec<InFlightRow>) {
         for row in rows {
             match row {
+                InFlightRow::Transfer { target, bundle, stamp } if self.is_foreign(target) => {
+                    // Another host's region: to its owner again.
+                    self.queue_to_peer(
+                        self.owner_of(target),
+                        crate::Reliable::Transfer { target, stamp, bundle: Box::new(bundle), player: None },
+                    );
+                }
                 InFlightRow::Transfer { target, bundle, stamp } => {
                     self.locations.insert(bundle.id, target);
                     if self.regions.get(&target).is_some_and(|l| !l.stopping) {
@@ -2074,6 +2039,8 @@ impl<S: RegionSpawner> WorldManager<S> {
         for f in self.in_flight_intents.iter().filter(|f| !f.in_source_view) {
             cut.rows.push(InFlightRow::Intent { target: f.target, msg: f.msg });
         }
+        // Transfers to other hosts not acknowledged yet (`cut_peer_rows`).
+        cut.rows.extend(self.cut_peer_rows());
         for (target, list) in &self.intent_mailbox {
             for m in list.iter().filter(|m| !m.in_source_view) {
                 cut.rows.push(InFlightRow::Intent { target: *target, msg: m.msg });
@@ -2270,6 +2237,97 @@ impl<S: RegionSpawner> WorldManager<S> {
             }
             self.locations.insert(p.bundle.id, rc);
             self.send_to_region(rc, RegionInput::Transfer(GameEventKind::EntityArrived(p.bundle), p.stamp));
+        }
+    }
+
+    /// `bundle` (in `target`'s frame), departed at `stamp` from `source` — a region of
+    /// this host, or `None`: another host's (an inbound [`crate::Reliable::Transfer`]) —
+    /// arrives at `target`, a region of this host. A person with a history is delivered
+    /// only into a running region (else absorbed), and the coordinator told so. A player's
+    /// or a person's arrival wakes its target; anything else into a region that is not
+    /// running waits for it ([`Self::hold_arrival`]; a stud body settles at the seam
+    /// instead). Otherwise it is in flight to the target. An inbound transfer is never in
+    /// a source's view of the pending cut.
+    fn accept_arrival(
+        &mut self,
+        source: Option<RegionCoords>,
+        target: RegionCoords,
+        stamp: crate::Tick,
+        bundle: crate::EntityBundle,
+    ) {
+        let view = source.is_some_and(|s| self.in_cut_view(s));
+        // Where drops of a body that never arrives are put down: its source's side of the
+        // seam, or (inbound) the target's own cell.
+        let from = source.unwrap_or(target);
+        let now_ms = self.clock_ms;
+        let client = bundle.client.as_ref().map(|(c, _)| *c);
+        if let (EntityKind::Person { person }, true) = (bundle.kind, self.world.is_some()) {
+            // A person is delivered only into a running region; the history
+            // absorbs anyone walking into one that is not (no wake).
+            let delivered = self.regions.get(&target).is_some_and(|l| !l.stopping);
+            if delivered {
+                self.note_moved(person, from, Step::Into { to: target, at: bundle_at(&bundle) });
+            } else {
+                let mut left = bundle.clone();
+                left.rebase(target, from);
+                self.note_moved(person, from, Step::Absorbed { at: bundle_at(&left) });
+            }
+            self.world_send(HostMsg::PersonCrossed { person, to: target, delivered });
+            if !delivered {
+                self.locations.remove(&bundle.id);
+                return;
+            }
+        }
+        // A player's arrival wakes its target (parked blob or gen), as does a
+        // person's with no history to absorb them; anything else into a region
+        // that is not running — absent, parked or stopping — waits for it to run
+        // (a stud body settles at the seam instead).
+        let wakes = client.is_some() || matches!(bundle.kind, EntityKind::Person { .. });
+        let running = self.regions.get(&target).is_some_and(|l| !l.stopping);
+        if !wakes && !running {
+            if bundle.carried.stud_body.is_some() {
+                // A falling stud body does not wait out a park (with its logs) in
+                // the mailbox: it settles now, on the seam on its source's side —
+                // its policy's drops put down there, or nothing.
+                self.settle_at_seam(from, target, bundle, view);
+            } else {
+                self.hold_arrival(from, target, stamp, bundle, view);
+            }
+            return;
+        }
+        self.ensure_running(target);
+        self.enter_in_flight(from, target, stamp, &bundle, view);
+        self.locations.insert(bundle.id, target);
+        self.send_to_region(target, RegionInput::Transfer(GameEventKind::EntityArrived(bundle), stamp));
+        self.directive_stamps.insert(target, stamp);
+        let refresh = |m: &mut Self| {
+            if let Some(s) = source {
+                m.refresh_keepalive(s, now_ms);
+            }
+            m.refresh_keepalive(target, now_ms);
+        };
+        if let Some(m) = client.and_then(|c| self.moving.get_mut(&c)) {
+            // The body crossed a seam while its move's park was on the way: park
+            // it where it went (its home is the move target).
+            m.from = target;
+            let c = client.expect("moving is keyed by client");
+            // Behind the arrival, in its slot.
+            self.send_to_region(target, RegionInput::Transfer(GameEventKind::ParkPlayer(c), stamp));
+            refresh(self);
+        } else if let Some(p) = client.and_then(|c| self.parking.get_mut(&c)) {
+            // The body crossed a seam while its park was on the way: the old
+            // region found nobody; park it where it went.
+            p.region = target;
+            let c = client.expect("parking is keyed by client");
+            // Behind the arrival, in its slot.
+            self.send_to_region(target, RegionInput::Transfer(GameEventKind::ParkPlayer(c), stamp));
+            refresh(self);
+        } else if let Some(c) = client {
+            self.homes.insert(c, target);
+            let _ = self.out.send((Some(c), ServerPacket::PlayerRegion(Some(target), c)));
+            // The old home may have just lost its keep-alive reason; the new one
+            // just gained it.
+            refresh(self);
         }
     }
 
@@ -2514,7 +2572,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             Some(r) if !crate::off_map(self.map_extent(), r.region) => r.region,
             _ => SPAWN_REGION,
         };
-        if self.is_unavailable(target) {
+        if self.refuses_play(target) {
             // Its region's stored state could not be read: the session is
             // ended, the record kept for the next try.
             log::warn!("client {id}: its region {target:?} is unavailable; session refused");
@@ -2691,6 +2749,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             terrain_cache: self.terrain_cache.len(),
             transfers_in_flight: self.in_flight_count(),
             pending_arrivals: self.pending_arrival_total(),
+            peer_unreceived: self.peer_unreceived(),
             arrivals_despawned: self.arrivals_despawned(),
             items_destroyed: self.items_destroyed(),
             intent_replies_lost: self.intent_replies_lost(),
@@ -2717,11 +2776,18 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.ownership.0.owns(rc, self.ownership.1)
     }
 
-    /// Whether `rc` is unavailable now: another process owns it, or its
-    /// stored state could not be read and its retry tick has not come
-    /// ([`STORE_LOAD_RETRY_SECS`]).
+    /// Whether nobody can be put into `rc` now: another host owns it and its session is
+    /// not reachable ([`Self::reaches`]), or its stored state could not be read and its
+    /// retry tick has not come ([`STORE_LOAD_RETRY_SECS`]).
     pub fn is_unavailable(&self, rc: RegionCoords) -> bool {
-        !self.owns(rc) || self.unavailable.get(&rc).is_some_and(|&retry| self.spawner.world_tick() < retry)
+        !self.reaches(rc) || self.unavailable.get(&rc).is_some_and(|&retry| self.spawner.world_tick() < retry)
+    }
+
+    /// Whether Play, embark, return, an adventure start or a placement into `rc` is
+    /// refused: it is unavailable, or another host owns it — players do not move between
+    /// hosts yet (Task 8 lifts the foreign half).
+    fn refuses_play(&self, rc: RegionCoords) -> bool {
+        self.is_unavailable(rc) || self.is_foreign(rc)
     }
 
     /// The regions that are unavailable now (tests, the `[server]` line).

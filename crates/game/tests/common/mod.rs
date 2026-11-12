@@ -411,6 +411,7 @@ pub fn fixed_body_mass_count(data: &Rollback) -> (usize, usize) {
 }
 
 pub mod cut_store;
+pub mod multi_rig;
 pub mod prefabs;
 pub mod rig;
 pub mod seam_translate;

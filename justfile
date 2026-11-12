@@ -1113,7 +1113,8 @@ test-r2:
 #     names a seed that replays exactly — plus the rest of the game's seam
 #     tests: the manager's handoff (`handoff_manager`), the halo, intents,
 #     mining / placing / chests / piles across a seam, slimes, people and
-#     bodies crossing, body arrivals (`seam_tests` below);
+#     bodies crossing, body arrivals, and entities crossing between hosts over
+#     the peer session (`peer_session`, `peer_schedule`) (`seam_tests` below);
 #   - server `threaded_world`: the same walk on real OS threads. Serial on
 #     purpose: each test already spawns 9+ region threads.
 # ~80 s–2 min warm (game ~45 s, the real-thread layer ~35 s, measured 2026-11-07). Run after
@@ -1121,7 +1122,7 @@ test-r2:
 # a seam. The client-side twin (bit-exact convergence under late scheduling)
 # needs a Bevy-sized test binary, so it stays an explicit opt-in:
 #   just test-one client "--test it -- --include-ignored crossing::crossing_converges_under_late_region"
-seam_tests := "handoff_schedule:: handoff_manager:: halo:: across_seam across_the_seam crosses_seam intents::intent_to_unloaded_owner mining::cooldown_does_not_cross item_piles::pickup_from_neighbour_pile item_piles::deposit_outside_region handoff_state::dynamic_arrival handoff_state::replayed_dynamic_arrival handoff_state::sleeping_body_arrives_asleep"
+seam_tests := "handoff_schedule:: handoff_manager:: peer_session:: peer_schedule:: halo:: across_seam across_the_seam crosses_seam intents::intent_to_unloaded_owner mining::cooldown_does_not_cross item_piles::pickup_from_neighbour_pile item_piles::deposit_outside_region handoff_state::dynamic_arrival handoff_state::replayed_dynamic_arrival handoff_state::sleeping_body_arrives_asleep"
 test-threads:
     {{cap}} {{cargo}} test -p game --test it -- --include-ignored {{seam_tests}}
     {{cap}} {{cargo}} test -p server --test threaded_world -- --include-ignored --test-threads=1
