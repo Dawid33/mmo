@@ -56,6 +56,7 @@ mod region_wire;
 pub use region_wire::set_snapshot_sends_colliders;
 pub mod save_cut;
 pub mod registry;
+pub mod peer;
 pub mod people;
 pub mod slime;
 pub mod state;
@@ -119,6 +120,7 @@ pub use movement::{Immersion, Motion};
 pub use orders::*;
 pub use ownership::{rendezvous_owner, super_region_of, Ownership, DEFAULT_SUPER_REGION_REGIONS};
 pub use pathfind::*;
+pub use peer::*;
 pub use path_plan::{
     line_step, next_region, route_blocked, PathPlan, RouteMap, HINT_LEVEL_REACH, HINT_REACH_BLOCKS, MAX_ROUTE_NODES,
     PORTAL_DEPTH_BLOCKS, ROUTE_MAX_RELIEF_PER_REGION_M, ROUTE_MAX_WATER_SHARE,

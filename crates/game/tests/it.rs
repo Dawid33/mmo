@@ -70,6 +70,7 @@ mod pathfind;
 mod portable;
 mod player;
 mod people;
+mod peer_session;
 mod physics_goldens;
 mod play_region;
 mod random_ops;
