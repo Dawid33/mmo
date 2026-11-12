@@ -23,9 +23,14 @@ pub trait PeerLink {
     /// `WorldLink::generation`. A session that sees it change while [`PeerLink::is_up`]
     /// stayed true treats it as a dropped and new connection. Required: see the contract.
     fn connection(&self) -> u64;
-    /// Drive an in-process link ([`InlinePeerLink`]); the session calls it before draining
-    /// [`PeerLink::recv`]. A no-op for a real link.
+    /// Drive the link: the session calls it before draining [`PeerLink::recv`] (an
+    /// in-process link advances its delays; a real one takes what arrived).
     fn pump(&mut self, _now_ms: u64) {}
+    /// End the current connection so a fresh one (with a new hello) follows: the
+    /// manager calls it when the session declared the connection broken
+    /// ([`super::PeerSession::is_broken`]) while the link still says up. A link that
+    /// reconnects by itself (or the in-process one) may leave it a no-op.
+    fn close(&mut self) {}
 }
 
 /// splitmix64 of `seed` and `i`: the stateless roll behind the inline link's delays.

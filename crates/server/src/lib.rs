@@ -138,6 +138,7 @@ pub mod coordinator_rt;
 pub mod cuts;
 pub mod lod_workers;
 pub mod login_link;
+pub mod peer_link;
 pub mod perf;
 pub mod player_store;
 pub mod region_threads;
@@ -616,6 +617,21 @@ pub fn run() -> claims::ServerExit {
         }
         auth_edge::AuthMode::Local => None,
     };
+    // Several hosts of one world (`VOXEL_HOSTS` > 1): only as `host`, on Postgres, with the
+    // login link (ids and placement come from it).
+    let hosts = match ownership {
+        game::Ownership::Static { hosts, .. } => hosts,
+        game::Ownership::AllInOne => 1,
+    };
+    let postgres = matches!(&world_source, world_file::WorldSource::Store { url: world_store::StoreUrl::Postgres(_), .. });
+    roles::check_several_hosts(role, hosts, postgres, spawn_orders.is_some()).unwrap_or_else(|e| fatal(&e));
+    // Where players reach this host (`ServerPacket::Host`, its `hosts` row).
+    let endpoint = game::HostEndpoint {
+        ordinal: ownership.ordinal(),
+        quic: Some(peer_link::advertise_quic_from(std::env::var(peer_link::ADVERTISE_QUIC_ENV).ok().as_deref(), port)),
+        webtransport: peer_link::advertise_wt_from(std::env::var(peer_link::ADVERTISE_WT_ENV).ok().as_deref()),
+        cert_hash: None,
+    };
     let mut authenticator = auth_edge::Authenticator::for_mode(auth_mode);
     if let Some((orders, _)) = &spawn_orders {
         authenticator = authenticator.with_spawn_orders(orders.clone());
@@ -709,7 +725,6 @@ pub fn run() -> claims::ServerExit {
     // Split roles share one wall-anchored clock stored in the world row (R3), so the
     // base instant is back-dated by the clock's phase: tick edges fall at the same wall
     // instants in every process.
-    let postgres = matches!(&world_source, world_file::WorldSource::Store { url: world_store::StoreUrl::Postgres(_), .. });
     let (world_clock, clock_phase) =
         roles::start_clock(role, store.as_ref(), postgres, opened.world_tick).unwrap_or_else(|e| fatal(&e));
     let start = roles::back_dated_start(clock_phase);
@@ -740,6 +755,9 @@ pub fn run() -> claims::ServerExit {
     // One claim is shared by the region threads and the cut writer.
     let boot = host_boot();
     let mut world_generation = claims::WorldGeneration::default();
+    // Several hosts: the peer listener and a link to every other host (dropped at the end
+    // of `run`, sync code).
+    let mut peer_links: Option<peer_link::PeerLinks> = None;
     let claims = store.clone().map(|store| {
         let extent = world_map.as_ref().map(game::WorldMap::extent);
         let claimed = claims::HostClaims::claim(store, ownership, extent, super_region_regions).unwrap_or_else(|e| fatal(&e));
@@ -750,28 +768,45 @@ pub fn run() -> claims::ServerExit {
             claimed.fence().epochs.len(),
             claimed.fence().owner
         );
-        // A host registers once per boot, right after its claim: a boot after one that never
-        // left clean raises the world's generation, which every other host then adopts.
+        // A host registers once per boot, after its claim (and, with several hosts, once its
+        // peer listener is bound: the row names its address and pin): a boot after one that
+        // never left clean raises the world's generation, which every other host then adopts.
         if role == roles::Role::Host {
-            let row = world_store::HostRow {
-                ordinal: ownership.ordinal(),
-                boot,
-                generation: 0,
-                clean: false,
-                peer_addr: None,
-                peer_cert: None,
-                quic: None,
-                webtransport: None,
-                wt_cert_hash: None,
-            };
-            let registered = match claimed.store().register_host(row, claimed.fence()) {
-                Ok(registered) => registered,
+            let fenced_exit = |e: &dyn std::fmt::Display| -> ! {
                 // Replaced between the claim and the registration: fenced, not a start-up error.
-                Err(e @ world_store::StoreError::Fenced { .. }) => {
-                    log::error!("[server] fenced while registering as host {}: {e}", ownership.ordinal());
-                    std::process::exit(claims::EXIT_FENCED)
+                log::error!("[server] fenced while registering as host {}: {e}", ownership.ordinal());
+                std::process::exit(claims::EXIT_FENCED)
+            };
+            let registered = if hosts > 1 {
+                let config = peer_link::PeerLinkConfig::from_env(ownership.ordinal()).unwrap_or_else(|e| fatal(&e));
+                let token =
+                    svc_link::service_token_from_env().unwrap_or_else(|e| fatal(&format!("the service link's token: {e}")));
+                let bind = config.bind;
+                let links = peer_link::PeerLinks::start(
+                    ownership.ordinal(),
+                    hosts,
+                    boot,
+                    endpoint.clone(),
+                    token,
+                    claimed.store().clone(),
+                    claimed.fence(),
+                    config,
+                )
+                .unwrap_or_else(|e| {
+                    if peer_link::is_fenced(&e) {
+                        fenced_exit(&e)
+                    }
+                    fatal(&format!("the peer links on {bind}: {e}"))
+                });
+                let registered = links.registered();
+                peer_links = Some(links);
+                registered
+            } else {
+                match peer_link::register(claimed.store(), claimed.fence(), ownership.ordinal(), boot, &endpoint, None) {
+                    Ok(registered) => registered,
+                    Err(e @ world_store::StoreError::Fenced { .. }) => fenced_exit(&e),
+                    Err(e) => fatal(&e.to_string()),
                 }
-                Err(e) => fatal(&e.to_string()),
             };
             info!(
                 "[server] registered host {} at world generation {}{}",
@@ -789,6 +824,23 @@ pub fn run() -> claims::ServerExit {
     }
     let mut manager = game::WorldManager::new(spawner, server_send, region_out_send, lod_builder);
     manager.set_ownership(ownership, super_region_regions);
+    manager.set_endpoints(endpoint.clone(), random_u64());
+    // A session per other host, over its link; the links' wake-up (none with one host).
+    let mut peer_wake = crossbeam::channel::never::<()>();
+    if let Some(links) = peer_links.as_mut() {
+        peer_wake = links.wake();
+        for (other, link) in links.take() {
+            let hello = game::PeerHello {
+                ordinal: ownership.ordinal(),
+                boot,
+                generation: world_generation.mine(),
+                endpoint: endpoint.clone(),
+                received_through: 0,
+                received_from_boot: None,
+            };
+            manager.set_peer(other, game::PeerSession::new(hello, other), link);
+        }
+    }
 
     // The world coordinator's thread and its link's wake-up (none without a history).
     let mut coordinator: Option<coordinator_rt::CoordinatorThread> = None;
@@ -871,6 +923,8 @@ pub fn run() -> claims::ServerExit {
             },
             // The coordinator sent something: `maintain` below reads it.
             recv(world_wake) -> _ => {},
+            // Another host sent something: `maintain` pumps the peers.
+            recv(peer_wake) -> _ => {},
             default(std::time::Duration::from_millis(200)) => {}
         }
         let sessions = manager.depths().sessions;
@@ -897,6 +951,10 @@ pub fn run() -> claims::ServerExit {
             break 'main;
         }
         manager.maintain(now_ms);
+        // A peer runs a newer world generation: this host is stale (polled above).
+        if let Some(generation) = manager.take_higher_generation() {
+            world_generation.note(generation);
+        }
         manager.pump_lod_results();
         if let Some(cuts) = cuts.as_mut() {
             // Backpressure: no new cut while the store still commits one.
@@ -1172,6 +1230,15 @@ fn host_world_link(ordinal: u32, boot: u64, epoch: u64) -> Result<roles::QuicWor
         move || svc_link::read_cert_hash(roles::COORDINATOR_CERT_SHA256_ENV, &cert_file),
         hello,
     ))
+}
+
+/// A random number: SipHash under keys the OS seeds (`RandomState`) over the boot number.
+/// The seed of this boot's observer nonces, which must not be guessable.
+fn random_u64() -> u64 {
+    use std::hash::{BuildHasher, Hasher};
+    let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+    h.write_u64(host_boot());
+    h.finish()
 }
 
 /// A number distinct per host process start (its world requests' `RequestId::boot`): the

@@ -37,7 +37,8 @@ pub use cert::{SERVICE_TOKEN_ENV, SERVICE_TOKEN_FILE_ENV, cert_sha256_hex, read_
 pub use frame::{FrameError, LINK_MAX_FRAME_BYTES};
 
 /// Wire version of the hello; a mismatch is refused. 2: a host's hello carries its claim epoch.
-pub const LINK_PROTOCOL_VERSION: u32 = 2;
+/// 3: hosts link to each other (R3: `game::PeerMsg` frames between hosts).
+pub const LINK_PROTOCOL_VERSION: u32 = 3;
 /// First reconnect delay; doubles per failed attempt up to [`LINK_RETRY_MAX_MS`].
 pub const LINK_RETRY_MIN_MS: u64 = 250;
 pub const LINK_RETRY_MAX_MS: u64 = 5000;

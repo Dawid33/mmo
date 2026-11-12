@@ -80,6 +80,31 @@ impl Role {
     }
 }
 
+/// Why several hosts (`VOXEL_HOSTS` > 1) refuse to start without the login link.
+pub const SEVERAL_HOSTS_NEED_LOGIN: &str = "several hosts need the login link: ids and placement come from it";
+/// Why several hosts refuse any role but `host`.
+pub const SEVERAL_HOSTS_NEED_ROLE_HOST: &str = "several hosts (VOXEL_HOSTS > 1) need VOXEL_ROLE=host";
+
+/// The start-up refusals of a world of `hosts` region hosts (R3): with more than one,
+/// the role must be `host`, the store Postgres ([`SPLIT_ROLES_NEED_POSTGRES`]) and the
+/// auth `jwt` with a service token (`login_link`: the login service's push), since
+/// player ids and placement come from the login service. One host changes nothing.
+pub fn check_several_hosts(role: Role, hosts: u32, postgres: bool, login_link: bool) -> Result<(), String> {
+    if hosts <= 1 {
+        return Ok(());
+    }
+    if role != Role::Host {
+        return Err(SEVERAL_HOSTS_NEED_ROLE_HOST.to_string());
+    }
+    if !postgres {
+        return Err(SPLIT_ROLES_NEED_POSTGRES.to_string());
+    }
+    if !login_link {
+        return Err(SEVERAL_HOSTS_NEED_LOGIN.to_string());
+    }
+    Ok(())
+}
+
 /// What a split role refuses to start on: the world's clock anchor says it is earlier
 /// than the saved world tick (a restored backup, a cleared-then-stale row).
 pub const CLOCK_BEHIND_WORLD_TICK: &str =

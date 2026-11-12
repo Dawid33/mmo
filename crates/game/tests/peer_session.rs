@@ -803,3 +803,89 @@ fn reset_connection_forces_a_new_hello() {
         assert!(a.s.is_reachable() && b.s.is_reachable(), "seed {seed}");
     }
 }
+
+/// One end of an [`InlinePeerLink`] that counts [`PeerLink::close`] calls.
+struct Closing {
+    inner: std::sync::Arc<std::sync::Mutex<InlinePeerLink>>,
+    closes: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl PeerLink for Closing {
+    fn send(&mut self, msg: PeerMsg) {
+        self.inner.lock().unwrap().send(msg)
+    }
+    fn recv(&mut self) -> Option<PeerMsg> {
+        self.inner.lock().unwrap().recv()
+    }
+    fn is_up(&self) -> bool {
+        self.inner.lock().unwrap().is_up()
+    }
+    fn connection(&self) -> u64 {
+        self.inner.lock().unwrap().connection()
+    }
+    fn pump(&mut self, now_ms: u64) {
+        self.inner.lock().unwrap().pump(now_ms)
+    }
+    fn close(&mut self) {
+        self.closes.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// The manager ends a connection its session declared broken (a gap: the session waits
+/// for the link's next connection) by closing the link — once — and never closes one
+/// that merely dropped or was replaced.
+#[test]
+fn manager_closes_a_link_whose_session_broke() {
+    use std::sync::atomic::Ordering;
+    let mut rig = crate::common::rig::Rig::with_ownership(
+        game::InlineSpawner::default(),
+        std::sync::Arc::new(|_| crate::common::uniform_seed()),
+        game::Ownership::Static { ordinal: 0, hosts: 2 },
+        1,
+    );
+    let (mine, mut theirs) = InlinePeerLink::pair(7, 0);
+    let mine = std::sync::Arc::new(std::sync::Mutex::new(mine));
+    let closes = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    rig.manager.set_peer(
+        1,
+        PeerSession::new(hello(0, 100, 1), 1),
+        Box::new(Closing { inner: mine.clone(), closes: closes.clone() }),
+    );
+    let mut now = 0;
+    let mut pump = |rig: &mut crate::common::rig::Rig, theirs: &mut InlinePeerLink| {
+        now += 1;
+        rig.manager.pump_peers(now);
+        theirs.pump(now);
+        std::iter::from_fn(|| theirs.recv()).collect::<Vec<_>>()
+    };
+    // Up: our hello out, theirs in.
+    let got = pump(&mut rig, &mut theirs);
+    assert!(matches!(got.as_slice(), [PeerMsg::Hello(_)]), "{got:?}");
+    theirs.send(PeerMsg::Hello(hello(1, 200, 1)));
+    pump(&mut rig, &mut theirs);
+    assert_eq!(closes.load(Ordering::SeqCst), 0, "an up session closes nothing");
+
+    // A plain drop and reconnect (between two pumps: a replaced connection): no close.
+    mine.lock().unwrap().set_up(false);
+    mine.lock().unwrap().set_up(true);
+    let got = pump(&mut rig, &mut theirs);
+    assert!(matches!(got.as_slice(), [PeerMsg::Hello(_)]), "a new hello: {got:?}");
+    theirs.send(PeerMsg::Hello(hello(1, 200, 1)));
+    pump(&mut rig, &mut theirs);
+    mine.lock().unwrap().set_up(false);
+    pump(&mut rig, &mut theirs);
+    mine.lock().unwrap().set_up(true);
+    pump(&mut rig, &mut theirs);
+    theirs.send(PeerMsg::Hello(hello(1, 200, 1)));
+    pump(&mut rig, &mut theirs);
+    assert_eq!(closes.load(Ordering::SeqCst), 0, "a dropped or replaced connection is not closed");
+
+    // A gap in their numbering: broken, the link is closed once.
+    theirs.send(reliable_frame(5, 5));
+    pump(&mut rig, &mut theirs);
+    assert_eq!(closes.load(Ordering::SeqCst), 1, "the broken connection is closed");
+    theirs.send(reliable_frame(6, 6));
+    pump(&mut rig, &mut theirs);
+    pump(&mut rig, &mut theirs);
+    assert_eq!(closes.load(Ordering::SeqCst), 1, "once");
+}

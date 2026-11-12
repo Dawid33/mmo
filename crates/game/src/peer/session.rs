@@ -145,6 +145,12 @@ impl PeerSession {
         self.state == Conn::Up && !self.held
     }
 
+    /// The current connection broke (a gap in the peer's numbering, an impossible ack):
+    /// nothing is processed until the link's next connection.
+    pub fn is_broken(&self) -> bool {
+        self.state == Conn::Broken
+    }
+
     /// Every reliable message queued, or sent and not acknowledged, in order — held or not.
     pub fn unreceived(&self) -> impl Iterator<Item = &Reliable> {
         self.out.iter().map(|(_, r)| r)

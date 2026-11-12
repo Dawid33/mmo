@@ -73,6 +73,11 @@ path = "tests/coordinator_rt.rs"
 required-features = ["test-hooks"]
 
 [[test]]
+name = "hosts"
+path = "tests/hosts.rs"
+required-features = ["test-hooks"]
+
+[[test]]
 name = "login_link"
 path = "tests/login_link.rs"
 

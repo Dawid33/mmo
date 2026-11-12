@@ -87,6 +87,12 @@ impl<S: RegionSpawner> WorldManager<S> {
                 continue;
             }
             let events = peer.session.pump(peer.link.as_mut(), now_ms);
+            // A connection the session broke on this pump (it reported `Down` and waits for
+            // the next one) is ended here, so the link makes a fresh one with a new hello.
+            if peer.session.is_broken() && peer.link.is_up() && events.contains(&PeerEvent::Down) {
+                log::warn!("[server] the connection to host {ordinal} broke: closing it for a fresh one");
+                peer.link.close();
+            }
             for ev in events {
                 self.peer_event(ordinal, ev);
             }
