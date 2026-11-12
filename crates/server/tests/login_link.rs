@@ -140,7 +140,7 @@ impl Login {
     fn spawn(&self, player: &PlayerToken, epoch: u64) -> bool {
         self.tx.send(LoginToHost::SpawnPlayer { player_token: player.0.clone(), session_epoch: epoch }).unwrap();
         match self.next(LINK_WAIT) {
-            Some(HostToLogin::SpawnAck { player_token, session_epoch, ok }) => {
+            Some(HostToLogin::SpawnAck { player_token, session_epoch, ok, .. }) => {
                 assert_eq!((player_token.as_str(), session_epoch), (player.0.as_str(), epoch));
                 ok
             }

@@ -396,14 +396,24 @@ async fn join(State(s): State<AppState>, ApiJson(req): ApiJson<JoinRequest>) -> 
     // A 503 does not mean nothing happened: an order that reached the host and was applied
     // (its ack lost, or later than the timeout) has already parked the player's online
     // session there — the player is then logged out of that world and must join again.
-    if let Err(e) = s.host_links.spawn(&world, &player_token, session_epoch).await {
-        log::warn!(
-            "[login] join: account {} world {} epoch {session_epoch}: {e}",
-            account.account_id,
-            world.world_id
-        );
-        return Err(Fail::world_unavailable());
-    }
+    // With several hosts the order may be taken by another host than the linked one: the
+    // ticket names the addresses its ack gave (else the world row's).
+    let place = match s.host_links.spawn(&world, &player_token, session_epoch).await {
+        Ok(place) => place,
+        Err(e) => {
+            log::warn!(
+                "[login] join: account {} world {} epoch {session_epoch}: {e}",
+                account.account_id,
+                world.world_id
+            );
+            return Err(Fail::world_unavailable());
+        }
+    };
+    let (quic, webtransport, cert_hash) = if place.named() {
+        (place.quic, place.webtransport, place.cert_hash)
+    } else {
+        (world.quic, world.webtransport, world.cert_hash)
+    };
     // Two joins racing with one token: the loser's spawn order is superseded by the winner's or
     // expires unused at the host; its rotation answers Reused (the family is revoked).
     let (rotated, refresh_token) = rotate_refresh(&s, &req.refresh_token).await?;
@@ -430,9 +440,9 @@ async fn join(State(s): State<AppState>, ApiJson(req): ApiJson<JoinRequest>) -> 
         ticket: JoinTicket {
             world: world.world_id,
             jwt,
-            quic: world.quic,
-            webtransport: world.webtransport,
-            cert_hash: world.cert_hash,
+            quic,
+            webtransport,
+            cert_hash,
             expires_in_secs: JOIN_JWT_TTL_SECS,
         },
         refresh_token,

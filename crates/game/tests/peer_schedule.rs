@@ -4351,3 +4351,340 @@ fn players_toward_a_leaver(rig: &mut MultiRig) {
 fn players_handed_or_moved_to_a_leaver_park_there_in_one_part() {
     sweep("players_handed_or_moved_to_a_leaver_park_there_in_one_part", 2, 1, SEEDS / 4, players_toward_a_leaver);
 }
+
+// --- Login placement across hosts (Task 15) ------------------------------------------
+
+/// The test login's player token (any string: the manager never resolves it).
+const LOGIN_TOKEN: &str = "5ca1ab1e5ca1ab1e";
+/// The session id of the test player's newer login.
+const NEW_LOGIN_CLIENT: game::ClientId = 12;
+/// A player no test connects.
+const FRESH_PLAYER: game::PlayerId = game::PlayerId(103);
+
+/// What each host told its login service so far, appended to `out` as `(host, message)`.
+fn collect_login_out(rig: &mut MultiRig, out: &mut Vec<(u32, game::LoginOut)>) {
+    for (h, r) in rig.hosts.iter_mut().enumerate() {
+        out.extend(r.manager.take_login_out().into_iter().map(|o| (h as u32, o)));
+    }
+}
+
+/// The host of a 3-host rig that owns neither `a` nor `b` (the entry host of the login
+/// tests: the login service is linked to it only), set as every host's entry host.
+fn third_host_as_entry(rig: &mut MultiRig, a: RegionCoords, b: RegionCoords) -> u32 {
+    let (ha, hb) = (rig.owner(a), rig.owner(b));
+    let entry = (0..rig.hosts.len() as u32).find(|h| *h != ha && *h != hb).expect("a third host");
+    for r in &mut rig.hosts {
+        r.manager.set_entry_host(entry);
+    }
+    entry
+}
+
+/// `place_spawn`'s rules in order, each with the earlier ones absent: no record → the
+/// owner of the spawn region; a record → its region's owner; a player handed away
+/// (`departed`) → where it went, whatever its record says; a player held here (online,
+/// then parked) → here, whatever its record says.
+fn place_spawn_rules(rig: &mut MultiRig) {
+    use game::Placement::{Here, Host};
+    let (a, b) = host_seam(2, 1);
+    let (ha, hb) = (rig.owner(a), rig.owner(b));
+    let at = |h: u32, owner: u32| if h == owner { Here } else { Host(owner) };
+    let spawn_owner = rig.owner(game::SPAWN_REGION);
+    for h in [ha, hb] {
+        let m = &rig.hosts[h as usize].manager;
+        assert_eq!(m.place_spawn(FRESH_PLAYER, None), at(h, spawn_owner), "no record, on host {h}");
+        assert_eq!(m.place_spawn(FRESH_PLAYER, Some(a)), at(h, ha), "a record in {a:?}, on host {h}");
+        assert_eq!(m.place_spawn(FRESH_PLAYER, Some(b)), at(h, hb), "a record in {b:?}, on host {h}");
+    }
+    rig.run(a);
+    rig.run(b);
+    rig.connect_login(ha, P_CLIENT, P_PLAYER, Some(record_at(a, [REGION_SIZE / 2.0, REGION_SIZE / 2.0])), LOGIN_TOKEN, 1);
+    let (_, _, id) = until_body(rig);
+    assert_eq!(rig.hosts[ha as usize].manager.place_spawn(P_PLAYER, Some(b)), Here, "online here");
+    assert!(rig.teleport(a, id, past_seam(a, b, REGION_SIZE / 2.0)));
+    until_player_settled_in(rig, b);
+    // Its stored record still says `a` (no cut since).
+    assert_eq!(rig.hosts[ha as usize].manager.place_spawn(P_PLAYER, Some(a)), Host(hb), "handed away: where it went");
+    assert_eq!(rig.hosts[hb as usize].manager.place_spawn(P_PLAYER, Some(a)), Here, "online here (handed here)");
+    // Its session never comes to hb: parked there after the grace.
+    for _ in 0..CROSS_ROUNDS {
+        if !rig.parked_on(P_PLAYER).is_empty() {
+            break;
+        }
+        rig.maintain_all(game::HANDOFF_SESSION_GRACE_MS / 2);
+        rig.round();
+    }
+    assert_eq!(rig.parked_on(P_PLAYER), [hb]);
+    assert_eq!(rig.hosts[hb as usize].manager.place_spawn(P_PLAYER, Some(a)), Here, "parked here");
+    assert_eq!(rig.hosts[ha as usize].manager.place_spawn(P_PLAYER, Some(a)), Host(hb), "parked where it went");
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn place_spawn_order_of_rules() {
+    sweep("place_spawn_order_of_rules", 2, 1, SEEDS / 4, place_spawn_rules);
+}
+
+/// One login of the test player through the entry host: the order (stored record in `a`)
+/// at `entry`, `walk` called before the rounds it names; the server answers taken orders
+/// every `serve_every` rounds. Then the session (`client`, `epoch`) connects where the
+/// acknowledgement said. The host that took the order, and whether that host refused the
+/// session (its player left it meanwhile: `PLAYER_ELSEWHERE_REFUSAL`), and the round the
+/// server answered the order in.
+fn login_through_entry(
+    rig: &mut MultiRig,
+    entry: u32,
+    (client, epoch): (game::ClientId, u64),
+    a: RegionCoords,
+    serve_every: u64,
+    out: &mut Vec<(u32, game::LoginOut)>,
+    mut walk: impl FnMut(&mut MultiRig, u64),
+) -> (u32, bool, u64) {
+    let order = game::ServerEvent::SpawnOrder {
+        origin: entry,
+        hops: 0,
+        player_token: LOGIN_TOKEN.into(),
+        session_epoch: epoch,
+        player: P_PLAYER,
+        record_region: Some(a),
+    };
+    rig.hosts[entry as usize].event(order);
+    let mut taken = Vec::new();
+    let is_ack = |o: &game::LoginOut| matches!(o, game::LoginOut::SpawnAck { session_epoch, .. } if *session_epoch == epoch);
+    for round in 0..CROSS_ROUNDS as u64 {
+        walk(rig, round);
+        rig.round();
+        if round % serve_every == serve_every - 1 {
+            for t in rig.serve_logins() {
+                taken.push((round, t));
+            }
+        }
+        collect_login_out(rig, out);
+        if out.iter().any(|(_, o)| is_ack(o)) {
+            break;
+        }
+    }
+    assert_eq!(taken.len(), 1, "one host took the order of epoch {epoch}: {taken:?}");
+    let (answered, (placed, _)) = taken[0];
+    let acks: Vec<&(u32, game::LoginOut)> = out.iter().filter(|(_, o)| is_ack(o)).collect();
+    let want = game::LoginOut::SpawnAck {
+        player_token: LOGIN_TOKEN.into(),
+        session_epoch: epoch,
+        ok: true,
+        endpoint: Some(rig_endpoint(placed)),
+    };
+    assert_eq!(acks, [&(entry, want)], "one acknowledgement, at the entry host, naming host {placed}");
+    let centre = [REGION_SIZE / 2.0, REGION_SIZE / 2.0];
+    rig.record_packets();
+    rig.connect_login(placed, client, P_PLAYER, Some(record_at(a, centre)), LOGIN_TOKEN, epoch);
+    let seen = rig.hosts[placed as usize].packets_seen.as_ref().expect("recording");
+    let refused = seen.iter().any(|(to, p)| {
+        *to == Some(client) && matches!(p, game::ServerPacket::Refused(why) if why == game::PLAYER_ELSEWHERE_REFUSAL)
+    });
+    (placed, refused, answered)
+}
+
+/// 3 hosts: the player walks from host A to host B; around the same round a newer login
+/// of it is ordered at the entry host E (neither), with the stored record still in A's
+/// region. E sends the order to A; A either still holds the player — it takes the order,
+/// and the player stays while online (no hand-off while its new session is awaited) — or
+/// relays it to B on the stream that carries the hand-off: behind it, so B holds the
+/// player when the order comes. One acknowledgement reaches E, naming the host that took
+/// the order, and the new session connects there. Only if A's supersede parked the player
+/// in the very tick its body left (the park then goes on with it to B) is that session
+/// refused (`PLAYER_ELSEWHERE_REFUSAL`, nothing placed); the client logs in again and that
+/// order is relayed to B. Either way the player ends as one body, and each login's end
+/// reaches E once.
+fn spawn_behind_handoff(rig: &mut MultiRig) {
+    let (a, b) = host_seam(3, 1);
+    let (ha, hb) = (rig.owner(a), rig.owner(b));
+    let entry = third_host_as_entry(rig, a, b);
+    rig.run(a);
+    rig.run(b);
+    let centre = [REGION_SIZE / 2.0, REGION_SIZE / 2.0];
+    rig.connect_login(ha, P_CLIENT, P_PLAYER, Some(record_at(a, centre)), LOGIN_TOKEN, 1);
+    let (_, _, id) = until_body(rig);
+    // The walk starts 0..=2 rounds after the order, and the server answers a taken order
+    // at once or only every third round (per seed and delay): the order meets the player
+    // on A before, during or after its hand-off, and a player A took the order for may try
+    // to walk on before its supersede comes. (Superseded first, it has no body to push.)
+    let mix = rig.seed + u64::from(rig.link_delay);
+    let (lead, serve_every) = (mix % 3, if (mix / 3) % 2 == 0 { 3 } else { 1 });
+    let mut out = Vec::new();
+    let walk = |rig: &mut MultiRig, round: u64| {
+        if round == lead {
+            rig.teleport(a, id, past_seam(a, b, REGION_SIZE / 2.0));
+        }
+    };
+    let (mut placed, refused, answered) =
+        login_through_entry(rig, entry, (NEW_LOGIN_CLIENT, 2), a, serve_every, &mut out, walk);
+    assert!(placed == ha || placed == hb, "placed on host {placed}, which never held the player");
+    let mut client = NEW_LOGIN_CLIENT;
+    if refused {
+        assert_eq!(placed, ha, "only A can lose the player after taking the order");
+        // Online, it was kept on A (no hand-off while its new session is awaited): only a
+        // player already parking when its body left — superseded before the walk — goes.
+        assert!(answered < lead, "the player left A online after A took its order (answered in round {answered}, walk in {lead})");
+        rig.players.remove(&NEW_LOGIN_CLIENT);
+        client = NEW_LOGIN_CLIENT + 1;
+        let again;
+        (again, _, _) = login_through_entry(rig, entry, (client, 3), a, 1, &mut out, |_, _| {});
+        assert_eq!(again, hb, "the login again lands where the player went");
+        placed = again;
+    }
+    for _ in 0..CROSS_ROUNDS {
+        rig.round();
+        collect_login_out(rig, &mut out);
+        if rig.player_owners(client).len() == 1 && rig.peer_unreceived() == 0 {
+            break;
+        }
+    }
+    for _ in 0..WAIT_ROUNDS {
+        rig.round();
+        collect_login_out(rig, &mut out);
+    }
+    let owners = rig.player_owners(client);
+    assert_eq!(owners.len(), 1, "the new login's one body: {owners:?}");
+    assert_eq!(owners[0].0, placed, "on the host that took the order");
+    assert!(rig.player_owners(P_CLIENT).is_empty(), "the old session's body is gone");
+    assert!(rig.parked_on(P_PLAYER).is_empty(), "no parked copy beside the body");
+    let ended_once = |epoch: u64| {
+        let end = game::LoginOut::SessionEnded { player_token: LOGIN_TOKEN.into(), session_epoch: epoch };
+        let ends: Vec<&(u32, game::LoginOut)> = out.iter().filter(|(_, o)| *o == end).collect();
+        assert_eq!(ends, [&(entry, end.clone())], "login {epoch} ended once, told to the entry host: {out:?}");
+    };
+    ended_once(1);
+    if refused {
+        ended_once(2);
+    }
+    let live = if refused { 3 } else { 2 };
+    assert!(
+        !out.iter().any(|(_, o)| matches!(o, game::LoginOut::SessionEnded { session_epoch, .. } if *session_epoch == live)),
+        "the live login did not end"
+    );
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn spawn_order_relayed_behind_a_hand_off_places_one_body() {
+    sweep("spawn_order_relayed_behind_a_hand_off_places_one_body", 3, 1, SEEDS / 2, spawn_behind_handoff);
+}
+
+/// 3 hosts: the player walks from host A to host B and the login service kicks its login
+/// at the entry host E in the same round. Wherever the kick meets the player (on A before
+/// the hand-off, on B after it, or on B before the hand-off arrives — remembered there), it
+/// is parked once; E acknowledges the kick once, after every peer applied it, and the
+/// login's end reaches E once.
+fn kick_crossing(rig: &mut MultiRig) {
+    let (a, b) = host_seam(3, 1);
+    let entry = third_host_as_entry(rig, a, b);
+    rig.run(a);
+    rig.run(b);
+    let (ha, hb) = (rig.owner(a), rig.owner(b));
+    rig.connect_login(ha, P_CLIENT, P_PLAYER, Some(record_at(a, [REGION_SIZE / 2.0, REGION_SIZE / 2.0])), LOGIN_TOKEN, 1);
+    let (_, _, id) = until_body(rig);
+    assert!(rig.teleport(a, id, past_seam(a, b, REGION_SIZE / 2.0)));
+    let kick = game::ServerEvent::Kick { player_token: LOGIN_TOKEN.into(), session_epoch: 1, reason: "signed out".into() };
+    rig.hosts[entry as usize].event(kick);
+    let mut out = Vec::new();
+    for _ in 0..CROSS_ROUNDS {
+        rig.round();
+        rig.serve_logins();
+        collect_login_out(rig, &mut out);
+        if !rig.parked_on(P_PLAYER).is_empty() && rig.peer_unreceived() == 0 && rig.player_owners(P_CLIENT).is_empty() {
+            break;
+        }
+    }
+    for _ in 0..WAIT_ROUNDS {
+        rig.round();
+        rig.serve_logins();
+        collect_login_out(rig, &mut out);
+    }
+    assert!(rig.player_owners(P_CLIENT).is_empty(), "the kicked session has no body");
+    let parked = rig.parked_on(P_PLAYER);
+    assert!(parked == [ha] || parked == [hb], "parked once, on A or B: {parked:?}");
+    let ack = game::LoginOut::KickAck { player_token: LOGIN_TOKEN.into(), session_epoch: 1 };
+    let ended = game::LoginOut::SessionEnded { player_token: LOGIN_TOKEN.into(), session_epoch: 1 };
+    let acks: Vec<&(u32, game::LoginOut)> = out.iter().filter(|(_, o)| *o == ack).collect();
+    assert_eq!(acks, [&(entry, ack.clone())], "acknowledged once, by the entry host: {out:?}");
+    let ends: Vec<&(u32, game::LoginOut)> = out.iter().filter(|(_, o)| *o == ended).collect();
+    assert_eq!(ends, [&(entry, ended.clone())], "the login ended once, told to the entry host: {out:?}");
+    // A resend (the login service's sweep) is acknowledged again and changes nothing.
+    rig.hosts[entry as usize].event(game::ServerEvent::Kick {
+        player_token: LOGIN_TOKEN.into(),
+        session_epoch: 1,
+        reason: "signed out".into(),
+    });
+    out.clear();
+    for _ in 0..WAIT_ROUNDS {
+        rig.round();
+        rig.serve_logins();
+        collect_login_out(rig, &mut out);
+    }
+    assert_eq!(out, [(entry, ack)], "a resend: one more acknowledgement, nothing else");
+    assert_eq!(rig.parked_on(P_PLAYER), parked);
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn kick_reaches_a_crossing_login_and_is_acked_once() {
+    sweep("kick_reaches_a_crossing_login_and_is_acked_once", 3, 1, SEEDS / 2, kick_crossing);
+}
+
+/// A spawn order placed from the STORE waits for every peer's first sync: the test
+/// player's move from A into B (an embark) is queued on A while the A–B link is down; a
+/// login of it is ordered at B with the stored record already in B's region. B holds the
+/// player not yet, so the order would place it from the store — it waits instead, until the
+/// link is back and A's backlog (the move, before A's `Running`) has come. Then B takes it
+/// from the live player: the new login gets the moved record (its fortress), not the stored
+/// one.
+fn store_spawn_waits_for_sync(rig: &mut MultiRig) {
+    let (b, ha, hb) = move_queued_link_down(rig, true);
+    rig.hosts[hb as usize].manager.set_entry_host(hb);
+    let order = game::ServerEvent::SpawnOrder {
+        origin: hb,
+        hops: 0,
+        player_token: LOGIN_TOKEN.into(),
+        session_epoch: 2,
+        player: P_PLAYER,
+        record_region: Some(b),
+    };
+    rig.hosts[hb as usize].event(order);
+    let (mut taken, mut out) = (Vec::new(), Vec::new());
+    for _ in 0..WAIT_ROUNDS {
+        rig.round();
+        taken.extend(rig.serve_logins());
+        collect_login_out(rig, &mut out);
+    }
+    assert!(taken.is_empty() && out.is_empty(), "nothing placed while host {ha} has not synced: {taken:?} {out:?}");
+    assert_eq!(rig.hosts[hb as usize].manager.spawn_orders_waiting(), 1, "the order waits");
+    rig.link_up(ha, hb);
+    for _ in 0..CROSS_ROUNDS {
+        rig.round();
+        taken.extend(rig.serve_logins());
+        collect_login_out(rig, &mut out);
+        if !out.is_empty() {
+            break;
+        }
+    }
+    assert_eq!(taken.iter().map(|(h, _)| *h).collect::<Vec<_>>(), [hb], "host {hb} took it");
+    let ack = game::LoginOut::SpawnAck { player_token: LOGIN_TOKEN.into(), session_epoch: 2, ok: true, endpoint: Some(rig_endpoint(hb)) };
+    assert_eq!(out, [(hb, ack)]);
+    // The new login connects with the store's (older) record: the live one wins.
+    rig.connect_login(hb, NEW_LOGIN_CLIENT, P_PLAYER, Some(centre_of(b)), LOGIN_TOKEN, 2);
+    for _ in 0..CROSS_ROUNDS {
+        rig.round();
+        if rig.player_owners(NEW_LOGIN_CLIENT).len() == 1 && rig.peer_unreceived() == 0 {
+            break;
+        }
+    }
+    assert_eq!(rig.player_owners(NEW_LOGIN_CLIENT), [(hb, b)], "one body, where the move took it");
+    assert!(rig.parked_on(P_PLAYER).is_empty());
+    let claim = rig.hosts[hb as usize].manager.client_claim(NEW_LOGIN_CLIENT);
+    assert_eq!(claim, Some(game::Claim::Fortress(EMBARK_SITE)), "the moved record's fortress, not the stored record's none");
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn spawn_from_the_store_waits_for_every_peer_sync() {
+    sweep("spawn_from_the_store_waits_for_every_peer_sync", 2, 1, SEEDS / 4, store_spawn_waits_for_sync);
+}

@@ -38,7 +38,10 @@ pub use frame::{FrameError, LINK_MAX_FRAME_BYTES};
 
 /// Wire version of the hello; a mismatch is refused. 2: a host's hello carries its claim epoch.
 /// 3: hosts link to each other (R3: `game::PeerMsg` frames between hosts).
-pub const LINK_PROTOCOL_VERSION: u32 = 3;
+/// 4: the coordinator's multi-host messages (`Attach.generation`, `ClaimIs`, `PlayerHandedTo`,
+/// hops, `LeaveRequest`), and the login relay between hosts (spawn orders, kicks, session ends;
+/// `SpawnAck` names the placing host's addresses).
+pub const LINK_PROTOCOL_VERSION: u32 = 4;
 /// First reconnect delay; doubles per failed attempt up to [`LINK_RETRY_MAX_MS`].
 pub const LINK_RETRY_MIN_MS: u64 = 250;
 pub const LINK_RETRY_MAX_MS: u64 = 5000;

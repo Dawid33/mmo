@@ -38,6 +38,17 @@
 //! The order is consumed and the supersede queued on this link's thread BEFORE the ack goes
 //! out, and the supersede shares the manager's event channel with the connects: the new
 //! session's `ClientConnected` always comes after the old one's park was asked for.
+//!
+//! **Several hosts** (R3): only the entry host ([`ENTRY_HOST_ENV`]) listens for the login
+//! service; its link RELAYS ([`start_relaying`]): a `SpawnPlayer` becomes a
+//! [`ServerEvent::SpawnOrder`] the manager places — here, or on the host that holds the
+//! player, over the peer stream (`game`'s `placement.rs`) — and a `Kick`, applied here first,
+//! goes to every host. Every host's main loop plays the server's half of it
+//! ([`LoginRelay::pump`]): it records the spawn orders its manager takes (as above: the
+//! supersede first) and applies the kicks relayed to it, and the entry host's tells the login
+//! service what the managers answered (`SpawnAck` naming the host that took the order,
+//! `KickAck` once every host applied a kick, `SessionEnded` only when a session left the
+//! world, never on a hand-off to another host).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
@@ -60,6 +71,21 @@ pub const DEFAULT_HOST_LINK_BIND: &str = "127.0.0.1:6490";
 /// `host_link_cert`); its cert and key persist beside it (keep it under a git-ignored dir).
 pub const HOST_LINK_CERT_HASH_FILE_ENV: &str = "VOXEL_HOST_LINK_CERT_HASH_FILE";
 pub const DEFAULT_HOST_LINK_CERT_HASH_FILE: &str = "target/dev-r2/host-0.cert-sha256";
+
+/// The host of several whose login link the login service dials (`VOXEL_HOST_LINK_BIND`):
+/// the others take spawn orders and kicks relayed by it.
+pub const ENTRY_HOST_ENV: &str = "VOXEL_ENTRY_HOST";
+
+/// The entry host's ordinal from an env value (unset or empty: 0); it must be one of the
+/// world's `hosts`.
+pub fn entry_host_from(value: Option<&str>, hosts: u32) -> Result<u32, String> {
+    let value = value.map(str::trim).filter(|v| !v.is_empty()).unwrap_or("0");
+    let entry: u32 = value.parse().map_err(|_| format!("{ENTRY_HOST_ENV}={value:?} is not a host ordinal"))?;
+    if entry >= hosts {
+        return Err(format!("{ENTRY_HOST_ENV}={entry} is not a host of this world (VOXEL_HOSTS={hosts})"));
+    }
+    Ok(entry)
+}
 
 /// The refusal of a ticket no pending spawn order matches.
 pub const REFUSE_NO_SPAWN_ORDER: &str = "no spawn order for this login — log in again";
@@ -205,11 +231,38 @@ pub struct SpawnOrders {
     now: Clock,
     /// Set once the link listens.
     login: OnceLock<LoginPeers>,
+    /// Several hosts ([`Self::relay_through`]): the manager's event channel.
+    relay: OnceLock<Sender<ServerEvent>>,
 }
 
 impl SpawnOrders {
     pub fn new(now: Clock) -> SpawnOrders {
-        SpawnOrders { state: Mutex::default(), now, login: OnceLock::new() }
+        SpawnOrders { state: Mutex::default(), now, login: OnceLock::new(), relay: OnceLock::new() }
+    }
+
+    /// Several hosts: login sessions are announced with their login
+    /// ([`ServerEvent::LoginConnected`]) and their ends are the manager's to report — a
+    /// session refused at the edge goes to it as [`ServerEvent::SessionEnded`]. Set once,
+    /// before anything connects; `false` if it was set already.
+    pub fn relay_through(&self, events: Sender<ServerEvent>) -> bool {
+        self.relay.set(events).is_ok()
+    }
+
+    /// Whether [`Self::relay_through`] was set.
+    pub fn relays(&self) -> bool {
+        self.relay.get().is_some()
+    }
+
+    /// `msg` to every login peer connected now (none: lost, best effort).
+    fn tell_login(&self, msg: HostToLogin) {
+        let Some(login) = self.login.get() else {
+            log::warn!("[login-link] {msg:?} for the login service, which is not linked to this host: dropped");
+            return;
+        };
+        let peers = login.peers.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        for peer in peers {
+            login.senders.send(peer, msg.clone());
+        }
     }
 
     fn state(&self) -> std::sync::MutexGuard<'_, OrderState> {
@@ -331,23 +384,45 @@ impl SpawnOrders {
         }
     }
 
-    /// The session admitted with (`token`, `epoch`) ended: forgotten (unless a newer one of
-    /// the player is live) and reported to the login service.
+    /// The session admitted with (`token`, `epoch`) ended without ever playing (refused at
+    /// its announcement, or its player unresolved): forgotten (unless a newer one of the
+    /// player is live) and reported to the login service (several hosts: through the
+    /// manager, [`ServerEvent::SessionEnded`]).
     pub fn ended(&self, token: &str, epoch: u64) {
-        {
-            let now = (self.now)();
-            let mut state = self.state();
-            if state.admitted.get(token) == Some(&epoch) {
-                state.admitted.remove(token);
+        self.forget(token, epoch);
+        match self.relay.get() {
+            Some(events) => {
+                let _ = events.send(ServerEvent::SessionEnded { player_token: token.to_string(), session_epoch: epoch });
             }
-            let newest = state.used.get(token).map_or(epoch, |(used, _)| (*used).max(epoch));
-            state.used.insert(token.to_string(), (newest, now.saturating_add(SPAWN_PENDING_TTL_SECS)));
+            None => self.tell_ended(token, epoch),
         }
-        if let Some(login) = self.login.get() {
-            let peers = login.peers.lock().unwrap_or_else(|p| p.into_inner()).clone();
-            for peer in peers {
-                login.senders.send(peer, HostToLogin::SessionEnded { player_token: token.to_string(), session_epoch: epoch });
-            }
+    }
+
+    /// The connection of the announced session admitted with (`token`, `epoch`) closed:
+    /// forgotten as [`Self::ended`]. One host reports it to the login service here; with
+    /// several the manager does, only once the session left the world (a session whose
+    /// player was handed to another host has not: a kick for it must stay pending).
+    pub fn closed(&self, token: &str, epoch: u64) {
+        self.forget(token, epoch);
+        if !self.relays() {
+            self.tell_ended(token, epoch);
+        }
+    }
+
+    fn forget(&self, token: &str, epoch: u64) {
+        let now = (self.now)();
+        let mut state = self.state();
+        if state.admitted.get(token) == Some(&epoch) {
+            state.admitted.remove(token);
+        }
+        let newest = state.used.get(token).map_or(epoch, |(used, _)| (*used).max(epoch));
+        state.used.insert(token.to_string(), (newest, now.saturating_add(SPAWN_PENDING_TTL_SECS)));
+    }
+
+    /// `SessionEnded` to the login peers connected now (none linked: nothing).
+    fn tell_ended(&self, token: &str, epoch: u64) {
+        if self.login.get().is_some() {
+            self.tell_login(HostToLogin::SessionEnded { player_token: token.to_string(), session_epoch: epoch });
         }
     }
 }
@@ -379,6 +454,37 @@ pub fn start(
     players: SharedPlayerStore,
     events: Sender<ServerEvent>,
 ) -> io::Result<LoginLink> {
+    start_with(bind, token, cert_hash_file, orders, players, events, None)
+}
+
+/// [`start`] for the entry host `ordinal` of several: `SpawnPlayer` goes to the manager
+/// ([`ServerEvent::SpawnOrder`]) and a `Kick` applied here goes on to it
+/// ([`ServerEvent::Kick`]); their answers to the login service come from
+/// [`LoginRelay::pump`] (`orders` must relay: [`LoginRelay::new`]).
+pub fn start_relaying(
+    bind: SocketAddr,
+    token: String,
+    cert_hash_file: Option<PathBuf>,
+    orders: Arc<SpawnOrders>,
+    players: SharedPlayerStore,
+    events: Sender<ServerEvent>,
+    ordinal: u32,
+) -> io::Result<LoginLink> {
+    if !orders.relays() {
+        return Err(io::Error::other("a relaying login link needs relaying spawn orders (LoginRelay::new)"));
+    }
+    start_with(bind, token, cert_hash_file, orders, players, events, Some(ordinal))
+}
+
+fn start_with(
+    bind: SocketAddr,
+    token: String,
+    cert_hash_file: Option<PathBuf>,
+    orders: Arc<SpawnOrders>,
+    players: SharedPlayerStore,
+    events: Sender<ServerEvent>,
+    relay: Option<u32>,
+) -> io::Result<LoginLink> {
     if let Some(dir) = cert_hash_file.as_deref().and_then(std::path::Path::parent).filter(|d| !d.as_os_str().is_empty()) {
         std::fs::create_dir_all(dir)?;
     }
@@ -389,7 +495,7 @@ pub fn start(
     log::info!("[login-link] listening for the login service on {}", listener.local_addr());
     std::thread::Builder::new()
         .name("login-link".into())
-        .spawn(move || serve(link_events, senders, orders, players, events))?;
+        .spawn(move || serve(link_events, senders, orders, players, events, relay))?;
     Ok(LoginLink { listener })
 }
 
@@ -399,6 +505,7 @@ fn serve(
     orders: Arc<SpawnOrders>,
     players: SharedPlayerStore,
     events: Sender<ServerEvent>,
+    relay: Option<u32>,
 ) {
     let login_peers = |f: &mut dyn FnMut(&mut BTreeSet<PeerId>)| {
         if let Some(login) = orders.login.get() {
@@ -430,14 +537,38 @@ fn serve(
                     log::warn!("[login-link] message from peer {} that is not the login service: ignored", peer.0);
                     continue;
                 }
-                match msg {
-                    LoginToHost::SpawnPlayer { player_token, session_epoch } => {
+                match (msg, relay) {
+                    (LoginToHost::SpawnPlayer { player_token, session_epoch }, None) => {
                         let ok = spawn(&orders, &players, &events, &player_token, session_epoch);
-                        senders.send(peer, HostToLogin::SpawnAck { player_token, session_epoch, ok });
+                        senders.send(peer, spawn_ack(player_token, session_epoch, ok, None));
                     }
-                    LoginToHost::Kick { player_token, session_epoch, reason } => {
-                        if kick(&orders, &players, &events, &player_token, session_epoch, reason) {
-                            senders.send(peer, HostToLogin::KickAck { player_token, session_epoch });
+                    // Several hosts: the manager places it (here or on the host holding the
+                    // player); `LoginRelay::pump` answers.
+                    (LoginToHost::SpawnPlayer { player_token, session_epoch }, Some(origin)) => {
+                        match resolve(&players, &player_token) {
+                            Some((player, record)) => {
+                                let record_region = record.map(|r| r.region);
+                                let order =
+                                    ServerEvent::SpawnOrder { origin, hops: 0, player_token, session_epoch, player, record_region };
+                                let _ = events.send(order);
+                            }
+                            None => {
+                                senders.send(peer, spawn_ack(player_token, session_epoch, false, None));
+                            }
+                        }
+                    }
+                    (LoginToHost::Kick { player_token, session_epoch, reason }, relay) => {
+                        if !kick(&orders, &players, &events, &player_token, session_epoch, reason.clone()) {
+                            continue;
+                        }
+                        match relay {
+                            // Applied here: on to every host; acknowledged once all applied it.
+                            Some(_) => {
+                                let _ = events.send(ServerEvent::Kick { player_token, session_epoch, reason });
+                            }
+                            None => {
+                                senders.send(peer, HostToLogin::KickAck { player_token, session_epoch });
+                            }
                         }
                     }
                 }
@@ -447,9 +578,19 @@ fn serve(
     log::info!("[login-link] stopped");
 }
 
-/// The player of a login token, through the player store (created if new). `None` (logged)
-/// for a malformed token or a store failure.
-fn player_of(players: &SharedPlayerStore, token: &str) -> Option<game::PlayerId> {
+/// The acknowledgement of a spawn order; `endpoint`: the host that took it (`None`: the
+/// world row's addresses).
+fn spawn_ack(player_token: String, session_epoch: u64, ok: bool, endpoint: Option<game::HostEndpoint>) -> HostToLogin {
+    let (quic, webtransport, cert_hash) = match endpoint {
+        Some(e) => (e.quic, e.webtransport, e.cert_hash),
+        None => (None, None, None),
+    };
+    HostToLogin::SpawnAck { player_token, session_epoch, ok, quic, webtransport, cert_hash }
+}
+
+/// The player of a login token and its stored record, through the player store (created
+/// if new). `None` (logged) for a malformed token or a store failure.
+fn resolve(players: &SharedPlayerStore, token: &str) -> Option<(game::PlayerId, Option<game::PlayerRecord>)> {
     let token = PlayerToken(token.to_string());
     if !token.is_valid() {
         log::warn!("[login-link] a malformed player token");
@@ -457,12 +598,17 @@ fn player_of(players: &SharedPlayerStore, token: &str) -> Option<game::PlayerId>
     }
     let resolved = players.lock().unwrap_or_else(|p| p.into_inner()).resolve(&PlayerKey::Online(token));
     match resolved {
-        Ok((player, _)) => Some(player),
+        Ok(found) => Some(found),
         Err(e) => {
             log::error!("[login-link] player store: {e}");
             None
         }
     }
+}
+
+/// The player of a login token ([`resolve`]).
+fn player_of(players: &SharedPlayerStore, token: &str) -> Option<game::PlayerId> {
+    resolve(players, token).map(|(player, _)| player)
 }
 
 /// `SpawnPlayer`: whether it is acked ok.
@@ -474,6 +620,11 @@ fn spawn(
     epoch: u64,
 ) -> bool {
     let Some(player) = player_of(players, token) else { return false };
+    order_player(orders, events, token, epoch, player)
+}
+
+/// A spawn order of `player` (resolved) recorded: whether it is acked ok.
+fn order_player(orders: &SpawnOrders, events: &Sender<ServerEvent>, token: &str, epoch: u64, player: game::PlayerId) -> bool {
     // Any session of the player parks now, before the new ticket is handed out (and, sent
     // under the orders' lock, before any session can be announced after the order).
     let supersede = || {
@@ -523,6 +674,51 @@ fn kick(
                 log::info!("[login-link] kick of player {} (up to epoch {up_to}): {reason}", player.0);
             }
             true
+        }
+    }
+}
+
+/// The server's half of the login relay between several hosts, on every host: the spawn
+/// orders its manager takes are recorded (the player's sessions superseded first, as one
+/// host does), the kicks relayed to it applied, and — on the entry host — what the managers
+/// answered goes to the login service.
+pub struct LoginRelay {
+    orders: Arc<SpawnOrders>,
+    players: SharedPlayerStore,
+    events: Sender<ServerEvent>,
+}
+
+impl LoginRelay {
+    /// The relay over `orders` (from now on they relay: [`SpawnOrders::relay_through`]);
+    /// supersedes and edge-ended sessions go to the manager on `events`.
+    pub fn new(orders: Arc<SpawnOrders>, players: SharedPlayerStore, events: Sender<ServerEvent>) -> LoginRelay {
+        if !orders.relay_through(events.clone()) {
+            log::warn!("[login-link] these spawn orders relay already");
+        }
+        LoginRelay { orders, players, events }
+    }
+
+    /// After the manager's upkeep: what it took, was relayed and answered.
+    pub fn pump<S: game::RegionSpawner>(&self, manager: &mut game::WorldManager<S>) {
+        for order in manager.take_spawn_here() {
+            let ok = order_player(&self.orders, &self.events, &order.player_token, order.session_epoch, order.player);
+            manager.spawn_answered(order, ok);
+        }
+        for k in manager.take_kicks_in() {
+            let applied = kick(&self.orders, &self.players, &self.events, &k.player_token, k.session_epoch, k.reason.clone());
+            manager.kick_applied(k, applied);
+        }
+        for out in manager.take_login_out() {
+            let msg = match out {
+                game::LoginOut::SpawnAck { player_token, session_epoch, ok, endpoint } => {
+                    spawn_ack(player_token, session_epoch, ok, endpoint)
+                }
+                game::LoginOut::KickAck { player_token, session_epoch } => HostToLogin::KickAck { player_token, session_epoch },
+                game::LoginOut::SessionEnded { player_token, session_epoch } => {
+                    HostToLogin::SessionEnded { player_token, session_epoch }
+                }
+            };
+            self.orders.tell_login(msg);
         }
     }
 }
@@ -636,6 +832,14 @@ mod tests {
         assert_eq!(o.kick("t", 2, "bye"), KickApplied::Revoked);
         assert!(o.supersede_revoked("t", 2, || tx.send("kick supersede").unwrap()));
         assert_eq!(rx.try_iter().collect::<Vec<_>>(), vec!["kick supersede"]);
+    }
+
+    #[test]
+    fn entry_host_env() {
+        assert_eq!(entry_host_from(None, 2), Ok(0));
+        assert_eq!(entry_host_from(Some(" 1 "), 2), Ok(1));
+        assert!(entry_host_from(Some("2"), 2).is_err());
+        assert!(entry_host_from(Some("x"), 2).is_err());
     }
 
     #[test]

@@ -24,8 +24,12 @@ use crate::save_cut::{
 };
 
 mod peers;
+mod placement;
 mod world_cut;
 mod world_link;
+pub use placement::{
+    KickIn, LoginOut, Placement, SpawnRequest, KICK_MEMORY_MS, SPAWN_PIN_MS, SPAWN_RELAY_MAX_HOPS, SPAWN_SYNC_WAIT_MS,
+};
 pub use world_link::{WorldLinkCounters, ATTACH_WAIT_MS, WORLD_REQUEST_TIMEOUT_SECS};
 use world_link::{PendingRequest, Step, WorldAttach, WorldViewCache};
 
@@ -84,6 +88,34 @@ pub enum ServerEvent {
     /// `client` is the id the home host knows the session by; `player` its player. When
     /// the body arrives here ([`crate::PlayerHandoff`]) the session becomes the home.
     ObserverConnected { client: ClientId, player: crate::PlayerId },
+    /// The login service ordered a spawn of `player` (several hosts: the entry host's login
+    /// link resolved the token and read the stored record's region; `None` = no record).
+    /// Entered at host `origin`, forwarded `hops` times so far. The manager places it
+    /// ([`WorldManager::place_spawn`]): here, or relayed to the host that holds the player.
+    SpawnOrder {
+        origin: u32,
+        hops: u8,
+        player_token: String,
+        session_epoch: u64,
+        player: crate::PlayerId,
+        record_region: Option<RegionCoords>,
+    },
+    /// [`ServerEvent::ClientConnected`] of a session a login ticket admitted (several
+    /// hosts): the manager keeps its login — it travels with the player to another host,
+    /// and its end (the session leaving the world) is reported to the login service.
+    LoginConnected {
+        client: ClientId,
+        player: crate::PlayerId,
+        record: Option<crate::PlayerRecord>,
+        player_token: String,
+        session_epoch: u64,
+    },
+    /// The login service's kick, applied to the entry host's admission state already: a
+    /// session of the login handed here is parked, and every other host is told.
+    Kick { player_token: String, session_epoch: u64, reason: String },
+    /// A login session ended at the edge before the manager knew it (refused on connect):
+    /// the login service is told.
+    SessionEnded { player_token: String, session_epoch: u64 },
 }
 
 impl ServerEvent {
@@ -570,7 +602,9 @@ pub const LOGGED_IN_ELSEWHERE: &str = "logged in elsewhere";
 pub const DUPLICATE_SESSION_REFUSAL: &str = "this login is already connected; log in again";
 
 /// The refusal of a login on a host that handed the player's body to another host
-/// (`departed`): it places nothing here (a later task routes the login there).
+/// (`departed`): it places nothing here. The login relay sends a spawn order to the host
+/// holding the player (`placement.rs`); only a session whose player left after its order
+/// was taken here (a park on its way out) still lands here, and logs in again.
 pub const PLAYER_ELSEWHERE_REFUSAL: &str = "your character is on another server of this world; log in again";
 
 /// The refusal that ends a session observing a player whose body the host it was handed
@@ -1056,6 +1090,28 @@ pub struct WorldManager<S: RegionSpawner> {
     /// it creates is noted as accounted for in that cut, and a state message it makes goes
     /// wrapped the same way (`world_cut.rs`).
     inbound_accounted: Option<CutId>,
+    /// The host the login service is linked to ([`Self::set_entry_host`]; `None`: this one).
+    entry_host: Option<u32>,
+    /// The login (token, session epoch) of each session whose player this host holds, from
+    /// [`ServerEvent::LoginConnected`] or a hand-off (`placement.rs`).
+    logins: BTreeMap<ClientId, (String, u64)>,
+    /// Peers whose first sync of their current connection came (`placement.rs`).
+    peer_synced: BTreeSet<u32>,
+    /// Spawn orders waiting for every peer's first sync, with when they were first seen.
+    spawn_held: Vec<(u64, SpawnRequest)>,
+    /// Spawn orders this host takes, for the server ([`Self::take_spawn_here`]).
+    spawn_here: Vec<SpawnRequest>,
+    /// Kicks other hosts relayed, for the server ([`Self::take_kicks_in`]).
+    kicks_in: Vec<KickIn>,
+    /// Kicks relayed to every peer, by (token, epoch): the peers yet to acknowledge.
+    kicks_pending: BTreeMap<(String, u64), BTreeSet<u32>>,
+    /// Kicks applied here, by token (`placement.rs`, [`KICK_MEMORY_MS`]).
+    kicked: BTreeMap<String, placement::Kicked>,
+    /// For the login service ([`Self::take_login_out`]).
+    login_out: Vec<LoginOut>,
+    /// Players a spawn order taken here waits to connect, with when it was taken: not handed
+    /// to another host meanwhile (`placement.rs`).
+    spawn_pins: BTreeMap<PlayerId, u64>,
 }
 
 impl<S: RegionSpawner> WorldManager<S> {
@@ -1178,6 +1234,16 @@ impl<S: RegionSpawner> WorldManager<S> {
             peer_boots: BTreeMap::new(),
             world_cut_done: Vec::new(),
             inbound_accounted: None,
+            entry_host: None,
+            logins: BTreeMap::new(),
+            peer_synced: BTreeSet::new(),
+            spawn_held: Vec::new(),
+            spawn_here: Vec::new(),
+            kicks_in: Vec::new(),
+            kicks_pending: BTreeMap::new(),
+            kicked: BTreeMap::new(),
+            login_out: Vec::new(),
+            spawn_pins: BTreeMap::new(),
         }
     }
 
@@ -1415,6 +1481,19 @@ impl<S: RegionSpawner> WorldManager<S> {
             ServerEvent::ClientDisconnected(id) => self.client_disconnected(id, now_ms),
             ServerEvent::Supersede { player, reason } => self.supersede(player, &reason, now_ms),
             ServerEvent::ObserverConnected { client, player } => self.observer_connected(client, player, now_ms),
+            ServerEvent::SpawnOrder { origin, hops, player_token, session_epoch, player, record_region } => {
+                self.spawn_order(SpawnRequest { origin, hops, player_token, session_epoch, player, record_region });
+            }
+            ServerEvent::LoginConnected { client, player, record, player_token, session_epoch } => {
+                if self.client_connected(client, player, record, now_ms) {
+                    self.logins.insert(client, (player_token, session_epoch));
+                } else if !self.client_id_live(client) {
+                    // Refused (its player is on another host): it never played here.
+                    self.login_session_ended(player_token, session_epoch);
+                }
+            }
+            ServerEvent::Kick { player_token, session_epoch, reason } => self.login_kick(player_token, session_epoch, reason),
+            ServerEvent::SessionEnded { player_token, session_epoch } => self.login_session_ended(player_token, session_epoch),
             ServerEvent::ClientPacket(packet, id) if self.restore_pending(id) && defers_until_restored(&packet) => {
                 self.deferred_packets.entry(id).or_default().push(packet);
             }
@@ -2790,6 +2869,8 @@ impl<S: RegionSpawner> WorldManager<S> {
             return;
         }
         self.awaiting_session.remove(&id);
+        // The session leaves the world here (never on a hand-off: the login went with it).
+        self.end_login(id);
         let player = self.player_of.remove(&id);
         let fortress = self.fortress_of.remove(&id);
         let adventure = self.adventurer_of.remove(&id);
@@ -2896,16 +2977,7 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// id still has state here (a session, a park, a move, a creation), which stays as it
     /// was — nothing is sent to the id, the live session owns it.
     fn client_connected(&mut self, id: ClientId, player: PlayerId, record: Option<PlayerRecord>, now_ms: u64) -> bool {
-        if self.sessions.contains_key(&id)
-            || self.player_of.contains_key(&id)
-            || self.homes.contains_key(&id)
-            || self.parking.contains_key(&id)
-            || self.moving.contains_key(&id)
-            || self.creating.contains_key(&id)
-            || self.fortress_of.contains_key(&id)
-            || self.adventurer_of.contains_key(&id)
-            || self.awaiting_park.values().any(|(c, _)| *c == id)
-        {
+        if self.client_id_live(id) {
             log::warn!("client {id}: {DUPLICATE_SESSION_REFUSAL} (a duplicate ClientConnected is ignored)");
             return false;
         }
@@ -2931,6 +3003,7 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.sessions.entry(id).or_default().player = Some(player);
         self.player_of.insert(id, player);
         self.placed_by_login(player);
+        self.spawn_unpin(player);
         let in_flight = self.parking.values().any(|p| p.player == player);
         if in_flight {
             // Reconnected faster than the park: restore once it is back.
@@ -2960,6 +3033,19 @@ impl<S: RegionSpawner> WorldManager<S> {
         true
     }
 
+    /// Whether session id `id` still has state here (a session, a park, a move, a creation).
+    fn client_id_live(&self, id: ClientId) -> bool {
+        self.sessions.contains_key(&id)
+            || self.player_of.contains_key(&id)
+            || self.homes.contains_key(&id)
+            || self.parking.contains_key(&id)
+            || self.moving.contains_key(&id)
+            || self.creating.contains_key(&id)
+            || self.fortress_of.contains_key(&id)
+            || self.adventurer_of.contains_key(&id)
+            || self.awaiting_park.values().any(|(c, _)| *c == id)
+    }
+
     /// Whether `id` waits for its player's park before it is restored.
     fn restore_pending(&self, id: ClientId) -> bool {
         self.awaiting_park.values().any(|(c, _)| *c == id)
@@ -2973,9 +3059,9 @@ impl<S: RegionSpawner> WorldManager<S> {
             Some(r) if !crate::off_map(self.map_extent(), r.region) => r.region,
             _ => SPAWN_REGION,
         };
-        // A login whose record lies on another host is not routed there yet (a later
-        // task): refused as for a region that cannot be loaded. A move goes across
-        // (`move_client`).
+        // A login whose record lies on another host is placed there by the login relay
+        // (`placement.rs`); one that still gets here (local auth, or no relay) is refused as
+        // for a region that cannot be loaded. A move goes across (`move_client`).
         if self.is_unavailable(target) || self.is_foreign(target) {
             // Its region's stored state could not be read: the session is
             // ended, the record kept for the next try.

@@ -391,12 +391,29 @@ impl Authenticator {
         }
     }
 
-    /// The connection of a session admitted with `ticket` ended (or never
-    /// started): the login link forgets it and tells the login service.
+    /// A session admitted with `ticket` never started (refused before or at its
+    /// announcement): the login link forgets it and tells the login service.
     pub fn session_ended(&self, ticket: &SessionTicket) {
         if let Admission::SpawnOrders(orders) = &self.admission {
             orders.ended(&ticket.player_token, ticket.session_epoch);
         }
+    }
+
+    /// The connection of an announced session admitted with `ticket` closed: the login link
+    /// forgets it. One host tells the login service here; several hosts leave that to the
+    /// manager, which knows whether the session left the world or only this host
+    /// ([`SpawnOrders::closed`]).
+    pub fn session_closed(&self, ticket: &SessionTicket) {
+        if let Admission::SpawnOrders(orders) = &self.admission {
+            orders.closed(&ticket.player_token, ticket.session_epoch);
+        }
+    }
+
+    /// Whether login sessions are announced to the manager with their login
+    /// ([`game::ServerEvent::LoginConnected`]): several hosts relay the login service's
+    /// orders between them ([`SpawnOrders::relay_through`]).
+    pub fn relays_logins(&self) -> bool {
+        matches!(&self.admission, Admission::SpawnOrders(orders) if orders.relays())
     }
 
     /// Why the session admitted with `ticket` may no longer play (a kick's

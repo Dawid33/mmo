@@ -183,8 +183,18 @@ pub enum LoginToHost {
 /// A world host to the login service, over the service link.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HostToLogin {
-    /// The answer to one [`LoginToHost::SpawnPlayer`] (matched by token and epoch).
-    SpawnAck { player_token: String, session_epoch: u64, ok: bool },
+    /// The answer to one [`LoginToHost::SpawnPlayer`] (matched by token and epoch). With
+    /// several hosts the order may be taken by another host than the one the login service
+    /// is linked to: `quic` / `webtransport` / `cert_hash` are then where the client
+    /// connects (that host's addresses); all `None` = the world row's.
+    SpawnAck {
+        player_token: String,
+        session_epoch: u64,
+        ok: bool,
+        quic: Option<String>,
+        webtransport: Option<String>,
+        cert_hash: Option<String>,
+    },
     /// The session admitted with this epoch's ticket disconnected (best effort: lost while the
     /// link is down).
     SessionEnded { player_token: String, session_epoch: u64 },

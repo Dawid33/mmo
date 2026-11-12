@@ -483,7 +483,7 @@ mod host_link {
     use std::time::Duration;
 
     use crossbeam::channel::Receiver;
-    use login::host_link::HostLinks;
+    use login::host_link::{HostLinks, SpawnPlace};
     use svc_link::{LinkEvent, LinkListener, PeerId, PeerRole, PeerSenders};
 
     use super::*;
@@ -511,12 +511,18 @@ mod host_link {
 
         /// On `bind`, with its cert kept beside `pin_file` (a restart keeps its pin).
         fn start_with(bind: &str, pin_file: Option<std::path::PathBuf>, ack: AckPolicy) -> FakeHost {
+            Self::start_placing(bind, pin_file, ack, SpawnPlace::default())
+        }
+
+        /// [`Self::start_with`], its acks naming `place` (another host of the world took the
+        /// order).
+        fn start_placing(bind: &str, pin_file: Option<std::path::PathBuf>, ack: AckPolicy, place: SpawnPlace) -> FakeHost {
             let (listener, events, peers) =
                 LinkListener::bind::<LoginToHost, HostToLogin>(bind.parse().unwrap(), SERVICE_TOKEN.into(), pin_file)
                     .unwrap();
             let seen: Arc<Mutex<Vec<LoginToHost>>> = Arc::default();
             let (record, answer) = (seen.clone(), peers.clone());
-            std::thread::spawn(move || serve(events, answer, record, ack));
+            std::thread::spawn(move || serve(events, answer, record, ack, place));
             FakeHost {
                 link: listener.local_addr().to_string(),
                 cert: listener.cert_sha256().to_string(),
@@ -575,6 +581,7 @@ mod host_link {
         peers: PeerSenders<HostToLogin>,
         seen: Arc<Mutex<Vec<LoginToHost>>>,
         ack: AckPolicy,
+        place: SpawnPlace,
     ) {
         for (peer, event) in events.iter() {
             match event {
@@ -584,7 +591,8 @@ mod host_link {
                     match msg {
                         LoginToHost::SpawnPlayer { player_token, session_epoch } => {
                             if let Some(ok) = ack(&player_token, session_epoch) {
-                                peers.send(peer, HostToLogin::SpawnAck { player_token, session_epoch, ok });
+                                let SpawnPlace { quic, webtransport, cert_hash } = place.clone();
+                                peers.send(peer, HostToLogin::SpawnAck { player_token, session_epoch, ok, quic, webtransport, cert_hash });
                             }
                         }
                         // Kicks are always applied and acked.
@@ -645,6 +653,36 @@ mod host_link {
         assert_eq!(open, vec!["w1".to_string()]);
     }
 
+    /// Several hosts: the linked host's ack names the host that took the order; the ticket
+    /// sends the client there, not to the world row's address.
+    #[tokio::test]
+    async fn join_uses_the_acknowledged_endpoint() {
+        let place = SpawnPlace {
+            quic: Some("host-1.example:7401".into()),
+            webtransport: Some("https://host-1.example:7501".into()),
+            cert_hash: Some("cd".repeat(32)),
+        };
+        let host = FakeHost::start_placing("127.0.0.1:0", None, Box::new(|_, _| Some(true)), place.clone());
+        let a = linked_app(&[host.world("lw")], Duration::from_millis(SPAWN_ACK_TIMEOUT_MS)).await;
+        let refresh = a.account().await;
+        let r = a.join(&refresh, "lw").await;
+        assert_eq!(r.status, StatusCode::OK, "{}", r.text());
+        let j: JoinResponse = r.json();
+        assert_eq!(
+            (j.ticket.quic, j.ticket.webtransport, j.ticket.cert_hash),
+            (place.quic, place.webtransport, place.cert_hash),
+            "the acknowledged host's addresses, not the world row's ({:?})",
+            host.world("lw").quic
+        );
+        // An ack that names nothing keeps the world row's addresses.
+        let plain = FakeHost::acking();
+        let world = plain.world("pw");
+        let b = linked_app(&[world.clone()], Duration::from_millis(SPAWN_ACK_TIMEOUT_MS)).await;
+        let refresh = b.account().await;
+        let j: JoinResponse = b.join(&refresh, "pw").await.json();
+        assert_eq!((j.ticket.quic, j.ticket.webtransport, j.ticket.cert_hash), (world.quic, world.webtransport, world.cert_hash));
+    }
+
     #[tokio::test]
     async fn join_fails_503_when_host_link_down() {
         // A link to a port nobody listens on (a pin that matches nothing).
@@ -696,7 +734,14 @@ mod host_link {
         let (peers, token) = (host.peers.clone(), player_token.clone());
         let late = tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(100)).await;
-            peers.broadcast(HostToLogin::SpawnAck { player_token: token, session_epoch: 1, ok: true });
+            peers.broadcast(HostToLogin::SpawnAck {
+                player_token: token,
+                session_epoch: 1,
+                ok: true,
+                quic: None,
+                webtransport: None,
+                cert_hash: None,
+            });
         });
         let r = a.join(&refresh, "lw").await;
         late.await.unwrap();

@@ -99,6 +99,8 @@ impl<S: RegionSpawner> WorldManager<S> {
         }
         // A person delivered by an inbound transfer was reported to the coordinator.
         self.flush_world();
+        // A peer may have finished its sync: spawn orders waiting for it go on.
+        self.retry_held_spawns();
     }
 
     /// The host that owns `rc`.
@@ -313,6 +315,9 @@ impl<S: RegionSpawner> WorldManager<S> {
             && !self.awaiting_park.contains_key(&player)
             // Its claim may change with an answer that comes to this host.
             && !self.claim_pending(player)
+            // A login ordered here waits for its session: an online player stays (one
+            // already parking for it goes on as a park, `hand_off_to_peer`).
+            && !(self.player_of.contains_key(&client) && self.spawn_pinned(player))
     }
 
     /// `bundle` (in `target`'s frame), `client`'s body, departed from `rc` at `stamp` into
@@ -343,6 +348,8 @@ impl<S: RegionSpawner> WorldManager<S> {
             }
         };
         let hop = self.hop_here(player) + 1;
+        // Its login session goes with it (it is still in the world).
+        let login = self.logins.remove(&client);
         log::info!("[server] player {} (client {client}) from {rc:?} into {target:?}: handed to host {owner}", player.0);
         self.homes.remove(&client);
         // Handed here without a session and on again before it came: not awaited here.
@@ -352,7 +359,7 @@ impl<S: RegionSpawner> WorldManager<S> {
         }
         self.departed.insert(player, owner);
         self.locations.remove(&bundle.id);
-        let handoff = crate::PlayerHandoff { client, player, claim, login: None, park, hop };
+        let handoff = crate::PlayerHandoff { client, player, claim, login, park, hop };
         self.send_reliable(owner, Reliable::Transfer { target, stamp, bundle: Box::new(bundle), player: Some(handoff) }, view);
         // Its home may have just lost its keep-alive reason.
         self.refresh_keepalive(rc, now_ms);
@@ -384,6 +391,7 @@ impl<S: RegionSpawner> WorldManager<S> {
         }
         self.placed_by_handoff(h.player, h.hop);
         let (fortress, adventure) = split_claim(h.claim);
+        let login = h.login.clone();
         if self.is_unavailable(target) || !self.owns(target) || self.leave_parked {
             // Its stored state could not be read (retry not come), the region is not this
             // host's, or this host parked everything to leave: the body cannot go there.
@@ -392,12 +400,14 @@ impl<S: RegionSpawner> WorldManager<S> {
             let record = handoff_record(target, &bundle, &h).expect("checked above");
             log::error!("[server] player {} handed into {target:?}, which cannot take it now: parked", h.player.0);
             self.park_handed(from, c, h.player, record, now_ms);
+            self.login_parked_on_arrival(login);
             return;
         }
         if h.park {
             // `accept_arrival` parks it where it lands (`ParkPlayer` behind the arrival).
             self.parking.insert(c, Parking { player: h.player, region: target, fortress, adventure });
             self.accept_arrival(None, target, stamp, bundle, now_ms);
+            self.login_parked_on_arrival(login);
             return;
         }
         self.player_of.insert(c, h.player);
@@ -417,6 +427,7 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.accept_arrival(None, target, stamp, bundle, now_ms);
         self.claim_changed(h.player);
         self.world_player_online(c);
+        self.login_arrived(c, login);
     }
 
     /// The move of `client` (`m`) into `m.target`, which another host owns, is answered
@@ -439,6 +450,7 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.world_handed(player, owner);
         self.forget_claim_reports(player);
         let hop = self.hop_here(player) + 1;
+        let login = self.logins.remove(&client);
         let (mut carried, y) = match record {
             Some(record) => (record.client, record.pose.translation.y),
             None => {
@@ -467,7 +479,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             session.kind = SessionKind::Observer;
         }
         self.departed.insert(player, owner);
-        let handoff = crate::PlayerHandoff { client, player, claim, login: None, park: false, hop };
+        let handoff = crate::PlayerHandoff { client, player, claim, login, park: false, hop };
         // Parked after `m.from` answered the pending cut: its snapshot holds the body.
         let view = self.in_cut_view(m.from);
         self.send_reliable(owner, Reliable::PlayerMove { handoff, record: Box::new(record), target: m.target }, view);
@@ -492,6 +504,7 @@ impl<S: RegionSpawner> WorldManager<S> {
         if self.is_unavailable(target) || !self.owns(target) || self.leave_parked {
             log::error!("[server] player {} moved into {target:?}, unavailable, not this host's or leaving: parked", h.player.0);
             self.park_handed(from, c, h.player, record, now_ms);
+            self.login_parked_on_arrival(h.login);
             return;
         }
         self.player_of.insert(c, h.player);
@@ -518,12 +531,13 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.refresh_keepalive(target, now_ms);
         self.claim_changed(h.player);
         self.world_player_online(c);
+        self.login_arrived(c, h.login);
     }
 
     /// Whether this host already holds `player`: online (any session), parked, parking,
     /// moving, its body being created, awaited after a hand-off, or a login of it waiting
     /// for a park.
-    fn holds_player(&self, player: PlayerId) -> bool {
+    pub(super) fn holds_player(&self, player: PlayerId) -> bool {
         self.player_of.values().any(|p| *p == player)
             || self.parked_players.contains_key(&player)
             || self.parking.values().any(|p| p.player == player)
@@ -912,6 +926,9 @@ impl<S: RegionSpawner> WorldManager<S> {
     fn peer_volatile(&mut self, from: u32, v: Volatile) {
         match v {
             Volatile::Running(list) => {
+                // Sent on our hello, behind everything it had queued for us: its first sync
+                // of this connection is done (`placement.rs`).
+                self.peer_synced_now(from);
                 // Replaces what was known of that host.
                 let list: BTreeSet<RegionCoords> = list.into_iter().collect();
                 let stale: Vec<RegionCoords> = self
@@ -1000,6 +1017,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             // May come without an `Up` (a connection broken at the hello).
             PeerEvent::Down => {
                 log::info!("[server] peer host {from} down");
+                self.peer_unsynced(from);
                 self.peer_lost(from);
                 self.world_cut_peer_lost(from);
             }
@@ -1009,6 +1027,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                 if let Some(peer) = self.peers.get_mut(&from) {
                     peer.stale = true;
                 }
+                self.peer_unsynced(from);
                 self.peer_lost(from);
                 self.world_cut_peer_lost(from);
             }
@@ -1137,6 +1156,11 @@ impl<S: RegionSpawner> WorldManager<S> {
                 self.accept_move(from, handoff, *record, target);
             }
             Reliable::PlayerParked { client, player } => self.player_parked_elsewhere(from, client, player),
+            msg @ (Reliable::SpawnOrder { .. }
+            | Reliable::SpawnAck { .. }
+            | Reliable::Kick { .. }
+            | Reliable::KickAck { .. }
+            | Reliable::SessionEnded { .. }) => self.peer_login_msg(from, msg),
             other => {
                 log::error!("[server] peer host {from}: {} is not handled by this host yet: dropped", reliable_name(&other))
             }

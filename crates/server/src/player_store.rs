@@ -177,8 +177,22 @@ pub fn announce_session(
     auth: &crate::auth_edge::Authenticator,
 ) -> Result<(), String> {
     let player = session.player;
+    let relay = auth.relays_logins();
     auth.announce(session.ticket.as_ref(), || {
-        let _ = send.send(game::ServerEvent::ClientConnected { client, player, record: session.record.clone() });
+        let record = session.record.clone();
+        let event = match &session.ticket {
+            // Several hosts: the manager keeps the session's login (it travels with the
+            // player, and the manager reports its end).
+            Some(ticket) if relay => game::ServerEvent::LoginConnected {
+                client,
+                player,
+                record,
+                player_token: ticket.player_token.clone(),
+                session_epoch: ticket.session_epoch,
+            },
+            _ => game::ServerEvent::ClientConnected { client, player, record },
+        };
+        let _ = send.send(event);
     })
     .inspect_err(|why| log::info!("[server] client {client}: its login was revoked while it connected: {why}"))
 }

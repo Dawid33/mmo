@@ -663,6 +663,42 @@ impl MultiRig {
         }
     }
 
+    /// `client` of `player` connects to host `h` with a login ticket of (`token`, `epoch`)
+    /// ([`ServerEvent::LoginConnected`]), restored from `record`; tracked from now on.
+    pub fn connect_login(
+        &mut self,
+        h: u32,
+        client: ClientId,
+        player: PlayerId,
+        record: Option<PlayerRecord>,
+        token: &str,
+        epoch: u64,
+    ) {
+        self.players.insert(client, player);
+        let ev = ServerEvent::LoginConnected { client, player, record, player_token: token.into(), session_epoch: epoch };
+        self.hosts[h as usize].event(ev);
+        self.assert_conserved_world();
+    }
+
+    /// Every host's server half of the login relay, as `server::login_link` plays it: a
+    /// spawn order a host took is recorded — the player's sessions there superseded first
+    /// (`Supersede`) — and answered ok; a kick another host relayed is applied and
+    /// answered. The orders taken, with the host that took each.
+    pub fn serve_logins(&mut self) -> Vec<(u32, game::SpawnRequest)> {
+        let mut taken = Vec::new();
+        for (h, rig) in self.hosts.iter_mut().enumerate() {
+            for order in rig.manager.take_spawn_here() {
+                rig.event(ServerEvent::Supersede { player: order.player, reason: game::LOGGED_IN_ELSEWHERE.into() });
+                taken.push((h as u32, order.clone()));
+                rig.manager.spawn_answered(order, true);
+            }
+            for kick in rig.manager.take_kicks_in() {
+                rig.manager.kick_applied(kick, true);
+            }
+        }
+        taken
+    }
+
     /// `client`'s connection to host `h` ends.
     pub fn disconnect(&mut self, h: u32, client: ClientId) {
         self.hosts[h as usize].event(ServerEvent::ClientDisconnected(client));

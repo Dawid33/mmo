@@ -440,9 +440,10 @@ impl WorldIngress {
                     // The world must know: unsubscribe everywhere, let the
                     // home region's grace timer start.
                     let _ = send.send(ServerEvent::ClientDisconnected(id));
-                    // And the login service, for a session its spawn order admitted.
+                    // And the login service, for a session its spawn order admitted (with
+                    // several hosts the manager tells it, once the session left the world).
                     if let Some(ticket) = &ticket {
-                        auth.session_ended(ticket);
+                        auth.session_closed(ticket);
                     }
                 });
             });
@@ -625,6 +626,20 @@ pub fn run() -> claims::ServerExit {
     };
     let postgres = matches!(&world_source, world_file::WorldSource::Store { url: world_store::StoreUrl::Postgres(_), .. });
     roles::check_several_hosts(role, hosts, postgres, spawn_orders.is_some()).unwrap_or_else(|e| fatal(&e));
+    // Several hosts: the login service is linked to one of them (the entry host); every host
+    // relays its spawn orders and kicks to the host holding the player (`login_link`). Set
+    // before anything connects (sessions are announced with their login).
+    let entry_host = (hosts > 1)
+        .then(|| login_link::entry_host_from(std::env::var(login_link::ENTRY_HOST_ENV).ok().as_deref(), hosts))
+        .transpose()
+        .unwrap_or_else(|e| fatal(&e));
+    let login_relay = match (&spawn_orders, entry_host) {
+        (Some((orders, _)), Some(entry)) => {
+            info!("[server] login relay: the login service is linked to host {entry}");
+            Some(login_link::LoginRelay::new(orders.clone(), players.clone(), client_packet_send.clone()))
+        }
+        _ => None,
+    };
     // A split host on Postgres, before it claims, registers or loads anything: the world cut
     // parts a crash left staged are finished first (several hosts: and two-phase commit
     // must be available).
@@ -650,13 +665,19 @@ pub fn run() -> claims::ServerExit {
     let rt = build_server_runtime(worker_threads);
     let cps = client_packet_send.clone();
     // The login service's push: a listener (dropped at the end of `run`, sync code).
-    let _login_link = spawn_orders.map(|(orders, token)| {
+    // Several hosts: only the entry host listens (the others take what it relays).
+    let listens = entry_host.is_none_or(|entry| entry == ownership.ordinal());
+    let _login_link = spawn_orders.filter(|_| listens).map(|(orders, token)| {
         let bind = login_link::bind_from(std::env::var(login_link::HOST_LINK_BIND_ENV).ok().as_deref())
             .unwrap_or_else(|e| fatal(&e));
         let pin_file =
             login_link::cert_hash_file_from(std::env::var(login_link::HOST_LINK_CERT_HASH_FILE_ENV).ok().as_deref());
-        let link = login_link::start(bind, token, Some(pin_file.clone()), orders, players.clone(), client_packet_send.clone())
-            .unwrap_or_else(|e| fatal(&format!("the login link on {bind}: {e}")));
+        let (pin, events) = (Some(pin_file.clone()), client_packet_send.clone());
+        let link = match entry_host {
+            Some(_) => login_link::start_relaying(bind, token, pin, orders, players.clone(), events, ownership.ordinal()),
+            None => login_link::start(bind, token, pin, orders, players.clone(), events),
+        }
+        .unwrap_or_else(|e| fatal(&format!("the login link on {bind}: {e}")));
         info!(
             "auth: login tickets need the login service's spawn orders, pushed to {} (pin {} in {})",
             link.local_addr(),
@@ -831,6 +852,9 @@ pub fn run() -> claims::ServerExit {
     let mut manager = game::WorldManager::new(spawner, server_send, region_out_send, lod_builder);
     manager.set_ownership(ownership, super_region_regions);
     manager.set_endpoints(endpoint.clone(), random_u64());
+    if let Some(entry) = entry_host {
+        manager.set_entry_host(entry);
+    }
     // The coordinator refuses an `Attach` of an older world generation than the store's.
     manager.set_host_generation(world_generation.mine());
     // A session per other host, over its link; the links' wake-up (none with one host).
@@ -965,6 +989,10 @@ pub fn run() -> claims::ServerExit {
             break 'main;
         }
         manager.maintain(now_ms);
+        // The login relay (several hosts): spawn orders taken, kicks relayed, answers out.
+        if let Some(relay) = &login_relay {
+            relay.pump(&mut manager);
+        }
         // A peer runs a newer world generation: this host is stale (polled above).
         if let Some(generation) = manager.take_higher_generation() {
             world_generation.note(generation);

@@ -229,7 +229,7 @@ pub async fn serve(
             sinks.remove(&id);
             let _ = send.send(ServerEvent::ClientDisconnected(id));
             if let Some(ticket) = &ticket {
-                auth.session_ended(ticket);
+                auth.session_closed(ticket);
             }
         });
     }

@@ -66,7 +66,23 @@ impl std::fmt::Display for SpawnError {
     }
 }
 
-type Waiters = Arc<Mutex<BTreeMap<(String, u64), oneshot::Sender<bool>>>>;
+/// Where an acknowledged spawn order sends the client: the addresses of the host that took
+/// it, as its [`HostToLogin::SpawnAck`] named them (all `None`: the world row's).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SpawnPlace {
+    pub quic: Option<String>,
+    pub webtransport: Option<String>,
+    pub cert_hash: Option<String>,
+}
+
+impl SpawnPlace {
+    /// Whether the acknowledgement named any address (else the world row's are used).
+    pub fn named(&self) -> bool {
+        self.quic.is_some() || self.webtransport.is_some()
+    }
+}
+
+type Waiters = Arc<Mutex<BTreeMap<(String, u64), oneshot::Sender<(bool, SpawnPlace)>>>>;
 
 /// One world's link: the dialer's sender, whether it is up, and the joins waiting for acks.
 struct HostLink {
@@ -246,9 +262,10 @@ impl HostLinks {
     }
 
     /// Push `SpawnPlayer` to `world`'s host and wait (at most [`SPAWN_ACK_TIMEOUT_MS`]) for its
-    /// ack. `Ok(())` at once for a world without a host link.
-    pub async fn spawn(&self, world: &WorldRow, player_token: &str, session_epoch: u64) -> Result<(), SpawnError> {
-        let Some(link) = self.link(world)? else { return Ok(()) };
+    /// ack: where the client connects, as the ack named it. `Ok` with no address at once for a
+    /// world without a host link.
+    pub async fn spawn(&self, world: &WorldRow, player_token: &str, session_epoch: u64) -> Result<SpawnPlace, SpawnError> {
+        let Some(link) = self.link(world)? else { return Ok(SpawnPlace::default()) };
         let key = (player_token.to_string(), session_epoch);
         let (ack_tx, mut ack) = oneshot::channel();
         link.waiters.lock().unwrap_or_else(|p| p.into_inner()).insert(key.clone(), ack_tx);
@@ -272,8 +289,8 @@ impl HostLinks {
         .await;
         link.waiters.lock().unwrap_or_else(|p| p.into_inner()).remove(&key);
         match answer {
-            Ok(Some(true)) => Ok(()),
-            Ok(Some(false)) => Err(SpawnError::Refused),
+            Ok(Some((true, place))) => Ok(place),
+            Ok(Some((false, _))) => Err(SpawnError::Refused),
             Ok(None) | Err(_) => Err(SpawnError::Timeout),
         }
     }
@@ -308,11 +325,11 @@ impl Pump {
                     }
                     self.up.send_replace(false);
                 }
-                LinkEvent::Msg(HostToLogin::SpawnAck { player_token, session_epoch, ok }) => {
+                LinkEvent::Msg(HostToLogin::SpawnAck { player_token, session_epoch, ok, quic, webtransport, cert_hash }) => {
                     let waiter = self.waiters.lock().unwrap_or_else(|p| p.into_inner()).remove(&(player_token, session_epoch));
                     match waiter {
                         Some(waiter) => {
-                            let _ = waiter.send(ok);
+                            let _ = waiter.send((ok, SpawnPlace { quic, webtransport, cert_hash }));
                         }
                         // Answered already (a resend's second ack) or given up on (503).
                         None => log::debug!("[login] world {}: ack for epoch {session_epoch} nobody waits for", self.world),

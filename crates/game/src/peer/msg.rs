@@ -66,12 +66,26 @@ pub enum Reliable {
     /// Admit `client` (of `player`) presenting `nonce` for `ttl_secs` from receipt (the
     /// receiving edge dates it by its own clock).
     ObserverOrder { client: ClientId, player: PlayerId, nonce: u64, ttl_secs: u64 },
-    /// Spawn a login session's player; `origin` is the host the order entered at,
-    /// `hops` how often it was forwarded.
-    SpawnOrder { origin: u32, hops: u8, player_token: String, session_epoch: u64 },
+    /// Spawn a login session's player; `origin` is the host the order entered at (the
+    /// one the login service pushed it to), `hops` how often it was forwarded. `player` and
+    /// `record_region` are what `origin` read from the store for the token.
+    SpawnOrder {
+        origin: u32,
+        hops: u8,
+        player_token: String,
+        session_epoch: u64,
+        player: PlayerId,
+        record_region: Option<RegionCoords>,
+    },
+    /// The answer to a [`Reliable::SpawnOrder`], to its `origin`: `endpoint` is the host
+    /// that took it (where the client connects), `None` when refused.
     SpawnAck { player_token: String, session_epoch: u64, ok: bool, endpoint: Option<HostEndpoint> },
+    /// The login service's kick, from the host it entered at: applied here, then answered
+    /// with [`Reliable::KickAck`].
     Kick { player_token: String, session_epoch: u64, reason: String },
     KickAck { player_token: String, session_epoch: u64 },
+    /// A login session left the world on the sender (to the host the login service is
+    /// linked to, which tells it).
     SessionEnded { player_token: String, session_epoch: u64 },
     /// The sender's in-band mark of a world save cut: what it sent before the mark
     /// belongs to the cut's receiver side, what follows to the next cut.
