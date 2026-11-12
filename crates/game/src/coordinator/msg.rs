@@ -91,6 +91,10 @@ pub struct OnlinePlayer {
     pub player: PlayerId,
     pub claim: Option<Claim>,
     pub claim_pending: bool,
+    /// The host's number of this report (increasing per host process): echoed in the
+    /// coordinator's [`CoordMsg::ClaimIs`] answer, so the host applies only an answer to
+    /// its latest report of the player.
+    pub report: u64,
 }
 
 /// Host → coordinator.
@@ -133,6 +137,11 @@ pub enum HostMsg {
     /// The player gave up its claim (retired, ended the adventure, or left before the
     /// claim's reply reached it). The site stays.
     ReleaseClaim { player: PlayerId },
+    /// The player left this host for host `to` (a walking hand-off or a move), its claim
+    /// going along: it stays online — in transit — until host `to` reports it
+    /// (`PlayerOnline`, or `PlayerOffline` if it parks there on arrival). Sent instead of
+    /// `PlayerOffline`, so nobody takes the fortress of a player crossing hosts.
+    PlayerHandedTo { player: PlayerId, to: u32 },
 }
 
 /// Where a coordinator message goes ([`crate::coordinator::Coordinator::take_out`]).
@@ -173,7 +182,8 @@ pub enum CoordMsg {
     /// The claim the host reported for `player` (`PlayerOnline`, or an `Attach`'s online
     /// entry) differs from the coordinator's, which is final: the host sets the player's
     /// claim to exactly `claim` and tells its client. Sent to the reporting host only.
-    ClaimIs { player: PlayerId, claim: Option<Claim> },
+    /// `report` is the [`OnlinePlayer::report`] it answers.
+    ClaimIs { player: PlayerId, claim: Option<Claim>, report: u64 },
     /// A history log line for the clients whose home is `region`.
     Notice { region: RegionCoords, line: String },
     /// The coordinator has applied the host's [`HostMsg::Attach`] of this `epoch`: every

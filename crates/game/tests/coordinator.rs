@@ -217,7 +217,7 @@ fn return_in_use_only_while_online() {
     c.handle(0, online(A, Some(Claim::Fortress(site)), false), 0);
     assert_eq!(c.claim_of(A), None);
     assert!(
-        c.take_msgs().contains(&CoordMsg::ClaimIs { player: A, claim: None }),
+        c.take_msgs().iter().any(|m| matches!(m, CoordMsg::ClaimIs { player: A, claim: None, .. })),
         "A's host is told to drop the fortress B plays"
     );
     c.handle(0, request(5, A, WorldRequest::ReturnTo(site)), 0);
@@ -583,7 +583,7 @@ fn attach_supersedes_unsent_directives() {
     assert!(c.take_msgs().is_empty());
     // The link dropped; the host re-attaches running `r` with no body of P.
     let running = RunningRegion { rc: r, incarnation: 1, people: Vec::new() };
-    let online = vec![OnlinePlayer { player: A, claim: None, claim_pending: true }];
+    let online = vec![OnlinePlayer { player: A, claim: None, claim_pending: true, report: 1 }];
     c.handle(0, HostMsg::Attach { host: 0, epoch: 1, running: vec![running], online, generation: 0 }, 0);
     let out = commit(&mut c);
     let attached = out.iter().position(|m| matches!(m, CoordMsg::Attached { epoch: 1 })).expect("the echo");
@@ -669,7 +669,7 @@ fn duplicated_bounce_is_redelivered_once() {
 }
 
 fn online(player: PlayerId, claim: Option<Claim>, claim_pending: bool) -> HostMsg {
-    HostMsg::PlayerOnline(OnlinePlayer { player, claim, claim_pending })
+    HostMsg::PlayerOnline(OnlinePlayer { player, claim, claim_pending, report: 1 })
 }
 
 /// The host's report is the truth for an online player without an unsettled request: a
@@ -697,7 +697,7 @@ fn host_report_reconciles_claims() {
     // B's host claims the same fortress while A plays it: refused, never two holders.
     c.handle(0, online(B, Some(Claim::Fortress(site)), false), 0);
     assert_eq!(c.claim_of(B), None);
-    assert!(commit(&mut c).contains(&CoordMsg::ClaimIs { player: B, claim: None }));
+    assert!(commit(&mut c).iter().any(|m| matches!(m, CoordMsg::ClaimIs { player: B, claim: None, .. })));
     // A's host reports an adventure instead: the fortress is freed, the adventure taken.
     c.handle(0, online(A, Some(Claim::Adventure(SiteId(0))), false), 0);
     assert_eq!(c.claim_of(A), Some(Claim::Adventure(SiteId(0))));
@@ -787,7 +787,7 @@ fn attach(host: u32, epoch: u64, running: Vec<RunningRegion>, online: Vec<Online
 }
 
 fn report(player: PlayerId, claim: Option<Claim>, claim_pending: bool) -> OnlinePlayer {
-    OnlinePlayer { player, claim, claim_pending }
+    OnlinePlayer { player, claim, claim_pending, report: 1 }
 }
 
 /// Host 0 runs site 0's region with its people and has A online in A's fortress; host 1
@@ -861,7 +861,7 @@ fn player_offline_from_the_old_host_after_online_on_the_new_is_ignored() {
 fn claim_is(out: &[(Target, CoordMsg)], player: PlayerId) -> Vec<(Target, Option<Claim>)> {
     out.iter()
         .filter_map(|(to, m)| match m {
-            CoordMsg::ClaimIs { player: p, claim } if *p == player => Some((*to, *claim)),
+            CoordMsg::ClaimIs { player: p, claim, .. } if *p == player => Some((*to, *claim)),
             _ => None,
         })
         .collect()
@@ -942,4 +942,96 @@ fn directive_for_an_unannounced_region_is_deferred_not_broadcast() {
     for p in party {
         assert_eq!(body_delta(&msgs, *p), 1, "{p:?} spawns once, on host 0: {msgs:?}");
     }
+}
+
+/// A hands P (holding fortress S) to B: P stays online — in transit — so another player's
+/// return to S is refused before B says anything; B's `PlayerOnline` confirms (the claim
+/// P's, online on B); B's `PlayerOffline` frees S.
+#[test]
+fn handed_player_stays_online_until_the_new_host_reports() {
+    let (mut c, civ, people) = coordinator();
+    c.handle(0, embark(1, A, civ, &people[0..2], rc(8, 0)), 0);
+    let WorldReply::Embarked { site, region } = reply_to(&commit(&mut c), 1) else { panic!("embarks") };
+    c.handle(0, HostMsg::PlayerHandedTo { player: A, to: 1 }, 0);
+    assert_eq!(c.online_on(A), Some(1), "in transit to host 1");
+    c.handle(0, request(2, B, WorldRequest::ReturnTo(site)), 0);
+    assert_eq!(reply_to(&commit(&mut c), 2), WorldReply::EmbarkRefused(EmbarkRefusal::InUse), "in use while in transit");
+    c.handle(1, online(A, Some(Claim::Fortress(site)), false), 0);
+    assert!(claim_is(&commit_routed(&mut c), A).is_empty(), "nothing to correct");
+    assert_eq!((c.online_on(A), c.claim_of(A)), (Some(1), Some(Claim::Fortress(site))));
+    c.handle(0, request(3, B, WorldRequest::ReturnTo(site)), 0);
+    assert_eq!(reply_to(&commit(&mut c), 3), WorldReply::EmbarkRefused(EmbarkRefusal::InUse));
+    c.handle(1, HostMsg::PlayerOffline { player: A }, 0);
+    c.handle(0, request(4, B, WorldRequest::ReturnTo(site)), 0);
+    assert_eq!(reply_to(&commit(&mut c), 4), WorldReply::Returned { site, region });
+}
+
+/// A `PlayerHandedTo` from a host the player is not online on (a stale or a stray
+/// message) changes nothing; nor does one for a player online nowhere.
+#[test]
+fn handed_to_from_a_host_that_does_not_have_the_player_is_ignored() {
+    let (mut c, civ, people) = coordinator();
+    c.handle(0, embark(1, A, civ, &people[0..2], rc(8, 0)), 0);
+    let WorldReply::Embarked { site, region } = reply_to(&commit(&mut c), 1) else { panic!("embarks") };
+    c.handle(2, HostMsg::PlayerHandedTo { player: A, to: 3 }, 0);
+    assert_eq!(c.online_on(A), Some(0));
+    c.handle(0, HostMsg::PlayerOffline { player: A }, 0);
+    assert_eq!(c.online_on(A), None);
+    c.handle(0, HostMsg::PlayerHandedTo { player: A, to: 1 }, 0);
+    assert_eq!(c.online_on(A), None, "online nowhere: nothing to hand");
+    c.handle(0, request(2, B, WorldRequest::ReturnTo(site)), 0);
+    assert_eq!(reply_to(&commit(&mut c), 2), WorldReply::Returned { site, region });
+}
+
+/// P in transit to host 1, which (re)attaches without it: the transit ends (offline). And
+/// host 1 parking P on arrival (its `PlayerOffline`) before host 0's `PlayerHandedTo`
+/// comes ends the transit as soon as that comes.
+#[test]
+fn attach_of_the_new_host_without_the_player_ends_the_transit() {
+    let (mut c, civ, people) = coordinator();
+    c.handle(0, embark(1, A, civ, &people[0..2], rc(8, 0)), 0);
+    let WorldReply::Embarked { site, .. } = reply_to(&commit(&mut c), 1) else { panic!("embarks") };
+    c.handle(0, HostMsg::PlayerHandedTo { player: A, to: 1 }, 0);
+    c.handle(1, attach(1, 1, Vec::new(), Vec::new()), 0);
+    assert_eq!(c.online_on(A), None);
+    c.handle(0, request(2, B, WorldRequest::ReturnTo(site)), 0);
+    assert!(matches!(reply_to(&commit(&mut c), 2), WorldReply::Returned { .. }));
+    c.handle(0, HostMsg::ReleaseClaim { player: B }, 0);
+    // A, online again on host 0 with the fortress, is handed to host 1 — whose park on
+    // arrival is heard first.
+    c.handle(0, online(A, Some(Claim::Fortress(site)), false), 0);
+    assert_eq!(c.claim_of(A), Some(Claim::Fortress(site)));
+    c.handle(1, HostMsg::PlayerOffline { player: A }, 0);
+    assert_eq!(c.online_on(A), Some(0), "not yet handed");
+    c.handle(0, HostMsg::PlayerHandedTo { player: A, to: 1 }, 0);
+    assert_eq!(c.online_on(A), None, "parked on arrival: offline");
+    c.handle(0, request(3, B, WorldRequest::ReturnTo(site)), 0);
+    assert!(matches!(reply_to(&commit(&mut c), 3), WorldReply::Returned { .. }));
+}
+
+/// A region's messages go to the host that runs it, not the requester's: an embark by
+/// host 0 into a region host 1 runs sends the founders' spawns and the founding notice to
+/// host 1, the reply to host 0; a notice for a region nobody runs goes to every host.
+#[test]
+fn notice_and_directive_go_to_the_regions_host() {
+    let (mut c, civ, people) = coordinator();
+    let r = rc(8, 0);
+    c.handle(1, HostMsg::RegionStarted { rc: r, incarnation: 1 }, 0);
+    commit(&mut c);
+    c.handle(0, embark(1, A, civ, &people[0..2], r), 0);
+    c.maintain(0);
+    let out = commit_routed(&mut c);
+    let to_of = |want: fn(&CoordMsg) -> bool| -> Vec<Target> { out.iter().filter(|(_, m)| want(m)).map(|(t, _)| *t).collect() };
+    let directives = to_of(|m| matches!(m, CoordMsg::Directive { .. }));
+    assert!(!directives.is_empty() && directives.iter().all(|t| *t == Target::Host(1)), "{out:?}");
+    assert_eq!(to_of(|m| matches!(m, CoordMsg::Reply { .. })), vec![Target::Host(0)]);
+    let notices = to_of(|m| matches!(m, CoordMsg::Notice { .. }));
+    assert!(!notices.is_empty() && notices.iter().all(|t| *t == Target::Host(1)), "{out:?}");
+    // Into a region nobody runs: its notice (the founding, for the player) to every host.
+    c.handle(0, embark(2, B, civ, &people[2..4], rc(14, 0)), 0);
+    c.maintain(0);
+    let out = commit_routed(&mut c);
+    let notices: Vec<Target> =
+        out.iter().filter(|(_, m)| matches!(m, CoordMsg::Notice { region, .. } if *region == rc(14, 0))).map(|(t, _)| *t).collect();
+    assert_eq!(notices, vec![Target::Every], "{out:?}");
 }

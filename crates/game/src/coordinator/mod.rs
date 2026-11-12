@@ -70,10 +70,13 @@ pub struct Coordinator {
     region_host: BTreeMap<RegionCoords, u32>,
     /// The host each online player is online on (`PlayerOnline`, an `Attach`'s online
     /// list, the host that was granted its claim). Rebuilt by every `Attach`, never saved.
+    /// A player in transit to a host (`PlayerHandedTo`) stays online on that host until it
+    /// reports. Never saved.
     online_on: BTreeMap<PlayerId, u32>,
-    /// The inline links sharing this core ([`InlineWorldLink::shared`]): each host's
-    /// messages not read by its link yet.
-    inline_boxes: BTreeMap<u32, VecDeque<CoordMsg>>,
+    /// `PlayerOffline`s from a host the player was not online on yet: the host it is
+    /// being handed to parked it on arrival before the hand-over's `PlayerHandedTo` came
+    /// (they travel on different links). That `PlayerHandedTo` then ends the transit.
+    offline_early: BTreeMap<PlayerId, u32>,
     /// `Some(n)`: a save was taken ([`Self::take_save`]) holding the state behind the
     /// first `n` messages of `gated`; [`Self::saved`] releases them.
     save_in_flight: Option<usize>,
@@ -111,7 +114,7 @@ impl Coordinator {
             out: Vec::new(),
             region_host: BTreeMap::new(),
             online_on: BTreeMap::new(),
-            inline_boxes: BTreeMap::new(),
+            offline_early: BTreeMap::new(),
             save_in_flight: None,
             dirty_since_save: false,
             force_save: false,
@@ -245,8 +248,28 @@ impl Coordinator {
                     self.online_on.remove(&player);
                     self.set_online(player, false);
                 }
-                // A hand-off's `PlayerOnline` from the new host may arrive first.
-                on => log::debug!("coordinator: {player:?} offline on host {host} ignored (online on {on:?})"),
+                // Parked on arrival here before the sending host's `PlayerHandedTo` came:
+                // that message ends the transit.
+                Some(h) => {
+                    log::debug!("coordinator: {player:?} offline on host {host} before host {h} handed it over");
+                    self.offline_early.insert(player, host);
+                }
+                None => log::debug!("coordinator: {player:?} offline on host {host} ignored (online nowhere)"),
+            },
+            HostMsg::PlayerHandedTo { player, to } => match self.online_on.get(&player).copied() {
+                Some(h) if h == host => {
+                    if self.offline_early.get(&player) == Some(&to) {
+                        // Host `to` parked it on arrival already.
+                        self.offline_early.remove(&player);
+                        self.online_on.remove(&player);
+                        self.set_online(player, false);
+                    } else {
+                        // In transit: online (its claim in use) until host `to` reports.
+                        self.online_on.insert(player, to);
+                    }
+                }
+                // The new host reported it first (online on it), or it is online nowhere.
+                on => log::debug!("coordinator: {player:?} handed by host {host} to {to} ignored (online on {on:?})"),
             },
             HostMsg::ReleaseClaim { player } => self.release_claim(player),
         }
@@ -289,28 +312,6 @@ impl Coordinator {
         std::mem::take(&mut self.out)
     }
 
-    /// For the inline links sharing this core: start a mailbox for `host`.
-    fn register_inline(&mut self, host: u32) {
-        self.inline_boxes.entry(host).or_default();
-    }
-
-    /// For the inline links sharing this core: what may leave goes to the mailboxes of
-    /// the hosts it is for (a message for a host with no link is lost, as on a real link).
-    fn route_inline(&mut self) {
-        for (to, msg) in self.take_out() {
-            match to {
-                Target::Host(h) => match self.inline_boxes.get_mut(&h) {
-                    Some(b) => b.push_back(msg),
-                    None => log::debug!("coordinator: no inline link for host {h}; {msg:?} lost"),
-                },
-                Target::Every => {
-                    for b in self.inline_boxes.values_mut() {
-                        b.push_back(msg.clone());
-                    }
-                }
-            }
-        }
-    }
 
     /// Ask for a save at the next [`Self::take_save`] (an orderly exit).
     pub fn request_save(&mut self) {
@@ -534,8 +535,9 @@ impl Coordinator {
     /// players. Whenever the claim the coordinator ends with differs from the report, the
     /// host is told it ([`CoordMsg::ClaimIs`]): the coordinator's answer is final.
     fn player_online(&mut self, host: u32, report: OnlinePlayer) {
-        let OnlinePlayer { player, claim, claim_pending } = report;
+        let OnlinePlayer { player, claim, claim_pending, report } = report;
         self.online_on.insert(player, host);
+        self.offline_early.remove(&player);
         let mine = self.player_claims.get(&player).copied();
         match (mine, claim) {
             (Some(mine), Some(theirs)) if mine == theirs => {}
@@ -556,7 +558,7 @@ impl Coordinator {
         let now = self.player_claims.get(&player).copied();
         if now != claim {
             log::info!("coordinator: host {host} reported {player:?} with {claim:?}; the claim is {now:?}");
-            self.push(Target::Host(host), CoordMsg::ClaimIs { player, claim: now });
+            self.push(Target::Host(host), CoordMsg::ClaimIs { player, claim: now, report });
         }
     }
 

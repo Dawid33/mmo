@@ -1,10 +1,10 @@
 //! The host's end of its link to the world coordinator, and the inline link that runs a
 //! [`Coordinator`] in the host's own thread (single-player on wasm, tests).
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
-use super::{CoordMsg, Coordinator, HostMsg};
+use super::{CoordMsg, Coordinator, HostMsg, Target};
 
 /// The host's end of the link to the world coordinator: messages out, messages in, in
 /// order (FIFO each way while the link is up).
@@ -42,11 +42,55 @@ fn mix(seed: u64, i: u64) -> u64 {
     z ^ (z >> 31)
 }
 
+/// One [`Coordinator`] several hosts' inline links share ([`InlineWorldLink::shared`]),
+/// with each host's messages not read by its link yet. Derefs to the coordinator.
+pub struct SharedCore {
+    coordinator: Coordinator,
+    boxes: BTreeMap<u32, VecDeque<CoordMsg>>,
+}
+
+impl SharedCore {
+    pub fn new(coordinator: Coordinator) -> Arc<Mutex<SharedCore>> {
+        Arc::new(Mutex::new(SharedCore { coordinator, boxes: BTreeMap::new() }))
+    }
+
+    /// What may leave goes to the mailboxes of the hosts it is for (a message for a host
+    /// with no link is lost, as on a real link).
+    fn route(&mut self) {
+        for (to, msg) in self.coordinator.take_out() {
+            match to {
+                Target::Host(h) => match self.boxes.get_mut(&h) {
+                    Some(b) => b.push_back(msg),
+                    None => log::debug!("shared inline coordinator: no link for host {h}; {msg:?} lost"),
+                },
+                Target::Every => {
+                    for b in self.boxes.values_mut() {
+                        b.push_back(msg.clone());
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl std::ops::Deref for SharedCore {
+    type Target = Coordinator;
+    fn deref(&self) -> &Coordinator {
+        &self.coordinator
+    }
+}
+
+impl std::ops::DerefMut for SharedCore {
+    fn deref_mut(&mut self) -> &mut Coordinator {
+        &mut self.coordinator
+    }
+}
+
 /// The coordinator behind an inline link: its own, or one core several hosts' links share
 /// ([`InlineWorldLink::shared`]).
 enum Core {
     Owned(Coordinator),
-    Shared(Arc<Mutex<Coordinator>>),
+    Shared(Arc<Mutex<SharedCore>>),
 }
 
 /// Salt of the roll behind a shared link's input delay (the output delay rolls unsalted).
@@ -95,8 +139,8 @@ impl InlineWorldLink {
     /// Host `host`'s link to `core`, which other hosts' links share: each host reads only
     /// what the core sends it (or every host). Make every host's link before any of them
     /// is pumped: a host whose link does not exist yet misses what is sent to every host.
-    pub fn shared(core: Arc<Mutex<Coordinator>>, host: u32) -> Self {
-        lock(&core).register_inline(host);
+    pub fn shared(core: Arc<Mutex<SharedCore>>, host: u32) -> Self {
+        lock(&core).boxes.entry(host).or_default();
         Self::over(Core::Shared(core), host)
     }
 
@@ -146,7 +190,7 @@ impl InlineWorldLink {
     }
 
     /// The core a shared link shares; `None` for a link of its own.
-    pub fn shared_core(&self) -> Option<Arc<Mutex<Coordinator>>> {
+    pub fn shared_core(&self) -> Option<Arc<Mutex<SharedCore>>> {
         match &self.core {
             Core::Owned(_) => None,
             Core::Shared(c) => Some(c.clone()),
@@ -180,7 +224,7 @@ impl InlineWorldLink {
     }
 }
 
-fn lock(core: &Mutex<Coordinator>) -> std::sync::MutexGuard<'_, Coordinator> {
+fn lock(core: &Mutex<SharedCore>) -> std::sync::MutexGuard<'_, SharedCore> {
     core.lock().unwrap_or_else(|e| e.into_inner())
 }
 
@@ -238,8 +282,8 @@ impl WorldLink for InlineWorldLink {
                 }
                 coord.maintain(now_ms);
                 coord.commit_unstored();
-                coord.route_inline();
-                coord.inline_boxes.get_mut(&self.host).map(|b| b.drain(..).collect()).unwrap_or_default()
+                coord.route();
+                coord.boxes.get_mut(&self.host).map(|b| b.drain(..).collect()).unwrap_or_default()
             }
         };
         // Never before the output ahead of it: the order is kept.

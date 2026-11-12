@@ -33,6 +33,9 @@ pub fn mix(seed: u64, i: u64) -> u64 {
 pub struct RigWorldLink {
     inner: game::InlineWorldLink,
     sent: Arc<Mutex<Vec<game::HostMsg>>>,
+    /// Test hook ([`MultiRig::hold_world`]): while set, nothing is read (the
+    /// coordinator's messages wait on the link, in order); sending goes on.
+    hold: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl game::WorldLink for RigWorldLink {
@@ -43,6 +46,9 @@ impl game::WorldLink for RigWorldLink {
         self.inner.send(msg)
     }
     fn recv(&mut self) -> Option<game::CoordMsg> {
+        if self.hold.load(std::sync::atomic::Ordering::SeqCst) {
+            return None;
+        }
         self.inner.recv()
     }
     fn is_up(&self) -> bool {
@@ -182,9 +188,11 @@ pub struct MultiRig {
     pub seed: u64,
     pub link_delay: u32,
     /// The world coordinator every host's world link reaches ([`Self::with_coordinator`]).
-    pub coordinator: Option<Arc<Mutex<game::Coordinator>>>,
+    pub coordinator: Option<Arc<Mutex<game::coordinator::SharedCore>>>,
     /// What each host sent its coordinator (while its link was up), by host.
     pub world_sent: Vec<Arc<Mutex<Vec<game::HostMsg>>>>,
+    /// Each host's [`RigWorldLink`] hold flag.
+    pub world_hold: Vec<Arc<std::sync::atomic::AtomicBool>>,
 }
 
 /// Host `h`'s endpoint in the rig (what its sessions' first packet names).
@@ -247,6 +255,7 @@ impl MultiRig {
                 link_delay: link_delay_steps,
                 coordinator: None,
                 world_sent: Vec::new(),
+                world_hold: Vec::new(),
             };
         for h in 0..hosts {
             rig.keep(h);
@@ -261,7 +270,7 @@ impl MultiRig {
     /// differently per seed). Rounds until every host is attached.
     pub fn with_coordinator(&mut self, history: game::history::History) {
         let now = self.hosts.iter().map(|r| r.now_ms).max().unwrap_or(0);
-        let core = Arc::new(Mutex::new(game::Coordinator::new(history, now)));
+        let core = game::coordinator::SharedCore::new(game::Coordinator::new(history, now));
         // Every link before any is installed (an install pumps it): none misses the view.
         let links: Vec<game::InlineWorldLink> = (0..self.hosts.len() as u32)
             .map(|h| game::InlineWorldLink::shared(core.clone(), h).with_delay(mix(self.seed, 3000 + u64::from(h)), self.link_delay))
@@ -269,9 +278,11 @@ impl MultiRig {
         for (h, inner) in links.into_iter().enumerate() {
             let sent = Arc::new(Mutex::new(Vec::new()));
             self.world_sent.push(sent.clone());
+            let hold = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            self.world_hold.push(hold.clone());
             let rig = &mut self.hosts[h];
             let now = rig.now_ms;
-            rig.manager.set_world_link(Box::new(RigWorldLink { inner, sent }), 4000 + h as u64, now);
+            rig.manager.set_world_link(Box::new(RigWorldLink { inner, sent, hold }), 4000 + h as u64, now);
             rig.settle();
         }
         self.coordinator = Some(core);
@@ -285,8 +296,13 @@ impl MultiRig {
     }
 
     /// The rig's coordinator, locked ([`Self::with_coordinator`]).
-    pub fn core(&self) -> std::sync::MutexGuard<'_, game::Coordinator> {
+    pub fn core(&self) -> std::sync::MutexGuard<'_, game::coordinator::SharedCore> {
         self.coordinator.as_ref().expect("a rig coordinator").lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Hold back (`true`) or release what the coordinator sends host `h`.
+    pub fn hold_world(&mut self, h: u32, hold: bool) {
+        self.world_hold[h as usize].store(hold, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// What host `h` sent its coordinator so far.

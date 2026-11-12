@@ -212,7 +212,7 @@ fn describe(msg: &CoordMsg) -> String {
         CoordMsg::SiteMarkers(s) => format!("SiteMarkers ({})", s.len()),
         CoordMsg::Notice { region, .. } => format!("Notice for {region:?}"),
         CoordMsg::Attached { epoch } => format!("Attached {{ epoch: {epoch} }}"),
-        CoordMsg::ClaimIs { player, claim } => format!("ClaimIs {player:?} {claim:?}"),
+        CoordMsg::ClaimIs { player, claim, report } => format!("ClaimIs {player:?} {claim:?} (report {report})"),
     }
 }
 
@@ -239,6 +239,7 @@ pub(crate) fn describe_host(msg: &HostMsg) -> String {
         HostMsg::PlayerOnline(p) => format!("PlayerOnline {:?}", p.player),
         HostMsg::PlayerOffline { player } => format!("PlayerOffline {player:?}"),
         HostMsg::ReleaseClaim { player } => format!("ReleaseClaim {player:?}"),
+        HostMsg::PlayerHandedTo { player, to } => format!("PlayerHandedTo {player:?} to host {to}"),
     }
 }
 
@@ -283,6 +284,18 @@ impl Routes {
     /// process (its claims taken over, fenced at its next cut) and is refused — read from
     /// the store, so this holds across a coordinator restart. Otherwise the newer
     /// connection of an ordinal replaces the older.
+    ///
+    /// The stored epoch is `MAX(epoch)` over the ordinal's `super_regions` rows. A partial
+    /// takeover (another process claimed some of its super-regions, not all) leaves the
+    /// maximum of what the ordinal still holds: equal to the live process's claim epoch
+    /// unless the taken rows were its highest, in which case even the live process is
+    /// refused until it is fenced and restarts (it is losing its claim anyway). An ordinal
+    /// owning nothing has no rows: epoch 0, which a host that claimed nothing carries.
+    /// The inverted edge: if the super-region layout changes (more hosts, another side),
+    /// rows of the old layout the ordinal still owns keep their epochs while its new rows
+    /// may start lower — `MAX` then names an old row, so the restarted process (claim
+    /// epoch = its new rows' maximum) is refused while a stale process of the old layout
+    /// would be admitted. A layout change must clear the old rows first.
     fn admit(&mut self, peer: PeerId, ordinal: u32, epoch: u64, stored_epoch: Option<u64>) -> Admit {
         let stored = stored_epoch.unwrap_or(0);
         if epoch != stored {

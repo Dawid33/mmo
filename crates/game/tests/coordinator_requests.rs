@@ -874,3 +874,186 @@ fn expired_embark_is_settled_never_executed() {
     });
     assert!(lost.into_inner() > 0, "no seed lost the embark with the old connection");
 }
+
+/// The coordinator granted A's embark (fortress G) and the link dropped with the reply
+/// on it; meanwhile the embark's region became unavailable on the host. On the
+/// re-attach the host reports A with no claim and the request unsettled: `ClaimIs(G)` is
+/// applied, then the replayed request's memo answer finds the region unavailable and
+/// gives the claim back — the host must hold no claim for A afterwards (the client told
+/// `Fortress(None)`), so B's later return to G leaves one player in the fortress.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn refused_grant_after_a_claim_is_leaves_no_claim_on_the_host() {
+    let ran = std::sync::atomic::AtomicU64::new(0);
+    each_seed("refused_grant_after_a_claim_is_leaves_no_claim_on_the_host", |seed| {
+        let a = PlayerId(A as u64);
+        let mut w = World::with(seed, &[A, B]);
+        let req = w.embark_request();
+        w.manager.handle_server_event(ServerEvent::ClientPacket(ClientPacket::Embark(req.clone()), A), w.now_ms);
+        if w.manager.pending_world_requests() == 0 {
+            return; // Answered at once (no lag by this seed): nothing in flight to lose.
+        }
+        ran.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        w.set_up(false);
+        w.link().lose_in_transit();
+        let site = *w.player_sites().first().expect("the coordinator applied it");
+        // The fortress region cannot be loaded on the host now.
+        w.manager.spawner_mut().fail_next_start(req.region);
+        w.packet(B, ClientPacket::RequestRegionConnection(req.region));
+        for _ in 0..DRAIN_ROUNDS {
+            w.tick();
+        }
+        assert!(w.manager.unavailable_regions().contains(&req.region), "seed {seed}: the region failed to load");
+        w.set_up(true);
+        for _ in 0..DRAIN_ROUNDS {
+            w.tick();
+        }
+        assert_eq!(w.embark_results(A), vec![Err(EmbarkRefusal::RegionUnavailable)], "seed {seed}");
+        assert_eq!(w.coordinator().claim_of(a), None, "seed {seed}: the grant was given back");
+        assert_eq!(w.manager.client_claim(A), None, "seed {seed}: and the host holds no claim for A");
+        let last_fortress = w.inbox.iter().rev().find_map(|(to, p)| match p {
+            ServerPacket::Fortress(f) if *to == Some(A) => Some(*f),
+            _ => None,
+        });
+        assert!(matches!(last_fortress, None | Some(None)), "seed {seed}: A was last told no fortress: {last_fortress:?}");
+        // The region loads again; B returns to G: one player in it.
+        for _ in 0..4 * game::STORE_LOAD_RETRY_TICKS {
+            if w.manager.unavailable_regions().is_empty() {
+                break;
+            }
+            w.tick();
+        }
+        assert_eq!(w.ask(B, ClientPacket::ReturnTo(site)), Ok(site), "seed {seed}: the fortress is free");
+        assert_eq!(w.manager.client_claim(A), None, "seed {seed}: never two players in G");
+    });
+    assert!(ran.into_inner() > 0, "no seed had the reply in flight");
+}
+
+/// A coordinator played by the test: what the host sends is recorded, what it reads is
+/// what the test queued; `generation` bumps make the host re-attach.
+#[derive(Clone, Default)]
+struct Scripted {
+    sent: Arc<Mutex<Vec<HostMsg>>>,
+    inbox: Arc<Mutex<std::collections::VecDeque<game::CoordMsg>>>,
+    generation: Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl WorldLink for Scripted {
+    fn send(&mut self, msg: HostMsg) {
+        self.sent.lock().unwrap().push(msg);
+    }
+    fn recv(&mut self) -> Option<game::CoordMsg> {
+        self.inbox.lock().unwrap().pop_front()
+    }
+    fn is_up(&self) -> bool {
+        true
+    }
+    fn generation(&self) -> u64 {
+        self.generation.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl Scripted {
+    fn give(&self, msg: game::CoordMsg) {
+        self.inbox.lock().unwrap().push_back(msg);
+    }
+
+    /// The reports of `player` the host sent, in order.
+    fn reports(&self, player: PlayerId) -> Vec<game::OnlinePlayer> {
+        let sent = self.sent.lock().unwrap();
+        sent.iter()
+            .flat_map(|m| match m {
+                HostMsg::Attach { online, .. } => online.clone(),
+                HostMsg::PlayerOnline(p) => vec![*p],
+                _ => Vec::new(),
+            })
+            .filter(|p| p.player == player)
+            .collect()
+    }
+}
+
+/// A `ClaimIs` answering a report that the player's claim changed since is stale: the
+/// host reports the player again and ends with exactly the answer to that report. The
+/// coordinator is played by the test (the sequence needs a claim the host restored that
+/// the coordinator gives another player, crossed with an expired grant's give-back, which
+/// one real single-host coordinator does not produce in this order): A (no claim) asks to
+/// embark; the request times out (A told it failed). The coordinator says A plays S
+/// (`ClaimIs`, as after a restore from a record). The host re-attaches, reporting `{S}`
+/// with the request unsettled; the expired embark's late reply gives its grant G back
+/// (a claim change) and only then the answer `ClaimIs(None)` to that report arrives —
+/// stale: ignored, and A reported again `{S}`; the answer to that, `ClaimIs(None)`, is
+/// applied.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn ignored_stale_claim_is_triggers_a_re_report_and_converges() {
+    let a = PlayerId(A as u64);
+    let (out_send, packets) = unbounded();
+    let (region_out_send, region_out) = unbounded();
+    let mut manager = crate::common::stud_manager(
+        InlineSpawner::default().with_stud_genesis(std::sync::Arc::new(floored_region)),
+        out_send,
+        region_out_send,
+    );
+    manager.set_world_map(strip());
+    let link = Scripted::default();
+    manager.set_world_link(Box::new(link.clone()), 1, 0);
+    let mut now = 0;
+    let settle = |m: &mut WorldManager<InlineSpawner>, now: u64| {
+        for _ in 0..4 {
+            m.spawner_mut().pump();
+            while let Ok((rc, out)) = region_out.try_recv() {
+                m.handle_region_output(rc, out, now);
+            }
+            m.maintain(now);
+        }
+    };
+    let attach_epoch = |link: &Scripted| {
+        link.sent.lock().unwrap().iter().rev().find_map(|m| match m {
+            HostMsg::Attach { epoch, .. } => Some(*epoch),
+            _ => None,
+        })
+    };
+    let history = history();
+    let s = history.sites().next().expect("a site").id;
+    let view = game::CoordMsg::View { civs: history.civ_markers(), sites: history.site_markers(), calendar: history.now() };
+    link.give(game::CoordMsg::Attached { epoch: attach_epoch(&link).expect("attached at once") });
+    link.give(view);
+    manager.handle_server_event(ServerEvent::connected(A), now);
+    settle(&mut manager, now);
+    let r1 = *link.reports(a).last().expect("A reported");
+    // A asks to embark; nothing answers; it times out.
+    let req = EmbarkRequest { civ: history.sites().next().unwrap().civ, people: Vec::new(), region: rc(8, 0) };
+    manager.handle_server_event(ServerEvent::ClientPacket(ClientPacket::Embark(req), A), now);
+    let id = link.sent.lock().unwrap().iter().find_map(|m| match m {
+        HostMsg::Request { id, .. } => Some(*id),
+        _ => None,
+    });
+    let id = id.expect("the embark was asked");
+    now += WORLD_REQUEST_TIMEOUT_SECS * 1000;
+    settle(&mut manager, now);
+    // The coordinator: A plays S.
+    link.give(game::CoordMsg::ClaimIs { player: a, claim: Some(game::Claim::Fortress(s)), report: r1.report });
+    settle(&mut manager, now);
+    assert_eq!(manager.client_claim(A), Some(game::Claim::Fortress(s)));
+    // A reconnect: the host re-attaches, reporting A {S} with the embark unsettled.
+    link.generation.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    settle(&mut manager, now);
+    let r2 = *link.reports(a).last().unwrap();
+    assert!(r2.report > r1.report && r2.claim == Some(game::Claim::Fortress(s)) && r2.claim_pending, "{r2:?}");
+    link.give(game::CoordMsg::Attached { epoch: attach_epoch(&link).unwrap() });
+    // The expired embark's reply (granted G), then the answer to report 2.
+    let g = game::history::SiteId(9);
+    link.give(game::CoordMsg::Reply { id, reply: game::WorldReply::Embarked { site: g, region: rc(8, 0) } });
+    link.give(game::CoordMsg::ClaimIs { player: a, claim: None, report: r2.report });
+    settle(&mut manager, now);
+    assert!(link.sent.lock().unwrap().contains(&HostMsg::ReleaseClaim { player: a }), "G was given back");
+    assert_eq!(manager.client_claim(A), Some(game::Claim::Fortress(s)), "the stale answer is not applied");
+    let r3 = *link.reports(a).last().unwrap();
+    assert!(r3.report > r2.report, "A was reported again: {r3:?}");
+    assert_eq!((r3.claim, r3.claim_pending), (Some(game::Claim::Fortress(s)), false));
+    // The answer to the re-report is applied: the host ends with the coordinator's claim.
+    link.give(game::CoordMsg::ClaimIs { player: a, claim: None, report: r3.report });
+    settle(&mut manager, now);
+    assert_eq!(manager.client_claim(A), None);
+    assert!(packets.try_iter().any(|(to, p)| to == Some(A) && matches!(p, ServerPacket::Fortress(None))));
+}

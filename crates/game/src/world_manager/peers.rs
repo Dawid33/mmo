@@ -317,7 +317,9 @@ impl<S: RegionSpawner> WorldManager<S> {
             None => {
                 let player = self.player_of.remove(&client).expect("can_hand_off: online or parking");
                 let claim = claim_of(self.fortress_of.remove(&client), self.adventurer_of.remove(&client));
-                self.world_send(HostMsg::PlayerOffline { player });
+                // Not offline: in transit, its claim kept in use until `owner` reports it.
+                self.world_send(HostMsg::PlayerHandedTo { player, to: owner });
+                self.forget_claim_reports(player);
                 (player, claim, false)
             }
         };
@@ -367,7 +369,7 @@ impl<S: RegionSpawner> WorldManager<S> {
         if self.is_unavailable(target) {
             // Its stored state could not be read (retry not come): the body cannot go
             // there. Parked from the hand-off, as a player crossing into a region whose
-            // load fails is (`region_load_failed`). The sender already reported it offline.
+            // load fails is (`region_load_failed`); `park_handed` reports it offline.
             let record = handoff_record(target, &bundle, &h).expect("checked above");
             log::error!("[server] player {} handed into unavailable {target:?}: parked", h.player.0);
             self.park_handed(from, c, h.player, record, now_ms);
@@ -394,6 +396,7 @@ impl<S: RegionSpawner> WorldManager<S> {
         }
         // Its home here, `PlayerRegion` to the client.
         self.accept_arrival(None, target, stamp, bundle, now_ms);
+        self.claim_changed(h.player);
         self.world_player_online(c);
     }
 
@@ -413,7 +416,9 @@ impl<S: RegionSpawner> WorldManager<S> {
             return;
         };
         let claim = claim_of(self.fortress_of.remove(&client), self.adventurer_of.remove(&client));
-        self.world_send(HostMsg::PlayerOffline { player });
+        // Not offline: in transit, its claim kept in use until `owner` reports it.
+        self.world_send(HostMsg::PlayerHandedTo { player, to: owner });
+        self.forget_claim_reports(player);
         let (mut carried, y) = match record {
             Some(record) => (record.client, record.pose.translation.y),
             None => {
@@ -493,6 +498,7 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.send_play_event(target, GameEventKind::CreateClientAt(c, landing, Some(Box::new(record.client))));
         let _ = self.out.send((Some(c), ServerPacket::PlayerRegion(Some(target), c)));
         self.refresh_keepalive(target, now_ms);
+        self.claim_changed(h.player);
         self.world_player_online(c);
     }
 
@@ -514,6 +520,9 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// the live one here is the newer truth. `from` needs no answer: the reliable message
     /// is acknowledged by its receipt. (`moving` and `awaiting_session` clients are in
     /// `player_of`.)
+    ///
+    /// No `PlayerOffline` is reported for it: the copy already here has its own state
+    /// with the coordinator (online, or parked and reported so).
     fn drop_arriving_copy(&mut self, from: u32, player: PlayerId) {
         log::warn!("[server] player {} from host {from} is already here; the arriving copy is dropped", player.0);
     }
@@ -521,8 +530,10 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// `player` (of `client`), handed here by host `from`, cannot go where it was headed:
     /// its record is parked here. A session of the client here is refused as one whose
     /// region cannot be loaded; with none, host `from` is told
-    /// ([`Self::tell_parked`]).
+    /// ([`Self::tell_parked`]). Never announced online here, it is reported offline: the
+    /// sending host reported it in transit to this host (`PlayerHandedTo`), not offline.
     fn park_handed(&mut self, from: u32, client: ClientId, player: PlayerId, record: PlayerRecord, now_ms: u64) {
+        self.world_send(HostMsg::PlayerOffline { player });
         self.cut_transit(player, &record);
         self.parked_players.insert(player, record);
         if self.sessions.contains_key(&client) {

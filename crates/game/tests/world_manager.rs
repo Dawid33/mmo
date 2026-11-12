@@ -1431,7 +1431,7 @@ fn claim_is_sets_the_host_claim() {
         let mut core = Coordinator::new(hist, 0);
         if taken_by_other {
             // Player 50, online on host 9, plays site 0.
-            let other = OnlinePlayer { player: PlayerId(50), claim: Some(Claim::Fortress(SiteId(0))), claim_pending: false };
+            let other = OnlinePlayer { player: PlayerId(50), claim: Some(Claim::Fortress(SiteId(0))), claim_pending: false, report: 1 };
             core.handle(9, HostMsg::PlayerOnline(other), 0);
         }
         let mut h = floored_harness();

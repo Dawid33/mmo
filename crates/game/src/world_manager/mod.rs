@@ -744,11 +744,13 @@ pub struct WorldManager<S: RegionSpawner> {
     /// (`ReleaseClaim`; the site stays). They never age: a claim the player does not
     /// know it holds would refuse its every embark.
     expired_requests: BTreeMap<RequestId, (PlayerId, WorldRequest)>,
-    /// Per player, how often its claim changed here by the host's own doing (a release
-    /// sent, a granting reply applied), and that count as of its last report to the
-    /// coordinator (`PlayerOnline`, the `Attach`): a `ClaimIs` answering a report the
-    /// player's claim has changed since is stale (the change is on its way to the
-    /// coordinator, which decided or will apply it) and is ignored.
+    /// Numbers this host's claim reports and claim changes (increasing).
+    claim_seq: u64,
+    /// Per player online here: the number of its last claim change by the host's own
+    /// doing (a release sent, a granting reply applied, a crossing between hosts) and of
+    /// its last report to the coordinator (`PlayerOnline`, the `Attach`). A `ClaimIs` is
+    /// applied only if it answers the latest report and nothing changed since
+    /// (`world_link.rs`, `claim_is`). Forgotten when the player's last session here ends.
     claim_changes: BTreeMap<PlayerId, u64>,
     claim_reported: BTreeMap<PlayerId, u64>,
     /// Requests and claim messages made while the link is down (or the `Attach` is being
@@ -1009,6 +1011,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             next_request_seq: 0,
             pending_requests: BTreeMap::new(),
             expired_requests: BTreeMap::new(),
+            claim_seq: 0,
             claim_changes: BTreeMap::new(),
             claim_reported: BTreeMap::new(),
             outbox: VecDeque::new(),
@@ -2651,6 +2654,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             // Its claim stays (in its record too); another player may take an offline
             // claimant's fortress up.
             self.world_send(HostMsg::PlayerOffline { player });
+            self.forget_claim_reports(player);
         }
         self.deferred_packets.remove(&id);
         self.awaiting_park.retain(|_, (c, _)| *c != id);
