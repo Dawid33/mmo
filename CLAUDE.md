@@ -76,6 +76,9 @@ print secrets.
 - `just test-one <crate> "<cargo test args>"` for exactly the touched tests. Integration tests are ONE
   `it` binary per crate (`--test it <file>::`); files that touch process-global state (`HASH_MODE`, the
   forged world, a logger, wasm32, perf gates) keep their own `[[test]]` target — a new such file needs one.
+  Server test targets `roles` and `coordinator_rt` need `--features test-hooks` (`just test-r2` / `test-server`
+  pass it); Postgres-backed tests take their throwaway database from `crates/pg-test-support`
+  (`MMO_TEST_DATABASE_URL`).
 - `just smoke` — the default sanity check, hard-limited to 60 s. It only type-checks the client; running
   client tests (`just test-one client "--lib <filter>"`) is a slow opt-in — **ask first**.
 - `just test-threads` after touching handoff, `WorldManager`, `region_threads` or anything crossing a seam
@@ -125,7 +128,8 @@ print secrets.
 - Join snapshots go out slim (`game/src/region_wire.rs`): stud chunks as diffs against their pristine chunk,
   derivable voxel collider grids rebuilt by the receiver — only shapes the sender has checked byte-equal to a
   fresh build are omitted. `VOXEL_SNAPSHOT_COLLIDERS=send|rebuild` (default: `send` for a single-player server).
-- Auth: `VOXEL_AUTH=token` (default, offline) or `jwt` (login service, `crates/login`; a `jwt` host without a service token refuses to start unless `VOXEL_JWT_ADMISSION=newest`, dev only). The workspace's
+- Auth: `VOXEL_AUTH=token` (default, offline) or `jwt` (login service, `crates/login`; a `jwt` host without a
+  service token refuses to start unless `VOXEL_JWT_ADMISSION=newest`, dev only). The workspace's
   only rustls crypto provider is **ring** — keep `aws-lc-rs` out of the tree.
 - **Role split (R2, `VOXEL_ROLE=all|host|coordinator`, default `all` = one process as before; plan
   `docs/superpowers/plans/2026-11-07-r2b-role-split.md`)**: the coordinator (`game::coordinator`, claims,
