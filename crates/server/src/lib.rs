@@ -411,13 +411,12 @@ impl WorldIngress {
                         Err(why) => return refuse_quic(&connection, &why).await,
                     };
                 let (player, ticket) = (hello.player, hello.ticket.clone());
-                // The id exists only now that the session is authenticated.
-                let id = match hello.client_id(&next_client_id, |id| sinks.contains_key(&id)) {
-                    Ok(id) => id,
-                    // No `session_ended`: the ticket belongs to the live session.
-                    Err(why) => return refuse_quic(&connection, &why).await,
-                };
-                sinks.insert(id, ClientSink::Quinn(connection.clone()));
+                // The id exists only now that the session is authenticated; the sink is
+                // claimed in the same step, so a replayed ticket never replaces a live one.
+                let id = hello.client_id(&next_client_id);
+                if player_store::claim_sink(&sinks, id, ClientSink::Quinn(connection.clone())).is_err() {
+                    return refuse_quic(&connection, player_store::REFUSE_ALREADY_CONNECTED).await;
+                }
                 // Announce before any of this client's other packets can be
                 // read: guarantees the player exists before its first request
                 // is served. A login revoked meanwhile (kicked, or a newer one)

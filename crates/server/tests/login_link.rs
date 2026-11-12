@@ -221,7 +221,7 @@ fn jwt_session_gets_session_client_id() {
     assert!(login.spawn(&alice, 7));
     let session = host.hello(&alice, 7).unwrap();
     let local_ids = AtomicU64::new(0);
-    let id = session.client_id(&local_ids, |_| false).unwrap();
+    let id = session.client_id(&local_ids);
     assert_eq!(id, game::session_client_id(session.player, 7));
     assert_eq!(local_ids.load(std::sync::atomic::Ordering::SeqCst), 0, "a login session spends no local id");
     // The announcement carries it.
@@ -236,25 +236,49 @@ fn jwt_session_gets_session_client_id() {
 }
 
 #[test]
-fn live_session_client_id_is_refused_without_touching_it() {
+fn client_ids_of_other_epochs_and_local_sessions() {
     use std::sync::atomic::AtomicU64;
-    let host = Host::start();
-    let login = host.login(PeerRole::Login);
-    let alice = token(1);
-    assert!(login.spawn(&alice, 1));
-    let session = host.hello(&alice, 1).unwrap();
+    let alice = HelloSession { player: game::PlayerId(3), record: None, ticket: None, session_epoch: Some(1) };
+    let next = HelloSession { session_epoch: Some(2), player: game::PlayerId(3), record: None, ticket: None };
     let local_ids = AtomicU64::new(0);
-    let live = game::session_client_id(session.player, 1);
-    // A replayed ticket would resolve to the id of a live session: refused.
-    let replay = HelloSession { player: session.player, record: None, ticket: None, session_epoch: session.session_epoch };
-    assert_eq!(replay.client_id(&local_ids, |id| id == live), Err(player_store::REFUSE_ALREADY_CONNECTED.to_string()));
-    // Another epoch of the same player is another session.
-    let next = HelloSession { player: session.player, record: None, ticket: None, session_epoch: Some(2) };
-    assert_ne!(next.client_id(&local_ids, |id| id == live).unwrap(), live);
+    assert_ne!(alice.client_id(&local_ids), next.client_id(&local_ids));
     // A local session takes the process counter, from 0.
-    let local = HelloSession { player: session.player, record: None, ticket: None, session_epoch: None };
-    assert_eq!(local.client_id(&local_ids, |_| true), Ok(0));
-    assert_eq!(local.client_id(&local_ids, |_| true), Ok(1));
+    let local = HelloSession { player: game::PlayerId(3), record: None, ticket: None, session_epoch: None };
+    assert_eq!((local.client_id(&local_ids), local.client_id(&local_ids)), (0, 1));
+}
+
+/// `claim_sink` is generic over the sink: a `ClientSink` needs a live connection, so the
+/// tests claim with a marker value in the real `DashMap<ClientId, _>` type.
+#[test]
+fn claim_sink_refuses_a_live_id_and_keeps_the_first_sink() {
+    use dashmap::DashMap;
+    let sinks: DashMap<ClientId, &'static str> = DashMap::new();
+    assert_eq!(player_store::claim_sink(&sinks, 9, "first"), Ok(()));
+    assert_eq!(player_store::claim_sink(&sinks, 9, "second"), Err("second"), "the sink comes back");
+    assert_eq!(*sinks.get(&9).unwrap(), "first", "the live sink is untouched");
+    assert_eq!(player_store::claim_sink(&sinks, 10, "other"), Ok(()), "another id is free");
+    assert_eq!(sinks.len(), 2);
+}
+
+#[test]
+fn concurrent_claims_of_one_id_have_one_winner() {
+    use dashmap::DashMap;
+    use std::sync::Barrier;
+    for round in 0..200u64 {
+        let sinks: Arc<DashMap<ClientId, u32>> = Arc::new(DashMap::new());
+        let barrier = Arc::new(Barrier::new(2));
+        let threads: Vec<_> = (0..2u32)
+            .map(|n| {
+                let (sinks, barrier) = (sinks.clone(), barrier.clone());
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    player_store::claim_sink(&sinks, round, n).is_ok()
+                })
+            })
+            .collect();
+        let wins = threads.into_iter().map(|t| t.join().unwrap()).filter(|won| *won).count();
+        assert_eq!(wins, 1, "round {round}: exactly one claim wins");
+    }
 }
 
 #[test]

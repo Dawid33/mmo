@@ -2452,6 +2452,9 @@ impl<S: RegionSpawner> WorldManager<S> {
             || self.parking.contains_key(&id)
             || self.moving.contains_key(&id)
             || self.creating.contains_key(&id)
+            || self.fortress_of.contains_key(&id)
+            || self.adventurer_of.contains_key(&id)
+            || self.awaiting_park.values().any(|(c, _)| *c == id)
         {
             log::warn!("client {id}: {DUPLICATE_SESSION_REFUSAL} (a duplicate ClientConnected is ignored)");
             return false;

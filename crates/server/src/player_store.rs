@@ -94,27 +94,28 @@ pub const REFUSE_ALREADY_CONNECTED: &str = game::DUPLICATE_SESSION_REFUSAL;
 impl HelloSession {
     /// The session's id, allocated now that it is authenticated: a login session's is
     /// [`game::session_client_id`] (the same on every host), a local session's the next of
-    /// the process counter. `Err` is the refusal when `is_live` says a session already
-    /// holds that id (the existing session is untouched).
-    pub fn client_id(
-        &self,
-        local_ids: &std::sync::atomic::AtomicU64,
-        is_live: impl Fn(game::ClientId) -> bool,
-    ) -> Result<game::ClientId, String> {
+    /// the process counter.
+    pub fn client_id(&self, local_ids: &std::sync::atomic::AtomicU64) -> game::ClientId {
         match self.session_epoch {
-            Some(epoch) => {
-                let id = game::session_client_id(self.player, epoch);
-                if is_live(id) {
-                    Err(REFUSE_ALREADY_CONNECTED.into())
-                } else {
-                    Ok(id)
-                }
-            }
-            None => Ok(local_ids.fetch_add(1, std::sync::atomic::Ordering::SeqCst)),
+            Some(epoch) => game::session_client_id(self.player, epoch),
+            None => local_ids.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
         }
     }
 }
 
+/// Store `sink` as the live connection of `id`, in one step with the check that no session
+/// holds `id` yet. `Err` hands the sink back: the id is live (a replayed ticket), the caller
+/// refuses that connection with [`REFUSE_ALREADY_CONNECTED`] and sends no `ClientConnected`,
+/// no `ClientDisconnected` and no `session_ended` for it (the live session owns all three).
+pub fn claim_sink<V>(sinks: &dashmap::DashMap<game::ClientId, V>, id: game::ClientId, sink: V) -> Result<(), V> {
+    match sinks.entry(id) {
+        dashmap::mapref::entry::Entry::Occupied(_) => Err(sink),
+        dashmap::mapref::entry::Entry::Vacant(slot) => {
+            slot.insert(sink);
+            Ok(())
+        }
+    }
+}
 /// The handshake: `first` must be a `Hello` whose credential `auth` accepts
 /// (see [`crate::auth_edge`]); the store then resolves its player key on
 /// tokio's blocking pool. `Err` is the refusal sent back.

@@ -10,7 +10,7 @@
 //! `VOXEL_WT_KEY` and reloaded whenever the files change (renewals).
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64};
+use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
@@ -180,13 +180,12 @@ pub async fn serve(
                     Err(why) => return refuse(&session, &why).await,
                 };
             let (player, ticket) = (hello.player, hello.ticket.clone());
-            // The id exists only now that the session is authenticated.
-            let id = match hello.client_id(&next_client_id, |id| sinks.contains_key(&id)) {
-                Ok(id) => id,
-                // No `session_ended`: the ticket belongs to the live session.
-                Err(why) => return refuse(&session, &why).await,
-            };
-            sinks.insert(id, ClientSink::Web(session.clone()));
+            // The id exists only now that the session is authenticated; the sink is
+            // claimed in the same step, so a replayed ticket never replaces a live one.
+            let id = hello.client_id(&next_client_id);
+            if crate::player_store::claim_sink(&sinks, id, ClientSink::Web(session.clone())).is_err() {
+                return refuse(&session, crate::player_store::REFUSE_ALREADY_CONNECTED).await;
+            }
             // Announce before reading any other packets, mirroring the quinn
             // path: guarantees the player exists before its first request is served.
             // A login revoked meanwhile (kicked, or a newer one) is refused instead.

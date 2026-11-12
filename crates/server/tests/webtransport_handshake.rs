@@ -240,8 +240,8 @@ async fn first_packet_not_hello_closes() {
 
     // A Hello: announced with its player, and the same name is the same player.
     let mut players = Vec::new();
-    // The refused connections took ids 0 and 1.
-    for client in [2, 3] {
+    // The refused connections took no id: a session gets one once authenticated.
+    for client in [0, 1] {
         let conn = connect(PORT).await;
         send_packet(&conn, &hello("bob")).await;
         let event = loop {
@@ -252,7 +252,7 @@ async fn first_packet_not_hello_closes() {
         };
         match event {
             ServerEvent::ClientConnected { client: c, player, record } => {
-                assert_eq!(c, client, "client ids count every connection");
+                assert_eq!(c, client, "client ids count authenticated sessions");
                 assert!(record.is_none());
                 players.push(player);
             }
