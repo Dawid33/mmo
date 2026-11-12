@@ -129,6 +129,13 @@ pub(crate) struct PendingCut {
     pub parked_at_t: BTreeMap<PlayerId, PlayerRecord>,
     /// Crossings and intents a target confirmed after its answer.
     pub rows: Vec<InFlightRow>,
+    /// A world cut (several hosts): players whose record another part writes — handed to
+    /// a participant before this host's mark (`None`: the receiver's), or received from a
+    /// participant after its mark (the sender's snapshot holds them; `Some` keeps the
+    /// record this part already had for the player at the cut tick, from before that
+    /// arrival). This part's fallbacks (parked, passing through, unreceived hand-offs)
+    /// never write them; a region snapshot or a crossing still does.
+    pub not_ours: BTreeMap<PlayerId, Option<PlayerRecord>>,
 }
 
 impl PendingCut {
@@ -144,6 +151,7 @@ impl PendingCut {
             transit_players: BTreeMap::new(),
             parked_at_t: BTreeMap::new(),
             rows: Vec::new(),
+            not_ours: BTreeMap::new(),
         }
     }
 }

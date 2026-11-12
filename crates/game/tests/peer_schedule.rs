@@ -2416,7 +2416,8 @@ fn assert_population(
     for (ea, eb) in rig.links.values() {
         for end in [ea, eb] {
             for msg in end.lock().unwrap().transit() {
-                if let game::PeerMsg::Reliable { body: game::Reliable::Transfer { bundle, .. }, .. } = msg {
+                if let game::PeerMsg::Reliable { body, .. } = &msg {
+                    let game::Reliable::Transfer { bundle, .. } = body.inner() else { continue };
                     if let game::EntityKind::Person { person } = bundle.kind {
                         *places.entry(person).or_default() += 1;
                     }
@@ -2815,4 +2816,715 @@ fn old_claim_is_after_round_trip(rig: &mut MultiRig) {
 #[ignore = "slow: >100ms — run via just test-full"]
 fn old_claim_is_after_a_round_trip_is_not_applied() {
     sweep("old_claim_is_after_a_round_trip_is_not_applied", 2, 1, SEEDS / 4, old_claim_is_after_round_trip);
+}
+
+// --- The coordinated world cut (Task 13) -------------------------------------------
+
+/// The coordinator's world-cut period in the rig: one every 20 rounds of the hosts' clocks.
+const WORLD_CUT_EVERY_MS: u64 = 20 * game::TICK_RATE;
+/// Round budget for the world cuts a test waits for.
+const WORLD_CUT_ROUNDS: usize = 600;
+/// Most rounds a crossing that leaves after its source answered may take to land on the
+/// other host while the cut is still pending (it is never held for the mark).
+const LANDS_WITHIN_ROUNDS: usize = 12;
+/// Rounds a test lags a region around the cut tick.
+const LAG_AROUND_T: u32 = 10;
+
+/// A history with nobody in it, on the rig's map.
+fn quiet_history() -> game::history::History {
+    use game::history::{History, SocietyGrid};
+    History::new(9, crate::history_handover::start(), SocietyGrid::from_world_map(&rig_world_map()))
+}
+
+/// The rig's shared coordinator over `history`, world cuts every [`WORLD_CUT_EVERY_MS`].
+fn world_cuts_over(rig: &mut MultiRig, history: game::history::History) {
+    rig.with_coordinator(history);
+    rig.with_world_cuts(WORLD_CUT_EVERY_MS);
+}
+
+fn world_cuts(rig: &mut MultiRig) {
+    world_cuts_over(rig, quiet_history());
+}
+
+/// World cuts committed so far.
+fn committed(rig: &MultiRig) -> usize {
+    rig.decided.values().filter(|c| **c).count()
+}
+
+/// Cut rounds until `more` further world cuts committed.
+fn until_committed(rig: &mut MultiRig, more: usize) {
+    let goal = committed(rig) + more;
+    for _ in 0..WORLD_CUT_ROUNDS {
+        if committed(rig) >= goal {
+            return;
+        }
+        rig.cut_round();
+    }
+    panic!("{} world cuts committed of {goal}; decisions {:?}", committed(rig), rig.decided);
+}
+
+/// Cut rounds until world cut `cut` is decided; its decision.
+fn until_decided(rig: &mut MultiRig, cut: game::CutId) -> bool {
+    for _ in 0..WORLD_CUT_ROUNDS {
+        if let Some(d) = rig.decided.get(&cut) {
+            return *d;
+        }
+        rig.cut_round();
+    }
+    panic!("world cut {} never decided", cut.0);
+}
+
+/// Cut rounds until host `h` takes part in a world cut not decided yet: its id and tick.
+fn until_world_cut_on(rig: &mut MultiRig, h: u32) -> (game::CutId, u64) {
+    for _ in 0..WORLD_CUT_ROUNDS {
+        let m = &rig.hosts[h as usize].manager;
+        if let (Some(cut), Some((id, tick))) = (m.world_cut(), m.pending_cut()) {
+            if cut == id && !rig.decided.contains_key(&cut) {
+                return (id, tick);
+            }
+        }
+        rig.cut_round();
+    }
+    panic!("host {h} never took part in a world cut");
+}
+
+fn world_tick(rig: &mut MultiRig) -> u64 {
+    rig.hosts[0].manager.spawner_mut().world_tick()
+}
+
+/// `id`, standing in `a` or `b` (adjacent), pushed over their seam; `false` if neither
+/// holds it now.
+fn push_over(rig: &mut MultiRig, id: game::EntityId, a: RegionCoords, b: RegionCoords) -> bool {
+    match rig.owners_of(id).as_slice() {
+        [(_, rc)] if *rc == a => rig.teleport(a, id, past_seam(a, b, REGION_SIZE / 2.0)),
+        [(_, rc)] if *rc == b => rig.teleport(b, id, past_seam(b, a, REGION_SIZE / 2.0)),
+        _ => false,
+    }
+}
+
+/// How often `id` is in the running world: owned by a region, in flight or waiting on a
+/// host, or never sent in a session.
+fn live_count(rig: &mut MultiRig, id: game::EntityId) -> usize {
+    let mut n = rig.owners_of(id).len();
+    for r in &rig.hosts {
+        let m = &r.manager;
+        n += m.in_flight_ids().iter().filter(|(i, _)| *i == id).count();
+        n += m.pending_arrival_ids().iter().filter(|(i, _)| *i == id).count();
+        n += m.peer_unreceived_ids().iter().filter(|(_, i, sent)| *i == id && !sent).count();
+    }
+    n
+}
+
+/// Rounds until nothing is unacknowledged between `rig`'s hosts.
+fn until_quiet(rig: &mut MultiRig) {
+    for _ in 0..CROSS_ROUNDS {
+        if rig.peer_unreceived() == 0 {
+            return;
+        }
+        rig.round();
+    }
+    panic!("{} reliable messages never acknowledged", rig.peer_unreceived());
+}
+
+/// The test player with `n` stones in its inventory, standing in the middle of `rc`.
+fn stocked_record(rc: RegionCoords, n: u32) -> game::PlayerRecord {
+    let mut r = centre_of(rc);
+    r.client.inventory.add(game::ItemStack { item: game::ItemId(2), count: n });
+    r
+}
+
+/// Slimes and the test player shuttle over the host seam while world cuts run: every
+/// committed cut holds each slime once (the store places each in exactly one region or
+/// row), the last cut writes the player's record from one part only, and the world
+/// restarted from the store has each slime and the player once.
+fn cut_under_crossings(rig: &mut MultiRig) {
+    let (a, b) = host_seam(2, 1);
+    let ha = rig.owner(a);
+    rig.run(a);
+    rig.run(b);
+    world_cuts(rig);
+    rig.connect_everywhere(ha, P_CLIENT, P_PLAYER, stocked_record(a, 7));
+    until_body(rig);
+    let y = crate::common::above_floor_y();
+    let slimes: Vec<game::EntityId> =
+        (0..4).map(|i| rig.spawn_slime(if i % 2 == 0 { a } else { b }, [REGION_SIZE / 2.0 + i as f32, y, REGION_SIZE / 3.0])).collect();
+    let goal = committed(rig) + 2;
+    let mut r = 0usize;
+    while committed(rig) < goal {
+        assert!(r < WORLD_CUT_ROUNDS, "two world cuts never committed: {:?}", rig.decided);
+        if r % 3 == (rig.seed % 3) as usize {
+            push_over(rig, slimes[(r / 3) % slimes.len()], a, b);
+        }
+        if r % 7 == 0 {
+            if let Some((_, rc, id)) = rig.player_body(P_CLIENT) {
+                let other = if rc == a { b } else { a };
+                if rc == a || rc == b {
+                    rig.teleport(rc, id, past_seam(rc, other, REGION_SIZE / 2.0));
+                }
+            }
+        }
+        rig.cut_round();
+        r += 1;
+    }
+    for id in &slimes {
+        assert_eq!(rig.stored_places(*id).len(), 1, "{id:?} stored once: {:?}", rig.stored_places(*id));
+    }
+    assert_eq!(rig.last_cut_writers(P_PLAYER).len(), 1, "the last cut writes the player once");
+    let record = rig.committed_players[&P_PLAYER].clone();
+    assert_eq!(record.client.inventory, stocked_record(a, 7).client.inventory, "the inventory it had");
+
+    let mut again = rig.rebuild_from_last_cut();
+    again.run(a);
+    again.run(b);
+    let home = again.owner(record.region);
+    again.connect_home(home, P_CLIENT, P_PLAYER, record);
+    until_quiet(&mut again);
+    for id in &slimes {
+        assert_eq!(live_count(&mut again, *id), 1, "{id:?} once in the restarted world");
+    }
+    assert_eq!(again.player_owners(P_CLIENT).len(), 1, "one body of the player");
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn cut_under_crossings_restores_each_entity_once() {
+    sweep("cut_under_crossings_restores_each_entity_once", 2, 1, SEEDS, cut_under_crossings);
+}
+
+/// Slimes leave both sides of the host seam one tick apart around a world cut's tick T
+/// (T−3 .. T+2): whichever were on the wire at T, the cut holds each once.
+fn on_the_wire(rig: &mut MultiRig) {
+    let (a, b) = host_seam(2, 1);
+    let ha = rig.owner(a);
+    rig.run(a);
+    rig.run(b);
+    world_cuts(rig);
+    let y = crate::common::above_floor_y();
+    let slimes: Vec<(game::EntityId, RegionCoords, RegionCoords)> = (0..6)
+        .map(|i| {
+            let (from, to) = if i % 2 == 0 { (a, b) } else { (b, a) };
+            (rig.spawn_slime(from, [REGION_SIZE / 2.0, y, 8.0 + 4.0 * i as f32]), from, to)
+        })
+        .collect();
+    rig.round();
+    let (cut, t) = until_world_cut_on(rig, ha);
+    let mut pushed = 0;
+    while !rig.decided.contains_key(&cut) {
+        let now = world_tick(rig);
+        while pushed < slimes.len() && now + 3 >= t + pushed as u64 {
+            let (id, from, to) = slimes[pushed];
+            if rig.owners_of(id).iter().any(|(_, rc)| *rc == from) {
+                rig.teleport(from, id, past_seam(from, to, 8.0 + 4.0 * pushed as f32));
+            }
+            pushed += 1;
+        }
+        rig.cut_round();
+    }
+    assert!(rig.decided[&cut], "the world cut at {t} committed");
+    for (id, _, _) in &slimes {
+        assert_eq!(rig.stored_places(*id).len(), 1, "{id:?} stored once: {:?}", rig.stored_places(*id));
+    }
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn transfer_on_the_wire_at_t_is_in_exactly_one_part() {
+    sweep("transfer_on_the_wire_at_t_is_in_exactly_one_part", 2, 1, SEEDS, on_the_wire);
+}
+
+/// [`DEPOSIT`] dirt put down by region `from` at a cell of `to` (another host's): an
+/// intent across the seam; `rig.items` counts it.
+fn deposit_from(rig: &mut MultiRig, from: RegionCoords, to: RegionCoords) {
+    crate::common::install_real_block_props();
+    let at = deposit_cell(from, to);
+    let stack = game::ItemStack { item: DIRT, count: DEPOSIT };
+    rig.host_of(from).manager.spawner_mut().with_region(from, |r| {
+        let now = r.current_tick();
+        r.with_data(|d| assert_eq!(d.deposit_items_safe(at, stack, now, game::PICKUP_DELAY_TICKS), 0));
+    });
+    rig.items = Some(rig.items.unwrap_or(0) + u64::from(DEPOSIT));
+}
+
+/// Items `rig` holds once it is quiet (every item counted, none only in flight).
+fn settled_items(rig: &mut MultiRig) -> u64 {
+    until_quiet(rig);
+    for _ in 0..WAIT_ROUNDS {
+        rig.round();
+    }
+    rig.items().0
+}
+
+/// Deposits cross the host seam one tick apart around a world cut's tick (T−3 .. T+2):
+/// into the other side's running region (`running`: the intents on the wire), or into
+/// its parked one (the owner's refusals carry the items back: replies on the wire). The
+/// world restarted from the cut holds every item once — every item put down before its
+/// region answered the cut (one put down after it is not in the cut: the test makes the
+/// items out of nothing).
+fn intents_on_the_wire(rig: &mut MultiRig, running: bool) {
+    let (a, b) = host_seam(2, 1);
+    let ha = rig.owner(a);
+    rig.run(a);
+    rig.run(b);
+    if !running {
+        rig.park(b);
+    }
+    world_cuts(rig);
+    let (cut, t) = until_world_cut_on(rig, ha);
+    let (mut sent, mut before) = (0u64, 0u64);
+    while !rig.decided.contains_key(&cut) {
+        let now = world_tick(rig);
+        while sent < 6 && now + 3 >= t + sent {
+            let (from, to) = if running && sent % 2 == 1 { (b, a) } else { (a, b) };
+            let host = rig.owner(from) as usize;
+            if rig.hosts[host].manager.pending_cut().is_some_and(|(c, _)| c == cut)
+                && rig.hosts[host].manager.awaiting_cut().contains(&from)
+            {
+                before += 1;
+            }
+            deposit_from(rig, from, to);
+            sent += 1;
+        }
+        rig.cut_round();
+    }
+    assert!(rig.decided[&cut], "the world cut at {t} committed");
+    assert!(before > 0, "some deposits were put down before their region answered");
+    let expected = u64::from(DEPOSIT) * before;
+    let mut again = rig.rebuild_from_last_cut();
+    again.run(a);
+    if running {
+        again.run(b);
+    }
+    assert_eq!(settled_items(&mut again), expected, "every item once in the restarted world");
+}
+
+fn intents_on_the_wire_running(rig: &mut MultiRig) {
+    intents_on_the_wire(rig, true);
+}
+
+fn replies_on_the_wire_parked(rig: &mut MultiRig) {
+    intents_on_the_wire(rig, false);
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn intent_reply_on_the_wire_at_t_is_in_exactly_one_part() {
+    sweep("intent_reply_on_the_wire_at_t_is_in_exactly_one_part (intents)", 2, 1, SEEDS, intents_on_the_wire_running);
+    sweep("intent_reply_on_the_wire_at_t_is_in_exactly_one_part (replies)", 2, 1, SEEDS, replies_on_the_wire_parked);
+}
+
+/// The link between the hosts drops while a world cut is pending on both: the cut is
+/// aborted (no part of it holds a row for the other participant's regions — the rig's
+/// store checks that of every part staged); a slime crossing while the link is down
+/// waits in the sender's session; once it is back the next cut commits and holds the
+/// slime once.
+fn link_down_aborts(rig: &mut MultiRig) {
+    let (a, b) = host_seam(2, 1);
+    let (ha, hb) = (rig.owner(a), rig.owner(b));
+    rig.run(a);
+    rig.run(b);
+    world_cuts(rig);
+    let (cut, _) = until_world_cut_on(rig, ha);
+    rig.link_down(ha, hb);
+    let id = rig.spawn_slime(a, past_seam(a, b, REGION_SIZE / 2.0));
+    assert!(!until_decided(rig, cut), "the cut with a link down is aborted");
+    for (c, h, part) in &rig.aborted_parts {
+        for row in &part.in_flight {
+            let target = match row {
+                game::InFlightRow::Transfer { target, .. } | game::InFlightRow::Intent { target, .. } => *target,
+            };
+            assert_eq!(rig.owner(target), *h, "cut {}: host {h}'s part holds a row for another participant", c.0);
+        }
+    }
+    assert!(rig.hosts[ha as usize].manager.peer_unreceived() > 0 || live_count(rig, id) == 1);
+    rig.link_up(ha, hb);
+    until_committed(rig, 1);
+    assert_eq!(rig.stored_places(id).len(), 1, "stored once: {:?}", rig.stored_places(id));
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn cut_with_a_link_down_aborts_and_the_next_cut_commits() {
+    sweep("cut_with_a_link_down_aborts_and_the_next_cut_commits", 2, 1, SEEDS, link_down_aborts);
+}
+
+/// One host reads the coordinator only after the cut tick passed: it answers `Missed`,
+/// the cut is aborted and the coordinator doubles the lead; the retry commits and the
+/// lead is back to [`game::WORLD_CUT_LEAD_TICKS`].
+fn missed_tick(rig: &mut MultiRig) {
+    world_cuts(rig);
+    rig.hold_world(1, true);
+    for _ in 0..WORLD_CUT_ROUNDS {
+        if rig.core().world_cut_running().is_some() {
+            break;
+        }
+        rig.cut_round();
+    }
+    let (cut, t) = rig.core().world_cut_running().expect("a world cut began");
+    while world_tick(rig) < t {
+        rig.cut_round();
+    }
+    rig.hold_world(1, false);
+    assert!(!until_decided(rig, cut), "the missed cut is aborted");
+    assert_eq!(rig.core().world_cut_lead(), 2 * game::WORLD_CUT_LEAD_TICKS, "the lead doubled");
+    until_committed(rig, 1);
+    assert_eq!(rig.core().world_cut_lead(), game::WORLD_CUT_LEAD_TICKS, "a committed cut resets the lead");
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn missed_tick_doubles_the_lead_and_the_retry_commits() {
+    sweep("missed_tick_doubles_the_lead_and_the_retry_commits", 2, 1, SEEDS / 2, missed_tick);
+}
+
+/// A host the coordinator expects is not attached: no world cut begins (no `BeginCut`
+/// on any host); once it is not expected any more, one commits.
+fn no_cut_while_absent(rig: &mut MultiRig) {
+    world_cuts(rig);
+    rig.core().set_expected_hosts([0, 1, 2].into_iter().collect());
+    for _ in 0..4 * (WORLD_CUT_EVERY_MS / game::TICK_RATE) as usize {
+        rig.cut_round();
+        assert_eq!(rig.core().world_cut_running(), None, "no cut while host 2 is absent");
+        assert!(rig.hosts.iter().all(|r| r.manager.world_cut().is_none()));
+    }
+    for h in 0..2 {
+        assert!(!rig.sent_to_coordinator(h).iter().any(|m| matches!(m, game::HostMsg::CutPrepared { .. } | game::HostMsg::CutFailed { .. })));
+    }
+    rig.core().set_expected_hosts([0, 1].into_iter().collect());
+    until_committed(rig, 1);
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn no_cut_while_an_expected_host_is_absent() {
+    sweep("no_cut_while_an_expected_host_is_absent", 2, 1, SEEDS / 4, no_cut_while_absent);
+}
+
+/// Host 1's link to the coordinator drops while a world cut runs (the runtime tells the
+/// core `host_detached`): the cut is aborted; once host 1 is back (its `Attach` names the
+/// cut it took part in and is answered) the next cut commits.
+fn host_detaching(rig: &mut MultiRig) {
+    world_cuts(rig);
+    let (cut, _) = until_world_cut_on(rig, 1);
+    rig.hosts[1].manager.world_link_mut().unwrap().as_inline_mut().unwrap().set_up(false);
+    rig.core().host_detached(1);
+    assert!(!until_decided(rig, cut), "the cut is aborted");
+    rig.hosts[1].manager.world_link_mut().unwrap().as_inline_mut().unwrap().set_up(true);
+    for _ in 0..WORLD_CUT_ROUNDS {
+        if rig.hosts[1].manager.world_attached() && rig.hosts[1].manager.world_cut() != Some(cut) {
+            break;
+        }
+        rig.cut_round();
+    }
+    assert_ne!(rig.hosts[1].manager.world_cut(), Some(cut), "host 1 learned the outcome");
+    until_committed(rig, 1);
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn host_detaching_mid_cut_aborts_it() {
+    sweep("host_detaching_mid_cut_aborts_it", 2, 1, SEEDS / 4, host_detaching);
+}
+
+/// Criterion A: the test player is moved across hosts (an embark through the real
+/// coordinator into a region of the other host) right around a world cut's tick, while
+/// a second player walks over the host seam: the decided cut writes each player's
+/// record from exactly one part, with the inventory it had, and the restarted world has
+/// one of each.
+fn mid_move(rig: &mut MultiRig) {
+    let (a, b) = host_seam(2, 1);
+    let ha = rig.owner(a);
+    let (history, civ, founders) = history_with_site(FAR_SITE, 4);
+    rig.run(a);
+    rig.run(b);
+    world_cuts_over(rig, history);
+    rig.record_packets();
+    rig.connect_everywhere(ha, P_CLIENT, P_PLAYER, stocked_record(a, 5));
+    rig.connect_everywhere(ha, P2_CLIENT, P2_PLAYER, record_at(a, [REGION_SIZE / 2.0, 10.0]));
+    until_body(rig);
+    let (cut, t) = until_world_cut_on(rig, ha);
+    let fire = t.saturating_sub(2 + rig.seed % 4);
+    let (mut embarked, mut walked) = (false, false);
+    while !rig.decided.contains_key(&cut) {
+        let now = world_tick(rig);
+        if !embarked && now >= fire {
+            let req = game::EmbarkRequest { civ, people: founders[0..2].to_vec(), region: b };
+            rig.hosts[ha as usize].event(game::ServerEvent::ClientPacket(game::ClientPacket::Embark(req), P_CLIENT));
+            embarked = true;
+        }
+        if !walked && now + 1 >= t {
+            if let Some((_, rc, id)) = rig.player_body(P2_CLIENT) {
+                if rc == a {
+                    rig.teleport(a, id, past_seam(a, b, 10.0));
+                    walked = true;
+                }
+            }
+        }
+        rig.cut_round();
+    }
+    until_committed(rig, 1);
+    for p in [P_PLAYER, P2_PLAYER] {
+        assert_eq!(rig.last_cut_writers(p).len(), 1, "player {} written by one part: {:?}", p.0, rig.last_cut_writers(p));
+    }
+    let record = rig.committed_players[&P_PLAYER].clone();
+    assert_eq!(record.client.inventory, stocked_record(a, 5).client.inventory, "the inventory it had");
+    let mut again = rig.rebuild_from_last_cut();
+    for (c, p) in [(P_CLIENT, P_PLAYER), (P2_CLIENT, P2_PLAYER)] {
+        let r = rig.committed_players[&p].clone();
+        let home = again.owner(r.region);
+        again.connect_home(home, c, p, r);
+    }
+    until_quiet(&mut again);
+    assert_eq!(again.player_owners(P_CLIENT).len(), 1);
+    assert_eq!(again.player_owners(P2_CLIENT).len(), 1);
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn cut_mid_move_holds_the_player_once() {
+    sweep("cut_mid_move_holds_the_player_once", 2, 1, SEEDS, mid_move);
+}
+
+/// Counter-example 1 of the ruling: region `a` has answered the cut while its host's
+/// keeper region lags, so the host's mark is not out; a slime (or, `player`, the test
+/// player) leaves `a` into the other host then. It crosses at once (nothing is held for
+/// the mark: it lands within [`LANDS_WITHIN_ROUNDS`]), goes wrapped (`a`'s snapshot holds
+/// it), and the cut holds it once — in `a`'s snapshot.
+fn cut_lagging_source(rig: &mut MultiRig, player: bool) {
+    let (a, b) = host_seam(2, 1);
+    let ha = rig.owner(a);
+    let home = rig.homes[ha as usize];
+    rig.run(a);
+    rig.run(b);
+    world_cuts(rig);
+    if player {
+        rig.connect_everywhere(ha, P_CLIENT, P_PLAYER, stocked_record(a, 3));
+        until_body(rig);
+    }
+    let y = crate::common::above_floor_y();
+    let slime = rig.spawn_slime(a, [REGION_SIZE / 2.0, y, REGION_SIZE / 2.0]);
+    let (cut, t) = until_world_cut_on(rig, ha);
+    while world_tick(rig) + 2 < t {
+        rig.cut_round();
+    }
+    let lag = (t - world_tick(rig)) as u32 + LAG_AROUND_T;
+    rig.hosts[ha as usize].manager.spawner_mut().hold(home, lag);
+    for _ in 0..WORLD_CUT_ROUNDS {
+        let m = &rig.hosts[ha as usize].manager;
+        if m.pending_cut().is_some_and(|(c, _)| c == cut) && !m.awaiting_cut().contains(&a) {
+            break;
+        }
+        rig.cut_round();
+    }
+    let m = &rig.hosts[ha as usize].manager;
+    assert!(m.awaiting_cut().contains(&home), "the keeper region still lags");
+    assert_eq!(m.world_cut_state().map(|s| s.1), Some("pending"), "the host's mark is not out");
+    let id = if player { rig.player_body(P_CLIENT).expect("a body").2 } else { slime };
+    assert!(rig.teleport(a, id, past_seam(a, b, REGION_SIZE / 2.0)), "{a:?} holds it");
+    let mut landed = false;
+    for _ in 0..LANDS_WITHIN_ROUNDS {
+        rig.cut_round();
+        if rig.owners_of(id).iter().any(|(_, rc)| *rc == b) {
+            landed = true;
+            break;
+        }
+    }
+    assert!(landed, "the crossing landed on the other host within {LANDS_WITHIN_ROUNDS} rounds");
+    rig.hosts[ha as usize].manager.spawner_mut().hold(home, 0);
+    assert!(until_decided(rig, cut), "the cut commits");
+    if player {
+        assert_eq!(rig.last_cut_writers(P_PLAYER), [ha], "the player is in {a:?}'s snapshot only");
+    } else {
+        assert_eq!(rig.stored_places(id), [(ha, a, "state")], "once, in {a:?}'s snapshot");
+    }
+}
+
+fn lagging_source_slime(rig: &mut MultiRig) {
+    cut_lagging_source(rig, false);
+}
+
+fn lagging_source_player(rig: &mut MultiRig) {
+    cut_lagging_source(rig, true);
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn cut_with_a_lagging_source_region_holds_a_crossing_once() {
+    sweep("cut_with_a_lagging_source_region_holds_a_crossing_once (slime)", 2, 1, SEEDS, lagging_source_slime);
+    sweep("cut_with_a_lagging_source_region_holds_a_crossing_once (player)", 2, 1, SEEDS / 2, lagging_source_player);
+}
+
+/// Counter-example 2 of the ruling: the other host's mark is out; region `a` lags (it has
+/// not answered) and puts dirt down into `b`, parked on the other host. That host refuses
+/// it after its mark: the reply carrying the items back is its own part's row (due at
+/// least T) and goes wrapped. Every item is once in the world restarted from the cut —
+/// `a` answering before the reply (`short`) or after it.
+fn refusal_after_mark(rig: &mut MultiRig, short: bool) {
+    let (a, b) = host_seam(2, 1);
+    let (ha, hb) = (rig.owner(a), rig.owner(b));
+    rig.run(a);
+    rig.run(b);
+    rig.park(b);
+    world_cuts(rig);
+    let (cut, t) = until_world_cut_on(rig, ha);
+    while world_tick(rig) + 3 < t {
+        rig.cut_round();
+    }
+    let lag = if short { 6 } else { 6 + LAG_AROUND_T };
+    rig.hosts[ha as usize].manager.spawner_mut().hold(a, lag);
+    for _ in 0..WORLD_CUT_ROUNDS {
+        if matches!(rig.hosts[hb as usize].manager.world_cut_state(), Some((c, "marked" | "complete" | "prepared")) if c == cut) {
+            break;
+        }
+        rig.cut_round();
+    }
+    assert!(rig.hosts[ha as usize].manager.awaiting_cut().contains(&a), "`a` has not answered");
+    deposit_from(rig, a, b);
+    let decided = until_decided(rig, cut);
+    let expected = u64::from(DEPOSIT);
+    if decided {
+        let (_, parts) = rig.last_committed();
+        let replies: Vec<&game::InFlightRow> = parts[&hb]
+            .in_flight
+            .iter()
+            .filter(|r| matches!(r, game::InFlightRow::Intent { msg: game::IntentMsg::Reply(s), .. } if s.due >= t))
+            .collect();
+        assert!(replies.len() <= 1, "the refusal is written once: {replies:?}");
+        if !short {
+            // `a` answers only after the reply came back: the refusal was made after the
+            // other host's mark and is that host's row (case 3).
+            assert_eq!(replies.len(), 1, "the refusal made after the mark is host {hb}'s row");
+        }
+        let mut again = rig.rebuild_from_last_cut();
+        again.run(a);
+        assert_eq!(settled_items(&mut again), expected, "every item once in the restarted world");
+    } else {
+        until_committed(rig, 1);
+    }
+}
+
+fn refusal_after_mark_short(rig: &mut MultiRig) {
+    refusal_after_mark(rig, true);
+}
+
+fn refusal_after_mark_long(rig: &mut MultiRig) {
+    refusal_after_mark(rig, false);
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn refusal_generated_after_the_mark_is_in_exactly_one_part() {
+    sweep("refusal_generated_after_the_mark_is_in_exactly_one_part (short)", 2, 1, SEEDS, refusal_after_mark_short);
+    sweep("refusal_generated_after_the_mark_is_in_exactly_one_part (long)", 2, 1, SEEDS, refusal_after_mark_long);
+}
+
+/// A wrapped message reaches host 1 before host 1 has read the cut's `BeginCut` (its
+/// coordinator link held): what it creates is noted as the sender's in that cut, so no
+/// part writes it twice — host 1 begins the cut too late (missed) and the cut is
+/// aborted; the next cut commits with the slime stored once.
+fn wrapper_before_begin(rig: &mut MultiRig) {
+    let (a, b) = host_seam(2, 1);
+    let (ha, hb) = (rig.owner(a), rig.owner(b));
+    rig.run(a);
+    rig.run(b);
+    world_cuts(rig);
+    let y = crate::common::above_floor_y();
+    let id = rig.spawn_slime(a, [REGION_SIZE / 2.0, y, REGION_SIZE / 2.0]);
+    rig.hold_world(hb, true);
+    let (cut, _) = until_world_cut_on(rig, ha);
+    for _ in 0..WORLD_CUT_ROUNDS {
+        let m = &rig.hosts[ha as usize].manager;
+        if !m.awaiting_cut().contains(&a) {
+            break;
+        }
+        rig.cut_round();
+    }
+    assert!(rig.teleport(a, id, past_seam(a, b, REGION_SIZE / 2.0)));
+    for _ in 0..LANDS_WITHIN_ROUNDS {
+        rig.cut_round();
+        if rig.owners_of(id).iter().any(|(_, rc)| *rc == b) {
+            break;
+        }
+    }
+    assert_eq!(rig.hosts[hb as usize].manager.world_cut(), None, "host {hb} has not begun the cut");
+    rig.hold_world(hb, false);
+    assert!(!until_decided(rig, cut), "host {hb} began it too late: aborted");
+    until_committed(rig, 1);
+    assert_eq!(rig.stored_places(id).len(), 1, "stored once: {:?}", rig.stored_places(id));
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn in_cut_message_arriving_before_begin_cut_is_not_a_row() {
+    sweep("in_cut_message_arriving_before_begin_cut_is_not_a_row", 2, 1, SEEDS / 2, wrapper_before_begin);
+}
+
+/// The sending host breaks the rule once (a test link strips the wrapper of a crossing
+/// sent after its mark): the receiver, still pending, fails the cut (`CutFailed {
+/// Aborted }`), applies the crossing all the same, and the next cut commits with the
+/// slime stored once.
+fn bare_after_mark(rig: &mut MultiRig) {
+    let (a, b) = host_seam(2, 1);
+    let (ha, hb) = (rig.owner(a), rig.owner(b));
+    let home_b = rig.homes[hb as usize];
+    rig.run(a);
+    rig.run(b);
+    world_cuts(rig);
+    let y = crate::common::above_floor_y();
+    let id = rig.spawn_slime(a, [REGION_SIZE / 2.0, y, REGION_SIZE / 2.0]);
+    let (cut, t) = until_world_cut_on(rig, ha);
+    rig.strip_next_wrapper(ha, hb);
+    while world_tick(rig) + 2 < t {
+        rig.cut_round();
+    }
+    let lag = (t - world_tick(rig)) as u32 + LAG_AROUND_T;
+    rig.hosts[hb as usize].manager.spawner_mut().hold(home_b, lag);
+    for _ in 0..WORLD_CUT_ROUNDS {
+        if matches!(rig.hosts[ha as usize].manager.world_cut_state(), Some((c, "marked" | "complete"))if c == cut) {
+            break;
+        }
+        rig.cut_round();
+    }
+    assert!(rig.teleport(a, id, past_seam(a, b, REGION_SIZE / 2.0)));
+    for _ in 0..CROSS_ROUNDS {
+        rig.cut_round();
+        if rig.stripped(ha, hb) == 1 && rig.owners_of(id).iter().any(|(_, rc)| *rc == b) {
+            break;
+        }
+    }
+    assert_eq!(rig.stripped(ha, hb), 1, "one wrapper stripped");
+    assert!(rig.owners_of(id).iter().any(|(_, rc)| *rc == b), "the bare crossing was applied");
+    let failed = rig
+        .sent_to_coordinator(hb)
+        .into_iter()
+        .any(|m| m == game::HostMsg::CutFailed { cut, why: game::CutFailure::Aborted });
+    assert!(failed, "host {hb} failed the cut");
+    rig.hosts[hb as usize].manager.spawner_mut().hold(home_b, 0);
+    assert!(!until_decided(rig, cut), "the cut is aborted");
+    until_committed(rig, 1);
+    assert_eq!(rig.stored_places(id).len(), 1, "stored once: {:?}", rig.stored_places(id));
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn bare_message_after_a_mark_fails_the_cut() {
+    sweep("bare_message_after_a_mark_fails_the_cut", 2, 1, SEEDS / 2, bare_after_mark);
+}
+
+/// Criterion F on a host: a `BeginCut` while the host still has a world cut pending is
+/// refused (`Aborted`) without touching the pending one, which commits.
+fn second_begin(rig: &mut MultiRig) {
+    world_cuts(rig);
+    let (cut, t) = until_world_cut_on(rig, 0);
+    let other = game::CutId(cut.0 + 1000);
+    let refused = rig.hosts[0].manager.begin_world_cut(other, t + 40, &[0, 1], &[]);
+    assert_eq!(refused, Err(game::CutFailure::Aborted), "a second cut is refused");
+    assert_eq!(rig.hosts[0].manager.pending_cut(), Some((cut, t)), "the pending cut is untouched");
+    assert_eq!(rig.hosts[0].manager.world_cut(), Some(cut));
+    assert!(until_decided(rig, cut), "the pending cut commits");
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn cut_begun_while_one_is_pending_is_refused_and_the_first_commits() {
+    sweep("cut_begun_while_one_is_pending_is_refused_and_the_first_commits", 2, 1, SEEDS / 4, second_begin);
 }

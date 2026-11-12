@@ -5,11 +5,12 @@
 //! spawner's round count, so [`MultiRig::round`] ticks every host every round and checks
 //! they agree. Every host-seam test builds on it. [`MultiRig::with_coordinator`] gives
 //! every host its own seeded, delaying inline link to ONE world coordinator.
+use super::cut_store::CutStore;
 use super::rig::{Rig, CLIENT};
 use game::{
-    ClientId, ClientPacket, EntityId, HostEndpoint, Intent, IntentMsg, InlinePeerLink, InlineSchedule, InlineSpawner, Ownership, PeerHello,
-    PeerLink, PeerMsg, PeerSession, PlayerId, PlayerRecord, RegionCoords, RegionSpawner, Reliable, ServerEvent,
-    REGION_SIZE, TICK_RATE,
+    ClientId, ClientPacket, CutId, EntityId, HostEndpoint, InFlightRow, Intent, IntentMsg, InlinePeerLink, InlineSchedule,
+    InlineSpawner, Ownership, PeerHello, PeerLink, PeerMsg, PeerSession, PlayerId, PlayerRecord, RegionCoords,
+    RegionSpawner, Reliable, ServerEvent, StoredRegion, WorldCut, REGION_SIZE, TICK_RATE,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
@@ -71,8 +72,19 @@ impl game::WorldLink for RigWorldLink {
     }
 }
 
-/// One end of a link the rig keeps a handle on (to take it down, read its transit).
-pub struct SharedEnd(pub Arc<Mutex<InlinePeerLink>>);
+/// A test hook on one direction of a link ([`MultiRig::strip_next_wrapper`]): once armed,
+/// the first [`Reliable::InCut`] sent after a [`Reliable::CutMark`] goes out bare — a
+/// sender breaking the world cut's rule.
+#[derive(Default, Debug)]
+pub struct Strip {
+    pub armed: bool,
+    pub after_mark: bool,
+    pub stripped: usize,
+}
+
+/// One end of a link the rig keeps a handle on (to take it down, read its transit), and
+/// its sending side's [`Strip`] hook.
+pub struct SharedEnd(pub Arc<Mutex<InlinePeerLink>>, pub Arc<Mutex<Strip>>);
 
 impl SharedEnd {
     fn end(&self) -> std::sync::MutexGuard<'_, InlinePeerLink> {
@@ -82,6 +94,21 @@ impl SharedEnd {
 
 impl PeerLink for SharedEnd {
     fn send(&mut self, msg: PeerMsg) {
+        let msg = {
+            let mut strip = self.1.lock().unwrap_or_else(|e| e.into_inner());
+            match msg {
+                PeerMsg::Reliable { body: Reliable::CutMark { cut }, seq } if strip.armed => {
+                    strip.after_mark = true;
+                    PeerMsg::Reliable { body: Reliable::CutMark { cut }, seq }
+                }
+                PeerMsg::Reliable { body: Reliable::InCut { body, .. }, seq } if strip.armed && strip.after_mark => {
+                    strip.armed = false;
+                    strip.stripped += 1;
+                    PeerMsg::Reliable { body: *body, seq }
+                }
+                other => other,
+            }
+        };
         self.end().send(msg)
     }
     fn recv(&mut self) -> Option<PeerMsg> {
@@ -203,6 +230,23 @@ pub struct MultiRig {
     pub world_hop_is: Vec<Arc<std::sync::atomic::AtomicUsize>>,
     /// Made without a spawner schedule (every region ticks in lockstep).
     pub lockstep: bool,
+    /// The rig's in-memory two-phase store (world cuts, [`Self::drive_world_cuts`]):
+    /// staged parts by `(cut, host)`, as Postgres holds prepared transactions.
+    pub parts: BTreeMap<(CutId, u32), WorldCut>,
+    /// The decision of every cut decided (first writer wins).
+    pub decided: BTreeMap<CutId, bool>,
+    /// What each host's committed parts hold (regions, its in-flight rows).
+    pub committed: BTreeMap<u32, CutStore>,
+    /// The players table, as committed parts wrote it.
+    pub committed_players: BTreeMap<PlayerId, PlayerRecord>,
+    /// The parts of the last committed cut, by host.
+    pub last_cut: Option<(CutId, BTreeMap<u32, WorldCut>)>,
+    /// Every part a host staged, in order: `(cut, host)`.
+    pub prepared: Vec<(CutId, u32)>,
+    /// Parts of cuts decided aborted, as they were staged.
+    pub aborted_parts: Vec<(CutId, u32, WorldCut)>,
+    /// Each direction's [`Strip`] hook, by `(from, to)`.
+    pub strips: BTreeMap<(u32, u32), Arc<Mutex<Strip>>>,
 }
 
 /// Host `h`'s endpoint in the rig (what its sessions' first packet names).
@@ -223,12 +267,31 @@ impl MultiRig {
         seed: u64,
         link_delay_steps: u32,
     ) -> MultiRig {
+        Self::new_from(hosts, s, schedule, seed, link_delay_steps, None)
+    }
+
+    /// [`Self::new`], every host's regions starting from `stored` where it holds them (a
+    /// world restarted from its store).
+    pub fn new_from(
+        hosts: u32,
+        s: u32,
+        schedule: Option<fn(u64) -> InlineSchedule>,
+        seed: u64,
+        link_delay_steps: u32,
+        stored: Option<BTreeMap<RegionCoords, StoredRegion>>,
+    ) -> MultiRig {
         let floor: game::InlineStudGenesis = Arc::new(|_| super::uniform_seed());
         let mut rigs = Vec::new();
         let mut homes = Vec::new();
         for h in 0..hosts {
             let ownership = Ownership::Static { ordinal: h, hosts };
-            let spawner = schedule.map_or_else(InlineSpawner::default, |f| InlineSpawner::with_schedule(f(mix(seed, u64::from(h)))));
+            let mut spawner = match &stored {
+                Some(regions) => InlineSpawner::with_portable(regions.clone()),
+                None => InlineSpawner::default(),
+            };
+            if let Some(f) = schedule {
+                spawner.set_schedule(Some(f(mix(seed, u64::from(h)))));
+            }
             let mut rig = Rig::with_ownership(spawner, floor.clone(), ownership, s);
             rig.manager.set_endpoints(rig_endpoint(h), mix(seed, 2000 + u64::from(h)));
             rigs.push(rig);
@@ -240,13 +303,17 @@ impl MultiRig {
             homes.push(home);
         }
         let mut links = BTreeMap::new();
+        let mut strips = BTreeMap::new();
         for a in 0..hosts {
             for b in a + 1..hosts {
                 let (ea, eb) = InlinePeerLink::pair(mix(seed, 1000 + u64::from(a * hosts + b)), link_delay_steps);
                 let (ea, eb) = (Arc::new(Mutex::new(ea)), Arc::new(Mutex::new(eb)));
-                rigs[a as usize].manager.set_peer(b, PeerSession::new(rig_hello(a), b), Box::new(SharedEnd(ea.clone())));
-                rigs[b as usize].manager.set_peer(a, PeerSession::new(rig_hello(b), a), Box::new(SharedEnd(eb.clone())));
+                let (sa, sb) = (Arc::new(Mutex::new(Strip::default())), Arc::new(Mutex::new(Strip::default())));
+                rigs[a as usize].manager.set_peer(b, PeerSession::new(rig_hello(a), b), Box::new(SharedEnd(ea.clone(), sa.clone())));
+                rigs[b as usize].manager.set_peer(a, PeerSession::new(rig_hello(b), a), Box::new(SharedEnd(eb.clone(), sb.clone())));
                 links.insert((a, b), (ea, eb));
+                strips.insert((a, b), sa);
+                strips.insert((b, a), sb);
             }
         }
         let mut rig =
@@ -268,6 +335,14 @@ impl MultiRig {
                 world_hold: Vec::new(),
                 world_hop_is: Vec::new(),
                 lockstep: schedule.is_none(),
+                parts: BTreeMap::new(),
+                decided: BTreeMap::new(),
+                committed: BTreeMap::new(),
+                committed_players: BTreeMap::new(),
+                last_cut: None,
+                prepared: Vec::new(),
+                aborted_parts: Vec::new(),
+                strips,
             };
         for h in 0..hosts {
             rig.keep(h);
@@ -307,6 +382,206 @@ impl MultiRig {
             self.round();
         }
         panic!("the hosts never all attached to the coordinator");
+    }
+
+    /// Arm the [`Strip`] hook of the link `from` → `to`.
+    pub fn strip_next_wrapper(&mut self, from: u32, to: u32) {
+        let mut strip = self.strips[&(from, to)].lock().unwrap();
+        *strip = Strip { armed: true, after_mark: false, stripped: strip.stripped };
+    }
+
+    /// Wrappers the `from` → `to` hook stripped so far.
+    pub fn stripped(&self, from: u32, to: u32) -> usize {
+        self.strips[&(from, to)].lock().unwrap().stripped
+    }
+
+    /// World cuts every `every_ms` (the coordinator's period; its clock is the hosts').
+    /// Rounds then go through [`Self::cut_round`].
+    pub fn with_world_cuts(&mut self, every_ms: u64) {
+        let hosts: BTreeSet<u32> = (0..self.hosts.len() as u32).collect();
+        let mut core = self.core();
+        core.set_cut_epoch(1);
+        core.set_expected_hosts(hosts);
+        core.set_world_cuts(every_ms);
+    }
+
+    /// A round ([`Self::round`]) with every host's upkeep ([`game::WorldManager::maintain`],
+    /// which drives the coordinator's clock) and the world cuts driven
+    /// ([`Self::drive_world_cuts`]).
+    pub fn cut_round(&mut self) {
+        let tick = self.hosts[0].manager.spawner_mut().world_tick();
+        if self.coordinator.is_some() {
+            self.core().set_world_tick(tick);
+        }
+        self.round();
+        for rig in &mut self.hosts {
+            let now = rig.now_ms;
+            rig.manager.maintain(now);
+            rig.settle();
+        }
+        self.drive_world_cuts();
+        for rig in &mut self.hosts {
+            rig.settle();
+        }
+    }
+
+    /// What a server and the coordinator runtime do with a world cut, against the rig's
+    /// in-memory two-phase store: each host's complete part is staged
+    /// ([`Self::prepare_part`]) and the host told; the coordinator's decisions are
+    /// recorded ([`Self::decide`]) and handed back; each host's `CutDone` is settled
+    /// (`cut_committed` / `cut_failed`); a lookup is answered from the decisions (an
+    /// undecided cut aborted).
+    pub fn drive_world_cuts(&mut self) {
+        let Some(core) = self.coordinator.clone() else { return };
+        for h in 0..self.hosts.len() as u32 {
+            let m = &mut self.hosts[h as usize].manager;
+            // Only a world cut's part (a test's one-phase cut stays for the test to take).
+            if m.world_cut().is_none() {
+                continue;
+            }
+            if let Some(cut) = m.take_cut() {
+                let id = cut.id;
+                match self.prepare_part(h, cut) {
+                    Ok(()) => self.hosts[h as usize].manager.world_cut_prepared(id),
+                    Err(why) => self.hosts[h as usize].manager.world_cut_failed(id, game::CutFailure::Store(why)),
+                }
+            }
+        }
+        for rig in &mut self.hosts {
+            for (cut, committed) in rig.manager.take_world_cut_done() {
+                if committed {
+                    rig.manager.cut_committed(cut, Vec::new());
+                } else {
+                    rig.manager.cut_failed(cut);
+                }
+            }
+        }
+        loop {
+            let decision = core.lock().unwrap_or_else(|e| e.into_inner()).take_decision();
+            let Some(d) = decision else { break };
+            let stored = self.decide(d.cut, d.commit, &d.hosts);
+            core.lock().unwrap_or_else(|e| e.into_inner()).decided(d.cut, stored);
+        }
+        let lookups = core.lock().unwrap_or_else(|e| e.into_inner()).take_cut_lookups();
+        for (host, cut) in lookups {
+            let stored = self.decide(cut, false, &[]);
+            core.lock().unwrap_or_else(|e| e.into_inner()).cut_outcome(host, cut, stored);
+        }
+    }
+
+    /// Host `h` stages its part `cut` (as `prepare_cut`): refused with the history in it;
+    /// a part of a cut decided already finishes itself (committed or dropped). No two
+    /// staged parts of one cut may write one player record or one entity (a test failure).
+    pub fn prepare_part(&mut self, h: u32, cut: WorldCut) -> Result<(), String> {
+        assert!(cut.history.is_none(), "a host's part never carries the history");
+        assert_eq!(cut.host, h, "a part is its host's");
+        if let Some(&committed) = self.decided.get(&cut.id) {
+            if committed {
+                self.apply_part(h, &cut);
+                return Ok(());
+            }
+            return Err(format!("cut {} was decided aborted before this part prepared", cut.id.0));
+        }
+        // Criterion C: every host takes part in the rig's cuts, so a part writes no row for
+        // what is in transit to another participant — except what it sent wrapped after its
+        // own mark (the ruling's case 3), whose stamp / due it raised to the cut tick.
+        for row in &cut.in_flight {
+            let (target, at) = match row {
+                InFlightRow::Transfer { target, stamp, .. } => (*target, *stamp),
+                InFlightRow::Intent { target, msg: IntentMsg::Intent(s) } => (*target, s.due),
+                InFlightRow::Intent { target, msg: IntentMsg::Reply(s) } => (*target, s.due),
+            };
+            let owner = self.hosts[0].manager.owner_of(target);
+            assert!(
+                owner == h || at >= cut.tick,
+                "cut {}: host {h}'s part has a row for {target:?} (host {owner}'s) due at {at}, before the cut tick {}",
+                cut.id.0,
+                cut.tick
+            );
+        }
+        let mine_players: BTreeSet<PlayerId> = cut.players.iter().map(|(p, _)| *p).collect();
+        let mine_ids = part_entities(&cut);
+        for ((c, other), part) in &self.parts {
+            if *c != cut.id {
+                continue;
+            }
+            let theirs: BTreeSet<PlayerId> = part.players.iter().map(|(p, _)| *p).collect();
+            let both: Vec<&PlayerId> = mine_players.intersection(&theirs).collect();
+            assert!(both.is_empty(), "cut {}: hosts {h} and {other} both write player records {both:?}", cut.id.0);
+            let ids = part_entities(part);
+            let both: Vec<&EntityId> = mine_ids.intersection(&ids).collect();
+            assert!(both.is_empty(), "cut {}: hosts {h} and {other} both write entities {both:?}", cut.id.0);
+        }
+        self.prepared.push((cut.id, h));
+        self.parts.insert((cut.id, h), cut);
+        Ok(())
+    }
+
+    /// The decision on `cut` (as `decide_cut` / `abort_cut`): the stored one if any (first
+    /// writer wins); else a commit only if asked and exactly `hosts` staged parts, an
+    /// abort otherwise. Every staged part is then committed or dropped as it says.
+    pub fn decide(&mut self, cut: CutId, commit: bool, hosts: &[u32]) -> bool {
+        if let Some(&stored) = self.decided.get(&cut) {
+            return stored;
+        }
+        let staged: BTreeSet<u32> = self.parts.keys().filter(|(c, _)| *c == cut).map(|(_, h)| *h).collect();
+        let listed: BTreeSet<u32> = hosts.iter().copied().collect();
+        let stored = commit && staged == listed;
+        self.decided.insert(cut, stored);
+        let mut parts = BTreeMap::new();
+        for h in staged {
+            let part = self.parts.remove(&(cut, h)).expect("staged");
+            if stored {
+                self.apply_part(h, &part);
+            } else {
+                self.aborted_parts.push((cut, h, part.clone()));
+            }
+            parts.insert(h, part);
+        }
+        if stored {
+            self.last_cut = Some((cut, parts));
+        }
+        stored
+    }
+
+    fn apply_part(&mut self, h: u32, part: &WorldCut) {
+        self.committed.entry(h).or_default().apply(part);
+        self.committed_players.extend(part.players.iter().cloned());
+    }
+
+    /// The last committed cut, or a panic.
+    pub fn last_committed(&self) -> (CutId, &BTreeMap<u32, WorldCut>) {
+        let (cut, parts) = self.last_cut.as_ref().expect("a committed world cut");
+        (*cut, parts)
+    }
+
+    /// Where the committed store holds `id`: `(host, region, "state" | "row")`.
+    pub fn stored_places(&self, id: EntityId) -> Vec<(u32, RegionCoords, &'static str)> {
+        let mut out = Vec::new();
+        for (h, store) in &self.committed {
+            out.extend(store.places(id).into_iter().map(|(rc, what)| (*h, rc, what)));
+        }
+        out
+    }
+
+    /// The parts of the last committed cut that write `player`'s record.
+    pub fn last_cut_writers(&self, player: PlayerId) -> Vec<u32> {
+        let (_, parts) = self.last_committed();
+        parts.iter().filter(|(_, p)| p.players.iter().any(|(q, _)| *q == player)).map(|(h, _)| *h).collect()
+    }
+
+    /// The world restarted from the store: every host restored from its committed parts
+    /// (its regions from the stored ones, its in-flight rows put back on their way),
+    /// lockstep, no link delay, each keeper back home.
+    pub fn rebuild_from_last_cut(&self) -> MultiRig {
+        let regions: BTreeMap<RegionCoords, StoredRegion> =
+            self.committed.values().flat_map(|s| s.regions.iter().map(|(rc, r)| (*rc, r.clone()))).collect();
+        let hosts = self.hosts.len() as u32;
+        let mut rig = MultiRig::new_from(hosts, self.s, None, 0, 0, Some(regions));
+        for (h, store) in &self.committed {
+            rig.hosts[*h as usize].manager.restore_in_flight(store.in_flight.clone());
+        }
+        rig
     }
 
     /// The rig's coordinator, locked ([`Self::with_coordinator`]).
@@ -506,8 +781,10 @@ impl MultiRig {
         let (a, b) = (a.min(b), a.max(b));
         let (ea, eb) = InlinePeerLink::pair(seed, link_delay_steps);
         let (ea, eb) = (Arc::new(Mutex::new(ea)), Arc::new(Mutex::new(eb)));
-        self.hosts[a as usize].manager.set_peer(b, PeerSession::new(rig_hello(a), b), Box::new(SharedEnd(ea.clone())));
-        self.hosts[b as usize].manager.set_peer(a, PeerSession::new(rig_hello(b), a), Box::new(SharedEnd(eb.clone())));
+        let sa = self.strips[&(a, b)].clone();
+        let sb = self.strips[&(b, a)].clone();
+        self.hosts[a as usize].manager.set_peer(b, PeerSession::new(rig_hello(a), b), Box::new(SharedEnd(ea.clone(), sa)));
+        self.hosts[b as usize].manager.set_peer(a, PeerSession::new(rig_hello(b), a), Box::new(SharedEnd(eb.clone(), sb)));
         self.links.insert((a, b), (ea, eb));
     }
 
@@ -635,7 +912,8 @@ impl MultiRig {
         for (&(a, b), (ea, eb)) in &self.links {
             for (to, end) in [(a, ea), (b, eb)] {
                 for msg in end.lock().unwrap().transit() {
-                    if let PeerMsg::Reliable { body: Reliable::Transfer { bundle, .. }, .. } = msg {
+                    if let PeerMsg::Reliable { body, .. } = &msg {
+                        let Reliable::Transfer { bundle, .. } = body.inner() else { continue };
                         places.entry(bundle.id).or_default().push(Place::Transit { to });
                     }
                 }
@@ -725,7 +1003,8 @@ impl MultiRig {
         for (ea, eb) in self.links.values() {
             for end in [ea, eb] {
                 for msg in end.lock().unwrap().transit() {
-                    if let PeerMsg::Reliable { body: Reliable::PlayerMove { handoff, .. }, .. } = msg {
+                    if let PeerMsg::Reliable { body, .. } = &msg {
+                        let Reliable::PlayerMove { handoff, .. } = body.inner() else { continue };
                         *out.entry(handoff.client).or_default() += 1;
                     }
                 }
@@ -845,8 +1124,9 @@ impl MultiRig {
         for (ea, eb) in self.links.values() {
             for end in [ea, eb] {
                 for msg in end.lock().unwrap().transit() {
-                    if let PeerMsg::Reliable { body: Reliable::Intent(m), .. } = msg {
-                        held += msg_items(&m);
+                    if let PeerMsg::Reliable { body, .. } = &msg {
+                        let Reliable::Intent(m) = body.inner() else { continue };
+                        held += msg_items(m);
                     }
                 }
             }
@@ -869,6 +1149,17 @@ impl MultiRig {
             assert_eq!(rig.manager.intent_replies_lost(), 0, "host {h} gave a reply up");
         }
     }
+}
+
+/// Every entity a part writes: in a region snapshot or an in-flight crossing row.
+fn part_entities(cut: &WorldCut) -> BTreeSet<EntityId> {
+    let mut ids: BTreeSet<EntityId> = cut.regions.iter().flat_map(|(_, p)| p.entities.iter().map(|b| b.id)).collect();
+    for row in &cut.in_flight {
+        if let InFlightRow::Transfer { bundle, .. } = row {
+            ids.insert(bundle.id);
+        }
+    }
+    ids
 }
 
 /// The items an intent or a reply carries (a deposit's or a put's stack; a reply's

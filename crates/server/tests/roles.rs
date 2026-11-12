@@ -639,7 +639,7 @@ fn stale_epoch_host_is_refused_by_a_restarted_coordinator() {
                 _ => assert!(Instant::now() < deadline, "the link never came up"),
             }
         }
-        link.send(game::HostMsg::Attach { host: 0, epoch: 1, running: Vec::new(), online: Vec::new(), generation: 0, boot: 1, settled_below: 0, handed: Vec::new() }).unwrap();
+        link.send(game::HostMsg::Attach { host: 0, epoch: 1, running: Vec::new(), online: Vec::new(), generation: 0, boot: 1, settled_below: 0, handed: Vec::new(), pending_cut: None }).unwrap();
         (link, events)
     };
     let (stale, stale_events) = dial(1, first);

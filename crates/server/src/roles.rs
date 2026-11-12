@@ -384,9 +384,26 @@ pub fn run_coordinator() -> ServerExit {
         std::fs::create_dir_all(dir).unwrap_or_else(|e| fatal(format!("{}: {e}", dir.display())));
     }
     let fenced = Fenced::default();
-    let coordinator =
-        crate::coordinator_rt::start_listening(store.clone(), start, bind, token, Some(cert_file), fenced.clone())
-            .unwrap_or_else(|e| fatal(e));
+    // Several hosts (`VOXEL_HOSTS` > 1): this coordinator runs their world cuts, every save
+    // period, at the world tick of its own clock (one host saves on its own).
+    let hosts = std::env::var(game::ownership::HOSTS_ENV).ok().and_then(|v| v.trim().parse::<u32>().ok()).unwrap_or(1);
+    let cuts = (hosts > 1).then(|| crate::coordinator_rt::WorldCuts {
+        every: Duration::from_secs(crate::world_save_secs(std::env::var(crate::WORLD_SAVE_SECS_ENV).ok().as_deref())),
+        tick: Box::new(move || clock.world_tick_now()),
+    });
+    if hosts > 1 {
+        log::info!("[coordinator] world cuts of {hosts} hosts");
+    }
+    let coordinator = crate::coordinator_rt::start_listening_with(
+        store.clone(),
+        start,
+        bind,
+        token,
+        Some(cert_file),
+        fenced.clone(),
+        cuts,
+    )
+    .unwrap_or_else(|e| fatal(e));
 
     let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     {

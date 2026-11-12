@@ -820,3 +820,33 @@ fn second_move_behind_held_creation(seed: u64) {
 fn second_move_while_creation_is_held() {
     for_seeds("a second move behind a held creation", second_move_behind_held_creation);
 }
+
+/// One host (R3 Task 13): its coordinator never runs world cuts — no `BeginCut` goes out
+/// however long the world runs — and the host's own one-phase cut works as before.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn one_host_keeps_the_one_phase_path() {
+    use game::history::{History, SocietyGrid};
+    let mut rig = Rig::with_floor(None, uniform_floor);
+    rig.join_spawn();
+    let history = History::new(5, crate::history_handover::start(), SocietyGrid::from_world_map(&crate::history_handover::land_map(16, 3)));
+    let link = game::InlineWorldLink::new(game::Coordinator::new(history, 0));
+    rig.manager.set_world_link(Box::new(link), 1, 0);
+    for _ in 0..40 {
+        rig.now_ms += 1_000;
+        let now = rig.now_ms;
+        rig.manager.maintain(now);
+        rig.round();
+        let core = rig.manager.world_link().and_then(|l| l.as_inline()).expect("inline").coordinator();
+        assert_eq!(core.world_cut_running(), None, "no world cut with one host");
+        assert_eq!(rig.manager.world_cut(), None, "no BeginCut reached the host");
+    }
+    while world_tick(&mut rig) < SAVE_CUT_LEAD_TICKS + 4 {
+        rig.round();
+    }
+    let now = world_tick(&mut rig);
+    let id = rig.manager.begin_cut(now).expect("the host-initiated cut begins");
+    let cut = until_cut(&mut rig);
+    assert_eq!((cut.id, cut.tick), (id, now + SAVE_CUT_LEAD_TICKS));
+    rig.manager.cut_committed(cut.id, Vec::new());
+}

@@ -892,7 +892,13 @@ pub fn run() -> claims::ServerExit {
         );
         manager.set_stored_regions(stored);
         manager.restore_in_flight(in_flight);
-        cuts::CutWriter::new(claims)
+        // Several hosts: the coordinator picks every cut (a world cut, staged and decided
+        // together); one host cuts on its own (the one-phase cut).
+        if hosts > 1 {
+            cuts::CutWriter::with_world_cuts(claims, world_generation.clone())
+        } else {
+            cuts::CutWriter::new(claims)
+        }
     });
 
     let mut report = perf::ServerReport::new();
@@ -959,8 +965,9 @@ pub fn run() -> claims::ServerExit {
         }
         manager.pump_lod_results();
         if let Some(cuts) = cuts.as_mut() {
-            // Backpressure: no new cut while the store still commits one.
-            if last_world_save.elapsed() >= save_every && cuts.in_flight() == 0 && !fenced.is_set() {
+            // Backpressure: no new cut while the store still commits one. With several hosts
+            // only the coordinator starts cuts (`BeginCut`); while it is down there are none.
+            if !cuts.world_cuts() && last_world_save.elapsed() >= save_every && cuts.in_flight() == 0 && !fenced.is_set() {
                 last_world_save = std::time::Instant::now();
                 // Regions, players and what is in flight, at one
                 // world tick a lead ahead (`save_cut.rs`).

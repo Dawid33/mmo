@@ -13,6 +13,15 @@
 //! ([`start_listening`], the hosts' end is [`crate::roles::QuicWorldLink`]); the inline
 //! link ([`game::InlineWorldLink`]) stays for tests and wasm single-player.
 //!
+//! **World cuts** (several hosts, R3 Task 13; [`WorldCuts`]): the core picks the tick and
+//! collects the hosts' parts; the runtime feeds it the world tick and the hosts the cut
+//! needs (those whose `hosts` row is not clean), records each decision in the store
+//! ([`StoreHandle::decide_cut`], under the coordinator's fence) and broadcasts the
+//! decision the STORE returned. A `decide_cut` that fails (a stale generation, a store
+//! error) is answered with `abort_cut` and an abort is broadcast. A host's question about
+//! a cut the core does not remember is answered from the store (`cut_decision`; an
+//! undecided one aborted). While the coordinator is down no cut runs.
+//!
 //! A save refused as `Fenced` (another coordinator claimed the row) fences the whole
 //! process: the shared [`Fenced`] flag is set — the server's main loop sees it and exits
 //! [`crate::claims::EXIT_FENCED`] through `cuts::exit_world` — the link goes down and the
@@ -214,15 +223,17 @@ fn describe(msg: &CoordMsg) -> String {
         CoordMsg::Attached { epoch } => format!("Attached {{ epoch: {epoch} }}"),
         CoordMsg::ClaimIs { player, claim, report } => format!("ClaimIs {player:?} {claim:?} (report {report})"),
         CoordMsg::HopIs { player, reported, hop } => format!("HopIs {player:?} {reported} -> {hop}"),
+        CoordMsg::BeginCut { cut, tick, hosts, .. } => format!("BeginCut {} at {tick} of {hosts:?}", cut.0),
+        CoordMsg::CutDone { cut, committed } => format!("CutDone {} (committed {committed})", cut.0),
     }
 }
 
 /// A host message's kind and region, for logs (an `Attach` or `Positions` can be large).
 pub(crate) fn describe_host(msg: &HostMsg) -> String {
     match msg {
-        HostMsg::Attach { host, epoch, running, online, generation, boot, settled_below, handed } => format!(
-            "Attach {{ host: {host}, epoch: {epoch}, generation: {generation}, boot: {boot}, settled_below: {settled_below} }} \
-             ({} regions, {} online, {} handed)",
+        HostMsg::Attach { host, epoch, running, online, generation, boot, settled_below, handed, pending_cut } => format!(
+            "Attach {{ host: {host}, epoch: {epoch}, generation: {generation}, boot: {boot}, settled_below: {settled_below}, \
+             pending_cut: {pending_cut:?} }} ({} regions, {} online, {} handed)",
             running.len(),
             online.len(),
             handed.len()
@@ -244,6 +255,8 @@ pub(crate) fn describe_host(msg: &HostMsg) -> String {
         HostMsg::PlayerOffline { player, hop } => format!("PlayerOffline {player:?} hop {hop}"),
         HostMsg::ReleaseClaim { player } => format!("ReleaseClaim {player:?}"),
         HostMsg::PlayerHandedTo { player, to, hop } => format!("PlayerHandedTo {player:?} to host {to} hop {hop}"),
+        HostMsg::CutPrepared { cut } => format!("CutPrepared {}", cut.0),
+        HostMsg::CutFailed { cut, why } => format!("CutFailed {} ({why:?})", cut.0),
     }
 }
 
@@ -517,6 +530,18 @@ impl CoordinatorThread {
     }
 }
 
+/// How often the runtime re-reads which hosts a world cut needs (their `hosts` rows).
+pub const WORLD_CUT_HOSTS_REFRESH_MS: u64 = 1_000;
+
+/// World cuts for a coordinator serving several hosts ([`start_listening_with`]).
+pub struct WorldCuts {
+    /// The period between cuts (`VOXEL_SAVE_SECS`).
+    pub every: Duration,
+    /// The world tick now ([`crate::roles::CoordinatorClock`] in a coordinator process;
+    /// a test's own clock).
+    pub tick: Box<dyn Fn() -> game::Tick + Send>,
+}
+
 /// The coordinator for an `AllInOne` process: runs `start` (its row claimed before its
 /// state was loaded, [`CoordinatorStart::fence`]) on its thread over a fresh
 /// [`ChannelWorldLink`] — the host's end, to install with `WorldManager::set_world_link`.
@@ -527,7 +552,7 @@ pub fn start_all_in_one(
 ) -> Result<(ChannelWorldLink, CoordinatorThread), String> {
     log::info!("[coordinator] the world coordinator (epoch {}), state {:?}", start.fence.epoch, start.source);
     let (link, host) = channel_link();
-    let thread = CoordinatorRuntime::spawn(store, start, LinkSet::one(host), fenced);
+    let thread = CoordinatorRuntime::spawn(store, start, LinkSet::one(host), fenced, None);
     Ok((link, thread))
 }
 
@@ -552,6 +577,19 @@ pub fn start_listening(
     cert_hash_file: Option<std::path::PathBuf>,
     fenced: Fenced,
 ) -> Result<ListeningCoordinator, String> {
+    start_listening_with(store, start, bind, token, cert_hash_file, fenced, None)
+}
+
+/// [`start_listening`], with world cuts of the hosts it serves (`cuts`: several hosts).
+pub fn start_listening_with(
+    store: StoreHandle,
+    start: CoordinatorStart,
+    bind: std::net::SocketAddr,
+    token: String,
+    cert_hash_file: Option<std::path::PathBuf>,
+    fenced: Fenced,
+    cuts: Option<WorldCuts>,
+) -> Result<ListeningCoordinator, String> {
     let (listener, events, senders) = LinkListener::bind::<HostMsg, CoordMsg>(bind, token, cert_hash_file.clone())
         .map_err(|e| format!("the coordinator's service link on {bind}: {e}"))?;
     let (addr, cert_sha256) = (listener.local_addr(), listener.cert_sha256().to_string());
@@ -561,7 +599,7 @@ pub fn start_listening(
         start.source,
         cert_hash_file.map(|f| format!(", in {}", f.display())).unwrap_or_default()
     );
-    let thread = CoordinatorRuntime::spawn(store, start, LinkSet::listener(listener, events, senders), fenced);
+    let thread = CoordinatorRuntime::spawn(store, start, LinkSet::listener(listener, events, senders), fenced, cuts);
     Ok(ListeningCoordinator { thread, addr, cert_sha256 })
 }
 
@@ -582,6 +620,12 @@ pub struct CoordinatorRuntime {
     /// No save is taken before this `now_ms` (after a failure).
     retry_at_ms: u64,
     failed_in_a_row: u32,
+    /// World cuts of several hosts (`None`: off).
+    cuts: Option<WorldCuts>,
+    /// `now_ms` the expected hosts were last read at.
+    hosts_read_ms: Option<u64>,
+    /// Lookups of cut outcomes the store could not answer yet: retried each pass.
+    lookups: Vec<(u32, game::CutId)>,
 }
 
 impl CoordinatorRuntime {
@@ -592,6 +636,7 @@ impl CoordinatorRuntime {
         start: CoordinatorStart,
         links: LinkSet,
         fenced: Fenced,
+        cuts: Option<WorldCuts>,
     ) -> CoordinatorThread {
         let (stop_tx, stop_rx) = crossbeam::channel::bounded(1);
         #[cfg(feature = "test-hooks")]
@@ -602,6 +647,10 @@ impl CoordinatorRuntime {
         let mut core = start.coordinator;
         if start.source.needs_save() {
             core.request_save();
+        }
+        if let Some(c) = &cuts {
+            core.set_cut_epoch(fence.epoch);
+            core.set_world_cuts(c.every.as_millis() as u64);
         }
         let runtime = CoordinatorRuntime {
             core,
@@ -615,6 +664,9 @@ impl CoordinatorRuntime {
             started: Instant::now(),
             retry_at_ms: 0,
             failed_in_a_row: 0,
+            cuts,
+            hosts_read_ms: None,
+            lookups: Vec::new(),
         };
         let join = std::thread::Builder::new()
             .name("coordinator".into())
@@ -667,8 +719,9 @@ impl CoordinatorRuntime {
             for f in inspect.try_iter() {
                 f(&mut self.core);
             }
+            self.feed_cuts(now);
             self.core.maintain(now);
-            if self.pump_save(now).is_err() {
+            if self.pump_save(now).is_err() || self.pump_cuts().is_err() {
                 return self.fence_out();
             }
             let out = self.core.take_out();
@@ -728,6 +781,7 @@ impl CoordinatorRuntime {
                             Err(TryRecvError::Disconnected) => {
                                 log::info!("[coordinator] a host closed its link");
                                 host.gone = true;
+                                self.core.host_detached(host.ordinal);
                             }
                         }
                     }
@@ -751,6 +805,7 @@ impl CoordinatorRuntime {
                                     l.routes.boots.insert(peer, boot);
                                     if let Some(old) = replaced {
                                         l.senders.close(old);
+                                        self.core.host_detached(ordinal);
                                     }
                                 }
                                 Admit::Refused => {
@@ -775,6 +830,7 @@ impl CoordinatorRuntime {
                                     if !generation_current(&self.store, ordinal, *generation) {
                                         l.routes.refuse(peer);
                                         l.senders.close(peer);
+                                        self.core.host_detached(ordinal);
                                         continue;
                                     }
                                 }
@@ -789,12 +845,79 @@ impl CoordinatorRuntime {
                         LinkEvent::Down(why) => {
                             if let Some(ordinal) = l.routes.gone(peer) {
                                 log::warn!("[coordinator] host {ordinal} (peer {}) left: {why}", peer.0);
+                                self.core.host_detached(ordinal);
                             }
                         }
                     }
                 }
             }
         }
+    }
+
+    /// The world tick, and (every [`WORLD_CUT_HOSTS_REFRESH_MS`]) the hosts a cut needs:
+    /// those whose `hosts` row is not clean. A store read that fails keeps the last set.
+    fn feed_cuts(&mut self, now: u64) {
+        let Some(cuts) = &self.cuts else { return };
+        self.core.set_world_tick((cuts.tick)());
+        if self.hosts_read_ms.is_some_and(|at| now < at + WORLD_CUT_HOSTS_REFRESH_MS) {
+            return;
+        }
+        self.hosts_read_ms = Some(now);
+        match self.store.hosts() {
+            Ok(rows) => self.core.set_expected_hosts(rows.iter().filter(|r| !r.clean).map(|r| r.ordinal).collect()),
+            Err(e) => log::warn!("[coordinator] the hosts could not be read ({e}); the cut keeps the last set"),
+        }
+    }
+
+    /// Record each world-cut decision of the core in the store and tell the core the
+    /// STORED decision; answer the hosts' questions about cuts the core does not remember.
+    /// `Err`: fenced.
+    fn pump_cuts(&mut self) -> Result<(), ()> {
+        if self.cuts.is_none() {
+            return Ok(());
+        }
+        while let Some(d) = self.core.take_decision() {
+            let stored = match self.store.decide_cut(d.cut, d.tick, d.commit, d.hosts.clone(), d.leaving.clone(), self.fence, d.generation) {
+                Ok(stored) => {
+                    if d.commit && !stored {
+                        log::warn!("[coordinator] world cut {}: a commit was asked, the store recorded an abort", d.cut.0);
+                    }
+                    stored
+                }
+                Err(StoreError::Fenced { .. }) => return Err(()),
+                Err(e) => {
+                    log::error!("[coordinator] world cut {}: the decision could not be recorded ({e}); aborting it", d.cut.0);
+                    match self.store.abort_cut(d.cut, d.tick) {
+                        Ok(stored) => stored,
+                        Err(e) => {
+                            // Undecided in the store: the recovery sweep aborts it; the hosts
+                            // are told it is aborted (only this coordinator could commit it).
+                            log::error!("[coordinator] world cut {}: the abort could not be recorded either ({e})", d.cut.0);
+                            false
+                        }
+                    }
+                }
+            };
+            game::perf_event!("world_cut_decided", "cut={} tick={} committed={stored}", d.cut.0, d.tick);
+            self.core.decided(d.cut, stored);
+        }
+        self.lookups.extend(self.core.take_cut_lookups());
+        let lookups = std::mem::take(&mut self.lookups);
+        for (host, cut) in lookups {
+            let answer = match self.store.cut_decision(cut) {
+                Ok(Some(stored)) => Ok(stored),
+                Ok(None) => self.store.abort_cut(cut, 0),
+                Err(e) => Err(e),
+            };
+            match answer {
+                Ok(stored) => self.core.cut_outcome(host, cut, stored),
+                Err(e) => {
+                    log::warn!("[coordinator] the outcome of cut {} for host {host} could not be read ({e}); asking again", cut.0);
+                    self.lookups.push((host, cut));
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Settle the save in flight (if answered) and start the next one when due. `Err`:
@@ -946,7 +1069,7 @@ mod tests {
     use game::RequestId;
 
     fn attach(host: u32, epoch: u64) -> HostMsg {
-        HostMsg::Attach { host, epoch, running: Vec::new(), online: Vec::new(), generation: 0, boot: 1, settled_below: 0, handed: Vec::new() }
+        HostMsg::Attach { host, epoch, running: Vec::new(), online: Vec::new(), generation: 0, boot: 1, settled_below: 0, handed: Vec::new(), pending_cut: None }
     }
 
     /// Any ordinal is served, each with one live connection; a hello whose claim epoch is

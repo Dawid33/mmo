@@ -386,7 +386,7 @@ fn directive_not_sent_before_save() {
     let player = PlayerId(1);
     let id = RequestId { host: 0, boot: 1, seq: 1 };
     let online = vec![game::OnlinePlayer { player, claim: None, claim_pending: false, report: 1, hop: 1 }];
-    link.send(HostMsg::Attach { host: 0, epoch: 1, running: Vec::new(), online, generation: 0, boot: 1, settled_below: 0, handed: Vec::new() });
+    link.send(HostMsg::Attach { host: 0, epoch: 1, running: Vec::new(), online, generation: 0, boot: 1, settled_below: 0, handed: Vec::new(), pending_cut: None });
     // The fortress region runs: the founding embodies the party there by directives.
     link.send(HostMsg::RegionStarted { rc: req.region, incarnation: 1 });
     link.send(HostMsg::Request { id, player, req: WorldRequest::Embark(req.clone()) });
@@ -446,7 +446,7 @@ fn fenced_coordinator_stops() {
     store.claim_coordinator().unwrap();
     let player = PlayerId(1);
     let online = vec![game::OnlinePlayer { player, claim: None, claim_pending: false, report: 1, hop: 1 }];
-    link.send(HostMsg::Attach { host: 0, epoch: 1, running: Vec::new(), online, generation: 0, boot: 1, settled_below: 0, handed: Vec::new() });
+    link.send(HostMsg::Attach { host: 0, epoch: 1, running: Vec::new(), online, generation: 0, boot: 1, settled_below: 0, handed: Vec::new(), pending_cut: None });
     link.send(HostMsg::Request { id: RequestId { host: 0, boot: 1, seq: 1 }, player, req: WorldRequest::Embark(req) });
     while !thread.is_finished() {
         assert!(Instant::now() < deadline, "the fenced coordinator kept running");
@@ -486,7 +486,7 @@ fn overlapping_start_claims_before_it_loads() {
     store.fail_next_writes(2);
     let player = PlayerId(1);
     let online = vec![game::OnlinePlayer { player, claim: None, claim_pending: false, report: 1, hop: 1 }];
-    link.send(HostMsg::Attach { host: 0, epoch: 1, running: Vec::new(), online, generation: 0, boot: 1, settled_below: 0, handed: Vec::new() });
+    link.send(HostMsg::Attach { host: 0, epoch: 1, running: Vec::new(), online, generation: 0, boot: 1, settled_below: 0, handed: Vec::new(), pending_cut: None });
     link.send(HostMsg::Request { id: RequestId { host: 0, boot: 1, seq: 1 }, player, req: WorldRequest::Embark(req) });
     while store.failing_writes_left() > 1 {
         assert!(Instant::now() < deadline, "the founding's save was never tried");

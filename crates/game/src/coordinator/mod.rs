@@ -20,10 +20,12 @@
 mod link;
 mod msg;
 mod state;
+mod world_cut;
 
 pub use link::*;
 pub use msg::*;
 pub use state::*;
+pub use world_cut::*;
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -158,6 +160,8 @@ pub struct Coordinator {
     calendar_day: u64,
     /// The sites as last broadcast ([`sites_key`]).
     sites_key: Vec<(SiteId, bool, u32, bool)>,
+    /// The world cuts of several hosts (`world_cut.rs`).
+    cuts: WorldCuts,
 }
 
 impl Coordinator {
@@ -190,6 +194,7 @@ impl Coordinator {
             last_save_ms: now_ms,
             clock_ms: now_ms,
             calendar_anchor,
+            cuts: WorldCuts::default(),
         };
         c.push_view(Target::Every);
         c
@@ -256,7 +261,7 @@ impl Coordinator {
         self.clock_ms = self.clock_ms.max(now_ms);
         self.dirty_since_save = true;
         match msg {
-            HostMsg::Attach { host: named, epoch, running, online, generation, boot, settled_below, handed } => {
+            HostMsg::Attach { host: named, epoch, running, online, generation, boot, settled_below, handed, pending_cut } => {
                 if named != host {
                     log::warn!("coordinator: host {host}'s Attach names host {named}; taken as host {host}'s");
                 }
@@ -271,7 +276,8 @@ impl Coordinator {
                     self.displaced_told.clear();
                 }
                 self.forget_settled(host, boot, settled_below, true);
-                self.attach(host, epoch, running, online, handed)
+                self.attach(host, epoch, running, online, handed);
+                self.cut_attach(host, pending_cut);
             }
             HostMsg::Settled { boot, below } => self.forget_settled(host, boot, below, false),
             HostMsg::RegionStarted { rc, incarnation } => {
@@ -332,6 +338,8 @@ impl Coordinator {
             HostMsg::PlayerOffline { player, hop } => self.player_offline(host, player, hop),
             HostMsg::PlayerHandedTo { player, to, hop } => self.player_handed(host, player, to, hop),
             HostMsg::ReleaseClaim { player } => self.release_claim(player),
+            HostMsg::CutPrepared { cut } => self.cut_prepared(host, cut),
+            HostMsg::CutFailed { cut, why } => self.cut_failed(host, cut, why),
         }
         self.push_directives();
     }
@@ -365,6 +373,7 @@ impl Coordinator {
             let to = self.region_host.get(&region).map_or(Target::Every, |h| Target::Host(*h));
             self.push(to, CoordMsg::Notice { region, line });
         }
+        self.maintain_cuts(now_ms);
     }
 
     /// The messages free to leave now, in order, each with the host(s) it is for.

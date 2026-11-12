@@ -80,6 +80,27 @@ pub enum Reliable {
     /// session of the client on the sender: a session the receiver still holds for the
     /// client (an observer) is ended.
     PlayerParked { client: ClientId, player: PlayerId },
+    /// A state message (`Transfer`, `PlayerMove`, `Intent`) the SENDER already accounts
+    /// for in its part of world cut `cut` (in a region snapshot of the sender, or written
+    /// as its own row / player record): the receiver never counts it in that cut. Never
+    /// nested.
+    InCut { cut: CutId, body: Box<Reliable> },
+}
+
+impl Reliable {
+    /// The message itself, an [`Reliable::InCut`] unwrapped.
+    pub fn inner(&self) -> &Reliable {
+        match self {
+            Reliable::InCut { body, .. } => body,
+            other => other,
+        }
+    }
+
+    /// A message whose content a save cut must account for exactly once: a transfer
+    /// (with or without a player), a player move, an intent or a reply.
+    pub fn is_state(&self) -> bool {
+        matches!(self.inner(), Reliable::Transfer { .. } | Reliable::PlayerMove { .. } | Reliable::Intent(_))
+    }
 }
 
 /// What may be lost: sent only while the peer is reachable, never replayed.

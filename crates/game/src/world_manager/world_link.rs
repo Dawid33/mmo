@@ -425,7 +425,8 @@ impl<S: RegionSpawner> WorldManager<S> {
         let generation = self.host_generation;
         let (boot, settled_below) = (self.world_boot, self.lowest_outstanding());
         self.settled_below = settled_below;
-        self.link_send(HostMsg::Attach { host, epoch, running, online, generation, boot, settled_below, handed });
+        let pending_cut = self.attach_pending_cut();
+        self.link_send(HostMsg::Attach { host, epoch, running, online, generation, boot, settled_below, handed, pending_cut });
         let queued: BTreeSet<RequestId> = self
             .outbox
             .iter()
@@ -626,6 +627,10 @@ impl<S: RegionSpawner> WorldManager<S> {
             }
             CoordMsg::ClaimIs { player, claim, report } => self.claim_is(player, claim, report),
             CoordMsg::HopIs { player, reported, hop } => self.hop_is(player, reported, hop),
+            CoordMsg::BeginCut { cut, tick, hosts, leaving, generation } => {
+                self.world_begin_cut(cut, tick, &hosts, &leaving, generation)
+            }
+            CoordMsg::CutDone { cut, committed } => self.world_cut_decided(cut, committed),
         }
     }
 

@@ -7,7 +7,9 @@ use serde::{Deserialize, Serialize};
 use crate::history::{
     AdventureRefusal, CalendarTick, Directive, EmbarkRefusal, LegendsPage, LegendsQuery, PersonId, SiteId,
 };
-use crate::{CivMarker, EmbarkOptions, EmbarkRequest, GameEventKind, PersonInfo, PlayerId, RegionCoords, SiteMarker};
+use crate::{
+    CivMarker, CutId, EmbarkOptions, EmbarkRequest, GameEventKind, PersonInfo, PlayerId, RegionCoords, SiteMarker, Tick,
+};
 
 /// One host's world request, unique across the host's restarts: `boot` is random per
 /// host process start, `seq` counts up within it.
@@ -131,6 +133,10 @@ pub enum HostMsg {
         /// the last [`CoordMsg::Attached`] it received: their `PlayerHandedTo` may have been
         /// lost with the old connection.
         handed: Vec<(PlayerId, u32, u64)>,
+        /// The world cut this host takes part in and has not heard the outcome of
+        /// ([`CoordMsg::CutDone`]): the coordinator answers it (from what it decided, or
+        /// the store's decision, an undecided cut aborted).
+        pending_cut: Option<CutId>,
     },
     /// Region `rc` started (its `incarnation`-th start on the host): answered with
     /// [`CoordMsg::SpawnPeople`] for that incarnation.
@@ -173,6 +179,25 @@ pub enum HostMsg {
     /// (no copy of them can come any more). Sent whenever the host's lowest outstanding
     /// sequence rises.
     Settled { boot: u64, below: u64 },
+    /// This host's part of world cut `cut` ([`CoordMsg::BeginCut`]) is staged in the store
+    /// (prepared), waiting for the coordinator's decision.
+    CutPrepared { cut: CutId },
+    /// This host's part of world cut `cut` failed: the cut is aborted. The host still
+    /// waits for [`CoordMsg::CutDone`] before it takes part in another cut.
+    CutFailed { cut: CutId, why: CutFailure },
+}
+
+/// Why a host's part of a world cut failed ([`HostMsg::CutFailed`]).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum CutFailure {
+    /// The cut tick was too close or past when the host (or one of its regions) got it:
+    /// the next cut doubles its lead.
+    Missed,
+    /// The cut could not be taken whole: a peer link went down, a region was lost, a
+    /// deadline passed, another cut was still pending, the generation differed.
+    Aborted,
+    /// The store refused or failed the part.
+    Store(String),
 }
 
 /// Where a coordinator message goes ([`crate::coordinator::Coordinator::take_out`]).
@@ -231,6 +256,14 @@ pub enum CoordMsg {
     /// wins, as the newest session does, and a real holder re-asserts itself once. A host
     /// renumbers one player at most `HOP_RENUMBER_MAX_PER_PLAYER` times.
     HopIs { player: PlayerId, reported: u64, hop: u64 },
+    /// Take part in world cut `cut` at world tick `tick` (several hosts): every host of
+    /// `hosts` snapshots its regions at `tick`, marks its peer links in band
+    /// ([`crate::Reliable::CutMark`]) and stages its part; `leaving` are the hosts that
+    /// leave in this cut (Task 14). `generation`: the world generation the cut is of — a
+    /// host of another generation refuses it.
+    BeginCut { cut: CutId, tick: Tick, hosts: Vec<u32>, leaving: Vec<u32>, generation: u64 },
+    /// World cut `cut` is decided: `committed` (every part visible) or aborted (none).
+    CutDone { cut: CutId, committed: bool },
 }
 
 impl CoordMsg {

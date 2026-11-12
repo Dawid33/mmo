@@ -24,6 +24,7 @@ use crate::save_cut::{
 };
 
 mod peers;
+mod world_cut;
 mod world_link;
 pub use world_link::{WorldLinkCounters, ATTACH_WAIT_MS, WORLD_REQUEST_TIMEOUT_SECS};
 use world_link::{PendingRequest, Step, WorldAttach, WorldViewCache};
@@ -641,6 +642,10 @@ struct InFlightIntent {
     /// source's snapshot predates sending it, so the cut must not carry it
     /// (`save_cut.rs`). Cleared by every `begin_cut`.
     in_source_view: bool,
+    /// The world cut whose sender accounts for it (it came wrapped in a
+    /// [`crate::Reliable::InCut`]): never written by this host's part of that cut, even if
+    /// it began here later (`world_cut.rs`).
+    accounted_in: Option<CutId>,
 }
 
 /// A crossing the manager has routed to its target but not yet seen applied
@@ -655,6 +660,10 @@ struct InFlight {
     /// source's snapshot still holds the body (`save_cut.rs`). Cleared by
     /// every `begin_cut`.
     in_source_view: bool,
+    /// The world cut whose sender accounts for it (it came wrapped in a
+    /// [`crate::Reliable::InCut`]): never written by this host's part of that cut, even if
+    /// it began here later (`world_cut.rs`).
+    accounted_in: Option<CutId>,
 }
 
 /// A non-player crossing into a region that was not running (plan Decision
@@ -669,6 +678,8 @@ struct PendingArrival {
     bundle: crate::EntityBundle,
     /// As [`InFlight::in_source_view`].
     in_source_view: bool,
+    /// As [`InFlight::accounted_in`].
+    accounted_in: Option<CutId>,
 }
 
 /// A reply (or a restored intent) waiting for a region that is not running
@@ -678,6 +689,8 @@ struct Mail {
     msg: crate::IntentMsg,
     /// As [`InFlightIntent::in_source_view`].
     in_source_view: bool,
+    /// As [`InFlight::accounted_in`].
+    accounted_in: Option<CutId>,
 }
 
 fn bundle_at(bundle: &crate::EntityBundle) -> [f32; 3] {
@@ -1003,6 +1016,23 @@ pub struct WorldManager<S: RegionSpawner> {
     nonce_state: Option<u64>,
     /// The unseeded-nonce error was logged (once).
     unseeded_warned: bool,
+    /// The world cut this host takes part in (several hosts, `world_cut.rs`), from its
+    /// `BeginCut` until its `CutDone` (or a local failure).
+    world_cut: Option<world_cut::WorldCutRun>,
+    /// The highest world cut id this host began or refused: a peer's mark of a cut at or
+    /// below it is stale.
+    world_cut_seen: Option<CutId>,
+    /// Per peer: its mark of a world cut this host has not begun yet (counted when it does).
+    early_marks: BTreeMap<u32, CutId>,
+    /// Players handed here wrapped in a world cut this host has not begun yet: another
+    /// part's in that cut.
+    accounted_players: BTreeMap<PlayerId, CutId>,
+    /// Decided world cuts for the server ([`Self::take_world_cut_done`]).
+    world_cut_done: Vec<(CutId, bool)>,
+    /// While a wrapped peer message ([`crate::Reliable::InCut`]) is applied: its cut. What
+    /// it creates is noted as accounted for in that cut, and a state message it makes goes
+    /// wrapped the same way (`world_cut.rs`).
+    inbound_accounted: Option<CutId>,
 }
 
 impl<S: RegionSpawner> WorldManager<S> {
@@ -1110,6 +1140,12 @@ impl<S: RegionSpawner> WorldManager<S> {
             observer_orders: Vec::new(),
             nonce_state: None,
             unseeded_warned: false,
+            world_cut: None,
+            world_cut_seen: None,
+            early_marks: BTreeMap::new(),
+            accounted_players: BTreeMap::new(),
+            world_cut_done: Vec::new(),
+            inbound_accounted: None,
         }
     }
 
@@ -1876,25 +1912,33 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// [`Self::take_cut`].
     pub fn begin_cut(&mut self, now: crate::Tick) -> Option<CutId> {
         self.expire_overdue_cut();
-        if self.pending_cut.is_some() || self.ready_cut.is_some() {
+        if self.pending_cut.is_some() || self.ready_cut.is_some() || self.world_cut.is_some() {
             return None;
         }
         self.next_cut_id += 1;
         let id = CutId(self.next_cut_id);
-        let tick = now + self.cut_lead;
+        self.begin_cut_at(id, now + self.cut_lead)
+    }
+
+    /// [`Self::begin_cut`]'s body: cut `id` at world tick `tick` (a one-phase cut's, or a
+    /// world cut's the coordinator placed). `None` (nothing pending) when a region thread
+    /// is found dead.
+    pub(super) fn begin_cut_at(&mut self, id: CutId, tick: crate::Tick) -> Option<CutId> {
         let mut cut = PendingCut::new(id, tick, tick + CUT_DEADLINE_LEADS * self.cut_lead);
-        // What was routed before now left its source before the cut tick.
+        // What was routed before now left its source before the cut tick — unless a peer
+        // sent it wrapped in this very cut (its sender accounts for it).
+        let mine = |acc: Option<CutId>| acc != Some(id);
         for f in self.in_flight.values_mut() {
-            f.in_source_view = false;
+            f.in_source_view = !mine(f.accounted_in);
         }
         for f in &mut self.in_flight_intents {
-            f.in_source_view = false;
+            f.in_source_view = !mine(f.accounted_in);
         }
         for p in self.pending_arrivals.values_mut().flatten() {
-            p.in_source_view = false;
+            p.in_source_view = !mine(p.accounted_in);
         }
         for m in self.intent_mailbox.values_mut().flatten() {
-            m.in_source_view = false;
+            m.in_source_view = !mine(m.accounted_in);
         }
         // Transfers to other hosts, too.
         self.peer_in_source_view.clear();
@@ -1929,6 +1973,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             // hold it. Aborted; the respawn comes with the next send to it.
             log::error!("save cut {}: regions {dead:?} died before they could be asked; aborted", id.0);
             self.pending_cut = None;
+            self.world_cut_dropped(id, crate::CutFailure::Aborted);
             return None;
         }
         self.try_complete_cut();
@@ -2010,7 +2055,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                     if self.regions.get(&target).is_some_and(|l| !l.stopping) {
                         self.send_intent_to(target, msg, false);
                     } else {
-                        self.intent_mailbox.entry(target).or_default().push(Mail { msg, in_source_view: false });
+                        self.intent_mailbox.entry(target).or_default().push(Mail { msg, in_source_view: false, accounted_in: None });
                     }
                 }
             }
@@ -2093,6 +2138,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             // A `Stopped` answer past the cut tick is not the region at it.
             let id = self.pending_cut.take().expect("checked").id;
             log::error!("save cut {}: {rc:?} parked at tick {at}, past the cut tick; aborted", id.0);
+            self.world_cut_dropped(id, crate::CutFailure::Aborted);
             return;
         }
         let mut records = Vec::new();
@@ -2132,6 +2178,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                 self.silent_stopping.insert(rc);
             }
         }
+        self.world_cut_dropped(cut.id, crate::CutFailure::Aborted);
     }
 
     /// The orderly exit stops waiting for the regions still stopping (a
@@ -2152,6 +2199,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                 cut.tick,
                 cut.waiting
             );
+            self.world_cut_dropped(cut.id, crate::CutFailure::Aborted);
         }
         stuck
     }
@@ -2166,6 +2214,7 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.pending_cut = None;
         self.cut_lead = (self.cut_lead * 2).min(SAVE_CUT_LEAD_MAX_TICKS);
         log::warn!("save cut {} at tick {tick}: {rc:?} was already past it; aborted (next lead {})", id.0, self.cut_lead);
+        self.world_cut_dropped(id, crate::CutFailure::Missed);
     }
 
     /// `rc` was lost (its thread died): a pending cut is aborted — what the
@@ -2174,6 +2223,7 @@ impl<S: RegionSpawner> WorldManager<S> {
     fn cut_region_lost(&mut self, rc: RegionCoords) {
         if let Some(cut) = self.pending_cut.take() {
             log::error!("save cut {}: {rc:?} was lost while it was pending; aborted", cut.id.0);
+            self.world_cut_dropped(cut.id, crate::CutFailure::Aborted);
         }
     }
 
@@ -2262,6 +2312,14 @@ impl<S: RegionSpawner> WorldManager<S> {
         if self.pending_cut.as_ref().is_none_or(|c| !c.waiting.is_empty()) {
             return;
         }
+        // A world cut: every region answered, so this host's marks go now; the part is
+        // complete once every participant's mark is in.
+        let id = self.pending_cut.as_ref().expect("checked").id;
+        if !self.world_cut_marks_in(id) {
+            return;
+        }
+        // Hosts whose in-transit messages another part writes (`cut_peer_rows`).
+        let participants = self.world_cut_peers(id);
         // Still in flight and in neither view.
         let crossings: Vec<InFlight> = self.in_flight.values().filter(|f| !f.in_source_view).cloned().collect();
         for f in &crossings {
@@ -2276,8 +2334,11 @@ impl<S: RegionSpawner> WorldManager<S> {
         for f in self.in_flight_intents.iter().filter(|f| !f.in_source_view) {
             cut.rows.push(InFlightRow::Intent { target: f.target, msg: f.msg });
         }
-        // Transfers to other hosts not acknowledged yet (`cut_peer_rows`).
-        cut.rows.extend(self.cut_peer_rows());
+        // Transfers to other hosts not acknowledged yet (`cut_peer_rows`): to a host that is
+        // absent from the cut only. A participant's link that is down aborts the cut, so
+        // what this host sent a participant is in exactly one part by the mark rule (the
+        // receiver's before this host's mark; this host's snapshot after it).
+        cut.rows.extend(self.cut_peer_rows(&participants));
         for (target, list) in &self.intent_mailbox {
             for m in list.iter().filter(|m| !m.in_source_view) {
                 cut.rows.push(InFlightRow::Intent { target: *target, msg: m.msg });
@@ -2309,11 +2370,21 @@ impl<S: RegionSpawner> WorldManager<S> {
         // Players handed to another host and not received there (`cut_peer_players`):
         // where they are headed. A snapshot holding the body wins (it came back during the
         // acknowledgement lag); the hand-off wins over an older record passing through.
-        for (player, record) in self.cut_peer_players() {
-            players.entry(player).or_insert(record);
+        for (player, record) in self.cut_peer_players(&participants) {
+            if !cut.not_ours.contains_key(&player) {
+                players.entry(player).or_insert(record);
+            }
         }
         for (player, record) in cut.parked_at_t.iter().chain(self.parked_players.iter()).chain(cut.transit_players.iter()) {
-            players.entry(*player).or_insert_with(|| record.clone());
+            if !cut.not_ours.contains_key(player) {
+                players.entry(*player).or_insert_with(|| record.clone());
+            }
+        }
+        // Another part's, but this part held the player at the cut tick before it came back.
+        for (player, record) in &cut.not_ours {
+            if let Some(record) = record {
+                players.entry(*player).or_insert_with(|| record.clone());
+            }
         }
         let carried: BTreeMap<RegionCoords, u64> = cut.regions.iter().map(|(rc, (_, seq))| (*rc, *seq)).collect();
         let world_cut = WorldCut {
@@ -2336,6 +2407,7 @@ impl<S: RegionSpawner> WorldManager<S> {
         );
         self.ready_cut = Some((world_cut, carried));
         self.cut_lead = SAVE_CUT_LEAD_TICKS;
+        self.world_cut_complete(id);
     }
 
     /// Crossings routed but not yet confirmed by their target (the `[server]`
@@ -2386,7 +2458,7 @@ impl<S: RegionSpawner> WorldManager<S> {
         );
         self.locations.insert(bundle.id, target);
         let list = self.pending_arrivals.entry(target).or_default();
-        list.push(PendingArrival { source, stamp, bundle, in_source_view });
+        list.push(PendingArrival { source, stamp, bundle, in_source_view, accounted_in: self.inbound_accounted });
         if list.len() <= PENDING_ARRIVALS_PER_REGION_MAX {
             return;
         }
@@ -2474,6 +2546,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                 stamp: p.stamp,
                 bundle: p.bundle.clone(),
                 in_source_view: p.in_source_view,
+                accounted_in: p.accounted_in,
             };
             if let Some(old) = self.in_flight.insert(p.bundle.id, entry) {
                 log::error!("{:?} waited for {rc:?} while in flight to {:?}", p.bundle.id, old.target);
@@ -2490,8 +2563,9 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// only into a running region (else absorbed), and the coordinator told so. A player's
     /// or a person's arrival wakes its target; anything else into a region that is not
     /// running waits for it ([`Self::hold_arrival`]; a stud body settles at the seam
-    /// instead). Otherwise it is in flight to the target. An inbound transfer is never in
-    /// a source's view of the pending cut.
+    /// instead). Otherwise it is in flight to the target. An inbound transfer is in a
+    /// source's view of the pending cut only when its sender accounts for it (it came
+    /// wrapped in that cut, `world_cut.rs`).
     fn accept_arrival(
         &mut self,
         source: Option<(RegionCoords, [f32; 3])>,
@@ -2501,7 +2575,9 @@ impl<S: RegionSpawner> WorldManager<S> {
         now_ms: u64,
     ) {
         let (source, left) = (source.map(|(rc, _)| rc), source.map(|(_, at)| at));
-        let view = source.is_some_and(|s| self.in_cut_view(s));
+        // An inbound transfer is in this host's part unless its sender accounts for it in the
+        // pending world cut (it came wrapped, `world_cut.rs`).
+        let view = source.map_or_else(|| self.inbound_accounted.is_some_and(|c| self.accounted_now(c)), |s| self.in_cut_view(s));
         // Where drops of a body that never arrives are put down: its source's side of the
         // seam, or (inbound) the target's own cell.
         let from = source.unwrap_or(target);
@@ -2593,7 +2669,7 @@ impl<S: RegionSpawner> WorldManager<S> {
         bundle: &crate::EntityBundle,
         in_source_view: bool,
     ) {
-        let entry = InFlight { target, stamp, bundle: bundle.clone(), in_source_view };
+        let entry = InFlight { target, stamp, bundle: bundle.clone(), in_source_view, accounted_in: self.inbound_accounted };
         if let Some(old) = self.in_flight.insert(bundle.id, entry) {
             log::error!("{:?} departed {source:?} while still in flight to {:?}", bundle.id, old.target);
         }
@@ -2612,7 +2688,9 @@ impl<S: RegionSpawner> WorldManager<S> {
             self.ensure_running(rc);
             log::warn!("{} intent(s) were in flight to lost region {rc:?}: sent again", intents.len());
             for f in intents {
+                self.inbound_accounted = f.accounted_in;
                 self.send_intent_to(rc, f.msg, f.in_source_view);
+                self.inbound_accounted = None;
             }
         }
         let ids: Vec<crate::EntityId> =
@@ -3130,7 +3208,7 @@ impl<S: RegionSpawner> WorldManager<S> {
         let intents: Vec<InFlightIntent> = self.in_flight_intents.iter().filter(|f| f.target == rc).cloned().collect();
         self.in_flight_intents.retain(|f| f.target != rc);
         for f in intents {
-            self.intent_mailbox.entry(rc).or_default().push(Mail { msg: f.msg, in_source_view: f.in_source_view });
+            self.intent_mailbox.entry(rc).or_default().push(Mail { msg: f.msg, in_source_view: f.in_source_view, accounted_in: f.accounted_in });
         }
         let ids: Vec<crate::EntityId> =
             self.in_flight.iter().filter(|(_, f)| f.target == rc).map(|(id, _)| *id).collect();
@@ -3149,7 +3227,13 @@ impl<S: RegionSpawner> WorldManager<S> {
                 }
                 continue;
             }
-            let p = PendingArrival { source: rc, stamp: f.stamp, bundle: f.bundle, in_source_view: f.in_source_view };
+            let p = PendingArrival {
+                source: rc,
+                stamp: f.stamp,
+                bundle: f.bundle,
+                in_source_view: f.in_source_view,
+                accounted_in: f.accounted_in,
+            };
             self.pending_arrivals.entry(rc).or_default().push(p);
         }
         self.forget_locations(rc);
@@ -3245,7 +3329,9 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.deliver_pending_arrivals(rc);
         // Replies that waited for it.
         for m in self.intent_mailbox.remove(&rc).unwrap_or_default() {
+            self.inbound_accounted = m.accounted_in;
             self.send_intent_to(rc, m.msg, m.in_source_view);
+            self.inbound_accounted = None;
         }
     }
 
@@ -3488,7 +3574,10 @@ impl<S: RegionSpawner> WorldManager<S> {
             (None, IntentMsg::Reply(s)) => {
                 let waiting = owner.filter(|rc| self.parked.contains_key(rc) || self.regions.contains_key(rc));
                 match waiting {
-                    Some(rc) => self.intent_mailbox.entry(rc).or_default().push(Mail { msg, in_source_view: view }),
+                    Some(rc) => {
+                        let accounted_in = self.inbound_accounted;
+                        self.intent_mailbox.entry(rc).or_default().push(Mail { msg, in_source_view: view, accounted_in })
+                    }
                     None => {
                         self.intent_replies_lost += 1;
                         log::warn!("[server] intent reply {:?} for {:?} lost: {owner:?} never ran", s.reply, s.reply.to());
@@ -3620,7 +3709,7 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// `msg` to running `rc`, held there to its due tick, and in flight until
     /// `rc` confirms it (`in_source_view`: see [`InFlightIntent`]).
     fn send_intent_to(&mut self, rc: RegionCoords, msg: crate::IntentMsg, in_source_view: bool) {
-        self.in_flight_intents.push(InFlightIntent { msg, target: rc, in_source_view });
+        self.in_flight_intents.push(InFlightIntent { msg, target: rc, in_source_view, accounted_in: self.inbound_accounted });
         self.send_to_region(rc, RegionInput::Transfer(GameEventKind::Intent(msg), msg.due()));
     }
 

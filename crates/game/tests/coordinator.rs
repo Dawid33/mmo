@@ -306,7 +306,7 @@ fn reattach_keeps_bodies_and_despawns_the_dead() {
     let mut c = Coordinator::from_state(state, grid(), 60_000).expect("state loads");
     assert!(matches!(c.take_msgs().as_slice(), [CoordMsg::View { .. }]));
     let running = RunningRegion { rc: r, incarnation: 1, people: vec![(p, [1.0, 2.0, 3.0]), (q, [4.0, 5.0, 6.0])] };
-    c.handle(0, HostMsg::Attach { host: 0, epoch: 1, running: vec![running], online: Vec::new(), generation: 0, boot: 7, settled_below: 0, handed: Vec::new() }, 60_000);
+    c.handle(0, HostMsg::Attach { host: 0, epoch: 1, running: vec![running], online: Vec::new(), generation: 0, boot: 7, settled_below: 0, handed: Vec::new(), pending_cut: None }, 60_000);
     let out = commit(&mut c);
     assert!(!out.iter().any(|m| matches!(m, CoordMsg::SpawnPeople { .. })), "a reattach spawns nothing: {out:?}");
     assert_eq!(events_about(&out, q), Vec::<GameEventKind>::new(), "Q's body stands");
@@ -507,7 +507,7 @@ fn attach_of_an_unannounced_region_spawns_its_residents_once() {
     let (mut c, _, people) = coordinator();
     let r = rc(0, 0);
     let running = |bodies: Vec<(PersonId, [f32; 3])>| RunningRegion { rc: r, incarnation: 1, people: bodies };
-    c.handle(0, HostMsg::Attach { host: 0, epoch: 1, running: vec![running(Vec::new())], online: Vec::new(), generation: 0, boot: 7, settled_below: 0, handed: Vec::new() }, 0);
+    c.handle(0, HostMsg::Attach { host: 0, epoch: 1, running: vec![running(Vec::new())], online: Vec::new(), generation: 0, boot: 7, settled_below: 0, handed: Vec::new(), pending_cut: None }, 0);
     let out = commit(&mut c);
     let attached = out.iter().position(|m| matches!(m, CoordMsg::Attached { epoch: 1 })).expect("the echo");
     for p in &people {
@@ -516,7 +516,7 @@ fn attach_of_an_unannounced_region_spawns_its_residents_once() {
     }
     // Re-attached with every body there: nothing more.
     let bodies: Vec<(PersonId, [f32; 3])> = people.iter().map(|p| (*p, [0.0; 3])).collect();
-    c.handle(0, HostMsg::Attach { host: 0, epoch: 2, running: vec![running(bodies)], online: Vec::new(), generation: 0, boot: 7, settled_below: 0, handed: Vec::new() }, 0);
+    c.handle(0, HostMsg::Attach { host: 0, epoch: 2, running: vec![running(bodies)], online: Vec::new(), generation: 0, boot: 7, settled_below: 0, handed: Vec::new(), pending_cut: None }, 0);
     let out = commit(&mut c);
     assert!(directives_for(&out, r).is_empty(), "{out:?}");
 }
@@ -549,7 +549,7 @@ fn crossing_held_behind_the_attach_keeps_one_body() {
         RunningRegion { rc: a, incarnation: 1, people: a_list },
         RunningRegion { rc: b, incarnation: 1, people: vec![(p, at)] },
     ];
-    c.handle(0, HostMsg::Attach { host: 0, epoch: 1, running, online: Vec::new(), generation: 0, boot: 7, settled_below: 0, handed: Vec::new() }, 0);
+    c.handle(0, HostMsg::Attach { host: 0, epoch: 1, running, online: Vec::new(), generation: 0, boot: 7, settled_below: 0, handed: Vec::new(), pending_cut: None }, 0);
     let out = commit(&mut c);
     count(p, &out, &mut p_bodies);
     count(q, &out, &mut q_bodies);
@@ -584,7 +584,7 @@ fn attach_supersedes_unsent_directives() {
     // The link dropped; the host re-attaches running `r` with no body of P.
     let running = RunningRegion { rc: r, incarnation: 1, people: Vec::new() };
     let online = vec![OnlinePlayer { player: A, claim: None, claim_pending: true, report: 1, hop: 1 }];
-    c.handle(0, HostMsg::Attach { host: 0, epoch: 1, running: vec![running], online, generation: 0, boot: 7, settled_below: 0, handed: Vec::new() }, 0);
+    c.handle(0, HostMsg::Attach { host: 0, epoch: 1, running: vec![running], online, generation: 0, boot: 7, settled_below: 0, handed: Vec::new(), pending_cut: None }, 0);
     let out = commit(&mut c);
     let attached = out.iter().position(|m| matches!(m, CoordMsg::Attached { epoch: 1 })).expect("the echo");
     assert!(directives_for(&out[..attached], r).is_empty(), "the stale spawn is dropped: {out:?}");
@@ -620,7 +620,7 @@ fn reattach_keeps_a_body_that_crossed_between_listed_regions() {
         if order {
             running.reverse();
         }
-        c.handle(0, HostMsg::Attach { host: 0, epoch: 1, running, online: Vec::new(), generation: 0, boot: 7, settled_below: 0, handed: Vec::new() }, 0);
+        c.handle(0, HostMsg::Attach { host: 0, epoch: 1, running, online: Vec::new(), generation: 0, boot: 7, settled_below: 0, handed: Vec::new(), pending_cut: None }, 0);
         let out = commit(&mut c);
         assert_eq!(body_delta(&out, p), 0, "order {order}: no despawn of P's only body: {out:?}");
         assert_eq!(c.history().person(p).unwrap().location, Location::InRegion(r1), "order {order}");
@@ -788,7 +788,7 @@ fn commit_routed(c: &mut Coordinator) -> Vec<(Target, CoordMsg)> {
 }
 
 fn attach(host: u32, epoch: u64, running: Vec<RunningRegion>, online: Vec<OnlinePlayer>) -> HostMsg {
-    HostMsg::Attach { host, epoch, running, online, generation: 0, boot: 7, settled_below: 0, handed: Vec::new() }
+    HostMsg::Attach { host, epoch, running, online, generation: 0, boot: 7, settled_below: 0, handed: Vec::new(), pending_cut: None }
 }
 
 fn report(player: PlayerId, claim: Option<Claim>, claim_pending: bool) -> OnlinePlayer {
@@ -1095,7 +1095,7 @@ fn settled_watermark_prunes_exactly_below() {
     assert_eq!(memo_ids(&c), vec![rid(3), rid(4), other_host]);
     c.handle(0, attach(0, 1, Vec::new(), Vec::new()), 0);
     assert_eq!(memo_ids(&c), vec![rid(3), rid(4), other_host], "an attach watermark of 0 prunes nothing");
-    c.handle(0, HostMsg::Attach { host: 0, epoch: 2, running: Vec::new(), online: Vec::new(), generation: 0, boot: 7, settled_below: 4, handed: Vec::new() }, 0);
+    c.handle(0, HostMsg::Attach { host: 0, epoch: 2, running: Vec::new(), online: Vec::new(), generation: 0, boot: 7, settled_below: 4, handed: Vec::new(), pending_cut: None }, 0);
     assert_eq!(memo_ids(&c), vec![rid(4), other_host], "the attach's watermark prunes below it");
     c.handle(1, HostMsg::Settled { boot: 7, below: 2 }, 0);
     assert_eq!(memo_ids(&c), vec![rid(4)]);
@@ -1124,6 +1124,7 @@ fn new_boot_attach_drops_the_old_boots_memo() {
         boot: 9,
         settled_below: 0,
         handed: Vec::new(),
+        pending_cut: None,
     };
     c.handle(0, attach_boot_9(2), 0);
     assert_eq!(memo_ids(&c), vec![other_host], "boot 7 of host 0 is gone");
@@ -1265,6 +1266,7 @@ fn reattach_mid_crossing_keeps_the_claim_online() {
             boot: 7,
             settled_below: 0,
             handed: vec![(A, HOST_B, 1)],
+            pending_cut: None,
         };
         c.handle(HOST_A, reattach, 0);
         assert_eq!(c.online_on(A), Some(HOST_B), "b_attaches {b_attaches}: in transit to B");
@@ -1351,6 +1353,7 @@ fn higher_generation_attach_resets_hops() {
         boot: 7,
         settled_below: 0,
         handed: Vec::new(),
+        pending_cut: None,
     };
     c.handle(HOST_B, attach_gen(HOST_B, 1, 0, vec![report(A, fortress, false)]), 0);
     assert_eq!((c.online_on(A), c.hop_of(A)), (None, 5), "the same generation: hop 1 is stale");
@@ -1542,4 +1545,163 @@ fn two_holders_do_not_ping_pong_for_ever() {
     assert_eq!(errors, 1, "one host ran out, once");
     assert!(hosts.iter().any(|h| c.online_on(A) == Some(*h)), "online on one of them");
     assert_eq!(c.hop_of(A), hop.iter().copied().max().unwrap());
+}
+
+// --- World cuts (R3 Task 13) ---------------------------------------------------------
+
+/// The world-cut period in these tests.
+const CUT_EVERY_MS: u64 = 1_000;
+
+/// A coordinator with world cuts every [`CUT_EVERY_MS`] of hosts 0 and 1, both attached,
+/// its outputs drained.
+fn cutting() -> Coordinator {
+    let (mut c, _, _) = coordinator();
+    c.set_cut_epoch(3);
+    c.set_expected_hosts([0, 1].into_iter().collect());
+    c.set_world_cuts(CUT_EVERY_MS);
+    c.set_world_tick(100);
+    c.handle(0, attach(0, 1, Vec::new(), Vec::new()), 0);
+    c.handle(1, attach(1, 1, Vec::new(), Vec::new()), 0);
+    commit_routed(&mut c);
+    c
+}
+
+/// The `BeginCut` each host got: `(host, cut, tick)`.
+fn begun(out: &[(Target, CoordMsg)]) -> Vec<(u32, game::CutId, u64)> {
+    out.iter()
+        .filter_map(|(to, m)| match (to, m) {
+            (Target::Host(h), CoordMsg::BeginCut { cut, tick, .. }) => Some((*h, *cut, *tick)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The `CutDone` each host got: `(host, cut, committed)`.
+fn done(out: &[(Target, CoordMsg)]) -> Vec<(u32, game::CutId, bool)> {
+    out.iter()
+        .filter_map(|(to, m)| match (to, m) {
+            (Target::Host(h), CoordMsg::CutDone { cut, committed }) => Some((*h, *cut, *committed)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A world cut begins a period after the cuts were turned on, at the world tick plus the
+/// lead, with an id of the coordinator's epoch; when both parts are staged it is decided
+/// commit and both hosts are told.
+#[test]
+fn world_cut_begins_and_commits_with_every_part() {
+    let mut c = cutting();
+    c.maintain(CUT_EVERY_MS - 1);
+    assert!(begun(&commit_routed(&mut c)).is_empty(), "not before the period");
+    c.maintain(CUT_EVERY_MS);
+    let out = commit_routed(&mut c);
+    let cut = game::CutId((3 << 32) | 1);
+    assert_eq!(begun(&out), [(0, cut, 100 + game::WORLD_CUT_LEAD_TICKS), (1, cut, 100 + game::WORLD_CUT_LEAD_TICKS)]);
+    c.maintain(3 * CUT_EVERY_MS);
+    assert!(begun(&commit_routed(&mut c)).is_empty(), "one cut at a time");
+    c.handle(0, HostMsg::CutPrepared { cut }, 2 * CUT_EVERY_MS);
+    assert_eq!(c.take_decision(), None, "host 1's part is missing");
+    c.handle(1, HostMsg::CutPrepared { cut }, 2 * CUT_EVERY_MS);
+    let d = c.take_decision().expect("decided");
+    assert_eq!((d.cut, d.commit, d.hosts.clone()), (cut, true, vec![0, 1]));
+    assert_eq!(c.take_decision(), None, "handed out once");
+    c.decided(cut, true);
+    assert_eq!(done(&commit_routed(&mut c)), [(0, cut, true), (1, cut, true)]);
+    assert_eq!(c.world_cut_running(), None);
+}
+
+/// Criterion F at the coordinator: no new cut while one is undecided — also once its
+/// decision was handed to the runtime and not yet recorded.
+#[test]
+fn no_second_world_cut_while_one_is_undecided() {
+    let mut c = cutting();
+    c.maintain(CUT_EVERY_MS);
+    let (_, cut, _) = begun(&commit_routed(&mut c))[0];
+    c.handle(0, HostMsg::CutFailed { cut, why: CutFailure::Aborted }, CUT_EVERY_MS);
+    assert!(!c.take_decision().expect("an abort").commit);
+    c.maintain(10 * CUT_EVERY_MS);
+    assert!(begun(&commit_routed(&mut c)).is_empty(), "the decision is not recorded yet");
+    c.decided(cut, false);
+    commit_routed(&mut c);
+    c.maintain(11 * CUT_EVERY_MS);
+    assert_eq!(begun(&commit_routed(&mut c)).len(), 2, "the next cut a period after the last decision");
+}
+
+/// A host that re-attaches naming the cut it took part in learns the outcome: the cut it
+/// was in when its link dropped is aborted (it detached) and every participant told; on
+/// its `Attach` it is answered from what the coordinator remembers; a cut the coordinator
+/// does not know (an older run's) is looked up by the runtime and answered from that.
+#[test]
+fn reattach_with_a_pending_cut_gets_its_outcome() {
+    let mut c = cutting();
+    c.maintain(CUT_EVERY_MS);
+    let (_, cut, _) = begun(&commit_routed(&mut c))[0];
+    c.handle(0, HostMsg::CutPrepared { cut }, CUT_EVERY_MS);
+    c.host_detached(1);
+    let d = c.take_decision().expect("the detach decides");
+    assert!(!d.commit, "a detached participant aborts the cut");
+    c.decided(cut, false);
+    assert_eq!(done(&commit_routed(&mut c)), [(0, cut, false), (1, cut, false)]);
+    // Host 1 never read that: it re-attaches naming the cut.
+    let reattach = HostMsg::Attach {
+        host: 1,
+        epoch: 2,
+        running: Vec::new(),
+        online: Vec::new(),
+        generation: 0,
+        boot: 7,
+        settled_below: 0,
+        handed: Vec::new(),
+        pending_cut: Some(cut),
+    };
+    c.handle(1, reattach, CUT_EVERY_MS);
+    assert_eq!(done(&commit_routed(&mut c)), [(1, cut, false)], "answered from the outcome remembered");
+    // A cut of an earlier coordinator run: the runtime looks it up.
+    let old = game::CutId((2 << 32) | 9);
+    c.handle(0, HostMsg::CutPrepared { cut: old }, CUT_EVERY_MS);
+    assert!(done(&commit_routed(&mut c)).is_empty());
+    assert_eq!(c.take_cut_lookups(), [(0, old)]);
+    c.cut_outcome(0, old, true);
+    assert_eq!(done(&commit_routed(&mut c)), [(0, old, true)]);
+    // A participant re-attaching mid-cut aborts it (its link dropped: marks may be lost).
+    c.maintain(5 * CUT_EVERY_MS);
+    let (_, next, _) = begun(&commit_routed(&mut c))[0];
+    c.handle(1, attach(1, 3, Vec::new(), Vec::new()), 5 * CUT_EVERY_MS);
+    assert_eq!(c.take_decision().map(|d| (d.cut, d.commit)), Some((next, false)));
+}
+
+/// A `Missed` doubles the lead up to the maximum; a committed cut resets it; the deadline
+/// aborts a cut a part never came for.
+#[test]
+fn missed_world_cut_doubles_the_lead_and_the_deadline_aborts() {
+    let mut c = cutting();
+    let mut now = 0;
+    let mut leads = Vec::new();
+    for _ in 0..6 {
+        now += CUT_EVERY_MS;
+        c.maintain(now);
+        let (_, cut, tick) = begun(&commit_routed(&mut c))[0];
+        leads.push(tick - 100);
+        c.handle(1, HostMsg::CutFailed { cut, why: CutFailure::Missed }, now);
+        c.take_decision().expect("aborted");
+        c.decided(cut, false);
+        commit_routed(&mut c);
+    }
+    assert_eq!(leads, [40, 80, 160, 320, 640, 640]);
+    now += CUT_EVERY_MS;
+    c.maintain(now);
+    let (_, cut, _) = begun(&commit_routed(&mut c))[0];
+    c.handle(0, HostMsg::CutPrepared { cut }, now);
+    c.handle(1, HostMsg::CutPrepared { cut }, now);
+    c.take_decision().expect("commit");
+    c.decided(cut, true);
+    assert_eq!(c.world_cut_lead(), game::WORLD_CUT_LEAD_TICKS);
+    now += CUT_EVERY_MS;
+    c.maintain(now);
+    let (_, cut, _) = begun(&commit_routed(&mut c))[0];
+    c.maintain(now + game::WORLD_CUT_DEADLINE_MS - 1);
+    assert_eq!(c.take_decision(), None);
+    c.maintain(now + game::WORLD_CUT_DEADLINE_MS);
+    assert_eq!(c.take_decision().map(|d| (d.cut, d.commit)), Some((cut, false)), "the deadline aborts");
 }

@@ -4,11 +4,23 @@
 //! what it carried, `cut_failed` keeps it for the next cut (nothing is lost).
 //! Commits are fenced ([`HostClaims`]): a refusal as fenced makes the whole
 //! process fenced (`Fenced`), and nothing more is written.
+//!
+//! **World cuts** (several hosts, R3 Task 13; [`CutWriter::with_world_cuts`]): the
+//! manager's part of a world cut is staged, not committed (`StoreHandle::prepare_cut`,
+//! at this process's world generation): staged → the manager tells the coordinator
+//! (`CutPrepared`); refused or failed → `CutFailed { Store }`. The part waits for the
+//! coordinator's `CutDone`; then `cut_decided` settles the store's pending mark FIRST
+//! and only then the manager hears `cut_committed` / `cut_failed` (store obligations 2
+//! and 4: until it is settled, the handle refuses every further cut). A part that may be
+//! staged although its prepare failed, or whose `CutDone` never comes, is settled the
+//! same way by asking the store every [`WORLD_PART_POLL`]. A `StaleGeneration` notes
+//! the newer generation (the host exits for a world rollback); `CutAborted` needs no
+//! settling. With one host nothing of this runs.
 
 use std::time::{Duration, Instant};
 
 use crossbeam::channel::{Receiver, TryRecvError};
-use game::{CutId, RegionCoords, RegionOutput, RegionSpawner, Tick, WorldManager};
+use game::{CutFailure, CutId, RegionCoords, RegionOutput, RegionSpawner, Tick, WorldCut, WorldManager};
 use world_store::{CutCommitted, StoreError, StoreHandle};
 
 use crate::claims::{Fenced, HostClaims, ServerExit, WorldGeneration, FENCED_REFUSAL, ROLLBACK_REFUSAL};
@@ -35,17 +47,57 @@ pub const EXIT_PARK_TIMEOUT: Duration = Duration::from_secs(10);
 /// How often the exit's park loop re-checks while no region output arrives.
 const EXIT_PARK_POLL: Duration = Duration::from_millis(20);
 
+/// How often a world part that may be staged is settled by asking the store
+/// (`cut_decided`) when no `CutDone` came for it.
+pub const WORLD_PART_POLL: Duration = Duration::from_secs(1);
+
+/// This host's part of a world cut, from its prepare until the store has settled it.
+struct WorldPart {
+    id: CutId,
+    /// The prepare's answer, while it has not come.
+    reply: Option<Receiver<Result<CutCommitted, StoreError>>>,
+    /// Staged (the prepare answered `Ok`): its region versions.
+    versions: Option<Vec<(RegionCoords, u64)>>,
+    /// The store may hold the part staged (a prepare that succeeded, or failed with the
+    /// pending mark possibly kept): settled with `cut_decided`.
+    maybe_staged: bool,
+    /// The coordinator's `CutDone` came.
+    done: bool,
+    /// The store was last asked about it at.
+    polled: Option<Instant>,
+}
+
 /// The server's side of the save cuts: the store and the commits in flight.
 pub struct CutWriter {
     claims: HostClaims,
     pending: Vec<Pending>,
     /// Commits failed in a row (reset by one that commits).
     failed_in_a_row: u32,
+    /// World cuts (several hosts): this process's world generation.
+    world: Option<WorldGeneration>,
+    /// The world part not settled yet (one at a time: the store refuses another meanwhile).
+    part: Option<WorldPart>,
 }
 
 impl CutWriter {
     pub fn new(claims: HostClaims) -> Self {
-        CutWriter { claims, pending: Vec::new(), failed_in_a_row: 0 }
+        CutWriter { claims, pending: Vec::new(), failed_in_a_row: 0, world: None, part: None }
+    }
+
+    /// A writer of a host of several (`VOXEL_HOSTS` > 1): its world cut parts are staged
+    /// at `generation` and decided by the coordinator (see the module docs).
+    pub fn with_world_cuts(claims: HostClaims, generation: WorldGeneration) -> Self {
+        CutWriter { world: Some(generation), ..CutWriter::new(claims) }
+    }
+
+    /// Whether this writer stages world cut parts (several hosts).
+    pub fn world_cuts(&self) -> bool {
+        self.world.is_some()
+    }
+
+    /// The world part not settled yet, if any.
+    pub fn world_part(&self) -> Option<CutId> {
+        self.part.as_ref().map(|p| p.id)
     }
 
     /// Commits failed in a row since the last one that committed.
@@ -66,9 +118,16 @@ impl CutWriter {
     /// answer that has come back to the manager. Never blocks.
     pub fn pump<S: RegionSpawner>(&mut self, manager: &mut WorldManager<S>) {
         while let Some(cut) = manager.take_cut() {
+            if self.world.is_some() && manager.world_cut() == Some(cut.id) {
+                self.prepare(manager, cut);
+                continue;
+            }
             let (id, tick, regions, players) = (cut.id, cut.tick, cut.regions.len(), cut.players.len());
             let reply = self.claims.commit_cut(cut);
             self.pending.push(Pending { id, tick, regions, players, queued: Instant::now(), reply });
+        }
+        if self.world.is_some() {
+            self.pump_world(manager);
         }
         let mut i = 0;
         while i < self.pending.len() {
@@ -90,6 +149,10 @@ impl CutWriter {
     /// (complete at once — nothing runs), committed, and every commit's
     /// answer waited for (at most `timeout`); then the store is shut down.
     /// Returns whether the last cut committed.
+    ///
+    /// Task 14: with several hosts the exit's save is the leave cut (a world cut in which
+    /// this host parks); until then it is this one-phase cut, refused by the store while a
+    /// world part is undecided.
     pub fn finish<S: RegionSpawner>(mut self, manager: &mut WorldManager<S>, now: Tick, timeout: Duration) -> bool {
         // A cut still pending (waiting for a region that never answered) is
         // given up by the manager at its deadline; a complete one goes first.
@@ -137,6 +200,110 @@ impl CutWriter {
     /// Whether this process was fenced.
     pub fn fenced(&self) -> &Fenced {
         self.claims.fenced()
+    }
+
+    /// Stage the manager's part of world cut `cut.id`; refused at once while an earlier
+    /// part is not settled (store obligation 4: never queued behind it).
+    fn prepare<S: RegionSpawner>(&mut self, manager: &mut WorldManager<S>, cut: WorldCut) {
+        let id = cut.id;
+        if let Some(p) = &self.part {
+            let why = format!("the part of cut {} is still undecided", p.id.0);
+            log::warn!("[server] world cut {}: {why}; failed", id.0);
+            manager.world_cut_failed(id, CutFailure::Store(why));
+            return;
+        }
+        let generation = self.world.as_ref().expect("world cuts").mine();
+        let reply = self.claims.store().prepare_cut(cut, self.claims.fence().clone(), generation);
+        self.part = Some(WorldPart { id, reply: Some(reply), versions: None, maybe_staged: true, done: false, polled: None });
+    }
+
+    /// The world part's prepare answer, the coordinator's `CutDone`s, and the settling.
+    fn pump_world<S: RegionSpawner>(&mut self, manager: &mut WorldManager<S>) {
+        let mut settled = false;
+        if let Some(part) = self.part.as_mut() {
+            let answer = match part.reply.as_ref().map(|r| r.try_recv()) {
+                Some(Ok(answer)) => Some(answer),
+                Some(Err(TryRecvError::Disconnected)) => Some(Err(StoreError::Backend("the world-store thread has stopped".into()))),
+                Some(Err(TryRecvError::Empty)) | None => None,
+            };
+            if let Some(answer) = answer {
+                part.reply = None;
+                let id = part.id;
+                match answer {
+                    Ok(staged) => {
+                        part.versions = Some(staged.versions);
+                        manager.world_cut_prepared(id);
+                    }
+                    Err(e) => {
+                        // Only a `Backend` error may leave the part staged (its mark kept).
+                        part.maybe_staged = matches!(e, StoreError::Backend(_));
+                        if self.claims.note_refusal(&e) {
+                            log::error!("[server] world cut {} was refused as fenced; this server was replaced and stops", id.0);
+                        }
+                        if let StoreError::StaleGeneration { stored, .. } = &e {
+                            self.world.as_ref().expect("world cuts").note(*stored);
+                        }
+                        if let StoreError::CutPending(other) = &e {
+                            log::error!("[server] world cut {}: the store still holds part of cut {} undecided", id.0, other.0);
+                        }
+                        log::warn!("[server] world cut {}: the part was not staged: {e}", id.0);
+                        manager.world_cut_failed(id, CutFailure::Store(e.to_string()));
+                        // Nothing staged, the pending mark cleared: settled.
+                        settled = !part.maybe_staged;
+                    }
+                }
+            }
+        }
+        if settled {
+            self.part = None;
+        }
+        for (cut, committed) in manager.take_world_cut_done() {
+            match self.part.as_mut() {
+                Some(part) if part.id == cut => part.done = true,
+                _ => {
+                    log::debug!("[server] world cut {} decided ({committed}); nothing of it staged here", cut.0);
+                    manager.cut_failed(cut);
+                }
+            }
+        }
+        self.settle_world(manager);
+    }
+
+    /// Settle the world part once it is decided: the store first (`cut_decided`, which
+    /// finishes the part and clears the handle's pending mark), then the manager.
+    fn settle_world<S: RegionSpawner>(&mut self, manager: &mut WorldManager<S>) {
+        let Some(part) = self.part.as_mut() else { return };
+        if part.reply.is_some() {
+            return;
+        }
+        let due = part.done || part.polled.is_none_or(|at| at.elapsed() >= WORLD_PART_POLL);
+        if !due {
+            return;
+        }
+        part.polled = Some(Instant::now());
+        let id = part.id;
+        match self.claims.store().cut_decided(id) {
+            Ok(Some(true)) => {
+                let versions = part.versions.take().unwrap_or_else(|| {
+                    log::warn!("[server] world cut {} committed with this host's part, whose prepare answer was lost", id.0);
+                    Vec::new()
+                });
+                self.part = None;
+                game::perf_event!("world_saved", "cut={} world=1", id.0);
+                manager.cut_committed(id, versions);
+            }
+            Ok(Some(false)) => {
+                self.part = None;
+                manager.cut_failed(id);
+            }
+            Ok(None) => {
+                if part.done {
+                    log::warn!("[server] world cut {}: decided by the coordinator, not in the store yet; asking again", id.0);
+                    part.done = false;
+                }
+            }
+            Err(e) => log::warn!("[server] world cut {}: its decision could not be read ({e}); asking again", id.0),
+        }
     }
 
     fn settle<S: RegionSpawner>(&mut self, manager: &mut WorldManager<S>, p: Pending, answer: Result<CutCommitted, StoreError>) {

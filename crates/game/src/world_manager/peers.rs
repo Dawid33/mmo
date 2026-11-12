@@ -118,6 +118,11 @@ impl<S: RegionSpawner> WorldManager<S> {
             || self.peers.get(&self.owner_of(rc)).is_some_and(|p| !p.stale && p.session.is_reachable())
     }
 
+    /// Whether host `ordinal`'s session is reachable now (and it is not of a newer generation).
+    pub(super) fn peer_reachable(&self, ordinal: u32) -> bool {
+        self.peers.get(&ordinal).is_some_and(|p| !p.stale && p.session.is_reachable())
+    }
+
     /// Reliable messages to other hosts not acknowledged yet, those waiting for a session
     /// included (the `[server]` counters line; 0 once everything arrived).
     pub fn peer_unreceived(&self) -> usize {
@@ -152,13 +157,13 @@ impl<S: RegionSpawner> WorldManager<S> {
             let all: Vec<&Reliable> = peer.session.unreceived().collect();
             let sent = all.len() - unsent;
             for (i, r) in all.into_iter().enumerate() {
-                if let Reliable::PlayerMove { handoff, .. } = r {
+                if let Reliable::PlayerMove { handoff, .. } = r.inner() {
                     out.push((ordinal, handoff.client, handoff.player, i < sent));
                 }
             }
         }
         for (&ordinal, list) in &self.peer_waiting {
-            out.extend(list.iter().filter_map(|r| match r {
+            out.extend(list.iter().filter_map(|r| match r.inner() {
                 Reliable::PlayerMove { handoff, .. } => Some((ordinal, handoff.client, handoff.player, false)),
                 _ => None,
             }));
@@ -175,13 +180,13 @@ impl<S: RegionSpawner> WorldManager<S> {
             let all: Vec<&Reliable> = peer.session.unreceived().collect();
             let sent = all.len() - unsent;
             for (i, r) in all.into_iter().enumerate() {
-                if let Reliable::Intent(msg) = r {
+                if let Reliable::Intent(msg) = r.inner() {
                     out.push((ordinal, *msg, i < sent));
                 }
             }
         }
         for (&ordinal, list) in &self.peer_waiting {
-            out.extend(list.iter().filter_map(|r| match r {
+            out.extend(list.iter().filter_map(|r| match r.inner() {
                 Reliable::Intent(msg) => Some((ordinal, *msg, false)),
                 _ => None,
             }));
@@ -334,10 +339,7 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.departed.insert(player, owner);
         self.locations.remove(&bundle.id);
         let handoff = crate::PlayerHandoff { client, player, claim, login: None, park, hop };
-        let id = self.queue_to_peer(owner, Reliable::Transfer { target, stamp, bundle: Box::new(bundle), player: Some(handoff) });
-        if view {
-            self.peer_in_source_view.insert((owner, id));
-        }
+        self.send_reliable(owner, Reliable::Transfer { target, stamp, bundle: Box::new(bundle), player: Some(handoff) }, view);
         // Its home may have just lost its keep-alive reason.
         self.refresh_keepalive(rc, now_ms);
     }
@@ -453,10 +455,7 @@ impl<S: RegionSpawner> WorldManager<S> {
         let handoff = crate::PlayerHandoff { client, player, claim, login: None, park: false, hop };
         // Parked after `m.from` answered the pending cut: its snapshot holds the body.
         let view = self.in_cut_view(m.from);
-        let id = self.queue_to_peer(owner, Reliable::PlayerMove { handoff, record: Box::new(record), target: m.target });
-        if view {
-            self.peer_in_source_view.insert((owner, id));
-        }
+        self.send_reliable(owner, Reliable::PlayerMove { handoff, record: Box::new(record), target: m.target }, view);
         self.refresh_keepalive(m.from, now_ms);
         self.redirect(client, m.target);
     }
@@ -665,9 +664,31 @@ impl<S: RegionSpawner> WorldManager<S> {
         z ^ (z >> 31)
     }
 
-    /// `msg` to host `ordinal`: on its session, or kept until it has one. Its id among
+    /// `msg` to host `ordinal` (a state message departing after its source answered goes by
+    /// [`Self::send_reliable`]): on its session, or kept until it has one.
+    pub(super) fn queue_to_peer(&mut self, ordinal: u32, msg: Reliable) {
+        self.send_reliable(ordinal, msg, false);
+    }
+
+    /// `msg` to host `ordinal`; `view`: a transfer, intent or move that departed after its
+    /// source answered the pending cut (its source's snapshot holds it). A state message to
+    /// a participant of a world cut goes bare or wrapped ([`Reliable::InCut`]) by who
+    /// accounts for it (`world_cut.rs`, [`Self::world_cut_wrap`]); `view` keeps it out of
+    /// a one-phase cut's rows.
+    pub(super) fn send_reliable(&mut self, ordinal: u32, msg: Reliable, view: bool) {
+        let msg = match self.world_cut_wrap(ordinal, msg, view) {
+            (msg, Some(cut)) => Reliable::InCut { cut, body: Box::new(msg) },
+            (msg, None) => msg,
+        };
+        let id = self.queue_now(ordinal, msg);
+        if view {
+            self.peer_in_source_view.insert((ordinal, id));
+        }
+    }
+
+    /// `msg` to host `ordinal` now: on its session, or kept until it has one. Its id among
     /// everything queued to that host (`peer_entries`).
-    pub(super) fn queue_to_peer(&mut self, ordinal: u32, msg: Reliable) -> u64 {
+    pub(super) fn queue_now(&mut self, ordinal: u32, msg: Reliable) -> u64 {
         let count = self.peer_queued.entry(ordinal).or_default();
         let id = *count;
         *count += 1;
@@ -723,29 +744,30 @@ impl<S: RegionSpawner> WorldManager<S> {
         log::debug!("[server] {:?} from {rc:?} into {target:?}: sent to host {owner}", bundle.id);
         // It is on another host now: nothing here routes to it.
         self.locations.remove(&bundle.id);
-        let id = self.queue_to_peer(owner, Reliable::Transfer { target, stamp, bundle: Box::new(bundle), player: None });
-        if view {
-            self.peer_in_source_view.insert((owner, id));
-        }
+        self.send_reliable(owner, Reliable::Transfer { target, stamp, bundle: Box::new(bundle), player: None }, view);
     }
 
-    /// One-phase cuts (until Task 13): every transfer to another host not acknowledged
-    /// yet, without a player, is a row of the cut — unless it left its source after the
-    /// source answered the cut (the source's snapshot holds it).
+    /// What this host sent a host that is NOT a participant of the cut (`participants`:
+    /// none for a one-phase cut) and that host has not acknowledged: every transfer
+    /// without a player is a row of the cut — unless it left its source after the source
+    /// answered the cut (the source's snapshot holds it). Intents and replies alike: each
+    /// is an [`InFlightRow::Intent`] to the foreign region it went to, unless its source
+    /// sent it after answering the cut. Entries are told apart by their per-host id
+    /// (`peer_entries`), never by value: an entity departing twice, or two equal replies,
+    /// in one cut window each count once.
     ///
-    /// Task 13 replaces this with in-band cut marks: today a transfer the peer received
-    /// but has not acknowledged is ALSO in the peer's state, so its cut may hold it too.
-    ///
-    /// Intents and replies alike: each not acknowledged yet is an
-    /// [`InFlightRow::Intent`] to the foreign region it went to, unless its source sent it
-    /// after answering the cut.
-    /// Entries are told apart by their per-host id (`peer_entries`), never by value: an
-    /// entity departing twice, or two equal replies, in one cut window each count once.
-    pub(super) fn cut_peer_rows(&self) -> Vec<InFlightRow> {
+    /// To a participant nothing is written here (`world_cut.rs`): a bare message before
+    /// this host's mark is the receiver's; a wrapped one ([`Reliable::InCut`]) is in this
+    /// host's snapshot or was written as this part's row when it was sent. A participant's
+    /// link that is down aborts the cut, so a sender writes an in-transit row only for a
+    /// host absent from the cut (a one-phase cut's peer may also hold an entry it received
+    /// and has not acknowledged yet).
+    pub(super) fn cut_peer_rows(&self, participants: &BTreeSet<u32>) -> Vec<InFlightRow> {
         self.peer_entries()
             .into_iter()
+            .filter(|(ordinal, _, _)| !participants.contains(ordinal))
             .filter(|(ordinal, id, _)| !self.peer_in_source_view.contains(&(*ordinal, *id)))
-            .filter_map(|(_, _, r)| match r {
+            .filter_map(|(_, _, r)| match r.inner() {
                 // A player handed over or moved is a record (`cut_peer_players`), not a row.
                 Reliable::Transfer { target, stamp, bundle, player: None } => {
                     Some(InFlightRow::Transfer { target: *target, bundle: (**bundle).clone(), stamp: *stamp })
@@ -756,22 +778,23 @@ impl<S: RegionSpawner> WorldManager<S> {
             .collect()
     }
 
-    /// One-phase cuts: every player handed to another host and not acknowledged yet — a
-    /// walking hand-off ([`Reliable::Transfer`] with a player: its body's record, as the
-    /// receiver would park it) or a move ([`Reliable::PlayerMove`]: its record) — as its
-    /// record, in the region it is headed for, unless it left its source after the source
-    /// answered the cut (the source's snapshot holds it). Not a row: a restore requeues
-    /// nothing for it, and the stored record places the player at its next login.
+    /// Every player handed to a host that is NOT a participant of the cut (one-phase: any
+    /// host) and not acknowledged yet — a walking hand-off ([`Reliable::Transfer`] with a
+    /// player: its body's record, as the receiver would park it) or a move
+    /// ([`Reliable::PlayerMove`]: its record) — as its record, in the region it is headed
+    /// for, unless it left its source after the source answered the cut (the source's
+    /// snapshot holds it). Not a row: a restore requeues nothing for it, and the stored
+    /// record places the player at its next login.
     ///
-    /// Task 13: a PlayerMove / Transfer-with-player follows the CutMark channel rule like
-    /// every reliable message, and all hosts' parts commit together. Until then two hosts
-    /// can write one player's record in independent one-phase cuts (the older may win), and
-    /// a move acknowledged before the sender's cut completes is in neither cut.
-    pub(super) fn cut_peer_players(&self) -> Vec<(PlayerId, PlayerRecord)> {
+    /// A player handed to a participant follows the same rule as every state message
+    /// (`world_cut.rs`): bare, its record is the receiver's; wrapped, this host's snapshot
+    /// holds the body or this part wrote its record when it was sent.
+    pub(super) fn cut_peer_players(&self, participants: &BTreeSet<u32>) -> Vec<(PlayerId, PlayerRecord)> {
         self.peer_entries()
             .into_iter()
+            .filter(|(ordinal, _, _)| !participants.contains(ordinal))
             .filter(|(ordinal, id, _)| !self.peer_in_source_view.contains(&(*ordinal, *id)))
-            .filter_map(|(_, _, r)| match r {
+            .filter_map(|(_, _, r)| match r.inner() {
                 Reliable::Transfer { target, bundle, player: Some(h), .. } => {
                     handoff_record(*target, bundle, h).map(|record| (h.player, record))
                 }
@@ -787,10 +810,7 @@ impl<S: RegionSpawner> WorldManager<S> {
         debug_assert_eq!(peer_intent_target(&msg), to, "an intent to a peer goes where its message says");
         let owner = self.owner_of(to);
         log::debug!("[server] {msg:?} for {to:?}: sent to host {owner}");
-        let id = self.queue_to_peer(owner, Reliable::Intent(msg));
-        if view {
-            self.peer_in_source_view.insert((owner, id));
-        }
+        self.send_reliable(owner, Reliable::Intent(msg), view);
     }
 
     /// `v` to the host that owns `rc`, if its session is up (else dropped: volatile).
@@ -959,6 +979,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             PeerEvent::Down => {
                 log::info!("[server] peer host {from} down");
                 self.peer_lost(from);
+                self.world_cut_peer_lost(from);
             }
             PeerEvent::HigherGeneration(generation) => {
                 log::error!("[server] peer host {from} runs world generation {generation}, newer than ours: this host is stale");
@@ -967,13 +988,57 @@ impl<S: RegionSpawner> WorldManager<S> {
                     peer.stale = true;
                 }
                 self.peer_lost(from);
+                self.world_cut_peer_lost(from);
             }
             PeerEvent::Reliable(msg) => self.peer_reliable(from, msg),
             PeerEvent::Volatile(v) => self.peer_volatile(from, v),
         }
     }
 
-    fn peer_reliable(&mut self, from: u32, msg: Reliable) {
+    /// A participant's link of the pending world cut went down (or it runs a newer
+    /// generation): its mark may never come — this host's part fails.
+    fn world_cut_peer_lost(&mut self, from: u32) {
+        if self.world_cut.as_ref().is_some_and(|r| r.state == super::world_cut::PartState::Pending && r.peers.contains(&from)) {
+            log::warn!("[server] world cut: the link to host {from} went down while the cut was pending");
+            self.world_cut_fail(crate::CutFailure::Aborted);
+        }
+    }
+
+    /// Host `from`'s next reliable message (`world_cut.rs`): a mark is noted; a wrapped
+    /// state message ([`Reliable::InCut`]) is applied with what it creates noted as
+    /// accounted for by its sender in that cut; a bare state message after `from`'s mark of
+    /// the pending world cut is a protocol violation — applied all the same (state is never
+    /// dropped), and the cut fails.
+    pub(super) fn peer_reliable(&mut self, from: u32, msg: Reliable) {
+        match msg {
+            Reliable::CutMark { cut } => self.peer_cut_mark(from, cut),
+            Reliable::InCut { cut, body } => {
+                if matches!(*body, Reliable::InCut { .. }) || !body.is_state() {
+                    log::error!("[server] host {from}: a wrapped {} for cut {}; applied as is", reliable_name(&body), cut.0);
+                }
+                self.note_player_accounted(&body, cut);
+                let after = self.accounted_now(cut);
+                let lineage = self.inbound_accounted.replace(cut);
+                self.peer_reliable_in(from, *body, after);
+                self.inbound_accounted = lineage;
+            }
+            msg => {
+                if msg.is_state() && self.after_mark(from) {
+                    log::error!(
+                        "[server] host {from} sent a bare {} after its mark of the pending world cut: \
+                         applied, the cut fails",
+                        reliable_name(&msg)
+                    );
+                    self.world_cut_fail(crate::CutFailure::Aborted);
+                }
+                self.peer_reliable_in(from, msg, false);
+            }
+        }
+    }
+
+    /// Apply host `from`'s reliable message; `after`: its sender accounts for it in the
+    /// pending cut (what it creates here is in no part of this host's).
+    fn peer_reliable_in(&mut self, from: u32, msg: Reliable, after: bool) {
         match msg {
             Reliable::Transfer { target, stamp, bundle, player: None } => {
                 if !self.owns(target) {
@@ -997,11 +1062,12 @@ impl<S: RegionSpawner> WorldManager<S> {
             Reliable::ObserverOrder { client, player, nonce, ttl_secs } => {
                 self.observer_orders.push((client, player, nonce, ttl_secs));
             }
-            // As if one of this host's regions had sent it (no cut has seen it here).
+            // As if one of this host's regions had sent it: no cut has seen it here, unless
+            // it came after its sender's mark (that sender's snapshot holds it).
             Reliable::Intent(msg) => {
                 let target = peer_intent_target(&msg);
                 if self.owns(target) {
-                    self.route_intent(msg, target, false);
+                    self.route_intent(msg, target, after);
                     return;
                 }
                 // Ownership disagrees: never forwarded (it could bounce between hosts).
@@ -1013,12 +1079,12 @@ impl<S: RegionSpawner> WorldManager<S> {
                     crate::IntentMsg::Intent(s) => {
                         let reply = crate::IntentReply::Refused(s.intent, crate::IntentRefusal::OwnerNotRunning);
                         let back = crate::SentReply { reply, hint: s.from, due: s.due + 1, hops: 0 };
-                        self.route_intent(crate::IntentMsg::Reply(back), target, false);
+                        self.route_intent(crate::IntentMsg::Reply(back), target, after);
                     }
                     // A reply is held here, in the mailbox of its region (a cut carries it,
                     // and a restore queues it to the owner): never lost.
                     reply @ crate::IntentMsg::Reply(_) => {
-                        self.intent_mailbox.entry(target).or_default().push(Mail { msg: reply, in_source_view: false });
+                        self.intent_mailbox.entry(target).or_default().push(Mail { msg: reply, in_source_view: after, accounted_in: self.inbound_accounted });
                     }
                 }
             }
@@ -1055,7 +1121,7 @@ fn split_claim(claim: Option<Claim>) -> (Option<SiteId>, Option<SiteId>) {
 
 /// The record of a player handed over in `bundle` (its body, in `target`'s frame), as the
 /// receiving host parks it: `None` if the bundle carries no player.
-fn handoff_record(target: RegionCoords, bundle: &crate::EntityBundle, h: &crate::PlayerHandoff) -> Option<PlayerRecord> {
+pub(super) fn handoff_record(target: RegionCoords, bundle: &crate::EntityBundle, h: &crate::PlayerHandoff) -> Option<PlayerRecord> {
     let (_, carried) = bundle.client.as_ref()?;
     let (fortress, adventure) = split_claim(h.claim);
     Some(PlayerRecord { client: crate::parked_client(carried), pose: bundle.body.pose, region: target, fortress, adventure })
@@ -1100,7 +1166,7 @@ pub(super) fn peer_intent_target(msg: &crate::IntentMsg) -> RegionCoords {
 
 /// The entity a reliable message carries, if it is a transfer.
 fn transfer_id(r: &Reliable) -> Option<crate::EntityId> {
-    match r {
+    match r.inner() {
         Reliable::Transfer { bundle, .. } => Some(bundle.id),
         _ => None,
     }
@@ -1120,5 +1186,6 @@ fn reliable_name(r: &Reliable) -> &'static str {
         Reliable::SessionEnded { .. } => "SessionEnded",
         Reliable::CutMark { .. } => "CutMark",
         Reliable::PlayerParked { .. } => "PlayerParked",
+        Reliable::InCut { .. } => "InCut",
     }
 }
