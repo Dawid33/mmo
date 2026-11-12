@@ -277,7 +277,7 @@ impl Coordinator {
                 }
                 self.forget_settled(host, boot, settled_below, true);
                 self.attach(host, epoch, running, online, handed);
-                self.cut_attach(host, pending_cut);
+                self.cut_attach(host, pending_cut, boot);
             }
             HostMsg::Settled { boot, below } => self.forget_settled(host, boot, below, false),
             HostMsg::RegionStarted { rc, incarnation } => {
@@ -340,6 +340,7 @@ impl Coordinator {
             HostMsg::ReleaseClaim { player } => self.release_claim(player),
             HostMsg::CutPrepared { cut } => self.cut_prepared(host, cut),
             HostMsg::CutFailed { cut, why } => self.cut_failed(host, cut, why),
+            HostMsg::LeaveRequest => self.leave_request(host),
         }
         self.push_directives();
     }

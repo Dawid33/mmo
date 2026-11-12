@@ -625,6 +625,12 @@ pub fn run() -> claims::ServerExit {
     };
     let postgres = matches!(&world_source, world_file::WorldSource::Store { url: world_store::StoreUrl::Postgres(_), .. });
     roles::check_several_hosts(role, hosts, postgres, spawn_orders.is_some()).unwrap_or_else(|e| fatal(&e));
+    // A split host on Postgres, before it claims, registers or loads anything: the world cut
+    // parts a crash left staged are finished first (several hosts: and two-phase commit
+    // must be available).
+    if let (roles::Role::Host, true, Some(store)) = (role, postgres, &store) {
+        roles::recover_staged_cuts(store, hosts).unwrap_or_else(|e| fatal(&e));
+    }
     // Where players reach this host (`ServerPacket::Host`, its `hosts` row).
     let endpoint = game::HostEndpoint {
         ordinal: ownership.ordinal(),

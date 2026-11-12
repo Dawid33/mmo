@@ -226,7 +226,9 @@ fn describe(msg: &CoordMsg) -> String {
         CoordMsg::Attached { epoch } => format!("Attached {{ epoch: {epoch} }}"),
         CoordMsg::ClaimIs { player, claim, report } => format!("ClaimIs {player:?} {claim:?} (report {report})"),
         CoordMsg::HopIs { player, reported, hop } => format!("HopIs {player:?} {reported} -> {hop}"),
-        CoordMsg::BeginCut { cut, tick, hosts, .. } => format!("BeginCut {} at {tick} of {hosts:?}", cut.0),
+        CoordMsg::BeginCut { cut, tick, hosts, leaving, .. } => {
+            format!("BeginCut {} at {tick} of {hosts:?} leaving {leaving:?}", cut.0)
+        }
         CoordMsg::CutDone { cut, committed } => format!("CutDone {} (committed {committed})", cut.0),
     }
 }
@@ -260,6 +262,7 @@ pub(crate) fn describe_host(msg: &HostMsg) -> String {
         HostMsg::PlayerHandedTo { player, to, hop } => format!("PlayerHandedTo {player:?} to host {to} hop {hop}"),
         HostMsg::CutPrepared { cut } => format!("CutPrepared {}", cut.0),
         HostMsg::CutFailed { cut, why } => format!("CutFailed {} ({why:?})", cut.0),
+        HostMsg::LeaveRequest => "LeaveRequest".to_string(),
     }
 }
 
@@ -908,7 +911,11 @@ impl CoordinatorRuntime {
         if let Some(rx) = &self.hosts_rx {
             match rx.try_recv() {
                 Err(TryRecvError::Empty) => return,
-                Ok(Ok(rows)) => self.core.set_expected_hosts(rows.iter().filter(|r| !r.clean).map(|r| r.ordinal).collect()),
+                Ok(Ok(rows)) => {
+                    // A host that left and registered again (another boot) is expected again.
+                    self.core.set_host_boots(rows.iter().map(|r| (r.ordinal, r.boot)).collect());
+                    self.core.set_expected_hosts(rows.iter().filter(|r| !r.clean).map(|r| r.ordinal).collect());
+                }
                 Ok(Err(e)) => {
                     self.core.expected_hosts_unknown();
                     self.warn_cuts(now, &format!("the hosts could not be read ({e}); no world cut until they are"));

@@ -3958,7 +3958,8 @@ fn region_woken_in_the_lead_window_is_owned_by_exactly_one_part() {
 /// Fix round 2: a person's bundle is never a cut row — neither a one-phase cut's row for a
 /// transfer to another host that is not acknowledged (`cut_peer_rows`), nor a world cut's
 /// case-3 row (`keep_in_part`): the history respawns people (as `cut_crossing` drops them).
-fn person_never_a_row(rig: &mut MultiRig) {
+/// The case: host A's part of the cut was staged (committed or aborted, it is checked).
+fn person_never_a_row(rig: &mut MultiRig) -> bool {
     let (a, b) = host_seam(2, 1);
     let (ha, hb) = (rig.owner(a), rig.owner(b));
     let home_b = rig.homes[hb as usize];
@@ -4001,9 +4002,13 @@ fn person_never_a_row(rig: &mut MultiRig) {
     rig.hosts[ha as usize].manager.send_reliable_for_test(hb, transfer, false);
     rig.hosts[hb as usize].manager.spawner_mut().hold(home_b, 0);
     until_decided(rig, cut);
-    if rig.decided[&cut] {
-        let (_, parts) = rig.last_committed();
-        assert!(part_holds(&parts[&ha], bodies[0]).is_none(), "no row of the person in host {ha}'s part");
+    // Host A's part as it was staged, committed or aborted.
+    let staged = match rig.last_cut.as_ref().filter(|(c, _)| *c == cut) {
+        Some((_, parts)) => parts.get(&ha).cloned(),
+        None => rig.aborted_parts.iter().find(|(c, h, _)| *c == cut && *h == ha).map(|(_, _, p)| p.clone()),
+    };
+    if let Some(part) = &staged {
+        assert!(part_holds(part, bodies[0]).is_none(), "no row of the person in host {ha}'s part");
     }
     // `cut_peer_rows`: the link down, a person walks into the other host; host A's
     // one-phase cut (the other host is no participant of it) writes no row of it.
@@ -4019,10 +4024,146 @@ fn person_never_a_row(rig: &mut MultiRig) {
     assert!(rig.hosts[ha as usize].manager.peer_unreceived_ids().iter().any(|(_, i, _)| *i == id), "queued to host {hb}");
     let one_phase = cut_on(rig, ha as usize);
     assert!(part_holds(&one_phase, id).is_none(), "no row of the person in the one-phase cut");
+    staged.is_some()
 }
 
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn person_bundle_is_never_a_cut_row() {
-    sweep("person_bundle_is_never_a_cut_row", 2, 1, 2, person_never_a_row);
+    sweep_hits("person_bundle_is_never_a_cut_row", 2, 1, 2, person_never_a_row);
+}
+
+/// Task 14: host B leaves in a world cut. A slime sent into B's parked region before the
+/// leave is B's (its mailbox, a row of its leave part); one crossing toward B after host A
+/// began the cut is held back on A (A's part) and never reaches B. Once the cut commits,
+/// A's session with B is held and forgets its mark and everything before it — those all
+/// reached B (B's part needed the mark) — while the held-back slime stays owed, a row of
+/// A's next cut (B absent). A reconnect of B's same boot keeps the session held. The
+/// scenario's case: A's mark was still unacknowledged when B went away (B's
+/// acknowledgements are lost from the cut's begin, [`MultiRig::mute_acks`]).
+fn committed_leave(rig: &mut MultiRig) -> bool {
+    let (a, b) = host_seam(2, 1);
+    let (ha, hb) = (rig.owner(a), rig.owner(b));
+    let home_b = rig.homes[hb as usize];
+    rig.run(a);
+    world_cuts(rig);
+    // B's keeper body parks with B's leave (the keeper's player is the host's ordinal).
+    let mut keeper = None;
+    rig.hosts[hb as usize].manager.spawner_mut().with_region(home_b, |r| {
+        let d = r.data();
+        keeper = d.player_entites.get(&crate::common::rig::CLIENT).and_then(|k| *d.ecs.id.try_get(*k));
+    });
+    rig.player_bodies.insert(keeper.expect("B's keeper body"), game::PlayerId(u64::from(hb)));
+    let early = rig.spawn_slime(a, past_seam(a, b, REGION_SIZE / 3.0));
+    rig.hosts[hb as usize].manager.request_leave();
+    let mut cut = None;
+    for _ in 0..WORLD_CUT_ROUNDS {
+        let leaving = rig.hosts[hb as usize].manager.leaving_cut();
+        if leaving.is_some() && rig.hosts[ha as usize].manager.world_cut() == leaving {
+            cut = leaving;
+            break;
+        }
+        rig.cut_round();
+    }
+    let cut = cut.expect("the leave cut began on both hosts");
+    // B's acknowledgements are lost from now on: what A sends B (its mark too) stays in
+    // A's session, as with a leaver whose last acknowledgements never arrive.
+    rig.mute_acks(hb, ha);
+    // After A began the cut: held back on A.
+    let late = rig.spawn_slime(a, past_seam(a, b, 2.0 * REGION_SIZE / 3.0));
+    let mark = |r: &game::Reliable| matches!(r, game::Reliable::CutMark { cut: c } if *c == cut);
+    let carries = |r: &game::Reliable, id: game::EntityId| matches!(r.inner(), game::Reliable::Transfer { bundle, .. } if bundle.id == id);
+    let mut hit = false;
+    for _ in 0..WORLD_CUT_ROUNDS {
+        assert!(
+            !rig.hosts[hb as usize].manager.pending_arrival_ids().iter().any(|(id, _)| *id == late),
+            "the slime sent after the leave cut began reached the leaving host"
+        );
+        let prepared = |h: u32| matches!(rig.hosts[h as usize].manager.world_cut_state(), Some((c, "prepared")) if c == cut);
+        if rig.decided.contains_key(&cut) || (prepared(ha) && prepared(hb)) {
+            // B exits: its link goes.
+            hit = rig.hosts[ha as usize].manager.peer_owed(hb).iter().any(mark);
+            rig.link_down(ha, hb);
+            break;
+        }
+        rig.cut_round();
+    }
+    if !until_decided(rig, cut) {
+        return false;
+    }
+    for _ in 0..WAIT_ROUNDS {
+        if rig.hosts[ha as usize].manager.peer_left(hb) {
+            break;
+        }
+        rig.cut_round();
+    }
+    assert!(rig.hosts[ha as usize].manager.peer_left(hb), "host {ha} holds its session with the host that left");
+    let owed = rig.hosts[ha as usize].manager.peer_owed(hb);
+    assert!(!owed.iter().any(mark), "the mark is forgotten after the committed leave");
+    assert!(!owed.iter().any(|r| carries(r, early)), "what went before the mark is forgotten");
+    assert!(owed.iter().any(|r| carries(r, late)), "the slime held back is still owed");
+    assert_eq!(rig.stored_places(early), [(hb, b, "row")], "the slime sent before the leave is in B's part");
+    assert!(
+        rig.stored_places(late).iter().all(|(h, _, _)| *h == ha) && rig.stored_places(late).len() == 1,
+        "the slime held back is in A's part only: {:?}",
+        rig.stored_places(late)
+    );
+    // B's process reconnects (the same boot): nothing goes out to it.
+    rig.link_up(ha, hb);
+    for _ in 0..WAIT_ROUNDS {
+        rig.cut_round();
+    }
+    assert!(rig.hosts[ha as usize].manager.peer_left(hb), "still held for the same boot");
+    assert!(
+        rig.hosts[ha as usize].manager.peer_unreceived_ids().contains(&(hb, late, false)),
+        "the held-back slime was never sent"
+    );
+    // A's next cut, B absent: the slime is A's row.
+    until_committed(rig, 1);
+    let (last, parts) = rig.last_committed();
+    assert!(last > cut && !parts.contains_key(&hb), "the next cut is A's alone");
+    assert_eq!(rig.stored_places(late), [(ha, b, "row")], "the slime owed to B is A's row");
+    hit
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn held_session_entries_before_the_mark_are_dropped_after_a_committed_leave() {
+    sweep_hits("held_session_entries_before_the_mark_are_dropped_after_a_committed_leave", 2, 1, SEEDS, committed_leave);
+}
+
+/// Task 14: a transfer arrives on host 0 from host 1 for a region host 2 owns (the hosts'
+/// ownership disagreeing): it is bounced on to host 2, where it lands once — never dropped.
+fn misrouted_transfer(rig: &mut MultiRig) {
+    let home0 = rig.homes[0];
+    let home2 = rig.homes[2];
+    assert_eq!(rig.owner(home2), 2);
+    let id = rig.spawn_slime(home0, [REGION_SIZE / 3.0, crate::common::above_floor_y(), REGION_SIZE / 3.0]);
+    let mut bundle = None;
+    rig.hosts[0].manager.spawner_mut().with_region(home0, |r| {
+        let key = r.data().id_index[&id];
+        bundle = Some(r.data().bundle_of(key));
+        r.with_data(|d| d.remove_entity_safe(key, None));
+    });
+    let mut bundle = bundle.unwrap();
+    // Standing in the middle of `home2`.
+    let y = crate::common::above_floor_y();
+    bundle.body.pose = game::Pose::from_translation(game::rapier3d::math::Vector::new(REGION_SIZE / 2.0, y, REGION_SIZE / 2.0));
+    let stamp = world_tick(rig);
+    let transfer = game::Reliable::Transfer { target: home2, stamp, bundle: Box::new(bundle), player: None };
+    rig.hosts[0].manager.apply_peer_reliable(1, transfer);
+    for _ in 0..CROSS_ROUNDS {
+        if rig.owners_of(id) == [(2, home2)] && rig.peer_unreceived() == 0 {
+            break;
+        }
+        rig.round();
+    }
+    assert_eq!(rig.owners_of(id), [(2, home2)], "bounced on to its owner, once");
+    assert_eq!(live_count(rig, id), 1);
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn transfer_for_a_region_of_a_third_host_is_bounced_to_its_owner() {
+    sweep("transfer_for_a_region_of_a_third_host_is_bounced_to_its_owner", 3, 1, SEEDS / 4, misrouted_transfer);
 }

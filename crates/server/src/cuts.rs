@@ -21,6 +21,18 @@
 //! rollback); `CutAborted` needs no settling. Every store call here is answered on a
 //! receiver: the main loop never waits. A part that keeps the next cuts from being staged
 //! counts toward [`CUT_FAILURES_BEFORE_STUCK`]. With one host nothing of this runs.
+//!
+//! **Leaving** (several hosts, R3 Task 14; [`exit_world`]): an exiting host asks for a leave
+//! cut (`LeaveRequest`); on the `BeginCut` naming it leaving its manager parks everything
+//! (the regions' `Stopped` answers are the cut's) and the part is staged like any other.
+//! Committed: its `hosts` row is clean, it exits 0 and its return keeps the world
+//! generation. No `BeginCut` within [`game::LEAVE_CUT_TIMEOUT_SECS`], or the cut aborted:
+//! it exits 0 without a cut ([`LEFT_WITHOUT_A_CUT`]) — its row stays dirty, so its return
+//! raises the generation and the world rolls back to the last cut.
+//!
+//! **Start-up** ([`resolve_staged_cuts`]): every split-role process finishes the parts a
+//! crash left staged (as their cut's decision says; an undecided cut is aborted) before it
+//! claims, registers or loads anything.
 
 use std::time::{Duration, Instant};
 
@@ -58,6 +70,25 @@ pub const WORLD_PART_POLL: Duration = Duration::from_secs(1);
 
 /// At most one warning per this long about failing reads of a world part's decision.
 pub const WORLD_PART_WARN: Duration = Duration::from_secs(10);
+
+/// What an exiting host of several logs when it leaves with no committed cut.
+pub const LEFT_WITHOUT_A_CUT: &str = "left without a cut: the world rolls back to the last cut when this host returns";
+
+/// Start-up recovery of a split-role process on Postgres, before it claims, registers or
+/// loads anything: every world cut part a crash left staged is finished as its cut's
+/// decision says, an undecided cut aborted (`StoreHandle::resolve_prepared`). Logged per
+/// cut.
+pub fn resolve_staged_cuts(store: &StoreHandle) -> Result<Vec<(CutId, bool)>, StoreError> {
+    let resolved = store.resolve_prepared()?;
+    for (cut, committed) in &resolved {
+        log::warn!(
+            "[server] world cut {} was left staged by a crash: {}",
+            cut.0,
+            if *committed { "committed (it was decided)" } else { "rolled back (undecided: aborted)" }
+        );
+    }
+    Ok(resolved)
+}
 
 /// A store answer on its way.
 type Answer<T> = Receiver<Result<T, StoreError>>;
@@ -117,6 +148,9 @@ pub struct CutWriter {
     /// How long after its prepare a part with no decision stored is aborted by this host
     /// ([`game::WORLD_CUT_DEADLINE_MS`]; a test shortens it).
     part_deadline: Duration,
+    /// How long the exit waits for the `BeginCut` naming this host leaving
+    /// ([`game::LEAVE_CUT_TIMEOUT_SECS`]; a test shortens it).
+    leave_timeout: Duration,
 }
 
 impl CutWriter {
@@ -129,6 +163,7 @@ impl CutWriter {
             part: None,
             warned: None,
             part_deadline: Duration::from_millis(game::WORLD_CUT_DEADLINE_MS),
+            leave_timeout: Duration::from_secs(game::LEAVE_CUT_TIMEOUT_SECS),
         }
     }
 
@@ -147,6 +182,12 @@ impl CutWriter {
     #[doc(hidden)]
     pub fn set_world_part_deadline(&mut self, deadline: Duration) {
         self.part_deadline = deadline;
+    }
+
+    /// Test hook: how long the exit waits for its leave cut to begin.
+    #[doc(hidden)]
+    pub fn set_leave_timeout(&mut self, timeout: Duration) {
+        self.leave_timeout = timeout;
     }
 
     /// The world part not settled yet, if any.
@@ -204,9 +245,7 @@ impl CutWriter {
     /// answer waited for (at most `timeout`); then the store is shut down.
     /// Returns whether the last cut committed.
     ///
-    /// Task 14: with several hosts the exit's save is the leave cut (a world cut in which
-    /// this host parks); until then it is this one-phase cut, refused by the store while a
-    /// world part is undecided.
+    /// With several hosts the exit's save is the leave cut instead ([`exit_world`]).
     pub fn finish<S: RegionSpawner>(mut self, manager: &mut WorldManager<S>, now: Tick, timeout: Duration) -> bool {
         // A cut still pending (waiting for a region that never answered) is
         // given up by the manager at its deadline; a complete one goes first.
@@ -411,7 +450,10 @@ impl CutWriter {
                     // deadline: abort it here (the first decision written wins).
                     let late = part.since.elapsed() >= self.part_deadline;
                     if part.done == Some(false) || late {
-                        log::warn!("[server] world cut {}: no decision stored; this host aborts it", id.0);
+                        if self.warned.is_none_or(|at| at.elapsed() >= WORLD_PART_WARN) {
+                            self.warned = Some(Instant::now());
+                            log::warn!("[server] world cut {}: no decision stored; this host aborts it", id.0);
+                        }
                         part.aborting = Some(self.claims.store().abort_cut_later(id, part.tick));
                     } else if part.done == Some(true) {
                         log::error!("[server] world cut {}: told committed, the store has no decision; asking again", id.0);
@@ -494,6 +536,82 @@ pub fn park_for_exit<S: RegionSpawner>(
     stuck
 }
 
+/// The exit of a host of several (world cuts): it asks for a leave cut and waits — the
+/// regions' outputs, the upkeep (peers, coordinator) and the cut writer running, `idle`
+/// every round — until that cut is settled, it aborted, or no `BeginCut` came within
+/// the leave timeout (see the module docs). A fence or a newer world generation seen
+/// meanwhile ends it as in [`exit_world`].
+fn leave_world<S: RegionSpawner>(
+    manager: &mut WorldManager<S>,
+    mut cuts: CutWriter,
+    region_out: &Receiver<(RegionCoords, RegionOutput)>,
+    now_ms: &impl Fn() -> u64,
+    fenced: &Fenced,
+    world_generation: &WorldGeneration,
+    save_timeout: Duration,
+    mut idle: impl FnMut(&mut WorldManager<S>),
+) -> ServerExit {
+    manager.request_leave();
+    let asked = Instant::now();
+    let mut begun: Option<Instant> = None;
+    loop {
+        idle(manager);
+        if let Ok((rc, output)) = region_out.recv_timeout(EXIT_PARK_POLL) {
+            manager.handle_region_output(rc, output, now_ms());
+            while let Ok((rc, output)) = region_out.try_recv() {
+                manager.handle_region_output(rc, output, now_ms());
+            }
+        }
+        manager.maintain(now_ms());
+        if let Some(generation) = manager.take_higher_generation() {
+            world_generation.note(generation);
+        }
+        if manager.leaving_cut().is_some() {
+            begun.get_or_insert_with(Instant::now);
+            // A region an arrival woke parks again.
+            manager.shutdown_all();
+        }
+        cuts.pump(manager);
+        if fenced.is_set() || cuts.fenced().is_set() {
+            manager.refuse_all_sessions(FENCED_REFUSAL);
+            cuts.finish_without_cut(manager);
+            log::error!("[server] fenced while leaving: nothing more is saved");
+            return ServerExit::Fenced;
+        }
+        if world_generation.is_set() {
+            manager.refuse_all_sessions(ROLLBACK_REFUSAL);
+            cuts.finish_without_cut(manager);
+            log::error!("[server] world rolled back while leaving: another host restarted dirty; nothing more is saved");
+            return ServerExit::WorldRolledBack;
+        }
+        let settled = cuts.world_part().is_none();
+        match manager.leave_outcome() {
+            Some(true) if settled => {
+                log::info!("[server] left the world in cut {}: saved", manager.leaving_cut().map_or(0, |c| c.0));
+                cuts.finish_without_cut(manager);
+                return ServerExit::Clean;
+            }
+            Some(false) if settled => {
+                log::error!("[server] the leave cut was aborted: {LEFT_WITHOUT_A_CUT}");
+                cuts.finish_without_cut(manager);
+                return ServerExit::Clean;
+            }
+            _ => {}
+        }
+        let late = match begun {
+            None => asked.elapsed() >= cuts.leave_timeout,
+            // Begun, never decided (the coordinator gone): past the cut's deadline and a save.
+            Some(at) => at.elapsed() >= Duration::from_millis(game::WORLD_CUT_DEADLINE_MS) + save_timeout,
+        };
+        if late {
+            let what = if begun.is_some() { "the leave cut was never decided" } else { "no leave cut began" };
+            log::error!("[server] {what}: {LEFT_WITHOUT_A_CUT}");
+            cuts.finish_without_cut(manager);
+            return ServerExit::Clean;
+        }
+    }
+}
+
 /// What [`exit_world`] works with.
 pub struct ExitParams<'a, NowMs, NowTick> {
     /// The region threads' outputs (their parks).
@@ -532,13 +650,14 @@ pub struct ExitParams<'a, NowMs, NowTick> {
 /// coordinator thread that failed (panicked) makes it
 /// [`ServerExit::CoordinatorFailed`] with no exit cut. A process whose world rolled back to
 /// an earlier generation ([`WorldGeneration`]) is treated like a fenced one (clients refused with
-/// [`ROLLBACK_REFUSAL`]); fenced wins when both are set.
+/// [`ROLLBACK_REFUSAL`]); fenced wins when both are set. A host of several (world cuts)
+/// leaves instead of saving on its own ([`leave_world`], the module docs).
 pub fn exit_world<S: RegionSpawner>(
     manager: &mut WorldManager<S>,
     params: ExitParams<'_, impl Fn() -> u64, impl Fn() -> Tick>,
     idle: impl FnMut(&mut WorldManager<S>),
 ) -> ServerExit {
-    let ExitParams { region_out, now_ms, cuts, coordinator, fenced, world_generation, park_timeout, save_timeout, now_tick } = params;
+    let ExitParams { region_out, now_ms, mut cuts, coordinator, fenced, world_generation, park_timeout, save_timeout, now_tick } = params;
     let fenced_now = fenced.is_set() || cuts.as_ref().is_some_and(|c| c.fenced().is_set());
     if fenced_now {
         manager.refuse_all_sessions(FENCED_REFUSAL);
@@ -564,6 +683,14 @@ pub fn exit_world<S: RegionSpawner>(
         }
         log::error!("[server] world rolled back: another host restarted dirty; nothing more is saved");
         return ServerExit::WorldRolledBack;
+    }
+    if let Some(cuts) = cuts.take_if(|c| c.world_cuts()) {
+        if let Some(coordinator) = coordinator {
+            // A host of several has no coordinator of its own.
+            log::error!("[server] a host of several with an in-process coordinator: it stops without a save");
+            coordinator.stop_without_save();
+        }
+        return leave_world(manager, cuts, region_out, &now_ms, fenced, world_generation, save_timeout, idle);
     }
     let given_up = park_for_exit(manager, region_out, now_ms, park_timeout, idle);
     let coordinator_exit = coordinator.map_or(ServerExit::Clean, |c| c.shutdown(save_timeout));

@@ -147,6 +147,8 @@ fn pump_until(
 /// A host's `WorldManager` (inline regions) with its peer sessions over real links, and
 /// (world cut tests) its cut writer.
 struct Sim {
+    ordinal: u32,
+    boot: u64,
     manager: WorldManager<InlineSpawner>,
     region_out: Receiver<(RegionCoords, RegionOutput)>,
     packets: Receiver<(Option<ClientId>, ServerPacket)>,
@@ -155,10 +157,15 @@ struct Sim {
 
 impl Sim {
     fn new(ordinal: u32, s: u32, boot: u64, generation: u64, links: &mut PeerLinks) -> Sim {
+        Sim::with_spawner(ordinal, s, boot, generation, links, InlineSpawner::default())
+    }
+
+    /// [`Sim::new`] on `spawner` (a restarted host's: its regions from the store).
+    fn with_spawner(ordinal: u32, s: u32, boot: u64, generation: u64, links: &mut PeerLinks, spawner: InlineSpawner) -> Sim {
         let (out_send, packets) = unbounded();
         let (region_out_send, region_out) = unbounded();
         let mut manager = WorldManager::new(
-            InlineSpawner::default().with_stud_genesis(Arc::new(stud_flat_seed)),
+            spawner.with_stud_genesis(Arc::new(stud_flat_seed)),
             out_send,
             region_out_send,
             Box::new(game::NullLodBuilder::default()),
@@ -177,7 +184,7 @@ impl Sim {
             manager.set_peer(other, PeerSession::new(hello, other), link);
         }
         manager.set_host_generation(generation);
-        Sim { manager, region_out, packets, cuts: None }
+        Sim { ordinal, boot, manager, region_out, packets, cuts: None }
     }
 
     /// A keeper client whose body stands in the middle of `rc` (this host's): `rc` runs.
@@ -598,9 +605,11 @@ impl game::WorldLink for SwitchLink {
 struct World {
     pair: Pair,
     seam: (RegionCoords, RegionCoords),
-    coordinator: server::coordinator_rt::ListeningCoordinator,
+    /// `None` while it is down (killed, not restarted yet).
+    coordinator: Option<server::coordinator_rt::ListeningCoordinator>,
     cert: PathBuf,
-    links: Vec<PeerLinks>,
+    /// Each host's peer links (`None`: the host is down).
+    links: Vec<Option<PeerLinks>>,
     claims: Vec<HostClaims>,
     /// The coordinator's own store handle.
     store: StoreHandle,
@@ -611,7 +620,9 @@ struct World {
 
 impl World {
     fn stop(self, dir: &std::path::Path) {
-        assert_eq!(self.coordinator.thread.shutdown(Duration::from_secs(10)), server::claims::ServerExit::Clean);
+        if let Some(c) = self.coordinator {
+            assert_eq!(c.thread.shutdown(Duration::from_secs(10)), server::claims::ServerExit::Clean);
+        }
         drop(self.pair);
         drop(self.links);
         self.store.shutdown();
@@ -666,7 +677,8 @@ fn world(db: &PgDb, dir: &std::path::Path) -> World {
         sim.cuts = Some(server::cuts::CutWriter::with_world_cuts(c.clone(), generation));
     }
     pair.until("both hosts attached", |p| p.sims.iter().all(|s| s.manager.world_attached()));
-    World { pair, seam, coordinator, cert, links, claims, store, switches, generations }
+    let links = links.into_iter().map(Some).collect();
+    World { pair, seam, coordinator: Some(coordinator), cert, links, claims, store, switches, generations }
 }
 
 /// Two real hosts and a real coordinator: a world cut is picked by the coordinator,
@@ -681,6 +693,7 @@ fn two_hosts_commit_one_world_cut() {
     let w = world(&db, &dir);
     let (a, b) = w.seam;
     let World { mut pair, coordinator, links, claims, store, .. } = w;
+    let coordinator = coordinator.unwrap();
     pair.until("a world cut committed", |_| decisions(&db).iter().any(|(_, _, c)| *c));
     pair.until("both hosts settled it", |p| p.sims.iter().all(|s| s.cuts.as_ref().unwrap().world_part().is_none()));
     let committed: Vec<(i64, i64, bool)> = decisions(&db).into_iter().filter(|(_, _, c)| *c).collect();
@@ -721,6 +734,7 @@ fn a_cut_with_one_host_detached_is_aborted_and_leaves_nothing_staged() {
     let Some(db) = PgDb::create("wdet") else { return };
     let dir = scratch("wdet");
     let World { mut pair, coordinator, cert, links, claims, store, switches, .. } = world(&db, &dir);
+    let coordinator = coordinator.unwrap();
     pair.until("host 0 takes part in a world cut", |p| p.sims[0].manager.world_cut().is_some());
     let running = coordinator.thread.inspect(|c| c.world_cut_running(), WAIT).flatten().expect("a world cut runs");
     switches[1].drop_link();
@@ -810,7 +824,7 @@ fn host_told_aborted_without_a_stored_decision_aborts_it_itself() {
     w.store.fail_next_decisions(u32::MAX);
     let cut = until_part(&mut w, 0, &["prepared"]);
     assert_eq!(decision_of(&db, cut), None, "undecided");
-    w.coordinator.thread.with_core(move |c| c.cut_outcome(0, cut, false), WAIT).expect("the core answers");
+    w.coordinator.as_ref().unwrap().thread.with_core(move |c| c.cut_outcome(0, cut, false), WAIT).expect("the core answers");
     w.pair.until("host 0 settled its part", |p| p.sims[0].cuts.as_ref().unwrap().world_part().is_none());
     assert_eq!(decision_of(&db, cut), Some(false), "host 0 recorded the abort");
     w.pair.until("host 1 settled its part too", |p| p.sims[1].cuts.as_ref().unwrap().world_part().is_none());
@@ -919,7 +933,7 @@ fn lost_cut_done_is_settled_from_the_store() {
     w.pair.until("host 1 settled its part with its link down", |p| p.sims[1].cuts.as_ref().unwrap().world_part().is_none());
     assert!(!w.pair.sims[1].manager.world_attached(), "host 1's link is still down");
     assert_eq!(prepared(&db), 0, "nothing stays prepared");
-    let link = quic_world_link(w.coordinator.addr, w.cert.clone(), 1, 1001, w.claims[1].fence().claim_epoch());
+    let link = quic_world_link(w.coordinator.as_ref().unwrap().addr, w.cert.clone(), 1, 1001, w.claims[1].fence().claim_epoch());
     w.switches[1].replace(link);
     w.until_committed_after(&db, cut.0 as i64);
     w.stop(&dir);
@@ -945,4 +959,559 @@ fn host_hearing_nothing_past_the_deadline_aborts_the_cut_itself() {
     w.until_committed_after(&db, cut.0 as i64);
     assert_eq!(prepared(&db), 0, "nothing stays prepared");
     w.stop(&dir);
+}
+
+// ---- leaving and crashes (Task 14) -----------------------------------------------------
+
+/// The world tick of the first host still up (what a restarted host's clock joins).
+fn live_tick(w: &mut World) -> u64 {
+    w.pair.sims.first_mut().map_or(0, |s| s.manager.spawner_mut().world_tick())
+}
+
+/// The seam region host `h` owns.
+fn seam_of(w: &World, h: u32) -> RegionCoords {
+    let (a, b) = w.seam;
+    let owner = Ownership::Static { ordinal: h, hosts: HOSTS };
+    if owner.owns(a, w.claims[h as usize].store().super_region_regions()) {
+        a
+    } else {
+        b
+    }
+}
+
+/// Host `h`'s simulation, if it is up.
+fn sim(w: &mut World, h: u32) -> &mut Sim {
+    w.pair.sims.iter_mut().find(|s| s.ordinal == h).expect("the host is up")
+}
+
+/// Host `h` crashes: its manager and cut writer go with nothing saved (what it staged
+/// stays staged), its peer listener and its link to the coordinator drop. Its store
+/// handle is shut down (a dead process's connections close).
+fn kill_host(w: &mut World, h: u32) {
+    let i = w.pair.sims.iter().position(|s| s.ordinal == h).expect("the host is up");
+    drop(w.pair.sims.remove(i));
+    w.switches[h as usize].drop_link();
+    w.links[h as usize] = None;
+}
+
+/// The coordinator process crashes (nothing more handled, saved or sent; its hosts'
+/// links drop).
+fn kill_coordinator(w: &mut World) {
+    w.coordinator.take().expect("the coordinator is up").thread.kill();
+    for switch in &w.switches {
+        switch.drop_link();
+    }
+}
+
+/// A coordinator process starts again on `store`, once that store's staged parts were
+/// resolved (as `run_coordinator` does first, [`server::roles::recover_staged_cuts`]): its
+/// row claimed, it listens; every host up gets a link to it.
+fn restart_coordinator_listening(w: &mut World, store: StoreHandle) {
+    let start = server::world_file::ensure_coordinator_state(&store, &land_map(), None).unwrap().expect("a history");
+    let tick = w.pair.tick.clone();
+    let cuts = server::coordinator_rt::WorldCuts {
+        every: CUT_EVERY,
+        tick: Box::new(move || tick.load(std::sync::atomic::Ordering::SeqCst)),
+    };
+    let coordinator = server::coordinator_rt::start_listening_with(
+        store.clone(),
+        start,
+        "127.0.0.1:0".parse().unwrap(),
+        TOKEN.into(),
+        Some(w.cert.clone()),
+        server::claims::Fenced::default(),
+        Some(cuts),
+    )
+    .expect("the coordinator listens");
+    let old = std::mem::replace(&mut w.store, store);
+    old.shutdown();
+    for sim in &w.pair.sims {
+        let epoch = w.claims[sim.ordinal as usize].fence().claim_epoch();
+        w.switches[sim.ordinal as usize].replace(quic_world_link(coordinator.addr, w.cert.clone(), sim.ordinal, sim.boot, epoch));
+    }
+    w.coordinator = Some(coordinator);
+}
+
+/// Host `h` starts again as boot `boot`, in `server::run`'s order: the parts a crash left
+/// staged resolved, its super-regions claimed, its row registered (with its peer
+/// listener), its regions and in-flight rows from the store, its clock joining the live
+/// hosts', a link to the coordinator (if one is up), its cut writer, its keeper. Its
+/// registration.
+fn restart_host(w: &mut World, db: &PgDb, dir: &std::path::Path, h: u32, boot: u64) -> world_store::HostBoot {
+    let first = db.open();
+    server::roles::recover_staged_cuts(&first, HOSTS).expect("the staged parts are resolved");
+    first.shutdown();
+    let (store, claims) = claim(db, h);
+    let mut links = start_links(&claims, h, boot, TOKEN, dir, "127.0.0.1:0");
+    let registered = links.registered();
+    let s = store.super_region_regions();
+    let owner = Ownership::Static { ordinal: h, hosts: HOSTS };
+    let stored = store.stored_regions().unwrap();
+    let regions: std::collections::BTreeMap<RegionCoords, game::StoredRegion> = stored
+        .keys()
+        .filter(|rc| owner.owns(**rc, s))
+        .filter_map(|rc| claims.load_region(*rc).unwrap().map(|r| (*rc, r)))
+        .collect();
+    let mut spawner = InlineSpawner::with_portable(regions);
+    let target = live_tick(w);
+    while spawner.world_tick() < target {
+        spawner.tick_all();
+    }
+    let mut sim = Sim::with_spawner(h, s, boot, registered.generation, &mut links, spawner);
+    sim.manager.set_stored_regions(stored);
+    sim.manager.restore_in_flight(store.load_in_flight(claims.fence().in_flight_scope()).unwrap());
+    let switch = SwitchLink(Arc::new(std::sync::Mutex::new((None, 0))));
+    if let Some(c) = &w.coordinator {
+        switch.replace(quic_world_link(c.addr, w.cert.clone(), h, boot, claims.fence().claim_epoch()));
+    }
+    w.switches[h as usize] = switch.clone();
+    sim.manager.set_world_link(Box::new(switch), boot, 0);
+    sim.manager.set_world_map(land_map());
+    let generation = server::claims::WorldGeneration::new(registered.generation);
+    w.generations[h as usize] = generation.clone();
+    sim.cuts = Some(server::cuts::CutWriter::with_world_cuts(claims.clone(), generation));
+    let rc = seam_of(w, h);
+    let (player, _) = store.resolve_player(&format!("hosts-test-keeper-{h}")).unwrap();
+    let now = w.pair.now();
+    sim.keep(player, rc, now);
+    let i = w.pair.sims.iter().position(|s| s.ordinal > h).unwrap_or(w.pair.sims.len());
+    w.pair.sims.insert(i, sim);
+    w.links[h as usize] = Some(links);
+    let old = std::mem::replace(&mut w.claims[h as usize], claims);
+    old.store().clone().shutdown();
+    registered
+}
+
+/// Host `h` exits (`cuts::exit_world`), the other hosts still running round by round
+/// meanwhile; its outcome. Its peer listener and coordinator link go with it.
+fn exit_host(w: &mut World, h: u32) -> server::claims::ServerExit {
+    let i = w.pair.sims.iter().position(|s| s.ordinal == h).expect("the host is up");
+    let mut sim = w.pair.sims.remove(i);
+    let fenced = w.claims[h as usize].fenced().clone();
+    let generation = w.generations[h as usize].clone();
+    let started = w.pair.started;
+    let region_out = sim.region_out.clone();
+    let cuts = sim.cuts.take();
+    let pair = &mut w.pair;
+    let exit = server::cuts::exit_world(
+        &mut sim.manager,
+        server::cuts::ExitParams {
+            region_out: &region_out,
+            now_ms: || started.elapsed().as_millis() as u64,
+            cuts,
+            coordinator: None,
+            fenced: &fenced,
+            world_generation: &generation,
+            park_timeout: server::cuts::EXIT_PARK_TIMEOUT,
+            save_timeout: Duration::from_secs(10),
+            now_tick: || 0,
+        },
+        |m| {
+            // Its own regions tick with the others' (one world tick everywhere).
+            m.spawner_mut().tick_all();
+            m.spawner_mut().pump();
+            pair.round();
+        },
+    );
+    w.switches[h as usize].drop_link();
+    w.links[h as usize] = None;
+    exit
+}
+
+/// Rounds until host `h` saw a newer world generation (a peer's hello, or a `BeginCut`):
+/// its rollback flag is set.
+fn until_rolled_back(w: &mut World, h: u32) {
+    let deadline = Instant::now() + WAIT;
+    loop {
+        if let Some(g) = sim(w, h).manager.take_higher_generation() {
+            w.generations[h as usize].note(g);
+        }
+        if w.generations[h as usize].is_set() {
+            return;
+        }
+        assert!(Instant::now() < deadline, "host {h} never saw the newer world generation");
+        w.pair.round();
+    }
+}
+
+/// The running regions of every host up holding `id`, with their host.
+fn holders_all(w: &mut World, id: EntityId) -> Vec<(u32, RegionCoords)> {
+    let mut out = Vec::new();
+    for sim in &mut w.pair.sims {
+        let h = sim.ordinal;
+        out.extend(sim.holders(id).into_iter().map(|rc| (h, rc)));
+    }
+    out
+}
+
+/// A slime spawned in the middle of `rc` (host `h`'s); its id.
+fn spawn_slime_in(w: &mut World, h: u32, rc: RegionCoords, x: f32) -> EntityId {
+    let mut id = None;
+    sim(w, h).manager.spawner_mut().with_region(rc, |region| {
+        let tick = region.current_tick();
+        let pos = game::parry::math::Vector::new(x, game::plate_units(30) + 3.0, REGION_SIZE / 2.0);
+        region.with_data(|d| {
+            let e = d.spawn_slime_safe(pos, 1, 0.0, tick);
+            id = *d.ecs.id.try_get(e);
+        });
+    });
+    id.expect("the slime has an EntityId")
+}
+
+/// `saved_tick` of `rc`'s stored row.
+fn saved_tick(db: &PgDb, rc: RegionCoords) -> i64 {
+    query_i64s(db, &format!("SELECT saved_tick FROM regions WHERE rx = {} AND rz = {}", rc.x, rc.z))[0]
+}
+
+/// The newest committed cut: `(cut, tick)`.
+fn last_committed(db: &PgDb) -> (i64, i64) {
+    decisions(db).into_iter().filter(|(_, _, k)| *k).map(|(c, t, _)| (c, t)).last().expect("a committed cut")
+}
+
+/// The other host (two hosts).
+fn other(h: u32) -> u32 {
+    1 - h
+}
+
+/// After host `dead` came back dirty (its generation one higher): the other host sees the
+/// newer generation, exits `WorldRolledBack` (once), and starts again; both run from the
+/// last committed cut and stay up for 5 s with the world's generation unchanged since.
+fn roll_back_and_restart_the_other(w: &mut World, db: &PgDb, dir: &std::path::Path, dead: u32, generation: u64) {
+    let live = other(dead);
+    until_rolled_back(w, live);
+    assert_eq!(exit_host(w, live), server::claims::ServerExit::WorldRolledBack, "host {live} rolls back");
+    let again = restart_host(w, db, dir, live, 3000 + u64::from(live));
+    assert_eq!((again.generation, again.bumped), (generation, false), "host {live} joins the new generation");
+    w.pair.until("both hosts attached again", |p| p.sims.len() == 2 && p.sims.iter().all(|s| s.manager.world_attached()));
+    let up = Instant::now();
+    while up.elapsed() < Duration::from_secs(5) {
+        w.pair.round();
+        for h in 0..HOSTS {
+            assert_eq!(sim(w, h).manager.take_higher_generation(), None, "host {h} sees no newer generation");
+            assert!(!w.generations[h as usize].is_set(), "host {h} stays up");
+        }
+    }
+    assert_eq!(w.claims[0].store().world_generation().unwrap(), generation, "raised exactly once");
+}
+
+/// Crash table: host 1 dies after its part is staged and the coordinator holds every
+/// `CutPrepared` (before the decision): the cut commits whole; host 1 reboots dirty (the
+/// generation + 1), host 0 rolls back, and both restart from that cut.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn host_killed_after_prepare_cut_commits_and_world_restarts_from_it() {
+    install_props();
+    let Some(db) = PgDb::create("kprep") else { return };
+    let dir = scratch("kprep");
+    let mut w = world(&db, &dir);
+    let generation = w.claims[0].store().world_generation().unwrap();
+    // Host 1's part staged, and the coordinator holds every `CutPrepared` of it (or has
+    // already recorded the commit: the race with the decision's write is the test's).
+    let mut cut = None;
+    let deadline = Instant::now() + WAIT;
+    while cut.is_none() {
+        assert!(Instant::now() < deadline, "no cut had every part staged");
+        if let Some((c, "prepared")) = sim(&mut w, 1).manager.world_cut_state() {
+            let progress = w.coordinator.as_ref().unwrap().thread.inspect(|c| c.world_cut_progress(), WAIT).flatten();
+            let all_at_core = progress.is_some_and(|(r, prepared, _)| r == c && prepared == [0, 1]);
+            if all_at_core || decision_of(&db, c) == Some(true) {
+                cut = Some(c);
+                break;
+            }
+        }
+        w.pair.round();
+    }
+    let cut = cut.unwrap();
+    kill_host(&mut w, 1);
+    w.pair.until("the cut decided", |_| decision_of(&db, cut).is_some());
+    assert_eq!(decision_of(&db, cut), Some(true), "every part was staged: committed");
+    let (_, tick) = last_committed(&db);
+    w.pair.until("host 0 settled it", |p| p.sims[0].cuts.as_ref().unwrap().world_part().is_none());
+    assert_eq!(prepared(&db), 0, "nothing stays prepared");
+    let again = restart_host(&mut w, &db, &dir, 1, 3001);
+    assert_eq!((again.generation, again.bumped), (generation + 1, true), "host 1 came back dirty");
+    roll_back_and_restart_the_other(&mut w, &db, &dir, 1, generation + 1);
+    let (a, b) = w.seam;
+    let (last, _) = last_committed(&db);
+    if last as u64 == cut.0 {
+        for rc in [a, b] {
+            assert_eq!(saved_tick(&db, rc), tick, "{rc:?} is as of the cut");
+        }
+    }
+    w.until_committed_after(&db, last);
+    assert_eq!(prepared(&db), 0, "nothing stays prepared");
+    w.stop(&dir);
+}
+
+/// Crash table: host 1 dies before its part is staged (host 0's may be): the cut is
+/// aborted (host 1's detach), nothing stays prepared; host 1 reboots dirty and every host
+/// rolls back to the previous cut.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn host_killed_before_prepare_cut_is_absent_and_the_world_rolls_back() {
+    install_props();
+    let Some(db) = PgDb::create("kpend") else { return };
+    let dir = scratch("kpend");
+    let mut w = world(&db, &dir);
+    let generation = w.claims[0].store().world_generation().unwrap();
+    w.until_committed_after(&db, 0);
+    let cut = until_part(&mut w, 1, &["pending", "marked"]);
+    kill_host(&mut w, 1);
+    w.pair.until("the cut decided", |_| decision_of(&db, cut).is_some());
+    assert_eq!(decision_of(&db, cut), Some(false), "a part never staged: aborted");
+    w.pair.until("host 0 settled it", |p| p.sims[0].cuts.as_ref().unwrap().world_part().is_none());
+    assert_eq!(prepared(&db), 0, "nothing stays prepared");
+    let (last, tick) = last_committed(&db);
+    let again = restart_host(&mut w, &db, &dir, 1, 3001);
+    assert_eq!((again.generation, again.bumped), (generation + 1, true), "host 1 came back dirty");
+    roll_back_and_restart_the_other(&mut w, &db, &dir, 1, generation + 1);
+    if last_committed(&db).0 == last {
+        let (a, b) = w.seam;
+        for rc in [a, b] {
+            assert_eq!(saved_tick(&db, rc), tick, "{rc:?} is as of the previous cut");
+        }
+    }
+    w.until_committed_after(&db, last);
+    assert_eq!(prepared(&db), 0, "nothing stays prepared");
+    w.stop(&dir);
+}
+
+/// Crash table: the coordinator dies with every part staged and no decision stored (its
+/// decision writes fail): its restart resolves the staged parts first — an abort is
+/// stored, nothing stays prepared — and the hosts, re-attached, hear `CutDone(false)`,
+/// keep everything uncommitted and commit the next cut.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn coordinator_killed_before_the_decision_cut_is_absent() {
+    install_props();
+    let Some(db) = PgDb::create("kcdec") else { return };
+    let dir = scratch("kcdec");
+    let mut w = world(&db, &dir);
+    w.store.fail_next_decisions(u32::MAX);
+    let cut = until_part(&mut w, 0, &["prepared"]);
+    w.pair.until("host 1 staged its part too", |p| matches!(p.sims[1].manager.world_cut_state(), Some((c, "prepared")) if c == cut));
+    assert_eq!(decision_of(&db, cut), None, "undecided");
+    assert_eq!(prepared(&db), 2, "both parts staged");
+    kill_coordinator(&mut w);
+    let store = db.open();
+    server::roles::recover_staged_cuts(&store, HOSTS).expect("the staged parts are resolved");
+    assert_eq!(decision_of(&db, cut), Some(false), "the restart aborted the undecided cut");
+    assert_eq!(prepared(&db), 0, "nothing stays prepared");
+    restart_coordinator_listening(&mut w, store);
+    w.pair.until("both hosts heard the outcome and settled", |p| {
+        p.sims.iter().all(|s| s.manager.world_attached() && s.manager.world_cut() != Some(cut) && s.cuts.as_ref().unwrap().world_part().is_none())
+    });
+    w.until_committed_after(&db, cut.0 as i64);
+    assert_eq!(prepared(&db), 0, "nothing stays prepared");
+    w.stop(&dir);
+}
+
+/// Crash table: the coordinator records a commit and dies after the first `COMMIT
+/// PREPARED` (`stop_after_commit_prepared(1)`): one part is still prepared. Its restart
+/// commits the rest before it does anything else — nothing stays prepared and both
+/// hosts' seam regions carry the cut's tick — and the hosts settle it as committed.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn coordinator_killed_between_commit_prepareds_cut_is_whole() {
+    install_props();
+    let Some(db) = PgDb::create("kccom") else { return };
+    let dir = scratch("kccom");
+    let mut w = world(&db, &dir);
+    w.store.stop_after_commit_prepared(1);
+    // No host round between the decision and the kill: a host's settling would finish
+    // the rest itself.
+    let deadline = Instant::now() + WAIT;
+    let (cut, tick) = loop {
+        assert!(Instant::now() < deadline, "no commit was recorded");
+        if let Some((c, t, _)) = decisions(&db).into_iter().find(|(_, _, k)| *k) {
+            break (c, t);
+        }
+        w.pair.round();
+    };
+    kill_coordinator(&mut w);
+    assert_eq!(prepared(&db), 1, "the coordinator died with one part still prepared");
+    let store = db.open();
+    server::roles::recover_staged_cuts(&store, HOSTS).expect("the staged parts are resolved");
+    assert_eq!(prepared(&db), 0, "the restart committed the rest");
+    let (a, b) = w.seam;
+    for rc in [a, b] {
+        assert!(saved_tick(&db, rc) >= tick, "{rc:?} carries the cut's tick");
+    }
+    restart_coordinator_listening(&mut w, store);
+    w.pair.until("both hosts settled it", |p| {
+        p.sims.iter().all(|s| s.manager.world_cut().map_or(true, |c| c.0 as i64 != cut) && s.cuts.as_ref().unwrap().world_part().is_none())
+    });
+    w.until_committed_after(&db, cut);
+    assert_eq!(prepared(&db), 0, "nothing stays prepared");
+    w.stop(&dir);
+}
+
+/// Crash table: host 1 dies between cuts (nothing staged) with a slime it took over since
+/// the last cut, and restarts: the generation is raised exactly once, host 0 exits
+/// `WorldRolledBack` once and restarts, both stay up, and the slime is in the world
+/// exactly once (where the last cut has it).
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn dirty_restart_rolls_every_host_back_once() {
+    install_props();
+    let Some(db) = PgDb::create("kdirty") else { return };
+    let dir = scratch("kdirty");
+    let mut w = world(&db, &dir);
+    let generation = w.claims[0].store().world_generation().unwrap();
+    let a0 = seam_of(&w, 0);
+    let id = spawn_slime_in(&mut w, 0, a0, REGION_SIZE / 2.0);
+    // A cut with the slime in host 0's region.
+    w.until_committed_after(&db, 0);
+    let (first, _) = last_committed(&db);
+    w.until_committed_after(&db, first);
+    // Over the seam to host 1, then host 1 dies between cuts.
+    let b1 = seam_of(&w, 1);
+    let past = if b1.x > a0.x { REGION_SIZE + game::FLIP_HYSTERESIS + 2.0 } else { -game::FLIP_HYSTERESIS - 2.0 };
+    let along_x = b1.x != a0.x;
+    sim(&mut w, 0).manager.spawner_mut().with_region(a0, |region| {
+        let key = region.data().id_index[&id];
+        let y = game::plate_units(30) + 3.0;
+        let at = if along_x {
+            game::rapier3d::math::Vector::new(past, y, REGION_SIZE / 2.0)
+        } else {
+            game::rapier3d::math::Vector::new(REGION_SIZE / 2.0, y, past)
+        };
+        region.with_data(|d| d.set_body_pose_safe(key, game::Pose::from_translation(at)));
+    });
+    w.pair.until("the slime on host 1, no cut pending", |p| {
+        let on_1 = p.sims[1].holders(id) == [b1];
+        on_1 && p.sims.iter().all(|s| s.manager.world_cut().is_none() && s.manager.peer_unreceived() == 0)
+    });
+    kill_host(&mut w, 1);
+    let again = restart_host(&mut w, &db, &dir, 1, 3001);
+    assert_eq!((again.generation, again.bumped), (generation + 1, true), "host 1 came back dirty: + 1");
+    roll_back_and_restart_the_other(&mut w, &db, &dir, 1, generation + 1);
+    w.pair.until("the slime back in a running region", |p| {
+        p.sims.iter_mut().map(|s| s.holders(id).len()).sum::<usize>() > 0
+    });
+    for _ in 0..40 {
+        w.pair.round();
+    }
+    assert_eq!(holders_all(&mut w, id).len(), 1, "the slime once: {:?}", holders_all(&mut w, id));
+    assert_eq!(prepared(&db), 0, "nothing stays prepared");
+    w.stop(&dir);
+}
+
+/// Host 1 leaves cleanly (`exit_world` with several hosts: a leave cut): it exits 0 with
+/// its row clean. A slime sent toward it meanwhile waits in host 0's session and is host
+/// 0's row in its next cut. Host 1 returns: the generation is unchanged, and the slime
+/// arrives there once.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn clean_leave_and_return_keeps_the_generation_and_delivers_waiting_transfers() {
+    install_props();
+    let Some(db) = PgDb::create("leave") else { return };
+    let dir = scratch("leave");
+    let mut w = world(&db, &dir);
+    let generation = w.claims[0].store().world_generation().unwrap();
+    w.until_committed_after(&db, 0);
+    assert_eq!(exit_host(&mut w, 1), server::claims::ServerExit::Clean, "host 1 left");
+    let clean: Vec<i64> = query_i64s(&db, "SELECT clean FROM hosts WHERE ordinal = 1");
+    assert_eq!(clean, [1], "host 1's row is clean");
+    let (left_in, _) = last_committed(&db);
+    assert_eq!(prepared(&db), 0, "nothing stays prepared");
+    // A slime toward host 1's region: it waits on host 0, a row of host 0's next cut.
+    let (a0, b1) = (seam_of(&w, 0), seam_of(&w, 1));
+    let past = if b1.x != a0.x {
+        if b1.x > a0.x { REGION_SIZE + game::FLIP_HYSTERESIS + 2.0 } else { -game::FLIP_HYSTERESIS - 2.0 }
+    } else {
+        REGION_SIZE / 2.0
+    };
+    let id = spawn_slime_in(&mut w, 0, a0, REGION_SIZE / 2.0);
+    sim(&mut w, 0).manager.spawner_mut().with_region(a0, |region| {
+        let key = region.data().id_index[&id];
+        let y = game::plate_units(30) + 3.0;
+        let at = if b1.x != a0.x {
+            game::rapier3d::math::Vector::new(past, y, REGION_SIZE / 2.0)
+        } else {
+            let z = if b1.z > a0.z { REGION_SIZE + game::FLIP_HYSTERESIS + 2.0 } else { -game::FLIP_HYSTERESIS - 2.0 };
+            game::rapier3d::math::Vector::new(REGION_SIZE / 2.0, y, z)
+        };
+        region.with_data(|d| d.set_body_pose_safe(key, game::Pose::from_translation(at)));
+    });
+    w.pair.until("the slime waits in host 0's session", |p| p.sims[0].manager.peer_unreceived_ids().iter().any(|(_, i, _)| *i == id));
+    w.until_committed_after(&db, left_in);
+    let rows = query_i64s(
+        &db,
+        &format!("SELECT COUNT(*) FROM in_flight WHERE host = 0 AND kind = 0 AND target_rx = {} AND target_rz = {}", b1.x, b1.z),
+    );
+    assert_eq!(rows, [1], "host 0's cut holds the waiting slime as a row");
+    // Host 1 returns.
+    let again = restart_host(&mut w, &db, &dir, 1, 3001);
+    assert_eq!((again.generation, again.bumped), (generation, false), "a clean return keeps the generation");
+    w.pair.until("the slime arrived on host 1", |p| {
+        p.sims.iter().all(|s| s.manager.peer_unreceived() == 0) && p.sims[1].holders(id) == [b1]
+    });
+    for _ in 0..40 {
+        w.pair.round();
+    }
+    // It arrived on host 1 (above); slimes wander, so only once is asserted now.
+    assert_eq!(holders_all(&mut w, id).len(), 1, "once: {:?}", holders_all(&mut w, id));
+    for h in 0..HOSTS {
+        assert!(!w.generations[h as usize].is_set(), "no rollback");
+    }
+    w.until_committed_after(&db, last_committed(&db).0);
+    assert_eq!(prepared(&db), 0, "nothing stays prepared");
+    w.stop(&dir);
+}
+
+/// A host of several exiting with no coordinator to cut for it waits its leave timeout
+/// and exits 0 without a cut: its row stays dirty, so its return raises the generation.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn leave_without_a_coordinator_exits_dirty() {
+    install_props();
+    let Some(db) = PgDb::create("nocoord") else { return };
+    let dir = scratch("nocoord");
+    let (mut pair, _seam, mut links, claims) = two_hosts(&db, &dir);
+    let generation = claims[1].store().world_generation().unwrap();
+    let g1 = server::claims::WorldGeneration::new(links[1].registered().generation);
+    let mut cuts = server::cuts::CutWriter::with_world_cuts(claims[1].clone(), g1.clone());
+    cuts.set_leave_timeout(Duration::from_secs(2));
+    let mut host1 = pair.sims.remove(1);
+    let region_out = host1.region_out.clone();
+    let started = pair.started;
+    let fenced = claims[1].fenced().clone();
+    let begun = Instant::now();
+    let exit = server::cuts::exit_world(
+        &mut host1.manager,
+        server::cuts::ExitParams {
+            region_out: &region_out,
+            now_ms: || started.elapsed().as_millis() as u64,
+            cuts: Some(cuts),
+            coordinator: None,
+            fenced: &fenced,
+            world_generation: &g1,
+            park_timeout: server::cuts::EXIT_PARK_TIMEOUT,
+            save_timeout: Duration::from_secs(10),
+            now_tick: || 0,
+        },
+        |m| {
+            m.spawner_mut().tick_all();
+            m.spawner_mut().pump();
+            pair.round();
+        },
+    );
+    assert_eq!(exit, server::claims::ServerExit::Clean, "exits 0");
+    assert!(begun.elapsed() >= Duration::from_secs(2), "after its leave timeout");
+    assert_eq!(query_i64s(&db, "SELECT clean FROM hosts WHERE ordinal = 1"), [0], "its row stays dirty");
+    drop(host1);
+    links.remove(1);
+    // Its return raises the generation.
+    let (_, c1) = claim(&db, 1);
+    let back = start_links(&c1, 1, 4001, TOKEN, &dir, "127.0.0.1:0");
+    assert_eq!((back.registered().generation, back.registered().bumped), (generation + 1, true));
+    drop(back);
+    drop(pair);
+    drop(links);
+    c1.store().clone().shutdown();
+    for c in claims {
+        c.store().clone().shutdown();
+    }
+    let _ = std::fs::remove_dir_all(&dir);
 }

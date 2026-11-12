@@ -7,6 +7,15 @@
 //! cut at a time: a new one starts only once the last is decided, a period
 //! ([`Coordinator::set_world_cuts`]) after it, and only while every expected host is
 //! attached. With world cuts off (one host, role `all`) nothing here sends anything.
+//!
+//! **Leave cuts (Task 14).** A host about to exit asks to leave ([`HostMsg::LeaveRequest`]):
+//! the requests are collected for [`LEAVE_BATCH_MS`] (from the first), then a cut begins at
+//! once — no period wait, but never beside another cut — with those hosts in `leaving`
+//! (they are among its `hosts` too: each stages a part, having parked everything for it).
+//! Once it commits their `hosts` rows are clean and they are no longer expected (`left`)
+//! until they come back: an `Attach` of another boot, or a `hosts` row of another boot
+//! ([`Coordinator::set_host_boots`]). An aborted leave cut forgets the requests (those hosts
+//! exit without a cut: the world rolls back to the last cut when they return).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -26,6 +35,12 @@ pub const WORLD_CUT_DEADLINE_MS: u64 = 30_000;
 /// from. An older one is looked up in the store by the runtime
 /// ([`Coordinator::take_cut_lookups`]).
 pub const WORLD_CUT_OUTCOMES_KEPT: usize = 64;
+/// How long (wall ms, from the first) the coordinator collects hosts' leave requests
+/// before it begins their leave cut.
+pub const LEAVE_BATCH_MS: u64 = 500;
+/// How long an exiting host (several hosts) waits for the `BeginCut` that names it
+/// leaving; past it, or with that cut aborted, it exits without a cut.
+pub const LEAVE_CUT_TIMEOUT_SECS: u64 = 30;
 
 /// A world cut to decide in the store ([`Coordinator::take_decision`]): record `commit`
 /// for `cut` (`hosts` staged their parts, `leaving` leave in it, the world at
@@ -59,9 +74,9 @@ struct CutRun {
 }
 
 impl CutRun {
-    /// Every host taking part (the leaving ones too).
+    /// Every host taking part (`hosts`: the leaving ones are among them).
     fn participants(&self) -> impl Iterator<Item = u32> + '_ {
-        self.hosts.iter().chain(&self.leaving).copied()
+        self.hosts.iter().copied()
     }
 
     fn has(&self, host: u32) -> bool {
@@ -98,6 +113,13 @@ pub(super) struct WorldCuts {
     outcomes: BTreeMap<CutId, bool>,
     /// `(host, cut)` whose outcome the runtime is to look up in the store.
     lookups: Vec<(u32, CutId)>,
+    /// Hosts asking to leave, with the `clock_ms` of their first request.
+    leave_requests: BTreeMap<u32, u64>,
+    /// Hosts that left in a committed cut, with the boot they left as (`None`: unknown):
+    /// not expected until another boot of theirs attaches or registers.
+    left: BTreeMap<u32, Option<u64>>,
+    /// Each host's boot as its latest `Attach` named it.
+    boots: BTreeMap<u32, u64>,
 }
 
 impl Default for WorldCuts {
@@ -115,6 +137,9 @@ impl Default for WorldCuts {
             run: None,
             outcomes: BTreeMap::new(),
             lookups: Vec::new(),
+            leave_requests: BTreeMap::new(),
+            left: BTreeMap::new(),
+            boots: BTreeMap::new(),
         }
     }
 }
@@ -150,10 +175,54 @@ impl Coordinator {
         self.cuts.world_tick = tick;
     }
 
-    /// Host `host`'s link went down: a cut it takes part in and not decided yet is aborted.
+    /// Host `host`'s link went down: a cut it takes part in and not decided yet is aborted;
+    /// a leave request of it not begun is forgotten (it sends it again with its `Attach`).
     pub fn host_detached(&mut self, host: u32) {
         self.cuts.attached.remove(&host);
+        self.cuts.leave_requests.remove(&host);
         self.abort_for(host, "detached");
+    }
+
+    /// The boot each host's `hosts` row names: a host that left as another boot has
+    /// registered again, and is expected again.
+    pub fn set_host_boots(&mut self, boots: BTreeMap<u32, u64>) {
+        self.cuts.left.retain(|h, left_as| match (boots.get(h), *left_as) {
+            (Some(b), Some(l)) if *b != l => {
+                log::info!("coordinator: host {h} registered again (boot {b}): expected again");
+                false
+            }
+            _ => true,
+        });
+    }
+
+    /// The hosts that left in a committed cut and have not come back.
+    pub fn left_hosts(&self) -> Vec<u32> {
+        self.cuts.left.keys().copied().collect()
+    }
+
+    /// Test support: the running world cut, the hosts whose part is staged, and its
+    /// verdict if taken.
+    #[doc(hidden)]
+    pub fn world_cut_progress(&self) -> Option<(CutId, Vec<u32>, Option<bool>)> {
+        self.cuts.run.as_ref().map(|r| (r.cut, r.prepared.iter().copied().collect(), r.verdict))
+    }
+
+    /// Host `host` asks to leave ([`crate::HostMsg::LeaveRequest`]): it is named `leaving` in
+    /// the next cut, which begins [`LEAVE_BATCH_MS`] after the first request not served.
+    pub(super) fn leave_request(&mut self, host: u32) {
+        if self.cuts.every_ms.is_none() {
+            log::warn!("coordinator: host {host} asks to leave, but world cuts are off; ignored");
+            return;
+        }
+        if self.cuts.left.contains_key(&host) {
+            log::debug!("coordinator: host {host} asks to leave again; it left already");
+            return;
+        }
+        let now = self.clock_ms;
+        self.cuts.leave_requests.entry(host).or_insert_with(|| {
+            log::info!("coordinator: host {host} asks to leave");
+            now
+        });
     }
 
     /// The decision of the running cut, once there is one (all parts staged: commit;
@@ -193,6 +262,17 @@ impl Coordinator {
         if committed {
             self.cuts.lead = WORLD_CUT_LEAD_TICKS;
         }
+        for &h in &run.leaving {
+            self.cuts.leave_requests.remove(&h);
+            if committed {
+                // Its row is clean now: not expected until another boot of it comes.
+                let boot = self.cuts.boots.get(&h).copied();
+                log::info!("coordinator: host {h} left in world cut {}", cut.0);
+                self.cuts.left.insert(h, boot);
+            } else {
+                log::warn!("coordinator: host {h}'s leave cut {} was aborted: it leaves without one", cut.0);
+            }
+        }
         self.cuts.last_ms = self.clock_ms;
         self.remember_outcome(cut, committed);
     }
@@ -222,8 +302,13 @@ impl Coordinator {
     /// An `Attach` of `host`: it is attached; a cut it takes part in and not decided yet
     /// is aborted (its link dropped: messages of the cut may be lost); the cut it says is
     /// pending is answered.
-    pub(super) fn cut_attach(&mut self, host: u32, pending: Option<CutId>) {
+    pub(super) fn cut_attach(&mut self, host: u32, pending: Option<CutId>, boot: u64) {
         self.cuts.attached.insert(host);
+        self.cuts.boots.insert(host, boot);
+        if self.cuts.left.get(&host).is_some_and(|left_as| *left_as != Some(boot)) {
+            log::info!("coordinator: host {host} is back (boot {boot}): expected again");
+            self.cuts.left.remove(&host);
+        }
         self.abort_for(host, "re-attached");
         if let Some(cut) = pending {
             if self.cuts.run.as_ref().is_none_or(|r| r.cut != cut) {
@@ -280,27 +365,43 @@ impl Coordinator {
             return;
         }
         let Some(every) = self.cuts.every_ms else { return };
-        if now_ms < self.cuts.last_ms.saturating_add(every) {
+        // A leave batch due (its first request `LEAVE_BATCH_MS` old) begins at once.
+        let leave_due = self.cuts.leave_requests.values().min().is_some_and(|first| now_ms >= first + LEAVE_BATCH_MS);
+        if !leave_due && now_ms < self.cuts.last_ms.saturating_add(every) {
             return;
         }
         // Every expected host attached, and no attached host outside the set (one that
-        // registered since the last read would run unsaved state beside the cut).
-        if !self.cuts.expected_known
-            || self.cuts.expected.is_empty()
-            || self.cuts.expected != self.cuts.attached
-        {
+        // registered since the last read would run unsaved state beside the cut). A host
+        // that left is neither (its process may still be attached on its way out).
+        let left = &self.cuts.left;
+        let expected: BTreeSet<u32> = self.cuts.expected.iter().copied().filter(|h| !left.contains_key(h)).collect();
+        let attached: BTreeSet<u32> = self.cuts.attached.iter().copied().filter(|h| !left.contains_key(h)).collect();
+        if !self.cuts.expected_known || expected.is_empty() || expected != attached {
             return;
         }
         self.cuts.next += 1;
         let cut = CutId((self.cuts.epoch << 32) | self.cuts.next);
         let tick = self.cuts.world_tick + self.cuts.lead;
-        let hosts: Vec<u32> = self.cuts.expected.iter().copied().collect();
-        // Task 14: the hosts leaving in this cut.
-        let leaving = Vec::new();
+        let hosts: Vec<u32> = expected.iter().copied().collect();
+        // The hosts leaving in this cut (among `hosts`); a request of a host not expected is
+        // dropped (it is not in the cut; it exits without one).
+        let leaving: Vec<u32> = if leave_due {
+            let asked: Vec<u32> = std::mem::take(&mut self.cuts.leave_requests).into_keys().collect();
+            for h in asked.iter().filter(|h| !expected.contains(h)) {
+                log::warn!("coordinator: host {h} asks to leave, but it is not expected; ignored");
+            }
+            asked.into_iter().filter(|h| expected.contains(h)).collect()
+        } else {
+            Vec::new()
+        };
         let generation = self.generation_seen;
-        log::info!("coordinator: world cut {} at tick {tick} (lead {}) of hosts {hosts:?}", cut.0, self.cuts.lead);
+        log::info!(
+            "coordinator: world cut {} at tick {tick} (lead {}) of hosts {hosts:?}, leaving {leaving:?}",
+            cut.0,
+            self.cuts.lead
+        );
         for &h in &hosts {
-            let msg = CoordMsg::BeginCut { cut, tick, hosts: hosts.clone(), leaving: Vec::new(), generation };
+            let msg = CoordMsg::BeginCut { cut, tick, hosts: hosts.clone(), leaving: leaving.clone(), generation };
             self.push(Target::Host(h), msg);
         }
         self.cuts.run = Some(CutRun {

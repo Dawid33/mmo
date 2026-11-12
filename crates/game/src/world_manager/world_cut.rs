@@ -52,6 +52,24 @@
 //! pending fail the part ([`crate::HostMsg::CutFailed`]); the coordinator then aborts the
 //! cut for every participant. A complete part stays until its
 //! [`crate::CoordMsg::CutDone`] ([`WorldManager::take_world_cut_done`]).
+//!
+//! **Leave cuts** (R3 Task 14). A host about to exit asks for one
+//! ([`WorldManager::request_leave`]); on the `BeginCut` naming it in `leaving` it parks every
+//! player and region (their `Stopped` answers are the cut's; nothing is woken for it any
+//! more: a hand-off or move to it parks the player here). For every pair of participants
+//! the leave joins (the leaver and each other one), everything one sends the other from its
+//! `BeginCut` until the cut is decided is that sender's (case 1, or case 3 at once — never
+//! bare: [`WorldManager::world_cut_wrap`]) and is HELD BACK on the sender
+//! ([`WorldManager::hold_for_leave`]); the pair is out of reach meanwhile (no hand-off,
+//! intent or subscribe goes to it). Holding back is what keeps a wrapped message out of the
+//! leaver: it would apply it and take it away when it exits, while the sender's snapshot
+//! holds it and its later cuts no longer do. The marks still go out on the session as
+//! usual. Committed: each side holds its session to the other and forgets its mark and
+//! everything before it (the other side received them all — its part needed the mark;
+//! [`crate::PeerSession::drop_through_mark`]), then queues what it held back behind it: the
+//! staying hosts keep it owed to the leaver's NEXT boot (their rows meanwhile: the leaver is
+//! absent from their cuts) and release the session on that boot's hello. Aborted: what was
+//! held back goes out as usual.
 
 use super::*;
 use crate::{CutFailure, Reliable};
@@ -92,12 +110,25 @@ pub(super) struct WorldCutRun {
 /// it: closer, the cut is missed (its regions may already be past it).
 pub const WORLD_CUT_MIN_LEAD_TICKS: crate::Tick = SAVE_CUT_LEAD_TICKS / 2;
 
+/// How many of its latest world cuts' marks a host remembers ([`WorldManager::marks_queued`]).
+pub const MARKS_QUEUED_KEPT: usize = 16;
+
+/// A peer joined to this host by a leave of the pending world cut (one of the two leaves):
+/// what this host sends it from its `BeginCut` until the cut is decided.
+#[derive(Debug)]
+pub(super) struct LeavePair {
+    pub cut: CutId,
+    /// Held back, in order (each already wrapped: this host accounts for it in `cut`).
+    pub held: Vec<Reliable>,
+}
+
 impl<S: RegionSpawner> WorldManager<S> {
     /// Take part in world cut `cut` at world tick `tick` with `hosts` (`leaving`: the
-    /// hosts leaving in it — Task 14: treated as participants for now). `Missed` when
-    /// `tick` is closer than [`WORLD_CUT_MIN_LEAD_TICKS`] or past; `Aborted` while another
-    /// cut is pending here (it is left untouched), when a participant is not reachable or a
-    /// region thread is dead.
+    /// hosts leaving in it, among them — a leaving host parks everything for it; every pair
+    /// a leave joins holds back what it sends: the module docs). `Missed` when `tick` is
+    /// closer than [`WORLD_CUT_MIN_LEAD_TICKS`] or past; `Aborted` while another cut is
+    /// pending here (it is left untouched), when a participant is not reachable, a region
+    /// thread is dead, or this host is named leaving without having asked.
     pub fn begin_world_cut(
         &mut self,
         cut: CutId,
@@ -123,10 +154,14 @@ impl<S: RegionSpawner> WorldManager<S> {
             log::warn!("world cut {}: a peer's wrapped message of it came before its BeginCut; missed", cut.0);
             return Err(CutFailure::Missed);
         }
-        // Task 14: a leaving host takes part like any participant for now.
         let all: BTreeSet<u32> = hosts.iter().chain(leaving).copied().collect();
         if !all.contains(&me) {
             log::error!("world cut {}: host {me} is not among its hosts {hosts:?}; refused", cut.0);
+            return Err(CutFailure::Aborted);
+        }
+        let i_leave = leaving.contains(&me);
+        if i_leave && !self.leave_requested {
+            log::error!("world cut {}: names host {me} leaving, which it never asked; refused", cut.0);
             return Err(CutFailure::Aborted);
         }
         let peers: BTreeSet<u32> = all.into_iter().filter(|h| *h != me).collect();
@@ -149,9 +184,134 @@ impl<S: RegionSpawner> WorldManager<S> {
         if let Some(run) = self.world_cut.as_mut().filter(|r| r.cut == cut) {
             run.beginning = false;
         }
+        // A leave joins this host and a peer when either leaves: everything this host sends
+        // that peer from now until the cut is decided waits here, in this host's part.
+        let peers: Vec<u32> = self.world_cut_peers(cut).into_iter().collect();
+        for p in peers.into_iter().filter(|p| i_leave || leaving.contains(p)) {
+            self.leave_pairs.insert(p, LeavePair { cut, held: Vec::new() });
+        }
+        if i_leave {
+            // Everything here parks for it: the regions' `Stopped` answers are the cut's.
+            log::info!("[server] world cut {} at tick {tick}: this host leaves in it; parking everything", cut.0);
+            self.leaving_cut = Some(cut);
+            let now_ms = self.clock_ms;
+            self.park_all_players(now_ms);
+            self.shutdown_all();
+        }
         log::debug!("[server] world cut {} at tick {tick} begun", cut.0);
         self.try_complete_cut();
         Ok(())
+    }
+
+    /// This host is about to exit (several hosts): it asks the coordinator for a cut it
+    /// leaves in ([`crate::HostMsg::LeaveRequest`]; sent with the next `Attach` if the link
+    /// is down). The server then waits for [`Self::leave_outcome`].
+    pub fn request_leave(&mut self) {
+        if !self.leave_requested {
+            log::info!("[server] asking the coordinator for a leave cut");
+        }
+        self.leave_requested = true;
+        self.world_send(HostMsg::LeaveRequest);
+    }
+
+    /// The world cut this host leaves in, once begun (everything here parked for it).
+    pub fn leaving_cut(&self) -> Option<CutId> {
+        self.leaving_cut
+    }
+
+    /// The leave cut's outcome once the server settled it ([`Self::cut_committed`] /
+    /// [`Self::cut_failed`]): `true` = this host's part is in the world, it may exit clean.
+    pub fn leave_outcome(&self) -> Option<bool> {
+        self.leave_outcome
+    }
+
+    /// The server settled world cut `id` (`committed` or not): the leave cut's outcome.
+    pub(super) fn note_leave_settled(&mut self, id: CutId, committed: bool) {
+        if self.leaving_cut == Some(id) && self.leave_outcome.is_none() {
+            self.leave_outcome = Some(committed);
+        }
+    }
+
+    /// Whether `ordinal` is out of reach for a leave: joined by the pending world cut's
+    /// leave, or left (until its next boot). Nothing new is handed to it.
+    pub(super) fn leave_blocks(&self, ordinal: u32) -> bool {
+        self.leave_pairs.contains_key(&ordinal) || self.left_peers.contains_key(&ordinal)
+    }
+
+    /// `msg` to `ordinal`, joined by a leave of the pending world cut: held back (`None`)
+    /// until the cut is decided; anything else is given back to be queued.
+    pub(super) fn hold_for_leave(&mut self, ordinal: u32, msg: Reliable) -> Option<Reliable> {
+        match self.leave_pairs.get_mut(&ordinal) {
+            Some(pair) => {
+                pair.held.push(msg);
+                None
+            }
+            None => Some(msg),
+        }
+    }
+
+    /// World cut `cut` is decided: each leave it joined this host in ends. Committed: the
+    /// session is held (the leaver's process is gone or going), what it holds up to this
+    /// host's mark is forgotten (every entry before the mark reached the other side: its
+    /// part needed the mark) and what was held back follows, owed to the leaver's next boot
+    /// (this host's rows meanwhile). Aborted: what was held back goes out now.
+    fn end_leaves(&mut self, cut: CutId, committed: bool) {
+        let pairs: Vec<u32> = self.leave_pairs.iter().filter(|(_, p)| p.cut == cut).map(|(o, _)| *o).collect();
+        let me_leaving = self.leaving_cut == Some(cut);
+        for ordinal in pairs {
+            let pair = self.leave_pairs.remove(&ordinal).expect("listed");
+            if let Some(peer) = self.peers.get_mut(&ordinal) {
+                if committed {
+                    peer.session.hold();
+                    peer.session.drop_through_mark(cut);
+                } else {
+                    peer.session.release();
+                }
+            }
+            if committed && !me_leaving {
+                let boot = self.peer_boots.get(&ordinal).copied();
+                log::info!(
+                    "[server] host {ordinal} left in world cut {}: {} message(s) wait for its return",
+                    cut.0,
+                    pair.held.len()
+                );
+                self.left_peers.insert(ordinal, boot);
+            }
+            for msg in pair.held {
+                self.queue_now(ordinal, msg);
+            }
+        }
+    }
+
+    /// Host `from`'s hello of boot `boot`: a host that left comes back as another boot —
+    /// its held session goes out again.
+    pub(super) fn peer_hello_boot(&mut self, from: u32, boot: u64) {
+        self.peer_boots.insert(from, boot);
+        let back = self.left_peers.get(&from).is_some_and(|left_as| *left_as != Some(boot));
+        if back {
+            self.left_peers.remove(&from);
+            if let Some(peer) = self.peers.get_mut(&from) {
+                log::info!("[server] host {from} is back (boot {boot}): what waited for it goes out");
+                peer.session.release();
+            }
+        }
+    }
+
+    /// Test support: whether this host's session with `ordinal` is held for a leave.
+    #[doc(hidden)]
+    pub fn peer_left(&self, ordinal: u32) -> bool {
+        self.left_peers.contains_key(&ordinal)
+    }
+
+    /// Test support: the reliable messages this host owes `ordinal` (its session's and the
+    /// ones a leave holds back), in order.
+    #[doc(hidden)]
+    pub fn peer_owed(&self, ordinal: u32) -> Vec<Reliable> {
+        let mut out: Vec<Reliable> =
+            self.peers.get(&ordinal).map(|p| p.session.unreceived().cloned().collect()).unwrap_or_default();
+        out.extend(self.peer_waiting.get(&ordinal).into_iter().flatten().cloned());
+        out.extend(self.leave_pairs.get(&ordinal).into_iter().flat_map(|p| p.held.iter().cloned()));
+        out
     }
 
     /// The world cut this host takes part in (until its `CutDone`, or a local failure).
@@ -232,6 +392,7 @@ impl<S: RegionSpawner> WorldManager<S> {
         }
         self.world_cut_seen = Some(self.world_cut_seen.map_or(cut, |s| s.max(cut)));
         self.early_marks.retain(|_, c| *c > cut);
+        self.end_leaves(cut, committed);
         self.world_cut_done.push((cut, committed));
     }
 
@@ -273,6 +434,9 @@ impl<S: RegionSpawner> WorldManager<S> {
             log::debug!("[server] world cut {}: every region answered; marks to {peers:?}", id.0);
             let now = self.spawner.world_tick();
             self.marks_queued.push((id, now));
+            if self.marks_queued.len() > MARKS_QUEUED_KEPT {
+                self.marks_queued.remove(0);
+            }
             for p in peers {
                 self.queue_now(p, Reliable::CutMark { cut: id });
             }
@@ -307,10 +471,13 @@ impl<S: RegionSpawner> WorldManager<S> {
             return (msg, self.inbound_accounted);
         };
         let (cut, tick) = (run.cut, run.tick);
+        // To (or from) a host leaving in this cut nothing goes bare: it is held back until
+        // the cut is decided (`hold_for_leave`), so it is this part's (case 1 or 3).
+        let leave = self.leave_pairs.contains_key(&ordinal);
         match run.state {
             PartState::Complete | PartState::Prepared | PartState::Failed => (msg, Some(cut)),
             PartState::Pending if view => (msg, Some(cut)),
-            PartState::Pending if !run.mark_sent => {
+            PartState::Pending if !run.mark_sent && !leave => {
                 if let Some(player) = reliable_player(&msg) {
                     if let Some(pending) = self.pending_cut.as_mut() {
                         pending.not_ours.insert(player, None);
@@ -458,8 +625,8 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.in_flight.iter().map(|(id, f)| (*id, f.accounted_in)).collect()
     }
 
-    /// Test support: every world cut this host queued its marks of, with the world tick it
-    /// did so at.
+    /// Test support: the latest world cuts this host queued its marks of (at most
+    /// [`MARKS_QUEUED_KEPT`]), with the world tick it did so at.
     #[doc(hidden)]
     pub fn marks_queued(&self) -> &[(CutId, crate::Tick)] {
         &self.marks_queued

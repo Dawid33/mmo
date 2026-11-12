@@ -354,6 +354,26 @@ impl WorldLink for QuicWorldLink {
     }
 }
 
+/// Why several hosts refuse a Postgres without two-phase commit.
+pub const SEVERAL_HOSTS_NEED_TWO_PHASE: &str =
+    "several hosts (VOXEL_HOSTS > 1) need Postgres with max_prepared_transactions > 0 (their world cuts are staged in two phases)";
+
+/// Start-up of a split-role process on Postgres, before any claim, registration or region
+/// load: every world cut part a crash left staged is finished
+/// ([`crate::cuts::resolve_staged_cuts`]); with several hosts (`hosts` > 1) two-phase commit
+/// must be available ([`SEVERAL_HOSTS_NEED_TWO_PHASE`]). `Err`: why the process must not start.
+pub fn recover_staged_cuts(store: &world_store::StoreHandle, hosts: u32) -> Result<(), String> {
+    if hosts > 1 {
+        store.two_phase_ready().map_err(|e| format!("{SEVERAL_HOSTS_NEED_TWO_PHASE}: {e}"))?;
+    }
+    match crate::cuts::resolve_staged_cuts(store) {
+        Ok(_) => Ok(()),
+        // One host on a server without prepared transactions has none to resolve.
+        Err(world_store::StoreError::Unsupported(_)) if hosts <= 1 => Ok(()),
+        Err(e) => Err(format!("the world cut parts left staged could not be resolved: {e}")),
+    }
+}
+
 /// `VOXEL_ROLE=coordinator`: the world coordinator alone. Opens the Postgres world
 /// store, claims the coordinator row, loads (or migrates, or bootstraps) its state and
 /// serves hosts on [`COORDINATOR_BIND_ENV`] until a stop signal (an orderly stop saves
@@ -369,6 +389,11 @@ pub fn run_coordinator() -> ServerExit {
     let opened = world_file::open_world(&source, &worldgen::forge::ForgeParams::default()).unwrap_or_else(|e| fatal(e));
     let store = opened.store.clone().expect("a Postgres world has a store");
     let map = opened.map.clone().expect("a stored world has a map");
+    // Several hosts (`VOXEL_HOSTS` > 1): this coordinator runs their world cuts, every save
+    // period, at the world tick of its own clock (one host saves on its own).
+    let hosts = std::env::var(game::ownership::HOSTS_ENV).ok().and_then(|v| v.trim().parse::<u32>().ok()).unwrap_or(1);
+    // Before it claims the coordinator row: the world cut parts a crash left staged.
+    recover_staged_cuts(&store, hosts).unwrap_or_else(|e| fatal(e));
     let (clock, phase) = start_clock(Role::Coordinator, Some(&store), true, opened.world_tick).unwrap_or_else(|e| fatal(e));
     let clock = CoordinatorClock::new(clock, phase);
     log::info!("[coordinator] world clock anchored: world tick {}", clock.world_tick_now());
@@ -384,9 +409,6 @@ pub fn run_coordinator() -> ServerExit {
         std::fs::create_dir_all(dir).unwrap_or_else(|e| fatal(format!("{}: {e}", dir.display())));
     }
     let fenced = Fenced::default();
-    // Several hosts (`VOXEL_HOSTS` > 1): this coordinator runs their world cuts, every save
-    // period, at the world tick of its own clock (one host saves on its own).
-    let hosts = std::env::var(game::ownership::HOSTS_ENV).ok().and_then(|v| v.trim().parse::<u32>().ok()).unwrap_or(1);
     let cuts = (hosts > 1).then(|| crate::coordinator_rt::WorldCuts {
         every: Duration::from_secs(crate::world_save_secs(std::env::var(crate::WORLD_SAVE_SECS_ENV).ok().as_deref())),
         tick: Box::new(move || clock.world_tick_now()),

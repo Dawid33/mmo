@@ -80,6 +80,8 @@ pub struct Strip {
     pub armed: bool,
     pub after_mark: bool,
     pub stripped: usize,
+    /// While set, the acknowledgements this end sends are lost ([`MultiRig::mute_acks`]).
+    pub mute_acks: bool,
 }
 
 /// One end of a link the rig keeps a handle on (to take it down, read its transit), and
@@ -96,6 +98,9 @@ impl PeerLink for SharedEnd {
     fn send(&mut self, msg: PeerMsg) {
         let msg = {
             let mut strip = self.1.lock().unwrap_or_else(|e| e.into_inner());
+            if strip.mute_acks && matches!(msg, PeerMsg::Ack { .. }) {
+                return;
+            }
             match msg {
                 PeerMsg::Reliable { body: Reliable::CutMark { cut }, seq } if strip.armed => {
                     strip.after_mark = true;
@@ -387,7 +392,13 @@ impl MultiRig {
     /// Arm the [`Strip`] hook of the link `from` → `to`.
     pub fn strip_next_wrapper(&mut self, from: u32, to: u32) {
         let mut strip = self.strips[&(from, to)].lock().unwrap();
-        *strip = Strip { armed: true, after_mark: false, stripped: strip.stripped };
+        *strip = Strip { armed: true, after_mark: false, stripped: strip.stripped, mute_acks: strip.mute_acks };
+    }
+
+    /// From now on the acknowledgements host `from` sends host `to` are lost: what `to`
+    /// sent stays unacknowledged in its session.
+    pub fn mute_acks(&mut self, from: u32, to: u32) {
+        self.strips[&(from, to)].lock().unwrap().mute_acks = true;
     }
 
     /// Wrappers the `from` → `to` hook stripped so far.
@@ -482,7 +493,7 @@ impl MultiRig {
             }
             return Err(format!("cut {} was decided aborted before this part prepared", cut.id.0));
         }
-        // Criterion C: every host takes part in the rig's cuts, so a part writes no row for
+        // Criterion C: every host takes part in the rig's cuts (but one that left), so a part writes no row for
         // what is in transit to another participant — except what it sent wrapped after its
         // own mark (the ruling's case 3), whose stamp / due it raised to the cut tick.
         for row in &cut.in_flight {
@@ -492,8 +503,10 @@ impl MultiRig {
                 InFlightRow::Intent { target, msg: IntentMsg::Reply(s) } => (*target, s.due),
             };
             let owner = self.hosts[0].manager.owner_of(target);
+            // A host that left (Task 14) takes no part: what waits for it is the sender's row.
+            let absent = self.hosts[h as usize].manager.peer_left(owner);
             assert!(
-                owner == h || at >= cut.tick,
+                owner == h || at >= cut.tick || absent,
                 "cut {}: host {h}'s part has a row for {target:?} (host {owner}'s) due at {at}, before the cut tick {}",
                 cut.id.0,
                 cut.tick

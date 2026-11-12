@@ -1028,9 +1028,24 @@ pub struct WorldManager<S: RegionSpawner> {
     /// while that cut was not pending here: this host is too late for it — a `BeginCut` of
     /// it (or an earlier one) is answered `Missed` (`world_cut.rs`).
     wrapper_seen: Option<CutId>,
-    /// Every world cut this host queued its marks of, with the world tick it did so at
-    /// (test support: [`Self::marks_queued`]).
+    /// The latest world cuts this host queued its marks of (at most
+    /// [`world_cut::MARKS_QUEUED_KEPT`]), with the world tick it did so at (test support:
+    /// [`Self::marks_queued`]).
     marks_queued: Vec<(CutId, crate::Tick)>,
+    /// This host asked to leave ([`Self::request_leave`]).
+    leave_requested: bool,
+    /// The world cut this host leaves in (begun: everything here parked for it).
+    leaving_cut: Option<CutId>,
+    /// The outcome of [`Self::leaving_cut`] once the server settled it.
+    leave_outcome: Option<bool>,
+    /// Per peer: a leave of the pending world cut joins this host and it (either leaves);
+    /// what this host sends it meanwhile waits here (`world_cut.rs`, leave cuts).
+    leave_pairs: BTreeMap<u32, world_cut::LeavePair>,
+    /// Peers that left in a committed cut, with the boot they left as: their session is
+    /// held until a hello of another boot.
+    left_peers: BTreeMap<u32, Option<u64>>,
+    /// Each peer's boot as its latest hello named it.
+    peer_boots: BTreeMap<u32, u64>,
     /// Decided world cuts for the server ([`Self::take_world_cut_done`]).
     world_cut_done: Vec<(CutId, bool)>,
     /// While a wrapped peer message ([`crate::Reliable::InCut`]) is applied: its cut. What
@@ -1149,6 +1164,12 @@ impl<S: RegionSpawner> WorldManager<S> {
             early_marks: BTreeMap::new(),
             wrapper_seen: None,
             marks_queued: Vec::new(),
+            leave_requested: false,
+            leaving_cut: None,
+            leave_outcome: None,
+            leave_pairs: BTreeMap::new(),
+            left_peers: BTreeMap::new(),
+            peer_boots: BTreeMap::new(),
             world_cut_done: Vec::new(),
             inbound_accounted: None,
         }
@@ -1999,6 +2020,7 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// cleared (unless a newer snapshot was merged since), and `versions`
     /// (each written region's terrain version) are what the store holds.
     pub fn cut_committed(&mut self, id: CutId, versions: Vec<(RegionCoords, u64)>) {
+        self.note_leave_settled(id, true);
         if let Some(carried) = self.outstanding_cuts.remove(&id) {
             for (rc, seq) in carried {
                 if self.uncommitted.get(&rc).is_some_and(|u| u.seq == seq) {
@@ -2014,6 +2036,7 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// The store failed to commit cut `id`: its entries stay uncommitted, so
     /// the next cut carries them again.
     pub fn cut_failed(&mut self, id: CutId) {
+        self.note_leave_settled(id, false);
         self.outstanding_cuts.remove(&id);
     }
 

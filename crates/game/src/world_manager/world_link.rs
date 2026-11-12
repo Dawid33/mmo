@@ -519,6 +519,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                 | HostMsg::PlayerOffline { .. }
                 | HostMsg::ReleaseClaim { .. }
                 | HostMsg::PlayerHandedTo { .. }
+                | HostMsg::LeaveRequest
         );
         // `Settled` is not queued: the next `Attach` carries the watermark.
         match &mut self.world_attach {

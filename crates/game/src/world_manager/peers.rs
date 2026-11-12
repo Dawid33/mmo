@@ -39,7 +39,7 @@ use crate::{PeerEvent, PeerLink, PeerSession, Reliable, Volatile};
 
 /// One other host: the session with it and the link it runs over.
 pub(super) struct Peer {
-    session: PeerSession,
+    pub(super) session: PeerSession,
     link: Box<dyn PeerLink + Send>,
     /// It runs a newer world generation ([`PeerEvent::HigherGeneration`]): this host is
     /// stale and stops using the session (nothing is pumped or sent on it any more).
@@ -114,13 +114,13 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// Whether something can be put into `rc` now: this host owns it, or its owner's
     /// session is reachable.
     pub fn reaches(&self, rc: RegionCoords) -> bool {
-        self.owns(rc)
-            || self.peers.get(&self.owner_of(rc)).is_some_and(|p| !p.stale && p.session.is_reachable())
+        self.owns(rc) || self.peer_reachable(self.owner_of(rc))
     }
 
-    /// Whether host `ordinal`'s session is reachable now (and it is not of a newer generation).
+    /// Whether host `ordinal`'s session is reachable now (and it is not of a newer
+    /// generation, nor joined to this host by a leave: `world_cut.rs`).
     pub(super) fn peer_reachable(&self, ordinal: u32) -> bool {
-        self.peers.get(&ordinal).is_some_and(|p| !p.stale && p.session.is_reachable())
+        self.peers.get(&ordinal).is_some_and(|p| !p.stale && p.session.is_reachable()) && !self.leave_blocks(ordinal)
     }
 
     /// Reliable messages to other hosts not acknowledged yet, those waiting for a session
@@ -128,6 +128,12 @@ impl<S: RegionSpawner> WorldManager<S> {
     pub fn peer_unreceived(&self) -> usize {
         self.peers.values().map(|p| p.session.unreceived().count()).sum::<usize>()
             + self.peer_waiting.values().map(Vec::len).sum::<usize>()
+            + self.leave_pairs.values().map(|p| p.held.len()).sum::<usize>()
+    }
+
+    /// What a leave holds back for each host (`world_cut.rs`), never sent yet.
+    fn leave_held(&self) -> impl Iterator<Item = (u32, &Reliable)> {
+        self.leave_pairs.iter().flat_map(|(o, p)| p.held.iter().map(move |r| (*o, r)))
     }
 
     /// Test support: the entity of every [`Reliable::Transfer`] not acknowledged yet —
@@ -144,6 +150,7 @@ impl<S: RegionSpawner> WorldManager<S> {
         for (&ordinal, list) in &self.peer_waiting {
             out.extend(list.iter().filter_map(transfer_id).map(|id| (ordinal, id, false)));
         }
+        out.extend(self.leave_held().filter_map(|(o, r)| transfer_id(r).map(|id| (o, id, false))));
         out
     }
 
@@ -162,8 +169,10 @@ impl<S: RegionSpawner> WorldManager<S> {
                 }
             }
         }
-        for (&ordinal, list) in &self.peer_waiting {
-            out.extend(list.iter().filter_map(|r| match r.inner() {
+        for (ordinal, list) in self.peer_waiting.iter().map(|(o, l)| (*o, l.iter().collect::<Vec<_>>())).chain(
+            self.leave_pairs.iter().map(|(o, p)| (*o, p.held.iter().collect::<Vec<_>>())),
+        ) {
+            out.extend(list.into_iter().filter_map(|r| match r.inner() {
                 Reliable::PlayerMove { handoff, .. } => Some((ordinal, handoff.client, handoff.player, false)),
                 _ => None,
             }));
@@ -185,8 +194,10 @@ impl<S: RegionSpawner> WorldManager<S> {
                 }
             }
         }
-        for (&ordinal, list) in &self.peer_waiting {
-            out.extend(list.iter().filter_map(|r| match r.inner() {
+        for (ordinal, list) in self.peer_waiting.iter().map(|(o, l)| (*o, l.iter().collect::<Vec<_>>())).chain(
+            self.leave_pairs.iter().map(|(o, p)| (*o, p.held.iter().collect::<Vec<_>>())),
+        ) {
+            out.extend(list.into_iter().filter_map(|r| match r.inner() {
                 Reliable::Intent(msg) => Some((ordinal, *msg, false)),
                 _ => None,
             }));
@@ -370,12 +381,13 @@ impl<S: RegionSpawner> WorldManager<S> {
         }
         self.placed_by_handoff(h.player, h.hop);
         let (fortress, adventure) = split_claim(h.claim);
-        if self.is_unavailable(target) {
-            // Its stored state could not be read (retry not come): the body cannot go
-            // there. Parked from the hand-off, as a player crossing into a region whose
-            // load fails is (`region_load_failed`); `park_handed` reports it offline.
+        if self.is_unavailable(target) || !self.owns(target) || self.leaving_cut.is_some() {
+            // Its stored state could not be read (retry not come), the region is not this
+            // host's, or this host parked everything to leave: the body cannot go there.
+            // Parked from the hand-off, as a player crossing into a region whose load fails
+            // is (`region_load_failed`); `park_handed` reports it offline.
             let record = handoff_record(target, &bundle, &h).expect("checked above");
-            log::error!("[server] player {} handed into unavailable {target:?}: parked", h.player.0);
+            log::error!("[server] player {} handed into {target:?}, which cannot take it now: parked", h.player.0);
             self.park_handed(from, c, h.player, record, now_ms);
             return;
         }
@@ -474,8 +486,8 @@ impl<S: RegionSpawner> WorldManager<S> {
             return self.drop_arriving_copy(from, h.player, h.hop);
         }
         self.placed_by_handoff(h.player, h.hop);
-        if self.is_unavailable(target) || !self.owns(target) {
-            log::error!("[server] player {} moved into {target:?}, unavailable or not this host's: parked", h.player.0);
+        if self.is_unavailable(target) || !self.owns(target) || self.leaving_cut.is_some() {
+            log::error!("[server] player {} moved into {target:?}, unavailable, not this host's or leaving: parked", h.player.0);
             self.park_handed(from, c, h.player, record, now_ms);
             return;
         }
@@ -680,6 +692,8 @@ impl<S: RegionSpawner> WorldManager<S> {
             (msg, Some(cut)) => Reliable::InCut { cut, body: Box::new(msg) },
             (msg, None) => msg,
         };
+        // Joined by a leave of the pending world cut: held back until it is decided.
+        let Some(msg) = self.hold_for_leave(ordinal, msg) else { return };
         let id = self.queue_now(ordinal, msg);
         if view {
             self.peer_in_source_view.insert((ordinal, id));
@@ -968,6 +982,8 @@ impl<S: RegionSpawner> WorldManager<S> {
         match ev {
             PeerEvent::Up(hello) => {
                 log::info!("[server] peer host {from} up (boot {})", hello.boot);
+                // A host that left and comes back as another boot gets what waited for it.
+                self.peer_hello_boot(from, hello.boot);
                 // Where its clients connect (`RegionElsewhere`).
                 self.peer_endpoints.insert(from, hello.endpoint.clone());
                 // Every region (stopping ones too: their `RegionDown` follows) bordering
@@ -1055,19 +1071,28 @@ impl<S: RegionSpawner> WorldManager<S> {
         match msg {
             Reliable::Transfer { target, stamp, bundle, player: None } => {
                 if !self.owns(target) {
-                    // Held here all the same (it waits in the mailbox; nothing is lost).
-                    // Task 14: bounce it to the owner instead.
-                    log::error!("[server] host {from} sent {:?} into {target:?}, which this host does not own", bundle.id);
-                    debug_assert!(false, "an inbound transfer into {target:?}, which this host does not own");
+                    let owner = self.owner_of(target);
+                    log::error!(
+                        "[server] host {from} sent {:?} into {target:?}, which this host does not own (host {owner} does)",
+                        bundle.id
+                    );
+                    if owner != from {
+                        // Bounced on to its owner (as any crossing into a foreign region).
+                        self.send_reliable(owner, Reliable::Transfer { target, stamp, bundle, player: None }, after);
+                        return;
+                    }
+                    // The sender thinks this host owns it and this host thinks the sender
+                    // does: never sent back (it could bounce for ever). It waits in the
+                    // mailbox here (a cut row; a restore queues it to the owner again).
                 }
                 let now_ms = self.clock_ms;
                 self.accept_arrival(None, target, stamp, *bundle, now_ms);
             }
             Reliable::Transfer { target, stamp, bundle, player: Some(handoff) } => {
                 if !self.owns(target) {
-                    // Held here all the same (as a transfer without a player).
+                    // Parked here from the hand-off (`accept_handoff`): a region this host does
+                    // not own is never started here. Never lost.
                     log::error!("[server] host {from} handed a player into {target:?}, which this host does not own");
-                    debug_assert!(false, "an inbound hand-off into {target:?}, which this host does not own");
                 }
                 self.accept_handoff(from, target, stamp, *bundle, handoff);
             }
@@ -1083,10 +1108,9 @@ impl<S: RegionSpawner> WorldManager<S> {
                     self.route_intent(msg, target, after);
                     return;
                 }
-                // Ownership disagrees: never forwarded (it could bounce between hosts).
-                // Task 14: bounce it to the owner instead.
+                // Ownership disagrees: never forwarded (it could bounce between hosts). An
+                // intent is refused back (its items return), a reply held here.
                 log::error!("[server] host {from} sent {msg:?} for {target:?}, which this host does not own");
-                debug_assert!(false, "an inbound intent for {target:?}, which this host does not own");
                 match msg {
                     // Refused back to where it came from: its items return.
                     crate::IntentMsg::Intent(s) => {
@@ -1106,7 +1130,6 @@ impl<S: RegionSpawner> WorldManager<S> {
                     // Parked here (`accept_move`): a region this host does not own is never
                     // started here, so its body could not be created. Never lost.
                     log::error!("[server] host {from} moved a player into {target:?}, which this host does not own");
-                    debug_assert!(false, "an inbound move into {target:?}, which this host does not own");
                 }
                 self.accept_move(from, handoff, *record, target);
             }

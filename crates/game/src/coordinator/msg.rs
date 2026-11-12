@@ -185,6 +185,10 @@ pub enum HostMsg {
     /// This host's part of world cut `cut` failed: the cut is aborted. The host still
     /// waits for [`CoordMsg::CutDone`] before it takes part in another cut.
     CutFailed { cut: CutId, why: CutFailure },
+    /// The host is about to exit (several hosts): it asks for a cut in which it leaves
+    /// (`BeginCut { leaving }` naming it), parks everything for it and exits once it
+    /// commits — its `hosts` row then clean, so its return keeps the world generation.
+    LeaveRequest,
 }
 
 /// Why a host's part of a world cut failed ([`HostMsg::CutFailed`]).
@@ -259,7 +263,7 @@ pub enum CoordMsg {
     /// Take part in world cut `cut` at world tick `tick` (several hosts): every host of
     /// `hosts` snapshots its regions at `tick`, marks its peer links in band
     /// ([`crate::Reliable::CutMark`]) and stages its part; `leaving` are the hosts that
-    /// leave in this cut (Task 14). `generation`: the world generation the cut is of — a
+    /// leave in this cut (among `hosts`; [`HostMsg::LeaveRequest`]). `generation`: the world generation the cut is of — a
     /// host of another generation refuses it.
     BeginCut { cut: CutId, tick: Tick, hosts: Vec<u32>, leaving: Vec<u32>, generation: u64 },
     /// World cut `cut` is decided: `committed` (every part visible) or aborted (none).

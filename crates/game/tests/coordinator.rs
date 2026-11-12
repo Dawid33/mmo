@@ -1723,3 +1723,50 @@ fn no_cut_while_an_attached_host_is_not_expected() {
     c.maintain(3 * CUT_EVERY_MS);
     assert_eq!(begun(&commit_routed(&mut c)).len(), 3, "all three take part");
 }
+
+/// Task 14: leave requests are collected for `LEAVE_BATCH_MS`, then a cut begins at once
+/// (before the period) with them `leaving` (among its hosts); once it commits the leaver
+/// is not expected — the next cut is the others' alone, though its process is still
+/// attached — until another boot of it attaches.
+#[test]
+fn leave_requests_begin_one_cut_and_a_leaver_is_not_expected_until_its_next_boot() {
+    let mut c = cutting();
+    c.handle(1, HostMsg::LeaveRequest, 100);
+    c.maintain(100 + game::LEAVE_BATCH_MS - 1);
+    assert!(begun(&commit_routed(&mut c)).is_empty(), "collected for the batch");
+    c.maintain(100 + game::LEAVE_BATCH_MS);
+    let out = commit_routed(&mut c);
+    let begins: Vec<(Vec<u32>, Vec<u32>)> = out
+        .iter()
+        .filter_map(|(_, m)| match m {
+            CoordMsg::BeginCut { hosts, leaving, .. } => Some((hosts.clone(), leaving.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(begins, vec![(vec![0, 1], vec![1]); 2], "both hosts, host 1 leaving, before the period");
+    let cut = begun(&out)[0].1;
+    c.handle(0, HostMsg::CutPrepared { cut }, 700);
+    c.handle(1, HostMsg::CutPrepared { cut }, 700);
+    let d = c.take_decision().expect("decided");
+    assert!(d.commit && d.hosts == vec![0, 1] && d.leaving == vec![1], "{d:?}");
+    c.decided(cut, true);
+    assert_eq!(done(&commit_routed(&mut c)).len(), 2, "one CutDone per host");
+    assert_eq!(c.left_hosts(), vec![1]);
+    // Its stale row (same boot) does not bring it back.
+    c.set_host_boots([(0, 7), (1, 7)].into_iter().collect());
+    c.maintain(700 + CUT_EVERY_MS);
+    let next = begun(&commit_routed(&mut c));
+    assert_eq!(next.iter().map(|(h, _, _)| *h).collect::<Vec<_>>(), vec![0], "host 0 alone");
+    let cut = next[0].1;
+    c.handle(0, HostMsg::CutPrepared { cut }, 1800);
+    let d = c.take_decision().expect("decided");
+    assert!(d.commit && d.hosts == vec![0] && d.leaving.is_empty(), "{d:?}");
+    c.decided(cut, true);
+    commit_routed(&mut c);
+    // Another boot of it attaches: expected again.
+    c.handle(1, HostMsg::Attach { host: 1, epoch: 2, running: Vec::new(), online: Vec::new(), generation: 0, boot: 8, settled_below: 0, handed: Vec::new(), pending_cut: None }, 1900);
+    assert!(c.left_hosts().is_empty());
+    commit_routed(&mut c);
+    c.maintain(1900 + CUT_EVERY_MS);
+    assert_eq!(begun(&commit_routed(&mut c)).len(), 2, "both take part again");
+}
