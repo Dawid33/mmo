@@ -277,3 +277,70 @@ fn cut_and_restore(rig: &mut MultiRig) {
 fn one_phase_cut_holds_unreceived_transfer_once_and_restore_requeues_it() {
     sweep("one_phase_cut_holds_unreceived_transfer_once_and_restore_requeues_it", 2, 1, SEEDS / 2, cut_and_restore);
 }
+
+/// Rounds the keeper's home region sits out so a cut stays pending after the source
+/// region answered it.
+const HOLD_HOME_ROUNDS: u32 = 1000;
+
+/// The link is down; a slime standing in `a` at the cut tick departs to the other host
+/// only after `a` answered the cut (another region of its host keeps the cut pending):
+/// `a`'s snapshot holds it, so the cut writes no in-flight row for it — it is saved once —
+/// and restoring that cut's rows queues nothing for it.
+fn depart_after_the_answer(rig: &mut MultiRig) {
+    let (a, b) = host_seam(2, 1);
+    let (ha, hb) = (rig.owner(a), rig.owner(b));
+    let home = rig.homes[ha as usize];
+    rig.run(a);
+    rig.run(b);
+    rig.link_down(ha, hb);
+    let id = rig.spawn_slime(a, [REGION_SIZE / 2.0, crate::common::above_floor_y(), REGION_SIZE / 2.0]);
+    rig.round();
+    // A cut that `a` answers while `home` keeps it pending.
+    let m = &mut rig.hosts[ha as usize].manager;
+    m.spawner_mut().hold(home, HOLD_HOME_ROUNDS);
+    let mut answered = false;
+    for _ in 0..CUT_ROUNDS {
+        let m = &mut rig.hosts[ha as usize].manager;
+        if m.pending_cut().is_none() {
+            // None yet, or `a` missed it: (again) a cut ahead of the world tick.
+            let world = m.spawner_mut().world_tick();
+            let lead = m.cut_lead();
+            m.begin_cut((world + CUT_LEAD).saturating_sub(lead)).expect("no cut pending");
+        }
+        rig.round();
+        let m = &rig.hosts[ha as usize].manager;
+        if m.pending_cut().is_some() && !m.awaiting_cut().contains(&a) {
+            answered = true;
+            break;
+        }
+    }
+    assert!(answered, "`a` never answered a pending cut");
+    assert_eq!(rig.owners_of(id), [(ha, a)], "the slime stood in `a` at the cut tick");
+    // Now it leaves for the other host.
+    assert!(rig.teleport(a, id, past_seam(a, b, REGION_SIZE / 2.0)));
+    for _ in 0..WAIT_ROUNDS {
+        rig.round();
+        if !rig.hosts[ha as usize].manager.peer_unreceived_ids().is_empty() {
+            break;
+        }
+    }
+    assert_eq!(rig.hosts[ha as usize].manager.peer_unreceived_ids(), [(hb, id, false)], "queued to host {hb}");
+    rig.hosts[ha as usize].manager.spawner_mut().hold(home, 0);
+    let cut = cut_on(rig, ha as usize);
+    let mut store = CutStore::default();
+    store.apply(&cut);
+    assert_eq!(store.places(id), [(a, "state")], "saved once, in its source's snapshot");
+    // Restoring the cut's rows queues nothing for it (the snapshot brings it back).
+    let mut restored = MultiRig::new(2, 1, None, 0, 0);
+    restored.hosts[ha as usize].manager.restore_in_flight(cut.in_flight.clone());
+    assert!(
+        restored.hosts[ha as usize].manager.peer_unreceived_ids().iter().all(|(_, q, _)| *q != id),
+        "no row of it is queued again"
+    );
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn transfer_departing_after_its_source_answered_the_cut_is_not_a_row() {
+    sweep("transfer_departing_after_its_source_answered_the_cut_is_not_a_row", 2, 1, SEEDS / 2, depart_after_the_answer);
+}

@@ -102,8 +102,12 @@ impl<S: RegionSpawner> WorldManager<S> {
         match self.peers.get_mut(&ordinal) {
             Some(peer) => peer.session.queue(msg),
             None => {
-                log::warn!("[server] no session with host {ordinal} yet: {} kept until it has one", reliable_name(&msg));
-                self.peer_waiting.entry(ordinal).or_default().push(msg);
+                let waiting = self.peer_waiting.entry(ordinal).or_default();
+                // Once per wait, not per message.
+                if waiting.is_empty() {
+                    log::warn!("[server] no session with host {ordinal} yet: messages to it are kept until it has one");
+                }
+                waiting.push(msg);
             }
         }
     }
@@ -120,7 +124,12 @@ impl<S: RegionSpawner> WorldManager<S> {
         bundle: crate::EntityBundle,
         view: bool,
     ) {
+        // Unreachable for a player: the `Departures` arm hands every body that wakes its
+        // target (a player, a person without a history) back to its source when the target
+        // is foreign, before this is called — a player hand-off is Task 7.
         debug_assert!(bundle.client.is_none(), "players do not cross hosts yet");
+        // Task 10: a person with a history crossing hosts (the receiving host's
+        // `PersonCrossed`) has no seeded test yet — the rig gets a coordinator there.
         let owner = self.owner_of(target);
         log::debug!("[server] {:?} from {rc:?} into {target:?}: sent to host {owner}", bundle.id);
         // It is on another host now: nothing here routes to it.
@@ -177,9 +186,13 @@ impl<S: RegionSpawner> WorldManager<S> {
         match msg {
             Reliable::Transfer { target, stamp, bundle, player: None } => {
                 if !self.owns(target) {
+                    // Held here all the same (it waits in the mailbox; nothing is lost).
+                    // Task 14: bounce it to the owner instead.
                     log::error!("[server] host {from} sent {:?} into {target:?}, which this host does not own", bundle.id);
+                    debug_assert!(false, "an inbound transfer into {target:?}, which this host does not own");
                 }
-                self.accept_arrival(None, target, stamp, *bundle);
+                let now_ms = self.clock_ms;
+                self.accept_arrival(None, target, stamp, *bundle, now_ms);
             }
             other => {
                 log::error!("[server] peer host {from}: {} is not handled by this host yet: dropped", reliable_name(&other))

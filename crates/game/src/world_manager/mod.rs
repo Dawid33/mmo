@@ -1467,6 +1467,9 @@ impl<S: RegionSpawner> WorldManager<S> {
                         self.send_to_region(rc, RegionInput::Transfer(GameEventKind::EntityArrived(bundle), stamp));
                         continue;
                     }
+                    // Where it left, in `rc`'s frame (a person absorbed at the seam is
+                    // listed there, bit-exact: a rebase there and back is not).
+                    let left = bundle_at(&bundle);
                     bundle.rebase(rc, target);
                     if self.is_foreign(target) {
                         // Another host's region: to its owner, reachable or not (it
@@ -1474,7 +1477,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                         self.depart_to_peer(rc, target, stamp, bundle, view);
                         continue;
                     }
-                    self.accept_arrival(Some(rc), target, stamp, bundle);
+                    self.accept_arrival(Some((rc, left)), target, stamp, bundle, now_ms);
                 }
             }
             RegionOutput::Forward(kind, stamp) => {
@@ -2241,7 +2244,8 @@ impl<S: RegionSpawner> WorldManager<S> {
     }
 
     /// `bundle` (in `target`'s frame), departed at `stamp` from `source` — a region of
-    /// this host, or `None`: another host's (an inbound [`crate::Reliable::Transfer`]) —
+    /// this host with the body's position there (its own frame, taken before the
+    /// rebase), or `None`: another host's (an inbound [`crate::Reliable::Transfer`]) —
     /// arrives at `target`, a region of this host. A person with a history is delivered
     /// only into a running region (else absorbed), and the coordinator told so. A player's
     /// or a person's arrival wakes its target; anything else into a region that is not
@@ -2250,16 +2254,17 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// a source's view of the pending cut.
     fn accept_arrival(
         &mut self,
-        source: Option<RegionCoords>,
+        source: Option<(RegionCoords, [f32; 3])>,
         target: RegionCoords,
         stamp: crate::Tick,
         bundle: crate::EntityBundle,
+        now_ms: u64,
     ) {
+        let (source, left) = (source.map(|(rc, _)| rc), source.map(|(_, at)| at));
         let view = source.is_some_and(|s| self.in_cut_view(s));
         // Where drops of a body that never arrives are put down: its source's side of the
         // seam, or (inbound) the target's own cell.
         let from = source.unwrap_or(target);
-        let now_ms = self.clock_ms;
         let client = bundle.client.as_ref().map(|(c, _)| *c);
         if let (EntityKind::Person { person }, true) = (bundle.kind, self.world.is_some()) {
             // A person is delivered only into a running region; the history
@@ -2268,9 +2273,10 @@ impl<S: RegionSpawner> WorldManager<S> {
             if delivered {
                 self.note_moved(person, from, Step::Into { to: target, at: bundle_at(&bundle) });
             } else {
-                let mut left = bundle.clone();
-                left.rebase(target, from);
-                self.note_moved(person, from, Step::Absorbed { at: bundle_at(&left) });
+                // Where it left its source; an inbound one where it stands (no region of
+                // this host is its source).
+                let at = left.unwrap_or_else(|| bundle_at(&bundle));
+                self.note_moved(person, from, Step::Absorbed { at });
             }
             self.world_send(HostMsg::PersonCrossed { person, to: target, delivered });
             if !delivered {
@@ -2299,7 +2305,9 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.enter_in_flight(from, target, stamp, &bundle, view);
         self.locations.insert(bundle.id, target);
         self.send_to_region(target, RegionInput::Transfer(GameEventKind::EntityArrived(bundle), stamp));
-        self.directive_stamps.insert(target, stamp);
+        // Never backwards: an inbound stamp may be older than a local one recorded.
+        let latest = self.directive_stamps.get(&target).map_or(stamp, |&s| s.max(stamp));
+        self.directive_stamps.insert(target, latest);
         let refresh = |m: &mut Self| {
             if let Some(s) = source {
                 m.refresh_keepalive(s, now_ms);

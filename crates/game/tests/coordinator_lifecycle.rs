@@ -556,3 +556,105 @@ fn resident_in_a_stopping_neighbour_keeps_one_body_across_the_attach() {
         w.check_settled("after the attach");
     });
 }
+
+/// An inline coordinator link that records every `Attach` the host sends.
+struct AttachTap {
+    inner: game::InlineWorldLink,
+    attaches: std::sync::Arc<std::sync::Mutex<Vec<game::coordinator::HostMsg>>>,
+}
+
+impl game::coordinator::WorldLink for AttachTap {
+    fn send(&mut self, msg: game::coordinator::HostMsg) {
+        if matches!(msg, game::coordinator::HostMsg::Attach { .. }) {
+            self.attaches.lock().unwrap().push(msg.clone());
+        }
+        self.inner.send(msg)
+    }
+    fn recv(&mut self) -> Option<game::coordinator::CoordMsg> {
+        self.inner.recv()
+    }
+    fn is_up(&self) -> bool {
+        self.inner.is_up()
+    }
+    fn generation(&self) -> u64 {
+        self.inner.generation()
+    }
+    fn pump(&mut self, now_ms: u64) {
+        self.inner.pump(now_ms)
+    }
+    fn as_inline_mut(&mut self) -> Option<&mut game::InlineWorldLink> {
+        Some(&mut self.inner)
+    }
+    fn as_inline(&self) -> Option<&game::InlineWorldLink> {
+        Some(&self.inner)
+    }
+}
+
+/// A person absorbed at a −x seam while the host gathers its `Attach` is listed in the
+/// region they left at the position they left it at — the source-frame position, bit for
+/// bit (a rebase into the target's frame and back is not exact in `f32`).
+#[test]
+fn absorbed_person_is_listed_at_its_source_frame_position() {
+    use game::coordinator::HostMsg;
+    let (h, a, _) = strip_history();
+    let (out_send, packets) = unbounded();
+    let (region_out_send, region_out) = unbounded();
+    let mut manager = crate::common::stud_manager(
+        InlineSpawner::default().with_stud_genesis(std::sync::Arc::new(floored_region)),
+        out_send,
+        region_out_send,
+    );
+    manager.set_world_map(strip());
+    let attaches = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let tap = AttachTap { inner: game::InlineWorldLink::new(game::Coordinator::new(h, 0)), attaches: attaches.clone() };
+    manager.set_world_link(Box::new(tap), 0, 0);
+    let mut w = World { manager, region_out, packets, now_ms: 0, seed: 0 };
+    w.send(ServerEvent::connected(CLIENT));
+    // (2, 0) runs; (1, 0), west of it, does not.
+    w.packet(ClientPacket::RequestRegionConnection(rc(2, 0)));
+    w.drain();
+    assert!(w.running(rc(2, 0)) && !w.running(rc(1, 0)));
+    // The link drops and comes back: the host gathers its attach.
+    w.manager.world_link_mut().and_then(|l| l.as_inline_mut()).expect("inline").set_up(false);
+    w.tick();
+    w.manager.world_link_mut().and_then(|l| l.as_inline_mut()).expect("inline").set_up(true);
+    attaches.lock().unwrap().clear();
+    w.now_ms += TICK_RATE;
+    w.manager.maintain(w.now_ms);
+    assert!(!w.manager.world_attached(), "gathering");
+    // Meanwhile a person (abstract to (2, 0)'s list) leaves (2, 0) over its −x seam.
+    let left = [-2.3_f32, 40.0, 17.1];
+    let person = a[0];
+    let pose = game::Pose::from_translation(game::rapier3d::math::Vector::new(left[0], left[1], left[2]));
+    let collider = game::ColliderSpec::Cuboid { half_extents: game::rapier3d::math::Vector::splat(1.0) };
+    let bundle = game::EntityBundle {
+        id: game::EntityId { birth_region: rc(2, 0), serial: 9_000_000 },
+        kind: game::EntityKind::Person { person },
+        body: game::body::body_state(pose, &collider, game::rapier3d::math::Vector::ZERO, game::rapier3d::math::Vector::ZERO),
+        collider,
+        carried: Default::default(),
+        client: None,
+        pending_inputs: Vec::new(),
+    };
+    let stamp = { use game::RegionSpawner; w.manager.spawner_mut().world_tick() };
+    w.manager.handle_region_output(rc(2, 0), RegionOutput::Departures(vec![(bundle, rc(1, 0))], stamp), w.now_ms);
+    w.settle();
+    w.manager.maintain(w.now_ms);
+    w.settle();
+    let sent = attaches.lock().unwrap().clone();
+    let listed = sent
+        .iter()
+        .find_map(|m| match m {
+            HostMsg::Attach { running, .. } => running
+                .iter()
+                .find(|r| r.rc == rc(2, 0))
+                .and_then(|r| r.people.iter().find(|(p, _)| *p == person).map(|(_, at)| *at)),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("the attach lists {person:?} in (2, 0): {sent:?}"));
+    assert_eq!(
+        listed.map(f32::to_bits),
+        left.map(f32::to_bits),
+        "listed at {listed:?}, left at {left:?}: the source-frame position, bit for bit"
+    );
+}
