@@ -8,7 +8,7 @@
 
 **Tech Stack:** Rust (dated nightly); quinn 0.11 + rustls (ring) via `svc-link`; sqlx 0.8 runtime queries, Postgres 17 (`PREPARE TRANSACTION`, `LISTEN` / `NOTIFY`); crossbeam between threads, tokio only at network edges; Bevy 0.19.1 client, WebTransport in the browser.
 
-**Spec:** `docs/superpowers/specs/2026-09-20-multi-instance-k8s-postgres-research.md` §0.4, §0.5 R3, §0.9f, §0.10, §8; handoff `docs/superpowers/plans/2026-11-11-r3-and-leftovers-planning-handoff.md`; seam protocol `docs/superpowers/plans/2026-11-06-seam-transparent-regions.md`; predecessor `docs/superpowers/plans/2026-11-07-r2b-role-split.md`. **Prerequisite:** `docs/superpowers/plans/2026-11-12-r2b-cleanups.md` (the `world_manager/` split, the `test-hooks` feature, `pg-test-support`).
+**Spec:** `docs/superpowers/specs/2026-09-20-multi-instance-k8s-postgres-research.md` §0.4, §0.5 R3, §0.9f, §0.10, §8; handoff `docs/superpowers/plans/2026-11-11-r3-and-leftovers-planning-handoff.md`; seam protocol `docs/superpowers/plans/2026-11-06-seam-transparent-regions.md`; predecessor `docs/superpowers/plans/2026-11-07-r2b-role-split.md`. **Prerequisite:** `docs/superpowers/plans/2026-11-12-r2b-cleanups.md` (the `world_manager/` split, the `test-hooks` feature, `pg-test-support`). Command form: `just test-one <crate> "--test <target> -- <filter> <filter>"` — cargo needs the `--` before name filters and before flags such as `--include-ignored`.
 
 ## Verified against the code on 2026-11-12 (`cc728a58`) — read before starting
 
@@ -137,7 +137,7 @@ justfile, scripts/crossing_summary.py, CLAUDE.md, TODO.md   MOD
 - Produces for later tasks: every host's `spawner.world_tick()` and the coordinator's `world_tick_now()` agree to within one tick.
 
 - [ ] **Step 1: Failing tests:** `world_clock::anchored_clocks_agree` (two `from_anchor` calls 1,234 ms apart: for 100 sampled wall instants the two clocks, each fed its own elapsed time plus its phase, return the same tick); `world_clock::anchor_before_now_never_goes_back`; `clock::first_anchor_wins` (two `ensure_clock_anchor` with different proposals → both return the first; after `clear_clock_anchor` the next proposal is stored; both engines); `schema::schemas_match`; `store_world::split_start_refuses_anchor_behind_world_tick` (slow, Postgres).
-- [ ] **Step 2: Run** `just test-one game "--test it world_clock::"`, `just test-one world-store "--test it clock:: schema::"`, `just test-pg "--test it clock:: schema::"` — FAIL.
+- [ ] **Step 2: Run** `just test-one game "--test it -- world_clock::"`, `just test-one world-store "--test it -- clock:: schema::"`, `just test-pg "--test it -- clock:: schema::"` — FAIL.
 - [ ] **Step 3: Implement.**
 - [ ] **Step 4: Run** the Step 2 commands, `just test-one server "--test store_world -- --include-ignored split_start"` (with `MMO_TEST_DATABASE_URL`), `just test-r2`, `just test-threads`, `just smoke` — PASS.
 - [ ] **Step 5: Commit** `feat: one wall-anchored world clock in the world row for split roles`.
@@ -154,9 +154,9 @@ justfile, scripts/crossing_summary.py, CLAUDE.md, TODO.md   MOD
 - Produces: the same player in the same login session has the same `ClientId` on every host; two sessions of one player differ.
 
 - [ ] **Step 1: Failing tests:** `player::session_client_id_is_unique_per_join` (same player, epochs 1 and 2 → different ids; players 1 and 2, same epoch → different; epoch `1 << 24` wraps onto epoch 0 of the same player only); `packet_codec::client_id_above_u32_round_trips` (`ServerPacket::PlayerRegion(None, 1 << 40)`); the same assertion added to `wasm_determinism.rs`; `login_link::jwt_session_gets_session_client_id` (the `ClientConnected` event's id equals `session_client_id(player, epoch)`).
-- [ ] **Step 2: Run** `just test-one game "--test it player::session_client_id packet_codec::client_id"` — FAIL (does not compile).
+- [ ] **Step 2: Run** `just test-one game "--test it -- player::session_client_id packet_codec::client_id"` — FAIL (does not compile).
 - [ ] **Step 3: Implement.** No behaviour change beyond the id's value.
-- [ ] **Step 4: Run** the Step 2 command, `just test-one server "--test login_link -- --include-ignored"`, `just determinism-wasm`, `just test-one game "--test it state_hash:: physics_goldens::"` (no golden changes — `StateHash` writes `usize` as `u64` already), `just test-threads`, `just smoke` — PASS.
+- [ ] **Step 4: Run** the Step 2 command, `just test-one server "--test login_link -- --include-ignored"`, `just determinism-wasm`, `just test-one game "--test it -- state_hash:: physics_goldens::"` (no golden changes — `StateHash` writes `usize` as `u64` already), `just test-threads`, `just smoke` — PASS.
 - [ ] **Step 5: Commit** `refactor: ClientId is a 64-bit session id, world-unique for login sessions`.
 
 ### Task 3: Host registry and the world generation
@@ -176,7 +176,7 @@ justfile, scripts/crossing_summary.py, CLAUDE.md, TODO.md   MOD
 - Why this converges: after A crashes, A's reboot bumps g → g+1; each peer sees g+1, exits, reboots dirty with its row at g ≠ g+1, so it adopts without bumping.
 
 - [ ] **Step 1: Failing tests:** `hosts::first_boot_does_not_bump`; `hosts::dirty_boot_bumps_once_and_peers_adopt` (A registers, A registers again → generation 1, `bumped`; B, whose row says 0, registers → generation 1, not bumped; B registers again → 2); `hosts::clean_row_keeps_generation` (set `clean = 1` by SQL; register → not bumped, row is `clean = 0` again); `hosts::register_is_fenced` (a stale fence → `Fenced`, no row change); `schema::schemas_match`; `claims::tests::higher_generation_sets_the_flag_lower_does_not`.
-- [ ] **Step 2: Run** `just test-one world-store "--test it hosts:: schema::"`, `just test-pg "--test it hosts:: schema::"`, `just test-one server "--lib claims::"` — FAIL.
+- [ ] **Step 2: Run** `just test-one world-store "--test it -- hosts:: schema::"`, `just test-pg "--test it -- hosts:: schema::"`, `just test-one server "--lib claims::"` — FAIL.
 - [ ] **Step 3: Implement.**
 - [ ] **Step 4: Run** the Step 2 commands, `just test-r2`, `just smoke` — PASS.
 - [ ] **Step 5: Commit** `feat(world-store,server): host registry and world generation — a dirty host restart is visible to every host`.
@@ -211,7 +211,7 @@ justfile, scripts/crossing_summary.py, CLAUDE.md, TODO.md   MOD
 - `pub struct InlinePeerLink` — `pub fn pair(seed: u64, max_delay_steps: u32) -> (InlinePeerLink, InlinePeerLink)`; `set_up(bool)` on either end drops what is in transit; each message is delayed `0..=max_delay_steps` pumps by a splitmix roll, order kept.
 
 - [ ] **Step 1: Failing tests** (`peer_session::`, 32 seeds each, a failure prints the seed): `reliable_exactly_once_in_order_across_flaps` (200 numbered payloads, the link dropped at 5 seeded points → the receiver's list is 1..=200, once each); `volatile_is_dropped_while_down_and_not_replayed`; `new_peer_boot_restarts_numbering_and_requeues` ; `higher_generation_is_reported_and_nothing_delivered`; `held_session_queues_and_release_sends_in_order`; `drop_through_mark_forgets_exactly_the_prefix`; `unreceived_lists_queued_and_unacked`.
-- [ ] **Step 2: Run** `just test-one game "--test it peer_session::"` — FAIL.
+- [ ] **Step 2: Run** `just test-one game "--test it -- peer_session::"` — FAIL.
 - [ ] **Step 3: Implement.**
 - [ ] **Step 4: Run** it — PASS; `just smoke`.
 - [ ] **Step 5: Commit** `feat(game): host↔host peer messages, the reliable/volatile peer session, an inline link`.
@@ -232,9 +232,9 @@ justfile, scripts/crossing_summary.py, CLAUDE.md, TODO.md   MOD
 - `multi_rig`: `pub struct MultiRig { pub hosts: Vec<Rig>, … }`; `MultiRig::new(hosts: u32, s: u32, schedule: Option<fn(u64) -> InlineSchedule>, seed: u64, link_delay_steps: u32) -> MultiRig`; `round()` (tick every host, settle, pump links, then `assert_conserved_world()`); `pub fn host_seam(hosts: u32, s: u32) -> (RegionCoords, RegionCoords)` (the adjacent pair nearest the origin with different owners); `pub fn link_down(&mut self, a: u32, b: u32)` / `link_up`. `assert_conserved_world`: every tracked `EntityId` is in exactly one of a running region of one host, one host's `in_flight` / `pending_arrivals`, one session's `unreceived()`, or a link's transit queue.
 
 - [ ] **Step 1: Failing tests** (`peer_schedule::`, 12 seeds × lockstep / `shuffled` / `late` / `jittery`, link delay 0..=3): `slime_crosses_host_seam_once`; `transfer_to_a_parked_foreign_region_waits_in_its_mailbox` (the owner holds it in `pending_arrivals`, not the sender); `link_down_keeps_transfer_and_delivers_after_up`; `lagging_source_host_transfer_conserved`; `double_crossing_at_a_four_host_corner` (`s = 1`, 4 hosts); `one_phase_cut_holds_unreceived_transfer_once_and_restore_requeues_it`; `world_manager::foreign_region_still_refuses_play`.
-- [ ] **Step 2: Run** `just test-one game "--test it peer_schedule:: world_manager::foreign_region"` — FAIL.
+- [ ] **Step 2: Run** `just test-one game "--test it -- peer_schedule:: world_manager::foreign_region"` — FAIL.
 - [ ] **Step 3: Implement.**
-- [ ] **Step 4: Run** the Step 2 command, `just test-threads`, `just test-one game "--test it save_cut:: handoff_manager::"`, `just smoke` — PASS.
+- [ ] **Step 4: Run** the Step 2 command, `just test-threads`, `just test-one game "--test it -- save_cut:: handoff_manager::"`, `just smoke` — PASS.
 - [ ] **Step 5: Commit** `feat(game): entities cross between hosts over the peer session; multi-host seeded rig`.
 
 ### Task 6: Halo and intents between hosts; what a dropped link means
@@ -252,9 +252,9 @@ justfile, scripts/crossing_summary.py, CLAUDE.md, TODO.md   MOD
 - Cuts (one-phase): an `unreceived()` `Intent` is an `InFlightRow::Intent`.
 
 - [ ] **Step 1: Failing tests** (`peer_schedule::`, seeded): `halo_delta_crosses_host_seam` (a dig at the border on host 0 shows in host 1's halo mirror within 8 rounds); `halo_entity_crosses_host_seam`; `halo_source_gone_when_peer_link_drops_and_reseeds_on_up`; `halo_never_wakes_a_foreign_region`; `deposit_intent_across_hosts_conserves_items`; `intent_to_unreachable_host_is_refused_and_items_return`; `intent_reply_survives_a_link_flap`.
-- [ ] **Step 2: Run** `just test-one game "--test it peer_schedule::halo peer_schedule::deposit peer_schedule::intent"` — FAIL.
+- [ ] **Step 2: Run** `just test-one game "--test it -- peer_schedule::halo peer_schedule::deposit peer_schedule::intent"` — FAIL.
 - [ ] **Step 3: Implement.**
-- [ ] **Step 4: Run** `just test-one game "--test it peer_schedule:: halo:: intents::"`, `just test-threads`, `just smoke` — PASS.
+- [ ] **Step 4: Run** `just test-one game "--test it -- peer_schedule:: halo:: intents::"`, `just test-threads`, `just smoke` — PASS.
 - [ ] **Step 5: Commit** `feat(game): halo and intents cross host seams; a dropped peer link is HaloSourceGone`.
 
 ### Task 7: A player crosses between hosts
@@ -277,9 +277,9 @@ justfile, scripts/crossing_summary.py, CLAUDE.md, TODO.md   MOD
 - An inbound `Reliable::ObserverOrder` is handed to the server through a new manager output `pub fn take_observer_orders(&mut self) -> Vec<(ClientId, PlayerId, u64 /*nonce*/, u64 /*expires*/)>` (Task 16 consumes it).
 
 - [ ] **Step 1: Failing tests** (`peer_schedule::`, seeded as in Task 5; the rig gives each client a session on both hosts): `player_crosses_host_seam_once_and_home_follows` (one body; host 1 sends `PlayerRegion`; host 0's session is `Observer`); `held_key_across_host_seam_settles` (inputs sent to host 0 after the departure reach the body on host 1; one crossing, no oscillation); `ping_pong_across_host_seam` (A→B→A within two ticks: one body, home is A, `departed` is empty on both); `handoff_without_session_parks_after_grace` (no session on host 1: after 5,000 ms the record is in host 1's `parked_players`, exactly once in the world); `disconnect_mid_handoff_parks_once`; `subscribe_to_foreign_region_answers_region_elsewhere_and_orders_the_owner`; `player_cannot_enter_an_unreachable_host`; `packet_codec::new_variants_round_trip_and_old_indices_are_unchanged` (the encoded tag of `ServerPacket::StudLodData` and of `Credential::Jwt` is what it was).
-- [ ] **Step 2: Run** `just test-one game "--test it peer_schedule::player peer_schedule::held_key peer_schedule::ping_pong peer_schedule::handoff peer_schedule::disconnect peer_schedule::subscribe packet_codec::new_variants"` — FAIL.
+- [ ] **Step 2: Run** `just test-one game "--test it -- peer_schedule::player peer_schedule::held_key peer_schedule::ping_pong peer_schedule::handoff peer_schedule::disconnect peer_schedule::subscribe packet_codec::new_variants"` — FAIL.
 - [ ] **Step 3: Implement.**
-- [ ] **Step 4: Run** `just test-one game "--test it peer_schedule:: packet_codec:: multi_client::"`, `just test-threads`, `just smoke` — PASS.
+- [ ] **Step 4: Run** `just test-one game "--test it -- peer_schedule:: packet_codec:: multi_client::"`, `just test-threads`, `just smoke` — PASS.
 - [ ] **Step 5: Commit** `feat(game): players cross between hosts — hand-off, observer sessions, forwarded input`.
 
 ### Task 8: Moves and parks into foreign regions
@@ -297,9 +297,9 @@ justfile, scripts/crossing_summary.py, CLAUDE.md, TODO.md   MOD
 - `client_disconnected` for a session with no home sends no `ParkPlayer`.
 
 - [ ] **Step 1: Failing tests:** `fence::player_record_in_a_foreign_super_region_commits` and `fence::stale_owner_still_cannot_write_a_player_record` (both engines where the scenario allows); `peer_schedule::embark_into_a_foreign_host_moves_the_player_once` (the body is on host 1, host 1 sent `PlayerRegion`, host 0 sent `RegionElsewhere`); `peer_schedule::retire_to_a_foreign_spawn_region`; `peer_schedule::move_to_unreachable_host_is_refused_before_parking` (`EmbarkResult(Err(RegionUnavailable))`, the claim released, the body untouched); `peer_schedule::peer_drops_after_the_park_record_waits_and_the_cut_holds_it_once`; `peer_schedule::observer_disconnect_parks_nothing`; `peer_schedule::cut_with_a_foreign_record_commits` (no `Fenced`, `cut_failed` never called).
-- [ ] **Step 2: Run** `just test-one world-store "--test it fence::player_record fence::stale_owner_still"`, `just test-pg "--test it fence::"`, `just test-one game "--test it peer_schedule::embark peer_schedule::retire peer_schedule::move_to peer_schedule::peer_drops peer_schedule::observer_disconnect peer_schedule::cut_with"` — FAIL.
+- [ ] **Step 2: Run** `just test-one world-store "--test it -- fence::player_record fence::stale_owner_still"`, `just test-pg "--test it -- fence::"`, `just test-one game "--test it -- peer_schedule::embark peer_schedule::retire peer_schedule::move_to peer_schedule::peer_drops peer_schedule::observer_disconnect peer_schedule::cut_with"` — FAIL.
 - [ ] **Step 3: Implement.**
-- [ ] **Step 4: Run** the Step 2 commands, `just test-one game "--test it world_manager:: coordinator_requests::"`, `just test-threads`, `just smoke` — PASS.
+- [ ] **Step 4: Run** the Step 2 commands, `just test-one game "--test it -- world_manager:: coordinator_requests::"`, `just test-threads`, `just smoke` — PASS.
 - [ ] **Step 5: Commit** `fix(game,world-store): moves and parks into another host's region hand the player over instead of parking a record nobody can save`.
 
 ### Task 9: `QuicPeerLink`, discovery, the latency knob
@@ -340,9 +340,9 @@ justfile, scripts/crossing_summary.py, CLAUDE.md, TODO.md   MOD
 - `Routes::admit(peer, ordinal, epoch, stored_epoch: Option<u64>, generation_ok: bool)`: any ordinal is served; a hello whose `epoch != stored_epoch` is refused ("a stale host process"), which holds across a coordinator restart; one live peer per ordinal, the newer connection replacing the older, as today. The runtime reads `store.world_generation()` at every `Attach` and refuses one whose `generation` is lower (it closes that peer, which is about to exit anyway). The coordinator itself never rolls back: it holds no region state, and R2b already lets the history run ahead of the regions.
 
 - [ ] **Step 1: Failing tests:** `coordinator::attach_from_host_1_keeps_host_0_regions_and_players`; `coordinator::player_offline_from_the_old_host_after_online_on_the_new_is_ignored`; `coordinator::claim_is_answers_a_differing_report` (three cases: the coordinator holds none, holds another site, `claim_pending` with a different grant → the host ends with exactly the coordinator's claim); `coordinator::directive_for_an_unannounced_region_is_deferred_not_broadcast`; `peer_schedule::claim_travels_with_the_player_across_hosts` (after the crossing, `Return` by another player is refused `InUse`; after the first player disconnects on host 1 it succeeds); `coordinator_rt::tests::two_ordinals_are_served` (replaces `only_host_ordinal_zero_is_served`); `roles::stale_epoch_host_is_refused_by_a_restarted_coordinator` (Postgres: claim twice as ordinal 0; a fresh coordinator refuses a hello carrying the first epoch); `roles::second_host_ordinal_is_refused` is rewritten as `roles::two_hosts_attach_and_both_get_their_people`. The existing `roles.rs` helpers pass the real claim epoch instead of 0.
-- [ ] **Step 2: Run** `just test-one game "--test it coordinator:: peer_schedule::claim_travels"`, `just test-one server "--lib coordinator_rt::"`, `just test-r2` — FAIL.
+- [ ] **Step 2: Run** `just test-one game "--test it -- coordinator:: peer_schedule::claim_travels"`, `just test-one server "--lib coordinator_rt::"`, `just test-r2` — FAIL.
 - [ ] **Step 3: Implement.**
-- [ ] **Step 4: Run** the Step 2 commands, `just test-one game "--test it coordinator_lifecycle:: coordinator_requests:: history_play::"`, `just test-one server "--features test-hooks --test coordinator_rt -- --include-ignored"`, `just test-threads`, `just smoke` — PASS.
+- [ ] **Step 4: Run** the Step 2 commands, `just test-one game "--test it -- coordinator_lifecycle:: coordinator_requests:: history_play::"`, `just test-one server "--features test-hooks --test coordinator_rt -- --include-ignored"`, `just test-threads`, `just smoke` — PASS.
 - [ ] **Step 5: Commit** `feat(game,server): the coordinator serves every host — per-host attach, routing by region owner, authoritative claims, admission by stored epoch`.
 
 ### Task 11: The answer memo is pruned by acknowledgement, not by count
@@ -357,9 +357,9 @@ justfile, scripts/crossing_summary.py, CLAUDE.md, TODO.md   MOD
 - Result: a resent `Request` or `Settle` always finds its answer, so nothing is re-executed and no claim leaks.
 
 - [ ] **Step 1: Failing tests:** `coordinator::memo_keeps_unsettled_answers_past_the_old_cap` (4,097 embark requests answered, none settled; replaying the first returns the memoised `Embarked` and founds no second site); `coordinator::settled_watermark_prunes_exactly_below`; `coordinator::new_boot_attach_drops_the_old_boots_memo`; `coordinator_requests::host_sends_settled_as_requests_complete` (after three round trips the coordinator's memo for that host is empty).
-- [ ] **Step 2: Run** `just test-one game "--test it coordinator::memo coordinator::settled coordinator::new_boot coordinator_requests::host_sends_settled"` — FAIL.
+- [ ] **Step 2: Run** `just test-one game "--test it -- coordinator::memo coordinator::settled coordinator::new_boot coordinator_requests::host_sends_settled"` — FAIL.
 - [ ] **Step 3: Implement.**
-- [ ] **Step 4: Run** `just test-one game "--test it coordinator:: coordinator_requests::"`, `just test-r2`, `just smoke` — PASS.
+- [ ] **Step 4: Run** `just test-one game "--test it -- coordinator:: coordinator_requests::"`, `just test-r2`, `just smoke` — PASS.
 - [ ] **Step 5: Commit** `fix(game): the coordinator's answer memo is pruned by host acknowledgement, never by count`.
 
 ### Task 12: Store — a cut in two phases
@@ -380,10 +380,10 @@ justfile, scripts/crossing_summary.py, CLAUDE.md, TODO.md   MOD
 - `StoreHandle::cut_decision(&self, cut: CutId) -> Result<Option<bool>, StoreError>`.
 - Test hook (`#[doc(hidden)]`, like `fail_next_writes`): `StoreHandle::stop_after_commit_prepared(&self, n: u32)` — `decide_cut` returns `Backend("test stop")` after `n` `COMMIT PREPARED`s.
 
-- [ ] **Step 1: Failing tests** (`just test-pg "--test it two_phase::"`, plus one SQLite case): `prepared_part_is_invisible_until_decided`; `commit_decision_applies_every_part_and_the_world_tick`; `abort_decision_leaves_nothing_and_no_prepared_xact`; `first_decision_wins` (`abort_cut` first → a later `decide_cut(commit = true)` returns `false` and rolls the parts back); `resolve_finishes_a_decided_cut_stopped_between_commits` (two parts prepared, `stop_after_commit_prepared(1)`, `decide_cut` errors, `resolve_prepared` → both parts visible, `pg_prepared_xacts` empty); `resolve_aborts_an_undecided_cut`; `fenced_host_cannot_prepare`; `stale_generation_cannot_prepare`; `stale_coordinator_cannot_decide`; `claim_waits_for_the_prepared_part_and_proceeds_after_the_decision`; `leaving_host_is_clean_only_if_committed`; `sqlite_is_not_two_phase_ready`; `schema::schemas_match`.
-- [ ] **Step 2: Run** `just pg-down && just pg-up`, then `just test-pg "--test it two_phase:: schema::"` and `just test-one world-store "--test it two_phase::sqlite schema::"` — FAIL.
+- [ ] **Step 1: Failing tests** (`just test-pg "--test it -- two_phase::"`, plus one SQLite case): `prepared_part_is_invisible_until_decided`; `commit_decision_applies_every_part_and_the_world_tick`; `abort_decision_leaves_nothing_and_no_prepared_xact`; `first_decision_wins` (`abort_cut` first → a later `decide_cut(commit = true)` returns `false` and rolls the parts back); `resolve_finishes_a_decided_cut_stopped_between_commits` (two parts prepared, `stop_after_commit_prepared(1)`, `decide_cut` errors, `resolve_prepared` → both parts visible, `pg_prepared_xacts` empty); `resolve_aborts_an_undecided_cut`; `fenced_host_cannot_prepare`; `stale_generation_cannot_prepare`; `stale_coordinator_cannot_decide`; `claim_waits_for_the_prepared_part_and_proceeds_after_the_decision`; `leaving_host_is_clean_only_if_committed`; `sqlite_is_not_two_phase_ready`; `schema::schemas_match`.
+- [ ] **Step 2: Run** `just pg-down && just pg-up`, then `just test-pg "--test it -- two_phase:: schema::"` and `just test-one world-store "--test it -- two_phase::sqlite schema::"` — FAIL.
 - [ ] **Step 3: Implement.**
-- [ ] **Step 4: Run** the Step 2 commands, `just test-pg "--test it cut:: fence::"`, `just smoke` — PASS.
+- [ ] **Step 4: Run** the Step 2 commands, `just test-pg "--test it -- cut:: fence::"`, `just smoke` — PASS.
 - [ ] **Step 5: Commit** `feat(world-store): two-phase save cuts — fenced PREPARE per host, one decision row, recovery sweep`.
 
 ### Task 13: The coordinated world cut
@@ -406,9 +406,9 @@ justfile, scripts/crossing_summary.py, CLAUDE.md, TODO.md   MOD
 - Rig: `MultiRig` gets an in-memory two-phase store (`parts: BTreeMap<(CutId, u32), WorldCut>`, `decided`), and `pub fn rebuild_from_last_cut(&self) -> MultiRig` (every host restored from its committed part) for the conservation check.
 
 - [ ] **Step 1: Failing tests** (`peer_schedule::cut_`, 12 seeds × 4 schedules × link delay 0..=3): `cut_under_crossings_restores_each_entity_once` (slimes and one player shuttle across the host seam while a cut runs; `rebuild_from_last_cut()` holds every tracked id, and the player's record, exactly once); `transfer_on_the_wire_at_t_is_in_exactly_one_part`; `intent_reply_on_the_wire_at_t_is_in_exactly_one_part`; `cut_with_a_link_down_aborts_and_the_next_cut_commits`; `missed_tick_doubles_the_lead_and_the_retry_commits`; `no_cut_while_an_expected_host_is_absent`; `host_detaching_mid_cut_aborts_it`; `coordinator::reattach_with_a_pending_cut_gets_its_outcome`; `save_cut::one_host_keeps_the_one_phase_path` (no `BeginCut` is ever sent with one host).
-- [ ] **Step 2: Run** `just test-one game "--test it peer_schedule::cut_ peer_schedule::transfer_on_the_wire peer_schedule::intent_reply_on_the_wire peer_schedule::missed_tick peer_schedule::no_cut peer_schedule::host_detaching coordinator::reattach_with_a_pending_cut save_cut::one_host"` — FAIL.
+- [ ] **Step 2: Run** `just test-one game "--test it -- peer_schedule::cut_ peer_schedule::transfer_on_the_wire peer_schedule::intent_reply_on_the_wire peer_schedule::missed_tick peer_schedule::no_cut peer_schedule::host_detaching coordinator::reattach_with_a_pending_cut save_cut::one_host"` — FAIL.
 - [ ] **Step 3: Implement.**
-- [ ] **Step 4: Run** the Step 2 command, `just test-one game "--test it save_cut::"`, `just test-one server "--test store_world -- --include-ignored"`, `just test-r2`, `just test-threads`, `just smoke` — PASS.
+- [ ] **Step 4: Run** the Step 2 command, `just test-one game "--test it -- save_cut::"`, `just test-one server "--test store_world -- --include-ignored"`, `just test-r2`, `just test-threads`, `just smoke` — PASS.
 - [ ] **Step 5: Commit** `feat: one world cut across hosts — the coordinator picks the tick, peers exchange marks, parts are prepared and decided together`.
 
 ### Task 14: Leaving cleanly, starting after a crash
@@ -435,9 +435,9 @@ justfile, scripts/crossing_summary.py, CLAUDE.md, TODO.md   MOD
 | A host dies between cuts | nothing staged | reboot dirty → generation + 1 → every host exits 5 and restarts from the last cut | conserved, ≤ one interval lost |
 
 - [ ] **Step 1: Failing tests** (`hosts.rs`, Postgres, real links, hosts as threads that can be dropped without saving; all slow): `host_killed_after_prepare_cut_commits_and_world_restarts_from_it`; `coordinator_killed_before_the_decision_cut_is_absent`; `coordinator_killed_between_commit_prepareds_cut_is_whole` (`stop_after_commit_prepared(1)`; after the restart `pg_prepared_xacts` is empty and both hosts' regions carry the cut's tick); `dirty_restart_rolls_every_host_back_once` (kill host 1 between cuts and restart it: generation is exactly + 1, host 0 ends with `ServerExit::WorldRolledBack` once, restarted hosts stay up for 5 s, every tracked entity is present once); `clean_leave_and_return_keeps_the_generation_and_delivers_waiting_transfers` (host 1 leaves; a slime sent toward it waits in host 0's queue and is in host 0's next cut as a row; host 1 returns → it arrives once); `leave_without_a_coordinator_exits_dirty`; `peer_schedule::held_session_entries_before_the_mark_are_dropped_after_a_committed_leave`.
-- [ ] **Step 2: Run** `just test-r3` (the recipe lands in Task 20; until then the Task 9 command) and `just test-one game "--test it peer_schedule::held_session"` — FAIL.
+- [ ] **Step 2: Run** `just test-r3` (the recipe lands in Task 20; until then the Task 9 command) and `just test-one game "--test it -- peer_schedule::held_session"` — FAIL.
 - [ ] **Step 3: Implement.**
-- [ ] **Step 4: Run** the Step 2 commands, `just test-r2`, `just test-pg "--test it two_phase::"`, `just test-threads`, `just smoke` — PASS.
+- [ ] **Step 4: Run** the Step 2 commands, `just test-r2`, `just test-pg "--test it -- two_phase::"`, `just test-threads`, `just smoke` — PASS.
 - [ ] **Step 5: Commit** `feat(server): leave cuts, start-up recovery of staged cuts, world rollback on a dirty host restart`.
 
 ## Phase D — placement and the client
@@ -454,10 +454,10 @@ justfile, scripts/crossing_summary.py, CLAUDE.md, TODO.md   MOD
 - `pub const SPAWN_RELAY_MAX_HOPS: u8 = 4;`
 - `pub enum Placement { Here, Host(u32) }`; `WorldManager::place_spawn(&self, player: PlayerId, record_region: Option<RegionCoords>) -> Placement` — in order: online, parked or parking here → `Here`; `departed[player]` → `Host`; `record_region` owned here → `Here`, else its owner; no record → the owner of `SPAWN_REGION`.
 - `ServerEvent::SpawnOrder { origin: u32, hops: u8, player_token: String, session_epoch: u64, player: PlayerId, record_region: Option<RegionCoords> }` (the server resolves the token and reads the record's region before sending it). `Here` → the host records the pending spawn in its `SpawnOrders` and acknowledges with its own endpoint; `Host(o)` → `Reliable::SpawnOrder` to `o` if reachable and `hops < SPAWN_RELAY_MAX_HOPS`, else an acknowledgement with `ok: false`. `Reliable::SpawnAck` travels back to `origin`, which answers login.
-- `Kick`: the entry host applies it and queues `Reliable::Kick` to every peer; it sends `HostToLogin::KickAck` once it and every **reachable** peer have acknowledged (an unreachable peer means no acknowledgement, so login resends — kicks stay durable). `SessionEnded` on another host → `Reliable::SessionEnded` to the entry host → login.
+- `Kick`: the entry host applies it and queues `Reliable::Kick` to every peer; it sends `HostToLogin::KickAck` once it and every **reachable** peer have acknowledged (an unreachable peer means no acknowledgement, so login resends — kicks stay durable). `SessionEnded` on another host → `Reliable::SessionEnded` to the entry host → login. **A host reports `SessionEnded` only when the session leaves the world** (its home session parks or disconnects), never when the player is handed to another host: login deletes a session's pending kick on `SessionEnded` (`end_session`, keyed by world, not by host), so a hand-off that reported it would drop a kick for a session that is still live. Test `hosts::handoff_does_not_end_the_login_session` pins it (a kick queued before the crossing still parks the player on the new host).
 
 - [ ] **Step 1: Failing tests:** `peer_schedule::place_spawn_order_of_rules` (the four rules, each with the earlier ones absent); `hosts::join_places_the_player_on_the_host_owning_its_record_region` (the ticket's `quic` is host 1's advertised address; host 1 holds the pending spawn, host 0 none); `hosts::rejoin_within_a_cut_follows_the_departed_pointer` (the player walked 0 → 1 and disconnected; no cut since; the join lands on host 1 and there is one body); `hosts::kick_reaches_a_session_on_a_non_entry_host_and_is_acked_once`; `hosts::spawn_for_an_unreachable_owner_is_refused` (login answers 503 `world_unavailable`); `hosts::session_ended_on_a_non_entry_host_reaches_login`; `api::join_uses_the_acknowledged_endpoint`.
-- [ ] **Step 2: Run** `just test-one game "--test it peer_schedule::place_spawn"`, `just test-one login "--test it api::join_uses"`, `just test-r3` — FAIL.
+- [ ] **Step 2: Run** `just test-one game "--test it -- peer_schedule::place_spawn"`, `just test-one login "--test it -- api::join_uses"`, `just test-r3` — FAIL.
 - [ ] **Step 3: Implement.**
 - [ ] **Step 4: Run** the Step 2 commands, `just test-one server "--test login_link -- --include-ignored"`, `just test-login-pg`, `just smoke` — PASS.
 - [ ] **Step 5: Commit** `feat(login,server): the entry host relays spawn orders and kicks to the host that holds the player`.
@@ -507,7 +507,7 @@ This and Task 18 are the largest client change since the region threads. `instan
 - [ ] **Step 1: Failing tests** (`connections::tests`, pure): `region_elsewhere_opens_one_connection_per_host` (two regions of one host → one `open`); `subscribe_and_release_go_to_the_owning_connection`; `predictions_and_ui_requests_go_home_only`; `traffic_from_the_wrong_connection_is_not_accepted`; `observer_close_returns_its_regions_home_close_ends_the_session`; harness: `two_hosts::window_spanning_a_host_seam_loads_regions_from_both`; `two_hosts::clock_follows_the_home_connection_only`.
 - [ ] **Step 2: Ask the user**, then run `just test-one client "--lib connections::"` — FAIL.
 - [ ] **Step 3: Implement.**
-- [ ] **Step 4: Run** the Step 2 command and `just test-one client "--test crossing two_hosts::"` (opt-in), `just smoke` — PASS.
+- [ ] **Step 4: Run** the Step 2 command and `just test-one client "--test crossing -- two_hosts::"` (opt-in), `just smoke` — PASS.
 - [ ] **Step 5: Commit** `feat(client): one connection per host with a region → connection table; input only to the home`.
 
 ### Task 18: Client — flips and moves across connections
@@ -524,7 +524,7 @@ This and Task 18 are the largest client change since the region threads. `instan
 - `CrossingProbe`'s `[perf] event=region_crossing` line gains `host_flip=0|1 from_host=<o> to_host=<o>`; `crossing_summary.py` gains `--by host_flip` and `--p95` (p95 of `correction_max`, `corrections`, `confirm_ms` per group).
 
 - [ ] **Step 1: Failing tests** (`crossing.rs`, harness `with_hosts(2)`): `host_flip_matches_thread_flip_without_delay` (the same walk across a thread seam and across a host seam with link delay 0: the same number of corrections and `correction_max` within 0.01); `held_key_across_a_host_seam_no_rubber_band` (`MAX_STEP_BACK_UNITS`); `home_follows_player_region_from_the_new_connection`; `teleport_to_a_foreign_host_switches_home`; `idle_observer_connection_is_closed`; and a script test in a new `scripts/tests/test_crossing_summary.py` (`unittest`), `test_groups_by_host_flip` (three sample lines → two groups with the right p95).
-- [ ] **Step 2: Ask the user**, then run `just test-one client "--test crossing host_flip held_key_across_a_host home_follows teleport idle_observer"` and `python3 -m unittest discover -s scripts/tests -p "test_crossing_summary.py"` — FAIL.
+- [ ] **Step 2: Ask the user**, then run `just test-one client "--test crossing -- host_flip held_key_across_a_host home_follows teleport idle_observer"` and `python3 -m unittest discover -s scripts/tests -p "test_crossing_summary.py"` — FAIL.
 - [ ] **Step 3: Implement.**
 - [ ] **Step 4: Run** the Step 2 commands, `just smoke` — PASS.
 - [ ] **Step 5: Commit** `feat(client): home follows the body across connections; crossing probe reports host flips`.
@@ -547,7 +547,7 @@ This and Task 18 are the largest client change since the region threads. `instan
 - LOD: nothing to do (see "Verified"); the task's doc comment on `stored_terrain_changed` says so and names §8 case 2 as not built.
 
 - [ ] **Step 1: Failing tests:** `notify::cut_notice_reaches_a_listener` (Postgres); `notify::listener_reconnect_emits_resync` (`pg_terminate_backend` on the listener's pid → a `Resync` within 5 s, later notices still arrive); `notify::poll_mode_resyncs_without_notify` (the poll period overridden to 1 s by a test setter); `notify::stored_regions_since_returns_only_newer_saves`; `halo::stored_terrain_change_reseeds_a_parked_foreign_halo` (a neighbour's version rises → the running region gets `SeedHaloFromStore` once; an unchanged version → nothing); `hosts::edit_saved_by_host_0_reaches_host_1s_halo_after_the_cut` (host 0 digs at the border, parks the region, a world cut commits → host 1's halo mirror shows the dig).
-- [ ] **Step 2: Run** `just test-pg "--test it notify::"`, `just test-one game "--test it halo::stored_terrain_change"`, `just test-r3` — FAIL.
+- [ ] **Step 2: Run** `just test-pg "--test it -- notify::"`, `just test-one game "--test it -- halo::stored_terrain_change"`, `just test-r3` — FAIL.
 - [ ] **Step 3: Implement.**
 - [ ] **Step 4: Run** the Step 2 commands, `just test-threads`, `just smoke` — PASS.
 - [ ] **Step 5: Commit** `feat(world-store,server): hosts learn of each other's saved terrain by LISTEN/NOTIFY per world cut, with a polling backstop`.
@@ -564,7 +564,7 @@ This and Task 18 are the largest client change since the region threads. `instan
 - `test-r3`: `MMO_TEST_DATABASE_URL=… just test-one server "--features test-hooks --test hosts -- --include-ignored --test-threads=1"`.
 - `worldctl super-region <url> <n>`: sets `world.super_region_regions`; refuses unless `super_regions` is empty (a world nobody has claimed yet). The go / no-go world uses `n = 1`, so a host seam is one region from the spawn.
 
-- [ ] **Step 1: Write** the recipes and the `worldctl` subcommand with its test `ctl::super_region_only_before_the_first_claim` (`just test-pg "--test it ctl::super_region"` FAIL → PASS).
+- [ ] **Step 1: Write** the recipes and the `worldctl` subcommand with its test `ctl::super_region_only_before_the_first_claim` (`just test-pg "--test it -- ctl::super_region"` FAIL → PASS).
 - [ ] **Step 2: Run** `just --list | grep -E "dev-r3|test-r3|host "` (all three listed), `just --dry-run dev-r3 hosts=3` (prints three host launches on ports 6466, 6476, 6486), `just test-r3` — PASS.
 - [ ] **Step 3: Ask the user, then live check** (one client, `adapter=Intel`): `just dev-r3`; `just run-online`; walk across a host seam and back; embark on the other host's land; Ctrl-C the stack → every host logs a committed leave cut; start again → the fortress and the body are where they were. `kill -9` one host → both restart once and the client is told to reconnect.
 - [ ] **Step 4: Commit** `feat: just dev-r3 (login + coordinator + N hosts), just test-r3`.
@@ -579,7 +579,7 @@ This and Task 18 are the largest client change since the region threads. `instan
 - `pub struct StoreCounters { pub requests: u64, pub wait_ms_max: u64, pub wait_ms_sum: u64, pub cpu_ms_sum: u64, pub cpu_ms_max: u64 }`; `StoreHandle::take_counters(&self) -> StoreCounters` (resets). `wait` = from the request being sent to its task starting; `cpu` = time spent in decode / encode inside the task (measured around those calls, not around the awaits). The `[server]` line gains `store_req= store_wait_max_ms= store_cpu_max_ms=`. No behaviour change.
 
 - [ ] **Step 1: Failing test** `counters::wait_and_cpu_are_recorded_and_reset` (ten `load_region`s of a region with entities → `requests == 10`, `cpu_ms_sum > 0`; a second `take_counters` is all zero).
-- [ ] **Step 2: Run** `just test-one world-store "--test it counters::"` — FAIL; implement; PASS; `just smoke`.
+- [ ] **Step 2: Run** `just test-one world-store "--test it -- counters::"` — FAIL; implement; PASS; `just smoke`.
 - [ ] **Step 3: Commit** `feat(world-store): store-thread wait and decode counters on the [server] line`.
 - [ ] **Step 4: Ask the user before measuring.** With their go-ahead: `just dev-r3 hosts=2` in release, one client joining at view distance; read `store_wait_max_ms` during the join burst and during a cut. **Decision rule:** a wait above 50 ms during a join, or above one tick during steady play → write a follow-up plan to move decode / encode onto `spawn_blocking`; otherwise record the numbers in `TODO.md` and close the item. Do not change the thread in this plan.
 

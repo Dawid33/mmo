@@ -84,7 +84,7 @@ justfile, TODO.md, CLAUDE.md                  MOD
 - What stays in `mod.rs`: the struct (all fields, including the world-link-only ones — they get `pub(super)`), `bundle_at` (Departures use it too), and every method that mixes core work with a world-link call (`handle_server_event`, `region_output`, `maintain`, `ensure_running`, `send_to_region`, `client_connected`, `client_disconnected`, `restore_player`, `park_settled`, `move_client`, `finish_move`).
 - Visibility: a moved method the core calls becomes `pub(super)`; a core method the moved half calls becomes `pub(super)`; nothing becomes `pub` that was not.
 
-- [ ] **Step 1: Record the baseline.** Run `just test-one game "--test it world_manager:: coordinator:: coordinator_lifecycle:: coordinator_requests::"` and `just test-threads`; note the pass counts.
+- [ ] **Step 1: Record the baseline.** Run `just test-one game "--test it -- world_manager:: coordinator:: coordinator_lifecycle:: coordinator_requests::"` and `just test-threads`; note the pass counts.
 - [ ] **Step 2: Move.** `git mv` the file, create `world_link.rs`, move the items above verbatim, fix `use`s and visibility only. No renames, no reordering inside a moved item, no drive-by edits.
 - [ ] **Step 3: Check it is a pure move.** `git diff --color-moved=zebra --color-moved-ws=ignore-all-space HEAD -- crates/game/src/world_manager` — every non-moved line is a `use`, a `mod`, a `pub use`, an `impl` header or a visibility keyword. `wc -l crates/game/src/world_manager/*.rs`: `mod.rs` under 3,300 lines.
 - [ ] **Step 4: Run** the Step 1 commands (same pass counts) and `just smoke` — pass.
@@ -101,10 +101,10 @@ justfile, TODO.md, CLAUDE.md                  MOD
 - `just test-r2` becomes `… just test-one server "--features test-hooks --test roles -- --include-ignored"`.
 
 - [ ] **Step 1: Write the failing check** `hooks::production_build_has_no_hooks` in `crates/server/tests/it.rs` (a new module `hooks`). "This method does not exist" cannot be asserted from a test, so the check reads the source: over `include_str!("../src/coordinator_rt.rs")`, every line containing `fn with_core`, `fn inspect`, `fn crash_before_claim_reply`, `inspect.try_iter()` or `crash_before_claim_reply.load(` has `#[cfg(feature = "test-hooks")]` on one of the 3 lines before it.
-- [ ] **Step 2: Run** `just test-one server "--test it hooks::"` — FAIL (no cfg lines yet).
+- [ ] **Step 2: Run** `just test-one server "--test it -- hooks::"` — FAIL (no cfg lines yet).
 - [ ] **Step 3: Gate** the items listed under Files with `#[cfg(feature = "test-hooks")]`; in `run` and `wait` the gated statements go in `#[cfg(feature = "test-hooks")] { … }` blocks.
 - [ ] **Step 4: Update the recipes.** `grep -n "roles\|coordinator_rt" justfile` — every hit that runs those targets gains `--features test-hooks`; `test-full` / `test` (if they run `-p server` with all targets) gain it too. Record the list of changed recipes in the commit message.
-- [ ] **Step 5: Run** `just test-one server "--test it hooks::"` (PASS), `just test-one server "--features test-hooks --test coordinator_rt -- --include-ignored"` (PASS), `just test-r2` (PASS, the same test count as before the change — a count of 0 means the target was skipped), `just smoke` (PASS).
+- [ ] **Step 5: Run** `just test-one server "--test it -- hooks::"` (PASS), `just test-one server "--features test-hooks --test coordinator_rt -- --include-ignored"` (PASS), `just test-r2` (PASS, the same test count as before the change — a count of 0 means the target was skipped), `just smoke` (PASS).
 - [ ] **Step 6: Commit** `refactor(server): coordinator test hooks behind the test-hooks feature`.
 
 ### Task 3: One Postgres test-support crate
@@ -127,7 +127,7 @@ justfile, TODO.md, CLAUDE.md                  MOD
 - [ ] **Step 1: Write the failing test** `crates/pg-test-support/tests/it.rs` `create_and_drop`: with the env var set, `PgTestDb::create("mmo_support")` → connect to `db.url` and `SELECT 1`; after `drop(db)`, `SELECT 1 FROM pg_database WHERE datname = $name` returns no row. With the env var unset → `None` (the test prints `SKIP_MSG` and returns). Slow-tagged.
 - [ ] **Step 2: Run** `MMO_TEST_DATABASE_URL=postgres://mmo:mmo@127.0.0.1:55432/postgres just test-one pg-test-support "--test it -- --include-ignored"` — FAIL (crate missing).
 - [ ] **Step 3: Implement** the crate; replace the four copies (each `common/mod.rs` keeps a thin `pub use pg_test_support::*;` so test files need no edits beyond the type name).
-- [ ] **Step 4: Run** the Step 2 command (PASS), `just test-pg "--test it open:: fence::"`, `just test-login-pg`, `just test-r2`, `just test-one server "--test store_world -- --include-ignored fenced"` with the env var set (all PASS), `cargo tree -i aws-lc-rs` (prints "did not match any packages"), `just smoke`.
+- [ ] **Step 4: Run** the Step 2 command (PASS), `just test-pg "--test it -- open:: fence::"`, `just test-login-pg`, `just test-r2`, `just test-one server "--test store_world -- --include-ignored fenced"` with the env var set (all PASS), `cargo tree -i aws-lc-rs` (prints "did not match any packages"), `just smoke`.
 - [ ] **Step 5: Commit** `test: one Postgres test-support crate replaces four PgDb copies`.
 
 ### Task 4: Pending kicks expire; dial failures stop repeating
@@ -143,9 +143,9 @@ justfile, TODO.md, CLAUDE.md                  MOD
 - `pub const LINK_DIAL_LOG_EVERY_SECS: u64 = 60;` (`svc-link`): `dial_loop` logs the first failure of a down period at `warn`, then at most one line per `LINK_DIAL_LOG_EVERY_SECS` carrying the number of failed attempts since the last line; the retry cadence is unchanged.
 
 - [ ] **Step 1: Write the failing tests:** `kicks::ended_session_drops_its_pending_kick` (queue a kick for epoch 3, `end_session(world, token, 3)` → `pending_kicks()` is empty); `kicks::newer_session_keeps_its_kick` (kick for epoch 4 survives `end_session(…, 3)`); `kicks::old_kick_expires_once` (a row with `created_at = now - 86_401` → `expire_pending_kicks(now, 86_400)` returns it and the table is empty; a row one second younger stays); `link::dial_failures_log_once_per_period` (a dialer against a closed port for 3 s with the retry minimum: a test logger counts lines containing `dial` and `failed` → exactly 1).
-- [ ] **Step 2: Run** `just test-one login "--test it kicks::"` and `just test-one svc-link "--test it -- --include-ignored dial_failures"` — FAIL.
+- [ ] **Step 2: Run** `just test-one login "--test it -- kicks::"` and `just test-one svc-link "--test dial_log -- --include-ignored"` (its own target, see Step 3) — FAIL.
 - [ ] **Step 3: Implement.** The svc-link test needs a logger: `link.rs` is in the `it` binary, and a logger is process-global state — give the test its own `[[test]]` target (`crates/svc-link/Cargo.toml`, `name = "dial_log"`) per CLAUDE.md's testing rule, and run it as `--test dial_log`.
-- [ ] **Step 4: Run** `just test-one login "--test it kicks::"`, `just test-one svc-link "--test dial_log -- --include-ignored"`, `just test-one svc-link "--test it -- --include-ignored"`, `just test-one server "--test login_link -- --include-ignored"`, `just smoke` — PASS.
+- [ ] **Step 4: Run** `just test-one login "--test it -- kicks::"`, `just test-one svc-link "--test dial_log -- --include-ignored"`, `just test-one svc-link "--test it -- --include-ignored"`, `just test-one server "--test login_link -- --include-ignored"`, `just smoke` — PASS.
 - [ ] **Step 5: Commit** `fix(login,svc-link): pending kicks end with their session or after a day; one dial-failure line a minute`.
 
 ### Task 5: Fail-closed `jwt` admission; coordinator state decode ladder
@@ -162,7 +162,7 @@ justfile, TODO.md, CLAUDE.md                  MOD
 - The module doc's rule changes from "NOT migrated" to: "an older format is migrated on load and written back in the current one at the next save; a newer or unknown one refuses the start".
 
 - [ ] **Step 1: Write the failing tests:** `jwt_admission::` in `crates/server/tests/it.rs` — four cases over `jwt_admission(…)`: `(true, None) → Ok(SpawnOrders)`, `(false, Some("newest")) → Ok(Newest)`, `(false, None) → Err` containing both `VOXEL_SERVICE_TOKEN` and `VOXEL_JWT_ADMISSION=newest`, `(true, Some("newest")) → Err`; `coordinator::state::v1_blob_still_decodes` — `include_bytes!("fixtures/coordinator_state_v1.bin")` decodes to a state with 1 claim and 1 memo entry and a history that `History` loads (the fixture is produced by an `#[ignore]`d generator test `write_v1_fixture` run once with today's `encode`); `coordinator::state::unknown_version_is_refused` (first byte 200 → `Err(Corrupt)` whose text contains `200`).
-- [ ] **Step 2: Run** `just test-one server "--test it jwt_admission::"` and `just test-one game "--test it coordinator::state::"` — FAIL.
+- [ ] **Step 2: Run** `just test-one server "--test it -- jwt_admission::"` and `just test-one game "--test it -- coordinator::state::"` — FAIL.
 - [ ] **Step 3: Implement** (generate and commit the fixture before changing `decode`).
 - [ ] **Step 4: Run** both commands, `just test-r2`, `just test-one server "--test login_link -- --include-ignored"`, `just smoke` — PASS. `grep -n "VOXEL_JWT_ADMISSION" justfile CLAUDE.md` shows the recipe and the doc line.
 - [ ] **Step 5: Commit** `feat(server,game): jwt hosts need the login link unless told otherwise; coordinator state decodes through a version ladder`, then the `TODO.md` "R2b minors" line is deleted (index-only) in `docs: R2b minors done`.
