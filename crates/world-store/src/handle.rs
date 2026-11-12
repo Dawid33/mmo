@@ -69,6 +69,8 @@ pub struct StoreHandle {
     fail_writes: Arc<AtomicU32>,
     /// Test hook ([`StoreHandle::stop_after_commit_prepared`]): the next decision's stop.
     stop_commits: Arc<Mutex<Option<u32>>>,
+    /// The pending prepared part and the cut lock timeout, shared with the store thread.
+    cuts: Arc<thread::CutState>,
 }
 
 fn stopped() -> StoreError {
@@ -79,13 +81,15 @@ impl StoreHandle {
     /// Opens the store at `url` on a new `world-store` thread; returns once it
     /// is open (a [`OpenMode::Writer`] creates a missing store and migrates it).
     pub fn open(url: &StoreUrl, dials: Dials, mode: OpenMode) -> Result<StoreHandle, StoreError> {
-        let (tx, join, super_region_regions) = thread::spawn(url, dials, mode)?;
+        let cuts = Arc::new(thread::CutState::new());
+        let (tx, join, super_region_regions) = thread::spawn(url, dials, mode, cuts.clone())?;
         Ok(StoreHandle {
             tx,
             join: Arc::new(Mutex::new(Some(join))),
             super_region_regions,
             fail_writes: Arc::new(AtomicU32::new(0)),
             stop_commits: Arc::new(Mutex::new(None)),
+            cuts,
         })
     }
 
@@ -109,6 +113,13 @@ impl StoreHandle {
     #[doc(hidden)]
     pub fn stop_after_commit_prepared(&self, n: u32) {
         *self.stop_commits.lock().unwrap_or_else(|e| e.into_inner()) = Some(n);
+    }
+
+    /// Test hook: the `lock_timeout` of this handle's later cut transactions, in ms
+    /// (default [`crate::CUT_LOCK_TIMEOUT_MS`]). Shared by every clone.
+    #[doc(hidden)]
+    pub fn set_cut_lock_timeout_ms(&self, ms: u64) {
+        self.cuts.lock_timeout_ms.store(ms, Ordering::SeqCst);
     }
 
     /// Takes one of [`StoreHandle::fail_next_writes`]' failures, if any are left.
@@ -199,13 +210,18 @@ impl StoreHandle {
     /// Fenced: `Fenced` (nothing written) unless `fence` still holds every
     /// super-region it claimed and every one the cut touches
     /// ([`crate::touched_super_regions`]). An empty fence with a cut that
-    /// touches no super-region performs no check at all.
+    /// touches no super-region performs no check at all. Refused at once with
+    /// `CutPending` while this handle has an undecided prepared part.
     pub fn commit_cut(
         &self,
         cut: WorldCut,
         fence: Fence,
     ) -> crossbeam::channel::Receiver<Result<CutCommitted, StoreError>> {
         let (tx, rx) = crossbeam::channel::bounded(1);
+        if let Some(pending) = *self.cuts.pending() {
+            let _ = tx.send(Err(StoreError::CutPending(pending)));
+            return rx;
+        }
         if let Some(e) = self.injected_failure() {
             let _ = tx.send(Err(e));
             return rx;
@@ -232,6 +248,15 @@ impl StoreHandle {
     /// commits it. Refused with `StaleGeneration` (nothing staged) unless the world is
     /// at `generation`. The prepared part keeps its `FOR SHARE` on the host's
     /// super-regions, so another process's claim of them waits for the decision.
+    /// A part that prepares after its cut was decided finishes itself: committed, the
+    /// answer is `Ok`; aborted, `CutAborted` (nothing written).
+    ///
+    /// From the call until the part is settled, this handle refuses every further cut
+    /// (`commit_cut` / `prepare_cut`) at once with `CutPending`. The part is settled by
+    /// [`StoreHandle::cut_decided`] once its cut is decided, or by an answer that left
+    /// nothing staged (any error but `Backend`, or a self-finished part). Refused at
+    /// once with `Unsupported` for a fence with `all_hosts` (its in-flight replace would
+    /// lock every host's rows) or a cut carrying the history (the coordinator's).
     /// Postgres only (`Unsupported` on SQLite). Counts as a cut commit for
     /// [`StoreHandle::fail_next_writes`].
     pub fn prepare_cut(
@@ -241,12 +266,32 @@ impl StoreHandle {
         generation: u64,
     ) -> crossbeam::channel::Receiver<Result<CutCommitted, StoreError>> {
         let (tx, rx) = crossbeam::channel::bounded(1);
-        if let Some(e) = self.injected_failure() {
+        let refused = if fence.all_hosts {
+            Some(StoreError::Unsupported("a two-phase cut needs a per-host fence".into()))
+        } else if cut.history.is_some() {
+            Some(StoreError::Unsupported("the history is the coordinator's; a host's cut part never carries it".into()))
+        } else {
+            None
+        };
+        if let Some(e) = refused {
             let _ = tx.send(Err(e));
             return rx;
         }
+        {
+            let mut pending = self.cuts.pending();
+            if let Some(p) = *pending {
+                let _ = tx.send(Err(StoreError::CutPending(p)));
+                return rx;
+            }
+            if let Some(e) = self.injected_failure() {
+                let _ = tx.send(Err(e));
+                return rx;
+            }
+            *pending = Some(cut.id);
+        }
         let req = Request::PrepareCut(Box::new(cut), fence, generation, Reply::Sync(tx));
-        if let Err(mpsc::error::SendError(Request::PrepareCut(_, _, _, reply))) = self.tx.send(req) {
+        if let Err(mpsc::error::SendError(Request::PrepareCut(c, _, _, reply))) = self.tx.send(req) {
+            self.cuts.settle(c.id);
             reply.send(Err(stopped()));
         }
         rx
@@ -258,8 +303,10 @@ impl StoreHandle {
     /// the cut is decided already (a host's [`StoreHandle::abort_cut`] may have won).
     /// A commit is refused with `StaleGeneration` (nothing recorded) unless the world is
     /// at `generation`. If this call records a commit it also writes the world tick
-    /// (`tick`, never backwards) and marks `leaving` clean. Then every part is
-    /// committed or rolled back as the STORED decision says (a part already finished
+    /// (`tick`, never backwards) and marks `leaving` clean. A commit is recorded only if
+    /// exactly the parts of `hosts` are staged; otherwise an ABORT is recorded (logged)
+    /// and the call returns `false`. Then every staged part of the cut — listed or not —
+    /// is committed or rolled back as the STORED decision says (a part already finished
     /// counts as done). Returns the stored decision. Postgres only.
     #[allow(clippy::too_many_arguments)]
     pub fn decide_cut(
@@ -278,9 +325,9 @@ impl StoreHandle {
     }
 
     /// A host's "abort unless decided": records an abort of `cut` if it has no
-    /// decision yet and returns the stored decision (`true`: it was committed). Not
-    /// fenced — the first decision written wins. Finishes no part (the decision or
-    /// [`StoreHandle::resolve_prepared`] does). Postgres only.
+    /// decision yet, finishes every staged part of the cut as the stored decision says,
+    /// and returns it (`true`: it was committed). Not fenced — the first decision
+    /// written wins. Postgres only.
     pub fn abort_cut(&self, cut: CutId, tick: Tick) -> Result<bool, StoreError> {
         self.ask(|r| Request::AbortCut(cut, tick, r))
     }
@@ -296,6 +343,14 @@ impl StoreHandle {
     /// The stored decision on `cut` (`Some(true)`: committed), `None` while undecided.
     pub fn cut_decision(&self, cut: CutId) -> Result<Option<bool>, StoreError> {
         self.ask(|r| Request::CutDecision(cut, r))
+    }
+
+    /// A host has heard that `cut` is decided (`CutDone`): re-reads the decision; if
+    /// there is one, finishes any part of the cut still staged as it says and settles
+    /// this handle's pending part, so its next cut is accepted. Returns the decision
+    /// (`None`: undecided — the pending part stays).
+    pub fn cut_decided(&self, cut: CutId) -> Result<Option<bool>, StoreError> {
+        self.ask(|r| Request::CutDecided(cut, r))
     }
 
     /// The player id and saved record of `key` (the `players.token` column:

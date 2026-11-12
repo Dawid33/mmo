@@ -31,6 +31,9 @@ pub use url::StoreUrl;
 pub const STORE_FORMAT_VERSION: u32 = 1;
 /// Largest connection pool of a store (the writer plus readers).
 pub const STORE_POOL_MAX: u32 = 4;
+/// How long a save cut's transaction (Postgres `lock_timeout`, both kinds) waits for
+/// any one row lock before it gives up: no cut sits on a lock for ever.
+pub const CUT_LOCK_TIMEOUT_MS: u64 = 10_000;
 
 /// The build-time dials a world is tied to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -154,6 +157,13 @@ pub enum StoreError {
     StaleGeneration { stored: u64, mine: u64 },
     /// A write asked of a handle opened [`OpenMode::ReadOnly`].
     ReadOnly,
+    /// A host's part of a two-phase cut prepared after the cut was decided aborted:
+    /// the part rolled itself back; nothing of it was written.
+    CutAborted(game::CutId),
+    /// This handle's part of the cut is prepared and not yet seen decided
+    /// ([`StoreHandle::cut_decided`]): the next cut is refused at once (it would wait
+    /// on that part's row locks). Nothing was written.
+    CutPending(game::CutId),
 }
 
 impl fmt::Display for StoreError {
@@ -224,6 +234,14 @@ impl fmt::Display for StoreError {
                  from another save; nothing was written"
             ),
             StoreError::ReadOnly => write!(f, "this world store was opened read-only; it writes nothing"),
+            StoreError::CutAborted(cut) => {
+                write!(f, "cut {} was decided aborted before this part prepared; the part rolled itself back", cut.0)
+            }
+            StoreError::CutPending(cut) => write!(
+                f,
+                "this host's part of cut {} is still undecided; no further cut is written until it is (cut_decided)",
+                cut.0
+            ),
             StoreError::Unsupported(e) => write!(f, "{e}"),
             StoreError::Corrupt(e) => write!(f, "world store is corrupt: {e}"),
         }
@@ -246,7 +264,14 @@ impl std::error::Error for StoreError {}
 
 impl From<sqlx::Error> for StoreError {
     fn from(e: sqlx::Error) -> Self {
-        StoreError::Backend(e.to_string())
+        match &e {
+            // `lock_not_available`: a save cut's `lock_timeout` ran out.
+            sqlx::Error::Database(d) if d.code().as_deref() == Some("55P03") => StoreError::Backend(format!(
+                "a save cut waited longer than its lock_timeout (CUT_LOCK_TIMEOUT_MS) for a row lock another \
+                 transaction or prepared cut part holds; nothing was written ({e})"
+            )),
+            _ => StoreError::Backend(e.to_string()),
+        }
     }
 }
 

@@ -1,10 +1,14 @@
 //! Two-phase save cuts (R3, Postgres only). Each host writes its fenced part of a
 //! cut and ends the transaction with `PREPARE TRANSACTION '<gid>'`
 //! ([`crate::rows::CutEnd::Prepare`]); the coordinator then records ONE decision
-//! row (`cut_decisions`, first writer wins on the cut id) and issues
-//! `COMMIT PREPARED` / `ROLLBACK PREPARED` for every part. A host that gives up
-//! records an abort the same way ([`abort_cut`]); a process starting up finishes or
-//! aborts whatever a crash left prepared ([`resolve_prepared`]).
+//! row (`cut_decisions`, first writer wins on the cut id) and finishes
+//! (`COMMIT PREPARED` / `ROLLBACK PREPARED`) every part of the cut that is staged.
+//! A commit is recorded only if exactly the listed hosts' parts are staged; otherwise
+//! the decision becomes an abort. A host that gives up records an abort the same way
+//! ([`abort_cut`]); a part that prepares after its cut was decided finishes itself
+//! ([`finish_if_decided`]); a process starting up finishes or aborts whatever a crash
+//! left prepared ([`resolve_prepared`]). Every finisher finishes EVERY staged part of
+//! the cut, as the stored decision says.
 //!
 //! Locks: a prepared part keeps every row lock it took — `FOR SHARE` on its host's
 //! `super_regions` rows (so a claim of them waits for the decision) and the rows it
@@ -16,12 +20,13 @@
 //! None of this takes the store's writer lock: a prepare queued behind a part that
 //! holds a row it needs waits for the decision, which must not wait for that prepare.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use game::{CutId, Tick};
 use sqlx::PgPool;
 
+use crate::rows::pg::cut_decision;
 use crate::{CoordinatorFence, StoreError};
 
 /// What every store that cannot prepare a cut answers.
@@ -36,6 +41,8 @@ const GID_MAX_BYTES: usize = 200;
 const PREPARED_BUSY_RETRY: Duration = Duration::from_millis(20);
 /// How many times it looks before giving up (10 s in all).
 const PREPARED_BUSY_TRIES: u32 = 500;
+/// The tick an abort recorded by the sweep carries: it does not know the cut's.
+const SWEEP_ABORT_TICK: Tick = 0;
 
 /// The gid of host `host`'s prepared part of `cut`. `world_tag` tells the worlds of
 /// one Postgres cluster apart (gids are cluster-wide): the database's OID.
@@ -48,7 +55,8 @@ pub fn cut_gid(world_tag: u32, cut: CutId, host: u32) -> String {
 fn gid_ok(gid: &str) -> bool {
     gid.len() <= GID_MAX_BYTES
         && gid.strip_prefix(GID_PREFIX).is_some_and(|rest| {
-            !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit() || b == b'-')
+            let parts: Vec<&str> = rest.split('-').collect();
+            parts.len() == 3 && parts.iter().all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
         })
 }
 
@@ -62,15 +70,59 @@ pub(crate) fn prepare_sql(gid: &str) -> String {
     format!("PREPARE TRANSACTION '{}'", checked(gid))
 }
 
-/// `(cut, host)` of a gid of world `world_tag`; `None` for any other gid.
-fn parse_gid(world_tag: u32, gid: &str) -> Option<(CutId, u32)> {
-    let rest = gid.strip_prefix(GID_PREFIX)?;
-    let mut parts = rest.split('-');
-    let (tag, cut, host) = (parts.next()?, parts.next()?, parts.next()?);
-    if parts.next().is_some() || tag.parse::<u32>().ok()? != world_tag {
-        return None;
+/// What a gid that starts with the prefix is.
+#[derive(Debug, PartialEq, Eq)]
+enum Gid {
+    /// A part of this world: `(cut, host)`.
+    Ours(CutId, u32),
+    /// A well-formed part of another world.
+    Foreign,
+    /// Not of [`cut_gid`]'s shape (or out of range).
+    Malformed,
+}
+
+fn parse_gid(world_tag: u32, gid: &str) -> Gid {
+    if !gid_ok(gid) {
+        return Gid::Malformed;
     }
-    Some((CutId(cut.parse().ok()?), host.parse().ok()?))
+    let mut parts = gid[GID_PREFIX.len()..].split('-');
+    let (Some(tag), Some(cut), Some(host)) = (parts.next(), parts.next(), parts.next()) else {
+        return Gid::Malformed;
+    };
+    match (tag.parse::<u32>(), cut.parse::<u64>(), host.parse::<u32>()) {
+        (Ok(t), Ok(c), Ok(h)) if t == world_tag => Gid::Ours(CutId(c), h),
+        (Ok(_), Ok(_), Ok(_)) => Gid::Foreign,
+        _ => Gid::Malformed,
+    }
+}
+
+/// Every staged part of this world: `cut → (host → gid)`. `cut`: only that cut's.
+/// A gid that only looks like ours is skipped with a warning.
+async fn staged_parts<'c>(
+    e: impl sqlx::Executor<'c, Database = sqlx::Postgres>,
+    world_tag: u32,
+    cut: Option<CutId>,
+) -> Result<BTreeMap<CutId, BTreeMap<u32, String>>, StoreError> {
+    let pattern = match cut {
+        Some(c) => format!("{GID_PREFIX}{world_tag}-{}-%", c.0),
+        None => format!("{GID_PREFIX}%"),
+    };
+    let gids: Vec<String> =
+        sqlx::query_scalar("SELECT gid FROM pg_prepared_xacts WHERE database = current_database() AND gid LIKE $1")
+            .bind(pattern)
+            .fetch_all(e)
+            .await?;
+    let mut out: BTreeMap<CutId, BTreeMap<u32, String>> = BTreeMap::new();
+    for gid in gids {
+        match parse_gid(world_tag, &gid) {
+            Gid::Ours(c, h) if cut.is_none_or(|want| want == c) => {
+                out.entry(c).or_default().insert(h, gid);
+            }
+            Gid::Ours(..) | Gid::Foreign => {}
+            Gid::Malformed => log::warn!("[world-store] skipping prepared transaction {gid:?}: not a cut part's gid"),
+        }
+    }
+    Ok(out)
 }
 
 /// This database's OID: the world tag of its gids.
@@ -90,9 +142,9 @@ pub(crate) async fn two_phase_ready(pool: &PgPool) -> Result<(), StoreError> {
 }
 
 /// Records `committed` for `cut` unless it is decided; returns whether this call
-/// inserted it. In `tx` (the decision) or on its own (an abort).
-async fn insert_decision(
-    conn: &mut sqlx::PgConnection,
+/// inserted it.
+async fn insert_decision<'c>(
+    e: impl sqlx::Executor<'c, Database = sqlx::Postgres>,
     cut: CutId,
     tick: Tick,
     committed: bool,
@@ -105,17 +157,13 @@ async fn insert_decision(
     .bind(tick as i64)
     .bind(i64::from(committed))
     .bind(crate::open::utc_now())
-    .execute(&mut *conn)
+    .execute(e)
     .await?;
     Ok(done.rows_affected() == 1)
 }
 
-async fn stored_decision(conn: &mut sqlx::PgConnection, cut: CutId) -> Result<Option<bool>, StoreError> {
-    let d: Option<i64> = sqlx::query_scalar("SELECT committed FROM cut_decisions WHERE cut_id = $1")
-        .bind(cut.0 as i64)
-        .fetch_optional(&mut *conn)
-        .await?;
-    Ok(d.map(|d| d != 0))
+fn no_decision(cut: CutId) -> StoreError {
+    StoreError::Corrupt(format!("cut {} has no decision after its insert", cut.0))
 }
 
 /// The coordinator's decision on `cut` (see [`crate::StoreHandle::decide_cut`]).
@@ -141,9 +189,10 @@ pub(crate) async fn decide_cut(
     if epoch.map(|e| e as u64) != Some(fence.epoch) {
         return Err(StoreError::Fenced { sr: None });
     }
-    let decided = match stored_decision(&mut tx, cut).await? {
+    let decided = match cut_decision(&mut *tx, cut).await? {
         Some(d) => d,
         None => {
+            let mut commit = commit;
             if commit {
                 let stored: i64 = sqlx::query_scalar("SELECT generation FROM world WHERE id = 1 FOR UPDATE")
                     .fetch_optional(&mut *tx)
@@ -152,12 +201,30 @@ pub(crate) async fn decide_cut(
                 if stored as u64 != generation {
                     return Err(StoreError::StaleGeneration { stored: stored as u64, mine: generation });
                 }
+                // A commit needs exactly the listed parts staged: a part still queued,
+                // mid-PREPARE or never prepared would otherwise be skipped (the cut
+                // half-visible) and could commit later over newer data.
+                let staged: BTreeSet<u32> = staged_parts(&mut *tx, world_tag, Some(cut))
+                    .await?
+                    .remove(&cut)
+                    .unwrap_or_default()
+                    .into_keys()
+                    .collect();
+                let listed: BTreeSet<u32> = hosts.iter().copied().collect();
+                if staged != listed {
+                    let missing: Vec<u32> = listed.difference(&staged).copied().collect();
+                    let unexpected: Vec<u32> = staged.difference(&listed).copied().collect();
+                    log::warn!(
+                        "[world-store] cut {} cannot commit: parts missing from hosts {missing:?}, unlisted parts \
+                         from hosts {unexpected:?}; recording an abort",
+                        cut.0
+                    );
+                    commit = false;
+                }
             }
-            let inserted = insert_decision(&mut tx, cut, tick, commit).await?;
+            let inserted = insert_decision(&mut *tx, cut, tick, commit).await?;
             // A host's abort may have won the insert meanwhile.
-            let d = stored_decision(&mut tx, cut)
-                .await?
-                .ok_or_else(|| StoreError::Corrupt(format!("cut {} has no decision after its insert", cut.0)))?;
+            let d = cut_decision(&mut *tx, cut).await?.ok_or_else(|| no_decision(cut))?;
             if inserted && d {
                 sqlx::query("UPDATE world SET world_tick = $1 WHERE id = 1 AND world_tick < $1")
                     .bind(tick as i64)
@@ -173,9 +240,70 @@ pub(crate) async fn decide_cut(
         }
     };
     tx.commit().await?;
+    finish_staged(pool, world_tag, cut, decided, stop_after).await?;
+    Ok(decided)
+}
+
+/// The stored decision on `cut`, recording an abort first if it has none.
+async fn decision_or_abort(pool: &PgPool, cut: CutId, tick: Tick) -> Result<bool, StoreError> {
+    insert_decision(pool, cut, tick, false).await?;
+    cut_decision(pool, cut).await?.ok_or_else(|| no_decision(cut))
+}
+
+/// A host's "abort unless decided": records an abort if `cut` has no decision, then
+/// finishes every staged part of it as the stored decision says, which it returns.
+/// Unfenced on purpose — the first writer wins.
+pub(crate) async fn abort_cut(pool: &PgPool, world_tag: u32, cut: CutId, tick: Tick) -> Result<bool, StoreError> {
+    let d = decision_or_abort(pool, cut, tick).await?;
+    finish_staged(pool, world_tag, cut, d, None).await?;
+    Ok(d)
+}
+
+/// The stored decision on `cut` (`None`: undecided); a decided cut's staged parts
+/// are finished as it says ([`crate::StoreHandle::cut_decided`]).
+pub(crate) async fn cut_decided(pool: &PgPool, world_tag: u32, cut: CutId) -> Result<Option<bool>, StoreError> {
+    let d = cut_decision(pool, cut).await?;
+    if let Some(d) = d {
+        finish_staged(pool, world_tag, cut, d, None).await?;
+    }
+    Ok(d)
+}
+
+/// Right after a part prepared: if its cut is decided already (the decider's finish
+/// pass may have run before the part was staged), the part finishes itself as
+/// decided. Returns the decision applied (`None`: undecided, the part stays prepared).
+pub(crate) async fn finish_if_decided(pool: &PgPool, gid: &str, cut: CutId) -> Result<Option<bool>, StoreError> {
+    let d = cut_decision(pool, cut).await?;
+    if let Some(d) = d {
+        log::warn!("[world-store] part {gid} prepared after cut {} was decided; finishing it ({d})", cut.0);
+        finish_part(pool, gid, d).await?;
+    }
+    Ok(d)
+}
+
+/// Whether the part `gid` is staged (prepared and not finished).
+pub(crate) async fn is_staged(pool: &PgPool, gid: &str) -> Result<bool, StoreError> {
+    let n: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM pg_prepared_xacts WHERE database = current_database() AND gid = $1",
+    )
+    .bind(gid)
+    .fetch_one(pool)
+    .await?;
+    Ok(n > 0)
+}
+
+/// Finishes every staged part of `cut` (whoever's) as `decided` says.
+async fn finish_staged(
+    pool: &PgPool,
+    world_tag: u32,
+    cut: CutId,
+    decided: bool,
+    stop_after: Option<u32>,
+) -> Result<(), StoreError> {
+    let parts = staged_parts(pool, world_tag, Some(cut)).await?.remove(&cut).unwrap_or_default();
     let mut committed = 0u32;
-    for host in hosts {
-        finish_part(pool, &cut_gid(world_tag, cut, host), decided).await?;
+    for gid in parts.values() {
+        finish_part(pool, gid, decided).await?;
         if decided {
             committed += 1;
             if stop_after == Some(committed) {
@@ -183,22 +311,12 @@ pub(crate) async fn decide_cut(
             }
         }
     }
-    Ok(decided)
-}
-
-/// A host's "abort unless decided": records an abort if `cut` has no decision and
-/// returns the stored one. Unfenced on purpose — the first writer wins.
-pub(crate) async fn abort_cut(pool: &PgPool, cut: CutId, tick: Tick) -> Result<bool, StoreError> {
-    let mut conn = pool.acquire().await?;
-    insert_decision(&mut conn, cut, tick, false).await?;
-    stored_decision(&mut conn, cut)
-        .await?
-        .ok_or_else(|| StoreError::Corrupt(format!("cut {} has no decision after its insert", cut.0)))
+    Ok(())
 }
 
 /// Commits (`commit`) or rolls back one prepared part. A part that is gone was
-/// finished already (by this decision before, or by another process's sweep); one
-/// that is "busy" is being finished by another process right now: look again.
+/// finished already (by this decision before, or by another process); one that is
+/// "busy" is being finished by another process right now: look again.
 async fn finish_part(pool: &PgPool, gid: &str, commit: bool) -> Result<(), StoreError> {
     let verb = if commit { "COMMIT PREPARED" } else { "ROLLBACK PREPARED" };
     let sql = format!("{verb} '{}'", checked(gid));
@@ -216,29 +334,14 @@ async fn finish_part(pool: &PgPool, gid: &str, commit: bool) -> Result<(), Store
 }
 
 /// Finishes every prepared part of this world that a crash left behind: a decided
-/// cut's parts as decided; an undecided cut is aborted first (the sweep does not know
-/// its tick: the abort row says 0). Safe beside other processes doing the same.
+/// cut's parts as decided; an undecided cut is aborted first (the abort row carries
+/// [`SWEEP_ABORT_TICK`]). Safe beside other processes doing the same.
 pub(crate) async fn resolve_prepared(pool: &PgPool, world_tag: u32) -> Result<Vec<(CutId, bool)>, StoreError> {
-    let gids: Vec<String> = sqlx::query_scalar(
-        "SELECT gid FROM pg_prepared_xacts WHERE database = current_database() AND gid LIKE 'mmo-cut-%'",
-    )
-    .fetch_all(pool)
-    .await?;
-    let mut cuts: BTreeMap<CutId, Vec<String>> = BTreeMap::new();
-    for gid in gids {
-        if let Some((cut, _)) = parse_gid(world_tag, &gid) {
-            cuts.entry(cut).or_default().push(gid);
-        }
-    }
+    let cuts = staged_parts(pool, world_tag, None).await?;
     let mut out = Vec::with_capacity(cuts.len());
-    for (cut, gids) in cuts {
-        let decided = match stored_decision(&mut *pool.acquire().await?, cut).await? {
-            Some(d) => d,
-            None => abort_cut(pool, cut, 0).await?,
-        };
-        for gid in gids {
-            finish_part(pool, &gid, decided).await?;
-        }
+    for cut in cuts.into_keys() {
+        let decided = decision_or_abort(pool, cut, SWEEP_ABORT_TICK).await?;
+        finish_staged(pool, world_tag, cut, decided, None).await?;
         log::info!("[world-store] resolved prepared cut {} ({})", cut.0, if decided { "committed" } else { "aborted" });
         out.push((cut, decided));
     }
@@ -253,10 +356,14 @@ mod tests {
     fn gids_round_trip_and_stay_in_their_world() {
         let gid = cut_gid(4242, CutId(u64::MAX), u32::MAX);
         assert!(gid_ok(&gid) && gid.len() <= GID_MAX_BYTES);
-        assert_eq!(parse_gid(4242, &gid), Some((CutId(u64::MAX), u32::MAX)));
-        assert_eq!(parse_gid(4243, &gid), None, "another world's");
-        assert_eq!(parse_gid(4242, "mmo-cut-4242-1"), None);
+        assert_eq!(parse_gid(4242, &gid), Gid::Ours(CutId(u64::MAX), u32::MAX));
+        assert_eq!(parse_gid(4243, &gid), Gid::Foreign, "another world's");
+        assert_eq!(parse_gid(4242, "mmo-cut-4242-1"), Gid::Malformed);
+        assert_eq!(parse_gid(4242, "mmo-cut-4242-1-2-3"), Gid::Malformed);
+        assert_eq!(parse_gid(4242, "mmo-cut-4242-1-99999999999"), Gid::Malformed, "host out of range");
         assert!(!gid_ok("mmo-cut-1'; DROP TABLE world; --"));
         assert!(!gid_ok("mmo-cut-"));
+        assert!(!gid_ok("mmo-cut-+4242-1-2"), "a sign is not a digit");
+        assert!(!gid_ok("mmo-cut-4242--2"));
     }
 }

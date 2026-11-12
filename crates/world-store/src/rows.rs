@@ -116,7 +116,7 @@ pub(crate) enum CutEnd {
 }
 
 macro_rules! engine_rows {
-    ($module:ident, $db:ty, $read_prelude:expr, $share_lock:expr, $update_lock:expr) => {
+    ($module:ident, $db:ty, $read_prelude:expr, $share_lock:expr, $update_lock:expr, $lock_timeout:expr) => {
         pub(crate) mod $module {
             use sqlx::Row;
 
@@ -732,26 +732,32 @@ macro_rules! engine_rows {
             }
 
             /// The stored decision on `cut` (`cut_decisions`), if any.
-            pub(crate) async fn cut_decision(pool: &Pool, cut: CutId) -> Result<Option<bool>, StoreError> {
+            pub(crate) async fn cut_decision<'c>(
+                e: impl sqlx::Executor<'c, Database = $db>,
+                cut: CutId,
+            ) -> Result<Option<bool>, StoreError> {
                 let d: Option<i64> = sqlx::query_scalar("SELECT committed FROM cut_decisions WHERE cut_id = $1")
                     .bind(i(cut.0))
-                    .fetch_optional(pool)
+                    .fetch_optional(e)
                     .await?;
                 Ok(d.map(|d| d != 0))
             }
 
             /// The whole cut in one transaction, ended as `end` says
-            /// ([`CutEnd`]); any error rolls all of it back. Callers hold the writer lock.
+            /// ([`CutEnd`]); any error rolls all of it back. On Postgres the transaction
+            /// waits at most `lock_timeout_ms` for any row lock. Callers hold the writer lock.
             pub(crate) async fn run_cut(
                 pool: &Pool,
                 cut: &WorldCut,
                 fence: &Fence,
                 s: u32,
                 end: &CutEnd,
+                lock_timeout_ms: u64,
             ) -> Result<CutCommitted, StoreError> {
                 match end {
                     CutEnd::Commit => {
                         let mut tx = pool.begin().await?;
+                        cut_lock_timeout(&mut *tx, lock_timeout_ms).await?;
                         let done = cut_rows(&mut *tx, cut, fence, s, end).await?;
                         tx.commit().await?;
                         Ok(done)
@@ -759,25 +765,56 @@ macro_rules! engine_rows {
                     CutEnd::Prepare { gid, generation } => {
                         // A raw transaction on one connection: a `sqlx::Transaction` would
                         // send a ROLLBACK when dropped, after the PREPARE. Every error
-                        // before the PREPARE rolls back here, on the same connection.
+                        // before the PREPARE rolls back here, on the same connection; a
+                        // panic or cancellation in between closes the connection instead
+                        // of handing it back inside the transaction.
                         let prepare = crate::two_phase::prepare_sql(gid);
-                        let mut conn = pool.acquire().await?;
-                        sqlx::Executor::execute(&mut *conn, "BEGIN").await?;
-                        let staged = prepare_rows(&mut *conn, cut, fence, s, end, *generation, &prepare).await;
-                        if staged.is_err() {
-                            if let Err(e) = sqlx::Executor::execute(&mut *conn, "ROLLBACK").await {
-                                // Never hand a connection with an open transaction back.
-                                log::error!("[world-store] rollback of a failed prepare: {e}; closing the connection");
-                                let _ = conn.close().await;
-                            }
+                        let mut conn = OpenTx { conn: Some(pool.acquire().await?), open: true };
+                        let c = conn.conn.as_mut().expect("set above");
+                        sqlx::Executor::execute(&mut **c, "BEGIN").await?;
+                        let staged = prepare_rows(&mut **c, cut, fence, s, end, *generation, &prepare, lock_timeout_ms).await;
+                        if staged.is_ok() {
+                            conn.open = false;
+                        } else if let Err(e) = sqlx::Executor::execute(&mut **c, "ROLLBACK").await {
+                            // Never hand a connection with an open transaction back.
+                            log::error!("[world-store] rollback of a failed prepare: {e}; closing the connection");
+                        } else {
+                            conn.open = false;
                         }
                         staged
                     }
                 }
             }
 
+            /// A pooled connection with a raw transaction that may still be open:
+            /// dropped while `open`, it is closed, never returned to the pool.
+            struct OpenTx {
+                conn: Option<sqlx::pool::PoolConnection<$db>>,
+                open: bool,
+            }
+
+            impl Drop for OpenTx {
+                fn drop(&mut self) {
+                    if self.open {
+                        if let Some(c) = self.conn.as_mut() {
+                            c.close_on_drop();
+                        }
+                    }
+                }
+            }
+
+            /// The first statement of a cut's transaction (Postgres): no row lock
+            /// is waited for longer than `ms`.
+            async fn cut_lock_timeout(conn: &mut Conn, ms: u64) -> Result<(), StoreError> {
+                if $lock_timeout {
+                    sqlx::Executor::execute(&mut *conn, format!("SET LOCAL lock_timeout = '{ms}ms'").as_str()).await?;
+                }
+                Ok(())
+            }
+
             /// A prepared part's statements after its `BEGIN`: the generation check,
             /// the cut's rows and the `PREPARE TRANSACTION`.
+            #[allow(clippy::too_many_arguments)]
             async fn prepare_rows(
                 conn: &mut Conn,
                 cut: &WorldCut,
@@ -786,7 +823,9 @@ macro_rules! engine_rows {
                 end: &CutEnd,
                 generation: u64,
                 prepare: &str,
+                lock_timeout_ms: u64,
             ) -> Result<CutCommitted, StoreError> {
+                cut_lock_timeout(&mut *conn, lock_timeout_ms).await?;
                 // No row lock: a prepared part holding one on the world row would
                 // block the decision's world tick update. The decision re-checks the
                 // generation under `FOR UPDATE`.
@@ -982,5 +1021,6 @@ macro_rules! engine_rows {
 
 // SQLite needs no row lock: claims and commits all hold the store's writer
 // lock and one writer process holds the file lock.
-engine_rows!(sqlite, sqlx::Sqlite, None, "", "");
-engine_rows!(pg, sqlx::Postgres, Some("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ"), " FOR SHARE", " FOR UPDATE");
+// `$lock_timeout`: whether a cut's transaction sets a `lock_timeout` (Postgres).
+engine_rows!(sqlite, sqlx::Sqlite, None, "", "", false);
+engine_rows!(pg, sqlx::Postgres, Some("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ"), " FOR SHARE", " FOR UPDATE", true);

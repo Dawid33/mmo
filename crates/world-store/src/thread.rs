@@ -7,6 +7,7 @@
 //! answers every write with `StoreError::ReadOnly`.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use game::{CutId, PlayerId, PlayerRecord, RegionCoords, Tick, WorldCut};
 use tokio::sync::{Mutex, mpsc, oneshot};
@@ -82,6 +83,7 @@ pub(crate) enum Request {
     AbortCut(CutId, Tick, Reply<bool>),
     ResolvePrepared(Reply<Vec<(CutId, bool)>>),
     CutDecision(CutId, Reply<Option<bool>>),
+    CutDecided(CutId, Reply<Option<bool>>),
     /// Finish the queued commits, then stop.
     Shutdown,
 }
@@ -97,6 +99,35 @@ pub(crate) struct Decision {
     pub generation: u64,
     /// Test hook: fail after this many `COMMIT PREPARED`s.
     pub stop_after: Option<u32>,
+}
+
+/// Cut state shared by a handle (and its clones) and its store thread.
+pub(crate) struct CutState {
+    /// The cut whose part this handle prepared (or is preparing) and has not yet seen
+    /// decided: every further cut is refused with `CutPending` until
+    /// [`crate::StoreHandle::cut_decided`] (or a prepare that ends with nothing staged)
+    /// clears it.
+    pub pending: std::sync::Mutex<Option<CutId>>,
+    /// `lock_timeout` of every cut transaction, ms ([`crate::CUT_LOCK_TIMEOUT_MS`]).
+    pub lock_timeout_ms: AtomicU64,
+}
+
+impl CutState {
+    pub(crate) fn new() -> CutState {
+        CutState { pending: std::sync::Mutex::new(None), lock_timeout_ms: AtomicU64::new(crate::CUT_LOCK_TIMEOUT_MS) }
+    }
+
+    pub(crate) fn pending(&self) -> std::sync::MutexGuard<'_, Option<CutId>> {
+        self.pending.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Forgets `cut`'s pending part (if it is the pending one).
+    pub(crate) fn settle(&self, cut: CutId) {
+        let mut p = self.pending();
+        if *p == Some(cut) {
+            *p = None;
+        }
+    }
 }
 
 /// One queued cut for the committer: the cut, its fence, how it ends, the answer.
@@ -118,7 +149,7 @@ pub(crate) type Spawned = (mpsc::UnboundedSender<Request>, std::thread::JoinHand
 
 /// Opens the store on a new `world-store` thread and returns it once the
 /// store is open (or the open's error).
-pub(crate) fn spawn(url: &StoreUrl, dials: Dials, mode: OpenMode) -> Result<Spawned, StoreError> {
+pub(crate) fn spawn(url: &StoreUrl, dials: Dials, mode: OpenMode, cuts: Arc<CutState>) -> Result<Spawned, StoreError> {
     let (tx, rx) = mpsc::unbounded_channel();
     let (opened_tx, opened_rx) = crossbeam::channel::bounded(1);
     let url = url.clone();
@@ -155,7 +186,7 @@ pub(crate) fn spawn(url: &StoreUrl, dials: Dials, mode: OpenMode) -> Result<Spaw
                     }
                 };
                 let _ = opened_tx.send(Ok(s));
-                serve(pool, guard, s, world_tag, mode == OpenMode::ReadOnly, rx).await;
+                serve(pool, guard, s, world_tag, cuts, mode == OpenMode::ReadOnly, rx).await;
             });
         })
         .map_err(|e| StoreError::Backend(format!("spawn the world-store thread: {e}")))?;
@@ -179,6 +210,7 @@ async fn serve(
     guard: LockGuard,
     s: u32,
     world_tag: Option<u32>,
+    cuts: Arc<CutState>,
     read_only: bool,
     mut rx: mpsc::UnboundedReceiver<Request>,
 ) {
@@ -186,11 +218,16 @@ async fn serve(
     // Commits and prepares in order on one task.
     let (commit_tx, mut commit_rx) = mpsc::unbounded_channel::<QueuedCut>();
     let committer = {
-        let (pool, writer) = (pool.clone(), writer.clone());
+        let (pool, writer, cuts) = (pool.clone(), writer.clone(), cuts.clone());
         tokio::spawn(async move {
             while let Some((cut, fence, end, reply)) = commit_rx.recv().await {
                 let _w = writer.lock().await;
-                let result = on_pool!(&pool, run_cut(&cut, &fence, s, &end));
+                let lock_timeout_ms = cuts.lock_timeout_ms.load(Ordering::SeqCst);
+                let result = on_pool!(&pool, run_cut(&cut, &fence, s, &end, lock_timeout_ms));
+                let result = match (&pool, &end) {
+                    (Pool::Pg(p), CutEnd::Prepare { gid, .. }) => settle_prepare(p, gid, cut.id, result, &cuts).await,
+                    _ => result,
+                };
                 let what = match end {
                     CutEnd::Commit => "committed",
                     CutEnd::Prepare { .. } => "prepared",
@@ -207,7 +244,7 @@ async fn serve(
     while let Some(req) = rx.recv().await {
         tasks.retain(|t| !t.is_finished());
         let (pool, writer) = (pool.clone(), writer.clone());
-        let req = match refuse_if_read_only(req, read_only) {
+        let req = match refuse_if_read_only(req, read_only, &cuts) {
             Some(req) => req,
             None => continue,
         };
@@ -219,6 +256,7 @@ async fn serve(
             }
             Request::PrepareCut(cut, fence, generation, reply) => {
                 let Some(tag) = world_tag else {
+                    cuts.settle(cut.id);
                     reply.send(Err(StoreError::Unsupported(TWO_PHASE_UNSUPPORTED.into())));
                     continue;
                 };
@@ -246,10 +284,23 @@ async fn serve(
             }),
             Request::AbortCut(cut, tick, r) => tokio::spawn(async move {
                 r.send(match &pool {
-                    Pool::Pg(p) => two_phase::abort_cut(p, cut, tick).await,
+                    Pool::Pg(p) => two_phase::abort_cut(p, world_tag.expect("set on Postgres"), cut, tick).await,
                     Pool::Sqlite(_) => Err(StoreError::Unsupported(TWO_PHASE_UNSUPPORTED.into())),
                 })
             }),
+            Request::CutDecided(cut, r) => {
+                let cuts = cuts.clone();
+                tokio::spawn(async move {
+                    let d = match (&pool, world_tag) {
+                        (Pool::Pg(p), Some(tag)) => two_phase::cut_decided(p, tag, cut).await,
+                        _ => on_pool!(&pool, cut_decision(cut)),
+                    };
+                    if let Ok(Some(_)) = d {
+                        cuts.settle(cut);
+                    }
+                    r.send(d)
+                })
+            }
             Request::ResolvePrepared(r) => tokio::spawn(async move {
                 r.send(match (&pool, world_tag) {
                     (Pool::Pg(p), Some(tag)) => two_phase::resolve_prepared(p, tag).await,
@@ -344,6 +395,40 @@ async fn serve(
     drop(guard);
 }
 
+/// After a part's prepare: a part staged for a cut that is decided already finishes
+/// itself (an abort answers `CutAborted`). The pending mark is cleared once the part
+/// is certainly not staged — finished here, or a failed prepare whose gid is not in
+/// `pg_prepared_xacts` (a PREPARE whose reply was lost leaves it staged: the mark
+/// stays, and the caller settles it with `abort_cut` + `cut_decided`). Kept for an
+/// undecided staged part.
+async fn settle_prepare(
+    p: &sqlx::PgPool,
+    gid: &str,
+    cut: CutId,
+    result: Result<CutCommitted, StoreError>,
+    cuts: &CutState,
+) -> Result<CutCommitted, StoreError> {
+    let (result, settled) = match result {
+        Ok(c) => match two_phase::finish_if_decided(p, gid, cut).await {
+            Ok(None) => (Ok(c), false),
+            Ok(Some(true)) => (Ok(c), true),
+            Ok(Some(false)) => (Err(StoreError::CutAborted(cut)), true),
+            Err(e) => (Err(e), false),
+        },
+        Err(e) => {
+            let staged = two_phase::is_staged(p, gid).await;
+            if !matches!(staged, Ok(false)) {
+                log::error!("[world-store] part {gid} failed ({e}) and may be staged ({staged:?}); this handle's cuts wait for cut_decided");
+            }
+            (Err(e), matches!(staged, Ok(false)))
+        }
+    };
+    if settled {
+        cuts.settle(cut);
+    }
+    result
+}
+
 /// Hands a cut to the committer task.
 fn queue_cut(commit_tx: &mpsc::UnboundedSender<QueuedCut>, queued: QueuedCut) {
     if let Err(mpsc::error::SendError((_, _, _, reply))) = commit_tx.send(queued) {
@@ -354,7 +439,7 @@ fn queue_cut(commit_tx: &mpsc::UnboundedSender<QueuedCut>, queued: QueuedCut) {
 /// On a read-only store, answers a write request with `ReadOnly` (`None`);
 /// passes every other request through. A player resolve is a read unless the
 /// key is new — that case is refused where it is served.
-fn refuse_if_read_only(req: Request, read_only: bool) -> Option<Request> {
+fn refuse_if_read_only(req: Request, read_only: bool, cuts: &CutState) -> Option<Request> {
     if !read_only {
         return Some(req);
     }
@@ -368,10 +453,14 @@ fn refuse_if_read_only(req: Request, read_only: bool) -> Option<Request> {
         Request::EnsureClockAnchor(_, r) => r.send(Err(StoreError::ReadOnly)),
         Request::ClearClockAnchor(r) => r.send(Err(StoreError::ReadOnly)),
         Request::RegisterHost(_, _, r) => r.send(Err(StoreError::ReadOnly)),
-        Request::PrepareCut(_, _, _, r) => r.send(Err(StoreError::ReadOnly)),
+        Request::PrepareCut(c, _, _, r) => {
+            cuts.settle(c.id);
+            r.send(Err(StoreError::ReadOnly))
+        }
         Request::DecideCut(_, r) => r.send(Err(StoreError::ReadOnly)),
         Request::AbortCut(_, _, r) => r.send(Err(StoreError::ReadOnly)),
         Request::ResolvePrepared(r) => r.send(Err(StoreError::ReadOnly)),
+        Request::CutDecided(_, r) => r.send(Err(StoreError::ReadOnly)),
         req => return Some(req),
     }
     None
