@@ -1215,6 +1215,11 @@ impl Region {
         std::mem::take(&mut self.pending_intents)
     }
 
+    /// Test support: what [`Region::take_intents`] would take now.
+    pub fn outgoing_intents(&self) -> &[crate::IntentMsg] {
+        &self.pending_intents
+    }
+
     /// Server, at `Shutdown`: refuse every intent still queued here
     /// (`OwnerNotRunning`), as its own forgotten transaction; the replies to
     /// other regions join the outbox.

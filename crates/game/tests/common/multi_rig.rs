@@ -6,7 +6,7 @@
 //! they agree. Every host-seam test builds on it.
 use super::rig::{Rig, CLIENT};
 use game::{
-    ClientPacket, EntityId, HostEndpoint, InlinePeerLink, InlineSchedule, InlineSpawner, Ownership, PeerHello,
+    ClientPacket, EntityId, HostEndpoint, Intent, IntentMsg, InlinePeerLink, InlineSchedule, InlineSpawner, Ownership, PeerHello,
     PeerLink, PeerMsg, PeerSession, PlayerId, PlayerRecord, RegionCoords, RegionSpawner, Reliable, ServerEvent,
     REGION_SIZE, TICK_RATE,
 };
@@ -135,6 +135,9 @@ pub struct MultiRig {
     pub tracked: BTreeMap<EntityId, Option<Place>>,
     /// The stud bodies seen: they may end by settling in the region that owns them.
     pub settling: BTreeSet<EntityId>,
+    /// Items the world holds, once a test put some in ([`Self::assert_items`]): checked
+    /// every round.
+    pub items: Option<u64>,
 }
 
 impl MultiRig {
@@ -175,7 +178,7 @@ impl MultiRig {
             }
         }
         let mut rig =
-            MultiRig { hosts: rigs, s, homes, links, tracked: BTreeMap::new(), settling: BTreeSet::new() };
+            MultiRig { hosts: rigs, s, homes, links, tracked: BTreeMap::new(), settling: BTreeSet::new(), items: None };
         for h in 0..hosts {
             rig.keep(h);
         }
@@ -426,5 +429,75 @@ impl MultiRig {
                 self.tracked.insert(id, Some(at[0].clone()));
             }
         }
+        if let Some(expected) = self.items {
+            self.assert_items(expected);
+        }
+    }
+
+    /// Items in the world as `(held, shadow)`: `held` = own piles, intents and replies
+    /// queued in running regions or in their outboxes, intents and replies in flight to
+    /// a region or waiting in a mailbox, in a session's never-sent part, or in transit on
+    /// a link; `shadow` = in intents and replies a session SENT and the peer has not
+    /// acknowledged (the peer may hold them already, or they are in transit, or were
+    /// lost with a connection and will be sent again).
+    pub fn items(&mut self) -> (u64, u64) {
+        let (mut held, mut shadow) = (0, 0);
+        for rig in &mut self.hosts {
+            for rc in rig.manager.running_regions() {
+                rig.manager.spawner_mut().with_region(rc, |region| {
+                    let data = region.data();
+                    held += data.item_piles().values().flat_map(|p| &p.stacks).map(|s| u64::from(s.count)).sum::<u64>();
+                    held += data.queued_intents().into_iter().map(|s| msg_items(&IntentMsg::Intent(s))).sum::<u64>();
+                    held += data.queued_replies().into_iter().map(|s| msg_items(&IntentMsg::Reply(s))).sum::<u64>();
+                    held += region.outgoing_intents().iter().map(msg_items).sum::<u64>();
+                });
+            }
+            held += rig.manager.intents_held().iter().map(msg_items).sum::<u64>();
+            for (_, msg, sent) in rig.manager.peer_unreceived_intents() {
+                if sent {
+                    shadow += msg_items(&msg);
+                } else {
+                    held += msg_items(&msg);
+                }
+            }
+        }
+        for (ea, eb) in self.links.values() {
+            for end in [ea, eb] {
+                for msg in end.lock().unwrap().transit() {
+                    if let PeerMsg::Reliable { body: Reliable::Intent(m), .. } = msg {
+                        held += msg_items(&m);
+                    }
+                }
+            }
+        }
+        (held, shadow)
+    }
+
+    /// Item conservation across hosts: `expected` items are held, or some of them only
+    /// in sent and unacknowledged messages (never more than `expected` held: a copy),
+    /// and nothing was destroyed or given up.
+    pub fn assert_items(&mut self, expected: u64) {
+        let (held, shadow) = self.items();
+        assert!(held <= expected, "{held} items held, {expected} put in: a copy");
+        assert!(held + shadow >= expected, "{held} items held + {shadow} unacknowledged, {expected} put in: lost");
+        if shadow == 0 {
+            assert_eq!(held, expected, "nothing unacknowledged: every item is held");
+        }
+        for (h, rig) in self.hosts.iter().enumerate() {
+            assert_eq!(rig.manager.items_destroyed(), 0, "host {h} destroyed items");
+            assert_eq!(rig.manager.intent_replies_lost(), 0, "host {h} gave a reply up");
+        }
+    }
+}
+
+/// The items an intent or a reply carries (a deposit's or a put's stack; a reply's
+/// [`game::IntentReply::carried_items`]).
+pub fn msg_items(m: &IntentMsg) -> u64 {
+    match m {
+        IntentMsg::Intent(s) => match s.intent {
+            Intent::DepositItems { stack, .. } | Intent::PutInContainer { stack, .. } => u64::from(stack.count),
+            _ => 0,
+        },
+        IntentMsg::Reply(s) => s.reply.carried_items().map_or(0, |(_, stack)| u64::from(stack.count)),
     }
 }

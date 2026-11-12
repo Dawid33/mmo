@@ -884,6 +884,15 @@ pub struct WorldManager<S: RegionSpawner> {
     /// cut (its snapshot still holds them): not rows of that cut. Cleared by every
     /// `begin_cut`, like [`InFlight::in_source_view`].
     peer_in_source_view: BTreeSet<crate::EntityId>,
+    /// Intents and replies to other hosts sent after their source answered the pending
+    /// cut (its snapshot predates them): not rows of that cut. One entry per message
+    /// (equal messages counted). Cleared by every `begin_cut`.
+    peer_intents_in_view: Vec<crate::IntentMsg>,
+    /// The regions of other hosts that border one of this host's and run, by their host
+    /// (`peers.rs`): what halo traffic to another host is sent to (halo never wakes a
+    /// region). Replaced by each [`crate::Volatile::Running`] of that host, kept by its
+    /// `RegionUp` / `RegionDown`, emptied when its link goes down.
+    foreign_running: BTreeMap<RegionCoords, u32>,
     /// A peer runs a newer world generation ([`Self::take_higher_generation`]).
     higher_generation: Option<u64>,
 }
@@ -974,6 +983,8 @@ impl<S: RegionSpawner> WorldManager<S> {
             peers: BTreeMap::new(),
             peer_waiting: BTreeMap::new(),
             peer_in_source_view: BTreeSet::new(),
+            peer_intents_in_view: Vec::new(),
+            foreign_running: BTreeMap::new(),
             higher_generation: None,
         }
     }
@@ -1393,6 +1404,13 @@ impl<S: RegionSpawner> WorldManager<S> {
                 // Stamped with its final tick, like those deltas: a lagging
                 // neighbour still holding one applies the reseed after it.
                 for n in crate::halo::neighbours(rc) {
+                    if self.is_foreign(n) {
+                        // Another host's: only when it runs it (`foreign_running`).
+                        if let Some(seed) = crate::halo::halo_seed_from_snapshot(rc, n, &far) {
+                            self.halo_to_peer(n, crate::Volatile::HaloUpdate { to: n, update: seed, stamp });
+                        }
+                        continue;
+                    }
                     let running = self.regions.get(&n).is_some_and(|l| !l.stopping);
                     if !running {
                         continue;
@@ -1401,6 +1419,8 @@ impl<S: RegionSpawner> WorldManager<S> {
                         self.send_to_region(n, RegionInput::Transfer(GameEventKind::HaloUpdate(seed), stamp));
                     }
                 }
+                // After its final halo: the other hosts' mirrors of it end.
+                self.announce_region(rc, false);
                 self.terrain_cache.insert(rc, far);
                 // What it held parks with it (its next run reports it again).
                 self.forget_locations(rc);
@@ -1494,6 +1514,11 @@ impl<S: RegionSpawner> WorldManager<S> {
             }
             RegionOutput::HaloDeltas(list, stamp) => {
                 for (update, target) in list {
+                    if self.is_foreign(target) {
+                        // Only to a region its owner runs (`foreign_running`).
+                        self.halo_to_peer(target, crate::Volatile::HaloUpdate { to: target, update, stamp });
+                        continue;
+                    }
                     // Halo updates never wake a region (a starting one is
                     // seeded afresh).
                     let running = self.regions.get(&target).is_some_and(|link| !link.stopping);
@@ -1529,6 +1554,11 @@ impl<S: RegionSpawner> WorldManager<S> {
                 // mirrors were ended (`halo_source_lost`); none comes back.
                 let list = if self.regions.contains_key(&rc) { list } else { Vec::new() };
                 for (mut msg, target) in list {
+                    if self.is_foreign(target) {
+                        msg.rebase(rc, target);
+                        self.halo_to_peer(target, crate::Volatile::HaloEntity { to: target, msg, stamp });
+                        continue;
+                    }
                     // Entity-halo messages NEVER wake a region (a starting one
                     // gets the band entities from its neighbours' next ticks).
                     let running = self.regions.get(&target).is_some_and(|link| !link.stopping);
@@ -1594,6 +1624,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                 self.pending_events.remove(&rc);
                 self.spawner.reap(rc);
                 self.halo_source_lost(rc);
+                self.announce_region(rc, false);
                 self.forget_locations(rc);
                 self.history_region_lost(rc);
                 let queued = self.restart_for_in_flight(rc);
@@ -1630,6 +1661,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             self.spawner.reap(rc);
             // Every other region is stopping: a no-op unless one is not.
             self.halo_source_lost(rc);
+            self.announce_region(rc, false);
             self.forget_locations(rc);
             self.history_region_lost(rc);
             // Woken for what was in flight to it; the exit loop stops it again.
@@ -1668,6 +1700,7 @@ impl<S: RegionSpawner> WorldManager<S> {
         }
         // Transfers to other hosts, too.
         self.peer_in_source_view.clear();
+        self.peer_intents_in_view.clear();
         let mut dead = Vec::new();
         for (rc, link) in &self.regions {
             if link.stopping && self.silent_stopping.contains(rc) {
@@ -1749,8 +1782,8 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// What a cut caught in flight, put back on its way (a restarted
     /// server, from the store): a crossing waits in its target's arrival
     /// mailbox and an intent or reply in its intent mailbox, both delivered
-    /// when the target runs — at once, if it already does. A crossing into a
-    /// region another host owns is queued to that host again.
+    /// when the target runs — at once, if it already does. A crossing, intent
+    /// or reply for a region another host owns is queued to that host again.
     pub fn restore_in_flight(&mut self, rows: Vec<InFlightRow>) {
         for row in rows {
             match row {
@@ -1771,6 +1804,10 @@ impl<S: RegionSpawner> WorldManager<S> {
                         // hold a player or a person).
                         self.hold_arrival(target, target, stamp, bundle, false);
                     }
+                }
+                InFlightRow::Intent { target, msg } if self.is_foreign(target) => {
+                    // Another host's region: to its owner again.
+                    self.queue_to_peer(self.owner_of(target), crate::Reliable::Intent(msg));
                 }
                 InFlightRow::Intent { target, msg } => {
                     if self.regions.get(&target).is_some_and(|l| !l.stopping) {
@@ -2841,6 +2878,7 @@ impl<S: RegionSpawner> WorldManager<S> {
         if self.regions.remove(&rc).is_none() {
             return;
         }
+        self.announce_region(rc, false);
         self.unavailable.insert(rc, retry);
         self.spawner.reap(rc);
         // It never ran in this process, so it has nothing uncommitted: the
@@ -2930,6 +2968,9 @@ impl<S: RegionSpawner> WorldManager<S> {
         if let Some(route) = &self.route_map {
             let _ = input.send(RegionInput::SetRouteMap(Some(route.clone())));
         }
+        // Hosts owning a neighbour learn it runs before its halo requests reach them
+        // (their answers to it are sent only to a region they know runs).
+        self.announce_region(rc, true);
         // Its terrain halo, before its first tick too.
         self.seed_halo(rc, &input);
         self.regions.insert(
@@ -2960,6 +3001,8 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// channel; nothing has ticked it yet), from each on-map neighbour:
     /// - running: the neighbour answers a `HaloRequest` with its live chunks
     ///   (a stamped Transfer); its cached terrain, if any, goes in first;
+    /// - running on another host (`foreign_running`): a `Volatile::HaloRequest`
+    ///   to that host, answered the same way over the peer link;
     /// - parked or cached (its last pushed / parked terrain): from the cache
     ///   (a region that parks also reseeds its running neighbours from its
     ///   final terrain, on `Stopped`);
@@ -2976,6 +3019,11 @@ impl<S: RegionSpawner> WorldManager<S> {
         let mut load_there = Vec::new();
         for n in crate::halo::neighbours(rc) {
             if crate::off_map(self.map_extent(), n) {
+                continue;
+            }
+            // Another host runs it: asked of that host (`peers.rs`); one it does not run
+            // is seeded like a parked region of this host.
+            if self.is_foreign(n) && self.foreign_halo_request(rc, n) {
                 continue;
             }
             let running = self.regions.get(&n).is_some_and(|l| !l.stopping);
@@ -3132,6 +3180,8 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// for the autosave.
     /// - An intent whose owner is not running — or is stopping — is answered
     ///   `Refused(.., OwnerNotRunning)`: an intent never wakes a region.
+    /// - Owned by another host: a reply, and an intent whose owner is reachable, go to
+    ///   that host reliably (`peers.rs`); an unreachable owner refuses as above.
     /// - A reply goes where its entity is, else to its `hint`; to a parked or
     ///   stopping region it waits in the mailbox for its next run. With no
     ///   such destination, or past `MAX_INTENT_REPLY_HOPS`, it is given up:
@@ -3154,6 +3204,16 @@ impl<S: RegionSpawner> WorldManager<S> {
             IntentMsg::Reply(s) if s.reply.to().is_region() => Some(s.reply.to().birth_region),
             IntentMsg::Reply(s) => self.locations.get(&s.reply.to()).copied().or(Some(s.hint)),
         };
+        // Another host's region: a reply always goes (reliably: it may carry items), an
+        // intent when that host is reachable; else it is refused below as for a region
+        // that is not running.
+        if let Some(to) = owner.filter(|rc| self.is_foreign(*rc)) {
+            let give_up = matches!(msg, IntentMsg::Reply(s) if s.hops > crate::intents::MAX_INTENT_REPLY_HOPS);
+            if !give_up && (matches!(msg, IntentMsg::Reply(_)) || self.reaches(to)) {
+                self.intent_to_peer(to, msg, view);
+                return;
+            }
+        }
         let running = owner.filter(|rc| self.regions.get(rc).is_some_and(|l| !l.stopping));
         match (running, msg) {
             (_, IntentMsg::Reply(s)) if s.hops > crate::intents::MAX_INTENT_REPLY_HOPS => {
@@ -3286,6 +3346,13 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.intent_mailbox.get(&rc).into_iter().flatten().map(|m| m.msg).collect()
     }
 
+    /// Test support: every intent and reply this manager holds on its way to one of its
+    /// regions — in flight to a running one, or waiting in a mailbox.
+    pub fn intents_held(&self) -> Vec<crate::IntentMsg> {
+        let in_flight = self.in_flight_intents.iter().map(|f| f.msg);
+        in_flight.chain(self.intent_mailbox.values().flatten().map(|m| m.msg)).collect()
+    }
+
     /// `msg` to running `rc`, held there to its due tick, and in flight until
     /// `rc` confirms it (`in_source_view`: see [`InFlightIntent`]).
     fn send_intent_to(&mut self, rc: RegionCoords, msg: crate::IntentMsg, in_source_view: bool) {
@@ -3321,6 +3388,7 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.pending_events.remove(&rc);
         self.spawner.reap(rc);
         self.halo_source_lost(rc);
+        self.announce_region(rc, false);
         self.forget_locations(rc);
         // Its people's bodies died with it: back to the history, then caught up again.
         self.history_region_lost(rc);

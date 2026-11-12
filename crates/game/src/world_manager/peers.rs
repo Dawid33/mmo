@@ -5,11 +5,22 @@
 //! [`WorldManager::accept_arrival`], the path a local crossing takes. Split out of
 //! `mod.rs`; the core calls in through the `pub(super)` methods here.
 //!
+//! Halo and intents cross host seams too. **Volatile** (lost while the link is down):
+//! which regions run ([`Volatile::Running`] on every [`PeerEvent::Up`], `RegionUp` /
+//! `RegionDown` as a region bordering that host starts and stops — `foreign_running`),
+//! halo requests and halo updates / entities, sent only to a region its owner runs (halo
+//! never wakes a region). A host learning that a region of the other runs asks that
+//! region for the seed of each of its own running neighbours — so a reconnect re-seeds
+//! every halo along the seam. A link going down (or a peer of a newer generation) is
+//! `HaloSourceGone` for every region of that host. **Reliable**: an intent whose owner
+//! is reachable, and every reply (a reply carrying items is never dropped); an intent
+//! whose owner is not reachable is refused (`OwnerNotRunning`) as for a parked region.
+//!
 //! Players do not cross hosts yet (Task 7): a player body departing into a foreign region
 //! is handed back to its source, and the play paths refuse foreign regions (Task 8).
 
 use super::*;
-use crate::{PeerEvent, PeerLink, PeerSession, Reliable};
+use crate::{PeerEvent, PeerLink, PeerSession, Reliable, Volatile};
 
 /// One other host: the session with it and the link it runs over.
 pub(super) struct Peer {
@@ -91,6 +102,34 @@ impl<S: RegionSpawner> WorldManager<S> {
         out
     }
 
+    /// Test support: every [`Reliable::Intent`] (an intent or a reply) not acknowledged
+    /// yet — `(peer, msg, on the wire)`, as [`Self::peer_unreceived_ids`].
+    pub fn peer_unreceived_intents(&self) -> Vec<(u32, crate::IntentMsg, bool)> {
+        let mut out = Vec::new();
+        for (&ordinal, peer) in &self.peers {
+            let unsent = peer.session.unsent().count();
+            let all: Vec<&Reliable> = peer.session.unreceived().collect();
+            let sent = all.len() - unsent;
+            for (i, r) in all.into_iter().enumerate() {
+                if let Reliable::Intent(msg) = r {
+                    out.push((ordinal, *msg, i < sent));
+                }
+            }
+        }
+        for (&ordinal, list) in &self.peer_waiting {
+            out.extend(list.iter().filter_map(|r| match r {
+                Reliable::Intent(msg) => Some((ordinal, *msg, false)),
+                _ => None,
+            }));
+        }
+        out
+    }
+
+    /// The regions of other hosts known to run and border one of this host's.
+    pub fn foreign_running(&self) -> Vec<RegionCoords> {
+        self.foreign_running.keys().copied().collect()
+    }
+
     /// The newest world generation a peer reported running ([`PeerEvent::HigherGeneration`]),
     /// once: this host is stale and must stop.
     pub fn take_higher_generation(&mut self) -> Option<u64> {
@@ -148,9 +187,14 @@ impl<S: RegionSpawner> WorldManager<S> {
     ///
     /// Task 13 replaces this with in-band cut marks: today a transfer the peer received
     /// but has not acknowledged is ALSO in the peer's state, so its cut may hold it too.
+    ///
+    /// Intents and replies alike: each not acknowledged yet is an
+    /// [`InFlightRow::Intent`] to the foreign region it went to, unless its source sent it
+    /// after answering the cut.
     pub(super) fn cut_peer_rows(&self) -> Vec<InFlightRow> {
         let sessions = self.peers.values().flat_map(|p| p.session.unreceived());
         let waiting = self.peer_waiting.values().flatten();
+        let mut in_view = self.peer_intents_in_view.clone();
         sessions
             .chain(waiting)
             .filter_map(|r| match r {
@@ -159,26 +203,177 @@ impl<S: RegionSpawner> WorldManager<S> {
                 {
                     Some(InFlightRow::Transfer { target: *target, bundle: (**bundle).clone(), stamp: *stamp })
                 }
+                Reliable::Intent(msg) => match in_view.iter().position(|m| m == msg) {
+                    Some(i) => {
+                        in_view.swap_remove(i);
+                        None
+                    }
+                    None => Some(InFlightRow::Intent { target: peer_intent_target(msg), msg: *msg }),
+                },
                 _ => None,
             })
             .collect()
     }
 
+    /// `msg` (an intent or a reply) to the region `to` another host owns, reliably.
+    /// `view`: sent after its source answered the pending cut (not a row of that cut).
+    pub(super) fn intent_to_peer(&mut self, to: RegionCoords, msg: crate::IntentMsg, view: bool) {
+        debug_assert_eq!(peer_intent_target(&msg), to, "an intent to a peer goes where its message says");
+        if view {
+            self.peer_intents_in_view.push(msg);
+        }
+        let owner = self.owner_of(to);
+        log::debug!("[server] {msg:?} for {to:?}: sent to host {owner}");
+        self.queue_to_peer(owner, Reliable::Intent(msg));
+    }
+
+    /// `v` to the host that owns `rc`, if its session is up (else dropped: volatile).
+    fn volatile_to_owner(&mut self, rc: RegionCoords, v: Volatile) {
+        let owner = self.owner_of(rc);
+        if let Some(peer) = self.peers.get_mut(&owner).filter(|p| !p.stale) {
+            peer.session.send_volatile(v);
+        }
+    }
+
+    /// Halo traffic for `to`, a region another host owns: sent only when that host runs
+    /// it (halo never wakes a region). Whether it was sent.
+    pub(super) fn halo_to_peer(&mut self, to: RegionCoords, v: Volatile) -> bool {
+        if !self.foreign_running.contains_key(&to) {
+            return false;
+        }
+        self.volatile_to_owner(to, v);
+        true
+    }
+
+    /// The halo seed of starting `rc` for its neighbour `n`, which another host owns:
+    /// asked of that host when it runs `n` (`n` answers with its live chunks, a
+    /// `HaloUpdate` to `rc`). `false` when `n` is not known to run (seeded as a parked
+    /// region instead). The other way round (`n`'s mirror of `rc`) the owner asks for
+    /// itself on this host's `RegionUp`.
+    pub(super) fn foreign_halo_request(&mut self, rc: RegionCoords, n: RegionCoords) -> bool {
+        self.halo_to_peer(n, Volatile::HaloRequest { from: rc, of: n })
+    }
+
+    /// Whether `rc` borders a region host `peer` owns (one of its 8 neighbours).
+    fn borders(&self, rc: RegionCoords, peer: u32) -> bool {
+        crate::halo::neighbours(rc).any(|n| !self.owns(n) && self.owner_of(n) == peer)
+    }
+
+    /// This host's region `rc` started (`up`) or stopped / was lost: told to every host
+    /// owning one of its neighbours.
+    pub(super) fn announce_region(&mut self, rc: RegionCoords, up: bool) {
+        let ordinals: Vec<u32> = self.peers.keys().copied().filter(|&p| self.borders(rc, p)).collect();
+        for ordinal in ordinals {
+            let Some(peer) = self.peers.get_mut(&ordinal).filter(|p| !p.stale) else { continue };
+            peer.session.send_volatile(if up { Volatile::RegionUp(rc) } else { Volatile::RegionDown(rc) });
+        }
+    }
+
+    /// Foreign region `n` runs: each of this host's running regions next to it asks it
+    /// for its halo seed (whatever `n` sent before this host knew was dropped).
+    fn request_seeds_of(&mut self, n: RegionCoords) {
+        let mine: Vec<RegionCoords> = crate::halo::neighbours(n)
+            .filter(|rc| self.regions.get(rc).is_some_and(|l| !l.stopping))
+            .collect();
+        for rc in mine {
+            self.volatile_to_owner(n, Volatile::HaloRequest { from: rc, of: n });
+        }
+    }
+
+    /// Host `from`'s region `n` no longer runs as far as this host knows: its mirrors here
+    /// end (`HaloSourceGone`).
+    fn foreign_region_gone(&mut self, n: RegionCoords) {
+        if self.foreign_running.remove(&n).is_some() {
+            self.halo_source_lost(n);
+        }
+    }
+
+    /// The link to host `from` is gone (or it runs a newer generation): every region of
+    /// it is gone for this host's halos.
+    fn peer_lost(&mut self, from: u32) {
+        let gone: Vec<RegionCoords> =
+            self.foreign_running.iter().filter(|(_, &h)| h == from).map(|(rc, _)| *rc).collect();
+        for n in gone {
+            self.foreign_region_gone(n);
+        }
+    }
+
+    /// Whether this host's region `rc` runs and is not stopping.
+    fn runs(&self, rc: RegionCoords) -> bool {
+        self.regions.get(&rc).is_some_and(|l| !l.stopping)
+    }
+
+    fn peer_volatile(&mut self, from: u32, v: Volatile) {
+        match v {
+            Volatile::Running(list) => {
+                // Replaces what was known of that host.
+                let list: BTreeSet<RegionCoords> = list.into_iter().collect();
+                let stale: Vec<RegionCoords> = self
+                    .foreign_running
+                    .iter()
+                    .filter(|(rc, &h)| h == from && !list.contains(rc))
+                    .map(|(rc, _)| *rc)
+                    .collect();
+                for n in stale {
+                    self.foreign_region_gone(n);
+                }
+                for n in list {
+                    self.foreign_running.insert(n, from);
+                    self.request_seeds_of(n);
+                }
+            }
+            Volatile::RegionUp(n) => {
+                self.foreign_running.insert(n, from);
+                self.request_seeds_of(n);
+            }
+            Volatile::RegionDown(n) => self.foreign_region_gone(n),
+            Volatile::HaloRequest { from: to, of } => {
+                // Not running (any more): its `Stopped` reseeds the requester instead.
+                if self.owns(of) && self.runs(of) {
+                    self.send_to_region(of, RegionInput::HaloRequest(to));
+                }
+            }
+            Volatile::HaloUpdate { to, update, stamp } => {
+                if self.owns(to) && self.runs(to) {
+                    self.send_to_region(to, RegionInput::Transfer(GameEventKind::HaloUpdate(update), stamp));
+                }
+            }
+            Volatile::HaloEntity { to, msg, stamp } => {
+                if self.owns(to) && self.runs(to) {
+                    self.send_to_region(to, RegionInput::Transfer(msg.into_event(), stamp));
+                }
+            }
+            v @ Volatile::Input { .. } => log::trace!("[server] peer host {from}: {v:?} ignored"),
+        }
+    }
+
     fn peer_event(&mut self, from: u32, ev: PeerEvent) {
         match ev {
-            PeerEvent::Up(hello) => log::info!("[server] peer host {from} up (boot {})", hello.boot),
+            PeerEvent::Up(hello) => {
+                log::info!("[server] peer host {from} up (boot {})", hello.boot);
+                // Every region (stopping ones too: their `RegionDown` follows) bordering
+                // that host; it asks each for the seeds of its own neighbours of them.
+                let running: Vec<RegionCoords> =
+                    self.regions.keys().copied().filter(|rc| self.borders(*rc, from)).collect();
+                if let Some(peer) = self.peers.get_mut(&from) {
+                    peer.session.send_volatile(Volatile::Running(running));
+                }
+            }
             // May come without an `Up` (a connection broken at the hello).
-            PeerEvent::Down => log::info!("[server] peer host {from} down"),
+            PeerEvent::Down => {
+                log::info!("[server] peer host {from} down");
+                self.peer_lost(from);
+            }
             PeerEvent::HigherGeneration(generation) => {
                 log::error!("[server] peer host {from} runs world generation {generation}, newer than ours: this host is stale");
                 self.higher_generation = Some(self.higher_generation.map_or(generation, |g| g.max(generation)));
                 if let Some(peer) = self.peers.get_mut(&from) {
                     peer.stale = true;
                 }
+                self.peer_lost(from);
             }
             PeerEvent::Reliable(msg) => self.peer_reliable(from, msg),
-            // Halo and region announcements: Task 6.
-            PeerEvent::Volatile(v) => log::trace!("[server] peer host {from}: {v:?} ignored"),
+            PeerEvent::Volatile(v) => self.peer_volatile(from, v),
         }
     }
 
@@ -194,10 +389,26 @@ impl<S: RegionSpawner> WorldManager<S> {
                 let now_ms = self.clock_ms;
                 self.accept_arrival(None, target, stamp, *bundle, now_ms);
             }
+            // As if one of this host's regions had sent it (no cut has seen it here).
+            Reliable::Intent(msg) => {
+                let emitter = peer_intent_target(&msg);
+                self.route_intent(msg, emitter, false);
+            }
             other => {
                 log::error!("[server] peer host {from}: {} is not handled by this host yet: dropped", reliable_name(&other))
             }
         }
+    }
+}
+
+/// The region an intent or a reply to another host goes to (`route_intent` without a
+/// directory: entities on another host are not in this host's): an intent's position
+/// target, a region-sourced intent's reply its region, any other reply its hint.
+pub(super) fn peer_intent_target(msg: &crate::IntentMsg) -> RegionCoords {
+    match msg {
+        crate::IntentMsg::Intent(s) => s.target.region().unwrap_or(s.from),
+        crate::IntentMsg::Reply(s) if s.reply.to().is_region() => s.reply.to().birth_region,
+        crate::IntentMsg::Reply(s) => s.hint,
     }
 }
 
