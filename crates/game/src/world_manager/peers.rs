@@ -136,9 +136,10 @@ impl<S: RegionSpawner> WorldManager<S> {
         out
     }
 
-    /// Test support: the player of every [`Reliable::PlayerMove`] not acknowledged yet —
-    /// `(peer, player, on the wire)`, as [`Self::peer_unreceived_ids`].
-    pub fn peer_unreceived_moves(&self) -> Vec<(u32, PlayerId, bool)> {
+    /// Test support: the client and player of every [`Reliable::PlayerMove`] not
+    /// acknowledged yet — `(peer, client, player, on the wire)`, as
+    /// [`Self::peer_unreceived_ids`].
+    pub fn peer_unreceived_moves(&self) -> Vec<(u32, ClientId, PlayerId, bool)> {
         let mut out = Vec::new();
         for (&ordinal, peer) in &self.peers {
             let unsent = peer.session.unsent().count();
@@ -146,13 +147,13 @@ impl<S: RegionSpawner> WorldManager<S> {
             let sent = all.len() - unsent;
             for (i, r) in all.into_iter().enumerate() {
                 if let Reliable::PlayerMove { handoff, .. } = r {
-                    out.push((ordinal, handoff.player, i < sent));
+                    out.push((ordinal, handoff.client, handoff.player, i < sent));
                 }
             }
         }
         for (&ordinal, list) in &self.peer_waiting {
             out.extend(list.iter().filter_map(|r| match r {
-                Reliable::PlayerMove { handoff, .. } => Some((ordinal, handoff.player, false)),
+                Reliable::PlayerMove { handoff, .. } => Some((ordinal, handoff.client, handoff.player, false)),
                 _ => None,
             }));
         }
@@ -348,6 +349,9 @@ impl<S: RegionSpawner> WorldManager<S> {
         let c = h.client;
         log::info!("[server] player {} (client {c}) handed over by host {from} into {target:?}", h.player.0);
         self.departed.remove(&h.player);
+        if self.holds_player(h.player) {
+            return self.drop_arriving_copy(from, h.player);
+        }
         let (fortress, adventure) = split_claim(h.claim);
         if self.is_unavailable(target) {
             // Its stored state could not be read (retry not come): the body cannot go
@@ -448,8 +452,11 @@ impl<S: RegionSpawner> WorldManager<S> {
         let c = h.client;
         log::info!("[server] player {} (client {c}) moved here by host {from} into {target:?}", h.player.0);
         self.departed.remove(&h.player);
-        if self.is_unavailable(target) {
-            log::error!("[server] player {} moved into unavailable {target:?}: parked", h.player.0);
+        if self.holds_player(h.player) {
+            return self.drop_arriving_copy(from, h.player);
+        }
+        if self.is_unavailable(target) || !self.owns(target) {
+            log::error!("[server] player {} moved into {target:?}, unavailable or not this host's: parked", h.player.0);
             self.park_handed(from, c, h.player, record, now_ms);
             return;
         }
@@ -476,6 +483,28 @@ impl<S: RegionSpawner> WorldManager<S> {
         let _ = self.out.send((Some(c), ServerPacket::PlayerRegion(Some(target), c)));
         self.refresh_keepalive(target, now_ms);
         self.world_player_online(c);
+    }
+
+    /// Whether this host already holds `player`: online (any session), parked, parking,
+    /// moving, its body being created, awaited after a hand-off, or a login of it waiting
+    /// for a park.
+    fn holds_player(&self, player: PlayerId) -> bool {
+        self.player_of.values().any(|p| *p == player)
+            || self.parked_players.contains_key(&player)
+            || self.parking.values().any(|p| p.player == player)
+            || self.creating.values().any(|(_, p, _)| *p == player)
+            || self.awaiting_park.contains_key(&player)
+    }
+
+    /// A move or hand-off of `player` from host `from` arrives while this host already
+    /// holds the player: the arriving copy is dropped — nothing is placed or parked. The
+    /// copy here was restored from the store record that `from`'s cut wrote from this very
+    /// queued message (it could not be delivered meanwhile), so the two started equal and
+    /// the live one here is the newer truth. `from` needs no answer: the reliable message
+    /// is acknowledged by its receipt. (`moving` and `awaiting_session` clients are in
+    /// `player_of`.)
+    fn drop_arriving_copy(&mut self, from: u32, player: PlayerId) {
+        log::warn!("[server] player {} from host {from} is already here; the arriving copy is dropped", player.0);
     }
 
     /// `player` (of `client`), handed here by host `from`, cannot go where it was headed:
@@ -688,6 +717,11 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// record, in the region it is headed for, unless it left its source after the source
     /// answered the cut (the source's snapshot holds it). Not a row: a restore requeues
     /// nothing for it, and the stored record places the player at its next login.
+    ///
+    /// Task 13: a PlayerMove / Transfer-with-player follows the CutMark channel rule like
+    /// every reliable message, and all hosts' parts commit together. Until then two hosts
+    /// can write one player's record in independent one-phase cuts (the older may win), and
+    /// a move acknowledged before the sender's cut completes is in neither cut.
     pub(super) fn cut_peer_players(&self) -> Vec<(PlayerId, PlayerRecord)> {
         self.peer_entries()
             .into_iter()
@@ -945,7 +979,8 @@ impl<S: RegionSpawner> WorldManager<S> {
             }
             Reliable::PlayerMove { handoff, record, target } => {
                 if !self.owns(target) {
-                    // Placed here all the same (as a hand-off): never lost.
+                    // Parked here (`accept_move`): a region this host does not own is never
+                    // started here, so its body could not be created. Never lost.
                     log::error!("[server] host {from} moved a player into {target:?}, which this host does not own");
                     debug_assert!(false, "an inbound move into {target:?}, which this host does not own");
                 }
@@ -983,8 +1018,14 @@ fn handoff_record(target: RegionCoords, bundle: &crate::EntityBundle, h: &crate:
 
 /// A server-authored event that was to follow a moved player's creation, applied to the
 /// `Client` it carries to another host instead: a mode change, as the region applies it
-/// (`set_play_mode_safe`; leaving survival puts the cursor stack back, what does not fit
-/// stays on the cursor). Nothing else follows a creation.
+/// (`set_play_mode_safe`). Nothing else follows a creation.
+///
+/// Leaving survival here differs from a local move in one way: what does not fit back
+/// into the inventory stays on the cursor (the record keeps it; the restore stows it
+/// again) instead of being dropped at the player's feet. Only an adventure ended while a
+/// move is in flight gets here (`end_adventure` otherwise sends its `SetMode` to the home
+/// before the move, where the drop happens as locally), and by then the body is parked or
+/// being parked: there is no region and no feet to drop at.
 fn carry_event(carried: &mut crate::Client, kind: GameEventKind) {
     match kind {
         GameEventKind::Order(_, Order::SetMode { mode, .. }) => {

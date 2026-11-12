@@ -1111,6 +1111,9 @@ impl<S: RegionSpawner> WorldManager<S> {
             Some(l) if l[0] < edge && l[1] < edge => l,
             _ => return refuse(self, PlayRefusal::NoDryLand),
         };
+        if !self.can_move(id, target) {
+            return refuse(self, PlayRefusal::RegionUnavailable);
+        }
         self.move_client(id, target, landing, now_ms);
         let from = home.map_or("none".to_string(), |h| format!("{},{}", h.x, h.z));
         crate::perf_event!(
@@ -1133,9 +1136,11 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// way, and [`Self::finish_move`] hands the player to that host
     /// ([`crate::Reliable::PlayerMove`]). A session whose body is on another host (an
     /// observer) moves nothing here.
+    ///
+    /// Callers check [`Self::can_move`] first and refuse as the request would be refused.
     fn move_client(&mut self, id: ClientId, target: RegionCoords, landing: [u32; 2], now_ms: u64) {
-        if self.sessions.get(&id).is_some_and(|s| s.kind == SessionKind::Observer) {
-            log::warn!("client {id}: a move to {target:?} from a session whose body is on another host; ignored");
+        if !self.can_move(id, target) {
+            debug_assert!(false, "move_client without can_move");
             return;
         }
         let home = self.homes.get(&id).copied();
@@ -1152,10 +1157,6 @@ impl<S: RegionSpawner> WorldManager<S> {
             self.moving.insert(id, Moving { from: home, target, landing, then: Vec::new() });
             self.send_play_event(home, GameEventKind::ParkPlayer(id));
             self.ensure_running(target);
-        } else if foreign {
-            // No body here to hand over (none is ever made here for that region).
-            log::error!("client {id}: a move to {target:?}, another host's, with no body here; ignored");
-            return;
         } else {
             self.send_play_event(target, GameEventKind::CreateClientAt(id, landing, None));
         }
@@ -1170,6 +1171,22 @@ impl<S: RegionSpawner> WorldManager<S> {
             self.refresh_keepalive(home, now_ms);
         }
         self.refresh_keepalive(target, now_ms);
+    }
+
+    /// Whether `id`'s player can be moved into `target` from here: not when its session
+    /// observes a body on another host, nor into another host's region with no body here
+    /// to hand over (none is ever made here for such a region).
+    fn can_move(&self, id: ClientId, target: RegionCoords) -> bool {
+        if self.sessions.get(&id).is_some_and(|s| s.kind == SessionKind::Observer) {
+            log::debug!("client {id}: a move to {target:?} from a session whose body is on another host: refused");
+            return false;
+        }
+        let bodiless = !self.homes.contains_key(&id) && !self.moving.contains_key(&id);
+        if bodiless && self.is_foreign(target) {
+            log::debug!("client {id}: a move to {target:?}, another host's, with no body here: refused");
+            return false;
+        }
+        true
     }
 
     /// A server-authored event for `id`'s player in `rc`: after its creation there
@@ -3524,8 +3541,8 @@ impl<S: RegionSpawner> WorldManager<S> {
 
     /// Test support: the players whose body's creation (a move, a restore) is on its way
     /// to a region of this host — their record is only here meanwhile.
-    pub fn creating_players(&self) -> Vec<PlayerId> {
-        self.creating.values().map(|(_, player, _)| *player).collect()
+    pub fn creating_players(&self) -> Vec<(ClientId, PlayerId)> {
+        self.creating.iter().map(|(c, (_, player, _))| (*c, *player)).collect()
     }
 
     /// Test support: `player`'s parked record.

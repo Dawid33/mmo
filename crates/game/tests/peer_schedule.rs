@@ -1893,17 +1893,20 @@ fn move_to_unreachable_host_is_refused_before_parking() {
     sweep("move_to_unreachable_host_is_refused_before_parking", 2, 1, SEEDS / 4, move_to_unreachable);
 }
 
-/// The link drops after the move's park went out: the player's record waits in the peer
-/// queue (no record parked here), a cut of this host holds it once — region the target,
-/// no in-flight row — and once the link is back the player arrives once and this host's
-/// cuts write it no more.
-fn drop_after_park(rig: &mut MultiRig) {
+/// The test player (on host `ha`, every host observing it if `everywhere`, else a session
+/// on `ha` only) embarks into `b` on host `hb`; the link drops once the move's park went
+/// out, and the move is queued on `ha`. `(b, ha, hb)`.
+fn move_queued_link_down(rig: &mut MultiRig, everywhere: bool) -> (RegionCoords, u32, u32) {
     let (a, b) = host_seam(2, 1);
     let (ha, hb) = (rig.owner(a), rig.owner(b));
     rig.run(a);
     let coordinator = install_coordinator(rig, ha, true);
     rig.record_packets();
-    rig.connect_everywhere(ha, P_CLIENT, P_PLAYER, centre_of(a));
+    if everywhere {
+        rig.connect_everywhere(ha, P_CLIENT, P_PLAYER, centre_of(a));
+    } else {
+        rig.connect_home(ha, P_CLIENT, P_PLAYER, centre_of(a));
+    }
     until_body(rig);
     embark_into(rig, ha, b);
     coordinator.release();
@@ -1912,6 +1915,15 @@ fn drop_after_park(rig: &mut MultiRig) {
     rig.hosts[ha as usize].manager.pump_world(now);
     rig.link_down(ha, hb);
     until_departed(rig, ha);
+    (b, ha, hb)
+}
+
+/// The link drops after the move's park went out: the player's record waits in the peer
+/// queue (no record parked here), a cut of this host holds it once — region the target,
+/// no in-flight row — and once the link is back the player arrives once and this host's
+/// cuts write it no more.
+fn drop_after_park(rig: &mut MultiRig) {
+    let (b, ha, hb) = move_queued_link_down(rig, true);
     assert!(rig.player_owners(P_CLIENT).is_empty(), "no body: the record is on its way");
     assert!(rig.parked_on(P_PLAYER).is_empty(), "nothing parked on either host");
     assert!(rig.hosts[ha as usize].manager.peer_unreceived() > 0, "the move waits for host {hb}");
@@ -2113,4 +2125,210 @@ fn far_park_told(rig: &mut MultiRig) {
 #[ignore = "slow: >100ms — run via just test-full"]
 fn client_is_told_when_the_far_host_parks_its_body() {
     sweep("client_is_told_when_the_far_host_parks_its_body", 2, 1, SEEDS / 4, far_park_told);
+}
+
+// --- Fix round 1 ------------------------------------------------------------------------
+
+/// A second session id of the test player: a fresh login.
+const LOGIN_CLIENT: game::ClientId = 8;
+
+/// Every body of the test player, under either session id: `(host, region)`.
+fn player_bodies_any(rig: &mut MultiRig) -> Vec<(u32, RegionCoords)> {
+    let mut out = rig.player_owners(P_CLIENT);
+    out.extend(rig.player_owners(LOGIN_CLIENT));
+    out
+}
+
+/// After a login placed the player on host `hb` from the record host `ha`'s cut wrote,
+/// the link comes back and the copy queued on `ha` arrives: it is dropped — the body the
+/// login made is the only one, and nothing is parked.
+fn after_login_the_copy_is_dropped(rig: &mut MultiRig, cut: game::WorldCut, b: RegionCoords, ha: u32, hb: u32) {
+    let record = records_in(&cut).first().map(|r| (*r).clone()).expect("the cut holds the player");
+    assert_eq!(record.region, b);
+    rig.connect_home(hb, LOGIN_CLIENT, P_PLAYER, record);
+    for _ in 0..BODY_ROUNDS {
+        if !rig.player_owners(LOGIN_CLIENT).is_empty() {
+            break;
+        }
+        rig.round();
+    }
+    assert_eq!(rig.player_owners(LOGIN_CLIENT), [(hb, b)], "the login placed the player");
+    rig.link_up(ha, hb);
+    for _ in 0..CROSS_ROUNDS {
+        rig.round();
+        if rig.peer_unreceived() == 0 {
+            break;
+        }
+    }
+    for _ in 0..WAIT_ROUNDS {
+        rig.round();
+        assert_eq!(player_bodies_any(rig), [(hb, b)], "one body, the one the login made");
+    }
+    assert!(rig.parked_on(P_PLAYER).is_empty(), "nothing parked");
+    let mb = &rig.hosts[hb as usize].manager;
+    assert_eq!(mb.player_of(LOGIN_CLIENT), Some(P_PLAYER));
+    assert_eq!(mb.player_of(P_CLIENT), None, "the arriving copy placed nothing");
+    assert_eq!(mb.home_of(P_CLIENT), None);
+    assert!(mb.departed().is_empty());
+}
+
+fn move_after_login(rig: &mut MultiRig) {
+    let (b, ha, hb) = move_queued_link_down(rig, true);
+    let cut = cut_on(rig, ha as usize);
+    after_login_the_copy_is_dropped(rig, cut, b, ha, hb);
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn move_arriving_after_a_login_placed_the_player_is_dropped() {
+    sweep("move_arriving_after_a_login_placed_the_player_is_dropped", 2, 1, SEEDS / 4, move_after_login);
+}
+
+fn handoff_after_login(rig: &mut MultiRig) {
+    let (a, b) = host_seam(2, 1);
+    let (ha, hb) = (rig.owner(a), rig.owner(b));
+    rig.run(a);
+    rig.run(b);
+    rig.connect_everywhere(ha, P_CLIENT, P_PLAYER, centre_of(a));
+    let (_, _, id) = until_body(rig);
+    assert!(rig.teleport(a, id, past_seam(a, b, REGION_SIZE / 2.0)));
+    let mut handed = false;
+    for _ in 0..CROSS_ROUNDS {
+        round_with(rig, |rig| {
+            if rig.hosts[ha as usize].manager.departed().contains_key(&P_PLAYER) {
+                handed = true;
+                rig.link_down(ha, hb);
+            }
+        });
+        if handed {
+            break;
+        }
+    }
+    assert!(handed, "host {ha} never handed the body off");
+    let cut = cut_on(rig, ha as usize);
+    after_login_the_copy_is_dropped(rig, cut, b, ha, hb);
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn handoff_arriving_for_a_player_already_here_is_dropped() {
+    sweep("handoff_arriving_for_a_player_already_here_is_dropped", 2, 1, SEEDS / 4, handoff_after_login);
+}
+
+/// The target region could not be loaded on its owner: the move arriving there is parked
+/// on that host, and with no session of the client there the sender is told
+/// (`PlayerParked`): its observer session of the client ends with
+/// `PLAYER_PARKED_ELSEWHERE`, once.
+fn move_into_unavailable(rig: &mut MultiRig) {
+    let (a, b) = host_seam(2, 1);
+    let (ha, hb) = (rig.owner(a), rig.owner(b));
+    rig.run(a);
+    rig.host_of(b).manager.spawner_mut().fail_next_start(b);
+    rig.host_of(b).event(game::ServerEvent::ClientPacket(game::ClientPacket::RequestRegionConnection(b), crate::common::rig::CLIENT));
+    for _ in 0..WAIT_ROUNDS {
+        if rig.hosts[hb as usize].manager.unavailable_regions().contains(&b) {
+            break;
+        }
+        rig.round();
+    }
+    assert!(rig.hosts[hb as usize].manager.unavailable_regions().contains(&b), "{b:?} failed to load");
+    install_coordinator(rig, ha, false);
+    rig.record_packets();
+    rig.connect_home(ha, P_CLIENT, P_PLAYER, centre_of(a));
+    until_body(rig);
+    embark_into(rig, ha, b);
+    let mut parked = false;
+    for _ in 0..CROSS_ROUNDS {
+        rig.round();
+        if !rig.parked_on(P_PLAYER).is_empty() && rig.peer_unreceived() == 0 {
+            parked = true;
+            break;
+        }
+    }
+    assert!(parked, "never parked: bodies {:?}", rig.player_owners(P_CLIENT));
+    for _ in 0..WAIT_ROUNDS {
+        rig.round();
+    }
+    assert_eq!(rig.parked_on(P_PLAYER), [hb], "parked once, on host {hb}");
+    assert_eq!(rig.hosts[hb as usize].manager.parked_record(P_PLAYER).map(|r| r.region), Some(b));
+    assert!(rig.player_owners(P_CLIENT).is_empty());
+    let told = packets_to(rig, ha)
+        .iter()
+        .filter(|p| matches!(p, game::ServerPacket::Refused(why) if why == game::PLAYER_PARKED_ELSEWHERE))
+        .count();
+    assert_eq!(told, 1, "host {ha}'s observer session was told once");
+    assert_eq!(rig.hosts[ha as usize].manager.session_kind(P_CLIENT), None);
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn move_into_an_unavailable_region_parks_and_tells_the_sender() {
+    sweep("move_into_an_unavailable_region_parks_and_tells_the_sender", 2, 1, SEEDS / 4, move_into_unavailable);
+}
+
+/// Ending an adventure moves the player to a spawn region another host owns: back in
+/// Fortress mode there, no claim anywhere.
+fn end_adventure_foreign(rig: &mut MultiRig) {
+    let hs = rig.owner(game::SPAWN_REGION);
+    let ha = 1 - hs;
+    let a = region_of(rig, ha);
+    rig.run(a);
+    rig.record_packets();
+    let client = game::Client { mode: game::PlayMode::Adventure, ..game::Client::default() };
+    let record = game::PlayerRecord { client, adventure: Some(RETIRED_SITE), ..centre_of(a) };
+    rig.connect_everywhere(ha, P_CLIENT, P_PLAYER, record);
+    until_body(rig);
+    assert_eq!(rig.hosts[ha as usize].manager.client_claim(P_CLIENT), Some(game::Claim::Adventure(RETIRED_SITE)));
+    rig.hosts[ha as usize].event(game::ServerEvent::ClientPacket(game::ClientPacket::EndAdventure, P_CLIENT));
+    until_player_settled_in(rig, game::SPAWN_REGION);
+    assert_moved(rig, ha, hs, game::SPAWN_REGION, None);
+    let mut mode = None;
+    rig.hosts[hs as usize].manager.spawner_mut().with_region(game::SPAWN_REGION, |region| {
+        mode = region.data().clients.get(&P_CLIENT).map(|c| c.mode);
+    });
+    assert_eq!(mode, Some(game::PlayMode::Fortress), "back in Fortress mode");
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn end_adventure_to_a_foreign_spawn_region() {
+    sweep("end_adventure_to_a_foreign_spawn_region", 2, 1, SEEDS / 4, end_adventure_foreign);
+}
+
+/// The client disconnects from both hosts while its move waits for a down link: once the
+/// link is back the move arrives with no session, and the player is parked once, on the
+/// target's host.
+fn disconnect_while_queued(rig: &mut MultiRig) {
+    let (b, ha, hb) = move_queued_link_down(rig, true);
+    rig.disconnect(ha, P_CLIENT);
+    rig.disconnect(hb, P_CLIENT);
+    rig.round();
+    assert!(rig.parked_on(P_PLAYER).is_empty(), "nothing parked while the move waits");
+    rig.link_up(ha, hb);
+    let mut parked = false;
+    for _ in 0..CROSS_ROUNDS {
+        rig.round();
+        rig.maintain_all(game::HANDOFF_SESSION_GRACE_MS);
+        if !rig.parked_on(P_PLAYER).is_empty() && rig.player_owners(P_CLIENT).is_empty() && rig.peer_unreceived() == 0 {
+            parked = true;
+            break;
+        }
+    }
+    assert!(parked, "never parked: bodies {:?}, parked on {:?}", rig.player_owners(P_CLIENT), rig.parked_on(P_PLAYER));
+    for _ in 0..WAIT_ROUNDS {
+        rig.round();
+    }
+    assert_eq!(rig.parked_on(P_PLAYER), [hb], "parked once, on host {hb}");
+    assert_eq!(rig.hosts[hb as usize].manager.parked_record(P_PLAYER).map(|r| r.region), Some(b));
+    assert!(rig.player_owners(P_CLIENT).is_empty());
+    for h in [ha, hb] {
+        let m = &rig.hosts[h as usize].manager;
+        assert_eq!((m.home_of(P_CLIENT), m.session_kind(P_CLIENT)), (None, None), "host {h} holds nothing of it");
+    }
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn disconnect_while_the_move_is_queued_parks_once_on_the_target() {
+    sweep("disconnect_while_the_move_is_queued_parks_once_on_the_target", 2, 1, SEEDS / 4, disconnect_while_queued);
 }

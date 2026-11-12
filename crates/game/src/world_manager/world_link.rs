@@ -694,9 +694,11 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// the fortress region parks by the usual grace rule (its people go back to the
     /// abstract history). No fortress = no-op.
     pub(super) fn retire(&mut self, id: ClientId, now_ms: u64) {
-        if self.fortress_of.remove(&id).is_none() {
+        // No move possible (no refusal exists for a retire): the fortress stays.
+        if !self.fortress_of.contains_key(&id) || !self.can_move(id, SPAWN_REGION) {
             return;
         }
+        self.fortress_of.remove(&id);
         let landing = self.landing_in(SPAWN_REGION);
         self.move_client(id, SPAWN_REGION, landing, now_ms);
         self.release_claim_of(id);
@@ -744,7 +746,8 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// End the adventure: back to Fortress mode, then to `SPAWN_REGION` like
     /// [`Self::retire`]. No adventure = no-op.
     pub(super) fn end_adventure(&mut self, id: ClientId, now_ms: u64) {
-        if !self.adventurer_of.contains_key(&id) {
+        // No move possible (no refusal exists for an adventure's end): it goes on.
+        if !self.adventurer_of.contains_key(&id) || !self.can_move(id, SPAWN_REGION) {
             return;
         }
         // A move in flight to another host's region has no home here: the order goes with
@@ -864,7 +867,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             WorldReply::AdventureRefused(e) => self.adventure_result(client, Err(e)),
             WorldReply::Embarked { site, region } | WorldReply::Returned { site, region } => {
                 self.site_regions.insert(site, region);
-                if self.is_unavailable(region) {
+                if self.is_unavailable(region) || !self.can_move(client, region) {
                     self.world_send(HostMsg::ReleaseClaim { player: p.player });
                     return self.embark_result(client, Err(EmbarkRefusal::RegionUnavailable));
                 }
@@ -888,7 +891,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             }
             WorldReply::AdventureStarted { site, region } => {
                 self.site_regions.insert(site, region);
-                if self.is_unavailable(region) {
+                if self.is_unavailable(region) || !self.can_move(client, region) {
                     self.world_send(HostMsg::ReleaseClaim { player: p.player });
                     return self.adventure_result(client, Err(AdventureRefusal::RegionUnavailable));
                 }

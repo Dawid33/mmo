@@ -1382,3 +1382,30 @@ fn duplicate_client_id_is_refused() {
     assert_eq!(h.manager.player_of(6), Some(game::PlayerId(1)));
     assert_eq!(h.manager.player_of(5), None, "the older session was ended");
 }
+
+/// A session observing a body on another host (`ObserverConnected`) cannot move a player:
+/// Play is refused as a move that cannot happen, and nothing is created or started here.
+#[test]
+fn observer_session_cannot_move_a_player() {
+    crate::common::install_real_block_props();
+    let mut h = floored_harness();
+    h.manager.set_world_map(game::WorldMap {
+        origin: RegionCoords::new(-1, -1),
+        width: 3,
+        height: 3,
+        tiles: (0..9).map(|_| play_tile()).collect(),
+        rock_names: vec![],
+        region_types: vec![],
+    });
+    h.event(ServerEvent::ObserverConnected { client: 3, player: game::PlayerId(9) }, 0);
+    h.drain_packets();
+    let target = RegionCoords::new(1, 0);
+    h.event(ServerEvent::ClientPacket(ClientPacket::PlayRegion(target), 3), 10);
+    let refused = h.drain_packets().into_iter().any(|(to, p)| {
+        to == Some(3) && matches!(p, ServerPacket::PlayRefused(rc, game::PlayRefusal::RegionUnavailable) if rc == target)
+    });
+    assert!(refused, "Play from an observer session is refused");
+    assert_eq!(h.manager.home_of(3), None, "no home here");
+    assert_eq!(h.manager.session_kind(3), Some(game::SessionKind::Observer));
+    assert!(!h.manager.running_regions().contains(&target), "nothing started for it");
+}
