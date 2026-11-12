@@ -591,7 +591,7 @@ fn kick_queued_while_the_link_is_down_parks_once_it_is_up() {
         ));
         links.start();
         // Signed out everywhere while the host is not reachable.
-        assert_eq!(store.revoke_account_with_kicks(account, 3, KICK_REASON).await.unwrap(), 1);
+        assert_eq!(store.revoke_account_with_kicks(account, NOW as i64, KICK_REASON).await.unwrap(), 1);
         links.wake_kicks();
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert_eq!(store.pending_kicks().await.unwrap().len(), 1, "the kick waits, durably");

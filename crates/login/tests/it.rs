@@ -4,6 +4,7 @@
 mod api;
 mod common;
 mod ctl;
+mod kicks;
 mod mail;
 mod password;
 mod schema;

@@ -41,6 +41,9 @@ pub const LINK_PROTOCOL_VERSION: u32 = 2;
 /// First reconnect delay; doubles per failed attempt up to [`LINK_RETRY_MAX_MS`].
 pub const LINK_RETRY_MIN_MS: u64 = 250;
 pub const LINK_RETRY_MAX_MS: u64 = 5000;
+/// While a link stays down, the dialer logs its failed attempts at most this often (the first
+/// failure of a down period is logged at once).
+pub const LINK_DIAL_LOG_EVERY_SECS: u64 = 60;
 /// Longest a peer may take to finish the handshake and hello.
 const LINK_HELLO_TIMEOUT: Duration = Duration::from_secs(5);
 /// A hello is a few dozen bytes; anything bigger is refused before it is allocated.
@@ -579,10 +582,15 @@ async fn dial_loop<In, Out>(
     };
     let mut backoff = LINK_RETRY_MIN_MS;
     let mut announced_down = false;
+    // Failed attempts since the last dial-failure line, and when that line went out.
+    let mut unlogged_failures: u64 = 0;
+    let mut last_dial_log: Option<std::time::Instant> = None;
     while !stop.load(Ordering::SeqCst) {
         match attempt(&endpoint, addr, &config, &hello).await {
             Ok((connection, send, recv)) => {
                 backoff = LINK_RETRY_MIN_MS;
+                unlogged_failures = 0;
+                last_dial_log = None;
                 let (tx, rx) = unbounded_channel::<Out>();
                 if stop.load(Ordering::SeqCst) {
                     break;
@@ -613,7 +621,16 @@ async fn dial_loop<In, Out>(
                 announced_down = true;
             }
             Err(why) => {
-                log::warn!("[svc-link] dial {addr} failed: {why}");
+                unlogged_failures += 1;
+                if last_dial_log.is_none_or(|t| t.elapsed() >= Duration::from_secs(LINK_DIAL_LOG_EVERY_SECS)) {
+                    if last_dial_log.is_none() {
+                        log::warn!("[svc-link] dial {addr} failed: {why}");
+                    } else {
+                        log::warn!("[svc-link] dial {addr} failed: {why} ({unlogged_failures} failed attempts since the last line)");
+                    }
+                    last_dial_log = Some(std::time::Instant::now());
+                    unlogged_failures = 0;
+                }
                 if !announced_down {
                     if events.send(LinkEvent::Down(why)).is_err() {
                         break;

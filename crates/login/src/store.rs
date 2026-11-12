@@ -530,8 +530,22 @@ impl LoginStore {
              WHERE world_id = $2 AND session_epoch = $3 AND ended_at IS NULL AND account_id = \
              (SELECT account_id FROM world_players WHERE world_id = $2 AND player_token = $4)";
         let epoch = i64::try_from(epoch).unwrap_or(i64::MAX);
-        let n = on!(self, p => sqlx::query(SQL).bind(now).bind(world).bind(epoch).bind(player_token)
-            .execute(p).await?.rows_affected());
+        const DROP_KICK: &str = "DELETE FROM pending_kicks WHERE world_id = $1 AND player_token = $2 AND session_epoch <= $3";
+        // One transaction: an ended session's kick has nothing left to do, so it goes with it.
+        macro_rules! tx {
+            ($p:expr) => {{
+                let mut tx = $p.begin().await?;
+                let n = sqlx::query(SQL).bind(now).bind(world).bind(epoch).bind(player_token)
+                    .execute(&mut *tx).await?.rows_affected();
+                sqlx::query(DROP_KICK).bind(world).bind(player_token).bind(epoch).execute(&mut *tx).await?;
+                tx.commit().await?;
+                n
+            }};
+        }
+        let n = match &self.pool {
+            Pool::Sqlite(p) => tx!(p),
+            Pool::Pg(p) => tx!(p),
+        };
         Ok(n > 0)
     }
 
@@ -585,5 +599,26 @@ impl LoginStore {
         let epoch = i64::try_from(epoch).unwrap_or(i64::MAX);
         let n = on!(self, p => sqlx::query(SQL).bind(world).bind(player_token).bind(epoch).execute(p).await?.rows_affected());
         Ok(n > 0)
+    }
+
+    /// Delete and return the kicks queued `ttl_secs` or more before `now_secs`: a host that
+    /// never acknowledges must not be retried forever. One statement, so two replicas never
+    /// both report the same row.
+    pub async fn expire_pending_kicks(&self, now_secs: u64, ttl_secs: u64) -> Result<Vec<PendingKick>, LoginError> {
+        const SQL: &str = "DELETE FROM pending_kicks WHERE created_at + $2 <= $1 \
+             RETURNING world_id, player_token, session_epoch, reason";
+        let now = i64::try_from(now_secs).unwrap_or(i64::MAX);
+        let ttl = i64::try_from(ttl_secs).unwrap_or(i64::MAX);
+        let mut kicks: Vec<PendingKick> = on!(self, p => sqlx::query(SQL).bind(now).bind(ttl).fetch_all(p).await?
+            .into_iter()
+            .map(|r| PendingKick {
+                world_id: r.get(0),
+                player_token: r.get(1),
+                session_epoch: r.get::<i64, _>(2) as u64,
+                reason: r.get(3),
+            })
+            .collect());
+        kicks.sort_by(|a, b| (&a.world_id, &a.player_token).cmp(&(&b.world_id, &b.player_token)));
+        Ok(kicks)
     }
 }

@@ -37,6 +37,8 @@ use tokio::sync::{Notify, oneshot, watch};
 
 /// How often pending kicks are resent while their link is up (and new ones looked for).
 pub const KICK_RESEND_MS: u64 = 2000;
+/// A kick the host never acknowledges is dropped (with a warning) after this long.
+pub const PENDING_KICK_TTL_SECS: u64 = 86_400;
 
 use crate::{LoginStore, WorldRow};
 
@@ -132,6 +134,17 @@ impl HostLinks {
 
     /// Every pending kick, over its world's link (dialed if need be) if that link is up.
     async fn send_pending_kicks(&self) {
+        let now = (self.clock)();
+        match self.store.expire_pending_kicks(now, PENDING_KICK_TTL_SECS).await {
+            // Unacknowledged for at least the TTL (the sweep runs every `KICK_RESEND_MS`).
+            Ok(expired) => for kick in expired {
+                log::warn!(
+                    "[login] kick for world {} player {} dropped after {} s unacknowledged",
+                    kick.world_id, kick.player_token, PENDING_KICK_TTL_SECS
+                );
+            },
+            Err(e) => log::error!("[login] expiring pending kicks: {e}"),
+        }
         let kicks = match self.store.pending_kicks().await {
             Ok(kicks) => kicks,
             Err(e) => return log::error!("[login] reading pending kicks: {e}"),
