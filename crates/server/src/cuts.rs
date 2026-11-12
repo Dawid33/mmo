@@ -13,9 +13,14 @@
 //! and only then the manager hears `cut_committed` / `cut_failed` (store obligations 2
 //! and 4: until it is settled, the handle refuses every further cut). A part that may be
 //! staged although its prepare failed, or whose `CutDone` never comes, is settled the
-//! same way by asking the store every [`WORLD_PART_POLL`]. A `StaleGeneration` notes
-//! the newer generation (the host exits for a world rollback); `CutAborted` needs no
-//! settling. With one host nothing of this runs.
+//! same way by asking the store every [`WORLD_PART_POLL`]. Told "aborted" while the store
+//! has no decision yet, or hearing nothing [`game::WORLD_CUT_DEADLINE_MS`] after the
+//! prepare, the host records the abort itself (`abort_cut`: the first decision written
+//! wins) and settles. A `CutPending` from another cut's part makes that part the one to
+//! settle. A `StaleGeneration` notes the newer generation (the host exits for a world
+//! rollback); `CutAborted` needs no settling. Every store call here is answered on a
+//! receiver: the main loop never waits. A part that keeps the next cuts from being staged
+//! counts toward [`CUT_FAILURES_BEFORE_STUCK`]. With one host nothing of this runs.
 
 use std::time::{Duration, Instant};
 
@@ -51,20 +56,50 @@ const EXIT_PARK_POLL: Duration = Duration::from_millis(20);
 /// (`cut_decided`) when no `CutDone` came for it.
 pub const WORLD_PART_POLL: Duration = Duration::from_secs(1);
 
+/// At most one warning per this long about failing reads of a world part's decision.
+pub const WORLD_PART_WARN: Duration = Duration::from_secs(10);
+
+/// A store answer on its way.
+type Answer<T> = Receiver<Result<T, StoreError>>;
+
 /// This host's part of a world cut, from its prepare until the store has settled it.
 struct WorldPart {
     id: CutId,
+    tick: Tick,
     /// The prepare's answer, while it has not come.
-    reply: Option<Receiver<Result<CutCommitted, StoreError>>>,
+    reply: Option<Answer<CutCommitted>>,
     /// Staged (the prepare answered `Ok`): its region versions.
     versions: Option<Vec<(RegionCoords, u64)>>,
     /// The store may hold the part staged (a prepare that succeeded, or failed with the
     /// pending mark possibly kept): settled with `cut_decided`.
     maybe_staged: bool,
-    /// The coordinator's `CutDone` came.
-    done: bool,
+    /// The coordinator's `CutDone` came (its outcome).
+    done: Option<bool>,
     /// The store was last asked about it at.
     polled: Option<Instant>,
+    /// `cut_decided`'s answer on its way.
+    deciding: Option<Answer<Option<bool>>>,
+    /// This host's own `abort_cut` on its way.
+    aborting: Option<Answer<bool>>,
+    /// When the part was queued.
+    since: Instant,
+}
+
+impl WorldPart {
+    fn new(id: CutId, tick: Tick, reply: Option<Answer<CutCommitted>>) -> Self {
+        WorldPart {
+            id,
+            tick,
+            reply,
+            versions: None,
+            maybe_staged: true,
+            done: None,
+            polled: None,
+            deciding: None,
+            aborting: None,
+            since: Instant::now(),
+        }
+    }
 }
 
 /// The server's side of the save cuts: the store and the commits in flight.
@@ -77,11 +112,13 @@ pub struct CutWriter {
     world: Option<WorldGeneration>,
     /// The world part not settled yet (one at a time: the store refuses another meanwhile).
     part: Option<WorldPart>,
+    /// When a failing read of a world part's decision was last warned about.
+    warned: Option<Instant>,
 }
 
 impl CutWriter {
     pub fn new(claims: HostClaims) -> Self {
-        CutWriter { claims, pending: Vec::new(), failed_in_a_row: 0, world: None, part: None }
+        CutWriter { claims, pending: Vec::new(), failed_in_a_row: 0, world: None, part: None, warned: None }
     }
 
     /// A writer of a host of several (`VOXEL_HOSTS` > 1): its world cut parts are staged
@@ -209,17 +246,31 @@ impl CutWriter {
         if let Some(p) = &self.part {
             let why = format!("the part of cut {} is still undecided", p.id.0);
             log::warn!("[server] world cut {}: {why}; failed", id.0);
+            self.world_failure(id, cut.tick, &why);
             manager.world_cut_failed(id, CutFailure::Store(why));
             return;
         }
         let generation = self.world.as_ref().expect("world cuts").mine();
+        let tick = cut.tick;
         let reply = self.claims.store().prepare_cut(cut, self.claims.fence().clone(), generation);
-        self.part = Some(WorldPart { id, reply: Some(reply), versions: None, maybe_staged: true, done: false, polled: None });
+        self.part = Some(WorldPart::new(id, tick, Some(reply)));
+    }
+
+    /// A world part failed to be staged, or could not be: counted toward the stuck report.
+    fn world_failure(&mut self, id: CutId, tick: Tick, why: &str) {
+        self.failed_in_a_row += 1;
+        if self.failed_in_a_row == CUT_FAILURES_BEFORE_STUCK {
+            log::error!(
+                "[server] world saving is stuck: {CUT_FAILURES_BEFORE_STUCK} world cut parts in a row could not be staged, \
+                 the last with: {why} (nothing is dropped; every cut retries what is uncommitted)"
+            );
+            game::perf_event!("world_save_stuck", "failed={} cut={} tick={}", self.failed_in_a_row, id.0, tick);
+        }
     }
 
     /// The world part's prepare answer, the coordinator's `CutDone`s, and the settling.
     fn pump_world<S: RegionSpawner>(&mut self, manager: &mut WorldManager<S>) {
-        let mut settled = false;
+        let mut failure: Option<(CutId, Tick, StoreError)> = None;
         if let Some(part) = self.part.as_mut() {
             let answer = match part.reply.as_ref().map(|r| r.try_recv()) {
                 Some(Ok(answer)) => Some(answer),
@@ -228,38 +279,48 @@ impl CutWriter {
             };
             if let Some(answer) = answer {
                 part.reply = None;
-                let id = part.id;
+                // Asked again only after `WORLD_PART_POLL` (or its `CutDone`).
+                part.polled = Some(Instant::now());
                 match answer {
                     Ok(staged) => {
                         part.versions = Some(staged.versions);
-                        manager.world_cut_prepared(id);
+                        manager.world_cut_prepared(part.id);
                     }
                     Err(e) => {
                         // Only a `Backend` error may leave the part staged (its mark kept).
                         part.maybe_staged = matches!(e, StoreError::Backend(_));
-                        if self.claims.note_refusal(&e) {
-                            log::error!("[server] world cut {} was refused as fenced; this server was replaced and stops", id.0);
-                        }
-                        if let StoreError::StaleGeneration { stored, .. } = &e {
-                            self.world.as_ref().expect("world cuts").note(*stored);
-                        }
-                        if let StoreError::CutPending(other) = &e {
-                            log::error!("[server] world cut {}: the store still holds part of cut {} undecided", id.0, other.0);
-                        }
-                        log::warn!("[server] world cut {}: the part was not staged: {e}", id.0);
-                        manager.world_cut_failed(id, CutFailure::Store(e.to_string()));
-                        // Nothing staged, the pending mark cleared: settled.
-                        settled = !part.maybe_staged;
+                        failure = Some((part.id, part.tick, e));
                     }
                 }
             }
         }
-        if settled {
-            self.part = None;
+        if let Some((id, tick, e)) = failure {
+            if self.claims.note_refusal(&e) {
+                log::error!("[server] world cut {} was refused as fenced; this server was replaced and stops", id.0);
+            }
+            if let StoreError::StaleGeneration { stored, .. } = &e {
+                self.world.as_ref().expect("world cuts").note(*stored);
+            }
+            log::warn!("[server] world cut {}: the part was not staged: {e}", id.0);
+            self.world_failure(id, tick, &e.to_string());
+            manager.world_cut_failed(id, CutFailure::Store(e.to_string()));
+            match &e {
+                // Another cut's part is undecided on this handle: that one is settled first
+                // (obligation 4), with the decision stored for it.
+                StoreError::CutPending(other) => {
+                    log::error!("[server] world cut {}: the store still holds part of cut {} undecided", id.0, other.0);
+                    self.part = Some(WorldPart::new(*other, tick, None));
+                }
+                _ if !self.part.as_ref().is_some_and(|p| p.maybe_staged) => self.part = None,
+                _ => {}
+            }
         }
         for (cut, committed) in manager.take_world_cut_done() {
             match self.part.as_mut() {
-                Some(part) if part.id == cut => part.done = true,
+                Some(part) if part.id == cut => {
+                    part.done = Some(committed);
+                    part.polled = None;
+                }
                 _ => {
                     log::debug!("[server] world cut {} decided ({committed}); nothing of it staged here", cut.0);
                     manager.cut_failed(cut);
@@ -270,39 +331,72 @@ impl CutWriter {
     }
 
     /// Settle the world part once it is decided: the store first (`cut_decided`, which
-    /// finishes the part and clears the handle's pending mark), then the manager.
+    /// finishes the part and clears the handle's pending mark), then the manager. Told it
+    /// is aborted (or past the deadline) while the store has no decision: this host
+    /// records the abort itself (`abort_cut`), then settles.
     fn settle_world<S: RegionSpawner>(&mut self, manager: &mut WorldManager<S>) {
         let Some(part) = self.part.as_mut() else { return };
         if part.reply.is_some() {
             return;
         }
-        let due = part.done || part.polled.is_none_or(|at| at.elapsed() >= WORLD_PART_POLL);
-        if !due {
-            return;
+        if let Some(rx) = &part.aborting {
+            match rx.try_recv() {
+                Err(TryRecvError::Empty) => return,
+                Ok(Ok(committed)) => {
+                    log::info!("[server] world cut {}: decided {committed} (this host's abort, or an earlier decision)", part.id.0)
+                }
+                Ok(Err(e)) => log::warn!("[server] world cut {}: this host's abort could not be recorded ({e})", part.id.0),
+                Err(TryRecvError::Disconnected) => {}
+            }
+            part.aborting = None;
+            part.polled = None;
         }
-        part.polled = Some(Instant::now());
-        let id = part.id;
-        match self.claims.store().cut_decided(id) {
-            Ok(Some(true)) => {
-                let versions = part.versions.take().unwrap_or_else(|| {
-                    log::warn!("[server] world cut {} committed with this host's part, whose prepare answer was lost", id.0);
-                    Vec::new()
-                });
-                self.part = None;
-                game::perf_event!("world_saved", "cut={} world=1", id.0);
-                manager.cut_committed(id, versions);
-            }
-            Ok(Some(false)) => {
-                self.part = None;
-                manager.cut_failed(id);
-            }
-            Ok(None) => {
-                if part.done {
-                    log::warn!("[server] world cut {}: decided by the coordinator, not in the store yet; asking again", id.0);
-                    part.done = false;
+        if let Some(rx) = &part.deciding {
+            let answer = match rx.try_recv() {
+                Err(TryRecvError::Empty) => return,
+                Ok(answer) => answer,
+                Err(TryRecvError::Disconnected) => Err(StoreError::Backend("the world-store thread has stopped".into())),
+            };
+            part.deciding = None;
+            let id = part.id;
+            match answer {
+                Ok(Some(true)) => {
+                    let versions = part.versions.take().unwrap_or_else(|| {
+                        log::warn!("[server] world cut {} committed with this host's part, whose prepare answer was lost", id.0);
+                        Vec::new()
+                    });
+                    self.part = None;
+                    self.failed_in_a_row = 0;
+                    game::perf_event!("world_saved", "cut={} world=1", id.0);
+                    manager.cut_committed(id, versions);
+                }
+                Ok(Some(false)) => {
+                    self.part = None;
+                    manager.cut_failed(id);
+                }
+                Ok(None) => {
+                    // Undecided in the store. Told it is aborted, or nothing heard past the
+                    // deadline: abort it here (the first decision written wins).
+                    let late = part.since.elapsed() >= Duration::from_millis(game::WORLD_CUT_DEADLINE_MS);
+                    if part.done == Some(false) || late {
+                        log::warn!("[server] world cut {}: no decision stored; this host aborts it", id.0);
+                        part.aborting = Some(self.claims.store().abort_cut_later(id, part.tick));
+                    } else if part.done == Some(true) {
+                        log::error!("[server] world cut {}: told committed, the store has no decision; asking again", id.0);
+                    }
+                }
+                Err(e) => {
+                    if self.warned.is_none_or(|at| at.elapsed() >= WORLD_PART_WARN) {
+                        self.warned = Some(Instant::now());
+                        log::warn!("[server] world cut {}: its decision could not be read ({e}); asking again", id.0);
+                    }
                 }
             }
-            Err(e) => log::warn!("[server] world cut {}: its decision could not be read ({e}); asking again", id.0),
+            return;
+        }
+        if part.polled.is_none_or(|at| at.elapsed() >= WORLD_PART_POLL) {
+            part.polled = Some(Instant::now());
+            part.deciding = Some(self.claims.store().cut_decided_later(part.id));
         }
     }
 

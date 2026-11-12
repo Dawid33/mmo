@@ -18,9 +18,12 @@
 //! needs (those whose `hosts` row is not clean), records each decision in the store
 //! ([`StoreHandle::decide_cut`], under the coordinator's fence) and broadcasts the
 //! decision the STORE returned. A `decide_cut` that fails (a stale generation, a store
-//! error) is answered with `abort_cut` and an abort is broadcast. A host's question about
-//! a cut the core does not remember is answered from the store (`cut_decision`; an
-//! undecided one aborted). While the coordinator is down no cut runs.
+//! error) is followed by `abort_cut`, retried ([`WORLD_CUT_DECISION_RETRY_MS`], slower
+//! past the cut's deadline) until a decision is stored: no outcome is ever announced that
+//! the store does not hold. A host's question about a cut the core does not remember is
+//! answered from the store (`cut_decision`; an undecided one aborted). Every store call of
+//! the world cuts is answered on a receiver: the loop never waits for the database. While
+//! the coordinator is down no cut runs.
 //!
 //! A save refused as `Fenced` (another coordinator claimed the row) fences the whole
 //! process: the shared [`Fenced`] flag is set — the server's main loop sees it and exits
@@ -532,6 +535,39 @@ impl CoordinatorThread {
 
 /// How often the runtime re-reads which hosts a world cut needs (their `hosts` rows).
 pub const WORLD_CUT_HOSTS_REFRESH_MS: u64 = 1_000;
+/// After a failed decision write, the wait before the next `abort_cut` while the cut is
+/// within [`game::WORLD_CUT_DEADLINE_MS`] of its decision being taken.
+pub const WORLD_CUT_DECISION_RETRY_MS: u64 = 250;
+/// The same past that deadline (the store is down: keep trying, slowly).
+pub const WORLD_CUT_DECISION_SLOW_RETRY_MS: u64 = 5_000;
+/// The wait before a failed lookup of a cut's outcome is tried again.
+pub const WORLD_CUT_LOOKUP_RETRY_MS: u64 = 1_000;
+/// At most one warning per this many ms about failing world-cut store calls.
+pub const WORLD_CUT_RETRY_LOG_MS: u64 = 10_000;
+
+/// A store answer on its way.
+type Answer<T> = Receiver<Result<T, StoreError>>;
+
+/// A decision of the core being recorded: its `decide_cut`, then (if that failed)
+/// `abort_cut` until one is stored.
+struct Recording {
+    d: game::CutDecide,
+    /// The answer awaited (`None`: waiting to try `abort_cut` at `retry_at`).
+    rx: Option<Answer<bool>>,
+    aborting: bool,
+    taken_ms: u64,
+    retry_at: u64,
+}
+
+/// A host's question about a cut's outcome, being answered from the store.
+struct Lookup {
+    host: u32,
+    cut: game::CutId,
+    rx: Option<Answer<Option<bool>>>,
+    /// The cut was undecided: `abort_cut`'s answer.
+    abort_rx: Option<Answer<bool>>,
+    retry_at: u64,
+}
 
 /// World cuts for a coordinator serving several hosts ([`start_listening_with`]).
 pub struct WorldCuts {
@@ -624,8 +660,14 @@ pub struct CoordinatorRuntime {
     cuts: Option<WorldCuts>,
     /// `now_ms` the expected hosts were last read at.
     hosts_read_ms: Option<u64>,
-    /// Lookups of cut outcomes the store could not answer yet: retried each pass.
-    lookups: Vec<(u32, game::CutId)>,
+    /// The hosts read in flight.
+    hosts_rx: Option<Answer<Vec<world_store::HostRow>>>,
+    /// The decision being recorded (one at a time: the core runs one cut at a time).
+    recording: Option<Recording>,
+    /// Lookups of cut outcomes in flight or waiting to be tried again.
+    lookups: Vec<Lookup>,
+    /// `now_ms` of the last warning about a failing world-cut store call.
+    warned_ms: Option<u64>,
 }
 
 impl CoordinatorRuntime {
@@ -666,7 +708,10 @@ impl CoordinatorRuntime {
             failed_in_a_row: 0,
             cuts,
             hosts_read_ms: None,
+            hosts_rx: None,
+            recording: None,
             lookups: Vec::new(),
+            warned_ms: None,
         };
         let join = std::thread::Builder::new()
             .name("coordinator".into())
@@ -721,7 +766,7 @@ impl CoordinatorRuntime {
             }
             self.feed_cuts(now);
             self.core.maintain(now);
-            if self.pump_save(now).is_err() || self.pump_cuts().is_err() {
+            if self.pump_save(now).is_err() || self.pump_cuts(now).is_err() {
                 return self.fence_out();
             }
             let out = self.core.take_out();
@@ -855,67 +900,130 @@ impl CoordinatorRuntime {
     }
 
     /// The world tick, and (every [`WORLD_CUT_HOSTS_REFRESH_MS`]) the hosts a cut needs:
-    /// those whose `hosts` row is not clean. A store read that fails keeps the last set.
+    /// those whose `hosts` row is not clean. A read that fails stops cuts until a good one
+    /// ([`Coordinator::expected_hosts_unknown`]).
     fn feed_cuts(&mut self, now: u64) {
         let Some(cuts) = &self.cuts else { return };
         self.core.set_world_tick((cuts.tick)());
-        if self.hosts_read_ms.is_some_and(|at| now < at + WORLD_CUT_HOSTS_REFRESH_MS) {
-            return;
+        if let Some(rx) = &self.hosts_rx {
+            match rx.try_recv() {
+                Err(TryRecvError::Empty) => return,
+                Ok(Ok(rows)) => self.core.set_expected_hosts(rows.iter().filter(|r| !r.clean).map(|r| r.ordinal).collect()),
+                Ok(Err(e)) => {
+                    self.core.expected_hosts_unknown();
+                    self.warn_cuts(now, &format!("the hosts could not be read ({e}); no world cut until they are"));
+                }
+                Err(TryRecvError::Disconnected) => {
+                    self.core.expected_hosts_unknown();
+                    self.warn_cuts(now, "the world-store thread has stopped; no world cut");
+                }
+            }
+            self.hosts_rx = None;
         }
-        self.hosts_read_ms = Some(now);
-        match self.store.hosts() {
-            Ok(rows) => self.core.set_expected_hosts(rows.iter().filter(|r| !r.clean).map(|r| r.ordinal).collect()),
-            Err(e) => log::warn!("[coordinator] the hosts could not be read ({e}); the cut keeps the last set"),
+        if self.hosts_read_ms.is_none_or(|at| now >= at + WORLD_CUT_HOSTS_REFRESH_MS) {
+            self.hosts_read_ms = Some(now);
+            self.hosts_rx = Some(self.store.hosts_later());
         }
     }
 
-    /// Record each world-cut decision of the core in the store and tell the core the
-    /// STORED decision; answer the hosts' questions about cuts the core does not remember.
-    /// `Err`: fenced.
-    fn pump_cuts(&mut self) -> Result<(), ()> {
+    /// A warning about a failing world-cut store call, at most once per
+    /// [`WORLD_CUT_RETRY_LOG_MS`].
+    fn warn_cuts(&mut self, now: u64, what: &str) {
+        if self.warned_ms.is_none_or(|at| now >= at + WORLD_CUT_RETRY_LOG_MS) {
+            self.warned_ms = Some(now);
+            log::warn!("[coordinator] {what}");
+        }
+    }
+
+    /// Record the core's world-cut decision in the store and tell the core the STORED
+    /// decision; answer the hosts' questions about cuts the core does not remember. Never
+    /// waits. `Err`: fenced.
+    fn pump_cuts(&mut self, now: u64) -> Result<(), ()> {
         if self.cuts.is_none() {
             return Ok(());
         }
-        while let Some(d) = self.core.take_decision() {
-            let stored = match self.store.decide_cut(d.cut, d.tick, d.commit, d.hosts.clone(), d.leaving.clone(), self.fence, d.generation) {
-                Ok(stored) => {
+        if self.recording.is_none() {
+            if let Some(d) = self.core.take_decision() {
+                let rx = self.store.decide_cut_later(d.cut, d.tick, d.commit, d.hosts.clone(), d.leaving.clone(), self.fence, d.generation);
+                self.recording = Some(Recording { d, rx: Some(rx), aborting: false, taken_ms: now, retry_at: now });
+            }
+        }
+        if let Some(r) = self.recording.as_mut() {
+            let answer = match r.rx.as_ref().map(|rx| rx.try_recv()) {
+                None | Some(Err(TryRecvError::Empty)) => None,
+                Some(Ok(answer)) => Some(answer),
+                Some(Err(TryRecvError::Disconnected)) => Some(Err(StoreError::Backend("the world-store thread has stopped".into()))),
+            };
+            match answer {
+                None => {}
+                Some(Ok(stored)) => {
+                    let d = self.recording.take().expect("recording").d;
                     if d.commit && !stored {
                         log::warn!("[coordinator] world cut {}: a commit was asked, the store recorded an abort", d.cut.0);
                     }
-                    stored
+                    game::perf_event!("world_cut_decided", "cut={} tick={} committed={stored}", d.cut.0, d.tick);
+                    self.core.decided(d.cut, stored);
                 }
-                Err(StoreError::Fenced { .. }) => return Err(()),
-                Err(e) => {
-                    log::error!("[coordinator] world cut {}: the decision could not be recorded ({e}); aborting it", d.cut.0);
-                    match self.store.abort_cut(d.cut, d.tick) {
-                        Ok(stored) => stored,
-                        Err(e) => {
-                            // Undecided in the store: the recovery sweep aborts it; the hosts
-                            // are told it is aborted (only this coordinator could commit it).
-                            log::error!("[coordinator] world cut {}: the abort could not be recorded either ({e})", d.cut.0);
-                            false
-                        }
-                    }
-                }
-            };
-            game::perf_event!("world_cut_decided", "cut={} tick={} committed={stored}", d.cut.0, d.tick);
-            self.core.decided(d.cut, stored);
-        }
-        self.lookups.extend(self.core.take_cut_lookups());
-        let lookups = std::mem::take(&mut self.lookups);
-        for (host, cut) in lookups {
-            let answer = match self.store.cut_decision(cut) {
-                Ok(Some(stored)) => Ok(stored),
-                Ok(None) => self.store.abort_cut(cut, 0),
-                Err(e) => Err(e),
-            };
-            match answer {
-                Ok(stored) => self.core.cut_outcome(host, cut, stored),
-                Err(e) => {
-                    log::warn!("[coordinator] the outcome of cut {} for host {host} could not be read ({e}); asking again", cut.0);
-                    self.lookups.push((host, cut));
+                Some(Err(StoreError::Fenced { .. })) => return Err(()),
+                Some(Err(e)) => {
+                    let (cut, aborting) = (r.d.cut.0, r.aborting);
+                    let slow = now.saturating_sub(r.taken_ms) >= game::WORLD_CUT_DEADLINE_MS;
+                    r.rx = None;
+                    r.aborting = true;
+                    r.retry_at = now + if slow { WORLD_CUT_DECISION_SLOW_RETRY_MS } else { WORLD_CUT_DECISION_RETRY_MS };
+                    let what = if aborting { "its abort" } else { "the decision" };
+                    self.warn_cuts(now, &format!("world cut {cut}: {what} could not be recorded ({e}); aborting it again"));
                 }
             }
+        }
+        if let Some(r) = self.recording.as_mut().filter(|r| r.rx.is_none() && now >= r.retry_at) {
+            r.rx = Some(self.store.abort_cut_later(r.d.cut, r.d.tick));
+        }
+        for (host, cut) in self.core.take_cut_lookups() {
+            if !self.lookups.iter().any(|l| l.host == host && l.cut == cut) {
+                self.lookups.push(Lookup { host, cut, rx: Some(self.store.cut_decision_later(cut)), abort_rx: None, retry_at: now });
+            }
+        }
+        let mut answered = Vec::new();
+        let mut failed = Vec::new();
+        for (i, l) in self.lookups.iter_mut().enumerate() {
+            if l.rx.is_none() && l.abort_rx.is_none() {
+                if now >= l.retry_at {
+                    l.rx = Some(self.store.cut_decision_later(l.cut));
+                }
+                continue;
+            }
+            if let Some(rx) = &l.rx {
+                match rx.try_recv() {
+                    Err(TryRecvError::Empty) => {}
+                    Ok(Ok(Some(stored))) => answered.push((i, stored)),
+                    Ok(Ok(None)) => {
+                        l.rx = None;
+                        l.abort_rx = Some(self.store.abort_cut_later(l.cut, 0));
+                    }
+                    Ok(Err(e)) => failed.push((i, e.to_string())),
+                    Err(TryRecvError::Disconnected) => failed.push((i, "the world-store thread has stopped".into())),
+                }
+            } else if let Some(rx) = &l.abort_rx {
+                match rx.try_recv() {
+                    Err(TryRecvError::Empty) => {}
+                    Ok(Ok(stored)) => answered.push((i, stored)),
+                    Ok(Err(e)) => failed.push((i, e.to_string())),
+                    Err(TryRecvError::Disconnected) => failed.push((i, "the world-store thread has stopped".into())),
+                }
+            }
+        }
+        for (i, e) in &failed {
+            let l = &mut self.lookups[*i];
+            l.rx = None;
+            l.abort_rx = None;
+            l.retry_at = now + WORLD_CUT_LOOKUP_RETRY_MS;
+            let (cut, host) = (l.cut.0, l.host);
+            self.warn_cuts(now, &format!("the outcome of cut {cut} for host {host} could not be read ({e}); asking again"));
+        }
+        for (i, stored) in answered.iter().rev() {
+            let l = self.lookups.remove(*i);
+            self.core.cut_outcome(l.host, l.cut, *stored);
         }
         Ok(())
     }

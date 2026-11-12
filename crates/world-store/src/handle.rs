@@ -69,6 +69,8 @@ pub struct StoreHandle {
     fail_writes: Arc<AtomicU32>,
     /// Test hook ([`StoreHandle::stop_after_commit_prepared`]): the next decision's stop.
     stop_commits: Arc<Mutex<Option<u32>>>,
+    /// Test hook ([`StoreHandle::fail_next_decisions`]): decisions still to fail.
+    fail_decisions: Arc<AtomicU32>,
     /// The pending prepared part and the cut lock timeout, shared with the store thread.
     cuts: Arc<thread::CutState>,
 }
@@ -89,6 +91,7 @@ impl StoreHandle {
             super_region_regions,
             fail_writes: Arc::new(AtomicU32::new(0)),
             stop_commits: Arc::new(Mutex::new(None)),
+            fail_decisions: Arc::new(AtomicU32::new(0)),
             cuts,
         })
     }
@@ -113,6 +116,28 @@ impl StoreHandle {
     #[doc(hidden)]
     pub fn stop_after_commit_prepared(&self, n: u32) {
         *self.stop_commits.lock().unwrap_or_else(|e| e.into_inner()) = Some(n);
+    }
+
+    /// Test hook: the next `n` cut decisions — [`StoreHandle::decide_cut`] and
+    /// [`StoreHandle::abort_cut`] (and their `_later` forms), whichever come first — fail
+    /// with a `Backend` error and record nothing. Shared by every clone.
+    #[doc(hidden)]
+    pub fn fail_next_decisions(&self, n: u32) {
+        self.fail_decisions.store(n, Ordering::SeqCst);
+    }
+
+    /// Test hook: decisions [`StoreHandle::fail_next_decisions`] has still to fail.
+    #[doc(hidden)]
+    pub fn fail_next_decisions_left(&self) -> u32 {
+        self.fail_decisions.load(Ordering::SeqCst)
+    }
+
+    /// Takes one of [`StoreHandle::fail_next_decisions`]' failures, if any are left.
+    fn injected_decision_failure(&self) -> Option<StoreError> {
+        self.fail_decisions
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+            .ok()
+            .map(|_| StoreError::Backend("injected decision failure (StoreHandle::fail_next_decisions)".into()))
     }
 
     /// Test hook: the `lock_timeout` of this handle's later cut transactions, in ms
@@ -146,6 +171,21 @@ impl StoreHandle {
         let (tx, rx) = crossbeam::channel::bounded(1);
         self.tx.send(make(Reply::Sync(tx))).map_err(|_| stopped())?;
         rx.recv().map_err(|_| stopped())?
+    }
+
+    /// [`Self::ask`] without waiting: the answer arrives on the receiver (a stopped store
+    /// thread: the receiver disconnects).
+    fn ask_later<T>(&self, make: impl FnOnce(Reply<T>) -> Request) -> crossbeam::channel::Receiver<Result<T, StoreError>> {
+        let (tx, rx) = crossbeam::channel::bounded(1);
+        let _ = self.tx.send(make(Reply::Sync(tx)));
+        rx
+    }
+
+    /// An answer already known, on a receiver.
+    fn answered<T>(v: Result<T, StoreError>) -> crossbeam::channel::Receiver<Result<T, StoreError>> {
+        let (tx, rx) = crossbeam::channel::bounded(1);
+        let _ = tx.send(v);
+        rx
     }
 
     pub fn world_info(&self) -> Result<WorldInfo, StoreError> {
@@ -319,9 +359,32 @@ impl StoreHandle {
         fence: CoordinatorFence,
         generation: u64,
     ) -> Result<bool, StoreError> {
+        if let Some(e) = self.injected_decision_failure() {
+            return Err(e);
+        }
         let stop_after = self.stop_commits.lock().unwrap_or_else(|e| e.into_inner()).take();
         let d = thread::Decision { cut, tick, commit, hosts, leaving, fence, generation, stop_after };
         self.ask(|r| Request::DecideCut(Box::new(d), r))
+    }
+
+    /// [`Self::decide_cut`], answered on the receiver (the coordinator's loop never waits).
+    #[allow(clippy::too_many_arguments)]
+    pub fn decide_cut_later(
+        &self,
+        cut: CutId,
+        tick: Tick,
+        commit: bool,
+        hosts: Vec<u32>,
+        leaving: Vec<u32>,
+        fence: CoordinatorFence,
+        generation: u64,
+    ) -> crossbeam::channel::Receiver<Result<bool, StoreError>> {
+        if let Some(e) = self.injected_decision_failure() {
+            return Self::answered(Err(e));
+        }
+        let stop_after = self.stop_commits.lock().unwrap_or_else(|e| e.into_inner()).take();
+        let d = thread::Decision { cut, tick, commit, hosts, leaving, fence, generation, stop_after };
+        self.ask_later(|r| Request::DecideCut(Box::new(d), r))
     }
 
     /// A host's "abort unless decided": records an abort of `cut` if it has no
@@ -329,7 +392,18 @@ impl StoreHandle {
     /// and returns it (`true`: it was committed). Not fenced — the first decision
     /// written wins. Postgres only.
     pub fn abort_cut(&self, cut: CutId, tick: Tick) -> Result<bool, StoreError> {
+        if let Some(e) = self.injected_decision_failure() {
+            return Err(e);
+        }
         self.ask(|r| Request::AbortCut(cut, tick, r))
+    }
+
+    /// [`Self::abort_cut`], answered on the receiver.
+    pub fn abort_cut_later(&self, cut: CutId, tick: Tick) -> crossbeam::channel::Receiver<Result<bool, StoreError>> {
+        if let Some(e) = self.injected_decision_failure() {
+            return Self::answered(Err(e));
+        }
+        self.ask_later(|r| Request::AbortCut(cut, tick, r))
     }
 
     /// The recovery sweep (each process at start): every part of this world still
@@ -345,12 +419,22 @@ impl StoreHandle {
         self.ask(|r| Request::CutDecision(cut, r))
     }
 
+    /// [`Self::cut_decision`], answered on the receiver.
+    pub fn cut_decision_later(&self, cut: CutId) -> crossbeam::channel::Receiver<Result<Option<bool>, StoreError>> {
+        self.ask_later(|r| Request::CutDecision(cut, r))
+    }
+
     /// A host has heard that `cut` is decided (`CutDone`): re-reads the decision; if
     /// there is one, finishes any part of the cut still staged as it says and settles
     /// this handle's pending part, so its next cut is accepted. Returns the decision
     /// (`None`: undecided — the pending part stays).
     pub fn cut_decided(&self, cut: CutId) -> Result<Option<bool>, StoreError> {
         self.ask(|r| Request::CutDecided(cut, r))
+    }
+
+    /// [`Self::cut_decided`], answered on the receiver (a host's main loop never waits).
+    pub fn cut_decided_later(&self, cut: CutId) -> crossbeam::channel::Receiver<Result<Option<bool>, StoreError>> {
+        self.ask_later(|r| Request::CutDecided(cut, r))
     }
 
     /// The player id and saved record of `key` (the `players.token` column:
@@ -443,6 +527,11 @@ impl StoreHandle {
     /// Every registered host, by ordinal.
     pub fn hosts(&self) -> Result<Vec<HostRow>, StoreError> {
         self.ask(Request::Hosts)
+    }
+
+    /// [`Self::hosts`], answered on the receiver.
+    pub fn hosts_later(&self) -> crossbeam::channel::Receiver<Result<Vec<HostRow>, StoreError>> {
+        self.ask_later(Request::Hosts)
     }
 
     /// The world's generation: how many dirty host restarts the world has seen.

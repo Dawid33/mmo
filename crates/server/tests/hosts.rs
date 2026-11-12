@@ -594,23 +594,45 @@ impl game::WorldLink for SwitchLink {
     }
 }
 
+/// Two real hosts with a real coordinator ([`world`]).
+struct World {
+    pair: Pair,
+    seam: (RegionCoords, RegionCoords),
+    coordinator: server::coordinator_rt::ListeningCoordinator,
+    cert: PathBuf,
+    links: Vec<PeerLinks>,
+    claims: Vec<HostClaims>,
+    /// The coordinator's own store handle.
+    store: StoreHandle,
+    switches: Vec<SwitchLink>,
+    /// Each host's world generation (its rollback flag).
+    generations: Vec<server::claims::WorldGeneration>,
+}
+
+impl World {
+    fn stop(self, dir: &std::path::Path) {
+        assert_eq!(self.coordinator.thread.shutdown(Duration::from_secs(10)), server::claims::ServerExit::Clean);
+        drop(self.pair);
+        drop(self.links);
+        self.store.shutdown();
+        for c in self.claims {
+            c.store().clone().shutdown();
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Rounds until a world cut decided after `after` (cut id) is committed and both hosts
+    /// settled it.
+    fn until_committed_after(&mut self, db: &PgDb, after: i64) {
+        self.pair.until("a later world cut committed", |_| decisions(db).iter().any(|(c, _, k)| *k && *c > after));
+        self.pair.until("both hosts settled it", |p| p.sims.iter().all(|s| s.cuts.as_ref().unwrap().world_part().is_none()));
+    }
+}
+
 /// Two real hosts ([`two_hosts`]) and a real coordinator runtime over real links, world
 /// cuts every [`CUT_EVERY`] at the hosts' world tick, each host with its cut writer
-/// (staging world parts): `(pair, seam, coordinator, its addr and pin, links, claims)`.
-#[allow(clippy::type_complexity)]
-fn world(
-    db: &PgDb,
-    dir: &std::path::Path,
-) -> (
-    Pair,
-    (RegionCoords, RegionCoords),
-    server::coordinator_rt::ListeningCoordinator,
-    PathBuf,
-    Vec<PeerLinks>,
-    Vec<HostClaims>,
-    StoreHandle,
-    Vec<SwitchLink>,
-) {
+/// (staging world parts).
+fn world(db: &PgDb, dir: &std::path::Path) -> World {
     let (mut pair, seam, links, claims) = two_hosts(db, dir);
     let store = db.open();
     let start = server::world_file::ensure_coordinator_state(&store, &land_map(), None).unwrap().expect("a history");
@@ -631,6 +653,7 @@ fn world(
     )
     .expect("the coordinator listens");
     let mut switches = Vec::new();
+    let mut generations = Vec::new();
     for (ordinal, sim) in pair.sims.iter_mut().enumerate() {
         let c = &claims[ordinal];
         let link = quic_world_link(coordinator.addr, cert.clone(), ordinal as u32, 1000 + ordinal as u64, c.fence().claim_epoch());
@@ -638,11 +661,12 @@ fn world(
         switches.push(switch.clone());
         sim.manager.set_world_link(Box::new(switch), 1000 + ordinal as u64, 0);
         sim.manager.set_world_map(land_map());
-        let generation = links[ordinal].registered().generation;
-        sim.cuts = Some(server::cuts::CutWriter::with_world_cuts(c.clone(), server::claims::WorldGeneration::new(generation)));
+        let generation = server::claims::WorldGeneration::new(links[ordinal].registered().generation);
+        generations.push(generation.clone());
+        sim.cuts = Some(server::cuts::CutWriter::with_world_cuts(c.clone(), generation));
     }
     pair.until("both hosts attached", |p| p.sims.iter().all(|s| s.manager.world_attached()));
-    (pair, seam, coordinator, cert, links, claims, store, switches)
+    World { pair, seam, coordinator, cert, links, claims, store, switches, generations }
 }
 
 /// Two real hosts and a real coordinator: a world cut is picked by the coordinator,
@@ -654,7 +678,9 @@ fn two_hosts_commit_one_world_cut() {
     install_props();
     let Some(db) = PgDb::create("wcut") else { return };
     let dir = scratch("wcut");
-    let (mut pair, (a, b), coordinator, _cert, links, claims, store, _switches) = world(&db, &dir);
+    let w = world(&db, &dir);
+    let (a, b) = w.seam;
+    let World { mut pair, coordinator, links, claims, store, .. } = w;
     pair.until("a world cut committed", |_| decisions(&db).iter().any(|(_, _, c)| *c));
     pair.until("both hosts settled it", |p| p.sims.iter().all(|s| s.cuts.as_ref().unwrap().world_part().is_none()));
     let committed: Vec<(i64, i64, bool)> = decisions(&db).into_iter().filter(|(_, _, c)| *c).collect();
@@ -694,7 +720,7 @@ fn a_cut_with_one_host_detached_is_aborted_and_leaves_nothing_staged() {
     install_props();
     let Some(db) = PgDb::create("wdet") else { return };
     let dir = scratch("wdet");
-    let (mut pair, _seam, coordinator, cert, links, claims, store, switches) = world(&db, &dir);
+    let World { mut pair, coordinator, cert, links, claims, store, switches, .. } = world(&db, &dir);
     pair.until("host 0 takes part in a world cut", |p| p.sims[0].manager.world_cut().is_some());
     let running = coordinator.thread.inspect(|c| c.world_cut_running(), WAIT).flatten().expect("a world cut runs");
     switches[1].drop_link();
@@ -718,4 +744,183 @@ fn a_cut_with_one_host_detached_is_aborted_and_leaves_nothing_staged() {
         c.store().clone().shutdown();
     }
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Runs `sql` on its own connection.
+fn exec(db: &PgDb, sql: &str) {
+    let (url, sql) = (db.0.url.clone(), sql.to_string());
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            use sqlx::Connection;
+            let mut c = sqlx::PgConnection::connect(&url).await.unwrap();
+            sqlx::query(&sql).execute(&mut c).await.unwrap();
+            c.close().await.unwrap();
+        })
+    })
+    .join()
+    .unwrap()
+}
+
+/// The cut a host takes part in, once its part is in `state` (`world_cut_state`).
+fn until_part(w: &mut World, h: usize, states: &[&str]) -> game::CutId {
+    let mut cut = None;
+    w.pair.until("the host's part", |p| {
+        cut = p.sims[h].manager.world_cut_state().filter(|(_, s)| states.contains(s)).map(|(c, _)| c);
+        cut.is_some()
+    });
+    cut.unwrap()
+}
+
+/// The decision row of `cut`, if any.
+fn decision_of(db: &PgDb, cut: game::CutId) -> Option<bool> {
+    decisions(db).into_iter().find(|(c, _, _)| *c as u64 == cut.0).map(|(_, _, k)| k)
+}
+
+/// Important 2: the coordinator's decision write and its first abort both fail: it keeps
+/// trying until an abort is stored, announces only that, and the next cut commits on
+/// both hosts — nothing stays staged.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn a_failed_decision_does_not_stall_later_cuts() {
+    install_props();
+    let Some(db) = PgDb::create("wfail") else { return };
+    let dir = scratch("wfail");
+    let mut w = world(&db, &dir);
+    w.store.fail_next_decisions(2);
+    w.pair.until("a world cut decided", |_| !decisions(&db).is_empty());
+    let first = decisions(&db)[0];
+    assert!(!first.2, "the cut whose decision failed is stored aborted");
+    assert_eq!(w.store.fail_next_decisions_left(), 0, "the decision and one abort failed first");
+    w.until_committed_after(&db, first.0);
+    assert_eq!(prepared(&db), 0, "nothing stays prepared");
+    w.stop(&dir);
+}
+
+/// Important 2: a host told its cut is aborted while the store has no decision (the
+/// coordinator cannot write one) records the abort itself and settles; the coordinator's
+/// later decision finds it; the next cut commits once the store works again.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn host_told_aborted_without_a_stored_decision_aborts_it_itself() {
+    install_props();
+    let Some(db) = PgDb::create("wself") else { return };
+    let dir = scratch("wself");
+    let mut w = world(&db, &dir);
+    w.store.fail_next_decisions(u32::MAX);
+    let cut = until_part(&mut w, 0, &["prepared"]);
+    assert_eq!(decision_of(&db, cut), None, "undecided");
+    w.coordinator.thread.with_core(move |c| c.cut_outcome(0, cut, false), WAIT).expect("the core answers");
+    w.pair.until("host 0 settled its part", |p| p.sims[0].cuts.as_ref().unwrap().world_part().is_none());
+    assert_eq!(decision_of(&db, cut), Some(false), "host 0 recorded the abort");
+    w.pair.until("host 1 settled its part too", |p| p.sims[1].cuts.as_ref().unwrap().world_part().is_none());
+    w.store.fail_next_decisions(0);
+    w.until_committed_after(&db, cut.0 as i64);
+    assert_eq!(prepared(&db), 0, "nothing stays prepared");
+    w.stop(&dir);
+}
+
+/// Criterion D: a host's handle still holds an undecided part of another cut (`CutPending`):
+/// its world part fails, and once that other cut is decided the host settles it and the
+/// next cut commits.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn cut_pending_on_a_host_settles_that_cut_first() {
+    install_props();
+    let Some(db) = PgDb::create("wpend") else { return };
+    let dir = scratch("wpend");
+    let mut w = world(&db, &dir);
+    let other = game::CutId(77);
+    let generation = w.generations[0].mine();
+    let empty = game::WorldCut { id: other, host: 0, tick: 1, regions: vec![], in_flight: vec![], players: vec![], history: None };
+    let staged = w.claims[0].store().prepare_cut(empty, w.claims[0].fence().clone(), generation).recv().unwrap();
+    assert!(staged.is_ok(), "the other cut's part is staged: {staged:?}");
+    w.pair.until("a world cut decided", |_| decisions(&db).iter().any(|(c, _, _)| *c as u64 != other.0));
+    let failed = decisions(&db).into_iter().find(|(c, _, _)| *c as u64 != other.0).unwrap();
+    assert!(!failed.2, "host 0 could not stage its part: the cut is aborted");
+    assert_eq!(w.pair.sims[0].cuts.as_ref().unwrap().world_part(), Some(other), "host 0 now settles cut {}", other.0);
+    w.store.abort_cut(other, 1).unwrap();
+    w.until_committed_after(&db, failed.0);
+    assert_eq!(prepared(&db), 0, "nothing stays prepared");
+    w.stop(&dir);
+}
+
+/// Criterion D: the world moved to a newer generation while a cut was pending: the host's
+/// prepare is refused `StaleGeneration`, the host notes the newer generation (it exits
+/// for the rollback), and the cut is aborted.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn stale_generation_on_prepare_is_noted() {
+    install_props();
+    let Some(db) = PgDb::create("wstale") else { return };
+    let dir = scratch("wstale");
+    let mut w = world(&db, &dir);
+    let cut = until_part(&mut w, 0, &["pending"]);
+    exec(&db, "UPDATE world SET generation = generation + 1");
+    w.pair.until("the cut decided", |_| decision_of(&db, cut).is_some());
+    assert_eq!(decision_of(&db, cut), Some(false), "aborted");
+    w.pair.until("host 0 noted the newer generation", |_| w.generations[0].is_set());
+    assert_eq!(prepared(&db), 0, "nothing stays prepared");
+    w.stop(&dir);
+}
+
+/// Criterion D: host 1's prepare waits on a lock another transaction holds past its lock
+/// timeout: the part fails (nothing staged), the cut is aborted, and once the lock is
+/// gone the next cut commits.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn lock_timeout_on_prepare_fails_the_part_and_the_next_cut_commits() {
+    install_props();
+    let Some(db) = PgDb::create("wlock") else { return };
+    let dir = scratch("wlock");
+    let mut w = world(&db, &dir);
+    w.claims[1].store().set_cut_lock_timeout_ms(200);
+    // A transaction holding host 1's super-region rows until released.
+    let (locked_tx, locked) = crossbeam::channel::bounded::<()>(1);
+    let (release_tx, release) = crossbeam::channel::bounded::<()>(1);
+    let url = db.0.url.clone();
+    let holder = std::thread::spawn(move || {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            use sqlx::Connection;
+            let mut c = sqlx::PgConnection::connect(&url).await.unwrap();
+            let mut tx = c.begin().await.unwrap();
+            sqlx::query("SELECT * FROM super_regions WHERE owner = 1 FOR UPDATE").execute(&mut *tx).await.unwrap();
+            locked_tx.send(()).unwrap();
+            let _ = release.recv();
+            tx.rollback().await.unwrap();
+        })
+    });
+    locked.recv().unwrap();
+    w.pair.until("a world cut decided", |_| !decisions(&db).is_empty());
+    let first = decisions(&db)[0];
+    assert!(!first.2, "host 1's part timed out on the lock: aborted");
+    release_tx.send(()).unwrap();
+    holder.join().unwrap();
+    w.claims[1].store().set_cut_lock_timeout_ms(world_store::CUT_LOCK_TIMEOUT_MS);
+    w.until_committed_after(&db, first.0);
+    assert_eq!(prepared(&db), 0, "nothing stays prepared");
+    w.stop(&dir);
+}
+
+/// Criterion D: host 1's `CutDone` is lost (its coordinator link dropped right after it
+/// staged its part): its poll finds the stored decision and settles while the link is
+/// still down.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn lost_cut_done_is_settled_from_the_store() {
+    install_props();
+    let Some(db) = PgDb::create("wlost") else { return };
+    let dir = scratch("wlost");
+    let mut w = world(&db, &dir);
+    let cut = until_part(&mut w, 1, &["prepared"]);
+    w.switches[1].drop_link();
+    w.pair.until("the cut decided", |_| decision_of(&db, cut).is_some());
+    w.pair.until("host 1 settled its part with its link down", |p| p.sims[1].cuts.as_ref().unwrap().world_part().is_none());
+    assert!(!w.pair.sims[1].manager.world_attached(), "host 1's link is still down");
+    assert_eq!(prepared(&db), 0, "nothing stays prepared");
+    let link = quic_world_link(w.coordinator.addr, w.cert.clone(), 1, 1001, w.claims[1].fence().claim_epoch());
+    w.switches[1].replace(link);
+    w.until_committed_after(&db, cut.0 as i64);
+    w.stop(&dir);
 }
