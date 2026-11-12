@@ -247,6 +247,19 @@ impl StoreHandle {
         self.ask(|r| Request::BindTerrain(kind, r))
     }
 
+    /// The world's clock anchor (R3): stores `proposed` if the world has none, and
+    /// returns the stored anchor either way — the first writer wins, so every host
+    /// and the coordinator of a world number ticks from the same instant.
+    pub fn ensure_clock_anchor(&self, proposed: game::ClockAnchor) -> Result<game::ClockAnchor, StoreError> {
+        self.ask(|r| Request::EnsureClockAnchor(proposed, r))
+    }
+
+    /// Forgets the clock anchor (`worldctl clock-reset`, and a single-process
+    /// start): the next [`StoreHandle::ensure_clock_anchor`] stores a new one.
+    pub fn clear_clock_anchor(&self) -> Result<(), StoreError> {
+        self.ask(Request::ClearClockAnchor)
+    }
+
     /// The terrain kind the world is tied to; `None` before the first
     /// [`StoreHandle::bind_terrain`].
     pub fn terrain_kind(&self) -> Result<Option<crate::TerrainKind>, StoreError> {

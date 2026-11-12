@@ -946,3 +946,35 @@ fn foreign_record_does_not_fence_a_healthy_host() {
     store.shutdown();
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A split role refuses to start when the world row's clock anchor puts the clock behind
+/// the saved world tick, and `all` (which forgets the anchor) clears the way. The start-up
+/// decision is `roles::start_clock` on a real Postgres store, the part of the server's
+/// start that does not need a whole split-role process.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn split_start_refuses_anchor_behind_world_tick() {
+    use server::roles::{start_clock, Role, CLOCK_BEHIND_WORLD_TICK};
+    let Some(db) = pg_test_support::PgTestDb::create("mmo_srv_clock") else {
+        eprintln!("{}", pg_test_support::SKIP_MSG);
+        return;
+    };
+    let url = world_store::StoreUrl::Postgres(db.url.clone());
+    let store = world_store::StoreHandle::open(&url, world_store::Dials::BUILT, world_store::OpenMode::Writer).unwrap();
+    // The first split process anchors the world at tick 0.
+    let (clock, phase) = start_clock(Role::Host, Some(&store), true, 0).expect("a fresh anchor starts");
+    assert!(phase < game::TICK_RATE && clock.tick_at(0) < 100);
+    // The world was saved far ahead of that anchor (a restored backup): refused, by both roles.
+    for role in [Role::Host, Role::Coordinator] {
+        let err = start_clock(role, Some(&store), true, 1_000_000).unwrap_err();
+        assert_eq!(err, CLOCK_BEHIND_WORLD_TICK);
+    }
+    // A role `all` start forgets the anchor and keeps its own clock from the saved tick...
+    let (own, phase) = start_clock(Role::All, Some(&store), true, 1_000_000).unwrap();
+    assert_eq!((own.tick_at(0), phase), (1_000_000, 0));
+    // ...so the next split start writes a fresh anchor at that tick.
+    let (clock, _) = start_clock(Role::Host, Some(&store), true, 1_000_000).expect("the anchor was cleared");
+    assert!(clock.tick_at(0) >= 1_000_000);
+    store.shutdown();
+    drop(db);
+}

@@ -17,6 +17,7 @@ use game::{
 use crate::codec::*;
 use crate::fence::{CoordinatorFence, Fence, SuperRegion, commit_check_set, load_check};
 use crate::forged::{ForgedHead, TiledRows};
+use game::ClockAnchor;
 use crate::{CutCommitted, StoreError, TerrainKind, WorldInfo};
 
 /// Super-regions checked per fence query (two binds each).
@@ -441,6 +442,38 @@ macro_rules! engine_rows {
                     Some(stored) => Err(StoreError::OtherTerrain { stored, wanted: kind }),
                     None => Err(StoreError::Corrupt("world.terrain is unset after it was written".into())),
                 }
+            }
+
+            /// Stores `proposed` as the world's clock anchor if it has none (the
+            /// update's own `WHERE`: first writer wins), then returns the stored one.
+            /// Callers hold the writer lock.
+            pub(crate) async fn ensure_clock_anchor(pool: &Pool, proposed: ClockAnchor) -> Result<ClockAnchor, StoreError> {
+                sqlx::query(
+                    "UPDATE world SET clock_anchor_unix_ms = $1, clock_anchor_tick = $2 \
+                     WHERE id = 1 AND clock_anchor_unix_ms IS NULL",
+                )
+                .bind(proposed.unix_ms as i64)
+                .bind(proposed.tick as i64)
+                .execute(pool)
+                .await?;
+                let row = sqlx::query("SELECT clock_anchor_unix_ms, clock_anchor_tick FROM world WHERE id = 1")
+                    .fetch_optional(pool)
+                    .await?
+                    .ok_or_else(|| StoreError::Corrupt("the world row is missing".into()))?;
+                let unix_ms: Option<i64> = row.try_get(0)?;
+                let tick: Option<i64> = row.try_get(1)?;
+                match (unix_ms, tick) {
+                    (Some(unix_ms), Some(tick)) => Ok(ClockAnchor { unix_ms: u(unix_ms), tick: u(tick) }),
+                    _ => Err(StoreError::Corrupt("world.clock_anchor is unset after it was written".into())),
+                }
+            }
+
+            /// Forgets the world's clock anchor. Callers hold the writer lock.
+            pub(crate) async fn clear_clock_anchor(pool: &Pool) -> Result<(), StoreError> {
+                sqlx::query("UPDATE world SET clock_anchor_unix_ms = NULL, clock_anchor_tick = NULL WHERE id = 1")
+                    .execute(pool)
+                    .await?;
+                Ok(())
             }
 
             /// The region as last committed, if `fence` still holds its

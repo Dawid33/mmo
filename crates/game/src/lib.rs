@@ -139,7 +139,7 @@ pub use stored_terrain::{load_stored_or_warn, StoredTerrain};
 pub use ui::*;
 pub use water::*;
 pub use world_view::{EntityRef, RegionView, StudWorldHit, WorldAabb, WorldRay, WorldView};
-pub use world_clock::{ticks_due, WorldClock, MAX_CATCH_UP_BURST};
+pub use world_clock::{ticks_due, ClockAnchor, WorldClock, MAX_CATCH_UP_BURST};
 pub use stud::*;
 pub use stud_body::*;
 pub use stud_carve::*;

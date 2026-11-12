@@ -701,8 +701,13 @@ pub fn run() -> claims::ServerExit {
     // The world clock: ms since `start` (the manager's `now_ms` base) -> world
     // tick, continuing from the last committed cut's tick (procedural worlds:
     // from 0, never saved).
-    let start = std::time::Instant::now();
-    let world_clock = game::WorldClock::starting_at(0, opened.world_tick);
+    // Split roles share one wall-anchored clock stored in the world row (R3), so the
+    // base instant is back-dated by the clock's phase: tick edges fall at the same wall
+    // instants in every process.
+    let postgres = matches!(&world_source, world_file::WorldSource::Store { url: world_store::StoreUrl::Postgres(_), .. });
+    let (world_clock, clock_phase) =
+        roles::start_clock(role, store.as_ref(), postgres, opened.world_tick).unwrap_or_else(|e| fatal(&e));
+    let start = roles::back_dated_start(clock_phase);
     // Region starts generate on their own thread: a fresh region's stud terrain
     // (`worldgen::stud_gen`), and the halo seeds of never-run neighbours — only their
     // band columns, trees and ice included (`generate_stud_window` gives the bricks

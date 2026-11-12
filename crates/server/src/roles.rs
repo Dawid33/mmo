@@ -80,6 +80,86 @@ impl Role {
     }
 }
 
+/// What a split role refuses to start on: the world's clock anchor says it is earlier
+/// than the saved world tick (a restored backup, a cleared-then-stale row).
+pub const CLOCK_BEHIND_WORLD_TICK: &str =
+    "the world clock is behind the saved world tick; run `worldctl clock-reset`";
+
+/// The start-up decision of a process on the world's clock anchor: its clock, and the
+/// phase (ms) to back-date its base instant by ([`game::WorldClock::from_anchor`]). Refused
+/// ([`CLOCK_BEHIND_WORLD_TICK`]) when the anchor puts `now_unix_ms` before the saved
+/// `world_tick`, since a region would then be asked to run backwards.
+pub fn clock_from_anchor(
+    anchor: game::ClockAnchor,
+    now_unix_ms: u64,
+    world_tick: game::Tick,
+) -> Result<(game::WorldClock, u64), String> {
+    if anchor.tick_at_unix(now_unix_ms) < world_tick {
+        return Err(CLOCK_BEHIND_WORLD_TICK.to_string());
+    }
+    Ok(game::WorldClock::from_anchor(anchor, now_unix_ms))
+}
+
+/// Wall time as unix ms.
+pub fn unix_ms_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64)
+}
+
+/// The world clock of a process (R3): split roles agree on one wall-anchored clock
+/// stored in the world row (first writer wins), so every host and the coordinator
+/// number ticks alike; `all` keeps its own clock from the saved tick (and, on
+/// Postgres, forgets the anchor so a later split start writes a fresh one). Returns the
+/// clock and the phase (ms) to back-date the base instant by.
+pub fn start_clock(
+    role: Role,
+    store: Option<&world_store::StoreHandle>,
+    postgres: bool,
+    world_tick: game::Tick,
+) -> Result<(game::WorldClock, u64), String> {
+    match (role, store) {
+        (Role::All, store) => {
+            if let (Some(store), true) = (store, postgres) {
+                store.clear_clock_anchor().map_err(|e| format!("clearing the world clock anchor: {e}"))?;
+            }
+            Ok((game::WorldClock::starting_at(0, world_tick), 0))
+        }
+        (_, Some(store)) => {
+            let now = unix_ms_now();
+            let anchor = store
+                .ensure_clock_anchor(game::ClockAnchor { unix_ms: now, tick: world_tick })
+                .map_err(|e| format!("the world clock anchor: {e}"))?;
+            clock_from_anchor(anchor, now, world_tick)
+        }
+        (_, None) => Err(SPLIT_ROLES_NEED_POSTGRES.to_string()),
+    }
+}
+
+/// The base instant of a clock started with `phase_ms` (see [`start_clock`]): now, moved
+/// earlier by the phase so tick edges fall at the same wall instants in every process.
+pub fn back_dated_start(phase_ms: u64) -> std::time::Instant {
+    let now = std::time::Instant::now();
+    now.checked_sub(Duration::from_millis(phase_ms)).unwrap_or(now)
+}
+
+/// The coordinator process's view of the world tick: the anchored clock and its base.
+pub struct CoordinatorClock {
+    clock: game::WorldClock,
+    started: std::time::Instant,
+}
+
+impl CoordinatorClock {
+    pub fn new(clock: game::WorldClock, phase_ms: u64) -> Self {
+        Self { clock, started: back_dated_start(phase_ms) }
+    }
+
+    /// The world tick in progress now; agrees with every host's to within one tick.
+    pub fn world_tick_now(&self) -> game::Tick {
+        self.clock.tick_at(self.started.elapsed().as_millis() as u64)
+    }
+}
+
 /// A service-link address from an env value; unset or empty is
 /// [`DEFAULT_COORDINATOR_ADDR`].
 pub fn coordinator_addr_from(var: &str, value: Option<&str>) -> Result<SocketAddr, String> {
@@ -253,6 +333,9 @@ pub fn run_coordinator() -> ServerExit {
     let opened = world_file::open_world(&source, &worldgen::forge::ForgeParams::default()).unwrap_or_else(|e| fatal(e));
     let store = opened.store.clone().expect("a Postgres world has a store");
     let map = opened.map.clone().expect("a stored world has a map");
+    let (clock, phase) = start_clock(Role::Coordinator, Some(&store), true, opened.world_tick).unwrap_or_else(|e| fatal(e));
+    let clock = CoordinatorClock::new(clock, phase);
+    log::info!("[coordinator] world clock anchored: world tick {}", clock.world_tick_now());
     let start = match world_file::ensure_coordinator_state(&store, &map, None).unwrap_or_else(|e| fatal(e)) {
         Some(start) => start,
         None => fatal("this world has no history (nobody can live in it): there is nothing to coordinate".into()),
@@ -299,6 +382,16 @@ pub fn run_coordinator() -> ServerExit {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clock_from_anchor_refuses_an_anchor_behind_the_world_tick() {
+        let anchor = game::ClockAnchor { unix_ms: 1_000_000, tick: 100 };
+        let ahead = 1_000_000 + 10 * game::TICK_RATE;
+        assert!(clock_from_anchor(anchor, ahead, 110).is_ok());
+        assert_eq!(clock_from_anchor(anchor, ahead, 111).unwrap_err(), CLOCK_BEHIND_WORLD_TICK);
+        let (clock, phase) = clock_from_anchor(anchor, ahead + 3, 0).unwrap();
+        assert_eq!((clock.tick_at(0), phase), (110, 3));
+    }
 
     #[test]
     fn role_from_env_value() {

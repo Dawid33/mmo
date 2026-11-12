@@ -32,6 +32,34 @@ impl WorldClock {
     }
 }
 
+/// One wall instant and the world tick due then, stored in the world row so
+/// every process of a world numbers ticks the same way (R3: hosts are separate
+/// processes). Unix ms, so it means the same thing in every process.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ClockAnchor {
+    pub unix_ms: u64,
+    pub tick: Tick,
+}
+
+impl ClockAnchor {
+    /// The tick in progress at wall time `unix_ms`: `tick + (unix_ms - self.unix_ms) / TICK_RATE`,
+    /// saturating at `tick` for an earlier time.
+    pub fn tick_at_unix(&self, unix_ms: u64) -> Tick {
+        self.tick + unix_ms.saturating_sub(self.unix_ms) / TICK_RATE
+    }
+}
+
+impl WorldClock {
+    /// A clock for a process started at wall time `now_unix_ms`, on the world's
+    /// anchor: ms since the process's base instant -> world tick. Also returns the
+    /// phase (ms) the caller back-dates its base instant by, so the tick edges fall
+    /// at the same wall instants in every process: feed the clock `elapsed + phase`.
+    pub fn from_anchor(anchor: ClockAnchor, now_unix_ms: u64) -> (WorldClock, u64) {
+        let phase = now_unix_ms.saturating_sub(anchor.unix_ms) % TICK_RATE;
+        (WorldClock::starting_at(0, anchor.tick_at_unix(now_unix_ms)), phase)
+    }
+}
+
 /// Ticks a region at `current` runs back to back to reach `target` (the world
 /// tick): the whole gap, at most [`MAX_CATCH_UP_BURST`]. Never overshoots, so
 /// no tick number is skipped.

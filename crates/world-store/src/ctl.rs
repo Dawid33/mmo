@@ -13,6 +13,8 @@
 //! - `retile --db <url>`: rebuilds the stored tiles from the archive row after
 //!   the tile format changed (one transaction, [`crate::write_tiled`]). A
 //!   store with no archive is refused: re-forge it.
+//! - `clock-reset <url>`: clears the world's clock anchor (R3: the shared tick numbering of
+//!   host processes); the next host or coordinator start stores a fresh one.
 //! - `export --db <url> <out.world>`: writes the stored forge file (the archive
 //!   row) to `out.world`, for the file-based tools (`just world-map`,
 //!   `cross-section`, `history`).
@@ -25,7 +27,7 @@ use crate::{Dials, OpenMode, StoreHandle, StoreUrl};
 
 /// What `worldctl` prints for a bad command line.
 pub const USAGE: &str = "usage: worldctl forge --db <url> [--preset <name>] [--size <m>] [--cell <m>] \
-[--seed <hex>] [--set <knob>=<value>]...\n       worldctl retile --db <url>\n       worldctl export --db <url> <out.world>";
+[--seed <hex>] [--set <knob>=<value>]...\n       worldctl retile --db <url>\n       worldctl export --db <url> <out.world>\n       worldctl clock-reset <url>";
 
 /// Runs one `worldctl` command (`args` without the program name).
 pub fn run(args: &[String]) -> Result<(), String> {
@@ -46,6 +48,12 @@ pub fn run(args: &[String]) -> Result<(), String> {
             let (db, out) = parse_export(&args[1..])?;
             let bytes = export(&db, Path::new(&out))?;
             println!("worldctl: exported {bytes} bytes to {out}");
+            Ok(())
+        }
+        Some("clock-reset") => {
+            let db = parse_clock_reset(&args[1..])?;
+            clock_reset(&db)?;
+            println!("worldctl: cleared the world clock anchor of {db:?}; the next host or coordinator start writes a new one");
             Ok(())
         }
         _ => Err(USAGE.to_string()),
@@ -100,6 +108,14 @@ fn parse_retile(args: &[String]) -> Result<StoreUrl, String> {
     match args {
         [flag, value] if flag == "--db" => parse_db(value),
         _ => Err(USAGE.to_string()),
+    }
+}
+
+/// `clock-reset`'s store: `<url>`, or `--db <url>` as the other commands take it.
+fn parse_clock_reset(args: &[String]) -> Result<StoreUrl, String> {
+    match args {
+        [url] if !url.starts_with("--") => parse_db(url),
+        _ => parse_retile(args),
     }
 }
 
@@ -162,6 +178,15 @@ pub fn export(db: &StoreUrl, out: &Path) -> Result<usize, String> {
             format!("{}: {e}", out.display())
         })?;
     Ok(bytes.len())
+}
+
+/// Clears `db`'s world clock anchor (needed after restoring a world whose saved tick is
+/// ahead of the anchor); the next host or coordinator start stores a new one.
+pub fn clock_reset(db: &StoreUrl) -> Result<(), String> {
+    let store = open(db, OpenMode::Writer)?;
+    let result = store.clear_clock_anchor().map_err(|e| e.to_string());
+    store.shutdown();
+    result
 }
 
 /// Rebuilds `db`'s tiles from its archived forge file, in one transaction

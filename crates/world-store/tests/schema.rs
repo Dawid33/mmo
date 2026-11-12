@@ -76,7 +76,7 @@ async fn introspect(pool: &Pool) -> BTreeSet<Col> {
 
 /// table: columns as `name:I|T|B` with `?` = nullable, `*` = primary key.
 const EXPECTED: &[(&str, &str)] = &[
-    ("world", "id:I*, format_version:I, region_blocks:I, chunk_blocks:I, content_crc:I, world_tick:I, super_region_regions:I, created_utc:T, terrain:I?"),
+    ("world", "id:I*, format_version:I, region_blocks:I, chunk_blocks:I, content_crc:I, world_tick:I, super_region_regions:I, created_utc:T, terrain:I?, clock_anchor_unix_ms:I?, clock_anchor_tick:I?"),
     ("forged_archive", "id:I*, bytes:B"),
     ("forged_meta", "id:I*, format_version:I, bytes:B"),
     ("forged_tiles", "tx:I*, tz:I*, bytes:B"),
