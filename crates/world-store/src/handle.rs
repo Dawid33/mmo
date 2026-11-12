@@ -67,6 +67,8 @@ pub struct StoreHandle {
     super_region_regions: u32,
     /// Test hook ([`StoreHandle::fail_next_writes`]): queued writes still to fail.
     fail_writes: Arc<AtomicU32>,
+    /// Test hook ([`StoreHandle::stop_after_commit_prepared`]): the next decision's stop.
+    stop_commits: Arc<Mutex<Option<u32>>>,
 }
 
 fn stopped() -> StoreError {
@@ -83,6 +85,7 @@ impl StoreHandle {
             join: Arc::new(Mutex::new(Some(join))),
             super_region_regions,
             fail_writes: Arc::new(AtomicU32::new(0)),
+            stop_commits: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -98,6 +101,14 @@ impl StoreHandle {
     #[doc(hidden)]
     pub fn failing_writes_left(&self) -> u32 {
         self.fail_writes.load(Ordering::SeqCst)
+    }
+
+    /// Test hook: the next [`StoreHandle::decide_cut`] (of any clone) stops after `n`
+    /// `COMMIT PREPARED`s and returns `Backend("test stop")`, as a coordinator that
+    /// dies between them would leave the cut.
+    #[doc(hidden)]
+    pub fn stop_after_commit_prepared(&self, n: u32) {
+        *self.stop_commits.lock().unwrap_or_else(|e| e.into_inner()) = Some(n);
     }
 
     /// Takes one of [`StoreHandle::fail_next_writes`]' failures, if any are left.
@@ -205,6 +216,86 @@ impl StoreHandle {
             }
         }
         rx
+    }
+
+    /// Whether this store can save cuts in two phases (several hosts): Postgres with
+    /// `max_prepared_transactions > 0`; otherwise `Unsupported`.
+    pub fn two_phase_ready(&self) -> Result<(), StoreError> {
+        self.ask(Request::TwoPhaseReady)
+    }
+
+    /// Queues host `cut.host`'s part of a two-phase cut and returns at once; the
+    /// answer arrives on the receiver. Runs in call order with
+    /// [`StoreHandle::commit_cut`]s, and writes what a commit writes, fenced the same
+    /// way, except the world tick (the decision writes it) — but ends with
+    /// `PREPARE TRANSACTION`: nothing is visible until [`StoreHandle::decide_cut`]
+    /// commits it. Refused with `StaleGeneration` (nothing staged) unless the world is
+    /// at `generation`. The prepared part keeps its `FOR SHARE` on the host's
+    /// super-regions, so another process's claim of them waits for the decision.
+    /// Postgres only (`Unsupported` on SQLite). Counts as a cut commit for
+    /// [`StoreHandle::fail_next_writes`].
+    pub fn prepare_cut(
+        &self,
+        cut: WorldCut,
+        fence: Fence,
+        generation: u64,
+    ) -> crossbeam::channel::Receiver<Result<CutCommitted, StoreError>> {
+        let (tx, rx) = crossbeam::channel::bounded(1);
+        if let Some(e) = self.injected_failure() {
+            let _ = tx.send(Err(e));
+            return rx;
+        }
+        let req = Request::PrepareCut(Box::new(cut), fence, generation, Reply::Sync(tx));
+        if let Err(mpsc::error::SendError(Request::PrepareCut(_, _, _, reply))) = self.tx.send(req) {
+            reply.send(Err(stopped()));
+        }
+        rx
+    }
+
+    /// The coordinator's decision on `cut`, whose parts hosts `hosts` prepared: one
+    /// transaction, fenced by `fence` (`Fenced { sr: None }`, nothing recorded or
+    /// finished, if another coordinator claimed the row since), records `commit` unless
+    /// the cut is decided already (a host's [`StoreHandle::abort_cut`] may have won).
+    /// A commit is refused with `StaleGeneration` (nothing recorded) unless the world is
+    /// at `generation`. If this call records a commit it also writes the world tick
+    /// (`tick`, never backwards) and marks `leaving` clean. Then every part is
+    /// committed or rolled back as the STORED decision says (a part already finished
+    /// counts as done). Returns the stored decision. Postgres only.
+    #[allow(clippy::too_many_arguments)]
+    pub fn decide_cut(
+        &self,
+        cut: CutId,
+        tick: Tick,
+        commit: bool,
+        hosts: Vec<u32>,
+        leaving: Vec<u32>,
+        fence: CoordinatorFence,
+        generation: u64,
+    ) -> Result<bool, StoreError> {
+        let stop_after = self.stop_commits.lock().unwrap_or_else(|e| e.into_inner()).take();
+        let d = thread::Decision { cut, tick, commit, hosts, leaving, fence, generation, stop_after };
+        self.ask(|r| Request::DecideCut(Box::new(d), r))
+    }
+
+    /// A host's "abort unless decided": records an abort of `cut` if it has no
+    /// decision yet and returns the stored decision (`true`: it was committed). Not
+    /// fenced — the first decision written wins. Finishes no part (the decision or
+    /// [`StoreHandle::resolve_prepared`] does). Postgres only.
+    pub fn abort_cut(&self, cut: CutId, tick: Tick) -> Result<bool, StoreError> {
+        self.ask(|r| Request::AbortCut(cut, tick, r))
+    }
+
+    /// The recovery sweep (each process at start): every part of this world still
+    /// prepared is committed or rolled back as its cut's decision says; an undecided
+    /// cut is aborted first. Safe beside other processes sweeping. Returns each cut it
+    /// found with the decision applied, by cut id. Postgres only.
+    pub fn resolve_prepared(&self) -> Result<Vec<(CutId, bool)>, StoreError> {
+        self.ask(Request::ResolvePrepared)
+    }
+
+    /// The stored decision on `cut` (`Some(true)`: committed), `None` while undecided.
+    pub fn cut_decision(&self, cut: CutId) -> Result<Option<bool>, StoreError> {
+        self.ask(|r| Request::CutDecision(cut, r))
     }
 
     /// The player id and saved record of `key` (the `players.token` column:

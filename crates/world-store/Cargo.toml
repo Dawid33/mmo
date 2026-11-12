@@ -9,7 +9,7 @@ autotests = false
 game = { workspace = true }
 worldgen = { workspace = true }
 sqlx = { workspace = true }
-tokio = { workspace = true, features = ["rt", "sync"] }
+tokio = { workspace = true, features = ["rt", "sync", "time"] }
 crossbeam = { workspace = true }
 zstd = "0.13"
 bincode = { workspace = true }

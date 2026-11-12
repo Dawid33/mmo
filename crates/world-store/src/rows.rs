@@ -9,7 +9,7 @@
 use std::collections::BTreeMap;
 
 use game::{
-    ColumnCoords, EntityBundle, EntityId, EntityKind, InFlightRow, IntentMsg, PlayerId, PlayerRecord,
+    ColumnCoords, CutId, EntityBundle, EntityId, EntityKind, InFlightRow, IntentMsg, PlayerId, PlayerRecord,
     RegionCoords, RegionMeta, StoredRegion, StudChunkCoords, StudChunkRecord, StudColumnGround, TerrainSnapshot, Tick,
     WorldCut,
 };
@@ -106,6 +106,15 @@ fn entity_insert_error(e: sqlx::Error, id: EntityId, rc: RegionCoords, tick: Tic
     }
 }
 
+/// How a cut's transaction ends ([`pg::run_cut`]).
+pub(crate) enum CutEnd {
+    /// One phase: the cut commits and writes the world tick.
+    Commit,
+    /// Two phase (Postgres): `world.generation` must be `generation`; the world tick
+    /// is left to the decision; the transaction ends with `PREPARE TRANSACTION 'gid'`.
+    Prepare { gid: String, generation: u64 },
+}
+
 macro_rules! engine_rows {
     ($module:ident, $db:ty, $read_prelude:expr, $share_lock:expr, $update_lock:expr) => {
         pub(crate) mod $module {
@@ -115,6 +124,7 @@ macro_rules! engine_rows {
 
             type Pool = sqlx::Pool<$db>;
             type Tx = sqlx::Transaction<'static, $db>;
+            type Conn = <$db as sqlx::Database>::Connection;
 
             /// A read transaction: one consistent view for multi-statement loads.
             async fn begin_read(pool: &Pool) -> Result<Tx, StoreError> {
@@ -194,7 +204,7 @@ macro_rules! engine_rows {
             /// `srs` in `tx`: each must be claimed in `fence` and stored with its
             /// owner and epoch. The first that is not → `Fenced`.
             async fn check_fence(
-                tx: &mut Tx,
+                conn: &mut Conn,
                 fence: &Fence,
                 srs: &std::collections::BTreeSet<SuperRegion>,
             ) -> Result<(), StoreError> {
@@ -205,7 +215,7 @@ macro_rules! engine_rows {
                     for (sx, sz) in batch {
                         q = q.bind(i64::from(*sx)).bind(i64::from(*sz));
                     }
-                    let rows = q.fetch_all(&mut **tx).await.map_err(|e| fence_race(e, batch[0]))?;
+                    let rows = q.fetch_all(&mut *conn).await.map_err(|e| fence_race(e, batch[0]))?;
                     let mut stored = BTreeMap::new();
                     for r in rows {
                         let (sx, sz): (i64, i64) = (r.try_get(0)?, r.try_get(1)?);
@@ -234,7 +244,7 @@ macro_rules! engine_rows {
             pub(crate) async fn register_host(pool: &Pool, row: HostRow, fence: &Fence) -> Result<HostBoot, StoreError> {
                 let mut tx = pool.begin().await?;
                 let srs: std::collections::BTreeSet<SuperRegion> = fence.epochs.keys().copied().collect();
-                check_fence(&mut tx, fence, &srs).await?;
+                check_fence(&mut *tx, fence, &srs).await?;
                 let world: i64 = sqlx::query(concat!("SELECT generation FROM world WHERE id = 1", $update_lock))
                     .fetch_optional(&mut *tx)
                     .await?
@@ -585,7 +595,7 @@ macro_rules! engine_rows {
                 s: u32,
             ) -> Result<Option<StoredRegion>, StoreError> {
                 let mut tx = begin_read(pool).await?;
-                check_fence(&mut tx, fence, &[load_check(rc, s)].into()).await?;
+                check_fence(&mut *tx, fence, &[load_check(rc, s)].into()).await?;
                 let Some((meta, stud_ground)) = region_row(&mut tx, rc).await? else {
                     tx.commit().await?;
                     return Ok(None);
@@ -721,25 +731,98 @@ macro_rules! engine_rows {
                     .ok_or_else(|| StoreError::Corrupt(format!("player token {token:?} vanished after its insert")))
             }
 
-            /// The whole cut in one transaction; any error rolls all of it back.
-            /// First the fence: every super-region the cut touches and every one
-            /// `fence` claimed must still be held ([`commit_check_set`]).
-            pub(crate) async fn commit_cut(
+            /// The stored decision on `cut` (`cut_decisions`), if any.
+            pub(crate) async fn cut_decision(pool: &Pool, cut: CutId) -> Result<Option<bool>, StoreError> {
+                let d: Option<i64> = sqlx::query_scalar("SELECT committed FROM cut_decisions WHERE cut_id = $1")
+                    .bind(i(cut.0))
+                    .fetch_optional(pool)
+                    .await?;
+                Ok(d.map(|d| d != 0))
+            }
+
+            /// The whole cut in one transaction, ended as `end` says
+            /// ([`CutEnd`]); any error rolls all of it back. Callers hold the writer lock.
+            pub(crate) async fn run_cut(
                 pool: &Pool,
                 cut: &WorldCut,
                 fence: &Fence,
                 s: u32,
+                end: &CutEnd,
+            ) -> Result<CutCommitted, StoreError> {
+                match end {
+                    CutEnd::Commit => {
+                        let mut tx = pool.begin().await?;
+                        let done = cut_rows(&mut *tx, cut, fence, s, end).await?;
+                        tx.commit().await?;
+                        Ok(done)
+                    }
+                    CutEnd::Prepare { gid, generation } => {
+                        // A raw transaction on one connection: a `sqlx::Transaction` would
+                        // send a ROLLBACK when dropped, after the PREPARE. Every error
+                        // before the PREPARE rolls back here, on the same connection.
+                        let prepare = crate::two_phase::prepare_sql(gid);
+                        let mut conn = pool.acquire().await?;
+                        sqlx::Executor::execute(&mut *conn, "BEGIN").await?;
+                        let staged = prepare_rows(&mut *conn, cut, fence, s, end, *generation, &prepare).await;
+                        if staged.is_err() {
+                            if let Err(e) = sqlx::Executor::execute(&mut *conn, "ROLLBACK").await {
+                                // Never hand a connection with an open transaction back.
+                                log::error!("[world-store] rollback of a failed prepare: {e}; closing the connection");
+                                let _ = conn.close().await;
+                            }
+                        }
+                        staged
+                    }
+                }
+            }
+
+            /// A prepared part's statements after its `BEGIN`: the generation check,
+            /// the cut's rows and the `PREPARE TRANSACTION`.
+            async fn prepare_rows(
+                conn: &mut Conn,
+                cut: &WorldCut,
+                fence: &Fence,
+                s: u32,
+                end: &CutEnd,
+                generation: u64,
+                prepare: &str,
+            ) -> Result<CutCommitted, StoreError> {
+                // No row lock: a prepared part holding one on the world row would
+                // block the decision's world tick update. The decision re-checks the
+                // generation under `FOR UPDATE`.
+                let stored: i64 = sqlx::query("SELECT generation FROM world WHERE id = 1")
+                    .fetch_optional(&mut *conn)
+                    .await?
+                    .ok_or_else(|| StoreError::Corrupt("the world row is missing".into()))?
+                    .try_get(0)?;
+                if u(stored) != generation {
+                    return Err(StoreError::StaleGeneration { stored: u(stored), mine: generation });
+                }
+                let done = cut_rows(&mut *conn, cut, fence, s, end).await?;
+                sqlx::Executor::execute(&mut *conn, prepare).await?;
+                Ok(done)
+            }
+
+            /// The rows of a cut, inside the caller's transaction. First the fence:
+            /// every super-region the cut touches and every one `fence` claimed must
+            /// still be held ([`commit_check_set`]). The world tick is written only
+            /// by a one-phase commit (a prepared part leaves it to the decision).
+            async fn cut_rows(
+                conn: &mut Conn,
+                cut: &WorldCut,
+                fence: &Fence,
+                s: u32,
+                end: &CutEnd,
             ) -> Result<CutCommitted, StoreError> {
                 let t = i(cut.tick);
-                let mut tx = pool.begin().await?;
-                check_fence(&mut tx, fence, &commit_check_set(cut, fence, s)).await?;
+                check_fence(conn, fence, &commit_check_set(cut, fence, s)).await?;
                 // Every region's entities go first, so an entity that moved between two
                 // regions of the cut is not seen twice.
                 for (rc, _) in &cut.regions {
                     sqlx::query("DELETE FROM entities WHERE rx = $1 AND rz = $2")
                         .bind(rc.x as i64)
                         .bind(rc.z as i64)
-                        .execute(&mut *tx)
+                        .execute(&mut *conn)
                         .await?;
                 }
                 let mut versions = Vec::with_capacity(cut.regions.len());
@@ -751,7 +834,7 @@ macro_rules! engine_rows {
                         let known = sqlx::query("SELECT 1 FROM regions WHERE rx = $1 AND rz = $2")
                             .bind(rx)
                             .bind(rz)
-                            .fetch_optional(&mut *tx)
+                            .fetch_optional(&mut *conn)
                             .await?;
                         if known.is_none() {
                             return Err(StoreError::Corrupt(format!(
@@ -778,7 +861,7 @@ macro_rules! engine_rows {
                     .bind(encode(FORMAT_REGION_META, &region.meta))
                     .bind(stud_ground_blob(region.stud_ground.as_ref()))
                     .bind(i64::from(region.stud_ground.is_some()))
-                    .fetch_one(&mut *tx)
+                    .fetch_one(&mut *conn)
                     .await?
                     .try_get(0)?;
                     versions.push((*rc, u(version)));
@@ -798,7 +881,7 @@ macro_rules! engine_rows {
                                 .bind(cy)
                                 .bind(cz)
                                 .bind(encode(FORMAT_STUD_CHUNK, record))
-                                .execute(&mut *tx)
+                                .execute(&mut *conn)
                                 .await?;
                             }
                             None => {
@@ -810,7 +893,7 @@ macro_rules! engine_rows {
                                 .bind(cx)
                                 .bind(cy)
                                 .bind(cz)
-                                .execute(&mut *tx)
+                                .execute(&mut *conn)
                                 .await?;
                             }
                         }
@@ -828,7 +911,7 @@ macro_rules! engine_rows {
                         .bind(t)
                         .bind(kind_code(&b.kind))
                         .bind(encode(FORMAT_ENTITY_BUNDLE, b))
-                        .execute(&mut *tx)
+                        .execute(&mut *conn)
                         .await
                         .map_err(|e| entity_insert_error(e, b.id, *rc, cut.tick))?;
                     }
@@ -838,7 +921,7 @@ macro_rules! engine_rows {
                         .bind(encode(FORMAT_PLAYER_RECORD, record))
                         .bind(t)
                         .bind(i(id.0))
-                        .execute(&mut *tx)
+                        .execute(&mut *conn)
                         .await?;
                     if done.rows_affected() == 0 {
                         return Err(StoreError::Corrupt(format!(
@@ -851,7 +934,7 @@ macro_rules! engine_rows {
                 // own host's, or (all-in-one) every host's.
                 sqlx::query("DELETE FROM in_flight WHERE $1 IS NULL OR host = $1")
                     .bind(fence.in_flight_scope().map(|_| cut.host as i64))
-                    .execute(&mut *tx)
+                    .execute(&mut *conn)
                     .await?;
                 // `seq` is the table's key across all hosts: each host owns a range
                 // (`host << 32`), so concurrent commits never collide and need no MAX read.
@@ -876,7 +959,7 @@ macro_rules! engine_rows {
                     .bind(i(stamp))
                     .bind(payload)
                     .bind(cut.host as i64)
-                    .execute(&mut *tx)
+                    .execute(&mut *conn)
                     .await?;
                 }
                 if let Some(bytes) = &cut.history {
@@ -885,11 +968,12 @@ macro_rules! engine_rows {
                          ON CONFLICT (id) DO UPDATE SET bytes = excluded.bytes",
                     )
                     .bind(bytes.as_slice())
-                    .execute(&mut *tx)
+                    .execute(&mut *conn)
                     .await?;
                 }
-                sqlx::query("UPDATE world SET world_tick = $1 WHERE id = 1 AND world_tick < $1").bind(t).execute(&mut *tx).await?;
-                tx.commit().await?;
+                if matches!(end, CutEnd::Commit) {
+                    sqlx::query("UPDATE world SET world_tick = $1 WHERE id = 1 AND world_tick < $1").bind(t).execute(&mut *conn).await?;
+                }
                 Ok(CutCommitted { id: cut.id, versions })
             }
         }

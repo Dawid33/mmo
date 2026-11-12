@@ -90,6 +90,7 @@ const EXPECTED: &[(&str, &str)] = &[
     ("super_regions", "sx:I*, sz:I*, owner:I, epoch:I"),
     ("coordinator", "id:I*, epoch:I, state:B?, saved_utc:T?"),
     ("hosts", "ordinal:I*, boot:I, generation:I, clean:I, peer_addr:T?, peer_cert:T?, quic:T?, webtransport:T?, wt_cert_hash:T?, updated_utc:T"),
+    ("cut_decisions", "cut_id:I*, tick:I, committed:I, decided_utc:T"),
 ];
 
 fn expected() -> BTreeSet<Col> {

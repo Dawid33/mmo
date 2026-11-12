@@ -8,10 +8,11 @@
 
 use std::sync::Arc;
 
-use game::{PlayerId, PlayerRecord, RegionCoords, WorldCut};
+use game::{CutId, PlayerId, PlayerRecord, RegionCoords, Tick, WorldCut};
 use tokio::sync::{Mutex, mpsc, oneshot};
 
-use crate::rows;
+use crate::rows::{self, CutEnd};
+use crate::two_phase::{self, TWO_PHASE_UNSUPPORTED};
 use crate::{
     CoordinatorFence, CutCommitted, Dials, Fence, LockGuard, OpenMode, Pool, StoreError, StoreUrl, SuperRegion,
     WorldInfo, open_pool,
@@ -74,9 +75,32 @@ pub(crate) enum Request {
     Hosts(Reply<Vec<crate::HostRow>>),
     WorldGeneration(Reply<u64>),
     OwnerClaimEpoch(u32, Reply<Option<u64>>),
+    TwoPhaseReady(Reply<()>),
+    /// A host's part of a two-phase cut, at the host's world generation.
+    PrepareCut(Box<WorldCut>, Fence, u64, Reply<CutCommitted>),
+    DecideCut(Box<Decision>, Reply<bool>),
+    AbortCut(CutId, Tick, Reply<bool>),
+    ResolvePrepared(Reply<Vec<(CutId, bool)>>),
+    CutDecision(CutId, Reply<Option<bool>>),
     /// Finish the queued commits, then stop.
     Shutdown,
 }
+
+/// [`crate::StoreHandle::decide_cut`]'s arguments.
+pub(crate) struct Decision {
+    pub cut: CutId,
+    pub tick: Tick,
+    pub commit: bool,
+    pub hosts: Vec<u32>,
+    pub leaving: Vec<u32>,
+    pub fence: CoordinatorFence,
+    pub generation: u64,
+    /// Test hook: fail after this many `COMMIT PREPARED`s.
+    pub stop_after: Option<u32>,
+}
+
+/// One queued cut for the committer: the cut, its fence, how it ends, the answer.
+type QueuedCut = (Box<WorldCut>, Fence, CutEnd, Reply<CutCommitted>);
 
 /// Calls `rows::<engine>::$f(pool, args…)` on whichever engine `pool` is.
 macro_rules! on_pool {
@@ -112,12 +136,18 @@ pub(crate) fn spawn(url: &StoreUrl, dials: Dials, mode: OpenMode) -> Result<Spaw
             rt.block_on(async move {
                 let opened = match open_pool(&url, dials, mode).await {
                     Ok((pool, guard)) => match on_pool!(&pool, super_region_regions()) {
-                        Ok(s) => Ok((pool, guard, s)),
+                        Ok(s) => match &pool {
+                            Pool::Sqlite(_) => Ok((pool, guard, s, None)),
+                            Pool::Pg(p) => match two_phase::world_tag(p).await {
+                                Ok(tag) => Ok((pool, guard, s, Some(tag))),
+                                Err(e) => Err(e),
+                            },
+                        },
                         Err(e) => Err(e),
                     },
                     Err(e) => Err(e),
                 };
-                let (pool, guard, s) = match opened {
+                let (pool, guard, s, world_tag) = match opened {
                     Ok(v) => v,
                     Err(e) => {
                         let _ = opened_tx.send(Err(e));
@@ -125,7 +155,7 @@ pub(crate) fn spawn(url: &StoreUrl, dials: Dials, mode: OpenMode) -> Result<Spaw
                     }
                 };
                 let _ = opened_tx.send(Ok(s));
-                serve(pool, guard, s, mode == OpenMode::ReadOnly, rx).await;
+                serve(pool, guard, s, world_tag, mode == OpenMode::ReadOnly, rx).await;
             });
         })
         .map_err(|e| StoreError::Backend(format!("spawn the world-store thread: {e}")))?;
@@ -142,19 +172,32 @@ pub(crate) fn spawn(url: &StoreUrl, dials: Dials, mode: OpenMode) -> Result<Spaw
     }
 }
 
-async fn serve(pool: Pool, guard: LockGuard, s: u32, read_only: bool, mut rx: mpsc::UnboundedReceiver<Request>) {
+/// `world_tag`: the Postgres database's OID (the gids of its prepared cut parts);
+/// `None` on SQLite.
+async fn serve(
+    pool: Pool,
+    guard: LockGuard,
+    s: u32,
+    world_tag: Option<u32>,
+    read_only: bool,
+    mut rx: mpsc::UnboundedReceiver<Request>,
+) {
     let writer = Arc::new(Mutex::new(()));
-    // Commits in order on one task.
-    let (commit_tx, mut commit_rx) = mpsc::unbounded_channel::<(Box<WorldCut>, Fence, Reply<CutCommitted>)>();
+    // Commits and prepares in order on one task.
+    let (commit_tx, mut commit_rx) = mpsc::unbounded_channel::<QueuedCut>();
     let committer = {
         let (pool, writer) = (pool.clone(), writer.clone());
         tokio::spawn(async move {
-            while let Some((cut, fence, reply)) = commit_rx.recv().await {
+            while let Some((cut, fence, end, reply)) = commit_rx.recv().await {
                 let _w = writer.lock().await;
-                let result = on_pool!(&pool, commit_cut(&cut, &fence, s));
+                let result = on_pool!(&pool, run_cut(&cut, &fence, s, &end));
+                let what = match end {
+                    CutEnd::Commit => "committed",
+                    CutEnd::Prepare { .. } => "prepared",
+                };
                 match &result {
-                    Ok(c) => log::debug!("[world-store] cut {} at tick {} committed ({} regions)", c.id.0, cut.tick, c.versions.len()),
-                    Err(e) => log::error!("[world-store] cut {} at tick {} failed: {e}", cut.id.0, cut.tick),
+                    Ok(c) => log::debug!("[world-store] cut {} at tick {} {what} ({} regions)", c.id.0, cut.tick, c.versions.len()),
+                    Err(e) => log::error!("[world-store] cut {} at tick {} ({what}) failed: {e}", cut.id.0, cut.tick),
                 }
                 reply.send(result);
             }
@@ -171,11 +214,49 @@ async fn serve(pool: Pool, guard: LockGuard, s: u32, read_only: bool, mut rx: mp
         let task = match req {
             Request::Shutdown => break,
             Request::CommitCut(cut, fence, reply) => {
-                if let Err(mpsc::error::SendError((_, _, reply))) = commit_tx.send((cut, fence, reply)) {
-                    reply.send(Err(StoreError::Backend("the world-store committer has stopped".into())));
-                }
+                queue_cut(&commit_tx, (cut, fence, CutEnd::Commit, reply));
                 continue;
             }
+            Request::PrepareCut(cut, fence, generation, reply) => {
+                let Some(tag) = world_tag else {
+                    reply.send(Err(StoreError::Unsupported(TWO_PHASE_UNSUPPORTED.into())));
+                    continue;
+                };
+                let gid = two_phase::cut_gid(tag, cut.id, cut.host);
+                queue_cut(&commit_tx, (cut, fence, CutEnd::Prepare { gid, generation }, reply));
+                continue;
+            }
+            Request::TwoPhaseReady(r) => tokio::spawn(async move {
+                r.send(match &pool {
+                    Pool::Pg(p) => two_phase::two_phase_ready(p).await,
+                    Pool::Sqlite(_) => Err(StoreError::Unsupported(TWO_PHASE_UNSUPPORTED.into())),
+                })
+            }),
+            // No writer lock for the decision, the abort or the sweep: a prepare
+            // queued behind a prepared part's row lock waits for the decision.
+            Request::DecideCut(d, r) => tokio::spawn(async move {
+                r.send(match (&pool, world_tag) {
+                    (Pool::Pg(p), Some(tag)) => {
+                        let Decision { cut, tick, commit, hosts, leaving, fence, generation, stop_after } = *d;
+                        two_phase::decide_cut(p, tag, cut, tick, commit, hosts, leaving, fence, generation, stop_after)
+                            .await
+                    }
+                    _ => Err(StoreError::Unsupported(TWO_PHASE_UNSUPPORTED.into())),
+                })
+            }),
+            Request::AbortCut(cut, tick, r) => tokio::spawn(async move {
+                r.send(match &pool {
+                    Pool::Pg(p) => two_phase::abort_cut(p, cut, tick).await,
+                    Pool::Sqlite(_) => Err(StoreError::Unsupported(TWO_PHASE_UNSUPPORTED.into())),
+                })
+            }),
+            Request::ResolvePrepared(r) => tokio::spawn(async move {
+                r.send(match (&pool, world_tag) {
+                    (Pool::Pg(p), Some(tag)) => two_phase::resolve_prepared(p, tag).await,
+                    _ => Err(StoreError::Unsupported(TWO_PHASE_UNSUPPORTED.into())),
+                })
+            }),
+            Request::CutDecision(cut, r) => tokio::spawn(async move { r.send(on_pool!(&pool, cut_decision(cut))) }),
             Request::WorldInfo(r) => tokio::spawn(async move { r.send(on_pool!(&pool, world_info())) }),
             Request::ForgedArchive(r) => tokio::spawn(async move { r.send(on_pool!(&pool, forged_archive())) }),
             Request::PutTiled(rows, r) => tokio::spawn(async move {
@@ -263,6 +344,13 @@ async fn serve(pool: Pool, guard: LockGuard, s: u32, read_only: bool, mut rx: mp
     drop(guard);
 }
 
+/// Hands a cut to the committer task.
+fn queue_cut(commit_tx: &mpsc::UnboundedSender<QueuedCut>, queued: QueuedCut) {
+    if let Err(mpsc::error::SendError((_, _, _, reply))) = commit_tx.send(queued) {
+        reply.send(Err(StoreError::Backend("the world-store committer has stopped".into())));
+    }
+}
+
 /// On a read-only store, answers a write request with `ReadOnly` (`None`);
 /// passes every other request through. A player resolve is a read unless the
 /// key is new — that case is refused where it is served.
@@ -280,6 +368,10 @@ fn refuse_if_read_only(req: Request, read_only: bool) -> Option<Request> {
         Request::EnsureClockAnchor(_, r) => r.send(Err(StoreError::ReadOnly)),
         Request::ClearClockAnchor(r) => r.send(Err(StoreError::ReadOnly)),
         Request::RegisterHost(_, _, r) => r.send(Err(StoreError::ReadOnly)),
+        Request::PrepareCut(_, _, _, r) => r.send(Err(StoreError::ReadOnly)),
+        Request::DecideCut(_, r) => r.send(Err(StoreError::ReadOnly)),
+        Request::AbortCut(_, _, r) => r.send(Err(StoreError::ReadOnly)),
+        Request::ResolvePrepared(r) => r.send(Err(StoreError::ReadOnly)),
         req => return Some(req),
     }
     None

@@ -13,6 +13,7 @@ mod open;
 mod rows;
 mod terrain;
 mod thread;
+mod two_phase;
 mod url;
 
 use std::fmt;
@@ -23,6 +24,7 @@ pub use forged::{StoreTiles, load_forged, write_tiled};
 pub use handle::{CutCommitted, HostBoot, HostRow, StoreHandle, WorldInfo};
 pub use open::{LockGuard, OpenMode, Pool, newest_migration, open_pool};
 pub use terrain::TerrainFromStore;
+pub use two_phase::cut_gid;
 pub use url::StoreUrl;
 
 /// The schema/format generation this build writes and reads.
