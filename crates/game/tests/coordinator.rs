@@ -1374,15 +1374,32 @@ const HOST_H: u32 = 3;
 /// placements (`g_flight`, hops above 3) are still on G's link. P logs in on H, which
 /// knows nothing of it (hop 1) and answers every `HopIs` of its current placement by
 /// renumbering above it and reporting again.
-fn login_race(choices: &[u8], g_flight: &[HostMsg]) -> (Vec<u8>, Coordinator, SiteId) {
+///
+/// `grant`: P gave its fortress up at hop 3 (H's login holds nothing), and G's in-flight
+/// placement at hop 4 asks to return to it — granted — between its `Online` and its
+/// `Offline` (`g_flight` is then ignored).
+fn login_race(choices: &[u8], g_flight: &[HostMsg], grant: bool) -> (Vec<u8>, Coordinator, SiteId) {
     let (mut c, civ, people) = coordinator();
     c.handle(HOST_G, embark(1, A, civ, &people[0..2], rc(8, 0)), 0);
     let WorldReply::Embarked { site, .. } = reply_to(&commit(&mut c), 1) else { panic!("embarks") };
     let fortress = Some(Claim::Fortress(site));
     c.handle(HOST_G, online_at(A, fortress, false, 3), 0);
+    if grant {
+        c.handle(HOST_G, HostMsg::ReleaseClaim { player: A }, 0);
+    }
     c.handle(HOST_G, HostMsg::PlayerOffline { player: A, hop: 3 }, 0);
     commit_routed(&mut c);
-    let mut g: std::collections::VecDeque<HostMsg> = g_flight.iter().cloned().collect();
+    let fortress = if grant { None } else { fortress };
+    let g_flight = if grant {
+        vec![
+            online_at(A, None, false, 4),
+            request(2, A, WorldRequest::ReturnTo(site)),
+            HostMsg::PlayerOffline { player: A, hop: 4 },
+        ]
+    } else {
+        g_flight.to_vec()
+    };
+    let mut g: std::collections::VecDeque<HostMsg> = g_flight.into_iter().collect();
     let mut h_hop = 1;
     let mut h_out = std::collections::VecDeque::from([online_at(A, fortress, false, h_hop)]);
     let mut h_in: std::collections::VecDeque<CoordMsg> = Default::default();
@@ -1434,7 +1451,7 @@ fn login_racing_an_older_placements_messages_ends_online_on_the_login_host() {
         let mut stack: Vec<Vec<u8>> = vec![Vec::new()];
         let mut runs = 0;
         while let Some(prefix) = stack.pop() {
-            let (enabled, mut c, site) = login_race(&prefix, &g_flight);
+            let (enabled, mut c, site) = login_race(&prefix, &g_flight, false);
             if enabled.is_empty() {
                 runs += 1;
                 assert_eq!(c.online_on(A), Some(HOST_H), "order {prefix:?}: online on H");
@@ -1449,6 +1466,28 @@ fn login_racing_an_older_placements_messages_ends_online_on_the_login_host() {
         }
         assert!(runs > 1, "{runs} orders");
     }
+    // G's in-flight placement is granted a claim (a return to P's old fortress) between its
+    // `Online` and `Offline`. The grant moves P onto G: H is told, re-asserts, and its
+    // report (no claim, nothing unsettled) is the truth — the grant is given back. Every
+    // order ends with P online on H holding nothing, the fortress free.
+    let mut stack: Vec<Vec<u8>> = vec![Vec::new()];
+    let mut runs = 0;
+    while let Some(prefix) = stack.pop() {
+        let (enabled, mut c, site) = login_race(&prefix, &[], true);
+        if enabled.is_empty() {
+            runs += 1;
+            assert_eq!(c.online_on(A), Some(HOST_H), "grant, order {prefix:?}: online on H");
+            assert_eq!(c.claim_of(A), None, "grant, order {prefix:?}: the grant is given back");
+            assert!(returnable(&mut c, site, 10), "grant, order {prefix:?}: the fortress is free");
+            continue;
+        }
+        for ch in enabled {
+            let mut next = prefix.clone();
+            next.push(ch);
+            stack.push(next);
+        }
+    }
+    assert!(runs > 1, "{runs} orders");
 }
 
 /// An `Online` at the known hop from a host other than the one the player is online on

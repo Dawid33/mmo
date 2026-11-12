@@ -641,6 +641,7 @@ impl<S: RegionSpawner> WorldManager<S> {
         let hop = self.hop_here(player) + 1;
         self.player_hop.insert(player, hop);
         self.handed.remove(&player);
+        self.hop_renumbers.reset(player);
     }
 
     /// `player` arrives from another host at the hand-off's `hop` (the sender's + 1), or
@@ -649,6 +650,7 @@ impl<S: RegionSpawner> WorldManager<S> {
         let hop = hop.max(self.hop_here(player) + 1);
         self.player_hop.insert(player, hop);
         self.handed.remove(&player);
+        self.hop_renumbers.reset(player);
     }
 
     /// `player` leaves for host `to`, its claim going along: the coordinator is told
@@ -668,8 +670,9 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// placement is numbered `hop + 1` and reported again: the newest reporter wins, as the
     /// newest session does, and this lets a real holder re-assert itself. Otherwise the
     /// report was of an older placement here: nothing to do. At most
-    /// [`crate::coordinator::HOP_RENUMBER_MAX_PER_PLAYER`] times per player
-    /// (`hop_renumbers`): two hosts that both hold it (a duplicate) stop outbidding.
+    /// [`crate::coordinator::HOP_RENUMBER_MAX_PER_PLAYER`] times per placement of the
+    /// player here (`hop_renumbers`): two hosts that both hold it (a duplicate) stop
+    /// outbidding.
     fn hop_is(&mut self, player: PlayerId, reported: u64, hop: u64) {
         let clients: Vec<ClientId> = self
             .player_of

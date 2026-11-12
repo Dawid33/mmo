@@ -1086,3 +1086,27 @@ fn host_sends_settled_as_requests_complete() {
         assert!(memo.is_empty(), "seed {seed}: every answer acknowledged: {memo:?}");
     });
 }
+
+/// R3 Task 11 fix round 2: the host's renumber budget (`HOP_RENUMBER_MAX_PER_PLAYER`)
+/// counts per placement. Another host (9, played by the test) keeps reporting A at a
+/// higher hop: each report displaces A's placement here, which renumbers above it — until
+/// the budget runs out and A stays displaced. A's next login here is a new placement:
+/// its renumbering works again and A ends online here.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn renumber_budget_is_per_placement() {
+    let a = PlayerId(A as u64);
+    let mut w = World::with(0, &[A]);
+    let report = |hop| game::OnlinePlayer { player: a, claim: None, claim_pending: false, report: 1, hop };
+    for _ in 0..=game::coordinator::HOP_RENUMBER_MAX_PER_PLAYER {
+        let next = w.coordinator().hop_of(a) + 1;
+        let now = w.now_ms;
+        w.link().coordinator_mut().handle(9, HostMsg::PlayerOnline(report(next)), now);
+        w.drain();
+    }
+    assert_eq!(w.coordinator().online_on(a), Some(9), "the budget ran out: A stays displaced");
+    w.send(ServerEvent::ClientDisconnected(A));
+    w.send(ServerEvent::connected(A));
+    w.drain();
+    assert_eq!(w.coordinator().online_on(a), Some(0), "a new placement renumbers again: online here");
+}

@@ -775,7 +775,8 @@ pub struct WorldManager<S: RegionSpawner> {
     /// player's return to its fortress is refused) — until `to` attaches without it or the
     /// player's next report (higher hop) anywhere.
     handed: BTreeMap<PlayerId, (u32, u64, u64)>,
-    /// Renumberings on `CoordMsg::HopIs` per player (this process: one world generation).
+    /// Renumberings on `CoordMsg::HopIs` per player, counted per placement here (a login
+    /// or an arrival starts the count over).
     hop_renumbers: crate::coordinator::RenumberBudget,
     /// Requests and claim messages made while the link is down (or the `Attach` is being
     /// gathered), in order: sent right after the `Attach`.

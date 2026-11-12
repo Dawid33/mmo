@@ -40,8 +40,8 @@ use crate::{EmbarkRequest, PlayerId, RegionCoords};
 pub const ANSWERED_MEMO_MAX: usize = 4096;
 /// Seconds between two errors about a memo over [`ANSWERED_MEMO_MAX`].
 pub const MEMO_WARN_SECS: u64 = 60;
-/// Most times one host renumbers one player's placement on a [`CoordMsg::HopIs`] within a
-/// world generation (its process): two hosts that both hold the player (a duplicate body)
+/// Most times one host renumbers one player's placement on a [`CoordMsg::HopIs`] (per
+/// placement: a new login or arrival starts over): two hosts that both hold the player (a duplicate body)
 /// would otherwise outbid each other for ever. Past it the host logs an error once and
 /// stops renumbering that player.
 pub const HOP_RENUMBER_MAX_PER_PLAYER: u32 = 8;
@@ -71,6 +71,12 @@ impl RenumberBudget {
             );
         }
         false
+    }
+
+    /// `player` is placed on the host anew (a login, an arrival): its budget starts over.
+    /// Renumbering itself is no new placement, so two holders still stop outbidding.
+    pub fn reset(&mut self, player: PlayerId) {
+        self.used.remove(&player);
     }
 
     /// Errors logged (players whose budget ran out).
@@ -803,7 +809,11 @@ impl Coordinator {
         }
         let granted = reply.grants_claim();
         if granted {
-            // The player plays it on the host that asked.
+            // The player plays it on the host that asked. If another host had it online by
+            // its own report, that host is told (`displace`): a grant to an older placement
+            // still in flight must not silently take the player off the one holding it.
+            let known = self.hop_of(player);
+            self.displace(player, host, known);
             self.online_on.insert(player, host);
             if self.online_reported.get(&player).is_some_and(|(h, _)| *h != host) {
                 self.online_reported.remove(&player);
