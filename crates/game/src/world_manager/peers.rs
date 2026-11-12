@@ -23,8 +23,14 @@
 //! observer. The leaving host remembers where it sent the player (`departed`): input the
 //! client still sends there follows the body ([`Volatile::Input`]). A client that never
 //! connects to the new host is parked there after [`HANDOFF_SESSION_GRACE_MS`]. A body
-//! heading for an unreachable host is handed back to its source; the play paths still
-//! refuse foreign regions (Task 8). A subscribe to a region another host owns is answered
+//! heading for an unreachable host is handed back to its source. A **move** (Play, embark,
+//! return, an adventure, retire) into a region another host owns parks the body here as
+//! a local move does, then hands the player over as a record ([`Reliable::PlayerMove`] —
+//! queued whether or not that host is reachable: the record waits there, conserved); the
+//! receiving host creates its body at the target's landing. A host that parks a player
+//! handed to it with no session of the client tells the host it came from
+//! ([`Reliable::PlayerParked`]), which ends its observer session of the client. A
+//! subscribe to a region another host owns is answered
 //! with that host's endpoint and an observer ticket ([`crate::ServerPacket::RegionElsewhere`]),
 //! the owner told to expect it ([`Reliable::ObserverOrder`]).
 
@@ -126,6 +132,29 @@ impl<S: RegionSpawner> WorldManager<S> {
         }
         for (&ordinal, list) in &self.peer_waiting {
             out.extend(list.iter().filter_map(transfer_id).map(|id| (ordinal, id, false)));
+        }
+        out
+    }
+
+    /// Test support: the player of every [`Reliable::PlayerMove`] not acknowledged yet —
+    /// `(peer, player, on the wire)`, as [`Self::peer_unreceived_ids`].
+    pub fn peer_unreceived_moves(&self) -> Vec<(u32, PlayerId, bool)> {
+        let mut out = Vec::new();
+        for (&ordinal, peer) in &self.peers {
+            let unsent = peer.session.unsent().count();
+            let all: Vec<&Reliable> = peer.session.unreceived().collect();
+            let sent = all.len() - unsent;
+            for (i, r) in all.into_iter().enumerate() {
+                if let Reliable::PlayerMove { handoff, .. } = r {
+                    out.push((ordinal, handoff.player, i < sent));
+                }
+            }
+        }
+        for (&ordinal, list) in &self.peer_waiting {
+            out.extend(list.iter().filter_map(|r| match r {
+                Reliable::PlayerMove { handoff, .. } => Some((ordinal, handoff.player, false)),
+                _ => None,
+            }));
         }
         out
     }
@@ -319,31 +348,14 @@ impl<S: RegionSpawner> WorldManager<S> {
         let c = h.client;
         log::info!("[server] player {} (client {c}) handed over by host {from} into {target:?}", h.player.0);
         self.departed.remove(&h.player);
-        let (fortress, adventure) = match h.claim {
-            Some(Claim::Fortress(s)) => (Some(s), None),
-            Some(Claim::Adventure(s)) => (None, Some(s)),
-            None => (None, None),
-        };
+        let (fortress, adventure) = split_claim(h.claim);
         if self.is_unavailable(target) {
             // Its stored state could not be read (retry not come): the body cannot go
             // there. Parked from the hand-off, as a player crossing into a region whose
-            // load fails is (`region_load_failed`); a session here is refused as one whose
-            // region cannot be loaded. The sender already reported it offline.
-            let (_, carried) = bundle.client.as_ref().expect("checked above");
-            let record = PlayerRecord {
-                client: crate::parked_client(carried),
-                pose: bundle.body.pose,
-                region: target,
-                fortress,
-                adventure,
-            };
+            // load fails is (`region_load_failed`). The sender already reported it offline.
+            let record = handoff_record(target, &bundle, &h).expect("checked above");
             log::error!("[server] player {} handed into unavailable {target:?}: parked", h.player.0);
-            self.cut_transit(h.player, &record);
-            self.parked_players.insert(h.player, record);
-            if self.sessions.contains_key(&c) {
-                let _ = self.out.send((Some(c), ServerPacket::Refused(REGION_UNAVAILABLE_REFUSAL.to_string())));
-                self.client_disconnected(c, now_ms);
-            }
+            self.park_handed(from, c, h.player, record, now_ms);
             return;
         }
         if h.park {
@@ -362,12 +374,152 @@ impl<S: RegionSpawner> WorldManager<S> {
         match self.sessions.get_mut(&c) {
             Some(session) => session.kind = SessionKind::Home,
             None => {
-                self.awaiting_session.insert(c, now_ms);
+                self.awaiting_session.insert(c, (now_ms, from));
             }
         }
         // Its home here, `PlayerRegion` to the client.
         self.accept_arrival(None, target, stamp, bundle, now_ms);
         self.world_player_online(c);
+    }
+
+    /// The move of `client` (`m`) into `m.target`, which another host owns, is answered
+    /// (`record` = its park out of `m.from`; `None` = no body came back, the region was
+    /// lost): the player goes to that host as a record ([`Reliable::PlayerMove`]: its
+    /// `Client`, its claims, standing at the move's landing) — queued whether or not that
+    /// host is reachable, so it waits there, conserved. This host keeps only where it went
+    /// (`departed`); the client's session here becomes an observer and is sent on to that
+    /// host ([`crate::ServerPacket::RegionElsewhere`]).
+    pub(super) fn move_to_peer(&mut self, client: ClientId, m: Moving, record: Option<Box<PlayerRecord>>, now_ms: u64) {
+        let owner = self.owner_of(m.target);
+        // A move belongs to an online player (a disconnect turns it into a park).
+        let Some(player) = self.player_of.remove(&client) else {
+            log::error!("move of client {client} into {:?}: no player; nothing to hand over", m.target);
+            debug_assert!(false, "a move with no player");
+            return;
+        };
+        let claim = claim_of(self.fortress_of.remove(&client), self.adventurer_of.remove(&client));
+        self.world_send(HostMsg::PlayerOffline { player });
+        let (mut carried, y) = match record {
+            Some(record) => (record.client, record.pose.translation.y),
+            None => {
+                log::error!("move of client {client} out of {:?}: no body came back; its items are lost", m.from);
+                (crate::Client::default(), 0.0)
+            }
+        };
+        // What was to follow its creation there (an adventure start's `SetMode`) is
+        // applied to what it carries.
+        for kind in m.then {
+            carry_event(&mut carried, kind);
+        }
+        let (fortress, adventure) = split_claim(claim);
+        let (x, z) = crate::block_column_xz(m.landing);
+        let pose = crate::Pose::from_translation(rapier3d::math::Vector::new(x, y, z));
+        let record = PlayerRecord { client: carried, pose, region: m.target, fortress, adventure };
+        log::info!(
+            "[server] player {} (client {client}) moves from {:?} into {:?}: handed to host {owner}",
+            player.0,
+            m.from,
+            m.target
+        );
+        self.homes.remove(&client);
+        self.awaiting_session.remove(&client);
+        if let Some(session) = self.sessions.get_mut(&client) {
+            session.kind = SessionKind::Observer;
+        }
+        self.departed.insert(player, owner);
+        let handoff = crate::PlayerHandoff { client, player, claim, login: None, park: false };
+        // Parked after `m.from` answered the pending cut: its snapshot holds the body.
+        let view = self.in_cut_view(m.from);
+        let id = self.queue_to_peer(owner, Reliable::PlayerMove { handoff, record: Box::new(record), target: m.target });
+        if view {
+            self.peer_in_source_view.insert((owner, id));
+        }
+        self.refresh_keepalive(m.from, now_ms);
+        self.redirect(client, m.target);
+    }
+
+    /// A player moved here by host `from` ([`Self::move_to_peer`]): this host's now — its
+    /// home session if the client is connected here, else awaited
+    /// ([`HANDOFF_SESSION_GRACE_MS`]) — its body created at `target`'s landing with what it
+    /// carries, as a move within one host creates it. A `target` that cannot be loaded
+    /// parks the record here ([`Self::park_handed`]).
+    fn accept_move(&mut self, from: u32, h: crate::PlayerHandoff, record: PlayerRecord, target: RegionCoords) {
+        let now_ms = self.clock_ms;
+        let c = h.client;
+        log::info!("[server] player {} (client {c}) moved here by host {from} into {target:?}", h.player.0);
+        self.departed.remove(&h.player);
+        if self.is_unavailable(target) {
+            log::error!("[server] player {} moved into unavailable {target:?}: parked", h.player.0);
+            self.park_handed(from, c, h.player, record, now_ms);
+            return;
+        }
+        self.player_of.insert(c, h.player);
+        let (fortress, adventure) = split_claim(h.claim);
+        if let Some(site) = fortress {
+            self.fortress_of.insert(c, site);
+        }
+        if let Some(site) = adventure {
+            self.adventurer_of.insert(c, site);
+        }
+        match self.sessions.get_mut(&c) {
+            Some(session) => session.kind = SessionKind::Home,
+            None => {
+                self.awaiting_session.insert(c, (now_ms, from));
+            }
+        }
+        // In no region while its creation is on its way to the target.
+        self.cut_transit(h.player, &record);
+        let landing = self.landing_in(target);
+        self.homes.insert(c, target);
+        self.creating.insert(c, (target, h.player, record.clone()));
+        self.send_play_event(target, GameEventKind::CreateClientAt(c, landing, Some(Box::new(record.client))));
+        let _ = self.out.send((Some(c), ServerPacket::PlayerRegion(Some(target), c)));
+        self.refresh_keepalive(target, now_ms);
+        self.world_player_online(c);
+    }
+
+    /// `player` (of `client`), handed here by host `from`, cannot go where it was headed:
+    /// its record is parked here. A session of the client here is refused as one whose
+    /// region cannot be loaded; with none, host `from` is told
+    /// ([`Self::tell_parked`]).
+    fn park_handed(&mut self, from: u32, client: ClientId, player: PlayerId, record: PlayerRecord, now_ms: u64) {
+        self.cut_transit(player, &record);
+        self.parked_players.insert(player, record);
+        if self.sessions.contains_key(&client) {
+            let _ = self.out.send((Some(client), ServerPacket::Refused(REGION_UNAVAILABLE_REFUSAL.to_string())));
+            self.client_disconnected(client, now_ms);
+        } else {
+            self.tell_parked(from, client, player);
+        }
+    }
+
+    /// Host `from` handed `player` (of `client`) here and this host parked it with no
+    /// session of the client: `from` ends the session it may still hold for the client.
+    fn tell_parked(&mut self, from: u32, client: ClientId, player: PlayerId) {
+        log::info!("[server] player {} (client {client}) parked here with no session: host {from} told", player.0);
+        self.queue_to_peer(from, Reliable::PlayerParked { client, player });
+    }
+
+    /// [`Self::tell_parked`] for an awaited client (`awaiting_session`) about to be parked.
+    pub(super) fn tell_awaited_parked(&mut self, client: ClientId) {
+        let Some(&(_, from)) = self.awaiting_session.get(&client) else { return };
+        let Some(&player) = self.player_of.get(&client) else { return };
+        self.tell_parked(from, client, player);
+    }
+
+    /// Host `from` parked `player`, handed there from here, with no session of `client`
+    /// there: this host's observer session of the client (if any) ends, the client told
+    /// why. `departed` stays (the record is on `from`).
+    fn player_parked_elsewhere(&mut self, from: u32, client: ClientId, player: PlayerId) {
+        let observing =
+            self.sessions.get(&client).is_some_and(|s| s.kind == SessionKind::Observer && s.player == Some(player));
+        if !observing {
+            log::debug!("[server] host {from} parked player {} (client {client}); no observer session here", player.0);
+            return;
+        }
+        log::info!("[server] host {from} parked player {} (client {client}): its session here ends", player.0);
+        let _ = self.out.send((Some(client), ServerPacket::Refused(PLAYER_PARKED_ELSEWHERE.to_string())));
+        self.client_disconnected(client, self.clock_ms);
     }
 
     /// `client` subscribes to `rc`, which another host owns: told where to go, with a
@@ -379,6 +531,13 @@ impl<S: RegionSpawner> WorldManager<S> {
             log::debug!("client {client}: {rc:?} is host {owner}'s, which is not reachable; subscribe dropped");
             return;
         }
+        self.redirect(client, rc);
+    }
+
+    /// `client` is told to go to the host that owns `rc` (its endpoint as last known, a
+    /// ticket that host is told to expect — queued like everything to it).
+    fn redirect(&mut self, client: ClientId, rc: RegionCoords) {
+        let owner = self.owner_of(rc);
         let Some(endpoint) = self.peer_endpoints.get(&owner).cloned() else {
             log::warn!("client {client}: {rc:?} is host {owner}'s, whose endpoint is not known; subscribe dropped");
             return;
@@ -513,12 +672,31 @@ impl<S: RegionSpawner> WorldManager<S> {
             .into_iter()
             .filter(|(ordinal, id, _)| !self.peer_in_source_view.contains(&(*ordinal, *id)))
             .filter_map(|(_, _, r)| match r {
-                // Task 8: an unreceived `Transfer` with a player writes that player's
-                // record into `WorldCut.players` (a hand-off is in no cut today).
+                // A player handed over or moved is a record (`cut_peer_players`), not a row.
                 Reliable::Transfer { target, stamp, bundle, player: None } => {
                     Some(InFlightRow::Transfer { target: *target, bundle: (**bundle).clone(), stamp: *stamp })
                 }
                 Reliable::Intent(msg) => Some(InFlightRow::Intent { target: peer_intent_target(msg), msg: *msg }),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// One-phase cuts: every player handed to another host and not acknowledged yet — a
+    /// walking hand-off ([`Reliable::Transfer`] with a player: its body's record, as the
+    /// receiver would park it) or a move ([`Reliable::PlayerMove`]: its record) — as its
+    /// record, in the region it is headed for, unless it left its source after the source
+    /// answered the cut (the source's snapshot holds it). Not a row: a restore requeues
+    /// nothing for it, and the stored record places the player at its next login.
+    pub(super) fn cut_peer_players(&self) -> Vec<(PlayerId, PlayerRecord)> {
+        self.peer_entries()
+            .into_iter()
+            .filter(|(ordinal, id, _)| !self.peer_in_source_view.contains(&(*ordinal, *id)))
+            .filter_map(|(_, _, r)| match r {
+                Reliable::Transfer { target, bundle, player: Some(h), .. } => {
+                    handoff_record(*target, bundle, h).map(|record| (h.player, record))
+                }
+                Reliable::PlayerMove { handoff, record, .. } => Some((handoff.player, (**record).clone())),
                 _ => None,
             })
             .collect()
@@ -765,8 +943,15 @@ impl<S: RegionSpawner> WorldManager<S> {
                     }
                 }
             }
-            // Task 8: an inbound `PlayerMove` places the player here: it clears
-            // `departed[player]` as `accept_handoff` does.
+            Reliable::PlayerMove { handoff, record, target } => {
+                if !self.owns(target) {
+                    // Placed here all the same (as a hand-off): never lost.
+                    log::error!("[server] host {from} moved a player into {target:?}, which this host does not own");
+                    debug_assert!(false, "an inbound move into {target:?}, which this host does not own");
+                }
+                self.accept_move(from, handoff, *record, target);
+            }
+            Reliable::PlayerParked { client, player } => self.player_parked_elsewhere(from, client, player),
             other => {
                 log::error!("[server] peer host {from}: {} is not handled by this host yet: dropped", reliable_name(&other))
             }
@@ -777,6 +962,43 @@ impl<S: RegionSpawner> WorldManager<S> {
 /// The claim a player's fortress / adventure is (it holds one at most).
 fn claim_of(fortress: Option<SiteId>, adventure: Option<SiteId>) -> Option<Claim> {
     fortress.map(Claim::Fortress).or(adventure.map(Claim::Adventure))
+}
+
+/// A claim as the fortress / adventure pair of a record.
+fn split_claim(claim: Option<Claim>) -> (Option<SiteId>, Option<SiteId>) {
+    match claim {
+        Some(Claim::Fortress(s)) => (Some(s), None),
+        Some(Claim::Adventure(s)) => (None, Some(s)),
+        None => (None, None),
+    }
+}
+
+/// The record of a player handed over in `bundle` (its body, in `target`'s frame), as the
+/// receiving host parks it: `None` if the bundle carries no player.
+fn handoff_record(target: RegionCoords, bundle: &crate::EntityBundle, h: &crate::PlayerHandoff) -> Option<PlayerRecord> {
+    let (_, carried) = bundle.client.as_ref()?;
+    let (fortress, adventure) = split_claim(h.claim);
+    Some(PlayerRecord { client: crate::parked_client(carried), pose: bundle.body.pose, region: target, fortress, adventure })
+}
+
+/// A server-authored event that was to follow a moved player's creation, applied to the
+/// `Client` it carries to another host instead: a mode change, as the region applies it
+/// (`set_play_mode_safe`; leaving survival puts the cursor stack back, what does not fit
+/// stays on the cursor). Nothing else follows a creation.
+fn carry_event(carried: &mut crate::Client, kind: GameEventKind) {
+    match kind {
+        GameEventKind::Order(_, Order::SetMode { mode, .. }) => {
+            if carried.mode != mode {
+                carried.mode = mode;
+                if mode == PlayMode::Fortress {
+                    if let Some(rest) = carried.leave_survival() {
+                        carried.cursor = Some(rest);
+                    }
+                }
+            }
+        }
+        other => log::error!("[server] {other:?} was to follow a player's creation; it moved to another host: dropped"),
+    }
 }
 
 /// The region an intent or a reply to another host goes to (`route_intent` without a
@@ -811,5 +1033,6 @@ fn reliable_name(r: &Reliable) -> &'static str {
         Reliable::KickAck { .. } => "KickAck",
         Reliable::SessionEnded { .. } => "SessionEnded",
         Reliable::CutMark { .. } => "CutMark",
+        Reliable::PlayerParked { .. } => "PlayerParked",
     }
 }

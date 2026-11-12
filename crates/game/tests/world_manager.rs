@@ -1294,10 +1294,11 @@ fn non_owned_region_is_unavailable() {
 }
 
 /// A region another host owns whose session is up is reachable (`reaches`, not
-/// unavailable), but players do not move between hosts yet: Play, a subscription and a
-/// session whose record lies there are still refused, and nothing is spawned for it.
+/// unavailable): Play there is not refused — the player is parked here and handed to
+/// that host (`Reliable::PlayerMove`, Task 8) — while a session whose record lies there is
+/// still refused (logins are not routed yet), and nothing is spawned for it here.
 #[test]
-fn foreign_region_still_refuses_play() {
+fn foreign_region_play_moves_and_login_is_still_refused() {
     use game::{HostEndpoint, InlinePeerLink, PeerHello, PeerSession};
     crate::common::install_real_block_props();
     let s = 1; // every region its own super-region
@@ -1341,10 +1342,12 @@ fn foreign_region_still_refuses_play() {
     h.drain_packets();
     h.event(ServerEvent::ClientPacket(ClientPacket::PlayRegion(target), 0), 10);
     h.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(target), 0), 10);
-    let refused = h.drain_packets().into_iter().any(|(to, p)| {
-        to == Some(0) && matches!(p, ServerPacket::PlayRefused(rc, game::PlayRefusal::RegionUnavailable) if rc == target)
-    });
-    assert!(refused, "Play into a foreign region is refused RegionUnavailable");
+    let refused = h.drain_packets().into_iter().any(|(to, p)| to == Some(0) && matches!(p, ServerPacket::PlayRefused(..)));
+    assert!(!refused, "Play into a reachable foreign region is not refused");
+    h.settle(15);
+    assert_eq!(h.manager.departed().get(&game::PlayerId(0)), Some(&other), "the player was handed to host {other}");
+    assert!(h.manager.peer_unreceived() > 0, "its move is queued to host {other}");
+    assert_eq!(h.manager.home_of(0), None, "no home here");
     let record = PlayerRecord {
         client: game::Client::default(),
         pose: game::Pose::from_translation(body_on_tile([3, STAND, 3])),

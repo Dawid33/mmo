@@ -572,6 +572,10 @@ pub const DUPLICATE_SESSION_REFUSAL: &str = "this login is already connected; lo
 /// (`departed`): it places nothing here (a later task routes the login there).
 pub const PLAYER_ELSEWHERE_REFUSAL: &str = "your character is on another server of this world; log in again";
 
+/// The refusal that ends a session observing a player whose body the host it was handed
+/// to parked, the client never having connected there ([`crate::Reliable::PlayerParked`]).
+pub const PLAYER_PARKED_ELSEWHERE: &str = "your character was parked on another server of this world; log in again";
+
 /// How long a region whose stored state could not be read
 /// ([`RegionOutput::LoadFailed`]) stays stopped before a start is tried
 /// again, in seconds of world time.
@@ -948,8 +952,9 @@ pub struct WorldManager<S: RegionSpawner> {
     /// a client still sends here follows it, and a login placement asks it.
     departed: BTreeMap<PlayerId, u32>,
     /// Players handed to this host with no session here yet, by client, with the `now_ms`
-    /// they arrived at: treated as disconnected after [`HANDOFF_SESSION_GRACE_MS`].
-    awaiting_session: BTreeMap<ClientId, u64>,
+    /// they arrived at and the host they came from: treated as disconnected after
+    /// [`HANDOFF_SESSION_GRACE_MS`] (that host told: [`crate::Reliable::PlayerParked`]).
+    awaiting_session: BTreeMap<ClientId, (u64, u32)>,
     /// Observer tickets handed out, per `(client, owner host)`: the nonce and the `now_ms`
     /// it was minted at (`peers.rs`, `observer_ticket`).
     observer_tickets: BTreeMap<(ClientId, u32), (u64, u64)>,
@@ -1094,7 +1099,7 @@ impl<S: RegionSpawner> WorldManager<S> {
         let Some(tile) = map.tile(target) else {
             return refuse(self, PlayRefusal::OffMap);
         };
-        if self.refuses_play(target) {
+        if self.is_unavailable(target) {
             return refuse(self, PlayRefusal::RegionUnavailable);
         }
         let home = self.homes.get(&id).copied();
@@ -1123,12 +1128,22 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// at once, so any history catch-up puts a fortress's people there first).
     /// `target` becomes its home now. A player with no home yet is created fresh.
     /// A second move while one is in flight retargets it.
+    ///
+    /// A `target` another host owns is not this host's home: the park goes out the same
+    /// way, and [`Self::finish_move`] hands the player to that host
+    /// ([`crate::Reliable::PlayerMove`]). A session whose body is on another host (an
+    /// observer) moves nothing here.
     fn move_client(&mut self, id: ClientId, target: RegionCoords, landing: [u32; 2], now_ms: u64) {
+        if self.sessions.get(&id).is_some_and(|s| s.kind == SessionKind::Observer) {
+            log::warn!("client {id}: a move to {target:?} from a session whose body is on another host; ignored");
+            return;
+        }
         let home = self.homes.get(&id).copied();
         if home == Some(target) {
             let _ = self.out.send((Some(id), ServerPacket::PlayerRegion(Some(target), id)));
             return;
         }
+        let foreign = self.is_foreign(target);
         if let Some(m) = self.moving.get_mut(&id) {
             m.target = target;
             m.landing = landing;
@@ -1137,11 +1152,20 @@ impl<S: RegionSpawner> WorldManager<S> {
             self.moving.insert(id, Moving { from: home, target, landing, then: Vec::new() });
             self.send_play_event(home, GameEventKind::ParkPlayer(id));
             self.ensure_running(target);
+        } else if foreign {
+            // No body here to hand over (none is ever made here for that region).
+            log::error!("client {id}: a move to {target:?}, another host's, with no body here; ignored");
+            return;
         } else {
             self.send_play_event(target, GameEventKind::CreateClientAt(id, landing, None));
         }
-        self.homes.insert(id, target);
-        let _ = self.out.send((Some(id), ServerPacket::PlayerRegion(Some(target), id)));
+        if foreign {
+            // The client is sent on once the player is handed over (`finish_move`).
+            self.homes.remove(&id);
+        } else {
+            self.homes.insert(id, target);
+            let _ = self.out.send((Some(id), ServerPacket::PlayerRegion(Some(target), id)));
+        }
         if let Some(home) = home {
             self.refresh_keepalive(home, now_ms);
         }
@@ -1161,8 +1185,14 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// no body was there, or the region was lost): the player is created in the
     /// target with its `Client` — an empty one if the body was lost, never the
     /// starting kit, which is only for players new to the world.
+    ///
+    /// A target another host owns: the player is handed to that host
+    /// ([`Self::move_to_peer`]), reachable or not (the record waits in the queue).
     fn finish_move(&mut self, client: ClientId, record: Option<Box<PlayerRecord>>, now_ms: u64) {
         let Some(m) = self.moving.remove(&client) else { return };
+        if self.is_foreign(m.target) {
+            return self.move_to_peer(client, m, record, now_ms);
+        }
         if let (Some(record), Some((player, fortress, adventure))) = (&record, self.player_for(client)) {
             // In no region while its creation is on its way to the target.
             self.cut_transit(player, &PlayerRecord { fortress, adventure, ..(**record).clone() });
@@ -1173,7 +1203,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             }
             _ => None,
         };
-        if self.refuses_play(m.target) {
+        if self.is_unavailable(m.target) {
             // Its target could not be loaded meanwhile: the record stays parked.
             if let Some((player, record)) = full {
                 log::warn!("move of client {client}: {:?} is unavailable; player {} parked", m.target, player.0);
@@ -1687,11 +1717,12 @@ impl<S: RegionSpawner> WorldManager<S> {
         let lapsed: Vec<ClientId> = self
             .awaiting_session
             .iter()
-            .filter(|(_, &since)| now_ms.saturating_sub(since) >= HANDOFF_SESSION_GRACE_MS)
+            .filter(|(_, &(since, _))| now_ms.saturating_sub(since) >= HANDOFF_SESSION_GRACE_MS)
             .map(|(c, _)| *c)
             .collect();
         for c in lapsed {
             log::warn!("[server] client {c} never connected to this host after its hand-off: parked");
+            self.tell_awaited_parked(c);
             self.client_disconnected(c, now_ms);
         }
         let connected_homes: BTreeSet<RegionCoords> = self
@@ -2212,6 +2243,12 @@ impl<S: RegionSpawner> WorldManager<S> {
         let mut players: BTreeMap<PlayerId, PlayerRecord> = BTreeMap::new();
         for (_, player, record) in ordered {
             players.insert(player, record);
+        }
+        // Players handed to another host and not received there (`cut_peer_players`):
+        // where they are headed. A snapshot holding the body wins (it came back during the
+        // acknowledgement lag); the hand-off wins over an older record passing through.
+        for (player, record) in self.cut_peer_players() {
+            players.entry(player).or_insert(record);
         }
         for (player, record) in cut.parked_at_t.iter().chain(self.parked_players.iter()).chain(cut.transit_players.iter()) {
             players.entry(*player).or_insert_with(|| record.clone());
@@ -2757,7 +2794,10 @@ impl<S: RegionSpawner> WorldManager<S> {
             Some(r) if !crate::off_map(self.map_extent(), r.region) => r.region,
             _ => SPAWN_REGION,
         };
-        if self.refuses_play(target) {
+        // A login whose record lies on another host is not routed there yet (a later
+        // task): refused as for a region that cannot be loaded. A move goes across
+        // (`move_client`).
+        if self.is_unavailable(target) || self.is_foreign(target) {
             // Its region's stored state could not be read: the session is
             // ended, the record kept for the next try.
             log::warn!("client {id}: its region {target:?} is unavailable; session refused");
@@ -2968,13 +3008,6 @@ impl<S: RegionSpawner> WorldManager<S> {
         !self.reaches(rc) || self.unavailable.get(&rc).is_some_and(|&retry| self.spawner.world_tick() < retry)
     }
 
-    /// Whether Play, embark, return, an adventure start or a placement into `rc` is
-    /// refused: it is unavailable, or another host owns it — players do not move between
-    /// hosts yet (Task 8 lifts the foreign half).
-    fn refuses_play(&self, rc: RegionCoords) -> bool {
-        self.is_unavailable(rc) || self.is_foreign(rc)
-    }
-
     /// The regions that are unavailable now (tests, the `[server]` line).
     pub fn unavailable_regions(&self) -> Vec<RegionCoords> {
         self.unavailable.keys().copied().filter(|rc| self.is_unavailable(*rc)).collect()
@@ -3072,6 +3105,9 @@ impl<S: RegionSpawner> WorldManager<S> {
         for client in homed {
             if self.sessions.contains_key(&client) {
                 let _ = self.out.send((Some(client), ServerPacket::Refused(REGION_UNAVAILABLE_REFUSAL.to_string())));
+            } else {
+                // Its record is parked above (`creating`): the host it came from is told.
+                self.tell_awaited_parked(client);
             }
             self.client_disconnected(client, now_ms);
         }
@@ -3484,6 +3520,12 @@ impl<S: RegionSpawner> WorldManager<S> {
             self.cut_transit(player, record);
         }
         record
+    }
+
+    /// Test support: the players whose body's creation (a move, a restore) is on its way
+    /// to a region of this host — their record is only here meanwhile.
+    pub fn creating_players(&self) -> Vec<PlayerId> {
+        self.creating.values().map(|(_, player, _)| *player).collect()
     }
 
     /// Test support: `player`'s parked record.

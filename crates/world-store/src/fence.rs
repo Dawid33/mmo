@@ -49,12 +49,15 @@ pub struct CoordinatorFence {
 }
 
 /// Every super-region a cut writes into: its regions (whose rows also hold
-/// its entity rows) and its players' records' regions. A commit checks these
-/// and every super-region of its fence.
+/// its entity rows). A commit checks these and every super-region of its fence.
+///
+/// A player record's region is not one: a host writes the records of the
+/// players it holds, wherever they are headed (a record of a player handed to
+/// another host's region rides in the cut until that host has it). The commit
+/// is still fenced by every super-region the host claimed, so a fenced-out host
+/// writes no record.
 pub fn touched_super_regions(cut: &WorldCut, s: u32) -> BTreeSet<SuperRegion> {
-    let regions = cut.regions.iter().map(|(rc, _)| *rc);
-    let players = cut.players.iter().map(|(_, record)| record.region);
-    regions.chain(players).map(|rc| super_region_of(rc, s)).collect()
+    cut.regions.iter().map(|(rc, _)| super_region_of(*rc, s)).collect()
 }
 
 /// The super-regions a commit with `fence` must find still held: the cut's

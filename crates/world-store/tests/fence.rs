@@ -100,6 +100,49 @@ fn stale_owner_commit_is_refused_and_writes_nothing() {
     });
 }
 
+/// A region far from the test claims: its super-region is another host's.
+const FOREIGN: RegionCoords = RegionCoords { x: 1000, z: 1000 };
+
+/// A host writes the record of a player it handed toward another host's region (the
+/// record rides in its cut until that host has it): a record's region is not a
+/// super-region the cut touches, so the commit is fenced by the host's own claim only.
+#[test]
+fn player_record_in_a_foreign_super_region_commits() {
+    each_backend("fence_foreign_record", false, |url| {
+        let h = open(url);
+        let fence = h.claim_super_regions(0, TEST_SUPER_REGIONS.to_vec()).unwrap();
+        let foreign_sr = game::super_region_of(FOREIGN, h.super_region_regions());
+        let other = h.claim_super_regions(1, vec![foreign_sr]).unwrap();
+        assert!(!fence.epochs.contains_key(&foreign_sr) && other.epochs.contains_key(&foreign_sr));
+        let mut c = cut(&h, 1);
+        c.players[0].1.region = FOREIGN;
+        h.commit_cut(c, fence.clone()).recv().unwrap().expect("the record of a player headed elsewhere commits");
+        let stored = h.resolve_player("local:fenced").unwrap().1.expect("the record is stored");
+        assert_eq!(stored.region, FOREIGN);
+        assert!(h.load_region(A, &fence).unwrap().is_some(), "and the cut's region with it");
+        h.shutdown();
+    });
+}
+
+/// The relaxation does not open a hole: a host fenced out of its own claim still writes
+/// no player record, wherever the record's region is.
+#[test]
+fn stale_owner_still_cannot_write_a_player_record() {
+    each_backend("fence_stale_record", false, |url| {
+        let h = open(url);
+        let stale = h.claim_super_regions(0, TEST_SUPER_REGIONS.to_vec()).unwrap();
+        let _newer = h.claim_super_regions(1, TEST_SUPER_REGIONS.to_vec()).unwrap();
+        for region in [A, FOREIGN] {
+            let mut c = WorldCut { regions: vec![], in_flight: vec![], ..cut(&h, 1) };
+            c.players[0].1.region = region;
+            let err = h.commit_cut(c, stale.clone()).recv().unwrap().unwrap_err();
+            assert!(matches!(err, StoreError::Fenced { .. }), "{region:?}: {err}");
+            assert_eq!(h.resolve_player("local:fenced").unwrap().1, None, "{region:?}: no player record");
+        }
+        h.shutdown();
+    });
+}
+
 #[test]
 fn stale_owner_region_load_is_refused() {
     each_backend("fence_load", false, |url| {

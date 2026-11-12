@@ -534,12 +534,21 @@ impl MultiRig {
             self.tracked.remove(&id);
             self.settling.remove(&id);
         }
-        // A tracked player's body ends by parking: its record is on a host now.
+        // A tracked player's body ends by parking (its record is on a host now) or by a
+        // move's park (its record is on its way to a new body: a creation in flight, a
+        // `PlayerMove` between hosts, or that new body already).
+        let in_move = self.players_in_move();
+        let bodies_now: BTreeSet<PlayerId> =
+            places.keys().filter_map(|id| self.player_bodies.get(id)).copied().collect();
         let parked: Vec<EntityId> = self
             .tracked
             .keys()
             .filter(|id| !places.contains_key(id) && !shadows.contains(id))
-            .filter(|id| self.player_bodies.get(id).is_some_and(|p| !self.parked_on(*p).is_empty()))
+            .filter(|id| {
+                self.player_bodies.get(id).is_some_and(|p| {
+                    !self.parked_on(*p).is_empty() || in_move.contains_key(p) || bodies_now.contains(p)
+                })
+            })
             .copied()
             .collect();
         for id in parked {
@@ -568,20 +577,69 @@ impl MultiRig {
         self.assert_players();
     }
 
+    /// Each player whose record is in a [`Reliable::PlayerMove`] never sent or in transit
+    /// on a link, with how many such places hold it; a move a session SENT and the peer
+    /// has not acknowledged (the acknowledgement lag: the peer may hold it) is listed with
+    /// no place of its own.
+    fn queued_moves(&self) -> BTreeMap<PlayerId, usize> {
+        let mut out: BTreeMap<PlayerId, usize> = BTreeMap::new();
+        for rig in &self.hosts {
+            for (_, p, sent) in rig.manager.peer_unreceived_moves() {
+                *out.entry(p).or_default() += usize::from(!sent);
+            }
+        }
+        for (ea, eb) in self.links.values() {
+            for end in [ea, eb] {
+                for msg in end.lock().unwrap().transit() {
+                    if let PeerMsg::Reliable { body: Reliable::PlayerMove { handoff, .. }, .. } = msg {
+                        *out.entry(handoff.player).or_default() += 1;
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Each player whose record is on its way to a new body — [`Self::queued_moves`], or a
+    /// body's creation in flight on a host (`creating_players`) — with how many places
+    /// hold it.
+    fn players_in_move(&self) -> BTreeMap<PlayerId, usize> {
+        let mut out = self.queued_moves();
+        for rig in &self.hosts {
+            for p in rig.manager.creating_players() {
+                *out.entry(p).or_default() += 1;
+            }
+        }
+        out
+    }
+
     /// Player conservation across hosts, for every player a test connected: its body is
-    /// in at most one region of one host, its parked record on at most one host, never
-    /// both (a body in flight or in a peer queue is an entity above, conserved as such),
-    /// at most one host has a home for it, has it online (`player_of`) or holds its claim.
+    /// in at most one region of one host, its parked record on at most one host, its
+    /// record on its way to a new body ([`Self::players_in_move`]) in at most one place,
+    /// never two of those (a body in flight or in a peer queue is an entity above,
+    /// conserved as such; a creation in flight may stand beside the body it made until
+    /// its host hears it applied), at most one host has a home for it, has it online
+    /// (`player_of`) or holds its claim.
     fn assert_players(&mut self) {
         let players: Vec<(ClientId, PlayerId)> = self.players.iter().map(|(c, p)| (*c, *p)).collect();
+        let in_move = self.players_in_move();
+        let queued_moves = self.queued_moves();
         for (client, player) in players {
             let bodies = self.player_owners(client);
             let parked = self.parked_on(player);
+            let moving = in_move.get(&player).copied().unwrap_or(0);
+            let queued = queued_moves.get(&player).copied().unwrap_or(0);
             assert!(bodies.len() <= 1, "player {}'s body is in several regions: {bodies:?}", player.0);
             assert!(parked.len() <= 1, "player {} is parked on several hosts: {parked:?}", player.0);
+            assert!(moving <= 1, "player {}'s record is on its way in {moving} places", player.0);
             assert!(
                 bodies.is_empty() || parked.is_empty(),
                 "player {} has a body ({bodies:?}) and a parked record (hosts {parked:?})",
+                player.0
+            );
+            assert!(
+                queued == 0 || (bodies.is_empty() && parked.is_empty()),
+                "player {} is in a queued move and has a body ({bodies:?}) or a parked record (hosts {parked:?})",
                 player.0
             );
             let homes: Vec<(u32, RegionCoords)> = (0..self.hosts.len() as u32)

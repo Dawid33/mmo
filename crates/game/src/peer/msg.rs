@@ -73,6 +73,10 @@ pub enum Reliable {
     /// The sender's in-band mark of a world save cut: what it sent before the mark
     /// belongs to the cut's receiver side, what follows to the next cut.
     CutMark { cut: CutId },
+    /// The sender parked `player` (of `client`), handed to it by the receiver, with no
+    /// session of the client on the sender: a session the receiver still holds for the
+    /// client (an observer) is ended.
+    PlayerParked { client: ClientId, player: PlayerId },
 }
 
 /// What may be lost: sent only while the peer is reachable, never replayed.
