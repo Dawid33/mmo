@@ -15,6 +15,11 @@
 //!   store with no archive is refused: re-forge it.
 //! - `clock-reset <url>`: clears the world's clock anchor (R3: the shared tick numbering of
 //!   host processes); the next host or coordinator start stores a fresh one.
+//! - `super-region <url> <n>`: sets the world's super-region side (`world.super_region_regions`,
+//!   regions per super-region side; hosts then run with `VOXEL_SUPER_REGION_REGIONS=<n>`).
+//!   Refused once any host has claimed a super-region: the fences name super-regions of the
+//!   old side. `n = 1` puts a host seam one region from the spawn (R3's go / no-go world).
+//!   Never echoes the URL (a Postgres URL carries a password).
 //! - `export --db <url> <out.world>`: writes the stored forge file (the archive
 //!   row) to `out.world`, for the file-based tools (`just world-map`,
 //!   `cross-section`, `history`).
@@ -27,7 +32,7 @@ use crate::{Dials, OpenMode, StoreHandle, StoreUrl};
 
 /// What `worldctl` prints for a bad command line.
 pub const USAGE: &str = "usage: worldctl forge --db <url> [--preset <name>] [--size <m>] [--cell <m>] \
-[--seed <hex>] [--set <knob>=<value>]...\n       worldctl retile --db <url>\n       worldctl export --db <url> <out.world>\n       worldctl clock-reset <url>";
+[--seed <hex>] [--set <knob>=<value>]...\n       worldctl retile --db <url>\n       worldctl export --db <url> <out.world>\n       worldctl clock-reset <url>\n       worldctl super-region <url> <n>";
 
 /// Runs one `worldctl` command (`args` without the program name).
 pub fn run(args: &[String]) -> Result<(), String> {
@@ -54,6 +59,12 @@ pub fn run(args: &[String]) -> Result<(), String> {
             let db = parse_clock_reset(&args[1..])?;
             clock_reset(&db)?;
             println!("worldctl: cleared the world clock anchor of {db:?}; the next host or coordinator start writes a new one");
+            Ok(())
+        }
+        Some("super-region") => {
+            let (db, n) = parse_super_region(&args[1..])?;
+            set_super_region(&db, n)?;
+            println!("worldctl: the world's super-regions are now {n} x {n} regions; run its hosts with VOXEL_SUPER_REGION_REGIONS={n}");
             Ok(())
         }
         _ => Err(USAGE.to_string()),
@@ -117,6 +128,20 @@ fn parse_clock_reset(args: &[String]) -> Result<StoreUrl, String> {
         [url] if !url.starts_with("--") => parse_db(url),
         _ => parse_retile(args),
     }
+}
+
+/// `super-region`'s store and side: `<url> <n>`, `n` a whole number >= 1 (what hosts accept
+/// in `VOXEL_SUPER_REGION_REGIONS`). Errors never echo the URL.
+fn parse_super_region(args: &[String]) -> Result<(StoreUrl, u32), String> {
+    let [url, n] = args else { return Err(USAGE.to_string()) };
+    let n = n
+        .trim()
+        .parse::<u32>()
+        .ok()
+        .filter(|n| *n >= 1)
+        .ok_or_else(|| format!("super-region: n = {n:?} is not a whole number >= 1"))?;
+    let db = StoreUrl::parse(url).map_err(|e| format!("super-region: the world store URL: {e}"))?;
+    Ok((db, n))
 }
 
 fn parse_export(args: &[String]) -> Result<(StoreUrl, String), String> {
@@ -185,6 +210,23 @@ pub fn export(db: &StoreUrl, out: &Path) -> Result<usize, String> {
 pub fn clock_reset(db: &StoreUrl) -> Result<(), String> {
     let store = open(db, OpenMode::Writer)?;
     let result = store.clear_clock_anchor().map_err(|e| e.to_string());
+    store.shutdown();
+    result
+}
+
+/// Sets `db`'s super-region side to `n`, refused unless no host has claimed a super-region
+/// yet. Errors never echo the URL.
+pub fn set_super_region(db: &StoreUrl, n: u32) -> Result<(), String> {
+    let store = StoreHandle::open(db, Dials::BUILT, OpenMode::Writer).map_err(|e| format!("the world store: {e}"))?;
+    let result = match store.set_super_region_regions(n) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(format!(
+            "super-region: refused, a host has already claimed super-regions of this world (side {}); \
+             the side is fixed once a host has started",
+            store.super_region_regions()
+        )),
+        Err(e) => Err(format!("super-region: {e}")),
+    };
     store.shutdown();
     result
 }

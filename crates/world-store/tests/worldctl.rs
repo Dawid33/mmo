@@ -86,3 +86,40 @@ fn worldctl_export_without_world() {
     assert!(!dir.join("o.world").exists());
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// `super-region <url> <n>` sets the world's super-region side, but only on a world no
+/// host has claimed yet (an empty `super_regions`): afterwards the fences already name
+/// super-regions of the old side. A bad `n` is refused, and no message echoes the URL
+/// (a Postgres URL carries a password).
+#[test]
+fn super_region_only_before_the_first_claim() {
+    crate::handle::each_backend("ctl_super_region", true, |url| {
+        let url_arg = match url {
+            StoreUrl::Sqlite(path) => path.to_str().unwrap().to_string(),
+            StoreUrl::Postgres(u) => u.clone(),
+            StoreUrl::Memory => unreachable!("reopen runs on a file"),
+        };
+        let h = open(url);
+        assert_eq!(h.super_region_regions(), game::DEFAULT_SUPER_REGION_REGIONS);
+        h.shutdown();
+        for bad in ["0", "-1", "many", ""] {
+            let err = ctl::run(&args(&["super-region", &url_arg, bad])).err().unwrap_or_else(|| panic!("{bad:?} accepted"));
+            assert!(err.contains(">= 1"), "{bad:?}: {err}");
+            assert!(!err.contains(&url_arg), "the URL is echoed: {err}");
+        }
+        let err = ctl::run(&args(&["super-region", &url_arg])).err().expect("no n");
+        assert!(err.contains("usage"), "{err}");
+        ctl::run(&args(&["super-region", &url_arg, "1"])).expect("set on an unclaimed world");
+        let h = open(url);
+        assert_eq!(h.super_region_regions(), 1, "stored, and read back at open");
+        // A host claims: the side is fixed from now on.
+        h.claim_super_regions(0, vec![(0, 0)]).unwrap();
+        h.shutdown();
+        let err = ctl::run(&args(&["super-region", &url_arg, "4"])).err().expect("refused once claimed");
+        assert!(err.contains("claimed"), "{err}");
+        assert!(!err.contains(&url_arg), "the URL is echoed: {err}");
+        let h = open(url);
+        assert_eq!(h.super_region_regions(), 1, "unchanged");
+        h.shutdown();
+    });
+}

@@ -76,8 +76,8 @@ print secrets.
 - `just test-one <crate> "<cargo test args>"` for exactly the touched tests. Integration tests are ONE
   `it` binary per crate (`--test it <file>::`); files that touch process-global state (`HASH_MODE`, the
   forged world, a logger, wasm32, perf gates) keep their own `[[test]]` target — a new such file needs one.
-  Server test targets `roles` and `coordinator_rt` need `--features test-hooks` (`just test-r2` / `test-server`
-  pass it); Postgres-backed tests take their throwaway database from `crates/pg-test-support`
+  Server test targets `roles`, `coordinator_rt` and `hosts` need `--features test-hooks` (`just test-r2` /
+  `test-r3` / `test-server` pass it); Postgres-backed tests take their throwaway database from `crates/pg-test-support`
   (`MMO_TEST_DATABASE_URL`).
 - `just smoke` — the default sanity check, hard-limited to 60 s. It only type-checks the client; running
   client tests (`just test-one client "--lib <filter>"`) is a slow opt-in — **ask first**.
@@ -141,6 +141,9 @@ print secrets.
   push, 127.0.0.1:6490) + `_CERT_HASH_FILE`, `VOXEL_OWNERSHIP=allinone|static`, `VOXEL_HOST_ORDINAL`,
   `VOXEL_HOSTS`, `VOXEL_SUPER_REGION_REGIONS` (16; checked against the world row). `just dev-r2` runs
   login + coordinator + host 0 (state in git-ignored `target/dev-r2/`); `just coordinator|host`, `just test-r2`.
+  R3 (several hosts): `just dev-r3 [hosts] [delay]` (all hosts, `target/dev-r3/`), `just test-r3`, `worldctl
+  super-region`; env `VOXEL_ENTRY_HOST`, `VOXEL_PEER_BIND`, `VOXEL_PEER_LINK_DELAY_MS`, `VOXEL_WT_PORT`,
+  `VOXEL_ADVERTISE_QUIC`/`_WT`, `VOXEL_TERRAIN_NOTIFY`, `VOXEL_WORLD_DB_DIRECT`.
 - **Owner epochs & fencing**: a host claims super-regions (`super_region_of`, `game::ownership`) in Postgres
   with an epoch; every cut / region load / coordinator save is fenced on it (`StoreError::Fenced`) — a fenced
   process stops writing and exits `EXIT_FENCED` (3); a dead coordinator thread exits `EXIT_COORDINATOR_FAILED`

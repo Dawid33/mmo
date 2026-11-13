@@ -579,6 +579,13 @@ impl StoreHandle {
         self.ask(Request::ClearClockAnchor)
     }
 
+    /// Sets the world's super-region side (`worldctl super-region`) if no host has claimed
+    /// a super-region yet; returns whether it did (`false`: `super_regions` is not empty,
+    /// nothing written). This handle keeps the side it read at open: reopen to use the new one.
+    pub fn set_super_region_regions(&self, s: u32) -> Result<bool, StoreError> {
+        self.ask(|r| Request::SetSuperRegionRegions(s, r))
+    }
+
     /// Registers this process's boot as host `row.ordinal` (once per boot, right after its
     /// claim): one fence-checked transaction that bumps `world.generation` when the host's
     /// previous boot never left clean (see [`HostBoot`]). `row.generation` and `row.clean`

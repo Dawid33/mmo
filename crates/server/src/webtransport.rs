@@ -1,5 +1,5 @@
 //! WebTransport ingress: browsers can't speak raw QUIC, so they connect here
-//! (HTTP/3 Extended CONNECT on `VOXEL_BIND_ADDR`:6467, 127.0.0.1 by default) and
+//! (HTTP/3 Extended CONNECT on `VOXEL_BIND_ADDR`:6467 — `VOXEL_WT_PORT` — 127.0.0.1 by default) and
 //! are routed into the same ServerEvent channel and ClientSink map as quinn
 //! clients. Wire format is identical: one uni-stream per bincode packet.
 //!

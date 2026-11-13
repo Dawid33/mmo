@@ -578,6 +578,18 @@ macro_rules! engine_rows {
                 }
             }
 
+            /// Sets `world.super_region_regions` to `s` if no super-region is claimed yet (one
+            /// statement); returns whether it did. Callers hold the writer lock.
+            pub(crate) async fn set_super_region_regions(pool: &Pool, s: u32) -> Result<bool, StoreError> {
+                let done = sqlx::query(
+                    "UPDATE world SET super_region_regions = $1 WHERE id = 1 AND NOT EXISTS (SELECT 1 FROM super_regions)",
+                )
+                .bind(i64::from(s))
+                .execute(pool)
+                .await?;
+                Ok(done.rows_affected() == 1)
+            }
+
             /// Forgets the world's clock anchor. Callers hold the writer lock.
             pub(crate) async fn clear_clock_anchor(pool: &Pool) -> Result<(), StoreError> {
                 sqlx::query("UPDATE world SET clock_anchor_unix_ms = NULL, clock_anchor_tick = NULL WHERE id = 1")

@@ -66,6 +66,21 @@ fn server_port_from(value: Option<&str>) -> Result<u16, String> {
     }
 }
 
+/// The WebTransport ingress's port (unset or empty = [`WEBTRANSPORT_PORT`]): several hosts
+/// on one machine (`just dev-r3`) each need their own.
+pub const WT_PORT_ENV: &str = "VOXEL_WT_PORT";
+
+/// The WebTransport port from the value of [`WT_PORT_ENV`].
+fn wt_port_from(value: Option<&str>) -> Result<u16, String> {
+    match value.map(str::trim).filter(|v| !v.is_empty()) {
+        None => Ok(WEBTRANSPORT_PORT),
+        Some(v) => match v.parse::<u16>() {
+            Ok(port) if port != 0 => Ok(port),
+            _ => Err(format!("invalid {WT_PORT_ENV} value `{v}` (expected a port 1-65535)")),
+        },
+    }
+}
+
 /// Whether to serve browsers over WebTransport (and write the cert-hash file
 /// the page reads). A single-player world is never reached from a browser, and
 /// its ingress would take the dev server's 6467 and overwrite its cert hash.
@@ -341,8 +356,11 @@ pub struct WorldIngress {
     ip: std::net::IpAddr,
     /// The QUIC port.
     port: u16,
-    /// Whether the WebTransport ingress (`ip`:[`WEBTRANSPORT_PORT`]) runs.
+    /// Whether the WebTransport ingress (`ip`:[`Self::wt_port`]) runs.
     webtransport: bool,
+    /// The WebTransport ingress's port ([`WEBTRANSPORT_PORT`] unless
+    /// [`Self::with_webtransport_port`]).
+    wt_port: u16,
     /// Resolves each connection's `Hello` token before its session starts.
     players: player_store::SharedPlayerStore,
     /// Checks each `Hello`'s credential first (`VOXEL_AUTH`).
@@ -362,13 +380,28 @@ impl WorldIngress {
         players: player_store::SharedPlayerStore,
         auth: Arc<auth_edge::Authenticator>,
     ) -> Self {
-        Self { ip, port, webtransport, players, auth, wt_cert: None, sinks: Arc::new(DashMap::new()) }
+        Self {
+            ip,
+            port,
+            webtransport,
+            wt_port: WEBTRANSPORT_PORT,
+            players,
+            auth,
+            wt_cert: None,
+            sinks: Arc::new(DashMap::new()),
+        }
     }
 
     /// The live connections by session id: the main loop marks the ones whose observer
     /// session the manager promoted to the home ([`ClientSink::set_home`]).
     pub fn sinks(&self) -> Arc<DashMap<ClientId, ClientSink>> {
         self.sinks.clone()
+    }
+
+    /// Serve WebTransport on `port` ([`WT_PORT_ENV`]).
+    pub fn with_webtransport_port(mut self, port: u16) -> Self {
+        self.wt_port = port;
+        self
     }
 
     /// Serve WebTransport with `cert` (minted ahead, so its hash could be advertised).
@@ -503,7 +536,7 @@ impl WorldIngress {
             let wt_next = next_client_id.clone();
             let wt_players = self.players.clone();
             let wt_auth = self.auth.clone();
-            let wt_addr = std::net::SocketAddr::new(self.ip, WEBTRANSPORT_PORT);
+            let wt_addr = std::net::SocketAddr::new(self.ip, self.wt_port);
             let minted = self.wt_cert.take();
             let certs = crate::webtransport::cert_source_from(
                 std::env::var(crate::webtransport::WT_CERT_ENV).ok().as_deref(),
@@ -664,6 +697,7 @@ pub fn run() -> claims::ServerExit {
     game::set_snapshot_sends_colliders(send_colliders);
     let configured_port = std::env::var(SERVER_PORT_ENV).ok();
     let port = server_port_from(configured_port.as_deref()).unwrap_or_else(|message| panic!("{message}"));
+    let wt_port = wt_port_from(std::env::var(WT_PORT_ENV).ok().as_deref()).unwrap_or_else(|message| panic!("{message}"));
     let configured_bind = std::env::var(BIND_ADDR_ENV).ok();
     let ip = bind_ip_from(configured_bind.as_deref()).unwrap_or_else(|message| panic!("{message}"));
     // The world is chosen before anything calls `forged::active()` (below), and
@@ -801,7 +835,8 @@ pub fn run() -> claims::ServerExit {
     }
     let auth = Arc::new(authenticator);
     let mut rgi = WorldIngress::new(ip, port, webtransport_enabled(single_player), players.clone(), auth.clone())
-        .with_webtransport_cert(wt_cert);
+        .with_webtransport_cert(wt_cert)
+        .with_webtransport_port(wt_port);
     let sinks = rgi.sinks();
     let configured_worker_threads = std::env::var("TOKIO_WORKER_THREADS").ok();
     let worker_threads = server_worker_threads(configured_worker_threads.as_deref())
@@ -1431,6 +1466,17 @@ mod tests {
             let err = server_port_from(Some(bad)).unwrap_err();
             assert!(err.contains(SERVER_PORT_ENV), "{err}");
             assert!(err.contains(bad), "{err}");
+        }
+    }
+
+    #[test]
+    fn webtransport_port_defaults_to_6467_and_takes_an_override() {
+        assert_eq!(wt_port_from(None), Ok(WEBTRANSPORT_PORT));
+        assert_eq!(wt_port_from(Some(" ")), Ok(WEBTRANSPORT_PORT));
+        assert_eq!(wt_port_from(Some("6477")), Ok(6477));
+        for bad in ["0", "65536", "port"] {
+            let err = wt_port_from(Some(bad)).unwrap_err();
+            assert!(err.contains(WT_PORT_ENV) && err.contains(bad), "{err}");
         }
     }
 

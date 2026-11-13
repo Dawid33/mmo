@@ -618,7 +618,12 @@ clean-old-worlds *args:
 #     rebuilds the tiles from the archived forge file (after a tile-format change);
 #   just worldctl export --db <url> <out.world>
 #     writes the stored forge file back out, for the file-based tools
-#     (`world-map`, `cross-section`, `history`, `genesis-probe`).
+#     (`world-map`, `cross-section`, `history`, `genesis-probe`);
+#   just worldctl clock-reset <url>
+#     clears the world clock anchor (`dev-r3` runs it before every start);
+#   just worldctl super-region <url> <n>
+#     sets the super-region side (regions per side) of a world no host has claimed
+#     yet; its hosts and coordinator then run with VOXEL_SUPER_REGION_REGIONS=<n>.
 # <url> = a .sqlite path or a postgres:// URL. A store a running server holds is
 # refused (its lock), never waited for. Built at `play_blocks`: the store's world
 # row and its world map are tied to the region size (pass region_blocks=N for others).
@@ -986,45 +991,79 @@ run-online: _dev-login-setup
 # certificate pin (`coordinator.cert-sha256`, its cert and private key beside it).
 dev_r2_dir := "target/dev-r2"
 
-# Make target/dev-r2/service-token (random, mode 0600) unless it exists.
-_dev-r2-token:
+# Several hosts of one world (R3: `host … hosts=N`, `dev-r3`) keep their dev secrets and
+# pins under the git-ignored target/dev-r3/ instead: the service token, the coordinator's
+# pin, host 0's login-link pin (`host-0.cert-sha256`) and every host's peer-link pin
+# (`host-<n>.peer.cert-sha256`), plus `dev-r3`'s logs.
+dev_r3_dir := "target/dev-r3"
+
+# Make <dir>/service-token (random, mode 0600) unless it exists.
+_dev-token dir:
     #!/usr/bin/env bash
     set -euo pipefail
-    mkdir -p {{dev_r2_dir}}
-    if [ ! -s {{dev_r2_dir}}/service-token ]; then
-        (umask 077; head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' >{{dev_r2_dir}}/service-token)
-        echo "made {{dev_r2_dir}}/service-token"
+    mkdir -p {{dir}}
+    if [ ! -s {{dir}}/service-token ]; then
+        (umask 077; head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' >{{dir}}/service-token)
+        echo "made {{dir}}/service-token"
     fi
+
+# Make target/dev-r2/service-token unless it exists.
+_dev-r2-token: (_dev-token dev_r2_dir)
 
 # The world coordinator alone (VOXEL_ROLE=coordinator) for the dev Postgres world
 # (`just pg-up` first): serves hosts on 127.0.0.1:6480 and writes its pin to
-# target/dev-r2/coordinator.cert-sha256. Play region size.
-coordinator: _dev-r2-token
+# target/dev-r2/coordinator.cert-sha256. Play region size. For a world of several
+# hosts pass the same `hosts` as to `host` (its token and pin are then under target/dev-r3/).
+coordinator hosts="1": (_dev-token (if hosts == "1" { dev_r2_dir } else { dev_r3_dir }))
     #!/usr/bin/env bash
     set -euo pipefail
     export VOXEL_REGION_BLOCKS={{play_blocks}}
     {{cap}} {{cargo}} build --bin server
-    VOXEL_ROLE=coordinator VOXEL_WORLD_DB={{dev_database_url}} \
-        VOXEL_SERVICE_TOKEN_FILE={{dev_r2_dir}}/service-token \
-        VOXEL_COORDINATOR_CERT_HASH_FILE={{dev_r2_dir}}/coordinator.cert-sha256 \
+    dir={{ if hosts == "1" { dev_r2_dir } else { dev_r3_dir } }}
+    VOXEL_ROLE=coordinator VOXEL_HOSTS={{hosts}} VOXEL_WORLD_DB={{dev_database_url}} \
+        VOXEL_SERVICE_TOKEN_FILE=$dir/service-token \
+        VOXEL_COORDINATOR_CERT_HASH_FILE=$dir/coordinator.cert-sha256 \
         RUST_BACKTRACE=1 ./target/debug/server
+
+# The environment of dev host $1 of $2 (`host`, `dev-r3`), as `NAME=value` words: peer
+# delay $3 ms, secrets and pins under $4, world store $5. Host n listens for clients on
+# UDP 6466 + 10n (WebTransport 6467 + 10n) and for its peers on 127.0.0.1:6500 + n; only
+# host 0 (the entry host, VOXEL_ENTRY_HOST's default) binds the login link (127.0.0.1:6490).
+# Several hosts need the login service (jwt, world `dev`); one host keeps VOXEL_AUTH as set.
+host_env_sh := '''
+o=$1 n=$2 dir=$4
+printf '%s ' VOXEL_ROLE=host VOXEL_OWNERSHIP=static VOXEL_HOST_ORDINAL=$o VOXEL_HOSTS=$n VOXEL_WORLD_DB=$5 \
+    VOXEL_SERVICE_TOKEN_FILE=$dir/service-token VOXEL_COORDINATOR_CERT_HASH_FILE=$dir/coordinator.cert-sha256 \
+    VOXEL_SERVER_PORT=$((6466 + 10 * o)) VOXEL_WT_PORT=$((6467 + 10 * o)) VOXEL_PEER_BIND=127.0.0.1:$((6500 + o)) \
+    VOXEL_PEER_LINK_DELAY_MS=$3
+if [ "$n" -gt 1 ]; then
+    printf '%s ' VOXEL_PEER_CERT_HASH_FILE=$dir/host-$o.peer.cert-sha256 \
+        VOXEL_ADVERTISE_WT=https://127.0.0.1:$((6467 + 10 * o))/ \
+        VOXEL_AUTH=jwt VOXEL_WORLD_ID=dev VOXEL_LOGIN_URL=http://127.0.0.1:8790
+fi
+if [ "$o" -eq 0 ]; then
+    printf '%s ' VOXEL_HOST_LINK_BIND=127.0.0.1:6490 VOXEL_HOST_LINK_CERT_HASH_FILE=$dir/host-0.cert-sha256
+fi
+'''
 
 # A region host (VOXEL_ROLE=host) of the dev Postgres world: host `ordinal` of `hosts`
 # (static ownership), dialing the coordinator at 127.0.0.1:6480 (started first or later —
-# it waits for the pin); clients connect on 127.0.0.1:6466 as with `just server`.
-# Local player names unless VOXEL_AUTH=jwt is set (see `dev-r2`; with jwt the host also
-# takes the login service's SpawnPlayer / Kick on 127.0.0.1:6490). Play region size.
-# R2 runs ONE host per world: keep the defaults. `ordinal` != 0 / `hosts` > 1 is R3 work —
-# the coordinator serves host ordinal 0 only, and a second host would also bind 6466.
-host ordinal="0" hosts="1": _dev-r2-token
+# it waits for the pin). Host n takes clients on UDP 6466 + 10n (WebTransport 6467 + 10n)
+# and its peer hosts on 127.0.0.1:6500 + n; `delay` holds every outgoing peer frame that
+# many ms (measurement only). One host (the defaults): as `just server` on 6466, local
+# player names unless VOXEL_AUTH=jwt is set (see `dev-r2`; with jwt it also takes the
+# login service's SpawnPlayer / Kick on 127.0.0.1:6490). Several hosts (`hosts` > 1, see
+# `dev-r3`, which runs them all): jwt with the login service, pins under target/dev-r3/,
+# and only host 0 binds the login link. Play region size.
+host ordinal="0" hosts="1" delay="0": (_dev-token (if hosts == "1" { dev_r2_dir } else { dev_r3_dir }))
     #!/usr/bin/env bash
     set -euo pipefail
+    if ! [[ "{{ordinal}}" =~ ^[0-9]+$ && "{{hosts}}" =~ ^[1-9][0-9]*$ && "{{delay}}" =~ ^[0-9]+$ ]] || (( {{ordinal}} >= {{hosts}} )); then
+        echo "host: ordinal < hosts and delay are whole numbers, given positionally (just host 1 2, not hosts=2)" >&2; exit 1
+    fi
     export VOXEL_REGION_BLOCKS={{play_blocks}}
     {{cap}} {{cargo}} build --bin server
-    VOXEL_ROLE=host VOXEL_OWNERSHIP=static VOXEL_HOST_ORDINAL={{ordinal}} VOXEL_HOSTS={{hosts}} \
-        VOXEL_WORLD_DB={{dev_database_url}} \
-        VOXEL_SERVICE_TOKEN_FILE={{dev_r2_dir}}/service-token \
-        VOXEL_COORDINATOR_CERT_HASH_FILE={{dev_r2_dir}}/coordinator.cert-sha256 \
+    env {{ shell(host_env_sh, ordinal, hosts, delay, if hosts == "1" { dev_r2_dir } else { dev_r3_dir }, dev_database_url) }} \
         RUST_BACKTRACE=1 ./target/debug/server
 
 # The split world with login: the dev Postgres (`pg-up`), the `dev-login` setup and login
@@ -1081,6 +1120,126 @@ dev-r2: pg-up _dev-login-setup _dev-r2-token
         VOXEL_AUTH=jwt VOXEL_WORLD_ID=dev VOXEL_LOGIN_URL=http://127.0.0.1:8790 \
         RUST_BACKTRACE=1 ./target/debug/server
 
+# The `dev-r3` host launches: one `launch <n> <env words>` line per host 0..$1 (delay $2,
+# dir $3, store $4, `host_env_sh` $5).
+dev_r3_launch_sh := '''
+i=0
+while [ "$i" -lt "$1" ]; do
+    printf 'launch %s %s\n' "$i" "$(sh -c "$5" sh "$i" "$1" "$2" "$3" "$4")"
+    i=$((i + 1))
+done
+'''
+
+# One world on several region hosts (R3) with login: the dev Postgres (`pg-up`, started
+# with max_prepared_transactions > 0 — several hosts stage their cuts in two phases and
+# refuse to start without it), the `dev-login` setup, `worldctl clock-reset`, the login
+# service, the coordinator (log target/dev-r3/coordinator.log) and, once it has written its
+# pin, EVERY host 0..`hosts` (`host` above: host n on UDP 6466 + 10n, peers on
+# 127.0.0.1:6500 + n; logs target/dev-r3/host-<n>.log). All of them on purpose: a host
+# ordinal that has never started is still awaited by placement, so logins are refused
+# (503) until every host of VOXEL_HOSTS has registered. World `dev` is re-registered with
+# host 0's login link once host 0 has written its pin. A host that exits 5
+# (EXIT_WORLD_ROLLBACK: a peer restarted dirty, the world went back to the last cut) is
+# started again; any other exit ends its loop. Ctrl-C stops the hosts first and waits for
+# them (their leave cut needs the coordinator), then the coordinator, then the login
+# service. `delay` holds every peer frame that many ms (measurement only). A world whose
+# super-region side was set (`just worldctl super-region <url> <n>`) needs
+# VOXEL_SUPER_REGION_REGIONS=<n> in the environment. First start on an empty database: see
+# `dev-r2` (`online_wait_secs`). Connect with `just run-online`-style login.
+dev-r3 hosts="2" delay="0": pg-up _dev-login-setup (_dev-token dev_r3_dir)
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if ! [[ "{{hosts}}" =~ ^[1-9][0-9]*$ && "{{delay}}" =~ ^[0-9]+$ ]]; then
+        echo "dev-r3: hosts and delay are whole numbers, given positionally (just dev-r3 3, not hosts=3)" >&2; exit 1
+    fi
+    export VOXEL_REGION_BLOCKS={{play_blocks}}
+    {{cap}} {{cargo}} build --bin server --bin worldctl
+    dir={{dev_r3_dir}}
+    pin=$dir/coordinator.cert-sha256
+    host_pin=$dir/host-0.cert-sha256
+    rm -f "$pin" "$host_pin" "$dir"/host-*.pid "$dir/stopping"
+    ./target/debug/worldctl clock-reset {{dev_database_url}} >/dev/null
+    echo "dev-r3: cleared the world clock anchor"
+    # Every server runs in its own session (setsid): Ctrl-C reaches only this script, which
+    # stops them in order.
+    VOXEL_SERVICE_TOKEN_FILE=$dir/service-token \
+        setsid ./target/debug/login serve >target/dev-login/login.log 2>&1 </dev/null &
+    lpid=$!
+    cpid=""
+    rpid=""
+    hpids=()
+    stop() {
+        # Ordered on purpose: a second Ctrl-C does not cut it short.
+        trap - EXIT
+        trap '' INT TERM
+        touch "$dir/stopping"
+        if [ -n "$rpid" ]; then kill "$rpid" 2>/dev/null || true; fi
+        if [ "${#hpids[@]}" -gt 0 ]; then
+            echo "dev-r3: stopping the hosts (each saves a leave cut with the coordinator)"
+            for f in "$dir"/host-*.pid; do
+                if [ -s "$f" ]; then kill -TERM "$(cat "$f")" 2>/dev/null || true; fi
+            done
+            wait "${hpids[@]}" 2>/dev/null || true
+        fi
+        if [ -n "$cpid" ]; then
+            echo "dev-r3: stopping the coordinator"
+            kill -TERM "$cpid" 2>/dev/null || true
+            wait "$cpid" 2>/dev/null || true
+        fi
+        echo "dev-r3: stopping the login service"
+        kill -TERM "$lpid" 2>/dev/null || true
+        wait "$lpid" 2>/dev/null || true
+    }
+    trap stop EXIT
+    trap 'exit 130' INT TERM
+    # Once host 0 has written its login-link pin: world `dev` gets the link.
+    (
+        until [ -s "$host_pin" ]; do sleep 0.5; done
+        ./target/debug/login world add dev --name "Dev world" --quic 127.0.0.1:6466 --wt https://127.0.0.1:6467/ \
+            --link 127.0.0.1:6490 --link-cert "$(cat "$host_pin")" >/dev/null
+        echo "dev-r3: world dev registered with host 0's login link (127.0.0.1:6490)"
+    ) &
+    rpid=$!
+    VOXEL_ROLE=coordinator VOXEL_HOSTS={{hosts}} VOXEL_WORLD_DB={{dev_database_url}} \
+        VOXEL_SERVICE_TOKEN_FILE=$dir/service-token VOXEL_COORDINATOR_CERT_HASH_FILE="$pin" \
+        setsid ./target/debug/server >$dir/coordinator.log 2>&1 </dev/null &
+    cpid=$!
+    echo "dev-r3: login on http://127.0.0.1:8790 (target/dev-login/login.log), coordinator on 127.0.0.1:6480 ($dir/coordinator.log)"
+    deadline=$(( SECONDS + {{online_wait_secs}} ))
+    until [ -s "$pin" ]; do
+        if ! kill -0 $cpid 2>/dev/null; then
+            echo "dev-r3: the coordinator exited; see $dir/coordinator.log" >&2; exit 1
+        fi
+        if (( SECONDS >= deadline )); then
+            echo "dev-r3: no coordinator pin after {{online_wait_secs}} s; see $dir/coordinator.log" >&2; exit 1
+        fi
+        sleep 0.5
+    done
+    # Host <n> with <env words>, started again while it exits 5 (EXIT_WORLD_ROLLBACK).
+    launch() {
+        local n=$1 log=$dir/host-$1.log
+        shift
+        (
+            while :; do
+                env "$@" RUST_BACKTRACE=1 setsid ./target/debug/server >>"$log" 2>&1 </dev/null &
+                spid=$!
+                echo "$spid" >"$dir/host-$n.pid"
+                if [ -e "$dir/stopping" ]; then kill -TERM "$spid" 2>/dev/null || true; fi
+                rc=0
+                wait "$spid" || rc=$?
+                if [ "$rc" -ne 5 ] || [ -e "$dir/stopping" ]; then
+                    echo "dev-r3: host $n exited ($rc); see $log"
+                    exit "$rc"
+                fi
+                echo "dev-r3: host $n exited 5 (the world rolled back to its last cut): starting it again"
+            done
+        ) &
+        hpids+=($!)
+        echo "dev-r3: host $n on UDP $((6466 + 10 * n)) ($log)"
+    }
+    {{ shell(dev_r3_launch_sh, hosts, delay, dev_r3_dir, dev_database_url, host_env_sh) }}
+    wait "${hpids[@]}" || true
+
 # Run exactly the tests a change touches, by crate + cargo-test arguments:
 #   just test-one game "--test it stud_lod::"
 #   just test-one client "--lib world_scale::"
@@ -1104,6 +1263,12 @@ test-login-pg *args:
 # and a host over a real service link on localhost, against the dev Postgres (`pg-up`).
 test-r2:
     MMO_TEST_DATABASE_URL=postgres://mmo:mmo@127.0.0.1:55432/postgres just test-one server "--features test-hooks --test roles -- --include-ignored"
+
+# The multi-host end-to-end tests (crates/server/tests/hosts.rs, all slow): a coordinator
+# and several hosts over real service and peer links on localhost, against the dev
+# Postgres (`pg-up`). Serial: each test already runs several hosts' region threads.
+test-r3:
+    MMO_TEST_DATABASE_URL=postgres://mmo:mmo@127.0.0.1:55432/postgres just test-one server "--features test-hooks --test hosts -- --include-ignored --test-threads=1"
 
 # Region threading: a player walking across the seam between two regions that
 # run on different threads. Two layers, both tagged slow (so smoke / test-one /

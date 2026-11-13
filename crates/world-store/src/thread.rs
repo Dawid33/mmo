@@ -75,6 +75,7 @@ pub(crate) enum Request {
     TerrainKind(Reply<Option<crate::TerrainKind>>),
     EnsureClockAnchor(game::ClockAnchor, Reply<game::ClockAnchor>),
     ClearClockAnchor(Reply<()>),
+    SetSuperRegionRegions(u32, Reply<bool>),
     RegisterHost(crate::HostRow, Fence, Reply<crate::HostBoot>),
     Hosts(Reply<Vec<crate::HostRow>>),
     WorldGeneration(Reply<u64>),
@@ -386,6 +387,10 @@ async fn serve(
                 let _w = writer.lock().await;
                 r.send(on_pool!(&pool, clear_clock_anchor()))
             }),
+            Request::SetSuperRegionRegions(n, r) => tokio::spawn(async move {
+                let _w = writer.lock().await;
+                r.send(on_pool!(&pool, set_super_region_regions(n)))
+            }),
             Request::RegisterHost(row, fence, r) => tokio::spawn(async move {
                 let _w = writer.lock().await;
                 r.send(on_pool!(&pool, register_host(row, &fence)))
@@ -469,6 +474,7 @@ fn refuse_if_read_only(req: Request, read_only: bool, cuts: &CutState) -> Option
         Request::BindTerrain(_, r) => r.send(Err(StoreError::ReadOnly)),
         Request::EnsureClockAnchor(_, r) => r.send(Err(StoreError::ReadOnly)),
         Request::ClearClockAnchor(r) => r.send(Err(StoreError::ReadOnly)),
+        Request::SetSuperRegionRegions(_, r) => r.send(Err(StoreError::ReadOnly)),
         Request::RegisterHost(_, _, r) => r.send(Err(StoreError::ReadOnly)),
         Request::PrepareCut(c, _, _, r) => {
             cuts.settle(c.id);
