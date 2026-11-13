@@ -4403,6 +4403,203 @@ fn players_handed_or_moved_to_a_leaver_park_there_in_one_part() {
     sweep("players_handed_or_moved_to_a_leaver_park_there_in_one_part", 2, 1, SEEDS / 4, players_toward_a_leaver);
 }
 
+// --- Every host leaving (Task 14b) ---------------------------------------------------
+
+/// Slimes and deposits that cross the host seam `a` | `b` both ways in the rounds around
+/// the hosts' leave requests (so some are on the wire, in a mailbox or held back when a
+/// leave cut parks everything), and a player standing on each side.
+struct LeaveTraffic {
+    a: RegionCoords,
+    b: RegionCoords,
+    slimes: Vec<(game::EntityId, RegionCoords, RegionCoords)>,
+    pushed: usize,
+    /// Items put down so far (each deposit before its region parked for a leave).
+    items: u64,
+}
+
+/// Slimes standing in `a` and `b`, a player on each of their hosts, every keeper body
+/// allowed to park, world cuts on. Entities whose region parks for the leave leave live
+/// tracking ([`MultiRig::parked_hold`]): they are checked on the stored state.
+fn leave_traffic(rig: &mut MultiRig) -> LeaveTraffic {
+    let (a, b) = host_seam(rig.hosts.len() as u32, rig.s);
+    let (ha, hb) = (rig.owner(a), rig.owner(b));
+    rig.run(a);
+    rig.run(b);
+    world_cuts(rig);
+    for h in 0..rig.hosts.len() as u32 {
+        keeper_may_park(rig, h);
+    }
+    rig.parked_hold = true;
+    rig.connect_home(ha, P_CLIENT, P_PLAYER, centre_of(a));
+    rig.connect_home(hb, P2_CLIENT, P2_PLAYER, centre_of(b));
+    let y = crate::common::above_floor_y();
+    let slimes = (0..6)
+        .map(|i| {
+            let (from, to) = if i % 2 == 0 { (a, b) } else { (b, a) };
+            (rig.spawn_slime(from, [REGION_SIZE / 2.0, y, 8.0 + 4.0 * i as f32]), from, to)
+        })
+        .collect();
+    rig.round();
+    LeaveTraffic { a, b, slimes, pushed: 0, items: 0 }
+}
+
+/// Whether `rc` runs on its owner, which has not parked for a leave.
+fn runs_unparked(rig: &mut MultiRig, rc: RegionCoords) -> bool {
+    let h = rig.owner(rc) as usize;
+    !rig.hosts[h].manager.leave_parked() && rig.hosts[h].manager.running_regions().contains(&rc)
+}
+
+/// One cut round; before it (from round `seed % 4` on) the next slime is pushed over the
+/// seam and a deposit goes across, each only while its source region still runs.
+fn traffic_round(rig: &mut MultiRig, t: &mut LeaveTraffic, round: usize) {
+    if t.pushed < t.slimes.len() && round >= (rig.seed % 4) as usize {
+        let (id, from, to) = t.slimes[t.pushed];
+        if runs_unparked(rig, from) {
+            rig.teleport(from, id, past_seam(from, to, 8.0 + 4.0 * t.pushed as f32));
+        }
+        let (from, to) = if t.pushed % 2 == 0 { (t.a, t.b) } else { (t.b, t.a) };
+        if runs_unparked(rig, from) {
+            crate::common::install_real_block_props();
+            let at = deposit_cell(from, to);
+            let stack = game::ItemStack { item: DIRT, count: DEPOSIT };
+            rig.host_of(from).manager.spawner_mut().with_region(from, |r| {
+                let now = r.current_tick();
+                r.with_data(|d| assert_eq!(d.deposit_items_safe(at, stack, now, game::PICKUP_DELAY_TICKS), 0));
+            });
+            t.items += u64::from(DEPOSIT);
+        }
+        t.pushed += 1;
+    }
+    rig.cut_round();
+}
+
+/// Traffic rounds until every host in `leavers` is named leaving in one world cut and
+/// that cut has begun on every host in `on` too: its id.
+fn until_leave_of(rig: &mut MultiRig, t: &mut LeaveTraffic, leavers: &[u32], on: &[u32]) -> game::CutId {
+    for round in 0..WORLD_CUT_ROUNDS {
+        let first = rig.hosts[leavers[0] as usize].manager.leaving_cut();
+        if let Some(cut) = first {
+            let all_leave = leavers.iter().all(|h| rig.hosts[*h as usize].manager.leaving_cut() == Some(cut));
+            let begun = on.iter().all(|h| rig.hosts[*h as usize].manager.world_cut() == Some(cut));
+            if all_leave && begun {
+                return cut;
+            }
+        }
+        traffic_round(rig, t, round);
+    }
+    panic!("hosts {leavers:?} never left in one cut begun on {on:?}; decisions {:?}", rig.decided);
+}
+
+/// Cut rounds until every host in `leavers` has its leave settled (its `CutDone` came and
+/// the server settled it): what its exit loop waits for.
+fn until_leaves_settled(rig: &mut MultiRig, leavers: &[u32]) {
+    for _ in 0..WAIT_ROUNDS {
+        if leavers.iter().all(|h| rig.hosts[*h as usize].manager.leave_outcome().is_some()) {
+            return;
+        }
+        rig.cut_round();
+    }
+    panic!("the leaves of {leavers:?} were never settled");
+}
+
+/// After every host left: each slime is stored exactly once, each player record is
+/// written once (by the host it stood on), the coordinator expects nobody; then every
+/// host "returns" — fresh managers restored from the store, in-flight rows on their way
+/// again — and the world is whole: each slime once, every item once, one body per player.
+fn assert_whole_after_leaves(rig: &mut MultiRig, t: &LeaveTraffic) {
+    let n = rig.hosts.len() as u32;
+    assert_eq!(rig.core().left_hosts(), (0..n).collect::<Vec<_>>(), "every host left");
+    for (id, _, _) in &t.slimes {
+        assert_eq!(rig.stored_places(*id).len(), 1, "{id:?} stored once: {:?}", rig.stored_places(*id));
+    }
+    for (player, rc) in [(P_PLAYER, t.a), (P2_PLAYER, t.b)] {
+        assert_eq!(rig.committed_players[&player].region, rc, "player {} stored where it stood", player.0);
+    }
+    let mut again = rig.rebuild_from_last_cut();
+    again.run(t.a);
+    again.run(t.b);
+    for (client, player) in [(P_CLIENT, P_PLAYER), (P2_CLIENT, P2_PLAYER)] {
+        let record = rig.committed_players[&player].clone();
+        let home = again.owner(record.region);
+        again.connect_home(home, client, player, record);
+    }
+    until_quiet(&mut again);
+    for (id, _, _) in &t.slimes {
+        assert_eq!(live_count(&mut again, *id), 1, "{id:?} once in the returned world");
+    }
+    assert!(t.items > 0, "some deposits went across");
+    assert_eq!(settled_items(&mut again), t.items, "every item once in the returned world");
+    for client in [P_CLIENT, P2_CLIENT] {
+        assert_eq!(again.player_owners(client).len(), 1, "one body of client {client}");
+    }
+}
+
+/// Task 14b: EVERY host asks to leave in the same batch (what the dev stack's shutdown
+/// does): one leave cut names them all leaving, each holds back toward every other (no
+/// stayer), every part still gets every other's mark and the cut commits — with
+/// slimes, deposits (and refusals of them, a leaver's regions being parked) in flight
+/// across the seam both ways. The stored world holds everything exactly once, and the
+/// returned world is whole.
+fn every_host_leaves(rig: &mut MultiRig) {
+    let mut t = leave_traffic(rig);
+    let all: Vec<u32> = (0..rig.hosts.len() as u32).collect();
+    for &h in &all {
+        rig.hosts[h as usize].manager.request_leave();
+    }
+    let cut = until_leave_of(rig, &mut t, &all, &all);
+    assert!(until_decided(rig, cut), "the leave cut of every host commits");
+    let (last, parts) = rig.last_committed();
+    assert_eq!(last, cut);
+    assert_eq!(parts.keys().copied().collect::<Vec<_>>(), all, "one part of every host");
+    until_leaves_settled(rig, &all);
+    for &h in &all {
+        assert_eq!(rig.hosts[h as usize].manager.leave_outcome(), Some(true), "host {h} left cleanly");
+    }
+    assert_whole_after_leaves(rig, &t);
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn both_hosts_leave_in_one_cut() {
+    sweep("both_hosts_leave_in_one_cut", 2, 1, SEEDS, every_host_leaves);
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn three_hosts_leave_in_one_cut() {
+    sweep("three_hosts_leave_in_one_cut", 3, 1, SEEDS / 4, every_host_leaves);
+}
+
+/// Task 14b: host A asks to leave; host B asks only once A's leave cut K has begun (its
+/// request misses K's batch): A leaves in K with B a stayer, then B leaves ALONE in the
+/// next cut, its only peer gone. What B held back for A in K (and sent A after it) is B's
+/// row of its own leave; the world is whole once both return.
+fn consecutive_leaves(rig: &mut MultiRig) {
+    let mut t = leave_traffic(rig);
+    let (ha, hb) = (rig.owner(t.a), rig.owner(t.b));
+    rig.hosts[ha as usize].manager.request_leave();
+    let first = until_leave_of(rig, &mut t, &[ha], &[ha, hb]);
+    rig.hosts[hb as usize].manager.request_leave();
+    assert!(until_decided(rig, first), "host {ha}'s leave cut commits");
+    assert_ne!(rig.hosts[hb as usize].manager.leaving_cut(), Some(first), "host {hb} stayed in it");
+    let second = until_leave_of(rig, &mut t, &[hb], &[hb]);
+    assert!(second > first);
+    assert!(rig.hosts[hb as usize].manager.peer_left(ha), "host {hb} saw host {ha} leave");
+    assert!(until_decided(rig, second), "host {hb}'s leave cut, alone, commits");
+    let (_, parts) = rig.last_committed();
+    assert_eq!(parts.keys().copied().collect::<Vec<_>>(), [hb], "the second cut is host {hb}'s alone");
+    until_leaves_settled(rig, &[ha, hb]);
+    assert_eq!(rig.hosts[hb as usize].manager.leave_outcome(), Some(true));
+    assert_eq!(rig.hosts[ha as usize].manager.leave_outcome(), Some(true));
+    assert_whole_after_leaves(rig, &t);
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn hosts_leave_in_consecutive_cuts() {
+    sweep("hosts_leave_in_consecutive_cuts", 2, 1, SEEDS, consecutive_leaves);
+}
+
 // --- Login placement across hosts (Task 15) ------------------------------------------
 
 /// The test login's player token (any string: the manager never resolves it).

@@ -3019,6 +3019,14 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.parked.keys().copied().collect()
     }
 
+    /// Test support: the entities parked region `rc`'s state holds (`None`: not parked
+    /// here, or its state does not decode).
+    #[doc(hidden)]
+    pub fn parked_entity_ids(&self, rc: RegionCoords) -> Option<Vec<crate::EntityId>> {
+        let rollback = self.parked.get(&rc)?.to_rollback().ok()?;
+        Some(rollback.id_index.keys().copied().collect())
+    }
+
     pub fn spawner_mut(&mut self) -> &mut S {
         &mut self.spawner
     }

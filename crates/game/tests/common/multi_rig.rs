@@ -195,6 +195,8 @@ pub enum Place {
     Unsent { host: u32, peer: u32 },
     /// In transit on the link to host `to`.
     Transit { to: u32 },
+    /// In the state of a region parked on a host (only with [`MultiRig::parked_hold`]).
+    Parked { host: u32, rc: RegionCoords },
 }
 
 pub struct MultiRig {
@@ -252,6 +254,10 @@ pub struct MultiRig {
     pub aborted_parts: Vec<(CutId, u32, WorldCut)>,
     /// Each direction's [`Strip`] hook, by `(from, to)`.
     pub strips: BTreeMap<(u32, u32), Arc<Mutex<Strip>>>,
+    /// The entities in every host's parked regions' states count as places too
+    /// ([`Place::Parked`], decoded every round — costly, so off by default): a test that
+    /// parks whole hosts (every host leaving) turns it on.
+    pub parked_hold: bool,
 }
 
 /// Host `h`'s endpoint in the rig (what its sessions' first packet names).
@@ -348,6 +354,7 @@ impl MultiRig {
                 prepared: Vec::new(),
                 aborted_parts: Vec::new(),
                 strips,
+                parked_hold: false,
             };
         for h in 0..hosts {
             rig.keep(h);
@@ -926,6 +933,7 @@ impl MultiRig {
         let mut settling = BTreeSet::new();
         let tracked_players = &self.players;
         let player_bodies = &mut self.player_bodies;
+        let parked_hold = self.parked_hold;
         for (h, rig) in self.hosts.iter_mut().enumerate() {
             let host = h as u32;
             for rc in rig.manager.running_regions() {
@@ -949,6 +957,13 @@ impl MultiRig {
             }
             for (id, _) in rig.manager.in_flight_ids().into_iter().chain(rig.manager.pending_arrival_ids()) {
                 places.entry(id).or_default().push(Place::Manager { host });
+            }
+            if parked_hold {
+                for rc in rig.manager.parked_regions() {
+                    for id in rig.manager.parked_entity_ids(rc).expect("a parked region's state decodes") {
+                        places.entry(id).or_default().push(Place::Parked { host, rc });
+                    }
+                }
             }
             for (peer, id, sent) in rig.manager.peer_unreceived_ids() {
                 if sent {
