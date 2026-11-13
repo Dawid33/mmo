@@ -139,11 +139,21 @@ pub(crate) struct CutState {
     pub pending: std::sync::Mutex<Option<CutId>>,
     /// `lock_timeout` of every cut transaction, ms ([`crate::CUT_LOCK_TIMEOUT_MS`]).
     pub lock_timeout_ms: AtomicU64,
+    /// Committed world cuts this handle decided that hold an entity in two regions
+    /// ([`two_phase::report_entities_twice`]).
+    pub entities_twice_cuts: AtomicU64,
+    /// Committed world cuts this handle decided whose check has run (found or not).
+    pub entities_checked_cuts: AtomicU64,
 }
 
 impl CutState {
     pub(crate) fn new() -> CutState {
-        CutState { pending: std::sync::Mutex::new(None), lock_timeout_ms: AtomicU64::new(crate::CUT_LOCK_TIMEOUT_MS) }
+        CutState {
+            pending: std::sync::Mutex::new(None),
+            lock_timeout_ms: AtomicU64::new(crate::CUT_LOCK_TIMEOUT_MS),
+            entities_twice_cuts: AtomicU64::new(0),
+            entities_checked_cuts: AtomicU64::new(0),
+        }
     }
 
     pub(crate) fn pending(&self) -> std::sync::MutexGuard<'_, Option<CutId>> {
@@ -313,16 +323,29 @@ async fn serve(
             }),
             // No writer lock for the decision, the abort or the sweep: a prepare
             // queued behind a prepared part's row lock waits for the decision.
-            Request::DecideCut(d, r) => tokio::spawn(async move {
-                r.send(match (&pool, world_tag) {
-                    (Pool::Pg(p), Some(tag)) => {
-                        let Decision { cut, tick, commit, hosts, leaving, fence, generation, stop_after } = *d;
-                        two_phase::decide_cut(p, tag, cut, tick, commit, hosts, leaving, fence, generation, stop_after)
-                            .await
+            Request::DecideCut(d, r) => {
+                let cuts = cuts.clone();
+                tokio::spawn(async move {
+                    let (cut, tick) = (d.cut, d.tick);
+                    let decided = match (&pool, world_tag) {
+                        (Pool::Pg(p), Some(tag)) => {
+                            let Decision { cut, tick, commit, hosts, leaving, fence, generation, stop_after } = *d;
+                            two_phase::decide_cut(p, tag, cut, tick, commit, hosts, leaving, fence, generation, stop_after)
+                                .await
+                        }
+                        _ => Err(StoreError::Unsupported(TWO_PHASE_UNSUPPORTED.into())),
+                    };
+                    let committed = matches!(decided, Ok(true));
+                    // Answered first: the check below never delays or fails the decision.
+                    r.send(decided);
+                    if let (true, Pool::Pg(p)) = (committed, &pool) {
+                        if two_phase::report_entities_twice(p, cut, tick).await {
+                            cuts.entities_twice_cuts.fetch_add(1, Ordering::SeqCst);
+                        }
+                        cuts.entities_checked_cuts.fetch_add(1, Ordering::SeqCst);
                     }
-                    _ => Err(StoreError::Unsupported(TWO_PHASE_UNSUPPORTED.into())),
                 })
-            }),
+            }
             Request::AbortCut(cut, tick, r) => tokio::spawn(async move {
                 r.send(match &pool {
                     Pool::Pg(p) => two_phase::abort_cut(p, world_tag.expect("set on Postgres"), cut, tick).await,

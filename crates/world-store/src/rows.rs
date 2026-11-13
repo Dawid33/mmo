@@ -119,8 +119,47 @@ fn check_entities_once(cut: &WorldCut) -> Result<(), StoreError> {
     Ok(())
 }
 
-/// An entity insert failing on the primary key is the same entity twice in one
-/// region of the cut ([`check_entities_once`] refuses it first).
+/// An entity of the cut still stored in `stored`, a region the cut does not rewrite
+/// ([`pg::run_cut`]'s stale-row guard): saving it would keep it in two regions.
+fn entity_stale(id: EntityId, saved: RegionCoords, stored: RegionCoords, tick: Tick) -> StoreError {
+    StoreError::Corrupt(format!(
+        "entity {id:?} in two regions of the cut at tick {tick}: saved in {saved:?}, still stored in \
+         {stored:?}, which the cut does not rewrite — an entity would be saved twice, a conservation \
+         bug; the cut was not committed"
+    ))
+}
+
+/// The guard against a stale row: an entity this cut writes (`n`, a row of a region of
+/// the cut — every such row was just written) with a row in another region (`o`, by
+/// [`check_entities_once`] not one of the cut's), for a batch of `n` of the cut's
+/// regions (`$1` on); `owned`: only rows in this host's regions (a prepared part:
+/// owner and side bound after the regions). One row is enough to refuse.
+fn stale_row_sql(n: usize, owned: bool) -> String {
+    let regions: Vec<String> = (0..n).map(|k| format!("(n.rx = ${} AND n.rz = ${})", 2 * k + 1, 2 * k + 2)).collect();
+    // Postgres only (a prepared part): the other row's region lies in a super-region
+    // owned by `$o` (`super_region_of`: floor division by `$s`, the side).
+    let owned = if owned {
+        let (o, side) = (2 * n + 1, 2 * n + 2);
+        format!(
+            " AND EXISTS (SELECT 1 FROM super_regions sr WHERE sr.owner = ${o} \
+               AND sr.sx = FLOOR(o.rx::numeric / ${side}::numeric)::bigint \
+               AND sr.sz = FLOOR(o.rz::numeric / ${side}::numeric)::bigint)"
+        )
+    } else {
+        String::new()
+    };
+    format!(
+        "SELECT n.birth_rx, n.birth_rz, n.serial, n.rx, n.rz, o.rx, o.rz FROM entities n \
+         JOIN entities o ON o.birth_rx = n.birth_rx AND o.birth_rz = n.birth_rz AND o.serial = n.serial \
+           AND NOT (o.rx = n.rx AND o.rz = n.rz) \
+         WHERE ({}){owned} LIMIT 1",
+        regions.join(" OR ")
+    )
+}
+
+/// An entity insert failing on the primary key `(rx, rz, birth…, serial)` is the same
+/// entity twice in one region of the cut — [`check_entities_once`] refuses that before
+/// anything is written; this is the backstop.
 fn entity_insert_error(e: sqlx::Error, id: EntityId, rc: RegionCoords, tick: Tick) -> StoreError {
     match &e {
         sqlx::Error::Database(d) if d.is_unique_violation() => entity_twice(id, rc, tick),
@@ -934,6 +973,45 @@ macro_rules! engine_rows {
                 Ok(done)
             }
 
+            /// Refuses the cut if an entity it saved still has a row in a region the cut
+            /// cannot be deleting (that row is visible here: committed, or this
+            /// transaction's): one phase — any other region; a prepared part — another
+            /// region OWNED BY THIS HOST (the claim rows of `fence.owner`, read in this
+            /// transaction): a row in a peer's region may be deleted by that peer's part of
+            /// the same cut and is judged after the decision instead
+            /// (`two_phase::report_entities_twice`). One query per batch of regions, the
+            /// other row found through `entities_id` (migration 0010).
+            async fn check_stale_rows(
+                conn: &mut Conn,
+                cut: &WorldCut,
+                fence: &Fence,
+                s: u32,
+                end: &CutEnd,
+            ) -> Result<(), StoreError> {
+                let owned = matches!(end, CutEnd::Prepare { .. });
+                let regions: Vec<RegionCoords> = cut.regions.iter().filter(|(_, r)| !r.entities.is_empty()).map(|(rc, _)| *rc).collect();
+                for batch in regions.chunks(FENCE_CHECK_BATCH) {
+                    let sql = stale_row_sql(batch.len(), owned);
+                    let mut q = sqlx::query(&sql);
+                    for rc in batch {
+                        q = q.bind(rc.x as i64).bind(rc.z as i64);
+                    }
+                    if owned {
+                        q = q.bind(i64::from(fence.owner)).bind(i64::from(s));
+                    }
+                    if let Some(r) = q.fetch_optional(&mut *conn).await? {
+                        let id = EntityId {
+                            birth_region: region_of(r.try_get(0)?, r.try_get(1)?)?,
+                            serial: u(r.try_get(2)?),
+                        };
+                        let saved = region_of(r.try_get(3)?, r.try_get(4)?)?;
+                        let stored = region_of(r.try_get(5)?, r.try_get(6)?)?;
+                        return Err(entity_stale(id, saved, stored, cut.tick));
+                    }
+                }
+                Ok(())
+            }
+
             /// The rows of a cut, inside the caller's transaction. First the fence:
             /// every super-region the cut touches and every one `fence` claimed must
             /// still be held ([`commit_check_set`]). The world tick is written only
@@ -1051,6 +1129,7 @@ macro_rules! engine_rows {
                         .map_err(|e| entity_insert_error(e, b.id, *rc, cut.tick))?;
                     }
                 }
+                check_stale_rows(&mut *conn, cut, fence, s, end).await?;
                 for (id, record) in &cut.players {
                     let done = sqlx::query("UPDATE players SET record = $1, saved_tick = $2 WHERE player_id = $3")
                         .bind(encode(FORMAT_PLAYER_RECORD, record))

@@ -341,6 +341,50 @@ async fn finish_part(pool: &PgPool, gid: &str, commit: bool) -> Result<(), Store
     Err(StoreError::Backend(format!("{verb} {gid}: still busy after {PREPARED_BUSY_TRIES} tries")))
 }
 
+/// Entities reported per cut by [`report_entities_twice`] at most.
+const ENTITIES_TWICE_LISTED: i64 = 20;
+
+/// After a COMMITTED world cut (detect only — it cannot refuse: each host's part could
+/// only judge its own regions, `rows::check_stale_rows`): any entity saved at the cut's
+/// tick that also has a row in another region, e.g. one a region respawned from the
+/// store still holds while it lives on another host. One `error!` per cut naming the
+/// entities and their regions; whether there was any. Errors of the check itself are
+/// warned and ignored.
+pub(crate) async fn report_entities_twice(pool: &PgPool, cut: CutId, tick: Tick) -> bool {
+    let rows = sqlx::query_as::<_, (i64, i64, i64, i64, i64, i64, i64)>(
+        "SELECT n.birth_rx, n.birth_rz, n.serial, n.rx, n.rz, o.rx, o.rz FROM entities n \
+         JOIN entities o ON o.birth_rx = n.birth_rx AND o.birth_rz = n.birth_rz AND o.serial = n.serial \
+           AND NOT (o.rx = n.rx AND o.rz = n.rz) \
+         WHERE n.saved_tick = $1 ORDER BY n.birth_rx, n.birth_rz, n.serial, o.rx, o.rz LIMIT $2",
+    )
+    .bind(tick as i64)
+    .bind(ENTITIES_TWICE_LISTED)
+    .fetch_all(pool)
+    .await;
+    match rows {
+        Ok(rows) if rows.is_empty() => false,
+        Ok(rows) => {
+            let list: Vec<String> = rows
+                .iter()
+                .map(|(bx, bz, serial, rx, rz, ox, oz)| {
+                    format!("entity ({bx}, {bz})#{} in ({rx}, {rz}) and ({ox}, {oz})", *serial as u64)
+                })
+                .collect();
+            log::error!(
+                "[world-store] world cut {} at tick {tick} committed an entity stored in two regions — a conservation \
+                 bug the hosts' parts could not refuse (the next start loads both copies): {}",
+                cut.0,
+                list.join("; ")
+            );
+            true
+        }
+        Err(e) => {
+            log::warn!("[world-store] world cut {}: the check for entities stored twice failed: {e}", cut.0);
+            false
+        }
+    }
+}
+
 /// Finishes every prepared part of this world that a crash left behind: a decided
 /// cut's parts as decided; an undecided cut is aborted first (the abort row carries
 /// [`SWEEP_ABORT_TICK`]). Safe beside other processes doing the same.

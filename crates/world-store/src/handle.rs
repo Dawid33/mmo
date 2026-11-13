@@ -159,6 +159,19 @@ impl StoreHandle {
         self.cuts.lock_timeout_ms.store(ms, Ordering::SeqCst);
     }
 
+    /// How many committed world cuts this handle (and its clones) decided were found to
+    /// hold an entity stored in two regions (each reported once with `error!`).
+    pub fn cuts_with_entities_twice(&self) -> u64 {
+        self.cuts.entities_twice_cuts.load(Ordering::SeqCst)
+    }
+
+    /// Test hook: how many committed world cuts this handle decided have had that check
+    /// run (it runs after the decision is answered).
+    #[doc(hidden)]
+    pub fn cuts_checked_for_entities_twice(&self) -> u64 {
+        self.cuts.entities_checked_cuts.load(Ordering::SeqCst)
+    }
+
     /// Takes one of [`StoreHandle::fail_next_writes`]' failures, if any are left.
     fn injected_failure(&self) -> Option<StoreError> {
         self.fail_writes

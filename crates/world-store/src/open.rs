@@ -127,15 +127,64 @@ pub async fn open_pool(url: &StoreUrl, dials: Dials, mode: OpenMode) -> Result<(
         return Err(refused);
     }
     if writer {
+        if let Some(from) = applied.filter(|a| *a < newest_migration()) {
+            log::info!("[world-store] migrating the schema from {from} to {} ({})", newest_migration(), url);
+        }
         match &pool {
             Pool::Sqlite(p) => sqlx::migrate!("migrations/sqlite").run(p).await?,
-            Pool::Pg(p) => sqlx::migrate!("migrations/pg").run(p).await?,
+            Pool::Pg(p) => migrate_pg(p).await?,
         }
     } else {
         check_schema(applied)?;
     }
     check_world_row(&pool, dials, writer).await?;
     Ok((pool, guard))
+}
+
+/// How long a Postgres migration waits for any lock, ms ([`set_migrate_lock_timeout_ms`]).
+pub const MIGRATE_LOCK_TIMEOUT_MS: u64 = 30_000;
+
+static MIGRATE_LOCK_TIMEOUT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(MIGRATE_LOCK_TIMEOUT_MS);
+
+/// Test hook: the lock timeout of the next Postgres migrations, ms (process-wide).
+#[doc(hidden)]
+pub fn set_migrate_lock_timeout_ms(ms: u64) {
+    MIGRATE_LOCK_TIMEOUT.store(ms, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Runs the Postgres migrations on one connection whose `lock_timeout` bounds every
+/// lock wait. A prepared cut part a crash left behind keeps its table locks, and an
+/// `ALTER TABLE` / `CREATE INDEX` behind it would otherwise wait for ever before
+/// anything (`resolve_prepared`) could finish it: the open fails instead, naming the
+/// prepared transactions and the remedy.
+async fn migrate_pg(pool: &sqlx::PgPool) -> Result<(), StoreError> {
+    let ms = MIGRATE_LOCK_TIMEOUT.load(std::sync::atomic::Ordering::SeqCst);
+    let mut conn = pool.acquire().await?;
+    sqlx::Executor::execute(&mut *conn, format!("SET lock_timeout = '{ms}ms'").as_str()).await?;
+    let ran = sqlx::migrate!("migrations/pg").run(&mut *conn).await;
+    let lock_timeout = |e: &sqlx::Error| matches!(e, sqlx::Error::Database(d) if d.code().as_deref() == Some("55P03"));
+    let timed_out = match &ran {
+        Err(sqlx::migrate::MigrateError::Execute(e)) | Err(sqlx::migrate::MigrateError::ExecuteMigration(e, _)) => lock_timeout(e),
+        _ => false,
+    };
+    if timed_out {
+        let gids: Vec<String> =
+            sqlx::query_scalar("SELECT gid FROM pg_prepared_xacts WHERE database = current_database() ORDER BY gid")
+                .fetch_all(&mut *conn)
+                .await
+                .unwrap_or_default();
+        // Never handed back with the setting (the connection is dropped, not reused).
+        conn.close_on_drop();
+        return Err(StoreError::Backend(format!(
+            "migrating the world schema waited longer than {ms} ms for a table lock; prepared transactions \
+             of this world (pg_prepared_xacts: {gids:?}) hold it — a save cut part a crashed host left \
+             staged. Start the previous build once (it resolves them), or run ROLLBACK PREPARED '<gid>' for \
+             each listed gid, then open the world again"
+        )));
+    }
+    ran?;
+    sqlx::Executor::execute(&mut *conn, "RESET lock_timeout").await?;
+    Ok(())
 }
 
 /// The migration that drops the voxel table and column (`0005_drop_voxel_terrain`).

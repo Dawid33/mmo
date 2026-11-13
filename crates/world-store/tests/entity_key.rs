@@ -95,6 +95,7 @@ fn world_keyed_entities_migrate_unchanged() {
 /// An entity twice in one region of a part, or in two of its regions, is refused as a
 /// conservation bug (the per-region key would take the second), and nothing is written.
 #[test]
+#[ignore = "slow: >100ms — run via just test-full"]
 fn entity_twice_in_one_part_is_refused() {
     each_backend("entity_twice", false, |url| {
         let h = open(url);
@@ -126,6 +127,51 @@ fn entity_twice_in_one_part_is_refused() {
             );
             assert!(h.stored_regions().unwrap().is_empty(), "case {n}: nothing written");
         }
+        h.shutdown();
+    });
+}
+
+/// Fix round 1, path (a): an entity stored in region A by a committed cut, then saved in
+/// region B by a later cut that leaves A out (A stopped without answering, or was given up
+/// at exit) — A's stale row would keep a second copy. The old world-wide key refused it;
+/// the stale-row guard refuses it now, nothing written. A healthy crossing (A and B both
+/// in the cut) is saved.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn entity_saved_while_a_region_outside_the_cut_still_holds_it_is_refused() {
+    each_backend("entity_stale", false, |url| {
+        let h = open(url);
+        let f = fence(&h);
+        let region = |entities: Vec<EntityBundle>| PortableRegion {
+            meta: meta(),
+            stud_ground: Some(stud_ground()),
+            entities,
+            ..Default::default()
+        };
+        let cut = |id: u64, regions: Vec<(RegionCoords, PortableRegion)>| WorldCut {
+            id: CutId(id),
+            host: 0,
+            tick: 100 * id,
+            regions,
+            in_flight: vec![],
+            players: vec![],
+            history: None,
+        };
+        h.commit_cut(cut(1, vec![(A, region(vec![entity(5)])), (B, region(vec![]))]), f.clone()).recv().unwrap().unwrap();
+        let err = h.commit_cut(cut(2, vec![(B, region(vec![entity(5)]))]), f.clone()).recv().unwrap().unwrap_err();
+        assert!(
+            matches!(&err, StoreError::Corrupt(m) if m.contains("still stored in RegionCoords { x: 0, z: 0 }")
+                && m.contains("conservation bug")),
+            "{err}"
+        );
+        assert_eq!(h.load_region(A, &f).unwrap().unwrap().entities, vec![entity(5)], "unchanged");
+        assert!(h.load_region(B, &f).unwrap().unwrap().entities.is_empty(), "unchanged");
+        assert_eq!(h.world_info().unwrap().world_tick, 100, "the cut was not committed");
+        // The healthy crossing: A rewritten without it in the same cut.
+        h.commit_cut(cut(3, vec![(A, region(vec![])), (B, region(vec![entity(5)]))]), f.clone()).recv().unwrap().unwrap();
+        assert_eq!(h.load_region(B, &f).unwrap().unwrap().entities, vec![entity(5)]);
+        // And a cut leaving A out that does not write the entity again is fine.
+        h.commit_cut(cut(4, vec![(B, region(vec![entity(5), entity(7)]))]), f.clone()).recv().unwrap().unwrap();
         h.shutdown();
     });
 }

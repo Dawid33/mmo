@@ -2671,6 +2671,12 @@ impl<S: RegionSpawner> WorldManager<S> {
                 players.entry(*player).or_insert_with(|| record.clone());
             }
         }
+        // Each player's record must be written by exactly ONE part of a world cut: the
+        // store's `players` row is keyed by player id world-wide and nothing in the
+        // database stops two parts from both writing it — only this protocol does (pinned
+        // by the seeded rig's `prepare_part`). A violation on Postgres is the second part
+        // waiting on the first's prepared row lock until its lock timeout (10 s): the cut
+        // aborts.
         let carried: BTreeMap<RegionCoords, u64> = cut.regions.iter().map(|(rc, (_, seq))| (*rc, *seq)).collect();
         let world_cut = WorldCut {
             host: self.ownership.0.ordinal(),

@@ -670,6 +670,7 @@ fn settled(h0: &StoreHandle, h1: &StoreHandle, cut: CutId) {
 /// region the two prepared parts touch no common row, so neither waits for the other, the
 /// decision commits both, and the entity is stored once, in host 1's region.
 #[test]
+#[ignore = "slow: >100ms — run via just test-full"]
 fn entity_crossing_between_two_parts_prepares_without_waiting() {
     let Some(w) = pg_world() else { return };
     let h = open(&w.url);
@@ -703,6 +704,8 @@ fn entity_crossing_between_two_parts_prepares_without_waiting() {
     assert!(h.load_region(A, &f0).unwrap().unwrap().entities.is_empty(), "gone from host 0's region");
     assert_eq!(h.load_region(B, &f1).unwrap().unwrap().entities, vec![e.clone()], "in host 1's region");
     assert_eq!(scalar_i64(&w, ENTITIES_STORED_TWICE), 0, "no entity stored in two regions");
+    until_checked(&h, 2);
+    assert_eq!(h.cuts_with_entities_twice(), 0, "a healthy crossing is not reported");
     // And back the other way, host 1's part prepared first.
     h1.prepare_cut(with(3, 1, vec![]), f1.clone(), 0).recv_timeout(Duration::from_secs(5)).unwrap().unwrap();
     h.prepare_cut(with(3, 0, vec![e.clone()]), f0.clone(), 0).recv_timeout(Duration::from_secs(5)).unwrap().unwrap();
@@ -712,6 +715,8 @@ fn entity_crossing_between_two_parts_prepares_without_waiting() {
     assert!(h.load_region(B, &f1).unwrap().unwrap().entities.is_empty());
     assert_eq!(scalar_i64(&w, "SELECT COUNT(*) FROM entities"), 1);
     assert_eq!(scalar_i64(&w, ENTITIES_STORED_TWICE), 0);
+    until_checked(&h, 3);
+    assert_eq!(h.cuts_with_entities_twice(), 0);
     assert_eq!(prepared(&w), 0);
     h1.shutdown();
     h.shutdown();
@@ -720,6 +725,7 @@ fn entity_crossing_between_two_parts_prepares_without_waiting() {
 /// A prepared part holding an entity in two of its regions is refused before anything is
 /// staged, and the next part is accepted.
 #[test]
+#[ignore = "slow: >100ms — run via just test-full"]
 fn prepared_part_with_an_entity_twice_is_refused() {
     let Some(w) = pg_world() else { return };
     let h = open(&w.url);
@@ -781,4 +787,136 @@ fn claim_holding_the_world_row_does_not_block_a_decision() {
     }
     rt.block_on(conn.close()).unwrap();
     h.shutdown();
+}
+
+/// Host 0's second region (same super-region as `A`).
+const A2: RegionCoords = RegionCoords { x: 1, z: 0 };
+
+/// Fix round 1, path (a) in a prepared part: an entity stored in host 0's region A, then
+/// saved by host 0's next part in its region A2 with A left out — refused at prepare
+/// (A is host 0's: its row cannot be deleted by any other part of the cut).
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn prepared_part_saving_an_entity_its_host_still_stores_elsewhere_is_refused() {
+    let Some(w) = pg_world() else { return };
+    let h = open(&w.url);
+    let (f0, _) = fences(&h);
+    let c = h.claim_coordinator().unwrap();
+    let e = crate::codec::bundle();
+    let mut first = part(1, 0);
+    first.regions[0].1.entities = vec![e.clone()];
+    h.prepare_cut(first, f0.clone(), 0).recv().unwrap().unwrap();
+    assert!(h.decide_cut(CutId(1), 100, true, vec![0], vec![], c, 0).unwrap());
+    assert_eq!(h.cut_decided(CutId(1)).unwrap(), Some(true));
+    let mut second = part(2, 0);
+    let mut other = region();
+    other.entities = vec![e.clone()];
+    second.regions = vec![(A2, other)];
+    let err = h.prepare_cut(second, f0.clone(), 0).recv().unwrap().unwrap_err();
+    assert!(matches!(&err, StoreError::Corrupt(m) if m.contains("still stored in") && m.contains("conservation bug")), "{err}");
+    assert_eq!(prepared(&w), 0, "nothing staged");
+    assert_eq!(h.load_region(A, &f0).unwrap().unwrap().entities, vec![e]);
+    h.shutdown();
+}
+
+/// Waits until `h` has checked `n` committed cuts for entities stored twice.
+fn until_checked(h: &StoreHandle, n: u64) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while h.cuts_checked_for_entities_twice() < n {
+        assert!(std::time::Instant::now() < deadline, "the post-commit check of cut {n} ran");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// Fix round 1, path (b): host 0's region A still stores an entity (e.g. respawned from
+/// the store) that now lives on host 1. Host 0's part leaves A out, host 1's part saves
+/// the entity in B: neither part can refuse it (a row in a peer's region may be deleted by
+/// the peer's part of the same cut), so the cut commits — and the decider reports it once.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn stale_row_across_hosts_commits_and_is_reported() {
+    let Some(w) = pg_world() else { return };
+    let h = open(&w.url);
+    let (f0, f1) = fences(&h);
+    let c = h.claim_coordinator().unwrap();
+    let h1 = open(&w.url);
+    let e = crate::codec::bundle();
+    let with = |id: u64, host: u32, entities: Vec<game::EntityBundle>| {
+        let mut p = part(id, host);
+        p.regions[0].1.entities = entities;
+        p
+    };
+    h.prepare_cut(with(1, 0, vec![e.clone()]), f0.clone(), 0).recv().unwrap().unwrap();
+    h1.prepare_cut(with(1, 1, vec![]), f1.clone(), 0).recv().unwrap().unwrap();
+    assert!(h.decide_cut(CutId(1), 100, true, vec![0, 1], vec![], c, 0).unwrap());
+    settled(&h, &h1, CutId(1));
+    until_checked(&h, 1);
+    assert_eq!(h.cuts_with_entities_twice(), 0, "a healthy cut reports nothing");
+    // Cut 2: host 0's part leaves A out (it holds no regions), host 1's saves e in B.
+    let mut empty = part(2, 0);
+    empty.regions.clear();
+    h.prepare_cut(empty, f0.clone(), 0).recv().unwrap().unwrap();
+    h1.prepare_cut(with(2, 1, vec![e.clone()]), f1.clone(), 0).recv().unwrap().expect("host 1 cannot judge A's row");
+    assert!(h.decide_cut(CutId(2), 200, true, vec![0, 1], vec![], c, 0).unwrap());
+    settled(&h, &h1, CutId(2));
+    until_checked(&h, 2);
+    assert_eq!(h.cuts_with_entities_twice(), 1, "the decider reports the cut");
+    assert_eq!(scalar_i64(&w, ENTITIES_STORED_TWICE), 1);
+    assert_eq!(prepared(&w), 0);
+    h1.shutdown();
+    h.shutdown();
+}
+
+/// Restores the migration lock timeout when dropped (a panicking test too).
+struct MigrateTimeout;
+
+impl Drop for MigrateTimeout {
+    fn drop(&mut self) {
+        world_store::set_migrate_lock_timeout_ms(world_store::MIGRATE_LOCK_TIMEOUT_MS);
+    }
+}
+
+/// Fix round 1, I2: a prepared cut part a crash left behind holds its table locks; a
+/// build whose migration needs `entities` must not wait for ever at open. The open fails
+/// within the migration's lock timeout, naming `pg_prepared_xacts`, the gid and the
+/// remedy; once the part is rolled back the open migrates.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn migration_behind_an_orphan_prepared_part_fails_with_the_remedy() {
+    let Some(w) = pg_world() else { return };
+    crate::voxel_refusal::old_store(&w.url, 9, "1", &[]);
+    let gid = "mmo-cut-1-1-0";
+    {
+        let url = w.db.url.clone();
+        let insert = format!(
+            "INSERT INTO entities (birth_rx, birth_rz, serial, rx, rz, saved_tick, kind, bundle) \
+             VALUES (0, 0, 1, 0, 0, 1, 1, {})",
+            crate::voxel_refusal::blob(&w.url, &[1, 2, 3])
+        );
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(async {
+                let mut c = sqlx::PgConnection::connect(&url).await.unwrap();
+                for sql in ["BEGIN", insert.as_str(), &format!("PREPARE TRANSACTION '{gid}'")] {
+                    sqlx::raw_sql(sql).execute(&mut c).await.unwrap();
+                }
+                c.close().await.unwrap();
+            })
+        })
+        .join()
+        .unwrap();
+    }
+    assert_eq!(prepared(&w), 1);
+    let _restore = MigrateTimeout;
+    world_store::set_migrate_lock_timeout_ms(300);
+    let at = std::time::Instant::now();
+    let err = StoreHandle::open(&w.url, Dials::BUILT, OpenMode::Writer).err().expect("the open fails");
+    assert!(at.elapsed() < Duration::from_secs(10), "within the bound: {:?}", at.elapsed());
+    let text = err.to_string();
+    assert!(text.contains("pg_prepared_xacts") && text.contains(gid) && text.contains("ROLLBACK PREPARED"), "{text}");
+    exec(&w, &format!("ROLLBACK PREPARED '{gid}'"));
+    world_store::set_migrate_lock_timeout_ms(world_store::MIGRATE_LOCK_TIMEOUT_MS);
+    let h = StoreHandle::open(&w.url, Dials::BUILT, OpenMode::Writer).expect("migrates once the part is gone");
+    h.shutdown();
+    assert_eq!(prepared(&w), 0);
 }

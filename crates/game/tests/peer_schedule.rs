@@ -3062,6 +3062,46 @@ fn cut_under_crossings_restores_each_entity_once() {
     sweep("cut_under_crossings_restores_each_entity_once", 2, 1, SEEDS, cut_under_crossings);
 }
 
+/// Task 12b fix round 1 (the benign case of the per-region entity key): a slime stored in
+/// host A's region `a` by a committed cut crosses to host B's region `b`, then `a` parks
+/// before the next cut. The next committed cut stores it in `b` only (the rig's store
+/// checks no entity is in two regions after every commit), and the world restarted from
+/// that cut has one live copy.
+fn crossing_then_park(rig: &mut MultiRig) {
+    let (a, b) = host_seam(2, 1);
+    let hb = rig.owner(b);
+    rig.run(a);
+    rig.run(b);
+    world_cuts(rig);
+    let y = crate::common::above_floor_y();
+    let id = rig.spawn_slime(a, [REGION_SIZE / 2.0, y, REGION_SIZE / 3.0]);
+    until_committed(rig, 1);
+    assert_eq!(rig.stored_places(id).iter().map(|(_, rc, _)| *rc).collect::<Vec<_>>(), [a], "stored in a first");
+    assert!(push_over(rig, id, a, b), "the slime stands in a");
+    for _ in 0..CROSS_ROUNDS {
+        if rig.owners_of(id) == [(hb, b)] {
+            break;
+        }
+        rig.round();
+    }
+    assert_eq!(rig.owners_of(id), [(hb, b)], "the slime crossed to b");
+    rig.park(a);
+    until_committed(rig, 1);
+    let places = rig.stored_places(id);
+    assert_eq!(places, [(hb, b, "state")], "stored in b only: {places:?}");
+    let mut again = rig.rebuild_from_last_cut();
+    again.run(a);
+    again.run(b);
+    until_quiet(&mut again);
+    assert_eq!(live_count(&mut again, id), 1, "one live copy in the restarted world");
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn crossing_then_parking_the_source_region_stores_the_entity_once() {
+    sweep("crossing_then_parking_the_source_region_stores_the_entity_once", 2, 1, SEEDS / 2, crossing_then_park);
+}
+
 /// Slimes leave both sides of the host seam one tick apart around a world cut's tick T
 /// (T−3 .. T+2): whichever were on the wire at T, the cut holds each once.
 fn on_the_wire(rig: &mut MultiRig) {

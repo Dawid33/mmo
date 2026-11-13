@@ -1880,11 +1880,14 @@ fn entity_crossing_hosts_between_cuts_does_not_stall_saving() {
     push_over_the_seam(&mut w, 0, id);
     w.pair.until("the slime on host 1", |p| p.sims[1].holders(id) == [b1]);
     w.until_committed_after(&db, stored);
-    let rows = format!(
-        "SELECT COUNT(*) FROM entities WHERE birth_rx = {} AND birth_rz = {} AND serial = {}",
-        id.birth_region.x, id.birth_region.z, id.serial as i64
-    );
-    assert_eq!(query_i64s(&db, &rows), [1], "the slime is stored once");
+    let rows = |column: &str| {
+        format!(
+            "SELECT {column} FROM entities WHERE birth_rx = {} AND birth_rz = {} AND serial = {}",
+            id.birth_region.x, id.birth_region.z, id.serial as i64
+        )
+    };
+    let stored_in: Vec<(i64, i64)> = query_i64s(&db, &rows("rx")).into_iter().zip(query_i64s(&db, &rows("rz"))).collect();
+    assert_eq!(stored_in, [(i64::from(b1.x), i64::from(b1.z))], "the slime is stored once, in host 1's region");
     assert_eq!(prepared(&db), 0, "nothing stays prepared");
     w.stop(&dir);
 }
