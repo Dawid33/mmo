@@ -695,7 +695,7 @@ mod tests {
     /// Two `BreakBlock` replies of one slot for different senders (no position,
     /// so no owner key) come out in sender order whatever order they went in.
     #[test]
-    fn a_break_block_reply_sorts_by_sender_and_content() {
+    fn a_break_block_reply_sorts_by_sender() {
         let (first, second) = (eid(-1, 0, 7), eid(0, 0, 2));
         let want = vec![break_reply(first), break_reply(second)];
         for order in [[0, 1], [1, 0]] {
