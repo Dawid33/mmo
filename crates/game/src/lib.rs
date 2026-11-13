@@ -55,6 +55,7 @@ pub mod region_runner;
 mod region_wire;
 pub use region_wire::set_snapshot_sends_colliders;
 pub mod save_cut;
+mod slot_order;
 pub mod registry;
 pub mod peer;
 pub mod people;
@@ -135,6 +136,7 @@ pub use portable::{
 pub use protocol::*;
 pub use region_runner::*;
 pub use save_cut::{CutId, InFlightRow, WorldCut, CUT_DEADLINE_LEADS, SAVE_CUT_LEAD_MAX_TICKS, SAVE_CUT_LEAD_TICKS};
+pub use slot_order::*;
 pub use registry::*;
 // Not a glob: `slope::classify` would collide with `biome::classify`; call it as `slope::classify`.
 pub use state::*;
