@@ -19,8 +19,12 @@
 //!   packet a client will never get, i.e. a silently incomplete join.
 //! * `backlog` — queued-but-unhandled messages: client→manager, region→manager,
 //!   manager→writer. Anything that keeps growing is the stage that cannot keep up.
-//! * `store_req` / `store_wait_max_ms` / `store_cpu_max_ms` — the world-store thread: requests
-//!   picked up, the longest wait of one from being sent, and the longest single encode / decode.
+//! * `store_req` / `store_wait_max_ms` / `store_lat_max_ms` / `store_cpu_max_ms` / `store_cpu_sum_ms` —
+//!   the world-store thread: requests picked up; the longest channel wait before the loop took one
+//!   (about 0 for a burst sent at once); the longest end-to-end latency (what a caller waited);
+//!   the longest single encode / decode and the window's total decode / encode time. High latency
+//!   with high cpu_sum = decoding is the bottleneck; high latency with low cpu_sum = the database.
+//!   Measure with a client connected (see below).
 //! * `tiles` — the served forged world's tile cache (only for a tiled world):
 //!   decoded MB resident (pinned ones included), MB pinned by running jobs, the
 //!   budget (`VOXEL_TILE_CACHE_MB`), and tiles loaded / failed loads in the
@@ -135,7 +139,10 @@ impl ServerReport {
             return;
         }
         self.window_start = Instant::now();
-        // Taken once per window, whether or not the line is said (an idle window is dropped).
+        // Taken once per window, whether or not the line is said: a max must mean one window,
+        // so an idle window's counters are dropped, not carried into the next line. Startup
+        // loads, before any region runs, fall in such an idle window: measure with a client
+        // connected.
         let st = store.map(|s| s.take_counters()).unwrap_or_default();
         let m = manager.take_perf_counters();
         let d = manager.depths();
@@ -159,7 +166,7 @@ impl ServerReport {
              latency avg={:.1}ms max={:.1}ms build avg={:.1}ms max={:.1}ms \
              | tx pkts={} bytes={} send sum={:.1}ms max={:.1}ms timeouts={} total_timeouts={} \
              | backlog in={} region={} tx={} \
-             | store_req={} store_wait_max_ms={} store_cpu_max_ms={}{}",
+             | store_req={} store_wait_max_ms={} store_lat_max_ms={} store_cpu_max_ms={} store_cpu_sum_ms={}{}",
             window.as_secs_f32(),
             d.sessions,
             d.running,
@@ -190,7 +197,9 @@ impl ServerReport {
             backlog.writer,
             st.requests,
             st.wait_ms_max,
+            st.latency_ms_max,
             st.cpu_ms_max,
+            st.cpu_ms_sum,
             tiles,
         );
     }

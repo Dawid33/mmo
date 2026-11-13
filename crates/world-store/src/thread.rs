@@ -33,19 +33,36 @@ pub(crate) fn on_store_thread() -> bool {
 }
 
 /// Where a request's answer goes: a blocking caller's channel or an async one's.
-pub(crate) enum Reply<T> {
+enum ReplyTo<T> {
     Sync(crossbeam::channel::Sender<Result<T, StoreError>>),
     Async(oneshot::Sender<Result<T, StoreError>>),
 }
 
+/// A request's answer channel, stamped with when the request was made: sending the
+/// answer on the store thread counts the request's end-to-end latency (the one choke
+/// point of every replying request kind).
+pub(crate) struct Reply<T> {
+    to: ReplyTo<T>,
+    sent: Instant,
+}
+
 impl<T> Reply<T> {
+    pub(crate) fn sync(tx: crossbeam::channel::Sender<Result<T, StoreError>>) -> Self {
+        Reply { to: ReplyTo::Sync(tx), sent: Instant::now() }
+    }
+
+    pub(crate) fn asynch(tx: oneshot::Sender<Result<T, StoreError>>) -> Self {
+        Reply { to: ReplyTo::Async(tx), sent: Instant::now() }
+    }
+
     pub(crate) fn send(self, v: Result<T, StoreError>) {
+        crate::counters::record_latency(self.sent.elapsed());
         // A caller that gave up waiting is not an error of the store.
-        match self {
-            Reply::Sync(tx) => {
+        match self.to {
+            ReplyTo::Sync(tx) => {
                 let _ = tx.send(v);
             }
-            Reply::Async(tx) => {
+            ReplyTo::Async(tx) => {
                 let _ = tx.send(v);
             }
         }

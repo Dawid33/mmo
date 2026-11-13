@@ -193,7 +193,7 @@ impl StoreHandle {
             ));
         }
         let (tx, rx) = crossbeam::channel::bounded(1);
-        self.send(make(Reply::Sync(tx))).map_err(|_| stopped())?;
+        self.send(make(Reply::sync(tx))).map_err(|_| stopped())?;
         rx.recv().map_err(|_| stopped())?
     }
 
@@ -201,7 +201,7 @@ impl StoreHandle {
     /// thread: the receiver disconnects).
     fn ask_later<T>(&self, make: impl FnOnce(Reply<T>) -> Request) -> crossbeam::channel::Receiver<Result<T, StoreError>> {
         let (tx, rx) = crossbeam::channel::bounded(1);
-        let _ = self.send(make(Reply::Sync(tx)));
+        let _ = self.send(make(Reply::sync(tx)));
         rx
     }
 
@@ -346,7 +346,7 @@ impl StoreHandle {
             let _ = tx.send(Err(e));
             return rx;
         }
-        if let Err(req) = self.send(Request::CommitCut(Box::new(cut), fence, Reply::Sync(tx))) {
+        if let Err(req) = self.send(Request::CommitCut(Box::new(cut), fence, Reply::sync(tx))) {
             if let Request::CommitCut(_, _, reply) = req {
                 reply.send(Err(stopped()));
             }
@@ -409,7 +409,7 @@ impl StoreHandle {
             }
             *pending = Some(cut.id);
         }
-        let req = Request::PrepareCut(Box::new(cut), fence, generation, Reply::Sync(tx));
+        let req = Request::PrepareCut(Box::new(cut), fence, generation, Reply::sync(tx));
         if let Err(Request::PrepareCut(c, _, _, reply)) = self.send(req) {
             self.cuts.settle(c.id);
             reply.send(Err(stopped()));
@@ -532,7 +532,7 @@ impl StoreHandle {
         key: &str,
     ) -> Result<(PlayerId, Option<PlayerRecord>), StoreError> {
         let (tx, rx) = oneshot::channel();
-        self.send(Request::ResolvePlayer(key.to_string(), Reply::Async(tx))).map_err(|_| stopped())?;
+        self.send(Request::ResolvePlayer(key.to_string(), Reply::asynch(tx))).map_err(|_| stopped())?;
         rx.await.map_err(|_| stopped())?
     }
 
@@ -560,7 +560,7 @@ impl StoreHandle {
             let _ = tx.send(Err(e));
             return rx;
         }
-        if let Err(req) = self.send(Request::SaveCoordinator(state, fence, Reply::Sync(tx))) {
+        if let Err(req) = self.send(Request::SaveCoordinator(state, fence, Reply::sync(tx))) {
             if let Request::SaveCoordinator(_, _, reply) = req {
                 reply.send(Err(stopped()));
             }
