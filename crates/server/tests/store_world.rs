@@ -226,6 +226,23 @@ fn legacy_saves_refuse_start() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A world store marked as saved on stud terrain does not start: opening the world is
+/// the store's refusal, naming re-forge — a start-up error, never a regenerated world —
+/// and the store is left as it was (still marked, still refused).
+#[test]
+fn stud_world_store_refuses_start() {
+    let dir = scratch("stud-store");
+    let url = world_store::StoreUrl::Sqlite(dir.join("w.sqlite"));
+    world_store::StoreHandle::open(&url, world_store::Dials::BUILT, world_store::OpenMode::Writer).unwrap().shutdown();
+    raw_exec(&url, "UPDATE world SET terrain = 1");
+    let source = WorldSource::Store { url: url.clone(), import: None };
+    for _ in 0..2 {
+        let err = open_world(&source, &small_params()).err().expect("a stud world is refused");
+        assert!(err.contains("stud terrain") && err.contains("re-forge"), "{err}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// The forge file goes into the store as tiles (its bytes kept as the
 /// archive row) and is deleted; the store then serves the world, with the
 /// tiled world's `content_crc` (Decision 8), not the file's crc32.
@@ -809,10 +826,10 @@ fn fenced_host_stops_and_writes_nothing() {
 /// a fenced one wins and maps to 3.
 fn rollback_exit_run(url: &world_store::StoreUrl, also_fenced: bool) {
     let store = world_store::StoreHandle::open(url, world_store::Dials::BUILT, world_store::OpenMode::Writer).unwrap();
-    install_props();
+    materials();
     let token = server::player_store::PlayerKey::Online(game::PlayerToken::generate([9; game::PLAYER_TOKEN_BYTES]));
     let (player, _) = StorePlayers(store.clone()).resolve(&token).unwrap();
-    let mut core = Core::open(&store);
+    let mut core = Core::open_with(&store, Box::new(flat_floor));
     core.manager.handle_server_event(ServerEvent::ClientConnected { client: 0, player, record: None }, 0);
     core.tick(3);
     let mut writer = server::cuts::CutWriter::new(core.claims.clone());

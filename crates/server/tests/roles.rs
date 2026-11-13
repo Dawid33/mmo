@@ -622,7 +622,6 @@ fn stale_epoch_host_is_refused_by_a_restarted_coordinator() {
     let dir = scratch("staleepoch");
     let cert_file = dir.join("coordinator.cert-sha256");
     let store = db.open();
-    server::world_file::bind_world_terrain(&store).expect("a stud world");
     let claim = || {
         HostClaims::claim(store.clone(), Ownership::Static { ordinal: 0, hosts: 1 }, Some(map.extent()), store.super_region_regions())
             .unwrap()
