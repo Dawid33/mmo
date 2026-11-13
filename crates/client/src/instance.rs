@@ -169,8 +169,10 @@ pub struct GameInstanceManager {
     /// Opens connections to other hosts (`None`: this transport has only the one).
     opener: Option<Box<dyn ConnOpener + Send>>,
     /// Regions whose observer connection closed, asked for again through the home
-    /// once `conn_clock_ms` reaches the value (`connections::observer_retry_delay_ms`).
-    observer_retry: BTreeMap<RegionCoords, u64>,
+    /// once `conn_clock_ms` reaches the due time (`connections::observer_retry_delay_ms`),
+    /// or sooner when the body comes near the region (`retry_observer_regions`):
+    /// `(due, scheduled at)`.
+    observer_retry: BTreeMap<RegionCoords, (u64, u64)>,
     /// How many times in a row each host's observer connection ended with regions to
     /// ask for again (by host ordinal; reset by a snapshot from that host): the retry
     /// backs off.
@@ -1694,9 +1696,13 @@ impl GameInstanceManager {
         );
         self.lod_assigned = assigned;
         // A former home lets go of the keys it held, paced like the requests.
-        for _ in 0..LOD_REQUESTS_PER_TICK {
+        let mut released = 0;
+        while released < LOD_REQUESTS_PER_TICK {
             let Some((conn, key)) = self.lod_release.pop_front() else { break };
-            self.conns.route(Outgoing::Conn(conn, ClientPacket::ReleaseLod(key)));
+            if self.conns.is_live(conn) {
+                self.conns.route(Outgoing::Conn(conn, ClientPacket::ReleaseLod(key)));
+                released += 1;
+            }
         }
         // Keys held since before the home moved hosts: asked of the new home again,
         // paced like new ones (and ahead of them).
@@ -1876,6 +1882,18 @@ impl GameInstanceManager {
             self.conns.ordinal_of(old),
             self.conns.home_ordinal()
         );
+        // The subscribes left unanswered at the old home get no answer the client reads
+        // any more (it reads only region traffic there): forgotten, so an unasked
+        // `RegionElsewhere` from the new home is never taken for their answer.
+        self.asked_home.clear();
+        // A release still queued for the new home (it was a former home itself) would
+        // land after the requests below and drop them: purged, as are those for a
+        // connection that closed. No release is ever queued for the home, so every
+        // (host, key) ends on what the client holds. Releases for a key no longer held
+        // stay: that host still holds it.
+        let new = self.conns.home();
+        let conns = &self.conns;
+        self.lod_release.retain(|(conn, _)| *conn != new && conns.is_live(*conn));
         // Released there and asked here again, both paced (`update_lod_window`).
         self.lod_release.extend(self.lod_subscribed.iter().map(|key| (old, *key)));
         self.lod_resend = self.lod_subscribed.clone();
@@ -1925,28 +1943,43 @@ impl GameInstanceManager {
         };
         // The body is in, or next to, a region that host served (or moving to one):
         // the host may get it any moment and must see a session within its grace.
-        let near = lost.iter().any(|rc| {
-            Some(*rc) == self.pending_move
-                || self.home_region.is_some_and(|home| (rc.x - home.x).abs() <= 1 && (rc.z - home.z).abs() <= 1)
-        });
+        let near = lost.iter().any(|rc| self.near_body(*rc));
         let wait = crate::connections::observer_retry_delay_ms(failures, near);
         if routine {
             info!("[client] the connection to host {ordinal:?} closed ({why}); {lost:?} asked for again in {wait} ms");
         } else {
             warn!("[client] the connection to host {ordinal:?} closed ({why}); {lost:?} asked for again in {wait} ms");
         }
-        let due = self.conn_clock_ms + wait;
+        let (now, due) = (self.conn_clock_ms, self.conn_clock_ms + wait);
         for rc in lost {
             self.drop_region(rc);
-            self.observer_retry.insert(rc, due);
+            self.observer_retry.insert(rc, (due, now));
         }
+    }
+
+    /// Whether `rc` is the body's region, next to it, or a move's target: the body may
+    /// be handed to its host any moment (`connections::OBSERVER_RETRY_NEAR_MAX_MS`).
+    fn near_body(&self, rc: RegionCoords) -> bool {
+        Some(rc) == self.pending_move
+            || self.home_region.is_some_and(|home| (rc.x - home.x).abs() <= 1 && (rc.z - home.z).abs() <= 1)
     }
 
     /// Ask the home again for the regions of a closed observer connection whose
     /// retry is due and that are still wanted.
     fn retry_observer_regions(&mut self) {
         let now = self.conn_clock_ms;
-        let due: Vec<RegionCoords> = self.observer_retry.iter().filter(|(_, at)| **at <= now).map(|(rc, _)| *rc).collect();
+        // A long wait set while the region was far is cut short once the body is near
+        // it now: its host must see a session within the hand-off grace.
+        let near_max = crate::connections::OBSERVER_RETRY_NEAR_MAX_MS;
+        let due: Vec<RegionCoords> = self
+            .observer_retry
+            .iter()
+            .filter(|(rc, (due, at))| {
+                let due = if self.near_body(**rc) { (*due).min(at + near_max) } else { *due };
+                due <= now
+            })
+            .map(|(rc, _)| *rc)
+            .collect();
         for rc in due {
             self.observer_retry.remove(&rc);
             if self.subscribed.contains(&rc) && !self.host.contains(&rc) {
@@ -2681,6 +2714,122 @@ mod manager_tests {
             self.0.fetch_add(1, Ordering::SeqCst);
             ConnHandle { send: crossbeam::channel::unbounded().0 }
         }
+    }
+
+    /// Keeps every opened connection's outgoing packets readable.
+    #[derive(Clone, Default)]
+    struct RecordingOpener(std::sync::Arc<std::sync::Mutex<Vec<Receiver<ClientPacket>>>>);
+
+    impl ConnOpener for RecordingOpener {
+        fn open(&mut self, _key: u32, _endpoint: &game::HostEndpoint, _credential: game::Credential) -> ConnHandle {
+            let (send, recv) = crossbeam::channel::unbounded();
+            self.0.lock().unwrap().push(recv);
+            ConnHandle { send }
+        }
+    }
+
+    /// The LOD keys a host holds for the client after the packets it got, in order.
+    fn lod_held(packets: impl IntoIterator<Item = ClientPacket>, held: &mut std::collections::BTreeSet<game::lod::LodKey>) {
+        for p in packets {
+            match p {
+                ClientPacket::RequestLod(key) => {
+                    held.insert(key);
+                }
+                ClientPacket::ReleaseLod(key) => {
+                    held.remove(&key);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Fix round 2 (Task 18 I1, m7): the home flips A -> B -> A -> B while the paced
+    /// LOD releases of the earlier flips are still queued (more keys than one tick
+    /// sends): no release reaches a host after its keys were asked of it again — at the
+    /// end B holds every key the client holds and A none. The subscribes left
+    /// unanswered at the old home are forgotten at each flip.
+    #[test]
+    fn lod_keys_end_on_the_home_after_quick_flips() {
+        let (mut manager, server_send, server_recv, _client_recv, _game) = manager_with_player();
+        let opener = RecordingOpener::default();
+        manager.set_conn_opener(Box::new(opener.clone()));
+        manager.set_lod_table(game::lod::LOD_RING_TABLE);
+        let home = RegionCoords::new(0, 0);
+        let b_region = RegionCoords::new(1, 0);
+        let endpoint = |ordinal| game::HostEndpoint { ordinal, quic: None, webtransport: None, cert_hash: None };
+        server_send.send(ServerPacket::Host(endpoint(0))).unwrap();
+        server_send.send(ServerPacket::PlayerRegion(Some(home), 0)).unwrap();
+        server_send
+            .send(ServerPacket::RegionElsewhere {
+                region: b_region,
+                endpoint: endpoint(1),
+                ticket: game::ObserverTicket { client: 0, nonce: 1 },
+            })
+            .unwrap();
+        assert!(manager.pump_packets(&server_recv).unwrap());
+        for _ in 0..200 {
+            manager.update_lod_window();
+        }
+        let keys = manager.lod_subscribed.clone();
+        assert!(keys.len() > 2 * LOD_REQUESTS_PER_TICK, "more keys than a tick sends: {}", keys.len());
+        let b = manager.conns.conn_to(1).expect("a connection to host 1");
+        let a = crate::connections::LOGIN_CONN;
+        let (events, incoming) = crossbeam::channel::unbounded();
+        let mut flip = |manager: &mut GameInstanceManager, conn: u32, hop: u64| {
+            events.send((conn, ConnEvent::Packet(ServerPacket::HomeHop(hop)))).unwrap();
+            events.send((conn, ConnEvent::Packet(ServerPacket::PlayerRegion(Some(home), 0)))).unwrap();
+            assert!(manager.pump(&incoming).unwrap());
+            assert_eq!(manager.conns.home(), conn);
+        };
+        manager.request_region(RegionCoords::new(-1, 0));
+        flip(&mut manager, b, 1);
+        let asked_forgotten = manager.asked_home.is_empty();
+        manager.update_lod_window();
+        flip(&mut manager, a, 2);
+        manager.update_lod_window();
+        flip(&mut manager, b, 3);
+        for _ in 0..200 {
+            manager.update_lod_window();
+        }
+        assert_eq!(manager.lod_subscribed, keys);
+        let mut on_a = std::collections::BTreeSet::new();
+        lod_held(manager.client_packet_recv().try_iter(), &mut on_a);
+        let mut on_b = std::collections::BTreeSet::new();
+        lod_held(opener.0.lock().unwrap()[0].try_iter(), &mut on_b);
+        assert_eq!(on_b, keys, "host B holds every key the client holds ({} missing)", keys.difference(&on_b).count());
+        assert!(on_a.is_empty(), "host A holds none: {} left", on_a.len());
+        assert!(asked_forgotten, "the old home's unanswered subscribes are forgotten at the flip");
+    }
+
+    /// Fix round 2 (Task 18 m5): a region's retry was set to a long wait while it was far
+    /// from the body; once the body is next to it, the retry fires within
+    /// `OBSERVER_RETRY_NEAR_MAX_MS` of when it was set, not at the long due time.
+    #[test]
+    fn a_long_retry_wait_is_cut_short_when_the_body_comes_near() {
+        let (mut manager, server_send, server_recv, _client_recv, _game) = manager_with_player();
+        let endpoint = game::HostEndpoint { ordinal: 0, quic: None, webtransport: None, cert_hash: None };
+        server_send.send(ServerPacket::Host(endpoint)).unwrap();
+        server_send.send(ServerPacket::PlayerRegion(Some(RegionCoords::new(0, 0)), 0)).unwrap();
+        assert!(manager.pump_packets(&server_recv).unwrap());
+        let _ = manager.client_packet_recv().try_iter().count();
+        let target = RegionCoords::new(4, 0);
+        manager.subscribed.insert(target);
+        let near_max = crate::connections::OBSERVER_RETRY_NEAR_MAX_MS;
+        let long = crate::connections::observer_retry_delay_ms(8, false);
+        assert!(long > near_max);
+        let at = manager.conn_clock_ms;
+        manager.observer_retry.insert(target, (at + long, at));
+        let asked = |m: &GameInstanceManager| {
+            m.client_packet_recv().try_iter().any(|p| matches!(p, ClientPacket::RequestRegionConnection(rc) if rc == target))
+        };
+        manager.conn_clock_ms = at + near_max;
+        manager.retry_observer_regions();
+        assert!(!asked(&manager), "far from the body: the long wait holds");
+        // The body walked next to it.
+        manager.home_region = Some(RegionCoords::new(3, 0));
+        manager.retry_observer_regions();
+        assert!(asked(&manager), "near the body: asked for again within the near cap");
+        assert!(manager.observer_retry.is_empty());
     }
 
     /// Fix round (Task 18 m4): a region subscribed and released twice through the home,
