@@ -540,6 +540,10 @@ impl RegionSpawner for InlineSpawner {
         send
     }
 
+    fn reap(&mut self, id: RegionCoords) {
+        self.failed.remove(&id);
+    }
+
     fn world_tick(&self) -> crate::Tick {
         self.rounds
     }
@@ -1668,8 +1672,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                     // A session sends input for its own client only.
                     kind @ (GameEventKind::PlayerInput(..)
                     | GameEventKind::UiAction(..)
-                    | GameEventKind::Order(..)
-                    | GameEventKind::Prefab(..))
+                    | GameEventKind::Order(..))
                         if kind.origin_client() != Some(id) =>
                     {
                         let now = self.clock_ms;
@@ -2305,9 +2308,10 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// own regions are only noted: their halos come from this host (live, or the final
     /// terrain of their park, which is never older than the store's).
     ///
-    /// LOD has nothing to do here: far terrain is the recipe's alone and never reads the
-    /// store, so the spec's §8 case 2 (invalidating LOD on another host's save) is not
-    /// built — the only stale cross-host read is halo seeding.
+    /// LOD: every such region whose version changed has its LOD keys invalidated
+    /// (`invalidate_region_lod`, as [`Self::cut_committed`] does for this host's own
+    /// saves): they may have been built from older stored, cached or pristine terrain,
+    /// and a rebuild reads the store (the spec's §8 case 2).
     pub fn stored_terrain_changed(&mut self, versions: BTreeMap<RegionCoords, u64>) {
         for (rc, version) in versions {
             let foreign = self.is_foreign(rc);
@@ -2324,8 +2328,10 @@ impl<S: RegionSpawner> WorldManager<S> {
             if changed {
                 self.stored_regions.insert(rc, version);
                 if foreign {
+                    self.pristine_terrain.remove(&rc);
                     self.terrain_cache.remove(&rc);
                 }
+                self.invalidate_region_lod(rc);
             }
             if !foreign || live || !(changed || stale) {
                 continue;
@@ -2885,7 +2891,7 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// arrives at `target`, a region of this host. A person with a history is delivered
     /// only into a running region (else absorbed), and the coordinator told so. A player's
     /// or a person's arrival wakes its target; anything else into a region that is not
-    /// running waits for it ([`Self::hold_arrival`]; a stud body settles at the seam
+    /// running waits for it ([`Self::hold_arrival`]; a voxel body settles at the seam
     /// instead). Otherwise it is in flight to the target. An inbound transfer is in a
     /// source's view of the pending cut only when its sender accounts for it (it came
     /// wrapped in that cut, `world_cut.rs`).
@@ -3160,8 +3166,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                 &event.kind,
                 kind @ (GameEventKind::PlayerInput(..)
                 | GameEventKind::UiAction(..)
-                | GameEventKind::Order(..)
-                | GameEventKind::Prefab(..)) if kind.origin_client() == Some(id)
+                | GameEventKind::Order(..)) if kind.origin_client() == Some(id)
             ),
             _ => true,
         }
