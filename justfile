@@ -1168,7 +1168,7 @@ done
 # (killed, e.g. `kill -9`) is started again after 1 s — at most 3 times within 60 s, then
 # its loop gives up. Any member ending otherwise (login, the coordinator, a host loop)
 # takes the whole stack down, exit 1. Ctrl-C stops the hosts first and waits for them (their
-# leave cut needs the coordinator; 45 s), then the coordinator, then the login service (60 s
+# leave cut needs the coordinator; 95 s, a host's own exit bound), then the coordinator, then the login service (60 s
 # each); what outlives its deadline is KILLed, and a second Ctrl-C kills at once.
 # Arguments are positional: `just dev-r3 3`, `just dev-r3 2 5` (`delay` holds every peer
 # frame that many ms; measurement only). A world whose super-region side was set

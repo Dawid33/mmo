@@ -889,3 +889,26 @@ fn manager_closes_a_link_whose_session_broke() {
     pump(&mut rig, &mut theirs);
     assert_eq!(closes.load(Ordering::SeqCst), 1, "once");
 }
+
+/// Final review m1: what a log prints of a dropped message never shows a player token
+/// (a spawn order's, a kick's, an in-cut player move's login).
+#[test]
+fn redacted_messages_hide_player_tokens() {
+    let order = Reliable::SpawnOrder {
+        origin: 0,
+        hops: 0,
+        player_token: "tok-secret-1".into(),
+        session_epoch: 1,
+        player: game::PlayerId(3),
+        record_region: None,
+    };
+    let kick = Reliable::InCut {
+        cut: CutId(1),
+        body: Box::new(Reliable::Kick { player_token: "tok-secret-2".into(), session_epoch: 1, reason: "bye".into() }),
+    };
+    for body in [order, kick] {
+        let shown = format!("{:?}", PeerMsg::Reliable { seq: 1, body: body.clone() }.redacted());
+        assert!(!shown.contains("tok-secret") && shown.contains("<secret>"), "{shown}");
+        assert!(format!("{body:?}").contains("tok-secret"), "the message itself is unchanged");
+    }
+}

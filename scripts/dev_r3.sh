@@ -23,7 +23,7 @@
 # Knobs (the defaults are what `just dev-r3` uses; tests drive the script with stubs):
 #   DEV_R3_SERVER (./target/debug/server), DEV_R3_LOGIN (./target/debug/login),
 #   DEV_R3_LOGIN_LOG (target/dev-login/login.log), DEV_R3_PIN_WAIT_SECS (180),
-#   DEV_R3_HOST_STOP_SECS (45: the leave cut's 30 s timeout + margin), DEV_R3_STOP_SECS (60),
+#   DEV_R3_HOST_STOP_SECS (95: a host's own bound on its exit, see below), DEV_R3_STOP_SECS (60),
 #   DEV_R3_RESTART_MAX (3), DEV_R3_RESTART_WINDOW_SECS (60), DEV_R3_RESTART_BACKOFF_SECS (1).
 set -uo pipefail
 
@@ -45,7 +45,12 @@ server=${DEV_R3_SERVER:-./target/debug/server}
 login=${DEV_R3_LOGIN:-./target/debug/login}
 login_log=${DEV_R3_LOGIN_LOG:-target/dev-login/login.log}
 pin_wait_secs=${DEV_R3_PIN_WAIT_SECS:-180}
-host_stop_secs=${DEV_R3_HOST_STOP_SECS:-45}
+# A host bounds its own exit (crates/server/src/cuts.rs `leave_world`): its leave cut must
+# BEGIN within game::LEAVE_CUT_TIMEOUT_SECS (30) of its request, and one begun is given up
+# game::WORLD_CUT_DEADLINE_MS (30 s) + server::EXIT_SAVE_TIMEOUT (30 s) after it began:
+# 90 s at worst, + 5 s margin. KILLing a host before that leaves its row dirty (the world
+# rolls back at its return); the usual leave takes ~3 s, and a second signal kills at once.
+host_stop_secs=${DEV_R3_HOST_STOP_SECS:-95}
 stop_secs=${DEV_R3_STOP_SECS:-60}
 restart_max=${DEV_R3_RESTART_MAX:-3}
 restart_window=${DEV_R3_RESTART_WINDOW_SECS:-60}

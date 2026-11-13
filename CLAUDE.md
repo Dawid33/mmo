@@ -183,7 +183,8 @@ print secrets.
   process stops writing and exits `EXIT_FENCED` (3, also when fenced at `register_host`); a dead coordinator
   thread exits `EXIT_COORDINATOR_FAILED` (4); a world rollback exits `EXIT_WORLD_ROLLBACK` (5). No advisory
   lock any more (SQLite keeps its flock). `OpenMode::ReadOnly` handles (export, tools) write nothing and need
-  the newest schema. Never add a store write that skips the fence.
+  the newest schema. Never add a store write that skips the fence. A world cut's commit decision must list
+  every host with a non-clean `hosts` row (`two_phase::decide_cut` records an abort otherwise).
 - **Link rules**: a re-`Attach` after any reconnect rebuilds the coordinator's view; requests are memoised by
   `RequestId` (idempotent resend); the Attach waits for exact people lists ("wait, never guess" — conservation
   beats latency). Login pushes `SpawnPlayer`/`Kick` to the host's link; kicks are durable until acked

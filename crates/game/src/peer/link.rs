@@ -120,7 +120,7 @@ impl PeerLink for InlinePeerLink {
         let to = 1 - self.end;
         let mut s = self.shared();
         if !s.up {
-            log::debug!("inline peer link down: {msg:?} lost");
+            log::debug!("inline peer link down: {:?} lost", msg.redacted());
             return;
         }
         let lag = mix(self.seed ^ to as u64, s.sent[to]) % (u64::from(self.max_delay_steps) + 1);

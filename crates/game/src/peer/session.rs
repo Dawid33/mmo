@@ -255,7 +255,7 @@ impl PeerSession {
                     }
                 }
                 (Conn::Up, PeerMsg::Volatile(v)) => events.push(PeerEvent::Volatile(v)),
-                (state, msg) => log::debug!("peer {}: {msg:?} dropped while {state:?}", self.peer),
+                (state, msg) => log::debug!("peer {}: {:?} dropped while {state:?}", self.peer, msg.redacted()),
             }
         }
         if self.state != Conn::Up {

@@ -1784,7 +1784,7 @@ fn aborted_leave_cut_past_the_leave_timeout_exits_dirty() {
 }
 
 /// The bound on both hosts' clean leave when they are stopped together: well inside the
-/// supervisor's 45 s deadline (the leave batch, a cut's lead and its decision take ~3 s).
+/// supervisor's 95 s deadline (the leave batch, a cut's lead and its decision take ~3 s).
 const BOTH_LEAVE_WITHIN: Duration = Duration::from_secs(15);
 
 /// Slime `id` in host `h`'s seam region, put just past the seam toward the other host's.

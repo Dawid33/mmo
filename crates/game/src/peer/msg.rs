@@ -62,7 +62,7 @@ pub struct Nonce(pub u64);
 
 impl std::fmt::Debug for Nonce {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("<secret>")
+        f.write_str(SECRET)
     }
 }
 
@@ -127,7 +127,35 @@ impl Reliable {
     pub fn is_state(&self) -> bool {
         matches!(self.inner(), Reliable::Transfer { .. } | Reliable::PlayerMove { .. } | Reliable::Intent(_))
     }
+
+    /// A copy with every player token shown as `<secret>` (as [`Nonce`] is): what a log
+    /// prints of a message.
+    pub fn redacted(&self) -> Reliable {
+        let mut r = self.clone();
+        r.redact();
+        r
+    }
+
+    fn redact(&mut self) {
+        match self {
+            Reliable::SpawnOrder { player_token, .. }
+            | Reliable::SpawnAck { player_token, .. }
+            | Reliable::Kick { player_token, .. }
+            | Reliable::KickAck { player_token, .. }
+            | Reliable::SessionEnded { player_token, .. } => *player_token = SECRET.into(),
+            Reliable::Transfer { player: Some(h), .. } | Reliable::PlayerMove { handoff: h, .. } => {
+                if let Some((token, _)) = h.login.as_mut() {
+                    *token = SECRET.into();
+                }
+            }
+            Reliable::InCut { body, .. } => body.redact(),
+            _ => {}
+        }
+    }
 }
+
+/// What a redacted secret shows ([`Nonce`]'s `Debug`, [`Reliable::redacted`]).
+const SECRET: &str = "<secret>";
 
 /// What may be lost: sent only while the peer is reachable, never replayed.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -155,4 +183,14 @@ pub enum PeerMsg {
     /// Cumulative: every reliable message up to `through` arrived.
     Ack { through: u64 },
     Volatile(Volatile),
+}
+
+impl PeerMsg {
+    /// A copy with every player token shown as `<secret>` ([`Reliable::redacted`]).
+    pub fn redacted(&self) -> PeerMsg {
+        match self {
+            PeerMsg::Reliable { seq, body } => PeerMsg::Reliable { seq: *seq, body: body.redacted() },
+            other => other.clone(),
+        }
+    }
 }
