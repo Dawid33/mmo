@@ -28,6 +28,24 @@ pub struct AccountRow {
     pub password_hash: String,
     pub email_verified_at: Option<i64>,
     pub created_at: i64,
+    /// The identity provider's subject; `None` for an account that never signed in through it.
+    pub subject: Option<String>,
+    pub display_name: String,
+}
+
+/// Longest stored `display_name`, in chars.
+pub const DISPLAY_NAME_MAX_CHARS: usize = 64;
+
+/// What [`LoginStore::upsert_oidc_account`] did.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OidcUpsert {
+    Created(AccountId),
+    /// The subject was known; email and name were refreshed.
+    Existing(AccountId),
+    /// A password account with this email now carries the subject.
+    Adopted(AccountId),
+    /// Another subject already holds this email.
+    EmailTaken,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -151,6 +169,8 @@ macro_rules! account_row {
             password_hash: $r.get(2),
             email_verified_at: $r.get(3),
             created_at: $r.get(4),
+            subject: $r.get(5),
+            display_name: $r.get(6),
         }
     };
 }
@@ -171,7 +191,7 @@ macro_rules! world_row {
     };
 }
 
-const ACCOUNT_COLS: &str = "account_id, email, password_hash, email_verified_at, created_at";
+const ACCOUNT_COLS: &str = "account_id, email, password_hash, email_verified_at, created_at, subject, display_name";
 const WORLD_COLS: &str =
     "world_id, name, status, quic, webtransport, cert_hash, created_at, host_link, host_link_cert";
 
@@ -229,6 +249,85 @@ impl LoginStore {
     pub async fn account_by_email(&self, email: &str) -> Result<Option<AccountRow>, LoginError> {
         let sql = format!("SELECT {ACCOUNT_COLS} FROM accounts WHERE email = $1");
         Ok(on!(self, p => sqlx::query(&sql).bind(email).fetch_optional(p).await?.map(|r| account_row!(r))))
+    }
+
+    pub async fn account_by_subject(&self, subject: &str) -> Result<Option<AccountRow>, LoginError> {
+        let sql = format!("SELECT {ACCOUNT_COLS} FROM accounts WHERE subject = $1");
+        Ok(on!(self, p => sqlx::query(&sql).bind(subject).fetch_optional(p).await?.map(|r| account_row!(r))))
+    }
+
+    /// Sign-in through the identity provider, in one transaction: the account of `subject`
+    /// (email and name refreshed); else the subject-less account with this email (adopted, and
+    /// its email marked verified); else [`OidcUpsert::EmailTaken`] if another subject holds the
+    /// email; else a new password-less account. `email` is already normalised (as for
+    /// [`Self::create_account`]); `display_name` is cut to [`DISPLAY_NAME_MAX_CHARS`].
+    pub async fn upsert_oidc_account(
+        &self,
+        subject: &str,
+        email: &str,
+        display_name: &str,
+        now: i64,
+    ) -> Result<OidcUpsert, LoginError> {
+        let name: String = display_name.chars().take(DISPLAY_NAME_MAX_CHARS).collect();
+        macro_rules! tx {
+            ($p:expr) => {{
+                let mut tx = $p.begin().await?;
+                let by_subject = sqlx::query("SELECT account_id FROM accounts WHERE subject = $1")
+                    .bind(subject)
+                    .fetch_optional(&mut *tx)
+                    .await?
+                    .map(|r| r.get::<i64, _>(0));
+                let out = if let Some(id) = by_subject {
+                    sqlx::query("UPDATE accounts SET email = $1, display_name = $2 WHERE account_id = $3")
+                        .bind(email)
+                        .bind(&name)
+                        .bind(id)
+                        .execute(&mut *tx)
+                        .await?;
+                    OidcUpsert::Existing(id)
+                } else if let Some(row) = sqlx::query("SELECT account_id, subject FROM accounts WHERE email = $1")
+                    .bind(email)
+                    .fetch_optional(&mut *tx)
+                    .await?
+                {
+                    if row.get::<Option<String>, _>(1).is_some() {
+                        OidcUpsert::EmailTaken
+                    } else {
+                        let id: i64 = row.get(0);
+                        sqlx::query(
+                            "UPDATE accounts SET subject = $1, display_name = $2, \
+                             email_verified_at = COALESCE(email_verified_at, $3) WHERE account_id = $4",
+                        )
+                        .bind(subject)
+                        .bind(&name)
+                        .bind(now)
+                        .bind(id)
+                        .execute(&mut *tx)
+                        .await?;
+                        OidcUpsert::Adopted(id)
+                    }
+                } else {
+                    let id: i64 = sqlx::query(
+                        "INSERT INTO accounts (email, password_hash, email_verified_at, created_at, subject, display_name) \
+                         VALUES ($1, '', $2, $2, $3, $4) RETURNING account_id",
+                    )
+                    .bind(email)
+                    .bind(now)
+                    .bind(subject)
+                    .bind(&name)
+                    .fetch_one(&mut *tx)
+                    .await?
+                    .get(0);
+                    OidcUpsert::Created(id)
+                };
+                tx.commit().await?;
+                out
+            }};
+        }
+        Ok(match &self.pool {
+            Pool::Sqlite(p) => tx!(p),
+            Pool::Pg(p) => tx!(p),
+        })
     }
 
     pub async fn account(&self, id: AccountId) -> Result<Option<AccountRow>, LoginError> {

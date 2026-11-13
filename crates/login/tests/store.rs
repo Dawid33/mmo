@@ -1,4 +1,4 @@
-use login::{LoginStore, RefreshOutcome, WorldRow};
+use login::{DISPLAY_NAME_MAX_CHARS, LoginStore, OidcUpsert, RefreshOutcome, WorldRow};
 use login_api::WorldStatus;
 
 async fn store() -> LoginStore {
@@ -369,4 +369,54 @@ async fn reset_password_spends_sets_and_revokes() {
     assert_ne!(s.take_refresh([1; 32], 11).await.unwrap(), RefreshOutcome::Valid { account: a, family: [9; 16] });
     assert_eq!(s.set_password_with_kicks(a, "newer", 12, "set").await.unwrap(), 0);
     assert_eq!(s.account(a).await.unwrap().unwrap().password_hash, "newer");
+}
+
+#[tokio::test]
+async fn oidc_first_login_creates_account() {
+    let s = store().await;
+    let OidcUpsert::Created(id) = s.upsert_oidc_account("s1", "a@x.io", "ann", 10).await.unwrap() else {
+        panic!("expected Created")
+    };
+    let row = s.account_by_subject("s1").await.unwrap().unwrap();
+    assert_eq!((row.account_id, row.display_name.as_str()), (id, "ann"));
+    assert_eq!((row.password_hash.as_str(), row.subject.as_deref()), ("", Some("s1")));
+    assert!(row.email_verified_at.is_some());
+}
+
+#[tokio::test]
+async fn oidc_second_login_updates_name_and_email() {
+    let s = store().await;
+    let OidcUpsert::Created(id) = s.upsert_oidc_account("s1", "a@x.io", "ann", 10).await.unwrap() else {
+        panic!("expected Created")
+    };
+    assert_eq!(s.upsert_oidc_account("s1", "b@x.io", "ann2", 11).await.unwrap(), OidcUpsert::Existing(id));
+    let row = s.account_by_subject("s1").await.unwrap().unwrap();
+    assert_eq!((row.display_name.as_str(), row.email.as_str()), ("ann2", "b@x.io"));
+}
+
+#[tokio::test]
+async fn oidc_adopts_password_account_by_email() {
+    let s = store().await;
+    let id = s.create_account("a@x.io", "hash", 5).await.unwrap().unwrap();
+    let token = s.player_token_for(id, "w1", 6, || "tok".into()).await.unwrap();
+    assert_eq!(s.upsert_oidc_account("s1", "a@x.io", "ann", 10).await.unwrap(), OidcUpsert::Adopted(id));
+    assert_eq!(s.player_token_for(id, "w1", 11, || panic!("must not mint again")).await.unwrap(), token);
+    let row = s.account_by_subject("s1").await.unwrap().unwrap();
+    assert_eq!((row.account_id, row.email_verified_at, row.password_hash.as_str()), (id, Some(10), "hash"));
+}
+
+#[tokio::test]
+async fn oidc_email_of_another_subject_is_refused() {
+    let s = store().await;
+    s.upsert_oidc_account("s1", "a@x.io", "ann", 10).await.unwrap();
+    assert_eq!(s.upsert_oidc_account("s2", "a@x.io", "bob", 11).await.unwrap(), OidcUpsert::EmailTaken);
+    assert!(s.account_by_subject("s2").await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn oidc_display_name_is_capped() {
+    let s = store().await;
+    s.upsert_oidc_account("s1", "a@x.io", &"é".repeat(200), 10).await.unwrap();
+    let row = s.account_by_subject("s1").await.unwrap().unwrap();
+    assert_eq!(row.display_name.chars().count(), DISPLAY_NAME_MAX_CHARS);
 }

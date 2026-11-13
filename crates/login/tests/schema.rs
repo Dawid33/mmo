@@ -132,6 +132,7 @@ fn expected_indexes() -> BTreeSet<Idx> {
     let i = |t: &str, c: &[&str], u| (t.to_string(), c.iter().map(|s| s.to_string()).collect(), u);
     BTreeSet::from([
         i("accounts", &["email"], true),
+        i("accounts", &["subject"], true),
         i("refresh_tokens", &["account_id"], false),
         i("refresh_tokens", &["family"], false),
         i("world_players", &["player_token"], true),
@@ -140,7 +141,7 @@ fn expected_indexes() -> BTreeSet<Idx> {
 
 /// table: columns as `name:I|T|B` with `?` = nullable, `*` = primary key.
 const EXPECTED: &[(&str, &str)] = &[
-    ("accounts", "account_id:I*, email:T, password_hash:T, email_verified_at:I?, created_at:I"),
+    ("accounts", "account_id:I*, email:T, password_hash:T, email_verified_at:I?, created_at:I, subject:T?, display_name:T"),
     ("refresh_tokens", "token_hash:B*, account_id:I, family:B, expires_at:I, revoked_at:I?"),
     ("email_tokens", "token_hash:B*, account_id:I, kind:I, expires_at:I, used_at:I?"),
     (

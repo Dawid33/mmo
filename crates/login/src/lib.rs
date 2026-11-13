@@ -16,7 +16,10 @@ use std::sync::Arc;
 pub use api::{AppState, router, system_clock};
 pub use config::{LoginConfig, MailerKind};
 pub use password::{Hasher, check_password, normalize_email};
-pub use store::{AccountId, AccountRow, LoginError, LoginStore, OpenSession, PendingKick, RefreshOutcome, WorldRow};
+pub use store::{
+    AccountId, AccountRow, DISPLAY_NAME_MAX_CHARS, LoginError, LoginStore, OidcUpsert, OpenSession, PendingKick, RefreshOutcome,
+    WorldRow,
+};
 
 /// Kind of an email token: verify the address.
 pub const EMAIL_TOKEN_VERIFY: i64 = 0;
