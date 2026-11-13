@@ -1209,18 +1209,24 @@ go_nogo_db_url := "postgres://mmo:mmo@127.0.0.1:55432/" + go_nogo_db
 # thread seam's + 0.05 AND conservation held (no state-hash mismatch; items_destroyed and
 # intent_replies_lost 0 on every [server] line; peer_unreceived not above 0 on both of a
 # host's last two); INVALID when a host restarted, any server-side process panicked or
-# ended, the stack fell over before the stop, a host logged no counters, a client lost its
-# session early or never had its state hash checked, or a group has < 20 crossings.
+# ended, the stack fell over before the stop or did not stop cleanly (a KILL: a host may
+# have hung), a host logged no counters or stopped logging them before the end, a client
+# lost its session early or never had its state hash checked, or a group has < 20 crossings.
 # Exit code: 0 GO, 1 NO-GO, 2 INVALID, anything else: no verdict (the recipe failed).
 # A run that did not stop cleanly (e.g. a second Ctrl-C) leaves a dirty host row: the next
 # run says so at its start and is likely INVALID (a host restarts once) — run it again.
 # Arguments are positional: `just go-nogo-r3 5`, `just adapter=6700 go-nogo-r3 2 90`.
 # Go / no-go for host seams: thread-seam vs host-seam shuttle on 2 hosts at `delay` ms.
-go-nogo-r3 delay="1" seconds="60": (_dev-hosts-check "0" "2" delay "2") (_dev-token go_nogo_dir / "stack")
+go-nogo-r3 delay="1" seconds="60": (_dev-token go_nogo_dir / "stack")
     #!/usr/bin/env bash
     set -euo pipefail
+    # Bad arguments are no verdict (3), never NO-GO (1). (The host words below are built
+    # with delay 0 when it is not a number, so that this check, not just, refuses it.)
+    if ! [[ "{{delay}}" =~ ^[0-9]+$ ]]; then
+        echo "go-nogo-r3: delay is a whole number of ms, given positionally (just go-nogo-r3 5, not delay=5)" >&2; exit 3
+    fi
     if ! [[ "{{seconds}}" =~ ^[0-9]+$ ]] || (( {{seconds}} < 10 )); then
-        echo "go-nogo-r3: seconds is a whole number >= 10, given positionally (just go-nogo-r3 1 60)" >&2; exit 1
+        echo "go-nogo-r3: seconds is a whole number >= 10, given positionally (just go-nogo-r3 1 60)" >&2; exit 3
     fi
     out={{go_nogo_dir}}
     stack=$out/stack
@@ -1306,7 +1312,7 @@ go-nogo-r3 delay="1" seconds="60": (_dev-hosts-check "0" "2" delay "2") (_dev-to
     DEV_R3_SERVER=./target/release/server DEV_R3_LOGIN=$login DEV_R3_LOGIN_LOG=$out/login/login.log \
         DEV_R3_PIN_WAIT_SECS={{online_wait_secs}} setsid scripts/dev_r3.sh "$stack" \
         'VOXEL_ROLE=coordinator VOXEL_HOSTS=2 VOXEL_WORLD_DB={{go_nogo_db_url}} VOXEL_SERVICE_TOKEN_FILE={{go_nogo_dir}}/stack/service-token VOXEL_COORDINATOR_CERT_HASH_FILE={{go_nogo_dir}}/stack/coordinator.cert-sha256' \
-        {{ shell(dev_r3_launch_sh, "2", delay, go_nogo_dir / "stack", go_nogo_db_url, host_env_sh) }} \
+        {{ shell(dev_r3_launch_sh, "2", if delay =~ '^[0-9]+$' { delay } else { "0" }, go_nogo_dir / "stack", go_nogo_db_url, host_env_sh) }} \
         >"$out/stack.log" 2>&1 </dev/null &
     stack_pid=$!
     echo "go-nogo-r3: starting login, the coordinator and 2 hosts (peer delay {{delay}} ms; $out/stack.log)"
@@ -1354,12 +1360,15 @@ go-nogo-r3 delay="1" seconds="60": (_dev-hosts-check "0" "2" delay "2") (_dev-to
         "host-0 started $(grep -c '\[server\] role:' "$stack/host-0.log" || true)x," \
         "host-1 started $(grep -c '\[server\] role:' "$stack/host-1.log" || true)x (more than once: INVALID)"
     echo "logs:        $out/client-thread.log $out/client-host.log $stack/host-0.log $stack/host-1.log $stack/coordinator.log"
-    verdict_rc=0
+    # The script's own code (0 GO, 1 NO-GO, 2 INVALID, 3 none), not tee's: 3 until it ran.
+    verdict_rc=3
+    set +e
     scripts/crossing_summary.py --go-nogo --thread-log "$out/client-thread.log" --host-log "$out/client-host.log" \
         --server-log "$stack/host-0.log" --server-log "$stack/host-1.log" \
         --aux-log "$stack/coordinator.log" --aux-log "$out/login/login.log" \
         --stack-log "$out/stack.log" --stack-stop-line "$stop_line" --stack-alive "$stack_alive" \
-        | tee "$out/verdict.txt" || verdict_rc=$?
+        --stack-exit "${stack_rc:-1}" | tee "$out/verdict.txt"
+    verdict_rc=${PIPESTATUS[0]}
     exit "$verdict_rc"
 
 # Run exactly the tests a change touches, by crate + cargo-test arguments:

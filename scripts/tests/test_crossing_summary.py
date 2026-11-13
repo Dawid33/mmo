@@ -65,19 +65,54 @@ STACK_OK = [
 ]
 
 
+# What dev_r3.sh prints after the recipe's TERM when everything stops in time.
+STACK_STOP_OK = [
+    "dev-r3: stopping the hosts (each saves a leave cut with the coordinator)",
+    "dev-r3: waiting up to 45s for the hosts (pids 11 12); Ctrl-C again kills at once",
+    "dev-r3: stopping the coordinator",
+    "dev-r3: stopping the login service",
+    "dev-r3: stopped",
+]
+
+
+def window_line(clock, unreceived=0):
+    """A host's `[server]` counters line as simplelog writes it (UTC HH:MM:SS)."""
+    return (f"{clock} [INFO] [server] window=5.0s sessions=1 regions=4 parked=0 transfers_inflight=0 "
+            f"pending_arrivals=0 peer_unreceived={unreceived} arrivals_despawned=0 items_destroyed=0 "
+            "intent_replies_lost=0 | lod hit=1")
+
+
+def timed_host(first, last):
+    """A host log with a window line every 5 s from second `first` to `last` of 12:00."""
+    return ["12:00:00 [INFO] [server] role: Host"] + [
+        window_line(f"12:{t // 60:02}:{t % 60:02}") for t in range(first, last + 1, 5)
+    ]
+
+
+def timed_client(done_at):
+    """A client log (Bevy's RFC 3339 UTC stamps) whose shuttle ended at 12:MM:SS."""
+    return [
+        "2026-11-13T12:00:01.000000Z  INFO client::instance: [client-state-hash] checked=12 mismatched=0",
+        f"2026-11-13T12:{done_at // 60:02}:{done_at % 60:02}.500000Z  INFO game::perf: [perf] "
+        "event=autopilot_done cruise_s=60 reversals=80 ready=true",
+    ]
+
+
 class GoNoGo(unittest.TestCase):
     """Decision 13: host p95 <= 1.25 x thread p95 + 0.05, per judged metric."""
 
-    def run_verdict(self, thread, host, clients=None, servers=None, aux=None, stack=None, stack_alive=True):
+    def run_verdict(self, thread, host, clients=None, servers=None, aux=None, stack=None, stack_alive=True,
+                    stack_exit=0, stack_after=None):
         clients = clients or {"thread run": CLIENT_OK, "host run": CLIENT_OK}
         servers = servers or {"host-0.log": SERVER_OK, "host-1.log": SERVER_OK}
         aux = aux or {"coordinator.log": ["INFO [server] role: coordinator"], "login.log": ["INFO listening"]}
         stack = STACK_OK if stack is None else stack
+        stack_after = STACK_STOP_OK if stack_after is None else stack_after
         return crossing_summary.verdict(
             thread,
             host,
             crossing_summary.conservation_problems(clients, servers),
-            crossing_summary.invalid_reasons(clients, servers, aux, stack, stack_alive),
+            crossing_summary.invalid_reasons(clients, servers, aux, stack, stack_alive, stack_exit, stack_after),
         )
 
     def good(self):
@@ -184,6 +219,47 @@ class GoNoGo(unittest.TestCase):
         # A restart that gave up.
         gave_up = STACK_OK + ["dev-r3: host 0 exited 5 after 3 restarts within 60s: giving up; see x"]
         self.assertEqual(self.run_verdict(*self.good(), stack=gave_up)[0], "INVALID")
+
+    def test_invalid_when_the_stack_did_not_stop_cleanly(self):
+        # A hung host: the supervisor KILLed it at the stop and exited 1.
+        word, reasons, _ = self.run_verdict(*self.good(), stack_exit=1)
+        self.assertEqual(word, "INVALID")
+        self.assertTrue(any("did not stop cleanly" in r for r in reasons), reasons)
+        killed = STACK_STOP_OK[:2] + ["dev-r3: killing the hosts (pids 12)", "dev-r3: stopped (failed)"]
+        word, reasons, _ = self.run_verdict(*self.good(), stack_after=killed)
+        self.assertEqual(word, "INVALID")
+        self.assertTrue(any("killing the hosts" in r for r in reasons), reasons)
+        unconfirmed = STACK_STOP_OK[:2] + ["dev-r3: could not confirm the hosts gone (pids 12)"]
+        self.assertEqual(self.run_verdict(*self.good(), stack_after=unconfirmed)[0], "INVALID")
+        # The same wordings before the stop count too.
+        before = STACK_OK + ["dev-r3: killing the coordinator (pids 9)"]
+        self.assertEqual(self.run_verdict(*self.good(), stack=before)[0], "INVALID")
+
+    def test_invalid_when_a_host_stops_reporting_before_the_end(self):
+        clients = {"thread run": timed_client(70), "host run": timed_client(160)}
+        # Both hosts report until the host-seam shuttle ends: GO.
+        whole = {"host-0.log": timed_host(5, 165), "host-1.log": timed_host(5, 160)}
+        word, reasons, _ = self.run_verdict(*self.good(), clients=clients, servers=whole)
+        self.assertEqual(word, "GO", reasons)
+        # Host 1 hung at 12:01:40, a minute before the end; its last lines were clean.
+        hung = {"host-0.log": timed_host(5, 165), "host-1.log": timed_host(5, 100)}
+        word, reasons, _ = self.run_verdict(*self.good(), clients=clients, servers=hung)
+        self.assertEqual(word, "INVALID")
+        self.assertIn("host-1.log", reasons[0])
+        # Midnight between the last window line and the end of the shuttle is no gap.
+        late = {"thread run": ["2026-11-13T23:59:58.000000Z  INFO x: [client-state-hash] checked=1 mismatched=0",
+                               "2026-11-14T00:00:03.000000Z  INFO x: [perf] event=autopilot_done cruise_s=60"]}
+        late["host run"] = late["thread run"]
+        night = {"host-0.log": [window_line("23:59:59")], "host-1.log": [window_line("00:00:01")]}
+        self.assertEqual(self.run_verdict(*self.good(), clients=late, servers=night)[0], "GO")
+
+    def test_without_timestamps_a_host_far_behind_its_peer_is_invalid(self):
+        many = ["INFO [server] role: Host"] + [SERVER_OK[2]] * 30
+        few = ["INFO [server] role: Host"] + [SERVER_OK[2]] * 5
+        word, reasons, _ = self.run_verdict(*self.good(), servers={"host-0.log": many, "host-1.log": few})
+        self.assertEqual(word, "INVALID")
+        self.assertIn("host-1.log", reasons[0])
+        self.assertEqual(self.run_verdict(*self.good(), servers={"host-0.log": many, "host-1.log": many})[0], "GO")
 
     def test_invalid_when_one_host_log_has_no_window_line(self):
         word, reasons, _ = self.run_verdict(*self.good(), servers={"host-0.log": SERVER_OK,

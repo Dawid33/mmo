@@ -11,6 +11,7 @@ Usage: crossing_summary.py [--by KEY] [--p95] <client.log>
        crossing_summary.py --go-nogo --thread-log <client.log> --host-log <client.log>
                            [--server-log <host-n.log>]... [--aux-log <coordinator/login.log>]...
                            [--stack-log <stack.log> [--stack-stop-line N]] [--stack-alive 0|1]
+                           [--stack-exit N]
                            [--min-crossings N]
 
   --by KEY  also split the game-thread crossings by the value of KEY on their line
@@ -47,7 +48,7 @@ RENDER_KEYS = [
 
 def pct(values, q):
     """Nearest rank: the sorted value at index round(q * (n - 1)) — with n = 20 the
-    p95 is the second-largest value, with n < 11 it is the largest."""
+    p95 is the second-largest value, with n <= 11 it is the largest."""
     s = sorted(values)
     return s[min(len(s) - 1, int(round(q * (len(s) - 1))))]
 
@@ -200,8 +201,22 @@ MIN_CROSSINGS = 20
 EXIT_CODES = {"GO": 0, "NO-GO": 1, "INVALID": 2}
 EXIT_NO_VERDICT = 3
 # What `scripts/dev_r3.sh` says when a member of the stack ended on its own (or a host
-# restarted: "exited 5 ... starting it again"), or its stop needed a KILL.
-STACK_FAILURES = ("exited", "giving up", "stopped (failed)", "ended (")
+# restarted: "exited 5 ... starting it again"), or a stop needed a KILL or could not
+# confirm a member gone.
+STACK_FAILURES = ("exited", "giving up", "stopped (failed)", "ended (", "killing ", "could not confirm",
+                  "still running")
+# After the recipe's own stop: what a clean stop never says (a host that could not save its
+# leave cut, e.g. one that hung, is KILLed at the deadline).
+STACK_STOP_FAILURES = ("killing ", "could not confirm", "still running", "stopped (failed)")
+# A host's last `[server] window=` line may be at most this many seconds older than the
+# end of the host-seam shuttle (`autopilot_done`): 3 report windows (5 s each).
+HOST_SILENT_LIMIT_S = 15
+# Without a common clock: a host with fewer window lines than this share of its busiest
+# peer's stopped reporting (hung) during the run.
+HOST_WINDOW_SHARE_MIN = 0.5
+# simplelog's default stamp on a server line (UTC, `HH:MM:SS`), and Bevy's (RFC 3339 UTC).
+SERVER_CLOCK = re.compile(r"^(\d{2}):(\d{2}):(\d{2}) ")
+CLIENT_CLOCK = re.compile(r"\d{4}-\d{2}-\d{2}T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?Z")
 # What a client says when its session ended or a host refused it.
 CLIENT_SESSION_LOST = ("[session] session ended", "refused the connection")
 
@@ -242,14 +257,69 @@ def conservation_problems(client_logs, server_logs):
     return problems
 
 
-def invalid_reasons(client_logs, server_logs, aux_logs=None, stack_lines=None, stack_alive=True):
+def clock_s(pattern, line):
+    """The second of the (UTC) day a log line was written at, or None."""
+    m = pattern.search(line)
+    return None if m is None else int(m.group(1)) * 3600 + int(m.group(2)) * 60 + int(m.group(3))
+
+
+def seconds_before(earlier, later):
+    """How many seconds `earlier` lies before `later` (seconds of day; a day wrap between
+    them is taken as the shorter way round)."""
+    return (later - earlier + 43200) % 86400 - 43200
+
+
+def silent_hosts(client_logs, server_logs):
+    """Hosts that stopped reporting (`[server] window=` lines) before the end of the run —
+    hung, not dead: `(method, reasons)`. With a common clock (the server's simplelog
+    `HH:MM:SS` and the client's RFC 3339, both UTC): every host's last window line must be at
+    most HOST_SILENT_LIMIT_S before the last `autopilot_done` of the host run (else of any
+    client). Without one: every host needs at least HOST_WINDOW_SHARE_MIN of its busiest
+    peer's count of window lines."""
+    reasons = []
+    ends = []
+    for name in ("host run", *[n for n in client_logs if n != "host run"]):
+        for line in clean(client_logs.get(name, [])):
+            if "event=autopilot_done" in line:
+                at = clock_s(CLIENT_CLOCK, line)
+                if at is not None:
+                    ends.append(at)
+        if ends:
+            break
+    lasts = {}
+    for name, lines in server_logs.items():
+        stamps = [clock_s(SERVER_CLOCK, line) for line in clean(lines) if "[server] window=" in line]
+        lasts[name] = stamps[-1] if stamps else None
+    if ends and lasts and all(at is not None for at in lasts.values()):
+        end = ends[-1]
+        for name, last in lasts.items():
+            gap = seconds_before(last, end)
+            if gap > HOST_SILENT_LIMIT_S:
+                reasons.append(f"{name}: its last [server] line is {gap} s before the shuttle ended "
+                               f"(> {HOST_SILENT_LIMIT_S} s): the host stopped reporting (hung?)")
+        return "clock", reasons
+    counts = {name: len(server_lines(lines)) for name, lines in server_logs.items()}
+    busiest = max(counts.values(), default=0)
+    for name, n in counts.items():
+        if n and n < HOST_WINDOW_SHARE_MIN * busiest:
+            reasons.append(f"{name}: {n} [server] lines against its peer's {busiest}: the host stopped "
+                           "reporting (hung?)")
+    return "counts", reasons
+
+
+def invalid_reasons(client_logs, server_logs, aux_logs=None, stack_lines=None, stack_alive=True, stack_exit=0,
+                    stack_after=None):
     """What makes a run unfit to judge (empty: fit).
     - `server_logs` (each host): started more than once (a restart rolls the world back),
       no `[server] window=` counters line in that host's log, `panicked at`;
     - `aux_logs` (the coordinator, the login service): `panicked at`;
     - `stack_lines` (the supervisor's output up to the recipe's own stop): a member that
-      exited, a restart that gave up, a failed stop (`STACK_FAILURES`); `stack_alive`
+      exited, a restart that gave up, a KILL, a failed stop (`STACK_FAILURES`); `stack_alive`
       False: the supervisor was gone before the recipe stopped it (the stack fell over);
+    - `stack_exit` (the supervisor's status after the recipe's stop; None: unknown) not 0,
+      or `stack_after` (its output after the stop) with a KILL or an unconfirmed member
+      (`STACK_STOP_FAILURES`): the stack did not stop cleanly — a host may have hung;
+    - a host that stopped reporting before the end (`silent_hosts`);
     - each client: no `[client-state-hash]` line (nothing checked), a panic or a lost
       GPU, no `autopilot_done` (the shuttle did not run its time), or its session ended
       or a host refused it before `autopilot_done`."""
@@ -270,6 +340,12 @@ def invalid_reasons(client_logs, server_logs, aux_logs=None, stack_lines=None, s
             reasons.append(f"the stack, before the recipe stopped it: {line.strip()[:160]}")
     if not stack_alive:
         reasons.append("the stack's supervisor had ended before the recipe stopped it (a member fell over)")
+    if stack_exit not in (None, 0):
+        reasons.append(f"the stack did not stop cleanly (supervisor exit {stack_exit}): a host may have hung")
+    for line in clean(stack_after or []):
+        if any(word in line for word in STACK_STOP_FAILURES):
+            reasons.append(f"the stack did not stop cleanly: {line.strip()[:160]}")
+    reasons.extend(silent_hosts(client_logs, server_logs)[1])
     for name, lines in client_logs.items():
         text = clean(lines)
         if not any("[client-state-hash]" in line for line in text):
@@ -344,7 +420,7 @@ def verdict(thread_crossings, host_crossings, conservation, invalid, min_crossin
 
 
 def go_nogo(thread_log, host_log, server_logs, aux_logs=(), stack_log=None, stack_stop_line=None,
-            stack_alive=True, min_crossings=MIN_CROSSINGS):
+            stack_alive=True, min_crossings=MIN_CROSSINGS, stack_exit=None):
     """Prints both runs' p95 tables by host_flip, the facts and the verdict; returns the
     word. `stack_stop_line`: how many lines of `stack_log` were written before the
     recipe's own stop (None: all of them)."""
@@ -353,8 +429,9 @@ def go_nogo(thread_log, host_log, server_logs, aux_logs=(), stack_log=None, stac
     servers = {path: read(path) for path in server_logs}
     aux = {path: read(path) for path in aux_logs}
     stack = read(stack_log) if stack_log else []
+    stack_after = []
     if stack_stop_line is not None:
-        stack = stack[:stack_stop_line]
+        stack, stack_after = stack[:stack_stop_line], stack[stack_stop_line:]
     for name, path in (("thread run", thread_log), ("host run", host_log)):
         print(f"\n== {name}: {path}")
         main(path, "host_flip", True)
@@ -367,11 +444,13 @@ def go_nogo(thread_log, host_log, server_logs, aux_logs=(), stack_log=None, stac
         f"seam groups: thread (one known host) n={len(groups['thread'])}, host (two known hosts) "
         f"n={len(groups['host'])}, a side unknown (never grouped) n={groups['unknown']}"
     )
+    method, _ = silent_hosts(clients, servers)
+    print(f"host liveness checked by: {'the common UTC clock' if method == 'clock' else 'window-line counts (no clock)'}")
     word, reasons, rows = verdict(
         thread_c,
         host_c,
         conservation_problems(clients, servers),
-        invalid_reasons(clients, servers, aux, stack, stack_alive),
+        invalid_reasons(clients, servers, aux, stack, stack_alive, stack_exit, stack_after),
         min_crossings,
     )
     print(f"\ngo / no-go (decision 13: host p95 <= {GO_NOGO_RATIO} x thread p95 + {GO_NOGO_SLACK}):")
@@ -405,6 +484,8 @@ if __name__ == "__main__":
     parser.add_argument("--stack-stop-line", type=int, help="--go-nogo: stack-log lines written before the stop")
     parser.add_argument("--stack-alive", type=int, choices=[0, 1], default=1,
                         help="--go-nogo: 1 if the supervisor still ran when the recipe stopped it")
+    parser.add_argument("--stack-exit", type=int,
+                        help="--go-nogo: the supervisor's exit status after the recipe's stop (not 0: INVALID)")
     parser.add_argument("--min-crossings", type=int, default=MIN_CROSSINGS)
     try:
         args = parser.parse_args()
@@ -417,7 +498,7 @@ if __name__ == "__main__":
             sys.exit(EXIT_NO_VERDICT)
         try:
             word = go_nogo(args.thread_log, args.host_log, args.server_log, args.aux_log, args.stack_log,
-                           args.stack_stop_line, bool(args.stack_alive), args.min_crossings)
+                           args.stack_stop_line, bool(args.stack_alive), args.min_crossings, args.stack_exit)
         except Exception:  # noqa: BLE001 — any failure is "no verdict", never a verdict's code
             traceback.print_exc()
             sys.exit(EXIT_NO_VERDICT)
