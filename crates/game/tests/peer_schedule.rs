@@ -1632,6 +1632,36 @@ fn ping_pong_without_a_session_on_the_far_host_leaves_no_awaiting_entry() {
     sweep("ping_pong_without_a_session_on_the_far_host_leaves_no_awaiting_entry", 2, 1, SEEDS / 4, ping_pong_sessionless);
 }
 
+/// The body is handed to B while the client has no session there; the client connects
+/// (an observer ticket) within the grace: the awaited session becomes the home, and its
+/// `PlayerRegion` comes right behind the player's hop there (`HomeHop`) — above the hop of
+/// the host it left — so a client with both connections follows it.
+fn awaited_session_home_hop(rig: &mut MultiRig) {
+    let (a, b) = host_seam(2, 1);
+    let (ha, hb) = (rig.owner(a), rig.owner(b));
+    rig.run(a);
+    rig.run(b);
+    rig.record_packets();
+    rig.connect_home(ha, P_CLIENT, P_PLAYER, record_at(a, [REGION_SIZE / 2.0, REGION_SIZE / 2.0]));
+    let (_, _, id) = until_body(rig);
+    assert!(rig.teleport(a, id, past_seam(a, b, REGION_SIZE / 2.0)));
+    until_player_settled_in(rig, b);
+    assert_eq!(rig.hosts[hb as usize].manager.session_kind(P_CLIENT), None, "no session on host {hb} yet");
+    assert!(home_hops(&packets_to(rig, hb)).is_empty(), "nothing told before the session came");
+    rig.hosts[hb as usize].event(game::ServerEvent::ObserverConnected { client: P_CLIENT, player: P_PLAYER });
+    assert_eq!(rig.hosts[hb as usize].manager.session_kind(P_CLIENT), Some(game::SessionKind::Home));
+    rig.round();
+    let hops = home_hops(&packets_to(rig, hb));
+    assert_eq!(hops.iter().map(|(_, r)| *r).collect::<Vec<_>>(), [b], "HomeHop right before PlayerRegion({b:?})");
+    assert!(hops[0].0 > 0, "a hand-off's hop is above the login's: {hops:?}");
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn awaited_session_gets_its_home_hop_before_player_region() {
+    sweep("awaited_session_gets_its_home_hop_before_player_region", 2, 1, SEEDS / 4, awaited_session_home_hop);
+}
+
 /// A coordinator link that is never up: a world request waits for it (a claim pending).
 struct NoCoordinator;
 

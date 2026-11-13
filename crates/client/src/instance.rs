@@ -182,10 +182,11 @@ pub struct GameInstanceManager {
     /// (`RegionElsewhere` for a region it did not subscribe): a move's target, held in
     /// the window until the `PlayerRegion` of the move comes.
     pending_move: Option<RegionCoords>,
-    /// Regions whose subscribe went out through the home and was not answered yet (by
-    /// a snapshot or a `RegionElsewhere`), with when (`conn_clock_ms`): a
-    /// `RegionElsewhere` for one released meanwhile is a late answer, not a move.
-    asked_home: BTreeMap<RegionCoords, u64>,
+    /// Regions whose subscribes went out through the home and were not all answered
+    /// yet (by a snapshot or a `RegionElsewhere`): how many are unanswered, and when
+    /// (`conn_clock_ms`) the last went. A `RegionElsewhere` for one released meanwhile
+    /// is a late answer, not a move — however many requests and releases came between.
+    asked_home: BTreeMap<RegionCoords, (u32, u64)>,
     /// Since when (`conn_clock_ms`) the predicted body — or a move — is on another
     /// host than the home's with no `PlayerRegion` from there, and whether that was
     /// logged ([`HOME_UNCONFIRMED_WARN_MS`]).
@@ -194,6 +195,9 @@ pub struct GameInstanceManager {
     /// LOD keys still to be asked of the home again since it moved hosts (paced like
     /// new keys).
     lod_resend: std::collections::BTreeSet<game::lod::LodKey>,
+    /// LOD keys still to be released on the connection of a former home (paced like
+    /// the requests).
+    lod_release: std::collections::VecDeque<(u32, game::lod::LodKey)>,
     /// Where the predicted regions run (inline here; one thread each in
     /// native play, `use_region_threads`). The manager never touches a
     /// `Region` directly: `RegionCmd` in, `RegionReport` out.
@@ -750,6 +754,7 @@ impl GameInstanceManager {
             home_unconfirmed_since: None,
             home_unconfirmed_warned: false,
             lod_resend: std::collections::BTreeSet::new(),
+            lod_release: std::collections::VecDeque::new(),
             client_id: None,
             home_region: None,
             window_center: None,
@@ -1688,6 +1693,11 @@ impl GameInstanceManager {
             game::lod::LOD_STICKY_BAND,
         );
         self.lod_assigned = assigned;
+        // A former home lets go of the keys it held, paced like the requests.
+        for _ in 0..LOD_REQUESTS_PER_TICK {
+            let Some((conn, key)) = self.lod_release.pop_front() else { break };
+            self.conns.route(Outgoing::Conn(conn, ClientPacket::ReleaseLod(key)));
+        }
         // Keys held since before the home moved hosts: asked of the new home again,
         // paced like new ones (and ahead of them).
         self.lod_resend.retain(|key| desired.contains(key));
@@ -1825,9 +1835,11 @@ impl GameInstanceManager {
             // than a home already taken (`ConnectionSet::on_player_region`).
             ServerPacket::PlayerRegion(..) => {
                 let old = self.conns.home();
+                let with_hop = self.conns.has_hop(conn);
                 if !self.conns.on_player_region(conn) {
+                    let why = if with_hop { "older than the home's" } else { "with no HomeHop (not a hand-off's)" };
                     info!(
-                        "[client] a PlayerRegion from host {:?} older than the home's (host {:?}): ignored",
+                        "[client] a PlayerRegion from host {:?}, {why} (home: host {:?}): ignored",
                         self.conns.ordinal_of(conn),
                         self.conns.home_ordinal()
                     );
@@ -1864,9 +1876,8 @@ impl GameInstanceManager {
             self.conns.ordinal_of(old),
             self.conns.home_ordinal()
         );
-        for key in &self.lod_subscribed {
-            self.conns.route(Outgoing::Conn(old, ClientPacket::ReleaseLod(*key)));
-        }
+        // Released there and asked here again, both paced (`update_lod_window`).
+        self.lod_release.extend(self.lod_subscribed.iter().map(|key| (old, *key)));
         self.lod_resend = self.lod_subscribed.clone();
     }
 
@@ -1902,7 +1913,9 @@ impl GameInstanceManager {
             info!("[client] the connection to host {ordinal:?} closed ({why}); it served no region");
             return;
         }
+        // A routine end (the host closed an idle session) is no failure of that host.
         let failures = match ordinal {
+            Some(_) if routine => 0,
             Some(o) => {
                 let n = self.observer_failures.entry(o).or_insert(0);
                 *n += 1;
@@ -1910,7 +1923,13 @@ impl GameInstanceManager {
             }
             None => 1,
         };
-        let wait = crate::connections::observer_retry_delay_ms(failures);
+        // The body is in, or next to, a region that host served (or moving to one):
+        // the host may get it any moment and must see a session within its grace.
+        let near = lost.iter().any(|rc| {
+            Some(*rc) == self.pending_move
+                || self.home_region.is_some_and(|home| (rc.x - home.x).abs() <= 1 && (rc.z - home.z).abs() <= 1)
+        });
+        let wait = crate::connections::observer_retry_delay_ms(failures, near);
         if routine {
             info!("[client] the connection to host {ordinal:?} closed ({why}); {lost:?} asked for again in {wait} ms");
         } else {
@@ -1941,9 +1960,21 @@ impl GameInstanceManager {
     /// (`asked_home`).
     fn request_region(&mut self, rc: RegionCoords) {
         if self.conns.connection_of(rc) == self.conns.home() {
-            self.asked_home.insert(rc, self.conn_clock_ms);
+            let asked = self.asked_home.entry(rc).or_insert((0, 0));
+            *asked = (asked.0 + 1, self.conn_clock_ms);
         }
         self.send_out(Outgoing::Region(rc, ClientPacket::RequestRegionConnection(rc)));
+    }
+
+    /// One subscribe of `rc` through the home was answered (a snapshot or a
+    /// `RegionElsewhere`): whether one was outstanding.
+    fn answered_home(&mut self, rc: RegionCoords) -> bool {
+        let Some(asked) = self.asked_home.get_mut(&rc) else { return false };
+        asked.0 -= 1;
+        if asked.0 == 0 {
+            self.asked_home.remove(&rc);
+        }
+        true
     }
 
     /// Once per client tick: close connections idle for `CONN_IDLE_CLOSE_MS`, forget
@@ -1954,7 +1985,7 @@ impl GameInstanceManager {
         for key in self.conns.close_idle(now) {
             info!("[client] connection {key} served no region for {} ms: closed", crate::connections::CONN_IDLE_CLOSE_MS);
         }
-        self.asked_home.retain(|_, at| now.saturating_sub(*at) < ASKED_HOME_FORGET_MS);
+        self.asked_home.retain(|_, (_, at)| now.saturating_sub(*at) < ASKED_HOME_FORGET_MS);
         let home_host = self.conns.home_ordinal();
         let body_elsewhere = self.home_region.is_some_and(|rc| self.region_host(rc) != home_host);
         if !(body_elsewhere || self.pending_move.is_some()) {
@@ -1965,12 +1996,17 @@ impl GameInstanceManager {
         let since = *self.home_unconfirmed_since.get_or_insert(now);
         if !self.home_unconfirmed_warned && now.saturating_sub(since) >= HOME_UNCONFIRMED_WARN_MS {
             self.home_unconfirmed_warned = true;
+            let what = match self.pending_move {
+                Some(target) => format!("a move to {target:?} is pending"),
+                None => format!(
+                    "the body is in {:?}, served by host {:?}",
+                    self.home_region,
+                    self.home_region.and_then(|rc| self.region_host(rc))
+                ),
+            };
             warn!(
-                "[client] the body is in {:?} (host {:?}), a move to {:?} is pending, and no host has said it is \
-                 the home for {HOME_UNCONFIRMED_WARN_MS} ms (home: host {home_host:?}); waiting",
-                self.home_region,
-                self.home_region.and_then(|rc| self.region_host(rc)),
-                self.pending_move
+                "[client] {what}, and no host has said it is the home for {HOME_UNCONFIRMED_WARN_MS} ms \
+                 (home: host {home_host:?}); waiting"
             );
         }
     }
@@ -2046,7 +2082,7 @@ impl GameInstanceManager {
                 }
             }
             game::ServerPacket::Region(id, raw_game_data) => {
-                self.asked_home.remove(&id);
+                self.answered_home(id);
                 if conn != self.conns.home() {
                     // That host serves again: its next connection end waits the
                     // shortest retry.
@@ -2151,8 +2187,8 @@ impl GameInstanceManager {
             game::ServerPacket::PersonInfo(p) => {
                 let _ = self.client_event_send.send(ClientUpdateEvent::PersonInfo(p));
             }
-            // Taken by `handle_packet` before it gets here.
-            game::ServerPacket::HomeHop(hop) => self.conns.on_home_hop(conn, hop),
+            // Unreachable: `handle_packet` takes every `HomeHop` before it gets here.
+            game::ServerPacket::HomeHop(_) => debug_assert!(false, "HomeHop reached apply_packet"),
             // The first packet of every session: which host the home is.
             game::ServerPacket::Host(endpoint) => {
                 info!("[client] the home connection is to host {}", endpoint.ordinal);
@@ -2163,7 +2199,7 @@ impl GameInstanceManager {
             // Only the home sends these (`handle_packet`): a client dials no
             // address from anywhere else.
             game::ServerPacket::RegionElsewhere { region, endpoint, ticket } => {
-                let asked = self.asked_home.remove(&region).is_some();
+                let asked = self.answered_home(region);
                 if !self.subscribed.contains(&region) && asked {
                     // Released while the answer was on its way.
                     log::debug!("[client] {region:?} is host {}'s, but no longer wanted", endpoint.ordinal);
@@ -2635,6 +2671,55 @@ mod manager_tests {
             game::DebugFlags::default(),
         );
         (manager, server_send, server_recv, client_recv, game_send)
+    }
+
+    /// Opens nothing real: counts the opens.
+    struct CountingOpener(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+    impl ConnOpener for CountingOpener {
+        fn open(&mut self, _key: u32, _endpoint: &game::HostEndpoint, _credential: game::Credential) -> ConnHandle {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            ConnHandle { send: crossbeam::channel::unbounded().0 }
+        }
+    }
+
+    /// Fix round (Task 18 m4): a region subscribed and released twice through the home,
+    /// both `RegionElsewhere` answers late — each is recognised as the answer to a
+    /// request, not read as a move; an unasked one after them is a move.
+    #[test]
+    fn late_region_elsewhere_answers_are_never_read_as_a_move() {
+        let (mut manager, server_send, server_recv, _client_recv, _game) = manager_with_player();
+        let opens = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        manager.set_conn_opener(Box::new(CountingOpener(opens.clone())));
+        let home = RegionCoords::new(0, 0);
+        let far = RegionCoords::new(5, 0);
+        let endpoint = game::HostEndpoint { ordinal: 1, quic: None, webtransport: None, cert_hash: None };
+        let elsewhere = || ServerPacket::RegionElsewhere {
+            region: far,
+            endpoint: endpoint.clone(),
+            ticket: game::ObserverTicket { client: 0, nonce: 1 },
+        };
+        server_send.send(ServerPacket::Host(game::HostEndpoint { ordinal: 0, ..endpoint.clone() })).unwrap();
+        server_send.send(ServerPacket::PlayerRegion(Some(home), 0)).unwrap();
+        assert!(manager.pump_packets(&server_recv).unwrap());
+        for _ in 0..2 {
+            // Requested through the home, then released before its answer came.
+            manager.request_region(far);
+            manager.send_out(Outgoing::Region(far, ClientPacket::ReleaseRegionConnection(far)));
+            manager.conns.release(far);
+        }
+        for _ in 0..2 {
+            server_send.send(elsewhere()).unwrap();
+            assert!(manager.pump_packets(&server_recv).unwrap());
+            assert_eq!(manager.pending_move, None, "a late answer is not a move");
+            assert!(!manager.subscribed.contains(&far));
+        }
+        assert_eq!(opens.load(Ordering::SeqCst), 0, "nothing connected for an unwanted region");
+        server_send.send(elsewhere()).unwrap();
+        assert!(manager.pump_packets(&server_recv).unwrap());
+        assert_eq!(manager.pending_move, Some(far), "an unasked one is a move");
+        assert!(manager.subscribed.contains(&far));
+        assert_eq!(opens.load(Ordering::SeqCst), 1);
     }
 
     /// The desired window must keep the home region subscribed even when

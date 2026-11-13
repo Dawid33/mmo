@@ -504,7 +504,11 @@ impl SimHarness {
     fn reap_closed_connections(&mut self) {
         let mut i = 0;
         while i < self.conns.len() {
-            let closed = matches!(self.conns[i].out.try_recv(), Err(crossbeam::channel::TryRecvError::Disconnected));
+            // Probed only when empty, so the probe never takes a packet: a connection
+            // with packets still waiting is not finished (they go out next step).
+            let out = &self.conns[i].out;
+            let closed =
+                out.is_empty() && matches!(out.try_recv(), Err(crossbeam::channel::TryRecvError::Disconnected));
             if !closed {
                 i += 1;
                 continue;

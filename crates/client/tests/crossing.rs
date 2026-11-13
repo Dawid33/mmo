@@ -455,12 +455,20 @@ mod two_hosts {
     }
 
     /// Once the body crossed into the other host's region and its connection became the
-    /// home, the clock follows that host: the old home's samples, read 40 ticks ahead,
-    /// no longer move it.
+    /// home, the clock follows that host: the old home's samples, read 40 ticks ahead, no
+    /// longer move it (the lead is the unskewed run's), and the NEW home's, read 40 ticks
+    /// ahead, do (the lead over the new home grows toward the skew) — a clock steered by
+    /// neither would pass the first half only.
     #[test]
     #[ignore = "slow: >100ms — run via just test-full"]
     fn clock_follows_the_new_home_after_a_host_flip() {
-        let run = |skew: bool| {
+        #[derive(Clone, Copy, PartialEq)]
+        enum Skew {
+            None,
+            OldHome,
+            NewHome,
+        }
+        let run = |skew: Skew| {
             let mut h = SimHarness::with_hosts(2);
             h.connect();
             load_window(&mut h);
@@ -470,10 +478,22 @@ mod two_hosts {
             let new = h.client_home_host().expect("a home host");
             assert_ne!(new, old, "the home moved hosts");
             let rc = h.player_region();
-            leads(&mut h, skew.then_some(old), new, rc, SKEW_TICKS as usize)
+            let skewed = match skew {
+                Skew::None => None,
+                Skew::OldHome => Some(old),
+                Skew::NewHome => Some(new),
+            };
+            leads(&mut h, skewed, new, rc, SKEW_TICKS as usize)
         };
-        let baseline = run(false);
-        assert_leads_match(&baseline, &run(true), "the old home's samples steered it");
+        let baseline = run(Skew::None);
+        assert_leads_match(&baseline, &run(Skew::OldHome), "the old home's samples steered it");
+        let followed = run(Skew::NewHome);
+        let (end_base, end_new) = (*baseline.last().unwrap(), *followed.last().unwrap());
+        assert!(
+            end_new - end_base >= SKEW_TICKS / 2,
+            "the new home's samples, {SKEW_TICKS} ticks ahead, moved the lead only from {end_base} to {end_new} \
+             (baseline {baseline:?}, new home skewed {followed:?})"
+        );
     }
 }
 

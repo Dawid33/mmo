@@ -26,6 +26,11 @@ pub const OBSERVER_RETRY_MS: u64 = 1_000;
 /// The longest wait before an observer connection's regions are asked for again (a
 /// host that keeps refusing, an endpoint the client cannot dial).
 pub const OBSERVER_RETRY_MAX_MS: u64 = 30_000;
+/// The longest wait when a lost region is the body's, a move's target, or next to the
+/// body's region: the body may be handed to that host any moment, and a session must
+/// reach it within the hosts' hand-off grace or the body is parked there.
+pub const OBSERVER_RETRY_NEAR_MAX_MS: u64 = 2_000;
+const _: () = assert!(OBSERVER_RETRY_NEAR_MAX_MS < game::HANDOFF_SESSION_GRACE_MS);
 /// A connection that is not the home and has served no region for this long is closed
 /// (the window left that host's regions; a host would idle-close it after
 /// `game::OBSERVER_IDLE_CLOSE_MS` anyway, and LOD subscriptions follow the home).
@@ -37,11 +42,14 @@ pub const CONN_IDLE_CLOSE_MS: u64 = 10_000;
 pub const LOGIN_CONN: u32 = 0;
 
 /// The wait before the regions of a host's observer connection are asked for again
-/// after `failures` ends in a row (1 = the first): [`OBSERVER_RETRY_MS`], doubling, at
-/// most [`OBSERVER_RETRY_MAX_MS`].
-pub fn observer_retry_delay_ms(failures: u32) -> u64 {
+/// after `failures` failed ends in a row (1 = the first; a routine close counts 0):
+/// [`OBSERVER_RETRY_MS`], doubling, at most [`OBSERVER_RETRY_MAX_MS`] — at most
+/// [`OBSERVER_RETRY_NEAR_MAX_MS`] when `near` (the body may cross into that host's
+/// region soon).
+pub fn observer_retry_delay_ms(failures: u32, near: bool) -> u64 {
     let doublings = failures.saturating_sub(1).min(16);
-    (OBSERVER_RETRY_MS << doublings).min(OBSERVER_RETRY_MAX_MS)
+    let cap = if near { OBSERVER_RETRY_NEAR_MAX_MS } else { OBSERVER_RETRY_MAX_MS };
+    (OBSERVER_RETRY_MS << doublings).min(cap)
 }
 
 /// What the manager and the region runners send. The runners send `Home`.
@@ -268,6 +276,11 @@ impl ConnectionSet {
         if self.conns.contains_key(&conn) {
             self.hop_of.insert(conn, hop);
         }
+    }
+
+    /// Whether connection `conn` sent a `HomeHop` its next `PlayerRegion` goes with.
+    pub fn has_hop(&self, conn: u32) -> bool {
+        self.hop_of.contains_key(&conn)
     }
 
     /// Connection `conn` sent `PlayerRegion`: whether it counts. The home's always does.
@@ -619,10 +632,14 @@ mod tests {
 
     #[test]
     fn observer_retry_backs_off_to_a_cap() {
-        assert_eq!(observer_retry_delay_ms(1), OBSERVER_RETRY_MS);
-        assert_eq!(observer_retry_delay_ms(2), 2 * OBSERVER_RETRY_MS);
-        assert_eq!(observer_retry_delay_ms(3), 4 * OBSERVER_RETRY_MS);
-        assert_eq!(observer_retry_delay_ms(40), OBSERVER_RETRY_MAX_MS);
-        assert!((1..64).map(observer_retry_delay_ms).collect::<Vec<_>>().windows(2).all(|w| w[0] <= w[1]));
+        assert_eq!(observer_retry_delay_ms(0, false), OBSERVER_RETRY_MS, "a routine close: the shortest wait");
+        assert_eq!(observer_retry_delay_ms(1, false), OBSERVER_RETRY_MS);
+        assert_eq!(observer_retry_delay_ms(2, false), 2 * OBSERVER_RETRY_MS);
+        assert_eq!(observer_retry_delay_ms(3, false), 4 * OBSERVER_RETRY_MS);
+        assert_eq!(observer_retry_delay_ms(40, false), OBSERVER_RETRY_MAX_MS);
+        assert!((1..64).map(|n| observer_retry_delay_ms(n, false)).collect::<Vec<_>>().windows(2).all(|w| w[0] <= w[1]));
+        // Near the body: always under the hosts' hand-off grace.
+        assert!((0..64).all(|n| observer_retry_delay_ms(n, true) <= OBSERVER_RETRY_NEAR_MAX_MS));
+        assert!(OBSERVER_RETRY_NEAR_MAX_MS < game::HANDOFF_SESSION_GRACE_MS);
     }
 }
