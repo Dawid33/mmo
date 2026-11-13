@@ -257,8 +257,8 @@ impl LoginStore {
     }
 
     /// Sign-in through the identity provider, in one transaction: the account of `subject`
-    /// (email and name refreshed); else the subject-less account with this email (adopted, and
-    /// its email marked verified); else [`OidcUpsert::EmailTaken`] if another subject holds the
+    /// (email and name refreshed); else the subject-less account with this email (adopted: its
+    /// password is cleared and its email marked verified); else [`OidcUpsert::EmailTaken`] if another subject holds the
     /// email; else a new password-less account. `email` is already normalised (as for
     /// [`Self::create_account`]); `display_name` is cut to [`DISPLAY_NAME_MAX_CHARS`].
     pub async fn upsert_oidc_account(
@@ -278,13 +278,22 @@ impl LoginStore {
                     .await?
                     .map(|r| r.get::<i64, _>(0));
                 let out = if let Some(id) = by_subject {
-                    sqlx::query("UPDATE accounts SET email = $1, display_name = $2 WHERE account_id = $3")
+                    let other = sqlx::query("SELECT 1 FROM accounts WHERE email = $1 AND account_id <> $2")
                         .bind(email)
-                        .bind(&name)
                         .bind(id)
-                        .execute(&mut *tx)
+                        .fetch_optional(&mut *tx)
                         .await?;
-                    OidcUpsert::Existing(id)
+                    if other.is_some() {
+                        OidcUpsert::EmailTaken
+                    } else {
+                        sqlx::query("UPDATE accounts SET email = $1, display_name = $2 WHERE account_id = $3")
+                            .bind(email)
+                            .bind(&name)
+                            .bind(id)
+                            .execute(&mut *tx)
+                            .await?;
+                        OidcUpsert::Existing(id)
+                    }
                 } else if let Some(row) = sqlx::query("SELECT account_id, subject FROM accounts WHERE email = $1")
                     .bind(email)
                     .fetch_optional(&mut *tx)
@@ -295,7 +304,7 @@ impl LoginStore {
                     } else {
                         let id: i64 = row.get(0);
                         sqlx::query(
-                            "UPDATE accounts SET subject = $1, display_name = $2, \
+                            "UPDATE accounts SET subject = $1, display_name = $2, password_hash = '', \
                              email_verified_at = COALESCE(email_verified_at, $3) WHERE account_id = $4",
                         )
                         .bind(subject)

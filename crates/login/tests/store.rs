@@ -402,7 +402,7 @@ async fn oidc_adopts_password_account_by_email() {
     assert_eq!(s.upsert_oidc_account("s1", "a@x.io", "ann", 10).await.unwrap(), OidcUpsert::Adopted(id));
     assert_eq!(s.player_token_for(id, "w1", 11, || panic!("must not mint again")).await.unwrap(), token);
     let row = s.account_by_subject("s1").await.unwrap().unwrap();
-    assert_eq!((row.account_id, row.email_verified_at, row.password_hash.as_str()), (id, Some(10), "hash"));
+    assert_eq!((row.account_id, row.email_verified_at, row.password_hash.as_str()), (id, Some(10), ""));
 }
 
 #[tokio::test]
@@ -419,4 +419,14 @@ async fn oidc_display_name_is_capped() {
     s.upsert_oidc_account("s1", "a@x.io", &"é".repeat(200), 10).await.unwrap();
     let row = s.account_by_subject("s1").await.unwrap().unwrap();
     assert_eq!(row.display_name.chars().count(), DISPLAY_NAME_MAX_CHARS);
+}
+
+#[tokio::test]
+async fn oidc_existing_subject_moving_to_another_accounts_email_is_refused() {
+    let s = store().await;
+    s.upsert_oidc_account("s1", "a@x.io", "ann", 10).await.unwrap();
+    s.upsert_oidc_account("s2", "b@x.io", "bob", 11).await.unwrap();
+    assert_eq!(s.upsert_oidc_account("s1", "b@x.io", "ann", 12).await.unwrap(), OidcUpsert::EmailTaken);
+    let row = s.account_by_subject("s1").await.unwrap().unwrap();
+    assert_eq!(row.email, "a@x.io");
 }
