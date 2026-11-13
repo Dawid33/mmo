@@ -8,6 +8,7 @@ use game::{InlineSchedule, RegionCoords, RegionSpawner, FLIP_HYSTERESIS, REGION_
 
 use crate::common::cut_store::CutStore;
 use crate::common::multi_rig::{four_host_corner, host_seam, rig_endpoint, MultiRig};
+use crate::common::rig::{assert_same_streams, Streams};
 
 /// Seeds swept per schedule mode.
 const SEEDS: u64 = 12;
@@ -116,6 +117,86 @@ fn cross_once(rig: &mut MultiRig) {
 #[ignore = "slow: >100ms — run via just test-full"]
 fn slime_crosses_host_seam_once() {
     sweep("slime_crosses_host_seam_once", 2, 1, SEEDS, cross_once);
+}
+
+/// Units inside its region's seam a [`two_sources_into_one`] slime stands.
+const MIRROR_INSET: f32 = 4.0;
+
+/// Two slimes on one host stand by the seams of two of its regions with one region of
+/// the other host, so both mirror into it every tick: neighbour messages whose order
+/// within a slot the sending host's schedule permutes. Then one of them crosses.
+fn two_sources_into_one(rig: &mut MultiRig) {
+    let steps = [(1, 0), (-1, 0), (0, 1), (0, -1)];
+    let mut near: Vec<RegionCoords> = (-8..=8).flat_map(|x| (-8..=8).map(move |z| RegionCoords::new(x, z))).collect();
+    near.sort_by_key(|rc| (rc.x.abs() + rc.z.abs(), rc.x, rc.z));
+    let (b, a, c) = near
+        .iter()
+        .find_map(|&b| {
+            let other: Vec<RegionCoords> = steps
+                .iter()
+                .map(|(dx, dz)| RegionCoords::new(b.x + dx, b.z + dz))
+                .filter(|&n| rig.owner(n) != rig.owner(b))
+                .collect();
+            let a = *other.first()?;
+            let c = other[1..].iter().copied().find(|&c| rig.owner(c) == rig.owner(a))?;
+            Some((b, a, c))
+        })
+        .expect("a region with two neighbours on one other host");
+    for rc in [a, b, c] {
+        rig.run(rc);
+    }
+    // Just inside `from`'s seam with `b`, mid-seam.
+    let inside = |from: RegionCoords| {
+        let across = |d: i32| match d {
+            1 => REGION_SIZE - MIRROR_INSET,
+            -1 => MIRROR_INSET,
+            _ => REGION_SIZE / 2.0,
+        };
+        [across(b.x - from.x), crate::common::above_floor_y(), across(b.z - from.z)]
+    };
+    rig.spawn_slime(a, inside(a));
+    let id = rig.spawn_slime(c, inside(c));
+    for _ in 0..WAIT_ROUNDS {
+        rig.round();
+    }
+    assert!(rig.teleport(c, id, past_seam(c, b, REGION_SIZE / 2.0)), "the slime is still in {c:?}");
+    until_settled_in(rig, id, b);
+}
+
+/// Every host's region fingerprints and event streams after `scenario` on a two-host
+/// rig at link delay 0, under `schedule` (or lockstep).
+fn two_host_record(
+    schedule: Option<fn(u64) -> InlineSchedule>,
+    seed: u64,
+    scenario: fn(&mut MultiRig),
+) -> Vec<(Vec<(RegionCoords, u64, u32)>, Streams)> {
+    let mut rig = MultiRig::new(2, 1, schedule, seed, 0);
+    for host in &mut rig.hosts {
+        host.event_streams = Some(Default::default());
+    }
+    scenario(&mut rig);
+    rig.hosts.iter_mut().map(|h| (h.fingerprint(), h.event_streams.take().expect("recording"))).collect()
+}
+
+/// Permuted tick order on both hosts only permutes the order neighbour messages
+/// reach a region within a slot: applied in canonical order, every host ends
+/// bit-identical to lockstep, with the same event streams.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn shuffled_two_hosts_match_lockstep() {
+    let scenarios: [(&str, fn(&mut MultiRig)); 2] = [("cross_once", cross_once), ("two_sources_into_one", two_sources_into_one)];
+    for (name, scenario) in scenarios {
+        for seed in 0..SEEDS {
+            let lockstep = two_host_record(None, seed, scenario);
+            let shuffled = std::panic::catch_unwind(|| two_host_record(Some(InlineSchedule::shuffled), seed, scenario))
+                .unwrap_or_else(|_| panic!("{name} broke under `shuffled`, seed {seed}"));
+            for (h, ((lf, ls), (sf, ss))) in lockstep.iter().zip(&shuffled).enumerate() {
+                let what = format!("{name}: host {h}, shuffled seed {seed} vs lockstep");
+                assert_same_streams(&what, ls, ss);
+                assert_eq!(lf, sf, "{what}: fingerprints differ");
+            }
+        }
+    }
 }
 
 /// The target is parked on its host: the transfer waits in the OWNER's mailbox (not the
@@ -369,8 +450,9 @@ fn transfer_departing_after_its_source_answered_the_cut_is_not_a_row() {
 
 /// Stud columns along a region's edge.
 const REGION_STUDS: i32 = (game::REGION_CHUNKS * game::STUD_CHUNK_STUDS) as i32;
-/// Round budget for a halo change to show across a host seam.
-const HALO_ROUNDS: usize = 8;
+/// Round budget for a halo change to show across a host seam (a delta is applied
+/// at the end of its slot, right before the target's next tick).
+const HALO_ROUNDS: usize = 9;
 /// Items a deposit test puts in.
 const DEPOSIT: u32 = 5;
 /// The dirt item of the block manifest.

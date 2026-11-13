@@ -109,6 +109,7 @@ fn crossing_flips_ownership_home_and_pushes_player_region() {
 
     h.teleport_player(SPAWN_REGION, 0, REGION_SIZE + FLIP_HYSTERESIS + 2.0, 128.0);
     h.tick(100); // scan extracts; relay injects
+    h.tick(150); // the target's slot closes: the arrival is applied before its Tick
 
     // Player owned by the target region now.
     let mut found_home = None;
@@ -169,6 +170,7 @@ fn halo_entity_updates_reach_running_neighbours() {
     let neighbour = RegionCoords::new(1, 0);
     h.teleport_player(SPAWN_REGION, 0, REGION_SIZE - 5.0, 128.0);
     h.tick(100);
+    h.tick(150); // the neighbour's slot closes: the update is applied before its Tick
     let mut mirrors = 0;
     h.manager.spawner_mut().with_region(neighbour, |region| {
         mirrors = region.data().halo_entities.len();
@@ -193,6 +195,8 @@ fn input_routes_by_home_ignoring_the_stamp() {
         SPAWN_REGION,
     );
     h.event(ServerEvent::ClientPacket(ClientPacket::GameEvent(ev), 0), 200);
+    // The body's arrival waits for the end of its slot; the input queues behind it.
+    h.tick(250);
     // The input reached the NEW home: its EventProcessed comes from `target`.
     let packets = h.drain_packets();
     assert!(packets.iter().any(|(_, p)| matches!(
@@ -278,10 +282,11 @@ fn arrival_lands_in_slot_after_departure_tick() {
     let start = tick_of(&mut h, target);
     h.teleport_player(SPAWN_REGION, 0, REGION_SIZE + FLIP_HYSTERESIS + 2.0, 128.0);
     h.tick(200);
+    h.tick(250); // closes the target's slot `stamp`
 
     let stamps = departure_stamps(&h, mark, SPAWN_REGION);
     assert_eq!(stamps, vec![start + 1], "the departure is stamped with the source tick after it ran");
-    // Slot `stamp`: after the target's tick that took it to `stamp`, before its next Tick.
+    // Slot `stamp`: at its end, right before the target's next Tick.
     assert_eq!(arrival_ticks(&h, mark, target, start), vec![stamps[0]]);
 }
 
@@ -313,7 +318,7 @@ fn transfer_to_lagging_target_waits() {
 
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
-fn transfer_to_leading_target_applies_on_receipt() {
+fn transfer_to_leading_target_applies_at_the_end_of_the_open_slot() {
     let mut h = subscribed_and_warm();
     let target = RegionCoords::new(1, 0);
     let mark = h.trace.len();
@@ -323,11 +328,13 @@ fn transfer_to_leading_target_applies_on_receipt() {
     for i in 0..4 {
         h.tick(200 + i * 50);
     }
+    assert!(arrival_ticks(&h, mark, target, start).is_empty(), "late: buffered to the end of the open slot");
+    h.tick(400);
 
     let stamps = departure_stamps(&h, mark, SPAWN_REGION);
     assert_eq!(stamps, vec![start + 1], "the lagging source departs in its first catch-up tick");
     let arrivals = arrival_ticks(&h, mark, target, start);
-    assert_eq!(arrivals, vec![start + 4], "applied at once, exactly once, by the leading target");
+    assert_eq!(arrivals, vec![start + 4], "applied at the end of the open slot, exactly once, by the leading target");
     let mut in_source = true;
     h.manager.spawner_mut().with_region(SPAWN_REGION, |r| {
         in_source = r.data().player_entites.contains_key(&0);

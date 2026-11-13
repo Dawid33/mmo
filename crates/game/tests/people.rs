@@ -166,6 +166,7 @@ fn person_crosses_seam_keeps_identity() {
         });
     });
     h.tick(100);
+    h.tick(150); // the target's slot closes: the arrival is applied before its Tick
     let mut here = Some(game::EntityKey::default());
     let mut there = None;
     h.manager.spawner_mut().with_region(SPAWN_REGION, |r| here = r.data().person_entity(P));

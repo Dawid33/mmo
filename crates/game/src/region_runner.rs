@@ -41,12 +41,13 @@ pub enum RegionInput {
     EventAfterTick(GameEventKind, u64),
     /// Something another region sent during its tick T (an `EntityArrived`,
     /// an entity- or terrain-halo update, a park that must follow an
-    /// arrival), stamped T+1:
-    /// applied once this region's `current_tick()` reaches the stamp — in
-    /// slot T+1 when the two run in step, at once when this one is ahead.
-    /// Held for as long as it takes (no `MAX_INPUT_LEAD_TICKS` cap: the
-    /// stamp is a region's, never a client's); after each tick, released
-    /// behind the client inputs held for the same slot.
+    /// arrival), stamped T+1: buffered in the region's [`crate::SlotInbox`]
+    /// and applied at the END of slot T+1 — right before the `Tick` that
+    /// closes it, with every other message of that slot, in canonical order
+    /// (never on receipt, so thread timing cannot order them). One that comes
+    /// after its slot closed lands at the end of the open slot. Held for as
+    /// long as it takes (no `MAX_INPUT_LEAD_TICKS` cap: the stamp is a
+    /// region's, never a client's).
     Transfer(GameEventKind, Tick),
     /// A new subscriber needs the full state; replied with
     /// `RegionOutput::Snapshot(client, ...)`.
@@ -272,12 +273,15 @@ pub struct RegionRunner {
     /// Client events waiting for the tick they were predicted after, in
     /// arrival order.
     held: std::collections::VecDeque<(GameEventKind, u64)>,
-    /// [`RegionInput::Transfer`]s waiting for their stamped slot, in arrival
-    /// order. Also holds the inputs of a client whose arrival is in here,
-    /// behind it, so they follow the body (see [`RegionRunner::route_input`]).
-    held_transfers: std::collections::VecDeque<(GameEventKind, Tick)>,
-    /// A [`RegionInput::ListPeople`] (its epoch) waiting for the transfers held
-    /// when it came, until the slot of the latest of them.
+    /// [`RegionInput::Transfer`]s waiting for the end of their stamped slot,
+    /// applied in canonical order right before the `Tick` that closes it
+    /// (`crate::slot_order`). Also holds, behind them, the events of a client
+    /// whose body's arrival or creation is in here, so they follow the body
+    /// (see [`RegionRunner::route_input`]). Runner state: never hashed or
+    /// saved — `Shutdown` applies all of it.
+    inbox: crate::SlotInbox,
+    /// A [`RegionInput::ListPeople`] (its epoch) waiting for the transfers
+    /// buffered when it came, until the slot of the latest of them closed.
     people_list_due: Option<(u64, Tick)>,
     /// Clients whose body left this region during the last
     /// [`MAX_INPUT_LEAD_TICKS`] ticks: where to and the departure stamp.
@@ -325,7 +329,7 @@ impl RegionRunner {
             region,
             out,
             held: Default::default(),
-            held_transfers: Default::default(),
+            inbox: crate::SlotInbox::new(),
             people_list_due: None,
             departed: Default::default(),
             state_hash_cost: Default::default(),
@@ -414,24 +418,19 @@ impl RegionRunner {
     pub fn handle_input(&mut self, input: RegionInput) -> bool {
         match input {
             RegionInput::Event(kind) if kind.input_client().is_some() => self.route_input(kind, None),
-            RegionInput::Event(kind) => match self.behind_held_creation(&kind) {
-                Some(stamp) => self.held_transfers.push_back((kind, stamp)),
+            RegionInput::Event(kind) => match self.behind_held_body(&kind) {
+                Some(stamp) => self.inbox.push_behind(kind, stamp),
                 None => self.apply_input(kind),
             },
-            RegionInput::Transfer(kind, stamp) => {
-                if stamp > self.region.current_tick() {
-                    self.held_transfers.push_back((kind, stamp));
-                } else if let Some(created) = self.behind_held_creation(&kind) {
-                    self.held_transfers.push_back((kind, created.max(stamp)));
-                } else {
-                    self.apply_input(kind);
-                }
-            }
+            RegionInput::Transfer(kind, stamp) => match self.behind_held_body(&kind) {
+                Some(held) => self.inbox.push_behind(kind, held.max(stamp)),
+                None => self.inbox.push(kind, stamp),
+            },
             RegionInput::EventAfterTick(kind, after_tick) if kind.input_client().is_some() => {
                 self.route_input(kind, Some(after_tick))
             }
-            RegionInput::EventAfterTick(kind, after_tick) => match self.behind_held_creation(&kind) {
-                Some(stamp) => self.held_transfers.push_back((kind, stamp.max(after_tick))),
+            RegionInput::EventAfterTick(kind, after_tick) => match self.behind_held_body(&kind) {
+                Some(stamp) => self.inbox.push_behind(kind, stamp.max(after_tick)),
                 None => self.hold_or_apply(kind, after_tick),
             },
             RegionInput::RequestSnapshot(client_id) => {
@@ -463,13 +462,12 @@ impl RegionRunner {
             }
             RegionInput::SeedHaloFromWorldgen(neighbours) => self.seed_halo_from_worldgen(neighbours),
             RegionInput::SeedHaloFromStore(neighbours) => self.seed_halo_from_store(neighbours),
-            RegionInput::ListPeople(epoch) => {
-                let due = self.held_transfers.iter().map(|(_, t)| *t).max();
-                match due.filter(|&t| t > self.region.current_tick()) {
-                    Some(t) => self.people_list_due = Some((epoch, t)),
-                    None => self.send_people_listed(epoch),
-                }
-            }
+            RegionInput::ListPeople(epoch) => match self.inbox.latest_stamp() {
+                // Answered once every buffered transfer has been applied: at the
+                // end of the latest one's slot (`tick`).
+                Some(t) => self.people_list_due = Some((epoch, t)),
+                None => self.send_people_listed(epoch),
+            },
             RegionInput::Shutdown => {
                 // A save cut at a tick this region will not reach now: it
                 // parks there, so its answer is its state with what is held
@@ -477,21 +475,11 @@ impl RegionRunner {
                 // would have run first), taken before what is held for the
                 // cut's slot or later.
                 if let Some((id, tick)) = self.pending_cut.take() {
-                    for (kind, _) in Self::take_before(&mut self.held, tick) {
-                        self.apply(kind);
-                    }
-                    for (kind, _) in Self::take_before(&mut self.held_transfers, tick) {
-                        self.apply_input(kind);
-                    }
+                    self.apply_buffered(Some(tick));
                     self.send_cut_snapshot(id, tick);
                 }
                 // Input must not be lost to a park.
-                for (kind, _) in std::mem::take(&mut self.held) {
-                    self.apply(kind);
-                }
-                for (kind, _) in std::mem::take(&mut self.held_transfers) {
-                    self.apply_input(kind);
-                }
+                self.apply_buffered(None);
                 let people = self.region.data().people_here();
                 for (person, _) in &people {
                     self.apply(GameEventKind::DespawnPerson(*person));
@@ -520,39 +508,54 @@ impl RegionRunner {
         true
     }
 
-    /// The stamp of `client`'s body creation held here (a create or restore
-    /// the manager held past a save cut's tick), if any.
-    fn held_creation(&self, client: ClientId) -> Option<Tick> {
-        self.held_transfers.iter().find_map(|(k, t)| match k {
-            GameEventKind::CreateClient(c) | GameEventKind::CreateClientAt(c, ..) | GameEventKind::RestorePlayer(c, _)
-                if *c == client =>
-            {
-                Some(*t)
+    /// The stamp of `client`'s body buffered in the inbox — its arrival (a
+    /// crossing waiting for the end of its slot), or its creation (a create or
+    /// restore the manager held past a save cut's tick) — if any.
+    fn held_body(&self, client: ClientId) -> Option<Tick> {
+        self.inbox.holds(|k| match k {
+            GameEventKind::EntityArrived(b) => b.client.as_ref().is_some_and(|(c, _)| *c == client),
+            GameEventKind::CreateClient(c) | GameEventKind::CreateClientAt(c, ..) | GameEventKind::RestorePlayer(c, _) => {
+                *c == client
             }
-            _ => None,
+            _ => false,
         })
     }
 
-    /// No event for a client is applied before its held creation: the stamp
+    /// No event for a client is applied before its buffered body: the stamp
     /// to queue `kind` (a server event for a client — park, leave, …) behind
     /// it, when there is one.
-    fn behind_held_creation(&self, kind: &GameEventKind) -> Option<Tick> {
+    fn behind_held_body(&self, kind: &GameEventKind) -> Option<Tick> {
         let client = match kind {
             GameEventKind::ParkPlayer(c) | GameEventKind::ClientLeft(c) => Some(*c),
             k => k.origin_client(),
         }?;
-        self.held_creation(client)
+        self.held_body(client)
     }
 
-    /// Removes and returns, in order, the entries of `queue` stamped before
-    /// `tick`.
-    fn take_before(
-        queue: &mut std::collections::VecDeque<(GameEventKind, u64)>,
-        tick: Tick,
-    ) -> Vec<(GameEventKind, u64)> {
-        let (before, rest): (Vec<_>, Vec<_>) = std::mem::take(queue).into_iter().partition(|(_, t)| *t < tick);
-        *queue = rest.into();
-        before
+    /// Applies what is buffered — the inbox in canonical order, then the
+    /// held client inputs — stamped before `before` (`None`: everything),
+    /// until nothing such is left (an applied arrival may hold the inputs it
+    /// carried). For a region about to park: the inbox first, as its
+    /// messages for the open slot close it before any later slot's input.
+    fn apply_buffered(&mut self, before: Option<Tick>) {
+        let due = |t: u64| before.is_none_or(|b| t < b);
+        loop {
+            let transfers = match before {
+                Some(tick) => self.inbox.drain_before(tick),
+                None => self.inbox.drain_all(),
+            };
+            let (inputs, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut self.held).into_iter().partition(|(_, t)| due(*t));
+            self.held = rest.into();
+            if inputs.is_empty() && transfers.is_empty() {
+                return;
+            }
+            for kind in transfers {
+                self.apply_input(kind);
+            }
+            for (kind, _) in inputs {
+                self.apply(kind);
+            }
+        }
     }
 
     /// Halo seeds read from the world store here, applied at once (before
@@ -623,25 +626,25 @@ impl RegionRunner {
     /// A client input (`stamp`: the tick it was predicted after, if any)
     /// follows the client's body:
     /// - body here: held for its slot or applied, as any event;
-    /// - body on its way here (its arrival is held): queued right behind the
-    ///   arrival, in the arrival's slot or its own later one;
+    /// - body on its way here (its arrival, or its creation, is buffered):
+    ///   queued right behind it in the inbox, or held for its own later slot
+    ///   (by then the body is in);
     /// - body left recently: sent back as [`RegionOutput::Forward`];
     /// - otherwise (no such client here at all) handled as before.
     fn route_input(&mut self, kind: GameEventKind, stamp: Option<u64>) {
         let client = kind.input_client().expect("route_input takes client inputs");
         if !self.region.data().clients.contains_key(&client) {
-            let arrival = self.held_transfers.iter().find_map(|(k, t)| match k {
-                GameEventKind::EntityArrived(b) if b.client.as_ref().map(|(c, _)| *c) == Some(client) => Some(*t),
-                _ => None,
-            });
-            // Or its creation, held past a save cut (`WorldManager::send_play_event`).
-            let arrival = arrival.or_else(|| self.held_creation(client));
-            if let Some(arrives) = arrival {
+            // Its arrival, or its creation held past a save cut
+            // (`WorldManager::send_play_event`).
+            if let Some(arrives) = self.held_body(client) {
                 let now = self.region.current_tick() as u64;
                 match stamp {
-                    // A later slot than the arrival's: the arrival is in by then.
-                    Some(s) if s > arrives && s - now <= MAX_INPUT_LEAD_TICKS => self.held.push_back((kind, s)),
-                    _ => self.held_transfers.push_back((kind, arrives)),
+                    // A later slot than the arrival's, not open yet: the
+                    // arrival is applied before the Tick that opens it.
+                    Some(s) if s > arrives && s > now && s - now <= MAX_INPUT_LEAD_TICKS => {
+                        self.held.push_back((kind, s))
+                    }
+                    _ => self.inbox.push_behind(kind, arrives),
                 }
                 return;
             }
@@ -657,8 +660,8 @@ impl RegionRunner {
         }
     }
 
-    /// A manager-routed event ([`RegionInput::Event`], or a released
-    /// [`RegionInput::Transfer`]).
+    /// A manager-routed event ([`RegionInput::Event`], or a
+    /// [`RegionInput::Transfer`] the inbox released).
     fn apply_input(&mut self, kind: GameEventKind) {
         match kind {
             // The manager filters these; drop defensively rather than
@@ -709,7 +712,22 @@ impl RegionRunner {
 
     /// One sim tick + the every-10-ticks SyncClock self-report. The caller
     /// owns pacing (thread timer on the server, frame accumulator on wasm).
+    ///
+    /// First the slot this Tick closes ends: every buffered neighbour message
+    /// stamped for it or earlier is applied, in canonical order
+    /// (`crate::slot_order`) — so a slot's events are its `Tick`, its client
+    /// inputs, then its neighbour messages sorted.
     pub fn tick(&mut self) {
+        let closing = self.region.current_tick();
+        for kind in self.inbox.drain_due(closing) {
+            self.apply_input(kind);
+        }
+        if let Some((epoch, due)) = self.people_list_due {
+            if due <= closing {
+                self.people_list_due = None;
+                self.send_people_listed(epoch);
+            }
+        }
         let event = self
             .region
             .handle_event(GameEventKind::Tick)
@@ -769,8 +787,8 @@ impl RegionRunner {
             }
             _ => {}
         }
-        // Slot `now`: events predicted after the tick that just ran, then
-        // transfers stamped for it, each in arrival order.
+        // Slot `now`: events predicted after the tick that just ran, in
+        // arrival order (its neighbour messages close it, at the next tick).
         let mut i = 0;
         while i < self.held.len() {
             if self.held[i].1 <= now {
@@ -778,21 +796,6 @@ impl RegionRunner {
                 self.apply(kind);
             } else {
                 i += 1;
-            }
-        }
-        let mut i = 0;
-        while i < self.held_transfers.len() {
-            if self.held_transfers[i].1 <= now {
-                let (kind, _) = self.held_transfers.remove(i).expect("index checked");
-                self.apply_input(kind);
-            } else {
-                i += 1;
-            }
-        }
-        if let Some((epoch, due)) = self.people_list_due {
-            if due <= now {
-                self.people_list_due = None;
-                self.send_people_listed(epoch);
             }
         }
         // (The slot's events cross nothing; the Tick's scan did.)

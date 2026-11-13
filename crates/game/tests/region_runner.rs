@@ -290,3 +290,134 @@ fn a_server_runner_keeps_no_event_history() {
         "server regions must not retain applied events"
     );
 }
+
+// --- Neighbour messages: applied at the end of their slot, in canonical order --
+//
+// A slot's region-to-region messages wait in the runner's `SlotInbox` and are
+// applied, sorted (stamp, class, key, arrival), right before the next `Tick`
+// — never on receipt, so thread timing cannot decide their order.
+
+fn pose(x: f32, y: f32, z: f32) -> game::Pose {
+    game::Pose::from_translation(game::rapier3d::math::Vector::new(x, y, z))
+}
+
+fn eid(x: i32, z: i32, serial: u64) -> game::EntityId {
+    game::EntityId { birth_region: RegionCoords::new(x, z), serial }
+}
+
+/// A mirror of a player standing in `source`, by its seam (target-local pose).
+fn ghost(source: RegionCoords, x: f32) -> GameEventKind {
+    GameEventKind::HaloEntity(game::HaloEntityDelta {
+        id: eid(source.x, source.z, 1),
+        source_region: source,
+        kind: game::EntityKind::Player,
+        isometry: pose(x, crate::common::above_floor_y(), 128.0),
+        linvel: game::rapier3d::math::Vector::ZERO,
+        collider: game::ColliderSpec::CapsuleY { half_height: 8.0, radius: 6.4 },
+    })
+}
+
+/// Client `client`'s body crossing in (serial `serial`, born in (-1, 0)).
+fn arriving_body(client: game::ClientId, serial: u64) -> GameEventKind {
+    GameEventKind::EntityArrived(game::EntityBundle {
+        id: eid(-1, 0, serial),
+        kind: game::EntityKind::Player,
+        body: game::BodyState::kinematic(pose(2.0 + serial as f32, crate::common::above_floor_y(), 128.0)),
+        collider: game::ColliderSpec::CapsuleY { half_height: 8.0, radius: 6.4 },
+        carried: game::Carried { camera: Some((0.0, 0.0)), motion: Some(game::Motion::default()), ..Default::default() },
+        client: Some((client, game::Client::default())),
+        pending_inputs: Vec::new(),
+    })
+}
+
+fn is_arrival_of(kind: &GameEventKind, client: game::ClientId) -> bool {
+    matches!(kind, GameEventKind::EntityArrived(b) if b.client.as_ref().map(|(c, _)| *c) == Some(client))
+}
+
+/// A runner past its first tick, outputs drained.
+fn ticked_runner() -> (RegionRunner, crossbeam::channel::Receiver<(RegionCoords, RegionOutput)>) {
+    let (mut r, out) = runner(RegionCoords::new(0, 0));
+    r.tick();
+    let _ = processed(&out);
+    (r, out)
+}
+
+#[test]
+fn transfers_of_a_slot_apply_before_the_next_tick_in_canonical_order() {
+    let (mut r, out) = ticked_runner();
+    let t = r.current_tick();
+    let (a, b) = (RegionCoords::new(-1, 0), RegionCoords::new(1, 0));
+    let (from_a, from_b) = (ghost(a, 1.0), ghost(b, game::REGION_SIZE - 1.0));
+    // On time (stamp = the open slot), B's first.
+    r.handle_input(RegionInput::Transfer(from_b.clone(), t));
+    r.handle_input(RegionInput::Transfer(from_a.clone(), t));
+    assert!(processed(&out).is_empty(), "nothing applied on receipt");
+    r.tick();
+    let events = processed(&out);
+    let kinds: Vec<_> = events.iter().map(|e| e.kind.clone()).collect();
+    assert_eq!(kinds, vec![from_a, from_b, GameEventKind::Tick], "sorted by source, then the Tick");
+    assert_eq!(events[1].id, events[0].id + 1);
+    assert_eq!(events[2].id, events[1].id + 1);
+}
+
+#[test]
+fn input_for_a_buffered_arrival_follows_it() {
+    for stamped in [false, true] {
+        let (mut r, out) = ticked_runner();
+        let t = r.current_tick();
+        r.handle_input(RegionInput::Transfer(arriving_body(7, 1), t));
+        let input = key_input(7);
+        r.handle_input(if stamped {
+            RegionInput::EventAfterTick(input.clone(), t as u64)
+        } else {
+            RegionInput::Event(input.clone())
+        });
+        assert!(processed(&out).is_empty(), "stamped {stamped}: the input waits behind the body");
+        r.tick();
+        let kinds: Vec<_> = processed(&out).into_iter().map(|e| e.kind).collect();
+        assert_eq!(kinds.len(), 3, "stamped {stamped}: {kinds:?}");
+        assert!(is_arrival_of(&kinds[0], 7), "stamped {stamped}: the body first: {kinds:?}");
+        assert_eq!(kinds[1..], [input, GameEventKind::Tick], "stamped {stamped}");
+    }
+}
+
+#[test]
+fn late_transfer_lands_at_the_end_of_the_open_slot() {
+    let (mut r, out) = ticked_runner();
+    r.tick();
+    let _ = processed(&out);
+    let t = r.current_tick();
+    let (a, b) = (RegionCoords::new(-1, 0), RegionCoords::new(1, 0));
+    let (on_time, late) = (ghost(a, 1.0), ghost(b, game::REGION_SIZE - 1.0));
+    r.handle_input(RegionInput::Transfer(on_time.clone(), t));
+    r.handle_input(RegionInput::Transfer(late.clone(), t - 1));
+    assert!(processed(&out).is_empty(), "a late message is not applied on receipt either");
+    r.tick();
+    let kinds: Vec<_> = processed(&out).into_iter().map(|e| e.kind).collect();
+    assert_eq!(kinds, vec![late, on_time, GameEventKind::Tick], "once, by its stamp first, before the Tick");
+}
+
+#[test]
+fn shutdown_applies_everything_buffered() {
+    let (mut r, out) = ticked_runner();
+    let t = r.current_tick();
+    r.handle_input(RegionInput::Transfer(arriving_body(7, 1), t));
+    r.handle_input(RegionInput::Transfer(arriving_body(8, 2), t + 2));
+    assert!(processed(&out).is_empty(), "both buffered");
+    assert!(!r.handle_input(RegionInput::Shutdown));
+    let outputs: Vec<_> = out.try_iter().map(|(_, o)| o).collect();
+    let arrived: Vec<usize> = outputs
+        .iter()
+        .enumerate()
+        .filter(|(_, o)| matches!(o, RegionOutput::EventProcessed(e) if matches!(e.kind, GameEventKind::EntityArrived(_))))
+        .map(|(i, _)| i)
+        .collect();
+    let stopped = outputs.iter().position(|o| matches!(o, RegionOutput::Stopped(..))).expect("Stopped");
+    assert_eq!(arrived.len(), 2, "both arrivals applied");
+    assert!(arrived.iter().all(|&i| i < stopped), "before Stopped");
+    let RegionOutput::Stopped(serialized, ..) = &outputs[stopped] else { unreachable!() };
+    let parked = serialized.to_rollback().expect("decodes");
+    for id in [eid(-1, 0, 1), eid(-1, 0, 2)] {
+        assert!(parked.id_index.contains_key(&id), "the parked region holds {id:?}");
+    }
+}

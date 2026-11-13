@@ -13,7 +13,7 @@ use game::{
 };
 
 use crate::common;
-use crate::common::rig::{north, north_west, seam_floor_columns, Rig, Seen, CLIENT, LEG_ROUNDS};
+use crate::common::rig::{assert_same_streams, north, north_west, seam_floor_columns, Rig, Seen, Streams, CLIENT, LEG_ROUNDS};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Seeds swept per schedule mode.
@@ -57,13 +57,39 @@ fn walk_there_and_back(
     route: Route,
     schedule: Option<InlineSchedule>,
 ) -> Vec<(RegionCoords, u64, u32)> {
+    walk_there_and_back_recorded(route, schedule, false).0
+}
+
+/// Units inside its region's seams a [`walk_there_and_back_recorded`] crowd slime stands.
+const CROWD_INSET: f32 = 8.0;
+
+/// [`walk_there_and_back`], also returning every region's event stream.
+/// `crowd`: a slime stands by the spawn corner in the north and in the west
+/// neighbour, so two sources mirror into the spawn region (and into the
+/// north-west one) every tick — neighbour messages whose order within a slot
+/// the schedule permutes.
+fn walk_there_and_back_recorded(
+    route: Route,
+    schedule: Option<InlineSchedule>,
+    crowd: bool,
+) -> (Vec<(RegionCoords, u64, u32)>, Streams) {
     let mut rig = Rig::new(schedule);
+    rig.event_streams = Some(Default::default());
     rig.event(ServerEvent::connected(CLIENT));
     for rc in SPAWN_REGION.window_3x3() {
         rig.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(rc), CLIENT));
     }
     // A late spawn region creates the player a round or two after connect.
     rig.walk_until_owned_by(SPAWN_REGION, "spawn");
+    if crowd {
+        let far = REGION_SIZE - CROWD_INSET;
+        for (rc, x, z) in [(north(), CROWD_INSET, far), (RegionCoords::new(-1, 0), far, CROWD_INSET)] {
+            rig.manager.spawner_mut().with_region(rc, |region| {
+                let tick = region.current_tick();
+                common::spawn_slime(region, [x, common::above_floor_y(), z], 1, 0.0, tick);
+            });
+        }
+    }
 
     rig.key(Key::KeyE, true);
     rig.key(Key::KeyE, false);
@@ -102,7 +128,8 @@ fn walk_there_and_back(
         rig.round();
     }
     assert_eq!(rig.owners(), [SPAWN_REGION]);
-    rig.fingerprint()
+    let streams = rig.event_streams.take().expect("recording");
+    (rig.fingerprint(), streams)
 }
 
 /// Sweeps `SEEDS` seeds of one schedule mode over every route; returns how
@@ -145,6 +172,26 @@ fn handoff_survives_permuted_tick_order() {
     // Order alone may legitimately end bit-identical to lockstep: regions
     // share no state, so only the manager's output order moves.
     sweep("shuffled", InlineSchedule::shuffled);
+}
+
+/// Permuted tick order only permutes the order neighbour messages reach a
+/// region within a slot; applied in canonical order at the slot's end, the
+/// world ends bit-identical to lockstep, every region's event stream (ids
+/// included) identical too.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn shuffled_schedule_matches_lockstep() {
+    for (route, crowd) in [(NORTH, false), (CORNER, false), (NORTH, true), (CORNER, true)] {
+        let (lockstep, lockstep_streams) = walk_there_and_back_recorded(route, None, crowd);
+        for seed in 0..SEEDS {
+            let (run, streams) =
+                std::panic::catch_unwind(|| walk_there_and_back_recorded(route, Some(InlineSchedule::shuffled(seed)), crowd))
+                    .unwrap_or_else(|_| panic!("{} (crowd {crowd}) broke under schedule `shuffled`, seed {seed}", route.name));
+            let what = format!("{} (crowd {crowd}) shuffled seed {seed} vs lockstep", route.name);
+            assert_same_streams(&what, &lockstep_streams, &streams);
+            assert_eq!(run, lockstep, "{what}: fingerprints differ");
+        }
+    }
 }
 
 #[test]

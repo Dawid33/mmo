@@ -147,6 +147,9 @@ pub struct Rig {
     /// `Some`: every event the regions processed since it was set, in output
     /// order — each region's authoritative stream, as a client replays it.
     pub events_seen: Option<Vec<(RegionCoords, GameEventKind)>>,
+    /// `Some`: each region's authoritative stream since it was set — every
+    /// event it processed, with its id, in output order.
+    pub event_streams: Option<Streams>,
     /// `Some`: every packet the manager sent since it was set, in order (region
     /// snapshots aside).
     pub packets_seen: Option<Vec<(Option<ClientId>, ServerPacket)>>,
@@ -192,6 +195,7 @@ impl Rig {
             cut_missed: Vec::new(),
             intents_seen: Vec::new(),
             events_seen: None,
+            event_streams: None,
             packets_seen: None,
         }
     }
@@ -226,6 +230,11 @@ impl Rig {
                     (self.events_seen.as_mut(), &out)
                 {
                     seen.push((rc, e.kind.clone()));
+                }
+                if let (Some(streams), RegionOutput::EventProcessed(e) | RegionOutput::EventProcessedHashed(e, ..)) =
+                    (self.event_streams.as_mut(), &out)
+                {
+                    streams.entry(rc).or_default().push((e.id, e.kind.clone()));
                 }
                 if let RegionOutput::CutMissed(id) = &out {
                     let mut at = 0;
@@ -427,6 +436,33 @@ impl Rig {
             });
         }
         out
+    }
+}
+
+/// Each region's authoritative event stream (`Rig::event_streams`): `(id, kind)`.
+pub type Streams = BTreeMap<RegionCoords, Vec<(usize, GameEventKind)>>;
+
+/// Panics, naming `what` and the first event that differs, unless `a` and `b`
+/// are the same streams.
+pub fn assert_same_streams(what: &str, a: &Streams, b: &Streams) {
+    let regions = |s: &Streams| s.keys().copied().collect::<Vec<_>>();
+    assert_eq!(regions(a), regions(b), "{what}: other regions emitted events");
+    for (rc, xs) in a {
+        let ys = &b[rc];
+        let short = |e: Option<&(usize, GameEventKind)>| {
+            let mut d = format!("{e:?}");
+            d.truncate(240);
+            d
+        };
+        if let Some(i) = (0..xs.len().max(ys.len())).find(|&i| xs.get(i) != ys.get(i)) {
+            panic!(
+                "{what}: {rc:?}'s streams part at event {i} of {}/{}:\n  {}\n  {}",
+                xs.len(),
+                ys.len(),
+                short(xs.get(i)),
+                short(ys.get(i))
+            );
+        }
     }
 }
 

@@ -91,7 +91,9 @@ fn neighbour_edit_reaches_halo_next_tick() {
     assert!(seen_from_spawn(&mut rig, north(), at.0).is_some(), "slot {t}: not yet");
     rig.round();
     assert_eq!(tick_of(&mut rig, SPAWN_REGION), t + 1);
-    assert_eq!(seen_from_spawn(&mut rig, north(), at.0), None, "slot {}: the carve is in the halo", t + 1);
+    assert!(seen_from_spawn(&mut rig, north(), at.0).is_some(), "slot {}: the delta is buffered to its end", t + 1);
+    rig.round();
+    assert_eq!(seen_from_spawn(&mut rig, north(), at.0), None, "tick {}: the carve is in the halo", t + 2);
     let below = [at.0[0], at.0[1] - 1, at.0[2]];
     assert!(seen_from_spawn(&mut rig, north(), below).is_some(), "the plate under it still stands");
     // Outside own ∪ halo: unknown.
@@ -171,6 +173,8 @@ fn parked_neighbour_reseeds_running_halo() {
     rig.manager.maintain(rig.now_ms);
     rig.settle();
     assert!(rig.manager.parked_regions().contains(&north()), "north parked");
+    assert!(seen_from_spawn(&mut rig, north(), at.0).is_some(), "the reseed is buffered to its slot's end");
+    rig.round();
     assert_eq!(seen_from_spawn(&mut rig, north(), at.0), None, "the parked edit is in the halo");
     assert!(seen_from_spawn(&mut rig, north(), [at.0[0] + 2, at.0[1], at.0[2]]).is_some(), "beside it the ground stands");
 }
@@ -215,8 +219,14 @@ fn halo_entity_removed_explicitly_on_park() {
     rig.manager.maintain(rig.now_ms);
     rig.settle();
     assert!(rig.manager.parked_regions().contains(&north()), "north parked");
-    // No round since: the spawn region is in the slot north's last stamp opens.
+    // No round since: the spawn region is in the slot north's last stamp opens;
+    // the end is buffered to that slot's end.
     assert_eq!(tick_of(&mut rig, SPAWN_REGION), last, "lockstep, nothing ticked since the park");
+    assert!(mirror_in(&mut rig, SPAWN_REGION, id).is_some(), "buffered to the end of the slot");
+    // One tick (not `round`: its conservation check does not count parked states).
+    rig.now_ms += game::TICK_RATE;
+    rig.manager.spawner_mut().tick_all();
+    rig.settle();
     assert_eq!(mirror_in(&mut rig, SPAWN_REGION, id), None, "the parked owner's mirror is gone");
 }
 
@@ -303,6 +313,7 @@ fn lost_region_mirrors_dropped_on_unload() {
     rig.manager.maintain(rig.now_ms);
     rig.settle();
     assert!(!rig.manager.running_regions().contains(&north()), "north is gone");
+    rig.round(); // the spawn region's slot closes: the drop is applied before its Tick
     assert_eq!(mirror_in(&mut rig, SPAWN_REGION, id), None, "the lost owner's mirror is gone");
 }
 
@@ -390,6 +401,8 @@ fn halo_carries_recipe_water() {
     fill(&mut rig, east(), (lo, hi));
     assert_eq!(units_from(&mut rig, east(), cell), Some(0), "the owner reads its bricks at once");
     assert_eq!(units_from(&mut rig, SPAWN_REGION, cell), Some(game::WATER_FULL), "the halo: not yet");
+    rig.round();
+    assert_eq!(units_from(&mut rig, SPAWN_REGION, cell), Some(game::WATER_FULL), "the T+1 delta: buffered to its slot's end");
     rig.round();
     assert_eq!(units_from(&mut rig, SPAWN_REGION, cell), Some(0), "after the T+1 halo delta");
 }

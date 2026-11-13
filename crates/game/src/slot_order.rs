@@ -323,6 +323,49 @@ mod tests {
     }
 
     #[test]
+    fn arrival_keys_sort_numerically_at_the_extremes() {
+        let big = i64::MAX as u64;
+        let in_order = vec![
+            eid(i32::MIN, 0, u64::MAX),
+            eid(-1, 5, 0),
+            eid(-1, 5, big),
+            eid(-1, 5, big + 1),
+            eid(-1, 5, u64::MAX),
+            eid(0, -3, 0),
+            eid(0, -3, u64::MAX),
+            eid(0, 0, big),
+            eid(0, 0, big + 1),
+        ];
+        // A fixed shuffle of the order above.
+        let mut inbox = SlotInbox::new();
+        for i in [5, 2, 8, 0, 7, 3, 1, 6, 4] {
+            inbox.push(arrival(in_order[i]), 2);
+        }
+        let drained: Vec<EntityId> = inbox
+            .drain_all()
+            .into_iter()
+            .map(|k| match k {
+                GameEventKind::EntityArrived(b) => b.id,
+                other => panic!("not an arrival: {other:?}"),
+            })
+            .collect();
+        assert_eq!(drained, in_order);
+    }
+
+    #[test]
+    fn entries_left_by_drain_due_keep_their_arrival_order() {
+        let (a, b) = (input(1), input(2));
+        let mut inbox = SlotInbox::new();
+        inbox.push_behind(a.clone(), 9);
+        inbox.push(intent(), 3);
+        inbox.push_behind(b.clone(), 9);
+        assert_eq!(inbox.drain_due(3), vec![intent()]);
+        inbox.push(intent(), 4);
+        assert_eq!(inbox.drain_due(4).len(), 1);
+        assert_eq!(inbox.drain_due(9), vec![a, b]);
+    }
+
+    #[test]
     fn holds_finds_a_buffered_arrival() {
         let mut inbox = SlotInbox::new();
         assert_eq!(inbox.holds(|k| matches!(k, GameEventKind::EntityArrived(_))), None);

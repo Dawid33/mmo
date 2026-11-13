@@ -60,7 +60,12 @@ fn for_seeds(what: &str, test: impl Fn(u64) + std::panic::RefUnwindSafe) {
 /// `InlineSchedule::jittery(seed)`, the client joined, and the world tick
 /// past a cut's lead (so a test can place a cut a few ticks ahead).
 fn jittery_rig(seed: u64) -> Rig {
-    let mut rig = Rig::with_floor(Some(InlineSchedule::jittery(seed)), uniform_floor);
+    scheduled_rig(Some(InlineSchedule::jittery(seed)))
+}
+
+/// [`jittery_rig`] under `schedule` (`None`: lockstep).
+fn scheduled_rig(schedule: Option<InlineSchedule>) -> Rig {
+    let mut rig = Rig::with_floor(schedule, uniform_floor);
     rig.join_spawn();
     while world_tick(&mut rig) < SAVE_CUT_LEAD_TICKS + 4 {
         rig.round();
@@ -73,8 +78,13 @@ fn jittery_rig(seed: u64) -> Rig {
 /// region running. `player`: the store's record for the client's player
 /// (restored), else a new player joins.
 fn restored(store: &CutStore, seed: u64, player: bool) -> Rig {
+    restored_under(store, Some(InlineSchedule::jittery(seed)), player)
+}
+
+/// [`restored`] under `schedule` (`None`: lockstep).
+fn restored_under(store: &CutStore, schedule: Option<InlineSchedule>, player: bool) -> Rig {
     let mut spawner = InlineSpawner::with_portable(store.regions.clone());
-    spawner.set_schedule(Some(InlineSchedule::jittery(seed)));
+    spawner.set_schedule(schedule);
     let mut rig = Rig::with_spawner(spawner, uniform_floor);
     if player {
         let record = store.players.get(&PlayerId(CLIENT as u64)).cloned().expect("the player's record");
@@ -164,7 +174,13 @@ fn push_over_north_seam(rig: &mut Rig, id: EntityId) -> bool {
 /// departure): the cut holds it exactly once — in a region snapshot or as an
 /// in-flight row — and a world restored from the cut has it exactly once.
 fn straddling_transfer(seed: u64, d: i64) {
-    let mut rig = jittery_rig(seed);
+    straddling_transfer_under(|| Some(InlineSchedule::jittery(seed)), d);
+}
+
+/// [`straddling_transfer`] under the schedule `schedule()` makes (`None`: lockstep),
+/// for the live world and the one restored from the cut.
+fn straddling_transfer_under(schedule: impl Fn() -> Option<InlineSchedule>, d: i64) {
+    let mut rig = scheduled_rig(schedule());
     let id = slime_by_north_seam(&mut rig);
     rig.round();
     let w0 = world_tick(&mut rig);
@@ -200,7 +216,7 @@ fn straddling_transfer(seed: u64, d: i64) {
     store.apply(&cut);
     let at = store.places(id);
     assert_eq!(at.len(), 1, "cut at {} (departure ~{departs}): the slime is saved in {at:?}", cut.tick);
-    let mut again = restored(&store, seed, false);
+    let mut again = restored_under(&store, schedule(), false);
     assert_eq!(live_count(&mut again, id), 1, "restored from the cut at {} (departure ~{departs}, saved {at:?})", cut.tick);
 }
 
@@ -212,6 +228,27 @@ fn straddling_transfer_is_saved_exactly_once() {
             straddling_transfer(seed, d);
         }
     });
+}
+
+/// Seeds of `InlineSchedule::shuffled` the crossing-at-the-cut sweep runs (besides lockstep).
+const SHUFFLED_SEEDS: u64 = 12;
+
+/// A slime crossing the north seam while the cut's tick passes (`d` ticks off its
+/// departure), its arrival applied at the end of its slot: under lockstep and every
+/// shuffled seed the cut plus its in-flight rows hold it exactly once, and a world
+/// rebuilt from the cut has one live copy.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn cut_during_a_crossing_holds_each_entity_once_under_every_schedule() {
+    let schedules = std::iter::once(None).chain((0..SHUFFLED_SEEDS).map(Some));
+    for seed in schedules {
+        for d in -3..=3 {
+            let run = std::panic::catch_unwind(|| straddling_transfer_under(|| seed.map(InlineSchedule::shuffled), d));
+            if run.is_err() {
+                panic!("a slime crossing at the cut (d = {d}) broke under {}", seed.map_or("lockstep".into(), |s| format!("shuffled({s})")));
+            }
+        }
+    }
 }
 
 fn stone(count: u32) -> ItemStack {
