@@ -1,5 +1,7 @@
-//! Opening a store: connect, (a writer) take SQLite's file lock and migrate,
-//! (read-only) check the schema is this build's; then check the world row.
+//! Opening a store: connect, (a writer) take SQLite's file lock, refuse a world this
+//! build cannot open untouched (a stud world, or a voxel world from before the stud
+//! switch), (a writer) migrate, (read-only) check the schema is this build's; then check
+//! the world row.
 
 use std::fs::File;
 use std::path::Path;
@@ -10,7 +12,7 @@ use sqlx::Row;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 
-use crate::{Dials, FormatKind, STORE_FORMAT_VERSION, STORE_POOL_MAX, StoreError, StoreUrl};
+use crate::{Dials, FormatKind, STORE_FORMAT_VERSION, STORE_POOL_MAX, StoreError, StoreUrl, TerrainKind};
 
 /// The connection pool of either engine.
 #[derive(Clone)]
@@ -114,7 +116,17 @@ pub async fn open_pool(url: &StoreUrl, dials: Dials, mode: OpenMode) -> Result<(
         }
     };
 
+    // Before anything is migrated or checked: a world this build cannot open is refused
+    // as it is, by a writer and a reader alike.
     let applied = applied_migration(&pool).await?;
+    if let Err(refused) = refuse_unreturned_world(&pool, applied).await {
+        // Closed before the answer: the caller sees the store as it was, no connection left on it.
+        match &pool {
+            Pool::Sqlite(p) => p.close().await,
+            Pool::Pg(p) => p.close().await,
+        }
+        return Err(refused);
+    }
     if writer {
         if let Some(from) = applied.filter(|a| *a < newest_migration()) {
             log::info!("[world-store] migrating the schema from {from} to {} ({})", newest_migration(), url);
@@ -209,6 +221,14 @@ pub(crate) fn claim_timeout_message(ms: u64, gids: &[String]) -> String {
     }
 }
 
+/// The migration that brings the voxel table and column back (`0011_voxel_terrain_returns`).
+const VOXEL_RETURN_MIGRATION: i64 = 11;
+/// The migration that dropped the voxel table and column (`0005_drop_voxel_terrain`):
+/// regions saved under it or later are stud regions.
+const DROP_VOXEL_TERRAIN_MIGRATION: i64 = 5;
+/// The migration that added `world.terrain` (`0004_stud_terrain`).
+const TERRAIN_KIND_MIGRATION: i64 = 4;
+
 /// The newest migration applied to the store (`_sqlx_migrations`), `None` for a
 /// database with no migration table yet (a new one).
 async fn applied_migration(pool: &Pool) -> Result<Option<i64>, StoreError> {
@@ -234,6 +254,40 @@ async fn scalar(pool: &Pool, sql: &str) -> Result<Option<i64>, StoreError> {
         Pool::Pg(p) => sqlx::query(sql).fetch_optional(p).await?.map(|r| r.try_get(0)).transpose()?,
     }
     .flatten())
+}
+
+/// Refuses a store this build cannot open, before any migration and for writers and
+/// read-only opens alike; reads only. `applied`: [`applied_migration`].
+///
+/// - A store that has not had [`VOXEL_RETURN_MIGRATION`] and holds a saved region is
+///   refused: a stud world (its terrain is never converted), or a voxel world from
+///   before the stud switch (`0005_drop_voxel_terrain`, on the way to `0011`, would drop
+///   its chunks). It is named by `world.terrain`; without one, by the schema it was saved
+///   under (from `0005` on only stud regions were saved).
+/// - From [`VOXEL_RETURN_MIGRATION`] on, a world row marked studs is refused.
+///
+/// A store with no saved region (or a new one) is migrated: it holds no terrain.
+async fn refuse_unreturned_world(pool: &Pool, applied: Option<i64>) -> Result<(), StoreError> {
+    const ANY_REGION: &str = "SELECT COUNT(*) FROM (SELECT 1 FROM regions LIMIT 1) AS t";
+    const TERRAIN: &str = "SELECT terrain FROM world WHERE id = 1";
+    let Some(applied) = applied else { return Ok(()) };
+    let terrain = if applied >= TERRAIN_KIND_MIGRATION { scalar(pool, TERRAIN).await? } else { None };
+    if applied >= VOXEL_RETURN_MIGRATION {
+        if terrain == Some(TerrainKind::Studs.code()) {
+            return Err(StoreError::OtherTerrain { stored: TerrainKind::Studs });
+        }
+        return Ok(());
+    }
+    let saved = table_exists(pool, "regions").await? && scalar(pool, ANY_REGION).await? > Some(0);
+    if !saved {
+        return Ok(());
+    }
+    let stored = match terrain.and_then(TerrainKind::from_code) {
+        Some(kind) => kind,
+        None if applied >= DROP_VOXEL_TERRAIN_MIGRATION => TerrainKind::Studs,
+        None => TerrainKind::Voxels,
+    };
+    Err(StoreError::OtherTerrain { stored })
 }
 
 /// A read-only open's schema check: the newest applied migration must be
@@ -268,7 +322,7 @@ async fn check_schema(pool: &Pool) -> Result<(), StoreError> {
 async fn check_world_row(pool: &Pool, dials: Dials, writer: bool) -> Result<(), StoreError> {
     const SELECT: &str = "SELECT format_version, region_blocks, chunk_blocks FROM world WHERE id = 1";
     const INSERT: &str = "INSERT INTO world (id, format_version, region_blocks, chunk_blocks, content_crc, \
-         world_tick, super_region_regions, created_utc) VALUES (1, $1, $2, $3, 0, 0, $4, $5) \
+         world_tick, super_region_regions, created_utc, terrain) VALUES (1, $1, $2, $3, 0, 0, $4, $5, $6) \
          ON CONFLICT (id) DO NOTHING";
     if writer {
         let created = utc_now();
@@ -280,6 +334,7 @@ async fn check_world_row(pool: &Pool, dials: Dials, writer: bool) -> Result<(), 
                     .bind(dials.chunk_blocks as i64)
                     .bind(i64::from(game::DEFAULT_SUPER_REGION_REGIONS))
                     .bind(created)
+                    .bind(TerrainKind::Voxels.code())
                     .execute($p)
                     .await
                     .map(|_| ())?

@@ -67,6 +67,51 @@ impl fmt::Display for Dials {
     }
 }
 
+/// The terrain a world's regions are saved in (`world.terrain`, migration `0004`).
+/// New worlds are written as [`TerrainKind::Voxels`], the only terrain stored; a stud
+/// world is never converted — the kind exists so it can be named when it is refused at
+/// open (`open.rs`, `refuse_unreturned_world`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TerrainKind {
+    /// Voxel terrain (`chunks`, `regions.ground`).
+    Voxels,
+    /// Stud terrain, saved by the builds between the stud switch and the voxel return
+    /// (migration `0011_voxel_terrain_returns` dropped its table and column).
+    Studs,
+}
+
+impl TerrainKind {
+    /// The `world.terrain` value.
+    pub fn code(self) -> i64 {
+        match self {
+            TerrainKind::Voxels => 0,
+            TerrainKind::Studs => 1,
+        }
+    }
+
+    pub fn from_code(code: i64) -> Option<TerrainKind> {
+        match code {
+            0 => Some(TerrainKind::Voxels),
+            1 => Some(TerrainKind::Studs),
+            _ => None,
+        }
+    }
+
+    /// The word for it in messages.
+    pub fn name(self) -> &'static str {
+        match self {
+            TerrainKind::Voxels => "voxels",
+            TerrainKind::Studs => "studs",
+        }
+    }
+}
+
+impl fmt::Display for TerrainKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
 /// Which stored format [`StoreError::OtherFormat`] is about.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FormatKind {
@@ -101,6 +146,11 @@ pub enum StoreError {
     Backend(String),
     Locked(String),
     OtherDials { stored: Dials, built: Dials },
+    /// A world this build cannot open: saved on stud terrain (`stored` [`TerrainKind::Studs`]),
+    /// or on voxel terrain before the stud switch (`stored` [`TerrainKind::Voxels`]; the
+    /// stud-era migration `0005` would drop its chunks). Refused at open, by a writer and a
+    /// read-only handle alike, before any migration runs: nothing in it is changed.
+    OtherTerrain { stored: TerrainKind },
     /// A stored format this build does not read: the store's own
     /// (`world.format_version`) or the forged tiles' (`forged_meta`).
     OtherFormat { found: u32, kind: FormatKind },
@@ -142,6 +192,20 @@ impl fmt::Display for StoreError {
             StoreError::OtherDials { stored, built } => write!(
                 f,
                 "this world was made with {stored} but this build has {built}; rebuild with the stored dials (just region_blocks=N chunk_blocks=N …) or use another world"
+            ),
+            StoreError::OtherTerrain { stored: TerrainKind::Studs } => write!(
+                f,
+                "this world was saved on stud terrain, which this build no longer serves — re-forge it \
+                 (the debug world: `just run --reset`; a menu world: make a new one). Terrain is never \
+                 converted; nothing in the world was changed, so a build from before the voxel return \
+                 still opens it"
+            ),
+            StoreError::OtherTerrain { stored: TerrainKind::Voxels } => write!(
+                f,
+                "this world was saved on voxel terrain by a build from before the stud switch; this build's \
+                 schema cannot take it over (an intermediate migration would drop its chunks) — re-forge it \
+                 (the debug world: `just run --reset`; a menu world: make a new one). Nothing in the world \
+                 was changed, so a build from before the stud switch still opens it"
             ),
             StoreError::OtherFormat { found, kind: FormatKind::Store } => write!(
                 f,
