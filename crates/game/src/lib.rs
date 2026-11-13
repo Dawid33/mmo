@@ -102,9 +102,9 @@ pub use buoyancy::*;
 pub use camera::*;
 pub use containers::*;
 pub use coordinator::{
-    Claim, CoordMsg, Coordinator, CoordinatorState, CutDecide, CutFailure, HostMsg, InlineWorldLink, OnlinePlayer,
-    RequestId, RunningRegion, WorldLink, WorldReply, WorldRequest, LEAVE_BATCH_MS, LEAVE_CUT_TIMEOUT_SECS,
-    WORLD_CUT_DEADLINE_MS, WORLD_CUT_LEAD_MAX_TICKS, WORLD_CUT_LEAD_TICKS,
+    Claim, CoordMsg, Coordinator, CoordinatorState, CutDecide, CutFailure, CutsBlocked, HostMsg, InlineWorldLink,
+    OnlinePlayer, RequestId, RunningRegion, WorldLink, WorldReply, WorldRequest, LEAVE_BATCH_MS, LEAVE_CUT_TIMEOUT_SECS,
+    WORLD_CUT_BLOCKED_GRACE_MS, WORLD_CUT_DEADLINE_MS, WORLD_CUT_LEAD_MAX_TICKS, WORLD_CUT_LEAD_TICKS,
 };
 pub use halo::{HaloUpdate, HALO_BLOCKS, HALO_CHUNKS};
 pub use debug_render::{ColliderDebug, DebugFlags, DebugLine, DEBUG_COLLIDER_RADIUS};

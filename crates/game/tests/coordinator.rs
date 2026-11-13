@@ -1808,3 +1808,31 @@ fn attach_of_a_host_outside_the_running_cut_aborts_it() {
     c.handle(2, attach(2, 1, Vec::new(), Vec::new()), 1900);
     assert_eq!(c.take_decision().map(|d| (d.cut, d.commit)), Some((cut, false)));
 }
+
+/// Final review I2: a due cut blocked by a dirty row with no attached host is reported
+/// (after the grace, once per period, naming the missing host and saying the world is not
+/// being saved); a cut begins as soon as the hosts match.
+#[test]
+fn blocked_cuts_are_reported_once_a_period_and_begin_when_the_hosts_match() {
+    let mut c = cutting();
+    c.set_expected_hosts([0, 1, 2].into_iter().collect());
+    c.maintain(CUT_EVERY_MS);
+    assert!(begun(&commit_routed(&mut c)).is_empty(), "host 2 is expected and not attached");
+    assert_eq!(c.take_cuts_blocked(), None, "within the grace");
+    let first = CUT_EVERY_MS + game::WORLD_CUT_BLOCKED_GRACE_MS;
+    c.maintain(first);
+    let blocked = c.take_cuts_blocked().expect("reported");
+    assert_eq!(blocked, game::CutsBlocked { missing: vec![2], unexpected: vec![] });
+    let text = blocked.to_string();
+    assert!(text.contains("NOT being saved") && text.contains("[2]") && text.contains("worldctl"), "{text}");
+    c.maintain(first + CUT_EVERY_MS - 1);
+    assert_eq!(c.take_cuts_blocked(), None, "once per period");
+    c.maintain(first + CUT_EVERY_MS);
+    assert!(c.take_cuts_blocked().is_some(), "again a period later");
+    assert!(begun(&commit_routed(&mut c)).is_empty());
+    c.handle(2, attach(2, 1, Vec::new(), Vec::new()), first + CUT_EVERY_MS + 1);
+    commit_routed(&mut c);
+    c.maintain(first + CUT_EVERY_MS + 2);
+    assert_eq!(begun(&commit_routed(&mut c)).len(), 3, "at once, all three");
+    assert_eq!(c.take_cuts_blocked(), None);
+}

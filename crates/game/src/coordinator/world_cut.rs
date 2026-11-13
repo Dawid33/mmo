@@ -41,6 +41,41 @@ pub const LEAVE_BATCH_MS: u64 = 500;
 /// How long an exiting host (several hosts) waits for the `BeginCut` that names it
 /// leaving; past it, or with that cut aborted, it exits without a cut.
 pub const LEAVE_CUT_TIMEOUT_SECS: u64 = 30;
+/// How long (wall ms) a due world cut must stay blocked by a host mismatch (a dirty `hosts`
+/// row with no attached host, or an attached host with no dirty row) before the core
+/// reports it ([`Coordinator::take_cuts_blocked`]): longer than the runtime's re-read of
+/// the rows, so a host starting up (attached before the next read) is not reported.
+pub const WORLD_CUT_BLOCKED_GRACE_MS: u64 = 5_000;
+
+/// No world cut begins: the hosts the cuts need (dirty `hosts` rows) are not the hosts
+/// attached. Its `Display` is the warning the coordinator logs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CutsBlocked {
+    /// Hosts with a dirty `hosts` row that are not attached.
+    pub missing: Vec<u32>,
+    /// Hosts attached with no dirty `hosts` row (registered since the rows were last read).
+    pub unexpected: Vec<u32>,
+}
+
+impl std::fmt::Display for CutsBlocked {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "no world cut can begin, the world is NOT being saved:")?;
+        if !self.missing.is_empty() {
+            write!(
+                f,
+                " hosts {:?} have a dirty `hosts` row (they may hold state) but are not attached — start them \
+                 (VOXEL_HOST_ORDINAL); there is no worldctl command yet to retire a host that will never \
+                 return (TODO.md), so until it starts nothing is saved and stopping the others rolls the world \
+                 back to the last cut;",
+                self.missing
+            )?;
+        }
+        if !self.unexpected.is_empty() {
+            write!(f, " hosts {:?} are attached but have no dirty `hosts` row (registered since the last read?);", self.unexpected)?;
+        }
+        Ok(())
+    }
+}
 
 /// A world cut to decide in the store ([`Coordinator::take_decision`]): record `commit`
 /// for `cut` (`hosts` staged their parts, `leaving` leave in it, the world at
@@ -120,6 +155,12 @@ pub(super) struct WorldCuts {
     left: BTreeMap<u32, Option<u64>>,
     /// Each host's boot as its latest `Attach` named it.
     boots: BTreeMap<u32, u64>,
+    /// `clock_ms` since which a due cut has been blocked by a host mismatch.
+    blocked_since: Option<u64>,
+    /// `clock_ms` the mismatch was last reported at.
+    blocked_noted: Option<u64>,
+    /// The report not taken yet ([`Coordinator::take_cuts_blocked`]).
+    blocked: Option<CutsBlocked>,
 }
 
 impl Default for WorldCuts {
@@ -140,6 +181,9 @@ impl Default for WorldCuts {
             leave_requests: BTreeMap::new(),
             left: BTreeMap::new(),
             boots: BTreeMap::new(),
+            blocked_since: None,
+            blocked_noted: None,
+            blocked: None,
         }
     }
 }
@@ -193,6 +237,13 @@ impl Coordinator {
             }
             _ => true,
         });
+    }
+
+    /// Why no world cut begins although one is due, if that lasted
+    /// [`WORLD_CUT_BLOCKED_GRACE_MS`]: reported at most once per cut period (the runtime
+    /// logs it).
+    pub fn take_cuts_blocked(&mut self) -> Option<CutsBlocked> {
+        self.cuts.blocked.take()
     }
 
     /// The hosts that left in a committed cut and have not come back.
@@ -379,9 +430,26 @@ impl Coordinator {
         let left = &self.cuts.left;
         let expected: BTreeSet<u32> = self.cuts.expected.iter().copied().filter(|h| !left.contains_key(h)).collect();
         let attached: BTreeSet<u32> = self.cuts.attached.iter().copied().filter(|h| !left.contains_key(h)).collect();
-        if !self.cuts.expected_known || expected.is_empty() || expected != attached {
+        if !self.cuts.expected_known || expected != attached || expected.is_empty() {
+            // A due cut blocked by a mismatch is reported (after the grace, once a period);
+            // an unknown read is the runtime's own warning, and no host at all is idle.
+            if self.cuts.expected_known && expected != attached {
+                let since = *self.cuts.blocked_since.get_or_insert(now_ms);
+                let noted = self.cuts.blocked_noted.is_some_and(|at| now_ms < at.saturating_add(every));
+                if now_ms >= since.saturating_add(WORLD_CUT_BLOCKED_GRACE_MS) && !noted {
+                    self.cuts.blocked_noted = Some(now_ms);
+                    self.cuts.blocked = Some(CutsBlocked {
+                        missing: expected.difference(&attached).copied().collect(),
+                        unexpected: attached.difference(&expected).copied().collect(),
+                    });
+                }
+            } else {
+                self.cuts.blocked_since = None;
+            }
             return;
         }
+        self.cuts.blocked_since = None;
+        self.cuts.blocked_noted = None;
         self.cuts.next += 1;
         let cut = CutId((self.cuts.epoch << 32) | self.cuts.next);
         let tick = self.cuts.world_tick + self.cuts.lead;

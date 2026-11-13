@@ -158,6 +158,14 @@ pub struct CutWriter {
     /// How long the exit waits for the `BeginCut` naming this host leaving
     /// ([`game::LEAVE_CUT_TIMEOUT_SECS`]; a test shortens it).
     leave_timeout: Duration,
+    /// The world-cut period (`VOXEL_SAVE_SECS`; `None`: not told): no world cut committed
+    /// for [`CUT_FAILURES_BEFORE_STUCK`] + 1 periods is reported stuck too — a cut the
+    /// coordinator never begins (a dirty `hosts` row of a host not running) fails nothing.
+    world_period: Option<Duration>,
+    /// When a world cut last committed (or this writer started).
+    world_saved: Instant,
+    /// When absent world cuts were last reported.
+    absent_warned: Option<Instant>,
 }
 
 impl CutWriter {
@@ -171,7 +179,16 @@ impl CutWriter {
             warned: None,
             part_deadline: Duration::from_millis(game::WORLD_CUT_DEADLINE_MS),
             leave_timeout: Duration::from_secs(game::LEAVE_CUT_TIMEOUT_SECS),
+            world_period: None,
+            world_saved: Instant::now(),
+            absent_warned: None,
         }
+    }
+
+    /// The world-cut period: no world cut committed for [`CUT_FAILURES_BEFORE_STUCK`] + 1
+    /// of them is reported (at error level, once per that span).
+    pub fn set_world_cut_period(&mut self, every: Duration) {
+        self.world_period = Some(every);
     }
 
     /// A writer of a host of several (`VOXEL_HOSTS` > 1): its world cut parts are staged
@@ -391,6 +408,23 @@ impl CutWriter {
             }
         }
         self.settle_world(manager);
+        self.warn_absent_cuts();
+    }
+
+    /// No world cut committed for [`CUT_FAILURES_BEFORE_STUCK`] + 1 periods: reported once
+    /// per that span (the coordinator's log says why no cut begins).
+    fn warn_absent_cuts(&mut self) {
+        let Some(every) = self.world_period else { return };
+        let span = every * (CUT_FAILURES_BEFORE_STUCK + 1);
+        if self.world_saved.elapsed() >= span && self.absent_warned.is_none_or(|at| at.elapsed() >= span) {
+            self.absent_warned = Some(Instant::now());
+            log::error!(
+                "[server] world saving is stuck: no world cut has committed in {} s (the period is {} s); the \
+                 coordinator's log says why — a dirty `hosts` row of a host that is not running blocks every cut",
+                self.world_saved.elapsed().as_secs(),
+                every.as_secs()
+            );
+        }
     }
 
     /// Settle the world part once it is decided: the store first (`cut_decided`, which
@@ -445,6 +479,7 @@ impl CutWriter {
                     });
                     self.part = None;
                     self.failed_in_a_row = 0;
+                    self.world_saved = Instant::now();
                     game::perf_event!("world_saved", "cut={} world=1", id.0);
                     manager.cut_committed(id, versions);
                 }

@@ -792,6 +792,9 @@ impl CoordinatorRuntime {
             }
             self.feed_cuts(now);
             self.core.maintain(now);
+            if let Some(blocked) = self.core.take_cuts_blocked() {
+                self.warn_cuts(now, &blocked.to_string());
+            }
             if self.pump_save(now).is_err() || self.pump_cuts(now).is_err() {
                 return self.fence_out();
             }

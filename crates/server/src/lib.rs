@@ -1144,6 +1144,9 @@ pub fn run() -> claims::ServerExit {
     let mut ever_connected = false;
     let mut last_world_save = std::time::Instant::now();
     let save_every = std::time::Duration::from_secs(world_save_secs(std::env::var(WORLD_SAVE_SECS_ENV).ok().as_deref()));
+    if let Some(cuts) = cuts.as_mut().filter(|c| c.world_cuts()) {
+        cuts.set_world_cut_period(save_every);
+    }
     let parent_gone = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     if single_player {
         let gone = parent_gone.clone();

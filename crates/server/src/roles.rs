@@ -374,6 +374,25 @@ pub fn recover_staged_cuts(store: &world_store::StoreHandle, hosts: u32) -> Resu
     }
 }
 
+/// The warning for dirty `hosts` rows (`(ordinal, clean)`) of ordinals the coordinator does
+/// not serve (`>= hosts`): a mis-set-up world (started with more hosts before, stopped
+/// uncleanly). Never ignored — such a host may hold state no cut would save — so world cuts
+/// stay blocked until it starts (or its row is retired). `None`: none.
+pub fn hosts_beyond_count(rows: &[(u32, bool)], hosts: u32) -> Option<String> {
+    let beyond: Vec<u32> = rows.iter().filter(|(o, clean)| !clean && *o >= hosts).map(|(o, _)| *o).collect();
+    (!beyond.is_empty()).then(|| {
+        format!(
+            "the world has dirty `hosts` rows of hosts {beyond:?}, but {}={hosts}: they ran before and did not \
+             leave cleanly, and may hold state. World cuts do not begin while a dirty row has no attached host, \
+             so the world is NOT saved: start this world with {}={} (all its hosts) until they leave cleanly; \
+             there is no worldctl command yet to retire a host's row (TODO.md)",
+            game::ownership::HOSTS_ENV,
+            game::ownership::HOSTS_ENV,
+            beyond.iter().max().map_or(hosts, |m| m + 1)
+        )
+    })
+}
+
 /// `VOXEL_ROLE=coordinator`: the world coordinator alone. Opens the Postgres world
 /// store, claims the coordinator row, loads (or migrates, or bootstraps) its state and
 /// serves hosts on [`COORDINATOR_BIND_ENV`] until a stop signal (an orderly stop saves
@@ -394,6 +413,15 @@ pub fn run_coordinator() -> ServerExit {
     let hosts = std::env::var(game::ownership::HOSTS_ENV).ok().and_then(|v| v.trim().parse::<u32>().ok()).unwrap_or(1);
     // Before it claims the coordinator row: the world cut parts a crash left staged.
     recover_staged_cuts(&store, hosts).unwrap_or_else(|e| fatal(e));
+    match store.hosts() {
+        Ok(rows) => {
+            let rows: Vec<(u32, bool)> = rows.iter().map(|r| (r.ordinal, r.clean)).collect();
+            if let Some(w) = hosts_beyond_count(&rows, hosts) {
+                log::warn!("[coordinator] {w}");
+            }
+        }
+        Err(e) => log::warn!("[coordinator] the hosts rows could not be read at start: {e}"),
+    }
     let (clock, phase) = start_clock(Role::Coordinator, Some(&store), true, opened.world_tick).unwrap_or_else(|e| fatal(e));
     let clock = CoordinatorClock::new(clock, phase);
     log::info!("[coordinator] world clock anchored: world tick {}", clock.world_tick_now());
@@ -466,6 +494,16 @@ mod tests {
         assert_eq!(clock_from_anchor(anchor, ahead, 111).unwrap_err(), CLOCK_BEHIND_WORLD_TICK);
         let (clock, phase) = clock_from_anchor(anchor, ahead + 3, 0).unwrap();
         assert_eq!((clock.tick_at(0), phase), (110, 3));
+    }
+
+    /// Final review I2: a dirty row beyond the configured host count is warned about,
+    /// a clean one or one within the count is not.
+    #[test]
+    fn dirty_rows_beyond_the_host_count_are_warned() {
+        assert_eq!(hosts_beyond_count(&[(0, false), (1, false)], 2), None);
+        assert_eq!(hosts_beyond_count(&[(0, false), (2, true)], 2), None, "a clean row left");
+        let w = hosts_beyond_count(&[(0, false), (1, false), (2, false)], 2).expect("warned");
+        assert!(w.contains("[2]") && w.contains("NOT saved") && w.contains("VOXEL_HOSTS=3"), "{w}");
     }
 
     #[test]
