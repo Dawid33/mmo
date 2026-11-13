@@ -3688,8 +3688,9 @@ impl<S: RegionSpawner> WorldManager<S> {
         // Then the history's catch-up: its people here now (at once through an inline
         // coordinator), before anything else.
         self.world_region_started(rc);
-        // Arrivals that waited for it, in arrival order, before its first
-        // tick (their stamps are past, so it applies them on receipt).
+        // Arrivals that waited for it, before its first tick (their stamps
+        // are past: its inbox applies them at its first tick's close, sorted
+        // by (stamp, entity id)).
         self.deliver_pending_arrivals(rc);
         // Replies that waited for it.
         for m in self.intent_mailbox.remove(&rc).unwrap_or_default() {

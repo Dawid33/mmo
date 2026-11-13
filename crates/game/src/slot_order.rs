@@ -48,6 +48,10 @@ pub enum SlotClass {
 }
 
 /// The class of a message kind.
+///
+/// No `_` arm, here or in [`key_of`]: a new `GameEventKind` must be classified
+/// (a new region-to-region message needs its own class and key, or two
+/// sources' copies of it would sort by arrival).
 pub fn slot_class(kind: &GameEventKind) -> SlotClass {
     match kind {
         GameEventKind::EntityArrived(_) => SlotClass::Arrival,
@@ -56,7 +60,21 @@ pub fn slot_class(kind: &GameEventKind) -> SlotClass {
         GameEventKind::HaloUpdate(_) => SlotClass::HaloUpdate,
         GameEventKind::HaloSourceGone(_) => SlotClass::HaloSourceGone,
         GameEventKind::Intent(_) => SlotClass::Intent,
-        _ => SlotClass::Other,
+        // Not region-to-region messages (manager directives, client events).
+        GameEventKind::Tick
+        | GameEventKind::PlayerInput(..)
+        | GameEventKind::CreateClient(_)
+        | GameEventKind::Quit
+        | GameEventKind::UiAction(..)
+        | GameEventKind::Order(..)
+        | GameEventKind::ClientLeft(_)
+        | GameEventKind::CreateClientAt(..)
+        | GameEventKind::SpawnPerson(_)
+        | GameEventKind::DespawnPerson(_)
+        | GameEventKind::WalkOut(..)
+        | GameEventKind::ParkPlayer(_)
+        | GameEventKind::RestorePlayer(..)
+        | GameEventKind::Prefab(..) => SlotClass::Other,
     }
 }
 
@@ -109,7 +127,21 @@ fn key_of(kind: &GameEventKind) -> Key {
             let [ox, oz] = reply_owner(&sent.reply).map_or([i64::MIN; 2], region_key);
             [REPLY_KEY, a, b, c, ox, oz]
         }
-        _ => [0; 6],
+        // Class `Other` ([`slot_class`]): arrival order only.
+        GameEventKind::Tick
+        | GameEventKind::PlayerInput(..)
+        | GameEventKind::CreateClient(_)
+        | GameEventKind::Quit
+        | GameEventKind::UiAction(..)
+        | GameEventKind::Order(..)
+        | GameEventKind::ClientLeft(_)
+        | GameEventKind::CreateClientAt(..)
+        | GameEventKind::SpawnPerson(_)
+        | GameEventKind::DespawnPerson(_)
+        | GameEventKind::WalkOut(..)
+        | GameEventKind::ParkPlayer(_)
+        | GameEventKind::RestorePlayer(..)
+        | GameEventKind::Prefab(..) => [0; 6],
     }
 }
 
