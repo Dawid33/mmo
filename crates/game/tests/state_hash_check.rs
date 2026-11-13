@@ -10,25 +10,19 @@
 
 use crossbeam::channel::{unbounded, Receiver};
 use game::{
-    ColumnCoords, GameEventKind, ReconcileStats, Region, RegionCoords, RegionInput, RegionOutput, RegionRunner,
-    StudColumnGround, StudProfile, StudRegionSeed,
+    Block, Chunk, ChunkCoords, GameEventKind, ReconcileStats, Region, RegionCoords, RegionInput,
+    RegionOutput, RegionRunner,
 };
-
-/// Surface plate of the flat stud ground.
-const TOP: i32 = 30;
 
 const CLIENT: game::ClientId = 7;
 
 fn server() -> (RegionRunner, Receiver<(RegionCoords, RegionOutput)>) {
     let id = RegionCoords::new(0, 0);
-    let soil = StudProfile { cover: game::MAT_GRASS, cover_plates: 1, soil: game::MAT_DIRT, soil_plates: 5 };
-    let ground = (0..2)
-        .flat_map(|x| (0..2).map(move |z| (ColumnCoords::new(x, z), StudColumnGround::flat(TOP, soil, game::MAT_STONE, -2000))))
+    let chunks = (0..2)
+        .flat_map(|x| (0..2).map(move |z| (ChunkCoords::new(x, 0, z), Chunk::flat_floor(8))))
         .collect();
-    let mut region = Region::new(game::Rollback::new(None), None, id, None);
-    region.seed_stud_world(StudRegionSeed { ground, features: Vec::new(), ..Default::default() });
     let (out_send, out) = unbounded();
-    let mut r = RegionRunner::new(id, region, out_send);
+    let mut r = RegionRunner::new(id, Region::from_chunks(id, chunks), out_send);
     r.handle_input(RegionInput::Event(GameEventKind::CreateClient(CLIENT)));
     r.tick();
     r.handle_input(RegionInput::RequestSnapshot(CLIENT));
@@ -80,7 +74,7 @@ fn run(lead: usize, client_predicts_input: bool, diverge: bool) -> ReconcileStat
     if diverge {
         // State the server never had, outside any prediction: reconcile
         // cannot correct it, only the hash check can see it.
-        client.with_data(|d| assert!(d.fill_stud_box_safe([6, TOP, 6], [8, TOP + 6, 8], game::MAT_STONE) > 0));
+        client.with_data(|d| assert!(d.set_block_safe([3, 1, 3], Block::new(game::edit::PLACE_BLOCK))));
     }
     let mut total = ReconcileStats::default();
     for round in 0..6 {

@@ -22,7 +22,7 @@ use game::history::{
     CalendarTick, EmbarkRefusal, History, LegendsFilter, LegendsQuery, Location, PersonId, Sex, SiteId,
 };
 use game::{
-    ClientId, ClientPacket, EmbarkRequest, InlineSpawner, Ownership, PlayerId,
+    ClientId, ClientPacket, EmbarkRequest, InlineLodBuilder, InlineSpawner, LodBuilder, Ownership, PlayerId,
     RegionCoords, RegionOutput, RegionSpawner, ServerEvent, ServerPacket, WorldLink, WorldManager, WorldMap,
 };
 use server::claims::{Fenced, HostClaims, ServerExit};
@@ -104,16 +104,16 @@ fn land_map() -> WorldMap {
     WorldMap { origin: RegionCoords::new(0, 0), width: 48, height: 48, tiles, rock_names: vec![], region_types: vec![] }
 }
 
-/// Flat stud ground under every chunk column of every region: ground without worldgen.
-fn stud_flat_seed(_rc: RegionCoords) -> game::StudRegionSeed {
-    let soil = game::StudProfile { cover: game::MAT_GRASS, cover_plates: 1, soil: game::MAT_DIRT, soil_plates: 5 };
-    let n = game::REGION_CHUNKS;
-    let ground = (0..n)
-        .flat_map(|x| {
-            (0..n).map(move |z| (game::ColumnCoords::new(x, z), game::StudColumnGround::flat(30, soil, game::MAT_STONE, -2000)))
-        })
-        .collect();
-    game::StudRegionSeed { ground, features: Vec::new(), ..Default::default() }
+fn flat_floor(_rc: RegionCoords) -> Vec<(game::ColumnCoords, game::Column)> {
+    let air = game::Block::new(game::BlockId::AIR);
+    let mut out = Vec::new();
+    for x in 0..game::REGION_CHUNKS {
+        for z in 0..game::REGION_CHUNKS {
+            let sub = game::SubChunk::Dense(Box::new(game::Chunk::flat_floor(game::BLOCK_VOXELS as u32)));
+            out.push((game::ColumnCoords::new(x, z), game::Column::new(0, air, air, vec![sub])));
+        }
+    }
+    out
 }
 
 /// Two members of the first site, into the first region (in a row from (2, 2)) where a
@@ -207,16 +207,22 @@ impl Host {
         coordinator: Option<CoordinatorThread>,
         boot: u64,
     ) -> Host {
-        // As `server::run`: the store is tied to stud terrain before any region loads.
-        server::world_file::bind_world_terrain(store).expect("a stud world");
         let claims = HostClaims::claim(store.clone(), ownership, Some(map.extent()), store.super_region_regions()).unwrap();
         let (out_send, packets) = unbounded();
         let (region_out_send, region_out) = unbounded();
+        let (lod_result_send, lod_result_recv) = unbounded();
+        let lod_builder: Box<dyn LodBuilder> = Box::new(InlineLodBuilder {
+            coarse: Box::new(|_key: &game::lod::LodKey| Vec::new()),
+            water: Box::new(game::lod::LodWater::dry),
+            out: lod_result_send,
+        });
         let mut manager = WorldManager::new(
-            InlineSpawner::default().with_stud_genesis(std::sync::Arc::new(stud_flat_seed)),
+            InlineSpawner::default(),
+            Box::new(flat_floor),
             out_send,
             region_out_send,
-            Box::new(game::NullLodBuilder::default()),
+            lod_builder,
+            lod_result_recv,
         );
         manager.set_ownership(ownership, store.super_region_regions());
         manager.set_stored_regions(store.stored_regions().unwrap());
@@ -250,6 +256,7 @@ impl Host {
                     | ServerPacket::GameEvent(_)
                     | ServerPacket::HashedGameEvent(..)
                     | ServerPacket::SyncClock(..)
+                    | ServerPacket::LodData(..)
                     | ServerPacket::Calendar(_)
                     | ServerPacket::Sites(_)
                     | ServerPacket::Notice(_)

@@ -3,7 +3,7 @@ use game::{RegionCoords, REGION_SIZE};
 #[test]
 fn world_offset_is_exact_multiples_of_region_size() {
     // A power of two (1024 by default), so every offset is exact in f32.
-    assert_eq!(REGION_SIZE, (game::REGION_BLOCKS * game::TILE_STUDS * game::STUD_UNITS) as f32);
+    assert_eq!(REGION_SIZE, (game::REGION_BLOCKS * game::BLOCK_VOXELS) as f32);
     assert!(game::REGION_BLOCKS_CHOICES.contains(&game::REGION_BLOCKS));
     assert!((REGION_SIZE as u32).is_power_of_two());
     assert_eq!(RegionCoords::new(0, 0).world_offset(), [0.0, 0.0, 0.0]);

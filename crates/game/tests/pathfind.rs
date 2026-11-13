@@ -1,17 +1,15 @@
-//! The path search (`game::pathfind`) on stud tiles, over a hand-made tile
-//! source: a tile is `Open`, `Solid` or a `Floor(plates)`. The same rules on
-//! real stud regions (tiles derived from bricks and recipes) are
-//! `stud_tiles::paths_*` / `standable_*`.
 use std::collections::BTreeMap;
 
 use game::*;
 
-/// A whole tile of anything.
-const STONE: TileFill = TileFill::Solid;
+const STONE: BlockId = BlockId(2);
+const WATER: BlockId = BlockId(5);
+const LEAVES: BlockId = BlockId(15);
 
 #[derive(Default)]
 struct Src {
-    blocks: BTreeMap<TilePos, TileFill>,
+    blocks: BTreeMap<TilePos, BlockId>,
+    slopes: BTreeMap<TilePos, SlopeShape>,
     water: BTreeMap<TilePos, u16>,
 }
 
@@ -35,11 +33,8 @@ impl Src {
 }
 
 impl TileSource for Src {
-    fn tile_fill(&self, p: TilePos) -> TileFill {
-        self.blocks.get(&p).copied().unwrap_or(TileFill::Open)
-    }
-    fn water_units(&self, p: TilePos) -> u16 {
-        self.water.get(&p).copied().unwrap_or(0)
+    fn block(&self, p: TilePos) -> BlockId {
+        self.blocks.get(&p).copied().unwrap_or(BlockId::AIR)
     }
     fn is_bedrock(&self, _: TilePos) -> bool {
         false
@@ -50,10 +45,20 @@ impl TileSource for Src {
     fn tree_id(&self, _: TilePos) -> u32 {
         0
     }
+    fn tree_limb(&self, _: TilePos) -> u8 {
+        0
+    }
+    fn slope(&self, p: TilePos) -> Option<SlopeShape> {
+        self.slopes.get(&p).copied()
+    }
+    fn water_units(&self, p: TilePos) -> u16 {
+        self.water.get(&p).copied().unwrap_or(0)
+    }
 }
 
 fn install() {
-    crate::common::install_real_block_props();
+    let reg = BlockRegistry::from_ron(include_str!("../../../assets/blocks/blocks.ron")).unwrap();
+    install_block_props(reg.props());
 }
 
 fn path(s: &Src, a: TilePos, b: TilePos) -> Option<Vec<TilePos>> {
@@ -86,26 +91,15 @@ fn detours_around_a_wall() {
     assert!(p.iter().any(|t| t[2] == 5));
 }
 
-/// A brick stair across the floor: a step of `STUD_STEP_PLATES` at x = 4 (stood on
-/// in its own tile) up to a whole tile at x = 5 (stood on in the tile above), then
-/// the drop of a tile (`STUD_DROP_PLATES`) back to the floor. One tile-high wall
-/// without the step is not climbed: stud bodies walk up, they never plan a jump.
 #[test]
-fn climbs_a_brick_stair_and_drops_a_tile() {
+fn climbs_one_block_step() {
     let mut s = Src::floor(12);
     for z in 0..12 {
-        s.blocks.insert([4, 1, z], TileFill::Floor(STUD_STEP_PLATES as u8));
-        s.blocks.insert([5, 1, z], STONE);
+        s.blocks.insert([4, 1, z], STONE);
     }
-    let p = path(&s, [1, 1, 1], [8, 1, 1]).unwrap();
-    assert!(p.iter().any(|t| t[0] == 4 && t[1] == 1), "over the step, in its own tile: {p:?}");
+    let p = path(&s, [1, 1, 1], [6, 1, 1]).unwrap();
     assert!(p.windows(2).any(|w| w[1][1] - w[0][1] == 1));
     assert!(p.windows(2).any(|w| w[1][1] - w[0][1] == -1));
-    let mut wall = Src::floor(12);
-    for z in 0..12 {
-        wall.blocks.insert([5, 1, z], STONE);
-    }
-    assert!(path(&wall, [1, 1, 1], [8, 1, 1]).is_none(), "a whole tile is too high a step");
 }
 
 #[test]
@@ -120,7 +114,8 @@ fn unreachable_two_high_wall() {
 #[test]
 fn unreachable_goal_in_water() {
     let mut s = Src::floor(12);
-    s.water.insert([6, 1, 1], WATER_FULL);
+    s.blocks.insert([6, 0, 1], WATER);
+    s.blocks.insert([6, 1, 1], WATER);
     assert!(path(&s, [1, 1, 1], [6, 1, 1]).is_none());
 }
 
@@ -131,9 +126,18 @@ fn unreachable_goal_not_standable() {
 }
 
 #[test]
+fn leaves_are_not_a_floor() {
+    install();
+    let mut s = Src::floor(12);
+    s.blocks.insert([6, 1, 1], LEAVES);
+    assert!(!standable(&s, [6, 2, 1]));
+    assert!(standable(&s, [6, 1, 1]), "leaves are passable, the stone below is a floor");
+}
+
+#[test]
 fn no_corner_cutting() {
     let mut s = Src::floor(12);
-    // Two pillars touching only diagonally: (3,1,3) and (4,1,4) (2 high).
+    // Two blocks touching only diagonally: (3,1,3) and (4,1,4) (2 high).
     for y in 1..=2 {
         s.blocks.insert([3, y, 3], STONE);
         s.blocks.insert([4, y, 4], STONE);
@@ -181,6 +185,44 @@ fn deterministic() {
     let b = path(&s, [0, 1, 0], [19, 1, 19]);
     assert!(a.is_some());
     assert_eq!(a, b);
+}
+
+/// A stone slope block at `p` (its floor tile is the one above).
+fn put_slope(s: &mut Src, p: TilePos, shape: SlopeShape) {
+    s.blocks.insert(p, STONE);
+    s.slopes.insert(p, shape);
+}
+
+#[test]
+fn slope_climb_costs_a_level_step() {
+    // A one-block step up along x = 10 (level 2 beyond it) with one slope,
+    // low side toward the start, 3.5 tiles off the straight line at the step.
+    let mut s = Src::floor(24);
+    for x in 10..24 {
+        for z in 0..24 {
+            s.blocks.insert([x, 1, z], STONE);
+        }
+    }
+    put_slope(&mut s, [10, 1, 9], SlopeShape::Straight { low: Side::NegX });
+    let p = path(&s, [1, 1, 1], [21, 2, 11]).expect("the step is climbable");
+    assert!(p.contains(&[10, 2, 9]), "the path must walk up the slope: {p:?}");
+    let ups = walk_ups(&s, &p);
+    assert_eq!(ups.len(), p.len());
+    assert_eq!(ups.iter().filter(|&&u| u).count(), 1, "one walk-up step, no jump: {p:?}");
+}
+
+#[test]
+fn wrong_side_slope_is_still_a_jump_climb() {
+    let mut s = Src::floor(12);
+    put_slope(&mut s, [5, 1, 5], SlopeShape::Straight { low: Side::NegX });
+    let on_slope = [5, 2, 5];
+    assert!(step_is_walk_up(&s, [4, 1, 5], on_slope), "from the low side");
+    for beside in [[5, 1, 4], [5, 1, 6], [6, 1, 5], [4, 1, 4]] {
+        assert!(!step_is_walk_up(&s, beside, on_slope), "from {beside:?}");
+    }
+    let p = path(&s, [5, 1, 4], on_slope).expect("a jump climb onto the slope is allowed");
+    assert_eq!(p, vec![[5, 1, 4], on_slope]);
+    assert_eq!(walk_ups(&s, &p), vec![false, false]);
 }
 
 /// Water of DF depth `depth` on the standing tile `[x, 1, z]`.

@@ -4,9 +4,10 @@
 //! alone, so the sun-to-ambient ratio IS the shadow contrast, and the fog
 //! colour has to match the skybox horizon or the terrain's far edge shows.
 //!
-//! The terrain materials draw through Bevy's PBR path, which reads these (the
-//! directional light, `GlobalAmbientLight`, and the camera's `DistanceFog`);
-//! the slice plane's own shader reads them through the view uniforms.
+//! The terrain shaders (`voxel_pull.wgsl`, `far_voxel.wgsl`) do their own
+//! lighting, so they read these through Bevy's view uniforms (the directional
+//! light, `GlobalAmbientLight`, and the camera's `DistanceFog`) rather than
+//! duplicating the numbers; the per-chunk fallback gets them through PBR.
 
 use bevy::camera::Exposure;
 use bevy::light::{CascadeShadowConfig, CascadeShadowConfigBuilder};
@@ -29,15 +30,10 @@ pub const SUN_DIRECTION: Vec3 = Vec3::new(-0.15, -0.18, 0.15);
 /// How far from the camera (view depth, metres) the sun casts shadows.
 /// Bevy's default cascades (10 / 150) assume 1 unit = 1 m; at
 /// `UNITS_PER_METER` = 16 they ended 9.4 m out, so the commander camera —
-/// 45 m from its focus at the start zoom, up to `ZOOM_FAR_M` — saw
-/// shadows only when zoomed right in. Twice the farthest zoom: the whole view at
-/// full zoom-out except the far ground of a shallow pitch. Derived from the zoom so
-/// it follows it, plus [`SHADOW_REACH_MARGIN_M`].
-pub const SHADOW_MAX_DISTANCE_M: f32 = 2.0 * crate::renderer::commander::ZOOM_FAR_M + SHADOW_REACH_MARGIN_M;
-/// Slack over twice the farthest zoom: Bevy's cascade split arithmetic rounds the last
-/// bound down (300 m came out as 4799.9995 units, a hair short of the 4800 it has to
-/// reach).
-pub const SHADOW_REACH_MARGIN_M: f32 = 1.0;
+/// 45 m from its focus at the start zoom, up to `ZOOM_FAR_M` (80 m) — saw
+/// shadows only when zoomed right in. This covers the whole view at full
+/// zoom-out except the far ground of a shallow pitch.
+pub const SHADOW_MAX_DISTANCE_M: f32 = 300.0;
 /// Far bound of the first (sharpest) cascade, metres.
 pub const SHADOW_FIRST_CASCADE_M: f32 = 20.0;
 /// Number of shadow cascades (WebGL2 supports only one; Bevy clamps there).

@@ -8,10 +8,10 @@
 use rapier3d::math::{Pose, Vector};
 use state_hash::StateHash;
 
-use crate::movement::{MoveKeys, UNITS_PER_METER};
+use crate::movement::{MoveKeys, PLAYER_CAPSULE_HALF_HEIGHT, PLAYER_CAPSULE_RADIUS, STEP_HEIGHT, UNITS_PER_METER};
 use crate::{
     nearest_standable, standable, walk_ups, ClientId, PathPlan, RouteMap, RegionCoords, Rollback, TilePos, TileSource,
-    WorldBlockPos, MAX_PATH_NODES, REGION_BLOCKS, TICK_RATE,
+    WorldBlockPos, BLOCK_VOXELS, MAX_PATH_NODES, REGION_BLOCKS, TICK_RATE,
 };
 
 /// How a client plays: the commander camera or one walking body.
@@ -64,29 +64,24 @@ impl Goal {
     }
 }
 
-/// Gap (sim units) left between the capsule bottom and the tile floor when
+/// Gap (voxel units) left between the capsule bottom and the tile floor when
 /// a body is placed on a tile; small enough that the next tick's ground snap
 /// grounds it.
 pub const ADVENTURE_PLACE_CLEARANCE_UNITS: f32 = 0.0;
 
+/// Body-centre position (region-local voxel units) of a player standing on
+/// tile `at`: the column's centre, feet on the floor (the top of block
+/// `at.y - 1`).
+pub fn body_on_tile(at: TilePos) -> Vector {
+    let bv = BLOCK_VOXELS as f32;
+    Vector::new(
+        (at[0] as f32 + 0.5) * bv,
+        at[1] as f32 * bv + PLAYER_CAPSULE_HALF_HEIGHT + PLAYER_CAPSULE_RADIUS + ADVENTURE_PLACE_CLEARANCE_UNITS,
+        (at[2] as f32 + 0.5) * bv,
+    )
+}
+
 impl Rollback {
-    /// Body-centre position (region-local sim units) of one of this region's bodies
-    /// standing on tile `at`: the column's centre, the body's feet on the caps of the
-    /// tile's floor ([`crate::stand_offset_units`]).
-    pub fn body_centre_on(&self, at: TilePos) -> Vector {
-        let (x, z) = crate::column_centre([at[0], at[2]]);
-        let scale = self.body_scale();
-        let feet = crate::level_bottom_units(at[1]) + crate::stand_offset_units(self, at) + crate::stud_cap_units();
-        Vector::new(x, feet + scale.capsule_half_height() + scale.capsule_radius() + ADVENTURE_PLACE_CLEARANCE_UNITS, z)
-    }
-
-    /// Feet position of one of this region's walking bodies whose centre is at `t`
-    /// (sim units): the bottom of the region's body capsule (`body_scale`).
-    pub fn feet_of(&self, t: Vector) -> Vector {
-        let scale = self.body_scale();
-        t - Vector::Y * (scale.capsule_half_height() + scale.capsule_radius())
-    }
-
     /// Switches `client`'s play mode, undo-safely. `false` = unknown client,
     /// nothing changed. Entering Adventure while in Adventure is a no-op.
     /// Entering Adventure with `at` moves the body onto the standable tile
@@ -148,8 +143,8 @@ impl Rollback {
         let Some(handle) = *self.data.ecs.rigidbody.try_get(key) else { return };
         let Some(body) = self.data.physics.bodies.get(handle) else { return };
         let rotation = body.position().rotation;
-        let translation = match nearest_standable(&self.tiles(), [at[0], at[2]], Some(at[1])) {
-            Some(tile) => self.body_centre_on(tile),
+        let translation = match nearest_standable(self, [at[0], at[2]], Some(at[1])) {
+            Some(tile) => body_on_tile(tile),
             None => {
                 let xz = self.spawn_xz();
                 Vector::new(xz.0, self.player_spawn_y(xz), xz.1)
@@ -193,10 +188,9 @@ impl Rollback {
     /// A fresh walk for entity `e` toward `goal`, from the tile its body
     /// stands on; `None` without a body or a path.
     pub(crate) fn plan_walker(&self, e: crate::EntityKey, goal: Goal, here: RegionCoords, map: Option<&RouteMap>) -> Option<Walker> {
-        let src = self.tiles();
-        let from = current_tile(&src, self.body_feet(e)?)?;
-        let plan = PathPlan::plan(&src, from, &goal, here, map, MAX_PATH_NODES)?;
-        let walk_up = walk_ups(&plan.local_path(here));
+        let from = current_tile(self, self.body_feet(e)?)?;
+        let plan = PathPlan::plan(self, from, &goal, here, map, MAX_PATH_NODES)?;
+        let walk_up = walk_ups(self, &plan.local_path(here));
         Some(Walker::new(goal, plan, walk_up))
     }
 
@@ -280,11 +274,11 @@ impl Rollback {
         }
     }
 
-    /// Region-local feet position (sim units) of entity `key`'s body.
+    /// Region-local feet position (voxel units) of entity `key`'s body.
     pub(crate) fn body_feet(&self, key: crate::EntityKey) -> Option<Vector> {
         let handle = (*self.data.ecs.rigidbody.try_get(key))?;
         let t = self.data.physics.bodies.get(handle)?.translation();
-        Some(self.feet_of(t))
+        Some(feet_of(t))
     }
 }
 
@@ -362,11 +356,23 @@ pub fn local_tile(p: WorldBlockPos, here: RegionCoords) -> TilePos {
     [(p.x - i64::from(here.x) * n) as i32, p.y, (p.z - i64::from(here.z) * n) as i32]
 }
 
+/// Feet position of a player body whose centre is at `t` (voxel units).
+pub fn feet_of(t: Vector) -> Vector {
+    t - Vector::Y * (PLAYER_CAPSULE_HALF_HEIGHT + PLAYER_CAPSULE_RADIUS)
+}
+
+/// The tile feet at `feet` (voxel units) occupy: the block column under
+/// them, at the level nearest the feet.
+pub fn feet_tile(feet: Vector) -> TilePos {
+    let bv = BLOCK_VOXELS as f32;
+    [(feet.x / bv).floor() as i32, (feet.y / bv + 0.5).floor() as i32, (feet.z / bv).floor() as i32]
+}
+
 /// The standable tile a body with feet at `feet` walks from: its own tile,
 /// else the nearest standable one in its column. The client's path preview
 /// starts from the same tile.
 pub fn current_tile(src: &impl TileSource, feet: Vector) -> Option<TilePos> {
-    let t = crate::feet_tile(feet);
+    let t = feet_tile(feet);
     if standable(src, t) {
         Some(t)
     } else {
@@ -377,10 +383,11 @@ pub fn current_tile(src: &impl TileSource, feet: Vector) -> Option<TilePos> {
 /// Whether feet at `feet` have reached waypoint `p`: within
 /// [`WAYPOINT_REACH_M`] of its column centre horizontally, on its level.
 fn reached(p: TilePos, feet: Vector) -> bool {
-    let (cx, cz) = crate::column_centre([p[0], p[2]]);
-    let (dx, dz) = (feet.x - cx, feet.z - cz);
+    let bv = BLOCK_VOXELS as f32;
+    let dx = feet.x - (p[0] as f32 + 0.5) * bv;
+    let dz = feet.z - (p[2] as f32 + 0.5) * bv;
     let r = WAYPOINT_REACH_M * UNITS_PER_METER;
-    dx * dx + dz * dz <= r * r && crate::on_level(p[1], feet.y)
+    dx * dx + dz * dz <= r * r && (feet.y / bv - p[1] as f32).abs() < 0.5
 }
 
 /// `t` with its level clamped to its column's scan range
@@ -394,27 +401,25 @@ fn clamp_tile(src: &impl TileSource, t: TilePos) -> Option<TilePos> {
     })
 }
 
-/// One tick of walking intent for a body with feet at `feet` (sim units,
+/// One tick of walking intent for a body with feet at `feet` (voxel units,
 /// local to `here`): forward, yawed toward the next waypoint's column
-/// centre — which may lie past the region's edge, in its halo. Every step of
-/// a path is walked ([`Walker::walk_up`]; the body walks up every rise a path
-/// plans, `movement::STUD_EDGE_HOLD_ANGLE`, pinned by
-/// `stud_tiles::bodies_walk_up_a_brick_stair_without_jumping`), so jump is
-/// held only as a safety net: by a grounded body whose walk has stalled
-/// [`WALK_UP_JUMP_AFTER_STALL_TICKS`]. Never sprints. The yaw follows
-/// `movement::plan`'s convention: forward is local −Z, so a heading
-/// `(dx, dz)` is `atan2(−dx, −dz)`.
+/// centre — which may lie past the region's edge, in its halo; jump held when the
+/// waypoint is more than [`STEP_HEIGHT`] above the feet, the body is
+/// grounded and the step is not a walk-up a slope ([`Walker::walk_up`]) — unless the walk
+/// has stalled [`WALK_UP_JUMP_AFTER_STALL_TICKS`], then it jumps anyway. Never sprints. The yaw follows `movement::plan`'s convention:
+/// forward is local −Z, so a heading `(dx, dz)` is `atan2(−dx, −dz)`.
 ///
 /// Jump is held, never pressed: `plan` toggles flight on a double tap, and
 /// a body re-jumping on landing could tap twice inside the window.
 pub fn steer(walker: &Walker, feet: Vector, grounded: bool, here: RegionCoords) -> (MoveKeys, f32) {
+    let bv = BLOCK_VOXELS as f32;
     let Some(wp) = walker.waypoint(walker.next, here) else { return (MoveKeys::default(), 0.0) };
-    let (cx, cz) = crate::column_centre([wp[0], wp[2]]);
+    let (cx, cz) = ((wp[0] as f32 + 0.5) * bv, (wp[2] as f32 + 0.5) * bv);
     let (dx, dz) = (cx - feet.x, cz - feet.z);
     let yaw = libm::atan2f(-dx, -dz);
     let walk_up = walker.walk_up.get(walker.next as usize).copied().unwrap_or(false);
     let walk_up = walk_up && walker.stalled < WALK_UP_JUMP_AFTER_STALL_TICKS;
-    let climb = grounded && !walk_up;
+    let climb = grounded && !walk_up && wp[1] as f32 * bv - feet.y > STEP_HEIGHT * UNITS_PER_METER;
     let keys = MoveKeys { forward: true, jump_held: climb, ..MoveKeys::default() };
     (keys, yaw)
 }

@@ -19,7 +19,7 @@ impl BlockId {
     pub const AIR: BlockId = BlockId(0);
 }
 
-/// The textures of a block's faces (item icons). `Untextured`: none (air).
+/// How a block's faces are textured. `Untextured` blocks (air) never mesh.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum TextureSpec {
     Untextured,
@@ -27,13 +27,27 @@ pub enum TextureSpec {
     Faces { top: String, side: String, bottom: String },
 }
 
-/// One manifest entry. The manifest's voxel-terrain keys (`solid`, `kind`,
-/// `render`, `collider`, `hardness`) are no longer read.
+/// One manifest entry.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct BlockDef {
     pub id: u16,
     pub name: String,
     pub textures: TextureSpec,
+    /// Whether the block collides. Default true.
+    #[serde(default = "default_solid")]
+    pub solid: bool,
+    /// Solid (default) or liquid. A liquid never collides.
+    #[serde(default)]
+    pub kind: crate::BlockKind,
+    /// How the block is drawn. Default opaque.
+    #[serde(default)]
+    pub render: crate::RenderMode,
+    /// The grid a chiseled block collides on. Default voxel.
+    #[serde(default)]
+    pub collider: crate::ColliderScale,
+    /// Break time, in hundredths (`DEFAULT_HARDNESS_CENTI` when absent).
+    #[serde(default)]
+    pub hardness: Option<u16>,
     /// What breaking it yields (`Same` when absent).
     #[serde(default)]
     pub drop: Option<DropDef>,
@@ -45,6 +59,10 @@ pub enum DropDef {
     Same,
     Nothing,
     Item(String),
+}
+
+fn default_solid() -> bool {
+    true
 }
 
 /// Top-level RON document shape: `( blocks: [ ... ] )`.
@@ -81,7 +99,8 @@ impl std::fmt::Display for RegistryError {
 impl std::error::Error for RegistryError {}
 
 /// Tree species made of one block named after the species, not
-/// `<species>_log` / `_branch` / `_leaves` (worldgen's `Species::single_block`).
+/// `<species>_log` / `_branch` / `_leaves` (worldgen's `Species::single_block`):
+/// their limb-0 blocks are trunk wood (`BlockProps::is_trunk`).
 pub const SINGLE_BLOCK_TREES: &[&str] = &["cactus"];
 
 /// Parsed, validated registry. Indexed by ascending `BlockId`.
@@ -140,12 +159,27 @@ impl BlockRegistry {
         }
     }
 
-    /// The names and drops of every block, for
+    /// The collision / render properties of every block, for
     /// [`crate::install_block_props`].
     pub fn props(&self) -> crate::BlockProps {
         let mut p = crate::BlockProps::default();
         for (id, def) in self.iter() {
+            if def.kind == crate::BlockKind::Liquid {
+                p.liquid.insert(id.0);
+            }
+            if !def.solid || def.kind == crate::BlockKind::Liquid {
+                p.non_solid.insert(id.0);
+            }
+            if def.render == crate::RenderMode::Cutout {
+                p.cutout.insert(id.0);
+            }
+            if def.collider == crate::ColliderScale::Half {
+                p.half_collider.insert(id.0);
+            }
             p.names.insert(id.0, def.name.clone());
+            if let Some(h) = def.hardness.filter(|h| *h != crate::DEFAULT_HARDNESS_CENTI) {
+                p.hardness.insert(id.0, h);
+            }
             match &def.drop {
                 None | Some(DropDef::Same) => {}
                 Some(DropDef::Nothing) => {
@@ -156,6 +190,11 @@ impl BlockRegistry {
                     let item = self.drop_item(n).expect("drop item validated at load");
                     p.drops.insert(id.0, crate::BlockDrop::Item(item));
                 }
+            }
+            // Tree trunks are named `<species>_log` (worldgen's `TreeBlocks`),
+            // or are a one-block species' block (a cactus is all trunk wood).
+            if def.name.ends_with("_log") || SINGLE_BLOCK_TREES.contains(&def.name.as_str()) {
+                p.trunk.insert(id.0);
             }
         }
         p

@@ -26,6 +26,7 @@ pub mod coordinator;
 pub mod creature_shapes;
 pub mod debug_render;
 pub mod edit;
+pub mod ground;
 pub mod halo;
 pub mod history;
 pub mod input;
@@ -46,37 +47,25 @@ pub mod path_plan;
 pub mod perf;
 pub mod player;
 pub mod portable;
-pub mod prefab;
 mod clock_jump;
 mod physics;
 pub mod protocol;
 mod region;
 pub mod region_runner;
-mod region_wire;
-pub use region_wire::set_snapshot_sends_colliders;
 pub mod save_cut;
 mod slot_order;
 pub mod registry;
 pub mod peer;
 pub mod people;
 pub mod slime;
+pub mod slope;
 pub mod state;
 pub mod stored_terrain;
-pub mod stud;
-pub mod stud_assets;
-pub mod stud_body;
-pub mod stud_carve;
-pub mod stud_trees;
-pub mod stud_catalog;
-pub mod stud_collider;
-pub mod stud_ground;
-pub mod stud_rebrick;
-pub mod stud_halo;
-pub mod stud_lod;
-pub mod stud_material;
-mod stud_ops;
-pub mod tiles;
+pub mod trees;
 pub mod ui;
+pub mod volume;
+pub mod voxel;
+pub mod voxel_body;
 pub mod water;
 pub mod world_clock;
 pub mod world_manager;
@@ -107,7 +96,8 @@ pub use coordinator::{
     OnlinePlayer, RequestId, RunningRegion, WorldLink, WorldReply, WorldRequest, LEAVE_BATCH_MS, LEAVE_CUT_TIMEOUT_SECS,
     WORLD_CUT_BLOCKED_GRACE_MS, WORLD_CUT_DEADLINE_MS, WORLD_CUT_LEAD_MAX_TICKS, WORLD_CUT_LEAD_TICKS,
 };
-pub use halo::{HaloUpdate, HALO_BLOCKS, HALO_CHUNKS};
+pub use ground::*;
+pub use halo::{HaloChunk, HaloDelta, HaloUpdate, HALO_BLOCKS, HALO_CHUNKS};
 pub use debug_render::{ColliderDebug, DebugFlags, DebugLine, DEBUG_COLLIDER_RADIUS};
 pub use input::*;
 pub use intents::{Effects, Intent, IntentMsg, IntentRefusal, IntentReply, SentIntent, SentReply, Target};
@@ -117,7 +107,7 @@ pub use item_piles::*;
 pub use lod::*;
 pub use lod_builder::*;
 pub use mining::*;
-pub use migrate::{Carried, CarriedV1, CarriedV2, NoVoxelBody};
+pub use migrate::Carried;
 pub use movement::{Immersion, Motion};
 pub use orders::*;
 pub use ownership::{rendezvous_owner, super_region_of, Ownership, DEFAULT_SUPER_REGION_REGIONS};
@@ -128,34 +118,24 @@ pub use path_plan::{
     PORTAL_DEPTH_BLOCKS, ROUTE_MAX_RELIEF_PER_REGION_M, ROUTE_MAX_WATER_SHARE,
 };
 pub use player::*;
-pub use prefab::*;
-pub use portable::{
-    restore_portable, PortableRegion, RegionMeta, RegionMetaV1, RegionMetaV2, SaveTerms, StoredRegion, StudChunkRecord, StudKept, StudTerm,
-    StudTerms,
-};
+pub use portable::{restore_portable, ChunkTerms, PortableRegion, RegionMeta, StoredRegion};
 pub use protocol::*;
 pub use region_runner::*;
 pub use save_cut::{CutId, InFlightRow, WorldCut, CUT_DEADLINE_LEADS, SAVE_CUT_LEAD_MAX_TICKS, SAVE_CUT_LEAD_TICKS};
 pub use slot_order::*;
 pub use registry::*;
 // Not a glob: `slope::classify` would collide with `biome::classify`; call it as `slope::classify`.
+pub use slope::{display_name, slope_chisel, walk_up, Side, SlopeShape};
 pub use state::*;
-pub use stored_terrain::{load_stored_or_warn, StoredTerrain};
+pub use stored_terrain::{load_stored_or_warn, NoStoredTerrain, StoredTerrain};
 pub use ui::*;
+pub use volume::*;
+pub use voxel::*;
+pub use trees::*;
+pub use voxel_body::*;
 pub use water::*;
-pub use world_view::{EntityRef, RegionView, StudWorldHit, WorldAabb, WorldRay, WorldView};
+pub use world_view::{EntityRef, Hit, RegionView, WorldAabb, WorldRay, WorldView};
 pub use world_clock::{ticks_due, ClockAnchor, WorldClock, MAX_CATCH_UP_BURST};
-pub use stud::*;
-pub use stud_body::*;
-pub use stud_carve::*;
-pub use stud_trees::*;
-pub use stud_collider::*;
-pub use stud_ground::*;
-pub use stud_rebrick::{rebrick_slot, REBRICK_SLOT_LENGTH, REBRICK_SLOT_WIDTH, REBRICK_STAGGER};
-pub use stud_halo::*;
-pub use stud_lod::*;
-pub use stud_material::*;
-pub use tiles::*;
 pub use world_manager::*;
 pub use world_map::*;
 
@@ -268,9 +248,10 @@ pub enum ClientUpdateEvent {
     /// The window moved on (or a region is being replaced): tear down this
     /// region's render state.
     RemoveRegion(RegionId),
-    /// Far terrain for one key (initial send or refresh —
-    /// replace-on-re-receipt). Meshed and spawned by the renderer.
-    StudLodData(LodKey, crate::stud_lod::StudLodTile),
+    /// Streamed LOD cells for one key (initial send or refresh —
+    /// replace-on-re-receipt), with the key's water surface layer. Decoded
+    /// and spawned by the renderer.
+    LodData(LodKey, LodPayload, crate::lod::LodWater),
     /// The ring assignment moved on: retire this key's render root.
     /// `near_takeover`: (one of) the key's regions just joined the near
     /// window, so the replacement is authoritative terrain still on its way
@@ -421,6 +402,20 @@ impl World {
     pub fn new() -> Self {
         return Self {
             regions: BTreeMap::new(),
+        };
+    }
+
+    pub fn basic() -> Self {
+        let one = RegionCoords::new(0, 0);
+        let chunks = (0..REGION_CHUNKS)
+            .flat_map(|x| {
+                (0..REGION_CHUNKS).map(move |z| (ChunkCoords::new(x, 0, z), Chunk::flat_floor(8)))
+            })
+            .collect();
+        let data = Region::from_chunks(one, chunks);
+
+        return Self {
+            regions: BTreeMap::from([(one, data)]),
         };
     }
 

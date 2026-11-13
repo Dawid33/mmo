@@ -7,13 +7,13 @@
 //! (addendum) and docs/superpowers/specs/2026-09-20-world-forge-f1/findings.md.
 //!
 //! The artifact stores coarse rasters (8-16 m cells) plus rivers and lakes as
-//! objects. This module turns them into what the generator (`stud_gen`)
-//! needs at any point: a smooth ground height (bicubic + a little detail
+//! objects. This module turns them into what `generate_region`/`coarse_tile`
+//! need at any point: a smooth ground height (bicubic + a little detail
 //! noise), river channels carved at 1 m resolution from the river objects,
 //! lake and river water ABOVE sea level, and banks that contain it.
 //!
-//! Opt-in: set `VOXEL_WORLD_FILE=<path>` and `generate_stud_region` /
-//! `stud_lod_tile` serve that world (the `seed` argument is then ignored); unset, nothing
+//! Opt-in: set `VOXEL_WORLD_FILE=<path>` and `generate_region`/`coarse_tile`
+//! serve that world (the `seed` argument is then ignored); unset, nothing
 //! changes. Only + - * /, floor and sqrt are used on the sampling path.
 
 use std::path::{Path, PathBuf};
@@ -1133,7 +1133,7 @@ impl ForgedWorld {
     /// The rock formation (index into the artifact's `rock_names`) at the
     /// ground surface of the engine column at world meters `(x, z)`, before
     /// soil: the artifact `column` looked up at `s = ground - geo` with
-    /// the ground recipe's rule
+    /// `game::ColumnGround::block_at`'s rule
     /// (the last formation whose top is above `s`, else the top one). Ground
     /// is the interpolated raster (exact at cell centres; no detail noise or
     /// river carving). `None` outside the artifact.

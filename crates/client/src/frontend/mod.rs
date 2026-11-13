@@ -4,8 +4,7 @@
 //!
 //! The screen shown follows [`AppState`] (menu 0, generator 1, load 2,
 //! starting 3 — also `InWorld` until the world map arrives — login 5, the
-//! online world list 6, whose flow is `login::flow`, the prefab library 7,
-//! `prefab_editor::library_ui`); the layer draws
+//! online world list 6, whose flow is `login::flow`); the layer draws
 //! only while [`frontend_ui_shown`]: the frontend owns the screen and the
 //! arrival map (the game UI's world map, before the first Play) is not up.
 //! The generator lives in [`generator`], the world list in [`load_world`] and
@@ -53,9 +52,6 @@ pub enum FrontendAction {
     /// The online world list's pick, by world id.
     JoinWorld(String),
     Logout,
-    /// The main menu's Prefab editor: its library screen (`prefab_editor::library_ui`,
-    /// which has its own action queue, like the world list).
-    PrefabLibrary,
 }
 
 /// What an action does.
@@ -86,10 +82,6 @@ pub const LOADING_SCREEN: i32 = 4;
 /// `FrontendUi.screen` of the login screen and the online world list.
 pub const LOGIN_SCREEN: i32 = 5;
 pub const WORLDS_SCREEN: i32 = 6;
-/// `FrontendUi.screen` of the prefab library.
-pub const PREFAB_LIBRARY_SCREEN: i32 = 7;
-/// Whether the menu offers the prefab editor: its library is files on disk.
-pub const PREFABS_AVAILABLE: bool = cfg!(not(target_arch = "wasm32"));
 
 /// The `FrontendUi.screen` an [`AppState`] shows (`InWorld` shows the
 /// starting screen: the layer is visible there only until the world map
@@ -102,7 +94,6 @@ pub fn screen_index(state: AppState) -> i32 {
         AppState::Starting | AppState::InWorld => 3,
         AppState::Login => LOGIN_SCREEN,
         AppState::Worlds => WORLDS_SCREEN,
-        AppState::PrefabLibrary => PREFAB_LIBRARY_SCREEN,
     }
 }
 
@@ -140,7 +131,6 @@ pub fn action_target(action: &FrontendAction) -> ActionEffect {
         FrontendAction::LoadWorld => ActionEffect::Goto(AppState::LoadWorld),
         FrontendAction::Back => ActionEffect::Goto(AppState::MainMenu),
         FrontendAction::JoinServer => ActionEffect::Goto(AppState::Starting),
-        FrontendAction::PrefabLibrary => ActionEffect::Goto(AppState::PrefabLibrary),
         FrontendAction::Exit => ActionEffect::Exit,
         FrontendAction::PlayOnline
         | FrontendAction::SignIn
@@ -215,8 +205,6 @@ fn connect_frontend(ui: &FrontendUi, world: &mut World) {
         });
     }
     ui.on_play_online(push(FrontendAction::PlayOnline));
-    ui.on_prefab_editor(push(FrontendAction::PrefabLibrary));
-    ui.set_prefabs_available(PREFABS_AVAILABLE);
     ui.on_logout(push(FrontendAction::Logout));
     {
         let queue = actions.clone();
@@ -259,8 +247,6 @@ fn connect_frontend(ui: &FrontendUi, world: &mut World) {
     generator::connect(ui, world);
     #[cfg(not(target_arch = "wasm32"))]
     load_world::connect(ui, world);
-    #[cfg(not(target_arch = "wasm32"))]
-    crate::prefab_editor::library_ui::connect(ui, world);
 }
 
 #[cfg(not(target_arch = "wasm32"))]

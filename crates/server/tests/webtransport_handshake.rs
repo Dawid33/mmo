@@ -96,7 +96,7 @@ async fn webtransport_client_full_handshake() {
     std::thread::spawn(move || {
         let origin = RegionCoords::new(0, 0);
         let mut world = game::World::new();
-        world.load(&origin, game::Region::empty(origin));
+        world.load(&origin, game::Region::from_chunks(origin, Vec::new()));
         while let Ok(event) = event_recv.recv() {
             match event {
                 ServerEvent::ClientPacket(packet, client_id) => match packet {

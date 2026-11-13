@@ -1,8 +1,8 @@
 //! Headless probe: how long does a region take to start on a real server
 //! region thread, and how much memory does each running region cost? Spawns
-//! regions through `ThreadRegionSpawner` with production stud worldgen —
+//! regions through `ThreadRegionSpawner` with production worldgen columns —
 //! the path `server::run` takes on a client's first subscription (deferred
-//! seeds: each region thread runs its own stud genesis) — times each until its
+//! seeds: each region thread runs its own worldgen) — times each until its
 //! first output and prints the process RSS as they come up, then keeps them
 //! ticking for `hold` seconds, sampling RSS.
 //!
@@ -11,7 +11,7 @@
 //!
 //! `regions=9` starts a 3x3 window at once, like a production-scale join (or
 //! the fortress neighbourhood). `VOXEL_WORLD_FILE=<file>` serves a forged
-//! world file; unset = procedural.
+//! world with the server's real block materials; unset = procedural.
 
 use std::time::{Duration, Instant};
 
@@ -42,10 +42,13 @@ fn main() {
         })
         .unwrap_or(RegionCoords::new(0, 0));
 
-    // The server's block registry.
+    // The server's block registry and materials (biome blocks, trees).
     let manifest = include_str!("../../../assets/blocks/blocks.ron");
     let registry = game::BlockRegistry::from_ron(manifest).expect("invalid block manifest");
     game::install_block_props(registry.props());
+    let materials = worldgen::material::Materials::from_names(|name| {
+        registry.id_of(name).unwrap_or_else(|| panic!("block manifest must define \"{name}\""))
+    });
     match std::env::var(worldgen::forged::WORLD_FILE_ENV).ok().filter(|p| !p.is_empty() && p != "procedural") {
         Some(path) => {
             let world = worldgen::forged::ForgedWorld::load(std::path::Path::new(&path))
@@ -70,14 +73,14 @@ fn main() {
         .take(count.max(1))
         .collect();
     let (out_send, out_recv) = crossbeam::channel::unbounded();
-    // Production path: region threads generate their own stud terrain.
-    let mut spawner = server::region_threads::ThreadRegionSpawner::default().with_genesis(std::sync::Arc::new(|rc| {
-        worldgen::stud_gen::generate_stud_region(rc, worldgen::WORLD_SEED)
-    }));
+    // Production path: region threads generate their own columns.
+    let generator: server::region_threads::SharedRegionGenerator =
+        std::sync::Arc::new(move |rc| worldgen::generate_region(rc, worldgen::WORLD_SEED, materials));
+    let mut spawner = server::region_threads::ThreadRegionSpawner::with_region_generator(generator);
     let started = Instant::now();
     let mut inputs = Vec::new();
     for &rc in &regions {
-        inputs.push(spawner.spawn(rc, RegionSeed::Fresh, out_send.clone()));
+        inputs.push(spawner.spawn(rc, RegionSeed::Deferred(None), out_send.clone()));
     }
     println!("spawned {} region threads in {:.1} ms", regions.len(), started.elapsed().as_secs_f64() * 1000.0);
     let mut pending: std::collections::BTreeSet<RegionCoords> = regions.iter().copied().collect();

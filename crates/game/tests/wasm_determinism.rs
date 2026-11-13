@@ -2,12 +2,10 @@
 //! state on native and on wasm32 (node, via wasm-bindgen-test-runner) —
 //! client and server run the sim on different targets. The scene is small and
 //! uses no worldgen, so the wasm build stays light: a kinematic player capsule
-//! walking and jumping over flat stud ground derived from recipes (with one
-//! strip a brick course higher: an autostep up and down), one slime, and a
+//! walking and jumping over 8×8 chunks of hand-built `Voxels` floor (block
+//! scale, plus one row of half blocks for chisel scale), one slime, and a
 //! kinematic compound of two rotated cuboids whose mass properties go through
-//! the eigen solve (std `acos`/`cos` in glamx). A second scene digs a shaft
-//! through implied stud ground (strata, bedrock); a third detaches bricks
-//! into a falling stud body.
+//! the eigen solve (std `acos`/`cos` in glamx).
 //!
 //! A fourth scene bootstraps a small synthetic world history
 //! (`game::history`) and pins crc32 of its encoded history file.
@@ -29,58 +27,84 @@
 //! ```
 mod common;
 
-use common::{body, fixed_body_mass_count, key, r0, spawn_slime, ticks, world_of, FLOOR_PLATES};
+use common::{body, fixed_body_mass_count, key, r0, spawn_slime, ticks, world_of};
 use game::rapier3d::math::Vector;
 use glamx::Quat;
 use game::rapier3d::prelude::{ColliderBuilder, RigidBodyBuilder, RigidBodyHandle};
-use game::{state_hash, ColumnCoords, Key, Pose, Region, StudColumnGround, StudRegionSeed, STUD_CHUNK_STUDS};
+use game::{
+    state_hash, Block, BlockId, Chunk, ChunkCoords, Column, ColumnCoords, ColumnGround,
+    Key, Pose, Region, SubChunk,
+};
 use slotmapd::Key as _;
 
-// Every region scene below was rebuilt on stud ground and re-recorded on
-// 2026-11-10 (stud world plan P10b: the game's tests off voxel terrain): the
-// scenes are new (stud recipes, bricks and the 2.2 m stud body instead of
-// voxel chunks and the 1.8 m body), so the old values (scene 0x60B6_386A /
-// 0xFC53_45B5, underground 0x6E9C_D4DF / 0x4F26_0F66, voxel body
-// 0x52FC_9318 / 0xFD58_5519 at 16-block chunks) describe nothing any more.
-// `physics_goldens` was rebuilt on stud ground in the same change.
-// Re-recorded 2026-11-11 (P10b, the voxel code deleted from `game`): the
-// hashed / serialized layout of `GameData` / `Ecs` lost its voxel fields
-// (`chunk`, `voxel_body`, `chunk_index`, `ground`, `water_bodies`, `halo`,
-// `halo_ground`) — a layout-only move: `physics_goldens` did not move.
-// Before: scene 0x3F2D_FC5B / 0x8704_493E, underground 0x1CAA_BA0A /
-// 0x3C72_DB95, stud body 0x6502_0AE7 / 0xC78F_A508. They move again
-// whenever that layout does.
-// Re-recorded 2026-11-11 (re-brick on exposure, `game::stud_rebrick`): the
-// UNDERGROUND pair only — its scene digs, and the ground a dig exposes is
-// now real bricks (other bricks, stud caps in the colliders). Before:
-// 0x3A4E_50AC / 0x2241_D662. The other scenes dig nothing and did not move.
-// Re-recorded 2026-11-11 (natural cliffs as pristine bricks): the recipe
-// (`StudColumnGround`, hashed and serialized in `GameData.stud_ground`) gained
-// its `apron` field — a layout move for all three scene pairs (these scenes'
-// hand-made recipes have a closed apron, so no brick changed; `physics_goldens`
-// did not move). Before: scene 0x5BCB_AA41 / 0xE5F7_54F5, underground
-// 0xF908_B67A / 0x802D_8C79, stud body 0x9F93_B77D / 0xD498_D06F.
-// Re-recorded 2026-11-11 (per-player prefab registration): `Client` gained its
-// `prefabs` map (hashed and serialized, empty here) — a layout move for the SCENE
-// pair only, the one scene with a client (`physics_goldens` did not move). Before:
-// scene 0x55DE_C516 / 0xEA4C_C8F9.
 /// crc32 of the scene region's bincode bytes after [`SCENE_TICKS`] ticks,
-/// on every target.
-const WASM_SCENE_DIGEST: u32 = 0x1213_C570;
+/// on every target. Re-recorded for the rapier 0.36 / parry 0.31 switch,
+/// then for `dt` = `TICK_DT` and the kinematic `can_sleep(false)` fix,
+/// then for the new `GameData.ground` field (serialized bytes + state hash),
+/// then for the `designations` / `constructed` order fields, then for the
+/// `ChunkBlocks` uniform/dense grid, `u16` `BlockIndex` and boxed
+/// `ColumnGround` footprints (serialization + state hash; geometry unchanged).
+/// Then for the `Ecs` `animator` / `bones` component slots (sim-owned
+/// animation, `game::anim`), and again for players being rigged dwarves
+/// (an animator + one collider per bone; the scene's player walks). Then
+/// for cell mode's removal (`GameData` lost `cells` / `cell_edits`; the
+/// 16-block values only — the 2-block ones still need a re-record). Then
+/// for the `Ecs` `voxel_body` component slot (`game::voxel_body`; layout
+/// only — no body in this scene; 16-block values only).
+/// Then for `Client.mode` (`game::adventure`; the scene's player is a
+/// client; 16-block values only). Then for the `Ecs` `walker` component
+/// slot (`game::adventure`; layout only — nobody walks; 16-block values only). Then for
+/// `GameData.item_piles` / `pile_expiry` (`game::item_piles`; layout only —
+/// no pile in these scenes; 16-block values only). Then for `Client.mining` /
+/// `break_cooldown_until` (`game::mining`; layout only — nobody mines; 16-block
+/// values only). Then for `GameData.containers` / `Client.open_container`
+/// (`game::containers`) and the starting kit's 2 chests now that the
+/// manifest has a `chest` (16-block values only). Then for `GameData.region` /
+/// `next_entity_serial` / `id_index` and the `Ecs` `id` slot (`EntityId`;
+/// layout only — 16-block values only). Then for the entity halo: `ghosts`
+/// became `halo_entities` (entries keep kind + collider, no TTL tick) and
+/// `GameData.halo_sent` was added (layout only — no mirror in these scenes;
+/// 16-block values only). Then for item piles keyed by `WorldBlockPos` and
+/// the new `GameData.halo_piles` / `pile_takes` (`game::item_piles`, Task
+/// 6.3; layout only — no pile in these scenes; 16-block values only). Then
+/// for chests keyed by `WorldBlockPos`, the new `GameData.halo_containers`
+/// and `Client.open_container` as a `WorldBlockPos` (`game::containers`, Task
+/// 6.4; layout only — no chest in these scenes; 16-block values only).
+/// Then for the slime spawner dropping its edge margin (Task 6.6: the
+/// region's tick-100 spawn attempt now picks a column off this floor, so the
+/// second slime the scene used to get no longer spawns; 16-block values
+/// only). Then for `Motion.immersion` / `Motion.blocked_horizontally` (water
+/// plan Task 3; layout only — with both left out of the hash the state hash
+/// is the previous 0x4C3E_CFAB; 16-block values only). Then for
+/// `ColumnGround.water_top` / `water_body` and `GameData.water_bodies`
+/// (water plan Task 5, recipe water; serialized bytes + hashed layout only —
+/// with the three left out of the hash every state hash here is the previous
+/// one; 16-block values only, the voxel body scene's too).
+///
+/// Every value is pinned per sim-chunk size (`game::CHUNK_BLOCKS`, a build
+/// dial): the same physical scene splits into different chunk entities,
+/// bodies and colliders at 2 and 16 blocks, so its bytes and hashes differ.
+/// Other sizes are not pinned and skip the comparison.
+const WASM_SCENE_DIGEST: u32 = pinned(0xFA8E_102F, 0x25C3_6020);
 /// `game::state_hash` of the same state, on every target.
-const SCENE_STATE_HASH: u32 = 0xEB0D_BBF0;
+const SCENE_STATE_HASH: u32 = pinned(0x5233_40BE, 0xC939_1267);
 const SCENE_TICKS: usize = 120;
 /// crc32 of [`underground_scene`]'s region bytes, on every target.
-const UNDERGROUND_DIGEST: u32 = 0xBFCD_2C74;
+const UNDERGROUND_DIGEST: u32 = pinned(0x5448_586C, 0x8439_7A8D);
 /// `game::state_hash` of the same state, on every target.
-const UNDERGROUND_STATE_HASH: u32 = 0x360F_E7CE;
+const UNDERGROUND_STATE_HASH: u32 = pinned(0x4080_B196, 0x4472_2ECB);
 
-/// crc32 of [`stud_body_scene`]'s region bytes, on every target.
-const STUD_BODY_DIGEST: u32 = 0x2E60_B044;
+/// crc32 of [`voxel_body_scene`]'s region bytes, on every target.
+/// Re-recorded for Task 7.5 (voxel bodies cross seams): the body is now an
+/// `EntityKind::Body` with an `EntityId` (`Ecs.kind` / `id`, `id_index`,
+/// `next_entity_serial`) and `VoxelBody` gained `drops` — state layout only,
+/// the same detach and fall (16-block values only).
+const VOXEL_BODY_DIGEST: u32 = pinned(0x0F43_FFD4, 0xC0F3_B295);
 /// `game::state_hash` of the same state, on every target.
-const STUD_BODY_STATE_HASH: u32 = 0xF132_A0D3;
-/// Ticks of [`stud_body_scene`] after the detach: it has landed and tumbles.
-const STUD_BODY_TICKS: usize = 30;
+const VOXEL_BODY_STATE_HASH: u32 = pinned(0x8D9E_A328, 0x1842_10DF);
+/// Ticks of [`voxel_body_scene`] after the detach: mid-fall (it rests and
+/// despawns at ~50).
+const VOXEL_BODY_TICKS: usize = 30;
 
 /// crc32 of `history::persist::encode` of [`history_scene`]'s bootstrapped
 /// history, on every target. Depends on the region size (journey leg times
@@ -101,10 +125,19 @@ const EXPLICIT_MASS_DIGEST: u32 = 0x1A48_699B;
 /// `build.py`'s collider rule) does. Independent of the chunk and region size.
 const CREATURE_MASS_DIGEST: u32 = 0x62EC_1C69;
 
-/// Whether this sim-chunk size has pinned values (16 blocks: the only size
-/// stud chunks exist at); prints a skip line if not.
+/// The value pinned for this build's chunk size: `at2` at 2-block chunks,
+/// `at16` at 16 (0 elsewhere; see [`pinned_size`]).
+const fn pinned(at2: u32, at16: u32) -> u32 {
+    match game::CHUNK_BLOCKS {
+        2 => at2,
+        16 => at16,
+        _ => 0,
+    }
+}
+
+/// Whether this chunk size has pinned values; prints a skip line if not.
 fn pinned_size() -> bool {
-    let pinned = game::CHUNK_BLOCKS == 16;
+    let pinned = matches!(game::CHUNK_BLOCKS, 2 | 16);
     if !pinned {
         log(&format!("wasm_determinism: nothing pinned at {}-block chunks, comparison skipped", game::CHUNK_BLOCKS));
     }
@@ -114,18 +147,31 @@ fn pinned_size() -> bool {
 /// Runs the scene; returns `(portable digest, state_hash)`.
 fn scene() -> (u32, u32) {
     // Units 64..320 each way around the spawn at (128, 128); the 32-unit
-    // strip z 192..224 (stud rows 24..28: tile rows 12 and 13) lies one brick
-    // course (`STUD_STEP_PLATES`) over the flat ground.
-    let mut world = world_of(64.0..320.0, 64.0..320.0, |_, cz| {
-        common::stud_ground(|_, sz| {
-            let strip = (24..28).contains(&(cz * STUD_CHUNK_STUDS + sz));
-            FLOOR_PLATES + if strip { game::STUD_STEP_PLATES } else { 0 }
-        })
+    // strip z 192..224 (block rows 12 and 13 — one chunk row at 2-block
+    // chunks) is half blocks (top 24) over the block-scale floor (top 16).
+    let mut world = world_of(64.0..320.0, 64.0..320.0, |_, z| {
+        let half = Chunk::flat_floor(24);
+        let mut chunk = Chunk::flat_floor(16);
+        for bz in 0..game::CHUNK_BLOCKS {
+            if !(12..14).contains(&(z * game::CHUNK_BLOCKS + bz)) {
+                continue;
+            }
+            for by in 0..game::CHUNK_BLOCKS {
+                for bx in 0..game::CHUNK_BLOCKS {
+                    let i = game::BlockIndex::from_xyz(bx, by, bz);
+                    chunk.set_block(bx, by, bz, half.block_at(bx, by, bz));
+                    match half.chisel.get(&i) {
+                        Some(c) => chunk.chisel.insert(i, c.clone()),
+                        None => chunk.chisel.remove(&i),
+                    };
+                }
+            }
+        }
+        chunk
     });
-    let drop = common::floor_y(FLOOR_PLATES) + 24.0;
-    spawn_slime(world.regions.get_mut(&r0()).unwrap(), [176.0, drop, 112.0], 1, 0.0, 0);
+    spawn_slime(world.regions.get_mut(&r0()).unwrap(), [176.0, 40.0, 112.0], 1, 0.0, 0);
     let compound = add_compound_body(&mut world);
-    // S (+z) over the raised strip and back off it, then D (+x), with jumps.
+    // S (+z) over the half-block row and back off it, then D (+x), with jumps.
     let script: [(usize, Key, bool); 8] = [
         (0, Key::KeyS, true),
         (10, Key::Space, true),
@@ -177,11 +223,10 @@ fn scene() -> (u32, u32) {
 /// every target.
 fn add_compound_body(world: &mut game::World) -> RigidBodyHandle {
     let mut handle = None;
-    let y = common::floor_y(FLOOR_PLATES) + 24.0;
     world.regions.get_mut(&r0()).unwrap().with_data(|d| {
         let e = d.data.ecs.create_entity_safe();
         let body = RigidBodyBuilder::kinematic_position_based()
-            .translation(Vector::new(240.0, y, 240.0))
+            .translation(Vector::new(240.0, 40.0, 240.0))
             .can_sleep(false)
             .user_data(e.data().as_ffi() as u128)
             .build();
@@ -206,43 +251,50 @@ fn add_compound_body(world: &mut game::World) -> RigidBodyHandle {
     handle.unwrap()
 }
 
-/// Plates below this are bedrock in [`underground_scene`].
-const UNDERGROUND_BEDROCK: i32 = -300;
-
-/// A 2x2-column stud region of implied ground (three tilted strata over
-/// bedrock) dug down a shaft that wanders across all four columns: each dig
-/// materialises chunks from the recipe, the last lies in bedrock and is
-/// refused. Returns `(digest, state_hash)`.
+/// A 2x2-column region of implied ground (three strata over bedrock) dug
+/// down a shaft that wanders across all four columns: each dig materialises chunks from the recipe, the last
+/// lands on bedrock and is refused. Returns `(digest, state_hash)`.
 fn underground_scene() -> (u32, u32) {
-    let n = STUD_CHUNK_STUDS;
+    let stone = BlockId(2);
+    let bedrock = BlockId(3);
     let column = || {
-        // Stone over sand over dirt, the formations' tops stepping with the
-        // stud column (`geo`): no layer of the shaft is one material.
-        StudColumnGround::new(
-            vec![FLOOR_PLATES; n * n].into(),
-            vec![game::STUD_NO_WATER; n * n].into(),
-            vec![0; n * n].into(),
-            vec![common::SOIL],
-            (0..n * n).map(|i| (i % 3) as i32).collect(),
-            vec![(i32::MAX, game::MAT_STONE), (-100, game::MAT_SAND), (-200, game::MAT_DIRT)],
-            UNDERGROUND_BEDROCK,
-        )
-        .expect("a recipe of known materials")
+        // `below` differs from the band, or normalising trims the band chunk.
+        let band = SubChunk::Dense(Box::new(Chunk::flat_floor_with(32, stone)));
+        let mut ground = ColumnGround::plain(vec![1; game::COLUMN_FOOTPRINT].into_boxed_slice(), 0, stone, bedrock);
+        ground.geo = (0..game::COLUMN_FOOTPRINT).map(|i| (i % 3) as i16).collect();
+        ground.strata = vec![(0, stone), (-20, BlockId(4)), (-40, BlockId(5))];
+        Column::new(0, Block::new(BlockId(1)), Block::new(BlockId::AIR), vec![band]).with_ground(ground)
     };
-    let ground = (0..2).flat_map(|x| (0..2).map(move |z| (ColumnCoords::new(x, z), column()))).collect();
-    let mut region = common::region_of(r0(), StudRegionSeed { ground, features: Vec::new(), ..Default::default() });
-    // The top plate of each dig; the last box lies wholly in bedrock.
-    let ys = [30, 6, -24, -60, -96, -132, -168, -204, -240, -276, -294, UNDERGROUND_BEDROCK];
-    let cw = n as i32;
-    let count = |region: &Region| region.data().stud_index.len();
+    let mut columns = Vec::new();
+    for x in 0..2 {
+        for z in 0..2 {
+            columns.push((ColumnCoords::new(x, z), column()));
+        }
+    }
+    let mut region = Region::from_columns(r0(), columns);
+    // Surface block Y is 1, so bedrock starts at 1 - UNDERGROUND_DEPTH = -59.
+    let ys = [1, -3, -8, -14, -20, -27, -33, -40, -47, -54, -58, -59];
+    let cb = game::CHUNK_BLOCKS as i32;
+    // Materialised chunks of the 2x2 columns over every chunk Y the shaft reaches.
+    let count = |region: &Region| {
+        let mut n = 0;
+        for x in 0..2 {
+            for z in 0..2 {
+                for cy in (-60i32).div_euclid(cb)..=1i32.div_euclid(cb) {
+                    n += region.data().chunk_key_at(ChunkCoords::new(x, cy, z)).is_some() as usize;
+                }
+            }
+        }
+        n
+    };
     let before = count(&region);
     for (i, y) in ys.into_iter().enumerate() {
         // The shaft wanders across the four columns around their shared
-        // corner at stud (cw, cw): a tile-sized box, a tile deep.
-        let (x, z) = (cw - 2 + 2 * (i as i32 % 2), cw - 2 + 2 * ((i as i32 % 3) / 2));
+        // corner at block (cb, cb).
+        let pos = [cb - 1 + (i as i32 % 2), y, cb - 1 + (i as i32 % 3) / 2];
         let mut changed = false;
-        region.with_data(|d| changed = !d.carve_stud_safe([x, y - 6, z], [x + 2, y, z + 2]).is_empty());
-        assert_eq!(changed, i != ys.len() - 1, "dig {i} at plate {y}: only the bedrock dig is refused");
+        region.with_data(|d| changed = d.set_block_safe(pos, Block::new(BlockId::AIR)));
+        assert_eq!(changed, i != ys.len() - 1, "dig {i} at y={y}: only the bedrock dig is refused");
     }
     let after = count(&region);
     if print_hash() {
@@ -258,52 +310,43 @@ fn underground_scene() -> (u32, u32) {
     (digest, hash)
 }
 
-/// A column of eight 2 x 4 bricks with an arm at its top, built 12 plates over
-/// flat stud ground and detached into a stud body (`game::stud_body`) spinning
-/// about its base: a dynamic body whose explicit mass properties, rotation
-/// integration, landing and compound-vs-terrain contacts all land in the
-/// state. Returns `(digest, state_hash)`.
-fn stud_body_scene() -> (u32, u32) {
-    use game::stud_catalog::STUD_PARTS;
-    let mut region = common::floor_region(r0(), 0.0..512.0, 0.0..512.0, FLOOR_PLATES);
-    let part = STUD_PARTS.iter().position(|p| p.number == "3001").expect("the 2 x 4 brick") as u16;
-    let at = common::sc(1, 0, 1);
-    let base = FLOOR_PLATES as u8 + 12;
-    let mut cells: Vec<[u8; 3]> = (0..8).map(|k| [8, base + 3 * k, 8]).collect();
-    cells.push([12, base + 21, 8]);
+/// A stone column with an arm, detached into a voxel body (`game::voxel_body`)
+/// toppling about its base (`detach_blocks_pivoting_safe`: tall enough that
+/// its spin is raised to go over, with `sqrt`) onto a block floor: a dynamic
+/// body whose explicit mass properties, rotation integration, landing and
+/// compound-vs-voxels contacts all land in the state. Returns
+/// `(digest, state_hash)`.
+fn voxel_body_scene() -> (u32, u32) {
+    let chunks = common::floor_chunks(0.0..512.0, 0.0..512.0, game::BLOCK_VOXELS as u32);
+    let mut region = Region::from_chunks(r0(), chunks);
+    let mut blocks: Vec<[i32; 3]> = (1..=8).map(|y| [16, y, 16]).collect();
+    blocks.extend([[17, 8, 16], [18, 8, 16]]);
     let mut body = None;
     region.with_data(|d| {
-        for &min in &cells {
-            assert!(d.place_stud_safe(at, game::StudBrick::part_at(min, part, 0, 4)), "brick at {min:?}");
+        for &p in &blocks {
+            assert!(d.set_block_safe(p, Block::new(BlockId(2))));
         }
     });
     region.with_data(|d| {
-        let picks = std::collections::BTreeMap::from([(at, cells.iter().copied().collect())]);
-        let u = game::STUD_UNITS as f32;
-        let pivot = Vector::new((n_studs(1) + 9.0) * u, common::floor_y(base as i32), (n_studs(1) + 9.0) * u);
-        body = d.detach_studs_safe(&picks, game::SettlePolicy::Despawn, Vector::new(0.3, 0.0, -1.5), Some(pivot));
+        let b = game::BLOCK_VOXELS as f32;
+        let pivot = Vector::new(16.5 * b, b, 16.5 * b);
+        body = d.detach_blocks_pivoting_safe(&blocks, game::SettlePolicy::Despawn, Vector::new(0.1, 0.0, -0.6), Some(pivot));
     });
     let body = body.expect("the column detaches");
     let start = *region.data().physics.bodies.get(*region.data().ecs.rigidbody.get(body)).unwrap().position();
-    for _ in 0..STUD_BODY_TICKS {
+    for _ in 0..VOXEL_BODY_TICKS {
         region.handle_event(game::GameEventKind::Tick).unwrap();
         region.forget_last_event();
     }
     let data = region.data();
     let end = *data.physics.bodies.get(*data.ecs.rigidbody.get(body)).unwrap().position();
     assert!(start.translation.y - end.translation.y > 16.0, "the body must fall: {start:?} -> {end:?}");
-    assert!(end.rotation.angle_between(start.rotation) > 0.2, "and turn: {start:?} -> {end:?}");
     let digest = crc32fast::hash(&game::SerializedRegion::from_rollback(data).0);
     let hash = state_hash(data);
     if print_hash() {
-        log(&format!("STUD_BODY_DIGEST = 0x{digest:08X}, STUD_BODY_STATE_HASH = 0x{hash:08X}"));
+        log(&format!("VOXEL_BODY_DIGEST = 0x{digest:08X}, VOXEL_BODY_STATE_HASH = 0x{hash:08X}"));
     }
     (digest, hash)
-}
-
-/// The first stud of chunk column `c` along an axis, as `f32`.
-fn n_studs(c: usize) -> f32 {
-    (c * STUD_CHUNK_STUDS) as f32
 }
 
 /// A 16×16 synthetic world map: land with a sea border and a sea channel at
@@ -479,24 +522,24 @@ fn underground_hash_wasm() {
 
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
-fn stud_body_hash_native() {
-    let (digest, hash) = stud_body_scene();
+fn voxel_body_hash_native() {
+    let (digest, hash) = voxel_body_scene();
     if !pinned_size() {
         return;
     }
-    assert_eq!(digest, STUD_BODY_DIGEST, "native digest 0x{digest:08X} != golden 0x{STUD_BODY_DIGEST:08X}");
-    assert_eq!(hash, STUD_BODY_STATE_HASH, "native state_hash 0x{hash:08X} != golden 0x{STUD_BODY_STATE_HASH:08X}");
+    assert_eq!(digest, VOXEL_BODY_DIGEST, "native digest 0x{digest:08X} != golden 0x{VOXEL_BODY_DIGEST:08X}");
+    assert_eq!(hash, VOXEL_BODY_STATE_HASH, "native state_hash 0x{hash:08X} != golden 0x{VOXEL_BODY_STATE_HASH:08X}");
 }
 
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen_test::wasm_bindgen_test]
-fn stud_body_hash_wasm() {
-    let (digest, hash) = stud_body_scene();
+fn voxel_body_hash_wasm() {
+    let (digest, hash) = voxel_body_scene();
     if !pinned_size() {
         return;
     }
-    assert_eq!(digest, STUD_BODY_DIGEST, "wasm32 digest 0x{digest:08X} != golden 0x{STUD_BODY_DIGEST:08X}");
-    assert_eq!(hash, STUD_BODY_STATE_HASH, "wasm32 state_hash 0x{hash:08X} != golden 0x{STUD_BODY_STATE_HASH:08X}");
+    assert_eq!(digest, VOXEL_BODY_DIGEST, "wasm32 digest 0x{digest:08X} != golden 0x{VOXEL_BODY_DIGEST:08X}");
+    assert_eq!(hash, VOXEL_BODY_STATE_HASH, "wasm32 state_hash 0x{hash:08X} != golden 0x{VOXEL_BODY_STATE_HASH:08X}");
 }
 
 #[cfg(not(target_arch = "wasm32"))]

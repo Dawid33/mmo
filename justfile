@@ -1,4 +1,4 @@
-# justfile — task runner for the MMO workspace.
+# justfile — task runner for the voxel MMO workspace.
 # Run `just` (or `just --list`) to see available recipes.
 #
 # Machine-specific bits are variables you can override on the command line, e.g.
@@ -22,7 +22,7 @@ adapter := env_var_or_default("VOXEL_ADAPTER", "")
 #   tiny  = 1 simulated region, no LOD rings      (cheapest world that loads)
 #   small = 1 simulated region + one factor-2 ring (24 LOD keys)
 #   full  = 5x5 simulated regions + the rings beyond them (~1,060 LOD keys)
-# e.g. `just world=tiny run`, `just world=small fps-steady base`. Finer control:
+# e.g. `just world=tiny run`, `just world=small render-bench`. Finer control:
 # export VOXEL_NEAR_RADIUS=0..3 / VOXEL_FORTRESS_RADIUS=0..3 / VOXEL_LOD_RINGS=off|small|full|"2:2,4:4"
 # (see crates/client/src/world_scale.rs). Every recipe inherits it; tests
 # ignore it (GameInstanceManager::new is env-free).
@@ -50,7 +50,7 @@ user := ""
 # World the server serves. Empty (default) = the default forged world,
 # worlds/default.world, forged on first start if missing (ForgeParams::default():
 # a 16 km / 32 m continent, ~5-10 s).
-# `procedural` = the noise world (nothing is saved). Any other value = that world file (e.g. one
+# `procedural` = the noise world. Any other value = that world file (e.g. one
 # from `just forge-proto`, one finite world — by default a 16 km continent):
 #   just forge-proto --seed D5C0DE021A --out target/world-forge/best
 #   just world_file=target/world-forge/best.world server   # then `just client`
@@ -59,21 +59,14 @@ user := ""
 world_file := env_var_or_default("VOXEL_WORLD_FILE", "")
 export VOXEL_WORLD_FILE := world_file
 
-# The server serves stud terrain (toy bricks) only: generated from the forged world,
-# or from the noise world for `world_file=procedural`, and saved in the world store.
-# There is no terrain switch. A stored world last served as a voxel world (one played
-# before the stud cutover) is refused at start with a message — terrain is never
-# converted: re-forge (`just run --reset` for the debug world) or make a new world.
-# Perf numbers recorded before the cutover are voxel numbers: do not compare across it.
-
 # Region edge in BLOCKS (1 block = 1 m) — a BUILD-time constant
 # (`game::REGION_BLOCKS`), unlike `world`: 64 = 1024-unit / 64 m regions
 # (default), 128 = 2048-unit, 256 = 4096-unit, 512 = 8192-unit regions, each
 # with the ring table re-cut to the same pixel budget and horizon. Nothing else
-# is legal (see crates/game/src/protocol.rs). The old chunk-denominated
-# VOXEL_REGION_CHUNKS / VOXEL_CELL_CHUNKS and the removed cell mode's
-# VOXEL_CELL_BLOCKS fail the build. The sim chunk (`game::CHUNK_BLOCKS`, 16 m:
-# one entity, one rapier body, one collider set) is a constant, not a dial.
+# is legal (see crates/game/src/protocol.rs). The dial is in blocks
+# so it keeps its meaning when the sim chunk (CHUNK_BLOCKS) changes size; the
+# old chunk-denominated VOXEL_REGION_CHUNKS / VOXEL_CELL_CHUNKS and the removed
+# cell mode's VOXEL_CELL_BLOCKS fail the build.
 #   just region_blocks=128 run
 # Switching recompiles `game` and everything downstream (not Bevy or the forks),
 # and server + client MUST come from the same value — nothing refuses a
@@ -87,13 +80,24 @@ export VOXEL_WORLD_FILE := world_file
 # tracy-client, and cross-section) build with
 # `play_blocks` = 256 (256 m regions, one-region near window — see
 # `DEFAULT_NEAR_RADIUS` in crates/client/src/world_scale.rs); everything else —
-# tests, check, clippy, raw cargo — stays at `test_blocks` = 64.
+# tests, check, clippy, render-bench, raw cargo — stays at `test_blocks` = 64.
 # An explicit `just region_blocks=N <recipe>` (or $VOXEL_REGION_BLOCKS) wins for
 # every recipe.
 region_blocks := env_var_or_default("VOXEL_REGION_BLOCKS", "")
 test_blocks := if region_blocks == "" { "64" } else { region_blocks }
 play_blocks := if region_blocks == "" { "256" } else { region_blocks }
 export VOXEL_REGION_BLOCKS := test_blocks
+
+# Sim-chunk edge in BLOCKS — a BUILD-time constant (`game::CHUNK_BLOCKS`,
+# crates/game/src/block.rs; exactly 2 or 16 (the sizes with pinned
+# goldens), anything else fails the build). A chunk owns one entity, one rapier body and one collider set; the
+# 32³-voxel render/LOD brick does not change with it. The default mirrors
+# `[env]` in .cargo/config.toml (one build fingerprint); switching recompiles
+# `game` and everything downstream. Server and client must share the value.
+# Default 16 (16 m chunks); 2 is the pre-2026-10-29 size, still tested:
+#   just chunk_blocks=2 smoke
+chunk_blocks := env_var_or_default("VOXEL_CHUNK_BLOCKS", "16")
+export VOXEL_CHUNK_BLOCKS := chunk_blocks
 
 # Spawn island size (phase 3 of the island spec): the island centred on the home
 # region, as a diameter in 64 m cells — a BUILD-time constant
@@ -167,6 +171,13 @@ check:
 server:
     VOXEL_REGION_BLOCKS={{play_blocks}} RUST_BACKTRACE=1 {{cargo}} run --bin server
 
+# Wipe the dev worldgen disk cache (target/worldgen-cache). The cache
+# self-invalidates when crates/worldgen or the block manifest change; use this
+# after a change elsewhere (e.g. column encoding in `game`) alters generated
+# output without touching those inputs. WORLDGEN_CACHE=0/1 forces it off/on.
+worldgen-cache-clear:
+    rm -rf target/worldgen-cache
+
 # Run the Bevy client. Override `adapter` to pin a GPU, e.g. `just adapter=6700 client`.
 client:
     #!/usr/bin/env bash
@@ -178,12 +189,10 @@ client:
     RUST_BACKTRACE=1 {{cargo}} run --bin client
 
 # Debug launch: straight into a small generated world with a fortress embarked
-# (`client debug embarked`, crates/client/src/debug_launch.rs), on stud terrain.
-# The world is worlds/debug-embarked/ (16 km / 32 m, forged on
-# first run) and is REUSED, with its fortress, on every later run; `just run --reset`
-# (or deleting the directory) re-forges it and embarks afresh. A debug world last
-# played as a voxel world is refused by its server (the starting screen shows the
-# server log's reason): `just run --reset`. Builds both binaries — the client
+# (`client debug embarked`, crates/client/src/debug_launch.rs). The world is
+# worlds/debug-embarked/ (16 km / 32 m, forged on first run) and is REUSED, with
+# its fortress, on every later run; `just run --reset` (or deleting the
+# directory) re-forges it and embarks afresh. Builds both binaries — the client
 # spawns the world's server itself, like a menu start.
 run *args:
     #!/usr/bin/env bash
@@ -193,48 +202,6 @@ run *args:
     if [ -n "{{user}}" ]; then export VOXEL_PLAYER_NAME="{{user}}"; fi
     {{cap}} {{cargo}} build --bin client --bin server
     RUST_BACKTRACE=1 ./target/debug/client debug embarked {{args}}
-
-# Debug launch into the toy-brick TEST world: 3x3 regions of hand-made stud chunks, no
-# store, no map, no history, no menu — a debug preset only; the real game (`run`,
-# `play`, `server`) is on stud terrain by default.
-# `just run-studs --procedural` plays the procedural noise world on stud terrain without
-# a store (the same terrain as `just world_file=procedural server` + `just client`).
-# Far terrain: the server streams a coarse height field per LOD key (`game::stud_lod`)
-# and the client draws it beyond the loaded regions. Its dials are the ring dials:
-# `world=tiny|small|full`, `view=<m>` (e.g. `just view=4000 run` for a cheap short view)
-# and VOXEL_LOD_RINGS=off|small|full|"bound:factor,..." — on stud terrain the client
-# turns whichever table that gives into the stud one (`game::stud_ring_table`: the same
-# reach, cells 4x coarser, never finer than a stud or wider than 256 cells a tile).
-# LOD_BUILD_THREADS sizes the server's builder pool.
-# The toy world has nothing beyond its 3x3 regions, so it runs with VOXEL_LOD_RINGS=off
-# (set here: the world scale is read in `main`, before the launch plugin runs).
-run-studs *args:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    export VOXEL_REGION_BLOCKS={{play_blocks}}
-    case " {{args}} " in
-        *" --procedural "*) ;;
-        *) export VOXEL_LOD_RINGS=off ;;
-    esac
-    export VOXEL_NEAR_RADIUS=1
-    if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
-    {{cap}} {{cargo}} build --bin client --bin server
-    RUST_BACKTRACE=1 ./target/debug/client debug studs {{args}}
-
-# The prefab editor, straight in: an empty baseplate world with prefab NAME of your
-# library opened (a new one when there is none; `untitled` without a name).
-# `just prefab-editor --game dev-arch` edits the game's own assets/prefabs/dev-arch.prefab.ron
-# (dev builds). Build mode is on: left click places, right click removes, Ctrl+S saves.
-# The world has nothing beyond its 3x3 regions, so it runs like `run-studs`.
-prefab-editor *args:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    export VOXEL_REGION_BLOCKS={{play_blocks}}
-    export VOXEL_LOD_RINGS=off
-    export VOXEL_NEAR_RADIUS=1
-    if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
-    {{cap}} {{cargo}} build --bin client --bin server
-    RUST_BACKTRACE=1 ./target/debug/client debug prefab {{args}}
 
 run_two_port := "6476"
 
@@ -471,6 +438,14 @@ play-test:
         echo "no panics/errors matched in logs."
     fi
 
+# Run the deterministic worldgen binary.
+worldgen:
+    {{cargo}} run --bin worldgen
+
+# Time full region generation (coarse-find + voxel-smooth surfaces)
+worldgen-bench:
+    {{cargo}} run --release -p worldgen --bin worldgen
+
 # Region start time + server RSS per running region, on real region threads
 # (no client, no LOD): `just genesis-probe 9 30 -9,-6` starts the 3x3 around
 # region (-9,-6), keeps it ticking 30 s and prints RSS. Builds at the play
@@ -479,7 +454,11 @@ genesis-probe regions="1" hold="0" center="0,0":
     VOXEL_REGION_BLOCKS={{play_blocks}} {{cap}} {{cargo}} build --release -p server --example genesis_probe
     VOXEL_WORLD_FILE="{{world_file}}" ./target/release/examples/genesis_probe {{regions}} {{hold}} {{center}}
 
-# Micro-benchmark of TerrainPipeline::column and its share of generate_stud_region.
+# Time one region's collider genesis build + determinism check.
+collider-bench:
+    {{cargo}} run --release -p worldgen --example collider_profile
+
+# Micro-benchmark of TerrainPipeline::column and its share of generate_region.
 bench-column:
     {{cargo}} run --release -p worldgen --example column_bench
 
@@ -518,11 +497,6 @@ asset-viewer *args:
 # the manifest creatures.json. No ids: every source. Then `just creature-check`.
 creatures *ids:
     python3 tools/creatures/build.py {{ids}}
-
-# Bake the LDraw parts in tools/ldraw-bake/parts.txt into crates/game/src/stud_catalog.rs and
-# assets/studs/ (LDRAW_DIR overrides assets/ldraw, which is git-ignored). `just ldraw-bake --check` verifies.
-ldraw-bake *args:
-    {{cap}} {{cargo}} run -p ldraw-bake --release -- --ldraw "${LDRAW_DIR:-assets/ldraw}" {{args}}
 
 # Sources for giants and animal people whose base creature is built
 # (tools/creatures/derive.py); existing ones are kept unless --force.
@@ -587,14 +561,26 @@ block-textures *args:
 world-map *args:
     {{cap}} {{cargo}} run --release -p worldgen --example world_map -- {{args}}
 
-# Vertical slice of the generated ground (cover, soil, forge rock layers, water) as a
-# PNG in target/cross-section/, read from the region's stud ground recipes (10 px per m).
-# Flags: --world <file>|procedural --region X,Z --axis x|z --at <block> --depth <m> --out <png>;
+# Vertical slice of the generated ground (soil, forge rock layers, bedrock) as a
+# PNG in target/cross-section/, read through the engine's own Column/ColumnGround.
+# Flags: --world <file>|procedural --region X,Z --axis x|z --at <block> --out <png>;
 # without --world it uses worlds/default.world, and a missing file is an error
 # (export one: just worldctl export --db <store> <out.world>). Built with
 # `play_blocks`, so --region / --at address the same grid as `just run`.
 cross-section *args:
     VOXEL_REGION_BLOCKS={{play_blocks}} {{cap}} {{cargo}} run --release -p worldgen --example cross_section -- {{args}}
+
+# Region cost and walkability of generated terrain (test-size region, procedural
+# world): snapshot / chisel / collider sizes, slopes by shape and how many
+# one-block rises are walkable without a jump. Args: [rx rz] (default 0 0).
+quantize-probe *args:
+    {{cap}} {{cargo}} run --release -p worldgen --example quantize_probe -- {{args}}
+
+# Flags: --world <file> --region X,Z; IMPLIED_AIR=1 counts the ground under a
+# column's band as unknown. Built with `play_blocks`, like cross-section.
+# Render-brick census of a region: entities spawned, bricks with faces, buried ones
+brick-census *args:
+    VOXEL_REGION_BLOCKS={{play_blocks}} {{cap}} {{cargo}} run --release -p worldgen --example brick_census -- {{args}}
 
 # World history: bootstrap + fast-forward a forged world's history (people, sites,
 # civs, journeys; `game::history`) and print statistics and the log. `--save` writes
@@ -636,6 +622,14 @@ worldctl *args:
 # Forge a world straight into a store: `just forge-db worlds/w.sqlite --size 32768 --cell 16`.
 forge-db db *args:
     just region_blocks={{play_blocks}} worldctl forge --db {{db}} {{args}}
+
+# Front / side / top orthographic PNGs of one generated tree (one pixel per
+# voxel, coloured by part) into target/tree-view/. Flags: --species
+# oak|pine|birch|spruce|acacia|palm|jungle|cactus --seed N --age N (0..=100) --out <path stem> --scale N; --grid
+# writes 3×3 sheets (front + top) of seeds N..N+8 instead; --time N prints the
+# skeleton + rasterise cost per tree over N seeds.
+tree-view *args:
+    {{cap}} {{cargo}} run --release -p worldgen --example tree_view -- {{args}}
 
 # Feature census of Blockbench/Bedrock model files (.bbmodel, .geo.json,
 # .animation.json): which format features each file uses, so a model loader
@@ -700,6 +694,94 @@ forge-bench size="16000" cell="16":
 forge-ui port="8787" *args:
     {{cap}} {{cargo}} run --release -p worldgen --example forge_proto -- --serve {{port}} {{args}}
 
+# Headless region-load cost breakdown (gen/derive/serde/mesh).
+bench-region:
+    {{cap}} {{cargo}} test -p worldgen --release --test region_load_cost -- --ignored --nocapture
+
+# Self-screenshot probe: the pulled-quad render path draws real terrain. Run it
+# on a real adapter after a Bevy bump (`just adapter=6700 pull-smoke`) — the
+# shader tests compose against stubs and miss upstream WGSL changes.
+pull-smoke:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
+    {{cargo}} run -p client --example pull_smoke
+
+# Production render benchmark: real server seed + full LOD table, fixed
+# 1920x1080 no-vsync client, three repeated JSON runs by default.
+# Pair modes: per-chunk+raster, direct+raster, gpu+raster, gpu+brick.
+# The `key=value` argument spelling intentionally matches benchmark reports:
+# `just render-bench backend=gpu+raster adapter=T600 repetitions=3 threads=4`.
+# `threads` caps both the Bevy worker pools and Tokio server workers so the
+# production-scene load leaves CPU headroom for the desktop.
+render-bench backend="direct+raster" adapter="" repetitions="3" threads="4":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    backend_arg="{{backend}}"
+    adapter_arg="{{adapter}}"
+    repetitions_arg="{{repetitions}}"
+    threads_arg="{{threads}}"
+    selected_backend="${backend_arg#backend=}"
+    selected_adapter="${adapter_arg#adapter=}"
+    selected_repetitions="${repetitions_arg#repetitions=}"
+    selected_threads="${threads_arg#threads=}"
+    case "$selected_backend" in
+        per-chunk|per-chunk+raster)
+            near="per-chunk"
+            far="raster"
+            ;;
+        direct|direct+raster)
+            near="direct"
+            far="raster"
+            ;;
+        gpu|gpu+raster)
+            near="gpu"
+            far="raster"
+            ;;
+        gpu+brick)
+            near="gpu"
+            far="brick"
+            ;;
+        *)
+            echo "invalid backend '$selected_backend' (expected per-chunk+raster, direct+raster, gpu+raster, or gpu+brick)" >&2
+            exit 2
+            ;;
+    esac
+    if ! [[ "$selected_repetitions" =~ ^[1-9][0-9]*$ ]]; then
+        echo "repetitions must be a positive integer, got '$selected_repetitions'" >&2
+        exit 2
+    fi
+    if ! [[ "$selected_threads" =~ ^[0-9]+$ ]] || [ "$selected_threads" -lt 4 ]; then
+        echo "threads must be an integer >= 4, got '$selected_threads'" >&2
+        exit 2
+    fi
+    mkdir -p target/render-bench
+    {{cap}} {{cargo}} build --release --bin client --bin server
+    RUST_BACKTRACE=1 TOKIO_WORKER_THREADS="$selected_threads" \
+        ./target/release/server > target/render-bench/server.log 2>&1 &
+    server_pid=$!
+    trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+    sleep 1
+    for repetition in $(seq 1 "$selected_repetitions"); do
+        adapter_slug="$selected_adapter"
+        if [ -z "$adapter_slug" ]; then adapter_slug="default"; fi
+        adapter_slug=${adapter_slug//[^[:alnum:]._-]/_}
+        world_slug="{{world}}"
+        if [ -n "$world_slug" ]; then world_slug="-${world_slug}"; fi
+        output="target/render-bench/${selected_backend}-${adapter_slug}${world_slug}-run-${repetition}.json"
+        echo ">> render benchmark ${selected_backend} repetition ${repetition}/${selected_repetitions} -> ${output}"
+        if [ -n "$selected_adapter" ]; then export WGPU_ADAPTER_NAME="$selected_adapter"; else unset WGPU_ADAPTER_NAME || true; fi
+        RENDER_BENCH=1 \
+        RENDER_BENCH_REPETITION="$repetition" \
+        RENDER_BENCH_OUTPUT="$output" \
+        VOXEL_NEAR_RENDER="$near" \
+        VOXEL_FAR_RENDER="$far" \
+        VOXEL_CLIENT_WORKER_THREADS="$selected_threads" \
+        TOKIO_WORKER_THREADS="$selected_threads" \
+        RUST_BACKTRACE=1 \
+            ./target/release/client
+    done
+
 # ---- WASM / browser -------------------------------------------------------
 
 # The server the browser build's main menu prefills in Join server (the deployed
@@ -752,14 +834,6 @@ web:
     WASM_SERVER_RUNNER_CUSTOM_INDEX_HTML=crates/client/index.html \
         {{cargo}} run -p client --target wasm32-unknown-unknown
 
-# Type-check the client for the browser (wasm32-unknown-unknown) without
-# building, bundling or serving it: the cheap answer to "does this still compile
-# for the web" after touching the renderer, compute jobs or anything cfg'd on
-# wasm (no wasm-bindgen, no binaryen, no server; a few minutes cold, seconds
-# warm). At the default (test) region size, like `smoke`.
-web-check:
-    {{cap}} {{cargo}} check -p client --lib --bins --target wasm32-unknown-unknown
-
 # The browser release bundle in target/web/ (scripts/web_release.sh): the
 # `wasm-release` profile, wasm-bindgen (the Cargo.lock-matched CLI, installed under
 # target/tools on first use), wasm-opt -O3 from a pinned binaryen release (also
@@ -794,10 +868,6 @@ deploy-push:
 # Follow the deployed server's log.
 deploy-logs:
     ssh {{deploy_host}} docker compose -f /srv/mmo/compose.yml logs -f --tail 200 server
-
-# Forward the deploy box's k3s API to localhost:6443 (kubeconfig context `orion`).
-tunnel:
-    scripts/tunnel.sh {{deploy_host}}
 
 # ---- Dev Postgres (deploy/dev) ---------------------------------------------
 
@@ -1430,7 +1500,7 @@ go-nogo-r3 delay="1" seconds="60": (_dev-token go_nogo_dir / "stack")
     exit "$verdict_rc"
 
 # Run exactly the tests a change touches, by crate + cargo-test arguments:
-#   just test-one game "--test it stud_lod::"
+#   just test-one game "--test it lod_streaming::pristine"
 #   just test-one client "--lib world_scale::"
 # Naming `--lib` / `--test <target>` matters: it skips building (and linking)
 # every other test binary in the crate. Most integration tests live in ONE
@@ -1468,7 +1538,8 @@ test-r3:
 #     tests: the manager's handoff (`handoff_manager`), the halo, intents,
 #     mining / placing / chests / piles across a seam, slimes, people and
 #     bodies crossing, body arrivals, and entities crossing between hosts over
-#     the peer session (`peer_session`, `peer_schedule`) (`seam_tests` below);
+#     the peer session (`peer_session`, `peer_schedule`) (`seam_tests` below;
+#     `voxel_body` is its own target);
 #   - server `threaded_world`: the same walk on real OS threads. Serial on
 #     purpose: each test already spawns 9+ region threads.
 # ~80 s–2 min warm (game ~45 s, the real-thread layer ~35 s, measured 2026-11-07). Run after
@@ -1479,6 +1550,7 @@ test-r3:
 seam_tests := "handoff_schedule:: handoff_manager:: peer_session:: peer_schedule:: halo:: across_seam across_the_seam crosses_seam intents::intent_to_unloaded_owner mining::cooldown_does_not_cross item_piles::pickup_from_neighbour_pile item_piles::deposit_outside_region handoff_state::dynamic_arrival handoff_state::replayed_dynamic_arrival handoff_state::sleeping_body_arrives_asleep"
 test-threads:
     {{cap}} {{cargo}} test -p game --test it -- --include-ignored {{seam_tests}}
+    {{cap}} {{cargo}} test -p game --test voxel_body -- --include-ignored body_leaving_region drops_travel_with_a_crossing_body replayed_voxel_body_arrival
     {{cap}} {{cargo}} test -p server --test threaded_world -- --include-ignored --test-threads=1
 
 # Cross-target determinism: the same physics scene must end in the same state
@@ -1723,7 +1795,7 @@ test-client:
 test-server:
     {{cap}} {{cargo}} test -p server --features test-hooks
 
-# Worldgen suite: pure-function generation, the forge, forged worlds, the tile map.
+# Worldgen suite: pure-function generation + the dev disk cache.
 test-worldgen:
     {{cap}} {{cargo}} test -p worldgen
 

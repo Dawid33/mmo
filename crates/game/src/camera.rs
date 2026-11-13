@@ -223,7 +223,6 @@ impl Controller for CameraController {
         let data = data.as_refs_mut();
         // Walk waypoints are world tiles, read in this region's frame.
         let region = **data.region;
-        let scale = **data.body_scale;
         for (client_id, e_id) in data.player_entites.iter() {
             let e_id = *e_id;
             let ecs = data.ecs.as_refs_mut();
@@ -265,8 +264,7 @@ impl Controller for CameraController {
             // the walk (`tick_walkers_safe`).
             let walk = match ecs.walker.try_get(e_id) {
                 Some(w) if client.mode == crate::PlayMode::Adventure && !active => {
-                    let feet = b.translation() - Vector::Y * (scale.capsule_half_height() + scale.capsule_radius());
-                    Some(crate::steer(w, feet, motion0.grounded, region))
+                    Some(crate::steer(w, crate::feet_of(b.translation()), motion0.grounded, region))
                 }
                 _ => None,
             };
@@ -291,8 +289,7 @@ impl Controller for CameraController {
             // Collision-corrected movement: slide along / stop at terrain
             // instead of teleporting through it. Queries are read-only; the
             // body write below is the footprint-sized mutate_body_safe entry.
-            // Fitted to the region's body size (stud world: 2.4 m).
-            let corrected = movement::walk_body_scaled(
+            let corrected = movement::walk_body_with(
                 &mut motion,
                 &keys,
                 yaw,
@@ -302,11 +299,10 @@ impl Controller for CameraController {
                 &data.physics.bodies,
                 &data.physics.colliders,
                 handle,
-                &scale.move_params(movement::MoveParams {
+                &movement::MoveParams {
                     allow_flight: client.mode != crate::PlayMode::Adventure,
                     ..movement::MoveParams::PLAYER
-                }),
-                scale,
+                },
             );
             if motion != motion0 {
                 // set_safe, not an undo_scope on the value: a body that

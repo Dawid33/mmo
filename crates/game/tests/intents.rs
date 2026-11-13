@@ -8,19 +8,19 @@
 use std::cell::RefCell;
 
 use game::{
-    BlockPos, ClientId, EntityId, GameEventKind, InlineSchedule, Intent, IntentRefusal, IntentReply, Key,
+    BlockId, BlockPos, ClientId, EntityId, GameEventKind, InlineSchedule, Intent, IntentRefusal, IntentReply, Key,
     Order, PlayMode, Region, RegionCoords, WorldBlockPos, WorldView, SPAWN_REGION,
 };
 
 use crate::common::rig::{Rig, CLIENT};
 use crate::common::seam_translate::{assert_seam_invariant, offset, spawn_tile, uniform_floor, Scenario};
 
-/// A region over flat stud ground (its top tile level `STAND - 1`) with `clients` players,
+/// A region over a one-block floor (block y 0) with `clients` players,
 /// wired to a renderer channel so its events can be rolled back.
 fn floor_region(clients: &[ClientId]) -> Region {
     crate::common::install_real_block_props();
     let rc = SPAWN_REGION;
-    let built = crate::common::region_of(rc, uniform_floor(rc));
+    let built = Region::from_columns(rc, uniform_floor(rc));
     let (send, recv) = crossbeam::channel::unbounded();
     // The renderer side stays open for the test's life.
     std::mem::forget(recv);
@@ -43,16 +43,13 @@ fn step(region: &mut Region, kind: GameEventKind) {
     region.commit_server_event();
 }
 
-/// The level of the ground's top tile.
-const FLOOR: i32 = crate::common::STAND - 1;
-
 fn solid(region: &Region, p: WorldBlockPos) -> bool {
-    crate::common::world_tile_filled(region.data(), p)
+    region.data().halo_block(p).is_some_and(|b| b.id != BlockId::AIR)
 }
 
-/// A floor tile of the spawn region, away from its edges.
+/// A floor block of the spawn region, away from its edges.
 fn floor_block() -> WorldBlockPos {
-    WorldBlockPos::from_local(SPAWN_REGION, BlockPos::new(10, FLOOR, 10))
+    WorldBlockPos::from_local(SPAWN_REGION, BlockPos::new(10, 0, 10))
 }
 
 #[test]
@@ -104,15 +101,13 @@ fn conflicting_takes_resolve_by_entity_id() {
     );
 }
 
-/// The read side: own ∪ halo studs, entities sorted by id, a stud ray.
+/// The read side: own ∪ halo blocks, entities sorted by id, a block ray.
 #[test]
-fn world_view_reads_studs_entities_and_rays() {
+fn world_view_reads_blocks_entities_and_rays() {
     let region = floor_region(&[0, 1]);
     let view = region.data().view();
     assert_eq!(view.tick(), region.current_tick());
-    let p = floor_block();
-    let top_cell = [p.x * game::TILE_STUDS as i64, (crate::common::FLOOR_PLATES - 1) as i64, p.z * game::TILE_STUDS as i64];
-    assert_eq!(view.stud_material_at(top_cell), Some(game::MAT_GRASS), "the ground's top plate");
+    assert!(view.block(floor_block()).is_some_and(|b| b.id != BlockId::AIR));
     let all = view.entities_in(game::WorldAabb::everything());
     let ids: Vec<EntityId> = all.iter().map(|e| e.id()).collect();
     let mut sorted = ids.clone();
@@ -121,18 +116,16 @@ fn world_view_reads_studs_entities_and_rays() {
     assert!(ids.contains(&body_id(&region, 0)) && ids.contains(&body_id(&region, 1)));
     let me = view.entity(body_id(&region, 0)).expect("own entity");
     assert!(!me.is_mirror());
-    // Straight down from 3 m above the floor tile's top, off the stud grid's lines.
-    let bv = crate::common::TILE_W;
-    let top = crate::common::floor_y(crate::common::FLOOR_PLATES);
+    // Straight down from 3 blocks above the floor block's top.
+    let p = floor_block();
+    let bv = game::BLOCK_VOXELS as f64;
     let ray = game::WorldRay {
-        origin: [((p.x as f32 + 0.25) * bv) as f64, (top + 3.0 * bv) as f64, ((p.z as f32 + 0.25) * bv) as f64],
+        origin: [(p.x as f64 + 0.5) * bv, 4.0 * bv, (p.z as f64 + 0.5) * bv],
         dir: [0.0, -1.0, 0.0],
     };
-    let hit = view.stud_raycast(ray, 6.0 * bv).expect("the floor");
-    assert_eq!(hit.chunk, game::WorldChunkPos::from_local(SPAWN_REGION, [0, 0, 0]));
-    assert_eq!(hit.cell, [top_cell[0] as u8, top_cell[1] as u8, top_cell[2] as u8]);
+    let hit = view.raycast(ray, 6.0).expect("the floor");
+    assert_eq!(hit.block, p);
     assert_eq!(hit.normal, [0, 1, 0]);
-    assert!((hit.t - 3.0 * bv).abs() < 0.01, "3 m down: {}", hit.t);
 }
 
 /// The client's body's id in the region owning it.
@@ -156,7 +149,7 @@ fn intent_to_unloaded_owner_is_refused() {
     rig.join_spawn();
     let far = RegionCoords::new(SPAWN_REGION.x + 5, SPAWN_REGION.z + 5);
     assert!(!rig.manager.running_regions().contains(&far));
-    let target = WorldBlockPos::from_local(far, BlockPos::new(3, FLOOR, 3));
+    let target = WorldBlockPos::from_local(far, BlockPos::new(3, 0, 3));
     let (home, by) = player_id(&mut rig);
     rig.order(Order::DevBreakBlock(target));
     let mut replies = Vec::new();
@@ -225,7 +218,7 @@ impl Scenario for BreakAcross {
         let entry = seen.last_mut().expect("this run's entry");
         if entry.0.is_none() {
             rig.manager.spawner_mut().with_region(owner, |r| {
-                if crate::common::tile_open(r.data(), [local.x, local.y, local.z]) {
+                if r.data().block_at([local.x, local.y, local.z]).is_none_or(|b| b.id == BlockId::AIR) {
                     entry.0 = Some(r.current_tick() - sent_at);
                 }
             });
@@ -333,7 +326,7 @@ fn cut_holds_intent_to_lagging_target_once() {
     let mut rig = Rig::with_floor(None, uniform_floor);
     rig.join_spawn();
     let west = RegionCoords::new(SPAWN_REGION.x - 1, SPAWN_REGION.z);
-    let local = BlockPos::new(10, FLOOR, 10);
+    let local = BlockPos::new(10, 0, 10);
     let target = WorldBlockPos::from_local(west, local);
     // Every region knows the cut (its tick a few ticks ahead); then west's
     // inputs lag: it reaches the cut tick and answers before the intent,
@@ -375,7 +368,7 @@ fn cut_holds_intent_to_lagging_target_once() {
     }
     let mut broken = false;
     again.manager.spawner_mut().with_region(west, |r| {
-        broken = crate::common::tile_open(r.data(), [local.x, local.y, local.z]);
+        broken = r.data().block_at([local.x, local.y, local.z]).is_none_or(|b| b.id == BlockId::AIR);
         assert!(r.data().queued_intents().is_empty());
     });
     assert!(broken, "applied after the restore");

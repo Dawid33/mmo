@@ -1,10 +1,28 @@
-//! The character controller on REAL generated terrain — plate steps, brick
-//! ledges, trees — which the flat-floor tests in `game` never see: a spawned
-//! player must land, walk and jump across it without tunneling, and every one
-//! of those ticks must roll back bit-exact.
+//! The character controller on REAL generated terrain — half-block steps,
+//! whole-block ledges and slab/block seams, which the flat-floor tests in
+//! `game` never see: a
+//! spawned player must land, walk and jump across it without tunneling, and
+//! every one of those ticks must roll back bit-exact.
 use game::StateHash;
 
-use game::{GameEventKind, InputEvent, Key, Region, RegionCoords, Rollback};
+use game::{GameEventKind, InputEvent, Key, Region, RegionCoords};
+
+fn mats() -> worldgen::material::Materials {
+    worldgen::material::Materials {
+        stone: game::BlockId(2),
+        dirt: game::BlockId(1),
+        grass: game::BlockId(3),
+        sand: game::BlockId(4),
+        water: game::BlockId(5),
+        bedrock: game::BlockId(6),
+        rocks: [7, 8, 9, 10, 11, 12].map(game::BlockId),
+        trees: worldgen::material::TreeBlocks::NONE,
+        biome: worldgen::material::BiomeBlocks::NONE,
+    }
+}
+
+/// Capsule half-extent (half-height 4.4 + radius 6.4): body origin → feet.
+const FEET: f32 = 10.8;
 
 fn crc(region: &Region) -> u32 {
     let mut h = crc32fast::Hasher::new();
@@ -24,8 +42,8 @@ fn pose(region: &Region) -> ([f32; 3], game::Motion) {
 #[ignore = "slow: >100ms — run via just test-full"]
 fn player_lands_walks_and_jumps_on_generated_terrain() {
     let rc = RegionCoords::new(0, 0);
-    let mut server = Region::new(Rollback::new(None), None, rc, None);
-    server.seed_stud_world(worldgen::stud_gen::generate_stud_region(rc, worldgen::WORLD_SEED));
+    let columns = worldgen::generate_region(rc, worldgen::WORLD_SEED, mats());
+    let mut server = Region::from_columns(rc, columns);
     server.handle_event(GameEventKind::CreateClient(0)).unwrap();
     // A client-style region (live render sender) so events can roll back.
     let (send, _recv) = crossbeam::channel::unbounded();
@@ -45,9 +63,6 @@ fn player_lands_walks_and_jumps_on_generated_terrain() {
         events.push(key(dir, false));
     }
 
-    // Body origin -> feet.
-    let scale = game::movement::BodyScale::STUD;
-    let feet = scale.capsule_half_height() + scale.capsule_radius();
     let mut hashes = vec![crc(&region)];
     let (mut travelled, mut grounded_ticks) = (0.0f32, 0);
     let mut last = pose(&region).0;
@@ -59,10 +74,10 @@ fn player_lands_walks_and_jumps_on_generated_terrain() {
         if i + 1 == landed_at {
             assert!(motion.grounded, "player must land on the terrain: {p:?} {motion:?}");
         }
-        // Never inside the ground: the feet stay above the ground of the
-        // column they are over (a crown overhead is a higher "surface").
-        if let Some(top) = region.data().stud_surface_y(p[0], p[2]).filter(|top| *top < p[1]) {
-            assert!(p[1] - feet > top - 0.5, "event {i}: feet at {} under surface {top}", p[1] - feet);
+        // Never inside the ground: the feet stay above the column they are over.
+        if let Some(surface) = region.data().surface_voxel_y(p[0].floor() as i32, p[2].floor() as i32) {
+            let top = (surface + 1) as f32;
+            assert!(p[1] - FEET > top - 0.5, "event {i}: feet at {} under surface {top}", p[1] - FEET);
         }
         travelled += ((p[0] - last[0]).powi(2) + (p[2] - last[2]).powi(2)).sqrt();
         grounded_ticks += motion.grounded as usize;

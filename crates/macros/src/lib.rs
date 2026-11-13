@@ -1068,7 +1068,7 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                 /// Raw insert: no undo entry, no renderer emit. Only correct
                 /// for genesis writes — values that are part of the base state
                 /// a region is never rolled back below (see
-                /// `seed_stud_genesis`). Anywhere else this desyncs the
+                /// `seed_terrain_genesis`). Anywhere else this desyncs the
                 /// undo log from the data.
                 pub fn insert_raw(&mut self, v: V) -> K {
                     self.data.insert(v)
@@ -1298,12 +1298,6 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                 pub fn update(&mut self, f: impl FnOnce(&mut T)) {
                     self.log_old();
                     f(&mut self.data);
-                }
-                /// Unlogged write, for raw paths only (genesis: base state a
-                /// region is never rolled back below) — never rolled back,
-                /// like the maps' `insert_raw`.
-                pub fn set_raw(&mut self, v: T) {
-                    self.data = v;
                 }
                 pub unsafe fn hash_data(&self) -> u32 {
                     let mut hasher = crate::StateHasher::new();

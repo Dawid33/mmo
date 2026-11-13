@@ -7,39 +7,14 @@ use serde::{Serialize, de::DeserializeOwned};
 
 use crate::StoreError;
 
-/// `regions.meta`: a `game::RegionMeta`. Format 2 dropped the voxel world's water
-/// bodies, format 3 stores designations by box of stud cells instead of by tile;
-/// format 1 and 2 rows are still read ([`decode_region_meta`]).
-pub const FORMAT_REGION_META: u8 = 3;
-/// The region meta layout with designations by tile (`game::RegionMetaV2`).
-pub const FORMAT_REGION_META_V2: u8 = 2;
-/// The region meta layout with (empty) voxel water bodies (`game::RegionMetaV1`).
-pub const FORMAT_REGION_META_V1: u8 = 1;
-/// `entities.bundle` and in-flight transfers: a `game::EntityBundle`. Format 2 added
-/// `Carried::stud_body`, format 3 dropped the voxel body slot; formats 1 and 2 are
-/// still read ([`decode_entity_bundle`]).
-pub const FORMAT_ENTITY_BUNDLE: u8 = 4;
-/// The entity bundle layout before a `Client` held registered prefabs (`game::EntityBundleV3`).
-pub const FORMAT_ENTITY_BUNDLE_V3: u8 = 3;
-/// The entity bundle layout with the (empty) voxel body slot (`game::EntityBundleV2`).
-pub const FORMAT_ENTITY_BUNDLE_V2: u8 = 2;
-/// The entity bundle layout before stud bodies (`game::EntityBundleV1`).
-pub const FORMAT_ENTITY_BUNDLE_V1: u8 = 1;
-/// `players.record`: a `game::PlayerRecord`. Format 2 added the `Client`'s registered
-/// prefabs (always empty in a record); format 1 rows are still read
-/// ([`decode_player_record`]).
-pub const FORMAT_PLAYER_RECORD: u8 = 2;
-/// The player record layout before registered prefabs (`game::PlayerRecordV1`).
-pub const FORMAT_PLAYER_RECORD_V1: u8 = 1;
+pub const FORMAT_REGION_META: u8 = 1;
+pub const FORMAT_CHUNK: u8 = 1;
+pub const FORMAT_COLUMN_GROUND: u8 = 1;
+pub const FORMAT_ENTITY_BUNDLE: u8 = 1;
+pub const FORMAT_PLAYER_RECORD: u8 = 1;
 pub const FORMAT_INTENT_MSG: u8 = 1;
-/// `stud_chunks.data`: a `game::StudChunkRecord`.
-pub const FORMAT_STUD_CHUNK: u8 = 1;
-/// `regions.stud_ground`: a region's `Vec<(ColumnCoords, StudColumnGround)>`. Format 2
-/// added the recipes' apron (the surfaces just outside each chunk column's side
-/// faces); format 1 rows are still read ([`decode_stud_ground`]).
-pub const FORMAT_STUD_GROUND: u8 = 2;
-/// The recipe layout before the apron (`game::StudColumnGroundV1`).
-pub const FORMAT_STUD_GROUND_V1: u8 = 1;
+/// `regions.ground`: a region's `Vec<(ColumnCoords, ColumnGround)>`.
+pub const FORMAT_REGION_GROUND: u8 = 1;
 
 /// `forged_world_map.bytes`: the forged world's `game::WorldMap`, framed by
 /// [`encode_world_map`] (not [`encode`]): format 1 was the plain
@@ -72,73 +47,6 @@ pub fn decode<T: DeserializeOwned>(expected: u8, bytes: &[u8]) -> Result<T, Stor
     let mut raw = Vec::new();
     zstd::stream::copy_decode(body, &mut raw).map_err(|e| StoreError::Corrupt(format!("{name}: zstd: {e}")))?;
     bincode::deserialize(&raw).map_err(|e| StoreError::Corrupt(format!("{name}: bincode: {e}")))
-}
-
-/// A stored entity bundle of any format: the current one, or format 2 (the voxel
-/// body slot, `game::EntityBundleV2`) or 1 (no stud body, `game::EntityBundleV1`)
-/// converted. Rows are rewritten in the current format by the next save that writes
-/// them. An old row that holds a voxel body does not decode (`Corrupt`): voxel
-/// worlds are refused at open.
-pub fn decode_entity_bundle(bytes: &[u8]) -> Result<game::EntityBundle, StoreError> {
-    let _cpu = crate::counters::CpuSpan::start();
-    match bytes.first() {
-        Some(&FORMAT_ENTITY_BUNDLE_V1) => {
-            decode::<game::EntityBundleV1>(FORMAT_ENTITY_BUNDLE_V1, bytes).map(game::EntityBundle::from)
-        }
-        Some(&FORMAT_ENTITY_BUNDLE_V2) => {
-            decode::<game::EntityBundleV2>(FORMAT_ENTITY_BUNDLE_V2, bytes).map(game::EntityBundle::from)
-        }
-        Some(&FORMAT_ENTITY_BUNDLE_V3) => {
-            decode::<game::EntityBundleV3>(FORMAT_ENTITY_BUNDLE_V3, bytes).map(game::EntityBundle::from)
-        }
-        _ => decode(FORMAT_ENTITY_BUNDLE, bytes),
-    }
-}
-
-/// A stored player record of any format: the current one, or format 1
-/// (`game::PlayerRecordV1`, a `Client` without registered prefabs) converted.
-pub fn decode_player_record(bytes: &[u8]) -> Result<game::PlayerRecord, StoreError> {
-    let _cpu = crate::counters::CpuSpan::start();
-    match bytes.first() {
-        Some(&FORMAT_PLAYER_RECORD_V1) => {
-            decode::<game::PlayerRecordV1>(FORMAT_PLAYER_RECORD_V1, bytes).map(game::PlayerRecord::from)
-        }
-        _ => decode(FORMAT_PLAYER_RECORD, bytes),
-    }
-}
-
-/// A region's stored recipes of any format: the current one, or format 1
-/// (`game::StudColumnGroundV1`, no apron) converted — each recipe's apron is taken from
-/// the neighbouring chunk columns of the same row (`game::link_stud_aprons`) and stays
-/// closed along the region's edge (no cliff bricks, no wall layers derived there). The
-/// row is written once per region, so a format 1 row is read this way every time.
-pub fn decode_stud_ground(bytes: &[u8]) -> Result<Vec<(game::ColumnCoords, game::StudColumnGround)>, StoreError> {
-    let _cpu = crate::counters::CpuSpan::start();
-    match bytes.first() {
-        Some(&FORMAT_STUD_GROUND_V1) => {
-            let old: Vec<(game::ColumnCoords, game::StudColumnGroundV1)> = decode(FORMAT_STUD_GROUND_V1, bytes)?;
-            let mut ground: Vec<_> = old.into_iter().map(|(c, g)| (c, game::StudColumnGround::from(g))).collect();
-            game::link_stud_aprons(&mut ground);
-            Ok(ground)
-        }
-        _ => decode(FORMAT_STUD_GROUND, bytes),
-    }
-}
-
-/// A stored region meta of any format: the current one, format 2
-/// (`game::RegionMetaV2`: each tile designation becomes its cell box) or format 1
-/// (`game::RegionMetaV1`, whose voxel water bodies must be empty) converted.
-pub fn decode_region_meta(bytes: &[u8]) -> Result<game::RegionMeta, StoreError> {
-    let _cpu = crate::counters::CpuSpan::start();
-    match bytes.first() {
-        Some(&FORMAT_REGION_META_V1) => {
-            decode::<game::RegionMetaV1>(FORMAT_REGION_META_V1, bytes).map(game::RegionMeta::from)
-        }
-        Some(&FORMAT_REGION_META_V2) => {
-            decode::<game::RegionMetaV2>(FORMAT_REGION_META_V2, bytes).map(game::RegionMeta::from)
-        }
-        _ => decode(FORMAT_REGION_META, bytes),
-    }
 }
 
 /// Bytes of the world-map row before its zstd body: the format byte, the

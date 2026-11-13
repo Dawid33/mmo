@@ -1,7 +1,7 @@
-//! Item ids and the manifest's drop data.
+//! Item ids and the manifest's block hardness / drop data.
 use game::{
-    drop_of, install_block_props, item_name, BlockId, BlockRegistry, ItemId, ItemStack,
-    ITEM_BLOCK_LIMIT, STICK,
+    drop_of, install_block_props, item_name, Block, BlockId, BlockRegistry, ItemId, ItemStack,
+    DEFAULT_HARDNESS_CENTI, ITEM_BLOCK_LIMIT, STICK,
 };
 
 const MANIFEST: &str = include_str!("../../../assets/blocks/blocks.ron");
@@ -18,12 +18,28 @@ fn drops_follow_manifest() {
     let id = |n: &str| reg.id_of(n).unwrap();
     let one = |item: ItemId| Some(ItemStack { item, count: 1 });
     let dirt = ItemId::block(id("dirt"));
-    assert_eq!(drop_of(id("dirt")), one(dirt));
-    assert_eq!(drop_of(id("grass")), one(dirt));
-    assert_eq!(drop_of(id("oak_leaves")), None);
-    assert_eq!(drop_of(id("oak_branch")), one(STICK));
-    assert_eq!(drop_of(id("oak_log")), one(ItemId::block(id("oak_log"))));
-    assert_eq!(drop_of(BlockId::AIR), None);
+    assert_eq!(drop_of(Block::new(id("dirt"))), one(dirt));
+    assert_eq!(drop_of(Block::new(id("grass"))), one(dirt));
+    assert_eq!(drop_of(Block::new(id("oak_leaves"))), None);
+    assert_eq!(drop_of(Block::new(id("oak_branch"))), one(STICK));
+    let log = Block::with_tree_id(id("oak_log"), 77);
+    assert_eq!(drop_of(log), one(ItemId::block(id("oak_log"))));
+    assert_eq!(drop_of(Block::new(BlockId::AIR)), None);
+}
+
+#[test]
+fn hardness_defaults() {
+    let reg = registry();
+    let p = game::block_props();
+    let h = |n: &str| p.hardness_centi(reg.id_of(n).unwrap());
+    assert_eq!(h("stone"), 150);
+    assert_eq!(h("dirt"), 50);
+    assert_eq!(h("granite"), 200);
+    assert_eq!(h("spruce_log"), 200);
+    assert_eq!(h("jungle_leaves"), 20);
+    assert_eq!(h("glacier_ice"), 50);
+    assert_eq!(h("gravel"), DEFAULT_HARDNESS_CENTI);
+    assert_eq!(DEFAULT_HARDNESS_CENTI, 100);
 }
 
 #[test]

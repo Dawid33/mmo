@@ -1,0 +1,16 @@
+[package]
+name = "block-mesh"
+description = "Fast algorithms for generating voxel block meshes from arrays."
+version = "0.2.0"
+repository = "https://github.com/bonsairobo/block-mesh-rs"
+keywords = ["graphics", "mesh", "voxel"]
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+# mmo-fork: glam 0.33 (the version rapier/glamx already resolve, same
+# features) instead of ilattice, which pinned glam 0.19.
+glam = { version = "0.33", default-features = false, features = ["std", "u32", "i32"] }
+ndshape = "0.3"
+ndcopy = "0.3"
+serde = { workspace = true, features = ["std"] }

@@ -13,8 +13,8 @@ use std::time::Duration;
 
 use crossbeam::channel::{unbounded, Receiver};
 use game::{
-    ClientId, InlineSpawner, RegionCoords, RegionOutput, RegionSpawner, ServerEvent, ServerPacket, WorldManager,
-    SPAWN_REGION,
+    BlockId, ClientId, InlineLodBuilder, InlineSpawner, LodBuilder, RegionCoords, RegionOutput, RegionSpawner,
+    ServerEvent, ServerPacket, WorldManager, SPAWN_REGION,
 };
 use server::claims::HostClaims;
 use server::player_store::{PlayerStore, StorePlayers};
@@ -55,12 +55,18 @@ struct Core {
 }
 
 impl Core {
-    /// On flat stud ground ([`stud_flat_seed`]: the process-global forged world is
-    /// `server_world_is_tiled`'s, so nothing here samples one), the store tied to stud
-    /// terrain as `server::run` ties it.
-    fn open(store: &world_store::StoreHandle) -> Core {
-        install_props();
-        world_file::bind_world_terrain(store).expect("a stud world");
+    /// Regions generate from `world` (explicitly: the process-global world is
+    /// `server_world_is_tiled`'s).
+    fn open(store: &world_store::StoreHandle, world: Arc<ForgedWorld>) -> Core {
+        let materials = materials();
+        Core::open_with(store, Box::new(move |rc| worldgen::generate_region_forged(&world, rc, materials)))
+    }
+
+    /// [`Core::open`] on `generate`.
+    fn open_with(
+        store: &world_store::StoreHandle,
+        generate: Box<dyn FnMut(RegionCoords) -> Vec<(game::ColumnCoords, game::Column)> + Send>,
+    ) -> Core {
         let claims = HostClaims::claim_around(store.clone(), SPAWN_REGION, 3).unwrap();
         let mut regions = std::collections::BTreeMap::new();
         for rc in store.stored_regions().unwrap().into_keys() {
@@ -68,11 +74,19 @@ impl Core {
         }
         let (out_send, packets) = unbounded();
         let (region_out_send, region_out) = unbounded();
+        let (lod_result_send, lod_result_recv) = unbounded();
+        let lod_builder: Box<dyn LodBuilder> = Box::new(InlineLodBuilder {
+            coarse: Box::new(|_key: &game::lod::LodKey| Vec::new()),
+            water: Box::new(game::lod::LodWater::dry),
+            out: lod_result_send,
+        });
         let mut manager = WorldManager::new(
-            InlineSpawner::with_portable(regions).with_stud_genesis(Arc::new(stud_flat_seed)),
+            InlineSpawner::with_portable(regions),
+            generate,
             out_send,
             region_out_send,
-            Box::new(game::NullLodBuilder::default()),
+            lod_builder,
+            lod_result_recv,
         );
         manager.set_stored_regions(store.stored_regions().unwrap());
         manager.restore_in_flight(store.load_in_flight(claims.fence().in_flight_scope()).unwrap());
@@ -110,29 +124,13 @@ impl Core {
     }
 }
 
-fn install_props() {
+fn materials() -> worldgen::material::Materials {
     let registry = game::BlockRegistry::from_ron(include_str!("../../../assets/blocks/blocks.ron")).unwrap();
     game::install_block_props(registry.props());
+    worldgen::material::Materials::from_names(|name| registry.id_of(name).expect("block in the manifest"))
 }
 
-/// Surface plate of the fixture's flat stud ground (layer 0).
-const STUD_TOP: i32 = 30;
-
-/// Flat stud ground under every chunk column of every region: ground without worldgen.
-fn stud_flat_seed(_rc: RegionCoords) -> game::StudRegionSeed {
-    let soil = game::StudProfile { cover: game::MAT_GRASS, cover_plates: 1, soil: game::MAT_DIRT, soil_plates: 5 };
-    let n = game::REGION_CHUNKS;
-    let ground = (0..n)
-        .flat_map(|x| {
-            (0..n).map(move |z| {
-                (game::ColumnCoords::new(x, z), game::StudColumnGround::flat(STUD_TOP, soil, game::MAT_STONE, -2000))
-            })
-        })
-        .collect();
-    game::StudRegionSeed { ground, features: Vec::new(), ..Default::default() }
-}
-
-/// The world restarts from its store: a dug hole stays dug, a slime is
+/// The world restarts from its store: a dug block stays dug, a slime is
 /// there once, the player comes back once, and the world tick never goes
 /// back.
 #[test]
@@ -144,32 +142,32 @@ fn restart_restores_world() {
     let source = source_for(&world_path);
     let opened = open_world(&source, &small_params()).expect("the world opens");
     let crc = opened.world.as_ref().unwrap().content_crc();
-    let world = opened.world.expect("a forged world");
+    let world = Arc::new(opened.world.expect("a forged world"));
     let store = opened.store.expect("a forged world has a store");
     let token = server::player_store::PlayerKey::Online(game::PlayerToken::generate([9; game::PLAYER_TOKEN_BYTES]));
     let (player, none) = StorePlayers(store.clone()).resolve(&token).unwrap();
     assert!(none.is_none());
 
-    // Life 1: a player, a dug hole and a slime in the spawn region.
-    let mut core = Core::open(&store);
+    // Life 1: a player, a dug block and a slime in the spawn region.
+    let mut core = Core::open(&store, world.clone());
     core.manager.handle_server_event(ServerEvent::ClientConnected { client: 0, player, record: None }, 0);
     core.settle();
-    // A box of studs out of the top plates, away from the spawn point.
-    let (lo, hi) = ([8, STUD_TOP - 4, 8], [12, STUD_TOP, 12]);
-    let dug = [9, STUD_TOP - 1, 9];
-    let mut slime = None;
+    let centre = game::REGION_BLOCKS as i32 / 2;
+    let (mut dug, mut slime) = (None, None);
     core.manager.spawner_mut().with_region(SPAWN_REGION, |region| {
-        assert!(region.data().stud_material_at(dug).is_some(), "solid ground under the surface");
-        region.with_data(|d| assert!(!d.carve_stud_safe(lo, hi).is_empty(), "dug"));
-        assert_eq!(region.data().stud_material_at(dug), None);
-        let units = game::REGION_SIZE / 4.0;
-        let top = region.data().stud_surface_y(units, units).expect("ground under the slime");
-        let at = game::parry::math::Vector::new(units, top + 3.0 * game::BLOCK_UNITS as f32, units);
+        let v = centre * game::BLOCK_VOXELS as i32 + game::BLOCK_VOXELS as i32 / 2;
+        let top = region.data().surface_voxel_y(v, v).expect("ground at the centre");
+        let pos = [centre, top.div_euclid(game::BLOCK_VOXELS as i32), centre];
+        assert_ne!(region.data().block_at(pos).map(|b| b.id), Some(BlockId::AIR), "a solid surface block");
+        region.with_data(|d| assert!(d.set_block_safe(pos, game::Block::new(BlockId::AIR)), "dug"));
+        dug = Some(pos);
+        let y = (top + 3 * game::BLOCK_VOXELS as i32) as f32;
+        let at = game::parry::math::Vector::new(v as f32 + 64.0, y, v as f32 + 64.0);
         let mut key = None;
         region.with_data(|d| key = Some(d.spawn_slime_safe(at, 1, 0.0f32.into(), 0)));
         slime = *region.data().ecs.id.try_get(key.unwrap());
     });
-    let slime = slime.expect("the slime has an EntityId");
+    let (dug, slime) = (dug.unwrap(), slime.expect("the slime has an EntityId"));
     core.tick(5);
     let exit_tick = core.exit();
     drop(world);
@@ -179,13 +177,13 @@ fn restart_restores_world() {
     let opened = open_world(&source, &small_params()).expect("the world opens again");
     assert_eq!(opened.world.as_ref().unwrap().content_crc(), crc, "the same world, from the store");
     assert!(opened.world_tick >= exit_tick, "the world tick never goes back: {} < {exit_tick}", opened.world_tick);
-    let world = opened.world.unwrap();
+    let world = Arc::new(opened.world.unwrap());
     let store = opened.store.unwrap();
     let (again, record) = StorePlayers(store.clone()).resolve(&token).unwrap();
     assert_eq!(again, player);
     let record = record.expect("the player's record was saved by the exit's cut");
     assert_eq!(record.region, SPAWN_REGION);
-    let mut core = Core::open(&store);
+    let mut core = Core::open(&store, world.clone());
     assert!(core.manager.stored_regions().contains_key(&SPAWN_REGION));
     core.manager.handle_server_event(ServerEvent::ClientConnected { client: 0, player, record: Some(record) }, 0);
     // One tick: the region reports what it holds to the manager's directory.
@@ -193,12 +191,10 @@ fn restart_restores_world() {
     let mut seen = None;
     core.manager.spawner_mut().with_region(SPAWN_REGION, |region| {
         let d = region.data();
-        let below = [dug[0], lo[1] - 1, dug[2]];
-        seen = Some((d.stud_material_at(dug), d.stud_material_at(below), d.id_index.contains_key(&slime), d.player_entites.len()));
+        seen = Some((d.block_at(dug).map(|b| b.id), d.id_index.contains_key(&slime), d.player_entites.len()));
     });
-    let (hole, below, has_slime, bodies) = seen.expect("the spawn region runs");
-    assert_eq!(hole, None, "the dug hole is still dug");
-    assert!(below.is_some(), "over the ground it was dug into");
+    let (block, has_slime, bodies) = seen.expect("the spawn region runs");
+    assert_eq!(block, Some(BlockId::AIR), "the dug block is still dug");
     assert!(has_slime, "the slime was restored");
     assert_eq!(core.manager.location_of(slime), Some(SPAWN_REGION), "and is in one place");
     assert_eq!(core.manager.pending_arrival_total(), 0, "not also waiting in a mailbox");
@@ -308,103 +304,7 @@ fn server_world_is_tiled() {
     // Region generation on the installed world pins its tiles first.
     let pins = worldgen::prefetch_region(SPAWN_REGION).expect("the tiles load");
     assert!(!pins.is_empty(), "a tiled world pins tiles");
-    drop(pins);
-    stored_world_on_stud_terrain(&store);
     let _ = std::fs::remove_dir_all(&dir);
-}
-
-/// The installed forged world as the server serves it, wired as the server wires it:
-/// a fresh region pins its tiles, is seeded from recipes sampled from the forged
-/// world, is edited and saved; started again it comes back from the
-/// store with the edit, and genesis does not run again. Part of `server_world_is_tiled`
-/// (the forged world is installed once per process).
-fn stored_world_on_stud_terrain(store: &world_store::StoreHandle) {
-    use game::{RegionInput, RegionSeed, StudChunkCoords};
-    use server::region_threads::ThreadRegionSpawner;
-    use std::collections::BTreeMap;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    const WAIT: Duration = Duration::from_secs(120);
-    // The server's own binding: a world with no saved region takes stud terrain.
-    assert_eq!(store.terrain_kind().unwrap(), None);
-    server::world_file::bind_world_terrain(store).expect("a world with no saved region takes stud terrain");
-    assert_eq!(store.terrain_kind().unwrap(), Some(world_store::TerrainKind::Studs));
-    let seed = worldgen::WORLD_SEED;
-    let calls = Arc::new(AtomicUsize::new(0));
-    let spawner = || {
-        let counted = calls.clone();
-        ThreadRegionSpawner::default()
-            .with_prefetch(Arc::new(worldgen::prefetch_region))
-            .with_genesis(Arc::new(move |rc| {
-                counted.fetch_add(1, Ordering::SeqCst);
-                worldgen::stud_gen::generate_stud_region(rc, seed)
-            }))
-            .with_store(HostClaims::claim_around(store.clone(), SPAWN_REGION, 0).unwrap())
-    };
-    let snapshot = |send: &crossbeam::channel::Sender<RegionInput>,
-                    recv: &crossbeam::channel::Receiver<(RegionCoords, RegionOutput)>| {
-        send.send(RegionInput::RequestSnapshot(0)).unwrap();
-        loop {
-            match recv.recv_timeout(WAIT).expect("region snapshot") {
-                (_, RegionOutput::Snapshot(_, rollback)) => return rollback,
-                (_, RegionOutput::LoadFailed(why)) => panic!("the region did not load: {why}"),
-                _ => {}
-            }
-        }
-    };
-    let studs = |r: &game::Rollback| -> BTreeMap<StudChunkCoords, game::StudChunk> {
-        r.stud_index.iter().map(|(c, _)| (*c, r.stud_chunk_at(*c).unwrap().clone())).collect()
-    };
-
-    let mut s = spawner();
-    let (out, recv) = unbounded();
-    let send = s.spawn(SPAWN_REGION, RegionSeed::Fresh, out);
-    let recipes = {
-        let _pins = worldgen::prefetch_region(SPAWN_REGION).unwrap();
-        worldgen::stud_gen::generate_stud_region(SPAWN_REGION, seed).ground
-    };
-    assert_eq!(recipes.len(), game::REGION_CHUNKS * game::REGION_CHUNKS);
-    let (col, g) = &recipes[0];
-    let air = StudChunkCoords { x: col.x, y: *g.surface_layers().end() + 2, z: col.z };
-    let part = game::stud_catalog::STUD_PARTS.iter().position(|p| p.number == "3001").unwrap() as u16;
-    let brick = game::StudBrick::part_at([3, 0, 3], part, 0, 4);
-    send.send(RegionInput::Event(game::GameEventKind::Order(0, game::Order::PlaceStud { chunk: air, brick }))).unwrap();
-    let before = snapshot(&send, &recv);
-    assert_eq!(before.body_scale(), game::movement::BodyScale::STUD);
-    assert_eq!(before.stud_chunk_at(air).and_then(|c| c.brick_at([3, 0, 3])), Some(&brick));
-    let top = g.surface(9, 9);
-    let cell = [(col.x * game::STUD_CHUNK_STUDS + 9) as i32, top - 1, (col.z * game::STUD_CHUNK_STUDS + 9) as i32];
-    assert!(before.stud_material_at(cell).is_some(), "forged ground under the recipe's surface");
-    send.send(RegionInput::Shutdown).unwrap();
-    let (tick, portable) = loop {
-        if let (_, RegionOutput::Stopped(_, _, tick, portable)) = recv.recv_timeout(WAIT).expect("region stops") {
-            break (tick, *portable);
-        }
-    };
-    s.reap(SPAWN_REGION);
-    assert_eq!(portable.stud_ground.as_ref(), Some(&recipes), "the stored recipes are the forged world's");
-    assert_eq!(portable.stud_chunks.len(), 1, "only the brick's chunk is stored: {:?}", portable.stud_chunks.keys());
-    let cut = game::WorldCut {
-        id: game::CutId(1),
-        host: 0,
-        tick,
-        regions: vec![(SPAWN_REGION, portable)],
-        in_flight: vec![],
-        players: vec![],
-        history: None,
-    };
-    HostClaims::claim_around(store.clone(), SPAWN_REGION, 0).unwrap().commit_cut(cut).recv().unwrap().expect("the cut commits");
-
-    let mut s = spawner();
-    let (out, recv) = unbounded();
-    let send = s.spawn(SPAWN_REGION, RegionSeed::Fresh, out);
-    let after = snapshot(&send, &recv);
-    assert_eq!(calls.load(Ordering::SeqCst), 1, "genesis re-ran on a stored region");
-    assert_eq!(after.body_scale(), game::movement::BodyScale::STUD);
-    assert_eq!(studs(&after), studs(&before), "the same stud chunks, from the store and the stored recipes");
-    assert_eq!(after.stud_material_at(cell), before.stud_material_at(cell));
-    send.send(RegionInput::Shutdown).unwrap();
-    while !matches!(recv.recv_timeout(WAIT).expect("region stops"), (_, RegionOutput::Stopped(..))) {}
-    s.reap(SPAWN_REGION);
 }
 
 /// A store imported under Plan A alone (the forge file as the archive row,
@@ -549,9 +449,7 @@ fn candidate_regions() -> impl Iterator<Item = RegionCoords> {
 /// world) has one byte flipped; then a region thread spawner over it like the
 /// server's (store + `prefetch_region` on that world) is started for
 /// `failing` and `healthy`: `failing` answers `LoadFailed` naming the tile and
-/// never generates, `healthy` generates and serves its terrain (the fixture's flat
-/// stud ground: stud worldgen samples only the process-global forged world, which is
-/// `server_world_is_tiled`'s — what is pinned here is the damaged store's own world).
+/// never generates, `healthy` generates and serves its terrain.
 fn damaged_tile_run(tag: &str, pick: impl Fn(&ForgedWorld) -> (RegionCoords, Tile)) {
     use game::{RegionInput, RegionSeed};
     use server::region_threads::ThreadRegionSpawner;
@@ -577,18 +475,17 @@ fn damaged_tile_run(tag: &str, pick: impl Fn(&ForgedWorld) -> (RegionCoords, Til
     let store = world_store::StoreHandle::open(&url, world_store::Dials::BUILT, world_store::OpenMode::Writer).unwrap();
     let (world, _) = world_store::load_forged(&store).unwrap().unwrap();
     let world = Arc::new(world);
-    install_props();
+    let materials = materials();
     let generated = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let log = generated.clone();
-    let genesis: server::region_threads::StudGenesis = Arc::new(move |rc| {
+    let (gen_world, log) = (world.clone(), generated.clone());
+    let generate: server::region_threads::SharedRegionGenerator = Arc::new(move |rc| {
         log.lock().unwrap().push(rc);
-        stud_flat_seed(rc)
+        worldgen::generate_region_forged(&gen_world, rc, materials)
     });
     let pre_world = world.clone();
     let prefetches = Arc::new(AtomicUsize::new(0));
     let counted = prefetches.clone();
-    let mut spawner = ThreadRegionSpawner::default()
-        .with_genesis(genesis)
+    let mut spawner = ThreadRegionSpawner::with_region_generator(generate)
         .with_prefetch(Arc::new(move |rc| {
             counted.fetch_add(1, Ordering::SeqCst);
             worldgen::prefetch_region_forged(&pre_world, rc)
@@ -602,9 +499,9 @@ fn damaged_tile_run(tag: &str, pick: impl Fn(&ForgedWorld) -> (RegionCoords, Til
             .unwrap(),
         );
     let (out, outputs) = unbounded();
-    let to_bad = spawner.spawn(failing, RegionSeed::Fresh, out.clone());
-    let to_good = spawner.spawn(healthy, RegionSeed::Fresh, out);
-    let _ = to_good.send(RegionInput::RequestSnapshot(0));
+    let to_bad = spawner.spawn(failing, RegionSeed::Deferred(None), out.clone());
+    let to_good = spawner.spawn(healthy, RegionSeed::Deferred(None), out);
+    let _ = to_good.send(RegionInput::RequestTerrain(0));
     let (mut failed, mut terrain) = (None, None);
     let deadline = std::time::Instant::now() + Duration::from_secs(60);
     while (failed.is_none() || terrain.is_none()) && std::time::Instant::now() < deadline {
@@ -614,9 +511,9 @@ fn damaged_tile_run(tag: &str, pick: impl Fn(&ForgedWorld) -> (RegionCoords, Til
                 assert_eq!(rc, failing, "only the region over the damaged tile fails: {why}");
                 failed = Some(why);
             }
-            RegionOutput::Snapshot(_, state) => {
+            RegionOutput::Terrain(_, snap) => {
                 assert_eq!(rc, healthy);
-                terrain = Some(state);
+                terrain = Some(snap);
             }
             _ => {}
         }
@@ -624,7 +521,7 @@ fn damaged_tile_run(tag: &str, pick: impl Fn(&ForgedWorld) -> (RegionCoords, Til
     let why = failed.expect("the region over the damaged tile answers LoadFailed");
     assert!(why.contains(&format!("({}, {})", bad.tx, bad.tz)), "names the tile: {why}");
     let terrain = terrain.expect("the healthy region runs");
-    assert_eq!(terrain.stud_index.len(), game::REGION_CHUNKS * game::REGION_CHUNKS, "with generated terrain");
+    assert!(!terrain.chunks.is_empty(), "with generated terrain");
     assert_eq!(*generated.lock().unwrap(), vec![healthy], "the failing region never generated");
     assert!(prefetches.load(Ordering::SeqCst) >= 9, "the healthy region pinned its 3x3 neighbourhood");
     let _ = to_good.send(RegionInput::Shutdown);
@@ -676,10 +573,23 @@ fn procedural_persists_nothing() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// One block of floor under every chunk column: ground without worldgen.
+fn flat_floor(_rc: RegionCoords) -> Vec<(game::ColumnCoords, game::Column)> {
+    let air = game::Block::new(BlockId::AIR);
+    let mut out = Vec::new();
+    for x in 0..game::REGION_CHUNKS {
+        for z in 0..game::REGION_CHUNKS {
+            let sub = game::SubChunk::Dense(Box::new(game::Chunk::flat_floor(game::BLOCK_VOXELS as u32)));
+            out.push((game::ColumnCoords::new(x, z), game::Column::new(0, air, air, vec![sub])));
+        }
+    }
+    out
+}
+
 /// A fresh store on a temp file (no world artifact: these tests only commit
 /// cuts) and a player resolved in it.
 fn bare_store(dir: &Path) -> (world_store::StoreHandle, server::player_store::PlayerKey, game::PlayerId) {
-    install_props();
+    materials();
     let url = world_store::StoreUrl::Sqlite(dir.join("w.sqlite"));
     let store = world_store::StoreHandle::open(&url, world_store::Dials::BUILT, world_store::OpenMode::Writer).unwrap();
     let token = server::player_store::PlayerKey::Online(game::PlayerToken::generate([7; game::PLAYER_TOKEN_BYTES]));
@@ -695,7 +605,7 @@ fn bare_store(dir: &Path) -> (world_store::StoreHandle, server::player_store::Pl
 fn exit_saves_a_region_that_parks_late() {
     let dir = scratch("late-park");
     let (store, token, player) = bare_store(&dir);
-    let mut core = Core::open(&store);
+    let mut core = Core::open_with(&store, Box::new(flat_floor));
     core.manager.handle_server_event(ServerEvent::ClientConnected { client: 0, player, record: None }, 0);
     core.tick(3);
     assert_eq!(core.manager.running_regions(), vec![SPAWN_REGION]);
@@ -756,7 +666,7 @@ fn exit_with_given_up_region_skips_exit_cut() {
     use game::ClientPacket;
     let dir = scratch("never-parks");
     let (store, _token, player) = bare_store(&dir);
-    let mut core = Core::open(&store);
+    let mut core = Core::open_with(&store, Box::new(flat_floor));
     core.manager.handle_server_event(ServerEvent::ClientConnected { client: 0, player, record: None }, 0);
     let east = RegionCoords::new(SPAWN_REGION.x + 1, SPAWN_REGION.z);
     core.manager.handle_server_event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(east), 0), 0);
@@ -807,10 +717,10 @@ fn exit_with_given_up_region_skips_exit_cut() {
 /// maps to exit status 3.
 fn fenced_host_run(url: &world_store::StoreUrl, thief: impl FnOnce(&world_store::StoreHandle) -> world_store::StoreHandle) {
     let store = world_store::StoreHandle::open(url, world_store::Dials::BUILT, world_store::OpenMode::Writer).unwrap();
-    install_props();
+    materials();
     let token = server::player_store::PlayerKey::Online(game::PlayerToken::generate([9; game::PLAYER_TOKEN_BYTES]));
     let (player, _) = StorePlayers(store.clone()).resolve(&token).unwrap();
-    let mut core = Core::open(&store);
+    let mut core = Core::open_with(&store, Box::new(flat_floor));
     core.manager.handle_server_event(ServerEvent::ClientConnected { client: 0, player, record: None }, 0);
     core.tick(3);
     let mut writer = server::cuts::CutWriter::new(core.claims.clone());
@@ -1015,7 +925,7 @@ fn foreign_record_does_not_fence_a_healthy_host() {
     let (_, stored) = StorePlayers(store.clone()).resolve(&token).unwrap();
     assert_eq!(stored.as_ref(), Some(&record));
 
-    let mut core = Core::open(&store);
+    let mut core = Core::open_with(&store, Box::new(flat_floor));
     assert!(!core.claims.fence().epochs.contains_key(&foreign_sr), "the foreign super-region is not ours");
     core.manager.set_ownership(ownership, s);
     core.manager.handle_server_event(ServerEvent::ClientConnected { client: 0, player, record: stored }, 0);

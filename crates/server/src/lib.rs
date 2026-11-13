@@ -23,11 +23,6 @@ use quinn::{
 /// don't start one with stdin at `/dev/null`.
 pub const SINGLE_PLAYER_ENV: &str = "VOXEL_SINGLE_PLAYER";
 
-/// `send` / `rebuild`: whether join snapshots carry stud collider grids or leave them
-/// to the receiver (`game::region_wire`). Unset: `send` for a single-player server,
-/// `rebuild` otherwise.
-pub const SNAPSHOT_COLLIDERS_ENV: &str = "VOXEL_SNAPSHOT_COLLIDERS";
-
 /// The QUIC port to bind on 127.0.0.1 (unset or empty = [`DEFAULT_SERVER_PORT`]).
 /// A client starting a menu world picks a free port and passes it here, so a
 /// menu world never collides with a dev server on 6466.
@@ -697,15 +692,6 @@ pub fn run() -> claims::ServerExit {
     let (server_send, server_recv) = crossbeam::channel::unbounded();
 
     let single_player = std::env::var(SINGLE_PLAYER_ENV).is_ok_and(|v| v == "1");
-    // Join snapshots: a remote client rebuilds stud collider grids from the bricks
-    // (20x fewer bytes, a genesis-sized rebuild per region); on loopback the bytes
-    // are free and the rebuild is not, so a single-player server sends them.
-    let send_colliders = match std::env::var(SNAPSHOT_COLLIDERS_ENV).as_deref() {
-        Ok("send") => true,
-        Ok("rebuild") => false,
-        _ => single_player,
-    };
-    game::set_snapshot_sends_colliders(send_colliders);
     let configured_port = std::env::var(SERVER_PORT_ENV).ok();
     let port = server_port_from(configured_port.as_deref()).unwrap_or_else(|message| panic!("{message}"));
     let wt_port = wt_port_from(std::env::var(WT_PORT_ENV).ok().as_deref()).unwrap_or_else(|message| panic!("{message}"));
@@ -722,12 +708,6 @@ pub fn run() -> claims::ServerExit {
     let mut opened = world_file::open_world(&world_source, &worldgen::forge::ForgeParams::default())
         .unwrap_or_else(|e| fatal(&e));
     let store = opened.store.clone();
-    // A stored world is tied to stud terrain before any region is loaded or saved; one
-    // saved as a voxel world does not start (its regions would come back without
-    // terrain), and nothing is written to it.
-    if let Some(store) = &store {
-        world_file::bind_world_terrain(store).unwrap_or_else(|e| fatal(&e));
-    }
     // Which regions this process simulates, and the super-region side that
     // decides it: a bad setting stops the start, naming the variable.
     let ownership = game::Ownership::from_env().unwrap_or_else(|e| fatal(&e));
@@ -895,27 +875,24 @@ pub fn run() -> claims::ServerExit {
     .unwrap_or_else(|_| include_str!("../../../assets/blocks/blocks.ron").to_string());
     let registry = game::BlockRegistry::from_ron(&manifest).expect("invalid block manifest");
     game::install_block_props(registry.props());
-    // The game's own prefabs, the same way: the repo directory, else the embedded copy.
-    game::install_prefabs(
-        game::load_builtin_prefabs(Some(
-            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").join(game::BUILTIN_PREFAB_DIR),
-        ))
-        .expect("invalid built-in prefab"),
-    );
+    let resolve = |name: &str| {
+        registry
+            .id_of(name)
+            .unwrap_or_else(|| panic!("block manifest must define \"{name}\""))
+    };
+    let materials = worldgen::material::Materials::from_names(resolve);
     match &world_source {
         world_file::WorldSource::Store { url, .. } => {
             info!("[server] world: forged, in the world store {url} (sampled from its tiles)")
         }
         world_file::WorldSource::Procedural => info!("[server] world: procedural (nothing is saved)"),
-        world_file::WorldSource::Studs => info!("[server] world: studs (toy bricks, nothing is saved)"),
-        world_file::WorldSource::PrefabEditor => {
-            info!("[server] world: prefab editor (an empty baseplate, nothing is saved)")
-        }
     }
     // The world map was built when the world was written and is read from
     // the store with it (procedural worlds: none).
     let world_map = world_file::install_world(&mut opened);
     let world_seed = worldgen::WORLD_SEED;
+    let gen_cache = worldgen::cache::WorldgenCache::from_env(world_seed, &manifest);
+    let (lod_result_send, lod_result_recv) = crossbeam::channel::unbounded();
     let configured_lod_threads = std::env::var("LOD_BUILD_THREADS").ok();
     let lod_threads = lod_workers::lod_build_threads(configured_lod_threads.as_deref())
         .unwrap_or_else(|message| panic!("{message}"));
@@ -923,20 +900,23 @@ pub fn run() -> claims::ServerExit {
         "[server] lod workers: {lod_threads} ({})",
         if configured_lod_threads.is_some() { "LOD_BUILD_THREADS" } else { "default: cores / 4, clamped 2..=6" }
     );
-    // The two keyword worlds of 3x3 hand-made regions: the toy-brick test world and the
-    // prefab editor's baseplate.
-    let editor_world = matches!(world_source, world_file::WorldSource::PrefabEditor);
-    let toy_studs = editor_world || matches!(world_source, world_file::WorldSource::Studs);
-    let lod_builder: Box<dyn game::LodBuilder> = if toy_studs {
-        // The 3x3 toy world has nothing beyond its regions.
-        Box::new(game::NullLodBuilder::default())
-    } else {
-        // Far terrain: height-field tiles from the ground recipe (`game::stud_lod`),
-        // for the procedural and the stored worlds alike.
-        Box::new(lod_workers::ThreadStudLodBuilder::new(world_seed, lod_threads))
-    };
+    let lod_builder: Box<dyn game::LodBuilder> = Box::new(lod_workers::ThreadLodBuilder::new(
+        world_seed,
+        materials,
+        gen_cache.clone(),
+        // Saved regions that have not run in this process: their LOD is
+        // built from the store (procedural worlds: none).
+        store.clone().map(|s| std::sync::Arc::new(world_store::TerrainFromStore(s)) as std::sync::Arc<dyn game::StoredTerrain>),
+        lod_result_send,
+        lod_threads,
+    ));
     // Kept only to read the manager→writer backlog for the `[server]` line.
     let writer_backlog = server_send.clone();
+    // Region starts generate on their own thread; the manager's copy of the
+    // generator is only reached by paths that stay synchronous by design.
+    let region_gen_cache = gen_cache.clone();
+    let region_generator: region_threads::SharedRegionGenerator =
+        std::sync::Arc::new(move |rc| region_gen_cache.generate_cached(rc, world_seed, materials));
     // The world clock: ms since `start` (the manager's `now_ms` base) -> world
     // tick, continuing from the last committed cut's tick (procedural worlds:
     // from 0, never saved).
@@ -946,28 +926,22 @@ pub fn run() -> claims::ServerExit {
     let (world_clock, clock_phase) =
         roles::start_clock(role, store.as_ref(), postgres, opened.world_tick).unwrap_or_else(|e| fatal(&e));
     let start = roles::back_dated_start(clock_phase);
-    // Region starts generate on their own thread: a fresh region's stud terrain
-    // (`worldgen::stud_gen`), and the halo seeds of never-run neighbours — only their
-    // band columns, trees and ice included (`generate_stud_window` gives the bricks
-    // the whole region's genesis gives those columns).
-    let mut spawner = region_threads::ThreadRegionSpawner::default().with_clock(world_clock, start);
-    spawner = if editor_world {
-        spawner.with_genesis(std::sync::Arc::new(worldgen::prefab_world::region_seed))
-    } else if toy_studs {
-        spawner.with_genesis(std::sync::Arc::new(worldgen::stud_world::region_seed))
-    } else {
-        spawner
-            .with_stud_halo(std::sync::Arc::new(move |rc, xs, zs| worldgen::stud_gen::generate_stud_window(rc, xs, zs, world_seed)))
-            .with_genesis(std::sync::Arc::new(move |rc| worldgen::stud_gen::generate_stud_region(rc, world_seed)))
-    };
-    // A stored world's genesis and halo seeds sample the forged tiles: each region
-    // thread pins the tiles of its 3x3 neighbourhood before it is built, so those
-    // reads never load, and one that will not load stops the region
-    // (`RegionOutput::LoadFailed`) — never an empty seam. The store-less worlds have
-    // no forged world to pin.
-    if store.is_some() {
-        spawner = spawner.with_prefetch(std::sync::Arc::new(worldgen::prefetch_region));
-    }
+    // Halo seeds of never-run neighbours: only their band columns, on the
+    // starting region's thread (`game::halo`).
+    // The region thread pinned its 3x3 neighbourhood's forged tiles before
+    // it was built (a tile that would not load stopped it), so these reads
+    // never load; a failure here is a bug, never an empty seam.
+    let halo_generator: game::HaloGenerator = std::sync::Arc::new(move |rc, xs, zs| {
+        let _pins = worldgen::prefetch_region(rc)
+            .unwrap_or_else(|e| panic!("halo seed of {rc:?}: its forged world tiles do not load: {e}"));
+        worldgen::generate_columns(rc, xs, zs, world_seed, materials)
+    });
+    // Each region thread pins the forged tiles of its 3x3 neighbourhood
+    // before it is built; one that will not load stops the region
+    // (`RegionOutput::LoadFailed`).
+    let mut spawner = region_threads::ThreadRegionSpawner::with_generator(region_generator, halo_generator)
+        .with_prefetch(std::sync::Arc::new(worldgen::prefetch_region))
+        .with_clock(world_clock, start);
     // Region loads and cut commits are fenced: the super-regions this process
     // owns are claimed now, once (procedural worlds keep nothing: no claims).
     // One claim is shared by the region threads and the cut writer.
@@ -1040,7 +1014,20 @@ pub fn run() -> claims::ServerExit {
     if let Some(claims) = &claims {
         spawner = spawner.with_store(claims.clone());
     }
-    let mut manager = game::WorldManager::new(spawner, server_send, region_out_send, lod_builder);
+    let mut manager = game::WorldManager::new(
+        spawner,
+        // Unused on the server (regions and LOD generate on their own
+        // threads); pinned like them all the same.
+        Box::new(move |rc| {
+            let _pins = worldgen::prefetch_region(rc)
+                .unwrap_or_else(|e| panic!("region {rc:?}: its forged world tiles do not load: {e}"));
+            gen_cache.generate_cached(rc, world_seed, materials)
+        }),
+        server_send,
+        region_out_send,
+        lod_builder,
+        lod_result_recv,
+    );
     manager.set_ownership(ownership, super_region_regions);
     manager.set_endpoints(endpoint.clone(), os_nonces());
     if let Some(entry) = entry_host {

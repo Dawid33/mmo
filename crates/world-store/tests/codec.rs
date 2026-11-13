@@ -11,9 +11,9 @@ use std::path::PathBuf;
 
 use game::rapier3d::math::Vector;
 use game::{
-    BlockId, Carried, Client, ColliderSpec, EntityBundle, EntityId,
+    Block, BlockId, ChiselData, Carried, Chunk, Client, ColliderSpec, ColumnGround, EntityBundle, EntityId,
     EntityKind, IntentMsg, ItemId, ItemPile, ItemStack, PlayerRecord, Pose, RegionCoords, RegionMeta, SentIntent, SentReply,
-    Target, WorldBlockPos, BodyState,
+    Target, WaterBody, WaterBodyId, WorldBlockPos, BodyState,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use world_store::*;
@@ -82,15 +82,43 @@ pub(crate) fn pos(x: i64, y: i32, z: i64) -> WorldBlockPos {
     WorldBlockPos { x, y, z }
 }
 
+pub(crate) fn chunk() -> Chunk {
+    let mut c = Chunk::default();
+    c.set_block(1, 2, 3, Block::new(BlockId(1)));
+    c.set_block(1, 3, 3, Block::new(BlockId(2)));
+    c.set_block(5, 0, 7, Block::new(BlockId(3)));
+    c.set_block(6, 6, 6, Block::new(BlockId(2)));
+    c.set_block(6, 7, 6, Block::new(BlockId(1)));
+    c.set_block(0, 0, 0, Block { id: BlockId(4), data: [1, 2, 3] });
+    c.set_block(2, 2, 2, Block::new(BlockId(1)));
+    c.chisel.insert(game::BlockIndex(0), ChiselData::cuboid(BlockId(4), [0, 0, 0], [4, 8, 4]));
+    c
+}
+
+pub(crate) fn ground() -> ColumnGround {
+    let mut g = ColumnGround::plain(
+        (0..game::COLUMN_FOOTPRINT).map(|i| 40 + (i % 5) as i16).collect(),
+        -3,
+        BlockId(1),
+        BlockId(9),
+    );
+    g.strata = vec![(0, BlockId(1)), (-8, BlockId(2)), (-20, BlockId(3))];
+    for i in [0usize, 1, 2, 17] {
+        g.water_top[i] = g.surface[i] + 3;
+        g.water_body[i] = 7;
+    }
+    g
+}
+
 pub(crate) fn meta() -> RegionMeta {
     let mut m = RegionMeta { tick: 123_456, next_game_event_id: 99, next_entity_serial: 12, ..Default::default() };
     let cell = pos(10, 20, 30);
     m.designations.insert(
-        game::StudBox::of_tile([3, 4, 5]).unwrap(),
+        [3, 4, 5],
         game::Designation { kind: game::DesignationKind::Chop, op: game::OpId { client: 2, seq: 7 }, priority: 6 },
     );
     m.designations.insert(
-        game::StudBox::of_tile([-1, 9, 2]).unwrap(),
+        [-1, 9, 2],
         game::Designation { kind: game::DesignationKind::Build(BlockId(3)), op: game::OpId { client: 1, seq: 8 }, priority: 2 },
     );
     m.constructed.insert([6, 7, 8], ());
@@ -129,6 +157,8 @@ pub(crate) fn meta() -> RegionMeta {
         (eid(2), 5),
         game::IntentReply::Refused(sent.intent, game::IntentRefusal::ContainerFull),
     );
+    m.water_bodies.insert(WaterBodyId(7), WaterBody { level: 4096 * 44, volume: 4096 * 4 });
+    m.water_bodies.insert(WaterBodyId(8), WaterBody { level: 4096 * 12, volume: 4096 });
     m
 }
 
@@ -165,23 +195,6 @@ pub(crate) fn bundle() -> EntityBundle {
     }
 }
 
-/// A default client in the layout stored before registered prefabs.
-fn client_v1() -> game::ClientV1 {
-    let c = Client::default();
-    game::ClientV1 {
-        input: c.input,
-        fps_cam_mode: c.fps_cam_mode,
-        mode: c.mode,
-        inventory: c.inventory,
-        inventory_open: c.inventory_open,
-        selected: c.selected,
-        cursor: c.cursor,
-        mining: c.mining,
-        break_cooldown_until: c.break_cooldown_until,
-        open_container: c.open_container,
-    }
-}
-
 pub(crate) fn player() -> PlayerRecord {
     let mut client = Client::default();
     client.inventory.slots[0] = Some(ItemStack { item: ItemId::block(BlockId(1)), count: 12 });
@@ -210,112 +223,16 @@ pub(crate) fn intent() -> IntentMsg {
     })
 }
 
-/// A stored stud chunk: a filler and a catalog part.
-pub(crate) fn stud_chunk() -> game::StudChunkRecord {
-    let chunk = game::StudChunk::new([
-        game::StudBrick::filler([0, 0, 0], [4, 6, 4], game::MAT_STONE),
-        game::StudBrick::part_at([8, 6, 8], 0, 1, 4),
-    ])
-    .unwrap();
-    game::StudChunkRecord::Edited(chunk)
-}
-
-/// Stud ground recipes of two chunk columns: flat ground at plates 30 and 95.
-pub(crate) fn stud_ground() -> Vec<(game::ColumnCoords, game::StudColumnGround)> {
-    let soil = game::StudProfile { cover: game::MAT_GRASS, cover_plates: 1, soil: game::MAT_DIRT, soil_plates: 5 };
-    let mut ground = vec![
-        (game::ColumnCoords::new(0, 0), game::StudColumnGround::flat(30, soil, game::MAT_STONE, -2000)),
-        (game::ColumnCoords::new(1, 0), game::StudColumnGround::flat(95, soil, game::MAT_STONE, -2000)),
-    ];
-    // Each one's apron on the side of the other: the cliff between them.
-    game::link_stud_aprons(&mut ground);
-    ground
-}
-
 #[test]
 fn golden_blobs_decode() {
-    check("stud_chunk", FORMAT_STUD_CHUNK, &stud_chunk());
-    check("stud_chunk_pristine", FORMAT_STUD_CHUNK, &game::StudChunkRecord::Pristine);
-    let fixture = |name: &str| std::fs::read(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(name)).unwrap();
-    check("stud_ground", FORMAT_STUD_GROUND, &stud_ground());
-    // Format 1 (no apron) is still read: the aprons come from the neighbouring
-    // columns of the row, the region's edge stays closed. Recorded 2026-11-11 from
-    // the format 1 `stud_ground.bin` of the same two columns.
-    let v1 = fixture("stud_ground_v1.bin");
-    assert_eq!(v1[0], FORMAT_STUD_GROUND_V1);
-    let read = decode_stud_ground(&v1).unwrap();
-    assert_eq!(read, stud_ground(), "a format 1 row reads as the linked recipes");
-    assert_eq!(read[1].1.apron(game::StudSide::West, 3), 30);
-    assert_eq!(read[1].1.apron(game::StudSide::East, 3), game::STUD_APRON_CLOSED);
-    assert_eq!(decode_stud_ground(&encode(FORMAT_STUD_GROUND, &stud_ground())).unwrap(), stud_ground());
     check("region_meta", FORMAT_REGION_META, &meta());
-    // Format 1 (with the voxel world's water bodies) is still read while they are
-    // empty — every stud region's row; the golden recorded then held two voxel water
-    // bodies, which no longer decode.
-    let m = meta();
-    let v1 = game::RegionMetaV1 {
-        tick: m.tick,
-        next_game_event_id: m.next_game_event_id,
-        next_entity_serial: m.next_entity_serial,
-        designations: m.designations.iter().map(|(b, d)| (b.tiles().min, *d)).collect(),
-        constructed: m.constructed.clone(),
-        item_piles: m.item_piles.clone(),
-        containers: m.containers.clone(),
-        pile_takes: m.pile_takes.clone(),
-        intents: m.intents.clone(),
-        intent_replies: m.intent_replies.clone(),
-        intent_inbox: m.intent_inbox.clone(),
-        water_bodies: Default::default(),
-    };
-    assert_eq!(decode_region_meta(&encode(FORMAT_REGION_META_V1, &v1)).unwrap(), m, "a format 1 stud meta decodes to the same meta");
-    assert_eq!(decode_region_meta(&encode(FORMAT_REGION_META, &m)).unwrap(), m);
-    // Format 2 (designations by tile) is still read, each tile as its cell box: the
-    // golden recorded then (the fixture value's two designations sat on tiles).
-    let v2 = fixture("region_meta_v2.bin");
-    assert_eq!(v2[0], FORMAT_REGION_META_V2);
-    assert_eq!(decode_region_meta(&v2).unwrap(), m, "a format 2 meta decodes to the same meta, its tiles as boxes");
-    let voxel = fixture("region_meta_v1_water.bin");
-    assert_eq!(voxel[0], FORMAT_REGION_META_V1);
-    assert!(matches!(decode_region_meta(&voxel), Err(StoreError::Corrupt(_))), "voxel water bodies are refused, not dropped");
+    check("chunk", FORMAT_CHUNK, &chunk());
+    check("column_ground", FORMAT_COLUMN_GROUND, &ground());
     check("entity_bundle", FORMAT_ENTITY_BUNDLE, &bundle());
-    // Format 2 (with the voxel body slot, empty in a stud world) is still read: the
-    // golden recorded then.
-    let v2 = fixture("entity_bundle_v2.bin");
-    assert_eq!(v2[0], FORMAT_ENTITY_BUNDLE_V2);
-    assert_eq!(decode_entity_bundle(&v2).unwrap(), bundle(), "a format 2 bundle decodes to the same bundle");
-    // Format 1 (before `Carried::stud_body`) is still read: the golden recorded then.
-    let v1 = std::fs::read(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/entity_bundle_v1.bin")).unwrap();
-    assert_eq!(v1[0], FORMAT_ENTITY_BUNDLE_V1);
-    assert_eq!(decode_entity_bundle(&v1).unwrap(), bundle(), "a format 1 bundle decodes to the same bundle, no stud body");
-    // Format 3 (a `Client` without registered prefabs) is still read: the golden
-    // recorded then.
-    let v3 = fixture("entity_bundle_v3.bin");
-    assert_eq!(v3[0], FORMAT_ENTITY_BUNDLE_V3);
-    assert_eq!(decode_entity_bundle(&v3).unwrap(), bundle(), "a format 3 bundle decodes to the same bundle");
-    let crossing = game::EntityBundleV3 {
-        id: bundle().id,
-        kind: bundle().kind,
-        body: bundle().body,
-        collider: bundle().collider,
-        carried: bundle().carried,
-        client: Some((7, game::ClientV1 { selected: 3, ..client_v1() })),
-        pending_inputs: Vec::new(),
-    };
-    let read = decode_entity_bundle(&encode(FORMAT_ENTITY_BUNDLE_V3, &crossing)).unwrap();
-    let (id, client) = read.client.expect("the crossing player's client");
-    assert_eq!((id, client.selected, client.prefabs.len()), (7, 3, 0), "a format 3 client reads with no registered prefabs");
-    assert_eq!(decode_entity_bundle(&encode(FORMAT_ENTITY_BUNDLE, &bundle())).unwrap(), bundle());
-    assert!(decode_entity_bundle(&[9, 1, 2]).is_err() && decode_entity_bundle(&[]).is_err());
     check("player_record", FORMAT_PLAYER_RECORD, &player());
-    // Format 1 (a `Client` without registered prefabs) is still read: the golden
-    // recorded then, of the same record.
-    let v1 = fixture("player_record_v1.bin");
-    assert_eq!(v1[0], FORMAT_PLAYER_RECORD_V1);
-    assert_eq!(decode_player_record(&v1).unwrap(), player(), "a format 1 record decodes to the same record");
-    assert_eq!(decode_player_record(&encode(FORMAT_PLAYER_RECORD, &player())).unwrap(), player());
-    assert!(decode_player_record(&[9, 1, 2]).is_err() && decode_player_record(&[]).is_err());
     check("intent_msg", FORMAT_INTENT_MSG, &intent());
     check("intent_msg_reply", FORMAT_INTENT_MSG, &IntentMsg::Reply(reply()));
+    check("region_ground", FORMAT_REGION_GROUND, &region_ground());
     check_world_map();
 }
 
@@ -333,16 +250,22 @@ fn check_world_map() {
     assert_eq!(decode_world_map(&golden).unwrap(), world_map(), "world_map: golden does not decode to the fixture value");
 }
 
+/// A region's ground recipes as `regions.ground` stores them.
+pub(crate) fn region_ground() -> Vec<(game::ColumnCoords, ColumnGround)> {
+    let mut other = ground();
+    other.surface[3] = -7;
+    vec![(game::ColumnCoords::new(0, 0), ground()), (game::ColumnCoords::new(1, 0), other)]
+}
+
 #[test]
 fn wrong_format_byte_is_corrupt() {
-    use game::StudChunkRecord;
-    let blob = encode(FORMAT_STUD_CHUNK, &stud_chunk());
-    let err = decode::<StudChunkRecord>(FORMAT_STUD_CHUNK + 1, &blob).unwrap_err();
-    assert!(matches!(&err, StoreError::Corrupt(m) if m.contains("StudChunkRecord")), "{err}");
+    let blob = encode(FORMAT_CHUNK, &chunk());
+    let err = decode::<Chunk>(FORMAT_CHUNK + 1, &blob).unwrap_err();
+    assert!(matches!(&err, StoreError::Corrupt(m) if m.contains("Chunk")), "{err}");
     let mut bad = blob.clone();
     bad.truncate(blob.len() / 2);
-    assert!(matches!(decode::<StudChunkRecord>(FORMAT_STUD_CHUNK, &bad), Err(StoreError::Corrupt(_))));
-    assert!(matches!(decode::<StudChunkRecord>(FORMAT_STUD_CHUNK, &[]), Err(StoreError::Corrupt(_))));
+    assert!(matches!(decode::<Chunk>(FORMAT_CHUNK, &bad), Err(StoreError::Corrupt(_))));
+    assert!(matches!(decode::<Chunk>(FORMAT_CHUNK, &[]), Err(StoreError::Corrupt(_))));
 }
 
 #[test]

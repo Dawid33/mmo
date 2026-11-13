@@ -3,11 +3,7 @@
 //!
 //! Presets:
 //! - `embarked` — a small generated world (`ForgeParams::default()`: the 16 km /
-//!   32 m continent) in `worlds/debug-embarked/`, played with a fortress embarked,
-//!   on stud terrain (the server's default; `VOXEL_TERRAIN=voxels` is the old voxel
-//!   world). The world's server refuses a world last served on the other terrain
-//!   (terrain is never converted): the start fails with the server log's reason,
-//!   and `--reset` re-forges.
+//!   32 m continent) in `worlds/debug-embarked/`, played with a fortress embarked.
 //!   The world and its fortress are REUSED between runs: an existing world is
 //!   loaded (not re-forged) and the client returns to the fortress it founded
 //!   there (the server keeps it in the world's `terrain.history`). Only deleting
@@ -57,8 +53,6 @@ use crate::renderer::world_map::WorldMapState;
 use crate::renderer::ClientRequests;
 use crate::session::{AppState, Embarked, LastSessionError, PendingWorld, PreparingWorld, SessionEnded, StartingStatus};
 
-/// The `studs` preset's entry dir under `worlds/` (only its `server.log`).
-pub const DEBUG_STUDS_SLUG: &str = "debug-studs";
 /// `worlds/<this>/`: the `embarked` preset's world.
 pub const DEBUG_EMBARKED_SLUG: &str = "debug-embarked";
 /// Its display name (`world_store::slug_for` turns it into [`DEBUG_EMBARKED_SLUG`]).
@@ -79,30 +73,19 @@ fn debug_world_override() -> Option<String> {
 }
 
 pub const USAGE: &str = "usage: client [debug embarked [--reset | --port N | --join HOST:PORT] [--adventure-at SITE]]\n       \
-    client [debug online [--world ID]]\n       \
-    client [debug studs]\n       \
-    client [debug prefab [--game] [NAME]]\n\
+    client [debug online [--world ID]]\n\
     \n\
     With no arguments the client opens on the main menu.\n\
     \n\
     presets:\n  \
-      embarked   a small generated world with a fortress embarked (worlds/debug-embarked/),\n             \
-                 on stud terrain; a world last played on voxel terrain is refused: --reset;\n             \
+      embarked   a small generated world with a fortress embarked (worlds/debug-embarked/);\n             \
                  reused between runs, --reset re-forges it and embarks afresh;\n             \
                  --port N hosts its server on UDP port N, --join HOST:PORT joins a\n             \
                  running server instead (several clients on one world); --adventure-at SITE\n             \
                  starts an adventure at site SITE (a number) instead of embarking\n  \
       online     start from the kept login (VOXEL_LOGIN_URL, VOXEL_LOGIN_REFRESH_FILE), join the\n             \
                  login service's world ID (default `dev`) and embark as `embarked` does\n             \
-                 (`just run-online` starts the login service and a server for it)\n  \
-      studs      the toy-brick TEST world: 3x3 regions of stud chunks, no store, no menu\n             \
-                 (`embarked` and the menu play real worlds on stud terrain);\n             \
-                 --procedural plays the procedural noise world on stud terrain instead.\n             \
-                 Run it via `just run-studs`, which sets near radius 1 and, for the toy\n             \
-                 world, disables the LOD rings (a bare `client debug studs` keeps the defaults)\n  \
-      prefab     the prefab editor on its empty world, on prefab NAME of your library (a new\n             \
-                 one if there is none; `untitled` when no name is given); --game edits the\n             \
-                 game's own assets/prefabs/ instead (dev builds). Run it via `just prefab-editor`";
+                 (`just run-online` starts the login service and a server for it)";
 
 /// The `online` preset's world when `--world` is not given (`just dev-login`'s).
 pub const DEFAULT_ONLINE_WORLD: &str = "dev";
@@ -116,24 +99,13 @@ pub enum DebugScenario {
     Embarked { reset: bool, port: Option<u16>, join: Option<std::net::SocketAddr>, adventure_at: Option<SiteId> },
     /// Log in, join the login service's `world`, embark.
     Online { world: String },
-    /// The toy-brick stud world on a single-player server (no store, no history).
-    /// `procedural`: the procedural noise world on stud terrain, instead of the toy world.
-    Studs { procedural: bool },
-    /// The prefab editor on its empty world (`crate::prefab_editor`). `game`: edit the
-    /// game's own `assets/prefabs/` on disk instead of the player's library (dev
-    /// builds). `name`: the prefab to open (a new one if there is no such file);
-    /// none = a new Build prefab called [`NEW_PREFAB_NAME`].
-    Prefab { game: bool, name: Option<String> },
 }
-
-/// What `client debug prefab` calls the prefab it starts when none is named.
-pub const NEW_PREFAB_NAME: &str = "untitled";
 
 impl DebugScenario {
     fn adventure_at(&self) -> Option<SiteId> {
         match self {
             DebugScenario::Embarked { adventure_at, .. } => *adventure_at,
-            DebugScenario::Online { .. } | DebugScenario::Studs { .. } | DebugScenario::Prefab { .. } => None,
+            DebugScenario::Online { .. } => None,
         }
     }
 }
@@ -161,31 +133,12 @@ pub fn parse_args<S: AsRef<str>>(args: &[S]) -> Result<Option<DebugScenario>, St
         [] => Ok(None),
         ["-h" | "--help" | "help", ..] => Err(USAGE.into()),
         ["debug"] => Err(format!("`debug` needs a preset\n\n{USAGE}")),
-        ["debug", "prefab", rest @ ..] => {
-            let (mut game, mut name) = (false, None);
-            for arg in rest {
-                match *arg {
-                    "--game" if cfg!(feature = "dev_ui") => game = true,
-                    "--game" => return Err(format!("--game edits the game's own prefabs: a dev build only\n\n{USAGE}")),
-                    flag if flag.starts_with('-') => {
-                        return Err(format!("unknown flag `{flag}` for `debug prefab`\n\n{USAGE}"));
-                    }
-                    n if name.is_some() => return Err(format!("`debug prefab` takes one name, got `{n}` too\n\n{USAGE}")),
-                    n if !game::prefab_name_ok(n) => {
-                        return Err(format!("bad prefab name `{n}`: a-z, 0-9 and '-', at most 48\n\n{USAGE}"));
-                    }
-                    n => name = Some(n.to_string()),
-                }
-            }
-            Ok(Some(DebugScenario::Prefab { game, name }))
-        }
         ["debug", preset, flags @ ..] => {
             let mut reset = false;
             let mut port = None;
             let mut join = None;
             let mut adventure_at = None;
             let mut world = None;
-            let mut procedural = false;
             let mut flags = flags.iter();
             while let Some(flag) = flags.next() {
                 let mut value = || {
@@ -193,7 +146,6 @@ pub fn parse_args<S: AsRef<str>>(args: &[S]) -> Result<Option<DebugScenario>, St
                 };
                 match *flag {
                     "--reset" => reset = true,
-                    "--procedural" => procedural = true,
                     "--port" => {
                         let v = value()?;
                         port = Some(v.parse::<u16>().map_err(|e| format!("bad --port `{v}`: {e}\n\n{USAGE}"))?);
@@ -225,19 +177,11 @@ pub fn parse_args<S: AsRef<str>>(args: &[S]) -> Result<Option<DebugScenario>, St
                 return Err(format!("--join plays on another client's world: not with --reset or --port\n\n{USAGE}"));
             }
             match *preset {
-                "embarked" if world.is_none() && !procedural => Ok(Some(DebugScenario::Embarked { reset, port, join, adventure_at })),
-                "online" if !reset && !procedural && port.is_none() && join.is_none() && adventure_at.is_none() => {
+                "embarked" if world.is_none() => Ok(Some(DebugScenario::Embarked { reset, port, join, adventure_at })),
+                "online" if !reset && port.is_none() && join.is_none() && adventure_at.is_none() => {
                     Ok(Some(DebugScenario::Online { world: world.unwrap_or_else(|| DEFAULT_ONLINE_WORLD.into()) }))
                 }
-                "studs" if !game::stud::STUDS_SUPPORTED => Err(format!(
-                    "`debug studs` needs 256-unit sim chunks (chunk_blocks=16); this build has CHUNK_UNITS={}",
-                    game::block::CHUNK_UNITS
-                )),
-                "studs" if !reset && port.is_none() && join.is_none() && adventure_at.is_none() && world.is_none() => {
-                    Ok(Some(DebugScenario::Studs { procedural }))
-                }
-                "embarked" | "online" if procedural => Err(format!("--procedural is a `debug studs` flag\n\n{USAGE}")),
-                "embarked" | "online" | "studs" => Err(format!("flags not valid for `debug {preset}`\n\n{USAGE}")),
+                "embarked" | "online" => Err(format!("flags not valid for `debug {preset}`\n\n{USAGE}")),
                 other => Err(format!("unknown debug preset `{other}`\n\n{USAGE}")),
             }
         }
@@ -435,42 +379,6 @@ fn boot(
             info!("[debug] logging in to join the login service's world {world}");
             launch.phase = Phase::Online(OnlineStep::Login);
             next.set(AppState::Login);
-            return;
-        }
-        DebugScenario::Prefab { game, name } => {
-            use crate::prefab_editor::{start_editor, EditorRequest, PrefabSource};
-            let request = EditorRequest {
-                source: if *game { PrefabSource::Game } else { PrefabSource::Library },
-                name: name.clone().unwrap_or_else(|| NEW_PREFAB_NAME.into()),
-                new_kind: Some(game::PrefabKindTag::Build),
-            };
-            info!("[debug] prefab editor: {request:?}");
-            if let Err(e) = start_editor(&mut commands, &mut next, request) {
-                error!("[debug] {e}");
-                error.0 = Some(e);
-            }
-            // The editor session takes it from here (connected is embarked: `enter_editor`).
-            launch.phase = Phase::Done;
-            return;
-        }
-        DebugScenario::Studs { procedural } => {
-            // `terrain` is passed verbatim as VOXEL_WORLD_FILE: `studs` is the server's toy stud
-            // world, `procedural` the procedural noise world.
-            // Only `server.log` lives in the entry dir. The toy world has no far terrain:
-            // `just run-studs` sets `VOXEL_LOD_RINGS=off` for it (not for `--procedural`, which
-            // streams stud far terrain), because `WorldScale::from_env` runs in `main` before this system.
-            let dir = worlds_root().join(DEBUG_STUDS_SLUG);
-            if let Err(e) = std::fs::create_dir_all(&dir) {
-                error!("[debug] could not create {}: {e}", dir.display());
-                error.0 = Some(format!("could not create {}: {e}", dir.display()));
-                launch.phase = Phase::Done;
-                return;
-            }
-            let terrain = if *procedural { "procedural" } else { "studs" };
-            info!("[debug] studs: world `{terrain}`, log in {}", dir.display());
-            commands.insert_resource(PendingWorld { entry_dir: dir, terrain: terrain.into(), name: "Studs".into() });
-            launch.phase = Phase::Embarking(Sent::Nothing);
-            next.set(AppState::Starting);
             return;
         }
     };
@@ -706,16 +614,6 @@ fn auto_embark(
     {
         return;
     }
-    if matches!(launch.scenario, DebugScenario::Studs { .. }) {
-        // A store-less world never sends a world map: connected is embarked.
-        info!("[debug] studs: playing the spawn region");
-        embarked.0 = true;
-        if let Some(mut cam) = cam {
-            cam.placed = false;
-        }
-        launch.phase = Phase::Done;
-        return;
-    }
     let (Some(map), Some(requests)) = (world_map.map.as_ref(), requests) else { return };
     if let Some(site) = launch.scenario.adventure_at() {
         // `apply_adventure_result` sets `Embarked` on success (seen next frame).
@@ -813,38 +711,6 @@ mod tests {
         let plain = |reset| Ok(Some(DebugScenario::Embarked { reset, port: None, join: None, adventure_at: None }));
         assert_eq!(parse_args(&["debug", "embarked"]), plain(false));
         assert_eq!(parse_args(&["debug", "embarked", "--reset"]), plain(true));
-    }
-
-    #[test]
-    fn debug_studs_parses_without_flags() {
-        if !game::stud::STUDS_SUPPORTED {
-            // Not a 256-unit sim chunk build: the preset errors out.
-            assert!(parse_args(&["debug", "studs"]).unwrap_err().contains("256-unit sim chunks"));
-            return;
-        }
-        assert_eq!(parse_args(&["debug", "studs"]), Ok(Some(DebugScenario::Studs { procedural: false })));
-        assert_eq!(parse_args(&["debug", "studs", "--procedural"]), Ok(Some(DebugScenario::Studs { procedural: true })));
-        assert!(parse_args(&["debug", "embarked", "--procedural"]).is_err());
-        assert!(parse_args(&["debug", "studs", "--reset"]).is_err());
-    }
-
-    #[test]
-    fn debug_prefab_parses() {
-        assert_eq!(parse_args(&["debug", "prefab"]), Ok(Some(DebugScenario::Prefab { game: false, name: None })));
-        assert_eq!(
-            parse_args(&["debug", "prefab", "my-house"]),
-            Ok(Some(DebugScenario::Prefab { game: false, name: Some("my-house".into()) }))
-        );
-        let game_arch = parse_args(&["debug", "prefab", "--game", "dev-arch"]);
-        if cfg!(feature = "dev_ui") {
-            assert_eq!(game_arch, Ok(Some(DebugScenario::Prefab { game: true, name: Some("dev-arch".into()) })));
-            assert_eq!(parse_args(&["debug", "prefab", "dev-arch", "--game"]), game_arch);
-        } else {
-            assert!(game_arch.unwrap_err().contains("--game"));
-        }
-        assert!(parse_args(&["debug", "prefab", "Bad Name"]).is_err());
-        assert!(parse_args(&["debug", "prefab", "--reset"]).is_err());
-        assert!(parse_args(&["debug", "prefab", "a", "b"]).is_err());
     }
 
     #[test]

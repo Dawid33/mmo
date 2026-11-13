@@ -96,8 +96,6 @@ pub(crate) enum Request {
     ClaimCoordinator(Reply<CoordinatorFence>),
     SaveCoordinator(Vec<u8>, CoordinatorFence, Reply<()>),
     LoadCoordinator(Reply<Option<Vec<u8>>>),
-    BindTerrain(crate::TerrainKind, Reply<()>),
-    TerrainKind(Reply<Option<crate::TerrainKind>>),
     EnsureClockAnchor(game::ClockAnchor, Reply<game::ClockAnchor>),
     ClearClockAnchor(Reply<()>),
     SetSuperRegionRegions(u32, Reply<bool>),
@@ -435,10 +433,6 @@ async fn serve(
                 r.send(on_pool!(&pool, save_coordinator(state, fence)))
             }),
             Request::LoadCoordinator(r) => tokio::spawn(async move { r.send(on_pool!(&pool, load_coordinator())) }),
-            Request::BindTerrain(kind, r) => tokio::spawn(async move {
-                let _w = writer.lock().await;
-                r.send(on_pool!(&pool, bind_terrain(kind)))
-            }),
             Request::EnsureClockAnchor(proposed, r) => tokio::spawn(async move {
                 let _w = writer.lock().await;
                 r.send(on_pool!(&pool, ensure_clock_anchor(proposed)))
@@ -460,7 +454,6 @@ async fn serve(
             Request::OwnerClaimEpoch(owner, r) => {
                 tokio::spawn(async move { r.send(on_pool!(&pool, owner_claim_epoch(owner))) })
             }
-            Request::TerrainKind(r) => tokio::spawn(async move { r.send(on_pool!(&pool, terrain_kind())) }),
         };
         tasks.push(task);
     }
@@ -531,7 +524,6 @@ fn refuse_if_read_only(req: Request, read_only: bool, cuts: &CutState) -> Option
         Request::ClaimSuperRegions(_, _, r) => r.send(Err(StoreError::ReadOnly)),
         Request::ClaimCoordinator(r) => r.send(Err(StoreError::ReadOnly)),
         Request::SaveCoordinator(_, _, r) => r.send(Err(StoreError::ReadOnly)),
-        Request::BindTerrain(_, r) => r.send(Err(StoreError::ReadOnly)),
         Request::EnsureClockAnchor(_, r) => r.send(Err(StoreError::ReadOnly)),
         Request::ClearClockAnchor(r) => r.send(Err(StoreError::ReadOnly)),
         Request::SetSuperRegionRegions(_, r) => r.send(Err(StoreError::ReadOnly)),

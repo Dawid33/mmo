@@ -28,7 +28,7 @@ use bevy::image::ImageSampler;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::prelude::*;
 use game::edit::BlockPos;
-use game::{BlockRegistry, ItemId, PileView, RegionId, BLOCK_UNITS};
+use game::{BlockRegistry, ItemId, PileView, RegionId, BLOCK_VOXELS};
 
 use super::commander::cut_entities::{home_rect, hidden_by_cut};
 use super::commander::level::{camera_cut, WorkingLevel};
@@ -177,14 +177,11 @@ pub(crate) fn material_for(
     (material, flat)
 }
 
-/// World position of the floor centre of pile cell `cell` in `region`: a block, or
-/// on stud terrain a tile (as wide, 1.2 m tall — `kind.level_bottom_units`). A pile
-/// resting on a low floor INSIDE its stud tile is drawn at the tile's bottom (the
-/// floor's height is not looked up here).
+/// World position of the floor centre of `cell` in `region`.
 pub fn pile_world_position(region: RegionId, cell: BlockPos) -> Vec3 {
     let o = region.world_offset();
-    let b = BLOCK_UNITS as f32;
-    Vec3::new(o[0] + (cell[0] as f32 + 0.5) * b, o[1] + game::level_bottom_units(cell[1]), o[2] + (cell[2] as f32 + 0.5) * b)
+    let b = BLOCK_VOXELS as f32;
+    Vec3::new(o[0] + (cell[0] as f32 + 0.5) * b, o[1] + cell[1] as f32 * b, o[2] + (cell[2] as f32 + 0.5) * b)
 }
 
 /// The cubes `stacks` are drawn with: running number, offset from the cell's
@@ -322,19 +319,16 @@ fn hide_cut_piles(
     level: Res<WorkingLevel>,
     tiles: Res<TileMirror>,
     pile_roots: Res<ItemPileRoots>,
-    mut roots: Query<(&ItemPileRoot, &mut Visibility, &mut Transform, Option<&super::item_flights::LandingHold>)>,
+    mut roots: Query<(&ItemPileRoot, &mut Visibility, Option<&super::item_flights::LandingHold>)>,
 ) {
     let cut = camera_cut(&level, &tiles);
     let home = tiles.region().map(home_rect);
     let shown = shown_mirrors(&pile_roots);
-    for (root, mut vis, mut tf, hold) in &mut roots {
-        // A pile spawned before the session's terrain was known moves to its place.
-        let at = pile_world_position(root.region, root.cell);
-        if tf.translation != at {
-            tf.translation = at;
-        }
+    for (root, mut vis, hold) in &mut roots {
         let duplicate = root.mirror && !shown.contains(&(root.region, root.cell));
-        let hide = duplicate || hold.is_some() || hidden_by_cut(at, cut, home);
+        let hide = duplicate
+            || hold.is_some()
+            || hidden_by_cut(pile_world_position(root.region, root.cell), cut, home);
         vis.set_if_neq(if hide { Visibility::Hidden } else { Visibility::Inherited });
     }
 }
@@ -433,11 +427,9 @@ mod tests {
         assert_eq!(r.len(), 1);
         assert_eq!(r[0].1, 3, "40 items = 3 cubes");
         assert_eq!(r[0].2, pile_world_position(region, cell));
-        // The cell is a tile: a metre wide, 1.2 m levels.
         let o = region.world_offset();
-        let b = BLOCK_UNITS as f32;
-        assert_eq!((r[0].2.x, r[0].2.z), (o[0] + 3.5 * b, o[2] + 7.5 * b));
-        assert!((r[0].2.y - 5.0 * 1.2 * b).abs() < 1e-3, "{}", r[0].2);
+        let b = BLOCK_VOXELS as f32;
+        assert_eq!(r[0].2, Vec3::new(o[0] + 3.5 * b, 5.0 * b, o[2] + 7.5 * b));
 
         // A change replaces the pile.
         app.world_mut().write_message(ItemPileMsg::Set { region, changes: vec![(cell, Some(view(1)))] });

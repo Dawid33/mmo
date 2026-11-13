@@ -8,6 +8,12 @@
 //! Beyond the old file: the neighbour-state mutators (`propagate_voxel_change`,
 //! `combine_voxel_states`, which the old fork did not track) and history
 //! independence (same content reached by different edit orders).
+//!
+//! Also `// mmo-fork: leaves in chunk-id order` in parry's `voxels.rs`:
+//! `Voxels::new` builds its chunk BVH from the chunks in first-seen order, not
+//! hash-map order (which differs between native and wasm32), so a build is a pure
+//! function of its input on every target. A 2-leaf tree keeps its input order,
+//! which is what shows.
 use std::hash::Hasher;
 use std::time::Instant;
 
@@ -123,4 +129,16 @@ fn hashing_is_cheap_regardless_of_voxel_count() {
     }
     assert!(acc != 0, "keep the loop from being optimized out");
     assert!(t.elapsed().as_millis() < 500, "2000 hashes took {:?} — Voxels::state_hash still walks contents", t.elapsed());
+}
+
+#[test]
+fn voxels_new_orders_its_chunks_as_first_seen() {
+    // Two keys in two parry chunks (8 voxels wide), in both input orders.
+    let (a, b) = (IVector::new(0, 0, 0), IVector::new(20, 0, 0));
+    let first = |keys: &[IVector]| {
+        let v = Voxels::new(Vector::new(1.0, 1.0, 1.0), keys);
+        v.voxels().next().expect("a voxel").grid_coords
+    };
+    assert_eq!(first(&[a, b]), a);
+    assert_eq!(first(&[b, a]), b);
 }

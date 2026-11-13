@@ -14,9 +14,9 @@ use crate::common;
 
 use common::{Body, CHUNK, Walker, chunks_over, seam_row, seam_z, spawn_x_band, spawn_z_walk};
 use game::movement::{CHARACTER_SKIN, PLAYER_CAPSULE_HALF_HEIGHT, PLAYER_CAPSULE_RADIUS, TICK_DT, UNITS_PER_METER, WALK_SPEED};
-use common::{Cell, Chunk};
-use game::{BLOCK_UNITS, CHUNK_BLOCKS};
+use game::{BLOCK_VOXELS, Block, BlockId, BlockIndex, CHUNK_BLOCKS, ChiselData, Chunk};
 
+const SOLID: BlockId = BlockId(1);
 /// Distance covered by one tick of walking.
 const STEP: f32 = WALK_SPEED * UNITS_PER_METER * TICK_DT;
 /// Slack on per-tick motion: the controller re-settles onto its skin by a
@@ -71,17 +71,21 @@ fn assert_level_walk_across(w: &mut Walker, side: usize, n: usize, borders: usiz
     assert!(crossed >= borders as f32, "the walk must cross chunk borders: {start:?} -> {prev:?}");
 }
 
-/// A floor of `BLOCK_UNITS` height built from chiselled blocks: the same
+/// A floor of `BLOCK_VOXELS` height built from chiselled blocks: the same
 /// surface as `flat_floor(16)`, but in the voxel-scale collider. Colliders
 /// take the coarsest solid cell of a chisel, so a full chisel would collapse
 /// to a block cell; one hidden void at the bottom of each upper 8³ octant
 /// keeps the octants holding the walking surface at voxel scale.
 fn chiselled_floor() -> Chunk {
-    let mut chunk = Chunk::flat_floor(BLOCK_UNITS as u32);
-    let half = BLOCK_UNITS / 2;
+    let mut chunk = Chunk::flat_floor(BLOCK_VOXELS as u32);
+    let half = BLOCK_VOXELS / 2;
     for bx in 0..2 {
         for bz in 0..2 {
-            chunk.set_partial(bx, 0, bz, |vx, vy, vz| !(vy == half && vx % half == 0 && vz % half == 0));
+            let voided = ChiselData::from_fn(vec![SOLID], |vx, vy, vz| {
+                let void = vy == half && vx % half == 0 && vz % half == 0;
+                (!void).then_some(0)
+            });
+            chunk.chisel.insert(BlockIndex::from_xyz(bx, 0, bz), voided);
         }
     }
     chunk
@@ -152,17 +156,17 @@ fn collapsed_cuboid_to_voxels_seam_is_level() {
     // away from the walking line keeps the neighbour a voxels collider with
     // the same surface.
     let mixed = |x: i32, z: i32| {
-        let mut chunk = Chunk::solid();
+        let mut chunk = Chunk::uniform(Block::new(SOLID));
         if z % 2 == 1 {
             // The top block farthest from the walking line (x = spawn).
-            let centre = |bx: usize| x as f32 * CHUNK + (bx * BLOCK_UNITS + BLOCK_UNITS / 2) as f32;
+            let centre = |bx: usize| x as f32 * CHUNK + (bx * BLOCK_VOXELS + BLOCK_VOXELS / 2) as f32;
             let far = (0..CHUNK_BLOCKS)
                 .max_by(|&a, &b| {
                     let off = |bx| (centre(bx) - common::SPAWN[0]).abs();
                     off(a).total_cmp(&off(b))
                 })
                 .unwrap();
-            chunk.set(far, CHUNK_BLOCKS - 1, 0, Cell::Air);
+            chunk.set_block(far, CHUNK_BLOCKS - 1, 0, Block::new(BlockId::AIR));
         }
         chunk
     };
@@ -204,10 +208,10 @@ fn full_block_wall_at_a_chunk_border_blocks() {
 /// one-block-thick ceiling whose underside is `clear_blocks` blocks above the
 /// floor.
 fn tunnel(clear_blocks: usize) -> Walker {
-    let floor = BLOCK_UNITS;
-    let ceiling = floor + clear_blocks * BLOCK_UNITS;
+    let floor = BLOCK_VOXELS;
+    let ceiling = floor + clear_blocks * BLOCK_VOXELS;
     // Chunk layers up to the one holding the ceiling's top face.
-    let top_layer = (ceiling + BLOCK_UNITS - 1) / CHUNK as usize;
+    let top_layer = (ceiling + BLOCK_VOXELS - 1) / CHUNK as usize;
     let mut chunks = Vec::new();
     for (x, z) in chunks_over(spawn_x_band(), rows_for(25)) {
         for cy in 0..=top_layer {
@@ -216,9 +220,9 @@ fn tunnel(clear_blocks: usize) -> Walker {
                 for bx in 0..CHUNK_BLOCKS {
                     for by in 0..CHUNK_BLOCKS {
                         for bz in 0..CHUNK_BLOCKS {
-                            let y0 = cy * (CHUNK as usize) + by * BLOCK_UNITS;
-                            if y0 >= ceiling && y0 < ceiling + BLOCK_UNITS {
-                                chunk.set(bx, by, bz, Cell::Full);
+                            let y0 = cy * (CHUNK as usize) + by * BLOCK_VOXELS;
+                            if y0 >= ceiling && y0 < ceiling + BLOCK_VOXELS {
+                                chunk.set_block(bx, by, bz, Block::new(SOLID));
                             }
                         }
                     }

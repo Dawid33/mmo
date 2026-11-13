@@ -6,21 +6,22 @@
 //! (and renders) behind it as usual, so the camera, meshing order and pipelines
 //! are all warm when it lifts; only the far LOD rings may still be streaming.
 //!
-//! Only the commander view gets one: the first-person dev mode (autopilot)
-//! keeps its own readiness gate.
+//! Only the commander view gets one: the first-person dev modes (render
+//! benchmark, autopilot) keep their own readiness gates.
 
 use bevy::prelude::*;
 
-use crate::renderer::bridge::RegionRoots;
+use crate::renderer::bridge::{PendingSnapshotVoxels, RegionRoots, SnapshotVoxelTask};
 use crate::renderer::commander::{CameraMode, CommanderCamera};
 use crate::renderer::hud::HudStatus;
-use crate::renderer::stud::systems::StudMeshChildren;
-use crate::renderer::stud::SimStudChunk;
+use crate::renderer::meshing::chunk_mesh::ChunkMeshDirty;
+use crate::renderer::meshing::queue::RemeshQueue;
+use crate::renderer::meshing::MeshingTask;
 use crate::session::{AppState, Embarked};
 
 /// Consecutive frames the home region must have no meshing work left (with
-/// the camera placed) before the cover lifts: chunks arrive and mesh in
-/// bursts with idle frames between them.
+/// the camera placed) before the cover lifts: snapshot batches and brick
+/// derivation arrive in bursts with idle frames between them.
 pub const LOADING_STABLE_FRAMES: u32 = 10;
 /// How long the cover takes to fade out.
 pub const LOADING_FADE_SECS: f32 = 0.5;
@@ -69,8 +70,8 @@ pub struct LoadSignals {
     pub home_known: bool,
     /// The home region's render root exists (its snapshot has arrived).
     pub home_rooted: bool,
-    /// Meshing work left in the home region: stud chunks whose first mesh
-    /// has not landed.
+    /// Meshing work left in the home region: queued and in-flight bricks,
+    /// chunks awaiting their bricks or their merged mesh.
     pub outstanding: usize,
 }
 
@@ -157,8 +158,12 @@ pub fn update_loading_cover(
     cam: Option<Res<CommanderCamera>>,
     status: Option<Res<HudStatus>>,
     roots: Option<Res<RegionRoots>>,
-    // Stud chunks whose first mesh has not landed (queued or in flight).
-    unmeshed: Query<&ChildOf, (With<SimStudChunk>, Without<StudMeshChildren>)>,
+    queue: Option<Res<RemeshQueue>>,
+    parents: Query<&ChildOf>,
+    in_flight: Query<
+        &ChildOf,
+        Or<(With<MeshingTask>, With<PendingSnapshotVoxels>, With<SnapshotVoxelTask>, With<ChunkMeshDirty>)>,
+    >,
 ) {
     let eligible = state.is_some_and(|s| *s.get() == AppState::InWorld)
         && embarked.is_some_and(|e| e.0)
@@ -169,7 +174,12 @@ pub fn update_loading_cover(
     // Counted only while a load is on: steady play pays nothing here.
     let loading = matches!(cover.phase, CoverPhase::Covering { .. }) || cam.as_ref().is_some_and(|c| !c.placed);
     let outstanding = match root {
-        Some(root) if eligible && loading => unmeshed.iter().filter(|p| p.parent() == root).count(),
+        Some(root) if eligible && loading => {
+            let queued = queue.as_ref().map_or(0, |q| {
+                q.dirty.keys().filter(|e| parents.get(**e).is_ok_and(|p| p.parent() == root)).count()
+            });
+            queued + in_flight.iter().filter(|p| p.parent() == root).count()
+        }
         _ => 0,
     };
     let signals = LoadSignals {

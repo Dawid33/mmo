@@ -19,7 +19,6 @@ use std::sync::{Arc, OnceLock};
 
 use game::RegionCoords;
 use worldgen::forged::ForgedWorld;
-use worldgen::stud_gen::{generate_stud_region_forged, stud_lod_tile_forged};
 use worldgen::forged_tiles::{
     decode_meta, decode_tile, encode_meta, encode_tile, split, ForgedMeta, MemTiles, Tile, TileCoords, TileLoader,
 };
@@ -46,6 +45,12 @@ fn fixture() -> &'static Fixture {
         assert!(tiled.artifact().is_none(), "a tiled world holds no artifact");
         Fixture { whole, tiled, meta, tiles }
     })
+}
+
+fn materials() -> worldgen::material::Materials {
+    let manifest = include_str!("../../../assets/blocks/blocks.ron");
+    let reg = game::BlockRegistry::from_ron(manifest).expect("valid manifest");
+    worldgen::material::Materials::from_names(|n| reg.id_of(n).unwrap_or_else(|| panic!("missing block {n}")))
 }
 
 /// Every point sampler's output at engine point `(x, z)`, as bits.
@@ -87,16 +92,22 @@ fn engine(f: &Fixture, ax: f64, az: f64) -> (f64, f64) {
     (min[0] + ax, min[1] + az)
 }
 
-/// A region's stud terrain (ground recipes and tree bricks) is the same from both worlds.
-fn assert_region(f: &Fixture, r: RegionCoords) {
-    assert!(
-        generate_stud_region_forged(&f.whole, r) == generate_stud_region_forged(&f.tiled, r),
-        "generate_stud_region_forged({r:?}): tiled differs from whole"
-    );
+fn assert_region(f: &Fixture, r: RegionCoords, mats: worldgen::material::Materials) {
+    let a = bincode::serialize(&worldgen::generate_region_forged(&f.whole, r, mats)).unwrap();
+    let b = bincode::serialize(&worldgen::generate_region_forged(&f.tiled, r, mats)).unwrap();
+    assert!(a == b, "generate_region_forged({r:?}): tiled differs from whole");
 }
 
-fn assert_lod(f: &Fixture, key: &game::lod::LodKey) {
-    assert!(stud_lod_tile_forged(&f.whole, key) == stud_lod_tile_forged(&f.tiled, key), "stud_lod_tile_forged({key:?})");
+fn assert_lod(f: &Fixture, key: &game::lod::LodKey, mats: worldgen::material::Materials) {
+    let cells = |w: &ForgedWorld| {
+        worldgen::coarse_tile_forged(w, key, mats)
+            .into_iter()
+            .map(|c| bincode::serialize(&(c.group, &c.grid)).unwrap())
+            .collect::<Vec<_>>()
+    };
+    assert!(cells(&f.whole) == cells(&f.tiled), "coarse_tile_forged({key:?})");
+    let water = |w: &ForgedWorld| bincode::serialize(&worldgen::coarse_water_forged(w, key, mats)).unwrap();
+    assert!(water(&f.whole) == water(&f.tiled), "coarse_water_forged({key:?})");
 }
 
 /// The Task 1 guard's grid and samplers (7 m stride, the map and 200 m past
@@ -127,6 +138,7 @@ fn tiled_equals_whole_everywhere() {
     }
     // Every region touching the map, plus a one-region rim, and LOD over
     // it at two factors (per-region keys and tiles); spread over threads.
+    let mats = materials();
     let rb = game::REGION_BLOCKS as f64;
     let (r0x, r0z) = ((min[0] / rb).floor() as i32 - 1, (min[1] / rb).floor() as i32 - 1);
     let (r1x, r1z) = (((max[0] - 1.0) / rb).floor() as i32 + 1, ((max[1] - 1.0) / rb).floor() as i32 + 1);
@@ -149,8 +161,8 @@ fn tiled_equals_whole_everywhere() {
                         break;
                     }
                     match regions.get(j) {
-                        Some(&r) => assert_region(f, r),
-                        None => assert_lod(f, &keys[j - regions.len()]),
+                        Some(&r) => assert_region(f, r, mats),
+                        None => assert_lod(f, &keys[j - regions.len()], mats),
                     }
                 }
             });
@@ -342,10 +354,11 @@ fn flipped_byte_is_a_decode_error() {
 #[ignore = "slow: >100ms — run via just test-full"]
 fn tiled_read_cost() {
     let f = fixture();
+    let mats = materials();
     for (name, w) in [("whole", &f.whole), ("tiled", &f.tiled)] {
         let t = std::time::Instant::now();
         for r in 0..4 {
-            std::hint::black_box(generate_stud_region_forged(w, RegionCoords::new(r, 0)));
+            std::hint::black_box(worldgen::generate_region_forged(w, RegionCoords::new(r, 0), mats));
         }
         let regions = t.elapsed();
         let t = std::time::Instant::now();
@@ -419,7 +432,14 @@ fn sweep_window(f: &Fixture, tiled: &ForgedWorld, (x0, z0): (f64, f64), lod: boo
         let rb = game::REGION_BLOCKS as f64;
         let rc = RegionCoords::new((x0 / rb).floor() as i32, (z0 / rb).floor() as i32);
         let key = game::lod::LodKey::for_region(16, rc);
-        assert!(stud_lod_tile_forged(&f.whole, &key) == stud_lod_tile_forged(tiled, &key), "stud_lod_tile_forged({key:?}) under eviction");
+        let mats = materials();
+        let cells = |w: &ForgedWorld| {
+            worldgen::coarse_tile_forged(w, &key, mats)
+                .into_iter()
+                .map(|c| bincode::serialize(&(c.group, &c.grid)).unwrap())
+                .collect::<Vec<_>>()
+        };
+        assert!(cells(&f.whole) == cells(tiled), "coarse_tile_forged({key:?}) under eviction");
     }
     check();
     drop(pins);
@@ -517,6 +537,7 @@ fn prefetch_error_is_reported_not_panicked() {
 #[ignore = "slow: >100ms — run via just test-full"]
 fn pinned_generation_needs_no_loads() {
     let f = fixture();
+    let mats = materials();
     let per_tile = (f64::from(FIXTURE_TILE_CELLS) * f.whole.globals().cell_m) as i32 / game::REGION_BLOCKS as i32;
     let (min, max) = f.whole.artifact_bounds_engine_m();
     let rb = game::REGION_BLOCKS as f64;
@@ -545,21 +566,21 @@ fn pinned_generation_needs_no_loads() {
         let pins = worldgen::prefetch_region_forged(&tiled, rc).expect("prefetch region");
         let before = loader.loads.load(Ordering::Relaxed);
         assert_eq!(before, pins.len(), "prefetch loads each pinned tile once");
-        assert!(
-            generate_stud_region_forged(&f.whole, rc) == generate_stud_region_forged(&tiled, rc),
-            "generate_stud_region_forged({rc:?}) after prefetch"
-        );
+        let a = bincode::serialize(&worldgen::generate_region_forged(&f.whole, rc, mats)).unwrap();
+        let b = bincode::serialize(&worldgen::generate_region_forged(&tiled, rc, mats)).unwrap();
+        assert!(a == b, "generate_region_forged({rc:?}) after prefetch");
         assert_eq!(loader.loads.load(Ordering::Relaxed), before, "region {rc:?} loaded a tile prefetch missed");
     }
 }
 
 /// The same for LOD keys: a per-region factor (16) and tile factors (64,
-/// 256), on tile seams, at an edge and past it — `stud_lod_tile_forged` after
-/// `prefetch_lod_forged` loads nothing.
+/// 256), on tile seams, at an edge and past it — `coarse_tile_forged` and
+/// `coarse_water_forged` after `prefetch_lod_forged` load nothing.
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn pinned_lod_needs_no_loads() {
     let f = fixture();
+    let mats = materials();
     let per_tile = (f64::from(FIXTURE_TILE_CELLS) * f.whole.globals().cell_m) as i32 / game::REGION_BLOCKS as i32;
     let (min, _) = f.whole.artifact_bounds_engine_m();
     let rb = game::REGION_BLOCKS as f64;
@@ -582,7 +603,15 @@ fn pinned_lod_needs_no_loads() {
             let pins = worldgen::prefetch_lod_forged(&tiled, &key).expect("prefetch lod");
             let before = loader.loads.load(Ordering::Relaxed);
             assert_eq!(before, pins.len());
-            assert!(stud_lod_tile_forged(&f.whole, &key) == stud_lod_tile_forged(&tiled, &key), "stud_lod_tile_forged({key:?}) after prefetch");
+            let cells = |w: &ForgedWorld| {
+                worldgen::coarse_tile_forged(w, &key, mats)
+                    .into_iter()
+                    .map(|c| bincode::serialize(&(c.group, &c.grid)).unwrap())
+                    .collect::<Vec<_>>()
+            };
+            assert!(cells(&f.whole) == cells(&tiled), "coarse_tile_forged({key:?}) after prefetch");
+            let water = |w: &ForgedWorld| bincode::serialize(&worldgen::coarse_water_forged(w, &key, mats)).unwrap();
+            assert!(water(&f.whole) == water(&tiled), "coarse_water_forged({key:?}) after prefetch");
             assert_eq!(loader.loads.load(Ordering::Relaxed), before, "LOD {key:?} loaded a tile prefetch missed");
         }
     }

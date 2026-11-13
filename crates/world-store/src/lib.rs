@@ -51,7 +51,6 @@ pub const CUT_LOCK_TIMEOUT_MS: u64 = 10_000;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Dials {
     pub region_blocks: u32,
-    /// The sim chunk's edge: the grid `stud_chunks` rows are keyed on.
     pub chunk_blocks: u32,
 }
 
@@ -65,51 +64,6 @@ impl Dials {
 impl fmt::Display for Dials {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "region_blocks={} chunk_blocks={}", self.region_blocks, self.chunk_blocks)
-    }
-}
-
-/// The terrain a world is tied to (`world.terrain`): set by the first server that
-/// serves it ([`StoreHandle::bind_terrain`]), never changed, never converted.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TerrainKind {
-    /// The mark of a world from before the stud cutover. This build stores no voxel
-    /// terrain at all (migration `0005_drop_voxel_terrain` dropped its table and
-    /// column): the kind exists only so such a world can be named when it is refused —
-    /// at open, before anything is migrated (`open.rs`), or by `bind_terrain`.
-    Voxels,
-    /// Stud terrain (`stud_chunks`, `regions.stud_ground`): the only terrain stored.
-    Studs,
-}
-
-impl TerrainKind {
-    /// The `world.terrain` value.
-    pub fn code(self) -> i64 {
-        match self {
-            TerrainKind::Voxels => 0,
-            TerrainKind::Studs => 1,
-        }
-    }
-
-    pub fn from_code(code: i64) -> Option<TerrainKind> {
-        match code {
-            0 => Some(TerrainKind::Voxels),
-            1 => Some(TerrainKind::Studs),
-            _ => None,
-        }
-    }
-
-    /// The word for it in messages.
-    pub fn name(self) -> &'static str {
-        match self {
-            TerrainKind::Voxels => "voxels",
-            TerrainKind::Studs => "studs",
-        }
-    }
-}
-
-impl fmt::Display for TerrainKind {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.name())
     }
 }
 
@@ -147,11 +101,6 @@ pub enum StoreError {
     Backend(String),
     Locked(String),
     OtherDials { stored: Dials, built: Dials },
-    /// The world is tied to another terrain kind than the one asked for
-    /// ([`StoreHandle::bind_terrain`]). With `stored` [`TerrainKind::Voxels`] it is
-    /// also how a store saved on voxel terrain is refused at open, by a writer and a
-    /// read-only handle alike, before any migration runs: nothing in it is changed.
-    OtherTerrain { stored: TerrainKind, wanted: TerrainKind },
     /// A stored format this build does not read: the store's own
     /// (`world.format_version`) or the forged tiles' (`forged_meta`).
     OtherFormat { found: u32, kind: FormatKind },
@@ -192,19 +141,7 @@ impl fmt::Display for StoreError {
             ),
             StoreError::OtherDials { stored, built } => write!(
                 f,
-                "this world was made with {stored} but this build has {built}; rebuild with the stored region size (just region_blocks=N …) or use another world"
-            ),
-            StoreError::OtherTerrain { stored: TerrainKind::Voxels, .. } => write!(
-                f,
-                "this world was saved on voxel terrain, which this build no longer serves — re-forge it \
-                 (the debug world: `just run --reset`; a menu world: make a new one). Terrain is never \
-                 converted; nothing in the world was changed, so a build from before the stud cutover \
-                 still opens it"
-            ),
-            StoreError::OtherTerrain { stored, wanted } => write!(
-                f,
-                "this world is saved on {stored} terrain and cannot be tied to {wanted} terrain \
-                 (terrain is never converted); use another world"
+                "this world was made with {stored} but this build has {built}; rebuild with the stored dials (just region_blocks=N chunk_blocks=N …) or use another world"
             ),
             StoreError::OtherFormat { found, kind: FormatKind::Store } => write!(
                 f,

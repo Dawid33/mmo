@@ -260,8 +260,7 @@ impl StoreHandle {
         self.ask(|r| Request::LoadRegion(rc, fence, r))
     }
 
-    /// Only the region's terrain — its stud edge (`game::StudEdge`: the edge columns'
-    /// recipes and stud rows); `None` if never committed.
+    /// Only the region's terrain (chunks + ground); `None` if never committed.
     /// Unfenced: what LOD and halo seeding read of regions this process need not own.
     pub fn load_terrain(&self, rc: RegionCoords) -> Result<Option<TerrainSnapshot>, StoreError> {
         self.ask(|r| Request::LoadTerrain(rc, r))
@@ -588,16 +587,6 @@ impl StoreHandle {
         self.ask(Request::LoadCoordinator)
     }
 
-    /// Ties the world to terrain `kind`: a world no server has served yet takes
-    /// it (written once, never changed); one already tied to the other kind is
-    /// refused with `OtherTerrain` and nothing is written. Call before any
-    /// region is loaded or saved. Servers bind [`crate::TerrainKind::Studs`], the
-    /// only terrain stored; a world saved on voxel terrain never gets this far (it
-    /// is refused at open), so `Voxels` is only ever the mark that gets a world refused.
-    pub fn bind_terrain(&self, kind: crate::TerrainKind) -> Result<(), StoreError> {
-        self.ask(|r| Request::BindTerrain(kind, r))
-    }
-
     /// The world's clock anchor (R3): stores `proposed` if the world has none, and
     /// returns the stored anchor either way — the first writer wins, so every host
     /// and the coordinator of a world number ticks from the same instant.
@@ -645,12 +634,6 @@ impl StoreHandle {
     /// holds (`None`: it holds none). A process whose claim was taken over has a lower one.
     pub fn owner_claim_epoch(&self, owner: u32) -> Result<Option<u64>, StoreError> {
         self.ask(|r| Request::OwnerClaimEpoch(owner, r))
-    }
-
-    /// The terrain kind the world is tied to; `None` before the first
-    /// [`StoreHandle::bind_terrain`].
-    pub fn terrain_kind(&self) -> Result<Option<crate::TerrainKind>, StoreError> {
-        self.ask(Request::TerrainKind)
     }
 
     /// Commits everything queued before this call, then stops the thread and

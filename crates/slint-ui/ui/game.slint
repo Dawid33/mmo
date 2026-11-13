@@ -8,10 +8,8 @@ import { DevStat, DevTickRow, DevToggle } from "debug-tab.slint";
 import { MenuColumn, MenuLayout } from "menu-column.slint";
 import { StubWindow } from "stub-window.slint";
 import { InventoryScreen, ItemSlot } from "inventory.slint";
-import { StudBuildLayout, StudBuildPalette, StudSwatch } from "stud-build.slint";
-import { PrefabEditorPanel } from "prefab-editor.slint";
 
-export { ItemSlot, EmbarkRow, LegendsFilterRow, RadialItem, SiteMark, StudSwatch, WorldMapConfig }
+export { ItemSlot, EmbarkRow, LegendsFilterRow, RadialItem, SiteMark, WorldMapConfig }
 
 // The whole in-game UI: one transparent window-sized layer that the client
 // draws over the 3D view (crates/client/src/renderer/slint_overlay.rs).
@@ -140,55 +138,6 @@ export component GameUi inherits Window {
     // The cursor, which the drag readout sits next to.
     in property <length> drag-x;
     in property <length> drag-y;
-    // The Build tool's material list in the context box (menu-column.slint):
-    // on stud terrain, the natural materials a build can name; empty = none.
-    in property <[string]> build-materials;
-    in property <int> build-material: -1;
-    callback pick-build-material(int);
-
-    // The stud build palette (stud-build.slint), bottom right while the stud
-    // build mode is on (crates/client/src/renderer/stud/build.rs).
-    in property <bool> stud-build-open;
-    in property <[string]> stud-parts;
-    in property <int> stud-part: -1;
-    in property <string> stud-rotation;
-    in property <[string]> stud-naturals;
-    in property <int> stud-natural: -1;
-    in property <[StudSwatch]> stud-colors;
-    in property <int> stud-color: -1;
-    in property <string> stud-selection;
-    callback stud-pick-part(int);
-    callback stud-rotate();
-    callback stud-pick-natural(int);
-    callback stud-pick-color(int);
-    callback stud-close();
-    // Hit-test positions of the palette for headless tests (window logical pixels).
-    // The prefab editor's panel (prefab-editor.slint), bottom centre while a prefab
-    // is being edited (crates/client/src/prefab_editor/panel.rs).
-    in property <bool> prefab-panel-open;
-    in property <string> prefab-title;
-    in property <string> prefab-counts;
-    in property <bool> prefab-dirty;
-    in property <string> prefab-message;
-    in property <bool> prefab-can-save;
-    in property <bool> prefab-confirm-exit;
-    callback prefab-save();
-    callback prefab-exit();
-    callback prefab-discard();
-    callback prefab-keep-editing();
-
-    out property <length> stud-rotate-x: palette.rotate-x;
-    out property <length> stud-rotate-y: palette.rotate-y;
-    out property <length> stud-close-x: palette.close-x;
-    out property <length> stud-close-y: palette.close-y;
-    out property <length> stud-parts-x: palette.parts-x;
-    out property <length> stud-parts-first-y: palette.parts-first-y;
-    out property <length> stud-parts-row-height: palette.parts-row-height;
-    out property <length> stud-naturals-first-y: palette.naturals-first-y;
-    out property <length> stud-swatches-x: palette.swatches-x;
-    out property <length> stud-swatches-y: palette.swatches-y;
-    out property <length> stud-swatch-pitch: palette.swatch-pitch;
-    out property <int> stud-swatch-columns: palette.swatch-columns;
 
     // The tool wheel (hold Q), which replaced the tool bar: one
     // wedge per tool in `TOOL_KEYS` order, then the cut. The client
@@ -382,9 +331,6 @@ export component GameUi inherits Window {
         tool-name: root.tool-name;
         priority: root.priority;
         level-text: root.level-text;
-        build-materials: root.build-materials;
-        build-material: root.build-material;
-        pick-build-material(i) => { root.pick-build-material(i); }
         selected-count: root.selected-count;
         selection-lines: root.selection-lines;
         following: root.following;
@@ -392,48 +338,6 @@ export component GameUi inherits Window {
         follow-clicked => { root.follow-clicked(); }
         top-down: root.top-down;
         top-down-clicked => { root.top-down-clicked(); }
-    }
-
-    // Bottom right; not over the arrival map. `visible` on a plain Rectangle
-    // (not `if`), so the test probes above stay readable.
-    Rectangle {
-        visible: root.stud-build-open && !root.map-modal;
-        palette := StudBuildPalette {
-            x: root.width - self.width - StudBuildLayout.margin;
-            y: root.height - self.height - StudBuildLayout.margin;
-            parts: root.stud-parts;
-            part: root.stud-part;
-            rotation-text: root.stud-rotation;
-            naturals: root.stud-naturals;
-            natural: root.stud-natural;
-            colors: root.stud-colors;
-            color: root.stud-color;
-            selection-text: root.stud-selection;
-            pick-part(i) => { root.stud-pick-part(i); }
-            rotate => { root.stud-rotate(); }
-            pick-natural(i) => { root.stud-pick-natural(i); }
-            pick-color(i) => { root.stud-pick-color(i); }
-            close => { root.stud-close(); }
-        }
-    }
-
-    // Bottom centre; not over the arrival map.
-    Rectangle {
-        visible: root.prefab-panel-open && !root.map-modal;
-        prefab-panel := PrefabEditorPanel {
-            x: (root.width - self.width) / 2;
-            y: root.height - self.height;
-            title-text: root.prefab-title;
-            counts-text: root.prefab-counts;
-            dirty: root.prefab-dirty;
-            message: root.prefab-message;
-            can-save: root.prefab-can-save;
-            confirm-exit: root.prefab-confirm-exit;
-            save => { root.prefab-save(); }
-            exit => { root.prefab-exit(); }
-            discard => { root.prefab-discard(); }
-            keep-editing => { root.prefab-keep-editing(); }
-        }
     }
 
     // Next to the cursor while dragging.

@@ -1,7 +1,204 @@
-//! Render configuration shared by every world camera.
+use std::fmt;
 
-/// Native cameras use post-process antialiasing. SMAA is single-sample, so
-/// leaving camera MSAA enabled would only add cost.
+use bevy::prelude::Resource;
+
+/// Full-resolution terrain rendering strategy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NearRenderBackend {
+    /// One Bevy `Mesh` asset and draw item per chunk.
+    PerChunk,
+    /// Shared quad-record buffers with one direct draw per visible chunk.
+    GroupedDirect,
+    /// GPU-built visibility and indirect draw commands over shared records.
+    GpuDriven,
+}
+
+impl NearRenderBackend {
+    /// Both modern near paths consume the same packed quad records. This keeps
+    /// meshing independent of whether draw submission is direct or GPU-driven.
+    pub const fn uses_quad_records(self) -> bool {
+        !matches!(self, Self::PerChunk)
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::PerChunk => "per-chunk",
+            Self::GroupedDirect => "direct",
+            Self::GpuDriven => "gpu",
+        }
+    }
+}
+
+/// Beyond-near-window terrain rendering strategy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FarRenderBackend {
+    /// Rasterized server-streamed LOD meshes/records.
+    Raster,
+    /// Deduplicated brick data sampled by a raymarch pass.
+    BrickRaymarch,
+}
+
+impl FarRenderBackend {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Raster => "raster",
+            Self::BrickRaymarch => "brick",
+        }
+    }
+}
+
+/// Backend implementations compiled into this client build.
+///
+/// Auto-selection is deliberately driven by this value rather than platform
+/// names scattered through render systems. Future backends can flip their
+/// gate when their complete pipeline is registered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TerrainRenderCapabilities {
+    pub grouped_direct: bool,
+    pub gpu_driven: bool,
+    pub brick_raymarch: bool,
+}
+
+impl TerrainRenderCapabilities {
+    pub const fn compiled() -> Self {
+        Self {
+            grouped_direct: true,
+            // The render-world capability resolver still falls back to
+            // grouped-direct when an adapter or pipeline misses a hard gate.
+            gpu_driven: true,
+            // Brick mode remains opt-in until the hybrid benchmark hard gates
+            // have been measured on the target adapters.
+            brick_raymarch: false,
+        }
+    }
+}
+
+/// One resolved near/far renderer pairing shared by meshing and render setup.
+#[derive(Resource, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TerrainRenderConfig {
+    pub near: NearRenderBackend,
+    pub far: FarRenderBackend,
+}
+
+impl TerrainRenderConfig {
+    /// Resolve optional environment values for a specified target/capability
+    /// set. The pure inputs keep platform and fallback behavior testable.
+    pub fn resolve(
+        near: Option<&str>,
+        far: Option<&str>,
+        is_wasm: bool,
+        capabilities: TerrainRenderCapabilities,
+    ) -> Result<Self, TerrainRenderConfigError> {
+        if is_wasm {
+            // Grouped-direct is what a WebGPU browser build can run; the
+            // `webgl2` build has no storage buffers at all, and
+            // `for_device` drops it to per-chunk once the adapter is known.
+            return Ok(Self {
+                near: NearRenderBackend::GroupedDirect,
+                far: FarRenderBackend::Raster,
+            });
+        }
+
+        let near = match near {
+            Some(value) => parse_near_backend(value)?,
+            None if capabilities.gpu_driven => NearRenderBackend::GpuDriven,
+            None if capabilities.grouped_direct => NearRenderBackend::GroupedDirect,
+            None => NearRenderBackend::PerChunk,
+        };
+        let far = match far {
+            Some(value) => parse_far_backend(value)?,
+            None if capabilities.brick_raymarch => FarRenderBackend::BrickRaymarch,
+            None => FarRenderBackend::Raster,
+        };
+        Ok(Self { near, far })
+    }
+
+    /// Reconcile the requested pairing with what the adapter can run. Both
+    /// quad-record backends read their records from storage buffers in the
+    /// VERTEX stage; a device without that (WebGL2, GLES 3.0) can only draw
+    /// per-chunk meshes. Must be applied before any chunk is meshed, because
+    /// the backend decides whether meshing emits `ChunkQuads` or `Mesh3d`.
+    pub const fn for_device(self, vertex_storage_buffers: bool) -> Self {
+        if self.near.uses_quad_records() && !vertex_storage_buffers {
+            Self {
+                near: NearRenderBackend::PerChunk,
+                far: self.far,
+            }
+        } else {
+            self
+        }
+    }
+
+    /// Resolve the process environment on native. Browser builds intentionally
+    /// never read overrides and always return the portable pairing.
+    pub fn from_env() -> Result<Self, TerrainRenderConfigError> {
+        #[cfg(target_arch = "wasm32")]
+        {
+            Self::resolve(None, None, true, TerrainRenderCapabilities::compiled())
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let near = std::env::var("VOXEL_NEAR_RENDER").ok();
+            let far = std::env::var("VOXEL_FAR_RENDER").ok();
+            Self::resolve(
+                near.as_deref(),
+                far.as_deref(),
+                false,
+                TerrainRenderCapabilities::compiled(),
+            )
+        }
+    }
+}
+
+impl Default for TerrainRenderConfig {
+    fn default() -> Self {
+        Self::from_env().unwrap_or_else(|error| panic!("{error}"))
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TerrainRenderConfigError {
+    InvalidNear(String),
+    InvalidFar(String),
+}
+
+impl fmt::Display for TerrainRenderConfigError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidNear(value) => write!(
+                f,
+                "invalid VOXEL_NEAR_RENDER value `{value}` (expected per-chunk, direct, or gpu)"
+            ),
+            Self::InvalidFar(value) => write!(
+                f,
+                "invalid VOXEL_FAR_RENDER value `{value}` (expected raster or brick)"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for TerrainRenderConfigError {}
+
+pub fn parse_near_backend(value: &str) -> Result<NearRenderBackend, TerrainRenderConfigError> {
+    match value {
+        "per-chunk" => Ok(NearRenderBackend::PerChunk),
+        "direct" => Ok(NearRenderBackend::GroupedDirect),
+        "gpu" => Ok(NearRenderBackend::GpuDriven),
+        value => Err(TerrainRenderConfigError::InvalidNear(value.to_owned())),
+    }
+}
+
+pub fn parse_far_backend(value: &str) -> Result<FarRenderBackend, TerrainRenderConfigError> {
+    match value {
+        "raster" => Ok(FarRenderBackend::Raster),
+        "brick" => Ok(FarRenderBackend::BrickRaymarch),
+        value => Err(TerrainRenderConfigError::InvalidFar(value.to_owned())),
+    }
+}
+
+/// Native cameras use the same post-process antialiasing in interactive and
+/// benchmark runs. SMAA is single-sample, so leaving camera MSAA enabled would
+/// add cost and make backend comparisons inconsistent.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn configure_native_antialiasing(
     mut commands: bevy::prelude::Commands,
@@ -22,6 +219,130 @@ pub fn configure_native_antialiasing(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const CURRENT: TerrainRenderCapabilities = TerrainRenderCapabilities {
+        grouped_direct: true,
+        gpu_driven: false,
+        brick_raymarch: false,
+    };
+
+    #[test]
+    fn parses_all_documented_backend_values() {
+        assert_eq!(
+            parse_near_backend("per-chunk"),
+            Ok(NearRenderBackend::PerChunk)
+        );
+        assert_eq!(
+            parse_near_backend("direct"),
+            Ok(NearRenderBackend::GroupedDirect)
+        );
+        assert_eq!(parse_near_backend("gpu"), Ok(NearRenderBackend::GpuDriven));
+        assert_eq!(parse_far_backend("raster"), Ok(FarRenderBackend::Raster));
+        assert_eq!(
+            parse_far_backend("brick"),
+            Ok(FarRenderBackend::BrickRaymarch)
+        );
+    }
+
+    #[test]
+    fn native_auto_chooses_best_available_backends() {
+        assert_eq!(
+            TerrainRenderConfig::resolve(None, None, false, CURRENT).unwrap(),
+            TerrainRenderConfig {
+                near: NearRenderBackend::GroupedDirect,
+                far: FarRenderBackend::Raster,
+            }
+        );
+        assert_eq!(
+            TerrainRenderConfig::resolve(
+                None,
+                None,
+                false,
+                TerrainRenderCapabilities {
+                    grouped_direct: true,
+                    gpu_driven: true,
+                    brick_raymarch: true,
+                },
+            )
+            .unwrap(),
+            TerrainRenderConfig {
+                near: NearRenderBackend::GpuDriven,
+                far: FarRenderBackend::BrickRaymarch,
+            }
+        );
+    }
+
+    #[test]
+    fn compiled_native_auto_enables_gpu_near_but_keeps_bricks_gated() {
+        let capabilities = TerrainRenderCapabilities::compiled();
+
+        assert!(capabilities.gpu_driven);
+        assert!(!capabilities.brick_raymarch);
+        assert_eq!(
+            TerrainRenderConfig::resolve(None, None, false, capabilities).unwrap(),
+            TerrainRenderConfig {
+                near: NearRenderBackend::GpuDriven,
+                far: FarRenderBackend::Raster,
+            }
+        );
+    }
+
+    #[test]
+    fn wasm_ignores_overrides_and_uses_portable_backends() {
+        assert_eq!(
+            TerrainRenderConfig::resolve(Some("gpu"), Some("brick"), true, CURRENT).unwrap(),
+            TerrainRenderConfig {
+                near: NearRenderBackend::GroupedDirect,
+                far: FarRenderBackend::Raster,
+            }
+        );
+    }
+
+    #[test]
+    fn device_without_vertex_storage_falls_back_to_per_chunk() {
+        for near in [NearRenderBackend::GroupedDirect, NearRenderBackend::GpuDriven] {
+            let config = TerrainRenderConfig {
+                near,
+                far: FarRenderBackend::Raster,
+            };
+            assert_eq!(config.for_device(true), config);
+            assert_eq!(
+                config.for_device(false),
+                TerrainRenderConfig {
+                    near: NearRenderBackend::PerChunk,
+                    far: FarRenderBackend::Raster,
+                }
+            );
+        }
+        let per_chunk = TerrainRenderConfig {
+            near: NearRenderBackend::PerChunk,
+            far: FarRenderBackend::Raster,
+        };
+        assert_eq!(per_chunk.for_device(false), per_chunk);
+    }
+
+    #[test]
+    fn invalid_values_name_the_environment_variable() {
+        assert_eq!(
+            TerrainRenderConfig::resolve(Some("meshlets"), None, false, CURRENT)
+                .unwrap_err()
+                .to_string(),
+            "invalid VOXEL_NEAR_RENDER value `meshlets` (expected per-chunk, direct, or gpu)"
+        );
+        assert_eq!(
+            TerrainRenderConfig::resolve(None, Some("fog"), false, CURRENT)
+                .unwrap_err()
+                .to_string(),
+            "invalid VOXEL_FAR_RENDER value `fog` (expected raster or brick)"
+        );
+    }
+
+    #[test]
+    fn only_per_chunk_uses_mesh_assets() {
+        assert!(!NearRenderBackend::PerChunk.uses_quad_records());
+        assert!(NearRenderBackend::GroupedDirect.uses_quad_records());
+        assert!(NearRenderBackend::GpuDriven.uses_quad_records());
+    }
 
     #[cfg(not(target_arch = "wasm32"))]
     #[test]

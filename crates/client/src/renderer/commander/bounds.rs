@@ -1,7 +1,6 @@
 //! Camera bounds in Adventure mode: the focus stays inside the character's
-//! window (the home region plus `max(near_radius, fortress_radius)` regions on
-//! every side — the adventurer's neighbourhood is simulated like a fortress's,
-//! see `instance::desired_window`), widened to the
+//! near window (the home region plus `near_radius` regions on every side —
+//! the only terrain the sim has loaded around the body), widened to the
 //! simulated fortress neighbourhood while the body is inside it. Fortress mode pans
 //! freely. `CommanderCamera::bounds` stays the home region's rectangle (camera
 //! placement, minimap); the window rect is a separate value computed here.
@@ -22,8 +21,7 @@ pub fn window_rect(home: RegionId, near_radius: i32) -> Rect {
     Rect { min: r.min - grow, max: r.max + grow }
 }
 
-/// The Adventure window: the body's window (its region plus the larger of the
-/// near radius and the neighbourhood radius `fortress_radius`), or — while the body's region
+/// The Adventure window: the body's near window, or — while the body's region
 /// lies inside the fortress neighbourhood (`fortress_radius` regions around the
 /// fortress, also simulated) — the box spanning both.
 pub fn adventure_window(
@@ -32,7 +30,7 @@ pub fn adventure_window(
     fortress: Option<RegionId>,
     fortress_radius: i32,
 ) -> Rect {
-    let near = window_rect(home, near_radius.max(fortress_radius));
+    let near = window_rect(home, near_radius);
     let Some(fortress) = fortress else { return near };
     let hood = window_rect(fortress, fortress_radius);
     let home_rect = region_rect(home);
@@ -92,19 +90,17 @@ mod tests {
     }
 
     #[test]
-    fn adventure_window_spans_body_and_fortress_neighbourhoods() {
+    fn adventure_window_spans_fortress_neighbourhood_only_from_inside() {
         let fort = game::RegionCoords::new(0, 0);
         let hood = window_rect(fort, 1);
-        // Inside the neighbourhood: the fortress 3x3 and the body's own 3x3.
+        // Inside the neighbourhood: the whole 3x3 is pannable.
         let next = game::RegionCoords::new(1, 0);
-        assert_eq!(adventure_window(next, 0, Some(fort), 1), hood.union(window_rect(next, 1)));
-        // Outside it: the body's own neighbourhood only.
+        assert_eq!(adventure_window(next, 0, Some(fort), 1), hood);
+        // Outside it: the body's own window only.
         let away = game::RegionCoords::new(5, 0);
-        assert_eq!(adventure_window(away, 0, Some(fort), 1), window_rect(away, 1));
-        // No fortress: the body's neighbourhood.
-        assert_eq!(adventure_window(next, 0, None, 1), window_rect(next, 1));
-        // Radius 0 (small / tiny worlds): the body's region only.
-        assert_eq!(adventure_window(next, 0, None, 0), region_rect(next));
+        assert_eq!(adventure_window(away, 0, Some(fort), 1), region_rect(away));
+        // No fortress: unchanged.
+        assert_eq!(adventure_window(next, 0, None, 1), region_rect(next));
     }
 
     #[test]

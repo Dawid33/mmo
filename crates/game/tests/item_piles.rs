@@ -6,23 +6,18 @@
 //! expire. Every change undoes bit-exact and reaches the renderer both ways.
 use crate::common;
 
-use common::{r0, STAND};
+use common::{floor_chunks, r0};
 use game::edit::BlockPos;
 use game::{
-    install_block_props, state_hash, BlockRegistry, ClientId,
+    feet_of, feet_tile, install_block_props, state_hash, Block, BlockId, BlockRegistry, ClientId,
     GameDataTransactionKind, GameDataUpdate, GameDataUpdateKind, GameEventKind, Intent, ItemId, ItemStack, PickupView, PileFlight, PileView,
-    PlayMode, Region, Rollback, INVENTORY_SLOTS, MAX_STACK, PICKUP_DELAY_TICKS, PILES_PER_REGION_MAX,
-    PILE_DESPAWN_TICKS, REGION_BLOCKS, STICK,
+    PlayMode, Region, Rollback, BLOCK_VOXELS, INVENTORY_SLOTS, MAX_STACK, PICKUP_DELAY_TICKS, PILES_PER_REGION_MAX,
+    PILE_DESPAWN_TICKS, REGION_BLOCKS, REGION_SIZE, STICK,
 };
 
 const MANIFEST: &str = include_str!("../../../assets/blocks/blocks.ron");
 const DIRT: ItemId = ItemId(1);
-/// The tile level of the ground's top (solid) tile: a pile rests in `G + 1`.
-const G: i32 = STAND - 1;
-/// The built tiles of these tests are stone.
-const STONE: bool = true;
-/// Dug out.
-const AIR: bool = false;
+const STONE: BlockId = BlockId(2);
 
 fn stack(item: ItemId, count: u32) -> ItemStack {
     ItemStack { item, count }
@@ -33,8 +28,8 @@ fn install() {
     install_block_props(reg.props());
 }
 
-/// A region of flat stud ground over its whole area, no players: the rest
-/// cell of any open column is tile level `G + 1`.
+/// A region floored one block deep (y 0) over its whole area, no players:
+/// the rest cell of any open column is y 1.
 fn region() -> Region {
     let (region, recv) = region_rx();
     std::mem::forget(recv);
@@ -46,7 +41,8 @@ fn region_rx() -> (Region, crossbeam::channel::Receiver<GameDataUpdate>) {
     install();
     let (send, recv) = crossbeam::channel::unbounded();
     let mut region = Region::new(Rollback::new(Some(send.clone())), Some(send), r0(), None);
-    region.seed_stud_world(common::uniform_seed());
+    let chunks = floor_chunks(0.0..REGION_SIZE, 0.0..REGION_SIZE, BLOCK_VOXELS as u32);
+    region.with_data(|r| r.seed_terrain_genesis(chunks));
     (region, recv)
 }
 
@@ -65,38 +61,33 @@ fn w(p: BlockPos) -> game::WorldBlockPos {
     game::WorldBlockPos::from_local(r0(), game::BlockPos::new(p[0], p[1], p[2]))
 }
 
-/// Builds tile `p` of stone (`STONE`) or digs it out (`AIR`).
-fn put_tile(region: &mut Region, p: BlockPos, stone: bool) {
-    region.with_data(|r| assert!(set_tile(r, p, stone), "write at {p:?}"));
-}
-
-fn set_tile(r: &mut Rollback, p: BlockPos, stone: bool) -> bool {
-    if stone { common::fill_tile(r, p) > 0 } else { common::carve_tile(r, p) }
+fn set_block(region: &mut Region, p: BlockPos, id: BlockId) {
+    region.with_data(|r| assert!(r.set_block_safe(p, Block::new(id)), "write at {p:?}"));
 }
 
 #[test]
 fn deposit_settles_on_floor() {
     let mut region = region();
-    assert_eq!(deposit(&mut region, [10, G + 10, 10], stack(DIRT, 3), 0), 0);
-    assert_eq!(piles(&region), vec![([10, G + 1, 10], vec![stack(DIRT, 3)])]);
+    assert_eq!(deposit(&mut region, [10, 10, 10], stack(DIRT, 3), 0), 0);
+    assert_eq!(piles(&region), vec![([10, 1, 10], vec![stack(DIRT, 3)])]);
 }
 
 #[test]
 fn deposits_bunch() {
     let mut region = region();
     // Centre first, then its eight neighbours, round and round.
-    let mut cells = vec![[10, G + 1, 10]];
+    let mut cells = vec![[10, 1, 10]];
     for dx in -1..=1 {
         for dz in -1..=1 {
             if (dx, dz) != (0, 0) {
-                cells.push([10 + dx, G + 1, 10 + dz]);
+                cells.push([10 + dx, 1, 10 + dz]);
             }
         }
     }
     for i in 0..40 {
         deposit(&mut region, cells[i % cells.len()], stack(DIRT, 1), i as u64);
     }
-    assert_eq!(piles(&region), vec![([10, G + 1, 10], vec![stack(DIRT, 40)])]);
+    assert_eq!(piles(&region), vec![([10, 1, 10], vec![stack(DIRT, 40)])]);
 }
 
 #[test]
@@ -104,55 +95,51 @@ fn merge_respects_max_stack() {
     let mut region = region();
     // 100 sticks, ten at a time.
     for i in 0..10 {
-        deposit(&mut region, [10, G + 1, 10], stack(STICK, 10), i);
+        deposit(&mut region, [10, 1, 10], stack(STICK, 10), i);
     }
-    assert_eq!(piles(&region), vec![([10, G + 1, 10], vec![stack(STICK, MAX_STACK), stack(STICK, 100 - MAX_STACK)])]);
+    assert_eq!(piles(&region), vec![([10, 1, 10], vec![stack(STICK, MAX_STACK), stack(STICK, 100 - MAX_STACK)])]);
 }
 
 #[test]
 fn different_items_share_pile_until_full() {
     let mut region = region();
     for k in 0..5u16 {
-        deposit(&mut region, [10, G + 1, 10], stack(ItemId(10 + k), 1), 0);
+        deposit(&mut region, [10, 1, 10], stack(ItemId(10 + k), 1), 0);
     }
     let got = piles(&region);
     assert_eq!(got.len(), 2, "{got:?}");
-    let centre = &region.data().item_piles()[&w([10, G + 1, 10])];
+    let centre = &region.data().item_piles()[&w([10, 1, 10])];
     assert_eq!(centre.stacks.len(), game::PILE_MAX_STACKS);
     // The nearest cell (Chebyshev 1, lowest key) that rests where it is.
-    assert_eq!(got[0], ([9, G + 1, 9], vec![stack(ItemId(14), 1)]));
+    assert_eq!(got[0], ([9, 1, 9], vec![stack(ItemId(14), 1)]));
 }
 
 #[test]
 fn pile_falls_when_support_broken() {
     let mut region = region();
-    put_tile(&mut region, [10, G + 1, 10], STONE);
-    deposit(&mut region, [10, G + 6, 10], stack(DIRT, 2), 0);
-    assert_eq!(piles(&region), vec![([10, G + 2, 10], vec![stack(DIRT, 2)])]);
-    put_tile(&mut region, [10, G + 1, 10], AIR);
-    assert_eq!(piles(&region), vec![([10, G + 1, 10], vec![stack(DIRT, 2)])]);
+    set_block(&mut region, [10, 1, 10], STONE);
+    deposit(&mut region, [10, 6, 10], stack(DIRT, 2), 0);
+    assert_eq!(piles(&region), vec![([10, 2, 10], vec![stack(DIRT, 2)])]);
+    set_block(&mut region, [10, 1, 10], BlockId::AIR);
+    assert_eq!(piles(&region), vec![([10, 1, 10], vec![stack(DIRT, 2)])]);
 }
 
 #[test]
 fn pile_pushed_up_by_placed_block() {
     let mut region = region();
-    deposit(&mut region, [10, G + 1, 10], stack(DIRT, 2), 0);
-    put_tile(&mut region, [10, G + 1, 10], STONE);
-    assert_eq!(piles(&region), vec![([10, G + 2, 10], vec![stack(DIRT, 2)])]);
+    deposit(&mut region, [10, 1, 10], stack(DIRT, 2), 0);
+    set_block(&mut region, [10, 1, 10], STONE);
+    assert_eq!(piles(&region), vec![([10, 2, 10], vec![stack(DIRT, 2)])]);
     // A batched fill pushes it up through every new block.
     region.with_data(|r| {
-        for p in [[10, G + 2, 10], [10, G + 3, 10]] {
-            assert!(set_tile(r, p, STONE));
-        }
+        r.fill_blocks_safe(&[[10, 2, 10], [10, 3, 10]], Block::new(STONE));
     });
-    assert_eq!(piles(&region), vec![([10, G + 4, 10], vec![stack(DIRT, 2)])]);
+    assert_eq!(piles(&region), vec![([10, 4, 10], vec![stack(DIRT, 2)])]);
     // And a batched clear drops it back to the floor.
     region.with_data(|r| {
-        // One batch, top down (dev-complete's stud path).
-        let boxes: Vec<_> = [[10, G + 3, 10], [10, G + 2, 10], [10, G + 1, 10]].iter().map(|p| game::stud_tile_box(*p).unwrap()).collect();
-        r.carve_stud_boxes_safe(&boxes);
+        r.clear_blocks_safe(&[[10, 1, 10], [10, 2, 10], [10, 3, 10]]);
     });
-    assert_eq!(piles(&region), vec![([10, G + 1, 10], vec![stack(DIRT, 2)])]);
+    assert_eq!(piles(&region), vec![([10, 1, 10], vec![stack(DIRT, 2)])]);
 }
 
 /// [`region`] at region `rc` instead of [`r0`].
@@ -161,7 +148,8 @@ fn region_at(rc: game::RegionCoords) -> Region {
     let (send, recv) = crossbeam::channel::unbounded();
     std::mem::forget(recv);
     let mut region = Region::new(Rollback::new(Some(send.clone())), Some(send), rc, None);
-    region.seed_stud_world(common::uniform_seed());
+    let chunks = floor_chunks(0.0..REGION_SIZE, 0.0..REGION_SIZE, BLOCK_VOXELS as u32);
+    region.with_data(|r| r.seed_terrain_genesis(chunks));
     region
 }
 
@@ -172,12 +160,12 @@ fn region_at(rc: game::RegionCoords) -> Region {
 fn deposit_outside_region_goes_to_its_owner() {
     let mut region = region();
     let n = REGION_BLOCKS as i32;
-    deposit(&mut region, [-5, G + 3, n + 7], stack(DIRT, 1), 0);
-    // Inside the floor: it rises out of the solid tile.
-    deposit(&mut region, [20, G, 20], stack(DIRT, 1), 0);
-    assert_eq!(piles(&region), vec![([20, G + 1, 20], vec![stack(DIRT, 1)])], "nothing clamped in");
+    deposit(&mut region, [-5, 3, n + 7], stack(DIRT, 1), 0);
+    // Inside the floor: it rises out of the solid block.
+    deposit(&mut region, [20, 0, 20], stack(DIRT, 1), 0);
+    assert_eq!(piles(&region), vec![([20, 1, 20], vec![stack(DIRT, 1)])], "nothing clamped in");
     let sent = region.take_intents();
-    let cell = w([-5, G + 3, n + 7]);
+    let cell = w([-5, 3, n + 7]);
     let owner = game::RegionCoords::new(-1, 1);
     assert_eq!(cell.to_local().0, owner);
     let by = game::EntityId::of_region(r0());
@@ -195,7 +183,7 @@ fn deposit_outside_region_goes_to_its_owner() {
         owner_region.handle_event(GameEventKind::Tick).unwrap();
     }
     let got: Vec<_> = owner_region.data().item_piles().iter().map(|(p, pile)| (*p, pile.stacks.clone())).collect();
-    assert_eq!(got, vec![(game::WorldBlockPos::new(cell.x, G + 1, cell.z), vec![stack(DIRT, 1)])]);
+    assert_eq!(got, vec![(game::WorldBlockPos::new(cell.x, 1, cell.z), vec![stack(DIRT, 1)])]);
     let replies = owner_region.take_intents();
     assert!(
         replies.iter().all(|m| matches!(m, game::IntentMsg::Reply(r) if matches!(r.reply, game::IntentReply::Granted(_)))),
@@ -208,9 +196,9 @@ fn deposit_outside_region_goes_to_its_owner() {
 #[test]
 fn takes_of_the_last_item_conflict() {
     let mut region = region();
-    let cell = w([10, G + 1, 10]);
+    let cell = w([10, 1, 10]);
     let now = region.current_tick();
-    region.with_data(|r| assert_eq!(r.deposit_items_safe([10, G + 1, 10], stack(DIRT, 1), now, 0), 0));
+    region.with_data(|r| assert_eq!(r.deposit_items_safe([10, 1, 10], stack(DIRT, 1), now, 0), 0));
     let other = game::RegionCoords::new(-1, 0);
     let (a, b) = (game::EntityId { birth_region: other, serial: 7 }, game::EntityId { birth_region: other, serial: 3 });
     let due = region.current_tick() + 1;
@@ -257,7 +245,7 @@ fn refused_deposit_goes_back_to_the_inventory() {
     region.with_data(|r| r.clients.get_mut(&0).unwrap().inventory = game::Inventory::new());
     let key = *region.data().player_entites.get(&0).unwrap();
     let by = region.data().entity_id(key).unwrap();
-    let cell = game::WorldBlockPos::new(-1, G + 1, 5);
+    let cell = game::WorldBlockPos::new(-1, 1, 5);
     let reply = game::SentReply {
         reply: game::IntentReply::Refused(
             Intent::DepositItems { cell, stack: stack(DIRT, 3), expire: 0, pickup: 0, by },
@@ -279,7 +267,7 @@ fn refused_deposit_goes_back_to_the_inventory() {
 #[test]
 fn refused_deposit_after_a_long_park_keeps_a_full_lifetime() {
     let mut region = region();
-    let cell = w([10, G + 1, 10]);
+    let cell = w([10, 1, 10]);
     // Refused while the source was parked: stamped from before the park.
     let refused = Intent::DepositItems {
         cell,
@@ -300,24 +288,20 @@ fn refused_deposit_after_a_long_park_keeps_a_full_lifetime() {
     for _ in 0..3 {
         region.handle_event(GameEventKind::Tick).unwrap();
     }
-    assert_eq!(piles(&region), vec![([10, G + 1, 10], vec![stack(DIRT, 2)])], "the refund is put down and kept");
+    assert_eq!(piles(&region), vec![([10, 1, 10], vec![stack(DIRT, 2)])], "the refund is put down and kept");
     let expires = region.data().pile_expiry().keys().next().expect("indexed").0;
     assert!(expires >= woke_at + PILE_DESPAWN_TICKS, "a full lifetime from the wake: expires at {expires}");
 }
 
 #[test]
 fn deposit_in_water_rests_on_floor() {
-    install();
-    // Recipe water at tile levels G + 1 ..= G + 3 over the floor of column (10, 10).
-    let pond = common::water::WaterBox { xs: 10..11, zs: 10..11, surface: G, water_top: G + 3 };
-    let (send, recv) = crossbeam::channel::unbounded();
-    std::mem::forget(recv);
-    let mut region = Region::new(Rollback::new(Some(send.clone())), Some(send), r0(), None);
-    region.seed_stud_world(common::water::floor_with_water(r0(), &[pond]));
-    let wet = WorldBlockPos::from_local(r0(), game::BlockPos::new(10, G + 1, 10));
+    let mut region = region();
+    // Recipe water at levels 1..=3 over the one-block floor of column (10, 10).
+    region.with_data(|d| crate::common::water::set_recipe_water(d, 10..11, 10..11, 0, 3, 0));
+    let wet = WorldBlockPos::from_local(r0(), game::BlockPos::new(10, 1, 10));
     assert_eq!(region.data().water_units_at(wet), game::WATER_FULL, "the pile cell is under water");
-    deposit(&mut region, [10, G + 8, 10], stack(DIRT, 1), 0);
-    assert_eq!(piles(&region), vec![([10, G + 1, 10], vec![stack(DIRT, 1)])]);
+    deposit(&mut region, [10, 8, 10], stack(DIRT, 1), 0);
+    assert_eq!(piles(&region), vec![([10, 1, 10], vec![stack(DIRT, 1)])]);
 }
 
 /// [`region`] with Adventure clients `ids`, their bodies at the spawn.
@@ -331,7 +315,7 @@ fn region_with_adventurers(ids: &[ClientId]) -> (Region, BlockPos) {
     let e = *region.data().player_entites.get(&ids[0]).unwrap();
     let data = region.data();
     let handle = data.ecs.rigidbody.try_get(e).unwrap();
-    let tile = common::feet_tile(data.physics.bodies.get(handle).unwrap().translation());
+    let tile = feet_tile(feet_of(data.physics.bodies.get(handle).unwrap().translation()));
     (region, tile)
 }
 
@@ -417,7 +401,7 @@ fn two_clients_one_pile_goes_to_lower_client_id_first() {
 #[test]
 fn expiry_removes_pile_at_tick() {
     let mut region = region();
-    deposit(&mut region, [10, G + 1, 10], stack(DIRT, 1), 100);
+    deposit(&mut region, [10, 1, 10], stack(DIRT, 1), 100);
     region.with_data(|r| r.expire_piles_safe(100 + PILE_DESPAWN_TICKS - 1));
     assert_eq!(piles(&region).len(), 1);
     region.with_data(|r| r.expire_piles_safe(100 + PILE_DESPAWN_TICKS));
@@ -430,7 +414,7 @@ fn expiry_removes_pile_at_tick() {
 fn clock_jump_keeps_pile_loaded_time() {
     let mut region = region();
     // Region tick 0, so the jump's delta is 10_000.
-    deposit(&mut region, [10, G + 1, 10], stack(DIRT, 1), 0);
+    deposit(&mut region, [10, 1, 10], stack(DIRT, 1), 0);
     let oldest = region.data().oldest();
     region.jump_clock_to(10_000);
     assert_eq!(region.current_tick(), 10_000);
@@ -456,27 +440,27 @@ fn cap_evicts_earliest() {
     let n = REGION_BLOCKS as i32;
     assert_eq!((n * n) as usize, PILES_PER_REGION_MAX, "the test fills every column of a 64-block region");
     // A pillar with a gap: column (5, 5) rests two piles, at y 2 and y 4.
-    put_tile(&mut region, [5, G + 1, 5], STONE);
-    put_tile(&mut region, [5, G + 3, 5], STONE);
+    set_block(&mut region, [5, 1, 5], STONE);
+    set_block(&mut region, [5, 3, 5], STONE);
     let mut tick = 0;
     region.with_data(|r| {
         for x in 0..n {
             for z in 0..n {
                 // No neighbour shares an item, so nothing merges.
                 let item = ItemId(10 + (x % 2 + 2 * (z % 2)) as u16);
-                r.deposit_items_safe([x, G + 1, z], stack(item, 1), tick, 0);
+                r.deposit_items_safe([x, 1, z], stack(item, 1), tick, 0);
                 tick += 1;
             }
         }
     });
     assert_eq!(region.data().item_piles().len(), PILES_PER_REGION_MAX);
     let counted = game::item_piles::items_destroyed_on_thread();
-    assert_eq!(deposit(&mut region, [5, G + 4, 5], stack(STICK, 1), tick), 1, "the evicted pile's one item is reported");
+    assert_eq!(deposit(&mut region, [5, 4, 5], stack(STICK, 1), tick), 1, "the evicted pile's one item is reported");
     assert_eq!(game::item_piles::items_destroyed_on_thread() - counted, 1, "and counted");
     let all = region.data().item_piles();
     assert_eq!(all.len(), PILES_PER_REGION_MAX);
-    assert!(!all.contains_key(&w([0, G + 1, 0])), "the earliest-expiring pile was evicted");
-    assert_eq!(all[&w([5, G + 4, 5])].stacks, vec![stack(STICK, 1)]);
+    assert!(!all.contains_key(&w([0, 1, 0])), "the earliest-expiring pile was evicted");
+    assert_eq!(all[&w([5, 4, 5])].stacks, vec![stack(STICK, 1)]);
     assert_eq!(region.data().pile_expiry().len(), PILES_PER_REGION_MAX);
 }
 
@@ -494,20 +478,20 @@ fn deposit_emits_updates_both_ways() {
     install();
     let (send, recv) = crossbeam::channel::unbounded();
     let mut r = Rollback::new(Some(send));
-    common::seed_studs(&mut r, common::uniform_seed());
+    r.seed_terrain_genesis(floor_chunks(0.0..REGION_SIZE, 0.0..REGION_SIZE, BLOCK_VOXELS as u32));
     r.new_transaction();
-    r.deposit_items_safe([10, G + 1, 10], stack(DIRT, 2), 0, 0);
+    r.deposit_items_safe([10, 1, 10], stack(DIRT, 2), 0, 0);
     r.forget();
     recv.try_iter().count();
 
     let before = state_hash(&r);
     r.new_transaction();
-    r.deposit_items_safe([10, G + 1, 10], stack(DIRT, 3), 0, 0);
+    r.deposit_items_safe([10, 1, 10], stack(DIRT, 3), 0, 0);
     r.rollback();
     assert_eq!(before, state_hash(&r));
     let got = pile_payloads(&recv);
     let view = |n| Some(PileView { stacks: vec![stack(DIRT, n)] });
-    assert_eq!(got, vec![(true, vec![([10, G + 1, 10], view(5))]), (false, vec![([10, G + 1, 10], view(2))])]);
+    assert_eq!(got, vec![(true, vec![([10, 1, 10], view(5))]), (false, vec![([10, 1, 10], view(2))])]);
 }
 
 #[test]
@@ -515,25 +499,25 @@ fn support_break_undo_bit_exact() {
     install();
     let (send, recv) = crossbeam::channel::unbounded();
     let mut r = Rollback::new(Some(send));
-    common::seed_studs(&mut r, common::uniform_seed());
+    r.seed_terrain_genesis(floor_chunks(0.0..REGION_SIZE, 0.0..REGION_SIZE, BLOCK_VOXELS as u32));
     r.new_transaction();
-    assert!(set_tile(&mut r, [10, G + 1, 10], STONE));
-    r.deposit_items_safe([10, G + 5, 10], stack(DIRT, 2), 0, 0);
+    assert!(r.set_block_safe([10, 1, 10], Block::new(STONE)));
+    r.deposit_items_safe([10, 5, 10], stack(DIRT, 2), 0, 0);
     r.forget();
     recv.try_iter().count();
 
     let before = state_hash(&r);
     r.new_transaction();
-    assert!(set_tile(&mut r, [10, G + 1, 10], AIR));
-    assert!(r.item_piles().contains_key(&w([10, G + 1, 10])), "the pile fell");
+    assert!(r.set_block_safe([10, 1, 10], Block::new(BlockId::AIR)));
+    assert!(r.item_piles().contains_key(&w([10, 1, 10])), "the pile fell");
     r.rollback();
     assert_eq!(before, state_hash(&r));
-    assert!(r.item_piles().contains_key(&w([10, G + 2, 10])));
+    assert!(r.item_piles().contains_key(&w([10, 2, 10])));
     let got = pile_payloads(&recv);
     let view = Some(PileView { stacks: vec![stack(DIRT, 2)] });
     assert_eq!(got.len(), 2, "{got:?}");
-    assert!(got[0].0 && got[0].1.contains(&([10, G + 1, 10], view.clone())));
-    assert!(!got[1].0 && got[1].1.contains(&([10, G + 2, 10], view)));
+    assert!(got[0].0 && got[0].1.contains(&([10, 1, 10], view.clone())));
+    assert!(!got[1].0 && got[1].1.contains(&([10, 2, 10], view)));
 }
 
 #[test]
@@ -564,8 +548,7 @@ fn closing_inventory_drops_what_does_not_fit_at_the_feet() {
 
 /// A pile whose support breaks falls onto a full pile, and every cell
 /// around its rest cell that could take a stack is full too: its items are
-/// destroyed (with what the dug support itself yields), reported and counted,
-/// and nothing else changes.
+/// destroyed, reported and counted, and nothing else changes.
 #[test]
 fn resettle_into_full_neighbourhood_counts_loss() {
     let mut region = region();
@@ -573,11 +556,11 @@ fn resettle_into_full_neighbourhood_counts_loss() {
     let total = MAX_STACK * game::PILE_MAX_STACKS as u32;
     // Rest cell (10, 1, 10) first, then its eight floor neighbours: the only
     // cells within reach that rest where they are (the rest fall or rise).
-    let mut cells = vec![[10, G + 1, 10]];
+    let mut cells = vec![[10, 1, 10]];
     for dx in -1..=1 {
         for dz in -1..=1 {
             if (dx, dz) != (0, 0) {
-                cells.push([10 + dx, G + 1, 10 + dz]);
+                cells.push([10 + dx, 1, 10 + dz]);
             }
         }
     }
@@ -585,8 +568,8 @@ fn resettle_into_full_neighbourhood_counts_loss() {
         assert_eq!(deposit(&mut region, c, stack(DIRT, total), 0), 0);
     }
     // A shelf over the rest cell's pile, with another pile on it.
-    put_tile(&mut region, [10, G + 2, 10], STONE);
-    deposit(&mut region, [10, G + 3, 10], stack(STICK, 5), 0);
+    set_block(&mut region, [10, 2, 10], STONE);
+    deposit(&mut region, [10, 3, 10], stack(STICK, 5), 0);
     assert_eq!(piles(&region).len(), cells.len() + 1);
     let full_piles: Vec<_> = cells.iter().map(|&c| (c, region.data().item_piles()[&w(c)].clone())).collect();
     for (_, p) in &full_piles {
@@ -599,20 +582,15 @@ fn resettle_into_full_neighbourhood_counts_loss() {
     region.forget_last_event();
     let _ = region.take_items_destroyed();
     let counted = game::item_piles::items_destroyed_on_thread();
-    let shelf = game::TileBox::new([10, G + 2, 10], [10, G + 2, 10]);
+    let shelf = game::TileBox::new([10, 2, 10], [10, 2, 10]);
     let op = game::OpId { client: 0, seq: 1 };
     let dig = game::Order::Designate { op, kind: game::DesignationKind::Dig, priority: game::DEFAULT_PRIORITY, area: shelf };
     for order in [dig, game::Order::DevCompleteAll] {
         region.handle_event(GameEventKind::Order(0, order)).unwrap();
         region.forget_last_event();
     }
-    // On stud terrain the dug shelf yields its stone too (a tile's worth of cells
-    // per item, `mining::DropTally`), which finds no room either.
-    let shelf_yield = (game::item_piles::items_destroyed_on_thread() - counted) as u32 - 5;
-    assert!((1..=2).contains(&shelf_yield), "the shelf's bricks: {shelf_yield}");
-    let lost = u64::from(5 + shelf_yield);
-    assert_eq!(game::item_piles::items_destroyed_on_thread() - counted, lost, "the stick pile's 5 items and the shelf's yield, counted once");
-    assert_eq!(region.take_items_destroyed(), lost, "attributed to the region");
+    assert_eq!(game::item_piles::items_destroyed_on_thread() - counted, 5, "the stick pile's 5 items, counted once");
+    assert_eq!(region.take_items_destroyed(), 5, "attributed to the region");
     assert_eq!(region.take_items_destroyed(), 0, "and drained");
     let after = region.data().item_piles();
     assert_eq!(after.len(), cells.len(), "the stick pile is gone");
@@ -633,7 +611,7 @@ fn pickup_tells_the_renderer_who_took_what() {
     let body = *region.data().player_entites.get(&0).unwrap();
     let data = region.data();
     let handle = data.ecs.rigidbody.try_get(body).unwrap();
-    let tile = common::feet_tile(data.physics.bodies.get(handle).unwrap().translation());
+    let tile = feet_tile(feet_of(data.physics.bodies.get(handle).unwrap().translation()));
     deposit(&mut region, tile, stack(STICK, 5), 0);
     recv.try_iter().count();
     region.with_data(|r| r.tick_pickups_safe(PICKUP_DELAY_TICKS));
@@ -670,16 +648,16 @@ fn falling_pile_tells_the_renderer_where_it_fell_from() {
     install();
     let (send, recv) = crossbeam::channel::unbounded();
     let mut r = Rollback::new(Some(send));
-    common::seed_studs(&mut r, common::uniform_seed());
+    r.seed_terrain_genesis(floor_chunks(0.0..REGION_SIZE, 0.0..REGION_SIZE, BLOCK_VOXELS as u32));
     r.new_transaction();
-    assert!(set_tile(&mut r, [10, G + 1, 10], STONE));
-    r.deposit_items_safe([10, G + 2, 10], stack(DIRT, 2), 0, 0);
+    assert!(r.set_block_safe([10, 1, 10], Block::new(STONE)));
+    r.deposit_items_safe([10, 2, 10], stack(DIRT, 2), 0, 0);
     r.forget();
     recv.try_iter().count();
     r.new_transaction();
-    assert!(set_tile(&mut r, [10, G + 1, 10], AIR));
+    assert!(r.set_block_safe([10, 1, 10], Block::new(BlockId::AIR)));
     let tick = *r.tick as u64;
-    assert_eq!(landings(&recv), vec![PileFlight { from: [10, G + 2, 10], to: [10, G + 1, 10], stacks: vec![stack(DIRT, 2)], tick }]);
+    assert_eq!(landings(&recv), vec![PileFlight { from: [10, 2, 10], to: [10, 1, 10], stacks: vec![stack(DIRT, 2)], tick }]);
 }
 
 /// A deposit from above (a throw, a drop from height) lands where it settles.
@@ -688,12 +666,12 @@ fn deposit_from_above_tells_the_renderer_its_origin() {
     install();
     let (send, recv) = crossbeam::channel::unbounded();
     let mut r = Rollback::new(Some(send));
-    common::seed_studs(&mut r, common::uniform_seed());
+    r.seed_terrain_genesis(floor_chunks(0.0..REGION_SIZE, 0.0..REGION_SIZE, BLOCK_VOXELS as u32));
     r.new_transaction();
-    r.deposit_items_from_safe([10, G + 6, 10], [12, G + 4, 10], stack(DIRT, 3), 7, 0);
-    assert_eq!(landings(&recv), vec![PileFlight { from: [10, G + 6, 10], to: [12, G + 1, 10], stacks: vec![stack(DIRT, 3)], tick: 7 }]);
+    r.deposit_items_from_safe([10, 6, 10], [12, 4, 10], stack(DIRT, 3), 7, 0);
+    assert_eq!(landings(&recv), vec![PileFlight { from: [10, 6, 10], to: [12, 1, 10], stacks: vec![stack(DIRT, 3)], tick: 7 }]);
     // A deposit that rests where it was made does not animate.
-    r.deposit_items_safe([20, G + 1, 20], stack(DIRT, 1), 7, 0);
+    r.deposit_items_safe([20, 1, 20], stack(DIRT, 1), 7, 0);
     assert!(landings(&recv).is_empty());
 }
 
@@ -803,6 +781,51 @@ fn pickup_from_neighbour_pile() {
     let dirt: u32 = inv.slots.iter().flatten().chain(cursor.iter()).filter(|s| s.item == DIRT).map(|s| s.count).sum();
     assert_eq!(dirt, 5, "exactly one copy: {inv:?}");
     assert_seam_invariant(&PickupAcross, Some(InlineSchedule::jittery));
+}
+
+/// A felled body's `DropItems` across a seam: a dirt column at the spawn
+/// region's −x edge toppled about its −x base edge falls into region
+/// (−1, 0) — since Task 7.5 the voxel body crosses the seam (its drops in
+/// the bundle) and settles there, putting its drops down in its new owner's
+/// cells: the four dirt end up in piles there, none here, nothing lost.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn felled_body_drops_across_seam() {
+    use game::rapier3d::math::Vector;
+    let mut rig = Rig::with_floor(None, crate::common::seam_translate::uniform_floor);
+    rig.join_spawn();
+    let mid = REGION_BLOCKS as i32 / 2;
+    let column: Vec<BlockPos> = (1..=4).map(|y| [0, y, mid]).collect();
+    rig.manager.spawner_mut().with_region(game::SPAWN_REGION, |r| {
+        r.with_data(|d| {
+            for &p in &column {
+                assert!(d.set_block_safe(p, Block::new(BlockId(1))), "dirt at {p:?}");
+            }
+            let bv = BLOCK_VOXELS as f32;
+            let pivot = Vector::new(0.0, bv, (mid as f32 + 0.5) * bv);
+            let spin = Vector::new(0.0, 0.0, 2.0);
+            assert!(d.detach_blocks_pivoting_safe(&column, game::SettlePolicy::DropItems, spin, Some(pivot)).is_some());
+        })
+    });
+    let west = game::RegionCoords::new(-1, 0);
+    let dirt_in = |rig: &mut Rig, rc| {
+        let mut n = 0;
+        rig.manager.spawner_mut().with_region(rc, |r| {
+            n = r.data().item_piles().values().flat_map(|p| &p.stacks).filter(|s| s.item == DIRT).map(|s| s.count).sum();
+        });
+        n
+    };
+    for _ in 0..120 {
+        rig.round();
+        if dirt_in(&mut rig, west) == 4 {
+            break;
+        }
+    }
+    assert_eq!(dirt_in(&mut rig, west), 4, "the four dirt lie across the seam");
+    assert_eq!(dirt_in(&mut rig, game::SPAWN_REGION), 0, "none stayed behind");
+    rig.manager.spawner_mut().with_region(west, |r| {
+        assert!(r.data().item_piles().keys().all(|p| p.x < 0), "in the cells under the body");
+    });
 }
 
 /// Review fix (R26): a take's grant carries items the owner already removed.

@@ -30,20 +30,11 @@ pub struct CursorPolicy {
     /// (`commander::first_person`): mouse look holds the pointer, except
     /// while the menu or map is open.
     pub first_person: bool,
-    /// The world is still loading behind the loading screen
-    /// ([`sync_world_loading`]): mouse look waits for it, so entering
-    /// Adventure (first person) does not take the pointer away while the
-    /// player can see nothing but the cover.
-    pub loading: bool,
 }
 
 impl CursorPolicy {
-    /// Mouse look holds the pointer: the sim asked for it or first person is
-    /// on — unless a game screen (menu, map, inventory, …) or a client-local
-    /// overlay is open, which always gets a free pointer — and not before the
-    /// world has loaded.
     pub fn grabbed(&self) -> bool {
-        (self.sim_grab || self.first_person) && !self.ui_modal && !self.overlay_open && !self.loading
+        (self.sim_grab || (self.first_person && !self.ui_modal)) && !self.overlay_open
     }
 
     /// A client-local overlay or a modal game screen is open: commander
@@ -72,56 +63,18 @@ pub fn reset_session_grab(world: &mut World) {
     }
 }
 
-/// Whether the commander view's world is still loading: the loading cover is
-/// up, or the camera has not been put over the body yet (true from the start
-/// of a session and after a Play, so it also covers the frames before the
-/// cover goes up in `PostUpdate`).
-pub fn world_loading(commander: bool, cover_up: bool, camera_placed: bool) -> bool {
-    commander && (cover_up || !camera_placed)
-}
-
-/// Feeds [`CursorPolicy::loading`]. Runs just before [`apply_cursor_policy`].
-/// The first-person dev modes (render benchmark, autopilot,
-/// `VOXEL_CAMERA=first-person`) have no loading screen and are never held.
-pub fn sync_world_loading(
-    mode: Option<Res<super::commander::CameraMode>>,
-    cam: Option<Res<super::commander::CommanderCamera>>,
-    cover: Option<Res<crate::frontend::loading::LoadingCover>>,
-    mut policy: ResMut<CursorPolicy>,
-) {
-    let commander = mode.is_some_and(|m| *m == super::commander::CameraMode::Commander);
-    let cover_up =
-        cover.is_some_and(|c| matches!(c.phase, crate::frontend::loading::CoverPhase::Covering { .. }));
-    let loading = world_loading(commander, cover_up, cam.is_some_and(|c| c.placed));
-    if policy.loading != loading {
-        policy.loading = loading;
-    }
-}
-
 /// Apply the policy to the window. Idempotent: writing `CursorOptions` trips
 /// change detection, which re-issues the winit grab — an X11 re-grab loop when
 /// the grab is contended — so only a real change is written.
-///
-/// When mouse look lets go of the pointer (a screen opened over first
-/// person), the pointer reappears at the window centre, as in Minecraft —
-/// not wherever the OS cursor was left when the look began. An orbit drag
-/// ending is not that: `commander` puts the pointer back where the press was.
 pub fn apply_cursor_policy(
     policy: Res<CursorPolicy>,
-    mut was_look_grab: Local<bool>,
-    mut windows: Query<(&mut CursorOptions, &mut Window), With<PrimaryWindow>>,
+    mut windows: Query<&mut CursorOptions, With<PrimaryWindow>>,
 ) {
     let (grab_mode, visible) = policy.mode();
-    let look_grab = policy.grabbed();
-    let released = std::mem::replace(&mut *was_look_grab, look_grab) && !look_grab;
-    if let Ok((mut cursor, mut window)) = windows.single_mut() {
+    if let Ok(mut cursor) = windows.single_mut() {
         if cursor.grab_mode != grab_mode || cursor.visible != visible {
             cursor.grab_mode = grab_mode;
             cursor.visible = visible;
-        }
-        if released && grab_mode == CursorGrabMode::None {
-            let centre = window.size() / 2.0;
-            window.set_cursor_position(Some(centre));
         }
     }
 }
@@ -174,44 +127,6 @@ mod tests {
         assert_eq!(locked.mode(), (CursorGrabMode::Locked, false));
         let overlay = CursorPolicy { overlay_open: true, ..locked };
         assert_eq!(overlay.mode(), (CursorGrabMode::None, true));
-    }
-
-    #[test]
-    fn a_game_screen_frees_the_sim_grab_too() {
-        // First person: the sim's FpsCam grab AND the client's first person.
-        let fp = CursorPolicy { sim_grab: true, first_person: true, ..Default::default() };
-        assert_eq!(fp.mode(), (CursorGrabMode::Locked, false));
-        assert_eq!(CursorPolicy { ui_modal: true, ..fp }.mode(), (CursorGrabMode::None, true));
-    }
-
-    #[test]
-    fn releasing_mouse_look_centres_the_pointer() {
-        let mut app = app();
-        {
-            let w = app.world_mut();
-            let mut q = w.query_filtered::<&mut Window, With<PrimaryWindow>>();
-            q.single_mut(w).unwrap().set_cursor_position(Some(Vec2::new(3.0, 4.0)));
-        }
-        app.world_mut().resource_mut::<CursorPolicy>().first_person = true;
-        app.update();
-        app.world_mut().resource_mut::<CursorPolicy>().ui_modal = true;
-        app.update();
-        let w = app.world_mut();
-        let window = w.query_filtered::<&Window, With<PrimaryWindow>>().single(w).unwrap();
-        assert_eq!(window.cursor_position(), Some(window.size() / 2.0));
-    }
-
-    #[test]
-    fn mouse_look_waits_for_the_world_to_load() {
-        let fp = CursorPolicy { sim_grab: true, first_person: true, ..Default::default() };
-        assert_eq!(CursorPolicy { loading: true, ..fp }.mode(), (CursorGrabMode::None, true));
-        assert_eq!(fp.mode(), (CursorGrabMode::Locked, false));
-        // Commander view: loading while the cover is up or the camera is unplaced.
-        assert!(world_loading(true, true, true));
-        assert!(world_loading(true, false, false));
-        assert!(!world_loading(true, false, true));
-        // The first-person dev modes have no loading screen.
-        assert!(!world_loading(false, true, false));
     }
 
     #[test]

@@ -14,8 +14,8 @@ use crossbeam::channel::{unbounded, Receiver};
 use game::history::bootstrap::{bootstrap, BootstrapParams};
 use game::history::*;
 use game::{
-    Biome, ClientId, ClientPacket, Coordinator, EmbarkRequest, HostMsg, InlineSchedule, InlineSpawner,
-    InlineWorldLink, PlayerId, RegionCoords, RegionOutput, ServerEvent, ServerPacket, WorldLink,
+    Biome, ClientId, ClientPacket, Coordinator, EmbarkRequest, HostMsg, InlineLodBuilder, InlineSchedule, InlineSpawner,
+    InlineWorldLink, LodBuilder, PlayerId, RegionCoords, RegionOutput, ServerEvent, ServerPacket, WorldLink,
     WorldManager, WorldMap, WorldRequest, TICK_RATE, UNLOAD_GRACE_MS, WORLD_REQUEST_TIMEOUT_SECS,
 };
 
@@ -131,10 +131,19 @@ impl World {
     fn new(seed: u64) -> Self {
         let (out_send, packets) = unbounded();
         let (region_out_send, region_out) = unbounded();
-        let mut manager = crate::common::stud_manager(
-            InlineSpawner::default().with_stud_genesis(std::sync::Arc::new(floored_region)),
+        let (lod_result_send, lod_result_recv) = unbounded();
+        let lod_builder: Box<dyn LodBuilder> = Box::new(InlineLodBuilder {
+            coarse: Box::new(|_key: &game::lod::LodKey| Vec::new()),
+            water: Box::new(game::lod::LodWater::dry),
+            out: lod_result_send,
+        });
+        let mut manager = WorldManager::new(
+            InlineSpawner::default(),
+            Box::new(floored_region),
             out_send,
             region_out_send,
+            lod_builder,
+            lod_result_recv,
         );
         manager.set_world_map(strip());
         let schedule = InlineSchedule::shuffled(seed).coordinator_delay(LINK_DELAY);
@@ -168,10 +177,7 @@ impl World {
         for (to, p) in self.packets.try_iter() {
             if !matches!(
                 p,
-                ServerPacket::Region(..)
-                    | ServerPacket::GameEvent(_)
-                    | ServerPacket::SyncClock(..)
-                    | ServerPacket::StudLodData(..)
+                ServerPacket::Region(..) | ServerPacket::GameEvent(_) | ServerPacket::SyncClock(..) | ServerPacket::LodData(..)
             ) {
                 self.inbox.push((to, p));
             }

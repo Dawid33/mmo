@@ -59,30 +59,37 @@ fn held_input_moves_the_player() {
 }
 
 #[test]
-fn streamed_far_tiles_arrive_for_ring_regions() {
-    // End-to-end far terrain: the instance's ring assignment must request a
-    // far tile for a region just outside the near window, and the server's
-    // StudLodData reply must reach the bridge channel as a decodable tile of
-    // the key's size. Only one ring is enabled — the production table would
-    // inline-build hundreds of keys through the LocalServer.
+fn streamed_factor2_lod_arrives_for_ring_regions() {
+    // End-to-end factor-2 check (the old far ring's replacement): the
+    // instance's ring assignment must request factor-2 LOD for a region just
+    // outside the near window, and the server's LodData reply must reach the
+    // bridge channel with decodable, non-empty grids. Only the factor-2 ring
+    // is enabled — the production table would inline-build hundreds of keys
+    // through the LocalServer (minutes of wall clock).
     let mut h = SimHarness::with_lod_table(&[(2, 2)]);
     h.connect();
     h.step_n(10);
-    let tiles: Vec<(game::lod::LodKey, game::StudLodTile)> = h
+    let lod: Vec<(game::lod::LodKey, game::LodPayload)> = h
         .drain_bridge_events()
         .into_iter()
         .filter_map(|e| match e {
-            game::ClientUpdateEvent::StudLodData(key, tile) => Some((key, tile)),
+            game::ClientUpdateEvent::LodData(key, payload, _) => Some((key, payload)),
             _ => None,
         })
         .collect();
     // The viewer sits in SPAWN_REGION (0,0); the home-only near window is
-    // excluded, so the distance-2 ring is asked for on the stud ring table.
-    let factor = game::stud_ring_table(&[(2, 2)])[0].1;
-    let key = game::lod::LodKey::for_region(factor, game::RegionCoords::new(2, 0));
-    let tile = tiles.iter().find(|(k, _)| *k == key).map(|(_, t)| t).expect("a far tile for the distance-2 ring region (2,0)");
-    assert_eq!(tile.side, game::StudLodTile::side_for(&key), "sized for its key");
-    let samples = tile.decode().expect("a well-formed tile over the wire");
-    let n = usize::from(tile.side) + 1;
-    assert_eq!(samples.len(), n * n, "one sample per lattice point");
+    // excluded, so the distance-2 ring renders at factor 2.
+    let key = game::lod::LodKey::for_region(2, game::RegionCoords::new(2, 0));
+    let payload = lod
+        .iter()
+        .find(|(k, _)| *k == key)
+        .map(|(_, p)| p)
+        .expect("factor-2 LodData for the distance-2 ring region (2,0)");
+    assert!(!payload.is_empty(), "flat worldgen floor produces cells");
+    for (_, grid) in payload {
+        assert!(
+            grid.decode().is_some(),
+            "well-formed RLE grids over the wire"
+        );
+    }
 }

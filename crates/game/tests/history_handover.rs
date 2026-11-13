@@ -686,8 +686,9 @@ fn civ_population_counts_strays() {
 use crate::common;
 use crossbeam::channel::{unbounded, Receiver};
 use game::{
-    ClientId, ClientPacket, InlineSpawner, RegionOutput, ServerEvent, ServerPacket, WorldManager, FLIP_HYSTERESIS,
-    REGION_SIZE, TICK_RATE, UNLOAD_GRACE_MS,
+    Block, BlockId, Chunk, ClientId, ClientPacket, Column, ColumnCoords, InlineLodBuilder, InlineSpawner, LodBuilder,
+    RegionOutput, ServerEvent, ServerPacket, SubChunk, WorldManager, BLOCK_VOXELS, FLIP_HYSTERESIS, REGION_SIZE,
+    TICK_RATE, UNLOAD_GRACE_MS,
 };
 use std::collections::BTreeMap;
 
@@ -726,9 +727,16 @@ pub fn history_mut_of<S: game::RegionSpawner>(m: &mut WorldManager<S>) -> &mut H
         .history_mut()
 }
 
-/// Flat stud ground under the whole of every region.
-pub fn floored_region(_rc: RegionCoords) -> game::StudRegionSeed {
-    common::uniform_seed()
+/// A one-block floor under the whole of every region.
+pub fn floored_region(_rc: RegionCoords) -> Vec<(ColumnCoords, Column)> {
+    let air = Block::new(BlockId::AIR);
+    common::chunks_over(0.0..REGION_SIZE, 0.0..REGION_SIZE)
+        .into_iter()
+        .map(|(x, z)| {
+            let sub = SubChunk::Dense(Box::new(Chunk::flat_floor(BLOCK_VOXELS as u32)));
+            (ColumnCoords::new(x, z), Column::new(0, air, air, vec![sub]))
+        })
+        .collect()
 }
 
 /// Every person with a body, and the running regions holding them.
@@ -785,10 +793,19 @@ impl World {
     fn new(map: WorldMap, history: Option<History>) -> Self {
         let (out_send, packets) = unbounded();
         let (region_out_send, region_out) = unbounded();
-        let mut manager = crate::common::stud_manager(
-            InlineSpawner::default().with_stud_genesis(std::sync::Arc::new(floored_region)),
+        let (lod_result_send, lod_result_recv) = unbounded();
+        let lod_builder: Box<dyn LodBuilder> = Box::new(InlineLodBuilder {
+            coarse: Box::new(|_key: &game::lod::LodKey| Vec::new()),
+            water: Box::new(game::lod::LodWater::dry),
+            out: lod_result_send,
+        });
+        let mut manager = WorldManager::new(
+            InlineSpawner::default(),
+            Box::new(floored_region),
             out_send,
             region_out_send,
+            lod_builder,
+            lod_result_recv,
         );
         manager.set_world_map(map);
         if let Some(h) = history {
@@ -923,7 +940,7 @@ fn neighbour_wake_catches_up() {
 
     // The player walks over the seam into the site region: the arrival wakes it, and its
     // people are there.
-    let z = (LANDING[1] as f32 + 0.5) * common::TILE_W;
+    let z = (LANDING[1] as f32 + 0.5) * BLOCK_VOXELS as f32;
     w.teleport_player(rc(1, 0), -(FLIP_HYSTERESIS + 2.0), z);
     w.tick();
     w.tick(); // the woken region's slot closes: the arrival is applied before its next Tick
@@ -1094,7 +1111,7 @@ fn arrival_into_stopping_region_waits_for_its_park() {
     let stop_outputs: Vec<_> = w.region_out.try_iter().collect();
     assert!(stop_outputs.iter().any(|(r, o)| *r == rc(0, 0) && matches!(o, RegionOutput::Stopped(..))));
     // The player walks over the seam into (0, 0): its departure is handled first.
-    let z = (LANDING[1] as f32 + 0.5) * common::TILE_W;
+    let z = (LANDING[1] as f32 + 0.5) * BLOCK_VOXELS as f32;
     w.teleport_player(rc(1, 0), -(FLIP_HYSTERESIS + 2.0), z);
     w.now_ms += TICK_RATE;
     w.manager.spawner_mut().tick_all();

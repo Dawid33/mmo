@@ -12,9 +12,7 @@
 
 use super::placement::{MAX_AGE, hash64};
 use super::species::Species;
-
-/// Skeleton units ("voxels") per metre: positions and radii are in 1/16 m.
-pub const VOXELS_PER_M: i32 = 16;
+use game::BLOCK_VOXELS;
 
 /// Fixed-point scale of `SIN_TABLE`.
 pub const SIN_SCALE: i32 = 1 << 14;
@@ -174,8 +172,32 @@ pub struct TreeSkeleton {
     pub leaf_nodes: Vec<u16>,
 }
 
+impl TreeSkeleton {
+    /// Per node, its limb: 0 for the trunk; for a level-1 node (a limb) and
+    /// everything descending from it, `(ordinal % MAX_TREE_LIMB) + 1`, its
+    /// ordinal among the level-1 nodes in node (birth) order — so a limb keeps
+    /// its index as the tree grows (a younger skeleton is a prefix).
+    pub fn limbs(&self) -> Vec<u8> {
+        let mut out: Vec<u8> = Vec::with_capacity(self.nodes.len());
+        let mut ordinal = 0u32;
+        for n in &self.nodes {
+            let limb = match (n.level, n.parent) {
+                (0, _) | (_, None) => 0,
+                (1, _) => {
+                    let l = (ordinal % u32::from(game::MAX_TREE_LIMB)) as u8 + 1;
+                    ordinal += 1;
+                    l
+                }
+                (_, Some(p)) => out[p as usize],
+            };
+            out.push(limb);
+        }
+        out
+    }
+}
+
 const SALT_SHAPE: u64 = 0x7EE5_5EED;
-const BV: f64 = VOXELS_PER_M as f64;
+const BV: f64 = BLOCK_VOXELS as f64;
 /// The trunk stands on the centre of its base block.
 const AXIS: f64 = BV / 2.0;
 
@@ -389,7 +411,7 @@ impl Builder<'_> {
         let sp = self.sp;
         let h = self
             .rng
-            .range(sp.trunk_height_blocks.0 * VOXELS_PER_M, sp.trunk_height_blocks.1 * VOXELS_PER_M)
+            .range(sp.trunk_height_blocks.0 * BLOCK_VOXELS as i32, sp.trunk_height_blocks.1 * BLOCK_VOXELS as i32)
             as f64;
         let r_base = sp.trunk_radius as f64;
         let r_top = r_base * sp.taper_pct as f64 / 100.0;
@@ -479,8 +501,8 @@ pub fn skeleton(species: &Species, seed: u64, age: u16) -> TreeSkeleton {
 
     // Fit the full-grown tree inside the species limits (crown radius from the
     // trunk axis, height from the ground), horizontally and vertically apart.
-    let lim_h = (species.crown_radius_blocks * VOXELS_PER_M) as f64 + AXIS - 2.0;
-    let lim_v = (species.max_height_blocks * VOXELS_PER_M) as f64 - 2.0;
+    let lim_h = (species.crown_radius_blocks * BLOCK_VOXELS as i32) as f64 + AXIS - 2.0;
+    let lim_v = (species.max_height_blocks * BLOCK_VOXELS as i32) as f64 - 2.0;
     let reach = |p: [f64; 3]| ((p[0] - AXIS) * (p[0] - AXIS) + (p[2] - AXIS) * (p[2] - AXIS)).sqrt();
     let (mut sh, mut sv) = (1.0f64, 1.0f64);
     // Wood and leaf clusters keep their size (only growth scales them): the fit
@@ -490,10 +512,10 @@ pub fn skeleton(species: &Species, seed: u64, age: u16) -> TreeSkeleton {
         sv = sv.min((lim_v - n.radius - n.flare) / n.pos[1].max(1.0));
     }
     for l in &b.leaves {
-        // Clusters keep inside the limits by their own radius (the bricks
-        // laid around them reach `LEAF_REACH_PAST_CROWN_BLOCKS` further at
-        // most). Younger trees have smaller radii and offsets, so the
-        // full-grown fit holds.
+        // A leaf block counts if its centre is within `r + LEAF_DITHER_VOXELS`
+        // of the cluster's (`raster.rs`); block centres sit on the trunk axis
+        // lattice, so this keeps those blocks inside the limits too. Younger
+        // trees have smaller radii and offsets, so the full-grown fit holds.
         let off = if l.out == [0.0; 3] { 0.0 } else { tip_offset(l.radius) };
         let out_h = (l.out[0] * l.out[0] + l.out[2] * l.out[2]).sqrt() * off;
         sh = sh.min((lim_h - l.radius - out_h) / reach(l.centre).max(1.0));
@@ -569,6 +591,26 @@ mod tests {
             assert!((1..=3).contains(&p.branch_levels), "{}", sp.name);
             assert!(p.trunk_height_blocks.0 <= p.trunk_height_blocks.1 && p.limbs.0 <= p.limbs.1);
             assert!(p.trunk_height_blocks.1 < sp.max_height_blocks, "{}", sp.name);
+        }
+    }
+
+    #[test]
+    fn limbs_keep_their_index_as_the_tree_grows() {
+        for sp in &SPECIES {
+            let old = skeleton(sp, 7, MAX_AGE);
+            let limbs = old.limbs();
+            assert!(limbs.iter().any(|&l| l > 0), "{}: has limbs", sp.name);
+            for (i, n) in old.nodes.iter().enumerate() {
+                assert_eq!(limbs[i] == 0, n.level == 0, "{}: node {i} level {}", sp.name, n.level);
+                if let Some(p) = n.parent.filter(|_| n.level > 1) {
+                    assert_eq!(limbs[i], limbs[p as usize]);
+                }
+            }
+            for age in [20, 50, 80] {
+                let young = skeleton(sp, 7, age);
+                assert_eq!(young.limbs()[..], limbs[..young.nodes.len()], "{} age {age}", sp.name);
+                assert_eq!(young.leaf_nodes.len(), young.leaves.len());
+            }
         }
     }
 

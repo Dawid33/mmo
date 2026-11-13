@@ -8,8 +8,9 @@
 //! (`crates/server/tests/threaded_world.rs` keeps the real-thread plumbing
 //! check). Run via `just test-threads`.
 use game::{
-    ClientPacket, ColumnCoords, GameEvent, GameEventKind, Goal, InlineSchedule, InputEvent, Key, Order, PlayMode,
-    RegionCoords, ServerEvent, REGION_BLOCKS, REGION_SIZE, SPAWN_REGION, TICK_RATE,
+    Block, BlockId, Chunk, ClientPacket, Column, ColumnCoords, GameEvent, GameEventKind, Goal, InlineSchedule,
+    InputEvent, Key, Order, PlayMode, RegionCoords, ServerEvent, SubChunk, REGION_BLOCKS, REGION_SIZE,
+    SPAWN_REGION, TICK_RATE,
 };
 
 use crate::common;
@@ -272,10 +273,15 @@ const WALK_Z_BLOCK: i32 = 8;
 /// rounds; missed ticks and late inputs stretch it).
 const ADVENTURE_ROUNDS: usize = 400;
 
-/// Flat stud ground over the spawn region's strip `z < 320` units, and the
+/// A one-block floor over the spawn region's strip `z < 320` units, and the
 /// first chunk column of the east neighbour beside it; far regions get the
 /// chunk under the spawn column.
-fn adventure_floor_columns(rc: RegionCoords) -> game::StudRegionSeed {
+fn adventure_floor_columns(rc: RegionCoords) -> Vec<(ColumnCoords, Column)> {
+    let floor = |(x, z): (usize, usize)| {
+        let air = Block::new(BlockId::AIR);
+        let sub = SubChunk::Dense(Box::new(Chunk::flat_floor(game::BLOCK_VOXELS as u32)));
+        (ColumnCoords::new(x, z), Column::new(0, air, air, vec![sub]))
+    };
     let zs = 0.0..320.0;
     let xs = if rc == SPAWN_REGION {
         0.0..REGION_SIZE
@@ -285,7 +291,7 @@ fn adventure_floor_columns(rc: RegionCoords) -> game::StudRegionSeed {
         128.0..160.0
     };
     let zs = if rc == SPAWN_REGION || rc == EAST { zs } else { 128.0..160.0 };
-    common::floor_seed(xs, zs, common::FLOOR_PLATES)
+    common::chunks_over(xs, zs).into_iter().map(floor).collect()
 }
 
 /// An adventurer `SEAM_GAP_BLOCKS` short of the +x seam is sent to a column
@@ -299,7 +305,7 @@ fn walk_into_east(seed: u64, schedule: InlineSchedule) {
     }
     rig.walk_until_owned_by(SPAWN_REGION, "spawn");
     let n = REGION_BLOCKS as i32;
-    rig.order(Order::SetMode { mode: PlayMode::Adventure, at: Some([n - SEAM_GAP_BLOCKS, common::STAND, WALK_Z_BLOCK]) });
+    rig.order(Order::SetMode { mode: PlayMode::Adventure, at: Some([n - SEAM_GAP_BLOCKS, 1, WALK_Z_BLOCK]) });
     for _ in 0..PAST_SEAM_ROUNDS {
         rig.round();
     }
@@ -801,15 +807,6 @@ use crate::common::seam_translate::{
 use crate::common::water::{floor_with_water, WaterBox};
 use game::WorldBlockPos;
 
-/// One metre (a tile's width), sim units: the snapshots' "block".
-const B: f32 = common::TILE_W;
-
-/// The bottom of tile level `level`, sim units: where the floor's top is for
-/// a placement's origin (`origin.y` is the level a body stands in).
-fn level_y(level: i32) -> f32 {
-    game::level_bottom_units(level)
-}
-
 /// Rounds a freshly placed body is left to land before a scenario starts.
 const PLACE_ROUNDS: usize = 6;
 
@@ -967,24 +964,22 @@ struct BodyLaunch {
     start: f32,
     lift: f32,
     up: f32,
-    /// Horizontal launch speed, m/s.
-    speed: f32,
 }
 
 /// Tossed: crosses the seam in flight, lands about a block past it.
-const TOSS: BodyLaunch = BodyLaunch { start: 1.0, lift: 1.5, up: 4.0, speed: BODY_LAUNCH_SPEED_M_PER_S };
+const TOSS: BodyLaunch = BodyLaunch { start: 1.0, lift: 1.5, up: 4.0 };
 /// Slid along the floor from half a block short of the seam.
-const SLIDE: BodyLaunch = BodyLaunch { start: 0.5, lift: 0.0, up: 0.0, speed: BODY_LAUNCH_SPEED_M_PER_S };
+const SLIDE: BodyLaunch = BodyLaunch { start: 0.5, lift: 0.0, up: 0.0 };
 
 impl Scenario for BodyLaunch {
     fn setup(&self, rig: &mut Rig, origin: WorldBlockPos) {
-        let b = B;
+        let b = game::BLOCK_VOXELS as f32;
         // The player first: its placement runs rounds.
         let p = BODY_PLAYER_BLOCKS;
         place_player(rig, offset(origin, p, 0, p), false);
-        // Resting on the floor's stud caps (its bottom at the stand level's
-        // bottom plus the caps), a hair above them, then lifted.
-        let y = level_y(origin.y) + game::stud_cap_units() + b / 2.0 + 0.01 + self.lift * b;
+        // Resting on the floor (its bottom at the stand level), a hair above
+        // it, then lifted.
+        let y = origin.y as f32 * b + b / 2.0 + 0.01 + self.lift * b;
         let d = self.start * b;
         let local = Vector::new(
             origin.x as f32 * b + d - SPAWN_REGION.x as f32 * REGION_SIZE,
@@ -992,7 +987,7 @@ impl Scenario for BodyLaunch {
             origin.z as f32 * b + d - SPAWN_REGION.z as f32 * REGION_SIZE,
         );
         let units = game::movement::UNITS_PER_METER;
-        let v = self.speed * units / std::f32::consts::SQRT_2;
+        let v = BODY_LAUNCH_SPEED_M_PER_S * units / std::f32::consts::SQRT_2;
         let linvel = Vector::new(-v, self.up * units, -v);
         let angvel = Vector::new(0.0, BODY_SPIN_RAD_PER_S, 0.0);
         let cube = game::ColliderSpec::Cuboid { half_extents: Vector::splat(b / 2.0) };
@@ -1141,7 +1136,7 @@ impl Scenario for SlideReArrived {
             return;
         }
         let origin = self.origin.get().expect("set up");
-        let b = B;
+        let b = game::BLOCK_VOXELS as f32;
         let rc = rig.owners_of(game::EntityKind::Body)[0];
         rig.manager.spawner_mut().with_region(rc, |region| {
             region.with_data(|d| {
@@ -1174,25 +1169,21 @@ impl Scenario for SlideReArrived {
 }
 
 /// Rest position tolerance of the floor SLIDE against the centred lockstep
-/// run, per axis, blocks — loose on purpose, and measured ×2 on stud ground
-/// (2026-11-10, P10b; REGION_BLOCKS 64): lockstep Seam(X) 0.0515, Seam(Z)
-/// 0.0139, Corner 0.0176; the jittery seeds 0–3 the same in every placement
-/// (the slide is over before jitter shifts anything); the [`SlideReArrived`]
-/// control (the handoff's contact-state reset with no seam) 0.0004. Loosened
-/// from the voxel floor's 0.078 (its Seam(X) spread was 0.0388): the cube
-/// slides over stud caps, a rougher contact, and stops after ~0.75 m.
-/// The seam spreads exceed the control: before any handoff, a cube touching
-/// the seam already starts differently, because its floor there is the
-/// neighbour's halo chunk, a collider inserted after the region's own, so the
-/// contact pairs are solved in another order — and the chunk-edge ghost
-/// contacts amplify any such difference.
-const SLIDE_POSE_TOL_BLOCKS: f32 = 0.103;
-/// … and rest rotation, degrees. Measured ×2 on stud ground: lockstep Seam(X)
-/// 5.58°, Corner 1.84°, Seam(Z) 0.25°; jittery seeds the same; the control 0°.
+/// run, per axis, blocks — loose on purpose, and measured ×2 (2026-11-06,
+/// REGION_BLOCKS 64, CHUNK_BLOCKS 16): lockstep Seam(X) 0.0388, Seam(Z)
+/// 0.0158, Corner 0.0124; the jittery seeds 0–3 the same in every
+/// placement (the slide is over before jitter shifts anything); the
+/// [`SlideReArrived`] control (the handoff's contact-state reset with no
+/// seam) 0.0024. The seam spreads exceed the control: before any handoff, a
+/// cube touching the seam already starts differently, because its floor
+/// there is the neighbour's halo chunk, a collider inserted after the
+/// region's own, so the contact pairs are solved in another order (first
+/// tick spin 2.68 vs 1.41 rad/s centred) — and the chunk-edge ghost contacts
+/// amplify any such difference (seam-free: 0.14 blocks, see the test).
+const SLIDE_POSE_TOL_BLOCKS: f32 = 0.078;
+/// … and rest rotation, degrees. Measured ×2: lockstep Seam(X) 6.96°,
+/// Corner 2.31°, Seam(Z) 0.26°; jittery seeds the same; the control 0°.
 const SLIDE_ANGLE_TOL_DEG: f32 = 14.0;
-/// A slide "rests past the origin" when its centre lies beyond the flip
-/// hysteresis on both axes, blocks (it rests 0.21–0.26 past, measured).
-const SLIDE_PAST: f32 = -game::FLIP_HYSTERESIS / B;
 
 /// The slide along the floor through the seam — the ground-contact
 /// crossing (a rolling log, a pushed crate). It crosses, is owned by one
@@ -1203,19 +1194,19 @@ const SLIDE_PAST: f32 = -game::FLIP_HYSTERESIS / B;
 /// body's contact state (the [`SlideReArrived`] control, run here, measures
 /// it with no seam), and a body sliding over the boundary between two
 /// terrain colliders (every chunk edge, so every region seam) catches on the
-/// far collider's edge — "ghost" contacts, each chunk's collider knows
+/// far collider's edge — "ghost" contacts, each chunk's `Voxels` shape knows
 /// nothing of its neighbour — which makes the slide chaotic with no region
-/// seam at all (on the voxel floor the same slide centred at block 16 and at
-/// block 32 rested 0.14 blocks apart; on stud caps a slide started a quarter
-/// block from the seam or launched at 12 m/s rests 0.28–0.29 blocks from the
-/// centred run's). A handoff regression beyond that cost
+/// seam at all: the same slide centred at block 16 and at block 32 (identical
+/// geometry, only the coordinates' float rounding differs) rests 0.14 blocks
+/// apart, and other launch speeds tip the cube onto another face at a seam
+/// or stop it dead at a chunk edge. A handoff regression beyond that cost
 /// (a lost velocity, weight or spin) still fails.
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn body_slide_is_seam_invariant_within_its_handoff_cost() {
     let reference = run(&SLIDE, Placement::Centre, None);
     let body_ref = the_body(&reference).clone();
-    assert!(body_ref.pos[0] < SLIDE_PAST && body_ref.pos[2] < SLIDE_PAST, "rests past the origin: {:?}", body_ref.pos);
+    assert!(body_ref.pos[0] < -0.25 && body_ref.pos[2] < -0.25, "rests past the origin: {:?}", body_ref.pos);
     let tol = Tolerances { pose_blocks: SLIDE_POSE_TOL_BLOCKS, angle_deg: SLIDE_ANGLE_TOL_DEG, ..LOCKSTEP_TOLERANCES };
     let control = SlideReArrived { origin: Default::default(), done: Default::default() };
     let snap = run(&control, Placement::Centre, None);
@@ -1224,7 +1215,7 @@ fn body_slide_is_seam_invariant_within_its_handoff_cost() {
     let mut check = |snap: &WorldSnapshot, what: &str| {
         let (pose, turn) = assert_body_matches(&body_ref, snap, &tol, what);
         let body = the_body(snap);
-        assert!(body.pos[0] < SLIDE_PAST && body.pos[2] < SLIDE_PAST, "{what}: rests past the origin: {:?}", body.pos);
+        assert!(body.pos[0] < -0.25 && body.pos[2] < -0.25, "{what}: rests past the origin: {:?}", body.pos);
         worst = (worst.0.max(pose), worst.1.max(turn));
     };
     for placement in &PLACEMENTS[1..] {
@@ -1246,37 +1237,150 @@ fn body_slide_is_seam_invariant_within_its_handoff_cost() {
     eprintln!("[body] slide worst: pose {} blocks, rotation {}°", worst.0, worst.1);
 }
 
-/// Probe behind the verdict on "slides over stud caps are chaotic near seams"
-/// (2026-11-11): is the spread a seam defect (state lost in the handoff) or the
-/// slide's own sensitivity? For each launch it prints the rest-pose spread, blocks,
-/// between runs that differ ONLY by a perturbation far below anything a handoff could
-/// lose, with no region seam involved (all at `Centre`), next to the spread between
-/// the centred run and the seam placements. Measured (REGION_BLOCKS 64): see the
-/// plan's "Open items pass" entry.
-#[test]
-#[ignore = "diagnostic: prints the slide's sensitivity with and without a seam"]
-fn slide_sensitivity_probe() {
-    let pos = |launch: &BodyLaunch, placement: Placement| the_body(&run(launch, placement, None)).pos;
-    let dist = |a: [f32; 3], b: [f32; 3]| (0..3).map(|i| (a[i] - b[i]).abs()).fold(0.0f32, f32::max);
-    let quarter = BodyLaunch { start: 0.25, ..SLIDE };
-    let fast = BodyLaunch { speed: 12.0, ..SLIDE };
-    for (name, launch) in [("slide", SLIDE), ("quarter-block start", quarter), ("12 m/s", fast)] {
-        let centre = pos(&launch, Placement::Centre);
-        // No seam, the launch speed off by 1e-4 and 1e-3 of itself.
-        for eps in [1e-4f32, 1e-3] {
-            let nudged = BodyLaunch { speed: launch.speed * (1.0 + eps), ..launch };
-            eprintln!("[probe] {name}: Centre vs Centre with speed x(1+{eps}): {} blocks", dist(centre, pos(&nudged, Placement::Centre)));
+// --- A tree felled across a seam ------------------------------------------------
+
+/// The felled tree's id (any non-zero id; the floor holds no other tree).
+const FELLED_TREE_ID: u32 = 7;
+/// Its trunk, in logs above the floor: tall enough (`TALL_PART_BLOCKS`) to
+/// topple over its butt, and to lay its centre of mass down past the seam.
+const FELLED_TRUNK_BLOCKS: i32 = 12;
+/// Blocks from the origin, along +x and +z, of the trunk: 2 from the seam.
+const FELLED_TRUNK_OFFSET: i64 = 2;
+/// Rounds for the fall and the rest that settles it (`REST_TICKS` still
+/// ticks), well under its `SETTLE_TIMEOUT_TICKS`, with room for jitter.
+const FELLED_ROUNDS: u32 = 120;
+
+/// A tree 2 blocks short of the seam (the corner, at `Corner`) leaning
+/// toward −x/−z across it: an oak trunk with a limb of logs and a few
+/// leaves reaching over the origin. Setup chops it at the floor as an
+/// Adventure player does (`player_chop_safe`: the cut drops at the stump,
+/// the rest falls as a `DropItems` voxel body). It tips along its lean,
+/// crosses the seam as an `EntityKind::Body` while it falls, and its logs
+/// are put down where it rests, by the region that then owns it.
+struct FelledTree;
+
+impl FelledTree {
+    /// The tree's blocks, (offset from the origin — on the stand level —,
+    /// block, limb).
+    fn blocks(log: BlockId, leaves: BlockId) -> Vec<([i64; 3], BlockId, u8)> {
+        let t = FELLED_TRUNK_OFFSET;
+        let mut out: Vec<([i64; 3], BlockId, u8)> =
+            (0..FELLED_TRUNK_BLOCKS).map(|y| ([t, y as i64, t], log, 0)).collect();
+        let top = FELLED_TRUNK_BLOCKS as i64 - 1;
+        for (d, dy) in [(1, -3), (1, -2), (2, -2), (2, -1), (1, -1)] {
+            out.push(([t - d, top + dy, t - d], log, 1));
         }
-        for placement in &PLACEMENTS[1..] {
-            eprintln!("[probe] {name}: Centre vs {placement:?}: {} blocks", dist(centre, pos(&launch, *placement)));
+        for (d, dy) in [(2, 0), (1, 0)] {
+            out.push(([t - d, top + dy, t - d], leaves, 1));
+        }
+        out
+    }
+
+    fn ids() -> (BlockId, BlockId) {
+        let reg = game::BlockRegistry::from_ron(include_str!("../../../assets/blocks/blocks.ron")).unwrap();
+        (reg.id_of("oak_log").unwrap(), reg.id_of("oak_leaves").unwrap())
+    }
+
+    /// Every item the tree is worth: the drops of its blocks.
+    fn worth() -> BTreeMap<game::ItemId, u32> {
+        common::install_real_block_props();
+        let (log, leaves) = Self::ids();
+        let mut out = BTreeMap::new();
+        for (_, id, limb) in Self::blocks(log, leaves) {
+            if let Some(s) = game::drop_of(Block::with_tree(id, FELLED_TREE_ID, limb)) {
+                *out.entry(s.item).or_default() += s.count;
+            }
+        }
+        out
+    }
+}
+
+impl Scenario for FelledTree {
+    fn setup(&self, rig: &mut Rig, origin: WorldBlockPos) {
+        common::install_real_block_props();
+        let p = BODY_PLAYER_BLOCKS;
+        place_player(rig, offset(origin, p, 0, p), false);
+        let (log, leaves) = Self::ids();
+        let blocks = Self::blocks(log, leaves);
+        let cut = spawn_tile(offset(origin, FELLED_TRUNK_OFFSET, 0, FELLED_TRUNK_OFFSET));
+        rig.manager.spawner_mut().with_region(SPAWN_REGION, |region| {
+            region.with_data(|d| {
+                for (o, id, limb) in &blocks {
+                    let at = spawn_tile(offset(origin, o[0], o[1] as i32, o[2]));
+                    assert!(d.set_block_safe(at, Block::with_tree(*id, FELLED_TREE_ID, *limb)), "tree block at {at:?}");
+                }
+                let tick = *d.data.tick;
+                assert!(d.player_chop_safe(cut, tick), "the chop fells the tree");
+            });
+        });
+    }
+
+    fn drive(&self, _rig: &mut Rig, _round: u32) {}
+
+    fn rounds(&self) -> u32 {
+        FELLED_ROUNDS
+    }
+
+    fn crosser(&self) -> Option<game::EntityKind> {
+        Some(game::EntityKind::Body)
+    }
+}
+
+/// Every pile's items summed per item.
+fn pile_totals(s: &WorldSnapshot) -> BTreeMap<game::ItemId, u32> {
+    let mut out = BTreeMap::new();
+    for stack in s.piles.values().flatten() {
+        *out.entry(stack.item).or_default() += stack.count;
+    }
+    out
+}
+
+/// A tree felled 2 blocks from a seam, leaning across it, falls across it
+/// in every placement: the body crosses (`run` asserts it was owned past the
+/// seam / corner, and by one region at a time), settles there, and its logs
+/// lie in piles owned by the regions they lie in (`snapshot` asserts it),
+/// past the origin — every item the tree was worth, once (the stump's pile
+/// included), lockstep and under jittery seeds. The piles' cells are the
+/// discrete outcome compared against the centred run; see the body below.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn tree_felled_across_seam() {
+    let worth = FelledTree::worth();
+    assert!(!worth.is_empty(), "the tree is worth something");
+    let reference = run(&FelledTree, Placement::Centre, None);
+    let check = |snap: &WorldSnapshot, what: &str| {
+        assert!(
+            !snap.entities.values().any(|e| e.kind == game::EntityKind::Body),
+            "{what}: the felled part settled"
+        );
+        assert_eq!(pile_totals(snap), worth, "{what}: every item, once: {:?}", snap.piles);
+        let past = snap.piles.keys().filter(|c| c[0] < 0 && c[2] < 0).count();
+        assert!(past > 0, "{what}: logs lie past the origin: {:?}", snap.piles);
+    };
+    check(&reference, "lockstep Centre");
+    for placement in &PLACEMENTS[1..] {
+        let snap = run(&FelledTree, *placement, None);
+        check(&snap, &format!("lockstep {placement:?}"));
+        if let Err(e) = compare(&reference, &snap, &LOCKSTEP_TOLERANCES) {
+            panic!("lockstep {placement:?} differs from Centre: {e}");
+        }
+    }
+    for seed in 0..JITTER_SEEDS {
+        for placement in PLACEMENTS {
+            let what = format!("jittery seed {seed} {placement:?}");
+            let snap = run(&FelledTree, placement, Some(InlineSchedule::jittery(seed)));
+            check(&snap, &what);
+            if let Err(e) = compare(&reference, &snap, &Tolerances { tiles: true, ..JITTER_TOLERANCES }) {
+                panic!("{what} differs from lockstep Centre: {e}");
+            }
         }
     }
 }
 
 // --- Pathing around water ----------------------------------------------------------
 
-/// Recipe water on the flat floor over the tile columns `span × span`
-/// around `origin` (x and z), up to tile level `water_top`.
+/// Recipe water on the one-block floor over the block columns `span × span`
+/// around `origin` (x and z), up to block level `water_top`.
 fn square_pond(origin: WorldBlockPos, span: std::ops::Range<i64>, water_top: i32) -> WaterBox {
     WaterBox {
         xs: origin.x + span.start..origin.x + span.end,
@@ -1317,7 +1421,7 @@ impl Scenario for PondDetour {
                 let Some(&e) = data.player_entites.get(&CLIENT) else { return };
                 let handle = (*data.ecs.rigidbody.try_get(e)).expect("player body");
                 let t = data.physics.bodies.get(handle).expect("body").translation();
-                let f = game::feet_tile(data.feet_of(t));
+                let f = game::feet_tile(game::feet_of(t));
                 let w = WorldBlockPos::from_local(rc, game::BlockPos::new(f[0], f[1], f[2]));
                 let (dx, dz) = (w.x - origin.x, w.z - origin.z);
                 assert!(
@@ -1333,11 +1437,10 @@ impl Scenario for PondDetour {
         POND_WALK_ROUNDS
     }
 
-    /// One tile of recipe water on the floor over the pond: too deep to wade
-    /// (`stud_stand` takes at most 2 plates), so its tiles are not standable.
+    /// One block of recipe water on the floor over the pond.
     fn floor(&self, origin: WorldBlockPos) -> Floor {
         let pond = square_pond(origin, -POND_HALF..POND_HALF, origin.y);
-        std::sync::Arc::new(move |rc| floor_with_water(rc, std::slice::from_ref(&pond)))
+        Box::new(move |rc| floor_with_water(rc, std::slice::from_ref(&pond)))
     }
 
     fn jitter_tolerances(&self) -> Tolerances {
@@ -1369,7 +1472,7 @@ struct SwimAcross {
     dove: std::cell::Cell<bool>,
 }
 
-/// Depth of the pool, tiles: water from the floor's top (`STAND_LEVEL`) up.
+/// Depth of the pool, blocks: water from the floor's top (`STAND_LEVEL`) up.
 const SWIM_POOL_DEPTH: i32 = 6;
 /// The pool spans `-SWIM_POOL_BEHIND..SWIM_POOL_AHEAD` blocks around the
 /// origin on x and z (the swim runs from +3 to about −1.2).
@@ -1377,9 +1480,8 @@ const SWIM_POOL_BEHIND: i64 = 4;
 const SWIM_POOL_AHEAD: i64 = 6;
 /// Blocks from the origin, along +x and +z, the swim starts at.
 const SWIM_START_BLOCKS: i64 = 3;
-/// Feet below the surface at the start, as a part of the body's height: inside
-/// the `Waist` band (waist wet from 0.5, eye from 0.9 of the height).
-const SWIM_START_DEPTH_OF_HEIGHT: f32 = 0.72;
+/// Feet below the surface at the start, blocks: inside the `Waist` band.
+const SWIM_START_DEPTH_BLOCKS: f32 = 1.3;
 /// Rounds after the move into the pool before the swim (and its checks)
 /// starts.
 const SWIM_SETTLE_ROUNDS: usize = 2;
@@ -1412,12 +1514,10 @@ impl Scenario for SwimAcross {
         let start = offset(origin, SWIM_START_BLOCKS, 0, SWIM_START_BLOCKS);
         let (rc, local) = start.to_local();
         assert_eq!(rig.owners(), [rc], "the player starts in the start's region");
-        let bv = B;
-        let scale = game::movement::BodyScale::STUD;
-        let half = scale.capsule_half_height() + scale.capsule_radius();
-        let surface = level_y(origin.y + SWIM_POOL_DEPTH);
-        let feet = surface - SWIM_START_DEPTH_OF_HEIGHT * 2.0 * half;
-        let centre = feet + half;
+        let bv = game::BLOCK_VOXELS as f32;
+        let surface = (origin.y + SWIM_POOL_DEPTH) as f32;
+        let feet = (surface - SWIM_START_DEPTH_BLOCKS) * bv;
+        let centre = feet + game::movement::PLAYER_HEIGHT * game::movement::UNITS_PER_METER / 2.0;
         let pose = game::Pose::translation((local.x as f32 + 0.5) * bv, centre, (local.z as f32 + 0.5) * bv);
         rig.manager.spawner_mut().with_region(rc, |r| {
             r.with_data(|d| {
@@ -1461,8 +1561,8 @@ impl Scenario for SwimAcross {
                 let Some(&e) = data.player_entites.get(&CLIENT) else { return };
                 let handle = (*data.ecs.rigidbody.try_get(e)).expect("player body");
                 let t = data.physics.bodies.get(handle).expect("body").translation();
-                let feet = data.feet_of(t);
-                let bv = B;
+                let feet = game::feet_of(t);
+                let bv = game::BLOCK_VOXELS as f32;
                 let column = game::BlockPos::new((feet.x / bv).floor() as i32, 0, (feet.z / bv).floor() as i32);
                 if !SwimAcross::over_pool(origin, WorldBlockPos::from_local(rc, column)) {
                     return;
@@ -1472,13 +1572,13 @@ impl Scenario for SwimAcross {
                 if m.immersion == game::Immersion::Head {
                     self.dove.set(true);
                 }
-                let bed = level_y(origin.y);
+                let bed = origin.y as f32 * bv;
                 if !descending {
                     assert!(
                         feet.y > bed + 0.25 * bv,
-                        "round {round}: feet at {} m reached the bed ({} m) with descend up: {m:?}",
+                        "round {round}: feet {} blocks reached the bed ({}) with descend up: {m:?}",
                         feet.y / bv,
-                        bed / bv
+                        origin.y
                     );
                 }
             });
@@ -1492,7 +1592,7 @@ impl Scenario for SwimAcross {
     /// The pool: recipe water `SWIM_POOL_DEPTH` deep on the floor.
     fn floor(&self, origin: WorldBlockPos) -> Floor {
         let pool = square_pond(origin, -SWIM_POOL_BEHIND..SWIM_POOL_AHEAD, origin.y + SWIM_POOL_DEPTH - 1);
-        std::sync::Arc::new(move |rc| floor_with_water(rc, std::slice::from_ref(&pool)))
+        Box::new(move |rc| floor_with_water(rc, std::slice::from_ref(&pool)))
     }
 }
 
@@ -1517,7 +1617,7 @@ fn swim_is_seam_invariant_under_jitter() {
 /// placement, never on the bed, never lost or duplicated.
 struct FloatingLog;
 
-/// Depth of the pool, tiles: water from the floor's top (`origin.y`) up.
+/// Depth of the pool, blocks: water from the floor's top (`origin.y`) up.
 const FLOAT_POOL_DEPTH: i32 = 6;
 /// The pool spans `-FLOAT_POOL_HALF..FLOAT_POOL_HALF` blocks around the
 /// origin on x and z.
@@ -1543,8 +1643,8 @@ impl Scenario for FloatingLog {
         common::install_real_block_props();
         let p = FLOAT_PLAYER_BLOCKS;
         place_player(rig, offset(origin, p, 0, p), false);
-        let b = B;
-        let surface = level_y(origin.y + FLOAT_POOL_DEPTH);
+        let b = game::BLOCK_VOXELS as f32;
+        let surface = (origin.y + FLOAT_POOL_DEPTH) as f32 * b;
         let half = Vector::new(FLOAT_LOG_HALF[0] * b, FLOAT_LOG_HALF[1] * b, FLOAT_LOG_HALF[2] * b);
         let d = FLOAT_START_BLOCKS * b;
         let local = Vector::new(
@@ -1570,7 +1670,7 @@ impl Scenario for FloatingLog {
     /// The pool: recipe water `FLOAT_POOL_DEPTH` deep on the floor.
     fn floor(&self, origin: WorldBlockPos) -> Floor {
         let pool = square_pond(origin, -FLOAT_POOL_HALF..FLOAT_POOL_HALF, origin.y + FLOAT_POOL_DEPTH - 1);
-        std::sync::Arc::new(move |rc| floor_with_water(rc, std::slice::from_ref(&pool)))
+        Box::new(move |rc| floor_with_water(rc, std::slice::from_ref(&pool)))
     }
 
     fn crosser(&self) -> Option<game::EntityKind> {
@@ -1588,10 +1688,9 @@ fn floating_body_is_seam_invariant() {
     let end = assert_seam_invariant(&FloatingLog, None);
     let check = |s: &WorldSnapshot, what: &str| {
         let body = the_body(s);
-        // Metres from the origin (the floor's top); the pool's surface is
-        // FLOAT_POOL_DEPTH tiles up.
+        // Blocks from the origin; the pool's surface is FLOAT_POOL_DEPTH up.
         let (lo, hi) = (body.pos[1] - FLOAT_LOG_HALF[1], body.pos[1] + FLOAT_LOG_HALF[1]);
-        let surface = FLOAT_POOL_DEPTH as f32 * common::tile_h() / B;
+        let surface = FLOAT_POOL_DEPTH as f32;
         eprintln!("[float] {what}: body at {:?} blocks, AABB y {lo} .. {hi}", body.pos);
         assert!(lo < surface && hi > surface, "{what}: floating, straddling the surface: {lo} .. {hi}");
         assert!(lo > 1.0, "{what}: clear of the bed: bottom {lo} blocks");
@@ -1600,879 +1699,4 @@ fn floating_body_is_seam_invariant() {
     // Every other placement matched this one within the lockstep
     // tolerances (`assert_seam_invariant`), so it floats there too.
     check(&end, "Centre");
-}
-
-// --- Stud terrain across a seam (stud world plan P4) -------------------------
-
-/// Surface plate of the flat stud ground (layer 0).
-const STUD_TOP: i32 = common::FLOOR_PLATES;
-/// Seeds swept per schedule mode over the stud scenario (it runs nine stud regions).
-const STUD_SEEDS: u64 = 3;
-/// How far (sim units) the walker's body may rise or sink on level stud ground: under
-/// a plate (3.2 units).
-const STUD_LEVEL_TOLERANCE: f32 = 2.0;
-
-fn stud_flat() -> game::StudColumnGround {
-    common::stud_flat(STUD_TOP)
-}
-
-/// Flat stud ground under every region.
-fn stud_flat_seed(_rc: RegionCoords) -> game::StudRegionSeed {
-    let n = game::REGION_CHUNKS;
-    let ground = (0..n).flat_map(|x| (0..n).map(move |z| (ColumnCoords::new(x, z), stud_flat()))).collect();
-    game::StudRegionSeed { ground, features: Vec::new(), ..Default::default() }
-}
-
-fn stud_rig(schedule: Option<InlineSchedule>) -> Rig {
-    Rig::with_floor(schedule, stud_flat_seed)
-}
-
-/// The player's body height and whether it stands, in the region owning it (`None`
-/// while a handoff is in flight).
-fn stud_walker(rig: &mut Rig) -> Option<(f32, bool)> {
-    let owners = rig.owners();
-    let rc = *owners.first()?;
-    let mut out = None;
-    rig.manager.spawner_mut().with_region(rc, |region| {
-        let data = region.data();
-        let e = *data.player_entites.get(&CLIENT).expect("player owned here");
-        let handle = *data.ecs.rigidbody.get(e);
-        let y = data.physics.bodies.get(handle).unwrap().translation().y;
-        let grounded = data.ecs.motion.try_get(e).as_ref().is_some_and(|m| m.grounded);
-        out = Some((y, grounded));
-    });
-    out
-}
-
-/// Every running region's stud halo holds exactly what its running neighbours have
-/// materialised in the columns it mirrors, brick for brick.
-fn assert_stud_halos_agree(rig: &mut Rig) {
-    type Chunks = BTreeMap<game::WorldChunkPos, game::StudChunk>;
-    let mut own: BTreeMap<RegionCoords, Chunks> = BTreeMap::new();
-    let mut halo: BTreeMap<RegionCoords, Chunks> = BTreeMap::new();
-    for rc in rig.manager.running_regions() {
-        rig.manager.spawner_mut().with_region(rc, |region| {
-            let d = region.data();
-            let chunks = d.stud_index.keys().map(|c| {
-                (game::WorldChunkPos::from_local(rc, [c.x as i32, c.y, c.z as i32]), d.stud_chunk_at(*c).unwrap().clone())
-            });
-            own.insert(rc, chunks.collect());
-            halo.insert(rc, d.stud_halo().iter().filter_map(|(k, h)| Some((*k, h.chunk.clone()?))).collect());
-        });
-    }
-    let mut checked = 0;
-    for (viewer, mirrored) in &halo {
-        for (owner, chunks) in &own {
-            let offset = (viewer.x - owner.x, viewer.z - owner.z);
-            if offset == (0, 0) || offset.0.abs() > 1 || offset.1.abs() > 1 {
-                continue;
-            }
-            let want: Chunks = chunks
-                .iter()
-                .filter(|(k, _)| {
-                    let c = k.to_local().1;
-                    game::halo::halo_targets(c.x as i32, c.z as i32).contains(&offset)
-                })
-                .map(|(k, c)| (*k, c.clone()))
-                .collect();
-            let have: Chunks = mirrored.iter().filter(|(k, _)| k.to_local().0 == *owner).map(|(k, c)| (*k, c.clone())).collect();
-            assert!(!want.is_empty(), "{owner:?} has an edge");
-            assert_eq!(have.keys().collect::<Vec<_>>(), want.keys().collect::<Vec<_>>(), "{viewer:?} mirrors {owner:?}");
-            assert!(have == want, "{viewer:?}'s halo of {owner:?} holds its bricks");
-            checked += 1;
-        }
-    }
-    assert!(checked >= 2, "at least the two regions of the scenario mirror each other");
-}
-
-/// The stud chunk `c` of `rc`, as its owner holds it.
-fn stud_chunk(rig: &mut Rig, rc: RegionCoords, c: game::StudChunkCoords) -> Option<game::StudChunk> {
-    let mut out = None;
-    rig.manager.spawner_mut().with_region(rc, |region| out = region.data().stud_chunk_at(c).cloned());
-    out
-}
-
-/// On flat stud ground under a 3x3 window: walk the body north across the seam
-/// (level and standing all the way, never lifted out of the ground), carve a box
-/// straddling the seam back toward the spawn region, place a brick into the spawn
-/// region from the far side — then both owners hold exactly the right bricks, every
-/// halo agrees with its owner, and a replica fed each region's event stream ends in
-/// the same state hash. Returns the final fingerprint.
-fn stud_seam_scenario(schedule: Option<InlineSchedule>) -> Vec<(RegionCoords, u64, u32)> {
-    let (cw, n) = (game::STUD_CHUNK_STUDS as i32, game::REGION_CHUNKS as i32);
-    let mut rig = stud_rig(schedule);
-    rig.join_spawn();
-    for _ in 0..PAST_SEAM_ROUNDS {
-        rig.round();
-    }
-    rig.manager.spawner_mut().with_region(SPAWN_REGION, |region| {
-        assert_eq!(region.data().body_scale(), game::movement::BodyScale::STUD);
-        assert!(region.data().stud_halo_chunk_at([0, 0, -1]).is_some(), "the north neighbour's edge is mirrored");
-    });
-
-    // From here on, replicas of the two regions the scenario plays in follow their
-    // event streams (what a client does with a region snapshot).
-    let mut replicas: BTreeMap<RegionCoords, game::Region> = BTreeMap::new();
-    for rc in [SPAWN_REGION, north()] {
-        rig.manager.spawner_mut().with_region(rc, |region| {
-            replicas.insert(rc, game::Region::new(region.data().clone(), None, rc, None));
-        });
-    }
-    rig.events_seen = Some(Vec::new());
-
-    // --- Walk across the seam.
-    let (y0, standing) = stud_walker(&mut rig).expect("the player stands in the spawn region");
-    assert!(standing, "spawned standing on the studs");
-    let lifts = game::halo::depenetration_lifts();
-    rig.key(Key::KeyE, true);
-    rig.key(Key::KeyE, false);
-    rig.key(Key::KeyW, true);
-    let (mut arrived, mut past) = (false, 0);
-    for _ in 0..LEG_ROUNDS {
-        rig.round();
-        if let Some((y, grounded)) = stud_walker(&mut rig) {
-            assert!((y - y0).abs() <= STUD_LEVEL_TOLERANCE, "the body left level ground: y {y0} -> {y}");
-            assert!(grounded, "the body lost the ground at y {y}");
-        }
-        arrived |= rig.owners() == [north()];
-        past += usize::from(arrived);
-        if past > PAST_SEAM_ROUNDS {
-            break;
-        }
-    }
-    assert!(arrived, "the walker never reached {:?}; owners {:?}", north(), rig.owners());
-    rig.key(Key::KeyW, false);
-    assert_eq!(rig.owners(), [north()], "no thrash back across the seam");
-    assert_eq!(game::halo::depenetration_lifts(), lifts, "a crossing body was lifted out of the ground");
-    rig.manager.spawner_mut().with_region(north(), |region| {
-        assert_eq!(region.data().body_scale(), game::movement::BodyScale::STUD, "the same body on both sides");
-    });
-
-    // --- Carve a box straddling the north region's +z seam (4 studs on each side),
-    // ordered in the north (the player's home).
-    let edge = n * cw;
-    let (x0, x1) = (2 * cw + 8, 2 * cw + 12);
-    rig.order(Order::CarveStud { lo: [x0, STUD_TOP - 6, edge - 4], hi: [x1, STUD_TOP, edge + 4] });
-    for _ in 0..PAST_SEAM_ROUNDS {
-        rig.round();
-    }
-    // --- Place a brick into the spawn region's edge chunk, against the seam.
-    let part = game::stud_catalog::STUD_PARTS.iter().position(|p| p.number == "3001").unwrap() as u16;
-    let placed = game::StudBrick::part_at([4, STUD_TOP as u8, 0], part, 0, 4);
-    rig.order(Order::PlaceStudAt { chunk: game::WorldChunkPos::from_local(SPAWN_REGION, [1, 0, 0]), brick: placed });
-    for _ in 0..PAST_SEAM_ROUNDS {
-        rig.round();
-    }
-    // Drain in lockstep: nothing is left in flight.
-    rig.manager.spawner_mut().set_schedule(None);
-    for _ in 0..PAST_SEAM_ROUNDS {
-        rig.round();
-    }
-
-    // Both owners lost exactly the box's cells: each chunk is its pristine one with
-    // the local part of the box carved out.
-    let at = |x: i32, z: i32| game::StudChunkCoords { x: x as usize, y: 0, z: z as usize };
-    let carved = |lo: [u8; 3], hi: [u8; 3]| {
-        let mut chunk = stud_flat().pristine_chunk(0).unwrap();
-        let removed: u32 = chunk.carve(lo, hi).iter().map(|&(_, cells)| cells).sum();
-        assert_eq!(removed, 4 * 6 * 4);
-        // The ground the hole exposes is real bricks (`stud_rebrick`), the other
-        // region's half of the hole counting as open: as if it were one region.
-        let other = |q: [i32; 3]| (q[2] == -1 || q[2] == cw) && (lo[0] as i32..hi[0] as i32).contains(&q[0]) && (lo[1] as i32..hi[1] as i32).contains(&q[1]);
-        common::rebrick_reference(&mut chunk, 0, other);
-        chunk
-    };
-    let (lx, top) = (8u8, STUD_TOP as u8);
-    assert!(
-        stud_chunk(&mut rig, north(), at(2, n - 1)) == Some(carved([lx, top - 6, cw as u8 - 4], [lx + 4, top, cw as u8])),
-        "the north's part of the box"
-    );
-    assert!(
-        stud_chunk(&mut rig, SPAWN_REGION, at(2, 0)) == Some(carved([lx, top - 6, 0], [lx + 4, top, 4])),
-        "the spawn region's part of the box"
-    );
-    let mut with_brick = stud_flat().pristine_chunk(0).unwrap();
-    with_brick.place(placed).unwrap();
-    assert!(stud_chunk(&mut rig, SPAWN_REGION, at(1, 0)) == Some(with_brick), "the brick placed across the seam");
-    assert_stud_halos_agree(&mut rig);
-    let granted = rig
-        .intents_seen
-        .iter()
-        .filter(|(rc, m)| *rc == SPAWN_REGION && matches!(m, game::IntentMsg::Reply(r) if matches!(r.reply, game::IntentReply::Granted(_))))
-        .count();
-    assert_eq!(granted, 2, "the carve and the placement were granted by the spawn region");
-
-    // Server vs replay: each replica, fed its region's events, hashes like the region.
-    for (rc, kind) in rig.events_seen.take().unwrap() {
-        if let Some(replica) = replicas.get_mut(&rc) {
-            replica.handle_event(kind).expect("the replica replays the stream");
-            replica.commit_server_event();
-        }
-    }
-    for (rc, replica) in &replicas {
-        let mut server = 0;
-        rig.manager.spawner_mut().with_region(*rc, |region| server = game::state_hash(region.data()));
-        assert_eq!(game::state_hash(replica.data()), server, "{rc:?}: the replayed stream ends in the server's state");
-    }
-    rig.fingerprint()
-}
-
-#[test]
-#[ignore = "slow: >100ms — run via just test-full"]
-fn stud_seam_walk_carve_and_place_in_lockstep() {
-    stud_seam_scenario(None);
-}
-
-#[test]
-#[ignore = "slow: >100ms — run via just test-full"]
-fn stud_seam_survives_scheduling_jitter() {
-    let modes: [(&str, fn(u64) -> InlineSchedule); 3] =
-        [("shuffled", InlineSchedule::shuffled), ("late", InlineSchedule::late), ("jittery", InlineSchedule::jittery)];
-    for (mode, schedule) in modes {
-        for seed in 0..STUD_SEEDS {
-            let run = || {
-                std::panic::catch_unwind(|| stud_seam_scenario(Some(schedule(seed))))
-                    .unwrap_or_else(|_| panic!("the stud seam broke under schedule `{mode}`, seed {seed}"))
-            };
-            assert_eq!(run(), run(), "stud seam under schedule `{mode}` seed {seed} is not reproducible");
-        }
-    }
-}
-
-// --- A natural cliff at a seam (pristine cliff bricks) ---------------------------
-
-/// The plateau east of the spawn region's column of regions: two stud layers up.
-const CLIFF_TOP: i32 = STUD_TOP + 2 * game::STUD_CHUNK_PLATES as i32;
-
-fn cliff_top(rc: RegionCoords) -> i32 {
-    if rc.x > SPAWN_REGION.x { CLIFF_TOP } else { STUD_TOP }
-}
-
-/// Flat ground per region at [`cliff_top`], each recipe with the apron a generator
-/// gives it: the neighbouring column's edge, across region seams too.
-fn stud_cliff_seed(rc: RegionCoords) -> game::StudRegionSeed {
-    use game::StudSide::*;
-    let n = game::REGION_CHUNKS;
-    let mut ground: Vec<_> =
-        (0..n).flat_map(|x| (0..n).map(move |z| (ColumnCoords::new(x, z), common::stud_flat(cliff_top(rc))))).collect();
-    game::link_stud_aprons(&mut ground);
-    for (c, g) in ground.iter_mut() {
-        for (side, on_edge, (dx, dz)) in [(West, c.x == 0, (-1, 0)), (East, c.x == n - 1, (1, 0)), (North, c.z == 0, (0, -1)), (South, c.z == n - 1, (0, 1))] {
-            if on_edge {
-                g.set_apron_side(side, &[cliff_top(RegionCoords::new(rc.x + dx, rc.z + dz)); game::STUD_CHUNK_STUDS]);
-            }
-        }
-    }
-    game::StudRegionSeed { ground, features: Vec::new(), ..Default::default() }
-}
-
-/// A sheer cliff along the spawn region's east seam, under the scheduler: the plateau
-/// region starts with its wall as real bricks — the bricks ONE region holding both
-/// grounds lays — whenever its neighbours are heard from, every halo holds its
-/// owner's chunks brick for brick, and nothing depends on arrival order (the
-/// fingerprint is the lockstep one under every schedule).
-fn stud_cliff_scenario(schedule: Option<InlineSchedule>) -> Vec<(RegionCoords, u64, u32)> {
-    let n = game::REGION_CHUNKS;
-    let mut rig = Rig::with_floor(schedule, stud_cliff_seed);
-    rig.join_spawn();
-    for _ in 0..3 * PAST_SEAM_ROUNDS {
-        rig.round();
-    }
-    rig.manager.spawner_mut().set_schedule(None);
-    for _ in 0..PAST_SEAM_ROUNDS {
-        rig.round();
-    }
-    let east = RegionCoords::new(SPAWN_REGION.x + 1, SPAWN_REGION.z);
-    // One region: a plain column and a plateau column side by side.
-    let mut one = vec![(ColumnCoords::new(0, 0), common::stud_flat(STUD_TOP)), (ColumnCoords::new(1, 0), common::stud_flat(CLIFF_TOP))];
-    game::link_stud_aprons(&mut one);
-    let at = |x: usize, y: i32| game::StudChunkCoords { x, y, z: 1 };
-    for y in 0..=2 {
-        let wall = stud_chunk(&mut rig, east, at(0, y)).unwrap_or_else(|| panic!("the plateau's wall layer {y}"));
-        assert!(Some(&wall) == one[1].1.pristine_chunk(y).as_ref(), "layer {y}: the bricks of one region");
-        let face = wall.brick_at([0, if y == 2 { 10 } else { 45 }, 16]).expect("the face is solid");
-        assert!(matches!(face.shape, game::StudShape::Part { .. }), "layer {y}: the face is {face:?}");
-    }
-    assert!(stud_chunk(&mut rig, east, at(1, 0)).is_none(), "behind the edge column the ground stays implied");
-    assert!(stud_chunk(&mut rig, SPAWN_REGION, at(n - 1, 0)) == one[0].1.pristine_chunk(0), "the plain's edge");
-    assert_stud_halos_agree(&mut rig);
-    rig.manager.spawner_mut().with_region(SPAWN_REGION, |region| {
-        for y in 0..=2 {
-            assert!(region.data().stud_halo_chunk_at([n as i32, y, 1]).is_some(), "the wall in the plain's halo: layer {y}");
-        }
-    });
-    rig.fingerprint()
-}
-
-#[test]
-#[ignore = "slow: >100ms — run via just test-full"]
-fn stud_cliff_at_a_seam_is_bricks_whatever_the_schedule() {
-    let lockstep = stud_cliff_scenario(None);
-    for seed in 0..STUD_SEEDS {
-        for schedule in [InlineSchedule::shuffled, InlineSchedule::late, InlineSchedule::jittery] {
-            let run = std::panic::catch_unwind(|| stud_cliff_scenario(Some(schedule(seed)))).unwrap_or_else(|_| panic!("the cliff broke under seed {seed}"));
-            assert_eq!(run.iter().map(|f| (f.0, f.2)).collect::<Vec<_>>(), lockstep.iter().map(|f| (f.0, f.2)).collect::<Vec<_>>(), "seed {seed}: the state depends on the schedule");
-        }
-    }
-}
-
-// --- Stud tiles at a seam (stud world plan P6a) --------------------------------
-
-/// On flat stud ground: a dig order whose box straddles the north seam, completed.
-/// A designation belongs to the region it is ordered in (a tile never straddles a
-/// seam; the box is clipped), so the spawn region digs exactly its own tiles — a shaft
-/// from the surface into the implied layer below — and the north region, untouched,
-/// sees the shaft through its stud halo: open tiles, a floor to stand on at its
-/// bottom, and its own implied ground behind the shaft's wall materialised. A replica
-/// fed each region's event stream ends in the same state hash. Returns the fingerprint.
-fn stud_dig_at_seam_scenario(schedule: Option<InlineSchedule>) -> Vec<(RegionCoords, u64, u32)> {
-    use game::{TileFill, TileSource};
-    let n = (game::REGION_CHUNKS * game::STUD_CHUNK_TILES) as i32;
-    let chunks = game::REGION_CHUNKS as i32;
-    let top = STUD_TOP / game::TILE_PLATES as i32 - 1;
-    let mut rig = stud_rig(schedule);
-    rig.join_spawn();
-    for _ in 0..PAST_SEAM_ROUNDS {
-        rig.round();
-    }
-    let mut replicas: BTreeMap<RegionCoords, game::Region> = BTreeMap::new();
-    for rc in [SPAWN_REGION, north()] {
-        rig.manager.spawner_mut().with_region(rc, |region| {
-            replicas.insert(rc, game::Region::new(region.data().clone(), None, rc, None));
-        });
-    }
-    rig.events_seen = Some(Vec::new());
-
-    // Tiles x 40..=41, levels -1..=top, z -2..=1: z < 0 is the north region's.
-    let area = game::TileBox::new([40, top, -2], [41, -1, 1]);
-    let op = game::OpId { client: CLIENT, seq: 1 };
-    rig.order(Order::Designate { op, kind: game::DesignationKind::Dig, priority: game::DEFAULT_PRIORITY, area });
-    for _ in 0..PAST_SEAM_ROUNDS {
-        rig.round();
-    }
-    rig.manager.spawner_mut().with_region(SPAWN_REGION, |region| {
-        let d = region.data().designations();
-        assert!(!d.is_empty(), "its own bricks of the box");
-        assert!(d.keys().all(|b| b.cells().0[2] >= 0), "nothing past the seam");
-    });
-    rig.manager.spawner_mut().with_region(north(), |region| {
-        assert!(region.data().designations().is_empty(), "a designation is the ordering region's");
-    });
-    rig.order(Order::DevCompleteAll);
-    for _ in 0..PAST_SEAM_ROUNDS {
-        rig.round();
-    }
-    // A fill box straddling the same seam, over the surface east of the shaft: the
-    // north region's part goes to it as an intent.
-    let (fx, fy) = (2 * 48, STUD_TOP);
-    rig.order(Order::FillStud { lo: [fx, fy, -3], hi: [fx + 4, fy + 6, 3], material: game::MAT_SAND });
-    for _ in 0..PAST_SEAM_ROUNDS {
-        rig.round();
-    }
-    // Drain in lockstep: nothing is left in flight.
-    rig.manager.spawner_mut().set_schedule(None);
-    for _ in 0..PAST_SEAM_ROUNDS {
-        rig.round();
-    }
-    let edge = (game::REGION_CHUNKS * game::STUD_CHUNK_STUDS) as i32;
-    for (rc, zs, tile_z) in [(SPAWN_REGION, 0..3, 0), (north(), edge - 3..edge, n - 1)] {
-        rig.manager.spawner_mut().with_region(rc, |region| {
-            let d = region.data();
-            for z in zs.clone() {
-                assert_eq!(d.stud_material_at([fx, fy + 5, z]), Some(game::MAT_SAND), "{rc:?} filled its part at z {z}");
-            }
-            assert_eq!(d.tile_fill([48, top + 1, tile_z]), TileFill::Solid);
-            // ... and sees the other side's part through its halo.
-            let across = if rc == SPAWN_REGION { -1 } else { n };
-            assert_eq!(d.tile_fill([48, top + 1, across]), TileFill::Solid, "{rc:?} sees the fill across the seam");
-            assert_eq!(d.tile_material([48, top + 1, across]), Some(game::MAT_SAND));
-        });
-    }
-    let granted = rig
-        .intents_seen
-        .iter()
-        .filter(|(rc, m)| *rc == north() && matches!(m, game::IntentMsg::Reply(r) if matches!(r.reply, game::IntentReply::Granted(game::Intent::FillStud { .. }))))
-        .count();
-    assert_eq!(granted, 1, "the north region granted its part of the fill");
-
-    rig.manager.spawner_mut().with_region(SPAWN_REGION, |region| {
-        let d = region.data();
-        for y in -1..=top {
-            for x in 40..=41 {
-                for z in 0..=1 {
-                    assert_eq!(d.tile_fill([x, y, z]), TileFill::Open, "dug {x},{y},{z}");
-                }
-                // The dig takes whole bricks: one reaching out of the box takes a bite of
-                // the wall, never the whole tile.
-                assert_ne!(d.tile_fill([x, y, 2]), TileFill::Open, "the shaft's south wall at level {y}");
-                // The north region's tiles, read through this region's halo.
-                assert_eq!(d.tile_fill([x, y, -1]), TileFill::Solid, "the north's ground at level {y}");
-            }
-        }
-        assert!(d.designations().is_empty());
-        assert!(d.stud_chunk_at(game::StudChunkCoords { x: 2, y: -1, z: 0 }).is_some(), "the layer under the surface");
-        assert!(game::standable(d, [40, -1, 0]), "the shaft's bottom");
-    });
-    rig.manager.spawner_mut().with_region(north(), |region| {
-        let d = region.data();
-        for y in -1..=top {
-            // The spawn region's tile z 0 is this region's z `n`.
-            assert_eq!(d.tile_fill([40, y, n]), TileFill::Open, "the shaft seen through the halo, level {y}");
-            assert_ne!(d.tile_fill([40, y, n + 2]), TileFill::Open);
-            assert_eq!(d.tile_fill([40, y, n - 1]), TileFill::Solid, "its own ground is untouched");
-        }
-        assert_eq!(d.tile_fill([40, -2, n]), TileFill::Solid);
-        assert!(game::standable(d, [40, -1, n]), "a path may end on the neighbour's shaft floor");
-        assert!(!game::standable(d, [40, top + 1, n]), "nothing to stand on over the shaft");
-        assert_eq!(d.column_band([40, n]).map(|(lo, _)| lo), Some(-(game::STUD_LAYER_TILES as i32)));
-        let behind = game::StudChunkCoords { x: 2, y: -1, z: chunks as usize - 1 };
-        assert!(d.stud_chunk_at(behind).is_some(), "the ground behind the neighbour's shaft is materialised");
-    });
-    assert_stud_halos_agree(&mut rig);
-
-    for (rc, kind) in rig.events_seen.take().unwrap() {
-        if let Some(replica) = replicas.get_mut(&rc) {
-            replica.handle_event(kind).expect("the replica replays the stream");
-            replica.commit_server_event();
-        }
-    }
-    for (rc, replica) in &replicas {
-        let mut server = 0;
-        rig.manager.spawner_mut().with_region(*rc, |region| server = game::state_hash(region.data()));
-        assert_eq!(game::state_hash(replica.data()), server, "{rc:?}: the replayed stream ends in the server's state");
-    }
-    rig.fingerprint()
-}
-
-#[test]
-#[ignore = "slow: >100ms — run via just test-full"]
-fn stud_dig_at_a_seam_in_lockstep() {
-    stud_dig_at_seam_scenario(None);
-}
-
-#[test]
-#[ignore = "slow: >100ms — run via just test-full"]
-fn stud_dig_at_a_seam_survives_scheduling_jitter() {
-    let modes: [(&str, fn(u64) -> InlineSchedule); 3] =
-        [("shuffled", InlineSchedule::shuffled), ("late", InlineSchedule::late), ("jittery", InlineSchedule::jittery)];
-    for (mode, schedule) in modes {
-        for seed in 0..STUD_SEEDS {
-            let run = || {
-                std::panic::catch_unwind(|| stud_dig_at_seam_scenario(Some(schedule(seed))))
-                    .unwrap_or_else(|_| panic!("the stud dig at a seam broke under schedule `{mode}`, seed {seed}"))
-            };
-            assert_eq!(run(), run(), "stud dig at a seam under schedule `{mode}` seed {seed} is not reproducible");
-        }
-    }
-}
-
-// --- Stud drops and stud bodies at a seam (stud world plan P6b) ------------------
-
-/// Tile column of the scenario's tree, in the spawn region: two tiles south of the
-/// north seam, so the felled tree lands across it.
-const STUD_TREE_TILE: [i32; 2] = [40, 2];
-/// Tiles from a seam the tree stands at (and its tile along a seam it does not cross).
-const STUD_TREE_NEAR: i32 = STUD_TREE_TILE[1];
-const STUD_TREE_ALONG: i32 = STUD_TREE_TILE[0];
-
-/// The tree's tile column when it is to fall `towards` (x, z; each 0 or −1): near the
-/// seam on each axis it leans along, [`STUD_TREE_ALONG`] on the others. `(0, −1)` is
-/// [`STUD_TREE_TILE`]; `(0, 0)` stands far from every seam (and leans north).
-fn stud_tree_tile(towards: (i32, i32)) -> [i32; 2] {
-    let at = |d: i32| if d < 0 { STUD_TREE_NEAR } else { STUD_TREE_ALONG };
-    match towards {
-        (0, 0) => [STUD_TREE_ALONG, STUD_TREE_ALONG],
-        (dx, dz) => [at(dx), at(dz)],
-    }
-}
-const STUD_TREE_ID: u16 = 21;
-/// The tree's trunk: 2 x 2 studs, this many plates tall.
-const STUD_TRUNK_PLATES: u8 = 48;
-
-/// [`stud_flat_seed`], with one tree in the spawn region at [`STUD_TREE_TILE`]: a
-/// trunk of four 12-plate segments, each a stud further north than the one under it
-/// (it leans toward the seam, so that is the way it tips), and leaves on top.
-fn stud_tree_seed(rc: RegionCoords) -> game::StudRegionSeed {
-    stud_tree_seed_towards(rc, (0, -1))
-}
-
-/// [`stud_tree_seed`] with the tree at [`stud_tree_tile`]`(towards)`, leaning a stud
-/// per segment along `towards` (north when that is `(0, 0)`).
-fn stud_tree_seed_towards(rc: RegionCoords, towards: (i32, i32)) -> game::StudRegionSeed {
-    let mut seed = stud_flat_seed(rc);
-    if rc == SPAWN_REGION {
-        let tile = stud_tree_tile(towards);
-        let lean = if towards == (0, 0) { (0, -1) } else { towards };
-        let tiles = game::STUD_CHUNK_TILES as i32;
-        let chunk = game::StudChunkCoords { x: (tile[0] / tiles) as usize, y: 0, z: (tile[1] / tiles) as usize };
-        let local = |tile: i32| ((tile % tiles) * game::TILE_STUDS as i32) as u8;
-        let (x, z) = (local(tile[0]), local(tile[1]));
-        let at = |base: u8, lean: i32, k: u8| (i32::from(base) + lean * i32::from(k)) as u8;
-        let mut bricks = Vec::new();
-        let segment = STUD_TRUNK_PLATES / 4;
-        for k in 0..4u8 {
-            game::fill_box([at(x, lean.0, k), STUD_TOP as u8 + k * segment, at(z, lean.1, k)], [2, segment, 2], game::MAT_WOOD, STUD_TREE_ID, &mut bricks);
-        }
-        // Leaves over the top segment: two studs past it on -x, one on -z, inside the chunk.
-        let (tx, tz) = (at(x, lean.0, 3), at(z, lean.1, 3));
-        game::fill_box([tx - tx.min(2), STUD_TOP as u8 + STUD_TRUNK_PLATES, tz - tz.min(1)], [6, 3, 4], game::MAT_LEAVES, STUD_TREE_ID, &mut bricks);
-        seed.features.push((chunk, bricks));
-    }
-    seed
-}
-
-/// Logs (the stud wood's drop) lying in `rc`'s piles, and its stud bodies.
-fn stud_logs_and_bodies(rig: &mut Rig, rc: RegionCoords) -> (u32, usize) {
-    let mut out = (0, 0);
-    rig.manager.spawner_mut().with_region(rc, |region| {
-        let d = region.data();
-        let log = game::ItemId::block(game::block_props().id_named(game::STUD_WOOD_DROP_BLOCK).unwrap());
-        let logs = d.item_piles().values().flat_map(|p| &p.stacks).filter(|s| s.item == log).map(|s| s.count).sum();
-        out = (logs, d.ecs.stud_body.iter().filter(|(_, v)| v.is_some()).count());
-    });
-    out
-}
-
-/// A tree chopped at its foot two tiles from a seam falls across it: the falling
-/// bricks are one stud body that the spawn region hands to the north region (with its
-/// model, settle state and drops) when its centre of mass crosses; it comes to rest
-/// there and turns into its logs in the NORTH region's piles, while the cut's own log
-/// lies at the stump. Then a carve order straddling the seam drops what each side's
-/// part removed into that side's piles. Nothing is lost or doubled, and a replica fed
-/// each region's event stream ends in the server's state hash. Returns the fingerprint.
-fn stud_tree_across_seam_scenario(schedule: Option<InlineSchedule>) -> Vec<(RegionCoords, u64, u32)> {
-    stud_tree_falls_towards(schedule, (0, -1))
-}
-
-/// [`stud_tree_across_seam_scenario`] with the tree falling `towards` (x, z; each 0 or
-/// −1): `(0, −1)` across the north seam (the scenario as documented, the seam carve
-/// included), `(−1, 0)` across the west seam, `(−1, −1)` through the corner into the
-/// north-west region, `(0, 0)` far from every seam (it stays home). In every
-/// placement the body is one, never in two regions at once, every log lies somewhere
-/// once — the fallen trunk's where it came to rest — and the replicas end in the
-/// server's hash.
-fn stud_tree_falls_towards(schedule: Option<InlineSchedule>, towards: (i32, i32)) -> Vec<(RegionCoords, u64, u32)> {
-    let seed: fn(RegionCoords) -> game::StudRegionSeed = match towards {
-        (0, -1) => stud_tree_seed,
-        (-1, 0) => |rc| stud_tree_seed_towards(rc, (-1, 0)),
-        (-1, -1) => |rc| stud_tree_seed_towards(rc, (-1, -1)),
-        (0, 0) => |rc| stud_tree_seed_towards(rc, (0, 0)),
-        other => panic!("no such fall: {other:?}"),
-    };
-    let target = RegionCoords::new(SPAWN_REGION.x + towards.0, SPAWN_REGION.z + towards.1);
-    // Every region the body can be in on its way: the spawn's, the target's and, for
-    // the corner, the two straight neighbours it may pass through.
-    let mut around = vec![SPAWN_REGION];
-    for rc in [RegionCoords::new(target.x, SPAWN_REGION.z), RegionCoords::new(SPAWN_REGION.x, target.z), target] {
-        if !around.contains(&rc) {
-            around.push(rc);
-        }
-    }
-    let others: Vec<RegionCoords> = around[1..].to_vec();
-    let mut rig = Rig::with_floor(schedule, seed);
-    rig.join_spawn();
-    for _ in 0..PAST_SEAM_ROUNDS {
-        rig.round();
-    }
-    let mut replicas: BTreeMap<RegionCoords, game::Region> = BTreeMap::new();
-    for rc in if others.is_empty() { vec![SPAWN_REGION, north()] } else { around.clone() } {
-        rig.manager.spawner_mut().with_region(rc, |region| {
-            replicas.insert(rc, game::Region::new(region.data().clone(), None, rc, None));
-        });
-    }
-    rig.events_seen = Some(Vec::new());
-    let elsewhere = |rig: &mut Rig| -> (u32, usize) {
-        others.iter().map(|rc| stud_logs_and_bodies(rig, *rc)).fold((0, 0), |a, b| (a.0 + b.0, a.1 + b.1))
-    };
-
-    let level = STUD_TOP / game::TILE_PLATES as i32;
-    let tile = stud_tree_tile(towards);
-    let foot = [tile[0], level, tile[1]];
-    rig.manager.spawner_mut().with_region(SPAWN_REGION, |region| {
-        assert_eq!(region.data().stud_tree_at(foot), Some(STUD_TREE_ID));
-    });
-    let op = game::OpId { client: CLIENT, seq: 1 };
-    let area = game::TileBox::new(foot, foot);
-    rig.order(Order::Designate { op, kind: game::DesignationKind::Chop, priority: game::DEFAULT_PRIORITY, area });
-    rig.order(Order::DevCompleteAll);
-    // Until the body has settled (at most its timeout, and the rounds a crossing takes).
-    let (mut seen_here, mut seen_north) = (false, false);
-    let mut rounds = 0;
-    loop {
-        rig.round();
-        rounds += 1;
-        let (here, there) = (stud_logs_and_bodies(&mut rig, SPAWN_REGION).1, elsewhere(&mut rig).1);
-        assert!(here + there <= 1, "the body is never in two regions at once");
-        seen_here |= here == 1;
-        seen_north |= stud_logs_and_bodies(&mut rig, target).1 == 1 && target != SPAWN_REGION;
-        if seen_here && here + there == 0 && rounds > PAST_SEAM_ROUNDS {
-            // Gone from both: settled — or in flight; a few more rounds tell.
-            let mut gone = true;
-            for _ in 0..PAST_SEAM_ROUNDS {
-                rig.round();
-                rounds += 1;
-                let now = stud_logs_and_bodies(&mut rig, SPAWN_REGION).1 + elsewhere(&mut rig).1;
-                seen_north |= stud_logs_and_bodies(&mut rig, target).1 == 1 && target != SPAWN_REGION;
-                gone &= now == 0;
-            }
-            if gone {
-                break;
-            }
-        }
-        assert!(rounds < 2 * game::SETTLE_TIMEOUT_TICKS as usize + 200, "the felled tree never settled");
-    }
-    assert!(seen_here, "the tree fell as a body in its own region");
-    assert_eq!(seen_north, target != SPAWN_REGION, "the body crossed into {target:?} (or, far from a seam, stayed home)");
-    // 24 wood cells cut (one log, at the stump); the rest of the trunk fell (7 logs).
-    let trunk_cells = 4 * u32::from(STUD_TRUNK_PLATES);
-    let expected = |cells: u32| game::stud_drops(&[(game::MAT_WOOD, cells)]).iter().map(|s| s.count).sum::<u32>();
-    let (at_stump, fallen) = (expected(4 * game::TILE_PLATES as u32), expected(trunk_cells - 4 * game::TILE_PLATES as u32));
-    assert_eq!((at_stump, fallen), (1, 7));
-    let (here, there) = (stud_logs_and_bodies(&mut rig, SPAWN_REGION).0, elsewhere(&mut rig).0);
-    assert_eq!(here + there, at_stump + fallen, "every log of the tree lies somewhere, once: {here} + {there}");
-    if target == SPAWN_REGION {
-        assert_eq!(there, 0, "far from a seam every log lies at home");
-    } else {
-        let in_target = stud_logs_and_bodies(&mut rig, target).0;
-        assert!(in_target >= fallen, "the fallen part's logs lie where it came to rest, in {target:?}: {here} + {there} ({in_target} there)");
-    }
-    rig.manager.spawner_mut().with_region(SPAWN_REGION, |region| {
-        let d = region.data();
-        assert!(d.stud_tree_at(foot).is_none(), "the tree is gone");
-        let left = d.stud_index.keys().flat_map(|c| d.stud_chunk_at(*c).unwrap().bricks()).filter(|b| b.data == STUD_TREE_ID).count();
-        assert_eq!(left, 0, "no brick of it is left standing");
-    });
-
-    if towards != (0, -1) {
-        return stud_tree_replicas_agree(rig, replicas);
-    }
-    // A carve straddling the seam, east of the tree: each side drops its own part.
-    let dirt = |rig: &mut Rig, rc: RegionCoords| {
-        let mut n = 0;
-        rig.manager.spawner_mut().with_region(rc, |region| {
-            let dirt = game::ItemId::block(game::block_props().id_named("dirt").unwrap());
-            n = region.data().item_piles().values().flat_map(|p| &p.stacks).filter(|s| s.item == dirt).map(|s| s.count).sum::<u32>();
-        });
-        n
-    };
-    let before = (dirt(&mut rig, SPAWN_REGION), dirt(&mut rig, north()));
-    let x = 2 * 60;
-    rig.order(Order::CarveStud { lo: [x, STUD_TOP - 6, -4], hi: [x + 4, STUD_TOP, 4] });
-    for _ in 0..PAST_SEAM_ROUNDS {
-        rig.round();
-    }
-    rig.manager.spawner_mut().set_schedule(None);
-    for _ in 0..PAST_SEAM_ROUNDS {
-        rig.round();
-    }
-    let after = (dirt(&mut rig, SPAWN_REGION), dirt(&mut rig, north()));
-    let side = after.0 - before.0;
-    assert!(side >= 1, "the spawn region's part dropped into its own piles");
-    assert_eq!(after.1 - before.1, side, "the north region's equal part dropped into ITS piles, not back across");
-    let dropped = rig
-        .intents_seen
-        .iter()
-        .filter(|(rc, m)| *rc == north() && matches!(m, game::IntentMsg::Reply(r) if matches!(r.reply, game::IntentReply::Granted(game::Intent::CarveStud { .. }))))
-        .count();
-    assert_eq!(dropped, 1, "the north region granted its part of the carve");
-    stud_tree_replicas_agree(rig, replicas)
-}
-
-/// The end of [`stud_tree_falls_towards`]: both sides of every seam agree on the stud
-/// halo, and each replica, fed its region's event stream, ends in the server's hash.
-fn stud_tree_replicas_agree(mut rig: Rig, mut replicas: BTreeMap<RegionCoords, game::Region>) -> Vec<(RegionCoords, u64, u32)> {
-    rig.manager.spawner_mut().set_schedule(None);
-    for _ in 0..PAST_SEAM_ROUNDS {
-        rig.round();
-    }
-    assert_stud_halos_agree(&mut rig);
-
-    for (rc, kind) in rig.events_seen.take().unwrap() {
-        if let Some(replica) = replicas.get_mut(&rc) {
-            replica.handle_event(kind).expect("the replica replays the stream");
-            replica.commit_server_event();
-        }
-    }
-    for (rc, replica) in &replicas {
-        let mut server = 0;
-        rig.manager.spawner_mut().with_region(*rc, |region| server = game::state_hash(region.data()));
-        assert_eq!(game::state_hash(replica.data()), server, "{rc:?}: the replayed stream ends in the server's state");
-    }
-    rig.fingerprint()
-}
-
-#[test]
-#[ignore = "slow: >100ms — run via just test-full"]
-fn stud_tree_falls_across_a_seam_in_lockstep() {
-    stud_tree_across_seam_scenario(None);
-}
-
-/// The other placements (coverage the voxel suite had on every seam, restored
-/// 2026-11-11): across the west seam, through the corner into the north-west region,
-/// and far from every seam.
-#[test]
-#[ignore = "slow: >100ms — run via just test-full"]
-fn stud_tree_falls_across_the_west_seam_the_corner_and_at_home() {
-    for towards in [(-1, 0), (-1, -1), (0, 0)] {
-        stud_tree_falls_towards(None, towards);
-    }
-}
-
-#[test]
-#[ignore = "slow: >100ms — run via just test-full"]
-fn stud_tree_across_a_seam_survives_scheduling_jitter() {
-    let modes: [(&str, fn(u64) -> InlineSchedule); 3] =
-        [("shuffled", InlineSchedule::shuffled), ("late", InlineSchedule::late), ("jittery", InlineSchedule::jittery)];
-    for (mode, schedule) in modes {
-        for seed in 0..STUD_SEEDS {
-            let run = || {
-                std::panic::catch_unwind(|| stud_tree_across_seam_scenario(Some(schedule(seed))))
-                    .unwrap_or_else(|_| panic!("the stud tree across a seam broke under schedule `{mode}`, seed {seed}"))
-            };
-            assert_eq!(run(), run(), "stud tree across a seam under schedule `{mode}` seed {seed} is not reproducible");
-        }
-    }
-}
-
-// --- Prefab stamps across a seam ---------------------------------------------------
-
-/// The sample arch, resolved as a player's prefab.
-fn prefab_arch() -> game::ResolvedPrefab {
-    game::resolve(&common::prefabs::arch(), game::Trust::Player).expect("the fixture resolves")
-}
-
-/// Two studs inside the spawn region's north seam (z = 0), turned so the lintel runs
-/// north across it: z -5..3.
-const PREFAB_SEAM_ANCHOR: [i64; 3] = [40, STUD_TOP as i64, 2];
-const PREFAB_SEAM_TURN: u8 = 3;
-
-fn prefab_command(rig: &mut Rig, cmd: game::PrefabCommand) {
-    let ev = GameEvent::new(GameEventKind::Prefab(CLIENT, cmd), 0, SPAWN_REGION);
-    rig.event(ServerEvent::ClientPacket(ClientPacket::GameEvent(ev), CLIENT));
-}
-
-/// Every brick of plastic colour 4 that `rc` owns, by world chunk.
-fn red_bricks(rig: &mut Rig, rc: RegionCoords) -> BTreeSet<(game::WorldChunkPos, game::StudBrick)> {
-    let mut out = BTreeSet::new();
-    rig.manager.spawner_mut().with_region(rc, |region| {
-        let d = region.data();
-        for c in d.stud_index.keys() {
-            let world = game::WorldChunkPos::from_local(rc, [c.x as i32, c.y, c.z as i32]);
-            out.extend(d.stud_chunk_at(*c).unwrap().bricks().filter(|b| b.material == 4).map(|b| (world, *b)));
-        }
-    });
-    out
-}
-
-/// What one region holding the whole world would lay for the seam stamp.
-fn prefab_seam_reference() -> BTreeSet<(game::WorldChunkPos, game::StudBrick)> {
-    let p = prefab_arch();
-    let game::ResolvedKind::Build(build) = &p.kind;
-    let layout = game::layout_build(build, PREFAB_SEAM_ANCHOR, PREFAB_SEAM_TURN);
-    assert_eq!(layout.skipped_split, 0);
-    layout.chunks.iter().flat_map(|(c, s)| s.bricks.iter().map(move |b| (*c, *b))).collect()
-}
-
-/// Registers the arch and stamps it across the spawn region's north seam: both owners
-/// end up holding exactly their part of what one region would lay, every halo agrees,
-/// and a replica fed each region's event stream ends in the same state hash.
-fn prefab_seam_scenario(schedule: Option<InlineSchedule>) -> Vec<(RegionCoords, u64, u32)> {
-    let mut rig = stud_rig(schedule);
-    rig.join_spawn();
-    for _ in 0..PAST_SEAM_ROUNDS {
-        rig.round();
-    }
-    let mut replicas: BTreeMap<RegionCoords, game::Region> = BTreeMap::new();
-    for rc in [SPAWN_REGION, north()] {
-        rig.manager.spawner_mut().with_region(rc, |region| {
-            replicas.insert(rc, game::Region::new(region.data().clone(), None, rc, None));
-        });
-    }
-    rig.events_seen = Some(Vec::new());
-
-    let p = prefab_arch();
-    prefab_command(&mut rig, game::PrefabCommand::Register(Box::new(p.clone())));
-    prefab_command(
-        &mut rig,
-        game::PrefabCommand::Stamp {
-            prefab: game::PrefabRef::Registered(p.key()),
-            anchor: PREFAB_SEAM_ANCHOR,
-            turn: PREFAB_SEAM_TURN,
-        },
-    );
-    for _ in 0..PAST_SEAM_ROUNDS {
-        rig.round();
-    }
-    // Drain in lockstep: nothing is left in flight.
-    rig.manager.spawner_mut().set_schedule(None);
-    for _ in 0..PAST_SEAM_ROUNDS {
-        rig.round();
-    }
-
-    let want = prefab_seam_reference();
-    let (here, there) = (red_bricks(&mut rig, SPAWN_REGION), red_bricks(&mut rig, north()));
-    assert!(!here.is_empty() && !there.is_empty(), "the stamp reaches both regions");
-    assert!(here.iter().all(|(c, _)| c.to_local().0 == SPAWN_REGION) && there.iter().all(|(c, _)| c.to_local().0 == north()));
-    let both: BTreeSet<_> = here.union(&there).copied().collect();
-    assert!(both == want, "the two regions together hold what one region would lay");
-    assert_stud_halos_agree(&mut rig);
-
-    for (rc, kind) in rig.events_seen.take().unwrap() {
-        if let Some(replica) = replicas.get_mut(&rc) {
-            replica.handle_event(kind).expect("the replica replays the stream");
-            replica.commit_server_event();
-        }
-    }
-    for (rc, replica) in &replicas {
-        let mut server = 0;
-        rig.manager.spawner_mut().with_region(*rc, |region| server = game::state_hash(region.data()));
-        assert_eq!(game::state_hash(replica.data()), server, "{rc:?}: the replayed stream ends in the server's state");
-    }
-    rig.fingerprint()
-}
-
-#[test]
-#[ignore = "slow: >100ms — run via just test-full"]
-fn prefab_stamp_across_a_seam_lays_both_sides() {
-    prefab_seam_scenario(None);
-    let modes: [(&str, fn(u64) -> InlineSchedule); 3] =
-        [("shuffled", InlineSchedule::shuffled), ("late", InlineSchedule::late), ("jittery", InlineSchedule::jittery)];
-    for (mode, schedule) in modes {
-        for seed in 0..STUD_SEEDS {
-            let run = || {
-                std::panic::catch_unwind(|| prefab_seam_scenario(Some(schedule(seed))))
-                    .unwrap_or_else(|_| panic!("the prefab stamp broke under schedule `{mode}`, seed {seed}"))
-            };
-            assert_eq!(run(), run(), "prefab stamp under schedule `{mode}` seed {seed} is not reproducible");
-        }
-    }
-}
-
-#[test]
-#[ignore = "slow: >100ms — run via just test-full"]
-fn prefab_stamp_into_a_sleeping_neighbour_is_partial_and_does_not_wake_it() {
-    // Only the spawn region runs: nobody asked for its neighbours.
-    let mut rig = stud_rig(None);
-    rig.event(ServerEvent::connected(CLIENT));
-    rig.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(SPAWN_REGION), CLIENT));
-    rig.walk_until_owned_by(SPAWN_REGION, "spawn");
-    assert_eq!(rig.manager.running_regions(), [SPAWN_REGION]);
-
-    let p = prefab_arch();
-    prefab_command(&mut rig, game::PrefabCommand::Register(Box::new(p.clone())));
-    prefab_command(
-        &mut rig,
-        game::PrefabCommand::Stamp {
-            prefab: game::PrefabRef::Registered(p.key()),
-            anchor: PREFAB_SEAM_ANCHOR,
-            turn: PREFAB_SEAM_TURN,
-        },
-    );
-    for _ in 0..2 * PAST_SEAM_ROUNDS {
-        rig.round();
-    }
-    assert_eq!(rig.manager.running_regions(), [SPAWN_REGION], "an intent never wakes a region");
-    let want: BTreeSet<_> = prefab_seam_reference().into_iter().filter(|(c, _)| c.to_local().0 == SPAWN_REGION).collect();
-    assert!(!want.is_empty());
-    assert!(red_bricks(&mut rig, SPAWN_REGION) == want, "this region's part is laid, the rest is not");
 }

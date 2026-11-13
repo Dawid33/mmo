@@ -388,10 +388,10 @@ fn stage2_ghost_collider_blocks_a_walking_player() {
     // held. With both keys pressed before any tick (as the brief sketched)
     // only two moves land, so an uncollided walk would already stop at 112 —
     // a false green. Proven by the bite-check in the task report.
-    use game::{GameEventKind, InputEvent, Key};
+    use game::{GameEventKind, InputEvent, Key, Region};
     let (_, src_key) = donor();
     let id = RegionCoords::new(0, 0);
-    let mut region = crate::common::empty_region(id);
+    let mut region = Region::from_chunks(id, Vec::new());
     region.handle_event(GameEventKind::CreateClient(1)).unwrap();
     region.forget_last_event();
     let player = *region.data().player_entites.get(&1).unwrap();
@@ -712,7 +712,7 @@ fn ignored_duplicate_person_arrival_drops_its_mirror() {
 
 // ---- dynamic bodies: EntityKind::Body (Task 7.2) ----
 
-use crate::body::{caps_top, cube, floored_region, live_body, spawn, tick};
+use crate::body::{cube, floored_region, live_body, spawn, tick};
 use game::rapier3d::dynamics::{RigidBody, RigidBodyActivation};
 use game::{BodyKind, BodyState, EntityId, GameEventKind, Region};
 
@@ -891,8 +891,7 @@ fn replayed_dynamic_arrival_is_bit_exact() {
 #[test]
 fn sleeping_body_arrives_asleep() {
     let mut a = floored_region();
-    // A 1 m cube resting on the floor's stud caps.
-    let rest = caps_top() + crate::common::TILE_W / 2.0;
+    let rest = game::BLOCK_VOXELS as f32 * 1.5;
     let e = spawn(&mut a, pose(512.0, rest, 512.0), cube(), Vector::ZERO, Vector::ZERO);
     for _ in 0..game::body::BODY_SETTLE_TICKS {
         tick(&mut a);
@@ -922,7 +921,7 @@ fn sleeping_body_arrives_asleep() {
     }
     assert!(live_body(&b, f).is_sleeping(), "asleep again");
     let moved = (live_body(&b, f).translation() - at).length();
-    assert!(moved < 0.01 * crate::common::TILE_W, "where it lay: moved {moved}");
+    assert!(moved < 0.01 * game::BLOCK_VOXELS as f32, "where it lay: moved {moved}");
 }
 
 /// A halo mirror moved toward a resting body pushes it (one way: the
@@ -930,8 +929,8 @@ fn sleeping_body_arrives_asleep() {
 #[test]
 fn ghost_pushes_dynamic_body_one_way() {
     let mut region = floored_region();
-    let b = crate::common::TILE_W;
-    let e = spawn(&mut region, pose(512.0, caps_top() + b / 2.0, 512.0), cube(), Vector::ZERO, Vector::ZERO);
+    let b = game::BLOCK_VOXELS as f32;
+    let e = spawn(&mut region, pose(512.0, b * 1.5, 512.0), cube(), Vector::ZERO, Vector::ZERO);
     for _ in 0..10 {
         tick(&mut region);
     }
@@ -939,7 +938,7 @@ fn ghost_pushes_dynamic_body_one_way() {
     // A slime-sized capsule mirror standing on the floor, 3 blocks to -x,
     // walking +x at 2 units/tick: it reaches the cube in ~20 ticks.
     let capsule = ColliderSpec::CapsuleY { half_height: 8.0, radius: 6.4 };
-    let y = caps_top() + 8.0 + 6.4;
+    let y = b + 8.0 + 6.4;
     let mut x = 512.0 - 3.0 * b;
     let mirror = |x: f32| HaloEntityDelta {
         id: body_id(5),
@@ -977,13 +976,13 @@ fn ghost_pushes_dynamic_body_one_way() {
 fn ghost_jump_snaps_without_flinging() {
     use game::halo::MIRROR_SNAP_DISTANCE_UNITS;
     let mut region = floored_region();
-    let b = crate::common::TILE_W;
-    let e = spawn(&mut region, pose(512.0, caps_top() + b / 2.0, 512.0), cube(), Vector::ZERO, Vector::ZERO);
+    let b = game::BLOCK_VOXELS as f32;
+    let e = spawn(&mut region, pose(512.0, b * 1.5, 512.0), cube(), Vector::ZERO, Vector::ZERO);
     for _ in 0..10 {
         tick(&mut region);
     }
     let capsule = ColliderSpec::CapsuleY { half_height: 8.0, radius: 6.4 };
-    let y = caps_top() + 8.0 + 6.4;
+    let y = b + 8.0 + 6.4;
     let mirror = |x: f32| HaloEntityDelta {
         id: body_id(5),
         source_region: body_src(),
@@ -1020,62 +1019,3 @@ fn ghost_jump_snaps_without_flinging() {
 }
 
 
-
-/// A replayed stud-body arrival keeps ONE copy of its drops (coverage lost with the
-/// voxel world, restored 2026-11-11). A felled trunk's logs ride the bundle
-/// (`Carried::drops`); the same bundle applied twice — a resent transfer — must leave
-/// one body whose drops are the bundle's, and once it settles exactly those items in
-/// the piles: never doubled, never lost.
-#[test]
-#[ignore = "slow: >100ms — run via just test-full"]
-fn replayed_stud_body_arrival_keeps_one_copy_of_its_drops() {
-    use crate::common::{floor_seed, r0, FLOOR_PLATES};
-    use game::REGION_SIZE;
-    use game::stud_body::{SettlePolicy, SETTLE_TIMEOUT_TICKS};
-    use game::{StudBrick, StudChunkCoords, MAT_WOOD, STUD_CHUNK_PLATES};
-    use std::collections::{BTreeMap, BTreeSet};
-    crate::common::install_real_block_props();
-    // Four courses of wood (a trunk) standing on the floor, detached whole.
-    let c = StudChunkCoords { x: 1, y: FLOOR_PLATES.div_euclid(STUD_CHUNK_PLATES as i32), z: 1 };
-    let base = FLOOR_PLATES.rem_euclid(STUD_CHUNK_PLATES as i32) as u8;
-    let mins: Vec<[u8; 3]> = (0..4).map(|k| [8, base + 3 * k, 8]).collect();
-    let floored = |features: Vec<(StudChunkCoords, Vec<StudBrick>)>| {
-        let mut seed = floor_seed(0.0..REGION_SIZE, 0.0..REGION_SIZE, FLOOR_PLATES);
-        seed.features = features;
-        let (send, _recv) = crossbeam::channel::unbounded();
-        let mut region = Region::new(Rollback::new(Some(send.clone())), Some(send), r0(), None);
-        region.seed_stud_world(seed);
-        region
-    };
-    let mut source = floored(vec![(c, mins.iter().map(|m| StudBrick::filler(*m, [2, 3, 2], MAT_WOOD)).collect())]);
-    let mut bundle = None;
-    source.with_data(|r| {
-        r.new_transaction();
-        let picks = BTreeMap::from([(c, mins.iter().copied().collect::<BTreeSet<_>>())]);
-        let e = r.detach_studs_safe(&picks, SettlePolicy::DropItems, Vector::ZERO, None).expect("the trunk became a body");
-        bundle = Some(r.extract_entity_safe(e));
-    });
-    let bundle = bundle.unwrap();
-    let carried: u32 = bundle.carried.drops.iter().map(|s| s.count).sum();
-    assert!(carried > 0, "the trunk carries its logs: {:?}", bundle.carried.drops);
-
-    let mut there = floored(Vec::new());
-    let e = arrive(&mut there, bundle.clone()).expect("arrived");
-    assert_eq!(arrive(&mut there, bundle.clone()), None, "a replay creates nothing");
-    let bodies = there.data().ecs.stud_body.iter().filter(|(_, v)| v.is_some()).count();
-    assert_eq!(bodies, 1, "one stud body");
-    assert_eq!(there.data().ecs.stud_body.try_get(e).as_ref().map(|sb| sb.drops.clone()), Some(bundle.carried.drops.clone()), "its drops, once");
-    for _ in 0..SETTLE_TIMEOUT_TICKS + 5 {
-        tick(&mut there);
-        if there.data().ecs.stud_body.try_get(e).is_none() {
-            break;
-        }
-    }
-    assert!(there.data().ecs.stud_body.try_get(e).is_none(), "it settled");
-    let mut piled: BTreeMap<game::ItemId, u32> = BTreeMap::new();
-    for s in there.data().item_piles().values().flat_map(|p| &p.stacks) {
-        *piled.entry(s.item).or_default() += s.count;
-    }
-    let want: BTreeMap<game::ItemId, u32> = bundle.carried.drops.iter().map(|s| (s.item, s.count)).collect();
-    assert_eq!(piled, want, "exactly the bundle's items lie in the piles");
-}

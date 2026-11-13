@@ -2,6 +2,35 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use game::*;
 
+const STONE: BlockId = BlockId(2);
+const WATER: BlockId = BlockId(9);
+
+#[derive(Default)]
+struct Src {
+    blocks: BTreeMap<TilePos, BlockId>,
+    bedrock: BTreeSet<TilePos>,
+    built: BTreeSet<TilePos>,
+    trees: BTreeMap<TilePos, u32>,
+}
+
+impl TileSource for Src {
+    fn block(&self, p: TilePos) -> BlockId {
+        self.blocks.get(&p).copied().unwrap_or(BlockId::AIR)
+    }
+    fn is_bedrock(&self, p: TilePos) -> bool {
+        self.bedrock.contains(&p)
+    }
+    fn is_constructed(&self, p: TilePos) -> bool {
+        self.built.contains(&p)
+    }
+    fn tree_id(&self, p: TilePos) -> u32 {
+        self.trees.get(&p).copied().unwrap_or(0)
+    }
+    fn tree_limb(&self, _: TilePos) -> u8 {
+        0
+    }
+}
+
 #[test]
 fn tiles_iterate_y_then_z_then_x() {
     let t: Vec<_> = TileBox::new([1, 0, 0], [0, 1, 1]).tiles().collect();
@@ -19,43 +48,107 @@ fn tile_count_and_clip() {
     assert_eq!(far.max[0], REGION_BLOCKS as i32 - 1);
 }
 
+#[test]
+fn dig_rules() {
+    let mut s = Src::default();
+    let p = |x| [x, 5, 0];
+    for x in 1..=4 {
+        s.blocks.insert(p(x), STONE);
+    }
+    s.built.insert(p(2));
+    s.bedrock.insert(p(3));
+    let dig = DesignationKind::Dig;
+    assert_eq!(validate(&s, dig, p(0)), Err(Invalid::NothingToDig));
+    assert_eq!(validate(&s, dig, p(1)), Ok(()));
+    assert_eq!(validate(&s, dig, p(2)), Err(Invalid::Built));
+    assert_eq!(validate(&s, dig, p(3)), Err(Invalid::Bedrock));
+    // No region-edge rule: the owner materialises its own implied ground.
+    assert_eq!(validate(&s, dig, p(4)), Ok(()));
+}
+
+#[test]
+fn deconstruct_needs_a_construction() {
+    let mut s = Src::default();
+    s.blocks.insert([0, 0, 0], STONE);
+    s.blocks.insert([1, 0, 0], STONE);
+    s.built.insert([1, 0, 0]);
+    let k = DesignationKind::Deconstruct;
+    assert_eq!(validate(&s, k, [0, 0, 0]), Err(Invalid::NotBuilt));
+    assert_eq!(validate(&s, k, [1, 0, 0]), Ok(()));
+}
+
+#[test]
+fn build_needs_air() {
+    let mut s = Src::default();
+    s.blocks.insert([0, 0, 0], STONE);
+    s.blocks.insert([1, 0, 0], WATER);
+    let k = DesignationKind::Build(game::edit::PLACE_BLOCK);
+    assert_eq!(validate(&s, k, [0, 0, 0]), Err(Invalid::Occupied));
+    assert_eq!(validate(&s, k, [1, 0, 0]), Err(Invalid::Occupied));
+    assert_eq!(validate(&s, k, [2, 0, 0]), Ok(()));
+    assert!(k.same_tool(DesignationKind::Build(STONE)));
+    assert!(!k.same_tool(DesignationKind::Dig));
+}
+
+#[test]
+fn chop_needs_a_solid_tree_block() {
+    let reg = BlockRegistry::from_ron(include_str!("../../../assets/blocks/blocks.ron")).unwrap();
+    install_block_props(reg.props());
+    let (log, leaves) = (reg.id_of("oak_log").unwrap(), reg.id_of("oak_leaves").unwrap());
+    let mut s = Src::default();
+    s.blocks.insert([0, 0, 0], log);
+    s.trees.insert([0, 0, 0], 7);
+    s.blocks.insert([1, 0, 0], leaves);
+    s.trees.insert([1, 0, 0], 7);
+    s.blocks.insert([2, 0, 0], STONE);
+    s.blocks.insert([3, 0, 0], log); // a log with no tree id (e.g. built)
+    let k = DesignationKind::Chop;
+    assert_eq!(validate(&s, k, [0, 0, 0]), Ok(()));
+    for x in 1..=4 {
+        assert_eq!(validate(&s, k, [x, 0, 0]), Err(Invalid::NotTree), "x = {x}");
+    }
+    assert!(k.same_tool(DesignationKind::Chop));
+    assert!(!k.same_tool(DesignationKind::Dig));
+    assert!(!DesignationKind::Dig.same_tool(k));
+}
+
+#[test]
+fn summary_counts_by_reason() {
+    let mut s = Src::default();
+    s.blocks.insert([0, 0, 0], STONE);
+    s.blocks.insert([2, 0, 0], STONE);
+    s.bedrock.insert([2, 0, 0]);
+    let sum = summarize(&s, DesignationKind::Dig, TileBox::new([0, 0, 0], [2, 0, 0]));
+    assert_eq!(sum.valid, 1);
+    assert_eq!(
+        sum.invalid,
+        BTreeMap::from([(Invalid::NothingToDig, 1), (Invalid::Bedrock, 1)])
+    );
+}
+
 // ---- Orders as sim state -------------------------------------------------
 
-/// The level of the ground's top (solid) tile in every test column; the tile
-/// above it is open. Everything below the materialised surface layer is
-/// implied by the recipe.
-const SURFACE: i32 = 4;
+const BEDROCK: BlockId = BlockId(3);
+/// Surface block Y of every test column: the band is one fully solid chunk
+/// at sub-Y 0 (blocks 0 and 1); everything below is implied.
+const SURFACE: i32 = 1;
 /// Bedrock starts this level and goes down from there.
-const BEDROCK_Y: i32 = SURFACE - 6;
+const BEDROCK_Y: i32 = SURFACE - UNDERGROUND_DEPTH;
 
-/// The recipe of every test column: stone to the top of level [`SURFACE`]
-/// (no soil), bedrock from level [`BEDROCK_Y`] down.
-fn stone_column() -> StudColumnGround {
-    let bare = StudProfile { cover: MAT_STONE, cover_plates: 0, soil: MAT_STONE, soil_plates: 0 };
-    let plates = TILE_PLATES as i32;
-    StudColumnGround::flat((SURFACE + 1) * plates, bare, MAT_STONE, (BEDROCK_Y + 1) * plates)
+/// One band chunk (sub-Y 0, fully stone) over plain implied ground.
+fn stone_column() -> Column {
+    let band = SubChunk::Dense(Box::new(Chunk::flat_floor_with(32, STONE)));
+    // `below` must differ from the band, or normalising collapses it away.
+    Column::new(0, Block::new(BlockId(1)), Block::new(BlockId::AIR), vec![band])
+        .with_ground(ColumnGround::plain(vec![SURFACE as i16; game::COLUMN_FOOTPRINT].into_boxed_slice(), 0, STONE, BEDROCK))
 }
 
-/// A stud region of [`stone_column`]s over `chunks` x `chunks` chunk columns,
-/// with a render-update channel and client 0.
-fn stone_region(chunks: usize) -> (Region, crossbeam::channel::Receiver<GameDataUpdate>) {
-    crate::common::install_real_block_props();
-    let r0 = RegionCoords::new(0, 0);
-    let ground = (0..chunks).flat_map(|x| (0..chunks).map(move |z| (ColumnCoords::new(x, z), stone_column()))).collect();
-    let (send, recv) = crossbeam::channel::unbounded();
-    let mut region = Region::new(Rollback::new(Some(send.clone())), Some(send), r0, None);
-    region.seed_stud_world(StudRegionSeed { ground, features: Vec::new(), ..Default::default() });
-    region.handle_event(GameEventKind::CreateClient(0)).unwrap();
-    region.forget_last_event();
-    (region, recv)
-}
-
-/// Extent of the test region in tiles along x and z: every order here stays
-/// inside tiles 0..8.
+/// Extent of the test region in blocks along x and z: every order here stays
+/// inside blocks 0..8.
 const ORDER_REGION_BLOCKS: usize = 8;
 
-/// A region over the chunk columns covering tiles 0..[`ORDER_REGION_BLOCKS`],
-/// with a render-update channel and client 0.
+/// A region over the chunk columns covering blocks 0..[`ORDER_REGION_BLOCKS`]
+/// (4 x 4 chunks at 2-block chunks), with a render-update channel and client 0.
 fn order_region() -> Region {
     let (region, recv) = order_region_with_updates();
     std::mem::forget(recv);
@@ -64,7 +157,20 @@ fn order_region() -> Region {
 
 /// [`order_region`], keeping the render-update receiver.
 fn order_region_with_updates() -> (Region, crossbeam::channel::Receiver<GameDataUpdate>) {
-    stone_region(ORDER_REGION_BLOCKS.div_ceil(CHUNK_BLOCKS))
+    let r0 = RegionCoords::new(0, 0);
+    let mut columns = Vec::new();
+    let chunks = ORDER_REGION_BLOCKS.div_ceil(CHUNK_BLOCKS);
+    for x in 0..chunks {
+        for z in 0..chunks {
+            columns.push((ColumnCoords::new(x, z), stone_column()));
+        }
+    }
+    let built = Region::from_columns(r0, columns);
+    let (send, recv) = crossbeam::channel::unbounded();
+    let mut region = Region::new(built.data().clone(), Some(send), r0, None);
+    region.handle_event(GameEventKind::CreateClient(0)).unwrap();
+    region.forget_last_event();
+    (region, recv)
 }
 
 fn op(seq: u32) -> OpId {
@@ -106,27 +212,8 @@ fn assert_rejected(region: &mut Region, order: Order) {
     assert_eq!(&designations, region.data().designations());
 }
 
-/// How full tile `p` is and what it is mostly made of.
-fn tile_at(region: &Region, p: TilePos) -> (TileFill, Option<u16>) {
-    (TileSource::tile_fill(region.data(), p), TileSource::tile_material(region.data(), p))
-}
-
-/// What a dev-completed `Build(PLACE_BLOCK)` leaves in a tile.
-fn built() -> (TileFill, Option<u16>) {
-    (TileFill::Solid, Some(stud_material_of_block(game::edit::PLACE_BLOCK)))
-}
-
-const OPEN: (TileFill, Option<u16>) = (TileFill::Open, None);
-
-/// `summarize` counts a box's tiles by what `validate` says of each.
-#[test]
-fn summary_counts_by_reason() {
-    let region = order_region();
-    // One column from a bedrock level up to the open tile over the ground.
-    let column = TileBox::new([2, BEDROCK_Y, 2], [2, SURFACE + 1, 2]);
-    let sum = summarize(region.data(), DesignationKind::Dig, column);
-    assert_eq!(sum.valid as i32, SURFACE - BEDROCK_Y);
-    assert_eq!(sum.invalid, BTreeMap::from([(Invalid::NothingToDig, 1), (Invalid::Bedrock, 1)]));
+fn block_at(region: &Region, p: TilePos) -> BlockId {
+    TileSource::block(region.data(), p)
 }
 
 #[test]
@@ -135,11 +222,8 @@ fn designate_dig_marks_only_valid_tiles_and_rolls_back() {
     let area = TileBox::new([2, SURFACE, 2], [5, SURFACE + 1, 5]);
     apply_checked(&mut region, designate(op(1), DesignationKind::Dig, area));
     let d = region.data().designations();
-    // The ground is one filler slab: the dig is its cells inside the volume, one box
-    // (the air layer above adds nothing).
-    let cells: Vec<_> = d.keys().map(|b| b.cells()).collect();
-    let (s, t) = (TILE_STUDS as i32, TILE_PLATES as i32);
-    assert_eq!(cells, vec![([2 * s, SURFACE * t, 2 * s], [6 * s, (SURFACE + 1) * t, 6 * s])]);
+    assert_eq!(d.len(), 16, "the air layer above adds nothing");
+    assert!(d.keys().all(|p| p[1] == SURFACE));
     assert!(d.values().all(|d| d.op == op(1) && d.priority == DEFAULT_PRIORITY));
 }
 
@@ -164,9 +248,8 @@ fn area_is_clipped_to_region() {
     let area = TileBox::new([-4, SURFACE, -4], [3, SURFACE, 3]);
     apply_checked(&mut region, designate(op(1), DesignationKind::Dig, area));
     let d = region.data().designations();
-    assert_eq!(d.len(), 1);
-    let s = TILE_STUDS as i32;
-    assert!(d.keys().all(|b| b.cells().0[0] == 0 && b.cells().0[2] == 0 && b.cells().1[0] == 4 * s && b.cells().1[2] == 4 * s));
+    assert_eq!(d.len(), 16);
+    assert!(d.keys().all(|p| (0..4).contains(&p[0]) && (0..4).contains(&p[2])));
 }
 
 #[test]
@@ -216,11 +299,30 @@ fn order_beyond_level_range_is_rejected_without_panic() {
 }
 
 #[test]
-fn build_of_air_is_rejected() {
+fn build_with_other_block_id_is_rejected() {
     let mut region = order_region();
     let area = TileBox::new([2, SURFACE + 1, 2], [3, SURFACE + 1, 3]);
-    // On stud terrain a build may name any block but air.
-    assert_rejected(&mut region, designate(op(1), DesignationKind::Build(BlockId::AIR), area));
+    for id in [BEDROCK, BlockId::AIR, BlockId(0xBEEF)] {
+        assert_rejected(&mut region, designate(op(1), DesignationKind::Build(id), area));
+    }
+    assert!(region.data().designations().is_empty());
+}
+
+#[test]
+fn failed_deconstruct_keeps_constructed_flag() {
+    let mut region = order_region();
+    let build = DesignationKind::Build(game::edit::PLACE_BLOCK);
+    let p = [2, SURFACE + 1, 2];
+    let tile = TileBox::new(p, p);
+    apply_checked(&mut region, designate(op(1), build, tile));
+    apply_checked(&mut region, Order::DevCompleteAll);
+    assert!(region.data().constructed().contains_key(&p));
+    // The construction turns to bedrock, which refuses every write.
+    region.with_data(|r| assert!(r.set_block_safe(p, Block::new(BEDROCK))));
+    apply_checked(&mut region, designate(op(2), DesignationKind::Deconstruct, tile));
+    apply_checked(&mut region, Order::DevCompleteAll);
+    assert_eq!(block_at(&region, p), BEDROCK, "the write was refused");
+    assert!(region.data().constructed().contains_key(&p), "so the flag stays");
     assert!(region.data().designations().is_empty());
 }
 
@@ -241,7 +343,7 @@ fn order_payloads(
 fn render_payloads_carry_new_values_and_undo_restores_prior() {
     let (mut region, recv) = order_region_with_updates();
     let tile = TileBox::new([2, SURFACE, 2], [2, SURFACE, 2]);
-    let p = StudBox::of_tile(tile.min).unwrap();
+    let p = tile.min;
     apply_checked(&mut region, designate(op(1), DesignationKind::Dig, tile));
     let old = region.data().designations()[&p];
     recv.try_iter().count();
@@ -319,17 +421,9 @@ fn cancel_op_spares_tiles_overwritten_by_a_later_op() {
     let dig = DesignationKind::Dig;
     apply_checked(&mut region, designate(op(1), dig, TileBox::new([2, SURFACE, 2], [5, SURFACE, 5])));
     apply_checked(&mut region, designate(op(2), dig, TileBox::new([3, SURFACE, 3], [4, SURFACE, 4])));
-    // The first box keeps its cells around the second: no cell is designated twice.
-    let total: u32 = region.data().designations().keys().map(|b| b.cell_count()).sum();
-    assert_eq!(total, 16 * STUD_TILE_CELLS);
-    assert_eq!(region.data().designations().values().filter(|d| d.op == op(2)).count(), 1);
     apply_checked(&mut region, Order::CancelOp(op(1)));
-    // The later op took its cells out of the first one's box; the rest of that box
-    // went with the cancel.
     let d = region.data().designations();
-    let (s, t) = (TILE_STUDS as i32, TILE_PLATES as i32);
-    let cells: Vec<_> = d.keys().map(|b| b.cells()).collect();
-    assert_eq!(cells, vec![([3 * s, SURFACE * t, 3 * s], [5 * s, (SURFACE + 1) * t, 5 * s])]);
+    assert_eq!(d.len(), 4);
     assert!(d.values().all(|d| d.op == op(2)));
 }
 
@@ -337,11 +431,11 @@ fn cancel_op_spares_tiles_overwritten_by_a_later_op() {
 fn erase_filters_by_kind() {
     let mut region = order_region();
     let build = DesignationKind::Build(game::edit::PLACE_BLOCK);
-    // Stone at the surface takes Dig, the open tiles above take Build.
+    // Stone at the surface takes Dig, the air above takes Build.
     let area = TileBox::new([2, SURFACE, 2], [5, SURFACE + 1, 5]);
     apply_checked(&mut region, designate(op(1), DesignationKind::Dig, area));
     apply_checked(&mut region, designate(op(2), build, area));
-    assert_eq!(region.data().designations().len(), 1 + 16, "one box of the slab, a tile box per build");
+    assert_eq!(region.data().designations().len(), 32);
     apply_checked(&mut region, Order::Erase { area, only: Some(DesignationKind::Dig) });
     let d = region.data().designations();
     assert_eq!(d.len(), 16);
@@ -357,16 +451,16 @@ fn dev_complete_builds_a_two_level_wall_then_deconstructs_it() {
     apply_checked(&mut region, designate(op(1), build, wall));
     apply_checked(&mut region, Order::DevCompleteAll);
     for p in wall.tiles() {
-        assert_eq!(tile_at(&region, p), built(), "{p:?} built");
+        assert_eq!(block_at(&region, p), game::edit::PLACE_BLOCK, "{p:?} built");
         assert!(region.data().constructed().contains_key(&p));
     }
     assert!(region.data().designations().is_empty());
 
     apply_checked(&mut region, designate(op(2), DesignationKind::Deconstruct, wall));
-    assert_eq!(region.data().designations().len(), 16, "a built tile is two 2 x 2 bricks, each designated");
+    assert_eq!(region.data().designations().len(), 8);
     apply_checked(&mut region, Order::DevCompleteAll);
     for p in wall.tiles() {
-        assert_eq!(tile_at(&region, p), OPEN, "{p:?} taken down");
+        assert_eq!(block_at(&region, p), BlockId::AIR, "{p:?} taken down");
     }
     assert!(region.data().constructed().is_empty());
     assert!(region.data().designations().is_empty());
@@ -378,17 +472,17 @@ fn dev_complete_drops_stale_designations() {
     let area = TileBox::new([2, SURFACE, 2], [3, SURFACE, 3]);
     apply_checked(&mut region, designate(op(1), DesignationKind::Dig, area));
     let stale = [2, SURFACE, 2];
-    region.with_data(|r| assert!(crate::common::carve_tile(r, stale)));
+    region.with_data(|r| assert!(r.set_block_safe(stale, Block::new(BlockId::AIR))));
     let n = ORDER_REGION_BLOCKS as i32;
     let snapshot: Vec<_> = (0..n)
         .flat_map(|x| (SURFACE - 2..=SURFACE + 1).flat_map(move |y| (0..n).map(move |z| [x, y, z])))
-        .map(|p| (p, tile_at(&region, p)))
+        .map(|p| (p, block_at(&region, p)))
         .collect();
     apply_checked(&mut region, Order::DevCompleteAll);
     assert!(region.data().designations().is_empty());
     for (p, was) in snapshot {
-        let expect = if area.contains(p) { OPEN } else { was };
-        assert_eq!(tile_at(&region, p), expect, "{p:?}");
+        let expect = if area.contains(p) { BlockId::AIR } else { was };
+        assert_eq!(block_at(&region, p), expect, "{p:?}");
     }
 }
 
@@ -399,12 +493,12 @@ fn dig_box_down_to_bedrock_skips_bedrock() {
     let area = TileBox::new([2, BEDROCK_Y - 1, 2], [3, SURFACE, 3]);
     apply_checked(&mut region, designate(op(1), DesignationKind::Dig, area));
     let d = region.data().designations();
-    assert_eq!(d.len(), 2, "the stone slab's cells in each layer; bedrock refused");
-    assert!(d.keys().all(|b| b.cells().0[1] >= (BEDROCK_Y + 1) * TILE_PLATES as i32));
+    assert_eq!(d.len() as u64, area.tile_count() - 2 * 4, "two bedrock levels refused");
+    assert!(d.keys().all(|p| p[1] > BEDROCK_Y));
     apply_checked(&mut region, Order::DevCompleteAll);
     for p in area.tiles() {
-        let expect = if p[1] > BEDROCK_Y { OPEN } else { (TileFill::Solid, Some(MAT_BEDROCK)) };
-        assert_eq!(tile_at(&region, p), expect, "{p:?}");
+        let expect = if p[1] > BEDROCK_Y { BlockId::AIR } else { BEDROCK };
+        assert_eq!(block_at(&region, p), expect, "{p:?}");
     }
 }
 
@@ -414,7 +508,7 @@ fn pick_solid(cells: &[TilePos]) -> impl Fn(TilePos) -> bool {
 }
 
 fn straight_down() -> (rapier3d::math::Vector, rapier3d::math::Vector) {
-    let s = crate::common::TILE_W;
+    let s = BLOCK_VOXELS as f32;
     (
         rapier3d::math::Vector::new(3.5 * s, 40.0 * s, 3.5 * s),
         rapier3d::math::Vector::new(0.0, -1.0, 0.0),
@@ -436,7 +530,7 @@ fn pick_sees_the_floor_below_an_air_cell() {
 #[test]
 fn pick_clamps_open_space_to_the_level() {
     use rapier3d::math::Vector;
-    let s = crate::common::TILE_W;
+    let s = BLOCK_VOXELS as f32;
     let pitch = 55.0_f32.to_radians();
     let d = Vector::new(pitch.cos(), -pitch.sin(), 0.0);
     let o = Vector::new(0.5 * s, 40.0 * s, 3.5 * s);
@@ -448,7 +542,7 @@ fn pick_clamps_open_space_to_the_level() {
 #[test]
 fn pick_ignores_blocks_above_the_cut() {
     use rapier3d::math::Vector;
-    let s = crate::common::TILE_W;
+    let s = BLOCK_VOXELS as f32;
     // 45 degrees toward +x: enters the level in column 3, but the open-space
     // clamp would say column 4.
     let c = std::f32::consts::FRAC_1_SQRT_2;
@@ -464,7 +558,7 @@ fn pick_ignores_blocks_above_the_cut() {
 #[test]
 fn visible_pick_hits_blocks_above_the_level() {
     use rapier3d::math::Vector;
-    let s = crate::common::TILE_W;
+    let s = BLOCK_VOXELS as f32;
     let c = std::f32::consts::FRAC_1_SQRT_2;
     let d = Vector::new(c, -c, 0.0);
     // The same ray as `pick_ignores_blocks_above_the_cut`: with nothing cut
@@ -484,17 +578,69 @@ fn visible_pick_any_depth_and_the_face_cell_for_builds() {
     assert_eq!(pick_visible_cell(o, d, 64.0, false, pick_solid(&[])), None, "nothing to hit");
 }
 
+/// Dug air under a 10-block-thick roof at block column (3, 3): the surface is
+/// y 30 everywhere, the room is air y 5..=7, its floor solid at y 4.
+fn xray_world() -> (impl Fn(TilePos) -> bool, impl Fn(TilePos) -> bool) {
+    let room = |p: TilePos| (p[0], p[2]) == (3, 3) && (5..=7).contains(&p[1]);
+    let solid = move |p: TilePos| p[1] < 30 && !room(p);
+    let dug = |p: TilePos| is_dug_air(p[1], 30);
+    (solid, dug)
+}
+
+#[test]
+fn dug_air_is_strictly_below_the_surface() {
+    assert!(is_dug_air(29, 30));
+    assert!(!is_dug_air(30, 30), "air inside the surface block (a half block's top) is not dug");
+    assert!(!is_dug_air(31, 30));
+}
+
+#[test]
+fn xray_sees_the_floor_of_a_room_through_its_roof() {
+    let (o, d) = straight_down();
+    let (solid, dug) = xray_world();
+    assert_eq!(pick_visible_cell(o, d, 64.0, false, &solid), Some([3, 29, 3]), "plain: the roof's top");
+    assert_eq!(pick_xray_cell(o, d, 64.0, false, &solid, &dug), Some([3, 4, 3]), "x-ray: the room's floor");
+    assert_eq!(pick_xray_cell(o, d, 64.0, true, &solid, &dug), Some([3, 5, 3]), "a build: the air on the floor");
+}
+
+#[test]
+fn xray_without_a_dug_space_on_the_ray_is_the_plain_pick() {
+    let s = BLOCK_VOXELS as f32;
+    let (solid, dug) = xray_world();
+    let o = rapier3d::math::Vector::new(9.5 * s, 40.0 * s, 9.5 * s);
+    let d = rapier3d::math::Vector::new(0.0, -1.0, 0.0);
+    assert_eq!(pick_xray_cell(o, d, 64.0, false, &solid, &dug), Some([9, 29, 9]));
+    // Air above the surface is not dug: a ray through the open sky hits ground.
+    assert_eq!(pick_xray_cell(o, d, 64.0, false, &solid, |_| true), Some([9, 29, 9]));
+}
+
+#[test]
+fn xray_ignores_a_room_beyond_reach() {
+    let (o, d) = straight_down();
+    let (solid, dug) = xray_world();
+    assert_eq!(pick_xray_cell(o, d, 20.0, false, &solid, &dug), Some([3, 29, 3]), "the room lies 33 blocks down");
+}
+
 /// `DevCompleteAll` writes in per-chunk batches (one undo entry per chunk —
 /// a per-tile loop re-hashed whole fields per tile, seconds on a play-size
 /// region, and the client replayed it on every rollback). The batched result
-/// must be the per-tile one (tile fill and dominant material), across chunk
-/// borders and into implied ground, and roll back bit-exact.
+/// must be the per-tile one, across chunk borders, and roll back bit-exact.
 #[test]
-#[ignore = "slow: >100ms — run via just test-full"]
 fn complete_all_batches_match_per_tile_edits() {
     let build_region = || {
-        let (region, recv) = stone_region(2);
+        let r0 = RegionCoords::new(0, 0);
+        let mut columns = Vec::new();
+        for x in 0..2 {
+            for z in 0..2 {
+                columns.push((ColumnCoords::new(x, z), stone_column()));
+            }
+        }
+        let built = Region::from_columns(r0, columns);
+        let (send, recv) = crossbeam::channel::unbounded();
         std::mem::forget(recv);
+        let mut region = Region::new(built.data().clone(), Some(send), r0, None);
+        region.handle_event(GameEventKind::CreateClient(0)).unwrap();
+        region.forget_last_event();
         region
     };
     let c = CHUNK_BLOCKS as i32;
@@ -509,17 +655,15 @@ fn complete_all_batches_match_per_tile_edits() {
     assert!(batched.data().designations().is_empty());
     per_tile.with_data(|r| {
         for p in dig.tiles() {
-            crate::common::carve_tile(r, p);
+            r.set_block_safe(p, Block::new(BlockId::AIR));
         }
-        let material = stud_material_of_block(game::edit::PLACE_BLOCK);
         for p in build.tiles() {
-            let (lo, hi) = stud_tile_box(p).unwrap();
-            assert!(r.fill_stud_box_safe(lo, hi, material) > 0);
+            r.set_block_safe(p, Block::new(game::edit::PLACE_BLOCK));
         }
     });
     let span = TileBox::new([0, SURFACE - 8, 0], [2 * c - 1, SURFACE + 4, 2 * c - 1]);
     for p in span.tiles() {
-        assert_eq!(tile_at(&batched, p), tile_at(&per_tile, p), "tile at {p:?}");
+        assert_eq!(block_at(&batched, p), block_at(&per_tile, p), "block at {p:?}");
     }
     let built: Vec<TilePos> = batched.data().constructed().keys().copied().collect();
     let mut want: Vec<TilePos> = build.tiles().collect();
@@ -529,6 +673,15 @@ fn complete_all_batches_match_per_tile_edits() {
     apply_checked(&mut batched, designate(op(3), DesignationKind::Deconstruct, build));
     apply_checked(&mut batched, Order::DevCompleteAll);
     assert!(batched.data().constructed().is_empty());
-    assert!(build.tiles().all(|p| tile_at(&batched, p) == OPEN));
+    assert!(build.tiles().all(|p| block_at(&batched, p) == BlockId::AIR));
 }
 
+#[test]
+fn water_cell_is_free_for_build_and_empty_for_dig() {
+    crate::common::install_real_block_props();
+    let water = BlockId(5);
+    let mut s = Src::default();
+    s.blocks.insert([0, 0, 0], water);
+    assert_eq!(validate(&s, DesignationKind::Build(game::edit::PLACE_BLOCK), [0, 0, 0]), Ok(()));
+    assert_eq!(validate(&s, DesignationKind::Dig, [0, 0, 0]), Err(Invalid::NothingToDig));
+}

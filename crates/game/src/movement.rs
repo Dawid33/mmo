@@ -13,12 +13,12 @@ use rapier3d::parry::query::ShapeCastOptions;
 use rapier3d::parry::shape::Shape;
 use rapier3d::pipeline::QueryPipeline;
 
-use crate::{BLOCK_UNITS, TICK_RATE};
+use crate::{BLOCK_VOXELS, TICK_RATE};
 
-// Tunables, in metres and seconds (1 m = 1 block = `BLOCK_UNITS` units), so
+// Tunables, in metres and seconds (1 m = 1 block = `BLOCK_VOXELS` units), so
 // they keep their meaning when TICK_RATE is retuned.
 /// World units per metre.
-pub const UNITS_PER_METER: f32 = BLOCK_UNITS as f32;
+pub const UNITS_PER_METER: f32 = BLOCK_VOXELS as f32;
 /// Seconds per simulation tick.
 pub const TICK_DT: f32 = TICK_RATE as f32 / 1000.0;
 /// Ground speed (Minecraft walk: 4.317 m/s).
@@ -57,8 +57,6 @@ pub const AUTOSTEP_MIN_WIDTH_M: f32 = 0.3;
 /// what a body walks up it also walks down — at 0.25 m a terrain slope's
 /// 0.5 m half-steps went airborne for 3-4 ticks.
 pub const GROUND_SNAP: f32 = 0.6;
-// `BodyScale` snaps `step_height_m`: UNIT keeps this snap only while they match.
-const _: () = assert!(GROUND_SNAP == STEP_HEIGHT);
 
 /// Horizontal swimming speed (at [`Immersion::Waist`] or deeper).
 pub const SWIM_SPEED: f32 = 2.2;
@@ -100,93 +98,6 @@ pub const PLAYER_CAPSULE_HALF_HEIGHT: f32 =
 /// Eye position above the body origin (the capsule centre), in world units.
 /// The sim body pose is the capsule centre; cameras and view rays add this.
 pub const PLAYER_EYE_OFFSET: f32 = (PLAYER_EYE_HEIGHT - PLAYER_HEIGHT / 2.0) * UNITS_PER_METER;
-
-/// Body factor of the stud world: 1.8 m people become 2.4 m minifigures
-/// (4 bricks tall). Scales the eye, the jump and gravity; the collision
-/// capsule has its own size below.
-pub const STUD_BODY_FACTOR: f32 = 4.0 / 3.0;
-/// Collision height of a stud-world person, metres. Shorter than the 2.4 m
-/// figure so a body standing on floor studs (0.1 m) passes a corridor two
-/// tiles (2.4 m) high — `physics-next` `stud_voxels`.
-pub const STUD_PLAYER_HEIGHT_M: f32 = 2.2;
-/// Collision radius of a stud-world person, metres: 0.8 m wide, so it passes
-/// a corridor one tile (2 studs, 1 m) wide.
-pub const STUD_PLAYER_RADIUS_M: f32 = 0.4;
-/// Step height in the stud world, metres: one 0.6 m brick course plus margin
-/// (a 0.55 m step does not climb it, 0.65 m does — `physics-next`
-/// `stud_voxels`). Decision point at first playtest: this, or one plate
-/// (0.25 m) plus jumping a brick.
-pub const STUD_STEP_HEIGHT_M: f32 = 0.65;
-
-/// Steepest contact (radians from level) a stud-world body rests on without sliding:
-/// a right angle, so it never slides. Stud terrain is boxes: a steeper-than-45° contact
-/// is always a capsule's round foot on a brick's EDGE, never a slope. Sliding there
-/// undid every autostep of a rise taller than the capsule's radius that began late in
-/// a tick: the step lifts the body, nudges it forward only by the tick's leftover
-/// motion, then gives the lift back — the foot came down on the ledge's edge, off
-/// axis, and slid back off it (`physics-next` `stud_voxels::stud_body_steps_up…`).
-/// Held on the edge, the next tick's step takes the rest of the rise.
-pub const STUD_EDGE_HOLD_ANGLE: f32 = std::f32::consts::FRAC_PI_2;
-/// The same limit for voxel-world bodies: rapier's default (45°), so terrain slopes
-/// steeper than a 1:1 ramp slide a body off.
-pub const VOXEL_SLOPE_SLIDE_ANGLE: f32 = std::f32::consts::FRAC_PI_4;
-
-/// The per-region size of a player body (spec "Player, fitted"): voxel
-/// worlds keep 1.8 m people, the stud world fits 2.4 m minifigures. `factor`
-/// scales the eye, the jump speed and gravity (so jump and fall *times*
-/// match, lengths scale) and the autostep tread; `step_height_m` is the
-/// autostep height, ground snap and depenetration reach; `height_m` /
-/// `radius_m` size the collision capsule (and so the spawn clearance). Walk speed and swimming do not scale (decision point
-/// at playtest). Only the player path reads it; every other walking body
-/// stays at the shared constants. Lives in `GameData::body_scale`.
-#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize, state_hash::StateHash)]
-pub struct BodyScale {
-    pub factor: f32,
-    pub step_height_m: f32,
-    pub height_m: f32,
-    pub radius_m: f32,
-}
-
-impl Default for BodyScale {
-    fn default() -> Self {
-        Self::UNIT
-    }
-}
-
-impl BodyScale {
-    /// The shared movement constants, unscaled (every product with `factor`
-    /// is exact): what every walking body but a region's player-sized ones
-    /// uses (slimes).
-    pub const UNIT: BodyScale =
-        BodyScale { factor: 1.0, step_height_m: STEP_HEIGHT, height_m: PLAYER_HEIGHT, radius_m: PLAYER_RADIUS };
-    pub const STUD: BodyScale = BodyScale {
-        factor: STUD_BODY_FACTOR,
-        step_height_m: STUD_STEP_HEIGHT_M,
-        height_m: STUD_PLAYER_HEIGHT_M,
-        radius_m: STUD_PLAYER_RADIUS_M,
-    };
-
-    /// Capsule half-height (cylinder part), world units.
-    pub fn capsule_half_height(&self) -> f32 {
-        // The same expression as `PLAYER_CAPSULE_HALF_HEIGHT`: bit-equal for VOXEL.
-        self.height_m * UNITS_PER_METER / 2.0 - self.capsule_radius()
-    }
-
-    /// Capsule radius, world units.
-    pub fn capsule_radius(&self) -> f32 {
-        self.radius_m * UNITS_PER_METER
-    }
-
-    /// Eye above the body origin (capsule centre), world units.
-    pub fn eye_offset(&self) -> f32 {
-        PLAYER_EYE_OFFSET * self.factor
-    }
-
-    /// `base` fitted to this body: jump speed and gravity scale by `factor`.
-    pub fn move_params(&self, base: MoveParams) -> MoveParams {
-        MoveParams { jump_speed: base.jump_speed * self.factor, gravity_scale: base.gravity_scale * self.factor, ..base }
-    }
-}
 
 /// Gap the character controller keeps between a body and the terrain, in world
 /// units. Absolute, not rapier's default of 1% of the body height: the voxel
@@ -264,14 +175,10 @@ pub struct MoveParams {
     /// Whether a double tap of jump starts flight. Off for Adventure
     /// (survival) bodies, which also drop out of flight.
     pub allow_flight: bool,
-    /// Multiplies `GRAVITY`, `FALL_GRAVITY` and `TERMINAL_SPEED` (a
-    /// [`BodyScale`] factor; 1.0 everywhere else).
-    pub gravity_scale: f32,
 }
 
 impl MoveParams {
-    pub const PLAYER: MoveParams =
-        MoveParams { walk_speed: WALK_SPEED, jump_speed: JUMP_SPEED, allow_flight: true, gravity_scale: 1.0 };
+    pub const PLAYER: MoveParams = MoveParams { walk_speed: WALK_SPEED, jump_speed: JUMP_SPEED, allow_flight: true };
 }
 
 /// Advances `motion` by one tick of intent and returns the translation the
@@ -348,16 +255,11 @@ pub fn plan_with(
             // ledge, at full speed for as long as the wall blocks and the
             // waist is wet. Head under, jump only swims up (a wall under
             // water is no ledge).
-            // Scaled like the jump (`BodyScale::move_params`): gravity is, so an
-            // unscaled exit carried a stud body 0.94 m where the voxel body rose 1.25 m.
-            let exit = SWIM_EXIT_SPEED * params.gravity_scale * UNITS_PER_METER;
+            let exit = SWIM_EXIT_SPEED * UNITS_PER_METER;
             (exit, exit)
         } else {
             let v0 = motion.vel_y;
-            // Scaled with gravity: water brakes a body as hard as gravity speeds it
-            // up, whatever the body's scale (unscaled, a stud body stepping off a
-            // bank sank 5.4 m where the voxel body's 3.4 m scales to 4.5 m).
-            let max_dv = SWIM_VERTICAL_ACCEL * params.gravity_scale * UNITS_PER_METER * TICK_DT;
+            let max_dv = SWIM_VERTICAL_ACCEL * UNITS_PER_METER * TICK_DT;
             (v0, v0 + (target - v0).clamp(-max_dv, max_dv))
         };
         motion.vel_y = v1;
@@ -369,8 +271,8 @@ pub fn plan_with(
         } else {
             motion.vel_y
         };
-        let g = (if v0 > 0.0 { GRAVITY } else { FALL_GRAVITY }) * params.gravity_scale;
-        let v1 = (v0 - g * UNITS_PER_METER * TICK_DT).max(-TERMINAL_SPEED * params.gravity_scale * UNITS_PER_METER);
+        let g = if v0 > 0.0 { GRAVITY } else { FALL_GRAVITY };
+        let v1 = (v0 - g * UNITS_PER_METER * TICK_DT).max(-TERMINAL_SPEED * UNITS_PER_METER);
         motion.vel_y = v1;
         // Trapezoid rule: exact under constant acceleration, so jump height
         // does not depend on the tick period.
@@ -412,28 +314,8 @@ pub fn walk_body_with(
     handle: rapier3d::prelude::RigidBodyHandle,
     params: &MoveParams,
 ) -> Vector {
-    walk_body_scaled(motion, keys, yaw, tick, broad_phase, narrow_phase, bodies, colliders, handle, params, BodyScale::UNIT)
-}
-
-/// [`walk_body_with`] for a body of `scale` (the player path); `params`
-/// should already be `scale.move_params(..)`.
-#[allow(clippy::too_many_arguments)]
-pub fn walk_body_scaled(
-    motion: &mut Motion,
-    keys: &MoveKeys,
-    yaw: f32,
-    tick: u64,
-    broad_phase: &rapier3d::prelude::DefaultBroadPhase,
-    narrow_phase: &rapier3d::prelude::NarrowPhase,
-    bodies: &rapier3d::prelude::RigidBodySet,
-    colliders: &rapier3d::prelude::ColliderSet,
-    handle: rapier3d::prelude::RigidBodyHandle,
-    params: &MoveParams,
-    scale: BodyScale,
-) -> Vector {
     let desired = plan_with(motion, keys, yaw, tick, params);
-    let (corrected, grounded) =
-        sweep_character_scaled(broad_phase, narrow_phase, bodies, colliders, handle, motion, desired, scale);
+    let (corrected, grounded) = sweep_character(broad_phase, narrow_phase, bodies, colliders, handle, motion, desired);
     settle(motion, &desired, &corrected, grounded);
     corrected
 }
@@ -455,13 +337,6 @@ pub fn settle(motion: &mut Motion, desired: &Vector, moved: &Vector, grounded: b
     let bumped_head = motion.vel_y > 0.0 && moved.y < desired.y * 0.5;
     if (grounded && motion.vel_y < 0.0) || bumped_head {
         motion.vel_y = 0.0;
-    } else if motion.vel_y < 0.0 && desired.y < 0.0 && moved.y > desired.y * 0.5 {
-        // A fall that something stopped without grounding the body (a capsule
-        // hanging on a brick's edge, wedged against a wall): the body keeps the
-        // speed it made, not the speed it wanted. Without this `vel_y` ran on to
-        // terminal speed while the body stood still, and the body shot down the
-        // moment it came free.
-        motion.vel_y = motion.vel_y.max((moved.y / TICK_DT).min(0.0));
     }
 }
 
@@ -479,16 +354,11 @@ pub fn settle(motion: &mut Motion, desired: &Vector, moved: &Vector, grounded: b
 /// would not clear it: a buried body stays put rather than being teleported
 /// up through whatever buried it.
 pub fn depenetration_lift(queries: &QueryPipeline, shape: &dyn Shape, pos: &Pose) -> f32 {
-    depenetration_lift_scaled(queries, shape, pos, BodyScale::UNIT)
-}
-
-/// [`depenetration_lift`] reaching `scale.step_height_m`.
-pub fn depenetration_lift_scaled(queries: &QueryPipeline, shape: &dyn Shape, pos: &Pose, scale: BodyScale) -> f32 {
     let zero = 0.0;
     if queries.intersect_shape(*pos, shape).next().is_none() {
         return zero;
     }
-    let max = scale.step_height_m * UNITS_PER_METER;
+    let max = STEP_HEIGHT * UNITS_PER_METER;
     let up = Vector::Y;
     let mut raised = *pos;
     raised.translation += up * max;
@@ -529,22 +399,6 @@ pub fn sweep_character(
     motion: &Motion,
     desired: Vector,
 ) -> (Vector, bool) {
-    sweep_character_scaled(broad_phase, narrow_phase, bodies, colliders, handle, motion, desired, BodyScale::UNIT)
-}
-
-/// [`sweep_character`] for a body of `scale`: its step height, ground snap,
-/// autostep tread and depenetration reach.
-#[allow(clippy::too_many_arguments)]
-pub fn sweep_character_scaled(
-    broad_phase: &rapier3d::prelude::DefaultBroadPhase,
-    narrow_phase: &rapier3d::prelude::NarrowPhase,
-    bodies: &rapier3d::prelude::RigidBodySet,
-    colliders: &rapier3d::prelude::ColliderSet,
-    handle: rapier3d::prelude::RigidBodyHandle,
-    motion: &Motion,
-    desired: Vector,
-    scale: BodyScale,
-) -> (Vector, bool) {
     let b = bodies.get(handle).unwrap();
     let t = b.translation();
     let Some(collider_handle) = b.colliders().first().copied() else {
@@ -561,9 +415,9 @@ pub fn sweep_character_scaled(
     // pitch, which must not tilt the collision shape.
     let upright = Pose::from_translation(t);
     // A body sunk into terrain is first put back on it.
-    let lift = Vector::Y * depenetration_lift_scaled(&queries, collider.shape(), &upright, scale);
+    let lift = Vector::Y * depenetration_lift(&queries, collider.shape(), &upright);
     let start = Pose::from_translation(t + lift);
-    let out = character_controller_scaled(motion, scale).move_shape(
+    let out = character_controller(motion).move_shape(
         TICK_DT,
         &queries,
         collider.shape(),
@@ -578,28 +432,20 @@ pub fn sweep_character_scaled(
 /// ledges and stick to the ground; flying and swimming (waist deep or more)
 /// bodies do neither.
 pub fn character_controller(motion: &Motion) -> KinematicCharacterController {
-    character_controller_scaled(motion, BodyScale::UNIT)
-}
-
-/// [`character_controller`] for a body of `scale`: steps and snaps
-/// `scale.step_height_m` (`GROUND_SNAP` is as tall as the step), tread
-/// `AUTOSTEP_MIN_WIDTH_M` × `factor`.
-pub fn character_controller_scaled(motion: &Motion, scale: BodyScale) -> KinematicCharacterController {
     let walking = !motion.flying && motion.immersion < Immersion::Waist;
     KinematicCharacterController {
         autostep: walking.then(|| CharacterAutostep {
-            max_height: CharacterLength::Absolute(scale.step_height_m * UNITS_PER_METER),
-            min_width: CharacterLength::Absolute(AUTOSTEP_MIN_WIDTH_M * scale.factor * UNITS_PER_METER),
+            max_height: CharacterLength::Absolute(STEP_HEIGHT * UNITS_PER_METER),
+            min_width: CharacterLength::Absolute(AUTOSTEP_MIN_WIDTH_M * UNITS_PER_METER),
             include_dynamic_bodies: false,
         }),
         snap_to_ground: walking
-            .then(|| CharacterLength::Absolute(scale.step_height_m * UNITS_PER_METER)),
+            .then(|| CharacterLength::Absolute(GROUND_SNAP * UNITS_PER_METER)),
         offset: CharacterLength::Absolute(CHARACTER_SKIN),
         // Plan D7: `depenetration_lift` owns sunk bodies (a buried one stays
         // put); upstream's zero-motion depenetration (#485) would push a body
         // buried deeper than STEP_HEIGHT out through cuboid terrain.
         depenetrate: false,
-        min_slope_slide_angle: if scale == BodyScale::STUD { STUD_EDGE_HOLD_ANGLE } else { VOXEL_SLOPE_SLIDE_ANGLE },
         ..Default::default()
     }
 }
@@ -729,28 +575,6 @@ mod tests {
         assert!(m.vel_y > 0.0);
         settle(&mut m, &d, &Vector::ZERO, false);
         assert_eq!(m.vel_y, 0.0);
-    }
-
-    /// A fall stopped without grounding (a capsule held on an edge) keeps the
-    /// speed it made, not the speed it wanted; a free fall keeps its own.
-    #[test]
-    fn a_blocked_fall_does_not_gather_speed() {
-        let mut m = Motion::default();
-        for t in 0..40 {
-            let desired = plan(&mut m, &keys(), YAW0, t);
-            assert!(desired.y < 0.0);
-            settle(&mut m, &desired, &Vector::ZERO, false);
-            assert_eq!(m.vel_y, 0.0, "tick {t}");
-        }
-        let desired = plan(&mut m, &keys(), YAW0, 40);
-        let wanted = m.vel_y;
-        settle(&mut m, &desired, &desired, false);
-        assert_eq!(m.vel_y, wanted, "an unobstructed fall is untouched");
-        // Sliding at a third of the wanted fall: that speed, no more.
-        let desired = plan(&mut m, &keys(), YAW0, 41);
-        let moved = Vector::new(0.0, desired.y / 3.0, 0.0);
-        settle(&mut m, &desired, &moved, false);
-        assert_eq!(m.vel_y, moved.y / TICK_DT);
     }
 
     #[test]

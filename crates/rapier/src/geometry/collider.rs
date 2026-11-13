@@ -584,15 +584,6 @@ impl Collider {
         self.shape = shape;
     }
 
-    /// mmo-fork: snapshot wire — swaps the shape for another WITHOUT touching
-    /// change tracking, returning the old one. Only for replacing a shape by
-    /// an equal one (the game's join snapshot leaves derivable `Voxels` shapes
-    /// off the wire and puts them back on receipt): `set_shape` would flag
-    /// `ColliderChanges::SHAPE` and so change hashed state.
-    pub fn swap_shape_raw(&mut self, shape: SharedShape) -> SharedShape {
-        core::mem::replace(&mut self.shape, shape)
-    }
-
     /// Returns the shape as a `SharedShape` (reference-counted shape).
     ///
     /// Use `shape()` for the trait object, this for the concrete type.

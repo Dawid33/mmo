@@ -10,11 +10,11 @@ fn crc(region: &Region) -> u32 {
 /// One region, one player, FPS-cam enabled, positioned by create_player_safe.
 ///
 /// Built via `Region::new` with a live throwaway render-event sender rather
-/// than a server region's `None` sender: rollback of a
+/// than `Region::from_chunks` (which wires a `None` sender): rollback of a
 /// tier-2 undo entry (our camera `register()`, and the surgical
 /// `mutate_body_safe` body-write sites) unwraps that sender internally, and a
-/// `None` client panics there — server regions
-/// only ever `forget()` transactions, never `rollback()` them. Same
+/// `None` client panics there — `Region::from_chunks` is for server regions,
+/// which only ever `forget()` transactions, never `rollback()` them. Same
 /// workaround as `handoff_scan.rs`'s `extracting_tick_holds_the_hash_bar`.
 /// `_send` stays bound so the channel doesn't disconnect mid-test.
 fn region_fps_ready() -> (Region, game::EntityKey, crossbeam::channel::Receiver<game::GameDataUpdate>)

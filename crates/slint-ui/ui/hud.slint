@@ -13,6 +13,8 @@ export global HudConfig {
     out property <length> minimap-size: 220px;
     out property <length> minimap-margin: 12px;
     out property <length> minimap-outline: 2px;
+    out property <length> mining-bar-width: 48px;
+    out property <length> mining-bar-height: 6px;
 }
 
 export component HudUi inherits Window {
@@ -25,10 +27,11 @@ export component HudUi inherits Window {
     in property <bool> crosshair-visible;
 
     // Adventure first person: the hotbar strip (bottom centre, 9 slots, the
-    // selected one highlighted). Mining progress is drawn on the block itself
-    // (the client's `renderer/block_target.rs` cracks).
+    // selected one highlighted) and the mining progress ring around the
+    // crosshair (0..1; 0 = not mining).
     in property <[ItemSlot]> hotbar;
     in property <int> hotbar-selected;
+    in property <float> mining-progress;
 
     // Commander box selection, window logical pixels.
     in property <bool> band-visible;
@@ -117,6 +120,22 @@ export component HudUi inherits Window {
             slot: slot;
             selected: i == root.hotbar-selected;
             interactive: false;
+        }
+    }
+
+    // Mining progress: a bar under the crosshair that fills as the block
+    // gives (a ring cannot be stroked with the software renderer's shapes).
+    if root.mining-progress > 0: Rectangle {
+        width: HudConfig.mining-bar-width;
+        height: HudConfig.mining-bar-height;
+        x: (root.width - self.width) / 2;
+        y: root.height / 2 + HudConfig.crosshair-arm;
+        background: rgba(0, 0, 0, 0.6);
+
+        Rectangle {
+            x: 0px;
+            width: parent.width * clamp(root.mining-progress, 0, 1);
+            background: rgb(255, 215, 90);
         }
     }
 }

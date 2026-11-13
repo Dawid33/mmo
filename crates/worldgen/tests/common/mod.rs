@@ -3,6 +3,7 @@
 //! right answers are known.
 #![allow(dead_code)] // each test binary uses its own subset
 
+use game::BlockId;
 use worldgen::forged::{GEO_STEP_M, HEIGHT_STEP_M, Lake, QRaster, PRECIP_STEP_MM, TEMPERATURE_STEP_C, RiverPoint, RiverReach, WorldArtifact, ARTIFACT_VERSION};
 
 pub const N: usize = 64;
@@ -23,6 +24,20 @@ pub const SHALE: u8 = 1;
 /// A plain rising eastward out of a western sea: h = 2 + 0.03 x.
 pub fn plain(ax: f64) -> f64 {
     2.0 + 0.03 * ax
+}
+
+pub fn mats() -> worldgen::material::Materials {
+    worldgen::material::Materials {
+        stone: BlockId(2),
+        dirt: BlockId(1),
+        grass: BlockId(3),
+        sand: BlockId(4),
+        water: BlockId(5),
+        bedrock: game::BlockId(6),
+        rocks: [7, 8, 9, 10, 11, 12].map(game::BlockId),
+        trees: worldgen::material::TreeBlocks::NONE,
+        biome: worldgen::material::BiomeBlocks::NONE,
+    }
 }
 
 pub fn synthetic() -> WorldArtifact {

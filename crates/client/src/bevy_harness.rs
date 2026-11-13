@@ -14,8 +14,8 @@ use crossbeam::channel::{unbounded, Receiver};
 use game::{ClientId, ClientUpdateEvent, GameEventKind, InputEvent, Key, ServerPacket};
 
 use crate::renderer::bridge::{
-    despawn_retired_regions, drain_client_updates, drain_region_updates, RegionRoots, Regions, RetiredRegionRoots,
-    SimEntityMap,
+    apply_snapshot_voxels, despawn_retired_regions, drain_client_updates, drain_region_updates,
+    RegionRoots, Regions, RetiredRegionRoots, SimEntityMap, SnapshotVoxelQueue,
 };
 use crate::renderer::hud::HudStatus;
 use crate::renderer::input::forward_input;
@@ -67,7 +67,7 @@ impl BevyInputHarness {
         //   synchronous build, and the production table's radius (32 regions)
         //   is thousands of keys — minutes of wall clock, gigabytes retained.
         // - Near window radius 0 (home region only, not the 3x3). Each region
-        //   is a terrain + collider genesis on the server plus a
+        //   is a full worldgen + voxel-collider genesis on the server plus a
         //   deserialized copy on the client; eight neighbours no assertion
         //   looks at are ~9x the memory and time for nothing.
         client.set_lod_table(&[]);
@@ -75,9 +75,12 @@ impl BevyInputHarness {
 
         let client_to_server = client.client_packet_recv();
         let (server_to_client_send, server_to_client) = unbounded::<ServerPacket>();
-        let server =
-            LocalServer::new_with_genesis(client_to_server, server_to_client_send, crate::local_server::lightweight_test_genesis())
-                .expect("local server");
+        let server = LocalServer::new_with_generator(
+            client_to_server,
+            server_to_client_send,
+            crate::local_server::lightweight_test_generator(),
+        )
+        .expect("local server");
 
         let mut app = App::new();
         app.add_plugins((MinimalPlugins, AssetPlugin::default()))
@@ -94,9 +97,9 @@ impl BevyInputHarness {
             .init_resource::<UiUpdates>()
             .init_resource::<crate::renderer::collider_debug::DebugColliderLines>()
             .init_resource::<crate::renderer::lod_rings::LodRings>()
+            .init_resource::<SnapshotVoxelQueue>()
             .init_resource::<RetiredRegionRoots>()
             .init_resource::<crate::renderer::cursor::CursorPolicy>()
-            .init_resource::<crate::renderer::stud::ClientBodyScale>()
             .insert_resource(ClientUpdates(bridge_recv))
             .insert_resource(GameEvents(tap_send))
             // Same ordering SimBridgePlugin uses: forward_input BEFORE the drains.
@@ -108,6 +111,7 @@ impl BevyInputHarness {
                         drain_client_updates,
                         despawn_retired_regions,
                         drain_region_updates,
+                        apply_snapshot_voxels,
                         crate::renderer::cursor::apply_cursor_policy,
                     )
                         .chain(),

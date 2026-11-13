@@ -10,16 +10,17 @@ use client::world_scale::WorldScale;
 use client::instance::{start_game_thread, Command};
 
 /// Share of total cores given to the AsyncCompute task pool, which runs the
-/// background chunk-meshing jobs (`renderer/compute.rs`). Normal clients take
-/// half the cores; `VOXEL_CLIENT_WORKER_THREADS` caps it so the load phase
-/// cannot monopolize a development machine.
+/// background chunk-meshing jobs (`renderer/meshing.rs`). Normal clients take
+/// half the cores; render benchmarks set `VOXEL_CLIENT_WORKER_THREADS` so the
+/// load phase cannot monopolize a development machine.
 const ASYNC_COMPUTE_PERCENT: f32 = 0.5;
 const ASYNC_COMPUTE_MIN_THREADS: usize = 1;
 const ASYNC_COMPUTE_MAX_THREADS: usize = usize::MAX;
 /// Bounds on the default Bevy thread cap: half the logical cores, clamped.
 /// The floor is the old fixed default; the ceiling keeps a many-core box from
-/// being monopolized: the join's meshing runs on the async pool, so it is
-/// paced by it. Tunable.
+/// being monopolized. 8 threads (vs 4) cut `full` join time 19% (2026-09-22
+/// capture) — the join's snapshot-voxel derivation and meshing share the
+/// async pool, so they were paced by it. Tunable.
 #[cfg(not(target_arch = "wasm32"))]
 const MIN_CLIENT_WORKER_THREADS: usize = 4;
 #[cfg(not(target_arch = "wasm32"))]
@@ -118,7 +119,7 @@ fn present_mode_from_env() -> bevy::window::PresentMode {
 
 fn main() {
     // Before any thread: it may set WGPU_ADAPTER_NAME (never the slow NVK GPU
-    // by accident). Probes pin theirs and are left alone.
+    // by accident). `RENDER_BENCH` and probes pin theirs and are left alone.
     #[cfg(not(target_arch = "wasm32"))]
     client::adapter_pick::pin_adapter();
     // In a Web Worker the module is instantiated for its exports
@@ -160,7 +161,8 @@ fn main() {
 
     // World-size knobs (VOXEL_WORLD / VOXEL_NEAR_RADIUS / VOXEL_LOD_RINGS,
     // `?world=` in the browser): resolved once here so a typo fails before
-    // any window or socket opens. The game thread subscribes by it.
+    // any window or socket opens. The game thread subscribes by it; the
+    // render benchmark gates on it.
     let world_scale = WorldScale::from_env().unwrap_or_else(|error| panic!("{error}"));
     // Haze + camera far plane: follow the ring table's reach
     // (VOXEL_VIEW_DISTANCE_M); VOXEL_FOG_VISIBILITY_M sets the haze alone.
@@ -173,12 +175,6 @@ fn main() {
     // `client debug <preset> [--reset]` (e.g. `just run` = `debug embarked`)
     // skips the manual setup; a plain `client` opens on the main menu. Parsed
     // first, so a bad command line exits before any window opens.
-    // The game's own prefabs, before any sim thread exists: predicted regions must
-    // resolve a built-in prefab exactly as the server does (the browser's sim worker
-    // installs them with its block registry).
-    #[cfg(not(target_arch = "wasm32"))]
-    client::blocks::install_builtin_prefabs();
-
     #[cfg(not(target_arch = "wasm32"))]
     let debug_scenario = {
         let args: Vec<String> = std::env::args().skip(1).collect();
@@ -193,7 +189,7 @@ fn main() {
     let debug_scenario: Option<()> = None;
 
     // The dev bypass (`VOXEL_SKIP_MENU=1`, a set `VOXEL_WORLD_FILE`,
-    // `VOXEL_AUTOPILOT`)
+    // `RENDER_BENCH`, `VOXEL_AUTOPILOT`)
     // connects to 127.0.0.1:6466 at startup, as before the menu existed.
     // Otherwise the app starts with dead channels and every world session
     // gets fresh ones (`session::SessionFlowPlugin`). A debug launch starts
@@ -253,6 +249,15 @@ fn main() {
         .and_then(|v| v.split_once('x').and_then(|(w, h)| Some((w.parse::<u32>().ok()?, h.parse::<u32>().ok()?))))
     {
         primary_window.resolution = bevy::window::WindowResolution::new(w, h).with_scale_factor_override(1.0);
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    if renderer::render_bench::enabled() {
+        primary_window.resolution = bevy::window::WindowResolution::new(
+            renderer::render_bench::BENCHMARK_WIDTH,
+            renderer::render_bench::BENCHMARK_HEIGHT,
+        )
+        .with_scale_factor_override(1.0);
+        primary_window.present_mode = bevy::window::PresentMode::AutoNoVsync;
     }
     // Track the canvas's parent (the full-viewport <body> in index.html) so the
     // render buffer resizes with the browser window instead of CSS-stretching.
@@ -318,8 +323,6 @@ fn main() {
     #[cfg(not(target_arch = "wasm32"))]
     app.insert_resource(client::session::GameThread(command_send.clone()))
         .add_plugins(client::session::SessionFlowPlugin);
-    #[cfg(not(target_arch = "wasm32"))]
-    app.add_plugins(client::prefab_editor::PrefabEditorPlugin);
     #[cfg(feature = "dev_ui")]
     app.add_plugins(renderer::dev_ui::DevUiPlugin);
     #[cfg(not(target_arch = "wasm32"))]

@@ -1,0 +1,46 @@
+[package]
+name = "block-mesh-examples"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies.bevy]
+version = "0.13"
+default-features = false
+features = [
+    "bevy_asset",
+    "bevy_core_pipeline",
+    "bevy_pbr",
+    "bevy_render",
+    "bevy_winit",
+    "png",
+    "ktx2",
+    "tonemapping_luts",
+    "zstd",
+]
+
+[target.'cfg(target_os = "linux")'.dev-dependencies.bevy]
+version = "0.13"
+default-features = false
+features = [
+    "bevy_asset",
+    "bevy_core_pipeline",
+    "bevy_pbr",
+    "bevy_render",
+    "bevy_winit",
+    "png",
+    "ktx2",
+    "tonemapping_luts",
+    "x11",
+    "zstd",
+]
+
+[dependencies.block-mesh]
+path = ".."
+
+[[example]]
+name = "render"
+path = "render/main.rs"
+
+[[example]]
+name = "uv_mapping"
+path = "uv_mapping/main.rs"

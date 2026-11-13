@@ -1,6 +1,28 @@
 use crossbeam::channel::unbounded;
-use game::{GameEventKind, Region, RegionCoords, RegionInput, RegionOutput, RegionRunner, RegionSeed};
+use game::{
+    Block, BlockId, Chunk, ChunkCoords, Column, ColumnCoords, GameEventKind, Region, RegionCoords,
+    RegionInput, RegionOutput, RegionRunner, RegionSeed, SerializedRegion, SubChunk,
+};
 use game::StateHash;
+
+fn flat_chunks() -> Vec<(ChunkCoords, Chunk)> {
+    (0..2)
+        .flat_map(|x| (0..2).map(move |z| (ChunkCoords::new(x, 0, z), Chunk::flat_floor(8))))
+        .collect()
+}
+
+fn flat_columns() -> Vec<(ColumnCoords, Column)> {
+    let below = Block::new(BlockId::AIR);
+    let above = Block::new(BlockId::AIR);
+    (0..2)
+        .flat_map(move |x| {
+            (0..2).map(move |z| {
+                let sub = SubChunk::Dense(Box::new(Chunk::flat_floor(8)));
+                (ColumnCoords::new(x, z), Column::new(0, below, above, vec![sub]))
+            })
+        })
+        .collect()
+}
 
 fn crc(region: &Region) -> u32 {
     let mut h = crc32fast::Hasher::new();
@@ -10,7 +32,7 @@ fn crc(region: &Region) -> u32 {
 
 fn runner(id: RegionCoords) -> (RegionRunner, crossbeam::channel::Receiver<(RegionCoords, RegionOutput)>) {
     let (out_send, out_recv) = unbounded();
-    let region = crate::common::region_of(id, crate::common::uniform_seed());
+    let region = Region::from_chunks(id, flat_chunks());
     (RegionRunner::new(id, region, out_send), out_recv)
 }
 
@@ -79,66 +101,61 @@ fn shutdown_stops_and_park_restore_is_hash_exact() {
     };
 
     // Restore: the exact cycle-in path the manager uses.
-    let restored = RegionSeed::Parked(serialized).into_region(id, || panic!("a parked region never generates")).unwrap();
+    let restored = RegionSeed::Parked(serialized, flat_columns()).into_region(id);
     assert_eq!(before, crc(&restored), "hash(before park) == hash(after restore), bit-exact");
 }
 
 #[test]
-fn a_stopped_region_hands_over_its_terrain() {
-    let id = RegionCoords::new(0, 0);
-    let (mut r, out) = runner(id);
-    assert!(!r.handle_input(RegionInput::Shutdown));
-    let (rc, output) = out.try_iter().last().expect("the Stopped output");
-    assert_eq!(rc, id);
-    let RegionOutput::Stopped(_, snap, _, _) = output else { panic!("expected Stopped") };
-    // The terrain snapshot of a stud region is its edge columns (what a
-    // neighbour's stud halo is seeded from).
-    assert_eq!(snap.stud.ground.len(), 4 * game::REGION_CHUNKS - 4);
+fn corrupt_parked_blob_falls_back_to_generation() {
+    let id = RegionCoords::new(2, 2);
+    let garbage = SerializedRegion(vec![0xde, 0xad, 0xbe, 0xef]);
+    let region = RegionSeed::Parked(garbage, flat_columns()).into_region(id);
+    assert_eq!(region.data().ecs.entities.len(), 4, "fell back to the 2x2 fallback chunks");
 }
 
-/// A parked blob is a region's whole state: one that does not decode fails
-/// the load on the inline spawner too (`LoadFailed`; the manager keeps the
-/// region stopped and retries later) and the genesis never runs in its place.
 #[test]
-fn a_corrupt_parked_blob_fails_the_load_and_is_never_regenerated() {
-    use game::RegionSpawner;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    let id = RegionCoords::new(1, -2);
-    let calls = std::sync::Arc::new(AtomicUsize::new(0));
-    let counted = calls.clone();
-    let mut spawner = game::InlineSpawner::default().with_stud_genesis(std::sync::Arc::new(move |_rc| {
-        counted.fetch_add(1, Ordering::SeqCst);
-        crate::common::uniform_seed()
-    }));
-    let corrupt = game::SerializedRegion(vec![0xFF; 7]);
-    assert!(corrupt.to_rollback().is_err());
-    assert!(RegionSeed::Parked(game::SerializedRegion(vec![0xFF; 7])).into_region(id, || panic!("genesis ran")).is_err());
+fn request_terrain_snapshot_replies_with_terrain() {
+    let id = RegionCoords::new(0, 0);
+    let (mut r, out) = runner(id);
+    r.handle_input(RegionInput::RequestTerrain(7));
+    let (rc, output) = out.try_recv().expect("far snapshot output");
+    assert_eq!(rc, id);
+    let RegionOutput::Terrain(client, snap) = output else {
+        panic!("expected TerrainSnapshot")
+    };
+    assert_eq!(client, 7);
+    assert_eq!(snap.chunks.len(), 4);
+}
 
-    let (out, out_recv) = unbounded();
-    let input = spawner.spawn(id, RegionSeed::Parked(corrupt), out.clone());
-    let outputs: Vec<_> = out_recv.try_iter().collect();
-    assert_eq!(outputs.len(), 1, "only the failure is reported");
-    match &outputs[0] {
-        (rc, RegionOutput::LoadFailed(why)) => {
-            assert_eq!(*rc, id);
-            assert!(why.contains("parked state corrupt"), "{why}");
-        }
-        (_, other) => panic!("a corrupt parked region must fail its load, got {}", other.name()),
+#[test]
+fn stable_terrain_never_pushes_far_change() {
+    let (mut r, out) = runner(RegionCoords::new(0, 0));
+    for _ in 0..(game::TERRAIN_HASH_INTERVAL_TICKS * 2 + 1) {
+        r.tick();
     }
-    assert!(spawner.running().is_empty(), "the region does not run");
-    assert_eq!(calls.load(Ordering::SeqCst), 0, "genesis must not run over a parked region");
-    // Its channel stays open until the manager reaps it (not a crashed region).
-    assert!(input.send(RegionInput::Shutdown).is_ok());
-    spawner.pump();
-    spawner.tick_all();
-    assert!(out_recv.try_recv().is_err(), "nothing runs there");
-    spawner.reap(id);
-    assert!(input.send(RegionInput::Shutdown).is_err(), "reaped: the channel is closed");
+    let pushes = out
+        .try_iter()
+        .filter(|(_, o)| matches!(o, RegionOutput::TerrainChanged(_)))
+        .count();
+    assert_eq!(pushes, 0, "unchanged terrain must not push a far refresh");
+}
 
-    // A fresh seed is what the genesis is for.
-    let _input = spawner.spawn(id, RegionSeed::Fresh, out);
-    assert_eq!(calls.load(Ordering::SeqCst), 1);
-    assert_eq!(spawner.running(), vec![id]);
+#[test]
+fn terrain_edit_pushes_one_throttled_far_change() {
+    use game::{Chunk, ChunkCoords};
+    let (mut r, out) = runner(RegionCoords::new(0, 0));
+    // Mutate terrain: add a new chunk (a flat floor) at y=1 via the test hook.
+    r.region_mut().with_data(|d| {
+        d.create_mesh(ChunkCoords::new(0, 1, 0), Chunk::flat_floor(8));
+    });
+    for _ in 0..(game::TERRAIN_HASH_INTERVAL_TICKS + 1) {
+        r.tick();
+    }
+    let pushes = out
+        .try_iter()
+        .filter(|(_, o)| matches!(o, RegionOutput::TerrainChanged(_)))
+        .count();
+    assert_eq!(pushes, 1, "one change → exactly one throttled push");
 }
 
 // --- Inputs applied at the tick the client predicted them after -------------
@@ -280,7 +297,7 @@ fn leading_client_reconciles_a_stamped_input_without_rollback() {
 fn a_server_runner_keeps_no_event_history() {
     let (out, _rx) = crossbeam::channel::unbounded();
     let rc = game::RegionCoords::new(0, 0);
-    let mut runner = game::RegionRunner::new(rc, crate::common::empty_region(rc), out);
+    let mut runner = game::RegionRunner::new(rc, game::Region::from_chunks(rc, Vec::new()), out);
     runner.handle_input(game::RegionInput::Event(game::GameEventKind::CreateClient(0)));
     for _ in 0..50 {
         runner.tick();

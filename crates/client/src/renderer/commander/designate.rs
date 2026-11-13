@@ -1,11 +1,5 @@
 //! Designation tools: DF-style dig / deconstruct / build / erase orders
-//! painted onto the home region's BRICKS at the working level.
-//!
-//! The drag picks a tile-aligned volume; what it selects is every brick meeting
-//! it (`game::designation_targets` — the sim's own rule, read over the client's
-//! stud chunks through [`ClientBricks`]), each shown as its own outlined brick by
-//! `stud::overlay` while the box is open. The hover is the brick under the cursor
-//! ([`pick_brick`]). A build has no bricks yet: it stays the volume.
+//! painted onto the home region's tiles at the working level.
 //!
 //! A tool key ([`TOOL_KEYS`]) picks a tool; the tile under the cursor at the
 //! working level is the hover ([`pick_level_cell`]) — or, with the cut off
@@ -38,8 +32,9 @@ use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use game::rapier3d::math::Vector;
 use game::{
-    pick_level_cell, pick_visible_cell, Designation, DesignationKind, Invalid, OpId, Order, OrderSummary, RegionId,
-    StudBox, StudChunk, TileBox, TilePos, DEFAULT_PRIORITY, MAX_ORDER_TILES, MAX_PRIORITY, REGION_BLOCKS,
+    pick_level_cell, pick_visible_cell, validate, Designation, DesignationKind, Invalid, OpId, Order, OrderSummary,
+    RegionId, TileBox, TilePos, TileSource, BLOCK_VOXELS, DEFAULT_PRIORITY, MAX_ORDER_TILES, MAX_PRIORITY,
+    REGION_BLOCKS,
 };
 
 use super::level::WorkingLevel;
@@ -48,20 +43,15 @@ use super::selection::DRAG_THRESHOLD_PX;
 use super::tiles::TileMirror;
 use super::CommanderView;
 use crate::renderer::cursor::CursorPolicy;
-use crate::renderer::fortress_view::DragPreview;
-use crate::renderer::stud::world::StudWorld;
-use crate::renderer::stud::SimStudChunk;
+use crate::renderer::fortress_view::{overlay_base_level, DragPreview};
 use crate::renderer::{GameEvents, LocalPlayer};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tool {
     Dig,
     Deconstruct,
-    /// Fills exactly the picked box with the build block
-    /// ([`DesignateState::build`]: [`game::edit::PLACE_BLOCK`] unless another
-    /// material was picked — on stud terrain the sim builds the stud material
-    /// of that block's name); a wall or a tower is a box whose corners sit on
-    /// different levels.
+    /// Fills exactly the picked box with [`game::edit::PLACE_BLOCK`]; a wall
+    /// or a tower is a box whose corners sit on different levels.
     Build,
     /// Fells the part of a tree beyond each picked log or branch block.
     Chop,
@@ -92,12 +82,10 @@ pub const PRIORITY_KEYS: [KeyCode; MAX_PRIORITY as usize] = [
 
 /// At most this many merged build-ghost cuboids are drawn per frame.
 pub const MAX_GHOST_BOXES: usize = 4096;
-/// Build ghosts are drawn up to this many levels above the working level, so
-/// the top of a two-level wall built from the level below still shows above
-/// the cut ...
+/// Build ghosts are drawn from the overlay's base level up to this many
+/// levels above the working level, so the top of a two-level wall built
+/// from the level below still shows above the cut.
 pub const GHOST_LEVELS_ABOVE: i32 = 1;
-/// ... and down to this many levels below it.
-pub const GHOST_LEVELS_BELOW: i32 = 15;
 
 /// How much the hover outline is grown past its cell, in sim units, so it
 /// does not z-fight the block faces.
@@ -114,18 +102,12 @@ const HOVER_COLOR: Color = Color::srgba(1.0, 1.0, 1.0, 0.8);
 const HIDDEN_EDGE_ALPHA: f32 = 0.3;
 
 impl Tool {
-    /// What the tool designates with the default build block; `None` for the
-    /// erase tool.
+    /// What the tool designates; `None` for the erase tool.
     pub fn kind(self) -> Option<DesignationKind> {
-        self.kind_with(game::edit::PLACE_BLOCK)
-    }
-
-    /// What the tool designates when builds use `build`; `None` for the erase tool.
-    pub fn kind_with(self, build: game::BlockId) -> Option<DesignationKind> {
         match self {
             Tool::Dig => Some(DesignationKind::Dig),
             Tool::Deconstruct => Some(DesignationKind::Deconstruct),
-            Tool::Build => Some(DesignationKind::Build(build)),
+            Tool::Build => Some(DesignationKind::Build(game::edit::PLACE_BLOCK)),
             Tool::Chop => Some(DesignationKind::Chop),
             Tool::Erase => None,
         }
@@ -244,17 +226,11 @@ pub fn step_corners(phase: &mut CornerPhase, ev: CornerEvent, drag_threshold_px:
 pub struct DesignateState {
     pub tool: Option<Tool>,
     pub priority: u8,
-    /// The block the Build tool designates ([`Tool::kind_with`]); picked in
-    /// the tool's material list on stud terrain (`stud/palette_ui.rs`).
-    pub build: game::BlockId,
     /// The two-corner pick; `drag` is `Some` exactly while it is not idle.
     pub corners: CornerPhase,
     pub drag: Option<Drag>,
-    /// The tile under the cursor at the working level (region-local): what
-    /// the drag's corners snap to.
+    /// The tile under the cursor at the working level (region-local).
     pub hover: Option<TilePos>,
-    /// The brick under the cursor ([`pick_brick`]): what the hover outlines.
-    pub hover_brick: Option<StudBox>,
     /// Sequence number of this client's next `Designate` order.
     pub next_seq: u32,
     /// Designate orders sent, oldest first; Ctrl+Z cancels the last.
@@ -266,11 +242,9 @@ impl Default for DesignateState {
         Self {
             tool: None,
             priority: DEFAULT_PRIORITY,
-            build: game::edit::PLACE_BLOCK,
             corners: CornerPhase::Idle,
             drag: None,
             hover: None,
-            hover_brick: None,
             next_seq: 0,
             sent: Vec::new(),
         }
@@ -330,12 +304,7 @@ pub fn no_tool_active(state: Res<DesignateState>) -> bool {
 /// The order a committed box sends: an erase for the erase tool or with
 /// Ctrl (of the tool's kind only), otherwise the tool's designation.
 pub fn order_for(tool: Tool, area: TileBox, erase: bool, op: OpId, priority: u8) -> Order {
-    order_for_build(tool, game::edit::PLACE_BLOCK, area, erase, op, priority)
-}
-
-/// [`order_for`] with the Build tool designating `build`.
-pub fn order_for_build(tool: Tool, build: game::BlockId, area: TileBox, erase: bool, op: OpId, priority: u8) -> Order {
-    match tool.kind_with(build) {
+    match tool.kind() {
         Some(kind) if !erase => Order::Designate { op, kind, priority, area },
         only => Order::Erase { area, only },
     }
@@ -362,6 +331,12 @@ pub fn merge_runs(tiles: impl Iterator<Item = TilePos>) -> Vec<TileBox> {
     out
 }
 
+/// "x × z × levels" of a box.
+fn size_text(area: TileBox) -> String {
+    let len = |i: usize| i64::from(area.max[i]) - i64::from(area.min[i]) + 1;
+    format!("{} × {} × {}", len(0), len(2), len(1))
+}
+
 fn verb(kind: Option<DesignationKind>) -> &'static str {
     match kind {
         Some(DesignationKind::Dig) => "to dig",
@@ -383,124 +358,44 @@ fn reason(why: Invalid) -> &'static str {
     }
 }
 
-/// What the order's count counts: bricks, except a build (no bricks yet), which
-/// counts the tile-sized spaces it fills, and an erase, which counts designations.
-fn noun(kind: Option<DesignationKind>, n: u64) -> &'static str {
-    match (kind, n == 1) {
-        (Some(DesignationKind::Build(_)), true) => "space",
-        (Some(DesignationKind::Build(_)), false) => "spaces",
-        (None, _) => "",
-        (_, true) => "brick",
-        (_, false) => "bricks",
-    }
-}
-
-/// The drag readout: the dragged volume's size in studs and plates followed by
-/// metres (`stud::palette::stud_size_text`), the BRICKS the order takes, then each
-/// refusal reason with its count, in [`Invalid`] order —
-/// "8 × 6 studs × 12 plates (4 × 3 × 2.4 m) — 17 bricks to dig · 3 bedrock".
-pub fn drag_text_on(area: TileBox, kind: Option<DesignationKind>, summary: &OrderSummary) -> String {
-    let size = crate::renderer::stud::palette::stud_size_text(area);
-    let unit = noun(kind, summary.valid);
-    let sep = if unit.is_empty() { "" } else { " " };
-    let mut text = format!("{size} — {} {unit}{sep}{}", summary.valid, verb(kind));
+/// The drag readout: size (x × z × levels), the tiles the order takes, then
+/// each refusal reason with its count, in [`Invalid`] order.
+pub fn drag_text(area: TileBox, kind: Option<DesignationKind>, summary: &OrderSummary) -> String {
+    let mut text = format!("{} — {} {}", size_text(area), summary.valid, verb(kind));
     for (why, n) in &summary.invalid {
         text.push_str(&format!(" · {n} {}", reason(*why)));
     }
     text
 }
 
-fn too_large_text(area: TileBox) -> String {
-    format!("{} — too large", crate::renderer::stud::palette::stud_size_text(area))
+/// `game::summarize` over already-validated tiles.
+fn summary_of(cells: &[(TilePos, Result<(), Invalid>)]) -> OrderSummary {
+    let mut out = OrderSummary::default();
+    for (_, result) in cells {
+        match result {
+            Ok(()) => out.valid += 1,
+            Err(why) => *out.invalid.entry(*why).or_default() += 1,
+        }
+    }
+    out
 }
 
-/// Erase previews: how many designations the erase would remove (every box
-/// sharing a cell with the volume, `Order::Erase`'s rule).
+fn too_large_text(area: TileBox) -> String {
+    format!("{} — too large", size_text(area))
+}
+
+/// Erase previews: how many designations the erase would remove.
 fn erase_summary(
-    designations: &BTreeMap<StudBox, Designation>,
+    designations: &BTreeMap<TilePos, Designation>,
     area: TileBox,
     only: Option<DesignationKind>,
 ) -> OrderSummary {
-    let (lo, hi) = area.stud_cells();
     let valid = designations
         .iter()
-        .filter(|(b, d)| b.meets(lo, hi) && only.is_none_or(|k| k.same_tool(d.kind)))
+        .filter(|(p, d)| area.contains(**p) && only.is_none_or(|k| k.same_tool(d.kind)))
         .count() as u64;
     OrderSummary { valid, invalid: BTreeMap::new() }
 }
-
-/// The home region's stud chunks as the sim's order rules read them
-/// (`game::BrickSource`): the loaded chunk entity's bricks, else the pristine chunk
-/// the region's recipe implies — `Rollback`'s own rule over the client's mirror.
-pub struct ClientBricks<'a, F: Fn(Entity) -> Option<&'a StudChunk>> {
-    pub world: &'a StudWorld,
-    pub chunk_of: F,
-    pub region: RegionId,
-}
-
-impl<'a, F: Fn(Entity) -> Option<&'a StudChunk>> ClientBricks<'a, F> {
-    /// The materialised chunk at `c` (`[x, layer, z]`, the region's frame), if loaded.
-    fn loaded(&self, c: [i64; 3]) -> Option<&'a StudChunk> {
-        let n = game::REGION_CHUNKS as i64;
-        if !(0..n).contains(&c[0]) || !(0..n).contains(&c[2]) {
-            return None;
-        }
-        let key = game::WorldChunkPos::from_local(self.region, [c[0] as i32, i32::try_from(c[1]).ok()?, c[2] as i32]);
-        (self.chunk_of)(self.world.entity_at(key)?)
-    }
-}
-
-impl<'a, F: Fn(Entity) -> Option<&'a StudChunk>> game::BrickSource for ClientBricks<'a, F> {
-    fn stud_chunk(&self, c: [i32; 3]) -> Option<std::borrow::Cow<'_, StudChunk>> {
-        let n = game::REGION_CHUNKS as i32;
-        if !(0..n).contains(&c[0]) || !(0..n).contains(&c[2]) {
-            return None;
-        }
-        if let Some(chunk) = self.loaded(c.map(i64::from)) {
-            return Some(std::borrow::Cow::Borrowed(chunk));
-        }
-        let ground = self.world.ground(self.region)?;
-        ground.get(&game::ColumnCoords::new(c[0] as usize, c[2] as usize))?.pristine_chunk(c[1]).map(std::borrow::Cow::Owned)
-    }
-}
-
-/// The brick under the cursor ray (region-local sim units, direction normalised) in
-/// the home region: the first stud cell the ray meets — below the top of working
-/// level `cut` when the cut is on (what is above is not drawn) — as the box a click
-/// there would take (`game::bricks_meeting` of the cell's tile: a part's whole box,
-/// a filler slab's cells in that tile). `None` over air, implied ground or another
-/// region.
-pub fn pick_brick<'a, F: Fn(Entity) -> Option<&'a StudChunk>>(
-    bricks: &ClientBricks<'a, F>,
-    (mut origin, dir): (Vector, Vector),
-    cut: Option<i32>,
-) -> Option<StudBox> {
-    if let Some(level) = cut {
-        // Start just under the cut plane (a ray that starts inside a brick hits it).
-        let top = game::level_bottom_units(level + 1) - CUT_PICK_EPSILON;
-        if origin.y > top {
-            if dir.y >= 0.0 {
-                return None;
-            }
-            origin += dir * ((top - origin.y) / dir.y);
-        }
-    }
-    let n = game::REGION_CHUNKS as i64;
-    let reach = VISIBLE_PICK_REACH_BLOCKS * game::tile_width_units();
-    let hit = game::raycast_studs_within(|c| bricks.loaded(c), origin, dir, reach, 0..n)?;
-    let chunk = bricks.loaded(hit.chunk)?;
-    let t = [game::TILE_STUDS as u8, game::TILE_PLATES as u8, game::TILE_STUDS as u8];
-    let lo = [0, 1, 2].map(|a| hit.cell[a] / t[a] * t[a]);
-    let hi = [0, 1, 2].map(|a| lo[a] + t[a]);
-    let c = [hit.chunk[0] as i32, hit.chunk[1] as i32, hit.chunk[2] as i32];
-    game::bricks_meeting(chunk, c, lo, hi)
-        .into_iter()
-        .map(|b| b.at)
-        .find(|b| (0..3).all(|a| (b.lo[a]..b.hi[a]).contains(&hit.cell[a])))
-}
-
-/// How far under the cut plane a brick pick starts, sim units.
-const CUT_PICK_EPSILON: f32 = 0.05;
 
 /// Keep a picked tile's column inside the home region.
 /// The drag corner this frame: x/z from the hovered tile while there is
@@ -572,8 +467,7 @@ pub fn designate_keys(
 /// enough to cross the home region from a camera outside it.
 pub const VISIBLE_PICK_REACH_BLOCKS: f32 = 2.0 * REGION_BLOCKS as f32;
 
-/// Cursor ray → the hovered tile (region-local) and the hovered brick
-/// ([`pick_brick`]). With the cut on the tile is the
+/// Cursor ray → the hovered tile (region-local). With the cut on it is the
 /// tile at the working level ([`pick_level_cell`]); with it off, everything is
 /// drawn, so it is the block the cursor is on, at whatever level
 /// ([`pick_visible_cell`]; for a build, the air in front of the face), falling
@@ -584,32 +478,22 @@ pub fn update_hover(
     policy: Res<CursorPolicy>,
     mirror: Res<TileMirror>,
     working: Res<WorkingLevel>,
-    world: Option<Res<StudWorld>>,
-    chunks: Query<&SimStudChunk>,
+    xray: Option<Res<crate::renderer::voxel_pull::xray::XraySettings>>,
     mut state: ResMut<DesignateState>,
 ) {
-    let (hover, brick) = (|| {
+    let xray = crate::renderer::voxel_pull::xray::xray_on(xray.as_deref(), working.cut);
+    let hover = (|| {
         let tool = state.tool?;
         if policy.blocks_game() || policy.ui_pointer {
             return None;
         }
-        let region = mirror.region()?;
-        let ray = cursor_ray(window.single().ok()?, view.single().ok()?, region)?;
-        let visible = (!working.cut).then(|| pick_visible(ray, tool == Tool::Build, &mirror)).flatten();
-        let p = visible.or_else(|| pick_level(ray, working.level?, &mirror))?;
-        // The brick under the cursor: what a dig, deconstruct, chop or erase there
-        // takes. A build goes into air: it keeps the tile.
-        let brick = world.as_deref().filter(|_| tool != Tool::Build).and_then(|world| {
-            let bricks = ClientBricks { world, chunk_of: |e| chunks.get(e).ok().map(|c| &c.chunk), region };
-            pick_brick(&bricks, ray, working.level.filter(|_| working.cut))
-        });
-        Some((clamp_to_region(p), brick))
-    })()
-    .unzip();
-    let brick = brick.flatten();
-    if state.hover != hover || state.hover_brick != brick {
+        let ray = cursor_ray(window.single().ok()?, view.single().ok()?, mirror.region()?)?;
+        let visible = (!working.cut).then(|| pick_visible_xray(ray, tool == Tool::Build, &mirror, xray)).flatten();
+        let p = visible.or_else(|| pick_level_cell(ray.0, ray.1, working.level?, |p| game::block_props().blocks_ray(mirror.block(p))))?;
+        Some(clamp_to_region(p))
+    })();
+    if state.hover != hover {
         state.hover = hover;
-        state.hover_brick = brick;
     }
 }
 
@@ -625,20 +509,25 @@ pub fn cursor_ray(window: &Window, (camera, tf): (&Camera, &Transform), region: 
 /// The block the cursor ray meets first in the mirrored region, at whatever
 /// level ([`pick_visible_cell`]); with `face` the air cell in front of the
 /// face it entered through.
-///
-/// `ray` is in region-local sim units; the walk runs in the mirror's tile space
-/// ([`TileMirror::tile_ray`]), so on stud terrain the tiles it returns are stud
-/// tiles (anything in a tile stops the ray: `TileMirror::pick_solid`).
 pub fn pick_visible(ray: (Vector, Vector), face: bool, mirror: &TileMirror) -> Option<TilePos> {
-    let ray = mirror.tile_ray(ray);
-    pick_visible_cell(ray.0, ray.1, VISIBLE_PICK_REACH_BLOCKS, face, |p| mirror.pick_solid(p))
+    pick_visible_cell(ray.0, ray.1, VISIBLE_PICK_REACH_BLOCKS, face, |p| game::block_props().blocks_ray(mirror.block(p)))
 }
 
-/// The tile under the cursor ray (region-local sim units) at working level
-/// `level` of the mirrored region ([`pick_level_cell`], in tile space).
-pub fn pick_level(ray: (Vector, Vector), level: i32, mirror: &TileMirror) -> Option<TilePos> {
-    let ray = mirror.tile_ray(ray);
-    pick_level_cell(ray.0, ray.1, level, |p| mirror.pick_solid(p))
+/// [`pick_visible`] under the dug-space x-ray (`xray`, cut off): through
+/// the terrain in front of a dug space, onto the floor or wall seen there
+/// ([`game::pick_xray_cell`]).
+pub fn pick_visible_xray(ray: (Vector, Vector), face: bool, mirror: &TileMirror, xray: bool) -> Option<TilePos> {
+    if !xray {
+        return pick_visible(ray, face, mirror);
+    }
+    game::pick_xray_cell(
+        ray.0,
+        ray.1,
+        VISIBLE_PICK_REACH_BLOCKS,
+        face,
+        |p| game::block_props().blocks_ray(mirror.block(p)),
+        |p| mirror.is_dug(p),
+    )
 }
 
 /// Left presses and releases → corners ([`step_corners`]) and orders; a
@@ -655,17 +544,11 @@ pub fn drag_input(
     events: Res<GameEvents>,
     local: Res<LocalPlayer>,
     mut state: ResMut<DesignateState>,
-    build: Res<crate::renderer::stud::build::StudBuild>,
     // Mouse travel since the right press; `None` while the button is up or
     // the press was not ours (UI / overlay).
     mut right_travel: crate::session::SessionLocal<Option<f32>>,
 ) {
     let right_travel = right_travel.get();
-    // Stud build mode owns the clicks.
-    if build.on {
-        *right_travel = None;
-        return;
-    }
     let Ok(window) = window.single() else { return };
     // A right press is a click unless the mouse travels: orbiting holds the
     // pointer still, so the travel is the raw motion, not the cursor.
@@ -725,7 +608,7 @@ pub fn drag_input(
         return;
     }
     let op = OpId { client, seq: state.next_seq };
-    let order = order_for_build(tool, state.build, area, drag.erase, op, state.priority);
+    let order = order_for(tool, area, drag.erase, op, state.priority);
     if matches!(order, Order::Designate { .. }) {
         state.next_seq += 1;
         state.sent.push(op);
@@ -739,14 +622,11 @@ pub struct PreviewBuilt {
     key: Option<(TileBox, Option<DesignationKind>, bool, u64)>,
 }
 
-/// The drag → [`DragPreview`] (box, kind, and every brick the order would take
-/// with its validity — `game::designation_targets`) and the readout.
-#[allow(clippy::too_many_arguments)] // Bevy system: params are DI, not an API
+/// The drag → [`DragPreview`] (box, kind, per-tile validity) and the readout.
+/// Must run before `fortress_view::update_overlay_grid`.
 pub fn update_drag_preview(
     state: Res<DesignateState>,
     mirror: Res<TileMirror>,
-    world: Option<Res<StudWorld>>,
-    chunks: Query<&SimStudChunk>,
     mut preview: ResMut<DragPreview>,
     mut readout: ResMut<DragReadout>,
     mut built: crate::session::SessionLocal<PreviewBuilt>,
@@ -755,14 +635,14 @@ pub fn update_drag_preview(
     let Some((tool, area, erase)) = state.drag_area() else {
         if built.key.is_some() {
             *built = PreviewBuilt::default();
-            *preview = DragPreview { stamp: preview.stamp.wrapping_add(1), ..default() };
+            *preview = DragPreview::default();
             readout.0.clear();
         }
         return;
     };
     let erasing = erase || tool == Tool::Erase;
-    // An erase previews the box only (the overlay keeps each designation's kind).
-    let kind = if erasing { None } else { tool.kind_with(state.build) };
+    // An erase previews the box only (the overlay keeps each tile's kind).
+    let kind = if erasing { None } else { tool.kind() };
     let key = Some((area, kind, erasing, mirror.version()));
     if built.key == key {
         return;
@@ -770,39 +650,28 @@ pub fn update_drag_preview(
     built.key = key;
     let clipped = area.clip_to_region();
     let count = clipped.map_or(0, |a| a.tile_count());
-    let (text, cells) = match (clipped, mirror.region(), world.as_deref()) {
-        (Some(a), Some(region), Some(world)) if count <= MAX_ORDER_TILES => match kind {
+    let (text, cells) = match clipped {
+        Some(a) if count <= MAX_ORDER_TILES => match kind {
             Some(k) => {
-                let bricks = ClientBricks { world, chunk_of: |e| chunks.get(e).ok().map(|c| &c.chunk), region };
-                let cells = game::designation_targets(&*mirror, &bricks, k, a);
-                (drag_text_on(area, kind, &game::summarize_targets(k, a, &cells)), cells)
+                let cells: Vec<_> = a.tiles().map(|p| (p, validate(&*mirror, k, p))).collect();
+                (drag_text(area, kind, &summary_of(&cells)), cells)
             }
             None => {
-                let only = if tool == Tool::Erase { None } else { tool.kind_with(state.build) };
+                let only = if tool == Tool::Erase { None } else { tool.kind() };
                 let summary = erase_summary(mirror.designations(), a, only);
-                (drag_text_on(area, None, &summary), Vec::new())
+                (drag_text(area, None, &summary), a.tiles().map(|p| (p, Ok(()))).collect())
             }
         },
-        (Some(_), _, _) if count > MAX_ORDER_TILES => (too_large_text(area), Vec::new()),
-        _ => (drag_text_on(area, kind, &OrderSummary::default()), Vec::new()),
+        Some(_) => (too_large_text(area), Vec::new()),
+        None => (drag_text(area, kind, &OrderSummary::default()), Vec::new()),
     };
-    *preview = DragPreview { area: Some(area), kind, cells, stamp: preview.stamp.wrapping_add(1) };
+    *preview = DragPreview { area: Some(area), kind, cells };
     readout.0 = text;
 }
 
-/// A world-space gizmo cuboid over the stud cells of `b` (region-local) in `region`.
-pub fn stud_box_transform(b: StudBox, region: RegionId, inflate: f32) -> Transform {
-    let (lo, hi) = b.cells();
-    let s = game::STUD_UNITS as f32;
-    let min = Vec3::new(lo[0] as f32 * s, game::plate_units(lo[1]), lo[2] as f32 * s);
-    let max = Vec3::new(hi[0] as f32 * s, game::plate_units(hi[1]), hi[2] as f32 * s);
-    let offset = Vec3::from_array(region.world_offset());
-    Transform::from_translation(offset + (min + max) / 2.0).with_scale(max - min + Vec3::splat(2.0 * inflate))
-}
-
 /// A world-space gizmo cuboid over the tiles of `b` (region-local) in `region`.
-pub fn tile_box_transform(b: TileBox, region: RegionId, inflate: f32) -> Transform {
-    let size = Vec3::new(game::tile_width_units(), game::tile_height_units(), game::tile_width_units());
+fn tile_box_transform(b: TileBox, region: RegionId, inflate: f32) -> Transform {
+    let size = BLOCK_VOXELS as f32;
     let min = Vec3::new(b.min[0] as f32, b.min[1] as f32, b.min[2] as f32) * size;
     let max = Vec3::new(b.max[0] as f32 + 1.0, b.max[1] as f32 + 1.0, b.max[2] as f32 + 1.0) * size;
     let offset = Vec3::from_array(region.world_offset());
@@ -826,7 +695,7 @@ pub struct GhostCache {
     boxes: Vec<TileBox>,
 }
 
-/// The drag box, the hover brick's outline and the build-designation ghosts.
+/// The drag box, the hover outline and the build-designation ghosts.
 pub fn draw_designate_gizmos(
     state: Res<DesignateState>,
     preview: Res<DragPreview>,
@@ -842,14 +711,12 @@ pub fn draw_designate_gizmos(
         let key = Some((mirror.version(), level));
         if ghosts.key != key {
             ghosts.key = key;
-            let (lo, hi) = (level - GHOST_LEVELS_BELOW, level + GHOST_LEVELS_ABOVE);
-            // A build designation sits on one tile's cells.
+            let (lo, hi) = (overlay_base_level(level), level + GHOST_LEVELS_ABOVE);
             let mut builds: Vec<TilePos> = mirror
                 .designations()
                 .iter()
-                .filter(|(_, d)| matches!(d.kind, DesignationKind::Build(_)))
-                .map(|(b, _)| b.tiles().min)
-                .filter(|p| (lo..=hi).contains(&p[1]))
+                .filter(|(p, d)| matches!(d.kind, DesignationKind::Build(_)) && (lo..=hi).contains(&p[1]))
+                .map(|(p, _)| *p)
                 .collect();
             builds.sort_unstable_by_key(|p| (p[1], p[2], p[0]));
             ghosts.boxes = merge_runs(builds.into_iter());
@@ -866,16 +733,8 @@ pub fn draw_designate_gizmos(
         gizmos.cube(tf, color);
         hidden.cube(tf, color.with_alpha(HIDDEN_EDGE_ALPHA));
     }
-    // The hover: the brick under the cursor; the tile where there is none (a build's
-    // air, implied ground).
-    match (state.tool, state.hover_brick, state.hover) {
-        (Some(_), Some(b), _) => {
-            gizmos.cube(stud_box_transform(b, region, HOVER_INFLATE), HOVER_COLOR);
-        }
-        (Some(_), None, Some(p)) => {
-            gizmos.cube(tile_box_transform(TileBox { min: p, max: p }, region, HOVER_INFLATE), HOVER_COLOR);
-        }
-        _ => {}
+    if let (Some(_), Some(p)) = (state.tool, state.hover) {
+        gizmos.cube(tile_box_transform(TileBox { min: p, max: p }, region, HOVER_INFLATE), HOVER_COLOR);
     }
 }
 
@@ -1044,8 +903,8 @@ mod tests {
             invalid: [(Invalid::Built, 1), (Invalid::Bedrock, 3)].into_iter().collect(),
         };
         assert_eq!(
-            drag_text_on(area, Some(DesignationKind::Dig), &summary),
-            "8 × 6 studs × 12 plates (4 × 3 × 2.4 m) — 20 bricks to dig · 3 bedrock · 1 built"
+            drag_text(area, Some(DesignationKind::Dig), &summary),
+            "4 × 3 × 2 — 20 to dig · 3 bedrock · 1 built"
         );
     }
 
@@ -1092,65 +951,16 @@ mod tests {
     #[test]
     fn erase_summary_counts_matching_designations() {
         let d = |kind| Designation { kind, op: OpId::default(), priority: DEFAULT_PRIORITY };
-        let at = |p| StudBox::of_tile(p).unwrap();
-        let marks: BTreeMap<StudBox, Designation> = [
-            (at([0, 0, 0]), d(DesignationKind::Dig)),
-            // A brick reaching into the area from the tile beside it counts too.
-            (StudBox { chunk: [0, 0, 0], lo: [5, 0, 0], hi: [9, 3, 2] }, d(DesignationKind::Deconstruct)),
-            (at([9, 0, 0]), d(DesignationKind::Dig)),
+        let marks: BTreeMap<TilePos, Designation> = [
+            ([0, 0, 0], d(DesignationKind::Dig)),
+            ([1, 0, 0], d(DesignationKind::Deconstruct)),
+            ([9, 0, 0], d(DesignationKind::Dig)),
         ]
         .into_iter()
         .collect();
         let area = TileBox::new([0, 0, 0], [2, 0, 0]);
         assert_eq!(erase_summary(&marks, area, None).valid, 2);
         assert_eq!(erase_summary(&marks, area, Some(DesignationKind::Dig)).valid, 1);
-        assert_eq!(
-            drag_text_on(area, None, &erase_summary(&marks, area, None)),
-            "6 × 2 studs × 6 plates (3 × 1 × 1.2 m) — 2 to erase"
-        );
-        let one = OrderSummary { valid: 1, invalid: BTreeMap::new() };
-        assert!(drag_text_on(area, Some(DesignationKind::Chop), &one).ends_with("— 1 brick to chop"));
-        assert!(drag_text_on(area, Some(DesignationKind::Build(game::edit::PLACE_BLOCK)), &one).ends_with("— 1 space to build"));
-    }
-
-    /// Picking returns the brick: the whole part under the cursor, never the tile;
-    /// with the cut on, what is above the working level does not stop the ray.
-    #[test]
-    fn picking_returns_the_brick_under_the_cursor() {
-        use game::{StudBrick, WorldChunkPos};
-        let region: RegionId = game::RegionCoords::new(0, 0);
-        let (part, rot) = game::stud_carve::box_part([4, 3, 2]).expect("a 2 x 4 brick");
-        let wide = StudBrick::part_at([4, 6, 4], part, rot, game::MAT_STONE);
-        let (cap_part, cap_rot) = game::stud_carve::box_part([2, 3, 2]).expect("a 2 x 2 brick");
-        // A brick two levels up, over the wide one's first studs.
-        let cap = StudBrick::part_at([4, 18, 4], cap_part, cap_rot, game::MAT_DIRT);
-        let slab = StudBrick::filler([0, 0, 0], [32, 6, 32], game::MAT_STONE);
-        let chunk = StudChunk::new([slab, wide, cap]).unwrap();
-        let mut world = StudWorld::default();
-        let e = Entity::from_raw_u32(1).unwrap();
-        world.set_chunk(e, WorldChunkPos::from_local(region, [0, 0, 0]), &chunk);
-        let bricks = ClientBricks { world: &world, chunk_of: |x| (x == e).then_some(&chunk), region };
-        let s = game::STUD_UNITS as f32;
-        let down = |x: f32, z: f32| (Vector::new(x * s, 400.0, z * s), Vector::new(0.0, -1.0, 0.0));
-        let whole = |b: &StudBrick| StudBox { chunk: [0, 0, 0], lo: b.min, hi: [0, 1, 2].map(|a| b.min[a] + b.size()[a]) };
-        // Nothing cut: the cap is on top.
-        assert_eq!(pick_brick(&bricks, down(4.5, 4.5), None), Some(whole(&cap)));
-        // Beside the cap: the wide brick, whole — four studs, two tiles.
-        assert_eq!(pick_brick(&bricks, down(7.5, 5.5), None), Some(whole(&wide)));
-        assert_eq!(whole(&wide).tiles(), TileBox::new([2, 1, 2], [3, 1, 2]));
-        // Cut at level 1 (plates 6..12): the cap above it is not drawn and not picked.
-        assert_eq!(pick_brick(&bricks, down(4.5, 4.5), Some(1)), Some(whole(&wide)));
-        // The slab has no bricks of its own: its cells in the tile under the cursor.
-        assert_eq!(pick_brick(&bricks, down(20.5, 21.5), None), Some(StudBox { chunk: [0, 0, 0], lo: [20, 0, 20], hi: [22, 6, 22] }));
-        // A ray that never comes down to the cut.
-        assert_eq!(pick_brick(&bricks, (Vector::new(4.5 * s, 400.0, 4.5 * s), Vector::new(0.0, 1.0, 0.0)), Some(1)), None);
-        // The order rules read the same chunk: a dig of the wide brick's first tile
-        // takes the whole brick (the slab under it is not in the volume).
-        let mirror = TileMirror::default();
-        let tile = TileBox::new([2, 1, 2], [2, 1, 2]);
-        let targets = game::designation_targets(&mirror, &bricks, DesignationKind::Dig, tile);
-        assert_eq!(targets, vec![(whole(&wide), Ok(()))]);
-        let summary = game::summarize_targets(DesignationKind::Dig, tile, &targets);
-        assert_eq!((summary.valid, summary.invalid.len()), (1, 0));
+        assert_eq!(drag_text(area, None, &erase_summary(&marks, area, None)), "3 × 1 × 1 — 2 to erase");
     }
 }

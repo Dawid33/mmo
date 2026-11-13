@@ -1,40 +1,32 @@
-//! Behaviour goldens for movement. A physics engine change can't keep hashes
-//! bit-exact, but it must keep behaviour: each scenario drives a body through
-//! the real region tick for [`SCENARIO_TICKS`] ticks and compares its
-//! per-tick `(x, y, z, grounded)` against
-//! `tests/fixtures/physics_goldens/<scenario>.csv`, within [`POS_TOL`] per
-//! axis and with [`GROUNDED_SLACK_TICKS`] of slack on `grounded` around a
-//! recorded transition.
-//!
-//! Recorded 2026-11-10 (stud world plan P10b) on stud ground with the stud
-//! body (`BodyScale::STUD`), on the rapier 0.36 / parry 0.31 forks: every
-//! scenario stood on voxel terrain before (those recordings dated from the
-//! nalgebra-era rapier 0.31 / parry 0.25 forks and described the 1.8 m voxel
-//! body), so all eight fixtures were rebuilt and re-recorded — three under a
-//! new name for what the stud scene is (`walk_brick_step` was
-//! `walk_scale_seam`, `jump_up_one_tile` was `step_up_one_block`,
-//! `terrace_uphill_1_plate` was `terrace_uphill_1_voxel`).
+//! Behaviour goldens for movement, recorded on the nalgebra-era physics
+//! (rapier 0.31 / parry 0.25 forks) before the rapier 0.36 switch. A physics
+//! engine change can't keep hashes bit-exact, but it must keep behaviour:
+//! each scenario drives a body through the real region tick for
+//! [`SCENARIO_TICKS`] ticks and compares its per-tick `(x, y, z, grounded)`
+//! against `tests/fixtures/physics_goldens/<scenario>.csv`, within
+//! [`POS_TOL`] per axis and with [`GROUNDED_SLACK_TICKS`] of slack on
+//! `grounded` around a recorded transition.
 //!
 //! Scenarios use only game-level inputs (key presses through the region tick,
-//! `set_body_pose_safe`, `spawn_slime_safe`), so the same source runs on a
+//! `set_body_pose_safe`, `spawn_slime_safe`), so the same source runs on the
 //! new engine; `common` holds every read of engine types.
 //!
 //! Re-record — only on the engine the goldens are meant to describe, and in a
 //! commit that says why:
 //!
 //! ```sh
-//! PHYSICS_GOLDENS_RECORD=1 just test-one game "--test it physics_goldens::"
+//! PHYSICS_GOLDENS_RECORD=1 just test-one game "--test physics_goldens"
 //! ```
 use crate::common;
 
 use std::fmt::Write as _;
 
 use common::{
-    approach_seam, body, entity_body, key, r0, seam_row, seam_x, spawn_slime, stud_flat, stud_ground, teleport, ticks,
-    world_of, Body, FLOOR_PLATES,
+    approach_seam, body, entity_body, floor_chunks, key, r0, seam_row, seam_x, spawn_slime,
+    teleport, ticks, world_of, Body,
 };
-use game::movement::{BodyScale, CHARACTER_SKIN, UNITS_PER_METER};
-use game::{GameEventKind, Key, World, STUD_CHUNK_STUDS, TILE_PLATES, TILE_STUDS};
+use game::movement::{CHARACTER_SKIN, PLAYER_CAPSULE_HALF_HEIGHT, PLAYER_CAPSULE_RADIUS, UNITS_PER_METER};
+use game::{Block, BlockId, Chunk, GameEventKind, Key, Region, World, BLOCK_VOXELS, CHUNK_BLOCKS};
 
 /// Ticks recorded per scenario.
 const SCENARIO_TICKS: usize = 120;
@@ -51,11 +43,9 @@ fn row(b: Body) -> Row {
     [b.x, b.y, b.z, b.grounded as u8 as f32]
 }
 
-/// Height of a player's body origin resting on studded ground whose surface
-/// plate is `plates`: the stud caps, the capsule, the controller's skin.
-fn rest_y(plates: i32) -> f32 {
-    let s = BodyScale::STUD;
-    common::floor_y(plates) + game::stud_cap_units() + s.capsule_half_height() + s.capsule_radius() + CHARACTER_SKIN
+/// Height of a player's body origin resting on a floor whose top is `floor`.
+fn rest_y(floor: f32) -> f32 {
+    floor + PLAYER_CAPSULE_HALF_HEIGHT + PLAYER_CAPSULE_RADIUS + CHARACTER_SKIN
 }
 
 /// Runs the player for [`SCENARIO_TICKS`] ticks, calling `input(world, tick)`
@@ -79,25 +69,24 @@ fn tap(world: &mut World, k: Key, at: usize, tick: usize) {
     }
 }
 
-/// +x at walk speed on flat stud ground, from 2 units before the chunk
-/// border ahead of the spawn (x = 256), across one more. Ground: x 96..608,
-/// z 96..160 units.
+/// +x at walk speed on a block-scale floor, from 2 units before the chunk
+/// border ahead of the spawn (x = 160 at 2-block chunks), across a dozen
+/// more. Floor: x 96..608, z 96..160 units.
 fn walk_flat_across_chunk_seam() -> Vec<Row> {
-    let mut world = world_of(96.0..608.0, 96.0..160.0, |_, _| stud_flat(FLOOR_PLATES));
+    let mut world = world_of(96.0..608.0, 96.0..160.0, |_, _| Chunk::flat_floor(16));
     let y = body(&world).y;
     teleport(&mut world, seam_x() - 2.0, y, 136.0);
     key(&mut world, Key::KeyD, true);
     run_player(world, |_, _| {})
 }
 
-/// +z from flat ground onto ground one brick course (3 plates, 0.6 m) higher
-/// at the chunk border ahead of the spawn (z = 256): the stud body's
-/// autostep at its tallest. Ground: x 96..160, z 96..576 units.
-fn walk_brick_step() -> Vec<Row> {
-    let step = game::STUD_STEP_PLATES;
-    let mut world =
-        world_of(96.0..160.0, 96.0..576.0, |_, z| stud_flat(if z >= seam_row() { FLOOR_PLATES + step } else { FLOOR_PLATES }));
-    // Start 32 units short of the border.
+/// +z from a block-scale floor (top 16) onto half blocks (one-cuboid
+/// chisels, top 24) at the chunk border ahead of the spawn (z = 160 at 2-block
+/// chunks): a scale seam and a half-block autostep. Floor: x 96..160,
+/// z 96..576 units.
+fn walk_scale_seam() -> Vec<Row> {
+    let mut world = world_of(96.0..160.0, 96.0..576.0, |_, z| Chunk::flat_floor(if z >= seam_row() { 24 } else { 16 }));
+    // Start 32 units short of the border (the spawn itself at 2-block chunks).
     approach_seam(&mut world, 32.0);
     run_player(world, |w, t| {
         if t == 0 {
@@ -106,14 +95,13 @@ fn walk_brick_step() -> Vec<Row> {
     })
 }
 
-/// +z into a one-tile (1.2 m) ledge at the chunk border ahead of the spawn
-/// (z = 256), jumping just before it: a tile is taller than the step height,
-/// so it takes a jump. Ground: x 96..160, z 96..576 units.
-fn jump_up_one_tile() -> Vec<Row> {
-    let tile = TILE_PLATES as i32;
-    let mut world =
-        world_of(96.0..160.0, 96.0..576.0, |_, z| stud_flat(if z >= seam_row() { FLOOR_PLATES + tile } else { FLOOR_PLATES }));
-    // Start 32 units short of the border.
+/// +z into a one-block (16-unit) ledge at the chunk border ahead of the spawn
+/// (z = 160 at 2-block chunks), jumping just before it: a block is taller
+/// than the step height, so it takes a jump, as in Minecraft. Floor: x 96..160,
+/// z 96..576 units.
+fn step_up_one_block() -> Vec<Row> {
+    let mut world = world_of(96.0..160.0, 96.0..576.0, |_, z| Chunk::flat_floor(if z >= seam_row() { 32 } else { 16 }));
+    // Start 32 units short of the border (the spawn itself at 2-block chunks).
     approach_seam(&mut world, 32.0);
     run_player(world, |w, t| {
         if t == 0 {
@@ -123,12 +111,26 @@ fn jump_up_one_tile() -> Vec<Row> {
     })
 }
 
-/// +z up one-plate terraces, a plate (0.2 m) up every two tiles: the gentle
-/// generated slope on which walking uphill dips in speed at each terrace.
-fn terrace_uphill_1_plate() -> Vec<Row> {
-    let world = world_of(96.0..160.0, 96.0..576.0, |_, cz| {
-        // Stud row `sz` of chunk row `cz`: a plate higher every 2 tiles.
-        stud_ground(|_, sz| FLOOR_PLATES + ((cz * STUD_CHUNK_STUDS + sz) / (2 * TILE_STUDS)) as i32)
+/// +z up one-voxel terraces, a step up every two blocks (one 2-block chunk
+/// row at the original chunk size): the gentle generated slope on which
+/// walking uphill dips in speed at each terrace.
+fn terrace_uphill_1_voxel() -> Vec<Row> {
+    let world = world_of(96.0..160.0, 96.0..576.0, |_, z| {
+        // Each block row z copies its row of a flat floor 12 + z/2 voxels deep.
+        let mut chunk = Chunk::default();
+        for bz in 0..CHUNK_BLOCKS {
+            let row = Chunk::flat_floor(12 + ((z * CHUNK_BLOCKS + bz) / 2) as u32);
+            for by in 0..CHUNK_BLOCKS {
+                for bx in 0..CHUNK_BLOCKS {
+                    chunk.set_block(bx, by, bz, row.block_at(bx, by, bz));
+                    let i = game::BlockIndex::from_xyz(bx, by, bz);
+                    if let Some(c) = row.chisel.get(&i) {
+                        chunk.chisel.insert(i, c.clone());
+                    }
+                }
+            }
+        }
+        chunk
     });
     run_player(world, |w, t| {
         if t == 0 {
@@ -137,37 +139,43 @@ fn terrace_uphill_1_plate() -> Vec<Row> {
     })
 }
 
-/// Space tapped once, standing on flat ground: one jump, then standing.
+/// Space tapped once, standing on a flat floor: one jump, then standing.
 fn jump_in_place() -> Vec<Row> {
-    let world = world_of(96.0..160.0, 96.0..160.0, |_, _| stud_flat(FLOOR_PLATES));
+    let world = world_of(96.0..160.0, 96.0..160.0, |_, _| Chunk::flat_floor(16));
     run_player(world, |w, t| tap(w, Key::Space, 0, t))
 }
 
-/// Sprinting forward (−z) over a one-tile trench (z 560..576 units, one tile
+/// Sprinting forward (−z) over a one-block trench (z 560..576, one block
 /// deep) with a jump just before its edge, then on to the end.
 fn sprint_jump_over_gap() -> Vec<Row> {
-    // The trench is tile row 35 along z (stud rows 70..72), spanning the
-    // ground's tile columns 6..10 (stud columns 12..20).
-    let ground = |cx: usize, cz: usize| {
-        stud_ground(|sx, sz| {
-            let (x, z) = (cx * STUD_CHUNK_STUDS + sx, cz * STUD_CHUNK_STUDS + sz);
-            let trench = (70..72).contains(&z) && (12..20).contains(&x);
-            if trench { FLOOR_PLATES - TILE_PLATES as i32 } else { FLOOR_PLATES }
-        })
+    // The trench is block row 35 along z (units 560..576), spanning the floor's
+    // block columns 6..10 (units 96..160).
+    let trench_z_block = 560 / BLOCK_VOXELS;
+    let floor = |x: usize, z: usize| {
+        let mut chunk = Chunk::flat_floor(2 * BLOCK_VOXELS as u32);
+        for bx in 0..CHUNK_BLOCKS {
+            for bz in 0..CHUNK_BLOCKS {
+                let block_x = x * CHUNK_BLOCKS + bx;
+                if z * CHUNK_BLOCKS + bz == trench_z_block && (6..10).contains(&block_x) {
+                    chunk.set_block(bx, 1, bz, Block::new(BlockId::AIR));
+                }
+            }
+        }
+        chunk
     };
-    let mut world = world_of(96.0..160.0, 64.0..640.0, ground);
-    teleport(&mut world, 144.0, rest_y(FLOOR_PLATES), 620.0);
+    let mut world = world_of(96.0..160.0, 64.0..640.0, floor);
+    teleport(&mut world, 144.0, rest_y(2.0 * BLOCK_VOXELS as f32), 620.0);
     ticks(&mut world, 2);
     key(&mut world, Key::ControlLeft, true);
     key(&mut world, Key::KeyW, true);
     run_player(world, |w, t| tap(w, Key::Space, 8, t))
 }
 
-/// Starts 0.3 units sunk into flat ground — into the stud caps, past the skin
+/// Starts 0.3 units sunk into a flat floor — into the solid, past the skin
 /// gap it normally rests on — stands, walks +z, stands.
 fn sunk_start_depenetrates() -> Vec<Row> {
-    let mut world = world_of(96.0..160.0, 96.0..224.0, |_, _| stud_flat(FLOOR_PLATES));
-    teleport(&mut world, 136.0, rest_y(FLOOR_PLATES) - CHARACTER_SKIN - 0.3, 136.0);
+    let mut world = world_of(96.0..160.0, 96.0..224.0, |_, _| Chunk::flat_floor(16));
+    teleport(&mut world, 136.0, rest_y(16.0) - CHARACTER_SKIN - 0.3, 136.0);
     run_player(world, |w, t| {
         if t == 20 {
             key(w, Key::KeyS, true);
@@ -177,12 +185,11 @@ fn sunk_start_depenetrates() -> Vec<Row> {
     })
 }
 
-/// One size-1 slime (spawn tick 0, so a fixed roll sequence) dropped from
-/// 1.5 m onto flat ground with no player: it lands, sits and hops.
+/// One size-1 slime (spawn tick 0, so a fixed roll sequence) dropped on a
+/// flat floor with no player: it lands, sits and hops.
 fn slime_hop_sequence() -> Vec<Row> {
-    let mut region = common::floor_region(r0(), 64.0..288.0, 64.0..288.0, FLOOR_PLATES);
-    let drop = common::floor_y(FLOOR_PLATES) + 1.5 * UNITS_PER_METER;
-    let slime = spawn_slime(&mut region, [176.0, drop, 176.0], 1, 0.0, 0);
+    let mut region = Region::from_chunks(r0(), floor_chunks(64.0..288.0, 64.0..288.0, 16));
+    let slime = spawn_slime(&mut region, [176.0, 40.0, 176.0], 1, 0.0, 0);
     (0..SCENARIO_TICKS)
         .map(|_| {
             region.handle_event(GameEventKind::Tick).unwrap();
@@ -196,9 +203,9 @@ fn slime_hop_sequence() -> Vec<Row> {
 fn run_scenario(name: &str) -> Vec<Row> {
     match name {
         "walk_flat_across_chunk_seam" => walk_flat_across_chunk_seam(),
-        "walk_brick_step" => walk_brick_step(),
-        "jump_up_one_tile" => jump_up_one_tile(),
-        "terrace_uphill_1_plate" => terrace_uphill_1_plate(),
+        "walk_scale_seam" => walk_scale_seam(),
+        "step_up_one_block" => step_up_one_block(),
+        "terrace_uphill_1_voxel" => terrace_uphill_1_voxel(),
         "jump_in_place" => jump_in_place(),
         "sprint_jump_over_gap" => sprint_jump_over_gap(),
         "sunk_start_depenetrates" => sunk_start_depenetrates(),
@@ -233,8 +240,23 @@ fn from_csv(text: &str) -> Vec<Row> {
         .collect()
 }
 
+/// The sim-chunk size the chunk-size-dependent fixtures were recorded at.
+const RECORDED_CHUNK_BLOCKS: usize = 16;
+
+/// Scenarios whose recording depends on the chunk size, so they are compared
+/// only at [`RECORDED_CHUNK_BLOCKS`]: the seam walks start relative to the
+/// first chunk border past the spawn (x/z 160 at 2-block chunks, 256 at 16 —
+/// the same trajectory translated), and the slime's hop rolls are seeded by
+/// its entity key, which follows the number of chunk entities created first.
+const CHUNK_SIZE_DEPENDENT: &[&str] =
+    &["walk_flat_across_chunk_seam", "walk_scale_seam", "step_up_one_block", "slime_hop_sequence"];
+
 /// Records the fixture in record mode; otherwise compares against it.
 fn check(name: &str) {
+    if CHUNK_BLOCKS != RECORDED_CHUNK_BLOCKS && CHUNK_SIZE_DEPENDENT.contains(&name) {
+        eprintln!("{name}: recorded at {RECORDED_CHUNK_BLOCKS}-block chunks, skipped at {CHUNK_BLOCKS}");
+        return;
+    }
     let actual = run_scenario(name);
     assert_eq!(actual.len(), SCENARIO_TICKS);
     let path = fixture(name);
@@ -269,18 +291,18 @@ fn walk_flat_across_chunk_seam_golden() {
 }
 
 #[test]
-fn walk_brick_step_golden() {
-    check("walk_brick_step");
+fn walk_scale_seam_golden() {
+    check("walk_scale_seam");
 }
 
 #[test]
-fn jump_up_one_tile_golden() {
-    check("jump_up_one_tile");
+fn step_up_one_block_golden() {
+    check("step_up_one_block");
 }
 
 #[test]
-fn terrace_uphill_1_plate_golden() {
-    check("terrace_uphill_1_plate");
+fn terrace_uphill_1_voxel_golden() {
+    check("terrace_uphill_1_voxel");
 }
 
 #[test]

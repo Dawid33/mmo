@@ -49,10 +49,8 @@ pub fn toggled(mode: PlayMode) -> PlayMode {
 }
 
 /// The tile under the camera focus (world x, z and the ground height
-/// `ground_y`, sim units), local to `home`, on terrain `kind`: the tile feet
-/// standing on that ground occupy (`TerrainKind::feet_tile` — a 1 m level on
-/// voxels, a 1.2 m tile on studs, where the floor may lie up to three plates
-/// into the tile or two under it).
+/// `ground_y`, sim units), local to `home`: the air tile feet standing on
+/// that ground occupy (`game::feet_tile`).
 pub fn focus_tile(focus: Vec2, ground_y: f32, home: RegionId) -> TilePos {
     let o = home.world_offset();
     game::feet_tile(Vector::new(focus.x - o[0], ground_y - o[1], focus.y - o[2]))
@@ -173,33 +171,7 @@ mod tests {
         let focus = Vec2::new(o[0] + 10.5 * UNITS_PER_METER, o[2] + 3.2 * UNITS_PER_METER);
         let t = focus_tile(focus, ground_y, home);
         assert_eq!((t[0], t[2]), (10, 3));
-        assert_eq!(t[1], 58, "the tile standing on the ground: 70 m / 1.2 m");
-        // It is the sim's own feet tile, at any height.
-        for y in [-33.0, 0.0, 7.9, 8.0, 1119.9, 1120.0, 1127.99] {
-            let p = Vector::new(10.5 * UNITS_PER_METER, y, 3.2 * UNITS_PER_METER);
-            assert_eq!(focus_tile(Vec2::new(o[0] + p.x, o[2] + p.z), y + o[1], home), game::feet_tile(p));
-        }
-    }
-
-    /// The hint is a 1.2 m TILE, the sim's own feet tile.
-    #[test]
-    fn focus_tile_counts_tiles() {
-        let home = RegionCoords { x: 0, z: 0 };
-        let h = game::tile_height_units();
-        let focus = Vec2::new(10.5 * UNITS_PER_METER, 3.2 * UNITS_PER_METER);
-        // Ground exactly on a tile boundary: feet on it stand in the tile above.
-        for level in [0, 1, 58, 70] {
-            let ground = game::level_bottom_units(level);
-            let t = focus_tile(focus, ground, home);
-            assert_eq!(t, [10, level, 3], "ground at the bottom of level {level}");
-            assert!(game::on_level(t[1], ground));
-            // A floor two plates into the tile (plates, half a brick) is the same tile.
-            assert_eq!(focus_tile(focus, ground + game::plate_units(2), home)[1], level);
-        }
-        // 70 m up is level 58 (70 / 1.2).
-        let y = 70.0 * UNITS_PER_METER;
-        assert_eq!(focus_tile(focus, y, home)[1], (y / h).floor() as i32);
-        assert_eq!((y / h).floor() as i32, 58);
+        assert_eq!(t[1], 70, "the air tile on top of the ground");
     }
 
     #[test]
@@ -210,17 +182,7 @@ mod tests {
             toggle_order(PlayMode::Fortress, &cam, Some(home)),
             Order::SetMode { mode: PlayMode::Adventure, at: Some([2, 2, 3]) }
         );
-        assert_eq!(
-            toggle_order(PlayMode::Adventure, &cam, Some(home)),
-            Order::SetMode { mode: PlayMode::Fortress, at: None }
-        );
-        // 20 m up: tile 17 (a floor two thirds into tile 16 belongs to the tile
-        // above — the sim's feet rule).
-        let cam = CommanderCamera { ground_y: 320.0, ..cam };
-        assert_eq!(
-            toggle_order(PlayMode::Fortress, &cam, Some(home)),
-            Order::SetMode { mode: PlayMode::Adventure, at: Some([2, 17, 3]) }
-        );
+        assert_eq!(toggle_order(PlayMode::Adventure, &cam, Some(home)), Order::SetMode { mode: PlayMode::Fortress, at: None });
     }
 
     #[test]

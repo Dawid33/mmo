@@ -23,7 +23,7 @@ use std::collections::BTreeSet;
 
 use crate::{
     find_path, find_path_toward, nearest_standable, standable, Goal, MapExtent, RegionCoords, Rollback, TilePos,
-    TileSource, TileSummary, WorldBlockPos, WorldMap, BLOCK_UNITS, FLIP_HYSTERESIS, HALO_BLOCKS, REGION_BLOCKS,
+    TileSource, TileSummary, WorldBlockPos, WorldMap, BLOCK_VOXELS, FLIP_HYSTERESIS, HALO_BLOCKS, REGION_BLOCKS,
 };
 
 /// Largest share of a region's raster cells under sea or lake that a coarse
@@ -90,7 +90,7 @@ impl RouteMap {
 /// gets there (`FLIP_HYSTERESIS`), and the tile is still inside the halo.
 pub const PORTAL_DEPTH_BLOCKS: i32 = 2;
 const _: () = assert!(
-    (PORTAL_DEPTH_BLOCKS * BLOCK_UNITS as i32) as f32 > FLIP_HYSTERESIS && PORTAL_DEPTH_BLOCKS < HALO_BLOCKS,
+    (PORTAL_DEPTH_BLOCKS * BLOCK_VOXELS as i32) as f32 > FLIP_HYSTERESIS && PORTAL_DEPTH_BLOCKS < HALO_BLOCKS,
     "a stretch's end must be past the hand-off and inside the halo"
 );
 /// Farthest (blocks, per axis) the A* heuristic's target lies from the start:
@@ -339,6 +339,9 @@ impl<S: TileSource> OnMap<'_, S> {
 }
 
 impl<S: TileSource> TileSource for OnMap<'_, S> {
+    fn block(&self, p: TilePos) -> crate::BlockId {
+        if self.on_map(p[0], p[2]) { self.src.block(p) } else { crate::BlockId::AIR }
+    }
     fn is_bedrock(&self, p: TilePos) -> bool {
         self.on_map(p[0], p[2]) && self.src.is_bedrock(p)
     }
@@ -348,17 +351,17 @@ impl<S: TileSource> TileSource for OnMap<'_, S> {
     fn tree_id(&self, p: TilePos) -> u32 {
         if self.on_map(p[0], p[2]) { self.src.tree_id(p) } else { 0 }
     }
+    fn tree_limb(&self, p: TilePos) -> u8 {
+        if self.on_map(p[0], p[2]) { self.src.tree_limb(p) } else { 0 }
+    }
     fn column_band(&self, column: [i32; 2]) -> Option<(i32, i32)> {
         self.on_map(column[0], column[1]).then(|| self.src.column_band(column)).flatten()
     }
+    fn slope(&self, p: TilePos) -> Option<crate::SlopeShape> {
+        self.on_map(p[0], p[2]).then(|| self.src.slope(p)).flatten()
+    }
     fn water_units(&self, p: TilePos) -> u16 {
         if self.on_map(p[0], p[2]) { self.src.water_units(p) } else { 0 }
-    }
-    fn tile_fill(&self, p: TilePos) -> crate::TileFill {
-        if self.on_map(p[0], p[2]) { self.src.tile_fill(p) } else { crate::TileFill::Open }
-    }
-    fn tile_material(&self, p: TilePos) -> Option<u16> {
-        self.on_map(p[0], p[2]).then(|| self.src.tile_material(p)).flatten()
     }
 }
 
@@ -375,8 +378,7 @@ impl Rollback {
     /// Dropped otherwise. No walker: no change.
     pub fn continue_walk_safe(&mut self, e: crate::EntityKey, here: RegionCoords, map: Option<&RouteMap>) {
         let Some(old) = self.data.ecs.walker.try_get(e).clone() else { return };
-        let tiles = self.tiles();
-        let src = OnMap { src: &tiles, here, map: map.map(RouteMap::extent) };
+        let src = OnMap { src: &*self, here, map: map.map(RouteMap::extent) };
         let rest = old.path.get(old.next as usize..).unwrap_or_default();
         let walkable = rest.iter().all(|&p| standable(&src, crate::local_tile(p, here)));
         if old.to_goal && !rest.is_empty() && walkable {

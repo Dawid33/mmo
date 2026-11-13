@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use crate::history::SiteId;
 use rapier3d::math::Vector;
 
-use crate::{Client, ClientId, Pose, RegionCoords, Rollback, StateHash};
+use crate::{Client, ClientId, Pose, RegionCoords, Rollback, StateHash, TileSource};
 
 /// The stable identity of a player (never reused for another name or token).
 #[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize, StateHash)]
@@ -148,26 +148,8 @@ pub struct PlayerRecord {
     pub adventure: Option<SiteId>,
 }
 
-/// [`PlayerRecord`] as stored before registered prefabs (world-store player record
-/// format 1): the same fields around a [`crate::ClientV1`]. Decode-only.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct PlayerRecordV1 {
-    pub client: crate::ClientV1,
-    pub pose: Pose,
-    pub region: RegionCoords,
-    pub fortress: Option<SiteId>,
-    pub adventure: Option<SiteId>,
-}
-
-impl From<PlayerRecordV1> for PlayerRecord {
-    fn from(r: PlayerRecordV1) -> Self {
-        let PlayerRecordV1 { client, pose, region, fortress, adventure } = r;
-        PlayerRecord { client: client.into(), pose, region, fortress, adventure }
-    }
-}
-
 /// `client` as a parked record keeps it: what belongs to the connection —
-/// held input, the first-person flag, an open inventory, registered prefabs — is reset, the
+/// held input, the first-person flag, an open inventory — is reset, the
 /// cursor stack goes back into the inventory (what does not fit stays on the
 /// cursor), an open chest closes, and what belongs to the region it stood
 /// in (mining, the break cooldown: [`Client::arrive`]) is cleared, so a
@@ -178,8 +160,6 @@ pub fn parked_client(client: &Client) -> Client {
     c.fps_cam_mode = false;
     c.inventory_open = false;
     c.open_container = None;
-    // Registered prefabs last for the session; the client registers again.
-    c.prefabs.clear();
     if let Some(rest) = c.stow_cursor() {
         c.cursor = Some(rest);
     }
@@ -225,24 +205,25 @@ impl Rollback {
 }
 
 /// Where a restored body goes: `t` (a body centre, region-local voxel units)
-/// when it is clear of terrain there (`body_fits`: on voxel terrain its feet
-/// tile and the tile above are clear of solid blocks) and inside
+/// when its feet tile and the tile above are clear of solid blocks and inside
 /// the region — water is clear, so a swimmer is restored in place; else onto
 /// the standable tile nearest its feet level in its column (clamped into the
 /// region); else over the region's spawn column (on its water's top where
 /// it has any, `player_spawn_y`). Never inside terrain.
 pub fn restore_translation(rollback: &Rollback, t: Vector) -> Vector {
-    let src = rollback.tiles();
-    let feet_at = rollback.feet_of(t);
-    let feet = crate::feet_tile(feet_at);
+    let feet = crate::feet_tile(crate::feet_of(t));
     let n = crate::REGION_BLOCKS as i32;
     let inside = (0..n).contains(&feet[0]) && (0..n).contains(&feet[2]);
-    if inside && crate::body_fits(&src, feet_at) {
+    let clear = |p: crate::TilePos| {
+        let b = rollback.block(p);
+        b == crate::BlockId::AIR || !crate::block_props().is_solid(b)
+    };
+    if inside && clear(feet) && clear([feet[0], feet[1] + 1, feet[2]]) {
         return t;
     }
     let column = [feet[0].clamp(0, n - 1), feet[2].clamp(0, n - 1)];
-    match crate::nearest_standable(&src, column, Some(feet[1])) {
-        Some(tile) => rollback.body_centre_on(tile),
+    match crate::nearest_standable(rollback, column, Some(feet[1])) {
+        Some(tile) => crate::body_on_tile(tile),
         None => {
             let xz = rollback.spawn_xz();
             Vector::new(xz.0, rollback.player_spawn_y(xz), xz.1)

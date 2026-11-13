@@ -12,7 +12,6 @@ use std::collections::BTreeSet;
 
 use bevy::color::palettes::css;
 use bevy::prelude::*;
-use game::movement::BodyScale;
 use bevy::window::PrimaryWindow;
 use game::{EntityKey, EntityKind, RegionId};
 
@@ -181,6 +180,7 @@ pub fn update_ground_pick(
     grid: Res<HeightGrid>,
     working: Res<WorkingLevel>,
     tiles: Res<TileMirror>,
+    xray: Option<Res<crate::renderer::voxel_pull::xray::XraySettings>>,
     mut pick: ResMut<GroundPick>,
 ) {
     pick.0 = (|| {
@@ -196,6 +196,7 @@ pub fn update_ground_pick(
             &grid,
             &working,
             &tiles,
+            crate::renderer::voxel_pull::xray::xray_on(xray.as_deref(), working.cut),
         )?;
         let region = RegionId::from_world(hit.x, hit.z);
         Some((region, hit - Vec3::from_array(region.world_offset())))
@@ -234,15 +235,15 @@ pub fn fallback_ground_pick(
     })();
 }
 
-/// Half the body's height and its half-width, world units, for bodies of the
-/// region's `scale`: feet and head are the pose's centre ∓ the first.
-fn body_extent(kind: EntityKind, scale: BodyScale) -> (f32, f32) {
-    let half_height = super::cut_entities::feet_offset(kind, scale);
+/// Half the body's height and its half-width, world units: feet and head
+/// are the pose's centre ∓ the first.
+fn body_extent(kind: EntityKind) -> (f32, f32) {
+    let half_height = super::cut_entities::feet_offset(kind);
     let half_width = match kind {
-        EntityKind::Player | EntityKind::Person { .. } => scale.capsule_radius(),
+        EntityKind::Player | EntityKind::Person { .. } => game::movement::PLAYER_CAPSULE_RADIUS,
         EntityKind::Slime { size } => game::slime::slime_edge_units(size) / 2.0,
         // Placeholder: the 1 m dev cube.
-        EntityKind::Body => game::BLOCK_UNITS as f32 / 2.0,
+        EntityKind::Body => game::BLOCK_VOXELS as f32 / 2.0,
     };
     (half_height, half_width)
 }
@@ -255,7 +256,6 @@ fn projected(
     gt: &GlobalTransform,
     entities: &Query<(&SimEntity, &SimKind, &GlobalTransform, Has<LocalBody>), Without<CutHidden>>,
     adventure: bool,
-    scale: BodyScale,
 ) -> Vec<((RegionId, EntityKey), ScreenBody)> {
     let right = gt.right();
     entities
@@ -265,7 +265,7 @@ fn projected(
             let at = e.translation();
             let to_screen = |p: Vec3| camera.world_to_viewport(gt, p).ok();
             let centre = to_screen(at)?;
-            let (half_height, half_width) = body_extent(kind.0, scale);
+            let (half_height, half_width) = body_extent(kind.0);
             let feet = to_screen(at - Vec3::Y * half_height).unwrap_or(centre);
             let head = to_screen(at + Vec3::Y * half_height).unwrap_or(centre);
             let half_width = to_screen(at + right * half_width).map_or(0.0, |p| p.distance(centre));
@@ -285,7 +285,6 @@ pub fn select_input(
     mode: Res<ClientPlayMode>,
     policy: Res<CursorPolicy>,
     minimap_pointer: Res<MinimapPointer>,
-    body_scale: Option<Res<crate::renderer::stud::ClientBodyScale>>,
     mut selection: ResMut<Selection>,
     mut press: crate::session::SessionLocal<Option<Vec2>>,
     mut band: ResMut<SelectionBand>,
@@ -314,8 +313,7 @@ pub fn select_input(
     let Some(end) = cursor else { return };
     let Ok((camera, tf)) = view.single() else { return };
     let gt = GlobalTransform::from(*tf);
-    let scale = body_scale.map_or(BodyScale::STUD, |s| s.0);
-    let candidates = projected(camera, &gt, &entities, mode.adventure(), scale);
+    let candidates = projected(camera, &gt, &entities, mode.adventure());
     let picked: Vec<_> = if dragging(start, end) {
         box_pick(start, end, candidates.into_iter().map(|(k, b)| (k, b.centre)))
     } else {
@@ -336,27 +334,32 @@ pub fn prune_selection(map: Res<SimEntityMap>, mut selection: ResMut<Selection>)
     selection.0.retain(|key| map.0.contains_key(key));
 }
 
-/// The selection ring of a `kind` body of the region's `scale`: its width
-/// (before [`RING_RADIUS_FACTOR`]) and how far under the pose its feet are,
-/// world units.
-fn ring_size(kind: EntityKind, scale: BodyScale) -> (f32, f32) {
-    let (half_height, half_width) = body_extent(kind, scale);
-    (2.0 * half_width, half_height)
-}
-
 /// A ring on the ground under each selected entity.
 pub fn draw_selection_rings(
     selection: Res<Selection>,
     map: Res<SimEntityMap>,
     entities: Query<(&SimKind, &GlobalTransform), Without<CutHidden>>,
-    body_scale: Option<Res<crate::renderer::stud::ClientBodyScale>>,
     mut gizmos: Gizmos,
 ) {
-    let scale = body_scale.map_or(BodyScale::STUD, |s| s.0);
     for key in &selection.0 {
         let Some(&e) = map.0.get(key) else { continue };
         let Ok((kind, gt)) = entities.get(e) else { continue };
-        let (edge, centre_height) = ring_size(kind.0, scale);
+        let (edge, centre_height) = match kind.0 {
+            EntityKind::Slime { size } => {
+                let edge = game::slime::slime_edge_units(size);
+                (edge, edge / 2.0)
+            }
+            // Placeholder: the 1 m dev cube.
+            EntityKind::Body => {
+                let edge = game::BLOCK_VOXELS as f32;
+                (edge, edge / 2.0)
+            }
+            // Only the adventurer's own body is ever selected.
+            EntityKind::Player | EntityKind::Person { .. } => (
+                2.0 * game::movement::PLAYER_CAPSULE_RADIUS,
+                super::cut_entities::feet_offset(kind.0),
+            ),
+        };
         // The sim pose is the body centre; the ring sits at the feet.
         let feet = gt.translation() - Vec3::Y * (centre_height - 1.0);
         gizmos.circle(
@@ -397,28 +400,6 @@ mod tests {
         let c = [(1, p(100.0, 100.0)), (2, p(105.0, 100.0)), (3, p(300.0, 0.0))];
         assert_eq!(click_pick(Vec2::new(104.0, 100.0), c, 12.0), Some(2));
         assert_eq!(click_pick(Vec2::new(200.0, 200.0), c, 12.0), None, "empty ground");
-    }
-
-    /// The pick box, the ring and the feet follow the region's body: 2.2 m
-    /// people on stud terrain, the same slimes.
-    #[test]
-    fn body_sizes_follow_the_regions_body_scale() {
-        use game::movement::{PLAYER_CAPSULE_RADIUS, PLAYER_HEIGHT, STUD_PLAYER_HEIGHT_M, STUD_PLAYER_RADIUS_M, UNITS_PER_METER};
-        for kind in [EntityKind::Player, EntityKind::Person { person: game::history::PersonId(1) }] {
-            let (hh, hw) = body_extent(kind, BodyScale::UNIT);
-            assert!((hh - PLAYER_HEIGHT * UNITS_PER_METER / 2.0).abs() < 1e-4);
-            assert_eq!(hw, PLAYER_CAPSULE_RADIUS, "voxel regions: the old constants");
-            let (hh, hw) = body_extent(kind, BodyScale::STUD);
-            assert!((hh - STUD_PLAYER_HEIGHT_M * UNITS_PER_METER / 2.0).abs() < 1e-4, "a 2.2 m body");
-            assert!((hw - STUD_PLAYER_RADIUS_M * UNITS_PER_METER).abs() < 1e-4);
-            let (edge, feet) = ring_size(kind, BodyScale::STUD);
-            assert_eq!((edge, feet), (2.0 * hw, hh), "the ring is the body's width, at its feet");
-        }
-        let slime = EntityKind::Slime { size: 3 };
-        assert_eq!(body_extent(slime, BodyScale::STUD), body_extent(slime, BodyScale::UNIT));
-        let edge = game::slime::slime_edge_units(3);
-        assert_eq!(ring_size(slime, BodyScale::UNIT), (edge, edge / 2.0));
-        assert_eq!(ring_size(EntityKind::Body, BodyScale::STUD), (game::BLOCK_UNITS as f32, game::BLOCK_UNITS as f32 / 2.0));
     }
 
     #[test]

@@ -5,7 +5,6 @@ import { Starting } from "starting.slint";
 import { Loading } from "loading.slint";
 import { LoginScreen } from "login.slint";
 import { OnlineWorldRow, WorldsScreen } from "worlds.slint";
-import { PrefabLibrary } from "prefab-library.slint";
 import { GameTheme } from "theme.slint";
 
 export { KnobRow, OnlineWorldRow, WorldRow }
@@ -21,7 +20,7 @@ export component FrontendUi inherits Window {
     background: transparent;
 
     // 0 menu, 1 generator, 2 load, 3 starting, 4 loading (over the world),
-    // 5 login, 6 the online world list, 7 the prefab library.
+    // 5 login, 6 the online world list.
     in property <int> screen;
     in property <bool> shown: true;
     in property <string> game-title: "Orion";
@@ -86,31 +85,6 @@ export component FrontendUi inherits Window {
     out property <length> logout-x: online-worlds.logout-x;
     out property <length> logout-y: online-worlds.logout-y;
 
-    // The prefab library (screen 7, prefab-library.slint), forwarded with a
-    // `prefab-` prefix; its Back is `back` above. `prefabs-available`: the menu
-    // offers it (native builds).
-    in property <bool> prefabs-available;
-    callback prefab-editor();
-    in property <[string]> prefab-mine <=> library.mine;
-    in property <[string]> prefab-game <=> library.game;
-    in property <bool> prefab-show-game <=> library.show-game;
-    in property <int> prefab-selected-mine <=> library.selected-mine;
-    in property <int> prefab-selected-game <=> library.selected-game;
-    in-out property <string> prefab-new-name <=> library.new-name;
-    in property <[string]> prefab-status-lines <=> library.status-lines;
-    in property <bool> prefab-confirm-delete <=> library.confirm-delete;
-    in property <string> prefab-delete-name <=> library.delete-name;
-    callback prefab-pick-mine <=> library.pick-mine;
-    callback prefab-pick-game <=> library.pick-game;
-    callback prefab-open <=> library.open;
-    callback prefab-new-build <=> library.new-build;
-    callback prefab-duplicate <=> library.duplicate;
-    callback prefab-delete <=> library.delete;
-    callback prefab-confirm-delete-yes <=> library.confirm-delete-yes;
-    callback prefab-confirm-delete-no <=> library.confirm-delete-no;
-    callback prefab-import <=> library.import;
-    callback prefab-export <=> library.export;
-
     out property <length> new-button-x: menu.new-button-x;
     out property <length> new-button-y: menu.new-button-y;
     out property <length> load-button-x: menu.load-button-x;
@@ -119,11 +93,9 @@ export component FrontendUi inherits Window {
     out property <length> exit-button-y: menu.exit-button-y;
     // The shown screen's Back.
     out property <length> back-button-x: root.screen == 1 ? generator.back-x : root.screen == 2 ? loader.back-x
-        : root.screen == 5 ? login.back-x : root.screen == 6 ? online-worlds.back-x
-        : root.screen == 7 ? library.back-x : starting.back-x;
+        : root.screen == 5 ? login.back-x : root.screen == 6 ? online-worlds.back-x : starting.back-x;
     out property <length> back-button-y: root.screen == 1 ? generator.back-y : root.screen == 2 ? loader.back-y
-        : root.screen == 5 ? login.back-y : root.screen == 6 ? online-worlds.back-y
-        : root.screen == 7 ? library.back-y : starting.back-y;
+        : root.screen == 5 ? login.back-y : root.screen == 6 ? online-worlds.back-y : starting.back-y;
 
     // The world list (screen 2, load-world.slint), forwarded with a `load-`
     // prefix; its Back is `back` above.
@@ -203,8 +175,6 @@ export component FrontendUi inherits Window {
         background-image: root.menu-background;
         join-only: root.join-only;
         online-available: root.online-available;
-        prefabs-available: root.prefabs-available;
-        prefab-editor => { root.prefab-editor(); }
         new-world => { root.new-world(); }
         load-world => { root.load-world(); }
         exit => { root.exit(); }
@@ -250,12 +220,6 @@ export component FrontendUi inherits Window {
         busy: root.login-busy;
         join(id) => { root.world-join(id); }
         logout => { root.logout(); }
-        back => { root.back(); }
-    }
-    library := PrefabLibrary {
-        visible: root.shown && root.screen == 7;
-        width: root.width;
-        height: root.height;
         back => { root.back(); }
     }
     loading := Loading {

@@ -1,9 +1,11 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 
 use bevy::prelude::*;
+use bevy::tasks::{block_on, futures_lite::future, Task};
 use crossbeam::channel::Receiver;
-use game::{ClientUpdateEvent, EntityKey, GameData, GameDataUpdate, GameDataUpdateKind, RegionId};
+use game::{ClientUpdateEvent, GameData, GameDataUpdate, GameDataUpdateKind, RegionId};
+use game::{EntityKey, Voxel};
 use super::history_view::HistoryMsg;
 
 use super::convert::{iso_to_transform, perspective_to_projection};
@@ -16,9 +18,9 @@ use crate::session::SessionScoped;
 #[derive(Resource, Default)]
 pub struct Regions(pub BTreeMap<RegionId, Receiver<GameDataUpdate>>);
 
-/// Each region's terrain root: the parent of its stud chunks and
+/// Each region's terrain root: the parent of its chunks, their bricks and
 /// its other static render entities, at the region's fixed world offset. Its
-/// moving entities (players, slimes, falling bodies, …) hang off a separate
+/// moving entities (players, slimes, voxel bodies, …) hang off a separate
 /// BODIES root at the same offset ([`RegionRoots::bodies`]): Bevy's static
 /// transform optimisation re-walks a whole tree when any node in it changes
 /// (a dirty root's `GlobalTransform` is rewritten, which flags every direct
@@ -155,12 +157,6 @@ impl SimTarget {
         }
     }
     pub fn camera(pos: Vec3, rot: Quat) -> Self {
-        Self::camera_eyed(pos, rot, game::movement::PLAYER_EYE_OFFSET)
-    }
-
-    /// [`Self::camera`] with the eye `eye` above the body origin (the region's
-    /// `BodyScale::eye_offset`).
-    pub fn camera_eyed(pos: Vec3, rot: Quat, eye: f32) -> Self {
         // The render camera SNAPS its rotation (rot_smoothing = 1.0) so
         // there's no slerp-arc tilt during turns, but LERPS its position so
         // movement glides instead of stepping. The snapped per-tick sim look
@@ -172,7 +168,7 @@ impl SimTarget {
             rot_smoothing: 1.0,
             pos_snap: 0.008,
             rot_snap: 0.001,
-            offset: Vec3::new(0.0, eye, 0.0),
+            offset: EYE_OFFSET,
         }
     }
 
@@ -184,6 +180,191 @@ impl SimTarget {
 
 /// The first-person eye sits this far above the player's body origin.
 pub const EYE_OFFSET: Vec3 = Vec3::new(0.0, game::movement::PLAYER_EYE_OFFSET, 0.0);
+
+/// A chunk's 32³ voxel grid, run-length encoded along the linear index
+/// (`x + 32*y + 32*32*z`, so runs extend along +X).
+///
+/// The dense form is 64 KiB (32768 voxels × 2 B) and the client used to keep one
+/// alive per chunk for the whole session — at ~2800 chunks per region that was
+/// ~183 MB per region, three quarters of the client's heap, and the largest
+/// single consumer by an order of magnitude.
+///
+/// Runs are cheap here by construction: a chunk is 8 blocks of 16³, each uniform
+/// unless chiselled, so every run is ≥16 voxels and a plain air/stone chunk is
+/// one run. Nothing needs the dense array persistently — the mesher expands it
+/// transiently to build `PaddedVoxels`, then drops it — so we store the runs and
+/// hand out a dense `Vec` on demand.
+///
+/// The second field caches the chunk's 26 boundary-zone hashes
+/// (`meshing::queue::boundary_zones`) when they were computed off the main
+/// thread (`with_boundary_zones`, in the snapshot-voxel task); `new` — and so
+/// `edit` — start without it. Equality ignores it.
+#[derive(Component, Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct VoxelData(Vec<(u16, game::BlockId)>, Option<[u32; 26]>);
+
+impl PartialEq for VoxelData {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+
+impl Eq for VoxelData {}
+
+impl VoxelData {
+    /// Encode a dense 32³ grid.
+    pub fn new(voxels: impl AsRef<[Voxel]>) -> Self {
+        let voxels = voxels.as_ref();
+        debug_assert_eq!(voxels.len(), game::BRICK_VOXEL_COUNT);
+        let mut runs: Vec<(u16, game::BlockId)> = Vec::new();
+        for v in voxels {
+            match runs.last_mut() {
+                // A run can't overflow u16: the whole chunk is 32768 voxels.
+                Some((len, id)) if *id == v.block => *len += 1,
+                _ => runs.push((1, v.block)),
+            }
+        }
+        Self(runs, None)
+    }
+
+    /// One run of `id` over the whole brick.
+    pub fn uniform(id: game::BlockId) -> Self {
+        Self(vec![(game::BRICK_VOXEL_COUNT as u16, id)], None)
+    }
+
+    /// Encode a brick straight from its blocks — identical to
+    /// `VoxelData::new(view.voxels())` without building the dense 32³ array.
+    /// Each `BRICK_VOXELS` x-row is `BRICK_BLOCKS` 16-voxel segments, one per
+    /// block: an unchiselled block adds one 16-run, a chiselled one its row of
+    /// materials. Derivation was ~65 µs/chunk of the join's worker time. A
+    /// uniform brick is one run with no per-voxel work. Runs stay `u16`: a
+    /// brick is 32768 voxels.
+    pub fn from_brick(view: &game::BrickView) -> Self {
+        use game::{BLOCK_VOXELS, BRICK_BLOCKS, BRICK_VOXELS};
+        if let Some(block) = view.uniform() {
+            return Self::uniform(block.id);
+        }
+        fn push(runs: &mut Vec<(u16, game::BlockId)>, len: u16, id: game::BlockId) {
+            match runs.last_mut() {
+                Some((run, last)) if *last == id => *run += len,
+                _ => runs.push((len, id)),
+            }
+        }
+        // Decoded once per chiselled block of the brick.
+        let mut materials: std::collections::BTreeMap<[usize; 3], Vec<game::BlockId>> = Default::default();
+        for bz in 0..BRICK_BLOCKS {
+            for by in 0..BRICK_BLOCKS {
+                for bx in 0..BRICK_BLOCKS {
+                    if let Some(c) = view.chisel(bx, by, bz) {
+                        materials.insert([bx, by, bz], c.materials());
+                    }
+                }
+            }
+        }
+        let edge = BRICK_VOXELS;
+        let mut runs: Vec<(u16, game::BlockId)> = Vec::new();
+        for z in 0..edge {
+            for y in 0..edge {
+                let (by, bz) = (y / BLOCK_VOXELS, z / BLOCK_VOXELS);
+                for bx in 0..BRICK_BLOCKS {
+                    match materials.get(&[bx, by, bz]) {
+                        None => push(&mut runs, BLOCK_VOXELS as u16, view.block_at(bx, by, bz).id),
+                        Some(m) => {
+                            let (ly, lz) = (y % BLOCK_VOXELS, z % BLOCK_VOXELS);
+                            let row = (ly + lz * BLOCK_VOXELS) * BLOCK_VOXELS;
+                            for id in &m[row..row + BLOCK_VOXELS] {
+                                push(&mut runs, 1, *id);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Self(runs, None)
+    }
+
+    /// Compute and cache the boundary-zone hashes now — for a caller already
+    /// off the main thread, so `mark_remesh_dirty` needn't (~2 s of main-thread
+    /// hashing per `full` join, 2026-09-22 findings).
+    pub fn with_boundary_zones(mut self) -> Self {
+        self.1 = Some(super::meshing::queue::compute_boundary_zones(&self));
+        self
+    }
+
+    /// Every voxel is air.
+    pub fn is_all_air(&self) -> bool {
+        self.0.iter().all(|&(_, id)| id == game::BlockId::AIR)
+    }
+
+    /// Every voxel is air or liquid (`cutout`'s liquids): nothing the chunk
+    /// mesher draws.
+    pub fn is_all_empty(&self, cutout: &super::meshing::binary::CutoutTable) -> bool {
+        self.0.iter().all(|&(_, id)| id == game::BlockId::AIR || cutout.is_liquid(id))
+    }
+
+    /// Every voxel hides what is behind it: no air, no liquid and no cutout
+    /// block (`cutout`) anywhere in the chunk.
+    pub fn is_opaque_throughout(&self, cutout: &super::meshing::binary::CutoutTable) -> bool {
+        self.0
+            .iter()
+            .all(|&(_, id)| id != game::BlockId::AIR && !cutout.is_liquid(id) && !cutout.is_cutout(id))
+    }
+
+    /// The cached boundary-zone hashes, if `with_boundary_zones` ran.
+    pub fn cached_boundary_zones(&self) -> Option<[u32; 26]> {
+        self.1
+    }
+
+    /// Expand back to the dense 32³ grid the mesher consumes.
+    pub fn decode(&self) -> Vec<Voxel> {
+        let mut out = Vec::with_capacity(game::BRICK_VOXEL_COUNT);
+        for &(len, id) in &self.0 {
+            out.extend(std::iter::repeat_n(Voxel::new(id), len as usize));
+        }
+        out
+    }
+
+    /// Visit monotonically increasing dense-grid indices without expanding the
+    /// RLE component. The meshing snapshot builder uses this for interiors and
+    /// neighbor boundary zones, where requested indices naturally arrive in
+    /// linear x-major order.
+    pub(crate) fn for_each_index_sorted(
+        &self,
+        indices: impl IntoIterator<Item = usize>,
+        mut visit: impl FnMut(usize, Voxel),
+    ) {
+        let mut runs = self.0.iter();
+        let Some(&(mut run_len, mut block)) = runs.next() else {
+            return;
+        };
+        let mut run_end = run_len as usize;
+        let mut previous = None;
+        for index in indices {
+            debug_assert!(previous.is_none_or(|p| index >= p), "RLE indices must be sorted");
+            debug_assert!(index < game::BRICK_VOXEL_COUNT, "voxel index out of bounds");
+            previous = Some(index);
+            while index >= run_end {
+                let &(next_len, next_block) = runs.next().expect("RLE covers the full chunk");
+                run_len = next_len;
+                block = next_block;
+                run_end += run_len as usize;
+            }
+            visit(index, Voxel::new(block));
+        }
+    }
+
+    /// Decode, mutate, re-encode. The edit path is rare (a chisel or a block
+    /// break); the read path is what had to stay cheap.
+    pub fn edit(&mut self, f: impl FnOnce(&mut Vec<Voxel>)) {
+        let mut dense = self.decode();
+        f(&mut dense);
+        *self = Self::new(dense);
+    }
+
+    /// Number of runs — the thing that actually costs memory.
+    pub fn runs(&self) -> usize {
+        self.0.len()
+    }
+}
 
 /// Marker: the local player's sim body. In commander mode it is hidden and
 /// gets no camera (the commander has no body to look through or show).
@@ -209,6 +390,308 @@ pub struct HaloMirror {
     pub source: RegionId,
 }
 
+/// Bricks derived per snapshot-voxel task. A region is ~2800 bricks at
+/// ~0.3 ms each, so a batch is ~20 ms of worker time: small enough that the
+/// first terrain shows up quickly and (on wasm, where tasks run on the main
+/// thread) that no single task is a long hitch.
+pub const SNAPSHOT_VOXEL_TASK_BRICKS: usize = 64;
+
+/// Sim chunks per snapshot-voxel task: [`SNAPSHOT_VOXEL_TASK_BRICKS`] worth
+/// of bricks, at least one chunk.
+pub const SNAPSHOT_VOXEL_TASK_CHUNKS: usize = {
+    let per_chunk = game::BRICKS_PER_CHUNK_EDGE.pow(3);
+    if SNAPSHOT_VOXEL_TASK_BRICKS > per_chunk { SNAPSHOT_VOXEL_TASK_BRICKS / per_chunk } else { 1 }
+};
+
+/// Floor on derived snapshot bricks spawned per frame (the live count follows
+/// [`SNAPSHOT_VOXELS_PER_SECOND`]; a chunk's bricks land together, so one
+/// chunk always fits). Each brick makes `mark_remesh_dirty` fingerprint it
+/// (~0.15 ms on a power-clamped machine, far less otherwise), so this is the
+/// main-thread cost of a joining region.
+pub const SNAPSHOT_VOXELS_PER_FRAME: usize = 64;
+/// Target brick insert rate. Kept above the mesher's `MESH_UPLOADS_PER_SECOND` so
+/// voxels always arrive faster than they can be meshed: the remesh queue then
+/// holds everything pending and its nearest-first ranking decides the order.
+pub const SNAPSHOT_VOXELS_PER_SECOND: f32 = 9600.0;
+/// Ceiling per frame: twice a 60 Hz frame's worth, so a long frame cannot
+/// snowball (each insert costs `mark_remesh_dirty` ~45 us unclamped; 512 per
+/// frame measured 31 ms stalls). See `MAX_MESH_UPLOADS_PER_FRAME`.
+pub const MAX_SNAPSHOT_VOXELS_PER_FRAME: usize = 160;
+
+/// Snapshot-voxel tasks allowed on the compute pool at once. The pool is FIFO
+/// and shared with the mesher: when wire compression made all nine regions of
+/// a join arrive within a second, their ~365 batches were spawned together and
+/// the first mesh tasks queued behind them (first terrain 0.9 s -> 1.9 s).
+/// Twice the default worker count keeps the workers fed without burying
+/// everything else; the rest wait in `SnapshotVoxelQueue`, nearest first.
+pub const MAX_OUTSTANDING_SNAPSHOT_VOXEL_TASKS: usize = 8;
+
+/// A chunk entity spawned from a region snapshot whose bricks are still
+/// being derived off-thread. Removed when the bricks land — or when an
+/// incremental `SetVoxelComponent` gets there first, which then wins: the
+/// late snapshot result is older and must not overwrite it.
+#[derive(Component)]
+pub struct PendingSnapshotVoxels;
+
+/// Block edits (`SetBlocks`) that reached a chunk while its bricks were still
+/// being derived off-thread. Each delta is a block's full new state, so they
+/// are applied in order on top of whatever bricks land.
+#[derive(Component, Default)]
+pub struct PendingBlockDeltas(pub(crate) Vec<game::BlockDelta>);
+
+/// One batch of snapshot-voxel derivation. Child of the region root, so
+/// removing (or replacing) the region despawns — and thereby cancels — it.
+#[derive(Component)]
+pub struct SnapshotVoxelTask(Task<Vec<DerivedChunk>>);
+
+/// A batch of chunks whose render bricks to derive (a compute job,
+/// `renderer::compute`); answers each chunk's bricks in order (`None`: the
+/// chunk is gone from the snapshot).
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct DeriveBricksJob {
+    /// Threads only: the whole snapshot, shared — the chunks at `items` are
+    /// read from it and `source` is ignored. Never serialized (a skipped
+    /// FIELD: serde's skipped enum *variants* renumber the rest on decode).
+    #[serde(skip)]
+    pub shared: Option<Arc<GameData>>,
+    /// The snapshot chunks to derive (unused for `DeriveSource::Owned`).
+    pub items: Vec<game::ChunkCoords>,
+    pub source: DeriveSource,
+}
+
+/// What a [`DeriveBricksJob`] derives from when it does not share a snapshot.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub enum DeriveSource {
+    /// The part of the snapshot the `items` read (a worker).
+    Part(super::bricks::SnapshotPart),
+    /// Chunks that came on their own (`AddTerrainChunk`): nothing across.
+    Owned(Vec<game::Chunk>),
+}
+
+impl DeriveBricksJob {
+    /// Snapshot chunks at `items`, the snapshot shared (threads).
+    pub fn shared(data: Arc<GameData>, items: Vec<game::ChunkCoords>) -> Self {
+        Self { shared: Some(data), items, source: DeriveSource::Part(Default::default()) }
+    }
+
+    /// Snapshot chunks at `items` with just the part of the snapshot they read.
+    pub fn part(part: super::bricks::SnapshotPart, items: Vec<game::ChunkCoords>) -> Self {
+        Self { shared: None, items, source: DeriveSource::Part(part) }
+    }
+
+    /// Chunks that came on their own.
+    pub fn owned(chunks: Vec<game::Chunk>) -> Self {
+        Self { shared: None, items: Vec::new(), source: DeriveSource::Owned(chunks) }
+    }
+}
+
+impl super::compute::ComputeJob for DeriveBricksJob {
+    type Output = Vec<Option<super::bricks::DerivedBricks>>;
+    const KIND: super::compute::JobKind = super::compute::JobKind::DeriveBricks;
+
+    fn run(self) -> Self::Output {
+        use super::bricks::{derive_chunk_bricks, derive_chunk_bricks_across, snapshot_across, DerivedBricks};
+        let zones = |mut derived: DerivedBricks| {
+            derived.spawn = derived.spawn.into_iter().map(|(l, v)| (l, v.with_boundary_zones())).collect();
+            derived
+        };
+        let cutout = super::meshing::binary::CutoutTable::installed();
+        if let Some(data) = self.shared {
+            return self
+                .items
+                .into_iter()
+                .map(|coords| {
+                    let key = data.chunk_index.get(&game::chunk_index_key(coords))?;
+                    let chunk = data.ecs.chunk.try_get(*key).as_ref()?;
+                    Some(zones(derive_chunk_bricks_across(chunk, snapshot_across(&data, coords, &cutout))))
+                })
+                .collect();
+        }
+        match self.source {
+            DeriveSource::Part(part) => self
+                .items
+                .into_iter()
+                .map(|coords| {
+                    let chunk = part.chunks.get(&coords)?.as_ref()?;
+                    Some(zones(derive_chunk_bricks_across(chunk, part.across(coords, &cutout))))
+                })
+                .collect(),
+            DeriveSource::Owned(chunks) => {
+                chunks.iter().map(|chunk| Some(zones(derive_chunk_bricks(chunk)))).collect()
+            }
+        }
+    }
+}
+
+/// A chunk entity, the blocks its bricks were derived from, and the bricks.
+type DerivedChunk = (Entity, game::Chunk, super::bricks::DerivedBricks);
+
+/// Derived voxels waiting for their per-frame insert budget.
+#[derive(Resource, Default)]
+pub struct SnapshotVoxelQueue {
+    /// Batches not yet handed to the compute pool (see
+    /// [`MAX_OUTSTANDING_SNAPSHOT_VOXEL_TASKS`]).
+    batches: VecDeque<PendingVoxelBatch>,
+    ready: VecDeque<DerivedChunk>,
+    /// Bricks inserted since the queue was last empty (for the `[perf]` line).
+    applied: u32,
+}
+
+/// One batch of a region snapshot's chunks, waiting for a compute-pool slot.
+struct PendingVoxelBatch {
+    region: RegionId,
+    /// The region root the chunks were spawned under; a replaced or removed
+    /// region has a different (or no) root, which retires the batch.
+    root: Entity,
+    /// World-space centroid of the batch's chunks, for nearest-first dispatch.
+    center: Vec3,
+    chunks: BatchChunks,
+}
+
+/// Where a voxel batch's chunks come from.
+enum BatchChunks {
+    /// A region snapshot, shared by its batches (no per-chunk clone), with
+    /// each chunk's coords: the snapshot also buries face bricks against the
+    /// chunks next to them (`bricks::snapshot_across`).
+    Snapshot(Arc<GameData>, Vec<(Entity, EntityKey, game::ChunkCoords)>),
+    /// Chunks of a cell activated after the snapshot (`AddTerrainChunk`).
+    Owned(Vec<(Entity, game::Chunk)>),
+}
+
+/// Index of the batch to dispatch next: the one nearest the camera, or simply
+/// the oldest while no camera exists yet (the local camera itself arrives in
+/// the home region's snapshot).
+fn nearest_batch(centers: impl Iterator<Item = Vec3>, camera: Option<Vec3>) -> Option<usize> {
+    let mut centers = centers.enumerate();
+    let Some(camera) = camera else {
+        return centers.next().map(|(index, _)| index);
+    };
+    centers
+        .min_by(|(_, a), (_, b)| a.distance_squared(camera).total_cmp(&b.distance_squared(camera)))
+        .map(|(index, _)| index)
+}
+
+/// Collect finished snapshot-voxel batches and insert up to
+/// [`SNAPSHOT_VOXELS_PER_FRAME`] of them. Spawning a region used to derive and
+/// RLE-encode every chunk inside `drain_client_updates`: one 0.5-2 s frame per
+/// region, 8.9 s for the production 3x3 join (2026-09-19 capture).
+pub fn apply_snapshot_voxels(
+    mut commands: Commands,
+    time: Res<Time<Real>>,
+    mut tasks: Query<(Entity, &mut SnapshotVoxelTask)>,
+    mut brick_edits: Query<(Entity, &mut super::bricks::BrickEdits)>,
+    pending: Query<(), With<PendingSnapshotVoxels>>,
+    cameras: Query<(&GlobalTransform, &Camera), With<Camera3d>>,
+    roots: Res<RegionRoots>,
+    mut queue: ResMut<SnapshotVoxelQueue>,
+) {
+    super::bricks::poll_brick_edits(&mut commands, &mut brick_edits);
+    let mut outstanding = 0usize;
+    for (task_entity, mut task) in &mut tasks {
+        if let Some(batch) = block_on(future::poll_once(&mut task.0)) {
+            queue.ready.extend(batch);
+            commands.entity(task_entity).despawn();
+        } else {
+            outstanding += 1;
+        }
+    }
+
+    // Retire batches of regions that were removed or replaced since (their
+    // entities are gone; holding the `Arc` would keep ~40 MiB alive each).
+    if roots.is_changed() {
+        queue.batches.retain(|batch| roots.0.get(&batch.region) == Some(&batch.root));
+    }
+    // Hand out compute-pool slots, nearest batch to the camera first.
+    let camera = cameras
+        .iter()
+        .find(|(_, camera)| camera.is_active)
+        .map(|(transform, _)| transform.translation());
+    while outstanding < MAX_OUTSTANDING_SNAPSHOT_VOXEL_TASKS {
+        let Some(index) = nearest_batch(queue.batches.iter().map(|batch| batch.center), camera) else {
+            break;
+        };
+        let Some(PendingVoxelBatch { root, chunks, .. }) = queue.batches.remove(index) else {
+            break;
+        };
+        let task = match chunks {
+            BatchChunks::Snapshot(data, items) => {
+                let coords: Vec<_> = items.iter().map(|&(_, _, coords)| coords).collect();
+                // Off the page (a wasm worker) the job carries just what it
+                // reads; on a thread it shares the snapshot.
+                let job = if super::compute::serializes() {
+                    DeriveBricksJob::part(super::bricks::SnapshotPart::gather(&data, coords.iter().copied()), coords)
+                } else {
+                    DeriveBricksJob::shared(data.clone(), coords)
+                };
+                super::compute::spawn(job, move |derived: Vec<Option<super::bricks::DerivedBricks>>| {
+                    items
+                        .into_iter()
+                        .zip(derived)
+                        .filter_map(|((entity, key, _), derived)| {
+                            let chunk = data.ecs.chunk.try_get(key).as_ref()?;
+                            Some((entity, chunk.clone(), derived?))
+                        })
+                        .collect()
+                })
+            }
+            BatchChunks::Owned(items) => {
+                let job = DeriveBricksJob::owned(items.iter().map(|(_, chunk)| chunk.clone()).collect());
+                super::compute::spawn(job, move |derived: Vec<Option<super::bricks::DerivedBricks>>| {
+                    items
+                        .into_iter()
+                        .zip(derived)
+                        .filter_map(|((entity, chunk), derived)| Some((entity, chunk, derived?)))
+                        .collect()
+                })
+            }
+        };
+        // Child of the region root: removing the region cancels the task.
+        commands.spawn((SnapshotVoxelTask(task), ChildOf(root)));
+        outstanding += 1;
+    }
+    let mut budget = super::meshing::queue::per_frame_budget(
+        SNAPSHOT_VOXELS_PER_SECOND,
+        time.delta(),
+        SNAPSHOT_VOXELS_PER_FRAME,
+        MAX_SNAPSHOT_VOXELS_PER_FRAME,
+    );
+    while budget > 0 {
+        let Some((entity, chunk, bricks)) = queue.ready.pop_front() else {
+            break;
+        };
+        // No marker: the entity is gone (region removed/replaced) or an
+        // incremental update already wrote newer voxels. Costs no budget.
+        if !pending.contains(entity) {
+            continue;
+        }
+        // A chunk's bricks land together; edits that arrived while they were
+        // derived are newer and go on top (`land_chunk_bricks`).
+        let count = bricks.spawn.len();
+        commands.queue(move |world: &mut World| {
+            if world.get::<PendingSnapshotVoxels>(entity).is_some() {
+                super::bricks::land_chunk_bricks(world, entity, chunk, bricks);
+            }
+        });
+        queue.applied += count as u32;
+        // TODO(perf, chunk flip): a whole chunk lands in one frame — at 16³
+        // chunks up to 512 bricks (296 for a uniform solid chunk: its face
+        // shell; ~200 for a typical surface chunk) against
+        // MAX_SNAPSHOT_VOXELS_PER_FRAME (160). Kept whole on purpose: the
+        // landing swaps the SimChunk mirror and lays PendingBlockDeltas on
+        // top in one step, and a half-landed chunk would have edits racing
+        // bricks that are not there yet. The overshoot is bounded to one
+        // chunk per frame (the budget saturates, nothing carries over), the
+        // voxels were derived off-thread, and meshing has its own budget.
+        // If `main_stall` / the join timeline show it, split by staging the
+        // bricks behind the pending marker instead of here.
+        budget = budget.saturating_sub(count.max(1));
+    }
+    if queue.applied > 0 && queue.ready.is_empty() && queue.batches.is_empty() && outstanding == 0 {
+        game::perf_event!("snapshot_voxels_applied", "bricks={}", queue.applied);
+        queue.applied = 0;
+    }
+}
+
 /// The text a lost session shows on the main menu.
 pub fn session_end_reason(error: &game::GameError) -> String {
     match error {
@@ -230,6 +713,7 @@ pub fn drain_client_updates(
     mut ui_updates: ResMut<crate::renderer::slint_overlay::UiUpdates>,
     mut debug_lines: ResMut<crate::renderer::collider_debug::DebugColliderLines>,
     mut lod_rings: ResMut<lod_rings::LodRings>,
+    mut snapshot_voxels: ResMut<SnapshotVoxelQueue>,
     mut retired_roots: ResMut<RetiredRegionRoots>,
     camera_mode: Option<Res<super::commander::CameraMode>>,
     mut tile_msgs: Option<ResMut<Messages<TileMirrorMsg>>>,
@@ -249,7 +733,7 @@ pub fn drain_client_updates(
             ClientUpdateEvent::NewRegion(id, data, receiver) => {
                 spawned_region = true;
                 // Back before its old tree was despawned: finish that first,
-                // so two trees of one region never share the stud index.
+                // so two trees of one region never share the chunk grid.
                 retired_roots.0.retain(|&(rc, root)| {
                     if rc == id {
                         commands.entity(root).despawn();
@@ -269,11 +753,11 @@ pub fn drain_client_updates(
                     m.iter().map(|(p, pile)| (game::local_cell(id, *p), Some(pile.view()))).collect()
                 };
                 let (piles, mirrors) = (frame(data.item_piles()), frame(data.halo_piles()));
-                // The stud mirror: terrain kind, stud recipes and the stud halo.
-                let stud_msg = super::stud::world::StudWorldMsg::of_snapshot(id, &data);
+                // The water pass's recipe (its tiles mesh once the chunks land).
+                let water_ground = Arc::new(data.ground_recipes().clone());
                 commands.queue(move |world: &mut World| {
-                    if let Some(mut msgs) = world.get_resource_mut::<Messages<super::stud::world::StudWorldMsg>>() {
-                        msgs.write(stud_msg);
+                    if let Some(mut msgs) = world.get_resource_mut::<Messages<super::water::WaterMsg>>() {
+                        msgs.write(super::water::WaterMsg::Region { region: id, ground: water_ground });
                     }
                     if let Some(mut msgs) = world.get_resource_mut::<Messages<super::item_piles::ItemPileMsg>>() {
                         msgs.write(super::item_piles::ItemPileMsg::RemoveRegion(id));
@@ -289,14 +773,29 @@ pub fn drain_client_updates(
                 if let Some(msgs) = tile_msgs.as_mut() {
                     msgs.write(TileMirrorMsg::Reset {
                         region: id,
+                        ground: data.ground_recipes().clone(),
                         designations: data.designations().iter().map(|(p, d)| (*p, *d)).collect(),
                         constructed: data.constructed().keys().copied().collect(),
                     });
+                    // Its terrain halo: walks are planned over it too.
+                    msgs.write(TileMirrorMsg::halo_of(id, &data));
                 }
                 let spawn = game::perf::Stopwatch::start();
-                spawn_region_snapshot(&mut commands, root, bodies, id, &data, &mut map, player.0, commander(camera_mode.as_deref()));
-                // Main-thread cost of one region: an entity per sim entity
-                // (the stud chunks are meshed off-thread, `stud::systems`).
+                let data = Arc::new(data);
+                spawn_region_snapshot(
+                    &mut commands,
+                    root,
+                    bodies,
+                    id,
+                    &data,
+                    &mut map,
+                    player.0,
+                    &mut snapshot_voxels,
+                    commander(camera_mode.as_deref()),
+                );
+                // Main-thread cost of one region: an entity per sim entity.
+                // The per-chunk voxel derivation runs off-thread (see
+                // `apply_snapshot_voxels`).
                 game::perf_event!(
                     "bridge_region_spawned",
                     "region={},{} spawn_ms={} entities={} chunks={} regions={}",
@@ -304,7 +803,7 @@ pub fn drain_client_updates(
                     id.z,
                     game::perf::ms(spawn.elapsed()),
                     data.ecs.entities.len(),
-                    data.ecs.stud.iter().filter(|(_, chunk)| chunk.is_some()).count(),
+                    data.ecs.chunk.iter().filter(|(_, chunk)| chunk.is_some()).count(),
                     roots.0.len()
                 );
                 info!("bridge: region {:?} loaded", id);
@@ -314,17 +813,21 @@ pub fn drain_client_updates(
                 // Unmapped now, despawned over the next frames.
                 if let Some(root) = unmap_region(&mut regions, &mut roots, &mut map, id) {
                     retired_roots.0.push_back((id, root));
+                    commands.queue(move |world: &mut World| super::bricks::prune_region_skipped(world, id));
                 }
                 debug_lines.0.remove(&id);
                 commands.queue(move |world: &mut World| {
+                    if let Some(mut msgs) = world.get_resource_mut::<Messages<super::water::WaterMsg>>() {
+                        msgs.write(super::water::WaterMsg::RemoveRegion { region: id });
+                    }
                     if let Some(mut msgs) = world.get_resource_mut::<Messages<super::item_piles::ItemPileMsg>>() {
                         msgs.write(super::item_piles::ItemPileMsg::RemoveRegion(id));
                     }
                 });
                 info!("bridge: region {:?} removed", id);
             }
-            ClientUpdateEvent::StudLodData(key, tile) => {
-                lod_rings.pending.push(lod_rings::LodEventMsg::StudData(key, tile));
+            ClientUpdateEvent::LodData(key, payload, water) => {
+                lod_rings.pending.push(lod_rings::LodEventMsg::Data(key, payload, water));
             }
             ClientUpdateEvent::RemoveLod { key, near_takeover } => {
                 lod_rings
@@ -396,6 +899,7 @@ fn remove_region(
     if let Some(root) = unmap_region(regions, roots, map, id) {
         // despawn() removes descendants via ChildOf relationships (Bevy 0.16+).
         commands.entity(root).despawn();
+        commands.queue(move |world: &mut World| super::bricks::prune_region_skipped(world, id));
     }
 }
 
@@ -418,13 +922,13 @@ fn spawn_region_snapshot(
     root: Entity,
     bodies: Entity,
     region: RegionId,
-    data: &GameData,
+    data: &Arc<GameData>,
     map: &mut SimEntityMap,
     local_player: Option<game::ClientId>,
+    voxel_queue: &mut SnapshotVoxelQueue,
     commander: bool,
 ) {
-    let body_scale = *data.body_scale;
-    commands.insert_resource(super::stud::ClientBodyScale(body_scale));
+    let mut chunk_entities: Vec<(Entity, EntityKey, Vec3)> = Vec::new();
     // Every player in the snapshot has a sim camera, but only the local
     // player's may become this window's active Camera3d.
     let local_camera_key = local_player.and_then(|id| data.player_entites.get(&id).copied());
@@ -437,30 +941,24 @@ fn spawn_region_snapshot(
     for (key, _) in data.ecs.entities.iter() {
         // Terrain under the static region root, everything else under the
         // bodies root (see `RegionRoots`).
-        let stud = data.ecs.stud.try_get(key).as_ref().cloned();
+        let is_chunk = data.ecs.chunk.try_get(key).is_some();
         let mut e = commands.spawn((
             SimEntity { region, key },
             Transform::IDENTITY,
             Visibility::default(),
-            ChildOf(if stud.is_some() { root } else { bodies }),
+            ChildOf(if is_chunk { root } else { bodies }),
         ));
         let mut local_position = Vec3::ZERO;
-        let mut has_pose = false;
         if let Some(handle) = data.ecs.rigidbody.try_get(key) {
             if let Some(body) = data.physics.bodies.get(*handle) {
-                has_pose = true;
                 let tf = iso_to_transform(body.position());
                 local_position = tf.translation;
                 e.insert((tf, SimTarget::body(tf.translation, tf.rotation)));
             }
         }
-        if let Some(chunk) = stud {
-            if has_pose {
-                let coords = game::StudChunkCoords::from_origin(local_position.to_array().into());
-                e.insert(super::stud::SimStudChunk { coords, chunk });
-            } else {
-                warn!("bridge: stud chunk {:?} in snapshot has no body pose; skipped", key);
-            }
+        if is_chunk {
+            e.insert((PendingSnapshotVoxels, super::bricks::ChunkBricks::default()));
+            chunk_entities.push((e.id(), key, local_position));
         }
         if let Some(cam) = data.ecs.camera.try_get(key) {
             if Some(key) == local_camera_key && commander {
@@ -469,7 +967,7 @@ fn spawn_region_snapshot(
                 if let Some(handle) = cam.view_matrix {
                     if let Some(body) = data.physics.bodies.get(handle) {
                         let mut tf = iso_to_transform(body.position());
-                        let target = SimTarget::camera_eyed(tf.translation, tf.rotation, body_scale.eye_offset());
+                        let target = SimTarget::camera(tf.translation, tf.rotation);
                         tf.translation = target.goal();
                         e.insert((
                             Camera3d::default(),
@@ -490,10 +988,36 @@ fn spawn_region_snapshot(
         if let Some(mirror) = mirrors.get(&key) {
             e.insert(*mirror);
         }
-        if let Some(body) = data.ecs.stud_body.try_get(key) {
-            e.insert((super::stud::bodies::PendingStudBody(Arc::new(body.model.clone())), super::stud::bodies::StudBodyModel));
+        if let Some(body) = data.ecs.voxel_body.try_get(key) {
+            e.insert((super::voxel_bodies::PendingVoxelBody(Arc::new(body.model.clone())), super::voxel_bodies::VoxelBodyModel));
         }
         map.0.insert((region, key), e.id());
+    }
+
+    // The chunks' voxels are derived + RLE-encoded off the main thread, in
+    // batches that share the snapshot through the `Arc` (no per-chunk clone).
+    // Batches are only QUEUED here; `apply_snapshot_voxels` hands them to the
+    // compute pool a few at a time, nearest to the camera first.
+    let offset = region.world_offset();
+    let offset = Vec3::new(offset[0], offset[1], offset[2]);
+    for batch in chunk_entities.chunks(SNAPSHOT_VOXEL_TASK_CHUNKS) {
+        let center = batch.iter().map(|(_, _, position)| *position).sum::<Vec3>() / batch.len() as f32;
+        voxel_queue.batches.push_back(PendingVoxelBatch {
+            region,
+            root,
+            // Chunk origin -> chunk centre, region-local -> world.
+            center: offset + center + Vec3::splat(game::CHUNK_UNITS as f32 / 2.0),
+            chunks: BatchChunks::Snapshot(
+                Arc::clone(data),
+                batch
+                    .iter()
+                    .map(|(entity, key, position)| {
+                        let t = game::rapier3d::math::Vector::new(position.x, position.y, position.z);
+                        (*entity, *key, game::chunk_coords_from_translation(t))
+                    })
+                    .collect(),
+            ),
+        });
     }
 }
 
@@ -502,13 +1026,17 @@ pub fn drain_region_updates(
     regions: Res<Regions>,
     roots: Res<RegionRoots>,
     mut map: ResMut<SimEntityMap>,
-    mut targets: Query<&mut SimTarget>,
+    mut targets: Query<(
+        &mut SimTarget,
+        &mut Transform,
+        Has<super::bricks::ChunkBricks>,
+    )>,
     local_player: Res<LocalPlayer>,
     mut cursor_policy: ResMut<super::cursor::CursorPolicy>,
+    mut voxel_queue: ResMut<SnapshotVoxelQueue>,
     camera_mode: Option<Res<super::commander::CameraMode>>,
     mut tile_msgs: Option<ResMut<Messages<TileMirrorMsg>>>,
     mut pile_msgs: Option<ResMut<Messages<super::item_piles::ItemPileMsg>>>,
-    body_scale: Res<super::stud::ClientBodyScale>,
 ) {
     let commander = commander(camera_mode.as_deref());
     // Local cameras inserted by Commands this drain, not yet queryable: a
@@ -518,9 +1046,41 @@ pub fn drain_region_updates(
     for (&region, receiver) in regions.0.iter() {
         let root = *roots.0.get(&region).expect("RegionRoots co-populated with Regions");
         let bodies = roots.bodies(region).expect("RegionRoots co-populated with Regions");
+        // Cell terrain loaded this drain: voxels are derived off-thread in the
+        // snapshot queue's batches (nearest first, budgeted per frame).
+        let mut new_terrain: Vec<(Entity, game::Chunk, Vec3)> = Vec::new();
         while let Ok(update) = receiver.try_recv() {
             // Do and Undo both applied: see SimTarget doc comment.
             match update.update_kind {
+                GameDataUpdateKind::AddTerrainChunk(key, iso, chunk) => {
+                    let tf = iso_to_transform(&iso);
+                    let bundle = (
+                        SimEntity { region, key },
+                        tf,
+                        Visibility::default(),
+                        SimTarget::body(tf.translation, tf.rotation),
+                        PendingSnapshotVoxels,
+                        ChildOf(root),
+                    );
+                    // A runtime chunk (`spawn_chunk_safe`) already sent its
+                    // `CreateEntity`: adopt that entity instead of spawning a
+                    // second one, so undo's `RemoveEntity` despawns it.
+                    // `ChunkBricks` only if absent: an already-landed entity
+                    // keeps its list until the new bricks replace it
+                    // (`land_chunk_bricks`), so no brick is orphaned.
+                    let e = if let Some(&existing) = map.0.get(&(region, key)) {
+                        commands
+                            .entity(existing)
+                            .insert(bundle)
+                            .insert_if_new(super::bricks::ChunkBricks::default());
+                        existing
+                    } else {
+                        let e = commands.spawn((bundle, super::bricks::ChunkBricks::default())).id();
+                        map.0.insert((region, key), e);
+                        e
+                    };
+                    new_terrain.push((e, *chunk, tf.translation));
+                }
                 GameDataUpdateKind::CreateEntity(key) => {
                     let e = commands
                         .spawn((
@@ -535,7 +1095,8 @@ pub fn drain_region_updates(
                 }
                 GameDataUpdateKind::RemoveEntity(key) => {
                     if let Some(e) = map.0.remove(&(region, key)) {
-                        commands.entity(e).despawn();
+                        // A terrain chunk's bricks are siblings, not children.
+                        commands.queue(move |world: &mut World| super::bricks::despawn_sim_entity(world, e));
                     } else {
                         warn!("bridge: RemoveEntity for unmapped {:?}", key);
                     }
@@ -546,21 +1107,63 @@ pub fn drain_region_updates(
                         continue;
                     };
                     let tf = iso_to_transform(&iso);
-                    if let Ok(mut target) = targets.get_mut(e) {
+                    if let Ok((mut target, mut transform, terrain_chunk)) = targets.get_mut(e) {
                         target.pos = tf.translation;
                         target.rot = tf.rotation;
+                        // `interpolate_transforms` skips terrain chunks (they
+                        // never move, and there are ~64k of them), so one
+                        // that does get a new pose snaps to it here, and its
+                        // bricks follow.
+                        if terrain_chunk {
+                            let goal = target.goal();
+                            let rot = target.rot;
+                            transform.set_if_neq(Transform { translation: goal, rotation: rot, ..*transform });
+                            commands.queue(move |world: &mut World| super::bricks::move_chunk_bricks(world, e, goal));
+                        }
                     } else {
                         // Entity spawned via Commands earlier this same drain —
                         // not yet queryable. Insert (overwrites on apply), and
                         // start it at its first pose rather than gliding in
-                        // from the region origin.
+                        // from the region origin: a chunk created at runtime
+                        // is keyed for meshing by where its Transform is.
                         let target = if new_cameras.contains(&e) {
-                            SimTarget::camera_eyed(tf.translation, tf.rotation, body_scale.0.eye_offset())
+                            SimTarget::camera(tf.translation, tf.rotation)
                         } else {
                             SimTarget::body(tf.translation, tf.rotation)
                         };
                         let start = Transform { translation: target.goal(), ..tf };
                         commands.entity(e).insert((start, target));
+                    }
+                }
+                GameDataUpdateKind::SetVoxelComponent(key, Some(voxels)) => {
+                    if let Some(&e) = map.0.get(&(region, key)) {
+                        // Newer than any snapshot voxels still in flight.
+                        commands.queue(move |world: &mut World| super::bricks::write_legacy_voxels(world, e, voxels));
+                    } else {
+                        warn!("bridge: SetVoxelComponent for unmapped {:?}", key);
+                    }
+                }
+                GameDataUpdateKind::SetBlocks(key, deltas) => {
+                    let Some(&e) = map.0.get(&(region, key)) else {
+                        warn!("bridge: SetBlocks for unmapped {:?}", key);
+                        continue;
+                    };
+                    // Bricks in hand: edit them (and their mirror). Still
+                    // being derived (or inserted later this drain): buffer
+                    // until they land.
+                    commands.queue(move |world: &mut World| {
+                        super::bricks::apply_block_deltas(world, e, deltas);
+                        super::water::chunk_edited(world, region, e);
+                    });
+                }
+                GameDataUpdateKind::SetVoxelComponent(key, None) => {
+                    if let Some(&e) = map.0.get(&(region, key)) {
+                        commands.queue(move |world: &mut World| {
+                            super::bricks::clear_chunk_voxels(world, e);
+                            super::water::chunk_edited(world, region, e);
+                        });
+                    } else {
+                        warn!("bridge: SetVoxelComponent for unmapped {:?}", key);
                     }
                 }
                 GameDataUpdateKind::AddCameraComponent(key, client_id, proj, iso) => {
@@ -578,7 +1181,7 @@ pub fn drain_region_updates(
                             Visibility::Hidden,
                         ));
                     } else if local_player.0 == Some(client_id) {
-                        let target = SimTarget::camera_eyed(tf.translation, tf.rotation, body_scale.0.eye_offset());
+                        let target = SimTarget::camera(tf.translation, tf.rotation);
                         let tf = Transform { translation: target.goal(), ..tf };
                         new_cameras.push(e);
                         commands.entity(e).insert((
@@ -614,11 +1217,11 @@ pub fn drain_region_updates(
                         continue;
                     };
                     let tf = iso_to_transform(&iso);
-                    if let Ok(mut target) = targets.get_mut(e) {
+                    if let Ok((mut target, _, _)) = targets.get_mut(e) {
                         target.pos = tf.translation;
                         target.rot = tf.rotation;
                     } else {
-                        commands.entity(e).insert(SimTarget::camera_eyed(tf.translation, tf.rotation, body_scale.0.eye_offset()));
+                        commands.entity(e).insert(SimTarget::camera(tf.translation, tf.rotation));
                     }
                 }
                 GameDataUpdateKind::SetEntityKind(key, kind) => {
@@ -645,7 +1248,7 @@ pub fn drain_region_updates(
                         }
                     }
                 }
-                // Plain per-box / per-tile writes, undo included: forwarded to the
+                // Plain per-tile writes, undo included: forwarded to the
                 // fortress tools' tile mirror.
                 GameDataUpdateKind::SetDesignations(changes) => {
                     if let Some(msgs) = tile_msgs.as_mut() {
@@ -655,6 +1258,12 @@ pub fn drain_region_updates(
                 GameDataUpdateKind::SetConstructed(changes) => {
                     if let Some(msgs) = tile_msgs.as_mut() {
                         msgs.write(TileMirrorMsg::Constructed { region, changes });
+                    }
+                }
+                // The terrain halo, for walk planning past the region's edge.
+                kind @ (GameDataUpdateKind::SetHaloTerrain(_) | GameDataUpdateKind::SetHaloGround(_)) => {
+                    if let Some(msg) = tile_msgs.as_mut().and_then(|_| TileMirrorMsg::from_update(region, &kind)) {
+                        tile_msgs.as_mut().unwrap().write(msg);
                     }
                 }
                 // Item piles (`game::item_piles`), drawn by `item_piles`.
@@ -679,72 +1288,6 @@ pub fn drain_region_updates(
                         msgs.write(super::item_piles::ItemPileMsg::Landed { region, flights });
                     }
                 }
-                GameDataUpdateKind::AddStudChunk(key, coords, chunk) => {
-                    // Adopt the entity a runtime `CreateEntity` already made
-                    // (so undo's `RemoveEntity` despawns it), else spawn one. Stud chunks
-                    // live under the terrain root and never move, so the pose
-                    // is the chunk origin.
-                    let origin = coords.origin();
-                    let bundle = (
-                        SimEntity { region, key },
-                        Transform::from_xyz(origin.x, origin.y, origin.z),
-                        Visibility::default(),
-                        super::stud::SimStudChunk { coords, chunk: *chunk },
-                        ChildOf(root),
-                    );
-                    if let Some(&existing) = map.0.get(&(region, key)) {
-                        commands.entity(existing).insert(bundle);
-                    } else {
-                        let e = commands.spawn(bundle).id();
-                        map.0.insert((region, key), e);
-                    }
-                }
-                GameDataUpdateKind::SetStudChunk(key, chunk) => {
-                    // Queued (not a query): the entity's `SimStudChunk` may be
-                    // inserted by Commands earlier in this same drain.
-                    match map.0.get(&(region, key)) {
-                        Some(&e) => commands.queue(move |world: &mut World| {
-                            match world.get_mut::<super::stud::SimStudChunk>(e) {
-                                Some(mut mirror) => mirror.chunk = *chunk,
-                                None => warn!("bridge: SetStudChunk for unmirrored {:?}", key),
-                            }
-                        }),
-                        None => warn!("bridge: SetStudChunk for unmapped {:?}", key),
-                    }
-                }
-                // Detached bricks (`game::stud_body`): meshed by `stud::bodies` into
-                // children that ride the entity's interpolated pose;
-                // `RemoveEntity` despawns them with it. Starts at the pose
-                // rather than gliding in.
-                GameDataUpdateKind::AddStudBody(key, iso, model) => {
-                    let tf = iso_to_transform(&iso);
-                    let bundle = (
-                        tf,
-                        SimTarget::body(tf.translation, tf.rotation),
-                        super::stud::bodies::PendingStudBody(Arc::new(*model)),
-                        super::stud::bodies::StudBodyModel,
-                    );
-                    if let Some(&e) = map.0.get(&(region, key)) {
-                        commands.entity(e).insert(bundle);
-                    } else {
-                        let e = commands
-                            .spawn((SimEntity { region, key }, Visibility::default(), ChildOf(bodies), bundle))
-                            .id();
-                        map.0.insert((region, key), e);
-                    }
-                }
-                // The stud halo (render-only mirror): for the stud index (edge
-                // culling) and the tile mirror. Queued so it lands after this
-                // region's snapshot message.
-                kind @ (GameDataUpdateKind::SetStudHalo(_) | GameDataUpdateKind::SetStudHaloGround(_)) => {
-                    if let Some(msg) = super::stud::world::StudWorldMsg::from_update(region, &kind) {
-                        commands.queue(move |world: &mut World| {
-                            if let Some(mut msgs) = world.get_resource_mut::<Messages<super::stud::world::StudWorldMsg>>() {
-                                msgs.write(msg);
-                            }
-                        });
-                    }
-                }
                 GameDataUpdateKind::SetFreeCam(client_id, enabled) => {
                     // Only the local player's toggle may grab this window's cursor.
                     if local_player.0 != Some(client_id) {
@@ -767,6 +1310,43 @@ pub fn drain_region_updates(
                         None => { commands.entity(e).remove::<super::rigs::SimAnimator>(); }
                     }
                 }
+                // Detached terrain (`game::voxel_body`): its model is meshed
+                // into brick children by `voxel_bodies`, which ride the
+                // entity's interpolated pose; `RemoveEntity` despawns them
+                // with it. Starts at the pose rather than gliding in.
+                GameDataUpdateKind::AddVoxelBody(key, iso, model) => {
+                    let tf = iso_to_transform(&iso);
+                    let bundle = (
+                        tf,
+                        SimTarget::body(tf.translation, tf.rotation),
+                        super::voxel_bodies::PendingVoxelBody(Arc::new(*model)),
+                        super::voxel_bodies::VoxelBodyModel,
+                    );
+                    if let Some(&e) = map.0.get(&(region, key)) {
+                        commands.entity(e).insert(bundle);
+                    } else {
+                        let e = commands
+                            .spawn((SimEntity { region, key }, Visibility::default(), ChildOf(bodies), bundle))
+                            .id();
+                        map.0.insert((region, key), e);
+                    }
+                }
+            }
+        }
+        if !new_terrain.is_empty() {
+            // Region-local centroid -> world, chunk origin -> centre.
+            let offset = region.world_offset();
+            let offset = Vec3::new(offset[0], offset[1], offset[2]);
+            for batch in new_terrain.chunks(SNAPSHOT_VOXEL_TASK_CHUNKS) {
+                let center = batch.iter().map(|(_, _, p)| *p).sum::<Vec3>() / batch.len() as f32;
+                voxel_queue.batches.push_back(PendingVoxelBatch {
+                    region,
+                    root,
+                    center: offset + center + Vec3::splat(game::CHUNK_UNITS as f32 / 2.0),
+                    chunks: BatchChunks::Owned(
+                        batch.iter().map(|(e, chunk, _)| (*e, chunk.clone())).collect(),
+                    ),
+                });
             }
         }
     }
@@ -889,15 +1469,16 @@ mod tests {
             .init_resource::<crate::renderer::slint_overlay::UiUpdates>()
             .init_resource::<crate::renderer::collider_debug::DebugColliderLines>()
             .init_resource::<lod_rings::LodRings>()
+            .init_resource::<SnapshotVoxelQueue>()
             .init_resource::<crate::renderer::cursor::CursorPolicy>()
             .init_resource::<RetiredRegionRoots>()
-            .init_resource::<crate::renderer::stud::ClientBodyScale>()
             .add_systems(
                 PreUpdate,
                 (
                     drain_client_updates,
                     despawn_retired_regions,
                     drain_region_updates,
+                    apply_snapshot_voxels,
                 )
                     .chain(),
             );
@@ -913,113 +1494,6 @@ mod tests {
             .send(ClientUpdateEvent::NewRegion(region_id, (*rb.data).clone(), update_recv))
             .unwrap();
         (app, client_send, update_send, region_id)
-    }
-
-    /// `AddStudChunk` then `SetStudChunk` drained in ONE call: the set must
-    /// land on the mirror even though the add is still deferred Commands.
-    #[test]
-    fn set_stud_chunk_in_same_drain_as_add() {
-        use crate::renderer::stud::SimStudChunk;
-        let (mut app, _client, updates, region) = test_app();
-        app.update();
-        let key = key(31);
-        let brick = |min| game::StudBrick { min, shape: game::StudShape::Filler { size: [1, 1, 1] }, material: 0, data: 0 };
-        let first = game::StudChunk::new([brick([0, 0, 0])]).unwrap();
-        let second = game::StudChunk::new([brick([1, 0, 0]), brick([2, 0, 0])]).unwrap();
-        let coords = game::StudChunkCoords { x: 1, y: 0, z: 2 };
-        let send = |kind| updates.send(GameDataUpdate::new(GameDataTransactionKind::Do, kind)).unwrap();
-        send(GameDataUpdateKind::AddStudChunk(key, coords, Box::new(first)));
-        send(GameDataUpdateKind::SetStudChunk(key, Box::new(second.clone())));
-        app.update();
-        app.update();
-        let e = *app.world().resource::<SimEntityMap>().0.get(&(region, key)).unwrap();
-        let mirror = app.world().get::<SimStudChunk>(e).expect("mirror");
-        assert_eq!(mirror.chunk, second);
-        assert_eq!(mirror.coords, coords);
-    }
-
-    /// The stud halo's render updates reach the stud index as messages (never as
-    /// entities), and a stud body's model is tagged for meshing on its entity.
-    #[test]
-    fn stud_halo_updates_and_stud_bodies_reach_the_stud_systems() {
-        use crate::renderer::stud::bodies::PendingStudBody;
-        use crate::renderer::stud::world::{StudWorld, StudWorldMsg};
-        let (mut app, _client, updates, region) = test_app();
-        app.add_message::<StudWorldMsg>().init_resource::<StudWorld>();
-        // Stand-in for the stud plugin's index system.
-        app.add_systems(Update, |mut w: ResMut<StudWorld>, mut msgs: MessageReader<StudWorldMsg>| {
-            for m in msgs.read() {
-                w.apply(m);
-            }
-        });
-        app.update();
-        let count = |app: &mut App| app.world_mut().query::<Entity>().iter(app.world()).count();
-        let entities_before = count(&mut app);
-        let brick = game::StudBrick::filler([0, 0, 0], [1, 1, 1], 4);
-        let chunk = game::StudChunk::new([brick]).unwrap();
-        let at = game::WorldChunkPos::from_local(region, [-1, 0, 0]);
-        let send = |kind| updates.send(GameDataUpdate::new(GameDataTransactionKind::Do, kind)).unwrap();
-        // Before the region's snapshot message the index drops it; the test app's
-        // region has none, so announce it the way a snapshot does.
-        app.world_mut().resource_mut::<Messages<StudWorldMsg>>().write(StudWorldMsg::Region {
-            region,
-            ground: Default::default(),
-            halo: Vec::new(),
-            halo_ground: Vec::new(),
-        });
-        send(GameDataUpdateKind::SetStudHalo(vec![(at, Some(chunk.clone()))]));
-        for _ in 0..3 {
-            app.update();
-        }
-        assert_eq!(app.world().resource::<StudWorld>().halo_chunk(at), Some(&chunk));
-        assert_eq!(count(&mut app), entities_before, "a halo chunk is data: nothing is spawned to draw");
-        send(GameDataUpdateKind::SetStudHalo(vec![(at, None)]));
-        for _ in 0..3 {
-            app.update();
-        }
-        assert_eq!(app.world().resource::<StudWorld>().halo_chunk(at), None);
-
-        let key = key(32);
-        let model = game::stud_body::StudModel {
-            bricks: vec![game::stud_body::StudModelBrick { min: [0, 0, 0], shape: brick.shape, material: 4, data: 0 }],
-        };
-        send(GameDataUpdateKind::AddStudBody(key, game::Pose::identity(), Box::new(model.clone())));
-        app.update();
-        app.update();
-        let e = *app.world().resource::<SimEntityMap>().0.get(&(region, key)).unwrap();
-        assert_eq!(*app.world().get::<PendingStudBody>(e).expect("tagged for meshing").0, model);
-        assert!(app.world().get::<crate::renderer::stud::bodies::StudBodyModel>(e).is_some(), "no placeholder box");
-    }
-
-    /// The runtime spawn path: `CreateEntity` then `AddStudChunk` for the same
-    /// key make ONE sim entity, under the terrain root; undo's `RemoveEntity`
-    /// despawns it.
-    #[test]
-    fn runtime_stud_chunk_adopts_the_created_entity_and_undo_despawns_it() {
-        use crate::renderer::stud::SimStudChunk;
-        let (mut app, _client, updates, region) = test_app();
-        app.update();
-        let k = key(21);
-        let coords = game::StudChunkCoords { x: 1, y: -1, z: 2 };
-        let chunk = game::StudChunk::new([game::StudBrick::filler([0, 0, 0], [1, 1, 1], 4)]).unwrap();
-        let send = |kind, how| updates.send(GameDataUpdate::new(how, kind)).unwrap();
-        send(GameDataUpdateKind::CreateEntity(k), GameDataTransactionKind::Do);
-        send(GameDataUpdateKind::AddStudChunk(k, coords, Box::new(chunk.clone())), GameDataTransactionKind::Do);
-        app.update();
-        app.update();
-        let e = *app.world().resource::<SimEntityMap>().0.get(&(region, k)).expect("chunk mapped");
-        let mut sims = app.world_mut().query::<&SimEntity>();
-        assert_eq!(sims.iter(app.world()).filter(|s| s.key == k).count(), 1, "one sim entity for the key");
-        assert_eq!(app.world().get::<SimStudChunk>(e).map(|c| (c.coords, c.chunk.clone())), Some((coords, chunk)));
-        let root = *app.world().resource::<RegionRoots>().0.get(&region).unwrap();
-        assert_eq!(app.world().get::<ChildOf>(e).map(ChildOf::parent), Some(root), "terrain hangs off the terrain root");
-        let origin = coords.origin();
-        assert_eq!(app.world().get::<Transform>(e).unwrap().translation, Vec3::new(origin.x, origin.y, origin.z));
-
-        send(GameDataUpdateKind::RemoveEntity(k), GameDataTransactionKind::Undo);
-        app.update();
-        assert!(app.world().resource::<SimEntityMap>().0.get(&(region, k)).is_none());
-        assert!(app.world().get_entity(e).is_err(), "sim entity despawned");
     }
 
     fn test_proj() -> game::Perspective3 {
@@ -1176,6 +1650,421 @@ mod tests {
         let e1 = *map.0.get(&(region_id, k1)).unwrap();
         assert!(app.world().entity(e0).contains::<SimKind>());
         assert!(app.world().entity(e1).contains::<SimKind>());
+    }
+
+    /// A snapshot with one terrain chunk; returns the chunk's sim key and the
+    /// voxels its first brick must eventually hold.
+    fn chunk_snapshot() -> (game::GameData, EntityKey, VoxelData) {
+        let mut rb = Rollback::new(None);
+        rb.new_transaction();
+        let chunk = game::Chunk::flat_floor(8);
+        let expected = VoxelData::new(chunk.brick([0; 3]).voxels());
+        let key = rb.create_mesh(game::ChunkCoords::new(0, 0, 0), chunk);
+        ((*rb.data).clone(), key, expected)
+    }
+
+    /// The bricks of chunk entity `chunk` (empty before they land).
+    fn bricks_of(app: &App, chunk: Entity) -> Vec<Entity> {
+        app.world().get::<crate::renderer::bricks::ChunkBricks>(chunk).map(|b| b.0.clone()).unwrap_or_default()
+    }
+
+    /// The voxels of brick `local` of chunk entity `chunk`, if it exists.
+    fn brick_voxels(app: &App, chunk: Entity, local: [u8; 3]) -> Option<VoxelData> {
+        bricks_of(app, chunk)
+            .into_iter()
+            .find(|&b| app.world().get::<crate::renderer::bricks::BrickOf>(b).is_some_and(|o| o.local == local))
+            .and_then(|b| app.world().get::<VoxelData>(b).cloned())
+    }
+
+    fn wait_for(app: &mut App, mut done: impl FnMut(&App) -> bool) -> bool {
+        for _ in 0..500 {
+            app.update();
+            if done(app) {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        false
+    }
+
+    /// Voxel derivation left `drain_client_updates` (it was a 0.5-2 s frame per
+    /// region): the chunk entity exists at once, flagged pending, and its
+    /// voxels land a few frames later from the task pool.
+    #[test]
+    fn snapshot_chunk_voxels_arrive_off_thread_and_clear_the_marker() {
+        let (mut app, client) = app_shell();
+        let (_update_send, update_recv) = crossbeam::channel::unbounded();
+        let (data, key, expected) = chunk_snapshot();
+        let region_id = RegionCoords::new(0, 0);
+        client.send(ClientUpdateEvent::NewRegion(region_id, data, update_recv)).unwrap();
+        app.update();
+
+        let e = *app.world().resource::<SimEntityMap>().0.get(&(region_id, key)).expect("chunk mapped");
+        assert!(
+            wait_for(&mut app, |app| !bricks_of(app, e).is_empty()),
+            "snapshot bricks never arrived"
+        );
+        assert_eq!(brick_voxels(&app, e, [0; 3]), Some(expected));
+        assert!(!app.world().entity(e).contains::<PendingSnapshotVoxels>());
+        assert!(!app.world().entity(e).contains::<VoxelData>(), "voxels live on the bricks");
+        let mut tasks = app.world_mut().query::<&SnapshotVoxelTask>();
+        assert_eq!(tasks.iter(app.world()).count(), 0, "finished task entities are despawned");
+    }
+
+    #[test]
+    fn nearest_batch_is_fifo_without_a_camera_and_nearest_first_with_one() {
+        let centers = [Vec3::new(500.0, 0.0, 0.0), Vec3::new(10.0, 0.0, 10.0), Vec3::new(-300.0, 40.0, 0.0)];
+        assert_eq!(nearest_batch(centers.iter().copied(), None), Some(0), "no camera yet: arrival order");
+        assert_eq!(nearest_batch(centers.iter().copied(), Some(Vec3::ZERO)), Some(1));
+        assert_eq!(nearest_batch(centers.iter().copied(), Some(Vec3::new(-290.0, 40.0, 0.0))), Some(2));
+        assert_eq!(nearest_batch(std::iter::empty(), Some(Vec3::ZERO)), None);
+    }
+
+    /// A join delivers every region within a second; their voxel batches must
+    /// not all hit the FIFO compute pool at once, or the first mesh tasks queue
+    /// behind hundreds of them (first terrain moved 0.9 s -> 1.9 s when wire
+    /// compression made the regions arrive together).
+    #[test]
+    fn snapshot_voxel_tasks_are_capped_and_every_chunk_still_gets_voxels() {
+        let (mut app, client) = app_shell();
+        let (_update_send, update_recv) = crossbeam::channel::unbounded();
+        let mut rb = Rollback::new(None);
+        rb.new_transaction();
+        let chunk_count = SNAPSHOT_VOXEL_TASK_CHUNKS * (MAX_OUTSTANDING_SNAPSHOT_VOXEL_TASKS + 3) + 1;
+        let keys: Vec<EntityKey> = (0..chunk_count)
+            .map(|i| rb.create_mesh(game::ChunkCoords::new(i % 32, (i / 1024) as i32, (i / 32) % 32), game::Chunk::flat_floor(8)))
+            .collect();
+        let region_id = RegionCoords::new(0, 0);
+        client
+            .send(ClientUpdateEvent::NewRegion(region_id, (*rb.data).clone(), update_recv))
+            .unwrap();
+
+        let mut peak = 0;
+        let mut done = false;
+        for _ in 0..2000 {
+            app.update();
+            let mut tasks = app.world_mut().query::<&SnapshotVoxelTask>();
+            peak = peak.max(tasks.iter(app.world()).count());
+            let map = app.world().resource::<SimEntityMap>();
+            if keys.iter().all(|k| map.0.get(&(region_id, *k)).is_some_and(|&e| !bricks_of(&app, e).is_empty())) {
+                done = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(done, "not every chunk received its snapshot voxels");
+        assert!(peak >= 1);
+        assert!(
+            peak <= MAX_OUTSTANDING_SNAPSHOT_VOXEL_TASKS,
+            "{peak} voxel tasks outstanding at once (cap {MAX_OUTSTANDING_SNAPSHOT_VOXEL_TASKS})"
+        );
+    }
+
+    /// An edit that reaches the bridge before the derived snapshot voxels do is
+    /// NEWER than them; the late result must be dropped, not applied on top.
+    #[test]
+    fn incremental_voxel_update_beats_the_late_snapshot_result() {
+        let (mut app, client) = app_shell();
+        let (update_send, update_recv) = crossbeam::channel::unbounded();
+        let (data, key, snapshot_voxels) = chunk_snapshot();
+        let region_id = RegionCoords::new(0, 0);
+        let edited = vec![Voxel::new(game::BlockId(9)); game::BRICK_VOXEL_COUNT];
+        assert_ne!(VoxelData::new(&edited), snapshot_voxels);
+        // Same frame as the snapshot: independent of how fast the task runs.
+        client.send(ClientUpdateEvent::NewRegion(region_id, data, update_recv)).unwrap();
+        update_send
+            .send(GameDataUpdate::new(
+                GameDataTransactionKind::Do,
+                GameDataUpdateKind::SetVoxelComponent(key, Some(edited.clone())),
+            ))
+            .unwrap();
+        app.update();
+
+        let e = *app.world().resource::<SimEntityMap>().0.get(&(region_id, key)).expect("chunk mapped");
+        // Let the task finish and the queue drain, then look at what survived.
+        let mut drained = false;
+        for _ in 0..500 {
+            app.update();
+            let mut tasks = app.world_mut().query::<&SnapshotVoxelTask>();
+            if tasks.iter(app.world()).count() == 0 {
+                drained = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(drained, "the snapshot voxel task never finished");
+        app.update(); // one more frame: anything it queued has been applied or dropped
+        assert!(!app.world().entity(e).contains::<PendingSnapshotVoxels>());
+        if game::BRICKS_PER_CHUNK_EDGE == 1 {
+            assert_eq!(brick_voxels(&app, e, [0; 3]), Some(VoxelData::new(&edited)));
+        } else {
+            // A dense write is one brick's worth: a chunk of many bricks
+            // ignores it (`write_legacy_voxels`), and the snapshot lands.
+            // Edits racing the snapshot there are `SetBlocks`, covered by
+            // `set_blocks_before_the_snapshot_voxels_is_applied_on_top`.
+            assert_eq!(brick_voxels(&app, e, [0; 3]), Some(snapshot_voxels));
+        }
+    }
+
+    /// `SetBlocks` for chunk block 0: air, and a chiselled block 1 when the
+    /// chunk has one.
+    fn set_blocks(key: EntityKey) -> (GameDataUpdate, Vec<game::BlockDelta>) {
+        let air = game::Block::new(game::BlockId::AIR);
+        let stone = game::Block::new(game::BlockId(2));
+        let deltas = vec![
+            game::BlockDelta { index: game::BlockIndex::from_linear(0), block: air, chisel: None },
+            game::BlockDelta {
+                index: game::BlockIndex::from_linear(1),
+                block: stone,
+                chisel: Some(game::ChiselData::cuboid(game::BlockId(2), [0, 0, 0], [16, 8, 16])),
+            },
+        ];
+        let update = GameDataUpdate::new(GameDataTransactionKind::Do, GameDataUpdateKind::SetBlocks(key, deltas.clone()));
+        (update, deltas)
+    }
+
+    /// The voxels `chunk`'s first brick holds after `deltas`, by the sim's own
+    /// derivation.
+    fn edited_voxels(chunk: &game::Chunk, deltas: &[game::BlockDelta]) -> VoxelData {
+        let mut chunk = chunk.clone();
+        for d in deltas {
+            chunk.blocks.set(d.index, d.block);
+            match &d.chisel {
+                Some(c) => {
+                    chunk.chisel.insert(d.index, c.clone());
+                }
+                None => {
+                    chunk.chisel.remove(&d.index);
+                }
+            }
+        }
+        VoxelData::new(chunk.brick([0; 3]).voxels())
+    }
+
+    #[test]
+    fn set_blocks_edits_landed_voxels() {
+        let (mut app, client) = app_shell();
+        let (update_send, update_recv) = crossbeam::channel::unbounded();
+        let (data, key, _) = chunk_snapshot();
+        let chunk = data.ecs.chunk.get(key).clone();
+        let region_id = RegionCoords::new(0, 0);
+        client.send(ClientUpdateEvent::NewRegion(region_id, data, update_recv)).unwrap();
+        app.update();
+        let e = *app.world().resource::<SimEntityMap>().0.get(&(region_id, key)).expect("chunk mapped");
+        assert!(
+            wait_for(&mut app, |app| !bricks_of(app, e).is_empty()),
+            "snapshot bricks never arrived"
+        );
+        let (update, deltas) = set_blocks(key);
+        update_send.send(update).unwrap();
+        app.update();
+        assert_eq!(brick_voxels(&app, e, [0; 3]), Some(edited_voxels(&chunk, &deltas)));
+    }
+
+    /// Past `BrickEditPolicy::inline_max_bricks` the bricks re-derive on the
+    /// compute pool; the result still lands, and a newer edit supersedes an
+    /// older one still running.
+    #[test]
+    fn set_blocks_off_thread_lands_the_latest_edit() {
+        let (mut app, client) = app_shell();
+        app.insert_resource(crate::renderer::bricks::BrickEditPolicy { inline_max_bricks: 0 });
+        let (update_send, update_recv) = crossbeam::channel::unbounded();
+        let (data, key, _) = chunk_snapshot();
+        let chunk = data.ecs.chunk.get(key).clone();
+        let region_id = RegionCoords::new(0, 0);
+        client.send(ClientUpdateEvent::NewRegion(region_id, data, update_recv)).unwrap();
+        app.update();
+        let e = *app.world().resource::<SimEntityMap>().0.get(&(region_id, key)).expect("chunk mapped");
+        assert!(wait_for(&mut app, |app| !bricks_of(app, e).is_empty()), "snapshot bricks never arrived");
+        let (first, mut deltas) = set_blocks(key);
+        let air = game::Block::new(game::BlockId::AIR);
+        let second = game::BlockDelta { index: game::BlockIndex::from_linear(1), block: air, chisel: None };
+        deltas.push(second.clone());
+        update_send.send(first).unwrap();
+        update_send
+            .send(GameDataUpdate::new(GameDataTransactionKind::Do, GameDataUpdateKind::SetBlocks(key, vec![second])))
+            .unwrap();
+        let want = edited_voxels(&chunk, &deltas);
+        assert!(
+            wait_for(&mut app, |app| brick_voxels(app, e, [0; 3]).as_ref() == Some(&want)
+                && !app.world().entity(e).contains::<crate::renderer::bricks::BrickEdits>()),
+            "the off-thread edit never landed"
+        );
+    }
+
+    /// An edit that beats the off-thread snapshot voxels is buffered and laid
+    /// over them when they land, not lost.
+    #[test]
+    fn set_blocks_before_the_snapshot_voxels_is_applied_on_top() {
+        let (mut app, client) = app_shell();
+        let (update_send, update_recv) = crossbeam::channel::unbounded();
+        let (data, key, _) = chunk_snapshot();
+        let chunk = data.ecs.chunk.get(key).clone();
+        let region_id = RegionCoords::new(0, 0);
+        client.send(ClientUpdateEvent::NewRegion(region_id, data, update_recv)).unwrap();
+        let (update, deltas) = set_blocks(key);
+        update_send.send(update).unwrap();
+        app.update();
+        let e = *app.world().resource::<SimEntityMap>().0.get(&(region_id, key)).expect("chunk mapped");
+        assert!(
+            wait_for(&mut app, |app| !bricks_of(app, e).is_empty()),
+            "snapshot bricks never arrived"
+        );
+        assert!(!app.world().entity(e).contains::<PendingBlockDeltas>());
+        assert_eq!(brick_voxels(&app, e, [0; 3]), Some(edited_voxels(&chunk, &deltas)));
+    }
+
+    /// A seam edit dirties the brick across the seam in the OTHER sim chunk:
+    /// its boundary zone toward the edit changed, and the grid finds it.
+    #[test]
+    fn edit_on_chunk_seam_remeshes_neighbour_brick() {
+        use crate::renderer::meshing::queue::{mark_remesh_dirty, ChunkGrid, ChunkKey, FrameUploads, RemeshQueue};
+        let (mut app, client) = app_shell();
+        app.init_resource::<ChunkGrid>()
+            .init_resource::<RemeshQueue>()
+            .init_resource::<FrameUploads>()
+            .add_systems(Update, mark_remesh_dirty);
+        let (update_send, update_recv) = crossbeam::channel::unbounded();
+        let mut rb = Rollback::new(None);
+        rb.new_transaction();
+        let a = rb.create_mesh(game::ChunkCoords::new(0, 0, 0), game::Chunk::flat_floor(8));
+        let b = rb.create_mesh(game::ChunkCoords::new(1, 0, 0), game::Chunk::flat_floor(8));
+        let region_id = RegionCoords::new(0, 0);
+        client.send(ClientUpdateEvent::NewRegion(region_id, (*rb.data).clone(), update_recv)).unwrap();
+        app.update();
+        let entity = |app: &App, k| *app.world().resource::<SimEntityMap>().0.get(&(region_id, k)).unwrap();
+        let (ea, eb) = (entity(&app, a), entity(&app, b));
+        assert!(
+            wait_for(&mut app, |app| [ea, eb].iter().all(|&c| {
+                let bricks = bricks_of(app, c);
+                !bricks.is_empty() && bricks.iter().all(|&br| app.world().entity(br).contains::<ChunkKey>())
+            })),
+            "bricks never landed"
+        );
+        app.update();
+        app.world_mut().resource_mut::<RemeshQueue>().dirty.clear();
+
+        // The block of chunk `a` on its +x face, solid in a flat floor.
+        let seam = game::BlockIndex::from_xyz(game::CHUNK_BLOCKS - 1, 0, 0);
+        let air = game::Block::new(game::BlockId::AIR);
+        update_send
+            .send(GameDataUpdate::new(
+                GameDataTransactionKind::Do,
+                GameDataUpdateKind::SetBlocks(a, vec![game::BlockDelta { index: seam, block: air, chisel: None }]),
+            ))
+            .unwrap();
+        app.update();
+        let neighbour = bricks_of(&app, eb)
+            .into_iter()
+            .find(|&br| app.world().get::<crate::renderer::bricks::BrickOf>(br).is_some_and(|o| o.local[0] == 0))
+            .expect("b's -x brick");
+        assert!(
+            app.world().resource::<RemeshQueue>().dirty.contains_key(&neighbour),
+            "the brick across the seam must remesh"
+        );
+    }
+
+    /// The runtime spawn path (`spawn_chunk_safe`): `CreateEntity` then
+    /// `AddTerrainChunk` for the same key make ONE sim entity whose bricks
+    /// land; undo's `RemoveEntity` despawns it and its bricks.
+    #[test]
+    fn runtime_chunk_spawn_and_undo_despawn_its_bricks() {
+        let (mut app, _client, updates, region_id) = test_app();
+        app.update();
+        let k = key(21);
+        let pose = game::Pose::translation(game::CHUNK_UNITS as f32, 0.0, 0.0);
+        updates.send(GameDataUpdate::new(GameDataTransactionKind::Do, GameDataUpdateKind::CreateEntity(k))).unwrap();
+        updates
+            .send(GameDataUpdate::new(
+                GameDataTransactionKind::Do,
+                GameDataUpdateKind::AddTerrainChunk(k, pose, Box::new(game::Chunk::flat_floor(8))),
+            ))
+            .unwrap();
+        app.update();
+        let e = *app.world().resource::<SimEntityMap>().0.get(&(region_id, k)).expect("chunk mapped");
+        assert!(wait_for(&mut app, |app| !bricks_of(app, e).is_empty()), "bricks never landed");
+        let mut sims = app.world_mut().query_filtered::<&SimEntity, Without<crate::renderer::bricks::BrickOf>>();
+        assert_eq!(sims.iter(app.world()).filter(|s| s.key == k).count(), 1, "one sim entity for the key");
+        let bricks = bricks_of(&app, e);
+        assert_eq!(bricks.len(), game::BRICKS_PER_CHUNK_EDGE.pow(2), "the floor's brick layer");
+        for &br in &bricks {
+            let of = app.world().get::<crate::renderer::bricks::BrickOf>(br).expect("BrickOf");
+            assert_eq!(of.chunk, e);
+            assert!(app.world().entity(br).contains::<VoxelData>());
+            let x = app.world().get::<Transform>(br).unwrap().translation.x;
+            assert_eq!(x, game::CHUNK_UNITS as f32 + (of.local[0] as usize * game::BRICK_VOXELS) as f32);
+        }
+        assert!(!app.world().entity(e).contains::<VoxelData>(), "the sim entity holds no voxels");
+
+        updates.send(GameDataUpdate::new(GameDataTransactionKind::Undo, GameDataUpdateKind::RemoveEntity(k))).unwrap();
+        app.update();
+        assert!(app.world().resource::<SimEntityMap>().0.get(&(region_id, k)).is_none());
+        assert!(app.world().get_entity(e).is_err(), "sim entity despawned");
+        for br in bricks {
+            assert!(app.world().get_entity(br).is_err(), "brick despawned");
+        }
+    }
+
+    /// `AddTerrainChunk` again for a chunk whose bricks already landed: the
+    /// old bricks stay listed until the new ones replace them — none orphaned.
+    #[test]
+    fn re_added_chunk_replaces_its_bricks_without_orphans() {
+        let (mut app, _client, updates, region_id) = test_app();
+        app.update();
+        let k = key(23);
+        let add = |chunk: game::Chunk| {
+            GameDataUpdate::new(
+                GameDataTransactionKind::Do,
+                GameDataUpdateKind::AddTerrainChunk(k, game::Pose::identity(), Box::new(chunk)),
+            )
+        };
+        updates.send(add(game::Chunk::flat_floor(8))).unwrap();
+        app.update();
+        let e = *app.world().resource::<SimEntityMap>().0.get(&(region_id, k)).expect("chunk mapped");
+        assert!(wait_for(&mut app, |app| !bricks_of(app, e).is_empty()), "bricks never landed");
+        let old = bricks_of(&app, e);
+        let stone = game::Chunk::uniform(game::Block::new(game::BlockId(2)));
+        updates.send(add(stone.clone())).unwrap();
+        let want = VoxelData::new(stone.brick([0; 3]).voxels());
+        assert!(wait_for(&mut app, |app| brick_voxels(app, e, [0; 3]).as_ref() == Some(&want)), "re-add never landed");
+        for b in old {
+            assert!(app.world().get_entity(b).is_err(), "old brick orphaned");
+        }
+        let mut owned = app.world_mut().query::<&crate::renderer::bricks::BrickOf>();
+        let count = owned.iter(app.world()).filter(|o| o.chunk == e).count();
+        assert_eq!(count, bricks_of(&app, e).len(), "every brick of the chunk is listed");
+    }
+
+    /// A terrain chunk is never interpolated, so a new pose snaps it — and
+    /// its bricks, which are siblings, follow.
+    #[test]
+    fn chunk_pose_moves_its_bricks() {
+        let (mut app, _client, updates, region_id) = test_app();
+        app.update();
+        let k = key(22);
+        updates
+            .send(GameDataUpdate::new(
+                GameDataTransactionKind::Do,
+                GameDataUpdateKind::AddTerrainChunk(k, game::Pose::identity(), Box::new(game::Chunk::flat_floor(8))),
+            ))
+            .unwrap();
+        app.update();
+        let e = *app.world().resource::<SimEntityMap>().0.get(&(region_id, k)).expect("chunk mapped");
+        assert!(wait_for(&mut app, |app| !bricks_of(app, e).is_empty()), "bricks never landed");
+        let to = Vec3::new(0.0, game::CHUNK_UNITS as f32, 0.0);
+        updates
+            .send(GameDataUpdate::new(
+                GameDataTransactionKind::Do,
+                GameDataUpdateKind::SetEntityPosition(k, game::Pose::translation(to.x, to.y, to.z)),
+            ))
+            .unwrap();
+        app.update();
+        assert_eq!(app.world().get::<Transform>(e).unwrap().translation, to);
+        for br in bricks_of(&app, e) {
+            let local = app.world().get::<crate::renderer::bricks::BrickOf>(br).unwrap().local;
+            let want = crate::renderer::bricks::brick_translation(to, local);
+            assert_eq!(app.world().get::<Transform>(br).unwrap().translation, want);
+        }
     }
 
     #[test]
@@ -1562,6 +2451,7 @@ mod tests {
             .init_resource::<crate::renderer::slint_overlay::UiUpdates>()
             .init_resource::<crate::renderer::collider_debug::DebugColliderLines>()
             .init_resource::<lod_rings::LodRings>()
+            .init_resource::<SnapshotVoxelQueue>()
             .add_systems(Update, drain_client_updates);
 
         client
@@ -1578,5 +2468,76 @@ mod tests {
         assert_eq!(status.home_region, Some(RegionCoords::new(2, -1)));
         assert_eq!(status.viewer_region, Some(RegionCoords::new(2, 0)));
         assert_eq!(status.connection, ConnectionState::Ready);
+    }
+}
+
+#[cfg(test)]
+mod voxel_data_tests {
+    use super::VoxelData;
+    use game::{BlockId, Voxel, BRICK_VOXEL_COUNT};
+
+    fn dense(f: impl Fn(usize) -> u16) -> Vec<Voxel> {
+        (0..BRICK_VOXEL_COUNT).map(|i| Voxel::new(BlockId(f(i)))).collect()
+    }
+
+    /// The contract the mesher depends on: decode(new(v)) == v, bit for bit.
+    #[test]
+    fn round_trips_exactly() {
+        for case in [
+            dense(|_| 0),                                   // all air: 1 run
+            dense(|_| 7),                                   // uniform solid
+            dense(|i| (i % 2) as u16),                      // worst case: no runs
+            dense(|i| ((i / 16) % 3) as u16),               // block-aligned runs
+            dense(|i| if i == 12345 { 4 } else { 0 }),      // single chiselled voxel
+        ] {
+            let encoded = VoxelData::new(&case);
+            assert_eq!(encoded.decode(), case, "RLE round trip must be exact");
+        }
+    }
+
+    /// Uniform chunks — the overwhelmingly common case — must collapse to one
+    /// run. This is where the ~183 MB/region saving actually comes from.
+    #[test]
+    fn uniform_chunk_is_one_run() {
+        assert_eq!(VoxelData::new(dense(|_| 0)).runs(), 1);
+        assert_eq!(VoxelData::new(dense(|_| 9)).runs(), 1);
+    }
+
+    /// A chunk of 8 uniform 16³ blocks must never need more than 32 runs per
+    /// row of 32 voxels — runs are >= 16 by construction, so the encoding can
+    /// not silently degenerate to the dense size for ordinary terrain.
+    #[test]
+    fn block_aligned_chunk_stays_compact() {
+        // Two materials split at the x=16 block boundary.
+        let v = dense(|i| if i % 32 < 16 { 1 } else { 2 });
+        let runs = VoxelData::new(&v).runs();
+        assert_eq!(runs, 2048, "one run per 16-voxel half-row");
+        assert!(runs * 4 < BRICK_VOXEL_COUNT * 2, "still smaller than the dense form");
+    }
+
+    /// edit() must decode, apply, and re-encode — the path chisels take.
+    #[test]
+    fn edit_round_trips() {
+        let mut d = VoxelData::new(dense(|_| 0));
+        assert_eq!(d.runs(), 1);
+        d.edit(|v| v[100] = Voxel::new(BlockId(3)));
+        let out = d.decode();
+        assert_eq!(out[100], Voxel::new(BlockId(3)));
+        assert_eq!(out[99], Voxel::new(BlockId(0)));
+        assert_eq!(out.len(), BRICK_VOXEL_COUNT);
+        assert_eq!(d.runs(), 3, "air | one voxel | air");
+    }
+
+    #[test]
+    fn sorted_index_visit_reads_rle_without_dense_decode() {
+        let dense = dense(|i| (i % 11) as u16);
+        let data = VoxelData::new(&dense);
+        let indices = [0usize, 1, 31, 32, 1024, 8191, BRICK_VOXEL_COUNT - 1];
+        let mut got = Vec::new();
+
+        data.for_each_index_sorted(indices, |index, voxel| got.push((index, voxel)));
+
+        let expected = indices.into_iter().map(|i| (i, dense[i])).collect::<Vec<_>>();
+        assert_eq!(got, expected);
     }
 }

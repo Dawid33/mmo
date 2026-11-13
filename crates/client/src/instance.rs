@@ -235,13 +235,11 @@ pub struct GameInstanceManager {
     /// Last ring-factor assignment per region (the stickiness `prev` for the
     /// next `desired_lod` call).
     lod_assigned: BTreeMap<RegionCoords, u32>,
-    /// Ring table driving `update_lod_window`: the stud table
-    /// (`game::stud_ring_table`: coarser cells over the same reach) of the
-    /// world scale's base table, `LOD_RING_TABLE` by default. A field so
-    /// test harnesses can shrink it (`set_lod_table`): every key it yields
-    /// costs the server a real build, which headless suites pay synchronously
-    /// through `InlineStudLodBuilder`.
-    lod_table: Vec<(i32, u32)>,
+    /// Ring table driving `update_lod_window` — a field (defaulting to
+    /// `LOD_RING_TABLE`) so test harnesses can shrink it: every key it
+    /// yields costs the server a real build, which headless suites pay
+    /// synchronously through `InlineLodBuilder`.
+    lod_table: &'static [(i32, u32)],
     /// Radius of the near (authoritative) window: 1 = 3x3 here; the binaries
     /// apply the production `WorldScale` (5x5) via `set_world_scale`.
     /// Headless suites shrink it to 0 — each region costs a full worldgen +
@@ -266,7 +264,7 @@ pub struct GameInstanceManager {
     /// Last hotbar emitted; the next projection is sent only if it differs.
     prev_hotbar: game::HotbarView,
     prev_inventory_view: game::InventoryView,
-    prev_mining: Option<game::MiningView>,
+    prev_mining: Option<u32>,
     prev_play_mode: game::PlayMode,
     /// Last-emitted cursor-grab intent, for edge-triggered SetCursorGrab.
     last_cursor_grab: bool,
@@ -644,23 +642,17 @@ fn window_recenter_margin() -> f32 {
 /// within `fortress_radius` of it, in both play modes — wherever the viewer
 /// (the adventurer, in Adventure) is, the fortress and its surroundings keep
 /// running on the server and predicted here.
-///
-/// Plus the **adventurer's neighbourhood**: in Adventure the body's (home)
-/// region and every region within `home_radius` of it (`window_for` passes
-/// `fortress_radius` there, 0 in Fortress mode), so an adventurer walks in the
-/// same 3x3 a fortress gets, carried along as the home region changes.
 fn desired_window(
     center: RegionCoords,
     home: Option<RegionCoords>,
     radius: i32,
-    home_radius: i32,
     fortress: Option<RegionCoords>,
     fortress_radius: i32,
 ) -> std::collections::BTreeSet<RegionCoords> {
     let mut desired: std::collections::BTreeSet<RegionCoords> =
         center.window_radius(radius).into_iter().collect();
     if let Some(home) = home {
-        desired.extend(home.window_radius(home_radius.max(0)));
+        desired.insert(home);
     }
     if let Some(fortress) = fortress {
         desired.extend(fortress.window_radius(fortress_radius.max(0)));
@@ -766,7 +758,7 @@ impl GameInstanceManager {
             window_center: None,
             subscribed: std::collections::BTreeSet::new(),
             lod_assigned: BTreeMap::new(),
-            lod_table: game::stud_ring_table(game::lod::LOD_RING_TABLE),
+            lod_table: game::lod::LOD_RING_TABLE,
             near_radius: 1,
             fortress_radius: 0,
             fortress_region: None,
@@ -912,12 +904,11 @@ impl GameInstanceManager {
         self.first_conn_recv.clone()
     }
 
-    /// Override the base LOD ring table (test/harness hook; subscribed with
-    /// as its `game::stud_ring_table`): headless suites pay every requested
-    /// key as a synchronous server-side build, so they shrink (or empty) the
-    /// table unless LOD is what they're testing.
-    pub fn set_lod_table(&mut self, table: &[(i32, u32)]) {
-        self.lod_table = game::stud_ring_table(table);
+    /// Override the LOD ring table (test/harness hook): headless suites pay
+    /// every requested key as a synchronous server-side build, so they shrink
+    /// (or empty) the table unless LOD is what they're testing.
+    pub fn set_lod_table(&mut self, table: &'static [(i32, u32)]) {
+        self.lod_table = table;
     }
 
     /// Shrink the near window (test/harness hook). Radius 0 subscribes to the
@@ -931,8 +922,7 @@ impl GameInstanceManager {
     /// Call before `start()`: the join burst reads both halves.
     pub fn set_world_scale(&mut self, scale: crate::world_scale::WorldScale) {
         info!("[client] world scale: {scale}");
-        self.set_lod_table(scale.lod_table);
-        info!("[client] LOD rings {:?} (from {:?})", self.lod_table, scale.lod_table);
+        self.lod_table = scale.lod_table;
         self.near_radius = scale.near_radius;
         self.fortress_radius = scale.fortress_radius;
     }
@@ -1084,12 +1074,11 @@ impl GameInstanceManager {
             | GameEventKind::HaloSourceGone(_)
             | GameEventKind::HaloUpdate(_)
             | GameEventKind::Intent(_) => {}
-            GameEventKind::UiAction(_, _) | GameEventKind::Order(_, _) | GameEventKind::Prefab(_, _)
-                if !self.is_caught_up => {
+            GameEventKind::UiAction(_, _) | GameEventKind::Order(_, _) if !self.is_caught_up => {
                 // Same admission rule as PlayerInput: drop until the sim has
                 // caught up with the server (join/replay window).
             }
-            e @ (GameEventKind::UiAction(_, _) | GameEventKind::Order(_, _) | GameEventKind::Prefab(_, _)) => {
+            e @ (GameEventKind::UiAction(_, _) | GameEventKind::Order(_, _)) => {
                 if let Some(home) = self.home_region {
                     if !self.host.contains(&home) {
                         self.send_unpredicted(home, e);
@@ -1465,15 +1454,10 @@ impl GameInstanceManager {
     /// [`desired_window`]); `update_window` and `update_lod_window` share it,
     /// so streamed LOD never covers a simulated region.
     fn window_for(&self, center: RegionCoords) -> std::collections::BTreeSet<RegionCoords> {
-        let home_radius = match self.prev_play_mode {
-            game::PlayMode::Adventure => self.fortress_radius,
-            game::PlayMode::Fortress => 0,
-        };
         let mut window = desired_window(
             center,
             self.home_region,
             self.near_radius,
-            home_radius,
             self.fortress_region,
             self.fortress_radius,
         );
@@ -1600,7 +1584,7 @@ impl GameInstanceManager {
                 let _ = self.ui_update_send.send(game::UiUpdate::Inventory(screen.clone()));
                 self.prev_inventory_view = screen;
             }
-            let mining = v.mining;
+            let mining = v.mining.map(|m| m.progress_per_mille);
             if mining != self.prev_mining {
                 let _ = self.ui_update_send.send(game::UiUpdate::Mining(mining));
                 self.prev_mining = mining;
@@ -1662,32 +1646,6 @@ impl GameInstanceManager {
         self.host.stop(rc);
     }
 
-    /// A LOD answer for `key` landed (voxel cells or a stud tile): `false` when
-    /// we no longer hold the key (it raced a release — the server is told
-    /// again); else the join timeline's milestones are kept and the caller
-    /// passes the data on.
-    fn lod_arrived(&mut self, key: game::lod::LodKey) -> bool {
-        if !self.lod_subscribed.contains(&key) {
-            // Raced a release: tell the server we really don't want it.
-            self.send_out(Outgoing::Home(ClientPacket::ReleaseLod(key)));
-            return false;
-        }
-        if !self.join.lod_all_received {
-            if self.join.lod_received.is_empty() {
-                game::perf_event!("lod_first_received", "factor={}", key.factor);
-            }
-            self.join.lod_received.insert(key);
-            if self.join.lod_requests_done
-                && self.lod_subscribed.is_subset(&self.join.lod_received)
-            {
-                self.join.lod_all_received = true;
-                game::perf_event!("lod_all_received", "keys={}", self.lod_subscribed.len());
-                self.join.lod_received.clear();
-            }
-        }
-        true
-    }
-
     /// Diff the desired LOD key set against current subscriptions. Runs
     /// right after `update_window`, so the near-window exclusion set it
     /// subtracts is already current — streamed LOD and simulated regions
@@ -1701,7 +1659,7 @@ impl GameInstanceManager {
             center,
             &excluded,
             &self.lod_assigned,
-            &self.lod_table,
+            self.lod_table,
             game::lod::LOD_STICKY_BAND,
         );
         self.lod_assigned = assigned;
@@ -2206,11 +2164,28 @@ impl GameInstanceManager {
                     .client_event_send
                     .send(ClientUpdateEvent::PlayRefused(rc, why));
             }
-            game::ServerPacket::StudLodData(key, tile) => {
-                if !self.lod_arrived(key) {
+            game::ServerPacket::LodData(key, payload, water) => {
+                if !self.lod_subscribed.contains(&key) {
+                    // Raced a release: tell the server we really don't want it.
+                    self.send_out(Outgoing::Home(ClientPacket::ReleaseLod(key)));
                     return Ok(());
                 }
-                let _ = self.client_event_send.send(ClientUpdateEvent::StudLodData(key, tile));
+                if !self.join.lod_all_received {
+                    if self.join.lod_received.is_empty() {
+                        game::perf_event!("lod_first_received", "factor={}", key.factor);
+                    }
+                    self.join.lod_received.insert(key);
+                    if self.join.lod_requests_done
+                        && self.lod_subscribed.is_subset(&self.join.lod_received)
+                    {
+                        self.join.lod_all_received = true;
+                        game::perf_event!("lod_all_received", "keys={}", self.lod_subscribed.len());
+                        self.join.lod_received.clear();
+                    }
+                }
+                let _ = self
+                    .client_event_send
+                    .send(ClientUpdateEvent::LodData(key, payload, water));
             }
             game::ServerPacket::Sites(v) => {
                 let _ = self.client_event_send.send(ClientUpdateEvent::Sites(v));
@@ -2575,7 +2550,7 @@ mod manager_tests {
     fn minimal_world() -> game::World {
         let home = RegionCoords::new(0, 0);
         let mut world = game::World::new();
-        world.load(&home, Region::empty(home));
+        world.load(&home, Region::from_chunks(home, Vec::new()));
         world
     }
 
@@ -2970,7 +2945,7 @@ mod manager_tests {
     fn desired_window_pins_home_outside_3x3() {
         let home = RegionCoords::new(0, 0);
         let far = RegionCoords::new(5, -3);
-        let desired = desired_window(far, Some(home), 1, 0, None, 0);
+        let desired = desired_window(far, Some(home), 1, None, 0);
         assert!(desired.contains(&home), "home must never leave the window");
         assert_eq!(desired.len(), 10, "3x3 around viewer plus distant home");
         for rc in far.window_3x3() {
@@ -2984,14 +2959,14 @@ mod manager_tests {
     fn desired_window_home_inside_does_not_duplicate() {
         let home = RegionCoords::new(0, 0);
         // Home adjacent to centre: inside the 3x3.
-        let desired = desired_window(RegionCoords::new(1, 0), Some(home), 1, 0, None, 0);
+        let desired = desired_window(RegionCoords::new(1, 0), Some(home), 1, None, 0);
         assert_eq!(desired.len(), 9);
         assert!(desired.contains(&home));
         // Home at centre.
-        let desired = desired_window(home, Some(home), 1, 0, None, 0);
+        let desired = desired_window(home, Some(home), 1, None, 0);
         assert_eq!(desired.len(), 9);
         // No home yet: plain 3x3.
-        assert_eq!(desired_window(RegionCoords::new(2, 2), None, 1, 0, None, 0).len(), 9);
+        assert_eq!(desired_window(RegionCoords::new(2, 2), None, 1, None, 0).len(), 9);
     }
 
     /// The fortress neighbourhood is simulated whatever the viewer does:
@@ -3000,42 +2975,22 @@ mod manager_tests {
     #[test]
     fn desired_window_keeps_fortress_neighbourhood() {
         let fort = RegionCoords::new(4, 4);
-        let at_home = desired_window(fort, Some(fort), 0, 0, Some(fort), 1);
+        let at_home = desired_window(fort, Some(fort), 0, Some(fort), 1);
         let expected: std::collections::BTreeSet<_> = fort.window_3x3().into_iter().collect();
         assert_eq!(at_home, expected);
 
         let away = RegionCoords::new(9, 4);
-        let roaming = desired_window(away, Some(away), 0, 0, Some(fort), 1);
+        let roaming = desired_window(away, Some(away), 0, Some(fort), 1);
         assert_eq!(roaming.len(), 10, "3x3 around the fortress plus the adventurer's region");
         assert!(roaming.contains(&away));
         assert!(expected.is_subset(&roaming));
 
         // Next door: the adventurer's region is part of the neighbourhood.
         let next = RegionCoords::new(5, 4);
-        assert_eq!(desired_window(next, Some(next), 0, 0, Some(fort), 1), expected);
+        assert_eq!(desired_window(next, Some(next), 0, Some(fort), 1), expected);
         // Radius 0 / no fortress: only the near window.
-        assert_eq!(desired_window(away, Some(away), 0, 0, Some(fort), 0).len(), 2);
-        assert_eq!(desired_window(away, Some(away), 0, 0, None, 1).len(), 1);
-    }
-
-    /// An adventurer gets the same neighbourhood around its own body (home)
-    /// region, with or without a fortress, and it follows the home region.
-    #[test]
-    fn desired_window_adventurer_neighbourhood_follows_home() {
-        let home = RegionCoords::new(4, -2);
-        let expected: std::collections::BTreeSet<_> =
-            home.window_radius(1).into_iter().collect();
-        assert_eq!(desired_window(home, Some(home), 0, 1, None, 0), expected);
-        // The viewer (window centre) elsewhere — outside the body's 3x3 (it was
-        // written one region east, which is inside it: 9 regions, not the 10
-        // asserted; the function is a plain union) — the body's 3x3 stays.
-        let viewer = RegionCoords::new(6, -2);
-        let roaming = desired_window(viewer, Some(home), 0, 1, None, 0);
-        assert!(expected.is_subset(&roaming));
-        assert_eq!(roaming.len(), 10);
-        // Overlapping a fortress neighbourhood: one union, no duplicates.
-        let fort = RegionCoords::new(5, -2);
-        assert_eq!(desired_window(home, Some(home), 0, 1, Some(fort), 1).len(), 12);
+        assert_eq!(desired_window(away, Some(away), 0, Some(fort), 0).len(), 2);
+        assert_eq!(desired_window(away, Some(away), 0, None, 1).len(), 1);
     }
 
     /// PlayerRegion must trigger subscription requests for the full 3x3
@@ -3090,7 +3045,7 @@ mod manager_tests {
         // replayed through reconcile — Tick id 0 lands in the region's
         // server-input buffer, waiting for the matching local prediction.
         let mut neighbour_world = game::World::new();
-        neighbour_world.load(&neighbour, Region::empty(neighbour));
+        neighbour_world.load(&neighbour, Region::from_chunks(neighbour, Vec::new()));
         server_send
             .send(neighbour_world.build_region_server_packet(&neighbour))
             .unwrap();
@@ -3174,7 +3129,7 @@ mod manager_tests {
 
         let far = RegionCoords::new(50, 50);
         let mut far_world = game::World::new();
-        far_world.load(&far, Region::empty(far));
+        far_world.load(&far, Region::from_chunks(far, Vec::new()));
         server_send
             .send(far_world.build_region_server_packet(&far))
             .unwrap();
@@ -3201,7 +3156,7 @@ mod manager_tests {
 
         // Load home (with the player) and the empty target region.
         let mut world = game::World::new();
-        let mut home_region = Region::empty(home);
+        let mut home_region = Region::from_chunks(home, Vec::new());
         home_region
             .handle_event(GameEventKind::CreateClient(0))
             .unwrap();
@@ -3211,7 +3166,7 @@ mod manager_tests {
             .send(world.build_region_server_packet(&home))
             .unwrap();
         let mut target_world = game::World::new();
-        target_world.load(&target, Region::empty(target));
+        target_world.load(&target, Region::from_chunks(target, Vec::new()));
         server_send
             .send(target_world.build_region_server_packet(&target))
             .unwrap();
@@ -3269,13 +3224,13 @@ mod manager_tests {
         server_send.send(ServerPacket::PlayerRegion(Some(home), 0)).unwrap();
         manager.pump_packets(&server_recv).unwrap();
         let mut world = game::World::new();
-        let mut home_region = Region::empty(home);
+        let mut home_region = Region::from_chunks(home, Vec::new());
         home_region.handle_event(GameEventKind::CreateClient(0)).unwrap();
         home_region.forget_last_event();
         world.load(&home, home_region);
         server_send.send(world.build_region_server_packet(&home)).unwrap();
         let mut target_world = game::World::new();
-        target_world.load(&target, Region::empty(target));
+        target_world.load(&target, Region::from_chunks(target, Vec::new()));
         server_send.send(target_world.build_region_server_packet(&target)).unwrap();
         manager.pump_packets(&server_recv).unwrap();
         manager.is_caught_up = true;
@@ -3350,7 +3305,7 @@ mod manager_tests {
         server_send.send(ServerPacket::PlayerRegion(Some(home), 0)).unwrap();
         manager.pump_packets(&server_recv).unwrap();
         let mut world = game::World::new();
-        let mut home_region = Region::empty(home);
+        let mut home_region = Region::from_chunks(home, Vec::new());
         home_region.handle_event(GameEventKind::CreateClient(0)).unwrap();
         home_region.forget_last_event();
         world.load(&home, home_region);
@@ -3460,13 +3415,13 @@ mod manager_tests {
 
         // Load A (with the player) and the empty target B.
         let mut world = game::World::new();
-        let mut home_region = Region::empty(home);
+        let mut home_region = Region::from_chunks(home, Vec::new());
         home_region.handle_event(GameEventKind::CreateClient(0)).unwrap();
         home_region.forget_last_event();
         world.load(&home, home_region);
         server_send.send(world.build_region_server_packet(&home)).unwrap();
         let mut target_world = game::World::new();
-        target_world.load(&target, Region::empty(target));
+        target_world.load(&target, Region::from_chunks(target, Vec::new()));
         server_send.send(target_world.build_region_server_packet(&target)).unwrap();
         manager.pump_packets(&server_recv).unwrap();
         manager.is_caught_up = true;
@@ -3509,7 +3464,7 @@ mod manager_tests {
 
         // The server's B: the same events, the arrival carrying the server's
         // own extraction from A (a real server-side region, faithful ids).
-        let mut server_a = Region::empty(home);
+        let mut server_a = Region::from_chunks(home, Vec::new());
         server_a.handle_event(GameEventKind::CreateClient(0)).unwrap();
         server_a.forget_last_event();
         let sa_key = *server_a.data().player_entites.get(&0).unwrap();
@@ -3519,7 +3474,7 @@ mod manager_tests {
         let (mut bundle, to) = departures.into_iter().next().expect("server-side player departed A");
         assert_eq!(to, target);
         bundle.rebase(home, target);
-        let mut server_b = Region::empty(target);
+        let mut server_b = Region::from_chunks(target, Vec::new());
         let auth: Vec<GameEvent> = predicted
             .into_iter()
             .map(|k| match k {
@@ -3602,54 +3557,6 @@ mod manager_tests {
         assert!(client_recv.try_recv().is_err());
     }
 
-    /// Far terrain is subscribed on the stud ring table from the first
-    /// request: only keys the server builds tiles for are requested; a
-    /// `StudLodData` for a held key goes to the renderer, one for a released
-    /// key is answered with a `ReleaseLod`.
-    #[test]
-    fn lod_is_subscribed_on_the_stud_ring_table() {
-        let (game_send, game_recv) = crossbeam::channel::unbounded();
-        let (client_send, client_recv) = crossbeam::channel::unbounded::<ClientUpdateEvent>();
-        let dummy_addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 0));
-        let mut manager = GameInstanceManager::new(game_send, game_recv, client_send, dummy_addr, game::DebugFlags::default());
-        let home = RegionCoords::new(0, 0);
-        manager.home_region = Some(home);
-        let packets = manager.client_packet_recv();
-        let stud_table = game::stud_ring_table(game::lod::LOD_RING_TABLE);
-        assert_eq!(manager.lod_table, stud_table);
-        // An overridden base table is subscribed with as its stud table too.
-        manager.set_lod_table(game::lod::LOD_RING_TABLE);
-        assert_eq!(manager.lod_table, stud_table);
-
-        let excluded = desired_window(home, Some(home), manager.near_radius, 0, None, 0);
-        let (_, expected) = desired_lod(home, &excluded, &BTreeMap::new(), &stud_table, game::lod::LOD_STICKY_BAND);
-        assert!(expected.iter().all(game::stud_lod_supported));
-        let (mut requested, mut released) = (std::collections::BTreeSet::new(), std::collections::BTreeSet::new());
-        for _ in 0..=expected.len().div_ceil(LOD_REQUESTS_PER_TICK) {
-            manager.update_lod_window();
-            for packet in packets.try_iter() {
-                match packet {
-                    ClientPacket::RequestLod(key) => assert!(requested.insert(key), "{key:?} requested twice"),
-                    ClientPacket::ReleaseLod(key) => assert!(released.insert(key)),
-                    _ => panic!("only LOD packets expected"),
-                }
-            }
-        }
-        assert!(released.is_empty());
-        assert_eq!(requested, expected);
-        assert_eq!(manager.lod_subscribed, expected);
-
-        // A tile for a held key reaches the renderer; one for a released key does not.
-        while client_recv.try_recv().is_ok() {}
-        let held = *expected.iter().next().unwrap();
-        manager.handle_server(game::ServerPacket::StudLodData(held, game::StudLodTile::default())).unwrap();
-        assert!(matches!(client_recv.try_recv(), Ok(ClientUpdateEvent::StudLodData(k, _)) if k == held));
-        let gone = game::lod::LodKey { factor: held.factor, coords: [9_999, 9_999] };
-        manager.handle_server(game::ServerPacket::StudLodData(gone, game::StudLodTile::default())).unwrap();
-        assert!(client_recv.try_recv().is_err());
-        assert!(matches!(packets.try_recv(), Ok(ClientPacket::ReleaseLod(k)) if k == gone));
-    }
-
     /// The join burst is paced: each tick requests at most
     /// `LOD_REQUESTS_PER_TICK` new keys, nearest ring first, and the full
     /// production set is still reached with no key requested twice.
@@ -3668,12 +3575,12 @@ mod manager_tests {
         let home = RegionCoords::new(0, 0);
         manager.home_region = Some(home);
         let packets = manager.client_packet_recv();
-        let excluded = desired_window(home, Some(home), manager.near_radius, 0, None, 0);
+        let excluded = desired_window(home, Some(home), manager.near_radius, None, 0);
         let (_, expected) = desired_lod(
             home,
             &excluded,
             &BTreeMap::new(),
-            &manager.lod_table,
+            game::lod::LOD_RING_TABLE,
             game::lod::LOD_STICKY_BAND,
         );
         assert!(expected.len() > LOD_REQUESTS_PER_TICK, "table must need pacing");
@@ -3753,7 +3660,7 @@ mod manager_tests {
         // Load a region whose snapshot already contains player 0 (seeded inv).
         let region_id = RegionCoords::new(0, 0);
         let mut world = game::World::new();
-        let mut home = Region::empty(region_id);
+        let mut home = Region::from_chunks(region_id, Vec::new());
         home.handle_event(GameEventKind::CreateClient(0)).unwrap();
         home.forget_last_event();
         world.load(&region_id, home);
@@ -3821,7 +3728,7 @@ mod manager_tests {
 
         let region_id = RegionCoords::new(0, 0);
         let mut world = game::World::new();
-        let mut home = Region::empty(region_id);
+        let mut home = Region::from_chunks(region_id, Vec::new());
         home.handle_event(GameEventKind::CreateClient(0)).unwrap();
         home.forget_last_event();
         world.load(&region_id, home);

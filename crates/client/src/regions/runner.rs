@@ -401,7 +401,7 @@ fn home_view(region: &Region, client: ClientId) -> Option<HomeView> {
         translation: body_translation(region, client),
         fps_cam_mode: c.fps_cam_mode,
         hotbar: game::build_hotbar(data, client),
-        mining: data.mining_view(client, region.current_tick() as u64),
+        mining: game::mining_view(c, region.current_tick() as u64),
         mode: c.mode,
         inventory_open: c.inventory_open,
         inventory: c.inventory.clone(),
@@ -422,7 +422,7 @@ mod tests {
     /// A client-side region (holding `CLIENT`) and a runner context for it.
     fn setup() -> (Region, RunnerState, RunnerCtx, Receiver<crate::connections::Outgoing>) {
         let rc = RegionCoords::new(0, 0);
-        let mut server = Region::empty(rc);
+        let mut server = Region::from_chunks(rc, Vec::new());
         server.handle_event(GameEventKind::CreateClient(CLIENT)).unwrap();
         server.commit_server_event();
         let region = Region::new(server.data().clone(), None, rc, Some(CLIENT));

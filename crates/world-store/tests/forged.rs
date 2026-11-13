@@ -34,6 +34,12 @@ fn fixture() -> &'static Fixture {
     })
 }
 
+fn materials() -> worldgen::material::Materials {
+    let manifest = include_str!("../../../assets/blocks/blocks.ron");
+    let reg = game::BlockRegistry::from_ron(manifest).expect("valid manifest");
+    worldgen::material::Materials::from_names(|n| reg.id_of(n).unwrap_or_else(|| panic!("missing block {n}")))
+}
+
 /// Every point sampler's output at engine point `(x, z)`, as bits.
 fn point_bits(w: &ForgedWorld, x: f64, z: f64) -> Vec<u64> {
     let mut v = Vec::with_capacity(24);
@@ -85,6 +91,7 @@ fn assert_bit_equal(whole: &ForgedWorld, tiled: &ForgedWorld) {
     let rc = |x: f64, z: f64| RegionCoords::new((x / region_m).floor() as i32, (z / region_m).floor() as i32);
     let seam_m = f64::from(TILE_CELLS) * whole.globals().cell_m;
     let centre = rc(min[0] + seam_m, min[1] + seam_m);
+    let mats = materials();
     for r in [
         centre,
         RegionCoords::new(centre.x - 1, centre.z),
@@ -92,9 +99,9 @@ fn assert_bit_equal(whole: &ForgedWorld, tiled: &ForgedWorld) {
         RegionCoords::new(centre.x - 1, centre.z - 1),
         rc(min[0], min[1]),
     ] {
-        let a = worldgen::stud_gen::generate_stud_region_forged(whole, r);
-        let b = worldgen::stud_gen::generate_stud_region_forged(tiled, r);
-        assert!(a == b, "generate_stud_region_forged({r:?}): tiled differs from whole");
+        let a = bincode::serialize(&worldgen::generate_region_forged(whole, r, mats)).unwrap();
+        let b = bincode::serialize(&worldgen::generate_region_forged(tiled, r, mats)).unwrap();
+        assert!(a == b, "generate_region_forged({r:?}): tiled differs from whole");
     }
 }
 

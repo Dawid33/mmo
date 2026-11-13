@@ -164,22 +164,26 @@ fn d8_touching_start_sliding_or_lifting_is_no_hit() {
 /// `length_unit`: its leaves' fat-AABB margin scales with it, so the two
 /// units give two BVH layouts over the same colliders.
 fn terrace_world(length_unit: f32, reversed: bool) -> PhysicsWorld {
-    use game::CHUNK_BLOCKS;
+    use game::{BlockIndex, CHUNK_BLOCKS};
     let (xs, zs) = (6..10usize, 14..22usize); // world block ranges
     let span = |r: &std::ops::Range<usize>| r.start / CHUNK_BLOCKS..=(r.end - 1) / CHUNK_BLOCKS;
     let mut chunks = Vec::new();
     for cx in span(&xs) {
         for cz in span(&zs) {
-            let mut chunk = common::Chunk::default();
+            let mut chunk = game::Chunk::default();
             for bz in 0..CHUNK_BLOCKS {
                 let wz = cz * CHUNK_BLOCKS + bz;
                 if !zs.contains(&wz) {
                     continue;
                 }
-                let row = common::Chunk::flat_floor(12 + (wz / 2) as u32);
+                let row = game::Chunk::flat_floor(12 + (wz / 2) as u32);
                 for bx in (0..CHUNK_BLOCKS).filter(|bx| xs.contains(&(cx * CHUNK_BLOCKS + bx))) {
                     for by in 0..CHUNK_BLOCKS {
-                        chunk.set(bx, by, bz, row.get(bx, by, bz).clone());
+                        chunk.set_block(bx, by, bz, row.block_at(bx, by, bz));
+                        let i = BlockIndex::from_xyz(bx, by, bz);
+                        if let Some(c) = row.chisel.get(&i) {
+                            chunk.chisel.insert(i, c.clone());
+                        }
                     }
                 }
             }

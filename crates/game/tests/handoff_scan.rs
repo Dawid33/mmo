@@ -16,7 +16,7 @@ fn pose(x: f32, z: f32) -> Pose {
 
 /// A region with one player, teleported to (x, z), ticked once.
 fn region_with_player_at(id: RegionCoords, x: f32, z: f32) -> Region {
-    let mut region = crate::common::empty_region(id);
+    let mut region = Region::from_chunks(id, Vec::new());
     region.handle_event(GameEventKind::CreateClient(7)).unwrap();
     region.forget_last_event();
     let key = *region.data().player_entites.get(&7).unwrap();
@@ -83,14 +83,13 @@ fn hysteresis_stops_boundary_thrash() {
 #[test]
 fn extracting_tick_holds_the_hash_bar() {
     // rollback_last_event replays tier-2 undo closures through
-    // client.as_ref().unwrap(); a None render sender panics. Server regions
-    // wire None (they forget, never roll back), so build the region
+    // client.as_ref().unwrap(); a None render sender panics. Region::from_chunks
+    // wires None (server regions forget, never roll back), so build the region
     // with a live throwaway sender instead — mirrors the sibling rollback tests
     // (handoff_state/random_ops/...). _recv stays bound so the channel is live.
     let id = RegionCoords::new(0, 0);
     let (send, _recv) = crossbeam::channel::unbounded();
     let mut region = Region::new(Rollback::new(None), Some(send), id, None);
-    region.seed_stud_world(Default::default());
     region.handle_event(GameEventKind::CreateClient(7)).unwrap();
     region.forget_last_event();
     let key = *region.data().player_entites.get(&7).unwrap();
@@ -121,7 +120,7 @@ fn identical_streams_produce_identical_scans_and_hashes() {
 
 #[test]
 fn kindless_terrain_in_margin_does_not_mirror() {
-    // Stud chunk entities get a fixed rigidbody but their `kind` component stays
+    // Chunk entities get a fixed rigidbody but their `kind` component stays
     // `None` (create_entity_safe never sets it) — the kind-None guard in
     // scan_boundaries is what excludes them. A chunk's own min-corner can
     // never land strictly inside the band (it's a multiple of `CHUNK_UNITS`,
@@ -134,13 +133,17 @@ fn kindless_terrain_in_margin_does_not_mirror() {
     // other tests use for player teleports.
     let id = RegionCoords::new(0, 0);
     let last = game::REGION_CHUNKS - 1;
-    let mut region = crate::common::empty_region(id);
-    region.with_data(|d| d.seed_stud_genesis(vec![(crate::common::sc(last, 0, last), crate::common::slab_chunk(3))]));
+    let mut region = Region::from_chunks(
+        id,
+        vec![(game::ChunkCoords::new(last, 0, last), game::Chunk::flat_floor(8))],
+    );
     let chunk_key = region
         .data()
-        .stud_key_at(crate::common::sc(last, 0, last))
-        .expect("the stud chunk is registered as an entity");
-    assert_eq!(*region.data().ecs.kind.try_get(chunk_key), None, "a terrain chunk has no kind");
+        .ecs
+        .chunk
+        .iter()
+        .find_map(|(k, c)| c.is_some().then_some(k))
+        .expect("terrain chunk registered as an entity with a chunk component");
     // Strictly inside the +x margin (half of it in), but short of the
     // departure line (REGION_SIZE + FLIP_HYSTERESIS), so only the halo path
     // is in play.
@@ -163,7 +166,7 @@ fn mirror_past_boundary_is_not_scanned() {
     // `mirror_past_boundary_is_not_extracted` below).
     let id = RegionCoords::new(0, 0);
     let src = RegionCoords::new(1, 0);
-    let mut region = crate::common::empty_region(id);
+    let mut region = Region::from_chunks(id, Vec::new());
     region
         .handle_event(GameEventKind::HaloEntity(game::HaloEntityDelta {
             id: game::EntityId::default(),
@@ -197,7 +200,7 @@ fn mirror_past_boundary_is_not_extracted() {
     let id = RegionCoords::new(0, 0);
     let src = RegionCoords::new(1, 0);
     let ghost_id = game::EntityId { birth_region: src, serial: 0 };
-    let mut region = crate::common::empty_region(id);
+    let mut region = Region::from_chunks(id, Vec::new());
     region
         .handle_event(GameEventKind::HaloEntity(game::HaloEntityDelta {
             id: ghost_id,

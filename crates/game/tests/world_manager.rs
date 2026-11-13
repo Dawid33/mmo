@@ -1,8 +1,8 @@
 use crossbeam::channel::{unbounded, Receiver};
-use crate::common::{self, body_on_tile, feet_tile, STAND};
 use game::{
-    ClientId, ClientPacket, GameEvent, GameEventKind, InlineSpawner, RegionCoords, RegionOutput, ServerEvent,
-    ServerPacket, WorldManager, SPAWN_REGION, UNLOAD_GRACE_MS,
+    Block, BlockId, Chunk, ClientId, ClientPacket, Column, ColumnCoords, GameEvent, GameEventKind,
+    InlineLodBuilder, InlineSpawner, LodBuilder, RegionCoords, RegionOutput, ServerEvent,
+    ServerPacket, SubChunk, WorldManager, SPAWN_REGION, UNLOAD_GRACE_MS,
 };
 
 struct Harness {
@@ -16,10 +16,27 @@ struct Harness {
 fn harness() -> Harness {
     let (out_send, packets) = unbounded();
     let (region_out_send, region_out) = unbounded();
-    // Flat stud ground under chunk column (0, 0) of every region.
-    let spawner = common::stud_spawner(|_rc| common::floor_seed(0.0..1.0, 0.0..1.0, common::FLOOR_PLATES));
+    let generator = Box::new(|_rc: RegionCoords| -> Vec<(ColumnCoords, Column)> {
+        let below = Block::new(BlockId::AIR);
+        let above = Block::new(BlockId::AIR);
+        let sub = SubChunk::Dense(Box::new(Chunk::flat_floor(8)));
+        vec![(ColumnCoords::new(0, 0), Column::new(0, below, above, vec![sub]))]
+    });
+    let (lod_result_send, lod_result_recv) = unbounded();
+    let lod_builder: Box<dyn LodBuilder> = Box::new(InlineLodBuilder {
+        coarse: Box::new(|_key: &game::lod::LodKey| Vec::new()),
+        water: Box::new(game::lod::LodWater::dry),
+        out: lod_result_send,
+    });
     Harness {
-        manager: common::stud_manager(spawner, out_send, region_out_send.clone()),
+        manager: WorldManager::new(
+            InlineSpawner::default(),
+            generator,
+            out_send,
+            region_out_send.clone(),
+            lod_builder,
+            lod_result_recv,
+        ),
         region_out,
         region_out_send,
         packets,
@@ -339,10 +356,10 @@ fn connected_harness() -> Harness {
     h
 }
 
-/// Does the packet list carry far terrain (`StudLodData`) for `key` addressed to client 0?
+/// Does the packet list carry a `LodData` for `key` addressed to client 0?
 fn has_lod_data(packets: &[(Option<ClientId>, ServerPacket)], key: game::lod::LodKey) -> bool {
     packets.iter().any(|(target, p)| {
-        *target == Some(0) && matches!(p, ServerPacket::StudLodData(k, ..) if *k == key)
+        *target == Some(0) && matches!(p, ServerPacket::LodData(k, ..) if *k == key)
     })
 }
 
@@ -350,21 +367,37 @@ fn has_lod_data(packets: &[(Option<ClientId>, ServerPacket)], key: game::lod::Lo
 fn lod_request_for_never_run_region_serves_without_waking() {
     let mut h = connected_harness();
     let rc = RegionCoords::new(5, 5);
-    let key = common::stud_lod_key(rc);
+    let key = game::lod::LodKey::for_region(2, rc);
     h.event(ServerEvent::ClientPacket(ClientPacket::RequestLod(key), 0), 0);
     // Never spun up a sim thread for the region: generate-on-miss.
     assert!(!h.manager.running_regions().contains(&rc));
     assert!(
         has_lod_data(&h.drain_packets(), key),
-        "LOD request must deliver a StudLodData packet"
+        "LOD request must deliver a LodData packet"
     );
+}
+
+#[test]
+fn lod_request_for_running_region_pulls_live_terrain() {
+    let mut h = connected_harness();
+    let rc = RegionCoords::new(1, 0);
+    // Make it running via a normal (near) subscribe first.
+    h.event(
+        ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(rc), 0),
+        0,
+    );
+    h.drain_packets();
+    assert!(h.manager.running_regions().contains(&rc));
+    let key = game::lod::LodKey::for_region(2, rc);
+    h.event(ServerEvent::ClientPacket(ClientPacket::RequestLod(key), 0), 0);
+    assert!(has_lod_data(&h.drain_packets(), key));
 }
 
 #[test]
 fn lod_subscribers_do_not_keep_a_region_alive() {
     let mut h = connected_harness();
     let rc = RegionCoords::new(9, 9);
-    let key = common::stud_lod_key(rc);
+    let key = game::lod::LodKey::for_region(2, rc);
     // Wake it (arrival-style) by near-subscribing, then release near but keep LOD.
     h.event(
         ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(rc), 0),
@@ -390,7 +423,7 @@ fn lod_subscribers_do_not_keep_a_region_alive() {
 #[test]
 fn parked_lod_request_still_gets_served_from_cache() {
     // After the region parks (previous scenario), a fresh LOD request is
-    // served by the far-terrain builder without waking it.
+    // served from terrain_cache without waking it.
     let mut h = connected_harness();
     let rc = RegionCoords::new(2, 3);
     h.event(
@@ -405,7 +438,7 @@ fn parked_lod_request_still_gets_served_from_cache() {
     h.settle(UNLOAD_GRACE_MS + 1);
     assert!(h.manager.parked_regions().contains(&rc));
     h.drain_packets();
-    let key = common::stud_lod_key(rc);
+    let key = game::lod::LodKey::for_region(2, rc);
     h.event(
         ServerEvent::ClientPacket(ClientPacket::RequestLod(key), 0),
         UNLOAD_GRACE_MS + 2,
@@ -414,12 +447,14 @@ fn parked_lod_request_still_gets_served_from_cache() {
     assert!(has_lod_data(&h.drain_packets(), key));
 }
 
-/// Records the seeds it is handed instead of running anything.
-struct RecordingSpawner {
+/// Stand-in for the native server's thread spawner: it generates a region's
+/// columns on the region's own thread (`generates_columns`), and records the
+/// seeds it is handed instead of running anything.
+struct DeferringSpawner {
     seeds: std::sync::Arc<std::sync::Mutex<Vec<(RegionCoords, &'static str)>>>,
 }
 
-impl game::RegionSpawner for RecordingSpawner {
+impl game::RegionSpawner for DeferringSpawner {
     fn world_tick(&self) -> game::Tick {
         0
     }
@@ -430,8 +465,10 @@ impl game::RegionSpawner for RecordingSpawner {
         _out: crossbeam::channel::Sender<(RegionCoords, RegionOutput)>,
     ) -> crossbeam::channel::Sender<game::RegionInput> {
         let kind = match seed {
-            game::RegionSeed::Fresh => "fresh",
-            game::RegionSeed::Parked(_) => "parked",
+            game::RegionSeed::Fresh(_) => "fresh",
+            game::RegionSeed::Parked(..) => "parked",
+            game::RegionSeed::Deferred(None) => "deferred-fresh",
+            game::RegionSeed::Deferred(Some(_)) => "deferred-parked",
         };
         self.seeds.lock().unwrap().push((id, kind));
         let (send, recv) = unbounded();
@@ -439,20 +476,44 @@ impl game::RegionSpawner for RecordingSpawner {
         std::mem::forget(recv);
         send
     }
+
+    fn generates_columns(&self) -> bool {
+        true
+    }
 }
 
-/// A region start costs the manager thread no worldgen (it measured 0.1-0.9 s
-/// per region, sequentially, 6-7 s for a 3x3 join — all of it routing
-/// latency): the spawner gets a bare `Fresh` seed and builds the region on its
-/// side.
+/// Worldgen for a region start must not run on the manager thread (it measured
+/// 0.1-0.9 s per region, sequentially, 6-7 s for a 3x3 join — all of it
+/// routing latency): a spawner that generates columns itself gets a deferred
+/// seed and the manager's generator is never called.
 #[test]
-fn region_start_hands_the_spawner_a_fresh_seed() {
+fn region_start_defers_worldgen_to_a_spawner_that_generates_columns() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
     let (out_send, _packets) = unbounded();
     let (region_out_send, _region_out) = unbounded();
+    let generated = Arc::new(AtomicUsize::new(0));
+    let counter = generated.clone();
+    let generator = Box::new(move |_rc: RegionCoords| -> Vec<(ColumnCoords, Column)> {
+        counter.fetch_add(1, Ordering::SeqCst);
+        Vec::new()
+    });
+    let (lod_result_send, lod_result_recv) = unbounded();
+    let lod_builder: Box<dyn LodBuilder> = Box::new(InlineLodBuilder {
+        coarse: Box::new(|_key: &game::lod::LodKey| Vec::new()),
+        water: Box::new(game::lod::LodWater::dry),
+        out: lod_result_send,
+    });
     let seeds = Arc::new(Mutex::new(Vec::new()));
-    let mut manager = common::stud_manager(RecordingSpawner { seeds: seeds.clone() }, out_send, region_out_send);
+    let mut manager = WorldManager::new(
+        DeferringSpawner { seeds: seeds.clone() },
+        generator,
+        out_send,
+        region_out_send,
+        lod_builder,
+        lod_result_recv,
+    );
 
     manager.handle_server_event(ServerEvent::connected(1), 0);
     manager.handle_server_event(
@@ -460,30 +521,37 @@ fn region_start_hands_the_spawner_a_fresh_seed() {
         0,
     );
 
+    assert_eq!(generated.load(Ordering::SeqCst), 0, "the manager must not run worldgen");
     let seeds = seeds.lock().unwrap();
-    assert_eq!(*seeds, vec![(SPAWN_REGION, "fresh"), (RegionCoords::new(5, 5), "fresh")]);
+    assert_eq!(
+        *seeds,
+        vec![(SPAWN_REGION, "deferred-fresh"), (RegionCoords::new(5, 5), "deferred-fresh")]
+    );
 }
 
-/// A seed generates exactly when it has to: a fresh region once, a parked
-/// region never.
+/// A deferred seed generates exactly when it has to: a fresh region once, a
+/// parked region never (the old eager path regenerated the columns on every
+/// resubscribe just to have a fallback for a corrupt blob).
 #[test]
-fn a_seed_generates_only_for_fresh_regions() {
+fn deferred_seed_generates_only_for_fresh_regions() {
     use std::cell::Cell;
     let id = RegionCoords::new(2, -3);
     let calls = Cell::new(0);
-    let genesis = || {
+    let generate = |_rc: RegionCoords| -> Vec<(ColumnCoords, Column)> {
         calls.set(calls.get() + 1);
-        Some(common::uniform_seed())
+        let air = Block::new(BlockId::AIR);
+        let sub = SubChunk::Dense(Box::new(Chunk::flat_floor(8)));
+        vec![(ColumnCoords::new(0, 0), Column::new(0, air, air, vec![sub]))]
     };
 
-    let fresh = game::RegionSeed::Fresh.into_region(id, genesis).unwrap();
+    let fresh = game::RegionSeed::Deferred(None).into_region_with(id, &generate);
     assert_eq!(calls.get(), 1);
-    assert_eq!(fresh.data().stud_index.len(), game::REGION_CHUNKS * game::REGION_CHUNKS);
+    assert_eq!(fresh.terrain_snapshot().chunks.len(), 1);
 
     let parked = game::SerializedRegion::from_rollback(fresh.data());
-    let restored = game::RegionSeed::Parked(parked).into_region(id, genesis).unwrap();
+    let restored = game::RegionSeed::Deferred(Some(parked)).into_region_with(id, &generate);
     assert_eq!(calls.get(), 1, "a valid parked region restores without worldgen");
-    assert_eq!(game::state_hash(restored.data()), game::state_hash(fresh.data()));
+    assert_eq!(restored.terrain_fingerprint(), fresh.terrain_fingerprint());
 }
 
 #[test]
@@ -523,18 +591,27 @@ fn leave_packet_removes_the_session() {
 
 // ---- Players park and restore across disconnects and restarts (Task 2) ----
 
-use game::{standable, PlayMode, PlayerId, PlayerRecord, TilePos};
+use game::{body_on_tile, feet_of, feet_tile, standable, PlayMode, PlayerId, PlayerRecord, TilePos};
 
-/// A harness whose regions are a whole flat stud floor (bodies stand in level `STAND`),
+/// A harness whose regions are a whole floor (block 0 solid, block 1 air),
 /// built over `spawner`.
 fn floored_harness_with(spawner: InlineSpawner) -> Harness {
     let (out_send, packets) = unbounded();
     let (region_out_send, region_out) = unbounded();
+    let (lod_result_send, lod_result_recv) = unbounded();
+    let lod_builder: Box<dyn LodBuilder> = Box::new(InlineLodBuilder {
+        coarse: Box::new(|_key: &game::lod::LodKey| Vec::new()),
+        water: Box::new(game::lod::LodWater::dry),
+        out: lod_result_send,
+    });
     Harness {
-        manager: common::stud_manager(
-            spawner.with_stud_genesis(std::sync::Arc::new(crate::history_handover::floored_region)),
+        manager: WorldManager::new(
+            spawner,
+            Box::new(crate::history_handover::floored_region),
             out_send,
             region_out_send.clone(),
+            lod_builder,
+            lod_result_recv,
         ),
         region_out,
         region_out_send,
@@ -643,7 +720,7 @@ fn reconnect_same_token_restores_body_and_inventory() {
     h.event(session(0, 0, None), 0);
     rearrange_inventory(&mut h, 0);
     client_event(&mut h, 0, GameEventKind::Order(0, game::Order::SetMode { mode: PlayMode::Adventure, at: None }));
-    let at = place_body(&mut h, SPAWN_REGION, 0, [5, STAND, 7]);
+    let at = place_body(&mut h, SPAWN_REGION, 0, [5, 1, 7]);
     h.event(ServerEvent::ClientDisconnected(0), 10);
     h.drain_packets();
     // A new connection (a new client id) of the same player.
@@ -663,7 +740,7 @@ fn second_session_takes_over() {
     let mut h = floored_harness();
     h.event(session(0, 0, None), 0);
     rearrange_inventory(&mut h, 0);
-    let at = place_body(&mut h, SPAWN_REGION, 0, [4, STAND, 9]);
+    let at = place_body(&mut h, SPAWN_REGION, 0, [4, 1, 9]);
     h.drain_packets();
     // The same player connects again while its first session is still open
     // (a crashed client whose connection has not timed out yet).
@@ -718,13 +795,13 @@ fn park_in_dead_region_does_not_lock_out() {
 fn restore_into_built_over_cell_lands_standable() {
     let mut h = floored_harness();
     h.event(session(0, 0, None), 0);
-    place_body(&mut h, SPAWN_REGION, 0, [5, STAND, 7]);
+    place_body(&mut h, SPAWN_REGION, 0, [5, 1, 7]);
     h.event(ServerEvent::ClientDisconnected(0), 10);
-    // Someone builds where the player stood: a two-tile pillar.
+    // Someone builds where the player stood: a two-block pillar.
     h.manager.spawner_mut().with_region(SPAWN_REGION, |region| {
         region.with_data(|d| {
-            assert!(common::fill_tile(d, [5, STAND, 7]) > 0);
-            assert!(common::fill_tile(d, [5, STAND + 1, 7]) > 0);
+            assert!(d.set_block_safe([5, 1, 7], game::Block::new(BlockId(1))));
+            assert!(d.set_block_safe([5, 2, 7], game::Block::new(BlockId(1))));
         });
     });
     // And the home region parks before the player is back.
@@ -734,11 +811,11 @@ fn restore_into_built_over_cell_lands_standable() {
     assert!(h.manager.parked_regions().contains(&SPAWN_REGION));
     h.event(session(1, 0, None), late);
     let t = body_of(&mut h, SPAWN_REGION, 1).expect("restored");
-    let tile = feet_tile(t);
+    let tile = feet_tile(feet_of(t));
     let mut ok = false;
     h.manager.spawner_mut().with_region(SPAWN_REGION, |region| ok = standable(region.data(), tile));
     assert!(ok, "the body stands on a standable tile, not inside the pillar: {tile:?}");
-    assert_eq!(tile, [5, STAND + 2, 7], "on top of the pillar");
+    assert_eq!(tile, [5, 3, 7], "on top of the pillar");
 }
 
 /// A save cut at the next tick (lockstep), taken.
@@ -776,13 +853,13 @@ fn fast_reconnect_waits_for_park() {
     let mut h = floored_harness();
     h.event(session(0, 0, None), 0);
     rearrange_inventory(&mut h, 0);
-    let at = place_body(&mut h, SPAWN_REGION, 0, [9, STAND, 4]);
+    let at = place_body(&mut h, SPAWN_REGION, 0, [9, 1, 4]);
     // Disconnect and reconnect before the region has parked the body (no
     // settle in between), with a stale record from the store.
     h.manager.handle_server_event(ServerEvent::ClientDisconnected(0), 10);
     let stale = PlayerRecord {
         client: game::Client::default(),
-        pose: game::Pose::from_translation(body_on_tile([1, STAND, 1])),
+        pose: game::Pose::from_translation(body_on_tile([1, 1, 1])),
         region: SPAWN_REGION,
         fortress: None,
         adventure: None,
@@ -806,7 +883,7 @@ fn restart_restores_player() {
     let mut h = floored_harness();
     h.event(session(0, 0, None), 0);
     rearrange_inventory(&mut h, 0);
-    let at = place_body(&mut h, SPAWN_REGION, 0, [6, STAND, 2]);
+    let at = place_body(&mut h, SPAWN_REGION, 0, [6, 1, 2]);
     h.manager.spawner_mut().tick_all();
     h.settle(0);
     let at = body_of(&mut h, SPAWN_REGION, 0).unwrap_or(at);
@@ -836,7 +913,7 @@ fn disconnect_mid_crossing_parks_the_body_where_it_went() {
     rearrange_inventory(&mut h, 0);
     // Past the +x seam: the next tick hands the body to (1, 0).
     let edge = game::REGION_BLOCKS as i32;
-    place_body(&mut h, SPAWN_REGION, 0, [edge + 2, STAND, 7]);
+    place_body(&mut h, SPAWN_REGION, 0, [edge + 2, 1, 7]);
     h.manager.spawner_mut().tick_all();
     // The disconnect reaches the manager before the departure does: the park
     // goes to the old home, which no longer has the body.
@@ -872,7 +949,7 @@ fn starting_kit_only_for_new_player() {
     // A known player who used it up comes back empty-handed, not with a new kit.
     let record = PlayerRecord {
         client: game::Client { inventory: game::Inventory::new(), ..game::Client::default() },
-        pose: game::Pose::from_translation(body_on_tile([3, STAND, 3])),
+        pose: game::Pose::from_translation(body_on_tile([3, 1, 3])),
         region: SPAWN_REGION,
         fortress: None,
         adventure: None,
@@ -903,7 +980,7 @@ struct FailingSpawner {
 impl FailingSpawner {
     fn new(fail: RegionCoords) -> Self {
         FailingSpawner {
-            inner: common::stud_spawner(crate::history_handover::floored_region),
+            inner: InlineSpawner::default(),
             fail,
             failures: 1,
             starts: Vec::new(),
@@ -921,10 +998,6 @@ impl FailingSpawner {
 }
 
 impl game::RegionSpawner for FailingSpawner {
-    fn stud_genesis(&self, rc: RegionCoords) -> Option<game::StudRegionSeed> {
-        self.inner.stud_genesis(rc)
-    }
-
     fn spawn(
         &mut self,
         id: RegionCoords,
@@ -966,7 +1039,20 @@ fn region_load_failure_never_regenerates() {
     let spawner = FailingSpawner::new(east);
     let (out_send, packets) = unbounded();
     let (region_out_send, region_out) = unbounded();
-    let mut manager = common::stud_manager(spawner, out_send, region_out_send);
+    let (lod_result_send, lod_result_recv) = unbounded();
+    let lod_builder: Box<dyn LodBuilder> = Box::new(InlineLodBuilder {
+        coarse: Box::new(|_key: &game::lod::LodKey| Vec::new()),
+        water: Box::new(game::lod::LodWater::dry),
+        out: lod_result_send,
+    });
+    let mut manager = WorldManager::new(
+        spawner,
+        Box::new(crate::history_handover::floored_region),
+        out_send,
+        region_out_send,
+        lod_builder,
+        lod_result_recv,
+    );
     // 3x3 tiles around the spawn region, every one with a dry landing.
     let tiles = (0..9).map(|_| play_tile()).collect();
     manager.set_world_map(game::WorldMap {
@@ -995,7 +1081,7 @@ fn region_load_failure_never_regenerates() {
     let edge = game::REGION_SIZE;
     let mut slime = None;
     manager.spawner_mut().inner.with_region(SPAWN_REGION, |region| {
-        let y = common::above_floor_y();
+        let y = game::BLOCK_VOXELS as f32 + 10.0;
         let e = crate::common::spawn_slime(region, [edge + game::FLIP_HYSTERESIS + 2.0, y, 128.0], 1, 0.0, 0);
         slime = *region.data().ecs.id.try_get(e);
     });
@@ -1093,7 +1179,20 @@ impl FailHarness {
     fn new(spawner: FailingSpawner) -> Self {
         let (out_send, packets) = unbounded();
         let (region_out_send, region_out) = unbounded();
-        let mut manager = common::stud_manager(spawner, out_send, region_out_send);
+        let (lod_result_send, lod_result_recv) = unbounded();
+        let lod_builder: Box<dyn LodBuilder> = Box::new(InlineLodBuilder {
+            coarse: Box::new(|_key: &game::lod::LodKey| Vec::new()),
+            water: Box::new(game::lod::LodWater::dry),
+            out: lod_result_send,
+        });
+        let mut manager = WorldManager::new(
+            spawner,
+            Box::new(crate::history_handover::floored_region),
+            out_send,
+            region_out_send,
+            lod_builder,
+            lod_result_recv,
+        );
         let tiles = (0..9).map(|_| play_tile()).collect();
         manager.set_world_map(game::WorldMap {
             origin: RegionCoords::new(-1, -1),
@@ -1229,7 +1328,7 @@ fn record_of_a_restore_into_a_failed_region_is_kept() {
     client.inventory.slots[MARK_SLOT + 1] = Some(MARK_CURSOR);
     let stored = PlayerRecord {
         client,
-        pose: game::Pose::from_translation(body_on_tile([5, STAND, 7])),
+        pose: game::Pose::from_translation(body_on_tile([5, 1, 7])),
         region: east,
         fortress: None,
         adventure: None,
@@ -1266,7 +1365,7 @@ fn off_map_record_refused_at_an_unavailable_spawn_is_not_parked() {
     let off_map = RegionCoords::new(0, 5);
     let stored = PlayerRecord {
         client: game::Client::default(),
-        pose: game::Pose::from_translation(body_on_tile([5, STAND, 7])),
+        pose: game::Pose::from_translation(body_on_tile([5, 1, 7])),
         region: off_map,
         fortress: None,
         adventure: None,

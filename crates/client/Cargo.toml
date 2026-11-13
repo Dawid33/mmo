@@ -37,8 +37,6 @@ bevy = { workspace = true }
 image = { workspace = true }
 bytemuck = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
-# `assets/studs/colors.ron` (renderer/stud/mesh.rs); same version as game's, no extra build.
-ron = "0.12"
 # Serde + bincode: native session wire bits, and on wasm the messages to and
 # from the Web Workers (`src/web_worker/`).
 serde = { workspace = true, features = ["std"] }
@@ -47,9 +45,6 @@ bincode = { workspace = true }
 # UI is bevy_ui. The clipboard/open_url defaults are left out (extra deps).
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-# The prefab library's Import from / Export to clipboard (`prefab_editor/library_ui.rs`).
-# Already in the tree (Bevy's and Slint's clipboard), so it adds no build.
-arboard = { version = "3.6", default-features = false }
 # The device sign-in opens the identity provider's page in the system browser (`login/flow.rs`).
 open = "5"
 quinn = { workspace = true }
@@ -125,6 +120,7 @@ web-sys = { version = "0.3", features = [
 ] }
 
 [dev-dependencies]
+block-mesh = { workspace = true }
 # The asset viewer's screen (examples/asset_viewer.rs).
 slint-ui-tools = { workspace = true }
 naga = { version = "29.0", features = ["wgsl-in"] }

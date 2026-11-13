@@ -21,12 +21,6 @@ fn with_mode(mode: HashMode) -> ModeGuard {
     ModeGuard(g)
 }
 
-/// A stud chunk holding one stone slab three plates thick: "a terrain chunk".
-fn slab_chunk() -> game::StudChunk {
-    let n = game::STUD_CHUNK_STUDS as u8;
-    game::StudChunk::new([game::StudBrick::filler([0, 0, 0], [n, 3, n], game::MAT_STONE)]).unwrap()
-}
-
 fn new_rollback() -> (
     Rollback,
     crossbeam::channel::Receiver<game::GameDataUpdate>,
@@ -105,7 +99,7 @@ fn entity_lifecycle_rolls_back_bit_exact_under_delta() {
     let _mode = with_mode(HashMode::Delta);
     let (mut r, _recv) = new_rollback();
     r.new_transaction();
-    r.create_stud_chunk_safe(game::StudChunkCoords { x: 0, y: 0, z: 0 }, slab_chunk());
+    r.create_mesh(game::ChunkCoords::new(0, 0, 0), game::Chunk::flat_floor(8));
     let h1 = game::state_hash(&r);
 
     r.new_transaction();
@@ -240,7 +234,7 @@ fn perf_evidence_hash_modes() {
         region.with_data(|r| {
             for x in 0..4 {
                 for z in 0..4 {
-                    r.create_stud_chunk_safe(game::StudChunkCoords { x, y: 0, z }, slab_chunk());
+                    r.create_mesh(game::ChunkCoords::new(x, 0, z), game::Chunk::flat_floor(8));
                 }
             }
         });

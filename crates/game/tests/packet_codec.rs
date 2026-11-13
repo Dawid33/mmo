@@ -148,6 +148,32 @@ fn world_map_tile_lookup() {
     assert_eq!(map.coords(4), RegionCoords::new(0, 0));
 }
 
+/// Water plan Task 8: `LodData` carries the key's `LodWater` surface layer
+/// next to its terrain grids, through the shared wire framing.
+#[test]
+fn lod_data_round_trips_with_water() {
+    use game::lod::{LodKey, LodWater, PackedLodGrid};
+    let key = LodKey { factor: 16, coords: [-2, 3] };
+    let side = 4u16;
+    let mut tops = vec![(game::NO_WATER, 0u8); usize::from(side) * usize::from(side)];
+    tops[5] = (63, 12);
+    tops[6] = (63, 12);
+    tops[11] = (70, 255);
+    let water = LodWater::encode(&tops, side);
+    assert!(water.is_well_formed());
+    assert_eq!(water.decode().as_deref(), Some(&tops[..]));
+    let payload = vec![([0, 1, 0], PackedLodGrid(vec![(32 * 32 * 32, game::BlockId(2))]))];
+    let wire = encode_packet(&ServerPacket::LodData(key, payload.clone(), water.clone())).unwrap();
+    match decode_packet::<ServerPacket>(&wire).unwrap() {
+        ServerPacket::LodData(k, p, w) => {
+            assert_eq!(k, key);
+            assert_eq!(p, payload);
+            assert_eq!(w, water);
+        }
+        other => panic!("wrong variant {other:?}"),
+    }
+}
+
 #[test]
 fn client_id_above_u32_round_trips() {
     let id: game::ClientId = 1 << 40;
@@ -159,13 +185,13 @@ fn client_id_above_u32_round_trips() {
 /// The variants R3 appended (`ServerPacket::Host`, `RegionElsewhere`,
 /// `Credential::Observer`) cross the codec, and every older variant keeps its encoded tag
 /// (bincode's little-endian `u32` variant index), so an older peer still reads them: the
-/// tags of `StudLodData` and `Jwt` as they were before the append.
+/// tags of `LodData` and `Jwt` as they were before the append.
 #[test]
 fn new_variants_round_trip_and_old_indices_are_unchanged() {
     use game::{Credential, HostEndpoint, ObserverTicket};
     let tag = |bytes: &[u8]| u32::from_le_bytes(bytes[..4].try_into().unwrap());
-    let lod = ServerPacket::StudLodData(game::LodKey { factor: 64, coords: [0, 0] }, Default::default());
-    assert_eq!(tag(&bincode::serialize(&lod).unwrap()), 18, "StudLodData's tag");
+    let lod = ServerPacket::LodData(game::lod::LodKey { factor: 64, coords: [0, 0] }, Vec::new(), Default::default());
+    assert_eq!(tag(&bincode::serialize(&lod).unwrap()), 6, "LodData's tag");
     assert_eq!(tag(&bincode::serialize(&Credential::Jwt("x".into())).unwrap()), 1, "Jwt's tag");
 
     let endpoint = HostEndpoint {

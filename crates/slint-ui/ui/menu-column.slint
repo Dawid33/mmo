@@ -1,5 +1,4 @@
 import { Button, FrameFace, GraphicalSets, LabelFace, Styles, VerticalFlow } from "@widgets";
-import { PickList } from "controls.slint";
 
 export global MenuLayout {
     out property <length> width: 260px;
@@ -21,13 +20,6 @@ export component MenuColumn {
     in property <int> priority;
     // "Level 64 · 6 below surface"; "" until the level is known.
     in property <string> level-text;
-    // The Build tool's material choices (stud terrain: the natural materials
-    // a build can name); empty = no picker (another tool, or voxel terrain).
-    in property <[string]> build-materials;
-    in property <int> build-material: -1;
-    callback pick-build-material(int);
-    // Rows shown before the material list scrolls.
-    in property <int> build-material-rows: 6;
 
     in property <int> selected-count;
     // The inspector's lines (one person) or a count per kind.
@@ -87,14 +79,6 @@ export component MenuColumn {
                 }
                 if root.tool-name != "": LabelFace { text: "Priority " + root.priority + "  [1–7]"; }
                 if root.tool-name != "" && root.level-text != "": LabelFace { text: root.level-text; }
-                if root.tool-name != "" && root.build-materials.length > 0: LabelFace { text: "Material"; }
-                if root.tool-name != "" && root.build-materials.length > 0: materials := PickList {
-                    height: self.natural-height;
-                    max-visible: root.build-material-rows;
-                    items: root.build-materials;
-                    selected: root.build-material;
-                    picked(i) => { root.pick-build-material(i); }
-                }
 
                 if root.selected-count > 0: LabelFace {
                     style: Styles.caption-label;

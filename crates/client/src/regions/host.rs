@@ -459,7 +459,7 @@ mod tests {
 
     /// A snapshot holding `CLIENT`, as the server would send it.
     fn snapshot() -> Rollback {
-        let mut server = Region::empty(RC);
+        let mut server = Region::from_chunks(RC, Vec::new());
         server.handle_event(GameEventKind::CreateClient(CLIENT)).unwrap();
         server.commit_server_event();
         server.data().clone()
@@ -546,7 +546,7 @@ mod tests {
         for x in 0..3 {
             let mut c = ctx();
             c.id = RegionCoords::new(x, 0);
-            let mut server = Region::empty(c.id);
+            let mut server = Region::from_chunks(c.id, Vec::new());
             server.handle_event(GameEventKind::CreateClient(CLIENT)).unwrap();
             server.commit_server_event();
             host.spawn(c, server.data().clone(), None);

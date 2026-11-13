@@ -256,7 +256,7 @@ pub fn island_info(seed: u64, rc: game::RegionCoords) -> Option<IslandInfo> {
         log::warn!("[islands] coastal spawn {spawn:?} lies outside region {rc:?}; spawning at the island centre");
         spawn = island.centre;
     }
-    let bv = f64::from(game::movement::UNITS_PER_METER); // sim units per block column
+    let bv = game::BLOCK_VOXELS as f64;
     let local = |v: f64, o: f64| ((v - o).floor() * bv + bv / 2.0) as u32;
     let size_cells = ((2.0 * island.reach() / ISLAND_CELL_M).ceil() as u32).next_power_of_two();
     let half = size_cells as f64 * ISLAND_CELL_M / 2.0;

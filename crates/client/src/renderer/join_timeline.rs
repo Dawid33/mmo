@@ -3,8 +3,10 @@
 //! actually on screen — plus a slow heartbeat while it is not, which is the
 //! evidence for a load that never finishes.
 //!
-//! `world_ready`: every near region spawned, every expected LOD key rooted,
-//! every mesh queue drained and nothing in flight, held for
+//! `world_ready` deliberately mirrors the render benchmark's readiness gates
+//! (`render_bench::BenchmarkReadiness`) minus the benchmark-only ones (backend
+//! authority, far-voxel residency): every near region spawned, every expected
+//! LOD key rooted, every queue drained and nothing in flight, held for
 //! [`WORLD_READY_STABLE_FRAMES`]. The system parks itself once that fires, so
 //! steady-state play pays one `bool` check per frame.
 
@@ -12,12 +14,14 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use bevy::prelude::*;
 
-use super::bridge::RegionRoots;
+use super::bridge::{PendingSnapshotVoxels, RegionRoots};
+use super::far_voxel::lifecycle::FarVoxelUploadPending;
+use super::far_voxel::FarBrickBuildTask;
 use super::hud::HudStatus;
 use super::lod_rings::LodRings;
-use super::stud::far::StudLodTasks;
-use super::stud::systems::{StudMeshChildren, StudMeshTasks};
-use super::stud::world::StudWorld;
+use super::meshing::lod::{LodBuildQueue, LodChunk, LodMeshTask, LodRasterReady};
+use super::meshing::queue::RemeshQueue;
+use super::meshing::{MeshingTask, TerrainQuadCount};
 use crate::world_scale::WorldScale;
 
 /// Consecutive all-gates-green frames before `world_ready` is declared. The
@@ -64,12 +68,9 @@ pub struct LoadDepths {
     pub lod_roots: usize,
     /// `None` until the viewer's region is known (the key set depends on it).
     pub expected_lod_keys: Option<usize>,
-    /// Near stud chunks waiting for a mesh job.
     pub remesh_queue: usize,
-    /// Far tile mesh jobs not landed yet.
     pub lod_build_queue: usize,
     pub pending_lod_events: usize,
-    /// Near chunk mesh jobs in flight.
     pub in_flight_tasks: usize,
 }
 
@@ -94,16 +95,29 @@ impl LoadDepths {
 pub fn track_join_timeline(
     // Per session: a second world gets its own join timeline.
     mut state: crate::session::SessionLocal<JoinTimelineState>,
-    time: Res<Time<Real>>,
-    mut world_ready: ResMut<WorldReady>,
+    // Paired: the function is at Bevy's 16-parameter limit.
+    (time, mut world_ready): (Res<Time<Real>>, ResMut<WorldReady>),
     scale: Option<Res<WorldScale>>,
     hud: Res<HudStatus>,
     roots: Res<RegionRoots>,
     rings: Res<LodRings>,
-    stud_world: Res<StudWorld>,
-    near_tasks: Res<StudMeshTasks>,
-    far_tasks: Res<StudLodTasks>,
-    meshed_chunks: Query<(), With<StudMeshChildren>>,
+    remesh_queue: Res<RemeshQueue>,
+    lod_build_queue: Res<LodBuildQueue>,
+    in_flight_near: Query<(), With<MeshingTask>>,
+    in_flight_lod: Query<(), With<LodMeshTask>>,
+    in_flight_bricks: Query<(), With<FarBrickBuildTask>>,
+    in_flight_far_uploads: Query<(), With<FarVoxelUploadPending>>,
+    meshed_bricks: Query<(), (With<super::bricks::BrickOf>, With<TerrainQuadCount>)>,
+    pending_snapshot_voxels: Query<(), With<PendingSnapshotVoxels>>,
+    lod_cells: Query<(
+        &LodChunk,
+        &ChildOf,
+        &Transform,
+        Option<&TerrainQuadCount>,
+        Has<LodRasterReady>,
+        &ViewVisibility,
+    )>,
+    names: Query<&Name>,
 ) {
     let state = state.get();
     if state.done {
@@ -125,26 +139,36 @@ pub fn track_join_timeline(
         if let Some(viewer) = hud.viewer_region.filter(|v| state.expected_for != Some((*v, roots.0.len()))) {
             state.expected_for = Some((viewer, roots.0.len()));
             let near: BTreeSet<game::RegionCoords> = roots.0.keys().copied().collect();
-            // The table the instance subscribes with (`set_world_scale`).
-            let table = game::stud_ring_table(scale.lod_table);
-            let (_, keys) = crate::instance::desired_lod(viewer, &near, &BTreeMap::new(), &table, game::lod::LOD_STICKY_BAND);
+            let (_, keys) = crate::instance::desired_lod(
+                viewer,
+                &near,
+                &BTreeMap::new(),
+                scale.lod_table,
+                game::lod::LOD_STICKY_BAND,
+            );
             state.expected_lod_keys = Some(keys.len());
         }
     }
 
-    let in_flight_near_tasks = near_tasks.len();
+    // Chunks still waiting for their off-thread snapshot voxels are not in the
+    // remesh queue yet, but they are very much unfinished near-mesh work.
+    let in_flight_near_tasks =
+        in_flight_near.iter().count() + pending_snapshot_voxels.iter().count();
     let depths = LoadDepths {
         near_regions: roots.0.len(),
         required_near_regions: scale.near_region_count(),
         lod_roots: rings.roots.len(),
         expected_lod_keys: state.expected_lod_keys,
-        remesh_queue: stud_world.queued(),
-        lod_build_queue: far_tasks.len(),
+        remesh_queue: remesh_queue.dirty.len(),
+        lod_build_queue: lod_build_queue.pending_count(),
         pending_lod_events: rings.pending.len(),
-        in_flight_tasks: in_flight_near_tasks,
+        in_flight_tasks: in_flight_near_tasks
+            + in_flight_lod.iter().count()
+            + in_flight_bricks.iter().count()
+            + in_flight_far_uploads.iter().count(),
     };
 
-    if !state.first_mesh && !meshed_chunks.is_empty() {
+    if !state.first_mesh && !meshed_bricks.is_empty() {
         state.first_mesh = true;
         game::perf_event!("first_near_mesh", "regions={}", depths.near_regions);
     }
@@ -156,9 +180,9 @@ pub fn track_join_timeline(
         state.near_drained = true;
         game::perf_event!(
             "near_meshing_drained",
-            "regions={} meshed_chunks={}",
+            "regions={} meshed_bricks={}",
             depths.near_regions,
-            meshed_chunks.iter().count()
+            meshed_bricks.iter().count()
         );
     }
 
@@ -179,6 +203,9 @@ pub fn track_join_timeline(
                 depths.lod_roots,
                 state.frames
             );
+            if game::perf::budget_lines_requested() {
+                log_lod_render_state(&lod_cells, &names);
+            }
         }
         return;
     }
@@ -204,6 +231,79 @@ pub fn track_join_timeline(
             state.frames,
             hud.connection
         );
+    }
+}
+
+/// One-shot `[perf-lod]` dump at `world_ready` (`PERF_LOG=1` only): per LOD
+/// root, how many cells exist / finished meshing / have quads / passed view
+/// culling this frame, plus a top-down x/z map of quad density — the client-side
+/// twin of `worldgen`'s `lod_coverage` example, which maps what the server
+/// SENT. A full map there and a partial one here puts the loss in client
+/// meshing; full in both puts it in culling or drawing. Rows are z, columns x:
+/// `.` no cell, `0` cells but no quads, `1`-`9` log2-ish quad density.
+#[allow(clippy::type_complexity)]
+fn log_lod_render_state(
+    lod_cells: &Query<(
+        &LodChunk,
+        &ChildOf,
+        &Transform,
+        Option<&TerrainQuadCount>,
+        Has<LodRasterReady>,
+        &ViewVisibility,
+    )>,
+    names: &Query<&Name>,
+) {
+    #[derive(Default)]
+    struct Root {
+        cells: u32,
+        ready: u32,
+        with_quads: u32,
+        visible: u32,
+        quads: u64,
+        map: BTreeMap<(i32, i32), u32>,
+    }
+    let mut roots: BTreeMap<Entity, Root> = BTreeMap::new();
+    for (chunk, parent, transform, quads, ready, view) in lod_cells {
+        let root = roots.entry(parent.parent()).or_default();
+        let span = 32.0 * chunk.factor as f32;
+        let cell = (
+            (transform.translation.x / span).round() as i32,
+            (transform.translation.z / span).round() as i32,
+        );
+        let quads = quads.map_or(0, |q| q.0);
+        root.cells += 1;
+        root.ready += ready as u32;
+        root.with_quads += (quads > 0) as u32;
+        root.visible += view.get() as u32;
+        root.quads += quads as u64;
+        let slot = root.map.entry(cell).or_default();
+        *slot = (*slot).max(quads);
+    }
+    for (entity, root) in &roots {
+        let name = names.get(*entity).map_or("?".to_string(), |n| n.as_str().replace(' ', "_"));
+        info!(
+            "[perf-lod] root={name} cells={} raster_ready={} with_quads={} view_visible={} quads={}",
+            root.cells, root.ready, root.with_quads, root.visible, root.quads
+        );
+        let (Some(min_x), Some(max_x)) =
+            (root.map.keys().map(|k| k.0).min(), root.map.keys().map(|k| k.0).max())
+        else {
+            continue;
+        };
+        let (min_z, max_z) = (
+            root.map.keys().map(|k| k.1).min().unwrap_or(0),
+            root.map.keys().map(|k| k.1).max().unwrap_or(0),
+        );
+        for z in min_z..=max_z {
+            let row: String = (min_x..=max_x)
+                .map(|x| match root.map.get(&(x, z)) {
+                    None => '.',
+                    Some(0) => '0',
+                    Some(&q) => char::from(b'0' + (32 - q.leading_zeros()).clamp(1, 9) as u8),
+                })
+                .collect();
+            info!("[perf-lod]   x{min_x}..{max_x} z={z:<3} {row}");
+        }
     }
 }
 

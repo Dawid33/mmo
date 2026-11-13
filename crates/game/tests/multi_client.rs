@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 use game::StateHash;
 
-use game::{GameEventKind, InputEvent, Key, Region, RegionCoords, World};
+use game::{Chunk, ChunkCoords, GameEventKind, InputEvent, Key, Region, RegionCoords, World};
 
 fn state_hash(r: &game::Rollback) -> u32 {
     let mut hasher = crc32fast::Hasher::new();
@@ -18,9 +18,22 @@ fn r0() -> RegionCoords {
 
 fn minimal_world() -> World {
     let mut world = World::new();
-    // Flat stud ground in the chunk column under the spawn at (128, 128).
-    let (x, z) = (game::PLAYER_SPAWN_X, game::PLAYER_SPAWN_Z);
-    world.load(&r0(), crate::common::floor_region(r0(), x..x + 1.0, z..z + 1.0, crate::common::FLOOR_PLATES));
+    world.load(
+        &r0(),
+        Region::from_chunks(
+            r0(),
+            // The chunk under the spawn at (128, 128): chunk (4, 0, 4) at
+            // 2-block chunks, (0, 0, 0) at 16.
+            vec![(
+                ChunkCoords::new(
+                    (game::PLAYER_SPAWN_X / game::CHUNK_UNITS as f32) as usize,
+                    0,
+                    (game::PLAYER_SPAWN_Z / game::CHUNK_UNITS as f32) as usize,
+                ),
+                Chunk::flat_floor(8),
+            )],
+        ),
+    );
     world
 }
 
@@ -238,6 +251,22 @@ fn create_player_attaches_capsule_collider() {
     assert_eq!(collider.parent(), Some(handle));
 }
 
+#[test]
+fn chunk_gets_voxels_collider() {
+    let server = minimal_world();
+    let data = server.data(&r0());
+    assert_eq!(data.physics.colliders.len(), 1);
+    let (_, collider) = data.physics.colliders.iter().next().unwrap();
+    assert!(
+        collider.shape().as_voxels().is_some(),
+        "chunk collider is a Voxels shape"
+    );
+    assert!(
+        collider.parent().is_some(),
+        "parented to the chunk's fixed body"
+    );
+}
+
 /// Feeds one key edge to player 0 on the server.
 fn key(server: &mut World, key: Key, pressed: bool) {
     server
@@ -266,11 +295,9 @@ fn player_motion(server: &World) -> game::Motion {
     data.ecs.motion.try_get(e).expect("players carry movement state")
 }
 
-/// A body resting on the studded floor sits a hair (the controller's skin
-/// offset) above the stud caps plus its capsule's half-extent.
-fn rest_y() -> f32 {
-    crate::common::standing_y(crate::common::FLOOR_PLATES) + game::stud_cap_units()
-}
+/// Floor top is y=8 and the capsule half-extent is 14.4, so a resting body
+/// sits a hair (the controller's skin offset) above y=22.4.
+const REST_Y: f32 = 8.0 + game::movement::PLAYER_CAPSULE_HALF_HEIGHT + game::movement::PLAYER_CAPSULE_RADIUS;
 
 /// A server player standing on the floor with input enabled (E pressed).
 fn grounded_player() -> World {
@@ -292,15 +319,15 @@ fn idle_player_falls_under_gravity_and_rests_on_terrain() {
     ticks(&mut server, 60);
 
     let y = player_y(&server);
-    assert!(y > rest_y() - 0.01, "player tunneled through the floor: y = {y}");
-    assert!(y < rest_y() + 1.0, "player never reached the floor: y = {y}");
+    assert!(y > REST_Y - 0.01, "player tunneled through the floor: y = {y}");
+    assert!(y < REST_Y + 1.0, "player never reached the floor: y = {y}");
     let motion = player_motion(&server);
     assert!(motion.grounded);
     assert_eq!(motion.vel_y, 0.0, "a resting body carries no fall speed");
 }
 
 #[test]
-fn space_jumps_over_a_tile_height_and_lands_again() {
+fn space_jumps_over_a_block_height_and_lands_again() {
     let mut server = grounded_player();
     let rest = player_y(&server);
     key(&mut server, Key::Space, true);
@@ -312,13 +339,8 @@ fn space_jumps_over_a_tile_height_and_lands_again() {
         ticks(&mut server, 1);
         peak = peak.max(player_y(&server));
     }
-    // The stud body's ballistic peak, jump² / 2g with its scaled parameters.
-    use game::movement::{BodyScale, MoveParams, GRAVITY, UNITS_PER_METER};
-    let p = BodyScale::STUD.move_params(MoveParams::PLAYER);
-    let ideal = p.jump_speed * p.jump_speed / (2.0 * GRAVITY * p.gravity_scale) * UNITS_PER_METER;
-    assert!(ideal > crate::common::tile_h(), "the ideal arc clears a tile");
-    assert!(peak - rest > crate::common::tile_h(), "jump peaked {} units up, under one tile", peak - rest);
-    assert!(peak - rest < ideal + 0.5, "jump peaked {} units up, over the ideal {ideal}", peak - rest);
+    assert!(peak - rest > 16.0, "jump peaked {} units up, under one block", peak - rest);
+    assert!(peak - rest < 24.0, "jump peaked {} units up", peak - rest);
     assert!((player_y(&server) - rest).abs() < 0.5, "must land back on the floor");
     let motion = player_motion(&server);
     assert!(motion.grounded && !motion.flying);

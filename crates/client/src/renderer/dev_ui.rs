@@ -2,7 +2,7 @@
 //! player UI: the last tab of the top-left fortress panel in `GameUi`
 //! (crates/slint-ui/ui/debug-tab.slint), on the tab row only in `dev_ui`
 //! builds. F3 opens it (and collapses it again), as does a click on the tab.
-//! Stats, the debug toggles (the same flags as F5–F8) and stand-ins for
+//! Stats, the debug toggles (the same flags as F4–F8) and stand-ins for
 //! systems that don't exist yet.
 //!
 //! The tab does not pause the game: in the commander view the pointer is
@@ -21,10 +21,13 @@ use slint_ui::{DevStat, DevTickRow, GameUi};
 
 use super::boundaries::BoundaryOverlay;
 use super::collider_debug::DebugFlagsRes;
+use super::config::TerrainRenderConfig;
 use super::cursor::CursorPolicy;
 use super::grid_debug::{GridDebug, TerrainDebug};
 use super::hud::{HudStatus, RegionTickTimes};
+use super::meshing::visibility::CullingConfig;
 use super::slint_overlay::SlintLayer;
+use super::voxel_pull::xray::XraySettings;
 use super::{GameEvents, LocalPlayer, UiCamera};
 
 /// Opens and collapses the Debug tab.
@@ -42,27 +45,34 @@ const NO_TAB: i32 = -1;
 pub enum DevToggle {
     Boundaries,
     ChunkGrid,
+    CaveCulling,
     HideLod,
     HideNear,
     Colliders,
+    /// The cut-off view's dug-space x-ray (`voxel_pull::xray`), for comparison.
+    Xray,
 }
 
 impl DevToggle {
-    pub const ALL: [DevToggle; 5] = [
+    pub const ALL: [DevToggle; 7] = [
         DevToggle::Boundaries,
         DevToggle::ChunkGrid,
+        DevToggle::CaveCulling,
         DevToggle::HideLod,
         DevToggle::HideNear,
         DevToggle::Colliders,
+        DevToggle::Xray,
     ];
 
     pub fn label(self) -> &'static str {
         match self {
             DevToggle::Boundaries => "Region boundaries (F8)",
             DevToggle::ChunkGrid => "Chunk grid (F5)",
+            DevToggle::CaveCulling => "Cave culling (F4)",
             DevToggle::HideLod => "Hide LOD (F6)",
             DevToggle::HideNear => "Hide near terrain (F7)",
             DevToggle::Colliders => "Collider wireframes",
+            DevToggle::Xray => "Dug-space x-ray (cut off)",
         }
     }
 }
@@ -157,10 +167,12 @@ pub fn toggle_checked(toggle: DevToggle, world: &World) -> bool {
     match toggle {
         DevToggle::Boundaries => world.resource::<BoundaryOverlay>().enabled,
         DevToggle::ChunkGrid => world.resource::<GridDebug>().enabled,
+        DevToggle::CaveCulling => world.resource::<CullingConfig>().graph_enabled,
         DevToggle::HideLod => world.resource::<TerrainDebug>().hide_lod,
         DevToggle::HideNear => world.resource::<TerrainDebug>().hide_near,
         // Shared with the game thread, which only builds lines while on.
         DevToggle::Colliders => world.resource::<DebugFlagsRes>().0.collider_wireframes(),
+        DevToggle::Xray => world.get_resource::<XraySettings>().is_some_and(|x| x.enabled),
     }
 }
 
@@ -169,9 +181,11 @@ pub fn apply_dev_action(action: DevAction, world: &mut World) {
         DevAction::Toggle(toggle, on) => match toggle {
             DevToggle::Boundaries => world.resource_mut::<BoundaryOverlay>().enabled = on,
             DevToggle::ChunkGrid => world.resource_mut::<GridDebug>().enabled = on,
+            DevToggle::CaveCulling => world.resource_mut::<CullingConfig>().graph_enabled = on,
             DevToggle::HideLod => world.resource_mut::<TerrainDebug>().hide_lod = on,
             DevToggle::HideNear => world.resource_mut::<TerrainDebug>().hide_near = on,
             DevToggle::Colliders => world.resource::<DebugFlagsRes>().0.set_collider_wireframes(on),
+            DevToggle::Xray => world.insert_resource(XraySettings { enabled: on }),
         },
         DevAction::CompleteOrders => {
             if let Some(client) = world.resource::<LocalPlayer>().0 {
@@ -193,10 +207,7 @@ pub fn apply_dev_action(action: DevAction, world: &mut World) {
 /// its local frame): the tile under it in the `home` region's block
 /// coordinates — orders run in the home region, which refuses a tile off its
 /// columns. `None` without a point or a home.
-pub fn drop_body_order(
-    target: Option<(game::RegionCoords, Vec3)>,
-    home: Option<game::RegionCoords>,
-) -> Option<game::Order> {
+pub fn drop_body_order(target: Option<(game::RegionCoords, Vec3)>, home: Option<game::RegionCoords>) -> Option<game::Order> {
     let ((region, local), home) = (target?, home?);
     Some(game::Order::DevDropBody { at: super::commander::move_order::hover_tile(region, local, home) })
 }
@@ -233,6 +244,7 @@ pub fn dev_stats(
     frame_ms: Option<f64>,
     pos: Option<Vec3>,
     status: &HudStatus,
+    terrain: &TerrainRenderConfig,
     entities: usize,
     calendar: Option<game::history::CalendarTick>,
 ) -> Vec<(String, String)> {
@@ -244,6 +256,7 @@ pub fn dev_stats(
         ("Home region".into(), region(status.home_region)),
         ("Viewer region".into(), region(status.viewer_region)),
         ("Connection".into(), format!("{:?}", status.connection)),
+        ("Terrain".into(), format!("near {:?}, far {:?}", terrain.near, terrain.far)),
         ("Entities".into(), entities.to_string()),
         ("Date".into(), calendar.map_or("--".into(), |c| c.date().to_string())),
     ]
@@ -290,7 +303,7 @@ fn push_dev_panel(
         let pos = cameras.iter(world).next().map(|t| t.translation());
         let entities = all.get_or_insert_with(|| world.query()).iter(world).count();
         let calendar = world.get_resource::<super::history_view::HistoryView>().and_then(|h| h.calendar);
-        dev_stats(fps, frame_ms, pos, world.resource(), entities, calendar)
+        dev_stats(fps, frame_ms, pos, world.resource(), world.resource(), entities, calendar)
     });
     *since = if stats.is_some() { Some(0.0) } else { Some(elapsed.min(DEV_STATS_INTERVAL_S)) };
 
@@ -355,21 +368,23 @@ mod tests {
 
     #[test]
     fn stats_rows_match_the_old_panel() {
-        let rows = dev_stats(Some(59.6), Some(16.6667), Some(Vec3::new(1.0, 2.25, -3.0)), &HudStatus::default(), 42, Some(game::history::CalendarTick::from_days(0)));
+        let cfg = TerrainRenderConfig::default();
+        let rows = dev_stats(Some(59.6), Some(16.6667), Some(Vec3::new(1.0, 2.25, -3.0)), &HudStatus::default(), &cfg, 42, Some(game::history::CalendarTick::from_days(0)));
         let labels: Vec<&str> = rows.iter().map(|(l, _)| l.as_str()).collect();
         assert_eq!(
             labels,
-            ["FPS", "Frame", "Position", "Home region", "Viewer region", "Connection", "Entities", "Date"]
+            ["FPS", "Frame", "Position", "Home region", "Viewer region", "Connection", "Terrain", "Entities", "Date"]
         );
         assert_eq!(row(&rows, "FPS"), "60");
         assert_eq!(row(&rows, "Frame"), "16.67 ms");
         assert_eq!(row(&rows, "Position"), format!("1.0 / {:.1} / -3.0", 2.25f32));
         assert_eq!(row(&rows, "Home region"), "--");
+        assert_eq!(row(&rows, "Terrain"), format!("near {:?}, far {:?}", cfg.near, cfg.far));
         assert_eq!(row(&rows, "Entities"), "42");
         assert_eq!(row(&rows, "Date"), "1 Granite 0");
-        assert_eq!(row(&dev_stats(None, None, None, &HudStatus::default(), 0, None), "Date"), "--");
+        assert_eq!(row(&dev_stats(None, None, None, &HudStatus::default(), &cfg, 0, None), "Date"), "--");
 
-        let empty = dev_stats(None, None, None, &HudStatus::default(), 0, None);
+        let empty = dev_stats(None, None, None, &HudStatus::default(), &cfg, 0, None);
         assert_eq!(row(&empty, "FPS"), "--");
         assert_eq!(row(&empty, "Frame"), "--");
         assert_eq!(row(&empty, "Position"), "--");
@@ -382,9 +397,11 @@ mod tests {
             [
                 "Region boundaries (F8)",
                 "Chunk grid (F5)",
+                "Cave culling (F4)",
                 "Hide LOD (F6)",
                 "Hide near terrain (F7)",
                 "Collider wireframes",
+                "Dug-space x-ray (cut off)",
             ]
         );
     }
@@ -394,6 +411,7 @@ mod tests {
         let mut world = World::new();
         world.insert_resource(BoundaryOverlay { enabled: false });
         world.insert_resource(GridDebug::default());
+        world.insert_resource(CullingConfig { graph_enabled: false });
         world.insert_resource(TerrainDebug::default());
         world.insert_resource(DebugFlagsRes(game::DebugFlags::default()));
         world.insert_resource(GameEvents(send));
@@ -430,7 +448,7 @@ mod tests {
     #[test]
     fn drop_body_aims_at_the_last_ground_point_in_home_tiles() {
         let home = game::RegionCoords::new(0, 0);
-        let b = game::BLOCK_UNITS as f32;
+        let b = game::BLOCK_VOXELS as f32;
         // Region-local ground point → the home region's tile under it.
         let at = drop_body_order(Some((home, Vec3::new(3.5 * b, b, 9.25 * b))), Some(home));
         assert_eq!(at, Some(game::Order::DevDropBody { at: [3, 1, 9] }));
@@ -447,8 +465,7 @@ mod tests {
         let (mut world, recv) = world();
         let home = game::RegionCoords::new(0, 0);
         world.insert_resource(HudStatus { home_region: Some(home), ..Default::default() });
-        // The top of tile level 0, in the third tile along x and z.
-        world.insert_resource(DevDropTarget(Some((home, Vec3::new(40.0, game::tile_height_units(), 40.0)))));
+        world.insert_resource(DevDropTarget(Some((home, Vec3::new(40.0, 16.0, 40.0)))));
         apply_dev_action(DevAction::DropBody, &mut world);
         assert!(recv.try_recv().is_err(), "no local player: nothing sent");
         world.insert_resource(LocalPlayer(Some(7)));

@@ -1,29 +1,27 @@
 use bevy::prelude::*;
 
 use super::bridge::{SimKind, SimTarget};
-use super::stud::bodies::StudBodyModel;
+use super::voxel_bodies::VoxelBodyModel;
 use game::EntityKind;
 
 /// Lazily-created shared avatar assets (one mesh + material per kind for now).
 #[derive(Resource, Default)]
 pub struct AvatarAssets {
     player: Option<(Handle<Mesh>, Handle<StandardMaterial>)>,
-    /// The body scale `player`'s capsule was built for.
-    player_scale: Option<game::movement::BodyScale>,
     slime: Option<SlimeAssets>,
     body: Option<(Handle<Mesh>, Handle<StandardMaterial>)>,
 }
 
 /// Marks an `EntityKind::Body` drawn as the placeholder box (a body whose
-/// shape the renderer does not know: the dev-dropped cube, or a stud
+/// shape the renderer does not know: the dev-dropped cube, or a voxel
 /// body's halo mirror before its arrival brings the model). Removed, with
-/// the box, once the entity turns out to be a stud body.
+/// the box, once the entity turns out to be a voxel body.
 #[derive(Component, Debug)]
 pub struct BodyBox;
 
 /// Edge of a body's placeholder box, world units: one block, the dev
 /// drop's cube (`game::body::dev_drop_body_safe`).
-pub const BODY_BOX_EDGE: f32 = game::BLOCK_UNITS as f32;
+pub const BODY_BOX_EDGE: f32 = game::BLOCK_VOXELS as f32;
 
 /// A unit cube plus the slime's materials; every part is the cube scaled.
 #[derive(Clone)]
@@ -37,24 +35,19 @@ struct SlimeAssets {
 /// Attaches a renderable body to kind-bearing entities. Entities with an
 /// active `Camera3d` are the local player — the first-person camera sits
 /// inside the capsule, so the local player gets no mesh. A body that is a
-/// stud body (`StudBodyModel`) is drawn by `stud::bodies`, any other one
+/// voxel body (`VoxelBodyModel`) is drawn by `voxel_bodies`, any other one
 /// as a [`BodyBox`] — taken off again if the model comes later.
 pub fn attach_avatars(
     mut commands: Commands,
     added: Query<
-        (Entity, &SimKind, Has<super::rigs::SimAnimator>, Has<StudBodyModel>),
+        (Entity, &SimKind, Has<super::rigs::SimAnimator>, Has<VoxelBodyModel>),
         (Added<SimKind>, Without<Camera3d>, Without<SlimeAvatar>),
     >,
-    modelled: Query<Entity, (Added<StudBodyModel>, With<BodyBox>)>,
+    modelled: Query<Entity, (Added<VoxelBodyModel>, With<BodyBox>)>,
     mut assets: ResMut<AvatarAssets>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    body_scale: Res<super::stud::ClientBodyScale>,
 ) {
-    if assets.player_scale != Some(body_scale.0) {
-        assets.player = None;
-        assets.player_scale = Some(body_scale.0);
-    }
     for e in &modelled {
         commands.entity(e).remove::<(BodyBox, Mesh3d, MeshMaterial3d<StandardMaterial>)>();
     }
@@ -64,7 +57,7 @@ pub fn attach_avatars(
             EntityKind::Player if rigged => {}
             // A person is always drawn by `rigs` (the dwarf), never a capsule.
             EntityKind::Person { .. } => {}
-            // A stud body: its model is its look (`stud::bodies`).
+            // A voxel body: its model is its look (`voxel_bodies`).
             EntityKind::Body if modelled => {}
             // Any other body: a one-block box (the shape is not sent; the
             // only such body today is the dev-dropped cube).
@@ -91,8 +84,8 @@ pub fn attach_avatars(
                             // Mirrors the sim capsule in create_player_safe
                             // (Capsule3d takes the full cylinder length).
                             meshes.add(Capsule3d::new(
-                                body_scale.0.capsule_radius(),
-                                2.0 * body_scale.0.capsule_half_height(),
+                                game::movement::PLAYER_CAPSULE_RADIUS,
+                                2.0 * game::movement::PLAYER_CAPSULE_HALF_HEIGHT,
                             )),
                             materials.add(StandardMaterial {
                                 base_color: Color::srgb(0.8, 0.3, 0.3),
@@ -283,7 +276,6 @@ mod tests {
         app.init_asset::<Mesh>();
         app.init_asset::<StandardMaterial>();
         app.init_resource::<AvatarAssets>();
-        app.init_resource::<crate::renderer::stud::ClientBodyScale>();
         app.add_systems(Update, attach_avatars);
         app
     }
@@ -336,18 +328,18 @@ mod tests {
     }
 
     #[test]
-    fn body_gets_a_box_unless_it_is_a_stud_body() {
-        use crate::renderer::stud::bodies::StudBodyModel;
+    fn body_gets_a_box_unless_it_is_a_voxel_body() {
+        use crate::renderer::voxel_bodies::VoxelBodyModel;
         let mut app = test_app();
         let plain = app.world_mut().spawn(SimKind(EntityKind::Body)).id();
-        let modelled = app.world_mut().spawn((SimKind(EntityKind::Body), StudBodyModel)).id();
+        let voxel = app.world_mut().spawn((SimKind(EntityKind::Body), VoxelBodyModel)).id();
         // A mirror drawn as a box until its arrival brings the model.
         let late = app.world_mut().spawn(SimKind(EntityKind::Body)).id();
         app.update();
         assert!(app.world().entity(plain).contains::<Mesh3d>(), "a plain body is a box");
-        assert!(!app.world().entity(modelled).contains::<Mesh3d>(), "a stud body draws its model");
+        assert!(!app.world().entity(voxel).contains::<Mesh3d>(), "a voxel body draws its model");
         assert!(app.world().entity(late).contains::<Mesh3d>());
-        app.world_mut().entity_mut(late).insert(StudBodyModel);
+        app.world_mut().entity_mut(late).insert(VoxelBodyModel);
         app.update();
         assert!(!app.world().entity(late).contains::<Mesh3d>(), "the box goes once the model comes");
         assert!(!app.world().entity(late).contains::<BodyBox>());

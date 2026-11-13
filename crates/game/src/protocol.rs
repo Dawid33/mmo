@@ -2,7 +2,10 @@ use std::time::Duration;
 
 use crate::input::InputEvent;
 use crate::lod::LodKey;
-use crate::{BLOCK_UNITS, CHUNK_BLOCKS, ChunkCoords, Client, ClientId, EntityKey, EntityKind, Pose, Rollback};
+use crate::{
+    BLOCK_VOXELS, BRICK_BLOCKS, CHUNK_BLOCKS, Chunk, ChunkCoords, Client, ClientId, Column, ColumnCoords, EntityKey, EntityKind,
+    Pose, Rollback,
+};
 use derive_more::Debug;
 use rapier3d::math::Vector;
 
@@ -46,8 +49,10 @@ pub const REGION_BLOCKS: usize = parse_region_blocks(option_env!("VOXEL_REGION_B
 /// Region edge in sim chunks (derived: the sim-chunk columns of a region).
 pub const REGION_CHUNKS: usize = REGION_BLOCKS / CHUNK_BLOCKS;
 const _: () = assert!(REGION_BLOCKS % CHUNK_BLOCKS == 0, "a region must be a whole number of sim chunks");
+/// Region edge in 32-voxel bricks (the LOD / render-brick grid unit).
+pub const REGION_BRICKS: usize = REGION_BLOCKS / BRICK_BLOCKS;
 /// Region edge in world units; a power of two, so exact in f32.
-pub const REGION_SIZE: f32 = (REGION_BLOCKS * BLOCK_UNITS) as f32;
+pub const REGION_SIZE: f32 = (REGION_BLOCKS * BLOCK_VOXELS) as f32;
 
 /// Region edges this build has been made to work at. The LOD tiling contract
 /// (`lod.rs`) only needs a power of two, but each size also needs its own
@@ -98,6 +103,10 @@ const fn parse_region_blocks(var: Option<&str>) -> usize {
     panic!("VOXEL_REGION_BLOCKS must be one of REGION_BLOCKS_CHOICES (64, 128, 256, 512)")
 }
 
+/// A running region checks its terrain hash this often and pushes a
+/// `TerrainChanged` only when it changed — the check cadence IS the
+/// refresh throttle.
+pub const TERRAIN_HASH_INTERVAL_TICKS: usize = 25;
 
 #[derive(
     Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq, PartialOrd,
@@ -185,7 +194,7 @@ impl WorldBlockPos {
 
     /// The world block of `pos` in `rc`'s block frame. `pos` need not lie
     /// inside the region: a block past its edge maps to the neighbour's.
-    pub fn from_local(rc: RegionCoords, pos: crate::BlockPos) -> Self {
+    pub fn from_local(rc: RegionCoords, pos: crate::volume::BlockPos) -> Self {
         let n = REGION_BLOCKS as i64;
         Self { x: rc.x as i64 * n + pos.x as i64, y: pos.y, z: rc.z as i64 * n + pos.z as i64 }
     }
@@ -193,10 +202,10 @@ impl WorldBlockPos {
     /// The region owning this block and the block in its frame
     /// (`0..REGION_BLOCKS` in x and z; floor division, so world block -1 is
     /// region -1's last block).
-    pub fn to_local(self) -> (RegionCoords, crate::BlockPos) {
+    pub fn to_local(self) -> (RegionCoords, crate::volume::BlockPos) {
         let n = REGION_BLOCKS as i64;
         let rc = RegionCoords::new(self.x.div_euclid(n) as i32, self.z.div_euclid(n) as i32);
-        (rc, crate::BlockPos::new(self.x.rem_euclid(n) as i32, self.y, self.z.rem_euclid(n) as i32))
+        (rc, crate::volume::BlockPos::new(self.x.rem_euclid(n) as i32, self.y, self.z.rem_euclid(n) as i32))
     }
 }
 
@@ -306,7 +315,7 @@ pub struct EntityId {
 
 impl EntityId {
     /// A region itself as an intent's source: a write no entity sends (a
-    /// settling stud body's drops, a chest's spill). Never allocated (serials
+    /// settling voxel body's drops, a chest's spill). Never allocated (serials
     /// count up from 0), never replied to (`intents.rs`).
     pub const fn of_region(rc: RegionCoords) -> Self {
         EntityId { birth_region: rc, serial: u64::MAX }
@@ -439,7 +448,7 @@ pub struct BodyState {
     pub mass: Option<parry3d::mass_properties::MassProperties>,
     /// The constant user force and torque rapier keeps applying to a
     /// dynamic body (zero for kinematic): the world's gravity is zero, so a
-    /// dynamic body's weight is a user force (`body.rs`, `stud_body.rs`),
+    /// dynamic body's weight is a user force (`body.rs`, `voxel_body.rs`),
     /// and it must cross with the body.
     pub user_force: Vector,
     pub user_torque: Vector,
@@ -591,71 +600,17 @@ pub struct EntityBundle {
     pub pending_inputs: Vec<(crate::GameEventKind, Tick)>,
 }
 
-/// [`EntityBundle`] as stored before stud bodies (world-store entity bundle
-/// format 1): the same fields around a [`crate::CarriedV1`]. Decode-only.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
-pub struct EntityBundleV1 {
-    pub id: EntityId,
-    pub kind: EntityKind,
-    pub body: BodyState,
-    pub collider: ColliderSpec,
-    pub carried: crate::CarriedV1,
-    pub client: Option<(ClientId, crate::ClientV1)>,
-    pub pending_inputs: Vec<(crate::GameEventKind, Tick)>,
-}
-
-impl From<EntityBundleV1> for EntityBundle {
-    fn from(b: EntityBundleV1) -> Self {
-        let EntityBundleV1 { id, kind, body, collider, carried, client, pending_inputs } = b;
-        EntityBundle { id, kind, body, collider, carried: carried.into(), client: client.map(|(id, c)| (id, c.into())), pending_inputs }
-    }
-}
-
-/// [`EntityBundle`] as stored with the stud body slot (world-store entity
-/// bundle format 2): the same fields around a [`crate::CarriedV2`]. Decode-only.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
-pub struct EntityBundleV2 {
-    pub id: EntityId,
-    pub kind: EntityKind,
-    pub body: BodyState,
-    pub collider: ColliderSpec,
-    pub carried: crate::CarriedV2,
-    pub client: Option<(ClientId, crate::ClientV1)>,
-    pub pending_inputs: Vec<(crate::GameEventKind, Tick)>,
-}
-
-impl From<EntityBundleV2> for EntityBundle {
-    fn from(b: EntityBundleV2) -> Self {
-        let EntityBundleV2 { id, kind, body, collider, carried, client, pending_inputs } = b;
-        EntityBundle { id, kind, body, collider, carried: carried.into(), client: client.map(|(id, c)| (id, c.into())), pending_inputs }
-    }
-}
-
-/// [`EntityBundle`] as stored before registered prefabs (world-store entity bundle
-/// format 3): the same fields around a [`crate::ClientV1`]. Decode-only.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
-pub struct EntityBundleV3 {
-    pub id: EntityId,
-    pub kind: EntityKind,
-    pub body: BodyState,
-    pub collider: ColliderSpec,
-    pub carried: crate::Carried,
-    pub client: Option<(ClientId, crate::ClientV1)>,
-    pub pending_inputs: Vec<(crate::GameEventKind, Tick)>,
-}
-
-impl From<EntityBundleV3> for EntityBundle {
-    fn from(b: EntityBundleV3) -> Self {
-        let EntityBundleV3 { id, kind, body, collider, carried, client, pending_inputs } = b;
-        EntityBundle { id, kind, body, collider, carried, client: client.map(|(id, c)| (id, c.into())), pending_inputs }
-    }
-}
-
 impl EntityBundle {
     /// Move the bundle from region `from`'s local frame into `to`'s: the
-    /// body pose (everything carried is in world coordinates).
+    /// body pose and a voxel body's region-local block `origin` (everything
+    /// else carried is in world coordinates).
     pub fn rebase(&mut self, from: RegionCoords, to: RegionCoords) {
         self.body.pose = rebase_isometry(&self.body.pose, from, to);
+        if let Some(vb) = &mut self.carried.voxel_body {
+            let n = crate::REGION_BLOCKS as i32;
+            vb.origin[0] += (from.x - to.x) * n;
+            vb.origin[2] += (from.z - to.z) * n;
+        }
     }
 }
 
@@ -733,20 +688,48 @@ pub enum WorldId {
     Default = 0,
 }
 
-/// A region's terrain as the manager keeps it for stopped regions: what the
-/// halo seeds of its starting neighbours are cut from. Never carries
+/// The visual-only subset of a region's data: terrain chunks, nothing else.
+/// Much smaller than a `Rollback` (a `Chunk` is 8 blocks + a sparse chisel
+/// map). The source for server-side LOD builds; never carries
 /// entities/physics/undo state.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TerrainSnapshot {
-    /// The stud terrain of the region's edge chunk columns (`stud_halo.rs`).
-    pub stud: crate::StudEdge,
+    pub chunks: Vec<(ChunkCoords, Chunk)>,
+    /// The per-column ground recipes (implied ground below the band), by
+    /// column: what a neighbour's halo reads below these chunks. Not part of
+    /// [`TerrainSnapshot::terrain_hash`] (it never changes).
+    pub ground: Vec<(ColumnCoords, crate::ColumnGround)>,
 }
 
 impl TerrainSnapshot {
-    /// A never-run region's terrain as its neighbours see it: the edge its
-    /// halo seeds are cut from.
-    pub fn of_stud_edge(stud: crate::StudEdge) -> Self {
-        Self { stud }
+    /// Materialize worldgen columns into the same `(ChunkCoords, Chunk)` form
+    /// `Region::from_columns` uses — how never-run regions are served.
+    pub fn from_columns(columns: Vec<(ColumnCoords, Column)>) -> Self {
+        let mut ground: Vec<_> = columns.iter().filter_map(|(c, col)| Some((*c, col.ground()?.clone()))).collect();
+        ground.sort_by_key(|(c, _)| (c.x, c.z));
+        let mut chunks: Vec<_> = columns
+            .into_iter()
+            .flat_map(|(col, column)| {
+                column
+                    .materialized_sub_chunks()
+                    .into_iter()
+                    .map(move |(sub_y, chunk)| (ChunkCoords::new(col.x, sub_y, col.z), chunk))
+            })
+            .collect();
+        // Sort by coordinate: keeps `terrain_hash` order-insensitive and
+        // stable relative to `Rollback::terrain_snapshot`'s
+        // ECS-insertion-order output, since both are hashed positionally via
+        // bincode.
+        chunks.sort_by_key(|(c, _)| (c.x, c.y, c.z));
+        Self { chunks, ground }
+    }
+
+    /// crc32 of the terrain (the chunks), for cheap change detection on the
+    /// region thread.
+    pub fn terrain_hash(&self) -> u32 {
+        let mut h = crc32fast::Hasher::new();
+        h.update(&bincode::serialize(&self.chunks).expect("terrain snapshot serializes"));
+        h.finalize()
     }
 }
 
@@ -768,8 +751,8 @@ pub enum ClientPacket {
     RequestRegionConnection(RegionId),
     /// Client no longer wants this region's events (window moved on).
     ReleaseRegionConnection(RegionId),
-    /// Subscribe to one LOD key: the server replies with `StudLodData` (from
-    /// cache or after building).
+    /// Subscribe to one LOD key: the server replies with `LodData` (from
+    /// cache or after building) and re-pushes on terrain change.
     RequestLod(LodKey),
     /// Unsubscribe; removal is client-driven, there is no "gone" packet.
     ReleaseLod(LodKey),
@@ -881,6 +864,9 @@ pub struct PersonInfo {
     pub children: Vec<String>,
 }
 
+/// One LOD response: (key-local cell group, RLE grid) pairs.
+pub type LodPayload = Vec<([i32; 3], crate::lod::PackedLodGrid)>;
+
 type CurrentTickRate = u64;
 
 #[derive(serde::Serialize, serde::Deserialize, Debug)]
@@ -899,9 +885,12 @@ pub enum ServerPacket {
     HashedGameEvent(GameEvent, Tick, u32),
     // TODO: Create player serverside and add player id here to let client know
     // who he is.
-    /// A region's join snapshot; on the wire in its slim form (`region_wire.rs`).
-    Region(RegionId, #[serde(with = "crate::region_wire")] Rollback),
+    Region(RegionId, Rollback),
     PlayerRegion(Option<RegionId>, ClientId),
+    /// Streamed LOD cells for one key (initial send AND refresh —
+    /// replace-on-re-receipt), with the key's water surface layer (from the
+    /// recipe; the grids hold no liquid).
+    LodData(LodKey, LodPayload, crate::lod::LodWater),
     /// The world map: per-region tile summaries of the forged world.
     WorldMap(crate::world_map::WorldMap),
     /// A `ClientPacket::PlayRegion` for this region was refused.
@@ -925,9 +914,6 @@ pub enum ServerPacket {
     Legends(crate::history::LegendsPage),
     /// The answer to `ClientPacket::StartAdventure`: the site the adventure starts at.
     AdventureResult(Result<crate::history::SiteId, crate::history::AdventureRefusal>),
-    /// The answer to `RequestLod`: the key's far terrain as a coarse height
-    /// field (`stud_lod.rs`; initial send AND refresh — replace-on-re-receipt).
-    StudLodData(LodKey, crate::stud_lod::StudLodTile),
     /// The host this connection is to: the first packet of every session (a single host
     /// sends ordinal 0 and no addresses).
     Host(crate::HostEndpoint),
@@ -1047,9 +1033,6 @@ pub enum GameEventKind {
     /// as a stamped transfer: joins this region's queue, applied / delivered
     /// at the opening of its due tick. Never accepted from a client.
     Intent(crate::IntentMsg),
-    /// A prefab command from a client (register, deregister, stamp;
-    /// `prefab/command.rs`). Routed like an `Order`.
-    Prefab(ClientId, crate::PrefabCommand),
 }
 
 /// Where a spawned person appears in a region.
@@ -1075,14 +1058,13 @@ pub struct PersonSpawn {
 
 impl GameEventKind {
     /// The client whose input this is: the kinds a client sends and the
-    /// manager routes to its home (`PlayerInput`, `UiAction`, `Order`, `Prefab`). They
+    /// manager routes to its home (`PlayerInput`, `UiAction`, `Order`). They
     /// follow the client's body across a seam.
     pub fn input_client(&self) -> Option<ClientId> {
         match self {
-            GameEventKind::PlayerInput(id, _)
-            | GameEventKind::UiAction(id, _)
-            | GameEventKind::Order(id, _)
-            | GameEventKind::Prefab(id, _) => Some(*id),
+            GameEventKind::PlayerInput(id, _) | GameEventKind::UiAction(id, _) | GameEventKind::Order(id, _) => {
+                Some(*id)
+            }
             _ => None,
         }
     }
@@ -1096,8 +1078,7 @@ impl GameEventKind {
             | GameEventKind::CreateClientAt(id, ..)
             | GameEventKind::RestorePlayer(id, _)
             | GameEventKind::UiAction(id, _)
-            | GameEventKind::Order(id, _)
-            | GameEventKind::Prefab(id, _) => Some(*id),
+            | GameEventKind::Order(id, _) => Some(*id),
             GameEventKind::Tick
             | GameEventKind::Quit
             | GameEventKind::EntityArrived(_)
@@ -1133,7 +1114,7 @@ impl GameEventKind {
 
 #[cfg(test)]
 mod tests {
-    use crate::BlockPos;
+    use crate::volume::BlockPos;
 
     #[test]
     fn world_block_pos_round_trips_across_negative_regions() {
@@ -1195,7 +1176,7 @@ mod tests {
 
     #[test]
     fn lod_packets_round_trip_bincode() {
-        use crate::lod::LodKey;
+        use crate::lod::{LodKey, PackedLodGrid};
         let key = LodKey { factor: 64, coords: [-1, 2] };
         let req = ClientPacket::RequestLod(key);
         let bytes = bincode::serialize(&req).unwrap();
@@ -1203,13 +1184,15 @@ mod tests {
             bincode::deserialize::<ClientPacket>(&bytes).unwrap(),
             ClientPacket::RequestLod(k) if k == key
         ));
-        let tile = crate::StudLodTile::encode(1, &[crate::StudLodSample::of_column(3, 2, Some(5)); 4]);
-        let data = ServerPacket::StudLodData(key, tile.clone());
+        let payload: LodPayload = vec![([0, -1, 0], PackedLodGrid(vec![(100, crate::BlockId(2))]))];
+        let water = crate::lod::LodWater::encode(&[(crate::NO_WATER, 0), (63, 3), (63, 3), (63, 4)], 2);
+        let data = ServerPacket::LodData(key, payload.clone(), water.clone());
         let bytes = bincode::serialize(&data).unwrap();
         match bincode::deserialize::<ServerPacket>(&bytes).unwrap() {
-            ServerPacket::StudLodData(k, t) => {
+            ServerPacket::LodData(k, p, w) => {
                 assert_eq!(k, key);
-                assert_eq!(t, tile);
+                assert_eq!(p, payload);
+                assert_eq!(w, water);
             }
             other => panic!("wrong variant {other:?}"),
         }
@@ -1276,7 +1259,7 @@ impl std::error::Error for PacketError {}
 ///
 /// Every transport edge uses this pair — server, native client, wasm client —
 /// so they must change together. Why it exists: a region snapshot is ~40 MiB
-/// of highly redundant state (collider shapes, brick lists
+/// of highly redundant state (voxel collider shapes, per-voxel chisel material
 /// arrays) and a production join ships nine; lz4 packs one 43x in ~7 ms, which
 /// is a net win even on loopback (2026-09-20 measurement,
 /// `worldgen` example `snapshot_size`).

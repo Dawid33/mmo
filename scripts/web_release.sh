@@ -8,7 +8,7 @@
 #                               open tabs when a redeploy changes it)
 #   <out>/assets/               the runtime assets (minus the dev cert-hash files)
 # Env: OUT (default target/web), CAP (the justfile's core-pinning prefix),
-# VOXEL_REGION_BLOCKS (must match the server's build),
+# VOXEL_REGION_BLOCKS / VOXEL_CHUNK_BLOCKS (must match the server's build),
 # VOXEL_WEB_SERVER (the main menu's prefilled Join server address).
 set -euo pipefail
 cd "$(dirname "$0")/.."

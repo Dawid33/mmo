@@ -65,8 +65,8 @@ fn eligible(s: &super::Species, biome: Option<Biome>) -> bool {
     }
 }
 
-/// Blocks a tree's leaves may reach past its crown radius (the leaf cells
-/// laid around a cluster); the seam rule keeps those inside the region too.
+/// Blocks a tree's leaves may reach past its crown radius (raster's leaf
+/// dither); the seam rule keeps those inside the region too.
 pub const LEAF_REACH_PAST_CROWN_BLOCKS: i32 = 1;
 
 const SALT_X: u64 = 1;
@@ -173,7 +173,7 @@ fn candidate(
     }
     let species = chosen?;
     // A crown must not cross a region seam: regions generate independently.
-    // Leaves reach one block past the crown radius.
+    // Leaf dither reaches one block past the crown radius (`raster.rs`).
     let radius = SPECIES[species as usize].crown_radius_blocks + LEAF_REACH_PAST_CROWN_BLOCKS;
     let (rx, rz) = (x.rem_euclid(REGION_BLOCKS), z.rem_euclid(REGION_BLOCKS));
     if rx - radius < 0 || rx + radius >= REGION_BLOCKS || rz - radius < 0 || rz + radius >= REGION_BLOCKS {

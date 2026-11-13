@@ -1,13 +1,13 @@
-//! Vertical slice of the ground the engine generates: cover, soil, forge rock
-//! layers, standing water. Reads the region's stud ground recipes
-//! (`generate_stud_region` -> `StudColumnGround::material_at`), so what it
-//! shows is what the game would build (trees, feature bricks, are not drawn).
+//! Vertical slice of the ground the engine generates: soil, forge rock layers,
+//! bedrock. Reads blocks through the engine's own `Column` / `ColumnGround`
+//! (materialised band from the column, deeper blocks from `block_at`), so what
+//! it shows is what the game would build.
 //!
 //! Run: just cross-section                       (the default world file, worlds/default.world)
 //!      just cross-section --world target/world-forge/xsec.world --region 1,0 --axis z --at 20
 //!      just cross-section --world procedural      (the noise world)
 //!
-//! Flags: --world <file>|procedural --region X,Z --axis x|z --at <block in region> --depth <m> --out <png> --seed <hex>.
+//! Flags: --world <file>|procedural --region X,Z --axis x|z --at <block in region> --out <png> --seed <hex>.
 //! A missing world file is an error, never a silent procedural slice: worlds
 //! live in world stores now, so write the file out first with
 //! `just worldctl export --db <store> <out.world>`.
@@ -15,36 +15,27 @@
 //! `--region` / `--at` address the same grid as the game; an `--at` outside
 //! the region is an error.
 //! Axis x runs the image along +x at a fixed z (`--at`, default the region
-//! centre); axis z runs along +z at a fixed x. One stud column is
-//! `PX_PER_STUD` pixels wide and one plate `PX_PER_PLATE` tall (10 px per
-//! metre both ways), from the highest surface (or water) + 8 m down to
-//! `--depth` metres (default 70) under the lowest surface. Also prints the
-//! stratum sequence (material, top plate, bottom plate) of the centre column.
+//! centre); axis z runs along +z at a fixed x. One pixel per block, from the
+//! highest surface + 8 down to the deepest bedrock + 2. Also prints the stratum
+//! sequence (block, top y, bottom y) of the centre block column.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use game::{stud_material, RegionCoords, StudColumnGround, REGION_BLOCKS, STUD_CHUNK_STUDS};
+use game::{Block, BlockId, BlockPos, Column, ReadVol, RegionCoords, CHUNK_BLOCKS, REGION_BLOCKS};
 use image::{ImageBuffer, Rgb};
 use worldgen::forge::geology::ROCKS;
-use worldgen::stud_gen::{PLATES_PER_M, STUDS_PER_M};
+use worldgen::material::Materials;
 
 const DEFAULT_WORLD: &str = "worlds/default.world";
-/// Metres drawn above the highest surface and (by default) under the lowest.
-const ABOVE_SURFACE_M: i32 = 8;
-const DEFAULT_DEPTH_M: i32 = 70;
-/// A stud is 0.5 m wide, a plate 0.2 m tall: 10 px per metre both ways.
-const PX_PER_STUD: u32 = 5;
-const PX_PER_PLATE: u32 = 2;
-const SKY: [u8; 3] = [168, 206, 236];
-const WATER: [u8; 3] = [48, 92, 180];
+const ABOVE_SURFACE: i32 = 8;
+const BELOW_BEDROCK: i32 = 2;
 
 fn main() {
     let mut world: Option<PathBuf> = None;
     let mut region = (0i32, 0i32);
     let mut axis_x = true;
     let mut at: Option<usize> = None;
-    let mut depth_m = DEFAULT_DEPTH_M;
     let mut out: Option<PathBuf> = None;
     let mut seed = worldgen::WORLD_SEED;
     let mut it = std::env::args().skip(1);
@@ -65,13 +56,12 @@ fn main() {
                 }
             }
             "--at" => at = Some(value().parse().expect("--at <block>")),
-            "--depth" => depth_m = value().parse().expect("--depth <m>"),
             "--out" => out = Some(PathBuf::from(value())),
             "--seed" => {
                 let v = value();
                 seed = u64::from_str_radix(v.trim_start_matches("0x").replace('_', "").as_str(), 16).expect("--seed <hex>");
             }
-            other => panic!("unknown argument {other}; flags: --world --region --axis --at --depth --out --seed"),
+            other => panic!("unknown argument {other}; flags: --world --region --axis --at --out --seed"),
         }
     }
     let world = match world {
@@ -88,18 +78,21 @@ fn main() {
         std::process::exit(2);
     }
 
+    let manifest = include_str!("../../../assets/blocks/blocks.ron");
+    let reg = game::BlockRegistry::from_ron(manifest).expect("valid block manifest");
+    let mats = Materials::from_names(|n| reg.id_of(n).unwrap_or_else(|| panic!("missing block {n}")));
     let coords = RegionCoords { x: region.0, z: region.1 };
     let forged = world
         .as_ref()
         .map(|path| worldgen::forged::ForgedWorld::load(path).unwrap_or_else(|e| panic!("{}: {e}", path.display())));
-    let (label, seed) = match (&world, &forged) {
+    let (label, columns) = match (&world, &forged) {
         (Some(path), Some(w)) => {
             let stem = path.file_stem().map_or("world".into(), |s| s.to_string_lossy().into_owned());
-            (stem, worldgen::stud_gen::generate_stud_region_forged(w, coords))
+            (stem, worldgen::generate_region_forged(w, coords, mats))
         }
-        _ => ("procedural".to_string(), worldgen::stud_gen::generate_stud_region(coords, seed)),
+        _ => ("procedural".to_string(), worldgen::generate_region(coords, seed, mats)),
     };
-    let by_coords: BTreeMap<(usize, usize), &StudColumnGround> = seed.ground.iter().map(|(c, g)| ((c.x, c.z), g)).collect();
+    let by_coords: BTreeMap<(usize, usize), &Column> = columns.iter().map(|(c, col)| ((c.x, c.z), col)).collect();
 
     let n = REGION_BLOCKS; // blocks along an edge
     let at = at.unwrap_or(n / 2);
@@ -107,70 +100,61 @@ fn main() {
         eprintln!("--at {at} is outside the region: blocks run 0..{n} (REGION_BLOCKS = {REGION_BLOCKS})");
         std::process::exit(2);
     }
-    // Stud column `u` along the slice (the slice runs through the first stud of block `at`).
-    let studs = n * STUDS_PER_M as usize;
-    let cs = STUD_CHUNK_STUDS;
-    let column = |u: usize| -> (&StudColumnGround, usize, usize) {
-        let (sx, sz) = if axis_x { (u, at * STUDS_PER_M as usize) } else { (at * STUDS_PER_M as usize, u) };
-        (by_coords[&(sx / cs, sz / cs)], sx % cs, sz % cs)
+    // Block (u, v) of the region -> (x, z) by axis.
+    let block_xz = |u: usize| if axis_x { (u, at) } else { (at, u) };
+    let read = |u: usize, y: i32| -> Block {
+        let (bx, bz) = block_xz(u);
+        let col = by_coords[&(bx / CHUNK_BLOCKS, bz / CHUNK_BLOCKS)];
+        let (lx, lz) = (bx % CHUNK_BLOCKS, bz % CHUNK_BLOCKS);
+        let ground = col.ground();
+        match ground {
+            Some(g) if g.is_implied(y.div_euclid(CHUNK_BLOCKS as i32)) => g.block_at(lx, lz, y),
+            _ => col.get(BlockPos::new(lx as i32, y, lz as i32)),
+        }
     };
 
     let (mut top, mut bottom) = (i32::MIN, i32::MAX);
-    for u in 0..studs {
-        let (g, sx, sz) = column(u);
-        let s = g.surface(sx, sz);
-        top = top.max(s).max(g.water_top(sx, sz).unwrap_or(s));
-        bottom = bottom.min(s);
+    for u in 0..n {
+        let (bx, bz) = block_xz(u);
+        let g = by_coords[&(bx / CHUNK_BLOCKS, bz / CHUNK_BLOCKS)].ground().expect("generated column has ground");
+        let i = (bx % CHUNK_BLOCKS) * CHUNK_BLOCKS + bz % CHUNK_BLOCKS;
+        let s = i32::from(g.surface[i]);
+        top = top.max(s);
+        bottom = bottom.min(s - game::UNDERGROUND_DEPTH);
     }
-    // Plates `bottom..top` are drawn.
-    let (top, bottom) = (top + ABOVE_SURFACE_M * PLATES_PER_M, bottom - depth_m * PLATES_PER_M);
+    let (top, bottom) = (top + ABOVE_SURFACE, bottom - BELOW_BEDROCK);
 
-    let colour = |id: u16| -> [u8; 3] {
-        let name = stud_material(id).map_or("?", |m| m.name);
-        if let Some(rock) = ROCKS.iter().find(|r| r.name == name) {
-            return rock.rgb;
-        }
-        match name {
-            "grass" => [86, 150, 60],
-            "dirt" => [112, 80, 52],
-            "sand" => [236, 224, 160],
-            "bedrock" => [20, 20, 24],
-            "stone" => [128, 128, 128],
-            "snow" => [244, 246, 250],
-            "ice" => [150, 200, 240],
-            "glacier_ice" => [96, 214, 214],
-            "mud" => [92, 72, 50],
-            "peat" => [60, 44, 32],
-            "gravel" => [150, 144, 136],
-            "red_sand" => [200, 104, 52],
-            "dry_grass" => [176, 168, 84],
-            "podzol" => [96, 76, 44],
-            "frozen_dirt" => [132, 120, 112],
-            "salt" => [236, 236, 228],
-            _ => [255, 0, 255],
-        }
-    };
-    // What the slice shows at `plate` of stud column `u`: ground, the water over it, or sky.
-    let pixel = |u: usize, plate: i32| -> [u8; 3] {
-        let (g, sx, sz) = column(u);
-        match g.material_at(sx, plate, sz) {
-            Some(id) => colour(id),
-            None if g.water_top(sx, sz).is_some_and(|w| plate < w) => WATER,
-            None => SKY,
+    let colour = |id: BlockId| -> [u8; 3] {
+        if id == BlockId::AIR {
+            [168, 206, 236]
+        } else if id == mats.grass {
+            [86, 150, 60]
+        } else if id == mats.dirt {
+            [112, 80, 52]
+        } else if id == mats.sand {
+            [236, 224, 160]
+        } else if id == mats.water {
+            [48, 92, 180]
+        } else if id == mats.bedrock {
+            [20, 20, 24]
+        } else if let Some(r) = mats.rocks.iter().position(|&r| r == id) {
+            ROCKS[r].rgb
+        } else if id == mats.stone {
+            [128, 128, 128]
+        } else if let Some(rgb) = biome_colour(&mats.biome, id) {
+            rgb
+        } else if let Some(rgb) = tree_colour(&mats.trees, id) {
+            rgb
+        } else {
+            [255, 0, 255]
         }
     };
 
-    let (width, height) = (studs as u32 * PX_PER_STUD, (top - bottom) as u32 * PX_PER_PLATE);
-    let mut img = ImageBuffer::<Rgb<u8>, _>::new(width, height);
-    for u in 0..studs {
-        for plate in bottom..top {
-            let rgb = Rgb(pixel(u, plate));
-            let (x0, y0) = (u as u32 * PX_PER_STUD, (top - 1 - plate) as u32 * PX_PER_PLATE);
-            for dx in 0..PX_PER_STUD {
-                for dy in 0..PX_PER_PLATE {
-                    img.put_pixel(x0 + dx, y0 + dy, rgb);
-                }
-            }
+    let height = (top - bottom + 1) as u32;
+    let mut img = ImageBuffer::<Rgb<u8>, _>::new(n as u32, height);
+    for u in 0..n {
+        for y in bottom..=top {
+            img.put_pixel(u as u32, (top - y) as u32, Rgb(colour(read(u, y).id)));
         }
     }
     let out = out.unwrap_or_else(|| {
@@ -183,13 +167,12 @@ fn main() {
     });
     std::fs::create_dir_all(out.parent().unwrap_or(".".as_ref())).ok();
     img.save(&out).expect("write png");
-    println!("{} ({width}x{height} px, plates {bottom}..{top}, {PLATES_PER_M} plates per metre)", out.display());
+    println!("{} ({}x{} px, y {bottom}..={top})", out.display(), n, height);
 
-    // Stratum sequence of the centre stud column of the slice.
-    let u = studs / 2;
+    // Stratum sequence of the centre block column of the slice.
+    let u = n / 2;
     if let Some(w) = &forged {
-        let b = u / STUDS_PER_M as usize;
-        let (bx, bz) = if axis_x { (b, at) } else { (at, b) };
+        let (bx, bz) = block_xz(u);
         let (x, z) = ((coords.x * n as i32 + bx as i32) as f64 + 0.5, (coords.z * n as i32 + bz as i32) as f64 + 0.5);
         let c = w.column_climate(x, z);
         println!(
@@ -200,30 +183,43 @@ fn main() {
             region_biomes(w, coords, n)
         );
     }
-    let (g, sx, sz) = column(u);
-    let name = |plate: i32| -> &'static str {
-        match g.material_at(sx, plate, sz) {
-            Some(id) => stud_material(id).map_or("?", |m| m.name),
-            None if g.water_top(sx, sz).is_some_and(|w| plate < w) => "water",
-            None => "air",
-        }
+    let name = |id: BlockId| -> String {
+        reg.def(id).map_or_else(|| format!("#{}", id.0), |d| d.name.to_string())
     };
-    let mut run: Option<(&str, i32)> = None; // (material, top plate)
-    println!("centre stud column u={u} (material, top plate, bottom plate):");
-    for plate in (bottom..top).rev() {
-        let now = name(plate);
+    let mut run: Option<(BlockId, i32)> = None; // (block, top y)
+    println!("centre column u={u} (block, top y, bottom y):");
+    for y in (bottom..=top).rev() {
+        let id = read(u, y).id;
         match run {
-            Some((was, _)) if was == now => {}
-            Some((was, from)) => {
-                println!("  {was:<14} {from:>6} {:>6}", plate + 1);
-                run = Some((now, plate));
+            Some((rid, _)) if rid == id => {}
+            Some((rid, ry)) => {
+                println!("  {:<14} {ry:>5} {:>5}", name(rid), y + 1);
+                run = Some((id, y));
             }
-            None => run = Some((now, plate)),
+            None => run = Some((id, y)),
         }
     }
-    if let Some((was, from)) = run {
-        println!("  {was:<14} {from:>6} {bottom:>6}");
+    if let Some((rid, ry)) = run {
+        println!("  {:<14} {ry:>5} {bottom:>5}", name(rid));
     }
+}
+
+/// Colours of the biome cover and ice blocks (`None` for any other block).
+fn biome_colour(b: &worldgen::material::BiomeBlocks, id: BlockId) -> Option<[u8; 3]> {
+    let table = [
+        (b.snow, [244, 246, 250]),
+        (b.ice, [150, 200, 240]),
+        (b.glacier_ice, [96, 214, 214]),
+        (b.mud, [92, 72, 50]),
+        (b.peat, [60, 44, 32]),
+        (b.gravel, [150, 144, 136]),
+        (b.red_sand, [200, 104, 52]),
+        (b.dry_grass, [176, 168, 84]),
+        (b.podzol, [96, 76, 44]),
+        (b.frozen_dirt, [132, 120, 112]),
+        (b.salt, [236, 236, 228]),
+    ];
+    table.iter().find(|(block, _)| *block == id && id != BlockId::AIR).map(|&(_, rgb)| rgb)
 }
 
 /// The dithered biomes of region `coords` (every 8th block column), by share.
@@ -240,4 +236,17 @@ fn region_biomes(w: &worldgen::forged::ForgedWorld, coords: RegionCoords, n: usi
     let mut v: Vec<_> = count.into_iter().collect();
     v.sort_by(|a, b| b.1.cmp(&a.1));
     v.iter().map(|(name, k)| format!("{name} {:.0}%", 100.0 * *k as f64 / total as f64)).collect::<Vec<_>>().join(", ")
+}
+
+/// Tree blocks: wood brown, leaves green; a one-block (leafless) species
+/// such as the cactus is its own green.
+fn tree_colour(trees: &worldgen::material::TreeBlocks, id: BlockId) -> Option<[u8; 3]> {
+    let s = trees.species.iter().find(|s| [s.log, s.branch, s.leaves].contains(&id))?;
+    Some(if s.log == s.leaves {
+        [70, 130, 60]
+    } else if id == s.leaves {
+        [40, 104, 44]
+    } else {
+        [104, 74, 46]
+    })
 }

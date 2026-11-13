@@ -1,29 +1,39 @@
-//! Server-streamed far terrain — the beyond-subscription view distance.
+//! Server-streamed LOD rings — the beyond-subscription view distance.
 //!
 //! The instance layer holds `RequestLod` subscriptions by ring assignment
 //! (`instance::update_lod_window`); the bridge routes the resulting
-//! `ClientUpdateEvent::StudLodData` / `RemoveLod` events into
-//! `LodRings.pending`. `apply_lod_events` spawns one root per `LodKey`, whose
-//! far tile is meshed by `stud::far` (terrain and water children). A key that
-//! is refreshed (re-receipt) or removed keeps its old root rendering until a
-//! replacement is visibly meshed (`retire_lod_roots`), so transitions never
-//! pop the horizon to empty. A key handed over to the near window stays until
-//! that region's authoritative chunks have ALL meshed — the switch is one
-//! swap, not a far tile that vanishes while the near terrain fills in chunk
-//! by chunk.
+//! `ClientUpdateEvent::LodData`/`RemoveLod` events into `LodRings.pending`.
+//! `apply_lod_events` decodes each RLE payload and spawns one root per
+//! `LodKey` with `LodVoxelData` children, meshed by `meshing::lod` — nothing
+//! here touches the full-res pipeline. A key that is refreshed (re-receipt)
+//! or removed keeps its old root rendering until a replacement is visibly
+//! meshed (`retire_lod_roots`), so transitions never pop the horizon to
+//! empty. Each root with water also gets one [`LodWaterSurface`] child: the
+//! key's `LodWater` (the grids hold no liquid) as greedy-merged top quads in
+//! the blended water material (water plan Task 8), retired with its root. A key handed over to the near window stays until that region's
+//! authoritative chunks have ALL meshed — the switch is one swap, not a LOD
+//! that vanishes while the near terrain fills in chunk by chunk.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use bevy::prelude::*;
-use game::lod::LodKey;
-use game::RegionCoords;
+use bevy::light::NotShadowCaster;
+use game::lod::{LodKey, LodWater};
+use game::{LodPayload, RegionCoords};
 
-use super::bridge::RegionRoots;
+use super::bridge::{PendingSnapshotVoxels, RegionRoots, VoxelData};
+use super::far_voxel::FarVoxelReady;
+use super::meshing::lod;
+use super::meshing::lod::LodRasterReady;
+use super::meshing::visibility::ChunkConnectivity;
+use super::voxel_pull::ChunkQuads;
+use super::water::material::{WaterMaterial, WaterMaterialHandle};
+use super::water::mesh::WaterMeshData;
 
 /// Deadline for retiring/retired roots: if the replacement hasn't shown a
 /// mesh within this many frames (~10s at 60fps), despawn the old root anyway
 /// — a late pop beats leaking an entity tree forever (e.g. a replacement
-/// whose tile does not decode never produces a mesh at all).
+/// whose cells are all air never produces a mesh at all).
 ///
 /// The counter resets on each re-receipt (a refresh rebuilds the slot at
 /// frame 0), so a key refreshed faster than its replacements mesh can extend
@@ -40,9 +50,9 @@ pub const NEAR_HANDOFF_HOLD_FRAMES: u32 = 3;
 /// A LOD event routed from the bridge (`drain_client_updates`), applied by
 /// `apply_lod_events` the same frame.
 pub enum LodEventMsg {
-    /// The far tile for one key (`game::stud_lod`) — initial send or refresh
-    /// (replace-on-re-receipt) — drawn by `stud::far`.
-    StudData(LodKey, game::StudLodTile),
+    /// Streamed cells for one key — initial send or refresh
+    /// (replace-on-re-receipt) — and its water surface layer.
+    Data(LodKey, LodPayload, LodWater),
     /// The ring assignment moved on: retire this key's render root.
     /// `near_takeover` as on `ClientUpdateEvent::RemoveLod`.
     Remove { key: LodKey, near_takeover: bool },
@@ -102,30 +112,35 @@ impl Default for LodRings {
     }
 }
 
-/// Far tiles `apply_lod_events` may hand to the mesher per frame before
-/// deferring the remaining messages: spawning a root and moving its tile into
-/// a compute job is cheap, this only stops a burst from stacking into one frame.
-pub const LOD_APPLY_TILES_PER_FRAME: usize = 64;
+/// Decoded LOD cells `apply_lod_events` may spawn per frame before deferring
+/// the remaining messages: about one factor-2 region payload, ~100 ms worst
+/// case. The real fix is to keep cells packed and decode in the LOD mesh task;
+/// this only stops several payloads from stacking into one frame.
+pub const LOD_APPLY_CELLS_PER_FRAME: usize = 512;
 
-/// Drain `LodRings.pending`: spawn a root per `StudData` tile (its mesh job
-/// drops a tile that does not decode — wire data is untrusted), retire the old
-/// root on re-receipt, and move `Remove`d keys' roots to the retirement list.
+/// Drain `LodRings.pending`: spawn a root per `Data` payload (decoding the
+/// RLE grids; undecodable cells drop with a warning — wire data is
+/// untrusted), retire the old root on re-receipt, and move `Remove`d keys'
+/// roots to the retirement list.
 pub fn apply_lod_events(
     mut commands: Commands,
     mut rings: ResMut<LodRings>,
-    mut stud_tasks: Option<ResMut<super::stud::far::StudLodTasks>>,
+    mut water_assets: LodWaterAssets,
 ) {
     let mut pending = std::mem::take(&mut rings.pending);
-    // Messages stay in arrival order; whatever exceeds the budget waits in
-    // `pending` for the next frame, and at least one message always makes
-    // progress.
-    let mut tiles = 0usize;
+    // Budgeted by decoded cells: `spawn_lod_root` expands every cell of a
+    // payload to a dense 32^3 grid on this thread (~0.2 ms per cell, a
+    // factor-2 region is ~480 cells). Unbudgeted, a burst of payloads was one
+    // 0.7-0.9 s frame (2026-09-19 captures). Messages stay in arrival order;
+    // whatever exceeds the budget waits in `pending` for the next frame, and
+    // at least one message always makes progress.
+    let mut cells = 0usize;
     let take = pending
         .iter()
         .position(|msg| {
-            let over = tiles >= LOD_APPLY_TILES_PER_FRAME;
-            if matches!(msg, LodEventMsg::StudData(..)) {
-                tiles += 1;
+            let over = cells >= LOD_APPLY_CELLS_PER_FRAME;
+            if let LodEventMsg::Data(_, payload, water) = msg {
+                cells += payload.len() + lod_water_cost(water);
             }
             over
         })
@@ -135,11 +150,9 @@ pub fn apply_lod_events(
     stall.add_work(pending.len() as u32);
     for msg in pending {
         match msg {
-            LodEventMsg::StudData(key, tile) => {
-                // Without the stud mesher (an app that draws no terrain) there
-                // is nothing to show the tile with.
-                let Some(tasks) = stud_tasks.as_mut() else { continue };
-                let root = super::stud::far::spawn_stud_lod_root(&mut commands, tasks, key, tile);
+            LodEventMsg::Data(key, payload, water) => {
+                let root = spawn_lod_root(&mut commands, key, &payload);
+                spawn_lod_water(&mut commands, &mut water_assets, root, &key, &water);
                 match rings.roots.entry(key) {
                     std::collections::btree_map::Entry::Occupied(mut e) => {
                         let slot = e.get_mut();
@@ -153,7 +166,11 @@ pub fn apply_lod_events(
                         slot.root = root;
                     }
                     std::collections::btree_map::Entry::Vacant(v) => {
-                        v.insert(LodSlot { root, retiring: None, retiring_frames: 0 });
+                        v.insert(LodSlot {
+                            root,
+                            retiring: None,
+                            retiring_frames: 0,
+                        });
                     }
                 }
             }
@@ -164,15 +181,221 @@ pub fn apply_lod_events(
                 if let Some(prev) = slot.retiring {
                     commands.entity(prev).despawn();
                 }
-                rings.retired.push(RetiredLod { key, entity: slot.root, frames: 0, near_takeover });
+                rings.retired.push(RetiredLod {
+                    key,
+                    entity: slot.root,
+                    frames: 0,
+                    near_takeover,
+                });
             }
         }
     }
 }
 
-/// A far root's water surface child (`stud::far`).
+/// Spawn one key's render tree: a root at the key's world offset plus one
+/// LOD child per decodable cell, per the `meshing::lod` spawner contract
+/// (translation `group * 32 * factor` with `-factor` on y to compensate the
+/// skirt bias, scale `splat(factor)`), with same-batch `LodNeighbors` wiring
+/// for padding gather. A key's whole payload arrives in one message, so
+/// every same-key neighbor is already in `spawned` by the time wiring runs.
+/// (Cross-key neighbors are not wired — border side-faces render unculled
+/// walls instead, over-draw the guard rails accept.)
+fn spawn_lod_root(commands: &mut Commands, key: LodKey, payload: &LodPayload) -> Entity {
+    let factor = key.factor;
+    let offset = key.world_offset();
+    let root = commands
+        .spawn((
+            Transform::from_translation(Vec3::new(offset[0], offset[1], offset[2])),
+            Visibility::default(),
+            Name::new(format!("lod {:?} x{}", key.coords, factor)),
+            crate::session::SessionScoped,
+            super::meshing::lod_tiles::LodTiles::default(),
+        ))
+        .id();
+
+    let span = 32 * factor as i32;
+    let mut spawned: BTreeMap<[i32; 3], Entity> = BTreeMap::new();
+    for (group, packed) in payload {
+        // Validate, don't decode: the run total is O(runs); the 64 KiB dense
+        // expansion is left to the mesh task (`LodVoxelData` stays packed).
+        if !packed.is_well_formed() {
+            warn!("lod: dropping undecodable grid {group:?} for {key:?}");
+            continue;
+        }
+        let translation = Vec3::new(
+            (group[0] * span) as f32,
+            (group[1] * span - factor as i32) as f32,
+            (group[2] * span) as f32,
+        );
+        let child = commands
+            .spawn((
+                Transform {
+                    translation,
+                    scale: Vec3::splat(factor as f32),
+                    ..default()
+                },
+                Visibility::default(),
+                lod::LodChunk { factor },
+                lod::LodVoxelData(packed.clone()),
+                super::meshing::lod_tiles::LodGroup(*group),
+                ChildOf(root),
+            ))
+            .id();
+        spawned.insert(*group, child);
+    }
+
+    for (&g, &e) in &spawned {
+        let mut neighbors = BTreeMap::new();
+        for dx in -1..=1i32 {
+            for dy in -1..=1i32 {
+                for dz in -1..=1i32 {
+                    if dx == 0 && dy == 0 && dz == 0 {
+                        continue;
+                    }
+                    if let Some(&ne) = spawned.get(&[g[0] + dx, g[1] + dy, g[2] + dz]) {
+                        neighbors.insert([dx, dy, dz], ne);
+                    }
+                }
+            }
+        }
+        if !neighbors.is_empty() {
+            commands.entity(e).insert(lod::LodNeighbors(neighbors));
+        }
+    }
+
+    root
+}
+
+/// A LOD root's water surface child (see the module doc).
 #[derive(Component)]
 pub struct LodWaterSurface;
+
+/// What [`spawn_lod_water`] draws with; absent in headless apps (no water
+/// child then).
+#[derive(bevy::ecs::system::SystemParam)]
+pub struct LodWaterAssets<'w> {
+    meshes: Option<ResMut<'w, Assets<Mesh>>>,
+    materials: Option<ResMut<'w, Assets<WaterMaterial>>>,
+    handle: Option<ResMut<'w, WaterMaterialHandle>>,
+    fortress: Option<Res<'w, super::fortress_view::FortressViewUniform>>,
+}
+
+/// A key's water layer in [`LOD_APPLY_CELLS_PER_FRAME`] terms: decoding and
+/// merging a cell's worth (32³) of LOD columns costs about one cell.
+fn lod_water_cost(water: &LodWater) -> usize {
+    if !water.has_water() {
+        return 0;
+    }
+    let side = usize::from(water.side);
+    (side * side).div_ceil(game::BRICK_VOXEL_COUNT)
+}
+
+/// The water surface of one LOD key: greedy-merged top quads, one per run of
+/// equal water top and equal alpha within a row, extended across the rows
+/// below it. Alpha from depth is the near pass's ([`super::water::water_alpha`]),
+/// and it saturates within a few metres, so open water still merges into a
+/// few quads. Positions are root-local world units: LOD column `(x, z)`
+/// spans `factor` units like the cell children, the surface sits on top of
+/// block `top` (`(top + 1)` blocks up). `None` when the layer is dry or
+/// malformed.
+pub fn lod_water_mesh(key: &LodKey, water: &LodWater) -> Option<WaterMeshData> {
+    let tops = water.decode()?;
+    let n = usize::from(water.side);
+    let keys: Vec<Option<(i16, u32)>> = tops
+        .iter()
+        .map(|&(top, depth)| {
+            (top != game::NO_WATER).then(|| (top, super::water::water_alpha(f32::from(depth)).to_bits()))
+        })
+        .collect();
+    let cell = key.factor as f32;
+    let block = game::BLOCK_VOXELS as f32;
+    let mut used = vec![false; n * n];
+    let mut data = WaterMeshData::default();
+    for z in 0..n {
+        let mut x = 0;
+        while x < n {
+            let i = z * n + x;
+            let Some(k) = keys[i].filter(|_| !used[i]) else {
+                x += 1;
+                continue;
+            };
+            let mut w = 1;
+            while x + w < n && !used[i + w] && keys[i + w] == Some(k) {
+                w += 1;
+            }
+            let mut h = 1;
+            while z + h < n {
+                let row = (z + h) * n + x;
+                if (row..row + w).any(|j| used[j] || keys[j] != Some(k)) {
+                    break;
+                }
+                h += 1;
+            }
+            for dz in 0..h {
+                let row = (z + dz) * n + x;
+                used[row..row + w].fill(true);
+            }
+            let y = (f32::from(k.0) + 1.0) * block;
+            data.quad(
+                [x as f32 * cell, y, z as f32 * cell],
+                [0.0, 0.0, h as f32 * cell],
+                [w as f32 * cell, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                f32::from_bits(k.1),
+            );
+            x += w;
+        }
+    }
+    (!data.is_empty()).then_some(data)
+}
+
+/// Spawn `root`'s water surface child when the key has water (a
+/// `SessionScoped` child, despawned with its root).
+fn spawn_lod_water(
+    commands: &mut Commands,
+    assets: &mut LodWaterAssets,
+    root: Entity,
+    key: &LodKey,
+    water: &LodWater,
+) {
+    if !water.has_water() {
+        return;
+    }
+    // Wire data is untrusted: a layer sized for another key would mesh past
+    // (or short of) its root, so check its side before decoding anything.
+    if water.side != LodWater::side_for(key) {
+        warn!(
+            "lod: dropping water layer of side {} for {key:?} (expected {})",
+            water.side,
+            LodWater::side_for(key)
+        );
+        return;
+    }
+    if !water.is_well_formed() {
+        warn!("lod: dropping undecodable water layer for {key:?}");
+        return;
+    }
+    let (Some(meshes), Some(materials), Some(handle)) =
+        (assets.meshes.as_mut(), assets.materials.as_mut(), assets.handle.as_mut())
+    else {
+        return;
+    };
+    let Some(mesh) = lod_water_mesh(key, water).and_then(super::water::tile_mesh) else {
+        return;
+    };
+    let material = handle.get_or_add(materials, assets.fortress.as_deref().copied().unwrap_or_default());
+    commands.spawn((
+        Name::new(format!("lod water {:?} x{}", key.coords, key.factor)),
+        Mesh3d(meshes.add(mesh)),
+        MeshMaterial3d(material),
+        Transform::default(),
+        Visibility::default(),
+        NotShadowCaster,
+        LodWaterSurface,
+        crate::session::SessionScoped,
+        ChildOf(root),
+    ));
+}
 
 /// Despawn retiring/retired LOD roots once their replacement is actually
 /// VISIBLE — the point of retirement is that a transition never pops the
@@ -180,17 +403,23 @@ pub struct LodWaterSurface;
 /// then the old root keeps rendering stale terrain on top of (or instead
 /// of) the new — over-draw, the guard rails' accepted trade.
 ///
-/// Visibility means meshes, not entities: a replacement root draws nothing
-/// until its far tile's mesh job has landed (`stud::far`). Hence:
+/// Visibility means meshes, not entities: a replacement's `LodVoxelData`
+/// children render nothing until the budgeted LOD mesh chain reaches them.
+/// Hence:
 /// - re-receipt: the slot's new `root` has a child carrying `Mesh3d`;
 /// - removal: some live slot with a meshed child covers one of the retired
 ///   key's regions, OR the near window holds one of those regions and it is
 ///   fully meshed ([`near_regions_meshed`]) — for a near-window takeover,
 ///   every region of the key must be replaced one of those two ways.
 ///
+/// "≥1 meshed child" (not all children) is deliberate: all-air cells never
+/// receive a `Mesh3d`, so an all-children predicate would always fall
+/// through to the deadline; the trade is at worst a few budget-frames of
+/// partial fill instead of a guaranteed full hole.
+///
 /// Each root also carries a frame deadline (`retirement_max_frames`): a
-/// replacement that never meshes (a tile that does not decode, a key released
-/// with no successor in view) must not pin the old root forever. Near-window
+/// replacement that never meshes (all-air cells, a key released with no
+/// successor in view) must not pin the old root forever. Near-window
 /// takeovers are exempt (see `RetiredLod::near_takeover`).
 pub fn retire_lod_roots(
     mut commands: Commands,
@@ -234,7 +463,7 @@ pub fn retire_lod_roots(
     }
     // Only a near-takeover retirement asks the near window; the scan behind
     // it walks every unmeshed near chunk, which is the whole backlog while
-    // flying, so skip it when nobody needs the answer.
+    // flying (~100k), so skip it when nobody needs the answer.
     let near_ready = if rings.retired.iter().any(|r| r.near_takeover) {
         near_regions_meshed(&near, &unmeshed_near, hold)
     } else {
@@ -265,13 +494,27 @@ pub fn retire_lod_roots(
         .collect();
 }
 
-/// A meshed far tile's terrain. The water surface child has a `Mesh3d` too,
-/// but it is not terrain: a root showing only water has not replaced anything.
-type ReadyLodCellFilter = (With<Mesh3d>, Without<LodWaterSurface>);
-/// A near chunk not yet on screen: a stud chunk whose first mesh has not
-/// landed (`stud::systems::apply_stud_meshes` gives every meshed chunk its
-/// children, empty ones included).
-type UnmeshedNearChunkFilter = (With<super::stud::SimStudChunk>, Without<super::stud::systems::StudMeshChildren>);
+/// A meshed terrain cell. The water surface child has a `Mesh3d` too, but
+/// it is not terrain: a root showing only water has not replaced anything.
+type ReadyLodCellFilter = (
+    Or<(
+        With<Mesh3d>,
+        With<ChunkQuads>,
+        With<FarVoxelReady>,
+        With<LodRasterReady>,
+    )>,
+    Without<LodWaterSurface>,
+);
+/// A near chunk not yet on screen: its snapshot voxels are still being
+/// derived, or it has voxels but its first mesh has not attached
+/// (`apply_meshed_chunks` inserts `ChunkConnectivity` for every finished
+/// mesh, all-air ones included, and strips it when the voxels go away) — or,
+/// on the per-chunk backend, a sim chunk whose merged mesh is not rebuilt yet.
+type UnmeshedNearChunkFilter = Or<(
+    With<PendingSnapshotVoxels>,
+    (With<VoxelData>, Without<ChunkConnectivity>),
+    With<super::meshing::chunk_mesh::ChunkMeshDirty>,
+)>;
 
 /// Near regions whose every chunk has meshed, stably for
 /// [`NEAR_HANDOFF_HOLD_FRAMES`]. `hold` tracks each region's streak against
@@ -313,49 +556,25 @@ fn near_regions_meshed(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use game::lod::PackedLodGrid;
+    use game::{BlockId, Voxel, BRICK_VOXEL_COUNT};
 
-    use super::super::stud::far::{apply_stud_lod_meshes, StudLodRoot, StudLodTasks, StudLodTerrain};
-    use super::super::stud::material::{StudMaterials, StudTerrainMaterial};
-    use super::super::stud::systems::StudMeshChildren;
-    use super::super::stud::SimStudChunk;
-    use super::super::water::material::{WaterMaterial, WaterMaterialHandle};
-    use game::{StudLodSample, StudLodTile};
+    use super::super::far_voxel::FarVoxelReady;
+    use super::super::meshing::lod::{LodChunk, LodVoxelData};
+    use super::super::meshing::queue::tests::{pipeline_app, wait_until};
+    use super::super::meshing::queue::MeshBudgets;
+    use super::super::meshing::records::QuadRecord;
+    use super::super::voxel_pull::ChunkQuads;
 
-    /// The two LOD-ring systems and the near-window resource, with no mesher:
-    /// roots, slots and retirement only.
+
+    /// The full meshing/LOD pipeline (`pipeline_app`) plus the two LOD-ring
+    /// systems and the near-window exclusion resource.
     fn rings_app() -> App {
-        let mut app = App::new();
-        app.add_plugins((MinimalPlugins, bevy::asset::AssetPlugin::default()))
-            .init_asset::<Mesh>()
-            .init_resource::<RegionRoots>()
+        let mut app = pipeline_app(MeshBudgets::default());
+        app.init_resource::<RegionRoots>()
             .init_resource::<LodRings>()
             .add_systems(Update, (apply_lod_events, retire_lod_roots).chain());
         app
-    }
-
-    /// `rings_app` plus what the far tiles are drawn with.
-    fn stud_rings_app() -> App {
-        bevy::tasks::AsyncComputeTaskPool::get_or_init(bevy::tasks::TaskPool::new);
-        let mut app = rings_app();
-        app.init_asset::<WaterMaterial>()
-            .init_resource::<WaterMaterialHandle>()
-            .init_asset::<StudTerrainMaterial>()
-            .init_resource::<StudMaterials>()
-            .init_resource::<StudLodTasks>()
-            .add_systems(Update, apply_stud_lod_meshes.after(apply_lod_events));
-        app
-    }
-
-    fn wait_until(app: &mut App, mut cond: impl FnMut(&mut App) -> bool) -> bool {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-        while std::time::Instant::now() < deadline {
-            app.update();
-            if cond(app) {
-                return true;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(2));
-        }
-        false
     }
 
     fn push_event(app: &mut App, msg: LodEventMsg) {
@@ -363,208 +582,215 @@ mod tests {
     }
 
     fn slot_root(app: &App, key: LodKey) -> Option<Entity> {
-        app.world().resource::<LodRings>().roots.get(&key).map(|s| s.root)
+        app.world()
+            .resource::<LodRings>()
+            .roots
+            .get(&key)
+            .map(|s| s.root)
     }
 
-    /// A terrain-meshed child for `root`, as a landed far tile leaves it.
-    fn mesh_root(app: &mut App, root: Entity) {
-        app.world_mut().spawn((Mesh3d(Handle::default()), ChildOf(root)));
+    fn root_meshed(app: &mut App, root: Entity) -> bool {
+        let world = app.world_mut();
+        let mut q = world.query_filtered::<&ChildOf, With<Mesh3d>>();
+        q.iter(world).any(|c| c.parent() == root)
     }
 
-    /// A slot for `key` whose root is already meshed (no job involved).
-    fn meshed_slot(app: &mut App, key: LodKey) -> Entity {
-        let root = app.world_mut().spawn_empty().id();
-        mesh_root(app, root);
-        app.world_mut().resource_mut::<LodRings>().roots.insert(key, LodSlot { root, retiring: None, retiring_frames: 0 });
-        root
-    }
-
-    /// A near region as the bridge spawns it from a snapshot: a root and `n`
-    /// stud chunks under it, none meshed yet.
-    fn spawn_near_region(app: &mut App, rc: RegionCoords, n: usize) -> Vec<Entity> {
-        let offset = rc.world_offset();
-        let root = app.world_mut().spawn((Transform::from_translation(Vec3::from_array(offset)), Visibility::default())).id();
-        app.world_mut().resource_mut::<RegionRoots>().0.insert(rc, root);
-        (0..n)
-            .map(|x| {
-                let coords = game::StudChunkCoords { x, y: 0, z: 0 };
-                app.world_mut().spawn((SimStudChunk { coords, chunk: game::StudChunk::default() }, ChildOf(root))).id()
-            })
+    fn lod_children(app: &mut App, root: Entity) -> Vec<(Transform, u32)> {
+        let world = app.world_mut();
+        let mut q = world.query::<(&Transform, &LodChunk, &LodVoxelData, &ChildOf)>();
+        q.iter(world)
+            .filter(|(.., c)| c.parent() == root)
+            .map(|(tf, lc, ..)| (*tf, lc.factor))
             .collect()
     }
 
-    /// The chunk's first mesh lands, as `stud::systems::apply_stud_meshes` does it.
-    fn land(app: &mut App, chunk: Entity) {
-        let child = app.world_mut().spawn(ChildOf(chunk)).id();
-        app.world_mut().entity_mut(chunk).insert(StudMeshChildren { body: child, top: child, glass: child });
+    fn one_solid_grid() -> Vec<Voxel> {
+        vec![Voxel::new(BlockId(1)); BRICK_VOXEL_COUNT]
     }
 
-    /// A stud key one region wide at this build's region size.
-    fn stud_key(rc: RegionCoords) -> LodKey {
-        let key = LodKey::for_region(game::stud_ring_table(game::lod::LOD_RING_TABLE)[0].1, rc);
-        assert_eq!(key.region_span(), 1);
-        key
+    fn solid_payload(group: [i32; 3]) -> LodPayload {
+        vec![(group, PackedLodGrid::encode(&one_solid_grid()))]
     }
 
-    /// A sloping tile for `key`; with `sea`, water stands over its low half.
-    fn stud_tile(key: &LodKey, sea: bool) -> StudLodTile {
-        let side = StudLodTile::side_for(key);
-        let n = usize::from(side) + 1;
-        let samples: Vec<StudLodSample> = (0..n * n)
-            .map(|i| {
-                let top = (i % n) as i32 - 8;
-                StudLodSample::of_column(top, game::MAT_GRASS, (sea && top < 0).then_some(0))
-            })
+    /// A burst of payloads must not stack into one frame: the cell budget
+    /// defers the excess, in arrival order, and every key still gets its root.
+    #[test]
+    fn a_payload_burst_is_spread_over_frames_in_arrival_order() {
+        let mut app = rings_app();
+        let packed = PackedLodGrid::encode(&one_solid_grid());
+        let big: LodPayload = (0..LOD_APPLY_CELLS_PER_FRAME as i32)
+            .map(|x| ([x, 0, 0], packed.clone()))
             .collect();
-        StudLodTile::encode(side, &samples)
-    }
-
-    fn stud_children(app: &mut App, root: Entity) -> (usize, usize) {
-        let world = app.world_mut();
-        let mut terrain = world.query_filtered::<&ChildOf, (With<StudLodTerrain>, With<Mesh3d>)>();
-        let t = terrain.iter(world).filter(|c| c.parent() == root).count();
-        let mut water = world.query_filtered::<&ChildOf, (With<LodWaterSurface>, With<Mesh3d>)>();
-        (t, water.iter(world).filter(|c| c.parent() == root).count())
-    }
-
-    fn meshed_stud_root(app: &mut App, key: LodKey) -> Entity {
-        push_event(app, LodEventMsg::StudData(key, stud_tile(&key, false)));
-        assert!(wait_until(app, |app| slot_root(app, key).is_some_and(|r| stud_children(app, r).0 == 1)));
-        slot_root(app, key).unwrap()
-    }
-
-    /// A tile takes its key's slot: a root at the key's
-    /// world offset whose terrain (and water) land from the mesh job, and a
-    /// re-receipt keeps the old root until the replacement's terrain is meshed.
-    #[test]
-    #[ignore = "slow: >100ms — run via just test-full"]
-    fn stud_tiles_take_the_ring_slots_and_replace_on_re_receipt() {
-        let mut app = stud_rings_app();
-        let key = stud_key(RegionCoords::new(3, -2));
-        push_event(&mut app, LodEventMsg::StudData(key, stud_tile(&key, true)));
-        app.update();
-        let root = slot_root(&app, key).expect("the tile's root is the key's slot");
-        assert_eq!(app.world().get::<StudLodRoot>(root).map(|r| r.0), Some(key));
-        assert_eq!(app.world().get::<Transform>(root).unwrap().translation, Vec3::from_array(key.world_offset()));
-        assert!(wait_until(&mut app, |app| stud_children(app, root) == (1, 1)), "one terrain and one water child");
-        assert!(app.world().resource::<StudLodTasks>().is_empty());
-
-        // Refresh, dry this time: the old root (with its water) stays until the
-        // new terrain is on screen, then goes whole.
-        push_event(&mut app, LodEventMsg::StudData(key, stud_tile(&key, false)));
-        app.update();
-        let fresh = slot_root(&app, key).unwrap();
-        assert_ne!(fresh, root);
-        assert_eq!(app.world().resource::<LodRings>().roots[&key].retiring, Some(root));
-        assert!(app.world().get_entity(root).is_ok());
-        assert!(wait_until(&mut app, |app| app.world().get_entity(root).is_err()), "retired once the replacement meshed");
-        assert_eq!(stud_children(&mut app, fresh), (1, 0));
-        assert_eq!(app.world().resource::<LodRings>().roots.len(), 1);
-    }
-
-    /// The hand-over to the near window on stud terrain: the far tile of a region
-    /// that joined the near window keeps drawing until every stud chunk of the
-    /// region has its first mesh, then goes — no hole, no lasting double draw.
-    #[test]
-    #[ignore = "slow: >100ms — run via just test-full"]
-    fn a_loaded_stud_region_releases_the_far_tile_it_covers() {
-        let mut app = stud_rings_app();
-        let rc = RegionCoords::new(1, -1);
-        let key = stud_key(rc);
-        let far_root = meshed_stud_root(&mut app, key);
-
-        push_event(&mut app, LodEventMsg::Remove { key, near_takeover: true });
-        // The region as the bridge spawns it: a root and two stud chunks, unmeshed.
-        let chunks = spawn_near_region(&mut app, rc, 2);
-        for _ in 0..NEAR_HANDOFF_HOLD_FRAMES + 5 {
-            app.update();
-        }
-        assert!(app.world().get_entity(far_root).is_ok(), "an unmeshed stud region keeps its far tile");
-        land(&mut app, chunks[0]);
-        for _ in 0..NEAR_HANDOFF_HOLD_FRAMES + 5 {
-            app.update();
-        }
-        assert!(app.world().get_entity(far_root).is_ok(), "a partly meshed one too, past any deadline");
-        land(&mut app, chunks[1]);
-        assert!(wait_until(&mut app, |app| app.world().get_entity(far_root).is_err()), "released once every chunk is meshed");
-        assert!(app.world().resource::<LodRings>().retired.is_empty());
-        assert!(slot_root(&app, key).is_none());
-    }
-
-    /// Untrusted wire data: a tile sized for another key, or one that does not
-    /// decode, leaves an empty root (no mesh job result to show); and an app
-    /// without the stud mesher ignores stud payloads.
-    #[test]
-    #[ignore = "slow: >100ms — run via just test-full"]
-    fn bad_stud_tiles_draw_nothing() {
-        let mut app = stud_rings_app();
-        let key = stud_key(RegionCoords::new(0, 4));
-        let mut wrong_side = stud_tile(&key, true);
-        wrong_side.side -= 1;
-        push_event(&mut app, LodEventMsg::StudData(key, wrong_side));
-        app.update();
-        let root = slot_root(&app, key).expect("the root still spawns");
-        assert!(app.world().resource::<StudLodTasks>().is_empty(), "no job for it");
-
-        let other = stud_key(RegionCoords::new(0, 5));
-        let mut cut = stud_tile(&other, true);
-        cut.heights.pop();
-        push_event(&mut app, LodEventMsg::StudData(other, cut));
-        assert!(wait_until(&mut app, |app| slot_root(app, other).is_some() && app.world().resource::<StudLodTasks>().is_empty()));
-        for r in [root, slot_root(&app, other).unwrap()] {
-            assert_eq!(stud_children(&mut app, r), (0, 0));
-        }
-
-        let mut plain = rings_app();
-        push_event(&mut plain, LodEventMsg::StudData(key, stud_tile(&key, false)));
-        plain.update();
-        assert!(slot_root(&plain, key).is_none());
-        assert!(plain.world().resource::<LodRings>().pending.is_empty());
-    }
-
-    /// A burst of tiles must not stack into one frame: the budget defers the
-    /// excess, in arrival order, and every key still gets its root.
-    #[test]
-    fn a_tile_burst_is_spread_over_frames_in_arrival_order() {
-        let mut app = stud_rings_app();
-        let n = LOD_APPLY_TILES_PER_FRAME + 3;
-        let keys: Vec<LodKey> = (0..n as i32).map(|x| stud_key(RegionCoords::new(10 + x, 0))).collect();
+        let keys: Vec<LodKey> = (0..3).map(|x| LodKey::for_region(2, game::RegionCoords::new(10 + x, 0))).collect();
         for key in &keys {
-            // Undecodable on purpose: the slots are the subject, not the meshes.
-            push_event(&mut app, LodEventMsg::StudData(*key, StudLodTile::default()));
+            push_event(&mut app, LodEventMsg::Data(*key, big.clone(), LodWater::default()));
         }
+
         app.update();
-        assert!(slot_root(&app, keys[LOD_APPLY_TILES_PER_FRAME - 1]).is_some(), "a frame's worth lands");
-        assert!(slot_root(&app, keys[LOD_APPLY_TILES_PER_FRAME]).is_none(), "a full budget defers the rest");
-        assert_eq!(app.world().resource::<LodRings>().pending.len(), 3);
+        assert!(slot_root(&app, keys[0]).is_some(), "the first payload always makes progress");
+        assert!(slot_root(&app, keys[1]).is_none(), "a full budget defers the rest");
+        assert_eq!(app.world().resource::<LodRings>().pending.len(), 2);
+
         app.update();
-        assert!(keys.iter().all(|k| slot_root(&app, *k).is_some()), "deferred tiles keep arrival order and all land");
+        assert!(slot_root(&app, keys[1]).is_some(), "deferred payloads keep arrival order");
+        assert!(slot_root(&app, keys[2]).is_none());
+
+        app.update();
+        assert!(slot_root(&app, keys[2]).is_some());
         assert!(app.world().resource::<LodRings>().pending.is_empty());
     }
 
+    fn pulled_marker() -> ChunkQuads {
+        ChunkQuads(std::sync::Arc::new(vec![QuadRecord([0, 0])]))
+    }
+
     #[test]
-    fn re_receipt_retires_the_old_root_once_the_replacement_is_meshed() {
+    fn re_receipt_retires_old_root_when_pulled_replacement_is_visible() {
         let mut app = rings_app();
-        let key = LodKey { factor: 32, coords: [0, 0] };
+        let key = LodKey {
+            factor: 4,
+            coords: [0, 0],
+        };
         let old_root = app.world_mut().spawn_empty().id();
         let new_root = app.world_mut().spawn_empty().id();
-        app.world_mut().resource_mut::<LodRings>().roots.insert(key, LodSlot { root: new_root, retiring: Some(old_root), retiring_frames: 0 });
-        for _ in 0..5 {
-            app.update();
-        }
-        assert!(app.world().get_entity(old_root).is_ok(), "old root despawned before the replacement meshed — horizon pop");
-        mesh_root(&mut app, new_root);
+        app.world_mut().spawn((pulled_marker(), ChildOf(new_root)));
+        app.world_mut().resource_mut::<LodRings>().roots.insert(
+            key,
+            LodSlot {
+                root: new_root,
+                retiring: Some(old_root),
+                retiring_frames: 0,
+            },
+        );
+
         app.update();
-        assert!(app.world().get_entity(old_root).is_err(), "the replacement is renderable");
-        assert!(app.world().resource::<LodRings>().roots[&key].retiring.is_none());
+
+        assert!(
+            app.world().get_entity(old_root).is_err(),
+            "pulled replacement is renderable"
+        );
+        assert!(app.world().resource::<LodRings>().roots[&key]
+            .retiring
+            .is_none());
+    }
+
+    #[test]
+    fn re_receipt_retires_old_root_when_brick_replacement_is_ready() {
+        let mut app = rings_app();
+        let key = LodKey {
+            factor: 16,
+            coords: [0, 0],
+        };
+        let old_root = app.world_mut().spawn_empty().id();
+        let new_root = app.world_mut().spawn_empty().id();
+        app.world_mut().spawn((FarVoxelReady, ChildOf(new_root)));
+        app.world_mut().resource_mut::<LodRings>().roots.insert(
+            key,
+            LodSlot {
+                root: new_root,
+                retiring: Some(old_root),
+                retiring_frames: 0,
+            },
+        );
+
+        app.update();
+
+        assert!(app.world().get_entity(old_root).is_err());
+        assert!(app.world().resource::<LodRings>().roots[&key]
+            .retiring
+            .is_none());
+    }
+
+    #[test]
+    fn lod_data_spawns_root_and_children_per_spawner_contract() {
+        let mut app = rings_app();
+        let key = LodKey {
+            factor: 64,
+            coords: [1, -1],
+        };
+        push_event(&mut app, LodEventMsg::Data(key, solid_payload([0, 2, 0]), LodWater::default()));
+        assert!(wait_until(&mut app, |app| slot_root(app, key).is_some()));
+        let root = slot_root(&app, key).unwrap();
+        let off = key.world_offset();
+        assert_eq!(
+            app.world()
+                .entity(root)
+                .get::<Transform>()
+                .unwrap()
+                .translation,
+            Vec3::new(off[0], off[1], off[2]),
+            "root sits at the key's world offset"
+        );
+        // Child per the meshing::lod spawner contract.
+        let children = lod_children(&mut app, root);
+        assert_eq!(children.len(), 1);
+        let (tf, factor) = children[0];
+        assert_eq!(factor, 64);
+        assert_eq!(tf.scale, Vec3::splat(64.0));
+        assert_eq!(
+            tf.translation,
+            Vec3::new(0.0, (2 * 32 * 64 - 64) as f32, 0.0),
+            "cell origin group*32*factor, y-bias -factor"
+        );
+        // And it meshes via the existing LOD chain.
+        assert!(wait_until(&mut app, |app| root_meshed(app, root)));
+    }
+
+    #[test]
+    fn re_receipt_retires_the_old_root_until_the_replacement_meshes() {
+        let mut app = rings_app();
+        let key = LodKey {
+            factor: 4,
+            coords: [0, 0],
+        };
+        push_event(&mut app, LodEventMsg::Data(key, solid_payload([0, 0, 0]), LodWater::default()));
+        assert!(
+            wait_until(&mut app, |app| slot_root(app, key)
+                .is_some_and(|r| root_meshed(app, r))),
+            "the first root must settle to meshed children"
+        );
+        let old_root = slot_root(&app, key).unwrap();
+
+        // Refresh: the old root must survive every frame until the NEW root
+        // has a meshed child (the invariant is asserted inside the wait).
+        push_event(&mut app, LodEventMsg::Data(key, solid_payload([0, 1, 0]), LodWater::default()));
+        assert!(
+            wait_until(&mut app, |app| {
+                let new_meshed =
+                    slot_root(app, key).is_some_and(|r| r != old_root && root_meshed(app, r));
+                if !new_meshed {
+                    assert!(
+                        app.world().get_entity(old_root).is_ok(),
+                        "old root despawned before the replacement meshed — horizon pop"
+                    );
+                }
+                new_meshed
+            }),
+            "the replacement must land and mesh"
+        );
+        assert!(
+            wait_until(&mut app, |app| app.world().get_entity(old_root).is_err()),
+            "old root despawns once the replacement is visible"
+        );
+        assert!(app.world().resource::<LodRings>().roots[&key]
+            .retiring
+            .is_none());
     }
 
     #[test]
     fn remove_lod_retires_until_deadline_or_coverage() {
         let mut app = rings_app();
-        app.world_mut().resource_mut::<LodRings>().retirement_max_frames = 3;
-        let key = LodKey { factor: 64, coords: [0, 0] };
-        let root = meshed_slot(&mut app, key);
+        app.world_mut()
+            .resource_mut::<LodRings>()
+            .retirement_max_frames = 3;
+        let key = LodKey {
+            factor: 16,
+            coords: [0, 0],
+        };
+        push_event(&mut app, LodEventMsg::Data(key, solid_payload([0, 0, 0]), LodWater::default()));
+        assert!(wait_until(&mut app, |app| slot_root(app, key)
+            .is_some_and(|r| root_meshed(app, r))));
+        let root = slot_root(&app, key).unwrap();
 
         push_event(&mut app, LodEventMsg::Remove { key, near_takeover: false });
         app.update();
@@ -573,36 +799,137 @@ mod tests {
             app.world().get_entity(root).is_ok(),
             "no replacement ever comes: the retired root keeps rendering until the deadline"
         );
-        assert!(wait_until(&mut app, |app| app.world().get_entity(root).is_err()), "deadline must despawn the retired root");
+        assert!(
+            wait_until(&mut app, |app| app.world().get_entity(root).is_err()),
+            "deadline must despawn the retired root"
+        );
         assert!(app.world().resource::<LodRings>().retired.is_empty());
     }
 
     #[test]
     fn removed_key_releases_when_another_meshed_key_covers_its_region() {
         let mut app = rings_app();
-        app.world_mut().resource_mut::<LodRings>().retirement_max_frames = u32::MAX;
-        let fine = LodKey::for_region(32, RegionCoords::new(0, 0));
-        let old_root = meshed_slot(&mut app, fine);
+        app.world_mut()
+            .resource_mut::<LodRings>()
+            .retirement_max_frames = u32::MAX;
+        let key4 = LodKey {
+            factor: 4,
+            coords: [0, 0],
+        };
+        push_event(&mut app, LodEventMsg::Data(key4, solid_payload([0, 0, 0]), LodWater::default()));
+        assert!(wait_until(&mut app, |app| slot_root(app, key4)
+            .is_some_and(|r| root_meshed(app, r))));
+        let old_root = slot_root(&app, key4).unwrap();
 
-        push_event(&mut app, LodEventMsg::Remove { key: fine, near_takeover: false });
+        push_event(&mut app, LodEventMsg::Remove { key: key4, near_takeover: false });
         for _ in 0..5 {
             app.update();
         }
-        assert!(app.world().get_entity(old_root).is_ok(), "no coverage yet: the retired root must keep rendering");
+        assert!(
+            app.world().get_entity(old_root).is_ok(),
+            "no coverage yet: the retired root must keep rendering"
+        );
 
-        // The ring reassignment's replacement: a coarser key over the same region,
-        // not meshed at first.
-        let coarse = LodKey::for_region(64, RegionCoords::new(0, 0));
-        assert!(coarse.regions().contains(&RegionCoords::new(0, 0)));
-        let new_root = app.world_mut().spawn_empty().id();
-        app.world_mut().resource_mut::<LodRings>().roots.insert(coarse, LodSlot { root: new_root, retiring: None, retiring_frames: 0 });
-        for _ in 0..5 {
+        // The ring reassignment's replacement: factor 16 over the same region.
+        let key16 = LodKey {
+            factor: 16,
+            coords: [0, 0],
+        };
+        push_event(&mut app, LodEventMsg::Data(key16, solid_payload([0, 0, 0]), LodWater::default()));
+        assert!(
+            wait_until(&mut app, |app| app.world().get_entity(old_root).is_err()),
+            "retired root despawns once a covering key is meshed"
+        );
+        assert!(app.world().resource::<LodRings>().retired.is_empty());
+    }
+
+    /// A near region as the bridge spawns it from a snapshot: a root at the
+    /// region's world offset and one chunk child per `chunk_origins` entry
+    /// (region-local), each still waiting for its off-thread voxels.
+    fn spawn_near_region(app: &mut App, rc: RegionCoords, chunk_origins: &[[f32; 3]]) -> Vec<Entity> {
+        let offset = rc.world_offset();
+        let root = app
+            .world_mut()
+            .spawn((
+                Transform::from_translation(Vec3::new(offset[0], offset[1], offset[2])),
+                Visibility::default(),
+            ))
+            .id();
+        app.world_mut().resource_mut::<RegionRoots>().0.insert(rc, root);
+        chunk_origins
+            .iter()
+            .map(|&origin| {
+                app.world_mut()
+                    .spawn((
+                        Transform::from_translation(Vec3::from_array(origin)),
+                        Visibility::default(),
+                        PendingSnapshotVoxels,
+                        ChildOf(root),
+                    ))
+                    .id()
+            })
+            .collect()
+    }
+
+    /// The snapshot voxels land, as `bridge::apply_snapshot_voxels` does it.
+    fn land_voxels(app: &mut App, chunk: Entity, voxels: Vec<Voxel>) {
+        app.world_mut()
+            .entity_mut(chunk)
+            .insert(VoxelData::new(voxels))
+            .remove::<PendingSnapshotVoxels>();
+    }
+
+    fn meshed_lod_root(app: &mut App, key: LodKey) -> Entity {
+        push_event(app, LodEventMsg::Data(key, solid_payload([0, 0, 0]), LodWater::default()));
+        assert!(wait_until(app, |app| slot_root(app, key)
+            .is_some_and(|r| root_meshed(app, r))));
+        slot_root(app, key).unwrap()
+    }
+
+    /// The handoff this module exists for: a LOD key taken over by the near
+    /// window keeps rendering while the region's chunks mesh one by one, and
+    /// is released only once ALL of them (all-air ones included) are on
+    /// screen — not when the first one lands.
+    #[test]
+    fn near_takeover_keeps_lod_until_the_whole_region_is_meshed() {
+        let mut app = rings_app();
+        let rc = RegionCoords::new(1, -1);
+        let key = LodKey {
+            factor: 4,
+            coords: [rc.x, rc.z],
+        };
+        let lod_root = meshed_lod_root(&mut app, key);
+
+        push_event(&mut app, LodEventMsg::Remove { key, near_takeover: true });
+        let chunks = spawn_near_region(&mut app, rc, &[[0.0; 3], [32.0, 0.0, 0.0], [0.0, 32.0, 0.0]]);
+
+        // Two of three chunks mesh (one solid, one all air): the third is
+        // still waiting for voxels, so the LOD must stay.
+        land_voxels(&mut app, chunks[0], one_solid_grid());
+        land_voxels(&mut app, chunks[2], vec![Voxel::default(); BRICK_VOXEL_COUNT]);
+        assert!(wait_until(&mut app, |app| {
+            [chunks[0], chunks[2]]
+                .iter()
+                .all(|&c| app.world().entity(c).contains::<ChunkConnectivity>())
+        }));
+        for _ in 0..NEAR_HANDOFF_HOLD_FRAMES + 5 {
             app.update();
         }
-        assert!(app.world().get_entity(old_root).is_ok(), "an unmeshed cover replaces nothing");
-        mesh_root(&mut app, new_root);
+        assert!(
+            app.world().get_entity(lod_root).is_ok(),
+            "a partly meshed region must not release its LOD"
+        );
+
+        // Voxels without a mesh yet still count as not rendered.
+        land_voxels(&mut app, chunks[1], one_solid_grid());
         app.update();
-        assert!(app.world().get_entity(old_root).is_err(), "retired root despawns once a covering key is meshed");
+        assert!(app.world().get_entity(lod_root).is_ok());
+
+        assert!(
+            wait_until(&mut app, |app| app.world().get_entity(lod_root).is_err()),
+            "LOD released once every chunk of the region is meshed"
+        );
+        assert!(app.world().entity(chunks[1]).contains::<ChunkConnectivity>());
         assert!(app.world().resource::<LodRings>().retired.is_empty());
     }
 
@@ -611,34 +938,168 @@ mod tests {
     #[test]
     fn near_takeover_ignores_the_retirement_deadline() {
         let mut app = rings_app();
-        app.world_mut().resource_mut::<LodRings>().retirement_max_frames = 3;
+        app.world_mut()
+            .resource_mut::<LodRings>()
+            .retirement_max_frames = 3;
         let rc = RegionCoords::new(0, 0);
-        let key = LodKey::for_region(32, rc);
-        let lod_root = meshed_slot(&mut app, key);
+        let key = LodKey {
+            factor: 2,
+            coords: [0, 0],
+        };
+        let lod_root = meshed_lod_root(&mut app, key);
 
         push_event(&mut app, LodEventMsg::Remove { key, near_takeover: true });
         for _ in 0..20 {
             app.update();
         }
-        assert!(app.world().get_entity(lod_root).is_ok(), "region not even arrived yet: the far tile must keep rendering");
+        assert!(
+            app.world().get_entity(lod_root).is_ok(),
+            "region not even arrived yet: the LOD must keep rendering"
+        );
 
-        let chunks = spawn_near_region(&mut app, rc, 1);
-        land(&mut app, chunks[0]);
+        let chunks = spawn_near_region(&mut app, rc, &[[0.0; 3]]);
+        land_voxels(&mut app, chunks[0], one_solid_grid());
         assert!(wait_until(&mut app, |app| app.world().get_entity(lod_root).is_err()));
     }
 
     /// A takeover whose region leaves the near window again before it
-    /// arrives is released by the key re-requested for it instead.
+    /// arrives is released by the LOD key re-requested for it instead.
     #[test]
     fn near_takeover_releases_on_returning_lod_cover() {
         let mut app = rings_app();
-        let key = LodKey::for_region(32, RegionCoords::new(3, 3));
-        let lod_root = meshed_slot(&mut app, key);
+        let key = LodKey {
+            factor: 2,
+            coords: [3, 3],
+        };
+        let lod_root = meshed_lod_root(&mut app, key);
         push_event(&mut app, LodEventMsg::Remove { key, near_takeover: true });
         app.update();
-        let new_root = meshed_slot(&mut app, key);
+        let new_root = meshed_lod_root(&mut app, key);
         assert_ne!(new_root, lod_root);
         assert!(wait_until(&mut app, |app| app.world().get_entity(lod_root).is_err()));
         assert!(app.world().resource::<LodRings>().retired.is_empty());
+    }
+
+    /// A ring reassignment (not a takeover) still releases on a meshed chunk
+    /// of a complete near region — and never on an incomplete one.
+    #[test]
+    fn plain_removal_waits_for_a_fully_meshed_near_region() {
+        let mut app = rings_app();
+        app.world_mut()
+            .resource_mut::<LodRings>()
+            .retirement_max_frames = u32::MAX;
+        let rc = RegionCoords::new(-2, 1);
+        let key = LodKey {
+            factor: 4,
+            coords: [rc.x, rc.z],
+        };
+        let lod_root = meshed_lod_root(&mut app, key);
+        push_event(&mut app, LodEventMsg::Remove { key, near_takeover: false });
+        let chunks = spawn_near_region(&mut app, rc, &[[0.0; 3], [0.0, 0.0, 32.0]]);
+        land_voxels(&mut app, chunks[0], one_solid_grid());
+        for _ in 0..20 {
+            app.update();
+        }
+        assert!(app.world().get_entity(lod_root).is_ok());
+        land_voxels(&mut app, chunks[1], one_solid_grid());
+        assert!(wait_until(&mut app, |app| app.world().get_entity(lod_root).is_err()));
+    }
+
+    #[test]
+    fn undecodable_grids_are_dropped_not_spawned() {
+        let mut app = rings_app();
+        let key = LodKey {
+            factor: 4,
+            coords: [0, 0],
+        };
+        let bad = vec![([0, 0, 0], PackedLodGrid(vec![(3, BlockId(1))]))]; // wrong total
+        push_event(&mut app, LodEventMsg::Data(key, bad, LodWater::default()));
+        app.update();
+        let root = slot_root(&app, key).expect("root spawns even if all cells drop");
+        assert_eq!(
+            lod_children(&mut app, root).len(),
+            0,
+            "bad cell dropped with a warning"
+        );
+    }
+
+    // ---- LOD water surface (water plan Task 8) ----
+
+    const DEEP: (i16, u8) = (63, 20);
+
+    /// Runs of equal top and alpha merge across rows; alpha saturates, so
+    /// deep columns of different depths share a quad; a shallow column gets
+    /// its own lighter one; the surface sits on top of block `top`.
+    #[test]
+    fn lod_water_mesh_merges_runs_and_lifts_to_the_top() {
+        let dry = (game::NO_WATER, 0);
+        let shallow = (63, 1);
+        #[rustfmt::skip]
+        let tops = [
+            DEEP, DEEP,     dry, dry,
+            DEEP, (63, 30), dry, dry,
+            shallow, dry,   dry, dry,
+            dry, dry,       dry, dry,
+        ];
+        let key = LodKey { factor: 16, coords: [0, 0] };
+        let mesh = lod_water_mesh(&key, &LodWater::encode(&tops, 4)).expect("wet");
+        assert_eq!(mesh.indices.len(), 12, "two quads: {:?}", mesh.positions);
+        let y = 64.0 * game::BLOCK_VOXELS as f32;
+        let f = key.factor as f32;
+        let deep: Vec<_> = mesh.positions[..4].to_vec();
+        assert_eq!(deep, vec![[0.0, y, 0.0], [0.0, y, 2.0 * f], [2.0 * f, y, 2.0 * f], [2.0 * f, y, 0.0]]);
+        assert!(mesh.normals.iter().all(|n| *n == [0.0, 1.0, 0.0]));
+        assert_eq!(mesh.colors[0][3], super::super::water::WATER_MAX_ALPHA);
+        assert_eq!(mesh.positions[4], [0.0, y, 2.0 * f]);
+        assert_eq!(mesh.colors[4][3], super::super::water::water_alpha(1.0));
+        assert!(mesh.colors[4][3] < mesh.colors[0][3], "the shallows are lighter");
+
+        assert!(lod_water_mesh(&key, &LodWater::encode(&[dry; 16], 4)).is_none(), "dry");
+        assert!(lod_water_mesh(&key, &LodWater { side: 4, runs: vec![(3, 63, 2)] }).is_none(), "malformed");
+    }
+
+    /// A root with water gets one water child — and that child is not a
+    /// meshed terrain cell: a refresh whose terrain has not meshed keeps the
+    /// old root.
+    #[test]
+    fn lod_water_child_spawns_but_is_not_terrain_readiness() {
+        let mut app = rings_app();
+        app.init_asset::<WaterMaterial>()
+            .init_resource::<WaterMaterialHandle>();
+        let key = LodKey::for_region(16, game::RegionCoords::new(3, 0));
+        let side = LodWater::side_for(&key);
+        let water = LodWater::encode(&vec![DEEP; usize::from(side) * usize::from(side)], side);
+        push_event(&mut app, LodEventMsg::Data(key, Vec::new(), water.clone()));
+        app.update();
+        let root = slot_root(&app, key).expect("root");
+        let world = app.world_mut();
+        let mut q = world.query_filtered::<&ChildOf, (With<LodWaterSurface>, With<Mesh3d>)>();
+        assert_eq!(q.iter(world).filter(|c| c.parent() == root).count(), 1, "one water child");
+
+        push_event(&mut app, LodEventMsg::Data(key, Vec::new(), water));
+        for _ in 0..5 {
+            app.update();
+        }
+        let slot = &app.world().resource::<LodRings>().roots[&key];
+        assert_eq!(slot.retiring, Some(root), "water alone does not retire the old root");
+    }
+
+    /// A water layer whose side is not its key's (untrusted wire data) is
+    /// dropped with a warning: no water child, the root still spawns.
+    #[test]
+    fn lod_water_of_the_wrong_side_is_dropped() {
+        let mut app = rings_app();
+        app.init_asset::<WaterMaterial>()
+            .init_resource::<WaterMaterialHandle>();
+        let key = LodKey::for_region(16, game::RegionCoords::new(3, 0));
+        let side = LodWater::side_for(&key) / 2;
+        let water = LodWater::encode(&vec![DEEP; usize::from(side) * usize::from(side)], side);
+        assert!(water.is_well_formed(), "well-formed for its own side");
+        push_event(&mut app, LodEventMsg::Data(key, Vec::new(), water));
+        app.update();
+        let root = slot_root(&app, key).expect("root spawns without its water");
+        let world = app.world_mut();
+        let mut q = world.query_filtered::<&ChildOf, With<LodWaterSurface>>();
+        assert_eq!(q.iter(world).filter(|c| c.parent() == root).count(), 0, "no water child");
     }
 }
