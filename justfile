@@ -1585,7 +1585,7 @@ kube *args:
 # docs/superpowers/plans/2026-11-06-k3s-observability-stack-handoff.md.
 orion_context := "orion"
 
-# `tofu init` an orion root (bootstrap | platform | monitoring | picoshare) against its S3 state.
+# `tofu init` an orion root (bootstrap | platform | monitoring | picoshare | site) against its S3 state.
 # Extra args pass through, e.g. `just orion-init monitoring -upgrade`.
 [positional-arguments]
 orion-init root *args:
@@ -1598,7 +1598,8 @@ orion-plan root *args:
     shift; {{tofu}} -chdir=deploy/envs/orion/{{root}} plan -input=false -var kube_context={{orion_context}} "$@"
 
 # Apply an orion root (interactive: tofu shows the plan and asks). Order on a
-# fresh server: platform, then monitoring and picoshare (either order).
+# fresh server: platform, then monitoring and picoshare (either order), and
+# keycloak -> keycloak-realm -> site (the website reads the realm's issuer).
 [positional-arguments]
 orion-apply root *args:
     shift; {{tofu}} -chdir=deploy/envs/orion/{{root}} apply -var kube_context={{orion_context}} "$@"

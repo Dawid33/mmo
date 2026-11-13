@@ -63,7 +63,9 @@ changed build/run/test command updates its recipe in the same change.
 
 OpenTofu (not Terraform) in `deploy/`: local single-node k0s (`just deploy-local`, never the inner loop);
 the `orion` k3s box (`deploy/envs/orion/`, S3 remote state, `just orion-plan|apply <root>` — always plan
-first; roots `platform` → `monitoring`, `picoshare` = https://share.factoriosurvivalworld.com; monitoring stack
+first; roots `platform` → `monitoring`, `picoshare` = https://share.factoriosurvivalworld.com, `site` = https://factoriosurvivalworld.com, the static website from `website/`
+with the `orion` Keycloak login theme beside it in `website/theme/` (`just site-dev|site-test|site-theme-check`; after a Keycloak image
+bump re-diff `website/theme/orion/login/template.ftl` against the new `base` theme and run `just site-theme-check`); monitoring stack
 handoff `docs/superpowers/plans/2026-11-06-k3s-observability-stack-handoff.md`);
 the public web build `just deploy` (`scripts/web_release.sh` — use the pinned binaryen under
 `target/tools`, never the distro's). `deploy/**/*.tfvars` and `.env` are git-ignored — never commit or
