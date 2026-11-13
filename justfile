@@ -835,6 +835,10 @@ kc-down:
 site-theme-check:
     scripts/site_theme_check.sh
 
+# Unit tests of the website's browser login module (plain node, no dependencies).
+site-test:
+    node --test website/tests/*.test.mjs
+
 # ---- Test -----------------------------------------------------------------
 
 # Scoped per-crate on purpose: first-party crates only (the vendored physics
