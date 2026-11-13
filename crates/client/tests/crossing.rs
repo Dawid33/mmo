@@ -362,6 +362,9 @@ fn predicted_intent_across_regions_does_not_mispredict() {
 
 /// Steps the two-source scenes are watched for.
 const TWO_SOURCES_WATCH_STEPS: usize = 200;
+/// Fewest watched steps that must see both bodies mirrored in one target
+/// (observed 107–190 of 200).
+const MIN_CONTENDED_STEPS: usize = TWO_SOURCES_WATCH_STEPS / 4;
 /// Server schedules `two_hosts_shuffled_server_order_does_not_mispredict` runs.
 const SHUFFLED_SERVER_SEEDS: u64 = 6;
 
@@ -443,7 +446,7 @@ fn two_sources_in_one_slot(mut h: SimHarness) -> (u64, u64, usize) {
 #[ignore = "slow: >100ms — run via just test-full"]
 fn two_neighbours_halo_in_one_slot_does_not_mispredict() {
     let (transfers, total, contended) = two_sources_in_one_slot(SimHarness::threaded(1));
-    assert!(contended > 0, "no slot had both bodies mirrored in the west or the north region");
+    assert!(contended >= MIN_CONTENDED_STEPS, "only {contended} steps had both bodies mirrored in the west or the north region");
     assert_eq!(transfers, 0, "transfer>transfer mispredictions ({total} in all, {contended} contended steps)");
     assert_eq!(total, 0, "mispredictions of other kinds ({contended} contended steps)");
 }
@@ -460,13 +463,86 @@ fn two_hosts_shuffled_server_order_does_not_mispredict() {
         let north_west = game::RegionCoords::new(game::SPAWN_REGION.x - 1, game::SPAWN_REGION.z - 1);
         assert_ne!(h.owner(game::SPAWN_REGION), h.owner(north_west), "the two sources run on different hosts");
         let (transfers, total, contended) = two_sources_in_one_slot(h);
-        assert!(contended > 0, "seed {seed}: no slot had both bodies mirrored in the west or the north region");
+        assert!(contended >= MIN_CONTENDED_STEPS, "seed {seed}: only {contended} steps had both bodies mirrored in the west or the north region");
         assert_eq!(
             transfers, 0,
             "seed {seed}: transfer>transfer mispredictions ({total} in all, {contended} contended steps)"
         );
         assert_eq!(total, 0, "seed {seed}: mispredictions of other kinds ({contended} contended steps)");
     }
+}
+
+/// Steps the crossing with a third party walks past the seam.
+const THIRD_PARTY_PAST_STEPS: usize = 20;
+
+/// The player flies north over the spawn's seam with W held (under a 100 ms
+/// round trip: the client leads, so its inputs around the crossing reach the
+/// server's old home and travel in the bundle) while a slime hops by the
+/// spawn's north seam, mirrored into the north region — a halo message of a
+/// third body in the slot of the player's arrival there. The server applies
+/// the crossing body's inputs directly after its arrival, before that halo
+/// message; the client predicts them there too, so neither the inputs nor the
+/// transfers mispredict, and the regions converge.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn crossing_with_a_third_party_halo_in_the_slot_does_not_mispredict() {
+    let bv = game::BLOCK_UNITS as f32;
+    let ground = game::plate_units(client::local_server::TEST_GROUND_TOP_PLATES);
+    let spawn = game::SPAWN_REGION;
+    let north = neighbour(spawn, Dir::North);
+    let mut h = SimHarness::with_near_radius(1);
+    let mut slime = None;
+    h.with_server_region(spawn, |r| {
+        let tick = r.current_tick();
+        let mut key = None;
+        r.with_data(|d| {
+            let pos = game::rapier3d::math::Vector::new(7.0 * bv, ground + 1.5 * bv, 4.0 * bv);
+            key = Some(d.spawn_slime_safe(pos, 1, 0.0, tick));
+        });
+        slime = r.data().entity_id(key.unwrap());
+    });
+    let slime = slime.expect("the slime has an EntityId");
+    h.connect();
+    load_spawn_window(&mut h);
+    h.step_n(HALO_JOIN_SETTLE_STEPS);
+    h.set_latency(RUBBER_BAND_LATENCY_STEPS);
+    h.step_n(CLOCK_SETTLE_STEPS);
+    take_off(&mut h);
+    let before = h.total_mispredictions_by_kind();
+    let mut mirrored = Vec::new();
+    let mut crossed = None;
+    h.press(game::Key::KeyW);
+    for step in 0..400 + THIRD_PARTY_PAST_STEPS {
+        h.step();
+        let mut m = false;
+        h.with_server_region(north, |r| m = r.data().halo_entity(slime).is_some());
+        mirrored.push(m);
+        if crossed.is_none() && h.player_region() == north {
+            crossed = Some(step);
+        }
+        if crossed.is_some_and(|c| step >= c + THIRD_PARTY_PAST_STEPS) {
+            break;
+        }
+    }
+    h.release(game::Key::KeyW);
+    let crossed = crossed.expect("the walk crossed north");
+    assert!(
+        mirrored[crossed.saturating_sub(2)..=crossed + 2].iter().all(|m| *m),
+        "the slime was not mirrored in the north region around the crossing: {:?}",
+        &mirrored[crossed.saturating_sub(2)..=crossed + 2]
+    );
+    let after = h.total_mispredictions_by_kind();
+    let mut wrong = Vec::new();
+    for p in 0..3 {
+        for k in 0..3 {
+            if (p != 0 || k != 0) && after[p][k] != before[p][k] {
+                wrong.push(format!("{}>{}={}", game::ReconcileStats::KIND_NAMES[p], game::ReconcileStats::KIND_NAMES[k], after[p][k] - before[p][k]));
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "input / transfer mispredictions across the crossing: {wrong:?}");
+    h.set_latency(0);
+    h.assert_converged();
 }
 
 /// R3: one world on several hosts. The client logs in to the host that owns

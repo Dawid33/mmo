@@ -5,7 +5,7 @@
 use crossbeam::channel::Sender;
 use game::{
     ClientId, ClientPacket, ClientUpdateEvent, EntityBundle, GameError, GameEvent, GameEventKind,
-    HaloEntityMsg, ReconcileStats, Region, RegionCoords, RegionId, SlotClass, SlotInbox,
+    HaloEntityMsg, ReconcileStats, Region, RegionCoords, RegionId, SlotInbox,
 };
 use log::info;
 #[cfg(not(target_arch = "wasm32"))]
@@ -151,9 +151,10 @@ pub struct RunnerState {
     /// sat-out tick closes nothing and applies nothing.
     ///
     /// Also this client's inputs that reached the region while its body's
-    /// arrival was buffered here (`push_behind`, class `Other`, the arrival's
-    /// stamp): predicted after every message of that slot, in order — where
-    /// the server's region applies them too (they follow the body).
+    /// arrival was buffered here (`push_after_arrival`): predicted directly
+    /// after that arrival, in order, before the slot's other messages — where
+    /// the server's region applies them too (they follow the body, as the
+    /// inputs a crossing bundle carries do).
     inbox: SlotInbox,
     collider_debug: game::ColliderDebug,
     last_view: Option<HomeView>,
@@ -208,8 +209,8 @@ pub fn handle(
         RegionCmd::Predict(kind) => {
             let has_body = region.data().player_entites.contains_key(&ctx.client_id);
             let arrives = if has_body { None } else { local_arrival_held(st, ctx.client_id) };
-            if let Some(arrives) = arrives {
-                st.inbox.push_behind(kind, arrives);
+            if let Some((stamp, id)) = arrives {
+                st.inbox.push_after_arrival(kind, stamp, id);
             } else if st.player_departed && !has_body {
                 out.push(RegionReport::Forward(kind));
             } else {
@@ -276,12 +277,12 @@ fn sat_out(region: &Region, out: &mut Vec<RegionReport>) {
 fn tick(region: &mut Region, st: &mut RunnerState, ctx: &RunnerCtx, out: &mut Vec<RegionReport>) {
     // The slot this tick closes ends with its neighbour messages (and any
     // late ones), in canonical order — after every input predicted in it, as
-    // on the server. Class `Other` entries are this client's inputs queued
-    // behind a buffered arrival of its body: no message pushed by `transfer`
-    // is of that class.
+    // on the server. A client input among them is this client's, queued
+    // directly behind the buffered arrival of its body: predicted (and sent).
     let now = region.current_tick();
     for kind in st.inbox.drain_due(now) {
-        if game::slot_class(&kind) == SlotClass::Other {
+        if let Some(client) = kind.input_client() {
+            debug_assert_eq!(client, ctx.client_id, "only the local client's inputs are queued here");
             predict(region, ctx, kind, out);
         } else {
             apply_transfer(region, kind);
@@ -342,10 +343,16 @@ fn predict(region: &mut Region, ctx: &RunnerCtx, kind: GameEventKind, out: &mut 
     }
 }
 
-/// The stamp of the local player's predicted arrival, if it is buffered here.
-fn local_arrival_held(st: &RunnerState, client: ClientId) -> Option<game::Tick> {
-    st.inbox
-        .holds(|k| matches!(k, GameEventKind::EntityArrived(b) if b.client.as_ref().map(|(c, _)| *c) == Some(client)))
+/// The stamp and entity of the local player's predicted arrival, if it is
+/// buffered here.
+fn local_arrival_held(st: &RunnerState, client: ClientId) -> Option<(game::Tick, game::EntityId)> {
+    let (stamp, kind) = st
+        .inbox
+        .holds_entry(|k| matches!(k, GameEventKind::EntityArrived(b) if b.client.as_ref().map(|(c, _)| *c) == Some(client)))?;
+    match kind {
+        GameEventKind::EntityArrived(b) => Some((stamp, b.id)),
+        _ => None,
+    }
 }
 
 /// Predict a transfer into the region, unless it is an arrival of an entity
@@ -564,12 +571,11 @@ mod tests {
         }
     }
 
-    /// An input queued behind the local player's buffered arrival follows
-    /// every message of the arrival's slot, not just the arrival — as the
-    /// server's region queues it (`push_behind`, the client twin of its
-    /// `behind_held_body`).
+    /// An input queued behind the local player's buffered arrival is
+    /// predicted directly after it, before the slot's other messages — where
+    /// the server applies a crossing body's inputs (carried or late).
     #[test]
-    fn local_input_follows_every_message_of_its_arrivals_slot() {
+    fn local_input_follows_its_arrival_directly() {
         let (mut r, mut st, ctx, server_recv) = setup();
         let bundle = departed_and_back(&mut r, &mut st, &ctx);
         let t = r.current_tick();
@@ -585,9 +591,9 @@ mod tests {
         assert!(
             matches!(
                 kinds.as_slice(),
-                [GameEventKind::EntityArrived(_), GameEventKind::HaloEntity(_), GameEventKind::PlayerInput(..), GameEventKind::Tick]
+                [GameEventKind::EntityArrived(_), GameEventKind::PlayerInput(..), GameEventKind::HaloEntity(_), GameEventKind::Tick]
             ),
-            "arrival, mirror, input, tick: {kinds:?}"
+            "arrival, input, mirror, tick: {kinds:?}"
         );
         match server_recv.try_recv().unwrap() {
             crate::connections::Outgoing::Home(ClientPacket::GameEventAfterTick(ev, after)) => {

@@ -592,14 +592,10 @@ impl ReconMetrics {
         self.total_mispredictions += u64::from(s.mispredictions);
         self.state_hash_checks += s.state_hash_checks;
         self.state_hash_mismatches += s.state_hash_mismatches;
-        for (total, row) in self.by_kinds.iter_mut().zip(s.by_kinds) {
-            for (total, n) in total.iter_mut().zip(row) {
-                *total += n;
-            }
-        }
-        for (total, row) in self.total_by_kinds.iter_mut().zip(s.by_kinds) {
-            for (total, n) in total.iter_mut().zip(row) {
-                *total += u64::from(n);
+        for (p, row) in s.by_kinds.iter().enumerate() {
+            for (k, &n) in row.iter().enumerate() {
+                self.by_kinds[p][k] += n;
+                self.total_by_kinds[p][k] += u64::from(n);
             }
         }
         self.replay_depth_sum += s.replay_depth_sum;

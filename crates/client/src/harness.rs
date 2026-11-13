@@ -923,6 +923,10 @@ impl SimHarness {
     }
 
     /// Authoritative teleport for scenario setup (server-side, undo-safe).
+    ///
+    /// Moves the body on the SERVER only: no event tells the client, so the
+    /// client's region the body was in diverges from the server for good. Not
+    /// for tests that count mispredictions or check that region's convergence.
     pub fn teleport_player(&mut self, pos: [f32; 3]) {
         self.servers[self.home_host].teleport_local_player(pos);
         self.settle();
