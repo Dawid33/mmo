@@ -56,6 +56,10 @@ impl fmt::Display for LoginFailure {
                 ApiErrorCode::WorldUnavailable => {
                     f.write_str("That world's server is not reachable right now \u{2014} try again shortly")
                 }
+                ApiErrorCode::IdentityRefused => f.write_str("The identity provider's login was refused"),
+                ApiErrorCode::IdentityConflict => {
+                    f.write_str("That identity clashes with an existing account")
+                }
                 ApiErrorCode::BadRequest => f.write_str(&e.message),
                 ApiErrorCode::Internal => f.write_str("The login server had a problem \u{2014} try again later"),
             },

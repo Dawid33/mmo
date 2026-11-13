@@ -27,6 +27,8 @@ pub const PATH_JOIN: &str = "/v1/join";
 pub const PATH_VERIFY: &str = "/v1/verify";
 pub const PATH_RESET_REQUEST: &str = "/v1/reset/request";
 pub const PATH_RESET_CONFIRM: &str = "/v1/reset/confirm";
+pub const PATH_LOGIN_OIDC: &str = "/v1/login/oidc";
+pub const PATH_CONFIG: &str = "/v1/config";
 pub const PATH_JWKS: &str = "/.well-known/jwks.json";
 
 /// The claims of a join JWT (`kid` rides in the header).
@@ -79,6 +81,22 @@ pub struct LoginResponse {
     pub refresh_token: String,
     pub account_email: String,
     pub email_verified: bool,
+    /// The account's display name (from the identity provider); empty when unknown.
+    #[serde(default)]
+    pub account_name: String,
+}
+
+/// `POST /v1/login/oidc`: logs in with an access token the identity provider issued.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OidcLoginRequest {
+    pub access_token: String,
+}
+
+/// `GET /v1/config`: where a client signs in.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LoginConfigResponse {
+    pub oidc_issuer: String,
+    pub oidc_client_id: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -158,6 +176,10 @@ pub enum ApiErrorCode {
     /// The world's host did not take the spawn order (its link is down or it did not answer in
     /// time): try again later. HTTP 503.
     WorldUnavailable,
+    /// The identity provider's token was bad, foreign or its email unverified.
+    IdentityRefused,
+    /// The identity cannot be tied to one account (it clashes with an existing one).
+    IdentityConflict,
     Internal,
 }
 
@@ -222,5 +244,18 @@ mod tests {
         );
         let e: ApiErrorCode = serde_json::from_str("\"not_verified\"").unwrap();
         assert_eq!(e, ApiErrorCode::NotVerified);
+    }
+
+    #[test]
+    fn oidc_types_serialize_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&ApiErrorCode::IdentityConflict).unwrap(),
+            "\"identity_conflict\""
+        );
+        let r: LoginResponse = serde_json::from_str(
+            r#"{"refresh_token":"r","account_email":"a@b.c","email_verified":true}"#,
+        )
+        .unwrap();
+        assert_eq!(r.account_name, "");
     }
 }

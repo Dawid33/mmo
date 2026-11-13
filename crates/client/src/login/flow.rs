@@ -685,6 +685,7 @@ mod tests {
                 refresh_token: token.into(),
                 account_email: email.into(),
                 email_verified: false,
+                account_name: String::new(),
             }),
         }
     }
@@ -734,7 +735,7 @@ mod tests {
         // Native stays on its menu, the browser's login screen moves on.
         let ok = |token: &str| LoginReply::Session {
             silent: true,
-            result: Ok(LoginResponse { refresh_token: token.into(), account_email: "a@b.c".into(), email_verified: true }),
+            result: Ok(LoginResponse { refresh_token: token.into(), account_email: "a@b.c".into(), email_verified: true, account_name: String::new() }),
         };
         assert_eq!(login.apply(ok("r2"), AppState::MainMenu).goto, None);
         assert_eq!(session().apply(ok("r2"), AppState::Login).goto, Some(AppState::Worlds));
@@ -841,7 +842,7 @@ mod tests {
         assert!(matches!(step.calls.as_slice(), [LoginCall::Refresh { token, silent: true }] if token == "kept"));
         let ok = LoginReply::Session {
             silent: true,
-            result: Ok(LoginResponse { refresh_token: "r2".into(), account_email: "a@b.c".into(), email_verified: true }),
+            result: Ok(LoginResponse { refresh_token: "r2".into(), account_email: "a@b.c".into(), email_verified: true, account_name: String::new() }),
         };
         let step = login.receive(0, ok, AppState::Login);
         assert_eq!(step.goto, Some(AppState::Worlds));

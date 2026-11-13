@@ -263,6 +263,7 @@ fn login_response(account: &AccountRow, refresh_token: String) -> LoginResponse 
         refresh_token,
         account_email: account.email.clone(),
         email_verified: account.email_verified_at.is_some(),
+        account_name: String::new(),
     }
 }
 
