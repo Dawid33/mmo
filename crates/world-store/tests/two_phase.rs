@@ -737,3 +737,48 @@ fn prepared_part_with_an_entity_twice_is_refused() {
     assert_eq!(prepared(&w), 0);
     h.shutdown();
 }
+
+/// The world-row lock matrix of the cut path (Task 12b follow-up): a claim's `FOR KEY
+/// SHARE` on the world row (held while it waits for a prepared part's `super_regions`
+/// rows) blocks neither a commit decision nor a host boot (both `FOR NO KEY UPDATE`);
+/// `worldctl super-region`'s `FOR UPDATE` still does block a decision (it is serialised).
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn claim_holding_the_world_row_does_not_block_a_decision() {
+    let Some(w) = pg_world() else { return };
+    let h = open(&w.url);
+    let (f0, _) = fences(&h);
+    let c = h.claim_coordinator().unwrap();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let mut conn = rt.block_on(sqlx::PgConnection::connect(&w.db.url)).unwrap();
+    for (id, lock, blocks) in [(50u64, "FOR KEY SHARE", false), (52, "FOR UPDATE", true)] {
+        h.prepare_cut(part(id, 0), f0.clone(), 0).recv().unwrap().unwrap();
+        let mut tx = rt.block_on(conn.begin()).unwrap();
+        rt.block_on(sqlx::query(&format!("SELECT super_region_regions FROM world WHERE id = 1 {lock}")).fetch_all(&mut *tx))
+            .unwrap();
+        let decided = h.decide_cut_later(CutId(id), 100 * id, true, vec![0], vec![], c, 0);
+        if blocks {
+            assert!(decided.recv_timeout(BLOCKED_FOR).is_err(), "{lock}: the decision waits");
+            rt.block_on(tx.rollback()).unwrap();
+            assert!(decided.recv_timeout(Duration::from_secs(10)).expect("decided after the lock goes").unwrap());
+        } else {
+            let done = decided.recv_timeout(Duration::from_secs(5)).unwrap_or_else(|_| panic!("{lock}: the decision waits"));
+            assert!(done.unwrap(), "committed");
+            // A host boot (its generation check) does not wait either.
+            let (tx_boot, rx_boot) = crossbeam::channel::bounded(1);
+            let booter = {
+                let (h, f0) = (h.clone(), f0.clone());
+                std::thread::spawn(move || {
+                    let _ = tx_boot.send(h.register_host(host_row(0), &f0));
+                })
+            };
+            rx_boot.recv_timeout(Duration::from_secs(5)).expect("the boot does not wait").unwrap();
+            booter.join().unwrap();
+            rt.block_on(tx.rollback()).unwrap();
+        }
+        assert_eq!(h.cut_decided(CutId(id)).unwrap(), Some(true));
+        assert_eq!(prepared(&w), 0);
+    }
+    rt.block_on(conn.close()).unwrap();
+    h.shutdown();
+}

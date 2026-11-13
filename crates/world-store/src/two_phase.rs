@@ -14,8 +14,9 @@
 //! `super_regions` rows (so a claim of them waits for the decision) and the rows it
 //! wrote — but none on `world` (it reads the generation without a lock and writes no
 //! world tick). The decision locks `coordinator` (`FOR SHARE`), then `world`
-//! (`FOR UPDATE`, a commit only), `cut_decisions` and `hosts`: no row a prepared part
-//! holds, so a decision never waits for a part.
+//! (`FOR NO KEY UPDATE`, a commit only — it never waits for a claim's `FOR KEY SHARE`),
+//! `cut_decisions` and `hosts`: no row a prepared part holds, so a decision never waits
+//! for a part, nor for a claim waiting for one.
 //!
 //! None of this takes the store's writer lock: a prepare queued behind a part that
 //! holds a row it needs waits for the decision, which must not wait for that prepare.
@@ -194,7 +195,14 @@ pub(crate) async fn decide_cut(
         None => {
             let mut commit = commit;
             if commit {
-                let stored: i64 = sqlx::query_scalar("SELECT generation FROM world WHERE id = 1 FOR UPDATE")
+                // `FOR NO KEY UPDATE`, not `FOR UPDATE`: it serialises with another
+                // decision and with `register_host`'s generation bump (both take it), and
+                // with `worldctl super-region` (`FOR UPDATE`), but NOT with a claim's
+                // `FOR KEY SHARE` — a claim holding that while it waits for a prepared
+                // part's `super_regions` locks would otherwise wait on this decision while
+                // this decision waits on it: a cycle through a prepared transaction that
+                // Postgres cannot detect.
+                let stored: i64 = sqlx::query_scalar("SELECT generation FROM world WHERE id = 1 FOR NO KEY UPDATE")
                     .fetch_optional(&mut *tx)
                     .await?
                     .ok_or_else(|| StoreError::Corrupt("the world row is missing".into()))?;

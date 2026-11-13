@@ -276,7 +276,7 @@ macro_rules! engine_rows {
             }
 
             /// Registers a host boot (R3): in one transaction, with the fence checked over the fence's own
-            /// super-regions first and then the world row locked (Postgres: `FOR UPDATE`; SQLite
+            /// super-regions first and then the world row locked (Postgres: `FOR NO KEY UPDATE`; SQLite
             /// has one writer) — the lock order of `commit_cut`. If the ordinal's row exists, is not clean and
             /// still holds the world's generation, the previous boot died without a clean
             /// save: `world.generation` goes up (`bumped`). The row is then upserted with
@@ -286,7 +286,11 @@ macro_rules! engine_rows {
                 let mut tx = pool.begin().await?;
                 let srs: std::collections::BTreeSet<SuperRegion> = fence.epochs.keys().copied().collect();
                 check_fence(&mut *tx, fence, &srs).await?;
-                let world: i64 = sqlx::query(concat!("SELECT generation FROM world WHERE id = 1", $update_lock))
+                // Postgres `FOR NO KEY UPDATE` (as `decide_cut`): serialises the generation
+                // with a decision and another boot, never waits for a claim's `FOR KEY SHARE`.
+                let no_key = if $update_lock.is_empty() { "" } else { " FOR NO KEY UPDATE" };
+                let sql = format!("SELECT generation FROM world WHERE id = 1{no_key}");
+                let world: i64 = sqlx::query(&sql)
                     .fetch_optional(&mut *tx)
                     .await?
                     .ok_or_else(|| StoreError::Corrupt("the world row is missing".into()))?
@@ -916,7 +920,7 @@ macro_rules! engine_rows {
                 cut_lock_timeout(&mut *conn, lock_timeout_ms).await?;
                 // No row lock: a prepared part holding one on the world row would
                 // block the decision's world tick update. The decision re-checks the
-                // generation under `FOR UPDATE`.
+                // generation under `FOR NO KEY UPDATE`.
                 let stored: i64 = sqlx::query("SELECT generation FROM world WHERE id = 1")
                     .fetch_optional(&mut *conn)
                     .await?

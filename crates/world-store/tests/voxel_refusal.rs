@@ -327,7 +327,8 @@ fn fresh_store_has_no_voxel_tables() {
         assert_eq!(h.terrain_kind().unwrap(), None);
         h.shutdown();
         assert_voxel_tables_gone(url);
-        assert_eq!(newest_migration(), 5, "0005_drop_voxel_terrain is this build's newest migration");
+        // A fresh store is at this build's newest migration, `0005_drop_voxel_terrain` or later.
+        assert!(newest_migration() > LAST_VOXEL_SCHEMA, "0005_drop_voxel_terrain is among this build's migrations");
         StoreHandle::open(url, Dials::BUILT, OpenMode::ReadOnly).unwrap().shutdown();
 
         raw_exec(url, "UPDATE world SET terrain = 0");
