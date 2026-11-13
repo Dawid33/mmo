@@ -39,5 +39,95 @@ class GroupsByHostFlip(unittest.TestCase):
         self.assertEqual(groups["all"]["corrections"], 4.0)
 
 
+def crossing(host_flip, correction_max, corrections, confirm_ms=40.0):
+    return {"host_flip": float(host_flip), "correction_max": correction_max, "corrections": float(corrections),
+            "confirm_ms": confirm_ms}
+
+
+SERVER_OK = [
+    "INFO [server] role: Host",
+    "INFO [server] window=5.0s sessions=1 regions=4 parked=0 transfers_inflight=0 pending_arrivals=0 "
+    "peer_unreceived=2 arrivals_despawned=0 items_destroyed=0 intent_replies_lost=0 | lod hit=1",
+    "INFO [server] window=5.0s sessions=0 regions=4 parked=0 transfers_inflight=0 pending_arrivals=0 "
+    "peer_unreceived=0 arrivals_despawned=0 items_destroyed=0 intent_replies_lost=0 | lod hit=1",
+]
+CLIENT_OK = ["INFO [client-state-hash] checked=12 mismatched=0 (server VOXEL_STATE_HASH_INTERVAL)"]
+
+
+class GoNoGo(unittest.TestCase):
+    """Decision 13: host p95 <= 1.25 x thread p95 + 0.05, per judged metric."""
+
+    def run_verdict(self, thread, host, clients=None, servers=None):
+        clients = clients or {"thread run": CLIENT_OK, "host run": CLIENT_OK}
+        servers = servers or {"host-0.log": SERVER_OK, "host-1.log": SERVER_OK}
+        return crossing_summary.verdict(
+            thread,
+            host,
+            crossing_summary.conservation_problems(clients, servers),
+            crossing_summary.invalid_reasons(clients, servers),
+        )
+
+    def test_go_when_host_flips_match_thread_flips(self):
+        thread = [crossing(0, 1.0, 2) for _ in range(30)]
+        # 1.25 x 1.0 + 0.05 = 1.30 and 1.25 x 2 + 0.05 = 2.55: at the limit is still GO.
+        host = [crossing(1, 1.3, 2) for _ in range(30)]
+        # Crossings of the other kind in either run are not counted.
+        word, reasons, rows = self.run_verdict(thread + [crossing(1, 99.0, 99)], host + [crossing(0, 99.0, 99)])
+        self.assertEqual(word, "GO", reasons)
+        self.assertEqual([r[0] for r in rows], ["correction_max", "corrections", "confirm_ms"])
+
+    def test_no_go_by_ratio(self):
+        thread = [crossing(0, 1.0, 2) for _ in range(30)]
+        host = [crossing(1, 1.0, 3) for _ in range(30)]  # corrections 3 > 2.55
+        word, reasons, _ = self.run_verdict(thread, host)
+        self.assertEqual(word, "NO-GO")
+        self.assertTrue(any(r.startswith("corrections:") for r in reasons), reasons)
+
+    def test_slack_lets_a_zero_thread_p95_pass_small_noise(self):
+        thread = [crossing(0, 0.0, 0) for _ in range(30)]
+        self.assertEqual(self.run_verdict(thread, [crossing(1, 0.05, 0) for _ in range(30)])[0], "GO")
+        self.assertEqual(self.run_verdict(thread, [crossing(1, 0.06, 0) for _ in range(30)])[0], "NO-GO")
+
+    def test_no_go_by_conservation_whatever_the_timing(self):
+        same = [crossing(0, 1.0, 2) for _ in range(30)], [crossing(1, 1.0, 2) for _ in range(30)]
+        lost = SERVER_OK[:2] + [SERVER_OK[2].replace("intent_replies_lost=0", "intent_replies_lost=1")]
+        word, reasons, _ = self.run_verdict(*same, servers={"host-0.log": SERVER_OK, "host-1.log": lost})
+        self.assertEqual(word, "NO-GO")
+        self.assertIn("intent_replies_lost", reasons[0])
+        unreceived = SERVER_OK[:2] + [SERVER_OK[2].replace("peer_unreceived=0", "peer_unreceived=3")]
+        self.assertEqual(self.run_verdict(*same, servers={"host-0.log": unreceived})[0], "NO-GO")
+        destroyed = [SERVER_OK[0], SERVER_OK[1].replace("items_destroyed=0", "items_destroyed=1"), SERVER_OK[2]]
+        self.assertEqual(self.run_verdict(*same, servers={"host-0.log": destroyed})[0], "NO-GO")
+        mismatch = ["[client-state-hash] checked=12 mismatched=1 (server VOXEL_STATE_HASH_INTERVAL)"]
+        word, _, _ = self.run_verdict(*same, clients={"thread run": CLIENT_OK, "host run": mismatch})
+        self.assertEqual(word, "NO-GO")
+        # peer_unreceived above 0 mid-run is fine; only the last line counts.
+        self.assertEqual(self.run_verdict(*same)[0], "GO")
+
+    def test_invalid(self):
+        good = [crossing(0, 1.0, 2) for _ in range(30)], [crossing(1, 1.0, 2) for _ in range(30)]
+        # Too few crossings in a group.
+        word, reasons, _ = self.run_verdict(good[0], good[1][:19])
+        self.assertEqual(word, "INVALID")
+        self.assertIn("host seam", reasons[0])
+        # A host restarted during the run.
+        restarted = SERVER_OK + ["INFO [server] role: Host"]
+        self.assertEqual(self.run_verdict(*good, servers={"host-0.log": restarted})[0], "INVALID")
+        # No state-hash check ran in a client.
+        word, _, _ = self.run_verdict(*good, clients={"thread run": CLIENT_OK, "host run": ["nothing"]})
+        self.assertEqual(word, "INVALID")
+        # A client panicked.
+        panicked = CLIENT_OK + ["thread 'main' panicked at src/x.rs:1:1"]
+        self.assertEqual(self.run_verdict(*good, clients={"thread run": panicked, "host run": CLIENT_OK})[0], "INVALID")
+
+    def test_parsed_lines_feed_the_verdict(self):
+        thread = crossing_summary.crossing_lines([LINES[0]] * 25)
+        host = crossing_summary.crossing_lines([LINES[1]] * 25)
+        word, reasons, rows = self.run_verdict(thread, host)
+        # correction_max 2.25 > 1.25 x 0.5 + 0.05.
+        self.assertEqual(word, "NO-GO", reasons)
+        self.assertEqual(rows[0][1:3], (0.5, 2.25))
+
+
 if __name__ == "__main__":
     unittest.main()

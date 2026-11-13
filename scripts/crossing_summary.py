@@ -8,11 +8,16 @@ the autopilot's own events, and — when the client ran with PERF_LOG=1 — the
 `[client-motion]` chunk-crossing lines.
 
 Usage: crossing_summary.py [--by KEY] [--p95] <client.log>
+       crossing_summary.py --go-nogo --thread-log <client.log> --host-log <client.log>
+                           [--server-log <host-n.log>]... [--min-crossings N]
 
   --by KEY  also split the game-thread crossings by the value of KEY on their line
             (e.g. `--by host_flip`: crossings between two hosts' regions vs within one).
   --p95     per group (or over all crossings): the p95 of correction_max, corrections
             and confirm_ms only.
+  --go-nogo the R3 go / no-go (`just go-nogo-r3`, the plan's decision 13): both client
+            logs' p95 tables by host_flip, then one verdict line, `VERDICT: GO`,
+            `VERDICT: NO-GO` or `VERDICT: INVALID` (see `verdict`).
 """
 import argparse
 import re
@@ -176,10 +181,159 @@ def main(path, by=None, p95_only=False):
         print("  * rollback corrections — plus, under the shuttle, its own reversals")
 
 
+# --- the R3 go / no-go (plan decision 13) -------------------------------------------
+
+# A host flip's p95 may be at most this times the thread flip's p95 ...
+GO_NOGO_RATIO = 1.25
+# ... plus this much (units of the metric), per judged metric.
+GO_NOGO_SLACK = 0.05
+# The judged metrics (confirm_ms is shown beside them, not judged).
+GO_NOGO_KEYS = ["correction_max", "corrections"]
+# Fewer crossings than this in either group: too few to judge a p95 (INVALID).
+MIN_CROSSINGS = 20
+
+
+def clean(lines):
+    return [ANSI.sub("", raw) for raw in lines]
+
+
+def conservation_problems(client_logs, server_logs):
+    """What breaks conservation in a run, as text (empty: it held). `client_logs` and
+    `server_logs` map a name to the log's lines. Client: a `[client-state-hash]` line with
+    `mismatched` > 0. Hosts: a `[server] window=` line with `items_destroyed` or
+    `intent_replies_lost` > 0, or a host whose LAST such line has `peer_unreceived` > 0."""
+    problems = []
+    for name, lines in client_logs.items():
+        for line in clean(lines):
+            if "[client-state-hash]" in line:
+                kv = dict(KV.findall(line))
+                if float(kv.get("mismatched", 0)) > 0:
+                    problems.append(f"{name}: state-hash mismatch: {line.strip()[:160]}")
+    for name, lines in server_logs.items():
+        last = None
+        for line in clean(lines):
+            if "[server] window=" not in line:
+                continue
+            kv = dict(KV.findall(line))
+            for key in ("items_destroyed", "intent_replies_lost"):
+                if float(kv.get(key, 0)) > 0:
+                    problems.append(f"{name}: {key}={kv[key]} on a [server] line")
+            last = kv
+        if last is not None and float(last.get("peer_unreceived", 0)) > 0:
+            problems.append(f"{name}: peer_unreceived={last['peer_unreceived']} at the end")
+    return problems
+
+
+def invalid_reasons(client_logs, server_logs):
+    """What makes a run unfit to judge (empty: fit): a host that started more than once
+    (a restart rolls the world back), no `[server] window=` counters line at all, a client
+    log with no `[client-state-hash]` line (nothing checked), a client that panicked or
+    lost its GPU."""
+    reasons = []
+    for name, lines in server_logs.items():
+        starts = sum(1 for line in clean(lines) if "[server] role:" in line)
+        if starts > 1:
+            reasons.append(f"{name}: the host started {starts} times (restarted during the run)")
+    if not any("[server] window=" in line for lines in server_logs.values() for line in clean(lines)):
+        reasons.append("no [server] counters line in any host log: conservation unchecked")
+    for name, lines in client_logs.items():
+        text = clean(lines)
+        if not any("[client-state-hash]" in line for line in text):
+            reasons.append(f"{name}: no [client-state-hash] line: the state hash was never checked")
+        fault = next((line for line in text if "DeviceLost" in line or "panicked at" in line), None)
+        if fault:
+            reasons.append(f"{name}: run aborted: {fault.strip()[:160]}")
+    return reasons
+
+
+def p95_of(crossings, metric):
+    values = [c[metric] for c in crossings if metric in c and c[metric] >= 0]
+    return pct(values, 0.95) if values else 0.0
+
+
+def verdict(thread_crossings, host_crossings, conservation, invalid, min_crossings=MIN_CROSSINGS):
+    """Decision 13 over one run: `(word, reasons, rows)`. The thread group is the thread
+    run's crossings with host_flip=0, the host group the host run's with host_flip=1.
+    In order: any `invalid` reason -> INVALID; any `conservation` problem -> NO-GO,
+    whatever the timing; fewer than `min_crossings` in a group -> INVALID; then GO iff for
+    every GO_NOGO_KEYS metric host p95 <= GO_NOGO_RATIO * thread p95 + GO_NOGO_SLACK.
+    `rows`: (metric, thread p95, host p95, limit or None, ok or None)."""
+    thread = [c for c in thread_crossings if c.get("host_flip") == 0]
+    host = [c for c in host_crossings if c.get("host_flip") == 1]
+    rows = []
+    for metric in GO_NOGO_KEYS:
+        t, h = p95_of(thread, metric), p95_of(host, metric)
+        limit = GO_NOGO_RATIO * t + GO_NOGO_SLACK
+        rows.append((metric, t, h, limit, h <= limit))
+    rows.append(("confirm_ms", p95_of(thread, "confirm_ms"), p95_of(host, "confirm_ms"), None, None))
+    if invalid:
+        return "INVALID", list(invalid), rows
+    if conservation:
+        return "NO-GO", ["conservation: " + p for p in conservation], rows
+    few = [
+        f"{name}: {len(group)} crossings (< {min_crossings})"
+        for name, group in (("thread seam (host_flip=0)", thread), ("host seam (host_flip=1)", host))
+        if len(group) < min_crossings
+    ]
+    if few:
+        return "INVALID", few, rows
+    misses = [
+        f"{m}: host p95 {h:.2f} > {GO_NOGO_RATIO} x thread p95 {t:.2f} + {GO_NOGO_SLACK} = {limit:.2f}"
+        for m, t, h, limit, ok in rows
+        if ok is False
+    ]
+    if misses:
+        return "NO-GO", misses, rows
+    return "GO", [f"thread n={len(thread)}, host n={len(host)}"], rows
+
+
+def go_nogo(thread_log, host_log, server_logs, min_crossings=MIN_CROSSINGS):
+    """Prints both runs' p95 tables by host_flip, the facts and the verdict; returns the word."""
+    read = lambda path: open(path, errors="replace").readlines()  # noqa: E731
+    clients = {"thread run": read(thread_log), "host run": read(host_log)}
+    servers = {path: read(path) for path in server_logs}
+    for name, path in (("thread run", thread_log), ("host run", host_log)):
+        print(f"\n== {name}: {path}")
+        main(path, "host_flip", True)
+    for path, lines in servers.items():
+        starts = sum(1 for line in clean(lines) if "[server] role:" in line)
+        print(f"host log {path}: started {starts} time(s){' (RESTARTED)' if starts > 1 else ''}")
+    word, reasons, rows = verdict(
+        crossing_lines(clients["thread run"]),
+        crossing_lines(clients["host run"]),
+        conservation_problems(clients, servers),
+        invalid_reasons(clients, servers),
+        min_crossings,
+    )
+    print(f"\ngo / no-go (decision 13: host p95 <= {GO_NOGO_RATIO} x thread p95 + {GO_NOGO_SLACK}):")
+    print(f"  {'metric':<16} {'thread p95':>10} {'host p95':>10} {'limit':>10}  ok")
+    for metric, t, h, limit, ok in rows:
+        if limit is None:
+            print(f"  {metric:<16} {t:>10.2f} {h:>10.2f} {'(shown)':>10}  -")
+        else:
+            print(f"  {metric:<16} {t:>10.2f} {h:>10.2f} {limit:>10.2f}  {'yes' if ok else 'NO'}")
+    for reason in reasons:
+        print(f"  {reason}")
+    print(f"VERDICT: {word}")
+    return word
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(usage=__doc__)
-    parser.add_argument("log")
+    parser.add_argument("log", nargs="?")
     parser.add_argument("--by", help="split game-thread crossings by this key's value")
     parser.add_argument("--p95", action="store_true", help="only the p95 of correction_max, corrections, confirm_ms")
+    parser.add_argument("--go-nogo", action="store_true", help="the R3 go / no-go verdict over two client logs")
+    parser.add_argument("--thread-log", help="--go-nogo: the client log of the thread-seam shuttle")
+    parser.add_argument("--host-log", help="--go-nogo: the client log of the host-seam shuttle")
+    parser.add_argument("--server-log", action="append", default=[], help="--go-nogo: a host's log (repeat)")
+    parser.add_argument("--min-crossings", type=int, default=MIN_CROSSINGS)
     args = parser.parse_args()
-    main(args.log, args.by, args.p95)
+    if args.go_nogo:
+        if not (args.thread_log and args.host_log):
+            parser.error("--go-nogo needs --thread-log and --host-log")
+        go_nogo(args.thread_log, args.host_log, args.server_log, args.min_crossings)
+    else:
+        if not args.log:
+            parser.error("a client log is needed")
+        main(args.log, args.by, args.p95)

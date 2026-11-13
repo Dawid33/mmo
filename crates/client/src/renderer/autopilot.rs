@@ -14,6 +14,13 @@
 //!   `CHUNK_UNITS` — 256 units at 16-block chunks — inside one region: no
 //!   handoff, just the crossing between two chunks' bodies and bricks).
 //!   `just shuttle-probe`.
+//! - `VOXEL_AUTOPILOT=shuttle` with `VOXEL_AUTOPILOT_BOUNDARY=host` or `thread`
+//!   (the R3 go / no-go, `just go-nogo-r3`): picks the region seam nearest the
+//!   start whose two sides belong to different hosts (`host`) or to one host
+//!   (`thread`) — [`pick_seam`], from `VOXEL_HOSTS` and
+//!   `VOXEL_SUPER_REGION_REGIONS`, which only this probe reads on the client —
+//!   turns to face the nearest point of that seam (away from its ends), flies
+//!   there, turns square to it and shuttles across it as above.
 //!
 //! `VOXEL_AUTOPILOT_SECONDS=N` closes the client N seconds after the climb.
 //!
@@ -22,12 +29,13 @@
 //! (the same `PlayerInput` events `forward_input` would), and it enables body
 //! control with `InputEvent::FpsCam(true)` rather than the E toggle — that sets
 //! the sim's fps-camera mode without the `SetFreeCam` that grabs the cursor.
+//! It turns the same way: `InputEvent::MouseMotion` into the sim's look.
 
 use std::time::Duration;
 
 use bevy::app::AppExit;
 use bevy::prelude::*;
-use game::{GameEventKind, InputEvent, Key};
+use game::{GameEventKind, InputEvent, Key, RegionCoords};
 
 use super::join_timeline::WorldReady;
 use super::{GameEvents, LocalPlayer};
@@ -58,20 +66,65 @@ const CRUISE_AT_MS: u64 = 1950;
 const SHUTTLE_OVERSHOOT_REGION_M: f32 = 6.0;
 const SHUTTLE_OVERSHOOT_CHUNK_M: f32 = 1.0;
 
+/// [`pick_seam`] looks this many regions around the home first (then further,
+/// up to [`PICK_SEAM_MAX_RADIUS`]).
+pub const PICK_SEAM_RADIUS: i32 = 4;
+/// The farthest [`pick_seam`] looks before giving up.
+pub const PICK_SEAM_MAX_RADIUS: i32 = 64;
+/// The seam shuttle is facing its goal once within this many degrees.
+const TURN_DONE_DEG: f32 = 2.0;
+/// A turn that leaves the heading error more than this times what it was went the
+/// wrong way: the yaw sign is flipped.
+const TURN_WRONG_WAY: f32 = 1.5;
+/// While flying to the seam, a heading this far off its target point turns again.
+const SEEK_REAIM_DEG: f32 = 10.0;
+/// After a turn, the look is measured again only this much later (the input
+/// goes through a tick, prediction and the render).
+const TURN_SETTLE_MS: u64 = 300;
+/// The seam shuttle aims at the point of the seam nearest it, kept this fraction
+/// of a region away from either end of the seam.
+const SEEK_EDGE_MARGIN: f32 = 0.25;
+/// The seam shuttle has reached its point of the seam within this many metres.
+const SEEK_ARRIVE_M: f32 = 8.0;
+
+/// Which kind of region seam the seam shuttle crosses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SeamKind {
+    /// Two regions of different hosts.
+    Host,
+    /// Two regions of one host (two of its region threads).
+    Thread,
+}
+
 #[derive(Clone, Copy, Debug)]
 enum Mode {
     Fly,
     /// Back and forth across one plane of a `cell`-unit grid.
     Shuttle { cell: f32, overshoot: f32 },
+    /// Back and forth across one region seam of `kind`, [`pick_seam`] with `hosts`
+    /// hosts and `s` regions per super-region side.
+    Seam { kind: SeamKind, hosts: u32, s: u32, overshoot: f32 },
 }
 
 /// Shuttle progress: looking for the first boundary, then bouncing across it.
 #[derive(Clone, Copy, Debug)]
 enum Leg {
     Seek { start: IVec2 },
+    /// The seam shuttle: turning to face `goal` (a horizontal world direction),
+    /// then `then`.
+    Turn { goal: Vec2, then: AfterTurn },
+    /// The seam shuttle: flying (W held) to `target`, a point of the seam.
+    Approach { target: Vec2, axis: usize, seam: f32, heading: f32 },
     /// `axis` 0 = x, 1 = z; `seam` in world units; `heading` is the sign of
     /// the current travel along the axis; `forward` whether W (else S) is held.
     Bounce { axis: usize, seam: f32, heading: f32, forward: bool },
+}
+
+/// What a [`Leg::Turn`] leads to.
+#[derive(Clone, Copy, Debug)]
+enum AfterTurn {
+    Approach { target: Vec2, axis: usize, seam: f32, heading: f32 },
+    Bounce { axis: usize, seam: f32, heading: f32 },
 }
 
 #[derive(Resource)]
@@ -84,6 +137,13 @@ pub struct Autopilot {
     cruising: bool,
     leg: Option<Leg>,
     reversals: u32,
+    /// The seam shuttle's last look input: when, and the heading error it corrected.
+    last_turn: Option<(Duration, f32)>,
+    /// Mouse x per radian of yaw, signed: `-1 / look_delta_rad(1)` by the sim's
+    /// convention; flipped if a turn makes the error worse.
+    px_per_rad: f32,
+    /// The seam shuttle holds W (approaching the seam; [`bounce`] drives W / S after).
+    w_held: bool,
 }
 
 impl Autopilot {
@@ -91,8 +151,13 @@ impl Autopilot {
         let var = std::env::var("VOXEL_AUTOPILOT").ok().filter(|v| !v.is_empty() && v != "0")?;
         let mode = match var.as_str() {
             "shuttle" => {
-                let chunk = std::env::var("VOXEL_AUTOPILOT_BOUNDARY").is_ok_and(|b| b == "chunk");
-                let (cell, default_m) = if chunk {
+                let boundary = std::env::var("VOXEL_AUTOPILOT_BOUNDARY").unwrap_or_default();
+                let seam = match boundary.as_str() {
+                    "host" => Some(SeamKind::Host),
+                    "thread" => Some(SeamKind::Thread),
+                    _ => None,
+                };
+                let (cell, default_m) = if boundary == "chunk" {
                     (game::CHUNK_UNITS as f32, SHUTTLE_OVERSHOOT_CHUNK_M)
                 } else {
                     (game::REGION_SIZE, SHUTTLE_OVERSHOOT_REGION_M)
@@ -101,7 +166,24 @@ impl Autopilot {
                     .ok()
                     .and_then(|s| s.parse::<f32>().ok())
                     .unwrap_or(default_m);
-                Mode::Shuttle { cell, overshoot: metres * game::movement::UNITS_PER_METER }
+                let overshoot = metres * game::movement::UNITS_PER_METER;
+                match seam {
+                    None => Mode::Shuttle { cell, overshoot },
+                    Some(kind) => {
+                        // Probe only: the client otherwise never reads the world's host layout.
+                        let number = |key: &str| std::env::var(key).ok().and_then(|v| v.parse::<u32>().ok());
+                        let hosts = number(game::ownership::HOSTS_ENV).unwrap_or(1);
+                        let s = number("VOXEL_SUPER_REGION_REGIONS").unwrap_or(game::DEFAULT_SUPER_REGION_REGIONS);
+                        if kind == SeamKind::Host && hosts < 2 {
+                            error!(
+                                "autopilot: VOXEL_AUTOPILOT_BOUNDARY=host needs {}>=2 (the world's host count); no autopilot",
+                                game::ownership::HOSTS_ENV
+                            );
+                            return None;
+                        }
+                        Mode::Seam { kind, hosts, s: s.max(1), overshoot }
+                    }
+                }
             }
             _ => Mode::Fly,
         };
@@ -117,6 +199,9 @@ impl Autopilot {
             cruising: false,
             leg: None,
             reversals: 0,
+            last_turn: None,
+            px_per_rad: -1.0 / game::look_delta_rad(1.0, game::LOOK_BASE_X),
+            w_held: false,
         })
     }
 }
@@ -183,51 +268,314 @@ fn drive_autopilot(
     if !pilot.cruising {
         pilot.cruising = true;
         // Fly sprints; a chunk shuttle stays at plain flight speed so a leg
-        // spans a few ticks.
-        let sprint = match pilot.mode {
-            Mode::Fly => true,
-            Mode::Shuttle { cell, .. } => cell >= game::REGION_SIZE,
+        // spans a few ticks. The seam shuttle holds W itself (not while turning).
+        let (sprint, forward) = match pilot.mode {
+            Mode::Fly => (true, true),
+            Mode::Shuttle { cell, .. } => (cell >= game::REGION_SIZE, true),
+            Mode::Seam { .. } => (true, false),
         };
         if sprint {
             key(Key::ControlLeft, true);
         }
-        key(Key::KeyW, true);
+        if forward {
+            key(Key::KeyW, true);
+        }
     }
 
-    if let Mode::Shuttle { cell, overshoot } = pilot.mode {
-        let pos = cameras.iter().find(|(c, _)| c.is_active).map(|(_, t)| t.translation());
-        if let Some(pos) = pos {
-            let here = IVec2::new((pos.x / cell).floor() as i32, (pos.z / cell).floor() as i32);
-            let at = [pos.x, pos.z];
-            match pilot.leg {
-                None => pilot.leg = Some(Leg::Seek { start: here }),
-                Some(Leg::Seek { start }) if here != start => {
-                    // First boundary: the plane between the two cells.
-                    let axis = if here.x != start.x { 0 } else { 1 };
-                    let (from, to) = if axis == 0 { (start.x, here.x) } else { (start.y, here.y) };
-                    let seam = from.max(to) as f32 * cell;
-                    let heading = (to - from).signum() as f32;
-                    game::perf_event!(
-                        "autopilot_shuttle",
-                        "axis={} seam={} cell={} overshoot={}",
-                        ["x", "z"][axis],
-                        seam,
-                        cell,
-                        overshoot
-                    );
-                    pilot.leg = Some(Leg::Bounce { axis, seam, heading, forward: true });
-                }
-                Some(Leg::Bounce { axis, seam, heading, forward }) => {
-                    if (at[axis] - seam) * heading >= overshoot {
-                        // Past the far side: turn around (W <-> S).
-                        key(if forward { Key::KeyW } else { Key::KeyS }, false);
-                        key(if forward { Key::KeyS } else { Key::KeyW }, true);
-                        pilot.reversals += 1;
-                        pilot.leg = Some(Leg::Bounce { axis, seam, heading: -heading, forward: !forward });
-                    }
-                }
-                _ => {}
+    let camera = cameras.iter().find(|(c, _)| c.is_active).map(|(_, t)| *t);
+    match pilot.mode {
+        Mode::Fly => {}
+        Mode::Shuttle { cell, overshoot } => {
+            if let Some(t) = camera {
+                shuttle(&mut pilot, t.translation(), cell, overshoot, &key);
             }
         }
+        Mode::Seam { kind, hosts, s, overshoot } => {
+            if let Some(t) = camera {
+                seam_shuttle(&mut pilot, now, &t, kind, hosts, s, overshoot, &key, &send);
+            }
+        }
+    }
+}
+
+/// Reverses (W <-> S) once `at` is `overshoot` past `seam` along the leg's heading.
+fn bounce(pilot: &mut Autopilot, at: [f32; 2], overshoot: f32, key: &impl Fn(Key, bool)) {
+    let Some(Leg::Bounce { axis, seam, heading, forward }) = pilot.leg else {
+        return;
+    };
+    if (at[axis] - seam) * heading >= overshoot {
+        // Past the far side: turn around (W <-> S).
+        key(if forward { Key::KeyW } else { Key::KeyS }, false);
+        key(if forward { Key::KeyS } else { Key::KeyW }, true);
+        pilot.reversals += 1;
+        pilot.leg = Some(Leg::Bounce { axis, seam, heading: -heading, forward: !forward });
+    }
+}
+
+/// `VOXEL_AUTOPILOT=shuttle` across the first `cell` boundary met.
+fn shuttle(pilot: &mut Autopilot, pos: Vec3, cell: f32, overshoot: f32, key: &impl Fn(Key, bool)) {
+    let here = IVec2::new((pos.x / cell).floor() as i32, (pos.z / cell).floor() as i32);
+    match pilot.leg {
+        None => pilot.leg = Some(Leg::Seek { start: here }),
+        Some(Leg::Seek { start }) if here != start => {
+            // First boundary: the plane between the two cells.
+            let axis = if here.x != start.x { 0 } else { 1 };
+            let (from, to) = if axis == 0 { (start.x, here.x) } else { (start.y, here.y) };
+            let seam = from.max(to) as f32 * cell;
+            let heading = (to - from).signum() as f32;
+            game::perf_event!(
+                "autopilot_shuttle",
+                "axis={} seam={} cell={} overshoot={}",
+                ["x", "z"][axis],
+                seam,
+                cell,
+                overshoot
+            );
+            pilot.leg = Some(Leg::Bounce { axis, seam, heading, forward: true });
+        }
+        Some(Leg::Bounce { .. }) => bounce(pilot, [pos.x, pos.z], overshoot, key),
+        _ => {}
+    }
+}
+
+/// The signed yaw (radians, about +Y, right-handed) that turns horizontal
+/// direction `from` onto `to`; 0 when either is degenerate.
+fn yaw_error(from: Vec2, to: Vec2) -> f32 {
+    if from.length_squared() < 1e-12 || to.length_squared() < 1e-12 {
+        return 0.0;
+    }
+    // In the x/z plane a rotation by +a about +Y takes (x, z) to
+    // (x cos a + z sin a, -x sin a + z cos a): -Z turns toward -X.
+    let cross_y = from.y * to.x - from.x * to.y;
+    let dot = from.dot(to);
+    cross_y.atan2(dot)
+}
+
+/// `VOXEL_AUTOPILOT=shuttle` across the [`pick_seam`] seam of `kind`.
+#[allow(clippy::too_many_arguments)]
+fn seam_shuttle(
+    pilot: &mut Autopilot,
+    now: Duration,
+    camera: &GlobalTransform,
+    kind: SeamKind,
+    hosts: u32,
+    s: u32,
+    overshoot: f32,
+    key: &impl Fn(Key, bool),
+    send: &impl Fn(InputEvent),
+) {
+    let pos = camera.translation();
+    let at = Vec2::new(pos.x, pos.z);
+    let facing = {
+        let f = camera.forward();
+        Vec2::new(f.x, f.z)
+    };
+    let hold_w = |pilot: &mut Autopilot, on: bool| {
+        if pilot.w_held != on {
+            key(Key::KeyW, on);
+            pilot.w_held = on;
+        }
+    };
+    match pilot.leg {
+        None => {
+            let size = game::REGION_SIZE;
+            let home = RegionCoords::new((pos.x / size).floor() as i32, (pos.z / size).floor() as i32);
+            let (a, b) = pick_seam(home, hosts, s, kind == SeamKind::Host);
+            // `b` is `a` plus one along the seam's axis (pick_seam's order).
+            let axis = if b.x != a.x { 0 } else { 1 };
+            // The point of the seam nearest the body, kept to the middle half of the
+            // edge (clear of the corners and the regions beyond them).
+            let along = |lo: i32, p: f32| {
+                p.clamp((lo as f32 + SEEK_EDGE_MARGIN) * size, (lo as f32 + 1.0 - SEEK_EDGE_MARGIN) * size)
+            };
+            let (seam, target) = if axis == 0 {
+                let seam = b.x as f32 * size;
+                (seam, Vec2::new(seam, along(a.z, at.y)))
+            } else {
+                let seam = b.z as f32 * size;
+                (seam, Vec2::new(along(a.x, at.x), seam))
+            };
+            // Cross toward the far side of the seam first.
+            let heading = if [at.x, at.y][axis] < seam { 1.0 } else { -1.0 };
+            let owner = |rc: RegionCoords| game::rendezvous_owner(game::super_region_of(rc, s), hosts);
+            game::perf_event!(
+                "autopilot_seam",
+                "boundary={} home={},{} a={},{} b={},{} owner_a={} owner_b={} hosts={} s={}",
+                if kind == SeamKind::Host { "host" } else { "thread" },
+                home.x,
+                home.z,
+                a.x,
+                a.z,
+                b.x,
+                b.z,
+                owner(a),
+                owner(b),
+                hosts,
+                s
+            );
+            pilot.leg = Some(Leg::Turn {
+                goal: target - at,
+                then: AfterTurn::Approach { target, axis, seam, heading },
+            });
+        }
+        Some(Leg::Turn { goal, then }) => {
+            hold_w(pilot, false);
+            if pilot.last_turn.is_some_and(|(t, _)| now - t < Duration::from_millis(TURN_SETTLE_MS)) {
+                return;
+            }
+            let goal = match then {
+                // Re-aim at the target point as the body drifts.
+                AfterTurn::Approach { target, .. } => target - at,
+                AfterTurn::Bounce { .. } => goal,
+            };
+            let error = yaw_error(facing, goal);
+            if error.abs() <= TURN_DONE_DEG.to_radians() {
+                pilot.last_turn = None;
+                match then {
+                    AfterTurn::Approach { target, axis, seam, heading } => {
+                        pilot.leg = Some(Leg::Approach { target, axis, seam, heading });
+                    }
+                    AfterTurn::Bounce { axis, seam, heading } => {
+                        game::perf_event!(
+                            "autopilot_shuttle",
+                            "axis={} seam={} cell={} overshoot={}",
+                            ["x", "z"][axis],
+                            seam,
+                            game::REGION_SIZE,
+                            overshoot
+                        );
+                        // Facing the seam square on: the first leg goes forward (W).
+                        hold_w(pilot, true);
+                        pilot.leg = Some(Leg::Bounce { axis, seam, heading, forward: true });
+                    }
+                }
+                return;
+            }
+            // The last turn made it clearly worse (about doubled, not just a look that has
+            // not caught up yet): the sign convention is the other way round.
+            if pilot.last_turn.is_some_and(|(_, before)| error.abs() > TURN_WRONG_WAY * before.abs()) {
+                pilot.px_per_rad = -pilot.px_per_rad;
+            }
+            send(InputEvent::MouseMotion { dx: error * pilot.px_per_rad, dy: 0.0 });
+            pilot.last_turn = Some((now, error));
+        }
+        Some(Leg::Approach { target, axis, seam, heading }) => {
+            let to_go = target - at;
+            if to_go.length() <= SEEK_ARRIVE_M * game::movement::UNITS_PER_METER {
+                hold_w(pilot, false);
+                let mut goal = Vec2::ZERO;
+                goal[axis] = heading;
+                pilot.leg = Some(Leg::Turn { goal, then: AfterTurn::Bounce { axis, seam, heading } });
+                return;
+            }
+            if yaw_error(facing, to_go).abs() > SEEK_REAIM_DEG.to_radians() {
+                hold_w(pilot, false);
+                pilot.leg = Some(Leg::Turn { goal: to_go, then: AfterTurn::Approach { target, axis, seam, heading } });
+                return;
+            }
+            hold_w(pilot, true);
+        }
+        // `bounce` drives W / S from here on.
+        Some(Leg::Bounce { .. }) => bounce(pilot, [at.x, at.y], overshoot, key),
+        Some(Leg::Seek { .. }) => {}
+    }
+}
+
+/// The nearest region seam to `home` whose two sides have different owners
+/// (`want_host_seam`: a host seam) or the same owner (a thread seam), with
+/// `hosts` hosts and `s` regions per super-region side
+/// ([`game::rendezvous_owner`] of [`game::super_region_of`]). Returns `(a, b)`
+/// with `b` one region past `a` in +x or +z. "Nearest": by the distance from the
+/// middle of `home` to the middle of the seam, ties to the lower `a` (x, then z),
+/// then x before z — the same answer every time. Looks [`PICK_SEAM_RADIUS`]
+/// regions around `home`, then further; panics if no such seam lies within
+/// [`PICK_SEAM_MAX_RADIUS`] (a host seam needs `hosts` >= 2).
+pub fn pick_seam(home: RegionCoords, hosts: u32, s: u32, want_host_seam: bool) -> (RegionCoords, RegionCoords) {
+    let owner = |rc: RegionCoords| game::rendezvous_owner(game::super_region_of(rc, s), hosts);
+    let mut radius = PICK_SEAM_RADIUS;
+    loop {
+        let mut best: Option<(i64, (i32, i32, u8), (RegionCoords, RegionCoords))> = None;
+        for x in home.x - radius..=home.x + radius {
+            for z in home.z - radius..=home.z + radius {
+                let a = RegionCoords::new(x, z);
+                for (axis, b) in [(0u8, RegionCoords::new(x + 1, z)), (1u8, RegionCoords::new(x, z + 1))] {
+                    if (b.x - home.x).abs() > radius || (b.z - home.z).abs() > radius {
+                        continue;
+                    }
+                    if (owner(a) != owner(b)) != want_host_seam {
+                        continue;
+                    }
+                    // Twice the offset from home's middle to the seam's middle.
+                    let (dx, dz) = (
+                        i64::from(a.x + b.x - 2 * home.x),
+                        i64::from(a.z + b.z - 2 * home.z),
+                    );
+                    let candidate = (dx * dx + dz * dz, (x, z, axis), (a, b));
+                    if best.as_ref().is_none_or(|best| (candidate.0, candidate.1) < (best.0, best.1)) {
+                        best = Some(candidate);
+                    }
+                }
+            }
+        }
+        if let Some((_, _, seam)) = best {
+            return seam;
+        }
+        assert!(
+            radius < PICK_SEAM_MAX_RADIUS,
+            "pick_seam: no {} seam within {PICK_SEAM_MAX_RADIUS} regions of {home:?} ({hosts} hosts, s = {s})",
+            if want_host_seam { "host" } else { "thread" }
+        );
+        radius = (radius * 2).min(PICK_SEAM_MAX_RADIUS);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn owner(rc: RegionCoords, hosts: u32, s: u32) -> u32 {
+        game::rendezvous_owner(game::super_region_of(rc, s), hosts)
+    }
+
+    fn adjacent(a: RegionCoords, b: RegionCoords) -> bool {
+        (a.x - b.x).abs() + (a.z - b.z).abs() == 1
+    }
+
+    fn within(rc: RegionCoords, home: RegionCoords, n: i32) -> bool {
+        (rc.x - home.x).abs() <= n && (rc.z - home.z).abs() <= n
+    }
+
+    #[test]
+    fn pick_seam_finds_a_host_seam_and_a_thread_seam() {
+        let (hosts, s) = (2, 1);
+        for home in [RegionCoords::new(0, 0), RegionCoords::new(-3, 7), RegionCoords::new(12, -5)] {
+            let (a, b) = pick_seam(home, hosts, s, true);
+            assert!(adjacent(a, b), "{a:?} | {b:?} is a seam");
+            assert_ne!(owner(a, hosts, s), owner(b, hosts, s), "a host seam's sides differ in owner");
+            assert!(within(a, home, 4) && within(b, home, 4), "near {home:?}");
+            let (a, b) = pick_seam(home, hosts, s, false);
+            assert!(adjacent(a, b), "{a:?} | {b:?} is a seam");
+            assert_eq!(owner(a, hosts, s), owner(b, hosts, s), "a thread seam's sides agree");
+            assert!(within(a, home, 4) && within(b, home, 4), "near {home:?}");
+        }
+    }
+
+    /// One host: every seam is a thread seam, and the nearest is one of home's own edges.
+    #[test]
+    fn pick_seam_one_host_is_home_edge() {
+        let home = RegionCoords::new(5, -2);
+        let (a, b) = pick_seam(home, 1, 16, false);
+        assert!(a == home || b == home, "{a:?} | {b:?} borders {home:?}");
+        assert_eq!(pick_seam(home, 1, 16, false), (a, b), "the same answer every time");
+    }
+
+    /// A positive yaw (about +Y) turns -Z (Bevy's forward) toward -X.
+    #[test]
+    fn yaw_error_sign() {
+        let forward = Vec2::new(0.0, -1.0);
+        assert!((yaw_error(forward, Vec2::new(-1.0, 0.0)) - std::f32::consts::FRAC_PI_2).abs() < 1e-5);
+        assert!((yaw_error(forward, Vec2::new(1.0, 0.0)) + std::f32::consts::FRAC_PI_2).abs() < 1e-5);
+        assert_eq!(yaw_error(forward, forward), 0.0);
+        assert_eq!(yaw_error(forward, Vec2::ZERO), 0.0);
     }
 }

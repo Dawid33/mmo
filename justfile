@@ -1185,6 +1185,150 @@ dev-r3 hosts="2" delay="0": (_dev-hosts-check "0" hosts delay "2") pg-up _dev-lo
         'VOXEL_ROLE=coordinator VOXEL_HOSTS={{hosts}} VOXEL_WORLD_DB={{dev_database_url}} VOXEL_SERVICE_TOKEN_FILE={{dev_r3_dir}}/service-token VOXEL_COORDINATOR_CERT_HASH_FILE={{dev_r3_dir}}/coordinator.cert-sha256' \
         {{ shell(dev_r3_launch_sh, hosts, delay, dev_r3_dir, dev_database_url, host_env_sh) }}
 
+# `go-nogo-r3`'s own state (logs, login, pins) and its own world database on the dev Postgres.
+go_nogo_dir := "target/go-nogo-r3"
+go_nogo_db := "mmo_go_nogo_r3"
+go_nogo_db_url := "postgres://mmo:mmo@127.0.0.1:55432/" + go_nogo_db
+
+# The R3 go / no-go probe (the plan's decision 13). A benchmark on this box: run it on
+# purpose, with nothing else heavy running. A release build at play region size; its OWN
+# world database `mmo_go_nogo_r3` on the dev Postgres (started as by `pg-up`), forged by `worldctl` with
+# super-regions of ONE region (two hosts then own a patchwork of single regions) and kept
+# for the next run — dropped and forged again only when it is not such a world — and its
+# own login state, pins and logs under target/go-nogo-r3/: never the dev world `mmo`,
+# target/dev-r3 or target/dev-login. Refuses to start while anything holds the dev stack's
+# ports (a `dev-r3`, `dev-r2`, `dev-login`, `run-online` or `server` up). Runs the two-host
+# stack through scripts/dev_r3.sh (release binaries; every peer frame held `delay` ms), then
+# `client debug online` twice under the autopilot shuttle, `seconds` each: across a seam
+# between two region threads of one host (`boundary=thread`), then across a seam between
+# the two hosts (`boundary=host`). Stops the stack (each host's leave cut; Ctrl-C at any
+# point stops it too, a second Ctrl-C kills it), then prints the adapter, region size,
+# delay, hosts and host restarts, both p95 tables by host_flip and `VERDICT: GO | NO-GO |
+# INVALID` (`scripts/crossing_summary.py --go-nogo`, also in target/go-nogo-r3/verdict.txt):
+# GO iff the host seam's p95 of correction_max and of corrections is at most 1.25 x the
+# thread seam's + 0.05 AND conservation held (no state-hash mismatch; items_destroyed and
+# intent_replies_lost 0 on every [server] line; peer_unreceived 0 on each host's last);
+# INVALID when a host restarted, a check never ran or a group has < 20 crossings.
+# Arguments are positional: `just go-nogo-r3 5`, `just adapter=6700 go-nogo-r3 2 90`.
+# Go / no-go for host seams: thread-seam vs host-seam shuttle on 2 hosts at `delay` ms.
+go-nogo-r3 delay="1" seconds="60": (_dev-hosts-check "0" "2" delay "2") (_dev-token go_nogo_dir / "stack")
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if ! [[ "{{seconds}}" =~ ^[0-9]+$ ]] || (( {{seconds}} < 10 )); then
+        echo "go-nogo-r3: seconds is a whole number >= 10, given positionally (just go-nogo-r3 1 60)" >&2; exit 1
+    fi
+    out={{go_nogo_dir}}
+    stack=$out/stack
+    db={{go_nogo_db}}
+    busy=""
+    for p in 6466 6467 6476 6477 6480 6490 6500 6501; do
+        if ss -Hlun "sport = :$p" | grep -q .; then busy="$busy udp/$p"; fi
+    done
+    if ss -Hltn 'sport = :8790' | grep -q .; then busy="$busy tcp/8790"; fi
+    if [ -n "$busy" ]; then
+        echo "go-nogo-r3: in use:$busy - a dev stack (dev-r3, dev-r2, dev-login, run-online, server) is up; stop it first" >&2
+        exit 1
+    fi
+    echo "go-nogo-r3: uses its OWN world database '$db' on the dev Postgres (kept between runs; dropped and"
+    echo "  forged again only when it is not a world of 1-region super-regions), login state under $out/login and"
+    echo "  pins under $stack. Resets: that world's clock and the logs under $out/. Never touches the dev world"
+    echo "  'mmo', target/dev-r3 or target/dev-login."
+    # The dev Postgres (as `pg-up`, without printing its URL).
+    docker compose -f deploy/dev/compose.yml up -d --wait
+    export VOXEL_REGION_BLOCKS={{play_blocks}}
+    if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
+    {{cap}} {{cargo}} build --release --bin server --bin worldctl --bin login
+    {{cap}} {{cargo}} build --release --bin client --features "{{probe_features}}" --target-dir {{probe_dir}}
+    mkdir -p "$out/login" "$stack"
+    rm -f "$out"/client-*.log "$out/stack.log" "$out/verdict.txt" "$stack"/host-*.log "$stack/coordinator.log"
+    psql() { docker compose -f deploy/dev/compose.yml exec -T postgres psql -U mmo -v ON_ERROR_STOP=1 -tA "$@"; }
+    side=""
+    if [ "$(psql -d mmo -c "SELECT 1 FROM pg_database WHERE datname = '$db'")" = 1 ]; then
+        side=$(psql -d "$db" -c "SELECT super_region_regions FROM world WHERE id = 1" 2>/dev/null || true)
+        if [ "$side" != 1 ]; then
+            echo "go-nogo-r3: '$db' is not a world of 1-region super-regions (side '${side:-none}'): dropping it (this recipe's own)"
+            psql -d mmo -c "DROP DATABASE $db" >/dev/null
+        fi
+    fi
+    if [ "$side" != 1 ]; then
+        psql -d mmo -c "CREATE DATABASE $db" >/dev/null
+        echo "go-nogo-r3: forging a world into '$db' (first run only; takes minutes)"
+        ./target/release/worldctl forge --db {{go_nogo_db_url}}
+        ./target/release/worldctl super-region {{go_nogo_db_url}} 1
+    fi
+    ./target/release/worldctl clock-reset {{go_nogo_db_url}}
+    export VOXEL_LOGIN_DB=$out/login/login.sqlite VOXEL_LOGIN_KEYS_DIR=$out/login/keys
+    login=./target/release/login
+    if ! ls "$VOXEL_LOGIN_KEYS_DIR"/*.pem >/dev/null 2>&1; then $login keygen >/dev/null; fi
+    $login world add dev --name "Dev world" --quic 127.0.0.1:6466 --wt https://127.0.0.1:6467/ >/dev/null
+    printf '%s\n' "{{dev_password}}" | $login account ensure {{dev_email}} --verified >/dev/null
+    # Every host and the coordinator (the world row says 1; a host refuses a mismatch).
+    export VOXEL_SUPER_REGION_REGIONS=1
+    stack_pid=""
+    # Running, not a zombie.
+    alive() { kill -0 "$1" 2>/dev/null && [[ "$(ps -o stat= -p "$1" 2>/dev/null)" != Z* ]]; }
+    stop_stack() {
+        trap 'kill -TERM "$stack_pid" 2>/dev/null || true' INT TERM HUP
+        if [ -n "$stack_pid" ] && alive "$stack_pid"; then
+            echo "go-nogo-r3: stopping the stack (each host saves a leave cut; Ctrl-C again kills it)"
+            kill -TERM "$stack_pid" 2>/dev/null || true
+        fi
+        if [ -n "$stack_pid" ]; then
+            while kill -0 "$stack_pid" 2>/dev/null; do wait "$stack_pid" 2>/dev/null || true; done
+        fi
+        stack_pid=""
+    }
+    trap stop_stack EXIT
+    trap 'exit 130' INT TERM HUP
+    # The supervisor in a session of its own: only stop_stack signals it (once; twice kills).
+    DEV_R3_SERVER=./target/release/server DEV_R3_LOGIN=$login DEV_R3_LOGIN_LOG=$out/login/login.log \
+        DEV_R3_PIN_WAIT_SECS={{online_wait_secs}} setsid scripts/dev_r3.sh "$stack" \
+        'VOXEL_ROLE=coordinator VOXEL_HOSTS=2 VOXEL_WORLD_DB={{go_nogo_db_url}} VOXEL_SERVICE_TOKEN_FILE={{go_nogo_dir}}/stack/service-token VOXEL_COORDINATOR_CERT_HASH_FILE={{go_nogo_dir}}/stack/coordinator.cert-sha256' \
+        {{ shell(dev_r3_launch_sh, "2", delay, go_nogo_dir / "stack", go_nogo_db_url, host_env_sh) }} \
+        >"$out/stack.log" 2>&1 </dev/null &
+    stack_pid=$!
+    echo "go-nogo-r3: starting login, the coordinator and 2 hosts (peer delay {{delay}} ms; $out/stack.log)"
+    deadline=$((SECONDS + {{online_wait_secs}} + 60))
+    until grep -q "world dev registered" "$out/stack.log" 2>/dev/null \
+        && ss -Hlun 'sport = :6466' | grep -q . && ss -Hlun 'sport = :6476' | grep -q .; do
+        if ! alive "$stack_pid"; then
+            echo "go-nogo-r3: the stack ended; see $out/stack.log and $stack/" >&2; exit 1
+        fi
+        if ((SECONDS >= deadline)); then
+            echo "go-nogo-r3: the stack is not up in time; see $out/stack.log and $stack/" >&2; exit 1
+        fi
+        sleep 1
+    done
+    sleep 5
+    run_client() {
+        echo "go-nogo-r3: client, autopilot boundary=$1, {{seconds}} s ($out/client-$1.log)"
+        VOXEL_AUTOPILOT=shuttle VOXEL_AUTOPILOT_BOUNDARY=$1 VOXEL_AUTOPILOT_SECONDS={{seconds}} \
+            VOXEL_HOSTS=2 VOXEL_SUPER_REGION_REGIONS=1 PERF_LOG=1 RUST_BACKTRACE=1 \
+            VOXEL_LOGIN_URL=http://127.0.0.1:8790 VOXEL_LOGIN_EMAIL={{dev_email}} VOXEL_LOGIN_PASSWORD={{dev_password}} \
+            timeout --foreground -k 10 $(( {{seconds}} + {{online_wait_secs}} )) \
+            ./{{probe_dir}}/release/client debug online >"$out/client-$1.log" 2>&1 </dev/null \
+            || echo "go-nogo-r3: the $1 client exited $?"
+    }
+    run_client thread
+    sleep 5
+    run_client host
+    echo "go-nogo-r3: letting the hosts settle (15 s: their last [server] lines come after the client left)"
+    sleep 15
+    stop_stack
+    trap - EXIT INT TERM HUP
+    echo
+    echo "== go / no-go facts"
+    echo "adapter:     $(grep -h -m1 AdapterInfo "$out/client-thread.log" "$out/client-host.log" 2>/dev/null | head -1 || true)"
+    echo "region size: {{play_blocks}} blocks"
+    echo "peer delay:  {{delay}} ms one way (VOXEL_PEER_LINK_DELAY_MS)"
+    echo "hosts:       2, super-regions of 1 region; {{seconds}} s per shuttle"
+    echo "restarts:    supervisor $(grep -c 'starting it again' "$out/stack.log" || true);" \
+        "host-0 started $(grep -c '\[server\] role:' "$stack/host-0.log" || true)x," \
+        "host-1 started $(grep -c '\[server\] role:' "$stack/host-1.log" || true)x (more than once: INVALID)"
+    echo "logs:        $out/client-thread.log $out/client-host.log $stack/host-0.log $stack/host-1.log $stack/coordinator.log"
+    scripts/crossing_summary.py --go-nogo --thread-log "$out/client-thread.log" --host-log "$out/client-host.log" \
+        --server-log "$stack/host-0.log" --server-log "$stack/host-1.log" | tee "$out/verdict.txt"
+
 # Run exactly the tests a change touches, by crate + cargo-test arguments:
 #   just test-one game "--test it stud_lod::"
 #   just test-one client "--lib world_scale::"
