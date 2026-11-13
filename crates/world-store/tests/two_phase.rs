@@ -652,3 +652,88 @@ fn prepare_refuses_an_all_hosts_fence_and_the_history() {
     h.commit_cut(part(4, 0), f).recv().unwrap().expect("nor is a one-phase commit refused");
     h.shutdown();
 }
+
+/// Entity ids stored in more than one region (`entities` is keyed per region, so the
+/// database itself no longer refuses one): must stay 0 after every committed cut.
+pub(crate) const ENTITIES_STORED_TWICE: &str = "SELECT COUNT(*) FROM (SELECT birth_rx, birth_rz, serial FROM entities \
+     GROUP BY birth_rx, birth_rz, serial HAVING COUNT(*) > 1) twice";
+
+/// Both handles see cut `cut` decided (so each accepts its next part).
+fn settled(h0: &StoreHandle, h1: &StoreHandle, cut: CutId) {
+    assert_eq!(h0.cut_decided(cut).unwrap(), Some(true));
+    assert_eq!(h1.cut_decided(cut).unwrap(), Some(true));
+}
+
+/// The defect of Task 14b: an entity stored in host 0's region by a committed cut
+/// crosses into host 1's region before the next cut. In that cut host 0's part deletes it
+/// from its region's rows and host 1's part inserts it into its own: with rows keyed per
+/// region the two prepared parts touch no common row, so neither waits for the other, the
+/// decision commits both, and the entity is stored once, in host 1's region.
+#[test]
+fn entity_crossing_between_two_parts_prepares_without_waiting() {
+    let Some(w) = pg_world() else { return };
+    let h = open(&w.url);
+    let (f0, f1) = fences(&h);
+    let c = h.claim_coordinator().unwrap();
+    let h1 = open(&w.url);
+    let e = crate::codec::bundle();
+    let with = |id: u64, host: u32, entities: Vec<game::EntityBundle>| {
+        let mut p = part(id, host);
+        p.regions[0].1.entities = entities;
+        p
+    };
+    h.prepare_cut(with(1, 0, vec![e.clone()]), f0.clone(), 0).recv().unwrap().unwrap();
+    h1.prepare_cut(with(1, 1, vec![]), f1.clone(), 0).recv().unwrap().unwrap();
+    assert!(h.decide_cut(CutId(1), 100, true, vec![0, 1], vec![], c, 0).unwrap());
+    settled(&h, &h1, CutId(1));
+    assert_eq!(h.load_region(A, &f0).unwrap().unwrap().entities, vec![e.clone()], "stored in host 0's region");
+    // Cut 2: host 0's part first (it holds its deleted rows' locks while prepared), then
+    // host 1's, which must not wait on them.
+    h.set_cut_lock_timeout_ms(500);
+    h1.set_cut_lock_timeout_ms(500);
+    h.prepare_cut(with(2, 0, vec![]), f0.clone(), 0).recv_timeout(Duration::from_secs(5)).unwrap().unwrap();
+    h1.prepare_cut(with(2, 1, vec![e.clone()]), f1.clone(), 0)
+        .recv_timeout(Duration::from_secs(5))
+        .expect("host 1's part is answered")
+        .expect("host 1's part prepares beside host 0's");
+    assert_eq!(prepared(&w), 2);
+    assert!(h.decide_cut(CutId(2), 200, true, vec![0, 1], vec![], c, 0).unwrap());
+    settled(&h, &h1, CutId(2));
+    assert_eq!(prepared(&w), 0);
+    assert!(h.load_region(A, &f0).unwrap().unwrap().entities.is_empty(), "gone from host 0's region");
+    assert_eq!(h.load_region(B, &f1).unwrap().unwrap().entities, vec![e.clone()], "in host 1's region");
+    assert_eq!(scalar_i64(&w, ENTITIES_STORED_TWICE), 0, "no entity stored in two regions");
+    // And back the other way, host 1's part prepared first.
+    h1.prepare_cut(with(3, 1, vec![]), f1.clone(), 0).recv_timeout(Duration::from_secs(5)).unwrap().unwrap();
+    h.prepare_cut(with(3, 0, vec![e.clone()]), f0.clone(), 0).recv_timeout(Duration::from_secs(5)).unwrap().unwrap();
+    assert!(h.decide_cut(CutId(3), 300, true, vec![0, 1], vec![], c, 0).unwrap());
+    settled(&h, &h1, CutId(3));
+    assert_eq!(h.load_region(A, &f0).unwrap().unwrap().entities, vec![e]);
+    assert!(h.load_region(B, &f1).unwrap().unwrap().entities.is_empty());
+    assert_eq!(scalar_i64(&w, "SELECT COUNT(*) FROM entities"), 1);
+    assert_eq!(scalar_i64(&w, ENTITIES_STORED_TWICE), 0);
+    assert_eq!(prepared(&w), 0);
+    h1.shutdown();
+    h.shutdown();
+}
+
+/// A prepared part holding an entity in two of its regions is refused before anything is
+/// staged, and the next part is accepted.
+#[test]
+fn prepared_part_with_an_entity_twice_is_refused() {
+    let Some(w) = pg_world() else { return };
+    let h = open(&w.url);
+    let f = h.claim_super_regions(0, vec![(0, 0), (0, -1)]).unwrap();
+    let mut twice = part(1, 0);
+    twice.regions[0].1.entities = vec![crate::codec::bundle()];
+    let mut other = region();
+    other.entities = vec![crate::codec::bundle()];
+    twice.regions.push((B, other));
+    let err = h.prepare_cut(twice, f.clone(), 0).recv().unwrap().unwrap_err();
+    assert!(matches!(&err, StoreError::Corrupt(m) if m.contains("two regions")), "{err}");
+    assert_eq!(prepared(&w), 0, "nothing staged");
+    h.prepare_cut(part(2, 0), f, 0).recv().unwrap().expect("the next part is accepted");
+    assert!(!h.abort_cut(CutId(2), 200).unwrap());
+    assert_eq!(prepared(&w), 0);
+    h.shutdown();
+}

@@ -94,14 +94,36 @@ fn terrain_of(code: Option<i64>) -> Result<Option<TerrainKind>, StoreError> {
     }
 }
 
-/// An entity insert failing on the primary key is the same entity in two
-/// regions of one cut (or twice in one): a conservation bug, kept loud.
+/// The same entity in two regions of one cut (or twice in one): a conservation bug,
+/// kept loud.
+fn entity_twice(id: EntityId, rc: RegionCoords, tick: Tick) -> StoreError {
+    StoreError::Corrupt(format!(
+        "entity {id:?} in two regions of the cut at tick {tick} (again in {rc:?}): an entity was \
+         saved twice — a conservation bug; the cut was not committed"
+    ))
+}
+
+/// Refuses a cut (one host's part) that holds an entity in two of its regions, or
+/// twice in one, before anything is written. `entities` is keyed per region (migration
+/// 0009: two hosts' parts never touch one row), so the database no longer refuses it;
+/// across parts the cut-ownership protocol keeps every entity in exactly one part.
+fn check_entities_once(cut: &WorldCut) -> Result<(), StoreError> {
+    let mut seen = std::collections::BTreeSet::new();
+    for (rc, region) in &cut.regions {
+        for b in &region.entities {
+            if !seen.insert(b.id) {
+                return Err(entity_twice(b.id, *rc, cut.tick));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// An entity insert failing on the primary key is the same entity twice in one
+/// region of the cut ([`check_entities_once`] refuses it first).
 fn entity_insert_error(e: sqlx::Error, id: EntityId, rc: RegionCoords, tick: Tick) -> StoreError {
     match &e {
-        sqlx::Error::Database(d) if d.is_unique_violation() => StoreError::Corrupt(format!(
-            "entity {id:?} in two regions of the cut at tick {tick} (again in {rc:?}): an entity was \
-             saved twice — a conservation bug; the cut was not committed"
-        )),
+        sqlx::Error::Database(d) if d.is_unique_violation() => entity_twice(id, rc, tick),
         _ => e.into(),
     }
 }
@@ -921,8 +943,12 @@ macro_rules! engine_rows {
             ) -> Result<CutCommitted, StoreError> {
                 let t = i(cut.tick);
                 check_fence(conn, fence, &commit_check_set(cut, fence, s)).await?;
-                // Every region's entities go first, so an entity that moved between two
-                // regions of the cut is not seen twice.
+                check_entities_once(cut)?;
+                // Every region's entities go first. Only this cut's (this part's) own
+                // regions' rows are deleted and inserted, by region: the rows are keyed
+                // per region, so another host's part of the same cut never touches one
+                // of them (an entity that crossed between the two hosts' regions is
+                // deleted from one region's rows and inserted into the other's).
                 for (rc, _) in &cut.regions {
                     sqlx::query("DELETE FROM entities WHERE rx = $1 AND rz = $2")
                         .bind(rc.x as i64)

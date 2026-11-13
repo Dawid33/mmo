@@ -83,7 +83,7 @@ const EXPECTED: &[(&str, &str)] = &[
     ("forged_world_map", "id:I*, bytes:B"),
     ("regions", "rx:I*, rz:I*, saved_tick:I, terrain_version:I, meta:B, stud_ground:B?"),
     ("stud_chunks", "rx:I*, rz:I*, cx:I*, cy:I*, cz:I*, data:B"),
-    ("entities", "birth_rx:I*, birth_rz:I*, serial:I*, rx:I, rz:I, saved_tick:I, kind:I, bundle:B"),
+    ("entities", "birth_rx:I*, birth_rz:I*, serial:I*, rx:I*, rz:I*, saved_tick:I, kind:I, bundle:B"),
     ("players", "player_id:I*, token:T, record:B?, saved_tick:I?"),
     ("history", "id:I*, bytes:B"),
     ("in_flight", "seq:I*, kind:I, target_rx:I, target_rz:I, stamp:I, payload:B, host:I"),

@@ -28,7 +28,7 @@ const LAST_VOXEL_SCHEMA: i64 = 4;
 const VOXELS: StoreError = StoreError::OtherTerrain { stored: TerrainKind::Voxels, wanted: TerrainKind::Studs };
 
 /// A pool on `url` that checks and migrates nothing (`open_pool` would refuse or migrate).
-async fn raw_pool(url: &StoreUrl) -> Pool {
+pub(crate) async fn raw_pool(url: &StoreUrl) -> Pool {
     match url {
         StoreUrl::Sqlite(path) => {
             let opts = sqlx::sqlite::SqliteConnectOptions::new()
@@ -42,7 +42,7 @@ async fn raw_pool(url: &StoreUrl) -> Pool {
     }
 }
 
-async fn close(pool: Pool) {
+pub(crate) async fn close(pool: Pool) {
     match pool {
         Pool::Sqlite(p) => p.close().await,
         Pool::Pg(p) => p.close().await,
@@ -50,7 +50,7 @@ async fn close(pool: Pool) {
 }
 
 /// A blob as an SQL literal of `url`'s engine.
-fn blob(url: &StoreUrl, bytes: &[u8]) -> String {
+pub(crate) fn blob(url: &StoreUrl, bytes: &[u8]) -> String {
     let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
     match url {
         StoreUrl::Postgres(_) => format!("'\\x{hex}'::bytea"),
@@ -61,7 +61,7 @@ fn blob(url: &StoreUrl, bytes: &[u8]) -> String {
 /// Makes the store at `url` as a build whose newest migration was `schema` left it:
 /// that schema, the world row (`terrain`: the `world.terrain` literal, for a schema
 /// that has the column), then `rows`.
-fn old_store(url: &StoreUrl, schema: i64, terrain: &str, rows: &[String]) {
+pub(crate) fn old_store(url: &StoreUrl, schema: i64, terrain: &str, rows: &[String]) {
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
         let pool = raw_pool(url).await;

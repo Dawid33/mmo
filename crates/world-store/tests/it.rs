@@ -5,6 +5,7 @@ mod clock;
 mod counters;
 mod codec;
 mod cut;
+mod entity_key;
 mod fence;
 mod handle;
 mod hosts;

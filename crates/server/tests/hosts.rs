@@ -621,6 +621,18 @@ fn prepared(db: &PgDb) -> i64 {
     query_i64s(db, "SELECT COUNT(*) FROM pg_prepared_xacts WHERE database = current_database()")[0]
 }
 
+/// Entity ids stored in more than one region. `entities` is keyed per region
+/// (world-store migration 0009: two hosts' cut parts never touch one row), so the
+/// database no longer refuses one entity in two regions; the cut-ownership protocol
+/// keeps it once, and this pins it over the committed rows.
+fn entities_stored_twice(db: &PgDb) -> i64 {
+    query_i64s(
+        db,
+        "SELECT COUNT(*) FROM (SELECT birth_rx, birth_rz, serial FROM entities \
+         GROUP BY birth_rx, birth_rz, serial HAVING COUNT(*) > 1) twice",
+    )[0]
+}
+
 /// The decided cuts: `(cut, tick, committed)`.
 fn decisions(db: &PgDb) -> Vec<(i64, i64, bool)> {
     let ids = query_i64s(db, "SELECT cut_id FROM cut_decisions ORDER BY cut_id");
@@ -718,6 +730,7 @@ impl World {
     fn until_committed_after(&mut self, db: &PgDb, after: i64) {
         self.pair.until("a later world cut committed", |_| decisions(db).iter().any(|(c, _, k)| *k && *c > after));
         self.pair.until("both hosts settled it", |p| p.sims.iter().all(|s| s.cuts.as_ref().unwrap().world_part().is_none()));
+        assert_eq!(entities_stored_twice(db), 0, "an entity is stored in two regions after the committed cuts");
     }
 }
 
@@ -1117,7 +1130,7 @@ fn restart_coordinator_listening(w: &mut World, store: StoreHandle) {
 /// staged resolved, its super-regions claimed, its row registered (with its peer
 /// listener), its regions and in-flight rows from the store, its clock joining the live
 /// hosts', a link to the coordinator (if one is up), its cut writer, its keeper. Its
-/// registration.
+/// registration. With no host up its clock starts where the world's stopped.
 fn restart_host(w: &mut World, db: &PgDb, dir: &std::path::Path, h: u32, boot: u64) -> world_store::HostBoot {
     let first = db.open();
     server::roles::recover_staged_cuts(&first, HOSTS).expect("the staged parts are resolved");
@@ -1134,7 +1147,8 @@ fn restart_host(w: &mut World, db: &PgDb, dir: &std::path::Path, h: u32, boot: u
         .filter_map(|rc| claims.load_region(*rc).unwrap().map(|r| (*rc, r)))
         .collect();
     let mut spawner = InlineSpawner::with_portable(regions);
-    let target = live_tick(w);
+    // With no host up (every host left), the world tick they left at.
+    let target = live_tick(w).max(w.pair.tick.load(std::sync::atomic::Ordering::SeqCst));
     while spawner.world_tick() < target {
         spawner.tick_all();
     }
@@ -1688,6 +1702,189 @@ fn aborted_leave_cut_past_the_leave_timeout_exits_dirty() {
     assert_eq!(decision_of(&db, first), Some(false), "the leave cut was aborted");
     assert!(!decisions(&db).iter().any(|(c, _, k)| *k && *c as u64 > first.0), "no later cut");
     assert_eq!(query_i64s(&db, "SELECT clean FROM hosts WHERE ordinal = 1"), [0], "its row stays dirty");
+    assert_eq!(prepared(&db), 0, "nothing stays prepared");
+    w.stop(&dir);
+}
+
+/// The bound on both hosts' clean leave when they are stopped together: well inside the
+/// supervisor's 45 s deadline (the leave batch, a cut's lead and its decision take ~3 s).
+const BOTH_LEAVE_WITHIN: Duration = Duration::from_secs(15);
+
+/// Slime `id` in host `h`'s seam region, put just past the seam toward the other host's.
+fn push_over_the_seam(w: &mut World, h: u32, id: EntityId) {
+    let (a, _) = w.seam;
+    let from = seam_of(w, h);
+    // The seam is `b = a + x`: from `a` over +x, from `b` over -x.
+    let x = if from == a { REGION_SIZE + game::FLIP_HYSTERESIS + 2.0 } else { -game::FLIP_HYSTERESIS - 2.0 };
+    sim(w, h).manager.spawner_mut().with_region(from, |region| {
+        let key = region.data().id_index[&id];
+        let at = game::rapier3d::math::Vector::new(x, game::plate_units(30) + 3.0, REGION_SIZE / 2.0);
+        region.with_data(|d| d.set_body_pose_safe(key, game::Pose::from_translation(at)));
+    });
+}
+
+/// What one host's `exit_world` came to: its outcome, how long it took from the shared
+/// stop signal, and the leave cut that named it (`leaving_cut`).
+struct Exited {
+    exit: server::claims::ServerExit,
+    took: Duration,
+    leaving_cut: Option<game::CutId>,
+}
+
+/// Every host gets the stop signal at the same moment (as the dev stack's supervisor
+/// TERMs them all): each runs the real `exit_world` on its own thread, its regions ticking
+/// at its own pace, the coordinator reading the highest world tick. Their outcomes, by
+/// ordinal; their peer listeners and coordinator links go with them.
+fn exit_every_host_at_once(w: &mut World) -> Vec<Exited> {
+    let mut sims: Vec<Sim> = std::mem::take(&mut w.pair.sims);
+    sims.sort_by_key(|s| s.ordinal);
+    let started = w.pair.started;
+    let tick = w.pair.tick.clone();
+    let stop = std::sync::Barrier::new(sims.len());
+    let params: Vec<(server::claims::Fenced, server::claims::WorldGeneration)> =
+        sims.iter().map(|s| (w.claims[s.ordinal as usize].fenced().clone(), w.generations[s.ordinal as usize].clone())).collect();
+    let exited = std::thread::scope(|scope| {
+        let handles: Vec<_> = sims
+            .iter_mut()
+            .zip(&params)
+            .map(|(sim, (fenced, generation))| {
+                let (tick, stop) = (tick.clone(), &stop);
+                scope.spawn(move || {
+                    let region_out = sim.region_out.clone();
+                    let cuts = sim.cuts.take();
+                    stop.wait();
+                    let at = Instant::now();
+                    let exit = server::cuts::exit_world(
+                        &mut sim.manager,
+                        server::cuts::ExitParams {
+                            region_out: &region_out,
+                            now_ms: || started.elapsed().as_millis() as u64,
+                            cuts,
+                            coordinator: None,
+                            fenced,
+                            world_generation: generation,
+                            park_timeout: server::cuts::EXIT_PARK_TIMEOUT,
+                            save_timeout: Duration::from_secs(10),
+                            now_tick: || 0,
+                        },
+                        |m| {
+                            m.spawner_mut().tick_all();
+                            m.spawner_mut().pump();
+                            tick.fetch_max(m.spawner_mut().world_tick(), std::sync::atomic::Ordering::SeqCst);
+                            std::thread::sleep(Duration::from_millis(5));
+                        },
+                    );
+                    Exited { exit, took: at.elapsed(), leaving_cut: sim.manager.leaving_cut() }
+                })
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().expect("an exit thread panicked")).collect::<Vec<_>>()
+    });
+    for sim in sims {
+        let h = sim.ordinal;
+        drop(sim);
+        w.switches[h as usize].drop_link();
+        w.links[h as usize] = None;
+    }
+    exited
+}
+
+/// Task 14b: both hosts are stopped at the same moment with the coordinator up (the dev
+/// stack's shutdown), slimes crossing the seam both ways as they go. Their leave requests
+/// fall in one batch, so the design yields ONE leave cut naming both leaving (there is no
+/// stayer): both exit clean well inside the supervisor's deadline, that cut is committed,
+/// both `hosts` rows are clean and nothing stays prepared. Restarting both keeps the world
+/// generation (no rollback), and each slime is in the world exactly once.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn both_hosts_stopped_together_leave_cleanly() {
+    install_props();
+    let Some(db) = PgDb::create("bothleave") else { return };
+    let dir = scratch("bothleave");
+    let mut w = world(&db, &dir);
+    let generation = w.claims[0].store().world_generation().unwrap();
+    w.until_committed_after(&db, 0);
+    let (before, _) = last_committed(&db);
+    let slimes: Vec<EntityId> = (0..HOSTS)
+        .map(|h| {
+            let rc = seam_of(&w, h);
+            spawn_slime_in(&mut w, h, rc, REGION_SIZE / 2.0)
+        })
+        .collect();
+    w.pair.round();
+    for h in 0..HOSTS {
+        push_over_the_seam(&mut w, h, slimes[h as usize]);
+    }
+    let exited = exit_every_host_at_once(&mut w);
+    for (h, e) in exited.iter().enumerate() {
+        assert_eq!(e.exit, server::claims::ServerExit::Clean, "host {h} exits 0");
+        assert!(e.took < BOTH_LEAVE_WITHIN, "host {h} left in {:?}", e.took);
+    }
+    let cut = exited[0].leaving_cut.expect("a leave cut named host 0");
+    assert_eq!(exited[1].leaving_cut, Some(cut), "one leave cut named both hosts leaving");
+    assert_eq!(decision_of(&db, cut), Some(true), "it committed");
+    // A periodic cut running at the stop signal may commit before it; none after it, and
+    // no leave cut was aborted (asked for again).
+    let since: Vec<(i64, i64, bool)> = decisions(&db).into_iter().filter(|(c, _, _)| *c > before).collect();
+    assert!(since.iter().all(|(_, _, k)| *k), "no cut aborted since the stop: {since:?}");
+    assert_eq!(since.last().map(|(c, _, _)| *c as u64), Some(cut.0), "the leave cut is the last decided: {since:?}");
+    assert_eq!(query_i64s(&db, "SELECT clean FROM hosts ORDER BY ordinal"), [1, 1], "both rows are clean");
+    assert_eq!(prepared(&db), 0, "nothing stays prepared");
+    // Both return: no generation bump, no rollback, each slime once.
+    for h in 0..HOSTS {
+        let again = restart_host(&mut w, &db, &dir, h, 3000 + u64::from(h));
+        assert_eq!((again.generation, again.bumped), (generation, false), "host {h}'s clean return keeps the generation");
+    }
+    w.pair.until("both hosts attached again", |p| p.sims.len() == 2 && p.sims.iter().all(|s| s.manager.world_attached()));
+    w.pair.until("every slime back in a running region, nothing owed", |p| {
+        p.sims.iter().all(|s| s.manager.peer_unreceived() == 0)
+            && slimes.iter().all(|id| p.sims.iter_mut().map(|s| s.holders(*id).len()).sum::<usize>() > 0)
+    });
+    for _ in 0..40 {
+        w.pair.round();
+    }
+    for id in &slimes {
+        assert_eq!(holders_all(&mut w, *id).len(), 1, "{id:?} once: {:?}", holders_all(&mut w, *id));
+    }
+    for h in 0..HOSTS {
+        assert!(!w.generations[h as usize].is_set(), "host {h}: no rollback");
+        assert_eq!(sim(&mut w, h).manager.take_higher_generation(), None, "host {h} sees no newer generation");
+    }
+    assert_eq!(w.claims[0].store().world_generation().unwrap(), generation, "the generation is unchanged");
+    w.until_committed_after(&db, cut.0 as i64);
+    assert_eq!(prepared(&db), 0, "nothing stays prepared");
+    w.stop(&dir);
+}
+
+/// Task 14b finding (fixed by Task 12b): a slime stored in host 0's seam region by one
+/// committed cut crosses into host 1's region before the next. Host 0's part deletes its
+/// region's `entities` rows and host 1's part inserts into its own region's; with one key
+/// per entity world-wide that was two prepared transactions on one row — host 1 waited for
+/// host 0's prepared part until its lock timeout (or hit a unique violation if it went
+/// first), the cut aborted, and so did every later one: world saving stalled for good.
+/// Rows are keyed per region now: the later cut commits, the slime stored once.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn entity_crossing_hosts_between_cuts_does_not_stall_saving() {
+    install_props();
+    let Some(db) = PgDb::create("xcross") else { return };
+    let dir = scratch("xcross");
+    let mut w = world(&db, &dir);
+    let a0 = seam_of(&w, 0);
+    let id = spawn_slime_in(&mut w, 0, a0, REGION_SIZE / 2.0);
+    w.until_committed_after(&db, 0);
+    let (first, _) = last_committed(&db);
+    w.until_committed_after(&db, first);
+    let (stored, _) = last_committed(&db);
+    let b1 = seam_of(&w, 1);
+    push_over_the_seam(&mut w, 0, id);
+    w.pair.until("the slime on host 1", |p| p.sims[1].holders(id) == [b1]);
+    w.until_committed_after(&db, stored);
+    let rows = format!(
+        "SELECT COUNT(*) FROM entities WHERE birth_rx = {} AND birth_rz = {} AND serial = {}",
+        id.birth_region.x, id.birth_region.z, id.serial as i64
+    );
+    assert_eq!(query_i64s(&db, &rows), [1], "the slime is stored once");
     assert_eq!(prepared(&db), 0, "nothing stays prepared");
     w.stop(&dir);
 }

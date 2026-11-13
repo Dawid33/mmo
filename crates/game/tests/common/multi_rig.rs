@@ -560,8 +560,26 @@ impl MultiRig {
         }
         if stored {
             self.last_cut = Some((cut, parts));
+            self.assert_stored_once(cut);
         }
         stored
+    }
+
+    /// The store's `entities` rows are keyed per region (world-store migration 0009), so
+    /// nothing in the database refuses one entity stored in two regions by two hosts'
+    /// parts: after a committed cut, every entity is in at most one stored region of the
+    /// whole world (every host's committed parts together).
+    fn assert_stored_once(&self, cut: CutId) {
+        let mut at: BTreeMap<EntityId, Vec<(u32, RegionCoords)>> = BTreeMap::new();
+        for (h, store) in &self.committed {
+            for (rc, region) in &store.regions {
+                for b in &region.entities {
+                    at.entry(b.id).or_default().push((*h, *rc));
+                }
+            }
+        }
+        let twice: Vec<_> = at.into_iter().filter(|(_, places)| places.len() > 1).collect();
+        assert!(twice.is_empty(), "cut {}: entities stored in two regions (host, region): {twice:?}", cut.0);
     }
 
     fn apply_part(&mut self, h: u32, part: &WorldCut) {
