@@ -1368,9 +1368,9 @@ go-nogo-r3 delay="1" seconds="60": (_dev-token go_nogo_dir / "stack")
     done
     sleep 5
     run_client() {
+        issue_token
         echo "go-nogo-r3: client, autopilot boundary=$1, {{seconds}} s ($out/client-$1.log)"
         VOXEL_AUTOPILOT=shuttle VOXEL_AUTOPILOT_BOUNDARY=$1 VOXEL_AUTOPILOT_SECONDS={{seconds}} \
-        issue_token
             VOXEL_HOSTS=2 VOXEL_SUPER_REGION_REGIONS=1 PERF_LOG=1 RUST_BACKTRACE=1 \
             VOXEL_LOGIN_URL=http://127.0.0.1:8790 VOXEL_LOGIN_REFRESH_FILE=$PWD/$out/login/refresh \
             timeout --foreground -k 10 $(( {{seconds}} + {{online_wait_secs}} )) \
