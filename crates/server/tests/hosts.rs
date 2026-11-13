@@ -158,6 +158,62 @@ struct Sim {
     cuts: Option<server::cuts::CutWriter>,
     /// The login relay's server half (login tests: [`login_hosts`]).
     login: Option<SimLogin>,
+    /// Its peer links' gate (a test takes them down and up).
+    gate: PeerGate,
+    /// Its listener for other hosts' saves (Task 19 tests).
+    terrain: Option<server::cuts::TerrainWatch>,
+}
+
+/// A switch over every peer link of a host: down, its links say so, send nothing and drop
+/// what arrives (a dropped connection loses what was on its way); up again, each is a new
+/// connection.
+#[derive(Clone, Default)]
+struct PeerGate(Arc<(std::sync::atomic::AtomicBool, std::sync::atomic::AtomicU64)>);
+
+impl PeerGate {
+    fn set_down(&self, down: bool) {
+        use std::sync::atomic::Ordering::SeqCst;
+        if self.0 .0.swap(down, SeqCst) && !down {
+            self.0 .1.fetch_add(1, SeqCst);
+        }
+    }
+
+    fn is_down(&self) -> bool {
+        self.0 .0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+/// A peer link behind a [`PeerGate`].
+struct GatedLink {
+    inner: Box<dyn PeerLink + Send>,
+    gate: PeerGate,
+}
+
+impl PeerLink for GatedLink {
+    fn send(&mut self, msg: PeerMsg) {
+        if !self.gate.is_down() {
+            self.inner.send(msg);
+        }
+    }
+    fn recv(&mut self) -> Option<PeerMsg> {
+        if self.gate.is_down() {
+            while self.inner.recv().is_some() {}
+            return None;
+        }
+        self.inner.recv()
+    }
+    fn is_up(&self) -> bool {
+        !self.gate.is_down() && self.inner.is_up()
+    }
+    fn connection(&self) -> u64 {
+        self.inner.connection() + 1_000_000 * self.gate.0 .1.load(std::sync::atomic::Ordering::SeqCst)
+    }
+    fn pump(&mut self, now_ms: u64) {
+        self.inner.pump(now_ms);
+    }
+    fn close(&mut self) {
+        self.inner.close();
+    }
 }
 
 /// A host's admission state and login relay, as `server::run` makes them for several hosts,
@@ -169,11 +225,8 @@ struct SimLogin {
 }
 
 impl Sim {
-    fn new(ordinal: u32, s: u32, boot: u64, generation: u64, links: &mut PeerLinks) -> Sim {
-        Sim::with_spawner(ordinal, s, boot, generation, links, InlineSpawner::default())
-    }
-
-    /// [`Sim::new`] on `spawner` (a restarted host's: its regions from the store).
+    /// A host's manager on `spawner` (a restarted host's: its regions from the store), its
+    /// peer sessions on `links`.
     fn with_spawner(ordinal: u32, s: u32, boot: u64, generation: u64, links: &mut PeerLinks, spawner: InlineSpawner) -> Sim {
         let (out_send, packets) = unbounded();
         let (region_out_send, region_out) = unbounded();
@@ -185,7 +238,9 @@ impl Sim {
         );
         manager.set_ownership(Ownership::Static { ordinal, hosts: HOSTS }, s);
         manager.set_endpoints(endpoint(ordinal), game::seeded_nonces(0x5EED + u64::from(ordinal)));
+        let gate = PeerGate::default();
         for (other, link) in links.take() {
+            let link: Box<dyn PeerLink + Send> = Box::new(GatedLink { inner: link, gate: gate.clone() });
             let hello = PeerHello {
                 ordinal,
                 boot,
@@ -197,7 +252,7 @@ impl Sim {
             manager.set_peer(other, PeerSession::new(hello, other), link);
         }
         manager.set_host_generation(generation);
-        Sim { ordinal, boot, manager, region_out, packets, cuts: None, login: None }
+        Sim { ordinal, boot, manager, region_out, packets, cuts: None, login: None, gate, terrain: None }
     }
 
     /// A keeper client whose body stands in the middle of `rc` (this host's): `rc` runs.
@@ -270,6 +325,9 @@ impl Pair {
             if let Some(cuts) = sim.cuts.as_mut() {
                 cuts.pump(&mut sim.manager);
             }
+            if let Some(watch) = sim.terrain.as_mut() {
+                watch.pump(&mut sim.manager);
+            }
             if let Some(login) = &sim.login {
                 login.relay.pump(&mut sim.manager);
             }
@@ -315,7 +373,9 @@ fn two_hosts(db: &PgDb, dir: &std::path::Path) -> (Pair, (RegionCoords, RegionCo
         let boot = 1000 + u64::from(ordinal);
         let mut links = start_links(&claims, ordinal, boot, TOKEN, dir, "127.0.0.1:0");
         let generation = links.registered().generation;
-        sims.push(Sim::new(ordinal, s, boot, generation, &mut links));
+        // Its regions' halo re-seeds read the store (Task 19), as a region thread's do.
+        let spawner = InlineSpawner::default().with_stored_terrain(Arc::new(world_store::TerrainFromStore(store.clone())));
+        sims.push(Sim::with_spawner(ordinal, s, boot, generation, &mut links, spawner));
         all_links.push(links);
         all_claims.push(claims);
     }
@@ -2146,5 +2206,79 @@ fn handoff_does_not_end_the_login_session() {
     assert!(w.bodies(client).is_empty(), "the kick parked the player");
     assert!(w.sim(1).manager.parked_record(PlayerId(905)).is_some(), "on host 1");
     assert_eq!(w.ended(&token, 1), 1, "its end reported once, by the park");
+    w.stop(&dir);
+}
+
+// ---- other hosts' saved terrain (Task 19) ------------------------------------------------
+
+/// Stud columns along a region's edge.
+const REGION_STUDS: i32 = (game::REGION_CHUNKS * game::STUD_CHUNK_STUDS) as i32;
+
+/// Host 0 digs at the border of its seam region while the peer link is down (the dig's
+/// halo delta, the region's final halo and its `RegionParked` are all lost with the link),
+/// then parks the region. Once a world cut has saved the park, host 1 hears the cut's
+/// notice (`LISTEN`) and its running seam region's halo of the parked one is re-seeded from
+/// the store: the dig shows there.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn edit_saved_by_host_0_reaches_host_1s_halo_after_the_cut() {
+    install_props();
+    let Some(db) = PgDb::create("terrain") else { return };
+    let dir = scratch("terrain");
+    let mut w = world(&db, &dir);
+    let (a, b) = w.seam;
+    let (ha, hb) = (w.pair.sims[0].manager.owner_of(a) as usize, w.pair.sims[0].manager.owner_of(b) as usize);
+    for sim in &mut w.pair.sims {
+        let store = w.claims[sim.ordinal as usize].store().clone();
+        sim.terrain = Some(server::cuts::TerrainWatch::start(store, world_store::NotifyMode::Listen));
+    }
+    w.pair.until("running sets exchanged", |p| {
+        p.sims[ha].manager.foreign_running().contains(&b) && p.sims[hb].manager.foreign_running().contains(&a)
+    });
+    // The top plate of `a`'s ground on its edge facing `b` (`b` is +x of `a`), and that
+    // cell as `b` sees it (its halo).
+    let (lo, hi) = ([REGION_STUDS - 4, 29, 20], [REGION_STUDS - 2, 30, 22]);
+    let seen_from_b = |p: &mut Pair| {
+        let mut m = None;
+        p.sims[hb].manager.spawner_mut().with_region(b, |r| {
+            m = Some(r.data().stud_material_seen([(lo[0] - REGION_STUDS) as i64, lo[1] as i64, lo[2] as i64]));
+        });
+        m.expect("b runs")
+    };
+    assert!(seen_from_b(&mut w.pair).is_some(), "b's halo holds a's ground");
+
+    // The peer link drops.
+    for sim in &w.pair.sims {
+        sim.gate.set_down(true);
+    }
+    w.pair.until("the link is seen down", |p| !p.sims[hb].manager.foreign_running().contains(&a));
+    // Host 0 digs at the border and parks the region.
+    w.pair.sims[ha].manager.spawner_mut().with_region(a, |r| {
+        r.with_data(|d| assert!(!d.carve_stud_safe(lo, hi).is_empty(), "the dig"));
+    });
+    let now = w.pair.now();
+    assert!(w.pair.sims[ha].manager.handle_server_event(ServerEvent::ClientDisconnected(KEEPER), now));
+    w.pair.until("a parked", |p| !p.sims[ha].manager.running_regions().contains(&a));
+    for _ in 0..10 {
+        w.pair.round();
+    }
+    assert!(seen_from_b(&mut w.pair).is_some(), "the dig's halo traffic was lost with the link");
+    let parked_after = decisions(&db).iter().map(|(c, _, _)| *c).max().unwrap_or(0);
+
+    // The link comes back; nothing on it carries a's parked terrain (a does not run).
+    for sim in &w.pair.sims {
+        sim.gate.set_down(false);
+    }
+    w.pair.until("the dig reaches b's halo from the store", |p| seen_from_b(p).is_none());
+    assert!(
+        decisions(&db).iter().any(|(c, _, k)| *k && *c > parked_after),
+        "brought by a world cut committed after the park"
+    );
+    let below = [(lo[0] - REGION_STUDS) as i64, (lo[1] - 1) as i64, lo[2] as i64];
+    let mut under = None;
+    w.pair.sims[hb].manager.spawner_mut().with_region(b, |r| under = r.data().stud_material_seen(below));
+    assert!(under.is_some(), "the ground under the dig is still there");
+    w.until_committed_after(&db, 0);
+    assert_eq!(prepared(&db), 0, "nothing stays prepared");
     w.stop(&dir);
 }

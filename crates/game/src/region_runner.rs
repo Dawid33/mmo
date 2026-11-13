@@ -557,7 +557,9 @@ impl RegionRunner {
 
     /// Halo seeds read from the world store here, applied at once (before
     /// the first tick); a neighbour the store cannot serve (logged) is
-    /// seeded from worldgen.
+    /// seeded from worldgen. A region that has ticked already (another host saved a
+    /// neighbour: `WorldManager::stored_terrain_changed`) keeps its mirror of a neighbour
+    /// the store cannot serve — worldgen would be older still.
     fn seed_halo_from_store(&mut self, neighbours: Vec<RegionCoords>) {
         let mut generate = Vec::new();
         for n in neighbours {
@@ -577,7 +579,9 @@ impl RegionRunner {
                 None => generate.push(n),
             }
         }
-        if !generate.is_empty() {
+        if !generate.is_empty() && self.opened.is_some() {
+            log::warn!("region {:?}: halo of {generate:?} not re-seeded (the store could not serve it); kept", self.id);
+        } else if !generate.is_empty() {
             self.seed_halo_from_worldgen(generate);
         }
     }

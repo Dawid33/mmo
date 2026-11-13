@@ -60,6 +60,9 @@ pub(crate) enum Request {
     LoadRegion(RegionCoords, Fence, Reply<Option<game::StoredRegion>>),
     LoadTerrain(RegionCoords, Reply<Option<game::TerrainSnapshot>>),
     StoredRegions(Reply<std::collections::BTreeMap<RegionCoords, u64>>),
+    StoredRegionsSince(Tick, Reply<std::collections::BTreeMap<RegionCoords, u64>>),
+    /// `pg_notify` of a committed cut (SQLite: nothing to do).
+    NotifyCut(CutId, Tick, Reply<()>),
     LoadInFlight(Option<u32>, Reply<Vec<game::InFlightRow>>),
     LoadHistory(Reply<Option<Vec<u8>>>),
     CommitCut(Box<WorldCut>, Fence, Reply<CutCommitted>),
@@ -322,6 +325,20 @@ async fn serve(
             }
             Request::LoadTerrain(rc, r) => tokio::spawn(async move { r.send(on_pool!(&pool, load_terrain(rc))) }),
             Request::StoredRegions(r) => tokio::spawn(async move { r.send(on_pool!(&pool, stored_regions())) }),
+            Request::StoredRegionsSince(tick, r) => {
+                tokio::spawn(async move { r.send(on_pool!(&pool, stored_regions_since(tick))) })
+            }
+            // No writer lock: it writes no row. Logged here, as callers need not wait for it.
+            Request::NotifyCut(cut, tick, r) => tokio::spawn(async move {
+                let done = match &pool {
+                    Pool::Pg(p) => rows::notify_cut(p, cut, tick).await,
+                    Pool::Sqlite(_) => Ok(()),
+                };
+                if let Err(e) = &done {
+                    log::warn!("[world-store] the notice of cut {} at tick {tick} was not sent ({e}); listeners resync by their poll", cut.0);
+                }
+                r.send(done)
+            }),
             Request::LoadInFlight(host, r) => {
                 tokio::spawn(async move { r.send(on_pool!(&pool, load_in_flight(host))) })
             }
@@ -461,6 +478,8 @@ fn refuse_if_read_only(req: Request, read_only: bool, cuts: &CutState) -> Option
         Request::AbortCut(_, _, r) => r.send(Err(StoreError::ReadOnly)),
         Request::ResolvePrepared(r) => r.send(Err(StoreError::ReadOnly)),
         Request::CutDecided(_, r) => r.send(Err(StoreError::ReadOnly)),
+        // A read-only handle sends nothing, a notice included.
+        Request::NotifyCut(_, _, r) => r.send(Err(StoreError::ReadOnly)),
         req => return Some(req),
     }
     None

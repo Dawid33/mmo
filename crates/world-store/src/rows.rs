@@ -650,6 +650,21 @@ macro_rules! engine_rows {
                 Ok(out)
             }
 
+            /// The regions saved at `tick` or later (`saved_tick >= tick`: what a world cut
+            /// at `tick` and every later one wrote), with their terrain versions.
+            pub(crate) async fn stored_regions_since(pool: &Pool, tick: Tick) -> Result<BTreeMap<RegionCoords, u64>, StoreError> {
+                let rows = sqlx::query("SELECT rx, rz, terrain_version FROM regions WHERE saved_tick >= $1")
+                    .bind(i(tick))
+                    .fetch_all(pool)
+                    .await?;
+                let mut out = BTreeMap::new();
+                for r in rows {
+                    let version: i64 = r.try_get(2)?;
+                    out.insert(region_of(r.try_get(0)?, r.try_get(1)?)?, u(version));
+                }
+                Ok(out)
+            }
+
             /// The in-flight rows of host `host` (`None`: of every host), in order.
             pub(crate) async fn load_in_flight(pool: &Pool, host: Option<u32>) -> Result<Vec<InFlightRow>, StoreError> {
                 let rows = sqlx::query(
@@ -1024,3 +1039,18 @@ macro_rules! engine_rows {
 // `$lock_timeout`: whether a cut's transaction sets a `lock_timeout` (Postgres).
 engine_rows!(sqlite, sqlx::Sqlite, None, "", "", false);
 engine_rows!(pg, sqlx::Postgres, Some("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ"), " FOR SHARE", " FOR UPDATE", true);
+
+/// Announces committed cut `cut` at `tick` to every listener of this world (Postgres:
+/// `pg_notify` on [`crate::listen::WORLD_CUT_CHANNEL`], in a transaction of its own —
+/// delivered when it commits). Writes no row, so it needs no fence: a notice is only a
+/// hint to re-read committed rows.
+pub(crate) async fn notify_cut(pool: &sqlx::PgPool, cut: CutId, tick: Tick) -> Result<(), StoreError> {
+    let mut tx = pool.begin().await?;
+    sqlx::query("SELECT pg_notify($1, $2)")
+        .bind(crate::listen::WORLD_CUT_CHANNEL)
+        .bind(crate::listen::payload(cut, tick))
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(())
+}

@@ -925,6 +925,8 @@ impl<S: RegionSpawner> WorldManager<S> {
     fn foreign_region_gone(&mut self, n: RegionCoords) {
         if self.foreign_running.remove(&n).is_some() {
             self.halo_source_lost(n);
+            // What it sent last may be lost: the store re-seeds it (`stored_terrain_changed`).
+            self.foreign_halo_stale.insert(n);
         }
     }
 
@@ -962,11 +964,13 @@ impl<S: RegionSpawner> WorldManager<S> {
                 }
                 for n in list {
                     self.foreign_running.insert(n, from);
+                    self.foreign_halo_stale.remove(&n);
                     self.request_seeds_of(n);
                 }
             }
             Volatile::RegionUp(n) => {
                 self.foreign_running.insert(n, from);
+                self.foreign_halo_stale.remove(&n);
                 self.request_seeds_of(n);
             }
             Volatile::RegionDown(n) => self.foreign_region_gone(n),

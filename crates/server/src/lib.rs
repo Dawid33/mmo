@@ -1083,6 +1083,16 @@ pub fn run() -> claims::ServerExit {
         }
     });
 
+    // Several hosts: other hosts' saves re-seed the halos of their parked regions next to
+    // this host's (`VOXEL_TERRAIN_NOTIFY`, `VOXEL_WORLD_DB_DIRECT`; one host: nothing to learn).
+    let mut terrain_watch = match (&cuts, hosts > 1) {
+        (Some(cuts), true) => {
+            let mode = world_store::NotifyMode::from_env().unwrap_or_else(|e| fatal(&e));
+            info!("[server] stored terrain of other hosts: {mode:?} (a resync every {} s)", world_store::TERRAIN_POLL_SECS);
+            Some(cuts::TerrainWatch::start(cuts.store().clone(), mode))
+        }
+        _ => None,
+    };
     let mut report = perf::ServerReport::new();
     let mut ever_connected = false;
     let mut last_world_save = std::time::Instant::now();
@@ -1162,6 +1172,9 @@ pub fn run() -> claims::ServerExit {
                 manager.begin_cut(world_clock.tick_at(start.elapsed().as_millis() as u64));
             }
             cuts.pump(&mut manager);
+        }
+        if let Some(watch) = terrain_watch.as_mut() {
+            watch.pump(&mut manager);
         }
         report.maybe_report(
             &mut manager,

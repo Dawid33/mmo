@@ -2,7 +2,7 @@
 //! Cloneable and `Send + Sync`; its methods block on the answer unless noted.
 
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use game::{
@@ -73,6 +73,11 @@ pub struct StoreHandle {
     fail_decisions: Arc<AtomicU32>,
     /// The pending prepared part and the cut lock timeout, shared with the store thread.
     cuts: Arc<thread::CutState>,
+    /// Where the store is: what [`StoreHandle::listen_cuts`] listens on (Postgres).
+    url: StoreUrl,
+    /// [`StoreHandle::listen_cuts`]' poll period in ms (test setter:
+    /// [`StoreHandle::set_terrain_poll_period`]).
+    poll_ms: Arc<AtomicU64>,
 }
 
 fn stopped() -> StoreError {
@@ -93,6 +98,8 @@ impl StoreHandle {
             stop_commits: Arc::new(Mutex::new(None)),
             fail_decisions: Arc::new(AtomicU32::new(0)),
             cuts,
+            url: url.clone(),
+            poll_ms: crate::listen::default_poll_ms(),
         })
     }
 
@@ -233,6 +240,62 @@ impl StoreHandle {
     /// Every stored region with its `terrain_version`.
     pub fn stored_regions(&self) -> Result<BTreeMap<RegionCoords, u64>, StoreError> {
         self.ask(Request::StoredRegions)
+    }
+
+    /// [`Self::stored_regions`], answered on the receiver (a main loop never waits).
+    pub fn stored_regions_later(&self) -> crossbeam::channel::Receiver<Result<BTreeMap<RegionCoords, u64>, StoreError>> {
+        self.ask_later(Request::StoredRegions)
+    }
+
+    /// The stored regions saved at `tick` or later (by a cut at `tick` or a later one), with
+    /// their `terrain_version`: what a [`crate::CutNotice::Cut`] at `tick` may have changed.
+    pub fn stored_regions_since(&self, tick: Tick) -> Result<BTreeMap<RegionCoords, u64>, StoreError> {
+        self.ask(|r| Request::StoredRegionsSince(tick, r))
+    }
+
+    /// [`Self::stored_regions_since`], answered on the receiver.
+    pub fn stored_regions_since_later(
+        &self,
+        tick: Tick,
+    ) -> crossbeam::channel::Receiver<Result<BTreeMap<RegionCoords, u64>, StoreError>> {
+        self.ask_later(|r| Request::StoredRegionsSince(tick, r))
+    }
+
+    /// Tells every listener of this world ([`Self::listen_cuts`]) that cut `cut` at `tick`
+    /// committed: `pg_notify` in a transaction of its own — call it only after the cut's
+    /// commit (or its decision), never inside a cut's transaction. A no-op on SQLite;
+    /// refused with `ReadOnly` by a read-only handle. No fence: it writes no row — a notice
+    /// is a hint to re-read committed rows, so a stale notifier costs a read, nothing more.
+    pub fn notify_cut(&self, cut: CutId, tick: Tick) -> Result<(), StoreError> {
+        self.ask(|r| Request::NotifyCut(cut, tick, r))
+    }
+
+    /// [`Self::notify_cut`] without waiting (a failure is logged by the store thread).
+    pub fn notify_cut_later(&self, cut: CutId, tick: Tick) -> crossbeam::channel::Receiver<Result<(), StoreError>> {
+        self.ask_later(|r| Request::NotifyCut(cut, tick, r))
+    }
+
+    /// Committed cuts as they are announced ([`Self::notify_cut`]), on a `terrain-listener`
+    /// thread of their own (`listen.rs`): in [`crate::NotifyMode::Listen`] one direct,
+    /// unpooled connection — to [`crate::WORLD_DB_DIRECT_ENV`]'s URL if set, else the store's
+    /// — says `Cut` per notice and `Resync` on every (re)connect; in both modes a `Resync`
+    /// every [`crate::TERRAIN_POLL_SECS`]. SQLite: a receiver that never says anything. The
+    /// thread ends once the receiver is dropped.
+    pub fn listen_cuts(&self, mode: crate::NotifyMode) -> crossbeam::channel::Receiver<crate::CutNotice> {
+        let url = match &self.url {
+            StoreUrl::Postgres(url) => Some(
+                std::env::var(crate::WORLD_DB_DIRECT_ENV).ok().filter(|u| !u.trim().is_empty()).unwrap_or_else(|| url.clone()),
+            ),
+            StoreUrl::Sqlite(_) | StoreUrl::Memory => None,
+        };
+        crate::listen::start(url, mode, &self.poll_ms)
+    }
+
+    /// Test hook: the poll period of this handle's later [`Self::listen_cuts`] (default
+    /// [`crate::TERRAIN_POLL_SECS`]). Shared by every clone.
+    #[doc(hidden)]
+    pub fn set_terrain_poll_period(&self, period: std::time::Duration) {
+        self.poll_ms.store(period.as_millis().max(1) as u64, Ordering::SeqCst);
     }
 
     /// The in-flight rows the last committed cuts left, in their order: host `host`'s

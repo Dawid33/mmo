@@ -25,6 +25,9 @@
 //! the world cuts is answered on a receiver: the loop never waits for the database. While
 //! the coordinator is down no cut runs.
 //!
+//! Each decision stored as committed is announced to the hosts' terrain listeners
+//! ([`StoreHandle::notify_cut`], after the decision's transaction; Task 19).
+//!
 //! A save refused as `Fenced` (another coordinator claimed the row) fences the whole
 //! process: the shared [`Fenced`] flag is set — the server's main loop sees it and exits
 //! [`crate::claims::EXIT_FENCED`] through `cuts::exit_world` — the link goes down and the
@@ -989,6 +992,12 @@ impl CoordinatorRuntime {
                         log::warn!("[coordinator] world cut {}: a commit was asked, the store recorded an abort", d.cut.0);
                     }
                     game::perf_event!("world_cut_decided", "cut={} tick={} committed={stored}", d.cut.0, d.tick);
+                    if stored {
+                        // The hosts' listeners re-read what it saved (Task 19). After the
+                        // decision's own transaction, not waited for: a lost notice is
+                        // covered by their poll, a duplicate costs a read.
+                        let _ = self.store.notify_cut_later(d.cut, d.tick);
+                    }
                     self.core.decided(d.cut, stored);
                 }
                 Some(Err(StoreError::Fenced { .. })) => return Err(()),

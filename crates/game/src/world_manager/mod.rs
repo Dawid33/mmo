@@ -312,6 +312,9 @@ pub struct InlineSpawner {
     /// Test support ([`InlineSpawner::fail_next_start`]): regions whose next start
     /// answers `LoadFailed`, as a store read that failed.
     fail_starts: BTreeSet<RegionCoords>,
+    /// The world store's terrain, handed to every runner
+    /// ([`InlineSpawner::with_stored_terrain`]).
+    stored_terrain: Option<std::sync::Arc<dyn crate::StoredTerrain>>,
 }
 
 impl InlineSpawner {
@@ -343,6 +346,14 @@ impl InlineSpawner {
     /// same function.
     pub fn with_stud_genesis(mut self, genesis: InlineStudGenesis) -> Self {
         self.stud_genesis = Some(genesis);
+        self
+    }
+
+    /// Every runner reads [`RegionInput::SeedHaloFromStore`]'s terrain from `stored`
+    /// ([`RegionRunner::set_stored_terrain`]): a host test's world store. Halo seeds at a
+    /// start still come from the stud genesis (this spawner seeds no halo on its regions).
+    pub fn with_stored_terrain(mut self, stored: std::sync::Arc<dyn crate::StoredTerrain>) -> Self {
+        self.stored_terrain = Some(stored);
         self
     }
 
@@ -525,6 +536,9 @@ impl RegionSpawner for InlineSpawner {
         let mut runner = runner;
         if self.record_slot_hashes {
             runner.record_slot_start_hashes();
+        }
+        if let Some(stored) = &self.stored_terrain {
+            runner.set_stored_terrain(stored.clone());
         }
         self.runners.insert(id, (recv, runner));
         send
@@ -1077,6 +1091,12 @@ pub struct WorldManager<S: RegionSpawner> {
     /// region). Replaced by each [`crate::Volatile::Running`] of that host, kept by its
     /// `RegionUp` / `RegionDown`, emptied when its link goes down.
     foreign_running: BTreeMap<RegionCoords, u32>,
+    /// Other hosts' regions whose halo stopped being live by a loss (their link went down,
+    /// their `RegionDown`, a `Running` without them): what they sent last may have been
+    /// lost, so the next [`Self::stored_terrain_changed`] that lists one re-seeds its
+    /// running neighbours' halos from the store even if its version is one already seen.
+    /// Forgotten when it runs again (`RegionUp` / `Running`).
+    foreign_halo_stale: BTreeSet<RegionCoords>,
     /// A peer runs a newer world generation ([`Self::take_higher_generation`]).
     higher_generation: Option<u64>,
     /// Where clients reach this host ([`Self::set_endpoints`]): the first packet of every
@@ -1270,6 +1290,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             peer_queued: BTreeMap::new(),
             peer_in_source_view: BTreeSet::new(),
             foreign_running: BTreeMap::new(),
+            foreign_halo_stale: BTreeSet::new(),
             higher_generation: None,
             endpoint: crate::HostEndpoint { ordinal: 0, quic: None, webtransport: None, cert_hash: None },
             peer_endpoints: BTreeMap::new(),
@@ -2225,6 +2246,48 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// at startup from the store; kept current by [`Self::cut_committed`]).
     pub fn set_stored_regions(&mut self, regions: BTreeMap<RegionCoords, u64>) {
         self.stored_regions = regions;
+    }
+
+    /// The world store says what it holds now (a host's listener: the regions a committed
+    /// world cut saved, or every stored region on a resync — `versions`, each region's
+    /// terrain version). For each region that does not run here and whose version differs
+    /// from [`Self::stored_regions`]: the version is noted; if another host owns it, its
+    /// cached terrain here (from when this host owned it) is dropped, and — unless its halo
+    /// is live (it runs on its host: `foreign_running`, kept fresh by halo traffic) — every
+    /// running region of this host next to it re-seeds its halo of it from the store
+    /// (`RegionInput::SeedHaloFromStore`). A foreign region whose halo stopped being live by
+    /// a loss re-seeds once even at an unchanged version (`foreign_halo_stale`). This host's
+    /// own regions are only noted: their halos come from this host (live, or the final
+    /// terrain of their park, which is never older than the store's).
+    ///
+    /// LOD has nothing to do here: far terrain is the recipe's alone and never reads the
+    /// store, so the spec's §8 case 2 (invalidating LOD on another host's save) is not
+    /// built — the only stale cross-host read is halo seeding.
+    pub fn stored_terrain_changed(&mut self, versions: BTreeMap<RegionCoords, u64>) {
+        for (rc, version) in versions {
+            if self.regions.contains_key(&rc) {
+                continue;
+            }
+            let foreign = self.is_foreign(rc);
+            let live = self.foreign_running.contains_key(&rc);
+            let changed = self.stored_regions.get(&rc) != Some(&version);
+            let stale = foreign && !live && self.foreign_halo_stale.remove(&rc);
+            if changed {
+                self.stored_regions.insert(rc, version);
+                if foreign {
+                    self.terrain_cache.remove(&rc);
+                }
+            }
+            if !foreign || live || !(changed || stale) {
+                continue;
+            }
+            let running: Vec<RegionCoords> = crate::halo::neighbours(rc)
+                .filter(|n| self.owns(*n) && self.regions.get(n).is_some_and(|l| !l.stopping))
+                .collect();
+            for n in running {
+                self.send_to_region(n, RegionInput::SeedHaloFromStore(vec![rc]));
+            }
+        }
     }
 
     /// See [`Self::set_stored_regions`].

@@ -9,6 +9,7 @@ mod codec;
 mod fence;
 mod forged;
 mod handle;
+mod listen;
 mod open;
 mod rows;
 mod terrain;
@@ -22,6 +23,10 @@ pub use codec::*;
 pub use fence::{CoordinatorFence, Fence, SuperRegion, touched_super_regions};
 pub use forged::{StoreTiles, load_forged, write_tiled};
 pub use handle::{CutCommitted, HostBoot, HostRow, StoreHandle, WorldInfo};
+pub use listen::{
+    CutNotice, NotifyMode, TERRAIN_LISTENER_APP, TERRAIN_NOTIFY_ENV, TERRAIN_POLL_SECS, WORLD_CUT_CHANNEL,
+    WORLD_DB_DIRECT_ENV,
+};
 pub use open::{LockGuard, OpenMode, Pool, newest_migration, open_pool};
 pub use terrain::TerrainFromStore;
 pub use two_phase::cut_gid;

@@ -30,15 +30,22 @@
 //! [`game::LEAVE_CUT_TIMEOUT_SECS`] of the first request: it exits 0 without a cut ([`LEFT_WITHOUT_A_CUT`]) — its row stays dirty, so its return
 //! raises the generation and the world rolls back to the last cut.
 //!
+//! **Other hosts' saves** (several hosts, R3 Task 19; [`TerrainWatch`]): every committed
+//! cut is announced (`StoreHandle::notify_cut`: the one-phase commit here, the world cut's
+//! decision in the coordinator runtime); each host listens (`StoreHandle::listen_cuts`) and
+//! hands the versions the store then holds to `WorldManager::stored_terrain_changed`, which
+//! re-seeds the halos of other hosts' parked regions from the store.
+//!
 //! **Start-up** ([`resolve_staged_cuts`]): every split-role process finishes the parts a
 //! crash left staged (as their cut's decision says; an undecided cut is aborted) before it
 //! claims, registers or loads anything.
 
+use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 use crossbeam::channel::{Receiver, TryRecvError};
 use game::{CutFailure, CutId, RegionCoords, RegionOutput, RegionSpawner, Tick, WorldCut, WorldManager};
-use world_store::{CutCommitted, StoreError, StoreHandle};
+use world_store::{CutCommitted, CutNotice, NotifyMode, StoreError, StoreHandle};
 
 use crate::claims::{Fenced, HostClaims, ServerExit, WorldGeneration, FENCED_REFUSAL, ROLLBACK_REFUSAL};
 use crate::coordinator_rt::CoordinatorThread;
@@ -481,7 +488,12 @@ impl CutWriter {
             }
         }
         match &answer {
-            Ok(_) => self.failed_in_a_row = 0,
+            Ok(_) => {
+                self.failed_in_a_row = 0;
+                // After the commit, never inside it; not waited for (a lost notice is
+                // covered by the listeners' poll).
+                let _ = self.claims.store().notify_cut_later(p.id, p.tick);
+            }
             Err(e) => {
                 self.failed_in_a_row += 1;
                 if self.failed_in_a_row == CUT_FAILURES_BEFORE_STUCK {
@@ -776,6 +788,84 @@ fn settle<S: RegionSpawner>(manager: &mut WorldManager<S>, p: Pending, answer: R
         Err(e) => {
             log::error!("[server] save cut {} at tick {} was not committed: {e} (the next cut carries it again)", p.id.0, p.tick);
             manager.cut_failed(p.id);
+        }
+    }
+}
+
+/// At most one warning per this long about failing reads of the stored regions' versions.
+pub const TERRAIN_WATCH_WARN: Duration = Duration::from_secs(30);
+
+/// What a [`TerrainWatch`] has still to read: the regions saved since a cut's tick, or all.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TerrainRead {
+    Since(Tick),
+    All,
+}
+
+impl TerrainRead {
+    /// One read covering both.
+    fn merge(self, other: TerrainRead) -> TerrainRead {
+        match (self, other) {
+            (TerrainRead::Since(a), TerrainRead::Since(b)) => TerrainRead::Since(a.min(b)),
+            _ => TerrainRead::All,
+        }
+    }
+}
+
+/// A host's view of the other hosts' saves (several hosts): the store's cut notices
+/// ([`StoreHandle::listen_cuts`], its own `terrain-listener` thread) become reads of the
+/// stored regions' terrain versions — `stored_regions_since(tick)` for a `Cut`,
+/// `stored_regions()` for a `Resync` — answered on receivers (the main loop never waits;
+/// one read at a time, later notices merged into the next), and each answer goes to
+/// `WorldManager::stored_terrain_changed`. A failed read is warned about and left to the
+/// next notice or the poll's `Resync` ([`world_store::TERRAIN_POLL_SECS`]).
+pub struct TerrainWatch {
+    store: StoreHandle,
+    notices: Receiver<CutNotice>,
+    reading: Option<Receiver<Result<BTreeMap<RegionCoords, u64>, StoreError>>>,
+    next: Option<TerrainRead>,
+    warned: Option<Instant>,
+}
+
+impl TerrainWatch {
+    /// Starts listening on `store` in `mode` (`VOXEL_TERRAIN_NOTIFY`).
+    pub fn start(store: StoreHandle, mode: NotifyMode) -> TerrainWatch {
+        let notices = store.listen_cuts(mode);
+        TerrainWatch { store, notices, reading: None, next: None, warned: None }
+    }
+
+    /// Takes the notices that came, hands an answered read to the manager, and starts the
+    /// next read. Never blocks.
+    pub fn pump<S: RegionSpawner>(&mut self, manager: &mut WorldManager<S>) {
+        while let Ok(notice) = self.notices.try_recv() {
+            let read = match notice {
+                CutNotice::Cut { tick } => TerrainRead::Since(tick),
+                CutNotice::Resync => TerrainRead::All,
+            };
+            self.next = Some(self.next.map_or(read, |n| n.merge(read)));
+        }
+        if let Some(rx) = &self.reading {
+            let answer = match rx.try_recv() {
+                Err(TryRecvError::Empty) => return,
+                Ok(answer) => answer,
+                Err(TryRecvError::Disconnected) => Err(StoreError::Backend("the world-store thread has stopped".into())),
+            };
+            self.reading = None;
+            match answer {
+                Ok(versions) => manager.stored_terrain_changed(versions),
+                Err(e) => {
+                    if self.warned.is_none_or(|at| at.elapsed() >= TERRAIN_WATCH_WARN) {
+                        self.warned = Some(Instant::now());
+                        log::warn!("[server] reading the stored regions' versions failed ({e}); the next notice or poll reads them again");
+                    }
+                }
+            }
+        }
+        if let Some(read) = self.next.take() {
+            self.reading = Some(match read {
+                TerrainRead::Since(tick) => self.store.stored_regions_since_later(tick),
+                TerrainRead::All => self.store.stored_regions_later(),
+            });
         }
     }
 }

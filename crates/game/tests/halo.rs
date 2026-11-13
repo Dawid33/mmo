@@ -486,3 +486,199 @@ fn stored_neighbours_are_seeded_from_the_store_by_their_region() {
     assert_eq!(from_worldgen.len(), 7, "the other neighbours: {from_worldgen:?}");
     assert!(!from_worldgen.contains(&east()));
 }
+
+// ---- stored terrain of other hosts' regions (R3 Task 19) --------------------------------
+
+/// Spawns regions on channels the test reads (`Recording`): what the manager sends them.
+struct RecordingSpawner(std::sync::Arc<std::sync::Mutex<Vec<(RegionCoords, crossbeam::channel::Receiver<game::RegionInput>)>>>);
+
+impl game::RegionSpawner for RecordingSpawner {
+    fn world_tick(&self) -> game::Tick {
+        0
+    }
+    fn spawn(
+        &mut self,
+        id: RegionCoords,
+        _seed: game::RegionSeed,
+        _out: crossbeam::channel::Sender<(RegionCoords, game::RegionOutput)>,
+    ) -> crossbeam::channel::Sender<game::RegionInput> {
+        let (send, recv) = crossbeam::channel::unbounded();
+        self.0.lock().unwrap().push((id, recv));
+        send
+    }
+    fn seeds_halos_on_region_threads(&self) -> bool {
+        true
+    }
+}
+
+/// A manager owning the spawn region (one of two hosts, every region its own
+/// super-region) with its spawn region running, a neighbour `f` of it the other host owns
+/// and a neighbour `l` it owns itself (never run), and the spawn region's input channel.
+struct TwoHostManager {
+    m: game::WorldManager<RecordingSpawner>,
+    mine: u32,
+    f: RegionCoords,
+    l: RegionCoords,
+    spawn_inputs: crossbeam::channel::Receiver<game::RegionInput>,
+}
+
+fn two_host_manager() -> TwoHostManager {
+    let s = 1;
+    let mine = game::rendezvous_owner(game::super_region_of(SPAWN_REGION, s), 2);
+    let ownership = game::Ownership::Static { ordinal: mine, hosts: 2 };
+    let f = game::halo::neighbours(SPAWN_REGION).find(|rc| !ownership.owns(*rc, s)).expect("a neighbour of the other host");
+    let l = game::halo::neighbours(SPAWN_REGION).find(|rc| ownership.owns(*rc, s)).expect("a neighbour of this host");
+    let spawned = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (out_send, _packets) = crossbeam::channel::unbounded();
+    let (region_out_send, _region_out) = crossbeam::channel::unbounded();
+    let mut m = common::stud_manager(RecordingSpawner(spawned.clone()), out_send, region_out_send);
+    m.set_ownership(ownership, s);
+    m.set_host_generation(1);
+    m.handle_server_event(game::ServerEvent::connected(1), 0);
+    let spawn_inputs = {
+        let spawned = spawned.lock().unwrap();
+        let (_, inputs) = spawned.iter().find(|(id, _)| *id == SPAWN_REGION).expect("the spawn region started");
+        inputs.clone()
+    };
+    assert!(m.running_regions().contains(&SPAWN_REGION));
+    assert!(!m.running_regions().contains(&l), "only the spawn region runs");
+    for _ in spawn_inputs.try_iter() {}
+    TwoHostManager { m, mine, f, l, spawn_inputs }
+}
+
+/// The neighbours `SeedHaloFromStore` asked the spawn region for since the last call.
+fn store_seeds(inputs: &crossbeam::channel::Receiver<game::RegionInput>) -> Vec<RegionCoords> {
+    let mut out = Vec::new();
+    for input in inputs.try_iter() {
+        if let game::RegionInput::SeedHaloFromStore(n) = input {
+            out.extend(n);
+        }
+    }
+    out
+}
+
+/// Another host's region next to a running one, not running there (parked): each rise of
+/// its stored terrain version re-seeds the running region's halo of it from the store,
+/// once; an unchanged version does nothing. A region of this host that does not run here
+/// (its parked terrain is the newest there is) and one that runs here are left alone.
+#[test]
+fn stored_terrain_change_reseeds_a_parked_foreign_halo() {
+    let TwoHostManager { mut m, f, l, spawn_inputs, .. } = two_host_manager();
+    assert!(!m.foreign_running().contains(&f));
+    m.stored_terrain_changed([(f, 1)].into());
+    assert_eq!(store_seeds(&spawn_inputs), vec![f], "its first saved version re-seeds the halo");
+    assert_eq!(m.stored_regions().get(&f), Some(&1));
+    m.stored_terrain_changed([(f, 1)].into());
+    assert_eq!(store_seeds(&spawn_inputs), Vec::<RegionCoords>::new(), "an unchanged version: nothing");
+    m.stored_terrain_changed([(f, 2)].into());
+    assert_eq!(store_seeds(&spawn_inputs), vec![f], "a newer version: once more");
+
+    m.stored_terrain_changed([(l, 5), (SPAWN_REGION, 9)].into());
+    assert_eq!(store_seeds(&spawn_inputs), Vec::<RegionCoords>::new(), "this host's own regions: nothing");
+    assert_eq!(m.stored_regions().get(&l), Some(&5), "a region of this host not running here: its version noted");
+    assert_eq!(m.stored_regions().get(&SPAWN_REGION), None, "a region running here: untouched");
+}
+
+/// A PeerLink end the test keeps a hold of (to drop and restore the connection).
+struct HeldLink(std::sync::Arc<std::sync::Mutex<game::InlinePeerLink>>);
+
+impl game::PeerLink for HeldLink {
+    fn send(&mut self, msg: game::PeerMsg) {
+        self.0.lock().unwrap().send(msg)
+    }
+    fn recv(&mut self) -> Option<game::PeerMsg> {
+        self.0.lock().unwrap().recv()
+    }
+    fn is_up(&self) -> bool {
+        self.0.lock().unwrap().is_up()
+    }
+    fn connection(&self) -> u64 {
+        self.0.lock().unwrap().connection()
+    }
+    fn pump(&mut self, now_ms: u64) {
+        self.0.lock().unwrap().pump(now_ms)
+    }
+}
+
+/// Task 6's carry: a FOREIGN neighbour that parks while the peer link is down (its final
+/// halo and its `RegionParked` are lost with the link). While it ran, its stored version
+/// rose (a cut while live: nothing to do then). Once the link is seen down its halo is no
+/// longer live: the next `Resync` re-seeds it from the store even though the version is
+/// one already seen, and the cut that saves its park re-seeds it again.
+#[test]
+fn stored_terrain_change_reseeds_a_foreign_halo_whose_link_dropped() {
+    use game::{HostEndpoint, PeerHello, PeerLink as _, PeerMsg, PeerSession, Volatile};
+    let TwoHostManager { mut m, mine, f, spawn_inputs, .. } = two_host_manager();
+    let other = 1 - mine;
+    let hello = |ordinal| PeerHello {
+        ordinal,
+        boot: 7 + u64::from(ordinal),
+        generation: 1,
+        endpoint: HostEndpoint { ordinal, quic: None, webtransport: None, cert_hash: None },
+        received_through: 0,
+        received_from_boot: None,
+    };
+    let (here, mut there) = game::InlinePeerLink::pair(3, 0);
+    let here = std::sync::Arc::new(std::sync::Mutex::new(here));
+    m.set_peer(other, PeerSession::new(hello(mine), other), Box::new(HeldLink(here.clone())));
+    let mut now = 0;
+    let mut pump = |m: &mut game::WorldManager<RecordingSpawner>, there: &mut game::InlinePeerLink| {
+        now += 1;
+        m.pump_peers(now);
+        there.pump(now);
+        for _ in std::iter::from_fn(|| there.recv()) {}
+    };
+    pump(&mut m, &mut there);
+    there.send(PeerMsg::Hello(hello(other)));
+    pump(&mut m, &mut there);
+    there.send(PeerMsg::Volatile(Volatile::RegionUp(f)));
+    pump(&mut m, &mut there);
+    assert!(m.foreign_running().contains(&f), "f runs on the other host: its halo is live");
+    for _ in spawn_inputs.try_iter() {}
+
+    m.stored_terrain_changed([(f, 1)].into());
+    assert_eq!(store_seeds(&spawn_inputs), Vec::<RegionCoords>::new(), "a live halo is not re-seeded");
+    assert_eq!(m.stored_regions().get(&f), Some(&1), "its version is noted");
+
+    // The link drops; f parks meanwhile (its final halo and `RegionParked` are lost).
+    here.lock().unwrap().set_up(false);
+    pump(&mut m, &mut there);
+    assert!(!m.foreign_running().contains(&f), "a lost link: f's halo is no longer live");
+    m.stored_terrain_changed([(f, 1)].into());
+    assert_eq!(store_seeds(&spawn_inputs), vec![f], "the Resync re-seeds it from the store");
+    m.stored_terrain_changed([(f, 1)].into());
+    assert_eq!(store_seeds(&spawn_inputs), Vec::<RegionCoords>::new(), "once");
+    // The cut that saves its park.
+    m.stored_terrain_changed([(f, 2)].into());
+    assert_eq!(store_seeds(&spawn_inputs), vec![f], "the notice of its saved park re-seeds it");
+}
+
+/// A region that has ticked asked to re-seed a neighbour the store cannot serve keeps its
+/// mirror of it (worldgen is never older-than-the-store safe); one the store serves is
+/// re-seeded from it, the saved dig included.
+#[test]
+fn stored_terrain_change_on_a_ticking_region_keeps_an_unserved_mirror() {
+    crate::common::install_real_block_props();
+    let (out, _out_recv) = crossbeam::channel::unbounded();
+    let region = common::region_of(SPAWN_REGION, common::uniform_seed());
+    let mut runner = game::RegionRunner::new(SPAWN_REGION, region, out);
+    let generated = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let count = generated.clone();
+    runner.set_stud_halo_generator(std::sync::Arc::new(move |_rc, xs, zs| {
+        count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let mut seed = common::uniform_seed();
+        seed.ground.retain(|(c, _)| xs.contains(&c.x) && zs.contains(&c.z));
+        seed
+    }));
+    runner.handle_input(game::RegionInput::SeedHaloFromWorldgen(vec![east(), north()]));
+    assert_eq!(generated.load(std::sync::atomic::Ordering::SeqCst), 2);
+    let (dug, snap) = east_saved_dug();
+    runner.set_stored_terrain(std::sync::Arc::new(OneStored(east(), snap)));
+    runner.tick();
+    runner.handle_input(game::RegionInput::SeedHaloFromStore(vec![east(), north()]));
+    assert_eq!(generated.load(std::sync::atomic::Ordering::SeqCst), 2, "no worldgen for the unserved neighbour");
+    let data = runner.region_mut().data();
+    let seen = |of: RegionCoords, cell: [i32; 3]| data.stud_material_seen(from_spawn(of, cell));
+    assert_eq!(seen(east(), dug.0), None, "the saved dig is in the halo");
+    assert!(seen(north(), [20, FLOOR_PLATES - 1, REGION_STUDS - 4]).is_some(), "north's mirror is kept");
+}

@@ -7,6 +7,7 @@ mod cut;
 mod fence;
 mod handle;
 mod hosts;
+mod notify;
 mod common;
 mod forged;
 mod open;
