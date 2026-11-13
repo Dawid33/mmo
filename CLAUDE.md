@@ -141,9 +141,10 @@ print secrets.
   push, 127.0.0.1:6490) + `_CERT_HASH_FILE`, `VOXEL_OWNERSHIP=allinone|static`, `VOXEL_HOST_ORDINAL`,
   `VOXEL_HOSTS`, `VOXEL_SUPER_REGION_REGIONS` (16; checked against the world row). `just dev-r2` runs
   login + coordinator + host 0 (state in git-ignored `target/dev-r2/`); `just coordinator|host`, `just test-r2`.
-  R3 (several hosts): `just dev-r3 [hosts] [delay]` (all hosts, `target/dev-r3/`), `just test-r3`, `worldctl
-  super-region`; env `VOXEL_ENTRY_HOST`, `VOXEL_PEER_BIND`, `VOXEL_PEER_LINK_DELAY_MS`, `VOXEL_WT_PORT`,
-  `VOXEL_ADVERTISE_QUIC`/`_WT`, `VOXEL_TERRAIN_NOTIFY`, `VOXEL_WORLD_DB_DIRECT`.
+  R3 (several hosts): `just dev-r3 [hosts] [delay]` (all hosts, supervised by `scripts/dev_r3.sh`;
+  `target/dev-r3/`), `just test-r3`, `worldctl super-region`; env `VOXEL_ENTRY_HOST`, `VOXEL_PEER_BIND`,
+  `VOXEL_PEER_LINK_DELAY_MS`, `VOXEL_WT_PORT`, `VOXEL_ADVERTISE_QUIC`/`_WT`, `VOXEL_TERRAIN_NOTIFY`,
+  `VOXEL_WORLD_DB_DIRECT`.
 - **Owner epochs & fencing**: a host claims super-regions (`super_region_of`, `game::ownership`) in Postgres
   with an epoch; every cut / region load / coordinator save is fenced on it (`StoreError::Fenced`) — a fenced
   process stops writing and exits `EXIT_FENCED` (3); a dead coordinator thread exits `EXIT_COORDINATOR_FAILED`
@@ -152,7 +153,8 @@ print secrets.
 - **Link rules**: a re-`Attach` after any reconnect rebuilds the coordinator's view; requests are memoised by
   `RequestId` (idempotent resend); the Attach waits for exact people lists ("wait, never guess" — conservation
   beats latency). Login pushes `SpawnPlayer`/`Kick` to the host's link; kicks are durable until acked
-  (login migration 0003). Until R3 the coordinator serves exactly one host ordinal (0).
+  (login migration 0003). With several hosts the coordinator serves every ordinal of `VOXEL_HOSTS`; login
+  links to the entry host only.
 
 **Client** (`crates/client`)
 - `renderer/` bridges sim state to Bevy; predicted regions run like the server's (`regions/`, threaded on

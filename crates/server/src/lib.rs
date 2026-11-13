@@ -892,7 +892,7 @@ pub fn run() -> claims::ServerExit {
     );
     match &world_source {
         world_file::WorldSource::Store { url, .. } => {
-            info!("[server] world: forged, in the world store {url:?} (sampled from its tiles)")
+            info!("[server] world: forged, in the world store {url} (sampled from its tiles)")
         }
         world_file::WorldSource::Procedural => info!("[server] world: procedural (nothing is saved)"),
         world_file::WorldSource::Studs => info!("[server] world: studs (toy bricks, nothing is saved)"),

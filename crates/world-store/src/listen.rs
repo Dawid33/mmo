@@ -97,10 +97,7 @@ fn reconnect_wait(lived: Duration) -> Duration {
 /// Where the listener connects, for logs: host and database, never the URL (it holds a
 /// password).
 fn describe(url: &str) -> String {
-    match url.parse::<sqlx::postgres::PgConnectOptions>() {
-        Ok(o) => format!("{}/{}", o.get_host(), o.get_database().unwrap_or("?")),
-        Err(_) => "an unparsable URL".into(),
-    }
+    crate::url::redact_url(url)
 }
 
 /// The poll period shared by a handle's clones (test setter: [`crate::StoreHandle::set_terrain_poll_period`]).

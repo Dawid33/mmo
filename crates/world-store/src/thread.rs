@@ -364,7 +364,7 @@ async fn serve(
             }),
             Request::ClaimSuperRegions(owner, srs, r) => tokio::spawn(async move {
                 let _w = writer.lock().await;
-                r.send(on_pool!(&pool, claim_super_regions(owner, srs)))
+                r.send(on_pool!(&pool, claim_super_regions(owner, srs, s)))
             }),
             Request::ClaimCoordinator(r) => tokio::spawn(async move {
                 let _w = writer.lock().await;

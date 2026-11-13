@@ -18,8 +18,15 @@
 //! - `super-region <url> <n>`: sets the world's super-region side (`world.super_region_regions`,
 //!   regions per super-region side; hosts then run with `VOXEL_SUPER_REGION_REGIONS=<n>`).
 //!   Refused once any host has claimed a super-region: the fences name super-regions of the
-//!   old side. `n = 1` puts a host seam one region from the spawn (R3's go / no-go world).
-//!   Never echoes the URL (a Postgres URL carries a password).
+//!   old side. Safe against a host starting at the same time: on Postgres the change and a
+//!   claim serialise on the world row (the change also locks `super_regions` against
+//!   inserts), so either the claim commits first and the change is refused, or the change
+//!   commits first and the claim — by a process that opened the store at the old side — is
+//!   refused (`StoreError::OtherSuperRegionSide`); on SQLite the file lock admits one
+//!   writer. `n = 1` puts a host seam one region from the spawn (R3's go / no-go world).
+//!
+//! No command prints a Postgres URL's credentials: stores are shown by
+//! [`StoreUrl`]'s `Display` (host and database only).
 //! - `export --db <url> <out.world>`: writes the stored forge file (the archive
 //!   row) to `out.world`, for the file-based tools (`just world-map`,
 //!   `cross-section`, `history`).
@@ -34,45 +41,41 @@ use crate::{Dials, OpenMode, StoreHandle, StoreUrl};
 pub const USAGE: &str = "usage: worldctl forge --db <url> [--preset <name>] [--size <m>] [--cell <m>] \
 [--seed <hex>] [--set <knob>=<value>]...\n       worldctl retile --db <url>\n       worldctl export --db <url> <out.world>\n       worldctl clock-reset <url>\n       worldctl super-region <url> <n>";
 
-/// Runs one `worldctl` command (`args` without the program name).
-pub fn run(args: &[String]) -> Result<(), String> {
+/// Runs one `worldctl` command (`args` without the program name); `Ok` is what it
+/// prints. Neither that nor an error ever shows a Postgres URL's credentials.
+pub fn run(args: &[String]) -> Result<String, String> {
     match args.first().map(String::as_str) {
         Some("forge") => {
             let (db, params) = parse_forge(&args[1..])?;
             let crc = forge_into(&db, &params)?;
-            println!("worldctl: forged a {} m world at {} m cells into {db:?} (content crc {crc:#010x})", params.size_m, params.cell_m);
-            Ok(())
+            Ok(format!("worldctl: forged a {} m world at {} m cells into {db} (content crc {crc:#010x})", params.size_m, params.cell_m))
         }
         Some("retile") => {
             let db = parse_retile(&args[1..])?;
             let crc = retile(&db)?;
-            println!("worldctl: re-tiled {db:?} from its archive (content crc {crc:#010x})");
-            Ok(())
+            Ok(format!("worldctl: re-tiled {db} from its archive (content crc {crc:#010x})"))
         }
         Some("export") => {
             let (db, out) = parse_export(&args[1..])?;
             let bytes = export(&db, Path::new(&out))?;
-            println!("worldctl: exported {bytes} bytes to {out}");
-            Ok(())
+            Ok(format!("worldctl: exported {bytes} bytes to {out}"))
         }
         Some("clock-reset") => {
             let db = parse_clock_reset(&args[1..])?;
             clock_reset(&db)?;
-            println!("worldctl: cleared the world clock anchor of {db:?}; the next host or coordinator start writes a new one");
-            Ok(())
+            Ok(format!("worldctl: cleared the world clock anchor of {db}; the next host or coordinator start writes a new one"))
         }
         Some("super-region") => {
             let (db, n) = parse_super_region(&args[1..])?;
             set_super_region(&db, n)?;
-            println!("worldctl: the world's super-regions are now {n} x {n} regions; run its hosts with VOXEL_SUPER_REGION_REGIONS={n}");
-            Ok(())
+            Ok(format!("worldctl: the world's super-regions are now {n} x {n} regions; run its hosts with VOXEL_SUPER_REGION_REGIONS={n}"))
         }
         _ => Err(USAGE.to_string()),
     }
 }
 
 fn parse_db(value: &str) -> Result<StoreUrl, String> {
-    StoreUrl::parse(value).map_err(|e| format!("--db {value:?}: {e}"))
+    StoreUrl::parse(value).map_err(|e| format!("--db {}: {e}", crate::redact_url(value)))
 }
 
 /// `forge`'s flags: the store and the forge parameters.
@@ -161,7 +164,7 @@ fn parse_export(args: &[String]) -> Result<(StoreUrl, String), String> {
 }
 
 fn open(db: &StoreUrl, mode: OpenMode) -> Result<StoreHandle, String> {
-    StoreHandle::open(db, Dials::BUILT, mode).map_err(|e| format!("world store {db:?}: {e}"))
+    StoreHandle::open(db, Dials::BUILT, mode).map_err(|e| format!("world store {db}: {e}"))
 }
 
 /// Forges `params` and stores it in `db` as tiles; returns the world's
@@ -173,7 +176,7 @@ pub fn forge_into(db: &StoreUrl, params: &ForgeParams) -> Result<u32, String> {
         let info = store.world_info().map_err(|e| e.to_string())?;
         let regions = store.stored_regions().map_err(|e| e.to_string())?;
         if info.has_artifact || !regions.is_empty() {
-            return Err(format!("{db:?} already holds a world; forge into a new database"));
+            return Err(format!("{db} already holds a world; forge into a new database"));
         }
         let bytes = std::panic::catch_unwind(|| forge::forge(params).artifact(params).to_bytes())
             .map_err(|e| format!("the forge failed: {}", forge::play::panic_message(e.as_ref())))?;
@@ -191,7 +194,7 @@ pub fn export(db: &StoreUrl, out: &Path) -> Result<usize, String> {
     store.shutdown();
     let bytes = archive
         .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("{db:?} holds no forged world to export"))?;
+        .ok_or_else(|| format!("{db} holds no forged world to export"))?;
     if let Some(dir) = out.parent().filter(|d| !d.as_os_str().is_empty()) {
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     }
@@ -240,7 +243,7 @@ pub fn retile(db: &StoreUrl) -> Result<u32, String> {
         let archive = store
             .forged_archive()
             .map_err(|e| e.to_string())?
-            .ok_or_else(|| format!("{db:?} keeps no archived forge file to re-tile from; re-forge the world"))?;
+            .ok_or_else(|| format!("{db} keeps no archived forge file to re-tile from; re-forge the world"))?;
         crate::write_tiled(&store, archive).map_err(|e| e.to_string())
     })();
     store.shutdown();

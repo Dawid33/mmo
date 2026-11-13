@@ -97,7 +97,7 @@ pub fn resolve(world_file: Option<&str>, world_db: Option<&str>) -> Result<World
         Some(path) => Some(from_repo_root(Path::new(path))),
     };
     let url = match (world_db, &world_file) {
-        (Some(db), _) => match StoreUrl::parse(db).map_err(|e| format!("{WORLD_DB_ENV}={db:?}: {e}"))? {
+        (Some(db), _) => match StoreUrl::parse(db).map_err(|e| format!("{WORLD_DB_ENV}={}: {e}", world_store::redact_url(db)))? {
             StoreUrl::Sqlite(path) => StoreUrl::Sqlite(from_repo_root(&path)),
             other => other,
         },
@@ -474,7 +474,7 @@ pub fn open_world(source: &WorldSource, params: &ForgeParams) -> Result<OpenedWo
         WorldSource::Store { url, import } => (url, import.as_deref()),
     };
     let store = StoreHandle::open(url, world_store::Dials::BUILT, world_store::OpenMode::Writer)
-        .map_err(|e| format!("world store {url:?}: {e}"))?;
+        .map_err(|e| format!("world store {url}: {e}"))?;
     let opened = check_legacy_saves(&store, import).and_then(|()| {
         let (world, map) = ensure_world(&store, import, params)?;
         let world_tick = store.world_info().map_err(|e| e.to_string())?.world_tick;

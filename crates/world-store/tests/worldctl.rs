@@ -123,3 +123,75 @@ fn super_region_only_before_the_first_claim() {
         h.shutdown();
     });
 }
+
+/// Postgres has no file lock: a host may open the store, then `super-region` changes the
+/// side before that host claims. The claim must not go through with super-regions of the
+/// old side — it re-reads the side in its own transaction and is refused.
+#[test]
+fn super_region_refuses_a_claim_opened_at_the_old_side() {
+    if crate::common::pg_admin_url().is_none() {
+        return crate::common::skip_msg();
+    }
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let db = rt.block_on(crate::common::PgTestDb::create_async("mmo_test")).expect("pg env var set");
+    let url = StoreUrl::Postgres(db.url.clone());
+    let early = open(&url);
+    assert_eq!(early.super_region_regions(), game::DEFAULT_SUPER_REGION_REGIONS);
+    ctl::run(&args(&["super-region", &db.url, "2"])).expect("nobody has claimed yet");
+    let err = early.claim_super_regions(0, vec![(0, 0)]).err().expect("a claim at the old side is refused");
+    assert!(matches!(err, world_store::StoreError::OtherSuperRegionSide { stored: 2, opened } if opened == game::DEFAULT_SUPER_REGION_REGIONS), "{err}");
+    early.shutdown();
+    // A process opened at the new side claims; from then on the side is fixed.
+    let late = open(&url);
+    assert_eq!(late.super_region_regions(), 2);
+    late.claim_super_regions(0, vec![(0, 0)]).unwrap();
+    let err = ctl::run(&args(&["super-region", &db.url, "1"])).err().expect("refused after a claim");
+    assert!(err.contains("claimed"), "{err}");
+    late.shutdown();
+    drop(db);
+}
+
+/// No worldctl command shows a Postgres URL's credentials, on success or failure
+/// (`Ok` is exactly what the binary prints; `Err` what it prints to stderr).
+#[test]
+fn worldctl_never_prints_the_postgres_password() {
+    if crate::common::pg_admin_url().is_none() {
+        return crate::common::skip_msg();
+    }
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let db = rt.block_on(crate::common::PgTestDb::create_async("mmo_test")).expect("pg env var set");
+    let userinfo = db.url.split("://").nth(1).and_then(|rest| rest.split_once('@')).map(|(u, _)| u.to_string());
+    let userinfo = userinfo.expect("the test URL carries user:password@");
+    let dir = temp_dir("pg_redact");
+    let out = dir.join("o.world");
+    let out = out.to_str().unwrap();
+    let missing = db.url.rsplit_once('/').map(|(base, _)| format!("{base}/mmo_no_such_database")).unwrap();
+    let mut said = Vec::new();
+    for list in [
+        vec!["export", "--db", &db.url, out],
+        vec!["retile", "--db", &db.url],
+        vec!["clock-reset", &db.url],
+        vec!["super-region", &db.url, "0"],
+        vec!["forge", "--db", &db.url, "--size", "2048", "--cell", "64", "--seed", "4", "--set", "iters=50"],
+        vec!["forge", "--db", &db.url, "--size", "2048", "--cell", "64"],
+        vec!["retile", "--db", &db.url],
+        vec!["export", "--db", &db.url, out],
+        vec!["super-region", &db.url, "1"],
+        vec!["clock-reset", &missing],
+        vec!["super-region", &missing, "1"],
+    ] {
+        let result = ctl::run(&args(&list));
+        let text = match &result {
+            Ok(s) | Err(s) => s.clone(),
+        };
+        assert!(!text.contains(&userinfo), "{list:?} printed the credentials: {text}");
+        said.push((list[0].to_string(), result.is_ok()));
+    }
+    // The run went through both paths of each command (so every message was looked at).
+    for cmd in ["export", "retile", "forge", "clock-reset", "super-region"] {
+        assert!(said.iter().any(|(c, ok)| c == cmd && *ok), "{cmd} never succeeded: {said:?}");
+        assert!(said.iter().any(|(c, ok)| c == cmd && !*ok), "{cmd} never failed: {said:?}");
+    }
+    let _ = std::fs::remove_dir_all(dir);
+    drop(db);
+}

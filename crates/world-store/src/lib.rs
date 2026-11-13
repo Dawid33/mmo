@@ -30,7 +30,7 @@ pub use listen::{
 pub use open::{LockGuard, OpenMode, Pool, newest_migration, open_pool};
 pub use terrain::TerrainFromStore;
 pub use two_phase::cut_gid;
-pub use url::StoreUrl;
+pub use url::{StoreUrl, redact_url};
 
 /// The schema/format generation this build writes and reads.
 pub const STORE_FORMAT_VERSION: u32 = 1;
@@ -169,6 +169,10 @@ pub enum StoreError {
     /// ([`StoreHandle::cut_decided`]): the next cut is refused at once (it would wait
     /// on that part's row locks). Nothing was written.
     CutPending(game::CutId),
+    /// A claim by a handle opened when the world's super-region side was `opened`, after
+    /// `worldctl super-region` changed it to `stored`: its super-regions are of the old
+    /// side. Nothing was written; restart the process (with `VOXEL_SUPER_REGION_REGIONS`).
+    OtherSuperRegionSide { stored: u32, opened: u32 },
 }
 
 impl fmt::Display for StoreError {
@@ -246,6 +250,11 @@ impl fmt::Display for StoreError {
                 f,
                 "this host's part of cut {} is still undecided; no further cut is written until it is (cut_decided)",
                 cut.0
+            ),
+            StoreError::OtherSuperRegionSide { stored, opened } => write!(
+                f,
+                "the world's super-region side is now {stored} regions but this process opened it at {opened}; \
+                 restart it with VOXEL_SUPER_REGION_REGIONS={stored}"
             ),
             StoreError::Unsupported(e) => write!(f, "{e}"),
             StoreError::Corrupt(e) => write!(f, "world store is corrupt: {e}"),

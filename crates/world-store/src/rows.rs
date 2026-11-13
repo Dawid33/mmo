@@ -116,7 +116,7 @@ pub(crate) enum CutEnd {
 }
 
 macro_rules! engine_rows {
-    ($module:ident, $db:ty, $read_prelude:expr, $share_lock:expr, $update_lock:expr, $lock_timeout:expr) => {
+    ($module:ident, $db:ty, $read_prelude:expr, $share_lock:expr, $update_lock:expr, $lock_timeout:expr, $claims_lock:expr) => {
         pub(crate) mod $module {
             use sqlx::Row;
 
@@ -174,13 +174,32 @@ macro_rules! engine_rows {
             /// Claims every super-region of `srs` for `owner` in one transaction:
             /// a new row gets epoch 1, a known one epoch + 1 (whoever held it is
             /// fenced). Rows are upserted in key order. Callers hold the writer lock.
+            ///
+            /// `opened` is the super-region side this handle read at open (`srs` are of that
+            /// side): the transaction first re-reads it from the world row (Postgres: `FOR
+            /// KEY SHARE`, the row [`set_super_region_regions`] locks first) and refuses with
+            /// [`StoreError::OtherSuperRegionSide`] if `worldctl super-region` changed it since.
             pub(crate) async fn claim_super_regions(
                 pool: &Pool,
                 owner: u32,
                 srs: Vec<SuperRegion>,
+                opened: u32,
             ) -> Result<Fence, StoreError> {
                 let srs: std::collections::BTreeSet<SuperRegion> = srs.into_iter().collect();
                 let mut tx = pool.begin().await?;
+                // Postgres `FOR KEY SHARE`: waits only for `set_super_region_regions`'s `FOR
+                // UPDATE`, not for a cut's ordinary update of the world row.
+                let key_share = if $share_lock.is_empty() { "" } else { " FOR KEY SHARE" };
+                let sql = format!("SELECT super_region_regions FROM world WHERE id = 1{key_share}");
+                let stored: i64 = sqlx::query(&sql)
+                    .fetch_optional(&mut *tx)
+                    .await?
+                    .ok_or_else(|| StoreError::Corrupt("the world row is missing".into()))?
+                    .try_get(0)?;
+                if stored != i64::from(opened) {
+                    let stored = u32::try_from(stored).unwrap_or(0);
+                    return Err(StoreError::OtherSuperRegionSide { stored, opened });
+                }
                 let mut epochs = BTreeMap::new();
                 for (sx, sz) in srs {
                     let epoch: i64 = sqlx::query(
@@ -578,16 +597,36 @@ macro_rules! engine_rows {
                 }
             }
 
-            /// Sets `world.super_region_regions` to `s` if no super-region is claimed yet (one
-            /// statement); returns whether it did. Callers hold the writer lock.
+            /// Sets `world.super_region_regions` to `s` if no super-region is claimed yet;
+            /// returns whether it did. One transaction: it locks the world row (Postgres:
+            /// `FOR UPDATE`; a claim takes it `FOR KEY SHARE` first, so the two serialise in the
+            /// same order and never deadlock), then `super_regions` against inserts (Postgres:
+            /// `SHARE ROW EXCLUSIVE`), checks that table is empty and writes. A claim committed
+            /// first makes this refuse; a claim after it sees the new side and refuses
+            /// ([`claim_super_regions`]). SQLite: the process's file lock already excludes
+            /// every other writer. Callers hold the writer lock.
             pub(crate) async fn set_super_region_regions(pool: &Pool, s: u32) -> Result<bool, StoreError> {
-                let done = sqlx::query(
-                    "UPDATE world SET super_region_regions = $1 WHERE id = 1 AND NOT EXISTS (SELECT 1 FROM super_regions)",
-                )
-                .bind(i64::from(s))
-                .execute(pool)
-                .await?;
-                Ok(done.rows_affected() == 1)
+                let mut tx = pool.begin().await?;
+                let sql = format!("SELECT super_region_regions FROM world WHERE id = 1{}", $update_lock);
+                sqlx::query(&sql)
+                    .fetch_optional(&mut *tx)
+                    .await?
+                    .ok_or_else(|| StoreError::Corrupt("the world row is missing".into()))?;
+                let lock: Option<&str> = $claims_lock;
+                if let Some(lock) = lock {
+                    sqlx::query(lock).execute(&mut *tx).await?;
+                }
+                let claimed: i64 = sqlx::query("SELECT COUNT(*) FROM super_regions").fetch_one(&mut *tx).await?.try_get(0)?;
+                if claimed > 0 {
+                    tx.rollback().await?;
+                    return Ok(false);
+                }
+                sqlx::query("UPDATE world SET super_region_regions = $1 WHERE id = 1")
+                    .bind(i64::from(s))
+                    .execute(&mut *tx)
+                    .await?;
+                tx.commit().await?;
+                Ok(true)
             }
 
             /// Forgets the world's clock anchor. Callers hold the writer lock.
@@ -1049,8 +1088,16 @@ macro_rules! engine_rows {
 // SQLite needs no row lock: claims and commits all hold the store's writer
 // lock and one writer process holds the file lock.
 // `$lock_timeout`: whether a cut's transaction sets a `lock_timeout` (Postgres).
-engine_rows!(sqlite, sqlx::Sqlite, None, "", "", false);
-engine_rows!(pg, sqlx::Postgres, Some("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ"), " FOR SHARE", " FOR UPDATE", true);
+engine_rows!(sqlite, sqlx::Sqlite, None, "", "", false, None);
+engine_rows!(
+    pg,
+    sqlx::Postgres,
+    Some("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ"),
+    " FOR SHARE",
+    " FOR UPDATE",
+    true,
+    Some("LOCK TABLE super_regions IN SHARE ROW EXCLUSIVE MODE")
+);
 
 /// Announces committed cut `cut` at `tick` to every listener of this world (Postgres:
 /// `pg_notify` on [`crate::listen::WORLD_CUT_CHANNEL`], in a transaction of its own —
