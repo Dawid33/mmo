@@ -5,9 +5,11 @@
 import { CONFIG } from "./config.js";
 import { beginLogin, completeLogin, currentSession, logoutUrl, OidcError } from "./oidc.js";
 
+// Pending logins live in localStorage, not per-tab sessionStorage: a sign-up's mailed
+// verification link finishes the login in a new tab (oidc.js keys them by state).
 const env = {
   config: CONFIG,
-  pending: sessionStorage,
+  pending: localStorage,
   session: localStorage,
   crypto: globalThis.crypto,
   fetch: (...a) => fetch(...a),
@@ -20,9 +22,8 @@ const NOTICES = {
   "password-not-changed": { text: "Password not changed.", className: null },
 };
 
+// no_pending_login is not an error to the player: see finishLogin.
 const CALLBACK_ERRORS = {
-  no_pending_login: "This sign-in link was already used.",
-  state_mismatch: "This login was not started from this browser tab, so it was stopped.",
   issuer_mismatch: "The answer came from the wrong login server, so it was ignored.",
   provider_error: "The login server did not finish the login.",
   token_exchange_failed: "The login server could not be reached to finish the login.",
@@ -80,8 +81,14 @@ function showNotice() {
 }
 
 function noticeFor(action) {
-  if (!action) return null;
+  if (action?.name !== "UPDATE_PASSWORD") return null;
   return action.status === "success" ? "password-changed" : "password-not-changed";
+}
+
+function showCallback(title, part) {
+  document.querySelector('[data-callback="title"]').textContent = title;
+  document.querySelector('[data-callback="busy"]').hidden = true;
+  document.querySelector(`[data-callback="${part}"]`).hidden = false;
 }
 
 async function finishLogin() {
@@ -90,26 +97,34 @@ async function finishLogin() {
     result = await completeLogin(env, location.href);
   } catch (e) {
     history.replaceState(null, "", location.pathname);
+    if (e instanceof OidcError && e.code === "no_pending_login") {
+      // This login was already finished or given up elsewhere — typically the tab left on
+      // Keycloak's "verify your email" page, after the mailed link logged in another tab.
+      if (currentSession(env)) return location.replace("/");
+      wireActions();
+      showCallback("Almost there", "again"); // Keycloak's own session makes it one click
+      return;
+    }
     if (!(e instanceof OidcError)) console.error("orion: login failed", e);
     const text = e instanceof OidcError && Object.hasOwn(CALLBACK_ERRORS, e.code)
       ? CALLBACK_ERRORS[e.code]
       : CALLBACK_UNKNOWN;
-    document.querySelector('[data-callback="title"]').textContent = "Login not finished";
     document.querySelector('[data-callback="message"]').textContent = text;
-    document.querySelector('[data-callback="busy"]').hidden = true;
-    document.querySelector('[data-callback="failed"]').hidden = false;
+    showCallback("Login not finished", "failed");
     return;
   }
-  history.replaceState(null, "", location.pathname);
-  const notice = noticeFor(result.action);
-  if (notice) sessionStorage.setItem(NOTICE_KEY, notice);
+  // Logged in: nothing below may keep the player on this page.
+  try {
+    history.replaceState(null, "", location.pathname);
+    const notice = noticeFor(result.action);
+    if (notice) sessionStorage.setItem(NOTICE_KEY, notice);
+  } catch (e) {
+    console.error("orion: could not leave a notice", e);
+  }
   location.replace(result.returnTo);
 }
 
-function main() {
-  const page = document.body.dataset.page;
-  if (page === "callback") return finishLogin();
-
+function wireActions() {
   for (const el of all("[data-action]")) {
     const action = ACTIONS[el.dataset.action];
     if (action) el.addEventListener("click", (event) => {
@@ -117,6 +132,13 @@ function main() {
       action();
     });
   }
+}
+
+function main() {
+  const page = document.body.dataset.page;
+  if (page === "callback") return finishLogin();
+
+  wireActions();
   for (const el of all('[data-link="play"]')) el.href = CONFIG.playUrl;
   for (const el of all('[data-link="chat"]')) el.href = CONFIG.chatUrl;
 

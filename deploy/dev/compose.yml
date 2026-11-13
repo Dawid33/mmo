@@ -1,5 +1,6 @@
 # Dev services: Postgres for the world store (`just pg-up`) and Keycloak for player
-# accounts (`just kc-up`). Separate from deploy/web/compose.yml, which is the game box.
+# accounts (`just kc-up`, which also starts its mail catcher, mailpit). Separate from
+# deploy/web/compose.yml, which is the game box.
 # Nothing here is production: fixed dev credentials, bound to localhost only.
 name: mmo-dev
 
@@ -26,9 +27,13 @@ services:
   # Dev identity provider: realm `players` imported from keycloak/players-realm.json at
   # every start. No data volume: `just kc-down` removes the container, so the next
   # `just kc-up` imports the file again (--import-realm skips a realm that exists).
+  # Like production the realm verifies email; its mail goes to mailpit below.
   keycloak:
     image: quay.io/keycloak/keycloak:26.8.2
     command: ["start-dev", "--import-realm"]
+    depends_on:
+      mailpit:
+        condition: service_healthy
     environment:
       KC_BOOTSTRAP_ADMIN_USERNAME: admin
       KC_BOOTSTRAP_ADMIN_PASSWORD: admin
@@ -53,6 +58,19 @@ services:
       timeout: 3s
       start_period: 120s
       retries: 60
+
+  # Mail catcher for Keycloak (realm smtpServer: mailpit:1025, inside this network only).
+  # Every mail it sends (email verification, password reset) is kept in memory and shown at
+  # http://127.0.0.1:8025 (web UI; JSON API under /api/v1). Removed by `just kc-down`.
+  mailpit:
+    image: axllent/mailpit:v1.33.1
+    ports:
+      - "127.0.0.1:8025:8025"
+    healthcheck:
+      test: ["CMD", "/mailpit", "readyz"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
 
 volumes:
   mmo-dev-pg:

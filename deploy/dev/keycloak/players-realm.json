@@ -7,6 +7,16 @@
   "resetPasswordAllowed": true,
   "loginWithEmailAllowed": true,
   "duplicateEmailsAllowed": false,
+  "verifyEmail": true,
+  "smtpServer": {
+    "host": "mailpit",
+    "port": "1025",
+    "from": "accounts-noreply@localhost",
+    "fromDisplayName": "Orion",
+    "auth": "false",
+    "ssl": "false",
+    "starttls": "false"
+  },
   "internationalizationEnabled": false,
   "components": {
     "org.keycloak.userprofile.UserProfileProvider": [

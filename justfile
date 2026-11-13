@@ -822,13 +822,15 @@ pg-psql *args:
 
 # Start the dev Keycloak on 127.0.0.1:8180 (admin / admin) and wait until it is healthy.
 # Realm `players` from deploy/dev/keycloak/players-realm.json, login theme website/theme/orion.
+# Its mail (email verification, password reset) lands in mailpit: http://127.0.0.1:8025.
 kc-up:
     docker compose -f deploy/dev/compose.yml up -d --wait keycloak
     @echo "dev issuer: http://127.0.0.1:8180/realms/players"
+    @echo "dev mail:   http://127.0.0.1:8025"
 
-# Stop and remove the dev Keycloak, so the next `kc-up` imports the realm file again.
+# Stop and remove the dev Keycloak and its mailpit, so the next `kc-up` imports the realm file again.
 kc-down:
-    docker compose -f deploy/dev/compose.yml rm -sf keycloak
+    docker compose -f deploy/dev/compose.yml rm -sf keycloak mailpit
 
 # Check every login page the dev Keycloak serves is in the orion theme (`just kc-up` first).
 # Env KC, SITE, SKIP_LOGIN=1: see scripts/site_theme_check.sh.

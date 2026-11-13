@@ -1,11 +1,15 @@
 // OpenID Connect authorization code + PKCE against Keycloak, for a static site.
 // No globals: everything comes in through `env`
 //   { config, pending: Storage, session: Storage, crypto: Crypto, fetch, now: () => ms }
-// (`pending` = sessionStorage, `session` = localStorage in the browser).
+// (both `pending` and `session` are localStorage in the browser).
+//
+// Each login in flight is kept as `orion.pending.<state>`, shared by every tab: a sign-up's
+// mailed verification link finishes the login in a new tab, which must find it there.
 
 export const SESSION_MAX_AGE_MS = 8 * 60 * 60 * 1000;
+export const PENDING_MAX_AGE_MS = 60 * 60 * 1000;
 
-const PENDING_KEY = "orion.pending";
+const PENDING_PREFIX = "orion.pending.";
 const SESSION_KEY = "orion.session";
 const SCOPE = "openid profile email";
 
@@ -39,7 +43,22 @@ export function safeReturnTo(path) {
 const redirectUri = (env) => `${env.config.siteUrl}/callback.html`;
 const endpoint = (env, name) => `${env.config.issuer}/protocol/openid-connect/${name}`;
 
+// A pending login can be finished for PENDING_MAX_AGE_MS after it began.
+const fresh = (env, pending) =>
+  typeof pending?.at === "number" && env.now() - pending.at <= PENDING_MAX_AGE_MS;
+
+// Drops pending logins that are too old to finish (or unreadable): abandoned logins.
+function prunePending(env) {
+  const keys = [];
+  for (let i = 0; i < env.pending.length; i++) {
+    const key = env.pending.key(i);
+    if (key?.startsWith(PENDING_PREFIX)) keys.push(key);
+  }
+  for (const key of keys) if (!fresh(env, readJson(env.pending, key))) env.pending.removeItem(key);
+}
+
 export async function beginLogin(env, { prompt, kcAction, returnTo } = {}) {
+  prunePending(env);
   const state = random(env.crypto);
   const nonce = random(env.crypto);
   const verifier = random(env.crypto);
@@ -55,8 +74,8 @@ export async function beginLogin(env, { prompt, kcAction, returnTo } = {}) {
   });
   if (prompt) params.set("prompt", prompt);
   if (kcAction) params.set("kc_action", kcAction);
-  env.pending.setItem(PENDING_KEY, JSON.stringify({
-    state, nonce, verifier, returnTo: safeReturnTo(returnTo),
+  env.pending.setItem(PENDING_PREFIX + state, JSON.stringify({
+    nonce, verifier, returnTo: safeReturnTo(returnTo), at: env.now(),
   }));
   return `${endpoint(env, "auth")}?${params}`;
 }
@@ -81,12 +100,13 @@ function idTokenClaims(idToken) {
 }
 
 export async function completeLogin(env, callbackUrl) {
-  const pending = readJson(env.pending, PENDING_KEY);
-  env.pending.removeItem(PENDING_KEY); // one try per login, whatever follows
-  if (!pending) throw new OidcError("no_pending_login");
-
   const query = new URL(callbackUrl).searchParams;
-  if (query.get("state") !== pending.state) throw new OidcError("state_mismatch");
+  const state = query.get("state");
+  if (!state) throw new OidcError("no_pending_login");
+  const pending = readJson(env.pending, PENDING_PREFIX + state);
+  env.pending.removeItem(PENDING_PREFIX + state); // one try per login, whatever follows
+  if (!fresh(env, pending)) throw new OidcError("no_pending_login");
+
   if (query.has("iss") && query.get("iss") !== env.config.issuer) throw new OidcError("issuer_mismatch");
   if (query.has("error")) throw new OidcError("provider_error", query.get("error"));
   const code = query.get("code");

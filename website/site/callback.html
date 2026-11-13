@@ -25,6 +25,10 @@
       <h1 data-callback="title">Logging in</h1>
     </header>
     <p data-callback="busy">One moment, finishing your login.</p>
+    <div data-callback="again" hidden>
+      <p>Log in to continue.</p>
+      <button class="btn btn-primary btn-block" type="button" data-action="login">Log in</button>
+    </div>
     <div data-callback="failed" hidden>
       <div class="alert alert-error" role="alert">
         <span class="alert-text" data-callback="message"></span>
