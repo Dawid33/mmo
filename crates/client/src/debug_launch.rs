@@ -547,11 +547,13 @@ fn online_login_verdict(state: AppState, busy: bool, logged_in: bool, error: &st
     if busy {
         return None;
     }
-    if state == AppState::Worlds && logged_in {
-        return Some(Ok(()));
-    }
+    // The error first: a failed world-list fetch leaves the screen on the list,
+    // logged in, with its line set — a login failure, not a join one.
     if !error.is_empty() {
         return Some(Err(format!("login failed: {error}")));
+    }
+    if state == AppState::Worlds && logged_in {
+        return Some(Ok(()));
     }
     if state == AppState::Login && !logged_in {
         return Some(Err("login failed: the kept login was refused".into()));
@@ -917,6 +919,15 @@ mod tests {
         let net = online_login_verdict(Login, false, false, "network: connection refused").unwrap().unwrap_err();
         assert!(net.contains("network: connection refused"), "{net}");
         assert_eq!(online_login_verdict(Worlds, false, false, ""), None, "on the list, fetch pending: wait");
+        // The world list could not be fetched: a login failure, on either screen.
+        assert_eq!(
+            online_login_verdict(Worlds, false, true, "worlds: HTTP 500"),
+            Some(Err("login failed: worlds: HTTP 500".into()))
+        );
+        assert_eq!(
+            online_login_verdict(Login, false, true, "worlds: HTTP 500"),
+            Some(Err("login failed: worlds: HTTP 500".into()))
+        );
     }
 
     #[test]

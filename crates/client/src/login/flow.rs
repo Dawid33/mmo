@@ -26,8 +26,8 @@
 //! ([`LoginCall::DeviceStart`]); its answer becomes the
 //! [`LoginSession::pending_device`] (the code the screen shows; native opens
 //! the browser at it). [`LoginSession::tick`] then sends one
-//! [`LoginCall::DevicePoll`] at a time, each at least the provider's interval
-//! after the previous one, until the provider hands out an access token,
+//! [`LoginCall::DevicePoll`] at a time, each the provider's interval plus
+//! [`DEVICE_POLL_MARGIN_SECS`] after the previous one, until the provider hands out an access token,
 //! which [`LoginCall::LoginOidc`] trades for the service's refresh token (the
 //! same path a refresh takes from there). The polling stops for good on the
 //! token, on an expired or refused sign-in, at the deadline, on Cancel or
@@ -67,6 +67,10 @@ pub const SIGN_IN_EXPIRED: &str = "Sign-in expired";
 pub const SIGN_IN_REFUSED: &str = "Sign-in was refused";
 /// The line when the provider ended the sign-in for another reason.
 pub const SIGN_IN_FAILED: &str = "Sign-in failed \u{2014} try again";
+/// Seconds added to the provider's poll interval before each device poll: a
+/// poll sent exactly one interval after the previous one can, with network
+/// jitter, arrive early and earn a `slow_down`.
+pub const DEVICE_POLL_MARGIN_SECS: f64 = 1.0;
 /// Whether this platform opens the provider's page itself. The browser does
 /// not: the page opens the tab from the button's click (a popup needs the
 /// player's gesture).
@@ -657,7 +661,7 @@ impl LoginSession {
         let step = Step::open(&start.verification_uri_complete);
         self.pending_device = Some(PendingDevice {
             deadline: self.clock + start.expires_in as f64,
-            next_poll: self.clock + interval as f64,
+            next_poll: self.clock + interval as f64 + DEVICE_POLL_MARGIN_SECS,
             interval,
             provider,
             start,
@@ -689,8 +693,8 @@ impl LoginSession {
             }
         };
         let interval = oidc::next_interval(pending.interval, &poll);
-        // The next poll was due one interval after this one was sent; a
-        // slow_down lengthens that wait as well as every later one.
+        // The next poll was due one interval (plus the margin) after this one
+        // was sent; a slow_down lengthens that wait as well as every later one.
         pending.next_poll += interval.saturating_sub(pending.interval) as f64;
         pending.interval = interval;
         match poll {
@@ -733,7 +737,7 @@ impl LoginSession {
             return Step::none();
         }
         pending.polling = true;
-        pending.next_poll = now + pending.interval as f64;
+        pending.next_poll = now + pending.interval as f64 + DEVICE_POLL_MARGIN_SECS;
         Step::call(LoginCall::DevicePoll {
             provider: pending.provider.clone(),
             device_code: pending.start.device_code.clone(),
@@ -1187,12 +1191,15 @@ mod tests {
         assert_eq!(login.user_code(), "WDJB-MJHT");
         assert_eq!(login.verification_uri_complete(), COMPLETE_URI);
 
+        // Due the interval (5 s) plus DEVICE_POLL_MARGIN_SECS (1 s) after the start.
         assert_eq!(polls(&login.tick(104.0, AppState::Login), "dev-1"), 0, "not before the interval");
-        assert_eq!(polls(&login.tick(105.0, AppState::Login), "dev-1"), 1);
-        assert_eq!(polls(&login.tick(111.0, AppState::Login), "dev-1"), 0, "at most one poll on its way");
+        assert_eq!(polls(&login.tick(105.0, AppState::Login), "dev-1"), 0, "not before the margin");
+        assert_eq!(polls(&login.tick(106.0, AppState::Login), "dev-1"), 1);
+        assert_eq!(polls(&login.tick(112.0, AppState::Login), "dev-1"), 0, "at most one poll on its way");
         let _ = login.receive(login.generation, polled("dev-1", DevicePoll::Pending), AppState::Login);
         assert!(login.waiting_for_sign_in() && login.error.is_empty());
-        assert_eq!(polls(&login.tick(111.0, AppState::Login), "dev-1"), 1, "due an interval after the last poll");
+        assert_eq!(polls(&login.tick(111.0, AppState::Login), "dev-1"), 0, "not before the interval and margin");
+        assert_eq!(polls(&login.tick(112.0, AppState::Login), "dev-1"), 1, "due an interval and margin after the last poll");
 
         let step = login.receive(login.generation, polled("dev-1", DevicePoll::Expired), AppState::Login);
         assert!(step.calls.is_empty() && step.goto.is_none());
@@ -1203,12 +1210,12 @@ mod tests {
         // The deadline, while polls keep failing to get through.
         let mut login = session();
         let _ = sign_in(&mut login, "dev-2", 0.0);
-        assert_eq!(polls(&login.tick(5.0, AppState::Login), "dev-2"), 1);
+        assert_eq!(polls(&login.tick(6.0, AppState::Login), "dev-2"), 1);
         let offline = LoginReply::DevicePolled { device_code: "dev-2".into(), result: Err(LoginFailure::Network("down".into())) };
         let _ = login.receive(login.generation, offline, AppState::Login);
         assert!(login.waiting_for_sign_in(), "a poll that did not get through does not end the sign-in");
-        assert_eq!(polls(&login.tick(9.0, AppState::Login), "dev-2"), 0);
-        assert_eq!(polls(&login.tick(10.0, AppState::Login), "dev-2"), 1, "it polls again at the next interval");
+        assert_eq!(polls(&login.tick(11.0, AppState::Login), "dev-2"), 0);
+        assert_eq!(polls(&login.tick(12.0, AppState::Login), "dev-2"), 1, "it polls again at the next interval");
         let step = login.tick(600.0, AppState::Login);
         assert!(step.calls.is_empty());
         assert!(!login.waiting_for_sign_in());
@@ -1224,7 +1231,7 @@ mod tests {
         // Refused at the provider.
         let mut login = session();
         let _ = sign_in(&mut login, "dev-3", 0.0);
-        assert_eq!(polls(&login.tick(5.0, AppState::Login), "dev-3"), 1);
+        assert_eq!(polls(&login.tick(6.0, AppState::Login), "dev-3"), 1);
         let _ = login.receive(login.generation, polled("dev-3", DevicePoll::Denied), AppState::Login);
         assert!(!login.waiting_for_sign_in());
         assert_eq!(login.error, SIGN_IN_REFUSED);
@@ -1236,7 +1243,7 @@ mod tests {
     fn cancel_stops_polling() {
         let mut login = session();
         let _ = sign_in(&mut login, "dev-1", 0.0);
-        assert_eq!(polls(&login.tick(5.0, AppState::Login), "dev-1"), 1);
+        assert_eq!(polls(&login.tick(6.0, AppState::Login), "dev-1"), 1);
         let _ = login.intent(LoginIntent::CancelSignIn, AppState::Login);
         assert!(!login.waiting_for_sign_in() && !login.busy() && login.error.is_empty());
         assert_eq!(polls(&login.tick(100.0, AppState::Login), "dev-1"), 0, "no poll after Cancel");
@@ -1278,21 +1285,22 @@ mod tests {
         let step = login.receive(login.generation, polled("dev-1", DevicePoll::Denied), AppState::Login);
         assert!(step.calls.is_empty());
         assert!(login.waiting_for_sign_in() && login.error.is_empty(), "dev-2 is still pending");
-        assert_eq!(polls(&login.tick(15.0, AppState::Login), "dev-2"), 1);
+        assert_eq!(polls(&login.tick(16.0, AppState::Login), "dev-2"), 1);
     }
 
     #[test]
     fn slow_down_lengthens_the_interval() {
         let mut login = session();
         let _ = sign_in(&mut login, "dev-1", 0.0);
-        assert_eq!(polls(&login.tick(5.0, AppState::Login), "dev-1"), 1);
+        // Every wait is the interval plus DEVICE_POLL_MARGIN_SECS (1 s).
+        assert_eq!(polls(&login.tick(6.0, AppState::Login), "dev-1"), 1);
         let _ = login.receive(login.generation, polled("dev-1", DevicePoll::SlowDown), AppState::Login);
         assert_eq!(login.pending_device.as_ref().map(|p| p.interval), Some(10));
-        assert_eq!(polls(&login.tick(14.0, AppState::Login), "dev-1"), 0);
-        assert_eq!(polls(&login.tick(15.0, AppState::Login), "dev-1"), 1);
+        assert_eq!(polls(&login.tick(16.0, AppState::Login), "dev-1"), 0);
+        assert_eq!(polls(&login.tick(17.0, AppState::Login), "dev-1"), 1);
         let _ = login.receive(login.generation, polled("dev-1", DevicePoll::Pending), AppState::Login);
-        assert_eq!(polls(&login.tick(24.0, AppState::Login), "dev-1"), 0);
-        assert_eq!(polls(&login.tick(25.0, AppState::Login), "dev-1"), 1);
+        assert_eq!(polls(&login.tick(27.0, AppState::Login), "dev-1"), 0);
+        assert_eq!(polls(&login.tick(28.0, AppState::Login), "dev-1"), 1);
     }
 
     /// The token is traded for the service's refresh token, and from there
@@ -1302,7 +1310,7 @@ mod tests {
         let mut login = session();
         let _ = sign_in(&mut login, "dev-1", 0.0);
         let _ = login.intent(LoginIntent::SignIn, AppState::Login);
-        assert_eq!(polls(&login.tick(5.0, AppState::Login), "dev-1"), 1, "a second Sign in starts nothing");
+        assert_eq!(polls(&login.tick(6.0, AppState::Login), "dev-1"), 1, "a second Sign in starts nothing");
         let step = login.receive(login.generation, polled("dev-1", DevicePoll::Token("access".into())), AppState::Login);
         assert!(matches!(step.calls.as_slice(), [LoginCall::LoginOidc { access_token }] if access_token == "access"));
         assert!(!login.waiting_for_sign_in());

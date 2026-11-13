@@ -146,6 +146,14 @@ pub fn parse_device_poll(status: u16, body: &str) -> DevicePoll {
     }
 }
 
+/// Whether a device poll's HTTP `status` says nothing about the sign-in itself
+/// and the poll should simply be repeated (whatever the body): a server error
+/// (5xx), or a request timeout / rate limit (408 / 429) that a proxy in front
+/// of the provider may answer.
+pub fn poll_status_is_transient(status: u16) -> bool {
+    status >= 500 || status == 408 || status == 429
+}
+
 /// The poll interval after `poll`: [`SLOW_DOWN_SECS`] longer on `slow_down`.
 pub fn next_interval(current: u64, poll: &DevicePoll) -> u64 {
     match poll {
@@ -256,6 +264,17 @@ mod tests {
         assert_eq!(parse_device_poll(502, "<html>bad gateway</html>"), DevicePoll::Failed("HTTP 502".into()));
         assert_eq!(parse_device_poll(400, r#"{"error":"invalid_grant"}"#), DevicePoll::Failed("invalid_grant".into()));
         assert_eq!(next_interval(5, &DevicePoll::Failed("x".into())), 5);
+    }
+
+    #[test]
+    fn poll_timeouts_and_rate_limits_are_transient() {
+        for status in [408, 429, 500, 502, 503] {
+            assert!(poll_status_is_transient(status), "{status}");
+        }
+        // The provider's own answers about the sign-in are not.
+        for status in [200, 400, 401, 403] {
+            assert!(!poll_status_is_transient(status), "{status}");
+        }
     }
 
     /// RFC 7636 Appendix B's verifier and S256 challenge (confirmed with

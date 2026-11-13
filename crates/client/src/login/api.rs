@@ -24,8 +24,12 @@ use super::oidc::{self, DevicePoll, DeviceStart};
 /// Overrides the login service's address on native (empty = unset); the
 /// build-time `VOXEL_LOGIN_URL` is the fallback.
 pub const LOGIN_URL_ENV: &str = "VOXEL_LOGIN_URL";
-/// The browser's query parameter (`?login=<url>`) that overrides it.
+/// The browser's query parameter (`?login=<url>`) that overrides it — honoured
+/// only on a page served from the local machine ([`login_override_allowed`]).
 pub const LOGIN_URL_QUERY: &str = "login";
+/// Page hostnames on which the browser honours `?login=`: the local machine
+/// only (as `Location.hostname` spells them; IPv6 comes bracketed).
+pub const LOGIN_OVERRIDE_HOSTS: [&str; 4] = ["localhost", "127.0.0.1", "[::1]", "::1"];
 /// Longest a login request may take before it fails as a network error
 /// (native: reqwest's own timeout).
 #[cfg(not(target_arch = "wasm32"))]
@@ -160,8 +164,9 @@ impl LoginApi {
     }
 
     /// One poll of a device sign-in (`verifier`: the PKCE verifier its start
-    /// sent the challenge of). A transport error or a provider-side failure
-    /// (5xx) is an `Err`: the sign-in goes on and polls again.
+    /// sent the challenge of). A transport error or a transient answer
+    /// ([`oidc::poll_status_is_transient`]: 5xx, a proxy's 408 / 429) is an `Err`:
+    /// the sign-in goes on and polls again.
     pub async fn device_poll(
         &self,
         issuer: &str,
@@ -176,7 +181,7 @@ impl LoginApi {
             ("code_verifier", verifier),
         ];
         let (status, body) = self.exchange(self.http.post(oidc::token_endpoint(issuer)).form(&form)).await?;
-        if status >= 500 {
+        if oidc::poll_status_is_transient(status) {
             return Err(LoginFailure::Protocol(status.to_string()));
         }
         Ok(oidc::parse_device_poll(status, &String::from_utf8_lossy(&body)))
@@ -263,9 +268,10 @@ fn network(e: reqwest::Error) -> LoginFailure {
 }
 
 /// Where the client finds the login service, as a pure function: `explicit`
-/// is the runtime override (native `VOXEL_LOGIN_URL` env, browser `?login=`),
-/// else `built`, the build-time `VOXEL_LOGIN_URL`, else none (no Play online:
-/// the menu stays as it was). Empty strings count as unset; a trailing `/` is
+/// is the runtime override (native `VOXEL_LOGIN_URL` env, browser `?login=` on
+/// a local page only — see [`login_override_allowed`]), else `built`, the
+/// build-time `VOXEL_LOGIN_URL`, else none (no Play online: the menu stays as
+/// it was). Empty strings count as unset; a trailing `/` is
 /// dropped.
 ///
 /// There is deliberately no `{page origin}/login` fallback: nothing serves
@@ -274,6 +280,15 @@ fn network(e: reqwest::Error) -> LoginFailure {
 pub fn resolve_login_url(explicit: Option<&str>, built: Option<&str>) -> Option<String> {
     let set = |v: Option<&str>| v.map(str::trim).filter(|v| !v.is_empty()).map(|v| v.trim_end_matches('/').to_string());
     set(explicit).or_else(|| set(built))
+}
+
+/// Whether the browser may take the login service's address from `?login=`
+/// on a page whose hostname is `page_host`: only on the local machine. On any
+/// other host a link to the genuine page with `?login=https://evil` would
+/// otherwise run the genuine sign-in and post the player's access token to
+/// evil; there only the build-time address counts.
+pub fn login_override_allowed(page_host: Option<&str>) -> bool {
+    page_host.is_some_and(|h| LOGIN_OVERRIDE_HOSTS.iter().any(|ok| h.eq_ignore_ascii_case(ok)))
 }
 
 /// The login service this client talks to, if there is one (no "Play online"
@@ -286,10 +301,20 @@ pub fn login_url() -> Option<String> {
     }
     #[cfg(target_arch = "wasm32")]
     {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        static WARNED: AtomicBool = AtomicBool::new(false);
         let location = web_sys::window().map(|w| w.location());
         let search = location.as_ref().and_then(|l| l.search().ok()).unwrap_or_default();
-        let explicit = crate::world_scale::query_param(&search, LOGIN_URL_QUERY)
+        let host = location.as_ref().and_then(|l| l.hostname().ok());
+        let mut explicit = crate::world_scale::query_param(&search, LOGIN_URL_QUERY)
             .map(|v| js_sys::decode_uri_component(v).ok().and_then(|s| s.as_string()).unwrap_or_else(|| v.to_string()));
+        if explicit.is_some() && !login_override_allowed(host.as_deref()) {
+            // Never the value: it is whatever a link put there.
+            if !WARNED.swap(true, Ordering::Relaxed) {
+                bevy::log::warn!("[login] ignoring ?{LOGIN_URL_QUERY}= (honoured on a localhost page only)");
+            }
+            explicit = None;
+        }
         resolve_login_url(explicit.as_deref(), built)
     }
 }
@@ -357,5 +382,22 @@ mod tests {
         // Nothing configured: no login (no page-origin fallback until R5,
         // so a deployed page keeps its join-only menu).
         assert_eq!(resolve_login_url(None, None), None);
+    }
+
+    #[test]
+    fn login_url_override_is_ignored_off_localhost() {
+        for host in ["localhost", "127.0.0.1", "::1", "[::1]", "LocalHost"] {
+            assert!(login_override_allowed(Some(host)), "{host:?}");
+        }
+        for host in [Some("game.example.com"), Some("localhost.evil.com"), Some("127.0.0.1.evil.com"), Some(""), None] {
+            assert!(!login_override_allowed(host), "{host:?}");
+        }
+        // As the browser composes it: off localhost only the build-time address counts.
+        let page = |host: Option<&str>| {
+            let explicit = Some("https://evil.example").filter(|_| login_override_allowed(host));
+            resolve_login_url(explicit, Some("https://login.example"))
+        };
+        assert_eq!(page(Some("game.example.com")).as_deref(), Some("https://login.example"));
+        assert_eq!(page(Some("localhost")).as_deref(), Some("https://evil.example"));
     }
 }
