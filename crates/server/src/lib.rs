@@ -201,6 +201,63 @@ impl ClientSink {
             ClientSink::Web(session) => session.close(wtransport::VarInt::from_u32(1), b"refused"),
         }
     }
+
+    /// Whether `other` is this very connection.
+    pub fn same_connection(&self, other: &ClientSink) -> bool {
+        match (self, other) {
+            (ClientSink::Quinn(a), ClientSink::Quinn(b)) => a.stable_id() == b.stable_id(),
+            (ClientSink::Web(a), ClientSink::Web(b)) => a.stable_id() == b.stable_id(),
+            _ => false,
+        }
+    }
+
+    /// Tell the connection `why` (best effort, within [`REFUSE_FLUSH`]), then close it: an
+    /// observer connection a newer one of its id replaced.
+    pub fn refuse_later(self, why: &str) {
+        let packet = game::encode_packet(&ServerPacket::Refused(why.to_string()));
+        tokio::spawn(async move {
+            if let Ok(packet) = packet {
+                let _ = tokio::time::timeout(REFUSE_FLUSH, self.send_packet(packet)).await;
+            }
+            tokio::time::sleep(REFUSE_FLUSH).await;
+            self.close_refused();
+        });
+    }
+}
+
+/// Seat an admitted session's connection `sink` as `id` and announce it to the manager.
+/// An observer replaces an older connection of its id ([`player_store::seat_observer`]);
+/// any other session claims the id ([`player_store::claim_sink`]) and is announced
+/// ([`player_store::announce_session`]). `Err` is the refusal: nothing is announced or kept.
+pub(crate) fn seat_session(
+    sinks: &DashMap<ClientId, ClientSink>,
+    send: &Sender<ServerEvent>,
+    id: ClientId,
+    hello: &player_store::HelloSession,
+    auth: &auth_edge::Authenticator,
+    sink: ClientSink,
+) -> Result<(), String> {
+    if hello.observer.is_some() {
+        if let Some(older) = player_store::seat_observer(sinks, send, id, hello.player, sink) {
+            log::info!("[server] client {id}: a newer observer connection replaces the older");
+            older.refuse_later(player_store::REFUSE_REPLACED);
+        }
+        return Ok(());
+    }
+    if player_store::claim_sink(sinks, id, sink).is_err() {
+        return Err(player_store::REFUSE_ALREADY_CONNECTED.into());
+    }
+    // Announce before reading any other packets: guarantees the player exists before its
+    // first request is served. A login revoked meanwhile (kicked, or a newer one) is
+    // refused instead.
+    if let Err(why) = player_store::announce_session(send, id, hello, auth) {
+        sinks.remove(&id);
+        if let Some(ticket) = &hello.ticket {
+            auth.session_ended(ticket);
+        }
+        return Err(why);
+    }
+    Ok(())
 }
 
 /// Wrapper around RegionGroup with additional bookeeping / networking
@@ -228,6 +285,9 @@ pub struct WorldIngress {
     players: player_store::SharedPlayerStore,
     /// Checks each `Hello`'s credential first (`VOXEL_AUTH`).
     auth: Arc<auth_edge::Authenticator>,
+    /// The WebTransport ingress's self-signed certificate, minted before the ingress starts
+    /// (its hash is in this host's endpoint); `None`: the ingress reads its source itself.
+    wt_cert: Option<webtransport::SelfSignedCert>,
 }
 
 impl WorldIngress {
@@ -238,7 +298,13 @@ impl WorldIngress {
         players: player_store::SharedPlayerStore,
         auth: Arc<auth_edge::Authenticator>,
     ) -> Self {
-        Self { ip, port, webtransport, players, auth }
+        Self { ip, port, webtransport, players, auth, wt_cert: None }
+    }
+
+    /// Serve WebTransport with `cert` (minted ahead, so its hash could be advertised).
+    pub fn with_webtransport_cert(mut self, cert: Option<webtransport::SelfSignedCert>) -> Self {
+        self.wt_cert = cert;
+        self
     }
 
     /// ## Network Loop
@@ -368,23 +434,20 @@ impl WorldIngress {
             let wt_players = self.players.clone();
             let wt_auth = self.auth.clone();
             let wt_addr = std::net::SocketAddr::new(self.ip, WEBTRANSPORT_PORT);
+            let minted = self.wt_cert.take();
             let certs = crate::webtransport::cert_source_from(
                 std::env::var(crate::webtransport::WT_CERT_ENV).ok().as_deref(),
                 std::env::var(crate::webtransport::WT_KEY_ENV).ok().as_deref(),
             )
             .unwrap_or_else(|message| panic!("{message}"));
             tokio::spawn(async move {
-                if let Err(e) = crate::webtransport::serve(
-                    wt_addr,
-                    certs,
-                    wt_send,
-                    wt_sinks,
-                    wt_next,
-                    wt_players,
-                    wt_auth,
-                )
-                .await
-                {
+                let served = match minted {
+                    Some(cert) => {
+                        crate::webtransport::serve_minted(wt_addr, cert, wt_send, wt_sinks, wt_next, wt_players, wt_auth).await
+                    }
+                    None => crate::webtransport::serve(wt_addr, certs, wt_send, wt_sinks, wt_next, wt_players, wt_auth).await,
+                };
+                if let Err(e) = served {
                     log::error!("webtransport ingress died: {e:?}");
                 }
             });
@@ -413,33 +476,23 @@ impl WorldIngress {
                     };
                 let (player, ticket) = (hello.player, hello.ticket.clone());
                 // The id exists only now that the session is authenticated; the sink is
-                // claimed in the same step, so a replayed ticket never replaces a live one.
+                // claimed in the same step, so a replayed ticket never replaces a live one
+                // (an observer's newer connection does replace its older one).
                 let id = hello.client_id(&next_client_id);
-                if player_store::claim_sink(&sinks, id, ClientSink::Quinn(connection.clone())).is_err() {
-                    return refuse_quic(&connection, player_store::REFUSE_ALREADY_CONNECTED).await;
-                }
-                // Announce before any of this client's other packets can be
-                // read: guarantees the player exists before its first request
-                // is served. A login revoked meanwhile (kicked, or a newer one)
-                // is refused instead.
-                if let Err(why) = crate::player_store::announce_session(&send, id, &hello, &auth) {
-                    sinks.remove(&id);
-                    if let Some(ticket) = &ticket {
-                        auth.session_ended(ticket);
-                    }
+                let mine = ClientSink::Quinn(connection.clone());
+                if let Err(why) = seat_session(&sinks, &send, id, &hello, &auth, mine.clone()) {
                     return refuse_quic(&connection, &why).await;
                 }
                 game::perf_event!("client_connected", "client={id} player={} transport=quic", player.0);
 
-                let fut = handle_connection(connection, send.clone(), id);
+                let fut = handle_connection(connection, send.clone(), id, sinks.clone(), mine.clone());
                 tokio::spawn(async move {
                     if let Err(e) = fut.await {
                         error!("connection failed: {reason}", reason = e.to_string())
                     }
-                    sinks.remove(&id);
-                    // The world must know: unsubscribe everywhere, let the
-                    // home region's grace timer start.
-                    let _ = send.send(ServerEvent::ClientDisconnected(id));
+                    // The world must know: unsubscribe everywhere, let the home region's
+                    // grace timer start — unless a newer connection holds the id now.
+                    player_store::release_sink(&sinks, &send, id, |live| live.same_connection(&mine));
                     // And the login service, for a session its spawn order admitted (with
                     // several hosts the manager tells it, once the session left the world).
                     if let Some(ticket) = &ticket {
@@ -646,19 +699,39 @@ pub fn run() -> claims::ServerExit {
     if let (roles::Role::Host, true, Some(store)) = (role, postgres, &store) {
         roles::recover_staged_cuts(store, hosts).unwrap_or_else(|e| fatal(&e));
     }
-    // Where players reach this host (`ServerPacket::Host`, its `hosts` row).
-    let endpoint = game::HostEndpoint {
-        ordinal: ownership.ordinal(),
-        quic: Some(peer_link::advertise_quic_from(std::env::var(peer_link::ADVERTISE_QUIC_ENV).ok().as_deref(), port)),
-        webtransport: peer_link::advertise_wt_from(std::env::var(peer_link::ADVERTISE_WT_ENV).ok().as_deref()),
-        cert_hash: None,
+    // The WebTransport ingress's self-signed certificate is minted now, before this host's
+    // endpoint is known to anyone: a browser pins its hash to open a connection here (a
+    // certificate from files is a CA's: no hash).
+    let wt_cert = match webtransport_enabled(single_player) {
+        true => match webtransport::cert_source_from(
+            std::env::var(webtransport::WT_CERT_ENV).ok().as_deref(),
+            std::env::var(webtransport::WT_KEY_ENV).ok().as_deref(),
+        )
+        .unwrap_or_else(|e| fatal(&e))
+        {
+            webtransport::CertSource::SelfSigned => Some(
+                webtransport::SelfSignedCert::mint()
+                    .unwrap_or_else(|e| fatal(&format!("minting the webtransport certificate: {e}"))),
+            ),
+            webtransport::CertSource::Files { .. } => None,
+        },
+        false => None,
     };
+    // Where players reach this host (`ServerPacket::Host`, its `hosts` row).
+    let endpoint = host_endpoint(ownership.ordinal(), port, |name| std::env::var(name).ok(), wt_cert.as_ref());
     let mut authenticator = auth_edge::Authenticator::for_mode(auth_mode);
     if let Some((orders, _)) = &spawn_orders {
         authenticator = authenticator.with_spawn_orders(orders.clone());
     }
+    // Several hosts: a client another host sends here (`RegionElsewhere`) connects with the
+    // ticket that host vouched for; the main loop records its orders.
+    let observer_orders = (hosts > 1).then(|| Arc::new(auth_edge::ObserverOrders::new(auth_edge::system_clock())));
+    if let Some(orders) = &observer_orders {
+        authenticator = authenticator.with_observer_orders(orders.clone());
+    }
     let auth = Arc::new(authenticator);
-    let mut rgi = WorldIngress::new(ip, port, webtransport_enabled(single_player), players.clone(), auth.clone());
+    let mut rgi = WorldIngress::new(ip, port, webtransport_enabled(single_player), players.clone(), auth.clone())
+        .with_webtransport_cert(wt_cert);
     let configured_worker_threads = std::env::var("TOKIO_WORKER_THREADS").ok();
     let worker_threads = server_worker_threads(configured_worker_threads.as_deref())
         .unwrap_or_else(|message| panic!("{message}"));
@@ -997,6 +1070,10 @@ pub fn run() -> claims::ServerExit {
             break 'main;
         }
         manager.maintain(now_ms);
+        // Several hosts: the observer tickets other hosts vouched for since the last pass.
+        if let Some(orders) = &observer_orders {
+            orders.record_all(manager.take_observer_orders());
+        }
         // The login relay (several hosts): spawn orders taken, kicks relayed, answers out.
         if let Some(relay) = &login_relay {
             relay.pump(&mut manager);
@@ -1059,6 +1136,24 @@ pub fn run() -> claims::ServerExit {
         agent_ready.shutdown();
     }
     outcome
+}
+
+/// Where players reach host `ordinal` (`ServerPacket::Host`, its `hosts` row): the
+/// advertised addresses ([`peer_link::ADVERTISE_QUIC_ENV`], [`peer_link::ADVERTISE_WT_ENV`]
+/// through `lookup`) and the hash of the WebTransport ingress's self-signed certificate
+/// (`wt_cert`, minted before this is called), which a browser pins.
+fn host_endpoint(
+    ordinal: u32,
+    port: u16,
+    lookup: impl Fn(&str) -> Option<String>,
+    wt_cert: Option<&webtransport::SelfSignedCert>,
+) -> game::HostEndpoint {
+    game::HostEndpoint {
+        ordinal,
+        quic: Some(peer_link::advertise_quic_from(lookup(peer_link::ADVERTISE_QUIC_ENV).as_deref(), port)),
+        webtransport: peer_link::advertise_wt_from(lookup(peer_link::ADVERTISE_WT_ENV).as_deref()),
+        cert_hash: wt_cert.map(|c| c.sha256_hex().to_string()),
+    }
 }
 
 /// How long a fenced server waits, before it exits, for its clients'
@@ -1133,9 +1228,12 @@ async fn handle_connection(
     connection: quinn::Connection,
     send: Sender<ServerEvent>,
     id: ClientId,
+    sinks: Arc<DashMap<ClientId, ClientSink>>,
+    mine: ClientSink,
 ) -> Result<(), ConnectionError> {
     loop {
         let send = send.clone();
+        let (sinks, mine) = (sinks.clone(), mine.clone());
         let stream = connection.accept_uni().await;
 
         let mut stream = match stream {
@@ -1159,7 +1257,7 @@ async fn handle_connection(
                     return ();
                 }
             };
-            send.send(ServerEvent::ClientPacket(packet, id)).unwrap();
+            player_store::forward_packet(&sinks, &send, id, |live| live.same_connection(&mine), packet);
         });
     }
 }
@@ -1229,6 +1327,20 @@ mod tests {
             assert!(err.contains(SERVER_PORT_ENV), "{err}");
             assert!(err.contains(bad), "{err}");
         }
+    }
+
+    #[test]
+    fn endpoint_carries_the_minted_webtransport_cert_hash() {
+        let cert = webtransport::SelfSignedCert::mint().unwrap();
+        let hex = cert.sha256_hex().to_string();
+        assert_eq!(hex.len(), 64, "{hex}");
+        assert!(hex.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()), "{hex}");
+        let wt = |name: &str| (name == peer_link::ADVERTISE_WT_ENV).then(|| "https://h.example:6467".to_string());
+        let endpoint = host_endpoint(3, 7000, wt, Some(&cert));
+        assert_eq!(endpoint.ordinal, 3);
+        assert_eq!(endpoint.cert_hash.as_deref(), Some(hex.as_str()));
+        assert_eq!(endpoint.webtransport.as_deref(), Some("https://h.example:6467"));
+        assert_eq!(host_endpoint(3, 7000, |_| None, None).cert_hash, None, "a certificate from files: no hash");
     }
 
     #[test]

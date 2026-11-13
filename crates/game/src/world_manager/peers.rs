@@ -274,11 +274,12 @@ impl<S: RegionSpawner> WorldManager<S> {
             log::error!("client {client}: an observer session for player {} holds another player's body", player.0);
         }
         let kind = if home { SessionKind::Home } else { SessionKind::Observer };
-        self.sessions.insert(client, Session { kind, player: Some(player), ..Session::default() });
+        self.sessions.insert(client, Session { kind, player: Some(player), idle_since_ms: now_ms, ..Session::default() });
         if home {
             log::info!("client {client}: connected after its body was handed here; the session is its home");
             let region = self.homes.get(&client).copied();
             let _ = self.out.send((Some(client), ServerPacket::PlayerRegion(region, client)));
+            self.send_home_state(client, now_ms);
             if let Some(rc) = region {
                 self.refresh_keepalive(rc, now_ms);
             }
@@ -356,6 +357,7 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.awaiting_session.remove(&client);
         if let Some(session) = self.sessions.get_mut(&client) {
             session.kind = SessionKind::Observer;
+            session.idle_since_ms = now_ms;
         }
         self.departed.insert(player, owner);
         self.locations.remove(&bundle.id);
@@ -417,14 +419,12 @@ impl<S: RegionSpawner> WorldManager<S> {
         if let Some(site) = adventure {
             self.adventurer_of.insert(c, site);
         }
-        match self.sessions.get_mut(&c) {
-            Some(session) => session.kind = SessionKind::Home,
-            None => {
-                self.awaiting_session.insert(c, (now_ms, from));
-            }
-        }
+        let promoted = self.promote_session(c, from, now_ms);
         // Its home here, `PlayerRegion` to the client.
         self.accept_arrival(None, target, stamp, bundle, now_ms);
+        if promoted {
+            self.send_home_state(c, now_ms);
+        }
         self.claim_changed(h.player);
         self.world_player_online(c);
         self.login_arrived(c, login);
@@ -477,6 +477,7 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.awaiting_session.remove(&client);
         if let Some(session) = self.sessions.get_mut(&client) {
             session.kind = SessionKind::Observer;
+            session.idle_since_ms = now_ms;
         }
         self.departed.insert(player, owner);
         let handoff = crate::PlayerHandoff { client, player, claim, login, park: false, hop };
@@ -515,12 +516,7 @@ impl<S: RegionSpawner> WorldManager<S> {
         if let Some(site) = adventure {
             self.adventurer_of.insert(c, site);
         }
-        match self.sessions.get_mut(&c) {
-            Some(session) => session.kind = SessionKind::Home,
-            None => {
-                self.awaiting_session.insert(c, (now_ms, from));
-            }
-        }
+        let promoted = self.promote_session(c, from, now_ms);
         // In no region while its creation is on its way to the target.
         self.cut_transit(h.player, &record);
         let landing = self.landing_in(target);
@@ -528,10 +524,29 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.creating.insert(c, (target, h.player, record.clone()));
         self.send_play_event(target, GameEventKind::CreateClientAt(c, landing, Some(Box::new(record.client))));
         let _ = self.out.send((Some(c), ServerPacket::PlayerRegion(Some(target), c)));
+        if promoted {
+            self.send_home_state(c, now_ms);
+        }
         self.refresh_keepalive(target, now_ms);
         self.claim_changed(h.player);
         self.world_player_online(c);
         self.login_arrived(c, h.login);
+    }
+
+    /// `c`'s body was handed here by host `from`: its session here (an observer, if any)
+    /// becomes the home — whether it did — else the session is awaited
+    /// ([`HANDOFF_SESSION_GRACE_MS`]).
+    fn promote_session(&mut self, c: ClientId, from: u32, now_ms: u64) -> bool {
+        match self.sessions.get_mut(&c) {
+            Some(session) => {
+                session.kind = SessionKind::Home;
+                true
+            }
+            None => {
+                self.awaiting_session.insert(c, (now_ms, from));
+                false
+            }
+        }
     }
 
     /// Whether this host already holds `player`: online (any session), parked, parking,

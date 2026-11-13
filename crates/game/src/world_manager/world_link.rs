@@ -850,7 +850,7 @@ impl<S: RegionSpawner> WorldManager<S> {
         }
     }
 
-    fn send_fortress(&self, id: ClientId) {
+    pub(super) fn send_fortress(&self, id: ClientId) {
         let held = self.fortress_of.get(&id).and_then(|&site| {
             let region = *self.site_regions.get(&site)?;
             Some(crate::HeldFortress { site, region })

@@ -86,6 +86,9 @@ pub struct HelloSession {
     pub ticket: Option<crate::auth_edge::SessionTicket>,
     /// The login ticket's epoch (`None` for a local session).
     pub session_epoch: Option<u64>,
+    /// An observer session ([`crate::auth_edge::AdmittedAs::Observer`]): the id its ticket
+    /// names, which is the session's id here. No record, no ticket, no epoch.
+    pub observer: Option<game::ClientId>,
 }
 
 /// The refusal of a login whose session id is already live (a replayed ticket).
@@ -96,9 +99,90 @@ impl HelloSession {
     /// [`game::session_client_id`] (the same on every host), a local session's the next of
     /// the process counter.
     pub fn client_id(&self, local_ids: &std::sync::atomic::AtomicU64) -> game::ClientId {
-        match self.session_epoch {
-            Some(epoch) => game::session_client_id(self.player, epoch),
-            None => local_ids.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
+        match (self.observer, self.session_epoch) {
+            (Some(client), _) => client,
+            (None, Some(epoch)) => game::session_client_id(self.player, epoch),
+            (None, None) => local_ids.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
+        }
+    }
+}
+
+/// The refusal an observer connection gets when a newer one of its id takes its place.
+pub const REFUSE_REPLACED: &str = "replaced by a newer connection";
+
+/// Store `sink` as the live connection of observer session `id`, replacing an older
+/// connection of the id, if any — returned: the caller refuses it with [`REFUSE_REPLACED`]
+/// and closes it. With the map entry held (so no close of either connection can come
+/// between), the manager is told the older session ended (`ClientDisconnected`) and then
+/// the new one started (`ObserverConnected`). The older connection's own close then reports
+/// nothing ([`release_sink`]).
+pub fn seat_observer<V>(
+    sinks: &dashmap::DashMap<game::ClientId, V>,
+    send: &crossbeam::channel::Sender<game::ServerEvent>,
+    id: game::ClientId,
+    player: game::PlayerId,
+    sink: V,
+) -> Option<V> {
+    let connected = game::ServerEvent::ObserverConnected { client: id, player };
+    match sinks.entry(id) {
+        dashmap::mapref::entry::Entry::Occupied(mut slot) => {
+            let older = slot.insert(sink);
+            let _ = send.send(game::ServerEvent::ClientDisconnected(id));
+            let _ = send.send(connected);
+            Some(older)
+        }
+        dashmap::mapref::entry::Entry::Vacant(slot) => {
+            slot.insert(sink);
+            let _ = send.send(connected);
+            None
+        }
+    }
+}
+
+/// A packet read from a connection of session `id`, to the manager — only while that
+/// connection is the id's live one (`mine`; checked with the map entry held, so a packet of
+/// a replaced or refused connection never reaches a newer session of the id). Whether it went.
+pub fn forward_packet<V>(
+    sinks: &dashmap::DashMap<game::ClientId, V>,
+    send: &crossbeam::channel::Sender<game::ServerEvent>,
+    id: game::ClientId,
+    mine: impl FnOnce(&V) -> bool,
+    packet: ClientPacket,
+) -> bool {
+    match sinks.get(&id) {
+        Some(live) if mine(&live) => {
+            let _ = send.send(game::ServerEvent::ClientPacket(packet, id));
+            true
+        }
+        _ => {
+            log::debug!("[server] a packet of client {id}'s replaced or refused connection dropped");
+            false
+        }
+    }
+}
+
+/// The connection of session `id` closed: unless a newer connection holds the id now
+/// (`mine` says whether the live sink is this connection's), the sink goes and the manager
+/// is told (`ClientDisconnected`), with the map entry held. Whether it was told.
+pub fn release_sink<V>(
+    sinks: &dashmap::DashMap<game::ClientId, V>,
+    send: &crossbeam::channel::Sender<game::ServerEvent>,
+    id: game::ClientId,
+    mine: impl FnOnce(&V) -> bool,
+) -> bool {
+    match sinks.entry(id) {
+        dashmap::mapref::entry::Entry::Occupied(slot) => {
+            if !mine(slot.get()) {
+                return false;
+            }
+            slot.remove();
+            let _ = send.send(game::ServerEvent::ClientDisconnected(id));
+            true
+        }
+        // Already removed (the manager refused it: it ended the session first).
+        dashmap::mapref::entry::Entry::Vacant(_slot) => {
+            let _ = send.send(game::ServerEvent::ClientDisconnected(id));
+            true
         }
     }
 }
@@ -138,8 +222,14 @@ pub async fn resolve_session(
         return Err("the first packet must be Hello".into());
     };
     let admitted = auth.admit(credential).await?;
+    let key = match admitted.who {
+        // Vouched for by another host: no store, no record, no login.
+        crate::auth_edge::AdmittedAs::Observer { client, player } => {
+            return Ok(HelloSession { player, record: None, ticket: None, session_epoch: None, observer: Some(client) });
+        }
+        crate::auth_edge::AdmittedAs::Player(key) => key,
+    };
     let store = store.clone();
-    let key = admitted.key;
     let resolved = tokio::task::spawn_blocking(move || {
         let mut store = store.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         store.resolve(&key)
@@ -154,7 +244,7 @@ pub async fn resolve_session(
     });
     match resolved {
         Ok((player, record)) => {
-            Ok(HelloSession { player, record, ticket: admitted.ticket, session_epoch: admitted.session_epoch })
+            Ok(HelloSession { player, record, ticket: admitted.ticket, session_epoch: admitted.session_epoch, observer: None })
         }
         Err(why) => {
             if let Some(ticket) = &admitted.ticket {
@@ -177,6 +267,12 @@ pub fn announce_session(
     auth: &crate::auth_edge::Authenticator,
 ) -> Result<(), String> {
     let player = session.player;
+    if let Some(client) = session.observer {
+        // Never a body, a store write or a login event (the accept paths seat it with
+        // [`seat_observer`], which also replaces an older connection).
+        let _ = send.send(game::ServerEvent::ObserverConnected { client, player });
+        return Ok(());
+    }
     let relay = auth.relays_logins();
     auth.announce(session.ticket.as_ref(), || {
         let record = session.record.clone();

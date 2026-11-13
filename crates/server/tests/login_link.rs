@@ -238,12 +238,12 @@ fn jwt_session_gets_session_client_id() {
 #[test]
 fn client_ids_of_other_epochs_and_local_sessions() {
     use std::sync::atomic::AtomicU64;
-    let alice = HelloSession { player: game::PlayerId(3), record: None, ticket: None, session_epoch: Some(1) };
-    let next = HelloSession { session_epoch: Some(2), player: game::PlayerId(3), record: None, ticket: None };
+    let alice = HelloSession { player: game::PlayerId(3), record: None, ticket: None, session_epoch: Some(1), observer: None };
+    let next = HelloSession { session_epoch: Some(2), player: game::PlayerId(3), record: None, ticket: None, observer: None };
     let local_ids = AtomicU64::new(0);
     assert_ne!(alice.client_id(&local_ids), next.client_id(&local_ids));
     // A local session takes the process counter, from 0.
-    let local = HelloSession { player: game::PlayerId(3), record: None, ticket: None, session_epoch: None };
+    let local = HelloSession { player: game::PlayerId(3), record: None, ticket: None, session_epoch: None, observer: None };
     assert_eq!((local.client_id(&local_ids), local.client_id(&local_ids)), (0, 1));
 }
 

@@ -47,6 +47,12 @@ pub const HANDOFF_SESSION_GRACE_MS: u64 = 5_000;
 /// How long an observer ticket ([`crate::ObserverTicket`]) is valid at the host that admits
 /// it, from receipt (`Reliable::ObserverOrder::ttl_secs`).
 pub const OBSERVER_ORDER_TTL_SECS: u64 = 120;
+/// How long an observer session ([`SessionKind::Observer`]) may go with no subscription and
+/// no body of its client on its way here before this host closes it
+/// ([`OBSERVER_IDLE_REFUSAL`]).
+pub const OBSERVER_IDLE_CLOSE_MS: u64 = 30_000;
+/// What an idle observer session is told when it is closed ([`OBSERVER_IDLE_CLOSE_MS`]).
+pub const OBSERVER_IDLE_REFUSAL: &str = "observer session idle: no subscription on this server";
 /// Most arrivals that wait in the manager's mailbox for one region that is
 /// not running ([`WorldManager::pending_arrival_count`]); past it the oldest
 /// is despawned — one carrying drops leaves them as item piles at the seam
@@ -534,6 +540,10 @@ struct Session {
     kind: SessionKind,
     /// The session's player (from `ClientConnected` / `ObserverConnected`).
     player: Option<PlayerId>,
+    /// An observer's: since when it may have had no subscription (`now_ms`; it became an
+    /// observer, or released a region) — closed [`OBSERVER_IDLE_CLOSE_MS`] after that if
+    /// it still has none.
+    idle_since_ms: u64,
     subscribed: BTreeSet<RegionCoords>,
     lod_subscribed: BTreeSet<LodKey>,
 }
@@ -649,6 +659,30 @@ struct Moving {
     /// Server-authored events for `target` that must follow the body's
     /// creation there (an adventure start's `SetMode`).
     then: Vec<GameEventKind>,
+}
+
+/// A client packet's variant name, for logs (never its contents: a `Hello` carries a secret).
+fn client_packet_name(packet: &ClientPacket) -> &'static str {
+    match packet {
+        ClientPacket::Hello { .. } => "Hello",
+        ClientPacket::GameEvent(_) => "GameEvent",
+        ClientPacket::GameEventAfterTick(..) => "GameEventAfterTick",
+        ClientPacket::RequestPlayerRegion => "RequestPlayerRegion",
+        ClientPacket::RequestRegionConnection(_) => "RequestRegionConnection",
+        ClientPacket::ReleaseRegionConnection(_) => "ReleaseRegionConnection",
+        ClientPacket::RequestLod(_) => "RequestLod",
+        ClientPacket::ReleaseLod(_) => "ReleaseLod",
+        ClientPacket::PlayRegion(_) => "PlayRegion",
+        ClientPacket::Leave => "Leave",
+        ClientPacket::RequestEmbarkOptions => "RequestEmbarkOptions",
+        ClientPacket::Embark(_) => "Embark",
+        ClientPacket::Retire => "Retire",
+        ClientPacket::ReturnTo(_) => "ReturnTo",
+        ClientPacket::RequestPersonInfo(_) => "RequestPersonInfo",
+        ClientPacket::RequestLegends(_) => "RequestLegends",
+        ClientPacket::StartAdventure(_) => "StartAdventure",
+        ClientPacket::EndAdventure => "EndAdventure",
+    }
 }
 
 /// Requests that place or move the player, held while its restore waits for its
@@ -1509,6 +1543,9 @@ impl<S: RegionSpawner> WorldManager<S> {
             }
             ServerEvent::Kick { player_token, session_epoch, reason } => self.login_kick(player_token, session_epoch, reason),
             ServerEvent::SessionEnded { player_token, session_epoch } => self.login_session_ended(player_token, session_epoch),
+            ServerEvent::ClientPacket(packet, id) if self.observer_drops(id, &packet) => {
+                log::debug!("client {id}: a {} packet from an observer session dropped", client_packet_name(&packet));
+            }
             ServerEvent::ClientPacket(packet, id) if self.restore_pending(id) && defers_until_restored(&packet) => {
                 self.deferred_packets.entry(id).or_default().push(packet);
             }
@@ -1953,6 +1990,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             self.tell_awaited_parked(c);
             self.client_disconnected(c, now_ms);
         }
+        self.close_idle_observers(now_ms);
         let connected_homes: BTreeSet<RegionCoords> = self
             .sessions
             .keys()
@@ -2948,6 +2986,63 @@ impl<S: RegionSpawner> WorldManager<S> {
         }
     }
 
+    /// Whether `packet` from `id` is dropped because `id`'s session here is an observer: it
+    /// may only subscribe, release, and send input for its own body (forwarded to the host
+    /// holding it, `peers.rs`) — never play, embark, leave or anything else.
+    fn observer_drops(&self, id: ClientId, packet: &ClientPacket) -> bool {
+        if !self.sessions.get(&id).is_some_and(|s| s.kind == SessionKind::Observer) {
+            return false;
+        }
+        match packet {
+            ClientPacket::RequestRegionConnection(_) | ClientPacket::ReleaseRegionConnection(_) => false,
+            ClientPacket::GameEventAfterTick(event, _) => !matches!(
+                &event.kind,
+                kind @ (GameEventKind::PlayerInput(..)
+                | GameEventKind::UiAction(..)
+                | GameEventKind::Order(..)
+                | GameEventKind::Prefab(..)) if kind.origin_client() == Some(id)
+            ),
+            _ => true,
+        }
+    }
+
+    /// Observer sessions with no subscription and no body of theirs on its way into a
+    /// region here, for [`OBSERVER_IDLE_CLOSE_MS`], are told [`OBSERVER_IDLE_REFUSAL`] and
+    /// ended (the edge closes them).
+    fn close_idle_observers(&mut self, now_ms: u64) {
+        let idle: Vec<ClientId> = self
+            .sessions
+            .iter()
+            .filter(|(c, s)| {
+                s.kind == SessionKind::Observer
+                    && s.subscribed.is_empty()
+                    && s.lod_subscribed.is_empty()
+                    && !self.in_flight.values().any(|f| f.bundle.client.as_ref().is_some_and(|(b, _)| b == *c))
+                    && now_ms.saturating_sub(s.idle_since_ms) >= OBSERVER_IDLE_CLOSE_MS
+            })
+            .map(|(c, _)| *c)
+            .collect();
+        for c in idle {
+            log::info!("client {c}: observer session idle for {OBSERVER_IDLE_CLOSE_MS} ms; closed");
+            let _ = self.out.send((Some(c), ServerPacket::Refused(OBSERVER_IDLE_REFUSAL.to_string())));
+            self.client_disconnected(c, now_ms);
+        }
+    }
+
+    /// `client`'s session here became its home (its body arrived; `PlayerRegion` was just
+    /// sent): the session state that changes over time follows — its fortress, the
+    /// calendar, the sites. Not the world map or the civs: the session had those as an
+    /// observer's client.
+    pub(super) fn send_home_state(&self, client: ClientId, now_ms: u64) {
+        self.send_fortress(client);
+        if let Some(now) = self.calendar_now(now_ms) {
+            let _ = self.out.send((Some(client), ServerPacket::Calendar(now)));
+        }
+        if self.world.is_some() {
+            let _ = self.out.send((Some(client), ServerPacket::Sites(self.world_sites())));
+        }
+    }
+
     /// `id`'s session (if any) ends: its region and LOD subscriptions go.
     fn end_session(&mut self, id: ClientId, now_ms: u64) {
         let Some(session) = self.sessions.remove(&id) else { return };
@@ -3575,6 +3670,9 @@ impl<S: RegionSpawner> WorldManager<S> {
     fn unsubscribe(&mut self, client: ClientId, rc: RegionCoords, now_ms: u64) {
         if let Some(session) = self.sessions.get_mut(&client) {
             session.subscribed.remove(&rc);
+            if session.subscribed.is_empty() {
+                session.idle_since_ms = now_ms;
+            }
         }
         self.unsubscribe_link(client, rc, now_ms);
     }

@@ -1384,7 +1384,8 @@ fn duplicate_client_id_is_refused() {
 }
 
 /// A session observing a body on another host (`ObserverConnected`) cannot move a player:
-/// Play is refused as a move that cannot happen, and nothing is created or started here.
+/// its Play is dropped (an observer may only subscribe and send its body's input), and
+/// nothing is created or started here.
 #[test]
 fn observer_session_cannot_move_a_player() {
     crate::common::install_real_block_props();
@@ -1401,10 +1402,9 @@ fn observer_session_cannot_move_a_player() {
     h.drain_packets();
     let target = RegionCoords::new(1, 0);
     h.event(ServerEvent::ClientPacket(ClientPacket::PlayRegion(target), 3), 10);
-    let refused = h.drain_packets().into_iter().any(|(to, p)| {
-        to == Some(3) && matches!(p, ServerPacket::PlayRefused(rc, game::PlayRefusal::RegionUnavailable) if rc == target)
-    });
-    assert!(refused, "Play from an observer session is refused");
+    let answered: Vec<String> =
+        h.drain_packets().into_iter().filter(|(to, _)| *to == Some(3)).map(|(_, p)| format!("{p:?}")).collect();
+    assert!(answered.is_empty(), "Play from an observer session is dropped: {answered:?}");
     assert_eq!(h.manager.home_of(3), None, "no home here");
     assert_eq!(h.manager.session_kind(3), Some(game::SessionKind::Observer));
     assert!(!h.manager.running_regions().contains(&target), "nothing started for it");

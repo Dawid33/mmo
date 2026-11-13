@@ -28,7 +28,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use auth::{Jwks, Verifier, VerifyError};
-use game::{Credential, PlayerName, PlayerToken};
+use game::{ClientId, Credential, PlayerId, PlayerName, PlayerToken};
 
 use crate::login_link::SpawnOrders;
 use crate::player_store::PlayerKey;
@@ -50,8 +50,15 @@ pub const REFUSE_JWT_ON_LOCAL_HOST: &str =
     "this server does not use login (single-player / dev)";
 /// The refusal a `jwt` host gives a player name.
 pub const REFUSE_LOCAL_ON_JWT_HOST: &str = "this server requires login";
-/// An observer ticket ([`Credential::Observer`]): not admitted by this edge yet.
-pub const REFUSE_OBSERVER: &str = "observer sessions are not served by this host";
+/// The refusal of an observer ticket ([`Credential::Observer`]) this host has no valid
+/// order for: unknown, expired or a wrong nonce — one text for all three.
+pub const REFUSE_OBSERVER: &str = "observer ticket not valid on this host";
+/// Most observer orders an edge keeps ([`ObserverOrders`]): past it the order that expires
+/// first goes.
+pub const OBSERVER_ORDERS_MAX: usize = 4096;
+/// Most observer orders an edge keeps for one client (the vouching host mints a new ticket
+/// once half of one's life is gone): past it that client's order that expires first goes.
+pub const OBSERVER_ORDERS_PER_CLIENT: usize = 4;
 /// The refusal of a ticket older than one this host already admitted.
 pub const REFUSE_SUPERSEDED: &str = "superseded by a newer login";
 /// The refusal of a ticket over [`game::MAX_JWT_BYTES`].
@@ -251,6 +258,108 @@ impl JwksCache {
     }
 }
 
+/// One observer order: a ticket another host handed `client` for this host.
+struct ObserverOrder {
+    player: PlayerId,
+    nonce: u64,
+    expires_unix_secs: u64,
+}
+
+/// The observer tickets this host admits ([`Credential::Observer`]): the orders other hosts
+/// sent it (`Reliable::ObserverOrder`, read by the main loop from
+/// [`game::WorldManager::take_observer_orders`] each pass). An order admits its ticket any
+/// number of times until it expires. Bounded: expired orders are pruned on every record,
+/// and at most [`OBSERVER_ORDERS_PER_CLIENT`] per client and [`OBSERVER_ORDERS_MAX`] in
+/// all are kept. Nothing here logs a nonce.
+pub struct ObserverOrders {
+    now: Clock,
+    orders: Mutex<BTreeMap<ClientId, Vec<ObserverOrder>>>,
+}
+
+impl ObserverOrders {
+    /// No orders yet; `now` is this edge's clock (expiry is checked against it).
+    pub fn new(now: Clock) -> ObserverOrders {
+        ObserverOrders { now, orders: Mutex::default() }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, BTreeMap<ClientId, Vec<ObserverOrder>>> {
+        self.orders.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Admit `nonce` for `client`'s `player` until `expires_unix_secs`.
+    pub fn record(&self, client: ClientId, player: PlayerId, nonce: u64, expires_unix_secs: u64) {
+        let now = (self.now)();
+        let mut orders = self.lock();
+        orders.retain(|_, list| {
+            list.retain(|o| o.expires_unix_secs > now);
+            !list.is_empty()
+        });
+        if expires_unix_secs <= now {
+            return;
+        }
+        let list = orders.entry(client).or_default();
+        list.push(ObserverOrder { player, nonce, expires_unix_secs });
+        if list.len() > OBSERVER_ORDERS_PER_CLIENT {
+            let first = list.iter().enumerate().min_by_key(|(_, o)| o.expires_unix_secs).map(|(i, _)| i);
+            list.remove(first.expect("not empty"));
+        }
+        while orders.values().map(Vec::len).sum::<usize>() > OBSERVER_ORDERS_MAX {
+            let first = orders
+                .iter()
+                .flat_map(|(c, list)| list.iter().enumerate().map(move |(i, o)| (o.expires_unix_secs, *c, i)))
+                .min()
+                .expect("not empty");
+            let list = orders.get_mut(&first.1).expect("listed");
+            list.remove(first.2);
+            if list.is_empty() {
+                orders.remove(&first.1);
+            }
+        }
+    }
+
+    /// The orders the manager took since its last call (`(client, player, nonce, ttl_secs)`,
+    /// [`game::WorldManager::take_observer_orders`]), each valid for its `ttl_secs` from now
+    /// by this edge's clock.
+    pub fn record_all(&self, orders: Vec<(ClientId, PlayerId, u64, u64)>) {
+        let now = (self.now)();
+        for (client, player, nonce, ttl_secs) in orders {
+            self.record(client, player, nonce, now.saturating_add(ttl_secs));
+        }
+    }
+
+    /// The player of `client`'s order for `nonce`, if one is valid at `now_secs`. The nonce
+    /// is compared in constant time with every order of the client; an unknown client, a
+    /// wrong nonce and an expired order give the same refusal.
+    pub fn admit(&self, client: ClientId, nonce: u64, now_secs: u64) -> Result<PlayerId, &'static str> {
+        let orders = self.lock();
+        let mut found = None;
+        for order in orders.get(&client).map(Vec::as_slice).unwrap_or_default() {
+            let valid = nonce_eq(order.nonce, nonce) & (order.expires_unix_secs > now_secs);
+            if valid {
+                found = Some(order.player);
+            }
+        }
+        found.ok_or(REFUSE_OBSERVER)
+    }
+
+    /// How many orders are kept (test support).
+    pub fn len(&self) -> usize {
+        self.lock().values().map(Vec::len).sum()
+    }
+
+    /// Whether no order is kept.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+/// `a == b` without a data-dependent branch.
+fn nonce_eq(a: u64, b: u64) -> bool {
+    let d = std::hint::black_box(a ^ b);
+    // (d | -d) has its top bit set exactly when d != 0.
+    ((d | d.wrapping_neg()) >> 63) == 0
+}
+
 /// An attacker chooses the `kid` of a ticket: a refusal (sent back and
 /// logged) shows at most this many of its characters.
 pub const MAX_KID_SHOWN_CHARS: usize = 64;
@@ -283,10 +392,21 @@ pub struct SessionTicket {
     pub session_epoch: u64,
 }
 
+/// Who an accepted credential is.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AdmittedAs {
+    /// A player by its key (a name, or a login ticket's token): the store resolves it.
+    Player(PlayerKey),
+    /// An observer ticket another host vouched for ([`ObserverOrders`]): the connection's
+    /// id IS `client` (the id that host knows the session by), its player `player`. No
+    /// store, no login.
+    Observer { client: ClientId, player: PlayerId },
+}
+
 /// A credential the edge accepted.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Admitted {
-    pub key: PlayerKey,
+    pub who: AdmittedAs,
     /// `Some` for a session admitted against a spawn order.
     pub ticket: Option<SessionTicket>,
     /// The ticket's `session_epoch` (`Some` for every `jwt` session): with the player, the
@@ -299,6 +419,9 @@ pub struct Authenticator {
     mode: AuthMode,
     jwks: Option<JwksCache>,
     admission: Admission,
+    /// Several hosts: the observer tickets other hosts vouched for (`None`: every observer
+    /// ticket is refused).
+    observers: Option<Arc<ObserverOrders>>,
     now: Clock,
 }
 
@@ -309,6 +432,7 @@ impl Authenticator {
             mode: AuthMode::Local,
             jwks: None,
             admission: Admission::Newest(Mutex::default()),
+            observers: None,
             now: system_clock(),
         }
     }
@@ -323,6 +447,7 @@ impl Authenticator {
             mode: AuthMode::Jwt { world, login_url },
             jwks: Some(jwks),
             admission: Admission::Newest(Mutex::default()),
+            observers: None,
             now,
         }
     }
@@ -331,6 +456,12 @@ impl Authenticator {
     /// instead of by newest epoch.
     pub fn with_spawn_orders(mut self, orders: Arc<SpawnOrders>) -> Authenticator {
         self.admission = Admission::SpawnOrders(orders);
+        self
+    }
+
+    /// Admit observer tickets against `orders` (several hosts).
+    pub fn with_observer_orders(mut self, orders: Arc<ObserverOrders>) -> Authenticator {
+        self.observers = Some(orders);
         self
     }
 
@@ -372,7 +503,10 @@ impl Authenticator {
     /// host), or the refusal text. A local name is re-validated: the wire
     /// form is not trusted to have gone through [`PlayerName::parse`].
     pub async fn authenticate(&self, credential: Credential) -> Result<PlayerKey, String> {
-        self.admit(credential).await.map(|admitted| admitted.key)
+        match self.admit(credential).await?.who {
+            AdmittedAs::Player(key) => Ok(key),
+            AdmittedAs::Observer { .. } => Err("an observer ticket names no player key".into()),
+        }
     }
 
     /// [`authenticate`](Self::authenticate), with the spawn-order session to
@@ -380,14 +514,30 @@ impl Authenticator {
     pub async fn admit(&self, credential: Credential) -> Result<Admitted, String> {
         match (&self.mode, credential) {
             (AuthMode::Local, Credential::Local(name)) => match PlayerName::parse(&name.0) {
-                Ok(name) => Ok(Admitted { key: PlayerKey::Local(name), ticket: None, session_epoch: None }),
+                Ok(name) => Ok(Admitted { who: AdmittedAs::Player(PlayerKey::Local(name)), ticket: None, session_epoch: None }),
                 Err(why) => Err(format!("invalid player name: {why}")),
             },
             (AuthMode::Local, Credential::Jwt(_)) => Err(REFUSE_JWT_ON_LOCAL_HOST.into()),
             (AuthMode::Jwt { .. }, Credential::Local(_)) => Err(REFUSE_LOCAL_ON_JWT_HOST.into()),
             (AuthMode::Jwt { world, .. }, Credential::Jwt(jwt)) => self.check_jwt(world, &jwt).await,
-            // Observer sessions (another host's redirect) are admitted from Task 16 on.
-            (_, Credential::Observer { .. }) => Err(REFUSE_OBSERVER.into()),
+            // Another host's redirect: whatever this host's mode, only that host's order admits it.
+            (_, Credential::Observer { client, nonce }) => {
+                let admitted = match &self.observers {
+                    // Checked by the clock the order's expiry was set by.
+                    Some(orders) => orders.admit(client, nonce, (orders.now)()),
+                    None => Err(REFUSE_OBSERVER),
+                };
+                match admitted {
+                    Ok(player) => {
+                        log::info!("[auth] client {client} admitted as an observer (player {})", player.0);
+                        Ok(Admitted { who: AdmittedAs::Observer { client, player }, ticket: None, session_epoch: None })
+                    }
+                    Err(why) => {
+                        log::info!("[auth] observer ticket of client {client} refused");
+                        Err(why.into())
+                    }
+                }
+            }
         }
     }
 
@@ -464,7 +614,11 @@ impl Authenticator {
                     Ok(()) => {
                         log::info!("[auth] account {} admitted by its spawn order (epoch {})", claims.sub, claims.session_epoch);
                         let ticket = SessionTicket { player_token: claims.player_token, session_epoch: claims.session_epoch };
-                        Ok(Admitted { key: PlayerKey::Online(token), ticket: Some(ticket), session_epoch: Some(claims.session_epoch) })
+                        Ok(Admitted {
+                            who: AdmittedAs::Player(PlayerKey::Online(token)),
+                            ticket: Some(ticket),
+                            session_epoch: Some(claims.session_epoch),
+                        })
                     }
                     Err(why) => {
                         log::info!("[auth] account {} ticket epoch {} refused: {why}", claims.sub, claims.session_epoch);
@@ -489,6 +643,6 @@ impl Authenticator {
         }
         *newest = claims.session_epoch;
         log::info!("[auth] account {} admitted (epoch {})", claims.sub, claims.session_epoch);
-        Ok(Admitted { key: PlayerKey::Online(token), ticket: None, session_epoch: Some(claims.session_epoch) })
+        Ok(Admitted { who: AdmittedAs::Player(PlayerKey::Online(token)), ticket: None, session_epoch: Some(claims.session_epoch) })
     }
 }

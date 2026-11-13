@@ -127,6 +127,30 @@ async fn watch_cert_files(
     }
 }
 
+/// A self-signed identity ([`CertSource::SelfSigned`]) minted before the ingress starts:
+/// its hash is part of this host's endpoint (`ServerPacket::Host`, its `hosts` row) — a
+/// browser pins it to open a connection here.
+pub struct SelfSignedCert {
+    identity: Identity,
+    sha256_hex: String,
+}
+
+impl SelfSignedCert {
+    /// serverCertificateHashes requires an ECDSA cert valid <= 14 days; wtransport's
+    /// self-signed identity satisfies both.
+    pub fn mint() -> Result<SelfSignedCert, Box<dyn std::error::Error + Send + Sync>> {
+        let identity = Identity::self_signed(["localhost", "127.0.0.1"])?;
+        let sha256_hex = cert_sha256_hex(&identity);
+        Ok(SelfSignedCert { identity, sha256_hex })
+    }
+
+    /// The certificate's SHA-256, lowercase hex (what the page passes to
+    /// serverCertificateHashes).
+    pub fn sha256_hex(&self) -> &str {
+        &self.sha256_hex
+    }
+}
+
 pub async fn serve(
     bind: SocketAddr,
     certs: CertSource,
@@ -137,16 +161,7 @@ pub async fn serve(
     auth: Arc<crate::auth_edge::Authenticator>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let endpoint = match &certs {
-        CertSource::SelfSigned => {
-            // serverCertificateHashes requires an ECDSA cert valid <= 14 days;
-            // wtransport's self-signed identity satisfies both.
-            let identity = Identity::self_signed(["localhost", "127.0.0.1"])?;
-            // Dev nicety, not load-bearing: never fail the ingress over it.
-            if let Err(e) = write_cert_hash_file(&identity, bind.port()) {
-                warn!("could not write cert-hash file (browser clients need it): {e:?}");
-            }
-            Arc::new(Endpoint::server(server_config(bind, identity))?)
-        }
+        CertSource::SelfSigned => return serve_minted(bind, SelfSignedCert::mint()?, send, sinks, next_client_id, players, auth).await,
         CertSource::Files { cert, key } => {
             let (identity, version) = load_identity_waiting(cert, key).await;
             info!("webtransport certificate loaded from {}", cert.display());
@@ -155,6 +170,37 @@ pub async fn serve(
             endpoint
         }
     };
+    accept_loop(endpoint, bind, send, sinks, next_client_id, players, auth).await
+}
+
+/// [`serve`] with the self-signed identity `cert` minted already (its hash known to this
+/// host's endpoint).
+pub async fn serve_minted(
+    bind: SocketAddr,
+    cert: SelfSignedCert,
+    send: Sender<ServerEvent>,
+    sinks: Arc<DashMap<ClientId, ClientSink>>,
+    next_client_id: Arc<AtomicU64>,
+    players: crate::player_store::SharedPlayerStore,
+    auth: Arc<crate::auth_edge::Authenticator>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // Dev nicety, not load-bearing: never fail the ingress over it.
+    if let Err(e) = write_cert_hash_file(cert.sha256_hex(), bind.port()) {
+        warn!("could not write cert-hash file (browser clients need it): {e:?}");
+    }
+    let endpoint = Arc::new(Endpoint::server(server_config(bind, cert.identity))?);
+    accept_loop(endpoint, bind, send, sinks, next_client_id, players, auth).await
+}
+
+async fn accept_loop(
+    endpoint: Arc<Endpoint<wtransport::endpoint::endpoint_side::Server>>,
+    bind: SocketAddr,
+    send: Sender<ServerEvent>,
+    sinks: Arc<DashMap<ClientId, ClientSink>>,
+    next_client_id: Arc<AtomicU64>,
+    players: crate::player_store::SharedPlayerStore,
+    auth: Arc<crate::auth_edge::Authenticator>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     info!("WebTransport endpoint listening on {bind}");
 
     loop {
@@ -183,17 +229,10 @@ pub async fn serve(
             // The id exists only now that the session is authenticated; the sink is
             // claimed in the same step, so a replayed ticket never replaces a live one.
             let id = hello.client_id(&next_client_id);
-            if crate::player_store::claim_sink(&sinks, id, ClientSink::Web(session.clone())).is_err() {
-                return refuse(&session, crate::player_store::REFUSE_ALREADY_CONNECTED).await;
-            }
-            // Announce before reading any other packets, mirroring the quinn
-            // path: guarantees the player exists before its first request is served.
-            // A login revoked meanwhile (kicked, or a newer one) is refused instead.
-            if let Err(why) = crate::player_store::announce_session(&send, id, &hello, &auth) {
-                sinks.remove(&id);
-                if let Some(ticket) = &ticket {
-                    auth.session_ended(ticket);
-                }
+            // Announced before reading any other packets, mirroring the quinn path (an
+            // observer's newer connection replaces its older one).
+            let mine = ClientSink::Web(session.clone());
+            if let Err(why) = crate::seat_session(&sinks, &send, id, &hello, &auth, mine.clone()) {
                 return refuse(&session, &why).await;
             }
             info!("webtransport client {id} connected (player {})", player.0);
@@ -222,12 +261,13 @@ pub async fn serve(
                     continue;
                 }
                 match game::decode_packet::<ClientPacket>(&buf) {
-                    Ok(packet) => send.send(ServerEvent::ClientPacket(packet, id)).unwrap(),
+                    Ok(packet) => {
+                        crate::player_store::forward_packet(&sinks, &send, id, |live| live.same_connection(&mine), packet);
+                    }
                     Err(e) => warn!("failed deserializing packet {e:?}"),
                 }
             }
-            sinks.remove(&id);
-            let _ = send.send(ServerEvent::ClientDisconnected(id));
+            crate::player_store::release_sink(&sinks, &send, id, |live| live.same_connection(&mine));
             if let Some(ticket) = &ticket {
                 auth.session_closed(ticket);
             }
@@ -279,21 +319,7 @@ async fn refuse(session: &wtransport::Connection, why: &str) {
 
 /// Dev-mode CA substitute: the page fetches this (wasm-server-runner serves
 /// assets/ over HTTP) and passes the hash to serverCertificateHashes.
-fn write_cert_hash_file(
-    identity: &Identity,
-    port: u16,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let hash = identity
-        .certificate_chain()
-        .as_slice()
-        .first()
-        .expect("self-signed identity has one cert")
-        .hash();
-    let hex = hash
-        .as_ref()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect::<String>();
+fn write_cert_hash_file(hex: &str, port: u16) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let json = format!(r#"{{"sha256_hex":"{hex}","port":{port}}}"#);
     // Resolve the repo-root assets dir from the crate location, not the CWD:
     // the binary is run from the repo root but tests run from crates/server.
@@ -304,6 +330,12 @@ fn write_cert_hash_file(
     );
     std::fs::write(path, json)?;
     Ok(())
+}
+
+/// The SHA-256 of `identity`'s (one) certificate, lowercase hex.
+fn cert_sha256_hex(identity: &Identity) -> String {
+    let hash = identity.certificate_chain().as_slice().first().expect("self-signed identity has one cert").hash();
+    hash.as_ref().iter().map(|b| format!("{b:02x}")).collect::<String>()
 }
 
 #[cfg(test)]
