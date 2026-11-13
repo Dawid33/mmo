@@ -24,7 +24,7 @@ use crate::{EntityId, GameEventKind, Intent, IntentMsg, IntentRefusal, IntentRep
 ///   `PlaceBlock` carry no position, and a reply relayed through the entity's old
 ///   region can tie with a direct one from the same owner). So messages of two
 ///   sources never tie; equal keys are identical replies or one sender's intents,
-///   which keep arrival order (a sender's emission order carries meaning: carve
+///   which keep arrival order (a sender's emission order carries meaning: break
 ///   then place);
 /// - `Other`: arrival only.
 ///
@@ -88,8 +88,7 @@ pub fn slot_class(kind: &GameEventKind) -> SlotClass {
         | GameEventKind::DespawnPerson(_)
         | GameEventKind::WalkOut(..)
         | GameEventKind::ParkPlayer(_)
-        | GameEventKind::RestorePlayer(..)
-        | GameEventKind::Prefab(..) => SlotClass::Other,
+        | GameEventKind::RestorePlayer(..) => SlotClass::Other,
     }
 }
 
@@ -155,8 +154,7 @@ fn key_of(kind: &GameEventKind) -> Key {
         | GameEventKind::DespawnPerson(_)
         | GameEventKind::WalkOut(..)
         | GameEventKind::ParkPlayer(_)
-        | GameEventKind::RestorePlayer(..)
-        | GameEventKind::Prefab(..) => [0; 6],
+        | GameEventKind::RestorePlayer(..) => [0; 6],
     }
 }
 
@@ -175,12 +173,6 @@ fn reply_owner(reply: &IntentReply) -> Option<RegionCoords> {
         | Intent::TakeFromPile { cell, .. }
         | Intent::PutInContainer { cell, .. }
         | Intent::TakeFromContainer { cell, .. } => Some(cell.to_local().0),
-        Intent::CarveStud { lo, .. } | Intent::FillStud { lo, .. } | Intent::BreakStud { lo, .. } => {
-            Some(crate::stud_chunk_of_cell(lo).to_local().0)
-        }
-        Intent::PlaceStud { chunk, .. } | Intent::RemoveStud { chunk, .. } | Intent::PlaceBrick { chunk, .. } => {
-            Some(chunk.to_local().0)
-        }
     }
 }
 
@@ -361,10 +353,10 @@ mod tests {
         GameEventKind::HaloUpdate(HaloUpdate {
             from,
             replace,
+            deltas: Vec::new(),
+            ground: Vec::new(),
             piles: Vec::new(),
             containers: Vec::new(),
-            studs: Vec::new(),
-            stud_ground: Vec::new(),
         })
     }
 
@@ -372,18 +364,28 @@ mod tests {
         GameEventKind::Intent(IntentMsg::Intent(SentIntent::default()))
     }
 
-    /// An intent by `by` carving a box in the world stud cells at `x` (any owner).
-    fn carve_by(by: EntityId, x: i64) -> GameEventKind {
-        GameEventKind::Intent(IntentMsg::Intent(SentIntent {
-            intent: Intent::CarveStud { lo: [x, 0, 0], hi: [x + 4, 6, 4], by },
-            ..SentIntent::default()
+    /// A take from the pile at world block `x` (any owner) by `by`.
+    fn take(x: i64, by: EntityId) -> Intent {
+        Intent::TakeFromPile { cell: crate::WorldBlockPos::new(x, 0, 0), item: crate::ItemId(1), count: 1, by }
+    }
+
+    /// An intent by `by` taking from the pile at world block `x` (any owner).
+    fn take_by(by: EntityId, x: i64) -> GameEventKind {
+        GameEventKind::Intent(IntentMsg::Intent(SentIntent { intent: take(x, by), ..SentIntent::default() }))
+    }
+
+    /// A reply to `to` for a take from the pile at world block `x` (answered by its owner).
+    fn take_reply(to: EntityId, x: i64) -> GameEventKind {
+        GameEventKind::Intent(IntentMsg::Reply(SentReply {
+            reply: IntentReply::Granted(take(x, to)),
+            ..SentReply::default()
         }))
     }
 
-    /// A reply to `to` for a carve of the world stud cells at `x` (answered by their owner).
-    fn carve_reply(to: EntityId, x: i64) -> GameEventKind {
+    /// A granted `BreakBlock` reply to `to` (no position: owner `None`).
+    fn break_reply(to: EntityId) -> GameEventKind {
         GameEventKind::Intent(IntentMsg::Reply(SentReply {
-            reply: IntentReply::Granted(Intent::CarveStud { lo: [x, 0, 0], hi: [x + 4, 6, 4], by: to }),
+            reply: IntentReply::Granted(Intent::BreakBlock { by: to, survival: true }),
             ..SentReply::default()
         }))
     }
@@ -554,7 +556,7 @@ mod tests {
     /// Two sources' intents (other senders) sort the same whatever the arrival order.
     #[test]
     fn two_sources_intents_sort_the_same_whatever_the_arrival_order() {
-        let (a, b) = (carve_by(eid(-1, 0, u64::MAX), 0), carve_by(eid(0, -1, u64::MAX), 0));
+        let (a, b) = (take_by(eid(-1, 0, u64::MAX), 0), take_by(eid(0, -1, u64::MAX), 0));
         let mut one = SlotInbox::new();
         one.push(a.clone(), 5);
         one.push(b.clone(), 5);
@@ -566,15 +568,15 @@ mod tests {
         assert_eq!(out[0], a, "by the sender's id");
     }
 
-    /// Replies to one entity from two owners (a carve over a corner) sort the same
+    /// Replies to one entity from two owners (piles either side of a seam) sort the same
     /// whatever the arrival order; intents come before replies.
     #[test]
     fn two_owners_replies_sort_the_same_whatever_the_arrival_order() {
         let to = eid(0, 0, 3);
-        let n = crate::REGION_STUDS as i64;
+        let n = crate::REGION_BLOCKS as i64;
         // Cells owned by the region at x = -1 and by the one at x = 0.
-        let (west, here) = (carve_reply(to, -4), carve_reply(to, n / 2));
-        let sent = carve_by(eid(5, 5, 0), 0);
+        let (west, here) = (take_reply(to, -4), take_reply(to, n / 2));
+        let sent = take_by(eid(5, 5, 0), 0);
         let mut one = SlotInbox::new();
         one.push(here.clone(), 5);
         one.push(west.clone(), 5);
@@ -592,7 +594,7 @@ mod tests {
     #[test]
     fn one_senders_intents_keep_their_order() {
         let by = eid(1, 1, 7);
-        let emitted = vec![carve_by(by, 40), carve_by(by, 0), carve_by(by, 20)];
+        let emitted = vec![take_by(by, 40), take_by(by, 0), take_by(by, 20)];
         let mut inbox = SlotInbox::new();
         for e in &emitted {
             inbox.push(e.clone(), 2);
@@ -611,7 +613,7 @@ mod tests {
             Intent::PlaceBlock { block: crate::BlockId::default(), by: to, survival: true },
             IntentRefusal::Occupied,
         );
-        let carve = Intent::CarveStud { lo: [0, 0, 0], hi: [4, 6, 4], by: to };
+        let take = take(0, to);
         let reply = |r: IntentReply, hops: u8, hint: RegionCoords| {
             GameEventKind::Intent(IntentMsg::Reply(SentReply { reply: r, hint, due: 5, hops }))
         };
@@ -621,8 +623,8 @@ mod tests {
             // A relayed copy (one hop, another hint) beside a direct reply.
             (reply(brk(true), 0, rc(0, 0)), reply(brk(true), 1, rc(1, 0))),
             (
-                reply(IntentReply::Granted(carve), 0, rc(0, 0)),
-                reply(IntentReply::Refused(carve, IntentRefusal::NothingThere), 0, rc(0, 0)),
+                reply(IntentReply::Granted(take), 0, rc(0, 0)),
+                reply(IntentReply::Refused(take, IntentRefusal::NothingThere), 0, rc(0, 0)),
             ),
         ];
         for (a, b) in pairs {
@@ -640,13 +642,13 @@ mod tests {
     /// a reply's tie-break never reorders one sender's intents.
     #[test]
     fn identical_replies_keep_arrival_order() {
-        let r = carve_reply(eid(0, 0, 3), 0);
+        let r = take_reply(eid(0, 0, 3), 0);
         let mut inbox = SlotInbox::new();
         inbox.push(r.clone(), 2);
         inbox.push(input(1), 2);
         inbox.push(r.clone(), 2);
         assert_eq!(inbox.drain_all(), vec![r.clone(), r, input(1)]);
-        assert!(reply_tie(&carve_by(eid(0, 0, 3), 0)).is_none(), "intents carry no content tie-break");
+        assert!(reply_tie(&take_by(eid(0, 0, 3), 0)).is_none(), "intents carry no content tie-break");
     }
 
     /// A follower of an arrival sorts directly after it, before the slot's
@@ -688,6 +690,36 @@ mod tests {
         inbox.push_behind(input(7), 4);
         inbox.push(arrival(eid(0, 0, 1)), 4);
         assert_eq!(inbox.drain_due(4), vec![arrival(eid(0, 0, 1)), create, input(7)]);
+    }
+
+    /// Two `BreakBlock` replies of one slot for different senders (no position,
+    /// so no owner key) come out in sender order whatever order they went in.
+    #[test]
+    fn a_break_block_reply_sorts_by_sender_and_content() {
+        let (first, second) = (eid(-1, 0, 7), eid(0, 0, 2));
+        let want = vec![break_reply(first), break_reply(second)];
+        for order in [[0, 1], [1, 0]] {
+            let mut inbox = SlotInbox::new();
+            for i in order {
+                inbox.push(want[i].clone(), 5);
+            }
+            assert_eq!(inbox.drain_due(5), want, "push order {order:?}");
+        }
+    }
+
+    /// A block reply and an arrival of one slot: the arrival first
+    /// (`SlotClass::Arrival` before `SlotClass::Intent`), whatever the push order.
+    #[test]
+    fn a_block_reply_and_an_arrival_of_one_slot_keep_class_order() {
+        let body = eid(0, 0, 4);
+        let want = vec![arrival(body), break_reply(body)];
+        for order in [[0, 1], [1, 0]] {
+            let mut inbox = SlotInbox::new();
+            for i in order {
+                inbox.push(want[i].clone(), 3);
+            }
+            assert_eq!(inbox.drain_due(3), want, "push order {order:?}");
+        }
     }
 
     #[test]
