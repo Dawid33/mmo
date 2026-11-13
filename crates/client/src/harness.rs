@@ -602,6 +602,15 @@ impl SimHarness {
         }
     }
 
+    /// Every host ticks its regions in a seeded permuted order each round
+    /// (`InlineSchedule::shuffled`, its own seed per host) instead of id order.
+    pub fn with_server_schedule(mut self, seed: u64) -> Self {
+        for (i, server) in self.servers.iter_mut().enumerate() {
+            server.set_schedule(Some(game::InlineSchedule::shuffled(seed ^ ((i as u64) << 32))));
+        }
+        self
+    }
+
     /// Send an `Order` as the local client (predicted at the next `step`).
     pub fn order(&mut self, order: game::Order) {
         let _ = self.client.push_game_event(GameEventKind::Order(LOCAL_CLIENT_ID, order));
@@ -901,6 +910,12 @@ impl SimHarness {
     /// The client's mispredictions over the whole session.
     pub fn total_mispredictions(&self) -> u64 {
         self.client.total_mispredictions()
+    }
+
+    /// [`Self::total_mispredictions`] by `[predicted kind][server kind]`
+    /// (`game::ReconcileStats::kind_slot`: tick, input, transfer).
+    pub fn total_mispredictions_by_kind(&self) -> [[u64; 3]; 3] {
+        self.client.total_mispredictions_by_kind()
     }
 
     pub fn player_region(&self) -> RegionCoords {

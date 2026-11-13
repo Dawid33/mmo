@@ -366,6 +366,9 @@ struct ReconMetrics {
     /// Every misprediction since the session started (never reset by the
     /// metrics window): the harness reads it (`total_mispredictions`).
     total_mispredictions: u64,
+    /// [`Self::total_mispredictions`] by (predicted kind, server kind), never
+    /// reset either (`total_mispredictions_by_kind`).
+    total_by_kinds: [[u64; 3]; 3],
     replay_depth_sum: usize,
     max_replay_depth: usize,
     /// Latest RTT-adjusted client-vs-server tick drift, in ms (negative =
@@ -592,6 +595,11 @@ impl ReconMetrics {
         for (total, row) in self.by_kinds.iter_mut().zip(s.by_kinds) {
             for (total, n) in total.iter_mut().zip(row) {
                 *total += n;
+            }
+        }
+        for (total, row) in self.total_by_kinds.iter_mut().zip(s.by_kinds) {
+            for (total, n) in total.iter_mut().zip(row) {
+                *total += u64::from(n);
             }
         }
         self.replay_depth_sum += s.replay_depth_sum;
@@ -962,6 +970,12 @@ impl GameInstanceManager {
     /// hook).
     pub fn total_mispredictions(&self) -> u64 {
         self.recon.total_mispredictions
+    }
+
+    /// [`Self::total_mispredictions`] by `[predicted kind][server kind]`
+    /// (`game::ReconcileStats::kind_slot`; test/harness hook).
+    pub fn total_mispredictions_by_kind(&self) -> [[u64; 3]; 3] {
+        self.recon.total_by_kinds
     }
 
     /// How many LOD keys this session holds subscribed (test/harness hook).

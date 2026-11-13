@@ -5,10 +5,9 @@
 use crossbeam::channel::Sender;
 use game::{
     ClientId, ClientPacket, ClientUpdateEvent, EntityBundle, GameError, GameEvent, GameEventKind,
-    HaloEntityMsg, ReconcileStats, Region, RegionCoords, RegionId,
+    HaloEntityMsg, ReconcileStats, Region, RegionCoords, RegionId, SlotClass, SlotInbox,
 };
 use log::info;
-use std::collections::VecDeque;
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::{Duration, Instant};
 
@@ -28,9 +27,9 @@ pub enum RegionCmd {
     /// sent to the server stamped with the tick it was predicted after.
     Predict(GameEventKind),
     /// A predicted arrival from a sibling region (isometry already rebased),
-    /// stamped with the source's tick after the tick that produced it: held
-    /// to the end of that slot here, the server's slot and order (see
-    /// [`RunnerState::held_transfers`]).
+    /// stamped with the source's tick after the tick that produced it:
+    /// buffered to the end of that slot here, the server's slot and order (see
+    /// [`RunnerState::inbox`]).
     Arrival(EntityBundle, game::Tick),
     /// A predicted entity-halo message from a sibling region (ditto, same
     /// stamp): an update of its mirror here, or its explicit end.
@@ -39,9 +38,9 @@ pub enum RegionCmd {
     /// stamp), like the server's `RegionInput::Transfer(HaloUpdate)`.
     Halo(game::HaloUpdate, game::Tick),
     /// A predicted intent or reply from a sibling region (`game::intents`),
-    /// stamped with its due tick: held to that slot like the server's
-    /// `RegionInput::Transfer(Intent)`, then queued for the opening of the
-    /// tick.
+    /// stamped with its due tick: buffered to the end of that slot like the
+    /// server's `RegionInput::Transfer(Intent)`, then queued for the opening
+    /// of the tick.
     Intent(game::IntentMsg),
     /// The world's extent and coarse-route map (`Region::set_route_map`).
     SetRouteMap(Option<std::sync::Arc<game::RouteMap>>),
@@ -94,8 +93,8 @@ pub enum RegionReport {
     View(Option<HomeView>),
     /// A `Predict` that reached this region after the local player's body
     /// left it — on a region thread, the game thread may send one before it
-    /// sees the departure. Re-sent to the new home (where it is held behind
-    /// the arrival if that is still held), as the server's region sends one
+    /// sees the departure. Re-sent to the new home (where it queues behind
+    /// the arrival if that is still buffered), as the server's region sends one
     /// back as `RegionOutput::Forward`: inputs follow the body.
     Forward(GameEventKind),
     Pong(u64),
@@ -142,17 +141,20 @@ pub struct RunnerCtx {
 pub struct RunnerState {
     /// The local player left this region in a predicted crossing.
     player_departed: bool,
-    /// Predicted arrivals / margin mirrors whose slot (the stamp) this
-    /// region has not closed, in receipt order: released at the start of
-    /// the `Tick` that closes it, right before that tick runs — so they
-    /// follow every input this client predicted in the slot, as the server's
-    /// `RegionRunner` releases its held inputs for a slot before its held
-    /// transfers. A sat-out tick closes nothing and releases nothing.
-    held_transfers: VecDeque<(GameEventKind, game::Tick)>,
-    /// This client's inputs that reached the region while its body's
-    /// arrival was held here: predicted right after the arrival, in order
-    /// — where the server's region applies them too (they follow the body).
-    held_inputs: Vec<GameEventKind>,
+    /// Every predicted message from a sibling region (arrival, entity halo,
+    /// terrain halo, intent or reply), never applied on receipt: right
+    /// before the `Tick` that closes the slot `now`, every one stamped
+    /// `<= now` is applied in `SlotInbox`'s canonical order — the server's
+    /// `RegionRunner` order, whatever order the host routed them in (thread
+    /// timing on the threaded host). So a slot is: `Tick`, this client's
+    /// inputs, the slot's neighbour messages sorted, the next `Tick`. A
+    /// sat-out tick closes nothing and applies nothing.
+    ///
+    /// Also this client's inputs that reached the region while its body's
+    /// arrival was buffered here (`push_behind`, class `Other`, the arrival's
+    /// stamp): predicted after every message of that slot, in order — where
+    /// the server's region applies them too (they follow the body).
+    inbox: SlotInbox,
     collider_debug: game::ColliderDebug,
     last_view: Option<HomeView>,
 }
@@ -168,8 +170,7 @@ pub fn handle(
 ) -> bool {
     match cmd {
         RegionCmd::Stop => {
-            st.held_transfers.clear();
-            st.held_inputs.clear();
+            st.inbox = SlotInbox::new();
             return false;
         }
         RegionCmd::Tick(target) => {
@@ -206,8 +207,9 @@ pub fn handle(
         }
         RegionCmd::Predict(kind) => {
             let has_body = region.data().player_entites.contains_key(&ctx.client_id);
-            if !has_body && local_arrival_held(st, ctx.client_id) {
-                st.held_inputs.push(kind);
+            let arrives = if has_body { None } else { local_arrival_held(st, ctx.client_id) };
+            if let Some(arrives) = arrives {
+                st.inbox.push_behind(kind, arrives);
             } else if st.player_departed && !has_body {
                 out.push(RegionReport::Forward(kind));
             } else {
@@ -215,16 +217,16 @@ pub fn handle(
             }
         }
         RegionCmd::Arrival(bundle, stamp) => {
-            // On receipt, not release: input for the returning player is
-            // held behind it here from now on, never sent back.
+            // On receipt, not when applied: input for the returning player
+            // queues behind it here from now on, never sent back.
             if bundle.client.as_ref().map(|(c, _)| *c) == Some(ctx.client_id) {
                 st.player_departed = false;
             }
-            transfer(region, st, ctx, GameEventKind::EntityArrived(bundle), stamp, out);
+            transfer(st, GameEventKind::EntityArrived(bundle), stamp);
         }
-        RegionCmd::HaloEntity(msg, stamp) => transfer(region, st, ctx, msg.into_event(), stamp, out),
-        RegionCmd::Halo(update, stamp) => transfer(region, st, ctx, GameEventKind::HaloUpdate(update), stamp, out),
-        RegionCmd::Intent(msg) => transfer(region, st, ctx, GameEventKind::Intent(msg), msg.due(), out),
+        RegionCmd::HaloEntity(msg, stamp) => transfer(st, msg.into_event(), stamp),
+        RegionCmd::Halo(update, stamp) => transfer(st, GameEventKind::HaloUpdate(update), stamp),
+        RegionCmd::Intent(msg) => transfer(st, GameEventKind::Intent(msg), msg.due()),
         RegionCmd::SetRouteMap(route) => region.set_route_map(route),
         RegionCmd::DebugLines(viewer_world) => {
             if ctx.debug_flags.collider_wireframes() {
@@ -254,7 +256,7 @@ pub fn handle(
 }
 
 /// A `Tick` that found the region at (or past) the predicted world tick:
-/// nothing runs, and no slot closes (held transfers stay held).
+/// nothing runs, and no slot closes (the inbox keeps its messages).
 fn sat_out(region: &Region, out: &mut Vec<RegionReport>) {
     out.push(RegionReport::Ticked {
         sat_out: true,
@@ -272,17 +274,17 @@ fn sat_out(region: &Region, out: &mut Vec<RegionReport>) {
 
 /// One region tick.
 fn tick(region: &mut Region, st: &mut RunnerState, ctx: &RunnerCtx, out: &mut Vec<RegionReport>) {
-    // The slot this tick closes ends with the transfers held for it, in
-    // receipt order — after every input predicted in it, the server's order
-    // (its held inputs for a slot, then its held transfers).
+    // The slot this tick closes ends with its neighbour messages (and any
+    // late ones), in canonical order — after every input predicted in it, as
+    // on the server. Class `Other` entries are this client's inputs queued
+    // behind a buffered arrival of its body: no message pushed by `transfer`
+    // is of that class.
     let now = region.current_tick();
-    let mut i = 0;
-    while i < st.held_transfers.len() {
-        if st.held_transfers[i].1 <= now {
-            let (kind, _) = st.held_transfers.remove(i).expect("index checked");
-            apply_transfer(region, st, ctx, kind, out);
+    for kind in st.inbox.drain_due(now) {
+        if game::slot_class(&kind) == SlotClass::Other {
+            predict(region, ctx, kind, out);
         } else {
-            i += 1;
+            apply_transfer(region, kind);
         }
     }
     #[cfg(not(target_arch = "wasm32"))]
@@ -315,22 +317,11 @@ fn tick(region: &mut Region, st: &mut RunnerState, ctx: &RunnerCtx, out: &mut Ve
     });
 }
 
-/// A transfer stamped `stamp`: applied now if its slot has already closed
-/// here (this region runs ahead of the source), else held to the end of
-/// that slot — released by the `Tick` that closes it.
-fn transfer(
-    region: &mut Region,
-    st: &mut RunnerState,
-    ctx: &RunnerCtx,
-    kind: GameEventKind,
-    stamp: game::Tick,
-    out: &mut Vec<RegionReport>,
-) {
-    if stamp >= region.current_tick() {
-        st.held_transfers.push_back((kind, stamp));
-    } else {
-        apply_transfer(region, st, ctx, kind, out);
-    }
+/// A message from a sibling region stamped `stamp`: always buffered, applied
+/// right before the `Tick` that closes slot `stamp` — or, late (its slot has
+/// closed here), the slot that is open — in canonical order.
+fn transfer(st: &mut RunnerState, kind: GameEventKind, stamp: game::Tick) {
+    st.inbox.push(kind, stamp);
 }
 
 /// Predict one of this client's inputs and send it to the server, stamped
@@ -351,11 +342,10 @@ fn predict(region: &mut Region, ctx: &RunnerCtx, kind: GameEventKind, out: &mut 
     }
 }
 
-/// Is the local player's predicted arrival held here?
-fn local_arrival_held(st: &RunnerState, client: ClientId) -> bool {
-    st.held_transfers.iter().any(|(k, _)| {
-        matches!(k, GameEventKind::EntityArrived(b) if b.client.as_ref().map(|(c, _)| *c) == Some(client))
-    })
+/// The stamp of the local player's predicted arrival, if it is buffered here.
+fn local_arrival_held(st: &RunnerState, client: ClientId) -> Option<game::Tick> {
+    st.inbox
+        .holds(|k| matches!(k, GameEventKind::EntityArrived(b) if b.client.as_ref().map(|(c, _)| *c) == Some(client)))
 }
 
 /// Predict a transfer into the region, unless it is an arrival of an entity
@@ -363,16 +353,7 @@ fn local_arrival_held(st: &RunnerState, client: ClientId) -> bool {
 /// trails the server's, its source trails this one), and a second arrival
 /// would never be confirmed — it would re-apply its stale bundle on every
 /// replay.
-///
-/// After the local player's arrival, the inputs held for it are predicted.
-fn apply_transfer(
-    region: &mut Region,
-    st: &mut RunnerState,
-    ctx: &RunnerCtx,
-    kind: GameEventKind,
-    out: &mut Vec<RegionReport>,
-) {
-    let local = matches!(&kind, GameEventKind::EntityArrived(b) if b.client.as_ref().map(|(c, _)| *c) == Some(ctx.client_id));
+fn apply_transfer(region: &mut Region, kind: GameEventKind) {
     let resident = matches!(&kind, GameEventKind::EntityArrived(b) if region.data().entity_by_id(b.id).is_some());
     if resident {
         if let GameEventKind::EntityArrived(bundle) = &kind {
@@ -380,11 +361,6 @@ fn apply_transfer(
         }
     } else {
         let _ = region.handle_event(kind);
-    }
-    if local && !local_arrival_held(st, ctx.client_id) {
-        for kind in std::mem::take(&mut st.held_inputs) {
-            predict(region, ctx, kind, out);
-        }
     }
 }
 
@@ -536,16 +512,13 @@ mod tests {
         assert!(server_recv.try_recv().is_err(), "a forwarded input is not sent from here");
     }
 
-    /// An input for the local player whose arrival is held here waits for
-    /// it: predicted (and sent, stamped with the arrival's slot) right after
-    /// the arrival, where the server's region applies it too.
-    #[test]
-    fn local_input_waits_for_its_held_arrival() {
-        let (mut r, mut st, ctx, server_recv) = setup();
+    /// The local player leaves the region in one tick: its departing bundle,
+    /// set back inside (to come straight back, as if from a neighbour).
+    fn departed_and_back(r: &mut Region, st: &mut RunnerState, ctx: &RunnerCtx) -> EntityBundle {
         let key = *r.data().player_entites.get(&CLIENT).unwrap();
         let out_of_region = game::Pose::translation(game::REGION_SIZE + game::FLIP_HYSTERESIS + 2.0, 26.0, 128.0);
         r.with_data(|d| d.set_body_pose_safe(key, out_of_region));
-        let out = tick1(&mut r, &mut st, &ctx);
+        let out = tick1(r, st, ctx);
         let mut bundle = out
             .into_iter()
             .find_map(|o| match o {
@@ -555,11 +528,21 @@ mod tests {
             .expect("the player departed")
             .0;
         assert!(!r.data().player_entites.contains_key(&CLIENT));
-        // It comes straight back, in this slot (as if from a neighbour).
         bundle.body = game::BodyState::kinematic(game::Pose::translation(128.0, 26.0, 128.0));
+        bundle
+    }
+
+    /// An input for the local player whose arrival is buffered here waits
+    /// for it: predicted (and sent, stamped with the arrival's slot) after
+    /// the arrival, where the server's region applies it too.
+    #[test]
+    fn local_input_waits_for_its_held_arrival() {
+        let (mut r, mut st, ctx, server_recv) = setup();
+        let bundle = departed_and_back(&mut r, &mut st, &ctx);
+        // It comes straight back, in this slot.
         let t = r.current_tick();
         run(&mut r, &mut st, &ctx, RegionCmd::Arrival(bundle, t));
-        assert_eq!(st.held_transfers.len(), 1, "the arrival is held to the end of slot {t}");
+        assert_eq!(st.inbox.len(), 1, "the arrival is buffered to the end of slot {t}");
         let n = r.pending_event_ids().len();
         let input = GameEventKind::PlayerInput(CLIENT, InputEvent::MouseMotion { dx: 1.0, dy: 0.0 });
         let out = run(&mut r, &mut st, &ctx, RegionCmd::Predict(input.clone()));
@@ -568,7 +551,7 @@ mod tests {
         assert!(server_recv.try_recv().is_err(), "held, not sent");
 
         tick1(&mut r, &mut st, &ctx);
-        assert!(st.held_inputs.is_empty());
+        assert!(st.inbox.is_empty());
         let ids = r.pending_event_ids();
         assert_eq!(ids.len(), n + 3, "arrival, input, tick");
         match server_recv.try_recv().unwrap() {
@@ -576,6 +559,40 @@ mod tests {
                 assert_eq!(ev.kind, input);
                 assert_eq!(after, t as u64, "stamped with the arrival's slot");
                 assert_eq!(ev.id, ids[n] + 1, "right after the arrival");
+            }
+            other => panic!("expected GameEventAfterTick, got {other:?}"),
+        }
+    }
+
+    /// An input queued behind the local player's buffered arrival follows
+    /// every message of the arrival's slot, not just the arrival — as the
+    /// server's region queues it (`push_behind`, the client twin of its
+    /// `behind_held_body`).
+    #[test]
+    fn local_input_follows_every_message_of_its_arrivals_slot() {
+        let (mut r, mut st, ctx, server_recv) = setup();
+        let bundle = departed_and_back(&mut r, &mut st, &ctx);
+        let t = r.current_tick();
+        let n = r.pending_event_ids().len();
+        run(&mut r, &mut st, &ctx, RegionCmd::Arrival(bundle, t));
+        let input = GameEventKind::PlayerInput(CLIENT, InputEvent::MouseMotion { dx: 1.0, dy: 0.0 });
+        run(&mut r, &mut st, &ctx, RegionCmd::Predict(input.clone()));
+        // A neighbour's mirror of the same slot, routed after the input.
+        run(&mut r, &mut st, &ctx, ghost(t));
+        assert!(server_recv.try_recv().is_err(), "held, not sent");
+        tick1(&mut r, &mut st, &ctx);
+        let kinds: Vec<&GameEventKind> = r.pending_events().skip(n).map(|e| &e.kind).collect();
+        assert!(
+            matches!(
+                kinds.as_slice(),
+                [GameEventKind::EntityArrived(_), GameEventKind::HaloEntity(_), GameEventKind::PlayerInput(..), GameEventKind::Tick]
+            ),
+            "arrival, mirror, input, tick: {kinds:?}"
+        );
+        match server_recv.try_recv().unwrap() {
+            crate::connections::Outgoing::Home(ClientPacket::GameEventAfterTick(ev, after)) => {
+                assert_eq!(ev.kind, input);
+                assert_eq!(after, t as u64, "stamped with the arrival's slot");
             }
             other => panic!("expected GameEventAfterTick, got {other:?}"),
         }
@@ -618,10 +635,15 @@ mod tests {
     }
 
     fn ghost(stamp: game::Tick) -> RegionCmd {
+        ghost_from(RegionCoords::new(-1, 0), 0, stamp)
+    }
+
+    /// A mirror update from `source` of its entity `serial`.
+    fn ghost_from(source: RegionCoords, serial: u64, stamp: game::Tick) -> RegionCmd {
         RegionCmd::HaloEntity(
             HaloEntityMsg::Update(game::HaloEntityDelta {
-                id: game::EntityId { birth_region: RegionCoords::new(-1, 0), serial: 0 },
-                source_region: RegionCoords::new(-1, 0),
+                id: game::EntityId { birth_region: source, serial },
+                source_region: source,
                 kind: game::EntityKind::Player,
                 isometry: game::Pose::translation(1.0, 26.0, 128.0),
                 linvel: game::parry::math::Vector::ZERO,
@@ -631,9 +653,10 @@ mod tests {
         )
     }
 
-    /// A transfer is held to the end of its slot: released by the `Tick`
-    /// that closes the slot, after the inputs predicted in it (the server's
-    /// order); one whose slot has already closed lands at once.
+    /// A transfer is buffered to the end of its slot: applied right before
+    /// the `Tick` that closes the slot, after the inputs predicted in it (the
+    /// server's order); one whose slot has already closed is not applied on
+    /// receipt either, but at the end of the slot that is open.
     #[test]
     fn transfers_land_at_the_end_of_their_slot() {
         let (mut r, mut st, ctx, server_recv) = setup();
@@ -655,9 +678,33 @@ mod tests {
         let ids = logged(&r);
         assert_eq!(ids.len(), n + 4, "the mirror, then the tick closing slot t+1");
         assert_eq!(ids[n + 2], input_id + 1, "the mirror follows the slot's input");
-        assert!(st.held_transfers.is_empty());
+        assert!(st.inbox.is_empty());
         run(&mut r, &mut st, &ctx, ghost(t + 1));
-        assert_eq!(logged(&r).len(), n + 5, "slot already closed: applied on receipt");
+        assert_eq!(logged(&r).len(), n + 4, "slot already closed: buffered all the same");
+        tick1(&mut r, &mut st, &ctx);
+        assert_eq!(logged(&r).len(), n + 6, "the late mirror, then the tick closing the open slot");
+        assert!(st.inbox.is_empty());
+    }
+
+    /// Two neighbours' messages of one slot apply in the server's canonical
+    /// order (`game::SlotInbox`) whatever order the host routed them in: the
+    /// region's events after the tick that closes the slot are the same.
+    #[test]
+    fn routed_messages_apply_in_canonical_order_whatever_the_report_order() {
+        let events = |west_first: bool| {
+            let (mut r, mut st, ctx, _) = setup();
+            let t = r.current_tick();
+            let west = ghost_from(RegionCoords::new(-1, 0), 1, t);
+            let north = ghost_from(RegionCoords::new(0, -1), 2, t);
+            for cmd in if west_first { [west, north] } else { [north, west] } {
+                run(&mut r, &mut st, &ctx, cmd);
+            }
+            tick1(&mut r, &mut st, &ctx);
+            r.pending_events().map(|e| (e.id, e.kind.clone())).collect::<Vec<_>>()
+        };
+        let (one, two) = (events(true), events(false));
+        assert_eq!(one.iter().filter(|(_, k)| matches!(k, GameEventKind::HaloEntity(_))).count(), 2, "{one:?}");
+        assert_eq!(one, two);
     }
 
     /// A sat-out tick closes no slot: the transfer stays held.
@@ -667,9 +714,9 @@ mod tests {
         let t = r.current_tick();
         run(&mut r, &mut st, &ctx, ghost(t));
         run(&mut r, &mut st, &ctx, RegionCmd::Tick(t));
-        assert_eq!(st.held_transfers.len(), 1);
+        assert_eq!(st.inbox.len(), 1);
         let out = tick1(&mut r, &mut st, &ctx);
-        assert!(st.held_transfers.is_empty());
+        assert!(st.inbox.is_empty());
         assert!(
             out.iter().any(|o| matches!(o, RegionReport::Ticked { sat_out: false, stamp, .. } if *stamp == t + 1)),
             "{out:?}"
@@ -695,10 +742,12 @@ mod tests {
         let t = r.current_tick();
         tick1(&mut r, &mut st, &ctx);
         let n = r.pending_event_ids().len();
-        // Slot t is closed: applied (here: dropped) on receipt.
+        // Slot t is closed: buffered, then dropped at the end of the open slot.
         run(&mut r, &mut st, &ctx, RegionCmd::Arrival(bundle, t));
-        assert!(st.held_transfers.is_empty());
-        assert_eq!(r.pending_event_ids().len(), n);
+        assert_eq!(st.inbox.len(), 1);
+        tick1(&mut r, &mut st, &ctx);
+        assert!(st.inbox.is_empty());
+        assert_eq!(r.pending_event_ids().len(), n + 1, "only the tick is logged");
     }
 
     #[test]

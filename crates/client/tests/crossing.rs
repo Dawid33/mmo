@@ -360,6 +360,115 @@ fn predicted_intent_across_regions_does_not_mispredict() {
     h.assert_converged();
 }
 
+/// Steps the two-source scenes are watched for.
+const TWO_SOURCES_WATCH_STEPS: usize = 200;
+/// Server schedules `two_hosts_shuffled_server_order_does_not_mispredict` runs.
+const SHUFFLED_SERVER_SEEDS: u64 = 6;
+
+/// `ReconcileStats::kind_slot` of everything relayed between regions.
+const TRANSFER_KIND: usize = 2;
+
+/// Two sources mirrored into the same regions in one slot, slot after slot: a
+/// slime hopping by the spawn region's north-west corner, and the player hovering
+/// in the north-west region by its south-east corner. Both are in the entity
+/// halo of the west and the north region, so each of those gets a halo message
+/// from two regions in most slots (the slime's mirror also ends and comes back
+/// as it hops out of the band and in). Returns the `transfer>transfer`
+/// mispredictions over the watch, all mispredictions, and the steps the server's
+/// west or north region mirrored both bodies. Converged before and after.
+fn two_sources_in_one_slot(mut h: SimHarness) -> (u64, u64, usize) {
+    let bv = game::BLOCK_UNITS as f32;
+    let ground = game::plate_units(client::local_server::TEST_GROUND_TOP_PLATES);
+    let spawn = game::SPAWN_REGION;
+    let north_west = game::RegionCoords::new(spawn.x - 1, spawn.z - 1);
+    let targets = [game::RegionCoords::new(spawn.x - 1, spawn.z), game::RegionCoords::new(spawn.x, spawn.z - 1)];
+    // Before the client loads the regions, so its snapshots hold the slime.
+    let mut slime = None;
+    h.with_server_region(spawn, |r| {
+        let tick = r.current_tick();
+        let mut key = None;
+        r.with_data(|d| {
+            let pos = game::rapier3d::math::Vector::new(7.0 * bv, ground + 1.5 * bv, 7.0 * bv);
+            key = Some(d.spawn_slime_safe(pos, 1, 0.0, tick));
+        });
+        slime = r.data().entity_id(key.unwrap());
+    });
+    let slime = slime.expect("the slime has an EntityId");
+    h.connect();
+    load_spawn_window(&mut h);
+    h.step_n(HALO_JOIN_SETTLE_STEPS);
+    // Fly north over the seam, then west over the next: the body hovers in
+    // the north-west region by its south-east corner. (Walked, not teleported:
+    // a server-side teleport leaves the client's spawn region diverged.)
+    take_off(&mut h);
+    walk_over_a_seam(&mut h, Dir::North);
+    assert_eq!(walk_over_a_seam(&mut h, Dir::West), north_west, "the player hovers in the north-west region");
+    // The window follows the home; what it left parks after the grace.
+    h.step_n(HALO_JOIN_SETTLE_STEPS);
+    assert_eq!(h.player_region(), north_west, "the player stays in the north-west region");
+    h.assert_converged();
+    let mut player = None;
+    h.with_server_region(north_west, |r| {
+        let d = r.data();
+        player = d.player_entites.get(&client::LOCAL_CLIENT_ID).and_then(|&k| d.entity_id(k));
+    });
+    let player = player.expect("the player's id");
+    let before = h.total_mispredictions_by_kind();
+    let total_before = h.total_mispredictions();
+    let mut contended = 0;
+    for _ in 0..TWO_SOURCES_WATCH_STEPS {
+        h.step();
+        let mut both = false;
+        for rc in targets {
+            h.with_server_region(rc, |r| {
+                both |= r.data().halo_entity(slime).is_some() && r.data().halo_entity(player).is_some();
+            });
+        }
+        contended += usize::from(both);
+    }
+    let after = h.total_mispredictions_by_kind();
+    h.assert_converged();
+    (
+        after[TRANSFER_KIND][TRANSFER_KIND] - before[TRANSFER_KIND][TRANSFER_KIND],
+        h.total_mispredictions() - total_before,
+        contended,
+    )
+}
+
+/// Two neighbours' halo messages for one region in one slot reach the client's
+/// region threads in whatever order the threads report them; the region applies
+/// them in the server's canonical order (`game::SlotInbox`), so the order never
+/// mispredicts.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn two_neighbours_halo_in_one_slot_does_not_mispredict() {
+    let (transfers, total, contended) = two_sources_in_one_slot(SimHarness::threaded(1));
+    assert!(contended > 0, "no slot had both bodies mirrored in the west or the north region");
+    assert_eq!(transfers, 0, "transfer>transfer mispredictions ({total} in all, {contended} contended steps)");
+    assert_eq!(total, 0, "mispredictions of other kinds ({contended} contended steps)");
+}
+
+/// The same two sources on two hosts (the spawn on one, the north-west region on
+/// the other), each host ticking its regions in a shuffled order: the server's
+/// order of a slot's messages is canonical whatever the schedule, and the
+/// client's matches it.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn two_hosts_shuffled_server_order_does_not_mispredict() {
+    for seed in 0..SHUFFLED_SERVER_SEEDS {
+        let mut h = SimHarness::with_hosts(2).with_server_schedule(seed);
+        let north_west = game::RegionCoords::new(game::SPAWN_REGION.x - 1, game::SPAWN_REGION.z - 1);
+        assert_ne!(h.owner(game::SPAWN_REGION), h.owner(north_west), "the two sources run on different hosts");
+        let (transfers, total, contended) = two_sources_in_one_slot(h);
+        assert!(contended > 0, "seed {seed}: no slot had both bodies mirrored in the west or the north region");
+        assert_eq!(
+            transfers, 0,
+            "seed {seed}: transfer>transfer mispredictions ({total} in all, {contended} contended steps)"
+        );
+        assert_eq!(total, 0, "seed {seed}: mispredictions of other kinds ({contended} contended steps)");
+    }
+}
+
 /// R3: one world on several hosts. The client logs in to the host that owns
 /// its spawn region; the regions of its window another host owns come over a
 /// connection to that host of their own (`client::connections`).
