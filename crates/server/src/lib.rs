@@ -872,6 +872,14 @@ pub fn run() -> claims::ServerExit {
             };
             manager.set_peer(other, game::PeerSession::new(hello, other), link);
         }
+        // Before any placement: the hosts that left cleanly hold nobody (a spawn order does
+        // not wait for them). A read that fails leaves every host expected (orders wait).
+        if let Some(store) = &store {
+            match peer_link::left_cleanly(store, ownership.ordinal()) {
+                Ok(left) => manager.note_left_peers(left),
+                Err(e) => log::warn!("[server] reading which hosts left cleanly: {e}; every host is awaited"),
+            }
+        }
     }
 
     // The world coordinator's thread and its link's wake-up (none without a history).

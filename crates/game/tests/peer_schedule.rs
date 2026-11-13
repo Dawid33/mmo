@@ -4688,3 +4688,156 @@ fn store_spawn_waits_for_sync(rig: &mut MultiRig) {
 fn spawn_from_the_store_waits_for_every_peer_sync() {
     sweep("spawn_from_the_store_waits_for_every_peer_sync", 2, 1, SEEDS / 4, store_spawn_waits_for_sync);
 }
+
+// --- Task 15 fix round 1 -----------------------------------------------------------
+
+/// A spawn order for a player no host holds, its stored record in `rc`, at `h` (its own
+/// entry host); rounds (the server answering) until host `h` told its login service
+/// something, or `budget` rounds. What it told.
+fn store_order_at(rig: &mut MultiRig, h: u32, rc: RegionCoords, epoch: u64, budget: usize) -> Vec<(u32, game::LoginOut)> {
+    rig.hosts[h as usize].manager.set_entry_host(h);
+    let order = game::ServerEvent::SpawnOrder {
+        origin: h,
+        hops: 0,
+        player_token: LOGIN_TOKEN.into(),
+        session_epoch: epoch,
+        player: FRESH_PLAYER,
+        record_region: Some(rc),
+    };
+    rig.hosts[h as usize].event(order);
+    let mut out = Vec::new();
+    for _ in 0..budget {
+        rig.serve_logins();
+        collect_login_out(rig, &mut out);
+        if !out.is_empty() {
+            break;
+        }
+        rig.round();
+    }
+    out
+}
+
+/// 3 hosts; host C is gone and host A's connection to it is new (as after A restarted
+/// while C was away). C left cleanly — A's server read C's clean `hosts` row at boot and
+/// told the manager (`note_left_peers`): a store placement on A is taken at once. Then C
+/// returns as a new boot: it is expected again (and synced by its `Running`).
+fn left_host_not_awaited(rig: &mut MultiRig) {
+    let (ha, hc) = (0, 2);
+    let a = rig.homes[ha as usize];
+    rig.link_down(ha, hc);
+    rig.link_down(1, hc);
+    rig.round();
+    assert!(!rig.hosts[ha as usize].manager.peers_synced(), "host {hc} is gone: not synced");
+    // The boot C left as (before the one that comes back).
+    rig.hosts[ha as usize].manager.note_left_peers([(hc, 1)]);
+    assert!(rig.hosts[ha as usize].manager.peers_synced(), "a host that left holds nobody");
+    let out = store_order_at(rig, ha, a, 2, 1);
+    let ack = game::LoginOut::SpawnAck { player_token: LOGIN_TOKEN.into(), session_epoch: 2, ok: true, endpoint: Some(rig_endpoint(ha)) };
+    assert_eq!(out, [(ha, ack)], "taken without waiting");
+    // C comes back (a new boot's hello): expected again, synced once its `Running` came.
+    rig.link_up(ha, hc);
+    rig.link_up(1, hc);
+    let mut synced = false;
+    for _ in 0..CROSS_ROUNDS {
+        rig.round();
+        if !rig.hosts[ha as usize].manager.peer_left(hc) && rig.hosts[ha as usize].manager.peers_synced() {
+            synced = true;
+            break;
+        }
+    }
+    assert!(synced, "host {hc} is expected again and synced");
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn a_host_that_left_cleanly_is_not_awaited_by_a_store_placement() {
+    sweep("a_host_that_left_cleanly_is_not_awaited_by_a_store_placement", 3, 1, SEEDS / 4, left_host_not_awaited);
+}
+
+/// The same with host C merely down (crashed, not left): the store placement waits for it
+/// and is refused once `SPAWN_SYNC_WAIT_MS` passed.
+fn down_host_awaited(rig: &mut MultiRig) {
+    let (ha, hc) = (0, 2);
+    let a = rig.homes[ha as usize];
+    rig.link_down(ha, hc);
+    rig.link_down(1, hc);
+    rig.round();
+    let out = store_order_at(rig, ha, a, 2, WAIT_ROUNDS);
+    assert!(out.is_empty(), "nothing while host {hc} may hold the player: {out:?}");
+    assert_eq!(rig.hosts[ha as usize].manager.spawn_orders_waiting(), 1);
+    rig.maintain_all(game::SPAWN_SYNC_WAIT_MS);
+    let mut out = Vec::new();
+    rig.round();
+    collect_login_out(rig, &mut out);
+    let refused = game::LoginOut::SpawnAck { player_token: LOGIN_TOKEN.into(), session_epoch: 2, ok: false, endpoint: None };
+    assert_eq!(out, [(ha, refused)], "refused after the wait");
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn a_crashed_host_is_still_awaited_by_a_store_placement() {
+    sweep("a_crashed_host_is_still_awaited_by_a_store_placement", 3, 1, SEEDS / 4, down_host_awaited);
+}
+
+/// An order host A took for its online player is answered `ok: false` (the server refused
+/// it, e.g. stale): the player is not kept on A — it crosses the host seam as before.
+fn refused_order_unpins(rig: &mut MultiRig) {
+    let (a, b) = host_seam(2, 1);
+    let (ha, hb) = (rig.owner(a), rig.owner(b));
+    rig.run(a);
+    rig.run(b);
+    rig.hosts[ha as usize].manager.set_entry_host(ha);
+    rig.connect_login(ha, P_CLIENT, P_PLAYER, Some(record_at(a, [REGION_SIZE / 2.0, REGION_SIZE / 2.0])), LOGIN_TOKEN, 2);
+    let (_, _, id) = until_body(rig);
+    let order = game::ServerEvent::SpawnOrder {
+        origin: ha,
+        hops: 0,
+        player_token: LOGIN_TOKEN.into(),
+        session_epoch: 1,
+        player: P_PLAYER,
+        record_region: Some(a),
+    };
+    rig.hosts[ha as usize].event(order);
+    let taken = rig.hosts[ha as usize].manager.take_spawn_here();
+    assert_eq!(taken.len(), 1, "held here: taken");
+    rig.hosts[ha as usize].manager.spawn_answered(taken[0].clone(), false);
+    assert!(rig.teleport(a, id, past_seam(a, b, REGION_SIZE / 2.0)));
+    until_player_settled_in(rig, b);
+    assert_eq!(rig.player_owners(P_CLIENT), [(hb, b)], "it crossed");
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn a_refused_order_does_not_keep_the_player() {
+    sweep("a_refused_order_does_not_keep_the_player", 2, 1, SEEDS / 4, refused_order_unpins);
+}
+
+/// A login whose session the manager refuses while placing it (its record in another
+/// host's region, no relay in between): its end is reported exactly once, and no login is
+/// kept for the dead session (a later close of its connection reports nothing more).
+fn refused_login_ends_once(rig: &mut MultiRig) {
+    let (a, b) = host_seam(2, 1);
+    let ha = rig.owner(a);
+    rig.hosts[ha as usize].manager.set_entry_host(ha);
+    rig.connect_login(ha, P_CLIENT, P_PLAYER, Some(record_at(b, [REGION_SIZE / 2.0, REGION_SIZE / 2.0])), LOGIN_TOKEN, 1);
+    let mut out = Vec::new();
+    for _ in 0..WAIT_ROUNDS {
+        rig.round();
+        collect_login_out(rig, &mut out);
+    }
+    let end = game::LoginOut::SessionEnded { player_token: LOGIN_TOKEN.into(), session_epoch: 1 };
+    assert_eq!(out, [(ha, end.clone())], "its end reported when it was refused, not at a later close");
+    rig.disconnect(ha, P_CLIENT);
+    for _ in 0..WAIT_ROUNDS {
+        rig.round();
+        collect_login_out(rig, &mut out);
+    }
+    assert_eq!(out, [(ha, end)], "and only once");
+    assert!(rig.player_owners(P_CLIENT).is_empty());
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn a_login_refused_while_placed_ends_once() {
+    sweep("a_login_refused_while_placed_ends_once", 2, 1, SEEDS / 4, refused_login_ends_once);
+}

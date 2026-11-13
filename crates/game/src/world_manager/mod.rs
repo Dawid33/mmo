@@ -28,7 +28,8 @@ mod placement;
 mod world_cut;
 mod world_link;
 pub use placement::{
-    KickIn, LoginOut, Placement, SpawnRequest, KICK_MEMORY_MS, SPAWN_PIN_MS, SPAWN_RELAY_MAX_HOPS, SPAWN_SYNC_WAIT_MS,
+    KickIn, LoginOut, Placement, SpawnRequest, KICK_MEMORY_MS, KICK_UNACKED_WARN_MS, SPAWN_PIN_MS, SPAWN_RELAY_MAX_HOPS,
+    SPAWN_SYNC_WAIT_MS,
 };
 pub use world_link::{WorldLinkCounters, ATTACH_WAIT_MS, WORLD_REQUEST_TIMEOUT_SECS};
 use world_link::{PendingRequest, Step, WorldAttach, WorldViewCache};
@@ -1111,7 +1112,9 @@ pub struct WorldManager<S: RegionSpawner> {
     login_out: Vec<LoginOut>,
     /// Players a spawn order taken here waits to connect, with when it was taken: not handed
     /// to another host meanwhile (`placement.rs`).
-    spawn_pins: BTreeMap<PlayerId, u64>,
+    spawn_pins: BTreeMap<PlayerId, placement::Pin>,
+    /// When an unacknowledgeable kick was last warned about ([`KICK_UNACKED_WARN_MS`]).
+    kick_warned_ms: Option<u64>,
 }
 
 impl<S: RegionSpawner> WorldManager<S> {
@@ -1244,6 +1247,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             kicked: BTreeMap::new(),
             login_out: Vec::new(),
             spawn_pins: BTreeMap::new(),
+            kick_warned_ms: None,
         }
     }
 
@@ -1485,11 +1489,22 @@ impl<S: RegionSpawner> WorldManager<S> {
                 self.spawn_order(SpawnRequest { origin, hops, player_token, session_epoch, player, record_region });
             }
             ServerEvent::LoginConnected { client, player, record, player_token, session_epoch } => {
-                if self.client_connected(client, player, record, now_ms) {
-                    self.logins.insert(client, (player_token, session_epoch));
-                } else if !self.client_id_live(client) {
-                    // Refused (its player is on another host): it never played here.
-                    self.login_session_ended(player_token, session_epoch);
+                // Known before it is placed: a placement that ends the session (a region it
+                // cannot reach) reports its end there, once.
+                let login = (player_token, session_epoch);
+                let before = self.logins.insert(client, login.clone());
+                if !self.client_connected(client, player, record, now_ms) {
+                    if self.client_id_live(client) {
+                        // A duplicate: the live session of the id keeps what it had.
+                        match before {
+                            Some(kept) => self.logins.insert(client, kept),
+                            None => self.logins.remove(&client),
+                        };
+                    } else {
+                        // Refused (its player is on another host): it never played here.
+                        self.logins.remove(&client);
+                        self.login_session_ended(login.0, login.1);
+                    }
                 }
             }
             ServerEvent::Kick { player_token, session_epoch, reason } => self.login_kick(player_token, session_epoch, reason),
@@ -1798,6 +1813,8 @@ impl<S: RegionSpawner> WorldManager<S> {
                         // it left, on its seam.
                         if off_map {
                             log::error!("departure from {rc:?} into off-map {target:?} refused: returned");
+                        } else if client.is_some_and(|c| self.is_foreign(target) && self.note_pinned_clamp(c)) {
+                            // Kept for the login ordered here (`placement.rs`): told once per pin.
                         } else {
                             log::warn!("departure from {rc:?} into unavailable {target:?} refused: returned");
                         }

@@ -83,6 +83,18 @@ pub enum LoginOut {
     SessionEnded { player_token: String, session_epoch: u64 },
 }
 
+/// How often a kick that cannot be acknowledged (a peer out of reach) is warned about; the
+/// login service resends it every couple of seconds.
+pub const KICK_UNACKED_WARN_MS: u64 = 60_000;
+
+/// A spawn order taken here for an online player ([`SPAWN_PIN_MS`]).
+pub(super) struct Pin {
+    at_ms: u64,
+    epoch: u64,
+    /// Its clamp at a host seam was logged.
+    told: bool,
+}
+
 /// A kick this host applied: every login of the token up to `up_to` is revoked.
 pub(super) struct Kicked {
     up_to: u64,
@@ -150,6 +162,10 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// The server recorded (`ok`) or refused a spawn order this host took: its origin is
     /// told, with this host's endpoint.
     pub fn spawn_answered(&mut self, order: SpawnRequest, ok: bool) {
+        if !ok && self.spawn_pins.get(&order.player).is_some_and(|p| p.epoch == order.session_epoch) {
+            // No session comes for a refused order: the player is free to move on.
+            self.spawn_pins.remove(&order.player);
+        }
         let endpoint = ok.then(|| self.endpoint.clone());
         self.spawn_answer(order.origin, order.player_token, order.session_epoch, ok, endpoint);
     }
@@ -193,8 +209,8 @@ impl<S: RegionSpawner> WorldManager<S> {
                 log::info!("[server] spawn order for player {} (epoch {}) placed here", req.player.0, req.session_epoch);
                 // Its session connects here: the player stays here until it does.
                 let now = self.clock_ms;
-                self.spawn_pins.retain(|_, at| now.saturating_sub(*at) < SPAWN_PIN_MS);
-                self.spawn_pins.insert(req.player, now);
+                self.spawn_pins.retain(|_, p| now.saturating_sub(p.at_ms) < SPAWN_PIN_MS);
+                self.spawn_pins.insert(req.player, Pin { at_ms: now, epoch: req.session_epoch, told: false });
                 self.spawn_here.push(req);
             }
             Placement::Host(owner) => {
@@ -238,7 +254,22 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// Whether a spawn order this host took for `player` waits for its session: the player
     /// is not handed to another host meanwhile (its body is clamped back at a host seam).
     pub(super) fn spawn_pinned(&self, player: PlayerId) -> bool {
-        self.spawn_pins.get(&player).is_some_and(|at| self.clock_ms.saturating_sub(*at) < SPAWN_PIN_MS)
+        self.spawn_pins.get(&player).is_some_and(|p| self.clock_ms.saturating_sub(p.at_ms) < SPAWN_PIN_MS)
+    }
+
+    /// `client`'s body was clamped back at a host seam: whether its pin did it (online and
+    /// pinned) — logged once per pin, not at every bounce.
+    pub(super) fn note_pinned_clamp(&mut self, client: ClientId) -> bool {
+        let Some(&player) = self.player_of.get(&client) else { return false };
+        if !self.spawn_pinned(player) {
+            return false;
+        }
+        let pin = self.spawn_pins.get_mut(&player).expect("pinned");
+        if !pin.told {
+            pin.told = true;
+            log::info!("client {client}: player {} stays on this host until its new login connects", player.0);
+        }
+        true
     }
 
     /// A session of `player` connected here: a spawn order's pin of it ends.
@@ -276,7 +307,12 @@ impl<S: RegionSpawner> WorldManager<S> {
         }
         let key = (player_token, session_epoch);
         if !complete {
-            log::warn!("[server] kick up to epoch {session_epoch}: a host is out of reach; not acknowledged (resent later)");
+            // Resent by the login service every few seconds while the host is away.
+            let now = self.clock_ms;
+            if self.kick_warned_ms.is_none_or(|at| now.saturating_sub(at) >= KICK_UNACKED_WARN_MS) {
+                self.kick_warned_ms = Some(now);
+                log::warn!("[server] kick up to epoch {session_epoch}: a host is out of reach; not acknowledged (resent later)");
+            }
             self.kicks_pending.remove(&key);
         } else if waiting.is_empty() {
             self.login_out.push(LoginOut::KickAck { player_token: key.0, session_epoch });

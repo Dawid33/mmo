@@ -1985,6 +1985,100 @@ fn spawn_for_an_unreachable_owner_is_refused() {
     let ack = w.join(&token, 1);
     assert_eq!(ack_quic(&ack), (false, None), "refused");
     assert!(w.orders(0).pending().by_token.is_empty(), "nothing ordered on host 0");
+    // The login service itself, over its own link to host 0: the join answers 503.
+    let (status, code) = login_join(&mut w, &token);
+    assert_eq!(status, 503);
+    assert_eq!(code, login_api::ApiErrorCode::WorldUnavailable);
+    assert!(w.orders(0).pending().by_token.is_empty(), "nothing ordered on host 0");
+    w.stop(&dir);
+}
+
+/// A real login service (its HTTP API in-process, an in-memory store, its own link to the
+/// entry host) joins the account that owns `token` to the world while the hosts run round
+/// by round: the join's HTTP status and, for a failure, its error code.
+fn login_join(w: &mut LoginWorld, token: &str) -> (u16, login_api::ApiErrorCode) {
+    use tower::ServiceExt;
+    const WORLD: &str = "hosts";
+    const NOW: u64 = 1_800_000_000;
+    let link = w.link.as_ref().unwrap();
+    let (addr, pin) = (link.local_addr().to_string(), link.cert_sha256().to_string());
+    let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
+    let token = token.to_string();
+    let joined = rt.spawn(async move {
+        let store = login::LoginStore::open("sqlite::memory:").await.unwrap();
+        store
+            .put_world(&login::WorldRow {
+                world_id: WORLD.into(),
+                name: "Hosts".into(),
+                status: login_api::WorldStatus::Open,
+                quic: Some("world-row.example:6466".into()),
+                webtransport: None,
+                cert_hash: None,
+                created_at: 1,
+                host_link: Some(addr),
+                host_link_cert: Some(pin),
+            })
+            .await
+            .unwrap();
+        let account = store.create_account("dwarf@example.org", "x", 1).await.unwrap().unwrap();
+        store.mark_verified(account, 1).await.unwrap();
+        assert_eq!(store.player_token_for(account, WORLD, 1, move || token.clone()).await.unwrap().len(), 32);
+        let refresh = "hosts-test-refresh-token";
+        let expires = (NOW + 3600) as i64;
+        store.insert_refresh(login::api::token_hash(refresh), account, [7; 16], expires).await.unwrap();
+        let clock: Arc<dyn Fn() -> u64 + Send + Sync> = Arc::new(|| NOW);
+        let (key, _) = auth::SigningKey::generate();
+        let state = login::AppState::new(
+            store.clone(),
+            Arc::new(auth::Signer::new(vec![key]).ok().unwrap()),
+            login::Hasher::for_tests(),
+            Arc::new(login::mail::LogMailer::default()),
+            Arc::new(login::LoginConfig::from_lookup(|_| None).unwrap()),
+            clock.clone(),
+        )
+        .with_host_links(login::host_link::HostLinks::new(Some(TOKEN.into()), store, clock));
+        let body = serde_json::to_vec(&login_api::JoinRequest { refresh_token: refresh.into(), world: WORLD.into() }).unwrap();
+        let req = axum::http::Request::post(login_api::PATH_JOIN)
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from(body))
+            .unwrap();
+        let resp = login::router(state).oneshot(req).await.unwrap();
+        let status = resp.status().as_u16();
+        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+        let err: login_api::ApiError = serde_json::from_slice(&bytes).unwrap_or_else(|e| panic!("{e}: {bytes:?}"));
+        (status, err.code)
+    });
+    let deadline = Instant::now() + WAIT;
+    while !joined.is_finished() {
+        assert!(Instant::now() < deadline, "the join never answered");
+        w.rounds(1);
+    }
+    let out = rt.block_on(joined).unwrap();
+    drop(rt);
+    out
+}
+
+/// A host that left cleanly (a committed leave cut, its row clean) is what a booting host
+/// reads as left (`peer_link::left_cleanly`, seeding `note_left_peers`); once it is back
+/// (its new boot registered) it is not, and a crashed host (its row dirty) never is.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn hosts_that_left_cleanly_are_read_at_boot() {
+    install_props();
+    let Some(db) = PgDb::create("lclean") else { return };
+    let dir = scratch("lclean");
+    let mut w = world(&db, &dir);
+    let store0 = w.claims[0].store().clone();
+    assert_eq!(server::peer_link::left_cleanly(&store0, 0).unwrap(), [], "both run");
+    w.until_committed_after(&db, 0);
+    assert_eq!(exit_host(&mut w, 1), server::claims::ServerExit::Clean, "host 1 left");
+    assert_eq!(server::peer_link::left_cleanly(&store0, 0).unwrap(), [(1, 1001)], "host 1 left as boot 1001");
+    assert_eq!(server::peer_link::left_cleanly(&store0, 1).unwrap(), [], "its own row is not a peer's");
+    restart_host(&mut w, &db, &dir, 1, 3001);
+    assert_eq!(server::peer_link::left_cleanly(&store0, 0).unwrap(), [], "back: its new boot cleared the row");
+    kill_host(&mut w, 1);
+    assert_eq!(server::peer_link::left_cleanly(&store0, 0).unwrap(), [], "crashed: its row stays dirty");
+    assert_eq!(prepared(&db), 0, "nothing stays prepared");
     w.stop(&dir);
 }
 

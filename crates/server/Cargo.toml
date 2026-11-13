@@ -62,6 +62,9 @@ serde_json = { workspace = true }
 base64 = { workspace = true }
 # The login service's own kick queue and host links, end to end in `login_link`.
 login = { workspace = true }
+# The login service's HTTP API driven in-process (`hosts`: a join answered 503).
+axum = { workspace = true }
+tower = { workspace = true }
 
 [[test]]
 name = "it"

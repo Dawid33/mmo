@@ -327,6 +327,26 @@ impl<S: RegionSpawner> WorldManager<S> {
         }
     }
 
+    /// Hosts the world store says left in a committed leave cut (their `hosts` row is
+    /// clean), each with the boot that left: the server reads them at boot, before any
+    /// placement, and this host treats them as it treats a leave it saw (`end_leaves`) —
+    /// nothing is handed to them, and a spawn order does not wait for their sync (they hold
+    /// nobody). A host that crashed (a dirty row) is not one of them: it stays expected.
+    /// One that comes back says so with another boot's hello (`peer_hello_boot`), and is
+    /// expected again from then on — a clean row read at boot is never the row of a boot
+    /// that runs: every boot clears its row before it dials or listens. Called before the
+    /// first [`Self::maintain`] (no hello read yet).
+    pub fn note_left_peers(&mut self, left: impl IntoIterator<Item = (u32, u64)>) {
+        let me = self.ordinal();
+        for (ordinal, boot) in left {
+            if ordinal == me {
+                continue;
+            }
+            log::info!("[server] host {ordinal} left the world cleanly (boot {boot}): not awaited until it returns");
+            self.left_peers.insert(ordinal, Some(boot));
+        }
+    }
+
     /// Host `from`'s hello of boot `boot`: a host that left comes back as another boot —
     /// its held session goes out again.
     pub(super) fn peer_hello_boot(&mut self, from: u32, boot: u64) {
