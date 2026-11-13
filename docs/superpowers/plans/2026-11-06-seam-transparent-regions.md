@@ -287,9 +287,9 @@
    and in the client's predicted regions alike. Immediately before a `Tick` the region applies every
    buffered message with `stamp <= current_tick()`, sorted by `(stamp, class, key, arrival)`: class 0
    `EntityArrived` (entity id), 1 `HaloEntityGone` (source, entity id), 2 `HaloEntity` (source, entity
-   id), 3 `HaloUpdate` (source), 4 `HaloSourceGone` (region), 5 `Intent` (intents before replies; an
+   id), 3 `HaloUpdate` deltas (source), 4 `HaloSourceGone` (region), 5 `HaloSeed` — a `HaloUpdate { replace: true }` (source), 6 `Intent` (intents before replies; an
    intent by its sender, a reply by the entity it is for, then the answering owner, then — replies only —
-   its content), 6 anything else (a held creation and what queues behind it), arrival only. So a slot is:
+   its content), 7 anything else (a held creation and what queues behind it), arrival only. So a slot is:
    `Tick`, inputs, the slot's neighbour messages sorted, the next `Tick` — thread timing no longer picks
    the order, and the same events in another arrival order are no longer a misprediction. A message
    whose slot already closed (`stamp < current_tick()`) is applied at the end of the open slot, by its
@@ -299,8 +299,8 @@
    `SlotInbox::push_after_arrival` and applied directly after it: after the inputs the arriving bundle
    carries, before the slot's other messages, followers in arrival order. What follows a held creation
    is pushed `Other` behind it, `push_behind`.)*
-   *(amended in execution: a halo seed (`HaloUpdate { replace: true }`) sorts in its own class directly after
-   `HaloSourceGone`, so a respawned region's seed follows the end of its lost incarnation's mirrors at one stamp.)*
+   *(Class 5 `HaloSeed` was added in execution: a respawned region's seed must follow the `HaloSourceGone` of its
+   lost incarnation at one stamp.)*
 
 ### Task 3.1: Server — `RegionInput::Transfer`, held until the stamped slot
 
