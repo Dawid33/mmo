@@ -1207,8 +1207,13 @@ go_nogo_db_url := "postgres://mmo:mmo@127.0.0.1:55432/" + go_nogo_db
 # INVALID` (`scripts/crossing_summary.py --go-nogo`, also in target/go-nogo-r3/verdict.txt):
 # GO iff the host seam's p95 of correction_max and of corrections is at most 1.25 x the
 # thread seam's + 0.05 AND conservation held (no state-hash mismatch; items_destroyed and
-# intent_replies_lost 0 on every [server] line; peer_unreceived 0 on each host's last);
-# INVALID when a host restarted, a check never ran or a group has < 20 crossings.
+# intent_replies_lost 0 on every [server] line; peer_unreceived not above 0 on both of a
+# host's last two); INVALID when a host restarted, any server-side process panicked or
+# ended, the stack fell over before the stop, a host logged no counters, a client lost its
+# session early or never had its state hash checked, or a group has < 20 crossings.
+# Exit code: 0 GO, 1 NO-GO, 2 INVALID, anything else: no verdict (the recipe failed).
+# A run that did not stop cleanly (e.g. a second Ctrl-C) leaves a dirty host row: the next
+# run says so at its start and is likely INVALID (a host restarts once) — run it again.
 # Arguments are positional: `just go-nogo-r3 5`, `just adapter=6700 go-nogo-r3 2 90`.
 # Go / no-go for host seams: thread-seam vs host-seam shuttle on 2 hosts at `delay` ms.
 go-nogo-r3 delay="1" seconds="60": (_dev-hosts-check "0" "2" delay "2") (_dev-token go_nogo_dir / "stack")
@@ -1220,6 +1225,10 @@ go-nogo-r3 delay="1" seconds="60": (_dev-hosts-check "0" "2" delay "2") (_dev-to
     out={{go_nogo_dir}}
     stack=$out/stack
     db={{go_nogo_db}}
+    # No verdict (exit 3) unless the verdict script ran: 1 and 2 are NO-GO and INVALID.
+    verdict_rc=""
+    no_verdict() { local rc=${1:-$?}; if [ -z "$verdict_rc" ] && [ "$rc" -le 2 ]; then rc=3; fi; exit "$rc"; }
+    trap no_verdict EXIT
     busy=""
     for p in 6466 6467 6476 6477 6480 6490 6500 6501; do
         if ss -Hlun "sport = :$p" | grep -q .; then busy="$busy udp/$p"; fi
@@ -1233,6 +1242,10 @@ go-nogo-r3 delay="1" seconds="60": (_dev-hosts-check "0" "2" delay "2") (_dev-to
     echo "  forged again only when it is not a world of 1-region super-regions), login state under $out/login and"
     echo "  pins under $stack. Resets: that world's clock and the logs under $out/. Never touches the dev world"
     echo "  'mmo', target/dev-r3 or target/dev-login."
+    if [ -e "$out/unclean" ]; then
+        echo "go-nogo-r3: NOTE: the previous run's stack did not stop cleanly ($(cat "$out/unclean")): its hosts' rows"
+        echo "  are dirty, so a host restarts once on this start and this run is likely INVALID - simply run it again."
+    fi
     # The dev Postgres (as `pg-up`, without printing its URL).
     docker compose -f deploy/dev/compose.yml up -d --wait
     export VOXEL_REGION_BLOCKS={{play_blocks}}
@@ -1265,6 +1278,7 @@ go-nogo-r3 delay="1" seconds="60": (_dev-hosts-check "0" "2" delay "2") (_dev-to
     # Every host and the coordinator (the world row says 1; a host refuses a mismatch).
     export VOXEL_SUPER_REGION_REGIONS=1
     stack_pid=""
+    stack_rc=""
     # Running, not a zombie.
     alive() { kill -0 "$1" 2>/dev/null && [[ "$(ps -o stat= -p "$1" 2>/dev/null)" != Z* ]]; }
     stop_stack() {
@@ -1274,13 +1288,21 @@ go-nogo-r3 delay="1" seconds="60": (_dev-hosts-check "0" "2" delay "2") (_dev-to
             kill -TERM "$stack_pid" 2>/dev/null || true
         fi
         if [ -n "$stack_pid" ]; then
-            while kill -0 "$stack_pid" 2>/dev/null; do wait "$stack_pid" 2>/dev/null || true; done
+            # The supervisor's own status (a wait cut short by a signal leaves it running).
+            while :; do
+                stack_rc=0
+                wait "$stack_pid" 2>/dev/null || stack_rc=$?
+                if ! kill -0 "$stack_pid" 2>/dev/null; then break; fi
+            done
+            if [ "$stack_rc" = 0 ]; then rm -f "$out/unclean"; else echo "supervisor exit $stack_rc" >"$out/unclean"; fi
         fi
         stack_pid=""
     }
-    trap stop_stack EXIT
+    trap 'rc=$?; stop_stack; no_verdict "$rc"' EXIT
     trap 'exit 130' INT TERM HUP
     # The supervisor in a session of its own: only stop_stack signals it (once; twice kills).
+    # Cleared once it stops with status 0 (stop_stack); left behind, the next run warns.
+    echo "the stack did not stop" >"$out/unclean"
     DEV_R3_SERVER=./target/release/server DEV_R3_LOGIN=$login DEV_R3_LOGIN_LOG=$out/login/login.log \
         DEV_R3_PIN_WAIT_SECS={{online_wait_secs}} setsid scripts/dev_r3.sh "$stack" \
         'VOXEL_ROLE=coordinator VOXEL_HOSTS=2 VOXEL_WORLD_DB={{go_nogo_db_url}} VOXEL_SERVICE_TOKEN_FILE={{go_nogo_dir}}/stack/service-token VOXEL_COORDINATOR_CERT_HASH_FILE={{go_nogo_dir}}/stack/coordinator.cert-sha256' \
@@ -1314,20 +1336,31 @@ go-nogo-r3 delay="1" seconds="60": (_dev-hosts-check "0" "2" delay "2") (_dev-to
     run_client host
     echo "go-nogo-r3: letting the hosts settle (15 s: their last [server] lines come after the client left)"
     sleep 15
+    # Whether the stack was still whole: the supervisor running, and where its output stood.
+    stack_alive=0
+    if alive "$stack_pid"; then stack_alive=1; fi
+    stop_line=$(wc -l <"$out/stack.log")
     stop_stack
-    trap - EXIT INT TERM HUP
+    trap no_verdict EXIT
+    trap - INT TERM HUP
     echo
     echo "== go / no-go facts"
     echo "adapter:     $(grep -h -m1 AdapterInfo "$out/client-thread.log" "$out/client-host.log" 2>/dev/null | head -1 || true)"
     echo "region size: {{play_blocks}} blocks"
     echo "peer delay:  {{delay}} ms one way (VOXEL_PEER_LINK_DELAY_MS)"
     echo "hosts:       2, super-regions of 1 region; {{seconds}} s per shuttle"
+    echo "stack:       supervisor $([ "$stack_alive" = 1 ] && echo "running" || echo "ENDED EARLY") at the stop, exit $stack_rc after it"
     echo "restarts:    supervisor $(grep -c 'starting it again' "$out/stack.log" || true);" \
         "host-0 started $(grep -c '\[server\] role:' "$stack/host-0.log" || true)x," \
         "host-1 started $(grep -c '\[server\] role:' "$stack/host-1.log" || true)x (more than once: INVALID)"
     echo "logs:        $out/client-thread.log $out/client-host.log $stack/host-0.log $stack/host-1.log $stack/coordinator.log"
+    verdict_rc=0
     scripts/crossing_summary.py --go-nogo --thread-log "$out/client-thread.log" --host-log "$out/client-host.log" \
-        --server-log "$stack/host-0.log" --server-log "$stack/host-1.log" | tee "$out/verdict.txt"
+        --server-log "$stack/host-0.log" --server-log "$stack/host-1.log" \
+        --aux-log "$stack/coordinator.log" --aux-log "$out/login/login.log" \
+        --stack-log "$out/stack.log" --stack-stop-line "$stop_line" --stack-alive "$stack_alive" \
+        | tee "$out/verdict.txt" || verdict_rc=$?
+    exit "$verdict_rc"
 
 # Run exactly the tests a change touches, by crate + cargo-test arguments:
 #   just test-one game "--test it stud_lod::"

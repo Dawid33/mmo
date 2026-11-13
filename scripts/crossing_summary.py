@@ -9,7 +9,9 @@ the autopilot's own events, and — when the client ran with PERF_LOG=1 — the
 
 Usage: crossing_summary.py [--by KEY] [--p95] <client.log>
        crossing_summary.py --go-nogo --thread-log <client.log> --host-log <client.log>
-                           [--server-log <host-n.log>]... [--min-crossings N]
+                           [--server-log <host-n.log>]... [--aux-log <coordinator/login.log>]...
+                           [--stack-log <stack.log> [--stack-stop-line N]] [--stack-alive 0|1]
+                           [--min-crossings N]
 
   --by KEY  also split the game-thread crossings by the value of KEY on their line
             (e.g. `--by host_flip`: crossings between two hosts' regions vs within one).
@@ -17,7 +19,8 @@ Usage: crossing_summary.py [--by KEY] [--p95] <client.log>
             and confirm_ms only.
   --go-nogo the R3 go / no-go (`just go-nogo-r3`, the plan's decision 13): both client
             logs' p95 tables by host_flip, then one verdict line, `VERDICT: GO`,
-            `VERDICT: NO-GO` or `VERDICT: INVALID` (see `verdict`).
+            `VERDICT: NO-GO` or `VERDICT: INVALID` (see `verdict`, `invalid_reasons`);
+            exit 0 GO, 1 NO-GO, 2 INVALID, 3 no verdict (a usage error or a failure).
 """
 import argparse
 import re
@@ -43,6 +46,8 @@ RENDER_KEYS = [
 
 
 def pct(values, q):
+    """Nearest rank: the sorted value at index round(q * (n - 1)) — with n = 20 the
+    p95 is the second-largest value, with n < 11 it is the largest."""
     s = sorted(values)
     return s[min(len(s) - 1, int(round(q * (len(s) - 1))))]
 
@@ -191,17 +196,32 @@ GO_NOGO_SLACK = 0.05
 GO_NOGO_KEYS = ["correction_max", "corrections"]
 # Fewer crossings than this in either group: too few to judge a p95 (INVALID).
 MIN_CROSSINGS = 20
+# The script's exit code per verdict (3: no verdict, the script itself failed).
+EXIT_CODES = {"GO": 0, "NO-GO": 1, "INVALID": 2}
+EXIT_NO_VERDICT = 3
+# What `scripts/dev_r3.sh` says when a member of the stack ended on its own (or a host
+# restarted: "exited 5 ... starting it again"), or its stop needed a KILL.
+STACK_FAILURES = ("exited", "giving up", "stopped (failed)", "ended (")
+# What a client says when its session ended or a host refused it.
+CLIENT_SESSION_LOST = ("[session] session ended", "refused the connection")
 
 
 def clean(lines):
     return [ANSI.sub("", raw) for raw in lines]
 
 
+def server_lines(lines):
+    """The key=value pairs of every `[server] window=` counters line."""
+    return [dict(KV.findall(line)) for line in clean(lines) if "[server] window=" in line]
+
+
 def conservation_problems(client_logs, server_logs):
     """What breaks conservation in a run, as text (empty: it held). `client_logs` and
-    `server_logs` map a name to the log's lines. Client: a `[client-state-hash]` line with
-    `mismatched` > 0. Hosts: a `[server] window=` line with `items_destroyed` or
-    `intent_replies_lost` > 0, or a host whose LAST such line has `peer_unreceived` > 0."""
+    `server_logs` (the hosts) map a name to the log's lines. Client: a
+    `[client-state-hash]` line with `mismatched` > 0. Hosts: a `[server] window=` line with
+    `items_destroyed` or `intent_replies_lost` > 0, or a host whose LAST TWO such lines
+    both have `peer_unreceived` > 0 (one sample also counts frames still in flight, e.g. a
+    cut's mark; a host with a single line is judged on it)."""
     problems = []
     for name, lines in client_logs.items():
         for line in clean(lines):
@@ -210,32 +230,46 @@ def conservation_problems(client_logs, server_logs):
                 if float(kv.get("mismatched", 0)) > 0:
                     problems.append(f"{name}: state-hash mismatch: {line.strip()[:160]}")
     for name, lines in server_logs.items():
-        last = None
-        for line in clean(lines):
-            if "[server] window=" not in line:
-                continue
-            kv = dict(KV.findall(line))
+        windows = server_lines(lines)
+        for kv in windows:
             for key in ("items_destroyed", "intent_replies_lost"):
                 if float(kv.get(key, 0)) > 0:
                     problems.append(f"{name}: {key}={kv[key]} on a [server] line")
-            last = kv
-        if last is not None and float(last.get("peer_unreceived", 0)) > 0:
-            problems.append(f"{name}: peer_unreceived={last['peer_unreceived']} at the end")
+        last = windows[-2:]
+        if last and all(float(kv.get("peer_unreceived", 0)) > 0 for kv in last):
+            values = ", ".join(kv["peer_unreceived"] for kv in last)
+            problems.append(f"{name}: peer_unreceived={values} on its last [server] line(s)")
     return problems
 
 
-def invalid_reasons(client_logs, server_logs):
-    """What makes a run unfit to judge (empty: fit): a host that started more than once
-    (a restart rolls the world back), no `[server] window=` counters line at all, a client
-    log with no `[client-state-hash]` line (nothing checked), a client that panicked or
-    lost its GPU."""
+def invalid_reasons(client_logs, server_logs, aux_logs=None, stack_lines=None, stack_alive=True):
+    """What makes a run unfit to judge (empty: fit).
+    - `server_logs` (each host): started more than once (a restart rolls the world back),
+      no `[server] window=` counters line in that host's log, `panicked at`;
+    - `aux_logs` (the coordinator, the login service): `panicked at`;
+    - `stack_lines` (the supervisor's output up to the recipe's own stop): a member that
+      exited, a restart that gave up, a failed stop (`STACK_FAILURES`); `stack_alive`
+      False: the supervisor was gone before the recipe stopped it (the stack fell over);
+    - each client: no `[client-state-hash]` line (nothing checked), a panic or a lost
+      GPU, no `autopilot_done` (the shuttle did not run its time), or its session ended
+      or a host refused it before `autopilot_done`."""
     reasons = []
     for name, lines in server_logs.items():
-        starts = sum(1 for line in clean(lines) if "[server] role:" in line)
+        text = clean(lines)
+        starts = sum(1 for line in text if "[server] role:" in line)
         if starts > 1:
             reasons.append(f"{name}: the host started {starts} times (restarted during the run)")
-    if not any("[server] window=" in line for lines in server_logs.values() for line in clean(lines)):
-        reasons.append("no [server] counters line in any host log: conservation unchecked")
+        if not any("[server] window=" in line for line in text):
+            reasons.append(f"{name}: no [server] counters line: conservation unchecked on that host")
+    for name, lines in {**server_logs, **(aux_logs or {})}.items():
+        panic = next((line for line in clean(lines) if "panicked at" in line), None)
+        if panic:
+            reasons.append(f"{name}: panicked: {panic.strip()[:160]}")
+    for line in clean(stack_lines or []):
+        if any(word in line for word in STACK_FAILURES):
+            reasons.append(f"the stack, before the recipe stopped it: {line.strip()[:160]}")
+    if not stack_alive:
+        reasons.append("the stack's supervisor had ended before the recipe stopped it (a member fell over)")
     for name, lines in client_logs.items():
         text = clean(lines)
         if not any("[client-state-hash]" in line for line in text):
@@ -243,6 +277,13 @@ def invalid_reasons(client_logs, server_logs):
         fault = next((line for line in text if "DeviceLost" in line or "panicked at" in line), None)
         if fault:
             reasons.append(f"{name}: run aborted: {fault.strip()[:160]}")
+        done = next((i for i, line in enumerate(text) if "event=autopilot_done" in line), None)
+        if done is None:
+            reasons.append(f"{name}: no autopilot_done: the shuttle did not run its time")
+        lost = next((line for line in text[: done if done is not None else len(text)]
+                     if any(word in line for word in CLIENT_SESSION_LOST)), None)
+        if lost:
+            reasons.append(f"{name}: the session ended early: {lost.strip()[:160]}")
     return reasons
 
 
@@ -251,15 +292,30 @@ def p95_of(crossings, metric):
     return pct(values, 0.95) if values else 0.0
 
 
+def side_known(c):
+    return c.get("from_host", -1) >= 0 and c.get("to_host", -1) >= 0
+
+
+def seam_groups(thread_crossings, host_crossings):
+    """The thread group: the thread run's crossings whose two sides are known (`from_host`,
+    `to_host` >= 0) and the same host; the host group: the host run's crossings whose sides
+    are known and differ. `unknown`: how many crossings of both runs had a side unknown
+    (-1, or missing) — reported, never grouped (the client's `host_flip` counts those as
+    flips)."""
+    thread = [c for c in thread_crossings if side_known(c) and c["from_host"] == c["to_host"]]
+    host = [c for c in host_crossings if side_known(c) and c["from_host"] != c["to_host"]]
+    unknown = sum(1 for c in thread_crossings + host_crossings if not side_known(c))
+    return {"thread": thread, "host": host, "unknown": unknown}
+
+
 def verdict(thread_crossings, host_crossings, conservation, invalid, min_crossings=MIN_CROSSINGS):
-    """Decision 13 over one run: `(word, reasons, rows)`. The thread group is the thread
-    run's crossings with host_flip=0, the host group the host run's with host_flip=1.
+    """Decision 13 over one run: `(word, reasons, rows)`. Groups: `seam_groups`.
     In order: any `invalid` reason -> INVALID; any `conservation` problem -> NO-GO,
     whatever the timing; fewer than `min_crossings` in a group -> INVALID; then GO iff for
     every GO_NOGO_KEYS metric host p95 <= GO_NOGO_RATIO * thread p95 + GO_NOGO_SLACK.
     `rows`: (metric, thread p95, host p95, limit or None, ok or None)."""
-    thread = [c for c in thread_crossings if c.get("host_flip") == 0]
-    host = [c for c in host_crossings if c.get("host_flip") == 1]
+    groups = seam_groups(thread_crossings, host_crossings)
+    thread, host = groups["thread"], groups["host"]
     rows = []
     for metric in GO_NOGO_KEYS:
         t, h = p95_of(thread, metric), p95_of(host, metric)
@@ -272,7 +328,7 @@ def verdict(thread_crossings, host_crossings, conservation, invalid, min_crossin
         return "NO-GO", ["conservation: " + p for p in conservation], rows
     few = [
         f"{name}: {len(group)} crossings (< {min_crossings})"
-        for name, group in (("thread seam (host_flip=0)", thread), ("host seam (host_flip=1)", host))
+        for name, group in (("thread seam (one host)", thread), ("host seam (two hosts)", host))
         if len(group) < min_crossings
     ]
     if few:
@@ -287,22 +343,35 @@ def verdict(thread_crossings, host_crossings, conservation, invalid, min_crossin
     return "GO", [f"thread n={len(thread)}, host n={len(host)}"], rows
 
 
-def go_nogo(thread_log, host_log, server_logs, min_crossings=MIN_CROSSINGS):
-    """Prints both runs' p95 tables by host_flip, the facts and the verdict; returns the word."""
+def go_nogo(thread_log, host_log, server_logs, aux_logs=(), stack_log=None, stack_stop_line=None,
+            stack_alive=True, min_crossings=MIN_CROSSINGS):
+    """Prints both runs' p95 tables by host_flip, the facts and the verdict; returns the
+    word. `stack_stop_line`: how many lines of `stack_log` were written before the
+    recipe's own stop (None: all of them)."""
     read = lambda path: open(path, errors="replace").readlines()  # noqa: E731
     clients = {"thread run": read(thread_log), "host run": read(host_log)}
     servers = {path: read(path) for path in server_logs}
+    aux = {path: read(path) for path in aux_logs}
+    stack = read(stack_log) if stack_log else []
+    if stack_stop_line is not None:
+        stack = stack[:stack_stop_line]
     for name, path in (("thread run", thread_log), ("host run", host_log)):
         print(f"\n== {name}: {path}")
         main(path, "host_flip", True)
     for path, lines in servers.items():
         starts = sum(1 for line in clean(lines) if "[server] role:" in line)
         print(f"host log {path}: started {starts} time(s){' (RESTARTED)' if starts > 1 else ''}")
+    thread_c, host_c = crossing_lines(clients["thread run"]), crossing_lines(clients["host run"])
+    groups = seam_groups(thread_c, host_c)
+    print(
+        f"seam groups: thread (one known host) n={len(groups['thread'])}, host (two known hosts) "
+        f"n={len(groups['host'])}, a side unknown (never grouped) n={groups['unknown']}"
+    )
     word, reasons, rows = verdict(
-        crossing_lines(clients["thread run"]),
-        crossing_lines(clients["host run"]),
+        thread_c,
+        host_c,
         conservation_problems(clients, servers),
-        invalid_reasons(clients, servers),
+        invalid_reasons(clients, servers, aux, stack, stack_alive),
         min_crossings,
     )
     print(f"\ngo / no-go (decision 13: host p95 <= {GO_NOGO_RATIO} x thread p95 + {GO_NOGO_SLACK}):")
@@ -319,6 +388,9 @@ def go_nogo(thread_log, host_log, server_logs, min_crossings=MIN_CROSSINGS):
 
 
 if __name__ == "__main__":
+    import sys
+    import traceback
+
     parser = argparse.ArgumentParser(usage=__doc__)
     parser.add_argument("log", nargs="?")
     parser.add_argument("--by", help="split game-thread crossings by this key's value")
@@ -327,12 +399,29 @@ if __name__ == "__main__":
     parser.add_argument("--thread-log", help="--go-nogo: the client log of the thread-seam shuttle")
     parser.add_argument("--host-log", help="--go-nogo: the client log of the host-seam shuttle")
     parser.add_argument("--server-log", action="append", default=[], help="--go-nogo: a host's log (repeat)")
+    parser.add_argument("--aux-log", action="append", default=[],
+                        help="--go-nogo: the coordinator's or login service's log (repeat; panics only)")
+    parser.add_argument("--stack-log", help="--go-nogo: the dev_r3.sh supervisor's output")
+    parser.add_argument("--stack-stop-line", type=int, help="--go-nogo: stack-log lines written before the stop")
+    parser.add_argument("--stack-alive", type=int, choices=[0, 1], default=1,
+                        help="--go-nogo: 1 if the supervisor still ran when the recipe stopped it")
     parser.add_argument("--min-crossings", type=int, default=MIN_CROSSINGS)
-    args = parser.parse_args()
+    try:
+        args = parser.parse_args()
+    except SystemExit as e:
+        # Usage errors are no verdict (argparse's own 2 would read as INVALID).
+        sys.exit(0 if e.code == 0 else EXIT_NO_VERDICT)
     if args.go_nogo:
         if not (args.thread_log and args.host_log):
-            parser.error("--go-nogo needs --thread-log and --host-log")
-        go_nogo(args.thread_log, args.host_log, args.server_log, args.min_crossings)
+            print("--go-nogo needs --thread-log and --host-log", file=sys.stderr)
+            sys.exit(EXIT_NO_VERDICT)
+        try:
+            word = go_nogo(args.thread_log, args.host_log, args.server_log, args.aux_log, args.stack_log,
+                           args.stack_stop_line, bool(args.stack_alive), args.min_crossings)
+        except Exception:  # noqa: BLE001 — any failure is "no verdict", never a verdict's code
+            traceback.print_exc()
+            sys.exit(EXIT_NO_VERDICT)
+        sys.exit(EXIT_CODES[word])
     else:
         if not args.log:
             parser.error("a client log is needed")

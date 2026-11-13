@@ -39,9 +39,10 @@ class GroupsByHostFlip(unittest.TestCase):
         self.assertEqual(groups["all"]["corrections"], 4.0)
 
 
-def crossing(host_flip, correction_max, corrections, confirm_ms=40.0):
+def crossing(host_flip, correction_max, corrections, confirm_ms=40.0, from_host=0, to_host=None):
+    to_host = float(host_flip) if to_host is None else to_host
     return {"host_flip": float(host_flip), "correction_max": correction_max, "corrections": float(corrections),
-            "confirm_ms": confirm_ms}
+            "confirm_ms": confirm_ms, "from_host": float(from_host), "to_host": float(to_host)}
 
 
 SERVER_OK = [
@@ -51,21 +52,36 @@ SERVER_OK = [
     "INFO [server] window=5.0s sessions=0 regions=4 parked=0 transfers_inflight=0 pending_arrivals=0 "
     "peer_unreceived=0 arrivals_despawned=0 items_destroyed=0 intent_replies_lost=0 | lod hit=1",
 ]
-CLIENT_OK = ["INFO [client-state-hash] checked=12 mismatched=0 (server VOXEL_STATE_HASH_INTERVAL)"]
+CLIENT_OK = [
+    "INFO [client-state-hash] checked=12 mismatched=0 (server VOXEL_STATE_HASH_INTERVAL)",
+    "INFO [perf] event=autopilot_done cruise_s=60 reversals=80 ready=true",
+    "INFO [session] session ended: left by the player",
+]
+STACK_OK = [
+    "dev-r3: login on http://127.0.0.1:8790 (x), coordinator on 127.0.0.1:6480 (y)",
+    "dev-r3: host 0 on UDP 6466 (target/go-nogo-r3/stack/host-0.log)",
+    "dev-r3: host 1 on UDP 6476 (target/go-nogo-r3/stack/host-1.log)",
+    "dev-r3: world dev registered with host 0's login link (127.0.0.1:6490)",
+]
 
 
 class GoNoGo(unittest.TestCase):
     """Decision 13: host p95 <= 1.25 x thread p95 + 0.05, per judged metric."""
 
-    def run_verdict(self, thread, host, clients=None, servers=None):
+    def run_verdict(self, thread, host, clients=None, servers=None, aux=None, stack=None, stack_alive=True):
         clients = clients or {"thread run": CLIENT_OK, "host run": CLIENT_OK}
         servers = servers or {"host-0.log": SERVER_OK, "host-1.log": SERVER_OK}
+        aux = aux or {"coordinator.log": ["INFO [server] role: coordinator"], "login.log": ["INFO listening"]}
+        stack = STACK_OK if stack is None else stack
         return crossing_summary.verdict(
             thread,
             host,
             crossing_summary.conservation_problems(clients, servers),
-            crossing_summary.invalid_reasons(clients, servers),
+            crossing_summary.invalid_reasons(clients, servers, aux, stack, stack_alive),
         )
+
+    def good(self):
+        return [crossing(0, 1.0, 2) for _ in range(30)], [crossing(1, 1.0, 2) for _ in range(30)]
 
     def test_go_when_host_flips_match_thread_flips(self):
         thread = [crossing(0, 1.0, 2) for _ in range(30)]
@@ -98,11 +114,37 @@ class GoNoGo(unittest.TestCase):
         self.assertEqual(self.run_verdict(*same, servers={"host-0.log": unreceived})[0], "NO-GO")
         destroyed = [SERVER_OK[0], SERVER_OK[1].replace("items_destroyed=0", "items_destroyed=1"), SERVER_OK[2]]
         self.assertEqual(self.run_verdict(*same, servers={"host-0.log": destroyed})[0], "NO-GO")
-        mismatch = ["[client-state-hash] checked=12 mismatched=1 (server VOXEL_STATE_HASH_INTERVAL)"]
+        mismatch = [CLIENT_OK[0].replace("mismatched=0", "mismatched=1")] + CLIENT_OK[1:]
         word, _, _ = self.run_verdict(*same, clients={"thread run": CLIENT_OK, "host run": mismatch})
         self.assertEqual(word, "NO-GO")
-        # peer_unreceived above 0 mid-run is fine; only the last line counts.
+        # peer_unreceived above 0 mid-run is fine; only the last two lines count.
         self.assertEqual(self.run_verdict(*same)[0], "GO")
+
+    def test_peer_unreceived_fails_only_on_the_last_two_lines(self):
+        line = SERVER_OK[2]
+        tail = lambda a, b: [SERVER_OK[0], line.replace("peer_unreceived=0", f"peer_unreceived={a}"),  # noqa: E731
+                             line.replace("peer_unreceived=0", f"peer_unreceived={b}")]
+        # Frames in flight at the last sample (a cut's mark) only: not a loss.
+        self.assertEqual(self.run_verdict(*self.good(), servers={"host-0.log": tail(0, 4)})[0], "GO")
+        self.assertEqual(self.run_verdict(*self.good(), servers={"host-0.log": tail(3, 0)})[0], "GO")
+        word, reasons, _ = self.run_verdict(*self.good(), servers={"host-0.log": tail(3, 4)})
+        self.assertEqual(word, "NO-GO")
+        self.assertIn("peer_unreceived", reasons[0])
+
+    def test_unknown_sides_are_never_grouped(self):
+        thread, host = self.good()
+        # host_flip=1 with one side unknown (-1): counted apart, not a host flip.
+        unknown = [crossing(1, 99.0, 99, from_host=-1, to_host=1) for _ in range(30)]
+        word, reasons, _ = self.run_verdict(thread, host + unknown)
+        self.assertEqual(word, "GO", reasons)
+        # A host run whose only "host flips" have an unknown side has no host group.
+        word, reasons, _ = self.run_verdict(thread, unknown)
+        self.assertEqual(word, "INVALID")
+        self.assertIn("host seam", reasons[0])
+        # A thread run's crossing between two known, different hosts is not a thread flip.
+        self.assertEqual(self.run_verdict([crossing(0, 1.0, 2, from_host=0, to_host=1)] * 30, host)[0], "INVALID")
+        groups = crossing_summary.seam_groups(thread + unknown, host + unknown)
+        self.assertEqual((len(groups["thread"]), len(groups["host"]), groups["unknown"]), (30, 30, 60))
 
     def test_invalid(self):
         good = [crossing(0, 1.0, 2) for _ in range(30)], [crossing(1, 1.0, 2) for _ in range(30)]
@@ -119,6 +161,50 @@ class GoNoGo(unittest.TestCase):
         # A client panicked.
         panicked = CLIENT_OK + ["thread 'main' panicked at src/x.rs:1:1"]
         self.assertEqual(self.run_verdict(*good, clients={"thread run": panicked, "host run": CLIENT_OK})[0], "INVALID")
+
+    def test_invalid_when_a_host_panicked(self):
+        panicked = SERVER_OK[:2] + ["thread 'region (3,4)' panicked at crates/game/src/x.rs:1:1:"] + SERVER_OK[2:]
+        word, reasons, _ = self.run_verdict(*self.good(), servers={"host-0.log": SERVER_OK, "host-1.log": panicked})
+        self.assertEqual(word, "INVALID")
+        self.assertIn("host-1.log", reasons[0])
+        # The coordinator or the login service too.
+        aux = {"coordinator.log": ["thread 'main' panicked at crates/server/src/lib.rs:9:9:"], "login.log": []}
+        self.assertEqual(self.run_verdict(*self.good(), aux=aux)[0], "INVALID")
+
+    def test_invalid_when_the_stack_ended_early(self):
+        # Host 1 fenced (exit 3) mid-run: the supervisor takes the stack down.
+        ended = STACK_OK + ["dev-r3: host 1 exited 3; see target/go-nogo-r3/stack/host-1.log",
+                            "dev-r3: host 1 (target/go-nogo-r3/stack/host-1.log) ended (3): stopping the stack",
+                            "dev-r3: stopped (failed)"]
+        word, reasons, _ = self.run_verdict(*self.good(), stack=ended, stack_alive=False)
+        self.assertEqual(word, "INVALID")
+        self.assertTrue(any("exited 3" in r for r in reasons), reasons)
+        # The supervisor gone at stop time is enough on its own.
+        self.assertEqual(self.run_verdict(*self.good(), stack_alive=False)[0], "INVALID")
+        # A restart that gave up.
+        gave_up = STACK_OK + ["dev-r3: host 0 exited 5 after 3 restarts within 60s: giving up; see x"]
+        self.assertEqual(self.run_verdict(*self.good(), stack=gave_up)[0], "INVALID")
+
+    def test_invalid_when_one_host_log_has_no_window_line(self):
+        word, reasons, _ = self.run_verdict(*self.good(), servers={"host-0.log": SERVER_OK,
+                                                                   "host-1.log": SERVER_OK[:1]})
+        self.assertEqual(word, "INVALID")
+        self.assertIn("host-1.log", reasons[0])
+
+    def test_invalid_when_a_client_lost_its_session_early(self):
+        lost = [CLIENT_OK[0], "ERROR Server connection closed: ConnectionLost",
+                "INFO [session] session ended: connection lost", CLIENT_OK[1]]
+        word, reasons, _ = self.run_verdict(*self.good(), clients={"thread run": CLIENT_OK, "host run": lost})
+        self.assertEqual(word, "INVALID")
+        self.assertIn("host run", reasons[0])
+        # The shuttle never ran its time (no autopilot_done: killed by the recipe's timeout).
+        short = CLIENT_OK[:1]
+        self.assertEqual(self.run_verdict(*self.good(), clients={"thread run": short, "host run": CLIENT_OK})[0],
+                         "INVALID")
+        # A refusal by a host.
+        refused = [CLIENT_OK[0], "ERROR [client] the server refused the connection: full", CLIENT_OK[1]]
+        self.assertEqual(self.run_verdict(*self.good(), clients={"thread run": refused, "host run": CLIENT_OK})[0],
+                         "INVALID")
 
     def test_parsed_lines_feed_the_verdict(self):
         thread = crossing_summary.crossing_lines([LINES[0]] * 25)
