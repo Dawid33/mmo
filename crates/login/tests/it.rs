@@ -6,6 +6,7 @@ mod common;
 mod ctl;
 mod kicks;
 mod mail;
+mod oidc;
 mod password;
 mod schema;
 mod store;

@@ -2,7 +2,7 @@
 
 use std::str::FromStr;
 
-use login_api::WorldStatus;
+use login_api::{EMAIL_MAX_CHARS, WorldStatus};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use sqlx::Row;
@@ -10,6 +10,20 @@ use sqlx::Row;
 use crate::LOGIN_POOL_MAX;
 
 pub type AccountId = i64;
+
+/// Trim and lowercase an email; it must be at most `EMAIL_MAX_CHARS` and have exactly
+/// one `@` with a non-empty part on each side.
+pub fn normalize_email(email: &str) -> Result<String, &'static str> {
+    let e = email.trim().to_lowercase();
+    if e.chars().count() > EMAIL_MAX_CHARS {
+        return Err("email too long");
+    }
+    let mut parts = e.split('@');
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some(l), Some(d), None) if !l.is_empty() && !d.is_empty() => Ok(e),
+        _ => Err("invalid email address"),
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum LoginError {

@@ -1,5 +1,15 @@
-use login::{DISPLAY_NAME_MAX_CHARS, LoginStore, OidcUpsert, RefreshOutcome, WorldRow};
+use login::{DISPLAY_NAME_MAX_CHARS, LoginStore, OidcUpsert, RefreshOutcome, WorldRow, normalize_email};
 use login_api::WorldStatus;
+
+#[test]
+fn email_normalized() {
+    assert_eq!(normalize_email(" A@B.c ").unwrap(), "a@b.c");
+    for bad in ["a@@b", "@b", "a@", "ab", "a@b@c", ""] {
+        assert!(normalize_email(bad).is_err(), "{bad:?}");
+    }
+    let long = format!("{}@x.y", "a".repeat(251));
+    assert!(normalize_email(&long).is_err());
+}
 
 async fn store() -> LoginStore {
     LoginStore::open("sqlite::memory:").await.unwrap()

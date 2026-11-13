@@ -3,7 +3,7 @@
 use argon2::password_hash::rand_core::OsRng;
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use argon2::{Algorithm, Argon2, Params, Version};
-use login_api::{EMAIL_MAX_CHARS, PASSWORD_MAX_CHARS, PASSWORD_MIN_CHARS};
+use login_api::{PASSWORD_MAX_CHARS, PASSWORD_MIN_CHARS};
 
 /// Argon2 memory cost of [`Hasher::for_tests`], in KiB.
 pub const TEST_MEMORY_KIB: u32 = 8;
@@ -58,19 +58,5 @@ pub fn check_password(password: &str) -> Result<(), &'static str> {
         Err("password too long")
     } else {
         Ok(())
-    }
-}
-
-/// Trim and lowercase an email; it must be at most `EMAIL_MAX_CHARS` and have exactly
-/// one `@` with a non-empty part on each side.
-pub fn normalize_email(email: &str) -> Result<String, &'static str> {
-    let e = email.trim().to_lowercase();
-    if e.chars().count() > EMAIL_MAX_CHARS {
-        return Err("email too long");
-    }
-    let mut parts = e.split('@');
-    match (parts.next(), parts.next(), parts.next()) {
-        (Some(l), Some(d), None) if !l.is_empty() && !d.is_empty() => Ok(e),
-        _ => Err("invalid email address"),
     }
 }

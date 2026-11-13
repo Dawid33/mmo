@@ -37,7 +37,8 @@ use crate::mail::{
     Mail, Mailer, RESET_TOKEN_TTL_SECS, VERIFY_TOKEN_TTL_SECS, already_registered_mail, reset_mail,
     verify_mail,
 };
-use crate::password::{Hasher, check_password, normalize_email};
+use crate::password::{Hasher, check_password};
+use crate::store::normalize_email;
 use crate::store::{AccountRow, LoginError, LoginStore, RefreshOutcome};
 use crate::{EMAIL_TOKEN_RESET, EMAIL_TOKEN_VERIFY};
 

@@ -6,6 +6,7 @@ pub mod config;
 pub mod ctl;
 pub mod host_link;
 pub mod mail;
+pub mod oidc;
 pub mod pages;
 pub mod password;
 pub mod store;
@@ -15,10 +16,10 @@ use std::sync::Arc;
 
 pub use api::{AppState, router, system_clock};
 pub use config::{LoginConfig, MailerKind};
-pub use password::{Hasher, check_password, normalize_email};
+pub use password::{Hasher, check_password};
 pub use store::{
     AccountId, AccountRow, DISPLAY_NAME_MAX_CHARS, LoginError, LoginStore, OidcUpsert, OpenSession, PendingKick, RefreshOutcome,
-    WorldRow,
+    WorldRow, normalize_email,
 };
 
 /// Kind of an email token: verify the address.
