@@ -936,7 +936,10 @@ _dev-login-setup:
         $login keygen
     fi
     $login world add dev --name "Dev world" --quic 127.0.0.1:6466 --wt https://127.0.0.1:6467/
-    $login account issue-refresh {{dev_email}} >target/dev-login/refresh.tmp && chmod 600 target/dev-login/refresh.tmp && mv target/dev-login/refresh.tmp target/dev-login/refresh
+    mkdir -p target/dev-login
+    $login account issue-refresh {{dev_email}} >target/dev-login/refresh.tmp
+    chmod 600 target/dev-login/refresh.tmp
+    mv target/dev-login/refresh.tmp target/dev-login/refresh
 
 # A dev server that requires login, with the login service beside it: ensures a signing
 # key, the world `dev` and the dev account (`dev_email`, with a kept token), runs `login serve`
@@ -1308,7 +1311,15 @@ go-nogo-r3 delay="1" seconds="60": (_dev-token go_nogo_dir / "stack")
     login=./target/release/login
     if ! ls "$VOXEL_LOGIN_KEYS_DIR"/*.pem >/dev/null 2>&1; then $login keygen >/dev/null; fi
     $login world add dev --name "Dev world" --quic 127.0.0.1:6466 --wt https://127.0.0.1:6467/ >/dev/null
-    $login account issue-refresh {{dev_email}} >"$out/login/refresh.tmp" && chmod 600 "$out/login/refresh.tmp" && mv "$out/login/refresh.tmp" "$out/login/refresh"
+    # A fresh login token for a probe client (its own family each time: the client rotates the
+    # token in the file). Each step is its own statement; a failure ends the recipe with 3 (no verdict).
+    issue_token() {
+        mkdir -p "$out/login" \
+            && $login account issue-refresh {{dev_email}} >"$out/login/refresh.tmp" \
+            && chmod 600 "$out/login/refresh.tmp" \
+            && mv "$out/login/refresh.tmp" "$out/login/refresh" \
+            || { echo "go-nogo-r3: could not issue a login token" >&2; exit 3; }
+    }
     # Every host and the coordinator (the world row says 1; a host refuses a mismatch).
     export VOXEL_SUPER_REGION_REGIONS=1
     stack_pid=""
@@ -1359,6 +1370,7 @@ go-nogo-r3 delay="1" seconds="60": (_dev-token go_nogo_dir / "stack")
     run_client() {
         echo "go-nogo-r3: client, autopilot boundary=$1, {{seconds}} s ($out/client-$1.log)"
         VOXEL_AUTOPILOT=shuttle VOXEL_AUTOPILOT_BOUNDARY=$1 VOXEL_AUTOPILOT_SECONDS={{seconds}} \
+        issue_token
             VOXEL_HOSTS=2 VOXEL_SUPER_REGION_REGIONS=1 PERF_LOG=1 RUST_BACKTRACE=1 \
             VOXEL_LOGIN_URL=http://127.0.0.1:8790 VOXEL_LOGIN_REFRESH_FILE=$PWD/$out/login/refresh \
             timeout --foreground -k 10 $(( {{seconds}} + {{online_wait_secs}} )) \
