@@ -835,9 +835,10 @@ kc-down:
 site-theme-check:
     scripts/site_theme_check.sh
 
-# Serve the website on http://127.0.0.1:8182 against the dev Keycloak (started first).
+# Serve the website on http://127.0.0.1:8182 against the dev Keycloak (started first), with
+# production's headers and Content-Security-Policy (scripts/site_dev_server.py).
 site-dev: kc-up
-    python3 -m http.server 8182 --bind 127.0.0.1 --directory website/site
+    python3 scripts/site_dev_server.py website/site
 
 # Unit tests of the website's browser login module (plain node, no dependencies).
 site-test:
