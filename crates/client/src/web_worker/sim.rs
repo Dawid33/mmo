@@ -13,11 +13,16 @@
 //! cross: the worker drains them into messages ([`SimOut::Region`],
 //! [`SimOut::Ui`]) and the page makes fresh channels for them.
 //!
-//! The WebTransport connection stays on the page (`netcode_web::connect_frames`,
-//! see its module doc for why) and moves raw frames: each frame the server
-//! sends is posted to the worker as it arrives (decoded there), each frame the
-//! worker encodes ([`SimOut::Packets`]) is queued for the wire as soon as its
-//! batch lands.
+//! The WebTransport connections stay on the page (`netcode_web::connect_frames`,
+//! see its module doc for why) and move raw frames: each frame a server sends
+//! is posted to the worker as it arrives, tagged with its connection's key
+//! (`web_frame::encode_server_frame`; decoded there), each frame the worker
+//! encodes ([`SimOut::Packets`], keyed) is queued for its connection's wire as
+//! soon as its batch lands. One session per server host (R3): the login one,
+//! and one per [`SimOut::Open`] — the manager's `ConnOpener` here is
+//! [`WorkerOpener`], whose opens the page carries out; a connection the
+//! manager drops is closed by [`SimOut::Close`], and one that ends on the page
+//! is told to the manager by [`ToSim::Closed`].
 //!
 //! The worker ticks on its own timer ([`DRIVE_INTERVAL_MS`]), like the native
 //! tick-generator thread — not on the page's frames, so a slow frame no
@@ -28,14 +33,20 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use crossbeam::channel::{Receiver, Sender};
-use game::{ClientPacket, ClientUpdateEvent, GameDataUpdate, GameEventKind, RegionId, ServerPacket, UiUpdate};
+use crossbeam::channel::TryRecvError;
+use game::{
+    ClientPacket, ClientUpdateEvent, Credential, GameDataUpdate, GameEventKind, HostEndpoint, RegionId, ServerPacket,
+    UiUpdate,
+};
 use js_sys::Uint8Array;
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::Closure;
 use wasm_bindgen::{JsCast, JsValue};
 
 use super::{LogLine, MainThreadOnly};
+use crate::connections::{ConnEvent, ConnHandle, ConnOpener, LOGIN_CONN};
 use crate::instance::ClientRequest;
+use crate::web_frame::{decode_server_frame, server_frame_header, TAG_SERVER_FRAME, TAG_TO_SIM};
 use crate::session::SessionChannels;
 use crate::web_endpoint::WebServer;
 use crate::world_scale::WorldScale;
@@ -44,11 +55,6 @@ use crate::GameInstanceManager;
 /// How often the worker wakes to tick the sim and move traffic (ms). Browsers
 /// clamp nested timers to 4 ms anyway.
 pub const DRIVE_INTERVAL_MS: i32 = 4;
-
-/// First byte of a page → worker message: a bincode [`ToSim`] follows.
-const TAG_TO_SIM: u8 = 0;
-/// First byte of a page → worker message: a server packet's frame follows.
-const TAG_SERVER_FRAME: u8 = 1;
 
 /// [`WorldScale`] on the wire (its ring table is a `&'static` slice there).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -94,13 +100,16 @@ pub enum ToSim {
     },
     /// The session was left: close the worker.
     Stop,
+    /// Connection `conn` ended on the page (its connect gave up, the server went).
+    Closed { conn: u32, reason: String },
 }
 
 /// One item of a sim worker → page batch.
 #[derive(Debug, Serialize, Deserialize)]
 pub enum SimOut {
-    /// Packet frames for the server (`game::encode_packet`), in order.
-    Packets(Vec<Vec<u8>>),
+    /// Packet frames for the servers (`game::encode_packet`), each with its
+    /// connection's key; in order per connection.
+    Packets(Vec<(u32, Vec<u8>)>),
     /// A `ClientUpdateEvent` (its channel halves, if any, are `never()` here).
     Client(ClientUpdateEvent),
     /// Updates for one region's render stream, in order.
@@ -111,6 +120,13 @@ pub enum SimOut {
     Lost(String),
     /// Log lines emitted in the worker (re-emitted on the page).
     Log(Vec<LogLine>),
+    /// Open connection `conn` to the host at `endpoint`, presenting `credential` (an
+    /// observer ticket); before any of its [`SimOut::Packets`]. (`Credential`'s `Debug`
+    /// redacts its secret.)
+    Open { conn: u32, endpoint: HostEndpoint, credential: Credential },
+    /// The manager dropped connection `conn` (an idle observer connection, a closed one):
+    /// hang it up once its queued frames are written; after its last packets.
+    Close { conn: u32 },
 }
 
 /// Sim worker → page.
@@ -125,16 +141,34 @@ fn tagged(tag: u8, body: &[u8]) -> Uint8Array {
 
 // ---------------------------------------------------------------- worker side
 
+/// A connection the manager opened: its key, host, Hello credential and outgoing packets.
+type Opened = (u32, HostEndpoint, Credential, Receiver<ClientPacket>);
+
+/// The worker's [`ConnOpener`]: the transports live on the page, so an open is a
+/// [`SimOut::Open`] in the next batch ([`collect`]).
+struct WorkerOpener {
+    opened: Sender<Opened>,
+}
+
+impl ConnOpener for WorkerOpener {
+    fn open(&mut self, key: u32, endpoint: &HostEndpoint, credential: Credential) -> ConnHandle {
+        let (send, packets) = crossbeam::channel::unbounded();
+        let _ = self.opened.send((key, endpoint.clone(), credential, packets));
+        ConnHandle { send }
+    }
+}
+
 /// The worker's session.
 struct WorkerSession {
     manager: GameInstanceManager,
-    /// Decoded server packets, into the manager, keyed by the one (home,
-    /// login) connection's key.
-    server_send: Sender<(u32, crate::connections::ConnEvent)>,
-    server_recv: Receiver<(u32, crate::connections::ConnEvent)>,
-    server_key: u32,
-    /// The manager's outgoing packets, encoded into [`SimOut::Packets`].
-    packets: Receiver<ClientPacket>,
+    /// Decoded server packets and connection ends, into the manager, keyed by connection.
+    server_send: Sender<(u32, ConnEvent)>,
+    server_recv: Receiver<(u32, ConnEvent)>,
+    /// Connections the manager opened since the last batch ([`WorkerOpener`]).
+    opened: Receiver<Opened>,
+    /// Each live connection's outgoing packets, encoded into [`SimOut::Packets`]; a
+    /// disconnected one (the manager dropped it) is a [`SimOut::Close`].
+    conns: BTreeMap<u32, Receiver<ClientPacket>>,
     /// The app ends of the session channels (the page forwards into them).
     game_send: Sender<GameEventKind>,
     request_send: Sender<ClientRequest>,
@@ -166,14 +200,16 @@ pub fn worker_start() {
                 Ok(message) => handle(message),
                 Err(e) => log::error!("[sim-worker] bad message: {e}"),
             },
-            Some((&TAG_SERVER_FRAME, frame)) => match game::decode_packet::<ServerPacket>(frame) {
-                Ok(packet) => SESSION.with(|s| {
-                    if let Some(session) = s.borrow_mut().as_mut() {
-                        let key = session.server_key;
-                        let _ = session.server_send.send((key, crate::connections::ConnEvent::Packet(packet)));
-                    }
-                }),
-                Err(e) => log::warn!("failed deserializing packet {e:?}"),
+            Some((&TAG_SERVER_FRAME, _)) => match decode_server_frame(&bytes) {
+                Some((conn, frame)) => match game::decode_packet::<ServerPacket>(frame) {
+                    Ok(packet) => SESSION.with(|s| {
+                        if let Some(session) = s.borrow_mut().as_mut() {
+                            let _ = session.server_send.send((conn, ConnEvent::Packet(packet)));
+                        }
+                    }),
+                    Err(e) => log::warn!("failed deserializing packet {e:?}"),
+                },
+                None => log::warn!("[sim-worker] a server frame of {} bytes, short of its header", bytes.len()),
             },
             _ => log::error!("[sim-worker] untagged message"),
         }
@@ -203,7 +239,9 @@ fn handle(message: ToSim) {
                 GameInstanceManager::new(game_send.clone(), game_recv, client_send, addr, debug_flags.clone());
             manager.set_world_scale(scale.into_scale());
             manager.set_request_recv(request_recv);
-            let packets = manager.client_packet_recv();
+            let (opened_send, opened) = crossbeam::channel::unbounded();
+            manager.set_conn_opener(Box::new(WorkerOpener { opened: opened_send }));
+            let conns = BTreeMap::from([(LOGIN_CONN, manager.client_packet_recv())]);
             manager.start();
             log::info!("[sim-worker] session started");
             SESSION.with(|s| {
@@ -211,8 +249,8 @@ fn handle(message: ToSim) {
                     manager,
                     server_send,
                     server_recv,
-                    server_key: crate::connections::LOGIN_CONN,
-                    packets,
+                    opened,
+                    conns,
                     game_send,
                     request_send,
                     client_recv,
@@ -242,6 +280,11 @@ fn handle(message: ToSim) {
             SESSION.with(|s| s.borrow_mut().take());
             scope().close();
         }
+        ToSim::Closed { conn, reason } => SESSION.with(|s| {
+            if let Some(session) = s.borrow().as_ref() {
+                let _ = session.server_send.send((conn, ConnEvent::Closed(reason)));
+            }
+        }),
     }
 }
 
@@ -268,6 +311,12 @@ fn drive() {
         match session.manager.pump(&session.server_recv) {
             Ok(true) => {}
             Ok(false) => log::info!("sim received Quit"),
+            // The home connection ended (its connect gave up, the server went, a refusal).
+            Err(game::GameError::Disconnected(reason)) => {
+                session.ended = true;
+                log::info!("[sim-worker] the session ended: {reason}");
+                out.push(SimOut::Lost(reason));
+            }
             Err(e) => {
                 session.ended = true;
                 log::error!("[sim-worker] game sim crashed: {e:?}");
@@ -285,8 +334,9 @@ fn drive() {
     }
 }
 
-/// Drain the session's outgoing channels into `out`: packets first, then each
-/// stream in order, a region's earlier updates before its replacement.
+/// Drain the session's outgoing channels into `out`: connections opened first, then
+/// packets, then connections closed, then each stream in order, a region's earlier
+/// updates before its replacement.
 fn collect(session: &mut WorkerSession, out: &mut FromSim) {
     fn flush(id: RegionId, rx: &Receiver<GameDataUpdate>, out: &mut FromSim) {
         let updates: Vec<_> = rx.try_iter().collect();
@@ -294,10 +344,30 @@ fn collect(session: &mut WorkerSession, out: &mut FromSim) {
             out.push(SimOut::Region(id, updates));
         }
     }
-    let packets: Vec<Vec<u8>> =
-        session.packets.try_iter().map(|p| game::encode_packet(&p).expect("client packet encodes")).collect();
+    for (conn, endpoint, credential, packets) in session.opened.try_iter() {
+        session.conns.insert(conn, packets);
+        out.push(SimOut::Open { conn, endpoint, credential });
+    }
+    let mut packets = Vec::new();
+    let mut closed = Vec::new();
+    for (&conn, rx) in &session.conns {
+        loop {
+            match rx.try_recv() {
+                Ok(p) => packets.push((conn, game::encode_packet(&p).expect("client packet encodes"))),
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    closed.push(conn);
+                    break;
+                }
+            }
+        }
+    }
     if !packets.is_empty() {
         out.push(SimOut::Packets(packets));
+    }
+    for conn in closed {
+        session.conns.remove(&conn);
+        out.push(SimOut::Close { conn });
     }
     while let Ok(event) = session.client_recv.try_recv() {
         match event {
@@ -339,14 +409,14 @@ struct Inbox {
 }
 
 /// The page's handle on a session's sim worker. Dropping it ends the session:
-/// the connection hangs up (once the frames already queued are written) and
+/// every connection hangs up (once the frames already queued are written) and
 /// the worker closes.
 pub struct SimWorker {
     worker: MainThreadOnly<web_sys::Worker>,
     inbox: Arc<Mutex<Inbox>>,
+    /// The message handler owns the session's connections (each one's frame queue):
+    /// dropping it hangs them all up.
     _handlers: MainThreadOnly<(Closure<dyn FnMut(web_sys::MessageEvent)>, Closure<dyn FnMut(JsValue)>)>,
-    /// The connect gave up or the connection died (`netcode_web`).
-    lost: Receiver<String>,
     /// The sim ends of the session channels: what the app sends is forwarded.
     game_recv: Receiver<GameEventKind>,
     request_recv: Receiver<ClientRequest>,
@@ -361,7 +431,8 @@ pub struct SimWorker {
 
 impl SimWorker {
     /// Start a sim worker for a session on `channels` (the app's ends are
-    /// already installed) and connect to `server` from the page.
+    /// already installed) and connect to `server` from the page (the login
+    /// connection; the worker asks for the others with [`SimOut::Open`]).
     pub fn start(
         server: WebServer,
         channels: SessionChannels,
@@ -375,12 +446,16 @@ impl SimWorker {
         let start = bincode::serialize(&start).expect("start message encodes");
         super::post_bytes(&worker, &tagged(TAG_TO_SIM, &start))?;
 
-        // The worker's encoded packets go straight to the wire queue as their
-        // batch lands; the rest waits for the frame's `pump`.
-        let (frames_send, frames_recv) = crossbeam::channel::unbounded::<Vec<u8>>();
+        // The session's connections, by key: each one's frame queue. The worker's
+        // encoded packets go straight to their connection's queue as their batch
+        // lands, and its opens and closes are carried out then too; the rest waits
+        // for the frame's `pump`.
+        let mut conns: BTreeMap<u32, Sender<Vec<u8>>> = BTreeMap::new();
+        open_connection(&worker, &mut conns, LOGIN_CONN, server, credential);
         let inbox = Arc::new(Mutex::new(Inbox::default()));
         let on_message = {
             let inbox = inbox.clone();
+            let worker = worker.clone();
             Closure::<dyn FnMut(web_sys::MessageEvent)>::new(move |event: web_sys::MessageEvent| {
                 let Some(bytes) = super::message_bytes(&event) else { return };
                 let batch: FromSim = match bincode::deserialize(&bytes) {
@@ -393,9 +468,29 @@ impl SimWorker {
                 let mut inbox = inbox.lock().unwrap();
                 for item in batch {
                     match item {
-                        SimOut::Packets(frames) => frames.into_iter().for_each(|f| {
-                            let _ = frames_send.send(f);
-                        }),
+                        SimOut::Packets(frames) => {
+                            for (conn, frame) in frames {
+                                match conns.get(&conn) {
+                                    Some(queue) => {
+                                        let _ = queue.send(frame);
+                                    }
+                                    None => log::debug!("[session] a frame for connection {conn}, closed: dropped"),
+                                }
+                            }
+                        }
+                        SimOut::Open { conn, endpoint, credential } => {
+                            match crate::web_endpoint::web_server_for_host(&endpoint) {
+                                Ok(server) => {
+                                    log::info!("[session] connection {conn}: to host {} ({server:?})", endpoint.ordinal);
+                                    open_connection(&worker, &mut conns, conn, server, Some(credential));
+                                }
+                                Err(reason) => post_to_sim(&worker, &ToSim::Closed { conn, reason }),
+                            }
+                        }
+                        // Dropping its queue hangs it up once what is queued is written.
+                        SimOut::Close { conn } => {
+                            conns.remove(&conn);
+                        }
                         other => inbox.items.push(other),
                     }
                 }
@@ -410,19 +505,6 @@ impl SimWorker {
         worker.set_onmessage(Some(on_message.as_ref().unchecked_ref()));
         worker.set_onerror(Some(on_error.as_ref().unchecked_ref()));
 
-        // Server frames go to the worker undecoded, as they arrive.
-        let (lost_send, lost) = crossbeam::channel::unbounded();
-        let frame_target = worker.clone();
-        crate::netcode_web::connect_frames(
-            server,
-            move |frame| {
-                let _ = super::post_bytes(&frame_target, &tagged(TAG_SERVER_FRAME, &frame));
-            },
-            frames_recv,
-            lost_send,
-            credential,
-        );
-
         let SessionChannels { game_recv, client_send, request_recv, .. } = channels;
         // The manager announces its UI stream first thing (`GameInstanceManager::new`);
         // here the stream is the page's own channel, fed from `SimOut::Ui`.
@@ -433,7 +515,6 @@ impl SimWorker {
             worker: MainThreadOnly(worker),
             inbox,
             _handlers: MainThreadOnly((on_message, on_error)),
-            lost,
             game_recv,
             request_recv,
             client_send,
@@ -446,8 +527,7 @@ impl SimWorker {
     }
 
     fn post(&self, message: &ToSim) {
-        let body = bincode::serialize(message).expect("sim message encodes");
-        let _ = super::post_bytes(&self.worker.0, &tagged(TAG_TO_SIM, &body));
+        post_to_sim(&self.worker.0, message);
     }
 
     fn send_inputs(&mut self) {
@@ -473,7 +553,7 @@ impl SimWorker {
             let mut inbox = self.inbox.lock().unwrap();
             (std::mem::take(&mut inbox.items), inbox.error.take())
         };
-        let mut lost = self.lost.try_recv().ok();
+        let mut lost = None;
         for item in items {
             match item {
                 SimOut::Client(ClientUpdateEvent::NewRegion(id, data, _)) => {
@@ -501,7 +581,8 @@ impl SimWorker {
                 }
                 SimOut::Lost(reason) => lost = lost.or(Some(reason)),
                 SimOut::Log(lines) => lines.iter().for_each(LogLine::emit),
-                SimOut::Packets(_) => {} // queued for the wire on arrival
+                // Carried out on arrival.
+                SimOut::Packets(_) | SimOut::Open { .. } | SimOut::Close { .. } => {}
             }
         }
         if let Some(error) = error {
@@ -514,12 +595,46 @@ impl SimWorker {
     }
 }
 
+fn post_to_sim(worker: &web_sys::Worker, message: &ToSim) {
+    let body = bincode::serialize(message).expect("sim message encodes");
+    let _ = super::post_bytes(worker, &tagged(TAG_TO_SIM, &body));
+}
+
+/// Open connection `conn` to `server` from the page: its frames go to the worker
+/// undecoded, tagged with `conn` (`web_frame`), as they arrive; its end is a
+/// [`ToSim::Closed`]; what the worker sends on it is queued in `conns`.
+fn open_connection(
+    worker: &web_sys::Worker,
+    conns: &mut BTreeMap<u32, Sender<Vec<u8>>>,
+    conn: u32,
+    server: WebServer,
+    credential: Option<Credential>,
+) {
+    let (queue, outgoing) = crossbeam::channel::unbounded::<Vec<u8>>();
+    conns.insert(conn, queue);
+    let (frame_target, closed_target) = (worker.clone(), worker.clone());
+    crate::netcode_web::connect_frames(
+        server,
+        conn,
+        move |frame| {
+            let header = server_frame_header(conn);
+            let message = Uint8Array::new_with_length((header.len() + frame.len()) as u32);
+            message.subarray(0, header.len() as u32).copy_from(&header);
+            message.subarray(header.len() as u32, message.length()).copy_from(&frame);
+            let _ = super::post_bytes(&frame_target, &message);
+        },
+        move |reason| post_to_sim(&closed_target, &ToSim::Closed { conn, reason }),
+        outgoing,
+        credential,
+    );
+}
+
 impl Drop for SimWorker {
     fn drop(&mut self) {
         // Before the closures drop: they back the JS functions the worker
-        // object still points at. The frame queue's sender goes with the
-        // message handler: once the frames already queued are written, the
-        // write loop hangs up and the server sees the session close at once.
+        // object still points at. Every connection's frame queue goes with the
+        // message handler: once the frames already queued are written, each
+        // write loop hangs up and every server sees the session close at once.
         self.worker.0.set_onmessage(None);
         self.worker.0.set_onerror(None);
         if !self.dead {

@@ -105,15 +105,43 @@ pub fn web_server_for(address: &str) -> Result<WebServer, String> {
 /// ([`WebServer::PinnedLocal`]); any other URL is trusted. `Err` names what is
 /// wrong.
 pub fn web_server_for_ticket(url: &str, cert_hash: Option<&str>) -> Result<WebServer, String> {
-    let url = url.trim();
-    if !url.starts_with("https://") {
-        return Err(format!("not a WebTransport URL: {url:?}"));
-    }
-    match cert_hash.map(str::trim).filter(|h| !h.is_empty()) {
+    let url = webtransport_url(url)?;
+    match pinned(url, cert_hash)? {
+        Some(server) => Ok(server),
         None if is_local_host(split_address(url)?.0) => Ok(WebServer::PinnedLocal),
         None => Ok(WebServer::Trusted { url: url.into() }),
+    }
+}
+
+/// Another host of the world, as the home names it (`ServerPacket::Host` /
+/// `RegionElsewhere`: R3, one WebTransport session per host): its URL pinned to ITS
+/// `cert_hash` (the self-signed certificate it minted at start); without a hash (a
+/// certificate from files) normal certificate validation — never the dev hash file,
+/// which names only host 0. `Err` names what is wrong.
+pub fn web_server_for_host(endpoint: &game::HostEndpoint) -> Result<WebServer, String> {
+    let url = endpoint
+        .webtransport
+        .as_deref()
+        .ok_or_else(|| format!("host {} offers no WebTransport address", endpoint.ordinal))?;
+    let url = webtransport_url(url)?;
+    Ok(pinned(url, endpoint.cert_hash.as_deref())?.unwrap_or_else(|| WebServer::Trusted { url: url.into() }))
+}
+
+/// `url` trimmed, if it is an https URL.
+fn webtransport_url(url: &str) -> Result<&str, String> {
+    let url = url.trim();
+    match url.starts_with("https://") {
+        true => Ok(url),
+        false => Err(format!("not a WebTransport URL: {url:?}")),
+    }
+}
+
+/// `url` pinned to `cert_hash` (a hex SHA-256); `None` when there is no hash.
+fn pinned(url: &str, cert_hash: Option<&str>) -> Result<Option<WebServer>, String> {
+    match cert_hash.map(str::trim).filter(|h| !h.is_empty()) {
+        None => Ok(None),
         Some(hash) if hash.len() == 64 && hash.chars().all(|c| c.is_ascii_hexdigit()) => {
-            Ok(WebServer::Pinned { url: url.into(), cert_hash: hash.to_ascii_lowercase() })
+            Ok(Some(WebServer::Pinned { url: url.into(), cert_hash: hash.to_ascii_lowercase() }))
         }
         Some(hash) => Err(format!("bad certificate hash {hash:?}")),
     }
@@ -184,6 +212,32 @@ mod tests {
             Ok(WebServer::Pinned { url: remote.into(), cert_hash: hash.clone() }),
             "remote with hash"
         );
+    }
+
+    /// The browser's other connections (R3): each host pinned by its own hash, and a
+    /// host without one validated normally — on this machine too, where the dev hash
+    /// file would name host 0, not it.
+    #[test]
+    fn another_host_is_pinned_by_its_own_hash_never_the_dev_file() {
+        let endpoint = |wt: Option<&str>, hash: Option<&str>| game::HostEndpoint {
+            ordinal: 1,
+            quic: None,
+            webtransport: wt.map(Into::into),
+            cert_hash: hash.map(Into::into),
+        };
+        let hash = "AB".repeat(32);
+        for url in ["https://127.0.0.1:6477/", "https://world.example.com:6477/"] {
+            assert_eq!(
+                web_server_for_host(&endpoint(Some(url), Some(&hash))),
+                Ok(WebServer::Pinned { url: url.into(), cert_hash: "ab".repeat(32) }),
+                "{url} with a hash"
+            );
+            assert_eq!(web_server_for_host(&endpoint(Some(url), None)), Ok(WebServer::Trusted { url: url.into() }), "{url}");
+            assert_eq!(web_server_for_host(&endpoint(Some(url), Some(" "))), Ok(WebServer::Trusted { url: url.into() }));
+            assert!(web_server_for_host(&endpoint(Some(url), Some("abc"))).is_err(), "not a SHA-256");
+        }
+        assert!(web_server_for_host(&endpoint(None, Some(&hash))).is_err(), "no WebTransport address");
+        assert!(web_server_for_host(&endpoint(Some("http://127.0.0.1:6477/"), None)).is_err());
     }
 
     #[test]

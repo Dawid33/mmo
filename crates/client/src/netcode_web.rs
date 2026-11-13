@@ -14,12 +14,21 @@
 //! transport stays where the main-thread build has always had it. It only
 //! uses what both globals have (`web_worker::fetch` / `sleep_ms`), so moving
 //! it into the worker is a call-site change once that is understood.
-use crate::connections::ConnEvent;
+//!
+//! One WebTransport session per server host (R3), as the native client holds one
+//! QUIC connection per host: the login connection ([`connect`] /
+//! [`connect_frames`] keyed `connections::LOGIN_CONN`), and one per other host
+//! the home names — opened by the session's `ConnOpener` ([`PageOpener`] for the
+//! inline sim; with the sim worker the page opens on the worker's
+//! `SimOut::Open`). Each is pinned by its host's own `HostEndpoint::cert_hash`
+//! (`web_endpoint::web_server_for_host`).
+use crate::connections::{ConnEvent, ConnHandle, ConnOpener};
 use crossbeam::channel::{Receiver, Sender, TryRecvError};
 use game::{ClientPacket, ServerPacket};
 use js_sys::{Reflect, Uint8Array};
 use log::{error, info, warn};
 use std::cell::Cell;
+use std::collections::VecDeque;
 use std::rc::Rc;
 use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::{spawn_local, JsFuture};
@@ -29,54 +38,94 @@ use web_sys::{
 
 use crate::web_endpoint::WebServer;
 
-/// Report a failed or lost connection to the session flow (`session::web_flow`
-/// ends the session with it as the reason). A session already left has
-/// dropped the receiver: nothing to tell.
-fn connection_lost(lost: &Sender<String>, reason: &str) {
-    error!("connection lost: {reason}");
-    let _ = lost.send(reason.to_string());
+/// Told once why a connection ended — its connect gave up or the session died — never
+/// for a close the game asked for (its sender dropped).
+type OnClosed = Rc<dyn Fn(String)>;
+
+fn connection_lost(key: u32, on_closed: &OnClosed, reason: &str) {
+    warn!("[client] connection {key} lost: {reason}");
+    on_closed(reason.to_string());
 }
 
-/// Kick off the connection to `server`; returns immediately. All I/O runs on
-/// the browser event loop via spawn_local, feeding the same channels
-/// `LocalServer` feeds the native harnesses. `lost` gets one line when the
-/// connect gives up or the connection dies; dropping `client_recv`'s sender
-/// (the session's game manager) closes the transport.
+/// Kick off connection `key` to `server`; returns immediately. All I/O runs on
+/// the browser event loop via spawn_local. Its packets arrive on `events` keyed
+/// `key`, and a `ConnEvent::Closed` when the connect gives up or the connection
+/// dies; dropping `outgoing`'s sender (the session's `ConnHandle`) closes it.
 pub fn connect(
     server: WebServer,
-    server_send: Sender<(u32, ConnEvent)>,
-    client_recv: Receiver<ClientPacket>,
-    lost: Sender<String>,
+    key: u32,
+    events: Sender<(u32, ConnEvent)>,
+    outgoing: Receiver<ClientPacket>,
     credential: Option<game::Credential>,
 ) {
-    // The one (home) connection: the login one. The browser's connections to
-    // other hosts are R3 Task 23's.
-    let incoming = Incoming::Packets(server_send, crate::connections::LOGIN_CONN);
-    let outgoing = Outgoing::Packets(client_recv);
-    spawn_local(async move {
-        if let Err(e) = run(server, incoming, outgoing, lost.clone(), credential).await {
-            connection_lost(&lost, &js_error_text(&e));
-        }
-    });
+    let on_closed: OnClosed = {
+        let events = events.clone();
+        Rc::new(move |reason| {
+            let _ = events.send((key, ConnEvent::Closed(reason)));
+        })
+    };
+    start(key, server, Incoming::Packets(events, key), Outgoing::new(Source::Packets(outgoing)), on_closed, credential);
 }
 
 /// [`connect`] at the frame level: each server packet's frame (as
-/// `game::encode_packet` made it) goes to `on_frame` undecoded, and the
-/// frames from `outgoing` are sent as they are. Dropping `outgoing`'s sender
-/// closes the transport.
+/// `game::encode_packet` made it) goes to `on_frame` undecoded, the frames from
+/// `outgoing` are sent as they are, and `on_closed` hears why the connection
+/// ended. Dropping `outgoing`'s sender closes the transport.
 pub fn connect_frames(
     server: WebServer,
+    key: u32,
     on_frame: impl FnMut(Vec<u8>) + 'static,
+    on_closed: impl Fn(String) + 'static,
     outgoing: Receiver<Vec<u8>>,
-    lost: Sender<String>,
     credential: Option<game::Credential>,
 ) {
     let incoming = Incoming::Frames(Box::new(on_frame));
+    start(key, server, incoming, Outgoing::new(Source::Frames(outgoing)), Rc::new(on_closed), credential);
+}
+
+fn start(
+    key: u32,
+    server: WebServer,
+    incoming: Incoming,
+    outgoing: Outgoing,
+    on_closed: OnClosed,
+    credential: Option<game::Credential>,
+) {
     spawn_local(async move {
-        if let Err(e) = run(server, incoming, Outgoing::Frames(outgoing), lost.clone(), credential).await {
-            connection_lost(&lost, &js_error_text(&e));
+        if let Err(e) = run(key, server, incoming, outgoing, on_closed.clone(), credential).await {
+            connection_lost(key, &on_closed, &js_error_text(&e));
         }
     });
+}
+
+/// The inline sim's [`ConnOpener`]: a WebTransport session from the page to each other
+/// host the home names, its events on the session's one channel. A host whose endpoint
+/// the browser cannot dial (no WebTransport URL, a bad hash) is closed at once, so its
+/// regions are retried through the home like any lost connection's.
+pub struct PageOpener {
+    events: Sender<(u32, ConnEvent)>,
+}
+
+impl PageOpener {
+    pub fn new(events: Sender<(u32, ConnEvent)>) -> Self {
+        Self { events }
+    }
+}
+
+impl ConnOpener for PageOpener {
+    fn open(&mut self, key: u32, endpoint: &game::HostEndpoint, credential: game::Credential) -> ConnHandle {
+        let (send, outgoing) = crossbeam::channel::unbounded();
+        match crate::web_endpoint::web_server_for_host(endpoint) {
+            Ok(server) => {
+                info!("[client] connection {key}: to host {} ({server:?})", endpoint.ordinal);
+                connect(server, key, self.events.clone(), outgoing, Some(credential));
+            }
+            Err(why) => {
+                let _ = self.events.send((key, ConnEvent::Closed(why)));
+            }
+        }
+        ConnHandle { send }
+    }
 }
 
 /// Where received packets go.
@@ -101,22 +150,53 @@ impl Incoming {
 }
 
 /// Where packets to send come from.
-enum Outgoing {
+enum Source {
     Packets(Receiver<ClientPacket>),
     Frames(Receiver<Vec<u8>>),
 }
 
+/// The frames to send, and those taken off the channel before the connection was up.
+struct Outgoing {
+    source: Source,
+    held: VecDeque<Vec<u8>>,
+}
+
 impl Outgoing {
-    /// The next frame to send; `Err` once the session was left.
-    fn next(&self) -> Result<Option<Vec<u8>>, ()> {
+    fn new(source: Source) -> Self {
+        Self { source, held: VecDeque::new() }
+    }
+
+    /// The next frame from the channel; `Err` once the session dropped its sender.
+    fn take(&self) -> Result<Option<Vec<u8>>, ()> {
         let take = |r: Result<Vec<u8>, TryRecvError>| match r {
             Ok(frame) => Ok(Some(frame)),
             Err(TryRecvError::Empty) => Ok(None),
             Err(TryRecvError::Disconnected) => Err(()),
         };
-        match self {
-            Outgoing::Packets(recv) => take(recv.try_recv().map(|p| game::encode_packet(&p).unwrap())),
-            Outgoing::Frames(recv) => take(recv.try_recv()),
+        match &self.source {
+            Source::Packets(recv) => take(recv.try_recv().map(|p| game::encode_packet(&p).unwrap())),
+            Source::Frames(recv) => take(recv.try_recv()),
+        }
+    }
+
+    /// The next frame to send; `Err` once the session was left (or closed this
+    /// connection) and nothing is held.
+    fn next(&mut self) -> Result<Option<Vec<u8>>, ()> {
+        match self.held.pop_front() {
+            Some(frame) => Ok(Some(frame)),
+            None => self.take(),
+        }
+    }
+
+    /// Whether the session dropped this connection while it was still connecting
+    /// (what it queued meanwhile is held for the wire).
+    fn left(&mut self) -> bool {
+        loop {
+            match self.take() {
+                Ok(Some(frame)) => self.held.push_back(frame),
+                Ok(None) => return false,
+                Err(()) => return true,
+            }
         }
     }
 }
@@ -145,10 +225,11 @@ const CONNECT_RETRY_LOG_EVERY: u32 = 10;
 const WRITE_POLL_MS: i32 = 4;
 
 async fn run(
+    key: u32,
     server: WebServer,
     mut incoming_to: Incoming,
-    outgoing: Outgoing,
-    lost: Sender<String>,
+    mut outgoing: Outgoing,
+    lost: OnClosed,
     credential: Option<game::Credential>,
 ) -> Result<(), JsValue> {
     let started = js_sys::Date::now();
@@ -158,8 +239,12 @@ async fn run(
             Ok(transport) => break transport,
             Err(failure) => failure,
         };
+        if outgoing.left() {
+            info!("[client] connection {key}: closed before it connected");
+            return Ok(());
+        }
         if js_sys::Date::now() - started >= CONNECT_DEADLINE_MS {
-            error!("[client] giving up after {attempt} connect attempts");
+            error!("[client] connection {key}: giving up after {attempt} connect attempts");
             return Err(JsValue::from_str(&format!(
                 "Could not reach the server after {attempt} attempts ({}).",
                 js_error_text(&failure)
@@ -167,19 +252,22 @@ async fn run(
         }
         if attempt == 1 || attempt % CONNECT_RETRY_LOG_EVERY == 0 {
             warn!(
-                "[client] webtransport connect attempt {attempt} failed ({failure:?}); \
+                "[client] connection {key}: webtransport connect attempt {attempt} failed ({failure:?}); \
                  is the server running? retrying"
             );
         }
         attempt += 1;
         sleep_ms(CONNECT_RETRY_INTERVAL_MS).await;
     };
-    info!("[client] webtransport connected");
-    game::perf_event!(
-        "connected",
-        "attempts={attempt} connect_ms={:.0}",
-        js_sys::Date::now() - started
-    );
+    info!("[client] connection {key}: webtransport connected");
+    // The join timeline's one `connected` (the login connection's).
+    if key == crate::connections::LOGIN_CONN {
+        game::perf_event!(
+            "connected",
+            "attempts={attempt} connect_ms={:.0}",
+            js_sys::Date::now() - started
+        );
+    }
 
     // Shared death flag: the read loop is the one that observes the server
     // going away; the write loop checks it so it stops polling instead of
@@ -205,7 +293,7 @@ async fn run(
                     if read_dead.replace(true) {
                         return; // closed by the write loop: the session was left
                     }
-                    return connection_lost(&read_lost, &format!("Lost the server: {}", js_error_text(&e)));
+                    return connection_lost(key, &read_lost, &format!("Lost the server: {}", js_error_text(&e)));
                 }
             };
             if Reflect::get(&next, &"done".into())
@@ -215,7 +303,7 @@ async fn run(
                 if read_dead.replace(true) {
                     return;
                 }
-                return connection_lost(&read_lost, "The server closed the connection.");
+                return connection_lost(key, &read_lost, "The server closed the connection.");
             }
             let stream: web_sys::ReadableStream =
                 match Reflect::get(&next, &"value".into()).and_then(|v| v.dyn_into()) {
@@ -262,7 +350,7 @@ async fn run(
                         // this client go at once.
                         dead.set(true);
                         transport.close();
-                        info!("[client] session left: webtransport closed");
+                        info!("[client] connection {key}: closed by the session");
                         return;
                     }
                 };
@@ -302,7 +390,7 @@ async fn run(
                         if dead.replace(true) {
                             return;
                         }
-                        return connection_lost(&lost, &format!("Lost the server: {}", js_error_text(&e)));
+                        return connection_lost(key, &lost, &format!("Lost the server: {}", js_error_text(&e)));
                     }
                 }
             }

@@ -4,7 +4,8 @@
 //! clients. Wire format is identical: one uni-stream per bincode packet.
 //!
 //! Two certificate sources ([`CertSource`]): in dev a self-signed cert the page
-//! pins by hash (`assets/webtransport-cert-hash.json`); when deployed
+//! pins by hash (`assets/webtransport-cert-hash.json`, written by host 0 only —
+//! [`cert_hash_file_names`]); when deployed
 //! (`just deploy`) a real certificate for the page's hostname — the Let's
 //! Encrypt one the reverse proxy obtains — read from `VOXEL_WT_CERT` /
 //! `VOXEL_WT_KEY` and reloaded whenever the files change (renewals).
@@ -161,7 +162,7 @@ pub async fn serve(
     auth: Arc<crate::auth_edge::Authenticator>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let endpoint = match &certs {
-        CertSource::SelfSigned => return serve_minted(bind, SelfSignedCert::mint()?, send, sinks, next_client_id, players, auth).await,
+        CertSource::SelfSigned => return serve_minted(bind, SelfSignedCert::mint()?, 0, send, sinks, next_client_id, players, auth).await,
         CertSource::Files { cert, key } => {
             let (identity, version) = load_identity_waiting(cert, key).await;
             info!("webtransport certificate loaded from {}", cert.display());
@@ -174,10 +175,13 @@ pub async fn serve(
 }
 
 /// [`serve`] with the self-signed identity `cert` minted already (its hash known to this
-/// host's endpoint).
+/// host's endpoint), on host `ordinal` (which dev hash files it writes:
+/// [`cert_hash_file_names`]).
+#[allow(clippy::too_many_arguments)]
 pub async fn serve_minted(
     bind: SocketAddr,
     cert: SelfSignedCert,
+    ordinal: u32,
     send: Sender<ServerEvent>,
     sinks: Arc<DashMap<ClientId, ClientSink>>,
     next_client_id: Arc<AtomicU64>,
@@ -185,7 +189,7 @@ pub async fn serve_minted(
     auth: Arc<crate::auth_edge::Authenticator>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Dev nicety, not load-bearing: never fail the ingress over it.
-    if let Err(e) = write_cert_hash_file(cert.sha256_hex(), bind.port()) {
+    if let Err(e) = write_cert_hash_file(cert.sha256_hex(), bind.port(), ordinal) {
         warn!("could not write cert-hash file (browser clients need it): {e:?}");
     }
     let endpoint = Arc::new(Endpoint::server(server_config(bind, cert.identity))?);
@@ -317,18 +321,31 @@ async fn refuse(session: &wtransport::Connection, why: &str) {
     session.close(wtransport::VarInt::from_u32(1), b"refused");
 }
 
+/// The dev hash files (under `assets/`) host `ordinal` writes. The page reads
+/// `webtransport-cert-hash.json` to pin the server a typed local address names (its first
+/// connection; the others are pinned by each host's `HostEndpoint::cert_hash`): only host 0
+/// writes it — the one host of a single-host run — so several dev hosts (`just dev-r3`) no
+/// longer overwrite each other's. Every host also writes its own
+/// `webtransport-cert-hash-<ordinal>.json`.
+pub fn cert_hash_file_names(ordinal: u32) -> Vec<String> {
+    let own = format!("webtransport-cert-hash-{ordinal}.json");
+    match ordinal {
+        0 => vec!["webtransport-cert-hash.json".to_string(), own],
+        _ => vec![own],
+    }
+}
+
 /// Dev-mode CA substitute: the page fetches this (wasm-server-runner serves
 /// assets/ over HTTP) and passes the hash to serverCertificateHashes.
-fn write_cert_hash_file(hex: &str, port: u16) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+fn write_cert_hash_file(hex: &str, port: u16, ordinal: u32) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let json = format!(r#"{{"sha256_hex":"{hex}","port":{port}}}"#);
     // Resolve the repo-root assets dir from the crate location, not the CWD:
     // the binary is run from the repo root but tests run from crates/server.
     // (env! bakes a build-machine path; acceptable for this localhost-dev file.)
-    let path = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../assets/webtransport-cert-hash.json"
-    );
-    std::fs::write(path, json)?;
+    let assets = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets");
+    for name in cert_hash_file_names(ordinal) {
+        std::fs::write(format!("{assets}/{name}"), &json)?;
+    }
     Ok(())
 }
 
@@ -352,5 +369,14 @@ mod cert_tests {
         );
         assert!(cert_source_from(Some("/c.crt"), None).is_err());
         assert!(cert_source_from(None, Some("/c.key")).is_err());
+    }
+
+    /// Several dev hosts each mint a certificate: only host 0 writes the file the page
+    /// pins a typed local address by, so the last host to start no longer wins it.
+    #[test]
+    fn only_host_zero_writes_the_page_s_hash_file() {
+        assert_eq!(cert_hash_file_names(0), ["webtransport-cert-hash.json", "webtransport-cert-hash-0.json"]);
+        assert_eq!(cert_hash_file_names(1), ["webtransport-cert-hash-1.json"]);
+        assert_eq!(cert_hash_file_names(7), ["webtransport-cert-hash-7.json"]);
     }
 }

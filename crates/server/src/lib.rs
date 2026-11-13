@@ -368,6 +368,9 @@ pub struct WorldIngress {
     /// The WebTransport ingress's self-signed certificate, minted before the ingress starts
     /// (its hash is in this host's endpoint); `None`: the ingress reads its source itself.
     wt_cert: Option<webtransport::SelfSignedCert>,
+    /// This host's ordinal: which dev cert-hash files the ingress writes
+    /// (`webtransport::cert_hash_file_names`).
+    host_ordinal: u32,
     /// Each live session's connection, by id (shared with the main loop: [`Self::sinks`]).
     sinks: Arc<DashMap<ClientId, ClientSink>>,
 }
@@ -388,6 +391,7 @@ impl WorldIngress {
             players,
             auth,
             wt_cert: None,
+            host_ordinal: 0,
             sinks: Arc::new(DashMap::new()),
         }
     }
@@ -407,6 +411,12 @@ impl WorldIngress {
     /// Serve WebTransport with `cert` (minted ahead, so its hash could be advertised).
     pub fn with_webtransport_cert(mut self, cert: Option<webtransport::SelfSignedCert>) -> Self {
         self.wt_cert = cert;
+        self
+    }
+
+    /// Serve as host `ordinal` of the world (0 unless several hosts).
+    pub fn with_host_ordinal(mut self, ordinal: u32) -> Self {
+        self.host_ordinal = ordinal;
         self
     }
 
@@ -538,6 +548,7 @@ impl WorldIngress {
             let wt_auth = self.auth.clone();
             let wt_addr = std::net::SocketAddr::new(self.ip, self.wt_port);
             let minted = self.wt_cert.take();
+            let ordinal = self.host_ordinal;
             let certs = crate::webtransport::cert_source_from(
                 std::env::var(crate::webtransport::WT_CERT_ENV).ok().as_deref(),
                 std::env::var(crate::webtransport::WT_KEY_ENV).ok().as_deref(),
@@ -546,7 +557,7 @@ impl WorldIngress {
             tokio::spawn(async move {
                 let served = match minted {
                     Some(cert) => {
-                        crate::webtransport::serve_minted(wt_addr, cert, wt_send, wt_sinks, wt_next, wt_players, wt_auth).await
+                        crate::webtransport::serve_minted(wt_addr, cert, ordinal, wt_send, wt_sinks, wt_next, wt_players, wt_auth).await
                     }
                     None => crate::webtransport::serve(wt_addr, certs, wt_send, wt_sinks, wt_next, wt_players, wt_auth).await,
                 };
@@ -836,7 +847,8 @@ pub fn run() -> claims::ServerExit {
     let auth = Arc::new(authenticator);
     let mut rgi = WorldIngress::new(ip, port, webtransport_enabled(single_player), players.clone(), auth.clone())
         .with_webtransport_cert(wt_cert)
-        .with_webtransport_port(wt_port);
+        .with_webtransport_port(wt_port)
+        .with_host_ordinal(ownership.ordinal());
     let sinks = rgi.sinks();
     let configured_worker_threads = std::env::var("TOKIO_WORKER_THREADS").ok();
     let worker_threads = server_worker_threads(configured_worker_threads.as_deref())

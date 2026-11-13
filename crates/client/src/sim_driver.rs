@@ -20,10 +20,12 @@ use crate::GameInstanceManager;
 /// The inline (main-thread) backend.
 pub struct SimDriver {
     manager: GameInstanceManager,
+    /// Every connection's events (the login one and those [`crate::netcode_web::PageOpener`]
+    /// opens to other hosts), keyed by connection.
     server_recv: Receiver<(u32, ConnEvent)>,
-    /// One line when the connect gave up or the connection died (`netcode_web`).
-    lost: Receiver<String>,
     client_tick_ms: f64,
+    /// The session ended (its home connection was lost): nothing runs any more.
+    ended: bool,
 }
 
 // SyncCell makes the driver Sync (Bevy Resource requires Send + Sync).
@@ -59,7 +61,6 @@ pub fn start_session(
     }
     let SessionChannels { game_send, game_recv, client_send, request_recv, .. } = channels;
     let (server_send, server_recv) = crossbeam::channel::unbounded();
-    let (lost_send, lost) = crossbeam::channel::unbounded();
     // The addr is unused on wasm; GameInstanceManager::new keeps one
     // signature on both targets.
     let dummy_addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 0));
@@ -67,15 +68,24 @@ pub fn start_session(
     // Same subscription scale as the native game thread (`?world=` here).
     manager.set_world_scale(world_scale);
     manager.set_request_recv(request_recv);
-    crate::netcode_web::connect(server, server_send, manager.client_packet_recv(), lost_send, credential);
+    // One WebTransport session per host: the login one here, the others opened by the
+    // manager through the page (`PageOpener`).
+    manager.set_conn_opener(Box::new(crate::netcode_web::PageOpener::new(server_send.clone())));
+    crate::netcode_web::connect(
+        server,
+        crate::connections::LOGIN_CONN,
+        server_send,
+        manager.client_packet_recv(),
+        credential,
+    );
     manager.start();
-    let driver = SimDriver { manager, server_recv, lost, client_tick_ms: 0.0 };
+    let driver = SimDriver { manager, server_recv, client_tick_ms: 0.0, ended: false };
     SimDriverRes(SyncCell::new(SimBackend::Inline(Box::new(driver))))
 }
 
 /// Once per frame while a session runs: run due client ticks, then drain
 /// both directions of traffic. Mirrors what the native threads do with
-/// sleeps and blocking select. A lost connection ends the session.
+/// sleeps and blocking select. A lost home connection ends the session.
 pub fn drive_sim(time: Res<Time>, driver: Option<ResMut<SimDriverRes>>, mut ended: MessageWriter<SessionEnded>) {
     let Some(mut driver) = driver else { return };
     let driver = match driver.0.get() {
@@ -87,10 +97,8 @@ pub fn drive_sim(time: Res<Time>, driver: Option<ResMut<SimDriverRes>>, mut ende
         }
         SimBackend::Inline(driver) => driver,
     };
-    let SimDriver { manager, server_recv, lost, client_tick_ms } = &mut **driver;
-
-    if let Ok(reason) = lost.try_recv() {
-        ended.write(SessionEnded { reason: Some(reason) });
+    let SimDriver { manager, server_recv, client_tick_ms, ended: over } = &mut **driver;
+    if *over {
         return;
     }
 
@@ -104,7 +112,14 @@ pub fn drive_sim(time: Res<Time>, driver: Option<ResMut<SimDriverRes>>, mut ende
         manager.send_tick();
     }
 
-    if !manager.pump(server_recv).expect("game sim crashed") {
-        info!("sim received Quit");
+    match manager.pump(server_recv) {
+        Ok(true) => {}
+        Ok(false) => info!("sim received Quit"),
+        // The home connection ended (its connect gave up, the server went, a refusal).
+        Err(game::GameError::Disconnected(reason)) => {
+            *over = true;
+            ended.write(SessionEnded { reason: Some(reason) });
+        }
+        Err(e) => panic!("game sim crashed: {e:?}"),
     }
 }

@@ -6,7 +6,7 @@
 #                               wasm-server-runner's layout, so one page serves both)
 #   <out>/api/version           the git revision (index.html polls it and reloads
 #                               open tabs when a redeploy changes it)
-#   <out>/assets/               the runtime assets (minus the dev cert-hash file)
+#   <out>/assets/               the runtime assets (minus the dev cert-hash files)
 # Env: OUT (default target/web), CAP (the justfile's core-pinning prefix),
 # VOXEL_REGION_BLOCKS (must match the server's build),
 # VOXEL_WEB_SERVER (the main menu's prefilled Join server address).
@@ -56,7 +56,7 @@ cp crates/client/index.html "$out.tmp/index.html"
 rev=$(git rev-parse --short HEAD)
 git diff --quiet HEAD -- || rev="$rev-dirty-$(date -u +%Y%m%dT%H%M%SZ)"
 printf '%s' "$rev" > "$out.tmp/api/version"
-rsync -a --exclude webtransport-cert-hash.json assets/ "$out.tmp/assets/"
+rsync -a --exclude 'webtransport-cert-hash*.json' assets/ "$out.tmp/assets/"
 
 rm -rf "$out"
 mv "$out.tmp" "$out"

@@ -1457,6 +1457,18 @@ slint-wasm:
     CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER="$root/bin/wasm-bindgen-test-runner" \
         {{cap}} {{cargo}} test -p slint-ui --test wasm_images --target wasm32-unknown-unknown
 
+# The browser client's page → sim worker server-frame codec on wasm32 (node):
+# crates/client/tests/web_frame_wasm.rs (natively: `just test-one client "--lib web_frame::"`).
+# Builds the client lib for wasm32 (slow cold). Same runner as determinism-wasm.
+client-wasm:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    ver=$(awk '/^name = "wasm-bindgen"$/ { getline; gsub(/version = |"/, ""); print; exit }' Cargo.lock)
+    root="$PWD/target/tools/wasm-bindgen-$ver"
+    [ -x "$root/bin/wasm-bindgen-test-runner" ] || {{cap}} cargo install --locked wasm-bindgen-cli --version "$ver" --root "$root"
+    CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER="$root/bin/wasm-bindgen-test-runner" \
+        {{cap}} {{cargo}} test -p client --test web_frame_wasm --target wasm32-unknown-unknown
+
 # Upstream rapier's own determinism tests, run from the vendored rapier 0.36
 # fork (docs/superpowers/plans/2026-09-22-rapier-035-upgrade.md),
 # plus upstream's regression tests for the code the fork patches (shape casts,

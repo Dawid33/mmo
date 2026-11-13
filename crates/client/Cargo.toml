@@ -122,9 +122,18 @@ web-sys = { version = "0.3", features = [
 slint-ui-tools = { workspace = true }
 naga = { version = "29.0", features = ["wgsl-in"] }
 
+# `tests/web_frame_wasm.rs` on wasm32 (`just client-wasm`), the same version the game's
+# wasm tests use.
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = "0.3"
+
 [[test]]
 name = "it"
 path = "tests/it.rs"
+
+[[test]]
+name = "web_frame_wasm"
+path = "tests/web_frame_wasm.rs"
 
 [[test]]
 name = "keepup_budget"

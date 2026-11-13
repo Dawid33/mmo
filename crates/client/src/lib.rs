@@ -31,6 +31,7 @@ pub mod prefab_editor; // the prefab editor: an empty world, a prefab opened int
 pub mod local_host; // the child server a menu-started session plays on
 pub mod session; // AppState, SessionScoped, session reset registry, FrontendCamera
 pub mod web_endpoint; // which WebTransport server the browser build dials
+pub mod web_frame; // page → sim worker framing: a server frame tagged with its connection
 pub mod world_scale; // near window + LOD ring table knobs (VOXEL_WORLD & co.)
 pub mod harness; // SimHarness — added in Task 3 (empty stub file for now)
 pub mod bevy_harness; // BevyInputHarness — headless Bevy-layer input harness
