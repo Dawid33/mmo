@@ -109,6 +109,11 @@ html {
   -webkit-text-size-adjust: 100%;
 }
 
+/* `hidden` beats any class that sets display (.btn, .alert, …). */
+[hidden] {
+  display: none !important;
+}
+
 body {
   margin: 0;
   font-family: var(--font);
@@ -206,6 +211,23 @@ hr {
 
 .brand:hover {
   text-decoration: none;
+}
+
+.site-nav {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-2) var(--space-3);
+}
+
+.site-nav .btn-primary {
+  margin-bottom: 0;
+}
+
+.site-nav-user {
+  font-weight: 800;
+  color: var(--text);
 }
 
 .site-footer {
@@ -626,6 +648,115 @@ hr {
   grid-template-columns: 1fr 1fr;
 }
 
+/* ---- Landing page ---------------------------------------------------------------------- */
+
+.page-main.page-wide {
+  max-width: calc(72rem + 2 * var(--gutter));
+}
+
+.hero {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr);
+  align-items: end;
+  gap: var(--space-6);
+  margin-bottom: var(--space-7);
+}
+
+.hero-text {
+  padding-bottom: var(--space-6);
+}
+
+.hero h1 {
+  margin-bottom: var(--space-4);
+  font-size: clamp(3.5rem, 11vw, 7rem);
+  font-weight: 900;
+  line-height: 0.9;
+  letter-spacing: -0.04em;
+}
+
+.hero-lead {
+  max-width: 24ch;
+  margin-bottom: var(--space-6);
+  font-size: var(--text-l);
+  font-weight: 700;
+}
+
+.hero-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: var(--space-3);
+}
+
+/* The fortress cutaway: website/site/img/fortress.svg. */
+.hero-art {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.features {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-6);
+}
+
+.feature + .feature {
+  padding-left: var(--space-6);
+  border-left: 2px solid var(--line);
+}
+
+.feature h2 {
+  font-size: var(--text-l);
+}
+
+.feature p {
+  margin: 0;
+  color: var(--muted);
+}
+
+/* ---- Profile page ---------------------------------------------------------------------- */
+
+.account {
+  margin: 0 0 var(--space-5);
+}
+
+.account-row {
+  padding: var(--space-3) 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.account-row:first-child {
+  padding-top: 0;
+}
+
+.account dt {
+  color: var(--muted);
+  font-size: var(--text-s);
+}
+
+.account dd {
+  margin: 0;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.badge {
+  display: inline-block;
+  margin-left: var(--space-1);
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-s);
+  font-size: var(--text-s);
+  font-weight: 700;
+  color: var(--warning);
+  background: var(--warning-bg);
+}
+
+.badge-ok {
+  color: var(--success);
+  background: var(--success-bg);
+}
+
 /* ---- Utility --------------------------------------------------------------------------- */
 
 .space-top {
@@ -647,9 +778,42 @@ hr {
 
 /* ---- Phone width ----------------------------------------------------------------------- */
 
+@media (max-width: 52rem) {
+  .hero {
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--space-5);
+  }
+
+  .hero-text {
+    padding-bottom: 0;
+  }
+
+  .features {
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--space-5);
+  }
+
+  .feature + .feature {
+    padding-left: 0;
+    padding-top: var(--space-5);
+    border-left: 0;
+    border-top: 2px solid var(--line);
+  }
+}
+
 @media (max-width: 30rem) {
   .page-main {
     padding-top: var(--space-4);
+  }
+
+  .site-nav {
+    gap: var(--space-2);
+  }
+
+  .site-nav .btn {
+    min-height: 40px;
+    padding: var(--space-1) var(--space-3);
+    font-size: var(--text-s);
   }
 
   .card {

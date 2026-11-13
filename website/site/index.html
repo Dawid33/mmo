@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html class="orion" lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="description" content="Dig, build and defend a fortress of toy bricks in a huge shared world.">
+  <title>Orion</title>
+  <link rel="icon" type="image/svg+xml" href="img/logo.svg">
+  <link rel="stylesheet" href="css/site.css">
+  <script type="module" src="js/app.js"></script>
+</head>
+<body class="page" data-page="home">
+<header class="site-header">
+  <a class="brand" href="/">
+    <img src="img/logo.svg" alt="" width="40" height="34">
+    <span>Orion</span>
+  </a>
+  <nav class="site-nav" aria-label="Account">
+    <button class="btn btn-quiet" type="button" data-action="login" data-show="out" hidden>Log in</button>
+    <button class="btn btn-primary" type="button" data-action="signup" data-show="out" hidden>Create account</button>
+    <a class="site-nav-user" href="profile.html" data-show="in" data-bind="username" hidden></a>
+    <button class="btn btn-quiet" type="button" data-action="logout" data-show="in" hidden>Log out</button>
+  </nav>
+</header>
+
+<main class="page-main page-wide">
+  <section class="hero">
+    <div class="hero-text">
+      <h1>Orion</h1>
+      <p class="hero-lead">Dig, build and defend a fortress of toy bricks in a huge shared world.</p>
+      <div class="hero-actions">
+        <a class="btn btn-primary btn-large" href="https://orion.factoriosurvivalworld.com/" data-link="play">Play in browser</a>
+        <button class="btn btn-quiet btn-large" type="button" data-action="signup" data-show="out" hidden>Create account</button>
+        <a class="btn btn-quiet btn-large" href="https://chat.factoriosurvivalworld.com/accounts/login/social/oidc/keycloak" data-link="chat">Join the chat</a>
+      </div>
+    </div>
+    <img class="hero-art" src="img/fortress.svg" width="480" height="390"
+         alt="A fortress dug into layers of bricks: a tower above the grass, a ladder down a shaft, a room in the earth and a lit hall in the rock with a builder inside.">
+  </section>
+
+  <section class="card features" aria-label="About the game">
+    <div class="feature">
+      <h2>Dig and build with bricks</h2>
+      <p>The ground is made of bricks, all the way down. Carve rooms into the hill, stack walls and towers, and lay every floor stud by stud.</p>
+    </div>
+    <div class="feature">
+      <h2>A world forged before you arrive</h2>
+      <p>Every world is made up front: rock layers, rivers and climate, and a history of the people who lived there before you embark.</p>
+    </div>
+    <div class="feature">
+      <h2>Play together in one fortress</h2>
+      <p>Friends can join the same fortress and build side by side, in a world big enough for many fortresses at once.</p>
+    </div>
+  </section>
+</main>
+
+<footer class="site-footer">
+  <p>One Orion account for the game and this site.</p>
+</footer>
+</body>
+</html>

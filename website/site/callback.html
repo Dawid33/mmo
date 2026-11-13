@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html class="orion" lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="robots" content="noindex">
+  <meta name="referrer" content="no-referrer">
+  <title>Logging in · Orion</title>
+  <link rel="icon" type="image/svg+xml" href="img/logo.svg">
+  <link rel="stylesheet" href="css/site.css">
+  <script type="module" src="js/app.js"></script>
+</head>
+<body class="page" data-page="callback">
+<header class="site-header">
+  <a class="brand" href="/">
+    <img src="img/logo.svg" alt="" width="40" height="34">
+    <span>Orion</span>
+  </a>
+</header>
+
+<main class="page-main">
+  <div class="card">
+    <header class="card-header">
+      <h1 data-callback="title">Logging in</h1>
+    </header>
+    <p data-callback="busy">One moment, finishing your login.</p>
+    <div data-callback="failed" hidden>
+      <div class="alert alert-error" role="alert">
+        <span class="alert-text" data-callback="message"></span>
+      </div>
+      <p><a href="/">Back to the Orion home page</a></p>
+    </div>
+  </div>
+</main>
+
+<footer class="site-footer">
+  <p>One Orion account for the game and this site.</p>
+</footer>
+</body>
+</html>
