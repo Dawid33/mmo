@@ -32,7 +32,7 @@
    | 2 | `HaloEntity` | `source_region` `(x, z)`, entity id |
    | 3 | `HaloUpdate` | `from` `(x, z)` |
    | 4 | `HaloSourceGone` | region `(x, z)` |
-   | 5 | `Intent` | intents before replies; an intent by its sending entity (`by`), a reply by the entity it is for, then the region that answered it (the owner of its intent's position; `BreakBlock` / `PlaceBlock` carry none and keep arrival order); then arrival *(amended in execution: "arrival only" left two sources' intents or replies tied, so the `seq` assigned on receipt — hashed state — still followed channel timing; the key makes messages of different sources never tie)* |
+   | 5 | `Intent` | intents before replies; an intent by its sending entity (`by`), a reply by the entity it is for, then the region that answered it (the owner of its intent's position; `BreakBlock` / `PlaceBlock` carry none); replies only, then their content (`reply`, `hops`, `hint`); then arrival *(amended in execution: "arrival only" left two sources' intents or replies tied, so the `seq` assigned on receipt — hashed state — still followed channel timing; the key makes messages of different sources never tie)* *(amended in execution, Task 3: replies to `BreakBlock` / `PlaceBlock` carry no position, and a reply relayed through the entity's old region could tie with a direct reply from the same owner — replies now tie-break on their content; intents do not, since one sender's emission order carries meaning: carve then place)* |
    | 6 | anything else, and anything queued **behind** another entry | arrival only |
 
    Classes 0–3 are in a source's own emission order (`Departures`, then `HaloEntities` with every `Gone` before every `Update`, then `HaloDeltas`), so one source's messages keep their relative order.

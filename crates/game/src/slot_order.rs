@@ -8,7 +8,7 @@
 
 use std::collections::VecDeque;
 
-use crate::{EntityId, GameEventKind, Intent, IntentMsg, IntentReply, RegionCoords, Tick};
+use crate::{EntityId, GameEventKind, Intent, IntentMsg, IntentRefusal, IntentReply, RegionCoords, Tick};
 
 /// Where a message sorts within its stamp. Within a class, by the message's own
 /// key, then arrival (one FIFO per source, so equal keys keep their source's order):
@@ -17,9 +17,13 @@ use crate::{EntityId, GameEventKind, Intent, IntentMsg, IntentReply, RegionCoord
 /// - `HaloUpdate`, `HaloSourceGone`: the source region;
 /// - `Intent`: intents before replies; an intent by its sending entity (`by`), a
 ///   reply by the entity it is for, then the region that answered it (the owner
-///   of its intent's position) — so messages of two sources never tie, except
-///   replies to one entity for `BreakBlock` / `PlaceBlock`, which carry no
-///   position (they keep arrival order);
+///   of its intent's position), then — replies only — its content (`reply`,
+///   `hops`, `hint`; amended in execution: replies to `BreakBlock` /
+///   `PlaceBlock` carry no position, and a reply relayed through the entity's old
+///   region can tie with a direct one from the same owner). So messages of two
+///   sources never tie; equal keys are identical replies or one sender's intents,
+///   which keep arrival order (a sender's emission order carries meaning: carve
+///   then place);
 /// - `Other`: arrival only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum SlotClass {
@@ -123,10 +127,31 @@ fn reply_owner(reply: &IntentReply) -> Option<RegionCoords> {
     }
 }
 
+/// A reply's content, compared after the key (derived `Ord` on plain integer
+/// fields: the same on every platform). `refusal` is `None` for a grant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct ReplyTie {
+    intent: Intent,
+    refusal: Option<IntentRefusal>,
+    hops: u8,
+    hint: RegionCoords,
+}
+
+fn reply_tie(kind: &GameEventKind) -> Option<ReplyTie> {
+    let GameEventKind::Intent(IntentMsg::Reply(sent)) = kind else { return None };
+    let (intent, refusal) = match sent.reply {
+        IntentReply::Granted(i) => (i, None),
+        IntentReply::Refused(i, r) => (i, Some(r)),
+    };
+    Some(ReplyTie { intent, refusal, hops: sent.hops, hint: sent.hint })
+}
+
 struct Entry {
     stamp: Tick,
     class: SlotClass,
     key: Key,
+    /// Replies only (`None` for every other entry, and for `push_behind`).
+    tie: Option<ReplyTie>,
     arrival: u64,
     kind: GameEventKind,
 }
@@ -143,22 +168,22 @@ impl SlotInbox {
         Self::default()
     }
 
-    fn add(&mut self, kind: GameEventKind, stamp: Tick, class: SlotClass, key: Key) {
+    fn add(&mut self, kind: GameEventKind, stamp: Tick, class: SlotClass, key: Key, tie: Option<ReplyTie>) {
         let arrival = self.next_arrival;
         self.next_arrival += 1;
-        self.entries.push_back(Entry { stamp, class, key, arrival, kind });
+        self.entries.push_back(Entry { stamp, class, key, tie, arrival, kind });
     }
 
     /// Buffer a message; its class and key come from the kind.
     pub fn push(&mut self, kind: GameEventKind, stamp: Tick) {
-        let (class, key) = (slot_class(&kind), key_of(&kind));
-        self.add(kind, stamp, class, key);
+        let (class, key, tie) = (slot_class(&kind), key_of(&kind), reply_tie(&kind));
+        self.add(kind, stamp, class, key, tie);
     }
 
     /// Buffer an entry that must follow the others of its stamp (class `Other`,
     /// arrival order among its peers), whatever its kind.
     pub fn push_behind(&mut self, kind: GameEventKind, stamp: Tick) {
-        self.add(kind, stamp, SlotClass::Other, [0; 6]);
+        self.add(kind, stamp, SlotClass::Other, [0; 6], None);
     }
 
     fn drain_where(&mut self, take: impl Fn(Tick) -> bool) -> Vec<GameEventKind> {
@@ -173,7 +198,7 @@ impl SlotInbox {
         }
         self.entries = keep;
         // `arrival` is unique, so the order is total (and a stable sort is moot).
-        out.sort_by_key(|e| (e.stamp, e.class, e.key, e.arrival));
+        out.sort_by_key(|e| (e.stamp, e.class, e.key, e.tie, e.arrival));
         out.into_iter().map(|e| e.kind).collect()
     }
 
@@ -471,6 +496,55 @@ mod tests {
             inbox.push(e.clone(), 2);
         }
         assert_eq!(inbox.drain_all(), emitted);
+    }
+
+    /// Two different replies to one entity from one owner (no position to tell
+    /// them apart: `BreakBlock`; or a relayed copy beside a direct one) sort the
+    /// same whatever the arrival order.
+    #[test]
+    fn one_owners_replies_tie_break_on_their_content() {
+        let to = eid(0, 0, 3);
+        let brk = |survival: bool| IntentReply::Granted(Intent::BreakBlock { by: to, survival });
+        let place = IntentReply::Refused(
+            Intent::PlaceBlock { block: crate::BlockId::default(), by: to, survival: true },
+            IntentRefusal::Occupied,
+        );
+        let carve = Intent::CarveStud { lo: [0, 0, 0], hi: [4, 6, 4], by: to };
+        let reply = |r: IntentReply, hops: u8, hint: RegionCoords| {
+            GameEventKind::Intent(IntentMsg::Reply(SentReply { reply: r, hint, due: 5, hops }))
+        };
+        let pairs = [
+            (reply(brk(true), 0, rc(0, 0)), reply(brk(false), 0, rc(0, 0))),
+            (reply(brk(true), 0, rc(0, 0)), reply(place, 0, rc(0, 0))),
+            // A relayed copy (one hop, another hint) beside a direct reply.
+            (reply(brk(true), 0, rc(0, 0)), reply(brk(true), 1, rc(1, 0))),
+            (
+                reply(IntentReply::Granted(carve), 0, rc(0, 0)),
+                reply(IntentReply::Refused(carve, IntentRefusal::NothingThere), 0, rc(0, 0)),
+            ),
+        ];
+        for (a, b) in pairs {
+            let mut one = SlotInbox::new();
+            one.push(a.clone(), 5);
+            one.push(b.clone(), 5);
+            let mut two = SlotInbox::new();
+            two.push(b, 5);
+            two.push(a, 5);
+            assert_eq!(one.drain_due(5), two.drain_due(5));
+        }
+    }
+
+    /// Two identical replies keep their arrival order (indistinguishable anyway);
+    /// a reply's tie-break never reorders one sender's intents.
+    #[test]
+    fn identical_replies_keep_arrival_order() {
+        let r = carve_reply(eid(0, 0, 3), 0);
+        let mut inbox = SlotInbox::new();
+        inbox.push(r.clone(), 2);
+        inbox.push(input(1), 2);
+        inbox.push(r.clone(), 2);
+        assert_eq!(inbox.drain_all(), vec![r.clone(), r, input(1)]);
+        assert!(reply_tie(&carve_by(eid(0, 0, 3), 0)).is_none(), "intents carry no content tie-break");
     }
 
     #[test]
