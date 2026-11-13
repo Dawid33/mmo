@@ -39,16 +39,40 @@ fn install_props() {
     game::install_block_props(registry.props());
 }
 
-/// Flat stud ground under every chunk column of every region: ground without worldgen.
-fn stud_flat_seed(_rc: RegionCoords) -> game::StudRegionSeed {
-    let soil = game::StudProfile { cover: game::MAT_GRASS, cover_plates: 1, soil: game::MAT_DIRT, soil_plates: 5 };
+/// Blocks of ground under every column of the flat fixture: its top is this many metres
+/// up (6 m).
+const GROUND_BLOCKS: usize = 6;
+
+/// Flat ground under every chunk column of every region, ground without worldgen: grass
+/// over dirt over stone, its top [`GROUND_BLOCKS`] up, stone below the band.
+fn flat_floor(_rc: RegionCoords) -> Vec<(game::ColumnCoords, game::Column)> {
+    static IDS: std::sync::OnceLock<[game::BlockId; 3]> = std::sync::OnceLock::new();
+    let [grass, dirt, stone] = *IDS.get_or_init(|| {
+        let registry = game::BlockRegistry::from_ron(include_str!("../../../assets/blocks/blocks.ron")).unwrap();
+        ["grass", "dirt", "stone"].map(|name| registry.id_of(name).expect("block in the manifest"))
+    });
+    let mut chunk = game::Chunk::default();
+    for x in 0..game::CHUNK_BLOCKS {
+        for z in 0..game::CHUNK_BLOCKS {
+            for y in 0..GROUND_BLOCKS {
+                let id = match GROUND_BLOCKS - 1 - y {
+                    0 => grass,
+                    1 => dirt,
+                    _ => stone,
+                };
+                chunk.set_block(x, y, z, game::Block::new(id));
+            }
+        }
+    }
+    let (air, stone) = (game::Block::new(game::BlockId::AIR), game::Block::new(stone));
     let n = game::REGION_CHUNKS;
-    let ground = (0..n)
-        .flat_map(|x| {
-            (0..n).map(move |z| (game::ColumnCoords::new(x, z), game::StudColumnGround::flat(30, soil, game::MAT_STONE, -2000)))
+    (0..n)
+        .flat_map(|x| (0..n).map(move |z| (x, z)))
+        .map(|(x, z)| {
+            let sub = game::SubChunk::Dense(Box::new(chunk.clone()));
+            (game::ColumnCoords::new(x, z), game::Column::new(0, stone, air, vec![sub]))
         })
-        .collect();
-    game::StudRegionSeed { ground, features: Vec::new(), ..Default::default() }
+        .collect()
 }
 
 /// A 16 × 16 grassland from the origin, every tile landing in its middle.
@@ -131,11 +155,19 @@ impl Host {
     fn new(ordinal: u32, port: u16) -> Host {
         let (out_send, packets) = unbounded();
         let (region_out_send, region_out) = unbounded();
+        let (lod_result_send, lod_result_recv) = unbounded();
+        let lod_builder: Box<dyn game::LodBuilder> = Box::new(game::InlineLodBuilder {
+            coarse: Box::new(|_key: &game::lod::LodKey| Vec::new()),
+            water: Box::new(game::lod::LodWater::dry),
+            out: lod_result_send,
+        });
         let mut manager = WorldManager::new(
-            InlineSpawner::default().with_stud_genesis(Arc::new(stud_flat_seed)),
+            InlineSpawner::default(),
+            Box::new(flat_floor),
             out_send,
             region_out_send,
-            Box::new(game::NullLodBuilder::default()),
+            lod_builder,
+            lod_result_recv,
         );
         manager.set_ownership(Ownership::Static { ordinal, hosts: HOSTS }, S);
         manager.set_endpoints(endpoint(ordinal, port), game::seeded_nonces(0x5EED + u64::from(ordinal)));
@@ -291,7 +323,7 @@ impl World {
     /// `CLIENT`'s player, its body standing in the middle of `a` on host A.
     fn connect_home_on_a(&mut self) {
         let a = self.seam.0;
-        let y = game::plate_units(30) + 3.0;
+        let y = (GROUND_BLOCKS * game::BLOCK_VOXELS) as f32 + 3.0;
         let record = PlayerRecord {
             client: game::Client::default(),
             pose: game::Pose::from_translation(game::rapier3d::math::Vector::new(REGION_SIZE / 2.0, y, REGION_SIZE / 2.0)),

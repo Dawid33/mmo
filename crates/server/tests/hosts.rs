@@ -69,16 +69,61 @@ fn extent() -> game::MapExtent {
     game::MapExtent { origin: RegionCoords::new(0, 0), width: 48, height: 48 }
 }
 
-/// Flat stud ground under every chunk column of every region: ground without worldgen.
-fn stud_flat_seed(_rc: RegionCoords) -> game::StudRegionSeed {
-    let soil = game::StudProfile { cover: game::MAT_GRASS, cover_plates: 1, soil: game::MAT_DIRT, soil_plates: 5 };
+/// Blocks of ground under every column of the flat fixture: its top is this many metres
+/// up (6 m).
+const GROUND_BLOCKS: usize = 6;
+
+/// The y (units) a keeper's body starts at: a little above the ground's top.
+fn above_ground_y() -> f32 {
+    (GROUND_BLOCKS * game::BLOCK_VOXELS) as f32 + 3.0
+}
+
+/// Flat ground under every chunk column of every region, ground without worldgen: grass
+/// over dirt over stone, its top [`GROUND_BLOCKS`] up, stone below the band.
+fn flat_floor(_rc: RegionCoords) -> Vec<(game::ColumnCoords, game::Column)> {
+    static IDS: std::sync::OnceLock<[game::BlockId; 3]> = std::sync::OnceLock::new();
+    let [grass, dirt, stone] = *IDS.get_or_init(|| {
+        let registry = game::BlockRegistry::from_ron(include_str!("../../../assets/blocks/blocks.ron")).unwrap();
+        ["grass", "dirt", "stone"].map(|name| registry.id_of(name).expect("block in the manifest"))
+    });
+    let mut chunk = game::Chunk::default();
+    for x in 0..game::CHUNK_BLOCKS {
+        for z in 0..game::CHUNK_BLOCKS {
+            for y in 0..GROUND_BLOCKS {
+                let id = match GROUND_BLOCKS - 1 - y {
+                    0 => grass,
+                    1 => dirt,
+                    _ => stone,
+                };
+                chunk.set_block(x, y, z, game::Block::new(id));
+            }
+        }
+    }
+    let (air, stone) = (game::Block::new(game::BlockId::AIR), game::Block::new(stone));
     let n = game::REGION_CHUNKS;
-    let ground = (0..n)
-        .flat_map(|x| {
-            (0..n).map(move |z| (game::ColumnCoords::new(x, z), game::StudColumnGround::flat(30, soil, game::MAT_STONE, -2000)))
+    (0..n)
+        .flat_map(|x| (0..n).map(move |z| (x, z)))
+        .map(|(x, z)| {
+            let sub = game::SubChunk::Dense(Box::new(chunk.clone()));
+            (game::ColumnCoords::new(x, z), game::Column::new(0, stone, air, vec![sub]))
         })
-        .collect();
-    game::StudRegionSeed { ground, features: Vec::new(), ..Default::default() }
+        .collect()
+}
+
+/// A host's manager on `spawner`: never-run regions start from [`flat_floor`]; far terrain
+/// is empty (an inline LOD builder with no coarse data).
+fn flat_manager(
+    spawner: InlineSpawner,
+    out: crossbeam::channel::Sender<(Option<ClientId>, ServerPacket)>,
+    region_out: crossbeam::channel::Sender<(RegionCoords, RegionOutput)>,
+) -> WorldManager<InlineSpawner> {
+    let (lod_result_send, lod_result_recv) = unbounded();
+    let lod_builder: Box<dyn game::LodBuilder> = Box::new(game::InlineLodBuilder {
+        coarse: Box::new(|_key: &game::lod::LodKey| Vec::new()),
+        water: Box::new(game::lod::LodWater::dry),
+        out: lod_result_send,
+    });
+    WorldManager::new(spawner, Box::new(flat_floor), out, region_out, lod_builder, lod_result_recv)
 }
 
 /// Where host `ordinal` says players reach it.
@@ -94,7 +139,6 @@ fn endpoint(ordinal: u32) -> HostEndpoint {
 /// One host process's store handle and claims (as `server::run` makes them).
 fn claim(db: &PgDb, ordinal: u32) -> (StoreHandle, HostClaims) {
     let store = db.open();
-    server::world_file::bind_world_terrain(&store).expect("a stud world");
     let s = store.super_region_regions();
     let claims = HostClaims::claim(store.clone(), Ownership::Static { ordinal, hosts: HOSTS }, Some(extent()), s).unwrap();
     (store, claims)
@@ -162,6 +206,8 @@ struct Sim {
     gate: PeerGate,
     /// Its listener for other hosts' saves (Task 19 tests).
     terrain: Option<server::cuts::TerrainWatch>,
+    /// While set, every event its regions processed, in order (a replay's input).
+    tap: Option<Vec<(RegionCoords, game::GameEvent)>>,
 }
 
 /// A switch over every peer link of a host: down, its links say so, send nothing and drop
@@ -230,12 +276,7 @@ impl Sim {
     fn with_spawner(ordinal: u32, s: u32, boot: u64, generation: u64, links: &mut PeerLinks, spawner: InlineSpawner) -> Sim {
         let (out_send, packets) = unbounded();
         let (region_out_send, region_out) = unbounded();
-        let mut manager = WorldManager::new(
-            spawner.with_stud_genesis(Arc::new(stud_flat_seed)),
-            out_send,
-            region_out_send,
-            Box::new(game::NullLodBuilder::default()),
-        );
+        let mut manager = flat_manager(spawner, out_send, region_out_send);
         manager.set_ownership(Ownership::Static { ordinal, hosts: HOSTS }, s);
         manager.set_endpoints(endpoint(ordinal), game::seeded_nonces(0x5EED + u64::from(ordinal)));
         let gate = PeerGate::default();
@@ -252,12 +293,12 @@ impl Sim {
             manager.set_peer(other, PeerSession::new(hello, other), link);
         }
         manager.set_host_generation(generation);
-        Sim { ordinal, boot, manager, region_out, packets, cuts: None, login: None, gate, terrain: None }
+        Sim { ordinal, boot, manager, region_out, packets, cuts: None, login: None, gate, terrain: None, tap: None }
     }
 
     /// A keeper client whose body stands in the middle of `rc` (this host's): `rc` runs.
     fn keep(&mut self, player: PlayerId, rc: RegionCoords, now: u64) {
-        let y = game::plate_units(30) + 3.0;
+        let y = above_ground_y();
         let record = PlayerRecord {
             client: game::Client::default(),
             pose: game::Pose::from_translation(game::rapier3d::math::Vector::new(REGION_SIZE / 2.0, y, REGION_SIZE / 2.0)),
@@ -278,6 +319,11 @@ impl Sim {
         for _ in 0..3 {
             self.manager.spawner_mut().pump();
             while let Ok((rc, out)) = self.region_out.try_recv() {
+                if let (Some(tap), RegionOutput::EventProcessed(ev) | RegionOutput::EventProcessedHashed(ev, ..)) =
+                    (self.tap.as_mut(), &out)
+                {
+                    tap.push((rc, ev.clone()));
+                }
                 self.manager.handle_region_output(rc, out, now);
             }
         }
@@ -443,7 +489,7 @@ fn slime_crosses_between_real_hosts() {
     let mut id = None;
     pair.sims[ha].manager.spawner_mut().with_region(a, |region| {
         let tick = region.current_tick();
-        let pos = game::parry::math::Vector::new(REGION_SIZE + game::FLIP_HYSTERESIS + 2.0, game::plate_units(30) + 3.0, REGION_SIZE / 2.0);
+        let pos = game::parry::math::Vector::new(REGION_SIZE + game::FLIP_HYSTERESIS + 2.0, above_ground_y(), REGION_SIZE / 2.0);
         region.with_data(|d| {
             let e = d.spawn_slime_safe(pos, 1, 0.0, tick);
             id = *d.ecs.id.try_get(e);
@@ -462,6 +508,179 @@ fn slime_crosses_between_real_hosts() {
     assert!(pair.sims[ha].holders(id).is_empty(), "not on the sending host");
     assert_eq!(pair.sims[ha].manager.pending_arrival_total(), 0, "nothing waits on the sending host");
     assert_eq!(pair.sims[ha].manager.in_flight_count(), 0, "nothing in flight on the sending host");
+    drop(pair);
+    drop(links);
+    for c in claims {
+        c.store().clone().shutdown();
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The breaker's client on host A (the keeper is client 0).
+const BREAKER: ClientId = 1;
+
+/// Region `rc`'s state on host `h` (as a client's join snapshot carries it).
+fn region_state(p: &mut Pair, h: usize, rc: RegionCoords) -> game::Rollback {
+    let mut state = None;
+    p.sims[h].manager.spawner_mut().with_region(rc, |r| state = Some(r.data().clone()));
+    state.expect("the region runs")
+}
+
+/// A block broken across a host seam: a player on host A, standing in the last block
+/// column of A's seam region `a`, breaks the top block one column over — in B's region
+/// `b`. The `BreakBlock` intent crosses the peer link and B grants it (the reply reaches
+/// the breaker's body on A once): B's chunk holds air there, A's halo of `b` reads air
+/// there, the ground beside and under it still stands, A's halo agrees with B's blocks
+/// around it, nothing is left unacknowledged, and each host's region hashes, slot by slot,
+/// equal to a replay of the events it processed applied to a snapshot taken before the
+/// break (the determinism a client's state-hash check relies on).
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn a_block_broken_across_a_host_seam_changes_the_owner_and_the_halo() {
+    install_props();
+    let Some(db) = PgDb::create("seambreak") else { return };
+    let dir = scratch("seambreak");
+    let (mut pair, (a, b), links, claims) = two_hosts(&db, &dir);
+    let (ha, hb) = (pair.sims[0].manager.owner_of(a) as usize, pair.sims[0].manager.owner_of(b) as usize);
+    assert_ne!(ha, hb, "a host seam");
+    pair.until("running sets exchanged", |p| {
+        p.sims[ha].manager.foreign_running().contains(&b) && p.sims[hb].manager.foreign_running().contains(&a)
+    });
+
+    // The breaker's body in the middle of `a`'s last block column (`b` is +x of `a`).
+    let voxels = game::BLOCK_VOXELS as f32;
+    let mid = game::REGION_BLOCKS as i32 / 2;
+    let (player, _) = claims[ha].store().resolve_player("hosts-test-breaker").unwrap();
+    let record = PlayerRecord {
+        client: game::Client::default(),
+        pose: game::Pose::from_translation(game::rapier3d::math::Vector::new(
+            REGION_SIZE - voxels / 2.0,
+            above_ground_y(),
+            (mid as f32 + 0.5) * voxels,
+        )),
+        region: a,
+        fortress: None,
+        adventure: None,
+    };
+    let now = pair.now();
+    let ev = ServerEvent::ClientConnected { client: BREAKER, player, record: Some(record) };
+    assert!(pair.sims[ha].manager.handle_server_event(ev, now));
+    let mut body = None;
+    pair.until("the breaker's body stands in a", |p| {
+        p.sims[ha].manager.spawner_mut().with_region(a, |r| {
+            let data = r.data();
+            body = data.player_entites.get(&BREAKER).and_then(|&e| {
+                let at = data.physics.bodies.get(*data.ecs.rigidbody.get(e))?.translation();
+                Some((data.entity_id(e)?, at.x))
+            });
+        });
+        body.is_some()
+    });
+    for _ in 0..10 {
+        pair.round();
+    }
+    let (by, _) = body.unwrap();
+    let mut x = 0.0;
+    pair.sims[ha].manager.spawner_mut().with_region(a, |r| {
+        let data = r.data();
+        let e = *data.player_entites.get(&BREAKER).expect("the breaker stays in a");
+        x = data.physics.bodies.get(*data.ecs.rigidbody.get(e)).unwrap().translation().x;
+    });
+    assert_eq!((x / voxels).floor() as i32, game::REGION_BLOCKS as i32 - 1, "the breaker stands in a's last block column: x = {x}");
+
+    // The top block of `b`'s ground one column past the seam, the block beside it in `b`,
+    // and the one under it.
+    let top = GROUND_BLOCKS as i32 - 1;
+    let target = game::WorldBlockPos::from_local(b, game::BlockPos::new(0, top, mid));
+    let beside = game::WorldBlockPos::new(target.x + 1, target.y, target.z);
+    let under = game::WorldBlockPos::new(target.x, target.y - 1, target.z);
+    for p in [target, beside, under] {
+        assert!(seen_from(&mut pair, hb, b, p).is_some(), "b's ground at {p:?}");
+        assert!(seen_from(&mut pair, ha, a, p).is_some(), "a's halo holds b's ground at {p:?}");
+    }
+
+    // What a client joining now would get, then every event processed and every slot-start
+    // hash from here on.
+    let snapshots = [(ha, a, region_state(&mut pair, ha, a)), (hb, b, region_state(&mut pair, hb, b))];
+    for sim in &mut pair.sims {
+        sim.tap = Some(Vec::new());
+        sim.manager.spawner_mut().record_slot_start_hashes();
+    }
+
+    // The break: the breaker's body sends `BreakBlock` at the target.
+    let order = game::GameEvent::new(game::GameEventKind::Order(BREAKER, game::Order::DevBreakBlock(target)), 0, a);
+    let now = pair.now();
+    assert!(pair.sims[ha].manager.handle_server_event(ServerEvent::ClientPacket(game::ClientPacket::GameEvent(order), BREAKER), now));
+    // An inbox holds one tick's replies, and a round runs one tick: read it every round.
+    let mut replies = Vec::new();
+    let read_replies = |p: &mut Pair, replies: &mut Vec<game::IntentReply>| {
+        p.sims[ha].manager.spawner_mut().with_region(a, |r| replies.extend(r.data().intent_inbox(by)));
+    };
+    let deadline = Instant::now() + WAIT;
+    while replies.is_empty()
+        || seen_from(&mut pair, hb, b, target).is_some()
+        || seen_from(&mut pair, ha, a, target).is_some()
+        || pair.sims.iter().any(|s| s.manager.peer_unreceived() > 0)
+    {
+        assert!(Instant::now() < deadline, "the break never settled: replies {replies:?}");
+        pair.round();
+        read_replies(&mut pair, &mut replies);
+    }
+    for _ in 0..10 {
+        pair.round();
+        read_replies(&mut pair, &mut replies);
+    }
+    let taps: Vec<_> = pair.sims.iter_mut().map(|s| s.tap.take().unwrap()).collect();
+    let slot_hashes: Vec<_> = pair.sims.iter_mut().map(|s| s.manager.spawner_mut().take_slot_start_hashes()).collect();
+
+    assert_eq!(replies, vec![game::IntentReply::Granted(game::Intent::BreakBlock { by, survival: false })], "B granted it, once");
+    assert_eq!(seen_from(&mut pair, hb, b, target), None, "b's chunk holds air there");
+    assert_eq!(seen_from(&mut pair, ha, a, target), None, "a's halo reads air there");
+    for p in [beside, under] {
+        assert!(seen_from(&mut pair, hb, b, p).is_some(), "the ground at {p:?} still stands");
+    }
+    // A's halo of `b` agrees with `b`'s own blocks around the break.
+    for dx in 0..game::HALO_BLOCKS {
+        for y in 0..=GROUND_BLOCKS as i32 {
+            for dz in -2..=2 {
+                let p = game::WorldBlockPos::new(target.x + i64::from(dx), y, target.z + i64::from(dz));
+                assert_eq!(seen_from(&mut pair, ha, a, p), seen_from(&mut pair, hb, b, p), "a's halo and b at {p:?}");
+            }
+        }
+    }
+    assert_eq!(pair.sims[ha].manager.in_flight_count(), 0, "nothing in flight on host A");
+    assert_eq!(pair.sims[hb].manager.in_flight_count(), 0, "nothing in flight on host B");
+
+    // Each host's region against a replay of what it processed since the snapshot.
+    for (h, rc, snapshot) in snapshots {
+        let (send, _updates) = unbounded();
+        let mut mirror = game::Region::new(snapshot, Some(send), rc, None);
+        let events: Vec<_> = taps[h].iter().filter(|(r, _)| *r == rc).map(|(_, ev)| ev.clone()).collect();
+        assert!(!events.is_empty(), "{rc:?} processed events");
+        // Every slot-start hash the live region recorded, against the replay's after the
+        // same Tick.
+        let recorded: Vec<(game::Tick, u32)> = slot_hashes[h].iter().filter(|(r, ..)| *r == rc).map(|(_, t, x)| (*t, *x)).collect();
+        let mut compared = 0;
+        for ev in events {
+            let (id, is_tick) = (ev.id, matches!(ev.kind, game::GameEventKind::Tick));
+            assert_eq!(mirror.handle_event(ev.kind).unwrap().id, id, "the replay numbers events alike");
+            mirror.commit_server_event();
+            if is_tick {
+                let t = mirror.current_tick();
+                if let Some((_, live)) = recorded.iter().find(|(tick, _)| *tick == t) {
+                    assert_eq!(game::state_hash(mirror.data()), *live, "host {h}'s {rc:?} at tick {t} hashes equal to its replay");
+                    compared += 1;
+                }
+            }
+        }
+        assert_eq!(compared, recorded.len(), "every recorded slot of {rc:?} was replayed");
+        let mut live = 0;
+        pair.sims[h].manager.spawner_mut().with_region(rc, |r| live = game::state_hash(r.data()));
+        assert_eq!(game::state_hash(mirror.data()), live, "host {h}'s {rc:?} hashes equal to its replay");
+        let replayed = mirror.data().halo_block(target).map(|b| b.id);
+        assert_eq!(replayed, Some(game::BlockId::AIR), "the replay of {rc:?} reads air at the break too");
+    }
+
     drop(pair);
     drop(links);
     for c in claims {
@@ -1260,7 +1479,7 @@ fn spawn_slime_in(w: &mut World, h: u32, rc: RegionCoords, x: f32) -> EntityId {
     let mut id = None;
     sim(w, h).manager.spawner_mut().with_region(rc, |region| {
         let tick = region.current_tick();
-        let pos = game::parry::math::Vector::new(x, game::plate_units(30) + 3.0, REGION_SIZE / 2.0);
+        let pos = game::parry::math::Vector::new(x, above_ground_y(), REGION_SIZE / 2.0);
         region.with_data(|d| {
             let e = d.spawn_slime_safe(pos, 1, 0.0, tick);
             id = *d.ecs.id.try_get(e);
@@ -1491,7 +1710,7 @@ fn dirty_restart_rolls_every_host_back_once() {
     let along_x = b1.x != a0.x;
     sim(&mut w, 0).manager.spawner_mut().with_region(a0, |region| {
         let key = region.data().id_index[&id];
-        let y = game::plate_units(30) + 3.0;
+        let y = above_ground_y();
         let at = if along_x {
             game::rapier3d::math::Vector::new(past, y, REGION_SIZE / 2.0)
         } else {
@@ -1546,7 +1765,7 @@ fn clean_leave_and_return_keeps_the_generation_and_delivers_waiting_transfers() 
     let id = spawn_slime_in(&mut w, 0, a0, REGION_SIZE / 2.0);
     sim(&mut w, 0).manager.spawner_mut().with_region(a0, |region| {
         let key = region.data().id_index[&id];
-        let y = game::plate_units(30) + 3.0;
+        let y = above_ground_y();
         let at = if b1.x != a0.x {
             game::rapier3d::math::Vector::new(past, y, REGION_SIZE / 2.0)
         } else {
@@ -1795,7 +2014,7 @@ fn push_over_the_seam(w: &mut World, h: u32, id: EntityId) {
     let x = if from == a { REGION_SIZE + game::FLIP_HYSTERESIS + 2.0 } else { -game::FLIP_HYSTERESIS - 2.0 };
     sim(w, h).manager.spawner_mut().with_region(from, |region| {
         let key = region.data().id_index[&id];
-        let at = game::rapier3d::math::Vector::new(x, game::plate_units(30) + 3.0, REGION_SIZE / 2.0);
+        let at = game::rapier3d::math::Vector::new(x, above_ground_y(), REGION_SIZE / 2.0);
         region.with_data(|d| d.set_body_pose_safe(key, game::Pose::from_translation(at)));
     });
 }
@@ -2077,7 +2296,7 @@ impl LoginWorld {
             client: game::Client::default(),
             pose: game::Pose::from_translation(game::rapier3d::math::Vector::new(
                 REGION_SIZE / 2.0,
-                game::plate_units(30) + 3.0,
+                above_ground_y(),
                 REGION_SIZE / 2.0,
             )),
             region: rc,
@@ -2166,7 +2385,7 @@ impl LoginWorld {
 
     /// Push `client`'s body (in `from`, on host `h`) past the seam into `to`.
     fn push_across(&mut self, h: u32, client: ClientId, from: RegionCoords, to: RegionCoords) {
-        let y = game::plate_units(30) + 3.0;
+        let y = above_ground_y();
         let past = |d: i32| match d {
             1 => REGION_SIZE + game::FLIP_HYSTERESIS + 2.0,
             -1 => -game::FLIP_HYSTERESIS - 2.0,
@@ -2485,8 +2704,16 @@ fn handoff_does_not_end_the_login_session() {
 
 // ---- other hosts' saved terrain (Task 19) ------------------------------------------------
 
-/// Stud columns along a region's edge.
-const REGION_STUDS: i32 = (game::REGION_CHUNKS * game::STUD_CHUNK_STUDS) as i32;
+/// Block columns along a region's edge.
+const REGION_EDGE: i32 = game::REGION_BLOCKS as i32;
+
+/// The block at world block `p` as region `rc` of host `h` sees it (its own or its halo's):
+/// `None` for air, or outside own ∪ halo.
+fn seen_from(p: &mut Pair, h: usize, rc: RegionCoords, at: game::WorldBlockPos) -> Option<game::BlockId> {
+    let mut seen = None;
+    p.sims[h].manager.spawner_mut().with_region(rc, |r| seen = Some(r.data().halo_block(at)));
+    seen.expect("the region runs").map(|b| b.id).filter(|id| *id != game::BlockId::AIR)
+}
 
 /// Host 0 digs at the border of its seam region while the peer link is down (the dig's
 /// halo delta, the region's final halo and its `RegionParked` are all lost with the link),
@@ -2509,16 +2736,11 @@ fn edit_saved_by_host_0_reaches_host_1s_halo_after_the_cut() {
     w.pair.until("running sets exchanged", |p| {
         p.sims[ha].manager.foreign_running().contains(&b) && p.sims[hb].manager.foreign_running().contains(&a)
     });
-    // The top plate of `a`'s ground on its edge facing `b` (`b` is +x of `a`), and that
-    // cell as `b` sees it (its halo).
-    let (lo, hi) = ([REGION_STUDS - 4, 29, 20], [REGION_STUDS - 2, 30, 22]);
-    let seen_from_b = |p: &mut Pair| {
-        let mut m = None;
-        p.sims[hb].manager.spawner_mut().with_region(b, |r| {
-            m = Some(r.data().stud_material_seen([(lo[0] - REGION_STUDS) as i64, lo[1] as i64, lo[2] as i64]));
-        });
-        m.expect("b runs")
-    };
+    // The top block of `a`'s ground near its edge facing `b` (`b` is +x of `a`), and that
+    // block as `b` sees it (its halo).
+    let dig = [REGION_EDGE - 2, GROUND_BLOCKS as i32 - 1, 10];
+    let at = game::WorldBlockPos::from_local(a, game::BlockPos::new(dig[0], dig[1], dig[2]));
+    let seen_from_b = |p: &mut Pair| seen_from(p, hb, b, at);
     assert!(seen_from_b(&mut w.pair).is_some(), "b's halo holds a's ground");
 
     // The peer link drops.
@@ -2530,7 +2752,7 @@ fn edit_saved_by_host_0_reaches_host_1s_halo_after_the_cut() {
     let mut dug_at = 0;
     w.pair.sims[ha].manager.spawner_mut().with_region(a, |r| {
         dug_at = r.current_tick() as i64;
-        r.with_data(|d| assert!(!d.carve_stud_safe(lo, hi).is_empty(), "the dig"));
+        r.with_data(|d| assert!(d.set_block_safe(dig, game::Block::new(game::BlockId::AIR)), "the dig"));
     });
     let now = w.pair.now();
     assert!(w.pair.sims[ha].manager.handle_server_event(ServerEvent::ClientDisconnected(KEEPER), now));
@@ -2560,10 +2782,8 @@ fn edit_saved_by_host_0_reaches_host_1s_halo_after_the_cut() {
         decisions(&db).iter().any(|(c, _, k)| *k && *c > parked_after),
         "brought by a world cut committed after the park"
     );
-    let below = [(lo[0] - REGION_STUDS) as i64, (lo[1] - 1) as i64, lo[2] as i64];
-    let mut under = None;
-    w.pair.sims[hb].manager.spawner_mut().with_region(b, |r| under = r.data().stud_material_seen(below));
-    assert!(under.is_some(), "the ground under the dig is still there");
+    let below = game::WorldBlockPos::new(at.x, at.y - 1, at.z);
+    assert!(seen_from(&mut w.pair, hb, b, below).is_some(), "the ground under the dig is still there");
     w.until_committed_after(&db, 0);
     assert_eq!(prepared(&db), 0, "nothing stays prepared");
     w.stop(&dir);
