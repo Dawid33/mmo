@@ -5,13 +5,13 @@
 
 use game::{CutId, EntityBundle, EntityId, PortableRegion, RegionCoords, StoredRegion, WorldCut};
 use world_store::{
-    Dials, FORMAT_ENTITY_BUNDLE, FORMAT_REGION_META, FORMAT_STUD_GROUND, FormatKind, OpenMode, StoreError, StoreHandle,
-    encode,
+    Dials, FORMAT_ENTITY_BUNDLE, FORMAT_REGION_GROUND, FORMAT_REGION_META, FormatKind, OpenMode, StoreError, StoreHandle,
+    encode, newest_migration,
 };
 
-use crate::codec::{bundle, meta, stud_ground};
+use crate::codec::{bundle, meta, region_ground};
 use crate::handle::{each_backend, fence, open};
-use crate::voxel_refusal::{blob, old_store};
+use crate::stud_refusal::{blob, migrate_to, old_store};
 
 const A: RegionCoords = RegionCoords { x: 0, z: 0 };
 const B: RegionCoords = RegionCoords { x: 1, z: -1 };
@@ -25,16 +25,25 @@ fn entity(serial: u64) -> EntityBundle {
     b
 }
 
-/// A region's row and its entities' rows as a schema-0008 build wrote them.
-fn old_rows(url: &world_store::StoreUrl, rc: RegionCoords, entities: &[EntityBundle]) -> Vec<String> {
+/// A region's row as this build writes it. A store from before `0011_voxel_terrain_returns`
+/// that holds a region is refused at open (`stud_refusal`), so the region rows of
+/// [`world_keyed_entities_migrate_unchanged`] go in once the store is migrated; `0009`
+/// touches only `entities`.
+fn region_row(url: &world_store::StoreUrl, rc: RegionCoords) -> String {
     let b = |bytes: Vec<u8>| blob(url, &bytes);
-    let mut rows = vec![format!(
-        "INSERT INTO regions (rx, rz, saved_tick, terrain_version, meta, stud_ground) VALUES ({}, {}, 700, 2, {}, {})",
+    format!(
+        "INSERT INTO regions (rx, rz, saved_tick, terrain_version, meta, ground) VALUES ({}, {}, 700, 2, {}, {})",
         rc.x,
         rc.z,
         b(encode(FORMAT_REGION_META, &meta())),
-        b(encode(FORMAT_STUD_GROUND, &stud_ground()))
-    )];
+        b(encode(FORMAT_REGION_GROUND, &region_ground()))
+    )
+}
+
+/// A region's entities' rows as a schema-0008 build wrote them.
+fn old_rows(url: &world_store::StoreUrl, rc: RegionCoords, entities: &[EntityBundle]) -> Vec<String> {
+    let b = |bytes: Vec<u8>| blob(url, &bytes);
+    let mut rows = vec![];
     for e in entities {
         rows.push(format!(
             "INSERT INTO entities (birth_rx, birth_rz, serial, rx, rz, saved_tick, kind, bundle) VALUES ({}, {}, {}, {}, {}, 700, 1, {})",
@@ -50,7 +59,7 @@ fn old_rows(url: &world_store::StoreUrl, rc: RegionCoords, entities: &[EntityBun
 }
 
 fn stored(entities: Vec<EntityBundle>) -> StoredRegion {
-    StoredRegion { meta: meta(), entities, stud_chunks: vec![], stud_ground: stud_ground() }
+    StoredRegion { meta: meta(), chunks: vec![], ground: region_ground(), entities }
 }
 
 /// A store with entity rows under the old key is migrated by its first writer (a
@@ -68,6 +77,9 @@ fn world_keyed_entities_migrate_unchanged() {
         let err = StoreHandle::open(url, Dials::BUILT, OpenMode::ReadOnly).err().unwrap();
         assert_eq!(err, StoreError::OtherFormat { found: WORLD_KEYED_SCHEMA as u32, kind: FormatKind::Schema });
 
+        // The first writer migrates; then the regions' rows (see `region_row`).
+        open(url).shutdown();
+        migrate_to(url, newest_migration(), &[region_row(url, A), region_row(url, B)]);
         let h = open(url);
         let f = fence(&h);
         assert_eq!(h.load_region(A, &f).unwrap(), Some(stored(in_a.clone())), "region A's entities unchanged");
@@ -102,7 +114,7 @@ fn entity_twice_in_one_part_is_refused() {
         let f = fence(&h);
         let region = |entities: Vec<EntityBundle>| PortableRegion {
             meta: meta(),
-            stud_ground: Some(stud_ground()),
+            ground: Some(region_ground()),
             entities,
             ..Default::default()
         };
@@ -144,7 +156,7 @@ fn entity_saved_while_a_region_outside_the_cut_still_holds_it_is_refused() {
         let f = fence(&h);
         let region = |entities: Vec<EntityBundle>| PortableRegion {
             meta: meta(),
-            stud_ground: Some(stud_ground()),
+            ground: Some(region_ground()),
             entities,
             ..Default::default()
         };

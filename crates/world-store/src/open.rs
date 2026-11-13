@@ -116,10 +116,16 @@ pub async fn open_pool(url: &StoreUrl, dials: Dials, mode: OpenMode) -> Result<(
         }
     };
 
-    // Before anything is migrated or checked: a world this build cannot open is refused
-    // as it is, by a writer and a reader alike.
+    // Before anything is migrated: a world this build cannot open is refused as it is, by
+    // a writer and a reader alike. A reader never migrates, so it first needs this build's
+    // schema (a store below it — an unreturned world among them — is refused untouched).
     let applied = applied_migration(&pool).await?;
-    if let Err(refused) = refuse_unreturned_world(&pool, applied).await {
+    let schema = if writer { Ok(()) } else { check_schema(&pool).await };
+    let refused = match schema {
+        Ok(()) => refuse_unreturned_world(&pool, applied).await,
+        Err(e) => Err(e),
+    };
+    if let Err(refused) = refused {
         // Closed before the answer: the caller sees the store as it was, no connection left on it.
         match &pool {
             Pool::Sqlite(p) => p.close().await,
@@ -135,8 +141,6 @@ pub async fn open_pool(url: &StoreUrl, dials: Dials, mode: OpenMode) -> Result<(
             Pool::Sqlite(p) => sqlx::migrate!("migrations/sqlite").run(p).await?,
             Pool::Pg(p) => migrate_pg(p).await?,
         }
-    } else {
-        check_schema(&pool).await?;
     }
     check_world_row(&pool, dials, writer).await?;
     Ok((pool, guard))
@@ -256,8 +260,9 @@ async fn scalar(pool: &Pool, sql: &str) -> Result<Option<i64>, StoreError> {
     .flatten())
 }
 
-/// Refuses a store this build cannot open, before any migration and for writers and
-/// read-only opens alike; reads only. `applied`: [`applied_migration`].
+/// Refuses a store this build cannot open, before any migration (a writer) or after the
+/// schema check (a read-only open, which never migrates); reads only. `applied`:
+/// [`applied_migration`].
 ///
 /// - A store that has not had [`VOXEL_RETURN_MIGRATION`] and holds a saved region is
 ///   refused: a stud world (its terrain is never converted), or a voxel world from

@@ -5,11 +5,11 @@
 
 use std::time::Duration;
 
-use game::{CutId, InFlightRow, PortableRegion, RegionCoords, StudChunkCoords, WorldCut};
+use game::{ChunkCoords, CutId, InFlightRow, PortableRegion, RegionCoords, WorldCut};
 use sqlx::Connection;
 use world_store::{Dials, Fence, HostRow, OpenMode, StoreError, StoreHandle, StoreUrl, cut_gid};
 
-use crate::codec::{intent, meta, stud_chunk, stud_ground};
+use crate::codec::{chunk, intent, meta, region_ground};
 use crate::common;
 use crate::handle::{each_backend, open};
 
@@ -24,8 +24,8 @@ const BLOCKED_FOR: Duration = Duration::from_millis(300);
 fn region() -> PortableRegion {
     PortableRegion {
         meta: meta(),
-        stud_chunks: [(StudChunkCoords { x: 0, y: 0, z: 0 }, Some(stud_chunk()))].into_iter().collect(),
-        stud_ground: Some(stud_ground()),
+        chunks: [(ChunkCoords::new(0, 0, 0), chunk())].into_iter().collect(),
+        ground: Some(region_ground()),
         ..Default::default()
     }
 }
@@ -208,6 +208,50 @@ fn commit_decision_applies_every_part_and_the_world_tick() {
     assert_eq!(prepared(&w), 0);
     // Deciding again changes nothing and finds nothing left to commit.
     assert!(h.decide_cut(CutId(2), 200, true, vec![0, 1], vec![], c, 0).unwrap());
+    h.shutdown();
+}
+
+/// A world cut taken while the same chunk is edited on two hosts, each in its own
+/// region: each host's part writes only its own region's `chunks` rows, and a part
+/// staged on a stale epoch is refused (`Fenced`) and writes no `chunks` row.
+#[test]
+fn a_cut_part_writes_only_its_own_regions_chunks() {
+    let Some(w) = pg_world() else { return };
+    let h = open(&w.url);
+    let (f0, f1) = fences(&h);
+    let c = h.claim_coordinator().unwrap();
+    let h1 = open(&w.url);
+    let at = ChunkCoords::new(0, 0, 0);
+    let edited = |id: u16| {
+        let mut ch = chunk();
+        ch.set_block(9, 9, 9, game::Block::new(game::BlockId(id)));
+        ch
+    };
+    let with_chunks = |mut p: WorldCut, chunks: Vec<(ChunkCoords, game::Chunk)>| {
+        p.regions[0].1.chunks = chunks.into_iter().collect();
+        p
+    };
+    h.prepare_cut(with_chunks(part(3, 0), vec![(at, edited(5))]), f0.clone(), 0).recv().unwrap().unwrap();
+    h1.prepare_cut(with_chunks(part(3, 1), vec![(at, edited(6))]), f1.clone(), 0).recv().unwrap().unwrap();
+    assert!(h.decide_cut(CutId(3), 300, true, vec![0, 1], vec![], c, 0).unwrap());
+    assert_eq!(h.load_region(A, &f0).unwrap().unwrap().chunks, vec![(at, edited(5))], "host 0's edit in A");
+    assert_eq!(h.load_region(B, &f1).unwrap().unwrap().chunks, vec![(at, edited(6))], "host 1's edit in B");
+    assert_eq!(scalar_i64(&w, "SELECT COUNT(*) FROM chunks WHERE rx = 0 AND rz = 0"), 1);
+    assert_eq!(scalar_i64(&w, "SELECT COUNT(*) FROM chunks WHERE rx = 1 AND rz = -1"), 1);
+    assert_eq!(scalar_i64(&w, "SELECT COUNT(*) FROM chunks"), 2, "no part wrote a row of the other's region");
+
+    // Host 0's super-region is claimed by another owner since: host 0's next part, on its
+    // old epoch, edits A's chunk again and adds one — refused, nothing written.
+    let newer = h.claim_super_regions(2, f0.epochs.keys().copied().collect()).unwrap();
+    let stale = open(&w.url);
+    let part4 = with_chunks(part(4, 0), vec![(at, edited(7)), (ChunkCoords::new(0, 1, 0), edited(8))]);
+    let err = stale.prepare_cut(part4, f0.clone(), 0).recv().unwrap().unwrap_err();
+    assert!(matches!(err, StoreError::Fenced { sr: Some(_) }), "{err}");
+    assert_eq!(prepared(&w), 0, "rolled back, not prepared");
+    assert_eq!(scalar_i64(&w, "SELECT COUNT(*) FROM chunks"), 2, "the stale part wrote no chunks row");
+    assert_eq!(h.load_region(A, &newer).unwrap().unwrap().chunks, vec![(at, edited(5))], "A's chunk unchanged");
+    stale.shutdown();
+    h1.shutdown();
     h.shutdown();
 }
 
@@ -965,14 +1009,14 @@ impl Drop for MigrateTimeout {
 #[ignore = "slow: >100ms — run via just test-full"]
 fn migration_behind_an_orphan_prepared_part_fails_with_the_remedy() {
     let Some(w) = pg_world() else { return };
-    crate::voxel_refusal::old_store(&w.url, 9, "1", &[]);
+    crate::stud_refusal::old_store(&w.url, 9, "1", &[]);
     let gid = "mmo-cut-1-1-0";
     {
         let url = w.db.url.clone();
         let insert = format!(
             "INSERT INTO entities (birth_rx, birth_rz, serial, rx, rz, saved_tick, kind, bundle) \
              VALUES (0, 0, 1, 0, 0, 1, 1, {})",
-            crate::voxel_refusal::blob(&w.url, &[1, 2, 3])
+            crate::stud_refusal::blob(&w.url, &[1, 2, 3])
         );
         std::thread::spawn(move || {
             let rt = tokio::runtime::Runtime::new().unwrap();
@@ -1008,7 +1052,7 @@ fn migration_behind_an_orphan_prepared_part_fails_with_the_remedy() {
 #[ignore = "slow: >100ms — run via just test-full"]
 fn migration_behind_an_ordinary_lock_says_retry() {
     let Some(w) = pg_world() else { return };
-    crate::voxel_refusal::old_store(&w.url, 9, "1", &[]);
+    crate::stud_refusal::old_store(&w.url, 9, "1", &[]);
     let rt = tokio::runtime::Runtime::new().unwrap();
     let mut conn = rt.block_on(sqlx::PgConnection::connect(&w.db.url)).unwrap();
     let mut tx = rt.block_on(conn.begin()).unwrap();

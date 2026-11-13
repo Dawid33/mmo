@@ -7,10 +7,10 @@ use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 use crossbeam::channel::Receiver;
-use game::{CutId, PortableRegion, RegionCoords, StudChunkCoords, WorldCut};
+use game::{ChunkCoords, CutId, PortableRegion, RegionCoords, WorldCut};
 use world_store::{CutNotice, Dials, NotifyMode, OpenMode, StoreHandle, StoreUrl, TERRAIN_LISTENER_APP};
 
-use crate::codec::{meta, stud_chunk, stud_ground};
+use crate::codec::{chunk, meta, region_ground};
 use crate::common;
 use crate::handle::{fence, open};
 
@@ -30,15 +30,15 @@ fn pg_db(tag: &str) -> Option<(common::PgTestDb, StoreUrl)> {
     Some((db, url))
 }
 
-/// A region's save at `tick`: one stud chunk row (a terrain change), with its ground on
+/// A region's save at `tick`: one chunk row (a terrain change), with its ground on
 /// the first save.
 fn region(tick: u64, ground: bool) -> PortableRegion {
     let mut m = meta();
     m.tick = tick;
     PortableRegion {
         meta: m,
-        stud_ground: ground.then(stud_ground),
-        stud_chunks: [(StudChunkCoords { x: 0, y: 0, z: 0 }, Some(stud_chunk()))].into_iter().collect(),
+        ground: ground.then(region_ground),
+        chunks: [(ChunkCoords::new(0, 0, 0), chunk())].into_iter().collect(),
         ..Default::default()
     }
 }

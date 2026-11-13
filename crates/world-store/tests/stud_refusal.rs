@@ -12,8 +12,8 @@ use std::borrow::Cow;
 use game::ColumnCoords;
 use sqlx::Row;
 use world_store::{
-    Dials, FORMAT_REGION_GROUND, FORMAT_REGION_META, FormatKind, OpenMode, Pool, StoreError, StoreHandle, StoreUrl, decode,
-    encode, newest_migration,
+    Dials, FORMAT_REGION_GROUND, FORMAT_REGION_META, FormatKind, OpenMode, Pool, StoreError, StoreHandle, StoreUrl,
+    TerrainKind, decode, encode, newest_migration,
 };
 
 use crate::codec::meta;
@@ -137,16 +137,20 @@ fn file_bytes(url: &StoreUrl) -> Option<Vec<u8>> {
     }
 }
 
-/// Opens the old store at `url` every way there is and checks each open is refused with
-/// a message that says to re-forge, and that neither the file nor its migrations changed.
+/// Opens the old store at `url` every way there is and checks each open is refused — a
+/// writer with a message that says to re-forge, a read-only handle (which never migrates)
+/// for its schema — and that neither the file nor its migrations changed.
 fn assert_refused_untouched(url: &StoreUrl, schema: i64, what: &str) {
     let bytes = file_bytes(url);
-    for mode in [OpenMode::Writer, OpenMode::ReadOnly] {
-        let err = StoreHandle::open(url, Dials::BUILT, mode).err().unwrap_or_else(|| panic!("{what}: {mode:?} opened it"));
+    for round in 0..2 {
+        let err = StoreHandle::open(url, Dials::BUILT, OpenMode::Writer).err().unwrap_or_else(|| panic!("{what}: a writer opened it"));
         let text = err.to_string();
-        assert!(text.contains("re-forge"), "{what}: {mode:?}: {text}");
-        assert_eq!(file_bytes(url), bytes, "{what}: {mode:?} changed the file");
-        assert_eq!(applied(url), Some(schema), "{what}: {mode:?} applied a migration");
+        assert!(text.contains("re-forge"), "{what}: round {round}: {text}");
+        assert_eq!(file_bytes(url), bytes, "{what}: the writer changed the file");
+        let err = StoreHandle::open(url, Dials::BUILT, OpenMode::ReadOnly).err().unwrap_or_else(|| panic!("{what}: read-only opened it"));
+        assert_eq!(err, StoreError::OtherFormat { found: schema as u32, kind: FormatKind::Schema }, "{what}");
+        assert_eq!(file_bytes(url), bytes, "{what}: the read-only open changed the file");
+        assert_eq!(applied(url), Some(schema), "{what}: a migration was applied");
     }
 }
 
@@ -238,5 +242,22 @@ fn a_read_only_handle_needs_migration_11() {
         let err = StoreHandle::open(url, Dials::BUILT, OpenMode::ReadOnly).err().expect("a read-only open of schema 0010");
         assert_eq!(err, StoreError::OtherFormat { found: LAST_STUD_SCHEMA as u32, kind: FormatKind::Schema });
         assert_eq!(applied(url), Some(LAST_STUD_SCHEMA), "nothing migrated");
+    });
+}
+
+/// From `0011` on, a world row marked studs is refused by a writer and a read-only handle
+/// alike, and the mark is kept.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn a_world_marked_studs_is_refused_from_11_on() {
+    each_backend("stud_mark", true, |url| {
+        StoreHandle::open(url, Dials::BUILT, OpenMode::Writer).unwrap().shutdown();
+        migrate_to(url, VOXEL_RETURN, &["UPDATE world SET terrain = 1".to_string()]);
+        for mode in [OpenMode::Writer, OpenMode::ReadOnly] {
+            let err = StoreHandle::open(url, Dials::BUILT, mode).err().unwrap_or_else(|| panic!("{mode:?} opened it"));
+            assert_eq!(err, StoreError::OtherTerrain { stored: TerrainKind::Studs }, "{mode:?}");
+            assert!(err.to_string().contains("re-forge"), "{err}");
+        }
+        assert_eq!(scalar(url, "SELECT terrain FROM world WHERE id = 1"), Some(1), "the mark is kept");
     });
 }
