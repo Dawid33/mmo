@@ -1481,7 +1481,7 @@ fn foreign_region_play_moves_and_login_is_still_refused() {
     assert_eq!(h.manager.home_of(0), None, "no home here");
     let record = PlayerRecord {
         client: game::Client::default(),
-        pose: game::Pose::from_translation(body_on_tile([3, STAND, 3])),
+        pose: game::Pose::from_translation(body_on_tile([3, 1, 3])),
         region: target,
         fortress: None,
         adventure: None,
@@ -1577,7 +1577,7 @@ fn claim_is_sets_the_host_claim() {
     let (mut h, _, _) = world(true);
     let record = PlayerRecord {
         client: game::Client::default(),
-        pose: game::Pose::from_translation(body_on_tile([3, STAND, 3])),
+        pose: game::Pose::from_translation(body_on_tile([3, 1, 3])),
         region: SPAWN_REGION,
         fortress: Some(SiteId(0)),
         adventure: None,

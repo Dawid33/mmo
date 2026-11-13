@@ -214,17 +214,17 @@ impl Rig {
         }
     }
 
-    /// [`Rig::with_genesis`] for one host of several: it simulates the regions
+    /// [`Rig::with_spawner`] for one host of several: it simulates the regions
     /// `ownership` gives it (`s` regions per super-region side). Its world tick is its
     /// spawner's round count, so every host of one world must be ticked every round
     /// ([`super::multi_rig::MultiRig`]).
     pub fn with_ownership(
         spawner: InlineSpawner,
-        floor: game::InlineStudGenesis,
+        floor: impl FnMut(RegionCoords) -> Vec<(ColumnCoords, Column)> + Send + 'static,
         ownership: game::Ownership,
         s: u32,
     ) -> Self {
-        let mut rig = Self::with_genesis(spawner, floor);
+        let mut rig = Self::with_spawner(spawner, floor);
         rig.manager.set_ownership(ownership, s);
         rig
     }

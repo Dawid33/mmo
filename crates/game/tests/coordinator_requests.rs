@@ -995,8 +995,9 @@ fn ignored_stale_claim_is_triggers_a_re_report_and_converges() {
     let a = PlayerId(A as u64);
     let (out_send, packets) = unbounded();
     let (region_out_send, region_out) = unbounded();
-    let mut manager = crate::common::stud_manager(
-        InlineSpawner::default().with_stud_genesis(std::sync::Arc::new(floored_region)),
+    let mut manager = crate::common::floor_manager(
+        InlineSpawner::default(),
+        floored_region,
         out_send,
         region_out_send,
     );

@@ -15,7 +15,7 @@ use game::{
 
 use crate::common;
 use crate::common::rig::{assert_same_streams, north, north_west, seam_floor_columns, Rig, Seen, Streams, CLIENT, LEG_ROUNDS};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 /// Seeds swept per schedule mode.
 const SEEDS: u64 = 12;
@@ -69,9 +69,10 @@ const CROWD_INSET: f32 = 8.0;
 /// neighbour, so two sources mirror into the spawn region (and into the
 /// north-west one) every tick — neighbour messages whose order within a slot
 /// the schedule permutes. It also sends intents and replies that meet in one
-/// slot: north and west each carve a box reaching into the north-west region
-/// (two sources' intents into one target), and the client carves a box over
-/// the spawn corner (its replies come from three owners, due one tick).
+/// slot: north and west each drop piles on the north-west region's blocks by
+/// the corner (two sources' intents into one target), and the client breaks the
+/// floor blocks by the spawn corner (its replies come from three owners, due
+/// one tick).
 fn walk_there_and_back_recorded(
     route: Route,
     schedule: Option<InlineSchedule>,
@@ -93,10 +94,15 @@ fn walk_there_and_back_recorded(
                 common::spawn_slime(region, [x, common::above_floor_y(), z], 1, 0.0, tick);
             });
         }
-        let (s, top) = ((game::REGION_CHUNKS * game::STUD_CHUNK_STUDS) as i32, common::FLOOR_PLATES);
-        carve_in(&mut rig, north(), [-4, top - 6, s - 12], [4, top, s - 8]);
-        carve_in(&mut rig, RegionCoords::new(-1, 0), [s - 12, top - 6, -4], [s - 8, top, 4]);
-        rig.order(Order::CarveStud { lo: [-4, top - 6, -4], hi: [4, top, 4] });
+        let n = REGION_BLOCKS as i32;
+        deposit_in(&mut rig, north(), &[[-2, 1, n - 6], [-1, 1, n - 5]]);
+        deposit_in(&mut rig, RegionCoords::new(-1, 0), &[[n - 6, 1, -2], [n - 5, 1, -1]]);
+        // A floor block in each of the three neighbours by the corner, off the diagonal the
+        // corner route walks (the half-block floor has nothing under a broken block).
+        for (x, z) in [(3, -2), (-2, 3), (-4, -1)] {
+            let floor = game::WorldBlockPos::from_local(SPAWN_REGION, game::BlockPos::new(x, 0, z));
+            rig.order(Order::DevBreakBlock(floor));
+        }
     }
 
     rig.key(Key::KeyE, true);
@@ -140,13 +146,18 @@ fn walk_there_and_back_recorded(
     (rig.fingerprint(), streams)
 }
 
-/// Applies `Order::CarveStud { lo, hi }` (`rc`'s stud frame) in `rc` between ticks — a
-/// region with no body of the client's: its intents to the neighbours the box reaches
-/// into are sent by the region itself (`EntityId::of_region`).
-fn carve_in(rig: &mut Rig, rc: RegionCoords, lo: [i32; 3], hi: [i32; 3]) {
+/// Drops a stack of dirt on each block `cells` names (`rc`'s frame) in `rc` between
+/// ticks — a region with no body of the client's: its deposits on the neighbours' blocks
+/// are intents the region itself sends (`EntityId::of_region`).
+fn deposit_in(rig: &mut Rig, rc: RegionCoords, cells: &[[i32; 3]]) {
     rig.manager.spawner_mut().with_region(rc, |region| {
-        region.handle_event(GameEventKind::Order(CLIENT, Order::CarveStud { lo, hi })).unwrap();
-        region.commit_server_event();
+        let tick = region.current_tick() as u64;
+        region.with_data(|d| {
+            for &cell in cells {
+                let stack = game::ItemStack { item: game::ItemId(1), count: 3 };
+                assert_eq!(d.deposit_items_safe(cell, stack, tick, game::PICKUP_DELAY_TICKS), 0, "{rc:?} {cell:?}");
+            }
+        });
     });
 }
 

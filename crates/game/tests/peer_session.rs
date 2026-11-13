@@ -839,7 +839,7 @@ fn manager_closes_a_link_whose_session_broke() {
     use std::sync::atomic::Ordering;
     let mut rig = crate::common::rig::Rig::with_ownership(
         game::InlineSpawner::default(),
-        std::sync::Arc::new(|_| crate::common::uniform_seed()),
+        crate::common::seam_translate::uniform_floor,
         game::Ownership::Static { ordinal: 0, hosts: 2 },
         1,
     );

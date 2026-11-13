@@ -32,6 +32,42 @@ pub fn install_real_block_props() {
     });
 }
 
+/// Height (units) of the top of the one-block test floor (`Chunk::flat_floor(BLOCK_VOXELS)`
+/// under every column: `seam_translate::uniform_floor`, `history_handover::floored_region`).
+pub const FLOOR_TOP: f32 = game::BLOCK_VOXELS as f32;
+/// The block level a body stands in (and a pile rests in) on the one-block test floor.
+pub const STAND: i32 = 1;
+
+/// The y (units) of a player body's centre when it stands on a floor whose top is
+/// `top` units high.
+pub fn standing_y(top: f32) -> f32 {
+    top + game::movement::PLAYER_CAPSULE_HALF_HEIGHT + game::movement::PLAYER_CAPSULE_RADIUS
+}
+
+/// A body-centre height a little above the one-block test floor (the spawn
+/// clearance's 3.6 units over a standing player): where the tests teleport
+/// players and put slimes and bodies down "on the floor".
+pub fn above_floor_y() -> f32 {
+    standing_y(FLOOR_TOP) + 3.6
+}
+
+/// A manager over `spawner` whose never-run regions start from `floor(rc)` (its
+/// `RegionGenerator`); far terrain is empty (an inline LOD builder with no coarse data).
+pub fn floor_manager<S: game::RegionSpawner>(
+    spawner: S,
+    floor: impl FnMut(RegionCoords) -> Vec<(game::ColumnCoords, game::Column)> + Send + 'static,
+    out: crossbeam::channel::Sender<(Option<game::ClientId>, game::ServerPacket)>,
+    region_out: crossbeam::channel::Sender<(RegionCoords, game::RegionOutput)>,
+) -> game::WorldManager<S> {
+    let (lod_result_send, lod_result_recv) = crossbeam::channel::unbounded();
+    let lod_builder: Box<dyn game::LodBuilder> = Box::new(game::InlineLodBuilder {
+        coarse: Box::new(|_key: &game::lod::LodKey| Vec::new()),
+        water: Box::new(game::lod::LodWater::dry),
+        out: lod_result_send,
+    });
+    game::WorldManager::new(spawner, Box::new(floor), out, region_out, lod_builder, lod_result_recv)
+}
+
 /// The chunk holding the world-unit position `units` (floor by `CHUNK_UNITS`).
 pub fn chunk_of(units: game::rapier3d::math::Vector) -> ChunkCoords {
     chunk_coords_from_translation(units)

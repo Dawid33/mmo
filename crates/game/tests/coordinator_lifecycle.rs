@@ -608,8 +608,9 @@ fn absorbed_person_is_listed_at_its_source_frame_position() {
     let (h, a, _) = strip_history();
     let (out_send, packets) = unbounded();
     let (region_out_send, region_out) = unbounded();
-    let mut manager = crate::common::stud_manager(
-        InlineSpawner::default().with_stud_genesis(std::sync::Arc::new(floored_region)),
+    let mut manager = crate::common::floor_manager(
+        InlineSpawner::default(),
+        floored_region,
         out_send,
         region_out_send,
     );

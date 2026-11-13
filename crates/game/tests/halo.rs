@@ -7,7 +7,7 @@ use game::{
     RegionCoords, WorldBlockPos, WorldChunkPos, BLOCK_VOXELS, REGION_BLOCKS, REGION_CHUNKS, SPAWN_REGION,
 };
 
-use crate::common;
+use crate::common::{self, STAND};
 use crate::common::rig::{Rig, CLIENT};
 use crate::common::seam_translate::uniform_floor;
 use crate::common::water::{floor_with_water, WaterBox};
@@ -82,6 +82,9 @@ fn neighbour_edit_reaches_halo_next_tick() {
     );
     rig.round();
     assert_eq!(seen_from_spawn(&mut rig, world).map(|b| b.id), Some(BlockId::AIR), "tick {}: the break is in the halo", t + 2);
+    // The one-block floor has nothing under the broken block: the floor beside it stands.
+    let beside = WorldBlockPos::from_local(north(), BlockPos::new(local.x + 1, local.y, local.z));
+    assert!(seen_from_spawn(&mut rig, beside).is_some_and(|b| b.id != BlockId::AIR), "the block beside it still stands");
     // Outside own ∪ halo: unknown.
     let far = WorldBlockPos::from_local(north(), BlockPos::new(10, 0, n / 2));
     assert_eq!(seen_from_spawn(&mut rig, far), None);
@@ -153,6 +156,7 @@ fn raycast_hits_neighbour_block() {
         set_block(&mut rig, east(), BlockPos::new(1, y, z), Block::new(BlockId(1)));
     }
     rig.round();
+    rig.round(); // the T+1 delta is buffered to its slot's end
     let bv = BLOCK_VOXELS as f32;
     // An eye 3 blocks inside the spawn region, looking +x along the row.
     let origin = Vector::new((n as f32 - 2.5) * bv, 2.5 * bv, (z as f32 + 0.5) * bv);
@@ -265,6 +269,8 @@ fn parked_neighbour_reseeds_running_halo() {
     );
     rig.round();
     assert_eq!(seen_from_spawn(&mut rig, world).map(|b| b.id), Some(BlockId::AIR), "the parked edit is in the halo");
+    let beside = WorldBlockPos::from_local(north(), BlockPos::new(local.x + 1, local.y, local.z));
+    assert!(seen_from_spawn(&mut rig, beside).is_some_and(|b| b.id != BlockId::AIR), "beside it the ground stands");
 }
 
 /// The mirror `rc` holds of entity `id`, if any.
@@ -709,7 +715,7 @@ impl game::RegionSpawner for RecordingSpawner {
         self.0.lock().unwrap().push((id, recv));
         send
     }
-    fn seeds_halos_on_region_threads(&self) -> bool {
+    fn generates_columns(&self) -> bool {
         true
     }
 }
@@ -734,7 +740,8 @@ fn two_host_manager() -> TwoHostManager {
     let spawned = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let (out_send, _packets) = crossbeam::channel::unbounded();
     let (region_out_send, _region_out) = crossbeam::channel::unbounded();
-    let mut m = common::stud_manager(RecordingSpawner(spawned.clone()), out_send, region_out_send);
+    // The spawner generates on its region threads: the manager's generator is never asked.
+    let mut m = common::floor_manager(RecordingSpawner(spawned.clone()), |_| Vec::new(), out_send, region_out_send);
     m.set_ownership(ownership, s);
     m.set_host_generation(1);
     m.handle_server_event(game::ServerEvent::connected(1), 0);
@@ -878,6 +885,61 @@ fn stored_terrain_change_drops_the_stale_mark_of_a_region_now_owned_here() {
     assert_eq!(store_seeds(&spawn_inputs), Vec::<RegionCoords>::new(), "the stale mark went with the ownership");
 }
 
+/// Another host saved one of its regions (not running here) at a newer version: the LOD
+/// built here from older terrain is stale. Its cached LOD entries are dropped and the keys
+/// a client is subscribed to are rebuilt (`invalidate_region_lod`, as `cut_committed`
+/// does for this host's own saves).
+#[test]
+fn stored_terrain_change_of_a_foreign_region_rebuilds_its_lod() {
+    use game::lod::LodKey;
+    use game::{ClientPacket, ServerEvent, ServerPacket};
+    let s = 1;
+    let mine = game::rendezvous_owner(game::super_region_of(SPAWN_REGION, s), 2);
+    let ownership = game::Ownership::Static { ordinal: mine, hosts: 2 };
+    let f = (3..64).map(|x| RegionCoords::new(x, 3)).find(|rc| !ownership.owns(*rc, s)).expect("a far region of the other host");
+    let (out_send, out) = crossbeam::channel::unbounded();
+    let (region_out_send, region_out) = crossbeam::channel::unbounded();
+    let mut m = common::floor_manager(game::InlineSpawner::default(), uniform_floor, out_send, region_out_send);
+    m.set_ownership(ownership, s);
+    m.set_host_generation(1);
+    let settle = |m: &mut game::WorldManager<game::InlineSpawner>| {
+        for _ in 0..3 {
+            m.spawner_mut().pump();
+            while let Ok((rc, o)) = region_out.try_recv() {
+                m.handle_region_output(rc, o, 0);
+            }
+            m.pump_lod_results();
+        }
+    };
+    m.handle_server_event(ServerEvent::connected(1), 0);
+    settle(&mut m);
+    assert!(m.is_foreign(f) && !m.running_regions().contains(&f));
+    let (subscribed, released) = (LodKey::for_region(2, f), LodKey::for_region(4, f));
+    for key in [subscribed, released] {
+        m.handle_server_event(ServerEvent::ClientPacket(ClientPacket::RequestLod(key), 1), 0);
+    }
+    settle(&mut m);
+    m.handle_server_event(ServerEvent::ClientPacket(ClientPacket::ReleaseLod(released), 1), 0);
+    let lod_data = |out: &crossbeam::channel::Receiver<(Option<game::ClientId>, ServerPacket)>| -> Vec<LodKey> {
+        out.try_iter()
+            .filter_map(|(_, p)| match p {
+                ServerPacket::LodData(k, ..) => Some(k),
+                _ => None,
+            })
+            .collect()
+    };
+    assert_eq!(lod_data(&out), vec![subscribed, released], "both keys built");
+    let cached = m.lod_cache_len();
+
+    m.stored_terrain_changed([(f, 1)].into());
+    settle(&mut m);
+    assert_eq!(lod_data(&out), vec![subscribed], "the subscribed key is rebuilt and pushed again");
+    assert_eq!(m.lod_cache_len(), cached - 1, "the released key's entry is dropped");
+    m.stored_terrain_changed([(f, 1)].into());
+    settle(&mut m);
+    assert_eq!(lod_data(&out), Vec::<LodKey>::new(), "an unchanged version rebuilds nothing");
+}
+
 /// A region that has ticked asked to re-seed a neighbour the store cannot serve keeps its
 /// mirror of it (worldgen is never older-than-the-store safe); one the store serves is
 /// re-seeded from it, the saved dig included.
@@ -885,25 +947,28 @@ fn stored_terrain_change_drops_the_stale_mark_of_a_region_now_owned_here() {
 fn stored_terrain_change_on_a_ticking_region_keeps_an_unserved_mirror() {
     crate::common::install_real_block_props();
     let (out, _out_recv) = crossbeam::channel::unbounded();
-    let region = common::region_of(SPAWN_REGION, common::uniform_seed());
+    let region = Region::from_columns(SPAWN_REGION, uniform_floor(SPAWN_REGION));
     let mut runner = game::RegionRunner::new(SPAWN_REGION, region, out);
-    let generated = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
-    let count = generated.clone();
-    runner.set_stud_halo_generator(std::sync::Arc::new(move |_rc, xs, zs| {
-        count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let mut seed = common::uniform_seed();
-        seed.ground.retain(|(c, _)| xs.contains(&c.x) && zs.contains(&c.z));
-        seed
+    // Every region the halo generator was asked for, once per facing window.
+    let generated = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let asked = generated.clone();
+    runner.set_halo_generator(std::sync::Arc::new(move |rc, xs, zs| {
+        asked.lock().unwrap().push(rc);
+        uniform_floor(rc).into_iter().filter(|(c, _)| xs.contains(&c.x) && zs.contains(&c.z)).collect()
     }));
     runner.handle_input(game::RegionInput::SeedHaloFromWorldgen(vec![east(), north()]));
-    assert_eq!(generated.load(std::sync::atomic::Ordering::SeqCst), 2);
+    let seeded = generated.lock().unwrap().clone();
+    let mut regions = seeded.clone();
+    regions.dedup();
+    assert_eq!(regions, vec![east(), north()]);
     let (dug, snap) = east_saved_dug();
     runner.set_stored_terrain(std::sync::Arc::new(OneStored(east(), snap)));
     runner.tick();
     runner.handle_input(game::RegionInput::SeedHaloFromStore(vec![east(), north()]));
-    assert_eq!(generated.load(std::sync::atomic::Ordering::SeqCst), 2, "no worldgen for the unserved neighbour");
+    assert_eq!(*generated.lock().unwrap(), seeded, "no worldgen for the unserved neighbour");
     let data = runner.region_mut().data();
-    let seen = |of: RegionCoords, cell: [i32; 3]| data.stud_material_seen(from_spawn(of, cell));
-    assert_eq!(seen(east(), dug.0), None, "the saved dig is in the halo");
-    assert!(seen(north(), [20, FLOOR_PLATES - 1, REGION_STUDS - 4]).is_some(), "north's mirror is kept");
+    let seen = |of: RegionCoords, p: BlockPos| data.halo_block(WorldBlockPos::from_local(of, p)).map(|b| b.id);
+    assert_eq!(seen(east(), dug), Some(BlockId::AIR), "the saved dig is in the halo");
+    let n = REGION_BLOCKS as i32;
+    assert!(seen(north(), BlockPos::new(10, 0, n - 2)).is_some_and(|b| b != BlockId::AIR), "north's mirror is kept");
 }

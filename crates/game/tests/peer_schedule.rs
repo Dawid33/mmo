@@ -156,19 +156,24 @@ fn two_sources_into_one(rig: &mut MultiRig) {
     };
     rig.spawn_slime(a, inside(a));
     let id = rig.spawn_slime(c, inside(c));
-    // Both also carve a box reaching into `b`: two sources' intents in one slot.
-    let (s, top) = ((game::REGION_CHUNKS * game::STUD_CHUNK_STUDS) as i32, crate::common::FLOOR_PLATES);
+    // Both also drop piles on `b`'s blocks by the seam: two sources' intents in one slot.
+    let n = game::REGION_BLOCKS as i32;
     for from in [a, c] {
         let span = |d: i32| match d {
-            1 => (s - 4, s + 4),
-            -1 => (-4, 4),
-            _ => (s / 2, s / 2 + 4),
+            1 => [n, n + 1],
+            -1 => [-1, -2],
+            _ => [n / 2, n / 2 + 1],
         };
-        let ((x0, x1), (z0, z1)) = (span(b.x - from.x), span(b.z - from.z));
-        let order = game::Order::CarveStud { lo: [x0, top - 6, z0], hi: [x1, top, z1] };
+        let (xs, zs) = (span(b.x - from.x), span(b.z - from.z));
         rig.host_of(from).manager.spawner_mut().with_region(from, |region| {
-            region.handle_event(game::GameEventKind::Order(crate::common::rig::CLIENT, order)).unwrap();
-            region.commit_server_event();
+            let tick = region.current_tick() as u64;
+            region.with_data(|d| {
+                for i in 0..2 {
+                    let cell = [xs[i], crate::common::STAND, zs[i]];
+                    let stack = game::ItemStack { item: game::ItemId(1), count: 3 };
+                    assert_eq!(d.deposit_items_safe(cell, stack, tick, game::PICKUP_DELAY_TICKS), 0, "{from:?} {cell:?}");
+                }
+            });
         });
     }
     for _ in 0..WAIT_ROUNDS {
@@ -463,8 +468,6 @@ fn transfer_departing_after_its_source_answered_the_cut_is_not_a_row() {
 
 // --- Halo and intents between hosts (Task 6) -------------------------------------
 
-/// Stud columns along a region's edge.
-const REGION_STUDS: i32 = (game::REGION_CHUNKS * game::STUD_CHUNK_STUDS) as i32;
 /// Round budget for a halo change to show across a host seam (a delta is applied
 /// at the end of its slot, right before the target's next tick).
 const HALO_ROUNDS: usize = 9;
@@ -473,39 +476,44 @@ const DEPOSIT: u32 = 5;
 /// The dirt item of the block manifest.
 const DIRT: game::ItemId = game::ItemId(1);
 
-/// The stud cell `cell` of region `of`, in region `rc`'s frame.
-fn cell_from(rc: RegionCoords, of: RegionCoords, cell: [i32; 3]) -> [i64; 3] {
-    let (dx, dz) = (of.x - rc.x, of.z - rc.z);
-    [(cell[0] + dx * REGION_STUDS) as i64, cell[1] as i64, (cell[2] + dz * REGION_STUDS) as i64]
-}
-
-/// The material at stud cell `cell` of region `of` as running region `rc` sees it (own ∪
-/// halo): `None` is air, or outside own ∪ halo.
-fn seen_from(rig: &mut MultiRig, rc: RegionCoords, of: RegionCoords, cell: [i32; 3]) -> Option<u16> {
+/// The block at `cell` of region `of` as running region `rc` sees it (own ∪ halo):
+/// `None` is air, or outside own ∪ halo.
+fn seen_from(rig: &mut MultiRig, rc: RegionCoords, of: RegionCoords, cell: [i32; 3]) -> Option<game::BlockId> {
     let mut m = None;
-    rig.host_of(rc).manager.spawner_mut().with_region(rc, |r| m = r.data().stud_material_seen(cell_from(rc, of, cell)));
+    let p = game::WorldBlockPos::from_local(of, game::BlockPos::new(cell[0], cell[1], cell[2]));
+    rig.host_of(rc).manager.spawner_mut().with_region(rc, |r| {
+        m = r.data().halo_block(p).map(|b| b.id).filter(|&id| id != game::BlockId::AIR)
+    });
     m
 }
 
-/// The box of the top ground plate of `a` over the 2 x 2 studs on its edge facing the
-/// adjacent `b`, mid-way along that edge.
-fn border_plate(a: RegionCoords, b: RegionCoords) -> ([i32; 3], [i32; 3]) {
-    let mid = REGION_STUDS / 2;
+/// The floor block of `a` on its edge facing the adjacent `b` (the second block in from
+/// the seam), mid-way along that edge.
+fn border_block(a: RegionCoords, b: RegionCoords) -> [i32; 3] {
+    let n = game::REGION_BLOCKS as i32;
     let across = |d: i32| match d {
-        1 => Some(REGION_STUDS - 4),
-        -1 => Some(2),
+        1 => Some(n - 2),
+        -1 => Some(1),
         _ => None,
     };
-    let x = across(b.x - a.x).unwrap_or(mid);
-    let z = across(b.z - a.z).unwrap_or(mid);
-    let plates = crate::common::FLOOR_PLATES;
-    ([x, plates - 1, z], [x + 2, plates, z + 2])
+    let x = across(b.x - a.x).unwrap_or(n / 2);
+    let z = across(b.z - a.z).unwrap_or(n / 2);
+    [x, crate::common::STAND - 1, z]
 }
 
-/// Carves `lo .. hi` out of running `rc` between ticks.
-fn carve(rig: &mut MultiRig, rc: RegionCoords, (lo, hi): ([i32; 3], [i32; 3])) {
+/// The block beside `cell` along its edge (the next one in x, or in z on an x seam).
+fn beside(a: RegionCoords, b: RegionCoords, cell: [i32; 3]) -> [i32; 3] {
+    if b.x != a.x {
+        [cell[0], cell[1], cell[2] + 1]
+    } else {
+        [cell[0] + 1, cell[1], cell[2]]
+    }
+}
+
+/// Breaks block `cell` of running `rc` between ticks.
+fn dig(rig: &mut MultiRig, rc: RegionCoords, cell: [i32; 3]) {
     rig.host_of(rc).manager.spawner_mut().with_region(rc, |r| {
-        r.with_data(|d| assert!(!d.carve_stud_safe(lo, hi).is_empty(), "{rc:?} {lo:?} carved"));
+        r.with_data(|d| assert!(d.set_block_safe(cell, game::Block::new(game::BlockId::AIR)), "{rc:?} {cell:?} dug"));
     });
 }
 
@@ -516,10 +524,10 @@ fn mirror_in(rig: &mut MultiRig, rc: RegionCoords, id: game::EntityId) -> bool {
     m
 }
 
-/// A spot in `a`'s frame inside its edge band facing the adjacent `b` (1.5 tiles short
+/// A spot in `a`'s frame inside its edge band facing the adjacent `b` (1.5 blocks short
 /// of the seam), mid-way along it.
 fn in_band(a: RegionCoords, b: RegionCoords) -> [f32; 3] {
-    let inset = 1.5 * crate::common::TILE_W;
+    let inset = 1.5 * game::BLOCK_VOXELS as f32;
     let across = |d: i32| match d {
         1 => Some(REGION_SIZE - inset),
         -1 => Some(inset),
@@ -547,12 +555,12 @@ fn halo_delta(rig: &mut MultiRig) {
     let (a, b) = host_seam(2, 1);
     rig.run(a);
     rig.run(b);
-    let plate = border_plate(a, b);
-    assert!(until(rig, HALO_ROUNDS, |r| seen_from(r, b, a, plate.0).is_some()), "b's halo holds a's ground");
-    carve(rig, a, plate);
-    assert!(until(rig, HALO_ROUNDS, |r| seen_from(r, b, a, plate.0).is_none()), "the dig never reached b's halo");
-    let below = [plate.0[0], plate.0[1] - 1, plate.0[2]];
-    assert!(seen_from(rig, b, a, below).is_some(), "the plate under it still stands");
+    let block = border_block(a, b);
+    assert!(until(rig, HALO_ROUNDS, |r| seen_from(r, b, a, block).is_some()), "b's halo holds a's ground");
+    dig(rig, a, block);
+    assert!(until(rig, HALO_ROUNDS, |r| seen_from(r, b, a, block).is_none()), "the dig never reached b's halo");
+    // The one-block floor has nothing under the dug block: the floor beside it stands.
+    assert!(seen_from(rig, b, a, beside(a, b, block)).is_some(), "the block beside it still stands");
 }
 
 #[test]
@@ -592,15 +600,15 @@ fn halo_link_flap(rig: &mut MultiRig) {
     rig.link_down(ha, hb);
     assert!(until(rig, WAIT_ROUNDS, |r| !mirror_in(r, b, id)), "the mirror outlived the link");
     assert!(rig.hosts[hb as usize].manager.foreign_running().is_empty(), "nothing of host {ha} is known to run");
-    let plate = border_plate(a, b);
-    carve(rig, a, plate);
+    let block = border_block(a, b);
+    dig(rig, a, block);
     for _ in 0..WAIT_ROUNDS {
         rig.round();
     }
-    assert!(seen_from(rig, b, a, plate.0).is_some(), "nothing crosses a down link");
+    assert!(seen_from(rig, b, a, block).is_some(), "nothing crosses a down link");
     rig.link_up(ha, hb);
     assert!(
-        until(rig, CROSS_ROUNDS, |r| seen_from(r, b, a, plate.0).is_none() && mirror_in(r, b, id)),
+        until(rig, CROSS_ROUNDS, |r| seen_from(r, b, a, block).is_none() && mirror_in(r, b, id)),
         "b's halo was never seeded again"
     );
     assert_eq!(rig.hosts[hb as usize].manager.foreign_running(), known, "exactly what ran before");
@@ -619,7 +627,7 @@ fn halo_no_wake(rig: &mut MultiRig) {
     let hb = rig.owner(b);
     rig.run(a);
     rig.spawn_slime(a, in_band(a, b));
-    carve(rig, a, border_plate(a, b));
+    dig(rig, a, border_block(a, b));
     for _ in 0..WAIT_ROUNDS {
         rig.round();
         for (ea, eb) in rig.links.values() {
@@ -966,8 +974,8 @@ fn request_answered_from_cache(rig: &mut MultiRig) {
     rig.link_down(ha, hb);
     rig.run(b);
     rig.run(a);
-    let plate = border_plate(a, b);
-    carve(rig, a, plate);
+    let block = border_block(a, b);
+    dig(rig, a, block);
     rig.round();
     rig.park(a);
     rig.link_up(ha, hb);
@@ -975,12 +983,12 @@ fn request_answered_from_cache(rig: &mut MultiRig) {
         until(rig, CROSS_ROUNDS, |r| r.hosts[ha as usize].manager.foreign_running().contains(&b)),
         "host {ha} learns `b` runs"
     );
-    assert!(seen_from(rig, b, a, plate.0).is_some(), "b's halo of a is worldgen's");
+    assert!(seen_from(rig, b, a, block).is_some(), "b's halo of a is worldgen's");
     // The request `b`'s host would have sent had it still believed `a` ran.
     let link = rig.links[&(ha.min(hb), ha.max(hb))].clone();
     let end = if hb < ha { link.0 } else { link.1 };
     game::PeerLink::send(&mut *end.lock().unwrap(), game::PeerMsg::Volatile(game::Volatile::HaloRequest { from: b, of: a }));
-    assert!(until(rig, HALO_ROUNDS, |r| seen_from(r, b, a, plate.0).is_none()), "never answered from the cache");
+    assert!(until(rig, HALO_ROUNDS, |r| seen_from(r, b, a, block).is_none()), "never answered from the cache");
 }
 
 #[test]
@@ -1143,7 +1151,7 @@ const WALK_START: f32 = 24.0;
 
 /// The test player's record: standing at `xz` (`rc`'s frame) in `rc`.
 fn record_at(rc: RegionCoords, xz: [f32; 2]) -> game::PlayerRecord {
-    let y = crate::common::standing_y(crate::common::FLOOR_PLATES);
+    let y = crate::common::standing_y(crate::common::FLOOR_TOP);
     game::PlayerRecord {
         client: game::Client::default(),
         pose: game::Pose::from_translation(game::rapier3d::math::Vector::new(xz[0], y, xz[1])),

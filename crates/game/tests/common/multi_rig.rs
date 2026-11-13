@@ -211,7 +211,7 @@ pub struct MultiRig {
     /// Every non-person entity seen, and where it was last (`None` = only in a session's
     /// sent and unacknowledged part): it must never vanish.
     pub tracked: BTreeMap<EntityId, Option<Place>>,
-    /// The stud bodies seen: they may end by settling in the region that owns them.
+    /// The voxel bodies seen: they may end by settling in the region that owns them.
     pub settling: BTreeSet<EntityId>,
     /// Every person body ever seen in a region: never tracked (a history may absorb one,
     /// also while it is only in a sent, unacknowledged transfer).
@@ -266,7 +266,7 @@ pub fn rig_endpoint(h: u32) -> HostEndpoint {
 }
 
 impl MultiRig {
-    /// `hosts` hosts of one stud world (flat floor everywhere), `s` regions per
+    /// `hosts` hosts of one voxel world (a one-block floor everywhere), `s` regions per
     /// super-region side; each host's spawner runs `schedule` (seeded from `seed` and
     /// its ordinal) or lockstep, every link delays by 0..=`link_delay_steps` pumps.
     /// Each host gets a keeper client standing in its home region; every session is up
@@ -291,7 +291,6 @@ impl MultiRig {
         link_delay_steps: u32,
         stored: Option<BTreeMap<RegionCoords, StoredRegion>>,
     ) -> MultiRig {
-        let floor: game::InlineStudGenesis = Arc::new(|_| super::uniform_seed());
         let mut rigs = Vec::new();
         let mut homes = Vec::new();
         for h in 0..hosts {
@@ -303,7 +302,7 @@ impl MultiRig {
             if let Some(f) = schedule {
                 spawner.set_schedule(Some(f(mix(seed, u64::from(h)))));
             }
-            let mut rig = Rig::with_ownership(spawner, floor.clone(), ownership, s);
+            let mut rig = Rig::with_ownership(spawner, super::seam_translate::uniform_floor, ownership, s);
             rig.manager.set_endpoints(rig_endpoint(h), game::seeded_nonces(mix(seed, 2000 + u64::from(h))));
             rigs.push(rig);
             let home = nearest_first(64)
@@ -655,7 +654,7 @@ impl MultiRig {
     /// Host `h`'s keeper: a client whose body stands in the middle of its home region.
     fn keep(&mut self, h: u32) {
         let home = self.homes[h as usize];
-        let y = super::standing_y(super::FLOOR_PLATES);
+        let y = super::standing_y(super::FLOOR_TOP);
         let record = PlayerRecord {
             client: game::Client::default(),
             pose: game::Pose::from_translation(game::rapier3d::math::Vector::new(REGION_SIZE / 2.0, y, REGION_SIZE / 2.0)),
@@ -936,7 +935,7 @@ impl MultiRig {
     }
 
     /// Conservation across hosts. Every tracked `EntityId` (people aside, whom a history
-    /// may absorb, arrivals a full mailbox despawned, and stud bodies that settled where
+    /// may absorb, arrivals a full mailbox despawned, and voxel bodies that settled where
     /// they are owned) is in exactly one of: a running region of one host, one host's
     /// `in_flight` / `pending_arrivals`, one session's never-sent part, or a link's
     /// transit queue. A transfer a session SENT and the peer has not acknowledged is the
@@ -967,7 +966,7 @@ impl MultiRig {
                         if matches!(data.ecs.kind.try_get(key), Some(game::EntityKind::Person { .. })) {
                             people.insert(*id);
                         }
-                        if data.ecs.stud_body.try_get(key).is_some() {
+                        if data.ecs.voxel_body.try_get(key).is_some() {
                             settling.insert(*id);
                         }
                     }
