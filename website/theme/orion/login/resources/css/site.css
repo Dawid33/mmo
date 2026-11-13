@@ -1,49 +1,69 @@
 /* Orion: one stylesheet for the website and the Keycloak login theme (website/site/css/site.css
    is a symlink to this file). Every value comes from the tokens on :root. Pages are a column:
-   .site-header with the .brand, a main area, .site-footer. The memorable thing is the brick:
-   a .card wears a row of studs on its top edge and a solid brick side under it, and the
-   primary button is a small brick that presses down. Everything else stays quiet. */
+   .site-header with the .brand, a main area, .site-footer.
+
+   The look is voxels seen from above at an angle. Raised things are blocks: a .card and the
+   primary button are a lit top face with a stepped side face cast down and to the right (a
+   pixel stair, not a soft shadow), and the button sinks into its footprint when pressed.
+   Inputs are the opposite: cells dug into the ground, shaded on their upper-left walls. The
+   footer is the ground itself: turf, soil, sandstone and stone in layers under a stepped
+   horizon. Everything else stays flat and quiet. */
 
 /* ---- Tokens ---------------------------------------------------------------------------- */
 
 :root {
   color-scheme: light dark;
 
-  /* Ground and surfaces */
-  --bg: #dfe5ec;          /* mortar grey: the page */
-  --bg-stud: rgb(255 255 255 / 0.3); /* baseplate dots on the page */
-  --surface: #ffffff;     /* a brick: cards */
-  --surface-edge: #b4bfcc; /* the brick's side under a card */
-  --surface-sunk: #f1f4f7; /* inputs, quiet panels */
-  --line: #c3ccd6;
-  --line-strong: #8d9aa8;
+  /* Ground and surfaces: a block's top face, its side, and a dug cell */
+  --bg: #dbe1dc;            /* pale lichen grey: the page */
+  --bg-grid: rgb(24 33 43 / 0.045); /* the voxel grid on the page */
+  --surface: #f7f9f6;       /* a block's top face: cards */
+  --surface-side: #a5b1ab;  /* its side face, stepped below and to the right */
+  --surface-sunk: #e9eee9;  /* a dug cell: inputs, quiet panels */
+  --sunk-shade: #c3ccc6;    /* the dug cell's shaded upper-left walls */
+  --line: #bfc9c3;
+  --line-strong: #7f8c86;
 
   /* Ink */
-  --text: #17212c;
-  --muted: #4f5d6c;
+  --text: #18212b;
+  --muted: #4b5961;
 
-  /* Toy-brick yellow: the one accent */
-  --accent: #f4b400;
-  --accent-hover: #ffc21a;
-  --accent-edge: #b98500;
-  --accent-ink: #1d1a10;
-  --link: #1b5cb8;
+  /* Malachite: the one accent, as a lit face over a dark side */
+  --accent: #1a7d62;
+  --accent-hover: #146b54;
+  --accent-side: #0d4f3d;
+  --accent-ink: #ffffff;
+  --accent-text: #177358;   /* the accent as large type on the page */
+  --link: #155fa0;
+
+  /* Strata: the ground under every page (footer) */
+  --turf: #8fa56a;
+  --soil: #7a5d47;
+  --sand: #c4a46e;
+  --stone: #5d6876;
+  --stone-ink: #eef1f4;
+  --ore: #ffb547;
 
   /* Messages */
   --danger: #b4321c;
   --danger-bg: #fbe5e0;
-  --success: #276f39;
-  --success-bg: #e0f1e4;
-  --warning: #8a5d00;
-  --warning-bg: #fff2cc;
-  --info: #1b5cb8;
-  --info-bg: #e2ecf9;
+  --success: #24703f;
+  --success-bg: #ddf0e2;
+  --warning: #855a00;
+  --warning-bg: #fbefcf;
+  --info: #155fa0;
+  --info-bg: #e0ebf6;
 
-  --focus: #1f6fe0;
+  --focus: #1f63d6;
 
-  /* Type: one rounded system stack, nothing downloaded */
-  --font: ui-rounded, "SF Pro Rounded", "Nunito", "Varela Round", system-ui, -apple-system,
-    "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  /* Type: a narrow, engineered face for headings and the brand (Bahnschrift, DIN and the
+     condensed grotesques that ship with each system), the system UI face for reading.
+     Nothing is downloaded. */
+  --font: system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans", "Helvetica Neue", Arial,
+    sans-serif;
+  --font-display: "Bahnschrift", "DIN Alternate", "DIN Condensed", "Avenir Next Condensed",
+    "Roboto Condensed", "Liberation Sans Narrow", "Arial Narrow", "Nimbus Sans Narrow",
+    var(--font);
   --text-s: 0.875rem;
   --text-m: 1rem;
   --text-l: 1.25rem;
@@ -51,9 +71,9 @@
   --text-xxl: clamp(2.25rem, 6vw, 3.5rem);
   --leading: 1.5;
 
-  /* Shape and space */
-  --radius-s: 4px;
-  --radius: 8px;
+  /* Shape and space: blocks have square corners */
+  --radius-s: 0;
+  --radius: 0;
   --space-1: 4px;
   --space-2: 8px;
   --space-3: 12px;
@@ -64,27 +84,35 @@
   --gutter: var(--space-4);
   --measure: 34rem;
   --card-width: 28rem;
-  --brick-edge: 6px;      /* depth of the brick side under a card */
-  --stud-h: 10px;      /* a stud is 28 px wide in each 48 px pitch */
-  --stud-pitch: 48px;
+  --step: 2px;              /* one stair of a block's side face */
+  --block-depth: 8px;       /* a card's side face: four stairs */
+  --button-depth: 4px;      /* the primary button's: two stairs */
+  --horizon: 12px;          /* height of the stepped horizon over the footer */
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #111923;
-    --bg-stud: rgb(255 255 255 / 0.035);
-    --surface: #1d2834;
-    --surface-edge: #070b10;
-    --surface-sunk: #151e28;
-    --line: #34424f;
-    --line-strong: #5d6d7d;
-    --text: #e8edf2;
-    --muted: #a3b0bd;
-    --accent: #f4b400;
-    --accent-hover: #ffc21a;
-    --accent-edge: #8f6600;
-    --accent-ink: #1d1a10;
-    --link: #7fb2ff;
+    --bg: #1a2029;
+    --bg-grid: rgb(255 255 255 / 0.03);
+    --surface: #27303b;
+    --surface-side: #0e1218;
+    --surface-sunk: #1e252e;
+    --sunk-shade: #12171d;
+    --line: #3a4552;
+    --line-strong: #64727f;
+    --text: #e7ece9;
+    --muted: #a5b2b9;
+    --accent: #36b98e;
+    --accent-hover: #4dcca1;
+    --accent-side: #0f5a44;
+    --accent-ink: #08261d;
+    --accent-text: #47c79b;
+    --link: #8cc4ff;
+    --turf: #56683f;
+    --soil: #4a3a2e;
+    --sand: #7f6a47;
+    --stone: #353c4d;
+    --stone-ink: #c9d1d9;
     --danger: #ff9a86;
     --danger-bg: #3a1a15;
     --success: #8fd6a0;
@@ -93,7 +121,7 @@
     --warning-bg: #352a0c;
     --info: #9cc3ff;
     --info-bg: #142540;
-    --focus: #7fb2ff;
+    --focus: #8cb8ff;
   }
 }
 
@@ -121,9 +149,11 @@ body {
   line-height: var(--leading);
   color: var(--text);
   background-color: var(--bg);
-  /* A baseplate, barely there. */
-  background-image: radial-gradient(circle at center, var(--bg-stud) 0 5px, transparent 5.5px);
-  background-size: 24px 24px;
+  /* The ground grid seen from above, barely there. */
+  background-image:
+    linear-gradient(var(--bg-grid) 1px, transparent 1px),
+    linear-gradient(90deg, var(--bg-grid) 1px, transparent 1px);
+  background-size: 32px 32px;
 }
 
 a {
@@ -149,9 +179,10 @@ h1,
 h2,
 h3 {
   margin: 0 0 var(--space-3);
-  font-weight: 800;
-  line-height: 1.15;
-  letter-spacing: -0.01em;
+  font-family: var(--font-display);
+  font-stretch: condensed;
+  font-weight: 700;
+  line-height: 1.1;
 }
 
 p {
@@ -160,7 +191,7 @@ p {
 
 hr {
   border: 0;
-  border-top: 1px solid var(--line);
+  border-top: 2px solid var(--line);
   margin: var(--space-5) 0;
 }
 
@@ -196,15 +227,18 @@ hr {
   display: inline-flex;
   align-items: center;
   gap: var(--space-3);
+  min-height: 44px;
   color: var(--text);
-  font-size: var(--text-l);
-  font-weight: 800;
-  letter-spacing: -0.01em;
+  font-family: var(--font-display);
+  font-stretch: condensed;
+  font-size: var(--text-xl);
+  font-weight: 700;
+  line-height: 1;
   text-decoration: none;
 }
 
 .brand img {
-  width: 40px;
+  width: 36px;
   height: auto;
   display: block;
 }
@@ -222,50 +256,66 @@ hr {
 }
 
 .site-nav .btn-primary {
-  margin-bottom: 0;
+  margin-bottom: var(--button-depth);
 }
 
 .site-nav-user {
-  font-weight: 800;
+  font-weight: 700;
   color: var(--text);
 }
 
+/* The ground: strata under a stepped horizon. The bands sit behind the footer's text, which
+   stays on the stone. */
 .site-footer {
-  padding: var(--space-5) var(--gutter) var(--space-6);
-  color: var(--muted);
+  position: relative;
+  margin-top: var(--horizon);
+  padding: 52px var(--gutter) var(--space-5);
+  color: var(--stone-ink);
   font-size: var(--text-s);
   text-align: center;
+  background: linear-gradient(
+    to bottom,
+    var(--turf) 0 10px,
+    var(--soil) 10px 26px,
+    var(--sand) 26px 34px,
+    var(--stone) 34px
+  );
+}
+
+/* The horizon: turf blocks of uneven height along the top edge. */
+.site-footer::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: calc(-1 * var(--horizon) + 1px);
+  height: var(--horizon);
+  background: var(--turf);
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='240' height='12'%3E%3Cpath d='M0 12V6h24V0h36v6h12v6h24V6h12V0h12v6h48v6h24V6h36V0h12v12z'/%3E%3C/svg%3E")
+    left bottom / 240px var(--horizon) repeat-x;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='240' height='12'%3E%3Cpath d='M0 12V6h24V0h36v6h12v6h24V6h12V0h12v6h48v6h24V6h36V0h12v12z'/%3E%3C/svg%3E")
+    left bottom / 240px var(--horizon) repeat-x;
+  pointer-events: none;
 }
 
 .site-footer p {
   margin: 0;
 }
 
-/* ---- The brick card -------------------------------------------------------------------- */
+/* ---- The block card -------------------------------------------------------------------- */
 
 .card {
   position: relative;
-  margin-top: var(--stud-h);
+  margin: 0 var(--block-depth) var(--block-depth) 0;
   padding: var(--space-6);
   background: var(--surface);
   border-radius: var(--radius);
-  box-shadow: 0 var(--brick-edge) 0 var(--surface-edge);
-}
-
-/* The studs: one row across the top edge, in the card's own colour. */
-.card::before {
-  content: "";
-  position: absolute;
-  left: var(--space-5);
-  right: var(--space-5);
-  top: calc(-1 * var(--stud-h) + 1px);
-  height: var(--stud-h);
-  background: var(--surface);
-  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='48' height='10'%3E%3Crect x='10' width='28' height='14' rx='3'/%3E%3C/svg%3E")
-    left top / var(--stud-pitch) var(--stud-h) space no-repeat;
-  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='48' height='10'%3E%3Crect x='10' width='28' height='14' rx='3'/%3E%3C/svg%3E")
-    left top / var(--stud-pitch) var(--stud-h) space no-repeat;
-  pointer-events: none;
+  /* The side face: four stairs down and to the right. */
+  box-shadow:
+    calc(1 * var(--step)) calc(1 * var(--step)) 0 var(--surface-side),
+    calc(2 * var(--step)) calc(2 * var(--step)) 0 var(--surface-side),
+    calc(3 * var(--step)) calc(3 * var(--step)) 0 var(--surface-side),
+    var(--block-depth) var(--block-depth) 0 var(--surface-side);
 }
 
 .card-header h1,
@@ -296,6 +346,7 @@ hr {
   padding: var(--space-3) var(--space-4);
   background: var(--surface-sunk);
   border-radius: var(--radius-s);
+  box-shadow: inset 3px 3px 0 var(--sunk-shade);
   font-weight: 700;
 }
 
@@ -303,6 +354,7 @@ hr {
   display: inline-flex;
   align-items: center;
   gap: var(--space-2);
+  min-height: 44px;
   font-size: var(--text-s);
   font-weight: 400;
 }
@@ -310,7 +362,7 @@ hr {
 .card-info {
   margin-top: var(--space-5);
   padding-top: var(--space-5);
-  border-top: 1px solid var(--line);
+  border-top: 2px solid var(--line);
   color: var(--muted);
 }
 
@@ -346,7 +398,8 @@ hr {
   font-weight: 700;
 }
 
-/* By element inside a card (zero specificity, so any class rule wins), and by class. */
+/* A dug cell. By element inside a card (zero specificity, so any class rule wins), and by
+   class. */
 :where(.card input:not([type="checkbox"], [type="radio"], [type="submit"], [type="button"], [type="hidden"]), .card select, .card textarea),
 .field-input {
   display: block;
@@ -358,6 +411,7 @@ hr {
   background: var(--surface-sunk);
   border: 2px solid var(--line);
   border-radius: var(--radius-s);
+  box-shadow: inset 3px 3px 0 var(--sunk-shade);
 }
 
 .card input:hover:not(:focus, [disabled]),
@@ -389,8 +443,6 @@ hr {
 .field-input-group > input {
   flex: 1;
   min-width: 0;
-  border-top-right-radius: 0;
-  border-bottom-right-radius: 0;
 }
 
 .field-message,
@@ -407,8 +459,10 @@ hr {
 }
 
 .field-group-title {
+  font-family: var(--font-display);
+  font-stretch: condensed;
   font-size: var(--text-l);
-  font-weight: 800;
+  font-weight: 700;
 }
 
 .card input[type="checkbox"],
@@ -417,7 +471,7 @@ hr {
   height: 18px;
   margin: 0 var(--space-2) 0 0;
   vertical-align: -3px;
-  accent-color: var(--accent-edge);
+  accent-color: var(--accent);
 }
 
 .checkbox label,
@@ -428,7 +482,8 @@ hr {
 .choice {
   display: flex;
   align-items: center;
-  margin-bottom: var(--space-2);
+  min-height: 44px;
+  margin-bottom: var(--space-1);
 }
 
 .choice-disabled {
@@ -439,6 +494,7 @@ hr {
 .form-settings {
   display: flex;
   flex-wrap: wrap;
+  align-items: center;
   justify-content: space-between;
   gap: var(--space-2) var(--space-4);
   font-size: var(--text-s);
@@ -484,7 +540,7 @@ hr {
   min-height: 44px;
   padding: var(--space-2) var(--space-5);
   font: inherit;
-  font-weight: 800;
+  font-weight: 700;
   line-height: 1.2;
   text-decoration: none;
   color: var(--text);
@@ -494,12 +550,15 @@ hr {
   cursor: pointer;
 }
 
+/* A small block: lit face, two stairs of side, and it sinks into its footprint when pressed. */
 .btn-primary {
-  margin-bottom: 4px;
+  margin: 0 var(--button-depth) var(--button-depth) 0;
   color: var(--accent-ink);
   background: var(--accent);
   border-color: var(--accent);
-  box-shadow: 0 4px 0 var(--accent-edge);
+  box-shadow:
+    var(--step) var(--step) 0 var(--accent-side),
+    var(--button-depth) var(--button-depth) 0 var(--accent-side);
   transition: transform 60ms ease-out, box-shadow 60ms ease-out;
 }
 
@@ -508,10 +567,9 @@ hr {
   border-color: var(--accent-hover);
 }
 
-/* The brick presses into the plate. */
 .btn-primary:active {
-  transform: translateY(3px);
-  box-shadow: 0 1px 0 var(--accent-edge);
+  transform: translate(var(--button-depth), var(--button-depth));
+  box-shadow: none;
 }
 
 .btn-quiet {
@@ -527,6 +585,11 @@ hr {
 .btn-block {
   display: flex;
   width: 100%;
+}
+
+/* A full-width block keeps its side face inside the card. */
+.btn-block.btn-primary {
+  width: calc(100% - var(--button-depth));
 }
 
 .btn-large {
@@ -553,7 +616,7 @@ hr {
   background: var(--surface-sunk);
   border: 2px solid var(--line);
   border-left: 0;
-  border-radius: 0 var(--radius-s) var(--radius-s) 0;
+  border-radius: var(--radius-s);
   cursor: pointer;
 }
 
@@ -620,10 +683,11 @@ hr {
   --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3 12a9 9 0 1 0 3-6.7L3 8'/%3E%3Cpath d='M3 3v5h5'/%3E%3C/svg%3E");
 }
 
+/* Message markers: a small square block. */
 .icon-alert,
 .icon-info,
 .icon-check {
-  --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Ccircle cx='12' cy='12' r='10'/%3E%3C/svg%3E");
+  --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect x='4' y='4' width='16' height='16'/%3E%3C/svg%3E");
 }
 
 .kc-tooltip-text {
@@ -656,29 +720,30 @@ hr {
 
 .hero {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr);
-  align-items: end;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 0.9fr);
+  align-items: center;
   gap: var(--space-6);
   margin-bottom: var(--space-7);
 }
 
-.hero-text {
-  padding-bottom: var(--space-6);
-}
-
+/* The name is a block too: the letters carry a stepped side face. */
 .hero h1 {
-  margin-bottom: var(--space-4);
-  font-size: clamp(3.5rem, 11vw, 7rem);
-  font-weight: 900;
+  margin-bottom: var(--space-5);
+  color: var(--accent-text);
+  font-size: clamp(4rem, 13vw, 8.5rem);
   line-height: 0.9;
-  letter-spacing: -0.04em;
+  text-shadow:
+    0.02em 0.02em 0 var(--accent-side),
+    0.04em 0.04em 0 var(--accent-side),
+    0.06em 0.06em 0 var(--accent-side);
 }
 
 .hero-lead {
-  max-width: 24ch;
+  max-width: 26ch;
   margin-bottom: var(--space-6);
-  font-size: var(--text-l);
-  font-weight: 700;
+  font-size: clamp(1.25rem, 2.4vw, 1.625rem);
+  font-weight: 600;
+  line-height: 1.35;
 }
 
 .hero-actions {
@@ -688,11 +753,13 @@ hr {
   gap: var(--space-3);
 }
 
-/* The fortress cutaway: website/site/img/fortress.svg. */
+/* The fortress cutaway: website/site/img/fortress.svg (website/tools/fortress_svg.py). */
 .hero-art {
   display: block;
   width: 100%;
+  max-width: 30rem;
   height: auto;
+  margin: 0 auto;
 }
 
 .features {
@@ -707,7 +774,7 @@ hr {
 }
 
 .feature h2 {
-  font-size: var(--text-l);
+  font-size: var(--text-xl);
 }
 
 .feature p {
@@ -723,7 +790,7 @@ hr {
 
 .account-row {
   padding: var(--space-3) 0;
-  border-bottom: 1px solid var(--line);
+  border-bottom: 2px solid var(--line);
 }
 
 .account-row:first-child {
@@ -784,8 +851,8 @@ hr {
     gap: var(--space-5);
   }
 
-  .hero-text {
-    padding-bottom: 0;
+  .hero-art {
+    max-width: 22rem;
   }
 
   .features {
@@ -806,23 +873,25 @@ hr {
     padding-top: var(--space-4);
   }
 
+  .brand {
+    font-size: var(--text-l);
+  }
+
+  .brand img {
+    width: 28px;
+  }
+
   .site-nav {
     gap: var(--space-2);
   }
 
   .site-nav .btn {
-    min-height: 40px;
     padding: var(--space-1) var(--space-3);
     font-size: var(--text-s);
   }
 
   .card {
     padding: var(--space-5) var(--space-4);
-  }
-
-  .card::before {
-    left: var(--space-4);
-    right: var(--space-4);
   }
 }
 

@@ -106,7 +106,7 @@
 <body data-orion-theme class="${properties.kcBodyClass!} ${bodyClass}" data-page-id="login-${pageId}">
 <header class="${properties.kcHeaderClass!}">
     <a class="${properties.kcHeaderWrapperClass!}" href="${properties.siteUrl}/">
-        <img src="${url.resourcesPath}/img/logo.svg" alt="" width="40" height="34" />
+        <img src="${url.resourcesPath}/img/logo.svg" alt="" width="36" height="38" />
         <span>${realm.displayName!'Orion'}</span>
     </a>
 </header>
