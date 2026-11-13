@@ -43,6 +43,11 @@ pub struct JoinTimelineState {
     first_mesh: bool,
     near_drained: bool,
     expected_lod_keys: Option<usize>,
+    /// The viewer region and near-region count `expected_lod_keys` was counted
+    /// for: a near region replaces the far tile under it, so the count is redone
+    /// whenever either changes (the fortress window loads its regions one by
+    /// one, long after the first).
+    expected_for: Option<(game::RegionCoords, usize)>,
     stable_frames: u32,
     first_green_ms: u64,
     last_progress_secs: f64,
@@ -116,8 +121,9 @@ pub fn track_join_timeline(
     }
 
     let scale = scale.map(|s| *s).unwrap_or_default();
-    if state.expected_lod_keys.is_none() && roots.0.len() >= scale.near_region_count() {
-        if let Some(viewer) = hud.viewer_region {
+    if roots.0.len() >= scale.near_region_count() {
+        if let Some(viewer) = hud.viewer_region.filter(|v| state.expected_for != Some((*v, roots.0.len()))) {
+            state.expected_for = Some((viewer, roots.0.len()));
             let near: BTreeSet<game::RegionCoords> = roots.0.keys().copied().collect();
             // The table the instance subscribes with (`set_world_scale`).
             let table = game::stud_ring_table(scale.lod_table);

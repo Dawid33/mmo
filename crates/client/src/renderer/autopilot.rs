@@ -144,6 +144,14 @@ pub struct Autopilot {
     px_per_rad: f32,
     /// The seam shuttle holds W (approaching the seam; [`bounce`] drives W / S after).
     w_held: bool,
+    /// When the seam shuttle last logged its state (`autopilot_state`, every 2 s).
+    last_state: Option<Duration>,
+    /// Progress watch of the seam shuttle: since when, the last position, and the
+    /// path flown since (a path length, not a displacement: the bounce returns
+    /// to where it was every two legs).
+    progress: Option<(Duration, Vec2, f32)>,
+    /// Space is held (climbing out of terrain the body flew into) until then.
+    climb_until: Option<Duration>,
 }
 
 impl Autopilot {
@@ -202,6 +210,9 @@ impl Autopilot {
             last_turn: None,
             px_per_rad: -1.0 / game::look_delta_rad(1.0, game::LOOK_BASE_X),
             w_held: false,
+            last_state: None,
+            progress: None,
+            climb_until: None,
         })
     }
 }
@@ -217,7 +228,10 @@ fn drive_autopilot(
     ready: Res<WorldReady>,
     player: Res<LocalPlayer>,
     game: Res<GameEvents>,
-    cameras: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
+    roots: Res<super::bridge::RegionRoots>,
+    // The body's camera (it carries the sim pose), not the frontend's: an online
+    // session keeps the menu's camera entity around, parked at the origin.
+    cameras: Query<(&Camera, &GlobalTransform), (With<Camera3d>, With<super::bridge::SimTarget>)>,
     mut pilot: ResMut<Autopilot>,
     mut exit: MessageWriter<AppExit>,
 ) {
@@ -282,7 +296,9 @@ fn drive_autopilot(
         }
     }
 
-    let camera = cameras.iter().find(|(c, _)| c.is_active).map(|(_, t)| *t);
+    // The active one of the body's cameras (a crossing briefly has two), else any:
+    // while the frontend still holds the screen the body's camera is inactive.
+    let camera = cameras.iter().find(|(c, _)| c.is_active).or_else(|| cameras.iter().next()).map(|(_, t)| *t);
     match pilot.mode {
         Mode::Fly => {}
         Mode::Shuttle { cell, overshoot } => {
@@ -292,7 +308,8 @@ fn drive_autopilot(
         }
         Mode::Seam { kind, hosts, s, overshoot } => {
             if let Some(t) = camera {
-                seam_shuttle(&mut pilot, now, &t, kind, hosts, s, overshoot, &key, &send);
+                let loaded: Vec<RegionCoords> = roots.0.keys().copied().collect();
+                seam_shuttle(&mut pilot, now, &t, &loaded, kind, hosts, s, overshoot, &key, &send);
             }
         }
     }
@@ -357,6 +374,7 @@ fn seam_shuttle(
     pilot: &mut Autopilot,
     now: Duration,
     camera: &GlobalTransform,
+    loaded: &[RegionCoords],
     kind: SeamKind,
     hosts: u32,
     s: u32,
@@ -370,6 +388,48 @@ fn seam_shuttle(
         let f = camera.forward();
         Vec2::new(f.x, f.z)
     };
+    // Low-rate trace of what the pilot is doing: a probe that never crosses is
+    // otherwise silent.
+    if pilot.last_state.is_none_or(|t| now - t >= Duration::from_secs(2)) {
+        pilot.last_state = Some(now);
+        game::perf_event!(
+            "autopilot_state",
+            "pos={:.0},{:.0},{:.0} facing={:.2},{:.2} leg={:?} w={} px_per_rad={:.1} reversals={}",
+            pos.x,
+            pos.y,
+            pos.z,
+            facing.x,
+            facing.y,
+            pilot.leg,
+            pilot.w_held,
+            pilot.px_per_rad,
+            pilot.reversals
+        );
+    }
+    // Flying level into rising ground stops the body dead: when a leg that should
+    // be moving covers under a metre of path in two seconds, climb for a while.
+    if pilot.climb_until.is_some_and(|until| now >= until) {
+        key(Key::Space, false);
+        pilot.climb_until = None;
+        pilot.progress = None;
+    }
+    let moving = pilot.w_held || matches!(pilot.leg, Some(Leg::Bounce { .. }));
+    if !moving || pilot.climb_until.is_some() {
+        pilot.progress = None;
+    } else {
+        let (since, last, path) = pilot.progress.unwrap_or((now, at, 0.0));
+        let path = path + (at - last).length();
+        if now - since >= Duration::from_millis(STUCK_WINDOW_MS) {
+            if path < STUCK_PATH_M * game::movement::UNITS_PER_METER {
+                game::perf_event!("autopilot_climb", "pos={:.0},{:.0},{:.0} path={:.1}", pos.x, pos.y, pos.z, path);
+                key(Key::Space, true);
+                pilot.climb_until = Some(now + Duration::from_millis(STUCK_CLIMB_MS));
+            }
+            pilot.progress = Some((now, at, 0.0));
+        } else {
+            pilot.progress = Some((since, at, path));
+        }
+    }
     let hold_w = |pilot: &mut Autopilot, on: bool| {
         if pilot.w_held != on {
             key(Key::KeyW, on);
@@ -380,7 +440,10 @@ fn seam_shuttle(
         None => {
             let size = game::REGION_SIZE;
             let home = RegionCoords::new((pos.x / size).floor() as i32, (pos.z / size).floor() as i32);
-            let (a, b) = pick_seam(home, hosts, s, kind == SeamKind::Host);
+            // Among the regions the client has: in fortress play the window stays on the
+            // fortress, and a seam with an unloaded side is a wall the body stops at.
+            let (a, b) = pick_loaded_seam(home, loaded, hosts, s, kind == SeamKind::Host)
+                .unwrap_or_else(|| pick_seam(home, hosts, s, kind == SeamKind::Host));
             // `b` is `a` plus one along the seam's axis (pick_seam's order).
             let axis = if b.x != a.x { 0 } else { 1 };
             // The point of the seam nearest the body, kept to the middle half of the
@@ -490,6 +553,40 @@ fn seam_shuttle(
 /// then x before z — the same answer every time. Looks [`PICK_SEAM_RADIUS`]
 /// regions around `home`, then further; panics if no such seam lies within
 /// [`PICK_SEAM_MAX_RADIUS`] (a host seam needs `hosts` >= 2).
+/// The seam shuttle's progress watch: its window, the path that counts as moving, and
+/// how long it then holds Space (flight climbs while it is held).
+const STUCK_WINDOW_MS: u64 = 2_000;
+const STUCK_PATH_M: f32 = 1.0;
+const STUCK_CLIMB_MS: u64 = 1_500;
+
+/// As [`pick_seam`], among `loaded` regions only: the seam nearest `home` whose two
+/// sides are both loaded and have different owners (`want_host_seam`) or the same one.
+/// `None` when the loaded regions hold no such seam.
+pub fn pick_loaded_seam(
+    home: RegionCoords,
+    loaded: &[RegionCoords],
+    hosts: u32,
+    s: u32,
+    want_host_seam: bool,
+) -> Option<(RegionCoords, RegionCoords)> {
+    let owner = |rc: RegionCoords| game::rendezvous_owner(game::super_region_of(rc, s), hosts);
+    let mut best: Option<(i64, (i32, i32, u8), (RegionCoords, RegionCoords))> = None;
+    for &a in loaded {
+        for (axis, b) in [(0u8, RegionCoords::new(a.x + 1, a.z)), (1u8, RegionCoords::new(a.x, a.z + 1))] {
+            if !loaded.contains(&b) || (owner(a) != owner(b)) != want_host_seam {
+                continue;
+            }
+            // Twice the offset from home's middle to the seam's middle.
+            let (dx, dz) = (i64::from(a.x + b.x - 2 * home.x), i64::from(a.z + b.z - 2 * home.z));
+            let candidate = (dx * dx + dz * dz, (a.x, a.z, axis), (a, b));
+            if best.as_ref().is_none_or(|best| (candidate.0, candidate.1) < (best.0, best.1)) {
+                best = Some(candidate);
+            }
+        }
+    }
+    best.map(|(_, _, seam)| seam)
+}
+
 pub fn pick_seam(home: RegionCoords, hosts: u32, s: u32, want_host_seam: bool) -> (RegionCoords, RegionCoords) {
     let owner = |rc: RegionCoords| game::rendezvous_owner(game::super_region_of(rc, s), hosts);
     let mut radius = PICK_SEAM_RADIUS;

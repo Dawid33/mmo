@@ -74,8 +74,14 @@ impl Plugin for StudPlugin {
                 (
                     palette_ui::apply_stud_ui_actions,
                     build::build_keys,
-                    build::build_pick,
-                    build::build_apply.after(crate::renderer::commander::hold_pointer_while_orbiting),
+                    // Picking and placing read the commander camera's state
+                    // (`MinimapPointer`, `RightPress`), which exists only in
+                    // commander mode: under the first-person camera (the
+                    // probes' autopilot) there is nothing to pick with.
+                    build::build_pick.run_if(resource_exists::<crate::renderer::commander::RightPress>),
+                    build::build_apply
+                        .after(crate::renderer::commander::hold_pointer_while_orbiting)
+                        .run_if(resource_exists::<crate::renderer::commander::RightPress>),
                     palette_ui::sync_stud_ui,
                 )
                     .chain()

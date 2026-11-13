@@ -124,6 +124,9 @@ impl Plugin for SimBridgePlugin {
         .add_session_reset::<fortress_view::FortressViewUniform>()
         .init_resource::<avatar::AvatarAssets>()
         .add_session_reset::<slint_overlay::UiUpdates>()
+        // `drain_ui_updates` (below) runs in both camera modes and fills these;
+        // the overlay that shows them exists only in commander mode.
+        .add_session_reset::<slint_overlay::HudItems>()
         .insert_resource(collider_debug::DebugFlagsRes(self.debug_flags.clone()))
         .add_session_reset::<collider_debug::DebugColliderLines>()
         .init_resource::<grid_debug::GridDebug>()

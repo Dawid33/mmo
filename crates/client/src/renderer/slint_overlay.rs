@@ -525,8 +525,6 @@ impl Plugin for SlintOverlayPlugin {
         )
             .add_session_reset::<PlayPending>()
             .add_session_reset::<PeopleRows>()
-            .init_resource::<HudItems>()
-            .add_session_reset::<HudItems>()
             .add_systems(
                 Update,
                 (
