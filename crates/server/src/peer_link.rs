@@ -17,7 +17,9 @@
 //! the newer).
 //!
 //! [`PEER_LINK_DELAY_MS_ENV`] holds every outgoing frame that long before it is written
-//! (order kept; a latency measurement knob, never on in play).
+//! (order kept; a latency measurement knob, never on in play) and writes it when it is due:
+//! a timer thread per link wakes the host loop then, so a d ms delay costs d ms, not the
+//! loop's next wake.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::io;
@@ -233,11 +235,32 @@ pub struct QuicPeerLink {
     /// Frames held by the delay: when each is due, its connection, the frame — in order.
     delayed: VecDeque<(Instant, u64, PeerMsg)>,
     clock: Box<dyn Fn() -> Instant + Send>,
+    /// A non-zero delay: the due time of every held frame goes to a timer thread that
+    /// signals the host loop's peer wake when it comes (the loop would otherwise only
+    /// flush at its next wake for something else — up to its 200 ms default). Zero delay:
+    /// none (no thread, no extra wakeup).
+    due_timer: Option<Sender<Instant>>,
 }
 
 impl QuicPeerLink {
-    fn new(peer: u32, wire: Box<dyn PeerWire + Send>, events: Receiver<Inbound>, delay: Duration) -> QuicPeerLink {
+    /// `wake` is the host loop's peer wake ([`PeerLinks::wake`]).
+    fn new(
+        peer: u32,
+        wire: Box<dyn PeerWire + Send>,
+        events: Receiver<Inbound>,
+        delay: Duration,
+        wake: Sender<()>,
+    ) -> QuicPeerLink {
+        let due_timer = (!delay.is_zero()).then(|| {
+            let (due_tx, dues) = crossbeam::channel::unbounded();
+            std::thread::Builder::new()
+                .name(format!("peer-delay-{peer}"))
+                .spawn(move || wake_when_due(dues, wake))
+                .expect("spawn the peer delay timer thread");
+            due_tx
+        });
         QuicPeerLink {
+            due_timer,
             peer,
             wire,
             events,
@@ -264,6 +287,19 @@ impl QuicPeerLink {
     }
 }
 
+/// The delay's timer thread: for each due time (sent in order), sleeps until it comes and
+/// signals `wake` (bounded(1): a wake already pending covers this one). Ends when its link
+/// is dropped.
+fn wake_when_due(dues: Receiver<Instant>, wake: Sender<()>) {
+    while let Ok(due) = dues.recv() {
+        let now = Instant::now();
+        if due > now {
+            std::thread::sleep(due - now);
+        }
+        let _ = wake.try_send(());
+    }
+}
+
 impl PeerLink for QuicPeerLink {
     fn send(&mut self, msg: PeerMsg) {
         let Some(tag) = self.live else {
@@ -273,7 +309,11 @@ impl PeerLink for QuicPeerLink {
         if self.delay.is_zero() {
             self.wire.write(tag, msg);
         } else {
-            self.delayed.push_back(((self.clock)() + self.delay, tag, msg));
+            let due = (self.clock)() + self.delay;
+            self.delayed.push_back((due, tag, msg));
+            if let Some(timer) = &self.due_timer {
+                let _ = timer.send(due);
+            }
         }
     }
 
@@ -608,7 +648,7 @@ impl PeerLinks {
                     .spawn(move || dial_peer(other, hello, store, inbound, cmds, wake))?;
                 Box::new(DialerWire(cmds_tx))
             };
-            links.push((other, Box::new(QuicPeerLink::new(other, wire, events, config.delay))));
+            links.push((other, Box::new(QuicPeerLink::new(other, wire, events, config.delay, wake_tx.clone()))));
         }
         std::thread::Builder::new()
             .name("peer-listener".into())
@@ -661,9 +701,54 @@ mod tests {
     }
 
     fn link(delay: Duration) -> (QuicPeerLink, Tap, Sender<Inbound>) {
+        let (link, tap, tx, _wake) = link_with_wake(delay);
+        (link, tap, tx)
+    }
+
+    /// [`link`] and the host loop's peer wake it signals.
+    fn link_with_wake(delay: Duration) -> (QuicPeerLink, Tap, Sender<Inbound>, Receiver<()>) {
         let tap = Tap::default();
         let (tx, rx) = crossbeam::channel::unbounded();
-        (QuicPeerLink::new(1, Box::new(tap.clone()), rx, delay), tap, tx)
+        let (wake_tx, wake) = crossbeam::channel::bounded(1);
+        (QuicPeerLink::new(1, Box::new(tap.clone()), rx, delay, wake_tx), tap, tx, wake)
+    }
+
+    /// The host loop as `server::run` drives it, idle (no client, no region, no coordinator):
+    /// wait for the peer wake or the 200 ms default, then pump. With a 5 ms delay a frame is
+    /// written when it is due (± a few ms), not at the next default wake — a real 1 ms link
+    /// would not lose a tick per crossing.
+    #[test]
+    fn a_delayed_frame_is_written_when_due_on_an_idle_loop() {
+        let (mut link, tap, tx, wake) = link_with_wake(Duration::from_millis(5));
+        tx.send(Inbound::Up(9)).unwrap();
+        link.pump(0);
+        while wake.try_recv().is_ok() {}
+        let t0 = Instant::now();
+        link.send(ack(1));
+        while tap.0.lock().unwrap().0.is_empty() {
+            assert!(t0.elapsed() < Duration::from_secs(2), "the frame was never written");
+            crossbeam::channel::select! {
+                recv(wake) -> _ => {},
+                default(Duration::from_millis(200)) => {}
+            }
+            link.pump(0);
+        }
+        let took = t0.elapsed();
+        assert!(took >= Duration::from_millis(5), "written before it was due ({took:?})");
+        // Robust on a loaded machine; the old behaviour waits for the 200 ms default.
+        assert!(took < Duration::from_millis(100), "written {took:?} after the send, not when due (5 ms)");
+    }
+
+    /// Without a delay no timer runs: a send never signals the wake by itself.
+    #[test]
+    fn no_delay_no_timer() {
+        let (mut link, tap, tx, wake) = link_with_wake(Duration::ZERO);
+        tx.send(Inbound::Up(9)).unwrap();
+        link.pump(0);
+        while wake.try_recv().is_ok() {}
+        link.send(ack(1));
+        assert_eq!(tap.0.lock().unwrap().0, vec![(9, ack(1))], "written at once");
+        assert!(wake.recv_timeout(Duration::from_millis(20)).is_err(), "no wake of its own");
     }
 
     fn ack(n: u64) -> PeerMsg {
