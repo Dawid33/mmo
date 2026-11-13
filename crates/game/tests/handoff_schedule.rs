@@ -67,7 +67,10 @@ const CROWD_INSET: f32 = 8.0;
 /// `crowd`: a slime stands by the spawn corner in the north and in the west
 /// neighbour, so two sources mirror into the spawn region (and into the
 /// north-west one) every tick — neighbour messages whose order within a slot
-/// the schedule permutes.
+/// the schedule permutes. It also sends intents and replies that meet in one
+/// slot: north and west each carve a box reaching into the north-west region
+/// (two sources' intents into one target), and the client carves a box over
+/// the spawn corner (its replies come from three owners, due one tick).
 fn walk_there_and_back_recorded(
     route: Route,
     schedule: Option<InlineSchedule>,
@@ -89,6 +92,10 @@ fn walk_there_and_back_recorded(
                 common::spawn_slime(region, [x, common::above_floor_y(), z], 1, 0.0, tick);
             });
         }
+        let (s, top) = ((game::REGION_CHUNKS * game::STUD_CHUNK_STUDS) as i32, common::FLOOR_PLATES);
+        carve_in(&mut rig, north(), [-4, top - 6, s - 12], [4, top, s - 8]);
+        carve_in(&mut rig, RegionCoords::new(-1, 0), [s - 12, top - 6, -4], [s - 8, top, 4]);
+        rig.order(Order::CarveStud { lo: [-4, top - 6, -4], hi: [4, top, 4] });
     }
 
     rig.key(Key::KeyE, true);
@@ -130,6 +137,16 @@ fn walk_there_and_back_recorded(
     assert_eq!(rig.owners(), [SPAWN_REGION]);
     let streams = rig.event_streams.take().expect("recording");
     (rig.fingerprint(), streams)
+}
+
+/// Applies `Order::CarveStud { lo, hi }` (`rc`'s stud frame) in `rc` between ticks — a
+/// region with no body of the client's: its intents to the neighbours the box reaches
+/// into are sent by the region itself (`EntityId::of_region`).
+fn carve_in(rig: &mut Rig, rc: RegionCoords, lo: [i32; 3], hi: [i32; 3]) {
+    rig.manager.spawner_mut().with_region(rc, |region| {
+        region.handle_event(GameEventKind::Order(CLIENT, Order::CarveStud { lo, hi })).unwrap();
+        region.commit_server_event();
+    });
 }
 
 /// Sweeps `SEEDS` seeds of one schedule mode over every route; returns how

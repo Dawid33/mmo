@@ -421,3 +421,116 @@ fn shutdown_applies_everything_buffered() {
         assert!(parked.id_index.contains_key(&id), "the parked region holds {id:?}");
     }
 }
+
+/// Every output's short name, `EventProcessed` ones as `EventProcessed(<kind>)` — in order.
+fn output_names(out: &crossbeam::channel::Receiver<(RegionCoords, RegionOutput)>) -> Vec<String> {
+    out.try_iter()
+        .map(|(_, o)| match &o {
+            RegionOutput::EventProcessed(e) | RegionOutput::EventProcessedHashed(e, ..) => {
+                let kind = format!("{:?}", e.kind);
+                format!("EventProcessed({})", kind.split(['(', ' ']).next().unwrap_or_default())
+            }
+            RegionOutput::PlayerParked(c, record, body) => {
+                format!("PlayerParked({c}, {}, {})", record.is_some(), body.is_some())
+            }
+            other => other.name().to_string(),
+        })
+        .collect()
+}
+
+/// A park the manager sends as a plain `Event` (a move right after a crossing) waits
+/// behind its client's buffered arrival: the body is in the region when it parks.
+#[test]
+fn park_for_a_buffered_arrival_follows_it() {
+    let (mut r, out) = ticked_runner();
+    let t = r.current_tick();
+    r.handle_input(RegionInput::Transfer(arriving_body(7, 1), t));
+    r.handle_input(RegionInput::Event(GameEventKind::ParkPlayer(7)));
+    assert!(out.try_recv().is_err(), "nothing output before the slot closes");
+    r.tick();
+    let names = output_names(&out);
+    let at = |n: &str| names.iter().position(|x| x == n).unwrap_or_else(|| panic!("no {n} in {names:?}"));
+    let (arrived, parked, record, tick) = (
+        at("EventProcessed(EntityArrived)"),
+        at("EventProcessed(ParkPlayer)"),
+        at("PlayerParked(7, true, true)"),
+        at("EventProcessed(Tick)"),
+    );
+    assert!(arrived < parked && parked < record && record < tick, "{names:?}");
+}
+
+/// A `ClientLeft` likewise waits behind its client's buffered arrival.
+#[test]
+fn client_left_for_a_buffered_arrival_follows_it() {
+    let (mut r, out) = ticked_runner();
+    let t = r.current_tick();
+    r.handle_input(RegionInput::Transfer(arriving_body(7, 1), t));
+    r.handle_input(RegionInput::Event(GameEventKind::ClientLeft(7)));
+    assert!(out.try_recv().is_err(), "nothing output before the slot closes");
+    r.tick();
+    let kinds: Vec<_> = processed(&out).into_iter().map(|e| e.kind).collect();
+    assert_eq!(kinds.len(), 3, "{kinds:?}");
+    assert!(is_arrival_of(&kinds[0], 7), "the body first: {kinds:?}");
+    assert_eq!(kinds[1..], [GameEventKind::ClientLeft(7), GameEventKind::Tick]);
+    assert!(!r.region_mut().data().clients.contains_key(&7), "the client left after its body arrived");
+}
+
+/// The inputs an arriving body carries (`pending_inputs`) are routed right after its
+/// `EntityArrived`, ahead of an input queued behind the arrival (that one is pushed
+/// behind the arrival entry, and the carried ones are routed while it is applied);
+/// a carried input stamped for a later slot waits for it.
+#[test]
+fn carried_inputs_follow_the_arrival_before_queued_ones() {
+    let (mut r, out) = ticked_runner();
+    let t = r.current_tick();
+    let look = |dx| GameEventKind::PlayerInput(7, game::InputEvent::MouseMotion { dx, dy: 0.0 });
+    let GameEventKind::EntityArrived(mut bundle) = arriving_body(7, 1) else { unreachable!() };
+    bundle.pending_inputs = vec![(look(1.0), t as u64), (look(3.0), t as u64 + 1)];
+    r.handle_input(RegionInput::Transfer(GameEventKind::EntityArrived(bundle), t));
+    r.handle_input(RegionInput::Event(look(2.0)));
+    r.tick();
+    let kinds: Vec<_> = processed(&out).into_iter().map(|e| e.kind).collect();
+    assert_eq!(kinds.len(), 5, "{kinds:?}");
+    assert!(is_arrival_of(&kinds[0], 7), "{kinds:?}");
+    assert_eq!(kinds[1..], [look(1.0), look(2.0), GameEventKind::Tick, look(3.0)]);
+}
+
+/// `Shutdown` with a save cut pending at a tick the region will not reach: what is
+/// buffered for the slots before the cut tick is applied before the `CutSnapshot`,
+/// the rest after it, before `Stopped` — nothing lost.
+#[test]
+fn shutdown_with_a_pending_cut_splits_the_inbox_at_the_cut_tick() {
+    let (mut r, out) = ticked_runner();
+    let t = r.current_tick();
+    r.handle_input(RegionInput::SaveAt(game::CutId(1), t + 2));
+    r.handle_input(RegionInput::Transfer(arriving_body(7, 1), t + 1));
+    r.handle_input(RegionInput::Transfer(arriving_body(8, 2), t + 2));
+    assert!(!r.handle_input(RegionInput::Shutdown));
+    let outputs: Vec<_> = out.try_iter().map(|(_, o)| o).collect();
+    let arrival_of = |client| {
+        outputs
+            .iter()
+            .position(|o| matches!(o, RegionOutput::EventProcessed(e) if is_arrival_of(&e.kind, client)))
+            .unwrap_or_else(|| panic!("client {client}'s body never arrived"))
+    };
+    let cut = outputs.iter().position(|o| matches!(o, RegionOutput::CutSnapshot(..))).expect("CutSnapshot");
+    let stopped = outputs.iter().position(|o| matches!(o, RegionOutput::Stopped(..))).expect("Stopped");
+    assert!(arrival_of(7) < cut, "stamped before the cut tick: in the snapshot");
+    assert!(cut < arrival_of(8) && arrival_of(8) < stopped, "stamped at the cut tick: after it, before the park");
+}
+
+/// A `ListPeople` while a transfer is buffered is answered once the slot closes: after
+/// the drain, before the `Tick`.
+#[test]
+fn list_people_waits_for_the_buffered_transfers() {
+    let (mut r, out) = ticked_runner();
+    let t = r.current_tick();
+    r.handle_input(RegionInput::Transfer(ghost(RegionCoords::new(-1, 0), 1.0), t));
+    r.handle_input(RegionInput::ListPeople(5));
+    assert!(out.try_recv().is_err(), "not answered while a transfer is buffered");
+    r.tick();
+    let names = output_names(&out);
+    let at = |n: &str| names.iter().position(|x| x == n).unwrap_or_else(|| panic!("no {n} in {names:?}"));
+    assert!(at("EventProcessed(HaloEntity)") < at("PeopleListed"), "{names:?}");
+    assert!(at("PeopleListed") < at("EventProcessed(Tick)"), "{names:?}");
+}

@@ -24,8 +24,10 @@
 //! [`InFlightRow`] of the cut — a player's crossing a [`PlayerRecord`]
 //! instead, a person's dropped (the history owns persons).
 //!
-//! A region that parks before T answers from `Shutdown`: what is held for
-//! slots before T is applied, the snapshot taken, then the rest. A body the
+//! A region that parks before T answers from `Shutdown`: what it buffers for
+//! slots before T — the neighbour messages stamped before T (its `SlotInbox`,
+//! in canonical order) and the client inputs held for those slots — is
+//! applied, the snapshot taken, then the rest. A body the
 //! manager creates or restores (a move, a reconnect) in a region that has not
 //! answered is held to slot T+1 — its park may have landed after its old
 //! region's snapshot — and a parked record keeps its state at T while the cut

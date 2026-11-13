@@ -32,13 +32,13 @@
    | 2 | `HaloEntity` | `source_region` `(x, z)`, entity id |
    | 3 | `HaloUpdate` | `from` `(x, z)` |
    | 4 | `HaloSourceGone` | region `(x, z)` |
-   | 5 | `Intent` | arrival only (its `seq` is assigned on receipt, which is now canonical) |
+   | 5 | `Intent` | intents before replies; an intent by its sending entity (`by`), a reply by the entity it is for, then the region that answered it (the owner of its intent's position; `BreakBlock` / `PlaceBlock` carry none and keep arrival order); then arrival *(amended in execution: "arrival only" left two sources' intents or replies tied, so the `seq` assigned on receipt — hashed state — still followed channel timing; the key makes messages of different sources never tie)* |
    | 6 | anything else, and anything queued **behind** another entry | arrival only |
 
    Classes 0–3 are in a source's own emission order (`Departures`, then `HaloEntities` with every `Gone` before every `Update`, then `HaloDeltas`), so one source's messages keep their relative order.
 5. An entry that must follow another (a client's event behind its held creation; a crossing player's input behind that player's arrival) is pushed as class 6 with the stamp of the entry it follows: it sorts after every class 0–5 entry of that stamp and keeps arrival order among class 6.
 
-**What does not change:** the tick a message takes effect in (the next `Tick` sees it either way); the wire; the stamps; the intent queue's `(due, source, seq)` order; where the state hash and a save cut's snapshot are taken (after the `Tick`, at the opening of a slot — they now see every message of the closed slot, on both sides alike).
+**What does not change:** the tick a message takes effect in (the next `Tick` sees it either way); the wire; the stamps; the intent queue's `(due, source, seq)` order (its `seq`, assigned on receipt, becomes canonical because class 5's key separates sources — *amended in execution*: receipt order alone is not canonical across sources); where the state hash and a save cut's snapshot are taken (after the `Tick`, at the opening of a slot — they now see every message of the closed slot, on both sides alike).
 
 **What does change, on purpose:** the server announces an on-time neighbour message (`EventProcessed`) up to one tick later than today — at the end of its slot instead of on receipt — and event ids within a slot are renumbered. Server and client are built together (no version handshake), so both move at once. Entries that share the buffer today move with it: a client creation or restore held for a save cut (`cut_hold_stamp`, `cut.tick + 1`) is applied at the end of that slot rather than at its start — still after the cut's snapshot, at most one tick later than now.
 

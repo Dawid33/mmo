@@ -156,6 +156,21 @@ fn two_sources_into_one(rig: &mut MultiRig) {
     };
     rig.spawn_slime(a, inside(a));
     let id = rig.spawn_slime(c, inside(c));
+    // Both also carve a box reaching into `b`: two sources' intents in one slot.
+    let (s, top) = ((game::REGION_CHUNKS * game::STUD_CHUNK_STUDS) as i32, crate::common::FLOOR_PLATES);
+    for from in [a, c] {
+        let span = |d: i32| match d {
+            1 => (s - 4, s + 4),
+            -1 => (-4, 4),
+            _ => (s / 2, s / 2 + 4),
+        };
+        let ((x0, x1), (z0, z1)) = (span(b.x - from.x), span(b.z - from.z));
+        let order = game::Order::CarveStud { lo: [x0, top - 6, z0], hi: [x1, top, z1] };
+        rig.host_of(from).manager.spawner_mut().with_region(from, |region| {
+            region.handle_event(game::GameEventKind::Order(crate::common::rig::CLIENT, order)).unwrap();
+            region.commit_server_event();
+        });
+    }
     for _ in 0..WAIT_ROUNDS {
         rig.round();
     }

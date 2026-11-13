@@ -32,6 +32,11 @@ impl SerializedRegion {
 pub enum RegionInput {
     /// A routed client event or a manager-authoritative event
     /// (CreateClient). The region assigns the authoritative event id.
+    /// Applied on receipt, so it overtakes the buffered [`RegionInput::Transfer`]s
+    /// (except an event for a client whose body is buffered, which queues behind
+    /// it): an event that must follow region-to-region messages travels as a
+    /// `Transfer` instead — the manager's directives do, stamped with its
+    /// `directive_stamps`.
     Event(GameEventKind),
     /// A client event the client predicted right after its own tick number
     /// `.1` of this region. Held until this region has run that tick, so it
@@ -523,7 +528,8 @@ impl RegionRunner {
 
     /// No event for a client is applied before its buffered body: the stamp
     /// to queue `kind` (a server event for a client — park, leave, …) behind
-    /// it, when there is one.
+    /// it, when there is one. Any other plain `Event` overtakes the inbox (see
+    /// [`RegionInput::Event`]).
     fn behind_held_body(&self, kind: &GameEventKind) -> Option<Tick> {
         let client = match kind {
             GameEventKind::ParkPlayer(c) | GameEventKind::ClientLeft(c) => Some(*c),
@@ -538,13 +544,12 @@ impl RegionRunner {
     /// carried). For a region about to park: the inbox first, as its
     /// messages for the open slot close it before any later slot's input.
     fn apply_buffered(&mut self, before: Option<Tick>) {
-        let due = |t: u64| before.is_none_or(|b| t < b);
+        // A stamp is a tick (or a held input's, at most `MAX_INPUT_LEAD_TICKS`
+        // ahead), never `Tick::MAX`: `None` takes everything.
+        let before = before.unwrap_or(Tick::MAX);
         loop {
-            let transfers = match before {
-                Some(tick) => self.inbox.drain_before(tick),
-                None => self.inbox.drain_all(),
-            };
-            let (inputs, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut self.held).into_iter().partition(|(_, t)| due(*t));
+            let transfers = self.inbox.drain_before(before);
+            let (inputs, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut self.held).into_iter().partition(|(_, t)| *t < before);
             self.held = rest.into();
             if inputs.is_empty() && transfers.is_empty() {
                 return;

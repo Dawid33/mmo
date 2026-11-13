@@ -8,9 +8,19 @@
 
 use std::collections::VecDeque;
 
-use crate::{EntityId, GameEventKind, RegionCoords, Tick};
+use crate::{EntityId, GameEventKind, Intent, IntentMsg, IntentReply, RegionCoords, Tick};
 
-/// Where a message sorts within its stamp.
+/// Where a message sorts within its stamp. Within a class, by the message's own
+/// key, then arrival (one FIFO per source, so equal keys keep their source's order):
+/// - `Arrival`: the entity's id;
+/// - `HaloEntityGone` / `HaloEntity`: the source region, then the entity's id;
+/// - `HaloUpdate`, `HaloSourceGone`: the source region;
+/// - `Intent`: intents before replies; an intent by its sending entity (`by`), a
+///   reply by the entity it is for, then the region that answered it (the owner
+///   of its intent's position) — so messages of two sources never tie, except
+///   replies to one entity for `BreakBlock` / `PlaceBlock`, which carry no
+///   position (they keep arrival order);
+/// - `Other`: arrival only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum SlotClass {
     Arrival = 0,
@@ -36,7 +46,7 @@ pub fn slot_class(kind: &GameEventKind) -> SlotClass {
     }
 }
 
-type Key = [i64; 5];
+type Key = [i64; 6];
 
 fn region_key(r: RegionCoords) -> [i64; 2] {
     [r.x as i64, r.z as i64]
@@ -56,27 +66,60 @@ fn key_of(kind: &GameEventKind) -> Key {
     match kind {
         GameEventKind::EntityArrived(b) => {
             let [a, b, c] = id_key(b.id);
-            [a, b, c, 0, 0]
+            [a, b, c, 0, 0, 0]
         }
         GameEventKind::HaloEntityGone(g) => {
             let [fx, fz] = region_key(g.from);
             let [a, b, c] = id_key(g.id);
-            [fx, fz, a, b, c]
+            [fx, fz, a, b, c, 0]
         }
         GameEventKind::HaloEntity(d) => {
             let [sx, sz] = region_key(d.source_region);
             let [a, b, c] = id_key(d.id);
-            [sx, sz, a, b, c]
+            [sx, sz, a, b, c, 0]
         }
         GameEventKind::HaloUpdate(u) => {
             let [fx, fz] = region_key(u.from);
-            [fx, fz, 0, 0, 0]
+            [fx, fz, 0, 0, 0, 0]
         }
         GameEventKind::HaloSourceGone(r) => {
             let [x, z] = region_key(*r);
-            [x, z, 0, 0, 0]
+            [x, z, 0, 0, 0, 0]
         }
-        _ => [0; 5],
+        GameEventKind::Intent(IntentMsg::Intent(sent)) => {
+            let [a, b, c] = id_key(sent.intent.by());
+            [INTENT_KEY, a, b, c, 0, 0]
+        }
+        GameEventKind::Intent(IntentMsg::Reply(sent)) => {
+            let [a, b, c] = id_key(sent.reply.to());
+            let [ox, oz] = reply_owner(&sent.reply).map_or([i64::MIN; 2], region_key);
+            [REPLY_KEY, a, b, c, ox, oz]
+        }
+        _ => [0; 6],
+    }
+}
+
+/// Class 5's first key: intents before replies.
+const INTENT_KEY: i64 = 0;
+const REPLY_KEY: i64 = 1;
+
+/// The region that answered `reply`: the owner of the position its intent named
+/// (`Target::region` of the intent it answers) — `None` for `BreakBlock` /
+/// `PlaceBlock`, whose position travels only in the `SentIntent`.
+fn reply_owner(reply: &IntentReply) -> Option<RegionCoords> {
+    let (IntentReply::Granted(intent) | IntentReply::Refused(intent, _)) = reply;
+    match *intent {
+        Intent::BreakBlock { .. } | Intent::PlaceBlock { .. } => None,
+        Intent::DepositItems { cell, .. }
+        | Intent::TakeFromPile { cell, .. }
+        | Intent::PutInContainer { cell, .. }
+        | Intent::TakeFromContainer { cell, .. } => Some(cell.to_local().0),
+        Intent::CarveStud { lo, .. } | Intent::FillStud { lo, .. } | Intent::BreakStud { lo, .. } => {
+            Some(crate::stud_chunk_of_cell(lo).to_local().0)
+        }
+        Intent::PlaceStud { chunk, .. } | Intent::RemoveStud { chunk, .. } | Intent::PlaceBrick { chunk, .. } => {
+            Some(chunk.to_local().0)
+        }
     }
 }
 
@@ -115,7 +158,7 @@ impl SlotInbox {
     /// Buffer an entry that must follow the others of its stamp (class `Other`,
     /// arrival order among its peers), whatever its kind.
     pub fn push_behind(&mut self, kind: GameEventKind, stamp: Tick) {
-        self.add(kind, stamp, SlotClass::Other, [0; 5]);
+        self.add(kind, stamp, SlotClass::Other, [0; 6]);
     }
 
     fn drain_where(&mut self, take: impl Fn(Tick) -> bool) -> Vec<GameEventKind> {
@@ -172,7 +215,7 @@ mod tests {
     use super::*;
     use crate::{
         BodyState, Carried, Client, ColliderSpec, EntityBundle, EntityKind, HaloEntityDelta, HaloEntityGone,
-        HaloUpdate, InputEvent, IntentMsg, Pose, SentIntent,
+        HaloUpdate, InputEvent, IntentMsg, Pose, SentIntent, SentReply,
     };
     use rapier3d::math::Vector;
 
@@ -224,6 +267,22 @@ mod tests {
 
     fn intent() -> GameEventKind {
         GameEventKind::Intent(IntentMsg::Intent(SentIntent::default()))
+    }
+
+    /// An intent by `by` carving a box in the world stud cells at `x` (any owner).
+    fn carve_by(by: EntityId, x: i64) -> GameEventKind {
+        GameEventKind::Intent(IntentMsg::Intent(SentIntent {
+            intent: Intent::CarveStud { lo: [x, 0, 0], hi: [x + 4, 6, 4], by },
+            ..SentIntent::default()
+        }))
+    }
+
+    /// A reply to `to` for a carve of the world stud cells at `x` (answered by their owner).
+    fn carve_reply(to: EntityId, x: i64) -> GameEventKind {
+        GameEventKind::Intent(IntentMsg::Reply(SentReply {
+            reply: IntentReply::Granted(Intent::CarveStud { lo: [x, 0, 0], hi: [x + 4, 6, 4], by: to }),
+            ..SentReply::default()
+        }))
     }
 
     fn input(client: u64) -> GameEventKind {
@@ -363,6 +422,55 @@ mod tests {
         inbox.push(intent(), 4);
         assert_eq!(inbox.drain_due(4).len(), 1);
         assert_eq!(inbox.drain_due(9), vec![a, b]);
+    }
+
+    /// Two sources' intents (other senders) sort the same whatever the arrival order.
+    #[test]
+    fn two_sources_intents_sort_the_same_whatever_the_arrival_order() {
+        let (a, b) = (carve_by(eid(-1, 0, u64::MAX), 0), carve_by(eid(0, -1, u64::MAX), 0));
+        let mut one = SlotInbox::new();
+        one.push(a.clone(), 5);
+        one.push(b.clone(), 5);
+        let mut two = SlotInbox::new();
+        two.push(b, 5);
+        two.push(a.clone(), 5);
+        let out = one.drain_due(5);
+        assert_eq!(out, two.drain_due(5));
+        assert_eq!(out[0], a, "by the sender's id");
+    }
+
+    /// Replies to one entity from two owners (a carve over a corner) sort the same
+    /// whatever the arrival order; intents come before replies.
+    #[test]
+    fn two_owners_replies_sort_the_same_whatever_the_arrival_order() {
+        let to = eid(0, 0, 3);
+        let n = crate::REGION_STUDS as i64;
+        // Cells owned by the region at x = -1 and by the one at x = 0.
+        let (west, here) = (carve_reply(to, -4), carve_reply(to, n / 2));
+        let sent = carve_by(eid(5, 5, 0), 0);
+        let mut one = SlotInbox::new();
+        one.push(here.clone(), 5);
+        one.push(west.clone(), 5);
+        one.push(sent.clone(), 5);
+        let mut two = SlotInbox::new();
+        two.push(west.clone(), 5);
+        two.push(sent.clone(), 5);
+        two.push(here.clone(), 5);
+        let out = one.drain_due(5);
+        assert_eq!(out, two.drain_due(5));
+        assert_eq!(out, vec![sent, west, here], "intents first, then replies by the answering owner");
+    }
+
+    /// One source's intents by one sender keep their emission order (equal keys).
+    #[test]
+    fn one_senders_intents_keep_their_order() {
+        let by = eid(1, 1, 7);
+        let emitted = vec![carve_by(by, 40), carve_by(by, 0), carve_by(by, 20)];
+        let mut inbox = SlotInbox::new();
+        for e in &emitted {
+            inbox.push(e.clone(), 2);
+        }
+        assert_eq!(inbox.drain_all(), emitted);
     }
 
     #[test]
