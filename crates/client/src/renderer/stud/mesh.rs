@@ -21,7 +21,8 @@
 //! **Whole bricks** ([`body_mesh`], [`stud_mesh`], [`mesh_model`]: the build
 //! ghost and falling bodies) are still the baked triangles copied, rotated and
 //! translated, culled by their tags: each brick's hi-detail `Face(dir)` tris
-//! where that face is exposed, `Inner` tris where the underside is exposed,
+//! where that face is exposed, `Outer` tris (a slope's slanted face) where a
+//! face they lean toward is exposed, `Inner` tris where the underside is exposed,
 //! seam-line quads on exposed faces; the lo-detail `Stud(cell)` tris of free
 //! stud cells. There a face is exposed when ANY cell across it over the
 //! brick's footprint is free.
@@ -360,9 +361,14 @@ fn emit_body(
     emit_seams(out, min, b, exposed, assets, alphas.seam);
 }
 
+/// How far an `Outer` triangle's unit normal must lean toward a face direction
+/// to be seen through that face.
+const OUTER_LEAN: f32 = 1e-3;
+
 /// The baked body triangles of brick `b` standing at cell `min`, for the faces
-/// `exposed`: a filler's box faces; a part's `Face` tris and, where the underside
-/// shows, its `Inner` ones.
+/// `exposed`: a filler's box faces; a part's `Face` tris, its `Outer` tris (a
+/// slope's slanted face) where a face they lean toward is exposed and, where
+/// the underside shows, its `Inner` ones.
 fn emit_faces(
     out: &mut StudMeshData,
     min: [i32; 3],
@@ -416,6 +422,14 @@ fn emit_faces(
                             continue;
                         }
                         TriTag::Inner
+                    }
+                    TriTag::Outer => {
+                        // A slanted outside face shows through every face it leans toward.
+                        let n = rotate_vec(rot, t.normal);
+                        if !DIRS.into_iter().enumerate().any(|(i, d)| exposed[i] && dot(n, dir_vec(d)) > OUTER_LEAN) {
+                            continue;
+                        }
+                        TriTag::Outer
                     }
                     TriTag::Stud(_) => continue,
                 };
@@ -1271,6 +1285,34 @@ mod tests {
             let c = StudChunk::new([StudBrick::part_at([4, 0, 4], slope as u16, 0, 4)]).unwrap();
             assert!(mesh_chunk(&c, &FaceSlabs::default(), false).body.indices.len() > 12 * 3);
         }
+    }
+
+    /// A slope standing on a brick (its underside covered) still shows its slanted
+    /// face, on every path that draws it; buried on the sides it leans toward, not.
+    #[test]
+    fn a_slope_on_a_brick_keeps_its_slanted_face() {
+        let slope = |min: [u8; 3]| brick("3040", min);
+        let base = brick("3001", [4, 0, 4]);
+        let chunk = StudChunk::new([base, slope([4, 3, 4])]).unwrap();
+        let n = StudNeighbours { get: &free };
+        let tags = body_tags(&chunk, &n, [4, 3, 4]);
+        assert!(!has_face(&tags, FaceDir::NegY), "the underside is covered");
+        assert!(!tags.contains(&TriTag::Inner));
+        assert!(tags.contains(&TriTag::Outer), "the slanted face is drawn");
+
+        // The terrain path: the slanted face is in the body mesh as slanted normals.
+        let slanted = |d: &StudMeshData| d.normals.iter().filter(|n| n[1] > 0.5 && n[1] < 0.9).count();
+        assert!(slanted(&mesh_chunk(&chunk, &FaceSlabs::default(), false).body) >= 3);
+
+        // Covered on top and in front (the two sides the 3040 face leans toward: +Y, -Z): hidden.
+        let buried = StudChunk::new([
+            base,
+            slope([4, 3, 4]),
+            brick("3001", [4, 6, 4]),
+            brick("3010", [4, 3, 3]),
+        ])
+        .unwrap();
+        assert!(!body_tags(&buried, &n, [4, 3, 4]).contains(&TriTag::Outer));
     }
 
     /// LDraw 47 (Trans_Clear) and 33 (Trans_Dark_Blue): two glass colours.

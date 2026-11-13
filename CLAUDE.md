@@ -63,24 +63,26 @@ changed build/run/test command updates its recipe in the same change.
 
 OpenTofu (not Terraform) in `deploy/`: local single-node k0s (`just deploy-local`, never the inner loop);
 the `orion` k3s box (`deploy/envs/orion/`, S3 remote state, `just orion-plan|apply <root>` — always plan
-first; roots `platform` → `monitoring`, `picoshare` = https://share.factoriosurvivalworld.com, `site` = https://factoriosurvivalworld.com, the static website from `website/`
-with the `orion` Keycloak login theme beside it in `website/theme/` (`just site-dev|site-test|site-theme-check`; after a Keycloak image
+first; roots `platform` → `garage` (+ `garage-buckets`) = https://s3.factoriosurvivalworld.com, the S3-compatible
+object store on the box itself (one copy, no off-box backup; telemetry and Zulip files live there) → `monitoring`, `picoshare` = https://share.factoriosurvivalworld.com, `zulip` = https://chat.factoriosurvivalworld.com,
+`keycloak` (+ `keycloak-realm`) = https://auth.factoriosurvivalworld.com, the identity provider → `site` = https://factoriosurvivalworld.com, the static website from `website/` with the `orion`
+Keycloak login theme beside it in `website/theme/` (`just site-dev|site-test|site-theme-check`; after a Keycloak image
 bump re-diff `website/theme/orion/login/template.ftl` against the new `base` theme and run `just site-theme-check`); monitoring stack
 handoff `docs/superpowers/plans/2026-11-06-k3s-observability-stack-handoff.md`);
 the public web build `just deploy` (`scripts/web_release.sh` — use the pinned binaryen under
 `target/tools`, never the distro's). `deploy/**/*.tfvars` and `.env` are git-ignored — never commit or
 print secrets.
 
-## Testing
-
 **Grafana (orion) for debugging and live data:** `.env` holds `GRAFANA_SERVICE_TOKEN`, a service-account
 token with the Admin role. Claude may use it to read dashboards, metrics, logs and traces through Grafana's
 HTTP API at https://grafana.factoriosurvivalworld.com (`Authorization: Bearer $GRAFANA_SERVICE_TOKEN`;
-data sources: Prometheus (local), Thanos, Loki, Tempo, Pyroscope, CloudWatch, Alertmanager; `just orion-grafana`
+data sources: Prometheus (local), Thanos, Loki, Tempo, Pyroscope, Alertmanager; `just orion-grafana`
 gives a local port-forward). Load it with `set -a; . ./.env; set +a` inside the one command that needs it; never echo it,
 pass it on a command line that gets logged, or write it anywhere else. Reading is fine without asking;
 **ask before changing anything in Grafana** (dashboards, alerts, data sources, users, tokens) — durable
 changes belong in `deploy/modules/monitoring/`, not in the UI.
+
+## Testing
 
 **Never run whole game/server/client suites as a routine check.** Verify with:
 

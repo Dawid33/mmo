@@ -1609,16 +1609,23 @@ kube *args:
 # ---------------------------------------------------------------------------
 # The orion k3s server (Hetzner 5.9.7.138, kube context `orion`): OpenTofu roots
 # under deploy/envs/orion — `bootstrap` (the S3 state bucket), `platform`
-# (cert-manager, Traefik settings), `monitoring` (Grafana, Prometheus + Thanos, Loki, Tempo,
-# Pyroscope, Alloy; data in S3), `picoshare` (file sharing at
-# https://share.factoriosurvivalworld.com). State lives in S3 (deploy/envs/orion/backend.s3.tfbackend,
+# (cert-manager, Traefik settings), `garage` (the S3-compatible object store on the
+# server itself: https://s3.factoriosurvivalworld.com) and `garage-buckets` (its buckets
+# and access keys, through the admin API: needs `just orion-garage-admin` running),
+# `monitoring` (Grafana, Prometheus + Thanos, Loki, Tempo, Pyroscope, Alloy; data in
+# Garage), `picoshare` (file sharing at
+# https://share.factoriosurvivalworld.com), `zulip` (team chat at
+# https://chat.factoriosurvivalworld.com; uploads in Garage, its own PostgreSQL), `keycloak`
+# (identity provider at https://auth.factoriosurvivalworld.com) and `keycloak-realm` (its realm,
+# clients and mail, through the admin API: needs `just orion-keycloak-admin` running) and `site` (the website at
+# https://factoriosurvivalworld.com, from website/). State lives in AWS S3 (deploy/envs/orion/backend.s3.tfbackend,
 # key orion/<root>.tfstate); AWS credentials come from the default chain
 # (`AWS_PROFILE=…` to pick a profile). Every recipe pins the `orion` context,
 # never the current one. Plan before every apply. Design:
 # docs/superpowers/plans/2026-11-06-k3s-observability-stack-handoff.md.
 orion_context := "orion"
 
-# `tofu init` an orion root (bootstrap | platform | monitoring | picoshare | site) against its S3 state.
+# `tofu init` an orion root (bootstrap | platform | garage | garage-buckets | monitoring | picoshare | zulip | keycloak | keycloak-realm | site) against its S3 state.
 # Extra args pass through, e.g. `just orion-init monitoring -upgrade`.
 [positional-arguments]
 orion-init root *args:
@@ -1631,8 +1638,11 @@ orion-plan root *args:
     shift; {{tofu}} -chdir=deploy/envs/orion/{{root}} plan -input=false -var kube_context={{orion_context}} "$@"
 
 # Apply an orion root (interactive: tofu shows the plan and asks). Order on a
-# fresh server: platform, then monitoring and picoshare (either order), and
-# keycloak -> keycloak-realm -> site (the website reads the realm's issuer).
+# fresh server: platform, then garage -> garage-buckets -> monitoring (its data is
+# in Garage; the first garage apply runs before monitoring exists, so with
+# `-var metrics=false`), then picoshare (any time) and
+# keycloak -> keycloak-realm -> zulip (Zulip logs in through Keycloak, and keeps its files in Garage)
+# and site (the website reads the realm's issuer).
 [positional-arguments]
 orion-apply root *args:
     shift; {{tofu}} -chdir=deploy/envs/orion/{{root}} apply -var kube_context={{orion_context}} "$@"
@@ -1657,6 +1667,44 @@ orion-grafana-password:
 # Print PicoShare's upload passphrase (from the picoshare root's state).
 orion-share-password:
     @{{tofu}} -chdir=deploy/envs/orion/picoshare output -raw shared_secret; echo
+
+# Print a one-time link that creates a Zulip organisation (and its first owner)
+# without any e-mail being sent. Needs the zulip root applied and `zulip-0` ready.
+orion-zulip-realm-link:
+    kubectl --context {{orion_context}} -n zulip exec zulip-0 -c zulip -- \
+        runuser -u zulip -- /home/zulip/deployments/current/manage.py generate_realm_creation_link
+
+# Send Zulip's test e-mail to an address (checks the SES / SMTP settings end to end).
+orion-zulip-test-email to:
+    kubectl --context {{orion_context}} -n zulip exec zulip-0 -c zulip -- \
+        runuser -u zulip -- /home/zulip/deployments/current/manage.py send_test_email {{to}}
+
+# Garage's admin API is not public: this forwards it to http://127.0.0.1:3903.
+# Keep it running while planning or applying the garage-buckets root. The port
+# is fixed: that root reads the address from the garage root's state.
+orion-garage-admin:
+    kubectl --context {{orion_context}} -n garage port-forward svc/garage 3903:3903
+
+# The `garage` CLI inside the Garage pod, e.g. `just orion-garage status`,
+# `just orion-garage bucket list`, `just orion-garage stats`.
+[positional-arguments]
+orion-garage *args:
+    kubectl --context {{orion_context}} -n garage exec deploy/garage -- /garage "$@"
+
+# One-time copy of a tenant's objects (telemetry | zulip) from its old AWS S3
+# buckets into Garage; see the script. Run before the tenant's root is applied.
+orion-garage-import tenant:
+    TOFU={{tofu}} scripts/orion_garage_import.sh {{tenant}}
+
+# Keycloak's admin console and admin API are not public: this forwards them to
+# http://127.0.0.1:8180/admin/ (user `admin`). Keep it running while planning or
+# applying the keycloak-realm root. The port is fixed: Keycloak is told this address.
+orion-keycloak-admin:
+    kubectl --context {{orion_context}} -n keycloak port-forward svc/keycloak 8180:8080
+
+# Print the password of Keycloak's `admin` user (from the keycloak root's state).
+orion-keycloak-admin-password:
+    @{{tofu}} -chdir=deploy/envs/orion/keycloak output -raw admin_password; echo
 
 # Whole quick suites (slow tests skipped). Minutes, not seconds — reach for
 # `smoke` / `test-one` while iterating and keep this for a broader sweep.

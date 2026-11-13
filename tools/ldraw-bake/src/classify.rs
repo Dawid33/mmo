@@ -1,5 +1,5 @@
 //! Turn flattened LDraw geometry into the baked part: sim units, Y up, origin at the bbox min corner,
-//! every triangle and edge tagged (`Face` / `Stud` / `Inner`), plus the cell size, stud cells and hull.
+//! every triangle and edge tagged (`Face` / `Stud` / `Outer` / `Inner`), plus the cell size, stud cells and hull.
 
 use crate::flatten::{Detail, Flat, Library, flatten, moved_to};
 use anyhow::{Result, bail};
@@ -152,6 +152,15 @@ fn tag_edge(a: [f64; 3], b: [f64; 3], stud: Option<[f64; 3]>, ext: [f64; 3], siz
     if mask == 0 { EdgeTag::Inner } else { EdgeTag::Faces(mask) }
 }
 
+/// Is `t` on the outside of the body: does every non-stud vertex of `l` lie on or behind its plane?
+/// (A supporting plane of the body's convex hull — the slanted face of a slope, not the hollow under it.)
+fn is_outer(t: &LocalTri, l: &LocalLod) -> bool {
+    l.tris.iter().filter(|o| o.stud.is_none()).flat_map(|o| o.v).all(|p| {
+        let d = sub(p, t.v[0]);
+        t.normal[0] * d[0] + t.normal[1] * d[1] + t.normal[2] * d[2] <= PLANE_TOL_LDU
+    })
+}
+
 fn bake_lod(l: &LocalLod, ext: [f64; 3], size: [u8; 3]) -> BakedLod {
     let tris = l
         .tris
@@ -159,7 +168,11 @@ fn bake_lod(l: &LocalLod, ext: [f64; 3], size: [u8; 3]) -> BakedLod {
         .map(|t| {
             let tag = match t.stud {
                 Some(s) => TriTag::Stud(cell_of(s, size)),
-                None => face_of(t, ext).map_or(TriTag::Inner, TriTag::Face),
+                None => match face_of(t, ext) {
+                    Some(d) => TriTag::Face(d),
+                    None if is_outer(t, l) => TriTag::Outer,
+                    None => TriTag::Inner,
+                },
             };
             BakedTri {
                 pos: [f32v(t.v[0]), f32v(t.v[1]), f32v(t.v[2])],
@@ -408,6 +421,31 @@ mod tests {
         let p = bake_part(&lib, "3040").unwrap();
         assert!(!p.def.hull.is_empty());
         assert_eq!(p.def.studs.len(), 1);
+    }
+
+    /// The slanted face of a slope is on no bbox face, yet it is the outside of the part: it must not be
+    /// tagged like the hollow underside (the mesher draws `Inner` only where the underside shows).
+    #[test]
+    fn slope_face_is_outer_and_the_hollow_stays_inner() {
+        let lib = lib_or_skip!();
+        for number in ["3040", "3039"] {
+            let p = bake_part(&lib, number).unwrap();
+            for lod in [&p.hi, &p.lo] {
+                let slanted = |t: &&BakedTri| t.normal[1] > 0.5 && t.normal[2] < -0.5;
+                let outer: Vec<_> = lod.tris.iter().filter(|t| t.tag == TriTag::Outer).collect();
+                assert!(!outer.is_empty(), "{number}: no outer triangle");
+                assert!(outer.iter().all(slanted), "{number}: an outer triangle that is not the slanted face");
+                assert!(
+                    lod.tris.iter().filter(slanted).all(|t| t.tag == TriTag::Outer),
+                    "{number}: a slanted outside triangle is not tagged Outer"
+                );
+            }
+            assert!(p.hi.tris.iter().any(|t| t.tag == TriTag::Inner), "{number}: the hollow underside is gone");
+        }
+        // A box part has no outside but its bbox faces.
+        let brick = bake_part(&lib, "3001").unwrap();
+        assert!(brick.hi.tris.iter().all(|t| t.tag != TriTag::Outer));
+        assert!(brick.hi.tris.iter().any(|t| t.tag == TriTag::Inner));
     }
 
     #[test]

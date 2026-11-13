@@ -6,7 +6,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Bump when the layout of [`BakedParts`] or its meaning changes.
-pub const BAKED_PARTS_VERSION: u32 = 1;
+pub const BAKED_PARTS_VERSION: u32 = 2;
 
 /// One row of the generated part table (`stud_catalog::STUD_PARTS`). Not serialized.
 #[derive(Debug, Clone, PartialEq)]
@@ -79,6 +79,9 @@ pub enum TriTag {
     Stud([u8; 3]),
     /// Underside tubes, hollow, anything inside.
     Inner,
+    /// On the outside of the part but on no bounding-box face (the slanted face of a slope): the whole
+    /// non-stud geometry lies behind its plane. Seen from every side its normal leans toward.
+    Outer,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
