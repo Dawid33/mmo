@@ -808,11 +808,11 @@ pub fn run() -> claims::ServerExit {
         }
         _ => None,
     };
-    // A split host on Postgres, before it claims, registers or loads anything: the world cut
-    // parts a crash left staged are finished first (several hosts: and two-phase commit
-    // must be available).
-    if let (roles::Role::Host, true, Some(store)) = (role, postgres, &store) {
-        roles::recover_staged_cuts(store, hosts).unwrap_or_else(|e| fatal(&e));
+    // On Postgres, before it claims, registers or loads anything: the world cut parts a
+    // crash left staged are finished first (several hosts: and two-phase commit must be
+    // available).
+    if let Some(store) = &store {
+        roles::resolve_before_claim(postgres, store, hosts).unwrap_or_else(|e| fatal(&e));
     }
     // The WebTransport ingress's self-signed certificate is minted now, before this host's
     // endpoint is known to anyone: a browser pins its hash to open a connection here (a

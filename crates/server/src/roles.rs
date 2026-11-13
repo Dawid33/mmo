@@ -374,6 +374,17 @@ pub fn recover_staged_cuts(store: &world_store::StoreHandle, hosts: u32) -> Resu
     }
 }
 
+/// Start-up of a `server::run` process, before it claims, registers or loads anything: on
+/// Postgres the world cut parts a crash left staged are finished ([`recover_staged_cuts`]),
+/// in EVERY role — a part left by a multi-host stack holds its `super_regions` rows, and a
+/// later `all` process's claim would wait on it for ever.
+pub fn resolve_before_claim(postgres: bool, store: &world_store::StoreHandle, hosts: u32) -> Result<(), String> {
+    if postgres {
+        recover_staged_cuts(store, hosts)?;
+    }
+    Ok(())
+}
+
 /// The warning for dirty `hosts` rows (`(ordinal, clean)`) of ordinals the coordinator does
 /// not serve (`>= hosts`): a mis-set-up world (started with more hosts before, stopped
 /// uncleanly). Never ignored — such a host may hold state no cut would save — so world cuts

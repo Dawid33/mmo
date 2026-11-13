@@ -1620,6 +1620,44 @@ fn host_returning_beside_a_cut_that_excludes_it_aborts_that_cut() {
     w.stop(&dir);
 }
 
+/// Final review I3: a multi-host stack killed with a part staged, then the same Postgres
+/// world started as role `all`: its start-up resolves the orphan part before the claim,
+/// which then proceeds (it would wait on the part's `super_regions` locks for ever).
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn role_all_on_postgres_resolves_an_orphan_part_before_its_claim() {
+    install_props();
+    let Some(db) = PgDb::create("allorph") else { return };
+    let (store, claims) = claim(&db, 0);
+    let generation = store.world_generation().unwrap();
+    let srs: Vec<_> = claims.fence().epochs.keys().copied().collect();
+    let orphan = game::WorldCut { id: game::CutId(9), host: 0, tick: 1, regions: vec![], in_flight: vec![], players: vec![], history: None };
+    store.prepare_cut(orphan, claims.fence().clone(), generation).recv().unwrap().expect("staged");
+    // The host process dies: the part stays prepared.
+    drop(claims);
+    store.shutdown();
+    assert_eq!(prepared(&db), 1);
+    // Role `all` on the same world.
+    let all = db.open();
+    server::roles::resolve_before_claim(true, &all, 1).expect("the start-up resolves staged parts");
+    let (tx, rx) = crossbeam::channel::bounded(1);
+    let claimer = {
+        let all = all.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(all.claim_super_regions(0, srs));
+        })
+    };
+    let claimed = rx.recv_timeout(Duration::from_secs(10));
+    if claimed.is_err() {
+        // Let the stuck claim finish before failing: nothing stays prepared.
+        db.open().resolve_prepared().unwrap();
+    }
+    claimer.join().unwrap();
+    claimed.expect("the claim proceeds").expect("claimed");
+    assert_eq!(prepared(&db), 0, "nothing stays prepared");
+    all.shutdown();
+}
+
 /// A host of several exiting with no coordinator to cut for it waits its leave timeout
 /// and exits 0 without a cut: its row stays dirty, so its return raises the generation.
 #[test]

@@ -36,8 +36,8 @@
 //! hands the versions the store then holds to `WorldManager::stored_terrain_changed`, which
 //! re-seeds the halos of other hosts' parked regions from the store.
 //!
-//! **Start-up** ([`resolve_staged_cuts`]): every split-role process finishes the parts a
-//! crash left staged (as their cut's decision says; an undecided cut is aborted) before it
+//! **Start-up** ([`resolve_staged_cuts`]): every process on Postgres (any role) finishes the
+//! parts a crash left staged (as their cut's decision says; an undecided cut is aborted) before it
 //! claims, registers or loads anything.
 
 use std::collections::BTreeMap;

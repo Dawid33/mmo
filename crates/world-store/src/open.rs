@@ -202,6 +202,24 @@ fn migrate_timeout_message(ms: u64, gids: &[String]) -> String {
     }
 }
 
+/// What a super-region claim that timed out on a row lock says (Postgres): the prepared
+/// transactions of this world holding it if there are any (`gids`), and the remedy.
+pub(crate) fn claim_timeout_message(ms: u64, gids: &[String]) -> String {
+    if gids.is_empty() {
+        format!(
+            "claiming super-regions waited longer than {ms} ms for a row lock another process holds on them \
+             (no prepared transaction of this world is in pg_prepared_xacts); retry once it is done"
+        )
+    } else {
+        format!(
+            "claiming super-regions waited longer than {ms} ms for a row lock; prepared transactions of this \
+             world (pg_prepared_xacts: {gids:?}) hold it — save cut parts nobody decided (is another process \
+             of this world still running?). Stop the world's other processes and start again (every start \
+             resolves staged parts first), or run ROLLBACK PREPARED '<gid>' for each listed gid"
+        )
+    }
+}
+
 /// The migration that drops the voxel table and column (`0005_drop_voxel_terrain`).
 const DROP_VOXEL_TERRAIN_MIGRATION: i64 = 5;
 /// The migration that added `world.terrain` (`0004_stud_terrain`).

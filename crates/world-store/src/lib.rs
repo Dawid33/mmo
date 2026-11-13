@@ -38,6 +38,11 @@ pub use url::{StoreUrl, redact_url};
 pub const STORE_FORMAT_VERSION: u32 = 1;
 /// Largest connection pool of a store (the writer plus readers).
 pub const STORE_POOL_MAX: u32 = 4;
+/// How long a super-region claim (Postgres `lock_timeout`) waits for a row lock: longer
+/// than a world cut may stay undecided (`game::WORLD_CUT_DEADLINE_MS`, then its decision),
+/// so only a part nobody will decide makes it fail.
+pub const CLAIM_LOCK_TIMEOUT_MS: u64 = 60_000;
+
 /// How long a save cut's transaction (Postgres `lock_timeout`, both kinds) waits for
 /// any one row lock before it gives up: no cut sits on a lock for ever.
 pub const CUT_LOCK_TIMEOUT_MS: u64 = 10_000;

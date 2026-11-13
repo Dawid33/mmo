@@ -248,6 +248,9 @@ macro_rules! engine_rows {
             ) -> Result<Fence, StoreError> {
                 let srs: std::collections::BTreeSet<SuperRegion> = srs.into_iter().collect();
                 let mut tx = pool.begin().await?;
+                // Bounded (Postgres): a prepared cut part holds its host's rows `FOR SHARE`
+                // until its cut is decided; one nobody decides would hold the claim for ever.
+                cut_lock_timeout(&mut *tx, crate::CLAIM_LOCK_TIMEOUT_MS).await?;
                 // Postgres `FOR KEY SHARE`: waits only for `set_super_region_regions`'s `FOR
                 // UPDATE`, not for a cut's ordinary update of the world row.
                 let key_share = if $share_lock.is_empty() { "" } else { " FOR KEY SHARE" };
@@ -263,7 +266,7 @@ macro_rules! engine_rows {
                 }
                 let mut epochs = BTreeMap::new();
                 for (sx, sz) in srs {
-                    let epoch: i64 = sqlx::query(
+                    let row = sqlx::query(
                         "INSERT INTO super_regions (sx, sz, owner, epoch) VALUES ($1, $2, $3, 1) \
                          ON CONFLICT (sx, sz) DO UPDATE SET owner = excluded.owner, epoch = super_regions.epoch + 1 \
                          RETURNING epoch",
@@ -272,8 +275,21 @@ macro_rules! engine_rows {
                     .bind(i64::from(sz))
                     .bind(i64::from(owner))
                     .fetch_one(&mut *tx)
-                    .await?
-                    .try_get(0)?;
+                    .await;
+                    let row = match row {
+                        Err(sqlx::Error::Database(d)) if d.code().as_deref() == Some("55P03") => {
+                            drop(tx);
+                            let gids: Vec<String> = sqlx::query_scalar(
+                                "SELECT gid FROM pg_prepared_xacts WHERE database = current_database() ORDER BY gid",
+                            )
+                            .fetch_all(pool)
+                            .await
+                            .unwrap_or_default();
+                            return Err(StoreError::Backend(crate::open::claim_timeout_message(crate::CLAIM_LOCK_TIMEOUT_MS, &gids)));
+                        }
+                        r => r?,
+                    };
+                    let epoch: i64 = row.try_get(0)?;
                     epochs.insert((sx, sz), u(epoch));
                 }
                 tx.commit().await?;
